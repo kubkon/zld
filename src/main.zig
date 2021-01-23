@@ -37,9 +37,7 @@ pub fn main() anyerror!void {
         printHelpAndExit();
     }
 
-    var zld = Zld.init(&gpa.allocator);
+    var zld = Zld.init(&gpa.allocator, Target.current);
     defer zld.deinit();
-
-    zld.target = Target.current;
     try zld.link(args);
 }
