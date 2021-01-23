@@ -5,7 +5,6 @@ const io = std.io;
 const mem = std.mem;
 const process = std.process;
 
-const CrossTarget = std.zig.CrossTarget;
 const Target = std.Target;
 
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -41,6 +40,6 @@ pub fn main() anyerror!void {
     var zld = Zld.init(&gpa.allocator);
     defer zld.deinit();
 
-    const cross_target = CrossTarget.fromTarget(Target.current);
-    try zld.link(args, cross_target);
+    zld.target = Target.current;
+    try zld.link(args);
 }

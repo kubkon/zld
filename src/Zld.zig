@@ -8,14 +8,17 @@ const log = std.log.scoped(.zld);
 const reloc = @import("reloc.zig");
 
 const Allocator = mem.Allocator;
-const CrossTarget = std.zig.CrossTarget;
+const Target = std.Target;
 const Trie = @import("Trie.zig");
 
 usingnamespace @import("commands.zig");
 usingnamespace @import("imports.zig");
 
 allocator: *Allocator,
-relocs: std.AutoArrayHashMapUnmanaged(u16, []reloc.relocation_info) = .{},
+file: ?fs.File = null,
+header: ?macho.mach_header_64 = null,
+load_commands: std.ArrayListUnmanaged(LoadCommand) = .{},
+target: ?Target = null,
 
 const Object = struct {
     base: *Zld,
@@ -41,10 +44,10 @@ const Object = struct {
             self.base.allocator.free(entry.value);
         }
         self.relocs.deinit(self.base.allocator);
+        self.file.?.close();
     }
 
-    fn parse(self: *Object, file: fs.File) !void {
-        self.file = file;
+    fn parse(self: *Object) !void {
         var reader = self.file.?.reader();
         self.header = try reader.readStruct(macho.mach_header_64);
 
@@ -119,14 +122,73 @@ pub fn init(allocator: *Allocator) Zld {
     return .{ .allocator = allocator };
 }
 
-pub fn deinit(self: *Zld) void {}
+pub fn deinit(self: *Zld) void {
+    for (self.load_commands.items) |*lc| {
+        lc.deinit(self.allocator);
+    }
+    self.load_commands.deinit(self.allocator);
+    self.file.?.close();
+}
 
-pub fn link(self: *Zld, files: []const []const u8, target: CrossTarget) !void {
+pub fn link(self: *Zld, files: []const []const u8) !void {
+    try self.populateMetadata();
+
     for (files) |file_name| {
-        const file = try fs.cwd().openFile(file_name, .{});
         var object: Object = .{ .base = self };
+        object.file = try fs.cwd().openFile(file_name, .{});
         defer object.deinit(self.allocator);
 
-        try object.parse(file);
+        try object.parse();
     }
+
+    try self.flush();
+}
+
+fn populateMetadata(self: *Zld) !void {
+    if (self.header == null) {
+        var header: macho.mach_header_64 = undefined;
+        header.magic = macho.MH_MAGIC_64;
+
+        const CpuInfo = struct {
+            cpu_type: macho.cpu_type_t,
+            cpu_subtype: macho.cpu_subtype_t,
+        };
+
+        const cpu_info: CpuInfo = switch (self.target.?.cpu.arch) {
+            .aarch64 => .{
+                .cpu_type = macho.CPU_TYPE_ARM64,
+                .cpu_subtype = macho.CPU_SUBTYPE_ARM_ALL,
+            },
+            .x86_64 => .{
+                .cpu_type = macho.CPU_TYPE_X86_64,
+                .cpu_subtype = macho.CPU_SUBTYPE_X86_64_ALL,
+            },
+            else => return error.UnsupportedMachOArchitecture,
+        };
+        header.cputype = cpu_info.cpu_type;
+        header.cpusubtype = cpu_info.cpu_subtype;
+        header.filetype = macho.MH_EXECUTE;
+        // These will get populated at the end of flushing the results to file.
+        header.ncmds = 0;
+        header.sizeofcmds = 0;
+        header.flags = macho.MH_NOUNDEFS | macho.MH_DYLDLINK | macho.MH_PIE;
+        header.reserved = 0;
+        self.header = header;
+    }
+}
+
+fn flush(self: *Zld) !void {
+    self.file = try fs.cwd().createFile("a.out", .{ .truncate = true });
+    try self.writeHeader();
+}
+
+fn writeHeader(self: *Zld) !void {
+    self.header.?.ncmds = @intCast(u32, self.load_commands.items.len);
+    var sizeofcmds: u32 = 0;
+    for (self.load_commands.items) |cmd| {
+        sizeofcmds += cmd.cmdsize();
+    }
+    self.header.?.sizeofcmds = sizeofcmds;
+    log.debug("writing Mach-O header {}", .{self.header.?});
+    try self.file.?.pwriteAll(mem.asBytes(&self.header.?), 0);
 }
