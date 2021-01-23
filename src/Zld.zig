@@ -16,7 +16,7 @@ usingnamespace @import("imports.zig");
 
 allocator: *Allocator,
 file: ?fs.File = null,
-header: ?macho.mach_header_64 = null,
+objects: std.ArrayListUnmanaged(Object) = .{},
 load_commands: std.ArrayListUnmanaged(LoadCommand) = .{},
 target: ?Target = null,
 
@@ -123,6 +123,10 @@ pub fn init(allocator: *Allocator) Zld {
 }
 
 pub fn deinit(self: *Zld) void {
+    for (self.objects.items) |*object| {
+        object.deinit(self.allocator);
+    }
+    self.objects.deinit(self.allocator);
     for (self.load_commands.items) |*lc| {
         lc.deinit(self.allocator);
     }
@@ -131,64 +135,56 @@ pub fn deinit(self: *Zld) void {
 }
 
 pub fn link(self: *Zld, files: []const []const u8) !void {
-    try self.populateMetadata();
-
+    try self.objects.ensureCapacity(self.allocator, files.len);
     for (files) |file_name| {
         var object: Object = .{ .base = self };
         object.file = try fs.cwd().openFile(file_name, .{});
-        defer object.deinit(self.allocator);
-
         try object.parse();
+        self.objects.appendAssumeCapacity(object);
     }
 
     try self.flush();
 }
 
-fn populateMetadata(self: *Zld) !void {
-    if (self.header == null) {
-        var header: macho.mach_header_64 = undefined;
-        header.magic = macho.MH_MAGIC_64;
-
-        const CpuInfo = struct {
-            cpu_type: macho.cpu_type_t,
-            cpu_subtype: macho.cpu_subtype_t,
-        };
-
-        const cpu_info: CpuInfo = switch (self.target.?.cpu.arch) {
-            .aarch64 => .{
-                .cpu_type = macho.CPU_TYPE_ARM64,
-                .cpu_subtype = macho.CPU_SUBTYPE_ARM_ALL,
-            },
-            .x86_64 => .{
-                .cpu_type = macho.CPU_TYPE_X86_64,
-                .cpu_subtype = macho.CPU_SUBTYPE_X86_64_ALL,
-            },
-            else => return error.UnsupportedMachOArchitecture,
-        };
-        header.cputype = cpu_info.cpu_type;
-        header.cpusubtype = cpu_info.cpu_subtype;
-        header.filetype = macho.MH_EXECUTE;
-        // These will get populated at the end of flushing the results to file.
-        header.ncmds = 0;
-        header.sizeofcmds = 0;
-        header.flags = macho.MH_NOUNDEFS | macho.MH_DYLDLINK | macho.MH_PIE;
-        header.reserved = 0;
-        self.header = header;
-    }
-}
+fn populateMetadata(self: *Zld) !void {}
 
 fn flush(self: *Zld) !void {
+    try self.populateMetadata();
     self.file = try fs.cwd().createFile("a.out", .{ .truncate = true });
     try self.writeHeader();
 }
 
 fn writeHeader(self: *Zld) !void {
-    self.header.?.ncmds = @intCast(u32, self.load_commands.items.len);
-    var sizeofcmds: u32 = 0;
+    var header: macho.mach_header_64 = undefined;
+    header.magic = macho.MH_MAGIC_64;
+
+    const CpuInfo = struct {
+        cpu_type: macho.cpu_type_t,
+        cpu_subtype: macho.cpu_subtype_t,
+    };
+
+    const cpu_info: CpuInfo = switch (self.target.?.cpu.arch) {
+        .aarch64 => .{
+            .cpu_type = macho.CPU_TYPE_ARM64,
+            .cpu_subtype = macho.CPU_SUBTYPE_ARM_ALL,
+        },
+        .x86_64 => .{
+            .cpu_type = macho.CPU_TYPE_X86_64,
+            .cpu_subtype = macho.CPU_SUBTYPE_X86_64_ALL,
+        },
+        else => return error.UnsupportedMachOArchitecture,
+    };
+    header.cputype = cpu_info.cpu_type;
+    header.cpusubtype = cpu_info.cpu_subtype;
+    header.filetype = macho.MH_EXECUTE;
+    header.flags = macho.MH_NOUNDEFS | macho.MH_DYLDLINK | macho.MH_PIE;
+    header.reserved = 0;
+
+    header.ncmds = @intCast(u32, self.load_commands.items.len);
+    header.sizeofcmds = 0;
     for (self.load_commands.items) |cmd| {
-        sizeofcmds += cmd.cmdsize();
+        header.sizeofcmds += cmd.cmdsize();
     }
-    self.header.?.sizeofcmds = sizeofcmds;
-    log.debug("writing Mach-O header {}", .{self.header.?});
-    try self.file.?.pwriteAll(mem.asBytes(&self.header.?), 0);
+    log.debug("writing Mach-O header {}", .{header});
+    try self.file.?.pwriteAll(mem.asBytes(&header), 0);
 }
