@@ -14,6 +14,7 @@ usingnamespace @import("commands.zig");
 usingnamespace @import("imports.zig");
 
 allocator: *Allocator,
+objects: std.ArrayListUnmanaged(Object) = .{},
 
 const Object = struct {
     base: *Zld,
@@ -27,7 +28,14 @@ const Object = struct {
     symtab: std.ArrayListUnmanaged(macho.nlist_64) = .{},
     strtab: std.ArrayListUnmanaged(u8) = .{},
 
-    fn deinit(self: *Object) void {}
+    fn deinit(self: *Object, allocator: *Allocator) void {
+        for (self.load_commands.items) |*lc| {
+            lc.deinit(allocator);
+        }
+        self.load_commands.deinit(allocator);
+        self.symtab.deinit(allocator);
+        self.strtab.deinit(allocator);
+    }
 
     fn parse(self: *Object, file: fs.File) !void {
         self.file = file;
@@ -90,12 +98,19 @@ pub fn init(allocator: *Allocator) Zld {
     return .{ .allocator = allocator };
 }
 
-pub fn deinit(self: *Zld) void {}
+pub fn deinit(self: *Zld) void {
+    for (self.objects.items) |*obj| {
+        obj.deinit(self.allocator);
+    }
+    self.objects.deinit(self.allocator);
+}
 
 pub fn link(self: *Zld, files: []const []const u8, target: CrossTarget) !void {
+    try self.objects.ensureCapacity(self.allocator, files.len);
     for (files) |file_name| {
-        var object: Object = .{ .base = self };
         const file = try fs.cwd().openFile(file_name, .{});
+        var object: Object = .{ .base = self };
         try object.parse(file);
+        self.objects.appendAssumeCapacity(object);
     }
 }
