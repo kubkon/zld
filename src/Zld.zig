@@ -135,6 +135,8 @@ pub fn deinit(self: *Zld) void {
 }
 
 pub fn link(self: *Zld, files: []const []const u8) !void {
+    try self.populateMetadata();
+
     try self.objects.ensureCapacity(self.allocator, files.len);
     for (files) |file_name| {
         var object: Object = .{ .base = self };
@@ -146,12 +148,48 @@ pub fn link(self: *Zld, files: []const []const u8) !void {
     try self.flush();
 }
 
-fn populateMetadata(self: *Zld) !void {}
+fn populateMetadata(self: *Zld) !void {
+    {
+        try self.load_commands.append(self.allocator, .{
+            .Segment = SegmentCommand.empty(.{
+                .cmd = macho.LC_SEGMENT_64,
+                .cmdsize = @sizeOf(macho.segment_command_64),
+                .segname = makeStaticString("__PAGEZERO"),
+                .vmaddr = 0,
+                .vmsize = 0x100000000, // size always set to 4GB
+                .fileoff = 0,
+                .filesize = 0,
+                .maxprot = 0,
+                .initprot = 0,
+                .nsects = 0,
+                .flags = 0,
+            }),
+        });
+    }
+}
 
 fn flush(self: *Zld) !void {
-    try self.populateMetadata();
     self.file = try fs.cwd().createFile("a.out", .{ .truncate = true });
+    try self.writeLoadCommands();
     try self.writeHeader();
+}
+
+fn writeLoadCommands(self: *Zld) !void {
+    var sizeofcmds: u32 = 0;
+    for (self.load_commands.items) |lc| {
+        sizeofcmds += lc.cmdsize();
+    }
+
+    var buffer = try self.allocator.alloc(u8, sizeofcmds);
+    defer self.allocator.free(buffer);
+    var writer = std.io.fixedBufferStream(buffer).writer();
+    for (self.load_commands.items) |lc| {
+        try lc.write(writer);
+    }
+
+    const off = @sizeOf(macho.mach_header_64);
+    log.debug("writing {} load commands from 0x{x} to 0x{x}", .{ self.load_commands.items.len, off, off + sizeofcmds });
+    try self.file.?.pwriteAll(buffer, off);
 }
 
 fn writeHeader(self: *Zld) !void {
@@ -187,4 +225,11 @@ fn writeHeader(self: *Zld) !void {
     }
     log.debug("writing Mach-O header {}", .{header});
     try self.file.?.pwriteAll(mem.asBytes(&header), 0);
+}
+
+fn makeStaticString(comptime bytes: []const u8) [16]u8 {
+    var buf = [_]u8{0} ** 16;
+    if (bytes.len > buf.len) @compileError("string too long; max 16 bytes");
+    mem.copy(u8, &buf, bytes);
+    return buf;
 }
