@@ -22,6 +22,7 @@ file: ?fs.File = null,
 
 objects: std.ArrayListUnmanaged(Object) = .{},
 load_commands: std.ArrayListUnmanaged(LoadCommand) = .{},
+segments_dir: std.StringHashMapUnmanaged(u16) = .{},
 
 text_segment_cmd_index: ?u16 = null,
 data_const_segment_cmd_index: ?u16 = null,
@@ -149,7 +150,8 @@ const Object = struct {
 
     fn parseRelocs(self: *Object) !void {
         const segment_cmd = self.load_commands.items[self.segment_cmd_index.?].Segment;
-        for (segment_cmd.sections.items) |sect, i| {
+        for (segment_cmd.sections.items()) |entry, i| {
+            const sect = entry.value;
             var buffer = try self.base.allocator.alloc(u8, @sizeOf(reloc.relocation_info) * sect.nreloc);
             defer self.base.allocator.free(buffer);
             _ = try self.file.?.preadAll(buffer, sect.reloff);
@@ -182,6 +184,13 @@ pub fn deinit(self: *Zld) void {
         lc.deinit(self.allocator);
     }
     self.load_commands.deinit(self.allocator);
+    {
+        var it = self.segments_dir.iterator();
+        while (it.next()) |nn| {
+            self.allocator.free(nn.key);
+        }
+        self.segments_dir.deinit(self.allocator);
+    }
     self.file.?.close();
 }
 
@@ -194,6 +203,8 @@ pub fn link(self: *Zld, files: []const []const u8) !void {
         object.file = try fs.cwd().openFile(file_name, .{});
         try object.parse();
         self.objects.appendAssumeCapacity(object);
+
+        // Update segments' sizes.
     }
 
     try self.flush();

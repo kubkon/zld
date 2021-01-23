@@ -160,29 +160,31 @@ pub const LoadCommand = union(enum) {
 
 pub const SegmentCommand = struct {
     inner: macho.segment_command_64,
-    sections: std.ArrayListUnmanaged(macho.section_64) = .{},
+    sections: std.StringArrayHashMapUnmanaged(macho.section_64) = .{},
 
     pub fn empty(inner: macho.segment_command_64) SegmentCommand {
         return .{ .inner = inner };
     }
 
-    pub fn addSection(self: *SegmentCommand, alloc: *Allocator, section: macho.section_64) !void {
-        try self.sections.append(alloc, section);
+    pub fn addSection(self: *SegmentCommand, allocator: *Allocator, section: macho.section_64) !void {
+        const sectname_len = mem.indexOfScalar(u8, &section.sectname, @as(u8, 0)) orelse section.sectname.len;
+        const sect_name = section.sectname[0..sectname_len];
+        var key = try allocator.dupe(u8, sect_name);
+        try self.sections.putNoClobber(allocator, key, section);
         self.inner.cmdsize += @sizeOf(macho.section_64);
         self.inner.nsects += 1;
     }
 
-    pub fn read(alloc: *Allocator, reader: anytype) !SegmentCommand {
+    pub fn read(allocator: *Allocator, reader: anytype) !SegmentCommand {
         const inner = try reader.readStruct(macho.segment_command_64);
         var segment = SegmentCommand{
             .inner = inner,
         };
-        try segment.sections.ensureCapacity(alloc, inner.nsects);
 
         var i: usize = 0;
         while (i < inner.nsects) : (i += 1) {
             const section = try reader.readStruct(macho.section_64);
-            segment.sections.appendAssumeCapacity(section);
+            try segment.addSection(allocator, section);
         }
 
         return segment;
@@ -190,13 +192,16 @@ pub const SegmentCommand = struct {
 
     pub fn write(self: SegmentCommand, writer: anytype) !void {
         try writer.writeAll(mem.asBytes(&self.inner));
-        for (self.sections.items) |sect| {
-            try writer.writeAll(mem.asBytes(&sect));
+        for (self.sections.items()) |entry| {
+            try writer.writeAll(mem.asBytes(&entry.value));
         }
     }
 
-    pub fn deinit(self: *SegmentCommand, alloc: *Allocator) void {
-        self.sections.deinit(alloc);
+    pub fn deinit(self: *SegmentCommand, allocator: *Allocator) void {
+        for (self.sections.items()) |entry| {
+            allocator.free(entry.key);
+        }
+        self.sections.deinit(allocator);
     }
 
     fn eql(self: SegmentCommand, other: SegmentCommand) bool {
