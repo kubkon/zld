@@ -1,11 +1,12 @@
 const Zld = @This();
 
 const std = @import("std");
+const mem = std.mem;
 const fs = std.fs;
 const macho = std.macho;
 const log = std.log.scoped(.zld);
 
-const Allocator = std.mem.Allocator;
+const Allocator = mem.Allocator;
 const CrossTarget = std.zig.CrossTarget;
 const Trie = @import("Trie.zig");
 
@@ -23,6 +24,8 @@ const Object = struct {
     symtab_cmd_index: ?u16 = null,
     dysymtab_cmd_index: ?u16 = null,
     build_version_cmd_index: ?u16 = null,
+    symtab: std.ArrayListUnmanaged(macho.nlist_64) = .{},
+    strtab: std.ArrayListUnmanaged(u8) = .{},
 
     fn deinit(self: *Object) void {}
 
@@ -58,6 +61,28 @@ const Object = struct {
             }
             self.load_commands.appendAssumeCapacity(cmd);
         }
+
+        try self.parseSymtab();
+        try self.parseStrtab();
+    }
+
+    fn parseSymtab(self: *Object) !void {
+        const symtab_cmd = self.load_commands.items[self.symtab_cmd_index.?].Symtab;
+        var buffer = try self.base.allocator.alloc(u8, @sizeOf(macho.nlist_64) * symtab_cmd.nsyms);
+        defer self.base.allocator.free(buffer);
+        _ = try self.file.?.preadAll(buffer, symtab_cmd.symoff);
+        try self.symtab.ensureCapacity(self.base.allocator, symtab_cmd.nsyms);
+        const slice = @alignCast(@alignOf(macho.nlist_64), mem.bytesAsSlice(macho.nlist_64, buffer));
+        self.symtab.appendSliceAssumeCapacity(slice);
+    }
+
+    fn parseStrtab(self: *Object) !void {
+        const symtab_cmd = self.load_commands.items[self.symtab_cmd_index.?].Symtab;
+        var buffer = try self.base.allocator.alloc(u8, symtab_cmd.strsize);
+        defer self.base.allocator.free(buffer);
+        _ = try self.file.?.preadAll(buffer, symtab_cmd.stroff);
+        try self.strtab.ensureCapacity(self.base.allocator, symtab_cmd.strsize);
+        self.strtab.appendSliceAssumeCapacity(buffer);
     }
 };
 
