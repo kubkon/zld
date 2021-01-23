@@ -5,6 +5,7 @@ const mem = std.mem;
 const fs = std.fs;
 const macho = std.macho;
 const log = std.log.scoped(.zld);
+const reloc = @import("reloc.zig");
 
 const Allocator = mem.Allocator;
 const CrossTarget = std.zig.CrossTarget;
@@ -14,7 +15,7 @@ usingnamespace @import("commands.zig");
 usingnamespace @import("imports.zig");
 
 allocator: *Allocator,
-objects: std.ArrayListUnmanaged(Object) = .{},
+relocs: std.AutoArrayHashMapUnmanaged(u16, []reloc.relocation_info) = .{},
 
 const Object = struct {
     base: *Zld,
@@ -27,6 +28,7 @@ const Object = struct {
     build_version_cmd_index: ?u16 = null,
     symtab: std.ArrayListUnmanaged(macho.nlist_64) = .{},
     strtab: std.ArrayListUnmanaged(u8) = .{},
+    relocs: std.AutoArrayHashMapUnmanaged(u16, []reloc.relocation_info) = .{},
 
     fn deinit(self: *Object, allocator: *Allocator) void {
         for (self.load_commands.items) |*lc| {
@@ -35,6 +37,10 @@ const Object = struct {
         self.load_commands.deinit(allocator);
         self.symtab.deinit(allocator);
         self.strtab.deinit(allocator);
+        for (self.relocs.items()) |entry| {
+            self.base.allocator.free(entry.value);
+        }
+        self.relocs.deinit(self.base.allocator);
     }
 
     fn parse(self: *Object, file: fs.File) !void {
@@ -72,6 +78,7 @@ const Object = struct {
 
         try self.parseSymtab();
         try self.parseStrtab();
+        try self.parseRelocs();
     }
 
     fn parseSymtab(self: *Object) !void {
@@ -80,6 +87,8 @@ const Object = struct {
         defer self.base.allocator.free(buffer);
         _ = try self.file.?.preadAll(buffer, symtab_cmd.symoff);
         try self.symtab.ensureCapacity(self.base.allocator, symtab_cmd.nsyms);
+        // TODO this align case should not be needed.
+        // Probably a bug in stage1.
         const slice = @alignCast(@alignOf(macho.nlist_64), mem.bytesAsSlice(macho.nlist_64, buffer));
         self.symtab.appendSliceAssumeCapacity(slice);
     }
@@ -92,25 +101,32 @@ const Object = struct {
         try self.strtab.ensureCapacity(self.base.allocator, symtab_cmd.strsize);
         self.strtab.appendSliceAssumeCapacity(buffer);
     }
+
+    fn parseRelocs(self: *Object) !void {
+        const segment_cmd = self.load_commands.items[self.segment_cmd_index.?].Segment;
+        for (segment_cmd.sections.items) |sect, i| {
+            var buffer = try self.base.allocator.alloc(u8, @sizeOf(reloc.relocation_info) * sect.nreloc);
+            defer self.base.allocator.free(buffer);
+            _ = try self.file.?.preadAll(buffer, sect.reloff);
+            var relocs = try self.base.allocator.alloc(reloc.relocation_info, sect.nreloc);
+            mem.copy(reloc.relocation_info, relocs, mem.bytesAsSlice(reloc.relocation_info, buffer));
+            try self.relocs.putNoClobber(self.base.allocator, @intCast(u16, i), relocs);
+        }
+    }
 };
 
 pub fn init(allocator: *Allocator) Zld {
     return .{ .allocator = allocator };
 }
 
-pub fn deinit(self: *Zld) void {
-    for (self.objects.items) |*obj| {
-        obj.deinit(self.allocator);
-    }
-    self.objects.deinit(self.allocator);
-}
+pub fn deinit(self: *Zld) void {}
 
 pub fn link(self: *Zld, files: []const []const u8, target: CrossTarget) !void {
-    try self.objects.ensureCapacity(self.allocator, files.len);
     for (files) |file_name| {
         const file = try fs.cwd().openFile(file_name, .{});
         var object: Object = .{ .base = self };
+        defer object.deinit(self.allocator);
+
         try object.parse(file);
-        self.objects.appendAssumeCapacity(object);
     }
 }
