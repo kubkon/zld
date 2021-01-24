@@ -10,6 +10,7 @@ const reloc = @import("reloc.zig");
 
 const Allocator = mem.Allocator;
 const Target = std.Target;
+const CodeSignature = @import("CodeSignature.zig");
 const Object = @import("Object.zig");
 const Trie = @import("Trie.zig");
 
@@ -201,10 +202,11 @@ pub fn link(self: *Zld, files: []const []const u8) !void {
         }
     }
 
-    // try self.updateTextSegment();
-
+    try self.allocateSegments();
     try self.flush();
 }
+
+fn allocateSegments(self: *Zld) !void {}
 
 fn populateMetadata(self: *Zld) !void {
     if (self.pagezero_segment_cmd_index == null) {
@@ -577,53 +579,58 @@ fn populateMetadata(self: *Zld) !void {
 
 fn flush(self: *Zld) !void {
     self.file = try fs.cwd().createFile("a.out", .{ .truncate = true });
+
+    try self.writeCodeSignaturePadding();
     try self.writeLoadCommands();
     try self.writeHeader();
+    try self.writeCodeSignature();
 }
 
-fn updateTextSegment(self: *Zld) !void {
-    const text_seg = &self.load_commands.items[self.text_segment_cmd_index.?].Segment;
+fn writeCodeSignaturePadding(self: *Zld) !void {
+    const linkedit_seg = &self.load_commands.items[self.linkedit_segment_cmd_index.?].Segment;
+    const code_sig_cmd = &self.load_commands.items[self.code_signature_cmd_index.?].LinkeditData;
+    const fileoff = linkedit_seg.inner.fileoff + linkedit_seg.inner.filesize;
+    const needed_size = CodeSignature.calcCodeSignaturePaddingSize(
+        "a.out",
+        fileoff,
+        self.page_size,
+    );
+    code_sig_cmd.dataoff = @intCast(u32, fileoff);
+    code_sig_cmd.datasize = needed_size;
 
-    // Insert stubs and stubs_helper section.
-    const nexterns = self.extern_lazy_symbols.items().len;
-    try text_seg.put(self.allocator, .{
-        .sectname = makeStaticString("__stubs"),
-        .segname = makeStaticString("__TEXT"),
-        .addr = 0,
-        .size = nexterns * stub_size,
-        .offset = 0,
-        .@"align" = 2,
-        .reloff = 0,
-        .nreloc = 0,
-        .flags = macho.S_SYMBOL_STUBS | macho.S_ATTR_PURE_INSTRUCTIONS | macho.S_ATTR_SOME_INSTRUCTIONS,
-        .reserved1 = 0,
-        .reserved2 = stub_size,
-        .reserved3 = 0,
-    });
-    try text_seg.put(self.allocator, .{
-        .sectname = makeStaticString("__stub_helper"),
-        .segname = makeStaticString("__TEXT"),
-        .addr = 0,
-        .size = nexterns * stubs_helper_size + stubs_helper_preamble_size,
-        .offset = 0,
-        .@"align" = 2,
-        .reloff = 0,
-        .nreloc = 0,
-        .flags = macho.S_REGULAR | macho.S_ATTR_PURE_INSTRUCTIONS | macho.S_ATTR_SOME_INSTRUCTIONS,
-        .reserved1 = 0,
-        .reserved2 = 0,
-        .reserved3 = 0,
-    });
-
-    // Update __TEXT segment size.
-    for (self.load_commands.items) |lc| {
-        text_seg.inner.filesize += lc.cmdsize();
+    // Advance size of __LINKEDIT segment
+    linkedit_seg.inner.filesize += needed_size;
+    if (linkedit_seg.inner.vmsize < linkedit_seg.inner.filesize) {
+        linkedit_seg.inner.vmsize = mem.alignForwardGeneric(u64, linkedit_seg.inner.filesize, self.page_size);
     }
+    log.debug("writing code signature padding from 0x{x} to 0x{x}", .{ fileoff, fileoff + needed_size });
+    // Pad out the space. We need to do this to calculate valid hashes for everything in the file
+    // except for code signature data.
+    try self.file.?.pwriteAll(&[_]u8{0}, fileoff + needed_size - 1);
+}
 
-    // Align to page size.
-    const size = mem.alignForwardGeneric(u64, text_seg.inner.filesize, self.page_size);
-    text_seg.inner.vmsize = size;
-    text_seg.inner.filesize = size;
+fn writeCodeSignature(self: *Zld) !void {
+    const text_seg = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
+    const code_sig_cmd = self.load_commands.items[self.code_signature_cmd_index.?].LinkeditData;
+
+    var code_sig = CodeSignature.init(self.allocator, self.page_size);
+    defer code_sig.deinit();
+    try code_sig.calcAdhocSignature(
+        self.file.?,
+        "a.out",
+        text_seg.inner,
+        code_sig_cmd,
+        .Exe,
+    );
+
+    var buffer = try self.allocator.alloc(u8, code_sig.size());
+    defer self.allocator.free(buffer);
+    var stream = std.io.fixedBufferStream(buffer);
+    try code_sig.write(stream.writer());
+
+    log.debug("writing code signature from 0x{x} to 0x{x}", .{ code_sig_cmd.dataoff, code_sig_cmd.dataoff + buffer.len });
+
+    try self.file.?.pwriteAll(buffer, code_sig_cmd.dataoff);
 }
 
 fn writeLoadCommands(self: *Zld) !void {
