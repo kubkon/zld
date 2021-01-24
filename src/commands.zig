@@ -166,13 +166,28 @@ pub const SegmentCommand = struct {
         return .{ .inner = inner };
     }
 
-    pub fn addSection(self: *SegmentCommand, allocator: *Allocator, section: macho.section_64) !void {
-        const sectname_len = mem.indexOfScalar(u8, &section.sectname, @as(u8, 0)) orelse section.sectname.len;
-        const sect_name = section.sectname[0..sectname_len];
-        var key = try allocator.dupe(u8, sect_name);
+    pub fn put(self: *SegmentCommand, allocator: *Allocator, section: macho.section_64) !void {
+        const name = parseName(&section.sectname);
+        var key = try allocator.dupe(u8, name);
         try self.sections.putNoClobber(allocator, key, section);
         self.inner.cmdsize += @sizeOf(macho.section_64);
         self.inner.nsects += 1;
+    }
+
+    pub fn getOrPut(
+        self: *SegmentCommand,
+        allocator: *Allocator,
+        name: []const u8,
+    ) !std.StringArrayHashMapUnmanaged(macho.section_64).GetOrPutResult {
+        const nn = try allocator.dupe(u8, name);
+        const res = try self.sections.getOrPut(allocator, nn);
+        if (res.found_existing) {
+            allocator.free(nn);
+        } else {
+            self.inner.cmdsize += @sizeOf(macho.section_64);
+            self.inner.nsects += 1;
+        }
+        return res;
     }
 
     pub fn read(allocator: *Allocator, reader: anytype) !SegmentCommand {
@@ -184,7 +199,7 @@ pub const SegmentCommand = struct {
         var i: usize = 0;
         while (i < inner.nsects) : (i += 1) {
             const section = try reader.readStruct(macho.section_64);
-            try segment.addSection(allocator, section);
+            try segment.put(allocator, section);
         }
 
         return segment;
@@ -253,6 +268,11 @@ pub fn GenericCommandWithData(comptime Cmd: type) type {
             return mem.eql(u8, self.data, other.data);
         }
     };
+}
+
+pub fn parseName(name: *const [16]u8) []const u8 {
+    const len = mem.indexOfScalar(u8, name, @as(u8, 0)) orelse name.len;
+    return name[0..len];
 }
 
 fn testRead(allocator: *Allocator, buffer: []const u8, expected: anytype) !void {

@@ -1,6 +1,7 @@
 const Zld = @This();
 
 const std = @import("std");
+const assert = std.debug.assert;
 const mem = std.mem;
 const fs = std.fs;
 const macho = std.macho;
@@ -196,8 +197,8 @@ pub fn deinit(self: *Zld) void {
 
 pub fn link(self: *Zld, files: []const []const u8) !void {
     try self.populateMetadata();
-
     try self.objects.ensureCapacity(self.allocator, files.len);
+
     for (files) |file_name| {
         var object: Object = .{ .base = self };
         object.file = try fs.cwd().openFile(file_name, .{});
@@ -205,6 +206,37 @@ pub fn link(self: *Zld, files: []const []const u8) !void {
         self.objects.appendAssumeCapacity(object);
 
         // Update segments' sizes.
+        const seg_cmd = object.load_commands.items[object.segment_cmd_index.?].Segment;
+        for (seg_cmd.sections.items()) |entry| {
+            const name = entry.key;
+            const sect = entry.value;
+            const segname = parseName(&sect.segname);
+
+            const seg_id = self.segments_dir.get(segname) orelse {
+                log.warn("segname {s} not found in the output artifact", .{segname});
+                continue;
+            };
+            const seg = &self.load_commands.items[seg_id].Segment;
+            const res = try seg.getOrPut(self.allocator, name);
+            if (!res.found_existing) {
+                res.entry.value = .{
+                    .sectname = makeStaticString(name),
+                    .segname = makeStaticString(segname),
+                    .addr = 0,
+                    .size = 0,
+                    .offset = 0,
+                    .@"align" = sect.@"align",
+                    .reloff = 0,
+                    .nreloc = 0,
+                    .flags = sect.flags,
+                    .reserved1 = 0,
+                    .reserved2 = 0,
+                    .reserved3 = 0,
+                };
+            }
+            res.entry.value.size += sect.size;
+            seg.inner.filesize += sect.size;
+        }
     }
 
     try self.flush();
@@ -227,6 +259,7 @@ fn populateMetadata(self: *Zld) !void {
                 .flags = 0,
             }),
         });
+        try self.addSegmentToDir(0);
     }
     if (self.text_segment_cmd_index == null) {
         self.text_segment_cmd_index = @intCast(u16, self.load_commands.items.len);
@@ -247,6 +280,7 @@ fn populateMetadata(self: *Zld) !void {
                 .flags = 0,
             }),
         });
+        try self.addSegmentToDir(self.text_segment_cmd_index.?);
     }
     if (self.data_const_segment_cmd_index == null) {
         self.data_const_segment_cmd_index = @intCast(u16, self.load_commands.items.len);
@@ -267,6 +301,7 @@ fn populateMetadata(self: *Zld) !void {
                 .flags = 0,
             }),
         });
+        try self.addSegmentToDir(self.data_const_segment_cmd_index.?);
     }
     if (self.data_segment_cmd_index == null) {
         self.data_segment_cmd_index = @intCast(u16, self.load_commands.items.len);
@@ -287,6 +322,7 @@ fn populateMetadata(self: *Zld) !void {
                 .flags = 0,
             }),
         });
+        try self.addSegmentToDir(self.data_segment_cmd_index.?);
     }
     if (self.linkedit_segment_cmd_index == null) {
         self.linkedit_segment_cmd_index = @intCast(u16, self.load_commands.items.len);
@@ -307,6 +343,7 @@ fn populateMetadata(self: *Zld) !void {
                 .flags = 0,
             }),
         });
+        try self.addSegmentToDir(self.linkedit_segment_cmd_index.?);
     }
     if (self.dyld_info_cmd_index == null) {
         self.dyld_info_cmd_index = @intCast(u16, self.load_commands.items.len);
@@ -512,9 +549,16 @@ fn writeHeader(self: *Zld) !void {
     try self.file.?.pwriteAll(mem.asBytes(&header), 0);
 }
 
-fn makeStaticString(comptime bytes: []const u8) [16]u8 {
+fn makeStaticString(bytes: []const u8) [16]u8 {
     var buf = [_]u8{0} ** 16;
-    if (bytes.len > buf.len) @compileError("string too long; max 16 bytes");
+    assert(bytes.len <= buf.len);
     mem.copy(u8, &buf, bytes);
     return buf;
+}
+
+fn addSegmentToDir(self: *Zld, idx: u16) !void {
+    const segment_cmd = self.load_commands.items[idx].Segment;
+    const name = parseName(&segment_cmd.inner.segname);
+    var key = try self.allocator.dupe(u8, name);
+    try self.segments_dir.putNoClobber(self.allocator, key, idx);
 }
