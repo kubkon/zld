@@ -50,6 +50,14 @@ data_got_section_index: ?u16 = null,
 la_symbol_ptr_section_index: ?u16 = null,
 data_section_index: ?u16 = null,
 
+local_symbols: std.ArrayListUnmanaged(macho.nlist_64) = .{},
+global_symbols: std.ArrayListUnmanaged(macho.nlist_64) = .{},
+extern_nonlazy_symbols: std.StringArrayHashMapUnmanaged(ExternSymbol) = .{},
+extern_lazy_symbols: std.StringArrayHashMapUnmanaged(ExternSymbol) = .{},
+
+string_table: std.ArrayListUnmanaged(u8) = .{},
+string_table_directory: std.StringHashMapUnmanaged(u32) = .{},
+
 /// Default path to dyld
 /// TODO instead of hardcoding it, we should probably look through some env vars and search paths
 /// instead but this will do for now.
@@ -161,6 +169,11 @@ const Object = struct {
             try self.relocs.putNoClobber(self.base.allocator, @intCast(u16, i), relocs);
         }
     }
+
+    fn getString(self: *const Object, str_off: u32) []const u8 {
+        assert(str_off < self.strtab.items.len);
+        return mem.spanZ(@ptrCast([*:0]const u8, self.strtab.items.ptr + str_off));
+    }
 };
 
 pub fn init(allocator: *Allocator, target: Target) Zld {
@@ -177,6 +190,18 @@ pub fn init(allocator: *Allocator, target: Target) Zld {
 }
 
 pub fn deinit(self: *Zld) void {
+    {
+        var it = self.string_table_directory.iterator();
+        while (it.next()) |nn| {
+            self.allocator.free(nn.key);
+        }
+    }
+    self.string_table_directory.deinit(self.allocator);
+    self.string_table.deinit(self.allocator);
+    self.extern_lazy_symbols.deinit(self.allocator);
+    self.extern_nonlazy_symbols.deinit(self.allocator);
+    self.global_symbols.deinit(self.allocator);
+    self.local_symbols.deinit(self.allocator);
     for (self.objects.items) |*object| {
         object.deinit(self.allocator);
     }
@@ -190,8 +215,8 @@ pub fn deinit(self: *Zld) void {
         while (it.next()) |nn| {
             self.allocator.free(nn.key);
         }
-        self.segments_dir.deinit(self.allocator);
     }
+    self.segments_dir.deinit(self.allocator);
     self.file.?.close();
 }
 
@@ -205,7 +230,6 @@ pub fn link(self: *Zld, files: []const []const u8) !void {
         try object.parse();
         self.objects.appendAssumeCapacity(object);
 
-        // Update segments' sizes.
         const seg_cmd = object.load_commands.items[object.segment_cmd_index.?].Segment;
         for (seg_cmd.sections.items()) |entry| {
             const name = entry.key;
@@ -236,6 +260,55 @@ pub fn link(self: *Zld, files: []const []const u8) !void {
             }
             res.entry.value.size += sect.size;
             seg.inner.filesize += sect.size;
+        }
+    }
+
+    for (self.objects.items) |object| {
+        for (object.symtab.items) |sym| {
+            const sym_name = object.getString(sym.n_strx);
+            const n_strx = try self.makeString(sym_name);
+            const new_sym = .{
+                .n_strx = n_strx,
+                .n_type = sym.n_type,
+                .n_value = sym.n_value,
+                .n_desc = sym.n_desc,
+                .n_sect = sym.n_sect,
+            };
+            if (sym.n_type == (macho.N_SECT | macho.N_EXT)) {
+                log.debug("writing global symbol '{s}' {}", .{ sym_name, new_sym });
+                try self.global_symbols.append(self.allocator, new_sym);
+            } else if (sym.n_type == macho.N_SECT) {
+                log.debug("writing local symbol '{s}' {}", .{ sym_name, new_sym });
+                try self.local_symbols.append(self.allocator, new_sym);
+            } else if (sym.n_type == (macho.N_UNDF | macho.N_EXT)) {
+                if (mem.eql(u8, sym_name, "___stderrp")) {
+                    log.debug("writing nonlazy symbol '{s}' {}", .{ sym_name, new_sym });
+                    var key = try self.allocator.dupe(u8, sym_name);
+                    try self.extern_nonlazy_symbols.putNoClobber(self.allocator, key, .{
+                        .inner = new_sym,
+                        .dylib_ordinal = 1,
+                        .segment = 2,
+                    });
+                } else {
+                    log.debug("writing lazy symbol '{s}' {}", .{ sym_name, new_sym });
+                    var key = try self.allocator.dupe(u8, sym_name);
+                    try self.extern_lazy_symbols.putNoClobber(self.allocator, key, .{
+                        .inner = new_sym,
+                        .dylib_ordinal = 1,
+                        .segment = 3,
+                    });
+                }
+            } else {
+                log.warn("unhandled symbol '{s}' of type 0x{x}", .{ sym_name, sym.n_type });
+            }
+        }
+    }
+
+    {
+        // Update __TEXT segment size.
+        const seg = &self.load_commands.items[self.text_segment_cmd_index.?].Segment;
+        for (self.load_commands.items) |lc| {
+            seg.inner.filesize += lc.cmdsize();
         }
     }
 
@@ -554,6 +627,31 @@ fn makeStaticString(bytes: []const u8) [16]u8 {
     assert(bytes.len <= buf.len);
     mem.copy(u8, &buf, bytes);
     return buf;
+}
+
+fn makeString(self: *Zld, bytes: []const u8) !u32 {
+    if (self.string_table_directory.get(bytes)) |offset| {
+        log.debug("reusing '{s}' from string table at offset 0x{x}", .{ bytes, offset });
+        return offset;
+    }
+
+    try self.string_table.ensureCapacity(self.allocator, self.string_table.items.len + bytes.len + 1);
+    const offset = @intCast(u32, self.string_table.items.len);
+    log.debug("writing new string '{s}' into string table at offset 0x{x}", .{ bytes, offset });
+    self.string_table.appendSliceAssumeCapacity(bytes);
+    self.string_table.appendAssumeCapacity(0);
+    try self.string_table_directory.putNoClobber(
+        self.allocator,
+        try self.allocator.dupe(u8, bytes),
+        offset,
+    );
+
+    return offset;
+}
+
+fn getString(self: *const Zld, str_off: u32) []const u8 {
+    assert(str_off < self.string_table.items.len);
+    return mem.spanZ(@ptrCast([*:0]const u8, self.string_table.items.ptr + str_off));
 }
 
 fn addSegmentToDir(self: *Zld, idx: u16) !void {
