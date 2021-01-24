@@ -10,6 +10,7 @@ const reloc = @import("reloc.zig");
 
 const Allocator = mem.Allocator;
 const Target = std.Target;
+const Object = @import("Object.zig");
 const Trie = @import("Trie.zig");
 
 usingnamespace @import("commands.zig");
@@ -25,6 +26,7 @@ objects: std.ArrayListUnmanaged(Object) = .{},
 load_commands: std.ArrayListUnmanaged(LoadCommand) = .{},
 segments_dir: std.StringHashMapUnmanaged(u16) = .{},
 
+pagezero_segment_cmd_index: ?u16 = null,
 text_segment_cmd_index: ?u16 = null,
 data_const_segment_cmd_index: ?u16 = null,
 data_segment_cmd_index: ?u16 = null,
@@ -43,10 +45,9 @@ uuid_cmd_index: ?u16 = null,
 code_signature_cmd_index: ?u16 = null,
 
 text_section_index: ?u16 = null,
-got_section_index: ?u16 = null,
 stubs_section_index: ?u16 = null,
 stub_helper_section_index: ?u16 = null,
-data_got_section_index: ?u16 = null,
+got_section_index: ?u16 = null,
 la_symbol_ptr_section_index: ?u16 = null,
 data_section_index: ?u16 = null,
 
@@ -71,110 +72,6 @@ const DEFAULT_LIB_SEARCH_PATH: []const u8 = "/usr/lib";
 const LIB_SYSTEM_NAME: [*:0]const u8 = "System";
 /// TODO we should search for libSystem and fail if it doesn't exist, instead of hardcoding it
 const LIB_SYSTEM_PATH: [*:0]const u8 = DEFAULT_LIB_SEARCH_PATH ++ "/libSystem.B.dylib";
-
-const Object = struct {
-    base: *Zld,
-    file: ?fs.File = null,
-    header: ?macho.mach_header_64 = null,
-    load_commands: std.ArrayListUnmanaged(LoadCommand) = .{},
-    segment_cmd_index: ?u16 = null,
-    symtab_cmd_index: ?u16 = null,
-    dysymtab_cmd_index: ?u16 = null,
-    build_version_cmd_index: ?u16 = null,
-    symtab: std.ArrayListUnmanaged(macho.nlist_64) = .{},
-    strtab: std.ArrayListUnmanaged(u8) = .{},
-    relocs: std.AutoArrayHashMapUnmanaged(u16, []reloc.relocation_info) = .{},
-
-    fn deinit(self: *Object, allocator: *Allocator) void {
-        for (self.load_commands.items) |*lc| {
-            lc.deinit(allocator);
-        }
-        self.load_commands.deinit(allocator);
-        self.symtab.deinit(allocator);
-        self.strtab.deinit(allocator);
-        for (self.relocs.items()) |entry| {
-            self.base.allocator.free(entry.value);
-        }
-        self.relocs.deinit(self.base.allocator);
-        self.file.?.close();
-    }
-
-    fn parse(self: *Object) !void {
-        var reader = self.file.?.reader();
-        self.header = try reader.readStruct(macho.mach_header_64);
-
-        if (self.header.?.filetype != macho.MH_OBJECT)
-            return error.ExpectedObjectInputFile;
-
-        try self.load_commands.ensureCapacity(self.base.allocator, self.header.?.ncmds);
-
-        var i: u16 = 0;
-        while (i < self.header.?.ncmds) : (i += 1) {
-            const cmd = try LoadCommand.read(self.base.allocator, reader);
-            switch (cmd.cmd()) {
-                macho.LC_SEGMENT_64 => {
-                    self.segment_cmd_index = i;
-                },
-                macho.LC_SYMTAB => {
-                    self.symtab_cmd_index = i;
-                },
-                macho.LC_DYSYMTAB => {
-                    self.dysymtab_cmd_index = i;
-                },
-                macho.LC_BUILD_VERSION => {
-                    self.build_version_cmd_index = i;
-                },
-                else => {
-                    log.warn("Unknown load command detected: 0x{x}.", .{cmd.cmd()});
-                },
-            }
-            self.load_commands.appendAssumeCapacity(cmd);
-        }
-
-        try self.parseSymtab();
-        try self.parseStrtab();
-        try self.parseRelocs();
-    }
-
-    fn parseSymtab(self: *Object) !void {
-        const symtab_cmd = self.load_commands.items[self.symtab_cmd_index.?].Symtab;
-        var buffer = try self.base.allocator.alloc(u8, @sizeOf(macho.nlist_64) * symtab_cmd.nsyms);
-        defer self.base.allocator.free(buffer);
-        _ = try self.file.?.preadAll(buffer, symtab_cmd.symoff);
-        try self.symtab.ensureCapacity(self.base.allocator, symtab_cmd.nsyms);
-        // TODO this align case should not be needed.
-        // Probably a bug in stage1.
-        const slice = @alignCast(@alignOf(macho.nlist_64), mem.bytesAsSlice(macho.nlist_64, buffer));
-        self.symtab.appendSliceAssumeCapacity(slice);
-    }
-
-    fn parseStrtab(self: *Object) !void {
-        const symtab_cmd = self.load_commands.items[self.symtab_cmd_index.?].Symtab;
-        var buffer = try self.base.allocator.alloc(u8, symtab_cmd.strsize);
-        defer self.base.allocator.free(buffer);
-        _ = try self.file.?.preadAll(buffer, symtab_cmd.stroff);
-        try self.strtab.ensureCapacity(self.base.allocator, symtab_cmd.strsize);
-        self.strtab.appendSliceAssumeCapacity(buffer);
-    }
-
-    fn parseRelocs(self: *Object) !void {
-        const segment_cmd = self.load_commands.items[self.segment_cmd_index.?].Segment;
-        for (segment_cmd.sections.items()) |entry, i| {
-            const sect = entry.value;
-            var buffer = try self.base.allocator.alloc(u8, @sizeOf(reloc.relocation_info) * sect.nreloc);
-            defer self.base.allocator.free(buffer);
-            _ = try self.file.?.preadAll(buffer, sect.reloff);
-            var relocs = try self.base.allocator.alloc(reloc.relocation_info, sect.nreloc);
-            mem.copy(reloc.relocation_info, relocs, mem.bytesAsSlice(reloc.relocation_info, buffer));
-            try self.relocs.putNoClobber(self.base.allocator, @intCast(u16, i), relocs);
-        }
-    }
-
-    fn getString(self: *const Object, str_off: u32) []const u8 {
-        assert(str_off < self.strtab.items.len);
-        return mem.spanZ(@ptrCast([*:0]const u8, self.strtab.items.ptr + str_off));
-    }
-};
 
 pub fn init(allocator: *Allocator, target: Target) Zld {
     const page_size: u16 = switch (target.cpu.arch) {
@@ -222,8 +119,8 @@ pub fn deinit(self: *Zld) void {
 
 pub fn link(self: *Zld, files: []const []const u8) !void {
     try self.populateMetadata();
-    try self.objects.ensureCapacity(self.allocator, files.len);
 
+    try self.objects.ensureCapacity(self.allocator, files.len);
     for (files) |file_name| {
         var object: Object = .{ .base = self };
         object.file = try fs.cwd().openFile(file_name, .{});
@@ -304,19 +201,14 @@ pub fn link(self: *Zld, files: []const []const u8) !void {
         }
     }
 
-    {
-        // Update __TEXT segment size.
-        const seg = &self.load_commands.items[self.text_segment_cmd_index.?].Segment;
-        for (self.load_commands.items) |lc| {
-            seg.inner.filesize += lc.cmdsize();
-        }
-    }
+    // try self.updateTextSegment();
 
     try self.flush();
 }
 
 fn populateMetadata(self: *Zld) !void {
-    {
+    if (self.pagezero_segment_cmd_index == null) {
+        self.pagezero_segment_cmd_index = @intCast(u16, self.load_commands.items.len);
         try self.load_commands.append(self.allocator, .{
             .Segment = SegmentCommand.empty(.{
                 .cmd = macho.LC_SEGMENT_64,
@@ -336,8 +228,6 @@ fn populateMetadata(self: *Zld) !void {
     }
     if (self.text_segment_cmd_index == null) {
         self.text_segment_cmd_index = @intCast(u16, self.load_commands.items.len);
-        const maxprot = macho.VM_PROT_READ | macho.VM_PROT_WRITE | macho.VM_PROT_EXECUTE;
-        const initprot = macho.VM_PROT_READ | macho.VM_PROT_EXECUTE;
         try self.load_commands.append(self.allocator, .{
             .Segment = SegmentCommand.empty(.{
                 .cmd = macho.LC_SEGMENT_64,
@@ -347,18 +237,90 @@ fn populateMetadata(self: *Zld) !void {
                 .vmsize = 0,
                 .fileoff = 0,
                 .filesize = 0,
-                .maxprot = maxprot,
-                .initprot = initprot,
+                .maxprot = macho.VM_PROT_READ | macho.VM_PROT_WRITE | macho.VM_PROT_EXECUTE,
+                .initprot = macho.VM_PROT_READ | macho.VM_PROT_EXECUTE,
                 .nsects = 0,
                 .flags = 0,
             }),
         });
         try self.addSegmentToDir(self.text_segment_cmd_index.?);
     }
+    if (self.text_section_index == null) {
+        const text_seg = &self.load_commands.items[self.text_segment_cmd_index.?].Segment;
+        self.text_section_index = @intCast(u16, text_seg.sections.items().len);
+        const alignment: u2 = switch (self.target.cpu.arch) {
+            .x86_64 => 0,
+            .aarch64 => 2,
+            else => unreachable, // unhandled architecture type
+        };
+        try text_seg.put(self.allocator, .{
+            .sectname = makeStaticString("__text"),
+            .segname = makeStaticString("__TEXT"),
+            .addr = 0,
+            .size = 0,
+            .offset = 0,
+            .@"align" = alignment,
+            .reloff = 0,
+            .nreloc = 0,
+            .flags = macho.S_REGULAR | macho.S_ATTR_PURE_INSTRUCTIONS | macho.S_ATTR_SOME_INSTRUCTIONS,
+            .reserved1 = 0,
+            .reserved2 = 0,
+            .reserved3 = 0,
+        });
+    }
+    if (self.stubs_section_index == null) {
+        const text_seg = &self.load_commands.items[self.text_segment_cmd_index.?].Segment;
+        self.stubs_section_index = @intCast(u16, text_seg.sections.items().len);
+        const alignment: u2 = switch (self.target.cpu.arch) {
+            .x86_64 => 0,
+            .aarch64 => 2,
+            else => unreachable, // unhandled architecture type
+        };
+        const stub_size: u4 = switch (self.target.cpu.arch) {
+            .x86_64 => 6,
+            .aarch64 => 2 * @sizeOf(u32),
+            else => unreachable, // unhandled architecture type
+        };
+        try text_seg.put(self.allocator, .{
+            .sectname = makeStaticString("__stubs"),
+            .segname = makeStaticString("__TEXT"),
+            .addr = 0,
+            .size = 0,
+            .offset = 0,
+            .@"align" = alignment,
+            .reloff = 0,
+            .nreloc = 0,
+            .flags = macho.S_SYMBOL_STUBS | macho.S_ATTR_PURE_INSTRUCTIONS | macho.S_ATTR_SOME_INSTRUCTIONS,
+            .reserved1 = 0,
+            .reserved2 = stub_size,
+            .reserved3 = 0,
+        });
+    }
+    if (self.stub_helper_section_index == null) {
+        const text_seg = &self.load_commands.items[self.text_segment_cmd_index.?].Segment;
+        self.stub_helper_section_index = @intCast(u16, text_seg.sections.items().len);
+        const alignment: u2 = switch (self.target.cpu.arch) {
+            .x86_64 => 0,
+            .aarch64 => 2,
+            else => unreachable, // unhandled architecture type
+        };
+        try text_seg.put(self.allocator, .{
+            .sectname = makeStaticString("__stub_helper"),
+            .segname = makeStaticString("__TEXT"),
+            .addr = 0,
+            .size = 0,
+            .offset = 0,
+            .@"align" = alignment,
+            .reloff = 0,
+            .nreloc = 0,
+            .flags = macho.S_REGULAR | macho.S_ATTR_PURE_INSTRUCTIONS | macho.S_ATTR_SOME_INSTRUCTIONS,
+            .reserved1 = 0,
+            .reserved2 = 0,
+            .reserved3 = 0,
+        });
+    }
     if (self.data_const_segment_cmd_index == null) {
         self.data_const_segment_cmd_index = @intCast(u16, self.load_commands.items.len);
-        const maxprot = macho.VM_PROT_READ | macho.VM_PROT_WRITE | macho.VM_PROT_EXECUTE;
-        const initprot = macho.VM_PROT_READ | macho.VM_PROT_WRITE;
         try self.load_commands.append(self.allocator, .{
             .Segment = SegmentCommand.empty(.{
                 .cmd = macho.LC_SEGMENT_64,
@@ -368,18 +330,34 @@ fn populateMetadata(self: *Zld) !void {
                 .vmsize = 0,
                 .fileoff = 0,
                 .filesize = 0,
-                .maxprot = maxprot,
-                .initprot = initprot,
+                .maxprot = macho.VM_PROT_READ | macho.VM_PROT_WRITE | macho.VM_PROT_EXECUTE,
+                .initprot = macho.VM_PROT_READ | macho.VM_PROT_WRITE,
                 .nsects = 0,
                 .flags = 0,
             }),
         });
         try self.addSegmentToDir(self.data_const_segment_cmd_index.?);
     }
+    if (self.got_section_index == null) {
+        const data_const_seg = &self.load_commands.items[self.data_const_segment_cmd_index.?].Segment;
+        self.got_section_index = @intCast(u16, data_const_seg.sections.items().len);
+        try data_const_seg.put(self.allocator, .{
+            .sectname = makeStaticString("__got"),
+            .segname = makeStaticString("__DATA_CONST"),
+            .addr = 0,
+            .size = 0,
+            .offset = 0,
+            .@"align" = 3, // 2^3 = @sizeOf(u64)
+            .reloff = 0,
+            .nreloc = 0,
+            .flags = macho.S_NON_LAZY_SYMBOL_POINTERS,
+            .reserved1 = 0,
+            .reserved2 = 0,
+            .reserved3 = 0,
+        });
+    }
     if (self.data_segment_cmd_index == null) {
         self.data_segment_cmd_index = @intCast(u16, self.load_commands.items.len);
-        const maxprot = macho.VM_PROT_READ | macho.VM_PROT_WRITE | macho.VM_PROT_EXECUTE;
-        const initprot = macho.VM_PROT_READ | macho.VM_PROT_WRITE;
         try self.load_commands.append(self.allocator, .{
             .Segment = SegmentCommand.empty(.{
                 .cmd = macho.LC_SEGMENT_64,
@@ -389,18 +367,52 @@ fn populateMetadata(self: *Zld) !void {
                 .vmsize = 0,
                 .fileoff = 0,
                 .filesize = 0,
-                .maxprot = maxprot,
-                .initprot = initprot,
+                .maxprot = macho.VM_PROT_READ | macho.VM_PROT_WRITE | macho.VM_PROT_EXECUTE,
+                .initprot = macho.VM_PROT_READ | macho.VM_PROT_WRITE,
                 .nsects = 0,
                 .flags = 0,
             }),
         });
         try self.addSegmentToDir(self.data_segment_cmd_index.?);
     }
+    if (self.la_symbol_ptr_section_index == null) {
+        const data_seg = &self.load_commands.items[self.data_segment_cmd_index.?].Segment;
+        self.la_symbol_ptr_section_index = @intCast(u16, data_seg.sections.items().len);
+        try data_seg.put(self.allocator, .{
+            .sectname = makeStaticString("__la_symbol_ptr"),
+            .segname = makeStaticString("__DATA"),
+            .addr = 0,
+            .size = 0,
+            .offset = 0,
+            .@"align" = 3, // 2^3 = @sizeOf(u64)
+            .reloff = 0,
+            .nreloc = 0,
+            .flags = macho.S_LAZY_SYMBOL_POINTERS,
+            .reserved1 = 0,
+            .reserved2 = 0,
+            .reserved3 = 0,
+        });
+    }
+    if (self.data_section_index == null) {
+        const data_seg = &self.load_commands.items[self.data_segment_cmd_index.?].Segment;
+        self.data_section_index = @intCast(u16, data_seg.sections.items().len);
+        try data_seg.put(self.allocator, .{
+            .sectname = makeStaticString("__data"),
+            .segname = makeStaticString("__DATA"),
+            .addr = 0,
+            .size = 0,
+            .offset = 0,
+            .@"align" = 3, // 2^3 = @sizeOf(u64)
+            .reloff = 0,
+            .nreloc = 0,
+            .flags = macho.S_REGULAR,
+            .reserved1 = 0,
+            .reserved2 = 0,
+            .reserved3 = 0,
+        });
+    }
     if (self.linkedit_segment_cmd_index == null) {
         self.linkedit_segment_cmd_index = @intCast(u16, self.load_commands.items.len);
-        const maxprot = macho.VM_PROT_READ | macho.VM_PROT_WRITE | macho.VM_PROT_EXECUTE;
-        const initprot = macho.VM_PROT_READ;
         try self.load_commands.append(self.allocator, .{
             .Segment = SegmentCommand.empty(.{
                 .cmd = macho.LC_SEGMENT_64,
@@ -410,8 +422,8 @@ fn populateMetadata(self: *Zld) !void {
                 .vmsize = 0,
                 .fileoff = 0,
                 .filesize = 0,
-                .maxprot = maxprot,
-                .initprot = initprot,
+                .maxprot = macho.VM_PROT_READ | macho.VM_PROT_WRITE | macho.VM_PROT_EXECUTE,
+                .initprot = macho.VM_PROT_READ,
                 .nsects = 0,
                 .flags = 0,
             }),
@@ -567,6 +579,51 @@ fn flush(self: *Zld) !void {
     self.file = try fs.cwd().createFile("a.out", .{ .truncate = true });
     try self.writeLoadCommands();
     try self.writeHeader();
+}
+
+fn updateTextSegment(self: *Zld) !void {
+    const text_seg = &self.load_commands.items[self.text_segment_cmd_index.?].Segment;
+
+    // Insert stubs and stubs_helper section.
+    const nexterns = self.extern_lazy_symbols.items().len;
+    try text_seg.put(self.allocator, .{
+        .sectname = makeStaticString("__stubs"),
+        .segname = makeStaticString("__TEXT"),
+        .addr = 0,
+        .size = nexterns * stub_size,
+        .offset = 0,
+        .@"align" = 2,
+        .reloff = 0,
+        .nreloc = 0,
+        .flags = macho.S_SYMBOL_STUBS | macho.S_ATTR_PURE_INSTRUCTIONS | macho.S_ATTR_SOME_INSTRUCTIONS,
+        .reserved1 = 0,
+        .reserved2 = stub_size,
+        .reserved3 = 0,
+    });
+    try text_seg.put(self.allocator, .{
+        .sectname = makeStaticString("__stub_helper"),
+        .segname = makeStaticString("__TEXT"),
+        .addr = 0,
+        .size = nexterns * stubs_helper_size + stubs_helper_preamble_size,
+        .offset = 0,
+        .@"align" = 2,
+        .reloff = 0,
+        .nreloc = 0,
+        .flags = macho.S_REGULAR | macho.S_ATTR_PURE_INSTRUCTIONS | macho.S_ATTR_SOME_INSTRUCTIONS,
+        .reserved1 = 0,
+        .reserved2 = 0,
+        .reserved3 = 0,
+    });
+
+    // Update __TEXT segment size.
+    for (self.load_commands.items) |lc| {
+        text_seg.inner.filesize += lc.cmdsize();
+    }
+
+    // Align to page size.
+    const size = mem.alignForwardGeneric(u64, text_seg.inner.filesize, self.page_size);
+    text_seg.inner.vmsize = size;
+    text_seg.inner.filesize = size;
 }
 
 fn writeLoadCommands(self: *Zld) !void {
