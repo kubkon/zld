@@ -202,11 +202,87 @@ pub fn link(self: *Zld, files: []const []const u8) !void {
         }
     }
 
-    try self.allocateSegments();
+    self.allocateTextSegment();
+    self.allocateDataConstSegment();
+    self.allocateDataSegment();
     try self.flush();
 }
 
-fn allocateSegments(self: *Zld) !void {}
+fn allocateTextSegment(self: *Zld) void {
+    const seg = &self.load_commands.items[self.text_segment_cmd_index.?].Segment;
+    const sections = seg.sections.items();
+    const nexterns = @intCast(u32, self.extern_lazy_symbols.items().len);
+
+    // Set stubs and stub_helper sizes
+    const stubs = &sections[self.stubs_section_index.?].value;
+    const stub_helper = &sections[self.stub_helper_section_index.?].value;
+    stubs.size += nexterns * stubs.reserved2;
+    stub_helper.size += nexterns * 3 * @sizeOf(u32);
+
+    var sizeofcmds: u64 = 0;
+    for (self.load_commands.items) |lc| {
+        sizeofcmds += lc.cmdsize();
+    }
+
+    self.allocateSegment(self.text_segment_cmd_index.?, 0, sizeofcmds);
+}
+
+fn allocateDataConstSegment(self: *Zld) void {
+    const seg = &self.load_commands.items[self.data_const_segment_cmd_index.?].Segment;
+    const sections = seg.sections.items();
+    const nexterns = @intCast(u32, self.extern_nonlazy_symbols.items().len);
+
+    // Set got size
+    const got = &sections[self.got_section_index.?].value;
+    got.size += nexterns * @sizeOf(u64);
+
+    const text_seg = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
+    const offset = text_seg.inner.fileoff + text_seg.inner.filesize;
+    self.allocateSegment(self.data_const_segment_cmd_index.?, offset, 0);
+}
+
+fn allocateDataSegment(self: *Zld) void {
+    const seg = &self.load_commands.items[self.data_segment_cmd_index.?].Segment;
+    const sections = seg.sections.items();
+    const nexterns = @intCast(u32, self.extern_lazy_symbols.items().len);
+
+    // Set la_symbol_ptr and data size
+    const la_symbol_ptr = &sections[self.la_symbol_ptr_section_index.?].value;
+    const data = &sections[self.data_section_index.?].value;
+    la_symbol_ptr.size += nexterns * @sizeOf(u64);
+    data.size += @sizeOf(u64); // TODO when do we need more?
+
+    const dc_seg = self.load_commands.items[self.data_const_segment_cmd_index.?].Segment;
+    const offset = dc_seg.inner.fileoff + dc_seg.inner.filesize;
+    self.allocateSegment(self.data_segment_cmd_index.?, offset, 0);
+}
+
+fn allocateSegment(self: *Zld, index: u16, offset: u64, start: u64) void {
+    const base_vmaddr = self.load_commands.items[self.pagezero_segment_cmd_index.?].Segment.inner.vmsize;
+    const seg = &self.load_commands.items[index].Segment;
+    const sections = seg.sections.items();
+
+    // Calculate segment size
+    var total_size = start;
+    for (sections) |entry| {
+        total_size += entry.value.size;
+    }
+    const aligned_size = mem.alignForwardGeneric(u64, total_size, self.page_size);
+    seg.inner.vmaddr = base_vmaddr + offset;
+    seg.inner.vmsize = aligned_size;
+    seg.inner.fileoff = offset;
+    seg.inner.filesize = aligned_size;
+
+    // Allocate section offsets
+    var end_off: u64 = seg.inner.fileoff + seg.inner.filesize;
+    var count: usize = sections.len;
+    while (count > 0) : (count -= 1) {
+        const sec = &sections[count - 1].value;
+        end_off -= mem.alignForwardGeneric(u64, sec.size, @sizeOf(u32)); // TODO Should we always align to 4?
+        sec.offset = @intCast(u32, end_off);
+        sec.addr = seg.inner.vmaddr + end_off;
+    }
+}
 
 fn populateMetadata(self: *Zld) !void {
     if (self.pagezero_segment_cmd_index == null) {
@@ -310,7 +386,7 @@ fn populateMetadata(self: *Zld) !void {
             .sectname = makeStaticString("__stub_helper"),
             .segname = makeStaticString("__TEXT"),
             .addr = 0,
-            .size = 0,
+            .size = 6 * @sizeOf(u32),
             .offset = 0,
             .@"align" = alignment,
             .reloff = 0,
@@ -575,15 +651,38 @@ fn populateMetadata(self: *Zld) !void {
             },
         });
     }
+    if (!self.extern_nonlazy_symbols.contains("dyld_stub_binder")) {
+        const index = @intCast(u32, self.extern_nonlazy_symbols.items().len);
+        const name = try self.allocator.dupe(u8, "dyld_stub_binder");
+        const offset = try self.makeString("dyld_stub_binder");
+        try self.extern_nonlazy_symbols.putNoClobber(self.allocator, name, .{
+            .inner = .{
+                .n_strx = offset,
+                .n_type = std.macho.N_UNDF | std.macho.N_EXT,
+                .n_sect = 0,
+                .n_desc = std.macho.REFERENCE_FLAG_UNDEFINED_NON_LAZY | std.macho.N_SYMBOL_RESOLVER,
+                .n_value = 0,
+            },
+            .dylib_ordinal = 1, // TODO this is currently hardcoded.
+            .segment = self.data_const_segment_cmd_index.?,
+            .offset = index * @sizeOf(u64),
+        });
+    }
 }
 
 fn flush(self: *Zld) !void {
     self.file = try fs.cwd().createFile("a.out", .{ .truncate = true });
 
-    try self.writeCodeSignaturePadding();
+    {
+        // TODO this is just a temp...
+        const seg = self.load_commands.items[self.data_segment_cmd_index.?].Segment;
+        try self.file.?.pwriteAll(&[_]u8{0}, seg.inner.fileoff + seg.inner.filesize);
+    }
+
+    // try self.writeCodeSignaturePadding();
     try self.writeLoadCommands();
     try self.writeHeader();
-    try self.writeCodeSignature();
+    // try self.writeCodeSignature();
 }
 
 fn writeCodeSignaturePadding(self: *Zld) !void {
