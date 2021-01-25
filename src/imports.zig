@@ -70,10 +70,10 @@ pub fn bindInfoSize(symbols: anytype) !u64 {
 
         size += 1;
         try leb.writeILEB128(writer, symbol.offset);
-        size += 2;
+        size += 1;
     }
 
-    size += stream.bytes_written;
+    size += stream.bytes_written + 1;
     return size;
 }
 
@@ -98,8 +98,9 @@ pub fn writeBindInfo(symbols: anytype, writer: anytype) !void {
         try writer.writeByte(macho.BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | @truncate(u4, symbol.segment));
         try leb.writeILEB128(writer, symbol.offset);
         try writer.writeByte(macho.BIND_OPCODE_DO_BIND);
-        try writer.writeByte(macho.BIND_OPCODE_DONE);
     }
+
+    try writer.writeByte(macho.BIND_OPCODE_DONE);
 }
 
 pub fn lazyBindInfoSize(symbols: anytype) !u64 {

@@ -1,4 +1,4 @@
-pub const reloc_type_arm64 = extern enum(u4) {
+pub const reloc_type_arm64 = packed enum(u4) {
     /// For pointers.
     ARM64_RELOC_UNSIGNED = 0,
 

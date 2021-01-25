@@ -15,6 +15,7 @@ usingnamespace @import("commands.zig");
 
 base: *Zld,
 file: ?fs.File = null,
+name: ?[]u8 = null,
 header: ?macho.mach_header_64 = null,
 load_commands: std.ArrayListUnmanaged(LoadCommand) = .{},
 segment_cmd_index: ?u16 = null,
@@ -23,7 +24,7 @@ dysymtab_cmd_index: ?u16 = null,
 build_version_cmd_index: ?u16 = null,
 symtab: std.ArrayListUnmanaged(macho.nlist_64) = .{},
 strtab: std.ArrayListUnmanaged(u8) = .{},
-relocs: std.AutoArrayHashMapUnmanaged(u16, []reloc.relocation_info) = .{},
+symbol_dir: std.AutoHashMapUnmanaged(usize, usize) = .{},
 
 pub fn deinit(self: *Object, allocator: *Allocator) void {
     for (self.load_commands.items) |*lc| {
@@ -32,14 +33,15 @@ pub fn deinit(self: *Object, allocator: *Allocator) void {
     self.load_commands.deinit(allocator);
     self.symtab.deinit(allocator);
     self.strtab.deinit(allocator);
-    for (self.relocs.items()) |entry| {
-        self.base.allocator.free(entry.value);
-    }
-    self.relocs.deinit(self.base.allocator);
-    self.file.?.close();
+    self.symbol_dir.deinit(allocator);
+    if (self.file) |*f| f.close();
+    if (self.name) |n| self.base.allocator.free(n);
 }
 
-pub fn parse(self: *Object) !void {
+pub fn parse(self: *Object, name: []const u8, file: fs.File) !void {
+    self.name = try self.base.allocator.dupe(u8, name);
+    self.file = file;
+
     var reader = self.file.?.reader();
     self.header = try reader.readStruct(macho.mach_header_64);
 
@@ -73,7 +75,6 @@ pub fn parse(self: *Object) !void {
 
     try self.parseSymtab();
     try self.parseStrtab();
-    try self.parseRelocs();
 }
 
 fn parseSymtab(self: *Object) !void {
@@ -95,19 +96,6 @@ fn parseStrtab(self: *Object) !void {
     _ = try self.file.?.preadAll(buffer, symtab_cmd.stroff);
     try self.strtab.ensureCapacity(self.base.allocator, symtab_cmd.strsize);
     self.strtab.appendSliceAssumeCapacity(buffer);
-}
-
-fn parseRelocs(self: *Object) !void {
-    const segment_cmd = self.load_commands.items[self.segment_cmd_index.?].Segment;
-    for (segment_cmd.sections.items()) |entry, i| {
-        const sect = entry.value;
-        var buffer = try self.base.allocator.alloc(u8, @sizeOf(reloc.relocation_info) * sect.nreloc);
-        defer self.base.allocator.free(buffer);
-        _ = try self.file.?.preadAll(buffer, sect.reloff);
-        var relocs = try self.base.allocator.alloc(reloc.relocation_info, sect.nreloc);
-        mem.copy(reloc.relocation_info, relocs, mem.bytesAsSlice(reloc.relocation_info, buffer));
-        try self.relocs.putNoClobber(self.base.allocator, @intCast(u16, i), relocs);
-    }
 }
 
 pub fn getString(self: *const Object, str_off: u32) []const u8 {
