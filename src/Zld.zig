@@ -121,6 +121,8 @@ pub fn deinit(self: *Zld) void {
 }
 
 pub fn link(self: *Zld, files: []const []const u8) !void {
+    if (files.len > 1) return error.TODOLinkMultipleObjectFiles;
+
     self.file = try fs.cwd().createFile("a.out", .{
         .truncate = true,
         .read = true,
@@ -142,6 +144,10 @@ pub fn link(self: *Zld, files: []const []const u8) !void {
             const sect = entry.value;
             const segname = parseName(&sect.segname);
 
+            if (mem.eql(u8, name, "__eh_frame")) {
+                log.warn("TODO handle __eh_frame section", .{});
+                continue;
+            }
             const seg_id = self.segments_dir.get(segname) orelse {
                 log.warn("segname {s} not found in the output artifact", .{segname});
                 continue;
