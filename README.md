@@ -1,6 +1,10 @@
 # zld
 
-Zig's lld drop-in replacement
+Zig's lld drop-in replacement, called ZigLD or `zld` for short
+
+**Disclaimer**: this is a WIP so things naturally will not work as intended or at all.
+However, with a bit of luck, and some spare time, I reckon `zld` can handle most common
+cases (with a special focus on cross-compilation) relatively quickly.
 
 ## Why?
 
@@ -20,4 +24,10 @@ Currently, the entire roadmap is organised around macOS/Mach-O support. This is 
 that's the binary format I'm most familiar with. Having said that, I'd welcome contributions
 adding some support to other widely used formats such as Elf, Coff, PE, etc.
 
-- [ ] link `.o` generated from simple C program on macOS
+- [x] link `.o` generated from simple C program on macOS targeting `aarch64`
+- [ ] link the same `.o` but targeting `x86_64`
+- [ ] unhack, or refactor, for basic single `.o` linking
+- [ ] link multiple `.o`
+- [ ] converge with Zig's stage2
+- [ ] handle multiple dynamic libraries
+- [ ] handle frameworks
