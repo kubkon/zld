@@ -7,7 +7,6 @@ const fs = std.fs;
 const macho = std.macho;
 const math = std.math;
 const log = std.log.scoped(.zld);
-const aarch64 = @import("aarch64.zig");
 
 const Allocator = mem.Allocator;
 const Target = std.Target;
@@ -17,6 +16,7 @@ const Trie = @import("Trie.zig");
 
 usingnamespace @import("commands.zig");
 usingnamespace @import("imports.zig");
+usingnamespace @import("reloc.zig");
 
 allocator: *Allocator,
 target: Target,
@@ -180,7 +180,7 @@ pub fn link(self: *Zld, files: []const []const u8) !void {
 
             const sym_name = object.getString(sym.n_strx);
             const n_strx = try self.makeString(sym_name);
-            if (mem.eql(u8, sym_name, "___stderrp")) {
+            if (mem.eql(u8, sym_name, "___stderrp") or mem.eql(u8, sym_name, "___stdoutp")) {
                 log.debug("writing nonlazy symbol '{s}'", .{sym_name});
                 var key = try self.allocator.dupe(u8, sym_name);
                 const offset = @intCast(u32, self.extern_nonlazy_symbols.items().len * @sizeOf(u64));
@@ -212,6 +212,24 @@ pub fn link(self: *Zld, files: []const []const u8) !void {
                 });
             }
         }
+    }
+
+    {
+        const index = @intCast(u32, self.extern_nonlazy_symbols.items().len);
+        const name = try self.allocator.dupe(u8, "dyld_stub_binder");
+        const offset = try self.makeString("dyld_stub_binder");
+        try self.extern_nonlazy_symbols.putNoClobber(self.allocator, name, .{
+            .inner = .{
+                .n_strx = offset,
+                .n_type = std.macho.N_UNDF | std.macho.N_EXT,
+                .n_sect = 0,
+                .n_desc = std.macho.REFERENCE_FLAG_UNDEFINED_NON_LAZY | std.macho.N_SYMBOL_RESOLVER,
+                .n_value = 0,
+            },
+            .dylib_ordinal = 1, // TODO this is currently hardcoded.
+            .segment = self.data_const_segment_cmd_index.?,
+            .offset = index * @sizeOf(u64),
+        });
     }
 
     self.allocateTextSegment();
@@ -385,23 +403,37 @@ fn writeStubHelperCommon(self: *Zld) !void {
             .aarch64 => {
                 var code: [4 * @sizeOf(u32)]u8 = undefined;
                 {
-                    const displacement = try math.cast(i21, data.addr - stub_helper.addr);
-                    mem.writeIntLittle(u32, code[0..4], aarch64.Instruction.adr(.x17, displacement).toU32());
+                    const displacement = @bitCast(u21, try math.cast(i21, data.addr - stub_helper.addr));
+                    // adr x17, disp
+                    mem.writeIntLittle(u32, code[0..4], @bitCast(u32, Arm64.Address{
+                        .rd = 17,
+                        .immhi = @truncate(u19, displacement >> 2),
+                        .immlo = @truncate(u2, displacement),
+                        .op = 0,
+                    }));
                 }
-                mem.writeIntLittle(u32, code[4..8], aarch64.Instruction.stp(
-                    .x16,
-                    .x17,
-                    aarch64.Register.sp,
-                    aarch64.Instruction.LoadStorePairOffset.pre_index(-16),
-                ).toU32());
+                // stp x16, x17, [sp, #-16]!
+                code[4] = 0xf0;
+                code[5] = 0x47;
+                code[6] = 0xbf;
+                code[7] = 0xa9;
                 {
-                    const displacement = try math.divExact(u64, got.addr - stub_helper.addr - 2 * @sizeOf(u32), 4);
+                    const dyld_stub_binder = self.extern_nonlazy_symbols.get("dyld_stub_binder").?;
+                    const addr = (got.addr + dyld_stub_binder.offset);
+                    const displacement = try math.divExact(u64, addr - stub_helper.addr - 2 * @sizeOf(u32), 4);
                     const literal = try math.cast(u19, displacement);
-                    mem.writeIntLittle(u32, code[8..12], aarch64.Instruction.ldr(.x16, .{
-                        .literal = literal,
-                    }).toU32());
+                    // ldr x16, label
+                    mem.writeIntLittle(u32, code[8..12], @bitCast(u32, Arm64.LoadLiteral{
+                        .rt = 16,
+                        .imm19 = literal,
+                        .opc = 1,
+                    }));
                 }
-                mem.writeIntLittle(u32, code[12..16], aarch64.Instruction.br(.x16).toU32());
+                // br x16
+                code[12] = 0x00;
+                code[13] = 0x02;
+                code[14] = 0x1f;
+                code[15] = 0xd6;
                 try self.file.?.pwriteAll(&code, stub_helper.offset);
                 break :blk stub_helper.offset + 4 * @sizeOf(u32);
             },
@@ -462,10 +494,17 @@ fn writeStub(self: *Zld, index: u32) !void {
             assert(la_ptr_addr >= stub_addr);
             const displacement = try math.divExact(u64, la_ptr_addr - stub_addr, 4);
             const literal = try math.cast(u19, displacement);
-            mem.writeIntLittle(u32, code[0..4], aarch64.Instruction.ldr(.x16, .{
-                .literal = literal,
-            }).toU32());
-            mem.writeIntLittle(u32, code[4..8], aarch64.Instruction.br(.x16).toU32());
+            // ldr x16, literal
+            mem.writeIntLittle(u32, code[0..4], @bitCast(u32, Arm64.LoadLiteral{
+                .rt = 16,
+                .imm19 = literal,
+                .opc = 1,
+            }));
+            // br x16
+            mem.writeIntLittle(u32, code[4..8], @bitCast(u32, Arm64.BranchRegister{
+                .rn = 16,
+                .link = 0,
+            }));
         },
         else => unreachable,
     }
@@ -499,10 +538,18 @@ fn writeStubInStubHelper(self: *Zld, index: u32, offset: u64) !void {
         },
         .aarch64 => {
             const displacement = try math.cast(i28, @intCast(i64, stub_helper.offset) - @intCast(i64, stub_off) - 4);
-            mem.writeIntLittle(u32, code[0..4], aarch64.Instruction.ldr(.w16, .{
-                .literal = @divExact(stub_size - @sizeOf(u32), 4),
-            }).toU32());
-            mem.writeIntLittle(u32, code[4..8], aarch64.Instruction.b(displacement).toU32());
+            const literal = @divExact(stub_size - @sizeOf(u32), 4);
+            // ldr w16, literal
+            mem.writeIntLittle(u32, code[0..4], @bitCast(u32, Arm64.LoadLiteral{
+                .rt = 16,
+                .imm19 = literal,
+                .opc = 0,
+            }));
+            // b disp
+            mem.writeIntLittle(u32, code[4..8], @bitCast(u32, Arm64.Branch{
+                .imm26 = @bitCast(u26, @intCast(i26, displacement >> 2)),
+                .link = 0,
+            }));
             mem.writeIntLittle(u32, code[8..12], 0x0); // Just a placeholder populated in `populateLazyBindOffsetsInStubHelper`.
         },
         else => unreachable,
@@ -570,24 +617,21 @@ fn doRelocs(self: *Zld) !void {
                 switch (@intToEnum(macho.reloc_type_arm64, rel.r_type)) {
                     macho.reloc_type_arm64.ARM64_RELOC_BRANCH26 => {
                         const displacement = target_addr - this_addr;
-                        mem.writeIntLittle(u32, inst, aarch64.Instruction.bl(@intCast(u26, displacement)).toU32());
+                        var parsed = mem.bytesAsValue(Arm64.Branch, inst);
+                        parsed.imm26 = @intCast(u26, displacement >> 2);
                     },
                     macho.reloc_type_arm64.ARM64_RELOC_PAGE21, macho.reloc_type_arm64.ARM64_RELOC_GOT_LOAD_PAGE21, macho.reloc_type_arm64.ARM64_RELOC_TLVP_LOAD_PAGE21 => {
                         const this_page = this_addr >> 12;
                         const target_page = target_addr >> 12;
-                        const pages = target_page - this_page;
-                        const reg = @intToEnum(aarch64.Register, @truncate(u5, inst[0]));
-                        mem.writeIntLittle(u32, inst, aarch64.Instruction.adrp(reg, @intCast(i21, pages)).toU32());
+                        const pages = @bitCast(u21, @intCast(i21, target_page - this_page));
+                        var parsed = mem.bytesAsValue(Arm64.Address, inst);
+                        parsed.immhi = @truncate(u19, pages >> 2);
+                        parsed.immlo = @truncate(u2, pages);
                     },
                     macho.reloc_type_arm64.ARM64_RELOC_PAGEOFF12, macho.reloc_type_arm64.ARM64_RELOC_GOT_LOAD_PAGEOFF12, macho.reloc_type_arm64.ARM64_RELOC_TLVP_LOAD_PAGEOFF12 => {
                         const narrowed = @truncate(u12, target_addr);
-                        const reg = @intToEnum(aarch64.Register, @truncate(u5, inst[0]));
-                        mem.writeIntLittle(u32, inst, aarch64.Instruction.add(
-                            reg,
-                            reg,
-                            @intCast(u12, narrowed),
-                            false,
-                        ).toU32());
+                        var parsed = mem.bytesAsValue(Arm64.LoadRegister, inst);
+                        parsed.offset = narrowed;
                     },
                     else => |tt| {
                         log.warn("unhandled relocation type '{}'", .{tt});
@@ -980,23 +1024,6 @@ fn populateMetadata(self: *Zld) !void {
                 .dataoff = 0,
                 .datasize = 0,
             },
-        });
-    }
-    if (!self.extern_nonlazy_symbols.contains("dyld_stub_binder")) {
-        const index = @intCast(u32, self.extern_nonlazy_symbols.items().len);
-        const name = try self.allocator.dupe(u8, "dyld_stub_binder");
-        const offset = try self.makeString("dyld_stub_binder");
-        try self.extern_nonlazy_symbols.putNoClobber(self.allocator, name, .{
-            .inner = .{
-                .n_strx = offset,
-                .n_type = std.macho.N_UNDF | std.macho.N_EXT,
-                .n_sect = 0,
-                .n_desc = std.macho.REFERENCE_FLAG_UNDEFINED_NON_LAZY | std.macho.N_SYMBOL_RESOLVER,
-                .n_value = 0,
-            },
-            .dylib_ordinal = 1, // TODO this is currently hardcoded.
-            .segment = self.data_const_segment_cmd_index.?,
-            .offset = index * @sizeOf(u64),
         });
     }
 }
