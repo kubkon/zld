@@ -3,6 +3,7 @@ const Zld = @This();
 const std = @import("std");
 const assert = std.debug.assert;
 const mem = std.mem;
+const meta = std.meta;
 const fs = std.fs;
 const macho = std.macho;
 const math = std.math;
@@ -405,12 +406,7 @@ fn writeStubHelperCommon(self: *Zld) !void {
                 {
                     const displacement = @bitCast(u21, try math.cast(i21, data.addr - stub_helper.addr));
                     // adr x17, disp
-                    mem.writeIntLittle(u32, code[0..4], @bitCast(u32, Arm64.Address{
-                        .rd = 17,
-                        .immhi = @truncate(u19, displacement >> 2),
-                        .immlo = @truncate(u2, displacement),
-                        .op = 0,
-                    }));
+                    mem.writeIntLittle(u32, code[0..4], Arm64.adr(17, displacement).toU32());
                 }
                 // stp x16, x17, [sp, #-16]!
                 code[4] = 0xf0;
@@ -423,11 +419,7 @@ fn writeStubHelperCommon(self: *Zld) !void {
                     const displacement = try math.divExact(u64, addr - stub_helper.addr - 2 * @sizeOf(u32), 4);
                     const literal = try math.cast(u19, displacement);
                     // ldr x16, label
-                    mem.writeIntLittle(u32, code[8..12], @bitCast(u32, Arm64.LoadLiteral{
-                        .rt = 16,
-                        .imm19 = literal,
-                        .opc = 1,
-                    }));
+                    mem.writeIntLittle(u32, code[8..12], Arm64.ldr(16, literal, true).toU32());
                 }
                 // br x16
                 code[12] = 0x00;
@@ -495,16 +487,9 @@ fn writeStub(self: *Zld, index: u32) !void {
             const displacement = try math.divExact(u64, la_ptr_addr - stub_addr, 4);
             const literal = try math.cast(u19, displacement);
             // ldr x16, literal
-            mem.writeIntLittle(u32, code[0..4], @bitCast(u32, Arm64.LoadLiteral{
-                .rt = 16,
-                .imm19 = literal,
-                .opc = 1,
-            }));
+            mem.writeIntLittle(u32, code[0..4], Arm64.ldr(16, literal, true).toU32());
             // br x16
-            mem.writeIntLittle(u32, code[4..8], @bitCast(u32, Arm64.BranchRegister{
-                .rn = 16,
-                .link = 0,
-            }));
+            mem.writeIntLittle(u32, code[4..8], Arm64.br(16).toU32());
         },
         else => unreachable,
     }
@@ -540,16 +525,9 @@ fn writeStubInStubHelper(self: *Zld, index: u32, offset: u64) !void {
             const displacement = try math.cast(i28, @intCast(i64, stub_helper.offset) - @intCast(i64, stub_off) - 4);
             const literal = @divExact(stub_size - @sizeOf(u32), 4);
             // ldr w16, literal
-            mem.writeIntLittle(u32, code[0..4], @bitCast(u32, Arm64.LoadLiteral{
-                .rt = 16,
-                .imm19 = literal,
-                .opc = 0,
-            }));
+            mem.writeIntLittle(u32, code[0..4], Arm64.ldr(16, literal, false).toU32());
             // b disp
-            mem.writeIntLittle(u32, code[4..8], @bitCast(u32, Arm64.Branch{
-                .imm26 = @bitCast(u26, @intCast(i26, displacement >> 2)),
-                .link = 0,
-            }));
+            mem.writeIntLittle(u32, code[4..8], Arm64.b(displacement).toU32());
             mem.writeIntLittle(u32, code[8..12], 0x0); // Just a placeholder populated in `populateLazyBindOffsetsInStubHelper`.
         },
         else => unreachable,
@@ -617,20 +595,20 @@ fn doRelocs(self: *Zld) !void {
                 switch (@intToEnum(macho.reloc_type_arm64, rel.r_type)) {
                     macho.reloc_type_arm64.ARM64_RELOC_BRANCH26 => {
                         const displacement = target_addr - this_addr;
-                        var parsed = mem.bytesAsValue(Arm64.Branch, inst);
-                        parsed.imm26 = @intCast(u26, displacement >> 2);
+                        var parsed = mem.bytesAsValue(meta.TagPayloadType(Arm64, Arm64.Branch), inst);
+                        parsed.disp = @intCast(u26, displacement >> 2);
                     },
                     macho.reloc_type_arm64.ARM64_RELOC_PAGE21, macho.reloc_type_arm64.ARM64_RELOC_GOT_LOAD_PAGE21, macho.reloc_type_arm64.ARM64_RELOC_TLVP_LOAD_PAGE21 => {
                         const this_page = this_addr >> 12;
                         const target_page = target_addr >> 12;
                         const pages = @bitCast(u21, @intCast(i21, target_page - this_page));
-                        var parsed = mem.bytesAsValue(Arm64.Address, inst);
+                        var parsed = mem.bytesAsValue(meta.TagPayloadType(Arm64, Arm64.Address), inst);
                         parsed.immhi = @truncate(u19, pages >> 2);
                         parsed.immlo = @truncate(u2, pages);
                     },
                     macho.reloc_type_arm64.ARM64_RELOC_PAGEOFF12, macho.reloc_type_arm64.ARM64_RELOC_GOT_LOAD_PAGEOFF12, macho.reloc_type_arm64.ARM64_RELOC_TLVP_LOAD_PAGEOFF12 => {
                         const narrowed = @truncate(u12, target_addr);
-                        var parsed = mem.bytesAsValue(Arm64.LoadRegister, inst);
+                        var parsed = mem.bytesAsValue(meta.TagPayloadType(Arm64, Arm64.LoadRegister), inst);
                         parsed.offset = narrowed;
                     },
                     else => |tt| {
