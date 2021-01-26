@@ -284,7 +284,13 @@ fn allocateTextSegment(self: *Zld) void {
     const stubs = &sections[self.stubs_section_index.?].value;
     const stub_helper = &sections[self.stub_helper_section_index.?].value;
     stubs.size += nexterns * stubs.reserved2;
-    stub_helper.size += nexterns * 3 * @sizeOf(u32);
+
+    const stub_size: u4 = switch (self.target.cpu.arch) {
+        .x86_64 => 10,
+        .aarch64 => 3 * @sizeOf(u32),
+        else => unreachable,
+    };
+    stub_helper.size += nexterns * stub_size;
 
     var sizeofcmds: u64 = 0;
     for (self.load_commands.items) |lc| {
@@ -395,7 +401,9 @@ fn writeStubHelperCommon(self: *Zld) !void {
                 code[9] = 0xff;
                 code[10] = 0x25;
                 {
-                    const displacement = try math.cast(u32, got.addr - stub_helper.addr - code_size);
+                    const dyld_stub_binder = self.extern_nonlazy_symbols.get("dyld_stub_binder").?;
+                    const addr = (got.addr + dyld_stub_binder.offset);
+                    const displacement = try math.cast(u32, addr - stub_helper.addr - code_size);
                     mem.writeIntLittle(u32, code[11..], displacement);
                 }
                 try self.file.?.pwriteAll(&code, stub_helper.offset);
@@ -571,49 +579,83 @@ fn doRelocs(self: *Zld) !void {
                 const offset = @intCast(u32, rel.r_address);
                 const inst = code[offset..][0..4];
                 const this_addr = out_sect.addr + offset;
-
                 const target_addr = blk: {
-                    if (object.symbol_dir.get(rel.r_symbolnum)) |idx| {
-                        const sym = self.local_symbols.items[idx];
-                        break :blk sym.n_value;
+                    if (rel.r_extern == 1) {
+                        if (object.symbol_dir.get(rel.r_symbolnum)) |idx| {
+                            const sym = self.local_symbols.items[idx];
+                            break :blk sym.n_value;
+                        } else {
+                            // extern
+                            const sym = object.symtab.items[rel.r_symbolnum];
+                            const symname = object.getString(sym.n_strx);
+                            if (self.extern_lazy_symbols.getIndex(symname)) |i| {
+                                const segment = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
+                                const stubs = segment.sections.items()[self.stubs_section_index.?].value;
+                                break :blk stubs.addr + i * stubs.reserved2;
+                            } else if (self.extern_nonlazy_symbols.get(symname)) |ext| {
+                                const segment = self.load_commands.items[ext.segment].Segment;
+                                const got = segment.sections.items()[self.got_section_index.?].value;
+                                break :blk got.addr + ext.offset;
+                            } else unreachable;
+                        }
                     } else {
-                        // extern
-                        const sym = object.symtab.items[rel.r_symbolnum];
-                        const symname = object.getString(sym.n_strx);
-                        if (self.extern_lazy_symbols.getIndex(symname)) |i| {
-                            const segment = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
-                            const stubs = segment.sections.items()[self.stubs_section_index.?].value;
-                            break :blk stubs.addr + i * stubs.reserved2;
-                        } else if (self.extern_nonlazy_symbols.get(symname)) |ext| {
-                            const segment = self.load_commands.items[ext.segment].Segment;
-                            const got = segment.sections.items()[self.got_section_index.?].value;
-                            break :blk got.addr + ext.offset;
-                        } else unreachable;
+                        // TODO need to store object section to final artifact section mapping
+                        const sect_id = rel.r_symbolnum - 1;
+                        const segment = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
+                        const sec = segment.sections.items()[sect_id + 2].value;
+                        break :blk sec.addr;
                     }
                 };
 
-                switch (@intToEnum(macho.reloc_type_arm64, rel.r_type)) {
-                    macho.reloc_type_arm64.ARM64_RELOC_BRANCH26 => {
-                        const displacement = target_addr - this_addr;
-                        var parsed = mem.bytesAsValue(meta.TagPayloadType(Arm64, Arm64.Branch), inst);
-                        parsed.disp = @intCast(u26, displacement >> 2);
+                switch (self.target.cpu.arch) {
+                    .x86_64 => {
+                        switch (@intToEnum(macho.reloc_type_x86_64, rel.r_type)) {
+                            macho.reloc_type_x86_64.X86_64_RELOC_BRANCH => {
+                                // callq / jmpq
+                                const displacement = @intCast(u32, target_addr - this_addr - 4);
+                                mem.writeIntLittle(u32, inst, displacement);
+                            },
+                            macho.reloc_type_x86_64.X86_64_RELOC_SIGNED => {
+                                // leaq
+                                const displacement = @bitCast(u32, @intCast(i32, target_addr - this_addr - 4));
+                                mem.writeIntLittle(u32, inst, displacement);
+                            },
+                            macho.reloc_type_x86_64.X86_64_RELOC_GOT_LOAD => {
+                                // movq
+                                const displacement = @intCast(u32, target_addr - this_addr - 4);
+                                mem.writeIntLittle(u32, inst, displacement);
+                            },
+                            else => |tt| {
+                                log.warn("unhandled relocation type '{}'", .{tt});
+                            },
+                        }
                     },
-                    macho.reloc_type_arm64.ARM64_RELOC_PAGE21, macho.reloc_type_arm64.ARM64_RELOC_GOT_LOAD_PAGE21, macho.reloc_type_arm64.ARM64_RELOC_TLVP_LOAD_PAGE21 => {
-                        const this_page = this_addr >> 12;
-                        const target_page = target_addr >> 12;
-                        const pages = @bitCast(u21, @intCast(i21, target_page - this_page));
-                        var parsed = mem.bytesAsValue(meta.TagPayloadType(Arm64, Arm64.Address), inst);
-                        parsed.immhi = @truncate(u19, pages >> 2);
-                        parsed.immlo = @truncate(u2, pages);
+                    .aarch64 => {
+                        switch (@intToEnum(macho.reloc_type_arm64, rel.r_type)) {
+                            macho.reloc_type_arm64.ARM64_RELOC_BRANCH26 => {
+                                const displacement = target_addr - this_addr;
+                                var parsed = mem.bytesAsValue(meta.TagPayloadType(Arm64, Arm64.Branch), inst);
+                                parsed.disp = @intCast(u26, displacement >> 2);
+                            },
+                            macho.reloc_type_arm64.ARM64_RELOC_PAGE21, macho.reloc_type_arm64.ARM64_RELOC_GOT_LOAD_PAGE21, macho.reloc_type_arm64.ARM64_RELOC_TLVP_LOAD_PAGE21 => {
+                                const this_page = this_addr >> 12;
+                                const target_page = target_addr >> 12;
+                                const pages = @bitCast(u21, @intCast(i21, target_page - this_page));
+                                var parsed = mem.bytesAsValue(meta.TagPayloadType(Arm64, Arm64.Address), inst);
+                                parsed.immhi = @truncate(u19, pages >> 2);
+                                parsed.immlo = @truncate(u2, pages);
+                            },
+                            macho.reloc_type_arm64.ARM64_RELOC_PAGEOFF12, macho.reloc_type_arm64.ARM64_RELOC_GOT_LOAD_PAGEOFF12, macho.reloc_type_arm64.ARM64_RELOC_TLVP_LOAD_PAGEOFF12 => {
+                                const narrowed = @truncate(u12, target_addr);
+                                var parsed = mem.bytesAsValue(meta.TagPayloadType(Arm64, Arm64.LoadRegister), inst);
+                                parsed.offset = narrowed;
+                            },
+                            else => |tt| {
+                                log.warn("unhandled relocation type '{}'", .{tt});
+                            },
+                        }
                     },
-                    macho.reloc_type_arm64.ARM64_RELOC_PAGEOFF12, macho.reloc_type_arm64.ARM64_RELOC_GOT_LOAD_PAGEOFF12, macho.reloc_type_arm64.ARM64_RELOC_TLVP_LOAD_PAGEOFF12 => {
-                        const narrowed = @truncate(u12, target_addr);
-                        var parsed = mem.bytesAsValue(meta.TagPayloadType(Arm64, Arm64.LoadRegister), inst);
-                        parsed.offset = narrowed;
-                    },
-                    else => |tt| {
-                        log.warn("unhandled relocation type '{}'", .{tt});
-                    },
+                    else => unreachable,
                 }
             }
 
@@ -735,11 +777,16 @@ fn populateMetadata(self: *Zld) !void {
             .aarch64 => 2,
             else => unreachable, // unhandled architecture type
         };
+        const stub_helper_size: u5 = switch (self.target.cpu.arch) {
+            .x86_64 => 15,
+            .aarch64 => 6 * @sizeOf(u32),
+            else => unreachable,
+        };
         try text_seg.put(self.allocator, .{
             .sectname = makeStaticString("__stub_helper"),
             .segname = makeStaticString("__TEXT"),
             .addr = 0,
-            .size = 6 * @sizeOf(u32),
+            .size = stub_helper_size,
             .offset = 0,
             .@"align" = alignment,
             .reloff = 0,
