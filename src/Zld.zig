@@ -8,7 +8,6 @@ const macho = std.macho;
 const math = std.math;
 const log = std.log.scoped(.zld);
 const aarch64 = @import("aarch64.zig");
-const reloc = @import("reloc.zig");
 
 const Allocator = mem.Allocator;
 const Target = std.Target;
@@ -538,10 +537,10 @@ fn doRelocs(self: *Zld) !void {
             _ = try object.file.?.preadAll(code, sect.offset);
 
             // Parse relocs (if any)
-            var raw_relocs = try self.allocator.alloc(u8, @sizeOf(reloc.relocation_info) * sect.nreloc);
+            var raw_relocs = try self.allocator.alloc(u8, @sizeOf(macho.relocation_info) * sect.nreloc);
             defer self.allocator.free(raw_relocs);
             _ = try object.file.?.preadAll(raw_relocs, sect.reloff);
-            const relocs = mem.bytesAsSlice(reloc.relocation_info, raw_relocs);
+            const relocs = mem.bytesAsSlice(macho.relocation_info, raw_relocs);
 
             for (relocs) |rel| {
                 const offset = @intCast(u32, rel.r_address);
@@ -568,19 +567,19 @@ fn doRelocs(self: *Zld) !void {
                     }
                 };
 
-                switch (@intToEnum(reloc.reloc_type_arm64, rel.r_type)) {
-                    reloc.reloc_type_arm64.ARM64_RELOC_BRANCH26 => {
+                switch (@intToEnum(macho.reloc_type_arm64, rel.r_type)) {
+                    macho.reloc_type_arm64.ARM64_RELOC_BRANCH26 => {
                         const displacement = target_addr - this_addr;
                         mem.writeIntLittle(u32, inst, aarch64.Instruction.bl(@intCast(u26, displacement)).toU32());
                     },
-                    reloc.reloc_type_arm64.ARM64_RELOC_PAGE21, reloc.reloc_type_arm64.ARM64_RELOC_GOT_LOAD_PAGE21, reloc.reloc_type_arm64.ARM64_RELOC_TLVP_LOAD_PAGE21 => {
+                    macho.reloc_type_arm64.ARM64_RELOC_PAGE21, macho.reloc_type_arm64.ARM64_RELOC_GOT_LOAD_PAGE21, macho.reloc_type_arm64.ARM64_RELOC_TLVP_LOAD_PAGE21 => {
                         const this_page = this_addr >> 12;
                         const target_page = target_addr >> 12;
                         const pages = target_page - this_page;
                         const reg = @intToEnum(aarch64.Register, @truncate(u5, inst[0]));
                         mem.writeIntLittle(u32, inst, aarch64.Instruction.adrp(reg, @intCast(i21, pages)).toU32());
                     },
-                    reloc.reloc_type_arm64.ARM64_RELOC_PAGEOFF12, reloc.reloc_type_arm64.ARM64_RELOC_GOT_LOAD_PAGEOFF12, reloc.reloc_type_arm64.ARM64_RELOC_TLVP_LOAD_PAGEOFF12 => {
+                    macho.reloc_type_arm64.ARM64_RELOC_PAGEOFF12, macho.reloc_type_arm64.ARM64_RELOC_GOT_LOAD_PAGEOFF12, macho.reloc_type_arm64.ARM64_RELOC_TLVP_LOAD_PAGEOFF12 => {
                         const narrowed = @truncate(u12, target_addr);
                         const reg = @intToEnum(aarch64.Register, @truncate(u5, inst[0]));
                         mem.writeIntLittle(u32, inst, aarch64.Instruction.add(
