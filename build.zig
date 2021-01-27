@@ -11,6 +11,9 @@ pub fn build(b: *Builder) void {
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall.
     const mode = b.standardReleaseOptions();
 
+    const lib = b.addStaticLibrary("zld", "src/Zld.zig");
+    lib.setBuildMode(mode);
+
     const exe = b.addExecutable("zld", "src/main.zig");
     exe.setTarget(target);
     exe.setBuildMode(mode);
@@ -24,4 +27,12 @@ pub fn build(b: *Builder) void {
 
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
+
+    const tests = b.addTest("src/test.zig");
+    tests.setBuildMode(mode);
+    tests.addPackagePath("end_to_end_tests", "test/test.zig");
+
+    const test_step = b.step("test", "Run library and end-to-end tests");
+    test_step.dependOn(&exe.step);
+    test_step.dependOn(&tests.step);
 }

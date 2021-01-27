@@ -10,7 +10,6 @@ const math = std.math;
 const log = std.log.scoped(.zld);
 
 const Allocator = mem.Allocator;
-const Target = std.Target;
 const CodeSignature = @import("CodeSignature.zig");
 const Object = @import("Object.zig");
 const Trie = @import("Trie.zig");
@@ -20,10 +19,11 @@ usingnamespace @import("imports.zig");
 usingnamespace @import("reloc.zig");
 
 allocator: *Allocator,
-target: Target,
-page_size: u16,
 
+arch: ?std.Target.Cpu.Arch = null,
+page_size: ?u16 = null,
 file: ?fs.File = null,
+out_path: ?[]const u8 = null,
 
 objects: std.ArrayListUnmanaged(Object) = .{},
 load_commands: std.ArrayListUnmanaged(LoadCommand) = .{},
@@ -76,17 +76,8 @@ const LIB_SYSTEM_NAME: [*:0]const u8 = "System";
 /// TODO we should search for libSystem and fail if it doesn't exist, instead of hardcoding it
 const LIB_SYSTEM_PATH: [*:0]const u8 = DEFAULT_LIB_SEARCH_PATH ++ "/libSystem.B.dylib";
 
-pub fn init(allocator: *Allocator, target: Target) Zld {
-    const page_size: u16 = switch (target.cpu.arch) {
-        .aarch64 => 0x4000,
-        .x86_64 => 0x1000,
-        else => unreachable,
-    };
-    return .{
-        .allocator = allocator,
-        .target = target,
-        .page_size = page_size,
-    };
+pub fn init(allocator: *Allocator) Zld {
+    return .{ .allocator = allocator };
 }
 
 pub fn deinit(self: *Zld) void {
@@ -98,7 +89,13 @@ pub fn deinit(self: *Zld) void {
     }
     self.string_table_directory.deinit(self.allocator);
     self.string_table.deinit(self.allocator);
+    for (self.extern_lazy_symbols.items()) |*entry| {
+        self.allocator.free(entry.key);
+    }
     self.extern_lazy_symbols.deinit(self.allocator);
+    for (self.extern_nonlazy_symbols.items()) |*entry| {
+        self.allocator.free(entry.key);
+    }
     self.extern_nonlazy_symbols.deinit(self.allocator);
     self.global_symbols.deinit(self.allocator);
     self.local_symbols.deinit(self.allocator);
@@ -120,10 +117,31 @@ pub fn deinit(self: *Zld) void {
     if (self.file) |*f| f.close();
 }
 
-pub fn link(self: *Zld, files: []const []const u8) !void {
+pub fn link(self: *Zld, files: []const []const u8, out_path: []const u8) !void {
+    if (files.len == 0) return error.NoInputFiles;
     if (files.len > 1) return error.TODOLinkMultipleObjectFiles;
 
-    self.file = try fs.cwd().createFile("a.out", .{
+    self.arch = blk: {
+        const file = try fs.cwd().openFile(files[0], .{});
+        defer file.close();
+        var reader = file.reader();
+        const header = try reader.readStruct(macho.mach_header_64);
+        const arch: std.Target.Cpu.Arch = switch (header.cputype) {
+            macho.CPU_TYPE_X86_64 => .x86_64,
+            macho.CPU_TYPE_ARM64 => .aarch64,
+            else => unreachable,
+        };
+        break :blk arch;
+    };
+
+    self.page_size = switch (self.arch.?) {
+        .aarch64 => 0x4000,
+        .x86_64 => 0x1000,
+        else => unreachable,
+    };
+
+    self.out_path = out_path;
+    self.file = try fs.cwd().createFile(out_path, .{
         .truncate = true,
         .read = true,
         .mode = 0o777,
@@ -285,7 +303,7 @@ fn allocateTextSegment(self: *Zld) void {
     const stub_helper = &sections[self.stub_helper_section_index.?].value;
     stubs.size += nexterns * stubs.reserved2;
 
-    const stub_size: u4 = switch (self.target.cpu.arch) {
+    const stub_size: u4 = switch (self.arch.?) {
         .x86_64 => 10,
         .aarch64 => 3 * @sizeOf(u32),
         else => unreachable,
@@ -346,7 +364,7 @@ fn allocateSegment(self: *Zld, index: u16, offset: u64, start: u64, reverse: boo
     for (sections) |entry| {
         total_size += entry.value.size;
     }
-    const aligned_size = mem.alignForwardGeneric(u64, total_size, self.page_size);
+    const aligned_size = mem.alignForwardGeneric(u64, total_size, self.page_size.?);
     seg.inner.vmaddr = base_vmaddr + offset;
     seg.inner.vmsize = aligned_size;
     seg.inner.fileoff = offset;
@@ -382,7 +400,7 @@ fn writeStubHelperCommon(self: *Zld) !void {
     const got = &data_const_segment.sections.items()[self.got_section_index.?].value;
 
     const stub_helper_stubs_start_off: u32 = blk: {
-        switch (self.target.cpu.arch) {
+        switch (self.arch.?) {
             .x86_64 => {
                 const code_size = 15;
                 var code: [code_size]u8 = undefined;
@@ -455,7 +473,7 @@ fn writeLazySymbolPointer(self: *Zld, index: u32, offset: u64) !void {
     const data_segment = self.load_commands.items[self.data_segment_cmd_index.?].Segment;
     const la_symbol_ptr = data_segment.sections.items()[self.la_symbol_ptr_section_index.?].value;
 
-    const stub_size: u4 = switch (self.target.cpu.arch) {
+    const stub_size: u4 = switch (self.arch.?) {
         .x86_64 => 10,
         .aarch64 => 3 * @sizeOf(u32),
         else => unreachable,
@@ -481,7 +499,7 @@ fn writeStub(self: *Zld, index: u32) !void {
     log.debug("writing stub at 0x{x}", .{stub_off});
     var code = try self.allocator.alloc(u8, stubs.reserved2);
     defer self.allocator.free(code);
-    switch (self.target.cpu.arch) {
+    switch (self.arch.?) {
         .x86_64 => {
             assert(la_ptr_addr >= stub_addr + stubs.reserved2);
             const displacement = try math.cast(u32, la_ptr_addr - stub_addr - stubs.reserved2);
@@ -508,7 +526,7 @@ fn writeStubInStubHelper(self: *Zld, index: u32, offset: u64) !void {
     const text_segment = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
     const stub_helper = text_segment.sections.items()[self.stub_helper_section_index.?].value;
 
-    const stub_size: u4 = switch (self.target.cpu.arch) {
+    const stub_size: u4 = switch (self.arch.?) {
         .x86_64 => 10,
         .aarch64 => 3 * @sizeOf(u32),
         else => unreachable,
@@ -516,7 +534,7 @@ fn writeStubInStubHelper(self: *Zld, index: u32, offset: u64) !void {
     const stub_off = offset + index * stub_size;
     var code = try self.allocator.alloc(u8, stub_size);
     defer self.allocator.free(code);
-    switch (self.target.cpu.arch) {
+    switch (self.arch.?) {
         .x86_64 => {
             const displacement = try math.cast(
                 i32,
@@ -607,22 +625,22 @@ fn doRelocs(self: *Zld) !void {
                     }
                 };
 
-                switch (self.target.cpu.arch) {
+                switch (self.arch.?) {
                     .x86_64 => {
                         switch (@intToEnum(macho.reloc_type_x86_64, rel.r_type)) {
                             macho.reloc_type_x86_64.X86_64_RELOC_BRANCH => {
                                 // callq / jmpq
-                                const displacement = @intCast(u32, target_addr - this_addr - 4);
+                                const displacement = @bitCast(u32, @intCast(i32, @intCast(i64, target_addr) - @intCast(i64, this_addr) - 4));
                                 mem.writeIntLittle(u32, inst, displacement);
                             },
                             macho.reloc_type_x86_64.X86_64_RELOC_SIGNED => {
                                 // leaq
-                                const displacement = @bitCast(u32, @intCast(i32, target_addr - this_addr - 4));
+                                const displacement = @bitCast(u32, @intCast(i32, @intCast(i64, target_addr) - @intCast(i64, this_addr) - 4));
                                 mem.writeIntLittle(u32, inst, displacement);
                             },
                             macho.reloc_type_x86_64.X86_64_RELOC_GOT_LOAD => {
                                 // movq
-                                const displacement = @intCast(u32, target_addr - this_addr - 4);
+                                const displacement = @bitCast(u32, @intCast(i32, @intCast(i64, target_addr) - @intCast(i64, this_addr) - 4));
                                 mem.writeIntLittle(u32, inst, displacement);
                             },
                             else => |tt| {
@@ -633,9 +651,9 @@ fn doRelocs(self: *Zld) !void {
                     .aarch64 => {
                         switch (@intToEnum(macho.reloc_type_arm64, rel.r_type)) {
                             macho.reloc_type_arm64.ARM64_RELOC_BRANCH26 => {
-                                const displacement = target_addr - this_addr;
+                                const displacement = @intCast(i28, @intCast(i64, target_addr) - @intCast(i64, this_addr));
                                 var parsed = mem.bytesAsValue(meta.TagPayloadType(Arm64, Arm64.Branch), inst);
-                                parsed.disp = @intCast(u26, displacement >> 2);
+                                parsed.disp = @truncate(u26, @bitCast(u28, displacement) >> 2);
                             },
                             macho.reloc_type_arm64.ARM64_RELOC_PAGE21, macho.reloc_type_arm64.ARM64_RELOC_GOT_LOAD_PAGE21, macho.reloc_type_arm64.ARM64_RELOC_TLVP_LOAD_PAGE21 => {
                                 const this_page = this_addr >> 12;
@@ -721,7 +739,7 @@ fn populateMetadata(self: *Zld) !void {
     if (self.text_section_index == null) {
         const text_seg = &self.load_commands.items[self.text_segment_cmd_index.?].Segment;
         self.text_section_index = @intCast(u16, text_seg.sections.items().len);
-        const alignment: u2 = switch (self.target.cpu.arch) {
+        const alignment: u2 = switch (self.arch.?) {
             .x86_64 => 0,
             .aarch64 => 2,
             else => unreachable, // unhandled architecture type
@@ -744,12 +762,12 @@ fn populateMetadata(self: *Zld) !void {
     if (self.stubs_section_index == null) {
         const text_seg = &self.load_commands.items[self.text_segment_cmd_index.?].Segment;
         self.stubs_section_index = @intCast(u16, text_seg.sections.items().len);
-        const alignment: u2 = switch (self.target.cpu.arch) {
+        const alignment: u2 = switch (self.arch.?) {
             .x86_64 => 0,
             .aarch64 => 2,
             else => unreachable, // unhandled architecture type
         };
-        const stub_size: u4 = switch (self.target.cpu.arch) {
+        const stub_size: u4 = switch (self.arch.?) {
             .x86_64 => 6,
             .aarch64 => 2 * @sizeOf(u32),
             else => unreachable, // unhandled architecture type
@@ -772,12 +790,12 @@ fn populateMetadata(self: *Zld) !void {
     if (self.stub_helper_section_index == null) {
         const text_seg = &self.load_commands.items[self.text_segment_cmd_index.?].Segment;
         self.stub_helper_section_index = @intCast(u16, text_seg.sections.items().len);
-        const alignment: u2 = switch (self.target.cpu.arch) {
+        const alignment: u2 = switch (self.arch.?) {
             .x86_64 => 0,
             .aarch64 => 2,
             else => unreachable, // unhandled architecture type
         };
-        const stub_helper_size: u5 = switch (self.target.cpu.arch) {
+        const stub_helper_size: u5 = switch (self.arch.?) {
             .x86_64 => 15,
             .aarch64 => 6 * @sizeOf(u32),
             else => unreachable,
@@ -1075,7 +1093,7 @@ fn flush(self: *Zld) !void {
 
     {
         const seg = &self.load_commands.items[self.linkedit_segment_cmd_index.?].Segment;
-        seg.inner.vmsize = mem.alignForwardGeneric(u64, seg.inner.filesize, self.page_size);
+        seg.inner.vmsize = mem.alignForwardGeneric(u64, seg.inner.filesize, self.page_size.?);
     }
 
     try self.writeCodeSignaturePadding();
@@ -1083,7 +1101,7 @@ fn flush(self: *Zld) !void {
     try self.writeHeader();
     try self.writeCodeSignature();
 
-    try fs.cwd().copyFile("a.out", fs.cwd(), "a.out", .{});
+    try fs.cwd().copyFile(self.out_path.?, fs.cwd(), self.out_path.?, .{});
 }
 
 fn writeRebaseInfoTable(self: *Zld) !void {
@@ -1291,16 +1309,16 @@ fn writeCodeSignaturePadding(self: *Zld) !void {
     const code_sig_cmd = &self.load_commands.items[self.code_signature_cmd_index.?].LinkeditData;
     const fileoff = seg.inner.fileoff + seg.inner.filesize;
     const needed_size = CodeSignature.calcCodeSignaturePaddingSize(
-        "a.out", // TODO
+        self.out_path.?,
         fileoff,
-        self.page_size,
+        self.page_size.?,
     );
     code_sig_cmd.dataoff = @intCast(u32, fileoff);
     code_sig_cmd.datasize = needed_size;
 
     // Advance size of __LINKEDIT segment
     seg.inner.filesize += needed_size;
-    seg.inner.vmsize = mem.alignForwardGeneric(u64, seg.inner.filesize, self.page_size);
+    seg.inner.vmsize = mem.alignForwardGeneric(u64, seg.inner.filesize, self.page_size.?);
 
     log.debug("writing code signature padding from 0x{x} to 0x{x}", .{ fileoff, fileoff + needed_size });
 
@@ -1313,11 +1331,11 @@ fn writeCodeSignature(self: *Zld) !void {
     const text_seg = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
     const code_sig_cmd = self.load_commands.items[self.code_signature_cmd_index.?].LinkeditData;
 
-    var code_sig = CodeSignature.init(self.allocator, self.page_size);
+    var code_sig = CodeSignature.init(self.allocator, self.page_size.?);
     defer code_sig.deinit();
     try code_sig.calcAdhocSignature(
         self.file.?,
-        "a.out",
+        self.out_path.?,
         text_seg.inner,
         code_sig_cmd,
         .Exe,
@@ -1360,7 +1378,7 @@ fn writeHeader(self: *Zld) !void {
         cpu_subtype: macho.cpu_subtype_t,
     };
 
-    const cpu_info: CpuInfo = switch (self.target.cpu.arch) {
+    const cpu_info: CpuInfo = switch (self.arch.?) {
         .aarch64 => .{
             .cpu_type = macho.CPU_TYPE_ARM64,
             .cpu_subtype = macho.CPU_SUBTYPE_ARM_ALL,
@@ -1386,7 +1404,7 @@ fn writeHeader(self: *Zld) !void {
     try self.file.?.pwriteAll(mem.asBytes(&header), 0);
 }
 
-fn makeStaticString(bytes: []const u8) [16]u8 {
+pub fn makeStaticString(bytes: []const u8) [16]u8 {
     var buf = [_]u8{0} ** 16;
     assert(bytes.len <= buf.len);
     mem.copy(u8, &buf, bytes);

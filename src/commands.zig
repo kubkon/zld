@@ -8,9 +8,7 @@ const testing = std.testing;
 const assert = std.debug.assert;
 
 const Allocator = std.mem.Allocator;
-const MachO = @import("../MachO.zig");
-const makeStaticString = MachO.makeStaticString;
-const padToIdeal = MachO.padToIdeal;
+const makeStaticString = @import("Zld.zig").makeStaticString;
 
 pub const LoadCommand = union(enum) {
     Segment: SegmentCommand,
@@ -199,7 +197,9 @@ pub const SegmentCommand = struct {
         var i: usize = 0;
         while (i < inner.nsects) : (i += 1) {
             const section = try reader.readStruct(macho.section_64);
-            try segment.put(allocator, section);
+            const name = parseName(&section.sectname);
+            var key = try allocator.dupe(u8, name);
+            try segment.sections.putNoClobber(allocator, key, section);
         }
 
         return segment;
@@ -221,11 +221,12 @@ pub const SegmentCommand = struct {
 
     fn eql(self: SegmentCommand, other: SegmentCommand) bool {
         if (!meta.eql(self.inner, other.inner)) return false;
-        const lhs = self.sections.items;
-        const rhs = other.sections.items;
+        const lhs = self.sections.items();
+        const rhs = other.sections.items();
         var i: usize = 0;
         while (i < self.inner.nsects) : (i += 1) {
-            if (!meta.eql(lhs[i], rhs[i])) return false;
+            if (!mem.eql(u8, lhs[i].key, rhs[i].key)) return false;
+            if (!meta.eql(lhs[i].value, rhs[i].value)) return false;
         }
         return true;
     }
@@ -318,7 +319,7 @@ test "read-write segment command" {
     var cmd = SegmentCommand{
         .inner = .{
             .cmd = macho.LC_SEGMENT_64,
-            .cmdsize = 152,
+            .cmdsize = 72,
             .segname = makeStaticString("__TEXT"),
             .vmaddr = 4294967296,
             .vmsize = 294912,
@@ -326,11 +327,11 @@ test "read-write segment command" {
             .filesize = 294912,
             .maxprot = macho.VM_PROT_READ | macho.VM_PROT_WRITE | macho.VM_PROT_EXECUTE,
             .initprot = macho.VM_PROT_EXECUTE | macho.VM_PROT_READ,
-            .nsects = 1,
+            .nsects = 0,
             .flags = 0,
         },
     };
-    try cmd.sections.append(gpa, .{
+    try cmd.put(gpa, .{
         .sectname = makeStaticString("__text"),
         .segname = makeStaticString("__TEXT"),
         .addr = 4294983680,
