@@ -1101,7 +1101,9 @@ fn flush(self: *Zld) !void {
     try self.writeHeader();
     try self.writeCodeSignature();
 
-    try fs.cwd().copyFile(self.out_path.?, fs.cwd(), self.out_path.?, .{});
+    if (comptime std.Target.current.isDarwin() and std.Target.current.cpu.arch == .aarch64) {
+        try fs.cwd().copyFile(self.out_path.?, fs.cwd(), self.out_path.?, .{});
+    }
 }
 
 fn writeRebaseInfoTable(self: *Zld) !void {
