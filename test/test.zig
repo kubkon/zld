@@ -8,6 +8,7 @@ pub fn addCases(ctx: *TestContext) !void {
         const target = std.zig.CrossTarget{
             .cpu_arch = arch,
             .os_tag = .macos,
+            .abi = .gnu,
         };
         var case = try ctx.addCase("hello world in C", target);
         try case.addSource(

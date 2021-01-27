@@ -97,6 +97,13 @@ pub const TestContext = struct {
             }
             try filenames.ensureCapacity(case.sources.items.len);
 
+            const target_triple = try std.fmt.allocPrint(testing.allocator, "{s}-{s}-{s}", .{
+                @tagName(case.target.cpu_arch.?),
+                @tagName(case.target.os_tag.?),
+                @tagName(case.target.abi.?),
+            });
+            defer testing.allocator.free(target_triple);
+
             for (case.sources.items) |src, i| {
                 const ext = switch (src.tt) {
                     .C => ".c",
@@ -122,6 +129,9 @@ pub const TestContext = struct {
                         try argv.append("build-obj");
                     },
                 }
+
+                try argv.append("-target");
+                try argv.append(target_triple);
 
                 const input_src_path = try std.fs.path.join(testing.allocator, &[_][]const u8{
                     "zig-cache", "tmp", &tmp.sub_path, input_src,
