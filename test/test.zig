@@ -1,7 +1,7 @@
 const std = @import("std");
 const TestContext = @import("../src/test.zig").TestContext;
 
-const archs = [_]std.Target.Cpu.Arch{.aarch64}; //, .x86_64 };
+const archs = [_]std.Target.Cpu.Arch{ .aarch64, .x86_64 };
 
 pub fn addCases(ctx: *TestContext) !void {
     for (archs) |arch| {
