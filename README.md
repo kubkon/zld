@@ -10,7 +10,7 @@ cases (with a special focus on cross-compilation) relatively quickly.
 
 ### Building
 
-Make sure you have at least Zig 0.7.1 in your path. Ideally, you're using Zig compiled
+Make sure you have at least Zig 0.8.0 in your path. Ideally, you're using Zig compiled
 from source tracking the master branch.
 
 ```
