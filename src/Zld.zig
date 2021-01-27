@@ -144,7 +144,7 @@ pub fn link(self: *Zld, files: []const []const u8, out_path: []const u8) !void {
     self.file = try fs.cwd().createFile(out_path, .{
         .truncate = true,
         .read = true,
-        .mode = 0o777,
+        .mode = if (std.Target.current.os.tag == .windows) 0 else 0o777,
     });
 
     try self.populateMetadata();
