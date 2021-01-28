@@ -6,32 +6,31 @@ const mem = std.mem;
 const assert = std.debug.assert;
 const Allocator = mem.Allocator;
 
-pub const ExternSymbol = struct {
+pub const Import = struct {
     /// MachO symbol table entry.
-    inner: macho.nlist_64,
+    symbol: macho.nlist_64,
 
     /// Id of the dynamic library where the specified entries can be found.
-    /// Id of 0 means self.
-    /// TODO this should really be an id into the table of all defined
-    /// dylibs.
-    dylib_ordinal: i64 = 0,
+    dylib_ordinal: i64,
 
-    /// Id of the segment where this symbol is defined (will have its address
-    /// resolved).
-    segment: u16 = 0,
-
-    /// Offset relative to the start address of the `segment`.
-    offset: u32 = 0,
+    /// Index of this import within the import list.
+    index: u32,
 };
 
-pub fn rebaseInfoSize(symbols: anytype) !u64 {
+pub const SharedDyldArgs = struct {
+    base_offset: u32,
+    segment_id: u16,
+};
+
+pub fn rebaseInfoSize(imports: anytype, args: SharedDyldArgs) !u64 {
     var stream = std.io.countingWriter(std.io.null_writer);
     var writer = stream.writer();
     var size: u64 = 0;
 
-    for (symbols) |entry| {
+    for (imports) |entry, i| {
         size += 2;
-        try leb.writeILEB128(writer, entry.value.offset);
+        const offset = args.base_offset + i * @sizeOf(u64);
+        try leb.writeILEB128(writer, offset);
         size += 1;
     }
 
@@ -39,28 +38,30 @@ pub fn rebaseInfoSize(symbols: anytype) !u64 {
     return size;
 }
 
-pub fn writeRebaseInfo(symbols: anytype, writer: anytype) !void {
-    for (symbols) |entry| {
-        const symbol = entry.value;
+pub fn writeRebaseInfo(imports: anytype, args: SharedDyldArgs, writer: anytype) !void {
+    for (imports) |entry, i| {
+        const import = entry.value;
         try writer.writeByte(macho.REBASE_OPCODE_SET_TYPE_IMM | @truncate(u4, macho.REBASE_TYPE_POINTER));
-        try writer.writeByte(macho.REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | @truncate(u4, symbol.segment));
-        try leb.writeILEB128(writer, symbol.offset);
+        try writer.writeByte(macho.REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | @truncate(u4, args.segment_id));
+
+        const offset = args.base_offset + i * @sizeOf(u64);
+        try leb.writeILEB128(writer, offset);
         try writer.writeByte(macho.REBASE_OPCODE_DO_REBASE_IMM_TIMES | @truncate(u4, 1));
     }
     try writer.writeByte(macho.REBASE_OPCODE_DONE);
 }
 
-pub fn bindInfoSize(symbols: anytype) !u64 {
+pub fn bindInfoSize(imports: anytype, args: SharedDyldArgs) !u64 {
     var stream = std.io.countingWriter(std.io.null_writer);
     var writer = stream.writer();
     var size: u64 = 0;
 
-    for (symbols) |entry| {
-        const symbol = entry.value;
+    for (imports) |entry, i| {
+        const import = entry.value;
 
         size += 1;
-        if (symbol.dylib_ordinal > 15) {
-            try leb.writeULEB128(writer, @bitCast(u64, symbol.dylib_ordinal));
+        if (import.dylib_ordinal > 15) {
+            try leb.writeULEB128(writer, @bitCast(u64, import.dylib_ordinal));
         }
         size += 1;
 
@@ -69,7 +70,9 @@ pub fn bindInfoSize(symbols: anytype) !u64 {
         size += 1;
 
         size += 1;
-        try leb.writeILEB128(writer, symbol.offset);
+
+        const offset = args.base_offset + i * @sizeOf(u64);
+        try leb.writeILEB128(writer, offset);
         size += 1;
     }
 
@@ -77,17 +80,17 @@ pub fn bindInfoSize(symbols: anytype) !u64 {
     return size;
 }
 
-pub fn writeBindInfo(symbols: anytype, writer: anytype) !void {
-    for (symbols) |entry| {
-        const symbol = entry.value;
+pub fn writeBindInfo(imports: anytype, args: SharedDyldArgs, writer: anytype) !void {
+    for (imports) |entry, i| {
+        const import = entry.value;
 
-        if (symbol.dylib_ordinal > 15) {
+        if (import.dylib_ordinal > 15) {
             try writer.writeByte(macho.BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB);
-            try leb.writeULEB128(writer, @bitCast(u64, symbol.dylib_ordinal));
-        } else if (symbol.dylib_ordinal > 0) {
-            try writer.writeByte(macho.BIND_OPCODE_SET_DYLIB_ORDINAL_IMM | @truncate(u4, @bitCast(u64, symbol.dylib_ordinal)));
+            try leb.writeULEB128(writer, @bitCast(u64, import.dylib_ordinal));
+        } else if (import.dylib_ordinal > 0) {
+            try writer.writeByte(macho.BIND_OPCODE_SET_DYLIB_ORDINAL_IMM | @truncate(u4, @bitCast(u64, import.dylib_ordinal)));
         } else {
-            try writer.writeByte(macho.BIND_OPCODE_SET_DYLIB_SPECIAL_IMM | @truncate(u4, @bitCast(u64, symbol.dylib_ordinal)));
+            try writer.writeByte(macho.BIND_OPCODE_SET_DYLIB_SPECIAL_IMM | @truncate(u4, @bitCast(u64, import.dylib_ordinal)));
         }
         try writer.writeByte(macho.BIND_OPCODE_SET_TYPE_IMM | @truncate(u4, macho.BIND_TYPE_POINTER));
 
@@ -95,26 +98,31 @@ pub fn writeBindInfo(symbols: anytype, writer: anytype) !void {
         try writer.writeAll(entry.key);
         try writer.writeByte(0);
 
-        try writer.writeByte(macho.BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | @truncate(u4, symbol.segment));
-        try leb.writeILEB128(writer, symbol.offset);
+        try writer.writeByte(macho.BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | @truncate(u4, args.segment_id));
+
+        const offset = args.base_offset + i * @sizeOf(u64);
+        try leb.writeILEB128(writer, offset);
         try writer.writeByte(macho.BIND_OPCODE_DO_BIND);
     }
 
     try writer.writeByte(macho.BIND_OPCODE_DONE);
 }
 
-pub fn lazyBindInfoSize(symbols: anytype) !u64 {
+pub fn lazyBindInfoSize(imports: anytype, args: SharedDyldArgs) !u64 {
     var stream = std.io.countingWriter(std.io.null_writer);
     var writer = stream.writer();
     var size: u64 = 0;
 
-    for (symbols) |entry| {
-        const symbol = entry.value;
+    for (imports) |entry, i| {
+        const import = entry.value;
         size += 1;
-        try leb.writeILEB128(writer, symbol.offset);
+
+        const offset = args.base_offset + i * @sizeOf(u64);
+        try leb.writeILEB128(writer, offset);
+
         size += 1;
-        if (symbol.dylib_ordinal > 15) {
-            try leb.writeULEB128(writer, @bitCast(u64, symbol.dylib_ordinal));
+        if (import.dylib_ordinal > 15) {
+            try leb.writeULEB128(writer, @bitCast(u64, import.dylib_ordinal));
         }
 
         size += 1;
@@ -128,19 +136,21 @@ pub fn lazyBindInfoSize(symbols: anytype) !u64 {
     return size;
 }
 
-pub fn writeLazyBindInfo(symbols: anytype, writer: anytype) !void {
-    for (symbols) |entry| {
-        const symbol = entry.value;
-        try writer.writeByte(macho.BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | @truncate(u4, symbol.segment));
-        try leb.writeILEB128(writer, symbol.offset);
+pub fn writeLazyBindInfo(imports: anytype, args: SharedDyldArgs, writer: anytype) !void {
+    for (imports) |entry, i| {
+        const import = entry.value;
+        try writer.writeByte(macho.BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | @truncate(u4, args.segment_id));
 
-        if (symbol.dylib_ordinal > 15) {
+        const offset = args.base_offset + i * @sizeOf(u64);
+        try leb.writeILEB128(writer, offset);
+
+        if (import.dylib_ordinal > 15) {
             try writer.writeByte(macho.BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB);
-            try leb.writeULEB128(writer, @bitCast(u64, symbol.dylib_ordinal));
-        } else if (symbol.dylib_ordinal > 0) {
-            try writer.writeByte(macho.BIND_OPCODE_SET_DYLIB_ORDINAL_IMM | @truncate(u4, @bitCast(u64, symbol.dylib_ordinal)));
+            try leb.writeULEB128(writer, @bitCast(u64, import.dylib_ordinal));
+        } else if (import.dylib_ordinal > 0) {
+            try writer.writeByte(macho.BIND_OPCODE_SET_DYLIB_ORDINAL_IMM | @truncate(u4, @bitCast(u64, import.dylib_ordinal)));
         } else {
-            try writer.writeByte(macho.BIND_OPCODE_SET_DYLIB_SPECIAL_IMM | @truncate(u4, @bitCast(u64, symbol.dylib_ordinal)));
+            try writer.writeByte(macho.BIND_OPCODE_SET_DYLIB_SPECIAL_IMM | @truncate(u4, @bitCast(u64, import.dylib_ordinal)));
         }
 
         try writer.writeByte(macho.BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM); // TODO Sometimes we might want to add flags.
