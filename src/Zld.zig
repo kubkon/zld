@@ -56,11 +56,11 @@ data_section_index: ?u16 = null,
 
 locals: std.ArrayListUnmanaged(macho.nlist_64) = .{},
 exports: std.StringArrayHashMapUnmanaged(macho.nlist_64) = .{},
-extern_nonlazy_symbols: std.StringArrayHashMapUnmanaged(ExternSymbol) = .{},
-extern_lazy_symbols: std.StringArrayHashMapUnmanaged(ExternSymbol) = .{},
+nonlazy_imports: std.StringArrayHashMapUnmanaged(ExternSymbol) = .{},
+lazy_imports: std.StringArrayHashMapUnmanaged(ExternSymbol) = .{},
 
-string_table: std.ArrayListUnmanaged(u8) = .{},
-string_table_directory: std.StringHashMapUnmanaged(u32) = .{},
+strtab: std.ArrayListUnmanaged(u8) = .{},
+strtab_directory: std.StringHashMapUnmanaged(u32) = .{},
 
 /// Default path to dyld
 /// TODO instead of hardcoding it, we should probably look through some env vars and search paths
@@ -82,21 +82,21 @@ pub fn init(allocator: *Allocator) Zld {
 
 pub fn deinit(self: *Zld) void {
     {
-        var it = self.string_table_directory.iterator();
+        var it = self.strtab_directory.iterator();
         while (it.next()) |nn| {
             self.allocator.free(nn.key);
         }
     }
-    self.string_table_directory.deinit(self.allocator);
-    self.string_table.deinit(self.allocator);
-    for (self.extern_lazy_symbols.items()) |*entry| {
+    self.strtab_directory.deinit(self.allocator);
+    self.strtab.deinit(self.allocator);
+    for (self.lazy_imports.items()) |*entry| {
         self.allocator.free(entry.key);
     }
-    self.extern_lazy_symbols.deinit(self.allocator);
-    for (self.extern_nonlazy_symbols.items()) |*entry| {
+    self.lazy_imports.deinit(self.allocator);
+    for (self.nonlazy_imports.items()) |*entry| {
         self.allocator.free(entry.key);
     }
-    self.extern_nonlazy_symbols.deinit(self.allocator);
+    self.nonlazy_imports.deinit(self.allocator);
     for (self.exports.items()) |*entry| {
         self.allocator.free(entry.key);
     }
@@ -198,15 +198,15 @@ pub fn link(self: *Zld, files: []const []const u8, out_path: []const u8) !void {
 
     for (self.objects.items) |object| {
         for (object.symtab.items) |sym| {
-            if (sym.n_type != (macho.N_UNDF | macho.N_EXT)) continue;
+            if (isLocal(&sym) or isExport(&sym)) continue;
 
             const sym_name = object.getString(sym.n_strx);
             const n_strx = try self.makeString(sym_name);
             if (mem.eql(u8, sym_name, "___stderrp") or mem.eql(u8, sym_name, "___stdoutp")) {
                 log.debug("writing nonlazy symbol '{s}'", .{sym_name});
                 var key = try self.allocator.dupe(u8, sym_name);
-                const offset = @intCast(u32, self.extern_nonlazy_symbols.items().len * @sizeOf(u64));
-                try self.extern_nonlazy_symbols.putNoClobber(self.allocator, key, .{
+                const offset = @intCast(u32, self.nonlazy_imports.items().len * @sizeOf(u64));
+                try self.nonlazy_imports.putNoClobber(self.allocator, key, .{
                     .inner = .{
                         .n_strx = n_strx,
                         .n_type = sym.n_type,
@@ -221,7 +221,7 @@ pub fn link(self: *Zld, files: []const []const u8, out_path: []const u8) !void {
             } else {
                 log.debug("writing lazy symbol '{s}'", .{sym_name});
                 var key = try self.allocator.dupe(u8, sym_name);
-                try self.extern_lazy_symbols.putNoClobber(self.allocator, key, .{
+                try self.lazy_imports.putNoClobber(self.allocator, key, .{
                     .inner = .{
                         .n_strx = n_strx,
                         .n_type = sym.n_type,
@@ -237,10 +237,10 @@ pub fn link(self: *Zld, files: []const []const u8, out_path: []const u8) !void {
     }
 
     {
-        const index = @intCast(u32, self.extern_nonlazy_symbols.items().len);
+        const index = @intCast(u32, self.nonlazy_imports.items().len);
         const name = try self.allocator.dupe(u8, "dyld_stub_binder");
         const offset = try self.makeString("dyld_stub_binder");
-        try self.extern_nonlazy_symbols.putNoClobber(self.allocator, name, .{
+        try self.nonlazy_imports.putNoClobber(self.allocator, name, .{
             .inner = .{
                 .n_strx = offset,
                 .n_type = std.macho.N_UNDF | std.macho.N_EXT,
@@ -261,7 +261,7 @@ pub fn link(self: *Zld, files: []const []const u8, out_path: []const u8) !void {
 
     for (self.objects.items) |*object| {
         for (object.symtab.items) |sym, i| {
-            if (sym.n_type & macho.N_SECT == 0) continue;
+            if (isImport(&sym)) continue;
 
             const seg = object.load_commands.items[object.segment_cmd_index.?].Segment;
             const sectname = seg.sections.items()[sym.n_sect - 1].key;
@@ -278,7 +278,7 @@ pub fn link(self: *Zld, files: []const []const u8, out_path: []const u8) !void {
                 .n_desc = sym.n_desc,
                 .n_sect = n_sect,
             };
-            if (sym.n_type == (macho.N_SECT | macho.N_EXT)) {
+            if (isExport(&sym)) {
                 log.debug("writing export '{s}'", .{sym_name});
                 const name = try self.allocator.dupe(u8, sym_name);
                 try self.exports.putNoClobber(self.allocator, name, new_sym);
@@ -300,7 +300,7 @@ pub fn link(self: *Zld, files: []const []const u8, out_path: []const u8) !void {
 fn allocateTextSegment(self: *Zld) void {
     const seg = &self.load_commands.items[self.text_segment_cmd_index.?].Segment;
     const sections = seg.sections.items();
-    const nexterns = @intCast(u32, self.extern_lazy_symbols.items().len);
+    const nexterns = @intCast(u32, self.lazy_imports.items().len);
 
     // Set stubs and stub_helper sizes
     const stubs = &sections[self.stubs_section_index.?].value;
@@ -325,7 +325,7 @@ fn allocateTextSegment(self: *Zld) void {
 fn allocateDataConstSegment(self: *Zld) void {
     const seg = &self.load_commands.items[self.data_const_segment_cmd_index.?].Segment;
     const sections = seg.sections.items();
-    const nexterns = @intCast(u32, self.extern_nonlazy_symbols.items().len);
+    const nexterns = @intCast(u32, self.nonlazy_imports.items().len);
 
     // Set got size
     const got = &sections[self.got_section_index.?].value;
@@ -339,7 +339,7 @@ fn allocateDataConstSegment(self: *Zld) void {
 fn allocateDataSegment(self: *Zld) void {
     const seg = &self.load_commands.items[self.data_segment_cmd_index.?].Segment;
     const sections = seg.sections.items();
-    const nexterns = @intCast(u32, self.extern_lazy_symbols.items().len);
+    const nexterns = @intCast(u32, self.lazy_imports.items().len);
 
     // Set la_symbol_ptr and data size
     const la_symbol_ptr = &sections[self.la_symbol_ptr_section_index.?].value;
@@ -423,7 +423,7 @@ fn writeStubHelperCommon(self: *Zld) !void {
                 code[9] = 0xff;
                 code[10] = 0x25;
                 {
-                    const dyld_stub_binder = self.extern_nonlazy_symbols.get("dyld_stub_binder").?;
+                    const dyld_stub_binder = self.nonlazy_imports.get("dyld_stub_binder").?;
                     const addr = (got.addr + dyld_stub_binder.offset);
                     const displacement = try math.cast(u32, addr - stub_helper.addr - code_size);
                     mem.writeIntLittle(u32, code[11..], displacement);
@@ -444,7 +444,7 @@ fn writeStubHelperCommon(self: *Zld) !void {
                 code[6] = 0xbf;
                 code[7] = 0xa9;
                 {
-                    const dyld_stub_binder = self.extern_nonlazy_symbols.get("dyld_stub_binder").?;
+                    const dyld_stub_binder = self.nonlazy_imports.get("dyld_stub_binder").?;
                     const addr = (got.addr + dyld_stub_binder.offset);
                     const displacement = try math.divExact(u64, addr - stub_helper.addr - 2 * @sizeOf(u32), 4);
                     const literal = try math.cast(u19, displacement);
@@ -463,7 +463,7 @@ fn writeStubHelperCommon(self: *Zld) !void {
         }
     };
 
-    for (self.extern_lazy_symbols.items()) |_, i| {
+    for (self.lazy_imports.items()) |_, i| {
         const index = @intCast(u32, i);
         try self.writeLazySymbolPointer(index, stub_helper_stubs_start_off);
         try self.writeStub(index);
@@ -610,11 +610,11 @@ fn doRelocs(self: *Zld) !void {
                             // extern
                             const sym = object.symtab.items[rel.r_symbolnum];
                             const symname = object.getString(sym.n_strx);
-                            if (self.extern_lazy_symbols.getIndex(symname)) |i| {
+                            if (self.lazy_imports.getIndex(symname)) |i| {
                                 const segment = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
                                 const stubs = segment.sections.items()[self.stubs_section_index.?].value;
                                 break :blk stubs.addr + i * stubs.reserved2;
-                            } else if (self.extern_nonlazy_symbols.get(symname)) |ext| {
+                            } else if (self.nonlazy_imports.get(symname)) |ext| {
                                 const segment = self.load_commands.items[ext.segment].Segment;
                                 const got = segment.sections.items()[self.got_section_index.?].value;
                                 break :blk got.addr + ext.offset;
@@ -1137,12 +1137,12 @@ fn setEntryPoint(self: *Zld) !void {
 }
 
 fn writeRebaseInfoTable(self: *Zld) !void {
-    const size = try rebaseInfoSize(self.extern_lazy_symbols.items());
+    const size = try rebaseInfoSize(self.lazy_imports.items());
     var buffer = try self.allocator.alloc(u8, @intCast(usize, size));
     defer self.allocator.free(buffer);
 
     var stream = std.io.fixedBufferStream(buffer);
-    try writeRebaseInfo(self.extern_lazy_symbols.items(), stream.writer());
+    try writeRebaseInfo(self.lazy_imports.items(), stream.writer());
 
     const seg = &self.load_commands.items[self.linkedit_segment_cmd_index.?].Segment;
     const dyld_info = &self.load_commands.items[self.dyld_info_cmd_index.?].DyldInfoOnly;
@@ -1156,12 +1156,12 @@ fn writeRebaseInfoTable(self: *Zld) !void {
 }
 
 fn writeBindInfoTable(self: *Zld) !void {
-    const size = try bindInfoSize(self.extern_nonlazy_symbols.items());
+    const size = try bindInfoSize(self.nonlazy_imports.items());
     var buffer = try self.allocator.alloc(u8, @intCast(usize, size));
     defer self.allocator.free(buffer);
 
     var stream = std.io.fixedBufferStream(buffer);
-    try writeBindInfo(self.extern_nonlazy_symbols.items(), stream.writer());
+    try writeBindInfo(self.nonlazy_imports.items(), stream.writer());
 
     const seg = &self.load_commands.items[self.linkedit_segment_cmd_index.?].Segment;
     const dyld_info = &self.load_commands.items[self.dyld_info_cmd_index.?].DyldInfoOnly;
@@ -1175,12 +1175,12 @@ fn writeBindInfoTable(self: *Zld) !void {
 }
 
 fn writeLazyBindInfoTable(self: *Zld) !void {
-    const size = try lazyBindInfoSize(self.extern_lazy_symbols.items());
+    const size = try lazyBindInfoSize(self.lazy_imports.items());
     var buffer = try self.allocator.alloc(u8, @intCast(usize, size));
     defer self.allocator.free(buffer);
 
     var stream = std.io.fixedBufferStream(buffer);
-    try writeLazyBindInfo(self.extern_lazy_symbols.items(), stream.writer());
+    try writeLazyBindInfo(self.lazy_imports.items(), stream.writer());
 
     const seg = &self.load_commands.items[self.linkedit_segment_cmd_index.?].Segment;
     const dyld_info = &self.load_commands.items[self.dyld_info_cmd_index.?].DyldInfoOnly;
@@ -1235,15 +1235,15 @@ fn writeSymbolTable(self: *Zld) !void {
     const nlocals = self.locals.items.len;
     const nexports = self.exports.items().len;
 
-    const nundefs = self.extern_lazy_symbols.items().len + self.extern_nonlazy_symbols.items().len;
+    const nundefs = self.lazy_imports.items().len + self.nonlazy_imports.items().len;
     var undefs = std.ArrayList(macho.nlist_64).init(self.allocator);
     defer undefs.deinit();
 
     try undefs.ensureCapacity(nundefs);
-    for (self.extern_lazy_symbols.items()) |entry| {
+    for (self.lazy_imports.items()) |entry| {
         undefs.appendAssumeCapacity(entry.value.inner);
     }
-    for (self.extern_nonlazy_symbols.items()) |entry| {
+    for (self.nonlazy_imports.items()) |entry| {
         undefs.appendAssumeCapacity(entry.value.inner);
     }
 
@@ -1286,8 +1286,8 @@ fn writeDynamicSymbolTable(self: *Zld) !void {
     const la_symbol_ptr = &data_segment.sections.items()[self.la_symbol_ptr_section_index.?].value;
     const dysymtab = &self.load_commands.items[self.dysymtab_cmd_index.?].Dysymtab;
 
-    const lazy = self.extern_lazy_symbols.items();
-    const nonlazy = self.extern_nonlazy_symbols.items();
+    const lazy = self.lazy_imports.items();
+    const nonlazy = self.nonlazy_imports.items();
     dysymtab.indirectsymoff = @intCast(u32, seg.inner.fileoff + seg.inner.filesize);
     dysymtab.nindirectsyms = @intCast(u32, lazy.len * 2 + nonlazy.len);
     const needed_size = dysymtab.nindirectsyms * @sizeOf(u32);
@@ -1304,20 +1304,20 @@ fn writeDynamicSymbolTable(self: *Zld) !void {
     var writer = stream.writer();
 
     stubs.reserved1 = 0;
-    for (self.extern_lazy_symbols.items()) |_, i| {
+    for (self.lazy_imports.items()) |_, i| {
         const symtab_idx = @intCast(u32, dysymtab.iundefsym + i);
         try writer.writeIntLittle(u32, symtab_idx);
     }
 
     const base_id = @intCast(u32, lazy.len);
     got.reserved1 = base_id;
-    for (self.extern_nonlazy_symbols.items()) |_, i| {
+    for (self.nonlazy_imports.items()) |_, i| {
         const symtab_idx = @intCast(u32, dysymtab.iundefsym + i + base_id);
         try writer.writeIntLittle(u32, symtab_idx);
     }
 
     la_symbol_ptr.reserved1 = got.reserved1 + @intCast(u32, nonlazy.len);
-    for (self.extern_lazy_symbols.items()) |_, i| {
+    for (self.lazy_imports.items()) |_, i| {
         const symtab_idx = @intCast(u32, dysymtab.iundefsym + i);
         try writer.writeIntLittle(u32, symtab_idx);
     }
@@ -1329,14 +1329,14 @@ fn writeStringTable(self: *Zld) !void {
     const seg = &self.load_commands.items[self.linkedit_segment_cmd_index.?].Segment;
     const symtab = &self.load_commands.items[self.symtab_cmd_index.?].Symtab;
     symtab.stroff = @intCast(u32, seg.inner.fileoff + seg.inner.filesize);
-    symtab.strsize = @intCast(u32, mem.alignForwardGeneric(u64, self.string_table.items.len, @alignOf(u64)));
+    symtab.strsize = @intCast(u32, mem.alignForwardGeneric(u64, self.strtab.items.len, @alignOf(u64)));
     seg.inner.filesize += symtab.strsize;
 
     log.debug("writing string table from 0x{x} to 0x{x}", .{ symtab.stroff, symtab.stroff + symtab.strsize });
 
-    try self.file.?.pwriteAll(self.string_table.items, symtab.stroff);
+    try self.file.?.pwriteAll(self.strtab.items, symtab.stroff);
 
-    if (symtab.strsize > self.string_table.items.len and self.arch.? == .x86_64) {
+    if (symtab.strsize > self.strtab.items.len and self.arch.? == .x86_64) {
         // This is the last section, so we need to pad it out.
         try self.file.?.pwriteAll(&[_]u8{0}, seg.inner.fileoff + seg.inner.filesize - 1);
     }
@@ -1450,17 +1450,17 @@ pub fn makeStaticString(bytes: []const u8) [16]u8 {
 }
 
 fn makeString(self: *Zld, bytes: []const u8) !u32 {
-    if (self.string_table_directory.get(bytes)) |offset| {
+    if (self.strtab_directory.get(bytes)) |offset| {
         log.debug("reusing '{s}' from string table at offset 0x{x}", .{ bytes, offset });
         return offset;
     }
 
-    try self.string_table.ensureCapacity(self.allocator, self.string_table.items.len + bytes.len + 1);
-    const offset = @intCast(u32, self.string_table.items.len);
+    try self.strtab.ensureCapacity(self.allocator, self.strtab.items.len + bytes.len + 1);
+    const offset = @intCast(u32, self.strtab.items.len);
     log.debug("writing new string '{s}' into string table at offset 0x{x}", .{ bytes, offset });
-    self.string_table.appendSliceAssumeCapacity(bytes);
-    self.string_table.appendAssumeCapacity(0);
-    try self.string_table_directory.putNoClobber(
+    self.strtab.appendSliceAssumeCapacity(bytes);
+    self.strtab.appendAssumeCapacity(0);
+    try self.strtab_directory.putNoClobber(
         self.allocator,
         try self.allocator.dupe(u8, bytes),
         offset,
@@ -1470,8 +1470,8 @@ fn makeString(self: *Zld, bytes: []const u8) !u32 {
 }
 
 fn getString(self: *const Zld, str_off: u32) []const u8 {
-    assert(str_off < self.string_table.items.len);
-    return mem.spanZ(@ptrCast([*:0]const u8, self.string_table.items.ptr + str_off));
+    assert(str_off < self.strtab.items.len);
+    return mem.spanZ(@ptrCast([*:0]const u8, self.strtab.items.ptr + str_off));
 }
 
 fn addSegmentToDir(self: *Zld, idx: u16) !void {
