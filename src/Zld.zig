@@ -54,8 +54,8 @@ got_section_index: ?u16 = null,
 la_symbol_ptr_section_index: ?u16 = null,
 data_section_index: ?u16 = null,
 
-local_symbols: std.ArrayListUnmanaged(macho.nlist_64) = .{},
-global_symbols: std.ArrayListUnmanaged(macho.nlist_64) = .{},
+locals: std.ArrayListUnmanaged(macho.nlist_64) = .{},
+exports: std.StringArrayHashMapUnmanaged(macho.nlist_64) = .{},
 extern_nonlazy_symbols: std.StringArrayHashMapUnmanaged(ExternSymbol) = .{},
 extern_lazy_symbols: std.StringArrayHashMapUnmanaged(ExternSymbol) = .{},
 
@@ -97,8 +97,11 @@ pub fn deinit(self: *Zld) void {
         self.allocator.free(entry.key);
     }
     self.extern_nonlazy_symbols.deinit(self.allocator);
-    self.global_symbols.deinit(self.allocator);
-    self.local_symbols.deinit(self.allocator);
+    for (self.exports.items()) |*entry| {
+        self.allocator.free(entry.key);
+    }
+    self.exports.deinit(self.allocator);
+    self.locals.deinit(self.allocator);
     for (self.objects.items) |*object| {
         object.deinit(self.allocator);
     }
@@ -276,13 +279,14 @@ pub fn link(self: *Zld, files: []const []const u8, out_path: []const u8) !void {
                 .n_sect = n_sect,
             };
             if (sym.n_type == (macho.N_SECT | macho.N_EXT)) {
-                log.debug("writing global symbol '{s}'", .{sym_name});
-                try self.global_symbols.append(self.allocator, new_sym);
+                log.debug("writing export '{s}'", .{sym_name});
+                const name = try self.allocator.dupe(u8, sym_name);
+                try self.exports.putNoClobber(self.allocator, name, new_sym);
             } else {
                 new_sym.n_value = txt.sections.get(sectname).?.addr;
                 log.debug("writing local symbol '{s}'", .{sym_name});
-                const index = self.local_symbols.items.len;
-                try self.local_symbols.append(self.allocator, new_sym);
+                const index = self.locals.items.len;
+                try self.locals.append(self.allocator, new_sym);
                 try object.symbol_dir.putNoClobber(self.allocator, i, index);
             }
         }
@@ -600,7 +604,7 @@ fn doRelocs(self: *Zld) !void {
                 const target_addr = blk: {
                     if (rel.r_extern == 1) {
                         if (object.symbol_dir.get(rel.r_symbolnum)) |idx| {
-                            const sym = self.local_symbols.items[idx];
+                            const sym = self.locals.items[idx];
                             break :blk sym.n_value;
                         } else {
                             // extern
@@ -717,6 +721,7 @@ fn populateMetadata(self: *Zld) !void {
         });
         try self.addSegmentToDir(0);
     }
+
     if (self.text_segment_cmd_index == null) {
         self.text_segment_cmd_index = @intCast(u16, self.load_commands.items.len);
         try self.load_commands.append(self.allocator, .{
@@ -736,6 +741,7 @@ fn populateMetadata(self: *Zld) !void {
         });
         try self.addSegmentToDir(self.text_segment_cmd_index.?);
     }
+
     if (self.text_section_index == null) {
         const text_seg = &self.load_commands.items[self.text_segment_cmd_index.?].Segment;
         self.text_section_index = @intCast(u16, text_seg.sections.items().len);
@@ -759,6 +765,7 @@ fn populateMetadata(self: *Zld) !void {
             .reserved3 = 0,
         });
     }
+
     if (self.stubs_section_index == null) {
         const text_seg = &self.load_commands.items[self.text_segment_cmd_index.?].Segment;
         self.stubs_section_index = @intCast(u16, text_seg.sections.items().len);
@@ -787,6 +794,7 @@ fn populateMetadata(self: *Zld) !void {
             .reserved3 = 0,
         });
     }
+
     if (self.stub_helper_section_index == null) {
         const text_seg = &self.load_commands.items[self.text_segment_cmd_index.?].Segment;
         self.stub_helper_section_index = @intCast(u16, text_seg.sections.items().len);
@@ -815,6 +823,7 @@ fn populateMetadata(self: *Zld) !void {
             .reserved3 = 0,
         });
     }
+
     if (self.data_const_segment_cmd_index == null) {
         self.data_const_segment_cmd_index = @intCast(u16, self.load_commands.items.len);
         try self.load_commands.append(self.allocator, .{
@@ -834,6 +843,7 @@ fn populateMetadata(self: *Zld) !void {
         });
         try self.addSegmentToDir(self.data_const_segment_cmd_index.?);
     }
+
     if (self.got_section_index == null) {
         const data_const_seg = &self.load_commands.items[self.data_const_segment_cmd_index.?].Segment;
         self.got_section_index = @intCast(u16, data_const_seg.sections.items().len);
@@ -852,6 +862,7 @@ fn populateMetadata(self: *Zld) !void {
             .reserved3 = 0,
         });
     }
+
     if (self.data_segment_cmd_index == null) {
         self.data_segment_cmd_index = @intCast(u16, self.load_commands.items.len);
         try self.load_commands.append(self.allocator, .{
@@ -871,6 +882,7 @@ fn populateMetadata(self: *Zld) !void {
         });
         try self.addSegmentToDir(self.data_segment_cmd_index.?);
     }
+
     if (self.la_symbol_ptr_section_index == null) {
         const data_seg = &self.load_commands.items[self.data_segment_cmd_index.?].Segment;
         self.la_symbol_ptr_section_index = @intCast(u16, data_seg.sections.items().len);
@@ -889,6 +901,7 @@ fn populateMetadata(self: *Zld) !void {
             .reserved3 = 0,
         });
     }
+
     if (self.data_section_index == null) {
         const data_seg = &self.load_commands.items[self.data_segment_cmd_index.?].Segment;
         self.data_section_index = @intCast(u16, data_seg.sections.items().len);
@@ -907,6 +920,7 @@ fn populateMetadata(self: *Zld) !void {
             .reserved3 = 0,
         });
     }
+
     if (self.linkedit_segment_cmd_index == null) {
         self.linkedit_segment_cmd_index = @intCast(u16, self.load_commands.items.len);
         try self.load_commands.append(self.allocator, .{
@@ -926,6 +940,7 @@ fn populateMetadata(self: *Zld) !void {
         });
         try self.addSegmentToDir(self.linkedit_segment_cmd_index.?);
     }
+
     if (self.dyld_info_cmd_index == null) {
         self.dyld_info_cmd_index = @intCast(u16, self.load_commands.items.len);
         try self.load_commands.append(self.allocator, .{
@@ -945,6 +960,7 @@ fn populateMetadata(self: *Zld) !void {
             },
         });
     }
+
     if (self.symtab_cmd_index == null) {
         self.symtab_cmd_index = @intCast(u16, self.load_commands.items.len);
         try self.load_commands.append(self.allocator, .{
@@ -958,6 +974,7 @@ fn populateMetadata(self: *Zld) !void {
             },
         });
     }
+
     if (self.dysymtab_cmd_index == null) {
         self.dysymtab_cmd_index = @intCast(u16, self.load_commands.items.len);
         try self.load_commands.append(self.allocator, .{
@@ -985,6 +1002,7 @@ fn populateMetadata(self: *Zld) !void {
             },
         });
     }
+
     if (self.dylinker_cmd_index == null) {
         self.dylinker_cmd_index = @intCast(u16, self.load_commands.items.len);
         const cmdsize = @intCast(u32, mem.alignForwardGeneric(
@@ -1002,6 +1020,7 @@ fn populateMetadata(self: *Zld) !void {
         mem.copy(u8, dylinker_cmd.data, mem.spanZ(DEFAULT_DYLD_PATH));
         try self.load_commands.append(self.allocator, .{ .Dylinker = dylinker_cmd });
     }
+
     if (self.libsystem_cmd_index == null) {
         self.libsystem_cmd_index = @intCast(u16, self.load_commands.items.len);
         const cmdsize = @intCast(u32, mem.alignForwardGeneric(
@@ -1027,6 +1046,7 @@ fn populateMetadata(self: *Zld) !void {
         mem.copy(u8, dylib_cmd.data, mem.spanZ(LIB_SYSTEM_PATH));
         try self.load_commands.append(self.allocator, .{ .Dylib = dylib_cmd });
     }
+
     if (self.main_cmd_index == null) {
         self.main_cmd_index = @intCast(u16, self.load_commands.items.len);
         try self.load_commands.append(self.allocator, .{
@@ -1038,6 +1058,7 @@ fn populateMetadata(self: *Zld) !void {
             },
         });
     }
+
     if (self.source_version_cmd_index == null) {
         self.source_version_cmd_index = @intCast(u16, self.load_commands.items.len);
         try self.load_commands.append(self.allocator, .{
@@ -1048,6 +1069,7 @@ fn populateMetadata(self: *Zld) !void {
             },
         });
     }
+
     if (self.uuid_cmd_index == null) {
         self.uuid_cmd_index = @intCast(u16, self.load_commands.items.len);
         var uuid_cmd: macho.uuid_command = .{
@@ -1058,6 +1080,7 @@ fn populateMetadata(self: *Zld) !void {
         std.crypto.random.bytes(&uuid_cmd.uuid);
         try self.load_commands.append(self.allocator, .{ .Uuid = uuid_cmd });
     }
+
     if (self.code_signature_cmd_index == null) {
         self.code_signature_cmd_index = @intCast(u16, self.load_commands.items.len);
         try self.load_commands.append(self.allocator, .{
@@ -1072,17 +1095,7 @@ fn populateMetadata(self: *Zld) !void {
 }
 
 fn flush(self: *Zld) !void {
-    {
-        // TODO this is just a temp!
-        const seg = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
-        const text = seg.sections.items()[self.text_section_index.?].value;
-        const entrypoint = &self.global_symbols.items[0];
-        entrypoint.n_value = text.addr;
-
-        const ec = &self.load_commands.items[self.main_cmd_index.?].Main;
-        ec.entryoff = @intCast(u32, text.addr - seg.inner.vmaddr);
-    }
-
+    try self.setEntryPoint();
     try self.writeRebaseInfoTable();
     try self.writeBindInfoTable();
     try self.writeLazyBindInfoTable();
@@ -1092,18 +1105,35 @@ fn flush(self: *Zld) !void {
     try self.writeStringTable();
 
     {
+        // Seal __LINKEDIT size
         const seg = &self.load_commands.items[self.linkedit_segment_cmd_index.?].Segment;
         seg.inner.vmsize = mem.alignForwardGeneric(u64, seg.inner.filesize, self.page_size.?);
     }
 
-    try self.writeCodeSignaturePadding();
+    if (self.arch.? == .aarch64) {
+        try self.writeCodeSignaturePadding();
+    }
+
     try self.writeLoadCommands();
     try self.writeHeader();
-    try self.writeCodeSignature();
+
+    if (self.arch.? == .aarch64) {
+        try self.writeCodeSignature();
+    }
 
     if (comptime std.Target.current.isDarwin() and std.Target.current.cpu.arch == .aarch64) {
         try fs.cwd().copyFile(self.out_path.?, fs.cwd(), self.out_path.?, .{});
     }
+}
+
+fn setEntryPoint(self: *Zld) !void {
+    const seg = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
+    const text = seg.sections.items()[self.text_section_index.?].value;
+    const entrypoint = self.exports.getEntry("_main") orelse return error.MissingMainEntrypoint;
+    entrypoint.value.n_value = text.addr;
+
+    const ec = &self.load_commands.items[self.main_cmd_index.?].Main;
+    ec.entryoff = @intCast(u32, text.addr - seg.inner.vmaddr);
 }
 
 fn writeRebaseInfoTable(self: *Zld) !void {
@@ -1168,8 +1198,9 @@ fn writeExportInfo(self: *Zld) !void {
     defer trie.deinit();
 
     const text_segment = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
-    for (self.global_symbols.items) |symbol| {
-        // TODO figure out if we should put all global symbols into the export trie
+    for (self.exports.items()) |entry| {
+        const symbol = entry.value;
+        // TODO figure out if we should put all exports into the export trie
         const name = self.getString(symbol.n_strx);
         assert(symbol.n_value >= text_segment.inner.vmaddr);
         try trie.put(.{
@@ -1201,8 +1232,8 @@ fn writeSymbolTable(self: *Zld) !void {
     const seg = &self.load_commands.items[self.linkedit_segment_cmd_index.?].Segment;
     const symtab = &self.load_commands.items[self.symtab_cmd_index.?].Symtab;
 
-    const nlocals = self.local_symbols.items.len;
-    const nglobals = self.global_symbols.items.len;
+    const nlocals = self.locals.items.len;
+    const nexports = self.exports.items().len;
 
     const nundefs = self.extern_lazy_symbols.items().len + self.extern_nonlazy_symbols.items().len;
     var undefs = std.ArrayList(macho.nlist_64).init(self.allocator);
@@ -1217,31 +1248,31 @@ fn writeSymbolTable(self: *Zld) !void {
     }
 
     symtab.symoff = @intCast(u32, seg.inner.fileoff + seg.inner.filesize);
-    symtab.nsyms = @intCast(u32, nlocals + nglobals + nundefs);
+    symtab.nsyms = @intCast(u32, nlocals + nexports + nundefs);
 
     const locals_off = symtab.symoff;
     const locals_size = nlocals * @sizeOf(macho.nlist_64);
     log.debug("writing local symbols from 0x{x} to 0x{x}", .{ locals_off, locals_size + locals_off });
-    try self.file.?.pwriteAll(mem.sliceAsBytes(self.local_symbols.items), locals_off);
+    try self.file.?.pwriteAll(mem.sliceAsBytes(self.locals.items), locals_off);
 
-    const globals_off = locals_off + locals_size;
-    const globals_size = nglobals * @sizeOf(macho.nlist_64);
-    log.debug("writing global symbols from 0x{x} to 0x{x}", .{ globals_off, globals_size + globals_off });
-    try self.file.?.pwriteAll(mem.sliceAsBytes(self.global_symbols.items), globals_off);
+    const exports_off = locals_off + locals_size;
+    const exports_size = nexports * @sizeOf(macho.nlist_64);
+    log.debug("writing export symbols from 0x{x} to 0x{x}", .{ exports_off, exports_size + exports_off });
+    try self.file.?.pwriteAll(mem.sliceAsBytes(self.exports.items()), exports_off);
 
-    const undefs_off = globals_off + globals_size;
+    const undefs_off = exports_off + exports_size;
     const undefs_size = nundefs * @sizeOf(macho.nlist_64);
     log.debug("writing extern symbols from 0x{x} to 0x{x}", .{ undefs_off, undefs_size + undefs_off });
     try self.file.?.pwriteAll(mem.sliceAsBytes(undefs.items), undefs_off);
 
-    seg.inner.filesize += locals_size + globals_size + undefs_size;
+    seg.inner.filesize += locals_size + exports_size + undefs_size;
 
     // Update dynamic symbol table.
     const dysymtab = &self.load_commands.items[self.dysymtab_cmd_index.?].Dysymtab;
     dysymtab.nlocalsym = @intCast(u32, nlocals);
     dysymtab.iextdefsym = @intCast(u32, nlocals);
-    dysymtab.nextdefsym = @intCast(u32, nglobals);
-    dysymtab.iundefsym = @intCast(u32, nlocals + nglobals);
+    dysymtab.nextdefsym = @intCast(u32, nexports);
+    dysymtab.iundefsym = @intCast(u32, nlocals + nexports);
     dysymtab.nundefsym = @intCast(u32, nundefs);
 }
 
@@ -1443,4 +1474,16 @@ fn addSegmentToDir(self: *Zld, idx: u16) !void {
     const name = parseName(&segment_cmd.inner.segname);
     var key = try self.allocator.dupe(u8, name);
     try self.segments_dir.putNoClobber(self.allocator, key, idx);
+}
+
+inline fn isLocal(sym: *const macho.nlist_64) bool {
+    return sym.n_type == macho.N_SECT;
+}
+
+inline fn isExport(sym: *const macho.nlist_64) bool {
+    return sym.n_type == macho.N_SECT | macho.N_EXT;
+}
+
+inline fn isImport(sym: *const macho.nlist_64) bool {
+    return sym.n_type == macho.N_UNDF | macho.N_EXT;
 }
