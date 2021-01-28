@@ -1081,7 +1081,7 @@ fn populateMetadata(self: *Zld) !void {
         try self.load_commands.append(self.allocator, .{ .Uuid = uuid_cmd });
     }
 
-    if (self.code_signature_cmd_index == null) {
+    if (self.code_signature_cmd_index == null and self.arch.? == .aarch64) {
         self.code_signature_cmd_index = @intCast(u16, self.load_commands.items.len);
         try self.load_commands.append(self.allocator, .{
             .LinkeditData = .{
@@ -1199,9 +1199,9 @@ fn writeExportInfo(self: *Zld) !void {
 
     const text_segment = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
     for (self.exports.items()) |entry| {
+        const name = entry.key;
         const symbol = entry.value;
         // TODO figure out if we should put all exports into the export trie
-        const name = self.getString(symbol.n_strx);
         assert(symbol.n_value >= text_segment.inner.vmaddr);
         try trie.put(.{
             .name = name,
@@ -1335,6 +1335,11 @@ fn writeStringTable(self: *Zld) !void {
     log.debug("writing string table from 0x{x} to 0x{x}", .{ symtab.stroff, symtab.stroff + symtab.strsize });
 
     try self.file.?.pwriteAll(self.string_table.items, symtab.stroff);
+
+    if (symtab.strsize > self.string_table.items.len and self.arch.? == .x86_64) {
+        // This is the last section, so we need to pad it out.
+        try self.file.?.pwriteAll(&[_]u8{0}, seg.inner.fileoff + seg.inner.filesize - 1);
+    }
 }
 
 fn writeCodeSignaturePadding(self: *Zld) !void {
