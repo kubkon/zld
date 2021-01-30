@@ -72,9 +72,9 @@ adding some support to other widely used formats such as Elf, Coff, PE, etc.
 
 - [x] link `.o` generated from simple C program on macOS targeting `aarch64`
 - [x] link the same `.o` but targeting `x86_64`
-- [ ] unhack, or refactor, for basic single `.o` linking
+- [x] unhack, or refactor, for basic single `.o` linking
+- [x] link multiple `.o`
 - [ ] link simple `.zig` (this includes TLV so should be interesting!)
-- [ ] link multiple `.o`
 - [ ] converge with Zig's stage2
 - [ ] handle multiple dynamic libraries
 - [ ] handle frameworks
