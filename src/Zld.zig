@@ -546,8 +546,8 @@ fn resolveSymbols(self: *Zld) !void {
         addr: u64,
         size: u64,
     };
-    var addressing = std.StringHashMap(Address).init(self.allocator);
-    defer addressing.deinit();
+    var next_address = std.StringHashMap(Address).init(self.allocator);
+    defer next_address.deinit();
 
     for (self.objects.items) |object| {
         const seg = object.load_commands.items[object.segment_cmd_index.?].Segment;
@@ -561,14 +561,14 @@ fn resolveSymbols(self: *Zld) !void {
             const out_seg = self.load_commands.items[out_seg_id].Segment;
             const out_sect = out_seg.sections.get(sectname) orelse continue;
 
-            const res = try addressing.getOrPut(sectname);
-            const address = &res.entry.value;
+            const res = try next_address.getOrPut(sectname);
+            const next = &res.entry.value;
             if (res.found_existing) {
-                address.addr += address.size;
+                next.addr += next.size;
             } else {
-                address.addr = out_sect.addr;
+                next.addr = out_sect.addr;
             }
-            address.size = sect.size;
+            next.size = sect.size;
         }
 
         for (object.symtab.items) |sym| {
@@ -584,7 +584,7 @@ fn resolveSymbols(self: *Zld) !void {
             const out_sect = out_seg.sections.getIndex(sectname) orelse continue;
 
             const n_strx = try self.makeString(sym_name);
-            const n_value = sym.n_value - sect.value.addr + addressing.get(sectname).?.addr;
+            const n_value = sym.n_value - sect.value.addr + next_address.get(sectname).?.addr;
 
             log.debug("resolving '{s}' as local symbol at 0x{x}", .{ sym_name, n_value });
 
@@ -600,13 +600,13 @@ fn resolveSymbols(self: *Zld) !void {
 }
 
 fn doRelocs(self: *Zld) !void {
-    const Offset = struct {
+    const Space = struct {
         address: u64,
         offset: u64,
         size: u64,
     };
-    var offsets = std.StringHashMap(Offset).init(self.allocator);
-    defer offsets.deinit();
+    var next_space = std.StringHashMap(Space).init(self.allocator);
+    defer next_space.deinit();
 
     for (self.objects.items) |object| {
         const seg = object.load_commands.items[object.segment_cmd_index.?].Segment;
@@ -620,22 +620,22 @@ fn doRelocs(self: *Zld) !void {
             const out_seg = self.load_commands.items[out_seg_id].Segment;
             const out_sect = out_seg.sections.get(sectname) orelse continue;
 
-            const res = try offsets.getOrPut(sectname);
-            const offset = &res.entry.value;
+            const res = try next_space.getOrPut(sectname);
+            const next = &res.entry.value;
             if (res.found_existing) {
-                offset.offset += offset.size;
-                offset.address += offset.size;
+                next.offset += next.size;
+                next.address += next.size;
             } else {
-                offset.offset = out_sect.offset;
-                offset.address = out_sect.addr;
+                next.offset = out_sect.offset;
+                next.address = out_sect.addr;
             }
-            offset.size = sect.size;
+            next.size = sect.size;
         }
 
         for (sections) |entry| {
             const sectname = entry.key;
             const sect = entry.value;
-            const offset = offsets.get(sectname) orelse continue;
+            const next = next_space.get(sectname) orelse continue;
 
             var code = try self.allocator.alloc(u8, sect.size);
             defer self.allocator.free(code);
@@ -650,7 +650,7 @@ fn doRelocs(self: *Zld) !void {
             for (relocs) |rel| {
                 const off = @intCast(u32, rel.r_address);
                 const inst = code[off..][0..4];
-                const this_addr = offset.address + off;
+                const this_addr = next.address + off;
                 const target_addr = blk: {
                     if (rel.r_extern == 1) {
                         const sym = object.symtab.items[rel.r_symbolnum];
@@ -658,8 +658,8 @@ fn doRelocs(self: *Zld) !void {
                             // Relocate using section offsets only.
                             const source_sectname = sections[sym.n_sect - 1].key;
                             const source_sect = sections[sym.n_sect - 1].value;
-                            const target_offset = offsets.get(source_sectname).?;
-                            break :blk target_offset.address + sym.n_value - source_sect.addr;
+                            const target_space = next_space.get(source_sectname).?;
+                            break :blk target_space.address + sym.n_value - source_sect.addr;
                         } else if (isImport(&sym)) {
                             // Relocate to either the artifact's local symbol, or an import from
                             // shared library.
@@ -681,8 +681,8 @@ fn doRelocs(self: *Zld) !void {
                         // here to get the actual section plus offset into that section of the relocated
                         // symbol.
                         const source_sectname = sections[rel.r_symbolnum - 1].key;
-                        const target_offset = offsets.get(source_sectname).?;
-                        break :blk target_offset.address;
+                        const target_space = next_space.get(source_sectname).?;
+                        break :blk target_space.address;
                     }
                 };
 
@@ -741,11 +741,11 @@ fn doRelocs(self: *Zld) !void {
             log.debug("writing contents of '{s}' section from '{s}' from 0x{x} to 0x{x}", .{
                 sectname,
                 object.name,
-                offset.offset,
-                offset.offset + offset.size,
+                next.offset,
+                next.offset + next.size,
             });
 
-            try self.file.?.pwriteAll(code, offset.offset);
+            try self.file.?.pwriteAll(code, next.offset);
         }
     }
 }
