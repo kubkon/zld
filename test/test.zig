@@ -10,15 +10,49 @@ pub fn addCases(ctx: *TestContext) !void {
             .os_tag = .macos,
             .abi = .gnu,
         };
-        var case = try ctx.addCase("hello world in C", target);
-        try case.addSource(
-            \\#include <stdio.h>
-            \\
-            \\int main() {
-            \\    fprintf(stdout, "Hello, World!\n");
-            \\    return 0;
-            \\}
-        , .C);
-        case.expectedOutput("Hello, World!\n");
+        {
+            var case = try ctx.addCase("hello world in C", target);
+            try case.addInput("main.c",
+                \\#include <stdio.h>
+                \\
+                \\int main() {
+                \\    fprintf(stdout, "Hello, World!\n");
+                \\    return 0;
+                \\}
+            );
+            case.expectedOutput("Hello, World!\n");
+        }
+
+        {
+            var case = try ctx.addCase("simple multi object in C", target);
+            try case.addInput("add.h",
+                \\#ifndef ADD_H
+                \\#define ADD_H
+                \\
+                \\int add(int a, int b);
+                \\
+                \\#endif
+            );
+            try case.addInput("add.c",
+                \\#include "add.h"
+                \\
+                \\int add(int a, int b) {
+                \\    return a + b;
+                \\}
+            );
+            try case.addInput("main.c",
+                \\#include <stdio.h>
+                \\#include "add.h"
+                \\
+                \\int main() {
+                \\    int a = 1;
+                \\    int b = 2;
+                \\    int res = add(1, 2);
+                \\    printf("%d + %d = %d\n", a, b, res);
+                \\    return 0;
+                \\}
+            );
+            case.expectedOutput("1 + 2 = 3\n");
+        }
     }
 }

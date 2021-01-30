@@ -547,13 +547,7 @@ fn resolveSymbols(self: *Zld) !void {
         size: u64,
     };
     var addressing = std.StringHashMap(Address).init(self.allocator);
-    defer {
-        var it = addressing.iterator();
-        while (it.next()) |nn| {
-            self.allocator.free(nn.key);
-        }
-        addressing.deinit();
-    }
+    defer addressing.deinit();
 
     for (self.objects.items) |object| {
         const seg = object.load_commands.items[object.segment_cmd_index.?].Segment;
@@ -567,8 +561,7 @@ fn resolveSymbols(self: *Zld) !void {
             const out_seg = self.load_commands.items[out_seg_id].Segment;
             const out_sect = out_seg.sections.get(sectname) orelse continue;
 
-            var name = try self.allocator.dupe(u8, sectname);
-            const res = try addressing.getOrPut(name);
+            const res = try addressing.getOrPut(sectname);
             const address = &res.entry.value;
             if (res.found_existing) {
                 address.addr += address.size;
@@ -613,13 +606,7 @@ fn doRelocs(self: *Zld) !void {
         size: u64,
     };
     var offsets = std.StringHashMap(Offset).init(self.allocator);
-    defer {
-        var it = offsets.iterator();
-        while (it.next()) |nn| {
-            self.allocator.free(nn.key);
-        }
-        offsets.deinit();
-    }
+    defer offsets.deinit();
 
     for (self.objects.items) |object| {
         const seg = object.load_commands.items[object.segment_cmd_index.?].Segment;
@@ -633,8 +620,7 @@ fn doRelocs(self: *Zld) !void {
             const out_seg = self.load_commands.items[out_seg_id].Segment;
             const out_sect = out_seg.sections.get(sectname) orelse continue;
 
-            var name = try self.allocator.dupe(u8, sectname);
-            const res = try offsets.getOrPut(name);
+            const res = try offsets.getOrPut(sectname);
             const offset = &res.entry.value;
             if (res.found_existing) {
                 offset.offset += offset.size;

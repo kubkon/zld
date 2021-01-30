@@ -22,41 +22,72 @@ test "end-to-end" {
     try ctx.run();
 }
 
-pub const SourceType = enum {
-    C,
-    Cpp,
-    Zig,
-};
-
 pub const TestContext = struct {
     cases: std.ArrayList(Case),
 
     pub const Case = struct {
         target: CrossTarget,
-        sources: std.ArrayList(Source),
+        input_files: std.ArrayList(InputFile),
         expected_out: ?[]const u8 = null,
 
-        const Source = struct {
-            src: []const u8,
-            tt: SourceType,
+        const InputFile = struct {
+            const FileType = enum {
+                Header,
+                C,
+                Cpp,
+                Zig,
+            };
+
+            filetype: FileType,
+            basename: []const u8,
+            contents: []const u8,
+
+            /// Caller own the memory.
+            fn getFilename(self: InputFile) ![]u8 {
+                const ext = switch (self.filetype) {
+                    .Header => ".h",
+                    .C => ".c",
+                    .Cpp => ".cpp",
+                    .Zig => ".zig",
+                };
+                return std.fmt.allocPrint(testing.allocator, "{s}{s}", .{ self.basename, ext });
+            }
         };
 
         pub fn init(target: CrossTarget) Case {
-            var sources = std.ArrayList(Source).init(testing.allocator);
+            var input_files = std.ArrayList(InputFile).init(testing.allocator);
             return .{
                 .target = target,
-                .sources = sources,
+                .input_files = input_files,
             };
         }
 
         pub fn deinit(self: *Case) void {
-            self.sources.deinit();
+            self.input_files.deinit();
         }
 
-        pub fn addSource(self: *Case, src: []const u8, tt: SourceType) !void {
-            try self.sources.append(.{
-                .src = src,
-                .tt = tt,
+        pub fn addInput(self: *Case, filename: []const u8, contents: []const u8) !void {
+            const ext = std.fs.path.extension(filename);
+            const filetype: InputFile.FileType = blk: {
+                if (mem.eql(u8, ".h", ext)) {
+                    break :blk .Header;
+                } else if (mem.eql(u8, ".c", ext)) {
+                    break :blk .C;
+                } else if (mem.eql(u8, ".cpp", ext)) {
+                    break :blk .Cpp;
+                } else if (mem.eql(u8, ".zig", ext)) {
+                    break :blk .Zig;
+                } else {
+                    log.warn("skipping file; unknown filetype detected with extension '{s}'", .{ext});
+                    return;
+                }
+            };
+            const index = mem.lastIndexOf(u8, filename, ext).?;
+            const basename = filename[0..index];
+            try self.input_files.append(.{
+                .filetype = filetype,
+                .basename = basename,
+                .contents = contents,
             });
         }
 
@@ -95,7 +126,6 @@ pub const TestContext = struct {
                 }
                 filenames.deinit();
             }
-            try filenames.ensureCapacity(case.sources.items.len);
 
             const target_triple = try std.fmt.allocPrint(testing.allocator, "{s}-{s}-{s}", .{
                 @tagName(case.target.cpu_arch.?),
@@ -104,51 +134,50 @@ pub const TestContext = struct {
             });
             defer testing.allocator.free(target_triple);
 
-            for (case.sources.items) |src, i| {
-                const ext = switch (src.tt) {
-                    .C => ".c",
-                    .Cpp => ".cpp",
-                    .Zig => ".zig",
-                };
-                const input_src = try std.fmt.allocPrint(testing.allocator, "src_{}{s}", .{ i, ext });
-                defer testing.allocator.free(input_src);
-
-                try tmp.dir.writeFile(input_src, src.src);
+            for (case.input_files.items) |input_file| {
+                const input_filename = try input_file.getFilename();
+                defer testing.allocator.free(input_filename);
+                try tmp.dir.writeFile(input_filename, input_file.contents);
 
                 var argv = std.ArrayList([]const u8).init(testing.allocator);
                 defer argv.deinit();
 
                 try argv.append("zig");
 
-                switch (src.tt) {
-                    .C, .Cpp => {
+                switch (input_file.filetype) {
+                    .C => {
                         try argv.append("cc");
+                        try argv.append("-c");
+                    },
+                    .Cpp => {
+                        try argv.append("c++");
                         try argv.append("-c");
                     },
                     .Zig => {
                         try argv.append("build-obj");
                     },
+                    .Header => continue,
                 }
 
                 try argv.append("-target");
                 try argv.append(target_triple);
 
-                const input_src_path = try std.fs.path.join(testing.allocator, &[_][]const u8{
-                    "zig-cache", "tmp", &tmp.sub_path, input_src,
+                const input_file_path = try std.fs.path.join(testing.allocator, &[_][]const u8{
+                    "zig-cache", "tmp", &tmp.sub_path, input_filename,
                 });
-                defer testing.allocator.free(input_src_path);
+                defer testing.allocator.free(input_file_path);
 
-                try argv.append(input_src_path);
+                try argv.append(input_file_path);
                 try argv.append("-o");
 
-                const output_src = try std.fmt.allocPrint(testing.allocator, "obj_{}.o", .{i});
-                defer testing.allocator.free(output_src);
+                const output_filename = try std.fmt.allocPrint(testing.allocator, "{s}.o", .{input_file.basename});
+                defer testing.allocator.free(output_filename);
 
-                const output_src_path = try std.fs.path.join(testing.allocator, &[_][]const u8{
-                    "zig-cache", "tmp", &tmp.sub_path, output_src,
+                const output_file_path = try std.fs.path.join(testing.allocator, &[_][]const u8{
+                    "zig-cache", "tmp", &tmp.sub_path, output_filename,
                 });
-                try argv.append(output_src_path);
-                filenames.appendAssumeCapacity(output_src_path);
+                try argv.append(output_file_path);
+                try filenames.append(output_file_path);
 
                 const result = try std.ChildProcess.exec(.{
                     .allocator = testing.allocator,
@@ -166,6 +195,7 @@ pub const TestContext = struct {
                 }
                 if (result.term != .Exited or result.term.Exited != 0) {
                     log.err("{s}", .{result.stderr});
+                    try printInvocation(argv.items);
                     return error.CompileError;
                 }
             }
@@ -204,11 +234,22 @@ pub const TestContext = struct {
                 }
                 if (result.term != .Exited or result.term.Exited != 0) {
                     log.err("{s}", .{result.stderr});
+                    try printInvocation(argv.items);
                     return error.ExeError;
                 }
 
-                testing.expect(mem.eql(u8, result.stdout, case.expected_out.?));
+                if (case.expected_out) |exp| {
+                    testing.expect(mem.eql(u8, result.stdout, exp));
+                } else {
+                    log.warn("exe was run, but no expected output was provided", .{});
+                }
             }
         }
     }
 };
+
+fn printInvocation(argv: []const []const u8) !void {
+    const full_inv = try std.mem.join(testing.allocator, " ", argv);
+    defer testing.allocator.free(full_inv);
+    log.err("The following command failed:\n{s}", .{full_inv});
+}
