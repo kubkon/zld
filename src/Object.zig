@@ -23,18 +23,14 @@ dysymtab_cmd_index: ?u16 = null,
 build_version_cmd_index: ?u16 = null,
 symtab: std.ArrayListUnmanaged(macho.nlist_64) = .{},
 strtab: std.ArrayListUnmanaged(u8) = .{},
-symbol_dir: std.AutoHashMapUnmanaged(usize, usize) = .{},
-symbols: std.StringHashMapUnmanaged(*const macho.nlist_64) = .{},
 
 pub fn deinit(self: *Object, allocator: *Allocator) void {
     for (self.load_commands.items) |*lc| {
         lc.deinit(allocator);
     }
-    self.symbols.deinit(allocator);
     self.load_commands.deinit(allocator);
     self.symtab.deinit(allocator);
     self.strtab.deinit(allocator);
-    self.symbol_dir.deinit(allocator);
     if (self.file) |*f| f.close();
     if (self.name) |n| self.base.allocator.free(n);
 }
@@ -76,11 +72,6 @@ pub fn parse(self: *Object, name: []const u8, file: fs.File) !void {
 
     try self.parseSymtab();
     try self.parseStrtab();
-
-    for (self.symtab.items) |*sym| {
-        const sym_name = self.getString(sym.n_strx);
-        try self.symbols.putNoClobber(self.base.allocator, sym_name, sym);
-    }
 }
 
 fn parseSymtab(self: *Object) !void {

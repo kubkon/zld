@@ -54,13 +54,12 @@ got_section_index: ?u16 = null,
 la_symbol_ptr_section_index: ?u16 = null,
 data_section_index: ?u16 = null,
 
-locals: std.ArrayListUnmanaged(macho.nlist_64) = .{},
+locals: std.StringArrayHashMapUnmanaged(macho.nlist_64) = .{},
 exports: std.StringArrayHashMapUnmanaged(macho.nlist_64) = .{},
 nonlazy_imports: std.StringArrayHashMapUnmanaged(Import) = .{},
 lazy_imports: std.StringArrayHashMapUnmanaged(Import) = .{},
 
 strtab: std.ArrayListUnmanaged(u8) = .{},
-strtab_directory: std.StringHashMapUnmanaged(u32) = .{},
 
 /// Default path to dyld
 /// TODO instead of hardcoding it, we should probably look through some env vars and search paths
@@ -81,13 +80,6 @@ pub fn init(allocator: *Allocator) Zld {
 }
 
 pub fn deinit(self: *Zld) void {
-    {
-        var it = self.strtab_directory.iterator();
-        while (it.next()) |nn| {
-            self.allocator.free(nn.key);
-        }
-    }
-    self.strtab_directory.deinit(self.allocator);
     self.strtab.deinit(self.allocator);
     for (self.lazy_imports.items()) |*entry| {
         self.allocator.free(entry.key);
@@ -101,6 +93,9 @@ pub fn deinit(self: *Zld) void {
         self.allocator.free(entry.key);
     }
     self.exports.deinit(self.allocator);
+    for (self.locals.items()) |*entry| {
+        self.allocator.free(entry.key);
+    }
     self.locals.deinit(self.allocator);
     for (self.objects.items) |*object| {
         object.deinit(self.allocator);
@@ -154,41 +149,8 @@ pub fn link(self: *Zld, files: []const []const u8, out_path: []const u8) !void {
     self.allocateDataConstSegment();
     self.allocateDataSegment();
     self.allocateLinkeditSegment();
-
-    for (self.objects.items) |*object| {
-        for (object.symtab.items) |sym, i| {
-            if (isImport(&sym)) continue;
-
-            const seg = object.load_commands.items[object.segment_cmd_index.?].Segment;
-            const sectname = seg.sections.items()[sym.n_sect - 1].key;
-            const txt = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
-            if (!txt.sections.contains(sectname)) continue;
-
-            const n_sect = @intCast(u8, txt.sections.getIndex(sectname).? + 1);
-            const sym_name = object.getString(sym.n_strx);
-            const n_strx = try self.makeString(sym_name);
-            var new_sym: macho.nlist_64 = .{
-                .n_strx = n_strx,
-                .n_type = sym.n_type,
-                .n_value = 0,
-                .n_desc = sym.n_desc,
-                .n_sect = n_sect,
-            };
-            if (isExport(&sym)) {
-                log.debug("writing export '{s}'", .{sym_name});
-                const name = try self.allocator.dupe(u8, sym_name);
-                try self.exports.putNoClobber(self.allocator, name, new_sym);
-            } else {
-                new_sym.n_value = txt.sections.get(sectname).?.addr;
-                log.debug("writing local symbol '{s}'", .{sym_name});
-                const index = self.locals.items.len;
-                try self.locals.append(self.allocator, new_sym);
-                try object.symbol_dir.putNoClobber(self.allocator, i, index);
-            }
-        }
-    }
-
     try self.writeStubHelperCommon();
+    try self.resolveSymbols();
     try self.doRelocs();
     try self.flush();
 }
@@ -296,6 +258,7 @@ fn resolveImports(self: *Zld) !void {
 
     const n_strx = try self.makeString("dyld_stub_binder");
     const name = try self.allocator.dupe(u8, "dyld_stub_binder");
+    log.debug("writing nonlazy symbol 'dyld_stub_binder'", .{});
     const index = @intCast(u32, self.nonlazy_imports.items().len);
     try self.nonlazy_imports.putNoClobber(self.allocator, name, .{
         .symbol = .{
@@ -578,8 +541,78 @@ fn writeStubInStubHelper(self: *Zld, index: u32, offset: u64) !void {
     try self.file.?.pwriteAll(code, stub_off);
 }
 
+fn resolveSymbols(self: *Zld) !void {
+    const Address = struct {
+        addr: u64,
+        size: u64,
+    };
+    var addressing = std.StringHashMap(Address).init(self.allocator);
+    defer {
+        var it = addressing.iterator();
+        while (it.next()) |nn| {
+            self.allocator.free(nn.key);
+        }
+        addressing.deinit();
+    }
+
+    for (self.objects.items) |object| {
+        const seg = object.load_commands.items[object.segment_cmd_index.?].Segment;
+        const sections = seg.sections.items();
+
+        for (sections) |entry| {
+            const sectname = entry.key;
+            const sect = entry.value;
+
+            const out_seg_id = self.segments_dir.get(parseName(&sect.segname)) orelse continue;
+            const out_seg = self.load_commands.items[out_seg_id].Segment;
+            const out_sect = out_seg.sections.get(sectname) orelse continue;
+
+            var name = try self.allocator.dupe(u8, sectname);
+            const res = try addressing.getOrPut(name);
+            const address = &res.entry.value;
+            if (res.found_existing) {
+                address.addr += address.size;
+            } else {
+                address.addr = out_sect.addr;
+            }
+            address.size = sect.size;
+        }
+
+        for (object.symtab.items) |sym| {
+            if (isImport(&sym) or isLocal(&sym)) continue;
+
+            const sym_name = object.getString(sym.n_strx);
+            var out_name = try self.allocator.dupe(u8, sym_name);
+
+            const sect = sections[sym.n_sect - 1];
+            const sectname = sect.key;
+            const out_seg_id = self.segments_dir.get(parseName(&sect.value.segname)) orelse continue;
+            const out_seg = self.load_commands.items[out_seg_id].Segment;
+            const out_sect = out_seg.sections.getIndex(sectname) orelse continue;
+
+            const n_strx = try self.makeString(sym_name);
+            const n_value = sym.n_value - sect.value.addr + addressing.get(sectname).?.addr;
+
+            log.debug("resolving '{s}' as local symbol at 0x{x}", .{ sym_name, n_value });
+
+            try self.locals.putNoClobber(self.allocator, out_name, .{
+                .n_strx = n_strx,
+                .n_value = n_value,
+                .n_type = macho.N_SECT,
+                .n_desc = sym.n_desc,
+                .n_sect = @intCast(u8, out_sect + 1),
+            });
+        }
+    }
+}
+
 fn doRelocs(self: *Zld) !void {
-    var offsets = std.StringArrayHashMap(usize).init(self.allocator);
+    const Offset = struct {
+        address: u64,
+        offset: u64,
+        size: u64,
+    };
+    var offsets = std.StringHashMap(Offset).init(self.allocator);
     defer {
         var it = offsets.iterator();
         while (it.next()) |nn| {
@@ -600,6 +633,24 @@ fn doRelocs(self: *Zld) !void {
             const out_seg = self.load_commands.items[out_seg_id].Segment;
             const out_sect = out_seg.sections.get(sectname) orelse continue;
 
+            var name = try self.allocator.dupe(u8, sectname);
+            const res = try offsets.getOrPut(name);
+            const offset = &res.entry.value;
+            if (res.found_existing) {
+                offset.offset += offset.size;
+                offset.address += offset.size;
+            } else {
+                offset.offset = out_sect.offset;
+                offset.address = out_sect.addr;
+            }
+            offset.size = sect.size;
+        }
+
+        for (sections) |entry| {
+            const sectname = entry.key;
+            const sect = entry.value;
+            const offset = offsets.get(sectname) orelse continue;
+
             var code = try self.allocator.alloc(u8, sect.size);
             defer self.allocator.free(code);
             _ = try object.file.?.preadAll(code, sect.offset);
@@ -611,34 +662,41 @@ fn doRelocs(self: *Zld) !void {
             const relocs = mem.bytesAsSlice(macho.relocation_info, raw_relocs);
 
             for (relocs) |rel| {
-                const offset = @intCast(u32, rel.r_address);
-                const inst = code[offset..][0..4];
-                const this_addr = out_sect.addr + offset;
+                const off = @intCast(u32, rel.r_address);
+                const inst = code[off..][0..4];
+                const this_addr = offset.address + off;
                 const target_addr = blk: {
                     if (rel.r_extern == 1) {
-                        if (object.symbol_dir.get(rel.r_symbolnum)) |idx| {
-                            const sym = self.locals.items[idx];
-                            break :blk sym.n_value;
-                        } else {
-                            // extern
-                            const sym = object.symtab.items[rel.r_symbolnum];
-                            const symname = object.getString(sym.n_strx);
-                            if (self.lazy_imports.getIndex(symname)) |i| {
+                        const sym = object.symtab.items[rel.r_symbolnum];
+                        if (isLocal(&sym)) {
+                            // Relocate using section offsets only.
+                            const source_sectname = sections[sym.n_sect - 1].key;
+                            const source_sect = sections[sym.n_sect - 1].value;
+                            const target_offset = offsets.get(source_sectname).?;
+                            break :blk target_offset.address + sym.n_value - source_sect.addr;
+                        } else if (isImport(&sym)) {
+                            // Relocate to either the artifact's local symbol, or an import from
+                            // shared library.
+                            const sym_name = object.getString(sym.n_strx);
+                            if (self.locals.get(sym_name)) |loc| {
+                                break :blk loc.n_value;
+                            } else if (self.lazy_imports.get(sym_name)) |ext| {
                                 const segment = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
                                 const stubs = segment.sections.items()[self.stubs_section_index.?].value;
-                                break :blk stubs.addr + i * stubs.reserved2;
-                            } else if (self.nonlazy_imports.get(symname)) |ext| {
+                                break :blk stubs.addr + ext.index * stubs.reserved2;
+                            } else if (self.nonlazy_imports.get(sym_name)) |ext| {
                                 const segment = self.load_commands.items[self.data_const_segment_cmd_index.?].Segment;
                                 const got = segment.sections.items()[self.got_section_index.?].value;
                                 break :blk got.addr + ext.index * @sizeOf(u64);
                             } else unreachable;
-                        }
+                        } else unreachable;
                     } else {
-                        // TODO need to store object section to final artifact section mapping
-                        const sect_id = rel.r_symbolnum - 1;
-                        const segment = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
-                        const sec = segment.sections.items()[sect_id + 2].value;
-                        break :blk sec.addr;
+                        // TODO I think we need to reparse the relocation_info as scattered_relocation_info
+                        // here to get the actual section plus offset into that section of the relocated
+                        // symbol.
+                        const source_sectname = sections[rel.r_symbolnum - 1].key;
+                        const target_offset = offsets.get(source_sectname).?;
+                        break :blk target_offset.address;
                     }
                 };
 
@@ -694,22 +752,14 @@ fn doRelocs(self: *Zld) !void {
                 }
             }
 
-            var name = try self.allocator.dupe(u8, sectname);
-            const res = try offsets.getOrPut(name);
-            if (!res.found_existing) {
-                res.entry.value = out_sect.offset;
-            }
-            const off = &res.entry.value;
-
             log.debug("writing contents of '{s}' section from '{s}' from 0x{x} to 0x{x}", .{
                 sectname,
                 object.name,
-                off.*,
-                off.* + code.len,
+                offset.offset,
+                offset.offset + offset.size,
             });
 
-            try self.file.?.pwriteAll(code, off.*);
-            off.* += code.len;
+            try self.file.?.pwriteAll(code, offset.offset);
         }
     }
 }
@@ -1140,13 +1190,23 @@ fn flush(self: *Zld) !void {
 }
 
 fn setEntryPoint(self: *Zld) !void {
+    // TODO we should respect the -entry flag passed in by the user to set a custom
+    // entrypoint. For now, assume default of `_main`.
     const seg = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
     const text = seg.sections.items()[self.text_section_index.?].value;
-    const entrypoint = self.exports.getEntry("_main") orelse return error.MissingMainEntrypoint;
-    entrypoint.value.n_value = text.addr;
+    const entry_sym = self.locals.get("_main") orelse return error.MissingMainEntrypoint;
+
+    const name = try self.allocator.dupe(u8, "_main");
+    try self.exports.putNoClobber(self.allocator, name, .{
+        .n_strx = entry_sym.n_strx,
+        .n_value = entry_sym.n_value,
+        .n_type = macho.N_SECT | macho.N_EXT,
+        .n_desc = entry_sym.n_desc,
+        .n_sect = entry_sym.n_sect,
+    });
 
     const ec = &self.load_commands.items[self.main_cmd_index.?].Main;
-    ec.entryoff = @intCast(u32, text.addr - seg.inner.vmaddr);
+    ec.entryoff = @intCast(u32, entry_sym.n_value - seg.inner.vmaddr);
 }
 
 fn writeRebaseInfoTable(self: *Zld) !void {
@@ -1257,7 +1317,15 @@ fn writeSymbolTable(self: *Zld) !void {
     const seg = &self.load_commands.items[self.linkedit_segment_cmd_index.?].Segment;
     const symtab = &self.load_commands.items[self.symtab_cmd_index.?].Symtab;
 
-    const nlocals = self.locals.items.len;
+    const nlocals = self.locals.items().len;
+    var locals = std.ArrayList(macho.nlist_64).init(self.allocator);
+    defer locals.deinit();
+
+    try locals.ensureCapacity(nlocals);
+    for (self.locals.items()) |entry| {
+        locals.appendAssumeCapacity(entry.value);
+    }
+
     const nexports = self.exports.items().len;
     var exports = std.ArrayList(macho.nlist_64).init(self.allocator);
     defer exports.deinit();
@@ -1285,7 +1353,7 @@ fn writeSymbolTable(self: *Zld) !void {
     const locals_off = symtab.symoff;
     const locals_size = nlocals * @sizeOf(macho.nlist_64);
     log.debug("writing local symbols from 0x{x} to 0x{x}", .{ locals_off, locals_size + locals_off });
-    try self.file.?.pwriteAll(mem.sliceAsBytes(self.locals.items), locals_off);
+    try self.file.?.pwriteAll(mem.sliceAsBytes(locals.items), locals_off);
 
     const exports_off = locals_off + locals_size;
     const exports_size = nexports * @sizeOf(macho.nlist_64);
@@ -1482,22 +1550,11 @@ pub fn makeStaticString(bytes: []const u8) [16]u8 {
 }
 
 fn makeString(self: *Zld, bytes: []const u8) !u32 {
-    if (self.strtab_directory.get(bytes)) |offset| {
-        log.debug("reusing '{s}' from string table at offset 0x{x}", .{ bytes, offset });
-        return offset;
-    }
-
     try self.strtab.ensureCapacity(self.allocator, self.strtab.items.len + bytes.len + 1);
     const offset = @intCast(u32, self.strtab.items.len);
     log.debug("writing new string '{s}' into string table at offset 0x{x}", .{ bytes, offset });
     self.strtab.appendSliceAssumeCapacity(bytes);
     self.strtab.appendAssumeCapacity(0);
-    try self.strtab_directory.putNoClobber(
-        self.allocator,
-        try self.allocator.dupe(u8, bytes),
-        offset,
-    );
-
     return offset;
 }
 
