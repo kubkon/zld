@@ -61,6 +61,8 @@ lazy_imports: std.StringArrayHashMapUnmanaged(Import) = .{},
 
 strtab: std.ArrayListUnmanaged(u8) = .{},
 
+stub_helper_stubs_start_off: ?u64 = null,
+
 /// Default path to dyld
 /// TODO instead of hardcoding it, we should probably look through some env vars and search paths
 /// instead but this will do for now.
@@ -379,7 +381,7 @@ fn writeStubHelperCommon(self: *Zld) !void {
     const data_const_segment = &self.load_commands.items[self.data_const_segment_cmd_index.?].Segment;
     const got = &data_const_segment.sections.items()[self.got_section_index.?].value;
 
-    const stub_helper_stubs_start_off: u32 = blk: {
+    self.stub_helper_stubs_start_off = blk: {
         switch (self.arch.?) {
             .x86_64 => {
                 const code_size = 15;
@@ -441,13 +443,13 @@ fn writeStubHelperCommon(self: *Zld) !void {
 
     for (self.lazy_imports.items()) |_, i| {
         const index = @intCast(u32, i);
-        try self.writeLazySymbolPointer(index, stub_helper_stubs_start_off);
+        try self.writeLazySymbolPointer(index);
         try self.writeStub(index);
-        try self.writeStubInStubHelper(index, stub_helper_stubs_start_off);
+        try self.writeStubInStubHelper(index);
     }
 }
 
-fn writeLazySymbolPointer(self: *Zld, index: u32, offset: u64) !void {
+fn writeLazySymbolPointer(self: *Zld, index: u32) !void {
     const text_segment = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
     const stub_helper = text_segment.sections.items()[self.stub_helper_section_index.?].value;
     const data_segment = self.load_commands.items[self.data_segment_cmd_index.?].Segment;
@@ -458,7 +460,7 @@ fn writeLazySymbolPointer(self: *Zld, index: u32, offset: u64) !void {
         .aarch64 => 3 * @sizeOf(u32),
         else => unreachable,
     };
-    const stub_off = offset + index * stub_size;
+    const stub_off = self.stub_helper_stubs_start_off.? + index * stub_size;
     const end = stub_helper.addr + stub_off - stub_helper.offset;
     var buf: [@sizeOf(u64)]u8 = undefined;
     mem.writeIntLittle(u64, &buf, end);
@@ -502,7 +504,7 @@ fn writeStub(self: *Zld, index: u32) !void {
     try self.file.?.pwriteAll(code, stub_off);
 }
 
-fn writeStubInStubHelper(self: *Zld, index: u32, offset: u64) !void {
+fn writeStubInStubHelper(self: *Zld, index: u32) !void {
     const text_segment = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
     const stub_helper = text_segment.sections.items()[self.stub_helper_section_index.?].value;
 
@@ -511,7 +513,7 @@ fn writeStubInStubHelper(self: *Zld, index: u32, offset: u64) !void {
         .aarch64 => 3 * @sizeOf(u32),
         else => unreachable,
     };
-    const stub_off = offset + index * stub_size;
+    const stub_off = self.stub_helper_stubs_start_off.? + index * stub_size;
     var code = try self.allocator.alloc(u8, stub_size);
     defer self.allocator.free(code);
     switch (self.arch.?) {
@@ -1262,6 +1264,73 @@ fn writeLazyBindInfoTable(self: *Zld) !void {
     log.debug("writing lazy binding info from 0x{x} to 0x{x}", .{ dyld_info.lazy_bind_off, dyld_info.lazy_bind_off + dyld_info.lazy_bind_size });
 
     try self.file.?.pwriteAll(buffer, dyld_info.lazy_bind_off);
+    try self.populateLazyBindOffsetsInStubHelper(buffer);
+}
+
+fn populateLazyBindOffsetsInStubHelper(self: *Zld, buffer: []const u8) !void {
+    var stream = std.io.fixedBufferStream(buffer);
+    var reader = stream.reader();
+    var offsets = std.ArrayList(u32).init(self.allocator);
+    try offsets.append(0);
+    defer offsets.deinit();
+    var valid_block = false;
+
+    while (true) {
+        const inst = reader.readByte() catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
+        const imm: u8 = inst & macho.BIND_IMMEDIATE_MASK;
+        const opcode: u8 = inst & macho.BIND_OPCODE_MASK;
+
+        switch (opcode) {
+            macho.BIND_OPCODE_DO_BIND => {
+                valid_block = true;
+            },
+            macho.BIND_OPCODE_DONE => {
+                if (valid_block) {
+                    const offset = try stream.getPos();
+                    try offsets.append(@intCast(u32, offset));
+                }
+                valid_block = false;
+            },
+            macho.BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM => {
+                var next = try reader.readByte();
+                while (next != @as(u8, 0)) {
+                    next = try reader.readByte();
+                }
+            },
+            macho.BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB => {
+                _ = try std.leb.readULEB128(u64, reader);
+            },
+            macho.BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB => {
+                _ = try std.leb.readULEB128(u64, reader);
+            },
+            macho.BIND_OPCODE_SET_ADDEND_SLEB => {
+                _ = try std.leb.readILEB128(i64, reader);
+            },
+            else => {},
+        }
+    }
+    assert(self.lazy_imports.items().len <= offsets.items.len);
+
+    const stub_size: u4 = switch (self.arch.?) {
+        .x86_64 => 10,
+        .aarch64 => 3 * @sizeOf(u32),
+        else => unreachable,
+    };
+    const off: u4 = switch (self.arch.?) {
+        .x86_64 => 1,
+        .aarch64 => 2 * @sizeOf(u32),
+        else => unreachable,
+    };
+    var buf: [@sizeOf(u32)]u8 = undefined;
+    for (self.lazy_imports.items()) |entry| {
+        const symbol = entry.value;
+        const placeholder_off = self.stub_helper_stubs_start_off.? + symbol.index * stub_size + off;
+        mem.writeIntLittle(u32, &buf, offsets.items[symbol.index]);
+        try self.file.?.pwriteAll(&buf, placeholder_off);
+    }
 }
 
 fn writeExportInfo(self: *Zld) !void {
