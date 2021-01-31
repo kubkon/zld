@@ -54,5 +54,20 @@ pub fn addCases(ctx: *TestContext) !void {
             );
             case.expectedOutput("1 + 2 = 3\n");
         }
+
+        {
+            var case = try ctx.addCase("multiple imports in C", target);
+            try case.addInput("main.c",
+                \\#include <stdio.h>
+                \\#include <stdlib.h>
+                \\
+                \\int main() {
+                \\    fprintf(stdout, "Hello, World!\n");
+                \\    exit(0);
+                \\    return 0;
+                \\}
+            );
+            case.expectedOutput("Hello, World!\n");
+        }
     }
 }
