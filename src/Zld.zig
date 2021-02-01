@@ -715,20 +715,20 @@ fn doRelocs(self: *Zld) !void {
                         switch (@intToEnum(macho.reloc_type_arm64, rel.r_type)) {
                             macho.reloc_type_arm64.ARM64_RELOC_BRANCH26 => {
                                 const displacement = @intCast(i28, @intCast(i64, target_addr) - @intCast(i64, this_addr));
-                                var parsed = mem.bytesAsValue(meta.TagPayloadType(Arm64, Arm64.Branch), inst);
+                                var parsed = mem.bytesAsValue(meta.TagPayload(Arm64, Arm64.Branch), inst);
                                 parsed.disp = @truncate(u26, @bitCast(u28, displacement) >> 2);
                             },
                             macho.reloc_type_arm64.ARM64_RELOC_PAGE21, macho.reloc_type_arm64.ARM64_RELOC_GOT_LOAD_PAGE21, macho.reloc_type_arm64.ARM64_RELOC_TLVP_LOAD_PAGE21 => {
                                 const this_page = this_addr >> 12;
                                 const target_page = target_addr >> 12;
                                 const pages = @bitCast(u21, @intCast(i21, target_page - this_page));
-                                var parsed = mem.bytesAsValue(meta.TagPayloadType(Arm64, Arm64.Address), inst);
+                                var parsed = mem.bytesAsValue(meta.TagPayload(Arm64, Arm64.Address), inst);
                                 parsed.immhi = @truncate(u19, pages >> 2);
                                 parsed.immlo = @truncate(u2, pages);
                             },
                             macho.reloc_type_arm64.ARM64_RELOC_PAGEOFF12, macho.reloc_type_arm64.ARM64_RELOC_GOT_LOAD_PAGEOFF12, macho.reloc_type_arm64.ARM64_RELOC_TLVP_LOAD_PAGEOFF12 => {
                                 const narrowed = @truncate(u12, target_addr);
-                                var parsed = mem.bytesAsValue(meta.TagPayloadType(Arm64, Arm64.LoadRegister), inst);
+                                var parsed = mem.bytesAsValue(meta.TagPayload(Arm64, Arm64.LoadRegister), inst);
                                 parsed.offset = narrowed;
                             },
                             else => |tt| {
