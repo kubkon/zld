@@ -100,7 +100,7 @@ pub fn deinit(self: *Zld) void {
     }
     self.locals.deinit(self.allocator);
     for (self.objects.items) |*object| {
-        object.deinit(self.allocator);
+        object.deinit();
     }
     self.objects.deinit(self.allocator);
     for (self.load_commands.items) |*lc| {
@@ -160,7 +160,7 @@ pub fn link(self: *Zld, files: []const []const u8, out_path: []const u8) !void {
 fn parseObjectFiles(self: *Zld, files: []const []const u8) !void {
     try self.objects.ensureCapacity(self.allocator, files.len);
     for (files) |file_name| {
-        var object: Object = .{ .base = self };
+        var object = Object.init(self.allocator);
         const file = try fs.cwd().openFile(file_name, .{});
         try object.parse(file_name, file);
         self.objects.appendAssumeCapacity(object);
