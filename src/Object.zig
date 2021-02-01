@@ -27,6 +27,13 @@ build_version_cmd_index: ?u16 = null,
 symtab: std.ArrayListUnmanaged(macho.nlist_64) = .{},
 strtab: std.ArrayListUnmanaged(u8) = .{},
 
+directory: std.AutoHashMapUnmanaged(DirectoryKey, u16) = .{},
+
+pub const DirectoryKey = struct {
+    segname: [16]u8,
+    sectname: [16]u8,
+};
+
 pub fn init(allocator: *Allocator) Object {
     return .{ .allocator = allocator };
 }
@@ -38,6 +45,7 @@ pub fn deinit(self: *Object) void {
     self.load_commands.deinit(self.allocator);
     self.symtab.deinit(self.allocator);
     self.strtab.deinit(self.allocator);
+    self.directory.deinit(self.allocator);
     if (self.file) |*f| f.close();
     if (self.name) |n| self.allocator.free(n);
 }
@@ -60,6 +68,13 @@ pub fn parse(self: *Object, name: []const u8, file: fs.File) !void {
         switch (cmd.cmd()) {
             macho.LC_SEGMENT_64 => {
                 self.segment_cmd_index = i;
+                const seg = cmd.Segment;
+                for (seg.sections.items) |sect, index| {
+                    try self.directory.putNoClobber(self.allocator, .{
+                        .segname = sect.segname,
+                        .sectname = sect.sectname,
+                    }, @intCast(u16, index));
+                }
             },
             macho.LC_SYMTAB => {
                 self.symtab_cmd_index = i;

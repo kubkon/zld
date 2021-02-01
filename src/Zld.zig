@@ -27,7 +27,6 @@ out_path: ?[]const u8 = null,
 
 objects: std.ArrayListUnmanaged(Object) = .{},
 load_commands: std.ArrayListUnmanaged(LoadCommand) = .{},
-segments_dir: std.StringHashMapUnmanaged(u16) = .{},
 
 pagezero_segment_cmd_index: ?u16 = null,
 text_segment_cmd_index: ?u16 = null,
@@ -62,6 +61,19 @@ lazy_imports: std.StringArrayHashMapUnmanaged(Import) = .{},
 strtab: std.ArrayListUnmanaged(u8) = .{},
 
 stub_helper_stubs_start_off: ?u64 = null,
+
+segments_directory: std.AutoHashMapUnmanaged([16]u8, u16) = .{},
+directory: std.AutoHashMapUnmanaged(DirectoryKey, DirectoryEntry) = .{},
+
+const DirectoryKey = struct {
+    segname: [16]u8,
+    sectname: [16]u8,
+};
+
+const DirectoryEntry = struct {
+    seg_index: u16,
+    sect_index: u16,
+};
 
 /// Default path to dyld
 /// TODO instead of hardcoding it, we should probably look through some env vars and search paths
@@ -107,13 +119,8 @@ pub fn deinit(self: *Zld) void {
         lc.deinit(self.allocator);
     }
     self.load_commands.deinit(self.allocator);
-    {
-        var it = self.segments_dir.iterator();
-        while (it.next()) |nn| {
-            self.allocator.free(nn.key);
-        }
-    }
-    self.segments_dir.deinit(self.allocator);
+    self.segments_directory.deinit(self.allocator);
+    self.directory.deinit(self.allocator);
     if (self.file) |*f| f.close();
 }
 
@@ -166,25 +173,27 @@ fn parseObjectFiles(self: *Zld, files: []const []const u8) !void {
         self.objects.appendAssumeCapacity(object);
 
         const seg_cmd = object.load_commands.items[object.segment_cmd_index.?].Segment;
-        for (seg_cmd.sections.items()) |entry| {
-            const name = entry.key;
-            const sect = entry.value;
-            const segname = parseName(&sect.segname);
+        for (seg_cmd.sections.items) |sect| {
+            const sectname = parseName(&sect.sectname);
 
-            if (mem.eql(u8, name, "__eh_frame")) {
+            if (mem.eql(u8, sectname, "__eh_frame")) {
                 log.warn("TODO handle __eh_frame section", .{});
                 continue;
             }
-            const seg_id = self.segments_dir.get(segname) orelse {
-                log.warn("segname {s} not found in the output artifact", .{segname});
+            const seg_index = self.segments_directory.get(sect.segname) orelse {
+                log.warn("segname {s} not found in the output artifact", .{sect.segname});
                 continue;
             };
-            const seg = &self.load_commands.items[seg_id].Segment;
-            const res = try seg.getOrPut(self.allocator, name);
+            const seg = &self.load_commands.items[seg_index].Segment;
+            const res = try self.directory.getOrPut(self.allocator, .{
+                .segname = sect.segname,
+                .sectname = sect.sectname,
+            });
             if (!res.found_existing) {
-                res.entry.value = .{
-                    .sectname = makeStaticString(name),
-                    .segname = makeStaticString(segname),
+                const sect_index = @intCast(u16, seg.sections.items.len);
+                try seg.append(self.allocator, .{
+                    .sectname = makeStaticString(&sect.sectname),
+                    .segname = makeStaticString(&sect.segname),
                     .addr = 0,
                     .size = 0,
                     .offset = 0,
@@ -195,9 +204,14 @@ fn parseObjectFiles(self: *Zld, files: []const []const u8) !void {
                     .reserved1 = 0,
                     .reserved2 = 0,
                     .reserved3 = 0,
+                });
+                res.entry.value = .{
+                    .seg_index = seg_index,
+                    .sect_index = sect_index,
                 };
             }
-            res.entry.value.size += sect.size;
+            const dest_sect = &seg.sections.items[res.entry.value.sect_index];
+            dest_sect.size += sect.size;
             seg.inner.filesize += sect.size;
         }
     }
@@ -277,12 +291,11 @@ fn resolveImports(self: *Zld) !void {
 
 fn allocateTextSegment(self: *Zld) void {
     const seg = &self.load_commands.items[self.text_segment_cmd_index.?].Segment;
-    const sections = seg.sections.items();
     const nexterns = @intCast(u32, self.lazy_imports.items().len);
 
     // Set stubs and stub_helper sizes
-    const stubs = &sections[self.stubs_section_index.?].value;
-    const stub_helper = &sections[self.stub_helper_section_index.?].value;
+    const stubs = &seg.sections.items[self.stubs_section_index.?];
+    const stub_helper = &seg.sections.items[self.stub_helper_section_index.?];
     stubs.size += nexterns * stubs.reserved2;
 
     const stub_size: u4 = switch (self.arch.?) {
@@ -302,11 +315,10 @@ fn allocateTextSegment(self: *Zld) void {
 
 fn allocateDataConstSegment(self: *Zld) void {
     const seg = &self.load_commands.items[self.data_const_segment_cmd_index.?].Segment;
-    const sections = seg.sections.items();
     const nexterns = @intCast(u32, self.nonlazy_imports.items().len);
 
     // Set got size
-    const got = &sections[self.got_section_index.?].value;
+    const got = &seg.sections.items[self.got_section_index.?];
     got.size += nexterns * @sizeOf(u64);
 
     const text_seg = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
@@ -316,12 +328,11 @@ fn allocateDataConstSegment(self: *Zld) void {
 
 fn allocateDataSegment(self: *Zld) void {
     const seg = &self.load_commands.items[self.data_segment_cmd_index.?].Segment;
-    const sections = seg.sections.items();
     const nexterns = @intCast(u32, self.lazy_imports.items().len);
 
     // Set la_symbol_ptr and data size
-    const la_symbol_ptr = &sections[self.la_symbol_ptr_section_index.?].value;
-    const data = &sections[self.data_section_index.?].value;
+    const la_symbol_ptr = &seg.sections.items[self.la_symbol_ptr_section_index.?];
+    const data = &seg.sections.items[self.data_section_index.?];
     la_symbol_ptr.size += nexterns * @sizeOf(u64);
     data.size += @sizeOf(u64); // TODO when do we need more?
 
@@ -339,12 +350,11 @@ fn allocateLinkeditSegment(self: *Zld) void {
 fn allocateSegment(self: *Zld, index: u16, offset: u64, start: u64, reverse: bool) void {
     const base_vmaddr = self.load_commands.items[self.pagezero_segment_cmd_index.?].Segment.inner.vmsize;
     const seg = &self.load_commands.items[index].Segment;
-    const sections = seg.sections.items();
 
     // Calculate segment size
     var total_size = start;
-    for (sections) |entry| {
-        total_size += entry.value.size;
+    for (seg.sections.items) |sect| {
+        total_size += sect.size;
     }
     const aligned_size = mem.alignForwardGeneric(u64, total_size, self.page_size.?);
     seg.inner.vmaddr = base_vmaddr + offset;
@@ -355,31 +365,31 @@ fn allocateSegment(self: *Zld, index: u16, offset: u64, start: u64, reverse: boo
     // Allocate section offsets
     if (reverse) {
         var end_off: u64 = seg.inner.fileoff + seg.inner.filesize;
-        var count: usize = sections.len;
+        var count: usize = seg.sections.items.len;
         while (count > 0) : (count -= 1) {
-            const sec = &sections[count - 1].value;
+            const sec = &seg.sections.items[count - 1];
             end_off -= mem.alignForwardGeneric(u64, sec.size, @sizeOf(u32)); // TODO Should we always align to 4?
             sec.offset = @intCast(u32, end_off);
             sec.addr = base_vmaddr + end_off;
         }
     } else {
         var next_off: u64 = seg.inner.fileoff;
-        for (sections) |*entry| {
-            entry.value.offset = @intCast(u32, next_off);
-            entry.value.addr = base_vmaddr + next_off;
-            next_off += mem.alignForwardGeneric(u64, entry.value.size, @sizeOf(u32)); // TODO Should we always align to 4?
+        for (seg.sections.items) |*sect| {
+            sect.offset = @intCast(u32, next_off);
+            sect.addr = base_vmaddr + next_off;
+            next_off += mem.alignForwardGeneric(u64, sect.size, @sizeOf(u32)); // TODO Should we always align to 4?
         }
     }
 }
 
 fn writeStubHelperCommon(self: *Zld) !void {
     const text_segment = &self.load_commands.items[self.text_segment_cmd_index.?].Segment;
-    const stub_helper = &text_segment.sections.items()[self.stub_helper_section_index.?].value;
+    const stub_helper = &text_segment.sections.items[self.stub_helper_section_index.?];
     const data_segment = &self.load_commands.items[self.data_segment_cmd_index.?].Segment;
-    const data = &data_segment.sections.items()[self.data_section_index.?].value;
-    const la_symbol_ptr = data_segment.sections.items()[self.la_symbol_ptr_section_index.?].value;
+    const data = &data_segment.sections.items[self.data_section_index.?];
+    const la_symbol_ptr = data_segment.sections.items[self.la_symbol_ptr_section_index.?];
     const data_const_segment = &self.load_commands.items[self.data_const_segment_cmd_index.?].Segment;
-    const got = &data_const_segment.sections.items()[self.got_section_index.?].value;
+    const got = &data_const_segment.sections.items[self.got_section_index.?];
 
     self.stub_helper_stubs_start_off = blk: {
         switch (self.arch.?) {
@@ -451,9 +461,9 @@ fn writeStubHelperCommon(self: *Zld) !void {
 
 fn writeLazySymbolPointer(self: *Zld, index: u32) !void {
     const text_segment = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
-    const stub_helper = text_segment.sections.items()[self.stub_helper_section_index.?].value;
+    const stub_helper = text_segment.sections.items[self.stub_helper_section_index.?];
     const data_segment = self.load_commands.items[self.data_segment_cmd_index.?].Segment;
-    const la_symbol_ptr = data_segment.sections.items()[self.la_symbol_ptr_section_index.?].value;
+    const la_symbol_ptr = data_segment.sections.items[self.la_symbol_ptr_section_index.?];
 
     const stub_size: u4 = switch (self.arch.?) {
         .x86_64 => 10,
@@ -471,9 +481,9 @@ fn writeLazySymbolPointer(self: *Zld, index: u32) !void {
 
 fn writeStub(self: *Zld, index: u32) !void {
     const text_segment = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
-    const stubs = text_segment.sections.items()[self.stubs_section_index.?].value;
+    const stubs = text_segment.sections.items[self.stubs_section_index.?];
     const data_segment = self.load_commands.items[self.data_segment_cmd_index.?].Segment;
-    const la_symbol_ptr = data_segment.sections.items()[self.la_symbol_ptr_section_index.?].value;
+    const la_symbol_ptr = data_segment.sections.items[self.la_symbol_ptr_section_index.?];
 
     const stub_off = stubs.offset + index * stubs.reserved2;
     const stub_addr = stubs.addr + index * stubs.reserved2;
@@ -506,7 +516,7 @@ fn writeStub(self: *Zld, index: u32) !void {
 
 fn writeStubInStubHelper(self: *Zld, index: u32) !void {
     const text_segment = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
-    const stub_helper = text_segment.sections.items()[self.stub_helper_section_index.?].value;
+    const stub_helper = text_segment.sections.items[self.stub_helper_section_index.?];
 
     const stub_size: u4 = switch (self.arch.?) {
         .x86_64 => 10,
@@ -548,22 +558,22 @@ fn resolveSymbols(self: *Zld) !void {
         addr: u64,
         size: u64,
     };
-    var next_address = std.StringHashMap(Address).init(self.allocator);
+    var next_address = std.AutoHashMap(DirectoryKey, Address).init(self.allocator);
     defer next_address.deinit();
 
     for (self.objects.items) |object| {
         const seg = object.load_commands.items[object.segment_cmd_index.?].Segment;
-        const sections = seg.sections.items();
 
-        for (sections) |entry| {
-            const sectname = entry.key;
-            const sect = entry.value;
+        for (seg.sections.items) |sect| {
+            const key: DirectoryKey = .{
+                .segname = sect.segname,
+                .sectname = sect.sectname,
+            };
+            const indices = self.directory.get(key) orelse continue;
+            const out_seg = self.load_commands.items[indices.seg_index].Segment;
+            const out_sect = out_seg.sections.items[indices.sect_index];
 
-            const out_seg_id = self.segments_dir.get(parseName(&sect.segname)) orelse continue;
-            const out_seg = self.load_commands.items[out_seg_id].Segment;
-            const out_sect = out_seg.sections.get(sectname) orelse continue;
-
-            const res = try next_address.getOrPut(sectname);
+            const res = try next_address.getOrPut(key);
             const next = &res.entry.value;
             if (res.found_existing) {
                 next.addr += next.size;
@@ -579,14 +589,16 @@ fn resolveSymbols(self: *Zld) !void {
             const sym_name = object.getString(sym.n_strx);
             var out_name = try self.allocator.dupe(u8, sym_name);
 
-            const sect = sections[sym.n_sect - 1];
-            const sectname = sect.key;
-            const out_seg_id = self.segments_dir.get(parseName(&sect.value.segname)) orelse continue;
-            const out_seg = self.load_commands.items[out_seg_id].Segment;
-            const out_sect = out_seg.sections.getIndex(sectname) orelse continue;
+            const sect = seg.sections.items[sym.n_sect - 1];
+
+            const key: DirectoryKey = .{
+                .segname = sect.segname,
+                .sectname = sect.sectname,
+            };
+            const res = self.directory.get(key) orelse continue;
 
             const n_strx = try self.makeString(sym_name);
-            const n_value = sym.n_value - sect.value.addr + next_address.get(sectname).?.addr;
+            const n_value = sym.n_value - sect.addr + next_address.get(key).?.addr;
 
             log.debug("resolving '{s}' as local symbol at 0x{x}", .{ sym_name, n_value });
 
@@ -595,7 +607,7 @@ fn resolveSymbols(self: *Zld) !void {
                 .n_value = n_value,
                 .n_type = macho.N_SECT,
                 .n_desc = sym.n_desc,
-                .n_sect = @intCast(u8, out_sect + 1),
+                .n_sect = @intCast(u8, res.sect_index + 1), // TODO
             });
         }
     }
@@ -607,22 +619,22 @@ fn doRelocs(self: *Zld) !void {
         offset: u64,
         size: u64,
     };
-    var next_space = std.StringHashMap(Space).init(self.allocator);
+    var next_space = std.AutoHashMap(DirectoryKey, Space).init(self.allocator);
     defer next_space.deinit();
 
     for (self.objects.items) |object| {
         const seg = object.load_commands.items[object.segment_cmd_index.?].Segment;
-        const sections = seg.sections.items();
 
-        for (sections) |entry| {
-            const sectname = entry.key;
-            const sect = entry.value;
+        for (seg.sections.items) |sect| {
+            const key: DirectoryKey = .{
+                .segname = sect.segname,
+                .sectname = sect.sectname,
+            };
+            const indices = self.directory.get(key) orelse continue;
+            const out_seg = self.load_commands.items[indices.seg_index].Segment;
+            const out_sect = out_seg.sections.items[indices.sect_index];
 
-            const out_seg_id = self.segments_dir.get(parseName(&sect.segname)) orelse continue;
-            const out_seg = self.load_commands.items[out_seg_id].Segment;
-            const out_sect = out_seg.sections.get(sectname) orelse continue;
-
-            const res = try next_space.getOrPut(sectname);
+            const res = try next_space.getOrPut(key);
             const next = &res.entry.value;
             if (res.found_existing) {
                 next.offset += next.size;
@@ -634,10 +646,13 @@ fn doRelocs(self: *Zld) !void {
             next.size = sect.size;
         }
 
-        for (sections) |entry| {
-            const sectname = entry.key;
-            const sect = entry.value;
-            const next = next_space.get(sectname) orelse continue;
+        for (seg.sections.items) |sect| {
+            const key: DirectoryKey = .{
+                .segname = sect.segname,
+                .sectname = sect.sectname,
+            };
+            // const res = self.directory.get(key) orelse continue;
+            const next = next_space.get(key) orelse continue;
 
             var code = try self.allocator.alloc(u8, sect.size);
             defer self.allocator.free(code);
@@ -649,18 +664,33 @@ fn doRelocs(self: *Zld) !void {
             _ = try object.file.?.preadAll(raw_relocs, sect.reloff);
             const relocs = mem.bytesAsSlice(macho.relocation_info, raw_relocs);
 
-            for (relocs) |rel| {
+            var addend: ?u24 = null;
+
+            for (relocs) |rel, i| {
+                log.debug("{}, {}", .{ relocs.len, i });
+                log.debug("offset 0x{x}", .{sect.reloff + i * @sizeOf(macho.relocation_info)});
+                log.debug("relocating {}, {s}", .{ rel, @tagName(@intToEnum(macho.reloc_type_arm64, rel.r_type)) });
+
+                const rel_type = @intToEnum(macho.reloc_type_arm64, rel.r_type);
+                if (rel_type == .ARM64_RELOC_ADDEND) {
+                    // Must be followed by PAGE21 or PAGEOFF12
+                    addend = rel.r_symbolnum;
+                    continue;
+                }
+
                 const off = @intCast(u32, rel.r_address);
                 const inst = code[off..][0..4];
                 const this_addr = next.address + off;
-                const target_addr = blk: {
+                var target_addr = blk: {
                     if (rel.r_extern == 1) {
                         const sym = object.symtab.items[rel.r_symbolnum];
                         if (isLocal(&sym)) {
                             // Relocate using section offsets only.
-                            const source_sectname = sections[sym.n_sect - 1].key;
-                            const source_sect = sections[sym.n_sect - 1].value;
-                            const target_space = next_space.get(source_sectname).?;
+                            const source_sect = seg.sections.items[sym.n_sect - 1];
+                            const target_space = next_space.get(.{
+                                .segname = source_sect.segname,
+                                .sectname = source_sect.sectname,
+                            }).?;
                             break :blk target_space.address + sym.n_value - source_sect.addr;
                         } else if (isImport(&sym)) {
                             // Relocate to either the artifact's local symbol, or an import from
@@ -670,11 +700,11 @@ fn doRelocs(self: *Zld) !void {
                                 break :blk loc.n_value;
                             } else if (self.lazy_imports.get(sym_name)) |ext| {
                                 const segment = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
-                                const stubs = segment.sections.items()[self.stubs_section_index.?].value;
+                                const stubs = segment.sections.items[self.stubs_section_index.?];
                                 break :blk stubs.addr + ext.index * stubs.reserved2;
                             } else if (self.nonlazy_imports.get(sym_name)) |ext| {
                                 const segment = self.load_commands.items[self.data_const_segment_cmd_index.?].Segment;
-                                const got = segment.sections.items()[self.got_section_index.?].value;
+                                const got = segment.sections.items[self.got_section_index.?];
                                 break :blk got.addr + ext.index * @sizeOf(u64);
                             } else unreachable;
                         } else unreachable;
@@ -682,11 +712,18 @@ fn doRelocs(self: *Zld) !void {
                         // TODO I think we need to reparse the relocation_info as scattered_relocation_info
                         // here to get the actual section plus offset into that section of the relocated
                         // symbol.
-                        const source_sectname = sections[rel.r_symbolnum - 1].key;
-                        const target_space = next_space.get(source_sectname).?;
+                        const source_sectname = seg.sections.items[rel.r_symbolnum - 1];
+                        const target_space = next_space.get(.{
+                            .segname = source_sectname.segname,
+                            .sectname = source_sectname.sectname,
+                        }).?;
                         break :blk target_space.address;
                     }
                 };
+                // if (addend) |a| {
+                //     // TODO
+                //     target_addr += addend;
+                // }
 
                 switch (self.arch.?) {
                     .x86_64 => {
@@ -712,15 +749,16 @@ fn doRelocs(self: *Zld) !void {
                         }
                     },
                     .aarch64 => {
-                        switch (@intToEnum(macho.reloc_type_arm64, rel.r_type)) {
+                        switch (rel_type) {
                             macho.reloc_type_arm64.ARM64_RELOC_BRANCH26 => {
                                 const displacement = @intCast(i28, @intCast(i64, target_addr) - @intCast(i64, this_addr));
                                 var parsed = mem.bytesAsValue(meta.TagPayload(Arm64, Arm64.Branch), inst);
                                 parsed.disp = @truncate(u26, @bitCast(u28, displacement) >> 2);
                             },
                             macho.reloc_type_arm64.ARM64_RELOC_PAGE21, macho.reloc_type_arm64.ARM64_RELOC_GOT_LOAD_PAGE21, macho.reloc_type_arm64.ARM64_RELOC_TLVP_LOAD_PAGE21 => {
-                                const this_page = this_addr >> 12;
-                                const target_page = target_addr >> 12;
+                                const this_page = @intCast(i32, this_addr >> 12);
+                                const target_page = @intCast(i32, target_addr >> 12);
+                                log.debug("relocating from page 0x{x} to 0x{x}", .{ this_page, target_page });
                                 const pages = @bitCast(u21, @intCast(i21, target_page - this_page));
                                 var parsed = mem.bytesAsValue(meta.TagPayload(Arm64, Arm64.Address), inst);
                                 parsed.immhi = @truncate(u19, pages >> 2);
@@ -741,7 +779,7 @@ fn doRelocs(self: *Zld) !void {
             }
 
             log.debug("writing contents of '{s}' section from '{s}' from 0x{x} to 0x{x}", .{
-                sectname,
+                sect.sectname,
                 object.name,
                 next.offset,
                 next.offset + next.size,
@@ -795,13 +833,13 @@ fn populateMetadata(self: *Zld) !void {
 
     if (self.text_section_index == null) {
         const text_seg = &self.load_commands.items[self.text_segment_cmd_index.?].Segment;
-        self.text_section_index = @intCast(u16, text_seg.sections.items().len);
+        self.text_section_index = @intCast(u16, text_seg.sections.items.len);
         const alignment: u2 = switch (self.arch.?) {
             .x86_64 => 0,
             .aarch64 => 2,
             else => unreachable, // unhandled architecture type
         };
-        try text_seg.put(self.allocator, .{
+        try text_seg.append(self.allocator, .{
             .sectname = makeStaticString("__text"),
             .segname = makeStaticString("__TEXT"),
             .addr = 0,
@@ -815,11 +853,15 @@ fn populateMetadata(self: *Zld) !void {
             .reserved2 = 0,
             .reserved3 = 0,
         });
+        try self.addSectionToDir(.{
+            .seg_index = self.text_segment_cmd_index.?,
+            .sect_index = self.text_section_index.?,
+        });
     }
 
     if (self.stubs_section_index == null) {
         const text_seg = &self.load_commands.items[self.text_segment_cmd_index.?].Segment;
-        self.stubs_section_index = @intCast(u16, text_seg.sections.items().len);
+        self.stubs_section_index = @intCast(u16, text_seg.sections.items.len);
         const alignment: u2 = switch (self.arch.?) {
             .x86_64 => 0,
             .aarch64 => 2,
@@ -830,7 +872,7 @@ fn populateMetadata(self: *Zld) !void {
             .aarch64 => 2 * @sizeOf(u32),
             else => unreachable, // unhandled architecture type
         };
-        try text_seg.put(self.allocator, .{
+        try text_seg.append(self.allocator, .{
             .sectname = makeStaticString("__stubs"),
             .segname = makeStaticString("__TEXT"),
             .addr = 0,
@@ -844,11 +886,15 @@ fn populateMetadata(self: *Zld) !void {
             .reserved2 = stub_size,
             .reserved3 = 0,
         });
+        try self.addSectionToDir(.{
+            .seg_index = self.text_segment_cmd_index.?,
+            .sect_index = self.stubs_section_index.?,
+        });
     }
 
     if (self.stub_helper_section_index == null) {
         const text_seg = &self.load_commands.items[self.text_segment_cmd_index.?].Segment;
-        self.stub_helper_section_index = @intCast(u16, text_seg.sections.items().len);
+        self.stub_helper_section_index = @intCast(u16, text_seg.sections.items.len);
         const alignment: u2 = switch (self.arch.?) {
             .x86_64 => 0,
             .aarch64 => 2,
@@ -859,7 +905,7 @@ fn populateMetadata(self: *Zld) !void {
             .aarch64 => 6 * @sizeOf(u32),
             else => unreachable,
         };
-        try text_seg.put(self.allocator, .{
+        try text_seg.append(self.allocator, .{
             .sectname = makeStaticString("__stub_helper"),
             .segname = makeStaticString("__TEXT"),
             .addr = 0,
@@ -872,6 +918,10 @@ fn populateMetadata(self: *Zld) !void {
             .reserved1 = 0,
             .reserved2 = 0,
             .reserved3 = 0,
+        });
+        try self.addSectionToDir(.{
+            .seg_index = self.text_segment_cmd_index.?,
+            .sect_index = self.stub_helper_section_index.?,
         });
     }
 
@@ -897,8 +947,8 @@ fn populateMetadata(self: *Zld) !void {
 
     if (self.got_section_index == null) {
         const data_const_seg = &self.load_commands.items[self.data_const_segment_cmd_index.?].Segment;
-        self.got_section_index = @intCast(u16, data_const_seg.sections.items().len);
-        try data_const_seg.put(self.allocator, .{
+        self.got_section_index = @intCast(u16, data_const_seg.sections.items.len);
+        try data_const_seg.append(self.allocator, .{
             .sectname = makeStaticString("__got"),
             .segname = makeStaticString("__DATA_CONST"),
             .addr = 0,
@@ -911,6 +961,10 @@ fn populateMetadata(self: *Zld) !void {
             .reserved1 = 0,
             .reserved2 = 0,
             .reserved3 = 0,
+        });
+        try self.addSectionToDir(.{
+            .seg_index = self.data_const_segment_cmd_index.?,
+            .sect_index = self.got_section_index.?,
         });
     }
 
@@ -936,8 +990,8 @@ fn populateMetadata(self: *Zld) !void {
 
     if (self.la_symbol_ptr_section_index == null) {
         const data_seg = &self.load_commands.items[self.data_segment_cmd_index.?].Segment;
-        self.la_symbol_ptr_section_index = @intCast(u16, data_seg.sections.items().len);
-        try data_seg.put(self.allocator, .{
+        self.la_symbol_ptr_section_index = @intCast(u16, data_seg.sections.items.len);
+        try data_seg.append(self.allocator, .{
             .sectname = makeStaticString("__la_symbol_ptr"),
             .segname = makeStaticString("__DATA"),
             .addr = 0,
@@ -951,12 +1005,16 @@ fn populateMetadata(self: *Zld) !void {
             .reserved2 = 0,
             .reserved3 = 0,
         });
+        try self.addSectionToDir(.{
+            .seg_index = self.data_segment_cmd_index.?,
+            .sect_index = self.la_symbol_ptr_section_index.?,
+        });
     }
 
     if (self.data_section_index == null) {
         const data_seg = &self.load_commands.items[self.data_segment_cmd_index.?].Segment;
-        self.data_section_index = @intCast(u16, data_seg.sections.items().len);
-        try data_seg.put(self.allocator, .{
+        self.data_section_index = @intCast(u16, data_seg.sections.items.len);
+        try data_seg.append(self.allocator, .{
             .sectname = makeStaticString("__data"),
             .segname = makeStaticString("__DATA"),
             .addr = 0,
@@ -969,6 +1027,10 @@ fn populateMetadata(self: *Zld) !void {
             .reserved1 = 0,
             .reserved2 = 0,
             .reserved3 = 0,
+        });
+        try self.addSectionToDir(.{
+            .seg_index = self.data_segment_cmd_index.?,
+            .sect_index = self.data_section_index.?,
         });
     }
 
@@ -1181,7 +1243,7 @@ fn setEntryPoint(self: *Zld) !void {
     // TODO we should respect the -entry flag passed in by the user to set a custom
     // entrypoint. For now, assume default of `_main`.
     const seg = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
-    const text = seg.sections.items()[self.text_section_index.?].value;
+    const text = seg.sections.items[self.text_section_index.?];
     const entry_sym = self.locals.get("_main") orelse return error.MissingMainEntrypoint;
 
     const name = try self.allocator.dupe(u8, "_main");
@@ -1434,11 +1496,11 @@ fn writeSymbolTable(self: *Zld) !void {
 fn writeDynamicSymbolTable(self: *Zld) !void {
     const seg = &self.load_commands.items[self.linkedit_segment_cmd_index.?].Segment;
     const text_segment = &self.load_commands.items[self.text_segment_cmd_index.?].Segment;
-    const stubs = &text_segment.sections.items()[self.stubs_section_index.?].value;
+    const stubs = &text_segment.sections.items[self.stubs_section_index.?];
     const data_const_seg = &self.load_commands.items[self.data_const_segment_cmd_index.?].Segment;
-    const got = &data_const_seg.sections.items()[self.got_section_index.?].value;
+    const got = &data_const_seg.sections.items[self.got_section_index.?];
     const data_segment = &self.load_commands.items[self.data_segment_cmd_index.?].Segment;
-    const la_symbol_ptr = &data_segment.sections.items()[self.la_symbol_ptr_section_index.?].value;
+    const la_symbol_ptr = &data_segment.sections.items[self.la_symbol_ptr_section_index.?];
     const dysymtab = &self.load_commands.items[self.dysymtab_cmd_index.?].Dysymtab;
 
     const lazy = self.lazy_imports.items();
@@ -1618,11 +1680,23 @@ fn getString(self: *const Zld, str_off: u32) []const u8 {
     return mem.spanZ(@ptrCast([*:0]const u8, self.strtab.items.ptr + str_off));
 }
 
+pub fn parseName(name: *const [16]u8) []const u8 {
+    const len = mem.indexOfScalar(u8, name, @as(u8, 0)) orelse name.len;
+    return name[0..len];
+}
+
 fn addSegmentToDir(self: *Zld, idx: u16) !void {
     const segment_cmd = self.load_commands.items[idx].Segment;
-    const name = parseName(&segment_cmd.inner.segname);
-    var key = try self.allocator.dupe(u8, name);
-    try self.segments_dir.putNoClobber(self.allocator, key, idx);
+    return self.segments_directory.putNoClobber(self.allocator, segment_cmd.inner.segname, idx);
+}
+
+fn addSectionToDir(self: *Zld, value: DirectoryEntry) !void {
+    const seg = self.load_commands.items[value.seg_index].Segment;
+    const sect = seg.sections.items[value.sect_index];
+    return self.directory.putNoClobber(self.allocator, .{
+        .segname = sect.segname,
+        .sectname = sect.sectname,
+    }, value);
 }
 
 inline fn isLocal(sym: *const macho.nlist_64) bool {
