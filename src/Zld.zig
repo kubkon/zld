@@ -253,7 +253,13 @@ fn resolveImports(self: *Zld) !void {
         // TODO handle symbol resolution from non-libc dylibs.
         const dylib_ordinal = 1;
 
-        if (mem.eql(u8, sym_name, "___stderrp") or mem.eql(u8, sym_name, "___stdoutp")) {
+        // TODO need to rework this. Perhaps should create a set of all possible libc
+        // symbols which are expected to be nonlazy?
+        if (mem.eql(u8, sym_name, "___stdoutp") or
+            mem.eql(u8, sym_name, "___stderrp") or
+            mem.eql(u8, sym_name, "___stack_chk_guard") or
+            mem.eql(u8, sym_name, "_environ"))
+        {
             log.debug("writing nonlazy symbol '{s}'", .{sym_name});
             const index = @intCast(u32, self.nonlazy_imports.items().len);
             try self.nonlazy_imports.putNoClobber(self.allocator, key, .{
@@ -651,7 +657,6 @@ fn doRelocs(self: *Zld) !void {
                 .segname = sect.segname,
                 .sectname = sect.sectname,
             };
-            // const res = self.directory.get(key) orelse continue;
             const next = next_space.get(key) orelse continue;
 
             var code = try self.allocator.alloc(u8, sect.size);
@@ -664,81 +669,35 @@ fn doRelocs(self: *Zld) !void {
             _ = try object.file.?.preadAll(raw_relocs, sect.reloff);
             const relocs = mem.bytesAsSlice(macho.relocation_info, raw_relocs);
 
-            var addend: ?u24 = null;
+            var addend: ?u64 = null;
+            var sub: ?i64 = null;
 
-            for (relocs) |rel, i| {
-                log.debug("{}, {}", .{ relocs.len, i });
-                log.debug("offset 0x{x}", .{sect.reloff + i * @sizeOf(macho.relocation_info)});
-                log.debug("relocating {}, {s}", .{ rel, @tagName(@intToEnum(macho.reloc_type_arm64, rel.r_type)) });
-
-                const rel_type = @intToEnum(macho.reloc_type_arm64, rel.r_type);
-                if (rel_type == .ARM64_RELOC_ADDEND) {
-                    // Must be followed by PAGE21 or PAGEOFF12
-                    addend = rel.r_symbolnum;
-                    continue;
-                }
-
+            for (relocs) |rel| {
                 const off = @intCast(u32, rel.r_address);
-                const inst = code[off..][0..4];
                 const this_addr = next.address + off;
-                var target_addr = blk: {
-                    if (rel.r_extern == 1) {
-                        const sym = object.symtab.items[rel.r_symbolnum];
-                        if (isLocal(&sym)) {
-                            // Relocate using section offsets only.
-                            const source_sect = seg.sections.items[sym.n_sect - 1];
-                            const target_space = next_space.get(.{
-                                .segname = source_sect.segname,
-                                .sectname = source_sect.sectname,
-                            }).?;
-                            break :blk target_space.address + sym.n_value - source_sect.addr;
-                        } else if (isImport(&sym)) {
-                            // Relocate to either the artifact's local symbol, or an import from
-                            // shared library.
-                            const sym_name = object.getString(sym.n_strx);
-                            if (self.locals.get(sym_name)) |loc| {
-                                break :blk loc.n_value;
-                            } else if (self.lazy_imports.get(sym_name)) |ext| {
-                                const segment = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
-                                const stubs = segment.sections.items[self.stubs_section_index.?];
-                                break :blk stubs.addr + ext.index * stubs.reserved2;
-                            } else if (self.nonlazy_imports.get(sym_name)) |ext| {
-                                const segment = self.load_commands.items[self.data_const_segment_cmd_index.?].Segment;
-                                const got = segment.sections.items[self.got_section_index.?];
-                                break :blk got.addr + ext.index * @sizeOf(u64);
-                            } else unreachable;
-                        } else unreachable;
-                    } else {
-                        // TODO I think we need to reparse the relocation_info as scattered_relocation_info
-                        // here to get the actual section plus offset into that section of the relocated
-                        // symbol.
-                        const source_sectname = seg.sections.items[rel.r_symbolnum - 1];
-                        const target_space = next_space.get(.{
-                            .segname = source_sectname.segname,
-                            .sectname = source_sectname.sectname,
-                        }).?;
-                        break :blk target_space.address;
-                    }
-                };
-                // if (addend) |a| {
-                //     // TODO
-                //     target_addr += addend;
-                // }
 
                 switch (self.arch.?) {
                     .x86_64 => {
-                        switch (@intToEnum(macho.reloc_type_x86_64, rel.r_type)) {
-                            macho.reloc_type_x86_64.X86_64_RELOC_BRANCH => {
+                        const rel_type = @intToEnum(macho.reloc_type_x86_64, rel.r_type);
+                        const target_addr = self.relocTargetAddr(object, rel, next_space);
+                        switch (rel_type) {
+                            .X86_64_RELOC_BRANCH => {
+                                assert(rel.r_length == 2);
+                                const inst = code[off..][0..4];
                                 // callq / jmpq
                                 const displacement = @bitCast(u32, @intCast(i32, @intCast(i64, target_addr) - @intCast(i64, this_addr) - 4));
                                 mem.writeIntLittle(u32, inst, displacement);
                             },
-                            macho.reloc_type_x86_64.X86_64_RELOC_SIGNED => {
+                            .X86_64_RELOC_SIGNED => {
+                                assert(rel.r_length == 2);
+                                const inst = code[off..][0..4];
                                 // leaq
                                 const displacement = @bitCast(u32, @intCast(i32, @intCast(i64, target_addr) - @intCast(i64, this_addr) - 4));
                                 mem.writeIntLittle(u32, inst, displacement);
                             },
-                            macho.reloc_type_x86_64.X86_64_RELOC_GOT_LOAD => {
+                            .X86_64_RELOC_GOT_LOAD => {
+                                assert(rel.r_length == 2);
+                                const inst = code[off..][0..4];
                                 // movq
                                 const displacement = @bitCast(u32, @intCast(i32, @intCast(i64, target_addr) - @intCast(i64, this_addr) - 4));
                                 mem.writeIntLittle(u32, inst, displacement);
@@ -749,29 +708,92 @@ fn doRelocs(self: *Zld) !void {
                         }
                     },
                     .aarch64 => {
+                        const rel_type = @intToEnum(macho.reloc_type_arm64, rel.r_type);
+
+                        if (rel_type == .ARM64_RELOC_ADDEND) {
+                            addend = rel.r_symbolnum;
+                            log.debug("setting addend = 0x{x}", .{addend});
+                            continue;
+                        }
+
+                        const target_addr = self.relocTargetAddr(object, rel, next_space);
                         switch (rel_type) {
-                            macho.reloc_type_arm64.ARM64_RELOC_BRANCH26 => {
+                            .ARM64_RELOC_BRANCH26 => {
+                                assert(rel.r_length == 2);
+                                const inst = code[off..][0..4];
                                 const displacement = @intCast(i28, @intCast(i64, target_addr) - @intCast(i64, this_addr));
                                 var parsed = mem.bytesAsValue(meta.TagPayload(Arm64, Arm64.Branch), inst);
                                 parsed.disp = @truncate(u26, @bitCast(u28, displacement) >> 2);
                             },
-                            macho.reloc_type_arm64.ARM64_RELOC_PAGE21, macho.reloc_type_arm64.ARM64_RELOC_GOT_LOAD_PAGE21, macho.reloc_type_arm64.ARM64_RELOC_TLVP_LOAD_PAGE21 => {
+                            .ARM64_RELOC_PAGE21,
+                            .ARM64_RELOC_GOT_LOAD_PAGE21,
+                            .ARM64_RELOC_TLVP_LOAD_PAGE21,
+                            => {
+                                assert(rel.r_length == 2);
+                                const inst = code[off..][0..4];
+                                const ta = if (addend) |a| target_addr + a else target_addr;
+                                log.debug("target_addr = 0x{x}", .{ta});
                                 const this_page = @intCast(i32, this_addr >> 12);
-                                const target_page = @intCast(i32, target_addr >> 12);
-                                log.debug("relocating from page 0x{x} to 0x{x}", .{ this_page, target_page });
+                                const target_page = @intCast(i32, ta >> 12);
                                 const pages = @bitCast(u21, @intCast(i21, target_page - this_page));
                                 var parsed = mem.bytesAsValue(meta.TagPayload(Arm64, Arm64.Address), inst);
                                 parsed.immhi = @truncate(u19, pages >> 2);
                                 parsed.immlo = @truncate(u2, pages);
                             },
-                            macho.reloc_type_arm64.ARM64_RELOC_PAGEOFF12, macho.reloc_type_arm64.ARM64_RELOC_GOT_LOAD_PAGEOFF12, macho.reloc_type_arm64.ARM64_RELOC_TLVP_LOAD_PAGEOFF12 => {
-                                const narrowed = @truncate(u12, target_addr);
+                            .ARM64_RELOC_PAGEOFF12,
+                            .ARM64_RELOC_GOT_LOAD_PAGEOFF12,
+                            .ARM64_RELOC_TLVP_LOAD_PAGEOFF12,
+                            => {
+                                assert(rel.r_length == 2);
+                                const inst = code[off..][0..4];
+                                const ta = if (addend) |a| target_addr + a else target_addr;
+                                log.debug("target_addr = 0x{x}", .{ta});
+                                const narrowed = @truncate(u12, ta);
                                 var parsed = mem.bytesAsValue(meta.TagPayload(Arm64, Arm64.LoadRegister), inst);
                                 parsed.offset = narrowed;
+                                addend = null;
                             },
-                            else => |tt| {
-                                log.warn("unhandled relocation type '{}'", .{tt});
+                            .ARM64_RELOC_SUBTRACTOR => {
+                                log.debug("ARM64_RELOC_SUBTRACTOR => {}, sym = {s}", .{ rel, object.getString(object.symtab.items[rel.r_symbolnum].n_strx) });
+                                sub = @intCast(i64, target_addr);
                             },
+                            .ARM64_RELOC_UNSIGNED => {
+                                switch (rel.r_length) {
+                                    3 => {
+                                        const inst = code[off..][0..8];
+                                        const offset = mem.readIntLittle(u64, inst);
+                                        log.debug("ARM64_RELOC_UNSIGNED => {}, addend => 0x{x}, sym = {s}", .{ rel, offset, object.getString(object.symtab.items[rel.r_symbolnum].n_strx) });
+                                        if (sub) |s| {
+                                            const value = @intCast(u64, @intCast(i64, target_addr) - s);
+                                            mem.writeIntLittle(u64, inst, value + offset);
+                                        } else {
+                                            mem.writeIntLittle(u64, inst, target_addr + offset);
+                                        }
+                                        sub = null;
+                                    },
+                                    2 => {
+                                        const inst = code[off..][0..4];
+                                        const offset = mem.readIntLittle(u32, inst);
+                                        log.debug("ARM64_RELOC_UNSIGNED => {}, addend => 0x{x}, sym = {s}", .{ rel, offset, object.getString(object.symtab.items[rel.r_symbolnum].n_strx) });
+                                        if (sub) |s| {
+                                            log.debug("target_addr = 0x{x}, sub = 0x{x}", .{ target_addr, s });
+                                            const result = @bitCast(u64, @intCast(i64, target_addr) - s + offset);
+                                            mem.writeIntLittle(u32, inst, @truncate(u32, result));
+                                        } else {
+                                            const result = target_addr + offset;
+                                            mem.writeIntLittle(u32, inst, @truncate(u32, result));
+                                        }
+                                        sub = null;
+                                    },
+                                    else => {
+                                        log.warn("unexpected reloc length {}", .{rel.r_length});
+                                    },
+                                }
+                            },
+                            .ARM64_RELOC_POINTER_TO_GOT => {
+                                log.warn("handle pointer-to-got slots", .{});
+                            },
+                            else => unreachable,
                         }
                     },
                     else => unreachable,
@@ -788,6 +810,54 @@ fn doRelocs(self: *Zld) !void {
             try self.file.?.pwriteAll(code, next.offset);
         }
     }
+}
+
+fn relocTargetAddr(self: *Zld, object: Object, rel: macho.relocation_info, next_space: anytype) u64 {
+    const seg = object.load_commands.items[object.segment_cmd_index.?].Segment;
+    const target_addr = blk: {
+        if (rel.r_extern == 1) {
+            const sym = object.symtab.items[rel.r_symbolnum];
+            if (isLocal(&sym) or isExport(&sym)) {
+                // Relocate using section offsets only.
+                const source_sect = seg.sections.items[sym.n_sect - 1];
+                const target_space = next_space.get(.{
+                    .segname = source_sect.segname,
+                    .sectname = source_sect.sectname,
+                }).?;
+                break :blk target_space.address + sym.n_value - source_sect.addr;
+            } else if (isImport(&sym)) {
+                // Relocate to either the artifact's local symbol, or an import from
+                // shared library.
+                const sym_name = object.getString(sym.n_strx);
+                if (self.locals.get(sym_name)) |loc| {
+                    break :blk loc.n_value;
+                } else if (self.lazy_imports.get(sym_name)) |ext| {
+                    const segment = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
+                    const stubs = segment.sections.items[self.stubs_section_index.?];
+                    break :blk stubs.addr + ext.index * stubs.reserved2;
+                } else if (self.nonlazy_imports.get(sym_name)) |ext| {
+                    const segment = self.load_commands.items[self.data_const_segment_cmd_index.?].Segment;
+                    const got = segment.sections.items[self.got_section_index.?];
+                    break :blk got.addr + ext.index * @sizeOf(u64);
+                } else unreachable;
+            } else {
+                log.warn("unexpected symbol {}, {s}", .{ sym, object.getString(sym.n_strx) });
+                unreachable;
+            }
+        } else {
+            // TODO I think we need to reparse the relocation_info as scattered_relocation_info
+            // here to get the actual section plus offset into that section of the relocated
+            // symbol. Unless the fine-grained location is encoded within the cell in the code
+            // buffer?
+            const source_sectname = seg.sections.items[rel.r_symbolnum - 1];
+            const target_space = next_space.get(.{
+                .segname = source_sectname.segname,
+                .sectname = source_sectname.sectname,
+            }).?;
+            break :blk target_space.address;
+        }
+    };
+    return target_addr;
 }
 
 fn populateMetadata(self: *Zld) !void {
