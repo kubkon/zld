@@ -11,12 +11,15 @@ pub fn build(b: *Builder) void {
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall.
     const mode = b.standardReleaseOptions();
 
+    const enable_logging = b.option(bool, "log", "Whether to enable logging") orelse false;
+
     const lib = b.addStaticLibrary("zld", "src/Zld.zig");
     lib.setBuildMode(mode);
 
     const exe = b.addExecutable("zld", "src/main.zig");
     exe.setTarget(target);
     exe.setBuildMode(mode);
+    exe.addBuildOption(bool, "enable_logging", enable_logging);
     exe.install();
 
     const run_cmd = exe.run();
