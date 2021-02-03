@@ -725,10 +725,12 @@ fn doRelocs(self: *Zld) !void {
                     },
                     .aarch64 => {
                         const rel_type = @intToEnum(macho.reloc_type_arm64, rel.r_type);
+                        log.debug("{s}", .{@tagName(rel_type)});
 
                         if (rel_type == .ARM64_RELOC_ADDEND) {
                             addend = rel.r_symbolnum;
                             log.debug("setting addend = 0x{x}", .{addend});
+                            // TODO followed by either PAGE21 or PAGEOFF12 only.
                             continue;
                         }
 
@@ -756,6 +758,7 @@ fn doRelocs(self: *Zld) !void {
                                 var parsed = mem.bytesAsValue(meta.TagPayload(Arm64, Arm64.Address), inst);
                                 parsed.immhi = @truncate(u19, pages >> 2);
                                 parsed.immlo = @truncate(u2, pages);
+                                addend = null;
                             },
                             .ARM64_RELOC_PAGEOFF12,
                             .ARM64_RELOC_GOT_LOAD_PAGEOFF12,
@@ -770,17 +773,10 @@ fn doRelocs(self: *Zld) !void {
                                     parsed.offset = narrowed;
                                 } else {
                                     var parsed = mem.bytesAsValue(meta.TagPayload(Arm64, Arm64.LoadRegister), inst);
-                                    // const offset = if (parsed.size == 1) @divExact(target_addr, 8) else @divExact(target_addr, 4);
-                                    const offset = target_addr;
-                                    const ta = if (addend) |a| offset + a else offset;
-                                    parsed.offset = @truncate(u12, ta);
+                                    const ta = if (addend) |a| target_addr + a else target_addr;
+                                    const offset = if (parsed.size == 1) @divExact(ta, 8) else @divExact(ta, 4);
+                                    parsed.offset = @truncate(u12, offset);
                                     log.debug("ta = 0x{x}, parsed_offset = 0x{x}", .{ ta, parsed.offset });
-                                    // if (narrowed > 0) {
-                                    //     log.debug("parsed = {}", .{parsed});
-                                    //     mem.writeIntLittle(u32, inst, Arm64.add(parsed.rt, parsed.rn, narrowed, parsed.size).toU32());
-                                    // } else {
-                                    //     parsed.offset = narrowed;
-                                    // }
                                 }
                                 addend = null;
                             },
