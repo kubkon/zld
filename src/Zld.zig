@@ -407,7 +407,8 @@ fn writeStubHelperCommon(self: *Zld) !void {
                 code[1] = 0x8d;
                 code[2] = 0x1d;
                 {
-                    const displacement = try math.cast(u32, data.addr - stub_helper.addr - 7);
+                    const target_addr = data.addr + data.size - @sizeOf(u64);
+                    const displacement = try math.cast(u32, target_addr - stub_helper.addr - 7);
                     mem.writeIntLittle(u32, code[3..7], displacement);
                 }
                 // push %r11
@@ -428,7 +429,8 @@ fn writeStubHelperCommon(self: *Zld) !void {
             .aarch64 => {
                 var code: [4 * @sizeOf(u32)]u8 = undefined;
                 {
-                    const displacement = @bitCast(u21, try math.cast(i21, data.addr - stub_helper.addr));
+                    const target_addr = data.addr + data.size - @sizeOf(u64);
+                    const displacement = @bitCast(u21, try math.cast(i21, target_addr - stub_helper.addr));
                     // adr x17, disp
                     mem.writeIntLittle(u32, code[0..4], Arm64.adr(17, displacement).toU32());
                 }
@@ -590,9 +592,15 @@ fn resolveSymbols(self: *Zld) !void {
         }
 
         for (object.symtab.items) |sym| {
-            if (isImport(&sym) or isLocal(&sym)) continue;
+            if (isImport(&sym)) continue;
 
             const sym_name = object.getString(sym.n_strx);
+
+            if (isLocal(&sym) and self.locals.get(sym_name) != null) {
+                log.debug("symbol '{s}' already exists; skipping", .{sym_name});
+                continue;
+            }
+
             var out_name = try self.allocator.dupe(u8, sym_name);
 
             const sect = seg.sections.items[sym.n_sect - 1];
@@ -608,12 +616,20 @@ fn resolveSymbols(self: *Zld) !void {
 
             log.debug("resolving '{s}' as local symbol at 0x{x}", .{ sym_name, n_value });
 
+            var n_sect = res.sect_index + 1;
+            for (self.load_commands.items) |sseg, i| {
+                if (i == res.seg_index) {
+                    break;
+                }
+                n_sect += @intCast(u16, sseg.Segment.sections.items.len);
+            }
+
             try self.locals.putNoClobber(self.allocator, out_name, .{
                 .n_strx = n_strx,
                 .n_value = n_value,
                 .n_type = macho.N_SECT,
                 .n_desc = sym.n_desc,
-                .n_sect = @intCast(u8, res.sect_index + 1), // TODO
+                .n_sect = @intCast(u8, n_sect),
             });
         }
     }
@@ -717,6 +733,7 @@ fn doRelocs(self: *Zld) !void {
                         }
 
                         const target_addr = self.relocTargetAddr(object, rel, next_space);
+                        log.debug("target_addr = 0x{x}, addend = 0x{x}", .{ target_addr, addend });
                         switch (rel_type) {
                             .ARM64_RELOC_BRANCH26 => {
                                 assert(rel.r_length == 2);
@@ -732,10 +749,10 @@ fn doRelocs(self: *Zld) !void {
                                 assert(rel.r_length == 2);
                                 const inst = code[off..][0..4];
                                 const ta = if (addend) |a| target_addr + a else target_addr;
-                                log.debug("target_addr = 0x{x}", .{ta});
                                 const this_page = @intCast(i32, this_addr >> 12);
                                 const target_page = @intCast(i32, ta >> 12);
                                 const pages = @bitCast(u21, @intCast(i21, target_page - this_page));
+                                log.debug("pages = 0x{x}", .{pages});
                                 var parsed = mem.bytesAsValue(meta.TagPayload(Arm64, Arm64.Address), inst);
                                 parsed.immhi = @truncate(u19, pages >> 2);
                                 parsed.immlo = @truncate(u2, pages);
@@ -746,11 +763,25 @@ fn doRelocs(self: *Zld) !void {
                             => {
                                 assert(rel.r_length == 2);
                                 const inst = code[off..][0..4];
-                                const ta = if (addend) |a| target_addr + a else target_addr;
-                                log.debug("target_addr = 0x{x}", .{ta});
-                                const narrowed = @truncate(u12, ta);
-                                var parsed = mem.bytesAsValue(meta.TagPayload(Arm64, Arm64.LoadRegister), inst);
-                                parsed.offset = narrowed;
+                                if (rel_type == .ARM64_RELOC_PAGEOFF12) {
+                                    var parsed = mem.bytesAsValue(meta.TagPayload(Arm64, Arm64.Add), inst);
+                                    const ta = if (addend) |a| target_addr + a else target_addr;
+                                    const narrowed = @truncate(u12, ta);
+                                    parsed.offset = narrowed;
+                                } else {
+                                    var parsed = mem.bytesAsValue(meta.TagPayload(Arm64, Arm64.LoadRegister), inst);
+                                    // const offset = if (parsed.size == 1) @divExact(target_addr, 8) else @divExact(target_addr, 4);
+                                    const offset = target_addr;
+                                    const ta = if (addend) |a| offset + a else offset;
+                                    parsed.offset = @truncate(u12, ta);
+                                    log.debug("ta = 0x{x}, parsed_offset = 0x{x}", .{ ta, parsed.offset });
+                                    // if (narrowed > 0) {
+                                    //     log.debug("parsed = {}", .{parsed});
+                                    //     mem.writeIntLittle(u32, inst, Arm64.add(parsed.rt, parsed.rn, narrowed, parsed.size).toU32());
+                                    // } else {
+                                    //     parsed.offset = narrowed;
+                                    // }
+                                }
                                 addend = null;
                             },
                             .ARM64_RELOC_SUBTRACTOR => {
@@ -829,6 +860,7 @@ fn relocTargetAddr(self: *Zld, object: Object, rel: macho.relocation_info, next_
                 // Relocate to either the artifact's local symbol, or an import from
                 // shared library.
                 const sym_name = object.getString(sym.n_strx);
+                log.debug("relocating '{s}'", .{sym_name});
                 if (self.locals.get(sym_name)) |loc| {
                     break :blk loc.n_value;
                 } else if (self.lazy_imports.get(sym_name)) |ext| {
@@ -1278,6 +1310,14 @@ fn populateMetadata(self: *Zld) !void {
 }
 
 fn flush(self: *Zld) !void {
+    {
+        const seg = &self.load_commands.items[self.data_segment_cmd_index.?].Segment;
+        for (seg.sections.items) |*sect| {
+            if (mem.eql(u8, parseName(&sect.sectname), "__bss")) {
+                sect.offset = 0;
+            }
+        }
+    }
     try self.setEntryPoint();
     try self.writeRebaseInfoTable();
     try self.writeBindInfoTable();
@@ -1717,7 +1757,7 @@ fn writeHeader(self: *Zld) !void {
     header.cputype = cpu_info.cpu_type;
     header.cpusubtype = cpu_info.cpu_subtype;
     header.filetype = macho.MH_EXECUTE;
-    header.flags = macho.MH_NOUNDEFS | macho.MH_DYLDLINK | macho.MH_PIE;
+    header.flags = macho.MH_NOUNDEFS | macho.MH_DYLDLINK | macho.MH_PIE | macho.MH_TWOLEVEL;
     header.reserved = 0;
 
     header.ncmds = @intCast(u32, self.load_commands.items.len);

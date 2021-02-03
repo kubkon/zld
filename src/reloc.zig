@@ -14,7 +14,7 @@ pub const Arm64 = union(enum) {
     Address: packed struct {
         reg: u5,
         immhi: u19,
-        fixed: u5 = 0b10000,
+        _1: u5 = 0b10000,
         immlo: u2,
         page: u1,
     },
@@ -24,8 +24,9 @@ pub const Arm64 = union(enum) {
         offset: u12,
         opc: u2,
         op1: u2,
-        fixed: u4 = 0b111_0,
-        size: u2,
+        _1: u4 = 0b111_0,
+        size: u1,
+        _2: u1 = 0b1,
     },
     LoadLiteral: packed struct {
         reg: u5,
@@ -33,6 +34,14 @@ pub const Arm64 = union(enum) {
         _1: u6 = 0b011_0_00,
         full_width: u1,
         _2: u1 = 0b0,
+    },
+    Add: packed struct {
+        rt: u5,
+        rn: u5,
+        offset: u12,
+        shift: u1 = 0b0,
+        _1: u8 = 0b0010_0010,
+        size: u1,
     },
 
     pub fn toU32(self: Arm64) u32 {
@@ -42,6 +51,7 @@ pub const Arm64 = union(enum) {
             .Address => |x| @bitCast(u32, x),
             .LoadRegister => |x| @bitCast(u32, x),
             .LoadLiteral => |x| @bitCast(u32, x),
+            .Add => |x| @bitCast(u32, x),
         };
         return as_u32;
     }
@@ -110,6 +120,17 @@ pub const Arm64 = union(enum) {
                 .reg = reg,
                 .literal = literal,
                 .full_width = if (is_full_width) 1 else 0,
+            },
+        };
+    }
+
+    pub fn add(rt: u5, rn: u5, offset: u12, size: u1) Arm64 {
+        return Arm64{
+            .Add = .{
+                .rt = rt,
+                .rn = rn,
+                .offset = offset,
+                .size = size,
             },
         };
     }
