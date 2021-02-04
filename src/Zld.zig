@@ -767,7 +767,7 @@ fn doRelocs(self: *Zld) !void {
                                 addend = null;
                             },
                             .ARM64_RELOC_SUBTRACTOR => {
-                                log.debug("ARM64_RELOC_SUBTRACTOR => {}, sym = {s}", .{ rel, object.getString(object.symtab.items[rel.r_symbolnum].n_strx) });
+                                log.debug("{}, sym = {s}", .{ rel, object.getString(object.symtab.items[rel.r_symbolnum].n_strx) });
                                 sub = @intCast(i64, target_addr);
                             },
                             .ARM64_RELOC_UNSIGNED => {
@@ -775,7 +775,7 @@ fn doRelocs(self: *Zld) !void {
                                     3 => {
                                         const inst = code[off..][0..8];
                                         const offset = mem.readIntLittle(u64, inst);
-                                        log.debug("ARM64_RELOC_UNSIGNED => {}, addend => 0x{x}, sym = {s}", .{ rel, offset, object.getString(object.symtab.items[rel.r_symbolnum].n_strx) });
+                                        log.debug("{}, addend => 0x{x}, sym = {s}", .{ rel, offset, object.getString(object.symtab.items[rel.r_symbolnum].n_strx) });
                                         log.debug("sym_addr = 0x{x}", .{target_addr});
                                         if (sub) |s| {
                                             const value = @bitCast(u64, @intCast(i64, target_addr) - s);
@@ -784,21 +784,28 @@ fn doRelocs(self: *Zld) !void {
                                             log.debug("value = 0x{x}", .{hmm});
                                             mem.writeIntLittle(u64, inst, hmm);
                                         } else {
-                                            mem.writeIntLittle(u64, inst, target_addr + offset);
+                                            var hmm: u64 = undefined;
+                                            _ = @addWithOverflow(u64, target_addr, offset, &hmm);
+                                            log.debug("value = 0x{x}", .{hmm});
+                                            mem.writeIntLittle(u64, inst, hmm);
                                         }
                                         sub = null;
                                     },
                                     2 => {
                                         const inst = code[off..][0..4];
                                         const offset = mem.readIntLittle(u32, inst);
-                                        log.debug("ARM64_RELOC_UNSIGNED => {}, addend => 0x{x}, sym = {s}", .{ rel, offset, object.getString(object.symtab.items[rel.r_symbolnum].n_strx) });
+                                        log.debug("{}, addend => 0x{x}, sym = {s}", .{ rel, offset, object.getString(object.symtab.items[rel.r_symbolnum].n_strx) });
                                         if (sub) |s| {
-                                            log.debug("target_addr = 0x{x}, sub = 0x{x}", .{ target_addr, s });
-                                            const result = @bitCast(u64, @intCast(i64, target_addr) - s + offset);
-                                            mem.writeIntLittle(u32, inst, @truncate(u32, result));
+                                            const result = @truncate(u32, @bitCast(u64, @intCast(i64, target_addr) - s));
+                                            var hmm: u32 = undefined;
+                                            _ = @addWithOverflow(u32, result, offset, &hmm);
+                                            log.debug("target_addr = 0x{x}, result = 0x{x}", .{ target_addr, hmm });
+                                            mem.writeIntLittle(u32, inst, hmm);
                                         } else {
-                                            const result = target_addr + offset;
-                                            mem.writeIntLittle(u32, inst, @truncate(u32, result));
+                                            var hmm: u32 = undefined;
+                                            _ = @addWithOverflow(u32, @truncate(u32, target_addr), offset, &hmm);
+                                            log.debug("target_addr = 0x{x}, result = 0x{x}", .{ target_addr, hmm });
+                                            mem.writeIntLittle(u32, inst, hmm);
                                         }
                                         sub = null;
                                     },
@@ -817,8 +824,9 @@ fn doRelocs(self: *Zld) !void {
                 }
             }
 
-            log.debug("writing contents of '{s}' section from '{s}' from 0x{x} to 0x{x}", .{
-                sect.sectname,
+            log.debug("writing contents of '{s},{s}' section from '{s}' from 0x{x} to 0x{x}", .{
+                parseName(&sect.segname),
+                parseName(&sect.sectname),
                 object.name,
                 next.offset,
                 next.offset + next.size,
