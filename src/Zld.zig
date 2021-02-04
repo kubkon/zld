@@ -174,10 +174,6 @@ fn parseObjectFiles(self: *Zld, files: []const []const u8) !void {
         for (seg_cmd.sections.items) |sect| {
             const sectname = parseName(&sect.sectname);
 
-            if (mem.eql(u8, sectname, "__eh_frame")) {
-                log.warn("TODO handle __eh_frame section", .{});
-                continue;
-            }
             const seg_index = self.segments_directory.get(sect.segname) orelse {
                 log.warn("segname {s} not found in the output artifact", .{sect.segname});
                 continue;
@@ -434,7 +430,7 @@ fn writeStubHelperCommon(self: *Zld) !void {
                     const displacement = try math.divExact(u64, addr - stub_helper.addr - 2 * @sizeOf(u32), 4);
                     const literal = try math.cast(u19, displacement);
                     // ldr x16, label
-                    mem.writeIntLittle(u32, code[8..12], Arm64.ldr(16, literal, true).toU32());
+                    mem.writeIntLittle(u32, code[8..12], Arm64.ldr(16, literal, 1).toU32());
                 }
                 // br x16
                 code[12] = 0x00;
@@ -502,7 +498,7 @@ fn writeStub(self: *Zld, index: u32) !void {
             const displacement = try math.divExact(u64, la_ptr_addr - stub_addr, 4);
             const literal = try math.cast(u19, displacement);
             // ldr x16, literal
-            mem.writeIntLittle(u32, code[0..4], Arm64.ldr(16, literal, true).toU32());
+            mem.writeIntLittle(u32, code[0..4], Arm64.ldr(16, literal, 1).toU32());
             // br x16
             mem.writeIntLittle(u32, code[4..8], Arm64.br(16).toU32());
         },
@@ -540,7 +536,7 @@ fn writeStubInStubHelper(self: *Zld, index: u32) !void {
             const displacement = try math.cast(i28, @intCast(i64, stub_helper.offset) - @intCast(i64, stub_off) - 4);
             const literal = @divExact(stub_size - @sizeOf(u32), 4);
             // ldr w16, literal
-            mem.writeIntLittle(u32, code[0..4], Arm64.ldr(16, literal, false).toU32());
+            mem.writeIntLittle(u32, code[0..4], Arm64.ldr(16, literal, 0).toU32());
             // b disp
             mem.writeIntLittle(u32, code[4..8], Arm64.b(displacement).toU32());
             mem.writeIntLittle(u32, code[8..12], 0x0); // Just a placeholder populated in `populateLazyBindOffsetsInStubHelper`.
@@ -751,20 +747,22 @@ fn doRelocs(self: *Zld) !void {
                             .ARM64_RELOC_GOT_LOAD_PAGEOFF12,
                             .ARM64_RELOC_TLVP_LOAD_PAGEOFF12,
                             => {
-                                assert(rel.r_length == 2);
                                 const inst = code[off..][0..4];
-                                if (rel_type == .ARM64_RELOC_PAGEOFF12) {
+                                if (Arm64.isArithmetic(inst)) {
+                                    // add
                                     var parsed = mem.bytesAsValue(meta.TagPayload(Arm64, Arm64.Add), inst);
                                     const ta = if (addend) |a| target_addr + a else target_addr;
                                     const narrowed = @truncate(u12, ta);
                                     parsed.offset = narrowed;
+                                    log.debug("ADD ta = 0x{x}, parsed_offset = 0x{x}", .{ ta, parsed.offset });
                                 } else {
+                                    // ldr/str
                                     var parsed = mem.bytesAsValue(meta.TagPayload(Arm64, Arm64.LoadRegister), inst);
                                     const ta = if (addend) |a| target_addr + a else target_addr;
                                     const narrowed = @truncate(u12, ta);
                                     const offset = if (parsed.size == 1) @divExact(narrowed, 8) else @divExact(narrowed, 4);
                                     parsed.offset = @truncate(u12, offset);
-                                    log.debug("ta = 0x{x}, parsed_offset = 0x{x}", .{ ta, parsed.offset });
+                                    log.debug("LDR ta = 0x{x}, parsed_offset = 0x{x}", .{ ta, parsed.offset });
                                 }
                                 addend = null;
                             },
@@ -780,8 +778,11 @@ fn doRelocs(self: *Zld) !void {
                                         log.debug("ARM64_RELOC_UNSIGNED => {}, addend => 0x{x}, sym = {s}", .{ rel, offset, object.getString(object.symtab.items[rel.r_symbolnum].n_strx) });
                                         log.debug("sym_addr = 0x{x}", .{target_addr});
                                         if (sub) |s| {
-                                            const value = @intCast(u64, @intCast(i64, target_addr) - s);
-                                            mem.writeIntLittle(u64, inst, value + offset);
+                                            const value = @bitCast(u64, @intCast(i64, target_addr) - s);
+                                            var hmm: u64 = undefined;
+                                            _ = @addWithOverflow(u64, value, offset, &hmm);
+                                            log.debug("value = 0x{x}", .{hmm});
+                                            mem.writeIntLittle(u64, inst, hmm);
                                         } else {
                                             mem.writeIntLittle(u64, inst, target_addr + offset);
                                         }
@@ -823,7 +824,15 @@ fn doRelocs(self: *Zld) !void {
                 next.offset + next.size,
             });
 
-            try self.file.?.pwriteAll(code, next.offset);
+            if (mem.eql(u8, parseName(&sect.sectname), "__bss")) {
+                // Zero-out the space
+                var zeroes = try self.allocator.alloc(u8, next.size);
+                defer self.allocator.free(zeroes);
+                mem.set(u8, zeroes, 0);
+                try self.file.?.pwriteAll(zeroes, next.offset);
+            } else {
+                try self.file.?.pwriteAll(code, next.offset);
+            }
         }
     }
 }
@@ -909,7 +918,7 @@ fn populateMetadata(self: *Zld) !void {
                 .vmsize = 0,
                 .fileoff = 0,
                 .filesize = 0,
-                .maxprot = macho.VM_PROT_READ | macho.VM_PROT_WRITE | macho.VM_PROT_EXECUTE,
+                .maxprot = macho.VM_PROT_READ | macho.VM_PROT_EXECUTE,
                 .initprot = macho.VM_PROT_READ | macho.VM_PROT_EXECUTE,
                 .nsects = 0,
                 .flags = 0,
@@ -1023,7 +1032,7 @@ fn populateMetadata(self: *Zld) !void {
                 .vmsize = 0,
                 .fileoff = 0,
                 .filesize = 0,
-                .maxprot = macho.VM_PROT_READ | macho.VM_PROT_WRITE | macho.VM_PROT_EXECUTE,
+                .maxprot = macho.VM_PROT_READ | macho.VM_PROT_WRITE,
                 .initprot = macho.VM_PROT_READ | macho.VM_PROT_WRITE,
                 .nsects = 0,
                 .flags = 0,
@@ -1112,7 +1121,7 @@ fn populateMetadata(self: *Zld) !void {
                 .vmsize = 0,
                 .fileoff = 0,
                 .filesize = 0,
-                .maxprot = macho.VM_PROT_READ | macho.VM_PROT_WRITE | macho.VM_PROT_EXECUTE,
+                .maxprot = macho.VM_PROT_READ,
                 .initprot = macho.VM_PROT_READ,
                 .nsects = 0,
                 .flags = 0,
@@ -1280,6 +1289,14 @@ fn flush(self: *Zld) !void {
         for (seg.sections.items) |*sect| {
             if (mem.eql(u8, parseName(&sect.sectname), "__bss")) {
                 sect.offset = 0;
+            }
+        }
+    }
+    {
+        const seg = &self.load_commands.items[self.text_segment_cmd_index.?].Segment;
+        for (seg.sections.items) |*sect| {
+            if (mem.eql(u8, parseName(&sect.sectname), "__eh_frame")) {
+                sect.flags = 0;
             }
         }
     }

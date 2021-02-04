@@ -1,3 +1,6 @@
+const std = @import("std");
+const log = std.log.scoped(.reloc);
+
 pub const Arm64 = union(enum) {
     Branch: packed struct {
         disp: u26,
@@ -22,9 +25,7 @@ pub const Arm64 = union(enum) {
         rt: u5,
         rn: u5,
         offset: u12,
-        opc: u2,
-        op1: u2,
-        _1: u4 = 0b111_0,
+        _1: u8 = 0b111_0_01_01,
         size: u1,
         _2: u1 = 0b1,
     },
@@ -32,15 +33,14 @@ pub const Arm64 = union(enum) {
         reg: u5,
         literal: u19,
         _1: u6 = 0b011_0_00,
-        full_width: u1,
+        size: u1,
         _2: u1 = 0b0,
     },
     Add: packed struct {
         rt: u5,
         rn: u5,
         offset: u12,
-        shift: u1 = 0b0,
-        _1: u8 = 0b0010_0010,
+        _1: u9 = 0b0_0_100010_0,
         size: u1,
     },
 
@@ -114,12 +114,12 @@ pub const Arm64 = union(enum) {
         };
     }
 
-    pub fn ldr(reg: u5, literal: u19, is_full_width: bool) Arm64 {
+    pub fn ldr(reg: u5, literal: u19, size: u1) Arm64 {
         return Arm64{
             .LoadLiteral = .{
                 .reg = reg,
                 .literal = literal,
-                .full_width = if (is_full_width) 1 else 0,
+                .size = size,
             },
         };
     }
@@ -133,5 +133,27 @@ pub const Arm64 = union(enum) {
                 .size = size,
             },
         };
+    }
+
+    pub fn ldrr(rt: u5, rn: u5, offset: u12, size: u1) Arm64 {
+        return Arm64{
+            .LoadRegister = .{
+                .rt = rt,
+                .rn = rn,
+                .offset = offset,
+                .size = size,
+            },
+        };
+    }
+
+    pub fn isArithmetic(inst: *const [4]u8) bool {
+        const group_decode = @truncate(u5, inst[3]);
+        log.debug("{b}", .{group_decode});
+        return ((group_decode >> 2) == 4);
+        // if ((group_decode >> 2) == 4) {
+        //     log.debug("Arithmetic imm", .{});
+        // } else if (((group_decode & 0b01010) >> 3) == 1) {
+        //     log.debug("Load/store", .{});
+        // }
     }
 };

@@ -69,5 +69,21 @@ pub fn addCases(ctx: *TestContext) !void {
             );
             case.expectedOutput("Hello, World!\n");
         }
+
+        {
+            var case = try ctx.addCase("zero-init statics in C", target);
+            try case.addInput("main.c",
+                \\#include <stdio.h>
+                \\
+                \\static int aGlobal = 1;
+                \\
+                \\int main() {
+                \\    printf("aGlobal=%d\n", aGlobal);
+                \\    aGlobal -= 1;
+                \\    return aGlobal;
+                \\}
+            );
+            case.expectedOutput("aGlobal=1\n");
+        }
     }
 }
