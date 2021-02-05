@@ -56,6 +56,7 @@ locals: std.StringArrayHashMapUnmanaged(macho.nlist_64) = .{},
 exports: std.StringArrayHashMapUnmanaged(macho.nlist_64) = .{},
 nonlazy_imports: std.StringArrayHashMapUnmanaged(Import) = .{},
 lazy_imports: std.StringArrayHashMapUnmanaged(Import) = .{},
+local_rebases: std.ArrayListUnmanaged(RebasePointer) = .{},
 
 strtab: std.ArrayListUnmanaged(u8) = .{},
 
@@ -94,6 +95,7 @@ pub fn init(allocator: *Allocator) Zld {
 
 pub fn deinit(self: *Zld) void {
     self.strtab.deinit(self.allocator);
+    self.local_rebases.deinit(self.allocator);
     for (self.lazy_imports.items()) |*entry| {
         self.allocator.free(entry.key);
     }
@@ -777,36 +779,40 @@ fn doRelocs(self: *Zld) !void {
                                         const offset = mem.readIntLittle(u64, inst);
                                         log.debug("{}, addend => 0x{x}, sym = {s}", .{ rel, offset, object.getString(object.symtab.items[rel.r_symbolnum].n_strx) });
                                         log.debug("sym_addr = 0x{x}", .{target_addr});
-                                        if (sub) |s| {
-                                            const value = @bitCast(u64, @intCast(i64, target_addr) - s);
-                                            var hmm: u64 = undefined;
-                                            _ = @addWithOverflow(u64, value, offset, &hmm);
-                                            log.debug("value = 0x{x}", .{hmm});
-                                            mem.writeIntLittle(u64, inst, hmm);
-                                        } else {
-                                            var hmm: u64 = undefined;
-                                            _ = @addWithOverflow(u64, target_addr, offset, &hmm);
-                                            log.debug("value = 0x{x}", .{hmm});
-                                            mem.writeIntLittle(u64, inst, hmm);
-                                        }
+                                        const val: u64 = if (sub) |s|
+                                            @bitCast(u64, @intCast(i64, target_addr) - s)
+                                        else
+                                            target_addr;
+                                        var result: u64 = undefined;
+                                        _ = @addWithOverflow(u64, target_addr, offset, &result);
+                                        log.debug("value = 0x{x}", .{result});
+                                        mem.writeIntLittle(u64, inst, result);
                                         sub = null;
+
+                                        // TODO should handle this better.
+                                        if (mem.eql(u8, parseName(&sect.segname), "__DATA")) outer: {
+                                            if (!mem.eql(u8, parseName(&sect.sectname), "__data") and
+                                                !mem.eql(u8, parseName(&sect.sectname), "__const")) break :outer;
+                                            const sseg = self.load_commands.items[self.data_segment_cmd_index.?].Segment;
+                                            const offf = next.address + off - sseg.inner.vmaddr;
+                                            try self.local_rebases.append(self.allocator, .{
+                                                .offset = offf,
+                                                .segment_id = @intCast(u16, self.data_segment_cmd_index.?),
+                                            });
+                                        }
                                     },
                                     2 => {
                                         const inst = code[off..][0..4];
                                         const offset = mem.readIntLittle(u32, inst);
                                         log.debug("{}, addend => 0x{x}, sym = {s}", .{ rel, offset, object.getString(object.symtab.items[rel.r_symbolnum].n_strx) });
-                                        if (sub) |s| {
-                                            const result = @truncate(u32, @bitCast(u64, @intCast(i64, target_addr) - s));
-                                            var hmm: u32 = undefined;
-                                            _ = @addWithOverflow(u32, result, offset, &hmm);
-                                            log.debug("target_addr = 0x{x}, result = 0x{x}", .{ target_addr, hmm });
-                                            mem.writeIntLittle(u32, inst, hmm);
-                                        } else {
-                                            var hmm: u32 = undefined;
-                                            _ = @addWithOverflow(u32, @truncate(u32, target_addr), offset, &hmm);
-                                            log.debug("target_addr = 0x{x}, result = 0x{x}", .{ target_addr, hmm });
-                                            mem.writeIntLittle(u32, inst, hmm);
-                                        }
+                                        const val: u32 = if (sub) |s|
+                                            @truncate(u32, @bitCast(u64, @intCast(i64, target_addr) - s))
+                                        else
+                                            @truncate(u32, target_addr);
+                                        var result: u32 = undefined;
+                                        _ = @addWithOverflow(u32, val, offset, &result);
+                                        log.debug("target_addr = 0x{x}, result = 0x{x}", .{ target_addr, result });
+                                        mem.writeIntLittle(u32, inst, result);
                                         sub = null;
                                     },
                                     else => {
@@ -1361,17 +1367,37 @@ fn setEntryPoint(self: *Zld) !void {
 
 fn writeRebaseInfoTable(self: *Zld) !void {
     const data_seg = self.load_commands.items[self.data_segment_cmd_index.?].Segment;
-    const la_symbol_ptr = data_seg.sections.items[self.la_symbol_ptr_section_index.?];
-    const args = SharedDyldArgs{
-        .base_offset = @intCast(u32, la_symbol_ptr.addr - data_seg.inner.vmaddr),
-        .segment_id = self.data_segment_cmd_index.?,
-    };
-    const size = try rebaseInfoSize(self.lazy_imports.items(), args);
+
+    var pointers = std.ArrayList(RebasePointer).init(self.allocator);
+    defer pointers.deinit();
+    try pointers.ensureCapacity(self.lazy_imports.items().len);
+
+    if (self.la_symbol_ptr_section_index) |idx| {
+        const sect = data_seg.sections.items[idx];
+        const base_offset = sect.addr - data_seg.inner.vmaddr;
+        const segment_id = @intCast(u16, self.data_segment_cmd_index.?);
+        for (self.lazy_imports.items()) |entry| {
+            pointers.appendAssumeCapacity(.{
+                .offset = base_offset + entry.value.index * @sizeOf(u64),
+                .segment_id = segment_id,
+            });
+        }
+    }
+
+    try pointers.ensureCapacity(pointers.items.len + self.local_rebases.items.len);
+
+    const nlocals = self.local_rebases.items.len;
+    var i = nlocals;
+    while (i > 0) : (i -= 1) {
+        pointers.appendAssumeCapacity(self.local_rebases.items[i - 1]);
+    }
+
+    const size = try rebaseInfoSize(pointers.items);
     var buffer = try self.allocator.alloc(u8, @intCast(usize, size));
     defer self.allocator.free(buffer);
 
     var stream = std.io.fixedBufferStream(buffer);
-    try writeRebaseInfo(self.lazy_imports.items(), args, stream.writer());
+    try writeRebaseInfo(pointers.items, stream.writer());
 
     const seg = &self.load_commands.items[self.linkedit_segment_cmd_index.?].Segment;
     const dyld_info = &self.load_commands.items[self.dyld_info_cmd_index.?].DyldInfoOnly;
