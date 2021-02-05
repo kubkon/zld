@@ -1,6 +1,7 @@
 const Zld = @import("Zld.zig");
 
 const std = @import("std");
+const build_options = @import("build_options");
 const io = std.io;
 const mem = std.mem;
 const process = std.process;
@@ -32,9 +33,53 @@ fn fatal(comptime format: []const u8, args: anytype) noreturn {
     process.exit(1);
 }
 
+pub const log_level: std.log.Level = switch (std.builtin.mode) {
+    .Debug => .debug,
+    .ReleaseSafe, .ReleaseFast => .info,
+    .ReleaseSmall => .crit,
+};
+
+var log_scopes: std.ArrayListUnmanaged([]const u8) = .{};
+
+pub fn log(
+    comptime level: std.log.Level,
+    comptime scope: @TypeOf(.EnumLiteral),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    // Hide debug messages unless:
+    // * logging enabled with `-Dlog`.
+    // * the --debug-log arg for the scope has been provided
+    if (@enumToInt(level) > @enumToInt(std.log.level) or
+        @enumToInt(level) > @enumToInt(std.log.Level.info))
+    {
+        if (!build_options.enable_logging) return;
+
+        const scope_name = @tagName(scope);
+        for (log_scopes.items) |log_scope| {
+            if (mem.eql(u8, log_scope, scope_name))
+                break;
+        } else return;
+    }
+
+    // We only recognize 4 log levels in this application.
+    const level_txt = switch (level) {
+        .emerg, .alert, .crit, .err => "error",
+        .warn => "warning",
+        .notice, .info => "info",
+        .debug => "debug",
+    };
+    const prefix1 = level_txt;
+    const prefix2 = if (scope == .default) ": " else "(" ++ @tagName(scope) ++ "): ";
+
+    // Print the message to stderr, silently ignoring any errors
+    std.debug.print(prefix1 ++ prefix2 ++ format ++ "\n", args);
+}
+
 pub fn main() anyerror!void {
     const all_args = try process.argsAlloc(allocator);
     defer process.argsFree(allocator, all_args);
+    defer log_scopes.deinit(allocator);
 
     const args = all_args[1..];
     if (args.len == 0) {
@@ -49,6 +94,12 @@ pub fn main() anyerror!void {
         const arg = args[i];
         if (mem.eql(u8, arg, "--help") or mem.eql(u8, arg, "-h")) {
             printHelpAndExit();
+        }
+        if (mem.eql(u8, arg, "--debug-log")) {
+            if (i + 1 >= args.len) fatal("Expected parameter after {s}", .{arg});
+            i += 1;
+            try log_scopes.append(allocator, args[i]);
+            continue;
         }
         if (mem.eql(u8, arg, "-o")) {
             if (i + 1 >= args.len) fatal("Expected output path after {s}", .{arg});

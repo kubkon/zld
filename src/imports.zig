@@ -6,6 +6,37 @@ const mem = std.mem;
 const assert = std.debug.assert;
 const Allocator = mem.Allocator;
 
+pub const RebasePointer = struct {
+    offset: u64,
+    segment_id: u16,
+};
+
+pub fn rebaseInfoSize(pointers: anytype) !u64 {
+    var stream = std.io.countingWriter(std.io.null_writer);
+    var writer = stream.writer();
+    var size: u64 = 0;
+
+    for (pointers) |pointer| {
+        size += 2;
+        try leb.writeILEB128(writer, pointer.offset);
+        size += 1;
+    }
+
+    size += 1 + stream.bytes_written;
+    return size;
+}
+
+pub fn writeRebaseInfo(pointers: anytype, writer: anytype) !void {
+    for (pointers) |pointer| {
+        try writer.writeByte(macho.REBASE_OPCODE_SET_TYPE_IMM | @truncate(u4, macho.REBASE_TYPE_POINTER));
+        try writer.writeByte(macho.REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | @truncate(u4, pointer.segment_id));
+
+        try leb.writeILEB128(writer, pointer.offset);
+        try writer.writeByte(macho.REBASE_OPCODE_DO_REBASE_IMM_TIMES | @truncate(u4, 1));
+    }
+    try writer.writeByte(macho.REBASE_OPCODE_DONE);
+}
+
 pub const Import = struct {
     /// MachO symbol table entry.
     symbol: macho.nlist_64,
@@ -21,35 +52,6 @@ pub const SharedDyldArgs = struct {
     base_offset: u32,
     segment_id: u16,
 };
-
-pub fn rebaseInfoSize(imports: anytype, args: SharedDyldArgs) !u64 {
-    var stream = std.io.countingWriter(std.io.null_writer);
-    var writer = stream.writer();
-    var size: u64 = 0;
-
-    for (imports) |entry, i| {
-        size += 2;
-        const offset = args.base_offset + i * @sizeOf(u64);
-        try leb.writeILEB128(writer, offset);
-        size += 1;
-    }
-
-    size += 1 + stream.bytes_written;
-    return size;
-}
-
-pub fn writeRebaseInfo(imports: anytype, args: SharedDyldArgs, writer: anytype) !void {
-    for (imports) |entry, i| {
-        const import = entry.value;
-        try writer.writeByte(macho.REBASE_OPCODE_SET_TYPE_IMM | @truncate(u4, macho.REBASE_TYPE_POINTER));
-        try writer.writeByte(macho.REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | @truncate(u4, args.segment_id));
-
-        const offset = args.base_offset + i * @sizeOf(u64);
-        try leb.writeILEB128(writer, offset);
-        try writer.writeByte(macho.REBASE_OPCODE_DO_REBASE_IMM_TIMES | @truncate(u4, 1));
-    }
-    try writer.writeByte(macho.REBASE_OPCODE_DONE);
-}
 
 pub fn bindInfoSize(imports: anytype, args: SharedDyldArgs) !u64 {
     var stream = std.io.countingWriter(std.io.null_writer);

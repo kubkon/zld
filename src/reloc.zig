@@ -1,3 +1,6 @@
+const std = @import("std");
+const log = std.log.scoped(.reloc);
+
 pub const Arm64 = union(enum) {
     Branch: packed struct {
         disp: u26,
@@ -14,7 +17,7 @@ pub const Arm64 = union(enum) {
     Address: packed struct {
         reg: u5,
         immhi: u19,
-        fixed: u5 = 0b10000,
+        _1: u5 = 0b10000,
         immlo: u2,
         page: u1,
     },
@@ -22,17 +25,23 @@ pub const Arm64 = union(enum) {
         rt: u5,
         rn: u5,
         offset: u12,
-        opc: u2,
-        op1: u2,
-        fixed: u4 = 0b111_0,
-        size: u2,
+        _1: u8 = 0b111_0_01_01,
+        size: u1,
+        _2: u1 = 0b1,
     },
     LoadLiteral: packed struct {
         reg: u5,
         literal: u19,
         _1: u6 = 0b011_0_00,
-        full_width: u1,
+        size: u1,
         _2: u1 = 0b0,
+    },
+    Add: packed struct {
+        rt: u5,
+        rn: u5,
+        offset: u12,
+        _1: u9 = 0b0_0_100010_0,
+        size: u1,
     },
 
     pub fn toU32(self: Arm64) u32 {
@@ -42,6 +51,7 @@ pub const Arm64 = union(enum) {
             .Address => |x| @bitCast(u32, x),
             .LoadRegister => |x| @bitCast(u32, x),
             .LoadLiteral => |x| @bitCast(u32, x),
+            .Add => |x| @bitCast(u32, x),
         };
         return as_u32;
     }
@@ -104,13 +114,46 @@ pub const Arm64 = union(enum) {
         };
     }
 
-    pub fn ldr(reg: u5, literal: u19, is_full_width: bool) Arm64 {
+    pub fn ldr(reg: u5, literal: u19, size: u1) Arm64 {
         return Arm64{
             .LoadLiteral = .{
                 .reg = reg,
                 .literal = literal,
-                .full_width = if (is_full_width) 1 else 0,
+                .size = size,
             },
         };
+    }
+
+    pub fn add(rt: u5, rn: u5, offset: u12, size: u1) Arm64 {
+        return Arm64{
+            .Add = .{
+                .rt = rt,
+                .rn = rn,
+                .offset = offset,
+                .size = size,
+            },
+        };
+    }
+
+    pub fn ldrr(rt: u5, rn: u5, offset: u12, size: u1) Arm64 {
+        return Arm64{
+            .LoadRegister = .{
+                .rt = rt,
+                .rn = rn,
+                .offset = offset,
+                .size = size,
+            },
+        };
+    }
+
+    pub fn isArithmetic(inst: *const [4]u8) bool {
+        const group_decode = @truncate(u5, inst[3]);
+        log.debug("{b}", .{group_decode});
+        return ((group_decode >> 2) == 4);
+        // if ((group_decode >> 2) == 4) {
+        //     log.debug("Arithmetic imm", .{});
+        // } else if (((group_decode & 0b01010) >> 3) == 1) {
+        //     log.debug("Load/store", .{});
+        // }
     }
 };

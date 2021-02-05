@@ -158,34 +158,16 @@ pub const LoadCommand = union(enum) {
 
 pub const SegmentCommand = struct {
     inner: macho.segment_command_64,
-    sections: std.StringArrayHashMapUnmanaged(macho.section_64) = .{},
+    sections: std.ArrayListUnmanaged(macho.section_64) = .{},
 
     pub fn empty(inner: macho.segment_command_64) SegmentCommand {
         return .{ .inner = inner };
     }
 
-    pub fn put(self: *SegmentCommand, allocator: *Allocator, section: macho.section_64) !void {
-        const name = parseName(&section.sectname);
-        var key = try allocator.dupe(u8, name);
-        try self.sections.putNoClobber(allocator, key, section);
+    pub fn append(self: *SegmentCommand, allocator: *Allocator, section: macho.section_64) !void {
+        try self.sections.append(allocator, section);
         self.inner.cmdsize += @sizeOf(macho.section_64);
         self.inner.nsects += 1;
-    }
-
-    pub fn getOrPut(
-        self: *SegmentCommand,
-        allocator: *Allocator,
-        name: []const u8,
-    ) !std.StringArrayHashMapUnmanaged(macho.section_64).GetOrPutResult {
-        const nn = try allocator.dupe(u8, name);
-        const res = try self.sections.getOrPut(allocator, nn);
-        if (res.found_existing) {
-            allocator.free(nn);
-        } else {
-            self.inner.cmdsize += @sizeOf(macho.section_64);
-            self.inner.nsects += 1;
-        }
-        return res;
     }
 
     pub fn read(allocator: *Allocator, reader: anytype) !SegmentCommand {
@@ -197,9 +179,7 @@ pub const SegmentCommand = struct {
         var i: usize = 0;
         while (i < inner.nsects) : (i += 1) {
             const section = try reader.readStruct(macho.section_64);
-            const name = parseName(&section.sectname);
-            var key = try allocator.dupe(u8, name);
-            try segment.sections.putNoClobber(allocator, key, section);
+            try segment.sections.append(allocator, section);
         }
 
         return segment;
@@ -207,26 +187,22 @@ pub const SegmentCommand = struct {
 
     pub fn write(self: SegmentCommand, writer: anytype) !void {
         try writer.writeAll(mem.asBytes(&self.inner));
-        for (self.sections.items()) |entry| {
-            try writer.writeAll(mem.asBytes(&entry.value));
+        for (self.sections.items) |sect| {
+            try writer.writeAll(mem.asBytes(&sect));
         }
     }
 
     pub fn deinit(self: *SegmentCommand, allocator: *Allocator) void {
-        for (self.sections.items()) |entry| {
-            allocator.free(entry.key);
-        }
         self.sections.deinit(allocator);
     }
 
     fn eql(self: SegmentCommand, other: SegmentCommand) bool {
         if (!meta.eql(self.inner, other.inner)) return false;
-        const lhs = self.sections.items();
-        const rhs = other.sections.items();
+        const lhs = self.sections.items;
+        const rhs = other.sections.items;
         var i: usize = 0;
         while (i < self.inner.nsects) : (i += 1) {
-            if (!mem.eql(u8, lhs[i].key, rhs[i].key)) return false;
-            if (!meta.eql(lhs[i].value, rhs[i].value)) return false;
+            if (!meta.eql(lhs[i], rhs[i])) return false;
         }
         return true;
     }
@@ -269,11 +245,6 @@ pub fn GenericCommandWithData(comptime Cmd: type) type {
             return mem.eql(u8, self.data, other.data);
         }
     };
-}
-
-pub fn parseName(name: *const [16]u8) []const u8 {
-    const len = mem.indexOfScalar(u8, name, @as(u8, 0)) orelse name.len;
-    return name[0..len];
 }
 
 fn testRead(allocator: *Allocator, buffer: []const u8, expected: anytype) !void {
@@ -331,7 +302,7 @@ test "read-write segment command" {
             .flags = 0,
         },
     };
-    try cmd.put(gpa, .{
+    try cmd.append(gpa, .{
         .sectname = makeStaticString("__text"),
         .segname = makeStaticString("__TEXT"),
         .addr = 4294983680,
