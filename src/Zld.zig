@@ -254,7 +254,8 @@ fn resolveImports(self: *Zld) !void {
         if (mem.eql(u8, sym_name, "___stdoutp") or
             mem.eql(u8, sym_name, "___stderrp") or
             mem.eql(u8, sym_name, "___stack_chk_guard") or
-            mem.eql(u8, sym_name, "_environ"))
+            mem.eql(u8, sym_name, "_environ") or
+            mem.eql(u8, sym_name, "__tlv_bootstrap")) // TODO __tlv_bootstrap is neither lazy nor nonlazy in conventional sense.
         {
             log.debug("writing nonlazy symbol '{s}'", .{sym_name});
             const index = @intCast(u32, self.nonlazy_imports.items().len);
@@ -654,6 +655,9 @@ fn doRelocs(self: *Zld) !void {
         }
 
         for (seg.sections.items) |sect| {
+            const segname = parseName(&sect.segname);
+            const sectname = parseName(&sect.sectname);
+
             const key: DirectoryKey = .{
                 .segname = sect.segname,
                 .sectname = sect.sectname,
@@ -747,16 +751,20 @@ fn doRelocs(self: *Zld) !void {
                             },
                             .ARM64_RELOC_PAGEOFF12,
                             .ARM64_RELOC_GOT_LOAD_PAGEOFF12,
-                            .ARM64_RELOC_TLVP_LOAD_PAGEOFF12,
                             => {
                                 const inst = code[off..][0..4];
+                                const target_name = object.getString(object.symtab.items[rel.r_symbolnum].n_strx);
                                 if (Arm64.isArithmetic(inst)) {
                                     // add
                                     var parsed = mem.bytesAsValue(meta.TagPayload(Arm64, Arm64.Add), inst);
                                     const ta = if (addend) |a| target_addr + a else target_addr;
                                     const narrowed = @truncate(u12, ta);
                                     parsed.offset = narrowed;
-                                    log.debug("ADD ta = 0x{x}, parsed_offset = 0x{x}", .{ ta, parsed.offset });
+                                    log.debug("ADD tn = {s}, ta = 0x{x}, parsed_offset = 0x{x}", .{
+                                        target_name,
+                                        ta,
+                                        parsed.offset,
+                                    });
                                 } else {
                                     // ldr/str
                                     var parsed = mem.bytesAsValue(meta.TagPayload(Arm64, Arm64.LoadRegister), inst);
@@ -764,9 +772,41 @@ fn doRelocs(self: *Zld) !void {
                                     const narrowed = @truncate(u12, ta);
                                     const offset = if (parsed.size == 1) @divExact(narrowed, 8) else @divExact(narrowed, 4);
                                     parsed.offset = @truncate(u12, offset);
-                                    log.debug("LDR ta = 0x{x}, parsed_offset = 0x{x}", .{ ta, parsed.offset });
+                                    log.debug("LDR tn = {s}, ta = 0x{x}, parsed_offset = 0x{x}", .{
+                                        target_name,
+                                        ta,
+                                        parsed.offset,
+                                    });
                                 }
                                 addend = null;
+                            },
+                            .ARM64_RELOC_TLVP_LOAD_PAGEOFF12 => {
+                                // TODO why is this necessary?
+                                const RegInfo = struct {
+                                    rt: u5,
+                                    rn: u5,
+                                    size: u1,
+                                };
+                                const inst = code[off..][0..4];
+                                const target_name = object.getString(object.symtab.items[rel.r_symbolnum].n_strx);
+                                const parsed: RegInfo = blk: {
+                                    if (Arm64.isArithmetic(inst)) {
+                                        const curr = mem.bytesAsValue(meta.TagPayload(Arm64, Arm64.Add), inst);
+                                        break :blk .{ .rt = curr.rt, .rn = curr.rn, .size = curr.size };
+                                    } else {
+                                        const curr = mem.bytesAsValue(meta.TagPayload(Arm64, Arm64.LoadRegister), inst);
+                                        break :blk .{ .rt = curr.rt, .rn = curr.rn, .size = curr.size };
+                                    }
+                                };
+                                const ta = if (addend) |a| target_addr + a else target_addr;
+                                const narrowed = @truncate(u12, ta);
+                                log.debug("ADD tn = {s}, ta = 0x{x}, parsed_offset = 0x{x}", .{
+                                    target_name,
+                                    ta,
+                                    narrowed,
+                                });
+                                // For TLV, we always generate an add instruction.
+                                mem.writeIntLittle(u32, inst, Arm64.add(parsed.rt, parsed.rn, narrowed, parsed.size).toU32());
                             },
                             .ARM64_RELOC_SUBTRACTOR => {
                                 log.debug("{}, sym = {s}", .{ rel, object.getString(object.symtab.items[rel.r_symbolnum].n_strx) });
@@ -790,9 +830,9 @@ fn doRelocs(self: *Zld) !void {
                                         sub = null;
 
                                         // TODO should handle this better.
-                                        if (mem.eql(u8, parseName(&sect.segname), "__DATA")) outer: {
-                                            if (!mem.eql(u8, parseName(&sect.sectname), "__data") and
-                                                !mem.eql(u8, parseName(&sect.sectname), "__const")) break :outer;
+                                        if (mem.eql(u8, segname, "__DATA")) outer: {
+                                            if (!mem.eql(u8, sectname, "__data") and
+                                                !mem.eql(u8, sectname, "__const")) break :outer;
                                             const sseg = self.load_commands.items[self.data_segment_cmd_index.?].Segment;
                                             const offf = next.address + off - sseg.inner.vmaddr;
                                             try self.local_rebases.append(self.allocator, .{
@@ -831,14 +871,17 @@ fn doRelocs(self: *Zld) !void {
             }
 
             log.debug("writing contents of '{s},{s}' section from '{s}' from 0x{x} to 0x{x}", .{
-                parseName(&sect.segname),
-                parseName(&sect.sectname),
+                segname,
+                sectname,
                 object.name,
                 next.offset,
                 next.offset + next.size,
             });
 
-            if (mem.eql(u8, parseName(&sect.sectname), "__bss")) {
+            if (mem.eql(u8, sectname, "__bss") or
+                mem.eql(u8, sectname, "__thread_bss") or
+                mem.eql(u8, sectname, "__thread_vars"))
+            {
                 // Zero-out the space
                 var zeroes = try self.allocator.alloc(u8, next.size);
                 defer self.allocator.free(zeroes);
@@ -1301,7 +1344,8 @@ fn flush(self: *Zld) !void {
     {
         const seg = &self.load_commands.items[self.data_segment_cmd_index.?].Segment;
         for (seg.sections.items) |*sect| {
-            if (mem.eql(u8, parseName(&sect.sectname), "__bss")) {
+            const sectname = parseName(&sect.sectname);
+            if (mem.eql(u8, sectname, "__bss") or mem.eql(u8, sectname, "__thread_bss")) {
                 sect.offset = 0;
             }
         }
@@ -1780,6 +1824,16 @@ fn writeHeader(self: *Zld) !void {
     header.filetype = macho.MH_EXECUTE;
     header.flags = macho.MH_NOUNDEFS | macho.MH_DYLDLINK | macho.MH_PIE | macho.MH_TWOLEVEL;
     header.reserved = 0;
+
+    const has_tlv: bool = blk: {
+        const seg = self.load_commands.items[self.data_segment_cmd_index.?].Segment;
+        for (seg.sections.items) |sect| {
+            const sectname = parseName(&sect.sectname);
+            if (mem.eql(u8, sectname, "__thread_vars") or mem.eql(u8, sectname, "__thread_bss")) break :blk true;
+        } else break :blk false;
+    };
+    if (has_tlv)
+        header.flags |= macho.MH_HAS_TLV_DESCRIPTORS;
 
     header.ncmds = @intCast(u32, self.load_commands.items.len);
     header.sizeofcmds = 0;
