@@ -1614,7 +1614,67 @@ fn writeSymbolTable(self: *Zld) !void {
     var locals = std.ArrayList(macho.nlist_64).init(self.allocator);
     defer locals.deinit();
 
-    try locals.ensureCapacity(nlocals);
+    {
+        var out_buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        const out_path = try std.os.realpath(self.out_path.?, &out_buffer);
+        // Current dir
+        const drn = std.fs.path.dirname(out_path);
+        const dirname = blk: {
+            if (drn) |ddd| {
+                break :blk try self.makeString(out_path[0 .. ddd.len + 1]);
+            } else {
+                break :blk try self.makeString("./");
+            }
+        };
+        try locals.append(.{
+            .n_strx = dirname,
+            .n_type = macho.N_SO,
+            .n_sect = 0,
+            .n_desc = 0,
+            .n_value = 0,
+        });
+        // Artifact name
+        const name = blk: {
+            if (drn) |ddd| {
+                break :blk try self.makeString(out_path[ddd.len + 1 ..]);
+            } else {
+                break :blk try self.makeString(out_path);
+            }
+        };
+        try locals.append(.{
+            .n_strx = name,
+            .n_type = macho.N_SO,
+            .n_sect = 0,
+            .n_desc = 0,
+            .n_value = 0,
+        });
+        // Path to object file with debug info
+        const path = self.objects.items[0].name.?;
+        const full_path = try std.os.realpath(path, &out_buffer);
+        const pp = try self.makeString(full_path);
+        const stat = try std.os.fstat(self.objects.items[0].file.?.handle);
+        try locals.append(.{
+            .n_strx = pp,
+            .n_type = macho.N_OSO,
+            .n_sect = 0,
+            .n_desc = 0,
+            .n_value = @bitCast(u64, stat.mtimesec),
+        });
+    }
+
+    try locals.ensureCapacity(locals.items.len + 2 * nlocals);
+
+    for (self.locals.items()) |entry| {
+        const sym = entry.value;
+        locals.appendAssumeCapacity(.{
+            .n_strx = sym.n_strx,
+            .n_type = macho.N_FUN,
+            .n_sect = sym.n_sect,
+            .n_desc = 0,
+            .n_value = sym.n_value,
+        });
+    }
+
     for (self.locals.items()) |entry| {
         locals.appendAssumeCapacity(entry.value);
     }
