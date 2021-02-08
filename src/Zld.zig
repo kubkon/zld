@@ -1363,6 +1363,14 @@ fn flush(self: *Zld) !void {
     try self.writeBindInfoTable();
     try self.writeLazyBindInfoTable();
     try self.writeExportInfo();
+
+    {
+        const seg = &self.load_commands.items[self.linkedit_segment_cmd_index.?].Segment;
+        const symtab = &self.load_commands.items[self.symtab_cmd_index.?].Symtab;
+        symtab.symoff = @intCast(u32, seg.inner.fileoff + seg.inner.filesize);
+    }
+
+    try self.writeDebugInfo();
     try self.writeSymbolTable();
     try self.writeDynamicSymbolTable();
     try self.writeStringTable();
@@ -1606,13 +1614,24 @@ fn writeExportInfo(self: *Zld) !void {
     try self.file.?.pwriteAll(buffer, dyld_info.export_off);
 }
 
-fn writeSymbolTable(self: *Zld) !void {
-    const seg = &self.load_commands.items[self.linkedit_segment_cmd_index.?].Segment;
-    const symtab = &self.load_commands.items[self.symtab_cmd_index.?].Symtab;
+fn writeDebugInfo(self: *Zld) !void {
+    var key = blk: {
+        var k = Object.DirectoryKey{
+            .segname = undefined,
+            .sectname = undefined,
+        };
+        mem.set(u8, &k.segname, 0);
+        mem.set(u8, &k.sectname, 0);
+        mem.copy(u8, &k.segname, "__DWARF");
+        mem.copy(u8, &k.sectname, "__debug_info");
+        break :blk k;
+    };
 
-    const nlocals = self.locals.items().len;
-    var locals = std.ArrayList(macho.nlist_64).init(self.allocator);
-    defer locals.deinit();
+    const object = self.objects.items[0];
+    const debug_info = object.directory.get(key) orelse return;
+
+    var stabs = std.ArrayList(macho.nlist_64).init(self.allocator);
+    defer stabs.deinit();
 
     {
         var out_buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
@@ -1626,7 +1645,7 @@ fn writeSymbolTable(self: *Zld) !void {
                 break :blk try self.makeString("./");
             }
         };
-        try locals.append(.{
+        try stabs.append(.{
             .n_strx = dirname,
             .n_type = macho.N_SO,
             .n_sect = 0,
@@ -1641,7 +1660,7 @@ fn writeSymbolTable(self: *Zld) !void {
                 break :blk try self.makeString(out_path);
             }
         };
-        try locals.append(.{
+        try stabs.append(.{
             .n_strx = name,
             .n_type = macho.N_SO,
             .n_sect = 0,
@@ -1649,24 +1668,26 @@ fn writeSymbolTable(self: *Zld) !void {
             .n_value = 0,
         });
         // Path to object file with debug info
-        const path = self.objects.items[0].name.?;
+        const path = object.name.?;
         const full_path = try std.os.realpath(path, &out_buffer);
         const pp = try self.makeString(full_path);
-        const stat = try std.os.fstat(self.objects.items[0].file.?.handle);
-        try locals.append(.{
+        const stat = try object.file.?.stat();
+        const mtime = @intCast(u64, @divFloor(stat.mtime, 1_000_000_000));
+        try stabs.append(.{
             .n_strx = pp,
             .n_type = macho.N_OSO,
             .n_sect = 0,
             .n_desc = 0,
-            .n_value = @bitCast(u64, stat.mtimesec),
+            .n_value = mtime,
         });
     }
 
-    try locals.ensureCapacity(locals.items.len + 2 * nlocals);
+    const nstabs = self.locals.items().len;
+    try stabs.ensureCapacity(stabs.items.len + nstabs);
 
     for (self.locals.items()) |entry| {
         const sym = entry.value;
-        locals.appendAssumeCapacity(.{
+        stabs.appendAssumeCapacity(.{
             .n_strx = sym.n_strx,
             .n_type = macho.N_FUN,
             .n_sect = sym.n_sect,
@@ -1675,6 +1696,33 @@ fn writeSymbolTable(self: *Zld) !void {
         });
     }
 
+    // Write stabs into the symbol table
+    const seg = &self.load_commands.items[self.linkedit_segment_cmd_index.?].Segment;
+    const symtab = &self.load_commands.items[self.symtab_cmd_index.?].Symtab;
+
+    symtab.nsyms = @intCast(u32, nstabs) + 3;
+
+    const stabs_off = symtab.symoff;
+    const stabs_size = symtab.nsyms * @sizeOf(macho.nlist_64);
+    log.debug("writing symbol stabs from 0x{x} to 0x{x}", .{ stabs_off, stabs_size + stabs_off });
+    try self.file.?.pwriteAll(mem.sliceAsBytes(stabs.items), stabs_off);
+
+    seg.inner.filesize += stabs_size;
+
+    // Update dynamic symbol table.
+    const dysymtab = &self.load_commands.items[self.dysymtab_cmd_index.?].Dysymtab;
+    dysymtab.nlocalsym = symtab.nsyms;
+}
+
+fn writeSymbolTable(self: *Zld) !void {
+    const seg = &self.load_commands.items[self.linkedit_segment_cmd_index.?].Segment;
+    const symtab = &self.load_commands.items[self.symtab_cmd_index.?].Symtab;
+
+    const nlocals = self.locals.items().len;
+    var locals = std.ArrayList(macho.nlist_64).init(self.allocator);
+    defer locals.deinit();
+
+    try locals.ensureCapacity(nlocals);
     for (self.locals.items()) |entry| {
         locals.appendAssumeCapacity(entry.value);
     }
@@ -1700,32 +1748,30 @@ fn writeSymbolTable(self: *Zld) !void {
         undefs.appendAssumeCapacity(entry.value.symbol);
     }
 
-    symtab.symoff = @intCast(u32, seg.inner.fileoff + seg.inner.filesize);
-    symtab.nsyms = @intCast(u32, nlocals + nexports + nundefs);
-
-    const locals_off = symtab.symoff;
+    const locals_off = symtab.symoff + symtab.nsyms * @sizeOf(macho.nlist_64);
     const locals_size = nlocals * @sizeOf(macho.nlist_64);
     log.debug("writing local symbols from 0x{x} to 0x{x}", .{ locals_off, locals_size + locals_off });
     try self.file.?.pwriteAll(mem.sliceAsBytes(locals.items), locals_off);
 
     const exports_off = locals_off + locals_size;
     const exports_size = nexports * @sizeOf(macho.nlist_64);
-    log.debug("writing export symbols from 0x{x} to 0x{x}", .{ exports_off, exports_size + exports_off });
+    log.debug("writing exported symbols from 0x{x} to 0x{x}", .{ exports_off, exports_size + exports_off });
     try self.file.?.pwriteAll(mem.sliceAsBytes(exports.items), exports_off);
 
     const undefs_off = exports_off + exports_size;
     const undefs_size = nundefs * @sizeOf(macho.nlist_64);
-    log.debug("writing extern symbols from 0x{x} to 0x{x}", .{ undefs_off, undefs_size + undefs_off });
+    log.debug("writing undefined symbols from 0x{x} to 0x{x}", .{ undefs_off, undefs_size + undefs_off });
     try self.file.?.pwriteAll(mem.sliceAsBytes(undefs.items), undefs_off);
 
+    symtab.nsyms += @intCast(u32, nlocals + nexports + nundefs);
     seg.inner.filesize += locals_size + exports_size + undefs_size;
 
     // Update dynamic symbol table.
     const dysymtab = &self.load_commands.items[self.dysymtab_cmd_index.?].Dysymtab;
-    dysymtab.nlocalsym = @intCast(u32, nlocals);
-    dysymtab.iextdefsym = @intCast(u32, nlocals);
+    dysymtab.nlocalsym += @intCast(u32, nlocals);
+    dysymtab.iextdefsym = dysymtab.nlocalsym;
     dysymtab.nextdefsym = @intCast(u32, nexports);
-    dysymtab.iundefsym = @intCast(u32, nlocals + nexports);
+    dysymtab.iundefsym = dysymtab.nlocalsym + dysymtab.nextdefsym;
     dysymtab.nundefsym = @intCast(u32, nundefs);
 }
 
