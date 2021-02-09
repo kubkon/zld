@@ -1615,21 +1615,10 @@ fn writeExportInfo(self: *Zld) !void {
 }
 
 fn writeDebugInfo(self: *Zld) !void {
-    var key = blk: {
-        var k = Object.DirectoryKey{
-            .segname = undefined,
-            .sectname = undefined,
-        };
-        mem.set(u8, &k.segname, 0);
-        mem.set(u8, &k.sectname, 0);
-        mem.copy(u8, &k.segname, "__DWARF");
-        mem.copy(u8, &k.sectname, "__debug_info");
-        break :blk k;
-    };
+    const res = (try self.readCompUnit()) orelse return;
+    log.debug("{s}, {s}, {}", .{ res.name, res.comp_dir, res.stmt_list });
 
     const object = self.objects.items[0];
-    const debug_info = object.directory.get(key) orelse return;
-
     var stabs = std.ArrayList(macho.nlist_64).init(self.allocator);
     defer stabs.deinit();
 
@@ -1682,6 +1671,7 @@ fn writeDebugInfo(self: *Zld) !void {
         });
     }
 
+    // TODO parse DWARF data.
     const nstabs = self.locals.items().len;
     try stabs.ensureCapacity(stabs.items.len + nstabs);
 
@@ -1697,7 +1687,7 @@ fn writeDebugInfo(self: *Zld) !void {
     }
 
     // Write stabs into the symbol table
-    const seg = &self.load_commands.items[self.linkedit_segment_cmd_index.?].Segment;
+    const linkedit = &self.load_commands.items[self.linkedit_segment_cmd_index.?].Segment;
     const symtab = &self.load_commands.items[self.symtab_cmd_index.?].Symtab;
 
     symtab.nsyms = @intCast(u32, nstabs) + 3;
@@ -1707,11 +1697,131 @@ fn writeDebugInfo(self: *Zld) !void {
     log.debug("writing symbol stabs from 0x{x} to 0x{x}", .{ stabs_off, stabs_size + stabs_off });
     try self.file.?.pwriteAll(mem.sliceAsBytes(stabs.items), stabs_off);
 
-    seg.inner.filesize += stabs_size;
+    linkedit.inner.filesize += stabs_size;
 
     // Update dynamic symbol table.
     const dysymtab = &self.load_commands.items[self.dysymtab_cmd_index.?].Dysymtab;
     dysymtab.nlocalsym = symtab.nsyms;
+}
+
+const ReadCompUnitResult = struct {
+    name: []u8,
+    comp_dir: []u8,
+    stmt_list: u64,
+};
+
+fn readCompUnit(self: *Zld) !?ReadCompUnitResult {
+    const object = self.objects.items[0];
+    const seg = object.load_commands.items[object.segment_cmd_index.?].Segment;
+
+    // TODO this is super ugly. Refactor.
+    var debug_info_key = blk: {
+        var k = Object.DirectoryKey{
+            .segname = undefined,
+            .sectname = undefined,
+        };
+        mem.set(u8, &k.segname, 0);
+        mem.set(u8, &k.sectname, 0);
+        mem.copy(u8, &k.segname, "__DWARF");
+        mem.copy(u8, &k.sectname, "__debug_info");
+        break :blk k;
+    };
+    const debug_info_idx = object.directory.get(debug_info_key) orelse return null;
+    const debug_info = seg.sections.items[debug_info_idx];
+    if (debug_info.size == 0) return null;
+
+    var debug_info_buf = try self.allocator.alloc(u8, debug_info.size);
+    defer self.allocator.free(debug_info_buf);
+    _ = try object.file.?.preadAll(debug_info_buf, debug_info.offset);
+
+    var debug_abbrev_key = blk: {
+        var k = Object.DirectoryKey{
+            .segname = undefined,
+            .sectname = undefined,
+        };
+        mem.set(u8, &k.segname, 0);
+        mem.set(u8, &k.sectname, 0);
+        mem.copy(u8, &k.segname, "__DWARF");
+        mem.copy(u8, &k.sectname, "__debug_abbrev");
+        break :blk k;
+    };
+    const debug_abbrev_idx = object.directory.get(debug_abbrev_key) orelse return null;
+    const debug_abbrev = seg.sections.items[debug_abbrev_idx];
+    if (debug_abbrev.size == 0) return null;
+
+    var debug_abbrev_buf = try self.allocator.alloc(u8, debug_abbrev.size);
+    defer self.allocator.free(debug_abbrev_buf);
+    _ = try object.file.?.preadAll(debug_abbrev_buf, debug_abbrev.offset);
+
+    var di_stream = std.io.fixedBufferStream(debug_info_buf);
+    var di_reader = di_stream.reader();
+    var da_stream = std.io.fixedBufferStream(debug_abbrev_buf);
+    var da_reader = da_stream.reader();
+
+    while (true) {
+        const next_cu = di_reader.readIntLittle(u32) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
+        const dwarf64 = next_cu == 0xffffffff;
+        var sz: i64 = @intCast(i64, next_cu);
+        if (dwarf64)
+            sz = @intCast(i64, try di_reader.readIntLittle(u64));
+        if (sz > 0xffffff00)
+            return null;
+
+        const vers = try di_reader.readIntLittle(u16);
+        switch (vers) {
+            3, 4 => {},
+            else => |x| {
+                log.warn("invalid DWARF version {}", .{vers});
+                return null;
+            },
+        }
+
+        // Get offset into the __debug_abbrev section.
+        const abbrev_base = if (dwarf64) try di_reader.readIntLittle(u64) else try di_reader.readIntLittle(u32);
+        if (abbrev_base > debug_abbrev.size) return null;
+        try da_stream.seekTo(abbrev_base);
+
+        const address_size = try di_reader.readByte();
+        const abbrev = try std.leb.readULEB128(u64, di_reader);
+
+        while (true) {
+            const next_abbrev = std.leb.readULEB128(u64, da_reader) catch |err| switch (err) {
+                error.EndOfStream => break,
+                else => return err,
+            };
+            if (abbrev == next_abbrev) break;
+
+            _ = try std.leb.readULEB128(u64, da_reader);
+            _ = da_reader.readByte() catch |err| switch (err) {
+                error.EndOfStream => return null,
+                else => return err,
+            };
+
+            var attr: u64 = undefined;
+            while (true) {
+                attr = try std.leb.readULEB128(u64, da_reader);
+                _ = try std.leb.readULEB128(u64, da_reader);
+                if (attr == 0 or attr == 0xffffffffffffffff) break;
+            }
+            if (attr != 0) return null;
+        }
+
+        const cu_tag = try std.leb.readULEB128(u64, da_reader);
+        if (cu_tag != std.dwarf.TAG_compile_unit) return null;
+
+        _ = da_reader.readByte() catch |err| switch (err) {
+            error.EndOfStream => return null,
+            else => return err,
+        };
+
+        // TODO verify claimed size.
+        try di_stream.seekBy(sz);
+    }
+
+    return null;
 }
 
 fn writeSymbolTable(self: *Zld) !void {
