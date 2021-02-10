@@ -2,6 +2,8 @@ const Zld = @This();
 
 const std = @import("std");
 const assert = std.debug.assert;
+const dwarf = std.dwarf;
+const leb = std.leb;
 const mem = std.mem;
 const meta = std.meta;
 const fs = std.fs;
@@ -1547,13 +1549,13 @@ fn populateLazyBindOffsetsInStubHelper(self: *Zld, buffer: []const u8) !void {
                 }
             },
             macho.BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB => {
-                _ = try std.leb.readULEB128(u64, reader);
+                _ = try leb.readULEB128(u64, reader);
             },
             macho.BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB => {
-                _ = try std.leb.readULEB128(u64, reader);
+                _ = try leb.readULEB128(u64, reader);
             },
             macho.BIND_OPCODE_SET_ADDEND_SLEB => {
-                _ = try std.leb.readILEB128(i64, reader);
+                _ = try leb.readILEB128(i64, reader);
             },
             else => {},
         }
@@ -1616,54 +1618,43 @@ fn writeExportInfo(self: *Zld) !void {
 
 fn writeDebugInfo(self: *Zld) !void {
     const res = (try self.readCompUnit()) orelse return;
-    log.debug("{s}, {s}, {}", .{ res.name, res.comp_dir, res.stmt_list });
+    defer {
+        self.allocator.free(res.name);
+        self.allocator.free(res.comp_dir);
+    }
 
     const object = self.objects.items[0];
     var stabs = std.ArrayList(macho.nlist_64).init(self.allocator);
     defer stabs.deinit();
 
     {
-        var out_buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
-        const out_path = try std.os.realpath(self.out_path.?, &out_buffer);
+        const tu_path = try std.fs.path.join(self.allocator, &[_][]const u8{ res.comp_dir, res.name });
+        defer self.allocator.free(tu_path);
+        const dirname = std.fs.path.dirname(tu_path) orelse "./";
         // Current dir
-        const drn = std.fs.path.dirname(out_path);
-        const dirname = blk: {
-            if (drn) |ddd| {
-                break :blk try self.makeString(out_path[0 .. ddd.len + 1]);
-            } else {
-                break :blk try self.makeString("./");
-            }
-        };
         try stabs.append(.{
-            .n_strx = dirname,
+            .n_strx = try self.makeString(tu_path[0 .. dirname.len + 1]),
             .n_type = macho.N_SO,
             .n_sect = 0,
             .n_desc = 0,
             .n_value = 0,
         });
         // Artifact name
-        const name = blk: {
-            if (drn) |ddd| {
-                break :blk try self.makeString(out_path[ddd.len + 1 ..]);
-            } else {
-                break :blk try self.makeString(out_path);
-            }
-        };
         try stabs.append(.{
-            .n_strx = name,
+            .n_strx = try self.makeString(tu_path[dirname.len + 1 ..]),
             .n_type = macho.N_SO,
             .n_sect = 0,
             .n_desc = 0,
             .n_value = 0,
         });
         // Path to object file with debug info
+        var buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
         const path = object.name.?;
-        const full_path = try std.os.realpath(path, &out_buffer);
-        const pp = try self.makeString(full_path);
+        const full_path = try std.os.realpath(path, &buffer);
         const stat = try object.file.?.stat();
         const mtime = @intCast(u64, @divFloor(stat.mtime, 1_000_000_000));
         try stabs.append(.{
-            .n_strx = pp,
+            .n_strx = try self.makeString(full_path),
             .n_type = macho.N_OSO,
             .n_sect = 0,
             .n_desc = 0,
@@ -1757,6 +1748,11 @@ fn readCompUnit(self: *Zld) !?ReadCompUnitResult {
     var di_reader = di_stream.reader();
     var da_stream = std.io.fixedBufferStream(debug_abbrev_buf);
     var da_reader = da_stream.reader();
+    var res: ReadCompUnitResult = .{
+        .name = undefined,
+        .comp_dir = undefined,
+        .stmt_list = 0,
+    };
 
     while (true) {
         const next_cu = di_reader.readIntLittle(u32) catch |err| switch (err) {
@@ -1764,6 +1760,7 @@ fn readCompUnit(self: *Zld) !?ReadCompUnitResult {
             else => return err,
         };
         const dwarf64 = next_cu == 0xffffffff;
+        // TODO verify claimed size.
         var sz: i64 = @intCast(i64, next_cu);
         if (dwarf64)
             sz = @intCast(i64, try di_reader.readIntLittle(u64));
@@ -1785,16 +1782,17 @@ fn readCompUnit(self: *Zld) !?ReadCompUnitResult {
         try da_stream.seekTo(abbrev_base);
 
         const address_size = try di_reader.readByte();
-        const abbrev = try std.leb.readULEB128(u64, di_reader);
+        const abbrev = try leb.readULEB128(u64, di_reader);
 
         while (true) {
-            const next_abbrev = std.leb.readULEB128(u64, da_reader) catch |err| switch (err) {
+            const next_abbrev = leb.readULEB128(u64, da_reader) catch |err| switch (err) {
                 error.EndOfStream => break,
                 else => return err,
             };
+            log.debug("abbrev = {}, next_abbrev = {}", .{ abbrev, next_abbrev });
             if (abbrev == next_abbrev) break;
 
-            _ = try std.leb.readULEB128(u64, da_reader);
+            _ = try leb.readULEB128(u64, da_reader);
             _ = da_reader.readByte() catch |err| switch (err) {
                 error.EndOfStream => return null,
                 else => return err,
@@ -1802,26 +1800,162 @@ fn readCompUnit(self: *Zld) !?ReadCompUnitResult {
 
             var attr: u64 = undefined;
             while (true) {
-                attr = try std.leb.readULEB128(u64, da_reader);
-                _ = try std.leb.readULEB128(u64, da_reader);
+                attr = try leb.readULEB128(u64, da_reader);
+                _ = try leb.readULEB128(u64, da_reader);
                 if (attr == 0 or attr == 0xffffffffffffffff) break;
             }
             if (attr != 0) return null;
         }
 
-        const cu_tag = try std.leb.readULEB128(u64, da_reader);
-        if (cu_tag != std.dwarf.TAG_compile_unit) return null;
+        const cu_tag = try leb.readULEB128(u64, da_reader);
+        if (cu_tag != dwarf.TAG_compile_unit) return null;
 
         _ = da_reader.readByte() catch |err| switch (err) {
             error.EndOfStream => return null,
             else => return err,
         };
 
-        // TODO verify claimed size.
+        while (true) {
+            const attr = try leb.readULEB128(u64, da_reader);
+            var form = try leb.readULEB128(u64, da_reader);
+            log.debug("attr = 0x{x}, form = 0x{x}", .{ attr, form });
+
+            if (attr == 0) break;
+            if (attr == 0xffffffffffffffff) return null;
+
+            if (form == dwarf.FORM_indirect) {
+                form = try leb.readULEB128(u64, di_reader);
+            }
+
+            switch (attr) {
+                dwarf.AT_name => {
+                    const name = try self.getDwarfString(form, di_reader);
+                    log.debug("name = {s}", .{name});
+                    if (name) |v| res.name = v;
+                },
+                dwarf.AT_comp_dir => {
+                    const comp_dir = try self.getDwarfString(form, di_reader);
+                    log.debug("comp_dir = {s}", .{comp_dir});
+                    if (comp_dir) |v| res.comp_dir = v;
+                },
+                dwarf.AT_stmt_list => {
+                    const stmt_list = try self.getDwarfOffset(form, dwarf64, di_reader);
+                    log.debug("stmt_list = {}", .{stmt_list});
+                    if (stmt_list) |v| res.stmt_list = v;
+                },
+                else => {
+                    _ = self.skipDwarfForm(form, address_size, dwarf64, di_reader) catch |_| return null;
+                },
+            }
+        }
+
         try di_stream.seekBy(sz);
     }
 
-    return null;
+    return res;
+}
+
+fn getDwarfString(self: *Zld, form: u64, reader: anytype) !?[]u8 {
+    var result = std.ArrayList(u8).init(self.allocator);
+    switch (form) {
+        dwarf.FORM_string => {
+            var ch = try reader.readByte();
+            while (ch != @as(u8, 0)) {
+                try result.append(ch);
+                ch = try reader.readByte();
+            }
+        },
+        dwarf.FORM_strp => {
+            const offset = try reader.readIntLittle(u32);
+            var key = blk: {
+                var k = Object.DirectoryKey{
+                    .segname = undefined,
+                    .sectname = undefined,
+                };
+                mem.set(u8, &k.segname, 0);
+                mem.set(u8, &k.sectname, 0);
+                mem.copy(u8, &k.segname, "__DWARF");
+                mem.copy(u8, &k.sectname, "__debug_str");
+                break :blk k;
+            };
+
+            const object = self.objects.items[0];
+            const seg = object.load_commands.items[object.segment_cmd_index.?].Segment;
+            const sect_idx = object.directory.get(key) orelse return null;
+            const sect = seg.sections.items[sect_idx];
+
+            var ds_buf = try self.allocator.alloc(u8, sect.size);
+            defer self.allocator.free(ds_buf);
+
+            _ = try object.file.?.preadAll(ds_buf, sect.offset);
+            var ds_stream = std.io.fixedBufferStream(ds_buf);
+            var ds_reader = ds_stream.reader();
+
+            ds_stream.seekTo(offset) catch |err| switch (err) {
+                error.EndOfStream => {
+                    log.warn("DWARF string outside of __debug_str range", .{});
+                    return null;
+                },
+                else => return err,
+            };
+            var ch = try ds_reader.readByte();
+            while (ch != @as(u8, 0)) {
+                try result.append(ch);
+                ch = try ds_reader.readByte();
+            }
+        },
+        else => return error.UnexpectedDwarfFormField,
+    }
+
+    return result.toOwnedSlice();
+}
+
+fn getDwarfOffset(self: *Zld, form: u64, dwarf64: bool, reader: anytype) !?u64 {
+    const inner_form: u8 = if (dwarf64) dwarf.FORM_data8 else dwarf.FORM_data4;
+    log.debug("inner_form = 0x{x}", .{inner_form});
+    switch (inner_form) {
+        dwarf.FORM_data4 => return try reader.readIntLittle(u32),
+        dwarf.FORM_data8 => return try reader.readIntLittle(u64),
+        else => {
+            log.warn("unknown DWARF form for statement list 0x{x}", .{inner_form});
+            return null;
+        },
+    }
+}
+
+fn skipDwarfForm(self: *Zld, form: u64, address_size: u8, dwarf64: bool, reader: anytype) !void {
+    var sz: u64 = blk: {
+        switch (form) {
+            dwarf.FORM_addr => break :blk address_size,
+            dwarf.FORM_block2 => break :blk try reader.readIntLittle(u16),
+            dwarf.FORM_block4 => break :blk try reader.readIntLittle(u32),
+            dwarf.FORM_data1, dwarf.FORM_flag, dwarf.FORM_ref1 => break :blk 1,
+            dwarf.FORM_data2, dwarf.FORM_ref2 => break :blk 2,
+            dwarf.FORM_data4, dwarf.FORM_ref4 => break :blk 4,
+            dwarf.FORM_data8, dwarf.FORM_ref8 => break :blk 8,
+            dwarf.FORM_string => {
+                var next = try reader.readByte();
+                while (next != @as(u8, 0)) {
+                    next = try reader.readByte();
+                }
+                break :blk 0;
+            },
+            dwarf.FORM_block1 => break :blk try reader.readByte(),
+            dwarf.FORM_sdata, dwarf.FORM_udata, dwarf.FORM_ref_udata => {
+                _ = try leb.readULEB128(u64, reader);
+                return;
+            },
+            dwarf.FORM_strp, dwarf.FORM_ref_addr => break :blk 4,
+            dwarf.FORM_sec_offset => break :blk @sizeOf(usize),
+            dwarf.FORM_exprloc => break :blk try leb.readULEB128(u64, reader),
+            dwarf.FORM_flag_present => break :blk 0,
+            dwarf.FORM_ref_sig8 => break :blk 0,
+            else => return error.UnexpectedDwarfFormField,
+        }
+    };
+    while (sz > 0) : (sz -= 1) {
+        _ = try reader.readByte();
+    }
 }
 
 fn writeSymbolTable(self: *Zld) !void {
