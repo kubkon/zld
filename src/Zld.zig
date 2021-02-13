@@ -1730,19 +1730,20 @@ fn writeDebugInfo(self: *Zld) !void {
         });
     }
 
-    const nstabs = self.locals.items().len;
-
     for (self.locals.items()) |entry, i| {
         const sym = entry.value;
         const target_addr = blk: for (object.symtab.items) |s| {
             const n = object.getString(s.n_strx);
             if (mem.eql(u8, n, entry.key)) break :blk s.n_value;
         } else continue;
-        const line_info = debug_info.inner.getLineNumberInfo(compile_unit.*, target_addr) catch |err| switch (err) {
-            error.MissingDebugInfo => null,
-            else => return err,
-        };
-        if (line_info) |li| {
+        const size = blk: for (debug_info.inner.func_list.items) |func| {
+            if (func.pc_range) |range| {
+                if (target_addr >= range.start and target_addr <= range.end) {
+                    break :blk range.end - range.start;
+                }
+            }
+        } else null;
+        if (size) |ss| {
             try stabs.append(.{
                 .n_strx = 0,
                 .n_type = macho.N_BNSYM,
@@ -1762,14 +1763,14 @@ fn writeDebugInfo(self: *Zld) !void {
                 .n_type = macho.N_FUN,
                 .n_sect = 0,
                 .n_desc = 0,
-                .n_value = @intCast(u16, li.line),
+                .n_value = ss,
             });
             try stabs.append(.{
                 .n_strx = 0,
                 .n_type = macho.N_ENSYM,
                 .n_sect = sym.n_sect,
                 .n_desc = 0,
-                .n_value = @intCast(u16, li.line),
+                .n_value = ss,
             });
         } else {
             // TODO need a way to differentiate symbols: global, static, local, etc.
@@ -1787,7 +1788,7 @@ fn writeDebugInfo(self: *Zld) !void {
     const linkedit = &self.load_commands.items[self.linkedit_segment_cmd_index.?].Segment;
     const symtab = &self.load_commands.items[self.symtab_cmd_index.?].Symtab;
 
-    symtab.nsyms = @intCast(u32, nstabs) + 3;
+    symtab.nsyms = @intCast(u32, stabs.items.len);
 
     const stabs_off = symtab.symoff;
     const stabs_size = symtab.nsyms * @sizeOf(macho.nlist_64);
