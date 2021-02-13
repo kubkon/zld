@@ -8,6 +8,7 @@ const macho = std.macho;
 const mem = std.mem;
 
 const Allocator = mem.Allocator;
+const parseName = @import("Zld.zig").parseName;
 
 usingnamespace @import("commands.zig");
 
@@ -23,6 +24,12 @@ segment_cmd_index: ?u16 = null,
 symtab_cmd_index: ?u16 = null,
 dysymtab_cmd_index: ?u16 = null,
 build_version_cmd_index: ?u16 = null,
+
+dwarf_debug_info_index: ?u16 = null,
+dwarf_debug_abbrev_index: ?u16 = null,
+dwarf_debug_str_index: ?u16 = null,
+dwarf_debug_line_index: ?u16 = null,
+dwarf_debug_ranges_index: ?u16 = null,
 
 symtab: std.ArrayListUnmanaged(macho.nlist_64) = .{},
 strtab: std.ArrayListUnmanaged(u8) = .{},
@@ -69,11 +76,27 @@ pub fn parse(self: *Object, name: []const u8, file: fs.File) !void {
             macho.LC_SEGMENT_64 => {
                 self.segment_cmd_index = i;
                 const seg = cmd.Segment;
-                for (seg.sections.items) |sect, index| {
+                for (seg.sections.items) |sect, j| {
+                    const index = @intCast(u16, j);
+                    if (mem.eql(u8, parseName(&sect.segname), "__DWARF")) {
+                        const sectname = parseName(&sect.sectname);
+                        if (mem.eql(u8, sectname, "__debug_info")) {
+                            self.dwarf_debug_info_index = index;
+                        } else if (mem.eql(u8, sectname, "__debug_abbrev")) {
+                            self.dwarf_debug_abbrev_index = index;
+                        } else if (mem.eql(u8, sectname, "__debug_str")) {
+                            self.dwarf_debug_str_index = index;
+                        } else if (mem.eql(u8, sectname, "__debug_line")) {
+                            self.dwarf_debug_line_index = index;
+                        } else if (mem.eql(u8, sectname, "__debug_ranges")) {
+                            self.dwarf_debug_ranges_index = index;
+                        }
+                    }
+
                     try self.directory.putNoClobber(self.allocator, .{
                         .segname = sect.segname,
                         .sectname = sect.sectname,
-                    }, @intCast(u16, index));
+                    }, index);
                 }
             },
             macho.LC_SYMTAB => {
@@ -120,4 +143,12 @@ fn parseStrtab(self: *Object) !void {
 pub fn getString(self: *const Object, str_off: u32) []const u8 {
     assert(str_off < self.strtab.items.len);
     return mem.spanZ(@ptrCast([*:0]const u8, self.strtab.items.ptr + str_off));
+}
+
+pub fn parseSection(self: Object, allocator: *Allocator, index: u16) ![]u8 {
+    const seg = self.load_commands.items[self.segment_cmd_index.?].Segment;
+    const sect = seg.sections.items[index];
+    var buffer = try allocator.alloc(u8, sect.size);
+    _ = try self.file.?.preadAll(buffer, sect.offset);
+    return buffer;
 }
