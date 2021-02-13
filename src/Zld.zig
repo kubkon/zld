@@ -1221,6 +1221,7 @@ fn populateMetadata(self: *Zld) !void {
                 .strsize = 0,
             },
         });
+        try self.strtab.append(self.allocator, 0);
     }
 
     if (self.dysymtab_cmd_index == null) {
@@ -1724,7 +1725,7 @@ fn writeDebugInfo(self: *Zld) !void {
             .n_strx = try self.makeString(full_path),
             .n_type = macho.N_OSO,
             .n_sect = 0,
-            .n_desc = 0,
+            .n_desc = 1,
             .n_value = mtime,
         });
     }
@@ -1738,33 +1739,46 @@ fn writeDebugInfo(self: *Zld) !void {
             if (mem.eql(u8, n, entry.key)) break :blk s.n_value;
         } else continue;
         const line_info = debug_info.inner.getLineNumberInfo(compile_unit.*, target_addr) catch |err| switch (err) {
-            error.MissingDebugInfo => continue,
+            error.MissingDebugInfo => null,
             else => return err,
         };
-        const start_addr = sym.n_value;
-        const end_addr = if (i + 1 < self.locals.items().len) self.locals.items()[i + 1].value.n_value else null;
-        // TODO figure out the end vmaddr of the last symbol
-        try stabs.append(.{
-            .n_strx = 0,
-            .n_type = macho.N_BNSYM,
-            .n_sect = sym.n_sect,
-            .n_desc = 0,
-            .n_value = start_addr,
-        });
-        try stabs.append(.{
-            .n_strx = sym.n_strx,
-            .n_type = macho.N_FUN,
-            .n_sect = sym.n_sect,
-            .n_desc = @intCast(u16, line_info.line),
-            .n_value = start_addr,
-        });
-        if (end_addr) |ea| {
+        if (line_info) |li| {
+            try stabs.append(.{
+                .n_strx = 0,
+                .n_type = macho.N_BNSYM,
+                .n_sect = sym.n_sect,
+                .n_desc = 0,
+                .n_value = sym.n_value,
+            });
+            try stabs.append(.{
+                .n_strx = sym.n_strx,
+                .n_type = macho.N_FUN,
+                .n_sect = sym.n_sect,
+                .n_desc = 0,
+                .n_value = sym.n_value,
+            });
+            try stabs.append(.{
+                .n_strx = 0,
+                .n_type = macho.N_FUN,
+                .n_sect = 0,
+                .n_desc = 0,
+                .n_value = @intCast(u16, li.line),
+            });
             try stabs.append(.{
                 .n_strx = 0,
                 .n_type = macho.N_ENSYM,
                 .n_sect = sym.n_sect,
                 .n_desc = 0,
-                .n_value = ea,
+                .n_value = @intCast(u16, li.line),
+            });
+        } else {
+            // TODO need a way to differentiate symbols: global, static, local, etc.
+            try stabs.append(.{
+                .n_strx = sym.n_strx,
+                .n_type = macho.N_STSYM,
+                .n_sect = sym.n_sect,
+                .n_desc = 0,
+                .n_value = sym.n_value,
             });
         }
     }
