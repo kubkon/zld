@@ -1738,7 +1738,8 @@ fn writeDebugInfo(self: *Zld) !void {
         } else continue;
         const size = blk: for (debug_info.inner.func_list.items) |func| {
             if (func.pc_range) |range| {
-                if (target_addr >= range.start and target_addr <= range.end) {
+                if (target_addr >= range.start and target_addr < range.end) {
+                    log.debug("'{s}': {}", .{ entry.key, range });
                     break :blk range.end - range.start;
                 }
             }

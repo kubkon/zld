@@ -25,6 +25,8 @@ symtab_cmd_index: ?u16 = null,
 dysymtab_cmd_index: ?u16 = null,
 build_version_cmd_index: ?u16 = null,
 
+text_section_index: ?u16 = null,
+
 dwarf_debug_info_index: ?u16 = null,
 dwarf_debug_abbrev_index: ?u16 = null,
 dwarf_debug_str_index: ?u16 = null,
@@ -78,8 +80,9 @@ pub fn parse(self: *Object, name: []const u8, file: fs.File) !void {
                 const seg = cmd.Segment;
                 for (seg.sections.items) |sect, j| {
                     const index = @intCast(u16, j);
-                    if (mem.eql(u8, parseName(&sect.segname), "__DWARF")) {
-                        const sectname = parseName(&sect.sectname);
+                    const segname = parseName(&sect.segname);
+                    const sectname = parseName(&sect.sectname);
+                    if (mem.eql(u8, segname, "__DWARF")) {
                         if (mem.eql(u8, sectname, "__debug_info")) {
                             self.dwarf_debug_info_index = index;
                         } else if (mem.eql(u8, sectname, "__debug_abbrev")) {
@@ -90,6 +93,10 @@ pub fn parse(self: *Object, name: []const u8, file: fs.File) !void {
                             self.dwarf_debug_line_index = index;
                         } else if (mem.eql(u8, sectname, "__debug_ranges")) {
                             self.dwarf_debug_ranges_index = index;
+                        }
+                    } else if (mem.eql(u8, segname, "__TEXT")) {
+                        if (mem.eql(u8, sectname, "__text")) {
+                            self.text_section_index = index;
                         }
                     }
 
