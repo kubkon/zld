@@ -1688,7 +1688,6 @@ fn writeDebugInfo(self: *Zld) !void {
         if (mem.eql(u8, symname, "_main")) break :blk sym.n_value;
     } else unreachable;
     const compile_unit = try debug_info.inner.findCompileUnit(addr);
-    const die = compile_unit.die;
     const name = try compile_unit.die.getAttrString(&debug_info.inner, dwarf.AT_name);
     const comp_dir = try compile_unit.die.getAttrString(&debug_info.inner, dwarf.AT_comp_dir);
 
@@ -1731,17 +1730,43 @@ fn writeDebugInfo(self: *Zld) !void {
     }
 
     const nstabs = self.locals.items().len;
-    try stabs.ensureCapacity(stabs.items.len + nstabs);
 
-    for (self.locals.items()) |entry| {
+    for (self.locals.items()) |entry, i| {
         const sym = entry.value;
-        stabs.appendAssumeCapacity(.{
+        const target_addr = blk: for (object.symtab.items) |s| {
+            const n = object.getString(s.n_strx);
+            if (mem.eql(u8, n, entry.key)) break :blk s.n_value;
+        } else continue;
+        const line_info = debug_info.inner.getLineNumberInfo(compile_unit.*, target_addr) catch |err| switch (err) {
+            error.MissingDebugInfo => continue,
+            else => return err,
+        };
+        const start_addr = sym.n_value;
+        const end_addr = if (i + 1 < self.locals.items().len) self.locals.items()[i + 1].value.n_value else null;
+        // TODO figure out the end vmaddr of the last symbol
+        try stabs.append(.{
+            .n_strx = 0,
+            .n_type = macho.N_BNSYM,
+            .n_sect = sym.n_sect,
+            .n_desc = 0,
+            .n_value = start_addr,
+        });
+        try stabs.append(.{
             .n_strx = sym.n_strx,
             .n_type = macho.N_FUN,
             .n_sect = sym.n_sect,
-            .n_desc = 0,
-            .n_value = sym.n_value,
+            .n_desc = @intCast(u16, line_info.line),
+            .n_value = start_addr,
         });
+        if (end_addr) |ea| {
+            try stabs.append(.{
+                .n_strx = 0,
+                .n_type = macho.N_ENSYM,
+                .n_sect = sym.n_sect,
+                .n_desc = 0,
+                .n_value = ea,
+            });
+        }
     }
 
     // Write stabs into the symbol table
