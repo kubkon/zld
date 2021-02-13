@@ -74,7 +74,7 @@ adding some support to other widely used formats such as Elf, Coff, PE, etc.
 - [x] link the same `.o` but targeting `x86_64`
 - [x] unhack, or refactor, for basic single `.o` linking
 - [x] link multiple `.o`
-- [ ] link simple `.zig` (this includes TLV so should be interesting!)
+- [x] link simple `.zig` (this includes TLV so should be interesting!)
 - [ ] converge with Zig's stage2
 - [ ] handle multiple dynamic libraries
 - [ ] handle frameworks
