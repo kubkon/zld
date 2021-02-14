@@ -1643,8 +1643,10 @@ const DebugInfo = struct {
             break :blk try object.parseSection(allocator, index);
         };
         var debug_ranges = blk: {
-            const index = object.dwarf_debug_ranges_index orelse return null;
-            break :blk try object.parseSection(allocator, index);
+            if (object.dwarf_debug_ranges_index) |ind| {
+                break :blk try object.parseSection(allocator, ind);
+            }
+            break :blk try allocator.alloc(u8, 0);
         };
 
         var inner: dwarf.DwarfInfo = .{
@@ -1784,6 +1786,15 @@ fn writeDebugInfo(self: *Zld) !void {
             });
         }
     }
+
+    // Close the source file!
+    try stabs.append(.{
+        .n_strx = 0,
+        .n_type = macho.N_SO,
+        .n_sect = 0,
+        .n_desc = 0,
+        .n_value = 0,
+    });
 
     // Write stabs into the symbol table
     const linkedit = &self.load_commands.items[self.linkedit_segment_cmd_index.?].Segment;
