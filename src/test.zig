@@ -26,6 +26,7 @@ pub const TestContext = struct {
     cases: std.ArrayList(Case),
 
     pub const Case = struct {
+        name: []const u8,
         target: CrossTarget,
         input_files: std.ArrayList(InputFile),
         expected_out: ?[]const u8 = null,
@@ -54,9 +55,10 @@ pub const TestContext = struct {
             }
         };
 
-        pub fn init(target: CrossTarget) Case {
+        pub fn init(name: []const u8, target: CrossTarget) Case {
             var input_files = std.ArrayList(InputFile).init(testing.allocator);
             return .{
+                .name = name,
                 .target = target,
                 .input_files = input_files,
             };
@@ -110,7 +112,7 @@ pub const TestContext = struct {
 
     pub fn addCase(self: *TestContext, name: []const u8, target: CrossTarget) !*Case {
         const idx = self.cases.items.len;
-        try self.cases.append(Case.init(target));
+        try self.cases.append(Case.init(name, target));
         return &self.cases.items[idx];
     }
 
@@ -239,7 +241,11 @@ pub const TestContext = struct {
                 }
 
                 if (case.expected_out) |exp| {
-                    testing.expect(mem.eql(u8, result.stdout, exp));
+                    const pass = mem.eql(u8, result.stdout, exp);
+                    if (!pass) {
+                        log.err("Test '{s}' failed\nExpected: '{s}'\nGot: '{s}'", .{ case.name, exp, result.stdout });
+                    }
+                    testing.expect(pass);
                 } else {
                     log.warn("exe was run, but no expected output was provided", .{});
                 }
