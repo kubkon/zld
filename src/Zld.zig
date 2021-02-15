@@ -705,7 +705,6 @@ fn doRelocs(self: *Zld) !void {
                             => {
                                 assert(rel.r_length == 2);
                                 const inst = code[off..][0..4];
-                                const offset = mem.readIntLittle(i32, inst);
                                 const correction: i4 = switch (rel_type) {
                                     .X86_64_RELOC_SIGNED => 0,
                                     .X86_64_RELOC_SIGNED_1 => 1,
@@ -713,8 +712,8 @@ fn doRelocs(self: *Zld) !void {
                                     .X86_64_RELOC_SIGNED_4 => 4,
                                     else => unreachable,
                                 };
-                                log.debug("{}, addend => 0x{x}, addr = 0x{x}", .{ rel, offset, target_addr });
-                                var result = @intCast(i64, target_addr) - @intCast(i64, this_addr) + offset - correction;
+                                log.debug("{}, addr = 0x{x}", .{ rel, target_addr });
+                                var result = @intCast(i64, target_addr) - @intCast(i64, this_addr) - correction - 4;
                                 const displacement = @bitCast(u32, @intCast(i32, result));
                                 mem.writeIntLittle(u32, inst, displacement);
                             },
