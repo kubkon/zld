@@ -688,29 +688,85 @@ fn doRelocs(self: *Zld) !void {
                         const rel_type = @intToEnum(macho.reloc_type_x86_64, rel.r_type);
                         const target_addr = self.relocTargetAddr(object, rel, next_space);
                         switch (rel_type) {
-                            .X86_64_RELOC_BRANCH => {
+                            .X86_64_RELOC_BRANCH,
+                            .X86_64_RELOC_GOT_LOAD,
+                            .X86_64_RELOC_GOT,
+                            .X86_64_RELOC_TLV,
+                            => {
                                 assert(rel.r_length == 2);
                                 const inst = code[off..][0..4];
-                                // callq / jmpq
                                 const displacement = @bitCast(u32, @intCast(i32, @intCast(i64, target_addr) - @intCast(i64, this_addr) - 4));
                                 mem.writeIntLittle(u32, inst, displacement);
                             },
-                            .X86_64_RELOC_SIGNED => {
+                            .X86_64_RELOC_SIGNED,
+                            .X86_64_RELOC_SIGNED_1,
+                            .X86_64_RELOC_SIGNED_2,
+                            .X86_64_RELOC_SIGNED_4,
+                            => {
                                 assert(rel.r_length == 2);
                                 const inst = code[off..][0..4];
-                                // leaq
-                                const displacement = @bitCast(u32, @intCast(i32, @intCast(i64, target_addr) - @intCast(i64, this_addr) - 4));
+                                const offset = mem.readIntLittle(i32, inst);
+                                const correction: i4 = switch (rel_type) {
+                                    .X86_64_RELOC_SIGNED => 0,
+                                    .X86_64_RELOC_SIGNED_1 => 1,
+                                    .X86_64_RELOC_SIGNED_2 => 2,
+                                    .X86_64_RELOC_SIGNED_4 => 4,
+                                    else => unreachable,
+                                };
+                                log.debug("{}, addend => 0x{x}, addr = 0x{x}", .{ rel, offset, target_addr });
+                                var result = @intCast(i64, target_addr) - @intCast(i64, this_addr) + offset - correction;
+                                const displacement = @bitCast(u32, @intCast(i32, result));
                                 mem.writeIntLittle(u32, inst, displacement);
                             },
-                            .X86_64_RELOC_GOT_LOAD => {
-                                assert(rel.r_length == 2);
-                                const inst = code[off..][0..4];
-                                // movq
-                                const displacement = @bitCast(u32, @intCast(i32, @intCast(i64, target_addr) - @intCast(i64, this_addr) - 4));
-                                mem.writeIntLittle(u32, inst, displacement);
+                            .X86_64_RELOC_SUBTRACTOR => {
+                                log.debug("{}, sym = {s}", .{ rel, object.getString(object.symtab.items[rel.r_symbolnum].n_strx) });
+                                sub = @intCast(i64, target_addr);
                             },
-                            else => |tt| {
-                                log.warn("unhandled relocation type '{}'", .{tt});
+                            .X86_64_RELOC_UNSIGNED => {
+                                switch (rel.r_length) {
+                                    3 => {
+                                        const inst = code[off..][0..8];
+                                        const offset = mem.readIntLittle(u64, inst);
+                                        log.debug("{}, addend => 0x{x}, sym = {s}", .{ rel, offset, object.getString(object.symtab.items[rel.r_symbolnum].n_strx) });
+                                        log.debug("sym_addr = 0x{x}", .{target_addr});
+                                        const val: u64 = if (sub) |s|
+                                            @bitCast(u64, @intCast(i64, target_addr) - s)
+                                        else
+                                            target_addr;
+                                        var result: u64 = undefined;
+                                        _ = @addWithOverflow(u64, target_addr, offset, &result);
+                                        log.debug("value = 0x{x}", .{result});
+                                        mem.writeIntLittle(u64, inst, result);
+                                        sub = null;
+
+                                        // TODO should handle this better.
+                                        if (mem.eql(u8, segname, "__DATA")) outer: {
+                                            if (!mem.eql(u8, sectname, "__data") and
+                                                !mem.eql(u8, sectname, "__const")) break :outer;
+                                            const sseg = self.load_commands.items[self.data_segment_cmd_index.?].Segment;
+                                            const offf = next.address + off - sseg.inner.vmaddr;
+                                            try self.local_rebases.append(self.allocator, .{
+                                                .offset = offf,
+                                                .segment_id = @intCast(u16, self.data_segment_cmd_index.?),
+                                            });
+                                        }
+                                    },
+                                    2 => {
+                                        const inst = code[off..][0..4];
+                                        const offset = mem.readIntLittle(u32, inst);
+                                        log.debug("{}, addend => 0x{x}, sym = {s}", .{ rel, offset, object.getString(object.symtab.items[rel.r_symbolnum].n_strx) });
+                                        const val: u32 = if (sub) |s|
+                                            @truncate(u32, @bitCast(u64, @intCast(i64, target_addr) - s))
+                                        else
+                                            @truncate(u32, target_addr);
+                                        var result: u32 = undefined;
+                                        _ = @addWithOverflow(u32, val, offset, &result);
+                                        log.debug("target_addr = 0x{x}, result = 0x{x}", .{ target_addr, result });
+                                        mem.writeIntLittle(u32, inst, result);
+                                        sub = null;
+                                    },
+                                    else => unreachable,
+                                }
                             },
                         }
                     },
@@ -857,14 +913,10 @@ fn doRelocs(self: *Zld) !void {
                                         mem.writeIntLittle(u32, inst, result);
                                         sub = null;
                                     },
-                                    else => {
-                                        log.warn("unexpected reloc length {}", .{rel.r_length});
-                                    },
+                                    else => unreachable,
                                 }
                             },
-                            .ARM64_RELOC_POINTER_TO_GOT => {
-                                log.warn("handle pointer-to-got slots", .{});
-                            },
+                            .ARM64_RELOC_POINTER_TO_GOT => return error.TODOArm64RelocPointerToGot,
                             else => unreachable,
                         }
                     },
