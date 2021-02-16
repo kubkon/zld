@@ -703,6 +703,7 @@ fn doRelocs(self: *Zld) !void {
                     .x86_64 => {
                         const rel_type = @intToEnum(macho.reloc_type_x86_64, rel.r_type);
                         const target_addr = self.relocTargetAddr(object, rel, next_space);
+                        log.debug("{}", .{rel_type});
                         switch (rel_type) {
                             .X86_64_RELOC_BRANCH,
                             .X86_64_RELOC_GOT_LOAD,
@@ -727,20 +728,30 @@ fn doRelocs(self: *Zld) !void {
                             .X86_64_RELOC_SIGNED_2,
                             .X86_64_RELOC_SIGNED_4,
                             => {
-                                // TODO it might be required here to parse the offset from the instruction placeholder,
-                                // compare the displacement with the original displacement in the .o file, and adjust
-                                // the displacement in the resultant binary file.
                                 assert(rel.r_length == 2);
                                 const inst = code[off..][0..4];
-                                const correction: i4 = switch (rel_type) {
-                                    .X86_64_RELOC_SIGNED => 0,
-                                    .X86_64_RELOC_SIGNED_1 => 1,
-                                    .X86_64_RELOC_SIGNED_2 => 2,
-                                    .X86_64_RELOC_SIGNED_4 => 4,
-                                    else => unreachable,
+                                const offset: i32 = blk: {
+                                    if (rel.r_extern == 1) {
+                                        const offf = mem.readIntLittle(i32, inst);
+                                        log.debug("{}, inst = 0x{x}, addend => 0x{x}, sym = {s}", .{ rel, inst, offf, object.getString(object.symtab.items[rel.r_symbolnum].n_strx) });
+                                        break :blk offf;
+                                    } else {
+                                        // TODO it might be required here to parse the offset from the instruction placeholder,
+                                        // compare the displacement with the original displacement in the .o file, and adjust
+                                        // the displacement in the resultant binary file.
+                                        log.debug("{}, inst = 0x{x}, addend => 0x{x}, sect = {}", .{ rel, inst, 0, rel.r_symbolnum });
+                                        const correction: i4 = switch (rel_type) {
+                                            .X86_64_RELOC_SIGNED => 0,
+                                            .X86_64_RELOC_SIGNED_1 => 1,
+                                            .X86_64_RELOC_SIGNED_2 => 2,
+                                            .X86_64_RELOC_SIGNED_4 => 4,
+                                            else => unreachable,
+                                        };
+                                        break :blk correction;
+                                    }
                                 };
                                 log.debug("{}, addr = 0x{x}", .{ rel, target_addr });
-                                var result = @intCast(i64, target_addr) - @intCast(i64, this_addr) - correction - 4;
+                                var result = @intCast(i64, target_addr) - @intCast(i64, this_addr) - 4 + offset;
                                 const displacement = @bitCast(u32, @intCast(i32, result));
                                 mem.writeIntLittle(u32, inst, displacement);
                             },
@@ -752,17 +763,16 @@ fn doRelocs(self: *Zld) !void {
                                 switch (rel.r_length) {
                                     3 => {
                                         const inst = code[off..][0..8];
-                                        const offset = mem.readIntLittle(u64, inst);
+                                        const offset = mem.readIntLittle(i64, inst);
                                         log.debug("{}, addend => 0x{x}, sym = {s}", .{ rel, offset, object.getString(object.symtab.items[rel.r_symbolnum].n_strx) });
                                         log.debug("sym_addr = 0x{x}", .{target_addr});
-                                        const val: u64 = if (sub) |s|
-                                            @bitCast(u64, @intCast(i64, target_addr) - s)
-                                        else
-                                            target_addr;
-                                        var result: u64 = undefined;
-                                        _ = @addWithOverflow(u64, target_addr, offset, &result);
+                                        const result = if (sub) |s| blk: {
+                                            break :blk @intCast(i64, target_addr) - s + offset;
+                                        } else blk: {
+                                            break :blk @intCast(i64, target_addr) + offset;
+                                        };
                                         log.debug("value = 0x{x}", .{result});
-                                        mem.writeIntLittle(u64, inst, result);
+                                        mem.writeIntLittle(u64, inst, @bitCast(u64, result));
                                         sub = null;
 
                                         // TODO should handle this better.
@@ -779,16 +789,15 @@ fn doRelocs(self: *Zld) !void {
                                     },
                                     2 => {
                                         const inst = code[off..][0..4];
-                                        const offset = mem.readIntLittle(u32, inst);
+                                        const offset = mem.readIntLittle(i32, inst);
                                         log.debug("{}, addend => 0x{x}, sym = {s}", .{ rel, offset, object.getString(object.symtab.items[rel.r_symbolnum].n_strx) });
-                                        const val: u32 = if (sub) |s|
-                                            @truncate(u32, @bitCast(u64, @intCast(i64, target_addr) - s))
-                                        else
-                                            @truncate(u32, target_addr);
-                                        var result: u32 = undefined;
-                                        _ = @addWithOverflow(u32, val, offset, &result);
+                                        const result = if (sub) |s| blk: {
+                                            break :blk @intCast(i64, target_addr) - s + offset;
+                                        } else blk: {
+                                            break :blk @intCast(i64, target_addr) + offset;
+                                        };
                                         log.debug("target_addr = 0x{x}, result = 0x{x}", .{ target_addr, result });
-                                        mem.writeIntLittle(u32, inst, result);
+                                        mem.writeIntLittle(u32, inst, @truncate(u32, @bitCast(u64, result)));
                                         sub = null;
                                     },
                                     else => unreachable,
@@ -908,7 +917,7 @@ fn doRelocs(self: *Zld) !void {
                                         else
                                             target_addr;
                                         var result: u64 = undefined;
-                                        _ = @addWithOverflow(u64, target_addr, offset, &result);
+                                        _ = @addWithOverflow(u64, val, offset, &result);
                                         log.debug("value = 0x{x}", .{result});
                                         mem.writeIntLittle(u64, inst, result);
                                         sub = null;
