@@ -703,6 +703,9 @@ fn doRelocs(self: *Zld) !void {
                             .X86_64_RELOC_SIGNED_2,
                             .X86_64_RELOC_SIGNED_4,
                             => {
+                                // TODO it might be required here to parse the offset from the instruction placeholder,
+                                // compare the displacement with the original displacement in the .o file, and adjust
+                                // the displacement in the resultant binary file.
                                 assert(rel.r_length == 2);
                                 const inst = code[off..][0..4];
                                 const correction: i4 = switch (rel_type) {
