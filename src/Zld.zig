@@ -51,6 +51,7 @@ text_section_index: ?u16 = null,
 stubs_section_index: ?u16 = null,
 stub_helper_section_index: ?u16 = null,
 got_section_index: ?u16 = null,
+tlv_section_index: ?u16 = null,
 la_symbol_ptr_section_index: ?u16 = null,
 data_section_index: ?u16 = null,
 
@@ -58,6 +59,7 @@ locals: std.StringArrayHashMapUnmanaged(macho.nlist_64) = .{},
 exports: std.StringArrayHashMapUnmanaged(macho.nlist_64) = .{},
 nonlazy_imports: std.StringArrayHashMapUnmanaged(Import) = .{},
 lazy_imports: std.StringArrayHashMapUnmanaged(Import) = .{},
+threadlocal_imports: std.StringArrayHashMapUnmanaged(Import) = .{},
 local_rebases: std.ArrayListUnmanaged(RebasePointer) = .{},
 
 strtab: std.ArrayListUnmanaged(u8) = .{},
@@ -102,6 +104,10 @@ pub fn deinit(self: *Zld) void {
         self.allocator.free(entry.key);
     }
     self.lazy_imports.deinit(self.allocator);
+    for (self.threadlocal_imports.items()) |*entry| {
+        self.allocator.free(entry.key);
+    }
+    self.threadlocal_imports.deinit(self.allocator);
     for (self.nonlazy_imports.items()) |*entry| {
         self.allocator.free(entry.key);
     }
@@ -189,6 +195,9 @@ fn parseObjectFiles(self: *Zld, files: []const []const u8) !void {
             });
             if (!res.found_existing) {
                 const sect_index = @intCast(u16, seg.sections.items.len);
+                if (mem.eql(u8, sectname, "__thread_vars")) {
+                    self.tlv_section_index = sect_index;
+                }
                 try seg.append(self.allocator, .{
                     .sectname = makeStaticString(&sect.sectname),
                     .segname = makeStaticString(&sect.segname),
@@ -256,12 +265,19 @@ fn resolveImports(self: *Zld) !void {
         if (mem.eql(u8, sym_name, "___stdoutp") or
             mem.eql(u8, sym_name, "___stderrp") or
             mem.eql(u8, sym_name, "___stack_chk_guard") or
-            mem.eql(u8, sym_name, "_environ") or
-            mem.eql(u8, sym_name, "__tlv_bootstrap")) // TODO __tlv_bootstrap is neither lazy nor nonlazy in conventional sense.
+            mem.eql(u8, sym_name, "_environ"))
         {
             log.debug("writing nonlazy symbol '{s}'", .{sym_name});
             const index = @intCast(u32, self.nonlazy_imports.items().len);
             try self.nonlazy_imports.putNoClobber(self.allocator, key, .{
+                .symbol = new_sym,
+                .dylib_ordinal = dylib_ordinal,
+                .index = index,
+            });
+        } else if (mem.eql(u8, sym_name, "__tlv_bootstrap")) {
+            log.debug("writing threadlocal symbol '{s}'", .{sym_name});
+            const index = @intCast(u32, self.threadlocal_imports.items().len);
+            try self.threadlocal_imports.putNoClobber(self.allocator, key, .{
                 .symbol = new_sym,
                 .dylib_ordinal = dylib_ordinal,
                 .index = index,
@@ -691,9 +707,17 @@ fn doRelocs(self: *Zld) !void {
                             .X86_64_RELOC_BRANCH,
                             .X86_64_RELOC_GOT_LOAD,
                             .X86_64_RELOC_GOT,
-                            .X86_64_RELOC_TLV,
                             => {
                                 assert(rel.r_length == 2);
+                                const inst = code[off..][0..4];
+                                const displacement = @bitCast(u32, @intCast(i32, @intCast(i64, target_addr) - @intCast(i64, this_addr) - 4));
+                                mem.writeIntLittle(u32, inst, displacement);
+                            },
+                            .X86_64_RELOC_TLV => {
+                                assert(rel.r_length == 2);
+                                // We need to rewrite the opcode from movq to leaq.
+                                code[off - 2] = 0x8d;
+                                // Add displacement.
                                 const inst = code[off..][0..4];
                                 const displacement = @bitCast(u32, @intCast(i32, @intCast(i64, target_addr) - @intCast(i64, this_addr) - 4));
                                 mem.writeIntLittle(u32, inst, displacement);
@@ -978,6 +1002,10 @@ fn relocTargetAddr(self: *Zld, object: Object, rel: macho.relocation_info, next_
                     const segment = self.load_commands.items[self.data_segment_cmd_index.?].Segment;
                     const got = segment.sections.items[self.got_section_index.?];
                     break :blk got.addr + ext.index * @sizeOf(u64);
+                } else if (self.threadlocal_imports.get(sym_name)) |ext| {
+                    const segment = self.load_commands.items[self.data_segment_cmd_index.?].Segment;
+                    const tlv = segment.sections.items[self.tlv_section_index.?];
+                    break :blk tlv.addr + ext.index * @sizeOf(u64);
                 } else unreachable;
             } else {
                 log.warn("unexpected symbol {}, {s}", .{ sym, object.getString(sym.n_strx) });
@@ -1521,17 +1549,47 @@ fn writeRebaseInfoTable(self: *Zld) !void {
 
 fn writeBindInfoTable(self: *Zld) !void {
     const data_seg = self.load_commands.items[self.data_segment_cmd_index.?].Segment;
-    const got = data_seg.sections.items[self.got_section_index.?];
-    const args = SharedDyldArgs{
-        .base_offset = @intCast(u32, got.addr - data_seg.inner.vmaddr),
-        .segment_id = self.data_segment_cmd_index.?,
-    };
-    const size = try bindInfoSize(self.nonlazy_imports.items(), args);
-    var buffer = try self.allocator.alloc(u8, @intCast(usize, size));
-    defer self.allocator.free(buffer);
 
-    var stream = std.io.fixedBufferStream(buffer);
-    try writeBindInfo(self.nonlazy_imports.items(), args, stream.writer());
+    var buffer1 = blk: {
+        const got = data_seg.sections.items[self.got_section_index.?];
+        const args = SharedDyldArgs{
+            .base_offset = @intCast(u32, got.addr - data_seg.inner.vmaddr),
+            .segment_id = self.data_segment_cmd_index.?,
+        };
+        const size = try bindInfoSize(self.nonlazy_imports.items(), args);
+        var buffer = try self.allocator.alloc(u8, @intCast(usize, size));
+
+        var stream = std.io.fixedBufferStream(buffer);
+        try writeBindInfo(self.nonlazy_imports.items(), args, stream.writer());
+
+        break :blk buffer;
+    };
+    defer self.allocator.free(buffer1);
+
+    var buffer2 = blk: {
+        if (self.tlv_section_index) |idx| {
+            const tlv = data_seg.sections.items[self.tlv_section_index.?];
+            const args = SharedDyldArgs{
+                .base_offset = @intCast(u32, tlv.addr - data_seg.inner.vmaddr),
+                .segment_id = self.data_segment_cmd_index.?,
+            };
+            const size = try bindInfoSize(self.threadlocal_imports.items(), args);
+            var buffer = try self.allocator.alloc(u8, @intCast(usize, size));
+
+            var stream = std.io.fixedBufferStream(buffer);
+            try writeBindInfo(self.threadlocal_imports.items(), args, stream.writer());
+
+            break :blk buffer;
+        } else {
+            break :blk try self.allocator.alloc(u8, 0);
+        }
+    };
+    defer self.allocator.free(buffer2);
+
+    var buffer = try self.allocator.alloc(u8, buffer1.len + buffer2.len - 1);
+    defer self.allocator.free(buffer);
+    mem.copy(u8, buffer, buffer1[0 .. buffer1.len - 1]);
+    mem.copy(u8, buffer[buffer1.len - 1 ..], buffer2);
 
     const seg = &self.load_commands.items[self.linkedit_segment_cmd_index.?].Segment;
     const dyld_info = &self.load_commands.items[self.dyld_info_cmd_index.?].DyldInfoOnly;
@@ -1890,7 +1948,7 @@ fn writeSymbolTable(self: *Zld) !void {
         exports.appendAssumeCapacity(entry.value);
     }
 
-    const nundefs = self.lazy_imports.items().len + self.nonlazy_imports.items().len;
+    const nundefs = self.lazy_imports.items().len + self.nonlazy_imports.items().len + self.threadlocal_imports.items().len;
     var undefs = std.ArrayList(macho.nlist_64).init(self.allocator);
     defer undefs.deinit();
 
@@ -1899,6 +1957,9 @@ fn writeSymbolTable(self: *Zld) !void {
         undefs.appendAssumeCapacity(entry.value.symbol);
     }
     for (self.nonlazy_imports.items()) |entry| {
+        undefs.appendAssumeCapacity(entry.value.symbol);
+    }
+    for (self.threadlocal_imports.items()) |entry| {
         undefs.appendAssumeCapacity(entry.value.symbol);
     }
 
@@ -2085,14 +2146,7 @@ fn writeHeader(self: *Zld) !void {
     header.flags = macho.MH_NOUNDEFS | macho.MH_DYLDLINK | macho.MH_PIE | macho.MH_TWOLEVEL;
     header.reserved = 0;
 
-    const has_tlv: bool = blk: {
-        const seg = self.load_commands.items[self.data_segment_cmd_index.?].Segment;
-        for (seg.sections.items) |sect| {
-            const sectname = parseName(&sect.sectname);
-            if (mem.eql(u8, sectname, "__thread_vars") or mem.eql(u8, sectname, "__thread_bss")) break :blk true;
-        } else break :blk false;
-    };
-    if (has_tlv)
+    if (self.tlv_section_index) |_|
         header.flags |= macho.MH_HAS_TLV_DESCRIPTORS;
 
     header.ncmds = @intCast(u32, self.load_commands.items.len);
