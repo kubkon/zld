@@ -6,12 +6,25 @@ const mem = std.mem;
 const assert = std.debug.assert;
 const Allocator = mem.Allocator;
 
-pub const RebasePointer = struct {
-    offset: u64,
-    segment_id: u16,
+pub const Import = struct {
+    /// MachO symbol table entry.
+    symbol: macho.nlist_64,
+
+    /// Id of the dynamic library where the specified entries can be found.
+    dylib_ordinal: i64,
+
+    /// Index of this import within the import list.
+    index: u32,
 };
 
-pub fn rebaseInfoSize(pointers: anytype) !u64 {
+pub const Pointer = struct {
+    offset: u64,
+    segment_id: u16,
+    dylib_ordinal: ?i64 = null,
+    name: ?[]const u8 = null,
+};
+
+pub fn rebaseInfoSize(pointers: []const Pointer) !u64 {
     var stream = std.io.countingWriter(std.io.null_writer);
     var writer = stream.writer();
     var size: u64 = 0;
@@ -26,7 +39,7 @@ pub fn rebaseInfoSize(pointers: anytype) !u64 {
     return size;
 }
 
-pub fn writeRebaseInfo(pointers: anytype, writer: anytype) !void {
+pub fn writeRebaseInfo(pointers: []const Pointer, writer: anytype) !void {
     for (pointers) |pointer| {
         try writer.writeByte(macho.REBASE_OPCODE_SET_TYPE_IMM | @truncate(u4, macho.REBASE_TYPE_POINTER));
         try writer.writeByte(macho.REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | @truncate(u4, pointer.segment_id));
@@ -37,44 +50,25 @@ pub fn writeRebaseInfo(pointers: anytype, writer: anytype) !void {
     try writer.writeByte(macho.REBASE_OPCODE_DONE);
 }
 
-pub const Import = struct {
-    /// MachO symbol table entry.
-    symbol: macho.nlist_64,
-
-    /// Id of the dynamic library where the specified entries can be found.
-    dylib_ordinal: i64,
-
-    /// Index of this import within the import list.
-    index: u32,
-};
-
-pub const SharedDyldArgs = struct {
-    base_offset: u32,
-    segment_id: u16,
-};
-
-pub fn bindInfoSize(imports: anytype, args: SharedDyldArgs) !u64 {
+pub fn bindInfoSize(pointers: []const Pointer) !u64 {
     var stream = std.io.countingWriter(std.io.null_writer);
     var writer = stream.writer();
     var size: u64 = 0;
 
-    for (imports) |entry, i| {
-        const import = entry.value;
-
+    for (pointers) |pointer| {
         size += 1;
-        if (import.dylib_ordinal > 15) {
-            try leb.writeULEB128(writer, @bitCast(u64, import.dylib_ordinal));
+        if (pointer.dylib_ordinal.? > 15) {
+            try leb.writeULEB128(writer, @bitCast(u64, pointer.dylib_ordinal.?));
         }
         size += 1;
 
         size += 1;
-        size += entry.key.len;
+        size += pointer.name.?.len;
         size += 1;
 
         size += 1;
 
-        const offset = args.base_offset + i * @sizeOf(u64);
-        try leb.writeILEB128(writer, offset);
+        try leb.writeILEB128(writer, pointer.offset);
         size += 1;
     }
 
@@ -82,53 +76,48 @@ pub fn bindInfoSize(imports: anytype, args: SharedDyldArgs) !u64 {
     return size;
 }
 
-pub fn writeBindInfo(imports: anytype, args: SharedDyldArgs, writer: anytype) !void {
-    for (imports) |entry, i| {
-        const import = entry.value;
-
-        if (import.dylib_ordinal > 15) {
+pub fn writeBindInfo(pointers: []const Pointer, writer: anytype) !void {
+    for (pointers) |pointer| {
+        if (pointer.dylib_ordinal.? > 15) {
             try writer.writeByte(macho.BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB);
-            try leb.writeULEB128(writer, @bitCast(u64, import.dylib_ordinal));
-        } else if (import.dylib_ordinal > 0) {
-            try writer.writeByte(macho.BIND_OPCODE_SET_DYLIB_ORDINAL_IMM | @truncate(u4, @bitCast(u64, import.dylib_ordinal)));
+            try leb.writeULEB128(writer, @bitCast(u64, pointer.dylib_ordinal.?));
+        } else if (pointer.dylib_ordinal.? > 0) {
+            try writer.writeByte(macho.BIND_OPCODE_SET_DYLIB_ORDINAL_IMM | @truncate(u4, @bitCast(u64, pointer.dylib_ordinal.?)));
         } else {
-            try writer.writeByte(macho.BIND_OPCODE_SET_DYLIB_SPECIAL_IMM | @truncate(u4, @bitCast(u64, import.dylib_ordinal)));
+            try writer.writeByte(macho.BIND_OPCODE_SET_DYLIB_SPECIAL_IMM | @truncate(u4, @bitCast(u64, pointer.dylib_ordinal.?)));
         }
         try writer.writeByte(macho.BIND_OPCODE_SET_TYPE_IMM | @truncate(u4, macho.BIND_TYPE_POINTER));
 
         try writer.writeByte(macho.BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM); // TODO Sometimes we might want to add flags.
-        try writer.writeAll(entry.key);
+        try writer.writeAll(pointer.name.?);
         try writer.writeByte(0);
 
-        try writer.writeByte(macho.BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | @truncate(u4, args.segment_id));
+        try writer.writeByte(macho.BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | @truncate(u4, pointer.segment_id));
 
-        const offset = args.base_offset + i * @sizeOf(u64);
-        try leb.writeILEB128(writer, offset);
+        try leb.writeILEB128(writer, pointer.offset);
         try writer.writeByte(macho.BIND_OPCODE_DO_BIND);
     }
 
     try writer.writeByte(macho.BIND_OPCODE_DONE);
 }
 
-pub fn lazyBindInfoSize(imports: anytype, args: SharedDyldArgs) !u64 {
+pub fn lazyBindInfoSize(pointers: []const Pointer) !u64 {
     var stream = std.io.countingWriter(std.io.null_writer);
     var writer = stream.writer();
     var size: u64 = 0;
 
-    for (imports) |entry, i| {
-        const import = entry.value;
+    for (pointers) |pointer| {
         size += 1;
 
-        const offset = args.base_offset + i * @sizeOf(u64);
-        try leb.writeILEB128(writer, offset);
+        try leb.writeILEB128(writer, pointer.offset);
 
         size += 1;
-        if (import.dylib_ordinal > 15) {
-            try leb.writeULEB128(writer, @bitCast(u64, import.dylib_ordinal));
+        if (pointer.dylib_ordinal.? > 15) {
+            try leb.writeULEB128(writer, @bitCast(u64, pointer.dylib_ordinal.?));
         }
 
         size += 1;
-        size += entry.key.len;
+        size += pointer.name.?.len;
         size += 1;
 
         size += 2;
@@ -138,25 +127,23 @@ pub fn lazyBindInfoSize(imports: anytype, args: SharedDyldArgs) !u64 {
     return size;
 }
 
-pub fn writeLazyBindInfo(imports: anytype, args: SharedDyldArgs, writer: anytype) !void {
-    for (imports) |entry, i| {
-        const import = entry.value;
-        try writer.writeByte(macho.BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | @truncate(u4, args.segment_id));
+pub fn writeLazyBindInfo(pointers: []const Pointer, writer: anytype) !void {
+    for (pointers) |pointer| {
+        try writer.writeByte(macho.BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | @truncate(u4, pointer.segment_id));
 
-        const offset = args.base_offset + i * @sizeOf(u64);
-        try leb.writeILEB128(writer, offset);
+        try leb.writeILEB128(writer, pointer.offset);
 
-        if (import.dylib_ordinal > 15) {
+        if (pointer.dylib_ordinal.? > 15) {
             try writer.writeByte(macho.BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB);
-            try leb.writeULEB128(writer, @bitCast(u64, import.dylib_ordinal));
-        } else if (import.dylib_ordinal > 0) {
-            try writer.writeByte(macho.BIND_OPCODE_SET_DYLIB_ORDINAL_IMM | @truncate(u4, @bitCast(u64, import.dylib_ordinal)));
+            try leb.writeULEB128(writer, @bitCast(u64, pointer.dylib_ordinal.?));
+        } else if (pointer.dylib_ordinal.? > 0) {
+            try writer.writeByte(macho.BIND_OPCODE_SET_DYLIB_ORDINAL_IMM | @truncate(u4, @bitCast(u64, pointer.dylib_ordinal.?)));
         } else {
-            try writer.writeByte(macho.BIND_OPCODE_SET_DYLIB_SPECIAL_IMM | @truncate(u4, @bitCast(u64, import.dylib_ordinal)));
+            try writer.writeByte(macho.BIND_OPCODE_SET_DYLIB_SPECIAL_IMM | @truncate(u4, @bitCast(u64, pointer.dylib_ordinal.?)));
         }
 
         try writer.writeByte(macho.BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM); // TODO Sometimes we might want to add flags.
-        try writer.writeAll(entry.key);
+        try writer.writeAll(pointer.name.?);
         try writer.writeByte(0);
 
         try writer.writeByte(macho.BIND_OPCODE_DO_BIND);

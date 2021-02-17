@@ -60,7 +60,7 @@ exports: std.StringArrayHashMapUnmanaged(macho.nlist_64) = .{},
 nonlazy_imports: std.StringArrayHashMapUnmanaged(Import) = .{},
 lazy_imports: std.StringArrayHashMapUnmanaged(Import) = .{},
 threadlocal_imports: std.StringArrayHashMapUnmanaged(Import) = .{},
-local_rebases: std.ArrayListUnmanaged(RebasePointer) = .{},
+local_rebases: std.ArrayListUnmanaged(Pointer) = .{},
 
 strtab: std.ArrayListUnmanaged(u8) = .{},
 
@@ -1508,7 +1508,7 @@ fn setEntryPoint(self: *Zld) !void {
 fn writeRebaseInfoTable(self: *Zld) !void {
     const data_seg = self.load_commands.items[self.data_segment_cmd_index.?].Segment;
 
-    var pointers = std.ArrayList(RebasePointer).init(self.allocator);
+    var pointers = std.ArrayList(Pointer).init(self.allocator);
     defer pointers.deinit();
     try pointers.ensureCapacity(self.lazy_imports.items().len);
 
@@ -1553,46 +1553,44 @@ fn writeRebaseInfoTable(self: *Zld) !void {
 fn writeBindInfoTable(self: *Zld) !void {
     const data_seg = self.load_commands.items[self.data_segment_cmd_index.?].Segment;
 
-    var buffer1 = blk: {
-        const got = data_seg.sections.items[self.got_section_index.?];
-        const args = SharedDyldArgs{
-            .base_offset = @intCast(u32, got.addr - data_seg.inner.vmaddr),
-            .segment_id = self.data_segment_cmd_index.?,
-        };
-        const size = try bindInfoSize(self.nonlazy_imports.items(), args);
-        var buffer = try self.allocator.alloc(u8, @intCast(usize, size));
+    var pointers = std.ArrayList(Pointer).init(self.allocator);
+    defer pointers.deinit();
+    try pointers.ensureCapacity(self.nonlazy_imports.items().len + self.threadlocal_imports.items().len);
 
-        var stream = std.io.fixedBufferStream(buffer);
-        try writeBindInfo(self.nonlazy_imports.items(), args, stream.writer());
-
-        break :blk buffer;
-    };
-    defer self.allocator.free(buffer1);
-
-    var buffer2 = blk: {
-        if (self.tlv_section_index) |idx| {
-            const tlv = data_seg.sections.items[self.tlv_section_index.?];
-            const args = SharedDyldArgs{
-                .base_offset = @intCast(u32, tlv.addr - data_seg.inner.vmaddr),
-                .segment_id = self.data_segment_cmd_index.?,
-            };
-            const size = try bindInfoSize(self.threadlocal_imports.items(), args);
-            var buffer = try self.allocator.alloc(u8, @intCast(usize, size));
-
-            var stream = std.io.fixedBufferStream(buffer);
-            try writeBindInfo(self.threadlocal_imports.items(), args, stream.writer());
-
-            break :blk buffer;
-        } else {
-            break :blk try self.allocator.alloc(u8, 0);
+    if (self.got_section_index) |idx| {
+        const sect = data_seg.sections.items[idx];
+        const base_offset = sect.addr - data_seg.inner.vmaddr;
+        const segment_id = @intCast(u16, self.data_segment_cmd_index.?);
+        for (self.nonlazy_imports.items()) |entry| {
+            pointers.appendAssumeCapacity(.{
+                .offset = base_offset + entry.value.index * @sizeOf(u64),
+                .segment_id = segment_id,
+                .dylib_ordinal = entry.value.dylib_ordinal,
+                .name = entry.key,
+            });
         }
-    };
-    defer self.allocator.free(buffer2);
+    }
 
-    var buffer = try self.allocator.alloc(u8, buffer1.len + buffer2.len - 1);
+    if (self.tlv_section_index) |idx| {
+        const sect = data_seg.sections.items[idx];
+        const base_offset = sect.addr - data_seg.inner.vmaddr;
+        const segment_id = @intCast(u16, self.data_segment_cmd_index.?);
+        for (self.threadlocal_imports.items()) |entry| {
+            pointers.appendAssumeCapacity(.{
+                .offset = base_offset + entry.value.index * @sizeOf(u64),
+                .segment_id = segment_id,
+                .dylib_ordinal = entry.value.dylib_ordinal,
+                .name = entry.key,
+            });
+        }
+    }
+
+    const size = try bindInfoSize(pointers.items);
+    var buffer = try self.allocator.alloc(u8, @intCast(usize, size));
     defer self.allocator.free(buffer);
-    mem.copy(u8, buffer, buffer1[0 .. buffer1.len - 1]);
-    mem.copy(u8, buffer[buffer1.len - 1 ..], buffer2);
+
+    var stream = std.io.fixedBufferStream(buffer);
+    try writeBindInfo(pointers.items, stream.writer());
 
     const seg = &self.load_commands.items[self.linkedit_segment_cmd_index.?].Segment;
     const dyld_info = &self.load_commands.items[self.dyld_info_cmd_index.?].DyldInfoOnly;
@@ -1607,17 +1605,31 @@ fn writeBindInfoTable(self: *Zld) !void {
 
 fn writeLazyBindInfoTable(self: *Zld) !void {
     const data_seg = self.load_commands.items[self.data_segment_cmd_index.?].Segment;
-    const la_symbol_ptr = data_seg.sections.items[self.la_symbol_ptr_section_index.?];
-    const args = SharedDyldArgs{
-        .base_offset = @intCast(u32, la_symbol_ptr.addr - data_seg.inner.vmaddr),
-        .segment_id = self.data_segment_cmd_index.?,
-    };
-    const size = try lazyBindInfoSize(self.lazy_imports.items(), args);
+
+    var pointers = std.ArrayList(Pointer).init(self.allocator);
+    defer pointers.deinit();
+    try pointers.ensureCapacity(self.lazy_imports.items().len);
+
+    if (self.la_symbol_ptr_section_index) |idx| {
+        const sect = data_seg.sections.items[idx];
+        const base_offset = sect.addr - data_seg.inner.vmaddr;
+        const segment_id = @intCast(u16, self.data_segment_cmd_index.?);
+        for (self.lazy_imports.items()) |entry| {
+            pointers.appendAssumeCapacity(.{
+                .offset = base_offset + entry.value.index * @sizeOf(u64),
+                .segment_id = segment_id,
+                .dylib_ordinal = entry.value.dylib_ordinal,
+                .name = entry.key,
+            });
+        }
+    }
+
+    const size = try lazyBindInfoSize(pointers.items);
     var buffer = try self.allocator.alloc(u8, @intCast(usize, size));
     defer self.allocator.free(buffer);
 
     var stream = std.io.fixedBufferStream(buffer);
-    try writeLazyBindInfo(self.lazy_imports.items(), args, stream.writer());
+    try writeLazyBindInfo(pointers.items, stream.writer());
 
     const seg = &self.load_commands.items[self.linkedit_segment_cmd_index.?].Segment;
     const dyld_info = &self.load_commands.items[self.dyld_info_cmd_index.?].DyldInfoOnly;
