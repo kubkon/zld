@@ -766,11 +766,10 @@ fn doRelocs(self: *Zld) !void {
                                         const offset = mem.readIntLittle(i64, inst);
                                         log.debug("{}, addend => 0x{x}, sym = {s}", .{ rel, offset, object.getString(object.symtab.items[rel.r_symbolnum].n_strx) });
                                         log.debug("sym_addr = 0x{x}", .{target_addr});
-                                        const result = if (sub) |s| blk: {
-                                            break :blk @intCast(i64, target_addr) - s + offset;
-                                        } else blk: {
-                                            break :blk @intCast(i64, target_addr) + offset;
-                                        };
+                                        const result = if (sub) |s|
+                                            @intCast(i64, target_addr) - s + offset
+                                        else
+                                            @intCast(i64, target_addr) + offset;
                                         log.debug("value = 0x{x}", .{result});
                                         mem.writeIntLittle(u64, inst, @bitCast(u64, result));
                                         sub = null;
@@ -779,10 +778,10 @@ fn doRelocs(self: *Zld) !void {
                                         if (mem.eql(u8, segname, "__DATA")) outer: {
                                             if (!mem.eql(u8, sectname, "__data") and
                                                 !mem.eql(u8, sectname, "__const")) break :outer;
-                                            const sseg = self.load_commands.items[self.data_segment_cmd_index.?].Segment;
-                                            const offf = next.address + off - sseg.inner.vmaddr;
+                                            const this_seg = self.load_commands.items[self.data_segment_cmd_index.?].Segment;
+                                            const this_offset = next.address + off - this_seg.inner.vmaddr;
                                             try self.local_rebases.append(self.allocator, .{
-                                                .offset = offf,
+                                                .offset = this_offset,
                                                 .segment_id = @intCast(u16, self.data_segment_cmd_index.?),
                                             });
                                         }
@@ -791,11 +790,10 @@ fn doRelocs(self: *Zld) !void {
                                         const inst = code[off..][0..4];
                                         const offset = mem.readIntLittle(i32, inst);
                                         log.debug("{}, addend => 0x{x}, sym = {s}", .{ rel, offset, object.getString(object.symtab.items[rel.r_symbolnum].n_strx) });
-                                        const result = if (sub) |s| blk: {
-                                            break :blk @intCast(i64, target_addr) - s + offset;
-                                        } else blk: {
-                                            break :blk @intCast(i64, target_addr) + offset;
-                                        };
+                                        const result = if (sub) |s|
+                                            @intCast(i64, target_addr) - s + offset
+                                        else
+                                            @intCast(i64, target_addr) + offset;
                                         log.debug("target_addr = 0x{x}, result = 0x{x}", .{ target_addr, result });
                                         mem.writeIntLittle(u32, inst, @truncate(u32, @bitCast(u64, result)));
                                         sub = null;
@@ -909,43 +907,39 @@ fn doRelocs(self: *Zld) !void {
                                 switch (rel.r_length) {
                                     3 => {
                                         const inst = code[off..][0..8];
-                                        const offset = mem.readIntLittle(u64, inst);
+                                        const offset = mem.readIntLittle(i64, inst);
                                         log.debug("{}, addend => 0x{x}, sym = {s}", .{ rel, offset, object.getString(object.symtab.items[rel.r_symbolnum].n_strx) });
                                         log.debug("sym_addr = 0x{x}", .{target_addr});
-                                        const val: u64 = if (sub) |s|
-                                            @bitCast(u64, @intCast(i64, target_addr) - s)
+                                        const result = if (sub) |s|
+                                            @intCast(i64, target_addr) - s + offset
                                         else
-                                            target_addr;
-                                        var result: u64 = undefined;
-                                        _ = @addWithOverflow(u64, val, offset, &result);
+                                            @intCast(i64, target_addr) + offset;
                                         log.debug("value = 0x{x}", .{result});
-                                        mem.writeIntLittle(u64, inst, result);
+                                        mem.writeIntLittle(u64, inst, @bitCast(u64, result));
                                         sub = null;
 
                                         // TODO should handle this better.
                                         if (mem.eql(u8, segname, "__DATA")) outer: {
                                             if (!mem.eql(u8, sectname, "__data") and
                                                 !mem.eql(u8, sectname, "__const")) break :outer;
-                                            const sseg = self.load_commands.items[self.data_segment_cmd_index.?].Segment;
-                                            const offf = next.address + off - sseg.inner.vmaddr;
+                                            const this_seg = self.load_commands.items[self.data_segment_cmd_index.?].Segment;
+                                            const this_offset = next.address + off - this_seg.inner.vmaddr;
                                             try self.local_rebases.append(self.allocator, .{
-                                                .offset = offf,
+                                                .offset = this_offset,
                                                 .segment_id = @intCast(u16, self.data_segment_cmd_index.?),
                                             });
                                         }
                                     },
                                     2 => {
                                         const inst = code[off..][0..4];
-                                        const offset = mem.readIntLittle(u32, inst);
+                                        const offset = mem.readIntLittle(i32, inst);
                                         log.debug("{}, addend => 0x{x}, sym = {s}", .{ rel, offset, object.getString(object.symtab.items[rel.r_symbolnum].n_strx) });
-                                        const val: u32 = if (sub) |s|
-                                            @truncate(u32, @bitCast(u64, @intCast(i64, target_addr) - s))
+                                        const result = if (sub) |s|
+                                            @intCast(i64, target_addr) - s + offset
                                         else
-                                            @truncate(u32, target_addr);
-                                        var result: u32 = undefined;
-                                        _ = @addWithOverflow(u32, val, offset, &result);
+                                            @intCast(i64, target_addr) + offset;
                                         log.debug("target_addr = 0x{x}, result = 0x{x}", .{ target_addr, result });
-                                        mem.writeIntLittle(u32, inst, result);
+                                        mem.writeIntLittle(u32, inst, @truncate(u32, @bitCast(u64, result)));
                                         sub = null;
                                     },
                                     else => unreachable,
