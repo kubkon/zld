@@ -1803,119 +1803,121 @@ const DebugInfo = struct {
 };
 
 fn writeDebugInfo(self: *Zld) !void {
-    const object = self.objects.items[0]; // TODO cannot guarantee it will always be the first object.
-    var debug_info = (try DebugInfo.parseFromObject(self.allocator, object)) orelse return;
-    defer debug_info.deinit(self.allocator);
-
-    const addr = blk: for (object.symtab.items) |sym| {
-        const symname = object.getString(sym.n_strx);
-        if (mem.eql(u8, symname, "_main")) break :blk sym.n_value;
-    } else unreachable;
-    const compile_unit = try debug_info.inner.findCompileUnit(addr);
-    const name = try compile_unit.die.getAttrString(&debug_info.inner, dwarf.AT_name);
-    const comp_dir = try compile_unit.die.getAttrString(&debug_info.inner, dwarf.AT_comp_dir);
-
     var stabs = std.ArrayList(macho.nlist_64).init(self.allocator);
     defer stabs.deinit();
 
-    {
-        const tu_path = try std.fs.path.join(self.allocator, &[_][]const u8{ comp_dir, name });
-        defer self.allocator.free(tu_path);
-        const dirname = std.fs.path.dirname(tu_path) orelse "./";
-        // Current dir
-        try stabs.append(.{
-            .n_strx = try self.makeString(tu_path[0 .. dirname.len + 1]),
-            .n_type = macho.N_SO,
-            .n_sect = 0,
-            .n_desc = 0,
-            .n_value = 0,
-        });
-        // Artifact name
-        try stabs.append(.{
-            .n_strx = try self.makeString(tu_path[dirname.len + 1 ..]),
-            .n_type = macho.N_SO,
-            .n_sect = 0,
-            .n_desc = 0,
-            .n_value = 0,
-        });
-        // Path to object file with debug info
-        var buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
-        const path = object.name.?;
-        const full_path = try std.os.realpath(path, &buffer);
-        const stat = try object.file.?.stat();
-        const mtime = @intCast(u64, @divFloor(stat.mtime, 1_000_000_000));
-        try stabs.append(.{
-            .n_strx = try self.makeString(full_path),
-            .n_type = macho.N_OSO,
-            .n_sect = 0,
-            .n_desc = 1,
-            .n_value = mtime,
-        });
-    }
+    for (self.objects.items) |object| {
+        var debug_info = blk: {
+            var di = try DebugInfo.parseFromObject(self.allocator, object);
+            break :blk di orelse continue;
+        };
+        defer debug_info.deinit(self.allocator);
 
-    for (self.locals.items()) |entry, i| {
-        const sym = entry.value;
-        const target_addr = blk: for (object.symtab.items) |s| {
-            const n = object.getString(s.n_strx);
-            if (mem.eql(u8, n, entry.key)) break :blk s.n_value;
-        } else continue;
-        const size = blk: for (debug_info.inner.func_list.items) |func| {
-            if (func.pc_range) |range| {
-                if (target_addr >= range.start and target_addr < range.end) {
-                    log.debug("'{s}': {}", .{ entry.key, range });
-                    break :blk range.end - range.start;
-                }
-            }
-        } else null;
-        if (size) |ss| {
+        const compile_unit = try debug_info.inner.findCompileUnit(0x0); // We assume there is only one CU.
+        const name = try compile_unit.die.getAttrString(&debug_info.inner, dwarf.AT_name);
+        const comp_dir = try compile_unit.die.getAttrString(&debug_info.inner, dwarf.AT_comp_dir);
+
+        {
+            const tu_path = try std.fs.path.join(self.allocator, &[_][]const u8{ comp_dir, name });
+            defer self.allocator.free(tu_path);
+            const dirname = std.fs.path.dirname(tu_path) orelse "./";
+            // Current dir
             try stabs.append(.{
-                .n_strx = 0,
-                .n_type = macho.N_BNSYM,
-                .n_sect = sym.n_sect,
-                .n_desc = 0,
-                .n_value = sym.n_value,
-            });
-            try stabs.append(.{
-                .n_strx = sym.n_strx,
-                .n_type = macho.N_FUN,
-                .n_sect = sym.n_sect,
-                .n_desc = 0,
-                .n_value = sym.n_value,
-            });
-            try stabs.append(.{
-                .n_strx = 0,
-                .n_type = macho.N_FUN,
+                .n_strx = try self.makeString(tu_path[0 .. dirname.len + 1]),
+                .n_type = macho.N_SO,
                 .n_sect = 0,
                 .n_desc = 0,
-                .n_value = ss,
+                .n_value = 0,
             });
+            // Artifact name
             try stabs.append(.{
-                .n_strx = 0,
-                .n_type = macho.N_ENSYM,
-                .n_sect = sym.n_sect,
+                .n_strx = try self.makeString(tu_path[dirname.len + 1 ..]),
+                .n_type = macho.N_SO,
+                .n_sect = 0,
                 .n_desc = 0,
-                .n_value = ss,
+                .n_value = 0,
             });
-        } else {
-            // TODO need a way to differentiate symbols: global, static, local, etc.
+            // Path to object file with debug info
+            var buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+            const path = object.name.?;
+            const full_path = try std.os.realpath(path, &buffer);
+            const stat = try object.file.?.stat();
+            const mtime = @intCast(u64, @divFloor(stat.mtime, 1_000_000_000));
             try stabs.append(.{
-                .n_strx = sym.n_strx,
-                .n_type = macho.N_STSYM,
-                .n_sect = sym.n_sect,
-                .n_desc = 0,
-                .n_value = sym.n_value,
+                .n_strx = try self.makeString(full_path),
+                .n_type = macho.N_OSO,
+                .n_sect = 0,
+                .n_desc = 1,
+                .n_value = mtime,
             });
         }
+
+        for (object.symtab.items) |source_sym| {
+            const symname = object.getString(source_sym.n_strx);
+            const source_addr = source_sym.n_value;
+            const target_sym = self.locals.get(symname) orelse continue;
+
+            const maybe_size = blk: for (debug_info.inner.func_list.items) |func| {
+                if (func.pc_range) |range| {
+                    if (source_addr >= range.start and source_addr < range.end) {
+                        log.debug("'{s}': {}", .{ symname, range });
+                        break :blk range.end - range.start;
+                    }
+                }
+            } else null;
+
+            if (maybe_size) |size| {
+                try stabs.append(.{
+                    .n_strx = 0,
+                    .n_type = macho.N_BNSYM,
+                    .n_sect = target_sym.n_sect,
+                    .n_desc = 0,
+                    .n_value = target_sym.n_value,
+                });
+                try stabs.append(.{
+                    .n_strx = target_sym.n_strx,
+                    .n_type = macho.N_FUN,
+                    .n_sect = target_sym.n_sect,
+                    .n_desc = 0,
+                    .n_value = target_sym.n_value,
+                });
+                try stabs.append(.{
+                    .n_strx = 0,
+                    .n_type = macho.N_FUN,
+                    .n_sect = 0,
+                    .n_desc = 0,
+                    .n_value = size,
+                });
+                try stabs.append(.{
+                    .n_strx = 0,
+                    .n_type = macho.N_ENSYM,
+                    .n_sect = target_sym.n_sect,
+                    .n_desc = 0,
+                    .n_value = size,
+                });
+            } else {
+                // TODO need a way to differentiate symbols: global, static, local, etc.
+                try stabs.append(.{
+                    .n_strx = target_sym.n_strx,
+                    .n_type = macho.N_STSYM,
+                    .n_sect = target_sym.n_sect,
+                    .n_desc = 0,
+                    .n_value = target_sym.n_value,
+                });
+            }
+        }
+
+        // Close the source file!
+        try stabs.append(.{
+            .n_strx = 0,
+            .n_type = macho.N_SO,
+            .n_sect = 0,
+            .n_desc = 0,
+            .n_value = 0,
+        });
     }
 
-    // Close the source file!
-    try stabs.append(.{
-        .n_strx = 0,
-        .n_type = macho.N_SO,
-        .n_sect = 0,
-        .n_desc = 0,
-        .n_value = 0,
-    });
+    if (stabs.items.len == 0) return;
 
     // Write stabs into the symbol table
     const linkedit = &self.load_commands.items[self.linkedit_segment_cmd_index.?].Segment;
