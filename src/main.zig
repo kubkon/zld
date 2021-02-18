@@ -35,7 +35,7 @@ fn fatal(comptime format: []const u8, args: anytype) noreturn {
 
 pub const log_level: std.log.Level = switch (std.builtin.mode) {
     .Debug => .debug,
-    .ReleaseSafe, .ReleaseFast => .info,
+    .ReleaseSafe, .ReleaseFast => .err,
     .ReleaseSmall => .crit,
 };
 
