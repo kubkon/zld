@@ -20,7 +20,7 @@ pub fn addCases(ctx: *TestContext) !void {
                 \\    return 0;
                 \\}
             );
-            case.expectedOutput("Hello, World!\n");
+            case.expectedStdout("Hello, World!\n");
         }
 
         {
@@ -52,7 +52,7 @@ pub fn addCases(ctx: *TestContext) !void {
                 \\    return 0;
                 \\}
             );
-            case.expectedOutput("1 + 2 = 3\n");
+            case.expectedStdout("1 + 2 = 3\n");
         }
 
         {
@@ -67,7 +67,7 @@ pub fn addCases(ctx: *TestContext) !void {
                 \\    return 0;
                 \\}
             );
-            case.expectedOutput("Hello, World!\n");
+            case.expectedStdout("Hello, World!\n");
         }
 
         {
@@ -83,7 +83,61 @@ pub fn addCases(ctx: *TestContext) !void {
                 \\    return aGlobal;
                 \\}
             );
-            case.expectedOutput("aGlobal=1\n");
+            case.expectedStdout("aGlobal=1\n");
+        }
+
+        {
+            var case = try ctx.addCase("hello world in Zig", target);
+            try case.addInput("hello.zig",
+                \\const std = @import("std");
+                \\
+                \\pub fn main() anyerror!void {
+                \\    const stdout = std.io.getStdOut().writer();
+                \\    try stdout.print("Hello, World!\n", .{});
+                \\}
+            );
+            case.expectedStdout("Hello, World!\n");
+        }
+
+        {
+            var case = try ctx.addCase("stack traces in Zig", target);
+            try case.addInput("panic.zig",
+                \\const std = @import("std");
+                \\
+                \\pub fn main() void {
+                \\    unreachable;
+                \\}
+            );
+            case.expectedStdout("");
+            // TODO figure out if we can test the resultant stack trace info
+            // case.expectedStderr(
+            //     \\thread 5731434 panic: reached unreachable code
+            //     \\/Users/kubkon/dev/zld/zig-cache/tmp/ObL4MD7CSJolhrZC/panic.zig:4:5: 0x104d4bef3 in main (panic)
+            //     \\    unreachable;
+            //     \\    ^
+            //     \\/opt/zig/lib/zig/std/start.zig:335:22: 0x104d4c03f in std.start.main (panic)
+            //     \\            root.main();
+            //     \\                     ^
+            //     \\???:?:?: 0x190c74f33 in ??? (???)
+            //     \\Panicked during a panic. Aborting.
+            // );
+        }
+
+        {
+            var case = try ctx.addCase("tlv in Zig", target);
+            try case.addInput("tlv.zig",
+                \\const std = @import("std");
+                \\
+                \\threadlocal var globl: usize = 0;
+                \\
+                \\pub fn main() void {
+                \\    std.log.info("Before: {}", .{globl});
+                \\    globl += 1;
+                \\    std.log.info("After: {}", .{globl});
+                \\}
+            );
+            case.expectedStdout("");
+            case.expectedStderr("info: Before: 0\ninfo: After: 1\n");
         }
     }
 }

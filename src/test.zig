@@ -10,6 +10,11 @@ const CrossTarget = std.zig.CrossTarget;
 const tmpDir = testing.tmpDir;
 const Zld = @import("Zld.zig");
 
+var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+const allocator = &gpa.allocator;
+// TODO fix memory leaks in std.dwarf
+// const allocator = &testing.allocator;
+
 test "unit" {
     _ = @import("Zld.zig");
 }
@@ -29,7 +34,12 @@ pub const TestContext = struct {
         name: []const u8,
         target: CrossTarget,
         input_files: std.ArrayList(InputFile),
-        expected_out: ?[]const u8 = null,
+        expected_out: ExpectedOutput = .{},
+
+        const ExpectedOutput = struct {
+            stdout: ?[]const u8 = null,
+            stderr: ?[]const u8 = null,
+        };
 
         const InputFile = struct {
             const FileType = enum {
@@ -51,12 +61,12 @@ pub const TestContext = struct {
                     .Cpp => ".cpp",
                     .Zig => ".zig",
                 };
-                return std.fmt.allocPrint(testing.allocator, "{s}{s}", .{ self.basename, ext });
+                return std.fmt.allocPrint(allocator, "{s}{s}", .{ self.basename, ext });
             }
         };
 
         pub fn init(name: []const u8, target: CrossTarget) Case {
-            var input_files = std.ArrayList(InputFile).init(testing.allocator);
+            var input_files = std.ArrayList(InputFile).init(allocator);
             return .{
                 .name = name,
                 .target = target,
@@ -93,13 +103,17 @@ pub const TestContext = struct {
             });
         }
 
-        pub fn expectedOutput(self: *Case, expected_out: []const u8) void {
-            self.expected_out = expected_out;
+        pub fn expectedStdout(self: *Case, expected_stdout: []const u8) void {
+            self.expected_out.stdout = expected_stdout;
+        }
+
+        pub fn expectedStderr(self: *Case, expected_stderr: []const u8) void {
+            self.expected_out.stderr = expected_stderr;
         }
     };
 
     pub fn init() TestContext {
-        var cases = std.ArrayList(Case).init(testing.allocator);
+        var cases = std.ArrayList(Case).init(allocator);
         return .{ .cases = cases };
     }
 
@@ -121,27 +135,32 @@ pub const TestContext = struct {
             var tmp = tmpDir(.{});
             defer tmp.cleanup();
 
-            var filenames = std.ArrayList([]u8).init(testing.allocator);
+            const cwd = try std.fs.path.join(allocator, &[_][]const u8{
+                "zig-cache", "tmp", &tmp.sub_path,
+            });
+            defer allocator.free(cwd);
+
+            var filenames = std.ArrayList([]u8).init(allocator);
             defer {
                 for (filenames.items) |f| {
-                    testing.allocator.free(f);
+                    allocator.free(f);
                 }
                 filenames.deinit();
             }
 
-            const target_triple = try std.fmt.allocPrint(testing.allocator, "{s}-{s}-{s}", .{
+            const target_triple = try std.fmt.allocPrint(allocator, "{s}-{s}-{s}", .{
                 @tagName(case.target.cpu_arch.?),
                 @tagName(case.target.os_tag.?),
                 @tagName(case.target.abi.?),
             });
-            defer testing.allocator.free(target_triple);
+            defer allocator.free(target_triple);
 
             for (case.input_files.items) |input_file| {
                 const input_filename = try input_file.getFilename();
-                defer testing.allocator.free(input_filename);
+                defer allocator.free(input_filename);
                 try tmp.dir.writeFile(input_filename, input_file.contents);
 
-                var argv = std.ArrayList([]const u8).init(testing.allocator);
+                var argv = std.ArrayList([]const u8).init(allocator);
                 defer argv.deinit();
 
                 try argv.append("zig");
@@ -164,30 +183,29 @@ pub const TestContext = struct {
                 try argv.append("-target");
                 try argv.append(target_triple);
 
-                const input_file_path = try std.fs.path.join(testing.allocator, &[_][]const u8{
-                    "zig-cache", "tmp", &tmp.sub_path, input_filename,
+                try argv.append(input_filename);
+
+                const output_filename = try std.fmt.allocPrint(allocator, "{s}.o", .{input_file.basename});
+                defer allocator.free(output_filename);
+
+                if (input_file.filetype != .Zig) {
+                    try argv.append("-o");
+                    try argv.append(output_filename);
+                }
+
+                const output_file_path = try std.fs.path.join(allocator, &[_][]const u8{
+                    cwd, output_filename,
                 });
-                defer testing.allocator.free(input_file_path);
-
-                try argv.append(input_file_path);
-                try argv.append("-o");
-
-                const output_filename = try std.fmt.allocPrint(testing.allocator, "{s}.o", .{input_file.basename});
-                defer testing.allocator.free(output_filename);
-
-                const output_file_path = try std.fs.path.join(testing.allocator, &[_][]const u8{
-                    "zig-cache", "tmp", &tmp.sub_path, output_filename,
-                });
-                try argv.append(output_file_path);
                 try filenames.append(output_file_path);
 
                 const result = try std.ChildProcess.exec(.{
-                    .allocator = testing.allocator,
+                    .allocator = allocator,
                     .argv = argv.items,
+                    .cwd = cwd,
                 });
                 defer {
-                    testing.allocator.free(result.stdout);
-                    testing.allocator.free(result.stderr);
+                    allocator.free(result.stdout);
+                    allocator.free(result.stderr);
                 }
                 if (result.stdout.len != 0) {
                     log.warn("unexpected compiler stdout: {s}", .{result.stdout});
@@ -202,21 +220,29 @@ pub const TestContext = struct {
                 }
             }
 
-            const output_path = try std.fs.path.join(testing.allocator, &[_][]const u8{
+            const filetype = case.input_files.items[0].filetype;
+            if (filetype == .Zig) {
+                const zig_compiler_rt_path = try std.fs.path.join(allocator, &[_][]const u8{
+                    "test", "assets", @tagName(case.target.cpu_arch.?), "compiler_rt.o",
+                });
+                try filenames.append(zig_compiler_rt_path);
+            }
+
+            const output_path = try std.fs.path.join(allocator, &[_][]const u8{
                 "zig-cache", "tmp", &tmp.sub_path, "a.out",
             });
-            defer testing.allocator.free(output_path);
+            defer allocator.free(output_path);
 
-            var zld = Zld.init(testing.allocator);
+            var zld = Zld.init(allocator);
             defer zld.deinit();
             try zld.link(filenames.items, output_path);
 
-            var argv = std.ArrayList([]const u8).init(testing.allocator);
+            var argv = std.ArrayList([]const u8).init(allocator);
             defer argv.deinit();
 
             outer: {
                 switch (case.target.getExternalExecutor()) {
-                    .native => try argv.append(output_path),
+                    .native => try argv.append("./a.out"),
                     else => {
                         // TODO simply pass the test
                         break :outer;
@@ -224,12 +250,28 @@ pub const TestContext = struct {
                 }
 
                 const result = try std.ChildProcess.exec(.{
-                    .allocator = testing.allocator,
+                    .allocator = allocator,
                     .argv = argv.items,
+                    .cwd = cwd,
                 });
                 defer {
-                    testing.allocator.free(result.stdout);
-                    testing.allocator.free(result.stderr);
+                    allocator.free(result.stdout);
+                    allocator.free(result.stderr);
+                }
+                if (case.expected_out.stdout != null or case.expected_out.stderr != null) {
+                    if (case.expected_out.stderr) |err| {
+                        const pass = mem.eql(u8, result.stderr, err);
+                        if (!pass)
+                            log.err("STDERR: Test '{s}' failed\nExpected: '{s}'\nGot: '{s}'", .{ case.name, err, result.stderr });
+                        testing.expect(pass);
+                    }
+                    if (case.expected_out.stdout) |out| {
+                        const pass = mem.eql(u8, result.stdout, out);
+                        if (!pass)
+                            log.err("STDOUT: Test '{s}' failed\nExpected: '{s}'\nGot: '{s}'", .{ case.name, out, result.stdout });
+                        testing.expect(pass);
+                    }
+                    continue;
                 }
                 if (result.stderr.len != 0) {
                     log.warn("unexpected exe stderr: {s}", .{result.stderr});
@@ -239,23 +281,14 @@ pub const TestContext = struct {
                     try printInvocation(argv.items);
                     return error.ExeError;
                 }
-
-                if (case.expected_out) |exp| {
-                    const pass = mem.eql(u8, result.stdout, exp);
-                    if (!pass) {
-                        log.err("Test '{s}' failed\nExpected: '{s}'\nGot: '{s}'", .{ case.name, exp, result.stdout });
-                    }
-                    testing.expect(pass);
-                } else {
-                    log.warn("exe was run, but no expected output was provided", .{});
-                }
+                log.warn("exe was run, but no expected output was provided", .{});
             }
         }
     }
 };
 
 fn printInvocation(argv: []const []const u8) !void {
-    const full_inv = try std.mem.join(testing.allocator, " ", argv);
-    defer testing.allocator.free(full_inv);
+    const full_inv = try std.mem.join(allocator, " ", argv);
+    defer allocator.free(full_inv);
     log.err("The following command failed:\n{s}", .{full_inv});
 }
