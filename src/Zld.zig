@@ -13,6 +13,7 @@ const log = std.log.scoped(.zld);
 
 const Allocator = mem.Allocator;
 const CodeSignature = @import("CodeSignature.zig");
+const Archive = @import("Archive.zig");
 const Object = @import("Object.zig");
 const Trie = @import("Trie.zig");
 
@@ -27,7 +28,9 @@ page_size: ?u16 = null,
 file: ?fs.File = null,
 out_path: ?[]const u8 = null,
 
+archives: std.ArrayListUnmanaged(Archive) = .{},
 objects: std.ArrayListUnmanaged(Object) = .{},
+
 load_commands: std.ArrayListUnmanaged(LoadCommand) = .{},
 
 pagezero_segment_cmd_index: ?u16 = null,
@@ -184,6 +187,10 @@ pub fn deinit(self: *Zld) void {
         self.allocator.free(entry.key);
     }
     self.locals.deinit(self.allocator);
+    for (self.archives.items) |*archive| {
+        archive.deinit();
+    }
+    self.archives.deinit(self.allocator);
     for (self.objects.items) |*object| {
         object.deinit();
     }
@@ -199,6 +206,7 @@ pub fn deinit(self: *Zld) void {
 
 pub fn link(self: *Zld, files: []const []const u8, out_path: []const u8) !void {
     if (files.len == 0) return error.NoInputFiles;
+    if (out_path.len == 0) return error.EmptyOutputPath;
 
     self.arch = blk: {
         const file = try fs.cwd().openFile(files[0], .{});
@@ -225,7 +233,7 @@ pub fn link(self: *Zld, files: []const []const u8, out_path: []const u8) !void {
     });
 
     try self.populateMetadata();
-    try self.parseObjectFiles(files);
+    try self.parseInputFiles(files);
     try self.resolveImports();
     self.allocateTextSegment();
     self.allocateDataSegment();
@@ -236,55 +244,84 @@ pub fn link(self: *Zld, files: []const []const u8, out_path: []const u8) !void {
     try self.flush();
 }
 
-fn parseObjectFiles(self: *Zld, files: []const []const u8) !void {
-    try self.objects.ensureCapacity(self.allocator, files.len);
+fn parseInputFiles(self: *Zld, files: []const []const u8) !void {
     for (files) |file_name| {
-        var object = Object.init(self.allocator);
         const file = try fs.cwd().openFile(file_name, .{});
-        try object.parse(file_name, file);
-        self.objects.appendAssumeCapacity(object);
 
-        const seg_cmd = object.load_commands.items[object.segment_cmd_index.?].Segment;
-        for (seg_cmd.sections.items) |sect| {
-            const sectname = parseName(&sect.sectname);
-
-            const seg_index = self.segments_directory.get(sect.segname) orelse {
-                log.warn("segname {s} not found in the output artifact", .{sect.segname});
-                continue;
+        try_object: {
+            var object = Object.initFromFile(self.allocator, file_name, file) catch |err| switch (err) {
+                error.NotObject => break :try_object,
+                else => |e| return e,
             };
-            const seg = &self.load_commands.items[seg_index].Segment;
-            const res = try self.directory.getOrPut(self.allocator, .{
-                .segname = sect.segname,
-                .sectname = sect.sectname,
-            });
-            if (!res.found_existing) {
-                const sect_index = @intCast(u16, seg.sections.items.len);
-                if (mem.eql(u8, sectname, "__thread_vars")) {
-                    self.tlv_section_index = sect_index;
-                }
-                try seg.append(self.allocator, .{
-                    .sectname = makeStaticString(&sect.sectname),
-                    .segname = makeStaticString(&sect.segname),
-                    .addr = 0,
-                    .size = 0,
-                    .offset = 0,
-                    .@"align" = sect.@"align",
-                    .reloff = 0,
-                    .nreloc = 0,
-                    .flags = sect.flags,
-                    .reserved1 = 0,
-                    .reserved2 = 0,
-                    .reserved3 = 0,
-                });
-                res.entry.value = .{
-                    .seg_index = seg_index,
-                    .sect_index = sect_index,
-                };
-            }
-            const dest_sect = &seg.sections.items[res.entry.value.sect_index];
-            dest_sect.size += sect.size;
-            seg.inner.filesize += sect.size;
+            const index = self.objects.items.len;
+            try self.objects.append(self.allocator, object);
+            const p_object = &self.objects.items[index];
+            try self.parseObjectFile(p_object);
+            continue;
         }
+
+        try_archive: {
+            var archive = Archive.initFromFile(self.allocator, file_name, file) catch |err| switch (err) {
+                error.NotArchive => break :try_archive,
+                else => |e| return e,
+            };
+            const index = self.archives.items.len;
+            try self.archives.append(self.allocator, archive);
+            const p_archive = &self.archives.items[index];
+
+            for (p_archive.objects.items) |*object| {
+                try self.parseObjectFile(object);
+            }
+
+            continue;
+        }
+
+        log.err("unexpected file type: expected object '.o' or archive '.a': {s}", .{file_name});
+        return error.UnexpectedInputFileType;
+    }
+}
+
+fn parseObjectFile(self: *Zld, object: *const Object) !void {
+    const seg_cmd = object.load_commands.items[object.segment_cmd_index.?].Segment;
+    for (seg_cmd.sections.items) |sect| {
+        const sectname = parseName(&sect.sectname);
+
+        const seg_index = self.segments_directory.get(sect.segname) orelse {
+            log.warn("segname {s} not found in the output artifact", .{sect.segname});
+            continue;
+        };
+        const seg = &self.load_commands.items[seg_index].Segment;
+        const res = try self.directory.getOrPut(self.allocator, .{
+            .segname = sect.segname,
+            .sectname = sect.sectname,
+        });
+        if (!res.found_existing) {
+            const sect_index = @intCast(u16, seg.sections.items.len);
+            if (mem.eql(u8, sectname, "__thread_vars")) {
+                self.tlv_section_index = sect_index;
+            }
+            try seg.append(self.allocator, .{
+                .sectname = makeStaticString(&sect.sectname),
+                .segname = makeStaticString(&sect.segname),
+                .addr = 0,
+                .size = 0,
+                .offset = 0,
+                .@"align" = sect.@"align",
+                .reloff = 0,
+                .nreloc = 0,
+                .flags = sect.flags,
+                .reserved1 = 0,
+                .reserved2 = 0,
+                .reserved3 = 0,
+            });
+            res.entry.value = .{
+                .seg_index = seg_index,
+                .sect_index = sect_index,
+            };
+        }
+        const dest_sect = &seg.sections.items[res.entry.value.sect_index];
+        dest_sect.size += sect.size;
+        seg.inner.filesize += sect.size;
     }
 }
 
@@ -748,12 +785,12 @@ fn doRelocs(self: *Zld) !void {
 
             var code = try self.allocator.alloc(u8, sect.size);
             defer self.allocator.free(code);
-            _ = try object.file.?.preadAll(code, sect.offset);
+            _ = try object.file.preadAll(code, sect.offset);
 
             // Parse relocs (if any)
             var raw_relocs = try self.allocator.alloc(u8, @sizeOf(macho.relocation_info) * sect.nreloc);
             defer self.allocator.free(raw_relocs);
-            _ = try object.file.?.preadAll(raw_relocs, sect.reloff);
+            _ = try object.file.preadAll(raw_relocs, sect.reloff);
             const relocs = mem.bytesAsSlice(macho.relocation_info, raw_relocs);
 
             var addend: ?u64 = null;
@@ -1839,9 +1876,9 @@ fn writeDebugInfo(self: *Zld) !void {
             });
             // Path to object file with debug info
             var buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
-            const path = object.name.?;
+            const path = object.name;
             const full_path = try std.os.realpath(path, &buffer);
-            const stat = try object.file.?.stat();
+            const stat = try object.file.stat();
             const mtime = @intCast(u64, @divFloor(stat.mtime, 1_000_000_000));
             try stabs.append(.{
                 .n_strx = try self.makeString(full_path),

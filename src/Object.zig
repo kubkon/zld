@@ -13,11 +13,11 @@ const parseName = @import("Zld.zig").parseName;
 usingnamespace @import("commands.zig");
 
 allocator: *Allocator,
+file: fs.File,
+name: []u8,
 
-file: ?fs.File = null,
-name: ?[]u8 = null,
+header: macho.mach_header_64,
 
-header: ?macho.mach_header_64 = null,
 load_commands: std.ArrayListUnmanaged(LoadCommand) = .{},
 
 segment_cmd_index: ?u16 = null,
@@ -43,10 +43,6 @@ pub const DirectoryKey = struct {
     sectname: [16]u8,
 };
 
-pub fn init(allocator: *Allocator) Object {
-    return .{ .allocator = allocator };
-}
-
 pub fn deinit(self: *Object) void {
     for (self.load_commands.items) |*lc| {
         lc.deinit(self.allocator);
@@ -55,24 +51,30 @@ pub fn deinit(self: *Object) void {
     self.symtab.deinit(self.allocator);
     self.strtab.deinit(self.allocator);
     self.directory.deinit(self.allocator);
-    if (self.file) |*f| f.close();
-    if (self.name) |n| self.allocator.free(n);
+    self.allocator.free(self.name);
+    self.file.close();
 }
 
-pub fn parse(self: *Object, name: []const u8, file: fs.File) !void {
-    self.name = try self.allocator.dupe(u8, name);
-    self.file = file;
+/// Caller owns the returned Object instance and is responsible for calling
+/// `deinit` to free allocated memory.
+pub fn initFromFile(allocator: *Allocator, name: []const u8, file: fs.File) !Object {
+    var reader = file.reader();
+    const header = try reader.readStruct(macho.mach_header_64);
 
-    var reader = self.file.?.reader();
-    self.header = try reader.readStruct(macho.mach_header_64);
+    if (header.filetype != macho.MH_OBJECT)
+        return error.NotObject;
 
-    if (self.header.?.filetype != macho.MH_OBJECT)
-        return error.ExpectedObjectInputFile;
+    var self = Object{
+        .allocator = allocator,
+        .name = try allocator.dupe(u8, name),
+        .file = file,
+        .header = header,
+    };
 
-    try self.load_commands.ensureCapacity(self.allocator, self.header.?.ncmds);
+    try self.load_commands.ensureCapacity(self.allocator, self.header.ncmds);
 
     var i: u16 = 0;
-    while (i < self.header.?.ncmds) : (i += 1) {
+    while (i < self.header.ncmds) : (i += 1) {
         const cmd = try LoadCommand.read(self.allocator, reader);
         switch (cmd.cmd()) {
             macho.LC_SEGMENT_64 => {
@@ -124,13 +126,15 @@ pub fn parse(self: *Object, name: []const u8, file: fs.File) !void {
 
     try self.parseSymtab();
     try self.parseStrtab();
+
+    return self;
 }
 
 fn parseSymtab(self: *Object) !void {
     const symtab_cmd = self.load_commands.items[self.symtab_cmd_index.?].Symtab;
     var buffer = try self.allocator.alloc(u8, @sizeOf(macho.nlist_64) * symtab_cmd.nsyms);
     defer self.allocator.free(buffer);
-    _ = try self.file.?.preadAll(buffer, symtab_cmd.symoff);
+    _ = try self.file.preadAll(buffer, symtab_cmd.symoff);
     try self.symtab.ensureCapacity(self.allocator, symtab_cmd.nsyms);
     // TODO this align case should not be needed.
     // Probably a bug in stage1.
@@ -142,7 +146,7 @@ fn parseStrtab(self: *Object) !void {
     const symtab_cmd = self.load_commands.items[self.symtab_cmd_index.?].Symtab;
     var buffer = try self.allocator.alloc(u8, symtab_cmd.strsize);
     defer self.allocator.free(buffer);
-    _ = try self.file.?.preadAll(buffer, symtab_cmd.stroff);
+    _ = try self.file.preadAll(buffer, symtab_cmd.stroff);
     try self.strtab.ensureCapacity(self.allocator, symtab_cmd.strsize);
     self.strtab.appendSliceAssumeCapacity(buffer);
 }
@@ -156,6 +160,6 @@ pub fn parseSection(self: Object, allocator: *Allocator, index: u16) ![]u8 {
     const seg = self.load_commands.items[self.segment_cmd_index.?].Segment;
     const sect = seg.sections.items[index];
     var buffer = try allocator.alloc(u8, sect.size);
-    _ = try self.file.?.preadAll(buffer, sect.offset);
+    _ = try self.file.preadAll(buffer, sect.offset);
     return buffer;
 }
