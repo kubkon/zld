@@ -79,6 +79,70 @@ const DirectoryEntry = struct {
     sect_index: u16,
 };
 
+const DebugInfo = struct {
+    inner: dwarf.DwarfInfo,
+    debug_info: []u8,
+    debug_abbrev: []u8,
+    debug_str: []u8,
+    debug_line: []u8,
+    debug_ranges: []u8,
+
+    pub fn parseFromObject(allocator: *Allocator, object: Object) !?DebugInfo {
+        var debug_info = blk: {
+            const index = object.dwarf_debug_info_index orelse return null;
+            break :blk try object.parseSection(allocator, index);
+        };
+        var debug_abbrev = blk: {
+            const index = object.dwarf_debug_abbrev_index orelse return null;
+            break :blk try object.parseSection(allocator, index);
+        };
+        var debug_str = blk: {
+            const index = object.dwarf_debug_str_index orelse return null;
+            break :blk try object.parseSection(allocator, index);
+        };
+        var debug_line = blk: {
+            const index = object.dwarf_debug_line_index orelse return null;
+            break :blk try object.parseSection(allocator, index);
+        };
+        var debug_ranges = blk: {
+            if (object.dwarf_debug_ranges_index) |ind| {
+                break :blk try object.parseSection(allocator, ind);
+            }
+            break :blk try allocator.alloc(u8, 0);
+        };
+
+        var inner: dwarf.DwarfInfo = .{
+            .endian = .Little,
+            .debug_info = debug_info,
+            .debug_abbrev = debug_abbrev,
+            .debug_str = debug_str,
+            .debug_line = debug_line,
+            .debug_ranges = debug_ranges,
+        };
+        try dwarf.openDwarfDebugInfo(&inner, allocator);
+
+        return DebugInfo{
+            .inner = inner,
+            .debug_info = debug_info,
+            .debug_abbrev = debug_abbrev,
+            .debug_str = debug_str,
+            .debug_line = debug_line,
+            .debug_ranges = debug_ranges,
+        };
+    }
+
+    pub fn deinit(self: *DebugInfo, allocator: *Allocator) void {
+        allocator.free(self.debug_info);
+        allocator.free(self.debug_abbrev);
+        allocator.free(self.debug_str);
+        allocator.free(self.debug_line);
+        allocator.free(self.debug_ranges);
+        self.inner.abbrev_table_list.deinit();
+        self.inner.compile_unit_list.deinit();
+        self.inner.func_list.deinit();
+    }
+};
+
 /// Default path to dyld
 /// TODO instead of hardcoding it, we should probably look through some env vars and search paths
 /// instead but this will do for now.
@@ -700,10 +764,40 @@ fn doRelocs(self: *Zld) !void {
                 const this_addr = next.address + off;
 
                 switch (self.arch.?) {
+                    .aarch64 => {
+                        const rel_type = @intToEnum(macho.reloc_type_arm64, rel.r_type);
+                        log.debug("{s}", .{rel_type});
+                        log.debug("    | source address 0x{x}", .{this_addr});
+
+                        if (rel_type == .ARM64_RELOC_ADDEND) {
+                            addend = rel.r_symbolnum;
+                            log.debug("    | calculated addend = 0x{x}", .{addend});
+                            // TODO followed by either PAGE21 or PAGEOFF12 only.
+                            continue;
+                        }
+                    },
                     .x86_64 => {
                         const rel_type = @intToEnum(macho.reloc_type_x86_64, rel.r_type);
-                        const target_addr = self.relocTargetAddr(object, rel, next_space);
-                        log.debug("{}", .{rel_type});
+                        log.debug("{s}", .{rel_type});
+                        log.debug("    | source address 0x{x}", .{this_addr});
+                    },
+                    else => {},
+                }
+
+                const target_addr = try self.relocTargetAddr(object, rel, next_space);
+                log.debug("    | target address 0x{x}", .{target_addr});
+                if (rel.r_extern == 1) {
+                    const target_symname = object.getString(object.symtab.items[rel.r_symbolnum].n_strx);
+                    log.debug("    | target symbol '{s}'", .{target_symname});
+                } else {
+                    const target_sectname = seg.sections.items[rel.r_symbolnum - 1].sectname;
+                    log.debug("    | target section '{s}'", .{parseName(&target_sectname)});
+                }
+
+                switch (self.arch.?) {
+                    .x86_64 => {
+                        const rel_type = @intToEnum(macho.reloc_type_x86_64, rel.r_type);
+
                         switch (rel_type) {
                             .X86_64_RELOC_BRANCH,
                             .X86_64_RELOC_GOT_LOAD,
@@ -732,14 +826,11 @@ fn doRelocs(self: *Zld) !void {
                                 const inst = code[off..][0..4];
                                 const offset: i32 = blk: {
                                     if (rel.r_extern == 1) {
-                                        const offf = mem.readIntLittle(i32, inst);
-                                        log.debug("{}, inst = 0x{x}, addend => 0x{x}, sym = {s}", .{ rel, inst, offf, object.getString(object.symtab.items[rel.r_symbolnum].n_strx) });
-                                        break :blk offf;
+                                        break :blk mem.readIntLittle(i32, inst);
                                     } else {
                                         // TODO it might be required here to parse the offset from the instruction placeholder,
                                         // compare the displacement with the original displacement in the .o file, and adjust
                                         // the displacement in the resultant binary file.
-                                        log.debug("{}, inst = 0x{x}, addend => 0x{x}, sect = {}", .{ rel, inst, 0, rel.r_symbolnum });
                                         const correction: i4 = switch (rel_type) {
                                             .X86_64_RELOC_SIGNED => 0,
                                             .X86_64_RELOC_SIGNED_1 => 1,
@@ -750,13 +841,12 @@ fn doRelocs(self: *Zld) !void {
                                         break :blk correction;
                                     }
                                 };
-                                log.debug("{}, addr = 0x{x}", .{ rel, target_addr });
-                                var result = @intCast(i64, target_addr) - @intCast(i64, this_addr) - 4 + offset;
+                                log.debug("    | calculated addend 0x{x}", .{offset});
+                                const result = @intCast(i64, target_addr) - @intCast(i64, this_addr) - 4 + offset;
                                 const displacement = @bitCast(u32, @intCast(i32, result));
                                 mem.writeIntLittle(u32, inst, displacement);
                             },
                             .X86_64_RELOC_SUBTRACTOR => {
-                                log.debug("{}, sym = {s}", .{ rel, object.getString(object.symtab.items[rel.r_symbolnum].n_strx) });
                                 sub = @intCast(i64, target_addr);
                             },
                             .X86_64_RELOC_UNSIGNED => {
@@ -764,13 +854,11 @@ fn doRelocs(self: *Zld) !void {
                                     3 => {
                                         const inst = code[off..][0..8];
                                         const offset = mem.readIntLittle(i64, inst);
-                                        log.debug("{}, addend => 0x{x}, sym = {s}", .{ rel, offset, object.getString(object.symtab.items[rel.r_symbolnum].n_strx) });
-                                        log.debug("sym_addr = 0x{x}", .{target_addr});
+                                        log.debug("    | calculated addend 0x{x}", .{offset});
                                         const result = if (sub) |s|
                                             @intCast(i64, target_addr) - s + offset
                                         else
                                             @intCast(i64, target_addr) + offset;
-                                        log.debug("value = 0x{x}", .{result});
                                         mem.writeIntLittle(u64, inst, @bitCast(u64, result));
                                         sub = null;
 
@@ -789,12 +877,11 @@ fn doRelocs(self: *Zld) !void {
                                     2 => {
                                         const inst = code[off..][0..4];
                                         const offset = mem.readIntLittle(i32, inst);
-                                        log.debug("{}, addend => 0x{x}, sym = {s}", .{ rel, offset, object.getString(object.symtab.items[rel.r_symbolnum].n_strx) });
+                                        log.debug("    | calculated addend 0x{x}", .{offset});
                                         const result = if (sub) |s|
                                             @intCast(i64, target_addr) - s + offset
                                         else
                                             @intCast(i64, target_addr) + offset;
-                                        log.debug("target_addr = 0x{x}, result = 0x{x}", .{ target_addr, result });
                                         mem.writeIntLittle(u32, inst, @truncate(u32, @bitCast(u64, result)));
                                         sub = null;
                                     },
@@ -805,17 +892,7 @@ fn doRelocs(self: *Zld) !void {
                     },
                     .aarch64 => {
                         const rel_type = @intToEnum(macho.reloc_type_arm64, rel.r_type);
-                        log.debug("{s}", .{@tagName(rel_type)});
 
-                        if (rel_type == .ARM64_RELOC_ADDEND) {
-                            addend = rel.r_symbolnum;
-                            log.debug("setting addend = 0x{x}", .{addend});
-                            // TODO followed by either PAGE21 or PAGEOFF12 only.
-                            continue;
-                        }
-
-                        const target_addr = self.relocTargetAddr(object, rel, next_space);
-                        log.debug("target_addr = 0x{x}, addend = 0x{x}", .{ target_addr, addend });
                         switch (rel_type) {
                             .ARM64_RELOC_BRANCH26 => {
                                 assert(rel.r_length == 2);
@@ -834,7 +911,7 @@ fn doRelocs(self: *Zld) !void {
                                 const this_page = @intCast(i32, this_addr >> 12);
                                 const target_page = @intCast(i32, ta >> 12);
                                 const pages = @bitCast(u21, @intCast(i21, target_page - this_page));
-                                log.debug("pages = 0x{x}", .{pages});
+                                log.debug("    | moving by {} pages", .{pages});
                                 var parsed = mem.bytesAsValue(meta.TagPayload(Arm64, Arm64.Address), inst);
                                 parsed.immhi = @truncate(u19, pages >> 2);
                                 parsed.immlo = @truncate(u2, pages);
@@ -844,30 +921,21 @@ fn doRelocs(self: *Zld) !void {
                             .ARM64_RELOC_GOT_LOAD_PAGEOFF12,
                             => {
                                 const inst = code[off..][0..4];
-                                const target_name = object.getString(object.symtab.items[rel.r_symbolnum].n_strx);
                                 if (Arm64.isArithmetic(inst)) {
+                                    log.debug("    | detected ADD opcode", .{});
                                     // add
                                     var parsed = mem.bytesAsValue(meta.TagPayload(Arm64, Arm64.Add), inst);
                                     const ta = if (addend) |a| target_addr + a else target_addr;
                                     const narrowed = @truncate(u12, ta);
                                     parsed.offset = narrowed;
-                                    log.debug("ADD tn = {s}, ta = 0x{x}, parsed_offset = 0x{x}", .{
-                                        target_name,
-                                        ta,
-                                        parsed.offset,
-                                    });
                                 } else {
+                                    log.debug("    | detected LDR/STR opcode", .{});
                                     // ldr/str
                                     var parsed = mem.bytesAsValue(meta.TagPayload(Arm64, Arm64.LoadRegister), inst);
                                     const ta = if (addend) |a| target_addr + a else target_addr;
                                     const narrowed = @truncate(u12, ta);
                                     const offset = if (parsed.size == 1) @divExact(narrowed, 8) else @divExact(narrowed, 4);
                                     parsed.offset = @truncate(u12, offset);
-                                    log.debug("LDR tn = {s}, ta = 0x{x}, parsed_offset = 0x{x}", .{
-                                        target_name,
-                                        ta,
-                                        parsed.offset,
-                                    });
                                 }
                                 addend = null;
                             },
@@ -879,7 +947,6 @@ fn doRelocs(self: *Zld) !void {
                                     size: u1,
                                 };
                                 const inst = code[off..][0..4];
-                                const target_name = object.getString(object.symtab.items[rel.r_symbolnum].n_strx);
                                 const parsed: RegInfo = blk: {
                                     if (Arm64.isArithmetic(inst)) {
                                         const curr = mem.bytesAsValue(meta.TagPayload(Arm64, Arm64.Add), inst);
@@ -891,16 +958,11 @@ fn doRelocs(self: *Zld) !void {
                                 };
                                 const ta = if (addend) |a| target_addr + a else target_addr;
                                 const narrowed = @truncate(u12, ta);
-                                log.debug("ADD tn = {s}, ta = 0x{x}, parsed_offset = 0x{x}", .{
-                                    target_name,
-                                    ta,
-                                    narrowed,
-                                });
+                                log.debug("    | rewriting TLV access to ADD opcode", .{});
                                 // For TLV, we always generate an add instruction.
                                 mem.writeIntLittle(u32, inst, Arm64.add(parsed.rt, parsed.rn, narrowed, parsed.size).toU32());
                             },
                             .ARM64_RELOC_SUBTRACTOR => {
-                                log.debug("{}, sym = {s}", .{ rel, object.getString(object.symtab.items[rel.r_symbolnum].n_strx) });
                                 sub = @intCast(i64, target_addr);
                             },
                             .ARM64_RELOC_UNSIGNED => {
@@ -908,13 +970,11 @@ fn doRelocs(self: *Zld) !void {
                                     3 => {
                                         const inst = code[off..][0..8];
                                         const offset = mem.readIntLittle(i64, inst);
-                                        log.debug("{}, addend => 0x{x}, sym = {s}", .{ rel, offset, object.getString(object.symtab.items[rel.r_symbolnum].n_strx) });
-                                        log.debug("sym_addr = 0x{x}", .{target_addr});
+                                        log.debug("    | calculated addend 0x{x}", .{offset});
                                         const result = if (sub) |s|
                                             @intCast(i64, target_addr) - s + offset
                                         else
                                             @intCast(i64, target_addr) + offset;
-                                        log.debug("value = 0x{x}", .{result});
                                         mem.writeIntLittle(u64, inst, @bitCast(u64, result));
                                         sub = null;
 
@@ -933,12 +993,11 @@ fn doRelocs(self: *Zld) !void {
                                     2 => {
                                         const inst = code[off..][0..4];
                                         const offset = mem.readIntLittle(i32, inst);
-                                        log.debug("{}, addend => 0x{x}, sym = {s}", .{ rel, offset, object.getString(object.symtab.items[rel.r_symbolnum].n_strx) });
+                                        log.debug("    | calculated addend 0x{x}", .{offset});
                                         const result = if (sub) |s|
                                             @intCast(i64, target_addr) - s + offset
                                         else
                                             @intCast(i64, target_addr) + offset;
-                                        log.debug("target_addr = 0x{x}, result = 0x{x}", .{ target_addr, result });
                                         mem.writeIntLittle(u32, inst, @truncate(u32, @bitCast(u64, result)));
                                         sub = null;
                                     },
@@ -977,7 +1036,7 @@ fn doRelocs(self: *Zld) !void {
     }
 }
 
-fn relocTargetAddr(self: *Zld, object: Object, rel: macho.relocation_info, next_space: anytype) u64 {
+fn relocTargetAddr(self: *Zld, object: Object, rel: macho.relocation_info, next_space: anytype) !u64 {
     const seg = object.load_commands.items[object.segment_cmd_index.?].Segment;
     const target_addr = blk: {
         if (rel.r_extern == 1) {
@@ -994,7 +1053,6 @@ fn relocTargetAddr(self: *Zld, object: Object, rel: macho.relocation_info, next_
                 // Relocate to either the artifact's local symbol, or an import from
                 // shared library.
                 const sym_name = object.getString(sym.n_strx);
-                log.debug("relocating '{s}'", .{sym_name});
                 if (self.locals.get(sym_name)) |loc| {
                     break :blk loc.n_value;
                 } else if (self.lazy_imports.get(sym_name)) |ext| {
@@ -1011,8 +1069,8 @@ fn relocTargetAddr(self: *Zld, object: Object, rel: macho.relocation_info, next_
                     break :blk tlv.addr + ext.index * @sizeOf(u64);
                 } else unreachable;
             } else {
-                log.warn("unexpected symbol {}, {s}", .{ sym, object.getString(sym.n_strx) });
-                unreachable;
+                log.err("unexpected symbol {}, {s}", .{ sym, object.getString(sym.n_strx) });
+                return error.UnexpectedSymbolWhenRelocating;
             }
         } else {
             // TODO I think we need to reparse the relocation_info as scattered_relocation_info
@@ -1744,70 +1802,6 @@ fn writeExportInfo(self: *Zld) !void {
     try self.file.?.pwriteAll(buffer, dyld_info.export_off);
 }
 
-const DebugInfo = struct {
-    inner: dwarf.DwarfInfo,
-    debug_info: []u8,
-    debug_abbrev: []u8,
-    debug_str: []u8,
-    debug_line: []u8,
-    debug_ranges: []u8,
-
-    pub fn parseFromObject(allocator: *Allocator, object: Object) !?DebugInfo {
-        var debug_info = blk: {
-            const index = object.dwarf_debug_info_index orelse return null;
-            break :blk try object.parseSection(allocator, index);
-        };
-        var debug_abbrev = blk: {
-            const index = object.dwarf_debug_abbrev_index orelse return null;
-            break :blk try object.parseSection(allocator, index);
-        };
-        var debug_str = blk: {
-            const index = object.dwarf_debug_str_index orelse return null;
-            break :blk try object.parseSection(allocator, index);
-        };
-        var debug_line = blk: {
-            const index = object.dwarf_debug_line_index orelse return null;
-            break :blk try object.parseSection(allocator, index);
-        };
-        var debug_ranges = blk: {
-            if (object.dwarf_debug_ranges_index) |ind| {
-                break :blk try object.parseSection(allocator, ind);
-            }
-            break :blk try allocator.alloc(u8, 0);
-        };
-
-        var inner: dwarf.DwarfInfo = .{
-            .endian = .Little,
-            .debug_info = debug_info,
-            .debug_abbrev = debug_abbrev,
-            .debug_str = debug_str,
-            .debug_line = debug_line,
-            .debug_ranges = debug_ranges,
-        };
-        try dwarf.openDwarfDebugInfo(&inner, allocator);
-
-        return DebugInfo{
-            .inner = inner,
-            .debug_info = debug_info,
-            .debug_abbrev = debug_abbrev,
-            .debug_str = debug_str,
-            .debug_line = debug_line,
-            .debug_ranges = debug_ranges,
-        };
-    }
-
-    pub fn deinit(self: *DebugInfo, allocator: *Allocator) void {
-        allocator.free(self.debug_info);
-        allocator.free(self.debug_abbrev);
-        allocator.free(self.debug_str);
-        allocator.free(self.debug_line);
-        allocator.free(self.debug_ranges);
-        self.inner.abbrev_table_list.deinit();
-        self.inner.compile_unit_list.deinit();
-        self.inner.func_list.deinit();
-    }
-};
-
 fn writeDebugInfo(self: *Zld) !void {
     var stabs = std.ArrayList(macho.nlist_64).init(self.allocator);
     defer stabs.deinit();
@@ -1866,7 +1860,6 @@ fn writeDebugInfo(self: *Zld) !void {
             const maybe_size = blk: for (debug_info.inner.func_list.items) |func| {
                 if (func.pc_range) |range| {
                     if (source_addr >= range.start and source_addr < range.end) {
-                        log.debug("'{s}': {}", .{ symname, range });
                         break :blk range.end - range.start;
                     }
                 }
