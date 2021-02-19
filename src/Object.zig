@@ -3,7 +3,7 @@ const Object = @This();
 const std = @import("std");
 const assert = std.debug.assert;
 const fs = std.fs;
-const log = std.log.scoped(.Object);
+const log = std.log.scoped(.object);
 const macho = std.macho;
 const mem = std.mem;
 
@@ -61,8 +61,11 @@ pub fn initFromFile(allocator: *Allocator, name: []const u8, file: fs.File) !Obj
     var reader = file.reader();
     const header = try reader.readStruct(macho.mach_header_64);
 
-    if (header.filetype != macho.MH_OBJECT)
+    if (header.filetype != macho.MH_OBJECT) {
+        // Reset file cursor.
+        try file.seekTo(0);
         return error.NotObject;
+    }
 
     var self = Object{
         .allocator = allocator,

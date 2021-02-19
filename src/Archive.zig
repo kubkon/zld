@@ -3,7 +3,7 @@ const Archive = @This();
 const std = @import("std");
 const assert = std.debug.assert;
 const fs = std.fs;
-const log = std.log.scoped(.Archive);
+const log = std.log.scoped(.archive);
 const macho = std.macho;
 const mem = std.mem;
 
@@ -57,5 +57,26 @@ pub fn deinit(self: *Archive) void {}
 /// Caller owns the returned Archive instance and is responsible for calling
 /// `deinit` to free allocated memory.
 pub fn initFromFile(allocator: *Allocator, name: []const u8, file: fs.File) !Archive {
-    return error.NotArchive;
+    var reader = file.reader();
+    var magic = try readMagic(allocator, reader);
+    defer allocator.free(magic);
+
+    if (!mem.eql(u8, magic, ARMAG)) {
+        // Reset the file cursor.
+        try file.seekTo(0);
+        return error.NotArchive;
+    }
+
+    unreachable;
+}
+
+fn readMagic(allocator: *Allocator, reader: anytype) ![]u8 {
+    var magic = std.ArrayList(u8).init(allocator);
+    try magic.ensureCapacity(SARMAG);
+    var i: usize = 0;
+    while (i < SARMAG) : (i += 1) {
+        const next = try reader.readByte();
+        magic.appendAssumeCapacity(next);
+    }
+    return magic.toOwnedSlice();
 }
