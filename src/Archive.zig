@@ -14,6 +14,8 @@ const parseName = @import("Zld.zig").parseName;
 usingnamespace @import("commands.zig");
 
 allocator: *Allocator,
+file: fs.File,
+header: ar_hdr,
 
 objects: std.ArrayListUnmanaged(Object) = .{},
 
@@ -22,7 +24,6 @@ objects: std.ArrayListUnmanaged(Object) = .{},
 // member indicates, for each member file.
 /// String that begins an archive file.
 pub const ARMAG: *const [SARMAG:0]u8 = "!<arch>\n";
-
 /// Size of that string.
 pub const SARMAG: u4 = 8;
 
@@ -62,12 +63,28 @@ pub fn initFromFile(allocator: *Allocator, name: []const u8, file: fs.File) !Arc
     defer allocator.free(magic);
 
     if (!mem.eql(u8, magic, ARMAG)) {
-        // Reset the file cursor.
+        // Reset file cursor.
         try file.seekTo(0);
         return error.NotArchive;
     }
 
-    unreachable;
+    const header = try reader.readStruct(ar_hdr);
+
+    if (!mem.eql(u8, &header.ar_fmag, ARFMAG))
+        return error.MalformedArchive;
+
+    var self = Archive{
+        .allocator = allocator,
+        .file = file,
+        .header = header,
+    };
+
+    const size = try self.readSize();
+
+    // TODO parse ToC of the archive (symbol -> object mapping)
+    // TODO parse objects contained within.
+
+    return self;
 }
 
 fn readMagic(allocator: *Allocator, reader: anytype) ![]u8 {
@@ -79,4 +96,10 @@ fn readMagic(allocator: *Allocator, reader: anytype) ![]u8 {
         magic.appendAssumeCapacity(next);
     }
     return magic.toOwnedSlice();
+}
+
+fn readSize(self: *Archive) !u64 {
+    const slice = mem.trimRight(u8, &self.header.ar_size, &[_]u8{@as(u8, 0x20)});
+    const size = try std.fmt.parseInt(u64, slice, 10);
+    return size;
 }
