@@ -118,18 +118,8 @@ pub fn initFromFile(allocator: *Allocator, ar_name: []const u8, file: fs.File) !
     const toc_size = try header.size();
     log.debug("{}", .{toc_size});
 
-    const name_or_length = try header.nameOrLength();
-    var name: []u8 = undefined;
-    switch (name_or_length) {
-        .Name => |n| {
-            name = try allocator.dupe(u8, n);
-        },
-        .Length => |len| {
-            name = try allocator.alloc(u8, len);
-            try reader.readNoEof(name);
-        },
-    }
-    log.debug("{}, {s}", .{ name_or_length, name });
+    var name = try getName(allocator, header, reader);
+    log.debug("archive name: {s}", .{name});
 
     var self = Archive{
         .allocator = allocator,
@@ -137,12 +127,65 @@ pub fn initFromFile(allocator: *Allocator, ar_name: []const u8, file: fs.File) !
         .header = header,
         .name = name,
     };
-    try self.readSymtab(reader);
-    try self.readStrtab(reader);
+    const object_offsets = try self.readTableOfContents(reader);
+    defer self.allocator.free(object_offsets);
 
-    // TODO parse objects contained within.
+    var i: usize = 1;
+    while (i < object_offsets.len) : (i += 1) {
+        const offset = object_offsets[i];
+        log.debug("0x{x}", .{offset});
 
-    return self;
+        // TODO parse objects contained within.
+        const object_header = try reader.readStruct(ar_hdr);
+        if (!mem.eql(u8, &object_header.ar_fmag, ARFMAG))
+            return error.MalformedArchive;
+
+        var object_name = try getName(self.allocator, object_header, reader);
+        defer self.allocator.free(object_name);
+        log.debug("object name: {s}", .{object_name});
+    }
+
+    return error.NotArchive;
+}
+
+fn readTableOfContents(self: *Archive, reader: anytype) ![]u64 {
+    const symtab_size = try reader.readIntLittle(u32);
+    var symtab = try self.allocator.alloc(u8, symtab_size);
+    defer self.allocator.free(symtab);
+    try reader.readNoEof(symtab);
+
+    const strtab_size = try reader.readIntLittle(u32);
+    var strtab = try self.allocator.alloc(u8, strtab_size);
+    defer self.allocator.free(strtab);
+    try reader.readNoEof(strtab);
+
+    var symtab_stream = std.io.fixedBufferStream(symtab);
+    var symtab_reader = symtab_stream.reader();
+
+    var object_offsets = std.ArrayList(u64).init(self.allocator);
+    try object_offsets.append(0);
+    var last: usize = 0;
+
+    while (true) {
+        const n_strx = symtab_reader.readIntLittle(u32) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => |e| return e,
+        };
+        const object_offset = try symtab_reader.readIntLittle(u32);
+        const symname = mem.spanZ(@ptrCast([*:0]const u8, strtab.ptr + n_strx));
+
+        log.debug("{s}, 0x{x}", .{ symname, object_offset });
+
+        var symname_owned = try self.allocator.dupe(u8, symname);
+        try self.toc.putNoClobber(self.allocator, symname_owned, object_offset);
+
+        if (object_offsets.items[last] != object_offset) {
+            try object_offsets.append(object_offset);
+            last += 1;
+        }
+    }
+
+    return object_offsets.toOwnedSlice();
 }
 
 fn readMagic(allocator: *Allocator, reader: anytype) ![]u8 {
@@ -156,27 +199,17 @@ fn readMagic(allocator: *Allocator, reader: anytype) ![]u8 {
     return magic.toOwnedSlice();
 }
 
-fn readSymtab(self: *Archive, reader: anytype) !void {
-    const symtab_size = try reader.readIntLittle(u32);
-    log.debug("{}", .{symtab_size});
-    var buffer = try self.allocator.alloc(u8, symtab_size);
-    defer self.allocator.free(buffer);
-    try reader.readNoEof(buffer);
-
-    var sym_stream = std.io.fixedBufferStream(buffer);
-    var sym_reader = sym_stream.reader();
-
-    while (true) {
-        const n_strx = sym_reader.readIntLittle(u32) catch |err| switch (err) {
-            error.EndOfStream => break,
-            else => |e| return e,
-        };
-        const obj = try sym_reader.readIntLittle(u32);
-
-        log.debug("0x{x}, 0x{x}", .{ n_strx, obj });
+fn getName(allocator: *Allocator, header: ar_hdr, reader: anytype) ![]u8 {
+    const name_or_length = try header.nameOrLength();
+    var name: []u8 = undefined;
+    switch (name_or_length) {
+        .Name => |n| {
+            name = try allocator.dupe(u8, n);
+        },
+        .Length => |len| {
+            name = try allocator.alloc(u8, len);
+            try reader.readNoEof(name);
+        },
     }
-}
-
-fn readStrtab(self: *Archive, reader: anytype) !void {
-    const strtab_size = try reader.readIntLittle(u32);
+    return name;
 }
