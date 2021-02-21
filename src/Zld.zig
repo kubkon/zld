@@ -95,23 +95,23 @@ const DebugInfo = struct {
     pub fn parseFromObject(allocator: *Allocator, object: Object) !?DebugInfo {
         var debug_info = blk: {
             const index = object.dwarf_debug_info_index orelse return null;
-            break :blk try object.parseSection(allocator, index);
+            break :blk try object.readSection(allocator, index);
         };
         var debug_abbrev = blk: {
             const index = object.dwarf_debug_abbrev_index orelse return null;
-            break :blk try object.parseSection(allocator, index);
+            break :blk try object.readSection(allocator, index);
         };
         var debug_str = blk: {
             const index = object.dwarf_debug_str_index orelse return null;
-            break :blk try object.parseSection(allocator, index);
+            break :blk try object.readSection(allocator, index);
         };
         var debug_line = blk: {
             const index = object.dwarf_debug_line_index orelse return null;
-            break :blk try object.parseSection(allocator, index);
+            break :blk try object.readSection(allocator, index);
         };
         var debug_ranges = blk: {
             if (object.dwarf_debug_ranges_index) |ind| {
-                break :blk try object.parseSection(allocator, ind);
+                break :blk try object.readSection(allocator, ind);
             }
             break :blk try allocator.alloc(u8, 0);
         };

@@ -204,9 +204,9 @@ fn readObject(self: *Archive, reader: anytype) !void {
         .header = header,
     };
 
-    try object.parseLoadCommands(reader, .{ .offset = offset });
-    try object.parseSymtab();
-    try object.parseStrtab();
+    try object.readLoadCommands(reader, .{ .offset = offset });
+    try object.readSymtab();
+    try object.readStrtab();
     try self.objects.append(self.allocator, object);
 }
 

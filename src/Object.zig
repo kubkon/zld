@@ -74,18 +74,18 @@ pub fn initFromFile(allocator: *Allocator, name: []const u8, file: fs.File) !Obj
         .header = header,
     };
 
-    try self.parseLoadCommands(reader, .{});
-    try self.parseSymtab();
-    try self.parseStrtab();
+    try self.readLoadCommands(reader, .{});
+    try self.readSymtab();
+    try self.readStrtab();
 
     return self;
 }
 
-pub const ParseOffset = struct {
+pub const ReadOffset = struct {
     offset: ?u32 = null,
 };
 
-pub fn parseLoadCommands(self: *Object, reader: anytype, offset: ParseOffset) !void {
+pub fn readLoadCommands(self: *Object, reader: anytype, offset: ReadOffset) !void {
     const offset_mod = offset.offset orelse 0;
     try self.load_commands.ensureCapacity(self.allocator, self.header.ncmds);
 
@@ -149,7 +149,7 @@ pub fn parseLoadCommands(self: *Object, reader: anytype, offset: ParseOffset) !v
     }
 }
 
-pub fn parseSymtab(self: *Object) !void {
+pub fn readSymtab(self: *Object) !void {
     const symtab_cmd = self.load_commands.items[self.symtab_cmd_index.?].Symtab;
     var buffer = try self.allocator.alloc(u8, @sizeOf(macho.nlist_64) * symtab_cmd.nsyms);
     defer self.allocator.free(buffer);
@@ -161,7 +161,7 @@ pub fn parseSymtab(self: *Object) !void {
     self.symtab.appendSliceAssumeCapacity(slice);
 }
 
-pub fn parseStrtab(self: *Object) !void {
+pub fn readStrtab(self: *Object) !void {
     const symtab_cmd = self.load_commands.items[self.symtab_cmd_index.?].Symtab;
     var buffer = try self.allocator.alloc(u8, symtab_cmd.strsize);
     defer self.allocator.free(buffer);
@@ -175,7 +175,7 @@ pub fn getString(self: *const Object, str_off: u32) []const u8 {
     return mem.spanZ(@ptrCast([*:0]const u8, self.strtab.items.ptr + str_off));
 }
 
-pub fn parseSection(self: Object, allocator: *Allocator, index: u16) ![]u8 {
+pub fn readSection(self: Object, allocator: *Allocator, index: u16) ![]u8 {
     const seg = self.load_commands.items[self.segment_cmd_index.?].Segment;
     const sect = seg.sections.items[index];
     var buffer = try allocator.alloc(u8, sect.size);
