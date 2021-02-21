@@ -223,7 +223,7 @@ pub const TestContext = struct {
             const filetype = case.input_files.items[0].filetype;
             if (filetype == .Zig) {
                 const zig_compiler_rt_path = try std.fs.path.join(allocator, &[_][]const u8{
-                    "test", "assets", @tagName(case.target.cpu_arch.?), "compiler_rt.o",
+                    "test", "assets", @tagName(case.target.cpu_arch.?), "libcompiler_rt.a",
                 });
                 try filenames.append(zig_compiler_rt_path);
             }
