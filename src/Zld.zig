@@ -28,7 +28,9 @@ page_size: ?u16 = null,
 file: ?fs.File = null,
 out_path: ?[]const u8 = null,
 
-archives: std.ArrayListUnmanaged(Archive) = .{},
+// TODO Eventually, we will want to keep track of the  archives themselves to be able to exclude objects
+// contained within from landing in the final artifact. For now however, since we don't optimise the binary
+// at all, we just move all objects from the archives into the final artifact.
 objects: std.ArrayListUnmanaged(Object) = .{},
 
 load_commands: std.ArrayListUnmanaged(LoadCommand) = .{},
@@ -187,10 +189,6 @@ pub fn deinit(self: *Zld) void {
         self.allocator.free(entry.key);
     }
     self.locals.deinit(self.allocator);
-    for (self.archives.items) |*archive| {
-        archive.deinit();
-    }
-    self.archives.deinit(self.allocator);
     for (self.objects.items) |*object| {
         object.deinit();
     }
@@ -265,14 +263,13 @@ fn parseInputFiles(self: *Zld, files: []const []const u8) !void {
                 error.NotArchive => break :try_archive,
                 else => |e| return e,
             };
-            const index = self.archives.items.len;
-            try self.archives.append(self.allocator, archive);
-            const p_archive = &self.archives.items[index];
-
-            for (p_archive.objects.items) |*object| {
-                try self.parseObjectFile(object);
+            defer archive.deinit();
+            while (archive.objects.popOrNull()) |object| {
+                const index = self.objects.items.len;
+                try self.objects.append(self.allocator, object);
+                const p_object = &self.objects.items[index];
+                try self.parseObjectFile(p_object);
             }
-
             continue;
         }
 

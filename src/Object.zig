@@ -74,16 +74,29 @@ pub fn initFromFile(allocator: *Allocator, name: []const u8, file: fs.File) !Obj
         .header = header,
     };
 
+    try self.parseLoadCommands(reader, .{});
+    try self.parseSymtab();
+    try self.parseStrtab();
+
+    return self;
+}
+
+pub const ParseOffset = struct {
+    offset: ?u32 = null,
+};
+
+pub fn parseLoadCommands(self: *Object, reader: anytype, offset: ParseOffset) !void {
+    const offset_mod = offset.offset orelse 0;
     try self.load_commands.ensureCapacity(self.allocator, self.header.ncmds);
 
     var i: u16 = 0;
     while (i < self.header.ncmds) : (i += 1) {
-        const cmd = try LoadCommand.read(self.allocator, reader);
+        var cmd = try LoadCommand.read(self.allocator, reader);
         switch (cmd.cmd()) {
             macho.LC_SEGMENT_64 => {
                 self.segment_cmd_index = i;
-                const seg = cmd.Segment;
-                for (seg.sections.items) |sect, j| {
+                var seg = cmd.Segment;
+                for (seg.sections.items) |*sect, j| {
                     const index = @intCast(u16, j);
                     const segname = parseName(&sect.segname);
                     const sectname = parseName(&sect.sectname);
@@ -109,10 +122,18 @@ pub fn initFromFile(allocator: *Allocator, name: []const u8, file: fs.File) !Obj
                         .segname = sect.segname,
                         .sectname = sect.sectname,
                     }, index);
+
+                    sect.offset += offset_mod;
+                    if (sect.reloff > 0)
+                        sect.reloff += offset_mod;
                 }
+
+                seg.inner.fileoff += offset_mod;
             },
             macho.LC_SYMTAB => {
                 self.symtab_cmd_index = i;
+                cmd.Symtab.symoff += offset_mod;
+                cmd.Symtab.stroff += offset_mod;
             },
             macho.LC_DYSYMTAB => {
                 self.dysymtab_cmd_index = i;
@@ -126,14 +147,9 @@ pub fn initFromFile(allocator: *Allocator, name: []const u8, file: fs.File) !Obj
         }
         self.load_commands.appendAssumeCapacity(cmd);
     }
-
-    try self.parseSymtab();
-    try self.parseStrtab();
-
-    return self;
 }
 
-fn parseSymtab(self: *Object) !void {
+pub fn parseSymtab(self: *Object) !void {
     const symtab_cmd = self.load_commands.items[self.symtab_cmd_index.?].Symtab;
     var buffer = try self.allocator.alloc(u8, @sizeOf(macho.nlist_64) * symtab_cmd.nsyms);
     defer self.allocator.free(buffer);
@@ -145,7 +161,7 @@ fn parseSymtab(self: *Object) !void {
     self.symtab.appendSliceAssumeCapacity(slice);
 }
 
-fn parseStrtab(self: *Object) !void {
+pub fn parseStrtab(self: *Object) !void {
     const symtab_cmd = self.load_commands.items[self.symtab_cmd_index.?].Symtab;
     var buffer = try self.allocator.alloc(u8, symtab_cmd.strsize);
     defer self.allocator.free(buffer);
