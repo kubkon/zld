@@ -121,6 +121,7 @@ pub fn initFromFile(allocator: *Allocator, ar_name: []const u8, file: fs.File) !
         return error.MalformedArchive;
 
     var embedded_name = try getName(allocator, header, reader);
+    log.debug("parsing archive '{s}' at '{s}'", .{ embedded_name, ar_name });
     defer allocator.free(embedded_name);
 
     var name = try allocator.dupe(u8, ar_name);
@@ -131,16 +132,20 @@ pub fn initFromFile(allocator: *Allocator, ar_name: []const u8, file: fs.File) !
         .name = name,
     };
 
-    const nobjects = try self.readTableOfContents(reader);
-    var i: usize = 0;
-    while (i < nobjects) : (i += 1) {
+    var object_offsets = try self.readTableOfContents(reader);
+    defer self.allocator.free(object_offsets);
+
+    var i: usize = 1;
+    while (i < object_offsets.len) : (i += 1) {
+        const offset = object_offsets[i];
+        try reader.context.seekTo(offset);
         try self.readObject(reader);
     }
 
     return self;
 }
 
-fn readTableOfContents(self: *Archive, reader: anytype) !u32 {
+fn readTableOfContents(self: *Archive, reader: anytype) ![]u32 {
     const symtab_size = try reader.readIntLittle(u32);
     var symtab = try self.allocator.alloc(u8, symtab_size);
     defer self.allocator.free(symtab);
@@ -154,8 +159,10 @@ fn readTableOfContents(self: *Archive, reader: anytype) !u32 {
     var symtab_stream = std.io.fixedBufferStream(symtab);
     var symtab_reader = symtab_stream.reader();
 
-    var last: u32 = 0;
-    var nobjects: u32 = 0;
+    var object_offsets = std.ArrayList(u32).init(self.allocator);
+    try object_offsets.append(0);
+    var last: usize = 0;
+
     while (true) {
         const n_strx = symtab_reader.readIntLittle(u32) catch |err| switch (err) {
             error.EndOfStream => break,
@@ -167,19 +174,20 @@ fn readTableOfContents(self: *Archive, reader: anytype) !u32 {
         var symname_owned = try self.allocator.dupe(u8, symname);
         try self.toc.putNoClobber(self.allocator, symname_owned, object_offset);
 
-        if (last != object_offset) {
-            // Here, I assume that symbols are NOT sorted in any way, and
-            // they point to objects in sequence.
-            last = object_offset;
-            nobjects += 1;
+        // Here, we assume that symbols are NOT sorted in any way, and
+        // they point to objects in sequence.
+        if (object_offsets.items[last] != object_offset) {
+            try object_offsets.append(object_offset);
+            last += 1;
         }
     }
 
-    return nobjects;
+    return object_offsets.toOwnedSlice();
 }
 
 fn readObject(self: *Archive, reader: anytype) !void {
     const object_header = try reader.readStruct(ar_hdr);
+    log.debug("object_header = {}", .{object_header});
     if (!mem.eql(u8, &object_header.ar_fmag, ARFMAG))
         return error.MalformedArchive;
 
