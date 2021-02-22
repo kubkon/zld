@@ -1,21 +1,6 @@
 const std = @import("std");
 const leb = std.leb;
 const macho = std.macho;
-const mem = std.mem;
-
-const assert = std.debug.assert;
-const Allocator = mem.Allocator;
-
-pub const Import = struct {
-    /// MachO symbol table entry.
-    symbol: macho.nlist_64,
-
-    /// Id of the dynamic library where the specified entries can be found.
-    dylib_ordinal: i64,
-
-    /// Index of this import within the import list.
-    index: u32,
-};
 
 pub const Pointer = struct {
     offset: u64,

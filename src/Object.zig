@@ -57,7 +57,7 @@ pub fn deinit(self: *Object) void {
 
 /// Caller owns the returned Object instance and is responsible for calling
 /// `deinit` to free allocated memory.
-pub fn initFromFile(allocator: *Allocator, name: []const u8, file: fs.File) !Object {
+pub fn initFromFile(allocator: *Allocator, arch: std.Target.Cpu.Arch, name: []const u8, file: fs.File) !Object {
     var reader = file.reader();
     const header = try reader.readStruct(macho.mach_header_64);
 
@@ -65,6 +65,19 @@ pub fn initFromFile(allocator: *Allocator, name: []const u8, file: fs.File) !Obj
         // Reset file cursor.
         try file.seekTo(0);
         return error.NotObject;
+    }
+
+    const this_arch: std.Target.Cpu.Arch = switch (header.cputype) {
+        macho.CPU_TYPE_ARM64 => .aarch64,
+        macho.CPU_TYPE_X86_64 => .x86_64,
+        else => |value| {
+            log.err("unsupported cpu architecture 0x{x}", .{value});
+            return error.UnsupportedCpuArchitecture;
+        },
+    };
+    if (this_arch != arch) {
+        log.err("mismatched cpu architecture: found {s}, expected {s}", .{ this_arch, arch });
+        return error.MismatchedCpuArchitecture;
     }
 
     var self = Object{

@@ -104,7 +104,7 @@ pub fn deinit(self: *Archive) void {
 
 /// Caller owns the returned Archive instance and is responsible for calling
 /// `deinit` to free allocated memory.
-pub fn initFromFile(allocator: *Allocator, ar_name: []const u8, file: fs.File) !Archive {
+pub fn initFromFile(allocator: *Allocator, arch: std.Target.Cpu.Arch, ar_name: []const u8, file: fs.File) !Archive {
     var reader = file.reader();
     var magic = try readMagic(allocator, reader);
     defer allocator.free(magic);
@@ -139,7 +139,7 @@ pub fn initFromFile(allocator: *Allocator, ar_name: []const u8, file: fs.File) !
     while (i < object_offsets.len) : (i += 1) {
         const offset = object_offsets[i];
         try reader.context.seekTo(offset);
-        try self.readObject(reader);
+        try self.readObject(arch, reader);
     }
 
     return self;
@@ -185,9 +185,9 @@ fn readTableOfContents(self: *Archive, reader: anytype) ![]u32 {
     return object_offsets.toOwnedSlice();
 }
 
-fn readObject(self: *Archive, reader: anytype) !void {
+fn readObject(self: *Archive, arch: std.Target.Cpu.Arch, reader: anytype) !void {
     const object_header = try reader.readStruct(ar_hdr);
-    log.debug("object_header = {}", .{object_header});
+
     if (!mem.eql(u8, &object_header.ar_fmag, ARFMAG))
         return error.MalformedArchive;
 
@@ -196,6 +196,19 @@ fn readObject(self: *Archive, reader: anytype) !void {
 
     const offset = @intCast(u32, try reader.context.getPos());
     const header = try reader.readStruct(macho.mach_header_64);
+
+    const this_arch: std.Target.Cpu.Arch = switch (header.cputype) {
+        macho.CPU_TYPE_ARM64 => .aarch64,
+        macho.CPU_TYPE_X86_64 => .x86_64,
+        else => |value| {
+            log.err("unsupported cpu architecture 0x{x}", .{value});
+            return error.UnsupportedCpuArchitecture;
+        },
+    };
+    if (this_arch != arch) {
+        log.err("mismatched cpu architecture: found {s}, expected {s}", .{ this_arch, arch });
+        return error.MismatchedCpuArchitecture;
+    }
 
     var object = Object{
         .allocator = self.allocator,

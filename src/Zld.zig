@@ -18,7 +18,7 @@ const Object = @import("Object.zig");
 const Trie = @import("Trie.zig");
 
 usingnamespace @import("commands.zig");
-usingnamespace @import("imports.zig");
+usingnamespace @import("bind.zig");
 usingnamespace @import("reloc.zig");
 
 allocator: *Allocator,
@@ -148,6 +148,17 @@ const DebugInfo = struct {
     }
 };
 
+pub const Import = struct {
+    /// MachO symbol table entry.
+    symbol: macho.nlist_64,
+
+    /// Id of the dynamic library where the specified entries can be found.
+    dylib_ordinal: i64,
+
+    /// Index of this import within the import list.
+    index: u32,
+};
+
 /// Default path to dyld
 /// TODO instead of hardcoding it, we should probably look through some env vars and search paths
 /// instead but this will do for now.
@@ -214,7 +225,10 @@ pub fn link(self: *Zld, files: []const []const u8, out_path: []const u8) !void {
         const arch: std.Target.Cpu.Arch = switch (header.cputype) {
             macho.CPU_TYPE_X86_64 => .x86_64,
             macho.CPU_TYPE_ARM64 => .aarch64,
-            else => unreachable,
+            else => |value| {
+                log.err("unsupported cpu architecture 0x{x}", .{value});
+                return error.UnsupportedCpuArchitecture;
+            },
         };
         break :blk arch;
     };
@@ -247,7 +261,7 @@ fn parseInputFiles(self: *Zld, files: []const []const u8) !void {
         const file = try fs.cwd().openFile(file_name, .{});
 
         try_object: {
-            var object = Object.initFromFile(self.allocator, file_name, file) catch |err| switch (err) {
+            var object = Object.initFromFile(self.allocator, self.arch.?, file_name, file) catch |err| switch (err) {
                 error.NotObject => break :try_object,
                 else => |e| return e,
             };
@@ -259,7 +273,7 @@ fn parseInputFiles(self: *Zld, files: []const []const u8) !void {
         }
 
         try_archive: {
-            var archive = Archive.initFromFile(self.allocator, file_name, file) catch |err| switch (err) {
+            var archive = Archive.initFromFile(self.allocator, self.arch.?, file_name, file) catch |err| switch (err) {
                 error.NotArchive => break :try_archive,
                 else => |e| return e,
             };
@@ -919,7 +933,10 @@ fn doRelocs(self: *Zld) !void {
                                         mem.writeIntLittle(u32, inst, @truncate(u32, @bitCast(u64, result)));
                                         sub = null;
                                     },
-                                    else => unreachable,
+                                    else => |len| {
+                                        log.err("unexpected relocation length 0x{x}", .{len});
+                                        return error.UnexpectedRelocationLength;
+                                    },
                                 }
                             },
                         }
@@ -1035,7 +1052,10 @@ fn doRelocs(self: *Zld) !void {
                                         mem.writeIntLittle(u32, inst, @truncate(u32, @bitCast(u64, result)));
                                         sub = null;
                                     },
-                                    else => unreachable,
+                                    else => |len| {
+                                        log.err("unexpected relocation length 0x{x}", .{len});
+                                        return error.UnexpectedRelocationLength;
+                                    },
                                 }
                             },
                             .ARM64_RELOC_POINTER_TO_GOT => return error.TODOArm64RelocPointerToGot,
@@ -1101,7 +1121,10 @@ fn relocTargetAddr(self: *Zld, object: Object, rel: macho.relocation_info, next_
                     const segment = self.load_commands.items[self.data_segment_cmd_index.?].Segment;
                     const tlv = segment.sections.items[self.tlv_section_index.?];
                     break :blk tlv.addr + ext.index * @sizeOf(u64);
-                } else unreachable;
+                } else {
+                    log.err("failed to resolve symbol '{s}' as a relocation target", .{sym_name});
+                    return error.FailedToResolveRelocationTarget;
+                }
             } else {
                 log.err("unexpected symbol {}, {s}", .{ sym, object.getString(sym.n_strx) });
                 return error.UnexpectedSymbolWhenRelocating;
@@ -2182,7 +2205,7 @@ fn writeHeader(self: *Zld) !void {
             .cpu_type = macho.CPU_TYPE_X86_64,
             .cpu_subtype = macho.CPU_SUBTYPE_X86_64_ALL,
         },
-        else => return error.UnsupportedMachOArchitecture,
+        else => return error.UnsupportedCpuArchitecture,
     };
     header.cputype = cpu_info.cpu_type;
     header.cpusubtype = cpu_info.cpu_subtype;
