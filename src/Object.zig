@@ -91,6 +91,13 @@ pub fn initFromFile(allocator: *Allocator, arch: std.Target.Cpu.Arch, name: []co
     try self.readSymtab();
     try self.readStrtab();
 
+    log.debug("\n\n", .{});
+    log.debug("{s} defines symbols", .{self.name});
+    for (self.symtab.items) |sym| {
+        const symname = self.getString(sym.n_strx);
+        log.debug("'{s}': {}", .{ symname, sym });
+    }
+
     return self;
 }
 
@@ -155,7 +162,7 @@ pub fn readLoadCommands(self: *Object, reader: anytype, offset: ReadOffset) !voi
                 self.build_version_cmd_index = i;
             },
             else => {
-                log.warn("Unknown load command detected: 0x{x}.", .{cmd.cmd()});
+                log.info("Unknown load command detected: 0x{x}.", .{cmd.cmd()});
             },
         }
         self.load_commands.appendAssumeCapacity(cmd);

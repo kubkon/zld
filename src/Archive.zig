@@ -20,14 +20,6 @@ name: []u8,
 
 objects: std.ArrayListUnmanaged(Object) = .{},
 
-// TODO ToC currently stores raw offset data to each
-// object AR header within the archive. It should be updated
-// to store indirection to the object table, or pointers to
-// the object structs. Also, we currently don't make use
-// of the ToC to exclude objects that are not being referenced
-// by the final artifact.
-toc: std.StringArrayHashMapUnmanaged(u32) = .{},
-
 // Archive files start with the ARMAG identifying string.  Then follows a
 // `struct ar_hdr', and as many bytes of member file data as its `ar_size'
 // member indicates, for each member file.
@@ -96,10 +88,7 @@ pub fn deinit(self: *Archive) void {
         object.deinit();
     }
     self.objects.deinit(self.allocator);
-    for (self.toc.items()) |entry| {
-        self.allocator.free(entry.key);
-    }
-    self.toc.deinit(self.allocator);
+    self.file.close();
 }
 
 /// Caller owns the returned Archive instance and is responsible for calling
@@ -139,7 +128,7 @@ pub fn initFromFile(allocator: *Allocator, arch: std.Target.Cpu.Arch, ar_name: [
     while (i < object_offsets.len) : (i += 1) {
         const offset = object_offsets[i];
         try reader.context.seekTo(offset);
-        try self.readObject(arch, reader);
+        try self.readObject(arch, ar_name, reader);
     }
 
     return self;
@@ -169,10 +158,8 @@ fn readTableOfContents(self: *Archive, reader: anytype) ![]u32 {
             else => |e| return e,
         };
         const object_offset = try symtab_reader.readIntLittle(u32);
-        const symname = mem.spanZ(@ptrCast([*:0]const u8, strtab.ptr + n_strx));
 
-        var symname_owned = try self.allocator.dupe(u8, symname);
-        try self.toc.putNoClobber(self.allocator, symname_owned, object_offset);
+        // TODO Store the table of contents for later reuse.
 
         // Here, we assume that symbols are NOT sorted in any way, and
         // they point to objects in sequence.
@@ -185,7 +172,7 @@ fn readTableOfContents(self: *Archive, reader: anytype) ![]u32 {
     return object_offsets.toOwnedSlice();
 }
 
-fn readObject(self: *Archive, arch: std.Target.Cpu.Arch, reader: anytype) !void {
+fn readObject(self: *Archive, arch: std.Target.Cpu.Arch, ar_name: []const u8, reader: anytype) !void {
     const object_header = try reader.readStruct(ar_hdr);
 
     if (!mem.eql(u8, &object_header.ar_fmag, ARFMAG))
@@ -210,16 +197,26 @@ fn readObject(self: *Archive, arch: std.Target.Cpu.Arch, reader: anytype) !void 
         return error.MismatchedCpuArchitecture;
     }
 
+    // TODO Implement std.fs.File.clone() or similar.
+    var new_file = try fs.cwd().openFile(ar_name, .{});
     var object = Object{
         .allocator = self.allocator,
         .name = object_name,
-        .file = self.file,
+        .file = new_file,
         .header = header,
     };
 
     try object.readLoadCommands(reader, .{ .offset = offset });
     try object.readSymtab();
     try object.readStrtab();
+
+    log.debug("\n\n", .{});
+    log.debug("{s} defines symbols", .{object.name});
+    for (object.symtab.items) |sym| {
+        const symname = object.getString(sym.n_strx);
+        log.debug("'{s}': {}", .{ symname, sym });
+    }
+
     try self.objects.append(self.allocator, object);
 }
 

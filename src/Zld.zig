@@ -217,21 +217,25 @@ pub fn link(self: *Zld, files: []const []const u8, out_path: []const u8) !void {
     if (files.len == 0) return error.NoInputFiles;
     if (out_path.len == 0) return error.EmptyOutputPath;
 
-    self.arch = blk: {
-        const file = try fs.cwd().openFile(files[0], .{});
-        defer file.close();
-        var reader = file.reader();
-        const header = try reader.readStruct(macho.mach_header_64);
-        const arch: std.Target.Cpu.Arch = switch (header.cputype) {
-            macho.CPU_TYPE_X86_64 => .x86_64,
-            macho.CPU_TYPE_ARM64 => .aarch64,
-            else => |value| {
-                log.err("unsupported cpu architecture 0x{x}", .{value});
-                return error.UnsupportedCpuArchitecture;
-            },
+    if (self.arch == null) {
+        // Try inferring the arch from the object files.
+        self.arch = blk: {
+            const file = try fs.cwd().openFile(files[0], .{});
+            defer file.close();
+            var reader = file.reader();
+            const header = try reader.readStruct(macho.mach_header_64);
+            const arch: std.Target.Cpu.Arch = switch (header.cputype) {
+                macho.CPU_TYPE_X86_64 => .x86_64,
+                macho.CPU_TYPE_ARM64 => .aarch64,
+                else => |value| {
+                    log.err("unsupported cpu architecture 0x{x}", .{value});
+                    return error.UnsupportedCpuArchitecture;
+                },
+            };
+            break :blk arch;
         };
-        break :blk arch;
-    };
+    }
+
     self.page_size = switch (self.arch.?) {
         .aarch64 => 0x4000,
         .x86_64 => 0x1000,
@@ -298,7 +302,7 @@ fn parseObjectFile(self: *Zld, object: *const Object) !void {
         const sectname = parseName(&sect.sectname);
 
         const seg_index = self.segments_directory.get(sect.segname) orelse {
-            log.warn("segname {s} not found in the output artifact", .{sect.segname});
+            log.info("segname {s} not found in the output artifact", .{sect.segname});
             continue;
         };
         const seg = &self.load_commands.items[seg_index].Segment;
@@ -376,6 +380,7 @@ fn resolveImports(self: *Zld) !void {
         // symbols which are expected to be nonlazy?
         if (mem.eql(u8, sym_name, "___stdoutp") or
             mem.eql(u8, sym_name, "___stderrp") or
+            mem.eql(u8, sym_name, "___stdinp") or
             mem.eql(u8, sym_name, "___stack_chk_guard") or
             mem.eql(u8, sym_name, "_environ"))
         {
@@ -761,6 +766,9 @@ fn doRelocs(self: *Zld) !void {
     defer next_space.deinit();
 
     for (self.objects.items) |object| {
+        log.debug("\n\n", .{});
+        log.debug("relocating object {s}", .{object.name});
+
         const seg = object.load_commands.items[object.segment_cmd_index.?].Segment;
 
         for (seg.sections.items) |sect| {
@@ -816,6 +824,7 @@ fn doRelocs(self: *Zld) !void {
                         const rel_type = @intToEnum(macho.reloc_type_arm64, rel.r_type);
                         log.debug("{s}", .{rel_type});
                         log.debug("    | source address 0x{x}", .{this_addr});
+                        log.debug("    | offset 0x{x}", .{off});
 
                         if (rel_type == .ARM64_RELOC_ADDEND) {
                             addend = rel.r_symbolnum;
@@ -828,6 +837,7 @@ fn doRelocs(self: *Zld) !void {
                         const rel_type = @intToEnum(macho.reloc_type_x86_64, rel.r_type);
                         log.debug("{s}", .{rel_type});
                         log.debug("    | source address 0x{x}", .{this_addr});
+                        log.debug("    | offset 0x{x}", .{off});
                     },
                     else => {},
                 }
@@ -913,7 +923,8 @@ fn doRelocs(self: *Zld) !void {
                                         // TODO should handle this better.
                                         if (mem.eql(u8, segname, "__DATA")) outer: {
                                             if (!mem.eql(u8, sectname, "__data") and
-                                                !mem.eql(u8, sectname, "__const")) break :outer;
+                                                !mem.eql(u8, sectname, "__const") and
+                                                !mem.eql(u8, sectname, "__mod_init_func")) break :outer;
                                             const this_seg = self.load_commands.items[self.data_segment_cmd_index.?].Segment;
                                             const this_offset = next.address + off - this_seg.inner.vmaddr;
                                             try self.local_rebases.append(self.allocator, .{
@@ -1032,7 +1043,8 @@ fn doRelocs(self: *Zld) !void {
                                         // TODO should handle this better.
                                         if (mem.eql(u8, segname, "__DATA")) outer: {
                                             if (!mem.eql(u8, sectname, "__data") and
-                                                !mem.eql(u8, sectname, "__const")) break :outer;
+                                                !mem.eql(u8, sectname, "__const") and
+                                                !mem.eql(u8, sectname, "__mod_init_func")) break :outer;
                                             const this_seg = self.load_commands.items[self.data_segment_cmd_index.?].Segment;
                                             const this_offset = next.address + off - this_seg.inner.vmaddr;
                                             try self.local_rebases.append(self.allocator, .{
@@ -2266,13 +2278,24 @@ fn addSectionToDir(self: *Zld, value: DirectoryEntry) !void {
 }
 
 fn isLocal(sym: *const macho.nlist_64) callconv(.Inline) bool {
-    return sym.n_type == macho.N_SECT;
+    if (isExtern(sym)) return false;
+    const tt = macho.N_TYPE & sym.n_type;
+    return tt == macho.N_SECT;
 }
 
 fn isExport(sym: *const macho.nlist_64) callconv(.Inline) bool {
-    return sym.n_type == macho.N_SECT | macho.N_EXT;
+    if (!isExtern(sym)) return false;
+    const tt = macho.N_TYPE & sym.n_type;
+    return tt == macho.N_SECT;
 }
 
 fn isImport(sym: *const macho.nlist_64) callconv(.Inline) bool {
-    return sym.n_type == macho.N_UNDF | macho.N_EXT;
+    if (!isExtern(sym)) return false;
+    const tt = macho.N_TYPE & sym.n_type;
+    return tt == macho.N_UNDF;
+}
+
+fn isExtern(sym: *const macho.nlist_64) callconv(.Inline) bool {
+    if ((sym.n_type & macho.N_EXT) == 0) return false;
+    return (sym.n_type & macho.N_PEXT) == 0;
 }
