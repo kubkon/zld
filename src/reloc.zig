@@ -26,8 +26,7 @@ pub const Arm64 = union(enum) {
         rn: u5,
         offset: u12,
         _1: u8 = 0b111_0_01_01,
-        size: u1,
-        _2: u1 = 0b1,
+        size: u2,
     },
     LoadLiteral: packed struct {
         reg: u5,
@@ -43,6 +42,9 @@ pub const Arm64 = union(enum) {
         _1: u9 = 0b0_0_100010_0,
         size: u1,
     },
+    Nop: packed struct {
+        fixed: u32 = 0b1101010100_0_00_011_0010_0000_000_11111,
+    },
 
     pub fn toU32(self: Arm64) u32 {
         const as_u32 = switch (self) {
@@ -52,6 +54,7 @@ pub const Arm64 = union(enum) {
             .LoadRegister => |x| @bitCast(u32, x),
             .LoadLiteral => |x| @bitCast(u32, x),
             .Add => |x| @bitCast(u32, x),
+            .Nop => |x| @bitCast(u32, x),
         };
         return as_u32;
     }
@@ -135,14 +138,40 @@ pub const Arm64 = union(enum) {
         };
     }
 
-    pub fn ldrr(rt: u5, rn: u5, offset: u12, size: u1) Arm64 {
+    pub fn ldrq(rt: u5, rn: u5, offset: u12) Arm64 {
         return Arm64{
             .LoadRegister = .{
                 .rt = rt,
                 .rn = rn,
                 .offset = offset,
-                .size = size,
+                .size = 0b11,
             },
+        };
+    }
+    pub fn ldrh(rt: u5, rn: u5, offset: u12) Arm64 {
+        return Arm64{
+            .LoadRegister = .{
+                .rt = rt,
+                .rn = rn,
+                .offset = offset,
+                .size = 0b01,
+            },
+        };
+    }
+    pub fn ldrb(rt: u5, rn: u5, offset: u12) Arm64 {
+        return Arm64{
+            .LoadRegister = .{
+                .rt = rt,
+                .rn = rn,
+                .offset = offset,
+                .size = 0b00,
+            },
+        };
+    }
+
+    pub fn nop() Arm64 {
+        return Arm64{
+            .Nop = .{},
         };
     }
 
