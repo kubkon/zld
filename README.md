@@ -2,11 +2,25 @@
 
 Zig's lld drop-in replacement, called ZigLD or `zld` for short
 
+---
+
+# This repo is a read-only archive
+I'm archiving this repo since the development has officially moved to [ziglang/zig]
+and will continue there. See [ziglang/zig#8282] for the PR upstreaming zld into Zig.
+I still plan on `zld` to be available as a drop-in replacement for LLD as well as an
+alternatives to system linkers, and the current plan is to have it exposed via
+Zig subcommand such as `zig ld`.
+
+[ziglang/zig]: https://github.com/ziglang/zig
+[ziglang/zig#8282]: https://github.com/ziglang/zig/pull/8282
+
+---
+
+## Quick start guide
+
 **Disclaimer**: this is a WIP so things naturally will not work as intended or at all.
 However, with a bit of luck, and some spare time, I reckon `zld` can handle most common
 cases (with a special focus on cross-compilation) relatively quickly.
-
-## Quick start guide
 
 ### Building
 
