@@ -19,6 +19,7 @@ const usage =
     \\
     \\General Options:
     \\-h, --help                    Print this help and exit
+    \\--verbose                     Print the full invocation
     \\-dynamic                      Perform dynamic linking
     \\-dylib                        Create dynamic library
     \\-shared                       Create dynamic library
@@ -111,8 +112,10 @@ pub fn main() anyerror!void {
     var out_path: ?[]const u8 = null;
     var syslibroot: ?[]const u8 = null;
     var stack: ?u64 = null;
-    var output_mode: ?Zld.OutputMode = null;
     var dynamic: bool = false;
+    var verbose: bool = false;
+    var dylib: bool = false;
+    var shared: bool = false;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -162,8 +165,12 @@ pub fn main() anyerror!void {
             stack = try std.fmt.parseInt(u64, args[i], 10);
             continue;
         }
-        if (mem.eql(u8, arg, "-dylib") or mem.eql(u8, arg, "-shared")) {
-            output_mode = .lib;
+        if (mem.eql(u8, arg, "-dylib")) {
+            dylib = true;
+            continue;
+        }
+        if (mem.eql(u8, arg, "-shared")) {
+            shared = true;
             continue;
         }
         if (mem.eql(u8, arg, "-dynamic")) {
@@ -176,11 +183,65 @@ pub fn main() anyerror!void {
             try rpath_list.append(args[i]);
             continue;
         }
+        if (mem.eql(u8, arg, "--verbose")) {
+            verbose = true;
+            continue;
+        }
         try positionals.append(arg);
     }
 
     if (positionals.items.len == 0) {
         fatal("Expected at least one input .o file", .{});
+    }
+
+    if (verbose) {
+        var argv = std.ArrayList([]const u8).init(arena);
+        try argv.append("zld");
+
+        if (dynamic) {
+            try argv.append("-dynamic");
+        }
+        if (syslibroot) |path| {
+            try argv.append("-syslibroot");
+            try argv.append(path);
+        }
+        if (shared) {
+            try argv.append("-shared");
+        }
+        if (dylib) {
+            try argv.append("-dylib");
+        }
+        if (stack) |st| {
+            try argv.append("-stack");
+            try argv.append(try std.fmt.allocPrint(arena, "{d}", .{st}));
+        }
+        if (out_path) |path| {
+            try argv.append("-o");
+            try argv.append(path);
+        }
+        for (libs.items) |lib| {
+            try argv.append(try std.fmt.allocPrint(arena, "-l{s}", .{lib}));
+        }
+        for (lib_dirs.items) |dir| {
+            try argv.append(try std.fmt.allocPrint(arena, "-L{s}", .{dir}));
+        }
+        for (frameworks.items) |fw| {
+            try argv.append("-framework");
+            try argv.append(fw);
+        }
+        for (framework_dirs.items) |dir| {
+            try argv.append(try std.fmt.allocPrint(arena, "-F{s}", .{dir}));
+        }
+        for (rpath_list.items) |rpath| {
+            try argv.append("-rpath");
+            try argv.append(rpath);
+        }
+        for (positionals.items) |pos| {
+            try argv.append(pos);
+        }
+        try argv.append("\n");
+
+        try io.getStdOut().writeAll(try mem.join(arena, " ", argv.items));
     }
 
     // TODO infer target if not specified
@@ -196,7 +257,7 @@ pub fn main() anyerror!void {
         },
         .dynamic = dynamic,
         .target = target.toTarget(),
-        .output_mode = output_mode orelse .exe,
+        .output_mode = if (dylib or shared) .lib else .exe,
         .syslibroot = syslibroot,
         .positionals = positionals.items,
         .libs = libs.items,

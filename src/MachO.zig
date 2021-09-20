@@ -303,26 +303,6 @@ pub fn flush(self: *MachO) !void {
     try self.resolveSymbolsInDylibs();
     try self.createDsoHandleAtom();
 
-    // log.warn("locals:", .{});
-    // for (self.locals.items) |sym, id| {
-    //     log.warn("  {d}: {s}: {}", .{ id, self.getString(sym.n_strx), sym });
-    // }
-    // log.warn("globals:", .{});
-    // for (self.globals.items) |sym, id| {
-    //     log.warn("  {d}: {s}: {}", .{ id, self.getString(sym.n_strx), sym });
-    // }
-    // log.warn("undefs:", .{});
-    // for (self.undefs.items) |sym, id| {
-    //     log.warn("  {d}: {s}: {}", .{ id, self.getString(sym.n_strx), sym });
-    // }
-    // {
-    //     log.warn("resolver:", .{});
-    //     var it = self.symbol_resolver.iterator();
-    //     while (it.next()) |entry| {
-    //         log.warn("  {s} => {}", .{ self.getString(entry.key_ptr.*), entry.value_ptr.* });
-    //     }
-    // }
-
     for (self.unresolved.keys()) |index| {
         const sym = self.undefs.items[index];
         const sym_name = self.getString(sym.n_strx);
