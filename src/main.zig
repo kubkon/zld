@@ -244,11 +244,19 @@ pub fn main() anyerror!void {
         try io.getStdOut().writeAll(try mem.join(arena, " ", argv.items));
     }
 
-    // TODO infer target if not specified
-    const target = CrossTarget{
-        .cpu_arch = .x86_64,
-        .os_tag = .macos,
-    };
+    // TODO allow for non-native targets
+    const target = std.Target.current;
+    if (std.Target.current.os.tag == .macos) {
+        if (syslibroot == null) {
+            syslibroot = try std.zig.system.darwin.getSDKPath(arena, target);
+        }
+        try libs.append("System");
+        try libs.append("c");
+        try lib_dirs.append("/usr/lib");
+        if (frameworks.items.len > 0) {
+            try framework_dirs.append("/System/Library/Frameworks");
+        }
+    }
 
     var zld = try Zld.openPath(gpa, .{
         .emit = .{
@@ -256,7 +264,7 @@ pub fn main() anyerror!void {
             .sub_path = out_path orelse "a.out",
         },
         .dynamic = dynamic,
-        .target = target.toTarget(),
+        .target = target,
         .output_mode = if (dylib or shared) .lib else .exe,
         .syslibroot = syslibroot,
         .positionals = positionals.items,
