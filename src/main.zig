@@ -1,13 +1,15 @@
-const Zld = @import("Zld.zig");
-
 const std = @import("std");
 const build_options = @import("build_options");
 const io = std.io;
 const mem = std.mem;
 const process = std.process;
 
-var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-var allocator = &gpa.allocator;
+const Allocator = mem.Allocator;
+const CrossTarget = std.zig.CrossTarget;
+const Zld = @import("Zld.zig");
+
+var gpa_allocator = std.heap.GeneralPurposeAllocator(.{}){};
+const gpa = &gpa_allocator.allocator;
 
 const usage =
     \\Usage: zld [files...]
@@ -27,7 +29,7 @@ fn printHelpAndExit() noreturn {
 
 fn fatal(comptime format: []const u8, args: anytype) noreturn {
     ret: {
-        const msg = std.fmt.allocPrint(allocator, format, args) catch break :ret;
+        const msg = std.fmt.allocPrint(gpa, format, args) catch break :ret;
         io.getStdErr().writeAll(msg) catch {};
     }
     process.exit(1);
@@ -77,17 +79,19 @@ pub fn log(
 }
 
 pub fn main() anyerror!void {
-    const all_args = try process.argsAlloc(allocator);
-    defer process.argsFree(allocator, all_args);
-    defer log_scopes.deinit(allocator);
+    var arena_allocator = std.heap.ArenaAllocator.init(gpa);
+    defer arena_allocator.deinit();
+    const arena = &arena_allocator.allocator;
+
+    const all_args = try process.argsAlloc(gpa);
+    defer process.argsFree(gpa, all_args);
 
     const args = all_args[1..];
     if (args.len == 0) {
         printHelpAndExit();
     }
 
-    var input_files = std.ArrayList([]const u8).init(allocator);
-    defer input_files.deinit();
+    var positionals = std.ArrayList([]const u8).init(arena);
     var out_path: ?[]const u8 = null;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -98,7 +102,7 @@ pub fn main() anyerror!void {
         if (mem.eql(u8, arg, "--debug-log")) {
             if (i + 1 >= args.len) fatal("Expected parameter after {s}", .{arg});
             i += 1;
-            try log_scopes.append(allocator, args[i]);
+            try log_scopes.append(arena, args[i]);
             continue;
         }
         if (mem.eql(u8, arg, "-o")) {
@@ -107,22 +111,37 @@ pub fn main() anyerror!void {
             out_path = args[i];
             continue;
         }
-        try input_files.append(arg);
+        try positionals.append(arg);
     }
 
-    if (input_files.items.len == 0) {
+    if (positionals.items.len == 0) {
         fatal("Expected at least one input .o file", .{});
     }
 
-    var zld = Zld.init(allocator);
-    defer zld.deinit();
-
-    const final_out_path = blk: {
-        if (out_path) |p| break :blk try allocator.dupe(u8, p);
-        const prefix = std.fs.path.dirname(input_files.items[0]) orelse ".";
-        break :blk try std.fs.path.join(allocator, &[_][]const u8{ prefix, "a.out" });
+    // TODO infer target if not specified
+    const target = CrossTarget{
+        .cpu_arch = .x86_64,
+        .os_tag = .macos,
     };
-    defer allocator.free(final_out_path);
 
-    try zld.link(input_files.items, final_out_path);
+    var zld = try Zld.openPath(gpa, .{
+        .emit = .{
+            .directory = std.fs.cwd(),
+            .sub_path = "a.out",
+        },
+        .target = target.toTarget(),
+        .output_mode = .exe,
+        .sysroot = null,
+        .positionals = positionals.items,
+        .libs = &[0][]const u8{},
+        .frameworks = &[0][]const u8{},
+        .lib_dirs = &[0][]const u8{},
+        .framework_dirs = &[0][]const u8{},
+        .rpath_list = &[0][]const u8{},
+    });
+    defer {
+        zld.closeFiles();
+        zld.deinit();
+    }
+    try zld.flush();
 }

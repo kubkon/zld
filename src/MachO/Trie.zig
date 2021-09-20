@@ -273,8 +273,6 @@ pub const Node = struct {
 /// The root node of the trie.
 root: ?*Node = null,
 
-allocator: *Allocator,
-
 /// If you want to access nodes ordered in DFS fashion,
 /// you should call `finalize` first since the nodes
 /// in this container are not guaranteed to not be stale
@@ -294,10 +292,6 @@ node_count: usize = 0,
 
 trie_dirty: bool = true,
 
-pub fn init(allocator: *Allocator) Trie {
-    return .{ .allocator = allocator };
-}
-
 /// Export symbol that is to be placed in the trie.
 pub const ExportSymbol = struct {
     /// Name of the symbol.
@@ -314,9 +308,9 @@ pub const ExportSymbol = struct {
 /// Insert a symbol into the trie, updating the prefixes in the process.
 /// This operation may change the layout of the trie by splicing edges in
 /// certain circumstances.
-pub fn put(self: *Trie, symbol: ExportSymbol) !void {
-    try self.createRoot();
-    const node = try self.root.?.put(self.allocator, symbol.name);
+pub fn put(self: *Trie, allocator: *Allocator, symbol: ExportSymbol) !void {
+    try self.createRoot(allocator);
+    const node = try self.root.?.put(allocator, symbol.name);
     node.terminal_info = .{
         .vmaddr_offset = symbol.vmaddr_offset,
         .export_flags = symbol.export_flags,
@@ -328,14 +322,15 @@ pub fn put(self: *Trie, symbol: ExportSymbol) !void {
 /// This step performs multiple passes through the trie ensuring
 /// there are no gaps after every `Node` is ULEB128 encoded.
 /// Call this method before trying to `write` the trie to a byte stream.
-pub fn finalize(self: *Trie) !void {
+pub fn finalize(self: *Trie, allocator: *Allocator) !void {
     if (!self.trie_dirty) return;
 
     self.ordered_nodes.shrinkRetainingCapacity(0);
-    try self.ordered_nodes.ensureCapacity(self.allocator, self.node_count);
+    try self.ordered_nodes.ensureTotalCapacity(allocator, self.node_count);
 
-    comptime const Fifo = std.fifo.LinearFifo(*Node, .{ .Static = std.math.maxInt(u8) });
-    var fifo = Fifo.init();
+    var fifo = std.fifo.LinearFifo(*Node, .Dynamic).init(allocator);
+    defer fifo.deinit();
+
     try fifo.writeItem(self.root.?);
 
     while (fifo.readItem()) |next| {
@@ -366,9 +361,9 @@ const ReadError = error{
 };
 
 /// Parse the trie from a byte stream.
-pub fn read(self: *Trie, reader: anytype) ReadError!usize {
-    try self.createRoot();
-    return self.root.?.read(self.allocator, reader);
+pub fn read(self: *Trie, allocator: *Allocator, reader: anytype) ReadError!usize {
+    try self.createRoot(allocator);
+    return self.root.?.read(allocator, reader);
 }
 
 /// Write the trie to a byte stream.
@@ -382,17 +377,17 @@ pub fn write(self: Trie, writer: anytype) !u64 {
     return counting_writer.bytes_written;
 }
 
-pub fn deinit(self: *Trie) void {
+pub fn deinit(self: *Trie, allocator: *Allocator) void {
     if (self.root) |root| {
-        root.deinit(self.allocator);
-        self.allocator.destroy(root);
+        root.deinit(allocator);
+        allocator.destroy(root);
     }
-    self.ordered_nodes.deinit(self.allocator);
+    self.ordered_nodes.deinit(allocator);
 }
 
-fn createRoot(self: *Trie) !void {
+fn createRoot(self: *Trie, allocator: *Allocator) !void {
     if (self.root == null) {
-        const root = try self.allocator.create(Node);
+        const root = try allocator.create(Node);
         root.* = .{ .base = self };
         self.root = root;
         self.node_count += 1;
@@ -401,117 +396,117 @@ fn createRoot(self: *Trie) !void {
 
 test "Trie node count" {
     var gpa = testing.allocator;
-    var trie = Trie.init(gpa);
-    defer trie.deinit();
+    var trie: Trie = .{};
+    defer trie.deinit(gpa);
 
-    testing.expectEqual(trie.node_count, 0);
-    testing.expect(trie.root == null);
+    try testing.expectEqual(trie.node_count, 0);
+    try testing.expect(trie.root == null);
 
-    try trie.put(.{
+    try trie.put(gpa, .{
         .name = "_main",
         .vmaddr_offset = 0,
         .export_flags = 0,
     });
-    testing.expectEqual(trie.node_count, 2);
+    try testing.expectEqual(trie.node_count, 2);
 
     // Inserting the same node shouldn't update the trie.
-    try trie.put(.{
+    try trie.put(gpa, .{
         .name = "_main",
         .vmaddr_offset = 0,
         .export_flags = 0,
     });
-    testing.expectEqual(trie.node_count, 2);
+    try testing.expectEqual(trie.node_count, 2);
 
-    try trie.put(.{
+    try trie.put(gpa, .{
         .name = "__mh_execute_header",
         .vmaddr_offset = 0x1000,
         .export_flags = 0,
     });
-    testing.expectEqual(trie.node_count, 4);
+    try testing.expectEqual(trie.node_count, 4);
 
     // Inserting the same node shouldn't update the trie.
-    try trie.put(.{
+    try trie.put(gpa, .{
         .name = "__mh_execute_header",
         .vmaddr_offset = 0x1000,
         .export_flags = 0,
     });
-    testing.expectEqual(trie.node_count, 4);
-    try trie.put(.{
+    try testing.expectEqual(trie.node_count, 4);
+    try trie.put(gpa, .{
         .name = "_main",
         .vmaddr_offset = 0,
         .export_flags = 0,
     });
-    testing.expectEqual(trie.node_count, 4);
+    try testing.expectEqual(trie.node_count, 4);
 }
 
 test "Trie basic" {
     var gpa = testing.allocator;
-    var trie = Trie.init(gpa);
-    defer trie.deinit();
+    var trie: Trie = .{};
+    defer trie.deinit(gpa);
 
     // root --- _st ---> node
-    try trie.put(.{
+    try trie.put(gpa, .{
         .name = "_st",
         .vmaddr_offset = 0,
         .export_flags = 0,
     });
-    testing.expect(trie.root.?.edges.items.len == 1);
-    testing.expect(mem.eql(u8, trie.root.?.edges.items[0].label, "_st"));
+    try testing.expect(trie.root.?.edges.items.len == 1);
+    try testing.expect(mem.eql(u8, trie.root.?.edges.items[0].label, "_st"));
 
     {
         // root --- _st ---> node --- art ---> node
-        try trie.put(.{
+        try trie.put(gpa, .{
             .name = "_start",
             .vmaddr_offset = 0,
             .export_flags = 0,
         });
-        testing.expect(trie.root.?.edges.items.len == 1);
+        try testing.expect(trie.root.?.edges.items.len == 1);
 
         const nextEdge = &trie.root.?.edges.items[0];
-        testing.expect(mem.eql(u8, nextEdge.label, "_st"));
-        testing.expect(nextEdge.to.edges.items.len == 1);
-        testing.expect(mem.eql(u8, nextEdge.to.edges.items[0].label, "art"));
+        try testing.expect(mem.eql(u8, nextEdge.label, "_st"));
+        try testing.expect(nextEdge.to.edges.items.len == 1);
+        try testing.expect(mem.eql(u8, nextEdge.to.edges.items[0].label, "art"));
     }
     {
         // root --- _ ---> node --- st ---> node --- art ---> node
         //                  |
         //                  |   --- main ---> node
-        try trie.put(.{
+        try trie.put(gpa, .{
             .name = "_main",
             .vmaddr_offset = 0,
             .export_flags = 0,
         });
-        testing.expect(trie.root.?.edges.items.len == 1);
+        try testing.expect(trie.root.?.edges.items.len == 1);
 
         const nextEdge = &trie.root.?.edges.items[0];
-        testing.expect(mem.eql(u8, nextEdge.label, "_"));
-        testing.expect(nextEdge.to.edges.items.len == 2);
-        testing.expect(mem.eql(u8, nextEdge.to.edges.items[0].label, "st"));
-        testing.expect(mem.eql(u8, nextEdge.to.edges.items[1].label, "main"));
+        try testing.expect(mem.eql(u8, nextEdge.label, "_"));
+        try testing.expect(nextEdge.to.edges.items.len == 2);
+        try testing.expect(mem.eql(u8, nextEdge.to.edges.items[0].label, "st"));
+        try testing.expect(mem.eql(u8, nextEdge.to.edges.items[1].label, "main"));
 
         const nextNextEdge = &nextEdge.to.edges.items[0];
-        testing.expect(mem.eql(u8, nextNextEdge.to.edges.items[0].label, "art"));
+        try testing.expect(mem.eql(u8, nextNextEdge.to.edges.items[0].label, "art"));
     }
 }
 
 test "write Trie to a byte stream" {
     var gpa = testing.allocator;
-    var trie = Trie.init(gpa);
-    defer trie.deinit();
+    var trie: Trie = .{};
+    defer trie.deinit(gpa);
 
-    try trie.put(.{
+    try trie.put(gpa, .{
         .name = "__mh_execute_header",
         .vmaddr_offset = 0,
         .export_flags = 0,
     });
-    try trie.put(.{
+    try trie.put(gpa, .{
         .name = "_main",
         .vmaddr_offset = 0x1000,
         .export_flags = 0,
     });
 
-    try trie.finalize();
-    try trie.finalize(); // Finalizing mulitple times is a nop subsequently unless we add new nodes.
+    try trie.finalize(gpa);
+    try trie.finalize(gpa); // Finalizing mulitple times is a nop subsequently unless we add new nodes.
 
     const exp_buffer = [_]u8{
         0x0, 0x1, // node root
@@ -529,15 +524,15 @@ test "write Trie to a byte stream" {
     var stream = std.io.fixedBufferStream(buffer);
     {
         const nwritten = try trie.write(stream.writer());
-        testing.expect(nwritten == trie.size);
-        testing.expect(mem.eql(u8, buffer, &exp_buffer));
+        try testing.expect(nwritten == trie.size);
+        try testing.expect(mem.eql(u8, buffer, &exp_buffer));
     }
     {
         // Writing finalized trie again should yield the same result.
         try stream.seekTo(0);
         const nwritten = try trie.write(stream.writer());
-        testing.expect(nwritten == trie.size);
-        testing.expect(mem.eql(u8, buffer, &exp_buffer));
+        try testing.expect(nwritten == trie.size);
+        try testing.expect(mem.eql(u8, buffer, &exp_buffer));
     }
 }
 
@@ -556,19 +551,19 @@ test "parse Trie from byte stream" {
     };
 
     var in_stream = std.io.fixedBufferStream(&in_buffer);
-    var trie = Trie.init(gpa);
-    defer trie.deinit();
-    const nread = try trie.read(in_stream.reader());
+    var trie: Trie = .{};
+    defer trie.deinit(gpa);
+    const nread = try trie.read(gpa, in_stream.reader());
 
-    testing.expect(nread == in_buffer.len);
+    try testing.expect(nread == in_buffer.len);
 
-    try trie.finalize();
+    try trie.finalize(gpa);
 
     var out_buffer = try gpa.alloc(u8, trie.size);
     defer gpa.free(out_buffer);
     var out_stream = std.io.fixedBufferStream(out_buffer);
     const nwritten = try trie.write(out_stream.writer());
 
-    testing.expect(nwritten == trie.size);
-    testing.expect(mem.eql(u8, &in_buffer, out_buffer));
+    try testing.expect(nwritten == trie.size);
+    try testing.expect(mem.eql(u8, &in_buffer, out_buffer));
 }

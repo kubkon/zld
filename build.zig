@@ -19,7 +19,11 @@ pub fn build(b: *Builder) void {
     const exe = b.addExecutable("zld", "src/main.zig");
     exe.setTarget(target);
     exe.setBuildMode(mode);
-    exe.addBuildOption(bool, "enable_logging", enable_logging);
+
+    const exe_opts = b.addOptions();
+    exe.addOptions("build_options", exe_opts);
+    exe_opts.addOption(bool, "enable_logging", enable_logging);
+
     exe.install();
 
     const run_cmd = exe.run();
