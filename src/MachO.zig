@@ -219,7 +219,7 @@ pub fn flush(self: *MachO) !void {
 
     var lib_dirs = std.ArrayList([]const u8).init(arena);
     for (self.base.options.lib_dirs) |dir| {
-        if (try resolveSearchDir(arena, dir, self.base.options.sysroot)) |search_dir| {
+        if (try resolveSearchDir(arena, dir, self.base.options.syslibroot)) |search_dir| {
             try lib_dirs.append(search_dir);
         } else {
             log.warn("directory not found for '-L{s}'", .{dir});
@@ -253,7 +253,7 @@ pub fn flush(self: *MachO) !void {
     // frameworks
     var framework_dirs = std.ArrayList([]const u8).init(arena);
     for (self.base.options.framework_dirs) |dir| {
-        if (try resolveSearchDir(arena, dir, self.base.options.sysroot)) |search_dir| {
+        if (try resolveSearchDir(arena, dir, self.base.options.syslibroot)) |search_dir| {
             try framework_dirs.append(search_dir);
         } else {
             log.warn("directory not found for '-F{s}'", .{dir});
@@ -289,8 +289,8 @@ pub fn flush(self: *MachO) !void {
 
     try self.strtab.append(self.base.allocator, 0);
     try self.populateMetadata();
-    try self.parseInputFiles(self.base.options.positionals, self.base.options.sysroot);
-    try self.parseLibs(libs.items, self.base.options.sysroot);
+    try self.parseInputFiles(self.base.options.positionals, self.base.options.syslibroot);
+    try self.parseLibs(libs.items, self.base.options.syslibroot);
 
     for (self.objects.items) |_, object_id| {
         try self.resolveSymbolsInObject(@intCast(u16, object_id));
@@ -586,6 +586,11 @@ pub fn parseDylib(self: *MachO, path: []const u8, opts: DylibCreateOpts) ParseDy
             dylib.deinit(self.base.allocator);
             return false;
         }
+    }
+
+    if (self.dylibs_map.contains(dylib.id.?.name)) {
+        // Hmm, seems we already parsed this dylib.
+        return true;
     }
 
     const dylib_id = @intCast(u16, self.dylibs.items.len);

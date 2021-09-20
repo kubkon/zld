@@ -19,7 +19,18 @@ const usage =
     \\
     \\General Options:
     \\-h, --help                    Print this help and exit
+    \\-dynamic                      Perform dynamic linking
+    \\-dylib                        Create dynamic library
+    \\-shared                       Create dynamic library
+    \\-syslibroot [path]            Specify the syslibroot
+    \\-l[name]                      Specify library to link against
+    \\-L[path]                      Specify library search dir
+    \\-framework [name]             Specify framework to link against
+    \\-F[path]                      Specify framework search dir
+    \\-rpath [path]                 Specify runtime path
+    \\-stack                        Override default stack size
     \\-o [path]                     Specify output path for the final artifact
+    \\--debug-log [name]            Turn on debugging for [name] backend (requires zld to be compiled with -Dlog)
 ;
 
 fn printHelpAndExit() noreturn {
@@ -94,8 +105,14 @@ pub fn main() anyerror!void {
     var positionals = std.ArrayList([]const u8).init(arena);
     var libs = std.ArrayList([]const u8).init(arena);
     var lib_dirs = std.ArrayList([]const u8).init(arena);
-    var sysroot: ?[]const u8 = null;
+    var frameworks = std.ArrayList([]const u8).init(arena);
+    var framework_dirs = std.ArrayList([]const u8).init(arena);
+    var rpath_list = std.ArrayList([]const u8).init(arena);
     var out_path: ?[]const u8 = null;
+    var syslibroot: ?[]const u8 = null;
+    var stack: ?u64 = null;
+    var output_mode: ?Zld.OutputMode = null;
+    var dynamic: bool = false;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -112,7 +129,7 @@ pub fn main() anyerror!void {
         if (mem.eql(u8, arg, "-syslibroot")) {
             if (i + 1 >= args.len) fatal("Expected path after {s}", .{arg});
             i += 1;
-            sysroot = args[i];
+            syslibroot = args[i];
             continue;
         }
         if (mem.startsWith(u8, arg, "-l")) {
@@ -123,10 +140,40 @@ pub fn main() anyerror!void {
             try lib_dirs.append(args[i][2..]);
             continue;
         }
+        if (mem.eql(u8, arg, "-framework")) {
+            if (i + 1 >= args.len) fatal("Expected framework name after {s}", .{arg});
+            i += 1;
+            try frameworks.append(args[i]);
+            continue;
+        }
+        if (mem.startsWith(u8, arg, "-F")) {
+            try framework_dirs.append(args[i][2..]);
+            continue;
+        }
         if (mem.eql(u8, arg, "-o")) {
             if (i + 1 >= args.len) fatal("Expected output path after {s}", .{arg});
             i += 1;
             out_path = args[i];
+            continue;
+        }
+        if (mem.eql(u8, arg, "-stack")) {
+            if (i + 1 >= args.len) fatal("Expected stack size value after {s}", .{arg});
+            i += 1;
+            stack = try std.fmt.parseInt(u64, args[i], 10);
+            continue;
+        }
+        if (mem.eql(u8, arg, "-dylib") or mem.eql(u8, arg, "-shared")) {
+            output_mode = .lib;
+            continue;
+        }
+        if (mem.eql(u8, arg, "-dynamic")) {
+            dynamic = true;
+            continue;
+        }
+        if (mem.eql(u8, arg, "-rpath")) {
+            if (i + 1 >= args.len) fatal("Expected path after {s}", .{arg});
+            i += 1;
+            try rpath_list.append(args[i]);
             continue;
         }
         try positionals.append(arg);
@@ -145,17 +192,19 @@ pub fn main() anyerror!void {
     var zld = try Zld.openPath(gpa, .{
         .emit = .{
             .directory = std.fs.cwd(),
-            .sub_path = "a.out",
+            .sub_path = out_path orelse "a.out",
         },
+        .dynamic = dynamic,
         .target = target.toTarget(),
-        .output_mode = .exe,
-        .sysroot = sysroot,
+        .output_mode = output_mode orelse .exe,
+        .syslibroot = syslibroot,
         .positionals = positionals.items,
         .libs = libs.items,
-        .frameworks = &[0][]const u8{},
+        .frameworks = frameworks.items,
         .lib_dirs = lib_dirs.items,
-        .framework_dirs = &[0][]const u8{},
-        .rpath_list = &[0][]const u8{},
+        .framework_dirs = framework_dirs.items,
+        .rpath_list = rpath_list.items,
+        .stack_size_override = stack,
     });
     defer {
         zld.closeFiles();

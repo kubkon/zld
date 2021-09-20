@@ -34,9 +34,10 @@ pub const OutputMode = enum {
 
 pub const Options = struct {
     emit: Emit,
+    dynamic: bool,
     output_mode: OutputMode,
     target: std.Target,
-    sysroot: ?[]const u8,
+    syslibroot: ?[]const u8,
     positionals: []const []const u8,
     libs: []const []const u8,
     frameworks: []const []const u8,
