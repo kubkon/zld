@@ -4,35 +4,17 @@ Zig's lld drop-in replacement, called ZigLD or `zld` for short
 
 ---
 
-# This repo is a read-only archive
-I'm archiving this repo since the development has officially moved to [ziglang/zig]
-and will continue there. See [ziglang/zig#8282] for the PR upstreaming zld into Zig.
-I still plan on `zld` to be available as a drop-in replacement for LLD as well as an
-alternatives to system linkers, and the current plan is to have it exposed via
-Zig subcommand such as `zig ld`.
-
-[ziglang/zig]: https://github.com/ziglang/zig
-[ziglang/zig#8282]: https://github.com/ziglang/zig/pull/8282
-
----
-
 ## Quick start guide
-
-**Disclaimer**: this is a WIP so things naturally will not work as intended or at all.
-However, with a bit of luck, and some spare time, I reckon `zld` can handle most common
-cases (with a special focus on cross-compilation) relatively quickly.
 
 ### Building
 
-Make sure you have at least Zig 0.8.0 in your path. Ideally, you're using Zig compiled
-from source tracking the master branch.
+You will need latest Zig in your path. You can get nightly binaries from [here](https://ziglang.org/download/).
 
 ```
 $ zig build
 ```
 
-This will create the `zld` binary in `zig-cache/bin/zld`. You can then use it like you'd
-use a standard linker (bearing in mind that you can only one object file: see the [Roadmap](##Roadmap)).
+This will create the `zld` binary in `zig-out/bin/zld`. You can then use it like you'd use a standard linker.
 
 ```
 $ cat <<EOF > hello.c
@@ -51,7 +33,7 @@ $ clang -c hello.c
 $ zig cc -c hello.c
 
 # Link away!
-$ ./zig-cache/bin/zld hello.o -o hello
+$ ./zig-out/bin/zld hello.o -o hello
 
 # Run!
 $ ./hello
@@ -59,36 +41,35 @@ $ ./hello
 
 ### Testing
 
-If you'd like to run unit and end-to-end tests (when you'll decide you wanna contribute for instance),
-run the tests like you'd normally do for any other Zig project.
+If you'd like to run unit and end-to-end tests, run the tests like you'd normally do for any other Zig project.
 
 ```
 $ zig build test
 ```
 
-## Why `zld`?
+## Why did you decide to unarchive this repo?
 
-Excellent question! Lemme be perfectly frank with you. We're having immense problems with
-the `lld` on macOS. Actually, it just doesn't work as it should and it's nowhere near in terms of the
-functionality of its other counterparts on other platforms (e.g., linking Elf with `lld` just works...).
-The purpose of this project is to implement a drop-in replacement for `lld` in Zig. Mind you, I'm not trying
-to replace the WIP of an incremental Mach-O linker! On the contrary, this linker being a traditional
-linker will be used to augment the incremental linking in Zig, and if all goes well, we might
-use it to perform optimised linking in the Release mode.
+Excellent question! If you recall, back in March 2021, I've moved the development of the linker directly
+to upstream (Zig master), and since then, `zld` (or `zig ld` in fact) has been able to link a variety
+of projects targeting Mach-O file format. Now I am in the process of implementing a traditional ELF linker,
+so I've decided to repeat the process which in my humble opinion worked out pretty well for Mach-O. The idea
+is to start small by adding basic linking in a standalone repo (separate from Zig master), and when the linker 
+matures enough, upstream it into Zig. I think this approach makes sense and allows me to focus on the target
+file format only rather than try and tackle both a new file format and challenges of incremental linking.
 
-So that's that...
+Having said that, I've also decided to downstream all latest developments to the traditional Mach-O linker
+back into this repo, thus making `zld` a capable standalone linker when it comes to linking Mach-O. I'll strive
+to make it a direct replacement for any system linker, however, note that my priority will always be advancing
+of `zig ld` (which is not to say that I won't backport fixes from one to another). At the end of the day, the idea
+will be to swap in `zig ld` in place of any other linker.
 
-## Roadmap
+## Supported backends
 
-Currently, the entire roadmap is organised around macOS/Mach-O support. This is mainly because
-that's the binary format I'm most familiar with. Having said that, I'd welcome contributions
-adding some support to other widely used formats such as Elf, Coff, PE, etc.
+- [x] Mach-O
+- [ ] ELF (now in progress)
+- [ ] COFF/PE
 
-- [x] link `.o` generated from simple C program on macOS targeting `aarch64`
-- [x] link the same `.o` but targeting `x86_64`
-- [x] unhack, or refactor, for basic single `.o` linking
-- [x] link multiple `.o`
-- [x] link simple `.zig` (this includes TLV so should be interesting!)
-- [ ] converge with Zig's stage2
-- [ ] handle multiple dynamic libraries
-- [ ] handle frameworks
+## Contributing
+
+You are welcome to contribute to this repo, but ask you to see if you could also contribute the same fix
+to Zig too. This will make my life easier and you will have made many Zig developers happy!
