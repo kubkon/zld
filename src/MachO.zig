@@ -289,7 +289,7 @@ pub fn flush(self: *MachO) !void {
 
     try self.populateMetadata();
     try self.parseInputFiles(self.base.options.positionals, self.base.options.sysroot);
-    try self.parseLibs(self.base.options.libs, self.base.options.sysroot);
+    try self.parseLibs(libs.items, self.base.options.sysroot);
 
     for (self.objects.items) |_, object_id| {
         try self.resolveSymbolsInObject(@intCast(u16, object_id));
@@ -1356,8 +1356,6 @@ fn allocateAtoms(self: *MachO) !void {
         var sym_it = self.symbol_resolver.valueIterator();
         while (sym_it.next()) |resolv| {
             if (resolv.where != .global) continue;
-
-            assert(resolv.local_sym_index != 0);
             const local_sym = self.locals.items[resolv.local_sym_index];
             const sym = &self.globals.items[resolv.where_index];
             sym.n_value = local_sym.n_value;

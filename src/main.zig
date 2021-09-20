@@ -92,7 +92,11 @@ pub fn main() anyerror!void {
     }
 
     var positionals = std.ArrayList([]const u8).init(arena);
+    var libs = std.ArrayList([]const u8).init(arena);
+    var lib_dirs = std.ArrayList([]const u8).init(arena);
+    var sysroot: ?[]const u8 = null;
     var out_path: ?[]const u8 = null;
+
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
@@ -103,6 +107,20 @@ pub fn main() anyerror!void {
             if (i + 1 >= args.len) fatal("Expected parameter after {s}", .{arg});
             i += 1;
             try log_scopes.append(arena, args[i]);
+            continue;
+        }
+        if (mem.eql(u8, arg, "-syslibroot")) {
+            if (i + 1 >= args.len) fatal("Expected path after {s}", .{arg});
+            i += 1;
+            sysroot = args[i];
+            continue;
+        }
+        if (mem.startsWith(u8, arg, "-l")) {
+            try libs.append(args[i][2..]);
+            continue;
+        }
+        if (mem.startsWith(u8, arg, "-L")) {
+            try lib_dirs.append(args[i][2..]);
             continue;
         }
         if (mem.eql(u8, arg, "-o")) {
@@ -131,11 +149,11 @@ pub fn main() anyerror!void {
         },
         .target = target.toTarget(),
         .output_mode = .exe,
-        .sysroot = null,
+        .sysroot = sysroot,
         .positionals = positionals.items,
-        .libs = &[0][]const u8{},
+        .libs = libs.items,
         .frameworks = &[0][]const u8{},
-        .lib_dirs = &[0][]const u8{},
+        .lib_dirs = lib_dirs.items,
         .framework_dirs = &[0][]const u8{},
         .rpath_list = &[0][]const u8{},
     });
