@@ -1,7 +1,6 @@
 const Zld = @This();
 
 const std = @import("std");
-const build_options = @import("build_options");
 const fs = std.fs;
 const io = std.io;
 const mem = std.mem;
@@ -49,7 +48,7 @@ pub const Options = struct {
 
 pub fn openPath(allocator: *Allocator, options: Options) !*Zld {
     return switch (options.target.os.tag) {
-        .linux => error.TODOElfLinker,
+        .linux => &(try Elf.openPath(allocator, options)).base,
         .macos => &(try MachO.openPath(allocator, options)).base,
         .windows => error.TODOCoffLinker,
         else => error.Unimplemented,
@@ -58,6 +57,7 @@ pub fn openPath(allocator: *Allocator, options: Options) !*Zld {
 
 pub fn deinit(base: *Zld) void {
     return switch (base.tag) {
+        .elf => base.cast(Elf).?.deinit(),
         .macho => base.cast(MachO).?.deinit(),
         else => {},
     };
@@ -65,6 +65,7 @@ pub fn deinit(base: *Zld) void {
 
 pub fn closeFiles(base: *Zld) void {
     return switch (base.tag) {
+        .elf => base.cast(Elf).?.closeFiles(),
         .macho => base.cast(MachO).?.closeFiles(),
         else => {},
     };
@@ -72,7 +73,7 @@ pub fn closeFiles(base: *Zld) void {
 
 pub fn flush(base: *Zld) !void {
     return switch (base.tag) {
-        .elf => error.TODOElfLinker,
+        .elf => base.cast(Elf).?.flush(),
         .macho => base.cast(MachO).?.flush(),
         .coff => error.TODOCoffLinker,
     };
