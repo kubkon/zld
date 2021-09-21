@@ -176,7 +176,7 @@ pub fn openPath(allocator: *Allocator, options: Zld.Options) !*MachO {
     const file = try options.emit.directory.createFile(options.emit.sub_path, .{
         .truncate = true,
         .read = true,
-        .mode = 0o777,
+        .mode = if (std.Target.current.os.tag == .windows) 0 else 0o777,
     });
     errdefer file.close();
 
