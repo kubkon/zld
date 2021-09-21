@@ -13,7 +13,7 @@ const Zld = @import("Zld.zig");
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 const allocator = &gpa.allocator;
 // TODO fix memory leaks in std.dwarf
-// const allocator = &testing.allocator;
+// const allocator = testing.allocator;
 
 test "unit" {
     _ = @import("Zld.zig");
@@ -233,9 +233,27 @@ pub const TestContext = struct {
             });
             defer allocator.free(output_path);
 
-            var zld = Zld.init(allocator);
-            defer zld.deinit();
-            try zld.link(filenames.items, output_path);
+            var zld = try Zld.openPath(allocator, .{
+                .emit = .{
+                    .directory = std.fs.cwd(),
+                    .sub_path = output_path,
+                },
+                .dynamic = true,
+                .target = case.target.toTarget(),
+                .output_mode = .exe,
+                .syslibroot = null,
+                .positionals = filenames.items,
+                .libs = &[0][]const u8{},
+                .frameworks = &[0][]const u8{},
+                .lib_dirs = &[0][]const u8{},
+                .framework_dirs = &[0][]const u8{},
+                .rpath_list = &[0][]const u8{},
+            });
+            defer {
+                zld.closeFiles();
+                zld.deinit();
+            }
+            try zld.flush();
 
             var argv = std.ArrayList([]const u8).init(allocator);
             defer argv.deinit();
@@ -263,13 +281,13 @@ pub const TestContext = struct {
                         const pass = mem.eql(u8, result.stderr, err);
                         if (!pass)
                             log.err("STDERR: Test '{s}' failed\nExpected: '{s}'\nGot: '{s}'", .{ case.name, err, result.stderr });
-                        testing.expect(pass);
+                        try testing.expect(pass);
                     }
                     if (case.expected_out.stdout) |out| {
                         const pass = mem.eql(u8, result.stdout, out);
                         if (!pass)
                             log.err("STDOUT: Test '{s}' failed\nExpected: '{s}'\nGot: '{s}'", .{ case.name, out, result.stdout });
-                        testing.expect(pass);
+                        try testing.expect(pass);
                     }
                     continue;
                 }

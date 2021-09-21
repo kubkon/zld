@@ -246,18 +246,6 @@ pub fn main() anyerror!void {
 
     // TODO allow for non-native targets
     const target = std.Target.current;
-    if (std.Target.current.os.tag == .macos) {
-        if (syslibroot == null) {
-            syslibroot = try std.zig.system.darwin.getSDKPath(arena, target);
-        }
-        try libs.append("System");
-        try libs.append("c");
-        try lib_dirs.append("/usr/lib");
-        if (frameworks.items.len > 0) {
-            try framework_dirs.append("/System/Library/Frameworks");
-        }
-    }
-
     var zld = try Zld.openPath(gpa, .{
         .emit = .{
             .directory = std.fs.cwd(),

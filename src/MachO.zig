@@ -217,12 +217,23 @@ pub fn flush(self: *MachO) !void {
     defer arena_allocator.deinit();
     const arena = &arena_allocator.allocator;
 
+    const syslibroot = if (self.base.options.syslibroot) |syslibroot| syslibroot else blk: {
+        if (std.Target.current.os.tag != .macos) break :blk null;
+        const syslibroot = std.zig.system.darwin.getSDKPath(arena, self.base.options.target) catch null;
+        break :blk syslibroot;
+    };
+
     var lib_dirs = std.ArrayList([]const u8).init(arena);
     for (self.base.options.lib_dirs) |dir| {
-        if (try resolveSearchDir(arena, dir, self.base.options.syslibroot)) |search_dir| {
+        if (try resolveSearchDir(arena, dir, syslibroot)) |search_dir| {
             try lib_dirs.append(search_dir);
         } else {
             log.warn("directory not found for '-L{s}'", .{dir});
+        }
+    }
+    if (std.Target.current.os.tag == .macos) {
+        if (try resolveSearchDir(arena, "/usr/lib", syslibroot)) |search_dir| {
+            try lib_dirs.append(search_dir);
         }
     }
 
@@ -250,13 +261,30 @@ pub fn flush(self: *MachO) !void {
         }
     }
 
+    if (std.Target.current.os.tag == .macos) {
+        for (&[_][]const u8{ "System", "c" }) |lib_name| {
+            for (&[_][]const u8{ ".tbd", ".dylib", ".a" }) |ext| {
+                if (try resolveLib(arena, lib_dirs.items, lib_name, ext)) |full_path| {
+                    try libs.append(full_path);
+                    break;
+                }
+            }
+        }
+    }
+
     // frameworks
     var framework_dirs = std.ArrayList([]const u8).init(arena);
     for (self.base.options.framework_dirs) |dir| {
-        if (try resolveSearchDir(arena, dir, self.base.options.syslibroot)) |search_dir| {
+        if (try resolveSearchDir(arena, dir, syslibroot)) |search_dir| {
             try framework_dirs.append(search_dir);
         } else {
             log.warn("directory not found for '-F{s}'", .{dir});
+        }
+    }
+
+    if (std.Target.current.os.tag == .macos and self.base.options.frameworks.len > 0) {
+        if (try resolveSearchDir(arena, "/System/Library/Frameworks", syslibroot)) |search_dir| {
+            try framework_dirs.append(search_dir);
         }
     }
 
@@ -289,8 +317,8 @@ pub fn flush(self: *MachO) !void {
 
     try self.strtab.append(self.base.allocator, 0);
     try self.populateMetadata();
-    try self.parseInputFiles(self.base.options.positionals, self.base.options.syslibroot);
-    try self.parseLibs(libs.items, self.base.options.syslibroot);
+    try self.parseInputFiles(self.base.options.positionals, syslibroot);
+    try self.parseLibs(libs.items, syslibroot);
 
     for (self.objects.items) |_, object_id| {
         try self.resolveSymbolsInObject(@intCast(u16, object_id));

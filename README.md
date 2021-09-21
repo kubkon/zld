@@ -2,8 +2,6 @@
 
 Zig's lld drop-in replacement, called ZigLD or `zld` for short
 
----
-
 ## Quick start guide
 
 ### Building
