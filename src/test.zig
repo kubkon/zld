@@ -253,14 +253,16 @@ pub const TestContext = struct {
                 zld.closeFiles();
                 zld.deinit();
             }
-            try zld.flush();
 
             var argv = std.ArrayList([]const u8).init(allocator);
             defer argv.deinit();
 
             outer: {
                 switch (case.target.getExternalExecutor()) {
-                    .native => try argv.append("./a.out"),
+                    .native => {
+                        try zld.flush();
+                        try argv.append("./a.out");
+                    },
                     else => {
                         // TODO simply pass the test
                         break :outer;
