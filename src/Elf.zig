@@ -13,6 +13,17 @@ pub const base_tag = Zld.Tag.elf;
 
 base: Zld,
 
+shdrs: std.ArrayListUnmanaged(elf.Elf64_Shdr) = .{},
+phdrs: std.ArrayListUnmanaged(elf.Elf64_Phdr) = .{},
+
+shstrtab: std.ArrayListUnmanaged(u8) = .{},
+
+shstrtab_index: ?u16 = null,
+
+shdrs_offset: ?u64 = null,
+
+entry_address: ?u64 = null,
+
 pub fn openPath(allocator: *Allocator, options: Zld.Options) !*Elf {
     const file = try options.emit.directory.createFile(options.emit.sub_path, .{
         .truncate = true,
@@ -45,7 +56,9 @@ fn createEmpty(gpa: *Allocator, options: Zld.Options) !*Elf {
 }
 
 pub fn deinit(self: *Elf) void {
-    _ = self;
+    self.shstrtab.deinit(self.base.allocator);
+    self.shdrs.deinit(self.base.allocator);
+    self.phdrs.deinit(self.base.allocator);
 }
 
 pub fn closeFiles(self: *Elf) void {
@@ -99,17 +112,16 @@ fn writeHeader(self: *Elf) !void {
     mem.writeIntLittle(u32, buffer[index..][0..4], 1);
     index += 4;
 
-    // TODO entry point address
-    const e_entry: u64 = 0;
-    mem.writeIntLittle(u64, buffer[index..][0..8], e_entry);
+    // Entry point address
+    mem.writeIntLittle(u64, buffer[index..][0..8], self.entry_address orelse 0);
     index += 8;
 
-    // TODO Program headers offset
-    mem.writeIntLittle(u64, buffer[index..][0..8], 0);
+    // Program headers offset
+    mem.writeIntLittle(u64, buffer[index..][0..8], @sizeOf(elf.Elf64_Ehdr));
     index += 8;
 
-    // TODO Section headers offset
-    mem.writeIntLittle(u64, buffer[index..][0..8], 0);
+    // Section headers offset
+    mem.writeIntLittle(u64, buffer[index..][0..8], self.shdrs_offset orelse 0);
     index += 8;
 
     const e_flags = 0;
@@ -120,26 +132,26 @@ fn writeHeader(self: *Elf) !void {
     mem.writeIntLittle(u16, buffer[index..][0..2], e_ehsize);
     index += 2;
 
-    // TODO Program headers
+    // Program headers
     const e_phentsize: u16 = @sizeOf(elf.Elf64_Phdr);
     mem.writeIntLittle(u16, buffer[index..][0..2], e_phentsize);
     index += 2;
 
-    const e_phnum: u16 = 0;
+    const e_phnum = @intCast(u16, self.phdrs.items.len);
     mem.writeIntLittle(u16, buffer[index..][0..2], e_phnum);
     index += 2;
 
-    // TODO Section headers
+    // Section headers
     const e_shentsize: u16 = @sizeOf(elf.Elf64_Shdr);
     mem.writeIntLittle(u16, buffer[index..][0..2], e_shentsize);
     index += 2;
 
-    const e_shnum: u16 = 0;
+    const e_shnum = @intCast(u16, self.shdrs.items.len);
     mem.writeIntLittle(u16, buffer[index..][0..2], e_shnum);
     index += 2;
 
-    // TODO section header strtab
-    mem.writeIntLittle(u16, buffer[index..][0..2], 0);
+    // Section header strtab
+    mem.writeIntLittle(u16, buffer[index..][0..2], self.shstrtab_index orelse 0);
     index += 2;
 
     assert(index == e_ehsize);
