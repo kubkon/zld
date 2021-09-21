@@ -175,7 +175,7 @@ const pagezero_vmsize: u64 = 0x100000000;
 pub fn openPath(allocator: *Allocator, options: Zld.Options) !*MachO {
     const file = try options.emit.directory.createFile(options.emit.sub_path, .{
         .truncate = true,
-        .read = false,
+        .read = true,
         .mode = 0o777,
     });
     errdefer file.close();
@@ -362,6 +362,9 @@ pub fn flush(self: *MachO) !void {
 
     if (self.requires_adhoc_codesig) {
         try self.writeCodeSignature(); // code signing always comes last
+        const dir = self.base.options.emit.directory;
+        const path = self.base.options.emit.sub_path;
+        try dir.copyFile(path, dir, path, .{});
     }
 }
 
