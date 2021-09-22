@@ -23,8 +23,12 @@ phdrs: std.ArrayListUnmanaged(elf.Elf64_Phdr) = .{},
 
 shstrtab: std.ArrayListUnmanaged(u8) = .{},
 
+phdr_phdr_index: ?u16 = null,
+phdr_load_r_index: ?u16 = null,
+
 text_shdr_index: ?u16 = null,
 data_shdr_index: ?u16 = null,
+
 shstrtab_index: ?u16 = null,
 symtab_index: ?u16 = null,
 strtab_index: ?u16 = null,
@@ -32,7 +36,8 @@ strtab_index: ?u16 = null,
 shdrs_offset: u64 = 0,
 next_offset: u64 = 0,
 
-entry_address: ?u64 = null,
+base_addr: u64 = 0x200000,
+entry_addr: ?u64 = null,
 
 globals: std.StringArrayHashMapUnmanaged(SymbolWithLoc) = .{},
 
@@ -99,14 +104,42 @@ pub fn flush(self: *Elf) !void {
     }
 
     try self.logSymtab();
-
-    self.next_offset = @sizeOf(elf.Elf64_Ehdr);
+    try self.writePhdrs();
     try self.writeShStrtab();
     try self.writeShdrs();
     try self.writeHeader();
 }
 
 fn populateMetadata(self: *Elf) !void {
+    if (self.phdr_phdr_index == null) {
+        const offset = @sizeOf(elf.Elf64_Ehdr);
+        const size = @sizeOf(elf.Elf64_Phdr);
+        self.phdr_phdr_index = @intCast(u16, self.phdrs.items.len);
+        try self.phdrs.append(self.base.allocator, .{
+            .p_type = elf.PT_PHDR,
+            .p_flags = elf.PF_R,
+            .p_offset = offset,
+            .p_vaddr = offset + self.base_addr,
+            .p_paddr = offset + self.base_addr,
+            .p_filesz = size,
+            .p_memsz = size,
+            .p_align = @alignOf(elf.Elf64_Phdr),
+        });
+        self.next_offset = offset;
+    }
+    if (self.phdr_load_r_index == null) {
+        self.phdr_load_r_index = @intCast(u16, self.phdrs.items.len);
+        try self.phdrs.append(self.base.allocator, .{
+            .p_type = elf.PT_LOAD,
+            .p_flags = elf.PF_R,
+            .p_offset = 0,
+            .p_vaddr = self.base_addr,
+            .p_paddr = self.base_addr,
+            .p_filesz = @sizeOf(elf.Elf64_Ehdr),
+            .p_memsz = @sizeOf(elf.Elf64_Ehdr),
+            .p_align = 0x1000,
+        });
+    }
     if (self.shstrtab_index == null) {
         try self.shstrtab.append(self.base.allocator, 0);
         self.shstrtab_index = @intCast(u16, self.shdrs.items.len);
@@ -248,6 +281,24 @@ fn writeShStrtab(self: *Elf) !void {
     self.next_offset += shdr.sh_size;
 }
 
+fn writePhdrs(self: *Elf) !void {
+    const phdrs_size = self.phdrs.items.len * @sizeOf(elf.Elf64_Phdr);
+    {
+        const phdr = &self.phdrs.items[self.phdr_load_r_index.?];
+        phdr.p_filesz += phdrs_size;
+        phdr.p_memsz += phdrs_size;
+    }
+    log.debug("writing program headers from 0x{x} to 0x{x}", .{
+        self.next_offset,
+        self.next_offset + phdrs_size,
+    });
+    for (self.phdrs.items) |phdr| {
+        log.debug("  {}", .{phdr});
+    }
+    try self.base.file.pwriteAll(mem.sliceAsBytes(self.phdrs.items), self.next_offset);
+    self.next_offset += phdrs_size;
+}
+
 fn writeShdrs(self: *Elf) !void {
     const shdrs_size = self.shdrs.items.len * @sizeOf(elf.Elf64_Shdr);
     log.debug("writing section headers from 0x{x} to 0x{x}", .{
@@ -306,12 +357,11 @@ fn writeHeader(self: *Elf) !void {
     index += 4;
 
     // Entry point address
-    mem.writeIntLittle(u64, buffer[index..][0..8], self.entry_address orelse 0);
+    mem.writeIntLittle(u64, buffer[index..][0..8], self.entry_addr orelse 0);
     index += 8;
 
     // Program headers offset
-    // mem.writeIntLittle(u64, buffer[index..][0..8], @sizeOf(elf.Elf64_Ehdr));
-    mem.writeIntLittle(u64, buffer[index..][0..8], 0);
+    mem.writeIntLittle(u64, buffer[index..][0..8], @sizeOf(elf.Elf64_Ehdr));
     index += 8;
 
     // Section headers offset
