@@ -56,27 +56,28 @@ pub fn openPath(allocator: *Allocator, options: Options) !*Zld {
 }
 
 pub fn deinit(base: *Zld) void {
-    return switch (base.tag) {
+    switch (base.tag) {
         .elf => base.cast(Elf).?.deinit(),
         .macho => base.cast(MachO).?.deinit(),
         else => {},
-    };
+    }
 }
 
 pub fn closeFiles(base: *Zld) void {
-    return switch (base.tag) {
+    switch (base.tag) {
         .elf => base.cast(Elf).?.closeFiles(),
         .macho => base.cast(MachO).?.closeFiles(),
         else => {},
-    };
+    }
+    base.file.close();
 }
 
 pub fn flush(base: *Zld) !void {
-    return switch (base.tag) {
-        .elf => base.cast(Elf).?.flush(),
-        .macho => base.cast(MachO).?.flush(),
-        .coff => error.TODOCoffLinker,
-    };
+    switch (base.tag) {
+        .elf => try base.cast(Elf).?.flush(),
+        .macho => try base.cast(MachO).?.flush(),
+        .coff => return error.TODOCoffLinker,
+    }
 }
 
 fn cast(base: *Zld, comptime T: type) ?*T {
