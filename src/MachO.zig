@@ -6,7 +6,7 @@ const builtin = @import("builtin");
 const assert = std.debug.assert;
 const fmt = std.fmt;
 const fs = std.fs;
-const log = std.log.scoped(.zld);
+const log = std.log.scoped(.macho);
 const macho = std.macho;
 const math = std.math;
 const mem = std.mem;
@@ -317,7 +317,7 @@ pub fn flush(self: *MachO) !void {
 
     try self.strtab.append(self.base.allocator, 0);
     try self.populateMetadata();
-    try self.parseInputFiles(self.base.options.positionals, syslibroot);
+    try self.parsePositionals(self.base.options.positionals, syslibroot);
     try self.parseLibs(libs.items, syslibroot);
 
     for (self.objects.items) |_, object_id| {
@@ -619,7 +619,7 @@ pub fn parseDylib(self: *MachO, path: []const u8, opts: DylibCreateOpts) ParseDy
     return true;
 }
 
-fn parseInputFiles(self: *MachO, files: []const []const u8, syslibroot: ?[]const u8) !void {
+fn parsePositionals(self: *MachO, files: []const []const u8, syslibroot: ?[]const u8) !void {
     for (files) |file_name| {
         const full_path = full_path: {
             var buffer: [fs.MAX_PATH_BYTES]u8 = undefined;

@@ -1,6 +1,6 @@
 const std = @import("std");
 const builtin = std.builtin;
-const log = std.log.scoped(.archive);
+const log = std.log.scoped(.macho);
 const macho = std.macho;
 const mem = std.mem;
 const native_endian = builtin.target.cpu.arch.endian();

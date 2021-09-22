@@ -3,15 +3,19 @@ const Elf = @This();
 const std = @import("std");
 const assert = std.debug.assert;
 const elf = std.elf;
+const fs = std.fs;
 const log = std.log.scoped(.elf);
 const mem = std.mem;
 
 const Allocator = mem.Allocator;
+const Object = @import("Elf/Object.zig");
 const Zld = @import("Zld.zig");
 
 pub const base_tag = Zld.Tag.elf;
 
 base: Zld,
+
+objects: std.ArrayListUnmanaged(Object) = .{},
 
 shdrs: std.ArrayListUnmanaged(elf.Elf64_Shdr) = .{},
 phdrs: std.ArrayListUnmanaged(elf.Elf64_Phdr) = .{},
@@ -23,6 +27,8 @@ shstrtab_index: ?u16 = null,
 shdrs_offset: ?u64 = null,
 
 entry_address: ?u64 = null,
+
+globals: std.StringArrayHashMapUnmanaged(elf.Elf64_Sym) = .{},
 
 pub fn openPath(allocator: *Allocator, options: Zld.Options) !*Elf {
     const file = try options.emit.directory.createFile(options.emit.sub_path, .{
@@ -56,17 +62,69 @@ fn createEmpty(gpa: *Allocator, options: Zld.Options) !*Elf {
 }
 
 pub fn deinit(self: *Elf) void {
+    for (self.globals.keys()) |key| {
+        self.base.allocator.free(key);
+    }
+    self.globals.deinit(self.base.allocator);
     self.shstrtab.deinit(self.base.allocator);
     self.shdrs.deinit(self.base.allocator);
     self.phdrs.deinit(self.base.allocator);
+    self.objects.deinit(self.base.allocator);
 }
 
-pub fn closeFiles(self: *Elf) void {
-    _ = self;
+pub fn closeFiles(self: Elf) void {
+    for (self.objects.items) |object| {
+        object.file.close();
+    }
 }
 
 pub fn flush(self: *Elf) !void {
+    try self.parsePositionals(self.base.options.positionals);
     try self.writeHeader();
+}
+
+fn parsePositionals(self: *Elf, files: []const []const u8) !void {
+    for (files) |file_name| {
+        const full_path = full_path: {
+            var buffer: [fs.MAX_PATH_BYTES]u8 = undefined;
+            const path = try std.fs.realpath(file_name, &buffer);
+            break :full_path try self.base.allocator.dupe(u8, path);
+        };
+        defer self.base.allocator.free(full_path);
+        log.debug("parsing input file path '{s}'", .{full_path});
+
+        if (try self.parseObject(full_path)) continue;
+
+        log.warn("unknown filetype for positional input file: '{s}'", .{file_name});
+    }
+}
+
+fn parseObject(self: *Elf, path: []const u8) !bool {
+    const file = fs.cwd().openFile(path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => |e| return e,
+    };
+    errdefer file.close();
+
+    const name = try self.base.allocator.dupe(u8, path);
+    errdefer self.base.allocator.free(name);
+
+    var object = Object{
+        .name = name,
+        .file = file,
+    };
+
+    object.parse(self.base.allocator, self.base.options.target) catch |err| switch (err) {
+        error.EndOfStream, error.NotObject => {
+            object.deinit(self.base.allocator);
+            return false;
+        },
+        else => |e| return e,
+    };
+
+    try self.objects.append(self.base.allocator, object);
+
+    return true;
 }
 
 fn writeHeader(self: *Elf) !void {

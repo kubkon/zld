@@ -57,16 +57,16 @@ pub fn openPath(allocator: *Allocator, options: Options) !*Zld {
 
 pub fn deinit(base: *Zld) void {
     switch (base.tag) {
-        .elf => base.cast(Elf).?.deinit(),
-        .macho => base.cast(MachO).?.deinit(),
+        .elf => @fieldParentPtr(Elf, "base", base).deinit(),
+        .macho => @fieldParentPtr(MachO, "base", base).deinit(),
         else => {},
     }
 }
 
-pub fn closeFiles(base: *Zld) void {
+pub fn closeFiles(base: Zld) void {
     switch (base.tag) {
-        .elf => base.cast(Elf).?.closeFiles(),
-        .macho => base.cast(MachO).?.closeFiles(),
+        .elf => @fieldParentPtr(Elf, "base", &base).closeFiles(),
+        .macho => @fieldParentPtr(MachO, "base", &base).closeFiles(),
         else => {},
     }
     base.file.close();
@@ -74,15 +74,8 @@ pub fn closeFiles(base: *Zld) void {
 
 pub fn flush(base: *Zld) !void {
     switch (base.tag) {
-        .elf => try base.cast(Elf).?.flush(),
-        .macho => try base.cast(MachO).?.flush(),
+        .elf => try @fieldParentPtr(Elf, "base", base).flush(),
+        .macho => try @fieldParentPtr(MachO, "base", base).flush(),
         .coff => return error.TODOCoffLinker,
     }
-}
-
-fn cast(base: *Zld, comptime T: type) ?*T {
-    if (base.tag != T.base_tag) {
-        return null;
-    }
-    return @fieldParentPtr(T, "base", base);
 }
