@@ -23,9 +23,14 @@ phdrs: std.ArrayListUnmanaged(elf.Elf64_Phdr) = .{},
 
 shstrtab: std.ArrayListUnmanaged(u8) = .{},
 
+text_shdr_index: ?u16 = null,
+data_shdr_index: ?u16 = null,
 shstrtab_index: ?u16 = null,
+symtab_index: ?u16 = null,
+strtab_index: ?u16 = null,
 
-shdrs_offset: ?u64 = null,
+shdrs_offset: u64 = 0,
+next_offset: u64 = 0,
 
 entry_address: ?u64 = null,
 
@@ -45,9 +50,11 @@ pub fn openPath(allocator: *Allocator, options: Zld.Options) !*Elf {
     errdefer file.close();
 
     const self = try createEmpty(allocator, options);
-    errdefer self.base.destroy();
+    errdefer allocator.destroy(self);
 
     self.base.file = file;
+
+    try self.populateMetadata();
 
     return self;
 }
@@ -92,7 +99,30 @@ pub fn flush(self: *Elf) !void {
     }
 
     try self.logSymtab();
+
+    self.next_offset = @sizeOf(elf.Elf64_Ehdr);
+    try self.writeShStrtab();
+    try self.writeShdrs();
     try self.writeHeader();
+}
+
+fn populateMetadata(self: *Elf) !void {
+    if (self.shstrtab_index == null) {
+        try self.shstrtab.append(self.base.allocator, 0);
+        self.shstrtab_index = @intCast(u16, self.shdrs.items.len);
+        try self.shdrs.append(self.base.allocator, .{
+            .sh_name = try self.makeShString(".shstrtab"),
+            .sh_type = elf.SHT_STRTAB,
+            .sh_flags = 0,
+            .sh_addr = 0,
+            .sh_offset = 0,
+            .sh_size = 0,
+            .sh_link = 0,
+            .sh_info = 0,
+            .sh_addralign = 1,
+            .sh_entsize = 0,
+        });
+    }
 }
 
 fn parsePositionals(self: *Elf, files: []const []const u8) !void {
@@ -201,6 +231,37 @@ fn resolveSymbolsInObject(self: *Elf, object_id: u16) !void {
     }
 }
 
+fn writeShStrtab(self: *Elf) !void {
+    const shdr = &self.shdrs.items[self.shstrtab_index.?];
+    shdr.sh_offset = self.next_offset;
+    shdr.sh_size = mem.alignForwardGeneric(u64, self.shstrtab.items.len, @alignOf(u64));
+    log.debug("writing '{s}' contents from 0x{x} to 0x{x}", .{
+        self.getShString(shdr.sh_name),
+        shdr.sh_offset,
+        shdr.sh_offset + shdr.sh_size,
+    });
+    var buffer = try self.base.allocator.alloc(u8, shdr.sh_size);
+    defer self.base.allocator.free(buffer);
+    mem.copy(u8, buffer, self.shstrtab.items);
+    mem.set(u8, buffer[self.shstrtab.items.len..], 0);
+    try self.base.file.pwriteAll(buffer, shdr.sh_offset);
+    self.next_offset += shdr.sh_size;
+}
+
+fn writeShdrs(self: *Elf) !void {
+    const shdrs_size = self.shdrs.items.len * @sizeOf(elf.Elf64_Shdr);
+    log.debug("writing section headers from 0x{x} to 0x{x}", .{
+        self.next_offset,
+        self.next_offset + shdrs_size,
+    });
+    for (self.shdrs.items) |shdr| {
+        log.debug("  {}", .{shdr});
+    }
+    try self.base.file.pwriteAll(mem.sliceAsBytes(self.shdrs.items), self.next_offset);
+    self.shdrs_offset = self.next_offset;
+    self.next_offset += shdrs_size;
+}
+
 fn writeHeader(self: *Elf) !void {
     var buffer: [@sizeOf(elf.Elf64_Ehdr)]u8 = undefined;
 
@@ -249,11 +310,12 @@ fn writeHeader(self: *Elf) !void {
     index += 8;
 
     // Program headers offset
-    mem.writeIntLittle(u64, buffer[index..][0..8], @sizeOf(elf.Elf64_Ehdr));
+    // mem.writeIntLittle(u64, buffer[index..][0..8], @sizeOf(elf.Elf64_Ehdr));
+    mem.writeIntLittle(u64, buffer[index..][0..8], 0);
     index += 8;
 
     // Section headers offset
-    mem.writeIntLittle(u64, buffer[index..][0..8], self.shdrs_offset orelse 0);
+    mem.writeIntLittle(u64, buffer[index..][0..8], self.shdrs_offset);
     index += 8;
 
     const e_flags = 0;
@@ -289,6 +351,23 @@ fn writeHeader(self: *Elf) !void {
     assert(index == e_ehsize);
 
     try self.base.file.pwriteAll(buffer[0..index], 0);
+}
+
+fn makeShString(self: *Elf, bytes: []const u8) !u32 {
+    try self.shstrtab.ensureUnusedCapacity(self.base.allocator, bytes.len + 1);
+    const new_off = @intCast(u32, self.shstrtab.items.len);
+
+    log.debug("writing new string'{s}' in shstrtab at offset 0x{x}", .{ bytes, new_off });
+
+    self.shstrtab.appendSliceAssumeCapacity(bytes);
+    self.shstrtab.appendAssumeCapacity(0);
+
+    return new_off;
+}
+
+fn getShString(self: Elf, off: u32) []const u8 {
+    assert(off < self.shstrtab.items.len);
+    return mem.spanZ(@ptrCast([*:0]const u8, self.shstrtab.items.ptr + off));
 }
 
 fn logSymtab(self: Elf) !void {
