@@ -8,6 +8,7 @@ const log = std.log.scoped(.elf);
 const mem = std.mem;
 
 const Allocator = mem.Allocator;
+const Atom = @import("Elf/Atom.zig");
 const Object = @import("Elf/Object.zig");
 const Zld = @import("Zld.zig");
 
@@ -28,7 +29,12 @@ shdrs_offset: ?u64 = null,
 
 entry_address: ?u64 = null,
 
-globals: std.StringArrayHashMapUnmanaged(elf.Elf64_Sym) = .{},
+globals: std.StringArrayHashMapUnmanaged(SymbolWithLoc) = .{},
+
+pub const SymbolWithLoc = struct {
+    sym_index: u32,
+    file: u16,
+};
 
 pub fn openPath(allocator: *Allocator, options: Zld.Options) !*Elf {
     const file = try options.emit.directory.createFile(options.emit.sub_path, .{
@@ -80,6 +86,12 @@ pub fn closeFiles(self: Elf) void {
 
 pub fn flush(self: *Elf) !void {
     try self.parsePositionals(self.base.options.positionals);
+
+    for (self.objects.items) |_, object_id| {
+        try self.resolveSymbolsInObject(@intCast(u16, object_id));
+    }
+
+    try self.logSymtab();
     try self.writeHeader();
 }
 
@@ -125,6 +137,88 @@ fn parseObject(self: *Elf, path: []const u8) !bool {
     try self.objects.append(self.base.allocator, object);
 
     return true;
+}
+
+fn resolveSymbolsInObject(self: *Elf, object_id: u16) !void {
+    const object = self.objects.items[object_id];
+
+    log.debug("resolving symbols in {s}", .{object.name});
+
+    for (object.symtab.items) |sym, i| {
+        const sym_id = @intCast(u32, i);
+        const sym_name = object.getString(sym.st_name);
+        const st_bind = sym.st_info >> 4;
+
+        switch (st_bind) {
+            elf.STB_LOCAL => {
+                log.debug("  (symbol '{s}' local to object; skipping...)", .{sym_name});
+                continue;
+            },
+            elf.STB_WEAK => {
+                const name = try self.base.allocator.dupe(u8, sym_name);
+                const res = try self.globals.getOrPut(self.base.allocator, name);
+                defer if (res.found_existing) self.base.allocator.free(name);
+
+                if (!res.found_existing) {
+                    res.value_ptr.* = .{
+                        .sym_index = sym_id,
+                        .file = object_id,
+                    };
+                    continue;
+                }
+
+                const global = res.value_ptr.*;
+                const linked_obj = self.objects.items[global.file];
+                const linked_sym = linked_obj.symtab.items[global.sym_index];
+
+                if (linked_sym.st_shndx != elf.SHN_UNDEF) {
+                    log.debug("  (symbol '{s}' already defined; skipping...)", .{sym_name});
+                    continue;
+                }
+
+                res.value_ptr.* = .{
+                    .sym_index = sym_id,
+                    .file = object_id,
+                };
+            },
+            elf.STB_GLOBAL => {
+                const name = try self.base.allocator.dupe(u8, sym_name);
+                const res = try self.globals.getOrPut(self.base.allocator, name);
+                defer if (res.found_existing) self.base.allocator.free(name);
+
+                if (!res.found_existing) {
+                    res.value_ptr.* = .{
+                        .sym_index = sym_id,
+                        .file = object_id,
+                    };
+                    continue;
+                }
+
+                const global = res.value_ptr.*;
+                const linked_obj = self.objects.items[global.file];
+                const linked_sym = linked_obj.symtab.items[global.sym_index];
+                const linked_sym_bind = linked_sym.st_info >> 4;
+
+                if (linked_sym_bind == elf.STB_GLOBAL and linked_sym.st_shndx != elf.SHN_UNDEF) {
+                    log.err("symbol '{s}' defined multiple times", .{sym_name});
+                    log.err("  first definition in '{s}'", .{linked_obj.name});
+                    log.err("  next definition in '{s}'", .{object.name});
+                    return error.MultipleSymbolDefinitions;
+                }
+
+                res.value_ptr.* = .{
+                    .sym_index = sym_id,
+                    .file = object_id,
+                };
+            },
+            else => {
+                log.err("unhandled symbol binding type: {}", .{st_bind});
+                log.err("  symbol '{s}'", .{sym_name});
+                log.err("  first definition in '{s}'", .{object.name});
+                return error.UnhandledSymbolBindType;
+            },
+        }
+    }
 }
 
 fn writeHeader(self: *Elf) !void {
@@ -215,4 +309,22 @@ fn writeHeader(self: *Elf) !void {
     assert(index == e_ehsize);
 
     try self.base.file.pwriteAll(buffer[0..index], 0);
+}
+
+fn logSymtab(self: Elf) !void {
+    for (self.objects.items) |object| {
+        log.debug("locals in {s}", .{object.name});
+        for (object.symtab.items) |sym, i| {
+            const st_bind = sym.st_info >> 4;
+            if (st_bind != elf.STB_LOCAL) continue;
+            log.debug("  {d}: {s}: {}", .{ i, object.getString(sym.st_name), sym });
+        }
+    }
+
+    log.debug("globals:", .{});
+    for (self.globals.values()) |global| {
+        const object = self.objects.items[global.file];
+        const sym = object.symtab.items[global.sym_index];
+        log.debug("  {s}: {} => {}", .{ object.getString(sym.st_name), global, sym });
+    }
 }

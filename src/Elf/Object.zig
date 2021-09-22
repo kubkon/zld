@@ -8,6 +8,8 @@ const log = std.log.scoped(.elf);
 const mem = std.mem;
 
 const Allocator = mem.Allocator;
+const Atom = @import("Atom.zig");
+const Elf = @import("../Elf.zig");
 
 file: fs.File,
 name: []const u8,
@@ -72,11 +74,6 @@ pub fn parse(self: *Object, allocator: *Allocator, target: std.Target) !void {
 
     try self.parseShdrs(allocator, reader);
     try self.parseSymtab(allocator);
-
-    log.debug("symtab:", .{});
-    for (self.symtab.items) |sym, i| {
-        log.debug("  {d}: {s}: {}", .{ i, self.getString(sym.st_name), sym });
-    }
 }
 
 fn parseShdrs(self: *Object, allocator: *Allocator, reader: anytype) !void {
@@ -135,7 +132,13 @@ fn parseSymtab(self: *Object, allocator: *Allocator) !void {
     }
 }
 
-fn getString(self: Object, off: u32) []const u8 {
+pub fn parseIntoAtoms(self: *Object, allocator: *Allocator, elf_file: *Elf) !void {
+    _ = self;
+    _ = allocator;
+    _ = elf_file;
+}
+
+pub fn getString(self: Object, off: u32) []const u8 {
     assert(off < self.strtab.items.len);
     return mem.spanZ(@ptrCast([*:0]const u8, self.strtab.items.ptr + off));
 }
