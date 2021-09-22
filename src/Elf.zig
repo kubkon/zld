@@ -154,34 +154,7 @@ fn resolveSymbolsInObject(self: *Elf, object_id: u16) !void {
                 log.debug("  (symbol '{s}' local to object; skipping...)", .{sym_name});
                 continue;
             },
-            elf.STB_WEAK => {
-                const name = try self.base.allocator.dupe(u8, sym_name);
-                const res = try self.globals.getOrPut(self.base.allocator, name);
-                defer if (res.found_existing) self.base.allocator.free(name);
-
-                if (!res.found_existing) {
-                    res.value_ptr.* = .{
-                        .sym_index = sym_id,
-                        .file = object_id,
-                    };
-                    continue;
-                }
-
-                const global = res.value_ptr.*;
-                const linked_obj = self.objects.items[global.file];
-                const linked_sym = linked_obj.symtab.items[global.sym_index];
-
-                if (linked_sym.st_shndx != elf.SHN_UNDEF) {
-                    log.debug("  (symbol '{s}' already defined; skipping...)", .{sym_name});
-                    continue;
-                }
-
-                res.value_ptr.* = .{
-                    .sym_index = sym_id,
-                    .file = object_id,
-                };
-            },
-            elf.STB_GLOBAL => {
+            elf.STB_WEAK, elf.STB_GLOBAL => {
                 const name = try self.base.allocator.dupe(u8, sym_name);
                 const res = try self.globals.getOrPut(self.base.allocator, name);
                 defer if (res.found_existing) self.base.allocator.free(name);
@@ -199,11 +172,18 @@ fn resolveSymbolsInObject(self: *Elf, object_id: u16) !void {
                 const linked_sym = linked_obj.symtab.items[global.sym_index];
                 const linked_sym_bind = linked_sym.st_info >> 4;
 
-                if (linked_sym_bind == elf.STB_GLOBAL and linked_sym.st_shndx != elf.SHN_UNDEF) {
-                    log.err("symbol '{s}' defined multiple times", .{sym_name});
-                    log.err("  first definition in '{s}'", .{linked_obj.name});
-                    log.err("  next definition in '{s}'", .{object.name});
-                    return error.MultipleSymbolDefinitions;
+                if (linked_sym.st_shndx != elf.SHN_UNDEF) {
+                    if (linked_sym_bind == elf.STB_GLOBAL and st_bind == elf.STB_GLOBAL) {
+                        log.err("symbol '{s}' defined multiple times", .{sym_name});
+                        log.err("  first definition in '{s}'", .{linked_obj.name});
+                        log.err("  next definition in '{s}'", .{object.name});
+                        return error.MultipleSymbolDefinitions;
+                    }
+
+                    if (st_bind == elf.STB_WEAK) {
+                        log.debug("  (symbol '{s}' already defined; skipping...)", .{sym_name});
+                        continue;
+                    }
                 }
 
                 res.value_ptr.* = .{
