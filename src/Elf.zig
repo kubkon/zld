@@ -18,6 +18,7 @@ base: Zld,
 
 objects: std.ArrayListUnmanaged(Object) = .{},
 
+header: ?elf.Elf64_Ehdr = null,
 shdrs: std.ArrayListUnmanaged(elf.Elf64_Shdr) = .{},
 phdrs: std.ArrayListUnmanaged(elf.Elf64_Phdr) = .{},
 
@@ -35,11 +36,9 @@ symtab_sect_index: ?u16 = null,
 strtab_sect_index: ?u16 = null,
 shstrtab_sect_index: ?u16 = null,
 
-shdrs_offset: u64 = 0,
 next_offset: u64 = 0,
 
 base_addr: u64 = 0x200000,
-entry_addr: ?u64 = null,
 
 globals: std.StringArrayHashMapUnmanaged(SymbolWithLoc) = .{},
 
@@ -110,6 +109,12 @@ pub fn flush(self: *Elf) !void {
     try self.allocateLoadRSeg();
     try self.allocateLoadRESeg();
     try self.allocateLoadRWSeg();
+
+    {
+        // Set entrypoint address
+        self.header.?.e_entry = self.base_addr;
+    }
+
     try self.writePhdrs();
     try self.writeSymtab();
     try self.writeStrtab();
@@ -119,6 +124,40 @@ pub fn flush(self: *Elf) !void {
 }
 
 fn populateMetadata(self: *Elf) !void {
+    if (self.header == null) {
+        var header = elf.Elf64_Ehdr{
+            .e_ident = undefined,
+            .e_type = switch (self.base.options.output_mode) {
+                .exe => elf.ET.EXEC,
+                .lib => elf.ET.DYN,
+            },
+            .e_machine = self.base.options.target.cpu.arch.toElfMachine(),
+            .e_version = 1,
+            .e_entry = 0,
+            .e_phoff = @sizeOf(elf.Elf64_Ehdr),
+            .e_shoff = 0,
+            .e_flags = 0,
+            .e_ehsize = @sizeOf(elf.Elf64_Ehdr),
+            .e_phentsize = @sizeOf(elf.Elf64_Phdr),
+            .e_phnum = 0,
+            .e_shentsize = @sizeOf(elf.Elf64_Shdr),
+            .e_shnum = 0,
+            .e_shstrndx = 0,
+        };
+        // Magic
+        mem.copy(u8, header.e_ident[0..4], "\x7fELF");
+        // Class
+        header.e_ident[4] = elf.ELFCLASS64;
+        // Endianness
+        header.e_ident[5] = elf.ELFDATA2LSB;
+        // ELF version
+        header.e_ident[6] = 1;
+        // OS ABI, often set to 0 regardless of target platform
+        // ABI Version, possibly used by glibc but not by static executables
+        // padding
+        mem.set(u8, header.e_ident[7..][0..9], 0);
+        self.header = header;
+    }
     if (self.phdr_seg_index == null) {
         const offset = @sizeOf(elf.Elf64_Ehdr);
         const size = @sizeOf(elf.Elf64_Phdr);
@@ -221,6 +260,7 @@ fn populateMetadata(self: *Elf) !void {
             .sh_addralign = 1,
             .sh_entsize = 0,
         });
+        self.header.?.e_shstrndx = self.shstrtab_sect_index.?;
     }
 }
 
@@ -392,14 +432,9 @@ fn writeSymtab(self: *Elf) !void {
             if (st_type == elf.STT_SECTION) continue;
 
             const sym_name = object.getString(sym.st_name);
-            try symtab.append(.{
-                .st_name = try self.makeString(sym_name),
-                .st_info = sym.st_info,
-                .st_other = 0,
-                .st_shndx = 0,
-                .st_value = self.base_addr,
-                .st_size = 0,
-            });
+            var out_sym = sym;
+            out_sym.st_name = try self.makeString(sym_name);
+            try symtab.append(out_sym);
         }
     }
 
@@ -408,14 +443,10 @@ fn writeSymtab(self: *Elf) !void {
         const obj = self.objects.items[global.file];
         const sym = obj.symtab.items[global.sym_index];
         const sym_name = obj.getString(sym.st_name);
-        symtab.appendAssumeCapacity(.{
-            .st_name = try self.makeString(sym_name),
-            .st_info = sym.st_info,
-            .st_other = 0,
-            .st_shndx = 0,
-            .st_value = self.base_addr,
-            .st_size = 0,
-        });
+
+        var out_sym = sym;
+        out_sym.st_name = try self.makeString(sym_name);
+        symtab.appendAssumeCapacity(out_sym);
     }
 
     shdr.sh_offset = mem.alignForwardGeneric(u64, self.next_offset, @alignOf(elf.Elf64_Sym));
@@ -467,103 +498,21 @@ fn writePhdrs(self: *Elf) !void {
 
 fn writeShdrs(self: *Elf) !void {
     const shdrs_size = self.shdrs.items.len * @sizeOf(elf.Elf64_Shdr);
-    self.shdrs_offset = mem.alignForwardGeneric(u64, self.next_offset, @alignOf(elf.Elf64_Shdr));
+    const e_shoff = mem.alignForwardGeneric(u64, self.next_offset, @alignOf(elf.Elf64_Shdr));
     log.debug("writing section headers from 0x{x} to 0x{x}", .{
-        self.shdrs_offset,
-        self.shdrs_offset + shdrs_size,
+        e_shoff,
+        e_shoff + shdrs_size,
     });
-    try self.base.file.pwriteAll(mem.sliceAsBytes(self.shdrs.items), self.shdrs_offset);
-    self.next_offset = self.shdrs_offset + shdrs_size;
+    try self.base.file.pwriteAll(mem.sliceAsBytes(self.shdrs.items), e_shoff);
+    self.header.?.e_shoff = e_shoff;
+    self.next_offset = e_shoff + shdrs_size;
 }
 
 fn writeHeader(self: *Elf) !void {
-    var buffer: [@sizeOf(elf.Elf64_Ehdr)]u8 = undefined;
-
-    // Magic
-    var index: usize = 0;
-    buffer[0..4].* = "\x7fELF".*;
-    index += 4;
-
-    // Class
-    buffer[index] = elf.ELFCLASS64;
-    index += 1;
-
-    // Endianness
-    buffer[index] = elf.ELFDATA2LSB;
-    index += 1;
-
-    // ELF version
-    buffer[index] = 1;
-    index += 1;
-
-    // OS ABI, often set to 0 regardless of target platform
-    // ABI Version, possibly used by glibc but not by static executables
-    // padding
-    mem.set(u8, buffer[index..][0..9], 0);
-    index += 9;
-
-    assert(index == 16);
-
-    const elf_type = switch (self.base.options.output_mode) {
-        .exe => elf.ET.EXEC,
-        .lib => elf.ET.DYN,
-    };
-    mem.writeIntLittle(u16, buffer[index..][0..2], @enumToInt(elf_type));
-    index += 2;
-
-    const machine = self.base.options.target.cpu.arch.toElfMachine();
-    mem.writeIntLittle(u16, buffer[index..][0..2], @enumToInt(machine));
-    index += 2;
-
-    // ELF version, again
-    mem.writeIntLittle(u32, buffer[index..][0..4], 1);
-    index += 4;
-
-    // Entry point address
-    mem.writeIntLittle(u64, buffer[index..][0..8], self.entry_addr orelse 0);
-    index += 8;
-
-    // Program headers offset
-    mem.writeIntLittle(u64, buffer[index..][0..8], @sizeOf(elf.Elf64_Ehdr));
-    index += 8;
-
-    // Section headers offset
-    mem.writeIntLittle(u64, buffer[index..][0..8], self.shdrs_offset);
-    index += 8;
-
-    const e_flags = 0;
-    mem.writeIntLittle(u32, buffer[index..][0..4], e_flags);
-    index += 4;
-
-    const e_ehsize: u16 = @sizeOf(elf.Elf64_Ehdr);
-    mem.writeIntLittle(u16, buffer[index..][0..2], e_ehsize);
-    index += 2;
-
-    // Program headers
-    const e_phentsize: u16 = @sizeOf(elf.Elf64_Phdr);
-    mem.writeIntLittle(u16, buffer[index..][0..2], e_phentsize);
-    index += 2;
-
-    const e_phnum = @intCast(u16, self.phdrs.items.len);
-    mem.writeIntLittle(u16, buffer[index..][0..2], e_phnum);
-    index += 2;
-
-    // Section headers
-    const e_shentsize: u16 = @sizeOf(elf.Elf64_Shdr);
-    mem.writeIntLittle(u16, buffer[index..][0..2], e_shentsize);
-    index += 2;
-
-    const e_shnum = @intCast(u16, self.shdrs.items.len);
-    mem.writeIntLittle(u16, buffer[index..][0..2], e_shnum);
-    index += 2;
-
-    // Section header strtab
-    mem.writeIntLittle(u16, buffer[index..][0..2], self.shstrtab_sect_index orelse 0);
-    index += 2;
-
-    assert(index == e_ehsize);
-
-    try self.base.file.pwriteAll(buffer[0..index], 0);
+    self.header.?.e_phnum = @intCast(u16, self.phdrs.items.len);
+    self.header.?.e_shnum = @intCast(u16, self.shdrs.items.len);
+    log.debug("writing ELF header {} at 0x{x}", .{ self.header.?, 0 });
+    try self.base.file.pwriteAll(mem.asBytes(&self.header.?), 0);
 }
 
 fn makeShString(self: *Elf, bytes: []const u8) !u32 {
