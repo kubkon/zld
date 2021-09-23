@@ -23,15 +23,16 @@ phdrs: std.ArrayListUnmanaged(elf.Elf64_Phdr) = .{},
 
 shstrtab: std.ArrayListUnmanaged(u8) = .{},
 
-phdr_phdr_index: ?u16 = null,
-phdr_load_r_index: ?u16 = null,
+phdr_seg_index: ?u16 = null,
+load_r_seg_index: ?u16 = null,
+load_re_seg_index: ?u16 = null,
+load_rw_seg_index: ?u16 = null,
 
-text_shdr_index: ?u16 = null,
-data_shdr_index: ?u16 = null,
-
-shstrtab_index: ?u16 = null,
-symtab_index: ?u16 = null,
-strtab_index: ?u16 = null,
+text_sect_index: ?u16 = null,
+data_sect_index: ?u16 = null,
+symtab_sect_index: ?u16 = null,
+strtab_sect_index: ?u16 = null,
+shstrtab_sect_index: ?u16 = null,
 
 shdrs_offset: u64 = 0,
 next_offset: u64 = 0,
@@ -102,8 +103,11 @@ pub fn flush(self: *Elf) !void {
     for (self.objects.items) |_, object_id| {
         try self.resolveSymbolsInObject(@intCast(u16, object_id));
     }
+    // try self.logSymtab();
 
-    try self.logSymtab();
+    try self.allocateLoadRSeg();
+    try self.allocateLoadRESeg();
+    try self.allocateLoadRWSeg();
     try self.writePhdrs();
     try self.writeShStrtab();
     try self.writeShdrs();
@@ -111,10 +115,10 @@ pub fn flush(self: *Elf) !void {
 }
 
 fn populateMetadata(self: *Elf) !void {
-    if (self.phdr_phdr_index == null) {
+    if (self.phdr_seg_index == null) {
         const offset = @sizeOf(elf.Elf64_Ehdr);
         const size = @sizeOf(elf.Elf64_Phdr);
-        self.phdr_phdr_index = @intCast(u16, self.phdrs.items.len);
+        self.phdr_seg_index = @intCast(u16, self.phdrs.items.len);
         try self.phdrs.append(self.base.allocator, .{
             .p_type = elf.PT_PHDR,
             .p_flags = elf.PF_R,
@@ -127,8 +131,8 @@ fn populateMetadata(self: *Elf) !void {
         });
         self.next_offset = offset;
     }
-    if (self.phdr_load_r_index == null) {
-        self.phdr_load_r_index = @intCast(u16, self.phdrs.items.len);
+    if (self.load_r_seg_index == null) {
+        self.load_r_seg_index = @intCast(u16, self.phdrs.items.len);
         try self.phdrs.append(self.base.allocator, .{
             .p_type = elf.PT_LOAD,
             .p_flags = elf.PF_R,
@@ -140,9 +144,35 @@ fn populateMetadata(self: *Elf) !void {
             .p_align = 0x1000,
         });
     }
-    if (self.shstrtab_index == null) {
+    if (self.load_re_seg_index == null) {
+        self.load_re_seg_index = @intCast(u16, self.phdrs.items.len);
+        try self.phdrs.append(self.base.allocator, .{
+            .p_type = elf.PT_LOAD,
+            .p_flags = elf.PF_R | elf.PF_X,
+            .p_offset = 0,
+            .p_vaddr = self.base_addr,
+            .p_paddr = self.base_addr,
+            .p_filesz = 0,
+            .p_memsz = 0,
+            .p_align = 0x1000,
+        });
+    }
+    if (self.load_rw_seg_index == null) {
+        self.load_rw_seg_index = @intCast(u16, self.phdrs.items.len);
+        try self.phdrs.append(self.base.allocator, .{
+            .p_type = elf.PT_LOAD,
+            .p_flags = elf.PF_R | elf.PF_W,
+            .p_offset = 0,
+            .p_vaddr = self.base_addr,
+            .p_paddr = self.base_addr,
+            .p_filesz = 0,
+            .p_memsz = 0,
+            .p_align = 0x1000,
+        });
+    }
+    if (self.shstrtab_sect_index == null) {
         try self.shstrtab.append(self.base.allocator, 0);
-        self.shstrtab_index = @intCast(u16, self.shdrs.items.len);
+        self.shstrtab_sect_index = @intCast(u16, self.shdrs.items.len);
         try self.shdrs.append(self.base.allocator, .{
             .sh_name = try self.makeShString(".shstrtab"),
             .sh_type = elf.SHT_STRTAB,
@@ -264,8 +294,56 @@ fn resolveSymbolsInObject(self: *Elf, object_id: u16) !void {
     }
 }
 
+fn allocateLoadRSeg(self: *Elf) !void {
+    const phdr = &self.phdrs.items[self.load_r_seg_index.?];
+    const size = @sizeOf(elf.Elf64_Ehdr) + self.phdrs.items.len * @sizeOf(elf.Elf64_Phdr);
+    phdr.p_offset = 0;
+    phdr.p_vaddr = self.base_addr;
+    phdr.p_paddr = self.base_addr;
+    phdr.p_filesz = size;
+    phdr.p_memsz = size;
+    log.debug("allocating read-only LOAD segment from 0x{x} to 0x{x}", .{
+        phdr.p_vaddr,
+        phdr.p_vaddr + size,
+    });
+}
+
+fn allocateLoadRESeg(self: *Elf) !void {
+    const base_addr = blk: {
+        const phdr = self.phdrs.items[self.load_r_seg_index.?];
+        break :blk phdr.p_vaddr + phdr.p_memsz;
+    };
+    const phdr = &self.phdrs.items[self.load_re_seg_index.?];
+    phdr.p_offset = base_addr - self.base_addr;
+    phdr.p_vaddr = base_addr;
+    phdr.p_paddr = base_addr;
+    phdr.p_filesz = 0;
+    phdr.p_memsz = 0;
+    log.debug("allocating read-execute LOAD segment from 0x{x} to 0x{x}", .{
+        phdr.p_vaddr,
+        phdr.p_vaddr + phdr.p_memsz,
+    });
+}
+
+fn allocateLoadRWSeg(self: *Elf) !void {
+    const base_addr = blk: {
+        const phdr = self.phdrs.items[self.load_re_seg_index.?];
+        break :blk phdr.p_vaddr + phdr.p_memsz;
+    };
+    const phdr = &self.phdrs.items[self.load_rw_seg_index.?];
+    phdr.p_offset = base_addr - self.base_addr;
+    phdr.p_vaddr = base_addr;
+    phdr.p_paddr = base_addr;
+    phdr.p_filesz = 0;
+    phdr.p_memsz = 0;
+    log.debug("allocating read-write LOAD segment from 0x{x} to 0x{x}", .{
+        phdr.p_vaddr,
+        phdr.p_vaddr + phdr.p_memsz,
+    });
+}
+
 fn writeShStrtab(self: *Elf) !void {
-    const shdr = &self.shdrs.items[self.shstrtab_index.?];
+    const shdr = &self.shdrs.items[self.shstrtab_sect_index.?];
     shdr.sh_offset = self.next_offset;
     shdr.sh_size = mem.alignForwardGeneric(u64, self.shstrtab.items.len, @alignOf(u64));
     log.debug("writing '{s}' contents from 0x{x} to 0x{x}", .{
@@ -283,18 +361,10 @@ fn writeShStrtab(self: *Elf) !void {
 
 fn writePhdrs(self: *Elf) !void {
     const phdrs_size = self.phdrs.items.len * @sizeOf(elf.Elf64_Phdr);
-    {
-        const phdr = &self.phdrs.items[self.phdr_load_r_index.?];
-        phdr.p_filesz += phdrs_size;
-        phdr.p_memsz += phdrs_size;
-    }
     log.debug("writing program headers from 0x{x} to 0x{x}", .{
         self.next_offset,
         self.next_offset + phdrs_size,
     });
-    for (self.phdrs.items) |phdr| {
-        log.debug("  {}", .{phdr});
-    }
     try self.base.file.pwriteAll(mem.sliceAsBytes(self.phdrs.items), self.next_offset);
     self.next_offset += phdrs_size;
 }
@@ -305,9 +375,6 @@ fn writeShdrs(self: *Elf) !void {
         self.next_offset,
         self.next_offset + shdrs_size,
     });
-    for (self.shdrs.items) |shdr| {
-        log.debug("  {}", .{shdr});
-    }
     try self.base.file.pwriteAll(mem.sliceAsBytes(self.shdrs.items), self.next_offset);
     self.shdrs_offset = self.next_offset;
     self.next_offset += shdrs_size;
@@ -395,7 +462,7 @@ fn writeHeader(self: *Elf) !void {
     index += 2;
 
     // Section header strtab
-    mem.writeIntLittle(u16, buffer[index..][0..2], self.shstrtab_index orelse 0);
+    mem.writeIntLittle(u16, buffer[index..][0..2], self.shstrtab_sect_index orelse 0);
     index += 2;
 
     assert(index == e_ehsize);
