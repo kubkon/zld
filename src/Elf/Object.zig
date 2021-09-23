@@ -18,6 +18,9 @@ header: ?elf.Elf64_Ehdr = null,
 
 shdrs: std.ArrayListUnmanaged(elf.Elf64_Shdr) = .{},
 
+sections: std.ArrayListUnmanaged(u16) = .{},
+relocs: std.AutoHashMapUnmanaged(u16, u16) = .{},
+
 symtab: std.ArrayListUnmanaged(elf.Elf64_Sym) = .{},
 strtab: std.ArrayListUnmanaged(u8) = .{},
 
@@ -25,6 +28,8 @@ symtab_index: ?u16 = null,
 
 pub fn deinit(self: *Object, allocator: *Allocator) void {
     self.shdrs.deinit(allocator);
+    self.sections.deinit(allocator);
+    self.relocs.deinit(allocator);
     self.symtab.deinit(allocator);
     self.strtab.deinit(allocator);
     allocator.free(self.name);
@@ -87,8 +92,17 @@ fn parseShdrs(self: *Object, allocator: *Allocator, reader: anytype) !void {
     while (i < shnum) : (i += 1) {
         const shdr = try reader.readStruct(elf.Elf64_Shdr);
 
-        if (shdr.sh_type == elf.SHT_SYMTAB) {
-            self.symtab_index = i;
+        switch (shdr.sh_type) {
+            elf.SHT_SYMTAB => {
+                self.symtab_index = i;
+            },
+            elf.SHT_PROGBITS => {
+                try self.sections.append(allocator, i);
+            },
+            elf.SHT_REL, elf.SHT_RELA => {
+                try self.relocs.putNoClobber(allocator, @intCast(u16, shdr.sh_info), i);
+            },
+            else => {},
         }
 
         self.shdrs.appendAssumeCapacity(shdr);
@@ -133,9 +147,54 @@ fn parseSymtab(self: *Object, allocator: *Allocator) !void {
 }
 
 pub fn parseIntoAtoms(self: *Object, allocator: *Allocator, elf_file: *Elf) !void {
-    _ = self;
-    _ = allocator;
     _ = elf_file;
+    log.debug("parsing '{s}' into atoms", .{self.name});
+
+    for (self.sections.items) |ndx| {
+        const shdr = self.shdrs.items[ndx];
+        const shdr_name = self.getString(shdr.sh_name);
+
+        log.debug("  (parsing section '{s}')", .{shdr_name});
+
+        var code = try self.readShdrContents(allocator, ndx);
+        defer allocator.free(code);
+        log.debug("  code = {x}", .{std.fmt.fmtSliceHexLower(code)});
+
+        if (self.relocs.get(ndx)) |rel_ndx| {
+            const rel_shdr = self.shdrs.items[rel_ndx];
+            var raw_relocs = try self.readShdrContents(allocator, rel_ndx);
+            defer allocator.free(raw_relocs);
+
+            const nrelocs = @divExact(rel_shdr.sh_size, rel_shdr.sh_entsize);
+            var relocs = std.ArrayList(elf.Elf64_Rela).init(allocator);
+            defer relocs.deinit();
+            try relocs.ensureTotalCapacity(nrelocs);
+
+            var count: usize = 0;
+            while (count < nrelocs) : (count += 1) {
+                const bytes = raw_relocs[count * rel_shdr.sh_entsize ..][0..rel_shdr.sh_entsize];
+                const rel = blk: {
+                    if (rel_shdr.sh_type == elf.SHT_REL) {
+                        const rel = @ptrCast(*const elf.Elf64_Rel, @alignCast(@alignOf(elf.Elf64_Rel), bytes)).*;
+                        // TODO parse addend from the placeholder
+                        // const addend = mem.readIntLittle(i32, code[rel.r_offset..][0..4]);
+                        // break :blk .{
+                        //     .r_offset = rel.r_offset,
+                        //     .r_info = rel.r_info,
+                        //     .r_addend = addend,
+                        // };
+                        log.err("TODO need to parse addend embedded in the relocation placeholder for SHT_REL", .{});
+                        log.err("  for relocation {}", .{rel});
+                        return error.TODOParseAddendFromPlaceholder;
+                    }
+
+                    break :blk @ptrCast(*const elf.Elf64_Rela, @alignCast(@alignOf(elf.Elf64_Rela), bytes)).*;
+                };
+                log.debug("    rel = {}", .{rel});
+                relocs.appendAssumeCapacity(rel);
+            }
+        }
+    }
 }
 
 pub fn getString(self: Object, off: u32) []const u8 {
