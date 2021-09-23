@@ -21,6 +21,7 @@ objects: std.ArrayListUnmanaged(Object) = .{},
 shdrs: std.ArrayListUnmanaged(elf.Elf64_Shdr) = .{},
 phdrs: std.ArrayListUnmanaged(elf.Elf64_Phdr) = .{},
 
+strtab: std.ArrayListUnmanaged(u8) = .{},
 shstrtab: std.ArrayListUnmanaged(u8) = .{},
 
 phdr_seg_index: ?u16 = null,
@@ -86,6 +87,7 @@ pub fn deinit(self: *Elf) void {
     }
     self.globals.deinit(self.base.allocator);
     self.shstrtab.deinit(self.base.allocator);
+    self.strtab.deinit(self.base.allocator);
     self.shdrs.deinit(self.base.allocator);
     self.phdrs.deinit(self.base.allocator);
     self.objects.deinit(self.base.allocator);
@@ -109,6 +111,8 @@ pub fn flush(self: *Elf) !void {
     try self.allocateLoadRESeg();
     try self.allocateLoadRWSeg();
     try self.writePhdrs();
+    try self.writeSymtab();
+    try self.writeStrtab();
     try self.writeShStrtab();
     try self.writeShdrs();
     try self.writeHeader();
@@ -169,6 +173,38 @@ fn populateMetadata(self: *Elf) !void {
             .p_memsz = 0,
             .p_align = 0x1000,
         });
+    }
+    if (self.symtab_sect_index == null) {
+        self.symtab_sect_index = @intCast(u16, self.shdrs.items.len);
+        try self.shdrs.append(self.base.allocator, .{
+            .sh_name = try self.makeShString(".symtab"),
+            .sh_type = elf.SHT_SYMTAB,
+            .sh_flags = 0,
+            .sh_addr = 0,
+            .sh_offset = 0,
+            .sh_size = 0,
+            .sh_link = 0,
+            .sh_info = 0,
+            .sh_addralign = @alignOf(elf.Elf64_Sym),
+            .sh_entsize = @sizeOf(elf.Elf64_Sym),
+        });
+    }
+    if (self.strtab_sect_index == null) {
+        self.strtab_sect_index = @intCast(u16, self.shdrs.items.len);
+        try self.shdrs.append(self.base.allocator, .{
+            .sh_name = try self.makeShString(".strtab"),
+            .sh_type = elf.SHT_STRTAB,
+            .sh_flags = 0,
+            .sh_addr = 0,
+            .sh_offset = 0,
+            .sh_size = 0,
+            .sh_link = 0,
+            .sh_info = 0,
+            .sh_addralign = 1,
+            .sh_entsize = 0,
+        });
+        // Link .strtab with .symtab via sh_link field.
+        self.shdrs.items[self.symtab_sect_index.?].sh_link = self.strtab_sect_index.?;
     }
     if (self.shstrtab_sect_index == null) {
         try self.shstrtab.append(self.base.allocator, 0);
@@ -342,20 +378,80 @@ fn allocateLoadRWSeg(self: *Elf) !void {
     });
 }
 
-fn writeShStrtab(self: *Elf) !void {
-    const shdr = &self.shdrs.items[self.shstrtab_sect_index.?];
-    shdr.sh_offset = self.next_offset;
-    shdr.sh_size = mem.alignForwardGeneric(u64, self.shstrtab.items.len, @alignOf(u64));
+fn writeSymtab(self: *Elf) !void {
+    const shdr = &self.shdrs.items[self.symtab_sect_index.?];
+
+    var symtab = std.ArrayList(elf.Elf64_Sym).init(self.base.allocator);
+    defer symtab.deinit();
+
+    for (self.objects.items) |object| {
+        for (object.symtab.items) |sym| {
+            const st_bind = sym.st_info >> 4;
+            const st_type = sym.st_info & 0xf;
+            if (st_bind != elf.STB_LOCAL) continue;
+            if (st_type == elf.STT_SECTION) continue;
+
+            const sym_name = object.getString(sym.st_name);
+            try symtab.append(.{
+                .st_name = try self.makeString(sym_name),
+                .st_info = sym.st_info,
+                .st_other = 0,
+                .st_shndx = 0,
+                .st_value = self.base_addr,
+                .st_size = 0,
+            });
+        }
+    }
+
+    try symtab.ensureUnusedCapacity(self.globals.count());
+    for (self.globals.values()) |global| {
+        const obj = self.objects.items[global.file];
+        const sym = obj.symtab.items[global.sym_index];
+        const sym_name = obj.getString(sym.st_name);
+        symtab.appendAssumeCapacity(.{
+            .st_name = try self.makeString(sym_name),
+            .st_info = sym.st_info,
+            .st_other = 0,
+            .st_shndx = 0,
+            .st_value = self.base_addr,
+            .st_size = 0,
+        });
+    }
+
+    shdr.sh_offset = mem.alignForwardGeneric(u64, self.next_offset, @alignOf(elf.Elf64_Sym));
+    shdr.sh_size = symtab.items.len * @sizeOf(elf.Elf64_Sym);
     log.debug("writing '{s}' contents from 0x{x} to 0x{x}", .{
         self.getShString(shdr.sh_name),
         shdr.sh_offset,
         shdr.sh_offset + shdr.sh_size,
     });
-    var buffer = try self.base.allocator.alloc(u8, shdr.sh_size);
-    defer self.base.allocator.free(buffer);
-    mem.copy(u8, buffer, self.shstrtab.items);
-    mem.set(u8, buffer[self.shstrtab.items.len..], 0);
-    try self.base.file.pwriteAll(buffer, shdr.sh_offset);
+    try self.base.file.pwriteAll(mem.sliceAsBytes(symtab.items), shdr.sh_offset);
+    self.next_offset = shdr.sh_offset + shdr.sh_size;
+}
+
+fn writeStrtab(self: *Elf) !void {
+    const shdr = &self.shdrs.items[self.strtab_sect_index.?];
+    shdr.sh_offset = self.next_offset;
+    shdr.sh_size = self.strtab.items.len;
+    log.debug("writing '{s}' contents from 0x{x} to 0x{x}", .{
+        self.getShString(shdr.sh_name),
+        shdr.sh_offset,
+        shdr.sh_offset + shdr.sh_size,
+    });
+    try self.base.file.pwriteAll(self.strtab.items, shdr.sh_offset);
+    self.next_offset += shdr.sh_size;
+}
+
+fn writeShStrtab(self: *Elf) !void {
+    const shdr = &self.shdrs.items[self.shstrtab_sect_index.?];
+    shdr.sh_offset = self.next_offset;
+    shdr.sh_size = self.shstrtab.items.len;
+    log.debug("writing '{s}' contents from 0x{x} to 0x{x}", .{
+        self.getShString(shdr.sh_name),
+        shdr.sh_offset,
+        shdr.sh_offset + shdr.sh_size,
+    });
+    try self.base.file.pwriteAll(self.shstrtab.items, shdr.sh_offset);
     self.next_offset += shdr.sh_size;
 }
 
@@ -371,13 +467,13 @@ fn writePhdrs(self: *Elf) !void {
 
 fn writeShdrs(self: *Elf) !void {
     const shdrs_size = self.shdrs.items.len * @sizeOf(elf.Elf64_Shdr);
+    self.shdrs_offset = mem.alignForwardGeneric(u64, self.next_offset, @alignOf(elf.Elf64_Shdr));
     log.debug("writing section headers from 0x{x} to 0x{x}", .{
-        self.next_offset,
-        self.next_offset + shdrs_size,
+        self.shdrs_offset,
+        self.shdrs_offset + shdrs_size,
     });
-    try self.base.file.pwriteAll(mem.sliceAsBytes(self.shdrs.items), self.next_offset);
-    self.shdrs_offset = self.next_offset;
-    self.next_offset += shdrs_size;
+    try self.base.file.pwriteAll(mem.sliceAsBytes(self.shdrs.items), self.shdrs_offset);
+    self.next_offset = self.shdrs_offset + shdrs_size;
 }
 
 fn writeHeader(self: *Elf) !void {
@@ -473,18 +569,29 @@ fn writeHeader(self: *Elf) !void {
 fn makeShString(self: *Elf, bytes: []const u8) !u32 {
     try self.shstrtab.ensureUnusedCapacity(self.base.allocator, bytes.len + 1);
     const new_off = @intCast(u32, self.shstrtab.items.len);
-
-    log.debug("writing new string'{s}' in shstrtab at offset 0x{x}", .{ bytes, new_off });
-
+    log.debug("writing new string'{s}' in .shstrtab at offset 0x{x}", .{ bytes, new_off });
     self.shstrtab.appendSliceAssumeCapacity(bytes);
     self.shstrtab.appendAssumeCapacity(0);
-
     return new_off;
 }
 
 fn getShString(self: Elf, off: u32) []const u8 {
     assert(off < self.shstrtab.items.len);
     return mem.spanZ(@ptrCast([*:0]const u8, self.shstrtab.items.ptr + off));
+}
+
+fn makeString(self: *Elf, bytes: []const u8) !u32 {
+    try self.strtab.ensureUnusedCapacity(self.base.allocator, bytes.len + 1);
+    const new_off = @intCast(u32, self.strtab.items.len);
+    log.debug("writing new string'{s}' in .strtab at offset 0x{x}", .{ bytes, new_off });
+    self.strtab.appendSliceAssumeCapacity(bytes);
+    self.strtab.appendAssumeCapacity(0);
+    return new_off;
+}
+
+fn getString(self: Elf, off: u32) []const u8 {
+    assert(off < self.strtab.items.len);
+    return mem.spanZ(@ptrCast([*:0]const u8, self.strtab.items.ptr + off));
 }
 
 fn logSymtab(self: Elf) !void {
