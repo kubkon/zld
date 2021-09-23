@@ -9,6 +9,7 @@ const process = std.process;
 const Allocator = mem.Allocator;
 const Elf = @import("Elf.zig");
 const MachO = @import("MachO.zig");
+const Coff = @import("Coff.zig");
 
 tag: Tag,
 allocator: *Allocator,
@@ -50,7 +51,7 @@ pub fn openPath(allocator: *Allocator, options: Options) !*Zld {
     return switch (options.target.os.tag) {
         .linux => &(try Elf.openPath(allocator, options)).base,
         .macos => &(try MachO.openPath(allocator, options)).base,
-        .windows => error.TODOCoffLinker,
+        .windows => &(try Coff.openPath(allocator, options)).base,
         else => error.Unimplemented,
     };
 }
@@ -59,7 +60,7 @@ pub fn deinit(base: *Zld) void {
     switch (base.tag) {
         .elf => @fieldParentPtr(Elf, "base", base).deinit(),
         .macho => @fieldParentPtr(MachO, "base", base).deinit(),
-        else => {},
+        .coff => @fieldParentPtr(Coff, "base", base).deinit(),
     }
 }
 
@@ -67,7 +68,7 @@ pub fn closeFiles(base: Zld) void {
     switch (base.tag) {
         .elf => @fieldParentPtr(Elf, "base", &base).closeFiles(),
         .macho => @fieldParentPtr(MachO, "base", &base).closeFiles(),
-        else => {},
+        .coff => @fieldParentPtr(Coff, "base", &base).closeFiles(),
     }
     base.file.close();
 }
@@ -76,6 +77,6 @@ pub fn flush(base: *Zld) !void {
     switch (base.tag) {
         .elf => try @fieldParentPtr(Elf, "base", base).flush(),
         .macho => try @fieldParentPtr(MachO, "base", base).flush(),
-        .coff => return error.TODOCoffLinker,
+        .coff => try @fieldParentPtr(Coff, "base", base).flush(),
     }
 }
