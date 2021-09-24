@@ -146,19 +146,86 @@ fn parseSymtab(self: *Object, allocator: *Allocator) !void {
     }
 }
 
-pub fn parseIntoAtoms(self: *Object, allocator: *Allocator, elf_file: *Elf) !void {
+fn sortBySeniority(aliases: []u32, object: *Object) void {
+    const Context = struct {
+        object: *Object,
+    };
+    const SortFn = struct {
+        fn lessThan(ctx: Context, lhs: u32, rhs: u32) bool {
+            const lhs_sym = ctx.object.symtab.items[lhs];
+            const lhs_sym_bind = lhs_sym.st_info >> 4;
+            const rhs_sym = ctx.object.symtab.items[rhs];
+            const rhs_sym_bind = rhs_sym.st_info >> 4;
+
+            if (lhs_sym_bind == rhs_sym_bind) {
+                return false;
+            }
+            if (lhs_sym_bind == elf.STB_GLOBAL) {
+                return true;
+            } else if (lhs_sym_bind == elf.STB_WEAK and rhs_sym_bind != elf.STB_GLOBAL) {
+                return true;
+            }
+            return false;
+        }
+    };
+
+    std.sort.sort(u32, aliases, Context{ .object = object }, SortFn.lessThan);
+}
+
+pub fn parseIntoAtoms(self: *Object, allocator: *Allocator, object_id: u16, elf_file: *Elf) !void {
     _ = elf_file;
     log.debug("parsing '{s}' into atoms", .{self.name});
+
+    var symbols_by_shndx = std.AutoHashMap(u16, std.ArrayList(u32)).init(allocator);
+    defer symbols_by_shndx.deinit();
+    for (self.sections.items) |ndx| {
+        try symbols_by_shndx.putNoClobber(ndx, std.ArrayList(u32).init(allocator));
+    }
+    for (self.symtab.items) |sym, sym_id| {
+        if (sym.st_shndx == elf.SHN_UNDEF) continue;
+        if (elf.SHN_LORESERVE <= sym.st_shndx and sym.st_shndx < elf.SHN_HIRESERVE) continue;
+        const map = symbols_by_shndx.getPtr(sym.st_shndx).?;
+        try map.append(@intCast(u32, sym_id));
+    }
 
     for (self.sections.items) |ndx| {
         const shdr = self.shdrs.items[ndx];
         const shdr_name = self.getString(shdr.sh_name);
 
-        log.debug("  (parsing section '{s}')", .{shdr_name});
+        log.debug("  parsing section '{s}'", .{shdr_name});
+
+        const atom = try Atom.createEmpty(allocator);
+        errdefer {
+            atom.deinit(allocator);
+            allocator.destroy(atom);
+        }
+        atom.file = object_id;
+        atom.alignment = @intCast(u32, shdr.sh_addralign);
+
+        const syms = symbols_by_shndx.get(ndx).?;
+        if (syms.items.len == 0) {
+            log.debug("  TODO handle sections with no symbols: {s}", .{shdr_name});
+            continue;
+        }
+
+        for (syms.items) |sym_id| {
+            const sym = self.symtab.items[sym_id];
+            if (sym.st_value > 0) {
+                try atom.contained.append(allocator, .{
+                    .local_sym_index = sym_id,
+                    .offset = sym.st_value,
+                });
+            } else {
+                try atom.aliases.append(allocator, sym_id);
+            }
+        }
+
+        sortBySeniority(atom.aliases.items, self);
+        atom.local_sym_index = atom.aliases.swapRemove(0);
 
         var code = try self.readShdrContents(allocator, ndx);
         defer allocator.free(code);
-        log.debug("  code = {x}", .{std.fmt.fmtSliceHexLower(code)});
+        try atom.code.appendSlice(allocator, code);
 
         if (self.relocs.get(ndx)) |rel_ndx| {
             const rel_shdr = self.shdrs.items[rel_ndx];
@@ -166,9 +233,7 @@ pub fn parseIntoAtoms(self: *Object, allocator: *Allocator, elf_file: *Elf) !voi
             defer allocator.free(raw_relocs);
 
             const nrelocs = @divExact(rel_shdr.sh_size, rel_shdr.sh_entsize);
-            var relocs = std.ArrayList(elf.Elf64_Rela).init(allocator);
-            defer relocs.deinit();
-            try relocs.ensureTotalCapacity(nrelocs);
+            try atom.relocs.ensureTotalCapacity(allocator, nrelocs);
 
             var count: usize = 0;
             while (count < nrelocs) : (count += 1) {
@@ -190,10 +255,11 @@ pub fn parseIntoAtoms(self: *Object, allocator: *Allocator, elf_file: *Elf) !voi
 
                     break :blk @ptrCast(*const elf.Elf64_Rela, @alignCast(@alignOf(elf.Elf64_Rela), bytes)).*;
                 };
-                log.debug("    rel = {}", .{rel});
-                relocs.appendAssumeCapacity(rel);
+                atom.relocs.appendAssumeCapacity(rel);
             }
         }
+
+        log.debug("{}\n", .{atom});
     }
 }
 

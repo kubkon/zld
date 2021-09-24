@@ -106,8 +106,8 @@ pub fn flush(self: *Elf) !void {
     }
     // try self.logSymtab();
 
-    for (self.objects.items) |*object| {
-        try object.parseIntoAtoms(self.base.allocator, self);
+    for (self.objects.items) |*object, object_id| {
+        try object.parseIntoAtoms(self.base.allocator, @intCast(u16, object_id), self);
     }
 
     try self.allocateLoadRSeg();
