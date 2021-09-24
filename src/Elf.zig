@@ -114,7 +114,6 @@ pub fn flush(self: *Elf) !void {
     for (self.objects.items) |_, object_id| {
         try self.resolveSymbolsInObject(@intCast(u16, object_id));
     }
-    // try self.logSymtab();
 
     for (self.objects.items) |*object, object_id| {
         try object.parseIntoAtoms(self.base.allocator, @intCast(u16, object_id), self);
@@ -123,12 +122,11 @@ pub fn flush(self: *Elf) !void {
     try self.allocateLoadRSeg();
     try self.allocateLoadRESeg();
     try self.allocateLoadRWSeg();
+    try self.allocateAtoms();
 
-    {
-        // Set entrypoint address
-        self.header.?.e_entry = self.base_addr;
-    }
+    try self.logSymtab();
 
+    try self.setEntryPoint();
     try self.writePhdrs();
     try self.writeSymtab();
     try self.writeStrtab();
@@ -545,6 +543,68 @@ fn allocateLoadRWSeg(self: *Elf) !void {
     log.debug("allocating read-write LOAD segment:", .{});
     log.debug("  in file from 0x{x} to 0x{x}", .{ phdr.p_offset, phdr.p_offset + phdr.p_filesz });
     log.debug("  in memory from 0x{x} to 0x{x}", .{ phdr.p_vaddr, phdr.p_vaddr + phdr.p_memsz });
+}
+
+fn allocateAtoms(self: *Elf) !void {
+    var it = self.atoms.iterator();
+    while (it.next()) |entry| {
+        const shdr_ndx = entry.key_ptr.*;
+        const shdr = self.shdrs.items[shdr_ndx];
+        var atom: *Atom = entry.value_ptr.*;
+
+        // Find the first atom
+        while (atom.prev) |prev| {
+            atom = prev;
+        }
+
+        log.debug("allocating atoms in '{s}' section", .{self.getShString(shdr.sh_name)});
+
+        var base_addr: u64 = shdr.sh_addr;
+        while (true) {
+            base_addr = mem.alignForwardGeneric(u64, base_addr, atom.alignment);
+
+            const object = &self.objects.items[atom.file];
+            const sym = &object.symtab.items[atom.local_sym_index];
+            sym.st_value = base_addr;
+            sym.st_shndx = shdr_ndx;
+            sym.st_size = atom.size;
+
+            log.debug("  atom '{s}' allocated from 0x{x} to 0x{x}", .{
+                object.getString(sym.st_name),
+                base_addr,
+                base_addr + atom.size,
+            });
+
+            // Update each alias (if any)
+            for (atom.aliases.items) |index| {
+                const alias_sym = &object.symtab.items[index];
+                alias_sym.st_value = base_addr;
+                alias_sym.st_shndx = shdr_ndx;
+                alias_sym.st_size = atom.size;
+            }
+
+            // Update each symbol contained within the TextBlock
+            for (atom.contained.items) |sym_at_off| {
+                const contained_sym = &object.symtab.items[sym_at_off.local_sym_index];
+                contained_sym.st_value = base_addr + sym_at_off.offset;
+                contained_sym.st_shndx = shdr_ndx;
+            }
+
+            base_addr += atom.size;
+
+            if (atom.next) |next| {
+                atom = next;
+            } else break;
+        }
+    }
+}
+
+fn setEntryPoint(self: *Elf) !void {
+    if (self.base.options.output_mode != .exe) return;
+    const global = self.globals.get("_start") orelse return error.DefaultEntryPointNotFound;
+    const object = self.objects.items[global.file];
+    const sym = object.symtab.items[global.sym_index];
+    self.header.?.e_entry = sym.st_value;
 }
 
 fn writeSymtab(self: *Elf) !void {
