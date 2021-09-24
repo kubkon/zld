@@ -126,6 +126,7 @@ pub fn flush(self: *Elf) !void {
 
     try self.logSymtab();
 
+    try self.writeAtoms();
     try self.setEntryPoint();
     try self.writePhdrs();
     try self.writeSymtab();
@@ -599,6 +600,46 @@ fn allocateAtoms(self: *Elf) !void {
     }
 }
 
+fn writeAtoms(self: *Elf) !void {
+    var it = self.atoms.iterator();
+    while (it.next()) |entry| {
+        const shdr_ndx = entry.key_ptr.*;
+        const shdr = self.shdrs.items[shdr_ndx];
+        var atom: *Atom = entry.value_ptr.*;
+
+        // Find the first atom
+        while (atom.prev) |prev| {
+            atom = prev;
+        }
+
+        log.debug("writing atoms in '{s}' section", .{self.getShString(shdr.sh_name)});
+
+        var buffer = try self.base.allocator.alloc(u8, shdr.sh_size);
+        defer self.base.allocator.free(buffer);
+        mem.set(u8, buffer, 0);
+
+        while (true) {
+            const object = self.objects.items[atom.file];
+            const sym = object.symtab.items[atom.local_sym_index];
+            const off = sym.st_value - shdr.sh_addr;
+
+            log.debug("  writing atom '{s}' at offset 0x{x}", .{ object.getString(sym.st_name), shdr.sh_offset + off });
+
+            mem.copy(u8, buffer[off..][0..atom.size], atom.code.items);
+
+            if (atom.next) |next| {
+                atom = next;
+            } else break;
+        }
+
+        try self.base.file.pwriteAll(buffer, shdr.sh_offset);
+
+        if (shdr.sh_offset + buffer.len > self.next_offset) {
+            self.next_offset = shdr.sh_offset + buffer.len;
+        }
+    }
+}
+
 fn setEntryPoint(self: *Elf) !void {
     if (self.base.options.output_mode != .exe) return;
     const global = self.globals.get("_start") orelse return error.DefaultEntryPointNotFound;
@@ -678,11 +719,10 @@ fn writeShStrtab(self: *Elf) !void {
 fn writePhdrs(self: *Elf) !void {
     const phdrs_size = self.phdrs.items.len * @sizeOf(elf.Elf64_Phdr);
     log.debug("writing program headers from 0x{x} to 0x{x}", .{
-        self.next_offset,
-        self.next_offset + phdrs_size,
+        self.header.?.e_phoff,
+        self.header.?.e_phoff + phdrs_size,
     });
-    try self.base.file.pwriteAll(mem.sliceAsBytes(self.phdrs.items), self.next_offset);
-    self.next_offset += phdrs_size;
+    try self.base.file.pwriteAll(mem.sliceAsBytes(self.phdrs.items), self.header.?.e_phoff);
 }
 
 fn writeShdrs(self: *Elf) !void {
