@@ -687,7 +687,12 @@ fn writeAtoms(self: *Elf) !void {
             const sym = object.symtab.items[atom.local_sym_index];
             const off = sym.st_value - shdr.sh_addr;
 
-            log.debug("  writing atom '{s}' at offset 0x{x}", .{ object.getString(sym.st_name), shdr.sh_offset + off });
+            try atom.resolveRelocs(self);
+
+            log.debug("writing atom '{s}' at offset 0x{x}", .{
+                object.getString(sym.st_name),
+                shdr.sh_offset + off,
+            });
 
             mem.copy(u8, buffer[off..][0..atom.size], atom.code.items);
 

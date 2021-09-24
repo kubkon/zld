@@ -2,9 +2,11 @@ const Atom = @This();
 
 const std = @import("std");
 const elf = std.elf;
+const log = std.log.scoped(.elf);
 const mem = std.mem;
 
 const Allocator = mem.Allocator;
+const Elf = @import("../Elf.zig");
 
 /// Each decl always gets a local symbol with the fully qualified name.
 /// The vaddr and size are found here directly.
@@ -91,4 +93,42 @@ pub fn format(self: Atom, comptime fmt: []const u8, options: std.fmt.FormatOptio
     try std.fmt.format(writer, "  .alignment = {d}, ", .{self.alignment});
     try std.fmt.format(writer, "  .relocs = {any}, ", .{self.relocs.items});
     try std.fmt.format(writer, "}}", .{});
+}
+
+pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
+    const object = elf_file.objects.items[self.file];
+    const sym = object.symtab.items[self.local_sym_index];
+
+    log.debug("resolving relocs in atom '{s}'", .{object.getString(sym.st_name)});
+
+    for (self.relocs.items) |rel| {
+        const r_sym = rel.r_info >> 32;
+        const r_type = @truncate(u32, rel.r_info);
+        switch (r_type) {
+            elf.R_X86_64_NONE => {},
+            elf.R_X86_64_64 => {
+                // Direct 64bit
+                const tsym = object.symtab.items[r_sym];
+                log.debug("R_X86_64_64: target address 0x{x}", .{tsym.st_value});
+                mem.writeIntLittle(u64, self.code.items[rel.r_offset..][0..8], tsym.st_value);
+            },
+            elf.R_X86_64_PC32 => {
+                // PC relative 32 bit signed
+                const source = @intCast(i64, sym.st_value + rel.r_offset);
+                const tsym = object.symtab.items[r_sym];
+                const target = @intCast(i64, tsym.st_value);
+                const displacement = @intCast(i32, target - source + rel.r_addend);
+                log.debug("R_X86_64_PC32: source addr 0x{x}, target addr 0x{x}, displacement 0x{x}", .{
+                    source,
+                    target,
+                    displacement,
+                });
+                mem.writeIntLittle(i32, self.code.items[rel.r_offset..][0..4], displacement);
+            },
+            else => {
+                log.debug("TODO unhandled relocation type: {d}", .{r_type});
+                log.debug("  {}", .{rel});
+            },
+        }
+    }
 }
