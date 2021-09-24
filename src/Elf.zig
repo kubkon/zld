@@ -119,6 +119,8 @@ pub fn flush(self: *Elf) !void {
         try object.parseIntoAtoms(self.base.allocator, @intCast(u16, object_id), self);
     }
 
+    // TODO need to sort sections so that .symtab, .strtab, .shstrtab are last
+
     try self.allocateLoadRSeg();
     try self.allocateLoadRESeg();
     try self.allocateLoadRWSeg();
@@ -204,6 +206,21 @@ fn populateMetadata(self: *Elf) !void {
             phdr.p_memsz += @sizeOf(elf.Elf64_Phdr);
         }
     }
+    if (self.rodata_sect_index == null) {
+        self.rodata_sect_index = @intCast(u16, self.shdrs.items.len);
+        try self.shdrs.append(self.base.allocator, .{
+            .sh_name = try self.makeShString(".rodata"),
+            .sh_type = elf.SHT_PROGBITS,
+            .sh_flags = elf.SHF_MERGE | elf.SHF_STRINGS | elf.SHF_ALLOC,
+            .sh_addr = 0,
+            .sh_offset = 0,
+            .sh_size = 0,
+            .sh_link = 0,
+            .sh_info = 0,
+            .sh_addralign = 0,
+            .sh_entsize = 0,
+        });
+    }
     if (self.load_re_seg_index == null) {
         self.load_re_seg_index = @intCast(u16, self.phdrs.items.len);
         try self.phdrs.append(self.base.allocator, .{
@@ -222,6 +239,21 @@ fn populateMetadata(self: *Elf) !void {
             phdr.p_memsz += @sizeOf(elf.Elf64_Phdr);
         }
     }
+    if (self.text_sect_index == null) {
+        self.text_sect_index = @intCast(u16, self.shdrs.items.len);
+        try self.shdrs.append(self.base.allocator, .{
+            .sh_name = try self.makeShString(".text"),
+            .sh_type = elf.SHT_PROGBITS,
+            .sh_flags = elf.SHF_EXECINSTR | elf.SHF_ALLOC,
+            .sh_addr = 0,
+            .sh_offset = 0,
+            .sh_size = 0,
+            .sh_link = 0,
+            .sh_info = 0,
+            .sh_addralign = 0,
+            .sh_entsize = 0,
+        });
+    }
     if (self.load_rw_seg_index == null) {
         self.load_rw_seg_index = @intCast(u16, self.phdrs.items.len);
         try self.phdrs.append(self.base.allocator, .{
@@ -239,6 +271,21 @@ fn populateMetadata(self: *Elf) !void {
             phdr.p_filesz += @sizeOf(elf.Elf64_Phdr);
             phdr.p_memsz += @sizeOf(elf.Elf64_Phdr);
         }
+    }
+    if (self.data_sect_index == null) {
+        self.data_sect_index = @intCast(u16, self.shdrs.items.len);
+        try self.shdrs.append(self.base.allocator, .{
+            .sh_name = try self.makeShString(".data"),
+            .sh_type = elf.SHT_PROGBITS,
+            .sh_flags = elf.SHF_WRITE | elf.SHF_ALLOC,
+            .sh_addr = 0,
+            .sh_offset = 0,
+            .sh_size = 0,
+            .sh_link = 0,
+            .sh_info = 0,
+            .sh_addralign = 0,
+            .sh_entsize = 0,
+        });
     }
     if (self.symtab_sect_index == null) {
         self.symtab_sect_index = @intCast(u16, self.shdrs.items.len);
