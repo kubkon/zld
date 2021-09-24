@@ -184,7 +184,7 @@ pub fn parseIntoAtoms(self: *Object, allocator: *Allocator, object_id: u16, elf_
     for (self.symtab.items) |sym, sym_id| {
         if (sym.st_shndx == elf.SHN_UNDEF) continue;
         if (elf.SHN_LORESERVE <= sym.st_shndx and sym.st_shndx < elf.SHN_HIRESERVE) continue;
-        const map = symbols_by_shndx.getPtr(sym.st_shndx).?;
+        const map = symbols_by_shndx.getPtr(sym.st_shndx) orelse continue;
         try map.append(@intCast(u32, sym_id));
     }
 

@@ -185,7 +185,6 @@ fn populateMetadata(self: *Elf) !void {
             .p_memsz = size,
             .p_align = @alignOf(elf.Elf64_Phdr),
         });
-        self.next_offset = offset;
     }
     if (self.load_r_seg_index == null) {
         self.load_r_seg_index = @intCast(u16, self.phdrs.items.len);
@@ -199,6 +198,11 @@ fn populateMetadata(self: *Elf) !void {
             .p_memsz = @sizeOf(elf.Elf64_Ehdr),
             .p_align = 0x1000,
         });
+        {
+            const phdr = &self.phdrs.items[self.phdr_seg_index.?];
+            phdr.p_filesz += @sizeOf(elf.Elf64_Phdr);
+            phdr.p_memsz += @sizeOf(elf.Elf64_Phdr);
+        }
     }
     if (self.load_re_seg_index == null) {
         self.load_re_seg_index = @intCast(u16, self.phdrs.items.len);
@@ -212,6 +216,11 @@ fn populateMetadata(self: *Elf) !void {
             .p_memsz = 0,
             .p_align = 0x1000,
         });
+        {
+            const phdr = &self.phdrs.items[self.phdr_seg_index.?];
+            phdr.p_filesz += @sizeOf(elf.Elf64_Phdr);
+            phdr.p_memsz += @sizeOf(elf.Elf64_Phdr);
+        }
     }
     if (self.load_rw_seg_index == null) {
         self.load_rw_seg_index = @intCast(u16, self.phdrs.items.len);
@@ -225,6 +234,11 @@ fn populateMetadata(self: *Elf) !void {
             .p_memsz = 0,
             .p_align = 0x1000,
         });
+        {
+            const phdr = &self.phdrs.items[self.phdr_seg_index.?];
+            phdr.p_filesz += @sizeOf(elf.Elf64_Phdr);
+            phdr.p_memsz += @sizeOf(elf.Elf64_Phdr);
+        }
     }
     if (self.symtab_sect_index == null) {
         self.symtab_sect_index = @intCast(u16, self.shdrs.items.len);
@@ -474,7 +488,8 @@ fn allocateSection(self: *Elf, ndx: u16, phdr_ndx: u16) !void {
         phdr.p_paddr += shdr.sh_offset;
     }
 
-    phdr.p_filesz += (shdr.sh_offset + shdr.sh_size) - base_offset;
+    // TODO fix this!
+    phdr.p_filesz += (shdr.sh_offset + shdr.sh_size) - (phdr.p_offset + phdr.p_filesz);
     phdr.p_memsz = phdr.p_filesz;
 }
 
@@ -544,6 +559,8 @@ fn allocateLoadRWSeg(self: *Elf) !void {
     log.debug("allocating read-write LOAD segment:", .{});
     log.debug("  in file from 0x{x} to 0x{x}", .{ phdr.p_offset, phdr.p_offset + phdr.p_filesz });
     log.debug("  in memory from 0x{x} to 0x{x}", .{ phdr.p_vaddr, phdr.p_vaddr + phdr.p_memsz });
+
+    self.next_offset = phdr.p_offset + phdr.p_filesz;
 }
 
 fn allocateAtoms(self: *Elf) !void {
@@ -633,10 +650,6 @@ fn writeAtoms(self: *Elf) !void {
         }
 
         try self.base.file.pwriteAll(buffer, shdr.sh_offset);
-
-        if (shdr.sh_offset + buffer.len > self.next_offset) {
-            self.next_offset = shdr.sh_offset + buffer.len;
-        }
     }
 }
 
@@ -679,6 +692,7 @@ fn writeSymtab(self: *Elf) !void {
         symtab.appendAssumeCapacity(out_sym);
     }
 
+    shdr.sh_info = 2; // TODO investigate what the meaning of this value is
     shdr.sh_offset = mem.alignForwardGeneric(u64, self.next_offset, @alignOf(elf.Elf64_Sym));
     shdr.sh_size = symtab.items.len * @sizeOf(elf.Elf64_Sym);
     log.debug("writing '{s}' contents from 0x{x} to 0x{x}", .{
