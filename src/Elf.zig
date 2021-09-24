@@ -456,52 +456,95 @@ fn resolveSymbolsInObject(self: *Elf, object_id: u16) !void {
     }
 }
 
+fn allocateSection(self: *Elf, ndx: u16, phdr_ndx: u16) !void {
+    const shdr = &self.shdrs.items[ndx];
+    const phdr = &self.phdrs.items[phdr_ndx];
+    const base_offset = phdr.p_offset + phdr.p_filesz;
+    shdr.sh_offset = mem.alignForwardGeneric(u64, base_offset, shdr.sh_addralign);
+    shdr.sh_addr = phdr.p_vaddr + shdr.sh_offset;
+
+    log.debug("allocating '{s}' section from 0x{x} to 0x{x}", .{
+        self.getShString(shdr.sh_name),
+        shdr.sh_addr,
+        shdr.sh_addr + shdr.sh_size,
+    });
+
+    if (phdr.p_filesz == 0) {
+        phdr.p_offset = shdr.sh_offset;
+        phdr.p_vaddr += shdr.sh_offset;
+        phdr.p_paddr += shdr.sh_offset;
+    }
+
+    phdr.p_filesz += (shdr.sh_offset + shdr.sh_size) - base_offset;
+    phdr.p_memsz = phdr.p_filesz;
+}
+
+fn getSegmentBaseAddr(self: *Elf, phdr_ndx: u16) u64 {
+    const phdr = self.phdrs.items[phdr_ndx];
+    const base_addr = mem.alignForwardGeneric(u64, phdr.p_vaddr + phdr.p_memsz, 0x1000);
+    return base_addr;
+}
+
+fn getSegmentBaseOff(self: *Elf, phdr_ndx: u16) u64 {
+    const phdr = self.phdrs.items[phdr_ndx];
+    const base_off = phdr.p_offset + phdr.p_filesz;
+    return base_off;
+}
+
 fn allocateLoadRSeg(self: *Elf) !void {
     const phdr = &self.phdrs.items[self.load_r_seg_index.?];
-    const size = @sizeOf(elf.Elf64_Ehdr) + self.phdrs.items.len * @sizeOf(elf.Elf64_Phdr);
+    const init_size = @sizeOf(elf.Elf64_Ehdr) + self.phdrs.items.len * @sizeOf(elf.Elf64_Phdr);
     phdr.p_offset = 0;
     phdr.p_vaddr = self.base_addr;
     phdr.p_paddr = self.base_addr;
-    phdr.p_filesz = size;
-    phdr.p_memsz = size;
-    log.debug("allocating read-only LOAD segment from 0x{x} to 0x{x}", .{
-        phdr.p_vaddr,
-        phdr.p_vaddr + size,
-    });
+    phdr.p_filesz = init_size;
+    phdr.p_memsz = init_size;
+
+    if (self.rodata_sect_index) |ndx| {
+        try self.allocateSection(ndx, self.load_r_seg_index.?);
+    }
+
+    log.debug("allocating read-only LOAD segment:", .{});
+    log.debug("  in file from 0x{x} to 0x{x}", .{ phdr.p_offset, phdr.p_offset + phdr.p_filesz });
+    log.debug("  in memory from 0x{x} to 0x{x}", .{ phdr.p_vaddr, phdr.p_vaddr + phdr.p_memsz });
 }
 
 fn allocateLoadRESeg(self: *Elf) !void {
-    const base_addr = blk: {
-        const phdr = self.phdrs.items[self.load_r_seg_index.?];
-        break :blk phdr.p_vaddr + phdr.p_memsz;
-    };
+    const base_addr = self.getSegmentBaseAddr(self.load_r_seg_index.?);
+    const base_off = self.getSegmentBaseOff(self.load_r_seg_index.?);
     const phdr = &self.phdrs.items[self.load_re_seg_index.?];
-    phdr.p_offset = base_addr - self.base_addr;
+    phdr.p_offset = base_off;
     phdr.p_vaddr = base_addr;
     phdr.p_paddr = base_addr;
     phdr.p_filesz = 0;
     phdr.p_memsz = 0;
-    log.debug("allocating read-execute LOAD segment from 0x{x} to 0x{x}", .{
-        phdr.p_vaddr,
-        phdr.p_vaddr + phdr.p_memsz,
-    });
+
+    if (self.text_sect_index) |ndx| {
+        try self.allocateSection(ndx, self.load_re_seg_index.?);
+    }
+
+    log.debug("allocating read-execute LOAD segment:", .{});
+    log.debug("  in file from 0x{x} to 0x{x}", .{ phdr.p_offset, phdr.p_offset + phdr.p_filesz });
+    log.debug("  in memory from 0x{x} to 0x{x}", .{ phdr.p_vaddr, phdr.p_vaddr + phdr.p_memsz });
 }
 
 fn allocateLoadRWSeg(self: *Elf) !void {
-    const base_addr = blk: {
-        const phdr = self.phdrs.items[self.load_re_seg_index.?];
-        break :blk phdr.p_vaddr + phdr.p_memsz;
-    };
+    const base_addr = self.getSegmentBaseAddr(self.load_re_seg_index.?);
+    const base_off = self.getSegmentBaseOff(self.load_re_seg_index.?);
     const phdr = &self.phdrs.items[self.load_rw_seg_index.?];
-    phdr.p_offset = base_addr - self.base_addr;
+    phdr.p_offset = base_off;
     phdr.p_vaddr = base_addr;
     phdr.p_paddr = base_addr;
     phdr.p_filesz = 0;
     phdr.p_memsz = 0;
-    log.debug("allocating read-write LOAD segment from 0x{x} to 0x{x}", .{
-        phdr.p_vaddr,
-        phdr.p_vaddr + phdr.p_memsz,
-    });
+
+    if (self.data_sect_index) |ndx| {
+        try self.allocateSection(ndx, self.load_rw_seg_index.?);
+    }
+
+    log.debug("allocating read-write LOAD segment:", .{});
+    log.debug("  in file from 0x{x} to 0x{x}", .{ phdr.p_offset, phdr.p_offset + phdr.p_filesz });
+    log.debug("  in memory from 0x{x} to 0x{x}", .{ phdr.p_vaddr, phdr.p_vaddr + phdr.p_memsz });
 }
 
 fn writeSymtab(self: *Elf) !void {
