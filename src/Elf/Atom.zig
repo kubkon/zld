@@ -25,6 +25,10 @@ contained: std.ArrayListUnmanaged(SymbolAtOffset) = .{},
 /// Code (may be non-relocated) this atom represents
 code: std.ArrayListUnmanaged(u8) = .{},
 
+/// Size of this atom
+/// TODO is this really needed given that size is a field of a symbol?
+size: u32,
+
 /// Alignment of this atom. Unlike in MachO, minimum alignment is 1.
 alignment: u32,
 
@@ -56,6 +60,7 @@ pub fn createEmpty(allocator: *Allocator) !*Atom {
     self.* = .{
         .local_sym_index = 0,
         .file = undefined,
+        .size = 0,
         .alignment = 0,
         .prev = null,
         .next = null,
@@ -82,6 +87,7 @@ pub fn format(self: Atom, comptime fmt: []const u8, options: std.fmt.FormatOptio
         self.code.items[0..64]
     else
         self.code.items)});
+    try std.fmt.format(writer, "  .size = {d}, ", .{self.size});
     try std.fmt.format(writer, "  .alignment = {d}, ", .{self.alignment});
     try std.fmt.format(writer, "  .relocs = {any}, ", .{self.relocs.items});
     try std.fmt.format(writer, "}}", .{});

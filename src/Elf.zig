@@ -31,6 +31,7 @@ load_re_seg_index: ?u16 = null,
 load_rw_seg_index: ?u16 = null,
 
 text_sect_index: ?u16 = null,
+rodata_sect_index: ?u16 = null,
 data_sect_index: ?u16 = null,
 symtab_sect_index: ?u16 = null,
 strtab_sect_index: ?u16 = null,
@@ -41,6 +42,9 @@ next_offset: u64 = 0,
 base_addr: u64 = 0x200000,
 
 globals: std.StringArrayHashMapUnmanaged(SymbolWithLoc) = .{},
+
+managed_atoms: std.ArrayListUnmanaged(*Atom) = .{},
+atoms: std.AutoHashMapUnmanaged(u16, *Atom) = .{},
 
 pub const SymbolWithLoc = struct {
     sym_index: u32,
@@ -81,6 +85,12 @@ fn createEmpty(gpa: *Allocator, options: Zld.Options) !*Elf {
 }
 
 pub fn deinit(self: *Elf) void {
+    self.atoms.deinit(self.base.allocator);
+    for (self.managed_atoms.items) |atom| {
+        atom.deinit(self.base.allocator);
+        self.base.allocator.destroy(atom);
+    }
+    self.managed_atoms.deinit(self.base.allocator);
     for (self.globals.keys()) |key| {
         self.base.allocator.free(key);
     }
@@ -266,6 +276,78 @@ fn populateMetadata(self: *Elf) !void {
         });
         self.header.?.e_shstrndx = self.shstrtab_sect_index.?;
     }
+}
+
+pub fn getMatchingSection(self: *Elf, object_id: u16, sect_id: u16) !?u16 {
+    const object = self.objects.items[object_id];
+    const shdr = object.shdrs.items[sect_id];
+    const flags = shdr.sh_flags;
+    const res: ?u16 = blk: {
+        if (flags & elf.SHF_ALLOC == 0) {
+            log.debug("TODO non-alloc sections", .{});
+            log.debug("  {s} => {}", .{ object.getString(shdr.sh_name), shdr });
+            break :blk null;
+        }
+        if (flags & elf.SHF_EXECINSTR != 0) {
+            if (self.text_sect_index == null) {
+                self.text_sect_index = @intCast(u16, self.shdrs.items.len);
+                try self.shdrs.append(self.base.allocator, .{
+                    .sh_name = try self.makeShString(".text"),
+                    .sh_type = elf.SHT_PROGBITS,
+                    .sh_flags = elf.SHF_EXECINSTR | elf.SHF_ALLOC,
+                    .sh_addr = 0,
+                    .sh_offset = 0,
+                    .sh_size = 0,
+                    .sh_link = 0,
+                    .sh_info = 0,
+                    .sh_addralign = 0,
+                    .sh_entsize = 0,
+                });
+            }
+            break :blk self.text_sect_index.?;
+        }
+        if (flags & elf.SHF_WRITE != 0) {
+            if (self.data_sect_index == null) {
+                self.data_sect_index = @intCast(u16, self.shdrs.items.len);
+                try self.shdrs.append(self.base.allocator, .{
+                    .sh_name = try self.makeShString(".data"),
+                    .sh_type = elf.SHT_PROGBITS,
+                    .sh_flags = elf.SHF_WRITE | elf.SHF_ALLOC,
+                    .sh_addr = 0,
+                    .sh_offset = 0,
+                    .sh_size = 0,
+                    .sh_link = 0,
+                    .sh_info = 0,
+                    .sh_addralign = 0,
+                    .sh_entsize = 0,
+                });
+            }
+            break :blk self.data_sect_index.?;
+        }
+        if (flags & elf.SHF_MERGE != 0 and flags & elf.SHF_STRINGS != 0) {
+            if (self.rodata_sect_index == null) {
+                self.rodata_sect_index = @intCast(u16, self.shdrs.items.len);
+                try self.shdrs.append(self.base.allocator, .{
+                    .sh_name = try self.makeShString(".rodata"),
+                    .sh_type = elf.SHT_PROGBITS,
+                    .sh_flags = elf.SHF_MERGE | elf.SHF_STRINGS | elf.SHF_ALLOC,
+                    .sh_addr = 0,
+                    .sh_offset = 0,
+                    .sh_size = 0,
+                    .sh_link = 0,
+                    .sh_info = 0,
+                    .sh_addralign = 0,
+                    .sh_entsize = 0,
+                });
+            }
+            break :blk self.rodata_sect_index.?;
+        }
+
+        log.debug("TODO unhandled section", .{});
+        log.debug("  {s} => {}", .{ object.getString(shdr.sh_name), shdr });
+        break :blk null;
+    };
+    return res;
 }
 
 fn parsePositionals(self: *Elf, files: []const []const u8) !void {

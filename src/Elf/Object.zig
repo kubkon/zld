@@ -5,6 +5,7 @@ const assert = std.debug.assert;
 const elf = std.elf;
 const fs = std.fs;
 const log = std.log.scoped(.elf);
+const math = std.math;
 const mem = std.mem;
 
 const Allocator = mem.Allocator;
@@ -173,7 +174,6 @@ fn sortBySeniority(aliases: []u32, object: *Object) void {
 }
 
 pub fn parseIntoAtoms(self: *Object, allocator: *Allocator, object_id: u16, elf_file: *Elf) !void {
-    _ = elf_file;
     log.debug("parsing '{s}' into atoms", .{self.name});
 
     var symbols_by_shndx = std.AutoHashMap(u16, std.ArrayList(u32)).init(allocator);
@@ -194,12 +194,20 @@ pub fn parseIntoAtoms(self: *Object, allocator: *Allocator, object_id: u16, elf_
 
         log.debug("  parsing section '{s}'", .{shdr_name});
 
+        const tshdr_ndx = (try elf_file.getMatchingSection(object_id, ndx)) orelse {
+            log.debug("unhandled section", .{});
+            continue;
+        };
+
         const atom = try Atom.createEmpty(allocator);
         errdefer {
             atom.deinit(allocator);
             allocator.destroy(atom);
         }
+        try elf_file.managed_atoms.append(allocator, atom);
+
         atom.file = object_id;
+        atom.size = @intCast(u32, shdr.sh_size);
         atom.alignment = @intCast(u32, shdr.sh_addralign);
 
         const syms = symbols_by_shndx.get(ndx).?;
@@ -259,7 +267,18 @@ pub fn parseIntoAtoms(self: *Object, allocator: *Allocator, object_id: u16, elf_
             }
         }
 
-        log.debug("{}\n", .{atom});
+        // Update target section's metadata
+        const tshdr = &elf_file.shdrs.items[tshdr_ndx];
+        tshdr.sh_size = mem.alignForwardGeneric(u64, tshdr.sh_size, atom.alignment) + atom.size;
+        tshdr.sh_addralign = math.max(tshdr.sh_addralign, atom.alignment);
+
+        if (elf_file.atoms.getPtr(tshdr_ndx)) |last| {
+            last.*.next = atom;
+            atom.prev = last.*;
+            last.* = atom;
+        } else {
+            try elf_file.atoms.putNoClobber(allocator, tshdr_ndx, atom);
+        }
     }
 }
 
