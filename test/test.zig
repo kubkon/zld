@@ -1,15 +1,59 @@
 const std = @import("std");
+const CrossTarget = std.zig.CrossTarget;
 const TestContext = @import("../src/test.zig").TestContext;
 
-const archs = [_]std.Target.Cpu.Arch{ .aarch64, .x86_64 };
+const linux_x86_64 = CrossTarget{
+    .cpu_arch = .x86_64,
+    .os_tag = .linux,
+    .abi = .musl,
+};
+const macos_targets = [2]CrossTarget{
+    .{
+        .cpu_arch = .x86_64,
+        .os_tag = .macos,
+        .abi = .gnu,
+    },
+    .{
+        .cpu_arch = .aarch64,
+        .os_tag = .macos,
+        .abi = .gnu,
+    },
+};
 
 pub fn addCases(ctx: *TestContext) !void {
-    for (archs) |arch| {
-        const target = std.zig.CrossTarget{
-            .cpu_arch = arch,
-            .os_tag = .macos,
-            .abi = .gnu,
-        };
+    // Linux/ELF tests
+    {
+        var case = try ctx.addCase("hello world in C", linux_x86_64);
+        try case.addInput("main.c",
+            \\const char* str = "Hello, World!\n";
+            \\
+            \\void _start() {
+            \\  asm volatile (
+            \\    "mov $1, %%rax;"
+            \\    "mov $1, %%rdi;"
+            \\    "mov %0, %%rsi;"
+            \\    "mov $14, %%rdx;"
+            \\    "syscall;"
+            \\    :
+            \\    : "r" (str)
+            \\    : "rax"
+            \\  );
+            \\
+            \\  asm volatile (
+            \\    "mov $60, %%rax;"
+            \\    "mov $0, %%rdi;"
+            \\    "syscall;"
+            \\    :
+            \\    :
+            \\    :
+            \\  );
+            \\}
+        );
+        case.expectedStdout("Hello, World!\n");
+    }
+
+    // macOS/Mach-O tests
+    for (macos_targets) |target| {
         {
             var case = try ctx.addCase("hello world in C", target);
             try case.addInput("main.c",

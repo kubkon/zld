@@ -263,9 +263,6 @@ pub fn main() anyerror!void {
         .rpath_list = rpath_list.items,
         .stack_size_override = stack,
     });
-    defer {
-        zld.closeFiles();
-        zld.deinit();
-    }
+    defer zld.deinit();
     try zld.flush();
 }

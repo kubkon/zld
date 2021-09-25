@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = std.builtin;
 const mem = std.mem;
 const testing = std.testing;
 const process = std.process;
@@ -249,25 +250,28 @@ pub const TestContext = struct {
                 .framework_dirs = &[0][]const u8{},
                 .rpath_list = &[0][]const u8{},
             });
-            defer {
-                zld.closeFiles();
-                zld.deinit();
-            }
+            defer zld.deinit();
 
             var argv = std.ArrayList([]const u8).init(allocator);
             defer argv.deinit();
 
             outer: {
-                switch (case.target.getExternalExecutor()) {
-                    .native => {
-                        try zld.flush();
-                        try argv.append("./a.out");
-                    },
-                    else => {
-                        // TODO simply pass the test
-                        break :outer;
-                    },
-                }
+                const to_target = case.target.toTarget();
+                if (to_target.cpu.arch == builtin.cpu.arch and to_target.os.tag == builtin.os.tag) {
+                    try zld.flush();
+                    try argv.append("./a.out");
+                } else break :outer;
+                // TODO re-enable via external executors instead of the hack above.
+                // switch (case.target.getExternalExecutor()) {
+                //     .native => {
+                //         try zld.flush();
+                //         try argv.append("./a.out");
+                //     },
+                //     else => {
+                //         // TODO simply pass the test
+                //         break :outer;
+                //     },
+                // }
 
                 const result = try std.ChildProcess.exec(.{
                     .allocator = allocator,
@@ -278,6 +282,7 @@ pub const TestContext = struct {
                     allocator.free(result.stdout);
                     allocator.free(result.stderr);
                 }
+
                 if (case.expected_out.stdout != null or case.expected_out.stderr != null) {
                     if (case.expected_out.stderr) |err| {
                         const pass = mem.eql(u8, result.stderr, err);

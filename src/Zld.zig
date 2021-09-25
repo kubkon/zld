@@ -64,19 +64,11 @@ pub fn deinit(base: *Zld) void {
     }
 }
 
-pub fn closeFiles(base: Zld) void {
-    switch (base.tag) {
-        .elf => @fieldParentPtr(Elf, "base", &base).closeFiles(),
-        .macho => @fieldParentPtr(MachO, "base", &base).closeFiles(),
-        .coff => @fieldParentPtr(Coff, "base", &base).closeFiles(),
-    }
-    base.file.close();
-}
-
 pub fn flush(base: *Zld) !void {
     switch (base.tag) {
         .elf => try @fieldParentPtr(Elf, "base", base).flush(),
         .macho => try @fieldParentPtr(MachO, "base", base).flush(),
         .coff => try @fieldParentPtr(Coff, "base", base).flush(),
     }
+    base.file.close();
 }

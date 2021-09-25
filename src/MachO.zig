@@ -2273,6 +2273,8 @@ fn setEntryPoint(self: *MachO) !void {
 }
 
 pub fn deinit(self: *MachO) void {
+    self.closeFiles();
+
     self.section_ordinals.deinit(self.base.allocator);
     self.got_entries_map.deinit(self.base.allocator);
     self.stubs_map.deinit(self.base.allocator);
@@ -2315,7 +2317,7 @@ pub fn deinit(self: *MachO) void {
     self.atoms.deinit(self.base.allocator);
 }
 
-pub fn closeFiles(self: MachO) void {
+fn closeFiles(self: MachO) void {
     for (self.objects.items) |object| {
         object.file.close();
     }

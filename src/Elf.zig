@@ -85,6 +85,8 @@ fn createEmpty(gpa: *Allocator, options: Zld.Options) !*Elf {
 }
 
 pub fn deinit(self: *Elf) void {
+    self.closeFiles();
+
     self.atoms.deinit(self.base.allocator);
     for (self.managed_atoms.items) |atom| {
         atom.deinit(self.base.allocator);
@@ -102,7 +104,7 @@ pub fn deinit(self: *Elf) void {
     self.objects.deinit(self.base.allocator);
 }
 
-pub fn closeFiles(self: Elf) void {
+fn closeFiles(self: Elf) void {
     for (self.objects.items) |object| {
         object.file.close();
     }
