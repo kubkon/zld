@@ -1,4 +1,5 @@
 const std = @import("std");
+const build_options = @import("build_options");
 const builtin = std.builtin;
 const mem = std.mem;
 const testing = std.testing;
@@ -256,22 +257,23 @@ pub const TestContext = struct {
             defer argv.deinit();
 
             outer: {
-                const to_target = case.target.toTarget();
-                if (to_target.cpu.arch == builtin.cpu.arch and to_target.os.tag == builtin.os.tag) {
-                    try zld.flush();
-                    try argv.append("./a.out");
-                } else break :outer;
-                // TODO re-enable via external executors instead of the hack above.
-                // switch (case.target.getExternalExecutor()) {
-                //     .native => {
-                //         try zld.flush();
-                //         try argv.append("./a.out");
-                //     },
-                //     else => {
-                //         // TODO simply pass the test
-                //         break :outer;
-                //     },
-                // }
+                switch (case.target.getExternalExecutor()) {
+                    .native => {
+                        try zld.flush();
+                        try argv.append("./a.out");
+                    },
+                    .qemu => |qemu_bin_name| if (build_options.enable_qemu) {
+                        try zld.flush();
+                        try argv.append(qemu_bin_name);
+                        try argv.append("./a.out");
+                    } else {
+                        break :outer;
+                    },
+                    else => {
+                        // TODO simply pass the test
+                        break :outer;
+                    },
+                }
 
                 const result = try std.ChildProcess.exec(.{
                     .allocator = allocator,

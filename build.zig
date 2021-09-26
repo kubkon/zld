@@ -12,6 +12,7 @@ pub fn build(b: *Builder) void {
     const mode = b.standardReleaseOptions();
 
     const enable_logging = b.option(bool, "log", "Whether to enable logging") orelse false;
+    const is_qemu_enabled = b.option(bool, "enable-qemu", "Use QEMU to run cross compiled foreign architecture tests") orelse false;
 
     const lib = b.addStaticLibrary("zld", "src/Zld.zig");
     lib.setBuildMode(mode);
@@ -38,6 +39,10 @@ pub fn build(b: *Builder) void {
     const tests = b.addTest("src/test.zig");
     tests.setBuildMode(mode);
     tests.addPackagePath("end_to_end_tests", "test/test.zig");
+
+    const test_opts = b.addOptions();
+    tests.addOptions("build_options", test_opts);
+    test_opts.addOption(bool, "enable_qemu", is_qemu_enabled);
 
     const test_step = b.step("test", "Run library and end-to-end tests");
     test_step.dependOn(&exe.step);
