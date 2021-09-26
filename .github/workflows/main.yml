@@ -1,27 +1,30 @@
-name: Main
+name: CI
 
-on:
-  push:
-  pull_request:
+on: [push, pull_request]
 
 jobs:
-  fmt:
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v2
-    - uses: goto-bus-stop/setup-zig@v1
-      with:
-        version: master
-    - run: zig fmt --check src/*.zig test/*.zig
-
-  test:
+  build:
+    name: Build and test
+    runs-on: ${{ matrix.os }}-latest
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{matrix.os}}
+        os: [macos, ubuntu, windows]
+
     steps:
-    - uses: actions/checkout@v1
-    - uses: goto-bus-stop/setup-zig@v1
-      with:
-        version: master
-    - run: zig build test
+    - name: Configure git
+      if: matrix.os == 'windows'
+      run: git config --global core.autocrlf false
+    - name: Checkout
+      uses: actions/checkout@v1
+    - name: Test Linux
+      if: matrix.os == 'ubuntu'
+      run: ./ci/linux_ci
+    - name: Test macOS
+      if: matrix.os == 'macos'
+      run: ./ci/macos_ci
+    - name: Test Windows
+      if: matrix.os == 'windows'
+      shell: bash
+      run: ./ci/win_ci
+

@@ -1,0 +1,19 @@
+#!/bin/sh
+
+set -x
+set -e
+
+VERSION="0.8.0"
+ZIG="zig-linux-x86_64-$VERSION"
+
+wget -nv "https://ziglang.org/download/$VERSION/$ZIG.tar.xz"
+tar xf "$ZIG.tar.xz"
+export PATH="$(pwd)/$ZIG:$PATH"
+
+QEMUBASE="qemu-linux-x86_64-6.1.0.1"
+wget -nv "https://ziglang.org/deps/$QEMUBASE.tar.xz"
+tar xf "$QEMUBASE.tar.xz"
+export PATH="$(pwd)/$QEMUBASE/bin:$PATH"
+
+zig build test -Denable-qemu
+

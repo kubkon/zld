@@ -1,0 +1,13 @@
+#!/bin/sh
+
+set -x
+set -e
+
+VERSION="0.8.0"
+ZIG="zig-macos-x86_64-$VERSION"
+
+curl -L "https://ziglang.org/download/$VERSION/$ZIG.tar.xz" -o "$ZIG.tar.xz"
+tar xf "$ZIG.tar.xz"
+export PATH="$(pwd)/$ZIG:$PATH"
+
+zig build test
