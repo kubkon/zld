@@ -3,7 +3,7 @@
 set -x
 set -e
 
-VERSION="0.8.0"
+VERSION="0.8.1"
 ZIG="zig-windows-x86_64-$VERSION"
 
 curl -L "https://ziglang.org/download/$VERSION/$ZIG.zip" -o "$ZIG.zip"
