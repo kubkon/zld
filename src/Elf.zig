@@ -725,9 +725,19 @@ fn writeSymtab(self: *Elf) !void {
 
     var symtab = std.ArrayList(elf.Elf64_Sym).init(self.base.allocator);
     defer symtab.deinit();
+    try symtab.ensureUnusedCapacity(1);
+    symtab.appendAssumeCapacity(.{
+        .st_name = 0,
+        .st_info = 0,
+        .st_other = 0,
+        .st_shndx = 0,
+        .st_value = 0,
+        .st_size = 0,
+    });
 
     for (self.objects.items) |object| {
         for (object.symtab.items) |sym| {
+            if (sym.st_name == 0) continue;
             const st_bind = sym.st_info >> 4;
             const st_type = sym.st_info & 0xf;
             if (st_bind != elf.STB_LOCAL) continue;
