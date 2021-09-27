@@ -260,6 +260,7 @@ fn populateMetadata(self: *Elf) !void {
         });
     }
     if (self.strtab_sect_index == null) {
+        try self.strtab.append(self.base.allocator, 0);
         self.strtab_sect_index = @intCast(u16, self.shdrs.items.len);
         try self.shdrs.append(self.base.allocator, .{
             .sh_name = try self.makeShString(".strtab"),
