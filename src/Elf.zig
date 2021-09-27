@@ -121,7 +121,7 @@ pub fn flush(self: *Elf) !void {
         try object.parseIntoAtoms(self.base.allocator, @intCast(u16, object_id), self);
     }
 
-    // TODO need to sort sections so that .symtab, .strtab, .shstrtab are last
+    try self.sortShdrs();
 
     try self.allocateLoadRSeg();
     try self.allocateLoadRESeg();
@@ -208,21 +208,6 @@ fn populateMetadata(self: *Elf) !void {
             phdr.p_memsz += @sizeOf(elf.Elf64_Phdr);
         }
     }
-    if (self.rodata_sect_index == null) {
-        self.rodata_sect_index = @intCast(u16, self.shdrs.items.len);
-        try self.shdrs.append(self.base.allocator, .{
-            .sh_name = try self.makeShString(".rodata"),
-            .sh_type = elf.SHT_PROGBITS,
-            .sh_flags = elf.SHF_MERGE | elf.SHF_STRINGS | elf.SHF_ALLOC,
-            .sh_addr = 0,
-            .sh_offset = 0,
-            .sh_size = 0,
-            .sh_link = 0,
-            .sh_info = 0,
-            .sh_addralign = 0,
-            .sh_entsize = 0,
-        });
-    }
     if (self.load_re_seg_index == null) {
         self.load_re_seg_index = @intCast(u16, self.phdrs.items.len);
         try self.phdrs.append(self.base.allocator, .{
@@ -241,21 +226,6 @@ fn populateMetadata(self: *Elf) !void {
             phdr.p_memsz += @sizeOf(elf.Elf64_Phdr);
         }
     }
-    if (self.text_sect_index == null) {
-        self.text_sect_index = @intCast(u16, self.shdrs.items.len);
-        try self.shdrs.append(self.base.allocator, .{
-            .sh_name = try self.makeShString(".text"),
-            .sh_type = elf.SHT_PROGBITS,
-            .sh_flags = elf.SHF_EXECINSTR | elf.SHF_ALLOC,
-            .sh_addr = 0,
-            .sh_offset = 0,
-            .sh_size = 0,
-            .sh_link = 0,
-            .sh_info = 0,
-            .sh_addralign = 0,
-            .sh_entsize = 0,
-        });
-    }
     if (self.load_rw_seg_index == null) {
         self.load_rw_seg_index = @intCast(u16, self.phdrs.items.len);
         try self.phdrs.append(self.base.allocator, .{
@@ -273,21 +243,6 @@ fn populateMetadata(self: *Elf) !void {
             phdr.p_filesz += @sizeOf(elf.Elf64_Phdr);
             phdr.p_memsz += @sizeOf(elf.Elf64_Phdr);
         }
-    }
-    if (self.data_sect_index == null) {
-        self.data_sect_index = @intCast(u16, self.shdrs.items.len);
-        try self.shdrs.append(self.base.allocator, .{
-            .sh_name = try self.makeShString(".data"),
-            .sh_type = elf.SHT_PROGBITS,
-            .sh_flags = elf.SHF_WRITE | elf.SHF_ALLOC,
-            .sh_addr = 0,
-            .sh_offset = 0,
-            .sh_size = 0,
-            .sh_link = 0,
-            .sh_info = 0,
-            .sh_addralign = 0,
-            .sh_entsize = 0,
-        });
     }
     if (self.symtab_sect_index == null) {
         self.symtab_sect_index = @intCast(u16, self.shdrs.items.len);
@@ -410,6 +365,56 @@ pub fn getMatchingSection(self: *Elf, object_id: u16, sect_id: u16) !?u16 {
         break :blk null;
     };
     return res;
+}
+
+/// Sorts section headers such that loadable sections come first (following the order of program headers),
+/// and symbol and string tables come last. The order of the contents within the file does not have to match
+/// the order of the section headers. However loadable sections do have to be within bounds
+/// of their respective program headers.
+fn sortShdrs(self: *Elf) !void {
+    var index_mapping = std.AutoHashMap(u16, u16).init(self.base.allocator);
+    defer index_mapping.deinit();
+    var shdrs = self.shdrs.toOwnedSlice(self.base.allocator);
+    defer self.base.allocator.free(shdrs);
+    try self.shdrs.ensureCapacity(self.base.allocator, shdrs.len);
+
+    const indices = &[_]*?u16{
+        &self.rodata_sect_index,
+        &self.text_sect_index,
+        &self.data_sect_index,
+        &self.symtab_sect_index,
+        &self.shstrtab_sect_index,
+        &self.strtab_sect_index,
+    };
+    for (indices) |maybe_index| {
+        const new_index: u16 = if (maybe_index.*) |index| blk: {
+            const idx = @intCast(u16, self.shdrs.items.len);
+            self.shdrs.appendAssumeCapacity(shdrs[index]);
+            try index_mapping.putNoClobber(index, idx);
+            break :blk idx;
+        } else continue;
+        maybe_index.* = new_index;
+    }
+
+    self.header.?.e_shstrndx = index_mapping.get(self.header.?.e_shstrndx).?;
+    {
+        var shdr = &self.shdrs.items[self.symtab_sect_index.?];
+        shdr.sh_link = self.strtab_sect_index.?;
+    }
+
+    var transient: std.AutoHashMapUnmanaged(u16, *Atom) = .{};
+    try transient.ensureCapacity(self.base.allocator, self.atoms.count());
+
+    var it = self.atoms.iterator();
+    while (it.next()) |entry| {
+        const old_sect_id = entry.key_ptr.*;
+        const new_sect_id = index_mapping.get(old_sect_id).?;
+        transient.putAssumeCapacityNoClobber(new_sect_id, entry.value_ptr.*);
+    }
+
+    self.atoms.clearAndFree(self.base.allocator);
+    self.atoms.deinit(self.base.allocator);
+    self.atoms = transient;
 }
 
 fn parsePositionals(self: *Elf, files: []const []const u8) !void {
