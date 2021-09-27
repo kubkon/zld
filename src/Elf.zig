@@ -740,6 +740,8 @@ fn writeSymtab(self: *Elf) !void {
         }
     }
 
+    // Denote start of globals
+    shdr.sh_info = @intCast(u32, symtab.items.len);
     try symtab.ensureUnusedCapacity(self.globals.count());
     for (self.globals.values()) |global| {
         const obj = self.objects.items[global.file];
@@ -751,7 +753,6 @@ fn writeSymtab(self: *Elf) !void {
         symtab.appendAssumeCapacity(out_sym);
     }
 
-    shdr.sh_info = 2; // TODO investigate what the meaning of this value is
     shdr.sh_offset = mem.alignForwardGeneric(u64, self.next_offset, @alignOf(elf.Elf64_Sym));
     shdr.sh_size = symtab.items.len * @sizeOf(elf.Elf64_Sym);
     log.debug("writing '{s}' contents from 0x{x} to 0x{x}", .{
