@@ -471,6 +471,7 @@ fn resolveSymbolsInObject(self: *Elf, object_id: u16) !void {
         const sym_id = @intCast(u32, i);
         const sym_name = object.getString(sym.st_name);
         const st_bind = sym.st_info >> 4;
+        const st_type = sym.st_info & 0xf;
 
         switch (st_bind) {
             elf.STB_LOCAL => {
@@ -494,6 +495,11 @@ fn resolveSymbolsInObject(self: *Elf, object_id: u16) !void {
                 const linked_obj = self.objects.items[global.file];
                 const linked_sym = linked_obj.symtab.items[global.sym_index];
                 const linked_sym_bind = linked_sym.st_info >> 4;
+
+                if (sym.st_shndx == elf.SHN_UNDEF and st_type == elf.STT_NOTYPE) {
+                    log.debug("  (symbol '{s}' already defined; skipping...)", .{sym_name});
+                    continue;
+                }
 
                 if (linked_sym.st_shndx != elf.SHN_UNDEF) {
                     if (linked_sym_bind == elf.STB_GLOBAL and st_bind == elf.STB_GLOBAL) {

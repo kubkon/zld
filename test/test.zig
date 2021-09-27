@@ -51,6 +51,45 @@ pub fn addCases(ctx: *TestContext) !void {
         );
         case.expectedStdout("Hello, World!\n");
     }
+    {
+        var case = try ctx.addCase("simple multi objects in C", linux_x86_64);
+        try case.addInput("print.c",
+            \\const char* str = "Hello, World!\n";
+            \\
+            \\void printMe() {
+            \\  asm volatile (
+            \\    "mov $1, %%rax;"
+            \\    "mov $1, %%rdi;"
+            \\    "mov %0, %%rsi;"
+            \\    "mov $14, %%rdx;"
+            \\    "syscall;"
+            \\    :
+            \\    : "r" (str)
+            \\    : "rax"
+            \\  );
+            \\}
+        );
+        try case.addInput("main.c",
+            \\void printMe();
+            \\
+            \\void exitNow() {
+            \\  asm volatile (
+            \\    "mov $60, %%rax;"
+            \\    "mov $0, %%rdi;"
+            \\    "syscall;"
+            \\    :
+            \\    :
+            \\    :
+            \\  );
+            \\}
+            \\
+            \\void _start() {
+            \\    printMe();
+            \\    exitNow();
+            \\}
+        );
+        case.expectedStdout("Hello, World!\n");
+    }
 
     // macOS/Mach-O tests
     for (macos_targets) |target| {

@@ -107,13 +107,11 @@ pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
         switch (r_type) {
             elf.R_X86_64_NONE => {},
             elf.R_X86_64_64 => {
-                // Direct 64bit
                 const tsym = object.symtab.items[r_sym];
                 log.debug("R_X86_64_64: target address 0x{x}", .{tsym.st_value});
                 mem.writeIntLittle(u64, self.code.items[rel.r_offset..][0..8], tsym.st_value);
             },
             elf.R_X86_64_PC32 => {
-                // PC relative 32 bit signed
                 const source = @intCast(i64, sym.st_value + rel.r_offset);
                 const tsym = object.symtab.items[r_sym];
                 const target = @intCast(i64, tsym.st_value);
@@ -122,6 +120,35 @@ pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
                     source,
                     target,
                     displacement,
+                });
+                mem.writeIntLittle(i32, self.code.items[rel.r_offset..][0..4], displacement);
+            },
+            elf.R_X86_64_PLT32 => {
+                const source = @intCast(i64, sym.st_value + rel.r_offset);
+                const tsym = object.symtab.items[r_sym];
+                const is_local = (tsym.st_info >> 4) & elf.STB_LOCAL != 0;
+                const target: i64 = blk: {
+                    if (!is_local) {
+                        const tsym_name = object.getString(tsym.st_name);
+                        const global = elf_file.globals.get(tsym_name).?;
+                        const actual_object = elf_file.objects.items[global.file];
+                        const actual_tsym = actual_object.symtab.items[global.sym_index];
+
+                        if (actual_tsym.st_info & 0xf == elf.STT_NOTYPE and
+                            actual_tsym.st_shndx == elf.SHN_UNDEF)
+                        {
+                            log.debug("TODO handle R_X86_64_PLT32 to an UND symbol via PLT table", .{});
+                            break :blk source;
+                        }
+
+                        break :blk @intCast(i64, actual_tsym.st_value);
+                    }
+
+                    break :blk @intCast(i64, tsym.st_value);
+                };
+                const displacement = @intCast(i32, target - source + rel.r_addend);
+                log.debug("R_X86_64_PLT32: source addr 0x{x}, target addr 0x{x}, displacement 0x{x}", .{
+                    source, target, displacement,
                 });
                 mem.writeIntLittle(i32, self.code.items[rel.r_offset..][0..4], displacement);
             },
