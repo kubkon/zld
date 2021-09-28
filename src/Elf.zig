@@ -30,6 +30,7 @@ load_r_seg_index: ?u16 = null,
 load_re_seg_index: ?u16 = null,
 load_rw_seg_index: ?u16 = null,
 
+null_sect_index: ?u16 = null,
 text_sect_index: ?u16 = null,
 rodata_sect_index: ?u16 = null,
 data_sect_index: ?u16 = null,
@@ -252,6 +253,38 @@ fn populateMetadata(self: *Elf) !void {
             phdr.p_memsz += @sizeOf(elf.Elf64_Phdr);
         }
     }
+    if (self.shstrtab_sect_index == null) {
+        try self.shstrtab.append(self.base.allocator, 0);
+        self.shstrtab_sect_index = @intCast(u16, self.shdrs.items.len);
+        try self.shdrs.append(self.base.allocator, .{
+            .sh_name = try self.makeShString(".shstrtab"),
+            .sh_type = elf.SHT_STRTAB,
+            .sh_flags = 0,
+            .sh_addr = 0,
+            .sh_offset = 0,
+            .sh_size = 0,
+            .sh_link = 0,
+            .sh_info = 0,
+            .sh_addralign = 1,
+            .sh_entsize = 0,
+        });
+        self.header.?.e_shstrndx = self.shstrtab_sect_index.?;
+    }
+    if (self.null_sect_index == null) {
+        self.null_sect_index = @intCast(u16, self.shdrs.items.len);
+        try self.shdrs.append(self.base.allocator, .{
+            .sh_name = 0,
+            .sh_type = elf.SHT_NULL,
+            .sh_flags = 0,
+            .sh_addr = 0,
+            .sh_offset = 0,
+            .sh_size = 0,
+            .sh_link = 0,
+            .sh_info = 0,
+            .sh_addralign = 0,
+            .sh_entsize = 0,
+        });
+    }
     if (self.symtab_sect_index == null) {
         self.symtab_sect_index = @intCast(u16, self.shdrs.items.len);
         try self.shdrs.append(self.base.allocator, .{
@@ -284,23 +317,6 @@ fn populateMetadata(self: *Elf) !void {
         });
         // Link .strtab with .symtab via sh_link field.
         self.shdrs.items[self.symtab_sect_index.?].sh_link = self.strtab_sect_index.?;
-    }
-    if (self.shstrtab_sect_index == null) {
-        try self.shstrtab.append(self.base.allocator, 0);
-        self.shstrtab_sect_index = @intCast(u16, self.shdrs.items.len);
-        try self.shdrs.append(self.base.allocator, .{
-            .sh_name = try self.makeShString(".shstrtab"),
-            .sh_type = elf.SHT_STRTAB,
-            .sh_flags = 0,
-            .sh_addr = 0,
-            .sh_offset = 0,
-            .sh_size = 0,
-            .sh_link = 0,
-            .sh_info = 0,
-            .sh_addralign = 1,
-            .sh_entsize = 0,
-        });
-        self.header.?.e_shstrndx = self.shstrtab_sect_index.?;
     }
 }
 
@@ -484,6 +500,7 @@ fn sortShdrs(self: *Elf) !void {
     try self.shdrs.ensureCapacity(self.base.allocator, shdrs.len);
 
     const indices = &[_]*?u16{
+        &self.null_sect_index,
         &self.rodata_sect_index,
         &self.text_sect_index,
         &self.data_sect_index,
@@ -759,6 +776,7 @@ fn allocateLoadRWSeg(self: *Elf) !void {
 
 fn allocateNonAllocSections(self: *Elf) !void {
     for (self.shdrs.items) |*shdr| {
+        if (shdr.sh_type == elf.SHT_NULL) continue;
         if (shdr.sh_flags & elf.SHF_ALLOC != 0) continue;
         shdr.sh_offset = mem.alignForwardGeneric(u64, self.next_offset, shdr.sh_addralign);
         log.debug("setting '{s}' non-alloc section's offsets from 0x{x} to 0x{x}", .{
