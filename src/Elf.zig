@@ -684,8 +684,18 @@ fn allocateLoadRSeg(self: *Elf) !void {
     phdr.p_filesz = init_size;
     phdr.p_memsz = init_size;
 
-    if (self.rodata_sect_index) |ndx| {
-        try self.allocateSection(ndx, self.load_r_seg_index.?);
+    // This assumes ordering of section headers matches ordering of sections in file
+    // so that the segments are contiguous in memory.
+    for (self.shdrs.items) |shdr, ndx| {
+        const is_read_alloc = blk: {
+            const flags = shdr.sh_flags;
+            if (flags & elf.SHF_ALLOC == 0) break :blk false;
+            if (flags & elf.SHF_WRITE != 0) break :blk false;
+            if (flags & elf.SHF_EXECINSTR != 0) break :blk false;
+            break :blk true;
+        };
+        if (!is_read_alloc) continue;
+        try self.allocateSection(@intCast(u16, ndx), self.load_r_seg_index.?);
     }
 
     log.debug("allocating read-only LOAD segment:", .{});
@@ -703,8 +713,15 @@ fn allocateLoadRESeg(self: *Elf) !void {
     phdr.p_filesz = 0;
     phdr.p_memsz = 0;
 
-    if (self.text_sect_index) |ndx| {
-        try self.allocateSection(ndx, self.load_re_seg_index.?);
+    // This assumes ordering of section headers matches ordering of sections in file
+    // so that the segments are contiguous in memory.
+    for (self.shdrs.items) |shdr, ndx| {
+        const is_exec_alloc = blk: {
+            const flags = shdr.sh_flags;
+            break :blk flags & elf.SHF_ALLOC != 0 and flags & elf.SHF_EXECINSTR != 0;
+        };
+        if (!is_exec_alloc) continue;
+        try self.allocateSection(@intCast(u16, ndx), self.load_re_seg_index.?);
     }
 
     log.debug("allocating read-execute LOAD segment:", .{});
@@ -722,8 +739,15 @@ fn allocateLoadRWSeg(self: *Elf) !void {
     phdr.p_filesz = 0;
     phdr.p_memsz = 0;
 
-    if (self.data_sect_index) |ndx| {
-        try self.allocateSection(ndx, self.load_rw_seg_index.?);
+    // This assumes ordering of section headers matches ordering of sections in file
+    // so that the segments are contiguous in memory.
+    for (self.shdrs.items) |shdr, ndx| {
+        const is_write_alloc = blk: {
+            const flags = shdr.sh_flags;
+            break :blk flags & elf.SHF_ALLOC != 0 and flags & elf.SHF_WRITE != 0;
+        };
+        if (!is_write_alloc) continue;
+        try self.allocateSection(@intCast(u16, ndx), self.load_rw_seg_index.?);
     }
 
     log.debug("allocating read-write LOAD segment:", .{});
