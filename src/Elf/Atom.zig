@@ -108,7 +108,7 @@ pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
             elf.R_X86_64_NONE => {},
             elf.R_X86_64_64 => {
                 const tsym = object.symtab.items[r_sym];
-                log.debug("R_X86_64_64: target address 0x{x}", .{tsym.st_value});
+                log.debug("R_X86_64_64: {x}: target address 0x{x}", .{ rel.r_offset, tsym.st_value });
                 mem.writeIntLittle(u64, self.code.items[rel.r_offset..][0..8], tsym.st_value);
             },
             elf.R_X86_64_PC32 => {
@@ -116,7 +116,8 @@ pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
                 const tsym = object.symtab.items[r_sym];
                 const target = @intCast(i64, tsym.st_value);
                 const displacement = @intCast(i32, target - source + rel.r_addend);
-                log.debug("R_X86_64_PC32: source addr 0x{x}, target addr 0x{x}, displacement 0x{x}", .{
+                log.debug("R_X86_64_PC32: {x}: source addr 0x{x}, target addr 0x{x}, displacement 0x{x}", .{
+                    rel.r_offset,
                     source,
                     target,
                     displacement,
@@ -147,10 +148,19 @@ pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
                     break :blk @intCast(i64, tsym.st_value);
                 };
                 const displacement = @intCast(i32, target - source + rel.r_addend);
-                log.debug("R_X86_64_PLT32: source addr 0x{x}, target addr 0x{x}, displacement 0x{x}", .{
-                    source, target, displacement,
+                log.debug("R_X86_64_PLT32: {x}: source addr 0x{x}, target addr 0x{x}, displacement 0x{x}", .{
+                    rel.r_offset,
+                    source,
+                    target,
+                    displacement,
                 });
                 mem.writeIntLittle(i32, self.code.items[rel.r_offset..][0..4], displacement);
+            },
+            elf.R_X86_64_32 => {
+                const tsym = object.symtab.items[r_sym];
+                const target = @intCast(u32, @intCast(i64, tsym.st_value) + rel.r_addend);
+                log.debug("R_X86_64_32: {x}: target addr 0x{x}", .{ rel.r_offset, target });
+                mem.writeIntLittle(u32, self.code.items[rel.r_offset..][0..4], target);
             },
             else => {
                 log.debug("TODO unhandled relocation type: {d}", .{r_type});

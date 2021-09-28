@@ -33,6 +33,13 @@ load_rw_seg_index: ?u16 = null,
 text_sect_index: ?u16 = null,
 rodata_sect_index: ?u16 = null,
 data_sect_index: ?u16 = null,
+
+debug_abbrev_index: ?u16 = null,
+debug_info_index: ?u16 = null,
+debug_str_index: ?u16 = null,
+debug_frame_index: ?u16 = null,
+debug_line_index: ?u16 = null,
+
 symtab_sect_index: ?u16 = null,
 strtab_sect_index: ?u16 = null,
 shstrtab_sect_index: ?u16 = null,
@@ -126,6 +133,7 @@ pub fn flush(self: *Elf) !void {
     try self.allocateLoadRSeg();
     try self.allocateLoadRESeg();
     try self.allocateLoadRWSeg();
+    try self.allocateNonAllocSections();
     try self.allocateAtoms();
 
     try self.logSymtab();
@@ -299,9 +307,105 @@ fn populateMetadata(self: *Elf) !void {
 pub fn getMatchingSection(self: *Elf, object_id: u16, sect_id: u16) !?u16 {
     const object = self.objects.items[object_id];
     const shdr = object.shdrs.items[sect_id];
+    const shdr_name = object.getString(shdr.sh_name);
     const flags = shdr.sh_flags;
     const res: ?u16 = blk: {
+        if (flags & elf.SHF_EXCLUDE != 0) break :blk null;
         if (flags & elf.SHF_ALLOC == 0) {
+            if (flags & elf.SHF_MERGE != 0 and flags & elf.SHF_STRINGS != 0) {
+                if (mem.eql(u8, shdr_name, ".debug_str")) {
+                    if (self.debug_str_index == null) {
+                        self.debug_str_index = @intCast(u16, self.shdrs.items.len);
+                        try self.shdrs.append(self.base.allocator, .{
+                            .sh_name = try self.makeShString(shdr_name),
+                            .sh_type = elf.SHT_PROGBITS,
+                            .sh_flags = elf.SHF_MERGE | elf.SHF_STRINGS,
+                            .sh_addr = 0,
+                            .sh_offset = 0,
+                            .sh_size = 0,
+                            .sh_link = 0,
+                            .sh_info = 0,
+                            .sh_addralign = 0,
+                            .sh_entsize = 1,
+                        });
+                    }
+                    break :blk self.debug_str_index.?;
+                } else if (mem.eql(u8, shdr_name, ".comment")) {
+                    log.debug("TODO .comment section", .{});
+                    break :blk null;
+                }
+            } else if (flags == 0) {
+                if (mem.eql(u8, shdr_name, ".debug_abbrev")) {
+                    if (self.debug_abbrev_index == null) {
+                        self.debug_abbrev_index = @intCast(u16, self.shdrs.items.len);
+                        try self.shdrs.append(self.base.allocator, .{
+                            .sh_name = try self.makeShString(shdr_name),
+                            .sh_type = elf.SHT_PROGBITS,
+                            .sh_flags = 0,
+                            .sh_addr = 0,
+                            .sh_offset = 0,
+                            .sh_size = 0,
+                            .sh_link = 0,
+                            .sh_info = 0,
+                            .sh_addralign = 0,
+                            .sh_entsize = 0,
+                        });
+                    }
+                    break :blk self.debug_abbrev_index.?;
+                } else if (mem.eql(u8, shdr_name, ".debug_info")) {
+                    if (self.debug_info_index == null) {
+                        self.debug_info_index = @intCast(u16, self.shdrs.items.len);
+                        try self.shdrs.append(self.base.allocator, .{
+                            .sh_name = try self.makeShString(shdr_name),
+                            .sh_type = elf.SHT_PROGBITS,
+                            .sh_flags = 0,
+                            .sh_addr = 0,
+                            .sh_offset = 0,
+                            .sh_size = 0,
+                            .sh_link = 0,
+                            .sh_info = 0,
+                            .sh_addralign = 0,
+                            .sh_entsize = 0,
+                        });
+                    }
+                    break :blk self.debug_info_index.?;
+                } else if (mem.eql(u8, shdr_name, ".debug_frame")) {
+                    if (self.debug_frame_index == null) {
+                        self.debug_frame_index = @intCast(u16, self.shdrs.items.len);
+                        try self.shdrs.append(self.base.allocator, .{
+                            .sh_name = try self.makeShString(shdr_name),
+                            .sh_type = elf.SHT_PROGBITS,
+                            .sh_flags = 0,
+                            .sh_addr = 0,
+                            .sh_offset = 0,
+                            .sh_size = 0,
+                            .sh_link = 0,
+                            .sh_info = 0,
+                            .sh_addralign = 0,
+                            .sh_entsize = 0,
+                        });
+                    }
+                    break :blk self.debug_frame_index.?;
+                } else if (mem.eql(u8, shdr_name, ".debug_line")) {
+                    if (self.debug_line_index == null) {
+                        self.debug_line_index = @intCast(u16, self.shdrs.items.len);
+                        try self.shdrs.append(self.base.allocator, .{
+                            .sh_name = try self.makeShString(shdr_name),
+                            .sh_type = elf.SHT_PROGBITS,
+                            .sh_flags = 0,
+                            .sh_addr = 0,
+                            .sh_offset = 0,
+                            .sh_size = 0,
+                            .sh_link = 0,
+                            .sh_info = 0,
+                            .sh_addralign = 0,
+                            .sh_entsize = 0,
+                        });
+                    }
+                    break :blk self.debug_line_index.?;
+                }
+            }
+
             log.debug("TODO non-alloc sections", .{});
             log.debug("  {s} => {}", .{ object.getString(shdr.sh_name), shdr });
             break :blk null;
@@ -383,6 +487,11 @@ fn sortShdrs(self: *Elf) !void {
         &self.rodata_sect_index,
         &self.text_sect_index,
         &self.data_sect_index,
+        &self.debug_abbrev_index,
+        &self.debug_info_index,
+        &self.debug_str_index,
+        &self.debug_frame_index,
+        &self.debug_line_index,
         &self.symtab_sect_index,
         &self.shstrtab_sect_index,
         &self.strtab_sect_index,
@@ -622,6 +731,19 @@ fn allocateLoadRWSeg(self: *Elf) !void {
     log.debug("  in memory from 0x{x} to 0x{x}", .{ phdr.p_vaddr, phdr.p_vaddr + phdr.p_memsz });
 
     self.next_offset = phdr.p_offset + phdr.p_filesz;
+}
+
+fn allocateNonAllocSections(self: *Elf) !void {
+    for (self.shdrs.items) |*shdr| {
+        if (shdr.sh_flags & elf.SHF_ALLOC != 0) continue;
+        shdr.sh_offset = mem.alignForwardGeneric(u64, self.next_offset, shdr.sh_addralign);
+        log.debug("setting '{s}' non-alloc section's offsets from 0x{x} to 0x{x}", .{
+            self.getShString(shdr.sh_name),
+            shdr.sh_offset,
+            shdr.sh_offset + shdr.sh_size,
+        });
+        self.next_offset = shdr.sh_offset + shdr.sh_size;
+    }
 }
 
 fn allocateAtoms(self: *Elf) !void {
