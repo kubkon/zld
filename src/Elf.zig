@@ -125,6 +125,23 @@ pub fn flush(self: *Elf) !void {
         try self.resolveSymbolsInObject(@intCast(u16, object_id));
     }
 
+    // TODO cache this like in Mach-O.
+    var has_undefs = false;
+    for (self.globals.values()) |global| {
+        const object = self.objects.items[global.file];
+        const sym = object.symtab.items[global.sym_index];
+        if (sym.st_shndx == elf.SHN_UNDEF and sym.st_info & 0xf == elf.STT_NOTYPE) {
+            const sym_name = object.getString(sym.st_name);
+            log.err("undefined reference to symbol '{s}'", .{sym_name});
+            log.err("  first referenced in '{s}'", .{object.name});
+            has_undefs = true;
+        }
+    }
+
+    if (has_undefs) {
+        return error.UndefinedSymbolReference;
+    }
+
     for (self.objects.items) |*object, object_id| {
         try object.parseIntoAtoms(self.base.allocator, @intCast(u16, object_id), self);
     }
