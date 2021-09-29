@@ -8,6 +8,7 @@ const log = std.log.scoped(.elf);
 const mem = std.mem;
 
 const Allocator = mem.Allocator;
+const Archive = @import("Elf/Archive.zig");
 const Atom = @import("Elf/Atom.zig");
 const Object = @import("Elf/Object.zig");
 const Zld = @import("Zld.zig");
@@ -16,6 +17,7 @@ pub const base_tag = Zld.Tag.elf;
 
 base: Zld,
 
+archives: std.ArrayListUnmanaged(Archive) = .{},
 objects: std.ArrayListUnmanaged(Object) = .{},
 
 header: ?elf.Elf64_Ehdr = null,
@@ -50,6 +52,7 @@ next_offset: u64 = 0,
 base_addr: u64 = 0x200000,
 
 globals: std.StringArrayHashMapUnmanaged(SymbolWithLoc) = .{},
+unresolved: std.AutoArrayHashMapUnmanaged(u32, void) = .{},
 
 managed_atoms: std.ArrayListUnmanaged(*Atom) = .{},
 atoms: std.AutoHashMapUnmanaged(u16, *Atom) = .{},
@@ -104,41 +107,110 @@ pub fn deinit(self: *Elf) void {
     for (self.globals.keys()) |key| {
         self.base.allocator.free(key);
     }
+    self.unresolved.deinit(self.base.allocator);
     self.globals.deinit(self.base.allocator);
     self.shstrtab.deinit(self.base.allocator);
     self.strtab.deinit(self.base.allocator);
     self.shdrs.deinit(self.base.allocator);
     self.phdrs.deinit(self.base.allocator);
+    for (self.objects.items) |*object| {
+        object.deinit(self.base.allocator);
+    }
     self.objects.deinit(self.base.allocator);
+    for (self.archives.items) |*archive| {
+        archive.deinit(self.base.allocator);
+    }
+    self.archives.deinit(self.base.allocator);
 }
 
 fn closeFiles(self: Elf) void {
     for (self.objects.items) |object| {
         object.file.close();
     }
+    for (self.archives.items) |archive| {
+        archive.file.close();
+    }
+}
+
+fn resolveLib(
+    arena: *Allocator,
+    search_dirs: []const []const u8,
+    name: []const u8,
+    ext: []const u8,
+) !?[]const u8 {
+    const search_name = try std.fmt.allocPrint(arena, "lib{s}{s}", .{ name, ext });
+
+    for (search_dirs) |dir| {
+        const full_path = try fs.path.join(arena, &[_][]const u8{ dir, search_name });
+
+        // Check if the file exists.
+        const tmp = fs.cwd().openFile(full_path, .{}) catch |err| switch (err) {
+            error.FileNotFound => continue,
+            else => |e| return e,
+        };
+        defer tmp.close();
+
+        return full_path;
+    }
+
+    return null;
 }
 
 pub fn flush(self: *Elf) !void {
+    var arena_allocator = std.heap.ArenaAllocator.init(self.base.allocator);
+    defer arena_allocator.deinit();
+    const arena = &arena_allocator.allocator;
+
+    var lib_dirs = std.ArrayList([]const u8).init(arena);
+    for (self.base.options.lib_dirs) |dir| {
+        // Verify that search path actually exists
+        var tmp = fs.cwd().openDir(dir, .{}) catch |err| switch (err) {
+            error.FileNotFound => continue,
+            else => |e| return e,
+        };
+        defer tmp.close();
+
+        try lib_dirs.append(dir);
+    }
+
+    var libs = std.ArrayList([]const u8).init(arena);
+    var lib_not_found = false;
+    for (self.base.options.libs) |lib_name| {
+        for (&[_][]const u8{ ".dylib", ".a" }) |ext| {
+            if (try resolveLib(arena, lib_dirs.items, lib_name, ext)) |full_path| {
+                try libs.append(full_path);
+                break;
+            }
+        } else {
+            log.warn("library not found for '-l{s}'", .{lib_name});
+            lib_not_found = true;
+        }
+    }
+    if (lib_not_found) {
+        log.warn("Library search paths:", .{});
+        for (lib_dirs.items) |dir| {
+            log.warn("  {s}", .{dir});
+        }
+    }
+
     try self.parsePositionals(self.base.options.positionals);
+    try self.parseLibs(libs.items);
 
     for (self.objects.items) |_, object_id| {
         try self.resolveSymbolsInObject(@intCast(u16, object_id));
     }
 
-    // TODO cache this like in Mach-O.
-    var has_undefs = false;
-    for (self.globals.values()) |global| {
+    try self.resolveSymbolsInArchives();
+
+    for (self.unresolved.keys()) |ndx| {
+        const global = self.globals.values()[ndx];
         const object = self.objects.items[global.file];
         const sym = object.symtab.items[global.sym_index];
-        if (sym.st_shndx == elf.SHN_UNDEF and sym.st_info & 0xf == elf.STT_NOTYPE) {
-            const sym_name = object.getString(sym.st_name);
-            log.err("undefined reference to symbol '{s}'", .{sym_name});
-            log.err("  first referenced in '{s}'", .{object.name});
-            has_undefs = true;
-        }
+        const sym_name = object.getString(sym.st_name);
+        log.err("undefined reference to symbol '{s}'", .{sym_name});
+        log.err("  first referenced in '{s}'", .{object.name});
     }
-
-    if (has_undefs) {
+    if (self.unresolved.count() > 0) {
         return error.UndefinedSymbolReference;
     }
 
@@ -577,6 +649,15 @@ fn parsePositionals(self: *Elf, files: []const []const u8) !void {
     }
 }
 
+fn parseLibs(self: *Elf, libs: []const []const u8) !void {
+    for (libs) |lib| {
+        log.debug("parsing lib path '{s}'", .{lib});
+        if (try self.parseArchive(lib)) continue;
+
+        log.warn("unknown filetype for a library: '{s}'", .{lib});
+    }
+}
+
 fn parseObject(self: *Elf, path: []const u8) !bool {
     const file = fs.cwd().openFile(path, .{}) catch |err| switch (err) {
         error.FileNotFound => return false,
@@ -605,6 +686,34 @@ fn parseObject(self: *Elf, path: []const u8) !bool {
     return true;
 }
 
+fn parseArchive(self: *Elf, path: []const u8) !bool {
+    const file = fs.cwd().openFile(path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => |e| return e,
+    };
+    errdefer file.close();
+
+    const name = try self.base.allocator.dupe(u8, path);
+    errdefer self.base.allocator.free(name);
+
+    var archive = Archive{
+        .name = name,
+        .file = file,
+    };
+
+    archive.parse(self.base.allocator, self.base.options.target) catch |err| switch (err) {
+        error.EndOfStream, error.NotArchive => {
+            archive.deinit(self.base.allocator);
+            return false;
+        },
+        else => |e| return e,
+    };
+
+    try self.archives.append(self.base.allocator, archive);
+
+    return true;
+}
+
 fn resolveSymbolsInObject(self: *Elf, object_id: u16) !void {
     const object = self.objects.items[object_id];
 
@@ -623,6 +732,7 @@ fn resolveSymbolsInObject(self: *Elf, object_id: u16) !void {
             },
             elf.STB_WEAK, elf.STB_GLOBAL => {
                 const name = try self.base.allocator.dupe(u8, sym_name);
+                const glob_ndx = @intCast(u32, self.globals.values().len);
                 const res = try self.globals.getOrPut(self.base.allocator, name);
                 defer if (res.found_existing) self.base.allocator.free(name);
 
@@ -631,6 +741,9 @@ fn resolveSymbolsInObject(self: *Elf, object_id: u16) !void {
                         .sym_index = sym_id,
                         .file = object_id,
                     };
+                    if (sym.st_shndx == elf.SHN_UNDEF and st_type == elf.STT_NOTYPE) {
+                        try self.unresolved.putNoClobber(self.base.allocator, glob_ndx, {});
+                    }
                     continue;
                 }
 
@@ -656,6 +769,8 @@ fn resolveSymbolsInObject(self: *Elf, object_id: u16) !void {
                         log.debug("  (symbol '{s}' already defined; skipping...)", .{sym_name});
                         continue;
                     }
+                } else {
+                    _ = self.unresolved.fetchSwapRemove(glob_ndx);
                 }
 
                 res.value_ptr.* = .{
@@ -670,6 +785,36 @@ fn resolveSymbolsInObject(self: *Elf, object_id: u16) !void {
                 return error.UnhandledSymbolBindType;
             },
         }
+    }
+}
+
+fn resolveSymbolsInArchives(self: *Elf) !void {
+    if (self.archives.items.len == 0) return;
+
+    var next_sym: usize = 0;
+    loop: while (next_sym < self.unresolved.count()) {
+        const global = self.globals.values()[self.unresolved.keys()[next_sym]];
+        const ref_object = self.objects.items[global.file];
+        const sym = ref_object.symtab.items[global.sym_index];
+        const sym_name = ref_object.getString(sym.st_name);
+
+        for (self.archives.items) |archive| {
+            // Check if the entry exists in a static archive.
+            const offsets = archive.toc.get(sym_name) orelse {
+                // No hit.
+                continue;
+            };
+            assert(offsets.items.len > 0);
+
+            // const object_id = @intCast(u16, self.objects.items.len);
+            // const object = try self.objects.addOne(self.base.allocator);
+            // object.* = try archive.parseObject(self.base.allocator, self.base.options.target, offsets.items[0]);
+            // try self.resolveSymbolsInObject(object_id);
+
+            continue :loop;
+        }
+
+        next_sym += 1;
     }
 }
 
