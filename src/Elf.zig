@@ -702,7 +702,7 @@ fn parseArchive(self: *Elf, path: []const u8) !bool {
         .file = file,
     };
 
-    archive.parse(self.base.allocator, self.base.options.target) catch |err| switch (err) {
+    archive.parse(self.base.allocator) catch |err| switch (err) {
         error.EndOfStream, error.NotArchive => {
             archive.deinit(self.base.allocator);
             return false;
@@ -807,10 +807,10 @@ fn resolveSymbolsInArchives(self: *Elf) !void {
             };
             assert(offsets.items.len > 0);
 
-            // const object_id = @intCast(u16, self.objects.items.len);
-            // const object = try self.objects.addOne(self.base.allocator);
-            // object.* = try archive.parseObject(self.base.allocator, self.base.options.target, offsets.items[0]);
-            // try self.resolveSymbolsInObject(object_id);
+            const object_id = @intCast(u16, self.objects.items.len);
+            const object = try self.objects.addOne(self.base.allocator);
+            object.* = try archive.parseObject(self.base.allocator, self.base.options.target, offsets.items[0]);
+            try self.resolveSymbolsInObject(object_id);
 
             continue :loop;
         }

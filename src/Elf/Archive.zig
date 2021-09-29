@@ -13,12 +13,12 @@ const Object = @import("Object.zig");
 file: fs.File,
 name: []const u8,
 
-header: ?ar_hdr = null,
-
 /// Parsed table of contents.
 /// Each symbol name points to a list of all definition
 /// sites within the current static archive.
 toc: std.StringArrayHashMapUnmanaged(std.ArrayListUnmanaged(u32)) = .{},
+
+extnames_strtab: std.ArrayListUnmanaged(u8) = .{},
 
 // Archive files start with the ARMAG identifying string.  Then follows a
 // `struct ar_hdr', and as many bytes of member file data as its `ar_size'
@@ -30,6 +30,8 @@ const SARMAG: u4 = 8;
 
 /// String in ar_fmag at the end of each header.
 const ARFMAG: *const [2:0]u8 = "`\n";
+
+const SYM64NAME: *const [7:0]u8 = "/SYM64/";
 
 const ar_hdr = extern struct {
     /// Member file name, sometimes / terminated.
@@ -52,9 +54,33 @@ const ar_hdr = extern struct {
 
     /// Always contains ARFMAG.
     ar_fmag: [2]u8,
+
+    fn date(self: ar_hdr) !u64 {
+        const value = getValue(&self.ar_date);
+        return std.fmt.parseInt(u64, value, 10);
+    }
+
+    fn size(self: ar_hdr) !u32 {
+        const value = getValue(&self.ar_size);
+        return std.fmt.parseInt(u32, value, 10);
+    }
+
+    fn getValue(raw: []const u8) []const u8 {
+        return mem.trimRight(u8, raw, &[_]u8{@as(u8, 0x20)});
+    }
+
+    fn read(reader: anytype) !ar_hdr {
+        const header = try reader.readStruct(ar_hdr);
+        if (!mem.eql(u8, &header.ar_fmag, ARFMAG)) {
+            log.debug("invalid header delimiter: expected '{s}', found '{s}'", .{ ARFMAG, header.ar_fmag });
+            return error.NotArchive;
+        }
+        return header;
+    }
 };
 
 pub fn deinit(self: *Archive, allocator: *Allocator) void {
+    self.extnames_strtab.deinit(allocator);
     for (self.toc.keys()) |*key| {
         allocator.free(key.*);
     }
@@ -65,22 +91,118 @@ pub fn deinit(self: *Archive, allocator: *Allocator) void {
     allocator.free(self.name);
 }
 
-pub fn parse(self: *Archive, allocator: *Allocator, target: std.Target) !void {
-    _ = allocator;
-    _ = target;
+pub fn parse(self: *Archive, allocator: *Allocator) !void {
     const reader = self.file.reader();
     const magic = try reader.readBytesNoEof(SARMAG);
-
     if (!mem.eql(u8, &magic, ARMAG)) {
         log.debug("invalid magic: expected '{s}', found '{s}'", .{ ARMAG, magic });
         return error.NotArchive;
     }
 
-    self.header = try reader.readStruct(ar_hdr);
-    if (!mem.eql(u8, &self.header.?.ar_fmag, ARFMAG)) {
-        log.debug("invalid header delimiter: expected '{s}', found '{s}'", .{ ARFMAG, self.header.?.ar_fmag });
-        return error.NotArchive;
+    {
+        // Parse lookup table
+        const hdr = try ar_hdr.read(reader);
+        const size = try hdr.size();
+        const ar_name = ar_hdr.getValue(&hdr.ar_name);
+
+        if (!mem.eql(u8, ar_name, "/")) {
+            log.err("expected symbol lookup table as first data section; instead found {s}", .{&hdr.ar_name});
+            return error.NoSymbolLookupTableInArchive;
+        }
+
+        var buffer = try allocator.alloc(u8, size);
+        defer allocator.free(buffer);
+
+        try reader.readNoEof(buffer);
+
+        var inner_stream = std.io.fixedBufferStream(buffer);
+        var inner_reader = inner_stream.reader();
+
+        const nsyms = try inner_reader.readIntBig(u32);
+
+        var offsets = std.ArrayList(u32).init(allocator);
+        defer offsets.deinit();
+        try offsets.ensureTotalCapacity(nsyms);
+
+        var i: usize = 0;
+        while (i < nsyms) : (i += 1) {
+            const offset = try inner_reader.readIntBig(u32);
+            offsets.appendAssumeCapacity(offset);
+        }
+
+        i = 0;
+        var pos: usize = try inner_stream.getPos();
+        while (i < nsyms) : (i += 1) {
+            const sym_name = mem.spanZ(@ptrCast([*:0]const u8, buffer.ptr + pos));
+            const owned_name = try allocator.dupe(u8, sym_name);
+            const res = try self.toc.getOrPut(allocator, owned_name);
+            defer if (res.found_existing) allocator.free(owned_name);
+
+            if (!res.found_existing) {
+                res.value_ptr.* = .{};
+            }
+
+            try res.value_ptr.append(allocator, offsets.items[i]);
+            pos += sym_name.len + 1;
+        }
     }
 
-    log.debug("{}", .{self.header.?});
+    blk: {
+        // Try parsing extended names table
+        const hdr = try ar_hdr.read(reader);
+        const size = try hdr.size();
+        const name = ar_hdr.getValue(&hdr.ar_name);
+
+        if (!mem.eql(u8, name, "//")) {
+            break :blk;
+        }
+
+        var buffer = try allocator.alloc(u8, size);
+        defer allocator.free(buffer);
+
+        try reader.readNoEof(buffer);
+        try self.extnames_strtab.appendSlice(allocator, buffer);
+    }
+
+    try reader.context.seekTo(0);
+}
+
+fn getExtName(self: Archive, off: u32) []const u8 {
+    assert(off < self.extnames_strtab.items.len);
+    return mem.spanZ(@ptrCast([*:'\n']const u8, self.extnames_strtab.items.ptr + off));
+}
+
+pub fn parseObject(self: Archive, allocator: *Allocator, target: std.Target, offset: u32) !Object {
+    const reader = self.file.reader();
+    try reader.context.seekTo(offset);
+
+    const hdr = try ar_hdr.read(reader);
+    const name = blk: {
+        const name = ar_hdr.getValue(&hdr.ar_name);
+        if (name[0] == '/') {
+            const off = try std.fmt.parseInt(u32, name[1..], 10);
+            break :blk self.getExtName(off);
+        }
+        break :blk name;
+    };
+    const object_name = name[0 .. name.len - 1]; // to account for trailing '/'
+
+    log.debug("extracting object '{s}' from archive '{s}'", .{ object_name, self.name });
+
+    const full_name = blk: {
+        var buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        const path = try std.os.realpath(self.name, &buffer);
+        break :blk try std.fmt.allocPrint(allocator, "{s}({s})", .{ path, object_name });
+    };
+
+    var object = Object{
+        .file = try fs.cwd().openFile(self.name, .{}),
+        .name = full_name,
+        .file_offset = @intCast(u32, try reader.context.getPos()),
+    };
+
+    try object.parse(allocator, target);
+    try reader.context.seekTo(0);
+
+    return object;
 }

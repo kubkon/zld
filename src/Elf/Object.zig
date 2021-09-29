@@ -14,6 +14,7 @@ const Elf = @import("../Elf.zig");
 
 file: fs.File,
 name: []const u8,
+file_offset: ?u32 = null,
 
 header: ?elf.Elf64_Ehdr = null,
 
@@ -38,6 +39,9 @@ pub fn deinit(self: *Object, allocator: *Allocator) void {
 
 pub fn parse(self: *Object, allocator: *Allocator, target: std.Target) !void {
     const reader = self.file.reader();
+    if (self.file_offset) |offset| {
+        try reader.context.seekTo(offset);
+    }
     const header = try reader.readStruct(elf.Elf64_Ehdr);
 
     if (!mem.eql(u8, header.e_ident[0..4], "\x7fELF")) {
@@ -86,7 +90,8 @@ fn parseShdrs(self: *Object, allocator: *Allocator, reader: anytype) !void {
     const shnum = self.header.?.e_shnum;
     if (shnum == 0) return;
 
-    try reader.context.seekTo(self.header.?.e_shoff);
+    const offset = self.file_offset orelse 0;
+    try reader.context.seekTo(offset + self.header.?.e_shoff);
     try self.shdrs.ensureTotalCapacity(allocator, shnum);
 
     var i: u16 = 0;
