@@ -644,6 +644,7 @@ fn parsePositionals(self: *Elf, files: []const []const u8) !void {
         log.debug("parsing input file path '{s}'", .{full_path});
 
         if (try self.parseObject(full_path)) continue;
+        if (try self.parseArchive(full_path)) continue;
 
         log.warn("unknown filetype for positional input file: '{s}'", .{file_name});
     }
