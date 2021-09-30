@@ -215,7 +215,7 @@ pub fn flush(self: *Elf) !void {
     try self.resolveSymbolsInArchives();
     try self.resolveSpecialSymbols();
 
-    try self.logSymtab();
+    self.logSymtab();
 
     for (self.unresolved.keys()) |ndx| {
         const global = self.globals.values()[ndx];
@@ -241,7 +241,8 @@ pub fn flush(self: *Elf) !void {
     try self.allocateNonAllocSections();
     try self.allocateAtoms();
 
-    try self.logSymtab();
+    self.logSymtab();
+    self.logAtoms();
 
     try self.writeAtoms();
     try self.setEntryPoint();
@@ -1001,23 +1002,26 @@ fn allocateSection(self: *Elf, ndx: u16, phdr_ndx: u16) !void {
     const phdr = &self.phdrs.items[phdr_ndx];
     const base_offset = phdr.p_offset + phdr.p_filesz;
     shdr.sh_offset = mem.alignForwardGeneric(u64, base_offset, shdr.sh_addralign);
-    shdr.sh_addr = phdr.p_vaddr + shdr.sh_offset;
-
-    log.debug("allocating '{s}' section from 0x{x} to 0x{x}", .{
-        self.getShString(shdr.sh_name),
-        shdr.sh_addr,
-        shdr.sh_addr + shdr.sh_size,
-    });
+    shdr.sh_addr = phdr.p_vaddr + shdr.sh_offset - phdr.p_offset;
+    const p_size = shdr.sh_offset + shdr.sh_size - base_offset;
 
     if (phdr.p_filesz == 0) {
+        shdr.sh_addr += phdr.p_offset;
         phdr.p_offset = shdr.sh_offset;
         phdr.p_vaddr += shdr.sh_offset;
         phdr.p_paddr += shdr.sh_offset;
     }
 
-    // TODO fix this!
-    phdr.p_filesz += (shdr.sh_offset + shdr.sh_size) - (phdr.p_offset + phdr.p_filesz);
-    phdr.p_memsz = phdr.p_filesz;
+    log.debug("allocating section '{s}' from 0x{x} to 0x{x} (0x{x} - 0x{x})", .{
+        self.getShString(shdr.sh_name),
+        shdr.sh_addr,
+        shdr.sh_addr + shdr.sh_size,
+        shdr.sh_offset,
+        shdr.sh_offset + shdr.sh_size,
+    });
+
+    phdr.p_filesz += p_size;
+    phdr.p_memsz += p_size;
 }
 
 fn getSegmentBaseAddr(self: *Elf, phdr_ndx: u16) u64 {
@@ -1196,6 +1200,36 @@ fn allocateAtoms(self: *Elf) !void {
     }
 }
 
+fn logAtoms(self: Elf) void {
+    for (self.shdrs.items) |shdr, ndx| {
+        log.debug("{s}", .{self.getShString(shdr.sh_name)});
+        var atom = self.atoms.get(@intCast(u16, ndx)) orelse {
+            log.debug("no atoms", .{});
+            continue;
+        };
+
+        while (atom.prev) |prev| {
+            atom = prev;
+        }
+
+        while (true) {
+            const sym = if (atom.file) |file| blk: {
+                const object = self.objects.items[file];
+                break :blk object.symtab.items[atom.local_sym_index];
+            } else self.locals.items[atom.local_sym_index];
+            const sym_name = if (atom.file) |file| blk: {
+                const object = self.objects.items[file];
+                break :blk object.getString(sym.st_name);
+            } else self.getString(sym.st_name);
+            log.debug("{s}: 0x{x} => {}", .{ sym_name, sym.st_value - shdr.sh_addr, atom });
+
+            if (atom.next) |next| {
+                atom = next;
+            } else break;
+        }
+    }
+}
+
 fn writeAtoms(self: *Elf) !void {
     var it = self.atoms.iterator();
     while (it.next()) |entry| {
@@ -1228,7 +1262,7 @@ fn writeAtoms(self: *Elf) !void {
                 self.objects.items[file].getString(sym.st_name)
             else
                 self.getString(sym.st_name);
-            log.debug("writing atom '{s}' at offset 0x{x}", .{ sym_name, shdr.sh_offset + off });
+            log.debug("  writing atom '{s}' at offset 0x{x}", .{ sym_name, shdr.sh_offset + off });
 
             mem.copy(u8, buffer[off..][0..atom.size], atom.code.items);
 
@@ -1376,7 +1410,7 @@ fn makeShString(self: *Elf, bytes: []const u8) !u32 {
     return new_off;
 }
 
-fn getShString(self: Elf, off: u32) []const u8 {
+pub fn getShString(self: Elf, off: u32) []const u8 {
     assert(off < self.shstrtab.items.len);
     return mem.spanZ(@ptrCast([*:0]const u8, self.shstrtab.items.ptr + off));
 }
@@ -1395,7 +1429,7 @@ pub fn getString(self: Elf, off: u32) []const u8 {
     return mem.spanZ(@ptrCast([*:0]const u8, self.strtab.items.ptr + off));
 }
 
-fn logSymtab(self: Elf) !void {
+fn logSymtab(self: Elf) void {
     for (self.objects.items) |object| {
         log.debug("locals in {s}", .{object.name});
         for (object.symtab.items) |sym, i| {

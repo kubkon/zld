@@ -199,6 +199,14 @@ pub fn parseIntoAtoms(self: *Object, allocator: *Allocator, object_id: u16, elf_
 
         log.debug("  parsing section '{s}'", .{shdr_name});
 
+        const syms = symbols_by_shndx.get(ndx).?;
+        if (syms.items.len == 0) {
+            if (shdr.sh_size != 0) {
+                log.debug("  TODO handle non-empty sections with no symbols: {s}", .{shdr_name});
+            }
+            continue;
+        }
+
         const tshdr_ndx = (try elf_file.getMatchingSection(object_id, ndx)) orelse {
             log.debug("unhandled section", .{});
             continue;
@@ -214,14 +222,6 @@ pub fn parseIntoAtoms(self: *Object, allocator: *Allocator, object_id: u16, elf_
         atom.file = object_id;
         atom.size = @intCast(u32, shdr.sh_size);
         atom.alignment = @intCast(u32, shdr.sh_addralign);
-
-        const syms = symbols_by_shndx.get(ndx).?;
-        if (syms.items.len == 0) {
-            if (shdr.sh_size != 0) {
-                log.debug("  TODO handle non-empty sections with no symbols: {s}", .{shdr_name});
-            }
-            continue;
-        }
 
         for (syms.items) |sym_id| {
             const sym = self.symtab.items[sym_id];
@@ -276,8 +276,12 @@ pub fn parseIntoAtoms(self: *Object, allocator: *Allocator, object_id: u16, elf_
 
         // Update target section's metadata
         const tshdr = &elf_file.shdrs.items[tshdr_ndx];
-        tshdr.sh_size = mem.alignForwardGeneric(u64, tshdr.sh_size, atom.alignment) + atom.size;
         tshdr.sh_addralign = math.max(tshdr.sh_addralign, atom.alignment);
+        tshdr.sh_size = mem.alignForwardGeneric(
+            u64,
+            mem.alignForwardGeneric(u64, tshdr.sh_size, atom.alignment) + atom.size,
+            tshdr.sh_addralign,
+        );
 
         if (elf_file.atoms.getPtr(tshdr_ndx)) |last| {
             last.*.next = atom;
