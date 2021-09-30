@@ -56,6 +56,7 @@ next_offset: u64 = 0,
 
 base_addr: u64 = 0x200000,
 
+symtab: std.ArrayListUnmanaged(elf.Elf64_Sym) = .{},
 globals: std.StringArrayHashMapUnmanaged(SymbolWithLoc) = .{},
 unresolved: std.AutoArrayHashMapUnmanaged(u32, void) = .{},
 
@@ -63,8 +64,11 @@ managed_atoms: std.ArrayListUnmanaged(*Atom) = .{},
 atoms: std.AutoHashMapUnmanaged(u16, *Atom) = .{},
 
 pub const SymbolWithLoc = struct {
+    /// Index in the respective symbol table.
     sym_index: u32,
-    file: u16,
+
+    /// null means it's a synthetic global.
+    file: ?u16,
 };
 
 pub fn openPath(allocator: *Allocator, options: Zld.Options) !*Elf {
@@ -114,6 +118,7 @@ pub fn deinit(self: *Elf) void {
     }
     self.unresolved.deinit(self.base.allocator);
     self.globals.deinit(self.base.allocator);
+    self.symtab.deinit(self.base.allocator);
     self.shstrtab.deinit(self.base.allocator);
     self.strtab.deinit(self.base.allocator);
     self.shdrs.deinit(self.base.allocator);
@@ -204,14 +209,13 @@ pub fn flush(self: *Elf) !void {
     for (self.objects.items) |_, object_id| {
         try self.resolveSymbolsInObject(@intCast(u16, object_id));
     }
-
     try self.resolveSymbolsInArchives();
 
     try self.logSymtab();
 
     for (self.unresolved.keys()) |ndx| {
         const global = self.globals.values()[ndx];
-        const object = self.objects.items[global.file];
+        const object = self.objects.items[global.file.?];
         const sym = object.symtab.items[global.sym_index];
         const sym_name = object.getString(sym.st_name);
 
@@ -860,7 +864,7 @@ fn resolveSymbolsInObject(self: *Elf, object_id: u16) !void {
                 }
 
                 const global = res.value_ptr.*;
-                const linked_obj = self.objects.items[global.file];
+                const linked_obj = self.objects.items[global.file.?];
                 const linked_sym = linked_obj.symtab.items[global.sym_index];
                 const linked_sym_bind = linked_sym.st_info >> 4;
 
@@ -905,7 +909,7 @@ fn resolveSymbolsInArchives(self: *Elf) !void {
     var next_sym: usize = 0;
     loop: while (next_sym < self.unresolved.count()) {
         const global = self.globals.values()[self.unresolved.keys()[next_sym]];
-        const ref_object = self.objects.items[global.file];
+        const ref_object = self.objects.items[global.file.?];
         const sym = ref_object.symtab.items[global.sym_index];
         const sym_name = ref_object.getString(sym.st_name);
 
@@ -1159,7 +1163,7 @@ fn writeAtoms(self: *Elf) !void {
 fn setEntryPoint(self: *Elf) !void {
     if (self.base.options.output_mode != .exe) return;
     const global = self.globals.get("_start") orelse return error.DefaultEntryPointNotFound;
-    const object = self.objects.items[global.file];
+    const object = self.objects.items[global.file.?];
     const sym = object.symtab.items[global.sym_index];
     self.header.?.e_entry = sym.st_value;
 }
@@ -1198,13 +1202,15 @@ fn writeSymtab(self: *Elf) !void {
     shdr.sh_info = @intCast(u32, symtab.items.len);
     try symtab.ensureUnusedCapacity(self.globals.count());
     for (self.globals.values()) |global| {
-        const obj = self.objects.items[global.file];
-        const sym = obj.symtab.items[global.sym_index];
-        const sym_name = obj.getString(sym.st_name);
-
-        var out_sym = sym;
-        out_sym.st_name = try self.makeString(sym_name);
-        symtab.appendAssumeCapacity(out_sym);
+        const sym = if (global.file) |file| blk: {
+            const obj = self.objects.items[file];
+            const sym = obj.symtab.items[global.sym_index];
+            const sym_name = obj.getString(sym.st_name);
+            var out_sym = sym;
+            out_sym.st_name = try self.makeString(sym_name);
+            break :blk out_sym;
+        } else self.symtab.items[global.sym_index];
+        symtab.appendAssumeCapacity(sym);
     }
 
     shdr.sh_offset = mem.alignForwardGeneric(u64, self.next_offset, @alignOf(elf.Elf64_Sym));
@@ -1312,8 +1318,13 @@ fn logSymtab(self: Elf) !void {
 
     log.debug("globals:", .{});
     for (self.globals.values()) |global| {
-        const object = self.objects.items[global.file];
-        const sym = object.symtab.items[global.sym_index];
-        log.debug("  {s}: {} => {}", .{ object.getString(sym.st_name), global, sym });
+        if (global.file) |file| {
+            const object = self.objects.items[file];
+            const sym = object.symtab.items[global.sym_index];
+            log.debug("  {s}: {} => {}", .{ object.getString(sym.st_name), global, sym });
+        } else {
+            const sym = self.symtab.items[global.sym_index];
+            log.debug("  {s}: {} => {}", .{ self.getString(sym.st_name), global, sym });
+        }
     }
 }

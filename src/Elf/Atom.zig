@@ -132,17 +132,21 @@ pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
                     if (!is_local) {
                         const tsym_name = object.getString(tsym.st_name);
                         const global = elf_file.globals.get(tsym_name).?;
-                        const actual_object = elf_file.objects.items[global.file];
-                        const actual_tsym = actual_object.symtab.items[global.sym_index];
 
-                        if (actual_tsym.st_info & 0xf == elf.STT_NOTYPE and
-                            actual_tsym.st_shndx == elf.SHN_UNDEF)
-                        {
-                            log.debug("TODO handle R_X86_64_PLT32 to an UND symbol via PLT table", .{});
-                            break :blk source;
+                        if (global.file) |file| {
+                            const actual_object = elf_file.objects.items[file];
+                            const actual_tsym = actual_object.symtab.items[global.sym_index];
+                            if (actual_tsym.st_info & 0xf == elf.STT_NOTYPE and
+                                actual_tsym.st_shndx == elf.SHN_UNDEF)
+                            {
+                                log.debug("TODO handle R_X86_64_PLT32 to an UND symbol via PLT table", .{});
+                                break :blk source;
+                            }
+                            break :blk @intCast(i64, actual_tsym.st_value);
+                        } else {
+                            const actual_tsym = elf_file.symtab.items[global.sym_index];
+                            break :blk @intCast(i64, actual_tsym.st_value);
                         }
-
-                        break :blk @intCast(i64, actual_tsym.st_value);
                     }
 
                     break :blk @intCast(i64, tsym.st_value);
