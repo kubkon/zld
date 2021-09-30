@@ -101,7 +101,7 @@ fn getSymbol(self: Atom, elf_file: *Elf, index: u32) elf.Elf64_Sym {
         const object = elf_file.objects.items[file];
         return object.symtab.items[index];
     } else {
-        return elf_file.symtab.items[index];
+        return elf_file.locals.items[index];
     }
 }
 
@@ -159,7 +159,7 @@ pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
                             }
                             break :blk @intCast(i64, actual_tsym.st_value);
                         } else {
-                            const actual_tsym = elf_file.symtab.items[global.sym_index];
+                            const actual_tsym = elf_file.locals.items[global.sym_index];
                             break :blk @intCast(i64, actual_tsym.st_value);
                         }
                     }

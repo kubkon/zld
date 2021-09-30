@@ -58,7 +58,7 @@ next_offset: u64 = 0,
 
 base_addr: u64 = 0x200000,
 
-symtab: std.ArrayListUnmanaged(elf.Elf64_Sym) = .{},
+locals: std.ArrayListUnmanaged(elf.Elf64_Sym) = .{},
 globals: std.StringArrayHashMapUnmanaged(SymbolWithLoc) = .{},
 unresolved: std.AutoArrayHashMapUnmanaged(u32, void) = .{},
 
@@ -120,7 +120,7 @@ pub fn deinit(self: *Elf) void {
     }
     self.unresolved.deinit(self.base.allocator);
     self.globals.deinit(self.base.allocator);
-    self.symtab.deinit(self.base.allocator);
+    self.locals.deinit(self.base.allocator);
     self.shstrtab.deinit(self.base.allocator);
     self.strtab.deinit(self.base.allocator);
     self.shdrs.deinit(self.base.allocator);
@@ -212,7 +212,7 @@ pub fn flush(self: *Elf) !void {
         try self.resolveSymbolsInObject(@intCast(u16, object_id));
     }
     try self.resolveSymbolsInArchives();
-    try self.createInitArrayStartAtom();
+    try self.resolveSpecialSymbols();
 
     try self.logSymtab();
 
@@ -221,14 +221,6 @@ pub fn flush(self: *Elf) !void {
         const object = self.objects.items[global.file.?];
         const sym = object.symtab.items[global.sym_index];
         const sym_name = object.getString(sym.st_name);
-
-        if (mem.eql(u8, sym_name, "_DYNAMIC")) {
-            // TODO we will need to handle it when linking against shared objects.
-            // For now, we ignore it and leave it undefined since we don't have .dynamic
-            // section defined.
-            continue;
-        }
-
         log.err("undefined reference to symbol '{s}'", .{sym_name});
         log.err("  first referenced in '{s}'", .{object.name});
     }
@@ -972,58 +964,39 @@ fn resolveSymbolsInArchives(self: *Elf) !void {
     }
 }
 
-fn createInitArrayStartAtom(self: *Elf) !void {
-    const global = self.globals.getPtr("__init_array_start") orelse return;
+fn resolveSpecialSymbols(self: *Elf) !void {
+    var next_sym: usize = 0;
+    loop: while (next_sym < self.unresolved.count()) {
+        const global = &self.globals.values()[self.unresolved.keys()[next_sym]];
+        const object = self.objects.items[global.file.?];
+        const sym = object.symtab.items[global.sym_index];
+        const sym_name = object.getString(sym.st_name);
 
-    if (self.init_array_sect_index == null) {
-        self.init_array_sect_index = @intCast(u16, self.shdrs.items.len);
-        try self.shdrs.append(self.base.allocator, .{
-            .sh_name = try self.makeShString(".init_array"),
-            .sh_type = elf.SHT_PROGBITS,
-            .sh_flags = elf.SHF_EXECINSTR | elf.SHF_ALLOC,
-            .sh_addr = 0,
-            .sh_offset = 0,
-            .sh_size = 0,
-            .sh_link = 0,
-            .sh_info = 0,
-            .sh_addralign = 0,
-            .sh_entsize = 0,
-        });
-    }
+        if (mem.eql(u8, sym_name, "__init_array_start") or
+            mem.eql(u8, sym_name, "__init_array_end") or
+            mem.eql(u8, sym_name, "__fini_array_start") or
+            mem.eql(u8, sym_name, "__fini_array_end") or
+            mem.eql(u8, sym_name, "_DYNAMIC"))
+        {
+            const sym_index = @intCast(u32, self.locals.items.len);
+            try self.locals.append(self.base.allocator, .{
+                .st_name = try self.makeString(sym_name),
+                .st_info = 0,
+                .st_other = 0,
+                .st_shndx = 0,
+                .st_value = 0,
+                .st_size = 0,
+            });
+            global.* = .{
+                .sym_index = sym_index,
+                .file = null,
+            };
+            _ = self.unresolved.fetchSwapRemove(@intCast(u32, self.globals.getIndex(sym_name).?));
 
-    const shdr_ndx = self.init_array_sect_index.?;
-    const sym_index = @intCast(u32, self.symtab.items.len);
-    try self.symtab.append(self.base.allocator, .{
-        .st_name = try self.makeString("__init_array_start"),
-        .st_info = 0,
-        .st_other = 0,
-        .st_shndx = shdr_ndx,
-        .st_value = 0,
-        .st_size = 0,
-    });
-    const atom = try Atom.createEmpty(self.base.allocator);
-    errdefer {
-        atom.deinit(self.base.allocator);
-        self.base.allocator.destroy(atom);
-    }
-    try self.managed_atoms.append(self.base.allocator, atom);
+            continue :loop;
+        }
 
-    atom.local_sym_index = sym_index;
-    atom.file = null; // synthetic atom
-    atom.size = 0;
-    atom.alignment = @alignOf(u64);
-
-    global.* = .{
-        .sym_index = sym_index,
-        .file = null,
-    };
-
-    if (self.atoms.getPtr(shdr_ndx)) |last| {
-        last.*.next = atom;
-        atom.prev = last.*;
-        last.* = atom;
-    } else {
-        try self.atoms.putNoClobber(self.base.allocator, shdr_ndx, atom);
+        next_sym += 1;
     }
 }
 
@@ -1206,7 +1179,7 @@ fn allocateAtoms(self: *Elf) !void {
                 }
             } else {
                 // Synthetic
-                const sym = &self.symtab.items[atom.local_sym_index];
+                const sym = &self.locals.items[atom.local_sym_index];
                 sym.st_value = base_addr;
                 sym.st_shndx = shdr_ndx;
                 sym.st_size = atom.size;
@@ -1249,7 +1222,7 @@ fn writeAtoms(self: *Elf) !void {
             const sym = if (atom.file) |file| blk: {
                 const object = self.objects.items[file];
                 break :blk object.symtab.items[atom.local_sym_index];
-            } else self.symtab.items[atom.local_sym_index];
+            } else self.locals.items[atom.local_sym_index];
 
             const off = sym.st_value - shdr.sh_addr;
 
@@ -1310,6 +1283,12 @@ fn writeSymtab(self: *Elf) !void {
         }
     }
 
+    for (self.locals.items) |sym| {
+        const st_bind = sym.st_info >> 4;
+        if (st_bind != elf.STB_LOCAL) continue;
+        try symtab.append(sym);
+    }
+
     // Denote start of globals
     shdr.sh_info = @intCast(u32, symtab.items.len);
     try symtab.ensureUnusedCapacity(self.globals.count());
@@ -1321,7 +1300,9 @@ fn writeSymtab(self: *Elf) !void {
             var out_sym = sym;
             out_sym.st_name = try self.makeString(sym_name);
             break :blk out_sym;
-        } else self.symtab.items[global.sym_index];
+        } else self.locals.items[global.sym_index];
+        // TODO refactor
+        if (sym.st_info >> 4 == elf.STB_LOCAL) continue;
         symtab.appendAssumeCapacity(sym);
     }
 
@@ -1433,10 +1414,10 @@ fn logSymtab(self: Elf) !void {
         if (global.file) |file| {
             const object = self.objects.items[file];
             const sym = object.symtab.items[global.sym_index];
-            log.debug("  {s}: {} => {}", .{ object.getString(sym.st_name), global, sym });
+            log.debug("  {s}: {d}@{d}", .{ object.getString(sym.st_name), global.sym_index, file });
         } else {
-            const sym = self.symtab.items[global.sym_index];
-            log.debug("  {s}: {} => {}", .{ self.getString(sym.st_name), global, sym });
+            const sym = self.locals.items[global.sym_index];
+            log.debug("  {s}: {d}@null", .{ self.getString(sym.st_name), global.sym_index });
         }
     }
 }
