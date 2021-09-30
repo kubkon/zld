@@ -44,6 +44,7 @@ got_sect_index: ?u16 = null,
 data_sect_index: ?u16 = null,
 bss_sect_index: ?u16 = null,
 
+debug_loc_index: ?u16 = null,
 debug_abbrev_index: ?u16 = null,
 debug_info_index: ?u16 = null,
 debug_str_index: ?u16 = null,
@@ -454,7 +455,24 @@ pub fn getMatchingSection(self: *Elf, object_id: u16, sect_id: u16) !?u16 {
                     break :blk null;
                 }
             } else if (flags == 0) {
-                if (mem.eql(u8, shdr_name, ".debug_abbrev")) {
+                if (mem.eql(u8, shdr_name, ".debug_loc")) {
+                    if (self.debug_loc_index == null) {
+                        self.debug_loc_index = @intCast(u16, self.shdrs.items.len);
+                        try self.shdrs.append(self.base.allocator, .{
+                            .sh_name = try self.makeShString(shdr_name),
+                            .sh_type = elf.SHT_PROGBITS,
+                            .sh_flags = 0,
+                            .sh_addr = 0,
+                            .sh_offset = 0,
+                            .sh_size = 0,
+                            .sh_link = 0,
+                            .sh_info = 0,
+                            .sh_addralign = 0,
+                            .sh_entsize = 0,
+                        });
+                    }
+                    break :blk self.debug_loc_index.?;
+                } else if (mem.eql(u8, shdr_name, ".debug_abbrev")) {
                     if (self.debug_abbrev_index == null) {
                         self.debug_abbrev_index = @intCast(u16, self.shdrs.items.len);
                         try self.shdrs.append(self.base.allocator, .{
@@ -636,12 +654,11 @@ pub fn getMatchingSection(self: *Elf, object_id: u16, sect_id: u16) !?u16 {
                 }
                 break :blk self.bss_sect_index.?;
             }
-
-            if (mem.eql(u8, shdr_name, ".data.rel.ro")) {
+            if (mem.startsWith(u8, shdr_name, ".data.rel.ro")) {
                 if (self.data_rel_ro_sect_index == null) {
                     self.data_rel_ro_sect_index = @intCast(u16, self.shdrs.items.len);
                     try self.shdrs.append(self.base.allocator, .{
-                        .sh_name = try self.makeShString(shdr_name),
+                        .sh_name = try self.makeShString(".data.rel.ro"),
                         .sh_type = elf.SHT_PROGBITS,
                         .sh_flags = elf.SHF_WRITE | elf.SHF_ALLOC,
                         .sh_addr = 0,
@@ -654,23 +671,6 @@ pub fn getMatchingSection(self: *Elf, object_id: u16, sect_id: u16) !?u16 {
                     });
                 }
                 break :blk self.data_rel_ro_sect_index.?;
-            } else if (mem.eql(u8, shdr_name, ".got")) {
-                if (self.got_sect_index == null) {
-                    self.got_sect_index = @intCast(u16, self.shdrs.items.len);
-                    try self.shdrs.append(self.base.allocator, .{
-                        .sh_name = try self.makeShString(shdr_name),
-                        .sh_type = elf.SHT_PROGBITS,
-                        .sh_flags = elf.SHF_WRITE | elf.SHF_ALLOC,
-                        .sh_addr = 0,
-                        .sh_offset = 0,
-                        .sh_size = 0,
-                        .sh_link = 0,
-                        .sh_info = 0,
-                        .sh_addralign = 0,
-                        .sh_entsize = 0,
-                    });
-                }
-                break :blk self.got_sect_index.?;
             }
 
             if (self.data_sect_index == null) {
@@ -690,28 +690,23 @@ pub fn getMatchingSection(self: *Elf, object_id: u16, sect_id: u16) !?u16 {
             }
             break :blk self.data_sect_index.?;
         }
-        if (flags & elf.SHF_MERGE != 0 and flags & elf.SHF_STRINGS != 0) {
-            if (self.rodata_sect_index == null) {
-                self.rodata_sect_index = @intCast(u16, self.shdrs.items.len);
-                try self.shdrs.append(self.base.allocator, .{
-                    .sh_name = try self.makeShString(".rodata"),
-                    .sh_type = elf.SHT_PROGBITS,
-                    .sh_flags = elf.SHF_MERGE | elf.SHF_STRINGS | elf.SHF_ALLOC,
-                    .sh_addr = 0,
-                    .sh_offset = 0,
-                    .sh_size = 0,
-                    .sh_link = 0,
-                    .sh_info = 0,
-                    .sh_addralign = 0,
-                    .sh_entsize = 0,
-                });
-            }
-            break :blk self.rodata_sect_index.?;
-        }
 
-        log.debug("TODO unhandled section", .{});
-        log.debug("  {s} => {}", .{ object.getString(shdr.sh_name), shdr });
-        break :blk null;
+        if (self.rodata_sect_index == null) {
+            self.rodata_sect_index = @intCast(u16, self.shdrs.items.len);
+            try self.shdrs.append(self.base.allocator, .{
+                .sh_name = try self.makeShString(".rodata"),
+                .sh_type = elf.SHT_PROGBITS,
+                .sh_flags = elf.SHF_MERGE | elf.SHF_STRINGS | elf.SHF_ALLOC,
+                .sh_addr = 0,
+                .sh_offset = 0,
+                .sh_size = 0,
+                .sh_link = 0,
+                .sh_info = 0,
+                .sh_addralign = 0,
+                .sh_entsize = 0,
+            });
+        }
+        break :blk self.rodata_sect_index.?;
     };
     return res;
 }
@@ -739,6 +734,7 @@ fn sortShdrs(self: *Elf) !void {
         &self.got_sect_index,
         &self.data_sect_index,
         &self.bss_sect_index,
+        &self.debug_loc_index,
         &self.debug_abbrev_index,
         &self.debug_info_index,
         &self.debug_str_index,

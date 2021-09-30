@@ -103,7 +103,7 @@ fn parseShdrs(self: *Object, allocator: *Allocator, reader: anytype) !void {
             elf.SHT_SYMTAB => {
                 self.symtab_index = i;
             },
-            elf.SHT_PROGBITS => {
+            elf.SHT_PROGBITS, elf.SHT_NOBITS => {
                 try self.sections.append(allocator, i);
             },
             elf.SHT_REL, elf.SHT_RELA => {
@@ -217,7 +217,9 @@ pub fn parseIntoAtoms(self: *Object, allocator: *Allocator, object_id: u16, elf_
 
         const syms = symbols_by_shndx.get(ndx).?;
         if (syms.items.len == 0) {
-            log.debug("  TODO handle sections with no symbols: {s}", .{shdr_name});
+            if (shdr.sh_size != 0) {
+                log.debug("  TODO handle non-empty sections with no symbols: {s}", .{shdr_name});
+            }
             continue;
         }
 
