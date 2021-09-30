@@ -770,9 +770,8 @@ fn resolveSymbolsInObject(self: *Elf, object_id: u16) !void {
                         log.debug("  (symbol '{s}' already defined; skipping...)", .{sym_name});
                         continue;
                     }
-                } else {
-                    _ = self.unresolved.fetchSwapRemove(glob_ndx);
                 }
+                _ = self.unresolved.fetchSwapRemove(@intCast(u32, self.globals.getIndex(name).?));
 
                 res.value_ptr.* = .{
                     .sym_index = sym_id,
