@@ -116,38 +116,39 @@ pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
     for (self.relocs.items) |rel| {
         const r_sym = @intCast(u32, rel.r_info >> 32);
         const r_type = @truncate(u32, rel.r_info);
+        const tsym = if (self.file) |file| blk: {
+            const object = elf_file.objects.items[file];
+            break :blk object.symtab.items[r_sym];
+        } else elf_file.locals.items[r_sym];
+        const tsym_name = if (self.file) |file| blk: {
+            const object = elf_file.objects.items[file];
+            break :blk object.getString(tsym.st_name);
+        } else elf_file.getString(tsym.st_name);
+
         switch (r_type) {
             elf.R_X86_64_NONE => {},
             elf.R_X86_64_64 => {
-                const tsym = self.getSymbol(elf_file, r_sym);
-                log.debug("R_X86_64_64: {x}: target address 0x{x}", .{ rel.r_offset, tsym.st_value });
+                log.debug("R_X86_64_64: {x}: [() => 0x{x}] ({s})", .{ rel.r_offset, tsym.st_value, tsym_name });
                 mem.writeIntLittle(u64, self.code.items[rel.r_offset..][0..8], tsym.st_value);
             },
             elf.R_X86_64_PC32 => {
                 const source = @intCast(i64, sym.st_value + rel.r_offset);
-                const tsym = self.getSymbol(elf_file, r_sym);
                 const target = @intCast(i64, tsym.st_value);
                 const displacement = @intCast(i32, target - source + rel.r_addend);
-                log.debug("R_X86_64_PC32: {x}: source addr 0x{x}, target addr 0x{x}, displacement 0x{x}", .{
+                log.debug("R_X86_64_PC32: {x}: [0x{x} => 0x{x}] ({s})", .{
                     rel.r_offset,
                     source,
                     target,
-                    displacement,
+                    tsym_name,
                 });
                 mem.writeIntLittle(i32, self.code.items[rel.r_offset..][0..4], displacement);
             },
             elf.R_X86_64_PLT32 => {
                 const source = @intCast(i64, sym.st_value + rel.r_offset);
-                const tsym = self.getSymbol(elf_file, r_sym);
                 const is_local = (tsym.st_info >> 4) & elf.STB_LOCAL != 0;
                 const target: i64 = blk: {
                     if (!is_local) {
-                        const tsym_name = if (self.file) |file|
-                            elf_file.objects.items[file].getString(tsym.st_name)
-                        else
-                            elf_file.getString(tsym.st_name);
                         const global = elf_file.globals.get(tsym_name).?;
-
                         if (global.file) |file| {
                             const actual_object = elf_file.objects.items[file];
                             const actual_tsym = actual_object.symtab.items[global.sym_index];
@@ -167,23 +168,28 @@ pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
                     break :blk @intCast(i64, tsym.st_value);
                 };
                 const displacement = @intCast(i32, target - source + rel.r_addend);
-                log.debug("R_X86_64_PLT32: {x}: source addr 0x{x}, target addr 0x{x}, displacement 0x{x}", .{
+                log.debug("R_X86_64_PLT32: {x}: [0x{x} => 0x{x}] ({s})", .{
                     rel.r_offset,
                     source,
                     target,
-                    displacement,
+                    tsym_name,
                 });
                 mem.writeIntLittle(i32, self.code.items[rel.r_offset..][0..4], displacement);
             },
             elf.R_X86_64_32 => {
-                const tsym = self.getSymbol(elf_file, r_sym);
                 const target = @intCast(u32, @intCast(i64, tsym.st_value) + rel.r_addend);
-                log.debug("R_X86_64_32: {x}: target addr 0x{x}", .{ rel.r_offset, target });
+                log.debug("R_X86_64_32: {x}: [() => 0x{x}] ({s})", .{ rel.r_offset, target, tsym_name });
                 mem.writeIntLittle(u32, self.code.items[rel.r_offset..][0..4], target);
             },
             else => {
-                log.debug("TODO unhandled relocation type: {d}", .{r_type});
-                log.debug("  {}", .{rel});
+                const source = @intCast(i64, sym.st_value + rel.r_offset);
+                log.debug("TODO {d}: {x}: [0x{x} => 0x{x}] ({s})", .{
+                    r_type,
+                    rel.r_offset,
+                    source,
+                    tsym.st_value,
+                    tsym_name,
+                });
             },
         }
     }

@@ -215,7 +215,7 @@ pub fn flush(self: *Elf) !void {
     try self.resolveSymbolsInArchives();
     try self.resolveSpecialSymbols();
 
-    self.logSymtab();
+    // self.logSymtab();
 
     for (self.unresolved.keys()) |ndx| {
         const global = self.globals.values()[ndx];
@@ -242,7 +242,7 @@ pub fn flush(self: *Elf) !void {
     try self.allocateAtoms();
 
     self.logSymtab();
-    self.logAtoms();
+    // self.logAtoms();
 
     try self.writeAtoms();
     try self.setEntryPoint();
