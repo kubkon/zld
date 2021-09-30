@@ -36,7 +36,9 @@ null_sect_index: ?u16 = null,
 rodata_sect_index: ?u16 = null,
 text_sect_index: ?u16 = null,
 init_sect_index: ?u16 = null,
+init_array_sect_index: ?u16 = null,
 fini_sect_index: ?u16 = null,
+fini_array_sect_index: ?u16 = null,
 data_rel_ro_sect_index: ?u16 = null,
 got_sect_index: ?u16 = null,
 data_sect_index: ?u16 = null,
@@ -210,6 +212,7 @@ pub fn flush(self: *Elf) !void {
         try self.resolveSymbolsInObject(@intCast(u16, object_id));
     }
     try self.resolveSymbolsInArchives();
+    try self.createInitArrayStartAtom();
 
     try self.logSymtab();
 
@@ -569,6 +572,40 @@ pub fn getMatchingSection(self: *Elf, object_id: u16, sect_id: u16) !?u16 {
                     });
                 }
                 break :blk self.fini_sect_index.?;
+            } else if (mem.eql(u8, shdr_name, ".init_array")) {
+                if (self.init_array_sect_index == null) {
+                    self.init_array_sect_index = @intCast(u16, self.shdrs.items.len);
+                    try self.shdrs.append(self.base.allocator, .{
+                        .sh_name = try self.makeShString(shdr_name),
+                        .sh_type = elf.SHT_PROGBITS,
+                        .sh_flags = elf.SHF_EXECINSTR | elf.SHF_ALLOC,
+                        .sh_addr = 0,
+                        .sh_offset = 0,
+                        .sh_size = 0,
+                        .sh_link = 0,
+                        .sh_info = 0,
+                        .sh_addralign = 0,
+                        .sh_entsize = 0,
+                    });
+                }
+                break :blk self.init_array_sect_index.?;
+            } else if (mem.eql(u8, shdr_name, ".fini_array")) {
+                if (self.fini_array_sect_index == null) {
+                    self.fini_array_sect_index = @intCast(u16, self.shdrs.items.len);
+                    try self.shdrs.append(self.base.allocator, .{
+                        .sh_name = try self.makeShString(shdr_name),
+                        .sh_type = elf.SHT_PROGBITS,
+                        .sh_flags = elf.SHF_EXECINSTR | elf.SHF_ALLOC,
+                        .sh_addr = 0,
+                        .sh_offset = 0,
+                        .sh_size = 0,
+                        .sh_link = 0,
+                        .sh_info = 0,
+                        .sh_addralign = 0,
+                        .sh_entsize = 0,
+                    });
+                }
+                break :blk self.fini_array_sect_index.?;
             }
 
             if (self.text_sect_index == null) {
@@ -703,7 +740,9 @@ fn sortShdrs(self: *Elf) !void {
         &self.rodata_sect_index,
         &self.text_sect_index,
         &self.init_sect_index,
+        &self.init_array_sect_index,
         &self.fini_sect_index,
+        &self.fini_array_sect_index,
         &self.data_rel_ro_sect_index,
         &self.got_sect_index,
         &self.data_sect_index,
@@ -933,6 +972,61 @@ fn resolveSymbolsInArchives(self: *Elf) !void {
     }
 }
 
+fn createInitArrayStartAtom(self: *Elf) !void {
+    const global = self.globals.getPtr("__init_array_start") orelse return;
+
+    if (self.init_array_sect_index == null) {
+        self.init_array_sect_index = @intCast(u16, self.shdrs.items.len);
+        try self.shdrs.append(self.base.allocator, .{
+            .sh_name = try self.makeShString(".init_array"),
+            .sh_type = elf.SHT_PROGBITS,
+            .sh_flags = elf.SHF_EXECINSTR | elf.SHF_ALLOC,
+            .sh_addr = 0,
+            .sh_offset = 0,
+            .sh_size = 0,
+            .sh_link = 0,
+            .sh_info = 0,
+            .sh_addralign = 0,
+            .sh_entsize = 0,
+        });
+    }
+
+    const shdr_ndx = self.init_array_sect_index.?;
+    const sym_index = @intCast(u32, self.symtab.items.len);
+    try self.symtab.append(self.base.allocator, .{
+        .st_name = try self.makeString("__init_array_start"),
+        .st_info = 0,
+        .st_other = 0,
+        .st_shndx = shdr_ndx,
+        .st_value = 0,
+        .st_size = 0,
+    });
+    const atom = try Atom.createEmpty(self.base.allocator);
+    errdefer {
+        atom.deinit(self.base.allocator);
+        self.base.allocator.destroy(atom);
+    }
+    try self.managed_atoms.append(self.base.allocator, atom);
+
+    atom.local_sym_index = sym_index;
+    atom.file = null; // synthetic atom
+    atom.size = 0;
+    atom.alignment = @alignOf(u64);
+
+    global.* = .{
+        .sym_index = sym_index,
+        .file = null,
+    };
+
+    if (self.atoms.getPtr(shdr_ndx)) |last| {
+        last.*.next = atom;
+        atom.prev = last.*;
+        last.* = atom;
+    } else {
+        try self.atoms.putNoClobber(self.base.allocator, shdr_ndx, atom);
+    }
+}
+
 fn allocateSection(self: *Elf, ndx: u16, phdr_ndx: u16) !void {
     const shdr = &self.shdrs.items[ndx];
     const phdr = &self.phdrs.items[phdr_ndx];
@@ -1083,31 +1177,45 @@ fn allocateAtoms(self: *Elf) !void {
         while (true) {
             base_addr = mem.alignForwardGeneric(u64, base_addr, atom.alignment);
 
-            const object = &self.objects.items[atom.file];
-            const sym = &object.symtab.items[atom.local_sym_index];
-            sym.st_value = base_addr;
-            sym.st_shndx = shdr_ndx;
-            sym.st_size = atom.size;
+            if (atom.file) |file| {
+                const object = &self.objects.items[file];
+                const sym = &object.symtab.items[atom.local_sym_index];
+                sym.st_value = base_addr;
+                sym.st_shndx = shdr_ndx;
+                sym.st_size = atom.size;
 
-            log.debug("  atom '{s}' allocated from 0x{x} to 0x{x}", .{
-                object.getString(sym.st_name),
-                base_addr,
-                base_addr + atom.size,
-            });
+                log.debug("  atom '{s}' allocated from 0x{x} to 0x{x}", .{
+                    object.getString(sym.st_name),
+                    base_addr,
+                    base_addr + atom.size,
+                });
 
-            // Update each alias (if any)
-            for (atom.aliases.items) |index| {
-                const alias_sym = &object.symtab.items[index];
-                alias_sym.st_value = base_addr;
-                alias_sym.st_shndx = shdr_ndx;
-                alias_sym.st_size = atom.size;
-            }
+                // Update each alias (if any)
+                for (atom.aliases.items) |index| {
+                    const alias_sym = &object.symtab.items[index];
+                    alias_sym.st_value = base_addr;
+                    alias_sym.st_shndx = shdr_ndx;
+                    alias_sym.st_size = atom.size;
+                }
 
-            // Update each symbol contained within the TextBlock
-            for (atom.contained.items) |sym_at_off| {
-                const contained_sym = &object.symtab.items[sym_at_off.local_sym_index];
-                contained_sym.st_value = base_addr + sym_at_off.offset;
-                contained_sym.st_shndx = shdr_ndx;
+                // Update each symbol contained within the TextBlock
+                for (atom.contained.items) |sym_at_off| {
+                    const contained_sym = &object.symtab.items[sym_at_off.local_sym_index];
+                    contained_sym.st_value = base_addr + sym_at_off.offset;
+                    contained_sym.st_shndx = shdr_ndx;
+                }
+            } else {
+                // Synthetic
+                const sym = &self.symtab.items[atom.local_sym_index];
+                sym.st_value = base_addr;
+                sym.st_shndx = shdr_ndx;
+                sym.st_size = atom.size;
+
+                log.debug("  atom '{s}' allocated from 0x{x} to 0x{x}", .{
+                    self.getString(sym.st_name),
+                    base_addr,
+                    base_addr + atom.size,
+                });
             }
 
             base_addr += atom.size;
@@ -1138,16 +1246,20 @@ fn writeAtoms(self: *Elf) !void {
         mem.set(u8, buffer, 0);
 
         while (true) {
-            const object = self.objects.items[atom.file];
-            const sym = object.symtab.items[atom.local_sym_index];
+            const sym = if (atom.file) |file| blk: {
+                const object = self.objects.items[file];
+                break :blk object.symtab.items[atom.local_sym_index];
+            } else self.symtab.items[atom.local_sym_index];
+
             const off = sym.st_value - shdr.sh_addr;
 
             try atom.resolveRelocs(self);
 
-            log.debug("writing atom '{s}' at offset 0x{x}", .{
-                object.getString(sym.st_name),
-                shdr.sh_offset + off,
-            });
+            const sym_name = if (atom.file) |file|
+                self.objects.items[file].getString(sym.st_name)
+            else
+                self.getString(sym.st_name);
+            log.debug("writing atom '{s}' at offset 0x{x}", .{ sym_name, shdr.sh_offset + off });
 
             mem.copy(u8, buffer[off..][0..atom.size], atom.code.items);
 
@@ -1301,7 +1413,7 @@ fn makeString(self: *Elf, bytes: []const u8) !u32 {
     return new_off;
 }
 
-fn getString(self: Elf, off: u32) []const u8 {
+pub fn getString(self: Elf, off: u32) []const u8 {
     assert(off < self.strtab.items.len);
     return mem.spanZ(@ptrCast([*:0]const u8, self.strtab.items.ptr + off));
 }
