@@ -33,9 +33,14 @@ load_re_seg_index: ?u16 = null,
 load_rw_seg_index: ?u16 = null,
 
 null_sect_index: ?u16 = null,
-text_sect_index: ?u16 = null,
 rodata_sect_index: ?u16 = null,
+text_sect_index: ?u16 = null,
+init_sect_index: ?u16 = null,
+fini_sect_index: ?u16 = null,
+data_rel_ro_sect_index: ?u16 = null,
+got_sect_index: ?u16 = null,
 data_sect_index: ?u16 = null,
+bss_sect_index: ?u16 = null,
 
 debug_abbrev_index: ?u16 = null,
 debug_info_index: ?u16 = null,
@@ -202,11 +207,21 @@ pub fn flush(self: *Elf) !void {
 
     try self.resolveSymbolsInArchives();
 
+    try self.logSymtab();
+
     for (self.unresolved.keys()) |ndx| {
         const global = self.globals.values()[ndx];
         const object = self.objects.items[global.file];
         const sym = object.symtab.items[global.sym_index];
         const sym_name = object.getString(sym.st_name);
+
+        if (mem.eql(u8, sym_name, "_DYNAMIC")) {
+            // TODO we will need to handle it when linking against shared objects.
+            // For now, we ignore it and leave it undefined since we don't have .dynamic
+            // section defined.
+            continue;
+        }
+
         log.err("undefined reference to symbol '{s}'", .{sym_name});
         log.err("  first referenced in '{s}'", .{object.name});
     }
@@ -516,6 +531,42 @@ pub fn getMatchingSection(self: *Elf, object_id: u16, sect_id: u16) !?u16 {
             break :blk null;
         }
         if (flags & elf.SHF_EXECINSTR != 0) {
+            if (mem.eql(u8, shdr_name, ".init")) {
+                if (self.init_sect_index == null) {
+                    self.init_sect_index = @intCast(u16, self.shdrs.items.len);
+                    try self.shdrs.append(self.base.allocator, .{
+                        .sh_name = try self.makeShString(shdr_name),
+                        .sh_type = elf.SHT_PROGBITS,
+                        .sh_flags = elf.SHF_EXECINSTR | elf.SHF_ALLOC,
+                        .sh_addr = 0,
+                        .sh_offset = 0,
+                        .sh_size = 0,
+                        .sh_link = 0,
+                        .sh_info = 0,
+                        .sh_addralign = 0,
+                        .sh_entsize = 0,
+                    });
+                }
+                break :blk self.init_sect_index.?;
+            } else if (mem.eql(u8, shdr_name, ".fini")) {
+                if (self.fini_sect_index == null) {
+                    self.fini_sect_index = @intCast(u16, self.shdrs.items.len);
+                    try self.shdrs.append(self.base.allocator, .{
+                        .sh_name = try self.makeShString(shdr_name),
+                        .sh_type = elf.SHT_PROGBITS,
+                        .sh_flags = elf.SHF_EXECINSTR | elf.SHF_ALLOC,
+                        .sh_addr = 0,
+                        .sh_offset = 0,
+                        .sh_size = 0,
+                        .sh_link = 0,
+                        .sh_info = 0,
+                        .sh_addralign = 0,
+                        .sh_entsize = 0,
+                    });
+                }
+                break :blk self.fini_sect_index.?;
+            }
+
             if (self.text_sect_index == null) {
                 self.text_sect_index = @intCast(u16, self.shdrs.items.len);
                 try self.shdrs.append(self.base.allocator, .{
@@ -534,6 +585,61 @@ pub fn getMatchingSection(self: *Elf, object_id: u16, sect_id: u16) !?u16 {
             break :blk self.text_sect_index.?;
         }
         if (flags & elf.SHF_WRITE != 0) {
+            if (shdr.sh_type == elf.SHT_NOBITS) {
+                if (self.bss_sect_index == null) {
+                    self.bss_sect_index = @intCast(u16, self.shdrs.items.len);
+                    try self.shdrs.append(self.base.allocator, .{
+                        .sh_name = try self.makeShString(".bss"),
+                        .sh_type = elf.SHT_NOBITS,
+                        .sh_flags = elf.SHF_WRITE | elf.SHF_ALLOC,
+                        .sh_addr = 0,
+                        .sh_offset = 0,
+                        .sh_size = 0,
+                        .sh_link = 0,
+                        .sh_info = 0,
+                        .sh_addralign = 0,
+                        .sh_entsize = 0,
+                    });
+                }
+                break :blk self.bss_sect_index.?;
+            }
+
+            if (mem.eql(u8, shdr_name, ".data.rel.ro")) {
+                if (self.data_rel_ro_sect_index == null) {
+                    self.data_rel_ro_sect_index = @intCast(u16, self.shdrs.items.len);
+                    try self.shdrs.append(self.base.allocator, .{
+                        .sh_name = try self.makeShString(shdr_name),
+                        .sh_type = elf.SHT_PROGBITS,
+                        .sh_flags = elf.SHF_WRITE | elf.SHF_ALLOC,
+                        .sh_addr = 0,
+                        .sh_offset = 0,
+                        .sh_size = 0,
+                        .sh_link = 0,
+                        .sh_info = 0,
+                        .sh_addralign = 0,
+                        .sh_entsize = 0,
+                    });
+                }
+                break :blk self.data_rel_ro_sect_index.?;
+            } else if (mem.eql(u8, shdr_name, ".got")) {
+                if (self.got_sect_index == null) {
+                    self.got_sect_index = @intCast(u16, self.shdrs.items.len);
+                    try self.shdrs.append(self.base.allocator, .{
+                        .sh_name = try self.makeShString(shdr_name),
+                        .sh_type = elf.SHT_PROGBITS,
+                        .sh_flags = elf.SHF_WRITE | elf.SHF_ALLOC,
+                        .sh_addr = 0,
+                        .sh_offset = 0,
+                        .sh_size = 0,
+                        .sh_link = 0,
+                        .sh_info = 0,
+                        .sh_addralign = 0,
+                        .sh_entsize = 0,
+                    });
+                }
+                break :blk self.got_sect_index.?;
+            }
+
             if (self.data_sect_index == null) {
                 self.data_sect_index = @intCast(u16, self.shdrs.items.len);
                 try self.shdrs.append(self.base.allocator, .{
@@ -592,7 +698,12 @@ fn sortShdrs(self: *Elf) !void {
         &self.null_sect_index,
         &self.rodata_sect_index,
         &self.text_sect_index,
+        &self.init_sect_index,
+        &self.fini_sect_index,
+        &self.data_rel_ro_sect_index,
+        &self.got_sect_index,
         &self.data_sect_index,
+        &self.bss_sect_index,
         &self.debug_abbrev_index,
         &self.debug_info_index,
         &self.debug_str_index,
