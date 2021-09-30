@@ -97,6 +97,7 @@ fn parseShdrs(self: *Object, allocator: *Allocator, reader: anytype) !void {
     var i: u16 = 0;
     while (i < shnum) : (i += 1) {
         const shdr = try reader.readStruct(elf.Elf64_Shdr);
+        self.shdrs.appendAssumeCapacity(shdr);
 
         switch (shdr.sh_type) {
             elf.SHT_SYMTAB => {
@@ -111,8 +112,6 @@ fn parseShdrs(self: *Object, allocator: *Allocator, reader: anytype) !void {
             },
             else => {},
         }
-
-        self.shdrs.appendAssumeCapacity(shdr);
     }
 
     // Parse shstrtab
@@ -299,7 +298,8 @@ fn readShdrContents(self: Object, allocator: *Allocator, shdr_index: u16) ![]con
     var buffer = try allocator.alloc(u8, shdr.sh_size);
     errdefer allocator.free(buffer);
 
-    const amt = try self.file.preadAll(buffer, shdr.sh_offset);
+    const offset = self.file_offset orelse 0;
+    const amt = try self.file.preadAll(buffer, shdr.sh_offset + offset);
     if (amt != buffer.len) {
         return error.InputOutput;
     }
