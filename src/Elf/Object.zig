@@ -107,7 +107,6 @@ fn parseShdrs(self: *Object, allocator: *Allocator, reader: anytype) !void {
                 try self.sections.append(allocator, i);
             },
             elf.SHT_REL, elf.SHT_RELA => {
-                if (shdr.sh_flags & elf.SHF_INFO_LINK == 0) continue;
                 try self.relocs.putNoClobber(allocator, @intCast(u16, shdr.sh_info), i);
             },
             else => {},

@@ -124,6 +124,8 @@ pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
             const object = elf_file.objects.items[file];
             break :blk object.getString(tsym.st_name);
         } else elf_file.getString(tsym.st_name);
+        const tsym_st_bind = tsym.st_info >> 4;
+        const tsym_st_type = tsym.st_info & 0xf;
 
         switch (r_type) {
             elf.R_X86_64_NONE => {},
@@ -145,7 +147,7 @@ pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
             },
             elf.R_X86_64_PLT32 => {
                 const source = @intCast(i64, sym.st_value + rel.r_offset);
-                const is_local = (tsym.st_info >> 4) & elf.STB_LOCAL != 0;
+                const is_local = tsym_st_type == elf.STT_SECTION or tsym_st_bind == elf.STB_LOCAL;
                 const target: i64 = blk: {
                     if (!is_local) {
                         const global = elf_file.globals.get(tsym_name).?;
@@ -180,6 +182,38 @@ pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
                 const target = @intCast(u32, @intCast(i64, tsym.st_value) + rel.r_addend);
                 log.debug("R_X86_64_32: {x}: [() => 0x{x}] ({s})", .{ rel.r_offset, target, tsym_name });
                 mem.writeIntLittle(u32, self.code.items[rel.r_offset..][0..4], target);
+            },
+            elf.R_X86_64_REX_GOTPCRELX => {
+                const source = @intCast(i64, sym.st_value + rel.r_offset);
+                const global = elf_file.globals.get(tsym_name).?;
+                const target: i64 = blk: {
+                    if (global.file) |file| {
+                        const actual_object = elf_file.objects.items[file];
+                        const actual_tsym = actual_object.symtab.items[global.sym_index];
+                        if (actual_tsym.st_info & 0xf == elf.STT_NOTYPE and
+                            actual_tsym.st_shndx == elf.SHN_UNDEF)
+                        {
+                            log.debug("TODO handle R_X86_64_REX_GOTPCRELX to an UND symbol via GOT", .{});
+                            break :blk source;
+                        }
+                        break :blk @intCast(i64, actual_tsym.st_value);
+                    } else {
+                        const actual_tsym = elf_file.locals.items[global.sym_index];
+                        break :blk @intCast(i64, actual_tsym.st_value);
+                    }
+                };
+
+                const full_inst = self.code.items[rel.r_offset - 3 ..][0..7];
+                log.debug("R_X86_64_REX_GOTPCRELX: {x}: [0x{x} => 0x{x}] ({s})", .{
+                    rel.r_offset,
+                    source,
+                    target,
+                    tsym_name,
+                });
+                log.debug("  => {x}", .{std.fmt.fmtSliceHexLower(full_inst)});
+
+                const displacement = @intCast(i32, target - source + rel.r_addend);
+                mem.writeIntLittle(i32, self.code.items[rel.r_offset..][0..4], displacement);
             },
             else => {
                 const source = @intCast(i64, sym.st_value + rel.r_offset);
