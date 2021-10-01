@@ -240,12 +240,46 @@ pub fn flush(self: *Elf) !void {
     try self.allocateLoadRWSeg();
     try self.allocateNonAllocSections();
     try self.allocateAtoms();
+    try self.setEntryPoint();
+
+    {
+        // TODO this should be put in its own logic but probably is linked to
+        // C++ handling so leaving it here until I gather more knowledge on
+        // those special symbols.
+        if (self.init_array_sect_index == null) {
+            if (self.globals.get("__init_array_start")) |global| {
+                assert(global.file == null);
+                const sym = &self.locals.items[global.sym_index];
+                sym.st_value = self.header.?.e_entry;
+                sym.st_shndx = self.text_sect_index.?;
+            }
+            if (self.globals.get("__init_array_end")) |global| {
+                assert(global.file == null);
+                const sym = &self.locals.items[global.sym_index];
+                sym.st_value = self.header.?.e_entry;
+                sym.st_shndx = self.text_sect_index.?;
+            }
+        }
+        if (self.fini_array_sect_index == null) {
+            if (self.globals.get("__fini_array_start")) |global| {
+                assert(global.file == null);
+                const sym = &self.locals.items[global.sym_index];
+                sym.st_value = self.header.?.e_entry;
+                sym.st_shndx = self.text_sect_index.?;
+            }
+            if (self.globals.get("__fini_array_end")) |global| {
+                assert(global.file == null);
+                const sym = &self.locals.items[global.sym_index];
+                sym.st_value = self.header.?.e_entry;
+                sym.st_shndx = self.text_sect_index.?;
+            }
+        }
+    }
 
     self.logSymtab();
     self.logAtoms();
 
     try self.writeAtoms();
-    try self.setEntryPoint();
     try self.writePhdrs();
     try self.writeSymtab();
     try self.writeStrtab();
@@ -990,10 +1024,73 @@ fn resolveSpecialSymbols(self: *Elf) !void {
             };
             _ = self.unresolved.fetchSwapRemove(@intCast(u32, self.globals.getIndex(sym_name).?));
 
+            if (mem.eql(u8, sym_name, "_DYNAMIC")) {
+                try self.createGotAtom();
+            }
+
             continue :loop;
         }
 
         next_sym += 1;
+    }
+}
+
+fn createGotAtom(self: *Elf) !void {
+    const shdr_ndx = self.got_sect_index orelse blk: {
+        const shdr_ndx = @intCast(u16, self.shdrs.items.len);
+        try self.shdrs.append(self.base.allocator, .{
+            .sh_name = try self.makeShString(".got"),
+            .sh_type = elf.SHT_PROGBITS,
+            .sh_flags = elf.SHF_WRITE | elf.SHF_ALLOC,
+            .sh_addr = 0,
+            .sh_offset = 0,
+            .sh_size = 0,
+            .sh_link = 0,
+            .sh_info = 0,
+            .sh_addralign = @alignOf(u64),
+            .sh_entsize = 0,
+        });
+        self.got_sect_index = shdr_ndx;
+        break :blk shdr_ndx;
+    };
+    const shdr = &self.shdrs.items[shdr_ndx];
+
+    const atom = try Atom.createEmpty(self.base.allocator);
+    errdefer {
+        atom.deinit(self.base.allocator);
+        self.base.allocator.destroy(atom);
+    }
+    try self.managed_atoms.append(self.base.allocator, atom);
+
+    atom.file = null;
+    atom.size = @sizeOf(u64);
+    atom.alignment = @alignOf(u64);
+
+    var code = try self.base.allocator.alloc(u8, @sizeOf(u64));
+    defer self.base.allocator.free(code);
+    mem.set(u8, code, 0);
+    try atom.code.appendSlice(self.base.allocator, code);
+
+    const sym_index = @intCast(u32, self.locals.items.len);
+    try self.locals.append(self.base.allocator, .{
+        .st_name = 0,
+        .st_info = (elf.STB_LOCAL << 4) | elf.STT_OBJECT,
+        .st_other = 1,
+        .st_shndx = shdr_ndx,
+        .st_value = 0,
+        .st_size = @sizeOf(u64),
+    });
+    atom.local_sym_index = sym_index;
+
+    // Update target section's metadata
+    shdr.sh_size += @sizeOf(u64);
+
+    if (self.atoms.getPtr(shdr_ndx)) |last| {
+        last.*.next = atom;
+        atom.prev = last.*;
+        last.* = atom;
+    } else {
+        try self.atoms.putNoClobber(self.base.allocator, shdr_ndx, atom);
     }
 }
 

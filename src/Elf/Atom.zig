@@ -130,8 +130,24 @@ pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
         switch (r_type) {
             elf.R_X86_64_NONE => {},
             elf.R_X86_64_64 => {
-                log.debug("R_X86_64_64: {x}: [() => 0x{x}] ({s})", .{ rel.r_offset, tsym.st_value, tsym_name });
-                mem.writeIntLittle(u64, self.code.items[rel.r_offset..][0..8], tsym.st_value);
+                const is_local = tsym_st_type == elf.STT_SECTION or tsym_st_bind == elf.STB_LOCAL;
+                const target: u64 = blk: {
+                    if (!is_local) {
+                        const global = elf_file.globals.get(tsym_name).?;
+                        if (global.file) |file| {
+                            const actual_object = elf_file.objects.items[file];
+                            const actual_tsym = actual_object.symtab.items[global.sym_index];
+                            break :blk actual_tsym.st_value;
+                        } else {
+                            const actual_tsym = elf_file.locals.items[global.sym_index];
+                            break :blk actual_tsym.st_value;
+                        }
+                    }
+
+                    break :blk tsym.st_value;
+                };
+                log.debug("R_X86_64_64: {x}: [() => 0x{x}] ({s})", .{ rel.r_offset, target, tsym_name });
+                mem.writeIntLittle(u64, self.code.items[rel.r_offset..][0..8], target);
             },
             elf.R_X86_64_PC32 => {
                 const source = @intCast(i64, sym.st_value + rel.r_offset);
@@ -198,7 +214,7 @@ pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
                 log.debug("R_X86_64_32: {x}: [() => 0x{x}] ({s})", .{ rel.r_offset, target, tsym_name });
                 mem.writeIntLittle(u32, self.code.items[rel.r_offset..][0..4], target);
             },
-            elf.R_X86_64_REX_GOTPCRELX => {
+            elf.R_X86_64_REX_GOTPCRELX => outer: {
                 const source = @intCast(i64, sym.st_value + rel.r_offset);
                 const global = elf_file.globals.get(tsym_name).?;
                 const target: i64 = blk: {
@@ -214,13 +230,25 @@ pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
                         break :blk @intCast(i64, actual_tsym.st_value);
                     } else {
                         const actual_tsym = elf_file.locals.items[global.sym_index];
+                        if (mem.eql(u8, "_DYNAMIC", tsym_name) and actual_tsym.st_value == 0) {
+                            // TODO special symbol; for now, point to start of .got section (no clue why).
+                            const shdr = elf_file.shdrs.items[elf_file.got_sect_index.?];
+                            break :blk @intCast(i64, shdr.sh_addr);
+                        }
                         break :blk @intCast(i64, actual_tsym.st_value);
                     }
                 };
 
-                if (self.code.items[rel.r_offset - 2] == 0x8b) {
+                // TODO just a hack! Add a disassembler, parse instructions to get the registers
+                // out, and output fixups by rewriting the opcode.
+                if (mem.eql(u8, &[_]u8{ 0x48, 0x8b }, self.code.items[rel.r_offset - 3 ..][0..2])) {
                     // mov -> lea
                     self.code.items[rel.r_offset - 2] = 0x8d;
+                } else if (mem.eql(u8, &[_]u8{ 0x48, 0x3b, 0x1d }, self.code.items[rel.r_offset - 3 ..][0..3])) {
+                    // cmp RIP -> cmp ABS
+                    self.code.items[rel.r_offset - 2 ..][0..2].* = .{ 0x81, 0xfb };
+                    mem.writeIntLittle(u32, self.code.items[rel.r_offset..][0..4], @intCast(u32, target));
+                    break :outer;
                 }
 
                 const full_inst = self.code.items[rel.r_offset - 3 ..][0..7];
