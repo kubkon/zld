@@ -237,7 +237,11 @@ pub fn parseIntoAtoms(self: *Object, allocator: *Allocator, object_id: u16, elf_
         sortBySeniority(atom.aliases.items, self);
         atom.local_sym_index = atom.aliases.swapRemove(0);
 
-        var code = try self.readShdrContents(allocator, ndx);
+        var code = if (shdr.sh_type == elf.SHT_NOBITS) blk: {
+            var code = try allocator.alloc(u8, atom.size);
+            mem.set(u8, code, 0);
+            break :blk code;
+        } else try self.readShdrContents(allocator, ndx);
         defer allocator.free(code);
         try atom.code.appendSlice(allocator, code);
 
