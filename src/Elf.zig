@@ -63,6 +63,8 @@ locals: std.ArrayListUnmanaged(elf.Elf64_Sym) = .{},
 globals: std.StringArrayHashMapUnmanaged(SymbolWithLoc) = .{},
 unresolved: std.AutoArrayHashMapUnmanaged(u32, void) = .{},
 
+got_entries_map: std.AutoArrayHashMapUnmanaged(SymbolWithLoc, *Atom) = .{},
+
 managed_atoms: std.ArrayListUnmanaged(*Atom) = .{},
 atoms: std.AutoHashMapUnmanaged(u16, *Atom) = .{},
 
@@ -119,6 +121,7 @@ pub fn deinit(self: *Elf) void {
     for (self.globals.keys()) |key| {
         self.base.allocator.free(key);
     }
+    self.got_entries_map.deinit(self.base.allocator);
     self.unresolved.deinit(self.base.allocator);
     self.globals.deinit(self.base.allocator);
     self.locals.deinit(self.base.allocator);
@@ -1024,10 +1027,6 @@ fn resolveSpecialSymbols(self: *Elf) !void {
             };
             _ = self.unresolved.fetchSwapRemove(@intCast(u32, self.globals.getIndex(sym_name).?));
 
-            if (mem.eql(u8, sym_name, "_DYNAMIC")) {
-                try self.createGotAtom();
-            }
-
             continue :loop;
         }
 
@@ -1035,7 +1034,7 @@ fn resolveSpecialSymbols(self: *Elf) !void {
     }
 }
 
-fn createGotAtom(self: *Elf) !void {
+pub fn createGotAtom(self: *Elf) !*Atom {
     const shdr_ndx = self.got_sect_index orelse blk: {
         const shdr_ndx = @intCast(u16, self.shdrs.items.len);
         try self.shdrs.append(self.base.allocator, .{
@@ -1092,6 +1091,8 @@ fn createGotAtom(self: *Elf) !void {
     } else {
         try self.atoms.putNoClobber(self.base.allocator, shdr_ndx, atom);
     }
+
+    return atom;
 }
 
 fn allocateSection(self: *Elf, ndx: u16, phdr_ndx: u16) !void {

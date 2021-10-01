@@ -218,24 +218,24 @@ pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
                 const source = @intCast(i64, sym.st_value + rel.r_offset);
                 const global = elf_file.globals.get(tsym_name).?;
                 const target: i64 = blk: {
-                    if (global.file) |file| {
-                        const actual_object = elf_file.objects.items[file];
-                        const actual_tsym = actual_object.symtab.items[global.sym_index];
-                        if (actual_tsym.st_info & 0xf == elf.STT_NOTYPE and
-                            actual_tsym.st_shndx == elf.SHN_UNDEF)
-                        {
-                            log.debug("TODO handle R_X86_64_REX_GOTPCRELX to an UND symbol via GOT", .{});
-                            break :blk source;
+                    if (elf_file.got_entries_map.get(global)) |got_atom| {
+                        if (got_atom.file) |file| {
+                            const actual_object = elf_file.objects.items[file];
+                            const actual_tsym = actual_object.symtab.items[got_atom.local_sym_index];
+                            break :blk @intCast(i64, actual_tsym.st_value);
+                        } else {
+                            const actual_tsym = elf_file.locals.items[got_atom.local_sym_index];
+                            break :blk @intCast(i64, actual_tsym.st_value);
                         }
-                        break :blk @intCast(i64, actual_tsym.st_value);
                     } else {
-                        const actual_tsym = elf_file.locals.items[global.sym_index];
-                        if (mem.eql(u8, "_DYNAMIC", tsym_name) and actual_tsym.st_value == 0) {
-                            // TODO special symbol; for now, point to start of .got section (no clue why).
-                            const shdr = elf_file.shdrs.items[elf_file.got_sect_index.?];
-                            break :blk @intCast(i64, shdr.sh_addr);
+                        if (global.file) |file| {
+                            const actual_object = elf_file.objects.items[file];
+                            const actual_tsym = actual_object.symtab.items[global.sym_index];
+                            break :blk @intCast(i64, actual_tsym.st_value);
+                        } else {
+                            const actual_tsym = elf_file.locals.items[global.sym_index];
+                            break :blk @intCast(i64, actual_tsym.st_value);
                         }
-                        break :blk @intCast(i64, actual_tsym.st_value);
                     }
                 };
 

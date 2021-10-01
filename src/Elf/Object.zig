@@ -273,6 +273,36 @@ pub fn parseIntoAtoms(self: *Object, allocator: *Allocator, object_id: u16, elf_
 
                     break :blk @ptrCast(*const elf.Elf64_Rela, @alignCast(@alignOf(elf.Elf64_Rela), bytes)).*;
                 };
+
+                // While traversing relocations, synthesize any missing atom.
+                // TODO synthesize PLT atoms, GOT atoms, etc.
+                const r_sym = @intCast(u32, rel.r_info >> 32);
+                const r_type = @truncate(u32, rel.r_info);
+                const tsym = self.symtab.items[r_sym];
+                const tsym_name = self.getString(tsym.st_name);
+                switch (r_type) {
+                    elf.R_X86_64_REX_GOTPCRELX => blk: {
+                        const global = elf_file.globals.get(tsym_name).?;
+                        if (global.file) |file| {
+                            const actual_object = elf_file.objects.items[file];
+                            const actual_tsym = actual_object.symtab.items[global.sym_index];
+                            if (actual_tsym.st_info & 0xf == elf.STT_NOTYPE and
+                                actual_tsym.st_shndx == elf.SHN_UNDEF)
+                            {
+                                log.debug("TODO handle R_X86_64_REX_GOTPCRELX to an UND symbol via GOT", .{});
+                            }
+                        } else {
+                            const actual_tsym = elf_file.locals.items[global.sym_index];
+                            if (mem.eql(u8, "_DYNAMIC", tsym_name) and actual_tsym.st_value == 0) {
+                                if (elf_file.got_entries_map.contains(global)) break :blk;
+                                const got_atom = try elf_file.createGotAtom();
+                                try elf_file.got_entries_map.putNoClobber(allocator, global, got_atom);
+                            }
+                        }
+                    },
+                    else => {},
+                }
+
                 atom.relocs.appendAssumeCapacity(rel);
             }
         }
