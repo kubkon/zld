@@ -135,7 +135,22 @@ pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
             },
             elf.R_X86_64_PC32 => {
                 const source = @intCast(i64, sym.st_value + rel.r_offset);
-                const target = @intCast(i64, tsym.st_value);
+                const is_local = tsym_st_type == elf.STT_SECTION or tsym_st_bind == elf.STB_LOCAL;
+                const target: i64 = blk: {
+                    if (!is_local) {
+                        const global = elf_file.globals.get(tsym_name).?;
+                        if (global.file) |file| {
+                            const actual_object = elf_file.objects.items[file];
+                            const actual_tsym = actual_object.symtab.items[global.sym_index];
+                            break :blk @intCast(i64, actual_tsym.st_value);
+                        } else {
+                            const actual_tsym = elf_file.locals.items[global.sym_index];
+                            break :blk @intCast(i64, actual_tsym.st_value);
+                        }
+                    }
+
+                    break :blk @intCast(i64, tsym.st_value);
+                };
                 const displacement = @intCast(i32, target - source + rel.r_addend);
                 log.debug("R_X86_64_PC32: {x}: [0x{x} => 0x{x}] ({s})", .{
                     rel.r_offset,
@@ -202,6 +217,11 @@ pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
                         break :blk @intCast(i64, actual_tsym.st_value);
                     }
                 };
+
+                if (self.code.items[rel.r_offset - 2] == 0x8b) {
+                    // mov -> lea
+                    self.code.items[rel.r_offset - 2] = 0x8d;
+                }
 
                 const full_inst = self.code.items[rel.r_offset - 3 ..][0..7];
                 log.debug("R_X86_64_REX_GOTPCRELX: {x}: [0x{x} => 0x{x}] ({s})", .{

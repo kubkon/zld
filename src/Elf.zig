@@ -242,7 +242,7 @@ pub fn flush(self: *Elf) !void {
     try self.allocateAtoms();
 
     self.logSymtab();
-    // self.logAtoms();
+    self.logAtoms();
 
     try self.writeAtoms();
     try self.setEntryPoint();
@@ -1202,26 +1202,39 @@ fn allocateAtoms(self: *Elf) !void {
 
 fn logAtoms(self: Elf) void {
     for (self.shdrs.items) |shdr, ndx| {
-        log.debug("{s}", .{self.getShString(shdr.sh_name)});
-        var atom = self.atoms.get(@intCast(u16, ndx)) orelse {
-            log.debug("no atoms", .{});
-            continue;
-        };
+        var atom = self.atoms.get(@intCast(u16, ndx)) orelse continue;
+
+        log.debug("WAT >>> {s}", .{self.getShString(shdr.sh_name)});
 
         while (atom.prev) |prev| {
             atom = prev;
         }
 
         while (true) {
-            const sym = if (atom.file) |file| blk: {
+            if (atom.file) |file| {
                 const object = self.objects.items[file];
-                break :blk object.symtab.items[atom.local_sym_index];
-            } else self.locals.items[atom.local_sym_index];
-            const sym_name = if (atom.file) |file| blk: {
-                const object = self.objects.items[file];
-                break :blk object.getString(sym.st_name);
-            } else self.getString(sym.st_name);
-            log.debug("{s}: 0x{x} => {}", .{ sym_name, sym.st_value - shdr.sh_addr, atom });
+                const sym = object.symtab.items[atom.local_sym_index];
+                const sym_name = object.getString(sym.st_name);
+                log.debug("  {s} : {d} => 0x{x}", .{ sym_name, atom.local_sym_index, sym.st_value });
+                log.debug("    defined in {s}", .{object.name});
+                log.debug("    aliases:", .{});
+                for (atom.aliases.items) |alias| {
+                    const asym = object.symtab.items[alias];
+                    const asym_name = object.getString(asym.st_name);
+                    log.debug("       {s} : {d} => 0x{x}", .{ asym_name, alias, asym.st_value });
+                }
+            } else {
+                const sym = self.locals.items[atom.local_sym_index];
+                const sym_name = self.getString(sym.st_name);
+                log.debug("  {s} : {d} => 0x{x}", .{ sym_name, atom.local_sym_index, sym.st_value });
+                log.debug("    synthetic", .{});
+                log.debug("    aliases:", .{});
+                for (atom.aliases.items) |alias| {
+                    const asym = self.locals.items[alias];
+                    const asym_name = self.getString(asym.st_name);
+                    log.debug("       {s} : {d} => 0x{x}", .{ asym_name, alias, asym.st_value });
+                }
+            }
 
             if (atom.next) |next| {
                 atom = next;
@@ -1433,8 +1446,9 @@ fn logSymtab(self: Elf) void {
     for (self.objects.items) |object| {
         log.debug("locals in {s}", .{object.name});
         for (object.symtab.items) |sym, i| {
+            const st_type = sym.st_info & 0xf;
             const st_bind = sym.st_info >> 4;
-            if (st_bind != elf.STB_LOCAL) continue;
+            if (st_bind != elf.STB_LOCAL or st_type != elf.STT_SECTION) continue;
             log.debug("  {d}: {s}: {}", .{ i, object.getString(sym.st_name), sym });
         }
     }
@@ -1444,10 +1458,10 @@ fn logSymtab(self: Elf) void {
         if (global.file) |file| {
             const object = self.objects.items[file];
             const sym = object.symtab.items[global.sym_index];
-            log.debug("  {s}: {d}@{d}", .{ object.getString(sym.st_name), global.sym_index, file });
+            log.debug("  {d}: {s}: 0x{x}, {s}", .{ global.sym_index, object.getString(sym.st_name), sym.st_value, object.name });
         } else {
             const sym = self.locals.items[global.sym_index];
-            log.debug("  {s}: {d}@null", .{ self.getString(sym.st_name), global.sym_index });
+            log.debug("  {d}: {s}: 0x{x}", .{ global.sym_index, self.getString(sym.st_name), sym.st_value });
         }
     }
 }
