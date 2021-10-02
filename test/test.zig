@@ -7,17 +7,24 @@ const linux_x86_64 = CrossTarget{
     .os_tag = .linux,
     .abi = .musl,
 };
-const macos_targets = [2]CrossTarget{
-    .{
-        .cpu_arch = .x86_64,
-        .os_tag = .macos,
-        .abi = .gnu,
-    },
-    .{
-        .cpu_arch = .aarch64,
-        .os_tag = .macos,
-        .abi = .gnu,
-    },
+const macos_x86_64 = CrossTarget{
+    .cpu_arch = .x86_64,
+    .os_tag = .macos,
+    .abi = .gnu,
+};
+const macos_aarch64 = CrossTarget{
+    .cpu_arch = .aarch64,
+    .os_tag = .macos,
+    .abi = .gnu,
+};
+const macos_targets: []const CrossTarget = &.{
+    macos_x86_64,
+    macos_aarch64,
+};
+const all_targets: []const CrossTarget = &.{
+    linux_x86_64,
+    macos_x86_64,
+    macos_aarch64,
 };
 
 pub fn addCases(ctx: *TestContext) !void {
@@ -93,19 +100,6 @@ pub fn addCases(ctx: *TestContext) !void {
 
     // macOS/Mach-O tests
     for (macos_targets) |target| {
-        {
-            var case = try ctx.addCase("hello world in C", target);
-            try case.addInput("main.c",
-                \\#include <stdio.h>
-                \\
-                \\int main() {
-                \\    fprintf(stdout, "Hello, World!\n");
-                \\    return 0;
-                \\}
-            );
-            case.expectedStdout("Hello, World!\n");
-        }
-
         {
             var case = try ctx.addCase("simple multi object in C", target);
             try case.addInput("add.h",
@@ -221,6 +215,22 @@ pub fn addCases(ctx: *TestContext) !void {
             );
             case.expectedStdout("");
             case.expectedStderr("info: Before: 0\ninfo: After: 1\n");
+        }
+    }
+
+    // All targets
+    for (all_targets) |target| {
+        {
+            var case = try ctx.addCase("hello world in C", target);
+            try case.addInput("main.c",
+                \\#include <stdio.h>
+                \\
+                \\int main() {
+                \\    fprintf(stdout, "Hello, World!\n");
+                \\    return 0;
+                \\}
+            );
+            case.expectedStdout("Hello, World!\n");
         }
     }
 }
