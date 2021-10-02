@@ -1078,20 +1078,14 @@ pub fn createGotAtom(self: *Elf, target: SymbolWithLoc) !*Atom {
         const object = self.objects.items[file];
         break :blk object.getString(tsym.st_name);
     } else self.getString(tsym.st_name);
-    const needs_reloc = blk: {
-        if (mem.eql(u8, tsym_name, "_DYNAMIC")) break :blk false;
-        break :blk tsym.st_info & 0xf != elf.STT_NOTYPE or tsym.st_shndx != elf.SHN_UNDEF;
-    };
-    if (needs_reloc) {
-        const r_sym = @intCast(u64, target.sym_index) << 32;
-        const r_addend: i64 = target.file orelse -1;
-        const r_info = r_sym | elf.R_X86_64_64;
-        try atom.relocs.append(self.base.allocator, .{
-            .r_offset = 0,
-            .r_info = r_info,
-            .r_addend = r_addend,
-        });
-    }
+    const r_sym = @intCast(u64, target.sym_index) << 32;
+    const r_addend: i64 = target.file orelse -1;
+    const r_info = r_sym | elf.R_X86_64_64;
+    try atom.relocs.append(self.base.allocator, .{
+        .r_offset = 0,
+        .r_info = r_info,
+        .r_addend = r_addend,
+    });
 
     const tmp_name = try std.fmt.allocPrint(self.base.allocator, ".got.{s}", .{tsym_name});
     defer self.base.allocator.free(tmp_name);
