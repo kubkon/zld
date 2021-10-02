@@ -243,7 +243,6 @@ pub fn parseIntoAtoms(self: *Object, allocator: *Allocator, object_id: u16, elf_
             break :blk code;
         } else try self.readShdrContents(allocator, ndx);
         defer allocator.free(code);
-        try atom.code.appendSlice(allocator, code);
 
         if (self.relocs.get(ndx)) |rel_ndx| {
             const rel_shdr = self.shdrs.items[rel_ndx];
@@ -256,7 +255,7 @@ pub fn parseIntoAtoms(self: *Object, allocator: *Allocator, object_id: u16, elf_
             var count: usize = 0;
             while (count < nrelocs) : (count += 1) {
                 const bytes = raw_relocs[count * rel_shdr.sh_entsize ..][0..rel_shdr.sh_entsize];
-                const rel = blk: {
+                var rel = blk: {
                     if (rel_shdr.sh_type == elf.SHT_REL) {
                         const rel = @ptrCast(*const elf.Elf64_Rel, @alignCast(@alignOf(elf.Elf64_Rel), bytes)).*;
                         // TODO parse addend from the placeholder
@@ -283,6 +282,26 @@ pub fn parseIntoAtoms(self: *Object, allocator: *Allocator, object_id: u16, elf_
                         // TODO optimize link-constant by rewriting opcodes. For example,
                         // mov -> lea completely bypassing GOT.
                         const global = elf_file.globals.get(tsym_name).?;
+                        const needs_got = inner: {
+                            const actual_tsym = if (global.file) |file| tsym: {
+                                const object = elf_file.objects.items[file];
+                                break :tsym object.symtab.items[global.sym_index];
+                            } else elf_file.locals.items[global.sym_index];
+                            break :inner actual_tsym.st_info & 0xf == elf.STT_NOTYPE and
+                                actual_tsym.st_shndx == elf.SHN_UNDEF;
+                        };
+
+                        if (!needs_got) {
+                            // Link-time constant, try to optimize it away.
+                            if (mem.eql(u8, &[_]u8{ 0x48, 0x8b }, code[rel.r_offset - 3 ..][0..2])) {
+                                // MOVQ -> LEAQ
+                                code[rel.r_offset - 2] = 0x8d;
+                                const r_sym = rel.r_sym();
+                                rel.r_info = (@intCast(u64, r_sym) << 32) | elf.R_X86_64_PC32;
+                                break :blk;
+                            }
+                        }
+
                         if (elf_file.got_entries_map.contains(global)) break :blk;
                         log.debug("R_X86_64_REX_GOTPCRELX: creating GOT atom: [() -> {s}]", .{
                             tsym_name,
@@ -296,6 +315,8 @@ pub fn parseIntoAtoms(self: *Object, allocator: *Allocator, object_id: u16, elf_
                 atom.relocs.appendAssumeCapacity(rel);
             }
         }
+
+        try atom.code.appendSlice(allocator, code);
 
         // Update target section's metadata
         const tshdr = &elf_file.shdrs.items[tshdr_ndx];
@@ -322,7 +343,7 @@ pub fn getString(self: Object, off: u32) []const u8 {
 }
 
 /// Caller owns the memory.
-fn readShdrContents(self: Object, allocator: *Allocator, shdr_index: u16) ![]const u8 {
+fn readShdrContents(self: Object, allocator: *Allocator, shdr_index: u16) ![]u8 {
     const shdr = self.shdrs.items[shdr_index];
     var buffer = try allocator.alloc(u8, shdr.sh_size);
     errdefer allocator.free(buffer);
