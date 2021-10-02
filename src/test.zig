@@ -222,12 +222,33 @@ pub const TestContext = struct {
                 }
             }
 
-            const filetype = case.input_files.items[0].filetype;
-            if (filetype == .Zig) {
-                const zig_compiler_rt_path = try std.fs.path.join(allocator, &[_][]const u8{
-                    "test", "assets", @tagName(case.target.cpu_arch.?), "libcompiler_rt.a",
+            // compiler_rt
+            const compiler_rt_path = try std.fs.path.join(allocator, &[_][]const u8{
+                "test", "assets", target_triple, "libcompiler_rt.a",
+            });
+            try filenames.append(compiler_rt_path);
+
+            if (case.target.getAbi() == .musl) {
+                // crt1
+                const crt1_path = try std.fs.path.join(allocator, &[_][]const u8{
+                    "test", "assets", target_triple, "crt1.o",
                 });
-                try filenames.append(zig_compiler_rt_path);
+                try filenames.append(crt1_path);
+                // crti
+                const crti_path = try std.fs.path.join(allocator, &[_][]const u8{
+                    "test", "assets", target_triple, "crti.o",
+                });
+                try filenames.append(crti_path);
+                // crtn
+                const crtn_path = try std.fs.path.join(allocator, &[_][]const u8{
+                    "test", "assets", target_triple, "crtn.o",
+                });
+                try filenames.append(crtn_path);
+                // libc
+                const libc_path = try std.fs.path.join(allocator, &[_][]const u8{
+                    "test", "assets", target_triple, "libc.a",
+                });
+                try filenames.append(libc_path);
             }
 
             const output_path = try std.fs.path.join(allocator, &[_][]const u8{

@@ -28,141 +28,8 @@ const all_targets: []const CrossTarget = &.{
 };
 
 pub fn addCases(ctx: *TestContext) !void {
-    // Linux/ELF tests
-    {
-        var case = try ctx.addCase("hello world in C", linux_x86_64);
-        try case.addInput("main.c",
-            \\const char* str = "Hello, World!\n";
-            \\
-            \\void _start() {
-            \\  asm volatile (
-            \\    "mov $1, %%rax;"
-            \\    "mov $1, %%rdi;"
-            \\    "mov %0, %%rsi;"
-            \\    "mov $14, %%rdx;"
-            \\    "syscall;"
-            \\    :
-            \\    : "r" (str)
-            \\    : "rax"
-            \\  );
-            \\
-            \\  asm volatile (
-            \\    "mov $60, %%rax;"
-            \\    "mov $0, %%rdi;"
-            \\    "syscall;"
-            \\    :
-            \\    :
-            \\    :
-            \\  );
-            \\}
-        );
-        case.expectedStdout("Hello, World!\n");
-    }
-    {
-        var case = try ctx.addCase("simple multi objects in C", linux_x86_64);
-        try case.addInput("print.c",
-            \\const char* str = "Hello, World!\n";
-            \\
-            \\void printMe() {
-            \\  asm volatile (
-            \\    "mov $1, %%rax;"
-            \\    "mov $1, %%rdi;"
-            \\    "mov %0, %%rsi;"
-            \\    "mov $14, %%rdx;"
-            \\    "syscall;"
-            \\    :
-            \\    : "r" (str)
-            \\    : "rax"
-            \\  );
-            \\}
-        );
-        try case.addInput("main.c",
-            \\void printMe();
-            \\
-            \\void exitNow() {
-            \\  asm volatile (
-            \\    "mov $60, %%rax;"
-            \\    "mov $0, %%rdi;"
-            \\    "syscall;"
-            \\    :
-            \\    :
-            \\    :
-            \\  );
-            \\}
-            \\
-            \\void _start() {
-            \\    printMe();
-            \\    exitNow();
-            \\}
-        );
-        case.expectedStdout("Hello, World!\n");
-    }
-
     // macOS/Mach-O tests
     for (macos_targets) |target| {
-        {
-            var case = try ctx.addCase("simple multi object in C", target);
-            try case.addInput("add.h",
-                \\#ifndef ADD_H
-                \\#define ADD_H
-                \\
-                \\int add(int a, int b);
-                \\
-                \\#endif
-            );
-            try case.addInput("add.c",
-                \\#include "add.h"
-                \\
-                \\int add(int a, int b) {
-                \\    return a + b;
-                \\}
-            );
-            try case.addInput("main.c",
-                \\#include <stdio.h>
-                \\#include "add.h"
-                \\
-                \\int main() {
-                \\    int a = 1;
-                \\    int b = 2;
-                \\    int res = add(1, 2);
-                \\    printf("%d + %d = %d\n", a, b, res);
-                \\    return 0;
-                \\}
-            );
-            case.expectedStdout("1 + 2 = 3\n");
-        }
-
-        {
-            var case = try ctx.addCase("multiple imports in C", target);
-            try case.addInput("main.c",
-                \\#include <stdio.h>
-                \\#include <stdlib.h>
-                \\
-                \\int main() {
-                \\    fprintf(stdout, "Hello, World!\n");
-                \\    exit(0);
-                \\    return 0;
-                \\}
-            );
-            case.expectedStdout("Hello, World!\n");
-        }
-
-        {
-            var case = try ctx.addCase("zero-init statics in C", target);
-            try case.addInput("main.c",
-                \\#include <stdio.h>
-                \\
-                \\static int aGlobal = 1;
-                \\
-                \\int main() {
-                \\    printf("aGlobal=%d\n", aGlobal);
-                \\    aGlobal -= 1;
-                \\    return aGlobal;
-                \\}
-            );
-            case.expectedStdout("aGlobal=1\n");
-        }
-
         {
             var case = try ctx.addCase("hello world in Zig", target);
             try case.addInput("hello.zig",
@@ -175,7 +42,6 @@ pub fn addCases(ctx: *TestContext) !void {
             );
             case.expectedStdout("Hello, World!\n");
         }
-
         {
             var case = try ctx.addCase("stack traces in Zig", target);
             try case.addInput("panic.zig",
@@ -199,7 +65,6 @@ pub fn addCases(ctx: *TestContext) !void {
             //     \\Panicked during a panic. Aborting.
             // );
         }
-
         {
             var case = try ctx.addCase("tlv in Zig", target);
             try case.addInput("tlv.zig",
@@ -231,6 +96,66 @@ pub fn addCases(ctx: *TestContext) !void {
                 \\}
             );
             case.expectedStdout("Hello, World!\n");
+        }
+        {
+            var case = try ctx.addCase("simple multi object in C", target);
+            try case.addInput("add.h",
+                \\#ifndef ADD_H
+                \\#define ADD_H
+                \\
+                \\int add(int a, int b);
+                \\
+                \\#endif
+            );
+            try case.addInput("add.c",
+                \\#include "add.h"
+                \\
+                \\int add(int a, int b) {
+                \\    return a + b;
+                \\}
+            );
+            try case.addInput("main.c",
+                \\#include <stdio.h>
+                \\#include "add.h"
+                \\
+                \\int main() {
+                \\    int a = 1;
+                \\    int b = 2;
+                \\    int res = add(1, 2);
+                \\    printf("%d + %d = %d\n", a, b, res);
+                \\    return 0;
+                \\}
+            );
+            case.expectedStdout("1 + 2 = 3\n");
+        }
+        {
+            var case = try ctx.addCase("multiple imports in C", target);
+            try case.addInput("main.c",
+                \\#include <stdio.h>
+                \\#include <stdlib.h>
+                \\
+                \\int main() {
+                \\    fprintf(stdout, "Hello, World!\n");
+                \\    exit(0);
+                \\    return 0;
+                \\}
+            );
+            case.expectedStdout("Hello, World!\n");
+        }
+        {
+            var case = try ctx.addCase("zero-init statics in C", target);
+            try case.addInput("main.c",
+                \\#include <stdio.h>
+                \\
+                \\static int aGlobal = 1;
+                \\
+                \\int main() {
+                \\    printf("aGlobal=%d\n", aGlobal);
+                \\    aGlobal -= 1;
+                \\    return aGlobal;
+                \\}
+            );
+            case.expectedStdout("aGlobal=1\n");
         }
     }
 }
