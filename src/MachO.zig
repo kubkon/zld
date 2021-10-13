@@ -128,7 +128,7 @@ stub_helper_preamble_atom: ?*Atom = null,
 strtab: std.ArrayListUnmanaged(u8) = .{},
 strtab_dir: std.HashMapUnmanaged(u32, void, StringIndexContext, std.hash_map.default_max_load_percentage) = .{},
 
-got_entries_map: std.AutoArrayHashMapUnmanaged(GotIndirectionKey, *Atom) = .{},
+got_entries_map: std.AutoArrayHashMapUnmanaged(Atom.Relocation.Target, *Atom) = .{},
 stubs_map: std.AutoArrayHashMapUnmanaged(u32, *Atom) = .{},
 
 has_dices: bool = false,
@@ -157,14 +157,6 @@ const SymbolWithLoc = struct {
     file: ?u16 = null, // null means Zig module
 };
 
-pub const GotIndirectionKey = struct {
-    where: enum {
-        local,
-        undef,
-    },
-    where_index: u32,
-};
-
 /// Default path to dyld
 const default_dyld_path: [*:0]const u8 = "/usr/lib/dyld";
 
@@ -176,7 +168,7 @@ pub fn openPath(allocator: *Allocator, options: Zld.Options) !*MachO {
     const file = try options.emit.directory.createFile(options.emit.sub_path, .{
         .truncate = true,
         .read = true,
-        .mode = if (std.Target.current.os.tag == .windows) 0 else 0o777,
+        .mode = if (builtin.os.tag == .windows) 0 else 0o777,
     });
     errdefer file.close();
 
@@ -218,7 +210,7 @@ pub fn flush(self: *MachO) !void {
     const arena = &arena_allocator.allocator;
 
     const syslibroot = if (self.base.options.syslibroot) |syslibroot| syslibroot else blk: {
-        if (std.Target.current.os.tag != .macos) break :blk null;
+        if (builtin.os.tag != .macos) break :blk null;
         const syslibroot = std.zig.system.darwin.getSDKPath(arena, self.base.options.target) catch null;
         break :blk syslibroot;
     };
@@ -231,7 +223,7 @@ pub fn flush(self: *MachO) !void {
             log.warn("directory not found for '-L{s}'", .{dir});
         }
     }
-    if (std.Target.current.os.tag == .macos) {
+    if (builtin.os.tag == .macos) {
         if (try resolveSearchDir(arena, "/usr/lib", syslibroot)) |search_dir| {
             try lib_dirs.append(search_dir);
         }
@@ -261,7 +253,7 @@ pub fn flush(self: *MachO) !void {
         }
     }
 
-    if (std.Target.current.os.tag == .macos) {
+    if (builtin.os.tag == .macos) {
         for (&[_][]const u8{ "System", "c" }) |lib_name| {
             for (&[_][]const u8{ ".tbd", ".dylib", ".a" }) |ext| {
                 if (try resolveLib(arena, lib_dirs.items, lib_name, ext)) |full_path| {
@@ -282,7 +274,7 @@ pub fn flush(self: *MachO) !void {
         }
     }
 
-    if (std.Target.current.os.tag == .macos and self.base.options.frameworks.len > 0) {
+    if (builtin.os.tag == .macos and self.base.options.frameworks.len > 0) {
         if (try resolveSearchDir(arena, "/System/Library/Frameworks", syslibroot)) |search_dir| {
             try framework_dirs.append(search_dir);
         }
@@ -405,7 +397,7 @@ fn resolveSearchDir(
 
     if (fs.path.isAbsolute(dir)) {
         if (syslibroot) |root| {
-            const common_dir = if (std.Target.current.os.tag == .windows) blk: {
+            const common_dir = if (builtin.os.tag == .windows) blk: {
                 // We need to check for disk designator and strip it out from dir path so
                 // that we can concat dir with syslibroot.
                 // TODO we should backport this mechanism to 'MachO.Dylib.parseDependentLibs()'
@@ -1433,7 +1425,7 @@ fn writeAtoms(self: *MachO) !void {
     }
 }
 
-pub fn createGotAtom(self: *MachO, key: GotIndirectionKey) !*Atom {
+pub fn createGotAtom(self: *MachO, target: Atom.Relocation.Target) !*Atom {
     const local_sym_index = @intCast(u32, self.locals.items.len);
     try self.locals.append(self.base.allocator, .{
         .n_strx = 0,
@@ -1446,25 +1438,27 @@ pub fn createGotAtom(self: *MachO, key: GotIndirectionKey) !*Atom {
         .seg = self.data_const_segment_cmd_index.?,
         .sect = self.got_section_index.?,
     });
-    switch (key.where) {
+    try atom.relocs.append(self.base.allocator, .{
+        .offset = 0,
+        .target = target,
+        .addend = 0,
+        .subtractor = null,
+        .pcrel = false,
+        .length = 3,
+        .@"type" = switch (self.base.options.target.cpu.arch) {
+            .aarch64 => @enumToInt(macho.reloc_type_arm64.ARM64_RELOC_UNSIGNED),
+            .x86_64 => @enumToInt(macho.reloc_type_x86_64.X86_64_RELOC_UNSIGNED),
+            else => unreachable,
+        },
+    });
+
+    switch (target) {
         .local => {
-            try atom.relocs.append(self.base.allocator, .{
-                .offset = 0,
-                .where = .local,
-                .where_index = key.where_index,
-                .payload = .{
-                    .unsigned = .{
-                        .subtractor = null,
-                        .addend = 0,
-                        .is_64bit = true,
-                    },
-                },
-            });
             try atom.rebases.append(self.base.allocator, 0);
         },
-        .undef => {
+        .global => |n_strx| {
             try atom.bindings.append(self.base.allocator, .{
-                .local_sym_index = key.where_index,
+                .n_strx = n_strx,
                 .offset = 0,
             });
         },
@@ -1526,14 +1520,12 @@ fn createStubHelperPreambleAtom(self: *MachO) !void {
             atom.code.items[2] = 0x1d;
             atom.relocs.appendAssumeCapacity(.{
                 .offset = 3,
-                .where = .local,
-                .where_index = dyld_private_sym_index,
-                .payload = .{
-                    .signed = .{
-                        .addend = 0,
-                        .correction = 0,
-                    },
-                },
+                .target = .{ .local = dyld_private_sym_index },
+                .addend = 0,
+                .subtractor = null,
+                .pcrel = true,
+                .length = 2,
+                .@"type" = @enumToInt(macho.reloc_type_x86_64.X86_64_RELOC_SIGNED),
             });
             // push %r11
             atom.code.items[7] = 0x41;
@@ -1543,14 +1535,12 @@ fn createStubHelperPreambleAtom(self: *MachO) !void {
             atom.code.items[10] = 0x25;
             atom.relocs.appendAssumeCapacity(.{
                 .offset = 11,
-                .where = .undef,
-                .where_index = self.dyld_stub_binder_index.?,
-                .payload = .{
-                    .load = .{
-                        .kind = .got,
-                        .addend = 0,
-                    },
-                },
+                .target = .{ .global = self.undefs.items[self.dyld_stub_binder_index.?].n_strx },
+                .addend = 0,
+                .subtractor = null,
+                .pcrel = true,
+                .length = 2,
+                .@"type" = @enumToInt(macho.reloc_type_x86_64.X86_64_RELOC_GOT),
             });
         },
         .aarch64 => {
@@ -1559,28 +1549,23 @@ fn createStubHelperPreambleAtom(self: *MachO) !void {
             mem.writeIntLittle(u32, atom.code.items[0..][0..4], aarch64.Instruction.adrp(.x17, 0).toU32());
             atom.relocs.appendAssumeCapacity(.{
                 .offset = 0,
-                .where = .local,
-                .where_index = dyld_private_sym_index,
-                .payload = .{
-                    .page = .{
-                        .kind = .page,
-                        .addend = 0,
-                    },
-                },
+                .target = .{ .local = dyld_private_sym_index },
+                .addend = 0,
+                .subtractor = null,
+                .pcrel = true,
+                .length = 2,
+                .@"type" = @enumToInt(macho.reloc_type_arm64.ARM64_RELOC_PAGE21),
             });
             // add x17, x17, 0
             mem.writeIntLittle(u32, atom.code.items[4..][0..4], aarch64.Instruction.add(.x17, .x17, 0, false).toU32());
             atom.relocs.appendAssumeCapacity(.{
                 .offset = 4,
-                .where = .local,
-                .where_index = dyld_private_sym_index,
-                .payload = .{
-                    .page_off = .{
-                        .kind = .page,
-                        .addend = 0,
-                        .op_kind = .arithmetic,
-                    },
-                },
+                .target = .{ .local = dyld_private_sym_index },
+                .addend = 0,
+                .subtractor = null,
+                .pcrel = false,
+                .length = 2,
+                .@"type" = @enumToInt(macho.reloc_type_arm64.ARM64_RELOC_PAGEOFF12),
             });
             // stp x16, x17, [sp, #-16]!
             mem.writeIntLittle(u32, atom.code.items[8..][0..4], aarch64.Instruction.stp(
@@ -1593,14 +1578,12 @@ fn createStubHelperPreambleAtom(self: *MachO) !void {
             mem.writeIntLittle(u32, atom.code.items[12..][0..4], aarch64.Instruction.adrp(.x16, 0).toU32());
             atom.relocs.appendAssumeCapacity(.{
                 .offset = 12,
-                .where = .undef,
-                .where_index = self.dyld_stub_binder_index.?,
-                .payload = .{
-                    .page = .{
-                        .kind = .got,
-                        .addend = 0,
-                    },
-                },
+                .target = .{ .global = self.undefs.items[self.dyld_stub_binder_index.?].n_strx },
+                .addend = 0,
+                .subtractor = null,
+                .pcrel = true,
+                .length = 2,
+                .@"type" = @enumToInt(macho.reloc_type_arm64.ARM64_RELOC_GOT_LOAD_PAGE21),
             });
             // ldr x16, [x16, 0]
             mem.writeIntLittle(u32, atom.code.items[16..][0..4], aarch64.Instruction.ldr(.x16, .{
@@ -1611,14 +1594,12 @@ fn createStubHelperPreambleAtom(self: *MachO) !void {
             }).toU32());
             atom.relocs.appendAssumeCapacity(.{
                 .offset = 16,
-                .where = .undef,
-                .where_index = self.dyld_stub_binder_index.?,
-                .payload = .{
-                    .page_off = .{
-                        .kind = .got,
-                        .addend = 0,
-                    },
-                },
+                .target = .{ .global = self.undefs.items[self.dyld_stub_binder_index.?].n_strx },
+                .addend = 0,
+                .subtractor = null,
+                .pcrel = false,
+                .length = 2,
+                .@"type" = @enumToInt(macho.reloc_type_arm64.ARM64_RELOC_GOT_LOAD_PAGEOFF12),
             });
             // br x16
             mem.writeIntLittle(u32, atom.code.items[20..][0..4], aarch64.Instruction.br(.x16).toU32());
@@ -1663,11 +1644,12 @@ pub fn createStubHelperAtom(self: *MachO) !*Atom {
             atom.code.items[5] = 0xe9;
             atom.relocs.appendAssumeCapacity(.{
                 .offset = 6,
-                .where = .local,
-                .where_index = self.stub_helper_preamble_atom.?.local_sym_index,
-                .payload = .{
-                    .branch = .{ .arch = arch },
-                },
+                .target = .{ .local = self.stub_helper_preamble_atom.?.local_sym_index },
+                .addend = 0,
+                .subtractor = null,
+                .pcrel = true,
+                .length = 2,
+                .@"type" = @enumToInt(macho.reloc_type_x86_64.X86_64_RELOC_BRANCH),
             });
         },
         .aarch64 => {
@@ -1683,11 +1665,12 @@ pub fn createStubHelperAtom(self: *MachO) !*Atom {
             mem.writeIntLittle(u32, atom.code.items[4..8], aarch64.Instruction.b(0).toU32());
             atom.relocs.appendAssumeCapacity(.{
                 .offset = 4,
-                .where = .local,
-                .where_index = self.stub_helper_preamble_atom.?.local_sym_index,
-                .payload = .{
-                    .branch = .{ .arch = arch },
-                },
+                .target = .{ .local = self.stub_helper_preamble_atom.?.local_sym_index },
+                .addend = 0,
+                .subtractor = null,
+                .pcrel = true,
+                .length = 2,
+                .@"type" = @enumToInt(macho.reloc_type_arm64.ARM64_RELOC_BRANCH26),
             });
             // Next 4 bytes 8..12 are just a placeholder populated in `populateLazyBindOffsetsInStubHelper`.
         },
@@ -1697,7 +1680,7 @@ pub fn createStubHelperAtom(self: *MachO) !*Atom {
     return atom;
 }
 
-pub fn createLazyPointerAtom(self: *MachO, stub_sym_index: u32, lazy_binding_sym_index: u32) !*Atom {
+pub fn createLazyPointerAtom(self: *MachO, stub_sym_index: u32, n_strx: u32) !*Atom {
     const local_sym_index = @intCast(u32, self.locals.items.len);
     try self.locals.append(self.base.allocator, .{
         .n_strx = 0,
@@ -1712,19 +1695,20 @@ pub fn createLazyPointerAtom(self: *MachO, stub_sym_index: u32, lazy_binding_sym
     });
     try atom.relocs.append(self.base.allocator, .{
         .offset = 0,
-        .where = .local,
-        .where_index = stub_sym_index,
-        .payload = .{
-            .unsigned = .{
-                .subtractor = null,
-                .addend = 0,
-                .is_64bit = true,
-            },
+        .target = .{ .local = stub_sym_index },
+        .addend = 0,
+        .subtractor = null,
+        .pcrel = false,
+        .length = 3,
+        .@"type" = switch (self.base.options.target.cpu.arch) {
+            .aarch64 => @enumToInt(macho.reloc_type_arm64.ARM64_RELOC_UNSIGNED),
+            .x86_64 => @enumToInt(macho.reloc_type_x86_64.X86_64_RELOC_UNSIGNED),
+            else => unreachable,
         },
     });
     try atom.rebases.append(self.base.allocator, 0);
     try atom.lazy_bindings.append(self.base.allocator, .{
-        .local_sym_index = lazy_binding_sym_index,
+        .n_strx = n_strx,
         .offset = 0,
     });
     return atom;
@@ -1761,11 +1745,12 @@ pub fn createStubAtom(self: *MachO, laptr_sym_index: u32) !*Atom {
             atom.code.items[1] = 0x25;
             try atom.relocs.append(self.base.allocator, .{
                 .offset = 2,
-                .where = .local,
-                .where_index = laptr_sym_index,
-                .payload = .{
-                    .branch = .{ .arch = arch },
-                },
+                .target = .{ .local = laptr_sym_index },
+                .addend = 0,
+                .subtractor = null,
+                .pcrel = true,
+                .length = 2,
+                .@"type" = @enumToInt(macho.reloc_type_x86_64.X86_64_RELOC_BRANCH),
             });
         },
         .aarch64 => {
@@ -1774,14 +1759,12 @@ pub fn createStubAtom(self: *MachO, laptr_sym_index: u32) !*Atom {
             mem.writeIntLittle(u32, atom.code.items[0..4], aarch64.Instruction.adrp(.x16, 0).toU32());
             atom.relocs.appendAssumeCapacity(.{
                 .offset = 0,
-                .where = .local,
-                .where_index = laptr_sym_index,
-                .payload = .{
-                    .page = .{
-                        .kind = .page,
-                        .addend = 0,
-                    },
-                },
+                .target = .{ .local = laptr_sym_index },
+                .addend = 0,
+                .subtractor = null,
+                .pcrel = true,
+                .length = 2,
+                .@"type" = @enumToInt(macho.reloc_type_arm64.ARM64_RELOC_PAGE21),
             });
             // ldr x16, x16, offset
             mem.writeIntLittle(u32, atom.code.items[4..8], aarch64.Instruction.ldr(.x16, .{
@@ -1792,15 +1775,12 @@ pub fn createStubAtom(self: *MachO, laptr_sym_index: u32) !*Atom {
             }).toU32());
             atom.relocs.appendAssumeCapacity(.{
                 .offset = 4,
-                .where = .local,
-                .where_index = laptr_sym_index,
-                .payload = .{
-                    .page_off = .{
-                        .kind = .page,
-                        .addend = 0,
-                        .op_kind = .load,
-                    },
-                },
+                .target = .{ .local = laptr_sym_index },
+                .addend = 0,
+                .subtractor = null,
+                .pcrel = false,
+                .length = 2,
+                .@"type" = @enumToInt(macho.reloc_type_arm64.ARM64_RELOC_PAGEOFF12),
             });
             // br x16
             mem.writeIntLittle(u32, atom.code.items[8..12], aarch64.Instruction.br(.x16).toU32());
@@ -2182,12 +2162,9 @@ fn resolveDyldStubBinder(self: *MachO) !void {
     }
 
     // Add dyld_stub_binder as the final GOT entry.
-    const got_entry = GotIndirectionKey{
-        .where = .undef,
-        .where_index = self.dyld_stub_binder_index.?,
-    };
-    const atom = try self.createGotAtom(got_entry);
-    try self.got_entries_map.putNoClobber(self.base.allocator, got_entry, atom);
+    const target = Atom.Relocation.Target{ .global = n_strx };
+    const atom = try self.createGotAtom(target);
+    try self.got_entries_map.putNoClobber(self.base.allocator, target, atom);
 }
 
 fn addDataInCodeLC(self: *MachO) !void {
@@ -2675,23 +2652,47 @@ fn writeDyldInfoData(self: *MachO) !void {
                 }
 
                 for (atom.bindings.items) |binding| {
-                    const bind_sym = self.undefs.items[binding.local_sym_index];
-                    try bind_pointers.append(.{
-                        .offset = binding.offset + base_offset,
-                        .segment_id = match.seg,
-                        .dylib_ordinal = @divExact(bind_sym.n_desc, macho.N_SYMBOL_RESOLVER),
-                        .name = self.getString(bind_sym.n_strx),
-                    });
+                    const resolv = self.symbol_resolver.get(binding.n_strx).?;
+                    switch (resolv.where) {
+                        .global => {
+                            // Turn into a rebase.
+                            try rebase_pointers.append(.{
+                                .offset = base_offset + binding.offset,
+                                .segment_id = match.seg,
+                            });
+                        },
+                        .undef => {
+                            const bind_sym = self.undefs.items[resolv.where_index];
+                            try bind_pointers.append(.{
+                                .offset = binding.offset + base_offset,
+                                .segment_id = match.seg,
+                                .dylib_ordinal = @divExact(bind_sym.n_desc, macho.N_SYMBOL_RESOLVER),
+                                .name = self.getString(bind_sym.n_strx),
+                            });
+                        },
+                    }
                 }
 
                 for (atom.lazy_bindings.items) |binding| {
-                    const bind_sym = self.undefs.items[binding.local_sym_index];
-                    try lazy_bind_pointers.append(.{
-                        .offset = binding.offset + base_offset,
-                        .segment_id = match.seg,
-                        .dylib_ordinal = @divExact(bind_sym.n_desc, macho.N_SYMBOL_RESOLVER),
-                        .name = self.getString(bind_sym.n_strx),
-                    });
+                    const resolv = self.symbol_resolver.get(binding.n_strx).?;
+                    switch (resolv.where) {
+                        .global => {
+                            // Turn into a rebase.
+                            try rebase_pointers.append(.{
+                                .offset = base_offset + binding.offset,
+                                .segment_id = match.seg,
+                            });
+                        },
+                        .undef => {
+                            const bind_sym = self.undefs.items[resolv.where_index];
+                            try lazy_bind_pointers.append(.{
+                                .offset = binding.offset + base_offset,
+                                .segment_id = match.seg,
+                                .dylib_ordinal = @divExact(bind_sym.n_desc, macho.N_SYMBOL_RESOLVER),
+                                .name = self.getString(bind_sym.n_strx),
+                            });
+                        },
+                    }
                 }
 
                 if (atom.prev) |prev| {
@@ -2788,16 +2789,37 @@ fn populateLazyBindOffsetsInStubHelper(self: *MachO, buffer: []const u8) !void {
     // Because we insert lazy binding opcodes in reverse order (from last to the first atom),
     // we need reverse the order of atom traversal here as well.
     // TODO figure out a less error prone mechanims for this!
-    var atom = last_atom;
-    while (atom.prev) |prev| {
-        atom = prev;
+    var table = std.AutoHashMap(i64, *Atom).init(self.base.allocator);
+    defer table.deinit();
+
+    {
+        var stub_atom = last_atom;
+        var laptr_atom = self.atoms.get(.{
+            .seg = self.data_segment_cmd_index.?,
+            .sect = self.la_symbol_ptr_section_index.?,
+        }).?;
+        const base_addr = blk: {
+            const seg = self.load_commands.items[self.data_segment_cmd_index.?].Segment;
+            break :blk seg.inner.vmaddr;
+        };
+
+        while (true) {
+            const laptr_off = blk: {
+                const sym = self.locals.items[laptr_atom.local_sym_index];
+                break :blk @intCast(i64, sym.n_value - base_addr);
+            };
+            try table.putNoClobber(laptr_off, stub_atom);
+            if (laptr_atom.prev) |prev| {
+                laptr_atom = prev;
+                stub_atom = stub_atom.prev.?;
+            } else break;
+        }
     }
-    atom = atom.next.?;
 
     var stream = std.io.fixedBufferStream(buffer);
     var reader = stream.reader();
-    var offsets = std.ArrayList(u32).init(self.base.allocator);
-    try offsets.append(0);
+    var offsets = std.ArrayList(struct { sym_offset: i64, offset: u32 }).init(self.base.allocator);
+    try offsets.append(.{ .sym_offset = undefined, .offset = 0 });
     defer offsets.deinit();
     var valid_block = false;
 
@@ -2815,7 +2837,7 @@ fn populateLazyBindOffsetsInStubHelper(self: *MachO, buffer: []const u8) !void {
             macho.BIND_OPCODE_DONE => {
                 if (valid_block) {
                     const offset = try stream.getPos();
-                    try offsets.append(@intCast(u32, offset));
+                    try offsets.append(.{ .sym_offset = undefined, .offset = @intCast(u32, offset) });
                 }
                 valid_block = false;
             },
@@ -2826,7 +2848,9 @@ fn populateLazyBindOffsetsInStubHelper(self: *MachO, buffer: []const u8) !void {
                 }
             },
             macho.BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB => {
-                _ = try std.leb.readULEB128(u64, reader);
+                var inserted = offsets.pop();
+                inserted.sym_offset = try std.leb.readILEB128(i64, reader);
+                try offsets.append(inserted);
             },
             macho.BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB => {
                 _ = try std.leb.readULEB128(u64, reader);
@@ -2838,8 +2862,10 @@ fn populateLazyBindOffsetsInStubHelper(self: *MachO, buffer: []const u8) !void {
         }
     }
 
-    const seg = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
-    const sect = seg.sections.items[self.stub_helper_section_index.?];
+    const sect = blk: {
+        const seg = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
+        break :blk seg.sections.items[self.stub_helper_section_index.?];
+    };
     const stub_offset: u4 = switch (self.base.options.target.cpu.arch) {
         .x86_64 => 1,
         .aarch64 => 2 * @sizeOf(u32),
@@ -2847,20 +2873,18 @@ fn populateLazyBindOffsetsInStubHelper(self: *MachO, buffer: []const u8) !void {
     };
     var buf: [@sizeOf(u32)]u8 = undefined;
     _ = offsets.pop();
+
     while (offsets.popOrNull()) |bind_offset| {
+        const atom = table.get(bind_offset.sym_offset).?;
         const sym = self.locals.items[atom.local_sym_index];
         const file_offset = sect.offset + sym.n_value - sect.addr + stub_offset;
-        mem.writeIntLittle(u32, &buf, bind_offset);
+        mem.writeIntLittle(u32, &buf, bind_offset.offset);
         log.debug("writing lazy bind offset in stub helper of 0x{x} for symbol {s} at offset 0x{x}", .{
-            bind_offset,
+            bind_offset.offset,
             self.getString(sym.n_strx),
             file_offset,
         });
         try self.base.file.pwriteAll(&buf, file_offset);
-
-        if (atom.next) |next| {
-            atom = next;
-        } else break;
     }
 }
 
@@ -3046,24 +3070,34 @@ fn writeSymbolTable(self: *MachO) !void {
 
     stubs.reserved1 = 0;
     for (self.stubs_map.keys()) |key| {
-        try writer.writeIntLittle(u32, dysymtab.iundefsym + key);
+        const resolv = self.symbol_resolver.get(key).?;
+        switch (resolv.where) {
+            .global => try writer.writeIntLittle(u32, macho.INDIRECT_SYMBOL_LOCAL),
+            .undef => try writer.writeIntLittle(u32, dysymtab.iundefsym + resolv.where_index),
+        }
     }
 
     got.reserved1 = nstubs;
     for (self.got_entries_map.keys()) |key| {
-        switch (key.where) {
-            .undef => {
-                try writer.writeIntLittle(u32, dysymtab.iundefsym + key.where_index);
-            },
-            .local => {
-                try writer.writeIntLittle(u32, macho.INDIRECT_SYMBOL_LOCAL);
+        switch (key) {
+            .local => try writer.writeIntLittle(u32, macho.INDIRECT_SYMBOL_LOCAL),
+            .global => |n_strx| {
+                const resolv = self.symbol_resolver.get(n_strx).?;
+                switch (resolv.where) {
+                    .global => try writer.writeIntLittle(u32, macho.INDIRECT_SYMBOL_LOCAL),
+                    .undef => try writer.writeIntLittle(u32, dysymtab.iundefsym + resolv.where_index),
+                }
             },
         }
     }
 
     la_symbol_ptr.reserved1 = got.reserved1 + ngot_entries;
     for (self.stubs_map.keys()) |key| {
-        try writer.writeIntLittle(u32, dysymtab.iundefsym + key);
+        const resolv = self.symbol_resolver.get(key).?;
+        switch (resolv.where) {
+            .global => try writer.writeIntLittle(u32, macho.INDIRECT_SYMBOL_LOCAL),
+            .undef => try writer.writeIntLittle(u32, dysymtab.iundefsym + resolv.where_index),
+        }
     }
 
     try self.base.file.pwriteAll(buf, dysymtab.indirectsymoff);

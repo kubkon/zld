@@ -409,7 +409,6 @@ pub fn parseIntoAtoms(self: *Object, allocator: *Allocator, macho_file: *MachO) 
 
         try atom.parseRelocs(relocs, .{
             .base_addr = sect.addr,
-            .base_offset = 0,
             .allocator = allocator,
             .object = self,
             .macho_file = macho_file,

@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const build_options = @import("build_options");
 const io = std.io;
 const mem = std.mem;
@@ -47,7 +48,7 @@ fn fatal(comptime format: []const u8, args: anytype) noreturn {
     process.exit(1);
 }
 
-pub const log_level: std.log.Level = switch (std.builtin.mode) {
+pub const log_level: std.log.Level = switch (builtin.mode) {
     .Debug => .debug,
     .ReleaseSafe, .ReleaseFast => .err,
     .ReleaseSmall => .crit,
@@ -245,7 +246,7 @@ pub fn main() anyerror!void {
     }
 
     // TODO allow for non-native targets
-    const target = std.Target.current;
+    const target = builtin.target;
     var zld = try Zld.openPath(gpa, .{
         .emit = .{
             .directory = std.fs.cwd(),

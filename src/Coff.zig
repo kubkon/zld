@@ -1,6 +1,7 @@
 const Coff = @This();
 
 const std = @import("std");
+const builtin = @import("builtin");
 const assert = std.debug.assert;
 const coff = std.coff;
 const fs = std.fs;
@@ -18,7 +19,7 @@ pub fn openPath(allocator: *Allocator, options: Zld.Options) !*Coff {
     const file = try options.emit.directory.createFile(options.emit.sub_path, .{
         .truncate = true,
         .read = true,
-        .mode = if (std.Target.current.os.tag == .windows) 0 else 0o777,
+        .mode = if (builtin.os.tag == .windows) 0 else 0o777,
     });
     errdefer file.close();
 
