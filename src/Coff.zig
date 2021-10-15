@@ -9,11 +9,14 @@ const log = std.log.scoped(.coff);
 const mem = std.mem;
 
 const Allocator = mem.Allocator;
+const Object = @import("Coff/Object.zig");
 const Zld = @import("Zld.zig");
 
 pub const base_tag = Zld.Tag.coff;
 
 base: Zld,
+
+objects: std.ArrayListUnmanaged(Object) = .{},
 
 pub fn openPath(allocator: *Allocator, options: Zld.Options) !*Coff {
     const file = try options.emit.directory.createFile(options.emit.sub_path, .{
@@ -55,6 +58,49 @@ pub fn closeFiles(self: Coff) void {
 }
 
 pub fn flush(self: *Coff) !void {
-    _ = self;
-    return error.TODOFlushInCoffLinker;
+    try self.parsePositionals(self.base.options.positionals);
+}
+
+fn parsePositionals(self: *Coff, files: []const []const u8) !void {
+    for (files) |file_name| {
+        const full_path = full_path: {
+            var buffer: [fs.MAX_PATH_BYTES]u8 = undefined;
+            const path = try std.fs.realpath(file_name, &buffer);
+            break :full_path try self.base.allocator.dupe(u8, path);
+        };
+        defer self.base.allocator.free(full_path);
+        log.debug("parsing input file path '{s}'", .{full_path});
+
+        if (try self.parseObject(full_path)) continue;
+
+        log.warn("unknown filetype for positional input file: '{s}'", .{file_name});
+    }
+}
+
+fn parseObject(self: *Coff, path: []const u8) !bool {
+    const file = fs.cwd().openFile(path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => |e| return e,
+    };
+    errdefer file.close();
+    
+    const name = try self.base.allocator.dupe(u8, path);
+    errdefer self.base.allocator.free(name);
+    
+    var object = Object{
+        .name = name,
+        .file = file,
+    };
+    
+    object.parse(self.base.allocator, self.base.options.target) catch |err| switch (err) {
+        error.EndOfStream => {
+            object.deinit(self.base.allocator);
+            return false;
+        },
+        else => |e| return e, 
+    };
+    
+    try self.objects.append(self.base.allocator, object);
+    
+    return true;
 }
