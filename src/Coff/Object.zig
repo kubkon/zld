@@ -44,12 +44,12 @@ const SectionHeader = packed struct {
 };
 
 const Symbol = packed struct {
-    n_name: [8]u8,
-    n_value: u32,
-    n_scnum: u16,
-    n_type: u16,
-    n_sclass: u8,
-    n_numaux: u8,
+    name: [8]u8,
+    value: u32,
+    sect_num: u16,
+    type: u16,
+    storage_class: u8,
+    num_aux: u8,
 };
 
 comptime {
@@ -99,6 +99,17 @@ fn parseSymbolTable(self: *Object, allocator: *Allocator) !void {
     var i: usize = 0;
     while (i < self.header.number_of_symbols) : (i += 1) {
         const symbol = try self.file.reader().readStruct(Symbol);
+        
+        // Ignore symbol if it has invalid section number
+        if (symbol.sect_num < 1 or symbol.sect_num > self.shdrtab.items.len) {
+            continue;
+        }
+        
+        // Ignore upcoming auxillary symbols
+        if (symbol.num_aux != 0) {
+            continue;
+        }
+        
         self.symtab.appendAssumeCapacity(symbol);
     }
 }
