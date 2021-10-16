@@ -1013,12 +1013,13 @@ fn resolveSpecialSymbols(self: *Elf) !void {
             mem.eql(u8, sym_name, "__fini_array_end") or
             mem.eql(u8, sym_name, "_DYNAMIC"))
         {
+            const st_shndx: u8 = if (mem.eql(u8, sym_name, "_DYNAMIC")) 0 else 1;
             const sym_index = @intCast(u32, self.locals.items.len);
             try self.locals.append(self.base.allocator, .{
                 .st_name = try self.makeString(sym_name),
                 .st_info = 0,
                 .st_other = 0,
-                .st_shndx = 0,
+                .st_shndx = st_shndx,
                 .st_value = 0,
                 .st_size = 0,
             });

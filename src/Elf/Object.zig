@@ -285,19 +285,44 @@ pub fn parseIntoAtoms(self: *Object, allocator: *Allocator, object_id: u16, elf_
                         const needs_got = inner: {
                             const actual_tsym = if (global.file) |file| tsym: {
                                 const object = elf_file.objects.items[file];
+                                log.debug("{s}", .{object.getString(
+                                    object.symtab.items[global.sym_index].st_name,
+                                )});
                                 break :tsym object.symtab.items[global.sym_index];
                             } else elf_file.locals.items[global.sym_index];
+                            log.debug("{}", .{actual_tsym});
                             break :inner actual_tsym.st_info & 0xf == elf.STT_NOTYPE and
                                 actual_tsym.st_shndx == elf.SHN_UNDEF;
                         };
+                        log.debug("needs_got = {}", .{
+                            needs_got,
+                        });
 
                         if (!needs_got) {
+                            log.debug("{x}", .{std.fmt.fmtSliceHexLower(code[rel.r_offset - 3 ..][0..3])});
                             // Link-time constant, try to optimize it away.
-                            if (mem.eql(u8, &[_]u8{ 0x48, 0x8b }, code[rel.r_offset - 3 ..][0..2])) {
+                            if (code[rel.r_offset - 2] == 0x8b) {
                                 // MOVQ -> LEAQ
                                 code[rel.r_offset - 2] = 0x8d;
                                 const r_sym = rel.r_sym();
                                 rel.r_info = (@intCast(u64, r_sym) << 32) | elf.R_X86_64_PC32;
+                                log.debug("R_X86_64_REX_GOTPCRELX -> R_X86_64_PC32: MOVQ -> LEAQ", .{});
+                                log.debug("{x}", .{std.fmt.fmtSliceHexLower(code[rel.r_offset - 3 ..][0..3])});
+                                break :blk;
+                            }
+                            if (code[rel.r_offset - 2] == 0x3b) inner: {
+                                const regs = code[rel.r_offset - 1];
+                                log.debug("regs = 0x{x}, hmm = 0x{x}", .{ regs, @truncate(u3, regs) });
+                                if (@truncate(u3, regs) != 0x5) break :inner;
+                                const reg = @intCast(u8, @truncate(u3, regs >> 3));
+                                // CMP r64, r/m64 -> CMP r/m64, imm32
+                                code[rel.r_offset - 2] = 0x81;
+                                code[rel.r_offset - 1] = 0xf8 | reg;
+                                const r_sym = rel.r_sym();
+                                rel.r_info = (@intCast(u64, r_sym) << 32) | elf.R_X86_64_32;
+                                rel.r_addend = 0;
+                                log.debug("R_X86_64_REX_GOTPCRELX -> R_X86_64_32: CMP r64, r/m64 -> CMP r/m64, imm32", .{});
+                                log.debug("{x}", .{std.fmt.fmtSliceHexLower(code[rel.r_offset - 3 ..][0..3])});
                                 break :blk;
                             }
                         }

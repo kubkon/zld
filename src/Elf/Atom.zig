@@ -237,9 +237,25 @@ pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
                 mem.writeIntLittle(i32, self.code.items[rel.r_offset..][0..4], displacement);
             },
             elf.R_X86_64_32 => {
-                const target = @intCast(u32, @intCast(i64, tsym.st_value) + rel.r_addend);
-                log.debug("R_X86_64_32: {x}: [() => 0x{x}] ({s})", .{ rel.r_offset, target, tsym_name });
-                mem.writeIntLittle(u32, self.code.items[rel.r_offset..][0..4], target);
+                const is_local = tsym_st_type == elf.STT_SECTION or tsym_st_bind == elf.STB_LOCAL;
+                const target: u64 = blk: {
+                    if (!is_local) {
+                        const global = elf_file.globals.get(tsym_name).?;
+                        if (global.file) |file| {
+                            const actual_object = elf_file.objects.items[file];
+                            const actual_tsym = actual_object.symtab.items[global.sym_index];
+                            break :blk actual_tsym.st_value;
+                        } else {
+                            const actual_tsym = elf_file.locals.items[global.sym_index];
+                            break :blk actual_tsym.st_value;
+                        }
+                    }
+
+                    break :blk tsym.st_value;
+                };
+                const scaled = @intCast(u32, @intCast(i64, target) + rel.r_addend);
+                log.debug("R_X86_64_32: {x}: [() => 0x{x}] ({s})", .{ rel.r_offset, scaled, tsym_name });
+                mem.writeIntLittle(u32, self.code.items[rel.r_offset..][0..4], scaled);
             },
             elf.R_X86_64_REX_GOTPCRELX => outer: {
                 const source = @intCast(i64, sym.st_value + rel.r_offset);
