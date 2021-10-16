@@ -17,6 +17,7 @@ symtab: std.ArrayListUnmanaged(Symbol) = .{},
 shdrtab: std.ArrayListUnmanaged(SectionHeader) = .{},
 strtab: []u8 = undefined,
 
+// TODO: Make these public in std.coff
 const CoffHeader = packed struct {
     machine: u16,
     number_of_sections: u16,
@@ -58,6 +59,9 @@ comptime {
 }
 
 pub fn deinit(self: *Object, allocator: *Allocator) void {
+    self.symtab.deinit(allocator);
+    self.shdrtab.deinit(allocator);
+    allocator.free(self.strtab);
     allocator.free(self.name);
 }
 
@@ -73,14 +77,14 @@ pub fn parse(self: *Object, allocator: *Allocator, target: ?std.Target) !void {
 
     self.header = header;
 
-    try self.parseSectionHeaders(allocator);
-    try self.parseSymbolTable(allocator);
-    try self.parseStringTable(allocator);
+    try self.parseShdrs(allocator);
+    try self.parseSymtab(allocator);
+    try self.parseStrtab(allocator);
 
     _ = target;
 }
 
-fn parseSectionHeaders(self: *Object, allocator: *Allocator) !void {
+fn parseShdrs(self: *Object, allocator: *Allocator) !void {
     try self.shdrtab.ensureTotalCapacity(allocator, self.header.number_of_sections);
 
     var i: usize = 0;
@@ -90,7 +94,7 @@ fn parseSectionHeaders(self: *Object, allocator: *Allocator) !void {
     }
 }
 
-fn parseSymbolTable(self: *Object, allocator: *Allocator) !void {
+fn parseSymtab(self: *Object, allocator: *Allocator) !void {
     const offset = self.header.pointer_to_symbol_table;
     try self.file.seekTo(offset);
 
@@ -99,22 +103,22 @@ fn parseSymbolTable(self: *Object, allocator: *Allocator) !void {
     var i: usize = 0;
     while (i < self.header.number_of_symbols) : (i += 1) {
         const symbol = try self.file.reader().readStruct(Symbol);
-        
+
         // Ignore symbol if it has invalid section number
         if (symbol.sect_num < 1 or symbol.sect_num > self.shdrtab.items.len) {
             continue;
         }
-        
+
         // Ignore upcoming auxillary symbols
         if (symbol.num_aux != 0) {
             continue;
         }
-        
+
         self.symtab.appendAssumeCapacity(symbol);
     }
 }
 
-fn parseStringTable(self: *Object, allocator: *Allocator) !void {
+fn parseStrtab(self: *Object, allocator: *Allocator) !void {
     const string_table_size = (try self.file.reader().readIntNative(u32)) - @sizeOf(u32);
 
     self.strtab = try allocator.alloc(u8, string_table_size);

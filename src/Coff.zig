@@ -50,11 +50,19 @@ fn createEmpty(gpa: *Allocator, options: Zld.Options) !*Coff {
 }
 
 pub fn deinit(self: *Coff) void {
-    _ = self;
+    self.closeFiles();
+
+    for (self.objects.items) |*object| {
+        object.deinit(self.base.allocator);
+    }
+
+    self.objects.deinit(self.base.allocator);
 }
 
 pub fn closeFiles(self: Coff) void {
-    _ = self;
+    for (self.objects.items) |object| {
+        object.file.close();
+    }
 }
 
 pub fn flush(self: *Coff) !void {
@@ -83,24 +91,24 @@ fn parseObject(self: *Coff, path: []const u8) !bool {
         else => |e| return e,
     };
     errdefer file.close();
-    
+
     const name = try self.base.allocator.dupe(u8, path);
     errdefer self.base.allocator.free(name);
-    
+
     var object = Object{
         .name = name,
         .file = file,
     };
-    
+
     object.parse(self.base.allocator, self.base.options.target) catch |err| switch (err) {
         error.EndOfStream => {
             object.deinit(self.base.allocator);
             return false;
         },
-        else => |e| return e, 
+        else => |e| return e,
     };
-    
+
     try self.objects.append(self.base.allocator, object);
-    
+
     return true;
 }
