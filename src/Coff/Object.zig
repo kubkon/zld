@@ -51,6 +51,16 @@ const Symbol = packed struct {
     type: u16,
     storage_class: u8,
     num_aux: u8,
+    
+    pub fn getName(self: Symbol, object: *Object) []const u8 {
+        if (mem.eql(u8, self.name[0..3], " " ** 4)) {
+            const offset = mem.readIntNative(u32, self.name[4..]);
+            return object.getString(offset);
+        }
+        else {
+            return mem.span(@ptrCast([*:0]const u8, &self.name));
+        }
+    }
 };
 
 comptime {
