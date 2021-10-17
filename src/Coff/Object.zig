@@ -5,6 +5,7 @@ const coff = std.coff;
 const mem = std.mem;
 const fs = std.fs;
 const assert = std.debug.assert;
+const log = std.log.scoped(.coff);
 
 const Allocator = mem.Allocator;
 
@@ -33,8 +34,13 @@ const IMAGE_FILE_MACHINE_IA64 = 0x0200;
 const IMAGE_FILE_MACHINE_AMD64 = 0x8664;
 
 const SectionHeader = packed struct {
+    const Misc = packed union {
+        physical_address: u32,
+        virtual_size: u32,
+    };
+
     name: [8]u8,
-    virtual_address: u32,
+    misc: Misc,
     size_of_raw_data: u32,
     pointer_to_raw_data: u32,
     pointer_to_relocations: u32,
@@ -51,13 +57,12 @@ const Symbol = packed struct {
     type: u16,
     storage_class: i8,
     num_aux: u8,
-    
+
     pub fn getName(self: Symbol, object: *Object) []const u8 {
         if (mem.readIntNative(u32, self.name[0..4]) == 0x0) {
             const offset = mem.readIntNative(u32, self.name[4..]);
             return object.getString(offset);
-        }
-        else {
+        } else {
             return mem.span(@ptrCast([*:0]const u8, &self.name));
         }
     }
@@ -103,23 +108,27 @@ pub fn deinit(self: *Object, allocator: *Allocator) void {
     allocator.free(self.name);
 }
 
-pub fn parse(self: *Object, allocator: *Allocator, target: ?std.Target) !void {
+pub fn parse(self: *Object, allocator: *Allocator, target: std.Target) !void {
     const reader = self.file.reader();
     const header = try reader.readStruct(CoffHeader);
 
-    if (header.machine != IMAGE_FILE_MACHINE_AMD64) {
-        return error.TodoSupportOtherMachines;
+    if (header.size_of_optional_header != 0) {
+        log.debug("Optional header not expected in an object file", .{});
+        return error.NotObject;
     }
 
-    assert(header.size_of_optional_header == 0);
-
+    if (header.machine != @enumToInt(target.cpu.arch.toCoffMachine())) {
+        log.debug("Invalid architecture {any}, expected {any}", .{
+            header.machine,
+            target.cpu.arch.toCoffMachine(),
+        });
+        return error.InvalidCpuArch;
+    }
     self.header = header;
 
     try self.parseShdrs(allocator);
     try self.parseSymtab(allocator);
     try self.parseStrtab(allocator);
-
-    _ = target;
 }
 
 fn parseShdrs(self: *Object, allocator: *Allocator) !void {
@@ -153,7 +162,7 @@ fn parseSymtab(self: *Object, allocator: *Allocator) !void {
             num_aux -= 1;
             continue;
         }
-        
+
         // Check for upcoming auxillary symbols
         if (symbol.num_aux != 0) {
             num_aux = symbol.num_aux;
