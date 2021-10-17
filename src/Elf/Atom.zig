@@ -3,6 +3,7 @@ const Atom = @This();
 const std = @import("std");
 const elf = std.elf;
 const log = std.log.scoped(.elf);
+const math = std.math;
 const mem = std.mem;
 
 const Allocator = mem.Allocator;
@@ -253,7 +254,15 @@ pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
 
                     break :blk tsym.st_value;
                 };
-                const scaled = @intCast(u32, @intCast(i64, target) + rel.r_addend);
+                const scaled = math.cast(u32, @intCast(i64, target) + rel.r_addend) catch |err| switch (err) {
+                    error.Overflow => {
+                        log.err("R_X86_64_32: target value overflows 32bits", .{});
+                        log.err("  target value 0x{x}", .{@intCast(i64, target) + rel.r_addend});
+                        log.err("  target symbol {s}", .{tsym_name});
+                        return error.RelocationOverflow;
+                    },
+                    else => |e| return e,
+                };
                 log.debug("R_X86_64_32: {x}: [() => 0x{x}] ({s})", .{ rel.r_offset, scaled, tsym_name });
                 mem.writeIntLittle(u32, self.code.items[rel.r_offset..][0..4], scaled);
             },
