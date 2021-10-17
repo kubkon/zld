@@ -47,13 +47,13 @@ const SectionHeader = packed struct {
 const Symbol = packed struct {
     name: [8]u8,
     value: u32,
-    sect_num: u16,
+    sect_num: i16,
     type: u16,
-    storage_class: u8,
+    storage_class: i8,
     num_aux: u8,
     
     pub fn getName(self: Symbol, object: *Object) []const u8 {
-        if (mem.eql(u8, self.name[0..3], " " ** 4)) {
+        if (mem.readIntNative(u32, self.name[0..4]) == 0x0) {
             const offset = mem.readIntNative(u32, self.name[4..]);
             return object.getString(offset);
         }
@@ -62,6 +62,34 @@ const Symbol = packed struct {
         }
     }
 };
+
+pub const IMAGE_SYM_CLASS_END_OF_FUNCTION = 0xff;
+pub const IMAGE_SYM_CLASS_NULL = 0;
+pub const IMAGE_SYM_CLASS_AUTOMATIC = 1;
+pub const IMAGE_SYM_CLASS_EXTERNAL = 2;
+pub const IMAGE_SYM_CLASS_STATIC = 3;
+pub const IMAGE_SYM_CLASS_REGISTER = 4;
+pub const IMAGE_SYM_CLASS_EXTERNAL_DEF = 5;
+pub const IMAGE_SYM_CLASS_LABEL = 6;
+pub const IMAGE_SYM_CLASS_UNDEFINED_LABEL = 7;
+pub const IMAGE_SYM_CLASS_MEMBER_OF_STRUCT = 8;
+pub const IMAGE_SYM_CLASS_ARGUMENT = 9;
+pub const IMAGE_SYM_CLASS_STRUCT_TAG = 10;
+pub const IMAGE_SYN_CLASS_MEMBER_OF_UNION = 11;
+pub const IMAGE_SYM_CLASS_UNION_TAG = 12;
+pub const IMAGE_SYM_CLASS_TYPE_DEFINITION = 13;
+pub const IMAGE_SYM_CLASS_UNDEFINED_STATIC = 14;
+pub const IMAGE_SYM_CLASS_ENUM_TAG = 15;
+pub const IMAGE_SYM_CLASS_MEMBER_OF_ENUM = 16;
+pub const IMAGE_SYM_CLASS_REGISTER_PARAM = 17;
+pub const IMAGE_SYM_CLASS_BIT_FIELD = 18;
+pub const IMAGE_SYM_CLASS_BLOCK = 100;
+pub const IMAGE_SYM_CLASS_FUNCTION = 101;
+pub const IMAGE_SYM_CLASS_END_OF_STRUCT = 102;
+pub const IMAGE_SYM_CLASS_FILE = 103;
+pub const IMAGE_SYM_CLASS_SECTION = 104;
+pub const IMAGE_SYM_CLASS_WEAK_EXTERNAL = 105;
+pub const IMAGE_SYM_CLASS_CLR_TOKEN = 107;
 
 comptime {
     assert(@sizeOf(Symbol) == 18);
@@ -111,6 +139,7 @@ fn parseSymtab(self: *Object, allocator: *Allocator) !void {
     try self.symtab.ensureTotalCapacity(allocator, self.header.number_of_symbols);
 
     var i: usize = 0;
+    var num_aux: usize = 0;
     while (i < self.header.number_of_symbols) : (i += 1) {
         const symbol = try self.file.reader().readStruct(Symbol);
 
@@ -119,9 +148,15 @@ fn parseSymtab(self: *Object, allocator: *Allocator) !void {
             continue;
         }
 
-        // Ignore upcoming auxillary symbols
-        if (symbol.num_aux != 0) {
+        // Ignore auxillary symbols
+        if (num_aux > 0) {
+            num_aux -= 1;
             continue;
+        }
+        
+        // Check for upcoming auxillary symbols
+        if (symbol.num_aux != 0) {
+            num_aux = symbol.num_aux;
         }
 
         self.symtab.appendAssumeCapacity(symbol);
@@ -136,6 +171,7 @@ fn parseStrtab(self: *Object, allocator: *Allocator) !void {
 }
 
 pub fn getString(self: *Object, off: u32) []const u8 {
-    assert(off < self.symtab.items.len);
-    return mem.span(@ptrCast([*:0]const u8, self.strtab.ptr + off));
+    const local_offset = off - @sizeOf(u32);
+    assert(local_offset < self.symtab.items.len);
+    return mem.span(@ptrCast([*:0]const u8, self.strtab.ptr + local_offset));
 }
