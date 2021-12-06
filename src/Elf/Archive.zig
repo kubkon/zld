@@ -79,7 +79,7 @@ const ar_hdr = extern struct {
     }
 };
 
-pub fn deinit(self: *Archive, allocator: *Allocator) void {
+pub fn deinit(self: *Archive, allocator: Allocator) void {
     self.extnames_strtab.deinit(allocator);
     for (self.toc.keys()) |*key| {
         allocator.free(key.*);
@@ -91,7 +91,7 @@ pub fn deinit(self: *Archive, allocator: *Allocator) void {
     allocator.free(self.name);
 }
 
-pub fn parse(self: *Archive, allocator: *Allocator) !void {
+pub fn parse(self: *Archive, allocator: Allocator) !void {
     const reader = self.file.reader();
     const magic = try reader.readBytesNoEof(SARMAG);
     if (!mem.eql(u8, &magic, ARMAG)) {
@@ -133,7 +133,7 @@ pub fn parse(self: *Archive, allocator: *Allocator) !void {
         i = 0;
         var pos: usize = try inner_stream.getPos();
         while (i < nsyms) : (i += 1) {
-            const sym_name = mem.spanZ(@ptrCast([*:0]const u8, buffer.ptr + pos));
+            const sym_name = mem.sliceTo(@ptrCast([*:0]const u8, buffer.ptr + pos), 0);
             const owned_name = try allocator.dupe(u8, sym_name);
             const res = try self.toc.getOrPut(allocator, owned_name);
             defer if (res.found_existing) allocator.free(owned_name);
@@ -169,10 +169,10 @@ pub fn parse(self: *Archive, allocator: *Allocator) !void {
 
 fn getExtName(self: Archive, off: u32) []const u8 {
     assert(off < self.extnames_strtab.items.len);
-    return mem.spanZ(@ptrCast([*:'\n']const u8, self.extnames_strtab.items.ptr + off));
+    return mem.sliceTo(@ptrCast([*:'\n']const u8, self.extnames_strtab.items.ptr + off), 0);
 }
 
-pub fn parseObject(self: Archive, allocator: *Allocator, target: std.Target, offset: u32) !Object {
+pub fn parseObject(self: Archive, allocator: Allocator, target: std.Target, offset: u32) !Object {
     const reader = self.file.reader();
     try reader.context.seekTo(offset);
 

@@ -101,14 +101,14 @@ comptime {
     assert(@sizeOf(CoffHeader) == 20);
 }
 
-pub fn deinit(self: *Object, allocator: *Allocator) void {
+pub fn deinit(self: *Object, allocator: Allocator) void {
     self.symtab.deinit(allocator);
     self.shdrtab.deinit(allocator);
     allocator.free(self.strtab);
     allocator.free(self.name);
 }
 
-pub fn parse(self: *Object, allocator: *Allocator, target: std.Target) !void {
+pub fn parse(self: *Object, allocator: Allocator, target: std.Target) !void {
     const reader = self.file.reader();
     const header = try reader.readStruct(CoffHeader);
 
@@ -131,7 +131,7 @@ pub fn parse(self: *Object, allocator: *Allocator, target: std.Target) !void {
     try self.parseStrtab(allocator);
 }
 
-fn parseShdrs(self: *Object, allocator: *Allocator) !void {
+fn parseShdrs(self: *Object, allocator: Allocator) !void {
     try self.shdrtab.ensureTotalCapacity(allocator, self.header.number_of_sections);
 
     var i: usize = 0;
@@ -141,7 +141,7 @@ fn parseShdrs(self: *Object, allocator: *Allocator) !void {
     }
 }
 
-fn parseSymtab(self: *Object, allocator: *Allocator) !void {
+fn parseSymtab(self: *Object, allocator: Allocator) !void {
     const offset = self.header.pointer_to_symbol_table;
     try self.file.seekTo(offset);
 
@@ -172,7 +172,7 @@ fn parseSymtab(self: *Object, allocator: *Allocator) !void {
     }
 }
 
-fn parseStrtab(self: *Object, allocator: *Allocator) !void {
+fn parseStrtab(self: *Object, allocator: Allocator) !void {
     const string_table_size = (try self.file.reader().readIntNative(u32)) - @sizeOf(u32);
 
     self.strtab = try allocator.alloc(u8, string_table_size);

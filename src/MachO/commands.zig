@@ -48,7 +48,7 @@ pub const LoadCommand = union(enum) {
     Rpath: GenericCommandWithData(macho.rpath_command),
     Unknown: GenericCommandWithData(macho.load_command),
 
-    pub fn read(allocator: *Allocator, reader: anytype) !LoadCommand {
+    pub fn read(allocator: Allocator, reader: anytype) !LoadCommand {
         const header = try reader.readStruct(macho.load_command);
         var buffer = try allocator.alloc(u8, header.cmdsize);
         defer allocator.free(buffer);
@@ -175,7 +175,7 @@ pub const LoadCommand = union(enum) {
         };
     }
 
-    pub fn deinit(self: *LoadCommand, allocator: *Allocator) void {
+    pub fn deinit(self: *LoadCommand, allocator: Allocator) void {
         return switch (self.*) {
             .Segment => |*x| x.deinit(allocator),
             .Dylinker => |*x| x.deinit(allocator),
@@ -261,7 +261,7 @@ pub const SegmentCommand = struct {
 
     pub fn addSection(
         self: *SegmentCommand,
-        alloc: *Allocator,
+        alloc: Allocator,
         comptime sectname: []const u8,
         opts: SectionOptions,
     ) !void {
@@ -285,12 +285,12 @@ pub const SegmentCommand = struct {
         self.inner.nsects += 1;
     }
 
-    pub fn read(alloc: *Allocator, reader: anytype) !SegmentCommand {
+    pub fn read(alloc: Allocator, reader: anytype) !SegmentCommand {
         const inner = try reader.readStruct(macho.segment_command_64);
         var segment = SegmentCommand{
             .inner = inner,
         };
-        try segment.sections.ensureCapacity(alloc, inner.nsects);
+        try segment.sections.ensureTotalCapacity(alloc, inner.nsects);
 
         var i: usize = 0;
         while (i < inner.nsects) : (i += 1) {
@@ -308,7 +308,7 @@ pub const SegmentCommand = struct {
         }
     }
 
-    pub fn deinit(self: *SegmentCommand, alloc: *Allocator) void {
+    pub fn deinit(self: *SegmentCommand, alloc: Allocator) void {
         self.sections.deinit(alloc);
     }
 
@@ -336,7 +336,7 @@ pub fn GenericCommandWithData(comptime Cmd: type) type {
 
         const Self = @This();
 
-        pub fn read(allocator: *Allocator, reader: anytype) !Self {
+        pub fn read(allocator: Allocator, reader: anytype) !Self {
             const inner = try reader.readStruct(Cmd);
             var data = try allocator.alloc(u8, inner.cmdsize - @sizeOf(Cmd));
             errdefer allocator.free(data);
@@ -352,7 +352,7 @@ pub fn GenericCommandWithData(comptime Cmd: type) type {
             try writer.writeAll(self.data);
         }
 
-        pub fn deinit(self: *Self, allocator: *Allocator) void {
+        pub fn deinit(self: *Self, allocator: Allocator) void {
             allocator.free(self.data);
         }
 
@@ -364,7 +364,7 @@ pub fn GenericCommandWithData(comptime Cmd: type) type {
 }
 
 pub fn createLoadDylibCommand(
-    allocator: *Allocator,
+    allocator: Allocator,
     name: []const u8,
     timestamp: u32,
     current_version: u32,
@@ -439,7 +439,7 @@ pub fn sectionIsDontDeadStripIfReferencesLive(sect: macho.section_64) bool {
     return sectionAttrs(sect) & macho.S_ATTR_LIVE_SUPPORT != 0;
 }
 
-fn testRead(allocator: *Allocator, buffer: []const u8, expected: anytype) !void {
+fn testRead(allocator: Allocator, buffer: []const u8, expected: anytype) !void {
     var stream = io.fixedBufferStream(buffer);
     var given = try LoadCommand.read(allocator, stream.reader());
     defer given.deinit(allocator);

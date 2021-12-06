@@ -12,7 +12,7 @@ const MachO = @import("MachO.zig");
 const Coff = @import("Coff.zig");
 
 tag: Tag,
-allocator: *Allocator,
+allocator: Allocator,
 file: fs.File,
 options: Options,
 
@@ -45,9 +45,11 @@ pub const Options = struct {
     framework_dirs: []const []const u8,
     rpath_list: []const []const u8,
     stack_size_override: ?u64 = null,
+    compatibility_version: ?std.builtin.Version = null,
+    current_version: ?std.builtin.Version = null,
 };
 
-pub fn openPath(allocator: *Allocator, options: Options) !*Zld {
+pub fn openPath(allocator: Allocator, options: Options) !*Zld {
     return switch (options.target.os.tag) {
         .linux => &(try Elf.openPath(allocator, options)).base,
         .macos => &(try MachO.openPath(allocator, options)).base,

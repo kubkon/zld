@@ -28,7 +28,7 @@ strtab: std.ArrayListUnmanaged(u8) = .{},
 
 symtab_index: ?u16 = null,
 
-pub fn deinit(self: *Object, allocator: *Allocator) void {
+pub fn deinit(self: *Object, allocator: Allocator) void {
     self.shdrs.deinit(allocator);
     self.sections.deinit(allocator);
     self.relocs.deinit(allocator);
@@ -37,7 +37,7 @@ pub fn deinit(self: *Object, allocator: *Allocator) void {
     allocator.free(self.name);
 }
 
-pub fn parse(self: *Object, allocator: *Allocator, target: std.Target) !void {
+pub fn parse(self: *Object, allocator: Allocator, target: std.Target) !void {
     const reader = self.file.reader();
     if (self.file_offset) |offset| {
         try reader.context.seekTo(offset);
@@ -86,7 +86,7 @@ pub fn parse(self: *Object, allocator: *Allocator, target: std.Target) !void {
     try self.parseSymtab(allocator);
 }
 
-fn parseShdrs(self: *Object, allocator: *Allocator, reader: anytype) !void {
+fn parseShdrs(self: *Object, allocator: Allocator, reader: anytype) !void {
     const shnum = self.header.?.e_shnum;
     if (shnum == 0) return;
 
@@ -119,7 +119,7 @@ fn parseShdrs(self: *Object, allocator: *Allocator, reader: anytype) !void {
     try self.strtab.appendSlice(allocator, buffer);
 }
 
-fn parseSymtab(self: *Object, allocator: *Allocator) !void {
+fn parseSymtab(self: *Object, allocator: Allocator) !void {
     if (self.symtab_index == null) return;
 
     const symtab_shdr = self.shdrs.items[self.symtab_index.?];
@@ -177,7 +177,7 @@ fn sortBySeniority(aliases: []u32, object: *Object) void {
     std.sort.sort(u32, aliases, Context{ .object = object }, SortFn.lessThan);
 }
 
-pub fn parseIntoAtoms(self: *Object, allocator: *Allocator, object_id: u16, elf_file: *Elf) !void {
+pub fn parseIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_file: *Elf) !void {
     log.debug("parsing '{s}' into atoms", .{self.name});
 
     var symbols_by_shndx = std.AutoHashMap(u16, std.ArrayList(u32)).init(allocator);
@@ -364,11 +364,11 @@ pub fn parseIntoAtoms(self: *Object, allocator: *Allocator, object_id: u16, elf_
 
 pub fn getString(self: Object, off: u32) []const u8 {
     assert(off < self.strtab.items.len);
-    return mem.spanZ(@ptrCast([*:0]const u8, self.strtab.items.ptr + off));
+    return mem.sliceTo(@ptrCast([*:0]const u8, self.strtab.items.ptr + off), 0);
 }
 
 /// Caller owns the memory.
-fn readShdrContents(self: Object, allocator: *Allocator, shdr_index: u16) ![]u8 {
+fn readShdrContents(self: Object, allocator: Allocator, shdr_index: u16) ![]u8 {
     const shdr = self.shdrs.items[shdr_index];
     var buffer = try allocator.alloc(u8, shdr.sh_size);
     errdefer allocator.free(buffer);

@@ -13,9 +13,9 @@ const tmpDir = testing.tmpDir;
 const Zld = @import("Zld.zig");
 
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-const allocator = &gpa.allocator;
+const allocator = gpa.allocator();
 // TODO fix memory leaks in std.dwarf
-// const allocator = testing.allocator;
+// const allocator = testing.allocator();
 
 test "unit" {
     _ = @import("Zld.zig");
@@ -256,6 +256,17 @@ pub const TestContext = struct {
             });
             defer allocator.free(output_path);
 
+            const host = try std.zig.system.NativeTargetInfo.detect(allocator, .{});
+            const target_info = try std.zig.system.NativeTargetInfo.detect(allocator, case.target);
+            const syslibroot = blk: {
+                if (case.target.getOsTag() == .macos and host.target.os.tag == .macos) {
+                    if (!std.zig.system.darwin.isDarwinSDKInstalled(allocator)) break :blk null;
+                    const sdk = std.zig.system.darwin.getDarwinSDK(allocator, host.target) orelse
+                        break :blk null;
+                    break :blk sdk.path;
+                }
+                break :blk null;
+            };
             var zld = try Zld.openPath(allocator, .{
                 .emit = .{
                     .directory = std.fs.cwd(),
@@ -264,7 +275,7 @@ pub const TestContext = struct {
                 .dynamic = true,
                 .target = case.target.toTarget(),
                 .output_mode = .exe,
-                .syslibroot = null,
+                .syslibroot = syslibroot,
                 .positionals = filenames.items,
                 .libs = &[0][]const u8{},
                 .frameworks = &[0][]const u8{},
@@ -278,7 +289,7 @@ pub const TestContext = struct {
             defer argv.deinit();
 
             outer: {
-                switch (case.target.getExternalExecutor()) {
+                switch (host.getExternalExecutor(target_info, .{})) {
                     .native => {
                         try zld.flush();
                         try argv.append("./a.out");

@@ -10,7 +10,6 @@ const CrossTarget = std.zig.CrossTarget;
 const Zld = @import("Zld.zig");
 
 var gpa_allocator = std.heap.GeneralPurposeAllocator(.{}){};
-const gpa = &gpa_allocator.allocator;
 
 const usage =
     \\Usage: zld [files...]
@@ -28,6 +27,7 @@ const usage =
     \\-l[name]                      Specify library to link against
     \\-L[path]                      Specify library search dir
     \\-framework [name]             Specify framework to link against
+    \\-weak_framework [name]        Specify weak framework to link against
     \\-F[path]                      Specify framework search dir
     \\-rpath [path]                 Specify runtime path
     \\-stack                        Override default stack size
@@ -42,7 +42,7 @@ fn printHelpAndExit() noreturn {
 
 fn fatal(comptime format: []const u8, args: anytype) noreturn {
     ret: {
-        const msg = std.fmt.allocPrint(gpa, format, args) catch break :ret;
+        const msg = std.fmt.allocPrint(gpa_allocator.allocator(), format, args) catch break :ret;
         io.getStdErr().writeAll(msg) catch {};
     }
     process.exit(1);
@@ -79,9 +79,9 @@ pub fn log(
 
     // We only recognize 4 log levels in this application.
     const level_txt = switch (level) {
-        .emerg, .alert, .crit, .err => "error",
+        .err => "error",
         .warn => "warning",
-        .notice, .info => "info",
+        .info => "info",
         .debug => "debug",
     };
     const prefix1 = level_txt;
@@ -92,9 +92,10 @@ pub fn log(
 }
 
 pub fn main() anyerror!void {
+    var gpa = gpa_allocator.allocator();
     var arena_allocator = std.heap.ArenaAllocator.init(gpa);
     defer arena_allocator.deinit();
-    const arena = &arena_allocator.allocator;
+    const arena = arena_allocator.allocator();
 
     const all_args = try process.argsAlloc(gpa);
     defer process.argsFree(gpa, all_args);
@@ -117,6 +118,8 @@ pub fn main() anyerror!void {
     var verbose: bool = false;
     var dylib: bool = false;
     var shared: bool = false;
+    var compatibility_version: ?std.builtin.Version = null;
+    var current_version: ?std.builtin.Version = null;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -144,7 +147,7 @@ pub fn main() anyerror!void {
             try lib_dirs.append(args[i][2..]);
             continue;
         }
-        if (mem.eql(u8, arg, "-framework")) {
+        if (mem.eql(u8, arg, "-framework") or mem.eql(u8, arg, "-weak_framework")) {
             if (i + 1 >= args.len) fatal("Expected framework name after {s}", .{arg});
             i += 1;
             try frameworks.append(args[i]);
@@ -182,6 +185,22 @@ pub fn main() anyerror!void {
             if (i + 1 >= args.len) fatal("Expected path after {s}", .{arg});
             i += 1;
             try rpath_list.append(args[i]);
+            continue;
+        }
+        if (mem.eql(u8, arg, "-compatibility_version")) {
+            if (i + 1 >= args.len) fatal("Expected version after {s}", .{arg});
+            i += 1;
+            compatibility_version = std.builtin.Version.parse(args[i]) catch |err| {
+                fatal("Unable to parse {s} {s}: {s}", .{ arg, args[i], @errorName(err) });
+            };
+            continue;
+        }
+        if (mem.eql(u8, arg, "-current_version")) {
+            if (i + 1 >= args.len) fatal("Expected version after {s}", .{arg});
+            i += 1;
+            current_version = std.builtin.Version.parse(args[i]) catch |err| {
+                fatal("Unable to parse {s} {s}: {s}", .{ arg, args[i], @errorName(err) });
+            };
             continue;
         }
         if (mem.eql(u8, arg, "--verbose")) {
@@ -263,6 +282,8 @@ pub fn main() anyerror!void {
         .framework_dirs = framework_dirs.items,
         .rpath_list = rpath_list.items,
         .stack_size_override = stack,
+        .compatibility_version = compatibility_version,
+        .current_version = current_version,
     });
     defer zld.deinit();
     try zld.flush();

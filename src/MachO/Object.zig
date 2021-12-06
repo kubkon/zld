@@ -69,7 +69,7 @@ const DebugInfo = struct {
     debug_line: []u8,
     debug_ranges: []u8,
 
-    pub fn parseFromObject(allocator: *Allocator, object: *const Object) !?DebugInfo {
+    pub fn parseFromObject(allocator: Allocator, object: *const Object) !?DebugInfo {
         var debug_info = blk: {
             const index = object.dwarf_debug_info_index orelse return null;
             break :blk try object.readSection(allocator, index);
@@ -113,7 +113,7 @@ const DebugInfo = struct {
         };
     }
 
-    pub fn deinit(self: *DebugInfo, allocator: *Allocator) void {
+    pub fn deinit(self: *DebugInfo, allocator: Allocator) void {
         allocator.free(self.debug_info);
         allocator.free(self.debug_abbrev);
         allocator.free(self.debug_str);
@@ -125,7 +125,7 @@ const DebugInfo = struct {
     }
 };
 
-pub fn deinit(self: *Object, allocator: *Allocator) void {
+pub fn deinit(self: *Object, allocator: Allocator) void {
     for (self.load_commands.items) |*lc| {
         lc.deinit(allocator);
     }
@@ -152,7 +152,7 @@ pub fn deinit(self: *Object, allocator: *Allocator) void {
     }
 }
 
-pub fn parse(self: *Object, allocator: *Allocator, target: std.Target) !void {
+pub fn parse(self: *Object, allocator: Allocator, target: std.Target) !void {
     const reader = self.file.reader();
     if (self.file_offset) |offset| {
         try reader.context.seekTo(offset);
@@ -188,7 +188,7 @@ pub fn parse(self: *Object, allocator: *Allocator, target: std.Target) !void {
     try self.parseDebugInfo(allocator);
 }
 
-pub fn readLoadCommands(self: *Object, allocator: *Allocator, reader: anytype) !void {
+pub fn readLoadCommands(self: *Object, allocator: Allocator, reader: anytype) !void {
     const header = self.header orelse unreachable; // Unreachable here signifies a fatal unexplored condition.
     const offset = self.file_offset orelse 0;
 
@@ -263,8 +263,8 @@ const NlistWithIndex = struct {
         // afterwards by address in each group. Normally, dysymtab should
         // be enough to guarantee the sort, but turns out not every compiler
         // is kind enough to specify the symbols in the correct order.
-        if (MachO.symbolIsSect(lhs.nlist)) {
-            if (MachO.symbolIsSect(rhs.nlist)) {
+        if (lhs.nlist.sect()) {
+            if (rhs.nlist.sect()) {
                 // Same group, sort by address.
                 return lhs.nlist.n_value < rhs.nlist.n_value;
             } else {
@@ -306,7 +306,7 @@ fn filterDice(dices: []macho.data_in_code_entry, start_addr: u64, end_addr: u64)
     return dices[start..end];
 }
 
-pub fn parseIntoAtoms(self: *Object, allocator: *Allocator, macho_file: *MachO) !void {
+pub fn parseIntoAtoms(self: *Object, allocator: Allocator, macho_file: *MachO) !void {
     const seg = self.load_commands.items[self.segment_cmd_index.?].Segment;
 
     log.debug("analysing {s}", .{self.name});
@@ -337,7 +337,7 @@ pub fn parseIntoAtoms(self: *Object, allocator: *Allocator, macho_file: *MachO) 
         var iundefsym: usize = sorted_all_nlists.items.len;
         while (iundefsym > 0) : (iundefsym -= 1) {
             const nlist = sorted_all_nlists.items[iundefsym];
-            if (MachO.symbolIsSect(nlist.nlist)) break;
+            if (nlist.nlist.sect()) break;
         }
         break :blk iundefsym;
     };
@@ -466,7 +466,7 @@ pub fn parseIntoAtoms(self: *Object, allocator: *Allocator, macho_file: *MachO) 
     }
 }
 
-fn parseSymtab(self: *Object, allocator: *Allocator) !void {
+fn parseSymtab(self: *Object, allocator: Allocator) !void {
     const index = self.symtab_cmd_index orelse return;
     const symtab_cmd = self.load_commands.items[index].Symtab;
 
@@ -482,7 +482,7 @@ fn parseSymtab(self: *Object, allocator: *Allocator) !void {
     try self.strtab.appendSlice(allocator, strtab);
 }
 
-pub fn parseDebugInfo(self: *Object, allocator: *Allocator) !void {
+pub fn parseDebugInfo(self: *Object, allocator: Allocator) !void {
     log.debug("parsing debug info in '{s}'", .{self.name});
 
     var debug_info = blk: {
@@ -514,7 +514,7 @@ pub fn parseDebugInfo(self: *Object, allocator: *Allocator) !void {
     }
 }
 
-pub fn parseDataInCode(self: *Object, allocator: *Allocator) !void {
+pub fn parseDataInCode(self: *Object, allocator: Allocator) !void {
     const index = self.data_in_code_cmd_index orelse return;
     const data_in_code = self.load_commands.items[index].LinkeditData;
 
@@ -534,7 +534,7 @@ pub fn parseDataInCode(self: *Object, allocator: *Allocator) !void {
     }
 }
 
-fn readSection(self: Object, allocator: *Allocator, index: u16) ![]u8 {
+fn readSection(self: Object, allocator: Allocator, index: u16) ![]u8 {
     const seg = self.load_commands.items[self.segment_cmd_index.?].Segment;
     const sect = seg.sections.items[index];
     var buffer = try allocator.alloc(u8, @intCast(usize, sect.size));
@@ -544,5 +544,5 @@ fn readSection(self: Object, allocator: *Allocator, index: u16) ![]u8 {
 
 pub fn getString(self: Object, off: u32) []const u8 {
     assert(off < self.strtab.items.len);
-    return mem.spanZ(@ptrCast([*:0]const u8, self.strtab.items.ptr + off));
+    return mem.sliceTo(@ptrCast([*:0]const u8, self.strtab.items.ptr + off), 0);
 }

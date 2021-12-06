@@ -77,7 +77,7 @@ pub const SymbolWithLoc = struct {
     file: ?u16,
 };
 
-pub fn openPath(allocator: *Allocator, options: Zld.Options) !*Elf {
+pub fn openPath(allocator: Allocator, options: Zld.Options) !*Elf {
     const file = try options.emit.directory.createFile(options.emit.sub_path, .{
         .truncate = true,
         .read = true,
@@ -95,7 +95,7 @@ pub fn openPath(allocator: *Allocator, options: Zld.Options) !*Elf {
     return self;
 }
 
-fn createEmpty(gpa: *Allocator, options: Zld.Options) !*Elf {
+fn createEmpty(gpa: Allocator, options: Zld.Options) !*Elf {
     const self = try gpa.create(Elf);
 
     self.* = .{
@@ -150,7 +150,7 @@ fn closeFiles(self: Elf) void {
 }
 
 fn resolveLib(
-    arena: *Allocator,
+    arena: Allocator,
     search_dirs: []const []const u8,
     name: []const u8,
     ext: []const u8,
@@ -176,7 +176,7 @@ fn resolveLib(
 pub fn flush(self: *Elf) !void {
     var arena_allocator = std.heap.ArenaAllocator.init(self.base.allocator);
     defer arena_allocator.deinit();
-    const arena = &arena_allocator.allocator;
+    const arena = arena_allocator.allocator();
 
     var lib_dirs = std.ArrayList([]const u8).init(arena);
     for (self.base.options.lib_dirs) |dir| {
@@ -759,7 +759,7 @@ fn sortShdrs(self: *Elf) !void {
     defer index_mapping.deinit();
     var shdrs = self.shdrs.toOwnedSlice(self.base.allocator);
     defer self.base.allocator.free(shdrs);
-    try self.shdrs.ensureCapacity(self.base.allocator, shdrs.len);
+    try self.shdrs.ensureTotalCapacity(self.base.allocator, shdrs.len);
 
     const indices = &[_]*?u16{
         &self.null_sect_index,
@@ -800,7 +800,7 @@ fn sortShdrs(self: *Elf) !void {
     }
 
     var transient: std.AutoHashMapUnmanaged(u16, *Atom) = .{};
-    try transient.ensureCapacity(self.base.allocator, self.atoms.count());
+    try transient.ensureTotalCapacity(self.base.allocator, self.atoms.count());
 
     var it = self.atoms.iterator();
     while (it.next()) |entry| {
@@ -1544,7 +1544,7 @@ fn makeShString(self: *Elf, bytes: []const u8) !u32 {
 
 pub fn getShString(self: Elf, off: u32) []const u8 {
     assert(off < self.shstrtab.items.len);
-    return mem.spanZ(@ptrCast([*:0]const u8, self.shstrtab.items.ptr + off));
+    return mem.sliceTo(@ptrCast([*:0]const u8, self.shstrtab.items.ptr + off), 0);
 }
 
 fn makeString(self: *Elf, bytes: []const u8) !u32 {
@@ -1558,7 +1558,7 @@ fn makeString(self: *Elf, bytes: []const u8) !u32 {
 
 pub fn getString(self: Elf, off: u32) []const u8 {
     assert(off < self.strtab.items.len);
-    return mem.spanZ(@ptrCast([*:0]const u8, self.strtab.items.ptr + off));
+    return mem.sliceTo(@ptrCast([*:0]const u8, self.strtab.items.ptr + off), 0);
 }
 
 fn logSymtab(self: Elf) void {

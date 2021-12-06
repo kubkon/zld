@@ -18,7 +18,7 @@ base: Zld,
 
 objects: std.ArrayListUnmanaged(Object) = .{},
 
-pub fn openPath(allocator: *Allocator, options: Zld.Options) !*Coff {
+pub fn openPath(allocator: Allocator, options: Zld.Options) !*Coff {
     const file = try options.emit.directory.createFile(options.emit.sub_path, .{
         .truncate = true,
         .read = true,
@@ -34,7 +34,7 @@ pub fn openPath(allocator: *Allocator, options: Zld.Options) !*Coff {
     return self;
 }
 
-fn createEmpty(gpa: *Allocator, options: Zld.Options) !*Coff {
+fn createEmpty(gpa: Allocator, options: Zld.Options) !*Coff {
     const self = try gpa.create(Coff);
 
     self.* = .{

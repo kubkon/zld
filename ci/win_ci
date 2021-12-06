@@ -3,7 +3,7 @@
 set -x
 set -e
 
-ZIG="zig-windows-x86_64-0.9.0-dev.1175+1f2f9f05c"
+ZIG="zig-windows-x86_64-0.9.0-dev.1903+2af94e76a"
 curl -L "https://ziglang.org/builds/$ZIG.zip" -o "$ZIG.zip"
 7z x "$ZIG.zip"
 export PATH="$(pwd)/$ZIG:$PATH"

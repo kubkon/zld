@@ -59,7 +59,7 @@ pub const SymbolAtOffset = struct {
     }
 };
 
-pub fn createEmpty(allocator: *Allocator) !*Atom {
+pub fn createEmpty(allocator: Allocator) !*Atom {
     const self = try allocator.create(Atom);
     self.* = .{
         .local_sym_index = 0,
@@ -72,7 +72,7 @@ pub fn createEmpty(allocator: *Allocator) !*Atom {
     return self;
 }
 
-pub fn deinit(self: *Atom, allocator: *Allocator) void {
+pub fn deinit(self: *Atom, allocator: Allocator) void {
     self.relocs.deinit(allocator);
     self.code.deinit(allocator);
     self.contained.deinit(allocator);
