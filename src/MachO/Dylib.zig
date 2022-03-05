@@ -179,16 +179,16 @@ fn readLoadCommands(self: *Dylib, allocator: Allocator, reader: anytype, depende
     while (i < self.header.?.ncmds) : (i += 1) {
         var cmd = try LoadCommand.read(allocator, reader);
         switch (cmd.cmd()) {
-            macho.LC_SYMTAB => {
+            macho.LC.SYMTAB => {
                 self.symtab_cmd_index = i;
             },
-            macho.LC_DYSYMTAB => {
+            macho.LC.DYSYMTAB => {
                 self.dysymtab_cmd_index = i;
             },
-            macho.LC_ID_DYLIB => {
+            macho.LC.ID_DYLIB => {
                 self.id_cmd_index = i;
             },
-            macho.LC_REEXPORT_DYLIB => {
+            macho.LC.REEXPORT_DYLIB => {
                 if (should_lookup_reexports) {
                     // Parse install_name to dependent dylib.
                     var id = try Id.fromLoadCommand(allocator, cmd.Dylib);
@@ -205,7 +205,7 @@ fn readLoadCommands(self: *Dylib, allocator: Allocator, reader: anytype, depende
 
 fn parseId(self: *Dylib, allocator: Allocator) !void {
     const index = self.id_cmd_index orelse {
-        log.debug("no LC_ID_DYLIB load command found; using hard-coded defaults...", .{});
+        log.debug("no LC.ID_DYLIB load command found; using hard-coded defaults...", .{});
         self.id = try Id.default(allocator, self.name);
         return;
     };

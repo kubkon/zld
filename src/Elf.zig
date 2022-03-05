@@ -314,7 +314,7 @@ fn populateMetadata(self: *Elf) !void {
             .e_shstrndx = 0,
         };
         // Magic
-        mem.copy(u8, header.e_ident[0..4], "\x7fELF");
+        mem.copy(u8, header.e_ident[0..4], Object.magic);
         // Class
         header.e_ident[4] = elf.ELFCLASS64;
         // Endianness

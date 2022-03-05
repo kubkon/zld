@@ -20,6 +20,7 @@ pub const Tag = enum {
     coff,
     elf,
     macho,
+    bitcode,
 };
 
 pub const Emit = struct {

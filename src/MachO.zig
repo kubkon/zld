@@ -2264,7 +2264,7 @@ fn addDataInCodeLC(self: *MachO) !void {
         self.data_in_code_cmd_index = @intCast(u16, self.load_commands.items.len);
         try self.load_commands.append(self.base.allocator, .{
             .LinkeditData = .{
-                .cmd = macho.LC_DATA_IN_CODE,
+                .cmd = macho.LC.DATA_IN_CODE,
                 .cmdsize = @sizeOf(macho.linkedit_data_command),
                 .dataoff = 0,
                 .datasize = 0,
@@ -2278,7 +2278,7 @@ fn addCodeSignatureLC(self: *MachO) !void {
     self.code_signature_cmd_index = @intCast(u16, self.load_commands.items.len);
     try self.load_commands.append(self.base.allocator, .{
         .LinkeditData = .{
-            .cmd = macho.LC_CODE_SIGNATURE,
+            .cmd = macho.LC.CODE_SIGNATURE,
             .cmdsize = @sizeOf(macho.linkedit_data_command),
             .dataoff = 0,
             .datasize = 0,
@@ -2294,7 +2294,7 @@ fn addRpathLCs(self: *MachO, rpaths: []const []const u8) !void {
             @sizeOf(u64),
         ));
         var rpath_cmd = commands.emptyGenericCommandWithData(macho.rpath_command{
-            .cmd = macho.LC_RPATH,
+            .cmd = macho.LC.RPATH,
             .cmdsize = cmdsize,
             .path = @sizeOf(macho.rpath_command),
         });
@@ -2551,7 +2551,7 @@ fn populateMetadata(self: *MachO) !void {
         self.dyld_info_cmd_index = @intCast(u16, self.load_commands.items.len);
         try self.load_commands.append(self.base.allocator, .{
             .DyldInfoOnly = .{
-                .cmd = macho.LC_DYLD_INFO_ONLY,
+                .cmd = macho.LC.DYLD_INFO_ONLY,
                 .cmdsize = @sizeOf(macho.dyld_info_command),
                 .rebase_off = 0,
                 .rebase_size = 0,
@@ -2571,7 +2571,7 @@ fn populateMetadata(self: *MachO) !void {
         self.symtab_cmd_index = @intCast(u16, self.load_commands.items.len);
         try self.load_commands.append(self.base.allocator, .{
             .Symtab = .{
-                .cmd = macho.LC_SYMTAB,
+                .cmd = macho.LC.SYMTAB,
                 .cmdsize = @sizeOf(macho.symtab_command),
                 .symoff = 0,
                 .nsyms = 0,
@@ -2585,7 +2585,7 @@ fn populateMetadata(self: *MachO) !void {
         self.dysymtab_cmd_index = @intCast(u16, self.load_commands.items.len);
         try self.load_commands.append(self.base.allocator, .{
             .Dysymtab = .{
-                .cmd = macho.LC_DYSYMTAB,
+                .cmd = macho.LC.DYSYMTAB,
                 .cmdsize = @sizeOf(macho.dysymtab_command),
                 .ilocalsym = 0,
                 .nlocalsym = 0,
@@ -2617,7 +2617,7 @@ fn populateMetadata(self: *MachO) !void {
             @sizeOf(u64),
         ));
         var dylinker_cmd = commands.emptyGenericCommandWithData(macho.dylinker_command{
-            .cmd = macho.LC_LOAD_DYLINKER,
+            .cmd = macho.LC.LOAD_DYLINKER,
             .cmdsize = cmdsize,
             .name = @sizeOf(macho.dylinker_command),
         });
@@ -2631,7 +2631,7 @@ fn populateMetadata(self: *MachO) !void {
         self.main_cmd_index = @intCast(u16, self.load_commands.items.len);
         try self.load_commands.append(self.base.allocator, .{
             .Main = .{
-                .cmd = macho.LC_MAIN,
+                .cmd = macho.LC.MAIN,
                 .cmdsize = @sizeOf(macho.entry_point_command),
                 .entryoff = 0x0,
                 .stacksize = 0,
@@ -2657,7 +2657,7 @@ fn populateMetadata(self: *MachO) !void {
             compat_version.major << 16 | compat_version.minor << 8 | compat_version.patch,
         );
         errdefer dylib_cmd.deinit(self.base.allocator);
-        dylib_cmd.inner.cmd = macho.LC_ID_DYLIB;
+        dylib_cmd.inner.cmd = macho.LC.ID_DYLIB;
         try self.load_commands.append(self.base.allocator, .{ .Dylib = dylib_cmd });
     }
 
@@ -2665,7 +2665,7 @@ fn populateMetadata(self: *MachO) !void {
         self.source_version_cmd_index = @intCast(u16, self.load_commands.items.len);
         try self.load_commands.append(self.base.allocator, .{
             .SourceVersion = .{
-                .cmd = macho.LC_SOURCE_VERSION,
+                .cmd = macho.LC.SOURCE_VERSION,
                 .cmdsize = @sizeOf(macho.source_version_command),
                 .version = 0x0,
             },
@@ -2690,7 +2690,7 @@ fn populateMetadata(self: *MachO) !void {
         const sdk_version = platform_version;
         const is_simulator_abi = self.base.options.target.abi == .simulator;
         var cmd = commands.emptyGenericCommandWithData(macho.build_version_command{
-            .cmd = macho.LC_BUILD_VERSION,
+            .cmd = macho.LC.BUILD_VERSION,
             .cmdsize = cmdsize,
             .platform = switch (self.base.options.target.os.tag) {
                 .macos => macho.PLATFORM_MACOS,
@@ -2716,7 +2716,7 @@ fn populateMetadata(self: *MachO) !void {
     if (self.uuid_cmd_index == null) {
         self.uuid_cmd_index = @intCast(u16, self.load_commands.items.len);
         var uuid_cmd: macho.uuid_command = .{
-            .cmd = macho.LC_UUID,
+            .cmd = macho.LC.UUID,
             .cmdsize = @sizeOf(macho.uuid_command),
             .uuid = undefined,
         };

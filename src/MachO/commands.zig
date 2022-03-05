@@ -57,59 +57,59 @@ pub const LoadCommand = union(enum) {
         var stream = io.fixedBufferStream(buffer);
 
         return switch (header.cmd) {
-            macho.LC_SEGMENT_64 => LoadCommand{
+            macho.LC.SEGMENT_64 => LoadCommand{
                 .Segment = try SegmentCommand.read(allocator, stream.reader()),
             },
-            macho.LC_DYLD_INFO,
-            macho.LC_DYLD_INFO_ONLY,
+            macho.LC.DYLD_INFO,
+            macho.LC.DYLD_INFO_ONLY,
             => LoadCommand{
                 .DyldInfoOnly = try stream.reader().readStruct(macho.dyld_info_command),
             },
-            macho.LC_SYMTAB => LoadCommand{
+            macho.LC.SYMTAB => LoadCommand{
                 .Symtab = try stream.reader().readStruct(macho.symtab_command),
             },
-            macho.LC_DYSYMTAB => LoadCommand{
+            macho.LC.DYSYMTAB => LoadCommand{
                 .Dysymtab = try stream.reader().readStruct(macho.dysymtab_command),
             },
-            macho.LC_ID_DYLINKER,
-            macho.LC_LOAD_DYLINKER,
-            macho.LC_DYLD_ENVIRONMENT,
+            macho.LC.ID_DYLINKER,
+            macho.LC.LOAD_DYLINKER,
+            macho.LC.DYLD_ENVIRONMENT,
             => LoadCommand{
                 .Dylinker = try GenericCommandWithData(macho.dylinker_command).read(allocator, stream.reader()),
             },
-            macho.LC_ID_DYLIB,
-            macho.LC_LOAD_WEAK_DYLIB,
-            macho.LC_LOAD_DYLIB,
-            macho.LC_REEXPORT_DYLIB,
+            macho.LC.ID_DYLIB,
+            macho.LC.LOAD_WEAK_DYLIB,
+            macho.LC.LOAD_DYLIB,
+            macho.LC.REEXPORT_DYLIB,
             => LoadCommand{
                 .Dylib = try GenericCommandWithData(macho.dylib_command).read(allocator, stream.reader()),
             },
-            macho.LC_MAIN => LoadCommand{
+            macho.LC.MAIN => LoadCommand{
                 .Main = try stream.reader().readStruct(macho.entry_point_command),
             },
-            macho.LC_VERSION_MIN_MACOSX,
-            macho.LC_VERSION_MIN_IPHONEOS,
-            macho.LC_VERSION_MIN_WATCHOS,
-            macho.LC_VERSION_MIN_TVOS,
+            macho.LC.VERSION_MIN_MACOSX,
+            macho.LC.VERSION_MIN_IPHONEOS,
+            macho.LC.VERSION_MIN_WATCHOS,
+            macho.LC.VERSION_MIN_TVOS,
             => LoadCommand{
                 .VersionMin = try stream.reader().readStruct(macho.version_min_command),
             },
-            macho.LC_SOURCE_VERSION => LoadCommand{
+            macho.LC.SOURCE_VERSION => LoadCommand{
                 .SourceVersion = try stream.reader().readStruct(macho.source_version_command),
             },
-            macho.LC_BUILD_VERSION => LoadCommand{
+            macho.LC.BUILD_VERSION => LoadCommand{
                 .BuildVersion = try GenericCommandWithData(macho.build_version_command).read(allocator, stream.reader()),
             },
-            macho.LC_UUID => LoadCommand{
+            macho.LC.UUID => LoadCommand{
                 .Uuid = try stream.reader().readStruct(macho.uuid_command),
             },
-            macho.LC_FUNCTION_STARTS,
-            macho.LC_DATA_IN_CODE,
-            macho.LC_CODE_SIGNATURE,
+            macho.LC.FUNCTION_STARTS,
+            macho.LC.DATA_IN_CODE,
+            macho.LC.CODE_SIGNATURE,
             => LoadCommand{
                 .LinkeditData = try stream.reader().readStruct(macho.linkedit_data_command),
             },
-            macho.LC_RPATH => LoadCommand{
+            macho.LC.RPATH => LoadCommand{
                 .Rpath = try GenericCommandWithData(macho.rpath_command).read(allocator, stream.reader()),
             },
             else => LoadCommand{
@@ -137,7 +137,7 @@ pub const LoadCommand = union(enum) {
         };
     }
 
-    pub fn cmd(self: LoadCommand) u32 {
+    pub fn cmd(self: LoadCommand) macho.LC {
         return switch (self) {
             .DyldInfoOnly => |x| x.cmd,
             .Symtab => |x| x.cmd,
@@ -231,7 +231,7 @@ pub const SegmentCommand = struct {
     pub fn empty(comptime segname: []const u8, opts: SegmentOptions) SegmentCommand {
         return .{
             .inner = .{
-                .cmd = macho.LC_SEGMENT_64,
+                .cmd = macho.LC.SEGMENT_64,
                 .cmdsize = opts.cmdsize,
                 .segname = makeStaticString(segname),
                 .vmaddr = opts.vmaddr,
@@ -377,7 +377,7 @@ pub fn createLoadDylibCommand(
     ));
 
     var dylib_cmd = emptyGenericCommandWithData(macho.dylib_command{
-        .cmd = macho.LC_LOAD_DYLIB,
+        .cmd = macho.LC.LOAD_DYLIB,
         .cmdsize = cmdsize,
         .dylib = .{
             .name = @sizeOf(macho.dylib_command),
@@ -481,7 +481,7 @@ test "read-write segment command" {
     };
     var cmd = SegmentCommand{
         .inner = .{
-            .cmd = macho.LC_SEGMENT_64,
+            .cmd = macho.LC.SEGMENT_64,
             .cmdsize = 152,
             .segname = makeStaticString("__TEXT"),
             .vmaddr = 4294967296,
@@ -528,7 +528,7 @@ test "read-write generic command with data" {
     };
     var cmd = GenericCommandWithData(macho.dylib_command){
         .inner = .{
-            .cmd = macho.LC_LOAD_DYLIB,
+            .cmd = macho.LC.LOAD_DYLIB,
             .cmdsize = 32,
             .dylib = .{
                 .name = 24,
@@ -563,7 +563,7 @@ test "read-write C struct command" {
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // stacksize
     };
     const cmd = .{
-        .cmd = macho.LC_MAIN,
+        .cmd = macho.LC.MAIN,
         .cmdsize = 24,
         .entryoff = 16644,
         .stacksize = 0,
