@@ -14,7 +14,6 @@ const meta = std.meta;
 
 const aarch64 = @import("aarch64.zig");
 const bind = @import("MachO/bind.zig");
-const commands = @import("MachO/commands.zig");
 
 const Allocator = mem.Allocator;
 const Archive = @import("MachO/Archive.zig");
@@ -23,8 +22,8 @@ const CodeSignature = @import("MachO/CodeSignature.zig");
 const Dylib = @import("MachO/Dylib.zig");
 const Object = @import("MachO/Object.zig");
 const LibStub = @import("tapi.zig").LibStub;
-const LoadCommand = commands.LoadCommand;
-const SegmentCommand = commands.SegmentCommand;
+const LoadCommand = macho.LoadCommand;
+const SegmentCommand = macho.SegmentCommand;
 const StringIndexAdapter = std.hash_map.StringIndexAdapter;
 const StringIndexContext = std.hash_map.StringIndexContext;
 const Trie = @import("MachO/Trie.zig");
@@ -374,12 +373,12 @@ pub fn flush(self: *MachO) !void {
     try self.writeAtoms();
 
     if (self.bss_section_index) |idx| {
-        const seg = &self.load_commands.items[self.data_segment_cmd_index.?].Segment;
+        const seg = &self.load_commands.items[self.data_segment_cmd_index.?].segment;
         const sect = &seg.sections.items[idx];
         sect.offset = 0;
     }
     if (self.tlv_bss_section_index) |idx| {
-        const seg = &self.load_commands.items[self.data_segment_cmd_index.?].Segment;
+        const seg = &self.load_commands.items[self.data_segment_cmd_index.?].segment;
         const sect = &seg.sections.items[idx];
         sect.offset = 0;
     }
@@ -711,18 +710,23 @@ pub const MatchingSection = struct {
 };
 
 pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSection {
-    const text_seg = &self.load_commands.items[self.text_segment_cmd_index.?].Segment;
-    const data_const_seg = &self.load_commands.items[self.data_const_segment_cmd_index.?].Segment;
-    const data_seg = &self.load_commands.items[self.data_segment_cmd_index.?].Segment;
-    const segname = commands.segmentName(sect);
-    const sectname = commands.sectionName(sect);
+    const text_seg = &self.load_commands.items[self.text_segment_cmd_index.?].segment;
+    const data_const_seg = &self.load_commands.items[self.data_const_segment_cmd_index.?].segment;
+    const data_seg = &self.load_commands.items[self.data_segment_cmd_index.?].segment;
+    const segname = sect.segName();
+    const sectname = sect.sectName();
 
     const res: ?MatchingSection = blk: {
-        switch (commands.sectionType(sect)) {
+        switch (sect.type_()) {
             macho.S_4BYTE_LITERALS, macho.S_8BYTE_LITERALS, macho.S_16BYTE_LITERALS => {
                 if (self.text_const_section_index == null) {
                     self.text_const_section_index = @intCast(u16, text_seg.sections.items.len);
-                    try text_seg.addSection(self.base.allocator, "__const", .{});
+                    try text_seg.sections.append(self.base.allocator, .{
+                        .segname = makeStaticString("__TEXT"),
+                        .sectname = makeStaticString("__const"),
+                    });
+                    text_seg.inner.cmdsize += @sizeOf(macho.section_64);
+                    text_seg.inner.nsects += 1;
                 }
 
                 break :blk .{
@@ -736,9 +740,13 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
                     // on merging the sections' contents.
                     if (self.objc_methname_section_index == null) {
                         self.objc_methname_section_index = @intCast(u16, text_seg.sections.items.len);
-                        try text_seg.addSection(self.base.allocator, "__objc_methname", .{
+                        try text_seg.sections.append(self.base.allocator, .{
+                            .segname = makeStaticString("__TEXT"),
+                            .sectname = makeStaticString("__objc_methname"),
                             .flags = macho.S_CSTRING_LITERALS,
                         });
+                        text_seg.inner.cmdsize += @sizeOf(macho.section_64);
+                        text_seg.inner.nsects += 1;
                     }
 
                     break :blk .{
@@ -748,9 +756,13 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
                 } else if (mem.eql(u8, sectname, "__objc_methtype")) {
                     if (self.objc_methtype_section_index == null) {
                         self.objc_methtype_section_index = @intCast(u16, text_seg.sections.items.len);
-                        try text_seg.addSection(self.base.allocator, "__objc_methtype", .{
+                        try text_seg.sections.append(self.base.allocator, .{
+                            .segname = makeStaticString("__TEXT"),
+                            .sectname = makeStaticString("__objc_methtype"),
                             .flags = macho.S_CSTRING_LITERALS,
                         });
+                        text_seg.inner.cmdsize += @sizeOf(macho.section_64);
+                        text_seg.inner.nsects += 1;
                     }
 
                     break :blk .{
@@ -760,7 +772,12 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
                 } else if (mem.eql(u8, sectname, "__objc_classname")) {
                     if (self.objc_classname_section_index == null) {
                         self.objc_classname_section_index = @intCast(u16, text_seg.sections.items.len);
-                        try text_seg.addSection(self.base.allocator, "__objc_classname", .{});
+                        try text_seg.sections.append(self.base.allocator, .{
+                            .segname = makeStaticString("__TEXT"),
+                            .sectname = makeStaticString("__objc_classname"),
+                        });
+                        text_seg.inner.cmdsize += @sizeOf(macho.section_64);
+                        text_seg.inner.nsects += 1;
                     }
 
                     break :blk .{
@@ -771,9 +788,13 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
 
                 if (self.cstring_section_index == null) {
                     self.cstring_section_index = @intCast(u16, text_seg.sections.items.len);
-                    try text_seg.addSection(self.base.allocator, "__cstring", .{
+                    try text_seg.sections.append(self.base.allocator, .{
+                        .segname = makeStaticString("__TEXT"),
+                        .sectname = makeStaticString("__cstring"),
                         .flags = macho.S_CSTRING_LITERALS,
                     });
+                    text_seg.inner.cmdsize += @sizeOf(macho.section_64);
+                    text_seg.inner.nsects += 1;
                 }
 
                 break :blk .{
@@ -785,9 +806,13 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
                 if (mem.eql(u8, segname, "__DATA") and mem.eql(u8, sectname, "__objc_selrefs")) {
                     if (self.objc_selrefs_section_index == null) {
                         self.objc_selrefs_section_index = @intCast(u16, data_seg.sections.items.len);
-                        try data_seg.addSection(self.base.allocator, "__objc_selrefs", .{
+                        try data_seg.sections.append(self.base.allocator, .{
+                            .segname = makeStaticString("__DATA"),
+                            .sectname = makeStaticString("__objc_selrefs"),
                             .flags = macho.S_LITERAL_POINTERS,
                         });
+                        data_seg.inner.cmdsize += @sizeOf(macho.section_64);
+                        data_seg.inner.nsects += 1;
                     }
 
                     break :blk .{
@@ -802,9 +827,13 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
             macho.S_MOD_INIT_FUNC_POINTERS => {
                 if (self.mod_init_func_section_index == null) {
                     self.mod_init_func_section_index = @intCast(u16, data_const_seg.sections.items.len);
-                    try data_const_seg.addSection(self.base.allocator, "__mod_init_func", .{
+                    try data_const_seg.sections.append(self.base.allocator, .{
+                        .segname = makeStaticString("__DATA_CONST"),
+                        .sectname = makeStaticString("__mod_init_func"),
                         .flags = macho.S_MOD_INIT_FUNC_POINTERS,
                     });
+                    data_const_seg.inner.cmdsize += @sizeOf(macho.section_64);
+                    data_const_seg.inner.nsects += 1;
                 }
 
                 break :blk .{
@@ -815,9 +844,13 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
             macho.S_MOD_TERM_FUNC_POINTERS => {
                 if (self.mod_term_func_section_index == null) {
                     self.mod_term_func_section_index = @intCast(u16, data_const_seg.sections.items.len);
-                    try data_const_seg.addSection(self.base.allocator, "__mod_term_func", .{
+                    try data_const_seg.sections.append(self.base.allocator, .{
+                        .segname = makeStaticString("__DATA_CONST"),
+                        .sectname = makeStaticString("__mod_term_func"),
                         .flags = macho.S_MOD_TERM_FUNC_POINTERS,
                     });
+                    data_const_seg.inner.cmdsize += @sizeOf(macho.section_64);
+                    data_const_seg.inner.nsects += 1;
                 }
 
                 break :blk .{
@@ -828,9 +861,13 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
             macho.S_ZEROFILL => {
                 if (self.bss_section_index == null) {
                     self.bss_section_index = @intCast(u16, data_seg.sections.items.len);
-                    try data_seg.addSection(self.base.allocator, "__bss", .{
+                    try data_seg.sections.append(self.base.allocator, .{
+                        .segname = makeStaticString("__DATA"),
+                        .sectname = makeStaticString("__bss"),
                         .flags = macho.S_ZEROFILL,
                     });
+                    data_seg.inner.cmdsize += @sizeOf(macho.section_64);
+                    data_seg.inner.nsects += 1;
                 }
 
                 break :blk .{
@@ -841,9 +878,13 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
             macho.S_THREAD_LOCAL_VARIABLES => {
                 if (self.tlv_section_index == null) {
                     self.tlv_section_index = @intCast(u16, data_seg.sections.items.len);
-                    try data_seg.addSection(self.base.allocator, "__thread_vars", .{
+                    try data_seg.sections.append(self.base.allocator, .{
+                        .segname = makeStaticString("__DATA"),
+                        .sectname = makeStaticString("__thread_vars"),
                         .flags = macho.S_THREAD_LOCAL_VARIABLES,
                     });
+                    data_seg.inner.cmdsize += @sizeOf(macho.section_64);
+                    data_seg.inner.nsects += 1;
                 }
 
                 break :blk .{
@@ -854,9 +895,13 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
             macho.S_THREAD_LOCAL_REGULAR => {
                 if (self.tlv_data_section_index == null) {
                     self.tlv_data_section_index = @intCast(u16, data_seg.sections.items.len);
-                    try data_seg.addSection(self.base.allocator, "__thread_data", .{
+                    try data_seg.sections.append(self.base.allocator, .{
+                        .segname = makeStaticString("__DATA"),
+                        .sectname = makeStaticString("__thread_data"),
                         .flags = macho.S_THREAD_LOCAL_REGULAR,
                     });
+                    data_seg.inner.cmdsize += @sizeOf(macho.section_64);
+                    data_seg.inner.nsects += 1;
                 }
 
                 break :blk .{
@@ -867,9 +912,13 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
             macho.S_THREAD_LOCAL_ZEROFILL => {
                 if (self.tlv_bss_section_index == null) {
                     self.tlv_bss_section_index = @intCast(u16, data_seg.sections.items.len);
-                    try data_seg.addSection(self.base.allocator, "__thread_bss", .{
+                    try data_seg.sections.append(self.base.allocator, .{
+                        .segname = makeStaticString("__DATA"),
+                        .sectname = makeStaticString("__thread_bss"),
                         .flags = macho.S_THREAD_LOCAL_ZEROFILL,
                     });
+                    data_seg.inner.cmdsize += @sizeOf(macho.section_64);
+                    data_seg.inner.nsects += 1;
                 }
 
                 break :blk .{
@@ -883,7 +932,12 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
                     // in the latest ld64 output.
                     if (self.eh_frame_section_index == null) {
                         self.eh_frame_section_index = @intCast(u16, text_seg.sections.items.len);
-                        try text_seg.addSection(self.base.allocator, "__eh_frame", .{});
+                        try text_seg.sections.append(self.base.allocator, .{
+                            .segname = makeStaticString("__TEXT"),
+                            .sectname = makeStaticString("__eh_frame"),
+                        });
+                        text_seg.inner.cmdsize += @sizeOf(macho.section_64);
+                        text_seg.inner.nsects += 1;
                     }
 
                     break :blk .{
@@ -895,7 +949,12 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
                 // TODO audit this: is this the right mapping?
                 if (self.data_const_section_index == null) {
                     self.data_const_section_index = @intCast(u16, data_const_seg.sections.items.len);
-                    try data_const_seg.addSection(self.base.allocator, "__const", .{});
+                    try data_const_seg.sections.append(self.base.allocator, .{
+                        .segname = makeStaticString("__DATA_CONST"),
+                        .sectname = makeStaticString("__const"),
+                    });
+                    data_const_seg.inner.cmdsize += @sizeOf(macho.section_64);
+                    data_const_seg.inner.nsects += 1;
                 }
 
                 break :blk .{
@@ -904,12 +963,16 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
                 };
             },
             macho.S_REGULAR => {
-                if (commands.sectionIsCode(sect)) {
+                if (sect.isCode()) {
                     if (self.text_section_index == null) {
                         self.text_section_index = @intCast(u16, text_seg.sections.items.len);
-                        try text_seg.addSection(self.base.allocator, "__text", .{
+                        try text_seg.sections.append(self.base.allocator, .{
+                            .segname = makeStaticString("__TEXT"),
+                            .sectname = makeStaticString("__text"),
                             .flags = macho.S_REGULAR | macho.S_ATTR_PURE_INSTRUCTIONS | macho.S_ATTR_SOME_INSTRUCTIONS,
                         });
+                        text_seg.inner.cmdsize += @sizeOf(macho.section_64);
+                        text_seg.inner.nsects += 1;
                     }
 
                     break :blk .{
@@ -917,7 +980,7 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
                         .sect = self.text_section_index.?,
                     };
                 }
-                if (commands.sectionIsDebug(sect)) {
+                if (sect.isDebug()) {
                     // TODO debug attributes
                     if (mem.eql(u8, "__LD", segname) and mem.eql(u8, "__compact_unwind", sectname)) {
                         log.debug("TODO compact unwind section: type 0x{x}, name '{s},{s}'", .{
@@ -931,7 +994,12 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
                     if (mem.eql(u8, sectname, "__ustring")) {
                         if (self.ustring_section_index == null) {
                             self.ustring_section_index = @intCast(u16, text_seg.sections.items.len);
-                            try text_seg.addSection(self.base.allocator, "__ustring", .{});
+                            try text_seg.sections.append(self.base.allocator, .{
+                                .segname = makeStaticString("__TEXT"),
+                                .sectname = makeStaticString("__ustring"),
+                            });
+                            text_seg.inner.cmdsize += @sizeOf(macho.section_64);
+                            text_seg.inner.nsects += 1;
                         }
 
                         break :blk .{
@@ -941,7 +1009,12 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
                     } else if (mem.eql(u8, sectname, "__gcc_except_tab")) {
                         if (self.gcc_except_tab_section_index == null) {
                             self.gcc_except_tab_section_index = @intCast(u16, text_seg.sections.items.len);
-                            try text_seg.addSection(self.base.allocator, "__gcc_except_tab", .{});
+                            try text_seg.sections.append(self.base.allocator, .{
+                                .segname = makeStaticString("__TEXT"),
+                                .sectname = makeStaticString("__gcc_except_tab"),
+                            });
+                            text_seg.inner.cmdsize += @sizeOf(macho.section_64);
+                            text_seg.inner.nsects += 1;
                         }
 
                         break :blk .{
@@ -951,7 +1024,12 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
                     } else if (mem.eql(u8, sectname, "__objc_methlist")) {
                         if (self.objc_methlist_section_index == null) {
                             self.objc_methlist_section_index = @intCast(u16, text_seg.sections.items.len);
-                            try text_seg.addSection(self.base.allocator, "__objc_methlist", .{});
+                            try text_seg.sections.append(self.base.allocator, .{
+                                .segname = makeStaticString("__TEXT"),
+                                .sectname = makeStaticString("__objc_methlist"),
+                            });
+                            text_seg.inner.cmdsize += @sizeOf(macho.section_64);
+                            text_seg.inner.nsects += 1;
                         }
 
                         break :blk .{
@@ -966,7 +1044,12 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
                     {
                         if (self.data_const_section_index == null) {
                             self.data_const_section_index = @intCast(u16, data_const_seg.sections.items.len);
-                            try data_const_seg.addSection(self.base.allocator, "__const", .{});
+                            try data_const_seg.sections.append(self.base.allocator, .{
+                                .segname = makeStaticString("__DATA_CONST"),
+                                .sectname = makeStaticString("__const"),
+                            });
+                            data_const_seg.inner.cmdsize += @sizeOf(macho.section_64);
+                            data_const_seg.inner.nsects += 1;
                         }
 
                         break :blk .{
@@ -976,7 +1059,12 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
                     } else {
                         if (self.text_const_section_index == null) {
                             self.text_const_section_index = @intCast(u16, text_seg.sections.items.len);
-                            try text_seg.addSection(self.base.allocator, "__const", .{});
+                            try text_seg.sections.append(self.base.allocator, .{
+                                .segname = makeStaticString("__TEXT"),
+                                .sectname = makeStaticString("__const"),
+                            });
+                            text_seg.inner.cmdsize += @sizeOf(macho.section_64);
+                            text_seg.inner.nsects += 1;
                         }
 
                         break :blk .{
@@ -989,7 +1077,12 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
                 if (mem.eql(u8, segname, "__DATA_CONST")) {
                     if (self.data_const_section_index == null) {
                         self.data_const_section_index = @intCast(u16, data_const_seg.sections.items.len);
-                        try data_const_seg.addSection(self.base.allocator, "__const", .{});
+                        try data_const_seg.sections.append(self.base.allocator, .{
+                            .segname = makeStaticString("__DATA_CONST"),
+                            .sectname = makeStaticString("__const"),
+                        });
+                        data_const_seg.inner.cmdsize += @sizeOf(macho.section_64);
+                        data_const_seg.inner.nsects += 1;
                     }
 
                     break :blk .{
@@ -1002,7 +1095,12 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
                     if (mem.eql(u8, sectname, "__const")) {
                         if (self.data_const_section_index == null) {
                             self.data_const_section_index = @intCast(u16, data_const_seg.sections.items.len);
-                            try data_const_seg.addSection(self.base.allocator, "__const", .{});
+                            try data_const_seg.sections.append(self.base.allocator, .{
+                                .segname = makeStaticString("__DATA_CONST"),
+                                .sectname = makeStaticString("__const"),
+                            });
+                            data_const_seg.inner.cmdsize += @sizeOf(macho.section_64);
+                            data_const_seg.inner.nsects += 1;
                         }
 
                         break :blk .{
@@ -1012,7 +1110,12 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
                     } else if (mem.eql(u8, sectname, "__cfstring")) {
                         if (self.objc_cfstring_section_index == null) {
                             self.objc_cfstring_section_index = @intCast(u16, data_const_seg.sections.items.len);
-                            try data_const_seg.addSection(self.base.allocator, "__cfstring", .{});
+                            try data_const_seg.sections.append(self.base.allocator, .{
+                                .segname = makeStaticString("__DATA_CONST"),
+                                .sectname = makeStaticString("__cfstring"),
+                            });
+                            data_const_seg.inner.cmdsize += @sizeOf(macho.section_64);
+                            data_const_seg.inner.nsects += 1;
                         }
 
                         break :blk .{
@@ -1022,7 +1125,12 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
                     } else if (mem.eql(u8, sectname, "__objc_classlist")) {
                         if (self.objc_classlist_section_index == null) {
                             self.objc_classlist_section_index = @intCast(u16, data_const_seg.sections.items.len);
-                            try data_const_seg.addSection(self.base.allocator, "__objc_classlist", .{});
+                            try data_const_seg.sections.append(self.base.allocator, .{
+                                .segname = makeStaticString("__DATA_CONST"),
+                                .sectname = makeStaticString("__objc_classlist"),
+                            });
+                            data_const_seg.inner.cmdsize += @sizeOf(macho.section_64);
+                            data_const_seg.inner.nsects += 1;
                         }
 
                         break :blk .{
@@ -1032,7 +1140,12 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
                     } else if (mem.eql(u8, sectname, "__objc_imageinfo")) {
                         if (self.objc_imageinfo_section_index == null) {
                             self.objc_imageinfo_section_index = @intCast(u16, data_const_seg.sections.items.len);
-                            try data_const_seg.addSection(self.base.allocator, "__objc_imageinfo", .{});
+                            try data_const_seg.sections.append(self.base.allocator, .{
+                                .segname = makeStaticString("__DATA_CONST"),
+                                .sectname = makeStaticString("__objc_imageinfo"),
+                            });
+                            data_const_seg.inner.cmdsize += @sizeOf(macho.section_64);
+                            data_const_seg.inner.nsects += 1;
                         }
 
                         break :blk .{
@@ -1042,7 +1155,12 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
                     } else if (mem.eql(u8, sectname, "__objc_const")) {
                         if (self.objc_const_section_index == null) {
                             self.objc_const_section_index = @intCast(u16, data_seg.sections.items.len);
-                            try data_seg.addSection(self.base.allocator, "__objc_const", .{});
+                            try data_seg.sections.append(self.base.allocator, .{
+                                .segname = makeStaticString("__DATA"),
+                                .sectname = makeStaticString("__objc_const"),
+                            });
+                            data_seg.inner.cmdsize += @sizeOf(macho.section_64);
+                            data_seg.inner.nsects += 1;
                         }
 
                         break :blk .{
@@ -1052,7 +1170,12 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
                     } else if (mem.eql(u8, sectname, "__objc_classrefs")) {
                         if (self.objc_classrefs_section_index == null) {
                             self.objc_classrefs_section_index = @intCast(u16, data_seg.sections.items.len);
-                            try data_seg.addSection(self.base.allocator, "__objc_classrefs", .{});
+                            try data_seg.sections.append(self.base.allocator, .{
+                                .segname = makeStaticString("__DATA"),
+                                .sectname = makeStaticString("__objc_classrefs"),
+                            });
+                            data_seg.inner.cmdsize += @sizeOf(macho.section_64);
+                            data_seg.inner.nsects += 1;
                         }
 
                         break :blk .{
@@ -1062,7 +1185,12 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
                     } else if (mem.eql(u8, sectname, "__objc_data")) {
                         if (self.objc_data_section_index == null) {
                             self.objc_data_section_index = @intCast(u16, data_seg.sections.items.len);
-                            try data_seg.addSection(self.base.allocator, "__objc_data", .{});
+                            try data_seg.sections.append(self.base.allocator, .{
+                                .segname = makeStaticString("__DATA"),
+                                .sectname = makeStaticString("__objc_data"),
+                            });
+                            data_seg.inner.cmdsize += @sizeOf(macho.section_64);
+                            data_seg.inner.nsects += 1;
                         }
 
                         break :blk .{
@@ -1072,7 +1200,12 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
                     } else {
                         if (self.data_section_index == null) {
                             self.data_section_index = @intCast(u16, data_seg.sections.items.len);
-                            try data_seg.addSection(self.base.allocator, "__data", .{});
+                            try data_seg.sections.append(self.base.allocator, .{
+                                .segname = makeStaticString("__DATA"),
+                                .sectname = makeStaticString("__data"),
+                            });
+                            data_seg.inner.cmdsize += @sizeOf(macho.section_64);
+                            data_seg.inner.nsects += 1;
                         }
 
                         break :blk .{
@@ -1111,7 +1244,7 @@ fn sortSections(self: *MachO) !void {
 
     {
         // __TEXT segment
-        const seg = &self.load_commands.items[self.text_segment_cmd_index.?].Segment;
+        const seg = &self.load_commands.items[self.text_segment_cmd_index.?].segment;
         var sections = seg.sections.toOwnedSlice(self.base.allocator);
         defer self.base.allocator.free(sections);
         try seg.sections.ensureTotalCapacity(self.base.allocator, sections.len);
@@ -1143,7 +1276,7 @@ fn sortSections(self: *MachO) !void {
 
     {
         // __DATA_CONST segment
-        const seg = &self.load_commands.items[self.data_const_segment_cmd_index.?].Segment;
+        const seg = &self.load_commands.items[self.data_const_segment_cmd_index.?].segment;
         var sections = seg.sections.toOwnedSlice(self.base.allocator);
         defer self.base.allocator.free(sections);
         try seg.sections.ensureTotalCapacity(self.base.allocator, sections.len);
@@ -1170,7 +1303,7 @@ fn sortSections(self: *MachO) !void {
 
     {
         // __DATA segment
-        const seg = &self.load_commands.items[self.data_segment_cmd_index.?].Segment;
+        const seg = &self.load_commands.items[self.data_segment_cmd_index.?].segment;
         var sections = seg.sections.toOwnedSlice(self.base.allocator);
         defer self.base.allocator.free(sections);
         try seg.sections.ensureTotalCapacity(self.base.allocator, sections.len);
@@ -1226,7 +1359,7 @@ fn sortSections(self: *MachO) !void {
     {
         // Create new section ordinals.
         self.section_ordinals.clearRetainingCapacity();
-        const text_seg = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
+        const text_seg = self.load_commands.items[self.text_segment_cmd_index.?].segment;
         for (text_seg.sections.items) |_, sect_id| {
             const res = self.section_ordinals.getOrPutAssumeCapacity(.{
                 .seg = self.text_segment_cmd_index.?,
@@ -1234,7 +1367,7 @@ fn sortSections(self: *MachO) !void {
             });
             assert(!res.found_existing);
         }
-        const data_const_seg = self.load_commands.items[self.data_const_segment_cmd_index.?].Segment;
+        const data_const_seg = self.load_commands.items[self.data_const_segment_cmd_index.?].segment;
         for (data_const_seg.sections.items) |_, sect_id| {
             const res = self.section_ordinals.getOrPutAssumeCapacity(.{
                 .seg = self.data_const_segment_cmd_index.?,
@@ -1242,7 +1375,7 @@ fn sortSections(self: *MachO) !void {
             });
             assert(!res.found_existing);
         }
-        const data_seg = self.load_commands.items[self.data_segment_cmd_index.?].Segment;
+        const data_seg = self.load_commands.items[self.data_segment_cmd_index.?].segment;
         for (data_seg.sections.items) |_, sect_id| {
             const res = self.section_ordinals.getOrPutAssumeCapacity(.{
                 .seg = self.data_segment_cmd_index.?,
@@ -1254,9 +1387,9 @@ fn sortSections(self: *MachO) !void {
 }
 
 fn allocateTextSegment(self: *MachO) !void {
-    const seg = &self.load_commands.items[self.text_segment_cmd_index.?].Segment;
+    const seg = &self.load_commands.items[self.text_segment_cmd_index.?].segment;
 
-    const base_vmaddr = self.load_commands.items[self.pagezero_segment_cmd_index.?].Segment.inner.vmsize;
+    const base_vmaddr = self.load_commands.items[self.pagezero_segment_cmd_index.?].segment.inner.vmsize;
     seg.inner.fileoff = 0;
     seg.inner.vmaddr = base_vmaddr;
 
@@ -1292,30 +1425,30 @@ fn allocateTextSegment(self: *MachO) !void {
 }
 
 fn allocateDataConstSegment(self: *MachO) !void {
-    const seg = &self.load_commands.items[self.data_const_segment_cmd_index.?].Segment;
-    const text_seg = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
+    const seg = &self.load_commands.items[self.data_const_segment_cmd_index.?].segment;
+    const text_seg = self.load_commands.items[self.text_segment_cmd_index.?].segment;
     seg.inner.fileoff = text_seg.inner.fileoff + text_seg.inner.filesize;
     seg.inner.vmaddr = text_seg.inner.vmaddr + text_seg.inner.vmsize;
     try self.allocateSegment(self.data_const_segment_cmd_index.?, 0);
 }
 
 fn allocateDataSegment(self: *MachO) !void {
-    const seg = &self.load_commands.items[self.data_segment_cmd_index.?].Segment;
-    const data_const_seg = self.load_commands.items[self.data_const_segment_cmd_index.?].Segment;
+    const seg = &self.load_commands.items[self.data_segment_cmd_index.?].segment;
+    const data_const_seg = self.load_commands.items[self.data_const_segment_cmd_index.?].segment;
     seg.inner.fileoff = data_const_seg.inner.fileoff + data_const_seg.inner.filesize;
     seg.inner.vmaddr = data_const_seg.inner.vmaddr + data_const_seg.inner.vmsize;
     try self.allocateSegment(self.data_segment_cmd_index.?, 0);
 }
 
 fn allocateLinkeditSegment(self: *MachO) void {
-    const seg = &self.load_commands.items[self.linkedit_segment_cmd_index.?].Segment;
-    const data_seg = self.load_commands.items[self.data_segment_cmd_index.?].Segment;
+    const seg = &self.load_commands.items[self.linkedit_segment_cmd_index.?].segment;
+    const data_seg = self.load_commands.items[self.data_segment_cmd_index.?].segment;
     seg.inner.fileoff = data_seg.inner.fileoff + data_seg.inner.filesize;
     seg.inner.vmaddr = data_seg.inner.vmaddr + data_seg.inner.vmsize;
 }
 
 fn allocateSegment(self: *MachO, index: u16, offset: u64) !void {
-    const seg = &self.load_commands.items[index].Segment;
+    const seg = &self.load_commands.items[index].segment;
 
     // Allocate the sections according to their alignment at the beginning of the segment.
     var start: u64 = offset;
@@ -1350,7 +1483,7 @@ pub fn createEmptyAtom(self: *MachO, local_sym_index: u32, size: u64, alignment:
     try atom.code.appendSlice(self.base.allocator, code);
 
     // Update target section's metadata
-    const tseg = &self.load_commands.items[match.seg].Segment;
+    const tseg = &self.load_commands.items[match.seg].segment;
     const tsect = &tseg.sections.items[match.sect];
     const new_size = mem.alignForwardGeneric(u64, tsect.size, atom_alignment) + atom_size;
     tsect.size = new_size;
@@ -1379,13 +1512,13 @@ fn allocateAtoms(self: *MachO) !void {
             atom = prev;
         }
 
-        const seg = self.load_commands.items[match.seg].Segment;
+        const seg = self.load_commands.items[match.seg].segment;
         const sect = seg.sections.items[match.sect];
 
         var base_addr: u64 = sect.addr;
         const n_sect = @intCast(u8, self.section_ordinals.getIndex(match).? + 1);
 
-        log.debug("allocating atoms in {s},{s}", .{ commands.segmentName(sect), commands.sectionName(sect) });
+        log.debug("allocating atoms in {s},{s}", .{ sect.segName(), sect.sectName() });
 
         while (true) {
             const atom_alignment = try math.powi(u32, 2, atom.alignment);
@@ -1440,7 +1573,7 @@ fn writeAtoms(self: *MachO) !void {
     var it = self.atoms.iterator();
     while (it.next()) |entry| {
         const match = entry.key_ptr.*;
-        const seg = self.load_commands.items[match.seg].Segment;
+        const seg = self.load_commands.items[match.seg].segment;
         const sect = seg.sections.items[match.sect];
         var atom: *Atom = entry.value_ptr.*;
 
@@ -1448,7 +1581,7 @@ fn writeAtoms(self: *MachO) !void {
         defer buffer.deinit();
         try buffer.ensureTotalCapacity(sect.size);
 
-        log.debug("writing atoms in {s},{s}", .{ commands.segmentName(sect), commands.sectionName(sect) });
+        log.debug("writing atoms in {s},{s}", .{ sect.segName(), sect.sectName() });
 
         while (atom.prev) |prev| {
             atom = prev;
@@ -2263,8 +2396,8 @@ fn addDataInCodeLC(self: *MachO) !void {
     if (self.data_in_code_cmd_index == null) {
         self.data_in_code_cmd_index = @intCast(u16, self.load_commands.items.len);
         try self.load_commands.append(self.base.allocator, .{
-            .LinkeditData = .{
-                .cmd = macho.LC_DATA_IN_CODE,
+            .linkedit_data = .{
+                .cmd = macho.LC.DATA_IN_CODE,
                 .cmdsize = @sizeOf(macho.linkedit_data_command),
                 .dataoff = 0,
                 .datasize = 0,
@@ -2277,8 +2410,8 @@ fn addCodeSignatureLC(self: *MachO) !void {
     if (self.code_signature_cmd_index != null or !self.requires_adhoc_codesig) return;
     self.code_signature_cmd_index = @intCast(u16, self.load_commands.items.len);
     try self.load_commands.append(self.base.allocator, .{
-        .LinkeditData = .{
-            .cmd = macho.LC_CODE_SIGNATURE,
+        .linkedit_data = .{
+            .cmd = macho.LC.CODE_SIGNATURE,
             .cmdsize = @sizeOf(macho.linkedit_data_command),
             .dataoff = 0,
             .datasize = 0,
@@ -2293,15 +2426,15 @@ fn addRpathLCs(self: *MachO, rpaths: []const []const u8) !void {
             @sizeOf(macho.rpath_command) + rpath.len + 1,
             @sizeOf(u64),
         ));
-        var rpath_cmd = commands.emptyGenericCommandWithData(macho.rpath_command{
-            .cmd = macho.LC_RPATH,
+        var rpath_cmd = macho.emptyGenericCommandWithData(macho.rpath_command{
+            .cmd = macho.LC.RPATH,
             .cmdsize = cmdsize,
             .path = @sizeOf(macho.rpath_command),
         });
         rpath_cmd.data = try self.base.allocator.alloc(u8, cmdsize - rpath_cmd.inner.path);
         mem.set(u8, rpath_cmd.data, 0);
         mem.copy(u8, rpath_cmd.data, rpath);
-        try self.load_commands.append(self.base.allocator, .{ .Rpath = rpath_cmd });
+        try self.load_commands.append(self.base.allocator, .{ .rpath = rpath_cmd });
     }
 }
 
@@ -2309,7 +2442,7 @@ fn addLoadDylibLCs(self: *MachO) !void {
     for (self.referenced_dylibs.keys()) |id| {
         const dylib = self.dylibs.items[id];
         const dylib_id = dylib.id orelse unreachable;
-        var dylib_cmd = try commands.createLoadDylibCommand(
+        var dylib_cmd = try macho.createLoadDylibCommand(
             self.base.allocator,
             dylib_id.name,
             dylib_id.timestamp,
@@ -2317,7 +2450,7 @@ fn addLoadDylibLCs(self: *MachO) !void {
             dylib_id.compatibility_version,
         );
         errdefer dylib_cmd.deinit(self.base.allocator);
-        try self.load_commands.append(self.base.allocator, .{ .Dylib = dylib_cmd });
+        try self.load_commands.append(self.base.allocator, .{ .dylib = dylib_cmd });
     }
 }
 
@@ -2326,7 +2459,7 @@ fn setEntryPoint(self: *MachO) !void {
 
     // TODO we should respect the -entry flag passed in by the user to set a custom
     // entrypoint. For now, assume default of `_main`.
-    const seg = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
+    const seg = self.load_commands.items[self.text_segment_cmd_index.?].segment;
     const n_strx = self.strtab_dir.getKeyAdapted(@as([]const u8, "_main"), StringIndexAdapter{
         .bytes = &self.strtab,
     }) orelse {
@@ -2336,7 +2469,7 @@ fn setEntryPoint(self: *MachO) !void {
     const resolv = self.symbol_resolver.get(n_strx) orelse unreachable;
     assert(resolv.where == .global);
     const sym = self.globals.items[resolv.where_index];
-    const ec = &self.load_commands.items[self.main_cmd_index.?].Main;
+    const ec = &self.load_commands.items[self.main_cmd_index.?].main;
     ec.entryoff = @intCast(u32, sym.n_value - seg.inner.vmaddr);
     ec.stacksize = self.base.options.stack_size_override orelse 0;
 }
@@ -2402,35 +2535,45 @@ fn populateMetadata(self: *MachO) !void {
     if (self.pagezero_segment_cmd_index == null) {
         self.pagezero_segment_cmd_index = @intCast(u16, self.load_commands.items.len);
         try self.load_commands.append(self.base.allocator, .{
-            .Segment = SegmentCommand.empty("__PAGEZERO", .{
-                .vmsize = 0x100000000, // size always set to 4GB
-            }),
+            .segment = .{
+                .inner = .{
+                    .segname = makeStaticString("__PAGEZERO"),
+                    .vmsize = 0x100000000, // size always set to 4GB
+                },
+            },
         });
     }
 
     if (self.text_segment_cmd_index == null) {
         self.text_segment_cmd_index = @intCast(u16, self.load_commands.items.len);
         try self.load_commands.append(self.base.allocator, .{
-            .Segment = SegmentCommand.empty("__TEXT", .{
-                .vmaddr = 0x100000000, // always starts at 4GB
-                .maxprot = macho.VM_PROT_READ | macho.VM_PROT_EXECUTE,
-                .initprot = macho.VM_PROT_READ | macho.VM_PROT_EXECUTE,
-            }),
+            .segment = .{
+                .inner = .{
+                    .segname = makeStaticString("__TEXT"),
+                    .vmaddr = 0x100000000, // always starts at 4GB
+                    .maxprot = macho.VM_PROT_READ | macho.VM_PROT_EXECUTE,
+                    .initprot = macho.VM_PROT_READ | macho.VM_PROT_EXECUTE,
+                },
+            },
         });
     }
 
     if (self.text_section_index == null) {
-        const text_seg = &self.load_commands.items[self.text_segment_cmd_index.?].Segment;
+        const text_seg = &self.load_commands.items[self.text_segment_cmd_index.?].segment;
         self.text_section_index = @intCast(u16, text_seg.sections.items.len);
         const alignment: u2 = switch (self.base.options.target.cpu.arch) {
             .x86_64 => 0,
             .aarch64 => 2,
             else => unreachable, // unhandled architecture type
         };
-        try text_seg.addSection(self.base.allocator, "__text", .{
+        try text_seg.sections.append(self.base.allocator, .{
+            .segname = makeStaticString("__TEXT"),
+            .sectname = makeStaticString("__text"),
             .@"align" = alignment,
             .flags = macho.S_REGULAR | macho.S_ATTR_PURE_INSTRUCTIONS | macho.S_ATTR_SOME_INSTRUCTIONS,
         });
+        text_seg.inner.cmdsize += @sizeOf(macho.section_64);
+        text_seg.inner.nsects += 1;
         _ = try self.section_ordinals.getOrPut(self.base.allocator, .{
             .seg = self.text_segment_cmd_index.?,
             .sect = self.text_section_index.?,
@@ -2438,7 +2581,7 @@ fn populateMetadata(self: *MachO) !void {
     }
 
     if (self.stubs_section_index == null) {
-        const text_seg = &self.load_commands.items[self.text_segment_cmd_index.?].Segment;
+        const text_seg = &self.load_commands.items[self.text_segment_cmd_index.?].segment;
         self.stubs_section_index = @intCast(u16, text_seg.sections.items.len);
         const alignment: u2 = switch (self.base.options.target.cpu.arch) {
             .x86_64 => 0,
@@ -2450,11 +2593,15 @@ fn populateMetadata(self: *MachO) !void {
             .aarch64 => 3 * @sizeOf(u32),
             else => unreachable, // unhandled architecture type
         };
-        try text_seg.addSection(self.base.allocator, "__stubs", .{
+        try text_seg.sections.append(self.base.allocator, .{
+            .segname = makeStaticString("__TEXT"),
+            .sectname = makeStaticString("__stubs"),
             .@"align" = alignment,
             .flags = macho.S_SYMBOL_STUBS | macho.S_ATTR_PURE_INSTRUCTIONS | macho.S_ATTR_SOME_INSTRUCTIONS,
             .reserved2 = stub_size,
         });
+        text_seg.inner.cmdsize += @sizeOf(macho.section_64);
+        text_seg.inner.nsects += 1;
         _ = try self.section_ordinals.getOrPut(self.base.allocator, .{
             .seg = self.text_segment_cmd_index.?,
             .sect = self.stubs_section_index.?,
@@ -2462,17 +2609,21 @@ fn populateMetadata(self: *MachO) !void {
     }
 
     if (self.stub_helper_section_index == null) {
-        const text_seg = &self.load_commands.items[self.text_segment_cmd_index.?].Segment;
+        const text_seg = &self.load_commands.items[self.text_segment_cmd_index.?].segment;
         self.stub_helper_section_index = @intCast(u16, text_seg.sections.items.len);
         const alignment: u2 = switch (self.base.options.target.cpu.arch) {
             .x86_64 => 0,
             .aarch64 => 2,
             else => unreachable, // unhandled architecture type
         };
-        try text_seg.addSection(self.base.allocator, "__stub_helper", .{
+        try text_seg.sections.append(self.base.allocator, .{
+            .segname = makeStaticString("__TEXT"),
+            .sectname = makeStaticString("__stub_helper"),
             .@"align" = alignment,
             .flags = macho.S_REGULAR | macho.S_ATTR_PURE_INSTRUCTIONS | macho.S_ATTR_SOME_INSTRUCTIONS,
         });
+        text_seg.inner.cmdsize += @sizeOf(macho.section_64);
+        text_seg.inner.nsects += 1;
         _ = try self.section_ordinals.getOrPut(self.base.allocator, .{
             .seg = self.text_segment_cmd_index.?,
             .sect = self.stub_helper_section_index.?,
@@ -2482,20 +2633,27 @@ fn populateMetadata(self: *MachO) !void {
     if (self.data_const_segment_cmd_index == null) {
         self.data_const_segment_cmd_index = @intCast(u16, self.load_commands.items.len);
         try self.load_commands.append(self.base.allocator, .{
-            .Segment = SegmentCommand.empty("__DATA_CONST", .{
-                .maxprot = macho.VM_PROT_READ | macho.VM_PROT_WRITE,
-                .initprot = macho.VM_PROT_READ | macho.VM_PROT_WRITE,
-            }),
+            .segment = .{
+                .inner = .{
+                    .segname = makeStaticString("__DATA_CONST"),
+                    .maxprot = macho.VM_PROT_READ | macho.VM_PROT_WRITE,
+                    .initprot = macho.VM_PROT_READ | macho.VM_PROT_WRITE,
+                },
+            },
         });
     }
 
     if (self.got_section_index == null) {
-        const data_const_seg = &self.load_commands.items[self.data_const_segment_cmd_index.?].Segment;
+        const data_const_seg = &self.load_commands.items[self.data_const_segment_cmd_index.?].segment;
         self.got_section_index = @intCast(u16, data_const_seg.sections.items.len);
-        try data_const_seg.addSection(self.base.allocator, "__got", .{
+        try data_const_seg.sections.append(self.base.allocator, .{
+            .segname = makeStaticString("__DATA_CONST"),
+            .sectname = makeStaticString("__got"),
             .@"align" = 3, // 2^3 = @sizeOf(u64)
             .flags = macho.S_NON_LAZY_SYMBOL_POINTERS,
         });
+        data_const_seg.inner.cmdsize += @sizeOf(macho.section_64);
+        data_const_seg.inner.nsects += 1;
         _ = try self.section_ordinals.getOrPut(self.base.allocator, .{
             .seg = self.data_const_segment_cmd_index.?,
             .sect = self.got_section_index.?,
@@ -2505,20 +2663,27 @@ fn populateMetadata(self: *MachO) !void {
     if (self.data_segment_cmd_index == null) {
         self.data_segment_cmd_index = @intCast(u16, self.load_commands.items.len);
         try self.load_commands.append(self.base.allocator, .{
-            .Segment = SegmentCommand.empty("__DATA", .{
-                .maxprot = macho.VM_PROT_READ | macho.VM_PROT_WRITE,
-                .initprot = macho.VM_PROT_READ | macho.VM_PROT_WRITE,
-            }),
+            .segment = .{
+                .inner = .{
+                    .segname = makeStaticString("__DATA"),
+                    .maxprot = macho.VM_PROT_READ | macho.VM_PROT_WRITE,
+                    .initprot = macho.VM_PROT_READ | macho.VM_PROT_WRITE,
+                },
+            },
         });
     }
 
     if (self.la_symbol_ptr_section_index == null) {
-        const data_seg = &self.load_commands.items[self.data_segment_cmd_index.?].Segment;
+        const data_seg = &self.load_commands.items[self.data_segment_cmd_index.?].segment;
         self.la_symbol_ptr_section_index = @intCast(u16, data_seg.sections.items.len);
-        try data_seg.addSection(self.base.allocator, "__la_symbol_ptr", .{
+        try data_seg.sections.append(self.base.allocator, .{
+            .segname = makeStaticString("__DATA"),
+            .sectname = makeStaticString("__la_symbol_ptr"),
             .@"align" = 3, // 2^3 = @sizeOf(u64)
             .flags = macho.S_LAZY_SYMBOL_POINTERS,
         });
+        data_seg.inner.cmdsize += @sizeOf(macho.section_64);
+        data_seg.inner.nsects += 1;
         _ = try self.section_ordinals.getOrPut(self.base.allocator, .{
             .seg = self.data_segment_cmd_index.?,
             .sect = self.la_symbol_ptr_section_index.?,
@@ -2526,11 +2691,15 @@ fn populateMetadata(self: *MachO) !void {
     }
 
     if (self.data_section_index == null) {
-        const data_seg = &self.load_commands.items[self.data_segment_cmd_index.?].Segment;
+        const data_seg = &self.load_commands.items[self.data_segment_cmd_index.?].segment;
         self.data_section_index = @intCast(u16, data_seg.sections.items.len);
-        try data_seg.addSection(self.base.allocator, "__data", .{
+        try data_seg.sections.append(self.base.allocator, .{
+            .segname = makeStaticString("__DATA"),
+            .sectname = makeStaticString("__data"),
             .@"align" = 3, // 2^3 = @sizeOf(u64)
         });
+        data_seg.inner.cmdsize += @sizeOf(macho.section_64);
+        data_seg.inner.nsects += 1;
         _ = try self.section_ordinals.getOrPut(self.base.allocator, .{
             .seg = self.data_segment_cmd_index.?,
             .sect = self.data_section_index.?,
@@ -2540,18 +2709,21 @@ fn populateMetadata(self: *MachO) !void {
     if (self.linkedit_segment_cmd_index == null) {
         self.linkedit_segment_cmd_index = @intCast(u16, self.load_commands.items.len);
         try self.load_commands.append(self.base.allocator, .{
-            .Segment = SegmentCommand.empty("__LINKEDIT", .{
-                .maxprot = macho.VM_PROT_READ,
-                .initprot = macho.VM_PROT_READ,
-            }),
+            .segment = .{
+                .inner = .{
+                    .segname = makeStaticString("__LINKEDIT"),
+                    .maxprot = macho.VM_PROT_READ,
+                    .initprot = macho.VM_PROT_READ,
+                },
+            },
         });
     }
 
     if (self.dyld_info_cmd_index == null) {
         self.dyld_info_cmd_index = @intCast(u16, self.load_commands.items.len);
         try self.load_commands.append(self.base.allocator, .{
-            .DyldInfoOnly = .{
-                .cmd = macho.LC_DYLD_INFO_ONLY,
+            .dyld_info_only = .{
+                .cmd = macho.LC.DYLD_INFO_ONLY,
                 .cmdsize = @sizeOf(macho.dyld_info_command),
                 .rebase_off = 0,
                 .rebase_size = 0,
@@ -2570,8 +2742,8 @@ fn populateMetadata(self: *MachO) !void {
     if (self.symtab_cmd_index == null) {
         self.symtab_cmd_index = @intCast(u16, self.load_commands.items.len);
         try self.load_commands.append(self.base.allocator, .{
-            .Symtab = .{
-                .cmd = macho.LC_SYMTAB,
+            .symtab = .{
+                .cmd = macho.LC.SYMTAB,
                 .cmdsize = @sizeOf(macho.symtab_command),
                 .symoff = 0,
                 .nsyms = 0,
@@ -2584,8 +2756,8 @@ fn populateMetadata(self: *MachO) !void {
     if (self.dysymtab_cmd_index == null) {
         self.dysymtab_cmd_index = @intCast(u16, self.load_commands.items.len);
         try self.load_commands.append(self.base.allocator, .{
-            .Dysymtab = .{
-                .cmd = macho.LC_DYSYMTAB,
+            .dysymtab = .{
+                .cmd = macho.LC.DYSYMTAB,
                 .cmdsize = @sizeOf(macho.dysymtab_command),
                 .ilocalsym = 0,
                 .nlocalsym = 0,
@@ -2616,22 +2788,22 @@ fn populateMetadata(self: *MachO) !void {
             @sizeOf(macho.dylinker_command) + mem.len(default_dyld_path),
             @sizeOf(u64),
         ));
-        var dylinker_cmd = commands.emptyGenericCommandWithData(macho.dylinker_command{
-            .cmd = macho.LC_LOAD_DYLINKER,
+        var dylinker_cmd = macho.emptyGenericCommandWithData(macho.dylinker_command{
+            .cmd = macho.LC.LOAD_DYLINKER,
             .cmdsize = cmdsize,
             .name = @sizeOf(macho.dylinker_command),
         });
         dylinker_cmd.data = try self.base.allocator.alloc(u8, cmdsize - dylinker_cmd.inner.name);
         mem.set(u8, dylinker_cmd.data, 0);
         mem.copy(u8, dylinker_cmd.data, mem.sliceTo(default_dyld_path, 0));
-        try self.load_commands.append(self.base.allocator, .{ .Dylinker = dylinker_cmd });
+        try self.load_commands.append(self.base.allocator, .{ .dylinker = dylinker_cmd });
     }
 
     if (self.main_cmd_index == null and self.base.options.output_mode == .exe) {
         self.main_cmd_index = @intCast(u16, self.load_commands.items.len);
         try self.load_commands.append(self.base.allocator, .{
-            .Main = .{
-                .cmd = macho.LC_MAIN,
+            .main = .{
+                .cmd = macho.LC.MAIN,
                 .cmdsize = @sizeOf(macho.entry_point_command),
                 .entryoff = 0x0,
                 .stacksize = 0,
@@ -2649,7 +2821,7 @@ fn populateMetadata(self: *MachO) !void {
             std.builtin.Version{ .major = 1, .minor = 0, .patch = 0 };
         const compat_version = self.base.options.compatibility_version orelse
             std.builtin.Version{ .major = 1, .minor = 0, .patch = 0 };
-        var dylib_cmd = try commands.createLoadDylibCommand(
+        var dylib_cmd = try macho.createLoadDylibCommand(
             self.base.allocator,
             install_name,
             2,
@@ -2657,15 +2829,15 @@ fn populateMetadata(self: *MachO) !void {
             compat_version.major << 16 | compat_version.minor << 8 | compat_version.patch,
         );
         errdefer dylib_cmd.deinit(self.base.allocator);
-        dylib_cmd.inner.cmd = macho.LC_ID_DYLIB;
-        try self.load_commands.append(self.base.allocator, .{ .Dylib = dylib_cmd });
+        dylib_cmd.inner.cmd = macho.LC.ID_DYLIB;
+        try self.load_commands.append(self.base.allocator, .{ .dylib = dylib_cmd });
     }
 
     if (self.source_version_cmd_index == null) {
         self.source_version_cmd_index = @intCast(u16, self.load_commands.items.len);
         try self.load_commands.append(self.base.allocator, .{
-            .SourceVersion = .{
-                .cmd = macho.LC_SOURCE_VERSION,
+            .source_version = .{
+                .cmd = macho.LC.SOURCE_VERSION,
                 .cmdsize = @sizeOf(macho.source_version_command),
                 .version = 0x0,
             },
@@ -2689,14 +2861,14 @@ fn populateMetadata(self: *MachO) !void {
         // TODO inspect man ld on macOS
         const sdk_version = platform_version;
         const is_simulator_abi = self.base.options.target.abi == .simulator;
-        var cmd = commands.emptyGenericCommandWithData(macho.build_version_command{
-            .cmd = macho.LC_BUILD_VERSION,
+        var cmd = macho.emptyGenericCommandWithData(macho.build_version_command{
+            .cmd = macho.LC.BUILD_VERSION,
             .cmdsize = cmdsize,
             .platform = switch (self.base.options.target.os.tag) {
-                .macos => macho.PLATFORM_MACOS,
-                .ios => if (is_simulator_abi) macho.PLATFORM_IOSSIMULATOR else macho.PLATFORM_IOS,
-                .watchos => if (is_simulator_abi) macho.PLATFORM_WATCHOSSIMULATOR else macho.PLATFORM_WATCHOS,
-                .tvos => if (is_simulator_abi) macho.PLATFORM_TVOSSIMULATOR else macho.PLATFORM_TVOS,
+                .macos => macho.PLATFORM.MACOS,
+                .ios => if (is_simulator_abi) macho.PLATFORM.IOSSIMULATOR else macho.PLATFORM.IOS,
+                .watchos => if (is_simulator_abi) macho.PLATFORM.WATCHOSSIMULATOR else macho.PLATFORM.WATCHOS,
+                .tvos => if (is_simulator_abi) macho.PLATFORM.TVOSSIMULATOR else macho.PLATFORM.TVOS,
                 else => unreachable,
             },
             .minos = platform_version,
@@ -2704,24 +2876,24 @@ fn populateMetadata(self: *MachO) !void {
             .ntools = 1,
         });
         const ld_ver = macho.build_tool_version{
-            .tool = macho.TOOL_LD,
+            .tool = macho.TOOL.LD,
             .version = 0x0,
         };
         cmd.data = try self.base.allocator.alloc(u8, cmdsize - @sizeOf(macho.build_version_command));
         mem.set(u8, cmd.data, 0);
         mem.copy(u8, cmd.data, mem.asBytes(&ld_ver));
-        try self.load_commands.append(self.base.allocator, .{ .BuildVersion = cmd });
+        try self.load_commands.append(self.base.allocator, .{ .build_version = cmd });
     }
 
     if (self.uuid_cmd_index == null) {
         self.uuid_cmd_index = @intCast(u16, self.load_commands.items.len);
         var uuid_cmd: macho.uuid_command = .{
-            .cmd = macho.LC_UUID,
+            .cmd = macho.LC.UUID,
             .cmdsize = @sizeOf(macho.uuid_command),
             .uuid = undefined,
         };
         std.crypto.random.bytes(&uuid_cmd.uuid);
-        try self.load_commands.append(self.base.allocator, .{ .Uuid = uuid_cmd });
+        try self.load_commands.append(self.base.allocator, .{ .uuid = uuid_cmd });
     }
 }
 
@@ -2741,7 +2913,7 @@ fn writeDyldInfoData(self: *MachO) !void {
 
             if (match.seg == self.text_segment_cmd_index.?) continue; // __TEXT is non-writable
 
-            const seg = self.load_commands.items[match.seg].Segment;
+            const seg = self.load_commands.items[match.seg].segment;
 
             while (true) {
                 const sym = self.locals.items[atom.local_sym_index];
@@ -2811,7 +2983,7 @@ fn writeDyldInfoData(self: *MachO) !void {
     {
         // TODO handle macho.EXPORT_SYMBOL_FLAGS_REEXPORT and macho.EXPORT_SYMBOL_FLAGS_STUB_AND_RESOLVER.
         log.debug("generating export trie", .{});
-        const text_segment = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
+        const text_segment = self.load_commands.items[self.text_segment_cmd_index.?].segment;
         const base_address = text_segment.inner.vmaddr;
 
         for (self.globals.items) |sym| {
@@ -2829,8 +3001,8 @@ fn writeDyldInfoData(self: *MachO) !void {
         try trie.finalize(self.base.allocator);
     }
 
-    const seg = &self.load_commands.items[self.linkedit_segment_cmd_index.?].Segment;
-    const dyld_info = &self.load_commands.items[self.dyld_info_cmd_index.?].DyldInfoOnly;
+    const seg = &self.load_commands.items[self.linkedit_segment_cmd_index.?].segment;
+    const dyld_info = &self.load_commands.items[self.dyld_info_cmd_index.?].dyld_info_only;
     const rebase_size = try bind.rebaseInfoSize(rebase_pointers.items);
     const bind_size = try bind.bindInfoSize(bind_pointers.items);
     const lazy_bind_size = try bind.lazyBindInfoSize(lazy_bind_pointers.items);
@@ -2902,7 +3074,7 @@ fn populateLazyBindOffsetsInStubHelper(self: *MachO, buffer: []const u8) !void {
             .sect = self.la_symbol_ptr_section_index.?,
         }).?;
         const base_addr = blk: {
-            const seg = self.load_commands.items[self.data_segment_cmd_index.?].Segment;
+            const seg = self.load_commands.items[self.data_segment_cmd_index.?].segment;
             break :blk seg.inner.vmaddr;
         };
 
@@ -2966,7 +3138,7 @@ fn populateLazyBindOffsetsInStubHelper(self: *MachO, buffer: []const u8) !void {
     }
 
     const sect = blk: {
-        const seg = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
+        const seg = self.load_commands.items[self.text_segment_cmd_index.?].segment;
         break :blk seg.sections.items[self.stub_helper_section_index.?];
     };
     const stub_offset: u4 = switch (self.base.options.target.cpu.arch) {
@@ -3006,7 +3178,7 @@ fn writeDices(self: *MachO) !void {
         atom = prev;
     }
 
-    const text_seg = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
+    const text_seg = self.load_commands.items[self.text_segment_cmd_index.?].segment;
     const text_sect = text_seg.sections.items[self.text_section_index.?];
 
     while (true) {
@@ -3030,8 +3202,8 @@ fn writeDices(self: *MachO) !void {
         } else break;
     }
 
-    const seg = &self.load_commands.items[self.linkedit_segment_cmd_index.?].Segment;
-    const dice_cmd = &self.load_commands.items[self.data_in_code_cmd_index.?].LinkeditData;
+    const seg = &self.load_commands.items[self.linkedit_segment_cmd_index.?].segment;
+    const dice_cmd = &self.load_commands.items[self.data_in_code_cmd_index.?].linkedit_data;
     const needed_size = @intCast(u32, buf.items.len);
 
     dice_cmd.dataoff = @intCast(u32, seg.inner.fileoff + seg.inner.filesize);
@@ -3047,8 +3219,8 @@ fn writeDices(self: *MachO) !void {
 }
 
 fn writeSymbolTable(self: *MachO) !void {
-    const seg = &self.load_commands.items[self.linkedit_segment_cmd_index.?].Segment;
-    const symtab = &self.load_commands.items[self.symtab_cmd_index.?].Symtab;
+    const seg = &self.load_commands.items[self.linkedit_segment_cmd_index.?].segment;
+    const symtab = &self.load_commands.items[self.symtab_cmd_index.?].symtab;
     symtab.symoff = @intCast(u32, seg.inner.fileoff + seg.inner.filesize);
 
     var locals = std.ArrayList(macho.nlist_64).init(self.base.allocator);
@@ -3137,18 +3309,18 @@ fn writeSymbolTable(self: *MachO) !void {
     seg.inner.filesize += locals_size + exports_size + undefs_size;
 
     // Update dynamic symbol table.
-    const dysymtab = &self.load_commands.items[self.dysymtab_cmd_index.?].Dysymtab;
+    const dysymtab = &self.load_commands.items[self.dysymtab_cmd_index.?].dysymtab;
     dysymtab.nlocalsym = @intCast(u32, nlocals);
     dysymtab.iextdefsym = dysymtab.nlocalsym;
     dysymtab.nextdefsym = @intCast(u32, nexports);
     dysymtab.iundefsym = dysymtab.nlocalsym + dysymtab.nextdefsym;
     dysymtab.nundefsym = @intCast(u32, nundefs);
 
-    const text_segment = &self.load_commands.items[self.text_segment_cmd_index.?].Segment;
+    const text_segment = &self.load_commands.items[self.text_segment_cmd_index.?].segment;
     const stubs = &text_segment.sections.items[self.stubs_section_index.?];
-    const data_const_segment = &self.load_commands.items[self.data_const_segment_cmd_index.?].Segment;
+    const data_const_segment = &self.load_commands.items[self.data_const_segment_cmd_index.?].segment;
     const got = &data_const_segment.sections.items[self.got_section_index.?];
-    const data_segment = &self.load_commands.items[self.data_segment_cmd_index.?].Segment;
+    const data_segment = &self.load_commands.items[self.data_segment_cmd_index.?].segment;
     const la_symbol_ptr = &data_segment.sections.items[self.la_symbol_ptr_section_index.?];
 
     const nstubs = @intCast(u32, self.stubs_map.keys().len);
@@ -3207,8 +3379,8 @@ fn writeSymbolTable(self: *MachO) !void {
 }
 
 fn writeStringTable(self: *MachO) !void {
-    const seg = &self.load_commands.items[self.linkedit_segment_cmd_index.?].Segment;
-    const symtab = &self.load_commands.items[self.symtab_cmd_index.?].Symtab;
+    const seg = &self.load_commands.items[self.linkedit_segment_cmd_index.?].segment;
+    const symtab = &self.load_commands.items[self.symtab_cmd_index.?].symtab;
     symtab.stroff = @intCast(u32, seg.inner.fileoff + seg.inner.filesize);
     symtab.strsize = @intCast(u32, mem.alignForwardGeneric(u64, self.strtab.items.len, @alignOf(u64)));
     seg.inner.filesize += symtab.strsize;
@@ -3224,7 +3396,7 @@ fn writeStringTable(self: *MachO) !void {
 }
 
 fn writeLinkeditSegment(self: *MachO) !void {
-    const seg = &self.load_commands.items[self.linkedit_segment_cmd_index.?].Segment;
+    const seg = &self.load_commands.items[self.linkedit_segment_cmd_index.?].segment;
     seg.inner.filesize = 0;
 
     try self.writeDyldInfoData();
@@ -3236,8 +3408,8 @@ fn writeLinkeditSegment(self: *MachO) !void {
 }
 
 fn writeCodeSignaturePadding(self: *MachO) !void {
-    const linkedit_segment = &self.load_commands.items[self.linkedit_segment_cmd_index.?].Segment;
-    const code_sig_cmd = &self.load_commands.items[self.code_signature_cmd_index.?].LinkeditData;
+    const linkedit_segment = &self.load_commands.items[self.linkedit_segment_cmd_index.?].segment;
+    const code_sig_cmd = &self.load_commands.items[self.code_signature_cmd_index.?].linkedit_data;
     const fileoff = linkedit_segment.inner.fileoff + linkedit_segment.inner.filesize;
     const needed_size = CodeSignature.calcCodeSignaturePaddingSize(
         self.base.options.emit.sub_path,
@@ -3259,8 +3431,8 @@ fn writeCodeSignaturePadding(self: *MachO) !void {
 }
 
 fn writeCodeSignature(self: *MachO) !void {
-    const text_segment = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
-    const code_sig_cmd = self.load_commands.items[self.code_signature_cmd_index.?].LinkeditData;
+    const text_segment = self.load_commands.items[self.text_segment_cmd_index.?].segment;
+    const code_sig_cmd = self.load_commands.items[self.code_signature_cmd_index.?].linkedit_data;
 
     var code_sig: CodeSignature = .{};
     defer code_sig.deinit(self.base.allocator);
@@ -3308,9 +3480,9 @@ fn writeLoadCommands(self: *MachO) !void {
 
 /// Writes Mach-O file header.
 fn writeHeader(self: *MachO) !void {
-    var header = commands.emptyHeader(.{
+    var header = macho.mach_header_64{
         .flags = macho.MH_NOUNDEFS | macho.MH_DYLDLINK | macho.MH_PIE | macho.MH_TWOLEVEL,
-    });
+    };
 
     switch (self.base.options.target.cpu.arch) {
         .aarch64 => {

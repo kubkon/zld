@@ -11,13 +11,10 @@ const macho = std.macho;
 const math = std.math;
 const mem = std.mem;
 const sort = std.sort;
-const commands = @import("commands.zig");
-const segmentName = commands.segmentName;
-const sectionName = commands.sectionName;
 
 const Allocator = mem.Allocator;
 const Atom = @import("Atom.zig");
-const LoadCommand = commands.LoadCommand;
+const LoadCommand = macho.LoadCommand;
 const MachO = @import("../MachO.zig");
 
 file: fs.File,
@@ -198,13 +195,13 @@ pub fn readLoadCommands(self: *Object, allocator: Allocator, reader: anytype) !v
     while (i < header.ncmds) : (i += 1) {
         var cmd = try LoadCommand.read(allocator, reader);
         switch (cmd.cmd()) {
-            macho.LC_SEGMENT_64 => {
+            macho.LC.SEGMENT_64 => {
                 self.segment_cmd_index = i;
-                var seg = cmd.Segment;
+                var seg = cmd.segment;
                 for (seg.sections.items) |*sect, j| {
                     const index = @intCast(u16, j);
-                    const segname = segmentName(sect.*);
-                    const sectname = sectionName(sect.*);
+                    const segname = sect.segName();
+                    const sectname = sect.sectName();
                     if (mem.eql(u8, segname, "__DWARF")) {
                         if (mem.eql(u8, sectname, "__debug_info")) {
                             self.dwarf_debug_info_index = index;
@@ -231,20 +228,20 @@ pub fn readLoadCommands(self: *Object, allocator: Allocator, reader: anytype) !v
 
                 seg.inner.fileoff += offset;
             },
-            macho.LC_SYMTAB => {
+            macho.LC.SYMTAB => {
                 self.symtab_cmd_index = i;
-                cmd.Symtab.symoff += offset;
-                cmd.Symtab.stroff += offset;
+                cmd.symtab.symoff += offset;
+                cmd.symtab.stroff += offset;
             },
-            macho.LC_DYSYMTAB => {
+            macho.LC.DYSYMTAB => {
                 self.dysymtab_cmd_index = i;
             },
-            macho.LC_BUILD_VERSION => {
+            macho.LC.BUILD_VERSION => {
                 self.build_version_cmd_index = i;
             },
-            macho.LC_DATA_IN_CODE => {
+            macho.LC.DATA_IN_CODE => {
                 self.data_in_code_cmd_index = i;
-                cmd.LinkeditData.dataoff += offset;
+                cmd.linkedit_data.dataoff += offset;
             },
             else => {
                 log.debug("Unknown load command detected: 0x{x}.", .{cmd.cmd()});
@@ -307,7 +304,7 @@ fn filterDice(dices: []macho.data_in_code_entry, start_addr: u64, end_addr: u64)
 }
 
 pub fn parseIntoAtoms(self: *Object, allocator: Allocator, macho_file: *MachO) !void {
-    const seg = self.load_commands.items[self.segment_cmd_index.?].Segment;
+    const seg = self.load_commands.items[self.segment_cmd_index.?].segment;
 
     log.debug("analysing {s}", .{self.name});
 
@@ -331,7 +328,7 @@ pub fn parseIntoAtoms(self: *Object, allocator: Allocator, macho_file: *MachO) !
     // Well, shit, sometimes compilers skip the dysymtab load command altogether, meaning we
     // have to infer the start of undef section in the symtab ourselves.
     const iundefsym = if (self.dysymtab_cmd_index) |cmd_index| blk: {
-        const dysymtab = self.load_commands.items[cmd_index].Dysymtab;
+        const dysymtab = self.load_commands.items[cmd_index].dysymtab;
         break :blk dysymtab.iundefsym;
     } else blk: {
         var iundefsym: usize = sorted_all_nlists.items.len;
@@ -348,8 +345,8 @@ pub fn parseIntoAtoms(self: *Object, allocator: Allocator, macho_file: *MachO) !
     for (seg.sections.items) |sect, id| {
         const sect_id = @intCast(u8, id);
         log.debug("putting section '{s},{s}' as an Atom", .{
-            segmentName(sect),
-            sectionName(sect),
+            sect.segName(),
+            sect.sectName(),
         });
 
         // Get matching segment/section in the final artifact.
@@ -400,7 +397,7 @@ pub fn parseIntoAtoms(self: *Object, allocator: Allocator, macho_file: *MachO) !
         const atom = try macho_file.createEmptyAtom(atom_local_sym_index, sect.size, sect.@"align", match);
 
         const is_zerofill = blk: {
-            const section_type = commands.sectionType(sect);
+            const section_type = sect.type_();
             break :blk section_type == macho.S_ZEROFILL or section_type == macho.S_THREAD_LOCAL_ZEROFILL;
         };
         if (!is_zerofill) {
@@ -468,7 +465,7 @@ pub fn parseIntoAtoms(self: *Object, allocator: Allocator, macho_file: *MachO) !
 
 fn parseSymtab(self: *Object, allocator: Allocator) !void {
     const index = self.symtab_cmd_index orelse return;
-    const symtab_cmd = self.load_commands.items[index].Symtab;
+    const symtab_cmd = self.load_commands.items[index].symtab;
 
     var symtab = try allocator.alloc(u8, @sizeOf(macho.nlist_64) * symtab_cmd.nsyms);
     defer allocator.free(symtab);
@@ -516,7 +513,7 @@ pub fn parseDebugInfo(self: *Object, allocator: Allocator) !void {
 
 pub fn parseDataInCode(self: *Object, allocator: Allocator) !void {
     const index = self.data_in_code_cmd_index orelse return;
-    const data_in_code = self.load_commands.items[index].LinkeditData;
+    const data_in_code = self.load_commands.items[index].linkedit_data;
 
     var buffer = try allocator.alloc(u8, data_in_code.datasize);
     defer allocator.free(buffer);
@@ -535,7 +532,7 @@ pub fn parseDataInCode(self: *Object, allocator: Allocator) !void {
 }
 
 fn readSection(self: Object, allocator: Allocator, index: u16) ![]u8 {
-    const seg = self.load_commands.items[self.segment_cmd_index.?].Segment;
+    const seg = self.load_commands.items[self.segment_cmd_index.?].segment;
     const sect = seg.sections.items[index];
     var buffer = try allocator.alloc(u8, @intCast(usize, sect.size));
     _ = try self.file.preadAll(buffer, sect.offset);

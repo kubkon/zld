@@ -12,19 +12,15 @@ jobs:
         os: [macos, ubuntu, windows]
 
     steps:
-    - name: Configure git
-      if: matrix.os == 'windows'
+    - if: matrix.os == 'windows'
       run: git config --global core.autocrlf false
-    - name: Checkout
-      uses: actions/checkout@v1
-    - name: Test Linux
-      if: matrix.os == 'ubuntu'
-      run: ./ci/linux_ci
-    - name: Test macOS
-      if: matrix.os == 'macos'
-      run: ./ci/macos_ci
-    - name: Test Windows
-      if: matrix.os == 'windows'
-      shell: bash
-      run: ./ci/win_ci
+    - uses: actions/checkout@v2
+      with:
+        submodules: true
+    - uses: goto-bus-stop/setup-zig@v1
+      with:
+        version: 0.9.1
+    - run: zig fmt --check src 
+    - run: zig build test
+    - run: zig build install
 
