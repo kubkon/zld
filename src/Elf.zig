@@ -45,6 +45,7 @@ data_rel_ro_sect_index: ?u16 = null,
 got_sect_index: ?u16 = null,
 data_sect_index: ?u16 = null,
 bss_sect_index: ?u16 = null,
+tdata_sect_index: ?u16 = null,
 tbss_sect_index: ?u16 = null,
 
 debug_loc_index: ?u16 = null,

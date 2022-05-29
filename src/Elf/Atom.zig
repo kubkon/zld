@@ -1,6 +1,7 @@
 const Atom = @This();
 
 const std = @import("std");
+const assert = std.debug.assert;
 const elf = std.elf;
 const log = std.log.scoped(.elf);
 const math = std.math;
@@ -299,12 +300,23 @@ pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
             },
             elf.R_X86_64_TPOFF32 => {
                 const source = @intCast(i64, sym.st_value + rel.r_offset);
-                log.debug("TODO R_X86_64_TPOFF32: {x}: [0x{x} => 0x{x}] ({s})", .{
+                const is_global_tls = tsym_st_type == elf.STT_TLS and tsym_st_bind == elf.STB_GLOBAL;
+                assert(is_global_tls);
+                const base_addr: u64 = base_addr: {
+                    const shdr = if (elf_file.tdata_sect_index) |index|
+                        elf_file.shdrs.items[index]
+                    else
+                        elf_file.shdrs.items[elf_file.tbss_sect_index.?];
+                    break :base_addr shdr.sh_addr;
+                };
+                const tls_offset = tsym.st_value - base_addr;
+                log.debug("R_X86_64_TPOFF32: {x}: [0x{x} => 0x{x} (TLS)] ({s})", .{
                     rel.r_offset,
                     source,
-                    tsym.st_value,
+                    tls_offset,
                     tsym_name,
                 });
+                mem.writeIntLittle(u32, self.code.items[rel.r_offset..][0..4], @intCast(u32, tls_offset));
             },
             elf.R_X86_64_DTPOFF64 => {
                 const source = @intCast(i64, sym.st_value + rel.r_offset);
