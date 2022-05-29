@@ -1116,20 +1116,14 @@ pub fn createGotAtom(self: *Elf, target: SymbolWithLoc) !*Atom {
     return atom;
 }
 
-fn allocateSection(self: *Elf, ndx: u16, phdr_ndx: u16) !void {
-    const shdr = &self.shdrs.items[ndx];
-    const phdr = &self.phdrs.items[phdr_ndx];
+fn allocateSection(self: *Elf, shdr: *elf.Elf64_Shdr, phdr: *elf.Elf64_Phdr) !void {
     const base_offset = phdr.p_offset + phdr.p_filesz;
     shdr.sh_offset = mem.alignForwardGeneric(u64, base_offset, shdr.sh_addralign);
-    shdr.sh_addr = phdr.p_vaddr + shdr.sh_offset - phdr.p_offset;
-    const p_size = shdr.sh_offset + shdr.sh_size - base_offset;
+    const p_filesz = shdr.sh_offset + shdr.sh_size - base_offset;
 
-    if (phdr.p_filesz == 0) {
-        shdr.sh_addr += phdr.p_offset;
-        phdr.p_offset = shdr.sh_offset;
-        phdr.p_vaddr += shdr.sh_offset;
-        phdr.p_paddr += shdr.sh_offset;
-    }
+    const base_addr = phdr.p_vaddr + phdr.p_memsz;
+    shdr.sh_addr = mem.alignForwardGeneric(u64, base_addr, shdr.sh_addralign);
+    const p_memsz = shdr.sh_addr + shdr.sh_size - base_addr;
 
     log.debug("allocating section '{s}' from 0x{x} to 0x{x} (0x{x} - 0x{x})", .{
         self.getShString(shdr.sh_name),
@@ -1139,20 +1133,15 @@ fn allocateSection(self: *Elf, ndx: u16, phdr_ndx: u16) !void {
         shdr.sh_offset + shdr.sh_size,
     });
 
-    phdr.p_filesz += p_size;
-    phdr.p_memsz += p_size;
+    phdr.p_filesz += p_filesz;
+    phdr.p_memsz += p_memsz;
 }
 
-fn getSegmentBaseAddr(self: *Elf, phdr_ndx: u16) u64 {
+fn getSegmentBase(self: *Elf, phdr_ndx: u16, alignment: u64) struct { off: u64, vaddr: u64 } {
     const phdr = self.phdrs.items[phdr_ndx];
-    const base_addr = mem.alignForwardGeneric(u64, phdr.p_vaddr + phdr.p_memsz, 0x1000);
-    return base_addr;
-}
-
-fn getSegmentBaseOff(self: *Elf, phdr_ndx: u16) u64 {
-    const phdr = self.phdrs.items[phdr_ndx];
-    const base_off = phdr.p_offset + phdr.p_filesz;
-    return base_off;
+    const off = phdr.p_offset + phdr.p_filesz;
+    const vaddr = mem.alignForwardGeneric(u64, phdr.p_vaddr + phdr.p_memsz, alignment) + @rem(off, alignment);
+    return .{ .off = off, .vaddr = vaddr };
 }
 
 fn allocateLoadRSeg(self: *Elf) !void {
@@ -1166,7 +1155,7 @@ fn allocateLoadRSeg(self: *Elf) !void {
 
     // This assumes ordering of section headers matches ordering of sections in file
     // so that the segments are contiguous in memory.
-    for (self.shdrs.items) |shdr, ndx| {
+    for (self.shdrs.items) |*shdr| {
         const is_read_alloc = blk: {
             const flags = shdr.sh_flags;
             if (flags & elf.SHF_ALLOC == 0) break :blk false;
@@ -1175,7 +1164,7 @@ fn allocateLoadRSeg(self: *Elf) !void {
             break :blk true;
         };
         if (!is_read_alloc) continue;
-        try self.allocateSection(@intCast(u16, ndx), self.load_r_seg_index.?);
+        try self.allocateSection(shdr, phdr);
     }
 
     log.debug("allocating read-only LOAD segment:", .{});
@@ -1184,24 +1173,23 @@ fn allocateLoadRSeg(self: *Elf) !void {
 }
 
 fn allocateLoadRESeg(self: *Elf) !void {
-    const base_addr = self.getSegmentBaseAddr(self.load_r_seg_index.?);
-    const base_off = self.getSegmentBaseOff(self.load_r_seg_index.?);
     const phdr = &self.phdrs.items[self.load_re_seg_index.?];
-    phdr.p_offset = base_off;
-    phdr.p_vaddr = base_addr;
-    phdr.p_paddr = base_addr;
+    const base = self.getSegmentBase(self.load_r_seg_index.?, phdr.p_align);
+    phdr.p_offset = base.off;
+    phdr.p_vaddr = base.vaddr;
+    phdr.p_paddr = base.vaddr;
     phdr.p_filesz = 0;
     phdr.p_memsz = 0;
 
     // This assumes ordering of section headers matches ordering of sections in file
     // so that the segments are contiguous in memory.
-    for (self.shdrs.items) |shdr, ndx| {
+    for (self.shdrs.items) |*shdr| {
         const is_exec_alloc = blk: {
             const flags = shdr.sh_flags;
             break :blk flags & elf.SHF_ALLOC != 0 and flags & elf.SHF_EXECINSTR != 0;
         };
         if (!is_exec_alloc) continue;
-        try self.allocateSection(@intCast(u16, ndx), self.load_re_seg_index.?);
+        try self.allocateSection(shdr, phdr);
     }
 
     log.debug("allocating read-execute LOAD segment:", .{});
@@ -1210,24 +1198,23 @@ fn allocateLoadRESeg(self: *Elf) !void {
 }
 
 fn allocateLoadRWSeg(self: *Elf) !void {
-    const base_addr = self.getSegmentBaseAddr(self.load_re_seg_index.?);
-    const base_off = self.getSegmentBaseOff(self.load_re_seg_index.?);
     const phdr = &self.phdrs.items[self.load_rw_seg_index.?];
-    phdr.p_offset = base_off;
-    phdr.p_vaddr = base_addr;
-    phdr.p_paddr = base_addr;
+    const base = self.getSegmentBase(self.load_re_seg_index.?, phdr.p_align);
+    phdr.p_offset = base.off;
+    phdr.p_vaddr = base.vaddr;
+    phdr.p_paddr = base.vaddr;
     phdr.p_filesz = 0;
     phdr.p_memsz = 0;
 
     // This assumes ordering of section headers matches ordering of sections in file
     // so that the segments are contiguous in memory.
-    for (self.shdrs.items) |shdr, ndx| {
+    for (self.shdrs.items) |*shdr| {
         const is_write_alloc = blk: {
             const flags = shdr.sh_flags;
             break :blk flags & elf.SHF_ALLOC != 0 and flags & elf.SHF_WRITE != 0;
         };
         if (!is_write_alloc) continue;
-        try self.allocateSection(@intCast(u16, ndx), self.load_rw_seg_index.?);
+        try self.allocateSection(shdr, phdr);
     }
 
     log.debug("allocating read-write LOAD segment:", .{});
