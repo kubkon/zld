@@ -762,23 +762,29 @@ fn sortShdrs(self: *Elf) !void {
     try self.shdrs.ensureTotalCapacity(self.base.allocator, shdrs.len);
 
     const indices = &[_]*?u16{
+        // null
         &self.null_sect_index,
+        // RO
         &self.rodata_sect_index,
+        // RE
         &self.text_sect_index,
         &self.init_sect_index,
         &self.init_array_sect_index,
         &self.fini_sect_index,
         &self.fini_array_sect_index,
+        // RW
         &self.data_rel_ro_sect_index,
         &self.got_sect_index,
         &self.data_sect_index,
         &self.bss_sect_index,
+        // DWARF
         &self.debug_loc_index,
         &self.debug_abbrev_index,
         &self.debug_info_index,
         &self.debug_str_index,
         &self.debug_frame_index,
         &self.debug_line_index,
+        // link-edit
         &self.symtab_sect_index,
         &self.shstrtab_sect_index,
         &self.strtab_sect_index,
@@ -1117,23 +1123,31 @@ pub fn createGotAtom(self: *Elf, target: SymbolWithLoc) !*Atom {
 }
 
 fn allocateSection(self: *Elf, shdr: *elf.Elf64_Shdr, phdr: *elf.Elf64_Phdr) !void {
-    const base_offset = phdr.p_offset + phdr.p_filesz;
-    shdr.sh_offset = mem.alignForwardGeneric(u64, base_offset, shdr.sh_addralign);
-    const p_filesz = shdr.sh_offset + shdr.sh_size - base_offset;
-
     const base_addr = phdr.p_vaddr + phdr.p_memsz;
     shdr.sh_addr = mem.alignForwardGeneric(u64, base_addr, shdr.sh_addralign);
     const p_memsz = shdr.sh_addr + shdr.sh_size - base_addr;
 
-    log.debug("allocating section '{s}' from 0x{x} to 0x{x} (0x{x} - 0x{x})", .{
-        self.getShString(shdr.sh_name),
-        shdr.sh_addr,
-        shdr.sh_addr + shdr.sh_size,
-        shdr.sh_offset,
-        shdr.sh_offset + shdr.sh_size,
-    });
+    const base_offset = phdr.p_offset + phdr.p_filesz;
+    shdr.sh_offset = mem.alignForwardGeneric(u64, base_offset, shdr.sh_addralign);
+    const p_filesz = shdr.sh_offset + shdr.sh_size - base_offset;
 
-    phdr.p_filesz += p_filesz;
+    if (shdr.sh_type == elf.SHT_NOBITS) {
+        log.debug("allocating section '{s}' from 0x{x} to 0x{x} (no physical size)", .{
+            self.getShString(shdr.sh_name),
+            shdr.sh_addr,
+            shdr.sh_addr + shdr.sh_size,
+        });
+    } else {
+        log.debug("allocating section '{s}' from 0x{x} to 0x{x} (0x{x} - 0x{x})", .{
+            self.getShString(shdr.sh_name),
+            shdr.sh_addr,
+            shdr.sh_addr + shdr.sh_size,
+            shdr.sh_offset,
+            shdr.sh_offset + shdr.sh_size,
+        });
+        phdr.p_filesz += p_filesz;
+    }
+
     phdr.p_memsz += p_memsz;
 }
 
@@ -1354,6 +1368,9 @@ fn writeAtoms(self: *Elf) !void {
     while (it.next()) |entry| {
         const shdr_ndx = entry.key_ptr.*;
         const shdr = self.shdrs.items[shdr_ndx];
+
+        if (shdr.sh_type == elf.SHT_NOBITS) continue;
+
         var atom: *Atom = entry.value_ptr.*;
 
         // Find the first atom
