@@ -32,6 +32,7 @@ phdr_seg_index: ?u16 = null,
 load_r_seg_index: ?u16 = null,
 load_re_seg_index: ?u16 = null,
 load_rw_seg_index: ?u16 = null,
+tls_seg_index: ?u16 = null,
 
 null_sect_index: ?u16 = null,
 rodata_sect_index: ?u16 = null,
@@ -44,6 +45,7 @@ data_rel_ro_sect_index: ?u16 = null,
 got_sect_index: ?u16 = null,
 data_sect_index: ?u16 = null,
 bss_sect_index: ?u16 = null,
+tbss_sect_index: ?u16 = null,
 
 debug_loc_index: ?u16 = null,
 debug_abbrev_index: ?u16 = null,
@@ -241,6 +243,7 @@ pub fn flush(self: *Elf) !void {
 
     try self.allocateLoadRSeg();
     try self.allocateLoadRESeg();
+    try self.allocateTlsSeg();
     try self.allocateLoadRWSeg();
     try self.allocateNonAllocSections();
     try self.allocateAtoms();
@@ -676,6 +679,38 @@ pub fn getMatchingSection(self: *Elf, object_id: u16, sect_id: u16) !?u16 {
         }
         if (flags & elf.SHF_WRITE != 0) {
             if (shdr.sh_type == elf.SHT_NOBITS) {
+                if (shdr.sh_flags & elf.SHF_TLS != 0) {
+                    if (self.tls_seg_index == null) {
+                        self.tls_seg_index = @intCast(u16, self.phdrs.items.len);
+                        try self.phdrs.append(self.base.allocator, .{
+                            .p_type = elf.PT_TLS,
+                            .p_flags = elf.PF_R,
+                            .p_offset = 0,
+                            .p_vaddr = self.base_addr,
+                            .p_paddr = self.base_addr,
+                            .p_filesz = 0,
+                            .p_memsz = 0,
+                            .p_align = 0,
+                        });
+                    }
+                    if (self.tbss_sect_index == null) {
+                        self.tbss_sect_index = @intCast(u16, self.shdrs.items.len);
+                        try self.shdrs.append(self.base.allocator, .{
+                            .sh_name = try self.makeShString(".tbss"),
+                            .sh_type = elf.SHT_NOBITS,
+                            .sh_flags = elf.SHF_WRITE | elf.SHF_ALLOC | elf.SHF_TLS,
+                            .sh_addr = 0,
+                            .sh_offset = 0,
+                            .sh_size = 0,
+                            .sh_link = 0,
+                            .sh_info = 0,
+                            .sh_addralign = 0,
+                            .sh_entsize = 0,
+                        });
+                    }
+                    break :blk self.tbss_sect_index.?;
+                }
+
                 if (self.bss_sect_index == null) {
                     self.bss_sect_index = @intCast(u16, self.shdrs.items.len);
                     try self.shdrs.append(self.base.allocator, .{
@@ -772,6 +807,8 @@ fn sortShdrs(self: *Elf) !void {
         &self.init_array_sect_index,
         &self.fini_sect_index,
         &self.fini_array_sect_index,
+        // TLS
+        &self.tbss_sect_index,
         // RW
         &self.data_rel_ro_sect_index,
         &self.got_sect_index,
@@ -1211,9 +1248,52 @@ fn allocateLoadRESeg(self: *Elf) !void {
     log.debug("  in memory from 0x{x} to 0x{x}", .{ phdr.p_vaddr, phdr.p_vaddr + phdr.p_memsz });
 }
 
-fn allocateLoadRWSeg(self: *Elf) !void {
-    const phdr = &self.phdrs.items[self.load_rw_seg_index.?];
+fn allocateTlsSeg(self: *Elf) !void {
+    const tls_seg_index = self.tls_seg_index orelse return;
+    const phdr = &self.phdrs.items[tls_seg_index];
+
+    // Calculate required minimum alignment first.
+    var min_align: u64 = 0;
+    for (self.shdrs.items) |shdr| {
+        const is_write_alloc_tls = blk: {
+            const flags = shdr.sh_flags;
+            break :blk flags & elf.SHF_ALLOC != 0 and flags & elf.SHF_WRITE != 0 and flags & elf.SHF_TLS != 0;
+        };
+        if (!is_write_alloc_tls) continue;
+        min_align = std.math.max(min_align, shdr.sh_addralign);
+    }
+    phdr.p_align = min_align;
+
     const base = self.getSegmentBase(self.load_re_seg_index.?, phdr.p_align);
+    phdr.p_offset = base.off;
+    phdr.p_vaddr = base.vaddr;
+    phdr.p_paddr = base.vaddr;
+    phdr.p_filesz = 0;
+    phdr.p_memsz = 0;
+
+    // This assumes ordering of section headers matches ordering of sections in file
+    // so that the segments are contiguous in memory.
+    for (self.shdrs.items) |*shdr| {
+        const is_write_alloc_tls = blk: {
+            const flags = shdr.sh_flags;
+            break :blk flags & elf.SHF_ALLOC != 0 and flags & elf.SHF_WRITE != 0 and flags & elf.SHF_TLS != 0;
+        };
+        if (!is_write_alloc_tls) continue;
+        try self.allocateSection(shdr, phdr);
+    }
+
+    log.debug("allocating TLS segment:", .{});
+    log.debug("  in file from 0x{x} to 0x{x}", .{ phdr.p_offset, phdr.p_offset + phdr.p_filesz });
+    log.debug("  in memory from 0x{x} to 0x{x}", .{ phdr.p_vaddr, phdr.p_vaddr + phdr.p_memsz });
+}
+
+fn allocateLoadRWSeg(self: *Elf) !void {
+    const prev_seg: u16 = blk: {
+        if (self.tls_seg_index) |index| break :blk index;
+        break :blk self.load_re_seg_index.?;
+    };
+    const phdr = &self.phdrs.items[self.load_rw_seg_index.?];
+    const base = self.getSegmentBase(prev_seg, phdr.p_align);
     phdr.p_offset = base.off;
     phdr.p_vaddr = base.vaddr;
     phdr.p_paddr = base.vaddr;
@@ -1225,7 +1305,7 @@ fn allocateLoadRWSeg(self: *Elf) !void {
     for (self.shdrs.items) |*shdr| {
         const is_write_alloc = blk: {
             const flags = shdr.sh_flags;
-            break :blk flags & elf.SHF_ALLOC != 0 and flags & elf.SHF_WRITE != 0;
+            break :blk flags & elf.SHF_ALLOC != 0 and flags & elf.SHF_WRITE != 0 and flags & elf.SHF_TLS == 0;
         };
         if (!is_write_alloc) continue;
         try self.allocateSection(shdr, phdr);
@@ -1379,6 +1459,9 @@ fn writeAtoms(self: *Elf) !void {
         }
 
         log.debug("writing atoms in '{s}' section", .{self.getShString(shdr.sh_name)});
+
+        if (shdr.sh_flags & elf.SHF_TLS != 0 and shdr.sh_type == elf.SHT_NOBITS) continue;
+        // TODO zero prefill .bss and .tbss if have presence in file
 
         var buffer = try self.base.allocator.alloc(u8, shdr.sh_size);
         defer self.base.allocator.free(buffer);

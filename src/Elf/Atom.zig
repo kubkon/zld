@@ -297,6 +297,35 @@ pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
                 const displacement = @intCast(i32, target - source + rel.r_addend);
                 mem.writeIntLittle(i32, self.code.items[rel.r_offset..][0..4], displacement);
             },
+            elf.R_X86_64_TPOFF32 => {
+                const source = @intCast(i64, sym.st_value + rel.r_offset);
+                log.debug("TODO R_X86_64_TPOFF32: {x}: [0x{x} => 0x{x}] ({s})", .{
+                    rel.r_offset,
+                    source,
+                    tsym.st_value,
+                    tsym_name,
+                });
+            },
+            elf.R_X86_64_DTPOFF64 => {
+                const source = @intCast(i64, sym.st_value + rel.r_offset);
+                log.debug("TODO R_X86_64_DTPOFF64: {x}: [0x{x} => 0x{x}] ({s})", .{
+                    rel.r_offset,
+                    source,
+                    tsym.st_value,
+                    tsym_name,
+                });
+            },
+            elf.R_X86_64_TLSGD => {
+                const source = @intCast(i64, sym.st_value + rel.r_offset);
+                // TODO calculate offset into the TLV descriptor.
+                // Ordering assumed is always .tdata followed by .tbss
+                log.debug("TODO R_X86_64_TLSGD: {x}: [0x{x} => 0x{x}] ({s})", .{
+                    rel.r_offset,
+                    source,
+                    tsym.st_value,
+                    tsym_name,
+                });
+            },
             else => {
                 const source = @intCast(i64, sym.st_value + rel.r_offset);
                 log.debug("TODO {d}: {x}: [0x{x} => 0x{x}] ({s})", .{
