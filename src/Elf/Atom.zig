@@ -8,6 +8,9 @@ const math = std.math;
 const mem = std.mem;
 
 const Allocator = mem.Allocator;
+const Disassembler = @import("zig-dis-x86_64").Disassembler;
+const Instruction = @import("zig-dis-x86_64").Instruction;
+const RegisterOrMemory = @import("zig-dis-x86_64").RegisterOrMemory;
 const Elf = @import("../Elf.zig");
 
 /// Each decl always gets a local symbol with the fully qualified name.
@@ -351,10 +354,10 @@ pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
                     });
                 }
             },
-            elf.R_X86_64_GOTTPOFF => {
+            elf.R_X86_64_GOTTPOFF => outer: {
                 const source = @intCast(i64, sym.st_value + rel.r_offset);
                 const is_global_tls = tsym_st_type == elf.STT_TLS and tsym_st_bind == elf.STB_GLOBAL;
-                if (is_global_tls) {
+                if (is_global_tls) blk: {
                     // Since the symbol is defined locally (in the linkage unit), we
                     // can statically relocate the offset. To put it another way,
                     // we convert this relocation into TPOFF32.
@@ -377,20 +380,43 @@ pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
                     });
                     // TODO move all this into parsing objects into atoms. By then,
                     // we should already know if the definition is available or not.
-                    // ADDQ -> LEAQ
-                    log.debug("{x}", .{std.fmt.fmtSliceHexLower(self.code.items[rel.r_offset - 4 ..][0..8])});
-                    self.code.items[rel.r_offset - 2] = 0xc7;
-                    self.code.items[rel.r_offset - 1] = 0xc3;
-                    mem.writeIntLittle(i32, self.code.items[rel.r_offset..][0..4], @intCast(i32, tls_offset));
-                } else {
-                    // TODO
-                    log.debug("TODO R_X86_64_GOTTPOFF: {x}: [0x{x} => 0x{x}] ({s})", .{
-                        rel.r_offset,
-                        source,
-                        tsym.st_value,
-                        tsym_name,
-                    });
+                    var disassembler = Disassembler.init(self.code.items[rel.r_offset - 3 ..]);
+                    const maybe_inst = disassembler.next() catch break :blk;
+                    const inst = maybe_inst orelse break :blk;
+
+                    switch (inst.tag) {
+                        .mov => {
+                            if (inst.enc != .rm) break :blk;
+                            const rm = inst.data.rm;
+                            if (rm.reg_or_mem != .mem) break :blk;
+                            if (rm.reg_or_mem.mem.base != .rip) break :blk;
+                            const dst_reg = rm.reg;
+                            const imm: u32 = @intCast(u32, tls_offset);
+                            // mov reg, imm32
+                            const new_inst = Instruction{
+                                .tag = .mov,
+                                .enc = .mi,
+                                .data = Instruction.Data.mi(RegisterOrMemory.reg(dst_reg), imm),
+                            };
+                            var stream = std.io.fixedBufferStream(self.code.items[rel.r_offset - 3 ..][0..7]);
+                            try new_inst.encode(stream.writer());
+                        },
+                        else => {
+                            var buf = std.ArrayList(u8).init(elf_file.base.allocator);
+                            defer buf.deinit();
+                            try inst.fmtPrint(buf.writer());
+                            log.debug("TODO can we optimise this out: {s}", .{buf.items});
+                        },
+                    }
+                    break :outer;
                 }
+                // TODO
+                log.debug("TODO R_X86_64_GOTTPOFF: {x}: [0x{x} => 0x{x}] ({s})", .{
+                    rel.r_offset,
+                    source,
+                    tsym.st_value,
+                    tsym_name,
+                });
             },
             elf.R_X86_64_TLSGD => {
                 const source = @intCast(i64, sym.st_value + rel.r_offset);
