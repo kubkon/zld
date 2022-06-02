@@ -342,6 +342,52 @@ pub fn parseIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
                         const got_atom = try elf_file.createGotAtom(global);
                         try elf_file.got_entries_map.putNoClobber(allocator, global, got_atom);
                     },
+                    elf.R_X86_64_GOTTPOFF => blk: {
+                        const global = elf_file.globals.get(tsym_name).?;
+                        if (isDefinitionAvailable(elf_file, global)) {
+                            // Link-time constant, try to optimize it away.
+                            var disassembler = Disassembler.init(code[rel.r_offset - 3 ..]);
+                            const maybe_inst = disassembler.next() catch break :blk;
+                            const inst = maybe_inst orelse break :blk;
+
+                            if (inst.enc != .rm) break :blk;
+                            const rm = inst.data.rm;
+                            if (rm.reg_or_mem != .mem) break :blk;
+                            if (rm.reg_or_mem.mem.base != .rip) break :blk;
+                            const dst = rm.reg;
+
+                            var stream = std.io.fixedBufferStream(code[rel.r_offset - 3 ..][0..7]);
+                            const writer = stream.writer();
+
+                            switch (inst.tag) {
+                                .mov => {
+                                    // rewrite to MOV MI encoding
+                                    const new_inst = Instruction{
+                                        .tag = .mov,
+                                        .enc = .mi,
+                                        .data = Instruction.Data.mi(RegisterOrMemory.reg(dst), 0x0),
+                                    };
+                                    try new_inst.encode(writer);
+
+                                    const r_sym = rel.r_sym();
+                                    rel.r_info = (@intCast(u64, r_sym) << 32) | elf.R_X86_64_TPOFF32;
+                                    rel.r_addend = 0;
+                                    log.debug("rewriting R_X86_64_GOTTPOFF -> R_X86_64_TPOFF32: MOV r64, r/m64 -> MOV r/m64, imm32", .{});
+                                },
+                                else => {},
+                            }
+                        }
+                    },
+                    elf.R_X86_64_DTPOFF64 => {
+                        const global = elf_file.globals.get(tsym_name).?;
+                        if (isDefinitionAvailable(elf_file, global)) {
+                            // rewrite into TPOFF32
+                            const r_sym = rel.r_sym();
+                            rel.r_info = (@intCast(u64, r_sym) << 32) | elf.R_X86_64_TPOFF32;
+                            rel.r_addend = 0;
+                            log.debug("rewriting R_X86_64_DTPOFF64 -> R_X86_64_TPOFF32", .{});
+                        }
+                    },
                     else => {},
                 }
 
