@@ -11,6 +11,9 @@ const mem = std.mem;
 const Allocator = mem.Allocator;
 const Atom = @import("Atom.zig");
 const Elf = @import("../Elf.zig");
+const Disassembler = @import("zig-dis-x86_64").Disassembler;
+const Instruction = @import("zig-dis-x86_64").Instruction;
+const RegisterOrMemory = @import("zig-dis-x86_64").RegisterOrMemory;
 
 file: fs.File,
 name: []const u8,
@@ -279,37 +282,38 @@ pub fn parseIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
                 const tsym_name = self.getString(tsym.st_name);
                 switch (rel.r_type()) {
                     elf.R_X86_64_REX_GOTPCRELX => blk: {
-                        // TODO optimize link-constant by rewriting opcodes. For example,
-                        // mov -> lea completely bypassing GOT.
                         const global = elf_file.globals.get(tsym_name).?;
-                        const needs_got = inner: {
-                            const actual_tsym = if (global.file) |file| tsym: {
-                                const object = elf_file.objects.items[file];
-                                log.debug("{s}", .{object.getString(
-                                    object.symtab.items[global.sym_index].st_name,
-                                )});
-                                break :tsym object.symtab.items[global.sym_index];
-                            } else elf_file.locals.items[global.sym_index];
-                            log.debug("{}", .{actual_tsym});
-                            break :inner actual_tsym.st_info & 0xf == elf.STT_NOTYPE and
-                                actual_tsym.st_shndx == elf.SHN_UNDEF;
-                        };
-                        log.debug("needs_got = {}", .{
-                            needs_got,
-                        });
-
-                        if (!needs_got) {
-                            log.debug("{x}", .{std.fmt.fmtSliceHexLower(code[rel.r_offset - 3 ..][0..3])});
+                        if (isDefinitionAvailable(elf_file, global)) opt: {
                             // Link-time constant, try to optimize it away.
-                            if (code[rel.r_offset - 2] == 0x8b) {
-                                // MOVQ -> LEAQ
-                                code[rel.r_offset - 2] = 0x8d;
-                                const r_sym = rel.r_sym();
-                                rel.r_info = (@intCast(u64, r_sym) << 32) | elf.R_X86_64_PC32;
-                                log.debug("R_X86_64_REX_GOTPCRELX -> R_X86_64_PC32: MOVQ -> LEAQ", .{});
-                                log.debug("{x}", .{std.fmt.fmtSliceHexLower(code[rel.r_offset - 3 ..][0..3])});
-                                break :blk;
+                            var disassembler = Disassembler.init(code[rel.r_offset - 3 ..]);
+                            const maybe_inst = disassembler.next() catch break :opt;
+                            const inst = maybe_inst orelse break :opt;
+
+                            switch (inst.tag) {
+                                .mov => {
+                                    if (inst.enc != .rm) break :opt;
+                                    const rm = inst.data.rm;
+                                    if (rm.reg_or_mem != .mem) break :opt;
+                                    if (rm.reg_or_mem.mem.base != .rip) break :opt;
+                                    const dst = rm.reg;
+                                    const src = rm.reg_or_mem;
+                                    // rewrite to LEA
+                                    const new_inst = Instruction{
+                                        .tag = .lea,
+                                        .enc = .rm,
+                                        .data = Instruction.Data.rm(dst, src),
+                                    };
+                                    var stream = std.io.fixedBufferStream(code[rel.r_offset - 3 ..][0..7]);
+                                    try new_inst.encode(stream.writer());
+
+                                    const r_sym = rel.r_sym();
+                                    rel.r_info = (@intCast(u64, r_sym) << 32) | elf.R_X86_64_PC32;
+                                    log.debug("rewriting R_X86_64_REX_GOTPCRELX -> R_X86_64_PC32: MOV -> LEA", .{});
+                                    break :blk;
+                                },
+                                else => {},
                             }
+
                             if (code[rel.r_offset - 2] == 0x3b) inner: {
                                 const regs = code[rel.r_offset - 1];
                                 log.debug("regs = 0x{x}, hmm = 0x{x}", .{ regs, @truncate(u3, regs) });
@@ -360,6 +364,14 @@ pub fn parseIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
             try elf_file.atoms.putNoClobber(allocator, tshdr_ndx, atom);
         }
     }
+}
+
+fn isDefinitionAvailable(elf_file: *Elf, global: Elf.SymbolWithLoc) bool {
+    const sym = if (global.file) |file| sym: {
+        const object = elf_file.objects.items[file];
+        break :sym object.symtab.items[global.sym_index];
+    } else elf_file.locals.items[global.sym_index];
+    return sym.st_info & 0xf != elf.STT_NOTYPE or sym.st_shndx != elf.SHN_UNDEF;
 }
 
 pub fn getString(self: Object, off: u32) []const u8 {
