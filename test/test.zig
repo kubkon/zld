@@ -157,5 +157,52 @@ pub fn addCases(ctx: *TestContext) !void {
             );
             case.expectedStdout("aGlobal=1\n");
         }
+        {
+            var case = try ctx.addCase("zerofill test in C", target);
+            try case.addInput("bss.c",
+                \\#include <stdio.h>
+                \\
+                \\static int buf[0x100000];
+                \\
+                \\int main(int argc, char* argv[]) {
+                \\  buf[0] = 1;
+                \\  buf[1] = 3;
+                \\  printf("%d, %d, %d\n", buf[0], buf[1], buf[0x100000-1]);
+                \\  return 0;
+                \\}
+            );
+            case.expectedStdout("1, 3, 0\n");
+        }
+        {
+            var case = try ctx.addCase("local tls in C", target);
+            try case.addInput("a.c",
+                \\#include <stdio.h>
+                \\
+                \\_Thread_local int x;
+                \\extern _Thread_local int y;
+                \\extern _Thread_local int z;
+                \\
+                \\int main(int argc, char* argv[]) {
+                \\  x = 2;
+                \\  y = 3;
+                \\  z = 4;
+                \\  printf("%d, %d, %d\n", x, y, z);
+                \\  x += 1;
+                \\  y -= 1;
+                \\  z *= 2;
+                \\  printf("%d, %d, %d\n", x, y, z);
+                \\  return 0;
+                \\}
+            );
+            try case.addInput("b.c",
+                \\_Thread_local int y;
+                \\_Thread_local int z;
+            );
+            case.expectedStdout(
+                \\2, 3, 4
+                \\3, 2, 8
+                \\
+            );
+        }
     }
 }
