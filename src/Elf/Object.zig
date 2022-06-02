@@ -289,45 +289,49 @@ pub fn parseIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
                             const maybe_inst = disassembler.next() catch break :opt;
                             const inst = maybe_inst orelse break :opt;
 
+                            // TODO can we optimise anything that isn't an RM encoding?
+                            if (inst.enc != .rm) break :opt;
+                            const rm = inst.data.rm;
+                            if (rm.reg_or_mem != .mem) break :opt;
+                            if (rm.reg_or_mem.mem.base != .rip) break :opt;
+                            const dst = rm.reg;
+                            const src = rm.reg_or_mem;
+
+                            var stream = std.io.fixedBufferStream(code[rel.r_offset - 3 ..][0..7]);
+                            const writer = stream.writer();
+
                             switch (inst.tag) {
                                 .mov => {
-                                    if (inst.enc != .rm) break :opt;
-                                    const rm = inst.data.rm;
-                                    if (rm.reg_or_mem != .mem) break :opt;
-                                    if (rm.reg_or_mem.mem.base != .rip) break :opt;
-                                    const dst = rm.reg;
-                                    const src = rm.reg_or_mem;
                                     // rewrite to LEA
                                     const new_inst = Instruction{
                                         .tag = .lea,
                                         .enc = .rm,
                                         .data = Instruction.Data.rm(dst, src),
                                     };
-                                    var stream = std.io.fixedBufferStream(code[rel.r_offset - 3 ..][0..7]);
-                                    try new_inst.encode(stream.writer());
+                                    try new_inst.encode(writer);
 
                                     const r_sym = rel.r_sym();
                                     rel.r_info = (@intCast(u64, r_sym) << 32) | elf.R_X86_64_PC32;
                                     log.debug("rewriting R_X86_64_REX_GOTPCRELX -> R_X86_64_PC32: MOV -> LEA", .{});
                                     break :blk;
                                 },
-                                else => {},
-                            }
+                                .cmp => {
+                                    // rewrite to CMP MI encoding
+                                    const new_inst = Instruction{
+                                        .tag = .cmp,
+                                        .enc = .mi,
+                                        .data = Instruction.Data.mi(RegisterOrMemory.reg(dst), 0x0),
+                                    };
+                                    try new_inst.encode(writer);
 
-                            if (code[rel.r_offset - 2] == 0x3b) inner: {
-                                const regs = code[rel.r_offset - 1];
-                                log.debug("regs = 0x{x}, hmm = 0x{x}", .{ regs, @truncate(u3, regs) });
-                                if (@truncate(u3, regs) != 0x5) break :inner;
-                                const reg = @intCast(u8, @truncate(u3, regs >> 3));
-                                // CMP r64, r/m64 -> CMP r/m64, imm32
-                                code[rel.r_offset - 2] = 0x81;
-                                code[rel.r_offset - 1] = 0xf8 | reg;
-                                const r_sym = rel.r_sym();
-                                rel.r_info = (@intCast(u64, r_sym) << 32) | elf.R_X86_64_32;
-                                rel.r_addend = 0;
-                                log.debug("R_X86_64_REX_GOTPCRELX -> R_X86_64_32: CMP r64, r/m64 -> CMP r/m64, imm32", .{});
-                                log.debug("{x}", .{std.fmt.fmtSliceHexLower(code[rel.r_offset - 3 ..][0..3])});
-                                break :blk;
+                                    const r_sym = rel.r_sym();
+                                    rel.r_info = (@intCast(u64, r_sym) << 32) | elf.R_X86_64_32;
+                                    rel.r_addend = 0;
+                                    log.debug("rewriting R_X86_64_REX_GOTPCRELX -> R_X86_64_32: CMP r64, r/m64 -> CMP r/m64, imm32", .{});
+
+                                    break :blk;
+                                },
+                                else => {},
                             }
                         }
 
