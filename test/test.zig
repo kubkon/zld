@@ -28,8 +28,8 @@ const all_targets: []const CrossTarget = &.{
 };
 
 pub fn addCases(ctx: *TestContext) !void {
-    // macOS/Mach-O tests
-    for (macos_targets) |target| {
+    // All targets
+    for (all_targets) |target| {
         {
             var case = try ctx.addCase("hello world in Zig", target);
             try case.addInput("hello.zig",
@@ -81,10 +81,6 @@ pub fn addCases(ctx: *TestContext) !void {
             case.expectedStdout("");
             case.expectedStderr("info: Before: 0\ninfo: After: 1\n");
         }
-    }
-
-    // All targets
-    for (all_targets) |target| {
         {
             var case = try ctx.addCase("hello world in C", target);
             try case.addInput("main.c",

@@ -157,6 +157,8 @@ pub const TestContext = struct {
             });
             defer allocator.free(target_triple);
 
+            var requires_crts: bool = true;
+
             for (case.input_files.items) |input_file| {
                 const input_filename = try input_file.getFilename();
                 defer allocator.free(input_filename);
@@ -178,6 +180,7 @@ pub const TestContext = struct {
                     },
                     .Zig => {
                         try argv.append("build-obj");
+                        requires_crts = false;
                     },
                     .Header => continue,
                 }
@@ -229,21 +232,23 @@ pub const TestContext = struct {
             try filenames.append(compiler_rt_path);
 
             if (case.target.getAbi() == .musl) {
-                // crt1
-                const crt1_path = try std.fs.path.join(allocator, &[_][]const u8{
-                    "test", "assets", target_triple, "crt1.o",
-                });
-                try filenames.append(crt1_path);
-                // crti
-                const crti_path = try std.fs.path.join(allocator, &[_][]const u8{
-                    "test", "assets", target_triple, "crti.o",
-                });
-                try filenames.append(crti_path);
-                // crtn
-                const crtn_path = try std.fs.path.join(allocator, &[_][]const u8{
-                    "test", "assets", target_triple, "crtn.o",
-                });
-                try filenames.append(crtn_path);
+                if (requires_crts) {
+                    // crt1
+                    const crt1_path = try std.fs.path.join(allocator, &[_][]const u8{
+                        "test", "assets", target_triple, "crt1.o",
+                    });
+                    try filenames.append(crt1_path);
+                    // crti
+                    const crti_path = try std.fs.path.join(allocator, &[_][]const u8{
+                        "test", "assets", target_triple, "crti.o",
+                    });
+                    try filenames.append(crti_path);
+                    // crtn
+                    const crtn_path = try std.fs.path.join(allocator, &[_][]const u8{
+                        "test", "assets", target_triple, "crtn.o",
+                    });
+                    try filenames.append(crtn_path);
+                }
                 // libc
                 const libc_path = try std.fs.path.join(allocator, &[_][]const u8{
                     "test", "assets", target_triple, "libc.a",
