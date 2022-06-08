@@ -154,32 +154,6 @@ fn parseSymtab(self: *Object, allocator: Allocator) !void {
     }
 }
 
-fn sortBySeniority(aliases: []u32, object: *Object) void {
-    const Context = struct {
-        object: *Object,
-    };
-    const SortFn = struct {
-        fn lessThan(ctx: Context, lhs: u32, rhs: u32) bool {
-            const lhs_sym = ctx.object.symtab.items[lhs];
-            const lhs_sym_bind = lhs_sym.st_info >> 4;
-            const rhs_sym = ctx.object.symtab.items[rhs];
-            const rhs_sym_bind = rhs_sym.st_info >> 4;
-
-            if (lhs_sym_bind == rhs_sym_bind) {
-                return false;
-            }
-            if (lhs_sym_bind == elf.STB_GLOBAL) {
-                return true;
-            } else if (lhs_sym_bind == elf.STB_WEAK and rhs_sym_bind != elf.STB_GLOBAL) {
-                return true;
-            }
-            return false;
-        }
-    };
-
-    std.sort.sort(u32, aliases, Context{ .object = object }, SortFn.lessThan);
-}
-
 pub fn parseIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_file: *Elf) !void {
     log.debug("parsing '{s}' into atoms", .{self.name});
 
@@ -225,20 +199,33 @@ pub fn parseIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
         atom.size = @intCast(u32, shdr.sh_size);
         atom.alignment = @intCast(u32, shdr.sh_addralign);
 
+        var local_sym_index: ?u32 = null;
+
         for (syms.items) |sym_id| {
             const sym = self.symtab.items[sym_id];
-            if (sym.st_value > 0) {
-                try atom.contained.append(allocator, .{
-                    .local_sym_index = sym_id,
-                    .offset = sym.st_value,
-                });
-            } else {
-                try atom.aliases.append(allocator, sym_id);
+            const is_sect_sym = sym.st_info & 0xf == elf.STT_SECTION;
+            if (is_sect_sym) {
+                local_sym_index = sym_id;
+                continue;
             }
+            try atom.contained.append(allocator, .{
+                .local_sym_index = sym_id,
+                .offset = sym.st_value,
+            });
         }
 
-        sortBySeniority(atom.aliases.items, self);
-        atom.local_sym_index = atom.aliases.swapRemove(0);
+        atom.local_sym_index = local_sym_index orelse blk: {
+            const sym_index = @intCast(u32, self.symtab.items.len);
+            try self.symtab.append(allocator, .{
+                .st_name = shdr.sh_name,
+                .st_info = (elf.STB_LOCAL << 4) | elf.STT_OBJECT,
+                .st_other = 0,
+                .st_shndx = 0,
+                .st_value = 0,
+                .st_size = atom.size,
+            });
+            break :blk sym_index;
+        };
 
         var code = if (shdr.sh_type == elf.SHT_NOBITS) blk: {
             var code = try allocator.alloc(u8, atom.size);
@@ -337,6 +324,15 @@ pub fn parseIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
 
                         if (elf_file.got_entries_map.contains(global)) break :blk;
                         log.debug("R_X86_64_REX_GOTPCRELX: creating GOT atom: [() -> {s}]", .{
+                            tsym_name,
+                        });
+                        const got_atom = try elf_file.createGotAtom(global);
+                        try elf_file.got_entries_map.putNoClobber(allocator, global, got_atom);
+                    },
+                    elf.R_X86_64_GOTPCREL => blk: {
+                        const global = elf_file.globals.get(tsym_name).?;
+                        if (elf_file.got_entries_map.contains(global)) break :blk;
+                        log.debug("R_X86_64_GOTPCREL: creating GOT atom: [() -> {s}]", .{
                             tsym_name,
                         });
                         const got_atom = try elf_file.createGotAtom(global);

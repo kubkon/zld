@@ -21,9 +21,6 @@ local_sym_index: u32,
 /// null means global synthetic symbol table.
 file: ?u32,
 
-/// List of symbol aliases pointing to the same atom via different entries
-aliases: std.ArrayListUnmanaged(u32) = .{},
-
 /// List of symbols contained within this atom
 contained: std.ArrayListUnmanaged(SymbolAtOffset) = .{},
 
@@ -77,7 +74,6 @@ pub fn deinit(self: *Atom, allocator: Allocator) void {
     self.relocs.deinit(allocator);
     self.code.deinit(allocator);
     self.contained.deinit(allocator);
-    self.aliases.deinit(allocator);
 }
 
 pub fn format(self: Atom, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
@@ -86,7 +82,6 @@ pub fn format(self: Atom, comptime fmt: []const u8, options: std.fmt.FormatOptio
     try std.fmt.format(writer, "Atom {{ ", .{});
     try std.fmt.format(writer, "  .local_sym_index = {d}, ", .{self.local_sym_index});
     try std.fmt.format(writer, "  .file = {d}, ", .{self.file});
-    try std.fmt.format(writer, "  .aliases = {any}, ", .{self.aliases.items});
     try std.fmt.format(writer, "  .contained = {any}, ", .{self.contained.items});
     try std.fmt.format(writer, "  .code = {x}, ", .{std.fmt.fmtSliceHexLower(if (self.code.items.len > 64)
         self.code.items[0..64]
@@ -183,7 +178,6 @@ pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
             const object = elf_file.objects.items[file];
             break :blk object.getString(tsym.st_name);
         } else elf_file.getString(tsym.st_name);
-        const tsym_st_bind = tsym.st_info >> 4;
         const tsym_st_type = tsym.st_info & 0xf;
 
         switch (r_type) {
@@ -231,7 +225,21 @@ pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
                 log.debug("R_X86_64_32: {x}: [() => 0x{x}] ({s})", .{ rel.r_offset, scaled, tsym_name });
                 mem.writeIntLittle(u32, self.code.items[rel.r_offset..][0..4], scaled);
             },
-            elf.R_X86_64_REX_GOTPCRELX => outer: {
+            elf.R_X86_64_32S => {
+                const target = self.getTargetAddress(r_sym, elf_file);
+                const scaled = math.cast(i32, @intCast(i64, target) + rel.r_addend) catch |err| switch (err) {
+                    error.Overflow => {
+                        log.err("R_X86_64_32: target value overflows 32bits", .{});
+                        log.err("  target value 0x{x}", .{@intCast(i64, target) + rel.r_addend});
+                        log.err("  target symbol {s}", .{tsym_name});
+                        return error.RelocationOverflow;
+                    },
+                    else => |e| return e,
+                };
+                log.debug("R_X86_64_32S: {x}: [() => 0x{x}] ({s})", .{ rel.r_offset, scaled, tsym_name });
+                mem.writeIntLittle(i32, self.code.items[rel.r_offset..][0..4], scaled);
+            },
+            elf.R_X86_64_REX_GOTPCRELX, elf.R_X86_64_GOTPCREL => outer: {
                 const source = @intCast(i64, sym.st_value + rel.r_offset);
                 const global = elf_file.globals.get(tsym_name).?;
                 const got_atom = elf_file.got_entries_map.get(global) orelse {
@@ -263,7 +271,7 @@ pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
                 mem.writeIntLittle(i32, self.code.items[rel.r_offset..][0..4], displacement);
             },
             elf.R_X86_64_TPOFF32 => {
-                assert(tsym_st_type == elf.STT_TLS and tsym_st_bind == elf.STB_GLOBAL);
+                assert(tsym_st_type == elf.STT_TLS);
                 const source = sym.st_value + rel.r_offset;
                 const target = self.getTargetAddress(r_sym, elf_file);
                 const base_addr: u64 = base_addr: {

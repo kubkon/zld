@@ -1445,14 +1445,6 @@ fn allocateAtoms(self: *Elf) !void {
                     base_addr + atom.size,
                 });
 
-                // Update each alias (if any)
-                for (atom.aliases.items) |index| {
-                    const alias_sym = &object.symtab.items[index];
-                    alias_sym.st_value = base_addr;
-                    alias_sym.st_shndx = shdr_ndx;
-                    alias_sym.st_size = atom.size;
-                }
-
                 // Update each symbol contained within the TextBlock
                 for (atom.contained.items) |sym_at_off| {
                     const contained_sym = &object.symtab.items[sym_at_off.local_sym_index];
@@ -1486,7 +1478,7 @@ fn logAtoms(self: Elf) void {
     for (self.shdrs.items) |shdr, ndx| {
         var atom = self.atoms.get(@intCast(u16, ndx)) orelse continue;
 
-        log.debug("WAT >>> {s}", .{self.getShString(shdr.sh_name)});
+        log.debug(">>> {s}", .{self.getShString(shdr.sh_name)});
 
         while (atom.prev) |prev| {
             atom = prev;
@@ -1499,22 +1491,24 @@ fn logAtoms(self: Elf) void {
                 const sym_name = object.getString(sym.st_name);
                 log.debug("  {s} : {d} => 0x{x}", .{ sym_name, atom.local_sym_index, sym.st_value });
                 log.debug("    defined in {s}", .{object.name});
-                log.debug("    aliases:", .{});
-                for (atom.aliases.items) |alias| {
-                    const asym = object.symtab.items[alias];
-                    const asym_name = object.getString(asym.st_name);
-                    log.debug("       {s} : {d} => 0x{x}", .{ asym_name, alias, asym.st_value });
+                log.debug("    contained:", .{});
+                for (atom.contained.items) |contained| {
+                    const index = contained.local_sym_index;
+                    const csym = object.symtab.items[index];
+                    const csym_name = object.getString(csym.st_name);
+                    log.debug("       {s} : {d} => 0x{x}", .{ csym_name, index, csym.st_value });
                 }
             } else {
                 const sym = self.locals.items[atom.local_sym_index];
                 const sym_name = self.getString(sym.st_name);
                 log.debug("  {s} : {d} => 0x{x}", .{ sym_name, atom.local_sym_index, sym.st_value });
                 log.debug("    synthetic", .{});
-                log.debug("    aliases:", .{});
-                for (atom.aliases.items) |alias| {
-                    const asym = self.locals.items[alias];
-                    const asym_name = self.getString(asym.st_name);
-                    log.debug("       {s} : {d} => 0x{x}", .{ asym_name, alias, asym.st_value });
+                log.debug("    contained:", .{});
+                for (atom.contained.items) |contained| {
+                    const index = contained.local_sym_index;
+                    const csym = self.locals.items[index];
+                    const csym_name = self.getString(csym.st_name);
+                    log.debug("       {s} : {d} => 0x{x}", .{ csym_name, index, csym.st_value });
                 }
             }
 
@@ -1733,9 +1727,10 @@ fn logSymtab(self: Elf) void {
     for (self.objects.items) |object| {
         log.debug("locals in {s}", .{object.name});
         for (object.symtab.items) |sym, i| {
-            const st_type = sym.st_info & 0xf;
+            // const st_type = sym.st_info & 0xf;
             const st_bind = sym.st_info >> 4;
-            if (st_bind != elf.STB_LOCAL or st_type != elf.STT_SECTION) continue;
+            // if (st_bind != elf.STB_LOCAL or st_type != elf.STT_SECTION) continue;
+            if (st_bind != elf.STB_LOCAL) continue;
             log.debug("  {d}: {s}: {}", .{ i, object.getString(sym.st_name), sym });
         }
     }
