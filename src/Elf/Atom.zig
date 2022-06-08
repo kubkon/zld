@@ -115,7 +115,8 @@ fn getTargetAddress(self: Atom, r_sym: u32, elf_file: *Elf) u64 {
 
     const tsym_st_bind = tsym.st_info >> 4;
     const tsym_st_type = tsym.st_info & 0xf;
-    const is_local = tsym_st_type == elf.STT_SECTION or tsym_st_bind == elf.STB_LOCAL;
+    const is_section = tsym_st_type == elf.STT_SECTION;
+    const is_local = is_section or tsym_st_bind == elf.STB_LOCAL;
 
     if (!is_local) {
         const global = elf_file.globals.get(tsym_name).?;
@@ -183,9 +184,9 @@ pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
         switch (r_type) {
             elf.R_X86_64_NONE => {},
             elf.R_X86_64_64 => {
-                const target = self.getTargetAddress(r_sym, elf_file);
+                const target = @intCast(i64, self.getTargetAddress(r_sym, elf_file)) + rel.r_addend;
                 log.debug("R_X86_64_64: {x}: [() => 0x{x}] ({s})", .{ rel.r_offset, target, tsym_name });
-                mem.writeIntLittle(u64, self.code.items[rel.r_offset..][0..8], target);
+                mem.writeIntLittle(i64, self.code.items[rel.r_offset..][0..8], target);
             },
             elf.R_X86_64_PC32 => {
                 const source = @intCast(i64, sym.st_value + rel.r_offset);

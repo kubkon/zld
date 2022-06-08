@@ -1554,16 +1554,14 @@ fn writeAtoms(self: *Elf) !void {
                 break :blk object.symtab.items[atom.local_sym_index];
             } else self.locals.items[atom.local_sym_index];
 
-            const off = sym.st_value - shdr.sh_addr;
-
             try atom.resolveRelocs(self);
 
+            const off = sym.st_value - shdr.sh_addr;
             const sym_name = if (atom.file) |file|
                 self.objects.items[file].getString(sym.st_name)
             else
                 self.getString(sym.st_name);
             log.debug("  writing atom '{s}' at offset 0x{x}", .{ sym_name, shdr.sh_offset + off });
-            log.debug("  contents: {x}", .{std.fmt.fmtSliceHexLower(atom.code.items)});
 
             mem.copy(u8, buffer[off..][0..atom.size], atom.code.items);
 
