@@ -54,6 +54,9 @@ debug_info_index: ?u16 = null,
 debug_str_index: ?u16 = null,
 debug_frame_index: ?u16 = null,
 debug_line_index: ?u16 = null,
+debug_ranges_index: ?u16 = null,
+debug_pubnames_index: ?u16 = null,
+debug_pubtypes_index: ?u16 = null,
 
 symtab_sect_index: ?u16 = null,
 strtab_sect_index: ?u16 = null,
@@ -582,6 +585,57 @@ pub fn getMatchingSection(self: *Elf, object_id: u16, sect_id: u16) !?u16 {
                         });
                     }
                     break :blk self.debug_line_index.?;
+                } else if (mem.eql(u8, shdr_name, ".debug_ranges")) {
+                    if (self.debug_ranges_index == null) {
+                        self.debug_ranges_index = @intCast(u16, self.shdrs.items.len);
+                        try self.shdrs.append(self.base.allocator, .{
+                            .sh_name = try self.makeShString(shdr_name),
+                            .sh_type = elf.SHT_PROGBITS,
+                            .sh_flags = 0,
+                            .sh_addr = 0,
+                            .sh_offset = 0,
+                            .sh_size = 0,
+                            .sh_link = 0,
+                            .sh_info = 0,
+                            .sh_addralign = 0,
+                            .sh_entsize = 0,
+                        });
+                        break :blk self.debug_ranges_index.?;
+                    }
+                } else if (mem.eql(u8, shdr_name, ".debug_pubnames")) {
+                    if (self.debug_pubnames_index == null) {
+                        self.debug_pubnames_index = @intCast(u16, self.shdrs.items.len);
+                        try self.shdrs.append(self.base.allocator, .{
+                            .sh_name = try self.makeShString(shdr_name),
+                            .sh_type = elf.SHT_PROGBITS,
+                            .sh_flags = 0,
+                            .sh_addr = 0,
+                            .sh_offset = 0,
+                            .sh_size = 0,
+                            .sh_link = 0,
+                            .sh_info = 0,
+                            .sh_addralign = 0,
+                            .sh_entsize = 0,
+                        });
+                        break :blk self.debug_pubnames_index.?;
+                    }
+                } else if (mem.eql(u8, shdr_name, ".debug_pubtypes")) {
+                    if (self.debug_pubtypes_index == null) {
+                        self.debug_pubtypes_index = @intCast(u16, self.shdrs.items.len);
+                        try self.shdrs.append(self.base.allocator, .{
+                            .sh_name = try self.makeShString(shdr_name),
+                            .sh_type = elf.SHT_PROGBITS,
+                            .sh_flags = 0,
+                            .sh_addr = 0,
+                            .sh_offset = 0,
+                            .sh_size = 0,
+                            .sh_link = 0,
+                            .sh_info = 0,
+                            .sh_addralign = 0,
+                            .sh_entsize = 0,
+                        });
+                        break :blk self.debug_pubtypes_index.?;
+                    }
                 }
             }
 
@@ -852,7 +906,10 @@ fn sortShdrs(self: *Elf) !void {
         &self.debug_loc_index,
         &self.debug_abbrev_index,
         &self.debug_info_index,
+        &self.debug_ranges_index,
         &self.debug_str_index,
+        &self.debug_pubnames_index,
+        &self.debug_pubtypes_index,
         &self.debug_frame_index,
         &self.debug_line_index,
         // link-edit
