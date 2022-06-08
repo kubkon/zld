@@ -178,14 +178,12 @@ pub fn addCases(ctx: *TestContext) !void {
             try case.addInput("a.c",
                 \\#include <stdio.h>
                 \\
-                \\_Thread_local int x;
+                \\_Thread_local int x = 2;
                 \\extern _Thread_local int y;
                 \\extern _Thread_local int z;
                 \\
                 \\int main(int argc, char* argv[]) {
-                \\  x = 2;
                 \\  y = 3;
-                \\  z = 4;
                 \\  printf("%d, %d, %d\n", x, y, z);
                 \\  x += 1;
                 \\  y -= 1;
@@ -196,7 +194,7 @@ pub fn addCases(ctx: *TestContext) !void {
             );
             try case.addInput("b.c",
                 \\_Thread_local int y;
-                \\_Thread_local int z;
+                \\_Thread_local int z = 4;
             );
             case.expectedStdout(
                 \\2, 3, 4
