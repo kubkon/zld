@@ -1147,16 +1147,23 @@ fn resolveSpecialSymbols(self: *Elf) !void {
             mem.eql(u8, sym_name, "__fini_array_end") or
             mem.eql(u8, sym_name, "_DYNAMIC"))
         {
-            const st_shndx: u8 = if (mem.eql(u8, sym_name, "_DYNAMIC")) 0 else 1;
-            const sym_index = @intCast(u32, self.locals.items.len);
-            try self.locals.append(self.base.allocator, .{
+            const local: elf.Elf64_Sym = if (mem.eql(u8, sym_name, "_DYNAMIC")) .{
+                .st_name = try self.makeString(sym_name),
+                .st_info = elf.STB_WEAK << 4,
+                .st_other = 0,
+                .st_shndx = 0,
+                .st_value = 0,
+                .st_size = 0,
+            } else .{
                 .st_name = try self.makeString(sym_name),
                 .st_info = 0,
                 .st_other = 0,
-                .st_shndx = st_shndx,
+                .st_shndx = 1, // TODO should this be hardcoded?
                 .st_value = 0,
                 .st_size = 0,
-            });
+            };
+            const sym_index = @intCast(u32, self.locals.items.len);
+            try self.locals.append(self.base.allocator, local);
             global.* = .{
                 .sym_index = sym_index,
                 .file = null,
