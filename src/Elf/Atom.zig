@@ -267,20 +267,20 @@ pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
                 const source = sym.st_value + rel.r_offset;
                 const target = self.getTargetAddress(r_sym, elf_file);
                 const base_addr: u64 = base_addr: {
-                    const shdr = if (elf_file.tdata_sect_index) |index|
+                    const shdr = if (elf_file.tbss_sect_index) |index|
                         elf_file.shdrs.items[index]
                     else
-                        elf_file.shdrs.items[elf_file.tbss_sect_index.?];
-                    break :base_addr shdr.sh_addr;
+                        elf_file.shdrs.items[elf_file.tdata_sect_index.?];
+                    break :base_addr shdr.sh_addr + shdr.sh_size;
                 };
-                const tls_offset = target - base_addr;
+                const tls_offset = @truncate(u32, @bitCast(u64, -@intCast(i64, base_addr - target)));
                 log.debug("R_X86_64_TPOFF32: {x}: [0x{x} => 0x{x} (TLS)] ({s})", .{
                     rel.r_offset,
                     source,
                     tls_offset,
                     tsym_name,
                 });
-                mem.writeIntLittle(u32, self.code.items[rel.r_offset..][0..4], @intCast(u32, tls_offset));
+                mem.writeIntLittle(u32, self.code.items[rel.r_offset..][0..4], tls_offset);
             },
             elf.R_X86_64_DTPOFF64 => {
                 const source = sym.st_value + rel.r_offset;
