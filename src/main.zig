@@ -126,88 +126,75 @@ pub fn main() anyerror!void {
         const arg = args[i];
         if (mem.eql(u8, arg, "--help") or mem.eql(u8, arg, "-h")) {
             printHelpAndExit();
-        }
-        if (mem.eql(u8, arg, "--debug-log")) {
+        } else if (mem.eql(u8, arg, "--debug-log")) {
             if (i + 1 >= args.len) fatal("Expected parameter after {s}", .{arg});
             i += 1;
             try log_scopes.append(arena, args[i]);
-            continue;
-        }
-        if (mem.eql(u8, arg, "-syslibroot")) {
+        } else if (mem.eql(u8, arg, "-syslibroot")) {
             if (i + 1 >= args.len) fatal("Expected path after {s}", .{arg});
             i += 1;
             syslibroot = args[i];
-            continue;
-        }
-        if (mem.startsWith(u8, arg, "-l")) {
+        } else if (mem.startsWith(u8, arg, "-l")) {
             try libs.append(args[i][2..]);
-            continue;
-        }
-        if (mem.startsWith(u8, arg, "-L")) {
+        } else if (mem.startsWith(u8, arg, "-L")) {
             try lib_dirs.append(args[i][2..]);
-            continue;
-        }
-        if (mem.eql(u8, arg, "-framework") or mem.eql(u8, arg, "-weak_framework")) {
+        } else if (mem.eql(u8, arg, "-framework") or mem.eql(u8, arg, "-weak_framework")) {
             if (i + 1 >= args.len) fatal("Expected framework name after {s}", .{arg});
             i += 1;
             try frameworks.append(args[i]);
-            continue;
-        }
-        if (mem.startsWith(u8, arg, "-F")) {
+        } else if (mem.startsWith(u8, arg, "-F")) {
             try framework_dirs.append(args[i][2..]);
-            continue;
-        }
-        if (mem.eql(u8, arg, "-o")) {
+        } else if (mem.eql(u8, arg, "-o")) {
             if (i + 1 >= args.len) fatal("Expected output path after {s}", .{arg});
             i += 1;
             out_path = args[i];
-            continue;
-        }
-        if (mem.eql(u8, arg, "-stack")) {
+        } else if (mem.eql(u8, arg, "-stack")) {
             if (i + 1 >= args.len) fatal("Expected stack size value after {s}", .{arg});
             i += 1;
             stack = try std.fmt.parseInt(u64, args[i], 10);
-            continue;
-        }
-        if (mem.eql(u8, arg, "-dylib")) {
+        } else if (mem.eql(u8, arg, "-z")) {
+            if (i + 1 >= args.len) fatal("Expected another argument after {s}", .{arg});
+            i += 1;
+            std.log.warn("TODO unhandled argument '-z {s}'", .{args[i]});
+        } else if (mem.startsWith(u8, arg, "-z")) {
+            std.log.warn("TODO unhandled argument '-z {s}'", .{args[i][2..]});
+        } else if (mem.eql(u8, arg, "--gc-sections")) {
+            std.log.warn("TODO unhandled argument '--gc-sections'", .{});
+        } else if (mem.eql(u8, arg, "--as-needed")) {
+            std.log.warn("TODO unhandled argument '--as-needed'", .{});
+        } else if (mem.eql(u8, arg, "--allow-shlib-undefined")) {
+            std.log.warn("TODO unhandled argument '--allow-shlib-undefined'", .{});
+        } else if (mem.startsWith(u8, arg, "-O")) {
+            std.log.warn("TODO unhandled argument '-O{s}'", .{args[i][2..]});
+        } else if (mem.eql(u8, arg, "-dylib")) {
             dylib = true;
-            continue;
-        }
-        if (mem.eql(u8, arg, "-shared")) {
+        } else if (mem.eql(u8, arg, "-shared")) {
             shared = true;
-            continue;
-        }
-        if (mem.eql(u8, arg, "-dynamic")) {
+        } else if (mem.eql(u8, arg, "-dynamic")) {
             dynamic = true;
-            continue;
-        }
-        if (mem.eql(u8, arg, "-rpath")) {
+        } else if (mem.eql(u8, arg, "-static")) {
+            dynamic = false;
+        } else if (mem.eql(u8, arg, "-rpath")) {
             if (i + 1 >= args.len) fatal("Expected path after {s}", .{arg});
             i += 1;
             try rpath_list.append(args[i]);
-            continue;
-        }
-        if (mem.eql(u8, arg, "-compatibility_version")) {
+        } else if (mem.eql(u8, arg, "-compatibility_version")) {
             if (i + 1 >= args.len) fatal("Expected version after {s}", .{arg});
             i += 1;
             compatibility_version = std.builtin.Version.parse(args[i]) catch |err| {
                 fatal("Unable to parse {s} {s}: {s}", .{ arg, args[i], @errorName(err) });
             };
-            continue;
-        }
-        if (mem.eql(u8, arg, "-current_version")) {
+        } else if (mem.eql(u8, arg, "-current_version")) {
             if (i + 1 >= args.len) fatal("Expected version after {s}", .{arg});
             i += 1;
             current_version = std.builtin.Version.parse(args[i]) catch |err| {
                 fatal("Unable to parse {s} {s}: {s}", .{ arg, args[i], @errorName(err) });
             };
-            continue;
-        }
-        if (mem.eql(u8, arg, "--verbose")) {
+        } else if (mem.eql(u8, arg, "--verbose")) {
             verbose = true;
-            continue;
+        } else {
+            try positionals.append(arg);
         }
-        try positionals.append(arg);
     }
 
     if (positionals.items.len == 0) {
@@ -220,7 +207,10 @@ pub fn main() anyerror!void {
 
         if (dynamic) {
             try argv.append("-dynamic");
+        } else {
+            try argv.append("-static");
         }
+
         if (syslibroot) |path| {
             try argv.append("-syslibroot");
             try argv.append(path);
