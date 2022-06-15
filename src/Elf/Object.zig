@@ -11,9 +11,11 @@ const mem = std.mem;
 const Allocator = mem.Allocator;
 const Atom = @import("Atom.zig");
 const Elf = @import("../Elf.zig");
-const Disassembler = @import("zig-dis-x86_64").Disassembler;
-const Instruction = @import("zig-dis-x86_64").Instruction;
-const RegisterOrMemory = @import("zig-dis-x86_64").RegisterOrMemory;
+
+const dis_x86_64 = @import("dis_x86_64");
+const Disassembler = dis_x86_64.Disassembler;
+const Instruction = dis_x86_64.Instruction;
+const RegisterOrMemory = dis_x86_64.RegisterOrMemory;
 
 file: fs.File,
 name: []const u8,

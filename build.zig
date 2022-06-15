@@ -17,12 +17,12 @@ pub fn build(b: *Builder) void {
     const lib = b.addStaticLibrary("zld", "src/Zld.zig");
     lib.setTarget(target);
     lib.setBuildMode(mode);
-    lib.addPackagePath("zig-dis-x86_64", "zig-dis-x86_64/src/lib.zig");
+    lib.addPackagePath("dis_x86_64", "zig-dis-x86_64/src/dis_x86_64.zig");
 
     const exe = b.addExecutable("zld", "src/main.zig");
     exe.setTarget(target);
     exe.setBuildMode(mode);
-    exe.addPackagePath("zig-dis-x86_64", "zig-dis-x86_64/src/lib.zig");
+    exe.addPackagePath("dis_x86_64", "zig-dis-x86_64/src/dis_x86_64.zig");
 
     const exe_opts = b.addOptions();
     exe.addOptions("build_options", exe_opts);
@@ -42,7 +42,7 @@ pub fn build(b: *Builder) void {
     const tests = b.addTest("src/test.zig");
     tests.setBuildMode(mode);
     tests.addPackagePath("end_to_end_tests", "test/test.zig");
-    tests.addPackagePath("zig-dis-x86_64", "zig-dis-x86_64/src/lib.zig");
+    tests.addPackagePath("dis_x86_64", "zig-dis-x86_64/src/dis_x86_64.zig");
 
     const test_opts = b.addOptions();
     tests.addOptions("build_options", test_opts);
