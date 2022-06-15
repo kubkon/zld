@@ -64,7 +64,8 @@ will be to swap in `zig ld` in place of any other linker.
 ## Supported backends
 
 - [x] Mach-O
-- [ ] ELF (now in progress)
+- [x] ELF (static non-PIE)
+- [ ] ELF (static PIE and dynamic)
 - [ ] COFF/PE
 
 ## Contributing
