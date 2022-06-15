@@ -155,9 +155,13 @@ pub fn main() anyerror!void {
         } else if (mem.eql(u8, arg, "-z")) {
             if (i + 1 >= args.len) fatal("Expected another argument after {s}", .{arg});
             i += 1;
-            std.log.warn("TODO unhandled argument '-z {s}'", .{args[i]});
+            if (mem.startsWith(u8, args[i], "stack-size=")) {
+                stack = try std.fmt.parseInt(u64, args[i]["stack-size=".len..], 10);
+            } else {
+                std.log.warn("TODO unhandled argument '-z {s}'", .{args[i]});
+            }
         } else if (mem.startsWith(u8, arg, "-z")) {
-            std.log.warn("TODO unhandled argument '-z {s}'", .{args[i][2..]});
+            std.log.warn("TODO unhandled argument '-z {s}'", .{args[i]["-z".len..]});
         } else if (mem.eql(u8, arg, "--gc-sections")) {
             std.log.warn("TODO unhandled argument '--gc-sections'", .{});
         } else if (mem.eql(u8, arg, "--as-needed")) {
@@ -165,7 +169,7 @@ pub fn main() anyerror!void {
         } else if (mem.eql(u8, arg, "--allow-shlib-undefined")) {
             std.log.warn("TODO unhandled argument '--allow-shlib-undefined'", .{});
         } else if (mem.startsWith(u8, arg, "-O")) {
-            std.log.warn("TODO unhandled argument '-O{s}'", .{args[i][2..]});
+            std.log.warn("TODO unhandled argument '-O{s}'", .{args[i]["-O".len..]});
         } else if (mem.eql(u8, arg, "-dylib")) {
             dylib = true;
         } else if (mem.eql(u8, arg, "-shared")) {
@@ -201,6 +205,9 @@ pub fn main() anyerror!void {
         fatal("Expected at least one input .o file", .{});
     }
 
+    // TODO allow for non-native targets
+    const target = builtin.target;
+
     if (verbose) {
         var argv = std.ArrayList([]const u8).init(arena);
         try argv.append("zld");
@@ -222,8 +229,14 @@ pub fn main() anyerror!void {
             try argv.append("-dylib");
         }
         if (stack) |st| {
-            try argv.append("-stack");
-            try argv.append(try std.fmt.allocPrint(arena, "{d}", .{st}));
+            switch (target.getObjectFormat()) {
+                .elf => try argv.append(try std.fmt.allocPrint(arena, "-z stack-size={d}", .{st})),
+                .macho => {
+                    try argv.append("-stack");
+                    try argv.append(try std.fmt.allocPrint(arena, "{d}", .{st}));
+                },
+                else => {},
+            }
         }
         if (out_path) |path| {
             try argv.append("-o");
@@ -254,8 +267,6 @@ pub fn main() anyerror!void {
         try io.getStdOut().writeAll(try mem.join(arena, " ", argv.items));
     }
 
-    // TODO allow for non-native targets
-    const target = builtin.target;
     var zld = try Zld.openPath(gpa, .{
         .emit = .{
             .directory = std.fs.cwd(),

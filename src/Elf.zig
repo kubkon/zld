@@ -33,6 +33,7 @@ load_r_seg_index: ?u16 = null,
 load_re_seg_index: ?u16 = null,
 load_rw_seg_index: ?u16 = null,
 tls_seg_index: ?u16 = null,
+gnu_stack_phdr_index: ?u16 = null,
 
 null_sect_index: ?u16 = null,
 rodata_sect_index: ?u16 = null,
@@ -245,6 +246,7 @@ pub fn flush(self: *Elf) !void {
 
     try self.sortShdrs();
 
+    try self.setStackSize();
     try self.allocateLoadRSeg();
     try self.allocateLoadRESeg();
     try self.allocateLoadRWSeg();
@@ -1580,6 +1582,27 @@ fn setEntryPoint(self: *Elf) !void {
     const object = self.objects.items[global.file.?];
     const sym = object.symtab.items[global.sym_index];
     self.header.?.e_entry = sym.st_value;
+}
+
+fn setStackSize(self: *Elf) !void {
+    const stack_size = self.base.options.stack_size_override orelse return;
+    const gnu_stack_phdr_index = self.gnu_stack_phdr_index orelse blk: {
+        const gnu_stack_phdr_index = @intCast(u16, self.phdrs.items.len);
+        try self.phdrs.append(self.base.allocator, .{
+            .p_type = elf.PT_GNU_STACK,
+            .p_flags = elf.PF_R | elf.PF_W,
+            .p_offset = 0,
+            .p_vaddr = 0,
+            .p_paddr = 0,
+            .p_filesz = 0,
+            .p_memsz = 0,
+            .p_align = 0,
+        });
+        self.gnu_stack_phdr_index = gnu_stack_phdr_index;
+        break :blk gnu_stack_phdr_index;
+    };
+    const phdr = &self.phdrs.items[gnu_stack_phdr_index];
+    phdr.p_memsz = stack_size;
 }
 
 fn writeSymtab(self: *Elf) !void {
