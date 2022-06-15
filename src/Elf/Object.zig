@@ -178,13 +178,6 @@ pub fn parseIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
         log.debug("  parsing section '{s}'", .{shdr_name});
 
         const syms = symbols_by_shndx.get(ndx).?;
-        if (syms.items.len == 0) {
-            if (shdr.sh_size != 0) {
-                log.debug("  TODO handle non-empty sections with no symbols: {s}", .{shdr_name});
-            }
-            continue;
-        }
-
         const tshdr_ndx = (try elf_file.getMatchingSection(object_id, ndx)) orelse {
             log.debug("unhandled section", .{});
             continue;
