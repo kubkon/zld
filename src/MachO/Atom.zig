@@ -16,6 +16,11 @@ const MachO = @import("../MachO.zig");
 const Object = @import("Object.zig");
 const StringIndexAdapter = std.hash_map.StringIndexAdapter;
 
+const dis_x86_64 = @import("dis_x86_64");
+const Disassembler = dis_x86_64.Disassembler;
+const Instruction = dis_x86_64.Instruction;
+const RegisterOrMemory = dis_x86_64.RegisterOrMemory;
+
 /// Each decl always gets a local symbol with the fully qualified name.
 /// The vaddr and size are found here directly.
 /// The file offset is found by computing the vaddr offset from the section vaddr
@@ -782,13 +787,34 @@ pub fn resolveRelocs(self: *Atom, macho_file: *MachO) !void {
                         mem.writeIntLittle(u32, self.code.items[rel.offset..][0..4], @bitCast(u32, displacement));
                     },
                     .X86_64_RELOC_TLV => {
-                        // We need to rewrite the opcode from movq to leaq.
-                        self.code.items[rel.offset - 2] = 0x8d;
                         const displacement = try math.cast(
                             i32,
                             @intCast(i64, target_addr) - @intCast(i64, source_addr) - 4 + rel.addend,
                         );
-                        mem.writeIntLittle(u32, self.code.items[rel.offset..][0..4], @bitCast(u32, displacement));
+
+                        // We need to rewrite the opcode from movq to leaq.
+                        var disassembler = Disassembler.init(self.code.items[rel.offset - 3 ..]);
+                        const inst = (try disassembler.next()) orelse unreachable;
+                        assert(inst.enc == .rm);
+                        assert(inst.tag == .mov);
+                        const rm = inst.data.rm;
+                        const dst = rm.reg;
+                        const src = rm.reg_or_mem.mem;
+
+                        var stream = std.io.fixedBufferStream(self.code.items[rel.offset - 3 ..][0..7]);
+                        const writer = stream.writer();
+
+                        const new_inst = Instruction{
+                            .tag = .lea,
+                            .enc = .rm,
+                            .data = Instruction.Data.rm(dst, RegisterOrMemory.mem(.{
+                                .ptr_size = src.ptr_size,
+                                .scale_index = src.scale_index,
+                                .base = src.base,
+                                .disp = displacement,
+                            })),
+                        };
+                        try new_inst.encode(writer);
                     },
                     .X86_64_RELOC_SIGNED,
                     .X86_64_RELOC_SIGNED_1,
