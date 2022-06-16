@@ -177,6 +177,11 @@ pub fn parseIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
 
         log.debug("  parsing section '{s}'", .{shdr_name});
 
+        if (shdr.sh_flags & elf.SHF_GROUP != 0) {
+            log.err("section '{s}' is part of a section group", .{shdr_name});
+            return error.HandleSectionGroups;
+        }
+
         const syms = symbols_by_shndx.get(ndx).?;
         const tshdr_ndx = (try elf_file.getMatchingSection(object_id, ndx)) orelse {
             log.debug("unhandled section", .{});

@@ -244,8 +244,9 @@ pub fn flush(self: *Elf) !void {
         try object.parseIntoAtoms(self.base.allocator, @intCast(u16, object_id), self);
     }
 
+    try self.assignShndxToSymbols();
+    try self.gcAtoms();
     try self.sortShdrs();
-
     try self.setStackSize();
     try self.allocateLoadRSeg();
     try self.allocateLoadRESeg();
@@ -289,7 +290,7 @@ pub fn flush(self: *Elf) !void {
     }
 
     self.logSymtab();
-    self.logAtoms();
+    self.logAtoms(0);
 
     try self.writeAtoms();
     try self.writePhdrs();
@@ -874,6 +875,57 @@ pub fn getMatchingSection(self: *Elf, object_id: u16, sect_id: u16) !?u16 {
     return res;
 }
 
+fn gcAtoms(self: *Elf) !void {
+    // TODO this just beginning of GC implementation. Consult with the docs of LLD which section is
+    // marked as GC root (and hence uncollectable).
+    // http://maskray.me/blog/2021-02-28-linker-garbage-collection
+
+    const entry_shdr_ndx: ?u32 = blk: {
+        const global = self.globals.get("_start") orelse break :blk null;
+        const sym = if (global.file) |file|
+            self.objects.items[file].symtab.items[global.sym_index]
+        else
+            self.locals.items[global.sym_index];
+        break :blk sym.st_shndx;
+    };
+
+    var gc_roots = std.ArrayList(u16).init(self.base.allocator);
+    defer gc_roots.deinit();
+
+    for (self.shdrs.items) |shdr, i| {
+        const shdr_ndx = @intCast(u16, i);
+        const sh_name = self.getShString(shdr.sh_name);
+
+        // Mark GC roots.
+        mark: {
+            if (!self.atoms.contains(shdr_ndx)) continue;
+            if (entry_shdr_ndx) |ndx| {
+                if (ndx == shdr_ndx) break :mark;
+            }
+            if (shdr.sh_type == elf.SHT_PREINIT_ARRAY) break :mark;
+            if (shdr.sh_type == elf.SHT_INIT_ARRAY) break :mark;
+            if (shdr.sh_type == elf.SHT_FINI_ARRAY) break :mark;
+            if (mem.eql(u8, ".ctors", sh_name)) break :mark;
+            if (mem.eql(u8, ".dtors", sh_name)) break :mark;
+            if (mem.eql(u8, ".init", sh_name)) break :mark;
+            if (mem.eql(u8, ".fini", sh_name)) break :mark;
+            if (mem.eql(u8, ".jcr", sh_name)) break :mark;
+            if (mem.indexOf(u8, "KEEP", sh_name) != null) break :mark;
+
+            // Non-GC root so continue.
+            continue;
+        }
+
+        // Add new GC root.
+        try gc_roots.append(shdr_ndx);
+    }
+
+    while (gc_roots.popOrNull()) |gc_root| {
+        const shdr = self.shdrs.items[gc_root];
+        log.warn("GC root: '{s}'", .{self.getShString(shdr.sh_name)});
+    }
+}
+
 /// Sorts section headers such that loadable sections come first (following the order of program headers),
 /// and symbol and string tables come last. The order of the contents within the file does not have to match
 /// the order of the section headers. However loadable sections do have to be within bounds
@@ -948,6 +1000,38 @@ fn sortShdrs(self: *Elf) !void {
     self.atoms.clearAndFree(self.base.allocator);
     self.atoms.deinit(self.base.allocator);
     self.atoms = transient;
+}
+
+fn assignShndxToSymbols(self: *Elf) !void {
+    var it = self.atoms.iterator();
+    while (it.next()) |entry| {
+        const shdr_ndx = entry.key_ptr.*;
+        var atom: *Atom = entry.value_ptr.*;
+
+        while (true) {
+            if (atom.file) |file| {
+                const object = &self.objects.items[file];
+                const sym = &object.symtab.items[atom.local_sym_index];
+                sym.st_shndx = shdr_ndx;
+                sym.st_size = atom.size;
+
+                // Update each symbol contained within the TextBlock
+                for (atom.contained.items) |sym_at_off| {
+                    const contained_sym = &object.symtab.items[sym_at_off.local_sym_index];
+                    contained_sym.st_shndx = shdr_ndx;
+                }
+            } else {
+                // Synthetic
+                const sym = &self.locals.items[atom.local_sym_index];
+                sym.st_shndx = shdr_ndx;
+                sym.st_size = atom.size;
+            }
+
+            if (atom.prev) |prev| {
+                atom = prev;
+            } else break;
+        }
+    }
 }
 
 fn parsePositionals(self: *Elf, files: []const []const u8) !void {
@@ -1483,8 +1567,10 @@ fn allocateAtoms(self: *Elf) !void {
     }
 }
 
-fn logAtoms(self: Elf) void {
+fn logAtoms(self: Elf, sh_flags: u64) void {
     for (self.shdrs.items) |shdr, ndx| {
+        if (shdr.sh_flags & sh_flags != sh_flags) continue;
+
         var atom = self.atoms.get(@intCast(u16, ndx)) orelse continue;
 
         log.debug(">>> {s}", .{self.getShString(shdr.sh_name)});
