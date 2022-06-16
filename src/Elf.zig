@@ -75,6 +75,7 @@ got_entries_map: std.AutoArrayHashMapUnmanaged(SymbolWithLoc, *Atom) = .{},
 
 managed_atoms: std.ArrayListUnmanaged(*Atom) = .{},
 atoms: std.AutoHashMapUnmanaged(u16, *Atom) = .{},
+atom_table: std.AutoHashMapUnmanaged(u32, *Atom) = .{},
 
 pub const SymbolWithLoc = struct {
     /// Index in the respective symbol table.
@@ -129,6 +130,7 @@ pub fn deinit(self: *Elf) void {
     for (self.globals.keys()) |key| {
         self.base.allocator.free(key);
     }
+    self.atom_table.deinit(self.base.allocator);
     self.got_entries_map.deinit(self.base.allocator);
     self.unresolved.deinit(self.base.allocator);
     self.globals.deinit(self.base.allocator);
@@ -244,7 +246,6 @@ pub fn flush(self: *Elf) !void {
         try object.parseIntoAtoms(self.base.allocator, @intCast(u16, object_id), self);
     }
 
-    try self.assignShndxToSymbols();
     try self.gcAtoms();
     try self.sortShdrs();
     try self.setStackSize();
@@ -876,54 +877,112 @@ pub fn getMatchingSection(self: *Elf, object_id: u16, sect_id: u16) !?u16 {
 }
 
 fn gcAtoms(self: *Elf) !void {
+    if (!self.base.options.gc_sections) return;
+
     // TODO this just beginning of GC implementation. Consult with the docs of LLD which section is
     // marked as GC root (and hence uncollectable).
     // http://maskray.me/blog/2021-02-28-linker-garbage-collection
+    var stack = std.ArrayList(*Atom).init(self.base.allocator);
+    defer stack.deinit();
 
-    const entry_shdr_ndx: ?u32 = blk: {
-        const global = self.globals.get("_start") orelse break :blk null;
-        const sym = if (global.file) |file|
-            self.objects.items[file].symtab.items[global.sym_index]
+    var retained = std.AutoHashMap(*Atom, void).init(self.base.allocator);
+    defer retained.deinit();
+
+    {
+        const global = self.globals.get("_start").?;
+        const atom: *Atom = if (global.file) |file|
+            self.objects.items[file].atom_table.get(global.sym_index).?
         else
-            self.locals.items[global.sym_index];
-        break :blk sym.st_shndx;
-    };
+            self.atom_table.get(global.sym_index).?;
+        try retained.putNoClobber(atom, {});
+        try stack.append(atom);
+    }
 
-    var gc_roots = std.ArrayList(u16).init(self.base.allocator);
-    defer gc_roots.deinit();
-
-    for (self.shdrs.items) |shdr, i| {
-        const shdr_ndx = @intCast(u16, i);
+    var it = self.atoms.iterator();
+    while (it.next()) |entry| {
+        const shdr_ndx = entry.key_ptr.*;
+        const shdr = self.shdrs.items[shdr_ndx];
         const sh_name = self.getShString(shdr.sh_name);
 
-        // Mark GC roots.
-        mark: {
-            if (!self.atoms.contains(shdr_ndx)) continue;
-            if (entry_shdr_ndx) |ndx| {
-                if (ndx == shdr_ndx) break :mark;
-            }
-            if (shdr.sh_type == elf.SHT_PREINIT_ARRAY) break :mark;
-            if (shdr.sh_type == elf.SHT_INIT_ARRAY) break :mark;
-            if (shdr.sh_type == elf.SHT_FINI_ARRAY) break :mark;
-            if (mem.eql(u8, ".ctors", sh_name)) break :mark;
-            if (mem.eql(u8, ".dtors", sh_name)) break :mark;
-            if (mem.eql(u8, ".init", sh_name)) break :mark;
-            if (mem.eql(u8, ".fini", sh_name)) break :mark;
-            if (mem.eql(u8, ".jcr", sh_name)) break :mark;
-            if (mem.indexOf(u8, "KEEP", sh_name) != null) break :mark;
+        mark_all: {
+            if (shdr.sh_type == elf.SHT_PREINIT_ARRAY) break :mark_all;
+            if (shdr.sh_type == elf.SHT_INIT_ARRAY) break :mark_all;
+            if (shdr.sh_type == elf.SHT_FINI_ARRAY) break :mark_all;
+            if (mem.eql(u8, ".ctors", sh_name)) break :mark_all;
+            if (mem.eql(u8, ".dtors", sh_name)) break :mark_all;
+            if (mem.eql(u8, ".init", sh_name)) break :mark_all;
+            if (mem.eql(u8, ".fini", sh_name)) break :mark_all;
+            if (mem.eql(u8, ".jcr", sh_name)) break :mark_all;
+            if (mem.indexOf(u8, sh_name, "KEEP") != null) break :mark_all;
 
-            // Non-GC root so continue.
             continue;
         }
 
-        // Add new GC root.
-        try gc_roots.append(shdr_ndx);
+        var atom: *Atom = entry.value_ptr.*;
+
+        while (true) {
+            try retained.putNoClobber(atom, {});
+            try stack.append(atom);
+            if (atom.prev) |prev| {
+                atom = prev;
+            } else break;
+        }
     }
 
-    while (gc_roots.popOrNull()) |gc_root| {
-        const shdr = self.shdrs.items[gc_root];
-        log.warn("GC root: '{s}'", .{self.getShString(shdr.sh_name)});
+    while (stack.popOrNull()) |src_atom| {
+        const src_name = src_atom.getName(self);
+        log.warn("alive: '{s}'", .{src_name});
+
+        for (src_atom.relocs.items) |rel| {
+            if (src_atom.getTargetAtom(self, rel)) |target_atom| {
+                const gop = try retained.getOrPut(target_atom);
+                if (!gop.found_existing) {
+                    try stack.append(target_atom);
+                }
+            }
+        }
     }
+
+    it = self.atoms.iterator();
+    while (it.next()) |entry| {
+        const shdr_ndx = entry.key_ptr.*;
+        const shdr = &self.shdrs.items[shdr_ndx];
+        const sh_name = self.getShString(shdr.sh_name);
+
+        if (mem.indexOf(u8, sh_name, ".debug") != null) continue;
+        if (shdr.sh_flags & (elf.SHF_ALLOC | elf.SHF_LINK_ORDER | elf.SHF_GROUP) == 0) continue;
+
+        var atom: *Atom = entry.value_ptr.*;
+
+        while (true) {
+            const orig_prev = atom.prev;
+
+            if (!retained.contains(atom)) {
+                // Dead atom; remove.
+                log.warn("dead: '{s}'", .{atom.getName(self)});
+                if (atom.file) |file| {
+                    const object = self.objects.items[file];
+                    log.warn("  (defined in {s})", .{object.name});
+                }
+
+                if (atom.prev) |prev| {
+                    prev.next = atom.next;
+                    shdr.sh_size -= atom.size;
+                }
+                if (atom.next) |next| {
+                    next.prev = atom.prev;
+                }
+            }
+
+            if (orig_prev) |prev| {
+                atom = prev;
+            } else break;
+        }
+    }
+
+    // for (self.shdrs.items) |*shdr, shdr_ndx| {
+    //     if (self.atoms.get(shdr_ndx))
+    // }
 }
 
 /// Sorts section headers such that loadable sections come first (following the order of program headers),
@@ -1000,38 +1059,6 @@ fn sortShdrs(self: *Elf) !void {
     self.atoms.clearAndFree(self.base.allocator);
     self.atoms.deinit(self.base.allocator);
     self.atoms = transient;
-}
-
-fn assignShndxToSymbols(self: *Elf) !void {
-    var it = self.atoms.iterator();
-    while (it.next()) |entry| {
-        const shdr_ndx = entry.key_ptr.*;
-        var atom: *Atom = entry.value_ptr.*;
-
-        while (true) {
-            if (atom.file) |file| {
-                const object = &self.objects.items[file];
-                const sym = &object.symtab.items[atom.local_sym_index];
-                sym.st_shndx = shdr_ndx;
-                sym.st_size = atom.size;
-
-                // Update each symbol contained within the TextBlock
-                for (atom.contained.items) |sym_at_off| {
-                    const contained_sym = &object.symtab.items[sym_at_off.local_sym_index];
-                    contained_sym.st_shndx = shdr_ndx;
-                }
-            } else {
-                // Synthetic
-                const sym = &self.locals.items[atom.local_sym_index];
-                sym.st_shndx = shdr_ndx;
-                sym.st_size = atom.size;
-            }
-
-            if (atom.prev) |prev| {
-                atom = prev;
-            } else break;
-        }
-    }
 }
 
 fn parsePositionals(self: *Elf, files: []const []const u8) !void {
@@ -1329,6 +1356,8 @@ pub fn createGotAtom(self: *Elf, target: SymbolWithLoc) !*Atom {
     });
     atom.local_sym_index = sym_index;
 
+    try self.atom_table.putNoClobber(self.base.allocator, atom.local_sym_index, atom);
+
     // Update target section's metadata
     shdr.sh_size += @sizeOf(u64);
 
@@ -1519,7 +1548,7 @@ fn allocateAtoms(self: *Elf) !void {
             atom = prev;
         }
 
-        log.debug("allocating atoms in '{s}' section", .{self.getShString(shdr.sh_name)});
+        log.warn("allocating atoms in '{s}' section", .{self.getShString(shdr.sh_name)});
 
         var base_addr: u64 = shdr.sh_addr;
         while (true) {
@@ -1532,7 +1561,7 @@ fn allocateAtoms(self: *Elf) !void {
                 sym.st_shndx = shdr_ndx;
                 sym.st_size = atom.size;
 
-                log.debug("  atom '{s}' allocated from 0x{x} to 0x{x}", .{
+                log.warn("  atom '{s}' allocated from 0x{x} to 0x{x}", .{
                     object.getString(sym.st_name),
                     base_addr,
                     base_addr + atom.size,
@@ -1551,7 +1580,7 @@ fn allocateAtoms(self: *Elf) !void {
                 sym.st_shndx = shdr_ndx;
                 sym.st_size = atom.size;
 
-                log.debug("  atom '{s}' allocated from 0x{x} to 0x{x}", .{
+                log.warn("  atom '{s}' allocated from 0x{x} to 0x{x}", .{
                     self.getString(sym.st_name),
                     base_addr,
                     base_addr + atom.size,
@@ -1630,7 +1659,7 @@ fn writeAtoms(self: *Elf) !void {
             atom = prev;
         }
 
-        log.debug("writing atoms in '{s}' section", .{self.getShString(shdr.sh_name)});
+        log.warn("writing atoms in '{s}' section", .{self.getShString(shdr.sh_name)});
 
         var buffer = try self.base.allocator.alloc(u8, shdr.sh_size);
         defer self.base.allocator.free(buffer);
@@ -1649,7 +1678,7 @@ fn writeAtoms(self: *Elf) !void {
                 self.objects.items[file].getString(sym.st_name)
             else
                 self.getString(sym.st_name);
-            log.debug("  writing atom '{s}' at offset 0x{x}", .{ sym_name, shdr.sh_offset + off });
+            log.warn("  writing atom '{s}' at offset 0x{x}", .{ sym_name, shdr.sh_offset + off });
 
             mem.copy(u8, buffer[off..][0..atom.size], atom.code.items);
 

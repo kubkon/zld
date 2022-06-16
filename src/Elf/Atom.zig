@@ -93,12 +93,75 @@ pub fn format(self: Atom, comptime fmt: []const u8, options: std.fmt.FormatOptio
     try std.fmt.format(writer, "}}", .{});
 }
 
-fn getSymbol(self: Atom, elf_file: *Elf, index: u32) elf.Elf64_Sym {
+pub fn getSymbol(self: Atom, elf_file: *Elf) elf.Elf64_Sym {
     if (self.file) |file| {
         const object = elf_file.objects.items[file];
-        return object.symtab.items[index];
+        return object.symtab.items[self.local_sym_index];
     } else {
-        return elf_file.locals.items[index];
+        return elf_file.locals.items[self.local_sym_index];
+    }
+}
+
+pub fn getName(self: Atom, elf_file: *Elf) []const u8 {
+    if (self.file) |file| {
+        const object = elf_file.objects.items[file];
+        const sym = object.symtab.items[self.local_sym_index];
+        return object.getString(sym.st_name);
+    } else {
+        const sym = elf_file.locals.items[self.local_sym_index];
+        return elf_file.getString(sym.st_name);
+    }
+}
+
+pub fn getTargetAtom(self: Atom, elf_file: *Elf, rel: elf.Elf64_Rela) ?*Atom {
+    const sym = self.getSymbol(elf_file);
+    const is_got_atom = if (elf_file.got_sect_index) |ndx| ndx == sym.st_shndx else false;
+
+    const r_sym = rel.r_sym();
+    const r_type = rel.r_type();
+
+    if (r_type == elf.R_X86_64_64 and is_got_atom) {
+        // Special handling as we have repurposed r_addend for out GOT atoms.
+        // Now, r_addend in those cases contains the index to the object file where
+        // the target symbol is defined.
+        if (rel.r_addend > -1) {
+            const object = elf_file.objects.items[@intCast(u64, rel.r_addend)];
+            return object.atom_table.get(r_sym);
+        } else {
+            return elf_file.atom_table.get(r_sym);
+        }
+    }
+
+    const tsym = if (self.file) |file| blk: {
+        const object = elf_file.objects.items[file];
+        break :blk object.symtab.items[r_sym];
+    } else elf_file.locals.items[r_sym];
+
+    const tsym_name = if (self.file) |file| blk: {
+        const object = elf_file.objects.items[file];
+        break :blk object.getString(tsym.st_name);
+    } else elf_file.getString(tsym.st_name);
+
+    const tsym_st_bind = tsym.st_info >> 4;
+    const tsym_st_type = tsym.st_info & 0xf;
+    const is_section = tsym_st_type == elf.STT_SECTION;
+    const is_local = is_section or tsym_st_bind == elf.STB_LOCAL;
+
+    if (!is_local) {
+        const global = elf_file.globals.get(tsym_name).?;
+        if (global.file) |file| {
+            const actual_object = elf_file.objects.items[file];
+            return actual_object.atom_table.get(global.sym_index);
+        } else {
+            return elf_file.atom_table.get(global.sym_index);
+        }
+    }
+
+    if (self.file) |file| {
+        const object = elf_file.objects.items[file];
+        return object.atom_table.get(r_sym);
+    } else {
+        return elf_file.atom_table.get(r_sym);
     }
 }
 
@@ -134,11 +197,8 @@ fn getTargetAddress(self: Atom, r_sym: u32, elf_file: *Elf) u64 {
 }
 
 pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
-    const sym = self.getSymbol(elf_file, self.local_sym_index);
-    const sym_name = if (self.file) |file|
-        elf_file.objects.items[file].getString(sym.st_name)
-    else
-        elf_file.getString(sym.st_name);
+    const sym = self.getSymbol(elf_file);
+    const sym_name = self.getName(elf_file);
     log.debug("resolving relocs in atom '{s}'", .{sym_name});
 
     const is_got_atom = if (elf_file.got_sect_index) |ndx| ndx == sym.st_shndx else false;

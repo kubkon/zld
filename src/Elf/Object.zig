@@ -31,6 +31,8 @@ relocs: std.AutoHashMapUnmanaged(u16, u16) = .{},
 symtab: std.ArrayListUnmanaged(elf.Elf64_Sym) = .{},
 strtab: std.ArrayListUnmanaged(u8) = .{},
 
+atom_table: std.AutoHashMapUnmanaged(u32, *Atom) = .{},
+
 symtab_index: ?u16 = null,
 
 pub fn deinit(self: *Object, allocator: Allocator) void {
@@ -39,6 +41,7 @@ pub fn deinit(self: *Object, allocator: Allocator) void {
     self.relocs.deinit(allocator);
     self.symtab.deinit(allocator);
     self.strtab.deinit(allocator);
+    self.atom_table.deinit(allocator);
     allocator.free(self.name);
 }
 
@@ -212,6 +215,7 @@ pub fn parseIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
                 .local_sym_index = sym_id,
                 .offset = sym.st_value,
             });
+            try self.atom_table.putNoClobber(allocator, sym_id, atom);
         }
 
         atom.local_sym_index = local_sym_index orelse blk: {
@@ -226,6 +230,7 @@ pub fn parseIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
             });
             break :blk sym_index;
         };
+        try self.atom_table.putNoClobber(allocator, atom.local_sym_index, atom);
 
         var code = if (shdr.sh_type == elf.SHT_NOBITS) blk: {
             var code = try allocator.alloc(u8, atom.size);
@@ -367,7 +372,7 @@ pub fn parseIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
 
                                     const r_sym = rel.r_sym();
                                     rel.r_info = (@intCast(u64, r_sym) << 32) | elf.R_X86_64_TPOFF32;
-                                    rel.r_addend = 0;
+                                    assert(rel.r_addend == 0); // expected r_addend == 0 when rewriting
                                     log.debug("rewriting R_X86_64_GOTTPOFF -> R_X86_64_TPOFF32: MOV r64, r/m64 -> MOV r/m64, imm32", .{});
                                 },
                                 else => {},
@@ -381,7 +386,6 @@ pub fn parseIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
                             const r_sym = rel.r_sym();
                             rel.r_info = (@intCast(u64, r_sym) << 32) | elf.R_X86_64_TPOFF32;
                             assert(rel.r_addend == 0); // expected r_addend == 0 when rewriting
-                            rel.r_addend = rel.r_addend;
                             log.debug("rewriting R_X86_64_DTPOFF64 -> R_X86_64_TPOFF32", .{});
                         }
                     },

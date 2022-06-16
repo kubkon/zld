@@ -47,6 +47,7 @@ pub const Options = struct {
     stack_size_override: ?u64 = null,
     compatibility_version: ?std.builtin.Version = null,
     current_version: ?std.builtin.Version = null,
+    gc_sections: bool,
 };
 
 pub fn openPath(allocator: Allocator, options: Options) !*Zld {

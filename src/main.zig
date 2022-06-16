@@ -120,6 +120,7 @@ pub fn main() anyerror!void {
     var shared: bool = false;
     var compatibility_version: ?std.builtin.Version = null;
     var current_version: ?std.builtin.Version = null;
+    var gc_sections: bool = false;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -163,7 +164,7 @@ pub fn main() anyerror!void {
         } else if (mem.startsWith(u8, arg, "-z")) {
             std.log.warn("TODO unhandled argument '-z {s}'", .{args[i]["-z".len..]});
         } else if (mem.eql(u8, arg, "--gc-sections")) {
-            std.log.warn("TODO unhandled argument '--gc-sections'", .{});
+            gc_sections = true;
         } else if (mem.eql(u8, arg, "--as-needed")) {
             std.log.warn("TODO unhandled argument '--as-needed'", .{});
         } else if (mem.eql(u8, arg, "--allow-shlib-undefined")) {
@@ -259,6 +260,9 @@ pub fn main() anyerror!void {
             try argv.append("-rpath");
             try argv.append(rpath);
         }
+        if (gc_sections) {
+            try argv.append("--gc-sections");
+        }
         for (positionals.items) |pos| {
             try argv.append(pos);
         }
@@ -285,6 +289,7 @@ pub fn main() anyerror!void {
         .stack_size_override = stack,
         .compatibility_version = compatibility_version,
         .current_version = current_version,
+        .gc_sections = gc_sections,
     });
     defer zld.deinit();
     try zld.flush();
