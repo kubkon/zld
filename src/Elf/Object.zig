@@ -375,7 +375,8 @@ pub fn parseIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
                             // rewrite into TPOFF32
                             const r_sym = rel.r_sym();
                             rel.r_info = (@intCast(u64, r_sym) << 32) | elf.R_X86_64_TPOFF32;
-                            rel.r_addend = 0;
+                            assert(rel.r_addend == 0); // expected r_addend == 0 when rewriting
+                            rel.r_addend = rel.r_addend;
                             log.debug("rewriting R_X86_64_DTPOFF64 -> R_X86_64_TPOFF32", .{});
                         }
                     },

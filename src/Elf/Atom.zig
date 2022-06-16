@@ -282,7 +282,7 @@ pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
                         elf_file.shdrs.items[elf_file.tdata_sect_index.?];
                     break :base_addr shdr.sh_addr + shdr.sh_size;
                 };
-                const tls_offset = @truncate(u32, @bitCast(u64, -@intCast(i64, base_addr - target)));
+                const tls_offset = @truncate(u32, @bitCast(u64, -@intCast(i64, base_addr - target) + rel.r_addend));
                 log.debug("R_X86_64_TPOFF32: {x}: [0x{x} => 0x{x} (TLS)] ({s})", .{
                     rel.r_offset,
                     source,
