@@ -130,34 +130,44 @@ pub fn getTargetAtom(self: Atom, elf_file: *Elf, rel: elf.Elf64_Rela) ?*Atom {
         }
     }
 
-    const tsym = elf_file.getSymbol(.{
-        .sym_index = r_sym,
-        .file = self.file,
-    });
     const tsym_name = elf_file.getSymbolName(.{
         .sym_index = r_sym,
         .file = self.file,
     });
-    const tsym_st_bind = tsym.st_info >> 4;
-    const tsym_st_type = tsym.st_info & 0xf;
-    const is_section = tsym_st_type == elf.STT_SECTION;
-    const is_local = is_section or tsym_st_bind == elf.STB_LOCAL;
 
-    if (!is_local) {
-        const global = elf_file.globals.get(tsym_name).?;
-        if (global.file) |file| {
-            const actual_object = elf_file.objects.items[file];
-            return actual_object.atom_table.get(global.sym_index);
-        } else {
-            return elf_file.atom_table.get(global.sym_index);
-        }
-    }
+    switch (r_type) {
+        elf.R_X86_64_GOTPCRELX, elf.R_X86_64_GOTPCREL => {
+            const global = elf_file.globals.get(tsym_name).?;
+            const got_atom = elf_file.got_entries_map.get(global).?;
+            return got_atom;
+        },
+        else => {
+            const tsym = elf_file.getSymbol(.{
+                .sym_index = r_sym,
+                .file = self.file,
+            });
+            const tsym_st_bind = tsym.st_info >> 4;
+            const tsym_st_type = tsym.st_info & 0xf;
+            const is_section = tsym_st_type == elf.STT_SECTION;
+            const is_local = is_section or tsym_st_bind == elf.STB_LOCAL;
 
-    if (self.file) |file| {
-        const object = elf_file.objects.items[file];
-        return object.atom_table.get(r_sym);
-    } else {
-        return elf_file.atom_table.get(r_sym);
+            if (!is_local) {
+                const global = elf_file.globals.get(tsym_name).?;
+                if (global.file) |file| {
+                    const actual_object = elf_file.objects.items[file];
+                    return actual_object.atom_table.get(global.sym_index);
+                } else {
+                    return elf_file.atom_table.get(global.sym_index);
+                }
+            }
+
+            if (self.file) |file| {
+                const object = elf_file.objects.items[file];
+                return object.atom_table.get(r_sym);
+            } else {
+                return elf_file.atom_table.get(r_sym);
+            }
+        },
     }
 }
 
