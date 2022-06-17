@@ -74,7 +74,7 @@ unresolved: std.AutoArrayHashMapUnmanaged(u32, void) = .{},
 got_entries_map: std.AutoArrayHashMapUnmanaged(SymbolWithLoc, *Atom) = .{},
 
 managed_atoms: std.ArrayListUnmanaged(*Atom) = .{},
-atoms: std.AutoHashMapUnmanaged(u16, *Atom) = .{},
+atoms: std.AutoHashMapUnmanaged(u16, ?*Atom) = .{},
 atom_table: std.AutoHashMapUnmanaged(u32, *Atom) = .{},
 
 pub const SymbolWithLoc = struct {
@@ -82,7 +82,7 @@ pub const SymbolWithLoc = struct {
     sym_index: u32,
 
     /// null means it's a synthetic global.
-    file: ?u16,
+    file: ?u32,
 };
 
 pub fn openPath(allocator: Allocator, options: Zld.Options) !*Elf {
@@ -876,8 +876,117 @@ pub fn getMatchingSection(self: *Elf, object_id: u16, sect_id: u16) !?u16 {
     return res;
 }
 
+fn assignShndxToSymbols(self: *Elf) !void {
+    var it = self.atoms.iterator();
+    while (it.next()) |entry| {
+        const shdr_ndx = entry.key_ptr.*;
+        var atom: *Atom = entry.value_ptr.*.?;
+
+        while (true) {
+            if (atom.file) |file| {
+                const object = &self.objects.items[file];
+                const sym = &object.symtab.items[atom.local_sym_index];
+                sym.st_shndx = shdr_ndx;
+
+                // Update each symbol contained within the TextBlock
+                for (atom.contained.items) |sym_at_off| {
+                    const contained_sym = &object.symtab.items[sym_at_off.local_sym_index];
+                    contained_sym.st_shndx = shdr_ndx;
+                }
+            } else {
+                // Synthetic
+                const sym = &self.locals.items[atom.local_sym_index];
+                sym.st_shndx = shdr_ndx;
+            }
+
+            if (atom.prev) |prev| {
+                atom = prev;
+            } else break;
+        }
+    }
+}
+
+fn pruneShdrs(self: *Elf) !void {
+    var index_mapping = std.AutoHashMap(u16, u16).init(self.base.allocator);
+    defer index_mapping.deinit();
+    var shdrs = self.shdrs.toOwnedSlice(self.base.allocator);
+    defer self.base.allocator.free(shdrs);
+    try self.shdrs.ensureTotalCapacity(self.base.allocator, shdrs.len);
+
+    const indices = &[_]*?u16{
+        // null
+        &self.null_sect_index,
+        // RO
+        &self.rodata_sect_index,
+        // RE
+        &self.text_sect_index,
+        &self.init_sect_index,
+        &self.init_array_sect_index,
+        &self.fini_sect_index,
+        &self.fini_array_sect_index,
+        // TLS
+        &self.tdata_sect_index,
+        &self.tbss_sect_index,
+        // RW
+        &self.data_rel_ro_sect_index,
+        &self.got_sect_index,
+        &self.data_sect_index,
+        &self.bss_sect_index,
+        // DWARF
+        &self.debug_loc_index,
+        &self.debug_abbrev_index,
+        &self.debug_info_index,
+        &self.debug_ranges_index,
+        &self.debug_str_index,
+        &self.debug_pubnames_index,
+        &self.debug_pubtypes_index,
+        &self.debug_frame_index,
+        &self.debug_line_index,
+        // link-edit
+        &self.symtab_sect_index,
+        &self.shstrtab_sect_index,
+        &self.strtab_sect_index,
+    };
+    for (indices) |maybe_index| {
+        if (maybe_index.*) |index| {
+            if (self.atoms.get(index)) |atom| {
+                if (atom == null) {
+                    maybe_index.* = null;
+                    continue;
+                }
+            }
+            const idx = @intCast(u16, self.shdrs.items.len);
+            self.shdrs.appendAssumeCapacity(shdrs[index]);
+            try index_mapping.putNoClobber(index, idx);
+            maybe_index.* = idx;
+        }
+    }
+
+    self.header.?.e_shstrndx = index_mapping.get(self.header.?.e_shstrndx).?;
+    {
+        var shdr = &self.shdrs.items[self.symtab_sect_index.?];
+        shdr.sh_link = self.strtab_sect_index.?;
+    }
+
+    var transient: std.AutoHashMapUnmanaged(u16, ?*Atom) = .{};
+    try transient.ensureTotalCapacity(self.base.allocator, self.atoms.count());
+
+    var it = self.atoms.iterator();
+    while (it.next()) |entry| {
+        const old_sect_id = entry.key_ptr.*;
+        const new_sect_id = index_mapping.get(old_sect_id) orelse continue;
+        transient.putAssumeCapacityNoClobber(new_sect_id, entry.value_ptr.*.?);
+    }
+
+    self.atoms.clearAndFree(self.base.allocator);
+    self.atoms.deinit(self.base.allocator);
+    self.atoms = transient;
+}
+
 fn gcAtoms(self: *Elf) !void {
     if (!self.base.options.gc_sections) return;
+
+    try self.assignShndxToSymbols();
 
     // TODO this just beginning of GC implementation. Consult with the docs of LLD which section is
     // marked as GC root (and hence uncollectable).
@@ -918,7 +1027,7 @@ fn gcAtoms(self: *Elf) !void {
             continue;
         }
 
-        var atom: *Atom = entry.value_ptr.*;
+        var atom: *Atom = entry.value_ptr.*.?;
 
         while (true) {
             try retained.putNoClobber(atom, {});
@@ -931,7 +1040,7 @@ fn gcAtoms(self: *Elf) !void {
 
     while (stack.popOrNull()) |src_atom| {
         const src_name = src_atom.getName(self);
-        log.warn("alive: '{s}'", .{src_name});
+        log.debug("alive: '{s}'", .{src_name});
 
         for (src_atom.relocs.items) |rel| {
             if (src_atom.getTargetAtom(self, rel)) |target_atom| {
@@ -952,25 +1061,54 @@ fn gcAtoms(self: *Elf) !void {
         if (mem.indexOf(u8, sh_name, ".debug") != null) continue;
         if (shdr.sh_flags & (elf.SHF_ALLOC | elf.SHF_LINK_ORDER | elf.SHF_GROUP) == 0) continue;
 
-        var atom: *Atom = entry.value_ptr.*;
+        var atom: *Atom = entry.value_ptr.*.?;
 
         while (true) {
             const orig_prev = atom.prev;
 
             if (!retained.contains(atom)) {
                 // Dead atom; remove.
-                log.warn("dead: '{s}'", .{atom.getName(self)});
+                log.debug("dead: '{s}'", .{atom.getName(self)});
                 if (atom.file) |file| {
                     const object = self.objects.items[file];
-                    log.warn("  (defined in {s})", .{object.name});
+                    log.debug("  (defined in {s})", .{object.name});
                 }
 
-                if (atom.prev) |prev| {
-                    prev.next = atom.next;
-                    shdr.sh_size -= atom.size;
+                {
+                    const sym = atom.getSymbolPtr(self);
+                    sym.* = .{
+                        .st_name = 0,
+                        .st_info = 0,
+                        .st_other = 0,
+                        .st_shndx = 0,
+                        .st_value = 0,
+                        .st_size = 0,
+                    };
                 }
+
+                for (atom.contained.items) |contained| {
+                    const contained_sym = self.getSymbolPtr(.{
+                        .sym_index = contained.local_sym_index,
+                        .file = atom.file,
+                    });
+                    contained_sym.* = .{
+                        .st_name = 0,
+                        .st_info = 0,
+                        .st_other = 0,
+                        .st_shndx = 0,
+                        .st_value = 0,
+                        .st_size = 0,
+                    };
+                }
+
+                shdr.sh_size -= atom.size;
                 if (atom.next) |next| {
                     next.prev = atom.prev;
+                }
+                if (atom.prev) |prev| {
+                    prev.next = atom.next;
+                } else {
+                    entry.value_ptr.* = if (atom.next) |next| next else null;
                 }
             }
 
@@ -980,9 +1118,8 @@ fn gcAtoms(self: *Elf) !void {
         }
     }
 
-    // for (self.shdrs.items) |*shdr, shdr_ndx| {
-    //     if (self.atoms.get(shdr_ndx))
-    // }
+    // Prune section headers
+    try self.pruneShdrs();
 }
 
 /// Sorts section headers such that loadable sections come first (following the order of program headers),
@@ -1046,7 +1183,7 @@ fn sortShdrs(self: *Elf) !void {
         shdr.sh_link = self.strtab_sect_index.?;
     }
 
-    var transient: std.AutoHashMapUnmanaged(u16, *Atom) = .{};
+    var transient: std.AutoHashMapUnmanaged(u16, ?*Atom) = .{};
     try transient.ensureTotalCapacity(self.base.allocator, self.atoms.count());
 
     var it = self.atoms.iterator();
@@ -1362,8 +1499,8 @@ pub fn createGotAtom(self: *Elf, target: SymbolWithLoc) !*Atom {
     shdr.sh_size += @sizeOf(u64);
 
     if (self.atoms.getPtr(shdr_ndx)) |last| {
-        last.*.next = atom;
-        atom.prev = last.*;
+        last.*.?.next = atom;
+        atom.prev = last.*.?;
         last.* = atom;
     } else {
         try self.atoms.putNoClobber(self.base.allocator, shdr_ndx, atom);
@@ -1541,14 +1678,14 @@ fn allocateAtoms(self: *Elf) !void {
     while (it.next()) |entry| {
         const shdr_ndx = entry.key_ptr.*;
         const shdr = self.shdrs.items[shdr_ndx];
-        var atom: *Atom = entry.value_ptr.*;
+        var atom: *Atom = entry.value_ptr.* orelse continue;
 
         // Find the first atom
         while (atom.prev) |prev| {
             atom = prev;
         }
 
-        log.warn("allocating atoms in '{s}' section", .{self.getShString(shdr.sh_name)});
+        log.debug("allocating atoms in '{s}' section", .{self.getShString(shdr.sh_name)});
 
         var base_addr: u64 = shdr.sh_addr;
         while (true) {
@@ -1561,7 +1698,7 @@ fn allocateAtoms(self: *Elf) !void {
                 sym.st_shndx = shdr_ndx;
                 sym.st_size = atom.size;
 
-                log.warn("  atom '{s}' allocated from 0x{x} to 0x{x}", .{
+                log.debug("  atom '{s}' allocated from 0x{x} to 0x{x}", .{
                     object.getString(sym.st_name),
                     base_addr,
                     base_addr + atom.size,
@@ -1580,7 +1717,7 @@ fn allocateAtoms(self: *Elf) !void {
                 sym.st_shndx = shdr_ndx;
                 sym.st_size = atom.size;
 
-                log.warn("  atom '{s}' allocated from 0x{x} to 0x{x}", .{
+                log.debug("  atom '{s}' allocated from 0x{x} to 0x{x}", .{
                     self.getString(sym.st_name),
                     base_addr,
                     base_addr + atom.size,
@@ -1600,7 +1737,8 @@ fn logAtoms(self: Elf, sh_flags: u64) void {
     for (self.shdrs.items) |shdr, ndx| {
         if (shdr.sh_flags & sh_flags != sh_flags) continue;
 
-        var atom = self.atoms.get(@intCast(u16, ndx)) orelse continue;
+        const maybe_atom = self.atoms.get(@intCast(u16, ndx)) orelse continue;
+        var atom = maybe_atom orelse continue;
 
         log.debug(">>> {s}", .{self.getShString(shdr.sh_name)});
 
@@ -1652,33 +1790,25 @@ fn writeAtoms(self: *Elf) !void {
         // TODO zero prefill .bss and .tbss if have presence in file
         if (shdr.sh_type == elf.SHT_NOBITS) continue;
 
-        var atom: *Atom = entry.value_ptr.*;
+        var atom: *Atom = entry.value_ptr.* orelse continue;
 
         // Find the first atom
         while (atom.prev) |prev| {
             atom = prev;
         }
 
-        log.warn("writing atoms in '{s}' section", .{self.getShString(shdr.sh_name)});
+        log.debug("writing atoms in '{s}' section", .{self.getShString(shdr.sh_name)});
 
         var buffer = try self.base.allocator.alloc(u8, shdr.sh_size);
         defer self.base.allocator.free(buffer);
         mem.set(u8, buffer, 0);
 
         while (true) {
-            const sym = if (atom.file) |file| blk: {
-                const object = self.objects.items[file];
-                break :blk object.symtab.items[atom.local_sym_index];
-            } else self.locals.items[atom.local_sym_index];
-
+            const sym = atom.getSymbol(self);
             try atom.resolveRelocs(self);
-
             const off = sym.st_value - shdr.sh_addr;
-            const sym_name = if (atom.file) |file|
-                self.objects.items[file].getString(sym.st_name)
-            else
-                self.getString(sym.st_name);
-            log.warn("  writing atom '{s}' at offset 0x{x}", .{ sym_name, shdr.sh_offset + off });
+
+            log.debug("  writing atom '{s}' at offset 0x{x}", .{ atom.getName(self), shdr.sh_offset + off });
 
             mem.copy(u8, buffer[off..][0..atom.size], atom.code.items);
 
@@ -1760,16 +1890,12 @@ fn writeSymtab(self: *Elf) !void {
     shdr.sh_info = @intCast(u32, symtab.items.len);
     try symtab.ensureUnusedCapacity(self.globals.count());
     for (self.globals.values()) |global| {
-        const sym = if (global.file) |file| blk: {
-            const obj = self.objects.items[file];
-            const sym = obj.symtab.items[global.sym_index];
-            const sym_name = obj.getString(sym.st_name);
-            var out_sym = sym;
-            out_sym.st_name = try self.makeString(sym_name);
-            break :blk out_sym;
-        } else self.locals.items[global.sym_index];
+        var sym = self.getSymbol(global);
+        if (sym.st_name == 0) continue;
         // TODO refactor
         if (sym.st_info >> 4 == elf.STB_LOCAL) continue;
+        const sym_name = self.getSymbolName(global);
+        sym.st_name = try self.makeString(sym_name);
         symtab.appendAssumeCapacity(sym);
     }
 
@@ -1864,6 +1990,30 @@ fn makeString(self: *Elf, bytes: []const u8) !u32 {
 pub fn getString(self: Elf, off: u32) []const u8 {
     assert(off < self.strtab.items.len);
     return mem.sliceTo(@ptrCast([*:0]const u8, self.strtab.items.ptr + off), 0);
+}
+
+pub fn getSymbolPtr(self: *Elf, sym_with_loc: SymbolWithLoc) *elf.Elf64_Sym {
+    if (sym_with_loc.file) |file| {
+        const object = &self.objects.items[file];
+        return &object.symtab.items[sym_with_loc.sym_index];
+    } else {
+        return &self.locals.items[sym_with_loc.sym_index];
+    }
+}
+
+pub fn getSymbol(self: *Elf, sym_with_loc: SymbolWithLoc) elf.Elf64_Sym {
+    return self.getSymbolPtr(sym_with_loc).*;
+}
+
+pub fn getSymbolName(self: *Elf, sym_with_loc: SymbolWithLoc) []const u8 {
+    if (sym_with_loc.file) |file| {
+        const object = self.objects.items[file];
+        const sym = object.symtab.items[sym_with_loc.sym_index];
+        return object.getString(sym.st_name);
+    } else {
+        const sym = self.locals.items[sym_with_loc.sym_index];
+        return self.getString(sym.st_name);
+    }
 }
 
 fn logSymtab(self: Elf) void {

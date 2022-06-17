@@ -94,23 +94,21 @@ pub fn format(self: Atom, comptime fmt: []const u8, options: std.fmt.FormatOptio
 }
 
 pub fn getSymbol(self: Atom, elf_file: *Elf) elf.Elf64_Sym {
-    if (self.file) |file| {
-        const object = elf_file.objects.items[file];
-        return object.symtab.items[self.local_sym_index];
-    } else {
-        return elf_file.locals.items[self.local_sym_index];
-    }
+    return self.getSymbolPtr(elf_file).*;
+}
+
+pub fn getSymbolPtr(self: Atom, elf_file: *Elf) *elf.Elf64_Sym {
+    return elf_file.getSymbolPtr(.{
+        .sym_index = self.local_sym_index,
+        .file = self.file,
+    });
 }
 
 pub fn getName(self: Atom, elf_file: *Elf) []const u8 {
-    if (self.file) |file| {
-        const object = elf_file.objects.items[file];
-        const sym = object.symtab.items[self.local_sym_index];
-        return object.getString(sym.st_name);
-    } else {
-        const sym = elf_file.locals.items[self.local_sym_index];
-        return elf_file.getString(sym.st_name);
-    }
+    return elf_file.getSymbolName(.{
+        .sym_index = self.local_sym_index,
+        .file = self.file,
+    });
 }
 
 pub fn getTargetAtom(self: Atom, elf_file: *Elf, rel: elf.Elf64_Rela) ?*Atom {
@@ -132,16 +130,14 @@ pub fn getTargetAtom(self: Atom, elf_file: *Elf, rel: elf.Elf64_Rela) ?*Atom {
         }
     }
 
-    const tsym = if (self.file) |file| blk: {
-        const object = elf_file.objects.items[file];
-        break :blk object.symtab.items[r_sym];
-    } else elf_file.locals.items[r_sym];
-
-    const tsym_name = if (self.file) |file| blk: {
-        const object = elf_file.objects.items[file];
-        break :blk object.getString(tsym.st_name);
-    } else elf_file.getString(tsym.st_name);
-
+    const tsym = elf_file.getSymbol(.{
+        .sym_index = r_sym,
+        .file = self.file,
+    });
+    const tsym_name = elf_file.getSymbolName(.{
+        .sym_index = r_sym,
+        .file = self.file,
+    });
     const tsym_st_bind = tsym.st_info >> 4;
     const tsym_st_type = tsym.st_info & 0xf;
     const is_section = tsym_st_type == elf.STT_SECTION;
@@ -166,16 +162,14 @@ pub fn getTargetAtom(self: Atom, elf_file: *Elf, rel: elf.Elf64_Rela) ?*Atom {
 }
 
 fn getTargetAddress(self: Atom, r_sym: u32, elf_file: *Elf) u64 {
-    const tsym = if (self.file) |file| blk: {
-        const object = elf_file.objects.items[file];
-        break :blk object.symtab.items[r_sym];
-    } else elf_file.locals.items[r_sym];
-
-    const tsym_name = if (self.file) |file| blk: {
-        const object = elf_file.objects.items[file];
-        break :blk object.getString(tsym.st_name);
-    } else elf_file.getString(tsym.st_name);
-
+    const tsym = elf_file.getSymbol(.{
+        .sym_index = r_sym,
+        .file = self.file,
+    });
+    const tsym_name = elf_file.getSymbolName(.{
+        .sym_index = r_sym,
+        .file = self.file,
+    });
     const tsym_st_bind = tsym.st_info >> 4;
     const tsym_st_type = tsym.st_info & 0xf;
     const is_section = tsym_st_type == elf.STT_SECTION;
@@ -183,14 +177,8 @@ fn getTargetAddress(self: Atom, r_sym: u32, elf_file: *Elf) u64 {
 
     if (!is_local) {
         const global = elf_file.globals.get(tsym_name).?;
-        if (global.file) |file| {
-            const actual_object = elf_file.objects.items[file];
-            const actual_tsym = actual_object.symtab.items[global.sym_index];
-            return actual_tsym.st_value;
-        } else {
-            const actual_tsym = elf_file.locals.items[global.sym_index];
-            return actual_tsym.st_value;
-        }
+        const sym = elf_file.getSymbol(global);
+        return sym.st_value;
     }
 
     return tsym.st_value;
@@ -211,34 +199,29 @@ pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
             // Special handling as we have repurposed r_addend for out GOT atoms.
             // Now, r_addend in those cases contains the index to the object file where
             // the target symbol is defined.
-            const target: u64 = blk: {
-                if (rel.r_addend > -1) {
-                    const object = elf_file.objects.items[@intCast(u64, rel.r_addend)];
-                    const tsym = object.symtab.items[r_sym];
-                    break :blk tsym.st_value;
-                } else {
-                    const tsym = elf_file.locals.items[r_sym];
-                    break :blk tsym.st_value;
-                }
-            };
-            const tsym_name = if (rel.r_addend > -1) blk: {
-                const object = elf_file.objects.items[@intCast(u64, rel.r_addend)];
-                const tsym = object.symtab.items[r_sym];
-                break :blk object.getString(tsym.st_name);
-            } else elf_file.getString(elf_file.locals.items[r_sym].st_name);
+            const file: ?u32 = if (rel.r_addend > -1) @intCast(u32, rel.r_addend) else null;
+            const tsym = elf_file.getSymbol(.{
+                .sym_index = r_sym,
+                .file = file,
+            });
+            const target = tsym.st_value;
+            const tsym_name = elf_file.getSymbolName(.{
+                .sym_index = r_sym,
+                .file = file,
+            });
             log.debug("R_X86_64_64: (GOT) {x}: [() => 0x{x}] ({s})", .{ rel.r_offset, target, tsym_name });
             mem.writeIntLittle(u64, self.code.items[rel.r_offset..][0..8], target);
             continue;
         }
 
-        const tsym = if (self.file) |file| blk: {
-            const object = elf_file.objects.items[file];
-            break :blk object.symtab.items[r_sym];
-        } else elf_file.locals.items[r_sym];
-        const tsym_name = if (self.file) |file| blk: {
-            const object = elf_file.objects.items[file];
-            break :blk object.getString(tsym.st_name);
-        } else elf_file.getString(tsym.st_name);
+        const tsym = elf_file.getSymbol(.{
+            .sym_index = r_sym,
+            .file = self.file,
+        });
+        const tsym_name = elf_file.getSymbolName(.{
+            .sym_index = r_sym,
+            .file = self.file,
+        });
         const tsym_st_type = tsym.st_info & 0xf;
 
         switch (r_type) {

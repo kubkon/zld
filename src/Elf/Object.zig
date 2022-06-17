@@ -408,8 +408,8 @@ pub fn parseIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
         );
 
         if (elf_file.atoms.getPtr(tshdr_ndx)) |last| {
-            last.*.next = atom;
-            atom.prev = last.*;
+            last.*.?.next = atom;
+            atom.prev = last.*.?;
             last.* = atom;
         } else {
             try elf_file.atoms.putNoClobber(allocator, tshdr_ndx, atom);
