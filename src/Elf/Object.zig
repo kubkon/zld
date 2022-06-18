@@ -202,6 +202,16 @@ pub fn parseIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
         atom.size = @intCast(u32, shdr.sh_size);
         atom.alignment = @intCast(u32, shdr.sh_addralign);
 
+        // TODO if --gc-sections and there is exactly one contained symbol,
+        // we can prune the main one. For example, in this situation we
+        // get something like this:
+        //
+        // .text.__udivti3
+        //    => __udivti3
+        //
+        // which can be pruned to:
+        //
+        // __udivti3
         var local_sym_index: ?u32 = null;
 
         for (syms.items) |sym_id| {
