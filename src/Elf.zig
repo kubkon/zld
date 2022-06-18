@@ -12,7 +12,7 @@ const Allocator = mem.Allocator;
 const Archive = @import("Elf/Archive.zig");
 const Atom = @import("Elf/Atom.zig");
 const Object = @import("Elf/Object.zig");
-const StringTable = @import("StringTable.zig");
+const StringTable = @import("strtab.zig").StringTable;
 const Zld = @import("Zld.zig");
 
 pub const base_tag = Zld.Tag.elf;
@@ -26,8 +26,8 @@ header: ?elf.Elf64_Ehdr = null,
 shdrs: std.ArrayListUnmanaged(elf.Elf64_Shdr) = .{},
 phdrs: std.ArrayListUnmanaged(elf.Elf64_Phdr) = .{},
 
-strtab: StringTable = .{},
-shstrtab: StringTable = .{},
+strtab: StringTable(.strtab) = .{},
+shstrtab: StringTable(.shstrtab) = .{},
 
 phdr_seg_index: ?u16 = null,
 load_r_seg_index: ?u16 = null,
@@ -1432,7 +1432,7 @@ pub fn createGotAtom(self: *Elf, target: SymbolWithLoc) !*Atom {
     const shdr_ndx = self.got_sect_index orelse blk: {
         const shdr_ndx = @intCast(u16, self.shdrs.items.len);
         try self.shdrs.append(self.base.allocator, .{
-            .sh_name = try self.strtab.insert(self.base.allocator, ".got"),
+            .sh_name = try self.shstrtab.insert(self.base.allocator, ".got"),
             .sh_type = elf.SHT_PROGBITS,
             .sh_flags = elf.SHF_WRITE | elf.SHF_ALLOC,
             .sh_addr = 0,
