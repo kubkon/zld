@@ -24,8 +24,7 @@ const Object = @import("MachO/Object.zig");
 const LibStub = @import("tapi.zig").LibStub;
 const LoadCommand = macho.LoadCommand;
 const SegmentCommand = macho.SegmentCommand;
-const StringIndexAdapter = std.hash_map.StringIndexAdapter;
-const StringIndexContext = std.hash_map.StringIndexContext;
+const StringTable = @import("strtab.zig").StringTable;
 const Trie = @import("MachO/Trie.zig");
 const Zld = @import("Zld.zig");
 
@@ -125,8 +124,7 @@ dyld_stub_binder_index: ?u32 = null,
 dyld_private_atom: ?*Atom = null,
 stub_helper_preamble_atom: ?*Atom = null,
 
-strtab: std.ArrayListUnmanaged(u8) = .{},
-strtab_dir: std.HashMapUnmanaged(u32, void, StringIndexContext, std.hash_map.default_max_load_percentage) = .{},
+strtab: StringTable(.strtab) = .{},
 
 got_entries_map: std.AutoArrayHashMapUnmanaged(Atom.Relocation.Target, *Atom) = .{},
 stubs_map: std.AutoArrayHashMapUnmanaged(u32, *Atom) = .{},
@@ -303,7 +301,7 @@ pub fn flush(self: *MachO) !void {
         try rpath_table.putNoClobber(rpath, {});
     }
 
-    try self.strtab.append(self.base.allocator, 0);
+    try self.strtab.buffer.append(self.base.allocator, 0);
     try self.populateMetadata();
 
     var dependent_libs = std.fifo.LinearFifo(Dylib.Id, .Dynamic).init(self.base.allocator);
@@ -328,7 +326,7 @@ pub fn flush(self: *MachO) !void {
         var next_sym: usize = 0;
         while (next_sym < self.unresolved.count()) {
             const sym = &self.undefs.items[self.unresolved.keys()[next_sym]];
-            const sym_name = self.getString(sym.n_strx);
+            const sym_name = self.strtab.getAssumeExists(sym.n_strx);
             const resolv = self.symbol_resolver.get(sym.n_strx) orelse unreachable;
 
             if (sym.discarded()) {
@@ -1529,7 +1527,7 @@ fn allocateAtoms(self: *MachO) !void {
             sym.n_sect = n_sect;
 
             log.debug("  (atom {s} allocated from 0x{x} to 0x{x})", .{
-                self.getString(sym.n_strx),
+                self.strtab.getAssumeExists(sym.n_strx),
                 base_addr,
                 base_addr + atom.size,
             });
@@ -1595,7 +1593,7 @@ fn writeAtoms(self: *MachO) !void {
                 break :blk try math.cast(usize, size);
             } else 0;
 
-            log.debug("  (adding atom {s} to buffer: {})", .{ self.getString(atom_sym.n_strx), atom_sym });
+            log.debug("  (adding atom {s} to buffer: {})", .{ self.strtab.getAssumeExists(atom_sym.n_strx), atom_sym });
 
             try atom.resolveRelocs(self);
             buffer.appendSliceAssumeCapacity(atom.code.items);
@@ -2019,51 +2017,48 @@ fn createTentativeDefAtoms(self: *MachO) !void {
 }
 
 fn createDsoHandleAtom(self: *MachO) !void {
-    if (self.strtab_dir.getKeyAdapted(@as([]const u8, "___dso_handle"), StringIndexAdapter{
-        .bytes = &self.strtab,
-    })) |n_strx| blk: {
-        const resolv = self.symbol_resolver.getPtr(n_strx) orelse break :blk;
-        if (resolv.where != .undef) break :blk;
+    const n_strx = self.strtab.getOffset("___dso_handle") orelse return;
+    const resolv = self.symbol_resolver.getPtr(n_strx) orelse return;
+    if (resolv.where != .undef) return;
 
-        const undef = &self.undefs.items[resolv.where_index];
-        const match: MatchingSection = .{
-            .seg = self.text_segment_cmd_index.?,
-            .sect = self.text_section_index.?,
-        };
-        const local_sym_index = @intCast(u32, self.locals.items.len);
-        var nlist = macho.nlist_64{
-            .n_strx = undef.n_strx,
-            .n_type = macho.N_SECT,
-            .n_sect = @intCast(u8, self.section_ordinals.getIndex(match).? + 1),
-            .n_desc = 0,
-            .n_value = 0,
-        };
-        try self.locals.append(self.base.allocator, nlist);
-        const global_sym_index = @intCast(u32, self.globals.items.len);
-        nlist.n_type |= macho.N_EXT;
-        nlist.n_desc = macho.N_WEAK_DEF;
-        try self.globals.append(self.base.allocator, nlist);
+    const undef = &self.undefs.items[resolv.where_index];
+    const match: MatchingSection = .{
+        .seg = self.text_segment_cmd_index.?,
+        .sect = self.text_section_index.?,
+    };
+    const local_sym_index = @intCast(u32, self.locals.items.len);
+    var nlist = macho.nlist_64{
+        .n_strx = undef.n_strx,
+        .n_type = macho.N_SECT,
+        .n_sect = @intCast(u8, self.section_ordinals.getIndex(match).? + 1),
+        .n_desc = 0,
+        .n_value = 0,
+    };
+    try self.locals.append(self.base.allocator, nlist);
+    const global_sym_index = @intCast(u32, self.globals.items.len);
+    nlist.n_type |= macho.N_EXT;
+    nlist.n_desc = macho.N_WEAK_DEF;
+    try self.globals.append(self.base.allocator, nlist);
 
-        assert(self.unresolved.swapRemove(resolv.where_index));
+    assert(self.unresolved.swapRemove(resolv.where_index));
 
-        undef.* = .{
-            .n_strx = 0,
-            .n_type = macho.N_UNDF,
-            .n_sect = 0,
-            .n_desc = 0,
-            .n_value = 0,
-        };
-        resolv.* = .{
-            .where = .global,
-            .where_index = global_sym_index,
-            .local_sym_index = local_sym_index,
-        };
+    undef.* = .{
+        .n_strx = 0,
+        .n_type = macho.N_UNDF,
+        .n_sect = 0,
+        .n_desc = 0,
+        .n_value = 0,
+    };
+    resolv.* = .{
+        .where = .global,
+        .where_index = global_sym_index,
+        .local_sym_index = local_sym_index,
+    };
 
-        // We create an empty atom for this symbol.
-        // TODO perhaps we should special-case special symbols? Create a separate
-        // linked list of atoms?
-        _ = try self.createEmptyAtom(local_sym_index, 0, 0, match);
-    }
+    // We create an empty atom for this symbol.
+    // TODO perhaps we should special-case special symbols? Create a separate
+    // linked list of atoms?
+    _ = try self.createEmptyAtom(local_sym_index, 0, 0, match);
 }
 
 fn resolveSymbolsInObject(self: *MachO, object_id: u16) !void {
@@ -2100,7 +2095,7 @@ fn resolveSymbolsInObject(self: *MachO, object_id: u16) !void {
             // Defined symbol regardless of scope lands in the locals symbol table.
             const local_sym_index = @intCast(u32, self.locals.items.len);
             try self.locals.append(self.base.allocator, .{
-                .n_strx = if (symbolIsTemp(sym, sym_name)) 0 else try self.makeString(sym_name),
+                .n_strx = if (symbolIsTemp(sym, sym_name)) 0 else try self.strtab.insert(self.base.allocator, sym_name),
                 .n_type = macho.N_SECT,
                 .n_sect = 0,
                 .n_desc = 0,
@@ -2113,7 +2108,7 @@ fn resolveSymbolsInObject(self: *MachO, object_id: u16) !void {
             // if we should save the symbol as a global, or potentially flag the error.
             if (!sym.ext()) continue;
 
-            const n_strx = try self.makeString(sym_name);
+            const n_strx = try self.strtab.insert(self.base.allocator, sym_name);
             const local = self.locals.items[local_sym_index];
             const resolv = self.symbol_resolver.getPtr(n_strx) orelse {
                 const global_sym_index = @intCast(u32, self.globals.items.len);
@@ -2176,11 +2171,11 @@ fn resolveSymbolsInObject(self: *MachO, object_id: u16) !void {
             };
         } else if (sym.tentative()) {
             // Symbol is a tentative definition.
-            const n_strx = try self.makeString(sym_name);
+            const n_strx = try self.strtab.insert(self.base.allocator, sym_name);
             const resolv = self.symbol_resolver.getPtr(n_strx) orelse {
                 const global_sym_index = @intCast(u32, self.globals.items.len);
                 try self.globals.append(self.base.allocator, .{
-                    .n_strx = try self.makeString(sym_name),
+                    .n_strx = try self.strtab.insert(self.base.allocator, sym_name),
                     .n_type = sym.n_type,
                     .n_sect = 0,
                     .n_desc = sym.n_desc,
@@ -2234,12 +2229,12 @@ fn resolveSymbolsInObject(self: *MachO, object_id: u16) !void {
             }
         } else {
             // Symbol is undefined.
-            const n_strx = try self.makeString(sym_name);
+            const n_strx = try self.strtab.insert(self.base.allocator, sym_name);
             if (self.symbol_resolver.contains(n_strx)) continue;
 
             const undef_sym_index = @intCast(u32, self.undefs.items.len);
             try self.undefs.append(self.base.allocator, .{
-                .n_strx = try self.makeString(sym_name),
+                .n_strx = try self.strtab.insert(self.base.allocator, sym_name),
                 .n_type = macho.N_UNDF,
                 .n_sect = 0,
                 .n_desc = sym.n_desc,
@@ -2261,7 +2256,7 @@ fn resolveSymbolsInArchives(self: *MachO) !void {
     var next_sym: usize = 0;
     loop: while (next_sym < self.unresolved.count()) {
         const sym = self.undefs.items[self.unresolved.keys()[next_sym]];
-        const sym_name = self.getString(sym.n_strx);
+        const sym_name = self.strtab.getAssumeExists(sym.n_strx);
 
         for (self.archives.items) |archive| {
             // Check if the entry exists in a static archive.
@@ -2289,7 +2284,7 @@ fn resolveSymbolsInDylibs(self: *MachO) !void {
     var next_sym: usize = 0;
     loop: while (next_sym < self.unresolved.count()) {
         const sym = self.undefs.items[self.unresolved.keys()[next_sym]];
-        const sym_name = self.getString(sym.n_strx);
+        const sym_name = self.strtab.getAssumeExists(sym.n_strx);
 
         for (self.dylibs.items) |dylib, id| {
             if (!dylib.symbols.contains(sym_name)) continue;
@@ -2321,7 +2316,7 @@ fn createMhExecuteHeaderAtom(self: *MachO) !void {
         .seg = self.text_segment_cmd_index.?,
         .sect = self.text_section_index.?,
     };
-    const n_strx = try self.makeString("__mh_execute_header");
+    const n_strx = try self.strtab.insert(self.base.allocator, "__mh_execute_header");
     const local_sym_index = @intCast(u32, self.locals.items.len);
     var nlist = macho.nlist_64{
         .n_strx = n_strx,
@@ -2349,7 +2344,7 @@ fn createMhExecuteHeaderAtom(self: *MachO) !void {
 fn resolveDyldStubBinder(self: *MachO) !void {
     if (self.dyld_stub_binder_index != null) return;
 
-    const n_strx = try self.makeString("dyld_stub_binder");
+    const n_strx = try self.strtab.insert(self.base.allocator, "dyld_stub_binder");
     const sym_index = @intCast(u32, self.undefs.items.len);
     try self.undefs.append(self.base.allocator, .{
         .n_strx = n_strx,
@@ -2363,7 +2358,7 @@ fn resolveDyldStubBinder(self: *MachO) !void {
         .where_index = sym_index,
     });
     const sym = &self.undefs.items[sym_index];
-    const sym_name = self.getString(n_strx);
+    const sym_name = self.strtab.getAssumeExists(n_strx);
 
     for (self.dylibs.items) |dylib, id| {
         if (!dylib.symbols.contains(sym_name)) continue;
@@ -2460,9 +2455,7 @@ fn setEntryPoint(self: *MachO) !void {
     // TODO we should respect the -entry flag passed in by the user to set a custom
     // entrypoint. For now, assume default of `_main`.
     const seg = self.load_commands.items[self.text_segment_cmd_index.?].segment;
-    const n_strx = self.strtab_dir.getKeyAdapted(@as([]const u8, "_main"), StringIndexAdapter{
-        .bytes = &self.strtab,
-    }) orelse {
+    const n_strx = self.strtab.getOffset("_main") orelse {
         log.err("'_main' export not found", .{});
         return error.MissingMainEntrypoint;
     };
@@ -2480,7 +2473,6 @@ pub fn deinit(self: *MachO) void {
     self.section_ordinals.deinit(self.base.allocator);
     self.got_entries_map.deinit(self.base.allocator);
     self.stubs_map.deinit(self.base.allocator);
-    self.strtab_dir.deinit(self.base.allocator);
     self.strtab.deinit(self.base.allocator);
     self.undefs.deinit(self.base.allocator);
     self.globals.deinit(self.base.allocator);
@@ -2942,7 +2934,7 @@ fn writeDyldInfoData(self: *MachO) !void {
                                 .offset = binding.offset + base_offset,
                                 .segment_id = match.seg,
                                 .dylib_ordinal = @divExact(bind_sym.n_desc, macho.N_SYMBOL_RESOLVER),
-                                .name = self.getString(bind_sym.n_strx),
+                                .name = self.strtab.getAssumeExists(bind_sym.n_strx),
                             });
                         },
                     }
@@ -2964,7 +2956,7 @@ fn writeDyldInfoData(self: *MachO) !void {
                                 .offset = binding.offset + base_offset,
                                 .segment_id = match.seg,
                                 .dylib_ordinal = @divExact(bind_sym.n_desc, macho.N_SYMBOL_RESOLVER),
-                                .name = self.getString(bind_sym.n_strx),
+                                .name = self.strtab.getAssumeExists(bind_sym.n_strx),
                             });
                         },
                     }
@@ -2988,7 +2980,7 @@ fn writeDyldInfoData(self: *MachO) !void {
 
         for (self.globals.items) |sym| {
             if (sym.n_type == 0) continue;
-            const sym_name = self.getString(sym.n_strx);
+            const sym_name = self.strtab.getAssumeExists(sym.n_strx);
             log.debug("  (putting '{s}' defined at 0x{x})", .{ sym_name, sym.n_value });
 
             try trie.put(self.base.allocator, .{
@@ -3156,7 +3148,7 @@ fn populateLazyBindOffsetsInStubHelper(self: *MachO, buffer: []const u8) !void {
         mem.writeIntLittle(u32, &buf, bind_offset.offset);
         log.debug("writing lazy bind offset in stub helper of 0x{x} for symbol {s} at offset 0x{x}", .{
             bind_offset.offset,
-            self.getString(sym.n_strx),
+            self.strtab.getAssumeExists(sym.n_strx),
             file_offset,
         });
         try self.base.file.pwriteAll(&buf, file_offset);
@@ -3239,21 +3231,21 @@ fn writeSymbolTable(self: *MachO) !void {
             // Open scope
             try locals.ensureUnusedCapacity(3);
             locals.appendAssumeCapacity(.{
-                .n_strx = try self.makeString(object.tu_comp_dir.?),
+                .n_strx = try self.strtab.insert(self.base.allocator, object.tu_comp_dir.?),
                 .n_type = macho.N_SO,
                 .n_sect = 0,
                 .n_desc = 0,
                 .n_value = 0,
             });
             locals.appendAssumeCapacity(.{
-                .n_strx = try self.makeString(object.tu_name.?),
+                .n_strx = try self.strtab.insert(self.base.allocator, object.tu_name.?),
                 .n_type = macho.N_SO,
                 .n_sect = 0,
                 .n_desc = 0,
                 .n_value = 0,
             });
             locals.appendAssumeCapacity(.{
-                .n_strx = try self.makeString(object.name),
+                .n_strx = try self.strtab.insert(self.base.allocator, object.name),
                 .n_type = macho.N_OSO,
                 .n_sect = 0,
                 .n_desc = 1,
@@ -3381,15 +3373,17 @@ fn writeSymbolTable(self: *MachO) !void {
 fn writeStringTable(self: *MachO) !void {
     const seg = &self.load_commands.items[self.linkedit_segment_cmd_index.?].segment;
     const symtab = &self.load_commands.items[self.symtab_cmd_index.?].symtab;
+    const buffer = self.strtab.toOwnedSlice(self.base.allocator);
+    defer self.base.allocator.free(buffer);
     symtab.stroff = @intCast(u32, seg.inner.fileoff + seg.inner.filesize);
-    symtab.strsize = @intCast(u32, mem.alignForwardGeneric(u64, self.strtab.items.len, @alignOf(u64)));
+    symtab.strsize = @intCast(u32, mem.alignForwardGeneric(u64, buffer.len, @alignOf(u64)));
     seg.inner.filesize += symtab.strsize;
 
     log.debug("writing string table from 0x{x} to 0x{x}", .{ symtab.stroff, symtab.stroff + symtab.strsize });
 
-    try self.base.file.pwriteAll(self.strtab.items, symtab.stroff);
+    try self.base.file.pwriteAll(buffer, symtab.stroff);
 
-    if (symtab.strsize > self.strtab.items.len) {
+    if (symtab.strsize > buffer.len) {
         // This is potentially the last section, so we need to pad it out.
         try self.base.file.pwriteAll(&[_]u8{0}, seg.inner.fileoff + seg.inner.filesize - 1);
     }
@@ -3528,36 +3522,6 @@ pub fn makeStaticString(bytes: []const u8) [16]u8 {
     assert(bytes.len <= buf.len);
     mem.copy(u8, &buf, bytes);
     return buf;
-}
-
-pub fn makeString(self: *MachO, string: []const u8) !u32 {
-    const gop = try self.strtab_dir.getOrPutContextAdapted(self.base.allocator, @as([]const u8, string), StringIndexAdapter{
-        .bytes = &self.strtab,
-    }, StringIndexContext{
-        .bytes = &self.strtab,
-    });
-    if (gop.found_existing) {
-        const off = gop.key_ptr.*;
-        log.debug("reusing string '{s}' at offset 0x{x}", .{ string, off });
-        return off;
-    }
-
-    try self.strtab.ensureUnusedCapacity(self.base.allocator, string.len + 1);
-    const new_off = @intCast(u32, self.strtab.items.len);
-
-    log.debug("writing new string '{s}' at offset 0x{x}", .{ string, new_off });
-
-    self.strtab.appendSliceAssumeCapacity(string);
-    self.strtab.appendAssumeCapacity(0);
-
-    gop.key_ptr.* = new_off;
-
-    return new_off;
-}
-
-pub fn getString(self: *MachO, off: u32) []const u8 {
-    assert(off < self.strtab.items.len);
-    return mem.sliceTo(@ptrCast([*:0]const u8, self.strtab.items.ptr + off), 0);
 }
 
 pub fn symbolIsTemp(sym: macho.nlist_64, sym_name: []const u8) bool {

@@ -94,6 +94,12 @@ pub fn StringTable(comptime log_scope: @Type(.EnumLiteral)) type {
             log.debug("marked '{s}' for deletion", .{string});
         }
 
+        pub fn getOffset(self: *Self, string: []const u8) ?u32 {
+            return self.table.getKeyAdapted(string, StringIndexAdapter{
+                .bytes = &self.buffer,
+            });
+        }
+
         pub fn get(self: Self, off: u32) ?[]const u8 {
             log.debug("getting string at 0x{x}", .{off});
             if (off >= self.buffer.items.len) return null;

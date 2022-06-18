@@ -245,12 +245,7 @@ pub fn parseRelocs(self: *Atom, relocs: []macho.relocation_info, context: RelocC
                 subtractor = context.object.symbol_mapping.get(rel.r_symbolnum).?;
             } else {
                 const sym_name = context.object.getString(sym.n_strx);
-                const n_strx = context.macho_file.strtab_dir.getKeyAdapted(
-                    @as([]const u8, sym_name),
-                    StringIndexAdapter{
-                        .bytes = &context.macho_file.strtab,
-                    },
-                ).?;
+                const n_strx = context.macho_file.strtab.getOffset(sym_name).?;
                 const resolv = context.macho_file.symbol_resolver.get(n_strx).?;
                 assert(resolv.where == .global);
                 subtractor = resolv.local_sym_index;
@@ -299,7 +294,7 @@ pub fn parseRelocs(self: *Atom, relocs: []macho.relocation_info, context: RelocC
                     defer context.allocator.free(sym_name);
                     const local_sym_index = @intCast(u32, context.macho_file.locals.items.len);
                     try context.macho_file.locals.append(context.allocator, .{
-                        .n_strx = try context.macho_file.makeString(sym_name),
+                        .n_strx = try context.macho_file.strtab.insert(context.allocator, sym_name),
                         .n_type = macho.N_SECT,
                         .n_sect = @intCast(u8, context.macho_file.section_ordinals.getIndex(match).? + 1),
                         .n_desc = 0,
@@ -319,12 +314,7 @@ pub fn parseRelocs(self: *Atom, relocs: []macho.relocation_info, context: RelocC
                 break :target Relocation.Target{ .local = sym_index };
             }
 
-            const n_strx = context.macho_file.strtab_dir.getKeyAdapted(
-                @as([]const u8, sym_name),
-                StringIndexAdapter{
-                    .bytes = &context.macho_file.strtab,
-                },
-            ) orelse unreachable;
+            const n_strx = context.macho_file.strtab.getOffset(sym_name) orelse unreachable;
             break :target Relocation.Target{ .global = n_strx };
         };
         const offset = @intCast(u32, rel.r_address);
@@ -536,7 +526,7 @@ pub fn resolveRelocs(self: *Atom, macho_file: *MachO) !void {
                         .local => |sym_index| macho_file.locals.items[sym_index].n_strx,
                         .global => |n_strx| n_strx,
                     };
-                    log.err("expected GOT entry for symbol '{s}'", .{macho_file.getString(n_strx)});
+                    log.err("expected GOT entry for symbol '{s}'", .{macho_file.strtab.getAssumeExists(n_strx)});
                     log.err("  this is an internal linker error", .{});
                     return error.FailedToResolveRelocationTarget;
                 };
