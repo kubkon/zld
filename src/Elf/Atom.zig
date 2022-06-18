@@ -134,9 +134,10 @@ pub fn getTargetAtom(self: Atom, elf_file: *Elf, rel: elf.Elf64_Rela) ?*Atom {
         .sym_index = r_sym,
         .file = self.file,
     });
+    log.debug("  (getTargetAtom: %{d}: {s}, r_type={d})", .{ r_sym, tsym_name, r_type });
 
     switch (r_type) {
-        elf.R_X86_64_GOTPCRELX, elf.R_X86_64_GOTPCREL => {
+        elf.R_X86_64_REX_GOTPCRELX, elf.R_X86_64_GOTPCRELX, elf.R_X86_64_GOTPCREL => {
             const global = elf_file.globals.get(tsym_name).?;
             const got_atom = elf_file.got_entries_map.get(global).?;
             return got_atom;
@@ -184,6 +185,7 @@ fn getTargetAddress(self: Atom, r_sym: u32, elf_file: *Elf) u64 {
     const tsym_st_type = tsym.st_info & 0xf;
     const is_section = tsym_st_type == elf.STT_SECTION;
     const is_local = is_section or tsym_st_bind == elf.STB_LOCAL;
+    log.debug("  (getTargetAddress: %{d}: {s}, local? {})", .{ r_sym, tsym_name, is_local });
 
     if (!is_local) {
         const global = elf_file.globals.get(tsym_name).?;

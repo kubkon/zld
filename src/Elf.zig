@@ -78,6 +78,10 @@ managed_atoms: std.ArrayListUnmanaged(*Atom) = .{},
 atoms: std.AutoHashMapUnmanaged(u16, ?*Atom) = .{},
 atom_table: std.AutoHashMapUnmanaged(u32, *Atom) = .{},
 
+/// Special st_other value used internally by zld to mark symbol
+/// as GCed.
+pub const STV_GC: u8 = std.math.maxInt(u8);
+
 pub const SymbolWithLoc = struct {
     /// Index in the respective symbol table.
     sym_index: u32,
@@ -228,8 +232,6 @@ pub fn flush(self: *Elf) !void {
     }
     try self.resolveSymbolsInArchives();
     try self.resolveSpecialSymbols();
-
-    // self.logSymtab();
 
     for (self.unresolved.keys()) |ndx| {
         const global = self.globals.values()[ndx];
@@ -998,12 +1000,13 @@ fn gcAtoms(self: *Elf) !void {
     var retained = std.AutoHashMap(*Atom, void).init(self.base.allocator);
     defer retained.deinit();
 
-    {
-        const global = self.globals.get("_start").?;
+    for (&[_][]const u8{ "_start", "_init", "_fini" }) |sym_name| {
+        const global = self.globals.get(sym_name) orelse continue;
         const atom: *Atom = if (global.file) |file|
             self.objects.items[file].atom_table.get(global.sym_index).?
         else
             self.atom_table.get(global.sym_index).?;
+        log.debug("marking '{s}' as GC root", .{atom.getName(self)});
         try retained.putNoClobber(atom, {});
         try stack.append(atom);
     }
@@ -1031,8 +1034,11 @@ fn gcAtoms(self: *Elf) !void {
         var atom: *Atom = entry.value_ptr.*.?;
 
         while (true) {
-            try retained.putNoClobber(atom, {});
-            try stack.append(atom);
+            const gop = try retained.getOrPut(atom);
+            if (!gop.found_existing) {
+                log.debug("marking '{s}' as GC root", .{atom.getName(self)});
+                try stack.append(atom);
+            }
             if (atom.prev) |prev| {
                 atom = prev;
             } else break;
@@ -1040,15 +1046,21 @@ fn gcAtoms(self: *Elf) !void {
     }
 
     while (stack.popOrNull()) |src_atom| {
-        const src_name = src_atom.getName(self);
-        log.debug("alive: '{s}'", .{src_name});
+        log.debug("source atom '{s}'", .{src_atom.getName(self)});
 
         for (src_atom.relocs.items) |rel| {
             if (src_atom.getTargetAtom(self, rel)) |target_atom| {
                 const gop = try retained.getOrPut(target_atom);
                 if (!gop.found_existing) {
+                    log.debug("  (reached target atom '{s}')", .{target_atom.getName(self)});
                     try stack.append(target_atom);
                 }
+            } else {
+                const tsym_name = self.getSymbolName(.{
+                    .sym_index = rel.r_sym(),
+                    .file = src_atom.file,
+                });
+                log.debug("  (dead link to symbol %{d}: {s})", .{ rel.r_sym(), tsym_name });
             }
         }
     }
@@ -1069,7 +1081,7 @@ fn gcAtoms(self: *Elf) !void {
 
             if (!retained.contains(atom)) {
                 // Dead atom; remove.
-                log.debug("dead: '{s}'", .{atom.getName(self)});
+                log.debug("dead atom '{s}'", .{atom.getName(self)});
                 if (atom.file) |file| {
                     const object = self.objects.items[file];
                     log.debug("  (defined in {s})", .{object.name});
@@ -1077,14 +1089,7 @@ fn gcAtoms(self: *Elf) !void {
 
                 {
                     const sym = atom.getSymbolPtr(self);
-                    sym.* = .{
-                        .st_name = 0,
-                        .st_info = 0,
-                        .st_other = 0,
-                        .st_shndx = 0,
-                        .st_value = 0,
-                        .st_size = 0,
-                    };
+                    sym.st_other = STV_GC; // repurposed for GC
                 }
 
                 for (atom.contained.items) |contained| {
@@ -1092,14 +1097,11 @@ fn gcAtoms(self: *Elf) !void {
                         .sym_index = contained.local_sym_index,
                         .file = atom.file,
                     });
-                    contained_sym.* = .{
-                        .st_name = 0,
-                        .st_info = 0,
-                        .st_other = 0,
-                        .st_shndx = 0,
-                        .st_value = 0,
-                        .st_size = 0,
-                    };
+                    log.debug("  (pruning contained symbol '{s}')", .{self.getSymbolName(.{
+                        .sym_index = contained.local_sym_index,
+                        .file = atom.file,
+                    })});
+                    contained_sym.st_other = STV_GC; // repurposed for GC
                 }
 
                 shdr.sh_size -= atom.size;
@@ -1871,6 +1873,7 @@ fn writeSymtab(self: *Elf) !void {
             if (st_type == elf.STT_NOTYPE) continue;
             if (sym.st_other == @enumToInt(elf.STV.INTERNAL)) continue;
             if (sym.st_other == @enumToInt(elf.STV.HIDDEN)) continue;
+            if (sym.st_other == STV_GC) continue;
 
             const sym_name = object.getString(sym.st_name);
             var out_sym = sym;
@@ -1884,6 +1887,7 @@ fn writeSymtab(self: *Elf) !void {
         if (st_bind != elf.STB_LOCAL) continue;
         if (sym.st_other == @enumToInt(elf.STV.INTERNAL)) continue;
         if (sym.st_other == @enumToInt(elf.STV.HIDDEN)) continue;
+        if (sym.st_other == STV_GC) continue;
         try symtab.append(sym);
     }
 
@@ -1892,7 +1896,8 @@ fn writeSymtab(self: *Elf) !void {
     try symtab.ensureUnusedCapacity(self.globals.count());
     for (self.globals.values()) |global| {
         var sym = self.getSymbol(global);
-        if (sym.st_name == 0) continue;
+        assert(sym.st_name > 0);
+        if (sym.st_other == STV_GC) continue;
         // TODO refactor
         if (sym.st_info >> 4 == elf.STB_LOCAL) continue;
         const sym_name = self.getSymbolName(global);

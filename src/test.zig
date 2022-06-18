@@ -287,7 +287,7 @@ pub const TestContext = struct {
                 .lib_dirs = &[0][]const u8{},
                 .framework_dirs = &[0][]const u8{},
                 .rpath_list = &[0][]const u8{},
-                .gc_sections = false,
+                .gc_sections = true,
             });
             defer zld.deinit();
 
