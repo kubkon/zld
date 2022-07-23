@@ -105,10 +105,10 @@ pub fn main() anyerror!void {
         printHelpAndExit();
     }
 
-    var positionals = std.ArrayList([]const u8).init(arena);
-    var libs = std.ArrayList([]const u8).init(arena);
+    var positionals = std.ArrayList(Zld.LinkObject).init(arena);
+    var libs = std.StringArrayHashMap(Zld.SystemLib).init(arena);
     var lib_dirs = std.ArrayList([]const u8).init(arena);
-    var frameworks = std.ArrayList([]const u8).init(arena);
+    var frameworks = std.StringArrayHashMap(Zld.SystemLib).init(arena);
     var framework_dirs = std.ArrayList([]const u8).init(arena);
     var rpath_list = std.ArrayList([]const u8).init(arena);
     var out_path: ?[]const u8 = null;
@@ -118,8 +118,8 @@ pub fn main() anyerror!void {
     var verbose: bool = false;
     var dylib: bool = false;
     var shared: bool = false;
+    var version: ?std.builtin.Version = null;
     var compatibility_version: ?std.builtin.Version = null;
-    var current_version: ?std.builtin.Version = null;
     var gc_sections: bool = false;
 
     var i: usize = 0;
@@ -136,13 +136,13 @@ pub fn main() anyerror!void {
             i += 1;
             syslibroot = args[i];
         } else if (mem.startsWith(u8, arg, "-l")) {
-            try libs.append(args[i][2..]);
+            try libs.put(args[i][2..], .{});
         } else if (mem.startsWith(u8, arg, "-L")) {
             try lib_dirs.append(args[i][2..]);
         } else if (mem.eql(u8, arg, "-framework") or mem.eql(u8, arg, "-weak_framework")) {
             if (i + 1 >= args.len) fatal("Expected framework name after {s}", .{arg});
             i += 1;
-            try frameworks.append(args[i]);
+            try frameworks.put(args[i], .{});
         } else if (mem.startsWith(u8, arg, "-F")) {
             try framework_dirs.append(args[i][2..]);
         } else if (mem.eql(u8, arg, "-o")) {
@@ -192,13 +192,16 @@ pub fn main() anyerror!void {
         } else if (mem.eql(u8, arg, "-current_version")) {
             if (i + 1 >= args.len) fatal("Expected version after {s}", .{arg});
             i += 1;
-            current_version = std.builtin.Version.parse(args[i]) catch |err| {
+            version = std.builtin.Version.parse(args[i]) catch |err| {
                 fatal("Unable to parse {s} {s}: {s}", .{ arg, args[i], @errorName(err) });
             };
         } else if (mem.eql(u8, arg, "--verbose")) {
             verbose = true;
         } else {
-            try positionals.append(arg);
+            try positionals.append(.{
+                .path = arg,
+                .must_link = true,
+            });
         }
     }
 
@@ -208,68 +211,6 @@ pub fn main() anyerror!void {
 
     // TODO allow for non-native targets
     const target = builtin.target;
-
-    if (verbose) {
-        var argv = std.ArrayList([]const u8).init(arena);
-        try argv.append("zld");
-
-        if (dynamic) {
-            try argv.append("-dynamic");
-        } else {
-            try argv.append("-static");
-        }
-
-        if (syslibroot) |path| {
-            try argv.append("-syslibroot");
-            try argv.append(path);
-        }
-        if (shared) {
-            try argv.append("-shared");
-        }
-        if (dylib) {
-            try argv.append("-dylib");
-        }
-        if (stack) |st| {
-            switch (target.getObjectFormat()) {
-                .elf => try argv.append(try std.fmt.allocPrint(arena, "-z stack-size={d}", .{st})),
-                .macho => {
-                    try argv.append("-stack");
-                    try argv.append(try std.fmt.allocPrint(arena, "{d}", .{st}));
-                },
-                else => {},
-            }
-        }
-        if (out_path) |path| {
-            try argv.append("-o");
-            try argv.append(path);
-        }
-        for (libs.items) |lib| {
-            try argv.append(try std.fmt.allocPrint(arena, "-l{s}", .{lib}));
-        }
-        for (lib_dirs.items) |dir| {
-            try argv.append(try std.fmt.allocPrint(arena, "-L{s}", .{dir}));
-        }
-        for (frameworks.items) |fw| {
-            try argv.append("-framework");
-            try argv.append(fw);
-        }
-        for (framework_dirs.items) |dir| {
-            try argv.append(try std.fmt.allocPrint(arena, "-F{s}", .{dir}));
-        }
-        for (rpath_list.items) |rpath| {
-            try argv.append("-rpath");
-            try argv.append(rpath);
-        }
-        if (gc_sections) {
-            try argv.append("--gc-sections");
-        }
-        for (positionals.items) |pos| {
-            try argv.append(pos);
-        }
-        try argv.append("\n");
-
-        try io.getStdOut().writeAll(try mem.join(arena, " ", argv.items));
-    }
 
     var zld = try Zld.openPath(gpa, .{
         .emit = .{
@@ -281,16 +222,18 @@ pub fn main() anyerror!void {
         .output_mode = if (dylib or shared) .lib else .exe,
         .syslibroot = syslibroot,
         .positionals = positionals.items,
-        .libs = libs.items,
-        .frameworks = frameworks.items,
+        .libs = libs,
+        .frameworks = frameworks,
         .lib_dirs = lib_dirs.items,
         .framework_dirs = framework_dirs.items,
         .rpath_list = rpath_list.items,
         .stack_size_override = stack,
+        .version = version,
         .compatibility_version = compatibility_version,
-        .current_version = current_version,
         .gc_sections = gc_sections,
+        .verbose = verbose,
     });
     defer zld.deinit();
+
     try zld.flush();
 }

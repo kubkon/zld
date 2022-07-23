@@ -192,6 +192,8 @@ pub fn flush(self: *Elf) !void {
     defer arena_allocator.deinit();
     const arena = arena_allocator.allocator();
 
+    const gc_sections = self.base.options.gc_sections orelse false;
+
     var lib_dirs = std.ArrayList([]const u8).init(arena);
     for (self.base.options.lib_dirs) |dir| {
         // Verify that search path actually exists
@@ -204,12 +206,12 @@ pub fn flush(self: *Elf) !void {
         try lib_dirs.append(dir);
     }
 
-    var libs = std.ArrayList([]const u8).init(arena);
+    var libs = std.StringArrayHashMap(Zld.SystemLib).init(arena);
     var lib_not_found = false;
-    for (self.base.options.libs) |lib_name| {
+    for (self.base.options.libs.keys()) |lib_name| {
         for (&[_][]const u8{ ".dylib", ".a" }) |ext| {
             if (try resolveLib(arena, lib_dirs.items, lib_name, ext)) |full_path| {
-                try libs.append(full_path);
+                try libs.put(full_path, self.base.options.libs.get(lib_name).?);
                 break;
             }
         } else {
@@ -224,8 +226,14 @@ pub fn flush(self: *Elf) !void {
         }
     }
 
-    try self.parsePositionals(self.base.options.positionals);
-    try self.parseLibs(libs.items);
+    var positionals = std.ArrayList([]const u8).init(arena);
+    try positionals.ensureTotalCapacity(self.base.options.positionals.len);
+    for (self.base.options.positionals) |obj| {
+        positionals.appendAssumeCapacity(obj.path);
+    }
+
+    try self.parsePositionals(positionals.items);
+    try self.parseLibs(libs.keys());
 
     for (self.objects.items) |_, object_id| {
         try self.resolveSymbolsInObject(@intCast(u16, object_id));
@@ -249,7 +257,10 @@ pub fn flush(self: *Elf) !void {
         try object.parseIntoAtoms(self.base.allocator, @intCast(u16, object_id), self);
     }
 
-    try self.gcAtoms();
+    if (gc_sections) {
+        try self.gcAtoms();
+    }
+
     try self.sortShdrs();
     try self.setStackSize();
     try self.allocateLoadRSeg();
@@ -987,8 +998,6 @@ fn pruneShdrs(self: *Elf) !void {
 }
 
 fn gcAtoms(self: *Elf) !void {
-    if (!self.base.options.gc_sections) return;
-
     try self.assignShndxToSymbols();
 
     // TODO this just beginning of GC implementation. Consult with the docs of LLD which section is

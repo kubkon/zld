@@ -153,7 +153,7 @@ pub const Value = union(ValueType) {
         if (node.cast(Node.Doc)) |doc| {
             const inner = doc.value orelse {
                 // empty doc
-                return Value{ .empty = .{} };
+                return Value{ .empty = {} };
             };
             return Value.fromNode(arena, tree, inner, null);
         } else if (node.cast(Node.Map)) |map| {
@@ -248,15 +248,16 @@ pub const Yaml = struct {
 
     pub fn load(allocator: Allocator, source: []const u8) !Yaml {
         var arena = ArenaAllocator.init(allocator);
+        const arena_allocator = arena.allocator();
 
-        var tree = Tree.init(arena.allocator());
+        var tree = Tree.init(arena_allocator);
         try tree.parse(source);
 
-        var docs = std.ArrayList(Value).init(arena.allocator());
+        var docs = std.ArrayList(Value).init(arena_allocator);
         try docs.ensureUnusedCapacity(tree.docs.items.len);
 
         for (tree.docs.items) |node| {
-            const value = try Value.fromNode(arena.allocator(), &tree, node, null);
+            const value = try Value.fromNode(arena_allocator, &tree, node, null);
             docs.appendAssumeCapacity(value);
         }
 
@@ -315,7 +316,7 @@ pub const Yaml = struct {
 
     fn parseValue(self: *Yaml, comptime T: type, value: Value) Error!T {
         return switch (@typeInfo(T)) {
-            .Int => math.cast(T, try value.asInt()),
+            .Int => math.cast(T, try value.asInt()) orelse error.Overflow,
             .Float => math.lossyCast(T, try value.asFloat()),
             .Struct => self.parseStruct(T, try value.asMap()),
             .Union => self.parseUnion(T, value),
@@ -508,6 +509,81 @@ test "simple map untyped" {
     const map = yaml.docs.items[0].map;
     try testing.expect(map.contains("a"));
     try testing.expectEqual(map.get("a").?.int, 0);
+}
+
+test "simple map untyped with a list of maps" {
+    const source =
+        \\a: 0
+        \\b: 
+        \\  - foo: 1
+        \\    bar: 2
+        \\  - foo: 3
+        \\    bar: 4
+        \\c: 1
+    ;
+
+    var yaml = try Yaml.load(testing.allocator, source);
+    defer yaml.deinit();
+
+    try testing.expectEqual(yaml.docs.items.len, 1);
+
+    const map = yaml.docs.items[0].map;
+    try testing.expect(map.contains("a"));
+    try testing.expect(map.contains("b"));
+    try testing.expect(map.contains("c"));
+    try testing.expectEqual(map.get("a").?.int, 0);
+    try testing.expectEqual(map.get("c").?.int, 1);
+    try testing.expectEqual(map.get("b").?.list[0].map.get("foo").?.int, 1);
+    try testing.expectEqual(map.get("b").?.list[0].map.get("bar").?.int, 2);
+    try testing.expectEqual(map.get("b").?.list[1].map.get("foo").?.int, 3);
+    try testing.expectEqual(map.get("b").?.list[1].map.get("bar").?.int, 4);
+}
+
+test "simple map untyped with a list of maps. no indent" {
+    const source =
+        \\b: 
+        \\- foo: 1
+        \\c: 1
+    ;
+
+    var yaml = try Yaml.load(testing.allocator, source);
+    defer yaml.deinit();
+
+    try testing.expectEqual(yaml.docs.items.len, 1);
+
+    const map = yaml.docs.items[0].map;
+    try testing.expect(map.contains("b"));
+    try testing.expect(map.contains("c"));
+    try testing.expectEqual(map.get("c").?.int, 1);
+    try testing.expectEqual(map.get("b").?.list[0].map.get("foo").?.int, 1);
+}
+
+test "simple map untyped with a list of maps. no indent 2" {
+    const source =
+        \\a: 0
+        \\b:
+        \\- foo: 1
+        \\  bar: 2
+        \\- foo: 3
+        \\  bar: 4
+        \\c: 1
+    ;
+
+    var yaml = try Yaml.load(testing.allocator, source);
+    defer yaml.deinit();
+
+    try testing.expectEqual(yaml.docs.items.len, 1);
+
+    const map = yaml.docs.items[0].map;
+    try testing.expect(map.contains("a"));
+    try testing.expect(map.contains("b"));
+    try testing.expect(map.contains("c"));
+    try testing.expectEqual(map.get("a").?.int, 0);
+    try testing.expectEqual(map.get("c").?.int, 1);
+    try testing.expectEqual(map.get("b").?.list[0].map.get("foo").?.int, 1);
+    try testing.expectEqual(map.get("b").?.list[0].map.get("bar").?.int, 2);
+    try testing.expectEqual(map.get("b").?.list[1].map.get("foo").?.int, 3);
+    try testing.expectEqual(map.get("b").?.list[1].map.get("bar").?.int, 4);
 }
 
 test "simple map typed" {

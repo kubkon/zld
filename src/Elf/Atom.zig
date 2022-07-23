@@ -269,28 +269,22 @@ pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
             },
             elf.R_X86_64_32 => {
                 const target = self.getTargetAddress(r_sym, elf_file);
-                const scaled = math.cast(u32, @intCast(i64, target) + rel.r_addend) catch |err| switch (err) {
-                    error.Overflow => {
-                        log.err("R_X86_64_32: target value overflows 32bits", .{});
-                        log.err("  target value 0x{x}", .{@intCast(i64, target) + rel.r_addend});
-                        log.err("  target symbol {s}", .{tsym_name});
-                        return error.RelocationOverflow;
-                    },
-                    else => |e| return e,
+                const scaled = math.cast(u32, @intCast(i64, target) + rel.r_addend) orelse {
+                    log.err("R_X86_64_32: target value overflows 32bits", .{});
+                    log.err("  target value 0x{x}", .{@intCast(i64, target) + rel.r_addend});
+                    log.err("  target symbol {s}", .{tsym_name});
+                    return error.RelocationOverflow;
                 };
                 log.debug("R_X86_64_32: {x}: [() => 0x{x}] ({s})", .{ rel.r_offset, scaled, tsym_name });
                 mem.writeIntLittle(u32, self.code.items[rel.r_offset..][0..4], scaled);
             },
             elf.R_X86_64_32S => {
                 const target = self.getTargetAddress(r_sym, elf_file);
-                const scaled = math.cast(i32, @intCast(i64, target) + rel.r_addend) catch |err| switch (err) {
-                    error.Overflow => {
-                        log.err("R_X86_64_32: target value overflows 32bits", .{});
-                        log.err("  target value 0x{x}", .{@intCast(i64, target) + rel.r_addend});
-                        log.err("  target symbol {s}", .{tsym_name});
-                        return error.RelocationOverflow;
-                    },
-                    else => |e| return e,
+                const scaled = math.cast(i32, @intCast(i64, target) + rel.r_addend) orelse {
+                    log.err("R_X86_64_32: target value overflows 32bits", .{});
+                    log.err("  target value 0x{x}", .{@intCast(i64, target) + rel.r_addend});
+                    log.err("  target symbol {s}", .{tsym_name});
+                    return error.RelocationOverflow;
                 };
                 log.debug("R_X86_64_32S: {x}: [() => 0x{x}] ({s})", .{ rel.r_offset, scaled, tsym_name });
                 mem.writeIntLittle(i32, self.code.items[rel.r_offset..][0..4], scaled);

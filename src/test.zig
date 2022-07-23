@@ -142,12 +142,12 @@ pub const TestContext = struct {
             });
             defer allocator.free(cwd);
 
-            var filenames = std.ArrayList([]u8).init(allocator);
+            var objects = std.ArrayList(Zld.LinkObject).init(allocator);
             defer {
-                for (filenames.items) |f| {
-                    allocator.free(f);
+                for (objects.items) |obj| {
+                    allocator.free(obj.path);
                 }
-                filenames.deinit();
+                objects.deinit();
             }
 
             const target_triple = try std.fmt.allocPrint(allocator, "{s}-{s}-{s}", .{
@@ -201,7 +201,7 @@ pub const TestContext = struct {
                 const output_file_path = try std.fs.path.join(allocator, &[_][]const u8{
                     cwd, output_filename,
                 });
-                try filenames.append(output_file_path);
+                try objects.append(.{ .path = output_file_path, .must_link = true });
 
                 const result = try std.ChildProcess.exec(.{
                     .allocator = allocator,
@@ -229,7 +229,7 @@ pub const TestContext = struct {
             const compiler_rt_path = try std.fs.path.join(allocator, &[_][]const u8{
                 "test", "assets", target_triple, "libcompiler_rt.a",
             });
-            try filenames.append(compiler_rt_path);
+            try objects.append(.{ .path = compiler_rt_path, .must_link = false });
 
             if (case.target.getAbi() == .musl) {
                 if (requires_crts) {
@@ -237,29 +237,35 @@ pub const TestContext = struct {
                     const crt1_path = try std.fs.path.join(allocator, &[_][]const u8{
                         "test", "assets", target_triple, "crt1.o",
                     });
-                    try filenames.append(crt1_path);
+                    try objects.append(.{ .path = crt1_path, .must_link = true });
                     // crti
                     const crti_path = try std.fs.path.join(allocator, &[_][]const u8{
                         "test", "assets", target_triple, "crti.o",
                     });
-                    try filenames.append(crti_path);
+                    try objects.append(.{ .path = crti_path, .must_link = true });
                     // crtn
                     const crtn_path = try std.fs.path.join(allocator, &[_][]const u8{
                         "test", "assets", target_triple, "crtn.o",
                     });
-                    try filenames.append(crtn_path);
+                    try objects.append(.{ .path = crtn_path, .must_link = true });
                 }
                 // libc
                 const libc_path = try std.fs.path.join(allocator, &[_][]const u8{
                     "test", "assets", target_triple, "libc.a",
                 });
-                try filenames.append(libc_path);
+                try objects.append(.{ .path = libc_path, .must_link = false });
             }
 
             const output_path = try std.fs.path.join(allocator, &[_][]const u8{
                 "zig-cache", "tmp", &tmp.sub_path, "a.out",
             });
             defer allocator.free(output_path);
+
+            var libs = std.StringArrayHashMap(Zld.SystemLib).init(allocator);
+            defer libs.deinit();
+
+            var frameworks = std.StringArrayHashMap(Zld.SystemLib).init(allocator);
+            defer frameworks.deinit();
 
             const host = try std.zig.system.NativeTargetInfo.detect(allocator, .{});
             const target_info = try std.zig.system.NativeTargetInfo.detect(allocator, case.target);
@@ -281,9 +287,9 @@ pub const TestContext = struct {
                 .target = case.target.toTarget(),
                 .output_mode = .exe,
                 .syslibroot = syslibroot,
-                .positionals = filenames.items,
-                .libs = &[0][]const u8{},
-                .frameworks = &[0][]const u8{},
+                .positionals = objects.items,
+                .libs = libs,
+                .frameworks = frameworks,
                 .lib_dirs = &[0][]const u8{},
                 .framework_dirs = &[0][]const u8{},
                 .rpath_list = &[0][]const u8{},

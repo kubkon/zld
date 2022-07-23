@@ -14,7 +14,7 @@ const Allocator = mem.Allocator;
 const Arch = std.Target.Cpu.Arch;
 const MachO = @import("../MachO.zig");
 const Object = @import("Object.zig");
-const StringIndexAdapter = std.hash_map.StringIndexAdapter;
+const SymbolWithLoc = MachO.SymbolWithLoc;
 
 const dis_x86_64 = @import("dis_x86_64");
 const Disassembler = dis_x86_64.Disassembler;
@@ -27,10 +27,10 @@ const RegisterOrMemory = dis_x86_64.RegisterOrMemory;
 /// the symbol references, and adding that to the file offset of the section.
 /// If this field is 0, it means the codegen size = 0 and there is no symbol or
 /// offset table entry.
-local_sym_index: u32,
+sym_index: u32,
 
-/// List of symbol aliases pointing to the same atom via different nlists
-aliases: std.ArrayListUnmanaged(u32) = .{},
+/// null means symbol defined by the linker.
+file: ?u32,
 
 /// List of symbols contained within this atom
 contained: std.ArrayListUnmanaged(SymbolAtOffset) = .{},
@@ -62,121 +62,67 @@ bindings: std.ArrayListUnmanaged(Binding) = .{},
 /// List of lazy bindings
 lazy_bindings: std.ArrayListUnmanaged(Binding) = .{},
 
-/// List of data-in-code entries. This is currently specific to x86_64 only.
-dices: std.ArrayListUnmanaged(macho.data_in_code_entry) = .{},
-
-/// Stab entry for this atom. This is currently specific to a binary created
-/// by linking object files in a traditional sense - in incremental sense, we
-/// bypass stabs altogether to produce dSYM bundle directly with fully relocated
-/// DWARF sections.
-stab: ?Stab = null,
-
 /// Points to the previous and next neighbours
 next: ?*Atom,
 prev: ?*Atom,
 
 pub const Binding = struct {
-    n_strx: u32,
+    target: SymbolWithLoc,
     offset: u64,
 };
 
 pub const SymbolAtOffset = struct {
-    local_sym_index: u32,
+    sym_index: u32,
     offset: u64,
-    stab: ?Stab = null,
-};
-
-pub const Stab = union(enum) {
-    function: u64,
-    static,
-    global,
-
-    pub fn asNlists(stab: Stab, local_sym_index: u32, macho_file: anytype) ![]macho.nlist_64 {
-        var nlists = std.ArrayList(macho.nlist_64).init(macho_file.base.allocator);
-        defer nlists.deinit();
-
-        const sym = macho_file.locals.items[local_sym_index];
-        switch (stab) {
-            .function => |size| {
-                try nlists.ensureUnusedCapacity(4);
-                nlists.appendAssumeCapacity(.{
-                    .n_strx = 0,
-                    .n_type = macho.N_BNSYM,
-                    .n_sect = sym.n_sect,
-                    .n_desc = 0,
-                    .n_value = sym.n_value,
-                });
-                nlists.appendAssumeCapacity(.{
-                    .n_strx = sym.n_strx,
-                    .n_type = macho.N_FUN,
-                    .n_sect = sym.n_sect,
-                    .n_desc = 0,
-                    .n_value = sym.n_value,
-                });
-                nlists.appendAssumeCapacity(.{
-                    .n_strx = 0,
-                    .n_type = macho.N_FUN,
-                    .n_sect = 0,
-                    .n_desc = 0,
-                    .n_value = size,
-                });
-                nlists.appendAssumeCapacity(.{
-                    .n_strx = 0,
-                    .n_type = macho.N_ENSYM,
-                    .n_sect = sym.n_sect,
-                    .n_desc = 0,
-                    .n_value = size,
-                });
-            },
-            .global => {
-                try nlists.append(.{
-                    .n_strx = sym.n_strx,
-                    .n_type = macho.N_GSYM,
-                    .n_sect = 0,
-                    .n_desc = 0,
-                    .n_value = 0,
-                });
-            },
-            .static => {
-                try nlists.append(.{
-                    .n_strx = sym.n_strx,
-                    .n_type = macho.N_STSYM,
-                    .n_sect = sym.n_sect,
-                    .n_desc = 0,
-                    .n_value = sym.n_value,
-                });
-            },
-        }
-
-        return nlists.toOwnedSlice();
-    }
 };
 
 pub const Relocation = struct {
-    pub const Target = union(enum) {
-        local: u32,
-        global: u32,
-    };
-
     /// Offset within the atom's code buffer.
     /// Note relocation size can be inferred by relocation's kind.
     offset: u32,
 
-    target: Target,
+    target: MachO.SymbolWithLoc,
 
     addend: i64,
 
-    subtractor: ?u32,
+    subtractor: ?MachO.SymbolWithLoc,
 
     pcrel: bool,
 
     length: u2,
 
     @"type": u4,
+
+    pub fn getTargetAtom(self: Relocation, macho_file: *MachO) ?*Atom {
+        const is_via_got = got: {
+            switch (macho_file.base.options.target.cpu.arch) {
+                .aarch64 => break :got switch (@intToEnum(macho.reloc_type_arm64, self.@"type")) {
+                    .ARM64_RELOC_GOT_LOAD_PAGE21,
+                    .ARM64_RELOC_GOT_LOAD_PAGEOFF12,
+                    .ARM64_RELOC_POINTER_TO_GOT,
+                    => true,
+                    else => false,
+                },
+                .x86_64 => break :got switch (@intToEnum(macho.reloc_type_x86_64, self.@"type")) {
+                    .X86_64_RELOC_GOT, .X86_64_RELOC_GOT_LOAD => true,
+                    else => false,
+                },
+                else => unreachable,
+            }
+        };
+
+        if (is_via_got) {
+            return macho_file.getGotAtomForSymbol(self.target).?; // panic means fatal error
+        }
+        if (macho_file.getStubsAtomForSymbol(self.target)) |stubs_atom| return stubs_atom;
+        if (macho_file.getTlvPtrAtomForSymbol(self.target)) |tlv_ptr_atom| return tlv_ptr_atom;
+        return macho_file.getAtomForSymbol(self.target);
+    }
 };
 
 pub const empty = Atom{
-    .local_sym_index = 0,
+    .sym_index = 0,
+    .file = null,
     .size = 0,
     .alignment = 0,
     .prev = null,
@@ -184,26 +130,62 @@ pub const empty = Atom{
 };
 
 pub fn deinit(self: *Atom, allocator: Allocator) void {
-    self.dices.deinit(allocator);
     self.lazy_bindings.deinit(allocator);
     self.bindings.deinit(allocator);
     self.rebases.deinit(allocator);
     self.relocs.deinit(allocator);
     self.contained.deinit(allocator);
-    self.aliases.deinit(allocator);
     self.code.deinit(allocator);
 }
 
+/// Returns symbol referencing this atom.
+pub fn getSymbol(self: Atom, macho_file: *MachO) macho.nlist_64 {
+    return self.getSymbolPtr(macho_file).*;
+}
+
+/// Returns pointer-to-symbol referencing this atom.
+pub fn getSymbolPtr(self: Atom, macho_file: *MachO) *macho.nlist_64 {
+    return macho_file.getSymbolPtr(.{
+        .sym_index = self.sym_index,
+        .file = self.file,
+    });
+}
+
+pub fn getSymbolWithLoc(self: Atom) SymbolWithLoc {
+    return .{ .sym_index = self.sym_index, .file = self.file };
+}
+
+/// Returns true if the symbol pointed at with `sym_loc` is contained within this atom.
+/// WARNING this function assumes all atoms have been allocated in the virtual memory.
+/// Calling it without allocating with `MachO.allocateSymbols` (or equivalent) will
+/// give bogus results.
+pub fn isSymbolContained(self: Atom, sym_loc: SymbolWithLoc, macho_file: *MachO) bool {
+    const sym = macho_file.getSymbol(sym_loc);
+    if (!sym.sect()) return false;
+    const self_sym = self.getSymbol(macho_file);
+    return sym.n_value >= self_sym.n_value and sym.n_value < self_sym.n_value + self.size;
+}
+
+/// Returns the name of this atom.
+pub fn getName(self: Atom, macho_file: *MachO) []const u8 {
+    return macho_file.getSymbolName(.{
+        .sym_index = self.sym_index,
+        .file = self.file,
+    });
+}
+
 const RelocContext = struct {
-    base_addr: u64 = 0,
-    allocator: Allocator,
-    object: *Object,
     macho_file: *MachO,
+    base_addr: u64 = 0,
+    base_offset: i32 = 0,
 };
-pub fn parseRelocs(self: *Atom, relocs: []macho.relocation_info, context: RelocContext) !void {
+
+pub fn parseRelocs(self: *Atom, relocs: []const macho.relocation_info, context: RelocContext) !void {
+    const gpa = context.macho_file.base.allocator;
+
     const arch = context.macho_file.base.options.target.cpu.arch;
     var addend: i64 = 0;
-    var subtractor: ?u32 = null;
+    var subtractor: ?SymbolWithLoc = null;
 
     for (relocs) |rel, i| {
         blk: {
@@ -240,15 +222,16 @@ pub fn parseRelocs(self: *Atom, relocs: []macho.relocation_info, context: RelocC
             }
 
             assert(subtractor == null);
-            const sym = context.object.symtab.items[rel.r_symbolnum];
+            const sym_loc = MachO.SymbolWithLoc{
+                .sym_index = rel.r_symbolnum,
+                .file = self.file,
+            };
+            const sym = context.macho_file.getSymbol(sym_loc);
             if (sym.sect() and !sym.ext()) {
-                subtractor = context.object.symbol_mapping.get(rel.r_symbolnum).?;
+                subtractor = sym_loc;
             } else {
-                const sym_name = context.object.getString(sym.n_strx);
-                const n_strx = context.macho_file.strtab.getOffset(sym_name).?;
-                const resolv = context.macho_file.symbol_resolver.get(n_strx).?;
-                assert(resolv.where == .global);
-                subtractor = resolv.local_sym_index;
+                const sym_name = context.macho_file.getSymbolName(sym_loc);
+                subtractor = context.macho_file.globals.get(sym_name).?;
             }
             // Verify that *_SUBTRACTOR is followed by *_UNSIGNED.
             if (relocs.len <= i + 1) {
@@ -279,45 +262,42 @@ pub fn parseRelocs(self: *Atom, relocs: []macho.relocation_info, context: RelocC
             continue;
         }
 
+        const object = &context.macho_file.objects.items[self.file.?];
         const target = target: {
             if (rel.r_extern == 0) {
                 const sect_id = @intCast(u16, rel.r_symbolnum - 1);
-                const local_sym_index = context.object.sections_as_symbols.get(sect_id) orelse blk: {
-                    const seg = context.object.load_commands.items[context.object.segment_cmd_index.?].segment;
-                    const sect = seg.sections.items[sect_id];
-                    const match = (try context.macho_file.getMatchingSection(sect)) orelse unreachable;
-                    const sym_name = try std.fmt.allocPrint(context.allocator, "{s}_{s}_{s}", .{
-                        context.object.name,
-                        sect.segName(),
-                        sect.sectName(),
-                    });
-                    defer context.allocator.free(sym_name);
-                    const local_sym_index = @intCast(u32, context.macho_file.locals.items.len);
-                    try context.macho_file.locals.append(context.allocator, .{
-                        .n_strx = try context.macho_file.strtab.insert(context.allocator, sym_name),
+                const sym_index = object.sections_as_symbols.get(sect_id) orelse blk: {
+                    const sect = object.getSourceSection(sect_id);
+                    const match = (try context.macho_file.getMatchingSection(sect)) orelse
+                        unreachable;
+                    const sym_index = @intCast(u32, object.symtab.items.len);
+                    try object.symtab.append(gpa, .{
+                        .n_strx = 0,
                         .n_type = macho.N_SECT,
-                        .n_sect = @intCast(u8, context.macho_file.section_ordinals.getIndex(match).? + 1),
+                        .n_sect = context.macho_file.getSectionOrdinal(match),
                         .n_desc = 0,
-                        .n_value = 0,
+                        .n_value = sect.addr,
                     });
-                    try context.object.sections_as_symbols.putNoClobber(context.allocator, sect_id, local_sym_index);
-                    break :blk local_sym_index;
+                    try object.sections_as_symbols.putNoClobber(gpa, sect_id, sym_index);
+                    break :blk sym_index;
                 };
-                break :target Relocation.Target{ .local = local_sym_index };
+                break :target MachO.SymbolWithLoc{ .sym_index = sym_index, .file = self.file };
             }
 
-            const sym = context.object.symtab.items[rel.r_symbolnum];
-            const sym_name = context.object.getString(sym.n_strx);
+            const sym_loc = MachO.SymbolWithLoc{
+                .sym_index = rel.r_symbolnum,
+                .file = self.file,
+            };
+            const sym = context.macho_file.getSymbol(sym_loc);
 
             if (sym.sect() and !sym.ext()) {
-                const sym_index = context.object.symbol_mapping.get(rel.r_symbolnum) orelse unreachable;
-                break :target Relocation.Target{ .local = sym_index };
+                break :target sym_loc;
+            } else {
+                const sym_name = context.macho_file.getSymbolName(sym_loc);
+                break :target context.macho_file.globals.get(sym_name).?;
             }
-
-            const n_strx = context.macho_file.strtab.getOffset(sym_name) orelse unreachable;
-            break :target Relocation.Target{ .global = n_strx };
         };
-        const offset = @intCast(u32, rel.r_address);
+        const offset = @intCast(u32, rel.r_address - context.base_offset);
 
         switch (arch) {
             .aarch64 => {
@@ -334,12 +314,20 @@ pub fn parseRelocs(self: *Atom, relocs: []macho.relocation_info, context: RelocC
                         try addGotEntry(target, context);
                     },
                     .ARM64_RELOC_UNSIGNED => {
-                        assert(rel.r_extern == 1);
                         addend = if (rel.r_length == 3)
                             mem.readIntLittle(i64, self.code.items[offset..][0..8])
                         else
                             mem.readIntLittle(i32, self.code.items[offset..][0..4]);
+                        if (rel.r_extern == 0) {
+                            const target_sect_base_addr = object.getSourceSection(@intCast(u16, rel.r_symbolnum - 1)).addr;
+                            addend -= @intCast(i64, target_sect_base_addr);
+                        }
                         try self.addPtrBindingOrRebase(rel, target, context);
+                    },
+                    .ARM64_RELOC_TLVP_LOAD_PAGE21,
+                    .ARM64_RELOC_TLVP_LOAD_PAGEOFF12,
+                    => {
+                        try addTlvPtrEntry(target, context);
                     },
                     else => {},
                 }
@@ -350,6 +338,7 @@ pub fn parseRelocs(self: *Atom, relocs: []macho.relocation_info, context: RelocC
                     .X86_64_RELOC_BRANCH => {
                         // TODO rewrite relocation
                         try addStub(target, context);
+                        addend = mem.readIntLittle(i32, self.code.items[offset..][0..4]);
                     },
                     .X86_64_RELOC_GOT, .X86_64_RELOC_GOT_LOAD => {
                         // TODO rewrite relocation
@@ -362,8 +351,7 @@ pub fn parseRelocs(self: *Atom, relocs: []macho.relocation_info, context: RelocC
                         else
                             mem.readIntLittle(i32, self.code.items[offset..][0..4]);
                         if (rel.r_extern == 0) {
-                            const seg = context.object.load_commands.items[context.object.segment_cmd_index.?].segment;
-                            const target_sect_base_addr = seg.sections.items[rel.r_symbolnum - 1].addr;
+                            const target_sect_base_addr = object.getSourceSection(@intCast(u16, rel.r_symbolnum - 1)).addr;
                             addend -= @intCast(i64, target_sect_base_addr);
                         }
                         try self.addPtrBindingOrRebase(rel, target, context);
@@ -384,11 +372,15 @@ pub fn parseRelocs(self: *Atom, relocs: []macho.relocation_info, context: RelocC
                         if (rel.r_extern == 0) {
                             // Note for the future self: when r_extern == 0, we should subtract correction from the
                             // addend.
-                            const seg = context.object.load_commands.items[context.object.segment_cmd_index.?].segment;
-                            const target_sect_base_addr = seg.sections.items[rel.r_symbolnum - 1].addr;
+                            const target_sect_base_addr = object.getSourceSection(@intCast(u16, rel.r_symbolnum - 1)).addr;
+                            // We need to add base_offset, i.e., offset of this atom wrt to the source
+                            // section. Otherwise, the addend will over-/under-shoot.
                             addend += @intCast(i64, context.base_addr + offset + 4) -
-                                @intCast(i64, target_sect_base_addr);
+                                @intCast(i64, target_sect_base_addr) + context.base_offset;
                         }
+                    },
+                    .X86_64_RELOC_TLV => {
+                        try addTlvPtrEntry(target, context);
                     },
                     else => {},
                 }
@@ -396,7 +388,7 @@ pub fn parseRelocs(self: *Atom, relocs: []macho.relocation_info, context: RelocC
             else => unreachable,
         }
 
-        try self.relocs.append(context.allocator, .{
+        try self.relocs.append(gpa, .{
             .offset = offset,
             .target = target,
             .addend = addend,
@@ -414,198 +406,191 @@ pub fn parseRelocs(self: *Atom, relocs: []macho.relocation_info, context: RelocC
 fn addPtrBindingOrRebase(
     self: *Atom,
     rel: macho.relocation_info,
-    target: Relocation.Target,
+    target: MachO.SymbolWithLoc,
     context: RelocContext,
 ) !void {
-    switch (target) {
-        .global => |n_strx| {
-            try self.bindings.append(context.allocator, .{
-                .n_strx = n_strx,
-                .offset = @intCast(u32, rel.r_address),
-            });
-        },
-        .local => {
-            const source_sym = context.macho_file.locals.items[self.local_sym_index];
-            const match = context.macho_file.section_ordinals.keys()[source_sym.n_sect - 1];
-            const seg = context.macho_file.load_commands.items[match.seg].segment;
-            const sect = seg.sections.items[match.sect];
-            const sect_type = sect.type_();
+    const gpa = context.macho_file.base.allocator;
+    const sym = context.macho_file.getSymbol(target);
+    if (sym.undf()) {
+        try self.bindings.append(gpa, .{
+            .target = target,
+            .offset = @intCast(u32, rel.r_address - context.base_offset),
+        });
+    } else {
+        const source_sym = self.getSymbol(context.macho_file);
+        const match = context.macho_file.getMatchingSectionFromOrdinal(source_sym.n_sect);
+        const sect = context.macho_file.getSection(match);
+        const sect_type = sect.type_();
 
-            const should_rebase = rebase: {
-                if (rel.r_length != 3) break :rebase false;
+        const should_rebase = rebase: {
+            if (rel.r_length != 3) break :rebase false;
 
-                // TODO actually, a check similar to what dyld is doing, that is, verifying
-                // that the segment is writable should be enough here.
-                const is_right_segment = blk: {
-                    if (context.macho_file.data_segment_cmd_index) |idx| {
-                        if (match.seg == idx) {
-                            break :blk true;
-                        }
+            // TODO actually, a check similar to what dyld is doing, that is, verifying
+            // that the segment is writable should be enough here.
+            const is_right_segment = blk: {
+                if (context.macho_file.data_segment_cmd_index) |idx| {
+                    if (match.seg == idx) {
+                        break :blk true;
                     }
-                    if (context.macho_file.data_const_segment_cmd_index) |idx| {
-                        if (match.seg == idx) {
-                            break :blk true;
-                        }
-                    }
-                    break :blk false;
-                };
-
-                if (!is_right_segment) break :rebase false;
-                if (sect_type != macho.S_LITERAL_POINTERS and
-                    sect_type != macho.S_REGULAR and
-                    sect_type != macho.S_MOD_INIT_FUNC_POINTERS and
-                    sect_type != macho.S_MOD_TERM_FUNC_POINTERS)
-                {
-                    break :rebase false;
                 }
-
-                break :rebase true;
+                if (context.macho_file.data_const_segment_cmd_index) |idx| {
+                    if (match.seg == idx) {
+                        break :blk true;
+                    }
+                }
+                break :blk false;
             };
 
-            if (should_rebase) {
-                try self.rebases.append(context.allocator, @intCast(u32, rel.r_address));
+            if (!is_right_segment) break :rebase false;
+            if (sect_type != macho.S_LITERAL_POINTERS and
+                sect_type != macho.S_REGULAR and
+                sect_type != macho.S_MOD_INIT_FUNC_POINTERS and
+                sect_type != macho.S_MOD_TERM_FUNC_POINTERS)
+            {
+                break :rebase false;
             }
-        },
+
+            break :rebase true;
+        };
+
+        if (should_rebase) {
+            try self.rebases.append(gpa, @intCast(u32, rel.r_address - context.base_offset));
+        }
     }
 }
 
-fn addGotEntry(target: Relocation.Target, context: RelocContext) !void {
-    if (context.macho_file.got_entries_map.contains(target)) return;
-    const atom = try context.macho_file.createGotAtom(target);
-    try context.macho_file.got_entries_map.putNoClobber(context.macho_file.base.allocator, target, atom);
+fn addTlvPtrEntry(target: MachO.SymbolWithLoc, context: RelocContext) !void {
+    const target_sym = context.macho_file.getSymbol(target);
+    if (!target_sym.undf()) return;
+    if (context.macho_file.tlv_ptr_entries_table.contains(target)) return;
+
+    const index = try context.macho_file.allocateTlvPtrEntry(target);
+    const atom = try context.macho_file.createTlvPtrAtom(target);
+    context.macho_file.tlv_ptr_entries.items[index].sym_index = atom.sym_index;
 }
 
-fn addStub(target: Relocation.Target, context: RelocContext) !void {
-    if (target != .global) return;
-    if (context.macho_file.stubs_map.contains(target.global)) return;
-    // TODO clean this up!
-    const stub_helper_atom = atom: {
-        const atom = try context.macho_file.createStubHelperAtom();
-        break :atom atom;
-    };
-    const laptr_atom = atom: {
-        const atom = try context.macho_file.createLazyPointerAtom(
-            stub_helper_atom.local_sym_index,
-            target.global,
-        );
-        break :atom atom;
-    };
-    const atom = try context.macho_file.createStubAtom(laptr_atom.local_sym_index);
-    try context.macho_file.stubs_map.putNoClobber(context.allocator, target.global, atom);
+fn addGotEntry(target: MachO.SymbolWithLoc, context: RelocContext) !void {
+    if (context.macho_file.got_entries_table.contains(target)) return;
+
+    const index = try context.macho_file.allocateGotEntry(target);
+    const atom = try context.macho_file.createGotAtom(target);
+    context.macho_file.got_entries.items[index].sym_index = atom.sym_index;
+}
+
+fn addStub(target: MachO.SymbolWithLoc, context: RelocContext) !void {
+    const target_sym = context.macho_file.getSymbol(target);
+    if (!target_sym.undf()) return;
+    if (context.macho_file.stubs_table.contains(target)) return;
+
+    const stub_index = try context.macho_file.allocateStubEntry(target);
+    const stub_helper_atom = try context.macho_file.createStubHelperAtom();
+    const laptr_atom = try context.macho_file.createLazyPointerAtom(stub_helper_atom.sym_index, target);
+    const stub_atom = try context.macho_file.createStubAtom(laptr_atom.sym_index);
+
+    context.macho_file.stubs.items[stub_index].sym_index = stub_atom.sym_index;
 }
 
 pub fn resolveRelocs(self: *Atom, macho_file: *MachO) !void {
+    log.debug("ATOM(%{d}, '{s}')", .{ self.sym_index, self.getName(macho_file) });
+
     for (self.relocs.items) |rel| {
-        log.debug("relocating {}", .{rel});
         const arch = macho_file.base.options.target.cpu.arch;
+        switch (arch) {
+            .aarch64 => {
+                log.debug("  RELA({s}) @ {x} => %{d} in object({d})", .{
+                    @tagName(@intToEnum(macho.reloc_type_arm64, rel.@"type")),
+                    rel.offset,
+                    rel.target.sym_index,
+                    rel.target.file,
+                });
+            },
+            .x86_64 => {
+                log.debug("  RELA({s}) @ {x} => %{d} in object({d})", .{
+                    @tagName(@intToEnum(macho.reloc_type_x86_64, rel.@"type")),
+                    rel.offset,
+                    rel.target.sym_index,
+                    rel.target.file,
+                });
+            },
+            else => unreachable,
+        }
+
         const source_addr = blk: {
-            const sym = macho_file.locals.items[self.local_sym_index];
-            break :blk sym.n_value + rel.offset;
+            const source_sym = self.getSymbol(macho_file);
+            break :blk source_sym.n_value + rel.offset;
+        };
+        const is_tlv = is_tlv: {
+            const source_sym = self.getSymbol(macho_file);
+            const match = macho_file.getMatchingSectionFromOrdinal(source_sym.n_sect);
+            const sect = macho_file.getSection(match);
+            break :is_tlv sect.type_() == macho.S_THREAD_LOCAL_VARIABLES;
         };
         const target_addr = blk: {
-            const is_via_got = got: {
-                switch (arch) {
-                    .aarch64 => break :got switch (@intToEnum(macho.reloc_type_arm64, rel.@"type")) {
-                        .ARM64_RELOC_GOT_LOAD_PAGE21,
-                        .ARM64_RELOC_GOT_LOAD_PAGEOFF12,
-                        .ARM64_RELOC_POINTER_TO_GOT,
-                        => true,
-                        else => false,
-                    },
-                    .x86_64 => break :got switch (@intToEnum(macho.reloc_type_x86_64, rel.@"type")) {
-                        .X86_64_RELOC_GOT, .X86_64_RELOC_GOT_LOAD => true,
-                        else => false,
-                    },
-                    else => unreachable,
-                }
+            const target_atom = rel.getTargetAtom(macho_file) orelse {
+                // If there is no atom for target, we still need to check for special, atom-less
+                // symbols such as `___dso_handle`.
+                const target_name = macho_file.getSymbolName(rel.target);
+                assert(macho_file.globals.contains(target_name));
+                const atomless_sym = macho_file.getSymbol(rel.target);
+                log.debug("    | atomless target '{s}'", .{target_name});
+                break :blk atomless_sym.n_value;
             };
-
-            if (is_via_got) {
-                const atom = macho_file.got_entries_map.get(rel.target) orelse {
-                    const n_strx = switch (rel.target) {
-                        .local => |sym_index| macho_file.locals.items[sym_index].n_strx,
-                        .global => |n_strx| n_strx,
-                    };
-                    log.err("expected GOT entry for symbol '{s}'", .{macho_file.strtab.getAssumeExists(n_strx)});
-                    log.err("  this is an internal linker error", .{});
-                    return error.FailedToResolveRelocationTarget;
+            log.debug("    | target ATOM(%{d}, '{s}') in object({d})", .{
+                target_atom.sym_index,
+                target_atom.getName(macho_file),
+                target_atom.file,
+            });
+            // If `rel.target` is contained within the target atom, pull its address value.
+            const target_sym = if (target_atom.isSymbolContained(rel.target, macho_file))
+                macho_file.getSymbol(rel.target)
+            else
+                target_atom.getSymbol(macho_file);
+            assert(target_sym.n_desc != MachO.N_DESC_GCED);
+            const base_address: u64 = if (is_tlv) base_address: {
+                // For TLV relocations, the value specified as a relocation is the displacement from the
+                // TLV initializer (either value in __thread_data or zero-init in __thread_bss) to the first
+                // defined TLV template init section in the following order:
+                // * wrt to __thread_data if defined, then
+                // * wrt to __thread_bss
+                const sect_id: u16 = sect_id: {
+                    if (macho_file.tlv_data_section_index) |i| {
+                        break :sect_id i;
+                    } else if (macho_file.tlv_bss_section_index) |i| {
+                        break :sect_id i;
+                    } else {
+                        log.err("threadlocal variables present but no initializer sections found", .{});
+                        log.err("  __thread_data not found", .{});
+                        log.err("  __thread_bss not found", .{});
+                        return error.FailedToResolveRelocationTarget;
+                    }
                 };
-                break :blk macho_file.locals.items[atom.local_sym_index].n_value;
-            }
-
-            switch (rel.target) {
-                .local => |sym_index| {
-                    const sym = macho_file.locals.items[sym_index];
-                    const is_tlv = is_tlv: {
-                        const source_sym = macho_file.locals.items[self.local_sym_index];
-                        const match = macho_file.section_ordinals.keys()[source_sym.n_sect - 1];
-                        const seg = macho_file.load_commands.items[match.seg].segment;
-                        const sect = seg.sections.items[match.sect];
-                        break :is_tlv sect.type_() == macho.S_THREAD_LOCAL_VARIABLES;
-                    };
-                    if (is_tlv) {
-                        // For TLV relocations, the value specified as a relocation is the displacement from the
-                        // TLV initializer (either value in __thread_data or zero-init in __thread_bss) to the first
-                        // defined TLV template init section in the following order:
-                        // * wrt to __thread_data if defined, then
-                        // * wrt to __thread_bss
-                        const seg = macho_file.load_commands.items[macho_file.data_segment_cmd_index.?].segment;
-                        const base_address = inner: {
-                            if (macho_file.tlv_data_section_index) |i| {
-                                break :inner seg.sections.items[i].addr;
-                            } else if (macho_file.tlv_bss_section_index) |i| {
-                                break :inner seg.sections.items[i].addr;
-                            } else {
-                                log.err("threadlocal variables present but no initializer sections found", .{});
-                                log.err("  __thread_data not found", .{});
-                                log.err("  __thread_bss not found", .{});
-                                return error.FailedToResolveRelocationTarget;
-                            }
-                        };
-                        break :blk sym.n_value - base_address;
-                    }
-                    break :blk sym.n_value;
-                },
-                .global => |n_strx| {
-                    // TODO Still trying to figure out how to possibly use stubs for local symbol indirection with
-                    // branching instructions. If it is not possible, then the best course of action is to
-                    // resurrect the former approach of defering creating synthethic atoms in __got and __la_symbol_ptr
-                    // sections until we resolve the relocations.
-                    const resolv = macho_file.symbol_resolver.get(n_strx).?;
-                    switch (resolv.where) {
-                        .global => break :blk macho_file.globals.items[resolv.where_index].n_value,
-                        .undef => {
-                            break :blk if (macho_file.stubs_map.get(n_strx)) |atom|
-                                macho_file.locals.items[atom.local_sym_index].n_value
-                            else
-                                0;
-                        },
-                    }
-                },
-            }
+                break :base_address macho_file.getSection(.{
+                    .seg = macho_file.data_segment_cmd_index.?,
+                    .sect = sect_id,
+                }).addr;
+            } else 0;
+            break :blk target_sym.n_value - base_address;
         };
 
         log.debug("  | source_addr = 0x{x}", .{source_addr});
-        log.debug("  | target_addr = 0x{x}", .{target_addr});
 
         switch (arch) {
             .aarch64 => {
                 switch (@intToEnum(macho.reloc_type_arm64, rel.@"type")) {
                     .ARM64_RELOC_BRANCH26 => {
+                        log.debug("    | target_addr = 0x{x}", .{target_addr});
                         const displacement = math.cast(
                             i28,
                             @intCast(i64, target_addr) - @intCast(i64, source_addr),
-                        ) catch |err| switch (err) {
-                            error.Overflow => {
-                                log.err("jump too big to encode as i28 displacement value", .{});
-                                log.err("  (target - source) = displacement => 0x{x} - 0x{x} = 0x{x}", .{
-                                    target_addr,
-                                    source_addr,
-                                    @intCast(i64, target_addr) - @intCast(i64, source_addr),
-                                });
-                                log.err("  TODO implement branch islands to extend jump distance for arm64", .{});
-                                return error.TODOImplementBranchIslands;
-                            },
+                        ) orelse {
+                            log.err("jump too big to encode as i28 displacement value", .{});
+                            log.err("  (target - source) = displacement => 0x{x} - 0x{x} = 0x{x}", .{
+                                target_addr,
+                                source_addr,
+                                @intCast(i64, target_addr) - @intCast(i64, source_addr),
+                            });
+                            log.err("  TODO implement branch islands to extend jump distance for arm64", .{});
+                            return error.TODOImplementBranchIslands;
                         };
                         const code = self.code.items[rel.offset..][0..4];
                         var inst = aarch64.Instruction{
@@ -622,6 +607,7 @@ pub fn resolveRelocs(self: *Atom, macho_file: *MachO) !void {
                     .ARM64_RELOC_TLVP_LOAD_PAGE21,
                     => {
                         const actual_target_addr = @intCast(i64, target_addr) + rel.addend;
+                        log.debug("    | target_addr = 0x{x}", .{actual_target_addr});
                         const source_page = @intCast(i32, source_addr >> 12);
                         const target_page = @intCast(i32, actual_target_addr >> 12);
                         const pages = @bitCast(u21, @intCast(i21, target_page - source_page));
@@ -639,6 +625,7 @@ pub fn resolveRelocs(self: *Atom, macho_file: *MachO) !void {
                     .ARM64_RELOC_PAGEOFF12 => {
                         const code = self.code.items[rel.offset..][0..4];
                         const actual_target_addr = @intCast(i64, target_addr) + rel.addend;
+                        log.debug("    | target_addr = 0x{x}", .{actual_target_addr});
                         const narrowed = @truncate(u12, @intCast(u64, actual_target_addr));
                         if (isArithmeticOp(self.code.items[rel.offset..][0..4])) {
                             var inst = aarch64.Instruction{
@@ -676,6 +663,7 @@ pub fn resolveRelocs(self: *Atom, macho_file: *MachO) !void {
                     .ARM64_RELOC_GOT_LOAD_PAGEOFF12 => {
                         const code = self.code.items[rel.offset..][0..4];
                         const actual_target_addr = @intCast(i64, target_addr) + rel.addend;
+                        log.debug("    | target_addr = 0x{x}", .{actual_target_addr});
                         const narrowed = @truncate(u12, @intCast(u64, actual_target_addr));
                         var inst: aarch64.Instruction = .{
                             .load_store_register = mem.bytesToValue(meta.TagPayload(
@@ -689,10 +677,13 @@ pub fn resolveRelocs(self: *Atom, macho_file: *MachO) !void {
                     },
                     .ARM64_RELOC_TLVP_LOAD_PAGEOFF12 => {
                         const code = self.code.items[rel.offset..][0..4];
+                        const actual_target_addr = @intCast(i64, target_addr) + rel.addend;
+                        log.debug("    | target_addr = 0x{x}", .{actual_target_addr});
+
                         const RegInfo = struct {
                             rd: u5,
                             rn: u5,
-                            size: u1,
+                            size: u2,
                         };
                         const reg_info: RegInfo = blk: {
                             if (isArithmeticOp(code)) {
@@ -713,13 +704,25 @@ pub fn resolveRelocs(self: *Atom, macho_file: *MachO) !void {
                                 break :blk .{
                                     .rd = inst.rt,
                                     .rn = inst.rn,
-                                    .size = @truncate(u1, inst.size),
+                                    .size = inst.size,
                                 };
                             }
                         };
-                        const actual_target_addr = @intCast(i64, target_addr) + rel.addend;
                         const narrowed = @truncate(u12, @intCast(u64, actual_target_addr));
-                        var inst = aarch64.Instruction{
+                        var inst = if (macho_file.tlv_ptr_entries_table.contains(rel.target)) blk: {
+                            const offset = try math.divExact(u12, narrowed, 8);
+                            break :blk aarch64.Instruction{
+                                .load_store_register = .{
+                                    .rt = reg_info.rd,
+                                    .rn = reg_info.rn,
+                                    .offset = offset,
+                                    .opc = 0b01,
+                                    .op1 = 0b01,
+                                    .v = 0,
+                                    .size = reg_info.size,
+                                },
+                            };
+                        } else aarch64.Instruction{
                             .add_subtract_immediate = .{
                                 .rd = reg_info.rd,
                                 .rn = reg_info.rn,
@@ -727,24 +730,27 @@ pub fn resolveRelocs(self: *Atom, macho_file: *MachO) !void {
                                 .sh = 0,
                                 .s = 0,
                                 .op = 0,
-                                .sf = reg_info.size,
+                                .sf = @truncate(u1, reg_info.size),
                             },
                         };
                         mem.writeIntLittle(u32, code, inst.toU32());
                     },
                     .ARM64_RELOC_POINTER_TO_GOT => {
-                        const result = try math.cast(i32, @intCast(i64, target_addr) - @intCast(i64, source_addr));
+                        log.debug("    | target_addr = 0x{x}", .{target_addr});
+                        const result = math.cast(i32, @intCast(i64, target_addr) - @intCast(i64, source_addr)) orelse
+                            return error.Overflow;
                         mem.writeIntLittle(u32, self.code.items[rel.offset..][0..4], @bitCast(u32, result));
                     },
                     .ARM64_RELOC_UNSIGNED => {
                         const result = blk: {
                             if (rel.subtractor) |subtractor| {
-                                const sym = macho_file.locals.items[subtractor];
+                                const sym = macho_file.getSymbol(subtractor);
                                 break :blk @intCast(i64, target_addr) - @intCast(i64, sym.n_value) + rel.addend;
                             } else {
                                 break :blk @intCast(i64, target_addr) + rel.addend;
                             }
                         };
+                        log.debug("    | target_addr = 0x{x}", .{result});
 
                         if (rel.length == 3) {
                             mem.writeIntLittle(u64, self.code.items[rel.offset..][0..8], @bitCast(u64, result));
@@ -763,24 +769,27 @@ pub fn resolveRelocs(self: *Atom, macho_file: *MachO) !void {
             .x86_64 => {
                 switch (@intToEnum(macho.reloc_type_x86_64, rel.@"type")) {
                     .X86_64_RELOC_BRANCH => {
-                        const displacement = try math.cast(
+                        log.debug("    | target_addr = 0x{x}", .{target_addr});
+                        const displacement = math.cast(
                             i32,
-                            @intCast(i64, target_addr) - @intCast(i64, source_addr) - 4,
-                        );
+                            @intCast(i64, target_addr) - @intCast(i64, source_addr) - 4 + rel.addend,
+                        ) orelse return error.Overflow;
                         mem.writeIntLittle(u32, self.code.items[rel.offset..][0..4], @bitCast(u32, displacement));
                     },
                     .X86_64_RELOC_GOT, .X86_64_RELOC_GOT_LOAD => {
-                        const displacement = try math.cast(
+                        log.debug("    | target_addr = 0x{x}", .{target_addr});
+                        const displacement = math.cast(
                             i32,
                             @intCast(i64, target_addr) - @intCast(i64, source_addr) - 4 + rel.addend,
-                        );
+                        ) orelse return error.Overflow;
                         mem.writeIntLittle(u32, self.code.items[rel.offset..][0..4], @bitCast(u32, displacement));
                     },
                     .X86_64_RELOC_TLV => {
-                        const displacement = try math.cast(
+                        log.debug("    | target_addr = 0x{x}", .{target_addr});
+                        const displacement = math.cast(
                             i32,
                             @intCast(i64, target_addr) - @intCast(i64, source_addr) - 4 + rel.addend,
-                        );
+                        ) orelse return error.Overflow;
 
                         // We need to rewrite the opcode from movq to leaq.
                         var disassembler = Disassembler.init(self.code.items[rel.offset - 3 ..]);
@@ -819,21 +828,23 @@ pub fn resolveRelocs(self: *Atom, macho_file: *MachO) !void {
                             else => unreachable,
                         };
                         const actual_target_addr = @intCast(i64, target_addr) + rel.addend;
-                        const displacement = try math.cast(
+                        log.debug("    | target_addr = 0x{x}", .{actual_target_addr});
+                        const displacement = math.cast(
                             i32,
                             actual_target_addr - @intCast(i64, source_addr + correction + 4),
-                        );
+                        ) orelse return error.Overflow;
                         mem.writeIntLittle(u32, self.code.items[rel.offset..][0..4], @bitCast(u32, displacement));
                     },
                     .X86_64_RELOC_UNSIGNED => {
                         const result = blk: {
                             if (rel.subtractor) |subtractor| {
-                                const sym = macho_file.locals.items[subtractor];
+                                const sym = macho_file.getSymbol(subtractor);
                                 break :blk @intCast(i64, target_addr) - @intCast(i64, sym.n_value) + rel.addend;
                             } else {
                                 break :blk @intCast(i64, target_addr) + rel.addend;
                             }
                         };
+                        log.debug("    | target_addr = 0x{x}", .{result});
 
                         if (rel.length == 3) {
                             mem.writeIntLittle(u64, self.code.items[rel.offset..][0..8], @bitCast(u64, result));

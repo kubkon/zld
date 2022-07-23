@@ -1,11 +1,13 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const DW = std.dwarf;
 const assert = std.debug.assert;
+const testing = std.testing;
 
 // zig fmt: off
 
 /// General purpose registers in the AArch64 instruction set
-pub const Register = enum(u6) {
+pub const Register = enum(u7) {
     // 64-bit registers
     x0, x1, x2, x3, x4, x5, x6, x7,
     x8, x9, x10, x11, x12, x13, x14, x15,
@@ -18,10 +20,23 @@ pub const Register = enum(u6) {
     w16, w17, w18, w19, w20, w21, w22, w23,
     w24, w25, w26, w27, w28, w29, w30, wzr,
 
-    pub const sp = Register.xzr;
+    // Stack pointer
+    sp, wsp,
 
-    pub fn id(self: Register) u5 {
-        return @truncate(u5, @enumToInt(self));
+    pub fn id(self: Register) u6 {
+        return switch (@enumToInt(self)) {
+            0...63 => return @as(u6, @truncate(u5, @enumToInt(self))),
+            64...65 => 32,
+            else => unreachable,
+        };
+    }
+
+    pub fn enc(self: Register) u5 {
+        return switch (@enumToInt(self)) {
+            0...63 => return @truncate(u5, @enumToInt(self)),
+            64...65 => 31,
+            else => unreachable,
+        };
     }
 
     /// Returns the bit-width of the register.
@@ -29,41 +44,64 @@ pub const Register = enum(u6) {
         return switch (@enumToInt(self)) {
             0...31 => 64,
             32...63 => 32,
+            64 => 64,
+            65 => 32,
+            else => unreachable,
         };
     }
 
     /// Convert from any register to its 64 bit alias.
     pub fn to64(self: Register) Register {
-        return @intToEnum(Register, self.id());
+        return switch (@enumToInt(self)) {
+            0...31 => self,
+            32...63 => @intToEnum(Register, @enumToInt(self) - 32),
+            64 => .sp,
+            65 => .sp,
+            else => unreachable,
+        };
     }
 
     /// Convert from any register to its 32 bit alias.
     pub fn to32(self: Register) Register {
-        return @intToEnum(Register, @as(u6, self.id()) + 32);
-    }
-
-    /// Returns the index into `callee_preserved_regs`.
-    pub fn allocIndex(self: Register) ?u4 {
-        inline for (callee_preserved_regs) |cpreg, i| {
-            if (self.id() == cpreg.id()) return i;
-        }
-        return null;
+        return switch (@enumToInt(self)) {
+            0...31 => @intToEnum(Register, @enumToInt(self) + 32),
+            32...63 => self,
+            64 => .wsp,
+            65 => .wsp,
+            else => unreachable,
+        };
     }
 
     pub fn dwarfLocOp(self: Register) u8 {
-        return @as(u8, self.id()) + DW.OP_reg0;
+        return @as(u8, self.enc()) + DW.OP.reg0;
     }
 };
 
 // zig fmt: on
 
-pub const callee_preserved_regs = [_]Register{
-    .x19, .x20, .x21, .x22, .x23,
-    .x24, .x25, .x26, .x27, .x28,
-};
+test "Register.enc" {
+    try testing.expectEqual(@as(u5, 0), Register.x0.enc());
+    try testing.expectEqual(@as(u5, 0), Register.w0.enc());
 
-pub const c_abi_int_param_regs = [_]Register{ .x0, .x1, .x2, .x3, .x4, .x5, .x6, .x7 };
-pub const c_abi_int_return_regs = [_]Register{ .x0, .x1, .x2, .x3, .x4, .x5, .x6, .x7 };
+    try testing.expectEqual(@as(u5, 31), Register.xzr.enc());
+    try testing.expectEqual(@as(u5, 31), Register.wzr.enc());
+
+    try testing.expectEqual(@as(u5, 31), Register.sp.enc());
+    try testing.expectEqual(@as(u5, 31), Register.sp.enc());
+}
+
+test "Register.size" {
+    try testing.expectEqual(@as(u7, 64), Register.x19.size());
+    try testing.expectEqual(@as(u7, 32), Register.w3.size());
+}
+
+test "Register.to64/to32" {
+    try testing.expectEqual(Register.x0, Register.w0.to64());
+    try testing.expectEqual(Register.x0, Register.x0.to64());
+
+    try testing.expectEqual(Register.w3, Register.w3.to32());
+    try testing.expectEqual(Register.w3, Register.x3.to32());
+}
 
 // zig fmt: off
 
@@ -142,6 +180,36 @@ pub const FloatingPointRegister = enum(u8) {
 };
 
 // zig fmt: on
+
+test "FloatingPointRegister.id" {
+    try testing.expectEqual(@as(u5, 0), FloatingPointRegister.b0.id());
+    try testing.expectEqual(@as(u5, 0), FloatingPointRegister.h0.id());
+    try testing.expectEqual(@as(u5, 0), FloatingPointRegister.s0.id());
+    try testing.expectEqual(@as(u5, 0), FloatingPointRegister.d0.id());
+    try testing.expectEqual(@as(u5, 0), FloatingPointRegister.q0.id());
+
+    try testing.expectEqual(@as(u5, 2), FloatingPointRegister.q2.id());
+    try testing.expectEqual(@as(u5, 31), FloatingPointRegister.d31.id());
+}
+
+test "FloatingPointRegister.size" {
+    try testing.expectEqual(@as(u8, 128), FloatingPointRegister.q1.size());
+    try testing.expectEqual(@as(u8, 64), FloatingPointRegister.d2.size());
+    try testing.expectEqual(@as(u8, 32), FloatingPointRegister.s3.size());
+    try testing.expectEqual(@as(u8, 16), FloatingPointRegister.h4.size());
+    try testing.expectEqual(@as(u8, 8), FloatingPointRegister.b5.size());
+}
+
+test "FloatingPointRegister.toX" {
+    try testing.expectEqual(FloatingPointRegister.q1, FloatingPointRegister.q1.to128());
+    try testing.expectEqual(FloatingPointRegister.q2, FloatingPointRegister.b2.to128());
+    try testing.expectEqual(FloatingPointRegister.q3, FloatingPointRegister.h3.to128());
+
+    try testing.expectEqual(FloatingPointRegister.d0, FloatingPointRegister.q0.to64());
+    try testing.expectEqual(FloatingPointRegister.s1, FloatingPointRegister.d1.to32());
+    try testing.expectEqual(FloatingPointRegister.h2, FloatingPointRegister.s2.to16());
+    try testing.expectEqual(FloatingPointRegister.b3, FloatingPointRegister.h3.to8());
+}
 
 /// Represents an instruction in the AArch64 instruction set
 pub const Instruction = union(enum) {
@@ -230,6 +298,49 @@ pub const Instruction = union(enum) {
         op: u1,
         sf: u1,
     },
+    logical_immediate: packed struct {
+        rd: u5,
+        rn: u5,
+        imms: u6,
+        immr: u6,
+        n: u1,
+        fixed: u6 = 0b100100,
+        opc: u2,
+        sf: u1,
+    },
+    bitfield: packed struct {
+        rd: u5,
+        rn: u5,
+        imms: u6,
+        immr: u6,
+        n: u1,
+        fixed: u6 = 0b100110,
+        opc: u2,
+        sf: u1,
+    },
+    add_subtract_shifted_register: packed struct {
+        rd: u5,
+        rn: u5,
+        imm6: u6,
+        rm: u5,
+        fixed_1: u1 = 0b0,
+        shift: u2,
+        fixed_2: u5 = 0b01011,
+        s: u1,
+        op: u1,
+        sf: u1,
+    },
+    add_subtract_extended_register: packed struct {
+        rd: u5,
+        rn: u5,
+        imm3: u3,
+        option: u3,
+        rm: u5,
+        fixed: u8 = 0b01011_00_1,
+        s: u1,
+        op: u1,
+        sf: u1,
+    },
     conditional_branch: struct {
         cond: u4,
         o0: u1,
@@ -244,23 +355,38 @@ pub const Instruction = union(enum) {
         fixed: u6 = 0b011010,
         sf: u1,
     },
-
-    pub const Shift = struct {
-        shift: Type = .lsl,
-        amount: u6 = 0,
-
-        pub const Type = enum(u2) {
-            lsl,
-            lsr,
-            asr,
-            ror,
-        };
-
-        pub const none = Shift{
-            .shift = .lsl,
-            .amount = 0,
-        };
-    };
+    conditional_select: struct {
+        rd: u5,
+        rn: u5,
+        op2: u2,
+        cond: u4,
+        rm: u5,
+        fixed: u8 = 0b11010100,
+        s: u1,
+        op: u1,
+        sf: u1,
+    },
+    data_processing_3_source: packed struct {
+        rd: u5,
+        rn: u5,
+        ra: u5,
+        o0: u1,
+        rm: u5,
+        op31: u3,
+        fixed: u5 = 0b11011,
+        op54: u2,
+        sf: u1,
+    },
+    data_processing_2_source: packed struct {
+        rd: u5,
+        rn: u5,
+        opcode: u6,
+        rm: u5,
+        fixed_1: u8 = 0b11010110,
+        s: u1,
+        fixed_2: u1 = 0b0,
+        sf: u1,
+    },
 
     pub const Condition = enum(u4) {
         /// Integer: Equal
@@ -311,6 +437,57 @@ pub const Instruction = union(enum) {
         /// Integer: Always
         /// Floating point: Always
         nv,
+
+        /// Converts a std.math.CompareOperator into a condition flag,
+        /// i.e. returns the condition that is true iff the result of the
+        /// comparison is true. Assumes signed comparison
+        pub fn fromCompareOperatorSigned(op: std.math.CompareOperator) Condition {
+            return switch (op) {
+                .gte => .ge,
+                .gt => .gt,
+                .neq => .ne,
+                .lt => .lt,
+                .lte => .le,
+                .eq => .eq,
+            };
+        }
+
+        /// Converts a std.math.CompareOperator into a condition flag,
+        /// i.e. returns the condition that is true iff the result of the
+        /// comparison is true. Assumes unsigned comparison
+        pub fn fromCompareOperatorUnsigned(op: std.math.CompareOperator) Condition {
+            return switch (op) {
+                .gte => .cs,
+                .gt => .hi,
+                .neq => .ne,
+                .lt => .cc,
+                .lte => .ls,
+                .eq => .eq,
+            };
+        }
+
+        /// Returns the condition which is true iff the given condition is
+        /// false (if such a condition exists)
+        pub fn negate(cond: Condition) Condition {
+            return switch (cond) {
+                .eq => .ne,
+                .ne => .eq,
+                .cs => .cc,
+                .cc => .cs,
+                .mi => .pl,
+                .pl => .mi,
+                .vs => .vc,
+                .vc => .vs,
+                .hi => .ls,
+                .ls => .hi,
+                .ge => .lt,
+                .lt => .ge,
+                .gt => .le,
+                .le => .gt,
+                .al => unreachable,
+                .nv => unreachable,
+            };
+        }
     };
 
     pub fn toU32(self: Instruction) u32 {
@@ -326,9 +503,16 @@ pub const Instruction = union(enum) {
             .no_operation => |v| @bitCast(u32, v),
             .logical_shifted_register => |v| @bitCast(u32, v),
             .add_subtract_immediate => |v| @bitCast(u32, v),
+            .logical_immediate => |v| @bitCast(u32, v),
+            .bitfield => |v| @bitCast(u32, v),
+            .add_subtract_shifted_register => |v| @bitCast(u32, v),
+            .add_subtract_extended_register => |v| @bitCast(u32, v),
             // TODO once packed structs work, this can be refactored
             .conditional_branch => |v| @as(u32, v.cond) | (@as(u32, v.o0) << 4) | (@as(u32, v.imm19) << 5) | (@as(u32, v.o1) << 24) | (@as(u32, v.fixed) << 25),
             .compare_and_branch => |v| @as(u32, v.rt) | (@as(u32, v.imm19) << 5) | (@as(u32, v.op) << 24) | (@as(u32, v.fixed) << 25) | (@as(u32, v.sf) << 31),
+            .conditional_select => |v| @as(u32, v.rd) | @as(u32, v.rn) << 5 | @as(u32, v.op2) << 10 | @as(u32, v.cond) << 12 | @as(u32, v.rm) << 16 | @as(u32, v.fixed) << 21 | @as(u32, v.s) << 29 | @as(u32, v.op) << 30 | @as(u32, v.sf) << 31,
+            .data_processing_3_source => |v| @bitCast(u32, v),
+            .data_processing_2_source => |v| @bitCast(u32, v),
         };
     }
 
@@ -338,33 +522,23 @@ pub const Instruction = union(enum) {
         imm16: u16,
         shift: u6,
     ) Instruction {
-        switch (rd.size()) {
-            32 => {
-                assert(shift % 16 == 0 and shift <= 16);
-                return Instruction{
-                    .move_wide_immediate = .{
-                        .rd = rd.id(),
-                        .imm16 = imm16,
-                        .hw = @intCast(u2, shift / 16),
-                        .opc = opc,
-                        .sf = 0,
-                    },
-                };
+        assert(shift % 16 == 0);
+        assert(!(rd.size() == 32 and shift > 16));
+        assert(!(rd.size() == 64 and shift > 48));
+
+        return Instruction{
+            .move_wide_immediate = .{
+                .rd = rd.enc(),
+                .imm16 = imm16,
+                .hw = @intCast(u2, shift / 16),
+                .opc = opc,
+                .sf = switch (rd.size()) {
+                    32 => 0,
+                    64 => 1,
+                    else => unreachable, // unexpected register size
+                },
             },
-            64 => {
-                assert(shift % 16 == 0 and shift <= 48);
-                return Instruction{
-                    .move_wide_immediate = .{
-                        .rd = rd.id(),
-                        .imm16 = imm16,
-                        .hw = @intCast(u2, shift / 16),
-                        .opc = opc,
-                        .sf = 1,
-                    },
-                };
-            },
-            else => unreachable, // unexpected register size
-        }
+        };
     }
 
     fn pcRelativeAddress(rd: Register, imm21: i21, op: u1) Instruction {
@@ -372,7 +546,7 @@ pub const Instruction = union(enum) {
         const imm21_u = @bitCast(u21, imm21);
         return Instruction{
             .pc_relative_address = .{
-                .rd = rd.id(),
+                .rd = rd.enc(),
                 .immlo = @truncate(u2, imm21_u),
                 .immhi = @truncate(u19, imm21_u >> 2),
                 .op = op,
@@ -380,69 +554,73 @@ pub const Instruction = union(enum) {
         };
     }
 
+    pub const LoadStoreOffsetImmediate = union(enum) {
+        post_index: i9,
+        pre_index: i9,
+        unsigned: u12,
+    };
+
+    pub const LoadStoreOffsetRegister = struct {
+        rm: u5,
+        shift: union(enum) {
+            uxtw: u2,
+            lsl: u2,
+            sxtw: u2,
+            sxtx: u2,
+        },
+    };
+
     /// Represents the offset operand of a load or store instruction.
     /// Data can be loaded from memory with either an immediate offset
     /// or an offset that is stored in some register.
     pub const LoadStoreOffset = union(enum) {
-        Immediate: union(enum) {
-            PostIndex: i9,
-            PreIndex: i9,
-            Unsigned: u12,
-        },
-        Register: struct {
-            rm: u5,
-            shift: union(enum) {
-                Uxtw: u2,
-                Lsl: u2,
-                Sxtw: u2,
-                Sxtx: u2,
-            },
-        },
+        immediate: LoadStoreOffsetImmediate,
+        register: LoadStoreOffsetRegister,
 
         pub const none = LoadStoreOffset{
-            .Immediate = .{ .Unsigned = 0 },
+            .immediate = .{ .unsigned = 0 },
         };
 
         pub fn toU12(self: LoadStoreOffset) u12 {
             return switch (self) {
-                .Immediate => |imm_type| switch (imm_type) {
-                    .PostIndex => |v| (@intCast(u12, @bitCast(u9, v)) << 2) + 1,
-                    .PreIndex => |v| (@intCast(u12, @bitCast(u9, v)) << 2) + 3,
-                    .Unsigned => |v| v,
+                .immediate => |imm_type| switch (imm_type) {
+                    .post_index => |v| (@intCast(u12, @bitCast(u9, v)) << 2) + 1,
+                    .pre_index => |v| (@intCast(u12, @bitCast(u9, v)) << 2) + 3,
+                    .unsigned => |v| v,
                 },
-                .Register => |r| switch (r.shift) {
-                    .Uxtw => |v| (@intCast(u12, r.rm) << 6) + (@intCast(u12, v) << 2) + 16 + 2050,
-                    .Lsl => |v| (@intCast(u12, r.rm) << 6) + (@intCast(u12, v) << 2) + 24 + 2050,
-                    .Sxtw => |v| (@intCast(u12, r.rm) << 6) + (@intCast(u12, v) << 2) + 48 + 2050,
-                    .Sxtx => |v| (@intCast(u12, r.rm) << 6) + (@intCast(u12, v) << 2) + 56 + 2050,
+                .register => |r| switch (r.shift) {
+                    .uxtw => |v| (@intCast(u12, r.rm) << 6) + (@intCast(u12, v) << 2) + 16 + 2050,
+                    .lsl => |v| (@intCast(u12, r.rm) << 6) + (@intCast(u12, v) << 2) + 24 + 2050,
+                    .sxtw => |v| (@intCast(u12, r.rm) << 6) + (@intCast(u12, v) << 2) + 48 + 2050,
+                    .sxtx => |v| (@intCast(u12, r.rm) << 6) + (@intCast(u12, v) << 2) + 56 + 2050,
                 },
             };
         }
 
         pub fn imm(offset: u12) LoadStoreOffset {
             return .{
-                .Immediate = .{ .Unsigned = offset },
+                .immediate = .{ .unsigned = offset },
             };
         }
 
         pub fn imm_post_index(offset: i9) LoadStoreOffset {
             return .{
-                .Immediate = .{ .PostIndex = offset },
+                .immediate = .{ .post_index = offset },
             };
         }
 
         pub fn imm_pre_index(offset: i9) LoadStoreOffset {
             return .{
-                .Immediate = .{ .PreIndex = offset },
+                .immediate = .{ .pre_index = offset },
             };
         }
 
         pub fn reg(rm: Register) LoadStoreOffset {
             return .{
-                .Register = .{
-                    .rm = rm.id(),
+                .register = .{
+                    .rm = rm.enc(),
                     .shift = .{
-                        .Lsl = 0,
+                        .lsl = 0,
                     },
                 },
             };
@@ -451,10 +629,10 @@ pub const Instruction = union(enum) {
         pub fn reg_uxtw(rm: Register, shift: u2) LoadStoreOffset {
             assert(rm.size() == 32 and (shift == 0 or shift == 2));
             return .{
-                .Register = .{
-                    .rm = rm.id(),
+                .register = .{
+                    .rm = rm.enc(),
                     .shift = .{
-                        .Uxtw = shift,
+                        .uxtw = shift,
                     },
                 },
             };
@@ -463,10 +641,10 @@ pub const Instruction = union(enum) {
         pub fn reg_lsl(rm: Register, shift: u2) LoadStoreOffset {
             assert(rm.size() == 64 and (shift == 0 or shift == 3));
             return .{
-                .Register = .{
-                    .rm = rm.id(),
+                .register = .{
+                    .rm = rm.enc(),
                     .shift = .{
-                        .Lsl = shift,
+                        .lsl = shift,
                     },
                 },
             };
@@ -475,10 +653,10 @@ pub const Instruction = union(enum) {
         pub fn reg_sxtw(rm: Register, shift: u2) LoadStoreOffset {
             assert(rm.size() == 32 and (shift == 0 or shift == 2));
             return .{
-                .Register = .{
-                    .rm = rm.id(),
+                .register = .{
+                    .rm = rm.enc(),
                     .shift = .{
-                        .Sxtw = shift,
+                        .sxtw = shift,
                     },
                 },
             };
@@ -487,10 +665,10 @@ pub const Instruction = union(enum) {
         pub fn reg_sxtx(rm: Register, shift: u2) LoadStoreOffset {
             assert(rm.size() == 64 and (shift == 0 or shift == 3));
             return .{
-                .Register = .{
-                    .rm = rm.id(),
+                .register = .{
+                    .rm = rm.enc(),
                     .shift = .{
-                        .Sxtx = shift,
+                        .sxtx = shift,
                     },
                 },
             };
@@ -499,18 +677,24 @@ pub const Instruction = union(enum) {
 
     /// Which kind of load/store to perform
     const LoadStoreVariant = enum {
-        /// 32-bit or 64-bit
+        /// 32 bits or 64 bits
         str,
-        /// 16-bit, zero-extended
-        strh,
-        /// 8-bit, zero-extended
+        /// 8 bits, zero-extended
         strb,
-        /// 32-bit or 64-bit
+        /// 16 bits, zero-extended
+        strh,
+        /// 32 bits or 64 bits
         ldr,
-        /// 16-bit, zero-extended
-        ldrh,
-        /// 8-bit, zero-extended
+        /// 8 bits, zero-extended
         ldrb,
+        /// 16 bits, zero-extended
+        ldrh,
+        /// 8 bits, sign extended
+        ldrsb,
+        /// 16 bits, sign extended
+        ldrsh,
+        /// 32 bits, sign extended
+        ldrsw,
     };
 
     fn loadStoreRegister(
@@ -519,40 +703,59 @@ pub const Instruction = union(enum) {
         offset: LoadStoreOffset,
         variant: LoadStoreVariant,
     ) Instruction {
+        assert(rn.size() == 64);
+        assert(rn.id() != Register.xzr.id());
+
         const off = offset.toU12();
+
         const op1: u2 = blk: {
             switch (offset) {
-                .Immediate => |imm| switch (imm) {
-                    .Unsigned => break :blk 0b01,
+                .immediate => |imm| switch (imm) {
+                    .unsigned => break :blk 0b01,
                     else => {},
                 },
                 else => {},
             }
             break :blk 0b00;
         };
-        const opc: u2 = switch (variant) {
-            .ldr, .ldrh, .ldrb => 0b01,
-            .str, .strh, .strb => 0b00,
+
+        const opc: u2 = blk: {
+            switch (variant) {
+                .ldr, .ldrh, .ldrb => break :blk 0b01,
+                .str, .strh, .strb => break :blk 0b00,
+                .ldrsb,
+                .ldrsh,
+                => switch (rt.size()) {
+                    32 => break :blk 0b11,
+                    64 => break :blk 0b10,
+                    else => unreachable, // unexpected register size
+                },
+                .ldrsw => break :blk 0b10,
+            }
         };
+
+        const size: u2 = blk: {
+            switch (variant) {
+                .ldr, .str => switch (rt.size()) {
+                    32 => break :blk 0b10,
+                    64 => break :blk 0b11,
+                    else => unreachable, // unexpected register size
+                },
+                .ldrsw => break :blk 0b10,
+                .ldrh, .ldrsh, .strh => break :blk 0b01,
+                .ldrb, .ldrsb, .strb => break :blk 0b00,
+            }
+        };
+
         return Instruction{
             .load_store_register = .{
-                .rt = rt.id(),
-                .rn = rn.id(),
+                .rt = rt.enc(),
+                .rn = rn.enc(),
                 .offset = off,
                 .opc = opc,
                 .op1 = op1,
                 .v = 0,
-                .size = blk: {
-                    switch (variant) {
-                        .ldr, .str => switch (rt.size()) {
-                            32 => break :blk 0b10,
-                            64 => break :blk 0b11,
-                            else => unreachable, // unexpected register size
-                        },
-                        .ldrh, .strh => break :blk 0b01,
-                        .ldrb, .strb => break :blk 0b00,
-                    }
-                },
+                .size = size,
             },
         };
     }
@@ -565,15 +768,18 @@ pub const Instruction = union(enum) {
         encoding: u2,
         load: bool,
     ) Instruction {
+        assert(rn.size() == 64);
+        assert(rn.id() != Register.xzr.id());
+
         switch (rt1.size()) {
             32 => {
                 assert(-256 <= offset and offset <= 252);
                 const imm7 = @truncate(u7, @bitCast(u9, offset >> 2));
                 return Instruction{
                     .load_store_register_pair = .{
-                        .rt1 = rt1.id(),
-                        .rn = rn.id(),
-                        .rt2 = rt2.id(),
+                        .rt1 = rt1.enc(),
+                        .rn = rn.enc(),
+                        .rt2 = rt2.enc(),
                         .imm7 = imm7,
                         .load = @boolToInt(load),
                         .encoding = encoding,
@@ -586,9 +792,9 @@ pub const Instruction = union(enum) {
                 const imm7 = @truncate(u7, @bitCast(u9, offset >> 3));
                 return Instruction{
                     .load_store_register_pair = .{
-                        .rt1 = rt1.id(),
-                        .rn = rn.id(),
-                        .rt2 = rt2.id(),
+                        .rt1 = rt1.enc(),
+                        .rn = rn.enc(),
+                        .rt2 = rt2.enc(),
                         .imm7 = imm7,
                         .load = @boolToInt(load),
                         .encoding = encoding,
@@ -601,27 +807,17 @@ pub const Instruction = union(enum) {
     }
 
     fn loadLiteral(rt: Register, imm19: u19) Instruction {
-        switch (rt.size()) {
-            32 => {
-                return Instruction{
-                    .load_literal = .{
-                        .rt = rt.id(),
-                        .imm19 = imm19,
-                        .opc = 0b00,
-                    },
-                };
+        return Instruction{
+            .load_literal = .{
+                .rt = rt.enc(),
+                .imm19 = imm19,
+                .opc = switch (rt.size()) {
+                    32 => 0b00,
+                    64 => 0b01,
+                    else => unreachable, // unexpected register size
+                },
             },
-            64 => {
-                return Instruction{
-                    .load_literal = .{
-                        .rt = rt.id(),
-                        .imm19 = imm19,
-                        .opc = 0b01,
-                    },
-                };
-            },
-            else => unreachable, // unexpected register size
-        }
+        };
     }
 
     fn exceptionGeneration(
@@ -652,7 +848,7 @@ pub const Instruction = union(enum) {
         return Instruction{
             .unconditional_branch_register = .{
                 .op4 = op4,
-                .rn = rn.id(),
+                .rn = rn.enc(),
                 .op3 = op3,
                 .op2 = op2,
                 .opc = opc,
@@ -672,46 +868,37 @@ pub const Instruction = union(enum) {
         };
     }
 
+    pub const LogicalShiftedRegisterShift = enum(u2) { lsl, lsr, asr, ror };
+
     fn logicalShiftedRegister(
         opc: u2,
         n: u1,
-        shift: Shift,
         rd: Register,
         rn: Register,
         rm: Register,
+        shift: LogicalShiftedRegisterShift,
+        amount: u6,
     ) Instruction {
-        switch (rd.size()) {
-            32 => {
-                assert(shift.amount < 32);
-                return Instruction{
-                    .logical_shifted_register = .{
-                        .rd = rd.id(),
-                        .rn = rn.id(),
-                        .imm6 = shift.amount,
-                        .rm = rm.id(),
-                        .n = n,
-                        .shift = @enumToInt(shift.shift),
-                        .opc = opc,
-                        .sf = 0b0,
-                    },
-                };
+        assert(rd.size() == rn.size());
+        assert(rd.size() == rm.size());
+        if (rd.size() == 32) assert(amount < 32);
+
+        return Instruction{
+            .logical_shifted_register = .{
+                .rd = rd.enc(),
+                .rn = rn.enc(),
+                .imm6 = amount,
+                .rm = rm.enc(),
+                .n = n,
+                .shift = @enumToInt(shift),
+                .opc = opc,
+                .sf = switch (rd.size()) {
+                    32 => 0b0,
+                    64 => 0b1,
+                    else => unreachable,
+                },
             },
-            64 => {
-                return Instruction{
-                    .logical_shifted_register = .{
-                        .rd = rd.id(),
-                        .rn = rn.id(),
-                        .imm6 = shift.amount,
-                        .rm = rm.id(),
-                        .n = n,
-                        .shift = @enumToInt(shift.shift),
-                        .opc = opc,
-                        .sf = 0b1,
-                    },
-                };
-            },
-            else => unreachable, // unexpected register size
-        }
+        };
     }
 
     fn addSubtractImmediate(
@@ -722,12 +909,142 @@ pub const Instruction = union(enum) {
         imm12: u12,
         shift: bool,
     ) Instruction {
+        assert(rd.size() == rn.size());
+        assert(rn.id() != Register.xzr.id());
+
         return Instruction{
             .add_subtract_immediate = .{
-                .rd = rd.id(),
-                .rn = rn.id(),
+                .rd = rd.enc(),
+                .rn = rn.enc(),
                 .imm12 = imm12,
                 .sh = @boolToInt(shift),
+                .s = s,
+                .op = op,
+                .sf = switch (rd.size()) {
+                    32 => 0b0,
+                    64 => 0b1,
+                    else => unreachable, // unexpected register size
+                },
+            },
+        };
+    }
+
+    fn logicalImmediate(
+        opc: u2,
+        rd: Register,
+        rn: Register,
+        imms: u6,
+        immr: u6,
+        n: u1,
+    ) Instruction {
+        assert(rd.size() == rn.size());
+        assert(!(rd.size() == 32 and n != 0));
+
+        return Instruction{
+            .logical_immediate = .{
+                .rd = rd.enc(),
+                .rn = rn.enc(),
+                .imms = imms,
+                .immr = immr,
+                .n = n,
+                .opc = opc,
+                .sf = switch (rd.size()) {
+                    32 => 0b0,
+                    64 => 0b1,
+                    else => unreachable, // unexpected register size
+                },
+            },
+        };
+    }
+
+    fn bitfield(
+        opc: u2,
+        n: u1,
+        rd: Register,
+        rn: Register,
+        immr: u6,
+        imms: u6,
+    ) Instruction {
+        assert(rd.size() == rn.size());
+        assert(!(rd.size() == 64 and n != 1));
+        assert(!(rd.size() == 32 and (n != 0 or immr >> 5 != 0 or immr >> 5 != 0)));
+
+        return Instruction{
+            .bitfield = .{
+                .rd = rd.enc(),
+                .rn = rn.enc(),
+                .imms = imms,
+                .immr = immr,
+                .n = n,
+                .opc = opc,
+                .sf = switch (rd.size()) {
+                    32 => 0b0,
+                    64 => 0b1,
+                    else => unreachable, // unexpected register size
+                },
+            },
+        };
+    }
+
+    pub const AddSubtractShiftedRegisterShift = enum(u2) { lsl, lsr, asr, _ };
+
+    fn addSubtractShiftedRegister(
+        op: u1,
+        s: u1,
+        shift: AddSubtractShiftedRegisterShift,
+        rd: Register,
+        rn: Register,
+        rm: Register,
+        imm6: u6,
+    ) Instruction {
+        assert(rd.size() == rn.size());
+        assert(rd.size() == rm.size());
+
+        return Instruction{
+            .add_subtract_shifted_register = .{
+                .rd = rd.enc(),
+                .rn = rn.enc(),
+                .imm6 = imm6,
+                .rm = rm.enc(),
+                .shift = @enumToInt(shift),
+                .s = s,
+                .op = op,
+                .sf = switch (rd.size()) {
+                    32 => 0b0,
+                    64 => 0b1,
+                    else => unreachable, // unexpected register size
+                },
+            },
+        };
+    }
+
+    pub const AddSubtractExtendedRegisterOption = enum(u3) {
+        uxtb,
+        uxth,
+        uxtw,
+        uxtx, // serves also as lsl
+        sxtb,
+        sxth,
+        sxtw,
+        sxtx,
+    };
+
+    fn addSubtractExtendedRegister(
+        op: u1,
+        s: u1,
+        rd: Register,
+        rn: Register,
+        rm: Register,
+        extend: AddSubtractExtendedRegisterOption,
+        imm3: u3,
+    ) Instruction {
+        return Instruction{
+            .add_subtract_extended_register = .{
+                .rd = rd.enc(),
+                .rn = rn.enc(),
+                .imm3 = imm3,
+                .option = @enumToInt(extend),
+                .rm = rm.enc(),
                 .s = s,
                 .op = op,
                 .sf = switch (rd.size()) {
@@ -746,6 +1063,7 @@ pub const Instruction = union(enum) {
         offset: i21,
     ) Instruction {
         assert(offset & 0b11 == 0b00);
+
         return Instruction{
             .conditional_branch = .{
                 .cond = @enumToInt(cond),
@@ -762,12 +1080,96 @@ pub const Instruction = union(enum) {
         offset: i21,
     ) Instruction {
         assert(offset & 0b11 == 0b00);
+
         return Instruction{
             .compare_and_branch = .{
-                .rt = rt.id(),
+                .rt = rt.enc(),
                 .imm19 = @bitCast(u19, @intCast(i19, offset >> 2)),
                 .op = op,
                 .sf = switch (rt.size()) {
+                    32 => 0b0,
+                    64 => 0b1,
+                    else => unreachable, // unexpected register size
+                },
+            },
+        };
+    }
+
+    fn conditionalSelect(
+        op2: u2,
+        op: u1,
+        s: u1,
+        rd: Register,
+        rn: Register,
+        rm: Register,
+        cond: Condition,
+    ) Instruction {
+        assert(rd.size() == rn.size());
+        assert(rd.size() == rm.size());
+
+        return Instruction{
+            .conditional_select = .{
+                .rd = rd.enc(),
+                .rn = rn.enc(),
+                .op2 = op2,
+                .cond = @enumToInt(cond),
+                .rm = rm.enc(),
+                .s = s,
+                .op = op,
+                .sf = switch (rd.size()) {
+                    32 => 0b0,
+                    64 => 0b1,
+                    else => unreachable, // unexpected register size
+                },
+            },
+        };
+    }
+
+    fn dataProcessing3Source(
+        op54: u2,
+        op31: u3,
+        o0: u1,
+        rd: Register,
+        rn: Register,
+        rm: Register,
+        ra: Register,
+    ) Instruction {
+        return Instruction{
+            .data_processing_3_source = .{
+                .rd = rd.enc(),
+                .rn = rn.enc(),
+                .ra = ra.enc(),
+                .o0 = o0,
+                .rm = rm.enc(),
+                .op31 = op31,
+                .op54 = op54,
+                .sf = switch (rd.size()) {
+                    32 => 0b0,
+                    64 => 0b1,
+                    else => unreachable, // unexpected register size
+                },
+            },
+        };
+    }
+
+    fn dataProcessing2Source(
+        s: u1,
+        opcode: u6,
+        rd: Register,
+        rn: Register,
+        rm: Register,
+    ) Instruction {
+        assert(rd.size() == rn.size());
+        assert(rd.size() == rm.size());
+
+        return Instruction{
+            .data_processing_2_source = .{
+                .rd = rd.enc(),
+                .rn = rn.enc(),
+                .opcode = opcode,
+                .rm = rm.enc(),
+                .s = s,
+                .sf = switch (rd.size()) {
                     32 => 0b0,
                     64 => 0b1,
                     else => unreachable, // unexpected register size
@@ -804,69 +1206,70 @@ pub const Instruction = union(enum) {
 
     // Load or store register
 
-    pub const LdrArgs = union(enum) {
-        register: struct {
-            rn: Register,
-            offset: LoadStoreOffset = LoadStoreOffset.none,
-        },
-        literal: u19,
-    };
-
-    pub fn ldr(rt: Register, args: LdrArgs) Instruction {
-        switch (args) {
-            .register => |info| return loadStoreRegister(rt, info.rn, info.offset, .ldr),
-            .literal => |literal| return loadLiteral(rt, literal),
-        }
+    pub fn ldrLiteral(rt: Register, literal: u19) Instruction {
+        return loadLiteral(rt, literal);
     }
 
-    pub fn ldrh(rt: Register, rn: Register, args: StrArgs) Instruction {
-        return loadStoreRegister(rt, rn, args.offset, .ldrh);
+    pub fn ldr(rt: Register, rn: Register, offset: LoadStoreOffset) Instruction {
+        return loadStoreRegister(rt, rn, offset, .ldr);
     }
 
-    pub fn ldrb(rt: Register, rn: Register, args: StrArgs) Instruction {
-        return loadStoreRegister(rt, rn, args.offset, .ldrb);
+    pub fn ldrh(rt: Register, rn: Register, offset: LoadStoreOffset) Instruction {
+        return loadStoreRegister(rt, rn, offset, .ldrh);
     }
 
-    pub const StrArgs = struct {
-        offset: LoadStoreOffset = LoadStoreOffset.none,
-    };
-
-    pub fn str(rt: Register, rn: Register, args: StrArgs) Instruction {
-        return loadStoreRegister(rt, rn, args.offset, .str);
+    pub fn ldrb(rt: Register, rn: Register, offset: LoadStoreOffset) Instruction {
+        return loadStoreRegister(rt, rn, offset, .ldrb);
     }
 
-    pub fn strh(rt: Register, rn: Register, args: StrArgs) Instruction {
-        return loadStoreRegister(rt, rn, args.offset, .strh);
+    pub fn ldrsb(rt: Register, rn: Register, offset: LoadStoreOffset) Instruction {
+        return loadStoreRegister(rt, rn, offset, .ldrsb);
     }
 
-    pub fn strb(rt: Register, rn: Register, args: StrArgs) Instruction {
-        return loadStoreRegister(rt, rn, args.offset, .strb);
+    pub fn ldrsh(rt: Register, rn: Register, offset: LoadStoreOffset) Instruction {
+        return loadStoreRegister(rt, rn, offset, .ldrsh);
+    }
+
+    pub fn ldrsw(rt: Register, rn: Register, offset: LoadStoreOffset) Instruction {
+        return loadStoreRegister(rt, rn, offset, .ldrsw);
+    }
+
+    pub fn str(rt: Register, rn: Register, offset: LoadStoreOffset) Instruction {
+        return loadStoreRegister(rt, rn, offset, .str);
+    }
+
+    pub fn strh(rt: Register, rn: Register, offset: LoadStoreOffset) Instruction {
+        return loadStoreRegister(rt, rn, offset, .strh);
+    }
+
+    pub fn strb(rt: Register, rn: Register, offset: LoadStoreOffset) Instruction {
+        return loadStoreRegister(rt, rn, offset, .strb);
     }
 
     // Load or store pair of registers
 
     pub const LoadStorePairOffset = struct {
         encoding: enum(u2) {
-            PostIndex = 0b01,
-            Signed = 0b10,
-            PreIndex = 0b11,
+            post_index = 0b01,
+            signed = 0b10,
+            pre_index = 0b11,
         },
         offset: i9,
 
         pub fn none() LoadStorePairOffset {
-            return .{ .encoding = .Signed, .offset = 0 };
+            return .{ .encoding = .signed, .offset = 0 };
         }
 
         pub fn post_index(imm: i9) LoadStorePairOffset {
-            return .{ .encoding = .PostIndex, .offset = imm };
+            return .{ .encoding = .post_index, .offset = imm };
         }
 
         pub fn pre_index(imm: i9) LoadStorePairOffset {
-            return .{ .encoding = .PreIndex, .offset = imm };
+            return .{ .encoding = .pre_index, .offset = imm };
         }
 
         pub fn signed(imm: i9) LoadStorePairOffset {
-            return .{ .encoding = .Signed, .offset = imm };
+            return .{ .encoding = .signed, .offset = imm };
         }
     };
 
@@ -940,36 +1343,84 @@ pub const Instruction = union(enum) {
 
     // Logical (shifted register)
 
-    pub fn @"and"(rd: Register, rn: Register, rm: Register, shift: Shift) Instruction {
-        return logicalShiftedRegister(0b00, 0b0, shift, rd, rn, rm);
+    pub fn andShiftedRegister(
+        rd: Register,
+        rn: Register,
+        rm: Register,
+        shift: LogicalShiftedRegisterShift,
+        amount: u6,
+    ) Instruction {
+        return logicalShiftedRegister(0b00, 0b0, rd, rn, rm, shift, amount);
     }
 
-    pub fn bic(rd: Register, rn: Register, rm: Register, shift: Shift) Instruction {
-        return logicalShiftedRegister(0b00, 0b1, shift, rd, rn, rm);
+    pub fn bicShiftedRegister(
+        rd: Register,
+        rn: Register,
+        rm: Register,
+        shift: LogicalShiftedRegisterShift,
+        amount: u6,
+    ) Instruction {
+        return logicalShiftedRegister(0b00, 0b1, rd, rn, rm, shift, amount);
     }
 
-    pub fn orr(rd: Register, rn: Register, rm: Register, shift: Shift) Instruction {
-        return logicalShiftedRegister(0b01, 0b0, shift, rd, rn, rm);
+    pub fn orrShiftedRegister(
+        rd: Register,
+        rn: Register,
+        rm: Register,
+        shift: LogicalShiftedRegisterShift,
+        amount: u6,
+    ) Instruction {
+        return logicalShiftedRegister(0b01, 0b0, rd, rn, rm, shift, amount);
     }
 
-    pub fn orn(rd: Register, rn: Register, rm: Register, shift: Shift) Instruction {
-        return logicalShiftedRegister(0b01, 0b1, shift, rd, rn, rm);
+    pub fn ornShiftedRegister(
+        rd: Register,
+        rn: Register,
+        rm: Register,
+        shift: LogicalShiftedRegisterShift,
+        amount: u6,
+    ) Instruction {
+        return logicalShiftedRegister(0b01, 0b1, rd, rn, rm, shift, amount);
     }
 
-    pub fn eor(rd: Register, rn: Register, rm: Register, shift: Shift) Instruction {
-        return logicalShiftedRegister(0b10, 0b0, shift, rd, rn, rm);
+    pub fn eorShiftedRegister(
+        rd: Register,
+        rn: Register,
+        rm: Register,
+        shift: LogicalShiftedRegisterShift,
+        amount: u6,
+    ) Instruction {
+        return logicalShiftedRegister(0b10, 0b0, rd, rn, rm, shift, amount);
     }
 
-    pub fn eon(rd: Register, rn: Register, rm: Register, shift: Shift) Instruction {
-        return logicalShiftedRegister(0b10, 0b1, shift, rd, rn, rm);
+    pub fn eonShiftedRegister(
+        rd: Register,
+        rn: Register,
+        rm: Register,
+        shift: LogicalShiftedRegisterShift,
+        amount: u6,
+    ) Instruction {
+        return logicalShiftedRegister(0b10, 0b1, rd, rn, rm, shift, amount);
     }
 
-    pub fn ands(rd: Register, rn: Register, rm: Register, shift: Shift) Instruction {
-        return logicalShiftedRegister(0b11, 0b0, shift, rd, rn, rm);
+    pub fn andsShiftedRegister(
+        rd: Register,
+        rn: Register,
+        rm: Register,
+        shift: LogicalShiftedRegisterShift,
+        amount: u6,
+    ) Instruction {
+        return logicalShiftedRegister(0b11, 0b0, rd, rn, rm, shift, amount);
     }
 
-    pub fn bics(rd: Register, rn: Register, rm: Register, shift: Shift) Instruction {
-        return logicalShiftedRegister(0b11, 0b1, shift, rd, rn, rm);
+    pub fn bicsShiftedRegister(
+        rd: Register,
+        rn: Register,
+        rm: Register,
+        shift: LogicalShiftedRegisterShift,
+        amount: u6,
+    ) Instruction {
+        return logicalShiftedRegister(0b11, 0b1, rd, rn, rm, shift, amount);
     }
 
     // Add/subtract (immediate)
@@ -990,6 +1441,181 @@ pub const Instruction = union(enum) {
         return addSubtractImmediate(0b1, 0b1, rd, rn, imm, shift);
     }
 
+    // Logical (immediate)
+
+    pub fn andImmediate(rd: Register, rn: Register, imms: u6, immr: u6, n: u1) Instruction {
+        return logicalImmediate(0b00, rd, rn, imms, immr, n);
+    }
+
+    pub fn orrImmediate(rd: Register, rn: Register, imms: u6, immr: u6, n: u1) Instruction {
+        return logicalImmediate(0b01, rd, rn, imms, immr, n);
+    }
+
+    pub fn eorImmediate(rd: Register, rn: Register, imms: u6, immr: u6, n: u1) Instruction {
+        return logicalImmediate(0b10, rd, rn, imms, immr, n);
+    }
+
+    pub fn andsImmediate(rd: Register, rn: Register, imms: u6, immr: u6, n: u1) Instruction {
+        return logicalImmediate(0b11, rd, rn, imms, immr, n);
+    }
+
+    // Bitfield
+
+    pub fn sbfm(rd: Register, rn: Register, immr: u6, imms: u6) Instruction {
+        const n: u1 = switch (rd.size()) {
+            32 => 0b0,
+            64 => 0b1,
+            else => unreachable, // unexpected register size
+        };
+        return bitfield(0b00, n, rd, rn, immr, imms);
+    }
+
+    pub fn bfm(rd: Register, rn: Register, immr: u6, imms: u6) Instruction {
+        const n: u1 = switch (rd.size()) {
+            32 => 0b0,
+            64 => 0b1,
+            else => unreachable, // unexpected register size
+        };
+        return bitfield(0b01, n, rd, rn, immr, imms);
+    }
+
+    pub fn ubfm(rd: Register, rn: Register, immr: u6, imms: u6) Instruction {
+        const n: u1 = switch (rd.size()) {
+            32 => 0b0,
+            64 => 0b1,
+            else => unreachable, // unexpected register size
+        };
+        return bitfield(0b10, n, rd, rn, immr, imms);
+    }
+
+    pub fn asrImmediate(rd: Register, rn: Register, shift: u6) Instruction {
+        const imms = @intCast(u6, rd.size() - 1);
+        return sbfm(rd, rn, shift, imms);
+    }
+
+    pub fn sbfx(rd: Register, rn: Register, lsb: u6, width: u7) Instruction {
+        return sbfm(rd, rn, lsb, @intCast(u6, lsb + width - 1));
+    }
+
+    pub fn sxtb(rd: Register, rn: Register) Instruction {
+        return sbfm(rd, rn, 0, 7);
+    }
+
+    pub fn sxth(rd: Register, rn: Register) Instruction {
+        return sbfm(rd, rn, 0, 15);
+    }
+
+    pub fn sxtw(rd: Register, rn: Register) Instruction {
+        assert(rd.size() == 64);
+        return sbfm(rd, rn, 0, 31);
+    }
+
+    pub fn lslImmediate(rd: Register, rn: Register, shift: u6) Instruction {
+        const size = @intCast(u6, rd.size() - 1);
+        return ubfm(rd, rn, size - shift + 1, size - shift);
+    }
+
+    pub fn lsrImmediate(rd: Register, rn: Register, shift: u6) Instruction {
+        const imms = @intCast(u6, rd.size() - 1);
+        return ubfm(rd, rn, shift, imms);
+    }
+
+    pub fn ubfx(rd: Register, rn: Register, lsb: u6, width: u7) Instruction {
+        return ubfm(rd, rn, lsb, @intCast(u6, lsb + width - 1));
+    }
+
+    pub fn uxtb(rd: Register, rn: Register) Instruction {
+        return ubfm(rd, rn, 0, 7);
+    }
+
+    pub fn uxth(rd: Register, rn: Register) Instruction {
+        return ubfm(rd, rn, 0, 15);
+    }
+
+    // Add/subtract (shifted register)
+
+    pub fn addShiftedRegister(
+        rd: Register,
+        rn: Register,
+        rm: Register,
+        shift: AddSubtractShiftedRegisterShift,
+        imm6: u6,
+    ) Instruction {
+        return addSubtractShiftedRegister(0b0, 0b0, shift, rd, rn, rm, imm6);
+    }
+
+    pub fn addsShiftedRegister(
+        rd: Register,
+        rn: Register,
+        rm: Register,
+        shift: AddSubtractShiftedRegisterShift,
+        imm6: u6,
+    ) Instruction {
+        return addSubtractShiftedRegister(0b0, 0b1, shift, rd, rn, rm, imm6);
+    }
+
+    pub fn subShiftedRegister(
+        rd: Register,
+        rn: Register,
+        rm: Register,
+        shift: AddSubtractShiftedRegisterShift,
+        imm6: u6,
+    ) Instruction {
+        return addSubtractShiftedRegister(0b1, 0b0, shift, rd, rn, rm, imm6);
+    }
+
+    pub fn subsShiftedRegister(
+        rd: Register,
+        rn: Register,
+        rm: Register,
+        shift: AddSubtractShiftedRegisterShift,
+        imm6: u6,
+    ) Instruction {
+        return addSubtractShiftedRegister(0b1, 0b1, shift, rd, rn, rm, imm6);
+    }
+
+    // Add/subtract (extended register)
+
+    pub fn addExtendedRegister(
+        rd: Register,
+        rn: Register,
+        rm: Register,
+        extend: AddSubtractExtendedRegisterOption,
+        imm3: u3,
+    ) Instruction {
+        return addSubtractExtendedRegister(0b0, 0b0, rd, rn, rm, extend, imm3);
+    }
+
+    pub fn addsExtendedRegister(
+        rd: Register,
+        rn: Register,
+        rm: Register,
+        extend: AddSubtractExtendedRegisterOption,
+        imm3: u3,
+    ) Instruction {
+        return addSubtractExtendedRegister(0b0, 0b1, rd, rn, rm, extend, imm3);
+    }
+
+    pub fn subExtendedRegister(
+        rd: Register,
+        rn: Register,
+        rm: Register,
+        extend: AddSubtractExtendedRegisterOption,
+        imm3: u3,
+    ) Instruction {
+        return addSubtractExtendedRegister(0b1, 0b0, rd, rn, rm, extend, imm3);
+    }
+
+    pub fn subsExtendedRegister(
+        rd: Register,
+        rn: Register,
+        rm: Register,
+        extend: AddSubtractExtendedRegisterOption,
+        imm3: u3,
+    ) Instruction {
+        return addSubtractExtendedRegister(0b1, 0b1, rd, rn, rm, extend, imm3);
+    }
+
     // Conditional branch
 
     pub fn bCond(cond: Condition, offset: i21) Instruction {
@@ -1005,4 +1631,313 @@ pub const Instruction = union(enum) {
     pub fn cbnz(rt: Register, offset: i21) Instruction {
         return compareAndBranch(0b1, rt, offset);
     }
+
+    // Conditional select
+
+    pub fn csel(rd: Register, rn: Register, rm: Register, cond: Condition) Instruction {
+        return conditionalSelect(0b00, 0b0, 0b0, rd, rn, rm, cond);
+    }
+
+    pub fn csinc(rd: Register, rn: Register, rm: Register, cond: Condition) Instruction {
+        return conditionalSelect(0b01, 0b0, 0b0, rd, rn, rm, cond);
+    }
+
+    pub fn csinv(rd: Register, rn: Register, rm: Register, cond: Condition) Instruction {
+        return conditionalSelect(0b00, 0b1, 0b0, rd, rn, rm, cond);
+    }
+
+    pub fn csneg(rd: Register, rn: Register, rm: Register, cond: Condition) Instruction {
+        return conditionalSelect(0b01, 0b1, 0b0, rd, rn, rm, cond);
+    }
+
+    // Data processing (3 source)
+
+    pub fn madd(rd: Register, rn: Register, rm: Register, ra: Register) Instruction {
+        return dataProcessing3Source(0b00, 0b000, 0b0, rd, rn, rm, ra);
+    }
+
+    pub fn smaddl(rd: Register, rn: Register, rm: Register, ra: Register) Instruction {
+        assert(rd.size() == 64 and rn.size() == 32 and rm.size() == 32 and ra.size() == 64);
+        return dataProcessing3Source(0b00, 0b001, 0b0, rd, rn, rm, ra);
+    }
+
+    pub fn umaddl(rd: Register, rn: Register, rm: Register, ra: Register) Instruction {
+        assert(rd.size() == 64 and rn.size() == 32 and rm.size() == 32 and ra.size() == 64);
+        return dataProcessing3Source(0b00, 0b101, 0b0, rd, rn, rm, ra);
+    }
+
+    pub fn msub(rd: Register, rn: Register, rm: Register, ra: Register) Instruction {
+        return dataProcessing3Source(0b00, 0b000, 0b1, rd, rn, rm, ra);
+    }
+
+    pub fn mul(rd: Register, rn: Register, rm: Register) Instruction {
+        return madd(rd, rn, rm, .xzr);
+    }
+
+    pub fn smull(rd: Register, rn: Register, rm: Register) Instruction {
+        return smaddl(rd, rn, rm, .xzr);
+    }
+
+    pub fn smulh(rd: Register, rn: Register, rm: Register) Instruction {
+        assert(rd.size() == 64);
+        return dataProcessing3Source(0b00, 0b010, 0b0, rd, rn, rm, .xzr);
+    }
+
+    pub fn umull(rd: Register, rn: Register, rm: Register) Instruction {
+        return umaddl(rd, rn, rm, .xzr);
+    }
+
+    pub fn umulh(rd: Register, rn: Register, rm: Register) Instruction {
+        assert(rd.size() == 64);
+        return dataProcessing3Source(0b00, 0b110, 0b0, rd, rn, rm, .xzr);
+    }
+
+    pub fn mneg(rd: Register, rn: Register, rm: Register) Instruction {
+        return msub(rd, rn, rm, .xzr);
+    }
+
+    // Data processing (2 source)
+
+    pub fn lslv(rd: Register, rn: Register, rm: Register) Instruction {
+        return dataProcessing2Source(0b0, 0b001000, rd, rn, rm);
+    }
+
+    pub fn lsrv(rd: Register, rn: Register, rm: Register) Instruction {
+        return dataProcessing2Source(0b0, 0b001001, rd, rn, rm);
+    }
+
+    pub fn asrv(rd: Register, rn: Register, rm: Register) Instruction {
+        return dataProcessing2Source(0b0, 0b001010, rd, rn, rm);
+    }
+
+    pub const asrRegister = asrv;
+    pub const lslRegister = lslv;
+    pub const lsrRegister = lsrv;
 };
+
+test {
+    testing.refAllDecls(@This());
+}
+
+test "serialize instructions" {
+    const Testcase = struct {
+        inst: Instruction,
+        expected: u32,
+    };
+
+    const testcases = [_]Testcase{
+        .{ // orr x0, xzr, x1
+            .inst = Instruction.orrShiftedRegister(.x0, .xzr, .x1, .lsl, 0),
+            .expected = 0b1_01_01010_00_0_00001_000000_11111_00000,
+        },
+        .{ // orn x0, xzr, x1
+            .inst = Instruction.ornShiftedRegister(.x0, .xzr, .x1, .lsl, 0),
+            .expected = 0b1_01_01010_00_1_00001_000000_11111_00000,
+        },
+        .{ // movz x1, #4
+            .inst = Instruction.movz(.x1, 4, 0),
+            .expected = 0b1_10_100101_00_0000000000000100_00001,
+        },
+        .{ // movz x1, #4, lsl 16
+            .inst = Instruction.movz(.x1, 4, 16),
+            .expected = 0b1_10_100101_01_0000000000000100_00001,
+        },
+        .{ // movz x1, #4, lsl 32
+            .inst = Instruction.movz(.x1, 4, 32),
+            .expected = 0b1_10_100101_10_0000000000000100_00001,
+        },
+        .{ // movz x1, #4, lsl 48
+            .inst = Instruction.movz(.x1, 4, 48),
+            .expected = 0b1_10_100101_11_0000000000000100_00001,
+        },
+        .{ // movz w1, #4
+            .inst = Instruction.movz(.w1, 4, 0),
+            .expected = 0b0_10_100101_00_0000000000000100_00001,
+        },
+        .{ // movz w1, #4, lsl 16
+            .inst = Instruction.movz(.w1, 4, 16),
+            .expected = 0b0_10_100101_01_0000000000000100_00001,
+        },
+        .{ // svc #0
+            .inst = Instruction.svc(0),
+            .expected = 0b1101_0100_000_0000000000000000_00001,
+        },
+        .{ // svc #0x80 ; typical on Darwin
+            .inst = Instruction.svc(0x80),
+            .expected = 0b1101_0100_000_0000000010000000_00001,
+        },
+        .{ // ret
+            .inst = Instruction.ret(null),
+            .expected = 0b1101_011_00_10_11111_0000_00_11110_00000,
+        },
+        .{ // bl #0x10
+            .inst = Instruction.bl(0x10),
+            .expected = 0b1_00101_00_0000_0000_0000_0000_0000_0100,
+        },
+        .{ // ldr x2, [x1]
+            .inst = Instruction.ldr(.x2, .x1, Instruction.LoadStoreOffset.none),
+            .expected = 0b11_111_0_01_01_000000000000_00001_00010,
+        },
+        .{ // ldr x2, [x1, #1]!
+            .inst = Instruction.ldr(.x2, .x1, Instruction.LoadStoreOffset.imm_pre_index(1)),
+            .expected = 0b11_111_0_00_01_0_000000001_11_00001_00010,
+        },
+        .{ // ldr x2, [x1], #-1
+            .inst = Instruction.ldr(.x2, .x1, Instruction.LoadStoreOffset.imm_post_index(-1)),
+            .expected = 0b11_111_0_00_01_0_111111111_01_00001_00010,
+        },
+        .{ // ldr x2, [x1], (x3)
+            .inst = Instruction.ldr(.x2, .x1, Instruction.LoadStoreOffset.reg(.x3)),
+            .expected = 0b11_111_0_00_01_1_00011_011_0_10_00001_00010,
+        },
+        .{ // ldr x2, label
+            .inst = Instruction.ldrLiteral(.x2, 0x1),
+            .expected = 0b01_011_0_00_0000000000000000001_00010,
+        },
+        .{ // ldrh x7, [x4], #0xaa
+            .inst = Instruction.ldrh(.x7, .x4, Instruction.LoadStoreOffset.imm_post_index(0xaa)),
+            .expected = 0b01_111_0_00_01_0_010101010_01_00100_00111,
+        },
+        .{ // ldrb x9, [x15, #0xff]!
+            .inst = Instruction.ldrb(.x9, .x15, Instruction.LoadStoreOffset.imm_pre_index(0xff)),
+            .expected = 0b00_111_0_00_01_0_011111111_11_01111_01001,
+        },
+        .{ // str x2, [x1]
+            .inst = Instruction.str(.x2, .x1, Instruction.LoadStoreOffset.none),
+            .expected = 0b11_111_0_01_00_000000000000_00001_00010,
+        },
+        .{ // str x2, [x1], (x3)
+            .inst = Instruction.str(.x2, .x1, Instruction.LoadStoreOffset.reg(.x3)),
+            .expected = 0b11_111_0_00_00_1_00011_011_0_10_00001_00010,
+        },
+        .{ // strh w0, [x1]
+            .inst = Instruction.strh(.w0, .x1, Instruction.LoadStoreOffset.none),
+            .expected = 0b01_111_0_01_00_000000000000_00001_00000,
+        },
+        .{ // strb w8, [x9]
+            .inst = Instruction.strb(.w8, .x9, Instruction.LoadStoreOffset.none),
+            .expected = 0b00_111_0_01_00_000000000000_01001_01000,
+        },
+        .{ // adr x2, #0x8
+            .inst = Instruction.adr(.x2, 0x8),
+            .expected = 0b0_00_10000_0000000000000000010_00010,
+        },
+        .{ // adr x2, -#0x8
+            .inst = Instruction.adr(.x2, -0x8),
+            .expected = 0b0_00_10000_1111111111111111110_00010,
+        },
+        .{ // adrp x2, #0x8
+            .inst = Instruction.adrp(.x2, 0x8),
+            .expected = 0b1_00_10000_0000000000000000010_00010,
+        },
+        .{ // adrp x2, -#0x8
+            .inst = Instruction.adrp(.x2, -0x8),
+            .expected = 0b1_00_10000_1111111111111111110_00010,
+        },
+        .{ // stp x1, x2, [sp, #8]
+            .inst = Instruction.stp(.x1, .x2, .sp, Instruction.LoadStorePairOffset.signed(8)),
+            .expected = 0b10_101_0_010_0_0000001_00010_11111_00001,
+        },
+        .{ // ldp x1, x2, [sp, #8]
+            .inst = Instruction.ldp(.x1, .x2, .sp, Instruction.LoadStorePairOffset.signed(8)),
+            .expected = 0b10_101_0_010_1_0000001_00010_11111_00001,
+        },
+        .{ // stp x1, x2, [sp, #-16]!
+            .inst = Instruction.stp(.x1, .x2, .sp, Instruction.LoadStorePairOffset.pre_index(-16)),
+            .expected = 0b10_101_0_011_0_1111110_00010_11111_00001,
+        },
+        .{ // ldp x1, x2, [sp], #16
+            .inst = Instruction.ldp(.x1, .x2, .sp, Instruction.LoadStorePairOffset.post_index(16)),
+            .expected = 0b10_101_0_001_1_0000010_00010_11111_00001,
+        },
+        .{ // and x0, x4, x2
+            .inst = Instruction.andShiftedRegister(.x0, .x4, .x2, .lsl, 0),
+            .expected = 0b1_00_01010_00_0_00010_000000_00100_00000,
+        },
+        .{ // and x0, x4, x2, lsl #0x8
+            .inst = Instruction.andShiftedRegister(.x0, .x4, .x2, .lsl, 0x8),
+            .expected = 0b1_00_01010_00_0_00010_001000_00100_00000,
+        },
+        .{ // add x0, x10, #10
+            .inst = Instruction.add(.x0, .x10, 10, false),
+            .expected = 0b1_0_0_100010_0_0000_0000_1010_01010_00000,
+        },
+        .{ // subs x0, x5, #11, lsl #12
+            .inst = Instruction.subs(.x0, .x5, 11, true),
+            .expected = 0b1_1_1_100010_1_0000_0000_1011_00101_00000,
+        },
+        .{ // b.hi #-4
+            .inst = Instruction.bCond(.hi, -4),
+            .expected = 0b0101010_0_1111111111111111111_0_1000,
+        },
+        .{ // cbz x10, #40
+            .inst = Instruction.cbz(.x10, 40),
+            .expected = 0b1_011010_0_0000000000000001010_01010,
+        },
+        .{ // add x0, x1, x2, lsl #5
+            .inst = Instruction.addShiftedRegister(.x0, .x1, .x2, .lsl, 5),
+            .expected = 0b1_0_0_01011_00_0_00010_000101_00001_00000,
+        },
+        .{ // csinc x1, x2, x4, eq
+            .inst = Instruction.csinc(.x1, .x2, .x4, .eq),
+            .expected = 0b1_0_0_11010100_00100_0000_0_1_00010_00001,
+        },
+        .{ // mul x1, x4, x9
+            .inst = Instruction.mul(.x1, .x4, .x9),
+            .expected = 0b1_00_11011_000_01001_0_11111_00100_00001,
+        },
+        .{ // eor x3, x5, #1
+            .inst = Instruction.eorImmediate(.x3, .x5, 0b000000, 0b000000, 0b1),
+            .expected = 0b1_10_100100_1_000000_000000_00101_00011,
+        },
+        .{ // lslv x6, x9, x10
+            .inst = Instruction.lslv(.x6, .x9, .x10),
+            .expected = 0b1_0_0_11010110_01010_0010_00_01001_00110,
+        },
+        .{ // lsl x4, x2, #42
+            .inst = Instruction.lslImmediate(.x4, .x2, 42),
+            .expected = 0b1_10_100110_1_010110_010101_00010_00100,
+        },
+        .{ // lsl x4, x2, #63
+            .inst = Instruction.lslImmediate(.x4, .x2, 63),
+            .expected = 0b1_10_100110_1_000001_000000_00010_00100,
+        },
+        .{ // lsr x4, x2, #42
+            .inst = Instruction.lsrImmediate(.x4, .x2, 42),
+            .expected = 0b1_10_100110_1_101010_111111_00010_00100,
+        },
+        .{ // lsr x4, x2, #63
+            .inst = Instruction.lsrImmediate(.x4, .x2, 63),
+            .expected = 0b1_10_100110_1_111111_111111_00010_00100,
+        },
+        .{ // umull x0, w0, w1
+            .inst = Instruction.umull(.x0, .w0, .w1),
+            .expected = 0b1_00_11011_1_01_00001_0_11111_00000_00000,
+        },
+        .{ // smull x0, w0, w1
+            .inst = Instruction.smull(.x0, .w0, .w1),
+            .expected = 0b1_00_11011_0_01_00001_0_11111_00000_00000,
+        },
+        .{ // tst x0, #0xffffffff00000000
+            .inst = Instruction.andsImmediate(.xzr, .x0, 0b011111, 0b100000, 0b1),
+            .expected = 0b1_11_100100_1_100000_011111_00000_11111,
+        },
+        .{ // umulh x0, x1, x2
+            .inst = Instruction.umulh(.x0, .x1, .x2),
+            .expected = 0b1_00_11011_1_10_00010_0_11111_00001_00000,
+        },
+        .{ // smulh x0, x1, x2
+            .inst = Instruction.smulh(.x0, .x1, .x2),
+            .expected = 0b1_00_11011_0_10_00010_0_11111_00001_00000,
+        },
+        .{ // adds x0, x1, x2, sxtx
+            .inst = Instruction.addsExtendedRegister(.x0, .x1, .x2, .sxtx, 0),
+            .expected = 0b1_0_1_01011_00_1_00010_111_000_00001_00000,
+        },
+    };
+
+    for (testcases) |case| {
+        const actual = case.inst.toU32();
+        try testing.expectEqual(case.expected, actual);
+    }
+}

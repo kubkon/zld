@@ -32,22 +32,58 @@ pub const OutputMode = enum {
     lib,
 };
 
+pub const SystemLib = struct {
+    needed: bool = false,
+    weak: bool = false,
+};
+
+pub const LinkObject = struct {
+    path: []const u8,
+    must_link: bool = false,
+};
+
 pub const Options = struct {
     emit: Emit,
     dynamic: bool,
     output_mode: OutputMode,
     target: std.Target,
     syslibroot: ?[]const u8,
-    positionals: []const []const u8,
-    libs: []const []const u8,
-    frameworks: []const []const u8,
+    positionals: []const LinkObject,
+    libs: std.StringArrayHashMap(SystemLib),
+    frameworks: std.StringArrayHashMap(SystemLib),
     lib_dirs: []const []const u8,
     framework_dirs: []const []const u8,
     rpath_list: []const []const u8,
     stack_size_override: ?u64 = null,
+    gc_sections: ?bool = null,
+    allow_shlib_undefined: ?bool = null,
+    strip: bool = false,
+    entry: ?[]const u8 = null,
+    verbose: bool = false,
+
+    version: ?std.builtin.Version = null,
     compatibility_version: ?std.builtin.Version = null,
-    current_version: ?std.builtin.Version = null,
-    gc_sections: bool,
+
+    /// (Darwin) Install name for the dylib
+    install_name: ?[]const u8 = null,
+
+    /// (Darwin) Path to entitlements file
+    entitlements: ?[]const u8 = null,
+
+    /// (Darwin) size of the __PAGEZERO segment
+    pagezero_size: ?u64 = null,
+
+    /// (Darwin) search strategy for system libraries
+    search_strategy: ?MachO.SearchStrategy = null,
+
+    /// (Darwin) set minimum space for future expansion of the load commands
+    headerpad_size: ?u32 = null,
+
+    /// (Darwin) set enough space as if all paths were MATPATHLEN
+    headerpad_max_install_names: bool = false,
+
+    /// (Darwin) remove dylibs that are unreachable by the entry point or exported symbols
+    dead_strip_dylibs: bool = false,
 };
 
 pub fn openPath(allocator: Allocator, options: Options) !*Zld {
@@ -68,6 +104,72 @@ pub fn deinit(base: *Zld) void {
 }
 
 pub fn flush(base: *Zld) !void {
+    const gpa = base.allocator;
+    var arena_allocator = std.heap.ArenaAllocator.init(gpa);
+    defer arena_allocator.deinit();
+    const arena = arena_allocator.allocator();
+
+    if (base.options.verbose) {
+        var argv = std.ArrayList([]const u8).init(arena);
+        try argv.append("zld");
+
+        if (base.options.dynamic) {
+            try argv.append("-dynamic");
+        } else {
+            try argv.append("-static");
+        }
+
+        if (base.options.syslibroot) |path| {
+            try argv.append("-syslibroot");
+            try argv.append(path);
+        }
+        if (base.options.output_mode == .lib) {
+            try argv.append("-shared");
+        }
+        if (base.options.stack_size_override) |st| {
+            switch (base.options.target.getObjectFormat()) {
+                .elf => try argv.append(try std.fmt.allocPrint(arena, "-z stack-size={d}", .{st})),
+                .macho => {
+                    try argv.append("-stack");
+                    try argv.append(try std.fmt.allocPrint(arena, "{d}", .{st}));
+                },
+                else => {},
+            }
+        }
+        try argv.append("-o");
+        try argv.append(base.options.emit.sub_path);
+        for (base.options.libs.keys()) |lib| {
+            try argv.append(try std.fmt.allocPrint(arena, "-l{s}", .{lib}));
+        }
+        for (base.options.lib_dirs) |dir| {
+            try argv.append(try std.fmt.allocPrint(arena, "-L{s}", .{dir}));
+        }
+        for (base.options.frameworks.keys()) |fw| {
+            try argv.append("-framework");
+            try argv.append(fw);
+        }
+        for (base.options.framework_dirs) |dir| {
+            try argv.append(try std.fmt.allocPrint(arena, "-F{s}", .{dir}));
+        }
+        for (base.options.rpath_list) |rpath| {
+            try argv.append("-rpath");
+            try argv.append(rpath);
+        }
+        if (base.options.gc_sections) |gc_sections| {
+            if (gc_sections) {
+                try argv.append("--gc-sections");
+            } else {
+                try argv.append("--no-gc-sections");
+            }
+        }
+        for (base.options.positionals) |obj| {
+            try argv.append(obj.path);
+        }
+        try argv.append("\n");
+
+        try io.getStdOut().writeAll(try mem.join(arena, " ", argv.items));
+    }
+
     switch (base.tag) {
         .elf => try @fieldParentPtr(Elf, "base", base).flush(),
         .macho => try @fieldParentPtr(MachO, "base", base).flush(),

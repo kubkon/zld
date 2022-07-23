@@ -66,7 +66,17 @@ pub fn closeFiles(self: Coff) void {
 }
 
 pub fn flush(self: *Coff) !void {
-    try self.parsePositionals(self.base.options.positionals);
+    const gpa = self.base.allocator;
+
+    var positionals = std.ArrayList([]const u8).init(gpa);
+    defer positionals.deinit();
+    try positionals.ensureTotalCapacity(self.base.options.positionals.len);
+
+    for (self.base.options.positionals) |obj| {
+        positionals.appendAssumeCapacity(obj.path);
+    }
+
+    try self.parsePositionals(positionals.items);
 }
 
 fn parsePositionals(self: *Coff, files: []const []const u8) !void {

@@ -19,7 +19,7 @@ jobs:
         submodules: true
     - uses: goto-bus-stop/setup-zig@v1
       with:
-        version: 0.9.1
+        version: master
     - run: zig fmt --check src 
     - run: zig build test
     - run: zig build install

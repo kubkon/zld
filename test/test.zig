@@ -10,12 +10,12 @@ const linux_x86_64 = CrossTarget{
 const macos_x86_64 = CrossTarget{
     .cpu_arch = .x86_64,
     .os_tag = .macos,
-    .abi = .gnu,
+    .abi = .none,
 };
 const macos_aarch64 = CrossTarget{
     .cpu_arch = .aarch64,
     .os_tag = .macos,
-    .abi = .gnu,
+    .abi = .none,
 };
 const macos_targets: []const CrossTarget = &.{
     macos_x86_64,
