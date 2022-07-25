@@ -163,6 +163,10 @@ pub fn parseArgs(arena: Allocator, args: []const []const u8) !Options {
         fatal(arena, "Expected at least one input .o file", .{});
     }
 
+    // Add some defaults
+    try lib_dirs.append("/usr/lib");
+    try framework_dirs.append("/System/Library/Frameworks");
+
     return Options{
         .emit = .{
             .directory = std.fs.cwd(),

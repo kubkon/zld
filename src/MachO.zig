@@ -278,11 +278,6 @@ pub fn flush(self: *MachO) !void {
             log.warn("directory not found for '-L{s}'", .{dir});
         }
     }
-    if (builtin.os.tag == .macos) {
-        if (try resolveSearchDir(arena, "/usr/lib", syslibroot)) |search_dir| {
-            try lib_dirs.append(search_dir);
-        }
-    }
 
     var libs = std.StringArrayHashMap(Zld.SystemLib).init(arena);
 
@@ -332,10 +327,6 @@ pub fn flush(self: *MachO) !void {
         }
     }
 
-    if (builtin.os.tag == .macos) {
-        try resolveLibSystem(arena, lib_dirs.items, &libs);
-    }
-
     // frameworks
     var framework_dirs = std.ArrayList([]const u8).init(arena);
     for (self.options.framework_dirs) |dir| {
@@ -343,12 +334,6 @@ pub fn flush(self: *MachO) !void {
             try framework_dirs.append(search_dir);
         } else {
             log.warn("directory not found for '-F{s}'", .{dir});
-        }
-    }
-
-    if (builtin.os.tag == .macos and self.options.frameworks.count() > 0) {
-        if (try resolveSearchDir(arena, "/System/Library/Frameworks", syslibroot)) |search_dir| {
-            try framework_dirs.append(search_dir);
         }
     }
 
@@ -498,28 +483,6 @@ pub fn flush(self: *MachO) !void {
         const dir = self.options.emit.directory;
         const path = self.options.emit.sub_path;
         try dir.copyFile(path, dir, path, .{});
-    }
-}
-
-fn resolveLibSystem(arena: Allocator, search_dirs: []const []const u8, out_libs: anytype) !void {
-    // Try stub file first. If we hit it, then we're done as the stub file
-    // re-exports every single symbol definition.
-    for (search_dirs) |dir| {
-        if (try resolveLib(arena, dir, "System", ".tbd")) |full_path| {
-            try out_libs.put(full_path, .{ .needed = true });
-            return;
-        }
-    }
-    // If we didn't hit the stub file, try .dylib next. However, libSystem.dylib
-    // doesn't export libc.dylib which we'll need to resolve subsequently also.
-    for (search_dirs) |dir| {
-        if (try resolveLib(arena, dir, "System", ".dylib")) |libsystem_path| {
-            if (try resolveLib(arena, dir, "c", ".dylib")) |libc_path| {
-                try out_libs.put(libsystem_path, .{ .needed = true });
-                try out_libs.put(libc_path, .{ .needed = true });
-                return;
-            }
-        }
     }
 }
 
@@ -768,8 +731,13 @@ pub fn parseDylib(
         }
     }
 
+    const gop = try self.dylibs_map.getOrPut(self.base.allocator, dylib.id.?.name);
+    if (gop.found_existing) {
+        dylib.deinit(self.base.allocator);
+        return true;
+    }
+    gop.value_ptr.* = dylib_id;
     try self.dylibs.append(self.base.allocator, dylib);
-    try self.dylibs_map.putNoClobber(self.base.allocator, dylib.id.?.name, dylib_id);
 
     const should_link_dylib_even_if_unreachable = blk: {
         if (self.options.dead_strip_dylibs and !opts.needed) break :blk false;
