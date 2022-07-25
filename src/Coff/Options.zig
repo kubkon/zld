@@ -1,4 +1,7 @@
+const Options = @This();
+
 const std = @import("std");
+const builtin = @import("builtin");
 const io = std.io;
 const mem = std.mem;
 const process = std.process;
@@ -34,16 +37,14 @@ fn fatal(arena: Allocator, comptime format: []const u8, args: anytype) noreturn 
     process.exit(1);
 }
 
-pub const Options = struct {
-    emit: Zld.Emit,
-    output_mode: Zld.OutputMode,
-    target: CrossTarget,
-    positionals: []const Zld.LinkObject,
-    libs: std.StringArrayHashMap(Zld.SystemLib),
-    lib_dirs: []const []const u8,
-};
+emit: Zld.Emit,
+output_mode: Zld.OutputMode,
+target: CrossTarget,
+positionals: []const Zld.LinkObject,
+libs: std.StringArrayHashMap(Zld.SystemLib),
+lib_dirs: []const []const u8,
 
-pub fn parse(arena: Allocator, target: std.Target, args: []const []const u8) !Options {
+pub fn parseArgs(arena: Allocator, args: []const []const u8) !Options {
     if (args.len == 0) {
         printHelpAndExit();
     }
@@ -93,7 +94,7 @@ pub fn parse(arena: Allocator, target: std.Target, args: []const []const u8) !Op
             .directory = std.fs.cwd(),
             .sub_path = out_path orelse "a.out",
         },
-        .target = CrossTarget.fromTarget(target),
+        .target = CrossTarget.fromTarget(builtin.target),
         .output_mode = .exe,
         .positionals = positionals.items,
         .libs = libs,

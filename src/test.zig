@@ -260,12 +260,18 @@ pub const TestContext = struct {
                 }
                 break :blk null;
             };
-            var opts: Zld.Options = switch (case.target.os_tag.?) {
+            const tag: Zld.Tag = switch (case.target.os_tag.?) {
                 .macos,
                 .ios,
                 .watchos,
                 .tvos,
-                => .{ .macho = .{
+                => .macho,
+                .linux => .elf,
+                .windows => .coff,
+                else => unreachable,
+            };
+            var opts: Zld.Options = switch (tag) {
+                .macho => .{ .macho = .{
                     .emit = .{
                         .directory = std.fs.cwd(),
                         .sub_path = output_path,
@@ -283,7 +289,7 @@ pub const TestContext = struct {
                     .framework_dirs = &[0][]const u8{},
                     .rpath_list = &[0][]const u8{},
                 } },
-                .linux => .{ .elf = .{
+                .elf => .{ .elf = .{
                     .emit = .{
                         .directory = std.fs.cwd(),
                         .sub_path = output_path,
@@ -296,10 +302,23 @@ pub const TestContext = struct {
                     .rpath_list = &[0][]const u8{},
                     .gc_sections = true,
                 } },
-                else => unreachable,
+                .coff => .{ .coff = .{
+                    .emit = .{
+                        .directory = std.fs.cwd(),
+                        .sub_path = output_path,
+                    },
+                    .target = case.target,
+                    .output_mode = .exe,
+                    .positionals = objects.items,
+                    .libs = libs,
+                    .lib_dirs = &[0][]const u8{},
+                } },
             };
-            var zld = try Zld.openPath(gpa, opts);
-            defer zld.deinit();
+            var zld = try Zld.openPath(gpa, tag, opts);
+            defer {
+                zld.closeFiles();
+                zld.deinit();
+            }
 
             var argv = std.ArrayList([]const u8).init(arena);
             outer: {

@@ -42,33 +42,35 @@ pub const LinkObject = struct {
     must_link: bool = false,
 };
 
-pub const Options = union(Tag) {
+pub const Options = union {
     elf: Elf.Options,
     macho: MachO.Options,
     coff: Coff.Options,
 };
 
-pub fn parseOpts(arena: Allocator, target: std.Target, args: []const []const u8) !Options {
-    return switch (target.os.tag) {
-        .macos,
-        .tvos,
-        .watchos,
-        .ios,
-        => .{ .macho = try @import("MachO/opts.zig").parse(arena, target, args) },
+pub fn parseAndFlush(allocator: Allocator, tag: Tag, args: []const []const u8) !void {
+    var arena_allocator = std.heap.ArenaAllocator.init(allocator);
+    defer arena_allocator.deinit();
+    const arena = arena_allocator.allocator();
 
-        .linux => .{ .elf = try @import("Elf/opts.zig").parse(arena, target, args) },
-
-        .windows => .{ .coff = try @import("Coff/opts.zig").parse(arena, target, args) },
-
-        else => unreachable,
+    const opts: Options = switch (tag) {
+        .elf => .{ .elf = try Elf.Options.parseArgs(arena, args) },
+        .macho => .{ .macho = try MachO.Options.parseArgs(arena, args) },
+        .coff => .{ .coff = try Coff.Options.parseArgs(arena, args) },
     };
+    const zld = try openPath(allocator, tag, opts);
+    defer {
+        zld.closeFiles();
+        zld.deinit();
+    }
+    try zld.flush();
 }
 
-pub fn openPath(allocator: Allocator, options: Options) !*Zld {
-    return switch (options) {
-        .macho => |opts| &(try MachO.openPath(allocator, opts)).base,
-        .elf => |opts| &(try Elf.openPath(allocator, opts)).base,
-        .coff => |opts| &(try Coff.openPath(allocator, opts)).base,
+pub fn openPath(allocator: Allocator, tag: Tag, options: Options) !*Zld {
+    return switch (tag) {
+        .macho => &(try MachO.openPath(allocator, options.macho)).base,
+        .elf => &(try Elf.openPath(allocator, options.elf)).base,
+        .coff => &(try Coff.openPath(allocator, options.coff)).base,
     };
 }
 
@@ -87,10 +89,9 @@ pub fn flush(base: *Zld) !void {
         .macho => try @fieldParentPtr(MachO, "base", base).flush(),
         .coff => try @fieldParentPtr(Coff, "base", base).flush(),
     }
-    base.closeFiles();
 }
 
-fn closeFiles(base: *const Zld) void {
+pub fn closeFiles(base: *const Zld) void {
     switch (base.tag) {
         .elf => @fieldParentPtr(Elf, "base", base).closeFiles(),
         .macho => @fieldParentPtr(MachO, "base", base).closeFiles(),

@@ -1,4 +1,7 @@
+const Options = @This();
+
 const std = @import("std");
+const builtin = @import("builtin");
 const io = std.io;
 const mem = std.mem;
 const process = std.process;
@@ -44,36 +47,34 @@ fn fatal(arena: Allocator, comptime format: []const u8, args: anytype) noreturn 
     process.exit(1);
 }
 
-pub const Options = struct {
-    emit: Zld.Emit,
-    output_mode: Zld.OutputMode,
-    target: CrossTarget,
-    platform_version: std.builtin.Version,
-    sdk_version: std.builtin.Version,
-    positionals: []const Zld.LinkObject,
-    libs: std.StringArrayHashMap(Zld.SystemLib),
-    frameworks: std.StringArrayHashMap(Zld.SystemLib),
-    lib_dirs: []const []const u8,
-    framework_dirs: []const []const u8,
-    rpath_list: []const []const u8,
-    dynamic: bool = false,
-    syslibroot: ?[]const u8 = null,
-    stack_size_override: ?u64 = null,
-    strip: bool = false,
-    entry: ?[]const u8 = null,
-    version: ?std.builtin.Version = null,
-    compatibility_version: ?std.builtin.Version = null,
-    install_name: ?[]const u8 = null,
-    entitlements: ?[]const u8 = null,
-    pagezero_size: ?u64 = null,
-    search_strategy: ?MachO.SearchStrategy = null,
-    headerpad_size: ?u32 = null,
-    headerpad_max_install_names: bool = false,
-    dead_strip: bool = false,
-    dead_strip_dylibs: bool = false,
-};
+emit: Zld.Emit,
+output_mode: Zld.OutputMode,
+target: CrossTarget,
+platform_version: std.builtin.Version,
+sdk_version: std.builtin.Version,
+positionals: []const Zld.LinkObject,
+libs: std.StringArrayHashMap(Zld.SystemLib),
+frameworks: std.StringArrayHashMap(Zld.SystemLib),
+lib_dirs: []const []const u8,
+framework_dirs: []const []const u8,
+rpath_list: []const []const u8,
+dynamic: bool = false,
+syslibroot: ?[]const u8 = null,
+stack_size_override: ?u64 = null,
+strip: bool = false,
+entry: ?[]const u8 = null,
+version: ?std.builtin.Version = null,
+compatibility_version: ?std.builtin.Version = null,
+install_name: ?[]const u8 = null,
+entitlements: ?[]const u8 = null,
+pagezero_size: ?u64 = null,
+search_strategy: ?MachO.SearchStrategy = null,
+headerpad_size: ?u32 = null,
+headerpad_max_install_names: bool = false,
+dead_strip: bool = false,
+dead_strip_dylibs: bool = false,
 
-pub fn parse(arena: Allocator, target: std.Target, args: []const []const u8) !Options {
+pub fn parseArgs(arena: Allocator, args: []const []const u8) !Options {
     if (args.len == 0) {
         printHelpAndExit();
     }
@@ -93,7 +94,7 @@ pub fn parse(arena: Allocator, target: std.Target, args: []const []const u8) !Op
     var version: ?std.builtin.Version = null;
     var compatibility_version: ?std.builtin.Version = null;
 
-    var platform_version: std.builtin.Version = target.os.version_range.semver.min;
+    var platform_version: std.builtin.Version = builtin.target.os.version_range.semver.min;
     var sdk_version: std.builtin.Version = platform_version;
 
     const Iterator = struct {
@@ -168,7 +169,7 @@ pub fn parse(arena: Allocator, target: std.Target, args: []const []const u8) !Op
             .sub_path = out_path orelse "a.out",
         },
         .dynamic = dynamic,
-        .target = CrossTarget.fromTarget(target),
+        .target = CrossTarget.fromTarget(builtin.target),
         .platform_version = platform_version,
         .sdk_version = sdk_version,
         .output_mode = if (dylib) .lib else .exe,

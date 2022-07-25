@@ -1,4 +1,7 @@
+const Options = @This();
+
 const std = @import("std");
+const builtin = @import("builtin");
 const io = std.io;
 const mem = std.mem;
 const process = std.process;
@@ -9,7 +12,7 @@ const Elf = @import("../Elf.zig");
 const Zld = @import("../Zld.zig");
 
 const usage =
-    \\Usage: zld [files...]
+    \\Usage: zld.ld [files...]
     \\
     \\Commands:
     \\  <empty> [files...] (default)  Generate final executable artifact 'a.out' from input '.o' files
@@ -40,21 +43,19 @@ fn fatal(arena: Allocator, comptime format: []const u8, args: anytype) noreturn 
     process.exit(1);
 }
 
-pub const Options = struct {
-    emit: Zld.Emit,
-    output_mode: Zld.OutputMode,
-    target: CrossTarget,
-    positionals: []const Zld.LinkObject,
-    libs: std.StringArrayHashMap(Zld.SystemLib),
-    lib_dirs: []const []const u8,
-    rpath_list: []const []const u8,
-    stack_size_override: ?u64 = null,
-    strip: bool = false,
-    entry: ?[]const u8 = null,
-    gc_sections: ?bool = null,
-};
+emit: Zld.Emit,
+output_mode: Zld.OutputMode,
+target: CrossTarget,
+positionals: []const Zld.LinkObject,
+libs: std.StringArrayHashMap(Zld.SystemLib),
+lib_dirs: []const []const u8,
+rpath_list: []const []const u8,
+stack_size_override: ?u64 = null,
+strip: bool = false,
+entry: ?[]const u8 = null,
+gc_sections: ?bool = null,
 
-pub fn parse(arena: Allocator, target: std.Target, args: []const []const u8) !Options {
+pub fn parseArgs(arena: Allocator, args: []const []const u8) !Options {
     if (args.len == 0) {
         printHelpAndExit();
     }
@@ -132,7 +133,7 @@ pub fn parse(arena: Allocator, target: std.Target, args: []const []const u8) !Op
             .directory = std.fs.cwd(),
             .sub_path = out_path orelse "a.out",
         },
-        .target = CrossTarget.fromTarget(target),
+        .target = CrossTarget.fromTarget(builtin.target),
         .output_mode = if (shared) .lib else .exe,
         .positionals = positionals.items,
         .libs = libs,

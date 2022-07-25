@@ -12,9 +12,9 @@ const Allocator = mem.Allocator;
 const Archive = @import("Elf/Archive.zig");
 const Atom = @import("Elf/Atom.zig");
 const Object = @import("Elf/Object.zig");
+pub const Options = @import("Elf/Options.zig");
 const StringTable = @import("strtab.zig").StringTable;
 const Zld = @import("Zld.zig");
-pub const Options = @import("Elf/opts.zig").Options;
 
 pub const base_tag = Zld.Tag.elf;
 

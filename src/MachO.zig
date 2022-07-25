@@ -23,13 +23,13 @@ const Atom = @import("MachO/Atom.zig");
 const CodeSignature = @import("MachO/CodeSignature.zig");
 const Dylib = @import("MachO/Dylib.zig");
 const Object = @import("MachO/Object.zig");
+pub const Options = @import("MachO/Options.zig");
 const LibStub = @import("tapi.zig").LibStub;
 const LoadCommand = macho.LoadCommand;
 const SegmentCommand = macho.SegmentCommand;
 const StringTable = @import("strtab.zig").StringTable;
 const Trie = @import("MachO/Trie.zig");
 const Zld = @import("Zld.zig");
-pub const Options = @import("MachO/opts.zig").Options;
 
 pub const base_tag = Zld.Tag.macho;
 

@@ -11,17 +11,17 @@ const Zld = @import("Zld.zig");
 var gpa_allocator = std.heap.GeneralPurposeAllocator(.{}){};
 const gpa = gpa_allocator.allocator();
 
-pub fn main() anyerror!void {
-    var arena_allocator = std.heap.ArenaAllocator.init(gpa);
-    defer arena_allocator.deinit();
-    const arena = arena_allocator.allocator();
-
+pub fn main() !void {
     const all_args = try process.argsAlloc(gpa);
     defer process.argsFree(gpa, all_args);
 
-    // TODO allow for non-native targets
-    const opts = try Zld.parseOpts(arena, builtin.target, all_args[1..]);
-    const zld = try Zld.openPath(gpa, opts);
-    defer zld.deinit();
-    try zld.flush();
+    if (mem.eql(u8, all_args[0], "zld.ld")) {
+        return Zld.parseAndFlush(gpa, .elf, all_args[1..]);
+    } else if (mem.eql(u8, all_args[0], "zld.ld64")) {
+        return Zld.parseAndFlush(gpa, .macho, all_args[1..]);
+    } else if (mem.eql(u8, all_args[0], "zld.link")) {
+        return Zld.parseAndFlush(gpa, .coff, all_args[1..]);
+    } else {
+        unreachable;
+    }
 }
