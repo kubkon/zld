@@ -18,21 +18,23 @@ const usage =
     \\  <empty> [files...] (default)  Generate final executable artifact 'a.out' from input '.o' files
     \\
     \\General Options:
-    \\-h, --help                    Print this help and exit
-    \\--verbose                     Print the full invocation
     \\-dynamic                      Perform dynamic linking
-    \\-dylib                        Create dynamic library
     \\-shared                       Create dynamic library
-    \\-syslibroot [path]            Specify the syslibroot
     \\-l[name]                      Specify library to link against
     \\-L[path]                      Specify library search dir
-    \\-framework [name]             Specify framework to link against
-    \\-weak_framework [name]        Specify weak framework to link against
-    \\-F[path]                      Specify framework search dir
     \\-rpath [path]                 Specify runtime path
     \\-stack                        Override default stack size
+    \\-syslibroot [path]            (Darwin) Specify the syslibroot
+    \\-dylib                        (Darwin) Create dynamic library
+    \\-install_name                 (Darwin) add dylib's install name
+    \\-framework [name]             (Darwin) specify framework to link against
+    \\-weak_framework [name]        (Darwin) specify weak framework to link against
+    \\-F[path]                      (Darwin) specify framework search dir
     \\-o [path]                     Specify output path for the final artifact
+    \\--entitlements                (Darwin) linker extension, add path to entitlements file for embedding in code signature
     \\--debug-log [name]            Turn on debugging for [name] backend (requires zld to be compiled with -Dlog)
+    \\-h, --help                    Print this help and exit
+    \\--verbose                     Print the full invocation
 ;
 
 fn printHelpAndExit() noreturn {
@@ -118,51 +120,57 @@ pub fn main() anyerror!void {
     var verbose: bool = false;
     var dylib: bool = false;
     var shared: bool = false;
+    var install_name: ?[]const u8 = null;
     var version: ?std.builtin.Version = null;
     var compatibility_version: ?std.builtin.Version = null;
     var gc_sections: bool = false;
 
-    var i: usize = 0;
-    while (i < args.len) : (i += 1) {
-        const arg = args[i];
+    const Iterator = struct {
+        args: []const []const u8,
+        i: usize = 0,
+        fn next(it: *@This()) ?[]const u8 {
+            if (it.i >= it.args.len) {
+                return null;
+            }
+            defer it.i += 1;
+            return it.args[it.i];
+        }
+    };
+    var args_iter = Iterator{
+        .args = all_args[2..],
+    };
+
+    while (args_iter.next()) |arg| {
         if (mem.eql(u8, arg, "--help") or mem.eql(u8, arg, "-h")) {
             printHelpAndExit();
         } else if (mem.eql(u8, arg, "--debug-log")) {
-            if (i + 1 >= args.len) fatal("Expected parameter after {s}", .{arg});
-            i += 1;
-            try log_scopes.append(arena, args[i]);
+            try log_scopes.append(arena, args_iter.next() orelse
+                fatal("Expected parameter after {s}", .{arg}));
         } else if (mem.eql(u8, arg, "-syslibroot")) {
-            if (i + 1 >= args.len) fatal("Expected path after {s}", .{arg});
-            i += 1;
-            syslibroot = args[i];
+            syslibroot = args_iter.next() orelse fatal("Expected path after {s}", .{arg});
         } else if (mem.startsWith(u8, arg, "-l")) {
-            try libs.put(args[i][2..], .{});
+            try libs.put(arg[2..], .{});
         } else if (mem.startsWith(u8, arg, "-L")) {
-            try lib_dirs.append(args[i][2..]);
+            try lib_dirs.append(arg[2..]);
         } else if (mem.eql(u8, arg, "-framework") or mem.eql(u8, arg, "-weak_framework")) {
-            if (i + 1 >= args.len) fatal("Expected framework name after {s}", .{arg});
-            i += 1;
-            try frameworks.put(args[i], .{});
+            const name = args_iter.next() orelse fatal("Expected framework name after {s}", .{arg});
+            try frameworks.put(name, .{});
         } else if (mem.startsWith(u8, arg, "-F")) {
-            try framework_dirs.append(args[i][2..]);
+            try framework_dirs.append(arg[2..]);
         } else if (mem.eql(u8, arg, "-o")) {
-            if (i + 1 >= args.len) fatal("Expected output path after {s}", .{arg});
-            i += 1;
-            out_path = args[i];
+            out_path = args_iter.next() orelse fatal("Expected output path after {s}", .{arg});
         } else if (mem.eql(u8, arg, "-stack")) {
-            if (i + 1 >= args.len) fatal("Expected stack size value after {s}", .{arg});
-            i += 1;
-            stack = try std.fmt.parseInt(u64, args[i], 10);
+            const stack_s = args_iter.next() orelse fatal("Expected stack size value after {s}", .{arg});
+            stack = try std.fmt.parseInt(u64, stack_s, 10);
         } else if (mem.eql(u8, arg, "-z")) {
-            if (i + 1 >= args.len) fatal("Expected another argument after {s}", .{arg});
-            i += 1;
-            if (mem.startsWith(u8, args[i], "stack-size=")) {
-                stack = try std.fmt.parseInt(u64, args[i]["stack-size=".len..], 10);
+            const z_arg = args_iter.next() orelse fatal("Expected another argument after {s}", .{arg});
+            if (mem.startsWith(u8, z_arg, "stack-size=")) {
+                stack = try std.fmt.parseInt(u64, z_arg["stack-size=".len..], 10);
             } else {
-                std.log.warn("TODO unhandled argument '-z {s}'", .{args[i]});
+                std.log.warn("TODO unhandled argument '-z {s}'", .{z_arg});
             }
         } else if (mem.startsWith(u8, arg, "-z")) {
-            std.log.warn("TODO unhandled argument '-z {s}'", .{args[i]["-z".len..]});
+            std.log.warn("TODO unhandled argument '-z {s}'", .{arg["-z".len..]});
         } else if (mem.eql(u8, arg, "--gc-sections")) {
             gc_sections = true;
         } else if (mem.eql(u8, arg, "--as-needed")) {
@@ -170,7 +178,7 @@ pub fn main() anyerror!void {
         } else if (mem.eql(u8, arg, "--allow-shlib-undefined")) {
             std.log.warn("TODO unhandled argument '--allow-shlib-undefined'", .{});
         } else if (mem.startsWith(u8, arg, "-O")) {
-            std.log.warn("TODO unhandled argument '-O{s}'", .{args[i]["-O".len..]});
+            std.log.warn("TODO unhandled argument '-O{s}'", .{arg["-O".len..]});
         } else if (mem.eql(u8, arg, "-dylib")) {
             dylib = true;
         } else if (mem.eql(u8, arg, "-shared")) {
@@ -180,21 +188,20 @@ pub fn main() anyerror!void {
         } else if (mem.eql(u8, arg, "-static")) {
             dynamic = false;
         } else if (mem.eql(u8, arg, "-rpath")) {
-            if (i + 1 >= args.len) fatal("Expected path after {s}", .{arg});
-            i += 1;
-            try rpath_list.append(args[i]);
+            const rpath = args_iter.next() orelse fatal("Expected path after {s}", .{arg});
+            try rpath_list.append(rpath);
         } else if (mem.eql(u8, arg, "-compatibility_version")) {
-            if (i + 1 >= args.len) fatal("Expected version after {s}", .{arg});
-            i += 1;
-            compatibility_version = std.builtin.Version.parse(args[i]) catch |err| {
-                fatal("Unable to parse {s} {s}: {s}", .{ arg, args[i], @errorName(err) });
+            const raw = args_iter.next() orelse fatal("Expected version after {s}", .{arg});
+            compatibility_version = std.builtin.Version.parse(raw) catch |err| {
+                fatal("Unable to parse {s} {s}: {s}", .{ arg, raw, @errorName(err) });
             };
         } else if (mem.eql(u8, arg, "-current_version")) {
-            if (i + 1 >= args.len) fatal("Expected version after {s}", .{arg});
-            i += 1;
-            version = std.builtin.Version.parse(args[i]) catch |err| {
-                fatal("Unable to parse {s} {s}: {s}", .{ arg, args[i], @errorName(err) });
+            const raw = args_iter.next() orelse fatal("Expected version after {s}", .{arg});
+            version = std.builtin.Version.parse(raw) catch |err| {
+                fatal("Unable to parse {s} {s}: {s}", .{ arg, raw, @errorName(err) });
             };
+        } else if (mem.eql(u8, arg, "-install_name")) {
+            install_name = args_iter.next() orelse fatal("Expected argument after {s}", .{arg});
         } else if (mem.eql(u8, arg, "--verbose")) {
             verbose = true;
         } else {
@@ -228,6 +235,7 @@ pub fn main() anyerror!void {
         .framework_dirs = framework_dirs.items,
         .rpath_list = rpath_list.items,
         .stack_size_override = stack,
+        .install_name = install_name,
         .version = version,
         .compatibility_version = compatibility_version,
         .gc_sections = gc_sections,
