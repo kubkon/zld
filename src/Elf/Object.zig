@@ -45,7 +45,7 @@ pub fn deinit(self: *Object, allocator: Allocator) void {
     allocator.free(self.name);
 }
 
-pub fn parse(self: *Object, allocator: Allocator, target: std.Target) !void {
+pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch) !void {
     const reader = self.file.reader();
     if (self.file_offset) |offset| {
         try reader.context.seekTo(offset);
@@ -72,10 +72,10 @@ pub fn parse(self: *Object, allocator: Allocator, target: std.Target) !void {
         log.debug("Invalid file type {any}, expected ET.REL", .{header.e_type});
         return error.NotObject;
     }
-    if (header.e_machine != target.cpu.arch.toElfMachine()) {
+    if (header.e_machine != cpu_arch.toElfMachine()) {
         log.debug("Invalid architecture {any}, expected {any}", .{
             header.e_machine,
-            target.cpu.arch.toElfMachine(),
+            cpu_arch.toElfMachine(),
         });
         return error.InvalidCpuArch;
     }

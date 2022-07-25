@@ -11,14 +11,16 @@ const mem = std.mem;
 const Allocator = mem.Allocator;
 const Object = @import("Coff/Object.zig");
 const Zld = @import("Zld.zig");
+pub const Options = @import("Coff/opts.zig").Options;
 
 pub const base_tag = Zld.Tag.coff;
 
 base: Zld,
+options: Options,
 
 objects: std.ArrayListUnmanaged(Object) = .{},
 
-pub fn openPath(allocator: Allocator, options: Zld.Options) !*Coff {
+pub fn openPath(allocator: Allocator, options: Options) !*Coff {
     const file = try options.emit.directory.createFile(options.emit.sub_path, .{
         .truncate = true,
         .read = true,
@@ -34,24 +36,22 @@ pub fn openPath(allocator: Allocator, options: Zld.Options) !*Coff {
     return self;
 }
 
-fn createEmpty(gpa: Allocator, options: Zld.Options) !*Coff {
+fn createEmpty(gpa: Allocator, options: Options) !*Coff {
     const self = try gpa.create(Coff);
 
     self.* = .{
         .base = .{
             .tag = .coff,
-            .options = options,
             .allocator = gpa,
             .file = undefined,
         },
+        .options = options,
     };
 
     return self;
 }
 
 pub fn deinit(self: *Coff) void {
-    self.closeFiles();
-
     for (self.objects.items) |*object| {
         object.deinit(self.base.allocator);
     }
@@ -59,7 +59,7 @@ pub fn deinit(self: *Coff) void {
     self.objects.deinit(self.base.allocator);
 }
 
-pub fn closeFiles(self: Coff) void {
+pub fn closeFiles(self: *const Coff) void {
     for (self.objects.items) |object| {
         object.file.close();
     }
@@ -70,9 +70,9 @@ pub fn flush(self: *Coff) !void {
 
     var positionals = std.ArrayList([]const u8).init(gpa);
     defer positionals.deinit();
-    try positionals.ensureTotalCapacity(self.base.options.positionals.len);
+    try positionals.ensureTotalCapacity(self.options.positionals.len);
 
-    for (self.base.options.positionals) |obj| {
+    for (self.options.positionals) |obj| {
         positionals.appendAssumeCapacity(obj.path);
     }
 
@@ -110,7 +110,7 @@ fn parseObject(self: *Coff, path: []const u8) !bool {
         .file = file,
     };
 
-    object.parse(self.base.allocator, self.base.options.target) catch |err| switch (err) {
+    object.parse(self.base.allocator, self.options.target.cpu_arch.?) catch |err| switch (err) {
         error.EndOfStream => {
             object.deinit(self.base.allocator);
             return false;

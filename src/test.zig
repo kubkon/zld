@@ -6,16 +6,14 @@ const testing = std.testing;
 const process = std.process;
 const log = std.log.scoped(.tests);
 
+const Allocator = mem.Allocator;
 const ChildProcess = std.ChildProcess;
 const Target = std.Target;
 const CrossTarget = std.zig.CrossTarget;
 const tmpDir = testing.tmpDir;
 const Zld = @import("Zld.zig");
 
-var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-const allocator = gpa.allocator();
-// TODO fix memory leaks in std.dwarf
-// const allocator = testing.allocator();
+const gpa = testing.allocator;
 
 test "unit" {
     _ = @import("Zld.zig");
@@ -56,7 +54,7 @@ pub const TestContext = struct {
             contents: []const u8,
 
             /// Caller own the memory.
-            fn getFilename(self: InputFile) ![]u8 {
+            fn getFilename(self: InputFile, allocator: Allocator) ![]u8 {
                 const ext = switch (self.filetype) {
                     .Header => ".h",
                     .C => ".c",
@@ -67,7 +65,7 @@ pub const TestContext = struct {
             }
         };
 
-        pub fn init(name: []const u8, target: CrossTarget) Case {
+        pub fn init(allocator: Allocator, name: []const u8, target: CrossTarget) Case {
             var input_files = std.ArrayList(InputFile).init(allocator);
             return .{
                 .name = name,
@@ -115,7 +113,7 @@ pub const TestContext = struct {
     };
 
     pub fn init() TestContext {
-        var cases = std.ArrayList(Case).init(allocator);
+        var cases = std.ArrayList(Case).init(gpa);
         return .{ .cases = cases };
     }
 
@@ -128,45 +126,38 @@ pub const TestContext = struct {
 
     pub fn addCase(self: *TestContext, name: []const u8, target: CrossTarget) !*Case {
         const idx = self.cases.items.len;
-        try self.cases.append(Case.init(name, target));
+        try self.cases.append(Case.init(gpa, name, target));
         return &self.cases.items[idx];
     }
 
     pub fn run(self: *TestContext) !void {
+        var arena_allocator = std.heap.ArenaAllocator.init(gpa);
+        defer arena_allocator.deinit();
+        const arena = arena_allocator.allocator();
+
         for (self.cases.items) |case| {
             var tmp = tmpDir(.{});
             defer tmp.cleanup();
 
-            const cwd = try std.fs.path.join(allocator, &[_][]const u8{
+            const cwd = try std.fs.path.join(arena, &[_][]const u8{
                 "zig-cache", "tmp", &tmp.sub_path,
             });
-            defer allocator.free(cwd);
 
-            var objects = std.ArrayList(Zld.LinkObject).init(allocator);
-            defer {
-                for (objects.items) |obj| {
-                    allocator.free(obj.path);
-                }
-                objects.deinit();
-            }
+            var objects = std.ArrayList(Zld.LinkObject).init(arena);
 
-            const target_triple = try std.fmt.allocPrint(allocator, "{s}-{s}-{s}", .{
+            const target_triple = try std.fmt.allocPrint(arena, "{s}-{s}-{s}", .{
                 @tagName(case.target.cpu_arch.?),
                 @tagName(case.target.os_tag.?),
                 @tagName(case.target.abi.?),
             });
-            defer allocator.free(target_triple);
 
             var requires_crts: bool = true;
 
             for (case.input_files.items) |input_file| {
-                const input_filename = try input_file.getFilename();
-                defer allocator.free(input_filename);
+                const input_filename = try input_file.getFilename(arena);
                 try tmp.dir.writeFile(input_filename, input_file.contents);
 
-                var argv = std.ArrayList([]const u8).init(allocator);
-                defer argv.deinit();
-
+                var argv = std.ArrayList([]const u8).init(arena);
                 try argv.append("zig");
 
                 switch (input_file.filetype) {
@@ -190,28 +181,23 @@ pub const TestContext = struct {
 
                 try argv.append(input_filename);
 
-                const output_filename = try std.fmt.allocPrint(allocator, "{s}.o", .{input_file.basename});
-                defer allocator.free(output_filename);
+                const output_filename = try std.fmt.allocPrint(arena, "{s}.o", .{input_file.basename});
 
                 if (input_file.filetype != .Zig) {
                     try argv.append("-o");
                     try argv.append(output_filename);
                 }
 
-                const output_file_path = try std.fs.path.join(allocator, &[_][]const u8{
+                const output_file_path = try std.fs.path.join(arena, &[_][]const u8{
                     cwd, output_filename,
                 });
                 try objects.append(.{ .path = output_file_path, .must_link = true });
 
                 const result = try std.ChildProcess.exec(.{
-                    .allocator = allocator,
+                    .allocator = arena,
                     .argv = argv.items,
                     .cwd = cwd,
                 });
-                defer {
-                    allocator.free(result.stdout);
-                    allocator.free(result.stderr);
-                }
                 if (result.stdout.len != 0) {
                     log.warn("unexpected compiler stdout: {s}", .{result.stdout});
                 }
@@ -226,7 +212,7 @@ pub const TestContext = struct {
             }
 
             // compiler_rt
-            const compiler_rt_path = try std.fs.path.join(allocator, &[_][]const u8{
+            const compiler_rt_path = try std.fs.path.join(arena, &[_][]const u8{
                 "test", "assets", target_triple, "libcompiler_rt.a",
             });
             try objects.append(.{ .path = compiler_rt_path, .must_link = false });
@@ -234,72 +220,88 @@ pub const TestContext = struct {
             if (case.target.getAbi() == .musl) {
                 if (requires_crts) {
                     // crt1
-                    const crt1_path = try std.fs.path.join(allocator, &[_][]const u8{
+                    const crt1_path = try std.fs.path.join(arena, &[_][]const u8{
                         "test", "assets", target_triple, "crt1.o",
                     });
                     try objects.append(.{ .path = crt1_path, .must_link = true });
                     // crti
-                    const crti_path = try std.fs.path.join(allocator, &[_][]const u8{
+                    const crti_path = try std.fs.path.join(arena, &[_][]const u8{
                         "test", "assets", target_triple, "crti.o",
                     });
                     try objects.append(.{ .path = crti_path, .must_link = true });
                     // crtn
-                    const crtn_path = try std.fs.path.join(allocator, &[_][]const u8{
+                    const crtn_path = try std.fs.path.join(arena, &[_][]const u8{
                         "test", "assets", target_triple, "crtn.o",
                     });
                     try objects.append(.{ .path = crtn_path, .must_link = true });
                 }
                 // libc
-                const libc_path = try std.fs.path.join(allocator, &[_][]const u8{
+                const libc_path = try std.fs.path.join(arena, &[_][]const u8{
                     "test", "assets", target_triple, "libc.a",
                 });
                 try objects.append(.{ .path = libc_path, .must_link = false });
             }
 
-            const output_path = try std.fs.path.join(allocator, &[_][]const u8{
+            const output_path = try std.fs.path.join(arena, &[_][]const u8{
                 "zig-cache", "tmp", &tmp.sub_path, "a.out",
             });
-            defer allocator.free(output_path);
 
-            var libs = std.StringArrayHashMap(Zld.SystemLib).init(allocator);
-            defer libs.deinit();
+            var libs = std.StringArrayHashMap(Zld.SystemLib).init(arena);
+            var frameworks = std.StringArrayHashMap(Zld.SystemLib).init(arena);
 
-            var frameworks = std.StringArrayHashMap(Zld.SystemLib).init(allocator);
-            defer frameworks.deinit();
-
-            const host = try std.zig.system.NativeTargetInfo.detect(allocator, .{});
-            const target_info = try std.zig.system.NativeTargetInfo.detect(allocator, case.target);
+            const host = try std.zig.system.NativeTargetInfo.detect(arena, .{});
+            const target_info = try std.zig.system.NativeTargetInfo.detect(arena, case.target);
             const syslibroot = blk: {
-                if (case.target.getOsTag() == .macos and host.target.os.tag == .macos) {
-                    if (!std.zig.system.darwin.isDarwinSDKInstalled(allocator)) break :blk null;
-                    const sdk = std.zig.system.darwin.getDarwinSDK(allocator, host.target) orelse
+                if (case.target.os_tag.? == .macos and host.target.os.tag == .macos) {
+                    if (!std.zig.system.darwin.isDarwinSDKInstalled(arena)) break :blk null;
+                    const sdk = std.zig.system.darwin.getDarwinSDK(arena, host.target) orelse
                         break :blk null;
                     break :blk sdk.path;
                 }
                 break :blk null;
             };
-            var zld = try Zld.openPath(allocator, .{
-                .emit = .{
-                    .directory = std.fs.cwd(),
-                    .sub_path = output_path,
-                },
-                .dynamic = true,
-                .target = case.target.toTarget(),
-                .output_mode = .exe,
-                .syslibroot = syslibroot,
-                .positionals = objects.items,
-                .libs = libs,
-                .frameworks = frameworks,
-                .lib_dirs = &[0][]const u8{},
-                .framework_dirs = &[0][]const u8{},
-                .rpath_list = &[0][]const u8{},
-                .gc_sections = true,
-            });
+            var opts: Zld.Options = switch (case.target.os_tag.?) {
+                .macos,
+                .ios,
+                .watchos,
+                .tvos,
+                => .{ .macho = .{
+                    .emit = .{
+                        .directory = std.fs.cwd(),
+                        .sub_path = output_path,
+                    },
+                    .dynamic = true,
+                    .target = case.target,
+                    .platform_version = target_info.target.os.version_range.semver.min,
+                    .sdk_version = target_info.target.os.version_range.semver.min,
+                    .output_mode = .exe,
+                    .syslibroot = syslibroot,
+                    .positionals = objects.items,
+                    .libs = libs,
+                    .frameworks = frameworks,
+                    .lib_dirs = &[0][]const u8{},
+                    .framework_dirs = &[0][]const u8{},
+                    .rpath_list = &[0][]const u8{},
+                } },
+                .linux => .{ .elf = .{
+                    .emit = .{
+                        .directory = std.fs.cwd(),
+                        .sub_path = output_path,
+                    },
+                    .target = case.target,
+                    .output_mode = .exe,
+                    .positionals = objects.items,
+                    .libs = libs,
+                    .lib_dirs = &[0][]const u8{},
+                    .rpath_list = &[0][]const u8{},
+                    .gc_sections = true,
+                } },
+                else => unreachable,
+            };
+            var zld = try Zld.openPath(gpa, opts);
             defer zld.deinit();
 
-            var argv = std.ArrayList([]const u8).init(allocator);
-            defer argv.deinit();
-
+            var argv = std.ArrayList([]const u8).init(arena);
             outer: {
                 switch (host.getExternalExecutor(target_info, .{})) {
                     .native => {
@@ -320,14 +322,10 @@ pub const TestContext = struct {
                 }
 
                 const result = try std.ChildProcess.exec(.{
-                    .allocator = allocator,
+                    .allocator = arena,
                     .argv = argv.items,
                     .cwd = cwd,
                 });
-                defer {
-                    allocator.free(result.stdout);
-                    allocator.free(result.stderr);
-                }
 
                 if (case.expected_out.stdout != null or case.expected_out.stderr != null) {
                     if (case.expected_out.stderr) |err| {
@@ -359,7 +357,7 @@ pub const TestContext = struct {
 };
 
 fn printInvocation(argv: []const []const u8) !void {
-    const full_inv = try std.mem.join(allocator, " ", argv);
-    defer allocator.free(full_inv);
+    const full_inv = try std.mem.join(gpa, " ", argv);
+    defer gpa.free(full_inv);
     log.err("The following command failed:\n{s}", .{full_inv});
 }

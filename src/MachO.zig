@@ -29,6 +29,7 @@ const SegmentCommand = macho.SegmentCommand;
 const StringTable = @import("strtab.zig").StringTable;
 const Trie = @import("MachO/Trie.zig");
 const Zld = @import("Zld.zig");
+pub const Options = @import("MachO/opts.zig").Options;
 
 pub const base_tag = Zld.Tag.macho;
 
@@ -40,6 +41,7 @@ pub const SearchStrategy = enum {
 pub const N_DESC_GCED: u16 = @bitCast(u16, @as(i16, -1));
 
 base: Zld,
+options: Options,
 
 /// Page size is dependent on the target cpu architecture.
 /// For x86_64 that's 4KB, whereas for aarch64, that's 16KB.
@@ -190,7 +192,7 @@ const default_pagezero_vmsize: u64 = 0x100000000;
 /// potential future extensions.
 const default_headerpad_size: u32 = 0x1000;
 
-pub fn openPath(allocator: Allocator, options: Zld.Options) !*MachO {
+pub fn openPath(allocator: Allocator, options: Options) !*MachO {
     const file = try options.emit.directory.createFile(options.emit.sub_path, .{
         .truncate = true,
         .read = true,
@@ -206,11 +208,11 @@ pub fn openPath(allocator: Allocator, options: Zld.Options) !*MachO {
     return self;
 }
 
-fn createEmpty(gpa: Allocator, options: Zld.Options) !*MachO {
+fn createEmpty(gpa: Allocator, options: Options) !*MachO {
     const self = try gpa.create(MachO);
-    const cpu_arch = options.target.cpu.arch;
-    const os_tag = options.target.os.tag;
-    const abi = options.target.abi;
+    const cpu_arch = options.target.cpu_arch.?;
+    const os_tag = options.target.os_tag.?;
+    const abi = options.target.abi.?;
     const page_size: u16 = if (cpu_arch == .aarch64) 0x4000 else 0x1000;
     // Adhoc code signature is required when targeting aarch64-macos either directly or indirectly via the simulator
     // ABI such as aarch64-ios-simulator, etc.
@@ -219,10 +221,10 @@ fn createEmpty(gpa: Allocator, options: Zld.Options) !*MachO {
     self.* = .{
         .base = .{
             .tag = .macho,
-            .options = options,
             .allocator = gpa,
             .file = undefined,
         },
+        .options = options,
         .page_size = page_size,
         .code_signature = if (requires_adhoc_codesig)
             CodeSignature.init(page_size)
@@ -239,8 +241,7 @@ pub fn flush(self: *MachO) !void {
     defer arena_allocator.deinit();
     const arena = arena_allocator.allocator();
 
-    const syslibroot = self.base.options.syslibroot;
-    const gc_sections = self.base.options.gc_sections orelse false;
+    const syslibroot = self.options.syslibroot;
 
     try self.strtab.buffer.append(gpa, 0);
     try self.populateMetadata();
@@ -250,16 +251,16 @@ pub fn flush(self: *MachO) !void {
 
     // Positional arguments to the linker such as object files and static archives.
     var positionals = std.ArrayList([]const u8).init(arena);
-    try positionals.ensureUnusedCapacity(self.base.options.positionals.len);
+    try positionals.ensureUnusedCapacity(self.options.positionals.len);
 
     var must_link_archives = std.StringArrayHashMap(void).init(arena);
-    try must_link_archives.ensureUnusedCapacity(self.base.options.positionals.len);
+    try must_link_archives.ensureUnusedCapacity(self.options.positionals.len);
 
     // TODO implement must-link archives
-    for (self.base.options.positionals) |obj| {
+    for (self.options.positionals) |obj| {
         positionals.appendAssumeCapacity(obj.path);
     }
-    // for (self.base.options.positionals) |obj| {
+    // for (self.options.positionals) |obj| {
     //     if (must_link_archives.contains(obj.path)) continue;
     //     if (obj.must_link) {
     //         _ = must_link_archives.getOrPutAssumeCapacity(obj.path);
@@ -270,7 +271,7 @@ pub fn flush(self: *MachO) !void {
 
     // Shared and static libraries passed via `-l` flag.
     var lib_dirs = std.ArrayList([]const u8).init(arena);
-    for (self.base.options.lib_dirs) |dir| {
+    for (self.options.lib_dirs) |dir| {
         if (try resolveSearchDir(arena, dir, syslibroot)) |search_dir| {
             try lib_dirs.append(search_dir);
         } else {
@@ -286,15 +287,15 @@ pub fn flush(self: *MachO) !void {
     var libs = std.StringArrayHashMap(Zld.SystemLib).init(arena);
 
     // Assume ld64 default -search_paths_first if no strategy specified.
-    const search_strategy = self.base.options.search_strategy orelse .paths_first;
-    outer: for (self.base.options.libs.keys()) |lib_name| {
+    const search_strategy = self.options.search_strategy orelse .paths_first;
+    outer: for (self.options.libs.keys()) |lib_name| {
         switch (search_strategy) {
             .paths_first => {
                 // Look in each directory for a dylib (stub first), and then for archive
                 for (lib_dirs.items) |dir| {
                     for (&[_][]const u8{ ".tbd", ".dylib", ".a" }) |ext| {
                         if (try resolveLib(arena, dir, lib_name, ext)) |full_path| {
-                            try libs.put(full_path, self.base.options.libs.get(lib_name).?);
+                            try libs.put(full_path, self.options.libs.get(lib_name).?);
                             continue :outer;
                         }
                     }
@@ -308,13 +309,13 @@ pub fn flush(self: *MachO) !void {
                 for (lib_dirs.items) |dir| {
                     for (&[_][]const u8{ ".tbd", ".dylib" }) |ext| {
                         if (try resolveLib(arena, dir, lib_name, ext)) |full_path| {
-                            try libs.put(full_path, self.base.options.libs.get(lib_name).?);
+                            try libs.put(full_path, self.options.libs.get(lib_name).?);
                             continue :outer;
                         }
                     }
                 } else for (lib_dirs.items) |dir| {
                     if (try resolveLib(arena, dir, lib_name, ".a")) |full_path| {
-                        try libs.put(full_path, self.base.options.libs.get(lib_name).?);
+                        try libs.put(full_path, self.options.libs.get(lib_name).?);
                     } else {
                         log.warn("library not found for '-l{s}'", .{lib_name});
                         lib_not_found = true;
@@ -337,7 +338,7 @@ pub fn flush(self: *MachO) !void {
 
     // frameworks
     var framework_dirs = std.ArrayList([]const u8).init(arena);
-    for (self.base.options.framework_dirs) |dir| {
+    for (self.options.framework_dirs) |dir| {
         if (try resolveSearchDir(arena, dir, syslibroot)) |search_dir| {
             try framework_dirs.append(search_dir);
         } else {
@@ -345,17 +346,17 @@ pub fn flush(self: *MachO) !void {
         }
     }
 
-    if (builtin.os.tag == .macos and self.base.options.frameworks.count() > 0) {
+    if (builtin.os.tag == .macos and self.options.frameworks.count() > 0) {
         if (try resolveSearchDir(arena, "/System/Library/Frameworks", syslibroot)) |search_dir| {
             try framework_dirs.append(search_dir);
         }
     }
 
-    outer: for (self.base.options.frameworks.keys()) |f_name| {
+    outer: for (self.options.frameworks.keys()) |f_name| {
         for (framework_dirs.items) |dir| {
             for (&[_][]const u8{ ".tbd", ".dylib", "" }) |ext| {
                 if (try resolveFramework(arena, dir, f_name, ext)) |full_path| {
-                    const info = self.base.options.frameworks.get(f_name).?;
+                    const info = self.options.frameworks.get(f_name).?;
                     try libs.put(full_path, .{
                         .needed = info.needed,
                         .weak = info.weak,
@@ -378,7 +379,7 @@ pub fn flush(self: *MachO) !void {
 
     // rpaths
     var rpath_table = std.StringArrayHashMap(void).init(arena);
-    for (self.base.options.rpath_list) |rpath| {
+    for (self.options.rpath_list) |rpath| {
         if (rpath_table.contains(rpath)) continue;
         const cmdsize = @intCast(u32, mem.alignForwardGeneric(
             u64,
@@ -397,14 +398,14 @@ pub fn flush(self: *MachO) !void {
     }
 
     // code signature and entitlements
-    if (self.base.options.entitlements) |path| {
+    if (self.options.entitlements) |path| {
         if (self.code_signature) |*csig| {
             try csig.addEntitlements(gpa, path);
-            csig.code_directory.ident = self.base.options.emit.sub_path;
+            csig.code_directory.ident = self.options.emit.sub_path;
         } else {
             var csig = CodeSignature.init(self.page_size);
             try csig.addEntitlements(gpa, path);
-            csig.code_directory.ident = self.base.options.emit.sub_path;
+            csig.code_directory.ident = self.options.emit.sub_path;
             self.code_signature = csig;
         }
     }
@@ -449,7 +450,7 @@ pub fn flush(self: *MachO) !void {
         try object.splitIntoAtoms(self, @intCast(u32, object_id));
     }
 
-    if (gc_sections) {
+    if (self.options.dead_strip) {
         try dead_strip.gcAtoms(self);
     }
 
@@ -480,7 +481,7 @@ pub fn flush(self: *MachO) !void {
 
     if (self.code_signature) |*csig| {
         csig.clear(gpa);
-        csig.code_directory.ident = self.base.options.emit.sub_path;
+        csig.code_directory.ident = self.options.emit.sub_path;
         // Preallocate space for the code signature.
         // We need to do this at this stage so that we have the load commands with proper values
         // written out to the file.
@@ -494,8 +495,8 @@ pub fn flush(self: *MachO) !void {
 
     if (self.code_signature) |*csig| {
         try self.writeCodeSignature(csig); // code signing always comes last
-        const dir = self.base.options.emit.directory;
-        const path = self.base.options.emit.sub_path;
+        const dir = self.options.emit.directory;
+        const path = self.options.emit.sub_path;
         try dir.copyFile(path, dir, path, .{});
     }
 }
@@ -634,7 +635,7 @@ fn parseObject(self: *MachO, path: []const u8) !bool {
         .mtime = mtime,
     };
 
-    object.parse(self.base.allocator, self.base.options.target) catch |err| switch (err) {
+    object.parse(self.base.allocator, self.options.target.cpu_arch.?) catch |err| switch (err) {
         error.EndOfStream, error.NotObject => {
             object.deinit(self.base.allocator);
             return false;
@@ -662,7 +663,7 @@ fn parseArchive(self: *MachO, path: []const u8, force_load: bool) !bool {
         .file = file,
     };
 
-    archive.parse(self.base.allocator, self.base.options.target) catch |err| switch (err) {
+    archive.parse(self.base.allocator, self.options.target.cpu_arch.?) catch |err| switch (err) {
         error.EndOfStream, error.NotArchive => {
             archive.deinit(self.base.allocator);
             return false;
@@ -682,7 +683,7 @@ fn parseArchive(self: *MachO, path: []const u8, force_load: bool) !bool {
         }
         for (offsets.keys()) |off| {
             const object = try self.objects.addOne(self.base.allocator);
-            object.* = try archive.parseObject(self.base.allocator, self.base.options.target, off);
+            object.* = try archive.parseObject(self.base.allocator, self.options.target.cpu_arch.?, off);
         }
     } else {
         try self.archives.append(self.base.allocator, archive);
@@ -730,7 +731,7 @@ pub fn parseDylib(
 
     dylib.parse(
         self.base.allocator,
-        self.base.options.target,
+        self.options.target.cpu_arch.?,
         dylib_id,
         dependent_libs,
     ) catch |err| switch (err) {
@@ -745,7 +746,7 @@ pub fn parseDylib(
 
             try dylib.parseFromStub(
                 self.base.allocator,
-                self.base.options.target,
+                self.options.target,
                 lib_stub,
                 dylib_id,
                 dependent_libs,
@@ -771,7 +772,7 @@ pub fn parseDylib(
     try self.dylibs_map.putNoClobber(self.base.allocator, dylib.id.?.name, dylib_id);
 
     const should_link_dylib_even_if_unreachable = blk: {
-        if (self.base.options.dead_strip_dylibs and !opts.needed) break :blk false;
+        if (self.options.dead_strip_dylibs and !opts.needed) break :blk false;
         break :blk !(opts.dependent or self.referenced_dylibs.contains(dylib_id));
     };
 
@@ -1594,7 +1595,7 @@ pub fn createGotAtom(self: *MachO, target: SymbolWithLoc) !*Atom {
         .subtractor = null,
         .pcrel = false,
         .length = 3,
-        .@"type" = switch (self.base.options.target.cpu.arch) {
+        .@"type" = switch (self.options.target.cpu_arch.?) {
             .aarch64 => @enumToInt(macho.reloc_type_arm64.ARM64_RELOC_UNSIGNED),
             .x86_64 => @enumToInt(macho.reloc_type_x86_64.X86_64_RELOC_UNSIGNED),
             else => unreachable,
@@ -1687,13 +1688,13 @@ fn createStubHelperPreambleAtom(self: *MachO) !void {
     if (self.stub_helper_preamble_atom != null) return;
 
     const gpa = self.base.allocator;
-    const arch = self.base.options.target.cpu.arch;
-    const size: u64 = switch (arch) {
+    const cpu_arch = self.options.target.cpu_arch.?;
+    const size: u64 = switch (cpu_arch) {
         .x86_64 => 15,
         .aarch64 => 6 * @sizeOf(u32),
         else => unreachable,
     };
-    const alignment: u32 = switch (arch) {
+    const alignment: u32 = switch (cpu_arch) {
         .x86_64 => 0,
         .aarch64 => 2,
         else => unreachable,
@@ -1708,7 +1709,7 @@ fn createStubHelperPreambleAtom(self: *MachO) !void {
     });
     const atom = try MachO.createEmptyAtom(gpa, sym_index, size, alignment);
     const dyld_private_sym_index = self.dyld_private_atom.?.sym_index;
-    switch (arch) {
+    switch (cpu_arch) {
         .x86_64 => {
             try atom.relocs.ensureUnusedCapacity(self.base.allocator, 2);
             // lea %r11, [rip + disp]
@@ -1815,13 +1816,13 @@ fn createStubHelperPreambleAtom(self: *MachO) !void {
 
 pub fn createStubHelperAtom(self: *MachO) !*Atom {
     const gpa = self.base.allocator;
-    const arch = self.base.options.target.cpu.arch;
-    const stub_size: u4 = switch (arch) {
+    const cpu_arch = self.options.target.cpu_arch.?;
+    const stub_size: u4 = switch (cpu_arch) {
         .x86_64 => 10,
         .aarch64 => 3 * @sizeOf(u32),
         else => unreachable,
     };
-    const alignment: u2 = switch (arch) {
+    const alignment: u2 = switch (cpu_arch) {
         .x86_64 => 0,
         .aarch64 => 2,
         else => unreachable,
@@ -1837,7 +1838,7 @@ pub fn createStubHelperAtom(self: *MachO) !*Atom {
     const atom = try MachO.createEmptyAtom(gpa, sym_index, stub_size, alignment);
     try atom.relocs.ensureTotalCapacity(gpa, 1);
 
-    switch (arch) {
+    switch (cpu_arch) {
         .x86_64 => {
             // pushq
             atom.code.items[0] = 0x68;
@@ -1909,7 +1910,7 @@ pub fn createLazyPointerAtom(self: *MachO, stub_sym_index: u32, target: SymbolWi
         .subtractor = null,
         .pcrel = false,
         .length = 3,
-        .@"type" = switch (self.base.options.target.cpu.arch) {
+        .@"type" = switch (self.options.target.cpu_arch.?) {
             .aarch64 => @enumToInt(macho.reloc_type_arm64.ARM64_RELOC_UNSIGNED),
             .x86_64 => @enumToInt(macho.reloc_type_x86_64.X86_64_RELOC_UNSIGNED),
             else => unreachable,
@@ -1936,13 +1937,13 @@ pub fn createLazyPointerAtom(self: *MachO, stub_sym_index: u32, target: SymbolWi
 
 pub fn createStubAtom(self: *MachO, laptr_sym_index: u32) !*Atom {
     const gpa = self.base.allocator;
-    const arch = self.base.options.target.cpu.arch;
-    const alignment: u2 = switch (arch) {
+    const cpu_arch = self.options.target.cpu_arch.?;
+    const alignment: u2 = switch (cpu_arch) {
         .x86_64 => 0,
         .aarch64 => 2,
         else => unreachable, // unhandled architecture type
     };
-    const stub_size: u4 = switch (arch) {
+    const stub_size: u4 = switch (cpu_arch) {
         .x86_64 => 6,
         .aarch64 => 3 * @sizeOf(u32),
         else => unreachable, // unhandled architecture type
@@ -1956,7 +1957,7 @@ pub fn createStubAtom(self: *MachO, laptr_sym_index: u32) !*Atom {
         .n_value = 0,
     });
     const atom = try MachO.createEmptyAtom(gpa, sym_index, stub_size, alignment);
-    switch (arch) {
+    switch (cpu_arch) {
         .x86_64 => {
             // jmp
             atom.code.items[0] = 0xff;
@@ -2132,7 +2133,11 @@ fn resolveSymbolsInArchives(self: *MachO) !void {
 
             const object_id = @intCast(u16, self.objects.items.len);
             const object = try self.objects.addOne(self.base.allocator);
-            object.* = try archive.parseObject(self.base.allocator, self.base.options.target, offsets.items[0]);
+            object.* = try archive.parseObject(
+                self.base.allocator,
+                self.options.target.cpu_arch.?,
+                offsets.items[0],
+            );
             try self.resolveSymbolsInObject(object, object_id);
 
             continue :loop;
@@ -2178,8 +2183,10 @@ fn resolveSymbolsInDylibs(self: *MachO) !void {
 }
 
 fn resolveSymbolsAtLoading(self: *MachO) !void {
-    const is_lib = self.base.options.output_mode == .lib;
-    const allow_undef = is_lib and (self.base.options.allow_shlib_undefined orelse false);
+    // TODO
+    // const is_lib = self.options.output_mode == .lib;
+    // const allow_undef = is_lib and (self.options.allow_shlib_undefined orelse false);
+    const allow_undef = false;
 
     var next_sym: usize = 0;
     while (next_sym < self.unresolved.count()) {
@@ -2220,7 +2227,7 @@ fn resolveSymbolsAtLoading(self: *MachO) !void {
 }
 
 fn createMhExecuteHeaderSymbol(self: *MachO) !void {
-    if (self.base.options.output_mode != .exe) return;
+    if (self.options.output_mode != .exe) return;
     if (self.globals.get("__mh_execute_header")) |global| {
         const sym = self.getSymbol(global);
         if (!sym.undf() and !(sym.pext() or sym.weakDef())) return;
@@ -2405,14 +2412,14 @@ fn addCodeSignatureLC(self: *MachO) !void {
 }
 
 fn setEntryPoint(self: *MachO) !void {
-    if (self.base.options.output_mode != .exe) return;
+    if (self.options.output_mode != .exe) return;
 
     const seg = self.load_commands.items[self.text_segment_cmd_index.?].segment;
     const global = try self.getEntryPoint();
     const sym = self.getSymbol(global);
     const ec = &self.load_commands.items[self.main_cmd_index.?].main;
     ec.entryoff = @intCast(u32, sym.n_value - seg.inner.vmaddr);
-    ec.stacksize = self.base.options.stack_size_override orelse 0;
+    ec.stacksize = self.options.stack_size_override orelse 0;
 }
 
 pub fn deinit(self: *MachO) void {
@@ -2469,7 +2476,7 @@ pub fn deinit(self: *MachO) void {
     }
 }
 
-fn closeFiles(self: MachO) void {
+pub fn closeFiles(self: *const MachO) void {
     for (self.objects.items) |object| {
         object.file.close();
     }
@@ -2482,12 +2489,12 @@ fn closeFiles(self: MachO) void {
 }
 
 fn populateMetadata(self: *MachO) !void {
-    const cpu_arch = self.base.options.target.cpu.arch;
-    const pagezero_vmsize = self.base.options.pagezero_size orelse default_pagezero_vmsize;
+    const cpu_arch = self.options.target.cpu_arch.?;
+    const pagezero_vmsize = self.options.pagezero_size orelse default_pagezero_vmsize;
     const aligned_pagezero_vmsize = mem.alignBackwardGeneric(u64, pagezero_vmsize, self.page_size);
 
     if (self.pagezero_segment_cmd_index == null) blk: {
-        if (self.base.options.output_mode == .lib) break :blk;
+        if (self.options.output_mode == .lib) break :blk;
         if (aligned_pagezero_vmsize == 0) break :blk;
         if (aligned_pagezero_vmsize != pagezero_vmsize) {
             log.warn("requested __PAGEZERO size (0x{x}) is not page aligned", .{pagezero_vmsize});
@@ -2744,7 +2751,7 @@ fn populateMetadata(self: *MachO) !void {
         try self.load_commands.append(self.base.allocator, .{ .dylinker = dylinker_cmd });
     }
 
-    if (self.main_cmd_index == null and self.base.options.output_mode == .exe) {
+    if (self.main_cmd_index == null and self.options.output_mode == .exe) {
         self.main_cmd_index = @intCast(u16, self.load_commands.items.len);
         try self.load_commands.append(self.base.allocator, .{
             .main = .{
@@ -2755,12 +2762,12 @@ fn populateMetadata(self: *MachO) !void {
         });
     }
 
-    if (self.dylib_id_cmd_index == null and self.base.options.output_mode == .lib) {
+    if (self.dylib_id_cmd_index == null and self.options.output_mode == .lib) {
         self.dylib_id_cmd_index = @intCast(u16, self.load_commands.items.len);
-        const install_name = self.base.options.install_name orelse self.base.options.emit.sub_path;
-        const current_version = self.base.options.version orelse
+        const install_name = self.options.install_name orelse self.options.emit.sub_path;
+        const current_version = self.options.version orelse
             std.builtin.Version{ .major = 1, .minor = 0, .patch = 0 };
-        const compat_version = self.base.options.compatibility_version orelse
+        const compat_version = self.options.compatibility_version orelse
             std.builtin.Version{ .major = 1, .minor = 0, .patch = 0 };
         var dylib_cmd = try macho.createLoadDylibCommand(
             self.base.allocator,
@@ -2792,14 +2799,19 @@ fn populateMetadata(self: *MachO) !void {
             @sizeOf(u64),
         ));
         const platform_version = blk: {
-            const ver = self.base.options.target.os.version_range.semver.min;
+            const ver = self.options.platform_version;
             const platform_version = ver.major << 16 | ver.minor << 8;
             break :blk platform_version;
         };
-        const is_simulator_abi = self.base.options.target.abi == .simulator;
+        const sdk_version = blk: {
+            const ver = self.options.sdk_version;
+            const sdk_version = ver.major << 16 | ver.minor << 8;
+            break :blk sdk_version;
+        };
+        const is_simulator_abi = self.options.target.abi.? == .simulator;
         var cmd = macho.emptyGenericCommandWithData(macho.build_version_command{
             .cmdsize = cmdsize,
-            .platform = switch (self.base.options.target.os.tag) {
+            .platform = switch (self.options.target.os_tag.?) {
                 .macos => .MACOS,
                 .ios => if (is_simulator_abi) macho.PLATFORM.IOSSIMULATOR else macho.PLATFORM.IOS,
                 .watchos => if (is_simulator_abi) macho.PLATFORM.WATCHOSSIMULATOR else macho.PLATFORM.WATCHOS,
@@ -2807,7 +2819,7 @@ fn populateMetadata(self: *MachO) !void {
                 else => unreachable,
             },
             .minos = platform_version,
-            .sdk = platform_version,
+            .sdk = sdk_version,
             .ntools = 1,
         });
         const ld_ver = macho.build_tool_version{
@@ -2862,10 +2874,10 @@ fn calcMinHeaderpad(self: *MachO) u64 {
         sizeofcmds += lc.cmdsize();
     }
 
-    var padding: u32 = sizeofcmds + (self.base.options.headerpad_size orelse 0);
+    var padding: u32 = sizeofcmds + (self.options.headerpad_size orelse 0);
     log.debug("minimum requested headerpad size 0x{x}", .{padding + @sizeOf(macho.mach_header_64)});
 
-    if (self.base.options.headerpad_max_install_names) {
+    if (self.options.headerpad_max_install_names) {
         var min_headerpad_size: u32 = 0;
         for (self.load_commands.items) |lc| switch (lc.cmd()) {
             .ID_DYLIB,
@@ -3278,7 +3290,7 @@ fn writeDyldInfoData(self: *MachO) !void {
         const text_segment = self.load_commands.items[self.text_segment_cmd_index.?].segment;
         const base_address = text_segment.inner.vmaddr;
 
-        if (self.base.options.output_mode == .exe) {
+        if (self.options.output_mode == .exe) {
             for (&[_]SymbolWithLoc{
                 try self.getEntryPoint(),
                 self.globals.get("__mh_execute_header").?,
@@ -3293,7 +3305,7 @@ fn writeDyldInfoData(self: *MachO) !void {
                 });
             }
         } else {
-            assert(self.base.options.output_mode == .lib);
+            assert(self.options.output_mode == .lib);
             for (self.globals.values()) |global| {
                 const sym = self.getSymbol(global);
 
@@ -3473,7 +3485,7 @@ fn populateLazyBindOffsetsInStubHelper(self: *MachO, buffer: []const u8) !void {
         .seg = text_segment_cmd_index,
         .sect = stub_helper_section_index,
     });
-    const stub_offset: u4 = switch (self.base.options.target.cpu.arch) {
+    const stub_offset: u4 = switch (self.options.target.cpu_arch.?) {
         .x86_64 => 1,
         .aarch64 => 2 * @sizeOf(u32),
         else => unreachable,
@@ -3669,7 +3681,7 @@ fn writeSymtab(self: *MachO) !void {
             try locals.append(out_sym);
         }
 
-        if (!self.base.options.strip) {
+        if (!self.options.strip) {
             try self.generateSymbolStabs(object, &locals);
         }
     }
@@ -3864,7 +3876,7 @@ fn writeCodeSignature(self: *MachO, code_sig: *CodeSignature) !void {
         .exec_seg_base = seg.inner.fileoff,
         .exec_seg_limit = seg.inner.filesize,
         .code_sig_cmd = code_sig_cmd,
-        .output_mode = self.base.options.output_mode,
+        .output_mode = self.options.output_mode,
     }, buffer.writer());
     assert(buffer.items.len == code_sig.size());
 
@@ -3905,7 +3917,7 @@ fn writeHeader(self: *MachO) !void {
     var header: macho.mach_header_64 = .{};
     header.flags = macho.MH_NOUNDEFS | macho.MH_DYLDLINK | macho.MH_PIE | macho.MH_TWOLEVEL;
 
-    switch (self.base.options.target.cpu.arch) {
+    switch (self.options.target.cpu_arch.?) {
         .aarch64 => {
             header.cputype = macho.CPU_TYPE_ARM64;
             header.cpusubtype = macho.CPU_SUBTYPE_ARM_ALL;
@@ -3917,7 +3929,7 @@ fn writeHeader(self: *MachO) !void {
         else => return error.UnsupportedCpuArchitecture,
     }
 
-    switch (self.base.options.output_mode) {
+    switch (self.options.output_mode) {
         .exe => {
             header.filetype = macho.MH_EXECUTE;
         },
@@ -4052,7 +4064,7 @@ pub fn getTlvPtrAtomForSymbol(self: *MachO, sym_with_loc: SymbolWithLoc) ?*Atom 
 /// Returns symbol location corresponding to the set entrypoint.
 /// Asserts output mode is executable.
 pub fn getEntryPoint(self: MachO) error{MissingMainEntrypoint}!SymbolWithLoc {
-    const entry_name = self.base.options.entry orelse "_main";
+    const entry_name = self.options.entry orelse "_main";
     const global = self.globals.get(entry_name) orelse {
         log.err("entrypoint '{s}' not found", .{entry_name});
         return error.MissingMainEntrypoint;
@@ -4144,13 +4156,14 @@ pub fn generateSymbolStabs(
     object: Object,
     locals: *std.ArrayList(macho.nlist_64),
 ) !void {
-    assert(!self.base.options.strip);
+    assert(!self.options.strip);
 
     const gpa = self.base.allocator;
 
     log.debug("parsing debug info in '{s}'", .{object.name});
 
     var debug_info = (try DebugInfo.parse(gpa, object)) orelse return;
+    defer debug_info.deinit(gpa);
 
     // We assume there is only one CU.
     const compile_unit = debug_info.inner.findCompileUnit(0x0) catch |err| switch (err) {
