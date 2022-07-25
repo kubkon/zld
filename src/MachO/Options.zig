@@ -3,6 +3,7 @@ const Options = @This();
 const std = @import("std");
 const builtin = @import("builtin");
 const io = std.io;
+const macho = std.macho;
 const mem = std.mem;
 const process = std.process;
 
@@ -19,41 +20,106 @@ pub const SearchStrategy = enum {
 const usage =
     \\Usage: ld64.zld [files...]
     \\
-    \\Commands:
-    \\  <empty> [files...] (default)  Generate final executable artifact 'a.out' from input '.o' files
-    \\
     \\General Options:
-    \\-current_version [value]        Specifies the current version number of the library
-    \\-compatibility_version [value]  Specifies the compatibility version number of the library
-    \\-dead_strip                     Remove functions and data that are unreachable by the entry point or exported symbols
-    \\-dead_strip_dylibs              Remove dylibs that were unreachable by the entry point or exported symbols
-    \\-dylib                          Create dynamic library
-    \\-dynamic                        Perform dynamic linking
-    \\-e [name]                       Specifies the entry point of main executable
-    \\-force_load [path]              Loads all members of the specified static archive library
-    \\-framework [name]               Link against framework
-    \\-F[path]                        Add search path for frameworks
-    \\-headerpad [value]              Set minimum space for future expansion of the load commands in hexadecimal notation
-    \\-headerpad_max_install_names    Set enough space as if all paths were MAXPATHLEN
-    \\-install_name                   Add dylib's install name
-    \\-l[name]                        Link against library
-    \\-L[path]                        Add search path for libraries
-    \\-needed_framework [name]        Link against framework (even if unused)
-    \\-needed-l[name]                 Alias of -needed_library
-    \\-needed_library [name]          Link against library (even if unused)
-    \\-rpath [path]                   Specify runtime path
-    \\-pagezero_size [value]          Size of the __PAGEZERO segment in hexademical notation
-    \\-S                              Do not put debug information (STABS or DWARF) in the output file
-    \\-search_paths_first             Search each dir in library search paths for `libx.dylib` then `libx.a`
-    \\-search_dylibs_first            Search `libx.dylib` in each dir in library search paths, then `libx.a`
-    \\-stack_size [value]             Size of the default stack in hexadecimal notation
-    \\-syslibroot [path]              Specify the syslibroot
-    \\-weak_framework [name]          Link against framework and mark it and all referenced symbols as weak
-    \\-weak-l[name]                   Alias of -weak_library
-    \\-weak_library [name]            Link against library and mark it and all referenced symbols as weak
-    \\--entitlements                  (Linker extension) add path to entitlements file for embedding in code signature
-    \\-o [path]                       Specify output path for the final artifact
-    \\-h, --help                      Print this help and exit
+    \\
+    \\-arch [name]
+    \\    Specifies which architecture the output file should be
+    \\
+    \\-current_version [value]
+    \\    Specifies the current version number of the library
+    \\
+    \\-compatibility_version [value]
+    \\    Specifies the compatibility version number of the library
+    \\
+    \\-dead_strip
+    \\    Remove functions and data that are unreachable by the entry point or exported symbols
+    \\
+    \\-dead_strip_dylibs
+    \\    Remove dylibs that were unreachable by the entry point or exported symbols
+    \\
+    \\-dylib
+    \\    Create dynamic library
+    \\
+    \\-dynamic
+    \\    Perform dynamic linking
+    \\
+    \\-e [name]
+    \\    Specifies the entry point of main executable
+    \\
+    \\-force_load [path]
+    \\    Loads all members of the specified static archive library
+    \\
+    \\-framework [name]
+    \\    Link against framework
+    \\
+    \\-F[path]
+    \\    Add search path for frameworks
+    \\
+    \\-headerpad [value]
+    \\    Set minimum space for future expansion of the load commands in hexadecimal notation
+    \\
+    \\-headerpad_max_install_names
+    \\    Set enough space as if all paths were MAXPATHLEN
+    \\
+    \\-install_name
+    \\    Add dylib's install name
+    \\
+    \\-l[name]
+    \\    Link against library
+    \\    
+    \\-L[path]
+    \\    Add search path for libraries
+    \\
+    \\-needed_framework [name]
+    \\    Link against framework (even if unused)
+    \\
+    \\-needed-l[name]
+    \\    Alias of -needed_library
+    \\
+    \\-needed_library [name]
+    \\    Link against library (even if unused)
+    \\
+    \\-rpath [path]
+    \\    Specify runtime path
+    \\
+    \\-pagezero_size [value]
+    \\    Size of the __PAGEZERO segment in hexademical notation
+    \\
+    \\-platform_version [platform] [min_version] [sdk_version]
+    \\    Sets the platform, oldest supported version of that platform and the SDK it was built against
+    \\
+    \\-S
+    \\    Do not put debug information (STABS or DWARF) in the output file
+    \\
+    \\-search_paths_first
+    \\    Search each dir in library search paths for `libx.dylib` then `libx.a`
+    \\
+    \\-search_dylibs_first
+    \\    Search `libx.dylib` in each dir in library search paths, then `libx.a`
+    \\
+    \\-stack_size [value]
+    \\    Size of the default stack in hexadecimal notation
+    \\
+    \\-syslibroot [path]
+    \\    Specify the syslibroot
+    \\
+    \\-weak_framework [name]
+    \\    Link against framework and mark it and all referenced symbols as weak
+    \\
+    \\-weak-l[name]
+    \\    Alias of -weak_library
+    \\
+    \\-weak_library [name]
+    \\    Link against library and mark it and all referenced symbols as weak
+    \\
+    \\--entitlements
+    \\    (Linker extension) add path to entitlements file for embedding in code signature
+    \\
+    \\-o [path]
+    \\    Specify output path for the final artifact
+    \\
+    \\-h, --help
+    \\    Print this help and exit
 ;
 
 fn printHelpAndExit() noreturn {
@@ -123,8 +189,9 @@ pub fn parseArgs(arena: Allocator, args: []const []const u8) !Options {
     var entry: ?[]const u8 = null;
     var strip: bool = false;
 
-    var platform_version: std.builtin.Version = builtin.target.os.version_range.semver.min;
-    var sdk_version: std.builtin.Version = platform_version;
+    var target: ?CrossTarget = null;
+    var platform_version: ?std.builtin.Version = null;
+    var sdk_version: ?std.builtin.Version = null;
 
     const Iterator = struct {
         args: []const []const u8,
@@ -226,6 +293,117 @@ pub fn parseArgs(arena: Allocator, args: []const []const u8) !Options {
                 .path = path,
                 .must_link = true,
             });
+        } else if (mem.eql(u8, arg, "-arch")) {
+            const arch_s = args_iter.next() orelse
+                fatal(arena, "Expected architecture name after {s}", .{arg});
+            if (target == null) {
+                target = CrossTarget.fromTarget(builtin.target);
+            }
+            if (mem.eql(u8, arch_s, "arm64")) {
+                target.?.cpu_arch = .aarch64;
+            } else if (mem.eql(u8, arch_s, "x86_64")) {
+                target.?.cpu_arch = .x86_64;
+            } else {
+                fatal(arena, "Failed to parse CPU architecture from '{s}'", .{arch_s});
+            }
+        } else if (mem.eql(u8, arg, "-platform_version")) {
+            const platform = args_iter.next() orelse
+                fatal(arena, "Expected platform name after {s}", .{arg});
+            const min_v = args_iter.next() orelse
+                fatal(arena, "Expected minimum platform version after {s} {s}", .{ arg, platform });
+            const sdk_v = args_iter.next() orelse
+                fatal(arena, "Expected SDK version after {s} {s} {s}", .{ arg, platform, min_v });
+
+            var tmp_target = CrossTarget{};
+
+            // First, try parsing platform as a numeric value.
+            if (std.fmt.parseUnsigned(u32, platform, 10)) |ord| {
+                switch (@intToEnum(macho.PLATFORM, ord)) {
+                    .MACOS => tmp_target = .{
+                        .os_tag = .macos,
+                        .abi = .none,
+                    },
+                    .IOS => tmp_target = .{
+                        .os_tag = .ios,
+                        .abi = .none,
+                    },
+                    .TVOS => tmp_target = .{
+                        .os_tag = .tvos,
+                        .abi = .none,
+                    },
+                    .WATCHOS => tmp_target = .{
+                        .os_tag = .watchos,
+                        .abi = .none,
+                    },
+                    .IOSSIMULATOR => tmp_target = .{
+                        .os_tag = .ios,
+                        .abi = .simulator,
+                    },
+                    .TVOSSIMULATOR => tmp_target = .{
+                        .os_tag = .tvos,
+                        .abi = .simulator,
+                    },
+                    .WATCHOSSIMULATOR => tmp_target = .{
+                        .os_tag = .watchos,
+                        .abi = .simulator,
+                    },
+                    else => |x| fatal(arena, "Unsupported Apple OS: {s}", .{@tagName(x)}),
+                }
+            } else |_| {
+                if (mem.eql(u8, platform, "macos")) {
+                    tmp_target = .{
+                        .os_tag = .macos,
+                        .abi = .none,
+                    };
+                } else if (mem.eql(u8, platform, "ios")) {
+                    tmp_target = .{
+                        .os_tag = .ios,
+                        .abi = .none,
+                    };
+                } else if (mem.eql(u8, platform, "tvos")) {
+                    tmp_target = .{
+                        .os_tag = .tvos,
+                        .abi = .none,
+                    };
+                } else if (mem.eql(u8, platform, "watchos")) {
+                    tmp_target = .{
+                        .os_tag = .watchos,
+                        .abi = .none,
+                    };
+                } else if (mem.eql(u8, platform, "ios-simulator")) {
+                    tmp_target = .{
+                        .os_tag = .ios,
+                        .abi = .simulator,
+                    };
+                } else if (mem.eql(u8, platform, "tvos-simulator")) {
+                    tmp_target = .{
+                        .os_tag = .tvos,
+                        .abi = .simulator,
+                    };
+                } else if (mem.eql(u8, platform, "watchos-simulator")) {
+                    tmp_target = .{
+                        .os_tag = .watchos,
+                        .abi = .simulator,
+                    };
+                } else {
+                    fatal(arena, "Unsupported Apple OS: {s}", .{platform});
+                }
+            }
+
+            if (target == null) {
+                target = CrossTarget.fromTarget(builtin.target);
+            }
+            if (target) |*tt| {
+                tt.os_tag = tmp_target.os_tag;
+                tt.abi = tmp_target.abi;
+            }
+
+            platform_version = std.builtin.Version.parse(min_v) catch |err| {
+                fatal(arena, "Failed to parse min_version '{s}': {s}", .{ min_v, @errorName(err) });
+            };
+            sdk_version = std.builtin.Version.parse(sdk_v) catch |err| {
+                fatal(arena, "Failed to parse sdk_version '{s}': {s}", .{ sdk_v, @errorName(err) });
+            };
         } else {
             try positionals.append(.{
                 .path = arg,
@@ -248,9 +426,9 @@ pub fn parseArgs(arena: Allocator, args: []const []const u8) !Options {
             .sub_path = out_path orelse "a.out",
         },
         .dynamic = dynamic,
-        .target = CrossTarget.fromTarget(builtin.target),
-        .platform_version = platform_version,
-        .sdk_version = sdk_version,
+        .target = if (target) |tt| tt else CrossTarget.fromTarget(builtin.target),
+        .platform_version = if (platform_version) |v| v else builtin.target.os.version_range.semver.min,
+        .sdk_version = if (sdk_version) |v| v else builtin.target.os.version_range.semver.min,
         .output_mode = if (dylib) .lib else .exe,
         .syslibroot = syslibroot,
         .positionals = positionals.items,
