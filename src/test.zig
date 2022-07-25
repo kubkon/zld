@@ -191,7 +191,7 @@ pub const TestContext = struct {
                 const output_file_path = try std.fs.path.join(arena, &[_][]const u8{
                     cwd, output_filename,
                 });
-                try objects.append(.{ .path = output_file_path, .must_link = true });
+                try objects.append(.{ .path = output_file_path, .must_link = false });
 
                 const result = try std.ChildProcess.exec(.{
                     .allocator = arena,
@@ -247,19 +247,26 @@ pub const TestContext = struct {
             });
 
             var libs = std.StringArrayHashMap(Zld.SystemLib).init(arena);
+            var lib_dirs = std.ArrayList([]const u8).init(arena);
             var frameworks = std.StringArrayHashMap(Zld.SystemLib).init(arena);
+            var framework_dirs = std.ArrayList([]const u8).init(arena);
 
             const host = try std.zig.system.NativeTargetInfo.detect(arena, .{});
             const target_info = try std.zig.system.NativeTargetInfo.detect(arena, case.target);
-            const syslibroot = blk: {
-                if (case.target.os_tag.? == .macos and host.target.os.tag == .macos) {
-                    if (!std.zig.system.darwin.isDarwinSDKInstalled(arena)) break :blk null;
-                    const sdk = std.zig.system.darwin.getDarwinSDK(arena, host.target) orelse
-                        break :blk null;
-                    break :blk sdk.path;
+            var syslibroot: ?[]const u8 = null;
+
+            if (case.target.isDarwin()) {
+                try libs.put("System", .{});
+                try lib_dirs.append("/usr/lib");
+                try framework_dirs.append("/System/Library/Frameworks");
+
+                if (std.zig.system.darwin.isDarwinSDKInstalled(arena)) {
+                    if (std.zig.system.darwin.getDarwinSDK(arena, host.target)) |sdk| {
+                        syslibroot = sdk.path;
+                    }
                 }
-                break :blk null;
-            };
+            }
+
             const tag: Zld.Tag = switch (case.target.os_tag.?) {
                 .macos,
                 .ios,
@@ -285,8 +292,8 @@ pub const TestContext = struct {
                     .positionals = objects.items,
                     .libs = libs,
                     .frameworks = frameworks,
-                    .lib_dirs = &[0][]const u8{},
-                    .framework_dirs = &[0][]const u8{},
+                    .lib_dirs = lib_dirs.items,
+                    .framework_dirs = framework_dirs.items,
                     .rpath_list = &[0][]const u8{},
                 } },
                 .elf => .{ .elf = .{

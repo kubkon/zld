@@ -33,11 +33,6 @@ const Zld = @import("Zld.zig");
 
 pub const base_tag = Zld.Tag.macho;
 
-pub const SearchStrategy = enum {
-    paths_first,
-    dylibs_first,
-};
-
 pub const N_DESC_GCED: u16 = @bitCast(u16, @as(i16, -1));
 
 base: Zld,
@@ -256,18 +251,14 @@ pub fn flush(self: *MachO) !void {
     var must_link_archives = std.StringArrayHashMap(void).init(arena);
     try must_link_archives.ensureUnusedCapacity(self.options.positionals.len);
 
-    // TODO implement must-link archives
     for (self.options.positionals) |obj| {
-        positionals.appendAssumeCapacity(obj.path);
+        if (must_link_archives.contains(obj.path)) continue;
+        if (obj.must_link) {
+            _ = must_link_archives.getOrPutAssumeCapacity(obj.path);
+        } else {
+            positionals.appendAssumeCapacity(obj.path);
+        }
     }
-    // for (self.options.positionals) |obj| {
-    //     if (must_link_archives.contains(obj.path)) continue;
-    //     if (obj.must_link) {
-    //         _ = must_link_archives.getOrPutAssumeCapacity(obj.path);
-    //     } else {
-    //         _ = positionals.appendAssumeCapacity(obj.path);
-    //     }
-    // }
 
     // Shared and static libraries passed via `-l` flag.
     var lib_dirs = std.ArrayList([]const u8).init(arena);
@@ -445,11 +436,11 @@ pub fn flush(self: *MachO) !void {
 
     try self.allocateSpecialSymbols();
 
-    // if (build_options.enable_logging) {
-    //     self.logSymtab();
-    //     self.logSectionOrdinals();
-    //     self.logAtoms();
-    // }
+    if (build_options.enable_logging) {
+        self.logSymtab();
+        self.logSectionOrdinals();
+        self.logAtoms();
+    }
 
     try self.writeAtoms();
 
@@ -2387,7 +2378,7 @@ fn setEntryPoint(self: *MachO) !void {
     const sym = self.getSymbol(global);
     const ec = &self.load_commands.items[self.main_cmd_index.?].main;
     ec.entryoff = @intCast(u32, sym.n_value - seg.inner.vmaddr);
-    ec.stacksize = self.options.stack_size_override orelse 0;
+    ec.stacksize = self.options.stack_size orelse 0;
 }
 
 pub fn deinit(self: *MachO) void {
@@ -2733,7 +2724,7 @@ fn populateMetadata(self: *MachO) !void {
     if (self.dylib_id_cmd_index == null and self.options.output_mode == .lib) {
         self.dylib_id_cmd_index = @intCast(u16, self.load_commands.items.len);
         const install_name = self.options.install_name orelse self.options.emit.sub_path;
-        const current_version = self.options.version orelse
+        const current_version = self.options.current_version orelse
             std.builtin.Version{ .major = 1, .minor = 0, .patch = 0 };
         const compat_version = self.options.compatibility_version orelse
             std.builtin.Version{ .major = 1, .minor = 0, .patch = 0 };
@@ -2842,7 +2833,7 @@ fn calcMinHeaderpad(self: *MachO) u64 {
         sizeofcmds += lc.cmdsize();
     }
 
-    var padding: u32 = sizeofcmds + (self.options.headerpad_size orelse 0);
+    var padding: u32 = sizeofcmds + (self.options.headerpad orelse 0);
     log.debug("minimum requested headerpad size 0x{x}", .{padding + @sizeOf(macho.mach_header_64)});
 
     if (self.options.headerpad_max_install_names) {

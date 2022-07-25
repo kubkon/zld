@@ -45,6 +45,7 @@ pub fn build(b: *Builder) void {
     const test_opts = b.addOptions();
     tests.addOptions("build_options", test_opts);
     test_opts.addOption(bool, "enable_qemu", is_qemu_enabled);
+    test_opts.addOption(bool, "enable_logging", enable_logging);
 
     const test_step = b.step("test", "Run library and end-to-end tests");
     test_step.dependOn(&tests.step);

@@ -12,7 +12,7 @@ const Coff = @import("../Coff.zig");
 const Zld = @import("../Zld.zig");
 
 const usage =
-    \\Usage: zld [files...]
+    \\Usage: link-zld [files...]
     \\
     \\Commands:
     \\  <empty> [files...] (default)  Generate final executable artifact 'a.out' from input '.o' files

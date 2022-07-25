@@ -12,7 +12,7 @@ const Elf = @import("../Elf.zig");
 const Zld = @import("../Zld.zig");
 
 const usage =
-    \\Usage: zld.ld [files...]
+    \\Usage: ld.zld [files...]
     \\
     \\Commands:
     \\  <empty> [files...] (default)  Generate final executable artifact 'a.out' from input '.o' files
