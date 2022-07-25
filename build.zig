@@ -1,14 +1,16 @@
-const Builder = @import("std").build.Builder;
+const std = @import("std");
+const fs = std.fs;
+const log = std.log;
+
+const Allocator = std.mem.Allocator;
+const Builder = std.build.Builder;
+const FileSource = std.build.FileSource;
+const LibExeObjStep = std.build.LibExeObjStep;
+const InstallDir = std.build.InstallDir;
+const Step = std.build.Step;
 
 pub fn build(b: *Builder) void {
-    // Standard target options allows the person running `zig build` to choose
-    // what target to build for. Here we do not override the defaults, which
-    // means any target is allowed, and the default is native. Other options
-    // for restricting supported target set are available.
     const target = b.standardTargetOptions(.{});
-
-    // Standard release options allow the person running `zig build` to select
-    // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall.
     const mode = b.standardReleaseOptions();
 
     const enable_logging = b.option(bool, "log", "Whether to enable logging") orelse false;
@@ -27,17 +29,13 @@ pub fn build(b: *Builder) void {
     const exe_opts = b.addOptions();
     exe.addOptions("build_options", exe_opts);
     exe_opts.addOption(bool, "enable_logging", enable_logging);
-
     exe.install();
 
-    const run_cmd = exe.run();
-    run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    const elf_symlink = symlink(exe, "ld.zld");
+    elf_symlink.step.dependOn(&exe.step);
 
-    const run_step = b.step("run", "Run the app");
-    run_step.dependOn(&run_cmd.step);
+    const macho_symlink = symlink(exe, "ld64.zld");
+    macho_symlink.step.dependOn(&exe.step);
 
     const tests = b.addTest("src/test.zig");
     tests.setBuildMode(mode);
@@ -49,6 +47,49 @@ pub fn build(b: *Builder) void {
     test_opts.addOption(bool, "enable_qemu", is_qemu_enabled);
 
     const test_step = b.step("test", "Run library and end-to-end tests");
-    test_step.dependOn(&exe.step);
     test_step.dependOn(&tests.step);
 }
+
+fn symlink(exe: *LibExeObjStep, name: []const u8) *CreateSymlinkStep {
+    const step = CreateSymlinkStep.create(exe.builder, exe.getOutputSource(), name);
+    exe.builder.getInstallStep().dependOn(&step.step);
+    return step;
+}
+
+const CreateSymlinkStep = struct {
+    pub const base_id = .custom;
+
+    step: Step,
+    builder: *Builder,
+    source: FileSource,
+    target: []const u8,
+
+    pub fn create(
+        builder: *Builder,
+        source: FileSource,
+        target: []const u8,
+    ) *CreateSymlinkStep {
+        const self = builder.allocator.create(CreateSymlinkStep) catch unreachable;
+        self.* = CreateSymlinkStep{
+            .builder = builder,
+            .step = Step.init(.log, builder.fmt("symlink {s} -> {s}", .{
+                source.getDisplayName(),
+                target,
+            }), builder.allocator, make),
+            .source = source,
+            .target = builder.dupe(target),
+        };
+        return self;
+    }
+
+    fn make(step: *Step) anyerror!void {
+        const self = @fieldParentPtr(CreateSymlinkStep, "step", step);
+        const rel_source = fs.path.basename(self.source.getPath(self.builder));
+        const source_path = self.builder.getInstallPath(.bin, rel_source);
+        const target_path = self.builder.getInstallPath(.bin, self.target);
+        fs.atomicSymLink(self.builder.allocator, source_path, target_path) catch |err| {
+            log.err("Unable to symlink {s} -> {s}", .{ source_path, target_path });
+            return err;
+        };
+    }
+};
