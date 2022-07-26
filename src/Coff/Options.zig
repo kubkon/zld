@@ -14,9 +14,6 @@ const Zld = @import("../Zld.zig");
 const usage =
     \\Usage: link-zld [files...]
     \\
-    \\Commands:
-    \\  <empty> [files...] (default)  Generate final executable artifact 'a.out' from input '.o' files
-    \\
     \\General Options:
     \\-l[name]                      Specify library to link against
     \\-L[path]                      Specify library search dir

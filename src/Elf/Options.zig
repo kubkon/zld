@@ -14,21 +14,20 @@ const Zld = @import("../Zld.zig");
 const usage =
     \\Usage: ld.zld [files...]
     \\
-    \\Commands:
-    \\  <empty> [files...] (default)  Generate final executable artifact 'a.out' from input '.o' files
-    \\
     \\General Options:
+    \\--entry=[name]                Set name of the entry point symbol
+    \\--gc-sections                 Force removal of functions and data that are unreachable by the entry point or exported symbols
     \\-l[name]                      Specify library to link against
     \\-L[path]                      Specify library search dir
-    \\-shared                       Create dynamic library
-    \\--gc-sections                 Force removal of functions and data that are unreachable by the entry point or exported symbols
-    \\--no-gc-section               Don't force removal of unreachable functions and data
-    \\-rpath [path]                 Specify runtime path
+    \\--rpath=[path], -R [path]     Specify runtime path
+    \\--shared                      Create dynamic library
     \\-o [path]                     Specify output path for the final artifact
     \\-z [arg]                      Set linker extension flags
-    \\  stack-size                  Override default stack size
+    \\  stack-size=[value]          Override default stack size
     \\-h, --help                    Print this help and exit
     \\--debug-log [scope]           Turn on debugging logs for [scope] (requires zld compiled with -Dlog)
+    \\
+    \\ld.zld: supported targets: elf64-x86-64
 ;
 
 emit: Zld.Emit,
@@ -38,10 +37,10 @@ positionals: []const Zld.LinkObject,
 libs: std.StringArrayHashMap(Zld.SystemLib),
 lib_dirs: []const []const u8,
 rpath_list: []const []const u8,
-stack_size_override: ?u64 = null,
+stack_size: ?u64 = null,
 strip: bool = false,
 entry: ?[]const u8 = null,
-gc_sections: ?bool = null,
+gc_sections: bool = false,
 
 pub fn parseArgs(arena: Allocator, ctx: Zld.MainCtx) !Options {
     if (ctx.args.len == 0) {
@@ -53,9 +52,10 @@ pub fn parseArgs(arena: Allocator, ctx: Zld.MainCtx) !Options {
     var lib_dirs = std.ArrayList([]const u8).init(arena);
     var rpath_list = std.ArrayList([]const u8).init(arena);
     var out_path: ?[]const u8 = null;
-    var stack: ?u64 = null;
+    var stack_size: ?u64 = null;
     var shared: bool = false;
-    var gc_sections: ?bool = null;
+    var gc_sections: bool = false;
+    var entry: ?[]const u8 = null;
 
     const Iterator = struct {
         args: []const []const u8,
@@ -87,7 +87,7 @@ pub fn parseArgs(arena: Allocator, ctx: Zld.MainCtx) !Options {
             const z_arg = args_iter.next() orelse
                 ctx.printFailure("Expected another argument after {s}", .{arg});
             if (mem.startsWith(u8, z_arg, "stack-size=")) {
-                stack = try std.fmt.parseInt(u64, z_arg["stack-size=".len..], 10);
+                stack_size = try std.fmt.parseInt(u64, z_arg["stack-size=".len..], 10);
             } else {
                 std.log.warn("TODO unhandled argument '-z {s}'", .{z_arg});
             }
@@ -101,12 +101,16 @@ pub fn parseArgs(arena: Allocator, ctx: Zld.MainCtx) !Options {
             std.log.warn("TODO unhandled argument '--allow-shlib-undefined'", .{});
         } else if (mem.startsWith(u8, arg, "-O")) {
             std.log.warn("TODO unhandled argument '-O{s}'", .{arg["-O".len..]});
-        } else if (mem.eql(u8, arg, "-shared")) {
+        } else if (mem.eql(u8, arg, "--shared")) {
             shared = true;
-        } else if (mem.eql(u8, arg, "-rpath")) {
+        } else if (mem.startsWith(u8, arg, "--rpath=")) {
+            try rpath_list.append(arg["--rpath=".len..]);
+        } else if (mem.eql(u8, arg, "-R")) {
             const rpath = args_iter.next() orelse
                 ctx.printFailure("Expected path after {s}", .{arg});
             try rpath_list.append(rpath);
+        } else if (mem.startsWith(u8, arg, "--entry=")) {
+            entry = arg["--entry=".len..];
         } else {
             try positionals.append(.{
                 .path = arg,
@@ -130,7 +134,8 @@ pub fn parseArgs(arena: Allocator, ctx: Zld.MainCtx) !Options {
         .libs = libs,
         .lib_dirs = lib_dirs.items,
         .rpath_list = rpath_list.items,
-        .stack_size_override = stack,
+        .stack_size = stack_size,
         .gc_sections = gc_sections,
+        .entry = entry,
     };
 }

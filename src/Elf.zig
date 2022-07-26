@@ -192,8 +192,6 @@ pub fn flush(self: *Elf) !void {
     defer arena_allocator.deinit();
     const arena = arena_allocator.allocator();
 
-    const gc_sections = self.options.gc_sections orelse false;
-
     var lib_dirs = std.ArrayList([]const u8).init(arena);
     for (self.options.lib_dirs) |dir| {
         // Verify that search path actually exists
@@ -257,7 +255,7 @@ pub fn flush(self: *Elf) !void {
         try object.parseIntoAtoms(self.base.allocator, @intCast(u16, object_id), self);
     }
 
-    if (gc_sections) {
+    if (self.options.gc_sections) {
         try self.gcAtoms();
     }
 
@@ -1841,7 +1839,7 @@ fn setEntryPoint(self: *Elf) !void {
 }
 
 fn setStackSize(self: *Elf) !void {
-    const stack_size = self.options.stack_size_override orelse return;
+    const stack_size = self.options.stack_size orelse return;
     const gnu_stack_phdr_index = self.gnu_stack_phdr_index orelse blk: {
         const gnu_stack_phdr_index = @intCast(u16, self.phdrs.items.len);
         try self.phdrs.append(self.base.allocator, .{
