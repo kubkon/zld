@@ -12,7 +12,8 @@ You will need latest Zig in your path. You can get nightly binaries from [here](
 $ zig build
 ```
 
-This will create the `zld` binary in `zig-out/bin/zld`. You can then use it like you'd use a standard linker.
+This will create the `ld.zld` (Elf), `ld64.zld` (MachO) and `link-zld` (Coff) binaries in `zig-out/bin/`.
+You can then use it like you'd use a standard linker.
 
 ```
 $ cat <<EOF > hello.c
@@ -30,8 +31,11 @@ $ clang -c hello.c
 # Or, create .o using zig cc
 $ zig cc -c hello.c
 
-# Link away!
-$ ./zig-out/bin/zld hello.o -o hello
+# On macOS
+$ ./zig-out/bin/ld64.zld hello.o -o hello
+
+# On Linux
+$ ./zig-out/bin/ld.zld hello.o -o hello
 
 # Run!
 $ ./hello

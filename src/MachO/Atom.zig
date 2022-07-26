@@ -95,7 +95,7 @@ pub const Relocation = struct {
 
     pub fn getTargetAtom(self: Relocation, macho_file: *MachO) ?*Atom {
         const is_via_got = got: {
-            switch (macho_file.base.options.target.cpu.arch) {
+            switch (macho_file.options.target.cpu_arch.?) {
                 .aarch64 => break :got switch (@intToEnum(macho.reloc_type_arm64, self.@"type")) {
                     .ARM64_RELOC_GOT_LOAD_PAGE21,
                     .ARM64_RELOC_GOT_LOAD_PAGEOFF12,
@@ -183,7 +183,7 @@ const RelocContext = struct {
 pub fn parseRelocs(self: *Atom, relocs: []const macho.relocation_info, context: RelocContext) !void {
     const gpa = context.macho_file.base.allocator;
 
-    const arch = context.macho_file.base.options.target.cpu.arch;
+    const arch = context.macho_file.options.target.cpu_arch.?;
     var addend: i64 = 0;
     var subtractor: ?SymbolWithLoc = null;
 
@@ -494,7 +494,7 @@ pub fn resolveRelocs(self: *Atom, macho_file: *MachO) !void {
     log.debug("ATOM(%{d}, '{s}')", .{ self.sym_index, self.getName(macho_file) });
 
     for (self.relocs.items) |rel| {
-        const arch = macho_file.base.options.target.cpu.arch;
+        const arch = macho_file.options.target.cpu_arch.?;
         switch (arch) {
             .aarch64 => {
                 log.debug("  RELA({s}) @ {x} => %{d} in object({d})", .{

@@ -96,10 +96,10 @@ pub const IMAGE_SYM_CLASS_SECTION = 104;
 pub const IMAGE_SYM_CLASS_WEAK_EXTERNAL = 105;
 pub const IMAGE_SYM_CLASS_CLR_TOKEN = 107;
 
-// comptime {
-//     assert(@sizeOf(Symbol) == 18);
-//     assert(@sizeOf(CoffHeader) == 20);
-// }
+comptime {
+    assert(@sizeOf(Symbol) == 18);
+    assert(@sizeOf(CoffHeader) == 20);
+}
 
 pub fn deinit(self: *Object, allocator: Allocator) void {
     self.symtab.deinit(allocator);
@@ -108,7 +108,7 @@ pub fn deinit(self: *Object, allocator: Allocator) void {
     allocator.free(self.name);
 }
 
-pub fn parse(self: *Object, allocator: Allocator, target: std.Target) !void {
+pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch) !void {
     const reader = self.file.reader();
     const header = try reader.readStruct(CoffHeader);
 
@@ -117,10 +117,10 @@ pub fn parse(self: *Object, allocator: Allocator, target: std.Target) !void {
         return error.NotObject;
     }
 
-    if (header.machine != @enumToInt(target.cpu.arch.toCoffMachine())) {
+    if (header.machine != @enumToInt(cpu_arch.toCoffMachine())) {
         log.debug("Invalid architecture {any}, expected {any}", .{
             header.machine,
-            target.cpu.arch.toCoffMachine(),
+            cpu_arch.toCoffMachine(),
         });
         return error.InvalidCpuArch;
     }

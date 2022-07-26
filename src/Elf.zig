@@ -12,12 +12,14 @@ const Allocator = mem.Allocator;
 const Archive = @import("Elf/Archive.zig");
 const Atom = @import("Elf/Atom.zig");
 const Object = @import("Elf/Object.zig");
+pub const Options = @import("Elf/Options.zig");
 const StringTable = @import("strtab.zig").StringTable;
 const Zld = @import("Zld.zig");
 
 pub const base_tag = Zld.Tag.elf;
 
 base: Zld,
+options: Options,
 
 archives: std.ArrayListUnmanaged(Archive) = .{},
 objects: std.ArrayListUnmanaged(Object) = .{},
@@ -90,7 +92,7 @@ pub const SymbolWithLoc = struct {
     file: ?u32,
 };
 
-pub fn openPath(allocator: Allocator, options: Zld.Options) !*Elf {
+pub fn openPath(allocator: Allocator, options: Options) !*Elf {
     const file = try options.emit.directory.createFile(options.emit.sub_path, .{
         .truncate = true,
         .read = true,
@@ -108,24 +110,22 @@ pub fn openPath(allocator: Allocator, options: Zld.Options) !*Elf {
     return self;
 }
 
-fn createEmpty(gpa: Allocator, options: Zld.Options) !*Elf {
+fn createEmpty(gpa: Allocator, options: Options) !*Elf {
     const self = try gpa.create(Elf);
 
     self.* = .{
         .base = .{
             .tag = .elf,
-            .options = options,
             .allocator = gpa,
             .file = undefined,
         },
+        .options = options,
     };
 
     return self;
 }
 
 pub fn deinit(self: *Elf) void {
-    self.closeFiles();
-
     self.atoms.deinit(self.base.allocator);
     for (self.managed_atoms.items) |atom| {
         atom.deinit(self.base.allocator);
@@ -154,7 +154,7 @@ pub fn deinit(self: *Elf) void {
     self.archives.deinit(self.base.allocator);
 }
 
-fn closeFiles(self: Elf) void {
+pub fn closeFiles(self: *const Elf) void {
     for (self.objects.items) |object| {
         object.file.close();
     }
@@ -192,10 +192,8 @@ pub fn flush(self: *Elf) !void {
     defer arena_allocator.deinit();
     const arena = arena_allocator.allocator();
 
-    const gc_sections = self.base.options.gc_sections orelse false;
-
     var lib_dirs = std.ArrayList([]const u8).init(arena);
-    for (self.base.options.lib_dirs) |dir| {
+    for (self.options.lib_dirs) |dir| {
         // Verify that search path actually exists
         var tmp = fs.cwd().openDir(dir, .{}) catch |err| switch (err) {
             error.FileNotFound => continue,
@@ -208,10 +206,10 @@ pub fn flush(self: *Elf) !void {
 
     var libs = std.StringArrayHashMap(Zld.SystemLib).init(arena);
     var lib_not_found = false;
-    for (self.base.options.libs.keys()) |lib_name| {
+    for (self.options.libs.keys()) |lib_name| {
         for (&[_][]const u8{ ".dylib", ".a" }) |ext| {
             if (try resolveLib(arena, lib_dirs.items, lib_name, ext)) |full_path| {
-                try libs.put(full_path, self.base.options.libs.get(lib_name).?);
+                try libs.put(full_path, self.options.libs.get(lib_name).?);
                 break;
             }
         } else {
@@ -227,8 +225,8 @@ pub fn flush(self: *Elf) !void {
     }
 
     var positionals = std.ArrayList([]const u8).init(arena);
-    try positionals.ensureTotalCapacity(self.base.options.positionals.len);
-    for (self.base.options.positionals) |obj| {
+    try positionals.ensureTotalCapacity(self.options.positionals.len);
+    for (self.options.positionals) |obj| {
         positionals.appendAssumeCapacity(obj.path);
     }
 
@@ -257,7 +255,7 @@ pub fn flush(self: *Elf) !void {
         try object.parseIntoAtoms(self.base.allocator, @intCast(u16, object_id), self);
     }
 
-    if (gc_sections) {
+    if (self.options.gc_sections) {
         try self.gcAtoms();
     }
 
@@ -320,11 +318,11 @@ fn populateMetadata(self: *Elf) !void {
     if (self.header == null) {
         var header = elf.Elf64_Ehdr{
             .e_ident = undefined,
-            .e_type = switch (self.base.options.output_mode) {
+            .e_type = switch (self.options.output_mode) {
                 .exe => elf.ET.EXEC,
                 .lib => elf.ET.DYN,
             },
-            .e_machine = self.base.options.target.cpu.arch.toElfMachine(),
+            .e_machine = self.options.target.cpu_arch.?.toElfMachine(),
             .e_version = 1,
             .e_entry = 0,
             .e_phoff = @sizeOf(elf.Elf64_Ehdr),
@@ -1251,7 +1249,7 @@ fn parseObject(self: *Elf, path: []const u8) !bool {
         .file = file,
     };
 
-    object.parse(self.base.allocator, self.base.options.target) catch |err| switch (err) {
+    object.parse(self.base.allocator, self.options.target.cpu_arch.?) catch |err| switch (err) {
         error.EndOfStream, error.NotObject => {
             object.deinit(self.base.allocator);
             return false;
@@ -1385,7 +1383,11 @@ fn resolveSymbolsInArchives(self: *Elf) !void {
 
             const object_id = @intCast(u16, self.objects.items.len);
             const object = try self.objects.addOne(self.base.allocator);
-            object.* = try archive.parseObject(self.base.allocator, self.base.options.target, offsets.items[0]);
+            object.* = try archive.parseObject(
+                self.base.allocator,
+                self.options.target.cpu_arch.?,
+                offsets.items[0],
+            );
             try self.resolveSymbolsInObject(object_id);
 
             continue :loop;
@@ -1829,7 +1831,7 @@ fn writeAtoms(self: *Elf) !void {
 }
 
 fn setEntryPoint(self: *Elf) !void {
-    if (self.base.options.output_mode != .exe) return;
+    if (self.options.output_mode != .exe) return;
     const global = self.globals.get("_start") orelse return error.DefaultEntryPointNotFound;
     const object = self.objects.items[global.file.?];
     const sym = object.symtab.items[global.sym_index];
@@ -1837,7 +1839,7 @@ fn setEntryPoint(self: *Elf) !void {
 }
 
 fn setStackSize(self: *Elf) !void {
-    const stack_size = self.base.options.stack_size_override orelse return;
+    const stack_size = self.options.stack_size orelse return;
     const gnu_stack_phdr_index = self.gnu_stack_phdr_index orelse blk: {
         const gnu_stack_phdr_index = @intCast(u16, self.phdrs.items.len);
         try self.phdrs.append(self.base.allocator, .{

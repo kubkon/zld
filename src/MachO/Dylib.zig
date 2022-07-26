@@ -11,6 +11,7 @@ const mem = std.mem;
 const fat = @import("fat.zig");
 
 const Allocator = mem.Allocator;
+const CrossTarget = std.zig.CrossTarget;
 const LibStub = @import("../tapi.zig").LibStub;
 const LoadCommand = macho.LoadCommand;
 const MachO = @import("../MachO.zig");
@@ -146,13 +147,13 @@ pub fn deinit(self: *Dylib, allocator: Allocator) void {
 pub fn parse(
     self: *Dylib,
     allocator: Allocator,
-    target: std.Target,
+    cpu_arch: std.Target.Cpu.Arch,
     dylib_id: u16,
     dependent_libs: anytype,
 ) !void {
     log.debug("parsing shared library '{s}'", .{self.name});
 
-    self.library_offset = try fat.getLibraryOffset(self.file.reader(), target);
+    self.library_offset = try fat.getLibraryOffset(self.file.reader(), cpu_arch);
 
     try self.file.seekTo(self.library_offset);
 
@@ -166,8 +167,8 @@ pub fn parse(
 
     const this_arch: std.Target.Cpu.Arch = try fat.decodeArch(self.header.?.cputype, true);
 
-    if (this_arch != target.cpu.arch) {
-        log.err("mismatched cpu architecture: expected {s}, found {s}", .{ target.cpu.arch, this_arch });
+    if (this_arch != cpu_arch) {
+        log.err("mismatched cpu architecture: expected {s}, found {s}", .{ cpu_arch, this_arch });
         return error.MismatchedCpuArchitecture;
     }
 
@@ -279,23 +280,24 @@ fn addSymbol(self: *Dylib, allocator: Allocator, sym_name: []const u8) !void {
 
 const TargetMatcher = struct {
     allocator: Allocator,
-    target: std.Target,
+    target: CrossTarget,
     target_strings: std.ArrayListUnmanaged([]const u8) = .{},
 
-    fn init(allocator: Allocator, target: std.Target) !TargetMatcher {
+    fn init(allocator: Allocator, target: CrossTarget) !TargetMatcher {
         var self = TargetMatcher{
             .allocator = allocator,
             .target = target,
         };
         try self.target_strings.append(allocator, try targetToAppleString(allocator, target));
 
-        if (target.abi == .simulator) {
+        const abi = target.abi orelse .none;
+        if (abi == .simulator) {
             // For Apple simulator targets, linking gets tricky as we need to link against the simulator
             // hosts dylibs too.
-            const host_target = try targetToAppleString(allocator, (std.zig.CrossTarget{
-                .cpu_arch = target.cpu.arch,
+            const host_target = try targetToAppleString(allocator, .{
+                .cpu_arch = target.cpu_arch.?,
                 .os_tag = .macos,
-            }).toTarget());
+            });
             try self.target_strings.append(allocator, host_target);
         }
 
@@ -309,23 +311,24 @@ const TargetMatcher = struct {
         self.target_strings.deinit(self.allocator);
     }
 
-    fn targetToAppleString(allocator: Allocator, target: std.Target) ![]const u8 {
-        const arch = switch (target.cpu.arch) {
+    fn targetToAppleString(allocator: Allocator, target: CrossTarget) ![]const u8 {
+        const cpu_arch = switch (target.cpu_arch.?) {
             .aarch64 => "arm64",
             .x86_64 => "x86_64",
             else => unreachable,
         };
-        const os = @tagName(target.os.tag);
-        const abi: ?[]const u8 = switch (target.abi) {
+        const os_tag = @tagName(target.os_tag.?);
+        const target_abi = target.abi orelse .none;
+        const abi: ?[]const u8 = switch (target_abi) {
             .none => null,
             .simulator => "simulator",
             .macabi => "maccatalyst",
             else => unreachable,
         };
         if (abi) |x| {
-            return std.fmt.allocPrint(allocator, "{s}-{s}-{s}", .{ arch, os, x });
+            return std.fmt.allocPrint(allocator, "{s}-{s}-{s}", .{ cpu_arch, os_tag, x });
         }
-        return std.fmt.allocPrint(allocator, "{s}-{s}", .{ arch, os });
+        return std.fmt.allocPrint(allocator, "{s}-{s}", .{ cpu_arch, os_tag });
     }
 
     fn hasValue(stack: []const []const u8, needle: []const u8) bool {
@@ -343,14 +346,14 @@ const TargetMatcher = struct {
     }
 
     fn matchesArch(self: TargetMatcher, archs: []const []const u8) bool {
-        return hasValue(archs, @tagName(self.target.cpu.arch));
+        return hasValue(archs, @tagName(self.target.cpu_arch.?));
     }
 };
 
 pub fn parseFromStub(
     self: *Dylib,
     allocator: Allocator,
-    target: std.Target,
+    target: CrossTarget,
     lib_stub: LibStub,
     dylib_id: u16,
     dependent_libs: anytype,

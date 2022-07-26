@@ -50,7 +50,7 @@ fn removeAtomFromSection(atom: *Atom, match: MatchingSection, macho_file: *MachO
 }
 
 fn collectRoots(roots: *std.AutoHashMap(*Atom, void), macho_file: *MachO) !void {
-    const output_mode = macho_file.base.options.output_mode;
+    const output_mode = macho_file.options.output_mode;
 
     switch (output_mode) {
         .exe => {
