@@ -2142,11 +2142,6 @@ fn resolveSymbolsInDylibs(self: *MachO) !void {
 }
 
 fn resolveSymbolsAtLoading(self: *MachO) !void {
-    // TODO
-    // const is_lib = self.options.output_mode == .lib;
-    // const allow_undef = is_lib and (self.options.allow_shlib_undefined orelse false);
-    const allow_undef = false;
-
     var next_sym: usize = 0;
     while (next_sym < self.unresolved.count()) {
         const global_index = self.unresolved.keys()[next_sym];
@@ -2164,7 +2159,7 @@ fn resolveSymbolsAtLoading(self: *MachO) !void {
             };
             _ = self.unresolved.swapRemove(global_index);
             continue;
-        } else if (allow_undef) {
+        } else if (self.options.allow_undef) {
             const n_desc = @bitCast(
                 u16,
                 macho.BIND_SPECIAL_DYLIB_FLAT_LOOKUP * @intCast(i16, macho.N_SYMBOL_RESOLVER),

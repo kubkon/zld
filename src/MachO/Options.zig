@@ -103,6 +103,9 @@ const usage =
     \\-syslibroot [path]
     \\    Specify the syslibroot
     \\
+    \\-undefined [value]
+    \\    Specifies how undefined symbols are to be treated: error (default), warning, suppress, or dynamic_lookup.
+    \\
     \\-weak_framework [name]
     \\    Link against framework and mark it and all referenced symbols as weak
     \\
@@ -151,6 +154,7 @@ headerpad: ?u32 = null,
 headerpad_max_install_names: bool = false,
 dead_strip: bool = false,
 dead_strip_dylibs: bool = false,
+allow_undef: bool = false,
 
 pub fn parseArgs(arena: Allocator, ctx: Zld.MainCtx) !Options {
     if (ctx.args.len == 0) {
@@ -178,6 +182,7 @@ pub fn parseArgs(arena: Allocator, ctx: Zld.MainCtx) !Options {
     var dead_strip_dylibs: bool = false;
     var entry: ?[]const u8 = null;
     var strip: bool = false;
+    var allow_undef: bool = false;
 
     var target: ?CrossTarget = if (comptime builtin.target.isDarwin())
         CrossTarget.fromTarget(builtin.target)
@@ -400,6 +405,17 @@ pub fn parseArgs(arena: Allocator, ctx: Zld.MainCtx) !Options {
             sdk_version = std.builtin.Version.parse(sdk_v) catch |err| {
                 ctx.printFailure("Failed to parse sdk_version '{s}': {s}", .{ sdk_v, @errorName(err) });
             };
+        } else if (mem.eql(u8, arg, "-undefined")) {
+            const treatment = args_iter.next() orelse ctx.printFailure("Expected value after {s}", .{arg});
+            if (mem.eql(u8, treatment, "error")) {
+                allow_undef = false;
+            } else if (mem.eql(u8, treatment, "warning") or mem.eql(u8, treatment, "suppress")) {
+                ctx.printFailure("TODO unimplemented -undefined {s} option", .{treatment});
+            } else if (mem.eql(u8, treatment, "dynamic_lookup")) {
+                allow_undef = true;
+            } else {
+                ctx.printFailure("Unknown option -undefined {s}", .{treatment});
+            }
         } else {
             try positionals.append(.{
                 .path = arg,
@@ -450,6 +466,7 @@ pub fn parseArgs(arena: Allocator, ctx: Zld.MainCtx) !Options {
         .pagezero_size = pagezero_size,
         .entry = entry,
         .strip = strip,
+        .allow_undef = allow_undef,
     };
 }
 
