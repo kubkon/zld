@@ -1,9 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const build_options = @import("build_options");
-const io = std.io;
 const mem = std.mem;
-const process = std.process;
 
 const Allocator = mem.Allocator;
 const Zld = @import("Zld.zig");
@@ -16,10 +14,7 @@ const usage =
     \\Call ld.zld (ELF), ld64.zld (MachO), link-zld (COFF).
 ;
 
-fn printUsage() noreturn {
-    io.getStdErr().writeAll(usage) catch {};
-    process.exit(0);
-}
+var log_scopes: std.ArrayList([]const u8) = std.ArrayList([]const u8).init(gpa);
 
 pub fn log(
     comptime level: std.log.Level,
@@ -34,6 +29,11 @@ pub fn log(
         @enumToInt(level) > @enumToInt(std.log.Level.info))
     {
         if (!build_options.enable_logging) return;
+
+        const scope_name = @tagName(scope);
+        for (log_scopes.items) |log_scope| {
+            if (mem.eql(u8, log_scope, scope_name)) break;
+        } else return;
     }
 
     // We only recognize 4 log levels in this application.
@@ -51,17 +51,25 @@ pub fn log(
 }
 
 pub fn main() !void {
-    const all_args = try process.argsAlloc(gpa);
-    defer process.argsFree(gpa, all_args);
+    const all_args = try std.process.argsAlloc(gpa);
+    defer std.process.argsFree(gpa, all_args);
 
     const cmd = std.fs.path.basename(all_args[0]);
-    if (mem.eql(u8, cmd, "ld.zld")) {
-        return Zld.parseAndFlush(gpa, .elf, all_args[1..]);
-    } else if (mem.eql(u8, cmd, "ld64.zld")) {
-        return Zld.parseAndFlush(gpa, .macho, all_args[1..]);
-    } else if (mem.eql(u8, cmd, "link-zld")) {
-        return Zld.parseAndFlush(gpa, .coff, all_args[1..]);
-    } else {
-        printUsage();
-    }
+    const tag: Zld.Tag = blk: {
+        if (mem.eql(u8, cmd, "ld.zld")) {
+            break :blk .elf;
+        } else if (mem.eql(u8, cmd, "ld64.zld")) {
+            break :blk .macho;
+        } else if (mem.eql(u8, cmd, "link-zld")) {
+            break :blk .coff;
+        } else {
+            std.io.getStdOut().writeAll(usage) catch {};
+            std.process.exit(0);
+        }
+    };
+    return Zld.main(tag, .{
+        .gpa = gpa,
+        .args = all_args[1..],
+        .log_scopes = &log_scopes,
+    });
 }

@@ -324,7 +324,7 @@ fn populateMetadata(self: *Elf) !void {
                 .exe => elf.ET.EXEC,
                 .lib => elf.ET.DYN,
             },
-            .e_machine = self.options.target.getCpuArch().toElfMachine(),
+            .e_machine = self.options.target.cpu_arch.?.toElfMachine(),
             .e_version = 1,
             .e_entry = 0,
             .e_phoff = @sizeOf(elf.Elf64_Ehdr),
@@ -1251,7 +1251,7 @@ fn parseObject(self: *Elf, path: []const u8) !bool {
         .file = file,
     };
 
-    object.parse(self.base.allocator, self.options.target.getCpuArch()) catch |err| switch (err) {
+    object.parse(self.base.allocator, self.options.target.cpu_arch.?) catch |err| switch (err) {
         error.EndOfStream, error.NotObject => {
             object.deinit(self.base.allocator);
             return false;
@@ -1387,7 +1387,7 @@ fn resolveSymbolsInArchives(self: *Elf) !void {
             const object = try self.objects.addOne(self.base.allocator);
             object.* = try archive.parseObject(
                 self.base.allocator,
-                self.options.target.getCpuArch(),
+                self.options.target.cpu_arch.?,
                 offsets.items[0],
             );
             try self.resolveSymbolsInObject(object_id);

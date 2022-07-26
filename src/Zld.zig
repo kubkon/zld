@@ -48,17 +48,38 @@ pub const Options = union {
     coff: Coff.Options,
 };
 
-pub fn parseAndFlush(allocator: Allocator, tag: Tag, args: []const []const u8) !void {
-    var arena_allocator = std.heap.ArenaAllocator.init(allocator);
+pub const MainCtx = struct {
+    gpa: Allocator,
+    args: []const []const u8,
+    log_scopes: *std.ArrayList([]const u8),
+
+    pub fn printSuccess(ctx: MainCtx, comptime format: []const u8, args: anytype) noreturn {
+        ret: {
+            const msg = std.fmt.allocPrint(ctx.gpa, format, args) catch break :ret;
+            std.io.getStdOut().writeAll(msg) catch {};
+        }
+        std.process.exit(0);
+    }
+
+    pub fn printFailure(ctx: MainCtx, comptime format: []const u8, args: anytype) noreturn {
+        ret: {
+            const msg = std.fmt.allocPrint(ctx.gpa, format, args) catch break :ret;
+            std.io.getStdErr().writeAll(msg) catch {};
+        }
+        std.process.exit(1);
+    }
+};
+
+pub fn main(tag: Tag, ctx: MainCtx) !void {
+    var arena_allocator = std.heap.ArenaAllocator.init(ctx.gpa);
     defer arena_allocator.deinit();
     const arena = arena_allocator.allocator();
-
     const opts: Options = switch (tag) {
-        .elf => .{ .elf = try Elf.Options.parseArgs(arena, args) },
-        .macho => .{ .macho = try MachO.Options.parseArgs(arena, args) },
-        .coff => .{ .coff = try Coff.Options.parseArgs(arena, args) },
+        .elf => .{ .elf = try Elf.Options.parseArgs(arena, ctx) },
+        .macho => .{ .macho = try MachO.Options.parseArgs(arena, ctx) },
+        .coff => .{ .coff = try Coff.Options.parseArgs(arena, ctx) },
     };
-    const zld = try openPath(allocator, tag, opts);
+    const zld = try openPath(ctx.gpa, tag, opts);
     defer zld.deinit();
     try zld.flush();
 }

@@ -120,20 +120,10 @@ const usage =
     \\
     \\-h, --help
     \\    Print this help and exit
+    \\
+    \\--debug-log [scope]
+    \\    Turn on debugging logs for [scope] (requires zld compiled with -Dlog)
 ;
-
-fn printHelpAndExit() noreturn {
-    io.getStdOut().writeAll(usage) catch {};
-    process.exit(0);
-}
-
-fn fatal(arena: Allocator, comptime format: []const u8, args: anytype) noreturn {
-    ret: {
-        const msg = std.fmt.allocPrint(arena, format, args) catch break :ret;
-        io.getStdErr().writeAll(msg) catch {};
-    }
-    process.exit(1);
-}
 
 emit: Zld.Emit,
 output_mode: Zld.OutputMode,
@@ -162,9 +152,9 @@ headerpad_max_install_names: bool = false,
 dead_strip: bool = false,
 dead_strip_dylibs: bool = false,
 
-pub fn parseArgs(arena: Allocator, args: []const []const u8) !Options {
-    if (args.len == 0) {
-        printHelpAndExit();
+pub fn parseArgs(arena: Allocator, ctx: Zld.MainCtx) !Options {
+    if (ctx.args.len == 0) {
+        ctx.printSuccess("{s}", .{usage});
     }
 
     var positionals = std.ArrayList(Zld.LinkObject).init(arena);
@@ -213,45 +203,48 @@ pub fn parseArgs(arena: Allocator, args: []const []const u8) !Options {
             return it.args[it.i];
         }
     };
-    var args_iter = Iterator{ .args = args };
+    var args_iter = Iterator{ .args = ctx.args };
 
     while (args_iter.next()) |arg| {
         if (mem.eql(u8, arg, "--help") or mem.eql(u8, arg, "-h")) {
-            printHelpAndExit();
+            ctx.printSuccess("{s}", .{usage});
+        } else if (mem.eql(u8, arg, "--debug-log")) {
+            const scope = args_iter.next() orelse ctx.printFailure("Expected log scope after {s}", .{arg});
+            try ctx.log_scopes.append(scope);
         } else if (mem.eql(u8, arg, "-syslibroot")) {
-            syslibroot = args_iter.next() orelse fatal(arena, "Expected path after {s}", .{arg});
+            syslibroot = args_iter.next() orelse ctx.printFailure("Expected path after {s}", .{arg});
         } else if (mem.startsWith(u8, arg, "-l")) {
             try libs.put(arg[2..], .{});
         } else if (mem.startsWith(u8, arg, "-L")) {
             try lib_dirs.append(arg[2..]);
         } else if (mem.eql(u8, arg, "-framework") or mem.eql(u8, arg, "-weak_framework")) {
-            const name = args_iter.next() orelse fatal(arena, "Expected framework name after {s}", .{arg});
+            const name = args_iter.next() orelse ctx.printFailure("Expected framework name after {s}", .{arg});
             try frameworks.put(name, .{});
         } else if (mem.startsWith(u8, arg, "-F")) {
             try framework_dirs.append(arg[2..]);
         } else if (mem.startsWith(u8, arg, "-needed-l")) {
             try libs.put(arg["-needed-l".len..], .{ .needed = true });
         } else if (mem.eql(u8, arg, "-needed_library")) {
-            const name = args_iter.next() orelse fatal(arena, "Expected library name after {s}", .{arg});
+            const name = args_iter.next() orelse ctx.printFailure("Expected library name after {s}", .{arg});
             try libs.put(name, .{ .needed = true });
         } else if (mem.eql(u8, arg, "-needed_framework")) {
-            const name = args_iter.next() orelse fatal(arena, "Expected framework name after {s}", .{arg});
+            const name = args_iter.next() orelse ctx.printFailure("Expected framework name after {s}", .{arg});
             try frameworks.put(name, .{ .needed = true });
         } else if (mem.startsWith(u8, arg, "-weak-l")) {
             try libs.put(arg["-weak-l".len..], .{ .weak = true });
         } else if (mem.eql(u8, arg, "-weak_library")) {
-            const name = args_iter.next() orelse fatal(arena, "Expected library name after {s}", .{arg});
+            const name = args_iter.next() orelse ctx.printFailure("Expected library name after {s}", .{arg});
             try libs.put(name, .{ .weak = true });
         } else if (mem.eql(u8, arg, "-weak_framework")) {
-            const name = args_iter.next() orelse fatal(arena, "Expected framework name after {s}", .{arg});
+            const name = args_iter.next() orelse ctx.printFailure("Expected framework name after {s}", .{arg});
             try frameworks.put(name, .{ .weak = true });
         } else if (mem.eql(u8, arg, "-o")) {
-            out_path = args_iter.next() orelse fatal(arena, "Expected output path after {s}", .{arg});
+            out_path = args_iter.next() orelse ctx.printFailure("Expected output path after {s}", .{arg});
         } else if (mem.eql(u8, arg, "-stack_size")) {
             const stack_s = args_iter.next() orelse
-                fatal(arena, "Expected stack size value after {s}", .{arg});
+                ctx.printFailure("Expected stack size value after {s}", .{arg});
             stack_size = std.fmt.parseUnsigned(u64, eatIntPrefix(stack_s, 16), 16) catch |err| {
-                fatal(arena, "Unable to parse '{s}': {s}", .{ arg, @errorName(err) });
+                ctx.printFailure("Unable to parse '{s}': {s}", .{ arg, @errorName(err) });
             };
         } else if (mem.eql(u8, arg, "-dylib")) {
             dylib = true;
@@ -260,65 +253,65 @@ pub fn parseArgs(arena: Allocator, args: []const []const u8) !Options {
         } else if (mem.eql(u8, arg, "-static")) {
             dynamic = false;
         } else if (mem.eql(u8, arg, "-rpath")) {
-            const rpath = args_iter.next() orelse fatal(arena, "Expected path after {s}", .{arg});
+            const rpath = args_iter.next() orelse ctx.printFailure("Expected path after {s}", .{arg});
             try rpath_list.append(rpath);
         } else if (mem.eql(u8, arg, "-compatibility_version")) {
-            const raw = args_iter.next() orelse fatal(arena, "Expected version after {s}", .{arg});
+            const raw = args_iter.next() orelse ctx.printFailure("Expected version after {s}", .{arg});
             compatibility_version = std.builtin.Version.parse(raw) catch |err| {
-                fatal(arena, "Unable to parse {s} {s}: {s}", .{ arg, raw, @errorName(err) });
+                ctx.printFailure("Unable to parse {s} {s}: {s}", .{ arg, raw, @errorName(err) });
             };
         } else if (mem.eql(u8, arg, "-current_version")) {
-            const raw = args_iter.next() orelse fatal(arena, "Expected version after {s}", .{arg});
+            const raw = args_iter.next() orelse ctx.printFailure("Expected version after {s}", .{arg});
             current_version = std.builtin.Version.parse(raw) catch |err| {
-                fatal(arena, "Unable to parse {s} {s}: {s}", .{ arg, raw, @errorName(err) });
+                ctx.printFailure("Unable to parse {s} {s}: {s}", .{ arg, raw, @errorName(err) });
             };
         } else if (mem.eql(u8, arg, "-install_name")) {
-            install_name = args_iter.next() orelse fatal(arena, "Expected argument after {s}", .{arg});
+            install_name = args_iter.next() orelse ctx.printFailure("Expected argument after {s}", .{arg});
         } else if (mem.eql(u8, arg, "-headerpad")) {
             const headerpad_s = args_iter.next() orelse
-                fatal(arena, "Expected headerpad size value after {s}", .{arg});
+                ctx.printFailure("Expected headerpad size value after {s}", .{arg});
             headerpad = std.fmt.parseUnsigned(u32, eatIntPrefix(headerpad_s, 16), 16) catch |err| {
-                fatal(arena, "Unable to parse '{s}': {s}", .{ arg, @errorName(err) });
+                ctx.printFailure("Unable to parse '{s}': {s}", .{ arg, @errorName(err) });
             };
         } else if (mem.eql(u8, arg, "-headerpad_max_install_names")) {
             headerpad_max_install_names = true;
         } else if (mem.eql(u8, arg, "-pagezero_size")) {
             const pagezero_s = args_iter.next() orelse
-                fatal(arena, "Expected pagezero size value after {s}", .{arg});
+                ctx.printFailure("Expected pagezero size value after {s}", .{arg});
             pagezero_size = std.fmt.parseUnsigned(u64, eatIntPrefix(pagezero_s, 16), 16) catch |err| {
-                fatal(arena, "Unable to parse '{s}': {s}", .{ arg, @errorName(err) });
+                ctx.printFailure("Unable to parse '{s}': {s}", .{ arg, @errorName(err) });
             };
         } else if (mem.eql(u8, arg, "-dead_strip")) {
             dead_strip = true;
         } else if (mem.eql(u8, arg, "-dead_strip_dylibs")) {
             dead_strip_dylibs = true;
         } else if (mem.eql(u8, arg, "-e")) {
-            entry = args_iter.next() orelse fatal(arena, "Expected symbol name after {s}", .{arg});
+            entry = args_iter.next() orelse ctx.printFailure("Expected symbol name after {s}", .{arg});
         } else if (mem.eql(u8, arg, "-S")) {
             strip = true;
         } else if (mem.eql(u8, arg, "-force_load")) {
-            const path = args_iter.next() orelse fatal(arena, "Expected path after {s}", .{arg});
+            const path = args_iter.next() orelse ctx.printFailure("Expected path after {s}", .{arg});
             try positionals.append(.{
                 .path = path,
                 .must_link = true,
             });
         } else if (mem.eql(u8, arg, "-arch")) {
             const arch_s = args_iter.next() orelse
-                fatal(arena, "Expected architecture name after {s}", .{arg});
+                ctx.printFailure("Expected architecture name after {s}", .{arg});
             if (mem.eql(u8, arch_s, "arm64")) {
                 target.?.cpu_arch = .aarch64;
             } else if (mem.eql(u8, arch_s, "x86_64")) {
                 target.?.cpu_arch = .x86_64;
             } else {
-                fatal(arena, "Failed to parse CPU architecture from '{s}'", .{arch_s});
+                ctx.printFailure("Failed to parse CPU architecture from '{s}'", .{arch_s});
             }
         } else if (mem.eql(u8, arg, "-platform_version")) {
             const platform = args_iter.next() orelse
-                fatal(arena, "Expected platform name after {s}", .{arg});
+                ctx.printFailure("Expected platform name after {s}", .{arg});
             const min_v = args_iter.next() orelse
-                fatal(arena, "Expected minimum platform version after {s} {s}", .{ arg, platform });
+                ctx.printFailure("Expected minimum platform version after {s} {s}", .{ arg, platform });
             const sdk_v = args_iter.next() orelse
-                fatal(arena, "Expected SDK version after {s} {s} {s}", .{ arg, platform, min_v });
+                ctx.printFailure("Expected SDK version after {s} {s} {s}", .{ arg, platform, min_v });
 
             var tmp_target = CrossTarget{};
 
@@ -353,7 +346,7 @@ pub fn parseArgs(arena: Allocator, args: []const []const u8) !Options {
                         .os_tag = .watchos,
                         .abi = .simulator,
                     },
-                    else => |x| fatal(arena, "Unsupported Apple OS: {s}", .{@tagName(x)}),
+                    else => |x| ctx.printFailure("Unsupported Apple OS: {s}", .{@tagName(x)}),
                 }
             } else |_| {
                 if (mem.eql(u8, platform, "macos")) {
@@ -392,7 +385,7 @@ pub fn parseArgs(arena: Allocator, args: []const []const u8) !Options {
                         .abi = .simulator,
                     };
                 } else {
-                    fatal(arena, "Unsupported Apple OS: {s}", .{platform});
+                    ctx.printFailure("Unsupported Apple OS: {s}", .{platform});
                 }
             }
 
@@ -402,10 +395,10 @@ pub fn parseArgs(arena: Allocator, args: []const []const u8) !Options {
             }
 
             platform_version = std.builtin.Version.parse(min_v) catch |err| {
-                fatal(arena, "Failed to parse min_version '{s}': {s}", .{ min_v, @errorName(err) });
+                ctx.printFailure("Failed to parse min_version '{s}': {s}", .{ min_v, @errorName(err) });
             };
             sdk_version = std.builtin.Version.parse(sdk_v) catch |err| {
-                fatal(arena, "Failed to parse sdk_version '{s}': {s}", .{ sdk_v, @errorName(err) });
+                ctx.printFailure("Failed to parse sdk_version '{s}': {s}", .{ sdk_v, @errorName(err) });
             };
         } else {
             try positionals.append(.{
@@ -416,13 +409,13 @@ pub fn parseArgs(arena: Allocator, args: []const []const u8) !Options {
     }
 
     if (positionals.items.len == 0) {
-        fatal(arena, "Expected at least one input .o file", .{});
+        ctx.printFailure("Expected at least one input .o file", .{});
     }
     if (target == null or target.?.cpu_arch == null) {
-        fatal(arena, "Missing -arch when cross-linking", .{});
+        ctx.printFailure("Missing -arch when cross-linking", .{});
     }
     if (target.?.os_tag == null) {
-        fatal(arena, "Missing -platform_version when cross-linking", .{});
+        ctx.printFailure("Missing -platform_version when cross-linking", .{});
     }
 
     // Add some defaults
