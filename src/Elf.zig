@@ -1832,9 +1832,8 @@ fn writeAtoms(self: *Elf) !void {
 
 fn setEntryPoint(self: *Elf) !void {
     if (self.options.output_mode != .exe) return;
-    const global = self.globals.get("_start") orelse return error.DefaultEntryPointNotFound;
-    const object = self.objects.items[global.file.?];
-    const sym = object.symtab.items[global.sym_index];
+    const global = try self.getEntryPoint();
+    const sym = self.getSymbol(global);
     self.header.?.e_entry = sym.st_value;
 }
 
@@ -2004,6 +2003,18 @@ pub fn getSymbolName(self: *Elf, sym_with_loc: SymbolWithLoc) []const u8 {
         const sym = self.locals.items[sym_with_loc.sym_index];
         return self.strtab.getAssumeExists(sym.st_name);
     }
+}
+
+/// Returns symbol localtion corresponding to the set entry point.
+/// Asserts output mode is executable.
+pub fn getEntryPoint(self: Elf) error{EntrypointNotFound}!SymbolWithLoc {
+    assert(self.options.output_mode == .exe);
+    const entry_name = self.options.entry orelse "_start";
+    const global = self.globals.get(entry_name) orelse {
+        log.err("entrypoint '{s}' not found", .{entry_name});
+        return error.EntrypointNotFound;
+    };
+    return global;
 }
 
 fn logSymtab(self: Elf) void {

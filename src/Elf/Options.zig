@@ -15,7 +15,7 @@ const usage =
     \\Usage: {s} [files...]
     \\
     \\General Options:
-    \\--entry=[name]                Set name of the entry point symbol
+    \\--entry=[name], -e [name]     Set name of the entry point symbol
     \\--gc-sections                 Force removal of functions and data that are unreachable by the entry point or exported symbols
     \\-l[name]                      Specify library to link against
     \\-L[path]                      Specify library search dir
@@ -111,6 +111,8 @@ pub fn parseArgs(arena: Allocator, ctx: Zld.MainCtx) !Options {
             try rpath_list.append(rpath);
         } else if (mem.startsWith(u8, arg, "--entry=")) {
             entry = arg["--entry=".len..];
+        } else if (mem.eql(u8, arg, "-e")) {
+            entry = args_iter.next() orelse ctx.printFailure("Expected name after {s}", .{arg});
         } else {
             try positionals.append(.{
                 .path = arg,
