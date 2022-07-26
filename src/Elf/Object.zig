@@ -21,7 +21,7 @@ file: fs.File,
 name: []const u8,
 file_offset: ?u32 = null,
 
-header: ?elf.Elf64_Ehdr = null,
+header: elf.Elf64_Ehdr = undefined,
 
 shdrs: std.ArrayListUnmanaged(elf.Elf64_Shdr) = .{},
 
@@ -50,56 +50,54 @@ pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch)
     if (self.file_offset) |offset| {
         try reader.context.seekTo(offset);
     }
-    const header = try reader.readStruct(elf.Elf64_Ehdr);
+    self.header = try reader.readStruct(elf.Elf64_Ehdr);
 
-    if (!mem.eql(u8, header.e_ident[0..4], "\x7fELF")) {
-        log.debug("Invalid ELF magic {s}, expected \x7fELF", .{header.e_ident[0..4]});
+    if (!mem.eql(u8, self.header.e_ident[0..4], "\x7fELF")) {
+        log.debug("Invalid ELF magic {s}, expected \x7fELF", .{self.header.e_ident[0..4]});
         return error.NotObject;
     }
-    if (header.e_ident[elf.EI_VERSION] != 1) {
-        log.debug("Unknown ELF version {d}, expected 1", .{header.e_ident[elf.EI_VERSION]});
+    if (self.header.e_ident[elf.EI_VERSION] != 1) {
+        log.debug("Unknown ELF version {d}, expected 1", .{self.header.e_ident[elf.EI_VERSION]});
         return error.NotObject;
     }
-    if (header.e_ident[elf.EI_DATA] != elf.ELFDATA2LSB) {
+    if (self.header.e_ident[elf.EI_DATA] != elf.ELFDATA2LSB) {
         log.err("TODO big endian support", .{});
         return error.TODOBigEndianSupport;
     }
-    if (header.e_ident[elf.EI_CLASS] != elf.ELFCLASS64) {
+    if (self.header.e_ident[elf.EI_CLASS] != elf.ELFCLASS64) {
         log.err("TODO 32bit support", .{});
         return error.TODOElf32bitSupport;
     }
-    if (header.e_type != elf.ET.REL) {
-        log.debug("Invalid file type {any}, expected ET.REL", .{header.e_type});
+    if (self.header.e_type != elf.ET.REL) {
+        log.debug("Invalid file type {any}, expected ET.REL", .{self.header.e_type});
         return error.NotObject;
     }
-    if (header.e_machine != cpu_arch.toElfMachine()) {
+    if (self.header.e_machine != cpu_arch.toElfMachine()) {
         log.debug("Invalid architecture {any}, expected {any}", .{
-            header.e_machine,
+            self.header.e_machine,
             cpu_arch.toElfMachine(),
         });
         return error.InvalidCpuArch;
     }
-    if (header.e_version != 1) {
-        log.debug("Invalid ELF version {d}, expected 1", .{header.e_version});
+    if (self.header.e_version != 1) {
+        log.debug("Invalid ELF version {d}, expected 1", .{self.header.e_version});
         return error.NotObject;
     }
 
-    assert(header.e_entry == 0);
-    assert(header.e_phoff == 0);
-    assert(header.e_phnum == 0);
-
-    self.header = header;
+    assert(self.header.e_entry == 0);
+    assert(self.header.e_phoff == 0);
+    assert(self.header.e_phnum == 0);
 
     try self.parseShdrs(allocator, reader);
     try self.parseSymtab(allocator);
 }
 
 fn parseShdrs(self: *Object, allocator: Allocator, reader: anytype) !void {
-    const shnum = self.header.?.e_shnum;
+    const shnum = self.header.e_shnum;
     if (shnum == 0) return;
 
     const offset = self.file_offset orelse 0;
-    try reader.context.seekTo(offset + self.header.?.e_shoff);
+    try reader.context.seekTo(offset + self.header.e_shoff);
     try self.shdrs.ensureTotalCapacity(allocator, shnum);
 
     var i: u16 = 0;
@@ -122,7 +120,7 @@ fn parseShdrs(self: *Object, allocator: Allocator, reader: anytype) !void {
     }
 
     // Parse shstrtab
-    var buffer = try self.readShdrContents(allocator, self.header.?.e_shstrndx);
+    var buffer = try self.readShdrContents(allocator, self.header.e_shstrndx);
     defer allocator.free(buffer);
     try self.strtab.appendSlice(allocator, buffer);
 }
