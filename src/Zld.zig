@@ -59,10 +59,7 @@ pub fn parseAndFlush(allocator: Allocator, tag: Tag, args: []const []const u8) !
         .coff => .{ .coff = try Coff.Options.parseArgs(arena, args) },
     };
     const zld = try openPath(allocator, tag, opts);
-    defer {
-        zld.closeFiles();
-        zld.deinit();
-    }
+    defer zld.deinit();
     try zld.flush();
 }
 
@@ -89,9 +86,10 @@ pub fn flush(base: *Zld) !void {
         .macho => try @fieldParentPtr(MachO, "base", base).flush(),
         .coff => try @fieldParentPtr(Coff, "base", base).flush(),
     }
+    base.closeFiles();
 }
 
-pub fn closeFiles(base: *const Zld) void {
+fn closeFiles(base: *const Zld) void {
     switch (base.tag) {
         .elf => @fieldParentPtr(Elf, "base", base).closeFiles(),
         .macho => @fieldParentPtr(MachO, "base", base).closeFiles(),

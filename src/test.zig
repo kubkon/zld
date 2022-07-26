@@ -295,6 +295,7 @@ pub const TestContext = struct {
                     .lib_dirs = lib_dirs.items,
                     .framework_dirs = framework_dirs.items,
                     .rpath_list = &[0][]const u8{},
+                    .dead_strip = true,
                 } },
                 .elf => .{ .elf = .{
                     .emit = .{
@@ -305,7 +306,7 @@ pub const TestContext = struct {
                     .output_mode = .exe,
                     .positionals = objects.items,
                     .libs = libs,
-                    .lib_dirs = &[0][]const u8{},
+                    .lib_dirs = lib_dirs.items,
                     .rpath_list = &[0][]const u8{},
                     .gc_sections = true,
                 } },
@@ -321,11 +322,8 @@ pub const TestContext = struct {
                     .lib_dirs = &[0][]const u8{},
                 } },
             };
-            var zld = try Zld.openPath(gpa, tag, opts);
-            defer {
-                zld.closeFiles();
-                zld.deinit();
-            }
+            const zld = try Zld.openPath(gpa, tag, opts);
+            defer zld.deinit();
 
             var argv = std.ArrayList([]const u8).init(arena);
             outer: {

@@ -163,7 +163,14 @@ pub fn parseIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
     log.debug("parsing '{s}' into atoms", .{self.name});
 
     var symbols_by_shndx = std.AutoHashMap(u16, std.ArrayList(u32)).init(allocator);
-    defer symbols_by_shndx.deinit();
+    defer {
+        var it = symbols_by_shndx.valueIterator();
+        while (it.next()) |value| {
+            value.deinit();
+        }
+        symbols_by_shndx.deinit();
+    }
+
     for (self.sections.items) |ndx| {
         try symbols_by_shndx.putNoClobber(ndx, std.ArrayList(u32).init(allocator));
     }

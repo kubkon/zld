@@ -189,9 +189,18 @@ pub fn parseArgs(arena: Allocator, args: []const []const u8) !Options {
     var entry: ?[]const u8 = null;
     var strip: bool = false;
 
-    var target: ?CrossTarget = null;
-    var platform_version: ?std.builtin.Version = null;
-    var sdk_version: ?std.builtin.Version = null;
+    var target: ?CrossTarget = if (comptime builtin.target.isDarwin())
+        CrossTarget.fromTarget(builtin.target)
+    else
+        null;
+    var platform_version: ?std.builtin.Version = if (comptime builtin.target.isDarwin())
+        builtin.target.os.version_range.semver.min
+    else
+        null;
+    var sdk_version: ?std.builtin.Version = if (comptime builtin.target.isDarwin())
+        builtin.target.os.version_range.semver.min
+    else
+        null;
 
     const Iterator = struct {
         args: []const []const u8,
@@ -296,9 +305,6 @@ pub fn parseArgs(arena: Allocator, args: []const []const u8) !Options {
         } else if (mem.eql(u8, arg, "-arch")) {
             const arch_s = args_iter.next() orelse
                 fatal(arena, "Expected architecture name after {s}", .{arg});
-            if (target == null) {
-                target = CrossTarget.fromTarget(builtin.target);
-            }
             if (mem.eql(u8, arch_s, "arm64")) {
                 target.?.cpu_arch = .aarch64;
             } else if (mem.eql(u8, arch_s, "x86_64")) {
@@ -390,9 +396,6 @@ pub fn parseArgs(arena: Allocator, args: []const []const u8) !Options {
                 }
             }
 
-            if (target == null) {
-                target = CrossTarget.fromTarget(builtin.target);
-            }
             if (target) |*tt| {
                 tt.os_tag = tmp_target.os_tag;
                 tt.abi = tmp_target.abi;
@@ -415,6 +418,12 @@ pub fn parseArgs(arena: Allocator, args: []const []const u8) !Options {
     if (positionals.items.len == 0) {
         fatal(arena, "Expected at least one input .o file", .{});
     }
+    if (target == null or target.?.cpu_arch == null) {
+        fatal(arena, "Missing -arch when cross-linking", .{});
+    }
+    if (target.?.os_tag == null) {
+        fatal(arena, "Missing -platform_version when cross-linking", .{});
+    }
 
     // Add some defaults
     try lib_dirs.append("/usr/lib");
@@ -426,9 +435,9 @@ pub fn parseArgs(arena: Allocator, args: []const []const u8) !Options {
             .sub_path = out_path orelse "a.out",
         },
         .dynamic = dynamic,
-        .target = if (target) |tt| tt else CrossTarget.fromTarget(builtin.target),
-        .platform_version = if (platform_version) |v| v else builtin.target.os.version_range.semver.min,
-        .sdk_version = if (sdk_version) |v| v else builtin.target.os.version_range.semver.min,
+        .target = target.?,
+        .platform_version = platform_version.?,
+        .sdk_version = sdk_version.?,
         .output_mode = if (dylib) .lib else .exe,
         .syslibroot = syslibroot,
         .positionals = positionals.items,
