@@ -86,10 +86,9 @@ const CreateSymlinkStep = struct {
     fn make(step: *Step) anyerror!void {
         const self = @fieldParentPtr(CreateSymlinkStep, "step", step);
         const rel_source = fs.path.basename(self.source.getPath(self.builder));
-        const source_path = self.builder.getInstallPath(.bin, rel_source);
         const target_path = self.builder.getInstallPath(.bin, self.target);
-        fs.atomicSymLink(self.builder.allocator, source_path, target_path) catch |err| {
-            log.err("Unable to symlink {s} -> {s}", .{ source_path, target_path });
+        fs.atomicSymLink(self.builder.allocator, rel_source, target_path) catch |err| {
+            log.err("Unable to symlink {s} -> {s}", .{ rel_source, target_path });
             return err;
         };
     }
