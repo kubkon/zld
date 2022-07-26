@@ -2367,7 +2367,6 @@ fn addCodeSignatureLC(self: *MachO) !void {
 
 fn setEntryPoint(self: *MachO) !void {
     if (self.options.output_mode != .exe) return;
-
     const seg = self.load_commands.items[self.text_segment_cmd_index.?].segment;
     const global = try self.getEntryPoint();
     const sym = self.getSymbol(global);
@@ -4018,6 +4017,7 @@ pub fn getTlvPtrAtomForSymbol(self: *MachO, sym_with_loc: SymbolWithLoc) ?*Atom 
 /// Returns symbol location corresponding to the set entrypoint.
 /// Asserts output mode is executable.
 pub fn getEntryPoint(self: MachO) error{MissingMainEntrypoint}!SymbolWithLoc {
+    assert(self.options.output_mode == .exe);
     const entry_name = self.options.entry orelse "_main";
     const global = self.globals.get(entry_name) orelse {
         log.err("entrypoint '{s}' not found", .{entry_name});
