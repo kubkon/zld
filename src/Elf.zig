@@ -242,8 +242,7 @@ pub fn flush(self: *Elf) !void {
     for (self.unresolved.keys()) |ndx| {
         const global = self.globals.values()[ndx];
         const object = self.objects.items[global.file.?];
-        const sym = object.symtab.items[global.sym_index];
-        const sym_name = object.getString(sym.st_name);
+        const sym_name = self.getSymbolName(global);
         log.err("undefined reference to symbol '{s}'", .{sym_name});
         log.err("  first referenced in '{s}'", .{object.name});
     }
@@ -487,8 +486,8 @@ fn populateMetadata(self: *Elf) !void {
 
 pub fn getMatchingSection(self: *Elf, object_id: u16, sect_id: u16) !?u16 {
     const object = self.objects.items[object_id];
-    const shdr = object.shdrs.items[sect_id];
-    const shdr_name = object.getString(shdr.sh_name);
+    const shdr = object.getSourceShdr(sect_id);
+    const shdr_name = object.getShString(shdr.sh_name);
     const flags = shdr.sh_flags;
     const res: ?u16 = blk: {
         if (flags & elf.SHF_EXCLUDE != 0) break :blk null;
@@ -656,7 +655,7 @@ pub fn getMatchingSection(self: *Elf, object_id: u16, sect_id: u16) !?u16 {
             }
 
             log.debug("TODO non-alloc sections", .{});
-            log.debug("  {s} => {}", .{ object.getString(shdr.sh_name), shdr });
+            log.debug("  {s} => {}", .{ object.getShString(shdr.sh_name), shdr });
             break :blk null;
         }
         if (flags & elf.SHF_EXECINSTR != 0) {
@@ -1249,7 +1248,7 @@ fn parseObject(self: *Elf, path: []const u8) !bool {
         .file = file,
     };
 
-    object.parse(self.base.allocator, self.options.target.cpu_arch.?) catch |err| switch (err) {
+    object.parse(self.base.allocator, self.options.target.cpu_arch.?, 0) catch |err| switch (err) {
         error.EndOfStream, error.NotObject => {
             object.deinit(self.base.allocator);
             return false;
@@ -1297,7 +1296,7 @@ fn resolveSymbolsInObject(self: *Elf, object_id: u16) !void {
 
     for (object.symtab.items) |sym, i| {
         const sym_id = @intCast(u32, i);
-        const sym_name = object.getString(sym.st_name);
+        const sym_name = self.getSymbolName(.{ .sym_index = sym_id, .file = object_id });
         const st_bind = sym.st_info >> 4;
         const st_type = sym.st_info & 0xf;
 
@@ -1369,9 +1368,7 @@ fn resolveSymbolsInArchives(self: *Elf) !void {
     var next_sym: usize = 0;
     loop: while (next_sym < self.unresolved.count()) {
         const global = self.globals.values()[self.unresolved.keys()[next_sym]];
-        const ref_object = self.objects.items[global.file.?];
-        const sym = ref_object.symtab.items[global.sym_index];
-        const sym_name = ref_object.getString(sym.st_name);
+        const sym_name = self.getSymbolName(global);
 
         for (self.archives.items) |archive| {
             // Check if the entry exists in a static archive.
@@ -1382,12 +1379,12 @@ fn resolveSymbolsInArchives(self: *Elf) !void {
             assert(offsets.items.len > 0);
 
             const object_id = @intCast(u16, self.objects.items.len);
-            const object = try self.objects.addOne(self.base.allocator);
-            object.* = try archive.parseObject(
+            const object = try archive.parseObject(
                 self.base.allocator,
                 self.options.target.cpu_arch.?,
                 offsets.items[0],
             );
+            try self.objects.append(self.base.allocator, object);
             try self.resolveSymbolsInObject(object_id);
 
             continue :loop;
@@ -1401,9 +1398,7 @@ fn resolveSpecialSymbols(self: *Elf) !void {
     var next_sym: usize = 0;
     loop: while (next_sym < self.unresolved.count()) {
         const global = &self.globals.values()[self.unresolved.keys()[next_sym]];
-        const object = self.objects.items[global.file.?];
-        const sym = object.symtab.items[global.sym_index];
-        const sym_name = object.getString(sym.st_name);
+        const sym_name = self.getSymbolName(global.*);
 
         if (mem.eql(u8, sym_name, "__init_array_start") or
             mem.eql(u8, sym_name, "__init_array_end") or
@@ -1700,37 +1695,25 @@ fn allocateAtoms(self: *Elf) !void {
         while (true) {
             base_addr = mem.alignForwardGeneric(u64, base_addr, atom.alignment);
 
-            if (atom.file) |file| {
-                const object = &self.objects.items[file];
-                const sym = &object.symtab.items[atom.local_sym_index];
-                sym.st_value = base_addr;
-                sym.st_shndx = shdr_ndx;
-                sym.st_size = atom.size;
+            const sym = atom.getSymbolPtr(self);
+            sym.st_value = base_addr;
+            sym.st_shndx = shdr_ndx;
+            sym.st_size = atom.size;
 
-                log.debug("  atom '{s}' allocated from 0x{x} to 0x{x}", .{
-                    object.getString(sym.st_name),
-                    base_addr,
-                    base_addr + atom.size,
+            log.debug("  atom '{s}' allocated from 0x{x} to 0x{x}", .{
+                atom.getName(self),
+                base_addr,
+                base_addr + atom.size,
+            });
+
+            // Update each symbol contained within the TextBlock
+            for (atom.contained.items) |sym_at_off| {
+                const contained_sym = self.getSymbolPtr(.{
+                    .sym_index = sym_at_off.local_sym_index,
+                    .file = atom.file,
                 });
-
-                // Update each symbol contained within the TextBlock
-                for (atom.contained.items) |sym_at_off| {
-                    const contained_sym = &object.symtab.items[sym_at_off.local_sym_index];
-                    contained_sym.st_value = base_addr + sym_at_off.offset;
-                    contained_sym.st_shndx = shdr_ndx;
-                }
-            } else {
-                // Synthetic
-                const sym = &self.locals.items[atom.local_sym_index];
-                sym.st_value = base_addr;
-                sym.st_shndx = shdr_ndx;
-                sym.st_size = atom.size;
-
-                log.debug("  atom '{s}' allocated from 0x{x} to 0x{x}", .{
-                    self.strtab.getAssumeExists(sym.st_name),
-                    base_addr,
-                    base_addr + atom.size,
-                });
+                contained_sym.st_value = base_addr + sym_at_off.offset;
+                contained_sym.st_shndx = shdr_ndx;
             }
 
             base_addr += atom.size;
@@ -1759,14 +1742,14 @@ fn logAtoms(self: Elf, sh_flags: u64) void {
             if (atom.file) |file| {
                 const object = self.objects.items[file];
                 const sym = object.symtab.items[atom.local_sym_index];
-                const sym_name = object.getString(sym.st_name);
+                const sym_name = object.getSymbolName(atom.local_sym_index);
                 log.debug("  {s} : {d} => 0x{x}", .{ sym_name, atom.local_sym_index, sym.st_value });
                 log.debug("    defined in {s}", .{object.name});
                 log.debug("    contained:", .{});
                 for (atom.contained.items) |contained| {
                     const index = contained.local_sym_index;
                     const csym = object.symtab.items[index];
-                    const csym_name = object.getString(csym.st_name);
+                    const csym_name = object.getSymbolName(contained.local_sym_index);
                     log.debug("       {s} : {d} => 0x{x}", .{ csym_name, index, csym.st_value });
                 }
             } else {
@@ -1874,7 +1857,7 @@ fn writeSymtab(self: *Elf) !void {
     });
 
     for (self.objects.items) |object| {
-        for (object.symtab.items) |sym| {
+        for (object.symtab.items) |sym, sym_id| {
             if (sym.st_name == 0) continue;
             const st_bind = sym.st_info >> 4;
             const st_type = sym.st_info & 0xf;
@@ -1885,7 +1868,7 @@ fn writeSymtab(self: *Elf) !void {
             if (sym.st_other == @enumToInt(elf.STV.HIDDEN)) continue;
             if (sym.st_other == STV_GC) continue;
 
-            const sym_name = object.getString(sym.st_name);
+            const sym_name = object.getSymbolName(@intCast(u32, sym_id));
             var out_sym = sym;
             out_sym.st_name = try self.strtab.insert(self.base.allocator, sym_name);
             try symtab.append(out_sym);
@@ -1997,8 +1980,7 @@ pub fn getSymbol(self: *Elf, sym_with_loc: SymbolWithLoc) elf.Elf64_Sym {
 pub fn getSymbolName(self: *Elf, sym_with_loc: SymbolWithLoc) []const u8 {
     if (sym_with_loc.file) |file| {
         const object = self.objects.items[file];
-        const sym = object.symtab.items[sym_with_loc.sym_index];
-        return object.getString(sym.st_name);
+        return object.getSymbolName(sym_with_loc.sym_index);
     } else {
         const sym = self.locals.items[sym_with_loc.sym_index];
         return self.strtab.getAssumeExists(sym.st_name);
@@ -2025,7 +2007,7 @@ fn logSymtab(self: Elf) void {
             const st_bind = sym.st_info >> 4;
             // if (st_bind != elf.STB_LOCAL or st_type != elf.STT_SECTION) continue;
             if (st_bind != elf.STB_LOCAL) continue;
-            log.debug("  {d}: {s}: {}", .{ i, object.getString(sym.st_name), sym });
+            log.debug("  {d}: {s}: {}", .{ i, object.getSymbolName(@intCast(u32, i)), sym });
         }
     }
 
@@ -2034,10 +2016,19 @@ fn logSymtab(self: Elf) void {
         if (global.file) |file| {
             const object = self.objects.items[file];
             const sym = object.symtab.items[global.sym_index];
-            log.debug("  {d}: {s}: 0x{x}, {s}", .{ global.sym_index, object.getString(sym.st_name), sym.st_value, object.name });
+            log.debug("  {d}: {s}: 0x{x}, {s}", .{
+                global.sym_index,
+                object.getSymbolName(global.sym_index),
+                sym.st_value,
+                object.name,
+            });
         } else {
             const sym = self.locals.items[global.sym_index];
-            log.debug("  {d}: {s}: 0x{x}", .{ global.sym_index, self.strtab.getAssumeExists(sym.st_name), sym.st_value });
+            log.debug("  {d}: {s}: 0x{x}", .{
+                global.sym_index,
+                self.strtab.getAssumeExists(sym.st_name),
+                sym.st_value,
+            });
         }
     }
 }

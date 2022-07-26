@@ -19,7 +19,10 @@ const RegisterOrMemory = dis_x86_64.RegisterOrMemory;
 
 file: fs.File,
 name: []const u8,
-file_offset: ?u32 = null,
+
+/// Data contents of the file.
+/// Initialized in `parse`.
+contents: []const u8 = undefined,
 
 header: elf.Elf64_Ehdr = undefined,
 
@@ -29,7 +32,8 @@ sections: std.ArrayListUnmanaged(u16) = .{},
 relocs: std.AutoHashMapUnmanaged(u16, u16) = .{},
 
 symtab: std.ArrayListUnmanaged(elf.Elf64_Sym) = .{},
-strtab: std.ArrayListUnmanaged(u8) = .{},
+strtab: []const u8 = &.{},
+shstrtab: []const u8 = &.{},
 
 atom_table: std.AutoHashMapUnmanaged(u32, *Atom) = .{},
 
@@ -40,16 +44,23 @@ pub fn deinit(self: *Object, allocator: Allocator) void {
     self.sections.deinit(allocator);
     self.relocs.deinit(allocator);
     self.symtab.deinit(allocator);
-    self.strtab.deinit(allocator);
     self.atom_table.deinit(allocator);
     allocator.free(self.name);
+    allocator.free(self.contents);
 }
 
-pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch) !void {
-    const reader = self.file.reader();
-    if (self.file_offset) |offset| {
-        try reader.context.seekTo(offset);
+pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch, offset: usize) !void {
+    const file_stat = try self.file.stat();
+    var file_size = math.cast(usize, file_stat.size) orelse return error.Overflow;
+    if (offset > 0) {
+        try self.file.seekTo(offset);
+        file_size -= offset;
     }
+    self.contents = try self.file.readToEndAlloc(allocator, file_size);
+
+    var stream = std.io.fixedBufferStream(self.contents);
+    const reader = stream.reader();
+
     self.header = try reader.readStruct(elf.Elf64_Ehdr);
 
     if (!mem.eql(u8, self.header.e_ident[0..4], "\x7fELF")) {
@@ -88,17 +99,11 @@ pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch)
     assert(self.header.e_phoff == 0);
     assert(self.header.e_phnum == 0);
 
-    try self.parseShdrs(allocator, reader);
-    try self.parseSymtab(allocator);
-}
-
-fn parseShdrs(self: *Object, allocator: Allocator, reader: anytype) !void {
     const shnum = self.header.e_shnum;
     if (shnum == 0) return;
 
-    const offset = self.file_offset orelse 0;
-    try reader.context.seekTo(offset + self.header.e_shoff);
-    try self.shdrs.ensureTotalCapacity(allocator, shnum);
+    try reader.context.seekTo(self.header.e_shoff);
+    try self.shdrs.ensureTotalCapacityPrecise(allocator, shnum);
 
     var i: u16 = 0;
     while (i < shnum) : (i += 1) {
@@ -120,41 +125,55 @@ fn parseShdrs(self: *Object, allocator: Allocator, reader: anytype) !void {
     }
 
     // Parse shstrtab
-    var buffer = try self.readShdrContents(allocator, self.header.e_shstrndx);
-    defer allocator.free(buffer);
-    try self.strtab.appendSlice(allocator, buffer);
+    self.shstrtab = self.readShdrContents(self.header.e_shstrndx);
+
+    try self.parseSymtab(allocator);
 }
 
 fn parseSymtab(self: *Object, allocator: Allocator) !void {
-    if (self.symtab_index == null) return;
+    const symtab_index = self.symtab_index orelse return;
+    const symtab_shdr = self.shdrs.items[symtab_index];
+    self.strtab = self.readShdrContents(@intCast(u16, symtab_shdr.sh_link));
+    try self.symtab.appendSlice(allocator, self.getSourceSymtab());
+}
 
-    const symtab_shdr = self.shdrs.items[self.symtab_index.?];
+pub fn getSourceSymtab(self: Object) []const elf.Elf64_Sym {
+    const index = self.symtab_index orelse return &[0]elf.Elf64_Sym{};
+    const raw_symtab = self.readShdrContents(index);
+    return mem.bytesAsSlice(elf.Elf64_Sym, @alignCast(@alignOf(elf.Elf64_Sym), raw_symtab));
+}
 
-    // We first read the contents of string table associated with this symbol table
-    // noting the offset at which it is appended to the existing string table, which
-    // we will then use to fixup st_name offset within each symbol.
-    const strtab_offset = @intCast(u32, self.strtab.items.len);
-    var str_buffer = try self.readShdrContents(allocator, @intCast(u16, symtab_shdr.sh_link));
-    defer allocator.free(str_buffer);
-    try self.strtab.appendSlice(allocator, str_buffer);
+pub fn getSourceSymbol(self: Object, index: u32) ?elf.Elf64_Sym {
+    const symtab = self.getSourceSymtab();
+    return symtab[index];
+}
 
-    var sym_buffer = try self.readShdrContents(allocator, self.symtab_index.?);
-    defer allocator.free(sym_buffer);
-    const syms = @alignCast(@alignOf(elf.Elf64_Sym), mem.bytesAsSlice(elf.Elf64_Sym, sym_buffer));
-    try self.symtab.ensureTotalCapacity(allocator, syms.len);
+pub fn getSourceShdr(self: Object, index: u16) elf.Elf64_Shdr {
+    assert(index < self.shdrs.items.len);
+    return self.shdrs.items[index];
+}
 
-    for (syms) |sym| {
-        var out_sym = sym;
-        if (sym.st_name > 0) {
-            out_sym.st_name += strtab_offset;
-        } else if (sym.st_info & 0xf == elf.STT_SECTION) {
-            // If the symbol is pointing to a section header, copy the sh_name offset as the new
-            // st_name offset.
-            const shdr = self.shdrs.items[sym.st_shndx];
-            out_sym.st_name = shdr.sh_name;
-        }
-        self.symtab.appendAssumeCapacity(out_sym);
+pub fn getSourceSymbolName(self: Object, index: u32) []const u8 {
+    const sym = self.getSourceSymbol(index).?;
+    if (sym.st_info & 0xf == elf.STT_SECTION) {
+        const shdr = self.shdrs.items[sym.st_shndx];
+        return self.getShString(shdr.sh_name);
+    } else {
+        return self.getString(sym.st_name);
     }
+}
+
+pub fn getSymbolPtr(self: *Object, index: u32) *elf.Elf64_Sym {
+    return &self.symtab.items[index];
+}
+
+pub fn getSymbol(self: Object, index: u32) elf.Elf64_Sym {
+    return self.symtab.items[index];
+}
+
+pub fn getSymbolName(self: Object, index: u32) []const u8 {
+    const sym = self.getSymbol(index);
+    return self.getString(sym.st_name);
 }
 
 pub fn parseIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_file: *Elf) !void {
@@ -172,7 +191,7 @@ pub fn parseIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
     for (self.sections.items) |ndx| {
         try symbols_by_shndx.putNoClobber(ndx, std.ArrayList(u32).init(allocator));
     }
-    for (self.symtab.items) |sym, sym_id| {
+    for (self.getSourceSymtab()) |sym, sym_id| {
         if (sym.st_shndx == elf.SHN_UNDEF) continue;
         if (elf.SHN_LORESERVE <= sym.st_shndx and sym.st_shndx < elf.SHN_HIRESERVE) continue;
         const map = symbols_by_shndx.getPtr(sym.st_shndx) orelse continue;
@@ -180,8 +199,8 @@ pub fn parseIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
     }
 
     for (self.sections.items) |ndx| {
-        const shdr = self.shdrs.items[ndx];
-        const shdr_name = self.getString(shdr.sh_name);
+        const shdr = self.getSourceShdr(ndx);
+        const shdr_name = self.getShString(shdr.sh_name);
 
         log.debug("  parsing section '{s}'", .{shdr_name});
 
@@ -190,11 +209,12 @@ pub fn parseIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
             return error.HandleSectionGroups;
         }
 
-        const syms = symbols_by_shndx.get(ndx).?;
         const tshdr_ndx = (try elf_file.getMatchingSection(object_id, ndx)) orelse {
             log.debug("unhandled section", .{});
             continue;
         };
+
+        const syms = symbols_by_shndx.get(ndx).?;
 
         const atom = try Atom.createEmpty(allocator);
         errdefer {
@@ -220,9 +240,18 @@ pub fn parseIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
         var local_sym_index: ?u32 = null;
 
         for (syms.items) |sym_id| {
-            const sym = self.symtab.items[sym_id];
+            const sym = self.getSourceSymbol(sym_id).?;
             const is_sect_sym = sym.st_info & 0xf == elf.STT_SECTION;
             if (is_sect_sym) {
+                const osym = self.getSymbolPtr(sym_id);
+                osym.* = .{
+                    .st_name = 0,
+                    .st_info = (elf.STB_LOCAL << 4) | elf.STT_OBJECT,
+                    .st_other = 0,
+                    .st_shndx = 0,
+                    .st_value = 0,
+                    .st_size = sym.st_size,
+                };
                 local_sym_index = sym_id;
                 continue;
             }
@@ -236,7 +265,7 @@ pub fn parseIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
         atom.local_sym_index = local_sym_index orelse blk: {
             const sym_index = @intCast(u32, self.symtab.items.len);
             try self.symtab.append(allocator, .{
-                .st_name = shdr.sh_name,
+                .st_name = 0,
                 .st_info = (elf.STB_LOCAL << 4) | elf.STT_OBJECT,
                 .st_other = 0,
                 .st_shndx = 0,
@@ -251,16 +280,15 @@ pub fn parseIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
             var code = try allocator.alloc(u8, atom.size);
             mem.set(u8, code, 0);
             break :blk code;
-        } else try self.readShdrContents(allocator, ndx);
+        } else try allocator.dupe(u8, self.readShdrContents(ndx));
         defer allocator.free(code);
 
         if (self.relocs.get(ndx)) |rel_ndx| {
-            const rel_shdr = self.shdrs.items[rel_ndx];
-            var raw_relocs = try self.readShdrContents(allocator, rel_ndx);
-            defer allocator.free(raw_relocs);
+            const rel_shdr = self.getSourceShdr(rel_ndx);
+            const raw_relocs = self.readShdrContents(rel_ndx);
 
             const nrelocs = @divExact(rel_shdr.sh_size, rel_shdr.sh_entsize);
-            try atom.relocs.ensureTotalCapacity(allocator, nrelocs);
+            try atom.relocs.ensureTotalCapacityPrecise(allocator, nrelocs);
 
             var count: usize = 0;
             while (count < nrelocs) : (count += 1) {
@@ -285,8 +313,7 @@ pub fn parseIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
 
                 // While traversing relocations, synthesize any missing atom.
                 // TODO synthesize PLT atoms, GOT atoms, etc.
-                const tsym = self.symtab.items[rel.r_sym()];
-                const tsym_name = self.getString(tsym.st_name);
+                const tsym_name = self.getSourceSymbolName(rel.r_sym());
                 switch (rel.r_type()) {
                     elf.R_X86_64_REX_GOTPCRELX => blk: {
                         const global = elf_file.globals.get(tsym_name).?;
@@ -441,21 +468,16 @@ fn isDefinitionAvailable(elf_file: *Elf, global: Elf.SymbolWithLoc) bool {
 }
 
 pub fn getString(self: Object, off: u32) []const u8 {
-    assert(off < self.strtab.items.len);
-    return mem.sliceTo(@ptrCast([*:0]const u8, self.strtab.items.ptr + off), 0);
+    assert(off < self.strtab.len);
+    return mem.sliceTo(@ptrCast([*:0]const u8, self.strtab.ptr + off), 0);
 }
 
-/// Caller owns the memory.
-fn readShdrContents(self: Object, allocator: Allocator, shdr_index: u16) ![]u8 {
+pub fn getShString(self: Object, off: u32) []const u8 {
+    assert(off < self.shstrtab.len);
+    return mem.sliceTo(@ptrCast([*:0]const u8, self.shstrtab.ptr + off), 0);
+}
+
+fn readShdrContents(self: Object, shdr_index: u16) []const u8 {
     const shdr = self.shdrs.items[shdr_index];
-    var buffer = try allocator.alloc(u8, shdr.sh_size);
-    errdefer allocator.free(buffer);
-
-    const offset = self.file_offset orelse 0;
-    const amt = try self.file.preadAll(buffer, shdr.sh_offset + offset);
-    if (amt != buffer.len) {
-        return error.InputOutput;
-    }
-
-    return buffer;
+    return self.contents[shdr.sh_offset..][0..shdr.sh_size];
 }

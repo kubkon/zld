@@ -198,10 +198,9 @@ pub fn parseObject(self: Archive, allocator: Allocator, cpu_arch: std.Target.Cpu
     var object = Object{
         .file = try fs.cwd().openFile(self.name, .{}),
         .name = full_name,
-        .file_offset = @intCast(u32, try reader.context.getPos()),
     };
 
-    try object.parse(allocator, cpu_arch);
+    try object.parse(allocator, cpu_arch, try reader.context.getPos());
     try reader.context.seekTo(0);
 
     return object;

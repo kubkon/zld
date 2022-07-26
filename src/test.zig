@@ -295,7 +295,6 @@ pub const TestContext = struct {
                     .lib_dirs = lib_dirs.items,
                     .framework_dirs = framework_dirs.items,
                     .rpath_list = &[0][]const u8{},
-                    .dead_strip = true,
                 } },
                 .elf => .{ .elf = .{
                     .emit = .{
@@ -308,7 +307,6 @@ pub const TestContext = struct {
                     .libs = libs,
                     .lib_dirs = lib_dirs.items,
                     .rpath_list = &[0][]const u8{},
-                    .gc_sections = true,
                 } },
                 .coff => .{ .coff = .{
                     .emit = .{
