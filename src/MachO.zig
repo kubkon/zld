@@ -16,8 +16,10 @@ const meta = std.meta;
 const aarch64 = @import("aarch64.zig");
 const bind = @import("MachO/bind.zig");
 const dead_strip = @import("MachO/dead_strip.zig");
+const fat = @import("MachO/fat.zig");
 
 const Allocator = mem.Allocator;
+const ArenaAllocator = std.heap.ArenaAllocator;
 const Archive = @import("MachO/Archive.zig");
 const Atom = @import("MachO/Atom.zig");
 const CodeSignature = @import("MachO/CodeSignature.zig");
@@ -47,7 +49,6 @@ code_signature: ?CodeSignature = null,
 
 objects: std.ArrayListUnmanaged(Object) = .{},
 archives: std.ArrayListUnmanaged(Archive) = .{},
-
 dylibs: std.ArrayListUnmanaged(Dylib) = .{},
 dylibs_map: std.StringHashMapUnmanaged(u16) = .{},
 referenced_dylibs: std.AutoArrayHashMapUnmanaged(u16, void) = .{},
@@ -232,7 +233,7 @@ fn createEmpty(gpa: Allocator, options: Options) !*MachO {
 
 pub fn flush(self: *MachO) !void {
     const gpa = self.base.allocator;
-    var arena_allocator = std.heap.ArenaAllocator.init(gpa);
+    var arena_allocator = ArenaAllocator.init(gpa);
     defer arena_allocator.deinit();
     const arena = arena_allocator.allocator();
 
@@ -396,8 +397,8 @@ pub fn flush(self: *MachO) !void {
     try self.parseLibs(libs.keys(), libs.values(), syslibroot, &dependent_libs);
     try self.parseDependentLibs(syslibroot, &dependent_libs);
 
-    for (self.objects.items) |*object, object_id| {
-        try self.resolveSymbolsInObject(object, @intCast(u16, object_id));
+    for (self.objects.items) |_, object_id| {
+        try self.resolveSymbolsInObject(@intCast(u16, object_id));
     }
 
     try self.resolveSymbolsInArchives();
@@ -569,66 +570,80 @@ fn resolveFramework(
 }
 
 fn parseObject(self: *MachO, path: []const u8) !bool {
+    const gpa = self.base.allocator;
     const file = fs.cwd().openFile(path, .{}) catch |err| switch (err) {
         error.FileNotFound => return false,
         else => |e| return e,
     };
-    errdefer file.close();
+    defer file.close();
 
-    const name = try self.base.allocator.dupe(u8, path);
-    errdefer self.base.allocator.free(name);
-
+    const name = try gpa.dupe(u8, path);
+    const cpu_arch = self.options.target.cpu_arch.?;
     const mtime: u64 = mtime: {
         const stat = file.stat() catch break :mtime 0;
         break :mtime @intCast(u64, @divFloor(stat.mtime, 1_000_000_000));
     };
+    const file_stat = try file.stat();
+    const file_size = math.cast(usize, file_stat.size) orelse return error.Overflow;
+    const contents = try file.readToEndAllocOptions(gpa, file_size, file_size, @alignOf(u64), null);
 
     var object = Object{
         .name = name,
-        .file = file,
         .mtime = mtime,
+        .contents = .{
+            .buffer = contents,
+            .owned = true,
+        },
     };
 
-    object.parse(self.base.allocator, self.options.target.cpu_arch.?) catch |err| switch (err) {
+    object.parse(gpa, cpu_arch) catch |err| switch (err) {
         error.EndOfStream, error.NotObject => {
-            object.deinit(self.base.allocator);
+            object.deinit(gpa);
             return false;
         },
         else => |e| return e,
     };
 
-    try self.objects.append(self.base.allocator, object);
+    try self.objects.append(gpa, object);
 
     return true;
 }
 
 fn parseArchive(self: *MachO, path: []const u8, force_load: bool) !bool {
+    const gpa = self.base.allocator;
     const file = fs.cwd().openFile(path, .{}) catch |err| switch (err) {
         error.FileNotFound => return false,
         else => |e| return e,
     };
-    errdefer file.close();
+    defer file.close();
 
-    const name = try self.base.allocator.dupe(u8, path);
-    errdefer self.base.allocator.free(name);
+    const name = try gpa.dupe(u8, path);
+    const cpu_arch = self.options.target.cpu_arch.?;
+    const file_stat = try file.stat();
+    var file_size = math.cast(usize, file_stat.size) orelse return error.Overflow;
+
+    const reader = file.reader();
+    const lib_offset = try fat.getLibraryOffset(reader, cpu_arch);
+    try file.seekTo(lib_offset);
+    file_size -= lib_offset;
+    const contents = try file.readToEndAllocOptions(gpa, file_size, file_size, @alignOf(u64), null);
 
     var archive = Archive{
         .name = name,
-        .file = file,
+        .contents = contents,
     };
 
-    archive.parse(self.base.allocator, self.options.target.cpu_arch.?) catch |err| switch (err) {
+    archive.parse(gpa) catch |err| switch (err) {
         error.EndOfStream, error.NotArchive => {
-            archive.deinit(self.base.allocator);
+            archive.deinit(gpa);
             return false;
         },
         else => |e| return e,
     };
 
     if (force_load) {
-        defer archive.deinit(self.base.allocator);
         // Get all offsets from the ToC
-        var offsets = std.AutoArrayHashMap(u32, void).init(self.base.allocator);
+        var offsets = std.AutoArrayHashMap(u32, void).init(gpa);
         defer offsets.deinit();
         for (archive.toc.values()) |offs| {
             for (offs.items) |off| {
@@ -636,11 +651,11 @@ fn parseArchive(self: *MachO, path: []const u8, force_load: bool) !bool {
             }
         }
         for (offsets.keys()) |off| {
-            const object = try self.objects.addOne(self.base.allocator);
-            object.* = try archive.parseObject(self.base.allocator, self.options.target.cpu_arch.?, off);
+            const object = try archive.parseObject(gpa, cpu_arch, off);
+            try self.objects.append(gpa, object);
         }
     } else {
-        try self.archives.append(self.base.allocator, archive);
+        try self.archives.append(gpa, archive);
     }
 
     return true;
@@ -651,6 +666,7 @@ const ParseDylibError = error{
     EmptyStubFile,
     MismatchedCpuArchitecture,
     UnsupportedCpuArchitecture,
+    EndOfStream,
 } || fs.File.OpenError || std.os.PReadError || Dylib.Id.ParseError;
 
 const DylibCreateOpts = struct {
@@ -667,43 +683,52 @@ pub fn parseDylib(
     dependent_libs: anytype,
     opts: DylibCreateOpts,
 ) ParseDylibError!bool {
+    const gpa = self.base.allocator;
     const file = fs.cwd().openFile(path, .{}) catch |err| switch (err) {
         error.FileNotFound => return false,
         else => |e| return e,
     };
-    errdefer file.close();
+    defer file.close();
 
-    const name = try self.base.allocator.dupe(u8, path);
-    errdefer self.base.allocator.free(name);
+    const cpu_arch = self.options.target.cpu_arch.?;
+    const file_stat = try file.stat();
+    var file_size = math.cast(usize, file_stat.size) orelse return error.Overflow;
+
+    const reader = file.reader();
+    const lib_offset = try fat.getLibraryOffset(reader, cpu_arch);
+    try file.seekTo(lib_offset);
+    file_size -= lib_offset;
+
+    const contents = try file.readToEndAllocOptions(gpa, file_size, file_size, @alignOf(u64), null);
+    defer gpa.free(contents);
 
     const dylib_id = @intCast(u16, self.dylibs.items.len);
-    var dylib = Dylib{
-        .name = name,
-        .file = file,
-        .weak = opts.weak,
-    };
+    var dylib = Dylib{ .weak = opts.weak };
 
-    dylib.parse(
-        self.base.allocator,
-        self.options.target.cpu_arch.?,
+    dylib.parseFromBinary(
+        gpa,
+        cpu_arch,
         dylib_id,
         dependent_libs,
+        path,
+        contents,
     ) catch |err| switch (err) {
         error.EndOfStream, error.NotDylib => {
             try file.seekTo(0);
 
-            var lib_stub = LibStub.loadFromFile(self.base.allocator, file) catch {
-                dylib.deinit(self.base.allocator);
+            var lib_stub = LibStub.loadFromFile(gpa, file) catch {
+                dylib.deinit(gpa);
                 return false;
             };
             defer lib_stub.deinit();
 
             try dylib.parseFromStub(
-                self.base.allocator,
+                gpa,
                 self.options.target,
                 lib_stub,
                 dylib_id,
                 dependent_libs,
+                path,
             );
         },
         else => |e| return e,
@@ -717,18 +742,18 @@ pub fn parseDylib(
             log.warn("  dylib version: {}", .{dylib.id.?.current_version});
 
             // TODO maybe this should be an error and facilitate auto-cleanup?
-            dylib.deinit(self.base.allocator);
+            dylib.deinit(gpa);
             return false;
         }
     }
 
-    const gop = try self.dylibs_map.getOrPut(self.base.allocator, dylib.id.?.name);
+    const gop = try self.dylibs_map.getOrPut(gpa, dylib.id.?.name);
     if (gop.found_existing) {
-        dylib.deinit(self.base.allocator);
+        dylib.deinit(gpa);
         return true;
     }
     gop.value_ptr.* = dylib_id;
-    try self.dylibs.append(self.base.allocator, dylib);
+    try self.dylibs.append(gpa, dylib);
 
     const should_link_dylib_even_if_unreachable = blk: {
         if (self.options.dead_strip_dylibs and !opts.needed) break :blk false;
@@ -737,7 +762,7 @@ pub fn parseDylib(
 
     if (should_link_dylib_even_if_unreachable) {
         try self.addLoadDylibLC(dylib_id);
-        try self.referenced_dylibs.putNoClobber(self.base.allocator, dylib_id, {});
+        try self.referenced_dylibs.putNoClobber(gpa, dylib_id, {});
     }
 
     return true;
@@ -747,10 +772,8 @@ fn parsePositionals(self: *MachO, files: []const []const u8, syslibroot: ?[]cons
     for (files) |file_name| {
         const full_path = full_path: {
             var buffer: [fs.MAX_PATH_BYTES]u8 = undefined;
-            const path = try std.fs.realpath(file_name, &buffer);
-            break :full_path try self.base.allocator.dupe(u8, path);
+            break :full_path try std.fs.realpath(file_name, &buffer);
         };
-        defer self.base.allocator.free(full_path);
         log.debug("parsing input file path '{s}'", .{full_path});
 
         if (try self.parseObject(full_path)) continue;
@@ -767,10 +790,8 @@ fn parseAndForceLoadStaticArchives(self: *MachO, files: []const []const u8) !voi
     for (files) |file_name| {
         const full_path = full_path: {
             var buffer: [fs.MAX_PATH_BYTES]u8 = undefined;
-            const path = try fs.realpath(file_name, &buffer);
-            break :full_path try self.base.allocator.dupe(u8, path);
+            break :full_path try fs.realpath(file_name, &buffer);
         };
-        defer self.base.allocator.free(full_path);
         log.debug("parsing and force loading static archive '{s}'", .{full_path});
 
         if (try self.parseArchive(full_path, true)) continue;
@@ -2022,7 +2043,8 @@ fn createTentativeDefAtoms(self: *MachO) !void {
     }
 }
 
-fn resolveSymbolsInObject(self: *MachO, object: *Object, object_id: u16) !void {
+fn resolveSymbolsInObject(self: *MachO, object_id: u16) !void {
+    const object = &self.objects.items[object_id];
     log.debug("resolving symbols in '{s}'", .{object.name});
 
     for (object.symtab.items) |sym, index| {
@@ -2077,6 +2099,8 @@ fn resolveSymbolsInObject(self: *MachO, object: *Object, object_id: u16) !void {
 fn resolveSymbolsInArchives(self: *MachO) !void {
     if (self.archives.items.len == 0) return;
 
+    const gpa = self.base.allocator;
+    const cpu_arch = self.options.target.cpu_arch.?;
     var next_sym: usize = 0;
     loop: while (next_sym < self.unresolved.count()) {
         const global = self.globals.values()[self.unresolved.keys()[next_sym]];
@@ -2091,13 +2115,9 @@ fn resolveSymbolsInArchives(self: *MachO) !void {
             assert(offsets.items.len > 0);
 
             const object_id = @intCast(u16, self.objects.items.len);
-            const object = try self.objects.addOne(self.base.allocator);
-            object.* = try archive.parseObject(
-                self.base.allocator,
-                self.options.target.cpu_arch.?,
-                offsets.items[0],
-            );
-            try self.resolveSymbolsInObject(object, object_id);
+            const object = try archive.parseObject(gpa, cpu_arch, offsets.items[0]);
+            try self.objects.append(gpa, object);
+            try self.resolveSymbolsInObject(object_id);
 
             continue :loop;
         }
@@ -2398,12 +2418,10 @@ pub fn deinit(self: *MachO) void {
         object.deinit(gpa);
     }
     self.objects.deinit(gpa);
-
     for (self.archives.items) |*archive| {
         archive.deinit(gpa);
     }
     self.archives.deinit(gpa);
-
     for (self.dylibs.items) |*dylib| {
         dylib.deinit(gpa);
     }
@@ -2426,18 +2444,6 @@ pub fn deinit(self: *MachO) void {
 
     if (self.code_signature) |*csig| {
         csig.deinit(gpa);
-    }
-}
-
-pub fn closeFiles(self: *const MachO) void {
-    for (self.objects.items) |object| {
-        object.file.close();
-    }
-    for (self.archives.items) |archive| {
-        archive.file.close();
-    }
-    for (self.dylibs.items) |dylib| {
-        dylib.file.close();
     }
 }
 

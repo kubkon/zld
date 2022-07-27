@@ -8,28 +8,13 @@ const log = std.log.scoped(.macho);
 const macho = std.macho;
 const math = std.math;
 const mem = std.mem;
-const fat = @import("fat.zig");
 
+const fat = @import("fat.zig");
 const Allocator = mem.Allocator;
 const CrossTarget = std.zig.CrossTarget;
 const LibStub = @import("../tapi.zig").LibStub;
 const LoadCommand = macho.LoadCommand;
 const MachO = @import("../MachO.zig");
-
-file: fs.File,
-name: []const u8,
-
-header: ?macho.mach_header_64 = null,
-
-// The actual dylib contents we care about linking with will be embedded at
-// an offset within a file if we are linking against a fat lib
-library_offset: u64 = 0,
-
-load_commands: std.ArrayListUnmanaged(LoadCommand) = .{},
-
-symtab_cmd_index: ?u16 = null,
-dysymtab_cmd_index: ?u16 = null,
-id_cmd_index: ?u16 = null,
 
 id: ?Id = null,
 weak: bool = false,
@@ -127,79 +112,70 @@ pub const Id = struct {
 };
 
 pub fn deinit(self: *Dylib, allocator: Allocator) void {
-    for (self.load_commands.items) |*lc| {
-        lc.deinit(allocator);
-    }
-    self.load_commands.deinit(allocator);
-
     for (self.symbols.keys()) |key| {
         allocator.free(key);
     }
     self.symbols.deinit(allocator);
-
-    allocator.free(self.name);
-
     if (self.id) |*id| {
         id.deinit(allocator);
     }
 }
 
-pub fn parse(
+pub fn parseFromBinary(
     self: *Dylib,
     allocator: Allocator,
     cpu_arch: std.Target.Cpu.Arch,
     dylib_id: u16,
     dependent_libs: anytype,
+    name: []const u8,
+    data: []align(@alignOf(u64)) const u8,
 ) !void {
-    log.debug("parsing shared library '{s}'", .{self.name});
+    var stream = std.io.fixedBufferStream(data);
+    const reader = stream.reader();
 
-    self.library_offset = try fat.getLibraryOffset(self.file.reader(), cpu_arch);
+    log.debug("parsing shared library '{s}'", .{name});
 
-    try self.file.seekTo(self.library_offset);
+    const header = try reader.readStruct(macho.mach_header_64);
 
-    var reader = self.file.reader();
-    self.header = try reader.readStruct(macho.mach_header_64);
-
-    if (self.header.?.filetype != macho.MH_DYLIB) {
-        log.debug("invalid filetype: expected 0x{x}, found 0x{x}", .{ macho.MH_DYLIB, self.header.?.filetype });
+    if (header.filetype != macho.MH_DYLIB) {
+        log.debug("invalid filetype: expected 0x{x}, found 0x{x}", .{
+            macho.MH_DYLIB,
+            header.filetype,
+        });
         return error.NotDylib;
     }
 
-    const this_arch: std.Target.Cpu.Arch = try fat.decodeArch(self.header.?.cputype, true);
+    const this_arch: std.Target.Cpu.Arch = try fat.decodeArch(header.cputype, true);
 
     if (this_arch != cpu_arch) {
         log.err("mismatched cpu architecture: expected {s}, found {s}", .{ cpu_arch, this_arch });
         return error.MismatchedCpuArchitecture;
     }
 
-    try self.readLoadCommands(allocator, reader, dylib_id, dependent_libs);
-    try self.parseId(allocator);
-    try self.parseSymbols(allocator);
-}
-
-fn readLoadCommands(
-    self: *Dylib,
-    allocator: Allocator,
-    reader: anytype,
-    dylib_id: u16,
-    dependent_libs: anytype,
-) !void {
-    const should_lookup_reexports = self.header.?.flags & macho.MH_NO_REEXPORTED_DYLIBS == 0;
-
-    try self.load_commands.ensureUnusedCapacity(allocator, self.header.?.ncmds);
+    const should_lookup_reexports = header.flags & macho.MH_NO_REEXPORTED_DYLIBS == 0;
 
     var i: u16 = 0;
-    while (i < self.header.?.ncmds) : (i += 1) {
+    while (i < header.ncmds) : (i += 1) {
         var cmd = try macho.LoadCommand.read(allocator, reader);
         switch (cmd.cmd()) {
             .SYMTAB => {
-                self.symtab_cmd_index = i;
-            },
-            .DYSYMTAB => {
-                self.dysymtab_cmd_index = i;
+                const symtab = @ptrCast(
+                    [*]const macho.nlist_64,
+                    @alignCast(@alignOf(macho.nlist_64), &data[cmd.symtab.symoff]),
+                )[0..cmd.symtab.nsyms];
+                const strtab = data[cmd.symtab.stroff..][0..cmd.symtab.strsize];
+
+                for (symtab) |sym| {
+                    const add_to_symtab = sym.ext() and (sym.ext() or sym.indr());
+
+                    if (!add_to_symtab) continue;
+
+                    const sym_name = mem.sliceTo(@ptrCast([*:0]const u8, strtab.ptr + sym.n_strx), 0);
+                    try self.symbols.putNoClobber(allocator, try allocator.dupe(u8, sym_name), {});
+                }
             },
             .ID_DYLIB => {
-                self.id_cmd_index = i;
+                self.id = try Id.fromLoadCommand(allocator, cmd.dylib);
             },
             .REEXPORT_DYLIB => {
                 if (should_lookup_reexports) {
@@ -212,40 +188,10 @@ fn readLoadCommands(
                 log.debug("Unknown load command detected: 0x{x}.", .{cmd.cmd()});
             },
         }
-        self.load_commands.appendAssumeCapacity(cmd);
     }
-}
-
-fn parseId(self: *Dylib, allocator: Allocator) !void {
-    const index = self.id_cmd_index orelse {
+    if (self.id == null) {
         log.debug("no LC_ID_DYLIB load command found; using hard-coded defaults...", .{});
-        self.id = try Id.default(allocator, self.name);
-        return;
-    };
-    self.id = try Id.fromLoadCommand(allocator, self.load_commands.items[index].dylib);
-}
-
-fn parseSymbols(self: *Dylib, allocator: Allocator) !void {
-    const index = self.symtab_cmd_index orelse return;
-    const symtab_cmd = self.load_commands.items[index].symtab;
-
-    var symtab = try allocator.alloc(u8, @sizeOf(macho.nlist_64) * symtab_cmd.nsyms);
-    defer allocator.free(symtab);
-    _ = try self.file.preadAll(symtab, symtab_cmd.symoff + self.library_offset);
-    const slice = @alignCast(@alignOf(macho.nlist_64), mem.bytesAsSlice(macho.nlist_64, symtab));
-
-    var strtab = try allocator.alloc(u8, symtab_cmd.strsize);
-    defer allocator.free(strtab);
-    _ = try self.file.preadAll(strtab, symtab_cmd.stroff + self.library_offset);
-
-    for (slice) |sym| {
-        const add_to_symtab = sym.ext() and (sym.ext() or sym.indr());
-
-        if (!add_to_symtab) continue;
-
-        const sym_name = mem.sliceTo(@ptrCast([*:0]const u8, strtab.ptr + sym.n_strx), 0);
-        const name = try allocator.dupe(u8, sym_name);
-        try self.symbols.putNoClobber(allocator, name, {});
+        self.id = try Id.default(allocator, name);
     }
 }
 
@@ -357,10 +303,11 @@ pub fn parseFromStub(
     lib_stub: LibStub,
     dylib_id: u16,
     dependent_libs: anytype,
+    name: []const u8,
 ) !void {
     if (lib_stub.inner.len == 0) return error.EmptyStubFile;
 
-    log.debug("parsing shared library from stub '{s}'", .{self.name});
+    log.debug("parsing shared library from stub '{s}'", .{name});
 
     const umbrella_lib = lib_stub.inner[0];
 

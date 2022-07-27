@@ -18,17 +18,12 @@ const MachO = @import("../MachO.zig");
 const MatchingSection = MachO.MatchingSection;
 const SymbolWithLoc = MachO.SymbolWithLoc;
 
-file: fs.File,
 name: []const u8,
 mtime: u64,
-
-/// Data contents of the file. Includes sections, and data of load commands.
-/// Excludes the backing memory for the header and load commands.
-/// Initialized in `parse`.
-contents: []const u8 = undefined,
-
-file_offset: ?u32 = null,
-
+contents: struct {
+    buffer: []align(@alignOf(u64)) const u8,
+    owned: bool,
+},
 header: macho.mach_header_64 = undefined,
 
 load_commands: std.ArrayListUnmanaged(macho.LoadCommand) = .{},
@@ -49,8 +44,6 @@ dwarf_debug_line_str_index: ?u16 = null,
 dwarf_debug_ranges_index: ?u16 = null,
 
 symtab: std.ArrayListUnmanaged(macho.nlist_64) = .{},
-strtab: []const u8 = &.{},
-data_in_code_entries: []const macho.data_in_code_entry = &.{},
 
 sections_as_symbols: std.AutoHashMapUnmanaged(u16, u32) = .{},
 
@@ -65,7 +58,6 @@ pub fn deinit(self: *Object, gpa: Allocator) void {
         lc.deinit(gpa);
     }
     self.load_commands.deinit(gpa);
-    gpa.free(self.contents);
     self.symtab.deinit(gpa);
     self.sections_as_symbols.deinit(gpa);
     self.atom_by_index_table.deinit(gpa);
@@ -77,22 +69,18 @@ pub fn deinit(self: *Object, gpa: Allocator) void {
     self.managed_atoms.deinit(gpa);
 
     gpa.free(self.name);
+
+    if (self.contents.owned) {
+        gpa.free(self.contents.buffer);
+    }
 }
 
 pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch) !void {
-    const file_stat = try self.file.stat();
-    const file_size = math.cast(usize, file_stat.size) orelse return error.Overflow;
-    self.contents = try self.file.readToEndAlloc(allocator, file_size);
-
-    var stream = std.io.fixedBufferStream(self.contents);
+    var stream = std.io.fixedBufferStream(self.contents.buffer);
     const reader = stream.reader();
 
-    const file_offset = self.file_offset orelse 0;
-    if (file_offset > 0) {
-        try reader.context.seekTo(file_offset);
-    }
-
     self.header = try reader.readStruct(macho.mach_header_64);
+
     if (self.header.filetype != macho.MH_OBJECT) {
         log.debug("invalid filetype: expected 0x{x}, found 0x{x}", .{
             macho.MH_OBJECT,
@@ -123,7 +111,7 @@ pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch)
             .SEGMENT_64 => {
                 self.segment_cmd_index = i;
                 var seg = cmd.segment;
-                for (seg.sections.items) |*sect, j| {
+                for (seg.sections.items) |sect, j| {
                     const index = @intCast(u16, j);
                     const segname = sect.segName();
                     const sectname = sect.sectName();
@@ -146,19 +134,10 @@ pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch)
                             self.text_section_index = index;
                         }
                     }
-
-                    sect.offset += file_offset;
-                    if (sect.reloff > 0) {
-                        sect.reloff += file_offset;
-                    }
                 }
-
-                seg.inner.fileoff += file_offset;
             },
             .SYMTAB => {
                 self.symtab_cmd_index = i;
-                cmd.symtab.symoff += file_offset;
-                cmd.symtab.stroff += file_offset;
             },
             .DYSYMTAB => {
                 self.dysymtab_cmd_index = i;
@@ -168,7 +147,6 @@ pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch)
             },
             .DATA_IN_CODE => {
                 self.data_in_code_cmd_index = i;
-                cmd.linkedit_data.dataoff += file_offset;
             },
             else => {
                 log.debug("Unknown load command detected: 0x{x}.", .{cmd.cmd()});
@@ -297,7 +275,7 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
     // and address within.
     const context = Context{
         .symtab = self.getSourceSymtab(),
-        .strtab = self.strtab,
+        .strtab = self.getSourceStrtab(),
     };
     var sorted_all_syms = try std.ArrayList(SymbolAtIndex).initCapacity(gpa, context.symtab.len);
     defer sorted_all_syms.deinit();
@@ -356,11 +334,10 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
         const code: ?[]const u8 = if (!is_zerofill) try self.getSectionContents(sect_id) else null;
 
         // Read section's list of relocations
-        const raw_relocs = self.contents[sect.reloff..][0 .. sect.nreloc * @sizeOf(macho.relocation_info)];
-        const relocs = mem.bytesAsSlice(
-            macho.relocation_info,
-            @alignCast(@alignOf(macho.relocation_info), raw_relocs),
-        );
+        const relocs = @ptrCast(
+            [*]const macho.relocation_info,
+            @alignCast(@alignOf(macho.relocation_info), &self.contents.buffer[sect.reloff]),
+        )[0..sect.nreloc];
 
         // Symbols within this section only.
         const filtered_syms = filterSymbolsByAddress(
@@ -584,21 +561,24 @@ fn createAtomFromSubsection(
 }
 
 fn parseSymtab(self: *Object, allocator: Allocator) !void {
-    const index = self.symtab_cmd_index orelse return;
-    const symtab = self.load_commands.items[index].symtab;
-    try self.symtab.appendSlice(allocator, self.getSourceSymtab());
-    self.strtab = self.contents[symtab.stroff..][0..symtab.strsize];
+    const symtab = self.getSourceSymtab();
+    if (symtab.len == 0) return;
+    try self.symtab.appendSlice(allocator, symtab);
 }
 
 pub fn getSourceSymtab(self: Object) []const macho.nlist_64 {
     const index = self.symtab_cmd_index orelse return &[0]macho.nlist_64{};
     const symtab = self.load_commands.items[index].symtab;
-    const symtab_size = @sizeOf(macho.nlist_64) * symtab.nsyms;
-    const raw_symtab = self.contents[symtab.symoff..][0..symtab_size];
-    return mem.bytesAsSlice(
-        macho.nlist_64,
-        @alignCast(@alignOf(macho.nlist_64), raw_symtab),
-    );
+    return @ptrCast(
+        [*]const macho.nlist_64,
+        @alignCast(@alignOf(macho.nlist_64), &self.contents.buffer[symtab.symoff]),
+    )[0..symtab.nsyms];
+}
+
+pub fn getSourceStrtab(self: Object) []const u8 {
+    const index = self.symtab_cmd_index orelse return &[0]u8{};
+    const symtab = self.load_commands.items[index].symtab;
+    return self.contents.buffer[symtab.stroff..][0..symtab.strsize];
 }
 
 pub fn getSourceSymbol(self: Object, index: u32) ?macho.nlist_64 {
@@ -616,11 +596,11 @@ pub fn getSourceSection(self: Object, index: u16) macho.section_64 {
 pub fn parseDataInCode(self: Object) ?[]const macho.data_in_code_entry {
     const index = self.data_in_code_cmd_index orelse return null;
     const data_in_code = self.load_commands.items[index].linkedit_data;
-    const raw_dice = self.contents[data_in_code.dataoff..][0..data_in_code.datasize];
-    return mem.bytesAsSlice(
-        macho.data_in_code_entry,
-        @alignCast(@alignOf(macho.data_in_code_entry), raw_dice),
-    );
+    const ndice = @divExact(data_in_code.datasize, @sizeOf(macho.data_in_code_entry));
+    return @ptrCast(
+        [*]const macho.data_in_code_entry,
+        @alignCast(@alignOf(macho.data_in_code_entry), &self.contents.buffer[data_in_code.dataoff]),
+    )[0..ndice];
 }
 
 pub fn getSectionContents(self: Object, index: u16) error{Overflow}![]const u8 {
@@ -632,12 +612,13 @@ pub fn getSectionContents(self: Object, index: u16) error{Overflow}![]const u8 {
         sect.offset,
         sect.offset + sect.size,
     });
-    return self.contents[sect.offset..][0..size];
+    return self.contents.buffer[sect.offset..][0..size];
 }
 
 pub fn getString(self: Object, off: u32) []const u8 {
-    assert(off < self.strtab.len);
-    return mem.sliceTo(@ptrCast([*:0]const u8, self.strtab.ptr + off), 0);
+    const strtab = self.getSourceStrtab();
+    assert(off < strtab.len);
+    return mem.sliceTo(@ptrCast([*:0]const u8, strtab.ptr + off), 0);
 }
 
 pub fn getAtomForSymbol(self: Object, sym_index: u32) ?*Atom {

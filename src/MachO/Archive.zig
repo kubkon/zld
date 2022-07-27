@@ -6,19 +6,13 @@ const fs = std.fs;
 const log = std.log.scoped(.macho);
 const macho = std.macho;
 const mem = std.mem;
-const fat = @import("fat.zig");
 
 const Allocator = mem.Allocator;
 const Object = @import("Object.zig");
 
-file: fs.File,
 name: []const u8,
-
-header: ?ar_hdr = null,
-
-// The actual contents we care about linking with will be embedded at
-// an offset within a file if we are linking against a fat lib
-library_offset: u64 = 0,
+contents: []align(@alignOf(u64)) const u8,
+header: ar_hdr = undefined,
 
 /// Parsed table of contents.
 /// Each symbol name points to a list of all definition
@@ -101,12 +95,12 @@ pub fn deinit(self: *Archive, allocator: Allocator) void {
     }
     self.toc.deinit(allocator);
     allocator.free(self.name);
+    allocator.free(self.contents);
 }
 
-pub fn parse(self: *Archive, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch) !void {
-    const reader = self.file.reader();
-    self.library_offset = try fat.getLibraryOffset(reader, cpu_arch);
-    try self.file.seekTo(self.library_offset);
+pub fn parse(self: *Archive, allocator: Allocator) !void {
+    var stream = std.io.fixedBufferStream(self.contents);
+    const reader = stream.reader();
 
     const magic = try reader.readBytesNoEof(SARMAG);
     if (!mem.eql(u8, &magic, ARMAG)) {
@@ -115,17 +109,19 @@ pub fn parse(self: *Archive, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch
     }
 
     self.header = try reader.readStruct(ar_hdr);
-    if (!mem.eql(u8, &self.header.?.ar_fmag, ARFMAG)) {
-        log.debug("invalid header delimiter: expected '{s}', found '{s}'", .{ ARFMAG, self.header.?.ar_fmag });
+    if (!mem.eql(u8, &self.header.ar_fmag, ARFMAG)) {
+        log.debug("invalid header delimiter: expected '{s}', found '{s}'", .{
+            ARFMAG,
+            self.header.ar_fmag,
+        });
         return error.NotArchive;
     }
 
-    var embedded_name = try parseName(allocator, self.header.?, reader);
+    var embedded_name = try parseName(allocator, self.header, reader);
     log.debug("parsing archive '{s}' at '{s}'", .{ embedded_name, self.name });
     defer allocator.free(embedded_name);
 
     try self.parseTableOfContents(allocator, reader);
-    try reader.context.seekTo(0);
 }
 
 fn parseName(allocator: Allocator, header: ar_hdr, reader: anytype) ![]u8 {
@@ -188,37 +184,48 @@ fn parseTableOfContents(self: *Archive, allocator: Allocator, reader: anytype) !
     }
 }
 
-pub fn parseObject(self: Archive, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch, offset: u32) !Object {
-    const reader = self.file.reader();
-    try reader.context.seekTo(offset + self.library_offset);
+pub fn parseObject(
+    self: Archive,
+    gpa: Allocator,
+    cpu_arch: std.Target.Cpu.Arch,
+    offset: u32,
+) !Object {
+    var stream = std.io.fixedBufferStream(self.contents);
+    const reader = stream.reader();
+    try stream.seekTo(offset);
 
     const object_header = try reader.readStruct(ar_hdr);
+    const object_start = try stream.getPos();
 
     if (!mem.eql(u8, &object_header.ar_fmag, ARFMAG)) {
         log.err("invalid header delimiter: expected '{s}', found '{s}'", .{ ARFMAG, object_header.ar_fmag });
         return error.MalformedArchive;
     }
 
-    const object_name = try parseName(allocator, object_header, reader);
-    defer allocator.free(object_name);
+    const object_name = try parseName(gpa, object_header, reader);
+    defer gpa.free(object_name);
 
     log.debug("extracting object '{s}' from archive '{s}'", .{ object_name, self.name });
 
     const name = name: {
         var buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
         const path = try std.os.realpath(self.name, &buffer);
-        break :name try std.fmt.allocPrint(allocator, "{s}({s})", .{ path, object_name });
+        break :name try std.fmt.allocPrint(gpa, "{s}({s})", .{ path, object_name });
     };
+    const object_offset = try stream.getPos();
+    const object_size = (try object_header.size()) - (object_offset - object_start);
+    const contents = self.contents[object_offset..][0..object_size];
 
     var object = Object{
-        .file = try fs.cwd().openFile(self.name, .{}),
         .name = name,
-        .file_offset = @intCast(u32, try reader.context.getPos()),
-        .mtime = try self.header.?.date(),
+        .mtime = try self.header.date(),
+        .contents = .{
+            .buffer = contents,
+            .owned = false,
+        },
     };
 
-    try object.parse(allocator, cpu_arch);
-    try reader.context.seekTo(0);
+    try object.parse(gpa, cpu_arch);
 
     return object;
 }

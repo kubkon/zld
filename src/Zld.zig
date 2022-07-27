@@ -113,7 +113,7 @@ pub fn flush(base: *Zld) !void {
 fn closeFiles(base: *const Zld) void {
     switch (base.tag) {
         .elf => @fieldParentPtr(Elf, "base", base).closeFiles(),
-        .macho => @fieldParentPtr(MachO, "base", base).closeFiles(),
+        .macho => {},
         .coff => @fieldParentPtr(Coff, "base", base).closeFiles(),
     }
     base.file.close();
