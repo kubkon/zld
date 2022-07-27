@@ -4056,6 +4056,7 @@ pub fn generateSymbolStabs(
 
     const gpa = self.base.allocator;
     var debug_info = try object.parseDwarfInfo();
+    defer debug_info.deinit(gpa);
     try dwarf.openDwarfDebugInfo(&debug_info, gpa);
 
     // We assume there is only one CU.

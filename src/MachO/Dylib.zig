@@ -13,7 +13,7 @@ const fat = @import("fat.zig");
 const Allocator = mem.Allocator;
 const CrossTarget = std.zig.CrossTarget;
 const LibStub = @import("../tapi.zig").LibStub;
-const LoadCommand = macho.LoadCommand;
+const LoadCommandIterator = @import("../mm.zig").LoadCommandIterator;
 const MachO = @import("../MachO.zig");
 
 id: ?Id = null,
@@ -39,16 +39,12 @@ pub const Id = struct {
         };
     }
 
-    pub fn fromLoadCommand(allocator: Allocator, lc: macho.GenericCommandWithData(macho.dylib_command)) !Id {
-        const dylib = lc.inner.dylib;
-        const dylib_name = @ptrCast([*:0]const u8, lc.data[dylib.name - @sizeOf(macho.dylib_command) ..]);
-        const name = try allocator.dupe(u8, mem.sliceTo(dylib_name, 0));
-
+    pub fn fromLoadCommand(allocator: Allocator, lc: macho.dylib_command, name: []const u8) !Id {
         return Id{
-            .name = name,
-            .timestamp = dylib.timestamp,
-            .current_version = dylib.current_version,
-            .compatibility_version = dylib.compatibility_version,
+            .name = try allocator.dupe(u8, name),
+            .timestamp = lc.dylib.timestamp,
+            .current_version = lc.dylib.current_version,
+            .compatibility_version = lc.dylib.compatibility_version,
         };
     }
 
@@ -153,21 +149,22 @@ pub fn parseFromBinary(
     }
 
     const should_lookup_reexports = header.flags & macho.MH_NO_REEXPORTED_DYLIBS == 0;
-
-    var i: u16 = 0;
-    while (i < header.ncmds) : (i += 1) {
-        var cmd = try macho.LoadCommand.read(allocator, reader);
+    var it = LoadCommandIterator{
+        .ncmds = header.ncmds,
+        .buffer = data[@sizeOf(macho.mach_header_64)..][0..header.sizeofcmds],
+    };
+    while (it.next()) |cmd| {
         switch (cmd.cmd()) {
             .SYMTAB => {
+                const symtab_cmd = cmd.cast(macho.symtab_command).?;
                 const symtab = @ptrCast(
                     [*]const macho.nlist_64,
-                    @alignCast(@alignOf(macho.nlist_64), &data[cmd.symtab.symoff]),
-                )[0..cmd.symtab.nsyms];
-                const strtab = data[cmd.symtab.stroff..][0..cmd.symtab.strsize];
+                    @alignCast(@alignOf(macho.nlist_64), &data[symtab_cmd.symoff]),
+                )[0..symtab_cmd.nsyms];
+                const strtab = data[symtab_cmd.stroff..][0..symtab_cmd.strsize];
 
                 for (symtab) |sym| {
-                    const add_to_symtab = sym.ext() and (sym.ext() or sym.indr());
-
+                    const add_to_symtab = sym.ext() and (sym.sect() or sym.indr());
                     if (!add_to_symtab) continue;
 
                     const sym_name = mem.sliceTo(@ptrCast([*:0]const u8, strtab.ptr + sym.n_strx), 0);
@@ -175,20 +172,27 @@ pub fn parseFromBinary(
                 }
             },
             .ID_DYLIB => {
-                self.id = try Id.fromLoadCommand(allocator, cmd.dylib);
+                self.id = try Id.fromLoadCommand(
+                    allocator,
+                    cmd.cast(macho.dylib_command).?,
+                    cmd.getDylibPathName(),
+                );
             },
             .REEXPORT_DYLIB => {
                 if (should_lookup_reexports) {
                     // Parse install_name to dependent dylib.
-                    var id = try Id.fromLoadCommand(allocator, cmd.dylib);
+                    var id = try Id.fromLoadCommand(
+                        allocator,
+                        cmd.cast(macho.dylib_command).?,
+                        cmd.getDylibPathName(),
+                    );
                     try dependent_libs.writeItem(.{ .id = id, .parent = dylib_id });
                 }
             },
-            else => {
-                log.debug("Unknown load command detected: 0x{x}.", .{cmd.cmd()});
-            },
+            else => {},
         }
     }
+
     if (self.id == null) {
         log.debug("no LC_ID_DYLIB load command found; using hard-coded defaults...", .{});
         self.id = try Id.default(allocator, name);

@@ -1,6 +1,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const macho = std.macho;
+const mem = std.mem;
 
 pub const LoadCommandIterator = struct {
     ncmds: usize,
@@ -33,6 +34,13 @@ pub const LoadCommandIterator = struct {
                 @alignCast(@alignOf(macho.section_64), &data[0]),
             )[0..segment.nsects];
             return sections;
+        }
+
+        /// Asserts LoadCommand is of type macho.dylib_command.
+        pub fn getDylibPathName(lc: LoadCommand) []const u8 {
+            const dylib = lc.cast(macho.dylib_command).?;
+            const data = lc.data[dylib.dylib.name..];
+            return mem.sliceTo(data, 0);
         }
     };
 
