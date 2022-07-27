@@ -4045,72 +4045,6 @@ pub fn findFirst(comptime T: type, haystack: []const T, start: usize, predicate:
     return i;
 }
 
-const DebugInfo = struct {
-    inner: dwarf.DwarfInfo,
-    debug_info: []const u8,
-    debug_abbrev: []const u8,
-    debug_str: []const u8,
-    debug_line: []const u8,
-    debug_line_str: []const u8,
-    debug_ranges: []const u8,
-
-    pub fn parse(allocator: Allocator, object: Object) !?DebugInfo {
-        var debug_info = blk: {
-            const index = object.dwarf_debug_info_index orelse return null;
-            break :blk try object.getSectionContents(index);
-        };
-        var debug_abbrev = blk: {
-            const index = object.dwarf_debug_abbrev_index orelse return null;
-            break :blk try object.getSectionContents(index);
-        };
-        var debug_str = blk: {
-            const index = object.dwarf_debug_str_index orelse return null;
-            break :blk try object.getSectionContents(index);
-        };
-        var debug_line = blk: {
-            const index = object.dwarf_debug_line_index orelse return null;
-            break :blk try object.getSectionContents(index);
-        };
-        var debug_line_str = blk: {
-            if (object.dwarf_debug_line_str_index) |ind| {
-                break :blk try object.getSectionContents(ind);
-            }
-            break :blk &[0]u8{};
-        };
-        var debug_ranges = blk: {
-            if (object.dwarf_debug_ranges_index) |ind| {
-                break :blk try object.getSectionContents(ind);
-            }
-            break :blk &[0]u8{};
-        };
-
-        var inner: dwarf.DwarfInfo = .{
-            .endian = .Little,
-            .debug_info = debug_info,
-            .debug_abbrev = debug_abbrev,
-            .debug_str = debug_str,
-            .debug_line = debug_line,
-            .debug_line_str = debug_line_str,
-            .debug_ranges = debug_ranges,
-        };
-        try dwarf.openDwarfDebugInfo(&inner, allocator);
-
-        return DebugInfo{
-            .inner = inner,
-            .debug_info = debug_info,
-            .debug_abbrev = debug_abbrev,
-            .debug_str = debug_str,
-            .debug_line = debug_line,
-            .debug_line_str = debug_line_str,
-            .debug_ranges = debug_ranges,
-        };
-    }
-
-    pub fn deinit(self: *DebugInfo, allocator: Allocator) void {
-        self.inner.deinit(allocator);
-    }
-};
-
 pub fn generateSymbolStabs(
     self: *MachO,
     object: Object,
@@ -4118,15 +4052,14 @@ pub fn generateSymbolStabs(
 ) !void {
     assert(!self.options.strip);
 
-    const gpa = self.base.allocator;
-
     log.debug("parsing debug info in '{s}'", .{object.name});
 
-    var debug_info = (try DebugInfo.parse(gpa, object)) orelse return;
-    defer debug_info.deinit(gpa);
+    const gpa = self.base.allocator;
+    var debug_info = try object.parseDwarfInfo();
+    try dwarf.openDwarfDebugInfo(&debug_info, gpa);
 
     // We assume there is only one CU.
-    const compile_unit = debug_info.inner.findCompileUnit(0x0) catch |err| switch (err) {
+    const compile_unit = debug_info.findCompileUnit(0x0) catch |err| switch (err) {
         error.MissingDebugInfo => {
             // TODO audit cases with missing debug info and audit our dwarf.zig module.
             log.debug("invalid or missing debug info in {s}; skipping", .{object.name});
@@ -4134,8 +4067,8 @@ pub fn generateSymbolStabs(
         },
         else => |e| return e,
     };
-    const tu_name = try compile_unit.die.getAttrString(&debug_info.inner, dwarf.AT.name);
-    const tu_comp_dir = try compile_unit.die.getAttrString(&debug_info.inner, dwarf.AT.comp_dir);
+    const tu_name = try compile_unit.die.getAttrString(&debug_info, dwarf.AT.name);
+    const tu_comp_dir = try compile_unit.die.getAttrString(&debug_info, dwarf.AT.comp_dir);
 
     // Open scope
     try locals.ensureUnusedCapacity(3);
@@ -4198,7 +4131,7 @@ pub fn generateSymbolStabs(
 fn generateSymbolStabsForSymbol(
     self: *MachO,
     sym_loc: SymbolWithLoc,
-    debug_info: DebugInfo,
+    debug_info: dwarf.DwarfInfo,
     buf: *[4]macho.nlist_64,
 ) ![]const macho.nlist_64 {
     const gpa = self.base.allocator;
@@ -4213,7 +4146,7 @@ fn generateSymbolStabsForSymbol(
     const source_sym = object.getSourceSymbol(sym_loc.sym_index) orelse return buf[0..0];
     const size: ?u64 = size: {
         if (source_sym.tentative()) break :size null;
-        for (debug_info.inner.func_list.items) |func| {
+        for (debug_info.func_list.items) |func| {
             if (func.pc_range) |range| {
                 if (source_sym.n_value >= range.start and source_sym.n_value < range.end) {
                     break :size range.end - range.start;

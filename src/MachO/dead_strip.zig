@@ -179,7 +179,7 @@ fn prune(arena: Allocator, alive: std.AutoHashMap(*Atom, void), macho_file: *Mac
         loop = false;
 
         for (macho_file.objects.items) |object| {
-            for (object.getSourceSymtab()) |_, source_index| {
+            for (object.in_symtab) |_, source_index| {
                 const atom = object.getAtomForSymbol(@intCast(u32, source_index)) orelse continue;
                 if (alive.contains(atom)) continue;
 
