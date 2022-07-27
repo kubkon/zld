@@ -6,12 +6,13 @@ const mem = std.mem;
 const Allocator = mem.Allocator;
 const Zld = @import("Zld.zig");
 
-var gpa_allocator = std.heap.GeneralPurposeAllocator(.{}){};
-const gpa = gpa_allocator.allocator();
+const gpa = std.heap.c_allocator;
 
 const usage =
     \\zld is a generic linker driver.
-    \\Call ld.zld (ELF), ld64.zld (MachO), link-zld (COFF).
+    \\Call
+    \\  ELF: ld.zld, ld
+    \\  MachO: ld64.zld, ld64
 ;
 
 var log_scopes: std.ArrayList([]const u8) = std.ArrayList([]const u8).init(gpa);
@@ -56,9 +57,9 @@ pub fn main() !void {
 
     const cmd = std.fs.path.basename(all_args[0]);
     const tag: Zld.Tag = blk: {
-        if (mem.eql(u8, cmd, "ld.zld")) {
+        if (mem.eql(u8, cmd, "ld.zld") or mem.eql(u8, cmd, "ld")) {
             break :blk .elf;
-        } else if (mem.eql(u8, cmd, "ld64.zld")) {
+        } else if (mem.eql(u8, cmd, "ld64.zld") or mem.eql(u8, cmd, "ld64")) {
             break :blk .macho;
         } else if (mem.eql(u8, cmd, "link-zld")) {
             break :blk .coff;
@@ -69,6 +70,7 @@ pub fn main() !void {
     };
     return Zld.main(tag, .{
         .gpa = gpa,
+        .cmd = cmd,
         .args = all_args[1..],
         .log_scopes = &log_scopes,
     });

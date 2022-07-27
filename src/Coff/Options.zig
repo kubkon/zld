@@ -12,7 +12,7 @@ const Coff = @import("../Coff.zig");
 const Zld = @import("../Zld.zig");
 
 const usage =
-    \\Usage: link-zld [files...]
+    \\Usage: {s} [files...]
     \\
     \\General Options:
     \\-l[name]                      Specify library to link against
@@ -31,7 +31,7 @@ lib_dirs: []const []const u8,
 
 pub fn parseArgs(arena: Allocator, ctx: Zld.MainCtx) !Options {
     if (ctx.args.len == 0) {
-        ctx.printSuccess("{s}", .{usage});
+        ctx.printSuccess(usage, .{ctx.cmd});
     }
 
     var positionals = std.ArrayList(Zld.LinkObject).init(arena);
@@ -54,7 +54,7 @@ pub fn parseArgs(arena: Allocator, ctx: Zld.MainCtx) !Options {
 
     while (args_iter.next()) |arg| {
         if (mem.eql(u8, arg, "--help") or mem.eql(u8, arg, "-h")) {
-            ctx.printSuccess("{s}", .{usage});
+            ctx.printSuccess(usage, .{ctx.cmd});
         } else if (mem.eql(u8, arg, "--debug-log")) {
             const scope = args_iter.next() orelse ctx.printFailure("Expected log scope after {s}", .{arg});
             try ctx.log_scopes.append(scope);

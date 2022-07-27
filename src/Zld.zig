@@ -50,6 +50,7 @@ pub const Options = union {
 
 pub const MainCtx = struct {
     gpa: Allocator,
+    cmd: []const u8,
     args: []const []const u8,
     log_scopes: *std.ArrayList([]const u8),
 
