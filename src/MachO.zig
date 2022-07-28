@@ -335,26 +335,6 @@ pub fn flush(self: *MachO) !void {
         }
     }
 
-    // rpaths
-    var rpath_table = std.StringArrayHashMap(void).init(arena);
-    for (self.options.rpath_list) |rpath| {
-        if (rpath_table.contains(rpath)) continue;
-        const cmdsize = @intCast(u32, mem.alignForwardGeneric(
-            u64,
-            @sizeOf(macho.rpath_command) + rpath.len + 1,
-            @sizeOf(u64),
-        ));
-        var rpath_cmd = macho.emptyGenericCommandWithData(macho.rpath_command{
-            .cmdsize = cmdsize,
-            .path = @sizeOf(macho.rpath_command),
-        });
-        rpath_cmd.data = try gpa.alloc(u8, cmdsize - rpath_cmd.inner.path);
-        mem.set(u8, rpath_cmd.data, 0);
-        mem.copy(u8, rpath_cmd.data, rpath);
-        try self.load_commands.append(gpa, .{ .rpath = rpath_cmd });
-        try rpath_table.putNoClobber(rpath, {});
-    }
-
     var dependent_libs = std.fifo.LinearFifo(struct {
         id: Dylib.Id,
         parent: u16,
@@ -429,6 +409,7 @@ pub fn flush(self: *MachO) !void {
     try writeDylinkerLC(&ncmds, lc_writer);
     try self.writeMainLC(&ncmds, lc_writer);
     try self.writeDylibIdLC(&ncmds, lc_writer);
+    try self.writeRpathLCs(&ncmds, lc_writer);
 
     {
         try lc_writer.writeStruct(macho.source_version_command{
@@ -2449,6 +2430,33 @@ fn writeDylibIdLC(self: *MachO, ncmds: *u32, lc_writer: anytype) !void {
         .current_version = curr.major << 16 | curr.minor << 8 | curr.patch,
         .compatibility_version = compat.major << 16 | compat.minor << 8 | compat.patch,
     }, ncmds, lc_writer);
+}
+
+fn writeRpathLCs(self: *MachO, ncmds: *u32, lc_writer: anytype) !void {
+    const gpa = self.base.allocator;
+    var rpath_table = std.StringArrayHashMap(void).init(gpa);
+    defer rpath_table.deinit();
+
+    for (self.options.rpath_list) |rpath| {
+        if (rpath_table.contains(rpath)) continue;
+        const rpath_len = rpath.len + 1;
+        const cmdsize = @intCast(u32, mem.alignForwardGeneric(
+            u64,
+            @sizeOf(macho.rpath_command) + rpath_len,
+            @sizeOf(u64),
+        ));
+        try lc_writer.writeStruct(macho.rpath_command{
+            .cmdsize = cmdsize,
+            .path = @sizeOf(macho.rpath_command),
+        });
+        try lc_writer.writeAll(rpath);
+        try lc_writer.writeByte(0);
+        const padding = cmdsize - @sizeOf(macho.rpath_command) - rpath_len;
+        if (padding > 0) {
+            try lc_writer.writeByteNTimes(0, padding);
+        }
+        ncmds.* += 1;
+    }
 }
 
 fn writeBuildVersionLC(self: *MachO, ncmds: *u32, lc_writer: anytype) !void {
