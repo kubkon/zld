@@ -272,13 +272,13 @@ pub fn parseRelocs(self: *Atom, relocs: []const macho.relocation_info, context: 
                 const sect_id = @intCast(u16, rel.r_symbolnum - 1);
                 const sym_index = object.sections_as_symbols.get(sect_id) orelse blk: {
                     const sect = object.getSourceSection(sect_id);
-                    const match = (try context.macho_file.getMatchingSection(sect)) orelse
+                    const match = (try context.macho_file.getOutputSection(sect)) orelse
                         unreachable;
                     const sym_index = @intCast(u32, object.symtab.items.len);
                     try object.symtab.append(gpa, .{
                         .n_strx = 0,
                         .n_type = macho.N_SECT,
-                        .n_sect = context.macho_file.getSectionOrdinal(match),
+                        .n_sect = match + 1,
                         .n_desc = 0,
                         .n_value = sect.addr,
                     });
@@ -422,8 +422,8 @@ fn addPtrBindingOrRebase(
         });
     } else {
         const source_sym = self.getSymbol(context.macho_file);
-        const match = context.macho_file.getMatchingSectionFromOrdinal(source_sym.n_sect);
-        const sect = context.macho_file.getSection(match);
+        const sect = context.macho_file.sections.items[source_sym.n_sect - 1];
+        const seg_id = context.macho_file.getSegmentId(sect);
         const sect_type = sect.type_();
 
         const should_rebase = rebase: {
@@ -433,12 +433,12 @@ fn addPtrBindingOrRebase(
             // that the segment is writable should be enough here.
             const is_right_segment = blk: {
                 if (context.macho_file.data_segment_cmd_index) |idx| {
-                    if (match.seg == idx) {
+                    if (seg_id == idx) {
                         break :blk true;
                     }
                 }
                 if (context.macho_file.data_const_segment_cmd_index) |idx| {
-                    if (match.seg == idx) {
+                    if (seg_id == idx) {
                         break :blk true;
                     }
                 }
@@ -525,8 +525,7 @@ pub fn resolveRelocs(self: *Atom, macho_file: *MachO) !void {
         };
         const is_tlv = is_tlv: {
             const source_sym = self.getSymbol(macho_file);
-            const match = macho_file.getMatchingSectionFromOrdinal(source_sym.n_sect);
-            const sect = macho_file.getSection(match);
+            const sect = macho_file.sections.items[source_sym.n_sect - 1];
             break :is_tlv sect.type_() == macho.S_THREAD_LOCAL_VARIABLES;
         };
         const target_addr = blk: {
@@ -568,10 +567,7 @@ pub fn resolveRelocs(self: *Atom, macho_file: *MachO) !void {
                         return error.FailedToResolveRelocationTarget;
                     }
                 };
-                break :base_address macho_file.getSection(.{
-                    .seg = macho_file.data_segment_cmd_index.?,
-                    .sect = sect_id,
-                }).addr;
+                break :base_address macho_file.sections.items[sect_id].addr;
             } else 0;
             break :blk target_sym.n_value - base_address;
         };

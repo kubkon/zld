@@ -17,7 +17,6 @@ const Allocator = mem.Allocator;
 const Atom = @import("Atom.zig");
 const LoadCommandIterator = @import("../mm.zig").LoadCommandIterator;
 const MachO = @import("../MachO.zig");
-const MatchingSection = MachO.MatchingSection;
 const SymbolWithLoc = MachO.SymbolWithLoc;
 
 name: []const u8,
@@ -268,15 +267,15 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
         log.debug("splitting section '{s},{s}' into atoms", .{ sect.segName(), sect.sectName() });
 
         // Get matching segment/section in the final artifact.
-        const match = (try macho_file.getMatchingSection(sect)) orelse {
+        const match = (try macho_file.getOutputSection(sect)) orelse {
             log.debug("  unhandled section", .{});
             continue;
         };
 
         log.debug("  output sect({d}, '{s},{s}')", .{
-            macho_file.getSectionOrdinal(match),
-            macho_file.getSection(match).segName(),
-            macho_file.getSection(match).sectName(),
+            match + 1,
+            macho_file.sections.items[match].segName(),
+            macho_file.sections.items[match].sectName(),
         });
 
         const cpu_arch = macho_file.options.target.cpu_arch.?;
@@ -313,7 +312,7 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
                     try self.symtab.append(gpa, .{
                         .n_strx = 0,
                         .n_type = macho.N_SECT,
-                        .n_sect = macho_file.getSectionOrdinal(match),
+                        .n_sect = match + 1,
                         .n_desc = 0,
                         .n_value = sect.addr,
                     });
@@ -402,7 +401,7 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
                         try self.symtab.append(gpa, .{
                             .n_strx = 0,
                             .n_type = macho.N_SECT,
-                            .n_sect = macho_file.getSectionOrdinal(match),
+                            .n_sect = match + 1,
                             .n_desc = 0,
                             .n_value = addr,
                         });
@@ -427,7 +426,7 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
                 try self.symtab.append(gpa, .{
                     .n_strx = 0,
                     .n_type = macho.N_SECT,
-                    .n_sect = macho_file.getSectionOrdinal(match),
+                    .n_sect = match + 1,
                     .n_desc = 0,
                     .n_value = sect.addr,
                 });
@@ -461,21 +460,21 @@ fn createAtomFromSubsection(
     code: ?[]const u8,
     relocs: []const macho.relocation_info,
     indexes: []const SymbolAtIndex,
-    match: MatchingSection,
+    match: u8,
     sect: macho.section_64,
 ) !*Atom {
     const gpa = macho_file.base.allocator;
     const sym = self.symtab.items[sym_index];
     const atom = try MachO.createEmptyAtom(gpa, sym_index, size, alignment);
     atom.file = object_id;
-    self.symtab.items[sym_index].n_sect = macho_file.getSectionOrdinal(match);
+    self.symtab.items[sym_index].n_sect = match + 1;
 
     log.debug("creating ATOM(%{d}, '{s}') in sect({d}, '{s},{s}') in object({d})", .{
         sym_index,
         self.getString(sym.n_strx),
-        macho_file.getSectionOrdinal(match),
-        macho_file.getSection(match).segName(),
-        macho_file.getSection(match).sectName(),
+        match + 1,
+        macho_file.sections.items[match].segName(),
+        macho_file.sections.items[match].sectName(),
         object_id,
     });
 
@@ -503,7 +502,7 @@ fn createAtomFromSubsection(
     try atom.contained.ensureTotalCapacity(gpa, indexes.len);
     for (indexes) |inner_sym_index| {
         const inner_sym = &self.symtab.items[inner_sym_index.index];
-        inner_sym.n_sect = macho_file.getSectionOrdinal(match);
+        inner_sym.n_sect = match + 1;
         atom.contained.appendAssumeCapacity(.{
             .sym_index = inner_sym_index.index,
             .offset = inner_sym.n_value - sym.n_value,
