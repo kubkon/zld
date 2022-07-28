@@ -44,9 +44,6 @@ options: Options,
 /// For x86_64 that's 4KB, whereas for aarch64, that's 16KB.
 page_size: u16,
 
-/// Code signature (if any)
-code_signature: ?CodeSignature = null,
-
 objects: std.ArrayListUnmanaged(Object) = .{},
 archives: std.ArrayListUnmanaged(Archive) = .{},
 dylibs: std.ArrayListUnmanaged(Dylib) = .{},
@@ -197,12 +194,7 @@ pub fn openPath(allocator: Allocator, options: Options) !*MachO {
 fn createEmpty(gpa: Allocator, options: Options) !*MachO {
     const self = try gpa.create(MachO);
     const cpu_arch = options.target.cpu_arch.?;
-    const os_tag = options.target.os_tag.?;
-    const abi = options.target.abi.?;
     const page_size: u16 = if (cpu_arch == .aarch64) 0x4000 else 0x1000;
-    // Adhoc code signature is required when targeting aarch64-macos either directly or indirectly via the simulator
-    // ABI such as aarch64-ios-simulator, etc.
-    const requires_adhoc_codesig = cpu_arch == .aarch64 and (os_tag == .macos or abi == .simulator);
 
     self.* = .{
         .base = .{
@@ -212,10 +204,6 @@ fn createEmpty(gpa: Allocator, options: Options) !*MachO {
         },
         .options = options,
         .page_size = page_size,
-        .code_signature = if (requires_adhoc_codesig)
-            CodeSignature.init(page_size)
-        else
-            null,
     };
 
     return self;
@@ -228,6 +216,9 @@ pub fn flush(self: *MachO) !void {
     const arena = arena_allocator.allocator();
 
     const syslibroot = self.options.syslibroot;
+    const cpu_arch = self.options.target.cpu_arch.?;
+    const os_tag = self.options.target.os_tag.?;
+    const abi = self.options.target.abi.?;
 
     try self.strtab.buffer.append(gpa, 0);
     try self.populateMetadata();
@@ -364,19 +355,6 @@ pub fn flush(self: *MachO) !void {
         try rpath_table.putNoClobber(rpath, {});
     }
 
-    // code signature and entitlements
-    if (self.options.entitlements) |path| {
-        if (self.code_signature) |*csig| {
-            try csig.addEntitlements(gpa, path);
-            csig.code_directory.ident = self.options.emit.sub_path;
-        } else {
-            var csig = CodeSignature.init(self.page_size);
-            try csig.addEntitlements(gpa, path);
-            csig.code_directory.ident = self.options.emit.sub_path;
-            self.code_signature = csig;
-        }
-    }
-
     var dependent_libs = std.fifo.LinearFifo(struct {
         id: Dylib.Id,
         parent: u16,
@@ -474,23 +452,34 @@ pub fn flush(self: *MachO) !void {
 
     try self.writeLoadDylibLCs(&ncmds, lc_writer);
 
-    const offset: ?u32 = if (self.code_signature) |*csig| blk: {
-        csig.clear(gpa);
-        csig.code_directory.ident = self.options.emit.sub_path;
+    const requires_codesig = blk: {
+        if (self.options.entitlements) |_| break :blk true;
+        if (cpu_arch == .aarch64 and (os_tag == .macos or abi == .simulator)) break :blk true;
+        break :blk false;
+    };
+    var codesig_offset: ?u32 = null;
+    var codesig: ?CodeSignature = if (requires_codesig) blk: {
         // Preallocate space for the code signature.
         // We need to do this at this stage so that we have the load commands with proper values
         // written out to the file.
         // The most important here is to have the correct vm and filesize of the __LINKEDIT segment
         // where the code signature goes into.
-        break :blk try self.writeCodeSignaturePadding(csig, &ncmds, lc_writer);
+        var codesig = CodeSignature.init(self.page_size);
+        codesig.code_directory.ident = self.options.emit.sub_path;
+        if (self.options.entitlements) |path| {
+            try codesig.addEntitlements(gpa, path);
+        }
+        codesig_offset = try self.writeCodeSignaturePadding(&codesig, &ncmds, lc_writer);
+        break :blk codesig;
     } else null;
+    defer if (codesig) |*csig| csig.deinit(gpa);
 
     var sizeofcmds = try self.writeSegmentHeaders(&ncmds);
     try self.base.file.pwriteAll(lc_buffer.items, @sizeOf(macho.mach_header_64) + sizeofcmds);
     try self.writeHeader(ncmds, @intCast(u32, lc_buffer.items.len + sizeofcmds));
 
-    if (self.code_signature) |*csig| {
-        try self.writeCodeSignature(csig, offset.?); // code signing always comes last
+    if (codesig) |*csig| {
+        try self.writeCodeSignature(csig, codesig_offset.?); // code signing always comes last
         const dir = self.options.emit.directory;
         const path = self.options.emit.sub_path;
         try dir.copyFile(path, dir, path, .{});
@@ -2562,10 +2551,6 @@ pub fn deinit(self: *MachO) void {
     self.managed_atoms.deinit(gpa);
     self.atoms.deinit(gpa);
     self.atom_by_index_table.deinit(gpa);
-
-    if (self.code_signature) |*csig| {
-        csig.deinit(gpa);
-    }
 }
 
 fn populateMetadata(self: *MachO) !void {
