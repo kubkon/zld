@@ -83,7 +83,10 @@ pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch)
         },
     };
     if (this_arch != cpu_arch) {
-        log.err("mismatched cpu architecture: expected {s}, found {s}", .{ cpu_arch, this_arch });
+        log.err("mismatched cpu architecture: expected {s}, found {s}", .{
+            @tagName(cpu_arch),
+            @tagName(this_arch),
+        });
         return error.MismatchedCpuArchitecture;
     }
 

@@ -2022,7 +2022,7 @@ fn createTentativeDefAtoms(self: *MachO) !void {
         const sym = self.getSymbolPtr(global);
         if (!sym.tentative()) continue;
 
-        log.debug("creating tentative definition for ATOM(%{d}, '{s}') in object({d})", .{
+        log.debug("creating tentative definition for ATOM(%{d}, '{s}') in object({?})", .{
             global.sym_index, self.getSymbolName(global), global.file,
         });
 
@@ -2919,7 +2919,7 @@ fn writeAtoms(self: *MachO) !void {
                 break :blk math.cast(usize, size) orelse return error.Overflow;
             } else 0;
 
-            log.debug("  (adding ATOM(%{d}, '{s}') from object({d}) to buffer)", .{
+            log.debug("  (adding ATOM(%{d}, '{s}') from object({?}) to buffer)", .{
                 atom.sym_index,
                 atom.getName(self),
                 atom.file,
@@ -4328,7 +4328,7 @@ fn logAtoms(self: *MachO) void {
 pub fn logAtom(self: *MachO, atom: *const Atom) void {
     const sym = atom.getSymbol(self);
     const sym_name = atom.getName(self);
-    log.debug("  ATOM(%{d}, '{s}') @ {x} (sizeof({x}), alignof({x})) in object({d}) in sect({d})", .{
+    log.debug("  ATOM(%{d}, '{s}') @ {x} (sizeof({x}), alignof({x})) in object({?}) in sect({d})", .{
         atom.sym_index,
         sym_name,
         sym.n_value,

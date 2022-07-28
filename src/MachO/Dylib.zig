@@ -144,7 +144,10 @@ pub fn parseFromBinary(
     const this_arch: std.Target.Cpu.Arch = try fat.decodeArch(header.cputype, true);
 
     if (this_arch != cpu_arch) {
-        log.err("mismatched cpu architecture: expected {s}, found {s}", .{ cpu_arch, this_arch });
+        log.err("mismatched cpu architecture: expected {s}, found {s}", .{
+            @tagName(cpu_arch),
+            @tagName(this_arch),
+        });
         return error.MismatchedCpuArchitecture;
     }
 

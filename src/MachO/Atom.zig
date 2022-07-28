@@ -205,7 +205,7 @@ pub fn parseRelocs(self: *Atom, relocs: []const macho.relocation_info, context: 
                             else => {
                                 log.err("unexpected relocation type after ARM64_RELOC_ADDEND", .{});
                                 log.err("  expected ARM64_RELOC_PAGE21 or ARM64_RELOC_PAGEOFF12", .{});
-                                log.err("  found {s}", .{next});
+                                log.err("  found {s}", .{@tagName(next)});
                                 return error.UnexpectedRelocationType;
                             },
                         }
@@ -244,7 +244,9 @@ pub fn parseRelocs(self: *Atom, relocs: []const macho.relocation_info, context: 
                     else => {
                         log.err("unexpected relocation type after ARM64_RELOC_ADDEND", .{});
                         log.err("  expected ARM64_RELOC_UNSIGNED", .{});
-                        log.err("  found {s}", .{@intToEnum(macho.reloc_type_arm64, relocs[i + 1].r_type)});
+                        log.err("  found {s}", .{
+                            @tagName(@intToEnum(macho.reloc_type_arm64, relocs[i + 1].r_type)),
+                        });
                         return error.UnexpectedRelocationType;
                     },
                 },
@@ -253,7 +255,9 @@ pub fn parseRelocs(self: *Atom, relocs: []const macho.relocation_info, context: 
                     else => {
                         log.err("unexpected relocation type after X86_64_RELOC_ADDEND", .{});
                         log.err("  expected X86_64_RELOC_UNSIGNED", .{});
-                        log.err("  found {s}", .{@intToEnum(macho.reloc_type_x86_64, relocs[i + 1].r_type)});
+                        log.err("  found {s}", .{
+                            @tagName(@intToEnum(macho.reloc_type_x86_64, relocs[i + 1].r_type)),
+                        });
                         return error.UnexpectedRelocationType;
                     },
                 },
@@ -497,7 +501,7 @@ pub fn resolveRelocs(self: *Atom, macho_file: *MachO) !void {
         const arch = macho_file.options.target.cpu_arch.?;
         switch (arch) {
             .aarch64 => {
-                log.debug("  RELA({s}) @ {x} => %{d} in object({d})", .{
+                log.debug("  RELA({s}) @ {x} => %{d} in object({?})", .{
                     @tagName(@intToEnum(macho.reloc_type_arm64, rel.@"type")),
                     rel.offset,
                     rel.target.sym_index,
@@ -505,7 +509,7 @@ pub fn resolveRelocs(self: *Atom, macho_file: *MachO) !void {
                 });
             },
             .x86_64 => {
-                log.debug("  RELA({s}) @ {x} => %{d} in object({d})", .{
+                log.debug("  RELA({s}) @ {x} => %{d} in object({?})", .{
                     @tagName(@intToEnum(macho.reloc_type_x86_64, rel.@"type")),
                     rel.offset,
                     rel.target.sym_index,
@@ -535,7 +539,7 @@ pub fn resolveRelocs(self: *Atom, macho_file: *MachO) !void {
                 log.debug("    | atomless target '{s}'", .{target_name});
                 break :blk atomless_sym.n_value;
             };
-            log.debug("    | target ATOM(%{d}, '{s}') in object({d})", .{
+            log.debug("    | target ATOM(%{d}, '{s}') in object({?})", .{
                 target_atom.sym_index,
                 target_atom.getName(macho_file),
                 target_atom.file,
