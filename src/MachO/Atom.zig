@@ -422,10 +422,10 @@ fn addPtrBindingOrRebase(
         });
     } else {
         const source_sym = self.getSymbol(context.macho_file);
-        const entry = context.macho_file.sections.get(source_sym.n_sect - 1);
-        const sect = entry.section;
-        const seg_id = entry.segment_index;
-        const sect_type = sect.type_();
+        const section = context.macho_file.sections.get(source_sym.n_sect - 1);
+        const header = section.header;
+        const segment_index = section.segment_index;
+        const sect_type = header.type_();
 
         const should_rebase = rebase: {
             if (rel.r_length != 3) break :rebase false;
@@ -434,12 +434,12 @@ fn addPtrBindingOrRebase(
             // that the segment is writable should be enough here.
             const is_right_segment = blk: {
                 if (context.macho_file.data_segment_cmd_index) |idx| {
-                    if (seg_id == idx) {
+                    if (segment_index == idx) {
                         break :blk true;
                     }
                 }
                 if (context.macho_file.data_const_segment_cmd_index) |idx| {
-                    if (seg_id == idx) {
+                    if (segment_index == idx) {
                         break :blk true;
                     }
                 }
@@ -526,8 +526,8 @@ pub fn resolveRelocs(self: *Atom, macho_file: *MachO) !void {
         };
         const is_tlv = is_tlv: {
             const source_sym = self.getSymbol(macho_file);
-            const sect = macho_file.sections.items(.section)[source_sym.n_sect - 1];
-            break :is_tlv sect.type_() == macho.S_THREAD_LOCAL_VARIABLES;
+            const header = macho_file.sections.items(.header)[source_sym.n_sect - 1];
+            break :is_tlv header.type_() == macho.S_THREAD_LOCAL_VARIABLES;
         };
         const target_addr = blk: {
             const target_atom = rel.getTargetAtom(macho_file) orelse {
@@ -568,7 +568,7 @@ pub fn resolveRelocs(self: *Atom, macho_file: *MachO) !void {
                         return error.FailedToResolveRelocationTarget;
                     }
                 };
-                break :base_address macho_file.sections.items(.section)[sect_id].addr;
+                break :base_address macho_file.sections.items(.header)[sect_id].addr;
             } else 0;
             break :blk target_sym.n_value - base_address;
         };

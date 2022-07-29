@@ -274,8 +274,8 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
 
         log.debug("  output sect({d}, '{s},{s}')", .{
             match + 1,
-            macho_file.sections.items(.section)[match].segName(),
-            macho_file.sections.items(.section)[match].sectName(),
+            macho_file.sections.items(.header)[match].segName(),
+            macho_file.sections.items(.header)[match].sectName(),
         });
 
         const cpu_arch = macho_file.options.target.cpu_arch.?;
@@ -473,8 +473,8 @@ fn createAtomFromSubsection(
         sym_index,
         self.getString(sym.n_strx),
         match + 1,
-        macho_file.sections.items(.section)[match].segName(),
-        macho_file.sections.items(.section)[match].sectName(),
+        macho_file.sections.items(.header)[match].segName(),
+        macho_file.sections.items(.header)[match].sectName(),
         object_id,
     });
 
