@@ -422,8 +422,9 @@ fn addPtrBindingOrRebase(
         });
     } else {
         const source_sym = self.getSymbol(context.macho_file);
-        const sect = context.macho_file.sections.items[source_sym.n_sect - 1];
-        const seg_id = context.macho_file.segments_table.get(source_sym.n_sect - 1).?;
+        const entry = context.macho_file.sections.get(source_sym.n_sect - 1);
+        const sect = entry.section;
+        const seg_id = entry.segment_index;
         const sect_type = sect.type_();
 
         const should_rebase = rebase: {
@@ -525,7 +526,7 @@ pub fn resolveRelocs(self: *Atom, macho_file: *MachO) !void {
         };
         const is_tlv = is_tlv: {
             const source_sym = self.getSymbol(macho_file);
-            const sect = macho_file.sections.items[source_sym.n_sect - 1];
+            const sect = macho_file.sections.items(.section)[source_sym.n_sect - 1];
             break :is_tlv sect.type_() == macho.S_THREAD_LOCAL_VARIABLES;
         };
         const target_addr = blk: {
@@ -567,7 +568,7 @@ pub fn resolveRelocs(self: *Atom, macho_file: *MachO) !void {
                         return error.FailedToResolveRelocationTarget;
                     }
                 };
-                break :base_address macho_file.sections.items[sect_id].addr;
+                break :base_address macho_file.sections.items(.section)[sect_id].addr;
             } else 0;
             break :blk target_sym.n_value - base_address;
         };

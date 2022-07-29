@@ -51,8 +51,10 @@ dylibs_map: std.StringHashMapUnmanaged(u16) = .{},
 referenced_dylibs: std.AutoArrayHashMapUnmanaged(u16, void) = .{},
 
 segments: std.ArrayListUnmanaged(macho.segment_command_64) = .{},
-sections: std.ArrayListUnmanaged(macho.section_64) = .{},
-segments_table: std.AutoHashMapUnmanaged(u8, u8) = .{},
+sections: std.MultiArrayList(struct {
+    segment_index: u8,
+    section: macho.section_64,
+}) = .{},
 
 pagezero_segment_cmd_index: ?u8 = null,
 text_segment_cmd_index: ?u8 = null,
@@ -390,7 +392,7 @@ pub fn flush(self: *MachO) !void {
     try self.writeAtoms();
 
     if (self.rustc_section_index) |id| {
-        const sect = &self.sections.items[id];
+        const sect = &self.sections.items(.section)[id];
         sect.size = self.rustc_section_size;
     }
 
@@ -1235,7 +1237,7 @@ pub fn addAtomToSection(self: *MachO, atom: *Atom, sect_id: u8) !void {
     } else {
         try self.atoms.putNoClobber(self.base.allocator, sect_id, atom);
     }
-    const sect = &self.sections.items[sect_id];
+    const sect = &self.sections.items(.section)[sect_id];
     const atom_alignment = try math.powi(u32, 2, atom.alignment);
     const aligned_end_addr = mem.alignForwardGeneric(u64, sect.size, atom_alignment);
     const padding = aligned_end_addr - sect.size;
@@ -1261,8 +1263,8 @@ fn pruneAndSortSections(self: *MachO) !void {
     var mapping = std.AutoArrayHashMap(u8, ?u8).init(gpa);
     defer mapping.deinit();
 
-    var sections = self.sections.toOwnedSlice(gpa);
-    defer gpa.free(sections);
+    var sections = self.sections.toOwnedSlice();
+    defer sections.deinit(gpa);
     try self.sections.ensureTotalCapacity(gpa, sections.len);
 
     for (&[_]*?u8{
@@ -1302,17 +1304,20 @@ fn pruneAndSortSections(self: *MachO) !void {
         &self.bss_section_index,
     }) |maybe_index| {
         const old_idx = maybe_index.* orelse continue;
-        const sect = sections[old_idx];
+        const seg_id = sections.items(.segment_index)[old_idx];
+        const sect = sections.items(.section)[old_idx];
         if (sect.size == 0) {
             log.debug("pruning section {s},{s}", .{ sect.segName(), sect.sectName() });
             maybe_index.* = null;
-            const seg_id = self.segments_table.get(old_idx).?;
             const seg = &self.segments.items[seg_id];
             seg.cmdsize -= @sizeOf(macho.section_64);
             seg.nsects -= 1;
         } else {
-            maybe_index.* = @intCast(u8, self.sections.items.len);
-            self.sections.appendAssumeCapacity(sect);
+            maybe_index.* = @intCast(u8, self.sections.slice().len);
+            self.sections.appendAssumeCapacity(.{
+                .segment_index = seg_id,
+                .section = sect,
+            });
         }
         try mapping.putNoClobber(old_idx, maybe_index.*);
     }
@@ -1320,9 +1325,6 @@ fn pruneAndSortSections(self: *MachO) !void {
     var atoms = std.ArrayList(struct { id: u8, atom: *Atom }).init(gpa);
     defer atoms.deinit();
     try atoms.ensureTotalCapacity(mapping.count());
-
-    var segments_table: std.AutoHashMapUnmanaged(u8, u8) = .{};
-    try segments_table.ensureTotalCapacity(gpa, self.segments_table.count());
 
     for (mapping.keys()) |old_sect| {
         const new_sect = mapping.get(old_sect).? orelse {
@@ -1334,11 +1336,7 @@ fn pruneAndSortSections(self: *MachO) !void {
             .id = new_sect,
             .atom = kv.value,
         });
-        segments_table.putAssumeCapacityNoClobber(new_sect, self.segments_table.get(old_sect).?);
     }
-
-    self.segments_table.clearAndFree(gpa);
-    self.segments_table = segments_table;
 
     while (atoms.popOrNull()) |next| {
         try self.atoms.putNoClobber(gpa, next.id, next.atom);
@@ -2370,7 +2368,6 @@ pub fn deinit(self: *MachO) void {
 
     self.segments.deinit(gpa);
     self.sections.deinit(gpa);
-    self.segments_table.deinit(gpa);
 
     for (self.managed_atoms.items) |atom| {
         atom.deinit(gpa);
@@ -2707,7 +2704,7 @@ fn allocateSymbols(self: *MachO) !void {
             atom = prev;
         }
 
-        const sect = self.sections.items[sect_id];
+        const sect = self.sections.items(.section)[sect_id];
         var base_vaddr = sect.addr;
 
         log.debug("allocating local symbols in sect({d}, '{s},{s}')", .{
@@ -2764,7 +2761,7 @@ fn writeAtoms(self: *MachO) !void {
     var it = self.atoms.iterator();
     while (it.next()) |entry| {
         const sect_id = entry.key_ptr.*;
-        const sect = self.sections.items[sect_id];
+        const sect = self.sections.items(.section)[sect_id];
         var atom: *Atom = entry.value_ptr.*;
 
         if (sect.flags == macho.S_ZEROFILL or sect.flags == macho.S_THREAD_LOCAL_ZEROFILL) continue;
@@ -2828,13 +2825,13 @@ fn allocateSegments(self: *MachO) !void {
 
         // Shift all sections to the back to minimize jump size between __TEXT and __DATA segments.
         var min_alignment: u32 = 0;
-        for (self.sections.items[0..seg.nsects]) |sect| {
+        for (self.sections.items(.section)[0..seg.nsects]) |sect| {
             const alignment = try math.powi(u32, 2, sect.@"align");
             min_alignment = math.max(min_alignment, alignment);
         }
 
         assert(min_alignment > 0);
-        const last_sect = self.sections.items[seg.nsects - 1];
+        const last_sect = self.sections.items(.section)[seg.nsects - 1];
         const shift: u32 = shift: {
             const diff = seg.filesize - last_sect.offset - last_sect.size;
             const factor = @divTrunc(diff, min_alignment);
@@ -2842,7 +2839,7 @@ fn allocateSegments(self: *MachO) !void {
         };
 
         if (shift > 0) {
-            for (self.sections.items[0..seg.nsects]) |*sect| {
+            for (self.sections.items(.section)[0..seg.nsects]) |*sect| {
                 sect.offset += shift;
                 sect.addr += shift;
             }
@@ -2880,8 +2877,10 @@ fn allocateSegment(self: *MachO, maybe_index: ?u8, indices: []const ?u8, init_si
 
     // Allocate the sections according to their alignment at the beginning of the segment.
     var start = init_size;
-    for (self.sections.items) |*sect| {
-        if (!mem.eql(u8, seg.segName(), sect.segName())) continue;
+    const slice = self.sections.slice();
+    for (slice.items(.section)) |*sect, i| {
+        const seg_id = slice.items(.segment_index)[i];
+        if (seg_id != index) continue;
         const is_zerofill = sect.flags == macho.S_ZEROFILL or sect.flags == macho.S_THREAD_LOCAL_ZEROFILL;
         const alignment = try math.powi(u32, 2, sect.@"align");
         const start_aligned = mem.alignForwardGeneric(u64, start, alignment);
@@ -2918,15 +2917,17 @@ fn initSection(
 ) !u8 {
     const gpa = self.base.allocator;
     const seg = &self.segments.items[segment_id];
-    const index = @intCast(u8, self.sections.items.len);
+    const index = @intCast(u8, self.sections.slice().len);
     try self.sections.append(gpa, .{
-        .sectname = makeStaticString(sectname),
-        .segname = seg.segname,
-        .flags = opts.flags,
-        .reserved1 = opts.reserved1,
-        .reserved2 = opts.reserved2,
+        .segment_index = segment_id,
+        .section = .{
+            .sectname = makeStaticString(sectname),
+            .segname = seg.segname,
+            .flags = opts.flags,
+            .reserved1 = opts.reserved1,
+            .reserved2 = opts.reserved2,
+        },
     });
-    try self.segments_table.putNoClobber(gpa, index, segment_id);
     seg.cmdsize += @sizeOf(macho.section_64);
     seg.nsects += 1;
     return index;
@@ -2943,7 +2944,7 @@ fn writeSegmentHeaders(self: *MachO, ncmds: *u32) !u64 {
         try writer.writeStruct(seg);
 
         // TODO
-        for (self.sections.items[count..][0..seg.nsects]) |sect| {
+        for (self.sections.items(.section)[count..][0..seg.nsects]) |sect| {
             try writer.writeStruct(sect);
         }
 
@@ -2984,11 +2985,14 @@ fn writeDyldInfoData(self: *MachO, ncmds: *u32, lc_writer: anytype) !void {
             const sect_id = entry.key_ptr.*;
             var atom: *Atom = entry.value_ptr.*;
 
-            const sect = self.sections.items[sect_id];
+            const sect_entry = self.sections.get(sect_id);
+            const seg_id = sect_entry.segment_index;
+            const sect = sect_entry.section;
+
             if (mem.eql(u8, sect.segName(), "__TEXT")) continue; // __TEXT is non-writable
 
             log.debug("dyld info for {s},{s}", .{ sect.segName(), sect.sectName() });
-            const seg_id = self.segments_table.get(sect_id).?;
+
             const seg = self.segments.items[seg_id];
 
             while (true) {
@@ -3249,7 +3253,7 @@ fn populateLazyBindOffsetsInStubHelper(self: *MachO, buffer: []const u8) !void {
         }
     }
 
-    const sect = self.sections.items[stub_helper_section_index];
+    const sect = self.sections.items(.section)[stub_helper_section_index];
     const stub_offset: u4 = switch (self.options.target.cpu_arch.?) {
         .x86_64 => 1,
         .aarch64 => 2 * @sizeOf(u32),
@@ -3365,7 +3369,7 @@ fn writeDataInCode(self: *MachO, ncmds: *u32, lc_writer: anytype) !void {
     defer out_dice.deinit();
 
     const text_sect_id = self.text_section_index orelse return;
-    const text_sect = self.sections.items[text_sect_id];
+    const text_sect = self.sections.items(.section)[text_sect_id];
 
     for (self.objects.items) |object| {
         const dice = object.parseDataInCode() orelse continue;
@@ -3589,7 +3593,7 @@ fn writeDysymtab(self: *MachO, ctx: SymtabCtx, lc: *macho.dysymtab_command) !voi
     const writer = buf.writer();
 
     if (self.stubs_section_index) |sect_id| {
-        const stubs = &self.sections.items[sect_id];
+        const stubs = &self.sections.items(.section)[sect_id];
         stubs.reserved1 = 0;
         for (self.stubs.items) |entry| {
             if (entry.sym_index == 0) continue;
@@ -3602,7 +3606,7 @@ fn writeDysymtab(self: *MachO, ctx: SymtabCtx, lc: *macho.dysymtab_command) !voi
     }
 
     if (self.got_section_index) |sect_id| {
-        const got = &self.sections.items[sect_id];
+        const got = &self.sections.items(.section)[sect_id];
         got.reserved1 = nstubs;
         for (self.got_entries.items) |entry| {
             if (entry.sym_index == 0) continue;
@@ -3618,7 +3622,7 @@ fn writeDysymtab(self: *MachO, ctx: SymtabCtx, lc: *macho.dysymtab_command) !voi
     }
 
     if (self.la_symbol_ptr_section_index) |sect_id| {
-        const la_symbol_ptr = &self.sections.items[sect_id];
+        const la_symbol_ptr = &self.sections.items(.section)[sect_id];
         la_symbol_ptr.reserved1 = nstubs + ngot_entries;
         for (self.stubs.items) |entry| {
             if (entry.sym_index == 0) continue;
@@ -4116,7 +4120,7 @@ fn logAtoms(self: *MachO) void {
             atom = prev;
         }
 
-        const sect = self.sections.items[sect_id];
+        const sect = self.sections.items(.section)[sect_id];
         log.debug("{s},{s}", .{ sect.segName(), sect.sectName() });
 
         while (true) {

@@ -25,7 +25,7 @@ pub fn gcAtoms(macho_file: *MachO) !void {
 }
 
 fn removeAtomFromSection(atom: *Atom, match: u8, macho_file: *MachO) void {
-    const sect = &macho_file.sections.items[match];
+    const sect = &macho_file.sections.items(.section)[match];
 
     // If we want to enable GC for incremental codepath, we need to take into
     // account any padding that might have been left here.
@@ -264,7 +264,7 @@ fn prune(arena: Allocator, alive: std.AutoHashMap(*Atom, void), macho_file: *Mac
     var gc_sections_it = gc_sections.iterator();
     while (gc_sections_it.next()) |entry| {
         const match = entry.key_ptr.*;
-        const sect = &macho_file.sections.items[match];
+        const sect = &macho_file.sections.items(.section)[match];
         if (sect.size == 0) continue; // Pruning happens automatically in next step.
 
         sect.@"align" = 0;
