@@ -423,7 +423,7 @@ fn addPtrBindingOrRebase(
     } else {
         const source_sym = self.getSymbol(context.macho_file);
         const sect = context.macho_file.sections.items[source_sym.n_sect - 1];
-        const seg_id = context.macho_file.getSegmentId(sect);
+        const seg_id = context.macho_file.segments_table.get(source_sym.n_sect - 1).?;
         const sect_type = sect.type_();
 
         const should_rebase = rebase: {

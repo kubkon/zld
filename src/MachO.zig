@@ -52,6 +52,7 @@ referenced_dylibs: std.AutoArrayHashMapUnmanaged(u16, void) = .{},
 
 segments: std.ArrayListUnmanaged(macho.segment_command_64) = .{},
 sections: std.ArrayListUnmanaged(macho.section_64) = .{},
+segments_table: std.AutoHashMapUnmanaged(u8, u8) = .{},
 
 pagezero_segment_cmd_index: ?u8 = null,
 text_segment_cmd_index: ?u8 = null,
@@ -1301,16 +1302,17 @@ fn pruneAndSortSections(self: *MachO) !void {
         &self.bss_section_index,
     }) |maybe_index| {
         const old_idx = maybe_index.* orelse continue;
-        const sect = &sections[old_idx];
+        const sect = sections[old_idx];
         if (sect.size == 0) {
             log.debug("pruning section {s},{s}", .{ sect.segName(), sect.sectName() });
             maybe_index.* = null;
-            const seg = self.getSegmentPtr(sect.*);
+            const seg_id = self.segments_table.get(old_idx).?;
+            const seg = &self.segments.items[seg_id];
             seg.cmdsize -= @sizeOf(macho.section_64);
             seg.nsects -= 1;
         } else {
             maybe_index.* = @intCast(u8, self.sections.items.len);
-            self.sections.appendAssumeCapacity(sect.*);
+            self.sections.appendAssumeCapacity(sect);
         }
         try mapping.putNoClobber(old_idx, maybe_index.*);
     }
@@ -1318,6 +1320,9 @@ fn pruneAndSortSections(self: *MachO) !void {
     var atoms = std.ArrayList(struct { id: u8, atom: *Atom }).init(gpa);
     defer atoms.deinit();
     try atoms.ensureTotalCapacity(mapping.count());
+
+    var segments_table: std.AutoHashMapUnmanaged(u8, u8) = .{};
+    try segments_table.ensureTotalCapacity(gpa, self.segments_table.count());
 
     for (mapping.keys()) |old_sect| {
         const new_sect = mapping.get(old_sect).? orelse {
@@ -1329,7 +1334,11 @@ fn pruneAndSortSections(self: *MachO) !void {
             .id = new_sect,
             .atom = kv.value,
         });
+        segments_table.putAssumeCapacityNoClobber(new_sect, self.segments_table.get(old_sect).?);
     }
+
+    self.segments_table.clearAndFree(gpa);
+    self.segments_table = segments_table;
 
     while (atoms.popOrNull()) |next| {
         try self.atoms.putNoClobber(gpa, next.id, next.atom);
@@ -2361,6 +2370,7 @@ pub fn deinit(self: *MachO) void {
 
     self.segments.deinit(gpa);
     self.sections.deinit(gpa);
+    self.segments_table.deinit(gpa);
 
     for (self.managed_atoms.items) |atom| {
         atom.deinit(gpa);
@@ -2902,19 +2912,21 @@ const InitSectionOpts = struct {
 
 fn initSection(
     self: *MachO,
-    segment_id: u16,
+    segment_id: u8,
     sectname: []const u8,
     opts: InitSectionOpts,
 ) !u8 {
+    const gpa = self.base.allocator;
     const seg = &self.segments.items[segment_id];
     const index = @intCast(u8, self.sections.items.len);
-    try self.sections.append(self.base.allocator, .{
+    try self.sections.append(gpa, .{
         .sectname = makeStaticString(sectname),
         .segname = seg.segname,
         .flags = opts.flags,
         .reserved1 = opts.reserved1,
         .reserved2 = opts.reserved2,
     });
+    try self.segments_table.putNoClobber(gpa, index, segment_id);
     seg.cmdsize += @sizeOf(macho.section_64);
     seg.nsects += 1;
     return index;
@@ -2976,7 +2988,7 @@ fn writeDyldInfoData(self: *MachO, ncmds: *u32, lc_writer: anytype) !void {
             if (mem.eql(u8, sect.segName(), "__TEXT")) continue; // __TEXT is non-writable
 
             log.debug("dyld info for {s},{s}", .{ sect.segName(), sect.sectName() });
-            const seg_id = self.getSegmentId(sect);
+            const seg_id = self.segments_table.get(sect_id).?;
             const seg = self.segments.items[seg_id];
 
             while (true) {
@@ -3727,23 +3739,6 @@ pub fn makeStaticString(bytes: []const u8) [16]u8 {
     assert(bytes.len <= buf.len);
     mem.copy(u8, &buf, bytes);
     return buf;
-}
-
-pub fn getSegmentId(self: MachO, sect: macho.section_64) u8 {
-    // TODO cache
-    for (self.segments.items) |seg, seg_id| {
-        if (mem.eql(u8, seg.segName(), sect.segName())) return @intCast(u8, seg_id);
-    } else unreachable;
-}
-
-pub fn getSegment(self: MachO, sect: macho.section_64) macho.segment_command_64 {
-    const seg_id = self.getSegmentId(sect);
-    return self.segments.items[seg_id];
-}
-
-pub fn getSegmentPtr(self: *MachO, sect: macho.section_64) *macho.segment_command_64 {
-    const seg_id = self.getSegmentId(sect);
-    return &self.segments.items[seg_id];
 }
 
 pub fn symbolIsTemp(self: *MachO, sym_with_loc: SymbolWithLoc) bool {
