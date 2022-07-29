@@ -1967,7 +1967,6 @@ fn resolveSymbolsAtLoading(self: *MachO) !void {
                 u16,
                 macho.BIND_SPECIAL_DYLIB_FLAT_LOOKUP * @intCast(i16, macho.N_SYMBOL_RESOLVER),
             );
-            // TODO allow_shlib_undefined is an ELF flag so figure out macOS specific flags too.
             sym.n_type = macho.N_EXT;
             sym.n_desc = n_desc;
             _ = self.unresolved.swapRemove(global_index);
@@ -2228,13 +2227,38 @@ fn writeDylibIdLC(self: *MachO, ncmds: *u32, lc_writer: anytype) !void {
     }, ncmds, lc_writer);
 }
 
+const RpathIterator = struct {
+    buffer: []const []const u8,
+    table: std.StringHashMap(void),
+    count: usize = 0,
+
+    fn init(gpa: Allocator, rpaths: []const []const u8) RpathIterator {
+        return .{ .buffer = rpaths, .table = std.StringHashMap(void).init(gpa) };
+    }
+
+    fn deinit(it: *RpathIterator) void {
+        it.table.deinit();
+    }
+
+    fn next(it: *RpathIterator) !?[]const u8 {
+        while (true) {
+            if (it.count >= it.buffer.len) return null;
+            const rpath = it.buffer[it.count];
+            it.count += 1;
+            const gop = try it.table.getOrPut(rpath);
+            if (gop.found_existing) continue;
+            return rpath;
+        }
+    }
+};
+
 fn writeRpathLCs(self: *MachO, ncmds: *u32, lc_writer: anytype) !void {
     const gpa = self.base.allocator;
-    var rpath_table = std.StringArrayHashMap(void).init(gpa);
-    defer rpath_table.deinit();
 
-    for (self.options.rpath_list) |rpath| {
-        if (rpath_table.contains(rpath)) continue;
+    var it = RpathIterator.init(gpa, self.options.rpath_list);
+    defer it.deinit();
+
+    while (try it.next()) |rpath| {
         const rpath_len = rpath.len + 1;
         const cmdsize = @intCast(u32, mem.alignForwardGeneric(
             u64,
@@ -2256,11 +2280,7 @@ fn writeRpathLCs(self: *MachO, ncmds: *u32, lc_writer: anytype) !void {
 }
 
 fn writeBuildVersionLC(self: *MachO, ncmds: *u32, lc_writer: anytype) !void {
-    const cmdsize = @intCast(u32, mem.alignForwardGeneric(
-        u64,
-        @sizeOf(macho.build_version_command) + @sizeOf(macho.build_tool_version),
-        @sizeOf(u64),
-    ));
+    const cmdsize = @sizeOf(macho.build_version_command) + @sizeOf(macho.build_tool_version);
     const platform_version = blk: {
         const ver = self.options.platform_version;
         const platform_version = ver.major << 16 | ver.minor << 8;
@@ -2518,37 +2538,109 @@ fn populateMetadata(self: *MachO) !void {
     }
 }
 
-fn calcMinLCsSize(self: *MachO) u32 {
-    // TODO
-    _ = self;
-    return 0x1000;
+inline fn calcInstallNameLen(cmd_size: u64, name: []const u8, assume_max_path_len: bool) u64 {
+    const name_len = if (assume_max_path_len) std.os.PATH_MAX else std.mem.len(name) + 1;
+    return mem.alignForwardGeneric(u64, cmd_size + name_len, @alignOf(u64));
 }
 
-fn calcMinHeaderpad(self: *MachO) u64 {
-    var min_size = self.calcMinLCsSize();
-    var padding: u32 = min_size + (self.options.headerpad orelse 0);
+fn calcLCsSize(self: *MachO, assume_max_path_len: bool) !u32 {
+    const gpa = self.base.allocator;
+
+    var sizeofcmds: u64 = 0;
+    for (self.segments.items) |seg| {
+        sizeofcmds += seg.nsects * @sizeOf(macho.section_64) + @sizeOf(macho.segment_command_64);
+    }
+
+    // LC_DYLD_INFO_ONLY
+    sizeofcmds += @sizeOf(macho.dyld_info_command);
+    // LC_FUNCTION_STARTS
+    if (self.text_section_index != null) {
+        sizeofcmds += @sizeOf(macho.linkedit_data_command);
+    }
+    // LC_DATA_IN_CODE
+    sizeofcmds += @sizeOf(macho.linkedit_data_command);
+    // LC_SYMTAB
+    sizeofcmds += @sizeOf(macho.symtab_command);
+    // LC_DYSYMTAB
+    sizeofcmds += @sizeOf(macho.dysymtab_command);
+    // LC_LOAD_DYLINKER
+    sizeofcmds += calcInstallNameLen(
+        @sizeOf(macho.dylinker_command),
+        mem.sliceTo(default_dyld_path, 0),
+        false,
+    );
+    // LC_MAIN
+    if (self.options.output_mode == .exe) {
+        sizeofcmds += @sizeOf(macho.entry_point_command);
+    }
+    // LC_ID_DYLIB
+    if (self.options.output_mode == .lib) {
+        sizeofcmds += blk: {
+            const install_name = self.options.install_name orelse self.options.emit.sub_path;
+            break :blk calcInstallNameLen(
+                @sizeOf(macho.dylib_command),
+                install_name,
+                assume_max_path_len,
+            );
+        };
+    }
+    // LC_RPATH
+    {
+        var it = RpathIterator.init(gpa, self.options.rpath_list);
+        defer it.deinit();
+        while (try it.next()) |rpath| {
+            sizeofcmds += calcInstallNameLen(
+                @sizeOf(macho.rpath_command),
+                rpath,
+                assume_max_path_len,
+            );
+        }
+    }
+    // LC_SOURCE_VERSION
+    sizeofcmds += @sizeOf(macho.source_version_command);
+    // LC_BUILD_VERSION
+    sizeofcmds += @sizeOf(macho.build_version_command) + @sizeOf(macho.build_tool_version);
+    // LC_UUID
+    sizeofcmds += @sizeOf(macho.uuid_command);
+    // LC_LOAD_DYLIB
+    for (self.referenced_dylibs.keys()) |id| {
+        const dylib = self.dylibs.items[id];
+        const dylib_id = dylib.id orelse unreachable;
+        sizeofcmds += calcInstallNameLen(
+            @sizeOf(macho.dylib_command),
+            dylib_id.name,
+            assume_max_path_len,
+        );
+    }
+    // LC_CODE_SIGNATURE
+    {
+        const target = self.options.target;
+        const requires_codesig = blk: {
+            if (self.options.entitlements) |_| break :blk true;
+            if (target.cpu_arch.? == .aarch64 and (target.os_tag.? == .macos or target.abi.? == .simulator))
+                break :blk true;
+            break :blk false;
+        };
+        if (requires_codesig) {
+            sizeofcmds += @sizeOf(macho.linkedit_data_command);
+        }
+    }
+
+    return @intCast(u32, sizeofcmds);
+}
+
+fn calcMinHeaderpad(self: *MachO) !u64 {
+    var padding: u32 = (try self.calcLCsSize(false)) + (self.options.headerpad orelse 0);
     log.debug("minimum requested headerpad size 0x{x}", .{padding + @sizeOf(macho.mach_header_64)});
 
     if (self.options.headerpad_max_install_names) {
-        log.err("TODO headerpad_max_install_names", .{});
-        unreachable;
-        // var min_headerpad_size: u32 = 0;
-        // for (self.load_commands.items) |lc| switch (lc.cmd()) {
-        //     .ID_DYLIB,
-        //     .LOAD_WEAK_DYLIB,
-        //     .LOAD_DYLIB,
-        //     .REEXPORT_DYLIB,
-        //     => {
-        //         min_headerpad_size += @sizeOf(macho.dylib_command) + std.os.PATH_MAX + 1;
-        //     },
-
-        //     else => {},
-        // };
-        // log.debug("headerpad_max_install_names minimum headerpad size 0x{x}", .{
-        //     min_headerpad_size + @sizeOf(macho.mach_header_64),
-        // });
-        // padding = @maximum(padding, min_headerpad_size);
+        var min_headerpad_size: u32 = try self.calcLCsSize(true);
+        log.debug("headerpad_max_install_names minimum headerpad size 0x{x}", .{
+            min_headerpad_size + @sizeOf(macho.mach_header_64),
+        });
+        padding = @maximum(padding, min_headerpad_size);
     }
+
     const offset = @sizeOf(macho.mach_header_64) + padding;
     log.debug("actual headerpad size 0x{x}", .{offset});
 
@@ -2718,7 +2810,7 @@ fn writeAtoms(self: *MachO) !void {
 fn allocateSegments(self: *MachO) !void {
     try self.allocateSegment(self.text_segment_cmd_index, &.{
         self.pagezero_segment_cmd_index,
-    }, self.calcMinHeaderpad());
+    }, try self.calcMinHeaderpad());
 
     if (self.text_segment_cmd_index) |index| blk: {
         const seg = &self.segments.items[index];
@@ -2784,7 +2876,6 @@ fn allocateSegment(self: *MachO, maybe_index: ?u8, indices: []const ?u8, init_si
         const alignment = try math.powi(u32, 2, sect.@"align");
         const start_aligned = mem.alignForwardGeneric(u64, start, alignment);
 
-        // TODO handle zerofill sections in stage2
         sect.offset = if (is_zerofill)
             0
         else
