@@ -21,10 +21,7 @@ const SymbolWithLoc = MachO.SymbolWithLoc;
 
 name: []const u8,
 mtime: u64,
-contents: struct {
-    buffer: []align(@alignOf(u64)) const u8,
-    owned: bool,
-},
+contents: []align(@alignOf(u64)) const u8,
 
 header: macho.mach_header_64 = undefined,
 in_symtab: []const macho.nlist_64 = undefined,
@@ -53,14 +50,11 @@ pub fn deinit(self: *Object, gpa: Allocator) void {
     self.managed_atoms.deinit(gpa);
 
     gpa.free(self.name);
-
-    if (self.contents.owned) {
-        gpa.free(self.contents.buffer);
-    }
+    gpa.free(self.contents);
 }
 
 pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch) !void {
-    var stream = std.io.fixedBufferStream(self.contents.buffer);
+    var stream = std.io.fixedBufferStream(self.contents);
     const reader = stream.reader();
 
     self.header = try reader.readStruct(macho.mach_header_64);
@@ -91,7 +85,7 @@ pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch)
 
     var it = LoadCommandIterator{
         .ncmds = self.header.ncmds,
-        .buffer = self.contents.buffer[@sizeOf(macho.mach_header_64)..][0..self.header.sizeofcmds],
+        .buffer = self.contents[@sizeOf(macho.mach_header_64)..][0..self.header.sizeofcmds],
     };
     while (it.next()) |cmd| {
         switch (cmd.cmd()) {
@@ -106,9 +100,9 @@ pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch)
                 const symtab = cmd.cast(macho.symtab_command).?;
                 self.in_symtab = @ptrCast(
                     [*]const macho.nlist_64,
-                    @alignCast(@alignOf(macho.nlist_64), &self.contents.buffer[symtab.symoff]),
+                    @alignCast(@alignOf(macho.nlist_64), &self.contents[symtab.symoff]),
                 )[0..symtab.nsyms];
-                self.in_strtab = self.contents.buffer[symtab.stroff..][0..symtab.strsize];
+                self.in_strtab = self.contents[symtab.stroff..][0..symtab.strsize];
                 try self.symtab.appendSlice(allocator, self.in_symtab);
             },
             else => {},
@@ -290,7 +284,7 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
         // Read section's list of relocations
         const relocs = @ptrCast(
             [*]const macho.relocation_info,
-            @alignCast(@alignOf(macho.relocation_info), &self.contents.buffer[sect.reloff]),
+            @alignCast(@alignOf(macho.relocation_info), &self.contents[sect.reloff]),
         )[0..sect.nreloc];
 
         // Symbols within this section only.
@@ -527,7 +521,7 @@ pub fn getSourceSection(self: Object, index: u16) macho.section_64 {
 pub fn parseDataInCode(self: Object) ?[]const macho.data_in_code_entry {
     var it = LoadCommandIterator{
         .ncmds = self.header.ncmds,
-        .buffer = self.contents.buffer[@sizeOf(macho.mach_header_64)..][0..self.header.sizeofcmds],
+        .buffer = self.contents[@sizeOf(macho.mach_header_64)..][0..self.header.sizeofcmds],
     };
     while (it.next()) |cmd| {
         switch (cmd.cmd()) {
@@ -536,7 +530,7 @@ pub fn parseDataInCode(self: Object) ?[]const macho.data_in_code_entry {
                 const ndice = @divExact(dice.datasize, @sizeOf(macho.data_in_code_entry));
                 return @ptrCast(
                     [*]const macho.data_in_code_entry,
-                    @alignCast(@alignOf(macho.data_in_code_entry), &self.contents.buffer[dice.dataoff]),
+                    @alignCast(@alignOf(macho.data_in_code_entry), &self.contents[dice.dataoff]),
                 )[0..ndice];
             },
             else => {},
@@ -547,7 +541,7 @@ pub fn parseDataInCode(self: Object) ?[]const macho.data_in_code_entry {
 fn parseDysymtab(self: Object) ?macho.dysymtab_command {
     var it = LoadCommandIterator{
         .ncmds = self.header.ncmds,
-        .buffer = self.contents.buffer[@sizeOf(macho.mach_header_64)..][0..self.header.sizeofcmds],
+        .buffer = self.contents[@sizeOf(macho.mach_header_64)..][0..self.header.sizeofcmds],
     };
     while (it.next()) |cmd| {
         switch (cmd.cmd()) {
@@ -599,7 +593,7 @@ fn getSectionContents(self: Object, sect: macho.section_64) error{Overflow}![]co
         sect.offset,
         sect.offset + sect.size,
     });
-    return self.contents.buffer[sect.offset..][0..size];
+    return self.contents[sect.offset..][0..size];
 }
 
 pub fn getString(self: Object, off: u32) []const u8 {

@@ -10,8 +10,9 @@ const mem = std.mem;
 const Allocator = mem.Allocator;
 const Object = @import("Object.zig");
 
+file: fs.File,
+fat_offset: u64,
 name: []const u8,
-contents: []align(@alignOf(u64)) const u8,
 header: ar_hdr = undefined,
 
 /// Parsed table of contents.
@@ -95,13 +96,9 @@ pub fn deinit(self: *Archive, allocator: Allocator) void {
     }
     self.toc.deinit(allocator);
     allocator.free(self.name);
-    allocator.free(self.contents);
 }
 
-pub fn parse(self: *Archive, allocator: Allocator) !void {
-    var stream = std.io.fixedBufferStream(self.contents);
-    const reader = stream.reader();
-
+pub fn parse(self: *Archive, allocator: Allocator, reader: anytype) !void {
     const magic = try reader.readBytesNoEof(SARMAG);
     if (!mem.eql(u8, &magic, ARMAG)) {
         log.debug("invalid magic: expected '{s}', found '{s}'", .{ ARMAG, magic });
@@ -117,15 +114,15 @@ pub fn parse(self: *Archive, allocator: Allocator) !void {
         return error.NotArchive;
     }
 
-    var embedded_name = try parseName(allocator, self.header, reader);
+    const name_or_length = try self.header.nameOrLength();
+    var embedded_name = try parseName(allocator, name_or_length, reader);
     log.debug("parsing archive '{s}' at '{s}'", .{ embedded_name, self.name });
     defer allocator.free(embedded_name);
 
     try self.parseTableOfContents(allocator, reader);
 }
 
-fn parseName(allocator: Allocator, header: ar_hdr, reader: anytype) ![]u8 {
-    const name_or_length = try header.nameOrLength();
+fn parseName(allocator: Allocator, name_or_length: ar_hdr.NameOrLength, reader: anytype) ![]u8 {
     var name: []u8 = undefined;
     switch (name_or_length) {
         .Name => |n| {
@@ -190,19 +187,18 @@ pub fn parseObject(
     cpu_arch: std.Target.Cpu.Arch,
     offset: u32,
 ) !Object {
-    var stream = std.io.fixedBufferStream(self.contents);
-    const reader = stream.reader();
-    try stream.seekTo(offset);
+    const reader = self.file.reader();
+    try reader.context.seekTo(self.fat_offset + offset);
 
     const object_header = try reader.readStruct(ar_hdr);
-    const object_start = try stream.getPos();
 
     if (!mem.eql(u8, &object_header.ar_fmag, ARFMAG)) {
         log.err("invalid header delimiter: expected '{s}', found '{s}'", .{ ARFMAG, object_header.ar_fmag });
         return error.MalformedArchive;
     }
 
-    const object_name = try parseName(gpa, object_header, reader);
+    const name_or_length = try object_header.nameOrLength();
+    const object_name = try parseName(gpa, name_or_length, reader);
     defer gpa.free(object_name);
 
     log.debug("extracting object '{s}' from archive '{s}'", .{ object_name, self.name });
@@ -212,17 +208,22 @@ pub fn parseObject(
         const path = try std.os.realpath(self.name, &buffer);
         break :name try std.fmt.allocPrint(gpa, "{s}({s})", .{ path, object_name });
     };
-    const object_offset = try stream.getPos();
-    const object_size = (try object_header.size()) - (object_offset - object_start);
-    const contents = self.contents[object_offset..][0..object_size];
+
+    const object_name_len = switch (name_or_length) {
+        .Name => 0,
+        .Length => |len| len,
+    };
+    const object_size = (try object_header.size()) - object_name_len;
+    const contents = try gpa.allocWithOptions(u8, object_size, @alignOf(u64), null);
+    const amt = try reader.readAll(contents);
+    if (amt != object_size) {
+        return error.Io;
+    }
 
     var object = Object{
         .name = name,
         .mtime = try self.header.date(),
-        .contents = .{
-            .buffer = contents,
-            .owned = false,
-        },
+        .contents = contents,
     };
 
     try object.parse(gpa, cpu_arch);

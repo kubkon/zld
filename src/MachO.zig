@@ -575,10 +575,7 @@ fn parseObject(self: *MachO, path: []const u8) !bool {
     var object = Object{
         .name = name,
         .mtime = mtime,
-        .contents = .{
-            .buffer = contents,
-            .owned = true,
-        },
+        .contents = contents,
     };
 
     object.parse(gpa, cpu_arch) catch |err| switch (err) {
@@ -600,25 +597,21 @@ fn parseArchive(self: *MachO, path: []const u8, force_load: bool) !bool {
         error.FileNotFound => return false,
         else => |e| return e,
     };
-    defer file.close();
+    errdefer file.close();
 
     const name = try gpa.dupe(u8, path);
     const cpu_arch = self.options.target.cpu_arch.?;
-    const file_stat = try file.stat();
-    var file_size = math.cast(usize, file_stat.size) orelse return error.Overflow;
-
     const reader = file.reader();
-    const lib_offset = try fat.getLibraryOffset(reader, cpu_arch);
-    try file.seekTo(lib_offset);
-    file_size -= lib_offset;
-    const contents = try file.readToEndAllocOptions(gpa, file_size, file_size, @alignOf(u64), null);
+    const fat_offset = try fat.getLibraryOffset(reader, cpu_arch);
+    try reader.context.seekTo(fat_offset);
 
     var archive = Archive{
+        .file = file,
+        .fat_offset = fat_offset,
         .name = name,
-        .contents = contents,
     };
 
-    archive.parse(gpa) catch |err| switch (err) {
+    archive.parse(gpa, reader) catch |err| switch (err) {
         error.EndOfStream, error.NotArchive => {
             archive.deinit(gpa);
             return false;
@@ -2356,6 +2349,12 @@ pub fn deinit(self: *MachO) void {
     }
     self.managed_atoms.deinit(gpa);
     self.atom_by_index_table.deinit(gpa);
+}
+
+pub fn closeFiles(self: *const MachO) void {
+    for (self.archives.items) |archive| {
+        archive.file.close();
+    }
 }
 
 fn populateMetadata(self: *MachO) !void {
