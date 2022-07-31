@@ -18,7 +18,7 @@ pub const SearchStrategy = enum {
 };
 
 const usage =
-    \\Usage: ld64.zld [files...]
+    \\Usage: {s} [files...]
     \\
     \\General Options:
     \\
@@ -158,7 +158,7 @@ allow_undef: bool = false,
 
 pub fn parseArgs(arena: Allocator, ctx: Zld.MainCtx) !Options {
     if (ctx.args.len == 0) {
-        ctx.printSuccess("{s}", .{usage});
+        ctx.printSuccess(usage, .{ctx.cmd});
     }
 
     var positionals = std.ArrayList(Zld.LinkObject).init(arena);
@@ -212,16 +212,12 @@ pub fn parseArgs(arena: Allocator, ctx: Zld.MainCtx) !Options {
 
     while (args_iter.next()) |arg| {
         if (mem.eql(u8, arg, "--help") or mem.eql(u8, arg, "-h")) {
-            ctx.printSuccess("{s}", .{usage});
+            ctx.printSuccess(usage, .{ctx.cmd});
         } else if (mem.eql(u8, arg, "--debug-log")) {
             const scope = args_iter.next() orelse ctx.printFailure("Expected log scope after {s}", .{arg});
             try ctx.log_scopes.append(scope);
         } else if (mem.eql(u8, arg, "-syslibroot")) {
             syslibroot = args_iter.next() orelse ctx.printFailure("Expected path after {s}", .{arg});
-        } else if (mem.startsWith(u8, arg, "-l")) {
-            try libs.put(arg[2..], .{});
-        } else if (mem.startsWith(u8, arg, "-L")) {
-            try lib_dirs.append(arg[2..]);
         } else if (mem.eql(u8, arg, "-framework") or mem.eql(u8, arg, "-weak_framework")) {
             const name = args_iter.next() orelse ctx.printFailure("Expected framework name after {s}", .{arg});
             try frameworks.put(name, .{});
@@ -416,6 +412,16 @@ pub fn parseArgs(arena: Allocator, ctx: Zld.MainCtx) !Options {
             } else {
                 ctx.printFailure("Unknown option -undefined {s}", .{treatment});
             }
+        } else if (mem.eql(u8, arg, "-lto_library")) {
+            const lto_lib = args_iter.next() orelse
+                ctx.printFailure("Expected path after {s}", .{arg});
+            ctx.printFailure("TODO unimplemented -lto_library {s} option", .{lto_lib});
+        } else if (mem.eql(u8, arg, "-demangle")) {
+            ctx.printFailure("TODO unimplemented -demangle option", .{});
+        } else if (mem.startsWith(u8, arg, "-l")) {
+            try libs.put(arg[2..], .{});
+        } else if (mem.startsWith(u8, arg, "-L")) {
+            try lib_dirs.append(arg[2..]);
         } else {
             try positionals.append(.{
                 .path = arg,

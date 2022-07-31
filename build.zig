@@ -25,17 +25,20 @@ pub fn build(b: *Builder) void {
     exe.setTarget(target);
     exe.setBuildMode(mode);
     exe.addPackagePath("dis_x86_64", "zig-dis-x86_64/src/dis_x86_64.zig");
+    exe.linkLibC();
 
     const exe_opts = b.addOptions();
     exe.addOptions("build_options", exe_opts);
     exe_opts.addOption(bool, "enable_logging", enable_logging);
     exe.install();
 
-    const elf_symlink = symlink(exe, "ld.zld");
-    elf_symlink.step.dependOn(&exe.step);
-
-    const macho_symlink = symlink(exe, "ld64.zld");
-    macho_symlink.step.dependOn(&exe.step);
+    const gen_symlinks = symlinks(exe, &[_][]const u8{
+        "ld.zld",
+        "ld",
+        "ld64.zld",
+        "ld64",
+    });
+    gen_symlinks.step.dependOn(&exe.step);
 
     const tests = b.addTest("src/test.zig");
     tests.setBuildMode(mode);
@@ -51,45 +54,46 @@ pub fn build(b: *Builder) void {
     test_step.dependOn(&tests.step);
 }
 
-fn symlink(exe: *LibExeObjStep, name: []const u8) *CreateSymlinkStep {
-    const step = CreateSymlinkStep.create(exe.builder, exe.getOutputSource(), name);
+fn symlinks(exe: *LibExeObjStep, names: []const []const u8) *CreateSymlinksStep {
+    const step = CreateSymlinksStep.create(exe.builder, exe.getOutputSource(), names);
     exe.builder.getInstallStep().dependOn(&step.step);
     return step;
 }
 
-const CreateSymlinkStep = struct {
+const CreateSymlinksStep = struct {
     pub const base_id = .custom;
 
     step: Step,
     builder: *Builder,
     source: FileSource,
-    target: []const u8,
+    targets: []const []const u8,
 
     pub fn create(
         builder: *Builder,
         source: FileSource,
-        target: []const u8,
-    ) *CreateSymlinkStep {
-        const self = builder.allocator.create(CreateSymlinkStep) catch unreachable;
-        self.* = CreateSymlinkStep{
+        targets: []const []const u8,
+    ) *CreateSymlinksStep {
+        const self = builder.allocator.create(CreateSymlinksStep) catch unreachable;
+        self.* = CreateSymlinksStep{
             .builder = builder,
-            .step = Step.init(.log, builder.fmt("symlink {s} -> {s}", .{
+            .step = Step.init(.log, builder.fmt("symlinks to {s}", .{
                 source.getDisplayName(),
-                target,
             }), builder.allocator, make),
             .source = source,
-            .target = builder.dupe(target),
+            .targets = builder.dupeStrings(targets),
         };
         return self;
     }
 
     fn make(step: *Step) anyerror!void {
-        const self = @fieldParentPtr(CreateSymlinkStep, "step", step);
+        const self = @fieldParentPtr(CreateSymlinksStep, "step", step);
         const rel_source = fs.path.basename(self.source.getPath(self.builder));
-        const target_path = self.builder.getInstallPath(.bin, self.target);
-        fs.atomicSymLink(self.builder.allocator, rel_source, target_path) catch |err| {
-            log.err("Unable to symlink {s} -> {s}", .{ rel_source, target_path });
-            return err;
-        };
+        for (self.targets) |target| {
+            const target_path = self.builder.getInstallPath(.bin, target);
+            fs.atomicSymLink(self.builder.allocator, rel_source, target_path) catch |err| {
+                log.err("Unable to symlink {s} -> {s}", .{ rel_source, target_path });
+                return err;
+            };
+        }
     }
 };
