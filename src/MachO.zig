@@ -27,8 +27,6 @@ const Dylib = @import("MachO/Dylib.zig");
 const Object = @import("MachO/Object.zig");
 pub const Options = @import("MachO/Options.zig");
 const LibStub = @import("tapi.zig").LibStub;
-const LoadCommand = macho.LoadCommand;
-const SegmentCommand = macho.SegmentCommand;
 const StringTable = @import("strtab.zig").StringTable;
 const Trie = @import("MachO/Trie.zig");
 const Zld = @import("Zld.zig");
@@ -65,48 +63,12 @@ data_const_segment_cmd_index: ?u8 = null,
 data_segment_cmd_index: ?u8 = null,
 linkedit_segment_cmd_index: ?u8 = null,
 
-// __TEXT segment sections
 text_section_index: ?u8 = null,
 stubs_section_index: ?u8 = null,
 stub_helper_section_index: ?u8 = null,
-text_const_section_index: ?u8 = null,
-cstring_section_index: ?u8 = null,
-ustring_section_index: ?u8 = null,
-gcc_except_tab_section_index: ?u8 = null,
-unwind_info_section_index: ?u8 = null,
-eh_frame_section_index: ?u8 = null,
-
-objc_methlist_section_index: ?u8 = null,
-objc_methname_section_index: ?u8 = null,
-objc_methtype_section_index: ?u8 = null,
-objc_classname_section_index: ?u8 = null,
-
-// __DATA_CONST segment sections
 got_section_index: ?u8 = null,
-mod_init_func_section_index: ?u8 = null,
-mod_term_func_section_index: ?u8 = null,
-data_const_section_index: ?u8 = null,
-
-objc_cfstring_section_index: ?u8 = null,
-objc_classlist_section_index: ?u8 = null,
-objc_imageinfo_section_index: ?u8 = null,
-
-// __DATA segment sections
-tlv_section_index: ?u8 = null,
-tlv_data_section_index: ?u8 = null,
-tlv_bss_section_index: ?u8 = null,
-tlv_ptrs_section_index: ?u8 = null,
 la_symbol_ptr_section_index: ?u8 = null,
 data_section_index: ?u8 = null,
-bss_section_index: ?u8 = null,
-
-objc_const_section_index: ?u8 = null,
-objc_selrefs_section_index: ?u8 = null,
-objc_classrefs_section_index: ?u8 = null,
-objc_data_section_index: ?u8 = null,
-
-rustc_section_index: ?u8 = null,
-rustc_section_size: u64 = 0,
 
 locals: std.ArrayListUnmanaged(macho.nlist_64) = .{},
 globals: std.StringArrayHashMapUnmanaged(SymbolWithLoc) = .{},
@@ -338,8 +300,8 @@ pub fn flush(self: *MachO) !void {
     var dependent_libs = std.fifo.LinearFifo(struct {
         id: Dylib.Id,
         parent: u16,
-    }, .Dynamic).init(gpa);
-    defer dependent_libs.deinit();
+    }, .Dynamic).init(arena);
+
     try self.parsePositionals(positionals.items, syslibroot, &dependent_libs);
     try self.parseAndForceLoadStaticArchives(must_link_archives.keys());
     try self.parseLibs(libs.keys(), libs.values(), syslibroot, &dependent_libs);
@@ -351,8 +313,6 @@ pub fn flush(self: *MachO) !void {
 
     try self.resolveSymbolsInArchives();
     try self.resolveDyldStubBinder();
-    try self.createDyldPrivateAtom();
-    try self.createStubHelperPreambleAtom();
     try self.resolveSymbolsInDylibs();
     try self.createMhExecuteHeaderSymbol();
     try self.createDsoHandleSymbol();
@@ -368,7 +328,13 @@ pub fn flush(self: *MachO) !void {
         return error.FrameworkNotFound;
     }
 
+    for (self.objects.items) |*object| {
+        try object.scanInputSections(self);
+    }
+
+    try self.createDyldPrivateAtom();
     try self.createTentativeDefAtoms();
+    try self.createStubHelperPreambleAtom();
 
     for (self.objects.items) |*object, object_id| {
         try object.splitIntoAtoms(self, @intCast(u32, object_id));
@@ -378,7 +344,6 @@ pub fn flush(self: *MachO) !void {
         try dead_strip.gcAtoms(self);
     }
 
-    try self.pruneAndSortSections();
     try self.allocateSegments();
     try self.allocateSymbols();
 
@@ -386,18 +351,13 @@ pub fn flush(self: *MachO) !void {
 
     if (build_options.enable_logging) {
         self.logSymtab();
+        self.logSections();
         self.logAtoms();
     }
 
     try self.writeAtoms();
 
-    if (self.rustc_section_index) |id| {
-        const header = &self.sections.items(.header)[id];
-        header.size = self.rustc_section_size;
-    }
-
-    var lc_buffer = std.ArrayList(u8).init(self.base.allocator);
-    defer lc_buffer.deinit();
+    var lc_buffer = std.ArrayList(u8).init(arena);
     const lc_writer = lc_buffer.writer();
     var ncmds: u32 = 0;
 
@@ -451,9 +411,12 @@ pub fn flush(self: *MachO) !void {
     } else null;
     defer if (codesig) |*csig| csig.deinit(gpa);
 
-    var sizeofcmds = try self.writeSegmentHeaders(&ncmds);
-    try self.base.file.pwriteAll(lc_buffer.items, @sizeOf(macho.mach_header_64) + sizeofcmds);
-    try self.writeHeader(ncmds, @intCast(u32, lc_buffer.items.len + sizeofcmds));
+    var headers_buf = std.ArrayList(u8).init(arena);
+    try self.writeSegmentHeaders(&ncmds, headers_buf.writer());
+
+    try self.base.file.pwriteAll(headers_buf.items, @sizeOf(macho.mach_header_64));
+    try self.base.file.pwriteAll(lc_buffer.items, @sizeOf(macho.mach_header_64) + headers_buf.items.len);
+    try self.writeHeader(ncmds, @intCast(u32, lc_buffer.items.len + headers_buf.items.len));
 
     if (codesig) |*csig| {
         try self.writeCodeSignature(csig, codesig_offset.?); // code signing always comes last
@@ -846,369 +809,135 @@ pub fn getOutputSection(self: *MachO, sect: macho.section_64) !?u8 {
     const segname = sect.segName();
     const sectname = sect.sectName();
     const res: ?u8 = blk: {
-        switch (sect.type_()) {
-            macho.S_4BYTE_LITERALS, macho.S_8BYTE_LITERALS, macho.S_16BYTE_LITERALS => {
-                if (self.text_const_section_index == null) {
-                    self.text_const_section_index = try self.initSection(
-                        self.text_segment_cmd_index.?,
-                        "__const",
-                        .{},
-                    );
-                }
-                break :blk self.text_const_section_index.?;
+        if (mem.eql(u8, "__LLVM", segname)) {
+            log.debug("TODO LLVM section: type 0x{x}, name '{s},{s}'", .{
+                sect.flags, segname, sectname,
+            });
+            break :blk null;
+        }
+
+        if (sect.isCode()) {
+            if (self.text_section_index == null) {
+                self.text_section_index = try self.initSection(
+                    "__TEXT",
+                    "__text",
+                    .{
+                        .flags = macho.S_REGULAR |
+                            macho.S_ATTR_PURE_INSTRUCTIONS |
+                            macho.S_ATTR_SOME_INSTRUCTIONS,
+                    },
+                );
+            }
+            break :blk self.text_section_index.?;
+        }
+
+        if (sect.isDebug()) {
+            // TODO debug attributes
+            if (mem.eql(u8, "__LD", segname) and mem.eql(u8, "__compact_unwind", sectname)) {
+                log.debug("TODO compact unwind section: type 0x{x}, name '{s},{s}'", .{
+                    sect.flags, segname, sectname,
+                });
+            }
+            break :blk null;
+        }
+
+        switch (sect.@"type"()) {
+            macho.S_4BYTE_LITERALS,
+            macho.S_8BYTE_LITERALS,
+            macho.S_16BYTE_LITERALS,
+            => {
+                break :blk self.getSectionByName("__TEXT", "__const") orelse try self.initSection(
+                    "__TEXT",
+                    "__const",
+                    .{},
+                );
             },
             macho.S_CSTRING_LITERALS => {
-                if (mem.eql(u8, sectname, "__objc_methname")) {
-                    // TODO it seems the common values within the sections in objects are deduplicated/merged
-                    // on merging the sections' contents.
-                    if (self.objc_methname_section_index == null) {
-                        self.objc_methname_section_index = try self.initSection(
-                            self.text_segment_cmd_index.?,
-                            "__objc_methname",
-                            .{},
-                        );
-                    }
-                    break :blk self.objc_methname_section_index.?;
-                } else if (mem.eql(u8, sectname, "__objc_methtype")) {
-                    if (self.objc_methtype_section_index == null) {
-                        self.objc_methtype_section_index = try self.initSection(
-                            self.text_segment_cmd_index.?,
-                            "__objc_methtype",
-                            .{},
-                        );
-                    }
-                    break :blk self.objc_methtype_section_index.?;
-                } else if (mem.eql(u8, sectname, "__objc_classname")) {
-                    if (self.objc_classname_section_index == null) {
-                        self.objc_classname_section_index = try self.initSection(
-                            self.text_segment_cmd_index.?,
-                            "__objc_classname",
-                            .{},
-                        );
-                    }
-                    break :blk self.objc_classname_section_index.?;
-                }
-
-                if (self.cstring_section_index == null) {
-                    self.cstring_section_index = try self.initSection(
-                        self.text_segment_cmd_index.?,
-                        "__cstring",
-                        .{
-                            .flags = macho.S_CSTRING_LITERALS,
-                        },
-                    );
-                }
-                break :blk self.cstring_section_index.?;
-            },
-            macho.S_LITERAL_POINTERS => {
-                if (mem.eql(u8, segname, "__DATA") and mem.eql(u8, sectname, "__objc_selrefs")) {
-                    if (self.objc_selrefs_section_index == null) {
-                        self.objc_selrefs_section_index = try self.initSection(
-                            self.data_segment_cmd_index.?,
-                            "__objc_selrefs",
-                            .{
-                                .flags = macho.S_LITERAL_POINTERS,
-                            },
-                        );
-                    }
-                    break :blk self.objc_selrefs_section_index.?;
-                } else {
-                    // TODO investigate
-                    break :blk null;
-                }
-            },
-            macho.S_MOD_INIT_FUNC_POINTERS => {
-                if (self.mod_init_func_section_index == null) {
-                    self.mod_init_func_section_index = try self.initSection(
-                        self.data_const_segment_cmd_index.?,
-                        "__mod_init_func",
-                        .{
-                            .flags = macho.S_MOD_INIT_FUNC_POINTERS,
-                        },
-                    );
-                }
-                break :blk self.mod_init_func_section_index.?;
-            },
-            macho.S_MOD_TERM_FUNC_POINTERS => {
-                if (self.mod_term_func_section_index == null) {
-                    self.mod_term_func_section_index = try self.initSection(
-                        self.data_const_segment_cmd_index.?,
-                        "__mod_term_func",
-                        .{
-                            .flags = macho.S_MOD_TERM_FUNC_POINTERS,
-                        },
-                    );
-                }
-                break :blk self.mod_term_func_section_index.?;
-            },
-            macho.S_ZEROFILL => {
-                if (self.bss_section_index == null) {
-                    self.bss_section_index = try self.initSection(
-                        self.data_segment_cmd_index.?,
-                        "__bss",
-                        .{
-                            .flags = macho.S_ZEROFILL,
-                        },
-                    );
-                }
-                break :blk self.bss_section_index.?;
-            },
-            macho.S_THREAD_LOCAL_VARIABLES => {
-                if (self.tlv_section_index == null) {
-                    self.tlv_section_index = try self.initSection(
-                        self.data_segment_cmd_index.?,
-                        "__thread_vars",
-                        .{
-                            .flags = macho.S_THREAD_LOCAL_VARIABLES,
-                        },
-                    );
-                }
-                break :blk self.tlv_section_index.?;
-            },
-            macho.S_THREAD_LOCAL_VARIABLE_POINTERS => {
-                if (self.tlv_ptrs_section_index == null) {
-                    self.tlv_ptrs_section_index = try self.initSection(
-                        self.data_segment_cmd_index.?,
-                        "__thread_ptrs",
-                        .{
-                            .flags = macho.S_THREAD_LOCAL_VARIABLE_POINTERS,
-                        },
-                    );
-                }
-                break :blk self.tlv_ptrs_section_index.?;
-            },
-            macho.S_THREAD_LOCAL_REGULAR => {
-                if (self.tlv_data_section_index == null) {
-                    self.tlv_data_section_index = try self.initSection(
-                        self.data_segment_cmd_index.?,
-                        "__thread_data",
-                        .{
-                            .flags = macho.S_THREAD_LOCAL_REGULAR,
-                        },
-                    );
-                }
-                break :blk self.tlv_data_section_index.?;
-            },
-            macho.S_THREAD_LOCAL_ZEROFILL => {
-                if (self.tlv_bss_section_index == null) {
-                    self.tlv_bss_section_index = try self.initSection(
-                        self.data_segment_cmd_index.?,
-                        "__thread_bss",
-                        .{
-                            .flags = macho.S_THREAD_LOCAL_ZEROFILL,
-                        },
-                    );
-                }
-                break :blk self.tlv_bss_section_index.?;
-            },
-            macho.S_COALESCED => {
-                if (mem.eql(u8, "__TEXT", segname) and mem.eql(u8, "__eh_frame", sectname)) {
-                    // TODO I believe __eh_frame is currently part of __unwind_info section
-                    // in the latest ld64 output.
-                    if (self.eh_frame_section_index == null) {
-                        self.eh_frame_section_index = try self.initSection(
-                            self.text_segment_cmd_index.?,
-                            "__eh_frame",
-                            .{},
-                        );
-                    }
-                    break :blk self.eh_frame_section_index.?;
-                }
-
-                // TODO audit this: is this the right mapping?
-                if (self.data_const_section_index == null) {
-                    self.data_const_section_index = try self.initSection(
-                        self.data_const_segment_cmd_index.?,
-                        "__const",
+                if (mem.startsWith(u8, sectname, "__objc")) {
+                    break :blk self.getSectionByName(segname, sectname) orelse try self.initSection(
+                        segname,
+                        sectname,
                         .{},
                     );
                 }
-                break :blk self.data_const_section_index.?;
+                break :blk self.getSectionByName("__TEXT", "__cstring") orelse try self.initSection(
+                    "__TEXT",
+                    "__cstring",
+                    .{ .flags = macho.S_CSTRING_LITERALS },
+                );
+            },
+            macho.S_MOD_INIT_FUNC_POINTERS,
+            macho.S_MOD_TERM_FUNC_POINTERS,
+            => {
+                break :blk self.getSectionByName("__DATA_CONST", sectname) orelse try self.initSection(
+                    "__DATA_CONST",
+                    sectname,
+                    .{ .flags = sect.flags },
+                );
+            },
+            macho.S_LITERAL_POINTERS,
+            macho.S_ZEROFILL,
+            macho.S_THREAD_LOCAL_VARIABLES,
+            macho.S_THREAD_LOCAL_VARIABLE_POINTERS,
+            macho.S_THREAD_LOCAL_REGULAR,
+            macho.S_THREAD_LOCAL_ZEROFILL,
+            => {
+                break :blk self.getSectionByName(segname, sectname) orelse try self.initSection(
+                    segname,
+                    sectname,
+                    .{ .flags = sect.flags },
+                );
+            },
+            macho.S_COALESCED => {
+                break :blk self.getSectionByName(segname, sectname) orelse try self.initSection(
+                    segname,
+                    sectname,
+                    .{},
+                );
             },
             macho.S_REGULAR => {
-                if (sect.isCode()) {
-                    if (self.text_section_index == null) {
-                        self.text_section_index = try self.initSection(
-                            self.text_segment_cmd_index.?,
-                            "__text",
-                            .{
-                                .flags = macho.S_REGULAR |
-                                    macho.S_ATTR_PURE_INSTRUCTIONS |
-                                    macho.S_ATTR_SOME_INSTRUCTIONS,
-                            },
-                        );
-                    }
-                    break :blk self.text_section_index.?;
-                }
-                if (sect.isDebug()) {
-                    // TODO debug attributes
-                    if (mem.eql(u8, "__LD", segname) and mem.eql(u8, "__compact_unwind", sectname)) {
-                        log.debug("TODO compact unwind section: type 0x{x}, name '{s},{s}'", .{
-                            sect.flags, segname, sectname,
-                        });
-                    }
-                    break :blk null;
-                }
-
                 if (mem.eql(u8, segname, "__TEXT")) {
-                    if (mem.eql(u8, sectname, "__ustring")) {
-                        if (self.ustring_section_index == null) {
-                            self.ustring_section_index = try self.initSection(
-                                self.text_segment_cmd_index.?,
-                                "__ustring",
-                                .{},
-                            );
-                        }
-                        break :blk self.ustring_section_index.?;
-                    } else if (mem.eql(u8, sectname, "__gcc_except_tab")) {
-                        if (self.gcc_except_tab_section_index == null) {
-                            self.gcc_except_tab_section_index = try self.initSection(
-                                self.text_segment_cmd_index.?,
-                                "__gcc_except_tab",
-                                .{},
-                            );
-                        }
-                        break :blk self.gcc_except_tab_section_index.?;
-                    } else if (mem.eql(u8, sectname, "__objc_methlist")) {
-                        if (self.objc_methlist_section_index == null) {
-                            self.objc_methlist_section_index = try self.initSection(
-                                self.text_segment_cmd_index.?,
-                                "__objc_methlist",
-                                .{},
-                            );
-                        }
-                        break :blk self.objc_methlist_section_index.?;
-                    } else if (mem.eql(u8, sectname, "__rodata") or
+                    if (mem.eql(u8, sectname, "__rodata") or
                         mem.eql(u8, sectname, "__typelink") or
                         mem.eql(u8, sectname, "__itablink") or
                         mem.eql(u8, sectname, "__gosymtab") or
                         mem.eql(u8, sectname, "__gopclntab"))
                     {
-                        if (self.data_const_section_index == null) {
-                            self.data_const_section_index = try self.initSection(
-                                self.data_const_segment_cmd_index.?,
-                                "__const",
-                                .{},
-                            );
-                        }
-                        break :blk self.data_const_section_index.?;
-                    } else {
-                        if (self.text_const_section_index == null) {
-                            self.text_const_section_index = try self.initSection(
-                                self.text_segment_cmd_index.?,
-                                "__const",
-                                .{},
-                            );
-                        }
-                        break :blk self.text_const_section_index.?;
-                    }
-                }
-
-                if (mem.eql(u8, segname, "__DATA_CONST")) {
-                    if (self.data_const_section_index == null) {
-                        self.data_const_section_index = try self.initSection(
-                            self.data_const_segment_cmd_index.?,
+                        break :blk self.getSectionByName("__DATA_CONST", "__const") orelse try self.initSection(
+                            "__DATA_CONST",
                             "__const",
                             .{},
                         );
                     }
-                    break :blk self.data_const_section_index.?;
                 }
-
                 if (mem.eql(u8, segname, "__DATA")) {
-                    if (mem.eql(u8, sectname, "__const")) {
-                        if (self.data_const_section_index == null) {
-                            self.data_const_section_index = try self.initSection(
-                                self.data_const_segment_cmd_index.?,
-                                "__const",
-                                .{},
-                            );
-                        }
-                        break :blk self.data_const_section_index.?;
-                    } else if (mem.eql(u8, sectname, "__cfstring")) {
-                        if (self.objc_cfstring_section_index == null) {
-                            self.objc_cfstring_section_index = try self.initSection(
-                                self.data_const_segment_cmd_index.?,
-                                "__cfstring",
-                                .{},
-                            );
-                        }
-                        break :blk self.objc_cfstring_section_index.?;
-                    } else if (mem.eql(u8, sectname, "__objc_classlist")) {
-                        if (self.objc_classlist_section_index == null) {
-                            self.objc_classlist_section_index = try self.initSection(
-                                self.data_const_segment_cmd_index.?,
-                                "__objc_classlist",
-                                .{},
-                            );
-                        }
-                        break :blk self.objc_classlist_section_index.?;
-                    } else if (mem.eql(u8, sectname, "__objc_imageinfo")) {
-                        if (self.objc_imageinfo_section_index == null) {
-                            self.objc_imageinfo_section_index = try self.initSection(
-                                self.data_const_segment_cmd_index.?,
-                                "__objc_imageinfo",
-                                .{},
-                            );
-                        }
-                        break :blk self.objc_imageinfo_section_index.?;
-                    } else if (mem.eql(u8, sectname, "__objc_const")) {
-                        if (self.objc_const_section_index == null) {
-                            self.objc_const_section_index = try self.initSection(
-                                self.data_segment_cmd_index.?,
-                                "__objc_const",
-                                .{},
-                            );
-                        }
-                        break :blk self.objc_const_section_index.?;
-                    } else if (mem.eql(u8, sectname, "__objc_classrefs")) {
-                        if (self.objc_classrefs_section_index == null) {
-                            self.objc_classrefs_section_index = try self.initSection(
-                                self.data_segment_cmd_index.?,
-                                "__objc_classrefs",
-                                .{},
-                            );
-                        }
-                        break :blk self.objc_classrefs_section_index.?;
-                    } else if (mem.eql(u8, sectname, "__objc_data")) {
-                        if (self.objc_data_section_index == null) {
-                            self.objc_data_section_index = try self.initSection(
-                                self.data_segment_cmd_index.?,
-                                "__objc_data",
-                                .{},
-                            );
-                        }
-                        break :blk self.objc_data_section_index.?;
-                    } else if (mem.eql(u8, sectname, ".rustc")) {
-                        if (self.rustc_section_index == null) {
-                            self.rustc_section_index = try self.initSection(
-                                self.data_segment_cmd_index.?,
-                                ".rustc",
-                                .{},
-                            );
-                            // We need to preserve the section size for rustc to properly
-                            // decompress the metadata.
-                            self.rustc_section_size = sect.size;
-                        }
-                        break :blk self.rustc_section_index.?;
-                    } else {
+                    if (mem.eql(u8, sectname, "__const") or
+                        mem.eql(u8, sectname, "__cfstring") or
+                        mem.eql(u8, sectname, "__objc_classlist") or
+                        mem.eql(u8, sectname, "__objc_imageinfo"))
+                    {
+                        break :blk self.getSectionByName("__DATA_CONST", sectname) orelse
+                            try self.initSection(
+                            "__DATA_CONST",
+                            sectname,
+                            .{},
+                        );
+                    } else if (mem.eql(u8, sectname, "__data")) {
                         if (self.data_section_index == null) {
                             self.data_section_index = try self.initSection(
-                                self.data_segment_cmd_index.?,
-                                "__data",
+                                segname,
+                                sectname,
                                 .{},
                             );
                         }
                         break :blk self.data_section_index.?;
                     }
                 }
-
-                if (mem.eql(u8, "__LLVM", segname) and mem.eql(u8, "__asm", sectname)) {
-                    log.debug("TODO LLVM asm section: type 0x{x}, name '{s},{s}'", .{
-                        sect.flags, segname, sectname,
-                    });
-                }
-                break :blk null;
+                break :blk self.getSectionByName(segname, sectname) orelse try self.initSection(
+                    segname,
+                    sectname,
+                    .{},
+                );
             },
             else => break :blk null,
         }
@@ -1247,87 +976,6 @@ fn getSegmentAllocBase(self: MachO, indices: []const ?u8) struct { vmaddr: u64, 
         };
     }
     return .{ .vmaddr = 0, .fileoff = 0 };
-}
-
-fn pruneAndSortSections(self: *MachO) !void {
-    const gpa = self.base.allocator;
-
-    var mapping = std.AutoArrayHashMap(u8, ?u8).init(gpa);
-    defer mapping.deinit();
-
-    var sections = self.sections.toOwnedSlice();
-    defer sections.deinit(gpa);
-    try self.sections.ensureTotalCapacity(gpa, sections.len);
-
-    for (&[_]*?u8{
-        // __TEXT
-        &self.text_section_index,
-        &self.stubs_section_index,
-        &self.stub_helper_section_index,
-        &self.gcc_except_tab_section_index,
-        &self.cstring_section_index,
-        &self.ustring_section_index,
-        &self.text_const_section_index,
-        &self.objc_methlist_section_index,
-        &self.objc_methname_section_index,
-        &self.objc_methtype_section_index,
-        &self.objc_classname_section_index,
-        &self.eh_frame_section_index,
-        // __DATA_CONST
-        &self.got_section_index,
-        &self.mod_init_func_section_index,
-        &self.mod_term_func_section_index,
-        &self.data_const_section_index,
-        &self.objc_cfstring_section_index,
-        &self.objc_classlist_section_index,
-        &self.objc_imageinfo_section_index,
-        // __DATA
-        &self.rustc_section_index,
-        &self.la_symbol_ptr_section_index,
-        &self.objc_const_section_index,
-        &self.objc_selrefs_section_index,
-        &self.objc_classrefs_section_index,
-        &self.objc_data_section_index,
-        &self.data_section_index,
-        &self.tlv_section_index,
-        &self.tlv_ptrs_section_index,
-        &self.tlv_data_section_index,
-        &self.tlv_bss_section_index,
-        &self.bss_section_index,
-    }) |maybe_index| {
-        const old_idx = maybe_index.* orelse continue;
-        const segment_index = sections.items(.segment_index)[old_idx];
-        const header = sections.items(.header)[old_idx];
-        const last_atom = sections.items(.last_atom)[old_idx];
-        if (header.size == 0) {
-            log.debug("pruning section {s},{s}", .{ header.segName(), header.sectName() });
-            maybe_index.* = null;
-            const seg = &self.segments.items[segment_index];
-            seg.cmdsize -= @sizeOf(macho.section_64);
-            seg.nsects -= 1;
-        } else {
-            maybe_index.* = @intCast(u8, self.sections.slice().len);
-            self.sections.appendAssumeCapacity(.{
-                .segment_index = segment_index,
-                .header = header,
-                .last_atom = last_atom,
-            });
-        }
-        try mapping.putNoClobber(old_idx, maybe_index.*);
-    }
-
-    for (self.segments.items) |*seg| {
-        const segname = seg.segName();
-        if (seg.nsects == 0 and
-            !mem.eql(u8, "__TEXT", segname) and
-            !mem.eql(u8, "__PAGEZERO", segname) and
-            !mem.eql(u8, "__LINKEDIT", segname))
-        {
-            // Segment has now become empty, so mark it as such
-            log.debug("marking segment {s} as dead", .{seg.segName()});
-            seg.cmd = @intToEnum(macho.LC, 0);
-        }
-    }
 }
 
 pub fn createEmptyAtom(gpa: Allocator, sym_index: u32, size: u64, alignment: u32) !*Atom {
@@ -1783,11 +1431,16 @@ fn createTentativeDefAtoms(self: *MachO) !void {
         // text blocks for each tentative definition.
         const size = sym.n_value;
         const alignment = (sym.n_desc >> 8) & 0x0f;
+        const n_sect = (try self.getOutputSection(.{
+            .segname = makeStaticString("__DATA"),
+            .sectname = makeStaticString("__bss"),
+            .flags = macho.S_ZEROFILL,
+        })).?;
 
         sym.* = .{
             .n_strx = sym.n_strx,
             .n_type = macho.N_SECT | macho.N_EXT,
-            .n_sect = 0,
+            .n_sect = n_sect,
             .n_desc = 0,
             .n_value = 0,
         };
@@ -1795,7 +1448,7 @@ fn createTentativeDefAtoms(self: *MachO) !void {
         const atom = try MachO.createEmptyAtom(gpa, global.sym_index, size, alignment);
         atom.file = global.file;
 
-        try self.allocateAtom(atom, self.bss_section_index.?);
+        try self.allocateAtom(atom, n_sect);
 
         if (global.file) |file| {
             const object = &self.objects.items[file];
@@ -2390,13 +2043,11 @@ fn populateMetadata(self: *MachO) !void {
     }
 
     if (self.text_section_index == null) {
-        self.text_section_index = try self.initSection(
-            self.text_segment_cmd_index.?,
-            "__text",
-            .{
-                .flags = macho.S_REGULAR | macho.S_ATTR_PURE_INSTRUCTIONS | macho.S_ATTR_SOME_INSTRUCTIONS,
-            },
-        );
+        self.text_section_index = try self.initSection("__TEXT", "__text", .{
+            .flags = macho.S_REGULAR |
+                macho.S_ATTR_PURE_INSTRUCTIONS |
+                macho.S_ATTR_SOME_INSTRUCTIONS,
+        });
     }
 
     if (self.stubs_section_index == null) {
@@ -2405,24 +2056,20 @@ fn populateMetadata(self: *MachO) !void {
             .aarch64 => 3 * @sizeOf(u32),
             else => unreachable, // unhandled architecture type
         };
-        self.stubs_section_index = try self.initSection(
-            self.text_segment_cmd_index.?,
-            "__stubs",
-            .{
-                .flags = macho.S_SYMBOL_STUBS | macho.S_ATTR_PURE_INSTRUCTIONS | macho.S_ATTR_SOME_INSTRUCTIONS,
-                .reserved2 = stub_size,
-            },
-        );
+        self.stubs_section_index = try self.initSection("__TEXT", "__stubs", .{
+            .flags = macho.S_SYMBOL_STUBS |
+                macho.S_ATTR_PURE_INSTRUCTIONS |
+                macho.S_ATTR_SOME_INSTRUCTIONS,
+            .reserved2 = stub_size,
+        });
     }
 
     if (self.stub_helper_section_index == null) {
-        self.stub_helper_section_index = try self.initSection(
-            self.text_segment_cmd_index.?,
-            "__stub_helper",
-            .{
-                .flags = macho.S_REGULAR | macho.S_ATTR_PURE_INSTRUCTIONS | macho.S_ATTR_SOME_INSTRUCTIONS,
-            },
-        );
+        self.stub_helper_section_index = try self.initSection("__TEXT", "__stub_helper", .{
+            .flags = macho.S_REGULAR |
+                macho.S_ATTR_PURE_INSTRUCTIONS |
+                macho.S_ATTR_SOME_INSTRUCTIONS,
+        });
     }
 
     if (self.data_const_segment_cmd_index == null) {
@@ -2436,13 +2083,9 @@ fn populateMetadata(self: *MachO) !void {
     }
 
     if (self.got_section_index == null) {
-        self.got_section_index = try self.initSection(
-            self.data_const_segment_cmd_index.?,
-            "__got",
-            .{
-                .flags = macho.S_NON_LAZY_SYMBOL_POINTERS,
-            },
-        );
+        self.got_section_index = try self.initSection("__DATA_CONST", "__got", .{
+            .flags = macho.S_NON_LAZY_SYMBOL_POINTERS,
+        });
     }
 
     if (self.data_segment_cmd_index == null) {
@@ -2456,61 +2099,13 @@ fn populateMetadata(self: *MachO) !void {
     }
 
     if (self.la_symbol_ptr_section_index == null) {
-        self.la_symbol_ptr_section_index = try self.initSection(
-            self.data_segment_cmd_index.?,
-            "__la_symbol_ptr",
-            .{
-                .flags = macho.S_LAZY_SYMBOL_POINTERS,
-            },
-        );
+        self.la_symbol_ptr_section_index = try self.initSection("__DATA", "__la_symbol_ptr", .{
+            .flags = macho.S_LAZY_SYMBOL_POINTERS,
+        });
     }
 
     if (self.data_section_index == null) {
-        self.data_section_index = try self.initSection(
-            self.data_segment_cmd_index.?,
-            "__data",
-            .{},
-        );
-    }
-
-    if (self.tlv_section_index == null) {
-        self.tlv_section_index = try self.initSection(
-            self.data_segment_cmd_index.?,
-            "__thread_vars",
-            .{
-                .flags = macho.S_THREAD_LOCAL_VARIABLES,
-            },
-        );
-    }
-
-    if (self.tlv_data_section_index == null) {
-        self.tlv_data_section_index = try self.initSection(
-            self.data_segment_cmd_index.?,
-            "__thread_data",
-            .{
-                .flags = macho.S_THREAD_LOCAL_REGULAR,
-            },
-        );
-    }
-
-    if (self.tlv_bss_section_index == null) {
-        self.tlv_bss_section_index = try self.initSection(
-            self.data_segment_cmd_index.?,
-            "__thread_bss",
-            .{
-                .flags = macho.S_THREAD_LOCAL_ZEROFILL,
-            },
-        );
-    }
-
-    if (self.bss_section_index == null) {
-        self.bss_section_index = try self.initSection(
-            self.data_segment_cmd_index.?,
-            "__bss",
-            .{
-                .flags = macho.S_ZEROFILL,
-            },
-        );
+        self.data_section_index = try self.initSection("__DATA", "__data", .{});
     }
 
     if (self.linkedit_segment_cmd_index == null) {
@@ -2615,7 +2210,7 @@ fn calcLCsSize(self: *MachO, assume_max_path_len: bool) !u32 {
     return @intCast(u32, sizeofcmds);
 }
 
-fn calcMinHeaderpad(self: *MachO) !u64 {
+fn calcMinHeaderPad(self: *MachO) !u64 {
     var padding: u32 = (try self.calcLCsSize(false)) + (self.options.headerpad orelse 0);
     log.debug("minimum requested headerpad size 0x{x}", .{padding + @sizeOf(macho.mach_header_64)});
 
@@ -2747,7 +2342,7 @@ fn writeAtoms(self: *MachO) !void {
         const header = slice.items(.header)[sect_id];
         var atom = last_atom;
 
-        if (header.flags == macho.S_ZEROFILL or header.flags == macho.S_THREAD_LOCAL_ZEROFILL) continue;
+        if (header.isZerofill()) continue;
 
         var buffer = std.ArrayList(u8).init(gpa);
         defer buffer.deinit();
@@ -2800,21 +2395,22 @@ fn writeAtoms(self: *MachO) !void {
 fn allocateSegments(self: *MachO) !void {
     try self.allocateSegment(self.text_segment_cmd_index, &.{
         self.pagezero_segment_cmd_index,
-    }, try self.calcMinHeaderpad());
+    }, try self.calcMinHeaderPad());
 
     if (self.text_segment_cmd_index) |index| blk: {
-        const seg = &self.segments.items[index];
-        if (seg.nsects == 0) break :blk;
+        const indexes = self.getSectionIndexes(index);
+        if (indexes.start == indexes.end) break :blk;
+        const seg = self.segments.items[index];
 
         // Shift all sections to the back to minimize jump size between __TEXT and __DATA segments.
         var min_alignment: u32 = 0;
-        for (self.sections.items(.header)[0..seg.nsects]) |header| {
+        for (self.sections.items(.header)[indexes.start..indexes.end]) |header| {
             const alignment = try math.powi(u32, 2, header.@"align");
             min_alignment = math.max(min_alignment, alignment);
         }
 
         assert(min_alignment > 0);
-        const last_header = self.sections.items(.header)[seg.nsects - 1];
+        const last_header = self.sections.items(.header)[indexes.end - 1];
         const shift: u32 = shift: {
             const diff = seg.filesize - last_header.offset - last_header.size;
             const factor = @divTrunc(diff, min_alignment);
@@ -2822,7 +2418,7 @@ fn allocateSegments(self: *MachO) !void {
         };
 
         if (shift > 0) {
-            for (self.sections.items(.header)[0..seg.nsects]) |*header| {
+            for (self.sections.items(.header)[indexes.start..indexes.end]) |*header| {
                 header.offset += shift;
                 header.addr += shift;
             }
@@ -2859,16 +2455,14 @@ fn allocateSegment(self: *MachO, maybe_index: ?u8, indices: []const ?u8, init_si
     seg.vmsize = init_size;
 
     // Allocate the sections according to their alignment at the beginning of the segment.
+    const indexes = self.getSectionIndexes(index);
     var start = init_size;
     const slice = self.sections.slice();
-    for (slice.items(.header)) |*header, sect_id| {
-        const segment_index = slice.items(.segment_index)[sect_id];
-        if (segment_index != index) continue;
-        const is_zerofill = header.flags == macho.S_ZEROFILL or header.flags == macho.S_THREAD_LOCAL_ZEROFILL;
+    for (slice.items(.header)[indexes.start..indexes.end]) |*header| {
         const alignment = try math.powi(u32, 2, header.@"align");
         const start_aligned = mem.alignForwardGeneric(u64, start, alignment);
 
-        header.offset = if (is_zerofill)
+        header.offset = if (header.isZerofill())
             0
         else
             @intCast(u32, seg.fileoff + start_aligned);
@@ -2876,7 +2470,7 @@ fn allocateSegment(self: *MachO, maybe_index: ?u8, indices: []const ?u8, init_si
 
         start = start_aligned + header.size;
 
-        if (!is_zerofill) {
+        if (!header.isZerofill()) {
             seg.filesize = start;
         }
         seg.vmsize = start;
@@ -2894,50 +2488,103 @@ const InitSectionOpts = struct {
 
 fn initSection(
     self: *MachO,
-    segment_id: u8,
+    segname: []const u8,
     sectname: []const u8,
     opts: InitSectionOpts,
 ) !u8 {
-    const gpa = self.base.allocator;
+    const segment_id = self.getSegmentByName(segname).?;
     const seg = &self.segments.items[segment_id];
-    const index = @intCast(u8, self.sections.slice().len);
-    try self.sections.append(gpa, .{
-        .segment_index = segment_id,
-        .header = .{
-            .sectname = makeStaticString(sectname),
-            .segname = seg.segname,
-            .flags = opts.flags,
-            .reserved1 = opts.reserved1,
-            .reserved2 = opts.reserved2,
-        },
-        .last_atom = undefined,
+    const index = try self.insertSection(segment_id, .{
+        .sectname = makeStaticString(sectname),
+        .segname = seg.segname,
+        .flags = opts.flags,
+        .reserved1 = opts.reserved1,
+        .reserved2 = opts.reserved2,
     });
     seg.cmdsize += @sizeOf(macho.section_64);
     seg.nsects += 1;
     return index;
 }
 
-fn writeSegmentHeaders(self: *MachO, ncmds: *u32) !u64 {
-    var buf = std.ArrayList(u8).init(self.base.allocator);
-    defer buf.deinit();
-    const writer = buf.writer();
+fn getSectionPrecedence(header: macho.section_64) u4 {
+    if (header.isCode()) {
+        if (mem.eql(u8, "__text", header.sectName())) return 0x0;
+        if (header.@"type"() == macho.S_SYMBOL_STUBS) return 0x1;
+        return 0x2;
+    }
+    switch (header.@"type"()) {
+        macho.S_NON_LAZY_SYMBOL_POINTERS,
+        macho.S_LAZY_SYMBOL_POINTERS,
+        => return 0x0,
+        macho.S_MOD_INIT_FUNC_POINTERS => return 0x1,
+        macho.S_MOD_TERM_FUNC_POINTERS => return 0x2,
+        macho.S_ZEROFILL => return 0xf,
+        macho.S_THREAD_LOCAL_REGULAR => return 0xd,
+        macho.S_THREAD_LOCAL_ZEROFILL => return 0xe,
+        else => if (mem.eql(u8, "__eh_frame", header.sectName()))
+            return 0xf
+        else
+            return 0x3,
+    }
+}
 
-    var count: usize = 0;
-    for (self.segments.items) |seg| {
-        if (seg.cmd == .NONE) continue;
-        try writer.writeStruct(seg);
+fn insertSection(self: *MachO, segment_index: u8, header: macho.section_64) !u8 {
+    const precedence = getSectionPrecedence(header);
+    const indexes = self.getSectionIndexes(segment_index);
+    const insertion_index = for (self.sections.items(.header)[indexes.start..indexes.end]) |hdr, i| {
+        if (getSectionPrecedence(hdr) > precedence) break @intCast(u8, i + indexes.start);
+    } else indexes.end;
+    log.debug("inserting section '{s},{s}' at index {d}", .{
+        header.segName(),
+        header.sectName(),
+        insertion_index,
+    });
+    for (&[_]*?u8{
+        &self.text_section_index,
+        &self.stubs_section_index,
+        &self.stub_helper_section_index,
+        &self.got_section_index,
+        &self.la_symbol_ptr_section_index,
+        &self.data_section_index,
+    }) |maybe_index| {
+        const index = maybe_index.* orelse continue;
+        if (insertion_index <= index) maybe_index.* = index + 1;
+    }
+    try self.sections.insert(self.base.allocator, insertion_index, .{
+        .segment_index = segment_index,
+        .header = header,
+        .last_atom = undefined,
+    });
+    return insertion_index;
+}
 
-        // TODO
-        for (self.sections.items(.header)[count..][0..seg.nsects]) |header| {
+fn writeSegmentHeaders(self: *MachO, ncmds: *u32, writer: anytype) !void {
+    for (self.segments.items) |seg, i| {
+        const indexes = self.getSectionIndexes(@intCast(u8, i));
+        var out_seg = seg;
+        out_seg.cmdsize = @sizeOf(macho.segment_command_64);
+        out_seg.nsects = 0;
+
+        // Update section headers count; any section with size of 0 is excluded
+        // since it doesn't have any data in the final binary file.
+        for (self.sections.items(.header)[indexes.start..indexes.end]) |header| {
+            if (header.size == 0) continue;
+            out_seg.cmdsize += @sizeOf(macho.section_64);
+            out_seg.nsects += 1;
+        }
+
+        if (out_seg.nsects == 0 and
+            (mem.eql(u8, out_seg.segName(), "__DATA_CONST") or
+            mem.eql(u8, out_seg.segName(), "__DATA"))) continue;
+
+        try writer.writeStruct(out_seg);
+        for (self.sections.items(.header)[indexes.start..indexes.end]) |header| {
+            if (header.size == 0) continue;
             try writer.writeStruct(header);
         }
 
-        count += seg.nsects;
         ncmds.* += 1;
     }
-
-    try self.base.file.pwriteAll(buf.items, @sizeOf(macho.mach_header_64));
-    return buf.items.len;
 }
 
 fn writeLinkeditSegmentData(self: *MachO, ncmds: *u32, lc_writer: anytype) !void {
@@ -3708,7 +3355,7 @@ fn writeHeader(self: *MachO, ncmds: u32, sizeofcmds: u32) !void {
         },
     }
 
-    if (self.tlv_section_index) |_| {
+    if (self.getSectionByName("__DATA", "__thread_vars")) |_| {
         header.flags |= macho.MH_HAS_TLV_DESCRIPTORS;
     }
 
@@ -3725,6 +3372,29 @@ pub fn makeStaticString(bytes: []const u8) [16]u8 {
     assert(bytes.len <= buf.len);
     mem.copy(u8, &buf, bytes);
     return buf;
+}
+
+fn getSegmentByName(self: MachO, segname: []const u8) ?u8 {
+    for (self.segments.items) |seg, i| {
+        if (mem.eql(u8, segname, seg.segName())) return @intCast(u8, i);
+    } else return null;
+}
+
+pub fn getSectionByName(self: MachO, segname: []const u8, sectname: []const u8) ?u8 {
+    // TODO investigate caching with a hashmap
+    for (self.sections.items(.header)) |header, i| {
+        if (mem.eql(u8, header.segName(), segname) and mem.eql(u8, header.sectName(), sectname))
+            return @intCast(u8, i);
+    } else return null;
+}
+
+pub fn getSectionIndexes(self: MachO, segment_index: u8) struct { start: u8, end: u8 } {
+    var start: u8 = 0;
+    const nsects = for (self.segments.items) |seg, i| {
+        if (i == segment_index) break @intCast(u8, seg.nsects);
+        start += @intCast(u8, seg.nsects);
+    } else 0;
+    return .{ .start = start, .end = start + nsects };
 }
 
 pub fn symbolIsTemp(self: *MachO, sym_with_loc: SymbolWithLoc) bool {
@@ -3970,6 +3640,19 @@ fn generateSymbolStabsForSymbol(
             .n_value = sym.n_value,
         };
         return buf[0..1];
+    }
+}
+
+fn logSections(self: *MachO) void {
+    log.debug("sections:", .{});
+    for (self.sections.items(.header)) |header, i| {
+        log.debug("  sect({d}): {s},{s} @{x}, sizeof({x})", .{
+            i + 1,
+            header.segName(),
+            header.sectName(),
+            header.offset,
+            header.size,
+        });
     }
 }
 

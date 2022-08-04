@@ -13,7 +13,7 @@ const fat = @import("fat.zig");
 const Allocator = mem.Allocator;
 const CrossTarget = std.zig.CrossTarget;
 const LibStub = @import("../tapi.zig").LibStub;
-const LoadCommandIterator = @import("../mm.zig").LoadCommandIterator;
+const LoadCommandIterator = macho.LoadCommandIterator;
 const MachO = @import("../MachO.zig");
 
 id: ?Id = null,

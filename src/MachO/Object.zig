@@ -15,7 +15,7 @@ const trace = @import("../../tracy.zig").trace;
 
 const Allocator = mem.Allocator;
 const Atom = @import("Atom.zig");
-const LoadCommandIterator = @import("../mm.zig").LoadCommandIterator;
+const LoadCommandIterator = macho.LoadCommandIterator;
 const MachO = @import("../MachO.zig");
 const SymbolWithLoc = MachO.SymbolWithLoc;
 
@@ -213,6 +213,23 @@ fn filterRelocs(
     return relocs[start..end];
 }
 
+pub fn scanInputSections(self: Object, macho_file: *MachO) !void {
+    for (self.sections.items) |sect| {
+        const match = (try macho_file.getOutputSection(sect)) orelse {
+            log.debug("  unhandled section", .{});
+            continue;
+        };
+        const output = macho_file.sections.items(.header)[match];
+        log.debug("mapping '{s},{s}' into output sect({d}, '{s},{s}')", .{
+            sect.segName(),
+            sect.sectName(),
+            match + 1,
+            output.segName(),
+            output.sectName(),
+        });
+    }
+}
+
 pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
     const gpa = macho_file.base.allocator;
 
@@ -273,13 +290,9 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
         });
 
         const cpu_arch = macho_file.options.target.cpu_arch.?;
-        const is_zerofill = blk: {
-            const section_type = sect.type_();
-            break :blk section_type == macho.S_ZEROFILL or section_type == macho.S_THREAD_LOCAL_ZEROFILL;
-        };
 
         // Read section's code
-        const code: ?[]const u8 = if (!is_zerofill) try self.getSectionContents(sect) else null;
+        const code: ?[]const u8 = if (!sect.isZerofill()) try self.getSectionContents(sect) else null;
 
         // Read section's list of relocations
         const relocs = @ptrCast(
