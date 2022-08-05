@@ -6,6 +6,7 @@ const assert = std.debug.assert;
 const elf = std.elf;
 const fs = std.fs;
 const log = std.log.scoped(.elf);
+const math = std.math;
 const mem = std.mem;
 
 const Allocator = mem.Allocator;
@@ -155,9 +156,6 @@ pub fn deinit(self: *Elf) void {
 }
 
 pub fn closeFiles(self: *const Elf) void {
-    for (self.objects.items) |object| {
-        object.file.close();
-    }
     for (self.archives.items) |archive| {
         archive.file.close();
     }
@@ -1234,21 +1232,25 @@ fn parseLibs(self: *Elf, libs: []const []const u8) !void {
 }
 
 fn parseObject(self: *Elf, path: []const u8) !bool {
+    const gpa = self.base.allocator;
     const file = fs.cwd().openFile(path, .{}) catch |err| switch (err) {
         error.FileNotFound => return false,
         else => |e| return e,
     };
-    errdefer file.close();
+    defer file.close();
 
-    const name = try self.base.allocator.dupe(u8, path);
-    errdefer self.base.allocator.free(name);
+    const name = try gpa.dupe(u8, path);
+    const cpu_arch = self.options.target.cpu_arch.?;
+    const file_stat = try file.stat();
+    const file_size = math.cast(usize, file_stat.size) orelse return error.Overflow;
+    const data = try file.readToEndAllocOptions(gpa, file_size, file_size, @alignOf(u64), null);
 
     var object = Object{
         .name = name,
-        .file = file,
+        .data = data,
     };
 
-    object.parse(self.base.allocator, self.options.target.cpu_arch.?, 0) catch |err| switch (err) {
+    object.parse(gpa, cpu_arch) catch |err| switch (err) {
         error.EndOfStream, error.NotObject => {
             object.deinit(self.base.allocator);
             return false;
@@ -1256,35 +1258,36 @@ fn parseObject(self: *Elf, path: []const u8) !bool {
         else => |e| return e,
     };
 
-    try self.objects.append(self.base.allocator, object);
+    try self.objects.append(gpa, object);
 
     return true;
 }
 
 fn parseArchive(self: *Elf, path: []const u8) !bool {
+    const gpa = self.base.allocator;
     const file = fs.cwd().openFile(path, .{}) catch |err| switch (err) {
         error.FileNotFound => return false,
         else => |e| return e,
     };
     errdefer file.close();
 
-    const name = try self.base.allocator.dupe(u8, path);
-    errdefer self.base.allocator.free(name);
+    const name = try gpa.dupe(u8, path);
+    const reader = file.reader();
 
     var archive = Archive{
         .name = name,
         .file = file,
     };
 
-    archive.parse(self.base.allocator) catch |err| switch (err) {
+    archive.parse(gpa, reader) catch |err| switch (err) {
         error.EndOfStream, error.NotArchive => {
-            archive.deinit(self.base.allocator);
+            archive.deinit(gpa);
             return false;
         },
         else => |e| return e,
     };
 
-    try self.archives.append(self.base.allocator, archive);
+    try self.archives.append(gpa, archive);
 
     return true;
 }

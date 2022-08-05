@@ -17,12 +17,8 @@ const Disassembler = dis_x86_64.Disassembler;
 const Instruction = dis_x86_64.Instruction;
 const RegisterOrMemory = dis_x86_64.RegisterOrMemory;
 
-file: fs.File,
 name: []const u8,
-
-/// Data contents of the file.
-/// Initialized in `parse`.
-contents: []const u8 = undefined,
+data: []align(@alignOf(u64)) const u8,
 
 header: elf.Elf64_Ehdr = undefined,
 
@@ -46,19 +42,11 @@ pub fn deinit(self: *Object, allocator: Allocator) void {
     self.symtab.deinit(allocator);
     self.atom_table.deinit(allocator);
     allocator.free(self.name);
-    allocator.free(self.contents);
+    allocator.free(self.data);
 }
 
-pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch, offset: usize) !void {
-    const file_stat = try self.file.stat();
-    var file_size = math.cast(usize, file_stat.size) orelse return error.Overflow;
-    if (offset > 0) {
-        try self.file.seekTo(offset);
-        file_size -= offset;
-    }
-    self.contents = try self.file.readToEndAlloc(allocator, file_size);
-
-    var stream = std.io.fixedBufferStream(self.contents);
+pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch) !void {
+    var stream = std.io.fixedBufferStream(self.data);
     const reader = stream.reader();
 
     self.header = try reader.readStruct(elf.Elf64_Ehdr);
@@ -479,5 +467,5 @@ pub fn getShString(self: Object, off: u32) []const u8 {
 
 fn readShdrContents(self: Object, shdr_index: u16) []const u8 {
     const shdr = self.shdrs.items[shdr_index];
-    return self.contents[shdr.sh_offset..][0..shdr.sh_size];
+    return self.data[shdr.sh_offset..][0..shdr.sh_size];
 }
