@@ -482,10 +482,7 @@ fn populateMetadata(self: *Elf) !void {
     }
 }
 
-pub fn getMatchingSection(self: *Elf, object_id: u16, sect_id: u16) !?u16 {
-    const object = self.objects.items[object_id];
-    const shdr = object.getShdrs()[sect_id];
-    const shdr_name = object.getShString(shdr.sh_name);
+pub fn getOutputSection(self: *Elf, shdr: elf.Elf64_Shdr, shdr_name: []const u8) !?u16 {
     const flags = shdr.sh_flags;
     const res: ?u16 = blk: {
         if (flags & elf.SHF_EXCLUDE != 0) break :blk null;
@@ -653,7 +650,7 @@ pub fn getMatchingSection(self: *Elf, object_id: u16, sect_id: u16) !?u16 {
             }
 
             log.debug("TODO non-alloc sections", .{});
-            log.debug("  {s} => {}", .{ object.getShString(shdr.sh_name), shdr });
+            log.debug("  {s} => {}", .{ shdr_name, shdr });
             break :blk null;
         }
         if (flags & elf.SHF_EXECINSTR != 0) {

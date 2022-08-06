@@ -140,7 +140,7 @@ pub fn splitIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
                 return error.HandleSectionGroups;
             }
 
-            const tshdr_ndx = (try elf_file.getMatchingSection(object_id, ndx)) orelse {
+            const tshdr_ndx = (try elf_file.getOutputSection(shdr, shdr_name)) orelse {
                 log.debug("unhandled section", .{});
                 continue;
             };
