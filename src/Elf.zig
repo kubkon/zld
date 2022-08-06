@@ -249,7 +249,7 @@ pub fn flush(self: *Elf) !void {
     }
 
     for (self.objects.items) |*object, object_id| {
-        try object.parseIntoAtoms(self.base.allocator, @intCast(u16, object_id), self);
+        try object.splitIntoAtoms(self.base.allocator, @intCast(u16, object_id), self);
     }
 
     if (self.options.gc_sections) {
@@ -484,7 +484,7 @@ fn populateMetadata(self: *Elf) !void {
 
 pub fn getMatchingSection(self: *Elf, object_id: u16, sect_id: u16) !?u16 {
     const object = self.objects.items[object_id];
-    const shdr = object.getSourceShdr(sect_id);
+    const shdr = object.getShdrs()[sect_id];
     const shdr_name = object.getShString(shdr.sh_name);
     const flags = shdr.sh_flags;
     const res: ?u16 = blk: {
