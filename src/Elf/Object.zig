@@ -90,6 +90,30 @@ pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch)
     };
 }
 
+pub fn scanInputSections(self: *Object, elf_file: *Elf) !void {
+    for (self.getShdrs()) |shdr| switch (shdr.sh_type) {
+        elf.SHT_PROGBITS, elf.SHT_NOBITS => {
+            const shdr_name = self.getShString(shdr.sh_name);
+            if (shdr.sh_flags & elf.SHF_GROUP != 0) {
+                log.err("section '{s}' is part of a section group", .{shdr_name});
+                return error.HandleSectionGroups;
+            }
+
+            const tshdr_ndx = (try elf_file.getOutputSection(shdr, shdr_name)) orelse {
+                log.debug("unhandled section", .{});
+                continue;
+            };
+            const out_shdr = elf_file.sections.items(.header)[tshdr_ndx];
+            log.debug("mapping '{s}' into output sect({d}, '{s}')", .{
+                shdr_name,
+                tshdr_ndx,
+                elf_file.shstrtab.get(out_shdr.sh_name).?,
+            });
+        },
+        else => {},
+    };
+}
+
 pub fn splitIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_file: *Elf) !void {
     log.debug("parsing '{s}' into atoms", .{self.name});
 
@@ -134,11 +158,6 @@ pub fn splitIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
             const shdr_name = self.getShString(shdr.sh_name);
 
             log.debug("  parsing section '{s}'", .{shdr_name});
-
-            if (shdr.sh_flags & elf.SHF_GROUP != 0) {
-                log.err("section '{s}' is part of a section group", .{shdr_name});
-                return error.HandleSectionGroups;
-            }
 
             const tshdr_ndx = (try elf_file.getOutputSection(shdr, shdr_name)) orelse {
                 log.debug("unhandled section", .{});
@@ -370,23 +389,7 @@ pub fn splitIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
             }
 
             try atom.code.appendSlice(allocator, code);
-
-            // Update target section's metadata
-            const tshdr = &elf_file.shdrs.items[tshdr_ndx];
-            tshdr.sh_addralign = math.max(tshdr.sh_addralign, atom.alignment);
-            tshdr.sh_size = mem.alignForwardGeneric(
-                u64,
-                mem.alignForwardGeneric(u64, tshdr.sh_size, atom.alignment) + atom.size,
-                tshdr.sh_addralign,
-            );
-
-            if (elf_file.atoms.getPtr(tshdr_ndx)) |last| {
-                last.*.?.next = atom;
-                atom.prev = last.*.?;
-                last.* = atom;
-            } else {
-                try elf_file.atoms.putNoClobber(allocator, tshdr_ndx, atom);
-            }
+            try elf_file.addAtomToSection(atom, tshdr_ndx);
         },
         else => {},
     };

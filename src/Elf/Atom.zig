@@ -325,10 +325,11 @@ pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
                 const source = sym.st_value + rel.r_offset;
                 const target = self.getTargetAddress(r_sym, elf_file);
                 const base_addr: u64 = base_addr: {
-                    const shdr = if (elf_file.tbss_sect_index) |index|
-                        elf_file.shdrs.items[index]
+                    const index = if (elf_file.getSectionByName(".tbss")) |index|
+                        index
                     else
-                        elf_file.shdrs.items[elf_file.tdata_sect_index.?];
+                        elf_file.getSectionByName(".tdata").?;
+                    const shdr = elf_file.sections.items(.header)[index];
                     break :base_addr shdr.sh_addr + shdr.sh_size;
                 };
                 const tls_offset = @truncate(u32, @bitCast(u64, -@intCast(i64, base_addr - target) + rel.r_addend));

@@ -26,8 +26,9 @@ archives: std.ArrayListUnmanaged(Archive) = .{},
 objects: std.ArrayListUnmanaged(Object) = .{},
 
 header: ?elf.Elf64_Ehdr = null,
-shdrs: std.ArrayListUnmanaged(elf.Elf64_Shdr) = .{},
 phdrs: std.ArrayListUnmanaged(elf.Elf64_Phdr) = .{},
+
+sections: std.MultiArrayList(Section) = .{},
 
 strtab: StringTable(.strtab) = .{},
 shstrtab: StringTable(.shstrtab) = .{},
@@ -39,30 +40,8 @@ load_rw_seg_index: ?u16 = null,
 tls_seg_index: ?u16 = null,
 gnu_stack_phdr_index: ?u16 = null,
 
-null_sect_index: ?u16 = null,
-rodata_sect_index: ?u16 = null,
 text_sect_index: ?u16 = null,
-init_sect_index: ?u16 = null,
-init_array_sect_index: ?u16 = null,
-fini_sect_index: ?u16 = null,
-fini_array_sect_index: ?u16 = null,
-data_rel_ro_sect_index: ?u16 = null,
 got_sect_index: ?u16 = null,
-data_sect_index: ?u16 = null,
-bss_sect_index: ?u16 = null,
-tdata_sect_index: ?u16 = null,
-tbss_sect_index: ?u16 = null,
-
-debug_loc_index: ?u16 = null,
-debug_abbrev_index: ?u16 = null,
-debug_info_index: ?u16 = null,
-debug_str_index: ?u16 = null,
-debug_frame_index: ?u16 = null,
-debug_line_index: ?u16 = null,
-debug_ranges_index: ?u16 = null,
-debug_pubnames_index: ?u16 = null,
-debug_pubtypes_index: ?u16 = null,
-
 symtab_sect_index: ?u16 = null,
 strtab_sect_index: ?u16 = null,
 shstrtab_sect_index: ?u16 = null,
@@ -78,8 +57,12 @@ unresolved: std.AutoArrayHashMapUnmanaged(u32, void) = .{},
 got_entries_map: std.AutoArrayHashMapUnmanaged(SymbolWithLoc, *Atom) = .{},
 
 managed_atoms: std.ArrayListUnmanaged(*Atom) = .{},
-atoms: std.AutoHashMapUnmanaged(u16, ?*Atom) = .{},
 atom_table: std.AutoHashMapUnmanaged(u32, *Atom) = .{},
+
+const Section = struct {
+    header: elf.Elf64_Shdr,
+    last_atom: ?*Atom,
+};
 
 /// Special st_other value used internally by zld to mark symbol
 /// as GCed.
@@ -127,7 +110,6 @@ fn createEmpty(gpa: Allocator, options: Options) !*Elf {
 }
 
 pub fn deinit(self: *Elf) void {
-    self.atoms.deinit(self.base.allocator);
     for (self.managed_atoms.items) |atom| {
         atom.deinit(self.base.allocator);
         self.base.allocator.destroy(atom);
@@ -143,8 +125,8 @@ pub fn deinit(self: *Elf) void {
     self.locals.deinit(self.base.allocator);
     self.shstrtab.deinit(self.base.allocator);
     self.strtab.deinit(self.base.allocator);
-    self.shdrs.deinit(self.base.allocator);
     self.phdrs.deinit(self.base.allocator);
+    self.sections.deinit(self.base.allocator);
     for (self.objects.items) |*object| {
         object.deinit(self.base.allocator);
     }
@@ -248,15 +230,18 @@ pub fn flush(self: *Elf) !void {
         return error.UndefinedSymbolReference;
     }
 
+    for (self.objects.items) |*object| {
+        try object.scanInputSections(self);
+    }
+
     for (self.objects.items) |*object, object_id| {
         try object.splitIntoAtoms(self.base.allocator, @intCast(u16, object_id), self);
     }
 
-    if (self.options.gc_sections) {
-        try self.gcAtoms();
-    }
+    // if (self.options.gc_sections) {
+    //     try self.gcAtoms();
+    // }
 
-    try self.sortShdrs();
     try self.setStackSize();
     try self.allocateLoadRSeg();
     try self.allocateLoadRESeg();
@@ -269,7 +254,7 @@ pub fn flush(self: *Elf) !void {
         // TODO this should be put in its own logic but probably is linked to
         // C++ handling so leaving it here until I gather more knowledge on
         // those special symbols.
-        if (self.init_array_sect_index == null) {
+        if (self.getSectionByName(".init_array") == null) {
             if (self.globals.get("__init_array_start")) |global| {
                 assert(global.file == null);
                 const sym = &self.locals.items[global.sym_index];
@@ -283,7 +268,7 @@ pub fn flush(self: *Elf) !void {
                 sym.st_shndx = self.text_sect_index.?;
             }
         }
-        if (self.fini_array_sect_index == null) {
+        if (self.getSectionByName(".fini_array") == null) {
             if (self.globals.get("__fini_array_start")) |global| {
                 assert(global.file == null);
                 const sym = &self.locals.items[global.sym_index];
@@ -299,6 +284,7 @@ pub fn flush(self: *Elf) !void {
         }
     }
 
+    self.logSections();
     self.logSymtab();
     self.logAtoms(0);
 
@@ -312,6 +298,7 @@ pub fn flush(self: *Elf) !void {
 }
 
 fn populateMetadata(self: *Elf) !void {
+    const gpa = self.base.allocator;
     if (self.header == null) {
         var header = elf.Elf64_Ehdr{
             .e_ident = undefined,
@@ -350,7 +337,7 @@ fn populateMetadata(self: *Elf) !void {
         const offset = @sizeOf(elf.Elf64_Ehdr);
         const size = @sizeOf(elf.Elf64_Phdr);
         self.phdr_seg_index = @intCast(u16, self.phdrs.items.len);
-        try self.phdrs.append(self.base.allocator, .{
+        try self.phdrs.append(gpa, .{
             .p_type = elf.PT_PHDR,
             .p_flags = elf.PF_R,
             .p_offset = offset,
@@ -363,7 +350,7 @@ fn populateMetadata(self: *Elf) !void {
     }
     if (self.load_r_seg_index == null) {
         self.load_r_seg_index = @intCast(u16, self.phdrs.items.len);
-        try self.phdrs.append(self.base.allocator, .{
+        try self.phdrs.append(gpa, .{
             .p_type = elf.PT_LOAD,
             .p_flags = elf.PF_R,
             .p_offset = 0,
@@ -381,7 +368,7 @@ fn populateMetadata(self: *Elf) !void {
     }
     if (self.load_re_seg_index == null) {
         self.load_re_seg_index = @intCast(u16, self.phdrs.items.len);
-        try self.phdrs.append(self.base.allocator, .{
+        try self.phdrs.append(gpa, .{
             .p_type = elf.PT_LOAD,
             .p_flags = elf.PF_R | elf.PF_X,
             .p_offset = 0,
@@ -399,7 +386,7 @@ fn populateMetadata(self: *Elf) !void {
     }
     if (self.load_rw_seg_index == null) {
         self.load_rw_seg_index = @intCast(u16, self.phdrs.items.len);
-        try self.phdrs.append(self.base.allocator, .{
+        try self.phdrs.append(gpa, .{
             .p_type = elf.PT_LOAD,
             .p_flags = elf.PF_R | elf.PF_W,
             .p_offset = 0,
@@ -415,26 +402,8 @@ fn populateMetadata(self: *Elf) !void {
             phdr.p_memsz += @sizeOf(elf.Elf64_Phdr);
         }
     }
-    if (self.shstrtab_sect_index == null) {
-        try self.shstrtab.buffer.append(self.base.allocator, 0);
-        self.shstrtab_sect_index = @intCast(u16, self.shdrs.items.len);
-        try self.shdrs.append(self.base.allocator, .{
-            .sh_name = try self.shstrtab.insert(self.base.allocator, ".shstrtab"),
-            .sh_type = elf.SHT_STRTAB,
-            .sh_flags = 0,
-            .sh_addr = 0,
-            .sh_offset = 0,
-            .sh_size = 0,
-            .sh_link = 0,
-            .sh_info = 0,
-            .sh_addralign = 1,
-            .sh_entsize = 0,
-        });
-        self.header.?.e_shstrndx = self.shstrtab_sect_index.?;
-    }
-    if (self.null_sect_index == null) {
-        self.null_sect_index = @intCast(u16, self.shdrs.items.len);
-        try self.shdrs.append(self.base.allocator, .{
+    {
+        _ = try self.insertSection(.{
             .sh_name = 0,
             .sh_type = elf.SHT_NULL,
             .sh_flags = 0,
@@ -445,12 +414,11 @@ fn populateMetadata(self: *Elf) !void {
             .sh_info = 0,
             .sh_addralign = 0,
             .sh_entsize = 0,
-        });
+        }, "");
     }
     if (self.symtab_sect_index == null) {
-        self.symtab_sect_index = @intCast(u16, self.shdrs.items.len);
-        try self.shdrs.append(self.base.allocator, .{
-            .sh_name = try self.shstrtab.insert(self.base.allocator, ".symtab"),
+        self.symtab_sect_index = try self.insertSection(.{
+            .sh_name = 0,
             .sh_type = elf.SHT_SYMTAB,
             .sh_flags = 0,
             .sh_addr = 0,
@@ -460,13 +428,12 @@ fn populateMetadata(self: *Elf) !void {
             .sh_info = 0,
             .sh_addralign = @alignOf(elf.Elf64_Sym),
             .sh_entsize = @sizeOf(elf.Elf64_Sym),
-        });
+        }, ".symtab");
     }
     if (self.strtab_sect_index == null) {
-        try self.strtab.buffer.append(self.base.allocator, 0);
-        self.strtab_sect_index = @intCast(u16, self.shdrs.items.len);
-        try self.shdrs.append(self.base.allocator, .{
-            .sh_name = try self.shstrtab.insert(self.base.allocator, ".strtab"),
+        try self.strtab.buffer.append(gpa, 0);
+        self.strtab_sect_index = try self.insertSection(.{
+            .sh_name = 0,
             .sh_type = elf.SHT_STRTAB,
             .sh_flags = 0,
             .sh_addr = 0,
@@ -476,731 +443,415 @@ fn populateMetadata(self: *Elf) !void {
             .sh_info = 0,
             .sh_addralign = 1,
             .sh_entsize = 0,
-        });
-        // Link .strtab with .symtab via sh_link field.
-        self.shdrs.items[self.symtab_sect_index.?].sh_link = self.strtab_sect_index.?;
+        }, ".strtab");
     }
+    if (self.shstrtab_sect_index == null) {
+        try self.shstrtab.buffer.append(gpa, 0);
+        self.shstrtab_sect_index = try self.insertSection(.{
+            .sh_name = 0,
+            .sh_type = elf.SHT_STRTAB,
+            .sh_flags = 0,
+            .sh_addr = 0,
+            .sh_offset = 0,
+            .sh_size = 0,
+            .sh_link = 0,
+            .sh_info = 0,
+            .sh_addralign = 1,
+            .sh_entsize = 0,
+        }, ".shstrtab");
+    }
+}
+
+fn getSectionPrecedence(shdr: elf.Elf64_Shdr, shdr_name: []const u8) u4 {
+    const flags = shdr.sh_flags;
+    switch (shdr.sh_type) {
+        elf.SHT_NULL => return 0,
+        elf.SHT_PREINIT_ARRAY,
+        elf.SHT_INIT_ARRAY,
+        elf.SHT_FINI_ARRAY,
+        => return 2,
+        elf.SHT_PROGBITS => if (flags & elf.SHF_ALLOC != 0) {
+            if (flags & elf.SHF_EXECINSTR != 0) {
+                return 2;
+            } else if (flags & elf.SHF_WRITE != 0) {
+                return if (flags & elf.SHF_TLS != 0) 3 else 5;
+            } else {
+                return 1;
+            }
+        } else {
+            if (mem.startsWith(u8, shdr_name, ".debug")) {
+                return 7;
+            } else {
+                return 8;
+            }
+        },
+        elf.SHT_NOBITS => return if (flags & elf.SHF_TLS != 0) 4 else 6,
+        elf.SHT_SYMTAB => return 0xa,
+        elf.SHT_STRTAB => return 0xb,
+        else => return 0xf,
+    }
+}
+
+fn insertSection(self: *Elf, shdr: elf.Elf64_Shdr, shdr_name: []const u8) !u16 {
+    const precedence = getSectionPrecedence(shdr, shdr_name);
+    const insertion_index = for (self.sections.items(.header)) |oshdr, i| {
+        const oshdr_name = self.shstrtab.get(oshdr.sh_name).?;
+        if (getSectionPrecedence(oshdr, oshdr_name) > precedence) break @intCast(u16, i);
+    } else @intCast(u16, self.sections.items(.header).len);
+    log.debug("inserting section '{s}' at index {d}", .{
+        shdr_name,
+        insertion_index,
+    });
+    for (&[_]*?u16{
+        &self.text_sect_index,
+        &self.got_sect_index,
+        &self.symtab_sect_index,
+        &self.strtab_sect_index,
+        &self.shstrtab_sect_index,
+    }) |maybe_index| {
+        const index = maybe_index.* orelse continue;
+        if (insertion_index <= index) maybe_index.* = index + 1;
+    }
+    try self.sections.insert(self.base.allocator, insertion_index, .{
+        .header = .{
+            .sh_name = try self.shstrtab.insert(self.base.allocator, shdr_name),
+            .sh_type = shdr.sh_type,
+            .sh_flags = shdr.sh_flags,
+            .sh_addr = 0,
+            .sh_offset = 0,
+            .sh_size = 0,
+            .sh_link = 0,
+            .sh_info = shdr.sh_info,
+            .sh_addralign = shdr.sh_addralign,
+            .sh_entsize = shdr.sh_entsize,
+        },
+        .last_atom = null,
+    });
+    return insertion_index;
 }
 
 pub fn getOutputSection(self: *Elf, shdr: elf.Elf64_Shdr, shdr_name: []const u8) !?u16 {
     const flags = shdr.sh_flags;
     const res: ?u16 = blk: {
         if (flags & elf.SHF_EXCLUDE != 0) break :blk null;
-        if (flags & elf.SHF_ALLOC == 0) {
-            if (flags & elf.SHF_MERGE != 0 and flags & elf.SHF_STRINGS != 0) {
-                if (mem.eql(u8, shdr_name, ".debug_str")) {
-                    if (self.debug_str_index == null) {
-                        self.debug_str_index = @intCast(u16, self.shdrs.items.len);
-                        try self.shdrs.append(self.base.allocator, .{
-                            .sh_name = try self.shstrtab.insert(self.base.allocator, shdr_name),
-                            .sh_type = elf.SHT_PROGBITS,
-                            .sh_flags = elf.SHF_MERGE | elf.SHF_STRINGS,
-                            .sh_addr = 0,
-                            .sh_offset = 0,
-                            .sh_size = 0,
-                            .sh_link = 0,
-                            .sh_info = 0,
-                            .sh_addralign = 0,
-                            .sh_entsize = 1,
-                        });
+        const out_name: []const u8 = name: {
+            switch (shdr.sh_type) {
+                elf.SHT_NULL => break :blk 0,
+                elf.SHT_PROGBITS => {
+                    if (flags & elf.SHF_ALLOC == 0) break :name shdr_name;
+                    if (flags & elf.SHF_EXECINSTR != 0) {
+                        if (mem.startsWith(u8, shdr_name, ".init")) {
+                            break :name ".init";
+                        } else if (mem.startsWith(u8, shdr_name, ".fini")) {
+                            break :name ".fini";
+                        } else if (mem.startsWith(u8, shdr_name, ".init_array")) {
+                            break :name ".init_array";
+                        } else if (mem.startsWith(u8, shdr_name, ".fini_array")) {
+                            break :name ".fini_array";
+                        } else {
+                            break :name ".text";
+                        }
                     }
-                    break :blk self.debug_str_index.?;
-                } else if (mem.eql(u8, shdr_name, ".comment")) {
-                    log.debug("TODO .comment section", .{});
-                    break :blk null;
-                }
-            } else if (flags == 0) {
-                if (mem.eql(u8, shdr_name, ".debug_loc")) {
-                    if (self.debug_loc_index == null) {
-                        self.debug_loc_index = @intCast(u16, self.shdrs.items.len);
-                        try self.shdrs.append(self.base.allocator, .{
-                            .sh_name = try self.shstrtab.insert(self.base.allocator, shdr_name),
-                            .sh_type = elf.SHT_PROGBITS,
-                            .sh_flags = 0,
-                            .sh_addr = 0,
-                            .sh_offset = 0,
-                            .sh_size = 0,
-                            .sh_link = 0,
-                            .sh_info = 0,
-                            .sh_addralign = 0,
-                            .sh_entsize = 0,
-                        });
+                    if (flags & elf.SHF_WRITE != 0) {
+                        if (flags & elf.SHF_TLS != 0) {
+                            if (self.tls_seg_index == null) {
+                                self.tls_seg_index = @intCast(u16, self.phdrs.items.len);
+                                try self.phdrs.append(self.base.allocator, .{
+                                    .p_type = elf.PT_TLS,
+                                    .p_flags = elf.PF_R,
+                                    .p_offset = 0,
+                                    .p_vaddr = self.base_addr,
+                                    .p_paddr = self.base_addr,
+                                    .p_filesz = 0,
+                                    .p_memsz = 0,
+                                    .p_align = 0,
+                                });
+                            }
+                            break :name ".tdata";
+                        } else if (mem.startsWith(u8, shdr_name, ".data.rel.ro")) {
+                            break :name ".data.rel.ro";
+                        } else {
+                            break :name ".data";
+                        }
                     }
-                    break :blk self.debug_loc_index.?;
-                } else if (mem.eql(u8, shdr_name, ".debug_abbrev")) {
-                    if (self.debug_abbrev_index == null) {
-                        self.debug_abbrev_index = @intCast(u16, self.shdrs.items.len);
-                        try self.shdrs.append(self.base.allocator, .{
-                            .sh_name = try self.shstrtab.insert(self.base.allocator, shdr_name),
-                            .sh_type = elf.SHT_PROGBITS,
-                            .sh_flags = 0,
-                            .sh_addr = 0,
-                            .sh_offset = 0,
-                            .sh_size = 0,
-                            .sh_link = 0,
-                            .sh_info = 0,
-                            .sh_addralign = 0,
-                            .sh_entsize = 0,
-                        });
+                    break :name ".rodata";
+                },
+                elf.SHT_NOBITS => {
+                    if (flags & elf.SHF_TLS != 0) {
+                        if (self.tls_seg_index == null) {
+                            self.tls_seg_index = @intCast(u16, self.phdrs.items.len);
+                            try self.phdrs.append(self.base.allocator, .{
+                                .p_type = elf.PT_TLS,
+                                .p_flags = elf.PF_R,
+                                .p_offset = 0,
+                                .p_vaddr = self.base_addr,
+                                .p_paddr = self.base_addr,
+                                .p_filesz = 0,
+                                .p_memsz = 0,
+                                .p_align = 0,
+                            });
+                        }
+                        break :name ".tbss";
+                    } else {
+                        break :name ".bss";
                     }
-                    break :blk self.debug_abbrev_index.?;
-                } else if (mem.eql(u8, shdr_name, ".debug_info")) {
-                    if (self.debug_info_index == null) {
-                        self.debug_info_index = @intCast(u16, self.shdrs.items.len);
-                        try self.shdrs.append(self.base.allocator, .{
-                            .sh_name = try self.shstrtab.insert(self.base.allocator, shdr_name),
-                            .sh_type = elf.SHT_PROGBITS,
-                            .sh_flags = 0,
-                            .sh_addr = 0,
-                            .sh_offset = 0,
-                            .sh_size = 0,
-                            .sh_link = 0,
-                            .sh_info = 0,
-                            .sh_addralign = 0,
-                            .sh_entsize = 0,
-                        });
-                    }
-                    break :blk self.debug_info_index.?;
-                } else if (mem.eql(u8, shdr_name, ".debug_frame")) {
-                    if (self.debug_frame_index == null) {
-                        self.debug_frame_index = @intCast(u16, self.shdrs.items.len);
-                        try self.shdrs.append(self.base.allocator, .{
-                            .sh_name = try self.shstrtab.insert(self.base.allocator, shdr_name),
-                            .sh_type = elf.SHT_PROGBITS,
-                            .sh_flags = 0,
-                            .sh_addr = 0,
-                            .sh_offset = 0,
-                            .sh_size = 0,
-                            .sh_link = 0,
-                            .sh_info = 0,
-                            .sh_addralign = 0,
-                            .sh_entsize = 0,
-                        });
-                    }
-                    break :blk self.debug_frame_index.?;
-                } else if (mem.eql(u8, shdr_name, ".debug_line")) {
-                    if (self.debug_line_index == null) {
-                        self.debug_line_index = @intCast(u16, self.shdrs.items.len);
-                        try self.shdrs.append(self.base.allocator, .{
-                            .sh_name = try self.shstrtab.insert(self.base.allocator, shdr_name),
-                            .sh_type = elf.SHT_PROGBITS,
-                            .sh_flags = 0,
-                            .sh_addr = 0,
-                            .sh_offset = 0,
-                            .sh_size = 0,
-                            .sh_link = 0,
-                            .sh_info = 0,
-                            .sh_addralign = 0,
-                            .sh_entsize = 0,
-                        });
-                    }
-                    break :blk self.debug_line_index.?;
-                } else if (mem.eql(u8, shdr_name, ".debug_ranges")) {
-                    if (self.debug_ranges_index == null) {
-                        self.debug_ranges_index = @intCast(u16, self.shdrs.items.len);
-                        try self.shdrs.append(self.base.allocator, .{
-                            .sh_name = try self.shstrtab.insert(self.base.allocator, shdr_name),
-                            .sh_type = elf.SHT_PROGBITS,
-                            .sh_flags = 0,
-                            .sh_addr = 0,
-                            .sh_offset = 0,
-                            .sh_size = 0,
-                            .sh_link = 0,
-                            .sh_info = 0,
-                            .sh_addralign = 0,
-                            .sh_entsize = 0,
-                        });
-                        break :blk self.debug_ranges_index.?;
-                    }
-                } else if (mem.eql(u8, shdr_name, ".debug_pubnames")) {
-                    if (self.debug_pubnames_index == null) {
-                        self.debug_pubnames_index = @intCast(u16, self.shdrs.items.len);
-                        try self.shdrs.append(self.base.allocator, .{
-                            .sh_name = try self.shstrtab.insert(self.base.allocator, shdr_name),
-                            .sh_type = elf.SHT_PROGBITS,
-                            .sh_flags = 0,
-                            .sh_addr = 0,
-                            .sh_offset = 0,
-                            .sh_size = 0,
-                            .sh_link = 0,
-                            .sh_info = 0,
-                            .sh_addralign = 0,
-                            .sh_entsize = 0,
-                        });
-                        break :blk self.debug_pubnames_index.?;
-                    }
-                } else if (mem.eql(u8, shdr_name, ".debug_pubtypes")) {
-                    if (self.debug_pubtypes_index == null) {
-                        self.debug_pubtypes_index = @intCast(u16, self.shdrs.items.len);
-                        try self.shdrs.append(self.base.allocator, .{
-                            .sh_name = try self.shstrtab.insert(self.base.allocator, shdr_name),
-                            .sh_type = elf.SHT_PROGBITS,
-                            .sh_flags = 0,
-                            .sh_addr = 0,
-                            .sh_offset = 0,
-                            .sh_size = 0,
-                            .sh_link = 0,
-                            .sh_info = 0,
-                            .sh_addralign = 0,
-                            .sh_entsize = 0,
-                        });
-                        break :blk self.debug_pubtypes_index.?;
-                    }
-                }
+                },
+                else => break :name shdr_name,
             }
-
-            log.debug("TODO non-alloc sections", .{});
-            log.debug("  {s} => {}", .{ shdr_name, shdr });
-            break :blk null;
-        }
-        if (flags & elf.SHF_EXECINSTR != 0) {
-            if (mem.eql(u8, shdr_name, ".init")) {
-                if (self.init_sect_index == null) {
-                    self.init_sect_index = @intCast(u16, self.shdrs.items.len);
-                    try self.shdrs.append(self.base.allocator, .{
-                        .sh_name = try self.shstrtab.insert(self.base.allocator, shdr_name),
-                        .sh_type = elf.SHT_PROGBITS,
-                        .sh_flags = elf.SHF_EXECINSTR | elf.SHF_ALLOC,
-                        .sh_addr = 0,
-                        .sh_offset = 0,
-                        .sh_size = 0,
-                        .sh_link = 0,
-                        .sh_info = 0,
-                        .sh_addralign = 0,
-                        .sh_entsize = 0,
-                    });
-                }
-                break :blk self.init_sect_index.?;
-            } else if (mem.eql(u8, shdr_name, ".fini")) {
-                if (self.fini_sect_index == null) {
-                    self.fini_sect_index = @intCast(u16, self.shdrs.items.len);
-                    try self.shdrs.append(self.base.allocator, .{
-                        .sh_name = try self.shstrtab.insert(self.base.allocator, shdr_name),
-                        .sh_type = elf.SHT_PROGBITS,
-                        .sh_flags = elf.SHF_EXECINSTR | elf.SHF_ALLOC,
-                        .sh_addr = 0,
-                        .sh_offset = 0,
-                        .sh_size = 0,
-                        .sh_link = 0,
-                        .sh_info = 0,
-                        .sh_addralign = 0,
-                        .sh_entsize = 0,
-                    });
-                }
-                break :blk self.fini_sect_index.?;
-            } else if (mem.eql(u8, shdr_name, ".init_array")) {
-                if (self.init_array_sect_index == null) {
-                    self.init_array_sect_index = @intCast(u16, self.shdrs.items.len);
-                    try self.shdrs.append(self.base.allocator, .{
-                        .sh_name = try self.shstrtab.insert(self.base.allocator, shdr_name),
-                        .sh_type = elf.SHT_PROGBITS,
-                        .sh_flags = elf.SHF_EXECINSTR | elf.SHF_ALLOC,
-                        .sh_addr = 0,
-                        .sh_offset = 0,
-                        .sh_size = 0,
-                        .sh_link = 0,
-                        .sh_info = 0,
-                        .sh_addralign = 0,
-                        .sh_entsize = 0,
-                    });
-                }
-                break :blk self.init_array_sect_index.?;
-            } else if (mem.eql(u8, shdr_name, ".fini_array")) {
-                if (self.fini_array_sect_index == null) {
-                    self.fini_array_sect_index = @intCast(u16, self.shdrs.items.len);
-                    try self.shdrs.append(self.base.allocator, .{
-                        .sh_name = try self.shstrtab.insert(self.base.allocator, shdr_name),
-                        .sh_type = elf.SHT_PROGBITS,
-                        .sh_flags = elf.SHF_EXECINSTR | elf.SHF_ALLOC,
-                        .sh_addr = 0,
-                        .sh_offset = 0,
-                        .sh_size = 0,
-                        .sh_link = 0,
-                        .sh_info = 0,
-                        .sh_addralign = 0,
-                        .sh_entsize = 0,
-                    });
-                }
-                break :blk self.fini_array_sect_index.?;
-            }
-
+        };
+        const res = self.getSectionByName(out_name) orelse try self.insertSection(shdr, out_name);
+        if (mem.eql(u8, out_name, ".text")) {
             if (self.text_sect_index == null) {
-                self.text_sect_index = @intCast(u16, self.shdrs.items.len);
-                try self.shdrs.append(self.base.allocator, .{
-                    .sh_name = try self.shstrtab.insert(self.base.allocator, ".text"),
-                    .sh_type = elf.SHT_PROGBITS,
-                    .sh_flags = elf.SHF_EXECINSTR | elf.SHF_ALLOC,
-                    .sh_addr = 0,
-                    .sh_offset = 0,
-                    .sh_size = 0,
-                    .sh_link = 0,
-                    .sh_info = 0,
-                    .sh_addralign = 0,
-                    .sh_entsize = 0,
-                });
+                self.text_sect_index = res;
             }
-            break :blk self.text_sect_index.?;
         }
-        if (flags & elf.SHF_WRITE != 0) {
-            if (shdr.sh_type == elf.SHT_NOBITS) {
-                if (shdr.sh_flags & elf.SHF_TLS != 0) {
-                    if (self.tls_seg_index == null) {
-                        self.tls_seg_index = @intCast(u16, self.phdrs.items.len);
-                        try self.phdrs.append(self.base.allocator, .{
-                            .p_type = elf.PT_TLS,
-                            .p_flags = elf.PF_R,
-                            .p_offset = 0,
-                            .p_vaddr = self.base_addr,
-                            .p_paddr = self.base_addr,
-                            .p_filesz = 0,
-                            .p_memsz = 0,
-                            .p_align = 0,
-                        });
-                    }
-                    if (self.tbss_sect_index == null) {
-                        self.tbss_sect_index = @intCast(u16, self.shdrs.items.len);
-                        try self.shdrs.append(self.base.allocator, .{
-                            .sh_name = try self.shstrtab.insert(self.base.allocator, ".tbss"),
-                            .sh_type = elf.SHT_NOBITS,
-                            .sh_flags = elf.SHF_WRITE | elf.SHF_ALLOC | elf.SHF_TLS,
-                            .sh_addr = 0,
-                            .sh_offset = 0,
-                            .sh_size = 0,
-                            .sh_link = 0,
-                            .sh_info = 0,
-                            .sh_addralign = 0,
-                            .sh_entsize = 0,
-                        });
-                    }
-                    break :blk self.tbss_sect_index.?;
-                }
-
-                if (self.bss_sect_index == null) {
-                    self.bss_sect_index = @intCast(u16, self.shdrs.items.len);
-                    try self.shdrs.append(self.base.allocator, .{
-                        .sh_name = try self.shstrtab.insert(self.base.allocator, ".bss"),
-                        .sh_type = elf.SHT_NOBITS,
-                        .sh_flags = elf.SHF_WRITE | elf.SHF_ALLOC,
-                        .sh_addr = 0,
-                        .sh_offset = 0,
-                        .sh_size = 0,
-                        .sh_link = 0,
-                        .sh_info = 0,
-                        .sh_addralign = 0,
-                        .sh_entsize = 0,
-                    });
-                }
-                break :blk self.bss_sect_index.?;
-            }
-
-            if (flags & elf.SHF_TLS != 0) {
-                if (self.tls_seg_index == null) {
-                    self.tls_seg_index = @intCast(u16, self.phdrs.items.len);
-                    try self.phdrs.append(self.base.allocator, .{
-                        .p_type = elf.PT_TLS,
-                        .p_flags = elf.PF_R,
-                        .p_offset = 0,
-                        .p_vaddr = self.base_addr,
-                        .p_paddr = self.base_addr,
-                        .p_filesz = 0,
-                        .p_memsz = 0,
-                        .p_align = 0,
-                    });
-                }
-                if (self.tdata_sect_index == null) {
-                    self.tdata_sect_index = @intCast(u16, self.shdrs.items.len);
-                    try self.shdrs.append(self.base.allocator, .{
-                        .sh_name = try self.shstrtab.insert(self.base.allocator, ".tdata"),
-                        .sh_type = elf.SHT_PROGBITS,
-                        .sh_flags = elf.SHF_WRITE | elf.SHF_ALLOC | elf.SHF_TLS,
-                        .sh_addr = 0,
-                        .sh_offset = 0,
-                        .sh_size = 0,
-                        .sh_link = 0,
-                        .sh_info = 0,
-                        .sh_addralign = 0,
-                        .sh_entsize = 0,
-                    });
-                }
-                break :blk self.tdata_sect_index.?;
-            }
-
-            if (mem.startsWith(u8, shdr_name, ".data.rel.ro")) {
-                if (self.data_rel_ro_sect_index == null) {
-                    self.data_rel_ro_sect_index = @intCast(u16, self.shdrs.items.len);
-                    try self.shdrs.append(self.base.allocator, .{
-                        .sh_name = try self.shstrtab.insert(self.base.allocator, ".data.rel.ro"),
-                        .sh_type = elf.SHT_PROGBITS,
-                        .sh_flags = elf.SHF_WRITE | elf.SHF_ALLOC,
-                        .sh_addr = 0,
-                        .sh_offset = 0,
-                        .sh_size = 0,
-                        .sh_link = 0,
-                        .sh_info = 0,
-                        .sh_addralign = 0,
-                        .sh_entsize = 0,
-                    });
-                }
-                break :blk self.data_rel_ro_sect_index.?;
-            }
-
-            if (self.data_sect_index == null) {
-                self.data_sect_index = @intCast(u16, self.shdrs.items.len);
-                try self.shdrs.append(self.base.allocator, .{
-                    .sh_name = try self.shstrtab.insert(self.base.allocator, ".data"),
-                    .sh_type = elf.SHT_PROGBITS,
-                    .sh_flags = elf.SHF_WRITE | elf.SHF_ALLOC,
-                    .sh_addr = 0,
-                    .sh_offset = 0,
-                    .sh_size = 0,
-                    .sh_link = 0,
-                    .sh_info = 0,
-                    .sh_addralign = 0,
-                    .sh_entsize = 0,
-                });
-            }
-            break :blk self.data_sect_index.?;
-        }
-
-        if (self.rodata_sect_index == null) {
-            self.rodata_sect_index = @intCast(u16, self.shdrs.items.len);
-            try self.shdrs.append(self.base.allocator, .{
-                .sh_name = try self.shstrtab.insert(self.base.allocator, ".rodata"),
-                .sh_type = elf.SHT_PROGBITS,
-                .sh_flags = elf.SHF_MERGE | elf.SHF_STRINGS | elf.SHF_ALLOC,
-                .sh_addr = 0,
-                .sh_offset = 0,
-                .sh_size = 0,
-                .sh_link = 0,
-                .sh_info = 0,
-                .sh_addralign = 0,
-                .sh_entsize = 0,
-            });
-        }
-        break :blk self.rodata_sect_index.?;
+        break :blk res;
     };
     return res;
 }
 
-fn assignShndxToSymbols(self: *Elf) !void {
-    var it = self.atoms.iterator();
-    while (it.next()) |entry| {
-        const shdr_ndx = entry.key_ptr.*;
-        var atom: *Atom = entry.value_ptr.*.?;
+// fn assignShndxToSymbols(self: *Elf) !void {
+//     var it = self.atoms.iterator();
+//     while (it.next()) |entry| {
+//         const shdr_ndx = entry.key_ptr.*;
+//         var atom: *Atom = entry.value_ptr.*.?;
 
-        while (true) {
-            if (atom.file) |file| {
-                const object = &self.objects.items[file];
-                const sym = &object.symtab.items[atom.local_sym_index];
-                sym.st_shndx = shdr_ndx;
+//         while (true) {
+//             if (atom.file) |file| {
+//                 const object = &self.objects.items[file];
+//                 const sym = &object.symtab.items[atom.local_sym_index];
+//                 sym.st_shndx = shdr_ndx;
 
-                // Update each symbol contained within the TextBlock
-                for (atom.contained.items) |sym_at_off| {
-                    const contained_sym = &object.symtab.items[sym_at_off.local_sym_index];
-                    contained_sym.st_shndx = shdr_ndx;
-                }
-            } else {
-                // Synthetic
-                const sym = &self.locals.items[atom.local_sym_index];
-                sym.st_shndx = shdr_ndx;
-            }
+//                 // Update each symbol contained within the TextBlock
+//                 for (atom.contained.items) |sym_at_off| {
+//                     const contained_sym = &object.symtab.items[sym_at_off.local_sym_index];
+//                     contained_sym.st_shndx = shdr_ndx;
+//                 }
+//             } else {
+//                 // Synthetic
+//                 const sym = &self.locals.items[atom.local_sym_index];
+//                 sym.st_shndx = shdr_ndx;
+//             }
 
-            if (atom.prev) |prev| {
-                atom = prev;
-            } else break;
-        }
-    }
-}
+//             if (atom.prev) |prev| {
+//                 atom = prev;
+//             } else break;
+//         }
+//     }
+// }
 
-fn pruneShdrs(self: *Elf) !void {
-    var index_mapping = std.AutoHashMap(u16, u16).init(self.base.allocator);
-    defer index_mapping.deinit();
-    var shdrs = self.shdrs.toOwnedSlice(self.base.allocator);
-    defer self.base.allocator.free(shdrs);
-    try self.shdrs.ensureTotalCapacity(self.base.allocator, shdrs.len);
+// fn pruneShdrs(self: *Elf) !void {
+//     var index_mapping = std.AutoHashMap(u16, u16).init(self.base.allocator);
+//     defer index_mapping.deinit();
+//     var shdrs = self.shdrs.toOwnedSlice(self.base.allocator);
+//     defer self.base.allocator.free(shdrs);
+//     try self.shdrs.ensureTotalCapacity(self.base.allocator, shdrs.len);
 
-    const indices = &[_]*?u16{
-        // null
-        &self.null_sect_index,
-        // RO
-        &self.rodata_sect_index,
-        // RE
-        &self.text_sect_index,
-        &self.init_sect_index,
-        &self.init_array_sect_index,
-        &self.fini_sect_index,
-        &self.fini_array_sect_index,
-        // TLS
-        &self.tdata_sect_index,
-        &self.tbss_sect_index,
-        // RW
-        &self.data_rel_ro_sect_index,
-        &self.got_sect_index,
-        &self.data_sect_index,
-        &self.bss_sect_index,
-        // DWARF
-        &self.debug_loc_index,
-        &self.debug_abbrev_index,
-        &self.debug_info_index,
-        &self.debug_ranges_index,
-        &self.debug_str_index,
-        &self.debug_pubnames_index,
-        &self.debug_pubtypes_index,
-        &self.debug_frame_index,
-        &self.debug_line_index,
-        // link-edit
-        &self.symtab_sect_index,
-        &self.shstrtab_sect_index,
-        &self.strtab_sect_index,
-    };
-    for (indices) |maybe_index| {
-        if (maybe_index.*) |index| {
-            if (self.atoms.get(index)) |atom| {
-                if (atom == null) {
-                    maybe_index.* = null;
-                    continue;
-                }
-            }
-            const idx = @intCast(u16, self.shdrs.items.len);
-            self.shdrs.appendAssumeCapacity(shdrs[index]);
-            try index_mapping.putNoClobber(index, idx);
-            maybe_index.* = idx;
-        }
-    }
+//     const indices = &[_]*?u16{
+//         // null
+//         &self.null_sect_index,
+//         // RO
+//         &self.rodata_sect_index,
+//         // RE
+//         &self.text_sect_index,
+//         &self.init_sect_index,
+//         &self.init_array_sect_index,
+//         &self.fini_array_sect_index,
+//         // TLS
+//         &self.tdata_sect_index,
+//         &self.tbss_sect_index,
+//         // RW
+//         &self.data_rel_ro_sect_index,
+//         &self.got_sect_index,
+//         &self.data_sect_index,
+//         &self.bss_sect_index,
+//         // DWARF
+//         &self.debug_loc_index,
+//         &self.debug_abbrev_index,
+//         &self.debug_info_index,
+//         &self.debug_ranges_index,
+//         &self.debug_str_index,
+//         &self.debug_pubnames_index,
+//         &self.debug_pubtypes_index,
+//         &self.debug_frame_index,
+//         &self.debug_line_index,
+//         // link-edit
+//         &self.symtab_sect_index,
+//         &self.shstrtab_sect_index,
+//         &self.strtab_sect_index,
+//     };
+//     for (indices) |maybe_index| {
+//         if (maybe_index.*) |index| {
+//             if (self.atoms.get(index)) |atom| {
+//                 if (atom == null) {
+//                     maybe_index.* = null;
+//                     continue;
+//                 }
+//             }
+//             const idx = @intCast(u16, self.shdrs.items.len);
+//             self.shdrs.appendAssumeCapacity(shdrs[index]);
+//             try index_mapping.putNoClobber(index, idx);
+//             maybe_index.* = idx;
+//         }
+//     }
 
-    self.header.?.e_shstrndx = index_mapping.get(self.header.?.e_shstrndx).?;
-    {
-        var shdr = &self.shdrs.items[self.symtab_sect_index.?];
-        shdr.sh_link = self.strtab_sect_index.?;
-    }
+//     self.header.?.e_shstrndx = index_mapping.get(self.header.?.e_shstrndx).?;
+//     {
+//         var shdr = &self.shdrs.items[self.symtab_sect_index.?];
+//         shdr.sh_link = self.strtab_sect_index.?;
+//     }
 
-    var transient: std.AutoHashMapUnmanaged(u16, ?*Atom) = .{};
-    try transient.ensureTotalCapacity(self.base.allocator, self.atoms.count());
+//     var transient: std.AutoHashMapUnmanaged(u16, ?*Atom) = .{};
+//     try transient.ensureTotalCapacity(self.base.allocator, self.atoms.count());
 
-    var it = self.atoms.iterator();
-    while (it.next()) |entry| {
-        const old_sect_id = entry.key_ptr.*;
-        const new_sect_id = index_mapping.get(old_sect_id) orelse continue;
-        transient.putAssumeCapacityNoClobber(new_sect_id, entry.value_ptr.*.?);
-    }
+//     var it = self.atoms.iterator();
+//     while (it.next()) |entry| {
+//         const old_sect_id = entry.key_ptr.*;
+//         const new_sect_id = index_mapping.get(old_sect_id) orelse continue;
+//         transient.putAssumeCapacityNoClobber(new_sect_id, entry.value_ptr.*.?);
+//     }
 
-    self.atoms.clearAndFree(self.base.allocator);
-    self.atoms.deinit(self.base.allocator);
-    self.atoms = transient;
-}
+//     self.atoms.clearAndFree(self.base.allocator);
+//     self.atoms.deinit(self.base.allocator);
+//     self.atoms = transient;
+// }
 
-fn gcAtoms(self: *Elf) !void {
-    try self.assignShndxToSymbols();
+// fn gcAtoms(self: *Elf) !void {
+//     try self.assignShndxToSymbols();
 
-    // TODO this just beginning of GC implementation. Consult with the docs of LLD which section is
-    // marked as GC root (and hence uncollectable).
-    // http://maskray.me/blog/2021-02-28-linker-garbage-collection
-    var stack = std.ArrayList(*Atom).init(self.base.allocator);
-    defer stack.deinit();
+//     // TODO this just beginning of GC implementation. Consult with the docs of LLD which section is
+//     // marked as GC root (and hence uncollectable).
+//     // http://maskray.me/blog/2021-02-28-linker-garbage-collection
+//     var stack = std.ArrayList(*Atom).init(self.base.allocator);
+//     defer stack.deinit();
 
-    var retained = std.AutoHashMap(*Atom, void).init(self.base.allocator);
-    defer retained.deinit();
+//     var retained = std.AutoHashMap(*Atom, void).init(self.base.allocator);
+//     defer retained.deinit();
 
-    for (&[_][]const u8{ "_start", "_init", "_fini" }) |sym_name| {
-        const global = self.globals.get(sym_name) orelse continue;
-        const atom: *Atom = if (global.file) |file|
-            self.objects.items[file].atom_table.get(global.sym_index).?
-        else
-            self.atom_table.get(global.sym_index).?;
-        log.debug("marking '{s}' as GC root", .{atom.getName(self)});
-        try retained.putNoClobber(atom, {});
-        try stack.append(atom);
-    }
+//     for (&[_][]const u8{ "_start", "_init", "_fini" }) |sym_name| {
+//         const global = self.globals.get(sym_name) orelse continue;
+//         const atom: *Atom = if (global.file) |file|
+//             self.objects.items[file].atom_table.get(global.sym_index).?
+//         else
+//             self.atom_table.get(global.sym_index).?;
+//         log.debug("marking '{s}' as GC root", .{atom.getName(self)});
+//         try retained.putNoClobber(atom, {});
+//         try stack.append(atom);
+//     }
 
-    var it = self.atoms.iterator();
-    while (it.next()) |entry| {
-        const shdr_ndx = entry.key_ptr.*;
-        const shdr = self.shdrs.items[shdr_ndx];
-        const sh_name = self.shstrtab.getAssumeExists(shdr.sh_name);
+//     var it = self.atoms.iterator();
+//     while (it.next()) |entry| {
+//         const shdr_ndx = entry.key_ptr.*;
+//         const shdr = self.shdrs.items[shdr_ndx];
+//         const sh_name = self.shstrtab.getAssumeExists(shdr.sh_name);
 
-        mark_all: {
-            if (shdr.sh_type == elf.SHT_PREINIT_ARRAY) break :mark_all;
-            if (shdr.sh_type == elf.SHT_INIT_ARRAY) break :mark_all;
-            if (shdr.sh_type == elf.SHT_FINI_ARRAY) break :mark_all;
-            if (mem.eql(u8, ".ctors", sh_name)) break :mark_all;
-            if (mem.eql(u8, ".dtors", sh_name)) break :mark_all;
-            if (mem.eql(u8, ".init", sh_name)) break :mark_all;
-            if (mem.eql(u8, ".fini", sh_name)) break :mark_all;
-            if (mem.eql(u8, ".jcr", sh_name)) break :mark_all;
-            if (mem.indexOf(u8, sh_name, "KEEP") != null) break :mark_all;
+//         mark_all: {
+//             if (shdr.sh_type == elf.SHT_PREINIT_ARRAY) break :mark_all;
+//             if (shdr.sh_type == elf.SHT_INIT_ARRAY) break :mark_all;
+//             if (shdr.sh_type == elf.SHT_FINI_ARRAY) break :mark_all;
+//             if (mem.eql(u8, ".ctors", sh_name)) break :mark_all;
+//             if (mem.eql(u8, ".dtors", sh_name)) break :mark_all;
+//             if (mem.eql(u8, ".init", sh_name)) break :mark_all;
+//             if (mem.eql(u8, ".fini", sh_name)) break :mark_all;
+//             if (mem.eql(u8, ".jcr", sh_name)) break :mark_all;
+//             if (mem.indexOf(u8, sh_name, "KEEP") != null) break :mark_all;
 
-            continue;
-        }
+//             continue;
+//         }
 
-        var atom: *Atom = entry.value_ptr.*.?;
+//         var atom: *Atom = entry.value_ptr.*.?;
 
-        while (true) {
-            const gop = try retained.getOrPut(atom);
-            if (!gop.found_existing) {
-                log.debug("marking '{s}' as GC root", .{atom.getName(self)});
-                try stack.append(atom);
-            }
-            if (atom.prev) |prev| {
-                atom = prev;
-            } else break;
-        }
-    }
+//         while (true) {
+//             const gop = try retained.getOrPut(atom);
+//             if (!gop.found_existing) {
+//                 log.debug("marking '{s}' as GC root", .{atom.getName(self)});
+//                 try stack.append(atom);
+//             }
+//             if (atom.prev) |prev| {
+//                 atom = prev;
+//             } else break;
+//         }
+//     }
 
-    while (stack.popOrNull()) |src_atom| {
-        log.debug("source atom '{s}'", .{src_atom.getName(self)});
+//     while (stack.popOrNull()) |src_atom| {
+//         log.debug("source atom '{s}'", .{src_atom.getName(self)});
 
-        for (src_atom.relocs.items) |rel| {
-            if (src_atom.getTargetAtom(self, rel)) |target_atom| {
-                const gop = try retained.getOrPut(target_atom);
-                if (!gop.found_existing) {
-                    log.debug("  (reached target atom '{s}')", .{target_atom.getName(self)});
-                    try stack.append(target_atom);
-                }
-            } else {
-                const tsym_name = self.getSymbolName(.{
-                    .sym_index = rel.r_sym(),
-                    .file = src_atom.file,
-                });
-                log.debug("  (dead link to symbol %{d}: {s})", .{ rel.r_sym(), tsym_name });
-            }
-        }
-    }
+//         for (src_atom.relocs.items) |rel| {
+//             if (src_atom.getTargetAtom(self, rel)) |target_atom| {
+//                 const gop = try retained.getOrPut(target_atom);
+//                 if (!gop.found_existing) {
+//                     log.debug("  (reached target atom '{s}')", .{target_atom.getName(self)});
+//                     try stack.append(target_atom);
+//                 }
+//             } else {
+//                 const tsym_name = self.getSymbolName(.{
+//                     .sym_index = rel.r_sym(),
+//                     .file = src_atom.file,
+//                 });
+//                 log.debug("  (dead link to symbol %{d}: {s})", .{ rel.r_sym(), tsym_name });
+//             }
+//         }
+//     }
 
-    it = self.atoms.iterator();
-    while (it.next()) |entry| {
-        const shdr_ndx = entry.key_ptr.*;
-        const shdr = &self.shdrs.items[shdr_ndx];
-        const sh_name = self.shstrtab.getAssumeExists(shdr.sh_name);
+//     it = self.atoms.iterator();
+//     while (it.next()) |entry| {
+//         const shdr_ndx = entry.key_ptr.*;
+//         const shdr = &self.shdrs.items[shdr_ndx];
+//         const sh_name = self.shstrtab.getAssumeExists(shdr.sh_name);
 
-        if (mem.indexOf(u8, sh_name, ".debug") != null) continue;
-        if (shdr.sh_flags & (elf.SHF_ALLOC | elf.SHF_LINK_ORDER | elf.SHF_GROUP) == 0) continue;
+//         if (mem.indexOf(u8, sh_name, ".debug") != null) continue;
+//         if (shdr.sh_flags & (elf.SHF_ALLOC | elf.SHF_LINK_ORDER | elf.SHF_GROUP) == 0) continue;
 
-        var atom: *Atom = entry.value_ptr.*.?;
+//         var atom: *Atom = entry.value_ptr.*.?;
 
-        while (true) {
-            const orig_prev = atom.prev;
+//         while (true) {
+//             const orig_prev = atom.prev;
 
-            if (!retained.contains(atom)) {
-                // Dead atom; remove.
-                log.debug("dead atom '{s}'", .{atom.getName(self)});
-                if (atom.file) |file| {
-                    const object = self.objects.items[file];
-                    log.debug("  (defined in {s})", .{object.name});
-                }
+//             if (!retained.contains(atom)) {
+//                 // Dead atom; remove.
+//                 log.debug("dead atom '{s}'", .{atom.getName(self)});
+//                 if (atom.file) |file| {
+//                     const object = self.objects.items[file];
+//                     log.debug("  (defined in {s})", .{object.name});
+//                 }
 
-                {
-                    const sym = atom.getSymbolPtr(self);
-                    sym.st_other = STV_GC; // repurposed for GC
-                }
+//                 {
+//                     const sym = atom.getSymbolPtr(self);
+//                     sym.st_other = STV_GC; // repurposed for GC
+//                 }
 
-                for (atom.contained.items) |contained| {
-                    const contained_sym = self.getSymbolPtr(.{
-                        .sym_index = contained.local_sym_index,
-                        .file = atom.file,
-                    });
-                    log.debug("  (pruning contained symbol '{s}')", .{self.getSymbolName(.{
-                        .sym_index = contained.local_sym_index,
-                        .file = atom.file,
-                    })});
-                    contained_sym.st_other = STV_GC; // repurposed for GC
-                }
+//                 for (atom.contained.items) |contained| {
+//                     const contained_sym = self.getSymbolPtr(.{
+//                         .sym_index = contained.local_sym_index,
+//                         .file = atom.file,
+//                     });
+//                     log.debug("  (pruning contained symbol '{s}')", .{self.getSymbolName(.{
+//                         .sym_index = contained.local_sym_index,
+//                         .file = atom.file,
+//                     })});
+//                     contained_sym.st_other = STV_GC; // repurposed for GC
+//                 }
 
-                shdr.sh_size -= atom.size;
-                if (atom.next) |next| {
-                    next.prev = atom.prev;
-                }
-                if (atom.prev) |prev| {
-                    prev.next = atom.next;
-                } else {
-                    entry.value_ptr.* = if (atom.next) |next| next else null;
-                }
-            }
+//                 shdr.sh_size -= atom.size;
+//                 if (atom.next) |next| {
+//                     next.prev = atom.prev;
+//                 }
+//                 if (atom.prev) |prev| {
+//                     prev.next = atom.next;
+//                 } else {
+//                     entry.value_ptr.* = if (atom.next) |next| next else null;
+//                 }
+//             }
 
-            if (orig_prev) |prev| {
-                atom = prev;
-            } else break;
-        }
-    }
+//             if (orig_prev) |prev| {
+//                 atom = prev;
+//             } else break;
+//         }
+//     }
 
-    // Prune section headers
-    try self.pruneShdrs();
-}
-
-/// Sorts section headers such that loadable sections come first (following the order of program headers),
-/// and symbol and string tables come last. The order of the contents within the file does not have to match
-/// the order of the section headers. However loadable sections do have to be within bounds
-/// of their respective program headers.
-fn sortShdrs(self: *Elf) !void {
-    var index_mapping = std.AutoHashMap(u16, u16).init(self.base.allocator);
-    defer index_mapping.deinit();
-    var shdrs = self.shdrs.toOwnedSlice(self.base.allocator);
-    defer self.base.allocator.free(shdrs);
-    try self.shdrs.ensureTotalCapacity(self.base.allocator, shdrs.len);
-
-    const indices = &[_]*?u16{
-        // null
-        &self.null_sect_index,
-        // RO
-        &self.rodata_sect_index,
-        // RE
-        &self.text_sect_index,
-        &self.init_sect_index,
-        &self.init_array_sect_index,
-        &self.fini_sect_index,
-        &self.fini_array_sect_index,
-        // TLS
-        &self.tdata_sect_index,
-        &self.tbss_sect_index,
-        // RW
-        &self.data_rel_ro_sect_index,
-        &self.got_sect_index,
-        &self.data_sect_index,
-        &self.bss_sect_index,
-        // DWARF
-        &self.debug_loc_index,
-        &self.debug_abbrev_index,
-        &self.debug_info_index,
-        &self.debug_ranges_index,
-        &self.debug_str_index,
-        &self.debug_pubnames_index,
-        &self.debug_pubtypes_index,
-        &self.debug_frame_index,
-        &self.debug_line_index,
-        // link-edit
-        &self.symtab_sect_index,
-        &self.shstrtab_sect_index,
-        &self.strtab_sect_index,
-    };
-    for (indices) |maybe_index| {
-        const new_index: u16 = if (maybe_index.*) |index| blk: {
-            const idx = @intCast(u16, self.shdrs.items.len);
-            self.shdrs.appendAssumeCapacity(shdrs[index]);
-            try index_mapping.putNoClobber(index, idx);
-            break :blk idx;
-        } else continue;
-        maybe_index.* = new_index;
-    }
-
-    self.header.?.e_shstrndx = index_mapping.get(self.header.?.e_shstrndx).?;
-    {
-        var shdr = &self.shdrs.items[self.symtab_sect_index.?];
-        shdr.sh_link = self.strtab_sect_index.?;
-    }
-
-    var transient: std.AutoHashMapUnmanaged(u16, ?*Atom) = .{};
-    try transient.ensureTotalCapacity(self.base.allocator, self.atoms.count());
-
-    var it = self.atoms.iterator();
-    while (it.next()) |entry| {
-        const old_sect_id = entry.key_ptr.*;
-        const new_sect_id = index_mapping.get(old_sect_id).?;
-        transient.putAssumeCapacityNoClobber(new_sect_id, entry.value_ptr.*);
-    }
-
-    self.atoms.clearAndFree(self.base.allocator);
-    self.atoms.deinit(self.base.allocator);
-    self.atoms = transient;
-}
+//     // Prune section headers
+//     try self.pruneShdrs();
+// }
 
 fn parsePositionals(self: *Elf, files: []const []const u8) !void {
     for (files) |file_name| {
@@ -1437,10 +1088,9 @@ fn resolveSpecialSymbols(self: *Elf) !void {
 }
 
 pub fn createGotAtom(self: *Elf, target: SymbolWithLoc) !*Atom {
-    const shdr_ndx = self.got_sect_index orelse blk: {
-        const shdr_ndx = @intCast(u16, self.shdrs.items.len);
-        try self.shdrs.append(self.base.allocator, .{
-            .sh_name = try self.shstrtab.insert(self.base.allocator, ".got"),
+    if (self.got_sect_index == null) {
+        self.got_sect_index = try self.insertSection(.{
+            .sh_name = 0,
             .sh_type = elf.SHT_PROGBITS,
             .sh_flags = elf.SHF_WRITE | elf.SHF_ALLOC,
             .sh_addr = 0,
@@ -1450,11 +1100,8 @@ pub fn createGotAtom(self: *Elf, target: SymbolWithLoc) !*Atom {
             .sh_info = 0,
             .sh_addralign = @alignOf(u64),
             .sh_entsize = 0,
-        });
-        self.got_sect_index = shdr_ndx;
-        break :blk shdr_ndx;
-    };
-    const shdr = &self.shdrs.items[shdr_ndx];
+        }, ".got");
+    }
 
     log.debug("creating GOT atom for target {}", .{target});
 
@@ -1491,26 +1138,32 @@ pub fn createGotAtom(self: *Elf, target: SymbolWithLoc) !*Atom {
         .st_name = try self.strtab.insert(self.base.allocator, tmp_name),
         .st_info = (elf.STB_LOCAL << 4) | elf.STT_OBJECT,
         .st_other = 1,
-        .st_shndx = shdr_ndx,
+        .st_shndx = 0,
         .st_value = 0,
         .st_size = @sizeOf(u64),
     });
     atom.local_sym_index = sym_index;
 
     try self.atom_table.putNoClobber(self.base.allocator, atom.local_sym_index, atom);
-
-    // Update target section's metadata
-    shdr.sh_size += @sizeOf(u64);
-
-    if (self.atoms.getPtr(shdr_ndx)) |last| {
-        last.*.?.next = atom;
-        atom.prev = last.*.?;
-        last.* = atom;
-    } else {
-        try self.atoms.putNoClobber(self.base.allocator, shdr_ndx, atom);
-    }
+    try self.addAtomToSection(atom, self.got_sect_index.?);
 
     return atom;
+}
+
+pub fn addAtomToSection(self: *Elf, atom: *Atom, sect_id: u16) !void {
+    const sym = atom.getSymbolPtr(self);
+    sym.st_shndx = sect_id;
+    var section = self.sections.get(sect_id);
+    if (section.header.sh_size > 0) {
+        section.last_atom.?.next = atom;
+        atom.prev = section.last_atom.?;
+    }
+    section.last_atom = atom;
+    const aligned_end_addr = mem.alignForwardGeneric(u64, section.header.sh_size, atom.alignment);
+    const padding = aligned_end_addr - section.header.sh_size;
+    section.header.sh_size += padding + atom.size;
+    section.header.sh_addralign = @maximum(section.header.sh_addralign, atom.alignment);
+    self.sections.set(sect_id, section);
 }
 
 fn allocateSection(self: *Elf, shdr: *elf.Elf64_Shdr, phdr: *elf.Elf64_Phdr) !void {
@@ -1549,13 +1202,13 @@ const SegmentBase = struct {
     alignment: ?u32 = null,
 };
 
-fn allocateSegment(self: *Elf, phdr_ndx: u16, shdr_ndxs: []*?u16, base: SegmentBase) !void {
+fn allocateSegment(self: *Elf, phdr_ndx: u16, shdr_ndxs: []?u16, base: SegmentBase) !void {
     const phdr = &self.phdrs.items[phdr_ndx];
 
     var min_align: u64 = 0;
     for (shdr_ndxs) |maybe_shdr_ndx| {
-        const shdr_ndx = maybe_shdr_ndx.* orelse continue;
-        const shdr = self.shdrs.items[shdr_ndx];
+        const shdr_ndx = maybe_shdr_ndx orelse continue;
+        const shdr = self.sections.items(.header)[shdr_ndx];
         min_align = @maximum(min_align, shdr.sh_addralign);
     }
 
@@ -1573,8 +1226,8 @@ fn allocateSegment(self: *Elf, phdr_ndx: u16, shdr_ndxs: []*?u16, base: SegmentB
     // This assumes ordering of section headers matches ordering of sections in file
     // so that the segments are contiguous in memory.
     for (shdr_ndxs) |maybe_shdr_ndx| {
-        const shdr_ndx = maybe_shdr_ndx.* orelse continue;
-        const shdr = &self.shdrs.items[shdr_ndx];
+        const shdr_ndx = maybe_shdr_ndx orelse continue;
+        const shdr = &self.sections.items(.header)[shdr_ndx];
         try self.allocateSection(shdr, phdr);
     }
 
@@ -1586,7 +1239,7 @@ fn allocateSegment(self: *Elf, phdr_ndx: u16, shdr_ndxs: []*?u16, base: SegmentB
 fn allocateLoadRSeg(self: *Elf) !void {
     const init_size = @sizeOf(elf.Elf64_Ehdr) + self.phdrs.items.len * @sizeOf(elf.Elf64_Phdr);
     try self.allocateSegment(self.load_r_seg_index.?, &.{
-        &self.rodata_sect_index,
+        self.getSectionByName(".rodata"),
     }, .{
         .offset = 0,
         .vaddr = self.base_addr,
@@ -1598,11 +1251,11 @@ fn allocateLoadRSeg(self: *Elf) !void {
 fn allocateLoadRESeg(self: *Elf) !void {
     const prev_seg = self.phdrs.items[self.load_r_seg_index.?];
     try self.allocateSegment(self.load_re_seg_index.?, &.{
-        &self.text_sect_index,
-        &self.init_sect_index,
-        &self.init_array_sect_index,
-        &self.fini_sect_index,
-        &self.fini_array_sect_index,
+        self.getSectionByName(".text"),
+        self.getSectionByName(".init"),
+        self.getSectionByName(".init_array"),
+        self.getSectionByName(".fini"),
+        self.getSectionByName(".fini_array"),
     }, .{
         .offset = prev_seg.p_offset + prev_seg.p_filesz,
         .vaddr = prev_seg.p_vaddr + prev_seg.p_memsz,
@@ -1610,11 +1263,11 @@ fn allocateLoadRESeg(self: *Elf) !void {
     });
 
     if (self.tls_seg_index) |tls_seg_index| blk: {
-        if (self.tdata_sect_index != null) break :blk; // TLS segment contains tdata section, hence it will be part of RW
+        if (self.getSectionByName(".tdata")) |_| break :blk; // TLS segment contains tdata section, hence it will be part of RW
         const phdr = self.phdrs.items[self.load_re_seg_index.?];
         try self.allocateSegment(tls_seg_index, &.{
-            &self.tdata_sect_index,
-            &self.tbss_sect_index,
+            self.getSectionByName(".tdata"),
+            self.getSectionByName(".tbss"),
         }, .{
             .offset = phdr.p_offset + phdr.p_filesz,
             .vaddr = phdr.p_vaddr + phdr.p_memsz,
@@ -1625,7 +1278,7 @@ fn allocateLoadRESeg(self: *Elf) !void {
 fn allocateLoadRWSeg(self: *Elf) !void {
     const base: SegmentBase = base: {
         if (self.tls_seg_index) |tls_seg_index| blk: {
-            if (self.tdata_sect_index != null) break :blk;
+            if (self.getSectionByName(".tdata")) |_| break :blk;
             const prev_seg = self.phdrs.items[tls_seg_index];
             break :base .{
                 .offset = prev_seg.p_offset + prev_seg.p_filesz,
@@ -1641,19 +1294,19 @@ fn allocateLoadRWSeg(self: *Elf) !void {
         };
     };
     try self.allocateSegment(self.load_rw_seg_index.?, &.{
-        &self.tdata_sect_index,
-        &self.data_rel_ro_sect_index,
-        &self.got_sect_index,
-        &self.data_sect_index,
-        &self.bss_sect_index,
+        self.getSectionByName(".tdata"),
+        self.getSectionByName(".data.rel.ro"),
+        self.getSectionByName(".got"),
+        self.getSectionByName(".data"),
+        self.getSectionByName(".bss"),
     }, base);
 
     const phdr = self.phdrs.items[self.load_rw_seg_index.?];
 
-    if (self.tdata_sect_index) |_| {
+    if (self.getSectionByName(".tdata")) |_| {
         try self.allocateSegment(self.tls_seg_index.?, &.{
-            &self.tdata_sect_index,
-            &self.tbss_sect_index,
+            self.getSectionByName(".tdata"),
+            self.getSectionByName(".tbss"),
         }, .{
             .offset = phdr.p_offset,
             .vaddr = phdr.p_vaddr,
@@ -1664,7 +1317,7 @@ fn allocateLoadRWSeg(self: *Elf) !void {
 }
 
 fn allocateNonAllocSections(self: *Elf) !void {
-    for (self.shdrs.items) |*shdr| {
+    for (self.sections.items(.header)) |*shdr| {
         if (shdr.sh_type == elf.SHT_NULL) continue;
         if (shdr.sh_flags & elf.SHF_ALLOC != 0) continue;
         shdr.sh_offset = mem.alignForwardGeneric(u64, self.next_offset, shdr.sh_addralign);
@@ -1678,11 +1331,11 @@ fn allocateNonAllocSections(self: *Elf) !void {
 }
 
 fn allocateAtoms(self: *Elf) !void {
-    var it = self.atoms.iterator();
-    while (it.next()) |entry| {
-        const shdr_ndx = entry.key_ptr.*;
-        const shdr = self.shdrs.items[shdr_ndx];
-        var atom: *Atom = entry.value_ptr.* orelse continue;
+    const slice = self.sections.slice();
+    for (slice.items(.last_atom)) |last_atom, i| {
+        var atom = last_atom orelse continue;
+        const shdr_ndx = @intCast(u16, i);
+        const shdr = slice.items(.header)[shdr_ndx];
 
         // Find the first atom
         while (atom.prev) |prev| {
@@ -1726,11 +1379,12 @@ fn allocateAtoms(self: *Elf) !void {
 }
 
 fn logAtoms(self: Elf, sh_flags: u64) void {
-    for (self.shdrs.items) |shdr, ndx| {
+    const slice = self.sections.slice();
+    for (slice.items(.last_atom)) |last_atom, i| {
+        var atom = last_atom orelse continue;
+        const ndx = @intCast(u16, i);
+        const shdr = slice.items(.header)[ndx];
         if (shdr.sh_flags & sh_flags != sh_flags) continue;
-
-        const maybe_atom = self.atoms.get(@intCast(u16, ndx)) orelse continue;
-        var atom = maybe_atom orelse continue;
 
         log.debug(">>> {s}", .{self.shstrtab.getAssumeExists(shdr.sh_name)});
 
@@ -1774,15 +1428,14 @@ fn logAtoms(self: Elf, sh_flags: u64) void {
 }
 
 fn writeAtoms(self: *Elf) !void {
-    var it = self.atoms.iterator();
-    while (it.next()) |entry| {
-        const shdr_ndx = entry.key_ptr.*;
-        const shdr = self.shdrs.items[shdr_ndx];
+    const slice = self.sections.slice();
+    for (slice.items(.last_atom)) |last_atom, i| {
+        var atom = last_atom orelse continue;
+        const shdr_ndx = @intCast(u16, i);
+        const shdr = slice.items(.header)[shdr_ndx];
 
         // TODO zero prefill .bss and .tbss if have presence in file
         if (shdr.sh_type == elf.SHT_NOBITS) continue;
-
-        var atom: *Atom = entry.value_ptr.* orelse continue;
 
         // Find the first atom
         while (atom.prev) |prev| {
@@ -1842,7 +1495,7 @@ fn setStackSize(self: *Elf) !void {
 }
 
 fn writeSymtab(self: *Elf) !void {
-    const shdr = &self.shdrs.items[self.symtab_sect_index.?];
+    const shdr = &self.sections.items(.header)[self.symtab_sect_index.?];
 
     var symtab = std.ArrayList(elf.Elf64_Sym).init(self.base.allocator);
     defer symtab.deinit();
@@ -1900,7 +1553,8 @@ fn writeSymtab(self: *Elf) !void {
 
     shdr.sh_offset = mem.alignForwardGeneric(u64, self.next_offset, @alignOf(elf.Elf64_Sym));
     shdr.sh_size = symtab.items.len * @sizeOf(elf.Elf64_Sym);
-    log.debug("writing '.symtab' contents from 0x{x} to 0x{x}", .{
+    log.debug("writing '{?s}' contents from 0x{x} to 0x{x}", .{
+        self.shstrtab.get(shdr.sh_name),
         shdr.sh_offset,
         shdr.sh_offset + shdr.sh_size,
     });
@@ -1911,10 +1565,11 @@ fn writeSymtab(self: *Elf) !void {
 fn writeStrtab(self: *Elf) !void {
     const buffer = self.strtab.toOwnedSlice(self.base.allocator);
     defer self.base.allocator.free(buffer);
-    const shdr = &self.shdrs.items[self.strtab_sect_index.?];
+    const shdr = &self.sections.items(.header)[self.strtab_sect_index.?];
     shdr.sh_offset = self.next_offset;
     shdr.sh_size = buffer.len;
-    log.debug("writing '.strtab' contents from 0x{x} to 0x{x}", .{
+    log.debug("writing '{?s}' contents from 0x{x} to 0x{x}", .{
+        self.shstrtab.get(shdr.sh_name),
         shdr.sh_offset,
         shdr.sh_offset + shdr.sh_size,
     });
@@ -1925,7 +1580,7 @@ fn writeStrtab(self: *Elf) !void {
 fn writeShStrtab(self: *Elf) !void {
     const buffer = self.shstrtab.toOwnedSlice(self.base.allocator);
     defer self.base.allocator.free(buffer);
-    const shdr = &self.shdrs.items[self.shstrtab_sect_index.?];
+    const shdr = &self.sections.items(.header)[self.shstrtab_sect_index.?];
     shdr.sh_offset = self.next_offset;
     shdr.sh_size = buffer.len;
     log.debug("writing '.shstrtab' contents from 0x{x} to 0x{x}", .{
@@ -1946,22 +1601,31 @@ fn writePhdrs(self: *Elf) !void {
 }
 
 fn writeShdrs(self: *Elf) !void {
-    const shdrs_size = self.shdrs.items.len * @sizeOf(elf.Elf64_Shdr);
+    self.sections.items(.header)[self.symtab_sect_index.?].sh_link = self.strtab_sect_index.?;
+    const shdrs_size = self.sections.items(.header).len * @sizeOf(elf.Elf64_Shdr);
     const e_shoff = mem.alignForwardGeneric(u64, self.next_offset, @alignOf(elf.Elf64_Shdr));
     log.debug("writing section headers from 0x{x} to 0x{x}", .{
         e_shoff,
         e_shoff + shdrs_size,
     });
-    try self.base.file.pwriteAll(mem.sliceAsBytes(self.shdrs.items), e_shoff);
+    try self.base.file.pwriteAll(mem.sliceAsBytes(self.sections.items(.header)), e_shoff);
     self.header.?.e_shoff = e_shoff;
     self.next_offset = e_shoff + shdrs_size;
 }
 
 fn writeHeader(self: *Elf) !void {
+    self.header.?.e_shstrndx = self.shstrtab_sect_index.?;
     self.header.?.e_phnum = @intCast(u16, self.phdrs.items.len);
-    self.header.?.e_shnum = @intCast(u16, self.shdrs.items.len);
+    self.header.?.e_shnum = @intCast(u16, self.sections.items(.header).len);
     log.debug("writing ELF header {} at 0x{x}", .{ self.header.?, 0 });
     try self.base.file.pwriteAll(mem.asBytes(&self.header.?), 0);
+}
+
+pub fn getSectionByName(self: *Elf, name: []const u8) ?u16 {
+    for (self.sections.items(.header)) |shdr, i| {
+        const this_name = self.shstrtab.get(shdr.sh_name).?;
+        if (mem.eql(u8, this_name, name)) return @intCast(u16, i);
+    } else return null;
 }
 
 pub fn getSymbolPtr(self: *Elf, sym_with_loc: SymbolWithLoc) *elf.Elf64_Sym {
@@ -1997,6 +1661,18 @@ pub fn getEntryPoint(self: Elf) error{EntrypointNotFound}!SymbolWithLoc {
         return error.EntrypointNotFound;
     };
     return global;
+}
+
+fn logSections(self: Elf) void {
+    log.debug("sections:", .{});
+    for (self.sections.items(.header)) |shdr, i| {
+        log.debug("  sect({d}): {s} @{x}, sizeof({x})", .{
+            i,
+            self.shstrtab.get(shdr.sh_name).?,
+            shdr.sh_offset,
+            shdr.sh_size,
+        });
+    }
 }
 
 fn logSymtab(self: Elf) void {
