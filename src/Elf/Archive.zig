@@ -91,8 +91,7 @@ pub fn deinit(self: *Archive, allocator: Allocator) void {
     allocator.free(self.name);
 }
 
-pub fn parse(self: *Archive, allocator: Allocator) !void {
-    const reader = self.file.reader();
+pub fn parse(self: *Archive, allocator: Allocator, reader: anytype) !void {
     const magic = try reader.readBytesNoEof(SARMAG);
     if (!mem.eql(u8, &magic, ARMAG)) {
         log.debug("invalid magic: expected '{s}', found '{s}'", .{ ARMAG, magic });
@@ -194,15 +193,19 @@ pub fn parseObject(self: Archive, allocator: Allocator, cpu_arch: std.Target.Cpu
         const path = try std.os.realpath(self.name, &buffer);
         break :blk try std.fmt.allocPrint(allocator, "{s}({s})", .{ path, object_name });
     };
+    const object_size = try hdr.size();
+    const data = try allocator.allocWithOptions(u8, object_size, @alignOf(u64), null);
+    const amt = try reader.readAll(data);
+    if (amt != object_size) {
+        return error.Io;
+    }
 
     var object = Object{
-        .file = try fs.cwd().openFile(self.name, .{}),
         .name = full_name,
-        .file_offset = @intCast(u32, try reader.context.getPos()),
+        .data = data,
     };
 
     try object.parse(allocator, cpu_arch);
-    try reader.context.seekTo(0);
 
     return object;
 }

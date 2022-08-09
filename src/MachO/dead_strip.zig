@@ -139,11 +139,7 @@ fn refersDead(atom: *Atom, macho_file: *MachO) bool {
     return false;
 }
 
-fn mark(
-    roots: std.AutoHashMap(*Atom, void),
-    alive: *std.AutoHashMap(*Atom, void),
-    macho_file: *MachO,
-) !void {
+fn mark(roots: std.AutoHashMap(*Atom, void), alive: *std.AutoHashMap(*Atom, void), macho_file: *MachO) !void {
     try alive.ensureUnusedCapacity(roots.count());
 
     var it = roots.keyIterator();
