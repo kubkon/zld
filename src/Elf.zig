@@ -47,8 +47,6 @@ symtab_sect_index: ?u16 = null,
 strtab_sect_index: ?u16 = null,
 shstrtab_sect_index: ?u16 = null,
 
-next_offset: u64 = 0,
-
 locals: std.ArrayListUnmanaged(elf.Elf64_Sym) = .{},
 globals: std.StringArrayHashMapUnmanaged(SymbolWithLoc) = .{},
 unresolved: std.AutoArrayHashMapUnmanaged(u32, void) = .{},
@@ -1089,21 +1087,24 @@ fn allocateLoadRWSeg(self: *Elf) !void {
             .vaddr = phdr.p_vaddr,
         });
     }
-
-    self.next_offset = phdr.p_offset + phdr.p_filesz;
 }
 
 fn allocateNonAllocSections(self: *Elf) !void {
+    var offset: u64 = 0;
     for (self.sections.items(.shdr)) |*shdr| {
+        defer {
+            offset = shdr.sh_offset + shdr.sh_size;
+        }
+
         if (shdr.sh_type == elf.SHT_NULL) continue;
         if (shdr.sh_flags & elf.SHF_ALLOC != 0) continue;
-        shdr.sh_offset = mem.alignForwardGeneric(u64, self.next_offset, shdr.sh_addralign);
+
+        shdr.sh_offset = mem.alignForwardGeneric(u64, offset, shdr.sh_addralign);
         log.debug("setting '{s}' non-alloc section's offsets from 0x{x} to 0x{x}", .{
             self.shstrtab.getAssumeExists(shdr.sh_name),
             shdr.sh_offset,
             shdr.sh_offset + shdr.sh_size,
         });
-        self.next_offset = shdr.sh_offset + shdr.sh_size;
     }
 }
 
@@ -1276,6 +1277,10 @@ fn setStackSize(self: *Elf) !void {
 }
 
 fn writeSymtab(self: *Elf) !void {
+    const offset: u64 = blk: {
+        const shdr = self.sections.items(.shdr)[self.symtab_sect_index.? - 1];
+        break :blk shdr.sh_offset + shdr.sh_size;
+    };
     const shdr = &self.sections.items(.shdr)[self.symtab_sect_index.?];
 
     var symtab = std.ArrayList(elf.Elf64_Sym).init(self.base.allocator);
@@ -1332,7 +1337,7 @@ fn writeSymtab(self: *Elf) !void {
         symtab.appendAssumeCapacity(sym);
     }
 
-    shdr.sh_offset = mem.alignForwardGeneric(u64, self.next_offset, @alignOf(elf.Elf64_Sym));
+    shdr.sh_offset = mem.alignForwardGeneric(u64, offset, @alignOf(elf.Elf64_Sym));
     shdr.sh_size = symtab.items.len * @sizeOf(elf.Elf64_Sym);
     log.debug("writing '{s}' contents from 0x{x} to 0x{x}", .{
         self.shstrtab.getAssumeExists(shdr.sh_name),
@@ -1340,14 +1345,17 @@ fn writeSymtab(self: *Elf) !void {
         shdr.sh_offset + shdr.sh_size,
     });
     try self.base.file.pwriteAll(mem.sliceAsBytes(symtab.items), shdr.sh_offset);
-    self.next_offset = shdr.sh_offset + shdr.sh_size;
 }
 
 fn writeStrtab(self: *Elf) !void {
+    const offset: u64 = blk: {
+        const shdr = self.sections.items(.shdr)[self.strtab_sect_index.? - 1];
+        break :blk shdr.sh_offset + shdr.sh_size;
+    };
     const buffer = self.strtab.toOwnedSlice(self.base.allocator);
     defer self.base.allocator.free(buffer);
     const shdr = &self.sections.items(.shdr)[self.strtab_sect_index.?];
-    shdr.sh_offset = self.next_offset;
+    shdr.sh_offset = offset;
     shdr.sh_size = buffer.len;
     log.debug("writing '{s}' contents from 0x{x} to 0x{x}", .{
         self.shstrtab.getAssumeExists(shdr.sh_name),
@@ -1355,21 +1363,23 @@ fn writeStrtab(self: *Elf) !void {
         shdr.sh_offset + shdr.sh_size,
     });
     try self.base.file.pwriteAll(buffer, shdr.sh_offset);
-    self.next_offset += shdr.sh_size;
 }
 
 fn writeShStrtab(self: *Elf) !void {
+    const offset: u64 = blk: {
+        const shdr = self.sections.items(.shdr)[self.shstrtab_sect_index.? - 1];
+        break :blk shdr.sh_offset + shdr.sh_size;
+    };
     const buffer = self.shstrtab.toOwnedSlice(self.base.allocator);
     defer self.base.allocator.free(buffer);
     const shdr = &self.sections.items(.shdr)[self.shstrtab_sect_index.?];
-    shdr.sh_offset = self.next_offset;
+    shdr.sh_offset = offset;
     shdr.sh_size = buffer.len;
     log.debug("writing '.shstrtab' contents from 0x{x} to 0x{x}", .{
         shdr.sh_offset,
         shdr.sh_offset + shdr.sh_size,
     });
     try self.base.file.pwriteAll(buffer, shdr.sh_offset);
-    self.next_offset += shdr.sh_size;
 }
 
 fn writePhdrs(self: *Elf) !void {
@@ -1383,15 +1393,18 @@ fn writePhdrs(self: *Elf) !void {
 
 fn writeShdrs(self: *Elf) !void {
     self.sections.items(.shdr)[self.symtab_sect_index.?].sh_link = self.strtab_sect_index.?;
+    const offset: u64 = blk: {
+        const shdr = self.sections.items(.shdr)[self.sections.len - 1];
+        break :blk shdr.sh_offset + shdr.sh_size;
+    };
     const shdrs_size = self.sections.items(.shdr).len * @sizeOf(elf.Elf64_Shdr);
-    const e_shoff = mem.alignForwardGeneric(u64, self.next_offset, @alignOf(elf.Elf64_Shdr));
+    const e_shoff = mem.alignForwardGeneric(u64, offset, @alignOf(elf.Elf64_Shdr));
     log.debug("writing section headers from 0x{x} to 0x{x}", .{
         e_shoff,
         e_shoff + shdrs_size,
     });
     try self.base.file.pwriteAll(mem.sliceAsBytes(self.sections.items(.shdr)), e_shoff);
     self.header.?.e_shoff = e_shoff;
-    self.next_offset = e_shoff + shdrs_size;
 }
 
 fn writeHeader(self: *Elf) !void {
