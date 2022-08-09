@@ -5,6 +5,7 @@ const builtin = @import("builtin");
 const assert = std.debug.assert;
 const elf = std.elf;
 const fs = std.fs;
+const gc = @import("Elf/gc.zig");
 const log = std.log.scoped(.elf);
 const math = std.math;
 const mem = std.mem;
@@ -238,9 +239,9 @@ pub fn flush(self: *Elf) !void {
         try object.splitIntoAtoms(self.base.allocator, @intCast(u16, object_id), self);
     }
 
-    // if (self.options.gc_sections) {
-    //     try self.gcAtoms();
-    // }
+    if (self.options.gc_sections) {
+        try gc.gcAtoms(self);
+    }
 
     try self.setStackSize();
     try self.allocateLoadRSeg();
@@ -286,7 +287,7 @@ pub fn flush(self: *Elf) !void {
 
     self.logSections();
     self.logSymtab();
-    self.logAtoms(0);
+    self.logAtoms();
 
     try self.writeAtoms();
     try self.writePhdrs();
@@ -416,6 +417,21 @@ fn populateMetadata(self: *Elf) !void {
             .sh_entsize = 0,
         }, "");
     }
+    // TODO remove this once GC is done prior to creating synthetic sections
+    if (self.got_sect_index == null) {
+        self.got_sect_index = try self.insertSection(.{
+            .sh_name = 0,
+            .sh_type = elf.SHT_PROGBITS,
+            .sh_flags = elf.SHF_WRITE | elf.SHF_ALLOC,
+            .sh_addr = 0,
+            .sh_offset = 0,
+            .sh_size = 0,
+            .sh_link = 0,
+            .sh_info = 0,
+            .sh_addralign = @alignOf(u64),
+            .sh_entsize = 0,
+        }, ".got");
+    }
     if (self.symtab_sect_index == null) {
         self.symtab_sect_index = try self.insertSection(.{
             .sh_name = 0,
@@ -499,7 +515,7 @@ fn insertSection(self: *Elf, shdr: elf.Elf64_Shdr, shdr_name: []const u8) !u16 {
     // the sections sorted, but it's a useful hack we can use for the debug builds in
     // self-hosted Zig compiler.
     const insertion_index = for (self.sections.items(.shdr)) |oshdr, i| {
-        const oshdr_name = self.shstrtab.get(oshdr.sh_name).?;
+        const oshdr_name = self.shstrtab.getAssumeExists(oshdr.sh_name);
         if (getSectionPrecedence(oshdr, oshdr_name) > precedence) break @intCast(u16, i);
     } else @intCast(u16, self.sections.items(.shdr).len);
     log.debug("inserting section '{s}' at index {d}", .{
@@ -903,9 +919,9 @@ pub fn createGotAtom(self: *Elf, target: SymbolWithLoc) !*Atom {
         .st_value = 0,
         .st_size = @sizeOf(u64),
     });
-    atom.local_sym_index = sym_index;
+    atom.sym_index = sym_index;
 
-    try self.atom_table.putNoClobber(self.base.allocator, atom.local_sym_index, atom);
+    try self.atom_table.putNoClobber(self.base.allocator, atom.sym_index, atom);
     try self.addAtomToSection(atom, self.got_sect_index.?);
 
     return atom;
@@ -1123,7 +1139,7 @@ fn allocateAtoms(self: *Elf) !void {
             // Update each symbol contained within the TextBlock
             for (atom.contained.items) |sym_at_off| {
                 const contained_sym = self.getSymbolPtr(.{
-                    .sym_index = sym_at_off.local_sym_index,
+                    .sym_index = sym_at_off.sym_index,
                     .file = atom.file,
                 });
                 contained_sym.st_value = base_addr + sym_at_off.offset;
@@ -1139,13 +1155,43 @@ fn allocateAtoms(self: *Elf) !void {
     }
 }
 
-fn logAtoms(self: Elf, sh_flags: u64) void {
+pub fn logAtom(self: *Elf, atom: *const Atom, comptime logger: anytype) void {
+    const sym = atom.getSymbol(self);
+    const sym_name = atom.getName(self);
+    logger.debug("  ATOM(%{d}, '{s}') @ {x} (sizeof({x}), alignof({x})) in object({?}) in sect({d})", .{
+        atom.sym_index,
+        sym_name,
+        sym.st_value,
+        sym.st_size,
+        atom.alignment,
+        atom.file,
+        sym.st_shndx,
+    });
+
+    for (atom.contained.items) |sym_off| {
+        const inner_sym = self.getSymbol(.{
+            .sym_index = sym_off.sym_index,
+            .file = atom.file,
+        });
+        const inner_sym_name = self.getSymbolName(.{
+            .sym_index = sym_off.sym_index,
+            .file = atom.file,
+        });
+        logger.debug("    (%{d}, '{s}') @ {x} ({x})", .{
+            sym_off.sym_index,
+            inner_sym_name,
+            inner_sym.st_value,
+            sym_off.offset,
+        });
+    }
+}
+
+fn logAtoms(self: *Elf) void {
     const slice = self.sections.slice();
     for (slice.items(.last_atom)) |last_atom, i| {
         var atom = last_atom orelse continue;
         const ndx = @intCast(u16, i);
         const shdr = slice.items(.shdr)[ndx];
-        if (shdr.sh_flags & sh_flags != sh_flags) continue;
 
         log.debug(">>> {s}", .{self.shstrtab.getAssumeExists(shdr.sh_name)});
 
@@ -1154,33 +1200,7 @@ fn logAtoms(self: Elf, sh_flags: u64) void {
         }
 
         while (true) {
-            if (atom.file) |file| {
-                const object = self.objects.items[file];
-                const sym = object.symtab.items[atom.local_sym_index];
-                const sym_name = object.getSymbolName(atom.local_sym_index);
-                log.debug("  {s} : {d} => 0x{x}", .{ sym_name, atom.local_sym_index, sym.st_value });
-                log.debug("    defined in {s}", .{object.name});
-                log.debug("    contained:", .{});
-                for (atom.contained.items) |contained| {
-                    const index = contained.local_sym_index;
-                    const csym = object.symtab.items[index];
-                    const csym_name = object.getSymbolName(contained.local_sym_index);
-                    log.debug("       {s} : {d} => 0x{x}", .{ csym_name, index, csym.st_value });
-                }
-            } else {
-                const sym = self.locals.items[atom.local_sym_index];
-                const sym_name = self.strtab.getAssumeExists(sym.st_name);
-                log.debug("  {s} : {d} => 0x{x}", .{ sym_name, atom.local_sym_index, sym.st_value });
-                log.debug("    synthetic", .{});
-                log.debug("    contained:", .{});
-                for (atom.contained.items) |contained| {
-                    const index = contained.local_sym_index;
-                    const csym = self.locals.items[index];
-                    const csym_name = self.strtab.getAssumeExists(csym.st_name);
-                    log.debug("       {s} : {d} => 0x{x}", .{ csym_name, index, csym.st_value });
-                }
-            }
-
+            self.logAtom(atom, log);
             if (atom.next) |next| {
                 atom = next;
             } else break;
@@ -1314,8 +1334,8 @@ fn writeSymtab(self: *Elf) !void {
 
     shdr.sh_offset = mem.alignForwardGeneric(u64, self.next_offset, @alignOf(elf.Elf64_Sym));
     shdr.sh_size = symtab.items.len * @sizeOf(elf.Elf64_Sym);
-    log.debug("writing '{?s}' contents from 0x{x} to 0x{x}", .{
-        self.shstrtab.get(shdr.sh_name),
+    log.debug("writing '{s}' contents from 0x{x} to 0x{x}", .{
+        self.shstrtab.getAssumeExists(shdr.sh_name),
         shdr.sh_offset,
         shdr.sh_offset + shdr.sh_size,
     });
@@ -1329,8 +1349,8 @@ fn writeStrtab(self: *Elf) !void {
     const shdr = &self.sections.items(.shdr)[self.strtab_sect_index.?];
     shdr.sh_offset = self.next_offset;
     shdr.sh_size = buffer.len;
-    log.debug("writing '{?s}' contents from 0x{x} to 0x{x}", .{
-        self.shstrtab.get(shdr.sh_name),
+    log.debug("writing '{s}' contents from 0x{x} to 0x{x}", .{
+        self.shstrtab.getAssumeExists(shdr.sh_name),
         shdr.sh_offset,
         shdr.sh_offset + shdr.sh_size,
     });
@@ -1384,7 +1404,7 @@ fn writeHeader(self: *Elf) !void {
 
 pub fn getSectionByName(self: *Elf, name: []const u8) ?u16 {
     for (self.sections.items(.shdr)) |shdr, i| {
-        const this_name = self.shstrtab.get(shdr.sh_name).?;
+        const this_name = self.shstrtab.getAssumeExists(shdr.sh_name);
         if (mem.eql(u8, this_name, name)) return @intCast(u16, i);
     } else return null;
 }
@@ -1443,7 +1463,7 @@ fn logSections(self: Elf) void {
     for (self.sections.items(.shdr)) |shdr, i| {
         log.debug("  sect({d}): {s} @{x}, sizeof({x})", .{
             i,
-            self.shstrtab.get(shdr.sh_name).?,
+            self.shstrtab.getAssumeExists(shdr.sh_name),
             shdr.sh_offset,
             shdr.sh_size,
         });

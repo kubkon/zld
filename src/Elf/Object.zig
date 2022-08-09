@@ -24,10 +24,16 @@ symtab_index: ?u16 = null,
 
 symtab: std.ArrayListUnmanaged(elf.Elf64_Sym) = .{},
 
+managed_atoms: std.ArrayListUnmanaged(*Atom) = .{},
 atom_table: std.AutoHashMapUnmanaged(u32, *Atom) = .{},
 
 pub fn deinit(self: *Object, allocator: Allocator) void {
     self.symtab.deinit(allocator);
+    for (self.managed_atoms.items) |atom| {
+        atom.deinit(allocator);
+        allocator.destroy(atom);
+    }
+    self.managed_atoms.deinit(allocator);
     self.atom_table.deinit(allocator);
     allocator.free(self.name);
     allocator.free(self.data);
@@ -107,7 +113,7 @@ pub fn scanInputSections(self: *Object, elf_file: *Elf) !void {
             log.debug("mapping '{s}' into output sect({d}, '{s}')", .{
                 shdr_name,
                 tshdr_ndx,
-                elf_file.shstrtab.get(out_shdr.sh_name).?,
+                elf_file.shstrtab.getAssumeExists(out_shdr.sh_name),
             });
         },
         else => {},
@@ -171,7 +177,7 @@ pub fn splitIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
                 atom.deinit(allocator);
                 allocator.destroy(atom);
             }
-            try elf_file.managed_atoms.append(allocator, atom);
+            try self.managed_atoms.append(allocator, atom);
 
             atom.file = object_id;
             atom.size = @intCast(u32, shdr.sh_size);
@@ -187,10 +193,10 @@ pub fn splitIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
             // which can be pruned to:
             //
             // __udivti3
-            var local_sym_index: ?u32 = null;
+            var sym_index: ?u32 = null;
 
             for (syms.items) |sym_id| {
-                const sym = self.getSourceSymbol(sym_id);
+                const sym = self.getSourceSymbol(sym_id).?;
                 const is_sect_sym = sym.st_info & 0xf == elf.STT_SECTION;
                 if (is_sect_sym) {
                     const osym = self.getSymbolPtr(sym_id);
@@ -202,18 +208,18 @@ pub fn splitIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
                         .st_value = 0,
                         .st_size = sym.st_size,
                     };
-                    local_sym_index = sym_id;
+                    sym_index = sym_id;
                     continue;
                 }
                 try atom.contained.append(allocator, .{
-                    .local_sym_index = sym_id,
+                    .sym_index = sym_id,
                     .offset = sym.st_value,
                 });
                 try self.atom_table.putNoClobber(allocator, sym_id, atom);
             }
 
-            atom.local_sym_index = local_sym_index orelse blk: {
-                const sym_index = @intCast(u32, self.symtab.items.len);
+            atom.sym_index = sym_index orelse blk: {
+                const index = @intCast(u32, self.symtab.items.len);
                 try self.symtab.append(allocator, .{
                     .st_name = 0,
                     .st_info = (elf.STB_LOCAL << 4) | elf.STT_OBJECT,
@@ -222,9 +228,9 @@ pub fn splitIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
                     .st_value = 0,
                     .st_size = atom.size,
                 });
-                break :blk sym_index;
+                break :blk index;
             };
-            try self.atom_table.putNoClobber(allocator, atom.local_sym_index, atom);
+            try self.atom_table.putNoClobber(allocator, atom.sym_index, atom);
 
             var code = if (shdr.sh_type == elf.SHT_NOBITS) blk: {
                 var code = try allocator.alloc(u8, atom.size);
@@ -427,8 +433,9 @@ pub fn getSourceShstrtab(self: Object) []const u8 {
     return self.getShdrContents(self.header.e_shstrndx);
 }
 
-pub fn getSourceSymbol(self: Object, index: u32) elf.Elf64_Sym {
+pub fn getSourceSymbol(self: Object, index: u32) ?elf.Elf64_Sym {
     const symtab = self.getSourceSymtab();
+    if (index >= symtab.len) return null;
     return symtab[index];
 }
 

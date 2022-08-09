@@ -16,7 +16,7 @@ const Elf = @import("../Elf.zig");
 /// the symbol references, and adding that to the file offset of the section.
 /// If this field is 0, it means the codegen size = 0 and there is no symbol or
 /// offset table entry.
-local_sym_index: u32,
+sym_index: u32,
 
 /// null means global synthetic symbol table.
 file: ?u32,
@@ -42,7 +42,7 @@ next: ?*Atom,
 prev: ?*Atom,
 
 pub const SymbolAtOffset = struct {
-    local_sym_index: u32,
+    sym_index: u32,
     offset: u64,
 
     pub fn format(
@@ -53,14 +53,14 @@ pub const SymbolAtOffset = struct {
     ) !void {
         _ = fmt;
         _ = options;
-        try std.fmt.format(writer, "{{ {d}: .offset = {d} }}", .{ self.local_sym_index, self.offset });
+        try std.fmt.format(writer, "{{ {d}: .offset = {d} }}", .{ self.sym_index, self.offset });
     }
 };
 
 pub fn createEmpty(allocator: Allocator) !*Atom {
     const self = try allocator.create(Atom);
     self.* = .{
-        .local_sym_index = 0,
+        .sym_index = 0,
         .file = undefined,
         .size = 0,
         .alignment = 0,
@@ -80,7 +80,7 @@ pub fn format(self: Atom, comptime fmt: []const u8, options: std.fmt.FormatOptio
     _ = fmt;
     _ = options;
     try std.fmt.format(writer, "Atom {{ ", .{});
-    try std.fmt.format(writer, "  .local_sym_index = {d}, ", .{self.local_sym_index});
+    try std.fmt.format(writer, "  .sym_index = {d}, ", .{self.sym_index});
     try std.fmt.format(writer, "  .file = {d}, ", .{self.file});
     try std.fmt.format(writer, "  .contained = {any}, ", .{self.contained.items});
     try std.fmt.format(writer, "  .code = {x}, ", .{std.fmt.fmtSliceHexLower(if (self.code.items.len > 64)
@@ -99,14 +99,18 @@ pub fn getSymbol(self: Atom, elf_file: *Elf) elf.Elf64_Sym {
 
 pub fn getSymbolPtr(self: Atom, elf_file: *Elf) *elf.Elf64_Sym {
     return elf_file.getSymbolPtr(.{
-        .sym_index = self.local_sym_index,
+        .sym_index = self.sym_index,
         .file = self.file,
     });
 }
 
+pub fn getSymbolWithLoc(self: Atom) Elf.SymbolWithLoc {
+    return .{ .sym_index = self.sym_index, .file = self.file };
+}
+
 pub fn getName(self: Atom, elf_file: *Elf) []const u8 {
     return elf_file.getSymbolName(.{
-        .sym_index = self.local_sym_index,
+        .sym_index = self.sym_index,
         .file = self.file,
     });
 }
@@ -297,10 +301,10 @@ pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
                 const target: i64 = blk: {
                     if (got_atom.file) |file| {
                         const actual_object = elf_file.objects.items[file];
-                        const actual_tsym = actual_object.symtab.items[got_atom.local_sym_index];
+                        const actual_tsym = actual_object.symtab.items[got_atom.sym_index];
                         break :blk @intCast(i64, actual_tsym.st_value);
                     }
-                    const actual_tsym = elf_file.locals.items[got_atom.local_sym_index];
+                    const actual_tsym = elf_file.locals.items[got_atom.sym_index];
                     break :blk @intCast(i64, actual_tsym.st_value);
                 };
                 log.debug("R_X86_64_REX_GOTPCRELX: {x}: [0x{x} => 0x{x}] ({s})", .{
