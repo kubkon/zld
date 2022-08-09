@@ -49,8 +49,6 @@ shstrtab_sect_index: ?u16 = null,
 
 next_offset: u64 = 0,
 
-base_addr: u64 = 0x200000,
-
 locals: std.ArrayListUnmanaged(elf.Elf64_Sym) = .{},
 globals: std.StringArrayHashMapUnmanaged(SymbolWithLoc) = .{},
 unresolved: std.AutoArrayHashMapUnmanaged(u32, void) = .{},
@@ -76,6 +74,8 @@ pub const SymbolWithLoc = struct {
     /// null means it's a synthetic global.
     file: ?u32,
 };
+
+const default_base_addr: u64 = 0x200000;
 
 pub fn openPath(allocator: Allocator, options: Options) !*Elf {
     const file = try options.emit.directory.createFile(options.emit.sub_path, .{
@@ -342,8 +342,8 @@ fn populateMetadata(self: *Elf) !void {
             .p_type = elf.PT_PHDR,
             .p_flags = elf.PF_R,
             .p_offset = offset,
-            .p_vaddr = offset + self.base_addr,
-            .p_paddr = offset + self.base_addr,
+            .p_vaddr = offset + default_base_addr,
+            .p_paddr = offset + default_base_addr,
             .p_filesz = size,
             .p_memsz = size,
             .p_align = @alignOf(elf.Elf64_Phdr),
@@ -355,8 +355,8 @@ fn populateMetadata(self: *Elf) !void {
             .p_type = elf.PT_LOAD,
             .p_flags = elf.PF_R,
             .p_offset = 0,
-            .p_vaddr = self.base_addr,
-            .p_paddr = self.base_addr,
+            .p_vaddr = default_base_addr,
+            .p_paddr = default_base_addr,
             .p_filesz = @sizeOf(elf.Elf64_Ehdr),
             .p_memsz = @sizeOf(elf.Elf64_Ehdr),
             .p_align = 0x1000,
@@ -373,8 +373,8 @@ fn populateMetadata(self: *Elf) !void {
             .p_type = elf.PT_LOAD,
             .p_flags = elf.PF_R | elf.PF_X,
             .p_offset = 0,
-            .p_vaddr = self.base_addr,
-            .p_paddr = self.base_addr,
+            .p_vaddr = default_base_addr,
+            .p_paddr = default_base_addr,
             .p_filesz = 0,
             .p_memsz = 0,
             .p_align = 0x1000,
@@ -391,8 +391,8 @@ fn populateMetadata(self: *Elf) !void {
             .p_type = elf.PT_LOAD,
             .p_flags = elf.PF_R | elf.PF_W,
             .p_offset = 0,
-            .p_vaddr = self.base_addr,
-            .p_paddr = self.base_addr,
+            .p_vaddr = default_base_addr,
+            .p_paddr = default_base_addr,
             .p_filesz = 0,
             .p_memsz = 0,
             .p_align = 0x1000,
@@ -580,8 +580,8 @@ pub fn getOutputSection(self: *Elf, shdr: elf.Elf64_Shdr, shdr_name: []const u8)
                                     .p_type = elf.PT_TLS,
                                     .p_flags = elf.PF_R,
                                     .p_offset = 0,
-                                    .p_vaddr = self.base_addr,
-                                    .p_paddr = self.base_addr,
+                                    .p_vaddr = default_base_addr,
+                                    .p_paddr = default_base_addr,
                                     .p_filesz = 0,
                                     .p_memsz = 0,
                                     .p_align = 0,
@@ -604,8 +604,8 @@ pub fn getOutputSection(self: *Elf, shdr: elf.Elf64_Shdr, shdr_name: []const u8)
                                 .p_type = elf.PT_TLS,
                                 .p_flags = elf.PF_R,
                                 .p_offset = 0,
-                                .p_vaddr = self.base_addr,
-                                .p_paddr = self.base_addr,
+                                .p_vaddr = default_base_addr,
+                                .p_paddr = default_base_addr,
                                 .p_filesz = 0,
                                 .p_memsz = 0,
                                 .p_align = 0,
@@ -1019,7 +1019,7 @@ fn allocateLoadRSeg(self: *Elf) !void {
         self.getSectionByName(".rodata"),
     }, .{
         .offset = 0,
-        .vaddr = self.base_addr,
+        .vaddr = default_base_addr,
         .init_size = init_size,
         .alignment = 0x1000,
     });
