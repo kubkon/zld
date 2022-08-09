@@ -1,6 +1,7 @@
 const Elf = @This();
 
 const std = @import("std");
+const build_options = @import("build_options");
 const builtin = @import("builtin");
 const assert = std.debug.assert;
 const elf = std.elf;
@@ -283,9 +284,11 @@ pub fn flush(self: *Elf) !void {
         }
     }
 
-    self.logSections();
-    self.logSymtab();
-    self.logAtoms();
+    if (build_options.enable_logging) {
+        self.logSymtab();
+        self.logSections();
+        self.logAtoms();
+    }
 
     try self.writeAtoms();
     try self.writePhdrs();
