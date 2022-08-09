@@ -60,7 +60,7 @@ managed_atoms: std.ArrayListUnmanaged(*Atom) = .{},
 atom_table: std.AutoHashMapUnmanaged(u32, *Atom) = .{},
 
 const Section = struct {
-    header: elf.Elf64_Shdr,
+    shdr: elf.Elf64_Shdr,
     last_atom: ?*Atom,
 };
 
@@ -494,10 +494,10 @@ fn getSectionPrecedence(shdr: elf.Elf64_Shdr, shdr_name: []const u8) u4 {
 
 fn insertSection(self: *Elf, shdr: elf.Elf64_Shdr, shdr_name: []const u8) !u16 {
     const precedence = getSectionPrecedence(shdr, shdr_name);
-    const insertion_index = for (self.sections.items(.header)) |oshdr, i| {
+    const insertion_index = for (self.sections.items(.shdr)) |oshdr, i| {
         const oshdr_name = self.shstrtab.get(oshdr.sh_name).?;
         if (getSectionPrecedence(oshdr, oshdr_name) > precedence) break @intCast(u16, i);
-    } else @intCast(u16, self.sections.items(.header).len);
+    } else @intCast(u16, self.sections.items(.shdr).len);
     log.debug("inserting section '{s}' at index {d}", .{
         shdr_name,
         insertion_index,
@@ -513,7 +513,7 @@ fn insertSection(self: *Elf, shdr: elf.Elf64_Shdr, shdr_name: []const u8) !u16 {
         if (insertion_index <= index) maybe_index.* = index + 1;
     }
     try self.sections.insert(self.base.allocator, insertion_index, .{
-        .header = .{
+        .shdr = .{
             .sh_name = try self.shstrtab.insert(self.base.allocator, shdr_name),
             .sh_type = shdr.sh_type,
             .sh_flags = shdr.sh_flags,
@@ -1154,15 +1154,15 @@ pub fn addAtomToSection(self: *Elf, atom: *Atom, sect_id: u16) !void {
     const sym = atom.getSymbolPtr(self);
     sym.st_shndx = sect_id;
     var section = self.sections.get(sect_id);
-    if (section.header.sh_size > 0) {
+    if (section.shdr.sh_size > 0) {
         section.last_atom.?.next = atom;
         atom.prev = section.last_atom.?;
     }
     section.last_atom = atom;
-    const aligned_end_addr = mem.alignForwardGeneric(u64, section.header.sh_size, atom.alignment);
-    const padding = aligned_end_addr - section.header.sh_size;
-    section.header.sh_size += padding + atom.size;
-    section.header.sh_addralign = @maximum(section.header.sh_addralign, atom.alignment);
+    const aligned_end_addr = mem.alignForwardGeneric(u64, section.shdr.sh_size, atom.alignment);
+    const padding = aligned_end_addr - section.shdr.sh_size;
+    section.shdr.sh_size += padding + atom.size;
+    section.shdr.sh_addralign = @maximum(section.shdr.sh_addralign, atom.alignment);
     self.sections.set(sect_id, section);
 }
 
@@ -1208,7 +1208,7 @@ fn allocateSegment(self: *Elf, phdr_ndx: u16, shdr_ndxs: []?u16, base: SegmentBa
     var min_align: u64 = 0;
     for (shdr_ndxs) |maybe_shdr_ndx| {
         const shdr_ndx = maybe_shdr_ndx orelse continue;
-        const shdr = self.sections.items(.header)[shdr_ndx];
+        const shdr = self.sections.items(.shdr)[shdr_ndx];
         min_align = @maximum(min_align, shdr.sh_addralign);
     }
 
@@ -1227,7 +1227,7 @@ fn allocateSegment(self: *Elf, phdr_ndx: u16, shdr_ndxs: []?u16, base: SegmentBa
     // so that the segments are contiguous in memory.
     for (shdr_ndxs) |maybe_shdr_ndx| {
         const shdr_ndx = maybe_shdr_ndx orelse continue;
-        const shdr = &self.sections.items(.header)[shdr_ndx];
+        const shdr = &self.sections.items(.shdr)[shdr_ndx];
         try self.allocateSection(shdr, phdr);
     }
 
@@ -1317,7 +1317,7 @@ fn allocateLoadRWSeg(self: *Elf) !void {
 }
 
 fn allocateNonAllocSections(self: *Elf) !void {
-    for (self.sections.items(.header)) |*shdr| {
+    for (self.sections.items(.shdr)) |*shdr| {
         if (shdr.sh_type == elf.SHT_NULL) continue;
         if (shdr.sh_flags & elf.SHF_ALLOC != 0) continue;
         shdr.sh_offset = mem.alignForwardGeneric(u64, self.next_offset, shdr.sh_addralign);
@@ -1335,7 +1335,7 @@ fn allocateAtoms(self: *Elf) !void {
     for (slice.items(.last_atom)) |last_atom, i| {
         var atom = last_atom orelse continue;
         const shdr_ndx = @intCast(u16, i);
-        const shdr = slice.items(.header)[shdr_ndx];
+        const shdr = slice.items(.shdr)[shdr_ndx];
 
         // Find the first atom
         while (atom.prev) |prev| {
@@ -1383,7 +1383,7 @@ fn logAtoms(self: Elf, sh_flags: u64) void {
     for (slice.items(.last_atom)) |last_atom, i| {
         var atom = last_atom orelse continue;
         const ndx = @intCast(u16, i);
-        const shdr = slice.items(.header)[ndx];
+        const shdr = slice.items(.shdr)[ndx];
         if (shdr.sh_flags & sh_flags != sh_flags) continue;
 
         log.debug(">>> {s}", .{self.shstrtab.getAssumeExists(shdr.sh_name)});
@@ -1432,7 +1432,7 @@ fn writeAtoms(self: *Elf) !void {
     for (slice.items(.last_atom)) |last_atom, i| {
         var atom = last_atom orelse continue;
         const shdr_ndx = @intCast(u16, i);
-        const shdr = slice.items(.header)[shdr_ndx];
+        const shdr = slice.items(.shdr)[shdr_ndx];
 
         // TODO zero prefill .bss and .tbss if have presence in file
         if (shdr.sh_type == elf.SHT_NOBITS) continue;
@@ -1495,7 +1495,7 @@ fn setStackSize(self: *Elf) !void {
 }
 
 fn writeSymtab(self: *Elf) !void {
-    const shdr = &self.sections.items(.header)[self.symtab_sect_index.?];
+    const shdr = &self.sections.items(.shdr)[self.symtab_sect_index.?];
 
     var symtab = std.ArrayList(elf.Elf64_Sym).init(self.base.allocator);
     defer symtab.deinit();
@@ -1565,7 +1565,7 @@ fn writeSymtab(self: *Elf) !void {
 fn writeStrtab(self: *Elf) !void {
     const buffer = self.strtab.toOwnedSlice(self.base.allocator);
     defer self.base.allocator.free(buffer);
-    const shdr = &self.sections.items(.header)[self.strtab_sect_index.?];
+    const shdr = &self.sections.items(.shdr)[self.strtab_sect_index.?];
     shdr.sh_offset = self.next_offset;
     shdr.sh_size = buffer.len;
     log.debug("writing '{?s}' contents from 0x{x} to 0x{x}", .{
@@ -1580,7 +1580,7 @@ fn writeStrtab(self: *Elf) !void {
 fn writeShStrtab(self: *Elf) !void {
     const buffer = self.shstrtab.toOwnedSlice(self.base.allocator);
     defer self.base.allocator.free(buffer);
-    const shdr = &self.sections.items(.header)[self.shstrtab_sect_index.?];
+    const shdr = &self.sections.items(.shdr)[self.shstrtab_sect_index.?];
     shdr.sh_offset = self.next_offset;
     shdr.sh_size = buffer.len;
     log.debug("writing '.shstrtab' contents from 0x{x} to 0x{x}", .{
@@ -1601,14 +1601,14 @@ fn writePhdrs(self: *Elf) !void {
 }
 
 fn writeShdrs(self: *Elf) !void {
-    self.sections.items(.header)[self.symtab_sect_index.?].sh_link = self.strtab_sect_index.?;
-    const shdrs_size = self.sections.items(.header).len * @sizeOf(elf.Elf64_Shdr);
+    self.sections.items(.shdr)[self.symtab_sect_index.?].sh_link = self.strtab_sect_index.?;
+    const shdrs_size = self.sections.items(.shdr).len * @sizeOf(elf.Elf64_Shdr);
     const e_shoff = mem.alignForwardGeneric(u64, self.next_offset, @alignOf(elf.Elf64_Shdr));
     log.debug("writing section headers from 0x{x} to 0x{x}", .{
         e_shoff,
         e_shoff + shdrs_size,
     });
-    try self.base.file.pwriteAll(mem.sliceAsBytes(self.sections.items(.header)), e_shoff);
+    try self.base.file.pwriteAll(mem.sliceAsBytes(self.sections.items(.shdr)), e_shoff);
     self.header.?.e_shoff = e_shoff;
     self.next_offset = e_shoff + shdrs_size;
 }
@@ -1616,13 +1616,13 @@ fn writeShdrs(self: *Elf) !void {
 fn writeHeader(self: *Elf) !void {
     self.header.?.e_shstrndx = self.shstrtab_sect_index.?;
     self.header.?.e_phnum = @intCast(u16, self.phdrs.items.len);
-    self.header.?.e_shnum = @intCast(u16, self.sections.items(.header).len);
+    self.header.?.e_shnum = @intCast(u16, self.sections.items(.shdr).len);
     log.debug("writing ELF header {} at 0x{x}", .{ self.header.?, 0 });
     try self.base.file.pwriteAll(mem.asBytes(&self.header.?), 0);
 }
 
 pub fn getSectionByName(self: *Elf, name: []const u8) ?u16 {
-    for (self.sections.items(.header)) |shdr, i| {
+    for (self.sections.items(.shdr)) |shdr, i| {
         const this_name = self.shstrtab.get(shdr.sh_name).?;
         if (mem.eql(u8, this_name, name)) return @intCast(u16, i);
     } else return null;
@@ -1665,7 +1665,7 @@ pub fn getEntryPoint(self: Elf) error{EntrypointNotFound}!SymbolWithLoc {
 
 fn logSections(self: Elf) void {
     log.debug("sections:", .{});
-    for (self.sections.items(.header)) |shdr, i| {
+    for (self.sections.items(.shdr)) |shdr, i| {
         log.debug("  sect({d}): {s} @{x}, sizeof({x})", .{
             i,
             self.shstrtab.get(shdr.sh_name).?,

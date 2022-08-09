@@ -103,7 +103,7 @@ pub fn scanInputSections(self: *Object, elf_file: *Elf) !void {
                 log.debug("unhandled section", .{});
                 continue;
             };
-            const out_shdr = elf_file.sections.items(.header)[tshdr_ndx];
+            const out_shdr = elf_file.sections.items(.shdr)[tshdr_ndx];
             log.debug("mapping '{s}' into output sect({d}, '{s}')", .{
                 shdr_name,
                 tshdr_ndx,
