@@ -455,6 +455,10 @@ pub fn getSymbolName(self: Object, index: u32) []const u8 {
     return self.getString(sym.st_name);
 }
 
+pub fn getAtomForSymbol(self: Object, sym_index: u32) ?*Atom {
+    return self.atom_table.get(sym_index);
+}
+
 pub fn getString(self: Object, off: u32) []const u8 {
     const strtab = self.getSourceStrtab();
     assert(off < strtab.len);

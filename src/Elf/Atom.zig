@@ -122,12 +122,11 @@ pub fn getTargetAtom(self: Atom, elf_file: *Elf, rel: elf.Elf64_Rela) ?*Atom {
         // Special handling as we have repurposed r_addend for out GOT atoms.
         // Now, r_addend in those cases contains the index to the object file where
         // the target symbol is defined.
-        if (rel.r_addend > -1) {
-            const object = elf_file.objects.items[@intCast(u64, rel.r_addend)];
-            return object.atom_table.get(r_sym);
-        } else {
-            return elf_file.atom_table.get(r_sym);
-        }
+        const file: ?u32 = if (rel.r_addend > -1) @intCast(u32, rel.r_addend) else null;
+        return elf_file.getAtomForSymbol(.{
+            .sym_index = r_sym,
+            .file = file,
+        });
     }
 
     const tsym_name = elf_file.getSymbolName(.{
@@ -154,20 +153,13 @@ pub fn getTargetAtom(self: Atom, elf_file: *Elf, rel: elf.Elf64_Rela) ?*Atom {
 
             if (!is_local) {
                 const global = elf_file.globals.get(tsym_name).?;
-                if (global.file) |file| {
-                    const actual_object = elf_file.objects.items[file];
-                    return actual_object.atom_table.get(global.sym_index);
-                } else {
-                    return elf_file.atom_table.get(global.sym_index);
-                }
+                return elf_file.getAtomForSymbol(global);
             }
 
-            if (self.file) |file| {
-                const object = elf_file.objects.items[file];
-                return object.atom_table.get(r_sym);
-            } else {
-                return elf_file.atom_table.get(r_sym);
-            }
+            return elf_file.getAtomForSymbol(.{
+                .sym_index = r_sym,
+                .file = self.file,
+            });
         },
     }
 }
