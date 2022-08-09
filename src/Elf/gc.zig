@@ -169,34 +169,36 @@ fn prune(arena: Allocator, alive: std.AutoHashMap(*Atom, void), elf_file: *Elf) 
             removeAtomFromSection(atom, sym.st_shndx, elf_file);
             _ = try gc_sections.put(sym.st_shndx, {});
         }
-
-        var gc_sections_it = gc_sections.iterator();
-        while (gc_sections_it.next()) |entry| {
-            const match = entry.key_ptr.*;
-            var section = elf_file.sections.get(match);
-            if (section.shdr.sh_size == 0) continue; // Pruning happens automatically in next step.
-
-            section.shdr.sh_addralign = 0;
-            section.shdr.sh_size = 0;
-
-            var atom = section.last_atom.?;
-
-            while (atom.prev) |prev| {
-                atom = prev;
-            }
-
-            while (true) {
-                const aligned_end_addr = mem.alignForwardGeneric(u64, section.shdr.sh_size, atom.alignment);
-                const padding = aligned_end_addr - section.shdr.sh_size;
-                section.shdr.sh_size += padding + atom.size;
-                section.shdr.sh_addralign = @maximum(section.shdr.sh_addralign, atom.alignment);
-
-                if (atom.next) |next| {
-                    atom = next;
-                } else break;
-            }
-
-            elf_file.sections.set(match, section);
-        }
     }
+
+    var gc_sections_it = gc_sections.iterator();
+    while (gc_sections_it.next()) |entry| {
+        const match = entry.key_ptr.*;
+        var section = elf_file.sections.get(match);
+        if (section.shdr.sh_size == 0) continue; // Pruning happens automatically in next step.
+
+        section.shdr.sh_addralign = 0;
+        section.shdr.sh_size = 0;
+
+        var atom = section.last_atom.?;
+
+        while (atom.prev) |prev| {
+            atom = prev;
+        }
+
+        while (true) {
+            const aligned_end_addr = mem.alignForwardGeneric(u64, section.shdr.sh_size, atom.alignment);
+            const padding = aligned_end_addr - section.shdr.sh_size;
+            section.shdr.sh_size += padding + atom.size;
+            section.shdr.sh_addralign = @maximum(section.shdr.sh_addralign, atom.alignment);
+
+            if (atom.next) |next| {
+                atom = next;
+            } else break;
+        }
+
+        elf_file.sections.set(match, section);
+    }
+
+    // TODO we might want to prune empty sections next
 }
