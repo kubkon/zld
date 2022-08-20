@@ -770,7 +770,7 @@ fn parseDependentLibs(self: *MachO, syslibroot: ?[]const u8, dependent_libs: any
     const arena = arena_alloc.allocator();
     defer arena_alloc.deinit();
 
-    while (dependent_libs.readItem()) |*dep_id| {
+    while (dependent_libs.readItem()) |dep_id| {
         defer dep_id.id.deinit(self.base.allocator);
 
         if (self.dylibs_map.contains(dep_id.id.name)) continue;
