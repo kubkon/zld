@@ -420,9 +420,12 @@ pub fn flush(self: *MachO) !void {
 
     if (codesig) |*csig| {
         try self.writeCodeSignature(csig, codesig_offset.?); // code signing always comes last
-        const dir = self.options.emit.directory;
-        const path = self.options.emit.sub_path;
-        try dir.copyFile(path, dir, path, .{});
+
+        if (comptime builtin.target.isDarwin()) {
+            const dir = self.options.emit.directory;
+            const path = self.options.emit.sub_path;
+            try dir.copyFile(path, dir, path, .{});
+        }
     }
 }
 
