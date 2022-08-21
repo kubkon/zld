@@ -48,7 +48,7 @@ pub const Id = struct {
         };
     }
 
-    pub fn deinit(id: *Id, allocator: Allocator) void {
+    pub fn deinit(id: Id, allocator: Allocator) void {
         allocator.free(id.name);
     }
 
@@ -210,20 +210,20 @@ fn addObjCClassSymbol(self: *Dylib, allocator: Allocator, sym_name: []const u8) 
 
     for (expanded) |sym| {
         if (self.symbols.contains(sym)) continue;
-        try self.symbols.putNoClobber(allocator, sym, .{});
+        try self.symbols.putNoClobber(allocator, sym, {});
     }
 }
 
 fn addObjCIVarSymbol(self: *Dylib, allocator: Allocator, sym_name: []const u8) !void {
     const expanded = try std.fmt.allocPrint(allocator, "_OBJC_IVAR_$_{s}", .{sym_name});
     if (self.symbols.contains(expanded)) return;
-    try self.symbols.putNoClobber(allocator, expanded, .{});
+    try self.symbols.putNoClobber(allocator, expanded, {});
 }
 
 fn addObjCEhTypeSymbol(self: *Dylib, allocator: Allocator, sym_name: []const u8) !void {
     const expanded = try std.fmt.allocPrint(allocator, "_OBJC_EHTYPE_$_{s}", .{sym_name});
     if (self.symbols.contains(expanded)) return;
-    try self.symbols.putNoClobber(allocator, expanded, .{});
+    try self.symbols.putNoClobber(allocator, expanded, {});
 }
 
 fn addSymbol(self: *Dylib, allocator: Allocator, sym_name: []const u8) !void {
