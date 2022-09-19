@@ -116,25 +116,31 @@ fn markLive(atom: *Atom, alive: *std.AutoHashMap(*Atom, void), macho_file: *Mach
     log.debug("marking live", .{});
     macho_file.logAtom(atom);
 
-    for (atom.relocs.items) |rel| {
-        const target_atom = rel.getTargetAtom(macho_file) orelse continue;
-        try markLive(target_atom, alive, macho_file);
+    if (macho_file.relocs.get(atom)) |relocs| {
+        for (relocs.items) |rel| {
+            const target_atom = rel.getTargetAtom(macho_file) orelse continue;
+            try markLive(target_atom, alive, macho_file);
+        }
     }
 }
 
 fn refersLive(atom: *Atom, alive: std.AutoHashMap(*Atom, void), macho_file: *MachO) bool {
-    for (atom.relocs.items) |rel| {
-        const target_atom = rel.getTargetAtom(macho_file) orelse continue;
-        if (alive.contains(target_atom)) return true;
+    if (macho_file.relocs.get(atom)) |relocs| {
+        for (relocs.items) |rel| {
+            const target_atom = rel.getTargetAtom(macho_file) orelse continue;
+            if (alive.contains(target_atom)) return true;
+        }
     }
     return false;
 }
 
 fn refersDead(atom: *Atom, macho_file: *MachO) bool {
-    for (atom.relocs.items) |rel| {
-        const target_atom = rel.getTargetAtom(macho_file) orelse continue;
-        const target_sym = target_atom.getSymbol(macho_file);
-        if (target_sym.n_desc == MachO.N_DESC_GCED) return true;
+    if (macho_file.relocs.get(atom)) |relocs| {
+        for (relocs.items) |rel| {
+            const target_atom = rel.getTargetAtom(macho_file) orelse continue;
+            const target_sym = target_atom.getSymbol(macho_file);
+            if (target_sym.n_desc == MachO.N_DESC_GCED) return true;
+        }
     }
     return false;
 }
