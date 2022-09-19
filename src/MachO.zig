@@ -90,28 +90,6 @@ managed_atoms: std.ArrayListUnmanaged(*Atom) = .{},
 /// Table of atoms indexed by the symbol index.
 atom_by_index_table: std.AutoHashMapUnmanaged(u32, *Atom) = .{},
 
-const Entry = struct {
-    target: SymbolWithLoc,
-    // Index into the synthetic symbol table (i.e., file == null).
-    sym_index: u32,
-
-    pub fn getSymbol(entry: Entry, macho_file: *MachO) macho.nlist_64 {
-        return macho_file.getSymbol(.{ .sym_index = entry.sym_index, .file = null });
-    }
-
-    pub fn getSymbolPtr(entry: Entry, macho_file: *MachO) *macho.nlist_64 {
-        return macho_file.getSymbolPtr(.{ .sym_index = entry.sym_index, .file = null });
-    }
-
-    pub fn getAtom(entry: Entry, macho_file: *MachO) *Atom {
-        return macho_file.getAtomForSymbol(.{ .sym_index = entry.sym_index, .file = null }).?;
-    }
-
-    pub fn getName(entry: Entry, macho_file: *MachO) []const u8 {
-        return macho_file.getSymbolName(.{ .sym_index = entry.sym_index, .file = null });
-    }
-};
-
 pub const SymbolWithLoc = struct {
     // Index into the respective symbol table.
     sym_index: u32,
