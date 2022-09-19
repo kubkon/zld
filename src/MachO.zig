@@ -75,8 +75,8 @@ globals: std.StringArrayHashMapUnmanaged(SymbolWithLoc) = .{},
 unresolved: std.AutoArrayHashMapUnmanaged(u32, void) = .{},
 
 dyld_stub_binder_index: ?u32 = null,
-dyld_private_atom: ?*Atom = null,
-stub_helper_preamble_atom: ?*Atom = null,
+dyld_private_sym_index: ?u32 = null,
+stub_helper_preamble_sym_index: ?u32 = null,
 
 strtab: StringTable(.strtab) = .{},
 
@@ -1062,15 +1062,13 @@ pub fn createTlvPtrAtom(self: *MachO, target: SymbolWithLoc) !*Atom {
 
 fn createDyldPrivateAtom(self: *MachO) !void {
     if (self.dyld_stub_binder_index == null) return;
-    if (self.dyld_private_atom != null) return;
 
     const gpa = self.base.allocator;
     const sym_index = try self.allocateSymbol();
     const atom = try MachO.createEmptyAtom(gpa, sym_index, @sizeOf(u64), 3);
     const sym = atom.getSymbolPtr(self);
     sym.n_type = macho.N_SECT;
-
-    self.dyld_private_atom = atom;
+    self.dyld_private_sym_index = sym_index;
 
     try self.allocateAtom(atom, self.data_section_index.?);
 
@@ -1080,7 +1078,6 @@ fn createDyldPrivateAtom(self: *MachO) !void {
 
 fn createStubHelperPreambleAtom(self: *MachO) !void {
     if (self.dyld_stub_binder_index == null) return;
-    if (self.stub_helper_preamble_atom != null) return;
 
     const gpa = self.base.allocator;
     const cpu_arch = self.options.target.cpu_arch.?;
@@ -1099,7 +1096,7 @@ fn createStubHelperPreambleAtom(self: *MachO) !void {
     const sym = atom.getSymbolPtr(self);
     sym.n_type = macho.N_SECT;
 
-    const dyld_private_sym_index = self.dyld_private_atom.?.sym_index;
+    const dyld_private_sym_index = self.dyld_private_sym_index.?;
     switch (cpu_arch) {
         .x86_64 => {
             try atom.relocs.ensureUnusedCapacity(self.base.allocator, 2);
@@ -1194,7 +1191,7 @@ fn createStubHelperPreambleAtom(self: *MachO) !void {
         },
         else => unreachable,
     }
-    self.stub_helper_preamble_atom = atom;
+    self.stub_helper_preamble_sym_index = sym_index;
 
     try self.allocateAtom(atom, self.stub_helper_section_index.?);
 
@@ -1232,7 +1229,7 @@ pub fn createStubHelperAtom(self: *MachO) !*Atom {
             atom.code.items[5] = 0xe9;
             atom.relocs.appendAssumeCapacity(.{
                 .offset = 6,
-                .target = .{ .sym_index = self.stub_helper_preamble_atom.?.sym_index, .file = null },
+                .target = .{ .sym_index = self.stub_helper_preamble_sym_index.?, .file = null },
                 .addend = 0,
                 .subtractor = null,
                 .pcrel = true,
@@ -1254,7 +1251,7 @@ pub fn createStubHelperAtom(self: *MachO) !*Atom {
             mem.writeIntLittle(u32, atom.code.items[4..8], aarch64.Instruction.b(0).toU32());
             atom.relocs.appendAssumeCapacity(.{
                 .offset = 4,
-                .target = .{ .sym_index = self.stub_helper_preamble_atom.?.sym_index, .file = null },
+                .target = .{ .sym_index = self.stub_helper_preamble_sym_index.?, .file = null },
                 .addend = 0,
                 .subtractor = null,
                 .pcrel = true,
@@ -2730,11 +2727,10 @@ fn populateLazyBindOffsetsInStubHelper(self: *MachO, buffer: []const u8) !void {
     const gpa = self.base.allocator;
 
     const stub_helper_section_index = self.stub_helper_section_index orelse return;
-    if (self.stub_helper_preamble_atom == null) return;
+    if (self.stub_helper_preamble_sym_index == null) return;
 
     const section = self.sections.get(stub_helper_section_index);
     const last_atom = section.last_atom;
-    if (last_atom == self.stub_helper_preamble_atom.?) return; // TODO is this a redundant check?
 
     var table = std.AutoHashMap(i64, *Atom).init(gpa);
     defer table.deinit();
