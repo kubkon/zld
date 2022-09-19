@@ -3456,6 +3456,19 @@ pub fn addLazyBinding(self: *MachO, atom_index: AtomIndex, binding: Atom.Binding
 }
 
 pub fn freeAtom(self: *MachO, atom_index: AtomIndex) void {
+    const gpa = self.base.allocator;
+    if (self.relocs.getPtr(atom_index)) |relocs| {
+        relocs.deinit(gpa);
+    }
+    if (self.rebases.getPtr(atom_index)) |rebases| {
+        rebases.deinit(gpa);
+    }
+    if (self.bindings.getPtr(atom_index)) |bindings| {
+        bindings.deinit(gpa);
+    }
+    if (self.lazy_bindings.getPtr(atom_index)) |bindings| {
+        bindings.deinit(gpa);
+    }
     _ = self.relocs.remove(atom_index);
     _ = self.rebases.remove(atom_index);
     _ = self.bindings.remove(atom_index);
