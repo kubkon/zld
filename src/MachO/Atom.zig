@@ -467,32 +467,27 @@ fn addPtrBindingOrRebase(
 fn addTlvPtrEntry(target: MachO.SymbolWithLoc, context: RelocContext) !void {
     const target_sym = context.macho_file.getSymbol(target);
     if (!target_sym.undf()) return;
-    if (context.macho_file.tlv_ptr_entries_table.contains(target)) return;
+    if (context.macho_file.tlv_ptr_entries.contains(target)) return;
 
-    const index = try context.macho_file.allocateTlvPtrEntry(target);
     const atom = try context.macho_file.createTlvPtrAtom(target);
-    context.macho_file.tlv_ptr_entries.items[index].sym_index = atom.sym_index;
+    try context.macho_file.tlv_ptr_entries.putNoClobber(context.macho_file.base.allocator, target, atom.sym_index);
 }
 
 fn addGotEntry(target: MachO.SymbolWithLoc, context: RelocContext) !void {
-    if (context.macho_file.got_entries_table.contains(target)) return;
-
-    const index = try context.macho_file.allocateGotEntry(target);
+    if (context.macho_file.got_entries.contains(target)) return;
     const atom = try context.macho_file.createGotAtom(target);
-    context.macho_file.got_entries.items[index].sym_index = atom.sym_index;
+    try context.macho_file.got_entries.putNoClobber(context.macho_file.base.allocator, target, atom.sym_index);
 }
 
 fn addStub(target: MachO.SymbolWithLoc, context: RelocContext) !void {
     const target_sym = context.macho_file.getSymbol(target);
     if (!target_sym.undf()) return;
-    if (context.macho_file.stubs_table.contains(target)) return;
+    if (context.macho_file.stubs.contains(target)) return;
 
-    const stub_index = try context.macho_file.allocateStubEntry(target);
     const stub_helper_atom = try context.macho_file.createStubHelperAtom();
     const laptr_atom = try context.macho_file.createLazyPointerAtom(stub_helper_atom.sym_index, target);
     const stub_atom = try context.macho_file.createStubAtom(laptr_atom.sym_index);
-
-    context.macho_file.stubs.items[stub_index].sym_index = stub_atom.sym_index;
+    try context.macho_file.stubs.putNoClobber(context.macho_file.base.allocator, target, stub_atom.sym_index);
 }
 
 pub fn resolveRelocs(self: *Atom, macho_file: *MachO) !void {
@@ -710,7 +705,7 @@ pub fn resolveRelocs(self: *Atom, macho_file: *MachO) !void {
                             }
                         };
                         const narrowed = @truncate(u12, @intCast(u64, actual_target_addr));
-                        var inst = if (macho_file.tlv_ptr_entries_table.contains(rel.target)) blk: {
+                        var inst = if (macho_file.tlv_ptr_entries.contains(rel.target)) blk: {
                             const offset = try math.divExact(u12, narrowed, 8);
                             break :blk aarch64.Instruction{
                                 .load_store_register = .{

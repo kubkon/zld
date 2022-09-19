@@ -251,8 +251,8 @@ pub const TestContext = struct {
             var frameworks = std.StringArrayHashMap(Zld.SystemLib).init(arena);
             var framework_dirs = std.ArrayList([]const u8).init(arena);
 
-            const host = try std.zig.system.NativeTargetInfo.detect(arena, .{});
-            const target_info = try std.zig.system.NativeTargetInfo.detect(arena, case.target);
+            const host = try std.zig.system.NativeTargetInfo.detect(.{});
+            const target_info = try std.zig.system.NativeTargetInfo.detect(case.target);
             var syslibroot: ?[]const u8 = null;
 
             if (case.target.isDarwin()) {

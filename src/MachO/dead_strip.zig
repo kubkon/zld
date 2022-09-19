@@ -199,19 +199,19 @@ fn prune(arena: Allocator, alive: std.AutoHashMap(*Atom, void), macho_file: *Mac
                     inner.n_desc = MachO.N_DESC_GCED;
                 }
 
-                if (macho_file.got_entries_table.contains(global)) {
+                if (macho_file.got_entries.contains(global)) {
                     const got_atom = macho_file.getGotAtomForSymbol(global).?;
                     const got_sym = got_atom.getSymbolPtr(macho_file);
                     got_sym.n_desc = MachO.N_DESC_GCED;
                 }
 
-                if (macho_file.stubs_table.contains(global)) {
+                if (macho_file.stubs.contains(global)) {
                     const stubs_atom = macho_file.getStubsAtomForSymbol(global).?;
                     const stubs_sym = stubs_atom.getSymbolPtr(macho_file);
                     stubs_sym.n_desc = MachO.N_DESC_GCED;
                 }
 
-                if (macho_file.tlv_ptr_entries_table.contains(global)) {
+                if (macho_file.tlv_ptr_entries.contains(global)) {
                     const tlv_ptr_atom = macho_file.getTlvPtrAtomForSymbol(global).?;
                     const tlv_ptr_sym = tlv_ptr_atom.getSymbolPtr(macho_file);
                     tlv_ptr_sym.n_desc = MachO.N_DESC_GCED;
@@ -222,40 +222,40 @@ fn prune(arena: Allocator, alive: std.AutoHashMap(*Atom, void), macho_file: *Mac
         }
     }
 
-    for (macho_file.got_entries.items) |entry| {
-        const sym = entry.getSymbol(macho_file);
+    for (macho_file.got_entries.keys()) |target| {
+        const sym_index = macho_file.got_entries.get(target).?;
+        const sym = macho_file.getSymbol(.{ .sym_index = sym_index, .file = null });
         if (sym.n_desc != MachO.N_DESC_GCED) continue;
 
-        // TODO tombstone
-        const atom = entry.getAtom(macho_file);
+        const atom = macho_file.getAtomForSymbol(.{ .sym_index = sym_index, .file = null }).?;
         const match = sym.n_sect - 1;
         removeAtomFromSection(atom, match, macho_file);
         _ = try gc_sections.put(match, {});
-        _ = macho_file.got_entries_table.remove(entry.target);
+        _ = macho_file.got_entries.swapRemove(target);
     }
 
-    for (macho_file.stubs.items) |entry| {
-        const sym = entry.getSymbol(macho_file);
+    for (macho_file.stubs.keys()) |target| {
+        const sym_index = macho_file.stubs.get(target).?;
+        const sym = macho_file.getSymbol(.{ .sym_index = sym_index, .file = null });
         if (sym.n_desc != MachO.N_DESC_GCED) continue;
 
-        // TODO tombstone
-        const atom = entry.getAtom(macho_file);
+        const atom = macho_file.getAtomForSymbol(.{ .sym_index = sym_index, .file = null }).?;
         const match = sym.n_sect - 1;
         removeAtomFromSection(atom, match, macho_file);
         _ = try gc_sections.put(match, {});
-        _ = macho_file.stubs_table.remove(entry.target);
+        _ = macho_file.stubs.swapRemove(target);
     }
 
-    for (macho_file.tlv_ptr_entries.items) |entry| {
-        const sym = entry.getSymbol(macho_file);
+    for (macho_file.tlv_ptr_entries.keys()) |target| {
+        const sym_index = macho_file.tlv_ptr_entries.get(target).?;
+        const sym = macho_file.getSymbol(.{ .sym_index = sym_index, .file = null });
         if (sym.n_desc != MachO.N_DESC_GCED) continue;
 
-        // TODO tombstone
-        const atom = entry.getAtom(macho_file);
+        const atom = macho_file.getAtomForSymbol(.{ .sym_index = sym_index, .file = null }).?;
         const match = sym.n_sect - 1;
         removeAtomFromSection(atom, match, macho_file);
         _ = try gc_sections.put(match, {});
-        _ = macho_file.tlv_ptr_entries_table.remove(entry.target);
+        _ = macho_file.tlv_ptr_entries.swapRemove(target);
     }
 
     var gc_sections_it = gc_sections.iterator();
