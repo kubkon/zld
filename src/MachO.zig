@@ -38,6 +38,7 @@ pub const N_DESC_GCED: u16 = @bitCast(u16, @as(i16, -1));
 const Section = struct {
     header: macho.section_64,
     segment_index: u8,
+    first_atom_index: AtomIndex,
     last_atom_index: AtomIndex,
 };
 
@@ -965,6 +966,8 @@ pub fn addAtomToSection(self: *MachO, atom_index: AtomIndex, sect_id: u8) !void 
         const last_atom = self.getAtomPtr(section.last_atom_index);
         last_atom.next_index = atom_index;
         atom.prev_index = section.last_atom_index;
+    } else {
+        section.first_atom_index = atom_index;
     }
     section.last_atom_index = atom_index;
     const atom = self.getAtom(atom_index);
@@ -2233,15 +2236,10 @@ fn allocateSymbol(self: *MachO) !u32 {
 
 fn allocateAtoms(self: *MachO) !void {
     const slice = &self.sections.slice();
-    for (slice.items(.last_atom_index)) |last_atom_index, sect_id| {
+    for (slice.items(.first_atom_index)) |first_atom_index, sect_id| {
         const header = slice.items(.header)[sect_id];
-        var atom_index = last_atom_index;
+        var atom_index = first_atom_index;
         var atom = self.getAtom(atom_index);
-
-        while (atom.prev_index) |prev_index| {
-            atom_index = prev_index;
-            atom = self.getAtom(atom_index);
-        }
 
         const n_sect = @intCast(u8, sect_id + 1);
         var base_vaddr = header.addr;
@@ -2308,9 +2306,9 @@ fn writeAtoms(self: *MachO) !void {
     const gpa = self.base.allocator;
     const slice = self.sections.slice();
 
-    for (slice.items(.last_atom_index)) |last_atom_index, sect_id| {
+    for (slice.items(.first_atom_index)) |first_atom_index, sect_id| {
         const header = slice.items(.header)[sect_id];
-        var atom_index = last_atom_index;
+        var atom_index = first_atom_index;
         var atom = self.getAtom(atom_index);
 
         if (header.isZerofill()) continue;
@@ -2320,11 +2318,6 @@ fn writeAtoms(self: *MachO) !void {
         try buffer.ensureTotalCapacity(math.cast(usize, header.size) orelse return error.Overflow);
 
         log.debug("writing atoms in {s},{s}", .{ header.segName(), header.sectName() });
-
-        while (atom.prev_index) |prev_index| {
-            atom_index = prev_index;
-            atom = self.getAtom(atom_index);
-        }
 
         while (true) {
             const this_sym = self.getSymbol(atom.getSymbolWithLoc());
@@ -2526,6 +2519,7 @@ fn insertSection(self: *MachO, segment_index: u8, header: macho.section_64) !u8 
     try self.sections.insert(self.base.allocator, insertion_index, .{
         .segment_index = segment_index,
         .header = header,
+        .first_atom_index = undefined,
         .last_atom_index = undefined,
     });
     return insertion_index;
@@ -3461,6 +3455,13 @@ pub fn addLazyBinding(self: *MachO, atom_index: AtomIndex, binding: Atom.Binding
     try gop.value_ptr.append(gpa, binding);
 }
 
+pub fn freeAtom(self: *MachO, atom_index: AtomIndex) void {
+    _ = self.relocs.remove(atom_index);
+    _ = self.rebases.remove(atom_index);
+    _ = self.bindings.remove(atom_index);
+    _ = self.lazy_bindings.remove(atom_index);
+}
+
 pub fn makeStaticString(bytes: []const u8) [16]u8 {
     var buf = [_]u8{0} ** 16;
     assert(bytes.len <= buf.len);
@@ -3892,18 +3893,13 @@ fn logSymtab(self: *MachO) void {
 fn logAtoms(self: *MachO) void {
     log.debug("atoms:", .{});
     const slice = self.sections.slice();
-    for (slice.items(.last_atom_index)) |last_atom_index, sect_id| {
-        var atom_index = last_atom_index;
+    for (slice.items(.first_atom_index)) |first_atom_index, sect_id| {
+        var atom_index = first_atom_index;
         var atom = self.getAtom(atom_index);
 
         const header = slice.items(.header)[sect_id];
 
         log.debug("{s},{s}", .{ header.segName(), header.sectName() });
-
-        while (atom.prev_index) |prev_index| {
-            atom_index = prev_index;
-            atom = self.getAtom(atom_index);
-        }
 
         while (true) {
             self.logAtom(atom_index);

@@ -26,6 +26,8 @@ pub fn gcAtoms(macho_file: *MachO) !void {
 }
 
 fn removeAtomFromSection(atom_index: AtomIndex, match: u8, macho_file: *MachO) void {
+    macho_file.freeAtom(atom_index);
+
     var section = macho_file.sections.get(match);
     const atom = macho_file.getAtomPtr(atom_index);
 
@@ -36,6 +38,10 @@ fn removeAtomFromSection(atom_index: AtomIndex, match: u8, macho_file: *MachO) v
     if (atom.prev_index) |prev_index| {
         const prev = macho_file.getAtomPtr(prev_index);
         prev.next_index = atom.next_index;
+    } else {
+        if (atom.next_index) |next_index| {
+            section.first_atom_index = next_index;
+        }
     }
     if (atom.next_index) |next_index| {
         const next = macho_file.getAtomPtr(next_index);
@@ -45,6 +51,7 @@ fn removeAtomFromSection(atom_index: AtomIndex, match: u8, macho_file: *MachO) v
             section.last_atom_index = prev_index;
         } else {
             // The section will be GCed in the next step.
+            section.first_atom_index = undefined;
             section.last_atom_index = undefined;
             section.header.size = 0;
         }
@@ -292,13 +299,8 @@ fn prune(arena: Allocator, alive: std.AutoHashMap(AtomIndex, void), macho_file: 
         section.header.@"align" = 0;
         section.header.size = 0;
 
-        var atom_index = section.last_atom_index;
+        var atom_index = section.first_atom_index;
         var atom = macho_file.getAtom(atom_index);
-
-        while (atom.prev_index) |prev_index| {
-            atom_index = prev_index;
-            atom = macho_file.getAtom(atom_index);
-        }
 
         while (true) {
             const atom_alignment = try math.powi(u32, 2, atom.alignment);
