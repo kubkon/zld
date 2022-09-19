@@ -38,7 +38,7 @@ pub const N_DESC_GCED: u16 = @bitCast(u16, @as(i16, -1));
 const Section = struct {
     header: macho.section_64,
     segment_index: u8,
-    last_atom: *Atom,
+    last_atom_index: AtomIndex,
 };
 
 base: Zld,
@@ -84,35 +84,19 @@ tlv_ptr_entries: std.AutoArrayHashMapUnmanaged(SymbolWithLoc, u32) = .{},
 got_entries: std.AutoArrayHashMapUnmanaged(SymbolWithLoc, u32) = .{},
 stubs: std.AutoArrayHashMapUnmanaged(SymbolWithLoc, u32) = .{},
 
-/// List of atoms that are owned directly by the linker such as synthetic GOT atoms, etc.
-managed_atoms: std.ArrayListUnmanaged(*Atom) = .{},
+atoms: std.ArrayListUnmanaged(Atom) = .{},
+atom_by_index_table: std.AutoHashMapUnmanaged(u32, AtomIndex) = .{},
 
-/// Table of atoms indexed by the symbol index.
-atom_by_index_table: std.AutoHashMapUnmanaged(u32, *Atom) = .{},
-
-/// A table of relocations indexed by the owning them `Atom`.
-/// Note that once we refactor `Atom`'s lifetime and ownership rules,
-/// this will be a table indexed by index into the list of Atoms.
 relocs: RelocationTable = .{},
-
-/// A table of rebases indexed by the owning them `Atom`.
-/// Note that once we refactor `Atom`'s lifetime and ownership rules,
-/// this will be a table indexed by index into the list of Atoms.
 rebases: RebaseTable = .{},
-
-/// A table of bindings indexed by the owning them `Atom`.
-/// Note that once we refactor `Atom`'s lifetime and ownership rules,
-/// this will be a table indexed by index into the list of Atoms.
 bindings: BindingTable = .{},
-
-/// A table of lazy bindings indexed by the owning them `Atom`.
-/// Note that once we refactor `Atom`'s lifetime and ownership rules,
-/// this will be a table indexed by index into the list of Atoms.
 lazy_bindings: BindingTable = .{},
 
-const BindingTable = std.AutoHashMapUnmanaged(*Atom, std.ArrayListUnmanaged(Atom.Binding));
-const RebaseTable = std.AutoHashMapUnmanaged(*Atom, std.ArrayListUnmanaged(u32));
-const RelocationTable = std.AutoHashMapUnmanaged(*Atom, std.ArrayListUnmanaged(Atom.Relocation));
+pub const AtomIndex = u32;
+
+const BindingTable = std.AutoHashMapUnmanaged(AtomIndex, std.ArrayListUnmanaged(Atom.Binding));
+const RebaseTable = std.AutoHashMapUnmanaged(AtomIndex, std.ArrayListUnmanaged(u32));
+const RelocationTable = std.AutoHashMapUnmanaged(AtomIndex, std.ArrayListUnmanaged(Atom.Relocation));
 
 pub const SymbolWithLoc = struct {
     // Index into the respective symbol table.
@@ -342,7 +326,7 @@ pub fn flush(self: *MachO) !void {
     }
 
     try self.allocateSegments();
-    try self.allocateSymbols();
+    try self.allocateAtoms();
 
     try self.allocateSpecialSymbols();
 
@@ -967,19 +951,23 @@ pub fn getOutputSection(self: *MachO, sect: macho.section_64) !?u8 {
     return res;
 }
 
-fn allocateAtom(self: *MachO, atom: *Atom, sect_id: u8) !void {
-    const sym = atom.getSymbolPtr(self);
-    try self.addAtomToSection(atom, sect_id);
+fn allocateAtom(self: *MachO, atom_index: AtomIndex, sect_id: u8) !void {
+    const atom = self.getAtom(atom_index);
+    const sym = self.getSymbolPtr(atom.getSymbolWithLoc());
+    try self.addAtomToSection(atom_index, sect_id);
     sym.n_sect = sect_id + 1;
 }
 
-pub fn addAtomToSection(self: *MachO, atom: *Atom, sect_id: u8) !void {
+pub fn addAtomToSection(self: *MachO, atom_index: AtomIndex, sect_id: u8) !void {
     var section = self.sections.get(sect_id);
     if (section.header.size > 0) {
-        section.last_atom.next = atom;
-        atom.prev = section.last_atom;
+        const atom = self.getAtomPtr(atom_index);
+        const last_atom = self.getAtomPtr(section.last_atom_index);
+        last_atom.next_index = atom_index;
+        atom.prev_index = section.last_atom_index;
     }
-    section.last_atom = atom;
+    section.last_atom_index = atom_index;
+    const atom = self.getAtom(atom_index);
     const atom_alignment = try math.powi(u32, 2, atom.alignment);
     const aligned_end_addr = mem.alignForwardGeneric(u64, section.header.size, atom_alignment);
     const padding = aligned_end_addr - section.header.size;
@@ -1000,29 +988,32 @@ fn getSegmentAllocBase(self: MachO, indices: []const ?u8) struct { vmaddr: u64, 
     return .{ .vmaddr = 0, .fileoff = 0 };
 }
 
-pub fn createEmptyAtom(gpa: Allocator, sym_index: u32, size: u64, alignment: u32) !*Atom {
+pub fn createEmptyAtom(self: *MachO, sym_index: u32, size: u64, alignment: u32) !AtomIndex {
+    const gpa = self.base.allocator;
     const size_usize = math.cast(usize, size) orelse return error.Overflow;
-    const atom = try gpa.create(Atom);
-    errdefer gpa.destroy(atom);
+    const index = @intCast(AtomIndex, self.atoms.items.len);
+    const atom = try self.atoms.addOne(gpa);
     atom.* = Atom.empty;
     atom.sym_index = sym_index;
     atom.size = size;
     atom.alignment = alignment;
 
+    log.debug("creating ATOM(%{d}) at index {d}", .{ sym_index, index });
+
     try atom.code.resize(gpa, size_usize);
     mem.set(u8, atom.code.items, 0);
 
-    return atom;
+    return index;
 }
 
-pub fn createGotAtom(self: *MachO, target: SymbolWithLoc) !*Atom {
+pub fn createGotAtom(self: *MachO, target: SymbolWithLoc) !AtomIndex {
     const gpa = self.base.allocator;
     const sym_index = try self.allocateSymbol();
-    const atom = try MachO.createEmptyAtom(gpa, sym_index, @sizeOf(u64), 3);
-    const sym = atom.getSymbolPtr(self);
+    const atom_index = try self.createEmptyAtom(sym_index, @sizeOf(u64), 3);
+    const sym = self.getSymbolPtr(.{ .sym_index = sym_index, .file = null });
     sym.n_type = macho.N_SECT;
 
-    try atom.addRelocation(self, .{
+    try self.addRelocation(atom_index, .{
         .offset = 0,
         .target = target,
         .addend = 0,
@@ -1039,49 +1030,46 @@ pub fn createGotAtom(self: *MachO, target: SymbolWithLoc) !*Atom {
     const target_sym = self.getSymbol(target);
     if (target_sym.undf()) {
         const global = self.globals.get(self.getSymbolName(target)).?;
-        try atom.addBinding(self, .{
+        try self.addBinding(atom_index, .{
             .target = global,
             .offset = 0,
         });
     } else {
-        try atom.addRebase(self, 0);
+        try self.addRebase(atom_index, 0);
     }
 
-    try self.managed_atoms.append(gpa, atom);
-    try self.atom_by_index_table.putNoClobber(gpa, sym_index, atom);
+    try self.atom_by_index_table.putNoClobber(gpa, sym_index, atom_index);
+    try self.allocateAtom(atom_index, self.got_section_index.?);
 
-    try self.allocateAtom(atom, self.got_section_index.?);
-
-    return atom;
+    return atom_index;
 }
 
-pub fn createTlvPtrAtom(self: *MachO, target: SymbolWithLoc) !*Atom {
+pub fn createTlvPtrAtom(self: *MachO, target: SymbolWithLoc) !AtomIndex {
     const gpa = self.base.allocator;
     const sym_index = try self.allocateSymbol();
-    const atom = try MachO.createEmptyAtom(gpa, sym_index, @sizeOf(u64), 3);
-    const sym = atom.getSymbolPtr(self);
+    const atom_index = try self.createEmptyAtom(sym_index, @sizeOf(u64), 3);
+    const sym = self.getSymbolPtr(.{ .sym_index = sym_index, .file = null });
     sym.n_type = macho.N_SECT;
 
     const target_sym = self.getSymbol(target);
     assert(target_sym.undf());
 
     const global = self.globals.get(self.getSymbolName(target)).?;
-    try atom.addBinding(self, .{
+    try self.addBinding(atom_index, .{
         .target = global,
         .offset = 0,
     });
 
-    try self.managed_atoms.append(gpa, atom);
-    try self.atom_by_index_table.putNoClobber(gpa, sym_index, atom);
+    try self.atom_by_index_table.putNoClobber(gpa, sym_index, atom_index);
 
     const match = (try self.getOutputSection(.{
         .segname = makeStaticString("__DATA"),
         .sectname = makeStaticString("__thread_ptrs"),
         .flags = macho.S_THREAD_LOCAL_VARIABLE_POINTERS,
     })).?;
-    try self.allocateAtom(atom, match);
+    try self.allocateAtom(atom_index, match);
 
-    return atom;
+    return atom_index;
 }
 
 fn createDyldPrivateAtom(self: *MachO) !void {
@@ -1089,15 +1077,13 @@ fn createDyldPrivateAtom(self: *MachO) !void {
 
     const gpa = self.base.allocator;
     const sym_index = try self.allocateSymbol();
-    const atom = try MachO.createEmptyAtom(gpa, sym_index, @sizeOf(u64), 3);
-    const sym = atom.getSymbolPtr(self);
+    const atom_index = try self.createEmptyAtom(sym_index, @sizeOf(u64), 3);
+    const sym = self.getSymbolPtr(.{ .sym_index = sym_index, .file = null });
     sym.n_type = macho.N_SECT;
     self.dyld_private_sym_index = sym_index;
 
-    try self.allocateAtom(atom, self.data_section_index.?);
-
-    try self.managed_atoms.append(gpa, atom);
-    try self.atom_by_index_table.putNoClobber(gpa, sym_index, atom);
+    try self.allocateAtom(atom_index, self.data_section_index.?);
+    try self.atom_by_index_table.putNoClobber(gpa, sym_index, atom_index);
 }
 
 fn createStubHelperPreambleAtom(self: *MachO) !void {
@@ -1116,8 +1102,9 @@ fn createStubHelperPreambleAtom(self: *MachO) !void {
         else => unreachable,
     };
     const sym_index = try self.allocateSymbol();
-    const atom = try MachO.createEmptyAtom(gpa, sym_index, size, alignment);
-    const sym = atom.getSymbolPtr(self);
+    const atom_index = try self.createEmptyAtom(sym_index, size, alignment);
+    const atom = self.getAtomPtr(atom_index);
+    const sym = self.getSymbolPtr(.{ .sym_index = sym_index, .file = null });
     sym.n_type = macho.N_SECT;
 
     const dyld_private_sym_index = self.dyld_private_sym_index.?;
@@ -1134,7 +1121,7 @@ fn createStubHelperPreambleAtom(self: *MachO) !void {
             atom.code.items[9] = 0xff;
             atom.code.items[10] = 0x25;
 
-            try atom.addRelocations(self, 2, .{
+            try self.addRelocations(atom_index, 2, .{
                 .{
                     .offset = 3,
                     .target = .{ .sym_index = dyld_private_sym_index, .file = null },
@@ -1178,7 +1165,7 @@ fn createStubHelperPreambleAtom(self: *MachO) !void {
             // br x16
             mem.writeIntLittle(u32, atom.code.items[20..][0..4], aarch64.Instruction.br(.x16).toU32());
 
-            try atom.addRelocations(self, 4, .{
+            try self.addRelocations(atom_index, 4, .{
                 .{
                     .offset = 0,
                     .target = .{ .sym_index = dyld_private_sym_index, .file = null },
@@ -1221,13 +1208,11 @@ fn createStubHelperPreambleAtom(self: *MachO) !void {
     }
     self.stub_helper_preamble_sym_index = sym_index;
 
-    try self.allocateAtom(atom, self.stub_helper_section_index.?);
-
-    try self.managed_atoms.append(gpa, atom);
-    try self.atom_by_index_table.putNoClobber(gpa, sym_index, atom);
+    try self.allocateAtom(atom_index, self.stub_helper_section_index.?);
+    try self.atom_by_index_table.putNoClobber(gpa, sym_index, atom_index);
 }
 
-pub fn createStubHelperAtom(self: *MachO) !*Atom {
+pub fn createStubHelperAtom(self: *MachO) !AtomIndex {
     const gpa = self.base.allocator;
     const cpu_arch = self.options.target.cpu_arch.?;
     const stub_size: u4 = switch (cpu_arch) {
@@ -1242,8 +1227,9 @@ pub fn createStubHelperAtom(self: *MachO) !*Atom {
     };
 
     const sym_index = try self.allocateSymbol();
-    const atom = try MachO.createEmptyAtom(gpa, sym_index, stub_size, alignment);
-    const sym = atom.getSymbolPtr(self);
+    const atom_index = try self.createEmptyAtom(sym_index, stub_size, alignment);
+    const atom = self.getAtomPtr(atom_index);
+    const sym = self.getSymbolPtr(.{ .sym_index = sym_index, .file = null });
     sym.n_sect = macho.N_SECT;
 
     switch (cpu_arch) {
@@ -1254,7 +1240,7 @@ pub fn createStubHelperAtom(self: *MachO) !*Atom {
             // jmpq
             atom.code.items[5] = 0xe9;
 
-            try atom.addRelocation(self, .{
+            try self.addRelocation(atom_index, .{
                 .offset = 6,
                 .target = .{ .sym_index = self.stub_helper_preamble_sym_index.?, .file = null },
                 .addend = 0,
@@ -1277,7 +1263,7 @@ pub fn createStubHelperAtom(self: *MachO) !*Atom {
             // b disp
             mem.writeIntLittle(u32, atom.code.items[4..8], aarch64.Instruction.b(0).toU32());
 
-            try atom.addRelocation(self, .{
+            try self.addRelocation(atom_index, .{
                 .offset = 4,
                 .target = .{ .sym_index = self.stub_helper_preamble_sym_index.?, .file = null },
                 .addend = 0,
@@ -1291,22 +1277,20 @@ pub fn createStubHelperAtom(self: *MachO) !*Atom {
         else => unreachable,
     }
 
-    try self.managed_atoms.append(gpa, atom);
-    try self.atom_by_index_table.putNoClobber(gpa, sym_index, atom);
+    try self.atom_by_index_table.putNoClobber(gpa, sym_index, atom_index);
+    try self.allocateAtom(atom_index, self.stub_helper_section_index.?);
 
-    try self.allocateAtom(atom, self.stub_helper_section_index.?);
-
-    return atom;
+    return atom_index;
 }
 
-pub fn createLazyPointerAtom(self: *MachO, stub_sym_index: u32, target: SymbolWithLoc) !*Atom {
+pub fn createLazyPointerAtom(self: *MachO, stub_sym_index: u32, target: SymbolWithLoc) !AtomIndex {
     const gpa = self.base.allocator;
     const sym_index = try self.allocateSymbol();
-    const atom = try MachO.createEmptyAtom(gpa, sym_index, @sizeOf(u64), 3);
-    const sym = atom.getSymbolPtr(self);
+    const atom_index = try self.createEmptyAtom(sym_index, @sizeOf(u64), 3);
+    const sym = self.getSymbolPtr(.{ .sym_index = sym_index, .file = null });
     sym.n_type = macho.N_SECT;
 
-    try atom.addRelocation(self, .{
+    try self.addRelocation(atom_index, .{
         .offset = 0,
         .target = .{ .sym_index = stub_sym_index, .file = null },
         .addend = 0,
@@ -1319,23 +1303,21 @@ pub fn createLazyPointerAtom(self: *MachO, stub_sym_index: u32, target: SymbolWi
             else => unreachable,
         },
     });
-    try atom.addRebase(self, 0);
+    try self.addRebase(atom_index, 0);
 
     const global = self.globals.get(self.getSymbolName(target)).?;
-    try atom.addLazyBinding(self, .{
+    try self.addLazyBinding(atom_index, .{
         .target = global,
         .offset = 0,
     });
 
-    try self.managed_atoms.append(gpa, atom);
-    try self.atom_by_index_table.putNoClobber(gpa, sym_index, atom);
+    try self.atom_by_index_table.putNoClobber(gpa, sym_index, atom_index);
+    try self.allocateAtom(atom_index, self.la_symbol_ptr_section_index.?);
 
-    try self.allocateAtom(atom, self.la_symbol_ptr_section_index.?);
-
-    return atom;
+    return atom_index;
 }
 
-pub fn createStubAtom(self: *MachO, laptr_sym_index: u32) !*Atom {
+pub fn createStubAtom(self: *MachO, laptr_sym_index: u32) !AtomIndex {
     const gpa = self.base.allocator;
     const cpu_arch = self.options.target.cpu_arch.?;
     const alignment: u2 = switch (cpu_arch) {
@@ -1349,8 +1331,9 @@ pub fn createStubAtom(self: *MachO, laptr_sym_index: u32) !*Atom {
         else => unreachable, // unhandled architecture type
     };
     const sym_index = try self.allocateSymbol();
-    const atom = try MachO.createEmptyAtom(gpa, sym_index, stub_size, alignment);
-    const sym = atom.getSymbolPtr(self);
+    const atom_index = try self.createEmptyAtom(sym_index, stub_size, alignment);
+    const atom = self.getAtomPtr(atom_index);
+    const sym = self.getSymbolPtr(.{ .sym_index = sym_index, .file = null });
     sym.n_type = macho.N_SECT;
 
     switch (cpu_arch) {
@@ -1358,7 +1341,7 @@ pub fn createStubAtom(self: *MachO, laptr_sym_index: u32) !*Atom {
             // jmp
             atom.code.items[0] = 0xff;
             atom.code.items[1] = 0x25;
-            try atom.addRelocation(self, .{
+            try self.addRelocation(atom_index, .{
                 .offset = 2,
                 .target = .{ .sym_index = laptr_sym_index, .file = null },
                 .addend = 0,
@@ -1379,7 +1362,7 @@ pub fn createStubAtom(self: *MachO, laptr_sym_index: u32) !*Atom {
             ).toU32());
             // br x16
             mem.writeIntLittle(u32, atom.code.items[8..12], aarch64.Instruction.br(.x16).toU32());
-            try atom.addRelocations(self, 2, .{
+            try self.addRelocations(atom_index, 2, .{
                 .{
                     .offset = 0,
                     .target = .{ .sym_index = laptr_sym_index, .file = null },
@@ -1403,12 +1386,10 @@ pub fn createStubAtom(self: *MachO, laptr_sym_index: u32) !*Atom {
         else => unreachable,
     }
 
-    try self.managed_atoms.append(gpa, atom);
-    try self.atom_by_index_table.putNoClobber(gpa, sym_index, atom);
+    try self.atom_by_index_table.putNoClobber(gpa, sym_index, atom_index);
+    try self.allocateAtom(atom_index, self.stubs_section_index.?);
 
-    try self.allocateAtom(atom, self.stubs_section_index.?);
-
-    return atom;
+    return atom_index;
 }
 
 fn createTentativeDefAtoms(self: *MachO) !void {
@@ -1440,18 +1421,18 @@ fn createTentativeDefAtoms(self: *MachO) !void {
             .n_value = 0,
         };
 
-        const atom = try MachO.createEmptyAtom(gpa, global.sym_index, size, alignment);
+        const atom_index = try self.createEmptyAtom(global.sym_index, size, alignment);
+        const atom = self.getAtomPtr(atom_index);
         atom.file = global.file;
 
-        try self.allocateAtom(atom, n_sect);
+        try self.allocateAtom(atom_index, n_sect);
 
         if (global.file) |file| {
             const object = &self.objects.items[file];
-            try object.managed_atoms.append(gpa, atom);
-            try object.atom_by_index_table.putNoClobber(gpa, global.sym_index, atom);
+            try object.atoms.append(gpa, atom_index);
+            try object.atom_by_index_table.putNoClobber(gpa, global.sym_index, atom_index);
         } else {
-            try self.managed_atoms.append(gpa, atom);
-            try self.atom_by_index_table.putNoClobber(gpa, global.sym_index, atom);
+            try self.atom_by_index_table.putNoClobber(gpa, global.sym_index, atom_index);
         }
     }
 }
@@ -1745,7 +1726,8 @@ fn resolveDyldStubBinder(self: *MachO) !void {
     }
 
     // Add dyld_stub_binder as the final GOT entry.
-    const got_atom = try self.createGotAtom(global);
+    const got_atom_index = try self.createGotAtom(global);
+    const got_atom = self.getAtom(got_atom_index);
     try self.got_entries.putNoClobber(gpa, global, got_atom.sym_index);
 }
 
@@ -1970,11 +1952,11 @@ pub fn deinit(self: *MachO) void {
     self.segments.deinit(gpa);
     self.sections.deinit(gpa);
 
-    for (self.managed_atoms.items) |atom| {
+    for (self.atoms.items) |*atom| {
         atom.deinit(gpa);
-        gpa.destroy(atom);
     }
-    self.managed_atoms.deinit(gpa);
+    self.atoms.deinit(gpa);
+
     self.atom_by_index_table.deinit(gpa);
 
     {
@@ -2249,14 +2231,16 @@ fn allocateSymbol(self: *MachO) !u32 {
     return index;
 }
 
-fn allocateSymbols(self: *MachO) !void {
+fn allocateAtoms(self: *MachO) !void {
     const slice = &self.sections.slice();
-    for (slice.items(.last_atom)) |last_atom, sect_id| {
+    for (slice.items(.last_atom_index)) |last_atom_index, sect_id| {
         const header = slice.items(.header)[sect_id];
-        var atom = last_atom;
+        var atom_index = last_atom_index;
+        var atom = self.getAtom(atom_index);
 
-        while (atom.prev) |prev| {
-            atom = prev;
+        while (atom.prev_index) |prev_index| {
+            atom_index = prev_index;
+            atom = self.getAtom(atom_index);
         }
 
         const n_sect = @intCast(u8, sect_id + 1);
@@ -2272,11 +2256,15 @@ fn allocateSymbols(self: *MachO) !void {
             const alignment = try math.powi(u32, 2, atom.alignment);
             base_vaddr = mem.alignForwardGeneric(u64, base_vaddr, alignment);
 
-            const sym = atom.getSymbolPtr(self);
+            const sym = self.getSymbolPtr(atom.getSymbolWithLoc());
             sym.n_value = base_vaddr;
             sym.n_sect = n_sect;
 
-            log.debug("  ATOM(%{d}, '{s}') @{x}", .{ atom.sym_index, atom.getName(self), base_vaddr });
+            log.debug("  ATOM(%{d}, '{s}') @{x}", .{
+                atom.sym_index,
+                self.getSymbolName(atom.getSymbolWithLoc()),
+                base_vaddr,
+            });
 
             // Update each symbol contained within the atom
             for (atom.contained.items) |sym_at_off| {
@@ -2290,8 +2278,9 @@ fn allocateSymbols(self: *MachO) !void {
 
             base_vaddr += atom.size;
 
-            if (atom.next) |next| {
-                atom = next;
+            if (atom.next_index) |next_index| {
+                atom_index = next_index;
+                atom = self.getAtom(atom_index);
             } else break;
         }
     }
@@ -2319,9 +2308,10 @@ fn writeAtoms(self: *MachO) !void {
     const gpa = self.base.allocator;
     const slice = self.sections.slice();
 
-    for (slice.items(.last_atom)) |last_atom, sect_id| {
+    for (slice.items(.last_atom_index)) |last_atom_index, sect_id| {
         const header = slice.items(.header)[sect_id];
-        var atom = last_atom;
+        var atom_index = last_atom_index;
+        var atom = self.getAtom(atom_index);
 
         if (header.isZerofill()) continue;
 
@@ -2331,28 +2321,29 @@ fn writeAtoms(self: *MachO) !void {
 
         log.debug("writing atoms in {s},{s}", .{ header.segName(), header.sectName() });
 
-        while (atom.prev) |prev| {
-            atom = prev;
+        while (atom.prev_index) |prev_index| {
+            atom_index = prev_index;
+            atom = self.getAtom(atom_index);
         }
 
         while (true) {
-            const this_sym = atom.getSymbol(self);
-            const padding_size: usize = if (atom.next) |next| blk: {
-                const next_sym = next.getSymbol(self);
+            const this_sym = self.getSymbol(atom.getSymbolWithLoc());
+            const padding_size: usize = if (atom.next_index) |next_index| blk: {
+                const next_sym = self.getSymbol(self.getAtom(next_index).getSymbolWithLoc());
                 const size = next_sym.n_value - (this_sym.n_value + atom.size);
                 break :blk math.cast(usize, size) orelse return error.Overflow;
             } else 0;
 
             log.debug("  (adding ATOM(%{d}, '{s}') from object({?}) to buffer)", .{
                 atom.sym_index,
-                atom.getName(self),
+                self.getSymbolName(atom.getSymbolWithLoc()),
                 atom.file,
             });
             if (padding_size > 0) {
                 log.debug("    (with padding {x})", .{padding_size});
             }
 
-            try atom.resolveRelocs(self);
+            try Atom.resolveRelocs(self, atom_index);
             buffer.appendSliceAssumeCapacity(atom.code.items);
 
             var i: usize = 0;
@@ -2361,8 +2352,9 @@ fn writeAtoms(self: *MachO) !void {
                 buffer.appendAssumeCapacity(0);
             }
 
-            if (atom.next) |next| {
-                atom = next;
+            if (atom.next_index) |next_index| {
+                atom_index = next_index;
+                atom = self.getAtom(atom_index);
             } else {
                 assert(buffer.items.len == header.size);
                 log.debug("  (writing at file offset 0x{x})", .{header.offset});
@@ -2534,7 +2526,7 @@ fn insertSection(self: *MachO, segment_index: u8, header: macho.section_64) !u8 
     try self.sections.insert(self.base.allocator, insertion_index, .{
         .segment_index = segment_index,
         .header = header,
-        .last_atom = undefined,
+        .last_atom_index = undefined,
     });
     return insertion_index;
 }
@@ -2585,14 +2577,18 @@ const AtomLessThanByAddressContext = struct {
     macho_file: *MachO,
 };
 
-fn atomLessThanByAddress(ctx: AtomLessThanByAddressContext, lhs: *Atom, rhs: *Atom) bool {
-    return lhs.getSymbol(ctx.macho_file).n_value < rhs.getSymbol(ctx.macho_file).n_value;
+fn atomLessThanByAddress(ctx: AtomLessThanByAddressContext, lhs: AtomIndex, rhs: AtomIndex) bool {
+    const lhs_atom = ctx.macho_file.getAtom(lhs);
+    const lhs_sym = ctx.macho_file.getSymbol(lhs_atom.getSymbolWithLoc());
+    const rhs_atom = ctx.macho_file.getAtom(rhs);
+    const rhs_sym = ctx.macho_file.getSymbol(rhs_atom.getSymbolWithLoc());
+    return lhs_sym.n_value < rhs_sym.n_value;
 }
 
 fn collectRebaseData(self: *MachO, pointers: *std.ArrayList(bind.Pointer)) !void {
     const gpa = self.base.allocator;
 
-    var sorted_atoms_by_address = std.ArrayList(*Atom).init(gpa);
+    var sorted_atoms_by_address = std.ArrayList(AtomIndex).init(gpa);
     defer sorted_atoms_by_address.deinit();
     try sorted_atoms_by_address.ensureTotalCapacityPrecise(self.rebases.count());
 
@@ -2601,21 +2597,23 @@ fn collectRebaseData(self: *MachO, pointers: *std.ArrayList(bind.Pointer)) !void
         sorted_atoms_by_address.appendAssumeCapacity(key_ptr.*);
     }
 
-    std.sort.sort(*Atom, sorted_atoms_by_address.items, AtomLessThanByAddressContext{
+    std.sort.sort(AtomIndex, sorted_atoms_by_address.items, AtomLessThanByAddressContext{
         .macho_file = self,
     }, atomLessThanByAddress);
 
     const slice = self.sections.slice();
-    for (sorted_atoms_by_address.items) |atom| {
-        log.debug("  ATOM(%{d}, '{s}')", .{ atom.sym_index, atom.getName(self) });
+    for (sorted_atoms_by_address.items) |atom_index| {
+        const atom = self.getAtom(atom_index);
 
-        const sym = atom.getSymbol(self);
+        log.debug("  ATOM(%{d}, '{s}')", .{ atom.sym_index, self.getSymbolName(atom.getSymbolWithLoc()) });
+
+        const sym = self.getSymbol(atom.getSymbolWithLoc());
         const segment_index = slice.items(.segment_index)[sym.n_sect - 1];
         const seg = self.getSegment(sym.n_sect - 1);
 
         const base_offset = sym.n_value - seg.vmaddr;
 
-        const rebases = self.rebases.get(atom).?;
+        const rebases = self.rebases.get(atom_index).?;
         try pointers.ensureUnusedCapacity(rebases.items.len);
         for (rebases.items) |offset| {
             log.debug("    | rebase at {x}", .{base_offset + offset});
@@ -2631,7 +2629,7 @@ fn collectRebaseData(self: *MachO, pointers: *std.ArrayList(bind.Pointer)) !void
 fn collectBindData(self: *MachO, pointers: *std.ArrayList(bind.Pointer), raw_bindings: anytype) !void {
     const gpa = self.base.allocator;
 
-    var sorted_atoms_by_address = std.ArrayList(*Atom).init(gpa);
+    var sorted_atoms_by_address = std.ArrayList(AtomIndex).init(gpa);
     defer sorted_atoms_by_address.deinit();
     try sorted_atoms_by_address.ensureTotalCapacityPrecise(raw_bindings.count());
 
@@ -2640,21 +2638,23 @@ fn collectBindData(self: *MachO, pointers: *std.ArrayList(bind.Pointer), raw_bin
         sorted_atoms_by_address.appendAssumeCapacity(key_ptr.*);
     }
 
-    std.sort.sort(*Atom, sorted_atoms_by_address.items, AtomLessThanByAddressContext{
+    std.sort.sort(AtomIndex, sorted_atoms_by_address.items, AtomLessThanByAddressContext{
         .macho_file = self,
     }, atomLessThanByAddress);
 
     const slice = self.sections.slice();
-    for (sorted_atoms_by_address.items) |atom| {
-        log.debug("  ATOM(%{d}, '{s}')", .{ atom.sym_index, atom.getName(self) });
+    for (sorted_atoms_by_address.items) |atom_index| {
+        const atom = self.getAtom(atom_index);
 
-        const sym = atom.getSymbol(self);
+        log.debug("  ATOM(%{d}, '{s}')", .{ atom.sym_index, self.getSymbolName(atom.getSymbolWithLoc()) });
+
+        const sym = self.getSymbol(atom.getSymbolWithLoc());
         const segment_index = slice.items(.segment_index)[sym.n_sect - 1];
         const seg = self.getSegment(sym.n_sect - 1);
 
         const base_offset = sym.n_value - seg.vmaddr;
 
-        const bindings = raw_bindings.get(atom).?;
+        const bindings = raw_bindings.get(atom_index).?;
         try pointers.ensureUnusedCapacity(bindings.items.len);
         for (bindings.items) |binding| {
             const bind_sym = self.getSymbol(binding.target);
@@ -2819,14 +2819,18 @@ fn populateLazyBindOffsetsInStubHelper(self: *MachO, buffer: []const u8) !void {
     if (self.stub_helper_preamble_sym_index == null) return;
 
     const section = self.sections.get(stub_helper_section_index);
-    const last_atom = section.last_atom;
+    const last_atom_index = section.last_atom_index;
 
-    var table = std.AutoHashMap(i64, *Atom).init(gpa);
+    var table = std.AutoHashMap(i64, AtomIndex).init(gpa);
     defer table.deinit();
 
     {
-        var stub_atom = last_atom;
-        var laptr_atom = self.sections.items(.last_atom)[self.la_symbol_ptr_section_index.?];
+        var stub_atom_index = last_atom_index;
+        var stub_atom = self.getAtom(stub_atom_index);
+
+        var laptr_atom_index = self.sections.items(.last_atom_index)[self.la_symbol_ptr_section_index.?];
+        var laptr_atom = self.getAtom(laptr_atom_index);
+
         const base_addr = blk: {
             const seg = self.segments.items[self.data_segment_cmd_index.?];
             break :blk seg.vmaddr;
@@ -2834,13 +2838,17 @@ fn populateLazyBindOffsetsInStubHelper(self: *MachO, buffer: []const u8) !void {
 
         while (true) {
             const laptr_off = blk: {
-                const sym = laptr_atom.getSymbol(self);
+                const sym = self.getSymbolPtr(laptr_atom.getSymbolWithLoc());
                 break :blk @intCast(i64, sym.n_value - base_addr);
             };
-            try table.putNoClobber(laptr_off, stub_atom);
-            if (laptr_atom.prev) |prev| {
-                laptr_atom = prev;
-                stub_atom = stub_atom.prev.?;
+
+            try table.putNoClobber(laptr_off, stub_atom_index);
+
+            if (laptr_atom.prev_index) |prev_index| {
+                laptr_atom_index = prev_index;
+                laptr_atom = self.getAtom(laptr_atom_index);
+                stub_atom_index = stub_atom.prev_index.?;
+                stub_atom = self.getAtom(stub_atom_index);
             } else break;
         }
     }
@@ -2900,15 +2908,19 @@ fn populateLazyBindOffsetsInStubHelper(self: *MachO, buffer: []const u8) !void {
     _ = offsets.pop();
 
     while (offsets.popOrNull()) |bind_offset| {
-        const atom = table.get(bind_offset.sym_offset).?;
-        const sym = atom.getSymbol(self);
+        const atom_index = table.get(bind_offset.sym_offset).?;
+        const atom = self.getAtom(atom_index);
+        const sym = self.getSymbol(atom.getSymbolWithLoc());
+
         const file_offset = header.offset + sym.n_value - header.addr + stub_offset;
         mem.writeIntLittle(u32, &buf, bind_offset.offset);
+
         log.debug("writing lazy bind offset in stub helper of 0x{x} for symbol {s} at offset 0x{x}", .{
             bind_offset.offset,
-            atom.getName(self),
+            self.getSymbolName(atom.getSymbolWithLoc()),
             file_offset,
         });
+
         try self.base.file.pwriteAll(&buf, file_offset);
     }
 }
@@ -3012,8 +3024,9 @@ fn writeDataInCode(self: *MachO, ncmds: *u32, lc_writer: anytype) !void {
         const dice = object.parseDataInCode() orelse continue;
         try out_dice.ensureUnusedCapacity(dice.len);
 
-        for (object.managed_atoms.items) |atom| {
-            const sym = atom.getSymbol(self);
+        for (object.atoms.items) |atom_index| {
+            const atom = self.getAtom(atom_index);
+            const sym = self.getSymbol(atom.getSymbolWithLoc());
             if (sym.n_desc == N_DESC_GCED) continue;
 
             const sect_id = sym.n_sect - 1;
@@ -3381,11 +3394,88 @@ fn writeHeader(self: *MachO, ncmds: u32, sizeofcmds: u32) !void {
     try self.base.file.pwriteAll(mem.asBytes(&header), 0);
 }
 
+pub fn addRelocation(self: *MachO, atom_index: AtomIndex, reloc: Atom.Relocation) !void {
+    return self.addRelocations(atom_index, 1, .{reloc});
+}
+
+pub fn addRelocations(
+    self: *MachO,
+    atom_index: AtomIndex,
+    comptime count: comptime_int,
+    relocs: [count]Atom.Relocation,
+) !void {
+    const gpa = self.base.allocator;
+    const target = self.options.target;
+    const gop = try self.relocs.getOrPut(gpa, atom_index);
+    if (!gop.found_existing) {
+        gop.value_ptr.* = .{};
+    }
+    try gop.value_ptr.ensureUnusedCapacity(gpa, count);
+    for (relocs) |reloc| {
+        log.debug("  (adding reloc of type {s} to target %{d})", .{
+            reloc.fmtType(target),
+            reloc.target.sym_index,
+        });
+        gop.value_ptr.appendAssumeCapacity(reloc);
+    }
+}
+
+pub fn addRebase(self: *MachO, atom_index: AtomIndex, offset: u32) !void {
+    const gpa = self.base.allocator;
+    const atom = self.getAtom(atom_index);
+    log.debug("  (adding rebase at offset 0x{x} in %{d})", .{ offset, atom.sym_index });
+    const gop = try self.rebases.getOrPut(gpa, atom_index);
+    if (!gop.found_existing) {
+        gop.value_ptr.* = .{};
+    }
+    try gop.value_ptr.append(gpa, offset);
+}
+
+pub fn addBinding(self: *MachO, atom_index: AtomIndex, binding: Atom.Binding) !void {
+    const gpa = self.base.allocator;
+    const atom = self.getAtom(atom_index);
+    log.debug("  (adding binding to symbol {s} at offset 0x{x} in %{d})", .{
+        self.getSymbolName(binding.target),
+        binding.offset,
+        atom.sym_index,
+    });
+    const gop = try self.bindings.getOrPut(gpa, atom_index);
+    if (!gop.found_existing) {
+        gop.value_ptr.* = .{};
+    }
+    try gop.value_ptr.append(gpa, binding);
+}
+
+pub fn addLazyBinding(self: *MachO, atom_index: AtomIndex, binding: Atom.Binding) !void {
+    const gpa = self.base.allocator;
+    const atom = self.getAtom(atom_index);
+    log.debug("  (adding lazy binding to symbol {s} at offset 0x{x} in %{d})", .{
+        self.getSymbolName(binding.target),
+        binding.offset,
+        atom.sym_index,
+    });
+    const gop = try self.lazy_bindings.getOrPut(gpa, atom_index);
+    if (!gop.found_existing) {
+        gop.value_ptr.* = .{};
+    }
+    try gop.value_ptr.append(gpa, binding);
+}
+
 pub fn makeStaticString(bytes: []const u8) [16]u8 {
     var buf = [_]u8{0} ** 16;
     assert(bytes.len <= buf.len);
     mem.copy(u8, &buf, bytes);
     return buf;
+}
+
+pub inline fn getAtomPtr(self: *MachO, atom_index: AtomIndex) *Atom {
+    assert(atom_index < self.atoms.items.len);
+    return &self.atoms.items[atom_index];
+}
+
+pub inline fn getAtom(self: MachO, atom_index: AtomIndex) Atom {
+    assert(atom_index < self.atoms.items.len);
+    return self.atoms.items[atom_index];
 }
 
 fn getSegmentByName(self: MachO, segname: []const u8) ?u8 {
@@ -3394,12 +3484,12 @@ fn getSegmentByName(self: MachO, segname: []const u8) ?u8 {
     } else return null;
 }
 
-pub fn getSegment(self: MachO, sect_id: u8) macho.segment_command_64 {
+pub inline fn getSegment(self: MachO, sect_id: u8) macho.segment_command_64 {
     const index = self.sections.items(.segment_index)[sect_id];
     return self.segments.items[index];
 }
 
-pub fn getSegmentPtr(self: *MachO, sect_id: u8) *macho.segment_command_64 {
+pub inline fn getSegmentPtr(self: *MachO, sect_id: u8) *macho.segment_command_64 {
     const index = self.sections.items(.segment_index)[sect_id];
     return &self.segments.items[index];
 }
@@ -3458,10 +3548,10 @@ pub fn getSymbolName(self: *MachO, sym_with_loc: SymbolWithLoc) []const u8 {
 
 /// Returns atom if there is an atom referenced by the symbol described by `sym_with_loc` descriptor.
 /// Returns null on failure.
-pub fn getAtomForSymbol(self: *MachO, sym_with_loc: SymbolWithLoc) ?*Atom {
+pub fn getAtomIndexForSymbol(self: *MachO, sym_with_loc: SymbolWithLoc) ?AtomIndex {
     if (sym_with_loc.file) |file| {
         const object = self.objects.items[file];
-        return object.getAtomForSymbol(sym_with_loc.sym_index);
+        return object.getAtomIndexForSymbol(sym_with_loc.sym_index);
     } else {
         return self.atom_by_index_table.get(sym_with_loc.sym_index);
     }
@@ -3469,23 +3559,23 @@ pub fn getAtomForSymbol(self: *MachO, sym_with_loc: SymbolWithLoc) ?*Atom {
 
 /// Returns GOT atom that references `sym_with_loc` if one exists.
 /// Returns null otherwise.
-pub fn getGotAtomForSymbol(self: *MachO, sym_with_loc: SymbolWithLoc) ?*Atom {
+pub fn getGotAtomIndexForSymbol(self: *MachO, sym_with_loc: SymbolWithLoc) ?AtomIndex {
     const sym_index = self.got_entries.get(sym_with_loc) orelse return null;
-    return self.getAtomForSymbol(.{ .sym_index = sym_index, .file = null });
+    return self.getAtomIndexForSymbol(.{ .sym_index = sym_index, .file = null });
 }
 
 /// Returns stubs atom that references `sym_with_loc` if one exists.
 /// Returns null otherwise.
-pub fn getStubsAtomForSymbol(self: *MachO, sym_with_loc: SymbolWithLoc) ?*Atom {
+pub fn getStubsAtomIndexForSymbol(self: *MachO, sym_with_loc: SymbolWithLoc) ?AtomIndex {
     const sym_index = self.stubs.get(sym_with_loc) orelse return null;
-    return self.getAtomForSymbol(.{ .sym_index = sym_index, .file = null });
+    return self.getAtomIndexForSymbol(.{ .sym_index = sym_index, .file = null });
 }
 
 /// Returns TLV pointer atom that references `sym_with_loc` if one exists.
 /// Returns null otherwise.
-pub fn getTlvPtrAtomForSymbol(self: *MachO, sym_with_loc: SymbolWithLoc) ?*Atom {
+pub fn getTlvPtrAtomIndexForSymbol(self: *MachO, sym_with_loc: SymbolWithLoc) ?AtomIndex {
     const sym_index = self.tlv_ptr_entries.get(sym_with_loc) orelse return null;
-    return self.getAtomForSymbol(.{ .sym_index = sym_index, .file = null });
+    return self.getAtomIndexForSymbol(.{ .sym_index = sym_index, .file = null });
 }
 
 /// Returns symbol location corresponding to the set entrypoint.
@@ -3565,7 +3655,8 @@ pub fn generateSymbolStabs(
 
     var stabs_buf: [4]macho.nlist_64 = undefined;
 
-    for (object.managed_atoms.items) |atom| {
+    for (object.atoms.items) |atom_index| {
+        const atom = self.getAtom(atom_index);
         const stabs = try self.generateSymbolStabsForSymbol(
             atom.getSymbolWithLoc(),
             debug_info,
@@ -3801,28 +3892,34 @@ fn logSymtab(self: *MachO) void {
 fn logAtoms(self: *MachO) void {
     log.debug("atoms:", .{});
     const slice = self.sections.slice();
-    for (slice.items(.last_atom)) |last_atom, sect_id| {
-        var atom = last_atom;
+    for (slice.items(.last_atom_index)) |last_atom_index, sect_id| {
+        var atom_index = last_atom_index;
+        var atom = self.getAtom(atom_index);
+
         const header = slice.items(.header)[sect_id];
 
         log.debug("{s},{s}", .{ header.segName(), header.sectName() });
 
-        while (atom.prev) |prev| {
-            atom = prev;
+        while (atom.prev_index) |prev_index| {
+            atom_index = prev_index;
+            atom = self.getAtom(atom_index);
         }
 
         while (true) {
-            self.logAtom(atom);
-            if (atom.next) |next| {
-                atom = next;
+            self.logAtom(atom_index);
+
+            if (atom.next_index) |next_index| {
+                atom_index = next_index;
+                atom = self.getAtom(atom_index);
             } else break;
         }
     }
 }
 
-pub fn logAtom(self: *MachO, atom: *const Atom) void {
-    const sym = atom.getSymbol(self);
-    const sym_name = atom.getName(self);
+pub fn logAtom(self: *MachO, atom_index: AtomIndex) void {
+    const atom = self.getAtom(atom_index);
+    const sym = self.getSymbol(atom.getSymbolWithLoc());
+    const sym_name = self.getSymbolName(atom.getSymbolWithLoc());
     log.debug("  ATOM(%{d}, '{s}') @ {x} (sizeof({x}), alignof({x})) in object({?}) in sect({d})", .{
         atom.sym_index,
         sym_name,

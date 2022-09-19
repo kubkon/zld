@@ -15,6 +15,7 @@ const trace = @import("../../tracy.zig").trace;
 
 const Allocator = mem.Allocator;
 const Atom = @import("Atom.zig");
+const AtomIndex = MachO.AtomIndex;
 const LoadCommandIterator = macho.LoadCommandIterator;
 const MachO = @import("../MachO.zig");
 const SymbolWithLoc = MachO.SymbolWithLoc;
@@ -34,24 +35,15 @@ symtab: std.ArrayListUnmanaged(macho.nlist_64) = .{},
 sections: std.ArrayListUnmanaged(macho.section_64) = .{},
 sections_as_symbols: std.AutoHashMapUnmanaged(u16, u32) = .{},
 
-/// List of atoms that map to the symbols parsed from this object file.
-managed_atoms: std.ArrayListUnmanaged(*Atom) = .{},
-
-/// Table of atoms belonging to this object file indexed by the symbol index.
-atom_by_index_table: std.AutoHashMapUnmanaged(u32, *Atom) = .{},
+atoms: std.ArrayListUnmanaged(AtomIndex) = .{},
+atom_by_index_table: std.AutoHashMapUnmanaged(u32, AtomIndex) = .{},
 
 pub fn deinit(self: *Object, gpa: Allocator) void {
     self.symtab.deinit(gpa);
     self.sections.deinit(gpa);
     self.sections_as_symbols.deinit(gpa);
+    self.atoms.deinit(gpa);
     self.atom_by_index_table.deinit(gpa);
-
-    for (self.managed_atoms.items) |atom| {
-        atom.deinit(gpa);
-        gpa.destroy(atom);
-    }
-    self.managed_atoms.deinit(gpa);
-
     gpa.free(self.name);
     gpa.free(self.contents);
 }
@@ -265,7 +257,7 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
                 [*]align(1) const macho.relocation_info,
                 self.contents.ptr + sect.reloff,
             )[0..sect.nreloc];
-            const atom = try self.createAtomFromSubsection(
+            const atom_index = try self.createAtomFromSubsection(
                 macho_file,
                 object_id,
                 sym_index,
@@ -277,7 +269,7 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
                 match,
                 sect,
             );
-            try macho_file.addAtomToSection(atom, match);
+            try macho_file.addAtomToSection(atom_index, match);
         }
         return;
     };
@@ -380,7 +372,7 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
                     const size = math.cast(usize, atom_size) orelse return error.Overflow;
                     break :blk cc[0..size];
                 } else null;
-                const atom = try self.createAtomFromSubsection(
+                const atom_index = try self.createAtomFromSubsection(
                     macho_file,
                     object_id,
                     sym_index,
@@ -392,7 +384,7 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
                     match,
                     sect,
                 );
-                try macho_file.addAtomToSection(atom, match);
+                try macho_file.addAtomToSection(atom_index, match);
             }
 
             var next_sym_count: usize = 0;
@@ -435,7 +427,7 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
                     math.min(@ctz(addr), sect.@"align")
                 else
                     sect.@"align";
-                const atom = try self.createAtomFromSubsection(
+                const atom_index = try self.createAtomFromSubsection(
                     macho_file,
                     object_id,
                     sorted_atom_syms.items[0].index,
@@ -464,14 +456,15 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
                         try self.sections_as_symbols.putNoClobber(gpa, sect_id, alias);
                         break :blk alias;
                     };
+                    const atom = macho_file.getAtomPtr(atom_index);
                     try atom.contained.append(gpa, .{
                         .sym_index = alias,
                         .offset = 0,
                     });
-                    try self.atom_by_index_table.put(gpa, alias, atom);
+                    try self.atom_by_index_table.put(gpa, alias, atom_index);
                 }
 
-                try macho_file.addAtomToSection(atom, match);
+                try macho_file.addAtomToSection(atom_index, match);
             }
         } else {
             // If there is no symbol to refer to this atom, we create
@@ -489,7 +482,7 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
                 try self.sections_as_symbols.putNoClobber(gpa, sect_id, sym_index);
                 break :blk sym_index;
             };
-            const atom = try self.createAtomFromSubsection(
+            const atom_index = try self.createAtomFromSubsection(
                 macho_file,
                 object_id,
                 sym_index,
@@ -501,7 +494,7 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
                 match,
                 sect,
             );
-            try macho_file.addAtomToSection(atom, match);
+            try macho_file.addAtomToSection(atom_index, match);
         }
     }
 }
@@ -518,10 +511,11 @@ fn createAtomFromSubsection(
     indexes: []const SymbolAtIndex,
     match: u8,
     sect: macho.section_64,
-) !*Atom {
+) !AtomIndex {
     const gpa = macho_file.base.allocator;
     const sym = self.symtab.items[sym_index];
-    const atom = try MachO.createEmptyAtom(gpa, sym_index, size, alignment);
+    const atom_index = try macho_file.createEmptyAtom(sym_index, size, alignment);
+    const atom = macho_file.getAtomPtr(atom_index);
     atom.file = object_id;
     self.symtab.items[sym_index].n_sect = match + 1;
 
@@ -534,21 +528,13 @@ fn createAtomFromSubsection(
         object_id,
     });
 
-    try self.atom_by_index_table.putNoClobber(gpa, sym_index, atom);
-    try self.managed_atoms.append(gpa, atom);
+    try self.atoms.append(gpa, atom_index);
+    try self.atom_by_index_table.putNoClobber(gpa, sym_index, atom_index);
 
     if (code) |cc| {
         assert(size == cc.len);
         mem.copy(u8, atom.code.items, cc);
     }
-
-    const base_offset = sym.n_value - sect.addr;
-    const filtered_relocs = filterRelocs(relocs, base_offset, base_offset + size);
-    try atom.parseRelocs(filtered_relocs, .{
-        .macho_file = macho_file,
-        .base_addr = sect.addr,
-        .base_offset = @intCast(i32, base_offset),
-    });
 
     // Since this is atom gets a helper local temporary symbol that didn't exist
     // in the object file which encompasses the entire section, we need traverse
@@ -564,10 +550,17 @@ fn createAtomFromSubsection(
             .offset = inner_sym.n_value - sym.n_value,
         });
 
-        try self.atom_by_index_table.putNoClobber(gpa, inner_sym_index.index, atom);
+        try self.atom_by_index_table.putNoClobber(gpa, inner_sym_index.index, atom_index);
     }
 
-    return atom;
+    const base_offset = sym.n_value - sect.addr;
+    const filtered_relocs = filterRelocs(relocs, base_offset, base_offset + size);
+    try Atom.parseRelocs(macho_file, atom_index, filtered_relocs, .{
+        .base_addr = sect.addr,
+        .base_offset = @intCast(i32, base_offset),
+    });
+
+    return atom_index;
 }
 
 pub fn getSourceSymbol(self: Object, index: u32) ?macho.nlist_64 {
@@ -683,6 +676,6 @@ pub fn getString(self: Object, off: u32) []const u8 {
     return mem.sliceTo(@ptrCast([*:0]const u8, strtab.ptr + off), 0);
 }
 
-pub fn getAtomForSymbol(self: Object, sym_index: u32) ?*Atom {
+pub fn getAtomIndexForSymbol(self: Object, sym_index: u32) ?AtomIndex {
     return self.atom_by_index_table.get(sym_index);
 }

@@ -6,8 +6,9 @@ const math = std.math;
 const mem = std.mem;
 
 const Allocator = mem.Allocator;
-const Atom = @import("Atom.zig");
+const AtomIndex = MachO.AtomIndex;
 const MachO = @import("../MachO.zig");
+const SymbolWithLoc = MachO.SymbolWithLoc;
 
 pub fn gcAtoms(macho_file: *MachO) !void {
     const gpa = macho_file.base.allocator;
@@ -15,33 +16,36 @@ pub fn gcAtoms(macho_file: *MachO) !void {
     defer arena_allocator.deinit();
     const arena = arena_allocator.allocator();
 
-    var roots = std.AutoHashMap(*Atom, void).init(arena);
+    var roots = std.AutoHashMap(AtomIndex, void).init(arena);
     try collectRoots(&roots, macho_file);
 
-    var alive = std.AutoHashMap(*Atom, void).init(arena);
+    var alive = std.AutoHashMap(AtomIndex, void).init(arena);
     try mark(roots, &alive, macho_file);
 
     try prune(arena, alive, macho_file);
 }
 
-fn removeAtomFromSection(atom: *Atom, match: u8, macho_file: *MachO) void {
+fn removeAtomFromSection(atom_index: AtomIndex, match: u8, macho_file: *MachO) void {
     var section = macho_file.sections.get(match);
+    const atom = macho_file.getAtomPtr(atom_index);
 
     // If we want to enable GC for incremental codepath, we need to take into
     // account any padding that might have been left here.
     section.header.size -= atom.size;
 
-    if (atom.prev) |prev| {
-        prev.next = atom.next;
+    if (atom.prev_index) |prev_index| {
+        const prev = macho_file.getAtomPtr(prev_index);
+        prev.next_index = atom.next_index;
     }
-    if (atom.next) |next| {
-        next.prev = atom.prev;
+    if (atom.next_index) |next_index| {
+        const next = macho_file.getAtomPtr(next_index);
+        next.prev_index = atom.prev_index;
     } else {
-        if (atom.prev) |prev| {
-            section.last_atom = prev;
+        if (atom.prev_index) |prev_index| {
+            section.last_atom_index = prev_index;
         } else {
             // The section will be GCed in the next step.
-            section.last_atom = undefined;
+            section.last_atom_index = undefined;
             section.header.size = 0;
         }
     }
@@ -49,15 +53,15 @@ fn removeAtomFromSection(atom: *Atom, match: u8, macho_file: *MachO) void {
     macho_file.sections.set(match, section);
 }
 
-fn collectRoots(roots: *std.AutoHashMap(*Atom, void), macho_file: *MachO) !void {
+fn collectRoots(roots: *std.AutoHashMap(AtomIndex, void), macho_file: *MachO) !void {
     const output_mode = macho_file.options.output_mode;
 
     switch (output_mode) {
         .exe => {
             // Add entrypoint as GC root
             const global = try macho_file.getEntryPoint();
-            const atom = macho_file.getAtomForSymbol(global).?; // panic here means fatal error
-            _ = try roots.getOrPut(atom);
+            const atom_index = macho_file.getAtomIndexForSymbol(global).?; // panic here means fatal error
+            _ = try roots.getOrPut(atom_index);
         },
         else => |other| {
             assert(other == .lib);
@@ -65,30 +69,33 @@ fn collectRoots(roots: *std.AutoHashMap(*Atom, void), macho_file: *MachO) !void 
             for (macho_file.globals.values()) |global| {
                 const sym = macho_file.getSymbol(global);
                 if (!sym.sect()) continue;
-                const atom = macho_file.getAtomForSymbol(global) orelse {
+                const atom_index = macho_file.getAtomIndexForSymbol(global) orelse {
                     log.debug("skipping {s}", .{macho_file.getSymbolName(global)});
                     continue;
                 };
-                _ = try roots.getOrPut(atom);
+                _ = try roots.getOrPut(atom_index);
                 log.debug("adding root", .{});
-                macho_file.logAtom(atom);
+                macho_file.logAtom(atom_index);
             }
         },
     }
 
     // TODO just a temp until we learn how to parse unwind records
     if (macho_file.globals.get("___gxx_personality_v0")) |global| {
-        if (macho_file.getAtomForSymbol(global)) |atom| {
-            _ = try roots.getOrPut(atom);
+        if (macho_file.getAtomIndexForSymbol(global)) |atom_index| {
+            _ = try roots.getOrPut(atom_index);
             log.debug("adding root", .{});
-            macho_file.logAtom(atom);
+            macho_file.logAtom(atom_index);
         }
     }
 
     for (macho_file.objects.items) |object| {
-        for (object.managed_atoms.items) |atom| {
+        for (object.atoms.items) |atom_index| {
+            const atom = macho_file.getAtom(atom_index);
             const source_sym = object.getSourceSymbol(atom.sym_index) orelse continue;
+
             if (source_sym.tentative()) continue;
+
             const source_sect = object.getSourceSection(source_sym.n_sect - 1);
             const is_gc_root = blk: {
                 if (source_sect.isDontDeadStrip()) break :blk true;
@@ -100,52 +107,54 @@ fn collectRoots(roots: *std.AutoHashMap(*Atom, void), macho_file: *MachO) !void 
                     else => break :blk false,
                 }
             };
+
             if (is_gc_root) {
-                try roots.putNoClobber(atom, {});
+                try roots.putNoClobber(atom_index, {});
                 log.debug("adding root", .{});
-                macho_file.logAtom(atom);
+                macho_file.logAtom(atom_index);
             }
         }
     }
 }
 
-fn markLive(atom: *Atom, alive: *std.AutoHashMap(*Atom, void), macho_file: *MachO) anyerror!void {
-    const gop = try alive.getOrPut(atom);
+fn markLive(atom_index: AtomIndex, alive: *std.AutoHashMap(AtomIndex, void), macho_file: *MachO) anyerror!void {
+    const gop = try alive.getOrPut(atom_index);
     if (gop.found_existing) return;
 
     log.debug("marking live", .{});
-    macho_file.logAtom(atom);
+    macho_file.logAtom(atom_index);
 
-    if (macho_file.relocs.get(atom)) |relocs| {
+    if (macho_file.relocs.get(atom_index)) |relocs| {
         for (relocs.items) |rel| {
-            const target_atom = rel.getTargetAtom(macho_file) orelse continue;
-            try markLive(target_atom, alive, macho_file);
+            const target_atom_index = rel.getTargetAtomIndex(macho_file) orelse continue;
+            try markLive(target_atom_index, alive, macho_file);
         }
     }
 }
 
-fn refersLive(atom: *Atom, alive: std.AutoHashMap(*Atom, void), macho_file: *MachO) bool {
-    if (macho_file.relocs.get(atom)) |relocs| {
+fn refersLive(atom_index: AtomIndex, alive: std.AutoHashMap(AtomIndex, void), macho_file: *MachO) bool {
+    if (macho_file.relocs.get(atom_index)) |relocs| {
         for (relocs.items) |rel| {
-            const target_atom = rel.getTargetAtom(macho_file) orelse continue;
-            if (alive.contains(target_atom)) return true;
+            const target_atom_index = rel.getTargetAtomIndex(macho_file) orelse continue;
+            if (alive.contains(target_atom_index)) return true;
         }
     }
     return false;
 }
 
-fn refersDead(atom: *Atom, macho_file: *MachO) bool {
-    if (macho_file.relocs.get(atom)) |relocs| {
+fn refersDead(atom_index: AtomIndex, macho_file: *MachO) bool {
+    if (macho_file.relocs.get(atom_index)) |relocs| {
         for (relocs.items) |rel| {
-            const target_atom = rel.getTargetAtom(macho_file) orelse continue;
-            const target_sym = target_atom.getSymbol(macho_file);
+            const target_atom_index = rel.getTargetAtomIndex(macho_file) orelse continue;
+            const target_atom = macho_file.getAtom(target_atom_index);
+            const target_sym = macho_file.getSymbol(target_atom.getSymbolWithLoc());
             if (target_sym.n_desc == MachO.N_DESC_GCED) return true;
         }
     }
     return false;
 }
 
-fn mark(roots: std.AutoHashMap(*Atom, void), alive: *std.AutoHashMap(*Atom, void), macho_file: *MachO) !void {
+fn mark(roots: std.AutoHashMap(AtomIndex, void), alive: *std.AutoHashMap(AtomIndex, void), macho_file: *MachO) !void {
     try alive.ensureUnusedCapacity(roots.count());
 
     var it = roots.keyIterator();
@@ -158,13 +167,17 @@ fn mark(roots: std.AutoHashMap(*Atom, void), alive: *std.AutoHashMap(*Atom, void
         loop = false;
 
         for (macho_file.objects.items) |object| {
-            for (object.managed_atoms.items) |atom| {
-                if (alive.contains(atom)) continue;
+            for (object.atoms.items) |atom_index| {
+                if (alive.contains(atom_index)) continue;
+
+                const atom = macho_file.getAtom(atom_index);
                 const source_sym = object.getSourceSymbol(atom.sym_index) orelse continue;
                 if (source_sym.tentative()) continue;
+
                 const source_sect = object.getSourceSection(source_sym.n_sect - 1);
-                if (source_sect.isDontDeadStripIfReferencesLive() and refersLive(atom, alive.*, macho_file)) {
-                    try markLive(atom, alive, macho_file);
+
+                if (source_sect.isDontDeadStripIfReferencesLive() and refersLive(atom_index, alive.*, macho_file)) {
+                    try markLive(atom_index, alive, macho_file);
                     loop = true;
                 }
             }
@@ -172,7 +185,7 @@ fn mark(roots: std.AutoHashMap(*Atom, void), alive: *std.AutoHashMap(*Atom, void
     }
 }
 
-fn prune(arena: Allocator, alive: std.AutoHashMap(*Atom, void), macho_file: *MachO) !void {
+fn prune(arena: Allocator, alive: std.AutoHashMap(AtomIndex, void), macho_file: *MachO) !void {
     // Any section that ends up here will be updated, that is,
     // its size and alignment recalculated.
     var gc_sections = std.AutoHashMap(u8, void).init(arena);
@@ -184,19 +197,20 @@ fn prune(arena: Allocator, alive: std.AutoHashMap(*Atom, void), macho_file: *Mac
             const in_symtab = object.in_symtab orelse continue;
 
             for (in_symtab) |_, source_index| {
-                const atom = object.getAtomForSymbol(@intCast(u32, source_index)) orelse continue;
-                if (alive.contains(atom)) continue;
+                const atom_index = object.getAtomIndexForSymbol(@intCast(u32, source_index)) orelse continue;
+                if (alive.contains(atom_index)) continue;
 
+                const atom = macho_file.getAtom(atom_index);
                 const global = atom.getSymbolWithLoc();
-                const sym = atom.getSymbolPtr(macho_file);
+                const sym = macho_file.getSymbolPtr(global);
                 const match = sym.n_sect - 1;
 
                 if (sym.n_desc == MachO.N_DESC_GCED) continue;
-                if (!sym.ext() and !refersDead(atom, macho_file)) continue;
+                if (!sym.ext() and !refersDead(atom_index, macho_file)) continue;
 
-                macho_file.logAtom(atom);
+                macho_file.logAtom(atom_index);
                 sym.n_desc = MachO.N_DESC_GCED;
-                removeAtomFromSection(atom, match, macho_file);
+                removeAtomFromSection(atom_index, match, macho_file);
                 _ = try gc_sections.put(match, {});
 
                 for (atom.contained.items) |sym_off| {
@@ -208,20 +222,23 @@ fn prune(arena: Allocator, alive: std.AutoHashMap(*Atom, void), macho_file: *Mac
                 }
 
                 if (macho_file.got_entries.contains(global)) {
-                    const got_atom = macho_file.getGotAtomForSymbol(global).?;
-                    const got_sym = got_atom.getSymbolPtr(macho_file);
+                    const got_atom_index = macho_file.getGotAtomIndexForSymbol(global).?;
+                    const got_atom = macho_file.getAtom(got_atom_index);
+                    const got_sym = macho_file.getSymbolPtr(got_atom.getSymbolWithLoc());
                     got_sym.n_desc = MachO.N_DESC_GCED;
                 }
 
                 if (macho_file.stubs.contains(global)) {
-                    const stubs_atom = macho_file.getStubsAtomForSymbol(global).?;
-                    const stubs_sym = stubs_atom.getSymbolPtr(macho_file);
+                    const stubs_atom_index = macho_file.getStubsAtomIndexForSymbol(global).?;
+                    const stubs_atom = macho_file.getAtom(stubs_atom_index);
+                    const stubs_sym = macho_file.getSymbolPtr(stubs_atom.getSymbolWithLoc());
                     stubs_sym.n_desc = MachO.N_DESC_GCED;
                 }
 
                 if (macho_file.tlv_ptr_entries.contains(global)) {
-                    const tlv_ptr_atom = macho_file.getTlvPtrAtomForSymbol(global).?;
-                    const tlv_ptr_sym = tlv_ptr_atom.getSymbolPtr(macho_file);
+                    const tlv_ptr_atom_index = macho_file.getTlvPtrAtomIndexForSymbol(global).?;
+                    const tlv_ptr_atom = macho_file.getAtom(tlv_ptr_atom_index);
+                    const tlv_ptr_sym = macho_file.getSymbolPtr(tlv_ptr_atom.getSymbolWithLoc());
                     tlv_ptr_sym.n_desc = MachO.N_DESC_GCED;
                 }
 
@@ -235,9 +252,9 @@ fn prune(arena: Allocator, alive: std.AutoHashMap(*Atom, void), macho_file: *Mac
         const sym = macho_file.getSymbol(.{ .sym_index = sym_index, .file = null });
         if (sym.n_desc != MachO.N_DESC_GCED) continue;
 
-        const atom = macho_file.getAtomForSymbol(.{ .sym_index = sym_index, .file = null }).?;
+        const atom_index = macho_file.getAtomIndexForSymbol(.{ .sym_index = sym_index, .file = null }).?;
         const match = sym.n_sect - 1;
-        removeAtomFromSection(atom, match, macho_file);
+        removeAtomFromSection(atom_index, match, macho_file);
         _ = try gc_sections.put(match, {});
         _ = macho_file.got_entries.swapRemove(target);
     }
@@ -247,9 +264,9 @@ fn prune(arena: Allocator, alive: std.AutoHashMap(*Atom, void), macho_file: *Mac
         const sym = macho_file.getSymbol(.{ .sym_index = sym_index, .file = null });
         if (sym.n_desc != MachO.N_DESC_GCED) continue;
 
-        const atom = macho_file.getAtomForSymbol(.{ .sym_index = sym_index, .file = null }).?;
+        const atom_index = macho_file.getAtomIndexForSymbol(.{ .sym_index = sym_index, .file = null }).?;
         const match = sym.n_sect - 1;
-        removeAtomFromSection(atom, match, macho_file);
+        removeAtomFromSection(atom_index, match, macho_file);
         _ = try gc_sections.put(match, {});
         _ = macho_file.stubs.swapRemove(target);
     }
@@ -259,9 +276,9 @@ fn prune(arena: Allocator, alive: std.AutoHashMap(*Atom, void), macho_file: *Mac
         const sym = macho_file.getSymbol(.{ .sym_index = sym_index, .file = null });
         if (sym.n_desc != MachO.N_DESC_GCED) continue;
 
-        const atom = macho_file.getAtomForSymbol(.{ .sym_index = sym_index, .file = null }).?;
+        const atom_index = macho_file.getAtomIndexForSymbol(.{ .sym_index = sym_index, .file = null }).?;
         const match = sym.n_sect - 1;
-        removeAtomFromSection(atom, match, macho_file);
+        removeAtomFromSection(atom_index, match, macho_file);
         _ = try gc_sections.put(match, {});
         _ = macho_file.tlv_ptr_entries.swapRemove(target);
     }
@@ -275,10 +292,12 @@ fn prune(arena: Allocator, alive: std.AutoHashMap(*Atom, void), macho_file: *Mac
         section.header.@"align" = 0;
         section.header.size = 0;
 
-        var atom = section.last_atom;
+        var atom_index = section.last_atom_index;
+        var atom = macho_file.getAtom(atom_index);
 
-        while (atom.prev) |prev| {
-            atom = prev;
+        while (atom.prev_index) |prev_index| {
+            atom_index = prev_index;
+            atom = macho_file.getAtom(atom_index);
         }
 
         while (true) {
@@ -288,8 +307,9 @@ fn prune(arena: Allocator, alive: std.AutoHashMap(*Atom, void), macho_file: *Mac
             section.header.size += padding + atom.size;
             section.header.@"align" = @maximum(section.header.@"align", atom.alignment);
 
-            if (atom.next) |next| {
-                atom = next;
+            if (atom.next_index) |next_index| {
+                atom_index = next_index;
+                atom = macho_file.getAtom(atom_index);
             } else break;
         }
 
