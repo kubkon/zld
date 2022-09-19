@@ -3433,7 +3433,7 @@ pub fn getEntryPoint(self: MachO) error{MissingMainEntrypoint}!SymbolWithLoc {
     return global;
 }
 
-pub fn findFirst(comptime T: type, haystack: []const T, start: usize, predicate: anytype) usize {
+pub fn findFirst(comptime T: type, haystack: []align(1) const T, start: usize, predicate: anytype) usize {
     if (!@hasDecl(@TypeOf(predicate), "predicate"))
         @compileError("Predicate is required to define fn predicate(@This(), T) bool");
 

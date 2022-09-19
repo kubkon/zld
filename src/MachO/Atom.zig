@@ -180,7 +180,7 @@ const RelocContext = struct {
     base_offset: i32 = 0,
 };
 
-pub fn parseRelocs(self: *Atom, relocs: []const macho.relocation_info, context: RelocContext) !void {
+pub fn parseRelocs(self: *Atom, relocs: []align(1) const macho.relocation_info, context: RelocContext) !void {
     const gpa = context.macho_file.base.allocator;
 
     const arch = context.macho_file.options.target.cpu_arch.?;
