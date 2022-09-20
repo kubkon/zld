@@ -253,10 +253,10 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
                 break :blk sym_index;
             };
             const code: ?[]const u8 = if (!sect.isZerofill()) self.getSectionContents(sect) else null;
-            const relocs = @ptrCast(
-                [*]align(1) const macho.relocation_info,
-                self.contents.ptr + sect.reloff,
-            )[0..sect.nreloc];
+            const relocs: ?[]align(1) const macho.relocation_info = if (!sect.isZerofill())
+                self.getRelocs(sect)
+            else
+                null;
             const atom_index = try self.createAtomFromSubsection(
                 macho_file,
                 object_id,
@@ -331,17 +331,11 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
         });
 
         const cpu_arch = macho_file.options.target.cpu_arch.?;
-
-        // Read section's code
         const code: ?[]const u8 = if (!sect.isZerofill()) self.getSectionContents(sect) else null;
-
-        // Read section's list of relocations
-        const relocs = @ptrCast(
-            [*]const macho.relocation_info,
-            @alignCast(@alignOf(macho.relocation_info), &self.contents[sect.reloff]),
-        )[0..sect.nreloc];
-
-        // Symbols within this section only.
+        const relocs: ?[]align(1) const macho.relocation_info = if (!sect.isZerofill())
+            self.getRelocs(sect)
+        else
+            null;
         const filtered_syms = filterSymbolsByAddress(
             sorted_syms,
             sect.addr,
@@ -368,10 +362,7 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
                     break :blk sym_index;
                 };
                 const atom_size = first_sym.n_value - sect.addr;
-                const atom_code: ?[]const u8 = if (code) |cc| blk: {
-                    const size = math.cast(usize, atom_size) orelse return error.Overflow;
-                    break :blk cc[0..size];
-                } else null;
+                const atom_code: ?[]const u8 = if (code) |cc| cc[0..@intCast(usize, atom_size)] else null;
                 const atom_index = try self.createAtomFromSubsection(
                     macho_file,
                     object_id,
@@ -419,8 +410,8 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
                     break :blk end_addr - addr;
                 };
                 const atom_code: ?[]const u8 = if (code) |cc| blk: {
-                    const start = math.cast(usize, addr - sect.addr) orelse return error.Overflow;
-                    const size = math.cast(usize, atom_size) orelse return error.Overflow;
+                    const start = @intCast(usize, addr - sect.addr);
+                    const size = @intCast(usize, atom_size);
                     break :blk cc[start..][0..size];
                 } else null;
                 const atom_align = if (addr > 0)
@@ -507,7 +498,7 @@ fn createAtomFromSubsection(
     size: u64,
     alignment: u32,
     code: ?[]const u8,
-    relocs: []align(1) const macho.relocation_info,
+    relocs: ?[]align(1) const macho.relocation_info,
     indexes: []const SymbolAtIndex,
     match: u8,
     sect: macho.section_64,
@@ -531,11 +522,6 @@ fn createAtomFromSubsection(
     try self.atoms.append(gpa, atom_index);
     try self.atom_by_index_table.putNoClobber(gpa, sym_index, atom_index);
 
-    if (code) |cc| {
-        assert(size == cc.len);
-        mem.copy(u8, atom.code.items, cc);
-    }
-
     // Since this is atom gets a helper local temporary symbol that didn't exist
     // in the object file which encompasses the entire section, we need traverse
     // the filtered symbols and note which symbol is contained within so that
@@ -553,12 +539,14 @@ fn createAtomFromSubsection(
         try self.atom_by_index_table.putNoClobber(gpa, inner_sym_index.index, atom_index);
     }
 
-    const base_offset = sym.n_value - sect.addr;
-    const filtered_relocs = filterRelocs(relocs, base_offset, base_offset + size);
-    try Atom.parseRelocs(macho_file, atom_index, filtered_relocs, .{
-        .base_addr = sect.addr,
-        .base_offset = @intCast(i32, base_offset),
-    });
+    if (code) |cc| {
+        const base_offset = sym.n_value - sect.addr;
+        const filtered_relocs = filterRelocs(relocs.?, base_offset, base_offset + size);
+        try Atom.parseRelocs(macho_file, atom_index, cc, filtered_relocs, .{
+            .base_addr = sect.addr,
+            .base_offset = @intCast(i32, base_offset),
+        });
+    }
 
     return atom_index;
 }
@@ -659,7 +647,7 @@ pub fn parseDwarfInfo(self: Object) dwarf.DwarfInfo {
     return di;
 }
 
-fn getSectionContents(self: Object, sect: macho.section_64) []const u8 {
+pub fn getSectionContents(self: Object, sect: macho.section_64) []const u8 {
     const size = @intCast(usize, sect.size);
     log.debug("getting {s},{s} data at 0x{x} - 0x{x}", .{
         sect.segName(),
@@ -668,6 +656,11 @@ fn getSectionContents(self: Object, sect: macho.section_64) []const u8 {
         sect.offset + sect.size,
     });
     return self.contents[sect.offset..][0..size];
+}
+
+pub fn getRelocs(self: Object, sect: macho.section_64) []align(1) const macho.relocation_info {
+    if (sect.nreloc == 0) return &[0]macho.relocation_info{};
+    return @ptrCast([*]align(1) const macho.relocation_info, self.contents.ptr + sect.reloff)[0..sect.nreloc];
 }
 
 pub fn getString(self: Object, off: u32) []const u8 {

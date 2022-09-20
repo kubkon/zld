@@ -967,7 +967,6 @@ pub fn addAtomToSection(self: *MachO, atom_index: AtomIndex, sect_id: u8) !void 
 
 pub fn createEmptyAtom(self: *MachO, sym_index: u32, size: u64, alignment: u32) !AtomIndex {
     const gpa = self.base.allocator;
-    const size_usize = math.cast(usize, size) orelse return error.Overflow;
     const index = @intCast(AtomIndex, self.atoms.items.len);
     const atom = try self.atoms.addOne(gpa);
     atom.* = Atom.empty;
@@ -976,9 +975,6 @@ pub fn createEmptyAtom(self: *MachO, sym_index: u32, size: u64, alignment: u32) 
     atom.alignment = alignment;
 
     log.debug("creating ATOM(%{d}) at index {d}", .{ sym_index, index });
-
-    try atom.code.resize(gpa, size_usize);
-    mem.set(u8, atom.code.items, 0);
 
     return index;
 }
@@ -1097,24 +1093,12 @@ fn createStubHelperPreambleAtom(self: *MachO) !void {
     };
     const sym_index = try self.allocateSymbol();
     const atom_index = try self.createEmptyAtom(sym_index, size, alignment);
-    const atom = self.getAtomPtr(atom_index);
     const sym = self.getSymbolPtr(.{ .sym_index = sym_index, .file = null });
     sym.n_type = macho.N_SECT;
 
     const dyld_private_sym_index = self.dyld_private_sym_index.?;
     switch (cpu_arch) {
         .x86_64 => {
-            // lea %r11, [rip + disp]
-            atom.code.items[0] = 0x4c;
-            atom.code.items[1] = 0x8d;
-            atom.code.items[2] = 0x1d;
-            // push %r11
-            atom.code.items[7] = 0x41;
-            atom.code.items[8] = 0x53;
-            // jmp [rip + disp]
-            atom.code.items[9] = 0xff;
-            atom.code.items[10] = 0x25;
-
             try self.addRelocations(atom_index, 2, .{
                 .{
                     .offset = 3,
@@ -1137,28 +1121,6 @@ fn createStubHelperPreambleAtom(self: *MachO) !void {
             });
         },
         .aarch64 => {
-            // adrp x17, 0
-            mem.writeIntLittle(u32, atom.code.items[0..][0..4], aarch64.Instruction.adrp(.x17, 0).toU32());
-            // add x17, x17, 0
-            mem.writeIntLittle(u32, atom.code.items[4..][0..4], aarch64.Instruction.add(.x17, .x17, 0, false).toU32());
-            // stp x16, x17, [sp, #-16]!
-            mem.writeIntLittle(u32, atom.code.items[8..][0..4], aarch64.Instruction.stp(
-                .x16,
-                .x17,
-                aarch64.Register.sp,
-                aarch64.Instruction.LoadStorePairOffset.pre_index(-16),
-            ).toU32());
-            // adrp x16, 0
-            mem.writeIntLittle(u32, atom.code.items[12..][0..4], aarch64.Instruction.adrp(.x16, 0).toU32());
-            // ldr x16, [x16, 0]
-            mem.writeIntLittle(u32, atom.code.items[16..][0..4], aarch64.Instruction.ldr(
-                .x16,
-                .x16,
-                aarch64.Instruction.LoadStoreOffset.imm(0),
-            ).toU32());
-            // br x16
-            mem.writeIntLittle(u32, atom.code.items[20..][0..4], aarch64.Instruction.br(.x16).toU32());
-
             try self.addRelocations(atom_index, 4, .{
                 .{
                     .offset = 0,
@@ -1212,6 +1174,37 @@ fn createStubHelperPreambleAtom(self: *MachO) !void {
     try self.atom_by_index_table.putNoClobber(gpa, sym_index, atom_index);
 }
 
+fn writeStubHelperPreambleCode(self: *MachO, writer: anytype) !void {
+    const cpu_arch = self.options.target.cpu_arch.?;
+    switch (cpu_arch) {
+        .x86_64 => {
+            try writer.writeAll(&.{
+                0x4c, 0x8d, 0x1d, 0x0,  0x0, 0x0, 0x0,
+                0x41, 0x53, 0xff, 0x25, 0x0, 0x0, 0x0,
+                0x0,
+            });
+        },
+        .aarch64 => {
+            try writer.writeIntLittle(u32, aarch64.Instruction.adrp(.x17, 0).toU32());
+            try writer.writeIntLittle(u32, aarch64.Instruction.add(.x17, .x17, 0, false).toU32());
+            try writer.writeIntLittle(u32, aarch64.Instruction.stp(
+                .x16,
+                .x17,
+                aarch64.Register.sp,
+                aarch64.Instruction.LoadStorePairOffset.pre_index(-16),
+            ).toU32());
+            try writer.writeIntLittle(u32, aarch64.Instruction.adrp(.x16, 0).toU32());
+            try writer.writeIntLittle(u32, aarch64.Instruction.ldr(
+                .x16,
+                .x16,
+                aarch64.Instruction.LoadStoreOffset.imm(0),
+            ).toU32());
+            try writer.writeIntLittle(u32, aarch64.Instruction.br(.x16).toU32());
+        },
+        else => unreachable,
+    }
+}
+
 pub fn createStubHelperAtom(self: *MachO) !AtomIndex {
     const gpa = self.base.allocator;
     const cpu_arch = self.options.target.cpu_arch.?;
@@ -1228,18 +1221,11 @@ pub fn createStubHelperAtom(self: *MachO) !AtomIndex {
 
     const sym_index = try self.allocateSymbol();
     const atom_index = try self.createEmptyAtom(sym_index, stub_size, alignment);
-    const atom = self.getAtomPtr(atom_index);
     const sym = self.getSymbolPtr(.{ .sym_index = sym_index, .file = null });
     sym.n_sect = macho.N_SECT;
 
     switch (cpu_arch) {
         .x86_64 => {
-            // pushq
-            atom.code.items[0] = 0x68;
-            // Next 4 bytes 1..4 are just a placeholder populated in `populateLazyBindOffsetsInStubHelper`.
-            // jmpq
-            atom.code.items[5] = 0xe9;
-
             try self.addRelocation(atom_index, .{
                 .offset = 6,
                 .target = .{ .sym_index = self.stub_helper_preamble_sym_index.?, .file = null },
@@ -1251,18 +1237,6 @@ pub fn createStubHelperAtom(self: *MachO) !AtomIndex {
             });
         },
         .aarch64 => {
-            const literal = blk: {
-                const div_res = try math.divExact(u64, stub_size - @sizeOf(u32), 4);
-                break :blk math.cast(u18, div_res) orelse return error.Overflow;
-            };
-            // ldr w16, literal
-            mem.writeIntLittle(u32, atom.code.items[0..4], aarch64.Instruction.ldrLiteral(
-                .w16,
-                literal,
-            ).toU32());
-            // b disp
-            mem.writeIntLittle(u32, atom.code.items[4..8], aarch64.Instruction.b(0).toU32());
-
             try self.addRelocation(atom_index, .{
                 .offset = 4,
                 .target = .{ .sym_index = self.stub_helper_preamble_sym_index.?, .file = null },
@@ -1272,7 +1246,6 @@ pub fn createStubHelperAtom(self: *MachO) !AtomIndex {
                 .length = 2,
                 .@"type" = @enumToInt(macho.reloc_type_arm64.ARM64_RELOC_BRANCH26),
             });
-            // Next 4 bytes 8..12 are just a placeholder populated in `populateLazyBindOffsetsInStubHelper`.
         },
         else => unreachable,
     }
@@ -1281,6 +1254,30 @@ pub fn createStubHelperAtom(self: *MachO) !AtomIndex {
     try self.allocateAtom(atom_index, self.getSectionByName("__TEXT", "__stub_helper").?);
 
     return atom_index;
+}
+
+fn writeStubHelperCode(self: *MachO, writer: anytype) !void {
+    const cpu_arch = self.options.target.cpu_arch.?;
+    switch (cpu_arch) {
+        .x86_64 => {
+            try writer.writeAll(&.{ 0x68, 0x0, 0x0, 0x0, 0x0, 0xe9, 0x0, 0x0, 0x0, 0x0 });
+        },
+        .aarch64 => {
+            const stub_size: u4 =
+                3 * @sizeOf(u32);
+            const literal = blk: {
+                const div_res = try math.divExact(u64, stub_size - @sizeOf(u32), 4);
+                break :blk math.cast(u18, div_res) orelse return error.Overflow;
+            };
+            try writer.writeIntLittle(u32, aarch64.Instruction.ldrLiteral(
+                .w16,
+                literal,
+            ).toU32());
+            try writer.writeIntLittle(u32, aarch64.Instruction.b(0).toU32());
+            try writer.writeAll(&.{ 0x0, 0x0, 0x0, 0x0 });
+        },
+        else => unreachable,
+    }
 }
 
 pub fn createLazyPointerAtom(self: *MachO, stub_sym_index: u32, target: SymbolWithLoc) !AtomIndex {
@@ -1337,15 +1334,11 @@ pub fn createStubAtom(self: *MachO, laptr_sym_index: u32) !AtomIndex {
     };
     const sym_index = try self.allocateSymbol();
     const atom_index = try self.createEmptyAtom(sym_index, stub_size, alignment);
-    const atom = self.getAtomPtr(atom_index);
     const sym = self.getSymbolPtr(.{ .sym_index = sym_index, .file = null });
     sym.n_type = macho.N_SECT;
 
     switch (cpu_arch) {
         .x86_64 => {
-            // jmp
-            atom.code.items[0] = 0xff;
-            atom.code.items[1] = 0x25;
             try self.addRelocation(atom_index, .{
                 .offset = 2,
                 .target = .{ .sym_index = laptr_sym_index, .file = null },
@@ -1357,16 +1350,6 @@ pub fn createStubAtom(self: *MachO, laptr_sym_index: u32) !AtomIndex {
             });
         },
         .aarch64 => {
-            // adrp x16, pages
-            mem.writeIntLittle(u32, atom.code.items[0..4], aarch64.Instruction.adrp(.x16, 0).toU32());
-            // ldr x16, x16, offset
-            mem.writeIntLittle(u32, atom.code.items[4..8], aarch64.Instruction.ldr(
-                .x16,
-                .x16,
-                aarch64.Instruction.LoadStoreOffset.imm(0),
-            ).toU32());
-            // br x16
-            mem.writeIntLittle(u32, atom.code.items[8..12], aarch64.Instruction.br(.x16).toU32());
             try self.addRelocations(atom_index, 2, .{
                 .{
                     .offset = 0,
@@ -1403,6 +1386,25 @@ pub fn createStubAtom(self: *MachO, laptr_sym_index: u32) !AtomIndex {
     try self.allocateAtom(atom_index, sect_id);
 
     return atom_index;
+}
+
+fn writeStubCode(self: *MachO, writer: anytype) !void {
+    const cpu_arch = self.options.target.cpu_arch.?;
+    switch (cpu_arch) {
+        .x86_64 => {
+            try writer.writeAll(&.{ 0xff, 0x25, 0x0, 0x0, 0x0, 0x0 });
+        },
+        .aarch64 => {
+            try writer.writeIntLittle(u32, aarch64.Instruction.adrp(.x16, 0).toU32());
+            try writer.writeIntLittle(u32, aarch64.Instruction.ldr(
+                .x16,
+                .x16,
+                aarch64.Instruction.LoadStoreOffset.imm(0),
+            ).toU32());
+            try writer.writeIntLittle(u32, aarch64.Instruction.br(.x16).toU32());
+        },
+        else => unreachable,
+    }
 }
 
 fn createTentativeDefAtoms(self: *MachO) !void {
@@ -2242,8 +2244,44 @@ fn writeAtoms(self: *MachO) !void {
                 log.debug("    (with padding {x})", .{padding_size});
             }
 
-            try Atom.resolveRelocs(self, atom_index);
-            buffer.appendSliceAssumeCapacity(atom.code.items);
+            const offset = buffer.items.len;
+
+            if (atom.file == null) outer: {
+                const is_ptr = blk: {
+                    if (self.dyld_private_sym_index) |sym_index| {
+                        if (atom.sym_index == sym_index) break :blk true;
+                    }
+                    switch (header.@"type"()) {
+                        macho.S_THREAD_LOCAL_VARIABLE_POINTERS,
+                        macho.S_NON_LAZY_SYMBOL_POINTERS,
+                        macho.S_LAZY_SYMBOL_POINTERS,
+                        => break :blk true,
+                        else => break :blk false,
+                    }
+                };
+                if (is_ptr) {
+                    buffer.appendSliceAssumeCapacity(&[_]u8{0} ** @sizeOf(u64));
+                    break :outer;
+                }
+                if (self.stub_helper_preamble_sym_index) |sym_index| {
+                    if (sym_index == atom.sym_index) {
+                        try self.writeStubHelperPreambleCode(buffer.writer());
+                        break :outer;
+                    }
+                }
+                if (header.@"type"() == macho.S_SYMBOL_STUBS) {
+                    try self.writeStubCode(buffer.writer());
+                } else {
+                    try self.writeStubHelperCode(buffer.writer());
+                }
+            } else {
+                if (Atom.getAtomCode(self, atom_index)) |code| {
+                    buffer.appendSliceAssumeCapacity(code);
+                } else unreachable; // zerofill handled above
+
+            }
+
+            try Atom.resolveRelocs(self, atom_index, buffer.items[offset..][0..atom.size]);
 
             var i: usize = 0;
             while (i < padding_size) : (i += 1) {
