@@ -1488,18 +1488,69 @@ fn resolveSymbolsInObject(self: *MachO, object_id: u16) !void {
         }
 
         const sym_loc = SymbolWithLoc{ .sym_index = sym_index, .file = object_id };
-        self.resolveGlobalSymbol(sym_loc) catch |err| switch (err) {
-            error.MultipleSymbolDefinitions => {
-                const global = self.globals.get(sym_name).?;
-                log.err("symbol '{s}' defined multiple times", .{sym_name});
-                if (global.file) |file| {
-                    log.err("  first definition in '{s}'", .{self.objects.items[file].name});
-                }
-                log.err("  next definition in '{s}'", .{self.objects.items[object_id].name});
-                return error.MultipleSymbolDefinitions;
-            },
-            else => |e| return e,
-        };
+
+        const gpa = self.base.allocator;
+        const name = try gpa.dupe(u8, sym_name);
+        const global_index = @intCast(u32, self.globals.values().len);
+        const gop = try self.globals.getOrPut(gpa, name);
+        defer if (gop.found_existing) gpa.free(name);
+
+        if (!gop.found_existing) {
+            gop.value_ptr.* = sym_loc;
+            if (sym.undf() and !sym.tentative()) {
+                try self.unresolved.putNoClobber(gpa, global_index, {});
+            }
+            continue;
+        }
+
+        const global = gop.value_ptr.*;
+        const global_sym = self.getSymbol(global);
+
+        // Cases to consider: sym vs global_sym
+        // 1.  strong(sym) and strong(global_sym) => error
+        // 2.  strong(sym) and weak(global_sym) => sym
+        // 3.  strong(sym) and tentative(global_sym) => sym
+        // 4.  strong(sym) and undf(global_sym) => sym
+        // 5.  weak(sym) and strong(global_sym) => global_sym
+        // 6.  weak(sym) and tentative(global_sym) => sym
+        // 7.  weak(sym) and undf(global_sym) => sym
+        // 8.  tentative(sym) and strong(global_sym) => global_sym
+        // 9.  tentative(sym) and weak(global_sym) => global_sym
+        // 10. tentative(sym) and tentative(global_sym) => pick larger
+        // 11. tentative(sym) and undf(global_sym) => sym
+        // 12. undf(sym) and * => global_sym
+        //
+        // Reduces to:
+        // 1. strong(sym) and strong(global_sym) => error
+        // 2. * and strong(global_sym) => global_sym
+        // 3. weak(sym) and weak(global_sym) => global_sym
+        // 4. tentative(sym) and tentative(global_sym) => pick larger
+        // 5. undf(sym) and * => global_sym
+        // 6. else => sym
+
+        const sym_is_strong = sym.sect() and !(sym.weakDef() or sym.pext());
+        const global_is_strong = global_sym.sect() and !(global_sym.weakDef() or global_sym.pext());
+        const sym_is_weak = sym.sect() and (sym.weakDef() or sym.pext());
+        const global_is_weak = global_sym.sect() and (global_sym.weakDef() or global_sym.pext());
+
+        if (sym_is_strong and global_is_strong) {
+            log.err("symbol '{s}' defined multiple times", .{sym_name});
+            if (global.file) |file| {
+                log.err("  first definition in '{s}'", .{self.objects.items[file].name});
+            }
+            log.err("  next definition in '{s}'", .{self.objects.items[object_id].name});
+            return error.MultipleSymbolDefinitions;
+        }
+        if (global_is_strong) continue;
+        if (sym_is_weak and global_is_weak) continue;
+        if (sym.tentative() and global_sym.tentative()) {
+            if (global_sym.n_value >= sym.n_value) continue;
+        }
+        if (sym.undf() and !sym.tentative()) continue;
+
+        _ = self.unresolved.swapRemove(@intCast(u32, self.globals.getIndex(name).?));
+
+        gop.value_ptr.* = sym_loc;
     }
 }
 
@@ -1639,67 +1690,6 @@ fn createDsoHandleSymbol(self: *MachO) !void {
     sym.n_desc = macho.N_WEAK_DEF;
     global.* = sym_loc;
     _ = self.unresolved.swapRemove(@intCast(u32, self.globals.getIndex("___dso_handle").?));
-}
-
-fn resolveGlobalSymbol(self: *MachO, current: SymbolWithLoc) !void {
-    const gpa = self.base.allocator;
-    const sym = self.getSymbol(current);
-    const sym_name = self.getSymbolName(current);
-
-    const name = try gpa.dupe(u8, sym_name);
-    const global_index = @intCast(u32, self.globals.values().len);
-    const gop = try self.globals.getOrPut(gpa, name);
-    defer if (gop.found_existing) gpa.free(name);
-
-    if (!gop.found_existing) {
-        gop.value_ptr.* = current;
-        if (sym.undf() and !sym.tentative()) {
-            try self.unresolved.putNoClobber(gpa, global_index, {});
-        }
-        return;
-    }
-
-    const global = gop.value_ptr.*;
-    const global_sym = self.getSymbol(global);
-
-    // Cases to consider: sym vs global_sym
-    // 1.  strong(sym) and strong(global_sym) => error
-    // 2.  strong(sym) and weak(global_sym) => sym
-    // 3.  strong(sym) and tentative(global_sym) => sym
-    // 4.  strong(sym) and undf(global_sym) => sym
-    // 5.  weak(sym) and strong(global_sym) => global_sym
-    // 6.  weak(sym) and tentative(global_sym) => sym
-    // 7.  weak(sym) and undf(global_sym) => sym
-    // 8.  tentative(sym) and strong(global_sym) => global_sym
-    // 9.  tentative(sym) and weak(global_sym) => global_sym
-    // 10. tentative(sym) and tentative(global_sym) => pick larger
-    // 11. tentative(sym) and undf(global_sym) => sym
-    // 12. undf(sym) and * => global_sym
-    //
-    // Reduces to:
-    // 1. strong(sym) and strong(global_sym) => error
-    // 2. * and strong(global_sym) => global_sym
-    // 3. weak(sym) and weak(global_sym) => global_sym
-    // 4. tentative(sym) and tentative(global_sym) => pick larger
-    // 5. undf(sym) and * => global_sym
-    // 6. else => sym
-
-    const sym_is_strong = sym.sect() and !(sym.weakDef() or sym.pext());
-    const global_is_strong = global_sym.sect() and !(global_sym.weakDef() or global_sym.pext());
-    const sym_is_weak = sym.sect() and (sym.weakDef() or sym.pext());
-    const global_is_weak = global_sym.sect() and (global_sym.weakDef() or global_sym.pext());
-
-    if (sym_is_strong and global_is_strong) return error.MultipleSymbolDefinitions;
-    if (global_is_strong) return;
-    if (sym_is_weak and global_is_weak) return;
-    if (sym.tentative() and global_sym.tentative()) {
-        if (global_sym.n_value >= sym.n_value) return;
-    }
-    if (sym.undf() and !sym.tentative()) return;
-
-    _ = self.unresolved.swapRemove(@intCast(u32, self.globals.getIndex(name).?));
-
-    gop.value_ptr.* = current;
 }
 
 fn resolveDyldStubBinder(self: *MachO) !void {
