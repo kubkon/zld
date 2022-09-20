@@ -29,7 +29,7 @@ header: macho.mach_header_64 = undefined,
 /// Symtab and strtab might not exist for empty object files so we use an optional
 /// to signal this.
 in_symtab: ?[]align(1) const macho.nlist_64 = null,
-in_strtab: ?[]const u8 = undefined,
+in_strtab: ?[]const u8 = null,
 
 symtab: std.ArrayListUnmanaged(macho.nlist_64) = .{},
 sections: std.ArrayListUnmanaged(macho.section_64) = .{},

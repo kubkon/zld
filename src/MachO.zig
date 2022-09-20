@@ -310,7 +310,7 @@ pub fn flush(self: *MachO) !void {
         return error.FrameworkNotFound;
     }
 
-    for (self.objects.items) |*object| {
+    for (self.objects.items) |object| {
         try object.scanInputSections(self);
     }
 
