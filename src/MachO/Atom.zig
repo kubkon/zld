@@ -403,29 +403,17 @@ fn addPtrBindingOrRebase(
         const source_sym = macho_file.getSymbol(atom.getSymbolWithLoc());
         const section = macho_file.sections.get(source_sym.n_sect - 1);
         const header = section.header;
-        const segment_index = section.segment_index;
         const sect_type = header.@"type"();
 
         const should_rebase = rebase: {
             if (rel.r_length != 3) break :rebase false;
 
-            // TODO actually, a check similar to what dyld is doing, that is, verifying
-            // that the segment is writable should be enough here.
-            const is_right_segment = blk: {
-                if (macho_file.data_segment_cmd_index) |idx| {
-                    if (segment_index == idx) {
-                        break :blk true;
-                    }
-                }
-                if (macho_file.data_const_segment_cmd_index) |idx| {
-                    if (segment_index == idx) {
-                        break :blk true;
-                    }
-                }
-                break :blk false;
+            const is_segment_writeable = blk: {
+                const segment = macho_file.getSegment(source_sym.n_sect - 1);
+                break :blk segment.maxprot & macho.PROT.WRITE != 0;
             };
 
-            if (!is_right_segment) break :rebase false;
+            if (!is_segment_writeable) break :rebase false;
             if (sect_type != macho.S_LITERAL_POINTERS and
                 sect_type != macho.S_REGULAR and
                 sect_type != macho.S_MOD_INIT_FUNC_POINTERS and
