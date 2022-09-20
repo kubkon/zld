@@ -322,6 +322,8 @@ pub fn flush(self: *MachO) !void {
         try object.splitIntoAtoms(self, @intCast(u32, object_id));
     }
 
+    try self.createDyldStubBinderGotAtom();
+
     if (self.options.dead_strip) {
         try dead_strip.gcAtoms(self);
     }
@@ -1075,6 +1077,17 @@ pub fn createTlvPtrAtom(self: *MachO, target: SymbolWithLoc) !AtomIndex {
     return atom_index;
 }
 
+fn createDyldStubBinderGotAtom(self: *MachO) !void {
+    const sym_index = self.dyld_stub_binder_index orelse return;
+
+    const gpa = self.base.allocator;
+
+    const sym_loc = SymbolWithLoc{ .sym_index = sym_index, .file = null };
+    const got_atom_index = try self.createGotAtom(sym_loc);
+    const got_atom = self.getAtom(got_atom_index);
+    try self.got_entries.putNoClobber(gpa, sym_loc, got_atom.sym_index);
+}
+
 fn createDyldPrivateAtom(self: *MachO) !void {
     if (self.dyld_stub_binder_index == null) return;
 
@@ -1727,11 +1740,6 @@ fn resolveDyldStubBinder(self: *MachO) !void {
         log.err("undefined reference to symbol '{s}'", .{sym_name});
         return error.UndefinedSymbolReference;
     }
-
-    // Add dyld_stub_binder as the final GOT entry.
-    const got_atom_index = try self.createGotAtom(global);
-    const got_atom = self.getAtom(got_atom_index);
-    try self.got_entries.putNoClobber(gpa, global, got_atom.sym_index);
 }
 
 fn writeDylinkerLC(ncmds: *u32, lc_writer: anytype) !void {
