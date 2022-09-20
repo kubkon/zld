@@ -252,7 +252,7 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
                 try self.sections_as_symbols.putNoClobber(gpa, sect_id, sym_index);
                 break :blk sym_index;
             };
-            const code: ?[]const u8 = if (!sect.isZerofill()) try self.getSectionContents(sect) else null;
+            const code: ?[]const u8 = if (!sect.isZerofill()) self.getSectionContents(sect) else null;
             const relocs = @ptrCast(
                 [*]align(1) const macho.relocation_info,
                 self.contents.ptr + sect.reloff,
@@ -333,7 +333,7 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
         const cpu_arch = macho_file.options.target.cpu_arch.?;
 
         // Read section's code
-        const code: ?[]const u8 = if (!sect.isZerofill()) try self.getSectionContents(sect) else null;
+        const code: ?[]const u8 = if (!sect.isZerofill()) self.getSectionContents(sect) else null;
 
         // Read section's list of relocations
         const relocs = @ptrCast(
@@ -609,7 +609,7 @@ fn parseDysymtab(self: Object) ?macho.dysymtab_command {
     } else return null;
 }
 
-pub fn parseDwarfInfo(self: Object) error{Overflow}!dwarf.DwarfInfo {
+pub fn parseDwarfInfo(self: Object) dwarf.DwarfInfo {
     var di = dwarf.DwarfInfo{
         .endian = .Little,
         .debug_info = &[0]u8{},
@@ -630,37 +630,37 @@ pub fn parseDwarfInfo(self: Object) error{Overflow}!dwarf.DwarfInfo {
         const sectname = sect.sectName();
         if (mem.eql(u8, segname, "__DWARF")) {
             if (mem.eql(u8, sectname, "__debug_info")) {
-                di.debug_info = try self.getSectionContents(sect);
+                di.debug_info = self.getSectionContents(sect);
             } else if (mem.eql(u8, sectname, "__debug_abbrev")) {
-                di.debug_abbrev = try self.getSectionContents(sect);
+                di.debug_abbrev = self.getSectionContents(sect);
             } else if (mem.eql(u8, sectname, "__debug_str")) {
-                di.debug_str = try self.getSectionContents(sect);
+                di.debug_str = self.getSectionContents(sect);
             } else if (mem.eql(u8, sectname, "__debug_str_offsets")) {
-                di.debug_str_offsets = try self.getSectionContents(sect);
+                di.debug_str_offsets = self.getSectionContents(sect);
             } else if (mem.eql(u8, sectname, "__debug_line")) {
-                di.debug_line = try self.getSectionContents(sect);
+                di.debug_line = self.getSectionContents(sect);
             } else if (mem.eql(u8, sectname, "__debug_line_str")) {
-                di.debug_line_str = try self.getSectionContents(sect);
+                di.debug_line_str = self.getSectionContents(sect);
             } else if (mem.eql(u8, sectname, "__debug_ranges")) {
-                di.debug_ranges = try self.getSectionContents(sect);
+                di.debug_ranges = self.getSectionContents(sect);
             } else if (mem.eql(u8, sectname, "__debug_loclists")) {
-                di.debug_loclists = try self.getSectionContents(sect);
+                di.debug_loclists = self.getSectionContents(sect);
             } else if (mem.eql(u8, sectname, "__debug_rnglists")) {
-                di.debug_rnglists = try self.getSectionContents(sect);
+                di.debug_rnglists = self.getSectionContents(sect);
             } else if (mem.eql(u8, sectname, "__debug_addr")) {
-                di.debug_addr = try self.getSectionContents(sect);
+                di.debug_addr = self.getSectionContents(sect);
             } else if (mem.eql(u8, sectname, "__debug_names")) {
-                di.debug_names = try self.getSectionContents(sect);
+                di.debug_names = self.getSectionContents(sect);
             } else if (mem.eql(u8, sectname, "__debug_frame")) {
-                di.debug_frame = try self.getSectionContents(sect);
+                di.debug_frame = self.getSectionContents(sect);
             }
         }
     }
     return di;
 }
 
-fn getSectionContents(self: Object, sect: macho.section_64) error{Overflow}![]const u8 {
-    const size = math.cast(usize, sect.size) orelse return error.Overflow;
+fn getSectionContents(self: Object, sect: macho.section_64) []const u8 {
+    const size = @intCast(usize, sect.size);
     log.debug("getting {s},{s} data at 0x{x} - 0x{x}", .{
         sect.segName(),
         sect.sectName(),

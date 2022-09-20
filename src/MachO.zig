@@ -3577,7 +3577,7 @@ pub fn generateSymbolStabs(
     log.debug("parsing debug info in '{s}'", .{object.name});
 
     const gpa = self.base.allocator;
-    var debug_info = try object.parseDwarfInfo();
+    var debug_info = object.parseDwarfInfo();
     defer debug_info.deinit(gpa);
     try dwarf.openDwarfDebugInfo(&debug_info, gpa);
 
