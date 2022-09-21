@@ -2472,7 +2472,11 @@ fn collectRebaseDataFromContainer(
 
     try pointers.ensureUnusedCapacity(container.count());
 
-    for (container.values()) |sym_index| {
+    for (container.keys()) |target| {
+        const target_sym = self.getSymbol(target);
+        if (target_sym.undf()) continue;
+
+        const sym_index = container.get(target).?;
         const sym = self.getSymbol(.{ .sym_index = sym_index, .file = null });
         const base_offset = sym.n_value - seg.vmaddr;
 
