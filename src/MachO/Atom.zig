@@ -433,7 +433,7 @@ fn addTlvPtrEntry(macho_file: *MachO, target: MachO.SymbolWithLoc) !void {
     if (!target_sym.undf()) return;
     if (macho_file.tlv_ptr_entries.contains(target)) return;
 
-    const atom_index = try macho_file.createTlvPtrAtom(target);
+    const atom_index = try macho_file.createTlvPtrAtom();
     const atom = macho_file.getAtom(atom_index);
     try macho_file.tlv_ptr_entries.putNoClobber(macho_file.base.allocator, target, atom.sym_index);
 }

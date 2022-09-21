@@ -986,13 +986,7 @@ pub fn createGotAtom(self: *MachO, target: SymbolWithLoc) !AtomIndex {
     sym.n_type = macho.N_SECT;
 
     const target_sym = self.getSymbol(target);
-    if (target_sym.undf()) {
-        const global = self.globals.get(self.getSymbolName(target)).?;
-        try self.addBinding(atom_index, .{
-            .target = global,
-            .offset = 0,
-        });
-    } else {
+    if (target_sym.sect()) {
         try self.addRebase(atom_index, 0);
     }
 
@@ -1016,21 +1010,12 @@ fn writeGotPointer(self: *MachO, got_index: u32, writer: anytype) !void {
     try writer.writeIntLittle(u64, target_addr);
 }
 
-pub fn createTlvPtrAtom(self: *MachO, target: SymbolWithLoc) !AtomIndex {
+pub fn createTlvPtrAtom(self: *MachO) !AtomIndex {
     const gpa = self.base.allocator;
     const sym_index = try self.allocateSymbol();
     const atom_index = try self.createEmptyAtom(sym_index, @sizeOf(u64), 3);
     const sym = self.getSymbolPtr(.{ .sym_index = sym_index, .file = null });
     sym.n_type = macho.N_SECT;
-
-    const target_sym = self.getSymbol(target);
-    assert(target_sym.undf());
-
-    const global = self.globals.get(self.getSymbolName(target)).?;
-    try self.addBinding(atom_index, .{
-        .target = global,
-        .offset = 0,
-    });
 
     try self.atom_by_index_table.putNoClobber(gpa, sym_index, atom_index);
 
@@ -2516,11 +2501,65 @@ fn collectRebaseData(self: *MachO, pointers: *std.ArrayList(bind.Pointer)) !void
     }
 }
 
+fn collectBindDataFromContainer(
+    self: *MachO,
+    sect_id: u8,
+    pointers: *std.ArrayList(bind.Pointer),
+    container: anytype,
+) !void {
+    const slice = self.sections.slice();
+    const segment_index = slice.items(.segment_index)[sect_id];
+    const seg = self.getSegment(sect_id);
+
+    try pointers.ensureUnusedCapacity(container.count());
+
+    for (container.keys()) |target| {
+        const bind_sym_name = self.getSymbolName(target);
+        const global = self.globals.get(bind_sym_name).?;
+        const bind_sym = self.getSymbol(global);
+        if (bind_sym.sect()) continue;
+
+        const sym_index = container.get(target).?;
+        const sym = self.getSymbol(.{ .sym_index = sym_index, .file = null });
+        const base_offset = sym.n_value - seg.vmaddr;
+
+        const dylib_ordinal = @divTrunc(@bitCast(i16, bind_sym.n_desc), macho.N_SYMBOL_RESOLVER);
+        var flags: u4 = 0;
+        log.debug("    | bind at {x}, import('{s}') in dylib({d})", .{
+            base_offset,
+            bind_sym_name,
+            dylib_ordinal,
+        });
+        if (bind_sym.weakRef()) {
+            log.debug("    | marking as weak ref ", .{});
+            flags |= @truncate(u4, macho.BIND_SYMBOL_FLAGS_WEAK_IMPORT);
+        }
+        pointers.appendAssumeCapacity(.{
+            .offset = base_offset,
+            .segment_id = segment_index,
+            .dylib_ordinal = dylib_ordinal,
+            .name = bind_sym_name,
+            .bind_flags = flags,
+        });
+    }
+}
+
 fn collectBindData(self: *MachO, pointers: *std.ArrayList(bind.Pointer), raw_bindings: anytype) !void {
     const gpa = self.base.allocator;
 
     log.debug("collecting bind data", .{});
 
+    // First, unpack GOT section
+    if (self.getSectionByName("__DATA_CONST", "__got")) |sect_id| {
+        try self.collectBindDataFromContainer(sect_id, pointers, self.got_entries);
+    }
+
+    // Next, unpack TLV pointers section
+    if (self.getSectionByName("__DATA", "__thread_ptrs")) |sect_id| {
+        try self.collectBindDataFromContainer(sect_id, pointers, self.tlv_ptr_entries);
+    }
+
+    // TODO: scan relocations for any remaining binds here
     var sorted_atoms_by_address = std.ArrayList(AtomIndex).init(gpa);
     defer sorted_atoms_by_address.deinit();
     try sorted_atoms_by_address.ensureTotalCapacityPrecise(raw_bindings.count());
