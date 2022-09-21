@@ -451,7 +451,7 @@ fn addStub(macho_file: *MachO, target: MachO.SymbolWithLoc) !void {
     if (macho_file.stubs.contains(target)) return;
 
     _ = try macho_file.createStubHelperAtom();
-    _ = try macho_file.createLazyPointerAtom(target);
+    _ = try macho_file.createLazyPointerAtom();
     const stub_atom_index = try macho_file.createStubAtom();
     const stub_atom = macho_file.getAtom(stub_atom_index);
     try macho_file.stubs.putNoClobber(macho_file.base.allocator, target, stub_atom.sym_index);
