@@ -1224,10 +1224,19 @@ pub fn createLazyPointerAtom(self: *MachO) !AtomIndex {
     return atom_index;
 }
 
-fn writeLazyPointer(self: *MachO, stub_index: u32, writer: anytype) !void {
+fn writeLazyPointer(self: *MachO, stub_helper_index: u32, writer: anytype) !void {
     const target_addr = blk: {
-        const sym_index = self.stubs.values()[stub_index];
-        const sym = self.getSymbol(.{ .sym_index = sym_index, .file = null });
+        const sect_id = self.getSectionByName("__TEXT", "__stub_helper").?;
+        var atom_index = self.sections.items(.first_atom_index)[sect_id];
+        var count: u32 = 0;
+        while (count < stub_helper_index + 1) : (count += 1) {
+            const atom = self.getAtom(atom_index);
+            if (atom.next_index) |next_index| {
+                atom_index = next_index;
+            }
+        }
+        const atom = self.getAtom(atom_index);
+        const sym = self.getSymbol(atom.getSymbolWithLoc());
         break :blk sym.n_value;
     };
     try writer.writeIntLittle(u64, target_addr);
