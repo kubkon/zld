@@ -978,17 +978,12 @@ pub fn createEmptyAtom(self: *MachO, sym_index: u32, size: u64, alignment: u32) 
     return index;
 }
 
-pub fn createGotAtom(self: *MachO, target: SymbolWithLoc) !AtomIndex {
+pub fn createGotAtom(self: *MachO) !AtomIndex {
     const gpa = self.base.allocator;
     const sym_index = try self.allocateSymbol();
     const atom_index = try self.createEmptyAtom(sym_index, @sizeOf(u64), 3);
     const sym = self.getSymbolPtr(.{ .sym_index = sym_index, .file = null });
     sym.n_type = macho.N_SECT;
-
-    const target_sym = self.getSymbol(target);
-    if (target_sym.sect()) {
-        try self.addRebase(atom_index, 0);
-    }
 
     try self.atom_by_index_table.putNoClobber(gpa, sym_index, atom_index);
 
@@ -1035,7 +1030,7 @@ fn createDyldStubBinderGotAtom(self: *MachO) !void {
     const gpa = self.base.allocator;
 
     const sym_loc = SymbolWithLoc{ .sym_index = sym_index, .file = null };
-    const got_atom_index = try self.createGotAtom(sym_loc);
+    const got_atom_index = try self.createGotAtom();
     const got_atom = self.getAtom(got_atom_index);
     try self.got_entries.putNoClobber(gpa, sym_loc, got_atom.sym_index);
 }
@@ -1217,8 +1212,6 @@ pub fn createLazyPointerAtom(self: *MachO) !AtomIndex {
     const atom_index = try self.createEmptyAtom(sym_index, @sizeOf(u64), 3);
     const sym = self.getSymbolPtr(.{ .sym_index = sym_index, .file = null });
     sym.n_type = macho.N_SECT;
-
-    try self.addRebase(atom_index, 0);
 
     try self.atom_by_index_table.putNoClobber(gpa, sym_index, atom_index);
 
@@ -2458,11 +2451,73 @@ fn atomLessThanByAddress(ctx: AtomLessThanByAddressContext, lhs: AtomIndex, rhs:
     return lhs_sym.n_value < rhs_sym.n_value;
 }
 
+fn collectRebaseDataFromContainer(
+    self: *MachO,
+    sect_id: u8,
+    pointers: *std.ArrayList(bind.Pointer),
+    container: anytype,
+) !void {
+    const slice = self.sections.slice();
+    const segment_index = slice.items(.segment_index)[sect_id];
+    const seg = self.getSegment(sect_id);
+
+    try pointers.ensureUnusedCapacity(container.count());
+
+    for (container.values()) |sym_index| {
+        const sym = self.getSymbol(.{ .sym_index = sym_index, .file = null });
+        const base_offset = sym.n_value - seg.vmaddr;
+
+        log.debug("    | rebase at {x}", .{base_offset});
+
+        pointers.appendAssumeCapacity(.{
+            .offset = base_offset,
+            .segment_id = segment_index,
+        });
+    }
+}
+
 fn collectRebaseData(self: *MachO, pointers: *std.ArrayList(bind.Pointer)) !void {
     const gpa = self.base.allocator;
 
     log.debug("collecting rebase data", .{});
 
+    // First, unpack GOT entries
+    if (self.getSectionByName("__DATA_CONST", "__got")) |sect_id| {
+        try self.collectRebaseDataFromContainer(sect_id, pointers, self.got_entries);
+    }
+
+    const slice = self.sections.slice();
+
+    // Next, unpact lazy pointers
+    // TODO: save la_ptr in a container so that we can re-use the helper
+    if (self.getSectionByName("__DATA", "__la_symbol_ptr")) |sect_id| {
+        const segment_index = slice.items(.segment_index)[sect_id];
+        const seg = self.getSegment(sect_id);
+        var atom_index = slice.items(.first_atom_index)[sect_id];
+
+        try pointers.ensureUnusedCapacity(self.stubs.count());
+
+        while (true) {
+            const atom = self.getAtom(atom_index);
+            const sym = self.getSymbol(atom.getSymbolWithLoc());
+            const base_offset = sym.n_value - seg.vmaddr;
+
+            log.debug("    | rebase at {x}", .{base_offset});
+
+            pointers.appendAssumeCapacity(.{
+                .offset = base_offset,
+                .segment_id = segment_index,
+            });
+
+            if (atom.next_index) |next_index| {
+                atom_index = next_index;
+            } else break;
+        }
+    }
+
+    // Finally, unpack the rest
+    // TODO: either traverse the relocations again, or save generated reabase offsets in local context
+    // when writing and resolving relocations.
     var sorted_atoms_by_address = std.ArrayList(AtomIndex).init(gpa);
     defer sorted_atoms_by_address.deinit();
     try sorted_atoms_by_address.ensureTotalCapacityPrecise(self.rebases.count());
@@ -2476,7 +2531,6 @@ fn collectRebaseData(self: *MachO, pointers: *std.ArrayList(bind.Pointer)) !void
         .macho_file = self,
     }, atomLessThanByAddress);
 
-    const slice = self.sections.slice();
     for (sorted_atoms_by_address.items) |atom_index| {
         const atom = self.getAtom(atom_index);
 

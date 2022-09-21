@@ -440,7 +440,7 @@ fn addTlvPtrEntry(macho_file: *MachO, target: MachO.SymbolWithLoc) !void {
 
 fn addGotEntry(macho_file: *MachO, target: MachO.SymbolWithLoc) !void {
     if (macho_file.got_entries.contains(target)) return;
-    const atom_index = try macho_file.createGotAtom(target);
+    const atom_index = try macho_file.createGotAtom();
     const atom = macho_file.getAtom(atom_index);
     try macho_file.got_entries.putNoClobber(macho_file.base.allocator, target, atom.sym_index);
 }
