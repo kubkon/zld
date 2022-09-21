@@ -189,25 +189,6 @@ fn filterSymbolsByAddress(
     return indexes[start..end];
 }
 
-fn filterRelocs(
-    relocs: []align(1) const macho.relocation_info,
-    start_addr: u64,
-    end_addr: u64,
-) []align(1) const macho.relocation_info {
-    const Predicate = struct {
-        addr: u64,
-
-        pub fn predicate(self: @This(), rel: macho.relocation_info) bool {
-            return rel.r_address < self.addr;
-        }
-    };
-
-    const start = MachO.findFirst(macho.relocation_info, relocs, 0, Predicate{ .addr = end_addr });
-    const end = MachO.findFirst(macho.relocation_info, relocs, start, Predicate{ .addr = start_addr });
-
-    return relocs[start..end];
-}
-
 pub fn scanInputSections(self: Object, macho_file: *MachO) !void {
     for (self.sections.items) |sect| {
         const match = (try macho_file.getOutputSection(sect)) orelse {
@@ -541,7 +522,7 @@ fn createAtomFromSubsection(
 
     if (code) |cc| {
         const base_offset = sym.n_value - sect.addr;
-        const filtered_relocs = filterRelocs(relocs.?, base_offset, base_offset + size);
+        const filtered_relocs = Atom.filterRelocs(relocs.?, base_offset, base_offset + size);
         try Atom.parseRelocs(macho_file, atom_index, cc, filtered_relocs, .{
             .base_addr = sect.addr,
             .base_offset = @intCast(i32, base_offset),

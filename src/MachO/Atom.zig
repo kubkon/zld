@@ -452,9 +452,8 @@ fn addStub(macho_file: *MachO, target: MachO.SymbolWithLoc) !void {
 
     const stub_helper_atom_index = try macho_file.createStubHelperAtom();
     const stub_helper_atom = macho_file.getAtom(stub_helper_atom_index);
-    const laptr_atom_index = try macho_file.createLazyPointerAtom(stub_helper_atom.sym_index, target);
-    const laptr_atom = macho_file.getAtom(laptr_atom_index);
-    const stub_atom_index = try macho_file.createStubAtom(laptr_atom.sym_index);
+    _ = try macho_file.createLazyPointerAtom(stub_helper_atom.sym_index, target);
+    const stub_atom_index = try macho_file.createStubAtom();
     const stub_atom = macho_file.getAtom(stub_atom_index);
     try macho_file.stubs.putNoClobber(macho_file.base.allocator, target, stub_atom.sym_index);
 }
@@ -863,4 +862,81 @@ pub fn getAtomCode(macho_file: *MachO, atom_index: AtomIndex) ?[]const u8 {
     const offset = source_sym.n_value - source_sect.addr;
     const code = object.getSectionContents(source_sect);
     return code[offset..][0..atom.size];
+}
+
+pub fn getAtomRelocs(macho_file: *MachO, atom_index: AtomIndex) ?[]align(1) const macho.relocation_info {
+    const atom = macho_file.getAtom(atom_index);
+    assert(atom.file != null); // Synthetic atom shouldn't need to unique for relocs.
+    const object = macho_file.objects.items[atom.file.?];
+    const source_sym = object.getSourceSymbol(atom.sym_index) orelse {
+        // If there was no matching symbol present in the source symtab, this means
+        // we are dealing with either an entire section, or part of it, but also
+        // starting at the beginning.
+        const source_sect = for (object.sections.items) |source_sect, sect_id| {
+            if (object.sections_as_symbols.get(@intCast(u16, sect_id))) |sym_index| {
+                if (sym_index == atom.sym_index) break source_sect;
+            }
+        } else unreachable;
+
+        if (source_sect.isZerofill()) return null;
+        const relocs = object.getRelocs(source_sect);
+        return filterRelocs(relocs, 0, atom.size);
+    };
+    const source_sect = object.getSourceSection(source_sym.n_sect - 1);
+    if (source_sect.isZerofill()) return null;
+    const offset = source_sym.n_value - source_sect.addr;
+    const relocs = object.getRelocs(source_sect);
+    return filterRelocs(relocs, offset, offset + atom.size);
+}
+
+pub fn filterRelocs(
+    relocs: []align(1) const macho.relocation_info,
+    start_addr: u64,
+    end_addr: u64,
+) []align(1) const macho.relocation_info {
+    const Predicate = struct {
+        addr: u64,
+
+        pub fn predicate(self: @This(), rel: macho.relocation_info) bool {
+            return rel.r_address < self.addr;
+        }
+    };
+
+    const start = MachO.findFirst(macho.relocation_info, relocs, 0, Predicate{ .addr = end_addr });
+    const end = MachO.findFirst(macho.relocation_info, relocs, start, Predicate{ .addr = start_addr });
+
+    return relocs[start..end];
+}
+
+pub fn calcPcRelativeDisplacementX86(source_addr: u64, target_addr: u64, correction: u3) error{Overflow}!i32 {
+    const disp = @intCast(i64, target_addr) - @intCast(i64, source_addr + 4 + correction);
+    return math.cast(i32, disp) orelse error.Overflow;
+}
+
+pub fn calcPcRelativeDisplacementArm64(source_addr: u64, target_addr: u64) error{Overflow}!i28 {
+    const disp = @intCast(i64, target_addr) - @intCast(i64, source_addr);
+    return math.cast(i28, disp) orelse error.Overflow;
+}
+
+pub fn calcNumberOfPages(source_addr: u64, target_addr: u64) i21 {
+    const source_page = @intCast(i32, source_addr >> 12);
+    const target_page = @intCast(i32, target_addr >> 12);
+    const pages = @intCast(i21, target_page - source_page);
+    return pages;
+}
+
+pub fn calcPageOffset(target_addr: u64, kind: enum {
+    arithmetic,
+    load_store_8,
+    load_store_32,
+    load_store_64,
+    load_store_128,
+}) !u12 {
+    const narrowed = @truncate(u12, target_addr);
+    return switch (kind) {
+        .arithmetic, .load_store_8 => narrowed,
+        .load_store_32 => try math.divExact(u12, narrowed, 4),
+        .load_store_64 => try math.divExact(u12, narrowed, 8),
+        .load_store_128 => try math.divExact(u12, narrowed, 16),
+    };
 }

@@ -1095,73 +1095,6 @@ fn createStubHelperPreambleAtom(self: *MachO) !void {
     const atom_index = try self.createEmptyAtom(sym_index, size, alignment);
     const sym = self.getSymbolPtr(.{ .sym_index = sym_index, .file = null });
     sym.n_type = macho.N_SECT;
-
-    const dyld_private_sym_index = self.dyld_private_sym_index.?;
-    switch (cpu_arch) {
-        .x86_64 => {
-            try self.addRelocations(atom_index, 2, .{
-                .{
-                    .offset = 3,
-                    .target = .{ .sym_index = dyld_private_sym_index, .file = null },
-                    .addend = 0,
-                    .subtractor = null,
-                    .pcrel = true,
-                    .length = 2,
-                    .@"type" = @enumToInt(macho.reloc_type_x86_64.X86_64_RELOC_SIGNED),
-                },
-                .{
-                    .offset = 11,
-                    .target = .{ .sym_index = self.dyld_stub_binder_index.?, .file = null },
-                    .addend = 0,
-                    .subtractor = null,
-                    .pcrel = true,
-                    .length = 2,
-                    .@"type" = @enumToInt(macho.reloc_type_x86_64.X86_64_RELOC_GOT),
-                },
-            });
-        },
-        .aarch64 => {
-            try self.addRelocations(atom_index, 4, .{
-                .{
-                    .offset = 0,
-                    .target = .{ .sym_index = dyld_private_sym_index, .file = null },
-                    .addend = 0,
-                    .subtractor = null,
-                    .pcrel = true,
-                    .length = 2,
-                    .@"type" = @enumToInt(macho.reloc_type_arm64.ARM64_RELOC_PAGE21),
-                },
-                .{
-                    .offset = 4,
-                    .target = .{ .sym_index = dyld_private_sym_index, .file = null },
-                    .addend = 0,
-                    .subtractor = null,
-                    .pcrel = false,
-                    .length = 2,
-                    .@"type" = @enumToInt(macho.reloc_type_arm64.ARM64_RELOC_PAGEOFF12),
-                },
-                .{
-                    .offset = 12,
-                    .target = .{ .sym_index = self.dyld_stub_binder_index.?, .file = null },
-                    .addend = 0,
-                    .subtractor = null,
-                    .pcrel = true,
-                    .length = 2,
-                    .@"type" = @enumToInt(macho.reloc_type_arm64.ARM64_RELOC_GOT_LOAD_PAGE21),
-                },
-                .{
-                    .offset = 16,
-                    .target = .{ .sym_index = self.dyld_stub_binder_index.?, .file = null },
-                    .addend = 0,
-                    .subtractor = null,
-                    .pcrel = false,
-                    .length = 2,
-                    .@"type" = @enumToInt(macho.reloc_type_arm64.ARM64_RELOC_GOT_LOAD_PAGEOFF12),
-                },
-            });
-        },
-        else => unreachable,
-    }
     self.stub_helper_preamble_sym_index = sym_index;
 
     const sect_id = self.getSectionByName("__TEXT", "__stub_helper") orelse
@@ -1176,29 +1109,59 @@ fn createStubHelperPreambleAtom(self: *MachO) !void {
 
 fn writeStubHelperPreambleCode(self: *MachO, writer: anytype) !void {
     const cpu_arch = self.options.target.cpu_arch.?;
+    const source_addr = blk: {
+        const sym = self.getSymbol(.{ .sym_index = self.stub_helper_preamble_sym_index.?, .file = null });
+        break :blk sym.n_value;
+    };
+    const dyld_private_addr = blk: {
+        const sym = self.getSymbol(.{ .sym_index = self.dyld_private_sym_index.?, .file = null });
+        break :blk sym.n_value;
+    };
+    const dyld_stub_binder_got_addr = blk: {
+        const got_entry = self.got_entries.get(.{ .sym_index = self.dyld_stub_binder_index.?, .file = null }).?;
+        const sym = self.getSymbol(.{ .sym_index = got_entry, .file = null });
+        break :blk sym.n_value;
+    };
     switch (cpu_arch) {
         .x86_64 => {
-            try writer.writeAll(&.{
-                0x4c, 0x8d, 0x1d, 0x0,  0x0, 0x0, 0x0,
-                0x41, 0x53, 0xff, 0x25, 0x0, 0x0, 0x0,
-                0x0,
-            });
+            try writer.writeAll(&.{ 0x4c, 0x8d, 0x1d });
+            {
+                const disp = try Atom.calcPcRelativeDisplacementX86(source_addr + 3, dyld_private_addr, 0);
+                try writer.writeIntLittle(i32, disp);
+            }
+            try writer.writeAll(&.{ 0x41, 0x53, 0xff, 0x25 });
+            {
+                const disp = try Atom.calcPcRelativeDisplacementX86(source_addr + 11, dyld_stub_binder_got_addr, 0);
+                try writer.writeIntLittle(i32, disp);
+            }
         },
         .aarch64 => {
-            try writer.writeIntLittle(u32, aarch64.Instruction.adrp(.x17, 0).toU32());
-            try writer.writeIntLittle(u32, aarch64.Instruction.add(.x17, .x17, 0, false).toU32());
+            {
+                const pages = Atom.calcNumberOfPages(source_addr, dyld_private_addr);
+                try writer.writeIntLittle(u32, aarch64.Instruction.adrp(.x17, pages).toU32());
+            }
+            {
+                const off = try Atom.calcPageOffset(dyld_private_addr, .arithmetic);
+                try writer.writeIntLittle(u32, aarch64.Instruction.add(.x17, .x17, off, false).toU32());
+            }
             try writer.writeIntLittle(u32, aarch64.Instruction.stp(
                 .x16,
                 .x17,
                 aarch64.Register.sp,
                 aarch64.Instruction.LoadStorePairOffset.pre_index(-16),
             ).toU32());
-            try writer.writeIntLittle(u32, aarch64.Instruction.adrp(.x16, 0).toU32());
-            try writer.writeIntLittle(u32, aarch64.Instruction.ldr(
-                .x16,
-                .x16,
-                aarch64.Instruction.LoadStoreOffset.imm(0),
-            ).toU32());
+            {
+                const pages = Atom.calcNumberOfPages(source_addr + 12, dyld_stub_binder_got_addr);
+                try writer.writeIntLittle(u32, aarch64.Instruction.adrp(.x16, pages).toU32());
+            }
+            {
+                const off = try Atom.calcPageOffset(dyld_stub_binder_got_addr, .load_store_64);
+                try writer.writeIntLittle(u32, aarch64.Instruction.ldr(
+                    .x16,
+                    .x16,
+                    aarch64.Instruction.LoadStoreOffset.imm(off),
+                ).toU32());
+            }
             try writer.writeIntLittle(u32, aarch64.Instruction.br(.x16).toU32());
         },
         else => unreachable,
@@ -1224,47 +1187,33 @@ pub fn createStubHelperAtom(self: *MachO) !AtomIndex {
     const sym = self.getSymbolPtr(.{ .sym_index = sym_index, .file = null });
     sym.n_sect = macho.N_SECT;
 
-    switch (cpu_arch) {
-        .x86_64 => {
-            try self.addRelocation(atom_index, .{
-                .offset = 6,
-                .target = .{ .sym_index = self.stub_helper_preamble_sym_index.?, .file = null },
-                .addend = 0,
-                .subtractor = null,
-                .pcrel = true,
-                .length = 2,
-                .@"type" = @enumToInt(macho.reloc_type_x86_64.X86_64_RELOC_BRANCH),
-            });
-        },
-        .aarch64 => {
-            try self.addRelocation(atom_index, .{
-                .offset = 4,
-                .target = .{ .sym_index = self.stub_helper_preamble_sym_index.?, .file = null },
-                .addend = 0,
-                .subtractor = null,
-                .pcrel = true,
-                .length = 2,
-                .@"type" = @enumToInt(macho.reloc_type_arm64.ARM64_RELOC_BRANCH26),
-            });
-        },
-        else => unreachable,
-    }
-
     try self.atom_by_index_table.putNoClobber(gpa, sym_index, atom_index);
     try self.allocateAtom(atom_index, self.getSectionByName("__TEXT", "__stub_helper").?);
 
     return atom_index;
 }
 
-fn writeStubHelperCode(self: *MachO, writer: anytype) !void {
+fn writeStubHelperCode(self: *MachO, atom_index: AtomIndex, writer: anytype) !void {
     const cpu_arch = self.options.target.cpu_arch.?;
+    const source_addr = blk: {
+        const atom = self.getAtom(atom_index);
+        const sym = self.getSymbol(atom.getSymbolWithLoc());
+        break :blk sym.n_value;
+    };
+    const target_addr = blk: {
+        const sym = self.getSymbol(.{ .sym_index = self.stub_helper_preamble_sym_index.?, .file = null });
+        break :blk sym.n_value;
+    };
     switch (cpu_arch) {
         .x86_64 => {
-            try writer.writeAll(&.{ 0x68, 0x0, 0x0, 0x0, 0x0, 0xe9, 0x0, 0x0, 0x0, 0x0 });
+            try writer.writeAll(&.{ 0x68, 0x0, 0x0, 0x0, 0x0, 0xe9 });
+            {
+                const disp = try Atom.calcPcRelativeDisplacementX86(source_addr + 6, target_addr, 0);
+                try writer.writeIntLittle(i32, disp);
+            }
         },
         .aarch64 => {
-            const stub_size: u4 =
-                3 * @sizeOf(u32);
+            const stub_size: u4 = 3 * @sizeOf(u32);
             const literal = blk: {
                 const div_res = try math.divExact(u64, stub_size - @sizeOf(u32), 4);
                 break :blk math.cast(u18, div_res) orelse return error.Overflow;
@@ -1273,7 +1222,10 @@ fn writeStubHelperCode(self: *MachO, writer: anytype) !void {
                 .w16,
                 literal,
             ).toU32());
-            try writer.writeIntLittle(u32, aarch64.Instruction.b(0).toU32());
+            {
+                const disp = try Atom.calcPcRelativeDisplacementArm64(source_addr + 4, target_addr);
+                try writer.writeIntLittle(u32, aarch64.Instruction.b(disp).toU32());
+            }
             try writer.writeAll(&.{ 0x0, 0x0, 0x0, 0x0 });
         },
         else => unreachable,
@@ -1319,7 +1271,7 @@ pub fn createLazyPointerAtom(self: *MachO, stub_sym_index: u32, target: SymbolWi
     return atom_index;
 }
 
-pub fn createStubAtom(self: *MachO, laptr_sym_index: u32) !AtomIndex {
+pub fn createStubAtom(self: *MachO) !AtomIndex {
     const gpa = self.base.allocator;
     const cpu_arch = self.options.target.cpu_arch.?;
     const alignment: u2 = switch (cpu_arch) {
@@ -1337,43 +1289,6 @@ pub fn createStubAtom(self: *MachO, laptr_sym_index: u32) !AtomIndex {
     const sym = self.getSymbolPtr(.{ .sym_index = sym_index, .file = null });
     sym.n_type = macho.N_SECT;
 
-    switch (cpu_arch) {
-        .x86_64 => {
-            try self.addRelocation(atom_index, .{
-                .offset = 2,
-                .target = .{ .sym_index = laptr_sym_index, .file = null },
-                .addend = 0,
-                .subtractor = null,
-                .pcrel = true,
-                .length = 2,
-                .@"type" = @enumToInt(macho.reloc_type_x86_64.X86_64_RELOC_BRANCH),
-            });
-        },
-        .aarch64 => {
-            try self.addRelocations(atom_index, 2, .{
-                .{
-                    .offset = 0,
-                    .target = .{ .sym_index = laptr_sym_index, .file = null },
-                    .addend = 0,
-                    .subtractor = null,
-                    .pcrel = true,
-                    .length = 2,
-                    .@"type" = @enumToInt(macho.reloc_type_arm64.ARM64_RELOC_PAGE21),
-                },
-                .{
-                    .offset = 4,
-                    .target = .{ .sym_index = laptr_sym_index, .file = null },
-                    .addend = 0,
-                    .subtractor = null,
-                    .pcrel = false,
-                    .length = 2,
-                    .@"type" = @enumToInt(macho.reloc_type_arm64.ARM64_RELOC_PAGEOFF12),
-                },
-            });
-        },
-        else => unreachable,
-    }
-
     try self.atom_by_index_table.putNoClobber(gpa, sym_index, atom_index);
 
     const sect_id = self.getSectionByName("__TEXT", "__stubs") orelse
@@ -1388,19 +1303,47 @@ pub fn createStubAtom(self: *MachO, laptr_sym_index: u32) !AtomIndex {
     return atom_index;
 }
 
-fn writeStubCode(self: *MachO, writer: anytype) !void {
+fn writeStubCode(self: *MachO, atom_index: AtomIndex, stub_index: u32, writer: anytype) !void {
     const cpu_arch = self.options.target.cpu_arch.?;
+    const source_addr = blk: {
+        const atom = self.getAtom(atom_index);
+        const sym = self.getSymbol(atom.getSymbolWithLoc());
+        break :blk sym.n_value;
+    };
+    const target_addr = blk: {
+        // TODO: cache this at stub atom creation; they always go in pairs anyhow
+        const la_sect_id = self.getSectionByName("__DATA", "__la_symbol_ptr").?;
+        var la_atom_index = self.sections.items(.first_atom_index)[la_sect_id];
+        var count: u32 = 0;
+        while (count < stub_index) : (count += 1) {
+            const la_atom = self.getAtom(la_atom_index);
+            la_atom_index = la_atom.next_index.?;
+        }
+        const atom = self.getAtom(la_atom_index);
+        const sym = self.getSymbol(atom.getSymbolWithLoc());
+        break :blk sym.n_value;
+    };
     switch (cpu_arch) {
         .x86_64 => {
-            try writer.writeAll(&.{ 0xff, 0x25, 0x0, 0x0, 0x0, 0x0 });
+            try writer.writeAll(&.{ 0xff, 0x25 });
+            {
+                const disp = try Atom.calcPcRelativeDisplacementX86(source_addr + 2, target_addr, 0);
+                try writer.writeIntLittle(i32, disp);
+            }
         },
         .aarch64 => {
-            try writer.writeIntLittle(u32, aarch64.Instruction.adrp(.x16, 0).toU32());
-            try writer.writeIntLittle(u32, aarch64.Instruction.ldr(
-                .x16,
-                .x16,
-                aarch64.Instruction.LoadStoreOffset.imm(0),
-            ).toU32());
+            {
+                const pages = Atom.calcNumberOfPages(source_addr, target_addr);
+                try writer.writeIntLittle(u32, aarch64.Instruction.adrp(.x16, pages).toU32());
+            }
+            {
+                const off = try Atom.calcPageOffset(target_addr, .load_store_64);
+                try writer.writeIntLittle(u32, aarch64.Instruction.ldr(
+                    .x16,
+                    .x16,
+                    aarch64.Instruction.LoadStoreOffset.imm(off),
+                ).toU32());
+            }
             try writer.writeIntLittle(u32, aarch64.Instruction.br(.x16).toU32());
         },
         else => unreachable,
@@ -2227,7 +2170,8 @@ fn writeAtoms(self: *MachO) !void {
 
         log.debug("writing atoms in {s},{s}", .{ header.segName(), header.sectName() });
 
-        while (true) {
+        var count: u32 = 0;
+        while (true) : (count += 1) {
             const this_sym = self.getSymbol(atom.getSymbolWithLoc());
             const padding_size: usize = if (atom.next_index) |next_index| blk: {
                 const next_sym = self.getSymbol(self.getAtom(next_index).getSymbolWithLoc());
@@ -2270,15 +2214,13 @@ fn writeAtoms(self: *MachO) !void {
                     }
                 }
                 if (header.@"type"() == macho.S_SYMBOL_STUBS) {
-                    try self.writeStubCode(buffer.writer());
+                    try self.writeStubCode(atom_index, count, buffer.writer());
                 } else {
-                    try self.writeStubHelperCode(buffer.writer());
+                    try self.writeStubHelperCode(atom_index, buffer.writer());
                 }
             } else {
-                if (Atom.getAtomCode(self, atom_index)) |code| {
-                    buffer.appendSliceAssumeCapacity(code);
-                } else unreachable; // zerofill handled above
-
+                const code = Atom.getAtomCode(self, atom_index).?;
+                buffer.appendSliceAssumeCapacity(code);
             }
 
             try Atom.resolveRelocs(self, atom_index, buffer.items[offset..][0..atom.size]);
