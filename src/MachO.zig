@@ -986,20 +986,6 @@ pub fn createGotAtom(self: *MachO, target: SymbolWithLoc) !AtomIndex {
     const sym = self.getSymbolPtr(.{ .sym_index = sym_index, .file = null });
     sym.n_type = macho.N_SECT;
 
-    try self.addRelocation(atom_index, .{
-        .offset = 0,
-        .target = target,
-        .addend = 0,
-        .subtractor = null,
-        .pcrel = false,
-        .length = 3,
-        .@"type" = switch (self.options.target.cpu_arch.?) {
-            .aarch64 => @enumToInt(macho.reloc_type_arm64.ARM64_RELOC_UNSIGNED),
-            .x86_64 => @enumToInt(macho.reloc_type_x86_64.X86_64_RELOC_UNSIGNED),
-            else => unreachable,
-        },
-    });
-
     const target_sym = self.getSymbol(target);
     if (target_sym.undf()) {
         const global = self.globals.get(self.getSymbolName(target)).?;
@@ -1020,6 +1006,15 @@ pub fn createGotAtom(self: *MachO, target: SymbolWithLoc) !AtomIndex {
     try self.allocateAtom(atom_index, sect_id);
 
     return atom_index;
+}
+
+fn writeGotPointer(self: *MachO, got_index: u32, writer: anytype) !void {
+    const target_addr = blk: {
+        const sym_loc = self.got_entries.keys()[got_index];
+        const sym = self.getSymbol(sym_loc);
+        break :blk sym.n_value;
+    };
+    try writer.writeIntLittle(u64, target_addr);
 }
 
 pub fn createTlvPtrAtom(self: *MachO, target: SymbolWithLoc) !AtomIndex {
@@ -1232,26 +1227,13 @@ fn writeStubHelperCode(self: *MachO, atom_index: AtomIndex, writer: anytype) !vo
     }
 }
 
-pub fn createLazyPointerAtom(self: *MachO, stub_sym_index: u32, target: SymbolWithLoc) !AtomIndex {
+pub fn createLazyPointerAtom(self: *MachO, target: SymbolWithLoc) !AtomIndex {
     const gpa = self.base.allocator;
     const sym_index = try self.allocateSymbol();
     const atom_index = try self.createEmptyAtom(sym_index, @sizeOf(u64), 3);
     const sym = self.getSymbolPtr(.{ .sym_index = sym_index, .file = null });
     sym.n_type = macho.N_SECT;
 
-    try self.addRelocation(atom_index, .{
-        .offset = 0,
-        .target = .{ .sym_index = stub_sym_index, .file = null },
-        .addend = 0,
-        .subtractor = null,
-        .pcrel = false,
-        .length = 3,
-        .@"type" = switch (self.options.target.cpu_arch.?) {
-            .aarch64 => @enumToInt(macho.reloc_type_arm64.ARM64_RELOC_UNSIGNED),
-            .x86_64 => @enumToInt(macho.reloc_type_x86_64.X86_64_RELOC_UNSIGNED),
-            else => unreachable,
-        },
-    });
     try self.addRebase(atom_index, 0);
 
     const global = self.globals.get(self.getSymbolName(target)).?;
@@ -1269,6 +1251,15 @@ pub fn createLazyPointerAtom(self: *MachO, stub_sym_index: u32, target: SymbolWi
     try self.allocateAtom(atom_index, sect_id);
 
     return atom_index;
+}
+
+fn writeLazyPointer(self: *MachO, stub_index: u32, writer: anytype) !void {
+    const target_addr = blk: {
+        const sym_index = self.stubs.values()[stub_index];
+        const sym = self.getSymbol(.{ .sym_index = sym_index, .file = null });
+        break :blk sym.n_value;
+    };
+    try writer.writeIntLittle(u64, target_addr);
 }
 
 pub fn createStubAtom(self: *MachO) !AtomIndex {
@@ -2190,40 +2181,43 @@ fn writeAtoms(self: *MachO) !void {
 
             const offset = buffer.items.len;
 
+            // TODO: move writing synthetic sections into a separate function
             if (atom.file == null) outer: {
-                const is_ptr = blk: {
-                    if (self.dyld_private_sym_index) |sym_index| {
-                        if (atom.sym_index == sym_index) break :blk true;
-                    }
-                    switch (header.@"type"()) {
-                        macho.S_THREAD_LOCAL_VARIABLE_POINTERS,
-                        macho.S_NON_LAZY_SYMBOL_POINTERS,
-                        macho.S_LAZY_SYMBOL_POINTERS,
-                        => break :blk true,
-                        else => break :blk false,
-                    }
-                };
-                if (is_ptr) {
-                    buffer.appendSliceAssumeCapacity(&[_]u8{0} ** @sizeOf(u64));
-                    break :outer;
-                }
-                if (self.stub_helper_preamble_sym_index) |sym_index| {
-                    if (sym_index == atom.sym_index) {
-                        try self.writeStubHelperPreambleCode(buffer.writer());
+                if (self.dyld_private_sym_index) |sym_index| {
+                    if (atom.sym_index == sym_index) {
+                        buffer.appendSliceAssumeCapacity(&[_]u8{0} ** @sizeOf(u64));
                         break :outer;
                     }
                 }
-                if (header.@"type"() == macho.S_SYMBOL_STUBS) {
-                    try self.writeStubCode(atom_index, count, buffer.writer());
-                } else {
-                    try self.writeStubHelperCode(atom_index, buffer.writer());
+                switch (header.@"type"()) {
+                    macho.S_NON_LAZY_SYMBOL_POINTERS => {
+                        try self.writeGotPointer(count, buffer.writer());
+                    },
+                    macho.S_LAZY_SYMBOL_POINTERS => {
+                        try self.writeLazyPointer(count, buffer.writer());
+                    },
+                    macho.S_THREAD_LOCAL_VARIABLE_POINTERS => {
+                        buffer.appendSliceAssumeCapacity(&[_]u8{0} ** @sizeOf(u64));
+                    },
+                    else => {
+                        if (self.stub_helper_preamble_sym_index) |sym_index| {
+                            if (sym_index == atom.sym_index) {
+                                try self.writeStubHelperPreambleCode(buffer.writer());
+                                break :outer;
+                            }
+                        }
+                        if (header.@"type"() == macho.S_SYMBOL_STUBS) {
+                            try self.writeStubCode(atom_index, count, buffer.writer());
+                        } else {
+                            try self.writeStubHelperCode(atom_index, buffer.writer());
+                        }
+                    },
                 }
             } else {
                 const code = Atom.getAtomCode(self, atom_index).?;
                 buffer.appendSliceAssumeCapacity(code);
+                try Atom.resolveRelocs(self, atom_index, buffer.items[offset..][0..atom.size]);
             }
-
-            try Atom.resolveRelocs(self, atom_index, buffer.items[offset..][0..atom.size]);
 
             var i: usize = 0;
             while (i < padding_size) : (i += 1) {
