@@ -177,14 +177,14 @@ fn filterSymbolsByAddress(
         }
     };
 
-    const start = MachO.findFirst(SymbolAtIndex, indexes, 0, Predicate{
+    const start = MachO.lsearch(SymbolAtIndex, indexes, Predicate{
         .addr = start_addr,
         .ctx = ctx,
     });
-    const end = MachO.findFirst(SymbolAtIndex, indexes, start, Predicate{
+    const end = MachO.lsearch(SymbolAtIndex, indexes[start..], Predicate{
         .addr = end_addr,
         .ctx = ctx,
-    });
+    }) + start;
 
     return indexes[start..end];
 }

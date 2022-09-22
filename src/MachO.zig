@@ -3134,8 +3134,8 @@ fn filterDataInCode(
         }
     };
 
-    const start = MachO.findFirst(macho.data_in_code_entry, dices, 0, Predicate{ .addr = start_addr });
-    const end = MachO.findFirst(macho.data_in_code_entry, dices, start, Predicate{ .addr = end_addr });
+    const start = MachO.lsearch(macho.data_in_code_entry, dices, Predicate{ .addr = start_addr });
+    const end = MachO.lsearch(macho.data_in_code_entry, dices[start..], Predicate{ .addr = end_addr }) + start;
 
     return dices[start..end];
 }
@@ -3696,13 +3696,31 @@ pub fn getEntryPoint(self: MachO) error{MissingMainEntrypoint}!SymbolWithLoc {
     return global;
 }
 
-pub fn findFirst(comptime T: type, haystack: []align(1) const T, start: usize, predicate: anytype) usize {
+/// Binary search
+pub fn bsearch(comptime T: type, haystack: []align(1) const T, predicate: anytype) usize {
     if (!@hasDecl(@TypeOf(predicate), "predicate"))
         @compileError("Predicate is required to define fn predicate(@This(), T) bool");
 
-    if (start == haystack.len) return start;
+    var min: usize = 0;
+    var max: usize = haystack.len;
+    while (min < max) {
+        const index = (min + max) / 2;
+        const curr = haystack[index];
+        if (predicate.predicate(curr)) {
+            min = index + 1;
+        } else {
+            max = index;
+        }
+    }
+    return min;
+}
 
-    var i = start;
+/// Linear search
+pub fn lsearch(comptime T: type, haystack: []align(1) const T, predicate: anytype) usize {
+    if (!@hasDecl(@TypeOf(predicate), "predicate"))
+        @compileError("Predicate is required to define fn predicate(@This(), T) bool");
+
+    var i: usize = 0;
     while (i < haystack.len) : (i += 1) {
         if (predicate.predicate(haystack[i])) break;
     }

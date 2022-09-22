@@ -889,7 +889,6 @@ inline fn isArithmeticOp(inst: *const [4]u8) bool {
     return ((group_decode >> 2) == 4);
 }
 
-/// Null means zerofill so no code presence.
 pub fn getAtomCode(macho_file: *MachO, atom_index: AtomIndex) []const u8 {
     const atom = macho_file.getAtom(atom_index);
     assert(atom.file != null); // Synthetic atom shouldn't need to inquire for code.
@@ -949,12 +948,12 @@ fn filterRelocs(
         addr: u64,
 
         pub fn predicate(self: @This(), rel: macho.relocation_info) bool {
-            return rel.r_address < self.addr;
+            return rel.r_address >= self.addr;
         }
     };
 
-    const start = MachO.findFirst(macho.relocation_info, relocs, 0, Predicate{ .addr = end_addr });
-    const end = MachO.findFirst(macho.relocation_info, relocs, start, Predicate{ .addr = start_addr });
+    const start = MachO.bsearch(macho.relocation_info, relocs, Predicate{ .addr = end_addr });
+    const end = MachO.bsearch(macho.relocation_info, relocs[start..], Predicate{ .addr = start_addr }) + start;
 
     return relocs[start..end];
 }
