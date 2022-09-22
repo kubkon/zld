@@ -233,22 +233,14 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
                 try self.sections_as_symbols.putNoClobber(gpa, sect_id, sym_index);
                 break :blk sym_index;
             };
-            const code: ?[]const u8 = if (!sect.isZerofill()) self.getSectionContents(sect) else null;
-            const relocs: ?[]align(1) const macho.relocation_info = if (!sect.isZerofill())
-                self.getRelocs(sect)
-            else
-                null;
             const atom_index = try self.createAtomFromSubsection(
                 macho_file,
                 object_id,
                 sym_index,
                 sect.size,
                 sect.@"align",
-                code,
-                relocs,
                 &.{},
                 match,
-                sect,
             );
             try macho_file.addAtomToSection(atom_index, match);
         }
@@ -312,11 +304,6 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
         });
 
         const cpu_arch = macho_file.options.target.cpu_arch.?;
-        const code: ?[]const u8 = if (!sect.isZerofill()) self.getSectionContents(sect) else null;
-        const relocs: ?[]align(1) const macho.relocation_info = if (!sect.isZerofill())
-            self.getRelocs(sect)
-        else
-            null;
         const filtered_syms = filterSymbolsByAddress(
             sorted_syms,
             sect.addr,
@@ -343,18 +330,14 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
                     break :blk sym_index;
                 };
                 const atom_size = first_sym.n_value - sect.addr;
-                const atom_code: ?[]const u8 = if (code) |cc| cc[0..@intCast(usize, atom_size)] else null;
                 const atom_index = try self.createAtomFromSubsection(
                     macho_file,
                     object_id,
                     sym_index,
                     atom_size,
                     sect.@"align",
-                    atom_code,
-                    relocs,
                     &.{},
                     match,
-                    sect,
                 );
                 try macho_file.addAtomToSection(atom_index, match);
             }
@@ -390,11 +373,6 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
                         sect.addr + sect.size;
                     break :blk end_addr - addr;
                 };
-                const atom_code: ?[]const u8 = if (code) |cc| blk: {
-                    const start = @intCast(usize, addr - sect.addr);
-                    const size = @intCast(usize, atom_size);
-                    break :blk cc[start..][0..size];
-                } else null;
                 const atom_align = if (addr > 0)
                     math.min(@ctz(addr), sect.@"align")
                 else
@@ -405,11 +383,8 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
                     sorted_atom_syms.items[0].index,
                     atom_size,
                     atom_align,
-                    atom_code,
-                    relocs,
                     sorted_atom_syms.items[1..],
                     match,
-                    sect,
                 );
 
                 if (cpu_arch == .x86_64 and addr == sect.addr) {
@@ -460,11 +435,8 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
                 sym_index,
                 sect.size,
                 sect.@"align",
-                code,
-                relocs,
                 filtered_syms,
                 match,
-                sect,
             );
             try macho_file.addAtomToSection(atom_index, match);
         }
@@ -478,11 +450,8 @@ fn createAtomFromSubsection(
     sym_index: u32,
     size: u64,
     alignment: u32,
-    code: ?[]const u8,
-    relocs: ?[]align(1) const macho.relocation_info,
     indexes: []const SymbolAtIndex,
     match: u8,
-    sect: macho.section_64,
 ) !AtomIndex {
     const gpa = macho_file.base.allocator;
     const sym = self.symtab.items[sym_index];
@@ -518,15 +487,6 @@ fn createAtomFromSubsection(
         });
 
         try self.atom_by_index_table.putNoClobber(gpa, inner_sym_index.index, atom_index);
-    }
-
-    if (code) |cc| {
-        const base_offset = sym.n_value - sect.addr;
-        const filtered_relocs = Atom.filterRelocs(relocs.?, base_offset, base_offset + size);
-        try Atom.parseRelocs(macho_file, atom_index, cc, filtered_relocs, .{
-            .base_addr = sect.addr,
-            .base_offset = @intCast(i32, base_offset),
-        });
     }
 
     return atom_index;

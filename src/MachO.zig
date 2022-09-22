@@ -75,7 +75,6 @@ stubs: std.AutoArrayHashMapUnmanaged(SymbolWithLoc, u32) = .{},
 atoms: std.ArrayListUnmanaged(Atom) = .{},
 atom_by_index_table: std.AutoHashMapUnmanaged(u32, AtomIndex) = .{},
 
-relocs: RelocationTable = .{},
 rebases: RebaseTable = .{},
 bindings: BindingTable = .{},
 
@@ -83,7 +82,6 @@ pub const AtomIndex = u32;
 
 const BindingTable = std.AutoHashMapUnmanaged(AtomIndex, std.ArrayListUnmanaged(Atom.Binding));
 const RebaseTable = std.AutoHashMapUnmanaged(AtomIndex, std.ArrayListUnmanaged(u32));
-const RelocationTable = std.AutoHashMapUnmanaged(AtomIndex, std.ArrayListUnmanaged(Atom.Relocation));
 
 pub const SymbolWithLoc = struct {
     // Index into the respective symbol table.
@@ -309,13 +307,26 @@ pub fn flush(self: *MachO) !void {
         try object.splitIntoAtoms(self, @intCast(u32, object_id));
     }
 
-    try self.createDyldStubBinderGotAtom();
+    for (self.objects.items) |object| {
+        for (object.atoms.items) |atom_index| {
+            const atom = self.getAtom(atom_index);
+            const sym = self.getSymbol(atom.getSymbolWithLoc());
+            const header = self.sections.items(.header)[sym.n_sect - 1];
+            if (header.isZerofill()) continue;
 
-    if (self.options.dead_strip) {
-        try dead_strip.gcAtoms(self);
+            const relocs = Atom.getAtomRelocs(self, atom_index);
+            try Atom.scanAtomRelocs(self, atom_index, relocs);
+        }
     }
 
-    try self.allocateSegments();
+    try self.createDyldStubBinderGotAtom();
+
+    // if (self.options.dead_strip) {
+    //     try dead_strip.gcAtoms(self);
+    // }
+
+    try self.sortSections();
+    try self.allocateSections();
     try self.allocateAtoms();
 
     try self.allocateSpecialSymbols();
@@ -1875,14 +1886,6 @@ pub fn deinit(self: *MachO) void {
     self.atom_by_index_table.deinit(gpa);
 
     {
-        var it = self.relocs.valueIterator();
-        while (it.next()) |relocs| {
-            relocs.deinit(gpa);
-        }
-        self.relocs.deinit(gpa);
-    }
-
-    {
         var it = self.rebases.valueIterator();
         while (it.next()) |rebases| {
             rebases.deinit(gpa);
@@ -2186,9 +2189,10 @@ fn writeAtoms(self: *MachO) !void {
                     },
                 }
             } else {
-                const code = Atom.getAtomCode(self, atom_index).?;
+                const code = Atom.getAtomCode(self, atom_index);
+                const relocs = Atom.getAtomRelocs(self, atom_index);
                 buffer.appendSliceAssumeCapacity(code);
-                try Atom.resolveRelocs(self, atom_index, buffer.items[offset..][0..atom.size]);
+                try Atom.resolveRelocs(self, atom_index, buffer.items[offset..][0..atom.size], relocs);
             }
 
             var i: usize = 0;
@@ -2210,7 +2214,95 @@ fn writeAtoms(self: *MachO) !void {
     }
 }
 
-fn allocateSegments(self: *MachO) !void {
+fn sortSections(self: *MachO) !void {
+    const gpa = self.base.allocator;
+
+    const SortedSegment = struct {
+        segment: macho.segment_command_64,
+        old_id: u8,
+
+        pub fn lessThan(_: void, lhs: @This(), rhs: @This()) bool {
+            return getSegmentPrecedence(lhs.segment.segName()) < getSegmentPrecedence(rhs.segment.segName());
+        }
+    };
+
+    const SortedSection = struct {
+        section: Section,
+        old_id: u8,
+
+        pub fn lessThan(_: void, lhs: @This(), rhs: @This()) bool {
+            return getSectionPrecedence(lhs.section.header) < getSectionPrecedence(rhs.section.header);
+        }
+    };
+
+    var segments = std.ArrayList(SortedSegment).init(gpa);
+    defer segments.deinit();
+    try segments.ensureTotalCapacity(self.segments.items.len);
+
+    var segment_table = try gpa.alloc(u8, self.segments.items.len);
+    defer gpa.free(segment_table);
+
+    for (self.segments.items) |segment, i| {
+        segments.appendAssumeCapacity(.{ .segment = segment, .old_id = @intCast(u8, i) });
+    }
+
+    std.sort.sort(SortedSegment, segments.items, {}, SortedSegment.lessThan);
+
+    const slice = self.sections.slice();
+    var sections = std.ArrayList(SortedSection).init(gpa);
+    defer sections.deinit();
+    try sections.ensureTotalCapacity(slice.len);
+
+    var section_table = try gpa.alloc(u8, slice.len);
+    defer gpa.free(section_table);
+
+    {
+        var i: u8 = 0;
+        while (i < slice.len) : (i += 1) {
+            sections.appendAssumeCapacity(.{ .section = self.sections.get(i), .old_id = @intCast(u8, i) });
+        }
+    }
+
+    std.sort.sort(SortedSection, sections.items, {}, SortedSection.lessThan);
+
+    self.segments.clearRetainingCapacity();
+    for (segments.items) |out, i| {
+        self.segments.appendAssumeCapacity(out.segment);
+        segment_table[out.old_id] = @intCast(u8, i);
+    }
+
+    for (sections.items) |out, i| {
+        self.sections.set(i, .{
+            .segment_index = segment_table[out.section.segment_index],
+            .header = out.section.header,
+            .first_atom_index = out.section.first_atom_index,
+            .last_atom_index = out.section.last_atom_index,
+        });
+        section_table[out.old_id] = @intCast(u8, i);
+    }
+
+    for (self.sections.items(.first_atom_index)) |first_atom_index| {
+        var atom_index = first_atom_index;
+
+        while (true) {
+            const atom = self.getAtom(atom_index);
+            const sym = self.getSymbolPtr(atom.getSymbolWithLoc());
+            const n_sect = section_table[sym.n_sect - 1] + 1;
+            sym.n_sect = n_sect;
+
+            for (atom.contained.items) |sym_at_off| {
+                const inner = self.getSymbolPtr(.{ .sym_index = sym_at_off.sym_index, .file = atom.file });
+                inner.n_sect = n_sect;
+            }
+
+            if (atom.next_index) |next_index| {
+                atom_index = next_index;
+            } else break;
+        }
+    }
+}
+
+fn allocateSections(self: *MachO) !void {
     for (self.segments.items) |*segment, segment_index| {
         const is_text_segment = mem.eql(u8, segment.segName(), "__TEXT");
         const base_size = if (is_text_segment) try self.calcMinHeaderPad() else 0;
@@ -2305,40 +2397,40 @@ fn initSection(
     sectname: []const u8,
     opts: InitSectionOpts,
 ) !u8 {
+    const gpa = self.base.allocator;
     const segment_id = self.getSegmentByName(segname) orelse blk: {
-        const precedence = getSegmentPrecedence(segname);
-        const insertion_index = for (self.segments.items) |segment, i| {
-            if (getSegmentPrecedence(segment.segName()) > precedence) break @intCast(u8, i);
-        } else @intCast(u8, self.segments.items.len);
-        for (self.sections.items(.segment_index)) |*segment_index| {
-            if (segment_index.* >= insertion_index) {
-                segment_index.* += 1;
-            }
-        }
-        log.debug("inserting segment '{s}' at index {d}", .{ segname, insertion_index });
+        log.debug("creating segment '{s}'", .{segname});
+        const segment_id = @intCast(u8, self.segments.items.len);
         const protection = getSegmentMemoryProtection(segname);
-        try self.segments.insert(self.base.allocator, insertion_index, .{
+        try self.segments.append(gpa, .{
             .cmdsize = @sizeOf(macho.segment_command_64),
             .segname = makeStaticString(segname),
             .maxprot = protection,
             .initprot = protection,
         });
-        break :blk insertion_index;
+        break :blk segment_id;
     };
+    log.debug("creating section '{s},{s}'", .{ segname, sectname });
     const seg = &self.segments.items[segment_id];
-    const index = try self.insertSection(segment_id, .{
-        .sectname = makeStaticString(sectname),
-        .segname = seg.segname,
-        .flags = opts.flags,
-        .reserved1 = opts.reserved1,
-        .reserved2 = opts.reserved2,
+    const index = @intCast(u8, self.sections.slice().len);
+    try self.sections.append(gpa, .{
+        .segment_index = segment_id,
+        .header = .{
+            .sectname = makeStaticString(sectname),
+            .segname = seg.segname,
+            .flags = opts.flags,
+            .reserved1 = opts.reserved1,
+            .reserved2 = opts.reserved2,
+        },
+        .first_atom_index = undefined,
+        .last_atom_index = undefined,
     });
     seg.cmdsize += @sizeOf(macho.section_64);
     seg.nsects += 1;
     return index;
 }
 
-inline fn getSegmentPrecedence(segname: []const u8) u3 {
+inline fn getSegmentPrecedence(segname: []const u8) u4 {
     if (mem.eql(u8, segname, "__PAGEZERO")) return 0x0;
     if (mem.eql(u8, segname, "__TEXT")) return 0x1;
     if (mem.eql(u8, segname, "__DATA_CONST")) return 0x2;
@@ -2354,46 +2446,30 @@ inline fn getSegmentMemoryProtection(segname: []const u8) macho.vm_prot_t {
     return macho.PROT.READ | macho.PROT.WRITE;
 }
 
-inline fn getSectionPrecedence(header: macho.section_64) u4 {
-    if (header.isCode()) {
-        if (mem.eql(u8, "__text", header.sectName())) return 0x0;
-        if (header.@"type"() == macho.S_SYMBOL_STUBS) return 0x1;
-        return 0x2;
-    }
-    switch (header.@"type"()) {
-        macho.S_NON_LAZY_SYMBOL_POINTERS,
-        macho.S_LAZY_SYMBOL_POINTERS,
-        => return 0x0,
-        macho.S_MOD_INIT_FUNC_POINTERS => return 0x1,
-        macho.S_MOD_TERM_FUNC_POINTERS => return 0x2,
-        macho.S_ZEROFILL => return 0xf,
-        macho.S_THREAD_LOCAL_REGULAR => return 0xd,
-        macho.S_THREAD_LOCAL_ZEROFILL => return 0xe,
-        else => if (mem.eql(u8, "__eh_frame", header.sectName()))
-            return 0xf
-        else
-            return 0x3,
-    }
-}
-
-fn insertSection(self: *MachO, segment_index: u8, header: macho.section_64) !u8 {
-    const precedence = getSectionPrecedence(header);
-    const indexes = self.getSectionIndexes(segment_index);
-    const insertion_index = for (self.sections.items(.header)[indexes.start..indexes.end]) |hdr, i| {
-        if (getSectionPrecedence(hdr) > precedence) break @intCast(u8, i + indexes.start);
-    } else indexes.end;
-    log.debug("inserting section '{s},{s}' at index {d}", .{
-        header.segName(),
-        header.sectName(),
-        insertion_index,
-    });
-    try self.sections.insert(self.base.allocator, insertion_index, .{
-        .segment_index = segment_index,
-        .header = header,
-        .first_atom_index = undefined,
-        .last_atom_index = undefined,
-    });
-    return insertion_index;
+inline fn getSectionPrecedence(header: macho.section_64) u8 {
+    const segment_precedence: u4 = getSegmentPrecedence(header.segName());
+    const section_precedence: u4 = blk: {
+        if (header.isCode()) {
+            if (mem.eql(u8, "__text", header.sectName())) break :blk 0x0;
+            if (header.@"type"() == macho.S_SYMBOL_STUBS) break :blk 0x1;
+            break :blk 0x2;
+        }
+        switch (header.@"type"()) {
+            macho.S_NON_LAZY_SYMBOL_POINTERS,
+            macho.S_LAZY_SYMBOL_POINTERS,
+            => break :blk 0x0,
+            macho.S_MOD_INIT_FUNC_POINTERS => break :blk 0x1,
+            macho.S_MOD_TERM_FUNC_POINTERS => break :blk 0x2,
+            macho.S_ZEROFILL => break :blk 0xf,
+            macho.S_THREAD_LOCAL_REGULAR => break :blk 0xd,
+            macho.S_THREAD_LOCAL_ZEROFILL => break :blk 0xe,
+            else => if (mem.eql(u8, "__eh_frame", header.sectName()))
+                break :blk 0xf
+            else
+                break :blk 0x3,
+        }
+    };
+    return (@intCast(u8, segment_precedence) << 4) + section_precedence;
 }
 
 fn writeSegmentHeaders(self: *MachO, ncmds: *u32, writer: anytype) !void {
@@ -3446,32 +3522,6 @@ fn writeHeader(self: *MachO, ncmds: u32, sizeofcmds: u32) !void {
     try self.base.file.pwriteAll(mem.asBytes(&header), 0);
 }
 
-pub fn addRelocation(self: *MachO, atom_index: AtomIndex, reloc: Atom.Relocation) !void {
-    return self.addRelocations(atom_index, 1, .{reloc});
-}
-
-pub fn addRelocations(
-    self: *MachO,
-    atom_index: AtomIndex,
-    comptime count: comptime_int,
-    relocs: [count]Atom.Relocation,
-) !void {
-    const gpa = self.base.allocator;
-    const target = self.options.target;
-    const gop = try self.relocs.getOrPut(gpa, atom_index);
-    if (!gop.found_existing) {
-        gop.value_ptr.* = .{};
-    }
-    try gop.value_ptr.ensureUnusedCapacity(gpa, count);
-    for (relocs) |reloc| {
-        log.debug("  (adding reloc of type {s} to target %{d})", .{
-            reloc.fmtType(target),
-            reloc.target.sym_index,
-        });
-        gop.value_ptr.appendAssumeCapacity(reloc);
-    }
-}
-
 pub fn addRebase(self: *MachO, atom_index: AtomIndex, offset: u32) !void {
     const gpa = self.base.allocator;
     const atom = self.getAtom(atom_index);
@@ -3500,16 +3550,12 @@ pub fn addBinding(self: *MachO, atom_index: AtomIndex, binding: Atom.Binding) !v
 
 pub fn freeAtom(self: *MachO, atom_index: AtomIndex) void {
     const gpa = self.base.allocator;
-    if (self.relocs.getPtr(atom_index)) |relocs| {
-        relocs.deinit(gpa);
-    }
     if (self.rebases.getPtr(atom_index)) |rebases| {
         rebases.deinit(gpa);
     }
     if (self.bindings.getPtr(atom_index)) |bindings| {
         bindings.deinit(gpa);
     }
-    _ = self.relocs.remove(atom_index);
     _ = self.rebases.remove(atom_index);
     _ = self.bindings.remove(atom_index);
 }
