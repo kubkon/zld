@@ -30,11 +30,10 @@ const RegisterOrMemory = dis_x86_64.RegisterOrMemory;
 /// offset table entry.
 sym_index: u32,
 
+nsyms_trailing: u32,
+
 /// null means symbol defined by the linker.
 file: ?u32,
-
-/// List of symbols contained within this atom
-contained: std.ArrayListUnmanaged(SymbolAtOffset) = .{},
 
 /// Size and alignment of this atom
 /// Unlike in Elf, we need to store the size of this symbol as part of
@@ -54,13 +53,9 @@ pub const Binding = struct {
     offset: u64,
 };
 
-pub const SymbolAtOffset = struct {
-    sym_index: u32,
-    offset: u64,
-};
-
 pub const empty = Atom{
     .sym_index = 0,
+    .nsyms_trailing = 0,
     .file = null,
     .size = 0,
     .alignment = 0,
@@ -68,15 +63,65 @@ pub const empty = Atom{
     .next_index = null,
 };
 
-pub fn deinit(self: *Atom, allocator: Allocator) void {
-    self.contained.deinit(allocator);
-}
-
 pub inline fn getSymbolWithLoc(self: Atom) SymbolWithLoc {
     return .{
         .sym_index = self.sym_index,
         .file = self.file,
     };
+}
+
+const InnerSymIterator = struct {
+    sym_index: u32,
+    count: u32,
+    file: u32,
+
+    pub fn next(it: *@This()) ?SymbolWithLoc {
+        if (it.count == 0) return null;
+        it.sym_index += 1;
+        it.count -= 1;
+        return SymbolWithLoc{ .sym_index = it.sym_index, .file = it.file };
+    }
+};
+
+pub fn getInnerSymbolsIterator(macho_file: *MachO, atom_index: AtomIndex) InnerSymIterator {
+    const atom = macho_file.getAtom(atom_index);
+    assert(atom.file != null);
+    return .{
+        .sym_index = atom.sym_index,
+        .count = atom.nsyms_trailing,
+        .file = atom.file.?,
+    };
+}
+
+pub fn getSectionAlias(macho_file: *MachO, atom_index: AtomIndex) ?SymbolWithLoc {
+    const atom = macho_file.getAtom(atom_index);
+    assert(atom.file != null);
+
+    const object = macho_file.objects.items[atom.file.?];
+    const nbase = @intCast(u32, object.in_symtab.?.len);
+    const ntotal = @intCast(u32, object.symtab.items.len);
+    var sym_index: u32 = nbase;
+    while (sym_index < ntotal) : (sym_index += 1) {
+        if (object.getAtomIndexForSymbol(sym_index)) |other_atom_index| {
+            if (other_atom_index == atom_index) return SymbolWithLoc{
+                .sym_index = sym_index,
+                .file = atom.file,
+            };
+        }
+    }
+    return null;
+}
+
+pub fn calcInnerSymbolOffset(macho_file: *MachO, atom_index: AtomIndex, sym_index: u32) u64 {
+    const atom = macho_file.getAtom(atom_index);
+    assert(atom.file != null);
+
+    if (atom.sym_index == sym_index) return 0;
+
+    const object = macho_file.objects.items[atom.file.?];
+    const source_atom_sym = object.getSourceSymbol(atom.sym_index).?;
+    const source_sym = object.getSourceSymbol(sym_index).?;
+    return source_sym.n_value - source_atom_sym.n_value;
 }
 
 /// Returns true if the symbol pointed at with `sym_loc` is contained within this atom.
@@ -131,7 +176,12 @@ const RelocContext = struct {
     base_offset: i32 = 0,
 };
 
-fn parseRelocTarget(macho_file: *MachO, atom_index: AtomIndex, rel: macho.relocation_info) !MachO.SymbolWithLoc {
+fn parseRelocTarget(
+    macho_file: *MachO,
+    atom_index: AtomIndex,
+    rel: macho.relocation_info,
+    reverse_lookup: []u32,
+) !MachO.SymbolWithLoc {
     const gpa = macho_file.base.allocator;
     const atom = macho_file.getAtom(atom_index);
     const object = &macho_file.objects.items[atom.file.?];
@@ -157,7 +207,7 @@ fn parseRelocTarget(macho_file: *MachO, atom_index: AtomIndex, rel: macho.reloca
     }
 
     const sym_loc = MachO.SymbolWithLoc{
-        .sym_index = rel.r_symbolnum,
+        .sym_index = reverse_lookup[rel.r_symbolnum],
         .file = atom.file,
     };
     const sym = macho_file.getSymbol(sym_loc);
@@ -202,6 +252,12 @@ fn scanAtomRelocsArm64(
     relocs: []align(1) const macho.relocation_info,
     context: RelocContext,
 ) !void {
+    const gpa = macho_file.base.allocator;
+    const atom = macho_file.getAtom(atom_index);
+    const object = macho_file.objects.items[atom.file.?];
+    const reverse_lookup = try object.createReverseSymbolLookup(gpa);
+    defer gpa.free(reverse_lookup);
+
     for (relocs) |rel| {
         const rel_type = @intToEnum(macho.reloc_type_arm64, rel.r_type);
 
@@ -210,7 +266,7 @@ fn scanAtomRelocsArm64(
             else => {},
         }
 
-        const target = try parseRelocTarget(macho_file, atom_index, rel);
+        const target = try parseRelocTarget(macho_file, atom_index, rel, reverse_lookup);
 
         switch (rel_type) {
             .ARM64_RELOC_BRANCH26 => {
@@ -243,6 +299,12 @@ fn scanAtomRelocsX86(
     relocs: []align(1) const macho.relocation_info,
     context: RelocContext,
 ) !void {
+    const gpa = macho_file.base.allocator;
+    const atom = macho_file.getAtom(atom_index);
+    const object = macho_file.objects.items[atom.file.?];
+    const reverse_lookup = try object.createReverseSymbolLookup(gpa);
+    defer gpa.free(reverse_lookup);
+
     for (relocs) |rel| {
         const rel_type = @intToEnum(macho.reloc_type_x86_64, rel.r_type);
 
@@ -251,7 +313,7 @@ fn scanAtomRelocsX86(
             else => {},
         }
 
-        const target = try parseRelocTarget(macho_file, atom_index, rel);
+        const target = try parseRelocTarget(macho_file, atom_index, rel, reverse_lookup);
 
         switch (rel_type) {
             .X86_64_RELOC_BRANCH => {
@@ -441,7 +503,11 @@ fn resolveRelocsArm64(
     atom_relocs: []align(1) const macho.relocation_info,
     context: RelocContext,
 ) !void {
+    const gpa = macho_file.base.allocator;
     const atom = macho_file.getAtom(atom_index);
+    const object = macho_file.objects.items[atom.file.?];
+    const reverse_lookup = try object.createReverseSymbolLookup(gpa);
+    defer gpa.free(reverse_lookup);
 
     var addend: ?i64 = null;
     var subtractor: ?SymbolWithLoc = null;
@@ -480,7 +546,7 @@ fn resolveRelocsArm64(
             else => {},
         }
 
-        const target = try parseRelocTarget(macho_file, atom_index, rel);
+        const target = try parseRelocTarget(macho_file, atom_index, rel, reverse_lookup);
         const rel_offset = @intCast(u32, rel.r_address - context.base_offset);
 
         log.debug("  RELA({s}) @ {x} => %{d} in object({?})", .{
@@ -676,7 +742,6 @@ fn resolveRelocsArm64(
                     mem.readIntLittle(i32, atom_code[rel_offset..][0..4]);
 
                 if (rel.r_extern == 0) {
-                    const object = macho_file.objects.items[atom.file.?];
                     const target_sect_base_addr = object.getSourceSection(@intCast(u16, rel.r_symbolnum - 1)).addr;
                     ptr_addend -= @intCast(i64, target_sect_base_addr);
                 }
@@ -713,7 +778,11 @@ fn resolveRelocsX86(
     atom_relocs: []align(1) const macho.relocation_info,
     context: RelocContext,
 ) !void {
+    const gpa = macho_file.base.allocator;
     const atom = macho_file.getAtom(atom_index);
+    const object = macho_file.objects.items[atom.file.?];
+    const reverse_lookup = try object.createReverseSymbolLookup(gpa);
+    defer gpa.free(reverse_lookup);
 
     var subtractor: ?SymbolWithLoc = null;
 
@@ -743,7 +812,7 @@ fn resolveRelocsX86(
             else => {},
         }
 
-        const target = try parseRelocTarget(macho_file, atom_index, rel);
+        const target = try parseRelocTarget(macho_file, atom_index, rel, reverse_lookup);
         const rel_offset = @intCast(u32, rel.r_address - context.base_offset);
 
         log.debug("  RELA({s}) @ {x} => %{d} in object({?})", .{
@@ -831,7 +900,6 @@ fn resolveRelocsX86(
                 var addend = mem.readIntLittle(i32, atom_code[rel_offset..][0..4]) + correction;
 
                 if (rel.r_extern == 0) {
-                    const object = macho_file.objects.items[atom.file.?];
                     // Note for the future self: when r_extern == 0, we should subtract correction from the
                     // addend.
                     const target_sect_base_addr = object.getSourceSection(@intCast(u16, rel.r_symbolnum - 1)).addr;
@@ -855,7 +923,6 @@ fn resolveRelocsX86(
                     mem.readIntLittle(i32, atom_code[rel_offset..][0..4]);
 
                 if (rel.r_extern == 0) {
-                    const object = macho_file.objects.items[atom.file.?];
                     const target_sect_base_addr = object.getSourceSection(@intCast(u16, rel.r_symbolnum - 1)).addr;
                     addend -= @intCast(i64, target_sect_base_addr);
                 }

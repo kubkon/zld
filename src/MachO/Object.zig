@@ -31,7 +31,11 @@ header: macho.mach_header_64 = undefined,
 in_symtab: ?[]align(1) const macho.nlist_64 = null,
 in_strtab: ?[]const u8 = null,
 
+/// Output symtab is sorted so that we can easily reference symbols following each
+/// other in address space.
 symtab: std.ArrayListUnmanaged(macho.nlist_64) = .{},
+source_symtab_lookup: std.ArrayListUnmanaged(u32) = .{},
+
 sections: std.ArrayListUnmanaged(macho.section_64) = .{},
 sections_as_symbols: std.AutoHashMapUnmanaged(u16, u32) = .{},
 
@@ -40,6 +44,7 @@ atom_by_index_table: std.AutoHashMapUnmanaged(u32, AtomIndex) = .{},
 
 pub fn deinit(self: *Object, gpa: Allocator) void {
     self.symtab.deinit(gpa);
+    self.source_symtab_lookup.deinit(gpa);
     self.sections.deinit(gpa);
     self.sections_as_symbols.deinit(gpa);
     self.atoms.deinit(gpa);
@@ -98,7 +103,34 @@ pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch)
                     @alignCast(@alignOf(macho.nlist_64), &self.contents[symtab.symoff]),
                 )[0..symtab.nsyms];
                 self.in_strtab = self.contents[symtab.stroff..][0..symtab.strsize];
-                try self.symtab.appendUnalignedSlice(allocator, self.in_symtab.?);
+
+                try self.symtab.ensureTotalCapacity(allocator, self.in_symtab.?.len);
+                try self.source_symtab_lookup.ensureTotalCapacity(allocator, self.in_symtab.?.len);
+
+                // You would expect that the symbol table is at least pre-sorted based on symbol's type:
+                // local < extern defined < undefined. Unfortunately, this is not guaranteed! For instance,
+                // the GO compiler does not necessarily respect that therefore we sort immediately by type
+                // and address within.
+                const ctx = Context{
+                    .object = self,
+                };
+                var sorted_all_syms = try std.ArrayList(SymbolAtIndex).initCapacity(allocator, self.in_symtab.?.len);
+                defer sorted_all_syms.deinit();
+
+                for (self.in_symtab.?) |_, index| {
+                    sorted_all_syms.appendAssumeCapacity(.{ .index = @intCast(u32, index) });
+                }
+
+                // We sort by type: defined < undefined, and
+                // afterwards by address in each group. Normally, dysymtab should
+                // be enough to guarantee the sort, but turns out not every compiler
+                // is kind enough to specify the symbols in the correct order.
+                sort.sort(SymbolAtIndex, sorted_all_syms.items, ctx, SymbolAtIndex.lessThan);
+
+                for (sorted_all_syms.items) |sym_id| {
+                    self.symtab.appendAssumeCapacity(sym_id.getSymbol(ctx));
+                    self.source_symtab_lookup.appendAssumeCapacity(sym_id.index);
+                }
             },
             else => {},
         }
@@ -113,7 +145,7 @@ const SymbolAtIndex = struct {
     index: u32,
 
     fn getSymbol(self: SymbolAtIndex, ctx: Context) macho.nlist_64 {
-        return ctx.object.getSourceSymbol(self.index).?;
+        return ctx.object.in_symtab.?[self.index];
     }
 
     fn getSymbolName(self: SymbolAtIndex, ctx: Context) []const u8 {
@@ -162,31 +194,26 @@ const SymbolAtIndex = struct {
     }
 };
 
-fn filterSymbolsByAddress(
-    indexes: []SymbolAtIndex,
-    start_addr: u64,
-    end_addr: u64,
-    ctx: Context,
-) []SymbolAtIndex {
+fn filterSymbolsByAddress(symbols: []macho.nlist_64, start_addr: u64, end_addr: u64) struct {
+    start: u32,
+    end: u32,
+} {
     const Predicate = struct {
         addr: u64,
-        ctx: Context,
 
-        pub fn predicate(pred: @This(), index: SymbolAtIndex) bool {
-            return index.getSymbol(pred.ctx).n_value >= pred.addr;
+        pub fn predicate(pred: @This(), symbol: macho.nlist_64) bool {
+            return symbol.n_value >= pred.addr;
         }
     };
 
-    const start = MachO.lsearch(SymbolAtIndex, indexes, Predicate{
+    const start = MachO.lsearch(macho.nlist_64, symbols, Predicate{
         .addr = start_addr,
-        .ctx = ctx,
     });
-    const end = MachO.lsearch(SymbolAtIndex, indexes[start..], Predicate{
+    const end = MachO.lsearch(macho.nlist_64, symbols[start..], Predicate{
         .addr = end_addr,
-        .ctx = ctx,
     }) + start;
 
-    return indexes[start..end];
+    return .{ .start = @intCast(u32, start), .end = @intCast(u32, end) };
 }
 
 pub fn scanInputSections(self: Object, macho_file: *MachO) !void {
@@ -211,7 +238,7 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
 
     log.debug("splitting object({d}, {s}) into atoms: one-shot mode", .{ object_id, self.name });
 
-    const in_symtab = self.in_symtab orelse {
+    if (self.in_symtab == null) {
         for (self.sections.items) |sect, id| {
             if (sect.isDebug()) continue;
             const match = (try macho_file.getOutputSection(sect)) orelse {
@@ -237,43 +264,23 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
                 macho_file,
                 object_id,
                 sym_index,
+                0,
                 sect.size,
                 sect.@"align",
-                &.{},
                 match,
             );
             try macho_file.addAtomToSection(atom_index, match);
         }
         return;
-    };
-
-    // You would expect that the symbol table is at least pre-sorted based on symbol's type:
-    // local < extern defined < undefined. Unfortunately, this is not guaranteed! For instance,
-    // the GO compiler does not necessarily respect that therefore we sort immediately by type
-    // and address within.
-    const context = Context{
-        .object = self,
-    };
-    var sorted_all_syms = try std.ArrayList(SymbolAtIndex).initCapacity(gpa, in_symtab.len);
-    defer sorted_all_syms.deinit();
-
-    for (in_symtab) |_, index| {
-        sorted_all_syms.appendAssumeCapacity(.{ .index = @intCast(u32, index) });
     }
-
-    // We sort by type: defined < undefined, and
-    // afterwards by address in each group. Normally, dysymtab should
-    // be enough to guarantee the sort, but turns out not every compiler
-    // is kind enough to specify the symbols in the correct order.
-    sort.sort(SymbolAtIndex, sorted_all_syms.items, context, SymbolAtIndex.lessThan);
 
     // Well, shit, sometimes compilers skip the dysymtab load command altogether, meaning we
     // have to infer the start of undef section in the symtab ourselves.
     const iundefsym = blk: {
         const dysymtab = self.parseDysymtab() orelse {
-            var iundefsym: usize = sorted_all_syms.items.len;
+            var iundefsym: usize = self.symtab.items.len;
             while (iundefsym > 0) : (iundefsym -= 1) {
-                const sym = sorted_all_syms.items[iundefsym - 1].getSymbol(context);
+                const sym = self.symtab.items[iundefsym - 1];
                 if (sym.sect()) break;
             }
             break :blk iundefsym;
@@ -282,7 +289,7 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
     };
 
     // We only care about defined symbols, so filter every other out.
-    const sorted_syms = sorted_all_syms.items[0..iundefsym];
+    const symtab = self.symtab.items[0..iundefsym];
     const subsections_via_symbols = self.header.flags & macho.MH_SUBSECTIONS_VIA_SYMBOLS != 0;
 
     for (self.sections.items) |sect, id| {
@@ -304,18 +311,13 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
         });
 
         const cpu_arch = macho_file.options.target.cpu_arch.?;
-        const filtered_syms = filterSymbolsByAddress(
-            sorted_syms,
-            sect.addr,
-            sect.addr + sect.size,
-            context,
-        );
+        const indexes = filterSymbolsByAddress(symtab, sect.addr, sect.addr + sect.size);
 
-        if (subsections_via_symbols and filtered_syms.len > 0) {
+        if (subsections_via_symbols and indexes.start != indexes.end) {
             // If the first nlist does not match the start of the section,
             // then we need to encapsulate the memory range [section start, first symbol)
             // as a temporary symbol and insert the matching Atom.
-            const first_sym = filtered_syms[0].getSymbol(context);
+            const first_sym = symtab[indexes.start];
             if (first_sym.n_value > sect.addr) {
                 const sym_index = self.sections_as_symbols.get(sect_id) orelse blk: {
                     const sym_index = @intCast(u32, self.symtab.items.len);
@@ -334,41 +336,28 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
                     macho_file,
                     object_id,
                     sym_index,
+                    0,
                     atom_size,
                     sect.@"align",
-                    &.{},
                     match,
                 );
                 try macho_file.addAtomToSection(atom_index, match);
             }
 
-            var next_sym_count: usize = 0;
-            while (next_sym_count < filtered_syms.len) {
-                const next_sym = filtered_syms[next_sym_count].getSymbol(context);
+            var next_sym_index = indexes.start;
+            while (next_sym_index < indexes.end) {
+                const next_sym = symtab[next_sym_index];
                 const addr = next_sym.n_value;
-                const atom_syms = filterSymbolsByAddress(
-                    filtered_syms[next_sym_count..],
-                    addr,
-                    addr + 1,
-                    context,
-                );
-                next_sym_count += atom_syms.len;
+                const atom_syms = filterSymbolsByAddress(symtab[next_sym_index..], addr, addr + 1);
+                assert(atom_syms.start != atom_syms.end);
+                const atom_sym_index = atom_syms.start + next_sym_index;
+                const nsym_trailing = atom_syms.end - atom_syms.start - 1;
+                next_sym_index += atom_syms.end;
 
-                // We want to bubble up the first externally defined symbol here.
-                assert(atom_syms.len > 0);
-                var sorted_atom_syms = std.ArrayList(SymbolAtIndex).init(gpa);
-                defer sorted_atom_syms.deinit();
-                try sorted_atom_syms.appendSlice(atom_syms);
-                sort.sort(
-                    SymbolAtIndex,
-                    sorted_atom_syms.items,
-                    context,
-                    SymbolAtIndex.greaterThanBySeniority,
-                );
-
+                // TODO: We want to bubble up the first externally defined symbol here.
                 const atom_size = blk: {
-                    const end_addr = if (next_sym_count < filtered_syms.len)
-                        filtered_syms[next_sym_count].getSymbol(context).n_value
+                    const end_addr = if (next_sym_index < indexes.end)
+                        symtab[next_sym_index].n_value
                     else
                         sect.addr + sect.size;
                     break :blk end_addr - addr;
@@ -380,13 +369,14 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
                 const atom_index = try self.createAtomFromSubsection(
                     macho_file,
                     object_id,
-                    sorted_atom_syms.items[0].index,
+                    atom_sym_index,
+                    nsym_trailing,
                     atom_size,
                     atom_align,
-                    sorted_atom_syms.items[1..],
                     match,
                 );
 
+                // TODO rework this at the relocation level
                 if (cpu_arch == .x86_64 and addr == sect.addr) {
                     // In x86_64 relocs, it can so happen that the compiler refers to the same
                     // atom by both the actual assigned symbol and the start of the section. In this
@@ -403,20 +393,12 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
                         try self.sections_as_symbols.putNoClobber(gpa, sect_id, alias);
                         break :blk alias;
                     };
-                    const atom = macho_file.getAtomPtr(atom_index);
-                    try atom.contained.append(gpa, .{
-                        .sym_index = alias,
-                        .offset = 0,
-                    });
                     try self.atom_by_index_table.put(gpa, alias, atom_index);
                 }
 
                 try macho_file.addAtomToSection(atom_index, match);
             }
         } else {
-            // If there is no symbol to refer to this atom, we create
-            // a temp one, unless we already did that when working out the relocations
-            // of other atoms.
             const sym_index = self.sections_as_symbols.get(sect_id) orelse blk: {
                 const sym_index = @intCast(u32, self.symtab.items.len);
                 try self.symtab.append(gpa, .{
@@ -433,11 +415,14 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
                 macho_file,
                 object_id,
                 sym_index,
+                0,
                 sect.size,
                 sect.@"align",
-                filtered_syms,
                 match,
             );
+            // If there is no symbol to refer to this atom, we create
+            // a temp one, unless we already did that when working out the relocations
+            // of other atoms.
             try macho_file.addAtomToSection(atom_index, match);
         }
     }
@@ -448,15 +433,16 @@ fn createAtomFromSubsection(
     macho_file: *MachO,
     object_id: u32,
     sym_index: u32,
+    nsyms_trailing: u32,
     size: u64,
     alignment: u32,
-    indexes: []const SymbolAtIndex,
     match: u8,
 ) !AtomIndex {
     const gpa = macho_file.base.allocator;
     const sym = self.symtab.items[sym_index];
     const atom_index = try macho_file.createEmptyAtom(sym_index, size, alignment);
     const atom = macho_file.getAtomPtr(atom_index);
+    atom.nsyms_trailing = nsyms_trailing;
     atom.file = object_id;
     self.symtab.items[sym_index].n_sect = match + 1;
 
@@ -472,21 +458,11 @@ fn createAtomFromSubsection(
     try self.atoms.append(gpa, atom_index);
     try self.atom_by_index_table.putNoClobber(gpa, sym_index, atom_index);
 
-    // Since this is atom gets a helper local temporary symbol that didn't exist
-    // in the object file which encompasses the entire section, we need traverse
-    // the filtered symbols and note which symbol is contained within so that
-    // we can properly allocate addresses down the line.
-    // While we're at it, we need to update segment,section mapping of each symbol too.
-    try atom.contained.ensureTotalCapacity(gpa, indexes.len);
-    for (indexes) |inner_sym_index| {
-        const inner_sym = &self.symtab.items[inner_sym_index.index];
-        inner_sym.n_sect = match + 1;
-        atom.contained.appendAssumeCapacity(.{
-            .sym_index = inner_sym_index.index,
-            .offset = inner_sym.n_value - sym.n_value,
-        });
-
-        try self.atom_by_index_table.putNoClobber(gpa, inner_sym_index.index, atom_index);
+    var it = Atom.getInnerSymbolsIterator(macho_file, atom_index);
+    while (it.next()) |sym_loc| {
+        const inner = macho_file.getSymbolPtr(sym_loc);
+        inner.n_sect = match + 1;
+        try self.atom_by_index_table.putNoClobber(gpa, sym_loc.sym_index, atom_index);
     }
 
     return atom_index;
@@ -495,7 +471,17 @@ fn createAtomFromSubsection(
 pub fn getSourceSymbol(self: Object, index: u32) ?macho.nlist_64 {
     const symtab = self.in_symtab.?;
     if (index >= symtab.len) return null;
-    return symtab[index];
+    const mapped_index = self.source_symtab_lookup.items[index];
+    return symtab[mapped_index];
+}
+
+/// Caller owns memory.
+pub fn createReverseSymbolLookup(self: Object, gpa: Allocator) ![]u32 {
+    const lookup = try gpa.alloc(u32, self.in_symtab.?.len);
+    for (self.source_symtab_lookup.items) |source_id, id| {
+        lookup[source_id] = @intCast(u32, id);
+    }
+    return lookup;
 }
 
 pub fn getSourceSection(self: Object, index: u16) macho.section_64 {

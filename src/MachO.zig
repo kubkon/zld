@@ -1877,10 +1877,6 @@ pub fn deinit(self: *MachO) void {
 
     self.segments.deinit(gpa);
     self.sections.deinit(gpa);
-
-    for (self.atoms.items) |*atom| {
-        atom.deinit(gpa);
-    }
     self.atoms.deinit(gpa);
 
     self.atom_by_index_table.deinit(gpa);
@@ -2080,14 +2076,25 @@ fn allocateAtoms(self: *MachO) !void {
                 base_vaddr,
             });
 
-            // Update each symbol contained within the atom
-            for (atom.contained.items) |sym_at_off| {
-                const contained_sym = self.getSymbolPtr(.{
-                    .sym_index = sym_at_off.sym_index,
-                    .file = atom.file,
-                });
-                contained_sym.n_value = base_vaddr + sym_at_off.offset;
-                contained_sym.n_sect = n_sect;
+            if (atom.file) |_| {
+                // Update each symbol contained within the atom
+                var it = Atom.getInnerSymbolsIterator(self, atom_index);
+                while (it.next()) |sym_loc| {
+                    const inner_sym = self.getSymbolPtr(sym_loc);
+                    inner_sym.n_value = base_vaddr + Atom.calcInnerSymbolOffset(
+                        self,
+                        atom_index,
+                        sym_loc.sym_index,
+                    );
+                    inner_sym.n_sect = n_sect;
+                }
+
+                // If there is a section alias, update it now too
+                if (Atom.getSectionAlias(self, atom_index)) |sym_loc| {
+                    const alias = self.getSymbolPtr(sym_loc);
+                    alias.n_value = base_vaddr;
+                    alias.n_sect = n_sect;
+                }
             }
 
             base_vaddr += atom.size;
@@ -2290,9 +2297,18 @@ fn sortSections(self: *MachO) !void {
             const n_sect = section_table[sym.n_sect - 1] + 1;
             sym.n_sect = n_sect;
 
-            for (atom.contained.items) |sym_at_off| {
-                const inner = self.getSymbolPtr(.{ .sym_index = sym_at_off.sym_index, .file = atom.file });
-                inner.n_sect = n_sect;
+            // TODO: this effectively means: is this Atom non-synthetic?
+            if (atom.file) |_| {
+                var it = Atom.getInnerSymbolsIterator(self, atom_index);
+                while (it.next()) |sym_loc| {
+                    const inner = self.getSymbolPtr(sym_loc);
+                    inner.n_sect = n_sect;
+                }
+
+                if (Atom.getSectionAlias(self, atom_index)) |sym_loc| {
+                    const alias = self.getSymbolPtr(sym_loc);
+                    alias.n_sect = n_sect;
+                }
             }
 
             if (atom.next_index) |next_index| {
@@ -3788,11 +3804,8 @@ pub fn generateSymbolStabs(
         );
         try locals.appendSlice(stabs);
 
-        for (atom.contained.items) |sym_at_off| {
-            const sym_loc = SymbolWithLoc{
-                .sym_index = sym_at_off.sym_index,
-                .file = atom.file,
-            };
+        var it = Atom.getInnerSymbolsIterator(self, atom_index);
+        while (it.next()) |sym_loc| {
             const contained_stabs = try self.generateSymbolStabsForSymbol(
                 sym_loc,
                 debug_info,
@@ -4063,20 +4076,31 @@ pub fn logAtom(self: *MachO, atom_index: AtomIndex) void {
         sym.n_sect,
     });
 
-    for (atom.contained.items) |sym_off| {
-        const inner_sym = self.getSymbol(.{
-            .sym_index = sym_off.sym_index,
-            .file = atom.file,
-        });
-        const inner_sym_name = self.getSymbolName(.{
-            .sym_index = sym_off.sym_index,
-            .file = atom.file,
-        });
-        log.debug("    (%{d}, '{s}') @ {x} ({x})", .{
-            sym_off.sym_index,
-            inner_sym_name,
-            inner_sym.n_value,
-            sym_off.offset,
-        });
+    if (atom.file) |_| {
+        var it = Atom.getInnerSymbolsIterator(self, atom_index);
+        while (it.next()) |sym_loc| {
+            const inner = self.getSymbol(sym_loc);
+            const inner_name = self.getSymbolName(sym_loc);
+            const offset = Atom.calcInnerSymbolOffset(self, atom_index, sym_loc.sym_index);
+
+            log.debug("    (%{d}, '{s}') @ {x} ({x})", .{
+                sym_loc.sym_index,
+                inner_name,
+                inner.n_value,
+                offset,
+            });
+        }
+
+        if (Atom.getSectionAlias(self, atom_index)) |sym_loc| {
+            const alias = self.getSymbol(sym_loc);
+            const alias_name = self.getSymbolName(sym_loc);
+
+            log.debug("    (%{d}, '{s}') @ {x} ({x})", .{
+                sym_loc.sym_index,
+                alias_name,
+                alias.n_value,
+                0,
+            });
+        }
     }
 }
