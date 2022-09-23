@@ -48,11 +48,6 @@ alignment: u32,
 next_index: ?AtomIndex,
 prev_index: ?AtomIndex,
 
-pub const Binding = struct {
-    target: SymbolWithLoc,
-    offset: u64,
-};
-
 pub const empty = Atom{
     .sym_index = 0,
     .nsyms_trailing = 0,
@@ -146,28 +141,9 @@ pub fn scanAtomRelocs(
     const atom = macho_file.getAtom(atom_index);
     assert(atom.file != null); // synthetic atoms do not have relocs
 
-    const object = macho_file.objects.items[atom.file.?];
-    const ctx: RelocContext = blk: {
-        if (object.getSourceSymbol(atom.sym_index)) |source_sym| {
-            const source_sect = object.getSourceSection(source_sym.n_sect - 1);
-            break :blk .{
-                .base_addr = source_sect.addr,
-                .base_offset = @intCast(i32, source_sym.n_value - source_sect.addr),
-            };
-        }
-        for (object.getSourceSections()) |source_sect, i| {
-            if (object.sections_as_symbols.get(@intCast(u16, i))) |sym_index| {
-                if (sym_index == atom.sym_index) break :blk .{
-                    .base_addr = source_sect.addr,
-                    .base_offset = 0,
-                };
-            }
-        } else unreachable;
-    };
-
     return switch (arch) {
-        .aarch64 => scanAtomRelocsArm64(macho_file, atom_index, relocs, reverse_lookup, ctx),
-        .x86_64 => scanAtomRelocsX86(macho_file, atom_index, relocs, reverse_lookup, ctx),
+        .aarch64 => scanAtomRelocsArm64(macho_file, atom_index, relocs, reverse_lookup),
+        .x86_64 => scanAtomRelocsX86(macho_file, atom_index, relocs, reverse_lookup),
         else => unreachable,
     };
 }
@@ -177,7 +153,7 @@ const RelocContext = struct {
     base_offset: i32 = 0,
 };
 
-fn parseRelocTarget(
+pub fn parseRelocTarget(
     macho_file: *MachO,
     atom_index: AtomIndex,
     rel: macho.relocation_info,
@@ -252,7 +228,6 @@ fn scanAtomRelocsArm64(
     atom_index: AtomIndex,
     relocs: []align(1) const macho.relocation_info,
     reverse_lookup: []u32,
-    context: RelocContext,
 ) !void {
     for (relocs) |rel| {
         const rel_type = @intToEnum(macho.reloc_type_arm64, rel.r_type);
@@ -276,9 +251,6 @@ fn scanAtomRelocsArm64(
                 // TODO rewrite relocation
                 try addGotEntry(macho_file, target);
             },
-            .ARM64_RELOC_UNSIGNED => {
-                try addPtrBindingOrRebase(macho_file, atom_index, rel, target, context);
-            },
             .ARM64_RELOC_TLVP_LOAD_PAGE21,
             .ARM64_RELOC_TLVP_LOAD_PAGEOFF12,
             => {
@@ -294,7 +266,6 @@ fn scanAtomRelocsX86(
     atom_index: AtomIndex,
     relocs: []align(1) const macho.relocation_info,
     reverse_lookup: []u32,
-    context: RelocContext,
 ) !void {
     for (relocs) |rel| {
         const rel_type = @intToEnum(macho.reloc_type_x86_64, rel.r_type);
@@ -315,30 +286,11 @@ fn scanAtomRelocsX86(
                 // TODO rewrite relocation
                 try addGotEntry(macho_file, target);
             },
-            .X86_64_RELOC_UNSIGNED => {
-                try addPtrBindingOrRebase(macho_file, atom_index, rel, target, context);
-            },
             .X86_64_RELOC_TLV => {
                 try addTlvPtrEntry(macho_file, target);
             },
             else => {},
         }
-    }
-}
-
-fn addPtrBindingOrRebase(
-    macho_file: *MachO,
-    atom_index: AtomIndex,
-    rel: macho.relocation_info,
-    target: MachO.SymbolWithLoc,
-    context: RelocContext,
-) !void {
-    const sym = macho_file.getSymbol(target);
-    if (sym.undf()) {
-        try macho_file.addBinding(atom_index, .{
-            .target = target,
-            .offset = @intCast(u32, rel.r_address - context.base_offset),
-        });
     }
 }
 
@@ -408,7 +360,7 @@ pub fn resolveRelocs(
 
     return switch (arch) {
         .aarch64 => resolveRelocsArm64(macho_file, atom_index, atom_code, atom_relocs, reverse_lookup, ctx),
-        .x86_64 => return resolveRelocsX86(macho_file, atom_index, atom_code, atom_relocs, reverse_lookup, ctx),
+        .x86_64 => resolveRelocsX86(macho_file, atom_index, atom_code, atom_relocs, reverse_lookup, ctx),
         else => unreachable,
     };
 }
