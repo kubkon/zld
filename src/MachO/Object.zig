@@ -36,7 +36,6 @@ in_strtab: ?[]const u8 = null,
 symtab: std.ArrayListUnmanaged(macho.nlist_64) = .{},
 source_symtab_lookup: std.ArrayListUnmanaged(u32) = .{},
 
-sections: ?[]macho.section_64 = null,
 sections_as_symbols: std.AutoHashMapUnmanaged(u16, u32) = .{},
 
 atoms: std.ArrayListUnmanaged(AtomIndex) = .{},
@@ -48,11 +47,6 @@ pub fn deinit(self: *Object, gpa: Allocator) void {
     self.sections_as_symbols.deinit(gpa);
     self.atoms.deinit(gpa);
     self.atom_by_index_table.deinit(gpa);
-
-    if (self.sections) |sections| {
-        gpa.free(sections);
-    }
-
     gpa.free(self.name);
     gpa.free(self.contents);
 }
@@ -93,14 +87,6 @@ pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch)
     };
     while (it.next()) |cmd| {
         switch (cmd.cmd()) {
-            .SEGMENT_64 => {
-                const segment = cmd.cast(macho.segment_command_64).?;
-                const sections = try allocator.alloc(macho.section_64, segment.nsects);
-                for (cmd.getSections()) |sect, i| {
-                    sections[i] = sect;
-                }
-                self.sections = sections;
-            },
             .SYMTAB => {
                 const symtab = cmd.cast(macho.symtab_command).?;
                 self.in_symtab = @ptrCast(
