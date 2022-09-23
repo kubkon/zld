@@ -172,8 +172,8 @@ const SymbolAtIndex = struct {
 };
 
 fn filterSymbolsByAddress(symbols: []macho.nlist_64, start_addr: u64, end_addr: u64) struct {
-    start: u32,
-    end: u32,
+    index: u32,
+    len: u32,
 } {
     const Predicate = struct {
         addr: u64,
@@ -183,14 +183,14 @@ fn filterSymbolsByAddress(symbols: []macho.nlist_64, start_addr: u64, end_addr: 
         }
     };
 
-    const start = MachO.lsearch(macho.nlist_64, symbols, Predicate{
+    const index = MachO.lsearch(macho.nlist_64, symbols, Predicate{
         .addr = start_addr,
     });
-    const end = MachO.lsearch(macho.nlist_64, symbols[start..], Predicate{
+    const len = MachO.lsearch(macho.nlist_64, symbols[index..], Predicate{
         .addr = end_addr,
-    }) + start;
+    });
 
-    return .{ .start = @intCast(u32, start), .end = @intCast(u32, end) };
+    return .{ .index = @intCast(u32, index), .len = @intCast(u32, len) };
 }
 
 const SortedSection = struct {
@@ -281,7 +281,6 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
     defer gpa.free(symtab);
 
     const subsections_via_symbols = self.header.flags & macho.MH_SUBSECTIONS_VIA_SYMBOLS != 0;
-    var sect_sym_index: u32 = 0;
 
     // Sort section headers by address.
     var sorted_sections = try gpa.alloc(SortedSection, sections.len);
@@ -293,6 +292,7 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
 
     std.sort.sort(SortedSection, sorted_sections, {}, sectionLessThanByAddress);
 
+    var sect_sym_index: u32 = 0;
     for (sorted_sections) |section| {
         const sect = section.header;
         if (sect.isDebug()) continue;
@@ -313,16 +313,15 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
         });
 
         const cpu_arch = macho_file.options.target.cpu_arch.?;
-        const indexes = filterSymbolsByAddress(symtab[sect_sym_index..], sect.addr, sect.addr + sect.size);
-        const start_index = sect_sym_index + indexes.start;
-        const end_index = sect_sym_index + indexes.end;
-        sect_sym_index += indexes.end;
+        const sect_loc = filterSymbolsByAddress(symtab[sect_sym_index..], sect.addr, sect.addr + sect.size);
+        const sect_start_index = sect_sym_index + sect_loc.index;
+        sect_sym_index += sect_loc.len;
 
-        if (subsections_via_symbols and indexes.start != indexes.end) {
+        if (subsections_via_symbols and sect_loc.len > 0) {
             // If the first nlist does not match the start of the section,
             // then we need to encapsulate the memory range [section start, first symbol)
             // as a temporary symbol and insert the matching Atom.
-            const first_sym = symtab[start_index];
+            const first_sym = symtab[sect_start_index];
             if (first_sym.n_value > sect.addr) {
                 const sym_index = self.sections_as_symbols.get(sect_id) orelse blk: {
                     const sym_index = @intCast(u32, self.symtab.items.len);
@@ -349,33 +348,32 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
                 try macho_file.addAtomToSection(atom_index, match);
             }
 
-            var next_sym_index = start_index;
-            while (next_sym_index < end_index) {
+            var next_sym_index = sect_start_index;
+            while (next_sym_index < sect_start_index + sect_loc.len) {
                 const next_sym = symtab[next_sym_index];
                 const addr = next_sym.n_value;
-                const atom_syms = filterSymbolsByAddress(symtab[next_sym_index..], addr, addr + 1);
-                assert(atom_syms.start != atom_syms.end);
-                const atom_sym_index = atom_syms.start + next_sym_index;
-                const nsym_trailing = atom_syms.end - atom_syms.start - 1;
-                next_sym_index += atom_syms.end;
+                const atom_loc = filterSymbolsByAddress(symtab[next_sym_index..], addr, addr + 1);
+                assert(atom_loc.len > 0);
+                const atom_sym_index = atom_loc.index + next_sym_index;
+                const nsyms_trailing = atom_loc.len - 1;
+                next_sym_index += atom_loc.len;
 
                 // TODO: We want to bubble up the first externally defined symbol here.
-                const atom_size = blk: {
-                    const end_addr = if (next_sym_index < end_index)
-                        symtab[next_sym_index].n_value
-                    else
-                        sect.addr + sect.size;
-                    break :blk end_addr - addr;
-                };
+                const atom_size = if (next_sym_index < sect_start_index + sect_loc.len)
+                    symtab[next_sym_index].n_value - addr
+                else
+                    sect.addr + sect.size - addr;
+
                 const atom_align = if (addr > 0)
                     math.min(@ctz(addr), sect.@"align")
                 else
                     sect.@"align";
+
                 const atom_index = try self.createAtomFromSubsection(
                     macho_file,
                     object_id,
                     atom_sym_index,
-                    nsym_trailing,
+                    nsyms_trailing,
                     atom_size,
                     atom_align,
                     match,
