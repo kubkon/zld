@@ -307,6 +307,11 @@ pub fn flush(self: *MachO) !void {
         try object.splitIntoAtoms(self, @intCast(u32, object_id));
     }
 
+    var reverse_lookups: [][]u32 = try arena.alloc([]u32, self.objects.items.len);
+    for (self.objects.items) |object, i| {
+        reverse_lookups[i] = try object.createReverseSymbolLookup(arena);
+    }
+
     for (self.objects.items) |object| {
         for (object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index);
@@ -315,7 +320,7 @@ pub fn flush(self: *MachO) !void {
             if (header.isZerofill()) continue;
 
             const relocs = Atom.getAtomRelocs(self, atom_index);
-            try Atom.scanAtomRelocs(self, atom_index, relocs);
+            try Atom.scanAtomRelocs(self, atom_index, relocs, reverse_lookups[atom.file.?]);
         }
     }
 
@@ -338,7 +343,7 @@ pub fn flush(self: *MachO) !void {
         self.logAtoms();
     }
 
-    try self.writeAtoms();
+    try self.writeAtoms(reverse_lookups);
 
     var lc_buffer = std.ArrayList(u8).init(arena);
     const lc_writer = lc_buffer.writer();
@@ -2126,7 +2131,7 @@ fn allocateSpecialSymbols(self: *MachO) !void {
     }
 }
 
-fn writeAtoms(self: *MachO) !void {
+fn writeAtoms(self: *MachO, reverse_lookups: [][]u32) !void {
     const gpa = self.base.allocator;
     const slice = self.sections.slice();
 
@@ -2199,7 +2204,13 @@ fn writeAtoms(self: *MachO) !void {
                 const code = Atom.getAtomCode(self, atom_index);
                 const relocs = Atom.getAtomRelocs(self, atom_index);
                 buffer.appendSliceAssumeCapacity(code);
-                try Atom.resolveRelocs(self, atom_index, buffer.items[offset..][0..atom.size], relocs);
+                try Atom.resolveRelocs(
+                    self,
+                    atom_index,
+                    buffer.items[offset..][0..atom.size],
+                    relocs,
+                    reverse_lookups[atom.file.?],
+                );
             }
 
             var i: usize = 0;
