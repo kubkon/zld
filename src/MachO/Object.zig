@@ -153,44 +153,30 @@ const SymbolAtIndex = struct {
         return ctx.object.getString(sym.n_strx);
     }
 
-    /// Returns whether lhs is less than rhs by allocated address in object file.
-    /// Undefined symbols are pushed to the back (always evaluate to true).
+    /// Performs lexicographic-like check.
+    /// * lhs and rhs defined
+    ///   * if lhs == rhs
+    ///     * ext < weak < local < temp
+    ///   * lhs < rhs
+    /// * !rhs is undefined
     fn lessThan(ctx: Context, lhs_index: SymbolAtIndex, rhs_index: SymbolAtIndex) bool {
         const lhs = lhs_index.getSymbol(ctx);
         const rhs = rhs_index.getSymbol(ctx);
-        if (lhs.sect()) {
-            if (rhs.sect()) {
-                // Same group, sort by address.
-                return lhs.n_value < rhs.n_value;
-            } else {
-                return true;
-            }
-        } else {
-            return false;
-        }
-    }
-
-    /// Returns whether lhs is less senior than rhs. The rules are:
-    /// 1. ext
-    /// 2. weak
-    /// 3. local
-    /// 4. temp (local starting with `l` prefix).
-    fn lessThanBySeniority(ctx: Context, lhs_index: SymbolAtIndex, rhs_index: SymbolAtIndex) bool {
-        const lhs = lhs_index.getSymbol(ctx);
-        const rhs = rhs_index.getSymbol(ctx);
-        if (!rhs.ext()) {
-            const lhs_name = lhs_index.getSymbolName(ctx);
-            return mem.startsWith(u8, lhs_name, "l") or mem.startsWith(u8, lhs_name, "L");
-        } else if (rhs.pext() or rhs.weakDef()) {
-            return !lhs.ext();
-        } else {
-            return false;
-        }
-    }
-
-    /// Like lessThanBySeniority but negated.
-    fn greaterThanBySeniority(ctx: Context, lhs_index: SymbolAtIndex, rhs_index: SymbolAtIndex) bool {
-        return !lessThanBySeniority(ctx, lhs_index, rhs_index);
+        if (lhs.sect() and rhs.sect()) {
+            if (lhs.n_value == rhs.n_value) {
+                if (lhs.ext() and rhs.ext()) {
+                    return lhs.pext() or lhs.weakDef();
+                } else {
+                    const lhs_name = lhs_index.getSymbolName(ctx);
+                    const lhs_temp = mem.startsWith(u8, lhs_name, "l") or mem.startsWith(u8, lhs_name, "L");
+                    const rhs_name = rhs_index.getSymbolName(ctx);
+                    const rhs_temp = mem.startsWith(u8, rhs_name, "l") or mem.startsWith(u8, rhs_name, "L");
+                    if (lhs_temp and rhs_temp) {
+                        return false;
+                    } else return rhs_temp;
+                }
+            } else return lhs.n_value < rhs.n_value;
+        } else return rhs.undf();
     }
 };
 
