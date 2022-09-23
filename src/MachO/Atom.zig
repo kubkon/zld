@@ -155,7 +155,7 @@ pub fn scanAtomRelocs(
                 .base_offset = @intCast(i32, source_sym.n_value - source_sect.addr),
             };
         }
-        for (object.sections.items) |source_sect, i| {
+        for (object.getSourceSections()) |source_sect, i| {
             if (object.sections_as_symbols.get(@intCast(u16, i))) |sym_index| {
                 if (sym_index == atom.sym_index) break :blk .{
                     .base_addr = source_sect.addr,
@@ -421,7 +421,7 @@ pub fn resolveRelocs(
                 .base_offset = @intCast(i32, source_sym.n_value - source_sect.addr),
             };
         }
-        for (object.sections.items) |source_sect, i| {
+        for (object.getSourceSections()) |source_sect, i| {
             if (object.sections_as_symbols.get(@intCast(u16, i))) |sym_index| {
                 if (sym_index == atom.sym_index) break :blk .{
                     .base_addr = source_sect.addr,
@@ -952,7 +952,7 @@ pub fn getAtomCode(macho_file: *MachO, atom_index: AtomIndex) []const u8 {
         // If there was no matching symbol present in the source symtab, this means
         // we are dealing with either an entire section, or part of it, but also
         // starting at the beginning.
-        const source_sect = for (object.sections.items) |source_sect, sect_id| {
+        const source_sect = for (object.getSourceSections()) |source_sect, sect_id| {
             if (object.sections_as_symbols.get(@intCast(u16, sect_id))) |sym_index| {
                 if (sym_index == atom.sym_index) break source_sect;
             }
@@ -977,7 +977,7 @@ pub fn getAtomRelocs(macho_file: *MachO, atom_index: AtomIndex) []align(1) const
         // If there was no matching symbol present in the source symtab, this means
         // we are dealing with either an entire section, or part of it, but also
         // starting at the beginning.
-        const source_sect = for (object.sections.items) |source_sect, sect_id| {
+        const source_sect = for (object.getSourceSections()) |source_sect, sect_id| {
             if (object.sections_as_symbols.get(@intCast(u16, sect_id))) |sym_index| {
                 if (sym_index == atom.sym_index) break source_sect;
             }

@@ -36,7 +36,7 @@ in_strtab: ?[]const u8 = null,
 symtab: std.ArrayListUnmanaged(macho.nlist_64) = .{},
 source_symtab_lookup: std.ArrayListUnmanaged(u32) = .{},
 
-sections: std.ArrayListUnmanaged(macho.section_64) = .{},
+sections: ?[]macho.section_64 = null,
 sections_as_symbols: std.AutoHashMapUnmanaged(u16, u32) = .{},
 
 atoms: std.ArrayListUnmanaged(AtomIndex) = .{},
@@ -45,10 +45,14 @@ atom_by_index_table: std.AutoHashMapUnmanaged(u32, AtomIndex) = .{},
 pub fn deinit(self: *Object, gpa: Allocator) void {
     self.symtab.deinit(gpa);
     self.source_symtab_lookup.deinit(gpa);
-    self.sections.deinit(gpa);
     self.sections_as_symbols.deinit(gpa);
     self.atoms.deinit(gpa);
     self.atom_by_index_table.deinit(gpa);
+
+    if (self.sections) |sections| {
+        gpa.free(sections);
+    }
+
     gpa.free(self.name);
     gpa.free(self.contents);
 }
@@ -91,10 +95,11 @@ pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch)
         switch (cmd.cmd()) {
             .SEGMENT_64 => {
                 const segment = cmd.cast(macho.segment_command_64).?;
-                try self.sections.ensureUnusedCapacity(allocator, segment.nsects);
-                for (cmd.getSections()) |sect| {
-                    self.sections.appendAssumeCapacity(sect);
+                const sections = try allocator.alloc(macho.section_64, segment.nsects);
+                for (cmd.getSections()) |sect, i| {
+                    sections[i] = sect;
                 }
+                self.sections = sections;
             },
             .SYMTAB => {
                 const symtab = cmd.cast(macho.symtab_command).?;
@@ -213,7 +218,7 @@ fn sectionLessThanByAddress(ctx: void, lhs: SortedSection, rhs: SortedSection) b
 }
 
 pub fn scanInputSections(self: Object, macho_file: *MachO) !void {
-    for (self.sections.items) |sect| {
+    for (self.getSourceSections()) |sect| {
         const match = (try macho_file.getOutputSection(sect)) orelse {
             log.debug("  unhandled section", .{});
             continue;
@@ -234,8 +239,9 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
 
     log.debug("splitting object({d}, {s}) into atoms: one-shot mode", .{ object_id, self.name });
 
+    const sections = self.getSourceSections();
     if (self.in_symtab == null) {
-        for (self.sections.items) |sect, id| {
+        for (sections) |sect, id| {
             if (sect.isDebug()) continue;
             const match = (try macho_file.getOutputSection(sect)) orelse {
                 log.debug("  unhandled section", .{});
@@ -290,10 +296,10 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
     var sect_sym_index: u32 = 0;
 
     // Sort section headers by address.
-    var sorted_sections = try gpa.alloc(SortedSection, self.sections.items.len);
+    var sorted_sections = try gpa.alloc(SortedSection, sections.len);
     defer gpa.free(sorted_sections);
 
-    for (self.sections.items) |sect, id| {
+    for (sections) |sect, id| {
         sorted_sections[id] = .{ .header = sect, .id = @intCast(u8, id) };
     }
 
@@ -496,8 +502,22 @@ pub fn createReverseSymbolLookup(self: Object, gpa: Allocator) ![]u32 {
 }
 
 pub fn getSourceSection(self: Object, index: u16) macho.section_64 {
-    assert(index < self.sections.items.len);
-    return self.sections.items[index];
+    const sections = self.getSourceSections();
+    assert(index < sections.len);
+    return sections[index];
+}
+
+pub fn getSourceSections(self: Object) []const macho.section_64 {
+    var it = LoadCommandIterator{
+        .ncmds = self.header.ncmds,
+        .buffer = self.contents[@sizeOf(macho.mach_header_64)..][0..self.header.sizeofcmds],
+    };
+    while (it.next()) |cmd| switch (cmd.cmd()) {
+        .SEGMENT_64 => {
+            return cmd.getSections();
+        },
+        else => {},
+    } else unreachable;
 }
 
 pub fn parseDataInCode(self: Object) ?[]const macho.data_in_code_entry {
@@ -551,7 +571,7 @@ pub fn parseDwarfInfo(self: Object) dwarf.DwarfInfo {
         .debug_names = &[0]u8{},
         .debug_frame = &[0]u8{},
     };
-    for (self.sections.items) |sect| {
+    for (self.getSourceSections()) |sect| {
         const segname = sect.segName();
         const sectname = sect.sectName();
         if (mem.eql(u8, segname, "__DWARF")) {
