@@ -277,7 +277,9 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
     };
 
     // We only care about defined symbols, so filter every other out.
-    const symtab = self.symtab.items[0..iundefsym];
+    const symtab = try gpa.dupe(macho.nlist_64, self.symtab.items[0..iundefsym]);
+    defer gpa.free(symtab);
+
     const subsections_via_symbols = self.header.flags & macho.MH_SUBSECTIONS_VIA_SYMBOLS != 0;
     var sect_sym_index: u32 = 0;
 
