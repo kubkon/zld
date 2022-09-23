@@ -202,6 +202,16 @@ fn filterSymbolsByAddress(symbols: []macho.nlist_64, start_addr: u64, end_addr: 
     return .{ .start = @intCast(u32, start), .end = @intCast(u32, end) };
 }
 
+const SortedSection = struct {
+    header: macho.section_64,
+    id: u8,
+};
+
+fn sectionLessThanByAddress(ctx: void, lhs: SortedSection, rhs: SortedSection) bool {
+    _ = ctx;
+    return lhs.header.addr < rhs.header.addr;
+}
+
 pub fn scanInputSections(self: Object, macho_file: *MachO) !void {
     for (self.sections.items) |sect| {
         const match = (try macho_file.getOutputSection(sect)) orelse {
@@ -277,11 +287,23 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
     // We only care about defined symbols, so filter every other out.
     const symtab = self.symtab.items[0..iundefsym];
     const subsections_via_symbols = self.header.flags & macho.MH_SUBSECTIONS_VIA_SYMBOLS != 0;
+    var sect_sym_index: u32 = 0;
+
+    // Sort section headers by address.
+    var sorted_sections = try gpa.alloc(SortedSection, self.sections.items.len);
+    defer gpa.free(sorted_sections);
 
     for (self.sections.items) |sect, id| {
+        sorted_sections[id] = .{ .header = sect, .id = @intCast(u8, id) };
+    }
+
+    std.sort.sort(SortedSection, sorted_sections, {}, sectionLessThanByAddress);
+
+    for (sorted_sections) |section| {
+        const sect = section.header;
         if (sect.isDebug()) continue;
 
-        const sect_id = @intCast(u8, id);
+        const sect_id = section.id;
         log.debug("splitting section '{s},{s}' into atoms", .{ sect.segName(), sect.sectName() });
 
         // Get matching segment/section in the final artifact.
@@ -297,13 +319,16 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
         });
 
         const cpu_arch = macho_file.options.target.cpu_arch.?;
-        const indexes = filterSymbolsByAddress(symtab, sect.addr, sect.addr + sect.size);
+        const indexes = filterSymbolsByAddress(symtab[sect_sym_index..], sect.addr, sect.addr + sect.size);
+        const start_index = sect_sym_index + indexes.start;
+        const end_index = sect_sym_index + indexes.end;
+        sect_sym_index += indexes.end;
 
         if (subsections_via_symbols and indexes.start != indexes.end) {
             // If the first nlist does not match the start of the section,
             // then we need to encapsulate the memory range [section start, first symbol)
             // as a temporary symbol and insert the matching Atom.
-            const first_sym = symtab[indexes.start];
+            const first_sym = symtab[start_index];
             if (first_sym.n_value > sect.addr) {
                 const sym_index = self.sections_as_symbols.get(sect_id) orelse blk: {
                     const sym_index = @intCast(u32, self.symtab.items.len);
@@ -330,8 +355,8 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
                 try macho_file.addAtomToSection(atom_index, match);
             }
 
-            var next_sym_index = indexes.start;
-            while (next_sym_index < indexes.end) {
+            var next_sym_index = start_index;
+            while (next_sym_index < end_index) {
                 const next_sym = symtab[next_sym_index];
                 const addr = next_sym.n_value;
                 const atom_syms = filterSymbolsByAddress(symtab[next_sym_index..], addr, addr + 1);
@@ -342,7 +367,7 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
 
                 // TODO: We want to bubble up the first externally defined symbol here.
                 const atom_size = blk: {
-                    const end_addr = if (next_sym_index < indexes.end)
+                    const end_addr = if (next_sym_index < end_index)
                         symtab[next_sym_index].n_value
                     else
                         sect.addr + sect.size;
