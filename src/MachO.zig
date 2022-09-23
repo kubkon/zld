@@ -75,13 +75,11 @@ stubs: std.AutoArrayHashMapUnmanaged(SymbolWithLoc, u32) = .{},
 atoms: std.ArrayListUnmanaged(Atom) = .{},
 atom_by_index_table: std.AutoHashMapUnmanaged(u32, AtomIndex) = .{},
 
-rebases: RebaseTable = .{},
 bindings: BindingTable = .{},
 
 pub const AtomIndex = u32;
 
 const BindingTable = std.AutoHashMapUnmanaged(AtomIndex, std.ArrayListUnmanaged(Atom.Binding));
-const RebaseTable = std.AutoHashMapUnmanaged(AtomIndex, std.ArrayListUnmanaged(u32));
 
 pub const SymbolWithLoc = struct {
     // Index into the respective symbol table.
@@ -1887,14 +1885,6 @@ pub fn deinit(self: *MachO) void {
     self.atom_by_index_table.deinit(gpa);
 
     {
-        var it = self.rebases.valueIterator();
-        while (it.next()) |rebases| {
-            rebases.deinit(gpa);
-        }
-        self.rebases.deinit(gpa);
-    }
-
-    {
         var it = self.bindings.valueIterator();
         while (it.next()) |bindings| {
             bindings.deinit(gpa);
@@ -2593,8 +2583,6 @@ fn collectRebaseDataFromContainer(
 }
 
 fn collectRebaseData(self: *MachO, pointers: *std.ArrayList(bind.Pointer)) !void {
-    const gpa = self.base.allocator;
-
     log.debug("collecting rebase data", .{});
 
     // First, unpack GOT entries
@@ -2631,42 +2619,73 @@ fn collectRebaseData(self: *MachO, pointers: *std.ArrayList(bind.Pointer)) !void
         }
     }
 
-    // Finally, unpack the rest
-    // TODO: either traverse the relocations again, or save generated reabase offsets in local context
-    // when writing and resolving relocations.
-    var sorted_atoms_by_address = std.ArrayList(AtomIndex).init(gpa);
-    defer sorted_atoms_by_address.deinit();
-    try sorted_atoms_by_address.ensureTotalCapacityPrecise(self.rebases.count());
+    // Finally, unpack the rest.
+    for (slice.items(.header)) |header, sect_id| {
+        switch (header.@"type"()) {
+            macho.S_LITERAL_POINTERS,
+            macho.S_REGULAR,
+            macho.S_MOD_INIT_FUNC_POINTERS,
+            macho.S_MOD_TERM_FUNC_POINTERS,
+            => {},
+            else => continue,
+        }
 
-    var it = self.rebases.keyIterator();
-    while (it.next()) |key_ptr| {
-        sorted_atoms_by_address.appendAssumeCapacity(key_ptr.*);
-    }
+        const segment_index = slice.items(.segment_index)[sect_id];
+        const segment = self.getSegment(@intCast(u8, sect_id));
+        if (segment.maxprot & macho.PROT.WRITE == 0) continue;
 
-    std.sort.sort(AtomIndex, sorted_atoms_by_address.items, AtomLessThanByAddressContext{
-        .macho_file = self,
-    }, atomLessThanByAddress);
+        const cpu_arch = self.options.target.cpu_arch.?;
+        var atom_index = slice.items(.first_atom_index)[sect_id];
 
-    for (sorted_atoms_by_address.items) |atom_index| {
-        const atom = self.getAtom(atom_index);
+        while (true) {
+            const atom = self.getAtom(atom_index);
+            const sym = self.getSymbol(atom.getSymbolWithLoc());
 
-        log.debug("  ATOM(%{d}, '{s}')", .{ atom.sym_index, self.getSymbolName(atom.getSymbolWithLoc()) });
+            const should_rebase = blk: {
+                if (self.dyld_private_sym_index) |sym_index| {
+                    if (atom.sym_index == sym_index) break :blk false;
+                }
+                break :blk !sym.undf();
+            };
 
-        const sym = self.getSymbol(atom.getSymbolWithLoc());
-        const segment_index = slice.items(.segment_index)[sym.n_sect - 1];
-        const seg = self.getSegment(sym.n_sect - 1);
+            if (should_rebase) {
+                log.debug("  ATOM(%{d}, '{s}')", .{ atom.sym_index, self.getSymbolName(atom.getSymbolWithLoc()) });
 
-        const base_offset = sym.n_value - seg.vmaddr;
+                const object = self.objects.items[atom.file.?];
+                const source_sym = object.getSourceSymbol(atom.sym_index).?;
+                const source_sect = object.getSourceSection(source_sym.n_sect - 1);
+                const relocs = Atom.getAtomRelocs(self, atom_index);
 
-        const rebases = self.rebases.get(atom_index).?;
-        try pointers.ensureUnusedCapacity(rebases.items.len);
-        for (rebases.items) |offset| {
-            log.debug("    | rebase at {x}", .{base_offset + offset});
+                for (relocs) |rel| {
+                    switch (cpu_arch) {
+                        .aarch64 => {
+                            const rel_type = @intToEnum(macho.reloc_type_arm64, rel.r_type);
+                            if (rel_type != .ARM64_RELOC_UNSIGNED) continue;
+                            if (rel.r_length != 3) continue;
+                        },
+                        .x86_64 => {
+                            const rel_type = @intToEnum(macho.reloc_type_x86_64, rel.r_type);
+                            if (rel_type != .X86_64_RELOC_UNSIGNED) continue;
+                            if (rel.r_length != 3) continue;
+                        },
+                        else => unreachable,
+                    }
 
-            pointers.appendAssumeCapacity(.{
-                .offset = base_offset + offset,
-                .segment_id = segment_index,
-            });
+                    const base_offset = @intCast(i32, sym.n_value - segment.vmaddr);
+                    const rel_offset = rel.r_address - @intCast(i32, source_sym.n_value - source_sect.addr);
+                    const offset = @intCast(u64, base_offset + rel_offset);
+                    log.debug("    | rebase at {x}", .{offset});
+
+                    try pointers.append(.{
+                        .offset = offset,
+                        .segment_id = segment_index,
+                    });
+                }
+            }
+
+            if (atom.next_index) |next_index| {
+                atom_index = next_index;
+            } else break;
         }
     }
 }
@@ -3549,17 +3568,6 @@ fn writeHeader(self: *MachO, ncmds: u32, sizeofcmds: u32) !void {
     try self.base.file.pwriteAll(mem.asBytes(&header), 0);
 }
 
-pub fn addRebase(self: *MachO, atom_index: AtomIndex, offset: u32) !void {
-    const gpa = self.base.allocator;
-    const atom = self.getAtom(atom_index);
-    log.debug("  (adding rebase at offset 0x{x} in %{d})", .{ offset, atom.sym_index });
-    const gop = try self.rebases.getOrPut(gpa, atom_index);
-    if (!gop.found_existing) {
-        gop.value_ptr.* = .{};
-    }
-    try gop.value_ptr.append(gpa, offset);
-}
-
 pub fn addBinding(self: *MachO, atom_index: AtomIndex, binding: Atom.Binding) !void {
     const gpa = self.base.allocator;
     const atom = self.getAtom(atom_index);
@@ -3577,13 +3585,9 @@ pub fn addBinding(self: *MachO, atom_index: AtomIndex, binding: Atom.Binding) !v
 
 pub fn freeAtom(self: *MachO, atom_index: AtomIndex) void {
     const gpa = self.base.allocator;
-    if (self.rebases.getPtr(atom_index)) |rebases| {
-        rebases.deinit(gpa);
-    }
     if (self.bindings.getPtr(atom_index)) |bindings| {
         bindings.deinit(gpa);
     }
-    _ = self.rebases.remove(atom_index);
     _ = self.bindings.remove(atom_index);
 }
 

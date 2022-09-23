@@ -339,36 +339,6 @@ fn addPtrBindingOrRebase(
             .target = target,
             .offset = @intCast(u32, rel.r_address - context.base_offset),
         });
-    } else {
-        const atom = macho_file.getAtom(atom_index);
-        const source_sym = macho_file.getSymbol(atom.getSymbolWithLoc());
-        const section = macho_file.sections.get(source_sym.n_sect - 1);
-        const header = section.header;
-        const sect_type = header.@"type"();
-
-        const should_rebase = rebase: {
-            if (rel.r_length != 3) break :rebase false;
-
-            const is_segment_writeable = blk: {
-                const segment = macho_file.getSegment(source_sym.n_sect - 1);
-                break :blk segment.maxprot & macho.PROT.WRITE != 0;
-            };
-
-            if (!is_segment_writeable) break :rebase false;
-            if (sect_type != macho.S_LITERAL_POINTERS and
-                sect_type != macho.S_REGULAR and
-                sect_type != macho.S_MOD_INIT_FUNC_POINTERS and
-                sect_type != macho.S_MOD_TERM_FUNC_POINTERS)
-            {
-                break :rebase false;
-            }
-
-            break :rebase true;
-        };
-
-        if (should_rebase) {
-            try macho_file.addRebase(atom_index, @intCast(u32, rel.r_address - context.base_offset));
-        }
     }
 }
 
