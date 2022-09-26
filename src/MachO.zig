@@ -1019,13 +1019,10 @@ pub fn createTlvPtrAtom(self: *MachO) !AtomIndex {
 
 fn createDyldStubBinderGotAtom(self: *MachO) !void {
     const sym_index = self.dyld_stub_binder_index orelse return;
-
-    const gpa = self.base.allocator;
-
     const sym_loc = SymbolWithLoc{ .sym_index = sym_index, .file = null };
     const got_atom_index = try self.createGotAtom();
     const got_atom = self.getAtom(got_atom_index);
-    try self.got_entries.putNoClobber(gpa, sym_loc, got_atom.sym_index);
+    try self.got_entries.putNoClobber(self.base.allocator, sym_loc, got_atom.sym_index);
 }
 
 fn createDyldPrivateAtom(self: *MachO) !void {
@@ -1897,6 +1894,8 @@ fn createSegments(self: *MachO) !void {
     }
 
     for (self.sections.items(.header)) |header, sect_id| {
+        // TODO: clean this up
+        if (self.sections.items(.first_atom_index)[sect_id] == null) continue; // empty section
         const segname = header.segName();
         const segment_id = self.getSegmentByName(segname) orelse blk: {
             log.debug("creating segment '{s}'", .{segname});
@@ -2265,7 +2264,16 @@ fn sortSections(self: *MachO) !void {
     {
         var i: u8 = 0;
         while (i < slice.len) : (i += 1) {
-            sections.appendAssumeCapacity(.{ .section = self.sections.get(i), .old_id = @intCast(u8, i) });
+            const section = self.sections.get(i);
+            if (section.first_atom_index == null) {
+                // TODO: clean this up
+                log.debug("pruning section {s},{s}", .{
+                    section.header.segName(),
+                    section.header.sectName(),
+                });
+                continue;
+            }
+            sections.appendAssumeCapacity(.{ .section = section, .old_id = @intCast(u8, i) });
         }
     }
 
@@ -2277,8 +2285,9 @@ fn sortSections(self: *MachO) !void {
         segment_table[out.old_id] = @intCast(u8, i);
     }
 
+    self.sections.shrinkRetainingCapacity(0);
     for (sections.items) |out, i| {
-        self.sections.set(i, .{
+        self.sections.appendAssumeCapacity(.{
             .segment_index = segment_table[out.section.segment_index],
             .header = out.section.header,
             .first_atom_index = out.section.first_atom_index,
@@ -3926,8 +3935,7 @@ fn logSections(self: *MachO) void {
     }
 }
 
-fn logSymAttributes(sym: macho.nlist_64, buf: *[4]u8) []const u8 {
-    mem.set(u8, buf[0..4], '_');
+fn logSymAttributes(sym: macho.nlist_64, buf: []u8) []const u8 {
     if (sym.sect()) {
         buf[0] = 's';
     }
@@ -3954,6 +3962,7 @@ fn logSymtab(self: *MachO) void {
     for (self.objects.items) |object, id| {
         log.debug("  object({d}): {s}", .{ id, object.name });
         for (object.atoms.items) |atom_index| {
+            mem.set(u8, &buf, '_');
             const atom = self.getAtom(atom_index);
             if (atom.dead) {
                 mem.copy(u8, buf[4..], " DEAD");
@@ -3964,7 +3973,7 @@ fn logSymtab(self: *MachO) void {
                 object.getString(sym.n_strx),
                 sym.n_value,
                 sym.n_sect,
-                logSymAttributes(sym, buf[0..4]),
+                logSymAttributes(sym, &buf),
             });
         }
     }
@@ -3977,7 +3986,7 @@ fn logSymtab(self: *MachO) void {
             self.strtab.get(sym.n_strx).?,
             sym.n_value,
             sym.n_sect,
-            logSymAttributes(sym, buf[0..4]),
+            logSymAttributes(sym, &buf),
         });
     }
 
@@ -3999,7 +4008,7 @@ fn logSymtab(self: *MachO) void {
             self.getSymbolName(global),
             sym.n_value,
             sym.n_sect,
-            logSymAttributes(sym, buf[0..4]),
+            logSymAttributes(sym, &buf),
             global.file,
         });
 
@@ -4019,7 +4028,7 @@ fn logSymtab(self: *MachO) void {
             self.getSymbolName(global),
             sym.n_value,
             ord,
-            logSymAttributes(sym, buf[0..4]),
+            logSymAttributes(sym, &buf),
         });
 
         count += 1;

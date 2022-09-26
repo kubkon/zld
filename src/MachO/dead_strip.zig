@@ -239,10 +239,11 @@ fn prune(macho_file: *MachO, alive: std.AutoHashMap(AtomIndex, void)) !void {
     for (macho_file.objects.items) |object| {
         for (object.atoms.items) |atom_index| {
             if (alive.contains(atom_index)) continue;
-            macho_file.getAtomPtr(atom_index).dead = true;
-            macho_file.logAtom(atom_index, log);
 
             const atom = macho_file.getAtomPtr(atom_index);
+            atom.dead = true;
+            macho_file.logAtom(atom_index, log);
+
             const sym = macho_file.getSymbol(atom.getSymbolWithLoc());
             const sect_id = sym.n_sect - 1;
             var section = macho_file.sections.get(sect_id);
@@ -262,7 +263,6 @@ fn prune(macho_file: *MachO, alive: std.AutoHashMap(AtomIndex, void)) !void {
                 if (atom.prev_index) |prev_index| {
                     section.last_atom_index = prev_index;
                 } else {
-                    // TODO: remove section header without modifying section indexes.
                     section.first_atom_index = null;
                     section.last_atom_index = null;
                 }
