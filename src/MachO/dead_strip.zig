@@ -14,17 +14,12 @@ const SymbolWithLoc = MachO.SymbolWithLoc;
 pub fn gcAtoms(macho_file: *MachO, reverse_lookups: [][]u32) !void {
     const gpa = macho_file.base.allocator;
 
-    var arena_allocator = std.heap.ArenaAllocator.init(gpa);
-    defer arena_allocator.deinit();
-    const arena = arena_allocator.allocator();
+    var roots = std.AutoHashMap(AtomIndex, void).init(gpa);
+    defer roots.deinit();
 
-    var roots = std.AutoHashMap(AtomIndex, void).init(arena);
     try collectRoots(macho_file, &roots);
-
-    var alive = std.AutoHashMap(AtomIndex, void).init(arena);
-    try mark(macho_file, roots, &alive, reverse_lookups);
-
-    try prune(macho_file, alive);
+    try mark(macho_file, roots, reverse_lookups);
+    try prune(macho_file);
 }
 
 fn collectRoots(macho_file: *MachO, roots: *std.AutoHashMap(AtomIndex, void)) !void {
@@ -92,21 +87,15 @@ fn collectRoots(macho_file: *MachO, roots: *std.AutoHashMap(AtomIndex, void)) !v
     }
 }
 
-fn markLive(
-    macho_file: *MachO,
-    atom_index: AtomIndex,
-    alive: *std.AutoHashMap(AtomIndex, void),
-    reverse_lookups: [][]u32,
-) anyerror!void {
-    const gop = try alive.getOrPut(atom_index);
-    if (gop.found_existing) return;
-
+fn markLive(macho_file: *MachO, atom_index: AtomIndex, reverse_lookups: [][]u32) anyerror!void {
+    const atom = macho_file.getAtomPtr(atom_index);
+    if (atom.live) |_| return;
+    atom.live = true;
     log.debug("marking live", .{});
     macho_file.logAtom(atom_index, log);
 
     const cpu_arch = macho_file.options.target.cpu_arch.?;
 
-    const atom = macho_file.getAtom(atom_index);
     const sym = macho_file.getSymbol(atom.getSymbolWithLoc());
     const header = macho_file.sections.items(.header)[sym.n_sect - 1];
     if (header.isZerofill()) return;
@@ -137,16 +126,11 @@ fn markLive(
             log.debug("atom for symbol '{s}' not found; skipping...", .{macho_file.getSymbolName(target)});
             continue;
         };
-        try markLive(macho_file, target_atom_index, alive, reverse_lookups);
+        try markLive(macho_file, target_atom_index, reverse_lookups);
     }
 }
 
-fn refersLive(
-    macho_file: *MachO,
-    atom_index: AtomIndex,
-    alive: *const std.AutoHashMap(AtomIndex, void),
-    reverse_lookups: [][]u32,
-) !bool {
+fn refersLive(macho_file: *MachO, atom_index: AtomIndex, reverse_lookups: [][]u32) !bool {
     const cpu_arch = macho_file.options.target.cpu_arch.?;
 
     const atom = macho_file.getAtom(atom_index);
@@ -180,35 +164,19 @@ fn refersLive(
             log.debug("atom for symbol '{s}' not found; skipping...", .{macho_file.getSymbolName(target)});
             continue;
         };
-        if (alive.contains(target_atom_index)) return true;
-    }
-
-    return false;
-}
-
-fn refersDead(atom_index: AtomIndex, macho_file: *MachO) bool {
-    if (macho_file.relocs.get(atom_index)) |relocs| {
-        for (relocs.items) |rel| {
-            const target_atom_index = rel.getTargetAtomIndex(macho_file) orelse continue;
-            const target_atom = macho_file.getAtom(target_atom_index);
-            const target_sym = macho_file.getSymbol(target_atom.getSymbolWithLoc());
-            if (target_sym.n_desc == MachO.N_DESC_GCED) return true;
+        const target_atom = macho_file.getAtom(target_atom_index);
+        if (target_atom.live) |live| {
+            return live;
         }
     }
+
     return false;
 }
 
-fn mark(
-    macho_file: *MachO,
-    roots: std.AutoHashMap(AtomIndex, void),
-    alive: *std.AutoHashMap(AtomIndex, void),
-    reverse_lookups: [][]u32,
-) !void {
-    try alive.ensureUnusedCapacity(roots.count());
-
+fn mark(macho_file: *MachO, roots: std.AutoHashMap(AtomIndex, void), reverse_lookups: [][]u32) !void {
     var it = roots.keyIterator();
     while (it.next()) |root| {
-        try markLive(macho_file, root.*, alive, reverse_lookups);
+        try markLive(macho_file, root.*, reverse_lookups);
     }
 
     var loop: bool = true;
@@ -217,15 +185,15 @@ fn mark(
 
         for (macho_file.objects.items) |object| {
             for (object.atoms.items) |atom_index| {
-                if (alive.contains(atom_index)) continue;
-
                 const atom = macho_file.getAtom(atom_index);
+                if (atom.live) |_| continue;
+
                 const source_sym = object.getSourceSymbol(atom.sym_index) orelse continue;
                 const source_sect = object.getSourceSection(source_sym.n_sect - 1);
 
                 if (source_sect.isDontDeadStripIfReferencesLive()) {
-                    if (try refersLive(macho_file, atom_index, alive, reverse_lookups)) {
-                        try markLive(macho_file, atom_index, alive, reverse_lookups);
+                    if (try refersLive(macho_file, atom_index, reverse_lookups)) {
+                        try markLive(macho_file, atom_index, reverse_lookups);
                         loop = true;
                     }
                 }
@@ -234,14 +202,14 @@ fn mark(
     }
 }
 
-fn prune(macho_file: *MachO, alive: std.AutoHashMap(AtomIndex, void)) !void {
+fn prune(macho_file: *MachO) !void {
     log.debug("pruning dead atoms", .{});
     for (macho_file.objects.items) |object| {
         for (object.atoms.items) |atom_index| {
-            if (alive.contains(atom_index)) continue;
-
             const atom = macho_file.getAtomPtr(atom_index);
-            atom.dead = true;
+            if (atom.live) |_| continue;
+
+            atom.live = false;
             macho_file.logAtom(atom_index, log);
 
             const sym = macho_file.getSymbol(atom.getSymbolWithLoc());

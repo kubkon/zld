@@ -47,8 +47,9 @@ size: u64,
 /// For instance, aligmment of 0 should be read as 2^0 = 1 byte aligned.
 alignment: u32,
 
-/// True if this Atom has been marked dead and will be excluded.
-dead: bool,
+/// Set when -dead_strip option has been specified.
+/// True if this Atom has been marked live and will be linked in the final image.
+live: ?bool,
 
 /// Points to the previous and next neighbours
 next_index: ?AtomIndex,
@@ -60,7 +61,7 @@ pub const empty = Atom{
     .file = null,
     .size = 0,
     .alignment = 0,
-    .dead = false,
+    .live = null,
     .prev_index = null,
     .next_index = null,
 };
@@ -70,6 +71,13 @@ pub inline fn getSymbolWithLoc(self: Atom) SymbolWithLoc {
         .sym_index = self.sym_index,
         .file = self.file,
     };
+}
+
+pub fn isDead(self: Atom) bool {
+    if (self.live) |live| {
+        return !live;
+    }
+    return false;
 }
 
 const InnerSymIterator = struct {
