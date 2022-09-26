@@ -38,8 +38,8 @@ pub const N_DESC_GCED: u16 = @bitCast(u16, @as(i16, -1));
 const Section = struct {
     header: macho.section_64,
     segment_index: u8,
-    first_atom_index: AtomIndex,
-    last_atom_index: AtomIndex,
+    first_atom_index: ?AtomIndex,
+    last_atom_index: ?AtomIndex,
 };
 
 base: Zld,
@@ -291,13 +291,13 @@ pub fn flush(self: *MachO) !void {
         try object.splitIntoAtoms(self, @intCast(u32, object_id));
     }
 
-    // if (self.options.dead_strip) {
-    //     try dead_strip.gcAtoms(self);
-    // }
-
     var reverse_lookups: [][]u32 = try arena.alloc([]u32, self.objects.items.len);
     for (self.objects.items) |object, i| {
         reverse_lookups[i] = try object.createReverseSymbolLookup(arena);
+    }
+
+    if (self.options.dead_strip) {
+        try dead_strip.gcAtoms(self, reverse_lookups);
     }
 
     try self.createDyldPrivateAtom();
@@ -942,31 +942,19 @@ pub fn getOutputSection(self: *MachO, sect: macho.section_64) !?u8 {
     return res;
 }
 
-fn allocateAtom(self: *MachO, atom_index: AtomIndex, sect_id: u8) !void {
-    const atom = self.getAtom(atom_index);
-    const sym = self.getSymbolPtr(atom.getSymbolWithLoc());
-    try self.addAtomToSection(atom_index, sect_id);
-    sym.n_sect = sect_id + 1;
-}
-
-pub fn addAtomToSection(self: *MachO, atom_index: AtomIndex, sect_id: u8) !void {
-    var section = self.sections.get(sect_id);
-    if (section.header.size > 0) {
-        const atom = self.getAtomPtr(atom_index);
-        const last_atom = self.getAtomPtr(section.last_atom_index);
+pub fn addAtomToSection(self: *MachO, atom_index: AtomIndex) void {
+    const atom = self.getAtomPtr(atom_index);
+    const sym = self.getSymbol(atom.getSymbolWithLoc());
+    var section = self.sections.get(sym.n_sect - 1);
+    if (section.last_atom_index) |last_atom_index| {
+        const last_atom = self.getAtomPtr(last_atom_index);
         last_atom.next_index = atom_index;
-        atom.prev_index = section.last_atom_index;
+        atom.prev_index = last_atom_index;
     } else {
         section.first_atom_index = atom_index;
     }
     section.last_atom_index = atom_index;
-    const atom = self.getAtom(atom_index);
-    const atom_alignment = try math.powi(u32, 2, atom.alignment);
-    const aligned_end_addr = mem.alignForwardGeneric(u64, section.header.size, atom_alignment);
-    const padding = aligned_end_addr - section.header.size;
-    section.header.size += padding + atom.size;
-    section.header.@"align" = @maximum(section.header.@"align", atom.alignment);
-    self.sections.set(sect_id, section);
+    self.sections.set(sym.n_sect - 1, section);
 }
 
 pub fn createEmptyAtom(self: *MachO, sym_index: u32, size: u64, alignment: u32) !AtomIndex {
@@ -990,13 +978,14 @@ pub fn createGotAtom(self: *MachO) !AtomIndex {
     const sym = self.getSymbolPtr(.{ .sym_index = sym_index, .file = null });
     sym.n_type = macho.N_SECT;
 
-    try self.atom_by_index_table.putNoClobber(gpa, sym_index, atom_index);
-
     const sect_id = self.getSectionByName("__DATA_CONST", "__got") orelse
         try self.initSection("__DATA_CONST", "__got", .{
         .flags = macho.S_NON_LAZY_SYMBOL_POINTERS,
     });
-    try self.allocateAtom(atom_index, sect_id);
+    sym.n_sect = sect_id + 1;
+
+    try self.atom_by_index_table.putNoClobber(gpa, sym_index, atom_index);
+    self.addAtomToSection(atom_index);
 
     return atom_index;
 }
@@ -1017,14 +1006,15 @@ pub fn createTlvPtrAtom(self: *MachO) !AtomIndex {
     const sym = self.getSymbolPtr(.{ .sym_index = sym_index, .file = null });
     sym.n_type = macho.N_SECT;
 
-    try self.atom_by_index_table.putNoClobber(gpa, sym_index, atom_index);
-
-    const match = (try self.getOutputSection(.{
+    const sect_id = (try self.getOutputSection(.{
         .segname = makeStaticString("__DATA"),
         .sectname = makeStaticString("__thread_ptrs"),
         .flags = macho.S_THREAD_LOCAL_VARIABLE_POINTERS,
     })).?;
-    try self.allocateAtom(atom_index, match);
+    sym.n_sect = sect_id + 1;
+
+    try self.atom_by_index_table.putNoClobber(gpa, sym_index, atom_index);
+    self.addAtomToSection(atom_index);
 
     return atom_index;
 }
@@ -1048,11 +1038,14 @@ fn createDyldPrivateAtom(self: *MachO) !void {
     const atom_index = try self.createEmptyAtom(sym_index, @sizeOf(u64), 3);
     const sym = self.getSymbolPtr(.{ .sym_index = sym_index, .file = null });
     sym.n_type = macho.N_SECT;
-    self.dyld_private_sym_index = sym_index;
 
     const sect_id = self.getSectionByName("__DATA", "__data") orelse try self.initSection("__DATA", "__data", .{});
-    try self.allocateAtom(atom_index, sect_id);
+    sym.n_sect = sect_id + 1;
+
+    self.dyld_private_sym_index = sym_index;
+
     try self.atom_by_index_table.putNoClobber(gpa, sym_index, atom_index);
+    self.addAtomToSection(atom_index);
 }
 
 fn createStubHelperPreambleAtom(self: *MachO) !void {
@@ -1074,7 +1067,6 @@ fn createStubHelperPreambleAtom(self: *MachO) !void {
     const atom_index = try self.createEmptyAtom(sym_index, size, alignment);
     const sym = self.getSymbolPtr(.{ .sym_index = sym_index, .file = null });
     sym.n_type = macho.N_SECT;
-    self.stub_helper_preamble_sym_index = sym_index;
 
     const sect_id = self.getSectionByName("__TEXT", "__stub_helper") orelse
         try self.initSection("__TEXT", "__stub_helper", .{
@@ -1082,8 +1074,12 @@ fn createStubHelperPreambleAtom(self: *MachO) !void {
             macho.S_ATTR_PURE_INSTRUCTIONS |
             macho.S_ATTR_SOME_INSTRUCTIONS,
     });
-    try self.allocateAtom(atom_index, sect_id);
+    sym.n_sect = sect_id + 1;
+
+    self.stub_helper_preamble_sym_index = sym_index;
+
     try self.atom_by_index_table.putNoClobber(gpa, sym_index, atom_index);
+    self.addAtomToSection(atom_index);
 }
 
 fn writeStubHelperPreambleCode(self: *MachO, writer: anytype) !void {
@@ -1166,8 +1162,11 @@ pub fn createStubHelperAtom(self: *MachO) !AtomIndex {
     const sym = self.getSymbolPtr(.{ .sym_index = sym_index, .file = null });
     sym.n_sect = macho.N_SECT;
 
+    const sect_id = self.getSectionByName("__TEXT", "__stub_helper").?;
+    sym.n_sect = sect_id + 1;
+
     try self.atom_by_index_table.putNoClobber(gpa, sym_index, atom_index);
-    try self.allocateAtom(atom_index, self.getSectionByName("__TEXT", "__stub_helper").?);
+    self.addAtomToSection(atom_index);
 
     return atom_index;
 }
@@ -1218,13 +1217,14 @@ pub fn createLazyPointerAtom(self: *MachO) !AtomIndex {
     const sym = self.getSymbolPtr(.{ .sym_index = sym_index, .file = null });
     sym.n_type = macho.N_SECT;
 
-    try self.atom_by_index_table.putNoClobber(gpa, sym_index, atom_index);
-
     const sect_id = self.getSectionByName("__DATA", "__la_symbol_ptr") orelse
         try self.initSection("__DATA", "__la_symbol_ptr", .{
         .flags = macho.S_LAZY_SYMBOL_POINTERS,
     });
-    try self.allocateAtom(atom_index, sect_id);
+    sym.n_sect = sect_id + 1;
+
+    try self.atom_by_index_table.putNoClobber(gpa, sym_index, atom_index);
+    self.addAtomToSection(atom_index);
 
     return atom_index;
 }
@@ -1232,7 +1232,7 @@ pub fn createLazyPointerAtom(self: *MachO) !AtomIndex {
 fn writeLazyPointer(self: *MachO, stub_helper_index: u32, writer: anytype) !void {
     const target_addr = blk: {
         const sect_id = self.getSectionByName("__TEXT", "__stub_helper").?;
-        var atom_index = self.sections.items(.first_atom_index)[sect_id];
+        var atom_index = self.sections.items(.first_atom_index)[sect_id].?;
         var count: u32 = 0;
         while (count < stub_helper_index + 1) : (count += 1) {
             const atom = self.getAtom(atom_index);
@@ -1265,8 +1265,6 @@ pub fn createStubAtom(self: *MachO) !AtomIndex {
     const sym = self.getSymbolPtr(.{ .sym_index = sym_index, .file = null });
     sym.n_type = macho.N_SECT;
 
-    try self.atom_by_index_table.putNoClobber(gpa, sym_index, atom_index);
-
     const sect_id = self.getSectionByName("__TEXT", "__stubs") orelse
         try self.initSection("__TEXT", "__stubs", .{
         .flags = macho.S_SYMBOL_STUBS |
@@ -1274,7 +1272,10 @@ pub fn createStubAtom(self: *MachO) !AtomIndex {
             macho.S_ATTR_SOME_INSTRUCTIONS,
         .reserved2 = stub_size,
     });
-    try self.allocateAtom(atom_index, sect_id);
+    sym.n_sect = sect_id + 1;
+
+    try self.atom_by_index_table.putNoClobber(gpa, sym_index, atom_index);
+    self.addAtomToSection(atom_index);
 
     return atom_index;
 }
@@ -1289,7 +1290,7 @@ fn writeStubCode(self: *MachO, atom_index: AtomIndex, stub_index: u32, writer: a
     const target_addr = blk: {
         // TODO: cache this at stub atom creation; they always go in pairs anyhow
         const la_sect_id = self.getSectionByName("__DATA", "__la_symbol_ptr").?;
-        var la_atom_index = self.sections.items(.first_atom_index)[la_sect_id];
+        var la_atom_index = self.sections.items(.first_atom_index)[la_sect_id].?;
         var count: u32 = 0;
         while (count < stub_index) : (count += 1) {
             const la_atom = self.getAtom(la_atom_index);
@@ -1345,7 +1346,7 @@ fn createTentativeDefAtoms(self: *MachO) !void {
             .segname = makeStaticString("__DATA"),
             .sectname = makeStaticString("__bss"),
             .flags = macho.S_ZEROFILL,
-        })).?;
+        })).? + 1;
 
         sym.* = .{
             .n_strx = sym.n_strx,
@@ -1359,7 +1360,7 @@ fn createTentativeDefAtoms(self: *MachO) !void {
         const atom = self.getAtomPtr(atom_index);
         atom.file = global.file;
 
-        try self.allocateAtom(atom_index, n_sect);
+        self.addAtomToSection(atom_index);
 
         if (global.file) |file| {
             const object = &self.objects.items[file];
@@ -2028,8 +2029,7 @@ fn allocateAtoms(self: *MachO) !void {
     const slice = &self.sections.slice();
     for (slice.items(.first_atom_index)) |first_atom_index, sect_id| {
         const header = slice.items(.header)[sect_id];
-        var atom_index = first_atom_index;
-        var atom = self.getAtom(atom_index);
+        var atom_index = first_atom_index.?;
 
         const n_sect = @intCast(u8, sect_id + 1);
         var base_vaddr = header.addr;
@@ -2041,6 +2041,7 @@ fn allocateAtoms(self: *MachO) !void {
         });
 
         while (true) {
+            const atom = self.getAtom(atom_index);
             const alignment = try math.powi(u32, 2, atom.alignment);
             base_vaddr = mem.alignForwardGeneric(u64, base_vaddr, alignment);
 
@@ -2079,7 +2080,6 @@ fn allocateAtoms(self: *MachO) !void {
 
             if (atom.next_index) |next_index| {
                 atom_index = next_index;
-                atom = self.getAtom(atom_index);
             } else break;
         }
     }
@@ -2110,8 +2110,7 @@ fn writeAtoms(self: *MachO, reverse_lookups: [][]u32) !void {
 
     for (slice.items(.first_atom_index)) |first_atom_index, sect_id| {
         const header = slice.items(.header)[sect_id];
-        var atom_index = first_atom_index;
-        var atom = self.getAtom(atom_index);
+        var atom_index = first_atom_index.?;
 
         if (header.isZerofill()) continue;
 
@@ -2123,6 +2122,7 @@ fn writeAtoms(self: *MachO, reverse_lookups: [][]u32) !void {
 
         var count: u32 = 0;
         while (true) : (count += 1) {
+            const atom = self.getAtom(atom_index);
             const this_sym = self.getSymbol(atom.getSymbolWithLoc());
             const padding_size: usize = if (atom.next_index) |next_index| blk: {
                 const next_sym = self.getSymbol(self.getAtom(next_index).getSymbolWithLoc());
@@ -2194,7 +2194,6 @@ fn writeAtoms(self: *MachO, reverse_lookups: [][]u32) !void {
 
             if (atom.next_index) |next_index| {
                 atom_index = next_index;
-                atom = self.getAtom(atom_index);
             } else {
                 assert(buffer.items.len == header.size);
                 log.debug("  (writing at file offset 0x{x})", .{header.offset});
@@ -2273,7 +2272,7 @@ fn sortSections(self: *MachO) !void {
     }
 
     for (self.sections.items(.first_atom_index)) |first_atom_index| {
-        var atom_index = first_atom_index;
+        var atom_index = first_atom_index.?;
 
         while (true) {
             const atom = self.getAtom(atom_index);
@@ -2363,7 +2362,24 @@ fn allocateSegment(self: *MachO, segment_index: u8, init_size: u64) !void {
     const indexes = self.getSectionIndexes(segment_index);
     var start = init_size;
     const slice = self.sections.slice();
-    for (slice.items(.header)[indexes.start..indexes.end]) |*header| {
+    for (slice.items(.header)[indexes.start..indexes.end]) |*header, sect_id| {
+        var atom_index = slice.items(.first_atom_index)[indexes.start + sect_id].?;
+        header.size = 0;
+        header.@"align" = 0;
+
+        while (true) {
+            const atom = self.getAtom(atom_index);
+            const atom_alignment = try math.powi(u32, 2, atom.alignment);
+            const aligned_end_addr = mem.alignForwardGeneric(u64, header.size, atom_alignment);
+            const padding = aligned_end_addr - header.size;
+            header.size += padding + atom.size;
+            header.@"align" = @maximum(header.@"align", atom.alignment);
+
+            if (atom.next_index) |next_index| {
+                atom_index = next_index;
+            } else break;
+        }
+
         const alignment = try math.powi(u32, 2, header.@"align");
         const start_aligned = mem.alignForwardGeneric(u64, start, alignment);
 
@@ -2422,8 +2438,8 @@ fn initSection(
             .reserved1 = opts.reserved1,
             .reserved2 = opts.reserved2,
         },
-        .first_atom_index = undefined,
-        .last_atom_index = undefined,
+        .first_atom_index = null,
+        .last_atom_index = null,
     });
     seg.cmdsize += @sizeOf(macho.section_64);
     seg.nsects += 1;
@@ -2568,7 +2584,7 @@ fn collectRebaseData(self: *MachO, pointers: *std.ArrayList(bind.Pointer)) !void
     if (self.getSectionByName("__DATA", "__la_symbol_ptr")) |sect_id| {
         const segment_index = slice.items(.segment_index)[sect_id];
         const seg = self.getSegment(sect_id);
-        var atom_index = slice.items(.first_atom_index)[sect_id];
+        var atom_index = slice.items(.first_atom_index)[sect_id].?;
 
         try pointers.ensureUnusedCapacity(self.stubs.count());
 
@@ -2606,7 +2622,7 @@ fn collectRebaseData(self: *MachO, pointers: *std.ArrayList(bind.Pointer)) !void
         if (segment.maxprot & macho.PROT.WRITE == 0) continue;
 
         const cpu_arch = self.options.target.cpu_arch.?;
-        var atom_index = slice.items(.first_atom_index)[sect_id];
+        var atom_index = slice.items(.first_atom_index)[sect_id].?;
 
         while (true) {
             const atom = self.getAtom(atom_index);
@@ -2734,7 +2750,7 @@ fn collectBindData(self: *MachO, pointers: *std.ArrayList(bind.Pointer), reverse
         if (segment.maxprot & macho.PROT.WRITE == 0) continue;
 
         const cpu_arch = self.options.target.cpu_arch.?;
-        var atom_index = slice.items(.first_atom_index)[sect_id];
+        var atom_index = slice.items(.first_atom_index)[sect_id].?;
 
         while (true) {
             const atom = self.getAtom(atom_index);
@@ -2815,7 +2831,7 @@ fn collectLazyBindData(self: *MachO, pointers: *std.ArrayList(bind.Pointer)) !vo
     const slice = self.sections.slice();
     const segment_index = slice.items(.segment_index)[sect_id];
     const seg = self.getSegment(sect_id);
-    var atom_index = slice.items(.first_atom_index)[sect_id];
+    var atom_index = slice.items(.first_atom_index)[sect_id].?;
 
     // TODO: we actually don't need to store lazy pointer atoms as they are synthetically generated by the linker
     try pointers.ensureUnusedCapacity(self.stubs.count());
@@ -2993,18 +3009,15 @@ fn populateLazyBindOffsetsInStubHelper(self: *MachO, buffer: []const u8) !void {
     if (self.stub_helper_preamble_sym_index == null) return;
 
     const section = self.sections.get(stub_helper_section_index);
-    const last_atom_index = section.last_atom_index;
+    const last_atom_index = section.last_atom_index.?;
 
     var table = std.AutoHashMap(i64, AtomIndex).init(gpa);
     defer table.deinit();
 
     {
         var stub_atom_index = last_atom_index;
-        var stub_atom = self.getAtom(stub_atom_index);
-
         const la_symbol_ptr_section_index = self.getSectionByName("__DATA", "__la_symbol_ptr").?;
-        var laptr_atom_index = self.sections.items(.last_atom_index)[la_symbol_ptr_section_index];
-        var laptr_atom = self.getAtom(laptr_atom_index);
+        var laptr_atom_index = self.sections.items(.last_atom_index)[la_symbol_ptr_section_index].?;
 
         const base_addr = blk: {
             const segment_index = self.getSegmentByName("__DATA").?;
@@ -3013,6 +3026,8 @@ fn populateLazyBindOffsetsInStubHelper(self: *MachO, buffer: []const u8) !void {
         };
 
         while (true) {
+            const stub_atom = self.getAtom(stub_atom_index);
+            const laptr_atom = self.getAtom(laptr_atom_index);
             const laptr_off = blk: {
                 const sym = self.getSymbolPtr(laptr_atom.getSymbolWithLoc());
                 break :blk @intCast(i64, sym.n_value - base_addr);
@@ -3022,9 +3037,7 @@ fn populateLazyBindOffsetsInStubHelper(self: *MachO, buffer: []const u8) !void {
 
             if (laptr_atom.prev_index) |prev_index| {
                 laptr_atom_index = prev_index;
-                laptr_atom = self.getAtom(laptr_atom_index);
                 stub_atom_index = stub_atom.prev_index.?;
-                stub_atom = self.getAtom(stub_atom_index);
             } else break;
         }
     }
@@ -4039,29 +4052,27 @@ fn logAtoms(self: *MachO) void {
     log.debug("atoms:", .{});
     const slice = self.sections.slice();
     for (slice.items(.first_atom_index)) |first_atom_index, sect_id| {
-        var atom_index = first_atom_index;
-        var atom = self.getAtom(atom_index);
-
+        var atom_index = first_atom_index.?;
         const header = slice.items(.header)[sect_id];
 
         log.debug("{s},{s}", .{ header.segName(), header.sectName() });
 
         while (true) {
-            self.logAtom(atom_index);
+            const atom = self.getAtom(atom_index);
+            self.logAtom(atom_index, log);
 
             if (atom.next_index) |next_index| {
                 atom_index = next_index;
-                atom = self.getAtom(atom_index);
             } else break;
         }
     }
 }
 
-pub fn logAtom(self: *MachO, atom_index: AtomIndex) void {
+pub fn logAtom(self: *MachO, atom_index: AtomIndex, logger: anytype) void {
     const atom = self.getAtom(atom_index);
     const sym = self.getSymbol(atom.getSymbolWithLoc());
     const sym_name = self.getSymbolName(atom.getSymbolWithLoc());
-    log.debug("  ATOM(%{d}, '{s}') @ {x} (sizeof({x}), alignof({x})) in object({?}) in sect({d})", .{
+    logger.debug("  ATOM(%{d}, '{s}') @ {x} (sizeof({x}), alignof({x})) in object({?}) in sect({d})", .{
         atom.sym_index,
         sym_name,
         sym.n_value,
@@ -4078,7 +4089,7 @@ pub fn logAtom(self: *MachO, atom_index: AtomIndex) void {
             const inner_name = self.getSymbolName(sym_loc);
             const offset = Atom.calcInnerSymbolOffset(self, atom_index, sym_loc.sym_index);
 
-            log.debug("    (%{d}, '{s}') @ {x} ({x})", .{
+            logger.debug("    (%{d}, '{s}') @ {x} ({x})", .{
                 sym_loc.sym_index,
                 inner_name,
                 inner.n_value,
@@ -4090,7 +4101,7 @@ pub fn logAtom(self: *MachO, atom_index: AtomIndex) void {
             const alias = self.getSymbol(sym_loc);
             const alias_name = self.getSymbolName(sym_loc);
 
-            log.debug("    (%{d}, '{s}') @ {x} ({x})", .{
+            logger.debug("    (%{d}, '{s}') @ {x} ({x})", .{
                 sym_loc.sym_index,
                 alias_name,
                 alias.n_value,

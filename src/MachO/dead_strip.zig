@@ -10,58 +10,27 @@ const AtomIndex = MachO.AtomIndex;
 const MachO = @import("../MachO.zig");
 const SymbolWithLoc = MachO.SymbolWithLoc;
 
-pub fn gcAtoms(macho_file: *MachO) !void {
+pub fn gcAtoms(macho_file: *MachO, reverse_lookups: [][]u32) !void {
     const gpa = macho_file.base.allocator;
+
     var arena_allocator = std.heap.ArenaAllocator.init(gpa);
     defer arena_allocator.deinit();
     const arena = arena_allocator.allocator();
 
     var roots = std.AutoHashMap(AtomIndex, void).init(arena);
     try collectRoots(&roots, macho_file);
+    _ = reverse_lookups;
 
-    var alive = std.AutoHashMap(AtomIndex, void).init(arena);
-    try mark(roots, &alive, macho_file);
+    // var alive = std.AutoHashMap(AtomIndex, void).init(arena);
+    // try mark(roots, &alive, macho_file);
 
-    try prune(arena, alive, macho_file);
-}
-
-fn removeAtomFromSection(atom_index: AtomIndex, match: u8, macho_file: *MachO) void {
-    macho_file.freeAtom(atom_index);
-
-    var section = macho_file.sections.get(match);
-    const atom = macho_file.getAtomPtr(atom_index);
-
-    // If we want to enable GC for incremental codepath, we need to take into
-    // account any padding that might have been left here.
-    section.header.size -= atom.size;
-
-    if (atom.prev_index) |prev_index| {
-        const prev = macho_file.getAtomPtr(prev_index);
-        prev.next_index = atom.next_index;
-    } else {
-        if (atom.next_index) |next_index| {
-            section.first_atom_index = next_index;
-        }
-    }
-    if (atom.next_index) |next_index| {
-        const next = macho_file.getAtomPtr(next_index);
-        next.prev_index = atom.prev_index;
-    } else {
-        if (atom.prev_index) |prev_index| {
-            section.last_atom_index = prev_index;
-        } else {
-            // The section will be GCed in the next step.
-            section.first_atom_index = undefined;
-            section.last_atom_index = undefined;
-            section.header.size = 0;
-        }
-    }
-
-    macho_file.sections.set(match, section);
+    // try prune(arena, alive, macho_file);
 }
 
 fn collectRoots(roots: *std.AutoHashMap(AtomIndex, void), macho_file: *MachO) !void {
     const output_mode = macho_file.options.output_mode;
+
+    log.debug("collecting roots", .{});
 
     switch (output_mode) {
         .exe => {
@@ -69,6 +38,8 @@ fn collectRoots(roots: *std.AutoHashMap(AtomIndex, void), macho_file: *MachO) !v
             const global = try macho_file.getEntryPoint();
             const atom_index = macho_file.getAtomIndexForSymbol(global).?; // panic here means fatal error
             _ = try roots.getOrPut(atom_index);
+            log.debug("adding root", .{});
+            macho_file.logAtom(atom_index, log);
         },
         else => |other| {
             assert(other == .lib);
@@ -77,12 +48,12 @@ fn collectRoots(roots: *std.AutoHashMap(AtomIndex, void), macho_file: *MachO) !v
                 const sym = macho_file.getSymbol(global);
                 if (!sym.sect()) continue;
                 const atom_index = macho_file.getAtomIndexForSymbol(global) orelse {
-                    log.debug("skipping {s}", .{macho_file.getSymbolName(global)});
-                    continue;
+                    log.debug("atom for symbol '{s}' not found", .{macho_file.getSymbolName(global)});
+                    unreachable;
                 };
                 _ = try roots.getOrPut(atom_index);
                 log.debug("adding root", .{});
-                macho_file.logAtom(atom_index);
+                macho_file.logAtom(atom_index, log);
             }
         },
     }
@@ -92,7 +63,7 @@ fn collectRoots(roots: *std.AutoHashMap(AtomIndex, void), macho_file: *MachO) !v
         if (macho_file.getAtomIndexForSymbol(global)) |atom_index| {
             _ = try roots.getOrPut(atom_index);
             log.debug("adding root", .{});
-            macho_file.logAtom(atom_index);
+            macho_file.logAtom(atom_index, log);
         }
     }
 
@@ -100,9 +71,6 @@ fn collectRoots(roots: *std.AutoHashMap(AtomIndex, void), macho_file: *MachO) !v
         for (object.atoms.items) |atom_index| {
             const atom = macho_file.getAtom(atom_index);
             const source_sym = object.getSourceSymbol(atom.sym_index) orelse continue;
-
-            if (source_sym.tentative()) continue;
-
             const source_sect = object.getSourceSection(source_sym.n_sect - 1);
             const is_gc_root = blk: {
                 if (source_sect.isDontDeadStrip()) break :blk true;
@@ -114,11 +82,10 @@ fn collectRoots(roots: *std.AutoHashMap(AtomIndex, void), macho_file: *MachO) !v
                     else => break :blk false,
                 }
             };
-
             if (is_gc_root) {
                 try roots.putNoClobber(atom_index, {});
                 log.debug("adding root", .{});
-                macho_file.logAtom(atom_index);
+                macho_file.logAtom(atom_index, log);
             }
         }
     }
@@ -129,7 +96,7 @@ fn markLive(atom_index: AtomIndex, alive: *std.AutoHashMap(AtomIndex, void), mac
     if (gop.found_existing) return;
 
     log.debug("marking live", .{});
-    macho_file.logAtom(atom_index);
+    macho_file.logAtom(atom_index, log);
 
     if (macho_file.relocs.get(atom_index)) |relocs| {
         for (relocs.items) |rel| {
@@ -215,7 +182,7 @@ fn prune(arena: Allocator, alive: std.AutoHashMap(AtomIndex, void), macho_file: 
                 if (sym.n_desc == MachO.N_DESC_GCED) continue;
                 if (!sym.ext() and !refersDead(atom_index, macho_file)) continue;
 
-                macho_file.logAtom(atom_index);
+                macho_file.logAtom(atom_index, log);
                 sym.n_desc = MachO.N_DESC_GCED;
                 removeAtomFromSection(atom_index, match, macho_file);
                 _ = try gc_sections.put(match, {});
@@ -317,4 +284,39 @@ fn prune(arena: Allocator, alive: std.AutoHashMap(AtomIndex, void), macho_file: 
 
         macho_file.sections.set(match, section);
     }
+}
+
+fn removeAtomFromSection(atom_index: AtomIndex, match: u8, macho_file: *MachO) void {
+    macho_file.freeAtom(atom_index);
+
+    var section = macho_file.sections.get(match);
+    const atom = macho_file.getAtomPtr(atom_index);
+
+    // If we want to enable GC for incremental codepath, we need to take into
+    // account any padding that might have been left here.
+    section.header.size -= atom.size;
+
+    if (atom.prev_index) |prev_index| {
+        const prev = macho_file.getAtomPtr(prev_index);
+        prev.next_index = atom.next_index;
+    } else {
+        if (atom.next_index) |next_index| {
+            section.first_atom_index = next_index;
+        }
+    }
+    if (atom.next_index) |next_index| {
+        const next = macho_file.getAtomPtr(next_index);
+        next.prev_index = atom.prev_index;
+    } else {
+        if (atom.prev_index) |prev_index| {
+            section.last_atom_index = prev_index;
+        } else {
+            // The section will be GCed in the next step.
+            section.first_atom_index = undefined;
+            section.last_atom_index = undefined;
+            section.header.size = 0;
+        }
+    }
+
+    macho_file.sections.set(match, section);
 }

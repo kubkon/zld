@@ -30,6 +30,9 @@ const RegisterOrMemory = dis_x86_64.RegisterOrMemory;
 /// offset table entry.
 sym_index: u32,
 
+/// If this Atom references a subsection in an Object file, `nsyms_trailing`
+/// tells how many symbols trailing `sym_index` fall within this Atom's address
+/// range.
 nsyms_trailing: u32,
 
 /// null means symbol defined by the linker.
@@ -43,6 +46,9 @@ size: u64,
 /// Alignment of this atom as a power of 2.
 /// For instance, aligmment of 0 should be read as 2^0 = 1 byte aligned.
 alignment: u32,
+
+/// True if this Atom has been marked dead and will be excluded.
+// dead: bool,
 
 /// Points to the previous and next neighbours
 next_index: ?AtomIndex,
