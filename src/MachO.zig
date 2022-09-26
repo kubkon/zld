@@ -293,10 +293,6 @@ pub fn flush(self: *MachO) !void {
         try object.scanInputSections(self);
     }
 
-    try self.createDyldPrivateAtom();
-    try self.createTentativeDefAtoms();
-    try self.createStubHelperPreambleAtom();
-
     for (self.objects.items) |*object, object_id| {
         try object.splitIntoAtoms(self, @intCast(u32, object_id));
     }
@@ -305,6 +301,10 @@ pub fn flush(self: *MachO) !void {
     for (self.objects.items) |object, i| {
         reverse_lookups[i] = try object.createReverseSymbolLookup(arena);
     }
+
+    try self.createDyldPrivateAtom();
+    try self.createTentativeDefAtoms();
+    try self.createStubHelperPreambleAtom();
 
     for (self.objects.items) |object| {
         for (object.atoms.items) |atom_index| {
