@@ -287,15 +287,13 @@ pub fn flush(self: *MachO) !void {
         return error.FrameworkNotFound;
     }
 
-    try self.createPagezeroSegment();
-
-    for (self.objects.items) |object| {
-        try object.scanInputSections(self);
-    }
-
     for (self.objects.items) |*object, object_id| {
         try object.splitIntoAtoms(self, @intCast(u32, object_id));
     }
+
+    // if (self.options.dead_strip) {
+    //     try dead_strip.gcAtoms(self);
+    // }
 
     var reverse_lookups: [][]u32 = try arena.alloc([]u32, self.objects.items.len);
     for (self.objects.items) |object, i| {
@@ -320,10 +318,7 @@ pub fn flush(self: *MachO) !void {
 
     try self.createDyldStubBinderGotAtom();
 
-    // if (self.options.dead_strip) {
-    //     try dead_strip.gcAtoms(self);
-    // }
-
+    try self.createPagezeroSegment();
     try self.sortSections();
     try self.allocateSections();
     try self.allocateAtoms();

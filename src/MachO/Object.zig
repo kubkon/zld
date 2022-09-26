@@ -203,23 +203,6 @@ fn sectionLessThanByAddress(ctx: void, lhs: SortedSection, rhs: SortedSection) b
     return lhs.header.addr < rhs.header.addr;
 }
 
-pub fn scanInputSections(self: Object, macho_file: *MachO) !void {
-    for (self.getSourceSections()) |sect| {
-        const match = (try macho_file.getOutputSection(sect)) orelse {
-            log.debug("  unhandled section", .{});
-            continue;
-        };
-        const output = macho_file.sections.items(.header)[match];
-        log.debug("mapping '{s},{s}' into output sect({d}, '{s},{s}')", .{
-            sect.segName(),
-            sect.sectName(),
-            match + 1,
-            output.segName(),
-            output.sectName(),
-        });
-    }
-}
-
 pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
     const gpa = macho_file.base.allocator;
 
