@@ -1924,6 +1924,19 @@ fn createSegments(self: *MachO) !void {
         segment.nsects += 1;
         self.sections.items(.segment_index)[sect_id] = segment_id;
     }
+
+    {
+        const protection = getSegmentMemoryProtection("__LINKEDIT");
+        const base = self.getSegmentAllocBase(@intCast(u8, self.segments.items.len));
+        try self.segments.append(self.base.allocator, .{
+            .cmdsize = @sizeOf(macho.segment_command_64),
+            .segname = makeStaticString("__LINKEDIT"),
+            .vmaddr = base.vmaddr,
+            .fileoff = base.fileoff,
+            .maxprot = protection,
+            .initprot = protection,
+        });
+    }
 }
 
 inline fn calcInstallNameLen(cmd_size: u64, name: []const u8, assume_max_path_len: bool) u64 {
@@ -2537,19 +2550,6 @@ fn writeSegmentHeaders(self: *MachO, ncmds: *u32, writer: anytype) !void {
 }
 
 fn writeLinkeditSegmentData(self: *MachO, ncmds: *u32, lc_writer: anytype, reverse_lookups: [][]u32) !void {
-    {
-        const protection = getSegmentMemoryProtection("__LINKEDIT");
-        const base = self.getSegmentAllocBase(@intCast(u8, self.segments.items.len));
-        try self.segments.append(self.base.allocator, .{
-            .cmdsize = @sizeOf(macho.segment_command_64),
-            .segname = makeStaticString("__LINKEDIT"),
-            .vmaddr = base.vmaddr,
-            .fileoff = base.fileoff,
-            .maxprot = protection,
-            .initprot = protection,
-        });
-    }
-
     try self.writeDyldInfoData(ncmds, lc_writer, reverse_lookups);
     try self.writeFunctionStarts(ncmds, lc_writer);
     try self.writeDataInCode(ncmds, lc_writer);
