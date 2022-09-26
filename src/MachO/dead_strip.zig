@@ -262,6 +262,16 @@ fn prune(macho_file: *MachO, alive: AtomTable) !void {
                     _ = macho_file.globals.swapRemove(sym_name);
                 }
             }
+
+            var inner_sym_it = Atom.getInnerSymbolsIterator(macho_file, atom_index);
+            while (inner_sym_it.next()) |inner| {
+                const inner_name = macho_file.getSymbolName(inner);
+                if (macho_file.globals.get(inner_name)) |global| {
+                    if (global.eql(inner)) {
+                        _ = macho_file.globals.swapRemove(inner_name);
+                    }
+                }
+            }
         }
     }
 }
