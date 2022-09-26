@@ -232,6 +232,7 @@ fn prune(macho_file: *MachO, alive: AtomTable) !void {
             const sym = macho_file.getSymbol(sym_loc);
             const sect_id = sym.n_sect - 1;
             var section = macho_file.sections.get(sect_id);
+            section.header.size -= atom.size;
 
             if (atom.prev_index) |prev_index| {
                 const prev = macho_file.getAtomPtr(prev_index);
@@ -248,8 +249,9 @@ fn prune(macho_file: *MachO, alive: AtomTable) !void {
                 if (atom.prev_index) |prev_index| {
                     section.last_atom_index = prev_index;
                 } else {
-                    section.first_atom_index = null;
-                    section.last_atom_index = null;
+                    assert(section.header.size == 0);
+                    section.first_atom_index = undefined;
+                    section.last_atom_index = undefined;
                 }
             }
 

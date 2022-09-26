@@ -36,8 +36,8 @@ pub const base_tag = Zld.Tag.macho;
 const Section = struct {
     header: macho.section_64,
     segment_index: u8,
-    first_atom_index: ?AtomIndex,
-    last_atom_index: ?AtomIndex,
+    first_atom_index: AtomIndex,
+    last_atom_index: AtomIndex,
 };
 
 base: Zld,
@@ -954,14 +954,15 @@ pub fn addAtomToSection(self: *MachO, atom_index: AtomIndex) void {
     const atom = self.getAtomPtr(atom_index);
     const sym = self.getSymbol(atom.getSymbolWithLoc());
     var section = self.sections.get(sym.n_sect - 1);
-    if (section.last_atom_index) |last_atom_index| {
-        const last_atom = self.getAtomPtr(last_atom_index);
+    if (section.header.size > 0) {
+        const last_atom = self.getAtomPtr(section.last_atom_index);
         last_atom.next_index = atom_index;
-        atom.prev_index = last_atom_index;
+        atom.prev_index = section.last_atom_index;
     } else {
         section.first_atom_index = atom_index;
     }
     section.last_atom_index = atom_index;
+    section.header.size += atom.size;
     self.sections.set(sym.n_sect - 1, section);
 }
 
@@ -1237,7 +1238,7 @@ pub fn createLazyPointerAtom(self: *MachO) !AtomIndex {
 fn writeLazyPointer(self: *MachO, stub_helper_index: u32, writer: anytype) !void {
     const target_addr = blk: {
         const sect_id = self.getSectionByName("__TEXT", "__stub_helper").?;
-        var atom_index = self.sections.items(.first_atom_index)[sect_id].?;
+        var atom_index = self.sections.items(.first_atom_index)[sect_id];
         var count: u32 = 0;
         while (count < stub_helper_index + 1) : (count += 1) {
             const atom = self.getAtom(atom_index);
@@ -1295,7 +1296,7 @@ fn writeStubCode(self: *MachO, atom_index: AtomIndex, stub_index: u32, writer: a
     const target_addr = blk: {
         // TODO: cache this at stub atom creation; they always go in pairs anyhow
         const la_sect_id = self.getSectionByName("__DATA", "__la_symbol_ptr").?;
-        var la_atom_index = self.sections.items(.first_atom_index)[la_sect_id].?;
+        var la_atom_index = self.sections.items(.first_atom_index)[la_sect_id];
         var count: u32 = 0;
         while (count < stub_index) : (count += 1) {
             const la_atom = self.getAtom(la_atom_index);
@@ -1904,8 +1905,7 @@ fn createSegments(self: *MachO) !void {
     }
 
     for (self.sections.items(.header)) |header, sect_id| {
-        // TODO: clean this up
-        if (self.sections.items(.first_atom_index)[sect_id] == null) continue; // empty section
+        if (header.size == 0) continue; // empty section
         const segname = header.segName();
         const segment_id = self.getSegmentByName(segname) orelse blk: {
             log.debug("creating segment '{s}'", .{segname});
@@ -2054,7 +2054,7 @@ fn allocateAtoms(self: *MachO) !void {
     const slice = &self.sections.slice();
     for (slice.items(.first_atom_index)) |first_atom_index, sect_id| {
         const header = slice.items(.header)[sect_id];
-        var atom_index = first_atom_index.?;
+        var atom_index = first_atom_index;
 
         const n_sect = @intCast(u8, sect_id + 1);
         var base_vaddr = header.addr;
@@ -2135,7 +2135,7 @@ fn writeAtoms(self: *MachO, reverse_lookups: [][]u32) !void {
 
     for (slice.items(.first_atom_index)) |first_atom_index, sect_id| {
         const header = slice.items(.header)[sect_id];
-        var atom_index = first_atom_index.?;
+        var atom_index = first_atom_index;
 
         if (header.isZerofill()) continue;
 
@@ -2275,8 +2275,7 @@ fn sortSections(self: *MachO) !void {
         var i: u8 = 0;
         while (i < slice.len) : (i += 1) {
             const section = self.sections.get(i);
-            if (section.first_atom_index == null) {
-                // TODO: clean this up
+            if (section.header.size == 0) {
                 log.debug("pruning section {s},{s}", .{
                     section.header.segName(),
                     section.header.sectName(),
@@ -2307,7 +2306,7 @@ fn sortSections(self: *MachO) !void {
     }
 
     for (self.sections.items(.first_atom_index)) |first_atom_index| {
-        var atom_index = first_atom_index.?;
+        var atom_index = first_atom_index;
 
         while (true) {
             const atom = self.getAtom(atom_index);
@@ -2398,7 +2397,7 @@ fn allocateSegment(self: *MachO, segment_index: u8, init_size: u64) !void {
     var start = init_size;
     const slice = self.sections.slice();
     for (slice.items(.header)[indexes.start..indexes.end]) |*header, sect_id| {
-        var atom_index = slice.items(.first_atom_index)[indexes.start + sect_id].?;
+        var atom_index = slice.items(.first_atom_index)[indexes.start + sect_id];
         header.size = 0;
         header.@"align" = 0;
 
@@ -2460,8 +2459,8 @@ fn initSection(
             .reserved1 = opts.reserved1,
             .reserved2 = opts.reserved2,
         },
-        .first_atom_index = null,
-        .last_atom_index = null,
+        .first_atom_index = undefined,
+        .last_atom_index = undefined,
     });
     return index;
 }
@@ -2604,7 +2603,7 @@ fn collectRebaseData(self: *MachO, pointers: *std.ArrayList(bind.Pointer)) !void
     if (self.getSectionByName("__DATA", "__la_symbol_ptr")) |sect_id| {
         const segment_index = slice.items(.segment_index)[sect_id];
         const seg = self.getSegment(sect_id);
-        var atom_index = slice.items(.first_atom_index)[sect_id].?;
+        var atom_index = slice.items(.first_atom_index)[sect_id];
 
         try pointers.ensureUnusedCapacity(self.stubs.count());
 
@@ -2642,7 +2641,7 @@ fn collectRebaseData(self: *MachO, pointers: *std.ArrayList(bind.Pointer)) !void
         if (segment.maxprot & macho.PROT.WRITE == 0) continue;
 
         const cpu_arch = self.options.target.cpu_arch.?;
-        var atom_index = slice.items(.first_atom_index)[sect_id].?;
+        var atom_index = slice.items(.first_atom_index)[sect_id];
 
         while (true) {
             const atom = self.getAtom(atom_index);
@@ -2770,7 +2769,7 @@ fn collectBindData(self: *MachO, pointers: *std.ArrayList(bind.Pointer), reverse
         if (segment.maxprot & macho.PROT.WRITE == 0) continue;
 
         const cpu_arch = self.options.target.cpu_arch.?;
-        var atom_index = slice.items(.first_atom_index)[sect_id].?;
+        var atom_index = slice.items(.first_atom_index)[sect_id];
 
         while (true) {
             const atom = self.getAtom(atom_index);
@@ -2851,7 +2850,7 @@ fn collectLazyBindData(self: *MachO, pointers: *std.ArrayList(bind.Pointer)) !vo
     const slice = self.sections.slice();
     const segment_index = slice.items(.segment_index)[sect_id];
     const seg = self.getSegment(sect_id);
-    var atom_index = slice.items(.first_atom_index)[sect_id].?;
+    var atom_index = slice.items(.first_atom_index)[sect_id];
 
     // TODO: we actually don't need to store lazy pointer atoms as they are synthetically generated by the linker
     try pointers.ensureUnusedCapacity(self.stubs.count());
@@ -3026,7 +3025,7 @@ fn populateLazyBindOffsetsInStubHelper(self: *MachO, buffer: []const u8) !void {
     if (self.stub_helper_preamble_sym_index == null) return;
 
     const section = self.sections.get(stub_helper_section_index);
-    const last_atom_index = section.last_atom_index.?;
+    const last_atom_index = section.last_atom_index;
 
     var table = std.AutoHashMap(i64, AtomIndex).init(gpa);
     defer table.deinit();
@@ -3034,7 +3033,7 @@ fn populateLazyBindOffsetsInStubHelper(self: *MachO, buffer: []const u8) !void {
     {
         var stub_atom_index = last_atom_index;
         const la_symbol_ptr_section_index = self.getSectionByName("__DATA", "__la_symbol_ptr").?;
-        var laptr_atom_index = self.sections.items(.last_atom_index)[la_symbol_ptr_section_index].?;
+        var laptr_atom_index = self.sections.items(.last_atom_index)[la_symbol_ptr_section_index];
 
         const base_addr = blk: {
             const segment_index = self.getSegmentByName("__DATA").?;
@@ -4066,7 +4065,7 @@ fn logAtoms(self: *MachO) void {
     log.debug("atoms:", .{});
     const slice = self.sections.slice();
     for (slice.items(.first_atom_index)) |first_atom_index, sect_id| {
-        var atom_index = first_atom_index.?;
+        var atom_index = first_atom_index;
         const header = slice.items(.header)[sect_id];
 
         log.debug("{s},{s}", .{ header.segName(), header.sectName() });
