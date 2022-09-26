@@ -316,7 +316,7 @@ pub fn flush(self: *MachO) !void {
 
     try self.createDyldStubBinderGotAtom();
 
-    try self.createPagezeroSegment();
+    try self.createSegments();
     try self.sortSections();
     try self.allocateSections();
     try self.allocateAtoms();
@@ -1881,22 +1881,40 @@ pub fn closeFiles(self: *const MachO) void {
     }
 }
 
-fn createPagezeroSegment(self: *MachO) !void {
-    if (self.options.output_mode == .lib) return;
-
+fn createSegments(self: *MachO) !void {
     const pagezero_vmsize = self.options.pagezero_size orelse default_pagezero_vmsize;
     const aligned_pagezero_vmsize = mem.alignBackwardGeneric(u64, pagezero_vmsize, self.page_size);
-    if (aligned_pagezero_vmsize == 0) return;
-
-    if (aligned_pagezero_vmsize != pagezero_vmsize) {
-        log.warn("requested __PAGEZERO size (0x{x}) is not page aligned", .{pagezero_vmsize});
-        log.warn("  rounding down to 0x{x}", .{aligned_pagezero_vmsize});
+    if (self.options.output_mode != .lib and aligned_pagezero_vmsize > 0) {
+        if (aligned_pagezero_vmsize != pagezero_vmsize) {
+            log.warn("requested __PAGEZERO size (0x{x}) is not page aligned", .{pagezero_vmsize});
+            log.warn("  rounding down to 0x{x}", .{aligned_pagezero_vmsize});
+        }
+        try self.segments.append(self.base.allocator, .{
+            .cmdsize = @sizeOf(macho.segment_command_64),
+            .segname = makeStaticString("__PAGEZERO"),
+            .vmsize = aligned_pagezero_vmsize,
+        });
     }
-    try self.segments.append(self.base.allocator, .{
-        .cmdsize = @sizeOf(macho.segment_command_64),
-        .segname = makeStaticString("__PAGEZERO"),
-        .vmsize = aligned_pagezero_vmsize,
-    });
+
+    for (self.sections.items(.header)) |header, sect_id| {
+        const segname = header.segName();
+        const segment_id = self.getSegmentByName(segname) orelse blk: {
+            log.debug("creating segment '{s}'", .{segname});
+            const segment_id = @intCast(u8, self.segments.items.len);
+            const protection = getSegmentMemoryProtection(segname);
+            try self.segments.append(self.base.allocator, .{
+                .cmdsize = @sizeOf(macho.segment_command_64),
+                .segname = makeStaticString(segname),
+                .maxprot = protection,
+                .initprot = protection,
+            });
+            break :blk segment_id;
+        };
+        const segment = &self.segments.items[segment_id];
+        segment.cmdsize += @sizeOf(macho.section_64);
+        segment.nsects += 1;
+        self.sections.items(.segment_index)[sect_id] = segment_id;
+    }
 }
 
 inline fn calcInstallNameLen(cmd_size: u64, name: []const u8, assume_max_path_len: bool) u64 {
@@ -2414,26 +2432,13 @@ fn initSection(
     opts: InitSectionOpts,
 ) !u8 {
     const gpa = self.base.allocator;
-    const segment_id = self.getSegmentByName(segname) orelse blk: {
-        log.debug("creating segment '{s}'", .{segname});
-        const segment_id = @intCast(u8, self.segments.items.len);
-        const protection = getSegmentMemoryProtection(segname);
-        try self.segments.append(gpa, .{
-            .cmdsize = @sizeOf(macho.segment_command_64),
-            .segname = makeStaticString(segname),
-            .maxprot = protection,
-            .initprot = protection,
-        });
-        break :blk segment_id;
-    };
     log.debug("creating section '{s},{s}'", .{ segname, sectname });
-    const seg = &self.segments.items[segment_id];
     const index = @intCast(u8, self.sections.slice().len);
     try self.sections.append(gpa, .{
-        .segment_index = segment_id,
+        .segment_index = undefined,
         .header = .{
             .sectname = makeStaticString(sectname),
-            .segname = seg.segname,
+            .segname = makeStaticString(segname),
             .flags = opts.flags,
             .reserved1 = opts.reserved1,
             .reserved2 = opts.reserved2,
@@ -2441,8 +2446,6 @@ fn initSection(
         .first_atom_index = null,
         .last_atom_index = null,
     });
-    seg.cmdsize += @sizeOf(macho.section_64);
-    seg.nsects += 1;
     return index;
 }
 
