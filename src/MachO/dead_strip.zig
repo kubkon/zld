@@ -261,7 +261,8 @@ fn prune(macho_file: *MachO, alive: AtomTable) !void {
             const sym_name = macho_file.getSymbolName(sym_loc);
             if (macho_file.globals.get(sym_name)) |global| {
                 if (global.eql(sym_loc)) {
-                    _ = macho_file.globals.swapRemove(sym_name);
+                    const kv = macho_file.globals.fetchSwapRemove(sym_name).?;
+                    macho_file.base.allocator.free(kv.key);
                 }
             }
 
@@ -270,7 +271,8 @@ fn prune(macho_file: *MachO, alive: AtomTable) !void {
                 const inner_name = macho_file.getSymbolName(inner);
                 if (macho_file.globals.get(inner_name)) |global| {
                     if (global.eql(inner)) {
-                        _ = macho_file.globals.swapRemove(inner_name);
+                        const kv = macho_file.globals.fetchSwapRemove(inner_name).?;
+                        macho_file.base.allocator.free(kv.key);
                     }
                 }
             }
