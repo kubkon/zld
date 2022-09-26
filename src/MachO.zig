@@ -81,6 +81,16 @@ pub const SymbolWithLoc = struct {
 
     // null means it's a synthetic global.
     file: ?u32 = null,
+
+    pub fn eql(this: SymbolWithLoc, other: SymbolWithLoc) bool {
+        if (this.file == null and other.file == null) {
+            return this.sym_index == other.sym_index;
+        }
+        if (this.file != null and other.file != null) {
+            return this.sym_index == other.sym_index and this.file.? == other.file.?;
+        }
+        return false;
+    }
 };
 
 /// Default path to dyld
@@ -2394,7 +2404,7 @@ fn allocateSegment(self: *MachO, segment_index: u8, init_size: u64) !void {
 
         while (true) {
             const atom = self.getAtom(atom_index);
-            if (atom.isDead()) continue;
+            assert(!atom.isDead());
 
             const atom_alignment = try math.powi(u32, 2, atom.alignment);
             const aligned_end_addr = mem.alignForwardGeneric(u64, header.size, atom_alignment);
@@ -2917,7 +2927,7 @@ fn collectExportData(self: *MachO, trie: *Trie) !void {
 
             const atom_index = self.getAtomIndexForSymbol(global).?;
             const atom = self.getAtom(atom_index);
-            if (atom.isDead()) continue;
+            assert(!atom.isDead());
 
             const sym_name = self.getSymbolName(global);
             log.debug("  (putting '{s}' defined at 0x{x})", .{ sym_name, sym.n_value });
@@ -3147,7 +3157,7 @@ fn writeFunctionStarts(self: *MachO, ncmds: *u32, lc_writer: anytype) !void {
 
         if (self.getAtomIndexForSymbol(global)) |atom_index| {
             const atom = self.getAtom(atom_index);
-            if (atom.isDead()) continue;
+            assert(!atom.isDead());
         }
 
         const sect_id = sym.n_sect - 1;
@@ -3233,7 +3243,7 @@ fn writeDataInCode(self: *MachO, ncmds: *u32, lc_writer: anytype) !void {
 
         for (object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index);
-            if (atom.isDead()) continue;
+            assert(!atom.isDead());
 
             const sym = self.getSymbol(atom.getSymbolWithLoc());
             const sect_id = sym.n_sect - 1;
@@ -3322,7 +3332,7 @@ fn writeSymtab(self: *MachO, lc: *macho.symtab_command) !SymtabCtx {
     for (self.objects.items) |object| {
         for (object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index);
-            if (atom.isDead()) continue;
+            assert(!atom.isDead());
 
             const sym_loc = atom.getSymbolWithLoc();
             const sym = self.getSymbol(sym_loc);
@@ -3349,7 +3359,7 @@ fn writeSymtab(self: *MachO, lc: *macho.symtab_command) !SymtabCtx {
 
         if (self.getAtomIndexForSymbol(global)) |atom_index| {
             const atom = self.getAtom(atom_index);
-            if (atom.isDead()) continue;
+            assert(!atom.isDead());
         }
 
         var out_sym = sym;
@@ -3817,7 +3827,7 @@ pub fn generateSymbolStabs(
 
     for (object.atoms.items) |atom_index| {
         const atom = self.getAtom(atom_index);
-        if (atom.isDead()) continue;
+        assert(!atom.isDead());
 
         const stabs = try self.generateSymbolStabsForSymbol(atom.getSymbolWithLoc(), debug_info, &stabs_buf);
         try locals.appendSlice(stabs);
@@ -3956,7 +3966,7 @@ fn logSymAttributes(sym: macho.nlist_64, buf: []u8) []const u8 {
 }
 
 fn logSymtab(self: *MachO) void {
-    var buf: [9]u8 = undefined;
+    var buf: [4]u8 = undefined;
 
     log.debug("locals:", .{});
     for (self.objects.items) |object, id| {
@@ -3964,9 +3974,6 @@ fn logSymtab(self: *MachO) void {
         for (object.atoms.items) |atom_index| {
             mem.set(u8, &buf, '_');
             const atom = self.getAtom(atom_index);
-            if (atom.isDead()) {
-                mem.copy(u8, buf[4..], " DEAD");
-            }
             const sym = self.getSymbol(atom.getSymbolWithLoc());
             log.debug("    %{d}: {s} @{x} in sect({d}), {s}", .{
                 atom.getSymbolWithLoc().sym_index,
@@ -3980,7 +3987,6 @@ fn logSymtab(self: *MachO) void {
     log.debug("  object(null)", .{});
     for (self.locals.items) |sym, sym_id| {
         if (sym.undf()) continue;
-
         log.debug("    %{d}: {s} @{x} in sect({d}), {s}", .{
             sym_id,
             self.strtab.get(sym.n_strx).?,
@@ -3995,14 +4001,6 @@ fn logSymtab(self: *MachO) void {
     for (self.globals.values()) |global| {
         const sym = self.getSymbol(global);
         if (sym.undf()) continue;
-
-        if (self.getAtomIndexForSymbol(global)) |atom_index| {
-            const atom = self.getAtom(atom_index);
-            if (atom.isDead()) {
-                mem.copy(u8, buf[4..], " DEAD");
-            }
-        }
-
         log.debug("    %{d}: {s} @{x} in sect({d}), {s} (def in object({?}))", .{
             count,
             self.getSymbolName(global),

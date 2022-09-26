@@ -16,6 +16,7 @@ pub fn gcAtoms(macho_file: *MachO, reverse_lookups: [][]u32) !void {
 
     var roots = std.AutoHashMap(AtomIndex, void).init(gpa);
     defer roots.deinit();
+    try roots.ensureUnusedCapacity(10); // just a guess
 
     try collectRoots(macho_file, &roots);
     try mark(macho_file, roots, reverse_lookups);
@@ -204,15 +205,20 @@ fn mark(macho_file: *MachO, roots: std.AutoHashMap(AtomIndex, void), reverse_loo
 
 fn prune(macho_file: *MachO) !void {
     log.debug("pruning dead atoms", .{});
-    for (macho_file.objects.items) |object| {
-        for (object.atoms.items) |atom_index| {
+    for (macho_file.objects.items) |*object| {
+        var i: usize = 0;
+        while (i < object.atoms.items.len) {
+            const atom_index = object.atoms.items[i];
             const atom = macho_file.getAtomPtr(atom_index);
-            if (atom.live) |_| continue;
+            if (atom.live) |_| {
+                i += 1;
+                continue;
+            }
 
-            atom.live = false;
             macho_file.logAtom(atom_index, log);
 
-            const sym = macho_file.getSymbol(atom.getSymbolWithLoc());
+            const sym_loc = atom.getSymbolWithLoc();
+            const sym = macho_file.getSymbol(sym_loc);
             const sect_id = sym.n_sect - 1;
             var section = macho_file.sections.get(sect_id);
 
@@ -237,6 +243,14 @@ fn prune(macho_file: *MachO) !void {
             }
 
             macho_file.sections.set(sect_id, section);
+            _ = object.atoms.swapRemove(i);
+
+            const sym_name = macho_file.getSymbolName(sym_loc);
+            if (macho_file.globals.get(sym_name)) |global| {
+                if (global.eql(sym_loc)) {
+                    _ = macho_file.globals.swapRemove(sym_name);
+                }
+            }
         }
     }
 }
