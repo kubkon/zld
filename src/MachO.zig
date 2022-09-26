@@ -2404,8 +2404,6 @@ fn allocateSegment(self: *MachO, segment_index: u8, init_size: u64) !void {
 
         while (true) {
             const atom = self.getAtom(atom_index);
-            assert(!atom.isDead());
-
             const atom_alignment = try math.powi(u32, 2, atom.alignment);
             const aligned_end_addr = mem.alignForwardGeneric(u64, header.size, atom_alignment);
             const padding = aligned_end_addr - header.size;
@@ -2925,10 +2923,6 @@ fn collectExportData(self: *MachO, trie: *Trie) !void {
             const sym = self.getSymbol(global);
             if (sym.undf()) continue;
 
-            const atom_index = self.getAtomIndexForSymbol(global).?;
-            const atom = self.getAtom(atom_index);
-            assert(!atom.isDead());
-
             const sym_name = self.getSymbolName(global);
             log.debug("  (putting '{s}' defined at 0x{x})", .{ sym_name, sym.n_value });
             try trie.put(gpa, .{
@@ -3155,11 +3149,6 @@ fn writeFunctionStarts(self: *MachO, ncmds: *u32, lc_writer: anytype) !void {
         const sym = self.getSymbol(global);
         if (sym.undf()) continue;
 
-        if (self.getAtomIndexForSymbol(global)) |atom_index| {
-            const atom = self.getAtom(atom_index);
-            assert(!atom.isDead());
-        }
-
         const sect_id = sym.n_sect - 1;
         if (sect_id != text_sect_index) continue;
 
@@ -3243,8 +3232,6 @@ fn writeDataInCode(self: *MachO, ncmds: *u32, lc_writer: anytype) !void {
 
         for (object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index);
-            assert(!atom.isDead());
-
             const sym = self.getSymbol(atom.getSymbolWithLoc());
             const sect_id = sym.n_sect - 1;
             if (sect_id != text_sect_id) {
@@ -3332,8 +3319,6 @@ fn writeSymtab(self: *MachO, lc: *macho.symtab_command) !SymtabCtx {
     for (self.objects.items) |object| {
         for (object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index);
-            assert(!atom.isDead());
-
             const sym_loc = atom.getSymbolWithLoc();
             const sym = self.getSymbol(sym_loc);
             if (sym.n_strx == 0) continue; // no name, skip
@@ -3356,11 +3341,6 @@ fn writeSymtab(self: *MachO, lc: *macho.symtab_command) !SymtabCtx {
     for (self.globals.values()) |global| {
         const sym = self.getSymbol(global);
         if (sym.undf()) continue; // import, skip
-
-        if (self.getAtomIndexForSymbol(global)) |atom_index| {
-            const atom = self.getAtom(atom_index);
-            assert(!atom.isDead());
-        }
 
         var out_sym = sym;
         out_sym.n_strx = try self.strtab.insert(gpa, self.getSymbolName(global));
@@ -3827,8 +3807,6 @@ pub fn generateSymbolStabs(
 
     for (object.atoms.items) |atom_index| {
         const atom = self.getAtom(atom_index);
-        assert(!atom.isDead());
-
         const stabs = try self.generateSymbolStabsForSymbol(atom.getSymbolWithLoc(), debug_info, &stabs_buf);
         try locals.appendSlice(stabs);
 

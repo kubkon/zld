@@ -47,10 +47,6 @@ size: u64,
 /// For instance, aligmment of 0 should be read as 2^0 = 1 byte aligned.
 alignment: u32,
 
-/// Set when -dead_strip option has been specified.
-/// True if this Atom has been marked live and will be linked in the final image.
-live: ?bool,
-
 /// Points to the previous and next neighbours
 next_index: ?AtomIndex,
 prev_index: ?AtomIndex,
@@ -61,7 +57,6 @@ pub const empty = Atom{
     .file = null,
     .size = 0,
     .alignment = 0,
-    .live = null,
     .prev_index = null,
     .next_index = null,
 };
@@ -71,13 +66,6 @@ pub inline fn getSymbolWithLoc(self: Atom) SymbolWithLoc {
         .sym_index = self.sym_index,
         .file = self.file,
     };
-}
-
-pub fn isDead(self: Atom) bool {
-    if (self.live) |live| {
-        return !live;
-    }
-    return false;
 }
 
 const InnerSymIterator = struct {
@@ -180,7 +168,6 @@ pub fn parseRelocTarget(
 
     if (rel.r_extern == 0) {
         const sect_id = @intCast(u16, rel.r_symbolnum - 1);
-        log.warn("sect_id = {d}", .{sect_id});
         const sym_index = object.sections_as_symbols.get(sect_id) orelse blk: {
             const sect = object.getSourceSection(sect_id);
             const match = (try macho_file.getOutputSection(sect)) orelse
