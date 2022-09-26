@@ -7,6 +7,7 @@ const mem = std.mem;
 
 const Allocator = mem.Allocator;
 const AtomIndex = MachO.AtomIndex;
+const Atom = @import("Atom.zig");
 const MachO = @import("../MachO.zig");
 const SymbolWithLoc = MachO.SymbolWithLoc;
 
@@ -18,16 +19,15 @@ pub fn gcAtoms(macho_file: *MachO, reverse_lookups: [][]u32) !void {
     const arena = arena_allocator.allocator();
 
     var roots = std.AutoHashMap(AtomIndex, void).init(arena);
-    try collectRoots(&roots, macho_file);
-    _ = reverse_lookups;
+    try collectRoots(macho_file, &roots);
 
-    // var alive = std.AutoHashMap(AtomIndex, void).init(arena);
-    // try mark(roots, &alive, macho_file);
+    var alive = std.AutoHashMap(AtomIndex, void).init(arena);
+    try mark(macho_file, roots, &alive, reverse_lookups);
 
     // try prune(arena, alive, macho_file);
 }
 
-fn collectRoots(roots: *std.AutoHashMap(AtomIndex, void), macho_file: *MachO) !void {
+fn collectRoots(macho_file: *MachO, roots: *std.AutoHashMap(AtomIndex, void)) !void {
     const output_mode = macho_file.options.output_mode;
 
     log.debug("collecting roots", .{});
@@ -46,10 +46,11 @@ fn collectRoots(roots: *std.AutoHashMap(AtomIndex, void), macho_file: *MachO) !v
             // Add exports as GC roots
             for (macho_file.globals.values()) |global| {
                 const sym = macho_file.getSymbol(global);
-                if (!sym.sect()) continue;
+                if (sym.undf()) continue;
+
                 const atom_index = macho_file.getAtomIndexForSymbol(global) orelse {
                     log.debug("atom for symbol '{s}' not found", .{macho_file.getSymbolName(global)});
-                    unreachable;
+                    continue;
                 };
                 _ = try roots.getOrPut(atom_index);
                 log.debug("adding root", .{});
@@ -91,18 +92,52 @@ fn collectRoots(roots: *std.AutoHashMap(AtomIndex, void), macho_file: *MachO) !v
     }
 }
 
-fn markLive(atom_index: AtomIndex, alive: *std.AutoHashMap(AtomIndex, void), macho_file: *MachO) anyerror!void {
+fn markLive(
+    macho_file: *MachO,
+    atom_index: AtomIndex,
+    alive: *std.AutoHashMap(AtomIndex, void),
+    reverse_lookups: [][]u32,
+) anyerror!void {
     const gop = try alive.getOrPut(atom_index);
     if (gop.found_existing) return;
 
     log.debug("marking live", .{});
     macho_file.logAtom(atom_index, log);
 
-    if (macho_file.relocs.get(atom_index)) |relocs| {
-        for (relocs.items) |rel| {
-            const target_atom_index = rel.getTargetAtomIndex(macho_file) orelse continue;
-            try markLive(target_atom_index, alive, macho_file);
+    const cpu_arch = macho_file.options.target.cpu_arch.?;
+
+    const atom = macho_file.getAtom(atom_index);
+    const sym = macho_file.getSymbol(atom.getSymbolWithLoc());
+    const header = macho_file.sections.items(.header)[sym.n_sect - 1];
+    if (header.isZerofill()) return;
+
+    const relocs = Atom.getAtomRelocs(macho_file, atom_index);
+    const reverse_lookup = reverse_lookups[atom.file.?];
+    for (relocs) |rel| {
+        switch (cpu_arch) {
+            .aarch64 => {
+                const rel_type = @intToEnum(macho.reloc_type_arm64, rel.r_type);
+                switch (rel_type) {
+                    .ARM64_RELOC_ADDEND, .ARM64_RELOC_SUBTRACTOR => continue,
+                    else => {},
+                }
+            },
+            .x86_64 => {
+                const rel_type = @intToEnum(macho.reloc_type_x86_64, rel.r_type);
+                switch (rel_type) {
+                    .X86_64_RELOC_SUBTRACTOR => continue,
+                    else => {},
+                }
+            },
+            else => unreachable,
         }
+
+        const target = try Atom.parseRelocTarget(macho_file, atom_index, rel, reverse_lookup);
+        const target_atom_index = macho_file.getAtomIndexForSymbol(target) orelse {
+            log.debug("atom for symbol '{s}' not found; skipping...", .{macho_file.getSymbolName(target)});
+            continue;
+        };
+        try markLive(macho_file, target_atom_index, alive, reverse_lookups);
     }
 }
 
@@ -128,35 +163,41 @@ fn refersDead(atom_index: AtomIndex, macho_file: *MachO) bool {
     return false;
 }
 
-fn mark(roots: std.AutoHashMap(AtomIndex, void), alive: *std.AutoHashMap(AtomIndex, void), macho_file: *MachO) !void {
+fn mark(
+    macho_file: *MachO,
+    roots: std.AutoHashMap(AtomIndex, void),
+    alive: *std.AutoHashMap(AtomIndex, void),
+    reverse_lookups: [][]u32,
+) !void {
     try alive.ensureUnusedCapacity(roots.count());
 
     var it = roots.keyIterator();
     while (it.next()) |root| {
-        try markLive(root.*, alive, macho_file);
+        try markLive(macho_file, root.*, alive, reverse_lookups);
     }
 
-    var loop: bool = true;
-    while (loop) {
-        loop = false;
+    // var loop: bool = true;
+    // while (loop) {
+    //     loop = false;
 
-        for (macho_file.objects.items) |object| {
-            for (object.atoms.items) |atom_index| {
-                if (alive.contains(atom_index)) continue;
+    //     for (macho_file.objects.items) |object| {
+    //         for (object.atoms.items) |atom_index| {
+    //             if (alive.contains(atom_index)) continue;
 
-                const atom = macho_file.getAtom(atom_index);
-                const source_sym = object.getSourceSymbol(atom.sym_index) orelse continue;
-                if (source_sym.tentative()) continue;
+    //             const atom = macho_file.getAtom(atom_index);
+    //             const source_sym = object.getSourceSymbol(atom.sym_index) orelse continue;
+    //             if (source_sym.tentative()) continue;
 
-                const source_sect = object.getSourceSection(source_sym.n_sect - 1);
+    //             const source_sect = object.getSourceSection(source_sym.n_sect - 1);
 
-                if (source_sect.isDontDeadStripIfReferencesLive() and refersLive(atom_index, alive.*, macho_file)) {
-                    try markLive(atom_index, alive, macho_file);
-                    loop = true;
-                }
-            }
-        }
-    }
+    //             if (source_sect.isDontDeadStripIfReferencesLive() and
+    //                 refersLive(atom_index, alive.*, macho_file, reverse_lookups)) {
+    //                 try markLive(atom_index, alive, macho_file, reverse_lookups);
+    //                 loop = true;
+    //             }
+    //         }
+    //     }
+    // }
 }
 
 fn prune(arena: Allocator, alive: std.AutoHashMap(AtomIndex, void), macho_file: *MachO) !void {

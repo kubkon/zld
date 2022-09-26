@@ -172,6 +172,7 @@ pub fn parseRelocTarget(
 
     if (rel.r_extern == 0) {
         const sect_id = @intCast(u16, rel.r_symbolnum - 1);
+        log.warn("sect_id = {d}", .{sect_id});
         const sym_index = object.sections_as_symbols.get(sect_id) orelse blk: {
             const sect = object.getSourceSection(sect_id);
             const match = (try macho_file.getOutputSection(sect)) orelse
