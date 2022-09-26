@@ -24,7 +24,7 @@ pub fn gcAtoms(macho_file: *MachO, reverse_lookups: [][]u32) !void {
     var alive = std.AutoHashMap(AtomIndex, void).init(arena);
     try mark(macho_file, roots, &alive, reverse_lookups);
 
-    // try prune(arena, alive, macho_file);
+    try prune(macho_file, alive);
 }
 
 fn collectRoots(macho_file: *MachO, roots: *std.AutoHashMap(AtomIndex, void)) !void {
@@ -141,13 +141,48 @@ fn markLive(
     }
 }
 
-fn refersLive(atom_index: AtomIndex, alive: std.AutoHashMap(AtomIndex, void), macho_file: *MachO) bool {
-    if (macho_file.relocs.get(atom_index)) |relocs| {
-        for (relocs.items) |rel| {
-            const target_atom_index = rel.getTargetAtomIndex(macho_file) orelse continue;
-            if (alive.contains(target_atom_index)) return true;
+fn refersLive(
+    macho_file: *MachO,
+    atom_index: AtomIndex,
+    alive: *const std.AutoHashMap(AtomIndex, void),
+    reverse_lookups: [][]u32,
+) !bool {
+    const cpu_arch = macho_file.options.target.cpu_arch.?;
+
+    const atom = macho_file.getAtom(atom_index);
+    const sym = macho_file.getSymbol(atom.getSymbolWithLoc());
+    const header = macho_file.sections.items(.header)[sym.n_sect - 1];
+    if (header.isZerofill()) return false;
+
+    const relocs = Atom.getAtomRelocs(macho_file, atom_index);
+    const reverse_lookup = reverse_lookups[atom.file.?];
+    for (relocs) |rel| {
+        switch (cpu_arch) {
+            .aarch64 => {
+                const rel_type = @intToEnum(macho.reloc_type_arm64, rel.r_type);
+                switch (rel_type) {
+                    .ARM64_RELOC_ADDEND, .ARM64_RELOC_SUBTRACTOR => continue,
+                    else => {},
+                }
+            },
+            .x86_64 => {
+                const rel_type = @intToEnum(macho.reloc_type_x86_64, rel.r_type);
+                switch (rel_type) {
+                    .X86_64_RELOC_SUBTRACTOR => continue,
+                    else => {},
+                }
+            },
+            else => unreachable,
         }
+
+        const target = try Atom.parseRelocTarget(macho_file, atom_index, rel, reverse_lookup);
+        const target_atom_index = macho_file.getAtomIndexForSymbol(target) orelse {
+            log.debug("atom for symbol '{s}' not found; skipping...", .{macho_file.getSymbolName(target)});
+            continue;
+        };
+        if (alive.contains(target_atom_index)) return true;
     }
+
     return false;
 }
 
@@ -176,188 +211,64 @@ fn mark(
         try markLive(macho_file, root.*, alive, reverse_lookups);
     }
 
-    // var loop: bool = true;
-    // while (loop) {
-    //     loop = false;
-
-    //     for (macho_file.objects.items) |object| {
-    //         for (object.atoms.items) |atom_index| {
-    //             if (alive.contains(atom_index)) continue;
-
-    //             const atom = macho_file.getAtom(atom_index);
-    //             const source_sym = object.getSourceSymbol(atom.sym_index) orelse continue;
-    //             if (source_sym.tentative()) continue;
-
-    //             const source_sect = object.getSourceSection(source_sym.n_sect - 1);
-
-    //             if (source_sect.isDontDeadStripIfReferencesLive() and
-    //                 refersLive(atom_index, alive.*, macho_file, reverse_lookups)) {
-    //                 try markLive(atom_index, alive, macho_file, reverse_lookups);
-    //                 loop = true;
-    //             }
-    //         }
-    //     }
-    // }
-}
-
-fn prune(arena: Allocator, alive: std.AutoHashMap(AtomIndex, void), macho_file: *MachO) !void {
-    // Any section that ends up here will be updated, that is,
-    // its size and alignment recalculated.
-    var gc_sections = std.AutoHashMap(u8, void).init(arena);
     var loop: bool = true;
     while (loop) {
         loop = false;
 
         for (macho_file.objects.items) |object| {
-            const in_symtab = object.in_symtab orelse continue;
-
-            for (in_symtab) |_, source_index| {
-                const atom_index = object.getAtomIndexForSymbol(@intCast(u32, source_index)) orelse continue;
+            for (object.atoms.items) |atom_index| {
                 if (alive.contains(atom_index)) continue;
 
                 const atom = macho_file.getAtom(atom_index);
-                const global = atom.getSymbolWithLoc();
-                const sym = macho_file.getSymbolPtr(global);
-                const match = sym.n_sect - 1;
+                const source_sym = object.getSourceSymbol(atom.sym_index) orelse continue;
+                const source_sect = object.getSourceSection(source_sym.n_sect - 1);
 
-                if (sym.n_desc == MachO.N_DESC_GCED) continue;
-                if (!sym.ext() and !refersDead(atom_index, macho_file)) continue;
-
-                macho_file.logAtom(atom_index, log);
-                sym.n_desc = MachO.N_DESC_GCED;
-                removeAtomFromSection(atom_index, match, macho_file);
-                _ = try gc_sections.put(match, {});
-
-                for (atom.contained.items) |sym_off| {
-                    const inner = macho_file.getSymbolPtr(.{
-                        .sym_index = sym_off.sym_index,
-                        .file = atom.file,
-                    });
-                    inner.n_desc = MachO.N_DESC_GCED;
+                if (source_sect.isDontDeadStripIfReferencesLive()) {
+                    if (try refersLive(macho_file, atom_index, alive, reverse_lookups)) {
+                        try markLive(macho_file, atom_index, alive, reverse_lookups);
+                        loop = true;
+                    }
                 }
-
-                if (macho_file.got_entries.contains(global)) {
-                    const got_atom_index = macho_file.getGotAtomIndexForSymbol(global).?;
-                    const got_atom = macho_file.getAtom(got_atom_index);
-                    const got_sym = macho_file.getSymbolPtr(got_atom.getSymbolWithLoc());
-                    got_sym.n_desc = MachO.N_DESC_GCED;
-                }
-
-                if (macho_file.stubs.contains(global)) {
-                    const stubs_atom_index = macho_file.getStubsAtomIndexForSymbol(global).?;
-                    const stubs_atom = macho_file.getAtom(stubs_atom_index);
-                    const stubs_sym = macho_file.getSymbolPtr(stubs_atom.getSymbolWithLoc());
-                    stubs_sym.n_desc = MachO.N_DESC_GCED;
-                }
-
-                if (macho_file.tlv_ptr_entries.contains(global)) {
-                    const tlv_ptr_atom_index = macho_file.getTlvPtrAtomIndexForSymbol(global).?;
-                    const tlv_ptr_atom = macho_file.getAtom(tlv_ptr_atom_index);
-                    const tlv_ptr_sym = macho_file.getSymbolPtr(tlv_ptr_atom.getSymbolWithLoc());
-                    tlv_ptr_sym.n_desc = MachO.N_DESC_GCED;
-                }
-
-                loop = true;
             }
         }
     }
-
-    for (macho_file.got_entries.keys()) |target| {
-        const sym_index = macho_file.got_entries.get(target).?;
-        const sym = macho_file.getSymbol(.{ .sym_index = sym_index, .file = null });
-        if (sym.n_desc != MachO.N_DESC_GCED) continue;
-
-        const atom_index = macho_file.getAtomIndexForSymbol(.{ .sym_index = sym_index, .file = null }).?;
-        const match = sym.n_sect - 1;
-        removeAtomFromSection(atom_index, match, macho_file);
-        _ = try gc_sections.put(match, {});
-        _ = macho_file.got_entries.swapRemove(target);
-    }
-
-    for (macho_file.stubs.keys()) |target| {
-        const sym_index = macho_file.stubs.get(target).?;
-        const sym = macho_file.getSymbol(.{ .sym_index = sym_index, .file = null });
-        if (sym.n_desc != MachO.N_DESC_GCED) continue;
-
-        const atom_index = macho_file.getAtomIndexForSymbol(.{ .sym_index = sym_index, .file = null }).?;
-        const match = sym.n_sect - 1;
-        removeAtomFromSection(atom_index, match, macho_file);
-        _ = try gc_sections.put(match, {});
-        _ = macho_file.stubs.swapRemove(target);
-    }
-
-    for (macho_file.tlv_ptr_entries.keys()) |target| {
-        const sym_index = macho_file.tlv_ptr_entries.get(target).?;
-        const sym = macho_file.getSymbol(.{ .sym_index = sym_index, .file = null });
-        if (sym.n_desc != MachO.N_DESC_GCED) continue;
-
-        const atom_index = macho_file.getAtomIndexForSymbol(.{ .sym_index = sym_index, .file = null }).?;
-        const match = sym.n_sect - 1;
-        removeAtomFromSection(atom_index, match, macho_file);
-        _ = try gc_sections.put(match, {});
-        _ = macho_file.tlv_ptr_entries.swapRemove(target);
-    }
-
-    var gc_sections_it = gc_sections.iterator();
-    while (gc_sections_it.next()) |entry| {
-        const match = entry.key_ptr.*;
-        var section = macho_file.sections.get(match);
-        if (section.header.size == 0) continue; // Pruning happens automatically in next step.
-
-        section.header.@"align" = 0;
-        section.header.size = 0;
-
-        var atom_index = section.first_atom_index;
-        var atom = macho_file.getAtom(atom_index);
-
-        while (true) {
-            const atom_alignment = try math.powi(u32, 2, atom.alignment);
-            const aligned_end_addr = mem.alignForwardGeneric(u64, section.header.size, atom_alignment);
-            const padding = aligned_end_addr - section.header.size;
-            section.header.size += padding + atom.size;
-            section.header.@"align" = @maximum(section.header.@"align", atom.alignment);
-
-            if (atom.next_index) |next_index| {
-                atom_index = next_index;
-                atom = macho_file.getAtom(atom_index);
-            } else break;
-        }
-
-        macho_file.sections.set(match, section);
-    }
 }
 
-fn removeAtomFromSection(atom_index: AtomIndex, match: u8, macho_file: *MachO) void {
-    macho_file.freeAtom(atom_index);
+fn prune(macho_file: *MachO, alive: std.AutoHashMap(AtomIndex, void)) !void {
+    log.debug("pruning dead atoms", .{});
+    for (macho_file.objects.items) |object| {
+        for (object.atoms.items) |atom_index| {
+            if (alive.contains(atom_index)) continue;
+            macho_file.getAtomPtr(atom_index).dead = true;
+            macho_file.logAtom(atom_index, log);
 
-    var section = macho_file.sections.get(match);
-    const atom = macho_file.getAtomPtr(atom_index);
+            const atom = macho_file.getAtomPtr(atom_index);
+            const sym = macho_file.getSymbol(atom.getSymbolWithLoc());
+            const sect_id = sym.n_sect - 1;
+            var section = macho_file.sections.get(sect_id);
 
-    // If we want to enable GC for incremental codepath, we need to take into
-    // account any padding that might have been left here.
-    section.header.size -= atom.size;
+            if (atom.prev_index) |prev_index| {
+                const prev = macho_file.getAtomPtr(prev_index);
+                prev.next_index = atom.next_index;
+            } else {
+                if (atom.next_index) |next_index| {
+                    section.first_atom_index = next_index;
+                }
+            }
+            if (atom.next_index) |next_index| {
+                const next = macho_file.getAtomPtr(next_index);
+                next.prev_index = atom.prev_index;
+            } else {
+                if (atom.prev_index) |prev_index| {
+                    section.last_atom_index = prev_index;
+                } else {
+                    // TODO: remove section header without modifying section indexes.
+                    section.first_atom_index = null;
+                    section.last_atom_index = null;
+                }
+            }
 
-    if (atom.prev_index) |prev_index| {
-        const prev = macho_file.getAtomPtr(prev_index);
-        prev.next_index = atom.next_index;
-    } else {
-        if (atom.next_index) |next_index| {
-            section.first_atom_index = next_index;
+            macho_file.sections.set(sect_id, section);
         }
     }
-    if (atom.next_index) |next_index| {
-        const next = macho_file.getAtomPtr(next_index);
-        next.prev_index = atom.prev_index;
-    } else {
-        if (atom.prev_index) |prev_index| {
-            section.last_atom_index = prev_index;
-        } else {
-            // The section will be GCed in the next step.
-            section.first_atom_index = undefined;
-            section.last_atom_index = undefined;
-            section.header.size = 0;
-        }
-    }
-
-    macho_file.sections.set(match, section);
 }
