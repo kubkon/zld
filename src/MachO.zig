@@ -33,8 +33,6 @@ const Zld = @import("Zld.zig");
 
 pub const base_tag = Zld.Tag.macho;
 
-pub const N_DESC_GCED: u16 = @bitCast(u16, @as(i16, -1));
-
 const Section = struct {
     header: macho.section_64,
     segment_index: u8,
@@ -2369,6 +2367,8 @@ fn allocateSegment(self: *MachO, segment_index: u8, init_size: u64) !void {
 
         while (true) {
             const atom = self.getAtom(atom_index);
+            if (atom.dead) continue;
+
             const atom_alignment = try math.powi(u32, 2, atom.alignment);
             const aligned_end_addr = mem.alignForwardGeneric(u64, header.size, atom_alignment);
             const padding = aligned_end_addr - header.size;
@@ -2901,10 +2901,11 @@ fn collectExportData(self: *MachO, trie: *Trie) !void {
         assert(self.options.output_mode == .lib);
         for (self.globals.values()) |global| {
             const sym = self.getSymbol(global);
-
             if (sym.undf()) continue;
-            if (!sym.ext()) continue;
-            if (sym.n_desc == N_DESC_GCED) continue;
+
+            const atom_index = self.getAtomIndexForSymbol(global).?;
+            const atom = self.getAtom(atom_index);
+            if (atom.dead) continue;
 
             const sym_name = self.getSymbolName(global);
             log.debug("  (putting '{s}' defined at 0x{x})", .{ sym_name, sym.n_value });
@@ -3131,7 +3132,12 @@ fn writeFunctionStarts(self: *MachO, ncmds: *u32, lc_writer: anytype) !void {
     for (self.globals.values()) |global| {
         const sym = self.getSymbol(global);
         if (sym.undf()) continue;
-        if (sym.n_desc == N_DESC_GCED) continue;
+
+        if (self.getAtomIndexForSymbol(global)) |atom_index| {
+            const atom = self.getAtom(atom_index);
+            if (atom.dead) continue;
+        }
+
         const sect_id = sym.n_sect - 1;
         if (sect_id != text_sect_index) continue;
 
@@ -3216,7 +3222,7 @@ fn writeDataInCode(self: *MachO, ncmds: *u32, lc_writer: anytype) !void {
         for (object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index);
             const sym = self.getSymbol(atom.getSymbolWithLoc());
-            if (sym.n_desc == N_DESC_GCED) continue;
+            if (atom.dead) continue;
 
             const sect_id = sym.n_sect - 1;
             if (sect_id != text_sect_id) {
@@ -3301,22 +3307,17 @@ fn writeSymtab(self: *MachO, lc: *macho.symtab_command) !SymtabCtx {
     var locals = std.ArrayList(macho.nlist_64).init(gpa);
     defer locals.deinit();
 
-    for (self.locals.items) |sym, sym_id| {
-        if (sym.n_strx == 0) continue; // no name, skip
-        if (sym.n_desc == N_DESC_GCED) continue; // GCed, skip
-        const sym_loc = SymbolWithLoc{ .sym_index = @intCast(u32, sym_id), .file = null };
-        if (self.symbolIsTemp(sym_loc)) continue; // local temp symbol, skip
-        if (self.globals.contains(self.getSymbolName(sym_loc))) continue; // global symbol is either an export or import, skip
-        try locals.append(sym);
-    }
+    for (self.objects.items) |object| {
+        for (object.atoms.items) |atom_index| {
+            const atom = self.getAtom(atom_index);
+            if (atom.dead) continue;
 
-    for (self.objects.items) |object, object_id| {
-        for (object.symtab.items) |sym, sym_id| {
+            const sym_loc = atom.getSymbolWithLoc();
+            const sym = self.getSymbol(sym_loc);
             if (sym.n_strx == 0) continue; // no name, skip
-            if (sym.n_desc == N_DESC_GCED) continue; // GCed, skip
-            const sym_loc = SymbolWithLoc{ .sym_index = @intCast(u32, sym_id), .file = @intCast(u32, object_id) };
+            if (sym.ext()) continue; // an export lands in its own symtab section, skip
             if (self.symbolIsTemp(sym_loc)) continue; // local temp symbol, skip
-            if (self.globals.contains(self.getSymbolName(sym_loc))) continue; // global symbol is either an export or import, skip
+
             var out_sym = sym;
             out_sym.n_strx = try self.strtab.insert(gpa, self.getSymbolName(sym_loc));
             try locals.append(out_sym);
@@ -3333,7 +3334,12 @@ fn writeSymtab(self: *MachO, lc: *macho.symtab_command) !SymtabCtx {
     for (self.globals.values()) |global| {
         const sym = self.getSymbol(global);
         if (sym.undf()) continue; // import, skip
-        if (sym.n_desc == N_DESC_GCED) continue; // GCed, skip
+
+        if (self.getAtomIndexForSymbol(global)) |atom_index| {
+            const atom = self.getAtom(atom_index);
+            if (atom.dead) continue;
+        }
+
         var out_sym = sym;
         out_sym.n_strx = try self.strtab.insert(gpa, self.getSymbolName(global));
         try exports.append(out_sym);
@@ -3346,8 +3352,8 @@ fn writeSymtab(self: *MachO, lc: *macho.symtab_command) !SymtabCtx {
 
     for (self.globals.values()) |global| {
         const sym = self.getSymbol(global);
-        if (sym.n_strx == 0) continue; // no name, skip
         if (!sym.undf()) continue; // not an import, skip
+
         const new_index = @intCast(u32, imports.items.len);
         var out_sym = sym;
         out_sym.n_strx = try self.strtab.insert(gpa, self.getSymbolName(global));
@@ -3437,8 +3443,6 @@ fn writeDysymtab(self: *MachO, ctx: SymtabCtx, lc: *macho.dysymtab_command) !voi
         for (self.stubs.keys()) |target| {
             const sym_index = self.stubs.get(target).?;
             assert(sym_index > 0);
-            const atom_sym = self.getSymbol(.{ .sym_index = sym_index, .file = null });
-            if (atom_sym.n_desc == N_DESC_GCED) continue;
             const target_sym = self.getSymbol(target);
             assert(target_sym.undf());
             try writer.writeIntLittle(u32, iundefsym + ctx.imports_table.get(target).?);
@@ -3451,8 +3455,6 @@ fn writeDysymtab(self: *MachO, ctx: SymtabCtx, lc: *macho.dysymtab_command) !voi
         for (self.got_entries.keys()) |target| {
             const sym_index = self.got_entries.get(target).?;
             assert(sym_index > 0);
-            const atom_sym = self.getSymbol(.{ .sym_index = sym_index, .file = null });
-            if (atom_sym.n_desc == N_DESC_GCED) continue;
             const target_sym = self.getSymbol(target);
             if (target_sym.undf()) {
                 try writer.writeIntLittle(u32, iundefsym + ctx.imports_table.get(target).?);
@@ -3468,8 +3470,6 @@ fn writeDysymtab(self: *MachO, ctx: SymtabCtx, lc: *macho.dysymtab_command) !voi
         for (self.stubs.keys()) |target| {
             const sym_index = self.stubs.get(target).?;
             assert(sym_index > 0);
-            const atom_sym = self.getSymbol(.{ .sym_index = sym_index, .file = null });
-            if (atom_sym.n_desc == N_DESC_GCED) continue;
             const target_sym = self.getSymbol(target);
             assert(target_sym.undf());
             try writer.writeIntLittle(u32, iundefsym + ctx.imports_table.get(target).?);
@@ -3805,20 +3805,14 @@ pub fn generateSymbolStabs(
 
     for (object.atoms.items) |atom_index| {
         const atom = self.getAtom(atom_index);
-        const stabs = try self.generateSymbolStabsForSymbol(
-            atom.getSymbolWithLoc(),
-            debug_info,
-            &stabs_buf,
-        );
+        if (atom.dead) continue;
+
+        const stabs = try self.generateSymbolStabsForSymbol(atom.getSymbolWithLoc(), debug_info, &stabs_buf);
         try locals.appendSlice(stabs);
 
         var it = Atom.getInnerSymbolsIterator(self, atom_index);
         while (it.next()) |sym_loc| {
-            const contained_stabs = try self.generateSymbolStabsForSymbol(
-                sym_loc,
-                debug_info,
-                &stabs_buf,
-            );
+            const contained_stabs = try self.generateSymbolStabsForSymbol(sym_loc, debug_info, &stabs_buf);
             try locals.appendSlice(contained_stabs);
         }
     }
@@ -3845,7 +3839,6 @@ fn generateSymbolStabsForSymbol(
     const sym_name = self.getSymbolName(sym_loc);
 
     if (sym.n_strx == 0) return buf[0..0];
-    if (sym.n_desc == N_DESC_GCED) return buf[0..0];
     if (self.symbolIsTemp(sym_loc)) return buf[0..0];
 
     const source_sym = object.getSourceSymbol(sym_loc.sym_index) orelse return buf[0..0];
@@ -3930,9 +3923,8 @@ fn logSections(self: *MachO) void {
     }
 }
 
-fn logSymAttributes(sym: macho.nlist_64, buf: *[9]u8) []const u8 {
+fn logSymAttributes(sym: macho.nlist_64, buf: *[4]u8) []const u8 {
     mem.set(u8, buf[0..4], '_');
-    mem.set(u8, buf[4..], ' ');
     if (sym.sect()) {
         buf[0] = 's';
     }
@@ -3949,49 +3941,85 @@ fn logSymAttributes(sym: macho.nlist_64, buf: *[9]u8) []const u8 {
     if (sym.undf()) {
         buf[3] = 'u';
     }
-    if (sym.n_desc == N_DESC_GCED) {
-        mem.copy(u8, buf[5..], "DEAD");
-    }
     return buf[0..];
 }
 
 fn logSymtab(self: *MachO) void {
     var buf: [9]u8 = undefined;
 
-    log.debug("symtab:", .{});
+    log.debug("locals:", .{});
     for (self.objects.items) |object, id| {
         log.debug("  object({d}): {s}", .{ id, object.name });
-        for (object.symtab.items) |sym, sym_id| {
-            const where = if (sym.undf() and !sym.tentative()) "ord" else "sect";
-            const def_index = if (sym.undf() and !sym.tentative())
-                @divTrunc(sym.n_desc, macho.N_SYMBOL_RESOLVER)
-            else
-                sym.n_sect;
-            log.debug("    %{d}: {s} @{x} in {s}({d}), {s}", .{
-                sym_id,
+        for (object.atoms.items) |atom_index| {
+            const atom = self.getAtom(atom_index);
+            if (atom.dead) {
+                mem.copy(u8, buf[4..], " DEAD");
+            }
+            const sym = self.getSymbol(atom.getSymbolWithLoc());
+            log.debug("    %{d}: {s} @{x} in sect({d}), {s}", .{
+                atom.getSymbolWithLoc().sym_index,
                 object.getString(sym.n_strx),
                 sym.n_value,
-                where,
-                def_index,
-                logSymAttributes(sym, &buf),
+                sym.n_sect,
+                logSymAttributes(sym, buf[0..4]),
             });
         }
     }
     log.debug("  object(null)", .{});
     for (self.locals.items) |sym, sym_id| {
-        const where = if (sym.undf() and !sym.tentative()) "ord" else "sect";
-        const def_index = if (sym.undf() and !sym.tentative())
-            @divTrunc(sym.n_desc, macho.N_SYMBOL_RESOLVER)
-        else
-            sym.n_sect;
-        log.debug("    %{d}: {s} @{x} in {s}({d}), {s}", .{
+        if (sym.undf()) continue;
+
+        log.debug("    %{d}: {s} @{x} in sect({d}), {s}", .{
             sym_id,
             self.strtab.get(sym.n_strx).?,
             sym.n_value,
-            where,
-            def_index,
-            logSymAttributes(sym, &buf),
+            sym.n_sect,
+            logSymAttributes(sym, buf[0..4]),
         });
+    }
+
+    log.debug("exports:", .{});
+    var count: usize = 0;
+    for (self.globals.values()) |global| {
+        const sym = self.getSymbol(global);
+        if (sym.undf()) continue;
+
+        if (self.getAtomIndexForSymbol(global)) |atom_index| {
+            const atom = self.getAtom(atom_index);
+            if (atom.dead) {
+                mem.copy(u8, buf[4..], " DEAD");
+            }
+        }
+
+        log.debug("    %{d}: {s} @{x} in sect({d}), {s} (def in object({?}))", .{
+            count,
+            self.getSymbolName(global),
+            sym.n_value,
+            sym.n_sect,
+            logSymAttributes(sym, buf[0..4]),
+            global.file,
+        });
+
+        count += 1;
+    }
+
+    log.debug("imports:", .{});
+    count = 0;
+    for (self.globals.values()) |global| {
+        const sym = self.getSymbol(global);
+        if (!sym.undf()) continue;
+
+        const ord = @divTrunc(sym.n_desc, macho.N_SYMBOL_RESOLVER);
+
+        log.debug("    %{d}: {s} @{x} in ord({d}), {s}", .{
+            count,
+            self.getSymbolName(global),
+            sym.n_value,
+            ord,
+            logSymAttributes(sym, buf[0..4]),
+        });
+
+        count += 1;
     }
 
     log.debug("globals table:", .{});
@@ -4003,7 +4031,6 @@ fn logSymtab(self: *MachO) void {
     log.debug("GOT entries:", .{});
     for (self.got_entries.keys()) |target, i| {
         const atom_sym = self.getSymbol(.{ .sym_index = self.got_entries.get(target).?, .file = null });
-        if (atom_sym.n_desc == N_DESC_GCED) continue;
         const target_sym = self.getSymbol(target);
         if (target_sym.undf()) {
             log.debug("  {d}@{x} => import('{s}')", .{
@@ -4017,7 +4044,7 @@ fn logSymtab(self: *MachO) void {
                 atom_sym.n_value,
                 target.sym_index,
                 target.file,
-                logSymAttributes(target_sym, &buf),
+                logSymAttributes(target_sym, buf[0..4]),
             });
         }
     }
@@ -4025,7 +4052,6 @@ fn logSymtab(self: *MachO) void {
     log.debug("__thread_ptrs entries:", .{});
     for (self.tlv_ptr_entries.keys()) |target, i| {
         const atom_sym = self.getSymbol(.{ .sym_index = self.tlv_ptr_entries.get(target).?, .file = null });
-        if (atom_sym.n_desc == N_DESC_GCED) continue;
         const target_sym = self.getSymbol(target);
         assert(target_sym.undf());
         log.debug("  {d}@{x} => import('{s}')", .{

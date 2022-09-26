@@ -48,7 +48,7 @@ size: u64,
 alignment: u32,
 
 /// True if this Atom has been marked dead and will be excluded.
-// dead: bool,
+dead: bool,
 
 /// Points to the previous and next neighbours
 next_index: ?AtomIndex,
@@ -60,6 +60,7 @@ pub const empty = Atom{
     .file = null,
     .size = 0,
     .alignment = 0,
+    .dead = false,
     .prev_index = null,
     .next_index = null,
 };
@@ -392,7 +393,6 @@ fn getRelocTargetAddress(macho_file: *MachO, rel: macho.relocation_info, target:
         macho_file.getSymbol(target)
     else
         macho_file.getSymbol(target_atom.getSymbolWithLoc());
-    assert(target_sym.n_desc != MachO.N_DESC_GCED);
     const base_address: u64 = if (is_tlv) base_address: {
         // For TLV relocations, the value specified as a relocation is the displacement from the
         // TLV initializer (either value in __thread_data or zero-init in __thread_bss) to the first
