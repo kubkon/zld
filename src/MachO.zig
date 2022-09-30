@@ -24,6 +24,7 @@ const Archive = @import("MachO/Archive.zig");
 const Atom = @import("MachO/Atom.zig");
 const CodeSignature = @import("MachO/CodeSignature.zig");
 const Dylib = @import("MachO/Dylib.zig");
+const DwarfInfo = @import("MachO/DwarfInfo.zig");
 const Object = @import("MachO/Object.zig");
 pub const Options = @import("MachO/Options.zig");
 const LibStub = @import("tapi.zig").LibStub;
@@ -3763,20 +3764,49 @@ pub fn generateSymbolStabs(
 
     const gpa = self.base.allocator;
     var debug_info = object.parseDwarfInfo();
-    defer debug_info.deinit(gpa);
-    try dwarf.openDwarfDebugInfo(&debug_info, gpa);
 
     // We assume there is only one CU.
-    const compile_unit = debug_info.findCompileUnit(0x0) catch |err| switch (err) {
-        error.MissingDebugInfo => {
+    const maybe_compile_unit = debug_info.findCompileUnit(gpa, 0x0) catch |err| switch (err) {
+        error.MalformedDwarf => {
             // TODO audit cases with missing debug info and audit our dwarf.zig module.
             log.debug("invalid or missing debug info in {s}; skipping", .{object.name});
             return;
         },
         else => |e| return e,
     };
-    const tu_name = try compile_unit.die.getAttrString(&debug_info, dwarf.AT.name, debug_info.debug_str, compile_unit.*);
-    const tu_comp_dir = try compile_unit.die.getAttrString(&debug_info, dwarf.AT.comp_dir, debug_info.debug_str, compile_unit.*);
+    const compile_unit = maybe_compile_unit orelse {
+        log.debug("invalid or missing debug info in {s}; skipping", .{object.name});
+        return;
+    };
+
+    var lookup = DwarfInfo.AbbrevLookupTable.init(gpa);
+    defer lookup.deinit();
+    try lookup.ensureUnusedCapacity(std.math.maxInt(u8));
+    try debug_info.genAbbrevLookupByKind(compile_unit.cuh.debug_abbrev_offset, &lookup);
+
+    var abbrev_it = DwarfInfo.AbbrevEntryIterator{};
+    const cu_entry: DwarfInfo.AbbrevEntry = while (try abbrev_it.next(debug_info, compile_unit, lookup)) |entry| switch (entry.tag) {
+        dwarf.TAG.compile_unit => break entry,
+        else => continue,
+    } else unreachable;
+
+    var maybe_tu_name: ?[]const u8 = null;
+    var maybe_tu_comp_dir: ?[]const u8 = null;
+    var attr_it = DwarfInfo.AttributeIterator{};
+
+    while (try attr_it.next(debug_info, cu_entry, compile_unit.cuh)) |attr| switch (attr.name) {
+        dwarf.AT.comp_dir => maybe_tu_comp_dir = attr.getString(debug_info, compile_unit.cuh) orelse continue,
+        dwarf.AT.name => maybe_tu_name = attr.getString(debug_info, compile_unit.cuh) orelse continue,
+        else => continue,
+    };
+
+    if (maybe_tu_name == null or maybe_tu_comp_dir == null) {
+        log.debug("invalid or missing debug info in {s}; skipping", .{object.name});
+        return;
+    }
+
+    const tu_name = maybe_tu_name.?;
+    const tu_comp_dir = maybe_tu_comp_dir.?;
 
     // Open scope
     try locals.ensureUnusedCapacity(3);
@@ -3806,12 +3836,12 @@ pub fn generateSymbolStabs(
 
     for (object.atoms.items) |atom_index| {
         const atom = self.getAtom(atom_index);
-        const stabs = try self.generateSymbolStabsForSymbol(atom.getSymbolWithLoc(), debug_info, &stabs_buf);
+        const stabs = try self.generateSymbolStabsForSymbol(atom_index, atom.getSymbolWithLoc(), debug_info, &stabs_buf);
         try locals.appendSlice(stabs);
 
         var it = Atom.getInnerSymbolsIterator(self, atom_index);
         while (it.next()) |sym_loc| {
-            const contained_stabs = try self.generateSymbolStabsForSymbol(sym_loc, debug_info, &stabs_buf);
+            const contained_stabs = try self.generateSymbolStabsForSymbol(atom_index, sym_loc, debug_info, &stabs_buf);
             try locals.appendSlice(contained_stabs);
         }
     }
@@ -3828,29 +3858,37 @@ pub fn generateSymbolStabs(
 
 fn generateSymbolStabsForSymbol(
     self: *MachO,
+    atom_index: AtomIndex,
     sym_loc: SymbolWithLoc,
-    debug_info: dwarf.DwarfInfo,
+    debug_info: DwarfInfo,
     buf: *[4]macho.nlist_64,
 ) ![]const macho.nlist_64 {
+    _ = debug_info;
     const gpa = self.base.allocator;
     const object = self.objects.items[sym_loc.file.?];
     const sym = self.getSymbol(sym_loc);
     const sym_name = self.getSymbolName(sym_loc);
+    const header = self.sections.items(.header)[sym.n_sect - 1];
 
     if (sym.n_strx == 0) return buf[0..0];
     if (self.symbolIsTemp(sym_loc)) return buf[0..0];
 
-    const source_sym = object.getSourceSymbol(sym_loc.sym_index) orelse return buf[0..0];
     const size: ?u64 = size: {
-        if (source_sym.tentative()) break :size null;
-        for (debug_info.func_list.items) |func| {
-            if (func.pc_range) |range| {
-                if (source_sym.n_value >= range.start and source_sym.n_value < range.end) {
-                    break :size range.end - range.start;
-                }
-            }
+        if (!header.isCode()) break :size null;
+        if (object.header.flags & macho.MH_SUBSECTIONS_VIA_SYMBOLS != 0) {
+            break :size self.getAtom(atom_index).size;
         }
-        break :size null;
+        return error.TODO;
+
+        // const source_sym = object.getSourceSymbol(sym_loc.sym_index) orelse return buf[0..0];
+        // for (debug_info.func_list.items) |func| {
+        //     if (func.pc_range) |range| {
+        //         if (source_sym.n_value >= range.start and source_sym.n_value < range.end) {
+        //             break :size range.end - range.start;
+        //         }
+        //     }
+        // }
+        // break :size null;
     };
 
     if (size) |ss| {

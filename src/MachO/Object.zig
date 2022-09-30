@@ -16,6 +16,7 @@ const trace = @import("../../tracy.zig").trace;
 const Allocator = mem.Allocator;
 const Atom = @import("Atom.zig");
 const AtomIndex = MachO.AtomIndex;
+const DwarfInfo = @import("DwarfInfo.zig");
 const LoadCommandIterator = macho.LoadCommandIterator;
 const MachO = @import("../MachO.zig");
 const SymbolWithLoc = MachO.SymbolWithLoc;
@@ -524,51 +525,21 @@ fn parseDysymtab(self: Object) ?macho.dysymtab_command {
     } else return null;
 }
 
-pub fn parseDwarfInfo(self: Object) dwarf.DwarfInfo {
-    var di = dwarf.DwarfInfo{
-        .endian = .Little,
+pub fn parseDwarfInfo(self: Object) DwarfInfo {
+    var di = DwarfInfo{
         .debug_info = &[0]u8{},
         .debug_abbrev = &[0]u8{},
         .debug_str = &[0]u8{},
-        .debug_str_offsets = &[0]u8{},
-        .debug_line = &[0]u8{},
-        .debug_line_str = &[0]u8{},
-        .debug_ranges = &[0]u8{},
-        .debug_loclists = &[0]u8{},
-        .debug_rnglists = &[0]u8{},
-        .debug_addr = &[0]u8{},
-        .debug_names = &[0]u8{},
-        .debug_frame = &[0]u8{},
     };
     for (self.getSourceSections()) |sect| {
-        const segname = sect.segName();
+        if (!sect.isDebug()) continue;
         const sectname = sect.sectName();
-        if (mem.eql(u8, segname, "__DWARF")) {
-            if (mem.eql(u8, sectname, "__debug_info")) {
-                di.debug_info = self.getSectionContents(sect);
-            } else if (mem.eql(u8, sectname, "__debug_abbrev")) {
-                di.debug_abbrev = self.getSectionContents(sect);
-            } else if (mem.eql(u8, sectname, "__debug_str")) {
-                di.debug_str = self.getSectionContents(sect);
-            } else if (mem.eql(u8, sectname, "__debug_str_offsets")) {
-                di.debug_str_offsets = self.getSectionContents(sect);
-            } else if (mem.eql(u8, sectname, "__debug_line")) {
-                di.debug_line = self.getSectionContents(sect);
-            } else if (mem.eql(u8, sectname, "__debug_line_str")) {
-                di.debug_line_str = self.getSectionContents(sect);
-            } else if (mem.eql(u8, sectname, "__debug_ranges")) {
-                di.debug_ranges = self.getSectionContents(sect);
-            } else if (mem.eql(u8, sectname, "__debug_loclists")) {
-                di.debug_loclists = self.getSectionContents(sect);
-            } else if (mem.eql(u8, sectname, "__debug_rnglists")) {
-                di.debug_rnglists = self.getSectionContents(sect);
-            } else if (mem.eql(u8, sectname, "__debug_addr")) {
-                di.debug_addr = self.getSectionContents(sect);
-            } else if (mem.eql(u8, sectname, "__debug_names")) {
-                di.debug_names = self.getSectionContents(sect);
-            } else if (mem.eql(u8, sectname, "__debug_frame")) {
-                di.debug_frame = self.getSectionContents(sect);
-            }
+        if (mem.eql(u8, sectname, "__debug_info")) {
+            di.debug_info = self.getSectionContents(sect);
+        } else if (mem.eql(u8, sectname, "__debug_abbrev")) {
+            di.debug_abbrev = self.getSectionContents(sect);
+        } else if (mem.eql(u8, sectname, "__debug_str")) {
+            di.debug_str = self.getSectionContents(sect);
         }
     }
     return di;
