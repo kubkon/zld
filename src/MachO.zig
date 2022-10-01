@@ -3758,7 +3758,7 @@ pub fn lsearch(comptime T: type, haystack: []align(1) const T, predicate: anytyp
 pub fn generateSymbolStabs(self: *MachO, object: Object, locals: *std.ArrayList(macho.nlist_64)) !void {
     assert(!self.options.strip);
 
-    log.debug("parsing debug info in '{s}'", .{object.name});
+    log.debug("generating stabs for '{s}'", .{object.name});
 
     const gpa = self.base.allocator;
     var debug_info = object.parseDwarfInfo();
@@ -3767,29 +3767,28 @@ pub fn generateSymbolStabs(self: *MachO, object: Object, locals: *std.ArrayList(
     defer lookup.deinit();
     try lookup.ensureUnusedCapacity(std.math.maxInt(u8));
 
-    var cu_it = DwarfInfo.CompileUnitIterator{};
+    // We assume there is only one CU.
+    var cu_it = debug_info.getCompileUnitIterator();
     const compile_unit = while (try cu_it.next(debug_info)) |cu| {
-        // We assume there is only one CU.
         try debug_info.genAbbrevLookupByKind(cu.cuh.debug_abbrev_offset, &lookup);
         break cu;
     } else {
-        // TODO audit cases with missing debug info and audit our dwarf.zig module.
-        log.debug("no compile unit found in debug info in {s}; skipping", .{object.name});
+        log.warn("no compile unit found in debug info in {s}; skipping", .{object.name});
         return;
     };
 
-    var abbrev_it = DwarfInfo.AbbrevEntryIterator{};
+    var abbrev_it = compile_unit.getAbbrevEntryIterator();
     const cu_entry: DwarfInfo.AbbrevEntry = while (try abbrev_it.next(debug_info, compile_unit, lookup)) |entry| switch (entry.tag) {
         dwarf.TAG.compile_unit => break entry,
         else => continue,
     } else {
-        log.debug("missing DWARF_TAG_compile_unit tag in {s}; skipping", .{object.name});
+        log.warn("missing DWARF_TAG_compile_unit tag in {s}; skipping", .{object.name});
         return;
     };
 
     var maybe_tu_name: ?[]const u8 = null;
     var maybe_tu_comp_dir: ?[]const u8 = null;
-    var attr_it = DwarfInfo.AttributeIterator{};
+    var attr_it = cu_entry.getAttributeIterator();
 
     while (try attr_it.next(debug_info, cu_entry, compile_unit.cuh)) |attr| switch (attr.name) {
         dwarf.AT.comp_dir => maybe_tu_comp_dir = attr.getString(debug_info, compile_unit.cuh) orelse continue,
@@ -3798,7 +3797,7 @@ pub fn generateSymbolStabs(self: *MachO, object: Object, locals: *std.ArrayList(
     };
 
     if (maybe_tu_name == null or maybe_tu_comp_dir == null) {
-        log.debug("missing DWARF_AT_comp_dir and DWARF_AT_name attributes {s}; skipping", .{object.name});
+        log.warn("missing DWARF_AT_comp_dir and DWARF_AT_name attributes {s}; skipping", .{object.name});
         return;
     }
 

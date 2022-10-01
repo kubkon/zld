@@ -13,7 +13,12 @@ debug_info: []const u8,
 debug_abbrev: []const u8,
 debug_str: []const u8,
 
-pub const CompileUnitIterator = struct {
+pub fn getCompileUnitIterator(self: DwarfInfo) CompileUnitIterator {
+    _ = self;
+    return .{};
+}
+
+const CompileUnitIterator = struct {
     pos: usize = 0,
 
     pub fn next(self: *CompileUnitIterator, ctx: DwarfInfo) !?CompileUnit {
@@ -71,11 +76,11 @@ pub fn genAbbrevLookupByKind(self: DwarfInfo, off: usize, lookup: *AbbrevLookupT
     }
 }
 
-const CompileUnit = struct {
+pub const CompileUnit = struct {
     cuh: Header,
     debug_info_off: usize,
 
-    const Header = struct {
+    pub const Header = struct {
         is_64bit: bool,
         length: u64,
         version: u16,
@@ -110,9 +115,14 @@ const CompileUnit = struct {
     inline fn getDebugInfo(self: CompileUnit, ctx: DwarfInfo) []const u8 {
         return ctx.debug_info[self.debug_info_off..][0..self.cuh.length];
     }
+
+    pub fn getAbbrevEntryIterator(self: CompileUnit) AbbrevEntryIterator {
+        _ = self;
+        return .{};
+    }
 };
 
-pub const AbbrevEntryIterator = struct {
+const AbbrevEntryIterator = struct {
     pos: usize = 0,
 
     pub fn next(self: *AbbrevEntryIterator, ctx: DwarfInfo, cu: CompileUnit, lookup: AbbrevLookupTable) !?AbbrevEntry {
@@ -165,9 +175,14 @@ pub const AbbrevEntry = struct {
     inline fn getDebugAbbrev(self: AbbrevEntry, ctx: DwarfInfo) []const u8 {
         return ctx.debug_abbrev[self.debug_abbrev_off..][0..self.debug_abbrev_len];
     }
+
+    pub fn getAttributeIterator(self: AbbrevEntry) AttributeIterator {
+        _ = self;
+        return .{};
+    }
 };
 
-const Attribute = struct {
+pub const Attribute = struct {
     name: u64,
     form: u64,
     debug_info_off: usize,
@@ -187,7 +202,7 @@ const Attribute = struct {
         return ctx.getString(off);
     }
 
-    fn getConstant(self: Attribute, ctx: DwarfInfo) !?i128 {
+    pub fn getConstant(self: Attribute, ctx: DwarfInfo) !?i128 {
         const debug_info = self.getDebugInfo(ctx);
         var stream = std.io.fixedBufferStream(debug_info);
         const reader = stream.reader();
@@ -203,7 +218,7 @@ const Attribute = struct {
         };
     }
 
-    fn getReference(self: Attribute, ctx: DwarfInfo) !?u64 {
+    pub fn getReference(self: Attribute, ctx: DwarfInfo) !?u64 {
         const debug_info = self.getDebugInfo(ctx);
         var stream = std.io.fixedBufferStream(debug_info);
         const reader = stream.reader();
@@ -218,7 +233,7 @@ const Attribute = struct {
         };
     }
 
-    fn getAddr(self: Attribute, ctx: DwarfInfo, cuh: CompileUnit.Header) ?u64 {
+    pub fn getAddr(self: Attribute, ctx: DwarfInfo, cuh: CompileUnit.Header) ?u64 {
         if (self.form != dwarf.FORM.addr) return null;
         const debug_info = self.getDebugInfo(ctx);
         return switch (cuh.address_size) {
@@ -231,7 +246,7 @@ const Attribute = struct {
     }
 };
 
-pub const AttributeIterator = struct {
+const AttributeIterator = struct {
     debug_abbrev_pos: usize = 0,
     debug_info_pos: usize = 0,
 
