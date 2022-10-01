@@ -13,64 +13,10 @@ debug_info: []const u8,
 debug_abbrev: []const u8,
 debug_str: []const u8,
 
-pub fn findCompileUnit(self: DwarfInfo, gpa: Allocator, address: u64) !?CompileUnit {
-    var cu_it = CompileUnitIterator{};
-    while (try cu_it.next(self)) |cu| {
-        var lookup = AbbrevLookupTable.init(gpa);
-        defer lookup.deinit();
-        try lookup.ensureUnusedCapacity(std.math.maxInt(u8));
-        try self.genAbbrevLookupByKind(cu.cuh.debug_abbrev_offset, &lookup);
-
-        var abbrev_it = AbbrevEntryIterator{};
-        const maybe_cu_entry: ?AbbrevEntry = while (try abbrev_it.next(self, cu, lookup)) |entry| switch (entry.tag) {
-            dwarf.TAG.compile_unit => break entry,
-            else => continue,
-        } else null;
-
-        var cu_entry = maybe_cu_entry orelse continue;
-
-        var attr_it = AttributeIterator{};
-        var maybe_low_pc: ?u64 = null;
-        var maybe_high_pc: ?u64 = null;
-        while (try attr_it.next(self, cu_entry, cu.cuh)) |attr| switch (attr.name) {
-            dwarf.AT.low_pc => {
-                if (attr.getAddr(self, cu.cuh)) |addr| {
-                    maybe_low_pc = addr;
-                    continue;
-                }
-                if (try attr.getConstant(self)) |constant| {
-                    maybe_low_pc = @intCast(u64, constant);
-                    continue;
-                }
-                return error.MalformedDwarf;
-            },
-            dwarf.AT.high_pc => {
-                if (attr.getAddr(self, cu.cuh)) |addr| {
-                    maybe_high_pc = addr;
-                    continue;
-                }
-                if (try attr.getConstant(self)) |constant| {
-                    const casted = @intCast(u64, constant);
-                    maybe_high_pc = if (maybe_low_pc) |lc| lc + casted else casted;
-                    continue;
-                }
-            },
-            else => {},
-        };
-
-        const low_pc = maybe_low_pc orelse continue;
-        const high_pc = maybe_high_pc orelse continue;
-
-        if (low_pc <= address and address < high_pc) return cu;
-    }
-
-    return null;
-}
-
-const CompileUnitIterator = struct {
+pub const CompileUnitIterator = struct {
     pos: usize = 0,
 
-    fn next(self: *CompileUnitIterator, ctx: DwarfInfo) !?CompileUnit {
+    pub fn next(self: *CompileUnitIterator, ctx: DwarfInfo) !?CompileUnit {
         if (self.pos >= ctx.debug_info.len) return null;
 
         var stream = std.io.fixedBufferStream(ctx.debug_info);

@@ -3329,8 +3329,10 @@ fn writeSymtab(self: *MachO, lc: *macho.symtab_command) !SymtabCtx {
             out_sym.n_strx = try self.strtab.insert(gpa, self.getSymbolName(sym_loc));
             try locals.append(out_sym);
         }
+    }
 
-        if (!self.options.strip) {
+    if (!self.options.strip) {
+        for (self.objects.items) |object| {
             try self.generateSymbolStabs(object, &locals);
         }
     }
@@ -3753,11 +3755,7 @@ pub fn lsearch(comptime T: type, haystack: []align(1) const T, predicate: anytyp
     return i;
 }
 
-pub fn generateSymbolStabs(
-    self: *MachO,
-    object: Object,
-    locals: *std.ArrayList(macho.nlist_64),
-) !void {
+pub fn generateSymbolStabs(self: *MachO, object: Object, locals: *std.ArrayList(macho.nlist_64)) !void {
     assert(!self.options.strip);
 
     log.debug("parsing debug info in '{s}'", .{object.name});
@@ -3765,30 +3763,29 @@ pub fn generateSymbolStabs(
     const gpa = self.base.allocator;
     var debug_info = object.parseDwarfInfo();
 
-    // We assume there is only one CU.
-    const maybe_compile_unit = debug_info.findCompileUnit(gpa, 0x0) catch |err| switch (err) {
-        error.MalformedDwarf => {
-            // TODO audit cases with missing debug info and audit our dwarf.zig module.
-            log.debug("invalid or missing debug info in {s}; skipping", .{object.name});
-            return;
-        },
-        else => |e| return e,
-    };
-    const compile_unit = maybe_compile_unit orelse {
-        log.debug("invalid or missing debug info in {s}; skipping", .{object.name});
-        return;
-    };
-
     var lookup = DwarfInfo.AbbrevLookupTable.init(gpa);
     defer lookup.deinit();
     try lookup.ensureUnusedCapacity(std.math.maxInt(u8));
-    try debug_info.genAbbrevLookupByKind(compile_unit.cuh.debug_abbrev_offset, &lookup);
+
+    var cu_it = DwarfInfo.CompileUnitIterator{};
+    const compile_unit = while (try cu_it.next(debug_info)) |cu| {
+        // We assume there is only one CU.
+        try debug_info.genAbbrevLookupByKind(cu.cuh.debug_abbrev_offset, &lookup);
+        break cu;
+    } else {
+        // TODO audit cases with missing debug info and audit our dwarf.zig module.
+        log.debug("no compile unit found in debug info in {s}; skipping", .{object.name});
+        return;
+    };
 
     var abbrev_it = DwarfInfo.AbbrevEntryIterator{};
     const cu_entry: DwarfInfo.AbbrevEntry = while (try abbrev_it.next(debug_info, compile_unit, lookup)) |entry| switch (entry.tag) {
         dwarf.TAG.compile_unit => break entry,
         else => continue,
-    } else unreachable;
+    } else {
+        log.debug("missing DWARF_TAG_compile_unit tag in {s}; skipping", .{object.name});
+        return;
+    };
 
     var maybe_tu_name: ?[]const u8 = null;
     var maybe_tu_comp_dir: ?[]const u8 = null;
@@ -3801,7 +3798,7 @@ pub fn generateSymbolStabs(
     };
 
     if (maybe_tu_name == null or maybe_tu_comp_dir == null) {
-        log.debug("invalid or missing debug info in {s}; skipping", .{object.name});
+        log.debug("missing DWARF_AT_comp_dir and DWARF_AT_name attributes {s}; skipping", .{object.name});
         return;
     }
 
