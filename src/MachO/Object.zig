@@ -6,7 +6,7 @@ const assert = std.debug.assert;
 const dwarf = std.dwarf;
 const fs = std.fs;
 const io = std.io;
-const log = std.log.scoped(.link);
+const log = std.log.scoped(.macho);
 const macho = std.macho;
 const math = std.math;
 const mem = std.mem;
@@ -148,7 +148,9 @@ const SymbolAtIndex = struct {
     /// Performs lexicographic-like check.
     /// * lhs and rhs defined
     ///   * if lhs == rhs
-    ///     * ext < weak < local < temp
+    ///     * if lhs.n_sect == rhs.n_sect
+    ///       * ext < weak < local < temp
+    ///     * lhs.n_sect < rhs.n_sect
     ///   * lhs < rhs
     /// * !rhs is undefined
     fn lessThan(ctx: Context, lhs_index: SymbolAtIndex, rhs_index: SymbolAtIndex) bool {
@@ -156,28 +158,60 @@ const SymbolAtIndex = struct {
         const rhs = rhs_index.getSymbol(ctx);
         if (lhs.sect() and rhs.sect()) {
             if (lhs.n_value == rhs.n_value) {
-                if (lhs.ext() and rhs.ext()) {
-                    return lhs.pext() or lhs.weakDef();
-                } else {
-                    const lhs_name = lhs_index.getSymbolName(ctx);
-                    const lhs_temp = mem.startsWith(u8, lhs_name, "l") or mem.startsWith(u8, lhs_name, "L");
-                    const rhs_name = rhs_index.getSymbolName(ctx);
-                    const rhs_temp = mem.startsWith(u8, rhs_name, "l") or mem.startsWith(u8, rhs_name, "L");
-                    if (lhs_temp and rhs_temp) {
-                        return false;
-                    } else return rhs_temp;
-                }
+                if (lhs.n_sect == rhs.n_sect) {
+                    if (lhs.ext() and rhs.ext()) {
+                        return lhs.pext() or lhs.weakDef();
+                    } else {
+                        const lhs_name = lhs_index.getSymbolName(ctx);
+                        const lhs_temp = mem.startsWith(u8, lhs_name, "l") or mem.startsWith(u8, lhs_name, "L");
+                        const rhs_name = rhs_index.getSymbolName(ctx);
+                        const rhs_temp = mem.startsWith(u8, rhs_name, "l") or mem.startsWith(u8, rhs_name, "L");
+                        if (lhs_temp and rhs_temp) {
+                            return false;
+                        } else return rhs_temp;
+                    }
+                } else return lhs.n_sect < rhs.n_sect;
             } else return lhs.n_value < rhs.n_value;
         } else return rhs.undf();
     }
 };
 
-fn filterSymbolsByAddress(symbols: []macho.nlist_64, start_addr: u64, end_addr: u64) struct {
+fn filterSymbolsBySection(symbols: []macho.nlist_64, n_sect: u8) struct {
+    index: u32,
+    len: u32,
+} {
+    const FirstMatch = struct {
+        n_sect: u8,
+
+        pub fn predicate(pred: @This(), symbol: macho.nlist_64) bool {
+            return symbol.n_sect == pred.n_sect;
+        }
+    };
+    const FirstNonMatch = struct {
+        n_sect: u8,
+
+        pub fn predicate(pred: @This(), symbol: macho.nlist_64) bool {
+            return symbol.n_sect != pred.n_sect;
+        }
+    };
+
+    const index = MachO.lsearch(macho.nlist_64, symbols, FirstMatch{
+        .n_sect = n_sect,
+    });
+    const len = MachO.lsearch(macho.nlist_64, symbols[index..], FirstNonMatch{
+        .n_sect = n_sect,
+    });
+
+    return .{ .index = @intCast(u32, index), .len = @intCast(u32, len) };
+}
+
+fn filterSymbolsByAddress(symbols: []macho.nlist_64, n_sect: u8, start_addr: u64, end_addr: u64) struct {
     index: u32,
     len: u32,
 } {
     const Predicate = struct {
         addr: u64,
+        n_sect: u8,
 
         pub fn predicate(pred: @This(), symbol: macho.nlist_64) bool {
             return symbol.n_value >= pred.addr;
@@ -186,9 +220,11 @@ fn filterSymbolsByAddress(symbols: []macho.nlist_64, start_addr: u64, end_addr: 
 
     const index = MachO.lsearch(macho.nlist_64, symbols, Predicate{
         .addr = start_addr,
+        .n_sect = n_sect,
     });
     const len = MachO.lsearch(macho.nlist_64, symbols[index..], Predicate{
         .addr = end_addr,
+        .n_sect = n_sect,
     });
 
     return .{ .index = @intCast(u32, index), .len = @intCast(u32, len) };
@@ -201,13 +237,16 @@ const SortedSection = struct {
 
 fn sectionLessThanByAddress(ctx: void, lhs: SortedSection, rhs: SortedSection) bool {
     _ = ctx;
+    if (lhs.header.addr == rhs.header.addr) {
+        return lhs.id < rhs.id;
+    }
     return lhs.header.addr < rhs.header.addr;
 }
 
 pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
     const gpa = macho_file.base.allocator;
 
-    log.debug("splitting object({d}, {s}) into atoms: one-shot mode", .{ object_id, self.name });
+    log.debug("splitting object({d}, {s}) into atoms", .{ object_id, self.name });
 
     const sections = self.getSourceSections();
     if (self.in_symtab == null) {
@@ -297,10 +336,12 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
         });
 
         const cpu_arch = macho_file.options.target.cpu_arch.?;
-        const sect_loc = filterSymbolsByAddress(symtab[sect_sym_index..], sect.addr, sect.addr + sect.size);
+        const sect_loc = filterSymbolsBySection(symtab[sect_sym_index..], sect_id + 1);
         const sect_start_index = sect_sym_index + sect_loc.index;
+
         sect_sym_index += sect_loc.len;
 
+        if (sect.size == 0) continue;
         if (subsections_via_symbols and sect_loc.len > 0) {
             // If the first nlist does not match the start of the section,
             // then we need to encapsulate the memory range [section start, first symbol)
@@ -336,7 +377,12 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
             while (next_sym_index < sect_start_index + sect_loc.len) {
                 const next_sym = symtab[next_sym_index];
                 const addr = next_sym.n_value;
-                const atom_loc = filterSymbolsByAddress(symtab[next_sym_index..], addr, addr + 1);
+                const atom_loc = filterSymbolsByAddress(
+                    symtab[next_sym_index..],
+                    sect_id + 1,
+                    addr,
+                    addr + 1,
+                );
                 assert(atom_loc.len > 0);
                 const atom_sym_index = atom_loc.index + next_sym_index;
                 const nsyms_trailing = atom_loc.len - 1;
