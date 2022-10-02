@@ -136,8 +136,20 @@ const AbbrevEntryIterator = struct {
         }
 
         const abbrev_pos = lookup.get(kind) orelse return error.MalformedDwarf;
-        const len = try findAbbrevEntrySize(ctx, abbrev_pos.pos, abbrev_pos.len, self.pos + cu.debug_info_off, cu.cuh);
-        const entry = try getAbbrevEntry(ctx, abbrev_pos.pos, abbrev_pos.len, self.pos + cu.debug_info_off, len);
+        const len = try findAbbrevEntrySize(
+            ctx,
+            abbrev_pos.pos,
+            abbrev_pos.len,
+            self.pos + cu.debug_info_off,
+            cu.cuh,
+        );
+        const entry = try getAbbrevEntry(
+            ctx,
+            abbrev_pos.pos,
+            abbrev_pos.len,
+            self.pos + cu.debug_info_off,
+            len,
+        );
 
         self.pos += len;
 

@@ -3832,12 +3832,26 @@ pub fn generateSymbolStabs(self: *MachO, object: Object, locals: *std.ArrayList(
 
     for (object.atoms.items) |atom_index| {
         const atom = self.getAtom(atom_index);
-        const stabs = try self.generateSymbolStabsForSymbol(atom_index, atom.getSymbolWithLoc(), debug_info, &stabs_buf);
+        const stabs = try self.generateSymbolStabsForSymbol(
+            atom_index,
+            atom.getSymbolWithLoc(),
+            debug_info,
+            compile_unit,
+            lookup,
+            &stabs_buf,
+        );
         try locals.appendSlice(stabs);
 
         var it = Atom.getInnerSymbolsIterator(self, atom_index);
         while (it.next()) |sym_loc| {
-            const contained_stabs = try self.generateSymbolStabsForSymbol(atom_index, sym_loc, debug_info, &stabs_buf);
+            const contained_stabs = try self.generateSymbolStabsForSymbol(
+                atom_index,
+                sym_loc,
+                debug_info,
+                compile_unit,
+                lookup,
+                &stabs_buf,
+            );
             try locals.appendSlice(contained_stabs);
         }
     }
@@ -3857,9 +3871,10 @@ fn generateSymbolStabsForSymbol(
     atom_index: AtomIndex,
     sym_loc: SymbolWithLoc,
     debug_info: DwarfInfo,
+    compile_unit: DwarfInfo.CompileUnit,
+    lookup: DwarfInfo.AbbrevLookupTable,
     buf: *[4]macho.nlist_64,
 ) ![]const macho.nlist_64 {
-    _ = debug_info;
     const gpa = self.base.allocator;
     const object = self.objects.items[sym_loc.file.?];
     const sym = self.getSymbol(sym_loc);
@@ -3869,64 +3884,128 @@ fn generateSymbolStabsForSymbol(
     if (sym.n_strx == 0) return buf[0..0];
     if (self.symbolIsTemp(sym_loc)) return buf[0..0];
 
-    const size: ?u64 = size: {
-        if (!header.isCode()) break :size null;
+    if (!header.isCode()) {
+        // Since we are not dealing with machine code, it's either a global or a static depending
+        // on the linkage scope.
+        if (self.globals.contains(sym_name)) {
+            // Global gets an N_GSYM stab type.
+            buf[0] = .{
+                .n_strx = try self.strtab.insert(gpa, sym_name),
+                .n_type = macho.N_GSYM,
+                .n_sect = sym.n_sect,
+                .n_desc = 0,
+                .n_value = 0,
+            };
+        } else {
+            // Local static gets an N_STSYM stab type.
+            buf[0] = .{
+                .n_strx = try self.strtab.insert(gpa, sym_name),
+                .n_type = macho.N_STSYM,
+                .n_sect = sym.n_sect,
+                .n_desc = 0,
+                .n_value = sym.n_value,
+            };
+        }
+        return buf[0..1];
+    }
+
+    const size: u64 = size: {
         if (object.header.flags & macho.MH_SUBSECTIONS_VIA_SYMBOLS != 0) {
             break :size self.getAtom(atom_index).size;
         }
-        return error.TODO;
 
-        // const source_sym = object.getSourceSymbol(sym_loc.sym_index) orelse return buf[0..0];
-        // for (debug_info.func_list.items) |func| {
-        //     if (func.pc_range) |range| {
-        //         if (source_sym.n_value >= range.start and source_sym.n_value < range.end) {
-        //             break :size range.end - range.start;
-        //         }
-        //     }
-        // }
-        // break :size null;
+        // Since we don't have subsections to work with, we need to infer the size of each function
+        // the slow way by scanning the debug info for matching symbol names and extracting
+        // the symbol's DWARF_AT_low_pc and DWARF_AT_high_pc values.
+        const source_sym = object.getSourceSymbol(sym_loc.sym_index) orelse return buf[0..0];
+
+        var abbrev_it = compile_unit.getAbbrevEntryIterator();
+        while (try abbrev_it.next(debug_info, compile_unit, lookup)) |entry| switch (entry.tag) {
+            dwarf.TAG.subprogram => {
+                assert(header.isCode());
+
+                var attr_it = entry.getAttributeIterator();
+                const is_fn = while (try attr_it.next(debug_info, entry, compile_unit.cuh)) |attr| switch (attr.name) {
+                    dwarf.AT.name => if (attr.getString(debug_info, compile_unit.cuh)) |str| {
+                        break mem.eql(u8, sym_name[1..], str);
+                    },
+                    else => continue,
+                } else {
+                    log.debug("no subprogram stab found for {s}", .{sym_name});
+                    return buf[0..0];
+                };
+                if (is_fn) {
+                    var maybe_address: ?u64 = null;
+                    var maybe_size: ?u64 = null;
+
+                    attr_it = entry.getAttributeIterator();
+                    while (try attr_it.next(debug_info, entry, compile_unit.cuh)) |attr| switch (attr.name) {
+                        dwarf.AT.low_pc => {
+                            if (attr.getAddr(debug_info, compile_unit.cuh)) |addr| {
+                                maybe_address = addr;
+                            }
+                            if (try attr.getConstant(debug_info)) |constant| {
+                                maybe_address = @intCast(u64, constant);
+                            }
+                        },
+                        dwarf.AT.high_pc => {
+                            if (attr.getAddr(debug_info, compile_unit.cuh)) |addr| {
+                                maybe_size = addr;
+                            }
+                            if (try attr.getConstant(debug_info)) |constant| {
+                                maybe_size = @intCast(u64, constant);
+                            }
+                        },
+                        else => {},
+                    };
+
+                    if (maybe_address == null or maybe_size == null) return buf[0..0];
+
+                    const address = maybe_address.?;
+                    const size = maybe_size.?;
+
+                    if (address <= source_sym.n_value and source_sym.n_value < address + size) {
+                        break :size size;
+                    }
+                }
+            },
+            else => continue,
+        } else {
+            log.debug("no stab found for {s}", .{sym_name});
+            return buf[0..0];
+        }
     };
 
-    if (size) |ss| {
-        buf[0] = .{
-            .n_strx = 0,
-            .n_type = macho.N_BNSYM,
-            .n_sect = sym.n_sect,
-            .n_desc = 0,
-            .n_value = sym.n_value,
-        };
-        buf[1] = .{
-            .n_strx = try self.strtab.insert(gpa, sym_name),
-            .n_type = macho.N_FUN,
-            .n_sect = sym.n_sect,
-            .n_desc = 0,
-            .n_value = sym.n_value,
-        };
-        buf[2] = .{
-            .n_strx = 0,
-            .n_type = macho.N_FUN,
-            .n_sect = 0,
-            .n_desc = 0,
-            .n_value = ss,
-        };
-        buf[3] = .{
-            .n_strx = 0,
-            .n_type = macho.N_ENSYM,
-            .n_sect = sym.n_sect,
-            .n_desc = 0,
-            .n_value = ss,
-        };
-        return buf;
-    } else {
-        buf[0] = .{
-            .n_strx = try self.strtab.insert(gpa, sym_name),
-            .n_type = macho.N_STSYM,
-            .n_sect = sym.n_sect,
-            .n_desc = 0,
-            .n_value = sym.n_value,
-        };
-        return buf[0..1];
-    }
+    buf[0] = .{
+        .n_strx = 0,
+        .n_type = macho.N_BNSYM,
+        .n_sect = sym.n_sect,
+        .n_desc = 0,
+        .n_value = sym.n_value,
+    };
+    buf[1] = .{
+        .n_strx = try self.strtab.insert(gpa, sym_name),
+        .n_type = macho.N_FUN,
+        .n_sect = sym.n_sect,
+        .n_desc = 0,
+        .n_value = sym.n_value,
+    };
+    buf[2] = .{
+        .n_strx = 0,
+        .n_type = macho.N_FUN,
+        .n_sect = 0,
+        .n_desc = 0,
+        .n_value = size,
+    };
+    buf[3] = .{
+        .n_strx = 0,
+        .n_type = macho.N_ENSYM,
+        .n_sect = sym.n_sect,
+        .n_desc = 0,
+        .n_value = size,
+    };
+
+    return buf;
 }
 
 fn logSegments(self: *MachO) void {
