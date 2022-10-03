@@ -3769,7 +3769,7 @@ pub fn generateSymbolStabs(self: *MachO, object: Object, locals: *std.ArrayList(
 
     // We assume there is only one CU.
     var cu_it = debug_info.getCompileUnitIterator();
-    const compile_unit = while (try cu_it.next(debug_info)) |cu| {
+    const compile_unit = while (try cu_it.next()) |cu| {
         try debug_info.genAbbrevLookupByKind(cu.cuh.debug_abbrev_offset, &lookup);
         break cu;
     } else {
@@ -3777,8 +3777,8 @@ pub fn generateSymbolStabs(self: *MachO, object: Object, locals: *std.ArrayList(
         return;
     };
 
-    var abbrev_it = compile_unit.getAbbrevEntryIterator();
-    const cu_entry: DwarfInfo.AbbrevEntry = while (try abbrev_it.next(debug_info, compile_unit, lookup)) |entry| switch (entry.tag) {
+    var abbrev_it = compile_unit.getAbbrevEntryIterator(debug_info);
+    const cu_entry: DwarfInfo.AbbrevEntry = while (try abbrev_it.next(lookup)) |entry| switch (entry.tag) {
         dwarf.TAG.compile_unit => break entry,
         else => continue,
     } else {
@@ -3788,9 +3788,9 @@ pub fn generateSymbolStabs(self: *MachO, object: Object, locals: *std.ArrayList(
 
     var maybe_tu_name: ?[]const u8 = null;
     var maybe_tu_comp_dir: ?[]const u8 = null;
-    var attr_it = cu_entry.getAttributeIterator();
+    var attr_it = cu_entry.getAttributeIterator(debug_info, compile_unit.cuh);
 
-    while (try attr_it.next(debug_info, cu_entry, compile_unit.cuh)) |attr| switch (attr.name) {
+    while (try attr_it.next()) |attr| switch (attr.name) {
         dwarf.AT.comp_dir => maybe_tu_comp_dir = attr.getString(debug_info, compile_unit.cuh) orelse continue,
         dwarf.AT.name => maybe_tu_name = attr.getString(debug_info, compile_unit.cuh) orelse continue,
         else => continue,
@@ -3830,14 +3830,21 @@ pub fn generateSymbolStabs(self: *MachO, object: Object, locals: *std.ArrayList(
 
     var stabs_buf: [4]macho.nlist_64 = undefined;
 
+    var name_lookup: ?DwarfInfo.SubprogramLookupByName = if (object.header.flags & macho.MH_SUBSECTIONS_VIA_SYMBOLS == 0) blk: {
+        var name_lookup = DwarfInfo.SubprogramLookupByName.init(gpa);
+        errdefer name_lookup.deinit();
+        try name_lookup.ensureUnusedCapacity(@intCast(u32, object.atoms.items.len));
+        try debug_info.genSubprogramLookupByName(compile_unit, lookup, &name_lookup);
+        break :blk name_lookup;
+    } else null;
+    defer if (name_lookup) |*nl| nl.deinit();
+
     for (object.atoms.items) |atom_index| {
         const atom = self.getAtom(atom_index);
         const stabs = try self.generateSymbolStabsForSymbol(
             atom_index,
             atom.getSymbolWithLoc(),
-            debug_info,
-            compile_unit,
-            lookup,
+            name_lookup,
             &stabs_buf,
         );
         try locals.appendSlice(stabs);
@@ -3847,9 +3854,7 @@ pub fn generateSymbolStabs(self: *MachO, object: Object, locals: *std.ArrayList(
             const contained_stabs = try self.generateSymbolStabsForSymbol(
                 atom_index,
                 sym_loc,
-                debug_info,
-                compile_unit,
-                lookup,
+                name_lookup,
                 &stabs_buf,
             );
             try locals.appendSlice(contained_stabs);
@@ -3870,9 +3875,7 @@ fn generateSymbolStabsForSymbol(
     self: *MachO,
     atom_index: AtomIndex,
     sym_loc: SymbolWithLoc,
-    debug_info: DwarfInfo,
-    compile_unit: DwarfInfo.CompileUnit,
-    lookup: DwarfInfo.AbbrevLookupTable,
+    lookup: ?DwarfInfo.SubprogramLookupByName,
     buf: *[4]macho.nlist_64,
 ) ![]const macho.nlist_64 {
     const gpa = self.base.allocator;
@@ -3918,58 +3921,10 @@ fn generateSymbolStabsForSymbol(
         // the slow way by scanning the debug info for matching symbol names and extracting
         // the symbol's DWARF_AT_low_pc and DWARF_AT_high_pc values.
         const source_sym = object.getSourceSymbol(sym_loc.sym_index) orelse return buf[0..0];
+        const subprogram = lookup.?.get(sym_name[1..]) orelse return buf[0..0];
 
-        var abbrev_it = compile_unit.getAbbrevEntryIterator();
-        while (try abbrev_it.next(debug_info, compile_unit, lookup)) |entry| switch (entry.tag) {
-            dwarf.TAG.subprogram => {
-                assert(header.isCode());
-
-                var attr_it = entry.getAttributeIterator();
-                const is_fn = while (try attr_it.next(debug_info, entry, compile_unit.cuh)) |attr| switch (attr.name) {
-                    dwarf.AT.name => if (attr.getString(debug_info, compile_unit.cuh)) |str| {
-                        break mem.eql(u8, sym_name[1..], str);
-                    },
-                    else => continue,
-                } else {
-                    log.debug("no subprogram stab found for {s}", .{sym_name});
-                    return buf[0..0];
-                };
-                if (is_fn) {
-                    var maybe_address: ?u64 = null;
-                    var maybe_size: ?u64 = null;
-
-                    attr_it = entry.getAttributeIterator();
-                    while (try attr_it.next(debug_info, entry, compile_unit.cuh)) |attr| switch (attr.name) {
-                        dwarf.AT.low_pc => {
-                            if (attr.getAddr(debug_info, compile_unit.cuh)) |addr| {
-                                maybe_address = addr;
-                            }
-                            if (try attr.getConstant(debug_info)) |constant| {
-                                maybe_address = @intCast(u64, constant);
-                            }
-                        },
-                        dwarf.AT.high_pc => {
-                            if (attr.getAddr(debug_info, compile_unit.cuh)) |addr| {
-                                maybe_size = addr;
-                            }
-                            if (try attr.getConstant(debug_info)) |constant| {
-                                maybe_size = @intCast(u64, constant);
-                            }
-                        },
-                        else => {},
-                    };
-
-                    if (maybe_address == null or maybe_size == null) return buf[0..0];
-
-                    const address = maybe_address.?;
-                    const size = maybe_size.?;
-
-                    if (address <= source_sym.n_value and source_sym.n_value < address + size) {
-                        break :size size;
-                    }
-                }
-            },
-            else => continue,
+        if (subprogram.addr <= source_sym.n_value and source_sym.n_value < subprogram.addr + subprogram.size) {
+            break :size subprogram.size;
         } else {
             log.debug("no stab found for {s}", .{sym_name});
             return buf[0..0];
