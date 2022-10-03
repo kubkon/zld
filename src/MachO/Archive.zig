@@ -222,7 +222,7 @@ pub fn parseObject(
 
     var object = Object{
         .name = name,
-        .mtime = try self.header.date(),
+        .mtime = object_header.date() catch 0,
         .contents = contents,
     };
 

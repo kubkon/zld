@@ -3773,7 +3773,7 @@ pub fn generateSymbolStabs(self: *MachO, object: Object, locals: *std.ArrayList(
         try debug_info.genAbbrevLookupByKind(cu.cuh.debug_abbrev_offset, &lookup);
         break cu;
     } else {
-        log.warn("no compile unit found in debug info in {s}; skipping", .{object.name});
+        log.debug("no compile unit found in debug info in {s}; skipping", .{object.name});
         return;
     };
 
@@ -3782,7 +3782,7 @@ pub fn generateSymbolStabs(self: *MachO, object: Object, locals: *std.ArrayList(
         dwarf.TAG.compile_unit => break entry,
         else => continue,
     } else {
-        log.warn("missing DWARF_TAG_compile_unit tag in {s}; skipping", .{object.name});
+        log.debug("missing DWARF_TAG_compile_unit tag in {s}; skipping", .{object.name});
         return;
     };
 
@@ -3797,7 +3797,7 @@ pub fn generateSymbolStabs(self: *MachO, object: Object, locals: *std.ArrayList(
     };
 
     if (maybe_tu_name == null or maybe_tu_comp_dir == null) {
-        log.warn("missing DWARF_AT_comp_dir and DWARF_AT_name attributes {s}; skipping", .{object.name});
+        log.debug("missing DWARF_AT_comp_dir and DWARF_AT_name attributes {s}; skipping", .{object.name});
         return;
     }
 
