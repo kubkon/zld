@@ -256,7 +256,6 @@ pub const Attribute = struct {
     pub fn getString(self: Attribute, ctx: DwarfInfo, cuh: CompileUnit.Header) ?[]const u8 {
         if (self.form != dwarf.FORM.strp) return null;
         const debug_info = self.getDebugInfo(ctx);
-        log.warn("@{x} - {x}: {x}, {x}", .{ self.debug_info_off, self.debug_info_len, self.name, self.form });
         const off = if (cuh.is_64bit)
             mem.readIntLittle(u64, debug_info[0..8])
         else

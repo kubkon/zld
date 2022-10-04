@@ -155,7 +155,9 @@ const SymbolAtIndex = struct {
             if (lhs.n_value == rhs.n_value) {
                 if (lhs.n_sect == rhs.n_sect) {
                     if (lhs.ext() and rhs.ext()) {
-                        return lhs.pext() or lhs.weakDef();
+                        if ((lhs.pext() or lhs.weakDef()) and (rhs.pext() or rhs.weakDef())) {
+                            return false;
+                        } else return rhs.pext() or rhs.weakDef();
                     } else {
                         const lhs_name = lhs_index.getSymbolName(ctx);
                         const lhs_temp = mem.startsWith(u8, lhs_name, "l") or mem.startsWith(u8, lhs_name, "L");
@@ -167,6 +169,8 @@ const SymbolAtIndex = struct {
                     }
                 } else return lhs.n_sect < rhs.n_sect;
             } else return lhs.n_value < rhs.n_value;
+        } else if (lhs.undf() and rhs.undf()) {
+            return false;
         } else return rhs.undf();
     }
 };
