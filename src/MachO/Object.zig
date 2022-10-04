@@ -103,9 +103,6 @@ pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch)
                 // local < extern defined < undefined. Unfortunately, this is not guaranteed! For instance,
                 // the GO compiler does not necessarily respect that therefore we sort immediately by type
                 // and address within.
-                const ctx = Context{
-                    .object = self,
-                };
                 var sorted_all_syms = try std.ArrayList(SymbolAtIndex).initCapacity(allocator, self.in_symtab.?.len);
                 defer sorted_all_syms.deinit();
 
@@ -117,10 +114,10 @@ pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch)
                 // afterwards by address in each group. Normally, dysymtab should
                 // be enough to guarantee the sort, but turns out not every compiler
                 // is kind enough to specify the symbols in the correct order.
-                sort.sort(SymbolAtIndex, sorted_all_syms.items, ctx, SymbolAtIndex.lessThan);
+                sort.sort(SymbolAtIndex, sorted_all_syms.items, self, SymbolAtIndex.lessThan);
 
                 for (sorted_all_syms.items) |sym_id| {
-                    self.symtab.appendAssumeCapacity(sym_id.getSymbol(ctx));
+                    self.symtab.appendAssumeCapacity(sym_id.getSymbol(self));
                     self.source_symtab_lookup.appendAssumeCapacity(sym_id.index);
                 }
             },
@@ -129,20 +126,18 @@ pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch)
     }
 }
 
-const Context = struct {
-    object: *const Object,
-};
-
 const SymbolAtIndex = struct {
     index: u32,
 
+    const Context = *const Object;
+
     fn getSymbol(self: SymbolAtIndex, ctx: Context) macho.nlist_64 {
-        return ctx.object.in_symtab.?[self.index];
+        return ctx.in_symtab.?[self.index];
     }
 
     fn getSymbolName(self: SymbolAtIndex, ctx: Context) []const u8 {
         const sym = self.getSymbol(ctx);
-        return ctx.object.getString(sym.n_strx);
+        return ctx.getString(sym.n_strx);
     }
 
     /// Performs lexicographic-like check.
