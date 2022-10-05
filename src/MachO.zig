@@ -2228,9 +2228,6 @@ fn calcSectionSizes(self: *MachO, reverse_lookups: [][]u32) !void {
     const slice = self.sections.slice();
     for (slice.items(.header)) |*header, sect_id| {
         if (header.size == 0) continue;
-        if (self.requiresThunks()) {
-            if (header.isCode() and !mem.eql(u8, header.sectName(), "__stub_helper")) continue;
-        }
 
         var atom_index = slice.items(.first_atom_index)[sect_id];
         header.size = 0;
@@ -2254,7 +2251,17 @@ fn calcSectionSizes(self: *MachO, reverse_lookups: [][]u32) !void {
         }
     }
 
-    if (self.requiresThunks()) {
+    if (self.requiresThunks()) blk: {
+        // First, let's check if the __TEXT segment will exceed 128MiB. If it doesn't,
+        // we don't need thunks.
+        var text_seg_size: u64 = 0;
+        for (slice.items(.header)) |header| {
+            if (!mem.eql(u8, header.segName(), "__TEXT")) continue;
+            text_seg_size += header.size;
+        }
+
+        if (text_seg_size < thunks.max_distance) break :blk;
+
         for (slice.items(.header)) |header, sect_id| {
             if (!header.isCode()) continue;
             if (mem.eql(u8, header.sectName(), "__stub_helper")) continue;

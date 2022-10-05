@@ -4,7 +4,7 @@ const std = @import("std");
 const build_options = @import("build_options");
 const aarch64 = @import("../aarch64.zig");
 const assert = std.debug.assert;
-const log = std.log.scoped(.macho);
+const log = std.log.scoped(.atom);
 const macho = std.macho;
 const math = std.math;
 const mem = std.mem;
@@ -120,18 +120,6 @@ pub fn calcInnerSymbolOffset(macho_file: *MachO, atom_index: AtomIndex, sym_inde
     const source_atom_sym = object.getSourceSymbol(atom.sym_index).?;
     const source_sym = object.getSourceSymbol(sym_index).?;
     return source_sym.n_value - source_atom_sym.n_value;
-}
-
-/// Returns true if the symbol pointed at with `sym_loc` is contained within this atom.
-/// WARNING this function assumes all atoms have been allocated in the virtual memory.
-/// Calling it without allocating with `MachO.allocateSymbols` (or equivalent) will
-/// give bogus results.
-fn isSymbolContained(macho_file: *MachO, atom_index: AtomIndex, sym_loc: SymbolWithLoc) bool {
-    const sym = macho_file.getSymbol(sym_loc);
-    if (!sym.sect()) return false;
-    const atom = macho_file.getAtom(atom_index);
-    const atom_sym = macho_file.getSymbol(atom.getSymbolWithLoc());
-    return sym.n_value >= atom_sym.n_value and sym.n_value < atom_sym.n_value + atom.size;
 }
 
 pub fn scanAtomRelocs(
@@ -368,7 +356,7 @@ pub fn resolveRelocs(
     };
 }
 
-fn getRelocTargetAddress(macho_file: *MachO, rel: macho.relocation_info, target: SymbolWithLoc, is_tlv: bool) !u64 {
+pub fn getRelocTargetAddress(macho_file: *MachO, rel: macho.relocation_info, target: SymbolWithLoc, is_tlv: bool) !u64 {
     const target_atom_index = getRelocTargetAtomIndex(macho_file, rel, target) orelse {
         // If there is no atom for target, we still need to check for special, atom-less
         // symbols such as `___dso_handle`.
@@ -385,10 +373,11 @@ fn getRelocTargetAddress(macho_file: *MachO, rel: macho.relocation_info, target:
         target_atom.file,
     });
     // If `target` is contained within the target atom, pull its address value.
-    const target_sym = if (isSymbolContained(macho_file, target_atom_index, target))
-        macho_file.getSymbol(target)
+    const target_sym = macho_file.getSymbol(target_atom.getSymbolWithLoc());
+    const offset = if (target_atom.file != null)
+        Atom.calcInnerSymbolOffset(macho_file, target_atom_index, target.sym_index)
     else
-        macho_file.getSymbol(target_atom.getSymbolWithLoc());
+        0;
     const base_address: u64 = if (is_tlv) base_address: {
         // For TLV relocations, the value specified as a relocation is the displacement from the
         // TLV initializer (either value in __thread_data or zero-init in __thread_bss) to the first
@@ -409,7 +398,7 @@ fn getRelocTargetAddress(macho_file: *MachO, rel: macho.relocation_info, target:
         };
         break :base_address macho_file.sections.items(.header)[sect_id].addr;
     } else 0;
-    return target_sym.n_value - base_address;
+    return target_sym.n_value + offset - base_address;
 }
 
 fn resolveRelocsArm64(
@@ -493,9 +482,11 @@ fn resolveRelocsArm64(
                         source_addr,
                         @intCast(i64, target_addr) - @intCast(i64, source_addr),
                     });
-                    log.err("  source {s}, target {s}", .{
+                    log.err("  source {s} (object({?})), target {s} (object({?}))", .{
                         macho_file.getSymbolName(atom.getSymbolWithLoc()),
+                        atom.file,
                         macho_file.getSymbolName(target),
+                        macho_file.getAtom(getRelocTargetAtomIndex(macho_file, rel, target).?).file,
                     });
                     log.err("  TODO implement branch islands to extend jump distance for arm64", .{});
                     return error.TODOImplementBranchIslands;
