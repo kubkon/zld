@@ -329,15 +329,10 @@ pub fn flush(self: *MachO) !void {
 
     try self.createDyldStubBinderGotAtom();
 
-    try self.calcSectionSizes();
+    try self.calcSectionSizes(reverse_lookups);
     try self.pruneAndSortSections();
     try self.createSegments();
     try self.allocateSegments();
-
-    // if (cpu_arch == .aarch64) {
-    //     // Create jump/branch range extenders if needed.
-    //     try thunks.createThunkAtoms(self, reverse_lookups);
-    // }
 
     try self.allocateSpecialSymbols();
 
@@ -2229,10 +2224,13 @@ fn pruneAndSortSections(self: *MachO) !void {
     }
 }
 
-fn calcSectionSizes(self: *MachO) !void {
+fn calcSectionSizes(self: *MachO, reverse_lookups: [][]u32) !void {
     const slice = self.sections.slice();
     for (slice.items(.header)) |*header, sect_id| {
         if (header.size == 0) continue;
+        if (self.requiresThunks()) {
+            if (header.isCode() and !mem.eql(u8, header.sectName(), "__stub_helper")) continue;
+        }
 
         var atom_index = slice.items(.first_atom_index)[sect_id];
         header.size = 0;
@@ -2255,6 +2253,16 @@ fn calcSectionSizes(self: *MachO) !void {
             } else break;
         }
     }
+
+    if (self.requiresThunks()) {
+        for (slice.items(.header)) |header, sect_id| {
+            if (!header.isCode()) continue;
+            if (mem.eql(u8, header.sectName(), "__stub_helper")) continue;
+
+            // Create jump/branch range extenders if needed.
+            try thunks.createThunks(self, @intCast(u8, sect_id), reverse_lookups);
+        }
+    }
 }
 
 fn allocateSegments(self: *MachO) !void {
@@ -2263,6 +2271,7 @@ fn allocateSegments(self: *MachO) !void {
         const base_size = if (is_text_segment) try self.calcMinHeaderPad() else 0;
         try self.allocateSegment(@intCast(u8, segment_index), base_size);
 
+        // TODO
         // if (is_text_segment) blk: {
         //     const indexes = self.getSectionIndexes(@intCast(u8, segment_index));
         //     if (indexes.start == indexes.end) break :blk;
@@ -3661,6 +3670,10 @@ pub fn getEntryPoint(self: MachO) error{MissingMainEntrypoint}!SymbolWithLoc {
         return error.MissingMainEntrypoint;
     };
     return global;
+}
+
+inline fn requiresThunks(self: MachO) bool {
+    return self.options.target.cpu_arch.? == .aarch64;
 }
 
 /// Binary search
