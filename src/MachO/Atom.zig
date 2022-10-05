@@ -493,6 +493,10 @@ fn resolveRelocsArm64(
                         source_addr,
                         @intCast(i64, target_addr) - @intCast(i64, source_addr),
                     });
+                    log.err("  source {s}, target {s}", .{
+                        macho_file.getSymbolName(atom.getSymbolWithLoc()),
+                        macho_file.getSymbolName(target),
+                    });
                     log.err("  TODO implement branch islands to extend jump distance for arm64", .{});
                     return error.TODOImplementBranchIslands;
                 };

@@ -17,6 +17,7 @@ const aarch64 = @import("aarch64.zig");
 const bind = @import("MachO/bind.zig");
 const dead_strip = @import("MachO/dead_strip.zig");
 const fat = @import("MachO/fat.zig");
+const thunks = @import("MachO/thunks.zig");
 
 const Allocator = mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
@@ -70,6 +71,7 @@ strtab: StringTable(.strtab) = .{},
 tlv_ptr_entries: std.AutoArrayHashMapUnmanaged(SymbolWithLoc, u32) = .{},
 got_entries: std.AutoArrayHashMapUnmanaged(SymbolWithLoc, u32) = .{},
 stubs: std.AutoArrayHashMapUnmanaged(SymbolWithLoc, u32) = .{},
+thunks: std.AutoArrayHashMapUnmanaged(SymbolWithLoc, u32) = .{},
 
 atoms: std.ArrayListUnmanaged(Atom) = .{},
 atom_by_index_table: std.AutoHashMapUnmanaged(u32, AtomIndex) = .{},
@@ -327,10 +329,15 @@ pub fn flush(self: *MachO) !void {
 
     try self.createDyldStubBinderGotAtom();
 
+    try self.calcSectionSizes();
+    try self.pruneAndSortSections();
     try self.createSegments();
-    try self.sortSections();
-    try self.allocateSections();
-    try self.allocateAtoms();
+    try self.allocateSegments();
+
+    // if (cpu_arch == .aarch64) {
+    //     // Create jump/branch range extenders if needed.
+    //     try thunks.createThunkAtoms(self, reverse_lookups);
+    // }
 
     try self.allocateSpecialSymbols();
 
@@ -1853,6 +1860,7 @@ pub fn deinit(self: *MachO) void {
     self.tlv_ptr_entries.deinit(gpa);
     self.got_entries.deinit(gpa);
     self.stubs.deinit(gpa);
+    self.thunks.deinit(gpa);
     self.strtab.deinit(gpa);
     self.locals.deinit(gpa);
     self.unresolved.deinit(gpa);
@@ -1907,6 +1915,7 @@ fn createSegments(self: *MachO) !void {
 
     for (self.sections.items(.header)) |header, sect_id| {
         if (header.size == 0) continue; // empty section
+
         const segname = header.segName();
         const segment_id = self.getSegmentByName(segname) orelse blk: {
             log.debug("creating segment '{s}'", .{segname});
@@ -2064,66 +2073,6 @@ fn allocateSymbol(self: *MachO) !u32 {
     return index;
 }
 
-fn allocateAtoms(self: *MachO) !void {
-    const slice = &self.sections.slice();
-    for (slice.items(.first_atom_index)) |first_atom_index, sect_id| {
-        const header = slice.items(.header)[sect_id];
-        var atom_index = first_atom_index;
-
-        const n_sect = @intCast(u8, sect_id + 1);
-        var base_vaddr = header.addr;
-
-        log.debug("allocating local symbols in sect({d}, '{s},{s}')", .{
-            n_sect,
-            header.segName(),
-            header.sectName(),
-        });
-
-        while (true) {
-            const atom = self.getAtom(atom_index);
-            const alignment = try math.powi(u32, 2, atom.alignment);
-            base_vaddr = mem.alignForwardGeneric(u64, base_vaddr, alignment);
-
-            const sym = self.getSymbolPtr(atom.getSymbolWithLoc());
-            sym.n_value = base_vaddr;
-            sym.n_sect = n_sect;
-
-            log.debug("  ATOM(%{d}, '{s}') @{x}", .{
-                atom.sym_index,
-                self.getSymbolName(atom.getSymbolWithLoc()),
-                base_vaddr,
-            });
-
-            if (atom.file) |_| {
-                // Update each symbol contained within the atom
-                var it = Atom.getInnerSymbolsIterator(self, atom_index);
-                while (it.next()) |sym_loc| {
-                    const inner_sym = self.getSymbolPtr(sym_loc);
-                    inner_sym.n_value = base_vaddr + Atom.calcInnerSymbolOffset(
-                        self,
-                        atom_index,
-                        sym_loc.sym_index,
-                    );
-                    inner_sym.n_sect = n_sect;
-                }
-
-                // If there is a section alias, update it now too
-                if (Atom.getSectionAlias(self, atom_index)) |sym_loc| {
-                    const alias = self.getSymbolPtr(sym_loc);
-                    alias.n_value = base_vaddr;
-                    alias.n_sect = n_sect;
-                }
-            }
-
-            base_vaddr += atom.size;
-
-            if (atom.next_index) |next_index| {
-                atom_index = next_index;
-            } else break;
-        }
-    }
-}
-
 fn allocateSpecialSymbols(self: *MachO) !void {
     for (&[_][]const u8{
         "___dso_handle",
@@ -2243,47 +2192,19 @@ fn writeAtoms(self: *MachO, reverse_lookups: [][]u32) !void {
     }
 }
 
-fn sortSections(self: *MachO) !void {
+fn pruneAndSortSections(self: *MachO) !void {
     const gpa = self.base.allocator;
 
-    const SortedSegment = struct {
-        segment: macho.segment_command_64,
-        old_id: u8,
-
-        pub fn lessThan(_: void, lhs: @This(), rhs: @This()) bool {
-            return getSegmentPrecedence(lhs.segment.segName()) < getSegmentPrecedence(rhs.segment.segName());
+    const SortSection = struct {
+        pub fn lessThan(_: void, lhs: Section, rhs: Section) bool {
+            return getSectionPrecedence(lhs.header) < getSectionPrecedence(rhs.header);
         }
     };
-
-    const SortedSection = struct {
-        section: Section,
-        old_id: u8,
-
-        pub fn lessThan(_: void, lhs: @This(), rhs: @This()) bool {
-            return getSectionPrecedence(lhs.section.header) < getSectionPrecedence(rhs.section.header);
-        }
-    };
-
-    var segments = std.ArrayList(SortedSegment).init(gpa);
-    defer segments.deinit();
-    try segments.ensureTotalCapacity(self.segments.items.len);
-
-    var segment_table = try gpa.alloc(u8, self.segments.items.len);
-    defer gpa.free(segment_table);
-
-    for (self.segments.items) |segment, i| {
-        segments.appendAssumeCapacity(.{ .segment = segment, .old_id = @intCast(u8, i) });
-    }
-
-    std.sort.sort(SortedSegment, segments.items, {}, SortedSegment.lessThan);
 
     const slice = self.sections.slice();
-    var sections = std.ArrayList(SortedSection).init(gpa);
+    var sections = std.ArrayList(Section).init(gpa);
     defer sections.deinit();
     try sections.ensureTotalCapacity(slice.len);
-
-    var section_table = try gpa.alloc(u8, slice.len);
-    defer gpa.free(section_table);
 
     {
         var i: u8 = 0;
@@ -2296,51 +2217,38 @@ fn sortSections(self: *MachO) !void {
                 });
                 continue;
             }
-            sections.appendAssumeCapacity(.{ .section = section, .old_id = @intCast(u8, i) });
+            sections.appendAssumeCapacity(section);
         }
     }
 
-    std.sort.sort(SortedSection, sections.items, {}, SortedSection.lessThan);
-
-    self.segments.clearRetainingCapacity();
-    for (segments.items) |out, i| {
-        self.segments.appendAssumeCapacity(out.segment);
-        segment_table[out.old_id] = @intCast(u8, i);
-    }
+    std.sort.sort(Section, sections.items, {}, SortSection.lessThan);
 
     self.sections.shrinkRetainingCapacity(0);
-    for (sections.items) |out, i| {
-        self.sections.appendAssumeCapacity(.{
-            .segment_index = segment_table[out.section.segment_index],
-            .header = out.section.header,
-            .first_atom_index = out.section.first_atom_index,
-            .last_atom_index = out.section.last_atom_index,
-        });
-        section_table[out.old_id] = @intCast(u8, i);
+    for (sections.items) |out| {
+        self.sections.appendAssumeCapacity(out);
     }
+}
 
-    for (self.sections.items(.first_atom_index)) |first_atom_index| {
-        var atom_index = first_atom_index;
+fn calcSectionSizes(self: *MachO) !void {
+    const slice = self.sections.slice();
+    for (slice.items(.header)) |*header, sect_id| {
+        if (header.size == 0) continue;
+
+        var atom_index = slice.items(.first_atom_index)[sect_id];
+        header.size = 0;
+        header.@"align" = 0;
 
         while (true) {
             const atom = self.getAtom(atom_index);
+            const atom_alignment = try math.powi(u32, 2, atom.alignment);
+            const atom_offset = mem.alignForwardGeneric(u64, header.size, atom_alignment);
+            const padding = atom_offset - header.size;
+
             const sym = self.getSymbolPtr(atom.getSymbolWithLoc());
-            const n_sect = section_table[sym.n_sect - 1] + 1;
-            sym.n_sect = n_sect;
+            sym.n_value = atom_offset;
 
-            // TODO: this effectively means: is this Atom non-synthetic?
-            if (atom.file) |_| {
-                var it = Atom.getInnerSymbolsIterator(self, atom_index);
-                while (it.next()) |sym_loc| {
-                    const inner = self.getSymbolPtr(sym_loc);
-                    inner.n_sect = n_sect;
-                }
-
-                if (Atom.getSectionAlias(self, atom_index)) |sym_loc| {
-                    const alias = self.getSymbolPtr(sym_loc);
-                    alias.n_sect = n_sect;
-                }
-            }
+            header.size += padding + atom.size;
+            header.@"align" = @maximum(header.@"align", atom.alignment);
 
             if (atom.next_index) |next_index| {
                 atom_index = next_index;
@@ -2349,38 +2257,38 @@ fn sortSections(self: *MachO) !void {
     }
 }
 
-fn allocateSections(self: *MachO) !void {
+fn allocateSegments(self: *MachO) !void {
     for (self.segments.items) |*segment, segment_index| {
         const is_text_segment = mem.eql(u8, segment.segName(), "__TEXT");
         const base_size = if (is_text_segment) try self.calcMinHeaderPad() else 0;
         try self.allocateSegment(@intCast(u8, segment_index), base_size);
 
-        if (is_text_segment) blk: {
-            const indexes = self.getSectionIndexes(@intCast(u8, segment_index));
-            if (indexes.start == indexes.end) break :blk;
+        // if (is_text_segment) blk: {
+        //     const indexes = self.getSectionIndexes(@intCast(u8, segment_index));
+        //     if (indexes.start == indexes.end) break :blk;
 
-            // Shift all sections to the back to minimize jump size between __TEXT and __DATA segments.
-            var min_alignment: u32 = 0;
-            for (self.sections.items(.header)[indexes.start..indexes.end]) |header| {
-                const alignment = try math.powi(u32, 2, header.@"align");
-                min_alignment = math.max(min_alignment, alignment);
-            }
+        //     // Shift all sections to the back to minimize jump size between __TEXT and __DATA segments.
+        //     var min_alignment: u32 = 0;
+        //     for (self.sections.items(.header)[indexes.start..indexes.end]) |header| {
+        //         const alignment = try math.powi(u32, 2, header.@"align");
+        //         min_alignment = math.max(min_alignment, alignment);
+        //     }
 
-            assert(min_alignment > 0);
-            const last_header = self.sections.items(.header)[indexes.end - 1];
-            const shift: u32 = shift: {
-                const diff = segment.filesize - last_header.offset - last_header.size;
-                const factor = @divTrunc(diff, min_alignment);
-                break :shift @intCast(u32, factor * min_alignment);
-            };
+        //     assert(min_alignment > 0);
+        //     const last_header = self.sections.items(.header)[indexes.end - 1];
+        //     const shift: u32 = shift: {
+        //         const diff = segment.filesize - last_header.offset - last_header.size;
+        //         const factor = @divTrunc(diff, min_alignment);
+        //         break :shift @intCast(u32, factor * min_alignment);
+        //     };
 
-            if (shift > 0) {
-                for (self.sections.items(.header)[indexes.start..indexes.end]) |*header| {
-                    header.offset += shift;
-                    header.addr += shift;
-                }
-            }
-        }
+        //     if (shift > 0) {
+        //         for (self.sections.items(.header)[indexes.start..indexes.end]) |*header| {
+        //             header.offset += shift;
+        //             header.addr += shift;
+        //         }
+        //     }
+        // }
     }
 }
 
@@ -2409,33 +2317,64 @@ fn allocateSegment(self: *MachO, segment_index: u8, init_size: u64) !void {
     // Allocate the sections according to their alignment at the beginning of the segment.
     const indexes = self.getSectionIndexes(segment_index);
     var start = init_size;
+
     const slice = self.sections.slice();
     for (slice.items(.header)[indexes.start..indexes.end]) |*header, sect_id| {
         var atom_index = slice.items(.first_atom_index)[indexes.start + sect_id];
-        header.size = 0;
-        header.@"align" = 0;
-
-        while (true) {
-            const atom = self.getAtom(atom_index);
-            const atom_alignment = try math.powi(u32, 2, atom.alignment);
-            const aligned_end_addr = mem.alignForwardGeneric(u64, header.size, atom_alignment);
-            const padding = aligned_end_addr - header.size;
-            header.size += padding + atom.size;
-            header.@"align" = @maximum(header.@"align", atom.alignment);
-
-            if (atom.next_index) |next_index| {
-                atom_index = next_index;
-            } else break;
-        }
 
         const alignment = try math.powi(u32, 2, header.@"align");
         const start_aligned = mem.alignForwardGeneric(u64, start, alignment);
+        const n_sect = @intCast(u8, indexes.start + sect_id + 1);
 
         header.offset = if (header.isZerofill())
             0
         else
             @intCast(u32, segment.fileoff + start_aligned);
         header.addr = segment.vmaddr + start_aligned;
+
+        log.debug("allocating local symbols in sect({d}, '{s},{s}')", .{
+            n_sect,
+            header.segName(),
+            header.sectName(),
+        });
+
+        while (true) {
+            const atom = self.getAtom(atom_index);
+            const sym = self.getSymbolPtr(atom.getSymbolWithLoc());
+            sym.n_value += header.addr;
+            sym.n_sect = n_sect;
+
+            log.debug("  ATOM(%{d}, '{s}') @{x}", .{
+                atom.sym_index,
+                self.getSymbolName(atom.getSymbolWithLoc()),
+                sym.n_value,
+            });
+
+            if (atom.file) |_| {
+                // Update each symbol contained within the atom
+                var it = Atom.getInnerSymbolsIterator(self, atom_index);
+                while (it.next()) |sym_loc| {
+                    const inner_sym = self.getSymbolPtr(sym_loc);
+                    inner_sym.n_value = sym.n_value + Atom.calcInnerSymbolOffset(
+                        self,
+                        atom_index,
+                        sym_loc.sym_index,
+                    );
+                    inner_sym.n_sect = n_sect;
+                }
+
+                // If there is a section alias, update it now too
+                if (Atom.getSectionAlias(self, atom_index)) |sym_loc| {
+                    const alias = self.getSymbolPtr(sym_loc);
+                    alias.n_value = sym.n_value;
+                    alias.n_sect = n_sect;
+                }
+            }
+
+            if (atom.next_index) |next_index| {
+                atom_index = next_index;
+            } else break;
+        }
 
         start = start_aligned + header.size;
 
