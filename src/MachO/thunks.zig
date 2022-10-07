@@ -107,10 +107,7 @@ pub fn createThunks(macho_file: *MachO, sect_id: u8, reverse_lookups: [][]u32) !
         allocated.putAssumeCapacityNoClobber(group_end, {});
 
         const group_start_sym = macho_file.getSymbol(group_start_atom.getSymbolWithLoc());
-        if (offset - group_start_sym.n_value >= max_distance) {
-            group_end = atom.next_index.?;
-            break;
-        }
+        if (offset - group_start_sym.n_value >= max_allowed_distance) break;
 
         if (atom.next_index) |next_index| {
             group_end = next_index;
@@ -143,8 +140,8 @@ pub fn createThunks(macho_file: *MachO, sect_id: u8, reverse_lookups: [][]u32) !
         } else break;
     }
 
-    allocateThunk(macho_file, thunk_index, offset, header);
-    offset += macho_file.thunks.items[thunk_index].getSize();
+    allocateThunk(macho_file, thunk_index, &offset, header);
+    // offset += macho_file.thunks.items[thunk_index].getSize();
 
     // Allocate the rest of the atoms.
     // TODO: for now, assume need for only one thunk.
@@ -176,7 +173,7 @@ pub fn createThunks(macho_file: *MachO, sect_id: u8, reverse_lookups: [][]u32) !
 fn allocateThunk(
     macho_file: *MachO,
     thunk_index: ThunkIndex,
-    base_offset: u64,
+    offset: *u64,
     header: *macho.section_64,
 ) void {
     const thunk = macho_file.thunks.items[thunk_index];
@@ -186,15 +183,14 @@ fn allocateThunk(
     const end_atom_index = thunk.getEndAtomIndex(macho_file);
 
     var atom_index = first_atom_index;
-    var offset = base_offset;
     while (true) {
         const atom = macho_file.getAtom(atom_index);
         macho_file.logAtom(atom_index, log);
-        offset = mem.alignForwardGeneric(u64, offset, 4);
+        offset.* = mem.alignForwardGeneric(u64, offset.*, 4);
 
         const sym = macho_file.getSymbolPtr(atom.getSymbolWithLoc());
-        sym.n_value = offset;
-        offset += atom.size;
+        sym.n_value = offset.*;
+        offset.* += atom.size;
 
         header.@"align" = @maximum(header.@"align", atom.alignment);
 
@@ -349,11 +345,7 @@ pub fn writeThunkCode(macho_file: *MachO, atom_index: AtomIndex, writer: anytype
 
     const pages = Atom.calcNumberOfPages(source_addr, target_addr);
     try writer.writeIntLittle(u32, aarch64.Instruction.adrp(.x16, pages).toU32());
-    const off = try Atom.calcPageOffset(target_addr, .load_store_64);
-    try writer.writeIntLittle(u32, aarch64.Instruction.ldr(
-        .x16,
-        .x16,
-        aarch64.Instruction.LoadStoreOffset.imm(off),
-    ).toU32());
+    const off = try Atom.calcPageOffset(target_addr, .arithmetic);
+    try writer.writeIntLittle(u32, aarch64.Instruction.add(.x16, .x16, off, false).toU32());
     try writer.writeIntLittle(u32, aarch64.Instruction.br(.x16).toU32());
 }
