@@ -71,7 +71,9 @@ strtab: StringTable(.strtab) = .{},
 tlv_ptr_entries: std.AutoArrayHashMapUnmanaged(SymbolWithLoc, u32) = .{},
 got_entries: std.AutoArrayHashMapUnmanaged(SymbolWithLoc, u32) = .{},
 stubs: std.AutoArrayHashMapUnmanaged(SymbolWithLoc, u32) = .{},
-thunks: std.AutoArrayHashMapUnmanaged(SymbolWithLoc, u32) = .{},
+
+thunk_table: std.AutoArrayHashMapUnmanaged(SymbolWithLoc, u32) = .{},
+thunks: std.ArrayListUnmanaged(thunks.Thunk) = .{},
 
 atoms: std.ArrayListUnmanaged(Atom) = .{},
 atom_by_index_table: std.AutoHashMapUnmanaged(u32, AtomIndex) = .{},
@@ -1855,6 +1857,7 @@ pub fn deinit(self: *MachO) void {
     self.tlv_ptr_entries.deinit(gpa);
     self.got_entries.deinit(gpa);
     self.stubs.deinit(gpa);
+    self.thunk_table.deinit(gpa);
     self.thunks.deinit(gpa);
     self.strtab.deinit(gpa);
     self.locals.deinit(gpa);
@@ -2053,7 +2056,7 @@ fn calcMinHeaderPad(self: *MachO) !u64 {
     return offset;
 }
 
-fn allocateSymbol(self: *MachO) !u32 {
+pub fn allocateSymbol(self: *MachO) !u32 {
     try self.locals.ensureUnusedCapacity(self.base.allocator, 1);
     log.debug("  (allocating symbol index {d})", .{self.locals.items.len});
     const index = @intCast(u32, self.locals.items.len);
@@ -2151,9 +2154,12 @@ fn writeAtoms(self: *MachO, reverse_lookups: [][]u32) !void {
                         }
                         if (header.@"type"() == macho.S_SYMBOL_STUBS) {
                             try self.writeStubCode(atom_index, count, buffer.writer());
-                        } else {
+                        } else if (mem.eql(u8, header.sectName(), "__stub_helper")) {
                             try self.writeStubHelperCode(atom_index, buffer.writer());
-                        }
+                        } else if (header.isCode()) {
+                            // A thunk
+                            try thunks.writeThunkCode(self, atom_index, buffer.writer());
+                        } else unreachable;
                     },
                 }
             } else {
@@ -2228,6 +2234,9 @@ fn calcSectionSizes(self: *MachO, reverse_lookups: [][]u32) !void {
     const slice = self.sections.slice();
     for (slice.items(.header)) |*header, sect_id| {
         if (header.size == 0) continue;
+        if (self.requiresThunks()) {
+            if (header.isCode() and !(header.@"type"() == macho.S_SYMBOL_STUBS) and !mem.eql(u8, header.sectName(), "__stub_helper")) continue;
+        }
 
         var atom_index = slice.items(.first_atom_index)[sect_id];
         header.size = 0;
@@ -2251,19 +2260,10 @@ fn calcSectionSizes(self: *MachO, reverse_lookups: [][]u32) !void {
         }
     }
 
-    if (self.requiresThunks()) blk: {
-        // First, let's check if the __TEXT segment will exceed 128MiB. If it doesn't,
-        // we don't need thunks.
-        var text_seg_size: u64 = 0;
-        for (slice.items(.header)) |header| {
-            if (!mem.eql(u8, header.segName(), "__TEXT")) continue;
-            text_seg_size += header.size;
-        }
-
-        if (text_seg_size < thunks.max_distance) break :blk;
-
+    if (self.requiresThunks()) {
         for (slice.items(.header)) |header, sect_id| {
             if (!header.isCode()) continue;
+            if (header.@"type"() == macho.S_SYMBOL_STUBS) continue;
             if (mem.eql(u8, header.sectName(), "__stub_helper")) continue;
 
             // Create jump/branch range extenders if needed.
@@ -3972,14 +3972,16 @@ fn logSymAttributes(sym: macho.nlist_64, buf: []u8) []const u8 {
 fn logSymtab(self: *MachO) void {
     var buf: [4]u8 = undefined;
 
-    log.debug("locals:", .{});
+    const scoped_log = std.log.scoped(.symtab);
+
+    scoped_log.debug("locals:", .{});
     for (self.objects.items) |object, id| {
-        log.debug("  object({d}): {s}", .{ id, object.name });
+        scoped_log.debug("  object({d}): {s}", .{ id, object.name });
         for (object.atoms.items) |atom_index| {
             mem.set(u8, &buf, '_');
             const atom = self.getAtom(atom_index);
             const sym = self.getSymbol(atom.getSymbolWithLoc());
-            log.debug("    %{d}: {s} @{x} in sect({d}), {s}", .{
+            scoped_log.debug("    %{d}: {s} @{x} in sect({d}), {s}", .{
                 atom.getSymbolWithLoc().sym_index,
                 object.getString(sym.n_strx),
                 sym.n_value,
@@ -3988,10 +3990,10 @@ fn logSymtab(self: *MachO) void {
             });
         }
     }
-    log.debug("  object(null)", .{});
+    scoped_log.debug("  object(null)", .{});
     for (self.locals.items) |sym, sym_id| {
         if (sym.undf()) continue;
-        log.debug("    %{d}: {s} @{x} in sect({d}), {s}", .{
+        scoped_log.debug("    %{d}: {s} @{x} in sect({d}), {s}", .{
             sym_id,
             self.strtab.get(sym.n_strx).?,
             sym.n_value,
@@ -4000,12 +4002,12 @@ fn logSymtab(self: *MachO) void {
         });
     }
 
-    log.debug("exports:", .{});
+    scoped_log.debug("exports:", .{});
     var count: usize = 0;
     for (self.globals.values()) |global| {
         const sym = self.getSymbol(global);
         if (sym.undf()) continue;
-        log.debug("    %{d}: {s} @{x} in sect({d}), {s} (def in object({?}))", .{
+        scoped_log.debug("    %{d}: {s} @{x} in sect({d}), {s} (def in object({?}))", .{
             count,
             self.getSymbolName(global),
             sym.n_value,
@@ -4017,7 +4019,7 @@ fn logSymtab(self: *MachO) void {
         count += 1;
     }
 
-    log.debug("imports:", .{});
+    scoped_log.debug("imports:", .{});
     count = 0;
     for (self.globals.values()) |global| {
         const sym = self.getSymbol(global);
@@ -4025,7 +4027,7 @@ fn logSymtab(self: *MachO) void {
 
         const ord = @divTrunc(sym.n_desc, macho.N_SYMBOL_RESOLVER);
 
-        log.debug("    %{d}: {s} @{x} in ord({d}), {s}", .{
+        scoped_log.debug("    %{d}: {s} @{x} in ord({d}), {s}", .{
             count,
             self.getSymbolName(global),
             sym.n_value,
@@ -4036,24 +4038,24 @@ fn logSymtab(self: *MachO) void {
         count += 1;
     }
 
-    log.debug("globals table:", .{});
+    scoped_log.debug("globals table:", .{});
     for (self.globals.keys()) |name, id| {
         const value = self.globals.values()[id];
-        log.debug("  {s} => %{d} in object({?})", .{ name, value.sym_index, value.file });
+        scoped_log.debug("  {s} => %{d} in object({?})", .{ name, value.sym_index, value.file });
     }
 
-    log.debug("GOT entries:", .{});
+    scoped_log.debug("GOT entries:", .{});
     for (self.got_entries.keys()) |target, i| {
         const atom_sym = self.getSymbol(.{ .sym_index = self.got_entries.get(target).?, .file = null });
         const target_sym = self.getSymbol(target);
         if (target_sym.undf()) {
-            log.debug("  {d}@{x} => import('{s}')", .{
+            scoped_log.debug("  {d}@{x} => import('{s}')", .{
                 i,
                 atom_sym.n_value,
                 self.getSymbolName(target),
             });
         } else {
-            log.debug("  {d}@{x} => local(%{d}) in object({?}) {s}", .{
+            scoped_log.debug("  {d}@{x} => local(%{d}) in object({?}) {s}", .{
                 i,
                 atom_sym.n_value,
                 target.sym_index,
@@ -4063,27 +4065,39 @@ fn logSymtab(self: *MachO) void {
         }
     }
 
-    log.debug("__thread_ptrs entries:", .{});
+    scoped_log.debug("__thread_ptrs entries:", .{});
     for (self.tlv_ptr_entries.keys()) |target, i| {
         const atom_sym = self.getSymbol(.{ .sym_index = self.tlv_ptr_entries.get(target).?, .file = null });
         const target_sym = self.getSymbol(target);
         assert(target_sym.undf());
-        log.debug("  {d}@{x} => import('{s}')", .{
+        scoped_log.debug("  {d}@{x} => import('{s}')", .{
             i,
             atom_sym.n_value,
             self.getSymbolName(target),
         });
     }
 
-    log.debug("stubs entries:", .{});
+    scoped_log.debug("stubs entries:", .{});
     for (self.stubs.keys()) |target, i| {
         const target_sym = self.getSymbol(target);
         const atom_sym = self.getSymbol(.{ .sym_index = self.stubs.get(target).?, .file = null });
         assert(target_sym.undf());
-        log.debug("  {d}@{x} => import('{s}')", .{
+        scoped_log.debug("  {d}@{x} => import('{s}')", .{
             i,
             atom_sym.n_value,
             self.getSymbolName(target),
+        });
+    }
+
+    scoped_log.debug("thunks:", .{});
+    for (self.thunk_table.keys()) |target, i| {
+        const target_sym = self.getSymbol(target);
+        const atom_sym = self.getSymbol(.{ .sym_index = self.thunk_table.get(target).?, .file = null });
+        scoped_log.debug("  {d}@{x} => thunk('{s}'@{x})", .{
+            i,
+            atom_sym.n_value,
+            self.getSymbolName(target),
+            target_sym.n_value,
         });
     }
 }

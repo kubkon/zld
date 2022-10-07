@@ -475,21 +475,23 @@ fn resolveRelocsArm64(
         switch (rel_type) {
             .ARM64_RELOC_BRANCH26 => {
                 log.debug("    | target_addr = 0x{x}", .{target_addr});
-                const displacement = calcPcRelativeDisplacementArm64(source_addr, target_addr) catch {
-                    log.err("jump too big to encode as i28 displacement value", .{});
-                    log.err("  (target - source) = displacement => 0x{x} - 0x{x} = 0x{x}", .{
-                        target_addr,
-                        source_addr,
-                        @intCast(i64, target_addr) - @intCast(i64, source_addr),
-                    });
-                    log.err("  source {s} (object({?})), target {s} (object({?}))", .{
-                        macho_file.getSymbolName(atom.getSymbolWithLoc()),
-                        atom.file,
-                        macho_file.getSymbolName(target),
-                        macho_file.getAtom(getRelocTargetAtomIndex(macho_file, rel, target).?).file,
-                    });
-                    log.err("  TODO implement branch islands to extend jump distance for arm64", .{});
-                    return error.TODOImplementBranchIslands;
+                const displacement = calcPcRelativeDisplacementArm64(source_addr, target_addr) catch blk: {
+                    const thunk_addr = macho_file.thunk_table.get(target).?;
+                    break :blk try calcPcRelativeDisplacementArm64(source_addr, thunk_addr);
+                    // log.err("jump too big to encode as i28 displacement value", .{});
+                    // log.err("  (target - source) = displacement => 0x{x} - 0x{x} = 0x{x}", .{
+                    //     target_addr,
+                    //     source_addr,
+                    //     @intCast(i64, target_addr) - @intCast(i64, source_addr),
+                    // });
+                    // log.err("  source {s} (object({?})), target {s} (object({?}))", .{
+                    //     macho_file.getSymbolName(atom.getSymbolWithLoc()),
+                    //     atom.file,
+                    //     macho_file.getSymbolName(target),
+                    //     macho_file.getAtom(getRelocTargetAtomIndex(macho_file, rel, target).?).file,
+                    // });
+                    // log.err("  TODO implement branch islands to extend jump distance for arm64", .{});
+                    // return error.TODOImplementBranchIslands;
                 };
                 const code = atom_code[rel_offset..][0..4];
                 var inst = aarch64.Instruction{
