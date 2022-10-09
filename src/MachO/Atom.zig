@@ -475,39 +475,30 @@ fn resolveRelocsArm64(
 
         switch (rel_type) {
             .ARM64_RELOC_BRANCH26 => {
-                // const actual_target_addr = if (macho_file.getStubsAtomIndexForSymbol(target)) |stub_atom_index| blk: {
-                //     const stub_atom = macho_file.getAtom(stub_atom_index);
-                //     if (macho_file.thunk_table.get(stub_atom.getSymbolWithLoc())) |thunk_sym_index| {
-                //         const thunk_sym = macho_file.getSymbol(.{ .sym_index = thunk_sym_index, .file = null });
-                //         break :blk thunk_sym.n_value;
-                //     }
-                //     break :blk target_addr;
-                // } else target_addr;
-                // const actual_target_addr = if (macho_file.thunk_table.get(target)) |thunk_atom_index| blk: {
-                //     const thunk_atom = macho_file.getAtom(thunk_atom_index);
-                //     const thunk_sym = macho_file.getSymbol(thunk_atom.getSymbolWithLoc());
-                //     break :blk thunk_sym.n_value;
-                // } else target_addr;
-                // const displacement = try calcPcRelativeDisplacementArm64(source_addr, actual_target_addr);
-                log.debug("    | target_addr = 0x{x}", .{target_addr});
-                const displacement = calcPcRelativeDisplacementArm64(source_addr, target_addr) catch blk: {
-                    const actual_target = if (macho_file.getStubsAtomIndexForSymbol(target)) |stub_atom_index| inner: {
-                        const stub_atom = macho_file.getAtom(stub_atom_index);
-                        break :inner stub_atom.getSymbolWithLoc();
-                    } else target;
-                    log.debug("  source {s} (object({?})), target {s} (object({?}))", .{
-                        macho_file.getSymbolName(atom.getSymbolWithLoc()),
-                        atom.file,
-                        macho_file.getSymbolName(target),
-                        macho_file.getAtom(getRelocTargetAtomIndex(macho_file, rel, target).?).file,
-                    });
+                const actual_target = if (macho_file.getStubsAtomIndexForSymbol(target)) |stub_atom_index| inner: {
+                    const stub_atom = macho_file.getAtom(stub_atom_index);
+                    break :inner stub_atom.getSymbolWithLoc();
+                } else target;
+                log.debug("  source {s} (object({?})), target {s} (object({?}))", .{
+                    macho_file.getSymbolName(atom.getSymbolWithLoc()),
+                    atom.file,
+                    macho_file.getSymbolName(target),
+                    macho_file.getAtom(getRelocTargetAtomIndex(macho_file, rel, target).?).file,
+                });
+
+                const displacement = if (calcPcRelativeDisplacementArm64(
+                    source_addr,
+                    macho_file.getSymbol(actual_target).n_value,
+                )) |disp| blk: {
+                    log.debug("    | target_addr = 0x{x}", .{macho_file.getSymbol(actual_target).n_value});
+                    break :blk disp;
+                } else |_| blk: {
                     const thunk_sym_index = macho_file.thunk_table.get(actual_target).?;
                     const thunk_sym = macho_file.getSymbol(.{ .sym_index = thunk_sym_index, .file = null });
+                    log.debug("    | target_addr = 0x{x}", .{thunk_sym.n_value});
                     break :blk try calcPcRelativeDisplacementArm64(source_addr, thunk_sym.n_value);
-
-                    // log.err("  TODO implement branch islands to extend jump distance for arm64", .{});
-                    // return error.TODOImplementBranchIslands;
                 };
+
                 const code = atom_code[rel_offset..][0..4];
                 var inst = aarch64.Instruction{
                     .unconditional_branch_immediate = mem.bytesToValue(meta.TagPayload(

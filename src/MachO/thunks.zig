@@ -339,7 +339,6 @@ pub fn writeThunkCode(macho_file: *MachO, atom_index: AtomIndex, writer: anytype
     const source_addr = sym.n_value;
     const target_addr = for (macho_file.thunk_table.keys()) |target| {
         const sym_index = macho_file.thunk_table.get(target).?;
-        log.warn("{d} ?? {d}", .{ sym_index, atom.sym_index });
         if (sym_index == atom.sym_index) break macho_file.getSymbol(target).n_value;
     } else unreachable;
 
