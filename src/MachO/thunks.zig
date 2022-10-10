@@ -244,24 +244,16 @@ fn scanRelocs(
         const gpa = macho_file.base.allocator;
         const target_sym = macho_file.getSymbol(target);
 
-        if (target_sym.undf()) {
-            const actual_target = macho_file.stubs.get(target).?;
-            const gop = try macho_file.thunk_table.getOrPut(gpa, .{
-                .sym_index = actual_target,
-                .file = null,
-            });
-            if (!gop.found_existing) {
-                const thunk_atom_index = try createThunkAtom(macho_file, thunk_index, group_end);
-                const thunk_atom = macho_file.getAtom(thunk_atom_index);
-                gop.value_ptr.* = thunk_atom.sym_index;
-            }
-        } else {
-            const gop = try macho_file.thunk_table.getOrPut(gpa, target);
-            if (!gop.found_existing) {
-                const thunk_atom_index = try createThunkAtom(macho_file, thunk_index, group_end);
-                const thunk_atom = macho_file.getAtom(thunk_atom_index);
-                gop.value_ptr.* = thunk_atom.sym_index;
-            }
+        const actual_target: SymbolWithLoc = if (target_sym.undf()) .{
+            .sym_index = macho_file.stubs.get(target).?,
+            .file = null,
+        } else target;
+
+        const gop = try macho_file.thunk_table.getOrPut(gpa, actual_target);
+        if (!gop.found_existing) {
+            const thunk_atom_index = try createThunkAtom(macho_file, thunk_index, group_end);
+            const thunk_atom = macho_file.getAtom(thunk_atom_index);
+            gop.value_ptr.* = thunk_atom.sym_index;
         }
     }
 }
