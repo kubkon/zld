@@ -374,10 +374,14 @@ pub fn getRelocTargetAddress(macho_file: *MachO, rel: macho.relocation_info, tar
     });
     // If `target` is contained within the target atom, pull its address value.
     const target_sym = macho_file.getSymbol(target_atom.getSymbolWithLoc());
-    const offset = if (target_atom.file != null)
-        Atom.calcInnerSymbolOffset(macho_file, target_atom_index, target.sym_index)
-    else
-        0;
+    const offset = if (target_atom.file != null) blk: {
+        const object = macho_file.objects.items[target_atom.file.?];
+        break :blk if (object.getSourceSymbol(target.sym_index)) |_|
+            Atom.calcInnerSymbolOffset(macho_file, target_atom_index, target.sym_index)
+        else
+            0; // section alias
+
+    } else 0;
     const base_address: u64 = if (is_tlv) base_address: {
         // For TLV relocations, the value specified as a relocation is the displacement from the
         // TLV initializer (either value in __thread_data or zero-init in __thread_bss) to the first
