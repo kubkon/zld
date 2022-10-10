@@ -55,6 +55,10 @@ pub const Thunk = struct {
     pub fn getSize(self: Thunk) u64 {
         return 12 * self.len;
     }
+
+    pub fn getAlignment() u32 {
+        return @alignOf(u32);
+    }
 };
 
 pub fn createThunks(macho_file: *MachO, sect_id: u8, reverse_lookups: [][]u32) !void {
@@ -140,8 +144,9 @@ pub fn createThunks(macho_file: *MachO, sect_id: u8, reverse_lookups: [][]u32) !
         } else break;
     }
 
-    allocateThunk(macho_file, thunk_index, &offset, header);
-    // offset += macho_file.thunks.items[thunk_index].getSize();
+    offset = mem.alignForwardGeneric(u64, offset, Thunk.getAlignment());
+    allocateThunk(macho_file, thunk_index, offset, header);
+    offset += macho_file.thunks.items[thunk_index].getSize();
 
     // Allocate the rest of the atoms.
     // TODO: for now, assume need for only one thunk.
@@ -173,7 +178,7 @@ pub fn createThunks(macho_file: *MachO, sect_id: u8, reverse_lookups: [][]u32) !
 fn allocateThunk(
     macho_file: *MachO,
     thunk_index: ThunkIndex,
-    offset: *u64,
+    base_offset: u64,
     header: *macho.section_64,
 ) void {
     const thunk = macho_file.thunks.items[thunk_index];
@@ -183,14 +188,15 @@ fn allocateThunk(
     const end_atom_index = thunk.getEndAtomIndex(macho_file);
 
     var atom_index = first_atom_index;
+    var offset = base_offset;
     while (true) {
         const atom = macho_file.getAtom(atom_index);
         macho_file.logAtom(atom_index, log);
-        offset.* = mem.alignForwardGeneric(u64, offset.*, 4);
+        offset = mem.alignForwardGeneric(u64, offset, Thunk.getAlignment());
 
         const sym = macho_file.getSymbolPtr(atom.getSymbolWithLoc());
-        sym.n_value = offset.*;
-        offset.* += atom.size;
+        sym.n_value = offset;
+        offset += atom.size;
 
         header.@"align" = @maximum(header.@"align", atom.alignment);
 
