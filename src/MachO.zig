@@ -72,7 +72,7 @@ tlv_ptr_entries: std.AutoArrayHashMapUnmanaged(SymbolWithLoc, u32) = .{},
 got_entries: std.AutoArrayHashMapUnmanaged(SymbolWithLoc, u32) = .{},
 stubs: std.AutoArrayHashMapUnmanaged(SymbolWithLoc, u32) = .{},
 
-thunk_table: std.AutoArrayHashMapUnmanaged(SymbolWithLoc, u32) = .{},
+thunk_table: std.AutoArrayHashMapUnmanaged(AtomIndex, thunks.ThunkIndex) = .{},
 thunks: std.ArrayListUnmanaged(thunks.Thunk) = .{},
 
 atoms: std.ArrayListUnmanaged(Atom) = .{},
@@ -4090,15 +4090,19 @@ fn logSymtab(self: *MachO) void {
     }
 
     scoped_log.debug("thunks:", .{});
-    for (self.thunk_table.keys()) |target, i| {
-        const target_sym = self.getSymbol(target);
-        const atom_sym = self.getSymbol(.{ .sym_index = self.thunk_table.get(target).?, .file = null });
-        scoped_log.debug("  {d}@{x} => thunk('{s}'@{x})", .{
-            i,
-            atom_sym.n_value,
-            self.getSymbolName(target),
-            target_sym.n_value,
-        });
+    for (self.thunks.items) |thunk, i| {
+        scoped_log.debug("  thunk({d})", .{i});
+        for (thunk.lookup.keys()) |target, j| {
+            const target_sym = self.getSymbol(target);
+            const atom = self.getAtom(thunk.lookup.get(target).?);
+            const atom_sym = self.getSymbol(atom.getSymbolWithLoc());
+            scoped_log.debug("    {d}@{x} => thunk('{s}'@{x})", .{
+                j,
+                atom_sym.n_value,
+                self.getSymbolName(target),
+                target_sym.n_value,
+            });
+        }
     }
 }
 

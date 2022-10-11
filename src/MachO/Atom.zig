@@ -497,8 +497,12 @@ fn resolveRelocsArm64(
                     log.debug("    | target_addr = 0x{x}", .{macho_file.getSymbol(actual_target).n_value});
                     break :blk disp;
                 } else |_| blk: {
-                    const thunk_sym_index = macho_file.thunk_table.get(actual_target).?;
-                    const thunk_sym = macho_file.getSymbol(.{ .sym_index = thunk_sym_index, .file = null });
+                    const thunk_index = macho_file.thunk_table.get(atom_index).?;
+                    const thunk = macho_file.thunks.items[thunk_index];
+                    const thunk_sym = macho_file.getSymbol(thunk.getTrampolineForSymbol(
+                        macho_file,
+                        actual_target,
+                    ).?);
                     log.debug("    | target_addr = 0x{x}", .{thunk_sym.n_value});
                     break :blk try calcPcRelativeDisplacementArm64(source_addr, thunk_sym.n_value);
                 };
