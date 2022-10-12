@@ -941,9 +941,16 @@ fn filterRelocs(
             return rel.r_address >= self.addr;
         }
     };
+    const LPredicate = struct {
+        addr: u64,
+
+        pub fn predicate(self: @This(), rel: macho.relocation_info) bool {
+            return rel.r_address < self.addr;
+        }
+    };
 
     const start = MachO.bsearch(macho.relocation_info, relocs, Predicate{ .addr = end_addr });
-    const end = MachO.bsearch(macho.relocation_info, relocs[start..], Predicate{ .addr = start_addr }) + start;
+    const end = MachO.lsearch(macho.relocation_info, relocs[start..], LPredicate{ .addr = start_addr }) + start;
 
     return relocs[start..end];
 }
