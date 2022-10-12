@@ -24,8 +24,6 @@ const max_distance = (1 << (jump_bits - 1));
 /// and assume margin to be 5MiB.
 const max_allowed_distance = max_distance - 0x500_000;
 
-const group_size = max_allowed_distance / 10;
-
 pub const Thunk = struct {
     start_index: AtomIndex,
     len: u32,
@@ -127,8 +125,6 @@ pub fn createThunks(macho_file: *MachO, sect_id: u8, reverse_lookups: [][]u32) !
             } else break;
         }
 
-        log.debug("GROUP END at {d}", .{group_end});
-
         // Insert thunk at group_end
         const thunk_index = @intCast(u32, macho_file.thunks.items.len);
         try macho_file.thunks.append(gpa, .{ .start_index = undefined, .len = 0 });
@@ -158,9 +154,16 @@ pub fn createThunks(macho_file: *MachO, sect_id: u8, reverse_lookups: [][]u32) !
         offset += macho_file.thunks.items[thunk_index].getSize();
 
         const thunk = macho_file.thunks.items[thunk_index];
-        const thunk_end_atom_index = thunk.getEndAtomIndex(macho_file) orelse break;
-        group_start = thunk_end_atom_index;
-        group_end = thunk_end_atom_index;
+        if (thunk.getEndAtomIndex(macho_file)) |thunk_end_atom_index| {
+            group_start = thunk_end_atom_index;
+            group_end = thunk_end_atom_index;
+        } else {
+            if (thunk.len > 0) break;
+            const group_end_atom = macho_file.getAtom(group_end);
+            if (group_end_atom.next_index) |next_index| {
+                group_end = next_index;
+            } else break;
+        }
     }
 
     header.size = @intCast(u32, offset);
