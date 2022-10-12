@@ -26,6 +26,7 @@ pub fn build(b: *Builder) void {
     exe.setBuildMode(mode);
     exe.addPackagePath("dis_x86_64", "zig-dis-x86_64/src/dis_x86_64.zig");
     exe.linkLibC();
+    exe.strip = false;
 
     const exe_opts = b.addOptions();
     exe.addOptions("build_options", exe_opts);

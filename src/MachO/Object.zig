@@ -35,7 +35,8 @@ in_strtab: ?[]const u8 = null,
 /// Output symtab is sorted so that we can easily reference symbols following each
 /// other in address space.
 symtab: std.ArrayListUnmanaged(macho.nlist_64) = .{},
-source_symtab_lookup: std.ArrayListUnmanaged(u32) = .{},
+/// Can be null as set together with in_symtab.
+source_symtab_lookup: []u32 = undefined,
 
 sections_as_symbols: std.AutoHashMapUnmanaged(u16, u32) = .{},
 
@@ -44,12 +45,14 @@ atom_by_index_table: std.AutoHashMapUnmanaged(u32, AtomIndex) = .{},
 
 pub fn deinit(self: *Object, gpa: Allocator) void {
     self.symtab.deinit(gpa);
-    self.source_symtab_lookup.deinit(gpa);
     self.sections_as_symbols.deinit(gpa);
     self.atoms.deinit(gpa);
     self.atom_by_index_table.deinit(gpa);
     gpa.free(self.name);
     gpa.free(self.contents);
+    if (self.in_symtab) |_| {
+        gpa.free(self.source_symtab_lookup);
+    }
 }
 
 pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch) !void {
@@ -97,7 +100,7 @@ pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch)
                 self.in_strtab = self.contents[symtab.stroff..][0..symtab.strsize];
 
                 try self.symtab.ensureTotalCapacity(allocator, self.in_symtab.?.len);
-                try self.source_symtab_lookup.ensureTotalCapacity(allocator, self.in_symtab.?.len);
+                self.source_symtab_lookup = try allocator.alloc(u32, self.in_symtab.?.len);
 
                 // You would expect that the symbol table is at least pre-sorted based on symbol's type:
                 // local < extern defined < undefined. Unfortunately, this is not guaranteed! For instance,
@@ -116,9 +119,9 @@ pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch)
                 // is kind enough to specify the symbols in the correct order.
                 sort.sort(SymbolAtIndex, sorted_all_syms.items, self, SymbolAtIndex.lessThan);
 
-                for (sorted_all_syms.items) |sym_id| {
+                for (sorted_all_syms.items) |sym_id, i| {
                     self.symtab.appendAssumeCapacity(sym_id.getSymbol(self));
-                    self.source_symtab_lookup.appendAssumeCapacity(sym_id.index);
+                    self.source_symtab_lookup[i] = sym_id.index;
                 }
             },
             else => {},
@@ -503,14 +506,14 @@ fn createAtomFromSubsection(
 pub fn getSourceSymbol(self: Object, index: u32) ?macho.nlist_64 {
     const symtab = self.in_symtab.?;
     if (index >= symtab.len) return null;
-    const mapped_index = self.source_symtab_lookup.items[index];
+    const mapped_index = self.source_symtab_lookup[index];
     return symtab[mapped_index];
 }
 
 /// Caller owns memory.
 pub fn createReverseSymbolLookup(self: Object, gpa: Allocator) ![]u32 {
     const lookup = try gpa.alloc(u32, self.in_symtab.?.len);
-    for (self.source_symtab_lookup.items) |source_id, id| {
+    for (self.source_symtab_lookup) |source_id, id| {
         lookup[source_id] = @intCast(u32, id);
     }
     return lookup;

@@ -7,6 +7,7 @@ const mem = std.mem;
 
 const aarch64 = @import("../aarch64.zig");
 
+const Allocator = mem.Allocator;
 const Atom = @import("Atom.zig");
 const AtomIndex = MachO.AtomIndex;
 const MachO = @import("../MachO.zig");
@@ -30,6 +31,10 @@ pub const Thunk = struct {
     len: u32,
 
     lookup: std.AutoArrayHashMapUnmanaged(SymbolWithLoc, AtomIndex) = .{},
+
+    pub fn deinit(self: *Thunk, gpa: Allocator) void {
+        self.lookup.deinit(gpa);
+    }
 
     pub fn getStartAtomIndex(self: Thunk) AtomIndex {
         assert(self.len != 0);

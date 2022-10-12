@@ -1858,7 +1858,12 @@ pub fn deinit(self: *MachO) void {
     self.got_entries.deinit(gpa);
     self.stubs.deinit(gpa);
     self.thunk_table.deinit(gpa);
+
+    for (self.thunks.items) |*thunk| {
+        thunk.deinit(gpa);
+    }
     self.thunks.deinit(gpa);
+
     self.strtab.deinit(gpa);
     self.locals.deinit(gpa);
     self.unresolved.deinit(gpa);
@@ -4127,6 +4132,8 @@ fn logAtoms(self: *MachO) void {
 }
 
 pub fn logAtom(self: *MachO, atom_index: AtomIndex, logger: anytype) void {
+    if (!build_options.enable_logging) return;
+
     const atom = self.getAtom(atom_index);
     const sym = self.getSymbol(atom.getSymbolWithLoc());
     const sym_name = self.getSymbolName(atom.getSymbolWithLoc());
