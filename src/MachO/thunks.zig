@@ -103,67 +103,12 @@ pub fn createThunks(macho_file: *MachO, sect_id: u8, reverse_lookups: [][]u32) !
     var group_end = first_atom_index;
     var offset: u64 = 0;
 
-    const group_start_atom = macho_file.getAtom(group_start);
-
     while (true) {
-        const atom = macho_file.getAtom(group_end);
-        macho_file.logAtom(group_end, log);
-        offset = mem.alignForwardGeneric(u64, offset, try math.powi(u32, 2, atom.alignment));
-
-        const sym = macho_file.getSymbolPtr(atom.getSymbolWithLoc());
-        sym.n_value = offset;
-        offset += atom.size;
-
-        header.@"align" = @maximum(header.@"align", atom.alignment);
-
-        allocated.putAssumeCapacityNoClobber(group_end, {});
-
-        const group_start_sym = macho_file.getSymbol(group_start_atom.getSymbolWithLoc());
-        if (offset - group_start_sym.n_value >= max_allowed_distance) break;
-
-        if (atom.next_index) |next_index| {
-            group_end = next_index;
-        } else break;
-    }
-
-    log.debug("GROUP END at {d}", .{group_end});
-
-    // Insert thunk at group_end
-    const thunk_index = @intCast(u32, macho_file.thunks.items.len);
-    try macho_file.thunks.append(gpa, .{ .start_index = undefined, .len = 0 });
-
-    // Scan relocs in the group and create trampolines for any unreachable callsite.
-    var atom_index = group_start;
-    while (true) {
-        const atom = macho_file.getAtom(atom_index);
-        try scanRelocs(
-            macho_file,
-            atom_index,
-            reverse_lookups[atom.file.?],
-            allocated,
-            thunk_index,
-            group_end,
-        );
-
-        if (atom_index == group_end) break;
-
-        if (atom.next_index) |next_index| {
-            atom_index = next_index;
-        } else break;
-    }
-
-    offset = mem.alignForwardGeneric(u64, offset, Thunk.getAlignment());
-    allocateThunk(macho_file, thunk_index, offset, header);
-    offset += macho_file.thunks.items[thunk_index].getSize();
-
-    // Allocate the rest of the atoms.
-    // TODO: for now, assume need for only one thunk.
-    if (macho_file.getAtom(group_end).next_index) |first_after| {
-        atom_index = first_after;
+        const group_start_atom = macho_file.getAtom(group_start);
 
         while (true) {
-            const atom = macho_file.getAtom(atom_index);
-            macho_file.logAtom(atom_index, log);
+            const atom = macho_file.getAtom(group_end);
+            macho_file.logAtom(group_end, log);
             offset = mem.alignForwardGeneric(u64, offset, try math.powi(u32, 2, atom.alignment));
 
             const sym = macho_file.getSymbolPtr(atom.getSymbolWithLoc());
@@ -172,12 +117,50 @@ pub fn createThunks(macho_file: *MachO, sect_id: u8, reverse_lookups: [][]u32) !
 
             header.@"align" = @maximum(header.@"align", atom.alignment);
 
-            allocated.putAssumeCapacityNoClobber(atom_index, {});
+            allocated.putAssumeCapacityNoClobber(group_end, {});
+
+            const group_start_sym = macho_file.getSymbol(group_start_atom.getSymbolWithLoc());
+            if (offset - group_start_sym.n_value >= max_allowed_distance) break;
+
+            if (atom.next_index) |next_index| {
+                group_end = next_index;
+            } else break;
+        }
+
+        log.debug("GROUP END at {d}", .{group_end});
+
+        // Insert thunk at group_end
+        const thunk_index = @intCast(u32, macho_file.thunks.items.len);
+        try macho_file.thunks.append(gpa, .{ .start_index = undefined, .len = 0 });
+
+        // Scan relocs in the group and create trampolines for any unreachable callsite.
+        var atom_index = group_start;
+        while (true) {
+            const atom = macho_file.getAtom(atom_index);
+            try scanRelocs(
+                macho_file,
+                atom_index,
+                reverse_lookups[atom.file.?],
+                allocated,
+                thunk_index,
+                group_end,
+            );
+
+            if (atom_index == group_end) break;
 
             if (atom.next_index) |next_index| {
                 atom_index = next_index;
             } else break;
         }
+
+        offset = mem.alignForwardGeneric(u64, offset, Thunk.getAlignment());
+        allocateThunk(macho_file, thunk_index, offset, header);
+        offset += macho_file.thunks.items[thunk_index].getSize();
+
+        const thunk = macho_file.thunks.items[thunk_index];
+        const thunk_end_atom_index = thunk.getEndAtomIndex(macho_file) orelse break;
+        group_start = thunk_end_atom_index;
+        group_end = thunk_end_atom_index;
     }
 
     header.size = @intCast(u32, offset);
