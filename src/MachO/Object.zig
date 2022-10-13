@@ -37,6 +37,8 @@ in_strtab: ?[]const u8 = null,
 symtab: std.ArrayListUnmanaged(macho.nlist_64) = .{},
 /// Can be null as set together with in_symtab.
 source_symtab_lookup: []u32 = undefined,
+/// Can be null as set together with in_symtab.
+strtab_lookup: []u32 = undefined,
 
 sections_as_symbols: std.AutoHashMapUnmanaged(u16, u32) = .{},
 
@@ -52,6 +54,7 @@ pub fn deinit(self: *Object, gpa: Allocator) void {
     gpa.free(self.contents);
     if (self.in_symtab) |_| {
         gpa.free(self.source_symtab_lookup);
+        gpa.free(self.strtab_lookup);
     }
 }
 
@@ -101,6 +104,7 @@ pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch)
 
                 try self.symtab.ensureTotalCapacity(allocator, self.in_symtab.?.len);
                 self.source_symtab_lookup = try allocator.alloc(u32, self.in_symtab.?.len);
+                self.strtab_lookup = try allocator.alloc(u32, self.in_symtab.?.len);
 
                 // You would expect that the symbol table is at least pre-sorted based on symbol's type:
                 // local < extern defined < undefined. Unfortunately, this is not guaranteed! For instance,
@@ -120,8 +124,13 @@ pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch)
                 sort.sort(SymbolAtIndex, sorted_all_syms.items, self, SymbolAtIndex.lessThan);
 
                 for (sorted_all_syms.items) |sym_id, i| {
-                    self.symtab.appendAssumeCapacity(sym_id.getSymbol(self));
+                    const sym = sym_id.getSymbol(self);
+
+                    self.symtab.appendAssumeCapacity(sym);
                     self.source_symtab_lookup[i] = sym_id.index;
+
+                    const sym_name_len = mem.sliceTo(@ptrCast([*:0]const u8, self.in_strtab.?.ptr + sym.n_strx), 0).len + 1;
+                    self.strtab_lookup[i] = @intCast(u32, sym_name_len);
                 }
             },
             else => {},
@@ -139,8 +148,8 @@ const SymbolAtIndex = struct {
     }
 
     fn getSymbolName(self: SymbolAtIndex, ctx: Context) []const u8 {
-        const sym = self.getSymbol(ctx);
-        return ctx.getString(sym.n_strx);
+        const off = self.getSymbol(ctx).n_strx;
+        return mem.sliceTo(@ptrCast([*:0]const u8, ctx.in_strtab.?.ptr + off), 0);
     }
 
     /// Performs lexicographic-like check.
@@ -175,6 +184,10 @@ const SymbolAtIndex = struct {
         } else if (lhs.undf() and rhs.undf()) {
             return false;
         } else return rhs.undf();
+    }
+
+    fn lessThanByNStrx(ctx: Context, lhs: SymbolAtIndex, rhs: SymbolAtIndex) bool {
+        return lhs.getSymbol(ctx).n_strx < rhs.getSymbol(ctx).n_strx;
     }
 };
 
@@ -474,7 +487,6 @@ fn createAtomFromSubsection(
     out_sect_id: u8,
 ) !AtomIndex {
     const gpa = macho_file.base.allocator;
-    const sym = self.symtab.items[sym_index];
     const atom_index = try macho_file.createEmptyAtom(sym_index, size, alignment);
     const atom = macho_file.getAtomPtr(atom_index);
     atom.nsyms_trailing = nsyms_trailing;
@@ -483,7 +495,7 @@ fn createAtomFromSubsection(
 
     log.debug("creating ATOM(%{d}, '{s}') in sect({d}, '{s},{s}') in object({d})", .{
         sym_index,
-        self.getString(sym.n_strx),
+        self.getSymbolName(sym_index),
         out_sect_id + 1,
         macho_file.sections.items(.header)[out_sect_id].segName(),
         macho_file.sections.items(.header)[out_sect_id].sectName(),
@@ -609,10 +621,19 @@ pub fn getRelocs(self: Object, sect: macho.section_64) []align(1) const macho.re
     return @ptrCast([*]align(1) const macho.relocation_info, self.contents.ptr + sect.reloff)[0..sect.nreloc];
 }
 
-pub fn getString(self: Object, off: u32) []const u8 {
+pub fn getSymbolName(self: Object, index: u32) []const u8 {
     const strtab = self.in_strtab.?;
-    assert(off < strtab.len);
-    return mem.sliceTo(@ptrCast([*:0]const u8, strtab.ptr + off), 0);
+    const sym = self.symtab.items[index];
+
+    if (self.getSourceSymbol(index) == null) {
+        assert(sym.n_strx == 0);
+        return "";
+    }
+
+    const start = sym.n_strx;
+    const len = self.strtab_lookup[index];
+
+    return strtab[start..][0 .. len - 1 :0];
 }
 
 pub fn getAtomIndexForSymbol(self: Object, sym_index: u32) ?AtomIndex {

@@ -1389,7 +1389,7 @@ fn resolveSymbolsInObject(self: *MachO, object_id: u16) !void {
 
     for (object.symtab.items) |sym, index| {
         const sym_index = @intCast(u32, index);
-        const sym_name = object.getString(sym.n_strx);
+        const sym_name = object.getSymbolName(sym_index);
 
         if (sym.stab()) {
             log.err("unhandled symbol type: stab", .{});
@@ -3632,8 +3632,7 @@ pub fn getSymbol(self: *MachO, sym_with_loc: SymbolWithLoc) macho.nlist_64 {
 pub fn getSymbolName(self: *MachO, sym_with_loc: SymbolWithLoc) []const u8 {
     if (sym_with_loc.file) |file| {
         const object = self.objects.items[file];
-        const sym = object.symtab.items[sym_with_loc.sym_index];
-        return object.getString(sym.n_strx);
+        return object.getSymbolName(sym_with_loc.sym_index);
     } else {
         const sym = self.locals.items[sym_with_loc.sym_index];
         return self.strtab.get(sym.n_strx).?;
@@ -3988,7 +3987,7 @@ fn logSymtab(self: *MachO) void {
             const sym = self.getSymbol(atom.getSymbolWithLoc());
             scoped_log.debug("    %{d}: {s} @{x} in sect({d}), {s}", .{
                 atom.getSymbolWithLoc().sym_index,
-                object.getString(sym.n_strx),
+                object.getSymbolName(atom.sym_index),
                 sym.n_value,
                 sym.n_sect,
                 logSymAttributes(sym, &buf),
