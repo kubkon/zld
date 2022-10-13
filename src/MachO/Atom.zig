@@ -47,6 +47,9 @@ size: u64,
 /// For instance, aligmment of 0 should be read as 2^0 = 1 byte aligned.
 alignment: u32,
 
+cached_relocs_start: i32,
+cached_relocs_len: u32,
+
 /// Points to the previous and next neighbours
 next_index: ?AtomIndex,
 prev_index: ?AtomIndex,
@@ -57,6 +60,8 @@ pub const empty = Atom{
     .file = null,
     .size = 0,
     .alignment = 0,
+    .cached_relocs_start = -1,
+    .cached_relocs_len = 0,
     .prev_index = null,
     .next_index = null,
 };
@@ -905,10 +910,15 @@ pub fn getAtomCode(macho_file: *MachO, atom_index: AtomIndex) []const u8 {
 }
 
 pub fn getAtomRelocs(macho_file: *MachO, atom_index: AtomIndex) []align(1) const macho.relocation_info {
-    const atom = macho_file.getAtom(atom_index);
+    const atom = macho_file.getAtomPtr(atom_index);
     assert(atom.file != null); // Synthetic atom shouldn't need to unique for relocs.
     const object = macho_file.objects.items[atom.file.?];
-    const source_sym = object.getSourceSymbol(atom.sym_index) orelse {
+
+    const source_sect = if (object.getSourceSymbol(atom.sym_index)) |source_sym| blk: {
+        const source_sect = object.getSourceSection(source_sym.n_sect - 1);
+        assert(!source_sect.isZerofill());
+        break :blk source_sect;
+    } else blk: {
         // If there was no matching symbol present in the source symtab, this means
         // we are dealing with either an entire section, or part of it, but also
         // starting at the beginning.
@@ -917,23 +927,29 @@ pub fn getAtomRelocs(macho_file: *MachO, atom_index: AtomIndex) []align(1) const
                 if (sym_index == atom.sym_index) break source_sect;
             }
         } else unreachable;
-
         assert(!source_sect.isZerofill());
-        const relocs = object.getRelocs(source_sect);
-        return filterRelocs(relocs, 0, atom.size);
+        break :blk source_sect;
     };
-    const source_sect = object.getSourceSection(source_sym.n_sect - 1);
-    assert(!source_sect.isZerofill());
-    const offset = source_sym.n_value - source_sect.addr;
+
     const relocs = object.getRelocs(source_sect);
-    return filterRelocs(relocs, offset, offset + atom.size);
+
+    if (atom.cached_relocs_start == -1) {
+        const indexes = if (object.getSourceSymbol(atom.sym_index)) |source_sym| blk: {
+            const offset = source_sym.n_value - source_sect.addr;
+            break :blk filterRelocs(relocs, offset, offset + atom.size);
+        } else filterRelocs(relocs, 0, atom.size);
+        atom.cached_relocs_start = indexes.start;
+        atom.cached_relocs_len = indexes.len;
+    }
+
+    return relocs[@intCast(u32, atom.cached_relocs_start)..][0..atom.cached_relocs_len];
 }
 
 fn filterRelocs(
     relocs: []align(1) const macho.relocation_info,
     start_addr: u64,
     end_addr: u64,
-) []align(1) const macho.relocation_info {
+) struct { start: i32, len: u32 } {
     const Predicate = struct {
         addr: u64,
 
@@ -950,9 +966,9 @@ fn filterRelocs(
     };
 
     const start = MachO.bsearch(macho.relocation_info, relocs, Predicate{ .addr = end_addr });
-    const end = MachO.lsearch(macho.relocation_info, relocs[start..], LPredicate{ .addr = start_addr }) + start;
+    const len = MachO.lsearch(macho.relocation_info, relocs[start..], LPredicate{ .addr = start_addr });
 
-    return relocs[start..end];
+    return .{ .start = @intCast(i32, start), .len = @intCast(u32, len) };
 }
 
 pub fn calcPcRelativeDisplacementX86(source_addr: u64, target_addr: u64, correction: u3) error{Overflow}!i32 {
