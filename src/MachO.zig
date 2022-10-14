@@ -155,6 +155,7 @@ pub fn flush(self: *MachO) !void {
     const os_tag = self.options.target.os_tag.?;
     const abi = self.options.target.abi.?;
 
+    try self.atoms.append(gpa, Atom.empty); // AtomIndex at 0 is reserved as null atom
     try self.strtab.buffer.append(gpa, 0);
 
     var lib_not_found = false;
@@ -1376,7 +1377,7 @@ fn createTentativeDefAtoms(self: *MachO) !void {
         if (global.file) |file| {
             const object = &self.objects.items[file];
             try object.atoms.append(gpa, atom_index);
-            try object.atom_by_index_table.putNoClobber(gpa, global.sym_index, atom_index);
+            object.atom_by_index_table[global.sym_index] = atom_index;
         } else {
             try self.atom_by_index_table.putNoClobber(gpa, global.sym_index, atom_index);
         }

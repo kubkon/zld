@@ -41,19 +41,20 @@ symtab: []macho.nlist_64 = undefined,
 source_symtab_lookup: []u32 = undefined,
 /// Can be null as set together with in_symtab.
 strtab_lookup: []u32 = undefined,
+/// Can be null as set together with in_symtab.
+atom_by_index_table: []AtomIndex = undefined,
 
 atoms: std.ArrayListUnmanaged(AtomIndex) = .{},
-atom_by_index_table: std.AutoHashMapUnmanaged(u32, AtomIndex) = .{},
 
 pub fn deinit(self: *Object, gpa: Allocator) void {
     self.atoms.deinit(gpa);
-    self.atom_by_index_table.deinit(gpa);
     gpa.free(self.name);
     gpa.free(self.contents);
     if (self.in_symtab) |_| {
         gpa.free(self.source_symtab_lookup);
         gpa.free(self.strtab_lookup);
         gpa.free(self.symtab);
+        gpa.free(self.atom_by_index_table);
     }
 }
 
@@ -106,6 +107,7 @@ pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch)
                 self.symtab = try allocator.alloc(macho.nlist_64, self.in_symtab.?.len + nsects);
                 self.source_symtab_lookup = try allocator.alloc(u32, self.in_symtab.?.len);
                 self.strtab_lookup = try allocator.alloc(u32, self.in_symtab.?.len);
+                self.atom_by_index_table = try allocator.alloc(AtomIndex, self.in_symtab.?.len + nsects);
 
                 for (self.symtab) |*sym| {
                     sym.* = .{
@@ -116,6 +118,8 @@ pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch)
                         .n_type = 0,
                     };
                 }
+
+                mem.set(AtomIndex, self.atom_by_index_table, 0);
 
                 // You would expect that the symbol table is at least pre-sorted based on symbol's type:
                 // local < extern defined < undefined. Unfortunately, this is not guaranteed! For instance,
@@ -438,7 +442,7 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
                     // atom by both the actual assigned symbol and the start of the section. In this
                     // case, we need to link the two together so add an alias.
                     const alias_index = self.getSectionAliasSymbolIndex(sect_id);
-                    try self.atom_by_index_table.put(gpa, alias_index, atom_index);
+                    self.atom_by_index_table[alias_index] = atom_index;
                 }
 
                 macho_file.addAtomToSection(atom_index);
@@ -489,13 +493,13 @@ fn createAtomFromSubsection(
     });
 
     try self.atoms.append(gpa, atom_index);
-    try self.atom_by_index_table.putNoClobber(gpa, sym_index, atom_index);
+    self.atom_by_index_table[sym_index] = atom_index;
 
     var it = Atom.getInnerSymbolsIterator(macho_file, atom_index);
     while (it.next()) |sym_loc| {
         const inner = macho_file.getSymbolPtr(sym_loc);
         inner.n_sect = out_sect_id + 1;
-        try self.atom_by_index_table.putNoClobber(gpa, sym_loc.sym_index, atom_index);
+        self.atom_by_index_table[sym_loc.sym_index] = atom_index;
     }
 
     return atom_index;
@@ -636,5 +640,7 @@ pub fn getSymbolName(self: Object, index: u32) []const u8 {
 }
 
 pub fn getAtomIndexForSymbol(self: Object, sym_index: u32) ?AtomIndex {
-    return self.atom_by_index_table.get(sym_index);
+    const atom_index = self.atom_by_index_table[sym_index];
+    if (atom_index == 0) return null;
+    return atom_index;
 }
