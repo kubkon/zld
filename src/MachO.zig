@@ -1385,10 +1385,13 @@ fn createTentativeDefAtoms(self: *MachO) !void {
 
 fn resolveSymbolsInObject(self: *MachO, object_id: u16) !void {
     const object = &self.objects.items[object_id];
+    const in_symtab = object.in_symtab orelse return;
+
     log.debug("resolving symbols in '{s}'", .{object.name});
 
-    for (object.symtab.items) |sym, index| {
-        const sym_index = @intCast(u32, index);
+    var sym_index: u32 = 0;
+    while (sym_index < in_symtab.len) : (sym_index += 1) {
+        const sym = object.symtab[sym_index];
         const sym_name = object.getSymbolName(sym_index);
 
         if (sym.stab()) {
@@ -3617,7 +3620,7 @@ pub fn symbolIsTemp(self: *MachO, sym_with_loc: SymbolWithLoc) bool {
 pub fn getSymbolPtr(self: *MachO, sym_with_loc: SymbolWithLoc) *macho.nlist_64 {
     if (sym_with_loc.file) |file| {
         const object = &self.objects.items[file];
-        return &object.symtab.items[sym_with_loc.sym_index];
+        return &object.symtab[sym_with_loc.sym_index];
     } else {
         return &self.locals.items[sym_with_loc.sym_index];
     }

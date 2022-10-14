@@ -102,7 +102,7 @@ pub fn getSectionAlias(macho_file: *MachO, atom_index: AtomIndex) ?SymbolWithLoc
 
     const object = macho_file.objects.items[atom.file.?];
     const nbase = @intCast(u32, object.in_symtab.?.len);
-    const ntotal = @intCast(u32, object.symtab.items.len);
+    const ntotal = @intCast(u32, object.symtab.len);
     var sym_index: u32 = nbase;
     while (sym_index < ntotal) : (sym_index += 1) {
         if (object.getAtomIndexForSymbol(sym_index)) |other_atom_index| {
@@ -155,27 +155,12 @@ pub fn parseRelocTarget(
     rel: macho.relocation_info,
     reverse_lookup: []u32,
 ) !MachO.SymbolWithLoc {
-    const gpa = macho_file.base.allocator;
     const atom = macho_file.getAtom(atom_index);
     const object = &macho_file.objects.items[atom.file.?];
 
     if (rel.r_extern == 0) {
-        const sect_id = @intCast(u16, rel.r_symbolnum - 1);
-        const sym_index = object.sections_as_symbols.get(sect_id) orelse blk: {
-            const sect = object.getSourceSection(sect_id);
-            const match = (try macho_file.getOutputSection(sect)) orelse
-                unreachable;
-            const sym_index = @intCast(u32, object.symtab.items.len);
-            try object.symtab.append(gpa, .{
-                .n_strx = 0,
-                .n_type = macho.N_SECT,
-                .n_sect = match + 1,
-                .n_desc = 0,
-                .n_value = sect.addr,
-            });
-            try object.sections_as_symbols.putNoClobber(gpa, sect_id, sym_index);
-            break :blk sym_index;
-        };
+        const sect_id = @intCast(u8, rel.r_symbolnum - 1);
+        const sym_index = object.getSectionAliasSymbolIndex(sect_id);
         return MachO.SymbolWithLoc{ .sym_index = sym_index, .file = atom.file };
     }
 
@@ -340,12 +325,11 @@ pub fn resolveRelocs(
             };
         }
         for (object.getSourceSections()) |source_sect, i| {
-            if (object.sections_as_symbols.get(@intCast(u16, i))) |sym_index| {
-                if (sym_index == atom.sym_index) break :blk .{
-                    .base_addr = source_sect.addr,
-                    .base_offset = 0,
-                };
-            }
+            const sym_index = object.getSectionAliasSymbolIndex(@intCast(u8, i));
+            if (sym_index == atom.sym_index) break :blk .{
+                .base_addr = source_sect.addr,
+                .base_offset = 0,
+            };
         } else unreachable;
     };
 
@@ -893,9 +877,8 @@ pub fn getAtomCode(macho_file: *MachO, atom_index: AtomIndex) []const u8 {
         // we are dealing with either an entire section, or part of it, but also
         // starting at the beginning.
         const source_sect = for (object.getSourceSections()) |source_sect, sect_id| {
-            if (object.sections_as_symbols.get(@intCast(u16, sect_id))) |sym_index| {
-                if (sym_index == atom.sym_index) break source_sect;
-            }
+            const sym_index = object.getSectionAliasSymbolIndex(@intCast(u8, sect_id));
+            if (sym_index == atom.sym_index) break source_sect;
         } else unreachable;
 
         assert(!source_sect.isZerofill());
@@ -923,9 +906,8 @@ pub fn getAtomRelocs(macho_file: *MachO, atom_index: AtomIndex) []align(1) const
         // we are dealing with either an entire section, or part of it, but also
         // starting at the beginning.
         const source_sect = for (object.getSourceSections()) |source_sect, sect_id| {
-            if (object.sections_as_symbols.get(@intCast(u16, sect_id))) |sym_index| {
-                if (sym_index == atom.sym_index) break source_sect;
-            }
+            const sym_index = object.getSectionAliasSymbolIndex(@intCast(u8, sect_id));
+            if (sym_index == atom.sym_index) break source_sect;
         } else unreachable;
         assert(!source_sect.isZerofill());
         break :blk source_sect;
