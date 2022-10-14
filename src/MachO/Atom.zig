@@ -278,30 +278,45 @@ fn scanAtomRelocsX86(
 fn addTlvPtrEntry(macho_file: *MachO, target: MachO.SymbolWithLoc) !void {
     const target_sym = macho_file.getSymbol(target);
     if (!target_sym.undf()) return;
-    if (macho_file.tlv_ptr_entries.contains(target)) return;
+    if (macho_file.tlv_ptr_table.contains(target)) return;
 
+    const gpa = macho_file.base.allocator;
     const atom_index = try macho_file.createTlvPtrAtom();
-    const atom = macho_file.getAtom(atom_index);
-    try macho_file.tlv_ptr_entries.putNoClobber(macho_file.base.allocator, target, atom.sym_index);
+    const tlv_ptr_index = @intCast(u32, macho_file.tlv_ptr_entries.items.len);
+    try macho_file.tlv_ptr_entries.append(gpa, .{
+        .target = target,
+        .atom_index = atom_index,
+    });
+    try macho_file.tlv_ptr_table.putNoClobber(gpa, target, tlv_ptr_index);
 }
 
 fn addGotEntry(macho_file: *MachO, target: MachO.SymbolWithLoc) !void {
-    if (macho_file.got_entries.contains(target)) return;
+    if (macho_file.got_table.contains(target)) return;
+    const gpa = macho_file.base.allocator;
     const atom_index = try macho_file.createGotAtom();
-    const atom = macho_file.getAtom(atom_index);
-    try macho_file.got_entries.putNoClobber(macho_file.base.allocator, target, atom.sym_index);
+    const got_index = @intCast(u32, macho_file.got_entries.items.len);
+    try macho_file.got_entries.append(gpa, .{
+        .target = target,
+        .atom_index = atom_index,
+    });
+    try macho_file.got_table.putNoClobber(gpa, target, got_index);
 }
 
 fn addStub(macho_file: *MachO, target: MachO.SymbolWithLoc) !void {
     const target_sym = macho_file.getSymbol(target);
     if (!target_sym.undf()) return;
-    if (macho_file.stubs.contains(target)) return;
+    if (macho_file.stubs_table.contains(target)) return;
 
+    const gpa = macho_file.base.allocator;
     _ = try macho_file.createStubHelperAtom();
     _ = try macho_file.createLazyPointerAtom();
-    const stub_atom_index = try macho_file.createStubAtom();
-    const stub_atom = macho_file.getAtom(stub_atom_index);
-    try macho_file.stubs.putNoClobber(macho_file.base.allocator, target, stub_atom.sym_index);
+    const atom_index = try macho_file.createStubAtom();
+    const stubs_index = @intCast(u32, macho_file.stubs.items.len);
+    try macho_file.stubs.append(gpa, .{
+        .target = target,
+        .atom_index = atom_index,
+    });
+    try macho_file.stubs_table.putNoClobber(gpa, target, stubs_index);
 }
 
 pub fn resolveRelocs(
@@ -617,7 +632,7 @@ fn resolveRelocsArm64(
                     }
                 };
 
-                var inst = if (macho_file.tlv_ptr_entries.contains(target)) aarch64.Instruction{
+                var inst = if (macho_file.tlv_ptr_table.contains(target)) aarch64.Instruction{
                     .load_store_register = .{
                         .rt = reg_info.rd,
                         .rn = reg_info.rn,

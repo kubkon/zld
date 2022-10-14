@@ -232,9 +232,12 @@ fn scanRelocs(
         const gpa = macho_file.base.allocator;
         const target_sym = macho_file.getSymbol(target);
 
-        const actual_target: SymbolWithLoc = if (target_sym.undf()) .{
-            .sym_index = macho_file.stubs.get(target).?,
-            .file = null,
+        const actual_target: SymbolWithLoc = if (target_sym.undf()) blk: {
+            const stub_atom_index = macho_file.getStubsAtomIndexForSymbol(target).?;
+            break :blk .{
+                .sym_index = macho_file.getAtom(stub_atom_index).sym_index,
+                .file = null,
+            };
         } else target;
 
         const thunk = &macho_file.thunks.items[thunk_index];

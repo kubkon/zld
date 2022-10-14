@@ -68,17 +68,43 @@ stub_helper_preamble_sym_index: ?u32 = null,
 
 strtab: StringTable(.strtab) = .{},
 
-tlv_ptr_entries: std.AutoArrayHashMapUnmanaged(SymbolWithLoc, u32) = .{},
-got_entries: std.AutoArrayHashMapUnmanaged(SymbolWithLoc, u32) = .{},
-stubs: std.AutoArrayHashMapUnmanaged(SymbolWithLoc, u32) = .{},
+tlv_ptr_entries: std.ArrayListUnmanaged(IndirectPointer) = .{},
+tlv_ptr_table: std.AutoHashMapUnmanaged(SymbolWithLoc, u32) = .{},
 
-thunk_table: std.AutoArrayHashMapUnmanaged(AtomIndex, thunks.ThunkIndex) = .{},
+got_entries: std.ArrayListUnmanaged(IndirectPointer) = .{},
+got_table: std.AutoHashMapUnmanaged(SymbolWithLoc, u32) = .{},
+
+stubs: std.ArrayListUnmanaged(IndirectPointer) = .{},
+stubs_table: std.AutoHashMapUnmanaged(SymbolWithLoc, u32) = .{},
+
+thunk_table: std.AutoHashMapUnmanaged(AtomIndex, thunks.ThunkIndex) = .{},
 thunks: std.ArrayListUnmanaged(thunks.Thunk) = .{},
 
 atoms: std.ArrayListUnmanaged(Atom) = .{},
 atom_by_index_table: std.AutoHashMapUnmanaged(u32, AtomIndex) = .{},
 
 pub const AtomIndex = u32;
+
+pub const IndirectPointer = struct {
+    target: SymbolWithLoc,
+    atom_index: AtomIndex,
+
+    pub fn getTargetSymbol(self: @This(), macho_file: *MachO) macho.nlist_64 {
+        // const bind_sym_name = self.getSymbolName(target);
+        // const global = self.globals.get(bind_sym_name).?;
+        // const bind_sym = self.getSymbol(global);
+        return macho_file.getSymbol(self.target);
+    }
+
+    pub fn getTargetSymbolName(self: @This(), macho_file: *MachO) []const u8 {
+        return macho_file.getSymbolName(self.target);
+    }
+
+    pub fn getAtomSymbol(self: @This(), macho_file: *MachO) macho.nlist_64 {
+        const atom = macho_file.getAtom(self.atom_index);
+        return macho_file.getSymbol(atom.getSymbolWithLoc());
+    }
+};
 
 pub const SymbolWithLoc = struct {
     // Index into the respective symbol table.
@@ -1007,8 +1033,8 @@ pub fn createGotAtom(self: *MachO) !AtomIndex {
 
 fn writeGotPointer(self: *MachO, got_index: u32, writer: anytype) !void {
     const target_addr = blk: {
-        const sym_loc = self.got_entries.keys()[got_index];
-        const sym = self.getSymbol(sym_loc);
+        const entry = self.got_entries.items[got_index];
+        const sym = entry.getTargetSymbol(self);
         break :blk sym.n_value;
     };
     try writer.writeIntLittle(u64, target_addr);
@@ -1036,10 +1062,15 @@ pub fn createTlvPtrAtom(self: *MachO) !AtomIndex {
 
 fn createDyldStubBinderGotAtom(self: *MachO) !void {
     const sym_index = self.dyld_stub_binder_index orelse return;
-    const sym_loc = SymbolWithLoc{ .sym_index = sym_index, .file = null };
-    const got_atom_index = try self.createGotAtom();
-    const got_atom = self.getAtom(got_atom_index);
-    try self.got_entries.putNoClobber(self.base.allocator, sym_loc, got_atom.sym_index);
+    const gpa = self.base.allocator;
+    const target = SymbolWithLoc{ .sym_index = sym_index, .file = null };
+    const atom_index = try self.createGotAtom();
+    const got_index = @intCast(u32, self.got_entries.items.len);
+    try self.got_entries.append(gpa, .{
+        .target = target,
+        .atom_index = atom_index,
+    });
+    try self.got_table.putNoClobber(gpa, target, got_index);
 }
 
 fn createDyldPrivateAtom(self: *MachO) !void {
@@ -1105,9 +1136,9 @@ fn writeStubHelperPreambleCode(self: *MachO, writer: anytype) !void {
         break :blk sym.n_value;
     };
     const dyld_stub_binder_got_addr = blk: {
-        const got_entry = self.got_entries.get(.{ .sym_index = self.dyld_stub_binder_index.?, .file = null }).?;
-        const sym = self.getSymbol(.{ .sym_index = got_entry, .file = null });
-        break :blk sym.n_value;
+        const index = self.got_table.get(.{ .sym_index = self.dyld_stub_binder_index.?, .file = null }).?;
+        const entry = self.got_entries.items[index];
+        break :blk entry.getAtomSymbol(self).n_value;
     };
     switch (cpu_arch) {
         .x86_64 => {
@@ -1859,8 +1890,11 @@ pub fn deinit(self: *MachO) void {
     const gpa = self.base.allocator;
 
     self.tlv_ptr_entries.deinit(gpa);
+    self.tlv_ptr_table.deinit(gpa);
     self.got_entries.deinit(gpa);
+    self.got_table.deinit(gpa);
     self.stubs.deinit(gpa);
+    self.stubs_table.deinit(gpa);
     self.thunk_table.deinit(gpa);
 
     for (self.thunks.items) |*thunk| {
@@ -2534,15 +2568,14 @@ fn collectRebaseDataFromContainer(
     const segment_index = slice.items(.segment_index)[sect_id];
     const seg = self.getSegment(sect_id);
 
-    try pointers.ensureUnusedCapacity(container.count());
+    try pointers.ensureUnusedCapacity(container.items.len);
 
-    for (container.keys()) |target| {
-        const target_sym = self.getSymbol(target);
+    for (container.items) |entry| {
+        const target_sym = entry.getTargetSymbol(self);
         if (target_sym.undf()) continue;
 
-        const sym_index = container.get(target).?;
-        const sym = self.getSymbol(.{ .sym_index = sym_index, .file = null });
-        const base_offset = sym.n_value - seg.vmaddr;
+        const atom_sym = entry.getAtomSymbol(self);
+        const base_offset = atom_sym.n_value - seg.vmaddr;
 
         log.debug("    | rebase at {x}", .{base_offset});
 
@@ -2570,7 +2603,7 @@ fn collectRebaseData(self: *MachO, pointers: *std.ArrayList(bind.Pointer)) !void
         const seg = self.getSegment(sect_id);
         var atom_index = slice.items(.first_atom_index)[sect_id];
 
-        try pointers.ensureUnusedCapacity(self.stubs.count());
+        try pointers.ensureUnusedCapacity(self.stubs.items.len);
 
         while (true) {
             const atom = self.getAtom(atom_index);
@@ -2671,16 +2704,14 @@ fn collectBindDataFromContainer(
     const segment_index = slice.items(.segment_index)[sect_id];
     const seg = self.getSegment(sect_id);
 
-    try pointers.ensureUnusedCapacity(container.count());
+    try pointers.ensureUnusedCapacity(container.items.len);
 
-    for (container.keys()) |target| {
-        const bind_sym_name = self.getSymbolName(target);
-        const global = self.globals.get(bind_sym_name).?;
-        const bind_sym = self.getSymbol(global);
+    for (container.items) |entry| {
+        const bind_sym_name = entry.getTargetSymbolName(self);
+        const bind_sym = entry.getTargetSymbol(self);
         if (bind_sym.sect()) continue;
 
-        const sym_index = container.get(target).?;
-        const sym = self.getSymbol(.{ .sym_index = sym_index, .file = null });
+        const sym = entry.getAtomSymbol(self);
         const base_offset = sym.n_value - seg.vmaddr;
 
         const dylib_ordinal = @divTrunc(@bitCast(i16, bind_sym.n_desc), macho.N_SYMBOL_RESOLVER);
@@ -2818,7 +2849,7 @@ fn collectLazyBindData(self: *MachO, pointers: *std.ArrayList(bind.Pointer)) !vo
     var atom_index = slice.items(.first_atom_index)[sect_id];
 
     // TODO: we actually don't need to store lazy pointer atoms as they are synthetically generated by the linker
-    try pointers.ensureUnusedCapacity(self.stubs.count());
+    try pointers.ensureUnusedCapacity(self.stubs.items.len);
 
     var count: u32 = 0;
     while (true) : (count += 1) {
@@ -2829,9 +2860,9 @@ fn collectLazyBindData(self: *MachO, pointers: *std.ArrayList(bind.Pointer)) !vo
         const sym = self.getSymbol(atom.getSymbolWithLoc());
         const base_offset = sym.n_value - seg.vmaddr;
 
-        const bind_target = self.stubs.keys()[count];
-        const bind_sym = self.getSymbol(bind_target);
-        const bind_sym_name = self.getSymbolName(bind_target);
+        const stub_entry = self.stubs.items[count];
+        const bind_sym = stub_entry.getTargetSymbol(self);
+        const bind_sym_name = stub_entry.getTargetSymbolName(self);
         const dylib_ordinal = @divTrunc(@bitCast(i16, bind_sym.n_desc), macho.N_SYMBOL_RESOLVER);
         var flags: u4 = 0;
         log.debug("    | lazy bind at {x}, import('{s}') in dylib({d})", .{
@@ -3387,8 +3418,8 @@ const SymtabCtx = struct {
 
 fn writeDysymtab(self: *MachO, ctx: SymtabCtx, lc: *macho.dysymtab_command) !void {
     const gpa = self.base.allocator;
-    const nstubs = @intCast(u32, self.stubs.count());
-    const ngot_entries = @intCast(u32, self.got_entries.count());
+    const nstubs = @intCast(u32, self.stubs.items.len);
+    const ngot_entries = @intCast(u32, self.got_entries.items.len);
     const nindirectsyms = nstubs * 2 + ngot_entries;
     const iextdefsym = ctx.nlocalsym;
     const iundefsym = iextdefsym + ctx.nextdefsym;
@@ -3408,24 +3439,20 @@ fn writeDysymtab(self: *MachO, ctx: SymtabCtx, lc: *macho.dysymtab_command) !voi
     if (self.getSectionByName("__TEXT", "__stubs")) |sect_id| {
         const stubs = &self.sections.items(.header)[sect_id];
         stubs.reserved1 = 0;
-        for (self.stubs.keys()) |target| {
-            const sym_index = self.stubs.get(target).?;
-            assert(sym_index > 0);
-            const target_sym = self.getSymbol(target);
+        for (self.stubs.items) |entry| {
+            const target_sym = entry.getTargetSymbol(self);
             assert(target_sym.undf());
-            try writer.writeIntLittle(u32, iundefsym + ctx.imports_table.get(target).?);
+            try writer.writeIntLittle(u32, iundefsym + ctx.imports_table.get(entry.target).?);
         }
     }
 
     if (self.getSectionByName("__DATA_CONST", "__got")) |sect_id| {
         const got = &self.sections.items(.header)[sect_id];
         got.reserved1 = nstubs;
-        for (self.got_entries.keys()) |target| {
-            const sym_index = self.got_entries.get(target).?;
-            assert(sym_index > 0);
-            const target_sym = self.getSymbol(target);
+        for (self.got_entries.items) |entry| {
+            const target_sym = entry.getTargetSymbol(self);
             if (target_sym.undf()) {
-                try writer.writeIntLittle(u32, iundefsym + ctx.imports_table.get(target).?);
+                try writer.writeIntLittle(u32, iundefsym + ctx.imports_table.get(entry.target).?);
             } else {
                 try writer.writeIntLittle(u32, macho.INDIRECT_SYMBOL_LOCAL);
             }
@@ -3435,12 +3462,10 @@ fn writeDysymtab(self: *MachO, ctx: SymtabCtx, lc: *macho.dysymtab_command) !voi
     if (self.getSectionByName("__DATA", "__la_symbol_ptr")) |sect_id| {
         const la_symbol_ptr = &self.sections.items(.header)[sect_id];
         la_symbol_ptr.reserved1 = nstubs + ngot_entries;
-        for (self.stubs.keys()) |target| {
-            const sym_index = self.stubs.get(target).?;
-            assert(sym_index > 0);
-            const target_sym = self.getSymbol(target);
+        for (self.stubs.items) |entry| {
+            const target_sym = entry.getTargetSymbol(self);
             assert(target_sym.undf());
-            try writer.writeIntLittle(u32, iundefsym + ctx.imports_table.get(target).?);
+            try writer.writeIntLittle(u32, iundefsym + ctx.imports_table.get(entry.target).?);
         }
     }
 
@@ -3657,22 +3682,25 @@ pub fn getAtomIndexForSymbol(self: *MachO, sym_with_loc: SymbolWithLoc) ?AtomInd
 /// Returns GOT atom that references `sym_with_loc` if one exists.
 /// Returns null otherwise.
 pub fn getGotAtomIndexForSymbol(self: *MachO, sym_with_loc: SymbolWithLoc) ?AtomIndex {
-    const sym_index = self.got_entries.get(sym_with_loc) orelse return null;
-    return self.getAtomIndexForSymbol(.{ .sym_index = sym_index, .file = null });
+    const index = self.got_table.get(sym_with_loc) orelse return null;
+    const entry = self.got_entries.items[index];
+    return entry.atom_index;
 }
 
 /// Returns stubs atom that references `sym_with_loc` if one exists.
 /// Returns null otherwise.
 pub fn getStubsAtomIndexForSymbol(self: *MachO, sym_with_loc: SymbolWithLoc) ?AtomIndex {
-    const sym_index = self.stubs.get(sym_with_loc) orelse return null;
-    return self.getAtomIndexForSymbol(.{ .sym_index = sym_index, .file = null });
+    const index = self.stubs_table.get(sym_with_loc) orelse return null;
+    const entry = self.stubs.items[index];
+    return entry.atom_index;
 }
 
 /// Returns TLV pointer atom that references `sym_with_loc` if one exists.
 /// Returns null otherwise.
 pub fn getTlvPtrAtomIndexForSymbol(self: *MachO, sym_with_loc: SymbolWithLoc) ?AtomIndex {
-    const sym_index = self.tlv_ptr_entries.get(sym_with_loc) orelse return null;
-    return self.getAtomIndexForSymbol(.{ .sym_index = sym_index, .file = null });
+    const index = self.tlv_ptr_table.get(sym_with_loc) orelse return null;
+    const entry = self.tlv_ptr_entries.items[index];
+    return entry.atom_index;
 }
 
 /// Returns symbol location corresponding to the set entrypoint.
@@ -4053,47 +4081,50 @@ fn logSymtab(self: *MachO) void {
     }
 
     scoped_log.debug("GOT entries:", .{});
-    for (self.got_entries.keys()) |target, i| {
-        const atom_sym = self.getSymbol(.{ .sym_index = self.got_entries.get(target).?, .file = null });
-        const target_sym = self.getSymbol(target);
+    for (self.got_entries.items) |entry, i| {
+        const atom_sym = entry.getAtomSymbol(self);
+        const target_sym = entry.getTargetSymbol(self);
+        const target_sym_name = entry.getTargetSymbolName(self);
         if (target_sym.undf()) {
             scoped_log.debug("  {d}@{x} => import('{s}')", .{
                 i,
                 atom_sym.n_value,
-                self.getSymbolName(target),
+                target_sym_name,
             });
         } else {
             scoped_log.debug("  {d}@{x} => local(%{d}) in object({?}) {s}", .{
                 i,
                 atom_sym.n_value,
-                target.sym_index,
-                target.file,
+                entry.target.sym_index,
+                entry.target.file,
                 logSymAttributes(target_sym, buf[0..4]),
             });
         }
     }
 
     scoped_log.debug("__thread_ptrs entries:", .{});
-    for (self.tlv_ptr_entries.keys()) |target, i| {
-        const atom_sym = self.getSymbol(.{ .sym_index = self.tlv_ptr_entries.get(target).?, .file = null });
-        const target_sym = self.getSymbol(target);
+    for (self.tlv_ptr_entries.items) |entry, i| {
+        const atom_sym = entry.getAtomSymbol(self);
+        const target_sym = entry.getTargetSymbol(self);
+        const target_sym_name = entry.getTargetSymbolName(self);
         assert(target_sym.undf());
         scoped_log.debug("  {d}@{x} => import('{s}')", .{
             i,
             atom_sym.n_value,
-            self.getSymbolName(target),
+            target_sym_name,
         });
     }
 
     scoped_log.debug("stubs entries:", .{});
-    for (self.stubs.keys()) |target, i| {
-        const target_sym = self.getSymbol(target);
-        const atom_sym = self.getSymbol(.{ .sym_index = self.stubs.get(target).?, .file = null });
+    for (self.stubs.items) |entry, i| {
+        const atom_sym = entry.getAtomSymbol(self);
+        const target_sym = entry.getTargetSymbol(self);
+        const target_sym_name = entry.getTargetSymbolName(self);
         assert(target_sym.undf());
         scoped_log.debug("  {d}@{x} => import('{s}')", .{
             i,
             atom_sym.n_value,
-            self.getSymbolName(target),
+            target_sym_name,
         });
     }
 
