@@ -130,7 +130,7 @@ pub fn createThunks(macho_file: *MachO, sect_id: u8, reverse_lookups: [][]u32) !
             try scanRelocs(
                 macho_file,
                 atom_index,
-                reverse_lookups[atom.file.?],
+                reverse_lookups[atom.getFile().?],
                 allocated,
                 thunk_index,
                 group_end,
@@ -207,7 +207,7 @@ fn scanRelocs(
     group_end: AtomIndex,
 ) !void {
     const atom = macho_file.getAtom(atom_index);
-    const object = macho_file.objects.items[atom.file.?];
+    const object = macho_file.objects.items[atom.getFile().?];
 
     const base_offset = if (object.getSourceSymbol(atom.sym_index)) |source_sym| blk: {
         const source_sect = object.getSourceSection(source_sym.n_sect - 1);
@@ -234,10 +234,7 @@ fn scanRelocs(
 
         const actual_target: SymbolWithLoc = if (target_sym.undf()) blk: {
             const stub_atom_index = macho_file.getStubsAtomIndexForSymbol(target).?;
-            break :blk .{
-                .sym_index = macho_file.getAtom(stub_atom_index).sym_index,
-                .file = null,
-            };
+            break :blk .{ .sym_index = macho_file.getAtom(stub_atom_index).sym_index };
         } else target;
 
         const thunk = &macho_file.thunks.items[thunk_index];
@@ -288,7 +285,7 @@ fn isReachable(
     const source_atom = macho_file.getAtom(atom_index);
     const source_sym = macho_file.getSymbol(source_atom.getSymbolWithLoc());
 
-    const target_object = macho_file.objects.items[target.file.?];
+    const target_object = macho_file.objects.items[target.getFile().?];
     const target_atom_index = target_object.getAtomIndexForSymbol(target.sym_index).?;
     const target_atom = macho_file.getAtom(target_atom_index);
     const target_sym = macho_file.getSymbol(target_atom.getSymbolWithLoc());
@@ -308,7 +305,7 @@ fn isReachable(
 fn createThunkAtom(macho_file: *MachO) !AtomIndex {
     const sym_index = try macho_file.allocateSymbol();
     const atom_index = try macho_file.createEmptyAtom(sym_index, @sizeOf(u32) * 3, 2);
-    const sym = macho_file.getSymbolPtr(.{ .sym_index = sym_index, .file = null });
+    const sym = macho_file.getSymbolPtr(.{ .sym_index = sym_index });
     sym.n_type = macho.N_SECT;
 
     const sect_id = macho_file.getSectionByName("__TEXT", "__text") orelse unreachable;

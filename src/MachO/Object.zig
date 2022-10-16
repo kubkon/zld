@@ -273,7 +273,7 @@ fn sectionLessThanByAddress(ctx: void, lhs: SortedSection, rhs: SortedSection) b
     return lhs.header.addr < rhs.header.addr;
 }
 
-pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
+pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u31) !void {
     const gpa = macho_file.base.allocator;
 
     log.debug("splitting object({d}, {s}) into atoms", .{ object_id, self.name });
@@ -469,7 +469,7 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
 fn createAtomFromSubsection(
     self: *Object,
     macho_file: *MachO,
-    object_id: u32,
+    object_id: u31,
     sym_index: u32,
     nsyms_trailing: u32,
     size: u64,

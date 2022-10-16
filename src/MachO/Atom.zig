@@ -35,8 +35,9 @@ sym_index: u32,
 /// range.
 nsyms_trailing: u32,
 
-/// null means symbol defined by the linker.
-file: ?u32,
+/// -1 means symbol defined by the linker.
+/// Otherwise, it is the index into appropriate object file.
+file: i32,
 
 /// Size and alignment of this atom
 /// Unlike in Elf, we need to store the size of this symbol as part of
@@ -57,7 +58,7 @@ prev_index: ?AtomIndex,
 pub const empty = Atom{
     .sym_index = 0,
     .nsyms_trailing = 0,
-    .file = null,
+    .file = -1,
     .size = 0,
     .alignment = 0,
     .cached_relocs_start = -1,
@@ -65,6 +66,11 @@ pub const empty = Atom{
     .prev_index = null,
     .next_index = null,
 };
+
+pub inline fn getFile(self: Atom) ?u31 {
+    if (self.file == -1) return null;
+    return @intCast(u31, self.file);
+}
 
 pub inline fn getSymbolWithLoc(self: Atom) SymbolWithLoc {
     return .{
@@ -76,7 +82,7 @@ pub inline fn getSymbolWithLoc(self: Atom) SymbolWithLoc {
 const InnerSymIterator = struct {
     sym_index: u32,
     count: u32,
-    file: u32,
+    file: i32,
 
     pub fn next(it: *@This()) ?SymbolWithLoc {
         if (it.count == 0) return null;
@@ -88,19 +94,19 @@ const InnerSymIterator = struct {
 
 pub fn getInnerSymbolsIterator(macho_file: *MachO, atom_index: AtomIndex) InnerSymIterator {
     const atom = macho_file.getAtom(atom_index);
-    assert(atom.file != null);
+    assert(atom.getFile() != null);
     return .{
         .sym_index = atom.sym_index,
         .count = atom.nsyms_trailing,
-        .file = atom.file.?,
+        .file = atom.file,
     };
 }
 
 pub fn getSectionAlias(macho_file: *MachO, atom_index: AtomIndex) ?SymbolWithLoc {
     const atom = macho_file.getAtom(atom_index);
-    assert(atom.file != null);
+    assert(atom.getFile() != null);
 
-    const object = macho_file.objects.items[atom.file.?];
+    const object = macho_file.objects.items[atom.getFile().?];
     const nbase = @intCast(u32, object.in_symtab.?.len);
     const ntotal = @intCast(u32, object.symtab.len);
     var sym_index: u32 = nbase;
@@ -117,11 +123,11 @@ pub fn getSectionAlias(macho_file: *MachO, atom_index: AtomIndex) ?SymbolWithLoc
 
 pub fn calcInnerSymbolOffset(macho_file: *MachO, atom_index: AtomIndex, sym_index: u32) u64 {
     const atom = macho_file.getAtom(atom_index);
-    assert(atom.file != null);
+    assert(atom.getFile() != null);
 
     if (atom.sym_index == sym_index) return 0;
 
-    const object = macho_file.objects.items[atom.file.?];
+    const object = macho_file.objects.items[atom.getFile().?];
     const source_atom_sym = object.getSourceSymbol(atom.sym_index).?;
     const source_sym = object.getSourceSymbol(sym_index).?;
     return source_sym.n_value - source_atom_sym.n_value;
@@ -135,7 +141,7 @@ pub fn scanAtomRelocs(
 ) !void {
     const arch = macho_file.options.target.cpu_arch.?;
     const atom = macho_file.getAtom(atom_index);
-    assert(atom.file != null); // synthetic atoms do not have relocs
+    assert(atom.getFile() != null); // synthetic atoms do not have relocs
 
     return switch (arch) {
         .aarch64 => scanAtomRelocsArm64(macho_file, atom_index, relocs, reverse_lookup),
@@ -156,7 +162,7 @@ pub fn parseRelocTarget(
     reverse_lookup: []u32,
 ) !MachO.SymbolWithLoc {
     const atom = macho_file.getAtom(atom_index);
-    const object = &macho_file.objects.items[atom.file.?];
+    const object = &macho_file.objects.items[atom.getFile().?];
 
     if (rel.r_extern == 0) {
         const sect_id = @intCast(u8, rel.r_symbolnum - 1);
@@ -202,7 +208,7 @@ pub fn getRelocTargetAtomIndex(macho_file: *MachO, rel: macho.relocation_info, t
     if (macho_file.getStubsAtomIndexForSymbol(target)) |stubs_atom| return stubs_atom;
     if (macho_file.getTlvPtrAtomIndexForSymbol(target)) |tlv_ptr_atom| return tlv_ptr_atom;
 
-    if (target.file == null) {
+    if (target.getFile() == null) {
         const target_sym_name = macho_file.getSymbolName(target);
         if (mem.eql(u8, "__mh_execute_header", target_sym_name)) return null;
         if (mem.eql(u8, "___dso_handle", target_sym_name)) return null;
@@ -210,7 +216,7 @@ pub fn getRelocTargetAtomIndex(macho_file: *MachO, rel: macho.relocation_info, t
         unreachable; // referenced symbol not found
     }
 
-    const object = macho_file.objects.items[target.file.?];
+    const object = macho_file.objects.items[target.getFile().?];
     return object.getAtomIndexForSymbol(target.sym_index);
 }
 
@@ -338,9 +344,9 @@ pub fn resolveRelocs(
 ) !void {
     const arch = macho_file.options.target.cpu_arch.?;
     const atom = macho_file.getAtom(atom_index);
-    assert(atom.file != null); // synthetic atoms do not have relocs
+    assert(atom.getFile() != null); // synthetic atoms do not have relocs
 
-    const object = macho_file.objects.items[atom.file.?];
+    const object = macho_file.objects.items[atom.getFile().?];
     const ctx: RelocContext = blk: {
         if (object.getSourceSymbol(atom.sym_index)) |source_sym| {
             const source_sect = object.getSourceSection(source_sym.n_sect - 1);
@@ -388,8 +394,8 @@ pub fn getRelocTargetAddress(macho_file: *MachO, rel: macho.relocation_info, tar
     });
     // If `target` is contained within the target atom, pull its address value.
     const target_sym = macho_file.getSymbol(target_atom.getSymbolWithLoc());
-    const offset = if (target_atom.file != null) blk: {
-        const object = macho_file.objects.items[target_atom.file.?];
+    const offset = if (target_atom.getFile() != null) blk: {
+        const object = macho_file.objects.items[target_atom.getFile().?];
         break :blk if (object.getSourceSymbol(target.sym_index)) |_|
             Atom.calcInnerSymbolOffset(macho_file, target_atom_index, target.sym_index)
         else
@@ -428,7 +434,7 @@ fn resolveRelocsArm64(
     context: RelocContext,
 ) !void {
     const atom = macho_file.getAtom(atom_index);
-    const object = macho_file.objects.items[atom.file.?];
+    const object = macho_file.objects.items[atom.getFile().?];
 
     var addend: ?i64 = null;
     var subtractor: ?SymbolWithLoc = null;
@@ -452,7 +458,7 @@ fn resolveRelocsArm64(
                     @tagName(rel_type),
                     rel.r_address,
                     rel.r_symbolnum,
-                    atom.file.?,
+                    atom.file,
                 });
 
                 const sym_loc = MachO.SymbolWithLoc{
@@ -719,7 +725,7 @@ fn resolveRelocsX86(
     context: RelocContext,
 ) !void {
     const atom = macho_file.getAtom(atom_index);
-    const object = macho_file.objects.items[atom.file.?];
+    const object = macho_file.objects.items[atom.getFile().?];
 
     var subtractor: ?SymbolWithLoc = null;
 
@@ -734,7 +740,7 @@ fn resolveRelocsX86(
                     @tagName(rel_type),
                     rel.r_address,
                     rel.r_symbolnum,
-                    atom.file.?,
+                    atom.file,
                 });
 
                 const sym_loc = MachO.SymbolWithLoc{
@@ -895,8 +901,8 @@ inline fn isArithmeticOp(inst: *const [4]u8) bool {
 
 pub fn getAtomCode(macho_file: *MachO, atom_index: AtomIndex) []const u8 {
     const atom = macho_file.getAtom(atom_index);
-    assert(atom.file != null); // Synthetic atom shouldn't need to inquire for code.
-    const object = macho_file.objects.items[atom.file.?];
+    assert(atom.getFile() != null); // Synthetic atom shouldn't need to inquire for code.
+    const object = macho_file.objects.items[atom.getFile().?];
     const source_sym = object.getSourceSymbol(atom.sym_index) orelse {
         // If there was no matching symbol present in the source symtab, this means
         // we are dealing with either an entire section, or part of it, but also
@@ -919,8 +925,8 @@ pub fn getAtomCode(macho_file: *MachO, atom_index: AtomIndex) []const u8 {
 
 pub fn getAtomRelocs(macho_file: *MachO, atom_index: AtomIndex) []align(1) const macho.relocation_info {
     const atom = macho_file.getAtomPtr(atom_index);
-    assert(atom.file != null); // Synthetic atom shouldn't need to unique for relocs.
-    const object = macho_file.objects.items[atom.file.?];
+    assert(atom.getFile() != null); // Synthetic atom shouldn't need to unique for relocs.
+    const object = macho_file.objects.items[atom.getFile().?];
 
     const source_sect = if (object.getSourceSymbol(atom.sym_index)) |source_sym| blk: {
         const source_sect = object.getSourceSection(source_sym.n_sect - 1);

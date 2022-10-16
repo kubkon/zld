@@ -38,8 +38,8 @@ fn collectRoots(macho_file: *MachO, roots: *AtomTable) !void {
     switch (output_mode) {
         .exe => {
             // Add entrypoint as GC root
-            const global = try macho_file.getEntryPoint();
-            const object = macho_file.objects.items[global.file.?];
+            const global: SymbolWithLoc = try macho_file.getEntryPoint();
+            const object = macho_file.objects.items[global.getFile().?];
             const atom_index = object.getAtomIndexForSymbol(global.sym_index).?; // panic here means fatal error
             _ = try roots.getOrPut(atom_index);
             log.debug("adding root", .{});
@@ -52,8 +52,7 @@ fn collectRoots(macho_file: *MachO, roots: *AtomTable) !void {
                 const sym = macho_file.getSymbol(global);
                 if (sym.undf()) continue;
 
-                const file = global.file.?;
-                const object = macho_file.objects.items[file];
+                const object = macho_file.objects.items[global.getFile().?];
                 const atom_index = object.getAtomIndexForSymbol(global.sym_index).?; // panic here means fatal error
                 _ = try roots.getOrPut(atom_index);
                 log.debug("adding root", .{});
@@ -64,7 +63,7 @@ fn collectRoots(macho_file: *MachO, roots: *AtomTable) !void {
 
     // TODO just a temp until we learn how to parse unwind records
     if (macho_file.globals.get("___gxx_personality_v0")) |global| {
-        const object = macho_file.objects.items[global.file.?];
+        const object = macho_file.objects.items[global.getFile().?];
         if (object.getAtomIndexForSymbol(global.sym_index)) |atom_index| {
             _ = try roots.getOrPut(atom_index);
             log.debug("adding root", .{});
@@ -117,7 +116,7 @@ fn markLive(
     if (header.isZerofill()) return;
 
     const relocs = Atom.getAtomRelocs(macho_file, atom_index);
-    const reverse_lookup = reverse_lookups[atom.file.?];
+    const reverse_lookup = reverse_lookups[atom.getFile().?];
     for (relocs) |rel| {
         switch (cpu_arch) {
             .aarch64 => {
@@ -140,7 +139,7 @@ fn markLive(
         const target = try Atom.parseRelocTarget(macho_file, atom_index, rel, reverse_lookup);
         const target_sym = macho_file.getSymbol(target);
         if (target_sym.undf()) continue;
-        if (target.file == null) {
+        if (target.getFile() == null) {
             const target_sym_name = macho_file.getSymbolName(target);
             if (mem.eql(u8, "__mh_execute_header", target_sym_name)) continue;
             if (mem.eql(u8, "___dso_handle", target_sym_name)) continue;
@@ -148,7 +147,7 @@ fn markLive(
             unreachable; // referenced symbol not found
         }
 
-        const object = macho_file.objects.items[target.file.?];
+        const object = macho_file.objects.items[target.getFile().?];
         const target_atom_index = object.getAtomIndexForSymbol(target.sym_index).?;
         try markLive(macho_file, target_atom_index, alive, reverse_lookups);
     }
@@ -163,7 +162,7 @@ fn refersLive(macho_file: *MachO, atom_index: AtomIndex, alive: AtomTable, rever
     if (header.isZerofill()) return false;
 
     const relocs = Atom.getAtomRelocs(macho_file, atom_index);
-    const reverse_lookup = reverse_lookups[atom.file.?];
+    const reverse_lookup = reverse_lookups[atom.getFile().?];
     for (relocs) |rel| {
         switch (cpu_arch) {
             .aarch64 => {
@@ -184,7 +183,7 @@ fn refersLive(macho_file: *MachO, atom_index: AtomIndex, alive: AtomTable, rever
         }
 
         const target = try Atom.parseRelocTarget(macho_file, atom_index, rel, reverse_lookup);
-        const object = macho_file.objects.items[target.file.?];
+        const object = macho_file.objects.items[target.getFile().?];
         const target_atom_index = object.getAtomIndexForSymbol(target.sym_index) orelse {
             log.debug("atom for symbol '{s}' not found; skipping...", .{macho_file.getSymbolName(target)});
             continue;
