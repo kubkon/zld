@@ -201,7 +201,17 @@ pub fn getRelocTargetAtomIndex(macho_file: *MachO, rel: macho.relocation_info, t
     }
     if (macho_file.getStubsAtomIndexForSymbol(target)) |stubs_atom| return stubs_atom;
     if (macho_file.getTlvPtrAtomIndexForSymbol(target)) |tlv_ptr_atom| return tlv_ptr_atom;
-    return macho_file.getAtomIndexForSymbol(target);
+
+    if (target.file == null) {
+        const target_sym_name = macho_file.getSymbolName(target);
+        if (mem.eql(u8, "__mh_execute_header", target_sym_name)) return null;
+        if (mem.eql(u8, "___dso_handle", target_sym_name)) return null;
+
+        unreachable; // referenced symbol not found
+    }
+
+    const object = macho_file.objects.items[target.file.?];
+    return object.getAtomIndexForSymbol(target.sym_index);
 }
 
 fn scanAtomRelocsArm64(

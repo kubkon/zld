@@ -81,7 +81,6 @@ thunk_table: std.AutoHashMapUnmanaged(AtomIndex, thunks.ThunkIndex) = .{},
 thunks: std.ArrayListUnmanaged(thunks.Thunk) = .{},
 
 atoms: std.ArrayListUnmanaged(Atom) = .{},
-atom_by_index_table: std.AutoHashMapUnmanaged(u32, AtomIndex) = .{},
 
 pub const AtomIndex = u32;
 
@@ -1013,7 +1012,6 @@ pub fn createEmptyAtom(self: *MachO, sym_index: u32, size: u64, alignment: u32) 
 }
 
 pub fn createGotAtom(self: *MachO) !AtomIndex {
-    const gpa = self.base.allocator;
     const sym_index = try self.allocateSymbol();
     const atom_index = try self.createEmptyAtom(sym_index, @sizeOf(u64), 3);
     const sym = self.getSymbolPtr(.{ .sym_index = sym_index, .file = null });
@@ -1025,7 +1023,6 @@ pub fn createGotAtom(self: *MachO) !AtomIndex {
     });
     sym.n_sect = sect_id + 1;
 
-    try self.atom_by_index_table.putNoClobber(gpa, sym_index, atom_index);
     self.addAtomToSection(atom_index);
 
     return atom_index;
@@ -1041,7 +1038,6 @@ fn writeGotPointer(self: *MachO, got_index: u32, writer: anytype) !void {
 }
 
 pub fn createTlvPtrAtom(self: *MachO) !AtomIndex {
-    const gpa = self.base.allocator;
     const sym_index = try self.allocateSymbol();
     const atom_index = try self.createEmptyAtom(sym_index, @sizeOf(u64), 3);
     const sym = self.getSymbolPtr(.{ .sym_index = sym_index, .file = null });
@@ -1054,7 +1050,6 @@ pub fn createTlvPtrAtom(self: *MachO) !AtomIndex {
     })).?;
     sym.n_sect = sect_id + 1;
 
-    try self.atom_by_index_table.putNoClobber(gpa, sym_index, atom_index);
     self.addAtomToSection(atom_index);
 
     return atom_index;
@@ -1076,7 +1071,6 @@ fn createDyldStubBinderGotAtom(self: *MachO) !void {
 fn createDyldPrivateAtom(self: *MachO) !void {
     if (self.dyld_stub_binder_index == null) return;
 
-    const gpa = self.base.allocator;
     const sym_index = try self.allocateSymbol();
     const atom_index = try self.createEmptyAtom(sym_index, @sizeOf(u64), 3);
     const sym = self.getSymbolPtr(.{ .sym_index = sym_index, .file = null });
@@ -1087,14 +1081,12 @@ fn createDyldPrivateAtom(self: *MachO) !void {
 
     self.dyld_private_sym_index = sym_index;
 
-    try self.atom_by_index_table.putNoClobber(gpa, sym_index, atom_index);
     self.addAtomToSection(atom_index);
 }
 
 fn createStubHelperPreambleAtom(self: *MachO) !void {
     if (self.dyld_stub_binder_index == null) return;
 
-    const gpa = self.base.allocator;
     const cpu_arch = self.options.target.cpu_arch.?;
     const size: u64 = switch (cpu_arch) {
         .x86_64 => 15,
@@ -1121,7 +1113,6 @@ fn createStubHelperPreambleAtom(self: *MachO) !void {
 
     self.stub_helper_preamble_sym_index = sym_index;
 
-    try self.atom_by_index_table.putNoClobber(gpa, sym_index, atom_index);
     self.addAtomToSection(atom_index);
 }
 
@@ -1187,7 +1178,6 @@ fn writeStubHelperPreambleCode(self: *MachO, writer: anytype) !void {
 }
 
 pub fn createStubHelperAtom(self: *MachO) !AtomIndex {
-    const gpa = self.base.allocator;
     const cpu_arch = self.options.target.cpu_arch.?;
     const stub_size: u4 = switch (cpu_arch) {
         .x86_64 => 10,
@@ -1208,7 +1198,6 @@ pub fn createStubHelperAtom(self: *MachO) !AtomIndex {
     const sect_id = self.getSectionByName("__TEXT", "__stub_helper").?;
     sym.n_sect = sect_id + 1;
 
-    try self.atom_by_index_table.putNoClobber(gpa, sym_index, atom_index);
     self.addAtomToSection(atom_index);
 
     return atom_index;
@@ -1254,7 +1243,6 @@ fn writeStubHelperCode(self: *MachO, atom_index: AtomIndex, writer: anytype) !vo
 }
 
 pub fn createLazyPointerAtom(self: *MachO) !AtomIndex {
-    const gpa = self.base.allocator;
     const sym_index = try self.allocateSymbol();
     const atom_index = try self.createEmptyAtom(sym_index, @sizeOf(u64), 3);
     const sym = self.getSymbolPtr(.{ .sym_index = sym_index, .file = null });
@@ -1266,7 +1254,6 @@ pub fn createLazyPointerAtom(self: *MachO) !AtomIndex {
     });
     sym.n_sect = sect_id + 1;
 
-    try self.atom_by_index_table.putNoClobber(gpa, sym_index, atom_index);
     self.addAtomToSection(atom_index);
 
     return atom_index;
@@ -1291,7 +1278,6 @@ fn writeLazyPointer(self: *MachO, stub_helper_index: u32, writer: anytype) !void
 }
 
 pub fn createStubAtom(self: *MachO) !AtomIndex {
-    const gpa = self.base.allocator;
     const cpu_arch = self.options.target.cpu_arch.?;
     const alignment: u2 = switch (cpu_arch) {
         .x86_64 => 0,
@@ -1317,7 +1303,6 @@ pub fn createStubAtom(self: *MachO) !AtomIndex {
     });
     sym.n_sect = sect_id + 1;
 
-    try self.atom_by_index_table.putNoClobber(gpa, sym_index, atom_index);
     self.addAtomToSection(atom_index);
 
     return atom_index;
@@ -1405,13 +1390,10 @@ fn createTentativeDefAtoms(self: *MachO) !void {
 
         self.addAtomToSection(atom_index);
 
-        if (global.file) |file| {
-            const object = &self.objects.items[file];
-            try object.atoms.append(gpa, atom_index);
-            object.atom_by_index_table[global.sym_index] = atom_index;
-        } else {
-            try self.atom_by_index_table.putNoClobber(gpa, global.sym_index, atom_index);
-        }
+        assert(global.file != null);
+        const object = &self.objects.items[global.file.?];
+        try object.atoms.append(gpa, atom_index);
+        object.atom_by_index_table[global.sym_index] = atom_index;
     }
 }
 
@@ -1929,8 +1911,6 @@ pub fn deinit(self: *MachO) void {
     self.segments.deinit(gpa);
     self.sections.deinit(gpa);
     self.atoms.deinit(gpa);
-
-    self.atom_by_index_table.deinit(gpa);
 }
 
 pub fn closeFiles(self: *const MachO) void {
@@ -3665,17 +3645,6 @@ pub fn getSymbolName(self: *MachO, sym_with_loc: SymbolWithLoc) []const u8 {
     } else {
         const sym = self.locals.items[sym_with_loc.sym_index];
         return self.strtab.get(sym.n_strx).?;
-    }
-}
-
-/// Returns atom if there is an atom referenced by the symbol described by `sym_with_loc` descriptor.
-/// Returns null on failure.
-pub fn getAtomIndexForSymbol(self: *MachO, sym_with_loc: SymbolWithLoc) ?AtomIndex {
-    if (sym_with_loc.file) |file| {
-        const object = self.objects.items[file];
-        return object.getAtomIndexForSymbol(sym_with_loc.sym_index);
-    } else {
-        return self.atom_by_index_table.get(sym_with_loc.sym_index);
     }
 }
 

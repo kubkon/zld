@@ -288,7 +288,8 @@ fn isReachable(
     const source_atom = macho_file.getAtom(atom_index);
     const source_sym = macho_file.getSymbol(source_atom.getSymbolWithLoc());
 
-    const target_atom_index = macho_file.getAtomIndexForSymbol(target).?;
+    const target_object = macho_file.objects.items[target.file.?];
+    const target_atom_index = target_object.getAtomIndexForSymbol(target.sym_index).?;
     const target_atom = macho_file.getAtom(target_atom_index);
     const target_sym = macho_file.getSymbol(target_atom.getSymbolWithLoc());
 
@@ -305,7 +306,6 @@ fn isReachable(
 }
 
 fn createThunkAtom(macho_file: *MachO) !AtomIndex {
-    const gpa = macho_file.base.allocator;
     const sym_index = try macho_file.allocateSymbol();
     const atom_index = try macho_file.createEmptyAtom(sym_index, @sizeOf(u32) * 3, 2);
     const sym = macho_file.getSymbolPtr(.{ .sym_index = sym_index, .file = null });
@@ -313,8 +313,6 @@ fn createThunkAtom(macho_file: *MachO) !AtomIndex {
 
     const sect_id = macho_file.getSectionByName("__TEXT", "__text") orelse unreachable;
     sym.n_sect = sect_id + 1;
-
-    try macho_file.atom_by_index_table.putNoClobber(gpa, sym_index, atom_index);
 
     return atom_index;
 }
