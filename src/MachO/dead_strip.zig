@@ -20,7 +20,7 @@ pub fn gcAtoms(macho_file: *MachO, reverse_lookups: [][]u32) !void {
     defer arena.deinit();
 
     var roots = AtomTable.init(arena.allocator());
-    try roots.ensureUnusedCapacity(@intCast(u32, macho_file.globals.count()));
+    try roots.ensureUnusedCapacity(@intCast(u32, macho_file.globals.items.len));
 
     var alive = AtomTable.init(arena.allocator());
     try alive.ensureTotalCapacity(@intCast(u32, macho_file.atoms.items.len));
@@ -38,7 +38,7 @@ fn collectRoots(macho_file: *MachO, roots: *AtomTable) !void {
     switch (output_mode) {
         .exe => {
             // Add entrypoint as GC root
-            const global: SymbolWithLoc = try macho_file.getEntryPoint();
+            const global: SymbolWithLoc = macho_file.getEntryPoint();
             const object = macho_file.objects.items[global.getFile().?];
             const atom_index = object.getAtomIndexForSymbol(global.sym_index).?; // panic here means fatal error
             _ = try roots.getOrPut(atom_index);
@@ -48,7 +48,7 @@ fn collectRoots(macho_file: *MachO, roots: *AtomTable) !void {
         else => |other| {
             assert(other == .lib);
             // Add exports as GC roots
-            for (macho_file.globals.values()) |global| {
+            for (macho_file.globals.items) |global| {
                 const sym = macho_file.getSymbol(global);
                 if (sym.undf()) continue;
 
@@ -62,12 +62,15 @@ fn collectRoots(macho_file: *MachO, roots: *AtomTable) !void {
     }
 
     // TODO just a temp until we learn how to parse unwind records
-    if (macho_file.globals.get("___gxx_personality_v0")) |global| {
-        const object = macho_file.objects.items[global.getFile().?];
-        if (object.getAtomIndexForSymbol(global.sym_index)) |atom_index| {
-            _ = try roots.getOrPut(atom_index);
-            log.debug("adding root", .{});
-            macho_file.logAtom(atom_index, log);
+    for (macho_file.globals.items) |global| {
+        if (mem.eql(u8, "___gxx_personality_v0", macho_file.getSymbolName(global))) {
+            const object = macho_file.objects.items[global.getFile().?];
+            if (object.getAtomIndexForSymbol(global.sym_index)) |atom_index| {
+                _ = try roots.getOrPut(atom_index);
+                log.debug("adding root", .{});
+                macho_file.logAtom(atom_index, log);
+            }
+            break;
         }
     }
 
@@ -238,7 +241,7 @@ fn prune(macho_file: *MachO, alive: AtomTable) !void {
 
             const atom = macho_file.getAtom(atom_index);
             const sym_loc = atom.getSymbolWithLoc();
-            const sym = macho_file.getSymbol(sym_loc);
+            const sym = macho_file.getSymbolPtr(sym_loc);
             const sect_id = sym.n_sect - 1;
             var section = macho_file.sections.get(sect_id);
             section.header.size -= atom.size;
@@ -267,22 +270,15 @@ fn prune(macho_file: *MachO, alive: AtomTable) !void {
             macho_file.sections.set(sect_id, section);
             _ = object.atoms.swapRemove(i);
 
-            const sym_name = macho_file.getSymbolName(sym_loc);
-            if (macho_file.globals.get(sym_name)) |global| {
-                if (global.eql(sym_loc)) {
-                    const kv = macho_file.globals.fetchSwapRemove(sym_name).?;
-                    macho_file.base.allocator.free(kv.key);
-                }
+            if (sym.ext()) {
+                sym.n_desc = MachO.N_DEAD;
             }
 
             var inner_sym_it = Atom.getInnerSymbolsIterator(macho_file, atom_index);
             while (inner_sym_it.next()) |inner| {
-                const inner_name = macho_file.getSymbolName(inner);
-                if (macho_file.globals.get(inner_name)) |global| {
-                    if (global.eql(inner)) {
-                        const kv = macho_file.globals.fetchSwapRemove(inner_name).?;
-                        macho_file.base.allocator.free(kv.key);
-                    }
+                const inner_sym = macho_file.getSymbolPtr(inner);
+                if (inner_sym.ext()) {
+                    inner_sym.n_desc = MachO.N_DEAD;
                 }
             }
         }

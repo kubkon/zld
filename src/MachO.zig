@@ -59,8 +59,11 @@ segments: std.ArrayListUnmanaged(macho.segment_command_64) = .{},
 sections: std.MultiArrayList(Section) = .{},
 
 locals: std.ArrayListUnmanaged(macho.nlist_64) = .{},
-globals: std.StringArrayHashMapUnmanaged(SymbolWithLoc) = .{},
+globals: std.ArrayListUnmanaged(SymbolWithLoc) = .{},
 
+entry_index: ?u32 = null,
+mh_execute_header_index: ?u32 = null,
+dso_handle_index: ?u32 = null,
 dyld_stub_binder_index: ?u32 = null,
 dyld_private_sym_index: ?u32 = null,
 stub_helper_preamble_sym_index: ?u32 = null,
@@ -118,6 +121,11 @@ pub const SymbolWithLoc = struct {
     }
 };
 
+const SymbolResolver = struct {
+    table: std.StringHashMap(u32),
+    unresolved: std.AutoArrayHashMap(u32, void),
+};
+
 /// Default path to dyld
 const default_dyld_path: [*:0]const u8 = "/usr/lib/dyld";
 
@@ -129,6 +137,9 @@ const default_pagezero_vmsize: u64 = 0x100000000;
 /// the table of load commands. This should be plenty for any
 /// potential future extensions.
 const default_headerpad_size: u32 = 0x1000;
+
+pub const N_GLOBAL_INDEX: u16 = @bitCast(u16, @as(i16, -1));
+pub const N_DEAD: u16 = @bitCast(u16, @as(i16, -2));
 
 pub fn openPath(allocator: Allocator, options: Options) !*MachO {
     const file = try options.emit.directory.createFile(options.emit.sub_path, .{
@@ -300,20 +311,23 @@ pub fn flush(self: *MachO) !void {
     try self.parseLibs(libs.keys(), libs.values(), syslibroot, &dependent_libs);
     try self.parseDependentLibs(syslibroot, &dependent_libs);
 
-    var unresolved = std.AutoArrayHashMap(u32, void).init(arena);
+    var resolver = SymbolResolver{
+        .table = std.StringHashMap(u32).init(arena),
+        .unresolved = std.AutoArrayHashMap(u32, void).init(arena),
+    };
 
     for (self.objects.items) |_, object_id| {
-        try self.resolveSymbolsInObject(@intCast(u16, object_id), &unresolved);
+        try self.resolveSymbolsInObject(@intCast(u16, object_id), &resolver);
     }
 
-    try self.resolveSymbolsInArchives(&unresolved);
-    try self.resolveDyldStubBinder(unresolved);
-    try self.resolveSymbolsInDylibs(&unresolved);
-    try self.createMhExecuteHeaderSymbol();
-    try self.createDsoHandleSymbol(&unresolved);
-    try self.resolveSymbolsAtLoading(&unresolved);
+    try self.resolveSymbolsInArchives(&resolver);
+    try self.resolveDyldStubBinder(&resolver);
+    try self.resolveSymbolsInDylibs(&resolver);
+    try self.createMhExecuteHeaderSymbol(&resolver);
+    try self.createDsoHandleSymbol(&resolver);
+    try self.resolveSymbolsAtLoading(&resolver);
 
-    if (unresolved.count() > 0) {
+    if (resolver.unresolved.count() > 0) {
         return error.UndefinedSymbolReference;
     }
     if (lib_not_found) {
@@ -321,6 +335,15 @@ pub fn flush(self: *MachO) !void {
     }
     if (framework_not_found) {
         return error.FrameworkNotFound;
+    }
+
+    if (self.options.output_mode == .exe) {
+        const entry_name = self.options.entry orelse "_main";
+        const global_index = resolver.table.get(entry_name) orelse {
+            log.err("entrypoint '{s}' not found", .{entry_name});
+            return error.MissingMainEntrypoint;
+        };
+        self.entry_index = global_index;
     }
 
     for (self.objects.items) |*object, object_id| {
@@ -1355,9 +1378,10 @@ fn writeStubCode(self: *MachO, atom_index: AtomIndex, stub_index: u32, writer: a
 fn createTentativeDefAtoms(self: *MachO) !void {
     const gpa = self.base.allocator;
 
-    for (self.globals.values()) |global| {
+    for (self.globals.items) |global| {
         const sym = self.getSymbolPtr(global);
         if (!sym.tentative()) continue;
+        if (sym.n_desc == N_DEAD) continue;
 
         log.debug("creating tentative definition for ATOM(%{d}, '{s}') in object({?})", .{
             global.sym_index, self.getSymbolName(global), global.file,
@@ -1394,11 +1418,7 @@ fn createTentativeDefAtoms(self: *MachO) !void {
     }
 }
 
-fn resolveSymbolsInObject(
-    self: *MachO,
-    object_id: u16,
-    unresolved: *std.AutoArrayHashMap(u32, void),
-) !void {
+fn resolveSymbolsInObject(self: *MachO, object_id: u16, resolver: *SymbolResolver) !void {
     const object = &self.objects.items[object_id];
     const in_symtab = object.in_symtab orelse return;
 
@@ -1406,7 +1426,7 @@ fn resolveSymbolsInObject(
 
     var sym_index: u32 = 0;
     while (sym_index < in_symtab.len) : (sym_index += 1) {
-        const sym = object.symtab[sym_index];
+        const sym = &object.symtab[sym_index];
         const sym_name = object.getSymbolName(sym_index);
 
         if (sym.stab()) {
@@ -1440,22 +1460,19 @@ fn resolveSymbolsInObject(
 
         const sym_loc = SymbolWithLoc{ .sym_index = sym_index, .file = object_id };
 
-        const gpa = self.base.allocator;
-        const name = try gpa.dupe(u8, sym_name);
-        const global_index = @intCast(u32, self.globals.values().len);
-        const gop = try self.globals.getOrPut(gpa, name);
-        defer if (gop.found_existing) gpa.free(name);
-
-        if (!gop.found_existing) {
-            gop.value_ptr.* = sym_loc;
+        const global_index = resolver.table.get(sym_name) orelse {
+            const gpa = self.base.allocator;
+            const name = try gpa.dupe(u8, sym_name);
+            const global_index = @intCast(u32, self.globals.items.len);
+            try self.globals.append(gpa, sym_loc);
+            try resolver.table.putNoClobber(name, global_index);
             if (sym.undf() and !sym.tentative()) {
-                try unresolved.putNoClobber(global_index, {});
+                try resolver.unresolved.putNoClobber(global_index, {});
             }
             continue;
-        }
-
-        const global = gop.value_ptr.*;
-        const global_sym = self.getSymbol(global);
+        };
+        const global = &self.globals.items[global_index];
+        const global_sym = self.getSymbolPtr(global.*);
 
         // Cases to consider: sym vs global_sym
         // 1.  strong(sym) and strong(global_sym) => error
@@ -1492,27 +1509,37 @@ fn resolveSymbolsInObject(
             log.err("  next definition in '{s}'", .{self.objects.items[object_id].name});
             return error.MultipleSymbolDefinitions;
         }
-        if (global_is_strong) continue;
-        if (sym_is_weak and global_is_weak) continue;
-        if (sym.tentative() and global_sym.tentative()) {
-            if (global_sym.n_value >= sym.n_value) continue;
+
+        const update_global = blk: {
+            if (global_is_strong) break :blk false;
+            if (sym_is_weak and global_is_weak) break :blk false;
+            if (sym.tentative() and global_sym.tentative()) {
+                if (global_sym.n_value >= sym.n_value) break :blk false;
+            }
+            if (sym.undf() and !sym.tentative()) break :blk false;
+            break :blk true;
+        };
+
+        if (update_global) {
+            global_sym.n_desc = N_GLOBAL_INDEX;
+            global_sym.n_value = global_index;
+            _ = resolver.unresolved.swapRemove(resolver.table.get(sym_name).?);
+            global.* = sym_loc;
+        } else {
+            sym.n_desc = N_GLOBAL_INDEX;
+            sym.n_value = global_index;
         }
-        if (sym.undf() and !sym.tentative()) continue;
-
-        _ = unresolved.swapRemove(@intCast(u32, self.globals.getIndex(name).?));
-
-        gop.value_ptr.* = sym_loc;
     }
 }
 
-fn resolveSymbolsInArchives(self: *MachO, unresolved: *std.AutoArrayHashMap(u32, void)) !void {
+fn resolveSymbolsInArchives(self: *MachO, resolver: *SymbolResolver) !void {
     if (self.archives.items.len == 0) return;
 
     const gpa = self.base.allocator;
     const cpu_arch = self.options.target.cpu_arch.?;
     var next_sym: usize = 0;
-    loop: while (next_sym < unresolved.count()) {
-        const global = self.globals.values()[unresolved.keys()[next_sym]];
+    loop: while (next_sym < resolver.unresolved.count()) {
+        const global = self.globals.items[resolver.unresolved.keys()[next_sym]];
         const sym_name = self.getSymbolName(global);
 
         for (self.archives.items) |archive| {
@@ -1526,7 +1553,7 @@ fn resolveSymbolsInArchives(self: *MachO, unresolved: *std.AutoArrayHashMap(u32,
             const object_id = @intCast(u16, self.objects.items.len);
             const object = try archive.parseObject(gpa, cpu_arch, offsets.items[0]);
             try self.objects.append(gpa, object);
-            try self.resolveSymbolsInObject(object_id, unresolved);
+            try self.resolveSymbolsInObject(object_id, resolver);
 
             continue :loop;
         }
@@ -1535,13 +1562,13 @@ fn resolveSymbolsInArchives(self: *MachO, unresolved: *std.AutoArrayHashMap(u32,
     }
 }
 
-fn resolveSymbolsInDylibs(self: *MachO, unresolved: *std.AutoArrayHashMap(u32, void)) !void {
+fn resolveSymbolsInDylibs(self: *MachO, resolver: *SymbolResolver) !void {
     if (self.dylibs.items.len == 0) return;
 
     var next_sym: usize = 0;
-    loop: while (next_sym < unresolved.count()) {
-        const global_index = unresolved.keys()[next_sym];
-        const global = self.globals.values()[global_index];
+    loop: while (next_sym < resolver.unresolved.count()) {
+        const global_index = resolver.unresolved.keys()[next_sym];
+        const global = self.globals.items[global_index];
         const sym = self.getSymbolPtr(global);
         const sym_name = self.getSymbolName(global);
 
@@ -1561,7 +1588,7 @@ fn resolveSymbolsInDylibs(self: *MachO, unresolved: *std.AutoArrayHashMap(u32, v
                 sym.n_desc |= macho.N_WEAK_REF;
             }
 
-            assert(unresolved.swapRemove(global_index));
+            assert(resolver.unresolved.swapRemove(global_index));
             continue :loop;
         }
 
@@ -1569,11 +1596,11 @@ fn resolveSymbolsInDylibs(self: *MachO, unresolved: *std.AutoArrayHashMap(u32, v
     }
 }
 
-fn resolveSymbolsAtLoading(self: *MachO, unresolved: *std.AutoArrayHashMap(u32, void)) !void {
+fn resolveSymbolsAtLoading(self: *MachO, resolver: *SymbolResolver) !void {
     var next_sym: usize = 0;
-    while (next_sym < unresolved.count()) {
-        const global_index = unresolved.keys()[next_sym];
-        const global = self.globals.values()[global_index];
+    while (next_sym < resolver.unresolved.count()) {
+        const global_index = resolver.unresolved.keys()[next_sym];
+        const global = self.globals.items[global_index];
         const sym = self.getSymbolPtr(global);
         const sym_name = self.getSymbolName(global);
 
@@ -1585,7 +1612,7 @@ fn resolveSymbolsAtLoading(self: *MachO, unresolved: *std.AutoArrayHashMap(u32, 
                 .n_desc = 0,
                 .n_value = 0,
             };
-            _ = unresolved.swapRemove(global_index);
+            _ = resolver.unresolved.swapRemove(global_index);
             continue;
         } else if (self.options.allow_undef) {
             const n_desc = @bitCast(
@@ -1594,7 +1621,7 @@ fn resolveSymbolsAtLoading(self: *MachO, unresolved: *std.AutoArrayHashMap(u32, 
             );
             sym.n_type = macho.N_EXT;
             sym.n_desc = n_desc;
-            _ = unresolved.swapRemove(global_index);
+            _ = resolver.unresolved.swapRemove(global_index);
             continue;
         }
 
@@ -1607,10 +1634,12 @@ fn resolveSymbolsAtLoading(self: *MachO, unresolved: *std.AutoArrayHashMap(u32, 
     }
 }
 
-fn createMhExecuteHeaderSymbol(self: *MachO) !void {
+fn createMhExecuteHeaderSymbol(self: *MachO, resolver: *SymbolResolver) !void {
     if (self.options.output_mode != .exe) return;
-    if (self.globals.get("__mh_execute_header")) |global| {
+    if (resolver.table.get("__mh_execute_header")) |global_index| {
+        const global = self.globals.items[global_index];
         const sym = self.getSymbol(global);
+        self.mh_execute_header_index = global_index;
         if (!sym.undf() and !(sym.pext() or sym.weakDef())) return;
     }
 
@@ -1622,14 +1651,24 @@ fn createMhExecuteHeaderSymbol(self: *MachO) !void {
     sym.n_type = macho.N_SECT | macho.N_EXT;
     sym.n_desc = macho.REFERENCED_DYNAMICALLY;
 
-    const name = try gpa.dupe(u8, "__mh_execute_header");
-    const gop = try self.globals.getOrPut(gpa, name);
-    defer if (gop.found_existing) gpa.free(name);
-    gop.value_ptr.* = sym_loc;
+    if (resolver.table.get("__mh_execute_header")) |global_index| {
+        const global = &self.globals.items[global_index];
+        const global_sym = self.getSymbolPtr(global.*);
+        global_sym.n_desc = N_GLOBAL_INDEX;
+        global_sym.n_value = global_index;
+        global.* = sym_loc;
+        self.mh_execute_header_index = global_index;
+    } else {
+        const global_index = @intCast(u32, self.globals.items.len);
+        try self.globals.append(gpa, sym_loc);
+        self.mh_execute_header_index = global_index;
+    }
 }
 
-fn createDsoHandleSymbol(self: *MachO, unresolved: *std.AutoArrayHashMap(u32, void)) !void {
-    const global = self.globals.getPtr("___dso_handle") orelse return;
+fn createDsoHandleSymbol(self: *MachO, resolver: *SymbolResolver) !void {
+    const global_index = resolver.table.get("___dso_handle") orelse return;
+    const global = &self.globals.items[global_index];
+    self.dso_handle_index = global_index;
     if (!self.getSymbol(global.*).undf()) return;
 
     const gpa = self.base.allocator;
@@ -1639,13 +1678,17 @@ fn createDsoHandleSymbol(self: *MachO, unresolved: *std.AutoArrayHashMap(u32, vo
     sym.n_strx = try self.strtab.insert(gpa, "___dso_handle");
     sym.n_type = macho.N_SECT | macho.N_EXT;
     sym.n_desc = macho.N_WEAK_DEF;
+
+    const global_sym = self.getSymbolPtr(global.*);
+    global_sym.n_desc = N_GLOBAL_INDEX;
+    global_sym.n_value = global_index;
+    _ = resolver.unresolved.swapRemove(resolver.table.get("___dso_handle").?);
     global.* = sym_loc;
-    _ = unresolved.swapRemove(@intCast(u32, self.globals.getIndex("___dso_handle").?));
 }
 
-fn resolveDyldStubBinder(self: *MachO, unresolved: std.AutoArrayHashMap(u32, void)) !void {
+fn resolveDyldStubBinder(self: *MachO, resolver: *SymbolResolver) !void {
     if (self.dyld_stub_binder_index != null) return;
-    if (unresolved.count() == 0) return; // no need for a stub binder if we don't have any imports
+    if (resolver.unresolved.count() == 0) return; // no need for a stub binder if we don't have any imports
 
     const gpa = self.base.allocator;
     const sym_index = try self.allocateSymbol();
@@ -1656,14 +1699,14 @@ fn resolveDyldStubBinder(self: *MachO, unresolved: std.AutoArrayHashMap(u32, voi
 
     const sym_name = try gpa.dupe(u8, "dyld_stub_binder");
     const global = SymbolWithLoc{ .sym_index = sym_index };
-    try self.globals.putNoClobber(gpa, sym_name, global);
+    try self.globals.append(gpa, global);
 
     for (self.dylibs.items) |dylib, id| {
         if (!dylib.symbols.contains(sym_name)) continue;
 
         const dylib_id = @intCast(u16, id);
         if (!self.referenced_dylibs.contains(dylib_id)) {
-            try self.referenced_dylibs.putNoClobber(self.base.allocator, dylib_id, {});
+            try self.referenced_dylibs.putNoClobber(gpa, dylib_id, {});
         }
 
         const ordinal = self.referenced_dylibs.getIndex(dylib_id) orelse unreachable;
@@ -1704,7 +1747,7 @@ fn writeMainLC(self: *MachO, ncmds: *u32, lc_writer: anytype) !void {
     if (self.options.output_mode != .exe) return;
     const seg_id = self.getSegmentByName("__TEXT").?;
     const seg = self.segments.items[seg_id];
-    const global = try self.getEntryPoint();
+    const global = self.getEntryPoint();
     const sym = self.getSymbol(global);
     try lc_writer.writeStruct(macho.entry_point_command{
         .cmd = .MAIN,
@@ -1887,10 +1930,6 @@ pub fn deinit(self: *MachO) void {
 
     self.strtab.deinit(gpa);
     self.locals.deinit(gpa);
-
-    for (self.globals.keys()) |key| {
-        gpa.free(key);
-    }
     self.globals.deinit(gpa);
 
     for (self.objects.items) |*object| {
@@ -2095,12 +2134,14 @@ pub fn allocateSymbol(self: *MachO) !u32 {
 }
 
 fn allocateSpecialSymbols(self: *MachO) !void {
-    for (&[_][]const u8{
-        "___dso_handle",
-        "__mh_execute_header",
-    }) |name| {
-        const global = self.globals.get(name) orelse continue;
+    for (&[_]?u32{
+        self.dso_handle_index,
+        self.mh_execute_header_index,
+    }) |maybe_index| {
+        const global_index = maybe_index orelse continue;
+        const global = self.globals.items[global_index];
         if (global.getFile() != null) continue;
+        const name = self.getSymbolName(global);
         const sym = self.getSymbolPtr(global);
         const segment_index = self.getSegmentByName("__TEXT").?;
         const seg = self.segments.items[segment_index];
@@ -2781,9 +2822,8 @@ fn collectBindData(self: *MachO, pointers: *std.ArrayList(bind.Pointer), reverse
                         else => unreachable,
                     }
 
-                    const target = try Atom.parseRelocTarget(self, atom_index, rel, reverse_lookups[atom.getFile().?]);
-                    const bind_sym_name = self.getSymbolName(target);
-                    const global = self.globals.get(bind_sym_name) orelse continue;
+                    const global = try Atom.parseRelocTarget(self, atom_index, rel, reverse_lookups[atom.getFile().?]);
+                    const bind_sym_name = self.getSymbolName(global);
                     const bind_sym = self.getSymbol(global);
                     if (!bind_sym.undf()) continue;
 
@@ -2880,8 +2920,8 @@ fn collectExportData(self: *MachO, trie: *Trie) !void {
 
     if (self.options.output_mode == .exe) {
         for (&[_]SymbolWithLoc{
-            try self.getEntryPoint(),
-            self.globals.get("__mh_execute_header").?,
+            self.getEntryPoint(),
+            self.globals.items[self.mh_execute_header_index.?],
         }) |global| {
             const sym = self.getSymbol(global);
             const sym_name = self.getSymbolName(global);
@@ -2894,9 +2934,10 @@ fn collectExportData(self: *MachO, trie: *Trie) !void {
         }
     } else {
         assert(self.options.output_mode == .lib);
-        for (self.globals.values()) |global| {
+        for (self.globals.items) |global| {
             const sym = self.getSymbol(global);
             if (sym.undf()) continue;
+            if (sym.n_desc == N_DEAD) continue;
 
             const sym_name = self.getSymbolName(global);
             log.debug("  (putting '{s}' defined at 0x{x})", .{ sym_name, sym.n_value });
@@ -3118,11 +3159,12 @@ fn writeFunctionStarts(self: *MachO, ncmds: *u32, lc_writer: anytype) !void {
     // We need to sort by address first
     var addresses = std.ArrayList(u64).init(gpa);
     defer addresses.deinit();
-    try addresses.ensureTotalCapacityPrecise(self.globals.count());
+    try addresses.ensureTotalCapacityPrecise(self.globals.items.len);
 
-    for (self.globals.values()) |global| {
+    for (self.globals.items) |global| {
         const sym = self.getSymbol(global);
         if (sym.undf()) continue;
+        if (sym.n_desc == N_DEAD) continue;
 
         const sect_id = sym.n_sect - 1;
         if (sect_id != text_sect_index) continue;
@@ -3315,9 +3357,10 @@ fn writeSymtab(self: *MachO, lc: *macho.symtab_command) !SymtabCtx {
     var exports = std.ArrayList(macho.nlist_64).init(gpa);
     defer exports.deinit();
 
-    for (self.globals.values()) |global| {
+    for (self.globals.items) |global| {
         const sym = self.getSymbol(global);
         if (sym.undf()) continue; // import, skip
+        if (sym.n_desc == N_DEAD) continue;
 
         var out_sym = sym;
         out_sym.n_strx = try self.strtab.insert(gpa, self.getSymbolName(global));
@@ -3329,9 +3372,10 @@ fn writeSymtab(self: *MachO, lc: *macho.symtab_command) !SymtabCtx {
 
     var imports_table = std.AutoHashMap(SymbolWithLoc, u32).init(gpa);
 
-    for (self.globals.values()) |global| {
+    for (self.globals.items) |global| {
         const sym = self.getSymbol(global);
         if (!sym.undf()) continue; // not an import, skip
+        if (sym.n_desc == N_DEAD) continue;
 
         const new_index = @intCast(u32, imports.items.len);
         var out_sym = sym;
@@ -3674,14 +3718,10 @@ pub fn getTlvPtrAtomIndexForSymbol(self: *MachO, sym_with_loc: SymbolWithLoc) ?A
 
 /// Returns symbol location corresponding to the set entrypoint.
 /// Asserts output mode is executable.
-pub fn getEntryPoint(self: MachO) error{MissingMainEntrypoint}!SymbolWithLoc {
+pub fn getEntryPoint(self: MachO) SymbolWithLoc {
     assert(self.options.output_mode == .exe);
-    const entry_name = self.options.entry orelse "_main";
-    const global = self.globals.get(entry_name) orelse {
-        log.err("entrypoint '{s}' not found", .{entry_name});
-        return error.MissingMainEntrypoint;
-    };
-    return global;
+    const global_index = self.entry_index.?;
+    return self.globals.items[global_index];
 }
 
 inline fn requiresThunks(self: MachO) bool {
@@ -3854,7 +3894,7 @@ fn generateSymbolStabsForSymbol(
     if (!header.isCode()) {
         // Since we are not dealing with machine code, it's either a global or a static depending
         // on the linkage scope.
-        if (self.globals.contains(sym_name)) {
+        if (sym.sect() and sym.ext()) {
             // Global gets an N_GSYM stab type.
             buf[0] = .{
                 .n_strx = try self.strtab.insert(gpa, sym_name),
@@ -3965,7 +4005,7 @@ fn logSymAttributes(sym: macho.nlist_64, buf: []u8) []const u8 {
             buf[1] = 'e';
         }
     }
-    if (sym.tentative()) {
+    if (sym.tentative() and sym.n_desc != N_GLOBAL_INDEX) {
         buf[2] = 't';
     }
     if (sym.undf()) {
@@ -3982,13 +4022,11 @@ fn logSymtab(self: *MachO) void {
     scoped_log.debug("locals:", .{});
     for (self.objects.items) |object, id| {
         scoped_log.debug("  object({d}): {s}", .{ id, object.name });
-        for (object.atoms.items) |atom_index| {
+        for (object.symtab) |sym, sym_id| {
             mem.set(u8, &buf, '_');
-            const atom = self.getAtom(atom_index);
-            const sym = self.getSymbol(atom.getSymbolWithLoc());
             scoped_log.debug("    %{d}: {s} @{x} in sect({d}), {s}", .{
-                atom.getSymbolWithLoc().sym_index,
-                object.getSymbolName(atom.sym_index),
+                sym_id,
+                object.getSymbolName(@intCast(u32, sym_id)),
                 sym.n_value,
                 sym.n_sect,
                 logSymAttributes(sym, &buf),
@@ -4009,9 +4047,10 @@ fn logSymtab(self: *MachO) void {
 
     scoped_log.debug("exports:", .{});
     var count: usize = 0;
-    for (self.globals.values()) |global| {
+    for (self.globals.items) |global| {
         const sym = self.getSymbol(global);
         if (sym.undf()) continue;
+        if (sym.n_desc == N_DEAD) continue;
         scoped_log.debug("    %{d}: {s} @{x} in sect({d}), {s} (def in object({?}))", .{
             count,
             self.getSymbolName(global),
@@ -4026,9 +4065,10 @@ fn logSymtab(self: *MachO) void {
 
     scoped_log.debug("imports:", .{});
     count = 0;
-    for (self.globals.values()) |global| {
+    for (self.globals.items) |global| {
         const sym = self.getSymbol(global);
         if (!sym.undf()) continue;
+        if (sym.n_desc == N_DEAD) continue;
 
         const ord = @divTrunc(sym.n_desc, macho.N_SYMBOL_RESOLVER);
 
@@ -4041,12 +4081,6 @@ fn logSymtab(self: *MachO) void {
         });
 
         count += 1;
-    }
-
-    scoped_log.debug("globals table:", .{});
-    for (self.globals.keys()) |name, id| {
-        const value = self.globals.values()[id];
-        scoped_log.debug("  {s} => %{d} in object({?})", .{ name, value.sym_index, value.file });
     }
 
     scoped_log.debug("GOT entries:", .{});

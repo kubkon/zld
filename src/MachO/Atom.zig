@@ -178,10 +178,10 @@ pub fn parseRelocTarget(
 
     if (sym.sect() and !sym.ext()) {
         return sym_loc;
-    } else {
-        const sym_name = macho_file.getSymbolName(sym_loc);
-        return macho_file.globals.get(sym_name).?;
-    }
+    } else if (sym.n_desc == MachO.N_GLOBAL_INDEX) {
+        const global_index = @intCast(u32, sym.n_value);
+        return macho_file.globals.items[global_index];
+    } else return sym_loc;
 }
 
 pub fn getRelocTargetAtomIndex(macho_file: *MachO, rel: macho.relocation_info, target: SymbolWithLoc) ?AtomIndex {
@@ -381,7 +381,6 @@ pub fn getRelocTargetAddress(macho_file: *MachO, rel: macho.relocation_info, tar
         // If there is no atom for target, we still need to check for special, atom-less
         // symbols such as `___dso_handle`.
         const target_name = macho_file.getSymbolName(target);
-        assert(macho_file.globals.contains(target_name));
         const atomless_sym = macho_file.getSymbol(target);
         log.debug("    | atomless target '{s}'", .{target_name});
         return atomless_sym.n_value;
