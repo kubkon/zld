@@ -170,16 +170,17 @@ pub fn parseRelocTarget(
         return MachO.SymbolWithLoc{ .sym_index = sym_index, .file = atom.file };
     }
 
+    const sym_index = reverse_lookup[rel.r_symbolnum];
     const sym_loc = MachO.SymbolWithLoc{
-        .sym_index = reverse_lookup[rel.r_symbolnum],
+        .sym_index = sym_index,
         .file = atom.file,
     };
     const sym = macho_file.getSymbol(sym_loc);
 
     if (sym.sect() and !sym.ext()) {
         return sym_loc;
-    } else if (sym.n_desc == MachO.N_GLOBAL_INDEX) {
-        const global_index = @intCast(u32, sym.n_value);
+    } else if (object.globals_lookup[sym_index] > -1) {
+        const global_index = @intCast(u32, object.globals_lookup[sym_index]);
         return macho_file.globals.items[global_index];
     } else return sym_loc;
 }

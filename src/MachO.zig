@@ -122,6 +122,7 @@ pub const SymbolWithLoc = struct {
 };
 
 const SymbolResolver = struct {
+    arena: Allocator,
     table: std.StringHashMap(u32),
     unresolved: std.AutoArrayHashMap(u32, void),
 };
@@ -138,8 +139,7 @@ const default_pagezero_vmsize: u64 = 0x100000000;
 /// potential future extensions.
 const default_headerpad_size: u32 = 0x1000;
 
-pub const N_GLOBAL_INDEX: u16 = @bitCast(u16, @as(i16, -1));
-pub const N_DEAD: u16 = @bitCast(u16, @as(i16, -2));
+pub const N_DEAD: u16 = @bitCast(u16, @as(i16, -1));
 
 pub fn openPath(allocator: Allocator, options: Options) !*MachO {
     const file = try options.emit.directory.createFile(options.emit.sub_path, .{
@@ -312,6 +312,7 @@ pub fn flush(self: *MachO) !void {
     try self.parseDependentLibs(syslibroot, &dependent_libs);
 
     var resolver = SymbolResolver{
+        .arena = arena,
         .table = std.StringHashMap(u32).init(arena),
         .unresolved = std.AutoArrayHashMap(u32, void).init(arena),
     };
@@ -1462,7 +1463,7 @@ fn resolveSymbolsInObject(self: *MachO, object_id: u16, resolver: *SymbolResolve
 
         const global_index = resolver.table.get(sym_name) orelse {
             const gpa = self.base.allocator;
-            const name = try gpa.dupe(u8, sym_name);
+            const name = try resolver.arena.dupe(u8, sym_name);
             const global_index = @intCast(u32, self.globals.items.len);
             try self.globals.append(gpa, sym_loc);
             try resolver.table.putNoClobber(name, global_index);
@@ -1472,7 +1473,7 @@ fn resolveSymbolsInObject(self: *MachO, object_id: u16, resolver: *SymbolResolve
             continue;
         };
         const global = &self.globals.items[global_index];
-        const global_sym = self.getSymbolPtr(global.*);
+        const global_sym = self.getSymbol(global.*);
 
         // Cases to consider: sym vs global_sym
         // 1.  strong(sym) and strong(global_sym) => error
@@ -1521,13 +1522,12 @@ fn resolveSymbolsInObject(self: *MachO, object_id: u16, resolver: *SymbolResolve
         };
 
         if (update_global) {
-            global_sym.n_desc = N_GLOBAL_INDEX;
-            global_sym.n_value = global_index;
+            const global_object = &self.objects.items[global.getFile().?];
+            global_object.globals_lookup[global.sym_index] = global_index;
             _ = resolver.unresolved.swapRemove(resolver.table.get(sym_name).?);
             global.* = sym_loc;
         } else {
-            sym.n_desc = N_GLOBAL_INDEX;
-            sym.n_value = global_index;
+            object.globals_lookup[sym_index] = global_index;
         }
     }
 }
@@ -1653,9 +1653,8 @@ fn createMhExecuteHeaderSymbol(self: *MachO, resolver: *SymbolResolver) !void {
 
     if (resolver.table.get("__mh_execute_header")) |global_index| {
         const global = &self.globals.items[global_index];
-        const global_sym = self.getSymbolPtr(global.*);
-        global_sym.n_desc = N_GLOBAL_INDEX;
-        global_sym.n_value = global_index;
+        const global_object = &self.objects.items[global.getFile().?];
+        global_object.globals_lookup[global.sym_index] = global_index;
         global.* = sym_loc;
         self.mh_execute_header_index = global_index;
     } else {
@@ -1679,9 +1678,8 @@ fn createDsoHandleSymbol(self: *MachO, resolver: *SymbolResolver) !void {
     sym.n_type = macho.N_SECT | macho.N_EXT;
     sym.n_desc = macho.N_WEAK_DEF;
 
-    const global_sym = self.getSymbolPtr(global.*);
-    global_sym.n_desc = N_GLOBAL_INDEX;
-    global_sym.n_value = global_index;
+    const global_object = &self.objects.items[global.getFile().?];
+    global_object.globals_lookup[sym_index] = global_index;
     _ = resolver.unresolved.swapRemove(resolver.table.get("___dso_handle").?);
     global.* = sym_loc;
 }
@@ -1691,13 +1689,13 @@ fn resolveDyldStubBinder(self: *MachO, resolver: *SymbolResolver) !void {
     if (resolver.unresolved.count() == 0) return; // no need for a stub binder if we don't have any imports
 
     const gpa = self.base.allocator;
+    const sym_name = "dyld_stub_binder";
     const sym_index = try self.allocateSymbol();
     const sym_loc = SymbolWithLoc{ .sym_index = sym_index };
     const sym = self.getSymbolPtr(sym_loc);
-    sym.n_strx = try self.strtab.insert(gpa, "dyld_stub_binder");
+    sym.n_strx = try self.strtab.insert(gpa, sym_name);
     sym.n_type = macho.N_UNDF;
 
-    const sym_name = try gpa.dupe(u8, "dyld_stub_binder");
     const global = SymbolWithLoc{ .sym_index = sym_index };
     try self.globals.append(gpa, global);
 
@@ -4005,7 +4003,7 @@ fn logSymAttributes(sym: macho.nlist_64, buf: []u8) []const u8 {
             buf[1] = 'e';
         }
     }
-    if (sym.tentative() and sym.n_desc != N_GLOBAL_INDEX) {
+    if (sym.tentative()) {
         buf[2] = 't';
     }
     if (sym.undf()) {
@@ -4046,41 +4044,33 @@ fn logSymtab(self: *MachO) void {
     }
 
     scoped_log.debug("exports:", .{});
-    var count: usize = 0;
-    for (self.globals.items) |global| {
+    for (self.globals.items) |global, i| {
         const sym = self.getSymbol(global);
         if (sym.undf()) continue;
         if (sym.n_desc == N_DEAD) continue;
         scoped_log.debug("    %{d}: {s} @{x} in sect({d}), {s} (def in object({?}))", .{
-            count,
+            i,
             self.getSymbolName(global),
             sym.n_value,
             sym.n_sect,
             logSymAttributes(sym, &buf),
             global.file,
         });
-
-        count += 1;
     }
 
     scoped_log.debug("imports:", .{});
-    count = 0;
-    for (self.globals.items) |global| {
+    for (self.globals.items) |global, i| {
         const sym = self.getSymbol(global);
         if (!sym.undf()) continue;
         if (sym.n_desc == N_DEAD) continue;
-
         const ord = @divTrunc(sym.n_desc, macho.N_SYMBOL_RESOLVER);
-
         scoped_log.debug("    %{d}: {s} @{x} in ord({d}), {s}", .{
-            count,
+            i,
             self.getSymbolName(global),
             sym.n_value,
             ord,
             logSymAttributes(sym, &buf),
         });
-
-        count += 1;
     }
 
     scoped_log.debug("GOT entries:", .{});

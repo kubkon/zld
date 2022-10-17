@@ -37,12 +37,14 @@ in_strtab: ?[]const u8 = null,
 /// The length of the symtab is at least of the input symtab length however there
 /// can be trailing section symbols.
 symtab: []macho.nlist_64 = undefined,
-/// Can be null as set together with in_symtab.
+/// Can be undefined as set together with in_symtab.
 source_symtab_lookup: []u32 = undefined,
-/// Can be null as set together with in_symtab.
+/// Can be undefined as set together with in_symtab.
 strtab_lookup: []u32 = undefined,
-/// Can be null as set together with in_symtab.
+/// Can be undefined as set together with in_symtab.
 atom_by_index_table: []AtomIndex = undefined,
+/// Can be undefined as set together with in_symtab.
+globals_lookup: []i64 = undefined,
 
 atoms: std.ArrayListUnmanaged(AtomIndex) = .{},
 
@@ -55,6 +57,7 @@ pub fn deinit(self: *Object, gpa: Allocator) void {
         gpa.free(self.strtab_lookup);
         gpa.free(self.symtab);
         gpa.free(self.atom_by_index_table);
+        gpa.free(self.globals_lookup);
     }
 }
 
@@ -107,6 +110,7 @@ pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch)
                 self.symtab = try allocator.alloc(macho.nlist_64, self.in_symtab.?.len + nsects);
                 self.source_symtab_lookup = try allocator.alloc(u32, self.in_symtab.?.len);
                 self.strtab_lookup = try allocator.alloc(u32, self.in_symtab.?.len);
+                self.globals_lookup = try allocator.alloc(i64, self.in_symtab.?.len);
                 self.atom_by_index_table = try allocator.alloc(AtomIndex, self.in_symtab.?.len + nsects);
 
                 for (self.symtab) |*sym| {
@@ -119,6 +123,7 @@ pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch)
                     };
                 }
 
+                mem.set(i64, self.globals_lookup, -1);
                 mem.set(AtomIndex, self.atom_by_index_table, 0);
 
                 // You would expect that the symbol table is at least pre-sorted based on symbol's type:
@@ -597,12 +602,6 @@ pub fn parseDwarfInfo(self: Object) DwarfInfo {
 
 pub fn getSectionContents(self: Object, sect: macho.section_64) []const u8 {
     const size = @intCast(usize, sect.size);
-    log.debug("getting {s},{s} data at 0x{x} - 0x{x}", .{
-        sect.segName(),
-        sect.sectName(),
-        sect.offset,
-        sect.offset + sect.size,
-    });
     return self.contents[sect.offset..][0..size];
 }
 
