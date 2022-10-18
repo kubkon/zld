@@ -1679,7 +1679,7 @@ fn createDsoHandleSymbol(self: *MachO, resolver: *SymbolResolver) !void {
     sym.n_desc = macho.N_WEAK_DEF;
 
     const global_object = &self.objects.items[global.getFile().?];
-    global_object.globals_lookup[sym_index] = global_index;
+    global_object.globals_lookup[global.sym_index] = global_index;
     _ = resolver.unresolved.swapRemove(resolver.table.get("___dso_handle").?);
     global.* = sym_loc;
 }
