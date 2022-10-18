@@ -235,7 +235,23 @@ fn scanAtomRelocsArm64(
             else => {},
         }
 
-        const target = try parseRelocTarget(macho_file, atom_index, rel, reverse_lookup);
+        if (rel.r_extern == 0) continue;
+
+        const atom = macho_file.getAtom(atom_index);
+        const object = &macho_file.objects.items[atom.getFile().?];
+        const sym_index = reverse_lookup[rel.r_symbolnum];
+        const sym_loc = MachO.SymbolWithLoc{
+            .sym_index = sym_index,
+            .file = atom.file,
+        };
+        const sym = macho_file.getSymbol(sym_loc);
+
+        if (sym.sect() and !sym.ext()) continue;
+
+        const target = if (object.globals_lookup[sym_index] > -1) blk: {
+            const global_index = @intCast(u32, object.globals_lookup[sym_index]);
+            break :blk macho_file.globals.items[global_index];
+        } else sym_loc;
 
         switch (rel_type) {
             .ARM64_RELOC_BRANCH26 => {
@@ -273,7 +289,23 @@ fn scanAtomRelocsX86(
             else => {},
         }
 
-        const target = try parseRelocTarget(macho_file, atom_index, rel, reverse_lookup);
+        if (rel.r_extern == 0) continue;
+
+        const atom = macho_file.getAtom(atom_index);
+        const object = &macho_file.objects.items[atom.getFile().?];
+        const sym_index = reverse_lookup[rel.r_symbolnum];
+        const sym_loc = MachO.SymbolWithLoc{
+            .sym_index = sym_index,
+            .file = atom.file,
+        };
+        const sym = macho_file.getSymbol(sym_loc);
+
+        if (sym.sect() and !sym.ext()) continue;
+
+        const target = if (object.globals_lookup[sym_index] > -1) blk: {
+            const global_index = @intCast(u32, object.globals_lookup[sym_index]);
+            break :blk macho_file.globals.items[global_index];
+        } else sym_loc;
 
         switch (rel_type) {
             .X86_64_RELOC_BRANCH => {
