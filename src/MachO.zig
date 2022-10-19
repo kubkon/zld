@@ -1981,7 +1981,7 @@ fn createSegments(self: *MachO) !void {
     // __TEXT segment is non-optional
     {
         const protection = getSegmentMemoryProtection("__TEXT");
-        try self.segments.append(self.gpa, .{
+        try self.segments.append(self.base.allocator, .{
             .cmdsize = @sizeOf(macho.segment_command_64),
             .segname = makeStaticString("__TEXT"),
             .maxprot = protection,
