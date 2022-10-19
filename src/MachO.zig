@@ -3053,6 +3053,8 @@ fn populateLazyBindOffsetsInStubHelper(self: *MachO, buffer: []const u8) !void {
     const gpa = self.base.allocator;
 
     const stub_helper_section_index = self.getSectionByName("__TEXT", "__stub_helper") orelse return;
+    const la_symbol_ptr_section_index = self.getSectionByName("__DATA", "__la_symbol_ptr") orelse return;
+
     if (self.stub_helper_preamble_sym_index == null) return;
 
     const section = self.sections.get(stub_helper_section_index);
@@ -3063,7 +3065,6 @@ fn populateLazyBindOffsetsInStubHelper(self: *MachO, buffer: []const u8) !void {
 
     {
         var stub_atom_index = last_atom_index;
-        const la_symbol_ptr_section_index = self.getSectionByName("__DATA", "__la_symbol_ptr").?;
         var laptr_atom_index = self.sections.items(.last_atom_index)[la_symbol_ptr_section_index];
 
         const base_addr = blk: {
