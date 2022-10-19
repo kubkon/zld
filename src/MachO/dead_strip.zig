@@ -104,11 +104,12 @@ fn markLive(
     alive: *AtomTable,
     reverse_lookups: [][]u32,
 ) anyerror!void {
+    log.debug("mark(ATOM({d}))", .{atom_index});
+
     if (alive.contains(atom_index)) return;
 
     alive.putAssumeCapacityNoClobber(atom_index, {});
 
-    log.debug("marking live", .{});
     macho_file.logAtom(atom_index, log);
 
     const cpu_arch = macho_file.options.target.cpu_arch.?;
@@ -152,11 +153,15 @@ fn markLive(
 
         const object = macho_file.objects.items[target.getFile().?];
         const target_atom_index = object.getAtomIndexForSymbol(target.sym_index).?;
+        log.debug("  following ATOM({d})", .{target_atom_index});
+
         try markLive(macho_file, target_atom_index, alive, reverse_lookups);
     }
 }
 
 fn refersLive(macho_file: *MachO, atom_index: AtomIndex, alive: AtomTable, reverse_lookups: [][]u32) !bool {
+    log.debug("refersLive(ATOM({d}))", .{atom_index});
+
     const cpu_arch = macho_file.options.target.cpu_arch.?;
 
     const atom = macho_file.getAtom(atom_index);
@@ -191,7 +196,12 @@ fn refersLive(macho_file: *MachO, atom_index: AtomIndex, alive: AtomTable, rever
             log.debug("atom for symbol '{s}' not found; skipping...", .{macho_file.getSymbolName(target)});
             continue;
         };
-        if (alive.contains(target_atom_index)) return true;
+        if (alive.contains(target_atom_index)) {
+            if (alive.contains(target_atom_index)) {
+                log.debug("  refers live ATOM({d})", .{target_atom_index});
+                return true;
+            }
+        }
     }
 
     return false;

@@ -108,7 +108,7 @@ pub fn createThunks(macho_file: *MachO, sect_id: u8, reverse_lookups: [][]u32) !
 
             macho_file.logAtom(group_end, log);
 
-            header.@"align" = @maximum(header.@"align", atom.alignment);
+            header.@"align" = @max(header.@"align", atom.alignment);
 
             allocated.putAssumeCapacityNoClobber(group_end, {});
 
@@ -192,7 +192,7 @@ fn allocateThunk(
 
         macho_file.logAtom(atom_index, log);
 
-        header.@"align" = @maximum(header.@"align", atom.alignment);
+        header.@"align" = @max(header.@"align", atom.alignment);
 
         if (end_atom_index == atom_index) break;
 

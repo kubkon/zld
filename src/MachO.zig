@@ -948,6 +948,13 @@ pub fn getOutputSection(self: *MachO, sect: macho.section_64) !?u8 {
                 );
             },
             macho.S_COALESCED => {
+                // TODO unwind info
+                if (mem.eql(u8, "__TEXT", segname) and mem.eql(u8, "__eh_frame", sectname)) {
+                    log.debug("TODO eh frame section: type 0x{x}, name '{s},{s}'", .{
+                        sect.flags, segname, sectname,
+                    });
+                    break :blk null;
+                }
                 break :blk self.getSectionByName(segname, sectname) orelse try self.initSection(
                     segname,
                     sectname,
@@ -2107,7 +2114,7 @@ fn calcMinHeaderPad(self: *MachO) !u64 {
         log.debug("headerpad_max_install_names minimum headerpad size 0x{x}", .{
             min_headerpad_size + @sizeOf(macho.mach_header_64),
         });
-        padding = @maximum(padding, min_headerpad_size);
+        padding = @max(padding, min_headerpad_size);
     }
 
     const offset = @sizeOf(macho.mach_header_64) + padding;
@@ -2314,7 +2321,7 @@ fn calcSectionSizes(self: *MachO, reverse_lookups: [][]u32) !void {
             sym.n_value = atom_offset;
 
             header.size += padding + atom.size;
-            header.@"align" = @maximum(header.@"align", atom.alignment);
+            header.@"align" = @max(header.@"align", atom.alignment);
 
             if (atom.next_index) |next_index| {
                 atom_index = next_index;

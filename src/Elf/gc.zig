@@ -190,7 +190,7 @@ fn prune(arena: Allocator, alive: std.AutoHashMap(*Atom, void), elf_file: *Elf) 
             const aligned_end_addr = mem.alignForwardGeneric(u64, section.shdr.sh_size, atom.alignment);
             const padding = aligned_end_addr - section.shdr.sh_size;
             section.shdr.sh_size += padding + atom.size;
-            section.shdr.sh_addralign = @maximum(section.shdr.sh_addralign, atom.alignment);
+            section.shdr.sh_addralign = @max(section.shdr.sh_addralign, atom.alignment);
 
             if (atom.next) |next| {
                 atom = next;

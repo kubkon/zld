@@ -940,7 +940,7 @@ pub fn addAtomToSection(self: *Elf, atom: *Atom, sect_id: u16) !void {
     const aligned_end_addr = mem.alignForwardGeneric(u64, section.shdr.sh_size, atom.alignment);
     const padding = aligned_end_addr - section.shdr.sh_size;
     section.shdr.sh_size += padding + atom.size;
-    section.shdr.sh_addralign = @maximum(section.shdr.sh_addralign, atom.alignment);
+    section.shdr.sh_addralign = @max(section.shdr.sh_addralign, atom.alignment);
     self.sections.set(sect_id, section);
 }
 
@@ -987,7 +987,7 @@ fn allocateSegment(self: *Elf, phdr_ndx: u16, shdr_ndxs: []?u16, base: SegmentBa
     for (shdr_ndxs) |maybe_shdr_ndx| {
         const shdr_ndx = maybe_shdr_ndx orelse continue;
         const shdr = self.sections.items(.shdr)[shdr_ndx];
-        min_align = @maximum(min_align, shdr.sh_addralign);
+        min_align = @max(min_align, shdr.sh_addralign);
     }
 
     const p_align = base.alignment orelse min_align;
