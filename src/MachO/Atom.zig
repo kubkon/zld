@@ -845,29 +845,33 @@ fn resolveRelocsX86(
                 log.debug("    | target_addr = 0x{x}", .{adjusted_target_addr});
                 const disp = try calcPcRelativeDisplacementX86(source_addr, adjusted_target_addr, 0);
 
-                // We need to rewrite the opcode from movq to leaq.
-                var disassembler = Disassembler.init(atom_code[rel_offset - 3 ..]);
-                const inst = (try disassembler.next()) orelse unreachable;
-                assert(inst.enc == .rm);
-                assert(inst.tag == .mov);
-                const rm = inst.data.rm;
-                const dst = rm.reg;
-                const src = rm.reg_or_mem.mem;
+                if (macho_file.tlv_ptr_table.get(target) == null) {
+                    // We need to rewrite the opcode from movq to leaq.
+                    var disassembler = Disassembler.init(atom_code[rel_offset - 3 ..]);
+                    const inst = (try disassembler.next()) orelse unreachable;
+                    assert(inst.enc == .rm);
+                    assert(inst.tag == .mov);
+                    const rm = inst.data.rm;
+                    const dst = rm.reg;
+                    const src = rm.reg_or_mem.mem;
 
-                var stream = std.io.fixedBufferStream(atom_code[rel_offset - 3 ..][0..7]);
-                const writer = stream.writer();
+                    var stream = std.io.fixedBufferStream(atom_code[rel_offset - 3 ..][0..7]);
+                    const writer = stream.writer();
 
-                const new_inst = Instruction{
-                    .tag = .lea,
-                    .enc = .rm,
-                    .data = Instruction.Data.rm(dst, RegisterOrMemory.mem(.{
-                        .ptr_size = src.ptr_size,
-                        .scale_index = src.scale_index,
-                        .base = src.base,
-                        .disp = disp,
-                    })),
-                };
-                try new_inst.encode(writer);
+                    const new_inst = Instruction{
+                        .tag = .lea,
+                        .enc = .rm,
+                        .data = Instruction.Data.rm(dst, RegisterOrMemory.mem(.{
+                            .ptr_size = src.ptr_size,
+                            .scale_index = src.scale_index,
+                            .base = src.base,
+                            .disp = disp,
+                        })),
+                    };
+                    try new_inst.encode(writer);
+                } else {
+                    mem.writeIntLittle(i32, atom_code[rel_offset..][0..4], disp);
+                }
             },
 
             .X86_64_RELOC_SIGNED,
