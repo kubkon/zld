@@ -4048,6 +4048,7 @@ fn logSymtab(self: *MachO) void {
     for (self.objects.items) |object, id| {
         scoped_log.debug("  object({d}): {s}", .{ id, object.name });
         for (object.symtab) |sym, sym_id| {
+            if (object.in_symtab == null) continue;
             mem.set(u8, &buf, '_');
             scoped_log.debug("    %{d}: {s} @{x} in sect({d}), {s}", .{
                 sym_id,
