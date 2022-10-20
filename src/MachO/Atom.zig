@@ -503,8 +503,9 @@ fn resolveRelocsArm64(
                     atom.file,
                 });
 
+                const sym_index = reverse_lookup[rel.r_symbolnum];
                 const sym_loc = MachO.SymbolWithLoc{
-                    .sym_index = rel.r_symbolnum,
+                    .sym_index = sym_index,
                     .file = atom.file,
                 };
                 const sym = macho_file.getSymbol(sym_loc);
@@ -785,8 +786,9 @@ fn resolveRelocsX86(
                     atom.file,
                 });
 
+                const sym_index = reverse_lookup[rel.r_symbolnum];
                 const sym_loc = MachO.SymbolWithLoc{
-                    .sym_index = rel.r_symbolnum,
+                    .sym_index = sym_index,
                     .file = atom.file,
                 };
                 const sym = macho_file.getSymbol(sym_loc);
