@@ -170,7 +170,7 @@ pub fn parseRelocTarget(
     atom_index: AtomIndex,
     rel: macho.relocation_info,
     reverse_lookup: []u32,
-) !MachO.SymbolWithLoc {
+) MachO.SymbolWithLoc {
     const atom = macho_file.getAtom(atom_index);
     const object = &macho_file.objects.items[atom.getFile().?];
 
@@ -434,15 +434,16 @@ pub fn getRelocTargetAddress(macho_file: *MachO, rel: macho.relocation_info, tar
         macho_file.getSymbolName(target_atom.getSymbolWithLoc()),
         target_atom.file,
     });
-    // If `target` is contained within the target atom, pull its address value.
     const target_sym = macho_file.getSymbol(target_atom.getSymbolWithLoc());
+    assert(target_sym.n_desc != MachO.N_DEAD);
+
+    // If `target` is contained within the target atom, pull its address value.
     const offset = if (target_atom.getFile() != null) blk: {
         const object = macho_file.objects.items[target_atom.getFile().?];
         break :blk if (object.getSourceSymbol(target.sym_index)) |_|
             Atom.calcInnerSymbolOffset(macho_file, target_atom_index, target.sym_index)
         else
             0; // section alias
-
     } else 0;
     const base_address: u64 = if (is_tlv) base_address: {
         // For TLV relocations, the value specified as a relocation is the displacement from the
@@ -503,20 +504,13 @@ fn resolveRelocsArm64(
                     atom.file,
                 });
 
-                const sym_index = reverse_lookup[rel.r_symbolnum];
-                const sym_loc = MachO.SymbolWithLoc{
-                    .sym_index = sym_index,
-                    .file = atom.file,
-                };
-                const sym = macho_file.getSymbol(sym_loc);
-                assert(sym.sect());
-                subtractor = sym_loc;
+                subtractor = parseRelocTarget(macho_file, atom_index, rel, reverse_lookup);
                 continue;
             },
             else => {},
         }
 
-        const target = try parseRelocTarget(macho_file, atom_index, rel, reverse_lookup);
+        const target = parseRelocTarget(macho_file, atom_index, rel, reverse_lookup);
         const rel_offset = @intCast(u32, rel.r_address - context.base_offset);
 
         log.debug("  RELA({s}) @ {x} => %{d} ('{s}') in object({?})", .{
@@ -786,20 +780,13 @@ fn resolveRelocsX86(
                     atom.file,
                 });
 
-                const sym_index = reverse_lookup[rel.r_symbolnum];
-                const sym_loc = MachO.SymbolWithLoc{
-                    .sym_index = sym_index,
-                    .file = atom.file,
-                };
-                const sym = macho_file.getSymbol(sym_loc);
-                assert(sym.sect());
-                subtractor = sym_loc;
+                subtractor = parseRelocTarget(macho_file, atom_index, rel, reverse_lookup);
                 continue;
             },
             else => {},
         }
 
-        const target = try parseRelocTarget(macho_file, atom_index, rel, reverse_lookup);
+        const target = parseRelocTarget(macho_file, atom_index, rel, reverse_lookup);
         const rel_offset = @intCast(u32, rel.r_address - context.base_offset);
 
         log.debug("  RELA({s}) @ {x} => %{d} in object({?})", .{
@@ -818,15 +805,18 @@ fn resolveRelocsX86(
             const header = macho_file.sections.items(.header)[source_sym.n_sect - 1];
             break :is_tlv header.@"type"() == macho.S_THREAD_LOCAL_VARIABLES;
         };
-        const target_addr = try getRelocTargetAddress(macho_file, rel, target, is_tlv);
 
         log.debug("    | source_addr = 0x{x}", .{source_addr});
+
+        const target_addr = try getRelocTargetAddress(macho_file, rel, target, is_tlv);
 
         switch (rel_type) {
             .X86_64_RELOC_BRANCH => {
                 const addend = mem.readIntLittle(i32, atom_code[rel_offset..][0..4]);
                 const adjusted_target_addr = @intCast(u64, @intCast(i64, target_addr) + addend);
+
                 log.debug("    | target_addr = 0x{x}", .{adjusted_target_addr});
+
                 const disp = try calcPcRelativeDisplacementX86(source_addr, adjusted_target_addr, 0);
                 mem.writeIntLittle(i32, atom_code[rel_offset..][0..4], disp);
             },

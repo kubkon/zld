@@ -42,8 +42,12 @@ fn collectRoots(macho_file: *MachO, roots: *AtomTable) !void {
             const object = macho_file.objects.items[global.getFile().?];
             const atom_index = object.getAtomIndexForSymbol(global.sym_index).?; // panic here means fatal error
             _ = try roots.getOrPut(atom_index);
-            log.debug("adding root", .{});
-            macho_file.logAtom(atom_index, log);
+
+            log.debug("root(ATOM({d}, %{d}, {d}))", .{
+                atom_index,
+                macho_file.getAtom(atom_index).sym_index,
+                macho_file.getAtom(atom_index).file,
+            });
         },
         else => |other| {
             assert(other == .lib);
@@ -55,8 +59,12 @@ fn collectRoots(macho_file: *MachO, roots: *AtomTable) !void {
                 const object = macho_file.objects.items[global.getFile().?];
                 const atom_index = object.getAtomIndexForSymbol(global.sym_index).?; // panic here means fatal error
                 _ = try roots.getOrPut(atom_index);
-                log.debug("adding root", .{});
-                macho_file.logAtom(atom_index, log);
+
+                log.debug("root(ATOM({d}, %{d}, {d}))", .{
+                    atom_index,
+                    macho_file.getAtom(atom_index).sym_index,
+                    macho_file.getAtom(atom_index).file,
+                });
             }
         },
     }
@@ -67,28 +75,36 @@ fn collectRoots(macho_file: *MachO, roots: *AtomTable) !void {
             const object = macho_file.objects.items[global.getFile().?];
             if (object.getAtomIndexForSymbol(global.sym_index)) |atom_index| {
                 _ = try roots.getOrPut(atom_index);
-                log.debug("adding root", .{});
-                macho_file.logAtom(atom_index, log);
+
+                log.debug("root(ATOM({d}, %{d}, {d}))", .{
+                    atom_index,
+                    macho_file.getAtom(atom_index).sym_index,
+                    macho_file.getAtom(atom_index).file,
+                });
             }
             break;
         }
     }
 
     for (macho_file.objects.items) |object| {
-        for (object.atoms.items) |atom_index| {
-            const atom = macho_file.getAtom(atom_index);
+        const has_subsections = object.header.flags & macho.MH_SUBSECTIONS_VIA_SYMBOLS != 0;
 
-            const sect_id = if (object.getSourceSymbol(atom.sym_index)) |source_sym|
-                source_sym.n_sect - 1
-            else blk: {
-                const nbase = @intCast(u32, object.in_symtab.?.len);
-                const sect_id = @intCast(u16, atom.sym_index - nbase);
-                break :blk sect_id;
-            };
-            const source_sect = object.getSourceSection(sect_id);
+        for (object.atoms.items) |atom_index| {
             const is_gc_root = blk: {
+                // Modelled after ld64 which treats each object file compiled without MH_SUBSECTIONS_VIA_SYMBOLS
+                // as a root.
+                if (!has_subsections) break :blk true;
+
+                const atom = macho_file.getAtom(atom_index);
+                const sect_id = if (object.getSourceSymbol(atom.sym_index)) |source_sym|
+                    source_sym.n_sect - 1
+                else sect_id: {
+                    const nbase = @intCast(u32, object.in_symtab.?.len);
+                    const sect_id = @intCast(u16, atom.sym_index - nbase);
+                    break :sect_id sect_id;
+                };
+                const source_sect = object.getSourceSection(sect_id);
                 if (source_sect.isDontDeadStrip()) break :blk true;
-                if (mem.eql(u8, "__StaticInit", source_sect.sectName())) break :blk true;
                 switch (source_sect.@"type"()) {
                     macho.S_MOD_INIT_FUNC_POINTERS,
                     macho.S_MOD_TERM_FUNC_POINTERS,
@@ -98,8 +114,12 @@ fn collectRoots(macho_file: *MachO, roots: *AtomTable) !void {
             };
             if (is_gc_root) {
                 try roots.putNoClobber(atom_index, {});
-                log.debug("adding root", .{});
-                macho_file.logAtom(atom_index, log);
+
+                log.debug("root(ATOM({d}, %{d}, {d}))", .{
+                    atom_index,
+                    macho_file.getAtom(atom_index).sym_index,
+                    macho_file.getAtom(atom_index).file,
+                });
             }
         }
     }
@@ -111,9 +131,12 @@ fn markLive(
     alive: *AtomTable,
     reverse_lookups: [][]u32,
 ) anyerror!void {
-    log.debug("mark(ATOM({d}))", .{atom_index});
-
     if (alive.contains(atom_index)) return;
+
+    const atom = macho_file.getAtom(atom_index);
+    const sym_loc = atom.getSymbolWithLoc();
+
+    log.debug("mark(ATOM({d}, %{d}, {d}))", .{ atom_index, sym_loc.sym_index, sym_loc.file });
 
     alive.putAssumeCapacityNoClobber(atom_index, {});
 
@@ -121,8 +144,7 @@ fn markLive(
 
     const cpu_arch = macho_file.options.target.cpu_arch.?;
 
-    const atom = macho_file.getAtom(atom_index);
-    const sym = macho_file.getSymbol(atom.getSymbolWithLoc());
+    const sym = macho_file.getSymbol(sym_loc);
     const header = macho_file.sections.items(.header)[sym.n_sect - 1];
     if (header.isZerofill()) return;
 
@@ -130,37 +152,31 @@ fn markLive(
     const reverse_lookup = reverse_lookups[atom.getFile().?];
     for (relocs) |rel| {
         const target = switch (cpu_arch) {
-            .aarch64 => blk: {
-                const rel_type = @intToEnum(macho.reloc_type_arm64, rel.r_type);
-                switch (rel_type) {
-                    .ARM64_RELOC_ADDEND => continue,
-                    .ARM64_RELOC_SUBTRACTOR => {
-                        const sym_index = reverse_lookup[rel.r_symbolnum];
-                        break :blk SymbolWithLoc{
-                            .sym_index = sym_index,
-                            .file = atom.file,
-                        };
-                    },
-                    else => break :blk try Atom.parseRelocTarget(macho_file, atom_index, rel, reverse_lookup),
-                }
+            .aarch64 => switch (@intToEnum(macho.reloc_type_arm64, rel.r_type)) {
+                .ARM64_RELOC_ADDEND => continue,
+                else => Atom.parseRelocTarget(macho_file, atom_index, rel, reverse_lookup),
             },
-            .x86_64 => blk: {
-                const rel_type = @intToEnum(macho.reloc_type_x86_64, rel.r_type);
-                switch (rel_type) {
-                    .X86_64_RELOC_SUBTRACTOR => {
-                        const sym_index = reverse_lookup[rel.r_symbolnum];
-                        break :blk SymbolWithLoc{
-                            .sym_index = sym_index,
-                            .file = atom.file,
-                        };
-                    },
-                    else => break :blk try Atom.parseRelocTarget(macho_file, atom_index, rel, reverse_lookup),
-                }
-            },
+            .x86_64 => Atom.parseRelocTarget(macho_file, atom_index, rel, reverse_lookup),
             else => unreachable,
         };
 
         const target_sym = macho_file.getSymbol(target);
+
+        if (rel.r_extern == 0) {
+            // We are pessimistic and mark all atoms within the target section as live.
+            // TODO: this can be improved by marking only the relevant atoms.
+            const sect_id = target_sym.n_sect;
+            const object = macho_file.objects.items[target.getFile().?];
+            for (object.atoms.items) |other_atom_index| {
+                const other_atom = macho_file.getAtom(other_atom_index);
+                const other_sym = macho_file.getSymbol(other_atom.getSymbolWithLoc());
+                if (other_sym.n_sect == sect_id) {
+                    try markLive(macho_file, other_atom_index, alive, reverse_lookups);
+                }
+            }
+            continue;
+        }
+
         if (target_sym.undf()) continue;
         if (target.getFile() == null) {
             const target_sym_name = macho_file.getSymbolName(target);
@@ -172,44 +188,40 @@ fn markLive(
 
         const object = macho_file.objects.items[target.getFile().?];
         const target_atom_index = object.getAtomIndexForSymbol(target.sym_index).?;
-        log.debug("  following ATOM({d})", .{target_atom_index});
+        log.debug("  following ATOM({d}, %{d}, {d})", .{
+            target_atom_index,
+            macho_file.getAtom(target_atom_index).sym_index,
+            macho_file.getAtom(target_atom_index).file,
+        });
 
         try markLive(macho_file, target_atom_index, alive, reverse_lookups);
     }
 }
 
 fn refersLive(macho_file: *MachO, atom_index: AtomIndex, alive: AtomTable, reverse_lookups: [][]u32) !bool {
-    log.debug("refersLive(ATOM({d}))", .{atom_index});
+    const atom = macho_file.getAtom(atom_index);
+    const sym_loc = atom.getSymbolWithLoc();
+
+    log.debug("refersLive(ATOM({d}, %{d}, {d}))", .{ atom_index, sym_loc.sym_index, sym_loc.file });
 
     const cpu_arch = macho_file.options.target.cpu_arch.?;
 
-    const atom = macho_file.getAtom(atom_index);
-    const sym = macho_file.getSymbol(atom.getSymbolWithLoc());
+    const sym = macho_file.getSymbol(sym_loc);
     const header = macho_file.sections.items(.header)[sym.n_sect - 1];
-    if (header.isZerofill()) return false;
+    assert(!header.isZerofill());
 
     const relocs = Atom.getAtomRelocs(macho_file, atom_index);
     const reverse_lookup = reverse_lookups[atom.getFile().?];
     for (relocs) |rel| {
-        switch (cpu_arch) {
-            .aarch64 => {
-                const rel_type = @intToEnum(macho.reloc_type_arm64, rel.r_type);
-                switch (rel_type) {
-                    .ARM64_RELOC_ADDEND, .ARM64_RELOC_SUBTRACTOR => continue,
-                    else => {},
-                }
+        const target = switch (cpu_arch) {
+            .aarch64 => switch (@intToEnum(macho.reloc_type_arm64, rel.r_type)) {
+                .ARM64_RELOC_ADDEND => continue,
+                else => Atom.parseRelocTarget(macho_file, atom_index, rel, reverse_lookup),
             },
-            .x86_64 => {
-                const rel_type = @intToEnum(macho.reloc_type_x86_64, rel.r_type);
-                switch (rel_type) {
-                    .X86_64_RELOC_SUBTRACTOR => continue,
-                    else => {},
-                }
-            },
+            .x86_64 => Atom.parseRelocTarget(macho_file, atom_index, rel, reverse_lookup),
             else => unreachable,
-        }
+        };
 
-        const target = try Atom.parseRelocTarget(macho_file, atom_index, rel, reverse_lookup);
         const object = macho_file.objects.items[target.getFile().?];
         const target_atom_index = object.getAtomIndexForSymbol(target.sym_index) orelse {
             log.debug("atom for symbol '{s}' not found; skipping...", .{macho_file.getSymbolName(target)});
@@ -217,7 +229,11 @@ fn refersLive(macho_file: *MachO, atom_index: AtomIndex, alive: AtomTable, rever
         };
         if (alive.contains(target_atom_index)) {
             if (alive.contains(target_atom_index)) {
-                log.debug("  refers live ATOM({d})", .{target_atom_index});
+                log.debug("  refers live ATOM({d}, %{d}, {d})", .{
+                    target_atom_index,
+                    macho_file.getAtom(target_atom_index).sym_index,
+                    macho_file.getAtom(target_atom_index).file,
+                });
                 return true;
             }
         }
@@ -272,10 +288,16 @@ fn prune(macho_file: *MachO, alive: AtomTable) !void {
                 continue;
             }
 
-            macho_file.logAtom(atom_index, log);
-
             const atom = macho_file.getAtom(atom_index);
             const sym_loc = atom.getSymbolWithLoc();
+
+            log.debug("prune(ATOM({d}, %{d}, {d}))", .{
+                atom_index,
+                sym_loc.sym_index,
+                sym_loc.file,
+            });
+            log.debug("  {s} in {s}", .{ macho_file.getSymbolName(sym_loc), object.name });
+
             const sym = macho_file.getSymbolPtr(sym_loc);
             const sect_id = sym.n_sect - 1;
             var section = macho_file.sections.get(sect_id);
@@ -305,16 +327,17 @@ fn prune(macho_file: *MachO, alive: AtomTable) !void {
             macho_file.sections.set(sect_id, section);
             _ = object.atoms.swapRemove(i);
 
-            if (sym.ext()) {
-                sym.n_desc = MachO.N_DEAD;
-            }
+            sym.n_desc = MachO.N_DEAD;
 
             var inner_sym_it = Atom.getInnerSymbolsIterator(macho_file, atom_index);
             while (inner_sym_it.next()) |inner| {
                 const inner_sym = macho_file.getSymbolPtr(inner);
-                if (inner_sym.ext()) {
-                    inner_sym.n_desc = MachO.N_DEAD;
-                }
+                inner_sym.n_desc = MachO.N_DEAD;
+            }
+
+            if (Atom.getSectionAlias(macho_file, atom_index)) |alias| {
+                const alias_sym = macho_file.getSymbolPtr(alias);
+                alias_sym.n_desc = MachO.N_DEAD;
             }
         }
     }
