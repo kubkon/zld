@@ -11,10 +11,12 @@ const CrossTarget = std.zig.CrossTarget;
 const Elf = @import("Elf.zig");
 const MachO = @import("MachO.zig");
 const Coff = @import("Coff.zig");
+const ThreadPool = @import("ThreadPool.zig");
 
 tag: Tag,
 allocator: Allocator,
 file: fs.File,
+thread_pool: *ThreadPool,
 
 pub const Tag = enum {
     coff,
@@ -75,21 +77,28 @@ pub fn main(tag: Tag, ctx: MainCtx) !void {
     var arena_allocator = std.heap.ArenaAllocator.init(ctx.gpa);
     defer arena_allocator.deinit();
     const arena = arena_allocator.allocator();
+
     const opts: Options = switch (tag) {
         .elf => .{ .elf = try Elf.Options.parseArgs(arena, ctx) },
         .macho => .{ .macho = try MachO.Options.parseArgs(arena, ctx) },
         .coff => .{ .coff = try Coff.Options.parseArgs(arena, ctx) },
     };
-    const zld = try openPath(ctx.gpa, tag, opts);
+
+    var thread_pool: ThreadPool = undefined;
+    try thread_pool.init(ctx.gpa);
+    defer thread_pool.deinit();
+
+    const zld = try openPath(ctx.gpa, tag, opts, &thread_pool);
     defer zld.deinit();
+
     try zld.flush();
 }
 
-pub fn openPath(allocator: Allocator, tag: Tag, options: Options) !*Zld {
+pub fn openPath(allocator: Allocator, tag: Tag, options: Options, thread_pool: *ThreadPool) !*Zld {
     return switch (tag) {
-        .macho => &(try MachO.openPath(allocator, options.macho)).base,
-        .elf => &(try Elf.openPath(allocator, options.elf)).base,
-        .coff => &(try Coff.openPath(allocator, options.coff)).base,
+        .macho => &(try MachO.openPath(allocator, options.macho, thread_pool)).base,
+        .elf => &(try Elf.openPath(allocator, options.elf, thread_pool)).base,
+        .coff => &(try Coff.openPath(allocator, options.coff, thread_pool)).base,
     };
 }
 

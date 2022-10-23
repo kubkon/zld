@@ -8,7 +8,9 @@ const macho = std.macho;
 const mem = std.mem;
 const testing = std.testing;
 const Allocator = mem.Allocator;
+const MachO = @import("../MachO.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
+const WaitGroup = @import("../WaitGroup.zig");
 const Zld = @import("../Zld.zig");
 
 const hash_size: u8 = 32;
@@ -259,10 +261,12 @@ pub const WriteOpts = struct {
 
 pub fn writeAdhocSignature(
     self: *CodeSignature,
-    allocator: Allocator,
+    macho_file: *MachO,
     opts: WriteOpts,
     writer: anytype,
 ) !void {
+    const allocator = macho_file.base.allocator;
+
     var header: macho.SuperBlob = .{
         .magic = macho.CSMAGIC_EMBEDDED_SIGNATURE,
         .length = @sizeOf(macho.SuperBlob),
@@ -277,34 +281,46 @@ pub fn writeAdhocSignature(
     self.code_directory.inner.execSegFlags = if (opts.output_mode == .exe) macho.CS_EXECSEG_MAIN_BINARY else 0;
     self.code_directory.inner.codeLimit = opts.file_size;
 
-    const total_pages = mem.alignForward(opts.file_size, self.page_size) / self.page_size;
-
-    var buffer = try allocator.alloc(u8, self.page_size);
-    defer allocator.free(buffer);
+    const total_pages = @intCast(u32, mem.alignForward(opts.file_size, self.page_size) / self.page_size);
 
     try self.code_directory.code_slots.ensureTotalCapacityPrecise(allocator, total_pages);
+    self.code_directory.code_slots.items.len = total_pages;
+    self.code_directory.inner.nCodeSlots = total_pages;
 
     // Calculate hash for each page (in file) and write it to the buffer
-    var hash: [hash_size]u8 = undefined;
-    var i: usize = 0;
-    while (i < total_pages) : (i += 1) {
-        const fstart = i * self.page_size;
-        const fsize = if (fstart + self.page_size > opts.file_size)
-            opts.file_size - fstart
-        else
-            self.page_size;
-        const len = try opts.file.preadAll(buffer, fstart);
-        assert(fsize <= len);
+    var wg: WaitGroup = .{};
+    {
+        const buffer = try allocator.alloc(u8, self.page_size * total_pages);
+        defer allocator.free(buffer);
 
-        Sha256.hash(buffer[0..fsize], &hash, .{});
+        const results = try allocator.alloc(fs.File.PReadError!usize, total_pages);
+        defer allocator.free(results);
+        {
+            wg.reset();
+            defer wg.wait();
 
-        self.code_directory.code_slots.appendAssumeCapacity(hash);
-        self.code_directory.inner.nCodeSlots += 1;
+            var i: usize = 0;
+            while (i < total_pages) : (i += 1) {
+                const fstart = i * self.page_size;
+                const fsize = if (fstart + self.page_size > opts.file_size)
+                    opts.file_size - fstart
+                else
+                    self.page_size;
+                const out_hash = &self.code_directory.code_slots.items[i];
+                wg.start();
+                try macho_file.base.thread_pool.spawn(workerSha256Hash, .{
+                    opts.file, fstart, buffer[fstart..][0..fsize], out_hash, &results[i], &wg,
+                });
+            }
+        }
+        for (results) |result| _ = try result;
     }
 
     try blobs.append(.{ .code_directory = &self.code_directory });
     header.length += @sizeOf(macho.BlobIndex);
     header.count += 1;
+
+    var hash: [hash_size]u8 = undefined;
 
     if (self.requirements) |*req| {
         var buf = std.ArrayList(u8).init(allocator);
@@ -355,6 +371,19 @@ pub fn writeAdhocSignature(
     for (blobs.items) |blob| {
         try blob.write(writer);
     }
+}
+
+fn workerSha256Hash(
+    file: fs.File,
+    fstart: usize,
+    buffer: []u8,
+    hash: *[hash_size]u8,
+    err: *fs.File.PReadError!usize,
+    wg: *WaitGroup,
+) void {
+    defer wg.finish();
+    err.* = file.preadAll(buffer, fstart);
+    Sha256.hash(buffer, hash, .{});
 }
 
 pub fn size(self: CodeSignature) u32 {

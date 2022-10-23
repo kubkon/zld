@@ -30,6 +30,7 @@ const Object = @import("MachO/Object.zig");
 pub const Options = @import("MachO/Options.zig");
 const LibStub = @import("tapi.zig").LibStub;
 const StringTable = @import("strtab.zig").StringTable;
+const ThreadPool = @import("ThreadPool.zig");
 const Trie = @import("MachO/Trie.zig");
 const Zld = @import("Zld.zig");
 
@@ -141,7 +142,7 @@ const default_headerpad_size: u32 = 0x1000;
 
 pub const N_DEAD: u16 = @bitCast(u16, @as(i16, -1));
 
-pub fn openPath(allocator: Allocator, options: Options) !*MachO {
+pub fn openPath(allocator: Allocator, options: Options, thread_pool: *ThreadPool) !*MachO {
     const file = try options.emit.directory.createFile(options.emit.sub_path, .{
         .truncate = true,
         .read = true,
@@ -149,7 +150,7 @@ pub fn openPath(allocator: Allocator, options: Options) !*MachO {
     });
     errdefer file.close();
 
-    const self = try createEmpty(allocator, options);
+    const self = try createEmpty(allocator, options, thread_pool);
     errdefer self.base.destroy();
 
     self.base.file = file;
@@ -157,7 +158,7 @@ pub fn openPath(allocator: Allocator, options: Options) !*MachO {
     return self;
 }
 
-fn createEmpty(gpa: Allocator, options: Options) !*MachO {
+fn createEmpty(gpa: Allocator, options: Options, thread_pool: *ThreadPool) !*MachO {
     const self = try gpa.create(MachO);
     const cpu_arch = options.target.cpu_arch.?;
     const page_size: u16 = if (cpu_arch == .aarch64) 0x4000 else 0x1000;
@@ -167,6 +168,7 @@ fn createEmpty(gpa: Allocator, options: Options) !*MachO {
             .tag = .macho,
             .allocator = gpa,
             .file = undefined,
+            .thread_pool = thread_pool,
         },
         .options = options,
         .page_size = page_size,
@@ -3576,7 +3578,7 @@ fn writeCodeSignature(self: *MachO, code_sig: *CodeSignature, offset: u32) !void
     var buffer = std.ArrayList(u8).init(self.base.allocator);
     defer buffer.deinit();
     try buffer.ensureTotalCapacityPrecise(code_sig.size());
-    try code_sig.writeAdhocSignature(self.base.allocator, .{
+    try code_sig.writeAdhocSignature(self, .{
         .file = self.base.file,
         .exec_seg_base = seg.fileoff,
         .exec_seg_limit = seg.filesize,

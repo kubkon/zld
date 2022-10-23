@@ -11,6 +11,7 @@ const mem = std.mem;
 const Allocator = mem.Allocator;
 const Object = @import("Coff/Object.zig");
 pub const Options = @import("Coff/Options.zig");
+const ThreadPool = @import("ThreadPool.zig");
 const Zld = @import("Zld.zig");
 
 pub const base_tag = Zld.Tag.coff;
@@ -20,7 +21,7 @@ options: Options,
 
 objects: std.ArrayListUnmanaged(Object) = .{},
 
-pub fn openPath(allocator: Allocator, options: Options) !*Coff {
+pub fn openPath(allocator: Allocator, options: Options, thread_pool: *ThreadPool) !*Coff {
     const file = try options.emit.directory.createFile(options.emit.sub_path, .{
         .truncate = true,
         .read = true,
@@ -28,7 +29,7 @@ pub fn openPath(allocator: Allocator, options: Options) !*Coff {
     });
     errdefer file.close();
 
-    const self = try createEmpty(allocator, options);
+    const self = try createEmpty(allocator, options, thread_pool);
     errdefer allocator.destroy(self);
 
     self.base.file = file;
@@ -36,7 +37,7 @@ pub fn openPath(allocator: Allocator, options: Options) !*Coff {
     return self;
 }
 
-fn createEmpty(gpa: Allocator, options: Options) !*Coff {
+fn createEmpty(gpa: Allocator, options: Options, thread_pool: *ThreadPool) !*Coff {
     const self = try gpa.create(Coff);
 
     self.* = .{
@@ -44,6 +45,7 @@ fn createEmpty(gpa: Allocator, options: Options) !*Coff {
             .tag = .coff,
             .allocator = gpa,
             .file = undefined,
+            .thread_pool = thread_pool,
         },
         .options = options,
     };

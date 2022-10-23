@@ -17,6 +17,7 @@ const Atom = @import("Elf/Atom.zig");
 const Object = @import("Elf/Object.zig");
 pub const Options = @import("Elf/Options.zig");
 const StringTable = @import("strtab.zig").StringTable;
+const ThreadPool = @import("ThreadPool.zig");
 const Zld = @import("Zld.zig");
 
 pub const base_tag = Zld.Tag.elf;
@@ -76,7 +77,7 @@ pub const SymbolWithLoc = struct {
 
 const default_base_addr: u64 = 0x200000;
 
-pub fn openPath(allocator: Allocator, options: Options) !*Elf {
+pub fn openPath(allocator: Allocator, options: Options, thread_pool: *ThreadPool) !*Elf {
     const file = try options.emit.directory.createFile(options.emit.sub_path, .{
         .truncate = true,
         .read = true,
@@ -84,7 +85,7 @@ pub fn openPath(allocator: Allocator, options: Options) !*Elf {
     });
     errdefer file.close();
 
-    const self = try createEmpty(allocator, options);
+    const self = try createEmpty(allocator, options, thread_pool);
     errdefer allocator.destroy(self);
 
     self.base.file = file;
@@ -94,7 +95,7 @@ pub fn openPath(allocator: Allocator, options: Options) !*Elf {
     return self;
 }
 
-fn createEmpty(gpa: Allocator, options: Options) !*Elf {
+fn createEmpty(gpa: Allocator, options: Options, thread_pool: *ThreadPool) !*Elf {
     const self = try gpa.create(Elf);
 
     self.* = .{
@@ -102,6 +103,7 @@ fn createEmpty(gpa: Allocator, options: Options) !*Elf {
             .tag = .elf,
             .allocator = gpa,
             .file = undefined,
+            .thread_pool = thread_pool,
         },
         .options = options,
     };
