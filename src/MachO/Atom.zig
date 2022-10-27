@@ -9,6 +9,7 @@ const macho = std.macho;
 const math = std.math;
 const mem = std.mem;
 const meta = std.meta;
+const trace = @import("../tracy.zig").trace;
 
 const Allocator = mem.Allocator;
 const Arch = std.Target.Cpu.Arch;
@@ -149,6 +150,9 @@ pub fn scanAtomRelocs(
     relocs: []align(1) const macho.relocation_info,
     reverse_lookup: []u32,
 ) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const arch = macho_file.options.target.cpu_arch.?;
     const atom = macho_file.getAtom(atom_index);
     assert(atom.getFile() != null); // synthetic atoms do not have relocs
@@ -171,6 +175,9 @@ pub fn parseRelocTarget(
     rel: macho.relocation_info,
     reverse_lookup: []u32,
 ) MachO.SymbolWithLoc {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const atom = macho_file.getAtom(atom_index);
     const object = &macho_file.objects.items[atom.getFile().?];
 
@@ -196,6 +203,9 @@ pub fn parseRelocTarget(
 }
 
 pub fn getRelocTargetAtomIndex(macho_file: *MachO, rel: macho.relocation_info, target: SymbolWithLoc) ?AtomIndex {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const is_via_got = got: {
         switch (macho_file.options.target.cpu_arch.?) {
             .aarch64 => break :got switch (@intToEnum(macho.reloc_type_arm64, rel.r_type)) {
@@ -385,6 +395,9 @@ pub fn resolveRelocs(
     atom_relocs: []align(1) const macho.relocation_info,
     reverse_lookup: []u32,
 ) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const arch = macho_file.options.target.cpu_arch.?;
     const atom = macho_file.getAtom(atom_index);
     assert(atom.getFile() != null); // synthetic atoms do not have relocs

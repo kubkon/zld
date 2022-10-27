@@ -4,6 +4,7 @@ const log = std.log.scoped(.dead_strip);
 const macho = std.macho;
 const math = std.math;
 const mem = std.mem;
+const trace = @import("../tracy.zig").trace;
 
 const Allocator = mem.Allocator;
 const AtomIndex = MachO.AtomIndex;
@@ -14,6 +15,9 @@ const SymbolWithLoc = MachO.SymbolWithLoc;
 const AtomTable = std.AutoHashMap(AtomIndex, void);
 
 pub fn gcAtoms(macho_file: *MachO, reverse_lookups: [][]u32) Allocator.Error!void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const gpa = macho_file.base.allocator;
 
     var arena = std.heap.ArenaAllocator.init(gpa);

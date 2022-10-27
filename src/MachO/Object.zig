@@ -11,7 +11,7 @@ const macho = std.macho;
 const math = std.math;
 const mem = std.mem;
 const sort = std.sort;
-const trace = @import("../../tracy.zig").trace;
+const trace = @import("../tracy.zig").trace;
 
 const Allocator = mem.Allocator;
 const Atom = @import("Atom.zig");
@@ -62,6 +62,9 @@ pub fn deinit(self: *Object, gpa: Allocator) void {
 }
 
 pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     var stream = std.io.fixedBufferStream(self.contents);
     const reader = stream.reader();
 
@@ -279,6 +282,9 @@ fn sectionLessThanByAddress(ctx: void, lhs: SortedSection, rhs: SortedSection) b
 }
 
 pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u31) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const gpa = macho_file.base.allocator;
 
     log.debug("splitting object({d}, {s}) into atoms", .{ object_id, self.name });

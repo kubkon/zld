@@ -18,6 +18,7 @@ const bind = @import("MachO/bind.zig");
 const dead_strip = @import("MachO/dead_strip.zig");
 const fat = @import("MachO/fat.zig");
 const thunks = @import("MachO/thunks.zig");
+const trace = @import("tracy.zig").trace;
 
 const Allocator = mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
@@ -178,6 +179,9 @@ fn createEmpty(gpa: Allocator, options: Options, thread_pool: *ThreadPool) !*Mac
 }
 
 pub fn flush(self: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const gpa = self.base.allocator;
     var arena_allocator = ArenaAllocator.init(gpa);
     defer arena_allocator.deinit();
@@ -318,17 +322,7 @@ pub fn flush(self: *MachO) !void {
         .table = std.StringHashMap(u32).init(arena),
         .unresolved = std.AutoArrayHashMap(u32, void).init(arena),
     };
-
-    for (self.objects.items) |_, object_id| {
-        try self.resolveSymbolsInObject(@intCast(u16, object_id), &resolver);
-    }
-
-    try self.resolveSymbolsInArchives(&resolver);
-    try self.resolveDyldStubBinder(&resolver);
-    try self.resolveSymbolsInDylibs(&resolver);
-    try self.createMhExecuteHeaderSymbol(&resolver);
-    try self.createDsoHandleSymbol(&resolver);
-    try self.resolveSymbolsAtLoading(&resolver);
+    try self.resolveSymbols(&resolver);
 
     if (resolver.unresolved.count() > 0) {
         return error.UndefinedSymbolReference;
@@ -349,9 +343,7 @@ pub fn flush(self: *MachO) !void {
         self.entry_index = global_index;
     }
 
-    for (self.objects.items) |*object, object_id| {
-        try object.splitIntoAtoms(self, @intCast(u31, object_id));
-    }
+    try self.splitIntoAtoms();
 
     var reverse_lookups: [][]u32 = try arena.alloc([]u32, self.objects.items.len);
     for (self.objects.items) |object, i| {
@@ -777,6 +769,9 @@ pub fn parseDylib(
 }
 
 fn parsePositionals(self: *MachO, files: []const []const u8, syslibroot: ?[]const u8, dependent_libs: anytype) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     for (files) |file_name| {
         const full_path = full_path: {
             var buffer: [fs.MAX_PATH_BYTES]u8 = undefined;
@@ -795,6 +790,9 @@ fn parsePositionals(self: *MachO, files: []const []const u8, syslibroot: ?[]cons
 }
 
 fn parseAndForceLoadStaticArchives(self: *MachO, files: []const []const u8) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     for (files) |file_name| {
         const full_path = full_path: {
             var buffer: [fs.MAX_PATH_BYTES]u8 = undefined;
@@ -814,6 +812,9 @@ fn parseLibs(
     syslibroot: ?[]const u8,
     dependent_libs: anytype,
 ) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     for (lib_names) |lib, i| {
         const lib_info = lib_infos[i];
         log.debug("parsing lib path '{s}'", .{lib});
@@ -829,6 +830,9 @@ fn parseLibs(
 }
 
 fn parseDependentLibs(self: *MachO, syslibroot: ?[]const u8, dependent_libs: anytype) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     // At this point, we can now parse dependents of dylibs preserving the inclusion order of:
     // 1) anything on the linker line is parsed first
     // 2) afterwards, we parse dependents of the included dylibs
@@ -1430,6 +1434,22 @@ fn createTentativeDefAtoms(self: *MachO) !void {
         try object.atoms.append(gpa, atom_index);
         object.atom_by_index_table[global.sym_index] = atom_index;
     }
+}
+
+fn resolveSymbols(self: *MachO, resolver: *SymbolResolver) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    for (self.objects.items) |_, object_id| {
+        try self.resolveSymbolsInObject(@intCast(u16, object_id), resolver);
+    }
+
+    try self.resolveSymbolsInArchives(resolver);
+    try self.resolveDyldStubBinder(resolver);
+    try self.resolveSymbolsInDylibs(resolver);
+    try self.createMhExecuteHeaderSymbol(resolver);
+    try self.createDsoHandleSymbol(resolver);
+    try self.resolveSymbolsAtLoading(resolver);
 }
 
 fn resolveSymbolsInObject(self: *MachO, object_id: u16, resolver: *SymbolResolver) !void {
@@ -2173,7 +2193,19 @@ fn allocateSpecialSymbols(self: *MachO) !void {
     }
 }
 
+fn splitIntoAtoms(self: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    for (self.objects.items) |*object, object_id| {
+        try object.splitIntoAtoms(self, @intCast(u31, object_id));
+    }
+}
+
 fn writeAtoms(self: *MachO, reverse_lookups: [][]u32) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const gpa = self.base.allocator;
     const slice = self.sections.slice();
 
@@ -2314,6 +2346,9 @@ fn pruneAndSortSections(self: *MachO) !void {
 }
 
 fn calcSectionSizes(self: *MachO, reverse_lookups: [][]u32) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const slice = self.sections.slice();
     for (slice.items(.header)) |*header, sect_id| {
         if (header.size == 0) continue;
@@ -2356,6 +2391,9 @@ fn calcSectionSizes(self: *MachO, reverse_lookups: [][]u32) !void {
 }
 
 fn allocateSegments(self: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     for (self.segments.items) |*segment, segment_index| {
         const is_text_segment = mem.eql(u8, segment.segName(), "__TEXT");
         const base_size = if (is_text_segment) try self.calcMinHeaderPad() else 0;
@@ -2589,6 +2627,9 @@ fn writeSegmentHeaders(self: *MachO, ncmds: *u32, writer: anytype) !void {
 }
 
 fn writeLinkeditSegmentData(self: *MachO, ncmds: *u32, lc_writer: anytype, reverse_lookups: [][]u32) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     try self.writeDyldInfoData(ncmds, lc_writer, reverse_lookups);
     try self.writeFunctionStarts(ncmds, lc_writer);
     try self.writeDataInCode(ncmds, lc_writer);
