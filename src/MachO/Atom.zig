@@ -634,7 +634,7 @@ fn resolveRelocsArm64(
                         ), code),
                     };
                     const off = try calcPageOffset(adjusted_target_addr, switch (inst.load_store_register.size) {
-                        0 => if (inst.load_store_register.v == 1) .load_store_128 else .load_store_8,
+                        0 => if (inst.load_store_register.v == 1) PageOffsetInstKind.load_store_128 else PageOffsetInstKind.load_store_8,
                         1 => .load_store_16,
                         2 => .load_store_32,
                         3 => .load_store_64,
@@ -1049,14 +1049,16 @@ pub fn calcNumberOfPages(source_addr: u64, target_addr: u64) i21 {
     return pages;
 }
 
-pub fn calcPageOffset(target_addr: u64, kind: enum {
+const PageOffsetInstKind = enum {
     arithmetic,
     load_store_8,
     load_store_16,
     load_store_32,
     load_store_64,
     load_store_128,
-}) !u12 {
+};
+
+pub fn calcPageOffset(target_addr: u64, kind: PageOffsetInstKind) !u12 {
     const narrowed = @truncate(u12, target_addr);
     return switch (kind) {
         .arithmetic, .load_store_8 => narrowed,
