@@ -47,7 +47,7 @@ pub fn build(b: *Builder) void {
 
         exe.addIncludePath(tracy_path);
         // TODO: upstream bug
-        exe.addSystemIncludePath("/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include");
+        exe.addSystemIncludePath("/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include");
         exe.addCSourceFile(client_cpp, tracy_c_flags);
         exe.linkSystemLibraryName("c++");
         exe.linkLibC();
