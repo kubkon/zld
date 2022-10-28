@@ -35,6 +35,9 @@ pub fn gcAtoms(macho_file: *MachO, reverse_lookups: [][]u32) Allocator.Error!voi
 }
 
 fn collectRoots(macho_file: *MachO, roots: *AtomTable) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const output_mode = macho_file.options.output_mode;
 
     log.debug("collecting roots", .{});
@@ -135,6 +138,9 @@ fn markLive(
     alive: *AtomTable,
     reverse_lookups: [][]u32,
 ) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     if (alive.contains(atom_index)) return;
 
     const atom = macho_file.getAtom(atom_index);
@@ -203,6 +209,9 @@ fn markLive(
 }
 
 fn refersLive(macho_file: *MachO, atom_index: AtomIndex, alive: AtomTable, reverse_lookups: [][]u32) bool {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const atom = macho_file.getAtom(atom_index);
     const sym_loc = atom.getSymbolWithLoc();
 
@@ -247,6 +256,9 @@ fn refersLive(macho_file: *MachO, atom_index: AtomIndex, alive: AtomTable, rever
 }
 
 fn mark(macho_file: *MachO, roots: AtomTable, alive: *AtomTable, reverse_lookups: [][]u32) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     var it = roots.keyIterator();
     while (it.next()) |root| {
         markLive(macho_file, root.*, alive, reverse_lookups);
@@ -282,6 +294,9 @@ fn mark(macho_file: *MachO, roots: AtomTable, alive: *AtomTable, reverse_lookups
 }
 
 fn prune(macho_file: *MachO, alive: AtomTable) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     log.debug("pruning dead atoms", .{});
     for (macho_file.objects.items) |*object| {
         var i: usize = 0;
