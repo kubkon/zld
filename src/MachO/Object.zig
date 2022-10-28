@@ -42,6 +42,8 @@ source_symtab_lookup: []u32 = undefined,
 /// Can be undefined as set together with in_symtab.
 source_address_lookup: []i64 = undefined,
 /// Can be undefined as set together with in_symtab.
+source_section_index_lookup: []i64 = undefined,
+/// Can be undefined as set together with in_symtab.
 strtab_lookup: []u32 = undefined,
 /// Can be undefined as set together with in_symtab.
 atom_by_index_table: []AtomIndex = undefined,
@@ -57,6 +59,7 @@ pub fn deinit(self: *Object, gpa: Allocator) void {
     if (self.in_symtab) |_| {
         gpa.free(self.source_symtab_lookup);
         gpa.free(self.source_address_lookup);
+        gpa.free(self.source_section_index_lookup);
         gpa.free(self.strtab_lookup);
         gpa.free(self.symtab);
         gpa.free(self.atom_by_index_table);
@@ -121,6 +124,7 @@ pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch)
                 // This is wasteful but we need to be able to lookup source symbol address after stripping and
                 // allocating of sections.
                 self.source_address_lookup = try allocator.alloc(i64, self.in_symtab.?.len);
+                self.source_section_index_lookup = try allocator.alloc(i64, nsects);
 
                 for (self.symtab) |*sym| {
                     sym.* = .{
@@ -134,6 +138,7 @@ pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch)
 
                 mem.set(i64, self.globals_lookup, -1);
                 mem.set(AtomIndex, self.atom_by_index_table, 0);
+                mem.set(i64, self.source_section_index_lookup, -1);
 
                 // You would expect that the symbol table is at least pre-sorted based on symbol's type:
                 // local < extern defined < undefined. Unfortunately, this is not guaranteed! For instance,
@@ -154,6 +159,10 @@ pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch)
 
                 for (sorted_all_syms.items) |sym_id, i| {
                     const sym = sym_id.getSymbol(self);
+
+                    if (sym.sect() and self.source_section_index_lookup[sym.n_sect - 1] == -1) {
+                        self.source_section_index_lookup[sym.n_sect - 1] = @intCast(i64, i);
+                    }
 
                     self.symtab[i] = sym;
                     self.source_address_lookup[i] = if (sym.undf()) -1 else @intCast(i64, sym.n_value);

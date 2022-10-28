@@ -4111,6 +4111,7 @@ fn logSymtab(self: *MachO) void {
             });
         }
     }
+
     scoped_log.debug("  object(-1)", .{});
     for (self.locals.items) |sym, sym_id| {
         if (sym.undf()) continue;
