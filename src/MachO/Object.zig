@@ -40,6 +40,8 @@ symtab: []macho.nlist_64 = undefined,
 /// Can be undefined as set together with in_symtab.
 source_symtab_lookup: []u32 = undefined,
 /// Can be undefined as set together with in_symtab.
+source_address_lookup: []i64 = undefined,
+/// Can be undefined as set together with in_symtab.
 strtab_lookup: []u32 = undefined,
 /// Can be undefined as set together with in_symtab.
 atom_by_index_table: []AtomIndex = undefined,
@@ -54,6 +56,7 @@ pub fn deinit(self: *Object, gpa: Allocator) void {
     gpa.free(self.contents);
     if (self.in_symtab) |_| {
         gpa.free(self.source_symtab_lookup);
+        gpa.free(self.source_address_lookup);
         gpa.free(self.strtab_lookup);
         gpa.free(self.symtab);
         gpa.free(self.atom_by_index_table);
@@ -115,6 +118,9 @@ pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch)
                 self.strtab_lookup = try allocator.alloc(u32, self.in_symtab.?.len);
                 self.globals_lookup = try allocator.alloc(i64, self.in_symtab.?.len);
                 self.atom_by_index_table = try allocator.alloc(AtomIndex, self.in_symtab.?.len + nsects);
+                // This is wasteful but we need to be able to lookup source symbol address after stripping and
+                // allocating of sections.
+                self.source_address_lookup = try allocator.alloc(i64, self.in_symtab.?.len);
 
                 for (self.symtab) |*sym| {
                     sym.* = .{
@@ -150,6 +156,7 @@ pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch)
                     const sym = sym_id.getSymbol(self);
 
                     self.symtab[i] = sym;
+                    self.source_address_lookup[i] = if (sym.undf()) -1 else @intCast(i64, sym.n_value);
                     self.source_symtab_lookup[i] = sym_id.index;
 
                     const sym_name_len = mem.sliceTo(@ptrCast([*:0]const u8, self.in_strtab.?.ptr + sym.n_strx), 0).len + 1;
@@ -243,13 +250,12 @@ fn filterSymbolsBySection(symbols: []macho.nlist_64, n_sect: u8) struct {
     return .{ .index = @intCast(u32, index), .len = @intCast(u32, len) };
 }
 
-fn filterSymbolsByAddress(symbols: []macho.nlist_64, n_sect: u8, start_addr: u64, end_addr: u64) struct {
+fn filterSymbolsByAddress(symbols: []macho.nlist_64, start_addr: u64, end_addr: u64) struct {
     index: u32,
     len: u32,
 } {
     const Predicate = struct {
         addr: u64,
-        n_sect: u8,
 
         pub fn predicate(pred: @This(), symbol: macho.nlist_64) bool {
             return symbol.n_value >= pred.addr;
@@ -258,11 +264,9 @@ fn filterSymbolsByAddress(symbols: []macho.nlist_64, n_sect: u8, start_addr: u64
 
     const index = MachO.lsearch(macho.nlist_64, symbols, Predicate{
         .addr = start_addr,
-        .n_sect = n_sect,
     });
     const len = MachO.lsearch(macho.nlist_64, symbols[index..], Predicate{
         .addr = end_addr,
-        .n_sect = n_sect,
     });
 
     return .{ .index = @intCast(u32, index), .len = @intCast(u32, len) };
@@ -411,12 +415,7 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u31) !void {
             while (next_sym_index < sect_start_index + sect_loc.len) {
                 const next_sym = symtab[next_sym_index];
                 const addr = next_sym.n_value;
-                const atom_loc = filterSymbolsByAddress(
-                    symtab[next_sym_index..],
-                    sect_id + 1,
-                    addr,
-                    addr + 1,
-                );
+                const atom_loc = filterSymbolsByAddress(symtab[next_sym_index..], addr, addr + 1);
                 assert(atom_loc.len > 0);
                 const atom_sym_index = atom_loc.index + next_sym_index;
                 const nsyms_trailing = atom_loc.len - 1;

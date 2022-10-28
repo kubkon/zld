@@ -169,23 +169,7 @@ fn markLive(
             .x86_64 => Atom.parseRelocTarget(macho_file, atom_index, rel, reverse_lookup),
             else => unreachable,
         };
-
         const target_sym = macho_file.getSymbol(target);
-
-        if (rel.r_extern == 0) {
-            // We are pessimistic and mark all atoms within the target section as live.
-            // TODO: this can be improved by marking only the relevant atoms.
-            const sect_id = target_sym.n_sect;
-            const object = macho_file.objects.items[target.getFile().?];
-            for (object.atoms.items) |other_atom_index| {
-                const other_atom = macho_file.getAtom(other_atom_index);
-                const other_sym = macho_file.getSymbol(other_atom.getSymbolWithLoc());
-                if (other_sym.n_sect == sect_id) {
-                    markLive(macho_file, other_atom_index, alive, reverse_lookups);
-                }
-            }
-            continue;
-        }
 
         if (target_sym.undf()) continue;
         if (target.getFile() == null) {
