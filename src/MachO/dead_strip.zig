@@ -4,6 +4,7 @@ const log = std.log.scoped(.dead_strip);
 const macho = std.macho;
 const math = std.math;
 const mem = std.mem;
+const trace = @import("../tracy.zig").trace;
 
 const Allocator = mem.Allocator;
 const AtomIndex = MachO.AtomIndex;
@@ -14,6 +15,9 @@ const SymbolWithLoc = MachO.SymbolWithLoc;
 const AtomTable = std.AutoHashMap(AtomIndex, void);
 
 pub fn gcAtoms(macho_file: *MachO, reverse_lookups: [][]u32) Allocator.Error!void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const gpa = macho_file.base.allocator;
 
     var arena = std.heap.ArenaAllocator.init(gpa);
@@ -31,6 +35,9 @@ pub fn gcAtoms(macho_file: *MachO, reverse_lookups: [][]u32) Allocator.Error!voi
 }
 
 fn collectRoots(macho_file: *MachO, roots: *AtomTable) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const output_mode = macho_file.options.output_mode;
 
     log.debug("collecting roots", .{});
@@ -131,6 +138,9 @@ fn markLive(
     alive: *AtomTable,
     reverse_lookups: [][]u32,
 ) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     if (alive.contains(atom_index)) return;
 
     const atom = macho_file.getAtom(atom_index);
@@ -159,23 +169,7 @@ fn markLive(
             .x86_64 => Atom.parseRelocTarget(macho_file, atom_index, rel, reverse_lookup),
             else => unreachable,
         };
-
         const target_sym = macho_file.getSymbol(target);
-
-        if (rel.r_extern == 0) {
-            // We are pessimistic and mark all atoms within the target section as live.
-            // TODO: this can be improved by marking only the relevant atoms.
-            const sect_id = target_sym.n_sect;
-            const object = macho_file.objects.items[target.getFile().?];
-            for (object.atoms.items) |other_atom_index| {
-                const other_atom = macho_file.getAtom(other_atom_index);
-                const other_sym = macho_file.getSymbol(other_atom.getSymbolWithLoc());
-                if (other_sym.n_sect == sect_id) {
-                    markLive(macho_file, other_atom_index, alive, reverse_lookups);
-                }
-            }
-            continue;
-        }
 
         if (target_sym.undf()) continue;
         if (target.getFile() == null) {
@@ -199,6 +193,9 @@ fn markLive(
 }
 
 fn refersLive(macho_file: *MachO, atom_index: AtomIndex, alive: AtomTable, reverse_lookups: [][]u32) bool {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const atom = macho_file.getAtom(atom_index);
     const sym_loc = atom.getSymbolWithLoc();
 
@@ -243,6 +240,9 @@ fn refersLive(macho_file: *MachO, atom_index: AtomIndex, alive: AtomTable, rever
 }
 
 fn mark(macho_file: *MachO, roots: AtomTable, alive: *AtomTable, reverse_lookups: [][]u32) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     var it = roots.keyIterator();
     while (it.next()) |root| {
         markLive(macho_file, root.*, alive, reverse_lookups);
@@ -278,6 +278,9 @@ fn mark(macho_file: *MachO, roots: AtomTable, alive: *AtomTable, reverse_lookups
 }
 
 fn prune(macho_file: *MachO, alive: AtomTable) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     log.debug("pruning dead atoms", .{});
     for (macho_file.objects.items) |*object| {
         var i: usize = 0;

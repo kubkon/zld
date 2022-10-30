@@ -15,6 +15,7 @@ pub fn build(b: *Builder) void {
 
     const enable_logging = b.option(bool, "log", "Whether to enable logging") orelse false;
     const is_qemu_enabled = b.option(bool, "enable-qemu", "Use QEMU to run cross compiled foreign architecture tests") orelse false;
+    const enable_tracy = b.option([]const u8, "tracy", "Enable Tracy integration. Supply path to Tracy source");
 
     const lib = b.addStaticLibrary("zld", "src/Zld.zig");
     lib.setTarget(target);
@@ -30,6 +31,33 @@ pub fn build(b: *Builder) void {
     const exe_opts = b.addOptions();
     exe.addOptions("build_options", exe_opts);
     exe_opts.addOption(bool, "enable_logging", enable_logging);
+    exe_opts.addOption(bool, "enable_tracy", enable_tracy != null);
+
+    if (enable_tracy) |tracy_path| {
+        const client_cpp = fs.path.join(
+            b.allocator,
+            &[_][]const u8{ tracy_path, "TracyClient.cpp" },
+        ) catch unreachable;
+
+        // On mingw, we need to opt into windows 7+ to get some features required by tracy.
+        const tracy_c_flags: []const []const u8 = if (target.isWindows() and target.getAbi() == .gnu)
+            &[_][]const u8{ "-DTRACY_ENABLE=1", "-fno-sanitize=undefined", "-D_WIN32_WINNT=0x601" }
+        else
+            &[_][]const u8{ "-DTRACY_ENABLE=1", "-fno-sanitize=undefined" };
+
+        exe.addIncludePath(tracy_path);
+        // TODO: upstream bug
+        exe.addSystemIncludePath("/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include");
+        exe.addCSourceFile(client_cpp, tracy_c_flags);
+        exe.linkSystemLibraryName("c++");
+        exe.linkLibC();
+        exe.strip = false;
+
+        if (target.isWindows()) {
+            exe.linkSystemLibrary("dbghelp");
+            exe.linkSystemLibrary("ws2_32");
+        }
+    }
     exe.install();
 
     const gen_symlinks = symlinks(exe, &[_][]const u8{

@@ -5,6 +5,7 @@ const fs = std.fs;
 const io = std.io;
 const mem = std.mem;
 const process = std.process;
+const trace = @import("tracy.zig").trace;
 
 const Allocator = mem.Allocator;
 const CrossTarget = std.zig.CrossTarget;
@@ -74,6 +75,9 @@ pub const MainCtx = struct {
 };
 
 pub fn main(tag: Tag, ctx: MainCtx) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     var arena_allocator = std.heap.ArenaAllocator.init(ctx.gpa);
     defer arena_allocator.deinit();
     const arena = arena_allocator.allocator();
