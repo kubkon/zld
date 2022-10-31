@@ -982,7 +982,7 @@ const SegmentBase = struct {
     alignment: ?u32 = null,
 };
 
-fn allocateSegment(self: *Elf, phdr_ndx: u16, shdr_ndxs: []?u16, base: SegmentBase) !void {
+fn allocateSegment(self: *Elf, phdr_ndx: u16, shdr_ndxs: []const ?u16, base: SegmentBase) !void {
     const phdr = &self.phdrs.items[phdr_ndx];
 
     var min_align: u64 = 0;
