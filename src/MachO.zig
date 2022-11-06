@@ -399,23 +399,21 @@ pub fn flush(self: *MachO) !void {
     // segment and the beginning of __LINKEDIT segment is zerofilled as the loader will
     // copy-paste this space into memory for quicker zerofill operation.
     if (self.getSegmentByName("__DATA")) |data_seg_id| blk: {
-        var physical_zerofill_start: u64 = 0;
+        var physical_zerofill_start: ?u64 = null;
         const section_indexes = self.getSectionIndexes(data_seg_id);
         for (self.sections.items(.header)[section_indexes.start..section_indexes.end]) |header| {
             if (header.isZerofill() and header.size > 0) break;
             physical_zerofill_start = header.offset + header.size;
         } else break :blk;
+        const start = physical_zerofill_start orelse break :blk;
         const linkedit = self.getLinkeditSegmentPtr();
-        const physical_zerofill_size = linkedit.fileoff - physical_zerofill_start;
-        if (physical_zerofill_size > 0) {
-            log.debug("zeroing out zerofill area of length {x} at {x}", .{
-                physical_zerofill_size,
-                physical_zerofill_start,
-            });
-            var padding = try self.base.allocator.alloc(u8, physical_zerofill_size);
+        const size = linkedit.fileoff - start;
+        if (size > 0) {
+            log.debug("zeroing out zerofill area of length {x} at {x}", .{ size, start });
+            var padding = try self.base.allocator.alloc(u8, size);
             defer self.base.allocator.free(padding);
             mem.set(u8, padding, 0);
-            try self.base.file.pwriteAll(padding, physical_zerofill_start);
+            try self.base.file.pwriteAll(padding, start);
         }
     }
 
