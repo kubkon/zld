@@ -6,7 +6,7 @@ const Wasm = @import("../Wasm.zig");
 const Symbol = @import("Symbol.zig");
 
 const leb = std.leb;
-const log = std.log.scoped(.zwld);
+const log = std.log.scoped(.wasm);
 const mem = std.mem;
 const Allocator = mem.Allocator;
 

@@ -11,10 +11,10 @@ const Atom = @import("Atom.zig");
 
 const fs = std.fs;
 const leb = std.leb;
-const log = std.log.scoped(.zwld);
+const log = std.log.scoped(.wasm);
 
 /// Writes the given `Wasm` object into a binary file as-is.
-pub fn emit(wasm: *Wasm, gpa: std.mem.Allocator) !void {
+pub fn emit(wasm: *Wasm) !void {
     const file = wasm.base.file;
     const writer = file.writer();
 
@@ -107,7 +107,7 @@ pub fn emit(wasm: *Wasm, gpa: std.mem.Allocator) !void {
         var atom = wasm.atoms.get(index).?.getFirst();
 
         // The code section must be sorted in line with the function order.
-        var sorted_atoms = try std.ArrayList(*Atom).initCapacity(gpa, wasm.functions.count());
+        var sorted_atoms = try std.ArrayList(*Atom).initCapacity(wasm.base.allocator, wasm.functions.count());
         defer sorted_atoms.deinit();
 
         while (true) {
@@ -185,10 +185,10 @@ pub fn emit(wasm: *Wasm, gpa: std.mem.Allocator) !void {
     const func_count: u32 = wasm.functions.count() + wasm.imports.functionCount();
     const global_count: u32 = wasm.globals.count() + wasm.imports.globalCount();
     // we must de-duplicate symbols that point to the same function
-    var funcs = std.AutoArrayHashMap(u32, Wasm.SymbolWithLoc).init(gpa);
+    var funcs = std.AutoArrayHashMap(u32, Wasm.SymbolWithLoc).init(wasm.base.allocator);
     defer funcs.deinit();
     try funcs.ensureUnusedCapacity(func_count);
-    var globals = try std.ArrayList(Wasm.SymbolWithLoc).initCapacity(gpa, global_count);
+    var globals = try std.ArrayList(Wasm.SymbolWithLoc).initCapacity(wasm.base.allocator, global_count);
     defer globals.deinit();
 
     for (wasm.resolved_symbols.keys()) |sym_with_loc| {
@@ -212,13 +212,13 @@ pub fn emit(wasm: *Wasm, gpa: std.mem.Allocator) !void {
     try leb.writeULEB128(writer, @intCast(u32, "name".len));
     try writer.writeAll("name");
 
-    try emitNameSection(wasm, 0x01, gpa, funcs.values(), writer);
-    try emitNameSection(wasm, 0x07, gpa, globals.items, writer);
-    try emitDataNamesSection(wasm, gpa, writer);
+    try emitNameSection(wasm, 0x01, wasm.base.allocator, funcs.values(), writer);
+    try emitNameSection(wasm, 0x07, wasm.base.allocator, globals.items, writer);
+    try emitDataNamesSection(wasm, wasm.base.allocator, writer);
     try emitCustomHeader(file, offset);
 
-    try emitDebugSections(file, wasm, gpa, writer);
-    try emitProducerSection(file, wasm, gpa, writer);
+    try emitDebugSections(file, wasm, wasm.base.allocator, writer);
+    try emitProducerSection(file, wasm, wasm.base.allocator, writer);
     try emitFeaturesSection(file, wasm, writer);
 }
 

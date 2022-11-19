@@ -13,7 +13,7 @@ const Allocator = std.mem.Allocator;
 const leb = std.leb;
 const meta = std.meta;
 
-const log = std.log.scoped(.link);
+const log = std.log.scoped(.wasm);
 
 /// Wasm spec version used for this `Object`
 version: u32 = 0,
@@ -883,12 +883,12 @@ fn assertEnd(reader: anytype) !void {
 }
 
 /// Parses an object file into atoms, for code and data sections
-pub fn parseIntoAtoms(object: *Object, gpa: Allocator, object_index: u16, wasm_bin: *Wasm) !void {
+pub fn parseIntoAtoms(object: *Object, object_index: u16, wasm_bin: *Wasm) !void {
     const Key = struct {
         kind: Symbol.Tag,
         index: u32,
     };
-    var symbol_for_segment = std.AutoArrayHashMap(Key, std.ArrayList(u32)).init(gpa);
+    var symbol_for_segment = std.AutoArrayHashMap(Key, std.ArrayList(u32)).init(wasm_bin.base.allocator);
     defer for (symbol_for_segment.values()) |*list| {
         list.deinit();
     } else symbol_for_segment.deinit();
@@ -899,7 +899,7 @@ pub fn parseIntoAtoms(object: *Object, gpa: Allocator, object_index: u16, wasm_b
                 const gop = try symbol_for_segment.getOrPut(.{ .kind = symbol.tag, .index = symbol.index });
                 const sym_idx = @intCast(u32, symbol_index);
                 if (!gop.found_existing) {
-                    gop.value_ptr.* = std.ArrayList(u32).init(gpa);
+                    gop.value_ptr.* = std.ArrayList(u32).init(wasm_bin.base.allocator);
                 }
                 try gop.value_ptr.*.append(sym_idx);
             },
@@ -908,18 +908,18 @@ pub fn parseIntoAtoms(object: *Object, gpa: Allocator, object_index: u16, wasm_b
     }
 
     for (object.relocatable_data) |relocatable_data, index| {
-        const final_index = (try wasm_bin.getMatchingSegment(gpa, object_index, @intCast(u32, index))) orelse {
+        const final_index = (try wasm_bin.getMatchingSegment(wasm_bin.base.allocator, object_index, @intCast(u32, index))) orelse {
             continue; // found unknown section, so skip parsing into atom as we do not know how to handle it.
         };
 
-        const atom = try gpa.create(Atom);
+        const atom = try wasm_bin.base.allocator.create(Atom);
         atom.* = Atom.empty;
         errdefer {
-            atom.deinit(gpa);
-            gpa.destroy(atom);
+            atom.deinit(wasm_bin.base.allocator);
+            wasm_bin.base.allocator.destroy(atom);
         }
 
-        try wasm_bin.managed_atoms.append(gpa, atom);
+        try wasm_bin.managed_atoms.append(wasm_bin.base.allocator, atom);
         atom.file = object_index;
         atom.size = relocatable_data.size;
         atom.alignment = relocatable_data.getAlignment(object);
@@ -931,10 +931,10 @@ pub fn parseIntoAtoms(object: *Object, gpa: Allocator, object_index: u16, wasm_b
                 // rather than within the entire section.
                 var reloc = relocation;
                 reloc.offset -= relocatable_data.offset;
-                try atom.relocs.append(gpa, reloc);
+                try atom.relocs.append(wasm_bin.base.allocator, reloc);
 
                 if (relocation.isTableIndex()) {
-                    try wasm_bin.elements.indirect_functions.putNoClobber(gpa, .{
+                    try wasm_bin.elements.indirect_functions.putNoClobber(wasm_bin.base.allocator, .{
                         .file = object_index,
                         .sym_index = relocation.index,
                     }, 0);
@@ -942,7 +942,7 @@ pub fn parseIntoAtoms(object: *Object, gpa: Allocator, object_index: u16, wasm_b
             }
         }
 
-        try atom.code.appendSlice(gpa, relocatable_data.data[0..relocatable_data.size]);
+        try atom.code.appendSlice(wasm_bin.base.allocator, relocatable_data.data[0..relocatable_data.size]);
 
         if (symbol_for_segment.getPtr(.{
             .kind = relocatable_data.getSymbolKind(),
@@ -959,7 +959,7 @@ pub fn parseIntoAtoms(object: *Object, gpa: Allocator, object_index: u16, wasm_b
                     atom.sym_index = idx;
                 }
             }
-            // try wasm_bin.symbol_atom.putNoClobber(gpa, atom.symbolLoc(), atom); // TODO
+            // try wasm_bin.symbol_atom.putNoClobber(wasm_bin.base.allocator, atom.symbolLoc(), atom); // TODO
         }
 
         const segment: *Wasm.Segment = &wasm_bin.segments.items[final_index];
@@ -967,7 +967,7 @@ pub fn parseIntoAtoms(object: *Object, gpa: Allocator, object_index: u16, wasm_b
             segment.alignment = std.math.max(segment.alignment, atom.alignment);
         }
 
-        try wasm_bin.appendAtomAtIndex(gpa, final_index, atom);
+        try wasm_bin.appendAtomAtIndex(wasm_bin.base.allocator, final_index, atom);
         log.debug("Parsed into atom: '{s}' at segment index {d}", .{ object.string_table.get(object.symtable[atom.sym_index].name), final_index });
     }
 }

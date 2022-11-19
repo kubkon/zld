@@ -7,7 +7,7 @@ const types = @import("types.zig");
 const Wasm = @import("../Wasm.zig");
 const Allocator = std.mem.Allocator;
 
-const log = std.log.scoped(.zwld);
+const log = std.log.scoped(.wasm);
 
 /// Accepts a slice with mutable elements and sets the field `field_name`'s value
 /// to the index within the list, based on the given `offset`.

@@ -3,7 +3,7 @@ const Archive = @This();
 const std = @import("std");
 const assert = std.debug.assert;
 const fs = std.fs;
-const log = std.log.scoped(.archive);
+const log = std.log.scoped(.wasm);
 const mem = std.mem;
 
 const Allocator = mem.Allocator;
