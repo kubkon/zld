@@ -2,12 +2,15 @@
 const Wasm = @This();
 
 const std = @import("std");
-const Atom = @import("Atom.zig");
-const Object = @import("Object.zig");
-const Archive = @import("Archive.zig");
-const Symbol = @import("Symbol.zig");
-const sections = @import("sections.zig");
-const types = @import("types.zig");
+const Zld = @import("Zld.zig");
+const Atom = @import("Wasm/Atom.zig");
+const Object = @import("Wasm/Object.zig");
+const Archive = @import("Wasm/Archive.zig");
+const Symbol = @import("Wasm/Symbol.zig");
+const sections = @import("Wasm/sections.zig");
+const types = @import("Wasm/types.zig");
+pub const Options = @import("Wasm/Options.zig");
+const ThreadPool = @import("ThreadPool.zig");
 
 const leb = std.leb;
 const fs = std.fs;
@@ -17,12 +20,9 @@ const mem = std.mem;
 
 const log = std.log.scoped(.zwld);
 
-/// The binary file that we will write the final binary data to
-file: fs.File,
+base: Zld,
 /// Configuration of the linker provided by the user
 options: Options,
-/// Output path of the binary
-name: []const u8,
 /// A list with references to objects we link to during `flush()`
 objects: std.ArrayListUnmanaged(Object) = .{},
 /// A list of archive files which are lazily linked with the final binary.
@@ -152,38 +152,6 @@ pub const SymbolWithLoc = struct {
     }
 };
 
-/// Options to pass to our linker which affects
-/// the end result and tells the linker how to build the final binary.
-pub const Options = struct {
-    /// When the entry name is different than `_start`
-    entry_name: ?[]const u8 = null,
-    /// Points to where the global data will start
-    global_base: ?u32 = null,
-    /// Tells the linker we will import memory from the host environment
-    import_memory: bool = false,
-    /// Tells the linker we will import the function table from the host environment
-    import_table: bool = false,
-    /// Sets the initial memory of the data section
-    /// Providing a value too low will result in a linking error.
-    initial_memory: ?u32 = null,
-    /// Sets the max memory for the data section.
-    /// Will result in a linking error when it's smaller than `initial_memory`m
-    /// or when the initial memory calculated by the linker is larger than the given maximum memory.
-    max_memory: ?u32 = null,
-    /// Tell the linker to merge data segments
-    /// i.e. all '.rodata' will be merged into a .rodata segment.
-    merge_data_segments: bool = true,
-    /// Tell the linker we do not require a starting entry
-    no_entry: bool = false,
-    /// Tell the linker to put the stack first, instead of after the data
-    stack_first: bool = false,
-    /// Specifies the size of the stack in bytes
-    stack_size: ?u32 = null,
-    /// Comma-delimited list of features to use.
-    /// When empty, the used features are inferred from the objects instead.
-    features: []const u8,
-};
-
 const FeatureSet = struct {
     set: SetType = .{ .mask = 0 }, // everything disabled by default
 
@@ -225,19 +193,37 @@ const FeatureSet = struct {
 
 /// Initializes a new wasm binary file at the given path.
 /// Will overwrite any existing file at said path.
-pub fn openPath(path: []const u8, options: Options) !Wasm {
-    const file = try fs.cwd().createFile(path, .{
+pub fn openPath(gpa: Allocator, options: Options, thread_pool: *ThreadPool) !*Wasm {
+    const file = try options.emit.directory.createFile(options.emit.sub_path, .{
         .truncate = true,
         .read = true,
     });
     errdefer file.close();
 
-    return Wasm{ .file = file, .options = options, .name = path };
+    const wasm = try createEmpty(gpa, options, thread_pool);
+    errdefer gpa.destroy(wasm);
+    wasm.base.file = file;
+    return wasm;
+}
+
+fn createEmpty(gpa: Allocator, options: Options, thread_pool: *ThreadPool) !*Wasm {
+    const wasm = try gpa.create(Wasm);
+    wasm.* = .{
+        .base = .{
+            .tag = .wasm,
+            .allocator = gpa,
+            .file = undefined,
+            .thread_pool = thread_pool,
+        },
+        .options = options,
+    };
+    return wasm;
 }
 
 /// Releases any resources that is owned by `Wasm`,
 /// usage after calling deinit is illegal behaviour.
-pub fn deinit(wasm: *Wasm, gpa: Allocator) void {
+pub fn deinit(wasm: *Wasm) void {
+    const gpa = wasm.base.allocator;
     for (wasm.objects.items) |*object| {
         object.deinit(gpa);
     }
@@ -267,11 +253,13 @@ pub fn deinit(wasm: *Wasm, gpa: Allocator) void {
     wasm.tables.deinit(gpa);
     wasm.string_table.deinit(gpa);
     wasm.undefs.deinit(gpa);
-    wasm.file.close();
-    wasm.* = undefined;
 }
 
-pub fn parseInputFiles(wasm: *Wasm, gpa: Allocator, files: []const []const u8) !void {
+pub fn closeFiles(wasm: *const Wasm) void {
+    _ = wasm;
+}
+
+pub fn parsePositionals(wasm: *Wasm, gpa: Allocator, files: []const []const u8) !void {
     for (files) |path| {
         if (try wasm.parseObjectFile(gpa, path)) continue;
         if (try wasm.parseArchive(gpa, path, false)) continue; // load archives lazily
@@ -286,7 +274,6 @@ fn parseObjectFile(wasm: *Wasm, gpa: Allocator, path: []const u8) !bool {
     errdefer file.close();
     var object = Object.create(gpa, file, path, null) catch |err| switch (err) {
         error.InvalidMagicByte, error.NotObjectFile => {
-            // file.close();
             return false;
         },
         else => |e| return e,
@@ -358,7 +345,9 @@ pub fn dataCount(wasm: Wasm) u32 {
 
 /// Flushes the `Wasm` construct into a final wasm binary by linking
 /// the objects, ensuring the final binary file has no collisions.
-pub fn flush(wasm: *Wasm, gpa: Allocator) !void {
+pub fn flush(wasm: *Wasm) !void {
+    const gpa = wasm.base.allocator;
+    try wasm.parsePositionals(gpa, wasm.options.positionals);
     try wasm.setupLinkerSymbols(gpa);
     for (wasm.objects.items) |_, obj_idx| {
         try wasm.resolveSymbolsInObject(gpa, @intCast(u16, obj_idx));
@@ -376,7 +365,7 @@ pub fn flush(wasm: *Wasm, gpa: Allocator) !void {
     try wasm.mergeTypes(gpa);
     try wasm.setupExports(gpa);
 
-    try @import("emit_wasm.zig").emit(wasm, gpa);
+    try @import("Wasm/emit_wasm.zig").emit(wasm, gpa);
 }
 
 /// Generic string table that duplicates strings
@@ -491,7 +480,7 @@ fn resolveSymbolsInObject(wasm: *Wasm, gpa: Allocator, object_index: u16) !void 
 
         const existing_file_path = if (existing_loc.file) |file| blk: {
             break :blk wasm.objects.items[file].name;
-        } else wasm.name;
+        } else wasm.options.emit.sub_path;
 
         if (!existing_sym.isUndefined()) outer: {
             if (!symbol.isUndefined()) inner: {

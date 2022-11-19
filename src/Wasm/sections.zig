@@ -4,7 +4,7 @@ const std = @import("std");
 const Symbol = @import("Symbol.zig");
 const Object = @import("Object.zig");
 const types = @import("types.zig");
-const Wasm = @import("Wasm.zig");
+const Wasm = @import("../Wasm.zig");
 const Allocator = std.mem.Allocator;
 
 const log = std.log.scoped(.zwld);

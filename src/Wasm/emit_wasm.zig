@@ -6,7 +6,7 @@ const Object = @import("Object.zig");
 const std = @import("std");
 const Symbol = @import("Symbol.zig");
 const types = @import("types.zig");
-const Wasm = @import("Wasm.zig");
+const Wasm = @import("../Wasm.zig");
 const Atom = @import("Atom.zig");
 
 const fs = std.fs;
@@ -15,8 +15,8 @@ const log = std.log.scoped(.zwld);
 
 /// Writes the given `Wasm` object into a binary file as-is.
 pub fn emit(wasm: *Wasm, gpa: std.mem.Allocator) !void {
-    const writer = wasm.file.writer();
-    const file = wasm.file;
+    const file = wasm.base.file;
+    const writer = file.writer();
 
     // magic bytes and wasm version
     try emitWasmHeader(writer);

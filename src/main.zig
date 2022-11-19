@@ -13,6 +13,8 @@ const usage =
     \\Call
     \\  ELF: ld.zld, ld
     \\  MachO: ld64.zld, ld64
+    \\  COFF: link-dl
+    \\  Wasm: wasm-zld
 ;
 
 var log_scopes: std.ArrayList([]const u8) = std.ArrayList([]const u8).init(gpa);
@@ -63,6 +65,8 @@ pub fn main() !void {
             break :blk .macho;
         } else if (mem.eql(u8, cmd, "link-zld")) {
             break :blk .coff;
+        } else if (mem.eql(u8, cmd, "wasm-zld")) {
+            break :blk .wasm;
         } else {
             std.io.getStdOut().writeAll(usage) catch {};
             std.process.exit(0);

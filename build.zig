@@ -65,6 +65,7 @@ pub fn build(b: *Builder) void {
         "ld",
         "ld64.zld",
         "ld64",
+        "wasm-zld",
     });
     gen_symlinks.step.dependOn(&exe.step);
 

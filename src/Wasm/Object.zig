@@ -6,7 +6,7 @@ const Object = @This();
 const Atom = @import("Atom.zig");
 const types = @import("types.zig");
 const std = @import("std");
-const Wasm = @import("Wasm.zig");
+const Wasm = @import("../Wasm.zig");
 const Symbol = @import("Symbol.zig");
 
 const Allocator = std.mem.Allocator;

@@ -12,6 +12,7 @@ const CrossTarget = std.zig.CrossTarget;
 const Elf = @import("Elf.zig");
 const MachO = @import("MachO.zig");
 const Coff = @import("Coff.zig");
+const Wasm = @import("Wasm.zig");
 const ThreadPool = @import("ThreadPool.zig");
 
 tag: Tag,
@@ -23,6 +24,7 @@ pub const Tag = enum {
     coff,
     elf,
     macho,
+    wasm,
 };
 
 pub const Emit = struct {
@@ -49,6 +51,7 @@ pub const Options = union {
     elf: Elf.Options,
     macho: MachO.Options,
     coff: Coff.Options,
+    wasm: Wasm.Options,
 };
 
 pub const MainCtx = struct {
@@ -86,6 +89,7 @@ pub fn main(tag: Tag, ctx: MainCtx) !void {
         .elf => .{ .elf = try Elf.Options.parseArgs(arena, ctx) },
         .macho => .{ .macho = try MachO.Options.parseArgs(arena, ctx) },
         .coff => .{ .coff = try Coff.Options.parseArgs(arena, ctx) },
+        .wasm => .{ .wasm = try Wasm.Options.parseArgs(arena, ctx) },
     };
 
     var thread_pool: ThreadPool = undefined;
@@ -103,6 +107,7 @@ pub fn openPath(allocator: Allocator, tag: Tag, options: Options, thread_pool: *
         .macho => &(try MachO.openPath(allocator, options.macho, thread_pool)).base,
         .elf => &(try Elf.openPath(allocator, options.elf, thread_pool)).base,
         .coff => &(try Coff.openPath(allocator, options.coff, thread_pool)).base,
+        .wasm => &(try Wasm.openPath(allocator, options.wasm, thread_pool)).base,
     };
 }
 
@@ -111,6 +116,7 @@ pub fn deinit(base: *Zld) void {
         .elf => @fieldParentPtr(Elf, "base", base).deinit(),
         .macho => @fieldParentPtr(MachO, "base", base).deinit(),
         .coff => @fieldParentPtr(Coff, "base", base).deinit(),
+        .wasm => @fieldParentPtr(Wasm, "base", base).deinit(),
     }
     base.allocator.destroy(base);
 }
@@ -120,6 +126,7 @@ pub fn flush(base: *Zld) !void {
         .elf => try @fieldParentPtr(Elf, "base", base).flush(),
         .macho => try @fieldParentPtr(MachO, "base", base).flush(),
         .coff => try @fieldParentPtr(Coff, "base", base).flush(),
+        .wasm => try @fieldParentPtr(Wasm, "base", base).flush(),
     }
     base.closeFiles();
 }
@@ -129,6 +136,7 @@ fn closeFiles(base: *const Zld) void {
         .elf => @fieldParentPtr(Elf, "base", base).closeFiles(),
         .macho => @fieldParentPtr(MachO, "base", base).closeFiles(),
         .coff => @fieldParentPtr(Coff, "base", base).closeFiles(),
+        .wasm => @fieldParentPtr(Wasm, "base", base).closeFiles(),
     }
     base.file.close();
 }

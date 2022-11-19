@@ -2,7 +2,7 @@ const Atom = @This();
 
 const std = @import("std");
 const types = @import("types.zig");
-const Wasm = @import("Wasm.zig");
+const Wasm = @import("../Wasm.zig");
 const Symbol = @import("Symbol.zig");
 
 const leb = std.leb;
