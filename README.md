@@ -12,7 +12,7 @@ You will need latest Zig in your path. You can get nightly binaries from [here](
 $ zig build
 ```
 
-This will create the `ld.zld` (Elf), `ld64.zld` (MachO) and `link-zld` (Coff) binaries in `zig-out/bin/`.
+This will create the `ld.zld` (Elf), `ld64.zld` (MachO), `link-zld` (Coff) and `wasm-zld` (Wasm) binaries in `zig-out/bin/`.
 You can then use it like you'd use a standard linker.
 
 ```
@@ -71,6 +71,7 @@ will be to swap in `zig ld` in place of any other linker.
 - [x] ELF (static non-PIE)
 - [ ] ELF (static PIE and dynamic)
 - [ ] COFF/PE
+- [x] Wasm (static)
 
 ## Contributing
 
