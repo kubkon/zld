@@ -908,7 +908,7 @@ pub fn getOutputSection(self: *MachO, sect: macho.section_64) !?u8 {
             break :blk null;
         }
 
-        switch (sect.@"type"()) {
+        switch (sect.type()) {
             macho.S_4BYTE_LITERALS,
             macho.S_8BYTE_LITERALS,
             macho.S_16BYTE_LITERALS,
@@ -2248,7 +2248,7 @@ fn writeAtoms(self: *MachO, reverse_lookups: [][]u32) !void {
                         break :outer;
                     }
                 }
-                switch (header.@"type"()) {
+                switch (header.type()) {
                     macho.S_NON_LAZY_SYMBOL_POINTERS => {
                         try self.writeGotPointer(count, buffer.writer());
                     },
@@ -2265,7 +2265,7 @@ fn writeAtoms(self: *MachO, reverse_lookups: [][]u32) !void {
                                 break :outer;
                             }
                         }
-                        if (header.@"type"() == macho.S_SYMBOL_STUBS) {
+                        if (header.type() == macho.S_SYMBOL_STUBS) {
                             try self.writeStubCode(atom_index, count, buffer.writer());
                         } else if (mem.eql(u8, header.sectName(), "__stub_helper")) {
                             try self.writeStubHelperCode(atom_index, buffer.writer());
@@ -2351,7 +2351,7 @@ fn calcSectionSizes(self: *MachO, reverse_lookups: [][]u32) !void {
     for (slice.items(.header)) |*header, sect_id| {
         if (header.size == 0) continue;
         if (self.requiresThunks()) {
-            if (header.isCode() and !(header.@"type"() == macho.S_SYMBOL_STUBS) and !mem.eql(u8, header.sectName(), "__stub_helper")) continue;
+            if (header.isCode() and !(header.type() == macho.S_SYMBOL_STUBS) and !mem.eql(u8, header.sectName(), "__stub_helper")) continue;
         }
 
         var atom_index = slice.items(.first_atom_index)[sect_id];
@@ -2379,7 +2379,7 @@ fn calcSectionSizes(self: *MachO, reverse_lookups: [][]u32) !void {
     if (self.requiresThunks()) {
         for (slice.items(.header)) |header, sect_id| {
             if (!header.isCode()) continue;
-            if (header.@"type"() == macho.S_SYMBOL_STUBS) continue;
+            if (header.type() == macho.S_SYMBOL_STUBS) continue;
             if (mem.eql(u8, header.sectName(), "__stub_helper")) continue;
 
             // Create jump/branch range extenders if needed.
@@ -2574,10 +2574,10 @@ inline fn getSectionPrecedence(header: macho.section_64) u8 {
     const section_precedence: u4 = blk: {
         if (header.isCode()) {
             if (mem.eql(u8, "__text", header.sectName())) break :blk 0x0;
-            if (header.@"type"() == macho.S_SYMBOL_STUBS) break :blk 0x1;
+            if (header.type() == macho.S_SYMBOL_STUBS) break :blk 0x1;
             break :blk 0x2;
         }
-        switch (header.@"type"()) {
+        switch (header.type()) {
             macho.S_NON_LAZY_SYMBOL_POINTERS,
             macho.S_LAZY_SYMBOL_POINTERS,
             => break :blk 0x0,
@@ -2704,7 +2704,7 @@ fn collectRebaseData(self: *MachO, pointers: *std.ArrayList(bind.Pointer)) !void
 
     // Finally, unpack the rest.
     for (slice.items(.header)) |header, sect_id| {
-        switch (header.@"type"()) {
+        switch (header.type()) {
             macho.S_LITERAL_POINTERS,
             macho.S_REGULAR,
             macho.S_MOD_INIT_FUNC_POINTERS,
@@ -2835,7 +2835,7 @@ fn collectBindData(self: *MachO, pointers: *std.ArrayList(bind.Pointer), reverse
     // Finally, unpack the rest.
     const slice = self.sections.slice();
     for (slice.items(.header)) |header, sect_id| {
-        switch (header.@"type"()) {
+        switch (header.type()) {
             macho.S_LITERAL_POINTERS,
             macho.S_REGULAR,
             macho.S_MOD_INIT_FUNC_POINTERS,
