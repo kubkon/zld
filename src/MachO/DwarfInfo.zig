@@ -181,7 +181,7 @@ const AbbrevEntryIterator = struct {
         self.pos += creader.bytes_read;
 
         if (kind == 0) {
-            return AbbrevEntry.@"null"();
+            return AbbrevEntry.null();
         }
 
         const abbrev_pos = lookup.get(kind) orelse return error.MalformedDwarf;
