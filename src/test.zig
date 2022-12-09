@@ -322,6 +322,7 @@ pub const TestContext = struct {
                     .libs = libs,
                     .lib_dirs = &[0][]const u8{},
                 } },
+                .wasm => @panic("TODO"),
             };
 
             var thread_pool: ThreadPool = undefined;
