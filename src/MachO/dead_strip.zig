@@ -63,7 +63,8 @@ fn collectRoots(macho_file: *MachO, roots: *AtomTable) !void {
                 const sym = macho_file.getSymbol(global);
                 if (sym.undf()) continue;
 
-                const object = macho_file.objects.items[global.getFile().?];
+                const file = global.getFile() orelse continue; // synthetic globals are atomless
+                const object = macho_file.objects.items[file];
                 const atom_index = object.getAtomIndexForSymbol(global.sym_index).?; // panic here means fatal error
                 _ = try roots.getOrPut(atom_index);
 
