@@ -1357,7 +1357,7 @@ fn writeStrtab(self: *Elf) !void {
         const shdr = self.sections.items(.shdr)[self.strtab_sect_index.? - 1];
         break :blk shdr.sh_offset + shdr.sh_size;
     };
-    const buffer = self.strtab.toOwnedSlice(self.base.allocator);
+    const buffer = try self.strtab.toOwnedSlice(self.base.allocator);
     defer self.base.allocator.free(buffer);
     const shdr = &self.sections.items(.shdr)[self.strtab_sect_index.?];
     shdr.sh_offset = offset;
@@ -1375,7 +1375,7 @@ fn writeShStrtab(self: *Elf) !void {
         const shdr = self.sections.items(.shdr)[self.shstrtab_sect_index.? - 1];
         break :blk shdr.sh_offset + shdr.sh_size;
     };
-    const buffer = self.shstrtab.toOwnedSlice(self.base.allocator);
+    const buffer = try self.shstrtab.toOwnedSlice(self.base.allocator);
     defer self.base.allocator.free(buffer);
     const shdr = &self.sections.items(.shdr)[self.shstrtab_sect_index.?];
     shdr.sh_offset = offset;

@@ -19,8 +19,8 @@ pub fn StringTable(comptime log_scope: @Type(.EnumLiteral)) type {
             self.table.deinit(gpa);
         }
 
-        pub fn toOwnedSlice(self: *Self, gpa: Allocator) []const u8 {
-            const result = self.buffer.toOwnedSlice(gpa);
+        pub fn toOwnedSlice(self: *Self, gpa: Allocator) Allocator.Error![]const u8 {
+            const result = try self.buffer.toOwnedSlice(gpa);
             self.table.clearRetainingCapacity();
             return result;
         }
