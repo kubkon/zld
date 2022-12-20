@@ -87,7 +87,7 @@ pub fn spawn(pool: *ThreadPool, comptime func: anytype, args: anytype) !void {
         fn runFn(runnable: *Runnable) void {
             const run_node = @fieldParentPtr(RunQueue.Node, "data", runnable);
             const closure = @fieldParentPtr(@This(), "run_node", run_node);
-            @call(.{}, func, closure.arguments);
+            @call(.auto, func, closure.arguments);
 
             // The thread pool's allocator is protected by the mutex.
             const mutex = &closure.pool.mutex;
