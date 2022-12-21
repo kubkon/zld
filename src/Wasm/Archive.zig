@@ -18,7 +18,7 @@ header: ar_hdr = undefined,
 /// This is stored as a single slice of bytes, as the header-names
 /// point to the character index of a file name, rather than the index
 /// in the list.
-long_file_names: []const u8 = undefined,
+long_file_names: []const u8 = &.{},
 
 /// Parsed table of contents.
 /// Each symbol name points to a list of all definition
