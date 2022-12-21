@@ -747,7 +747,19 @@ fn setupExports(wasm: *Wasm) !void {
         if (!symbol.isExported()) continue;
 
         const name = sym_loc.getName(wasm);
-        const exported: std.wasm.Export = .{
+        const exported: std.wasm.Export = if (symbol.tag == .data) exp: {
+            const atom = wasm.symbol_atom.get(sym_loc).?;
+            const offset = wasm.globals.count() + wasm.imports.globalCount();
+            const global_index = try wasm.globals.append(wasm.base.allocator, offset, .{
+                .global_type = .{ .valtype = .i32, .mutable = false },
+                .init = .{ .i32_const = @bitCast(i32, atom.offset) },
+            });
+            break :exp .{
+                .name = name,
+                .kind = .global,
+                .index = global_index,
+            };
+        } else .{
             .name = name,
             .kind = symbol.tag.externalType(),
             .index = symbol.index,
