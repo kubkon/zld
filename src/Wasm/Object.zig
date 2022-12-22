@@ -934,7 +934,7 @@ pub fn parseIntoAtoms(object: *Object, object_index: u16, wasm_bin: *Wasm) !void
                 try atom.relocs.append(wasm_bin.base.allocator, reloc);
 
                 if (relocation.isTableIndex()) {
-                    try wasm_bin.elements.indirect_functions.putNoClobber(wasm_bin.base.allocator, .{
+                    try wasm_bin.elements.indirect_functions.put(wasm_bin.base.allocator, .{
                         .file = object_index,
                         .sym_index = relocation.index,
                     }, 0);
@@ -949,17 +949,17 @@ pub fn parseIntoAtoms(object: *Object, object_index: u16, wasm_bin: *Wasm) !void
             .index = relocatable_data.getIndex(),
         })) |symbols| {
             atom.sym_index = symbols.pop();
+            try wasm_bin.symbol_atom.putNoClobber(wasm_bin.base.allocator, atom.symbolLoc(), atom);
 
             // symbols referencing the same atom will be added as alias
             // or as 'parent' when they are global.
             while (symbols.popOrNull()) |idx| {
+                try wasm_bin.symbol_atom.putNoClobber(wasm_bin.base.allocator, .{ .file = atom.file, .sym_index = idx }, atom);
                 const alias_symbol = object.symtable[idx];
-                const symbol = object.symtable[atom.sym_index];
-                if (alias_symbol.isGlobal() and symbol.isLocal()) {
+                if (alias_symbol.isGlobal()) {
                     atom.sym_index = idx;
                 }
             }
-            // try wasm_bin.symbol_atom.putNoClobber(wasm_bin.base.allocator, atom.symbolLoc(), atom); // TODO
         }
 
         const segment: *Wasm.Segment = &wasm_bin.segments.items[final_index];

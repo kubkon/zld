@@ -1066,9 +1066,13 @@ fn allocateAtoms(wasm: *Wasm) !void {
         var atom: *Atom = entry.value_ptr.*.getFirst();
         var offset: u32 = 0;
         while (true) {
+            const symbol_loc = atom.symbolLoc();
+            if (!wasm.resolved_symbols.contains(symbol_loc)) {
+                atom = atom.next orelse break;
+                continue;
+            }
             offset = std.mem.alignForwardGeneric(u32, offset, atom.alignment);
             atom.offset = offset;
-            const symbol_loc = atom.symbolLoc();
             log.debug("Atom '{s}' allocated from 0x{x:0>8} to 0x{x:0>8} size={d}", .{
                 symbol_loc.getName(wasm),
                 offset,
