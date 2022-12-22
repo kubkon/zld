@@ -49,8 +49,12 @@ strtab_lookup: []u32 = undefined,
 atom_by_index_table: []AtomIndex = undefined,
 /// Can be undefined as set together with in_symtab.
 globals_lookup: []i64 = undefined,
+/// Can be undefined as set together with in_symtab.
+relocs_lookup: []RelocEntry = undefined,
 
 atoms: std.ArrayListUnmanaged(AtomIndex) = .{},
+
+const RelocEntry = struct { start: u32, len: u32 };
 
 pub fn deinit(self: *Object, gpa: Allocator) void {
     self.atoms.deinit(gpa);
@@ -64,6 +68,7 @@ pub fn deinit(self: *Object, gpa: Allocator) void {
         gpa.free(self.symtab);
         gpa.free(self.atom_by_index_table);
         gpa.free(self.globals_lookup);
+        gpa.free(self.relocs_lookup);
     }
 }
 
@@ -104,76 +109,77 @@ pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch)
         .ncmds = self.header.ncmds,
         .buffer = self.contents[@sizeOf(macho.mach_header_64)..][0..self.header.sizeofcmds],
     };
-    while (it.next()) |cmd| {
-        switch (cmd.cmd()) {
-            .SYMTAB => {
-                const symtab = cmd.cast(macho.symtab_command).?;
-                self.in_symtab = @ptrCast(
-                    [*]const macho.nlist_64,
-                    @alignCast(@alignOf(macho.nlist_64), &self.contents[symtab.symoff]),
-                )[0..symtab.nsyms];
-                self.in_strtab = self.contents[symtab.stroff..][0..symtab.strsize];
+    const nsects = self.getSourceSections().len;
+    const symtab = while (it.next()) |cmd| switch (cmd.cmd()) {
+        .SYMTAB => break cmd.cast(macho.symtab_command).?,
+        else => {},
+    } else return;
 
-                const nsects = self.getSourceSections().len;
+    self.in_symtab = @ptrCast(
+        [*]const macho.nlist_64,
+        @alignCast(@alignOf(macho.nlist_64), &self.contents[symtab.symoff]),
+    )[0..symtab.nsyms];
+    self.in_strtab = self.contents[symtab.stroff..][0..symtab.strsize];
 
-                self.symtab = try allocator.alloc(macho.nlist_64, self.in_symtab.?.len + nsects);
-                self.source_symtab_lookup = try allocator.alloc(u32, self.in_symtab.?.len);
-                self.strtab_lookup = try allocator.alloc(u32, self.in_symtab.?.len);
-                self.globals_lookup = try allocator.alloc(i64, self.in_symtab.?.len);
-                self.atom_by_index_table = try allocator.alloc(AtomIndex, self.in_symtab.?.len + nsects);
-                // This is wasteful but we need to be able to lookup source symbol address after stripping and
-                // allocating of sections.
-                self.source_address_lookup = try allocator.alloc(i64, self.in_symtab.?.len);
-                self.source_section_index_lookup = try allocator.alloc(i64, nsects);
+    self.symtab = try allocator.alloc(macho.nlist_64, self.in_symtab.?.len + nsects);
+    self.source_symtab_lookup = try allocator.alloc(u32, self.in_symtab.?.len);
+    self.strtab_lookup = try allocator.alloc(u32, self.in_symtab.?.len);
+    self.globals_lookup = try allocator.alloc(i64, self.in_symtab.?.len);
+    self.atom_by_index_table = try allocator.alloc(AtomIndex, self.in_symtab.?.len + nsects);
+    self.relocs_lookup = try allocator.alloc(RelocEntry, self.in_symtab.?.len + nsects);
+    // This is wasteful but we need to be able to lookup source symbol address after stripping and
+    // allocating of sections.
+    self.source_address_lookup = try allocator.alloc(i64, self.in_symtab.?.len);
+    self.source_section_index_lookup = try allocator.alloc(i64, nsects);
 
-                for (self.symtab) |*sym| {
-                    sym.* = .{
-                        .n_value = 0,
-                        .n_sect = 0,
-                        .n_desc = 0,
-                        .n_strx = 0,
-                        .n_type = 0,
-                    };
-                }
+    for (self.symtab) |*sym| {
+        sym.* = .{
+            .n_value = 0,
+            .n_sect = 0,
+            .n_desc = 0,
+            .n_strx = 0,
+            .n_type = 0,
+        };
+    }
 
-                mem.set(i64, self.globals_lookup, -1);
-                mem.set(AtomIndex, self.atom_by_index_table, 0);
-                mem.set(i64, self.source_section_index_lookup, -1);
+    mem.set(i64, self.globals_lookup, -1);
+    mem.set(AtomIndex, self.atom_by_index_table, 0);
+    mem.set(i64, self.source_section_index_lookup, -1);
+    mem.set(RelocEntry, self.relocs_lookup, .{
+        .start = 0,
+        .len = 0,
+    });
 
-                // You would expect that the symbol table is at least pre-sorted based on symbol's type:
-                // local < extern defined < undefined. Unfortunately, this is not guaranteed! For instance,
-                // the GO compiler does not necessarily respect that therefore we sort immediately by type
-                // and address within.
-                var sorted_all_syms = try std.ArrayList(SymbolAtIndex).initCapacity(allocator, self.in_symtab.?.len);
-                defer sorted_all_syms.deinit();
+    // You would expect that the symbol table is at least pre-sorted based on symbol's type:
+    // local < extern defined < undefined. Unfortunately, this is not guaranteed! For instance,
+    // the GO compiler does not necessarily respect that therefore we sort immediately by type
+    // and address within.
+    var sorted_all_syms = try std.ArrayList(SymbolAtIndex).initCapacity(allocator, self.in_symtab.?.len);
+    defer sorted_all_syms.deinit();
 
-                for (self.in_symtab.?) |_, index| {
-                    sorted_all_syms.appendAssumeCapacity(.{ .index = @intCast(u32, index) });
-                }
+    for (self.in_symtab.?) |_, index| {
+        sorted_all_syms.appendAssumeCapacity(.{ .index = @intCast(u32, index) });
+    }
 
-                // We sort by type: defined < undefined, and
-                // afterwards by address in each group. Normally, dysymtab should
-                // be enough to guarantee the sort, but turns out not every compiler
-                // is kind enough to specify the symbols in the correct order.
-                sort.sort(SymbolAtIndex, sorted_all_syms.items, self, SymbolAtIndex.lessThan);
+    // We sort by type: defined < undefined, and
+    // afterwards by address in each group. Normally, dysymtab should
+    // be enough to guarantee the sort, but turns out not every compiler
+    // is kind enough to specify the symbols in the correct order.
+    sort.sort(SymbolAtIndex, sorted_all_syms.items, self, SymbolAtIndex.lessThan);
 
-                for (sorted_all_syms.items) |sym_id, i| {
-                    const sym = sym_id.getSymbol(self);
+    for (sorted_all_syms.items) |sym_id, i| {
+        const sym = sym_id.getSymbol(self);
 
-                    if (sym.sect() and self.source_section_index_lookup[sym.n_sect - 1] == -1) {
-                        self.source_section_index_lookup[sym.n_sect - 1] = @intCast(i64, i);
-                    }
-
-                    self.symtab[i] = sym;
-                    self.source_address_lookup[i] = if (sym.undf()) -1 else @intCast(i64, sym.n_value);
-                    self.source_symtab_lookup[i] = sym_id.index;
-
-                    const sym_name_len = mem.sliceTo(@ptrCast([*:0]const u8, self.in_strtab.?.ptr + sym.n_strx), 0).len + 1;
-                    self.strtab_lookup[i] = @intCast(u32, sym_name_len);
-                }
-            },
-            else => {},
+        if (sym.sect() and self.source_section_index_lookup[sym.n_sect - 1] == -1) {
+            self.source_section_index_lookup[sym.n_sect - 1] = @intCast(i64, i);
         }
+
+        self.symtab[i] = sym;
+        self.source_address_lookup[i] = if (sym.undf()) -1 else @intCast(i64, sym.n_value);
+        self.source_symtab_lookup[i] = sym_id.index;
+
+        const sym_name_len = mem.sliceTo(@ptrCast([*:0]const u8, self.in_strtab.?.ptr + sym.n_strx), 0).len + 1;
+        self.strtab_lookup[i] = @intCast(u32, sym_name_len);
     }
 }
 
@@ -295,12 +301,16 @@ fn sectionLessThanByAddress(ctx: void, lhs: SortedSection, rhs: SortedSection) b
 }
 
 pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u31) !void {
+    log.debug("splitting object({d}, {s}) into atoms", .{ object_id, self.name });
+
+    try self.splitRegularSections(macho_file, object_id);
+}
+
+pub fn splitRegularSections(self: *Object, macho_file: *MachO, object_id: u31) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
     const gpa = macho_file.base.allocator;
-
-    log.debug("splitting object({d}, {s}) into atoms", .{ object_id, self.name });
 
     const sections = self.getSourceSections();
     for (sections) |sect, id| {
@@ -417,6 +427,9 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u31) !void {
                     sect.@"align",
                     out_sect_id,
                 );
+                if (!sect.isZerofill()) {
+                    try self.cacheRelocs(macho_file, atom_index);
+                }
                 macho_file.addAtomToSection(atom_index);
             }
 
@@ -430,7 +443,6 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u31) !void {
                 const nsyms_trailing = atom_loc.len - 1;
                 next_sym_index += atom_loc.len;
 
-                // TODO: We want to bubble up the first externally defined symbol here.
                 const atom_size = if (next_sym_index < sect_start_index + sect_loc.len)
                     symtab[next_sym_index].n_value - addr
                 else
@@ -460,7 +472,9 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u31) !void {
                     const alias_index = self.getSectionAliasSymbolIndex(sect_id);
                     self.atom_by_index_table[alias_index] = atom_index;
                 }
-
+                if (!sect.isZerofill()) {
+                    try self.cacheRelocs(macho_file, atom_index);
+                }
                 macho_file.addAtomToSection(atom_index);
             }
         } else {
@@ -475,6 +489,9 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u31) !void {
                 sect.@"align",
                 out_sect_id,
             );
+            if (!sect.isZerofill()) {
+                try self.cacheRelocs(macho_file, atom_index);
+            }
             macho_file.addAtomToSection(atom_index);
         }
     }
@@ -519,6 +536,58 @@ fn createAtomFromSubsection(
     }
 
     return atom_index;
+}
+
+fn filterRelocs(
+    relocs: []align(1) const macho.relocation_info,
+    start_addr: u64,
+    end_addr: u64,
+) RelocEntry {
+    const Predicate = struct {
+        addr: u64,
+
+        pub fn predicate(self: @This(), rel: macho.relocation_info) bool {
+            return rel.r_address >= self.addr;
+        }
+    };
+    const LPredicate = struct {
+        addr: u64,
+
+        pub fn predicate(self: @This(), rel: macho.relocation_info) bool {
+            return rel.r_address < self.addr;
+        }
+    };
+
+    const start = MachO.bsearch(macho.relocation_info, relocs, Predicate{ .addr = end_addr });
+    const len = MachO.lsearch(macho.relocation_info, relocs[start..], LPredicate{ .addr = start_addr });
+
+    return .{ .start = @intCast(u32, start), .len = @intCast(u32, len) };
+}
+
+fn cacheRelocs(self: *Object, macho_file: *MachO, atom_index: AtomIndex) !void {
+    const atom = macho_file.getAtom(atom_index);
+
+    const source_sect = if (self.getSourceSymbol(atom.sym_index)) |source_sym| blk: {
+        const source_sect = self.getSourceSection(source_sym.n_sect - 1);
+        assert(!source_sect.isZerofill());
+        break :blk source_sect;
+    } else blk: {
+        // If there was no matching symbol present in the source symtab, this means
+        // we are dealing with either an entire section, or part of it, but also
+        // starting at the beginning.
+        const nbase = @intCast(u32, self.in_symtab.?.len);
+        const sect_id = @intCast(u16, atom.sym_index - nbase);
+        const source_sect = self.getSourceSection(sect_id);
+        assert(!source_sect.isZerofill());
+        break :blk source_sect;
+    };
+
+    const relocs = self.getRelocs(source_sect);
+
+    self.relocs_lookup[atom.sym_index] = if (self.getSourceSymbol(atom.sym_index)) |source_sym| blk: {
+        const offset = source_sym.n_value - source_sect.addr;
+        break :blk filterRelocs(relocs, offset, offset + atom.size);
+    } else filterRelocs(relocs, 0, atom.size);
 }
 
 pub fn getSourceSymbol(self: Object, index: u32) ?macho.nlist_64 {

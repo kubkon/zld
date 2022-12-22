@@ -50,9 +50,6 @@ size: u64,
 /// For instance, aligmment of 0 should be read as 2^0 = 1 byte aligned.
 alignment: u32,
 
-cached_relocs_start: i32,
-cached_relocs_len: u32,
-
 /// Points to the previous and next neighbours
 next_index: ?AtomIndex,
 prev_index: ?AtomIndex,
@@ -64,8 +61,6 @@ pub const empty = Atom{
     .file = -1,
     .size = 0,
     .alignment = 0,
-    .cached_relocs_start = -1,
-    .cached_relocs_len = 0,
     .prev_index = null,
     .next_index = null,
 };
@@ -1029,9 +1024,10 @@ pub fn getAtomCode(macho_file: *MachO, atom_index: AtomIndex) []const u8 {
 }
 
 pub fn getAtomRelocs(macho_file: *MachO, atom_index: AtomIndex) []align(1) const macho.relocation_info {
-    const atom = macho_file.getAtomPtr(atom_index);
+    const atom = macho_file.getAtom(atom_index);
     assert(atom.getFile() != null); // Synthetic atom shouldn't need to unique for relocs.
     const object = macho_file.objects.items[atom.getFile().?];
+    const cache = object.relocs_lookup[atom.sym_index];
 
     const source_sect = if (object.getSourceSymbol(atom.sym_index)) |source_sym| blk: {
         const source_sect = object.getSourceSection(source_sym.n_sect - 1);
@@ -1049,43 +1045,7 @@ pub fn getAtomRelocs(macho_file: *MachO, atom_index: AtomIndex) []align(1) const
     };
 
     const relocs = object.getRelocs(source_sect);
-
-    if (atom.cached_relocs_start == -1) {
-        const indexes = if (object.getSourceSymbol(atom.sym_index)) |source_sym| blk: {
-            const offset = source_sym.n_value - source_sect.addr;
-            break :blk filterRelocs(relocs, offset, offset + atom.size);
-        } else filterRelocs(relocs, 0, atom.size);
-        atom.cached_relocs_start = indexes.start;
-        atom.cached_relocs_len = indexes.len;
-    }
-
-    return relocs[@intCast(u32, atom.cached_relocs_start)..][0..atom.cached_relocs_len];
-}
-
-fn filterRelocs(
-    relocs: []align(1) const macho.relocation_info,
-    start_addr: u64,
-    end_addr: u64,
-) struct { start: i32, len: u32 } {
-    const Predicate = struct {
-        addr: u64,
-
-        pub fn predicate(self: @This(), rel: macho.relocation_info) bool {
-            return rel.r_address >= self.addr;
-        }
-    };
-    const LPredicate = struct {
-        addr: u64,
-
-        pub fn predicate(self: @This(), rel: macho.relocation_info) bool {
-            return rel.r_address < self.addr;
-        }
-    };
-
-    const start = MachO.bsearch(macho.relocation_info, relocs, Predicate{ .addr = end_addr });
-    const len = MachO.lsearch(macho.relocation_info, relocs[start..], LPredicate{ .addr = start_addr });
-
-    return .{ .start = @intCast(i32, start), .len = @intCast(u32, len) };
+    return relocs[cache.start..][0..cache.len];
 }
 
 pub fn calcPcRelativeDisplacementX86(source_addr: u64, target_addr: u64, correction: u3) error{Overflow}!i32 {
