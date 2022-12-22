@@ -566,7 +566,7 @@ fn resolveSymbolsInObject(wasm: *Wasm, object_index: u16) !void {
         try wasm.resolved_symbols.put(wasm.base.allocator, location, {});
         assert(wasm.resolved_symbols.swapRemove(existing_loc));
         if (existing_sym.isUndefined()) {
-            assert(wasm.undefs.swapRemove(sym_name));
+            _ = wasm.undefs.swapRemove(sym_name);
         }
     }
 }
@@ -581,8 +581,7 @@ fn resolveSymbolsInArchives(wasm: *Wasm) !void {
     log.debug("Resolving symbols in archives", .{});
     var index: u32 = 0;
     undef_loop: while (index < wasm.undefs.count()) {
-        const undef_sym_loc = wasm.undefs.values()[index];
-        const sym_name = undef_sym_loc.getName(wasm);
+        const sym_name = wasm.undefs.keys()[index];
 
         for (wasm.archives.items) |archive| {
             const offset = archive.toc.get(sym_name) orelse {
@@ -749,10 +748,16 @@ fn setupExports(wasm: *Wasm) !void {
         const name = sym_loc.getName(wasm);
         const exported: std.wasm.Export = if (symbol.tag == .data) exp: {
             const atom = wasm.symbol_atom.get(sym_loc).?;
+            const merge_segment = wasm.options.merge_data_segments;
+            const segment_info = wasm.objects.items[atom.file].segment_info;
+            const segment_name = segment_info[symbol.index].outputName(merge_segment);
+            const segment_index = wasm.data_segments.get(segment_name).?;
+            const segment = wasm.segments.items[segment_index];
+            const addr_value = @bitCast(i32, atom.offset + segment.offset);
             const offset = wasm.globals.count() + wasm.imports.globalCount();
             const global_index = try wasm.globals.append(wasm.base.allocator, offset, .{
                 .global_type = .{ .valtype = .i32, .mutable = false },
-                .init = .{ .i32_const = @bitCast(i32, atom.offset) },
+                .init = .{ .i32_const = addr_value },
             });
             break :exp .{
                 .name = name,
