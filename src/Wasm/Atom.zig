@@ -152,10 +152,8 @@ fn relocationValue(atom: *Atom, relocation: types.Relocation, wasm_bin: *const W
         .R_WASM_TABLE_INDEX_SLEB64,
         => return wasm_bin.elements.indirect_functions.get(target_loc) orelse 0,
         .R_WASM_TYPE_INDEX_LEB => {
-            if (symbol.isUndefined()) {
-                return wasm_bin.imports.imported_functions.values()[symbol.index].type;
-            }
-            return wasm_bin.functions.items.items[symbol.index].type_index;
+            const original_type = wasm_bin.objects.items[atom.file].func_types[relocation.index];
+            return wasm_bin.func_types.find(original_type).?;
         },
         .R_WASM_GLOBAL_INDEX_I32,
         .R_WASM_GLOBAL_INDEX_LEB,
