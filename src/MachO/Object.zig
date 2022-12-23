@@ -304,6 +304,7 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u31) !void {
     log.debug("splitting object({d}, {s}) into atoms", .{ object_id, self.name });
 
     try self.splitRegularSections(macho_file, object_id);
+    try self.parseUnwindInfo(macho_file, object_id);
 }
 
 pub fn splitRegularSections(self: *Object, macho_file: *MachO, object_id: u31) !void {
@@ -590,6 +591,28 @@ fn cacheRelocs(self: *Object, macho_file: *MachO, atom_index: AtomIndex) !void {
     } else filterRelocs(relocs, 0, atom.size);
 }
 
+fn parseUnwindInfo(self: *Object, macho_file: *MachO, object_id: u31) !void {
+    _ = object_id;
+    _ = macho_file;
+
+    if (self.getSourceSectionByName("__LD", "__compact_unwind")) |sect| {
+        const data = self.getSectionContents(sect);
+        if (data.len % @sizeOf(macho.compact_unwind_entry) != 0) {
+            log.err("size of __LD,__compact_unwind section not multiple of compact unwind info entry: {d} % {d} != 0", .{
+                data.len,
+                @sizeOf(macho.compact_unwind_entry),
+            });
+            return error.InvalidCompactUnwindInfo;
+        }
+
+        const num_entries = @divExact(data.len, @sizeOf(macho.compact_unwind_entry));
+        const entries = @ptrCast([*]align(1) const macho.compact_unwind_entry, data)[0..num_entries];
+
+        log.warn("entries = {any}", .{entries});
+        // TODO parse!
+    }
+}
+
 pub fn getSourceSymbol(self: Object, index: u32) ?macho.nlist_64 {
     const symtab = self.in_symtab.?;
     if (index >= symtab.len) return null;
@@ -611,6 +634,14 @@ pub fn getSourceSection(self: Object, index: u16) macho.section_64 {
     const sections = self.getSourceSections();
     assert(index < sections.len);
     return sections[index];
+}
+
+pub fn getSourceSectionByName(self: Object, segname: []const u8, sectname: []const u8) ?macho.section_64 {
+    const sections = self.getSourceSections();
+    for (sections) |sect| {
+        if (mem.eql(u8, segname, sect.segName()) and mem.eql(u8, sectname, sect.sectName()))
+            return sect;
+    } else return null;
 }
 
 pub fn getSourceSections(self: Object) []const macho.section_64 {
