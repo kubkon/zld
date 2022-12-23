@@ -424,6 +424,27 @@ pub fn flush(self: *MachO) !void {
         }
     }
 
+    const requires_codesig = blk: {
+        if (self.options.entitlements) |_| break :blk true;
+        if (cpu_arch == .aarch64 and (os_tag == .macos or abi == .simulator)) break :blk true;
+        break :blk false;
+    };
+    var codesig: ?CodeSignature = if (requires_codesig) blk: {
+        // Preallocate space for the code signature.
+        // We need to do this at this stage so that we have the load commands with proper values
+        // written out to the file.
+        // The most important here is to have the correct vm and filesize of the __LINKEDIT segment
+        // where the code signature goes into.
+        var codesig = CodeSignature.init(self.page_size);
+        codesig.code_directory.ident = fs.path.basename(self.options.emit.sub_path);
+        if (self.options.entitlements) |path| {
+            try codesig.addEntitlements(gpa, path);
+        }
+        try self.writeCodeSignaturePadding(&codesig);
+        break :blk codesig;
+    } else null;
+    defer if (codesig) |*csig| csig.deinit(gpa);
+
     // Write load commands
     var lc_buffer = std.ArrayList(u8).init(arena);
     const lc_writer = lc_buffer.writer();
@@ -466,29 +487,11 @@ pub fn flush(self: *MachO) !void {
 
     try load_commands.writeLoadDylibLCs(self.dylibs.items, self.referenced_dylibs.keys(), lc_writer);
 
-    const requires_codesig = blk: {
-        if (self.options.entitlements) |_| break :blk true;
-        if (cpu_arch == .aarch64 and (os_tag == .macos or abi == .simulator)) break :blk true;
-        break :blk false;
-    };
     var codesig_cmd_offset: ?u32 = null;
-    var codesig: ?CodeSignature = if (requires_codesig) blk: {
-        // Preallocate space for the code signature.
-        // We need to do this at this stage so that we have the load commands with proper values
-        // written out to the file.
-        // The most important here is to have the correct vm and filesize of the __LINKEDIT segment
-        // where the code signature goes into.
-        var codesig = CodeSignature.init(self.page_size);
-        codesig.code_directory.ident = fs.path.basename(self.options.emit.sub_path);
-        if (self.options.entitlements) |path| {
-            try codesig.addEntitlements(gpa, path);
-        }
-        try self.writeCodeSignaturePadding(&codesig);
+    if (requires_codesig) {
         codesig_cmd_offset = @sizeOf(macho.mach_header_64) + @intCast(u32, lc_buffer.items.len);
         try lc_writer.writeStruct(self.codesig_cmd);
-        break :blk codesig;
-    } else null;
-    defer if (codesig) |*csig| csig.deinit(gpa);
+    }
 
     const ncmds = load_commands.calcNumOfLCs(lc_buffer.items);
     try self.base.file.pwriteAll(lc_buffer.items, @sizeOf(macho.mach_header_64));
