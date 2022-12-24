@@ -14,6 +14,7 @@ const usage =
     \\
     \\Options:
     \\-h, --help                         Print this help and exit
+    \\--debug-log [scope]                Turn on debugging logs for [scope] (requires zld compiled with -Dlog)
     \\-o [path]                          Output path of the binary
     \\--entry <entry>                    Name of entry point symbol
     \\--global-base=<value>              Value from where the global data will start
@@ -86,6 +87,10 @@ pub fn parseArgs(arena: Allocator, context: Zld.MainCtx) !Options {
         const arg = args[i];
         if (mem.eql(u8, arg, "-h") or mem.eql(u8, arg, "--help")) {
             context.printSuccess(usage, .{context.cmd});
+        } else if (mem.eql(u8, arg, "--debug-log")) {
+            if (i + 1 >= args.len) context.printFailure("Missing scope for debug log", .{});
+            i += 1;
+            try context.log_scopes.append(args[i]);
         } else if (mem.eql(u8, arg, "--entry")) {
             if (i + 1 >= args.len) context.printFailure("Missing entry name argument", .{});
             entry_name = args[i + 1];

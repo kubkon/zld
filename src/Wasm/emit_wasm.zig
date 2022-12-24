@@ -337,33 +337,40 @@ fn emitType(type_entry: std.wasm.Type, writer: anytype) !void {
 
 fn emitImportSymbol(wasm: *const Wasm, sym_loc: Wasm.SymbolWithLoc, writer: anytype) !void {
     const symbol = sym_loc.getSymbol(wasm).*;
-    var import: std.wasm.Import = .{
-        .module_name = undefined,
-        .name = sym_loc.getName(wasm),
-        .kind = undefined,
-    };
 
-    switch (symbol.tag) {
-        .function => {
+    const import: std.wasm.Import = switch (symbol.tag) {
+        .function => import: {
             const value = wasm.imports.imported_functions.values()[symbol.index];
+            const key = wasm.imports.imported_functions.keys()[symbol.index];
             std.debug.assert(value.index == symbol.index);
-            import.kind = .{ .function = value.type };
-            import.module_name = wasm.imports.imported_functions.keys()[symbol.index].module_name;
+            break :import .{
+                .kind = .{ .function = value.type },
+                .module_name = key.module_name,
+                .name = key.name,
+            };
         },
-        .global => {
+        .global => import: {
             const value = wasm.imports.imported_globals.values()[symbol.index];
+            const key = wasm.imports.imported_globals.keys()[symbol.index];
             std.debug.assert(value.index == symbol.index);
-            import.kind = .{ .global = value.global };
-            import.module_name = wasm.imports.imported_globals.keys()[symbol.index].module_name;
+            break :import .{
+                .kind = .{ .global = value.global },
+                .module_name = key.module_name,
+                .name = key.name,
+            };
         },
-        .table => {
+        .table => import: {
             const value = wasm.imports.imported_tables.values()[symbol.index];
+            const key = wasm.imports.imported_tables.keys()[symbol.index];
             std.debug.assert(value.index == symbol.index);
-            import.kind = .{ .table = value.table };
-            import.module_name = wasm.imports.imported_tables.keys()[symbol.index].module_name;
+            break :import .{
+                .kind = .{ .table = value.table },
+                .module_name = key.module_name,
+                .name = key.name,
+            };
         },
         else => unreachable,
-    }
+    };
 
     try emitImport(import, writer);
 }

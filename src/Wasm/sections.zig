@@ -109,7 +109,7 @@ pub const Imports = struct {
         const symbol = &object.symtable[sym_with_loc.sym_index];
         const import = object.findImport(symbol.tag.externalType(), symbol.index);
         const module_name = object.string_table.get(import.module_name);
-        const import_name = object.string_table.get(symbol.name);
+        const import_name = object.string_table.get(import.name);
 
         switch (symbol.tag) {
             .function => {
