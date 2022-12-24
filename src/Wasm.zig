@@ -754,7 +754,7 @@ fn setupExports(wasm: *Wasm) !void {
             const segment_index = wasm.data_segments.get(segment_name).?;
             const segment = wasm.segments.items[segment_index];
             const addr_value = @bitCast(i32, atom.offset + segment.offset);
-            const offset = wasm.globals.count() + wasm.imports.globalCount();
+            const offset = wasm.imports.globalCount();
             const global_index = try wasm.globals.append(wasm.base.allocator, offset, .{
                 .global_type = .{ .valtype = .i32, .mutable = false },
                 .init = .{ .i32_const = addr_value },
