@@ -448,9 +448,6 @@ fn resolveSymbolsInObject(wasm: *Wasm, object_index: u16) !void {
             .sym_index = sym_index,
         };
         const sym_name = object.string_table.get(symbol.name);
-        if (mem.eql(u8, sym_name, "__indirect_function_table")) {
-            continue;
-        }
         const sym_name_index = try wasm.string_table.put(wasm.base.allocator, sym_name);
 
         if (symbol.isLocal()) {
@@ -647,13 +644,20 @@ fn getFunctionSignature(wasm: *const Wasm, loc: SymbolWithLoc) std.wasm.Type {
 /// Calculates the new indexes for symbols and their respective symbols
 fn mergeSections(wasm: *Wasm) !void {
     // first append the indirect function table if initialized
-    if (wasm.string_table.getOffset("__indirect_function_table")) |offset| {
+    const function_pointers = wasm.elements.functionCount();
+    if (function_pointers > 0 and !wasm.options.import_table) {
         log.debug("Appending indirect function table", .{});
+        const offset = wasm.string_table.getOffset("__indirect_function_table").?;
         const sym_with_loc = wasm.global_symbols.get(offset).?;
-        const object: Object = wasm.objects.items[sym_with_loc.file.?];
         const symbol = sym_with_loc.getSymbol(wasm);
-        const imp = object.findImport(.table, object.symtable[sym_with_loc.sym_index].index);
-        symbol.index = try wasm.tables.append(wasm.base.allocator, wasm.imports.tableCount(), imp.kind.table);
+        symbol.index = try wasm.tables.append(
+            wasm.base.allocator,
+            wasm.imports.tableCount(),
+            .{
+                .limits = .{ .min = function_pointers, .max = function_pointers },
+                .reftype = .funcref,
+            },
+        );
     }
 
     log.debug("Merging sections", .{});
@@ -780,38 +784,61 @@ fn setupExports(wasm: *Wasm) !void {
 
 /// Creates symbols that are made by the linker, rather than the compiler/object file
 fn setupLinkerSymbols(wasm: *Wasm) !void {
-    const name_offset = try wasm.string_table.put(wasm.base.allocator, "__stack_pointer");
-    var symbol: Symbol = .{
-        .flags = 0,
-        .name = name_offset,
-        .tag = .global,
-        .index = 0,
-    };
-    symbol.setFlag(.WASM_SYM_VISIBILITY_HIDDEN);
+    // stack pointer symbol
+    {
+        const loc = try wasm.createSyntheticSymbol("__stack_pointer");
+        const symbol = loc.getSymbol(wasm);
+        symbol.tag = .global;
+        symbol.setFlag(.WASM_SYM_VISIBILITY_HIDDEN);
+        const global: std.wasm.Global = .{
+            .init = .{ .i32_const = 0 },
+            .global_type = .{ .valtype = .i32, .mutable = true },
+        };
+        symbol.index = try wasm.globals.append(wasm.base.allocator, 0, global);
+    }
 
-    const global: std.wasm.Global = .{
-        .init = .{ .i32_const = 0 },
-        .global_type = .{ .valtype = .i32, .mutable = true },
-    };
+    // indirect function table symbol
+    {
+        const loc = try wasm.createSyntheticSymbol("__indirect_function_table");
+        const symbol = loc.getSymbol(wasm);
+        symbol.tag = .table;
+        symbol.setFlag(.WASM_SYM_VISIBILITY_HIDDEN);
+        // do need to create table here, as we only create it if there's any
+        // function pointers to be stored. This is done in `mergeSections`
+    }
+}
 
-    symbol.index = try wasm.globals.append(wasm.base.allocator, 0, global);
-
+/// For a given name, creates a new global synthetic symbol.
+/// Leaves index and tag undefined. Flags is empty.
+fn createSyntheticSymbol(wasm: *Wasm, name: []const u8) !SymbolWithLoc {
+    const name_offset = try wasm.string_table.put(wasm.base.allocator, name);
     const sym_index = @intCast(u32, wasm.synthetic_symbols.count());
     const loc: SymbolWithLoc = .{ .sym_index = sym_index, .file = null };
-    try wasm.synthetic_symbols.putNoClobber(wasm.base.allocator, wasm.string_table.get(name_offset), symbol);
+    try wasm.synthetic_symbols.putNoClobber(wasm.base.allocator, name, .{
+        .name = name_offset,
+        .flags = 0,
+        .tag = undefined,
+        .index = undefined,
+    });
     try wasm.resolved_symbols.putNoClobber(wasm.base.allocator, loc, {});
     try wasm.global_symbols.putNoClobber(wasm.base.allocator, name_offset, loc);
+    return loc;
 }
 
 fn mergeImports(wasm: *Wasm) !void {
-    const maybe_func_table_offset = wasm.string_table.getOffset("__indirect_function_table");
-    if (wasm.options.import_table) {
-        const table_offset = maybe_func_table_offset orelse {
-            log.err("Required import __indirect_function_table is missing from object files", .{});
-            return error.MissingSymbol;
-        };
+    if (wasm.options.import_table and wasm.elements.functionCount() > 0) {
+        const table_offset = wasm.string_table.getOffset("__indirect_function_table").?;
         const sym_with_loc = wasm.global_symbols.get(table_offset).?;
-        try wasm.imports.appendSymbol(wasm.base.allocator, wasm, sym_with_loc);
+        const symbol = sym_with_loc.getSymbol(wasm);
+        symbol.index = wasm.imports.tableCount();
+        try wasm.imports.imported_tables.putNoClobber(wasm.base.allocator, .{
+            .module_name = "env",
+            .name = "__indirect_function_table",
+        }, .{ .index = symbol.index, .table = .{
+            .limits = .{ .min = wasm.elements.functionCount(), .max = null },
+            .reftype = .funcref,
+        } });
+        try wasm.imports.imported_symbols.append(wasm.base.allocator, sym_with_loc);
     }
 
     for (wasm.resolved_symbols.keys()) |sym_with_loc| {

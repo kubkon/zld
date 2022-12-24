@@ -9,14 +9,6 @@ const Allocator = std.mem.Allocator;
 
 const log = std.log.scoped(.wasm);
 
-/// Accepts a slice with mutable elements and sets the field `field_name`'s value
-/// to the index within the list, based on the given `offset`.
-fn setIndex(comptime field_name: []const u8, slice: anytype, offset: u32) void {
-    for (slice) |item, index| {
-        @field(item, field_name) = @intCast(u32, index + offset);
-    }
-}
-
 /// Output function section, holding a list of all
 /// function with indexes to their type
 pub const Functions = struct {
@@ -252,13 +244,6 @@ pub const Globals = struct {
         return &self.items.items[index];
     }
 
-    /// Assigns indexes to all functions based on the given `offset`
-    /// Meaning that for element 0, with offset 2, will have its first element's index
-    /// set to 2, rather than 0.
-    pub fn setIndexes(self: *Globals, offset: u32) void {
-        setIndex("global_idx", self.items.items, offset);
-    }
-
     pub fn deinit(self: *Globals, gpa: Allocator) void {
         self.items.deinit(gpa);
         self.got_symbols.deinit(gpa);
@@ -271,8 +256,6 @@ pub const Globals = struct {
 pub const Types = struct {
     /// A list of `wasm.FuncType`, when appending to
     /// this list, duplicates will be removed.
-    ///
-    /// TODO: Would a hashmap be more efficient?
     items: std.ArrayListUnmanaged(std.wasm.Type) = .{},
 
     /// Checks if a given type is already present within the list of types.
@@ -338,38 +321,6 @@ pub const Tables = struct {
         return @intCast(u32, self.items.items.len);
     }
 
-    /// Sets the table indexes of all table elements relative to their position within
-    /// the list, starting from `offset` rather than '0'.
-    pub fn setIndexes(self: *Tables, offset: u32) void {
-        setIndex("table_idx", self.items.items, offset);
-    }
-
-    /// Creates a synthetic symbol for the indirect function table and appends it into the
-    /// table list.
-    pub fn createIndirectFunctionTable(self: *Tables, gpa: Allocator, wasm_bin: *Wasm) !void {
-        // Only create it if it doesn't exist yet
-        if (Symbol.linker_defined.indirect_function_table != null) {
-            log.debug("Indirect function table already exists, skipping creation...", .{});
-            return;
-        }
-
-        const index = self.count();
-        try self.items.append(gpa, .{
-            .limits = .{ .min = 0, .max = null },
-            .reftype = .funcref,
-            .table_idx = index,
-        });
-        var symbol: Symbol = .{
-            .flags = 0, // created defined symbol
-            .name = Symbol.linker_defined.names.indirect_function_table, // __indirect_function_table
-            .kind = .{ .table = .{ .index = index, .table = &self.items.items[index] } },
-        };
-        try wasm_bin.synthetic_symbols.append(gpa, symbol);
-        Symbol.linker_defined.indirect_function_table = &wasm_bin.synthetic_symbols.items[wasm_bin.synthetic_symbols.items.len - 1];
-
-        log.debug("Created indirect function table at index {d}", .{index});
-    }
-
     pub fn deinit(self: *Tables, gpa: Allocator) void {
         self.items.deinit(gpa);
         self.* = undefined;
@@ -402,7 +353,7 @@ pub const Exports = struct {
 
 pub const Elements = struct {
     /// A list of symbols for indirect function calls where the key
-    /// represents the symbol location, and the value represents the table index.
+    /// represents the symbol location, and the value represents the index into the table.
     indirect_functions: std.AutoArrayHashMapUnmanaged(Wasm.SymbolWithLoc, u32) = .{},
 
     /// Appends a function symbol to the list of indirect function calls.
