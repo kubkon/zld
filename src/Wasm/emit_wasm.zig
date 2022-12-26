@@ -187,44 +187,46 @@ pub fn emit(wasm: *Wasm) !void {
         try emitSectionHeader(file, offset, .data, data_count);
     }
 
-    // names section
-    const func_count: u32 = wasm.functions.count() + wasm.imports.functionCount();
-    const global_count: u32 = wasm.globals.count() + wasm.imports.globalCount();
-    // we must de-duplicate symbols that point to the same function
-    var funcs = std.AutoArrayHashMap(u32, Wasm.SymbolWithLoc).init(wasm.base.allocator);
-    defer funcs.deinit();
-    try funcs.ensureUnusedCapacity(func_count);
-    var globals = try std.ArrayList(Wasm.SymbolWithLoc).initCapacity(wasm.base.allocator, global_count);
-    defer globals.deinit();
+    if (!wasm.options.strip) {
+        // names section
+        const func_count: u32 = wasm.functions.count() + wasm.imports.functionCount();
+        const global_count: u32 = wasm.globals.count() + wasm.imports.globalCount();
+        // we must de-duplicate symbols that point to the same function
+        var funcs = std.AutoArrayHashMap(u32, Wasm.SymbolWithLoc).init(wasm.base.allocator);
+        defer funcs.deinit();
+        try funcs.ensureUnusedCapacity(func_count);
+        var globals = try std.ArrayList(Wasm.SymbolWithLoc).initCapacity(wasm.base.allocator, global_count);
+        defer globals.deinit();
 
-    for (wasm.resolved_symbols.keys()) |sym_with_loc| {
-        const symbol = sym_with_loc.getSymbol(wasm);
-        switch (symbol.tag) {
-            .function => {
-                const gop = try funcs.getOrPut(symbol.index);
-                if (!gop.found_existing) {
-                    gop.value_ptr.* = sym_with_loc;
-                }
-            },
-            .global => globals.appendAssumeCapacity(sym_with_loc),
-            else => {}, // do not emit 'names' section for other symbols
+        for (wasm.resolved_symbols.keys()) |sym_with_loc| {
+            const symbol = sym_with_loc.getSymbol(wasm);
+            switch (symbol.tag) {
+                .function => {
+                    const gop = try funcs.getOrPut(symbol.index);
+                    if (!gop.found_existing) {
+                        gop.value_ptr.* = sym_with_loc;
+                    }
+                },
+                .global => globals.appendAssumeCapacity(sym_with_loc),
+                else => {}, // do not emit 'names' section for other symbols
+            }
         }
+
+        std.sort.sort(Wasm.SymbolWithLoc, funcs.values(), wasm, lessThan);
+        std.sort.sort(Wasm.SymbolWithLoc, globals.items, wasm, lessThan);
+
+        const offset = try reserveCustomSectionHeader(file);
+        try leb.writeULEB128(writer, @intCast(u32, "name".len));
+        try writer.writeAll("name");
+
+        try emitNameSection(wasm, 0x01, wasm.base.allocator, funcs.values(), writer);
+        try emitNameSection(wasm, 0x07, wasm.base.allocator, globals.items, writer);
+        try emitDataNamesSection(wasm, wasm.base.allocator, writer);
+        try emitCustomHeader(file, offset);
+
+        try emitDebugSections(file, wasm, wasm.base.allocator, writer);
+        try emitProducerSection(file, wasm, wasm.base.allocator, writer);
     }
-
-    std.sort.sort(Wasm.SymbolWithLoc, funcs.values(), wasm, lessThan);
-    std.sort.sort(Wasm.SymbolWithLoc, globals.items, wasm, lessThan);
-
-    const offset = try reserveCustomSectionHeader(file);
-    try leb.writeULEB128(writer, @intCast(u32, "name".len));
-    try writer.writeAll("name");
-
-    try emitNameSection(wasm, 0x01, wasm.base.allocator, funcs.values(), writer);
-    try emitNameSection(wasm, 0x07, wasm.base.allocator, globals.items, writer);
-    try emitDataNamesSection(wasm, wasm.base.allocator, writer);
-    try emitCustomHeader(file, offset);
-
-    try emitDebugSections(file, wasm, wasm.base.allocator, writer);
-    try emitProducerSection(file, wasm, wasm.base.allocator, writer);
     try emitFeaturesSection(file, wasm, writer);
 }
 

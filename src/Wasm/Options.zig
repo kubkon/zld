@@ -27,6 +27,7 @@ const usage =
     \\--stack-first                      Place stack at start of linear memory instead of after data
     \\--stack-size=<value>               Specifies the stack size in bytes
     \\--features=<value>                 Comma-delimited list of used features, inferred by object files if unset
+    \\--strip                            Strip all debug information and symbol names
 ;
 
 /// Result path of the binary
@@ -61,6 +62,9 @@ stack_size: ?u32 = null,
 /// Comma-delimited list of features to use.
 /// When empty, the used features are inferred from the objects instead.
 features: []const u8,
+/// Strips all debug information and optional sections such as symbol names,
+/// and the 'producers' section.
+strip: bool = false,
 
 pub fn parseArgs(arena: Allocator, context: Zld.MainCtx) !Options {
     if (context.args.len == 0) {
@@ -81,6 +85,7 @@ pub fn parseArgs(arena: Allocator, context: Zld.MainCtx) !Options {
     var stack_first = false;
     var stack_size: ?u32 = null;
     var features: ?[]const u8 = null;
+    var strip: ?bool = null;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -142,6 +147,8 @@ pub fn parseArgs(arena: Allocator, context: Zld.MainCtx) !Options {
             const index = mem.indexOfScalar(u8, arg, '=') orelse context.printFailure("Missing '=' symbol and value for features list", .{});
             features = arg[index + 1 ..];
             i += 1;
+        } else if (mem.eql(u8, arg, "--strip")) {
+            strip = true;
         } else {
             try positionals.append(arg);
         }
@@ -172,5 +179,6 @@ pub fn parseArgs(arena: Allocator, context: Zld.MainCtx) !Options {
         .stack_first = stack_first,
         .stack_size = stack_size,
         .features = features orelse &.{},
+        .strip = strip orelse false,
     };
 }
