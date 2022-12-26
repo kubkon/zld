@@ -54,7 +54,7 @@ pub fn emit(wasm: *Wasm) !void {
     if (wasm.functions.count() != 0) {
         log.debug("Writing 'Functions' section ({d})", .{wasm.functions.count()});
         const offset = try reserveSectionHeader(file);
-        for (wasm.functions.items.items) |func| {
+        for (wasm.functions.items.values()) |func| {
             try emitFunction(func, writer);
         }
         try emitSectionHeader(file, offset, .function, wasm.functions.count());
@@ -444,24 +444,14 @@ fn emitExport(exported: std.wasm.Export, writer: anytype) !void {
 }
 
 fn emitElement(wasm: *Wasm, writer: anytype) !void {
+    // passive, with implicit 0-index table
     var flags: u32 = 0;
-    var index: ?u32 = if (wasm.string_table.getOffset("__indirect_function_table")) |offset| blk: {
-        const sym_loc = wasm.global_symbols.get(offset).?;
-        flags |= 0x2;
-        break :blk sym_loc.getSymbol(wasm).index;
-    } else null;
     try leb.writeULEB128(writer, flags);
-    if (index) |idx|
-        try leb.writeULEB128(writer, idx);
-
+    // Start the function table at index 1
     try emitInitExpression(.{ .i32_const = 1 }, writer);
-    if (flags & 0x3 != 0) {
-        try leb.writeULEB128(writer, @as(u8, 0));
-    }
-
     try leb.writeULEB128(writer, wasm.elements.functionCount());
-    for (wasm.elements.indirect_functions.keys()) |sym_with_loc| {
-        const symbol = wasm.objects.items[sym_with_loc.file.?].symtable[sym_with_loc.sym_index];
+    for (wasm.elements.indirect_functions.keys()) |sym_loc| {
+        const symbol = sym_loc.getSymbol(wasm);
         try leb.writeULEB128(writer, symbol.index);
     }
 }

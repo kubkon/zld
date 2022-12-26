@@ -271,7 +271,6 @@ fn parsePositionals(wasm: *Wasm, files: []const []const u8) !void {
 /// does not represent an object file.
 fn parseObjectFile(wasm: *Wasm, gpa: Allocator, path: []const u8) !bool {
     const file = try fs.cwd().openFile(path, .{});
-    errdefer file.close();
     var object = Object.create(gpa, file, path, null) catch |err| switch (err) {
         error.InvalidMagicByte, error.NotObjectFile => {
             return false;
@@ -360,6 +359,7 @@ pub fn flush(wasm: *Wasm) !void {
     try wasm.mergeImports();
     try wasm.allocateAtoms();
     try wasm.setupMemory();
+    wasm.mapFunctionTable();
     try wasm.mergeSections();
     try wasm.mergeTypes();
     try wasm.setupExports();
@@ -638,7 +638,18 @@ fn getFunctionSignature(wasm: *const Wasm, loc: SymbolWithLoc) std.wasm.Type {
         return obj.func_types[type_index];
     }
     assert(!is_undefined);
-    return wasm.func_types.get(wasm.functions.items.items[symbol.index].type_index).*;
+    return wasm.func_types.get(wasm.functions.items.values()[symbol.index].type_index).*;
+}
+
+/// Assigns indexes to all indirect functions.
+/// Starts at offset 1, where the value `0` represents an unresolved function pointer
+/// or null-pointer
+fn mapFunctionTable(wasm: *Wasm) void {
+    var index: u32 = 1;
+    var it = wasm.elements.indirect_functions.iterator();
+    while (it.next()) |entry| : (index += 1) {
+        entry.value_ptr.* = index;
+    }
 }
 
 /// Calculates the new indexes for symbols and their respective symbols
@@ -662,7 +673,8 @@ fn mergeSections(wasm: *Wasm) !void {
 
     log.debug("Merging sections", .{});
     for (wasm.resolved_symbols.keys()) |sym_with_loc| {
-        const object = wasm.objects.items[sym_with_loc.file orelse continue]; // synthetic symbols do not need to be merged
+        const file_index = sym_with_loc.file orelse continue; // synthetic symbols do not need to be merged
+        const object = wasm.objects.items[file_index];
         const symbol: *Symbol = &object.symtable[sym_with_loc.sym_index];
         if (symbol.isUndefined() or (symbol.tag != .function and symbol.tag != .global and symbol.tag != .table)) {
             // Skip undefined symbols as they go in the `import` section
@@ -677,6 +689,7 @@ fn mergeSections(wasm: *Wasm) !void {
                 const original_func = object.functions[index];
                 symbol.index = try wasm.functions.append(
                     wasm.base.allocator,
+                    .{ .file = file_index, .index = symbol.index },
                     wasm.imports.functionCount(),
                     original_func,
                 );
@@ -728,7 +741,7 @@ fn mergeTypes(wasm: *Wasm) !void {
                 continue;
             } else if (!dirty.contains(symbol.index)) {
                 log.debug("Adding type from function '{s}'", .{object.string_table.get(symbol.name)});
-                const func = &wasm.functions.items.items[symbol.index - wasm.imports.functionCount()];
+                const func = &wasm.functions.items.values()[symbol.index - wasm.imports.functionCount()];
                 func.type_index = try wasm.func_types.append(wasm.base.allocator, object.func_types[func.type_index]);
             }
         }
@@ -1047,7 +1060,7 @@ pub fn appendAtomAtIndex(wasm: *Wasm, gpa: Allocator, index: u32, atom: *Atom) !
     }
 }
 
-/// Sorts the data segments into the preffered order of:
+/// Sorts the data segments into the preferred order of:
 /// - .rodata
 /// - .data
 /// - .text
@@ -1107,7 +1120,6 @@ fn allocateAtoms(wasm: *Wasm) !void {
                 atom.size,
             });
             offset += atom.size;
-            try wasm.symbol_atom.put(wasm.base.allocator, symbol_loc, atom); // Update atom pointers
             atom = atom.next orelse break;
         }
         segment.size = std.mem.alignForwardGeneric(u32, offset, segment.alignment);

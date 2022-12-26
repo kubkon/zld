@@ -137,10 +137,9 @@ pub fn isNoStrip(symbol: Symbol) bool {
 
 pub fn isExported(symbol: Symbol) bool {
     if (symbol.isUndefined() or symbol.isLocal()) return false;
-    if (symbol.isHidden()) return false;
-    if (symbol.hasFlag(.WASM_SYM_EXPORTED)) return true;
-    if (symbol.hasFlag(.WASM_SYM_BINDING_WEAK)) return false;
-    return true;
+    // TODO: support dynamic flag and then automatically export
+    // symbols which are not hidden
+    return symbol.hasFlag(.WASM_SYM_EXPORTED);
 }
 
 pub fn isWeak(symbol: Symbol) bool {
