@@ -285,9 +285,7 @@ pub const Types = struct {
     /// otherwise, returns `null`.
     pub fn find(self: Types, func_type: std.wasm.Type) ?u32 {
         return for (self.items.items) |ty, index| {
-            if (std.mem.eql(std.wasm.Valtype, ty.params, func_type.params) and
-                std.mem.eql(std.wasm.Valtype, ty.returns, func_type.returns))
-            {
+            if (ty.eql(func_type)) {
                 return @intCast(u32, index);
             }
         } else null;
@@ -359,7 +357,7 @@ pub const Exports = struct {
 pub const Elements = struct {
     /// A list of symbols for indirect function calls where the key
     /// represents the symbol location, and the value represents the index into the table.
-    indirect_functions: std.AutoArrayHashMapUnmanaged(Wasm.SymbolWithLoc, u32) = .{},
+    indirect_functions: std.AutoHashMapUnmanaged(Wasm.SymbolWithLoc, u32) = .{},
 
     pub fn functionCount(self: Elements) u32 {
         return @intCast(u32, self.indirect_functions.count());

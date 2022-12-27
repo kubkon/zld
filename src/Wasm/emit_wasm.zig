@@ -452,9 +452,9 @@ fn emitElement(wasm: *Wasm, writer: anytype) !void {
     // Start the function table at index 1
     try emitInitExpression(.{ .i32_const = 1 }, writer);
     try leb.writeULEB128(writer, wasm.elements.functionCount());
-    for (wasm.elements.indirect_functions.keys()) |sym_loc| {
-        const symbol = sym_loc.getSymbol(wasm);
-        try leb.writeULEB128(writer, symbol.index);
+    var it = wasm.elements.indirect_functions.keyIterator();
+    while (it.next()) |key_ptr| {
+        try leb.writeULEB128(writer, key_ptr.*.getSymbol(wasm).index);
     }
 }
 

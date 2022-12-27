@@ -74,7 +74,7 @@ pub fn parseArgs(arena: Allocator, context: Zld.MainCtx) !Options {
     const args = context.args;
     var positionals = std.ArrayList([]const u8).init(arena);
     var entry_name: ?[]const u8 = null;
-    var global_base: ?u32 = 1024;
+    var global_base: ?u32 = null;
     var import_memory: bool = false;
     var import_table: bool = false;
     var initial_memory: ?u32 = null;

@@ -645,10 +645,10 @@ fn getFunctionSignature(wasm: *const Wasm, loc: SymbolWithLoc) std.wasm.Type {
 /// Starts at offset 1, where the value `0` represents an unresolved function pointer
 /// or null-pointer
 fn mapFunctionTable(wasm: *Wasm) void {
+    var it = wasm.elements.indirect_functions.valueIterator();
     var index: u32 = 1;
-    var it = wasm.elements.indirect_functions.iterator();
-    while (it.next()) |entry| : (index += 1) {
-        entry.value_ptr.* = index;
+    while (it.next()) |value_ptr| : (index += 1) {
+        value_ptr.* = index;
     }
 }
 
@@ -665,7 +665,8 @@ fn mergeSections(wasm: *Wasm) !void {
             wasm.base.allocator,
             wasm.imports.tableCount(),
             .{
-                .limits = .{ .min = function_pointers, .max = function_pointers },
+                // index starts at 1, so add 1 extra element
+                .limits = .{ .min = function_pointers + 1, .max = function_pointers + 1 },
                 .reftype = .funcref,
             },
         );
@@ -799,9 +800,8 @@ fn setupExports(wasm: *Wasm) !void {
 fn setupLinkerSymbols(wasm: *Wasm) !void {
     // stack pointer symbol
     {
-        const loc = try wasm.createSyntheticSymbol("__stack_pointer");
+        const loc = try wasm.createSyntheticSymbol("__stack_pointer", .global);
         const symbol = loc.getSymbol(wasm);
-        symbol.tag = .global;
         symbol.setFlag(.WASM_SYM_VISIBILITY_HIDDEN);
         const global: std.wasm.Global = .{
             .init = .{ .i32_const = 0 },
@@ -812,9 +812,8 @@ fn setupLinkerSymbols(wasm: *Wasm) !void {
 
     // indirect function table symbol
     {
-        const loc = try wasm.createSyntheticSymbol("__indirect_function_table");
+        const loc = try wasm.createSyntheticSymbol("__indirect_function_table", .table);
         const symbol = loc.getSymbol(wasm);
-        symbol.tag = .table;
         symbol.setFlag(.WASM_SYM_VISIBILITY_HIDDEN);
         // do need to create table here, as we only create it if there's any
         // function pointers to be stored. This is done in `mergeSections`
@@ -822,15 +821,15 @@ fn setupLinkerSymbols(wasm: *Wasm) !void {
 }
 
 /// For a given name, creates a new global synthetic symbol.
-/// Leaves index and tag undefined. Flags is empty.
-fn createSyntheticSymbol(wasm: *Wasm, name: []const u8) !SymbolWithLoc {
+/// Leaves index undefined and the default flags (0).
+fn createSyntheticSymbol(wasm: *Wasm, name: []const u8, tag: Symbol.Tag) !SymbolWithLoc {
     const name_offset = try wasm.string_table.put(wasm.base.allocator, name);
     const sym_index = @intCast(u32, wasm.synthetic_symbols.count());
     const loc: SymbolWithLoc = .{ .sym_index = sym_index, .file = null };
     try wasm.synthetic_symbols.putNoClobber(wasm.base.allocator, name, .{
         .name = name_offset,
         .flags = 0,
-        .tag = undefined,
+        .tag = tag,
         .index = undefined,
     });
     try wasm.resolved_symbols.putNoClobber(wasm.base.allocator, loc, {});
@@ -963,21 +962,13 @@ pub fn getMatchingSegment(wasm: *Wasm, gpa: Allocator, object_index: u16, reloca
             const result = try wasm.data_segments.getOrPut(gpa, segment_name);
             if (!result.found_existing) {
                 result.value_ptr.* = index;
-                try wasm.segments.append(gpa, .{
-                    .alignment = 1,
-                    .size = 0,
-                    .offset = 0,
-                });
+                try wasm.appendDummySegment(gpa);
                 return index;
             } else return result.value_ptr.*;
         },
         .code => return wasm.code_section_index orelse blk: {
             wasm.code_section_index = index;
-            try wasm.segments.append(gpa, .{
-                .alignment = 1,
-                .size = 0,
-                .offset = 0,
-            });
+            try wasm.appendDummySegment(gpa);
             break :blk index;
         },
         .debug => {
@@ -1100,7 +1091,6 @@ fn allocateAtoms(wasm: *Wasm) !void {
     try wasm.sortDataSegments(wasm.base.allocator);
 
     var it = wasm.atoms.iterator();
-    try wasm.symbol_atom.ensureUnusedCapacity(wasm.base.allocator, wasm.atoms.count());
     while (it.next()) |entry| {
         const segment = &wasm.segments.items[entry.key_ptr.*];
         var atom: *Atom = entry.value_ptr.*.getFirst();
