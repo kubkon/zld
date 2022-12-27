@@ -9,33 +9,30 @@ const Allocator = std.mem.Allocator;
 
 const log = std.log.scoped(.wasm);
 
-/// Accepts a slice with mutable elements and sets the field `field_name`'s value
-/// to the index within the list, based on the given `offset`.
-fn setIndex(comptime field_name: []const u8, slice: anytype, offset: u32) void {
-    for (slice) |item, index| {
-        @field(item, field_name) = @intCast(u32, index + offset);
-    }
-}
-
 /// Output function section, holding a list of all
 /// function with indexes to their type
 pub const Functions = struct {
     /// Holds the list of function type indexes.
     /// The list is built from merging all defined functions into this single list.
     /// Once appended, it becomes immutable and should not be mutated outside this list.
-    items: std.ArrayListUnmanaged(std.wasm.Func) = .{},
+    items: std.AutoArrayHashMapUnmanaged(struct { file: u16, index: u32 }, std.wasm.Func) = .{},
 
     /// Adds a new function to the section while also setting the function index
     /// of the `Func` itself.
-    pub fn append(self: *Functions, gpa: Allocator, offset: u32, func: std.wasm.Func) !u32 {
-        const index = offset + self.count();
-        try self.items.append(gpa, func);
-        return index;
+    pub fn append(self: *Functions, gpa: Allocator, ref: struct { file: u16, index: u32 }, offset: u32, func: std.wasm.Func) !u32 {
+        const gop = try self.items.getOrPut(
+            gpa,
+            .{ .file = ref.file, .index = ref.index },
+        );
+        if (!gop.found_existing) {
+            gop.value_ptr.* = func;
+        }
+        return @intCast(u32, gop.index) + offset;
     }
 
     /// Returns the count of entires within the function section
     pub fn count(self: *Functions) u32 {
-        return @intCast(u32, self.items.items.len);
+        return @intCast(u32, self.items.count());
     }
 
     pub fn deinit(self: *Functions, gpa: Allocator) void {
@@ -117,7 +114,7 @@ pub const Imports = struct {
         const symbol = &object.symtable[sym_with_loc.sym_index];
         const import = object.findImport(symbol.tag.externalType(), symbol.index);
         const module_name = object.string_table.get(import.module_name);
-        const import_name = object.string_table.get(symbol.name);
+        const import_name = object.string_table.get(import.name);
 
         switch (symbol.tag) {
             .function => {
@@ -252,13 +249,6 @@ pub const Globals = struct {
         return &self.items.items[index];
     }
 
-    /// Assigns indexes to all functions based on the given `offset`
-    /// Meaning that for element 0, with offset 2, will have its first element's index
-    /// set to 2, rather than 0.
-    pub fn setIndexes(self: *Globals, offset: u32) void {
-        setIndex("global_idx", self.items.items, offset);
-    }
-
     pub fn deinit(self: *Globals, gpa: Allocator) void {
         self.items.deinit(gpa);
         self.got_symbols.deinit(gpa);
@@ -271,8 +261,6 @@ pub const Globals = struct {
 pub const Types = struct {
     /// A list of `wasm.FuncType`, when appending to
     /// this list, duplicates will be removed.
-    ///
-    /// TODO: Would a hashmap be more efficient?
     items: std.ArrayListUnmanaged(std.wasm.Type) = .{},
 
     /// Checks if a given type is already present within the list of types.
@@ -297,9 +285,7 @@ pub const Types = struct {
     /// otherwise, returns `null`.
     pub fn find(self: Types, func_type: std.wasm.Type) ?u32 {
         return for (self.items.items) |ty, index| {
-            if (std.mem.eql(std.wasm.Valtype, ty.params, func_type.params) and
-                std.mem.eql(std.wasm.Valtype, ty.returns, func_type.returns))
-            {
+            if (ty.eql(func_type)) {
                 return @intCast(u32, index);
             }
         } else null;
@@ -338,38 +324,6 @@ pub const Tables = struct {
         return @intCast(u32, self.items.items.len);
     }
 
-    /// Sets the table indexes of all table elements relative to their position within
-    /// the list, starting from `offset` rather than '0'.
-    pub fn setIndexes(self: *Tables, offset: u32) void {
-        setIndex("table_idx", self.items.items, offset);
-    }
-
-    /// Creates a synthetic symbol for the indirect function table and appends it into the
-    /// table list.
-    pub fn createIndirectFunctionTable(self: *Tables, gpa: Allocator, wasm_bin: *Wasm) !void {
-        // Only create it if it doesn't exist yet
-        if (Symbol.linker_defined.indirect_function_table != null) {
-            log.debug("Indirect function table already exists, skipping creation...", .{});
-            return;
-        }
-
-        const index = self.count();
-        try self.items.append(gpa, .{
-            .limits = .{ .min = 0, .max = null },
-            .reftype = .funcref,
-            .table_idx = index,
-        });
-        var symbol: Symbol = .{
-            .flags = 0, // created defined symbol
-            .name = Symbol.linker_defined.names.indirect_function_table, // __indirect_function_table
-            .kind = .{ .table = .{ .index = index, .table = &self.items.items[index] } },
-        };
-        try wasm_bin.synthetic_symbols.append(gpa, symbol);
-        Symbol.linker_defined.indirect_function_table = &wasm_bin.synthetic_symbols.items[wasm_bin.synthetic_symbols.items.len - 1];
-
-        log.debug("Created indirect function table at index {d}", .{index});
-    }
-
     pub fn deinit(self: *Tables, gpa: Allocator) void {
         self.items.deinit(gpa);
         self.* = undefined;
@@ -402,19 +356,8 @@ pub const Exports = struct {
 
 pub const Elements = struct {
     /// A list of symbols for indirect function calls where the key
-    /// represents the symbol location, and the value represents the table index.
-    indirect_functions: std.AutoArrayHashMapUnmanaged(Wasm.SymbolWithLoc, u32) = .{},
-
-    /// Appends a function symbol to the list of indirect function calls.
-    /// The table index will be set on the symbol, based on the length
-    ///
-    /// Asserts symbol represents a function.
-    pub fn appendSymbol(self: *Elements, gpa: Allocator, symbol_loc: Wasm.SymbolWithLoc) !void {
-        const gop = try self.indirect_functions.getOrPut(gpa, symbol_loc);
-        if (gop.found_existing) return;
-        // start at index 1 so the index '0' is an invalid function pointer
-        gop.value_ptr.* = self.functionCount() + 1;
-    }
+    /// represents the symbol location, and the value represents the index into the table.
+    indirect_functions: std.AutoHashMapUnmanaged(Wasm.SymbolWithLoc, u32) = .{},
 
     pub fn functionCount(self: Elements) u32 {
         return @intCast(u32, self.indirect_functions.count());

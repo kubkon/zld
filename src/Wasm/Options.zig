@@ -14,6 +14,7 @@ const usage =
     \\
     \\Options:
     \\-h, --help                         Print this help and exit
+    \\--debug-log [scope]                Turn on debugging logs for [scope] (requires zld compiled with -Dlog)
     \\-o [path]                          Output path of the binary
     \\--entry <entry>                    Name of entry point symbol
     \\--global-base=<value>              Value from where the global data will start
@@ -26,6 +27,7 @@ const usage =
     \\--stack-first                      Place stack at start of linear memory instead of after data
     \\--stack-size=<value>               Specifies the stack size in bytes
     \\--features=<value>                 Comma-delimited list of used features, inferred by object files if unset
+    \\--strip                            Strip all debug information and symbol names
 ;
 
 /// Result path of the binary
@@ -60,6 +62,9 @@ stack_size: ?u32 = null,
 /// Comma-delimited list of features to use.
 /// When empty, the used features are inferred from the objects instead.
 features: []const u8,
+/// Strips all debug information and optional sections such as symbol names,
+/// and the 'producers' section.
+strip: bool = false,
 
 pub fn parseArgs(arena: Allocator, context: Zld.MainCtx) !Options {
     if (context.args.len == 0) {
@@ -69,7 +74,7 @@ pub fn parseArgs(arena: Allocator, context: Zld.MainCtx) !Options {
     const args = context.args;
     var positionals = std.ArrayList([]const u8).init(arena);
     var entry_name: ?[]const u8 = null;
-    var global_base: ?u32 = 1024;
+    var global_base: ?u32 = null;
     var import_memory: bool = false;
     var import_table: bool = false;
     var initial_memory: ?u32 = null;
@@ -80,12 +85,17 @@ pub fn parseArgs(arena: Allocator, context: Zld.MainCtx) !Options {
     var stack_first = false;
     var stack_size: ?u32 = null;
     var features: ?[]const u8 = null;
+    var strip: ?bool = null;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
         if (mem.eql(u8, arg, "-h") or mem.eql(u8, arg, "--help")) {
             context.printSuccess(usage, .{context.cmd});
+        } else if (mem.eql(u8, arg, "--debug-log")) {
+            if (i + 1 >= args.len) context.printFailure("Missing scope for debug log", .{});
+            i += 1;
+            try context.log_scopes.append(args[i]);
         } else if (mem.eql(u8, arg, "--entry")) {
             if (i + 1 >= args.len) context.printFailure("Missing entry name argument", .{});
             entry_name = args[i + 1];
@@ -137,6 +147,8 @@ pub fn parseArgs(arena: Allocator, context: Zld.MainCtx) !Options {
             const index = mem.indexOfScalar(u8, arg, '=') orelse context.printFailure("Missing '=' symbol and value for features list", .{});
             features = arg[index + 1 ..];
             i += 1;
+        } else if (mem.eql(u8, arg, "--strip")) {
+            strip = true;
         } else {
             try positionals.append(arg);
         }
@@ -167,5 +179,6 @@ pub fn parseArgs(arena: Allocator, context: Zld.MainCtx) !Options {
         .stack_first = stack_first,
         .stack_size = stack_size,
         .features = features orelse &.{},
+        .strip = strip orelse false,
     };
 }

@@ -316,6 +316,9 @@ pub const ParseError = error{
     UnexpectedTable,
     /// Object file contains a feature that is unknown to the linker
     UnknownFeature,
+    /// The 'elemkind' found in the element section is unsupported.
+    /// Zld currently only supports funcrefs.
+    UnsupportedElemKind,
 };
 
 fn parse(object: *Object, gpa: Allocator, reader: anytype, is_object_file: *bool) Parser(@TypeOf(reader)).Error!void {
@@ -509,8 +512,19 @@ fn Parser(comptime ReaderType: type) type {
                     },
                     .element => {
                         for (try readVec(&parser.object.elements, reader, gpa)) |*elem| {
-                            elem.table_index = try readLeb(u32, reader);
+                            const flags = try readLeb(u8, reader);
+                            if (flags & 0x2 != 0) {
+                                elem.table_index = try readLeb(u32, reader);
+                            } else {
+                                elem.table_index = flags;
+                            }
                             elem.offset = try readInit(reader);
+                            if (flags & 0x3 != 0) {
+                                const elem_kind = try readLeb(u8, reader);
+                                if (elem_kind != 0) {
+                                    return error.UnsupportedElemKind;
+                                }
+                            }
 
                             for (try readVec(&elem.func_indexes, reader, gpa)) |*idx| {
                                 idx.* = try readLeb(u32, reader);
@@ -522,6 +536,7 @@ fn Parser(comptime ReaderType: type) type {
                         var start = reader.context.bytes_left;
                         var index: u32 = 0;
                         const count = try readLeb(u32, reader);
+                        const imported_function_count = parser.object.importedCountByKind(.function);
                         while (index < count) : (index += 1) {
                             const code_len = try readLeb(u32, reader);
                             const offset = @intCast(u32, start - reader.context.bytes_left);
@@ -532,7 +547,7 @@ fn Parser(comptime ReaderType: type) type {
                                 .type = .code,
                                 .data = data.ptr,
                                 .size = code_len,
-                                .index = parser.object.importedCountByKind(.function) + index,
+                                .index = imported_function_count + index,
                                 .offset = offset,
                                 .section_index = section_index,
                             });
@@ -868,7 +883,7 @@ fn readInit(reader: anytype) !std.wasm.InitExpression {
     const init_expr: std.wasm.InitExpression = switch (@intToEnum(std.wasm.Opcode, opcode)) {
         .i32_const => .{ .i32_const = try readLeb(i32, reader) },
         .global_get => .{ .global_get = try readLeb(u32, reader) },
-        else => @panic("TODO: initexpression for other opcodes"),
+        else => |tag| std.debug.panic("TODO: initexpression for other opcodes: {}", .{tag}),
     };
 
     if ((try readEnum(std.wasm.Opcode, reader)) != .end) return error.MissingEndForExpression;

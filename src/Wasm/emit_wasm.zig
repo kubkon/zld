@@ -54,7 +54,7 @@ pub fn emit(wasm: *Wasm) !void {
     if (wasm.functions.count() != 0) {
         log.debug("Writing 'Functions' section ({d})", .{wasm.functions.count()});
         const offset = try reserveSectionHeader(file);
-        for (wasm.functions.items.items) |func| {
+        for (wasm.functions.items.values()) |func| {
             try emitFunction(func, writer);
         }
         try emitSectionHeader(file, offset, .function, wasm.functions.count());
@@ -187,44 +187,46 @@ pub fn emit(wasm: *Wasm) !void {
         try emitSectionHeader(file, offset, .data, data_count);
     }
 
-    // names section
-    const func_count: u32 = wasm.functions.count() + wasm.imports.functionCount();
-    const global_count: u32 = wasm.globals.count() + wasm.imports.globalCount();
-    // we must de-duplicate symbols that point to the same function
-    var funcs = std.AutoArrayHashMap(u32, Wasm.SymbolWithLoc).init(wasm.base.allocator);
-    defer funcs.deinit();
-    try funcs.ensureUnusedCapacity(func_count);
-    var globals = try std.ArrayList(Wasm.SymbolWithLoc).initCapacity(wasm.base.allocator, global_count);
-    defer globals.deinit();
+    if (!wasm.options.strip) {
+        // names section
+        const func_count: u32 = wasm.functions.count() + wasm.imports.functionCount();
+        const global_count: u32 = wasm.globals.count() + wasm.imports.globalCount();
+        // we must de-duplicate symbols that point to the same function
+        var funcs = std.AutoArrayHashMap(u32, Wasm.SymbolWithLoc).init(wasm.base.allocator);
+        defer funcs.deinit();
+        try funcs.ensureUnusedCapacity(func_count);
+        var globals = try std.ArrayList(Wasm.SymbolWithLoc).initCapacity(wasm.base.allocator, global_count);
+        defer globals.deinit();
 
-    for (wasm.resolved_symbols.keys()) |sym_with_loc| {
-        const symbol = sym_with_loc.getSymbol(wasm);
-        switch (symbol.tag) {
-            .function => {
-                const gop = try funcs.getOrPut(symbol.index);
-                if (!gop.found_existing) {
-                    gop.value_ptr.* = sym_with_loc;
-                }
-            },
-            .global => globals.appendAssumeCapacity(sym_with_loc),
-            else => {}, // do not emit 'names' section for other symbols
+        for (wasm.resolved_symbols.keys()) |sym_with_loc| {
+            const symbol = sym_with_loc.getSymbol(wasm);
+            switch (symbol.tag) {
+                .function => {
+                    const gop = try funcs.getOrPut(symbol.index);
+                    if (!gop.found_existing) {
+                        gop.value_ptr.* = sym_with_loc;
+                    }
+                },
+                .global => globals.appendAssumeCapacity(sym_with_loc),
+                else => {}, // do not emit 'names' section for other symbols
+            }
         }
+
+        std.sort.sort(Wasm.SymbolWithLoc, funcs.values(), wasm, lessThan);
+        std.sort.sort(Wasm.SymbolWithLoc, globals.items, wasm, lessThan);
+
+        const offset = try reserveCustomSectionHeader(file);
+        try leb.writeULEB128(writer, @intCast(u32, "name".len));
+        try writer.writeAll("name");
+
+        try emitNameSection(wasm, 0x01, wasm.base.allocator, funcs.values(), writer);
+        try emitNameSection(wasm, 0x07, wasm.base.allocator, globals.items, writer);
+        try emitDataNamesSection(wasm, wasm.base.allocator, writer);
+        try emitCustomHeader(file, offset);
+
+        try emitDebugSections(file, wasm, wasm.base.allocator, writer);
+        try emitProducerSection(file, wasm, wasm.base.allocator, writer);
     }
-
-    std.sort.sort(Wasm.SymbolWithLoc, funcs.values(), wasm, lessThan);
-    std.sort.sort(Wasm.SymbolWithLoc, globals.items, wasm, lessThan);
-
-    const offset = try reserveCustomSectionHeader(file);
-    try leb.writeULEB128(writer, @intCast(u32, "name".len));
-    try writer.writeAll("name");
-
-    try emitNameSection(wasm, 0x01, wasm.base.allocator, funcs.values(), writer);
-    try emitNameSection(wasm, 0x07, wasm.base.allocator, globals.items, writer);
-    try emitDataNamesSection(wasm, wasm.base.allocator, writer);
-    try emitCustomHeader(file, offset);
-
-    try emitDebugSections(file, wasm, wasm.base.allocator, writer);
-    try emitProducerSection(file, wasm, wasm.base.allocator, writer);
     try emitFeaturesSection(file, wasm, writer);
 }
 
@@ -337,33 +339,40 @@ fn emitType(type_entry: std.wasm.Type, writer: anytype) !void {
 
 fn emitImportSymbol(wasm: *const Wasm, sym_loc: Wasm.SymbolWithLoc, writer: anytype) !void {
     const symbol = sym_loc.getSymbol(wasm).*;
-    var import: std.wasm.Import = .{
-        .module_name = undefined,
-        .name = sym_loc.getName(wasm),
-        .kind = undefined,
-    };
 
-    switch (symbol.tag) {
-        .function => {
+    const import: std.wasm.Import = switch (symbol.tag) {
+        .function => import: {
             const value = wasm.imports.imported_functions.values()[symbol.index];
+            const key = wasm.imports.imported_functions.keys()[symbol.index];
             std.debug.assert(value.index == symbol.index);
-            import.kind = .{ .function = value.type };
-            import.module_name = wasm.imports.imported_functions.keys()[symbol.index].module_name;
+            break :import .{
+                .kind = .{ .function = value.type },
+                .module_name = key.module_name,
+                .name = key.name,
+            };
         },
-        .global => {
+        .global => import: {
             const value = wasm.imports.imported_globals.values()[symbol.index];
+            const key = wasm.imports.imported_globals.keys()[symbol.index];
             std.debug.assert(value.index == symbol.index);
-            import.kind = .{ .global = value.global };
-            import.module_name = wasm.imports.imported_globals.keys()[symbol.index].module_name;
+            break :import .{
+                .kind = .{ .global = value.global },
+                .module_name = key.module_name,
+                .name = key.name,
+            };
         },
-        .table => {
+        .table => import: {
             const value = wasm.imports.imported_tables.values()[symbol.index];
+            const key = wasm.imports.imported_tables.keys()[symbol.index];
             std.debug.assert(value.index == symbol.index);
-            import.kind = .{ .table = value.table };
-            import.module_name = wasm.imports.imported_tables.keys()[symbol.index].module_name;
+            break :import .{
+                .kind = .{ .table = value.table },
+                .module_name = key.module_name,
+                .name = key.name,
+            };
         },
         else => unreachable,
-    }
+    };
 
     try emitImport(import, writer);
 }
@@ -437,25 +446,15 @@ fn emitExport(exported: std.wasm.Export, writer: anytype) !void {
 }
 
 fn emitElement(wasm: *Wasm, writer: anytype) !void {
+    // passive, with implicit 0-index table
     var flags: u32 = 0;
-    var index: ?u32 = if (wasm.string_table.getOffset("__indirect_function_table")) |offset| blk: {
-        const sym_loc = wasm.global_symbols.get(offset).?;
-        flags |= 0x2;
-        break :blk sym_loc.getSymbol(wasm).index;
-    } else null;
     try leb.writeULEB128(writer, flags);
-    if (index) |idx|
-        try leb.writeULEB128(writer, idx);
-
+    // Start the function table at index 1
     try emitInitExpression(.{ .i32_const = 1 }, writer);
-    if (flags & 0x3 != 0) {
-        try leb.writeULEB128(writer, @as(u8, 0));
-    }
-
     try leb.writeULEB128(writer, wasm.elements.functionCount());
-    for (wasm.elements.indirect_functions.keys()) |sym_with_loc| {
-        const symbol = wasm.objects.items[sym_with_loc.file.?].symtable[sym_with_loc.sym_index];
-        try leb.writeULEB128(writer, symbol.index);
+    var it = wasm.elements.indirect_functions.keyIterator();
+    while (it.next()) |key_ptr| {
+        try leb.writeULEB128(writer, key_ptr.*.getSymbol(wasm).index);
     }
 }
 
