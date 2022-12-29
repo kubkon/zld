@@ -759,9 +759,35 @@ fn setupExports(wasm: *Wasm) !void {
         try wasm.exports.append(wasm.base.allocator, .{ .name = "memory", .kind = .memory, .index = 0 });
     }
 
+    if (wasm.options.exports.len > 0) {
+        var failed_exports = try std.ArrayList([]const u8).initCapacity(wasm.base.allocator, wasm.options.exports.len);
+        defer failed_exports.deinit();
+
+        for (wasm.options.exports) |export_name| {
+            const name_index = wasm.string_table.getOffset(export_name) orelse {
+                failed_exports.appendAssumeCapacity(export_name);
+                continue;
+            };
+            const loc = wasm.global_symbols.get(name_index) orelse {
+                failed_exports.appendAssumeCapacity(export_name);
+                continue;
+            };
+            const symbol = loc.getSymbol(wasm);
+            symbol.setFlag(.WASM_SYM_EXPORTED);
+        }
+
+        if (failed_exports.items.len > 0) {
+            for (failed_exports.items) |export_name| {
+                log.err("Failed to export symbol '{s}' using `--export`, symbol was not found", .{export_name});
+            }
+
+            return error.ExportedSymbolNotFound;
+        }
+    }
+
     for (wasm.resolved_symbols.keys()) |sym_loc| {
         const symbol = sym_loc.getSymbol(wasm);
-        if (!symbol.isExported()) continue;
+        if (!symbol.isExported(wasm.options.export_dynamic)) continue;
 
         const name = sym_loc.getName(wasm);
         const exported: std.wasm.Export = if (symbol.tag == .data) exp: {
