@@ -12,6 +12,7 @@ const math = std.math;
 const mem = std.mem;
 const sort = std.sort;
 const trace = @import("../tracy.zig").trace;
+const unwind_info = @import("unwind_info.zig");
 
 const Allocator = mem.Allocator;
 const Atom = @import("Atom.zig");
@@ -20,6 +21,7 @@ const DwarfInfo = @import("DwarfInfo.zig");
 const LoadCommandIterator = macho.LoadCommandIterator;
 const MachO = @import("../MachO.zig");
 const SymbolWithLoc = MachO.SymbolWithLoc;
+const UnwindRecord = unwind_info.UnwindRecord;
 
 name: []const u8,
 mtime: u64,
@@ -54,6 +56,9 @@ relocs_lookup: []RelocEntry = undefined,
 
 atoms: std.ArrayListUnmanaged(AtomIndex) = .{},
 
+unwind_info_sect: ?macho.section_64 = null,
+unwind_relocs_lookup: []RelocEntry = undefined,
+
 const RelocEntry = struct { start: u32, len: u32 };
 
 pub fn deinit(self: *Object, gpa: Allocator) void {
@@ -69,6 +74,9 @@ pub fn deinit(self: *Object, gpa: Allocator) void {
         gpa.free(self.atom_by_index_table);
         gpa.free(self.globals_lookup);
         gpa.free(self.relocs_lookup);
+    }
+    if (self.unwind_info_sect) |_| {
+        gpa.free(self.unwind_relocs_lookup);
     }
 }
 
@@ -180,6 +188,16 @@ pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch)
 
         const sym_name_len = mem.sliceTo(@ptrCast([*:0]const u8, self.in_strtab.?.ptr + sym.n_strx), 0).len + 1;
         self.strtab_lookup[i] = @intCast(u32, sym_name_len);
+    }
+
+    // Parse __LD,__compact_unwind if one exists.
+    self.unwind_info_sect = self.getSourceSectionByName("__LD", "__compact_unwind");
+    if (self.unwind_info_sect) |_| {
+        self.unwind_relocs_lookup = try allocator.alloc(RelocEntry, self.getUnwindRecords().len);
+        mem.set(RelocEntry, self.unwind_relocs_lookup, .{
+            .start = 0,
+            .len = 0,
+        });
     }
 }
 
@@ -304,7 +322,7 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u31) !void {
     log.debug("splitting object({d}, {s}) into atoms", .{ object_id, self.name });
 
     try self.splitRegularSections(macho_file, object_id);
-    try self.parseUnwindInfo(macho_file, object_id);
+    self.parseUnwindInfo();
 }
 
 pub fn splitRegularSections(self: *Object, macho_file: *MachO, object_id: u31) !void {
@@ -591,25 +609,17 @@ fn cacheRelocs(self: *Object, macho_file: *MachO, atom_index: AtomIndex) !void {
     } else filterRelocs(relocs, 0, atom.size);
 }
 
-fn parseUnwindInfo(self: *Object, macho_file: *MachO, object_id: u31) !void {
-    _ = object_id;
-    _ = macho_file;
-
-    if (self.getSourceSectionByName("__LD", "__compact_unwind")) |sect| {
-        const data = self.getSectionContents(sect);
-        if (data.len % @sizeOf(macho.compact_unwind_entry) != 0) {
-            log.err("size of __LD,__compact_unwind section not multiple of compact unwind info entry: {d} % {d} != 0", .{
-                data.len,
-                @sizeOf(macho.compact_unwind_entry),
-            });
-            return error.InvalidCompactUnwindInfo;
-        }
-
-        const num_entries = @divExact(data.len, @sizeOf(macho.compact_unwind_entry));
-        const entries = @ptrCast([*]align(1) const macho.compact_unwind_entry, data)[0..num_entries];
-
-        log.warn("entries = {any}", .{entries});
-        // TODO parse!
+fn parseUnwindInfo(self: *Object) void {
+    const sect = self.unwind_info_sect orelse return;
+    const relocs = self.getRelocs(sect);
+    const unwind_records = self.getUnwindRecords();
+    for (unwind_records) |_, i| {
+        const offset = i * @sizeOf(macho.compact_unwind_entry);
+        self.unwind_relocs_lookup[i] = filterRelocs(
+            relocs,
+            offset,
+            offset + @sizeOf(macho.compact_unwind_entry),
+        );
     }
 }
 
@@ -754,4 +764,11 @@ pub fn getAtomIndexForSymbol(self: Object, sym_index: u32) ?AtomIndex {
     const atom_index = self.atom_by_index_table[sym_index];
     if (atom_index == 0) return null;
     return atom_index;
+}
+
+pub fn getUnwindRecords(self: Object) []align(1) const macho.compact_unwind_entry {
+    const sect = self.unwind_info_sect orelse return &[0]macho.compact_unwind_entry{};
+    const data = self.getSectionContents(sect);
+    const num_entries = @divExact(data.len, @sizeOf(macho.compact_unwind_entry));
+    return @ptrCast([*]align(1) const macho.compact_unwind_entry, data)[0..num_entries];
 }

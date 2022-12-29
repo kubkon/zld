@@ -299,7 +299,8 @@ fn isReachable(
     if (!allocated.contains(target_atom_index)) return false;
 
     const source_addr = source_sym.n_value + @intCast(u32, rel.r_address - base_offset);
-    const target_addr = Atom.getRelocTargetAddress(macho_file, rel, target, false) catch unreachable;
+    const is_via_got = Atom.relocRequiresGot(macho_file, rel);
+    const target_addr = Atom.getRelocTargetAddress(macho_file, target, is_via_got, false) catch unreachable;
     _ = Atom.calcPcRelativeDisplacementArm64(source_addr, target_addr) catch
         return false;
 

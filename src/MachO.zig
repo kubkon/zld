@@ -18,6 +18,7 @@ const bind = @import("MachO/bind.zig");
 const dead_strip = @import("MachO/dead_strip.zig");
 const fat = @import("MachO/fat.zig");
 const load_commands = @import("MachO/load_commands.zig");
+const unwind_info = @import("MachO/unwind_info.zig");
 const thunks = @import("MachO/thunks.zig");
 const trace = @import("tracy.zig").trace;
 
@@ -381,6 +382,7 @@ pub fn flush(self: *MachO) !void {
             try Atom.scanAtomRelocs(self, atom_index, relocs, reverse_lookups[atom.getFile().?]);
         }
     }
+    try unwind_info.scanUnwindInfo(self, reverse_lookups);
 
     try self.createDyldStubBinderGotAtom();
 
@@ -399,6 +401,7 @@ pub fn flush(self: *MachO) !void {
     }
 
     try self.writeAtoms(reverse_lookups);
+    try unwind_info.writeUnwindInfo(self, reverse_lookups);
     try self.writeLinkeditSegmentData(reverse_lookups);
 
     // If the last section of __DATA segment is zerofill section, we need to ensure

@@ -264,26 +264,9 @@ pub fn parseRelocTarget(
     } else return sym_loc;
 }
 
-pub fn getRelocTargetAtomIndex(macho_file: *MachO, rel: macho.relocation_info, target: SymbolWithLoc) ?AtomIndex {
+pub fn getRelocTargetAtomIndex(macho_file: *MachO, target: SymbolWithLoc, is_via_got: bool) ?AtomIndex {
     const tracy = trace(@src());
     defer tracy.end();
-
-    const is_via_got = got: {
-        switch (macho_file.options.target.cpu_arch.?) {
-            .aarch64 => break :got switch (@intToEnum(macho.reloc_type_arm64, rel.r_type)) {
-                .ARM64_RELOC_GOT_LOAD_PAGE21,
-                .ARM64_RELOC_GOT_LOAD_PAGEOFF12,
-                .ARM64_RELOC_POINTER_TO_GOT,
-                => true,
-                else => false,
-            },
-            .x86_64 => break :got switch (@intToEnum(macho.reloc_type_x86_64, rel.r_type)) {
-                .X86_64_RELOC_GOT, .X86_64_RELOC_GOT_LOAD => true,
-                else => false,
-            },
-            else => unreachable,
-        }
-    };
 
     if (is_via_got) {
         return macho_file.getGotAtomIndexForSymbol(target).?; // panic means fatal error
@@ -421,7 +404,7 @@ fn addTlvPtrEntry(macho_file: *MachO, target: MachO.SymbolWithLoc) !void {
     try macho_file.tlv_ptr_table.putNoClobber(gpa, target, tlv_ptr_index);
 }
 
-fn addGotEntry(macho_file: *MachO, target: MachO.SymbolWithLoc) !void {
+pub fn addGotEntry(macho_file: *MachO, target: MachO.SymbolWithLoc) !void {
     if (macho_file.got_table.contains(target)) return;
     const gpa = macho_file.base.allocator;
     const atom_index = try macho_file.createGotAtom();
@@ -478,8 +461,13 @@ pub fn resolveRelocs(
     };
 }
 
-pub fn getRelocTargetAddress(macho_file: *MachO, rel: macho.relocation_info, target: SymbolWithLoc, is_tlv: bool) !u64 {
-    const target_atom_index = getRelocTargetAtomIndex(macho_file, rel, target) orelse {
+pub fn getRelocTargetAddress(
+    macho_file: *MachO,
+    target: SymbolWithLoc,
+    is_via_got: bool,
+    is_tlv: bool,
+) !u64 {
+    const target_atom_index = getRelocTargetAtomIndex(macho_file, target, is_via_got) orelse {
         // If there is no atom for target, we still need to check for special, atom-less
         // symbols such as `___dso_handle`.
         const target_name = macho_file.getSymbolName(target);
@@ -584,12 +572,13 @@ fn resolveRelocsArm64(
             const source_sym = macho_file.getSymbol(atom.getSymbolWithLoc());
             break :blk source_sym.n_value + rel_offset;
         };
+        const is_via_got = relocRequiresGot(macho_file, rel);
         const is_tlv = is_tlv: {
             const source_sym = macho_file.getSymbol(atom.getSymbolWithLoc());
             const header = macho_file.sections.items(.header)[source_sym.n_sect - 1];
             break :is_tlv header.type() == macho.S_THREAD_LOCAL_VARIABLES;
         };
-        const target_addr = try getRelocTargetAddress(macho_file, rel, target, is_tlv);
+        const target_addr = try getRelocTargetAddress(macho_file, target, is_via_got, is_tlv);
 
         log.debug("    | source_addr = 0x{x}", .{source_addr});
 
@@ -603,7 +592,7 @@ fn resolveRelocsArm64(
                     macho_file.getSymbolName(atom.getSymbolWithLoc()),
                     atom.file,
                     macho_file.getSymbolName(target),
-                    macho_file.getAtom(getRelocTargetAtomIndex(macho_file, rel, target).?).file,
+                    macho_file.getAtom(getRelocTargetAtomIndex(macho_file, target, false).?).file,
                 });
 
                 const displacement = if (calcPcRelativeDisplacementArm64(
@@ -862,6 +851,7 @@ fn resolveRelocsX86(
             const source_sym = macho_file.getSymbol(atom.getSymbolWithLoc());
             break :blk source_sym.n_value + rel_offset;
         };
+        const is_via_got = relocRequiresGot(macho_file, rel);
         const is_tlv = is_tlv: {
             const source_sym = macho_file.getSymbol(atom.getSymbolWithLoc());
             const header = macho_file.sections.items(.header)[source_sym.n_sect - 1];
@@ -870,7 +860,7 @@ fn resolveRelocsX86(
 
         log.debug("    | source_addr = 0x{x}", .{source_addr});
 
-        const target_addr = try getRelocTargetAddress(macho_file, rel, target, is_tlv);
+        const target_addr = try getRelocTargetAddress(macho_file, target, is_via_got, is_tlv);
 
         switch (rel_type) {
             .X86_64_RELOC_BRANCH => {
@@ -1083,4 +1073,23 @@ pub fn calcPageOffset(target_addr: u64, kind: PageOffsetInstKind) !u12 {
         .load_store_64 => try math.divExact(u12, narrowed, 8),
         .load_store_128 => try math.divExact(u12, narrowed, 16),
     };
+}
+
+pub fn relocRequiresGot(macho_file: *MachO, rel: macho.relocation_info) bool {
+    switch (macho_file.options.target.cpu_arch.?) {
+        .aarch64 => switch (@intToEnum(macho.reloc_type_arm64, rel.r_type)) {
+            .ARM64_RELOC_GOT_LOAD_PAGE21,
+            .ARM64_RELOC_GOT_LOAD_PAGEOFF12,
+            .ARM64_RELOC_POINTER_TO_GOT,
+            => return true,
+            else => return false,
+        },
+        .x86_64 => switch (@intToEnum(macho.reloc_type_x86_64, rel.r_type)) {
+            .X86_64_RELOC_GOT,
+            .X86_64_RELOC_GOT_LOAD,
+            => return true,
+            else => return false,
+        },
+        else => unreachable,
+    }
 }
