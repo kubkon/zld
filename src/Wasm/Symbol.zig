@@ -135,10 +135,9 @@ pub fn isNoStrip(symbol: Symbol) bool {
     return symbol.flags & @enumToInt(Flag.WASM_SYM_NO_STRIP) != 0;
 }
 
-pub fn isExported(symbol: Symbol) bool {
+pub fn isExported(symbol: Symbol, is_dynamic: bool) bool {
     if (symbol.isUndefined() or symbol.isLocal()) return false;
-    // TODO: support dynamic flag and then automatically export
-    // symbols which are not hidden
+    if (is_dynamic and symbol.isVisible()) return true;
     return symbol.hasFlag(.WASM_SYM_EXPORTED);
 }
 

@@ -28,6 +28,8 @@ const usage =
     \\--stack-size=<value>               Specifies the stack size in bytes
     \\--features=<value>                 Comma-delimited list of used features, inferred by object files if unset
     \\--strip                            Strip all debug information and symbol names
+    \\--export-dynamic                   Dynamically export non-hidden symbols
+    \\--export=<value>                   Force exporting a global symbol (fails when symbol does not exist)
 ;
 
 /// Result path of the binary
@@ -65,6 +67,11 @@ features: []const u8,
 /// Strips all debug information and optional sections such as symbol names,
 /// and the 'producers' section.
 strip: bool = false,
+/// Exports a symbol when it's defined, global and not hidden.
+export_dynamic: bool = false,
+/// Forcefully exports a symbol by its name, fails when the symbol
+/// is unresolved.
+exports: []const []const u8,
 
 pub fn parseArgs(arena: Allocator, context: Zld.MainCtx) !Options {
     if (context.args.len == 0) {
@@ -86,6 +93,8 @@ pub fn parseArgs(arena: Allocator, context: Zld.MainCtx) !Options {
     var stack_size: ?u32 = null;
     var features: ?[]const u8 = null;
     var strip: ?bool = null;
+    var export_dynamic: bool = false;
+    var exports = std.ArrayList([]const u8).init(arena);
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -149,6 +158,11 @@ pub fn parseArgs(arena: Allocator, context: Zld.MainCtx) !Options {
             i += 1;
         } else if (mem.eql(u8, arg, "--strip")) {
             strip = true;
+        } else if (mem.eql(u8, arg, "--export-dynamic")) {
+            export_dynamic = true;
+        } else if (mem.startsWith(u8, arg, "--export")) {
+            const index = mem.indexOfScalar(u8, arg, '=') orelse context.printFailure("Missing '=' symbol and value for symbol name", .{});
+            try exports.append(arg[index + 1 ..]);
         } else {
             try positionals.append(arg);
         }
@@ -180,5 +194,7 @@ pub fn parseArgs(arena: Allocator, context: Zld.MainCtx) !Options {
         .stack_size = stack_size,
         .features = features orelse &.{},
         .strip = strip orelse false,
+        .export_dynamic = export_dynamic,
+        .exports = exports.items,
     };
 }
