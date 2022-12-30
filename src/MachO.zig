@@ -2269,7 +2269,7 @@ const InitSectionOpts = struct {
     reserved2: u32 = 0,
 };
 
-fn initSection(
+pub fn initSection(
     self: *MachO,
     segname: []const u8,
     sectname: []const u8,

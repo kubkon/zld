@@ -322,7 +322,7 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u31) !void {
     log.debug("splitting object({d}, {s}) into atoms", .{ object_id, self.name });
 
     try self.splitRegularSections(macho_file, object_id);
-    self.parseUnwindInfo();
+    try self.parseUnwindInfo(macho_file);
 }
 
 pub fn splitRegularSections(self: *Object, macho_file: *MachO, object_id: u31) !void {
@@ -609,8 +609,11 @@ fn cacheRelocs(self: *Object, macho_file: *MachO, atom_index: AtomIndex) !void {
     } else filterRelocs(relocs, 0, atom.size);
 }
 
-fn parseUnwindInfo(self: *Object) void {
+fn parseUnwindInfo(self: *Object, macho_file: *MachO) !void {
     const sect = self.unwind_info_sect orelse return;
+
+    _ = try macho_file.initSection("__TEXT", "__unwind_info", .{});
+
     const relocs = self.getRelocs(sect);
     const unwind_records = self.getUnwindRecords();
     for (unwind_records) |_, i| {
