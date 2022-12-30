@@ -143,7 +143,6 @@ pub fn scanAtomRelocs(
     macho_file: *MachO,
     atom_index: AtomIndex,
     relocs: []align(1) const macho.relocation_info,
-    reverse_lookup: []u32,
 ) !void {
     const tracy = trace(@src());
     defer tracy.end();
@@ -153,8 +152,8 @@ pub fn scanAtomRelocs(
     assert(atom.getFile() != null); // synthetic atoms do not have relocs
 
     return switch (arch) {
-        .aarch64 => scanAtomRelocsArm64(macho_file, atom_index, relocs, reverse_lookup),
-        .x86_64 => scanAtomRelocsX86(macho_file, atom_index, relocs, reverse_lookup),
+        .aarch64 => scanAtomRelocsArm64(macho_file, atom_index, relocs),
+        .x86_64 => scanAtomRelocsX86(macho_file, atom_index, relocs),
         else => unreachable,
     };
 }
@@ -185,12 +184,7 @@ pub fn getRelocContext(macho_file: *MachO, atom_index: AtomIndex) RelocContext {
     };
 }
 
-pub fn parseRelocTarget(
-    macho_file: *MachO,
-    atom_index: AtomIndex,
-    rel: macho.relocation_info,
-    reverse_lookup: []u32,
-) MachO.SymbolWithLoc {
+pub fn parseRelocTarget(macho_file: *MachO, atom_index: AtomIndex, rel: macho.relocation_info) MachO.SymbolWithLoc {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -249,7 +243,7 @@ pub fn parseRelocTarget(
         return MachO.SymbolWithLoc{ .sym_index = sym_index, .file = atom.file };
     }
 
-    const sym_index = reverse_lookup[rel.r_symbolnum];
+    const sym_index = object.reverse_symtab_lookup[rel.r_symbolnum];
     const sym_loc = MachO.SymbolWithLoc{
         .sym_index = sym_index,
         .file = atom.file,
@@ -290,7 +284,6 @@ fn scanAtomRelocsArm64(
     macho_file: *MachO,
     atom_index: AtomIndex,
     relocs: []align(1) const macho.relocation_info,
-    reverse_lookup: []u32,
 ) !void {
     for (relocs) |rel| {
         const rel_type = @intToEnum(macho.reloc_type_arm64, rel.r_type);
@@ -304,7 +297,7 @@ fn scanAtomRelocsArm64(
 
         const atom = macho_file.getAtom(atom_index);
         const object = &macho_file.objects.items[atom.getFile().?];
-        const sym_index = reverse_lookup[rel.r_symbolnum];
+        const sym_index = object.reverse_symtab_lookup[rel.r_symbolnum];
         const sym_loc = MachO.SymbolWithLoc{
             .sym_index = sym_index,
             .file = atom.file,
@@ -340,12 +333,7 @@ fn scanAtomRelocsArm64(
     }
 }
 
-fn scanAtomRelocsX86(
-    macho_file: *MachO,
-    atom_index: AtomIndex,
-    relocs: []align(1) const macho.relocation_info,
-    reverse_lookup: []u32,
-) !void {
+fn scanAtomRelocsX86(macho_file: *MachO, atom_index: AtomIndex, relocs: []align(1) const macho.relocation_info) !void {
     for (relocs) |rel| {
         const rel_type = @intToEnum(macho.reloc_type_x86_64, rel.r_type);
 
@@ -358,7 +346,7 @@ fn scanAtomRelocsX86(
 
         const atom = macho_file.getAtom(atom_index);
         const object = &macho_file.objects.items[atom.getFile().?];
-        const sym_index = reverse_lookup[rel.r_symbolnum];
+        const sym_index = object.reverse_symtab_lookup[rel.r_symbolnum];
         const sym_loc = MachO.SymbolWithLoc{
             .sym_index = sym_index,
             .file = atom.file,
@@ -438,7 +426,6 @@ pub fn resolveRelocs(
     atom_index: AtomIndex,
     atom_code: []u8,
     atom_relocs: []align(1) const macho.relocation_info,
-    reverse_lookup: []u32,
 ) !void {
     const tracy = trace(@src());
     defer tracy.end();
@@ -455,8 +442,8 @@ pub fn resolveRelocs(
     const ctx = getRelocContext(macho_file, atom_index);
 
     return switch (arch) {
-        .aarch64 => resolveRelocsArm64(macho_file, atom_index, atom_code, atom_relocs, reverse_lookup, ctx),
-        .x86_64 => resolveRelocsX86(macho_file, atom_index, atom_code, atom_relocs, reverse_lookup, ctx),
+        .aarch64 => resolveRelocsArm64(macho_file, atom_index, atom_code, atom_relocs, ctx),
+        .x86_64 => resolveRelocsX86(macho_file, atom_index, atom_code, atom_relocs, ctx),
         else => unreachable,
     };
 }
@@ -520,7 +507,6 @@ fn resolveRelocsArm64(
     atom_index: AtomIndex,
     atom_code: []u8,
     atom_relocs: []align(1) const macho.relocation_info,
-    reverse_lookup: []u32,
     context: RelocContext,
 ) !void {
     const atom = macho_file.getAtom(atom_index);
@@ -551,13 +537,13 @@ fn resolveRelocsArm64(
                     atom.file,
                 });
 
-                subtractor = parseRelocTarget(macho_file, atom_index, rel, reverse_lookup);
+                subtractor = parseRelocTarget(macho_file, atom_index, rel);
                 continue;
             },
             else => {},
         }
 
-        const target = parseRelocTarget(macho_file, atom_index, rel, reverse_lookup);
+        const target = parseRelocTarget(macho_file, atom_index, rel);
         const rel_offset = @intCast(u32, rel.r_address - context.base_offset);
 
         log.debug("  RELA({s}) @ {x} => %{d} ('{s}') in object({?})", .{
@@ -809,7 +795,6 @@ fn resolveRelocsX86(
     atom_index: AtomIndex,
     atom_code: []u8,
     atom_relocs: []align(1) const macho.relocation_info,
-    reverse_lookup: []u32,
     context: RelocContext,
 ) !void {
     const atom = macho_file.getAtom(atom_index);
@@ -831,13 +816,13 @@ fn resolveRelocsX86(
                     atom.file,
                 });
 
-                subtractor = parseRelocTarget(macho_file, atom_index, rel, reverse_lookup);
+                subtractor = parseRelocTarget(macho_file, atom_index, rel);
                 continue;
             },
             else => {},
         }
 
-        const target = parseRelocTarget(macho_file, atom_index, rel, reverse_lookup);
+        const target = parseRelocTarget(macho_file, atom_index, rel);
         const rel_offset = @intCast(u32, rel.r_address - context.base_offset);
 
         log.debug("  RELA({s}) @ {x} => %{d} in object({?})", .{

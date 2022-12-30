@@ -42,6 +42,8 @@ symtab: []macho.nlist_64 = undefined,
 /// Can be undefined as set together with in_symtab.
 source_symtab_lookup: []u32 = undefined,
 /// Can be undefined as set together with in_symtab.
+reverse_symtab_lookup: []u32 = undefined,
+/// Can be undefined as set together with in_symtab.
 source_address_lookup: []i64 = undefined,
 /// Can be undefined as set together with in_symtab.
 source_section_index_lookup: []i64 = undefined,
@@ -58,6 +60,8 @@ atoms: std.ArrayListUnmanaged(AtomIndex) = .{},
 
 unwind_info_sect: ?macho.section_64 = null,
 unwind_relocs_lookup: []RelocEntry = undefined,
+exec_atoms: std.ArrayListUnmanaged(AtomIndex) = .{},
+unwind_records_lookup: std.AutoHashMapUnmanaged(u32, u32) = .{},
 
 const RelocEntry = struct { start: u32, len: u32 };
 
@@ -67,6 +71,7 @@ pub fn deinit(self: *Object, gpa: Allocator) void {
     gpa.free(self.contents);
     if (self.in_symtab) |_| {
         gpa.free(self.source_symtab_lookup);
+        gpa.free(self.reverse_symtab_lookup);
         gpa.free(self.source_address_lookup);
         gpa.free(self.source_section_index_lookup);
         gpa.free(self.strtab_lookup);
@@ -78,6 +83,8 @@ pub fn deinit(self: *Object, gpa: Allocator) void {
     if (self.unwind_info_sect) |_| {
         gpa.free(self.unwind_relocs_lookup);
     }
+    self.exec_atoms.deinit(gpa);
+    self.unwind_records_lookup.deinit(gpa);
 }
 
 pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch) !void {
@@ -131,6 +138,7 @@ pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch)
 
     self.symtab = try allocator.alloc(macho.nlist_64, self.in_symtab.?.len + nsects);
     self.source_symtab_lookup = try allocator.alloc(u32, self.in_symtab.?.len);
+    self.reverse_symtab_lookup = try allocator.alloc(u32, self.in_symtab.?.len);
     self.strtab_lookup = try allocator.alloc(u32, self.in_symtab.?.len);
     self.globals_lookup = try allocator.alloc(i64, self.in_symtab.?.len);
     self.atom_by_index_table = try allocator.alloc(AtomIndex, self.in_symtab.?.len + nsects);
@@ -185,6 +193,7 @@ pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch)
         self.symtab[i] = sym;
         self.source_address_lookup[i] = if (sym.undf()) -1 else @intCast(i64, sym.n_value);
         self.source_symtab_lookup[i] = sym_id.index;
+        self.reverse_symtab_lookup[sym_id.index] = @intCast(u32, i);
 
         const sym_name_len = mem.sliceTo(@ptrCast([*:0]const u8, self.in_strtab.?.ptr + sym.n_strx), 0).len + 1;
         self.strtab_lookup[i] = @intCast(u32, sym_name_len);
@@ -322,7 +331,7 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u31) !void {
     log.debug("splitting object({d}, {s}) into atoms", .{ object_id, self.name });
 
     try self.splitRegularSections(macho_file, object_id);
-    try self.parseUnwindInfo(macho_file);
+    try self.parseUnwindInfo(macho_file, object_id);
 }
 
 pub fn splitRegularSections(self: *Object, macho_file: *MachO, object_id: u31) !void {
@@ -554,6 +563,15 @@ fn createAtomFromSubsection(
         self.atom_by_index_table[sym_loc.sym_index] = atom_index;
     }
 
+    const out_sect = macho_file.sections.items(.header)[out_sect_id];
+    if (out_sect.isCode() and
+        mem.eql(u8, "__TEXT", out_sect.segName()) and
+        mem.eql(u8, "__text", out_sect.sectName()))
+    {
+        // TODO currently assuming a single section for executable machine code
+        try self.exec_atoms.append(gpa, atom_index);
+    }
+
     return atom_index;
 }
 
@@ -609,20 +627,32 @@ fn cacheRelocs(self: *Object, macho_file: *MachO, atom_index: AtomIndex) !void {
     } else filterRelocs(relocs, 0, atom.size);
 }
 
-fn parseUnwindInfo(self: *Object, macho_file: *MachO) !void {
+fn parseUnwindInfo(self: *Object, macho_file: *MachO, object_id: u31) !void {
     const sect = self.unwind_info_sect orelse return;
 
     _ = try macho_file.initSection("__TEXT", "__unwind_info", .{});
 
+    try self.unwind_records_lookup.ensureTotalCapacity(
+        macho_file.base.allocator,
+        @intCast(u32, self.exec_atoms.items.len),
+    );
+
     const relocs = self.getRelocs(sect);
     const unwind_records = self.getUnwindRecords();
-    for (unwind_records) |_, i| {
-        const offset = i * @sizeOf(macho.compact_unwind_entry);
-        self.unwind_relocs_lookup[i] = filterRelocs(
+    for (unwind_records) |record, record_id| {
+        const offset = record_id * @sizeOf(macho.compact_unwind_entry);
+        const rel_pos = filterRelocs(
             relocs,
             offset,
             offset + @sizeOf(macho.compact_unwind_entry),
         );
+        assert(rel_pos.len > 0); // TODO convert to an error as the unwind info is malformed
+        self.unwind_relocs_lookup[record_id] = rel_pos;
+
+        // Find function symbol that this record describes
+        const rel = relocs[rel_pos.start..][0];
+        const target = unwind_info.parseRelocTarget(macho_file, record, record_id, object_id, rel);
+        self.unwind_records_lookup.putAssumeCapacityNoClobber(target.sym_index, @intCast(u32, record_id));
     }
 }
 
@@ -631,16 +661,6 @@ pub fn getSourceSymbol(self: Object, index: u32) ?macho.nlist_64 {
     if (index >= symtab.len) return null;
     const mapped_index = self.source_symtab_lookup[index];
     return symtab[mapped_index];
-}
-
-/// Caller owns memory.
-pub fn createReverseSymbolLookup(self: Object, arena: Allocator) ![]u32 {
-    const symtab = self.in_symtab orelse return &[0]u32{};
-    const lookup = try arena.alloc(u32, symtab.len);
-    for (self.source_symtab_lookup) |source_id, id| {
-        lookup[source_id] = @intCast(u32, id);
-    }
-    return lookup;
 }
 
 pub fn getSourceSection(self: Object, index: u16) macho.section_64 {

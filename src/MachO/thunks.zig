@@ -61,7 +61,7 @@ pub const Thunk = struct {
     }
 };
 
-pub fn createThunks(macho_file: *MachO, sect_id: u8, reverse_lookups: [][]u32) !void {
+pub fn createThunks(macho_file: *MachO, sect_id: u8) !void {
     const header = &macho_file.sections.items(.header)[sect_id];
     if (header.size == 0) return;
 
@@ -132,7 +132,6 @@ pub fn createThunks(macho_file: *MachO, sect_id: u8, reverse_lookups: [][]u32) !
             try scanRelocs(
                 macho_file,
                 atom_index,
-                reverse_lookups[atom.getFile().?],
                 allocated,
                 thunk_index,
                 group_end,
@@ -206,7 +205,6 @@ fn allocateThunk(
 fn scanRelocs(
     macho_file: *MachO,
     atom_index: AtomIndex,
-    reverse_lookup: []u32,
     allocated: std.AutoHashMap(AtomIndex, void),
     thunk_index: ThunkIndex,
     group_end: AtomIndex,
@@ -223,7 +221,7 @@ fn scanRelocs(
     for (relocs) |rel| {
         if (!relocNeedsThunk(rel)) continue;
 
-        const target = Atom.parseRelocTarget(macho_file, atom_index, rel, reverse_lookup);
+        const target = Atom.parseRelocTarget(macho_file, atom_index, rel);
         if (isReachable(macho_file, atom_index, rel, base_offset, target, allocated)) continue;
 
         log.debug("{x}: source = {s}@{x}, target = {s}@{x} unreachable", .{

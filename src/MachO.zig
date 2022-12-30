@@ -358,13 +358,8 @@ pub fn flush(self: *MachO) !void {
 
     try self.splitIntoAtoms();
 
-    var reverse_lookups: [][]u32 = try arena.alloc([]u32, self.objects.items.len);
-    for (self.objects.items) |object, i| {
-        reverse_lookups[i] = try object.createReverseSymbolLookup(arena);
-    }
-
     if (self.options.dead_strip) {
-        try dead_strip.gcAtoms(self, reverse_lookups);
+        try dead_strip.gcAtoms(self);
     }
 
     try self.createDyldPrivateAtom();
@@ -379,14 +374,14 @@ pub fn flush(self: *MachO) !void {
             if (header.isZerofill()) continue;
 
             const relocs = Atom.getAtomRelocs(self, atom_index);
-            try Atom.scanAtomRelocs(self, atom_index, relocs, reverse_lookups[atom.getFile().?]);
+            try Atom.scanAtomRelocs(self, atom_index, relocs);
         }
     }
-    try unwind_info.scanUnwindInfo(self, reverse_lookups);
+    try unwind_info.scanUnwindInfo(self);
 
     try self.createDyldStubBinderGotAtom();
 
-    try self.calcSectionSizes(reverse_lookups);
+    try self.calcSectionSizes();
     try unwind_info.calcUnwindInfoSectionSize(self);
     try self.pruneAndSortSections();
     try self.createSegments();
@@ -401,9 +396,9 @@ pub fn flush(self: *MachO) !void {
         self.logAtoms();
     }
 
-    try self.writeAtoms(reverse_lookups);
-    try unwind_info.writeUnwindInfo(self, reverse_lookups);
-    try self.writeLinkeditSegmentData(reverse_lookups);
+    try self.writeAtoms();
+    try unwind_info.writeUnwindInfo(self);
+    try self.writeLinkeditSegmentData();
 
     // If the last section of __DATA segment is zerofill section, we need to ensure
     // that the free space between the end of the last non-zerofill section of __DATA
@@ -1937,7 +1932,7 @@ fn splitIntoAtoms(self: *MachO) !void {
     }
 }
 
-fn writeAtoms(self: *MachO, reverse_lookups: [][]u32) !void {
+fn writeAtoms(self: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -2022,7 +2017,6 @@ fn writeAtoms(self: *MachO, reverse_lookups: [][]u32) !void {
                     atom_index,
                     buffer.items[offset..][0..atom.size],
                     relocs,
-                    reverse_lookups[atom.getFile().?],
                 );
             }
 
@@ -2062,7 +2056,7 @@ fn pruneAndSortSections(self: *MachO) !void {
         var i: u8 = 0;
         while (i < slice.len) : (i += 1) {
             const section = self.sections.get(i);
-            log.warn("section {s},{s} {d}", .{
+            log.debug("section {s},{s} {d}", .{
                 section.header.segName(),
                 section.header.sectName(),
                 section.first_atom_index,
@@ -2086,7 +2080,7 @@ fn pruneAndSortSections(self: *MachO) !void {
     }
 }
 
-fn calcSectionSizes(self: *MachO, reverse_lookups: [][]u32) !void {
+fn calcSectionSizes(self: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -2128,7 +2122,7 @@ fn calcSectionSizes(self: *MachO, reverse_lookups: [][]u32) !void {
             if (mem.eql(u8, header.sectName(), "__stub_helper")) continue;
 
             // Create jump/branch range extenders if needed.
-            try thunks.createThunks(self, @intCast(u8, sect_id), reverse_lookups);
+            try thunks.createThunks(self, @intCast(u8, sect_id));
         }
     }
 }
@@ -2372,11 +2366,11 @@ fn writeSegmentHeaders(self: *MachO, writer: anytype) !void {
     }
 }
 
-fn writeLinkeditSegmentData(self: *MachO, reverse_lookups: [][]u32) !void {
+fn writeLinkeditSegmentData(self: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
-    try self.writeDyldInfoData(reverse_lookups);
+    try self.writeDyldInfoData();
     try self.writeFunctionStarts();
     try self.writeDataInCode();
     try self.writeSymtabs();
@@ -2568,7 +2562,7 @@ fn collectBindDataFromContainer(
     }
 }
 
-fn collectBindData(self: *MachO, pointers: *std.ArrayList(bind.Pointer), reverse_lookups: [][]u32) !void {
+fn collectBindData(self: *MachO, pointers: *std.ArrayList(bind.Pointer)) !void {
     log.debug("collecting bind data", .{});
 
     // First, unpack GOT section
@@ -2640,7 +2634,7 @@ fn collectBindData(self: *MachO, pointers: *std.ArrayList(bind.Pointer), reverse
                         else => unreachable,
                     }
 
-                    const global = Atom.parseRelocTarget(self, atom_index, rel, reverse_lookups[atom.getFile().?]);
+                    const global = Atom.parseRelocTarget(self, atom_index, rel);
                     const bind_sym_name = self.getSymbolName(global);
                     const bind_sym = self.getSymbol(global);
                     if (!bind_sym.undf()) continue;
@@ -2770,7 +2764,7 @@ fn collectExportData(self: *MachO, trie: *Trie) !void {
     try trie.finalize(gpa);
 }
 
-fn writeDyldInfoData(self: *MachO, reverse_lookups: [][]u32) !void {
+fn writeDyldInfoData(self: *MachO) !void {
     const gpa = self.base.allocator;
 
     var rebase_pointers = std.ArrayList(bind.Pointer).init(gpa);
@@ -2779,7 +2773,7 @@ fn writeDyldInfoData(self: *MachO, reverse_lookups: [][]u32) !void {
 
     var bind_pointers = std.ArrayList(bind.Pointer).init(gpa);
     defer bind_pointers.deinit();
-    try self.collectBindData(&bind_pointers, reverse_lookups);
+    try self.collectBindData(&bind_pointers);
 
     var lazy_bind_pointers = std.ArrayList(bind.Pointer).init(gpa);
     defer lazy_bind_pointers.deinit();

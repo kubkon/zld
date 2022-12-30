@@ -14,7 +14,7 @@ const SymbolWithLoc = MachO.SymbolWithLoc;
 
 const AtomTable = std.AutoHashMap(AtomIndex, void);
 
-pub fn gcAtoms(macho_file: *MachO, reverse_lookups: [][]u32) Allocator.Error!void {
+pub fn gcAtoms(macho_file: *MachO) Allocator.Error!void {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -30,7 +30,7 @@ pub fn gcAtoms(macho_file: *MachO, reverse_lookups: [][]u32) Allocator.Error!voi
     try alive.ensureTotalCapacity(@intCast(u32, macho_file.atoms.items.len));
 
     try collectRoots(macho_file, &roots);
-    mark(macho_file, roots, &alive, reverse_lookups);
+    mark(macho_file, roots, &alive);
     prune(macho_file, alive);
 }
 
@@ -137,7 +137,6 @@ fn markLive(
     macho_file: *MachO,
     atom_index: AtomIndex,
     alive: *AtomTable,
-    reverse_lookups: [][]u32,
 ) void {
     const tracy = trace(@src());
     defer tracy.end();
@@ -160,14 +159,13 @@ fn markLive(
     if (header.isZerofill()) return;
 
     const relocs = Atom.getAtomRelocs(macho_file, atom_index);
-    const reverse_lookup = reverse_lookups[atom.getFile().?];
     for (relocs) |rel| {
         const target = switch (cpu_arch) {
             .aarch64 => switch (@intToEnum(macho.reloc_type_arm64, rel.r_type)) {
                 .ARM64_RELOC_ADDEND => continue,
-                else => Atom.parseRelocTarget(macho_file, atom_index, rel, reverse_lookup),
+                else => Atom.parseRelocTarget(macho_file, atom_index, rel),
             },
-            .x86_64 => Atom.parseRelocTarget(macho_file, atom_index, rel, reverse_lookup),
+            .x86_64 => Atom.parseRelocTarget(macho_file, atom_index, rel),
             else => unreachable,
         };
         const target_sym = macho_file.getSymbol(target);
@@ -189,11 +187,11 @@ fn markLive(
             macho_file.getAtom(target_atom_index).file,
         });
 
-        markLive(macho_file, target_atom_index, alive, reverse_lookups);
+        markLive(macho_file, target_atom_index, alive);
     }
 }
 
-fn refersLive(macho_file: *MachO, atom_index: AtomIndex, alive: AtomTable, reverse_lookups: [][]u32) bool {
+fn refersLive(macho_file: *MachO, atom_index: AtomIndex, alive: AtomTable) bool {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -209,14 +207,13 @@ fn refersLive(macho_file: *MachO, atom_index: AtomIndex, alive: AtomTable, rever
     assert(!header.isZerofill());
 
     const relocs = Atom.getAtomRelocs(macho_file, atom_index);
-    const reverse_lookup = reverse_lookups[atom.getFile().?];
     for (relocs) |rel| {
         const target = switch (cpu_arch) {
             .aarch64 => switch (@intToEnum(macho.reloc_type_arm64, rel.r_type)) {
                 .ARM64_RELOC_ADDEND => continue,
-                else => Atom.parseRelocTarget(macho_file, atom_index, rel, reverse_lookup),
+                else => Atom.parseRelocTarget(macho_file, atom_index, rel),
             },
-            .x86_64 => Atom.parseRelocTarget(macho_file, atom_index, rel, reverse_lookup),
+            .x86_64 => Atom.parseRelocTarget(macho_file, atom_index, rel),
             else => unreachable,
         };
 
@@ -240,13 +237,13 @@ fn refersLive(macho_file: *MachO, atom_index: AtomIndex, alive: AtomTable, rever
     return false;
 }
 
-fn mark(macho_file: *MachO, roots: AtomTable, alive: *AtomTable, reverse_lookups: [][]u32) void {
+fn mark(macho_file: *MachO, roots: AtomTable, alive: *AtomTable) void {
     const tracy = trace(@src());
     defer tracy.end();
 
     var it = roots.keyIterator();
     while (it.next()) |root| {
-        markLive(macho_file, root.*, alive, reverse_lookups);
+        markLive(macho_file, root.*, alive);
     }
 
     var loop: bool = true;
@@ -268,8 +265,8 @@ fn mark(macho_file: *MachO, roots: AtomTable, alive: *AtomTable, reverse_lookups
                 const source_sect = object.getSourceSection(sect_id);
 
                 if (source_sect.isDontDeadStripIfReferencesLive()) {
-                    if (refersLive(macho_file, atom_index, alive.*, reverse_lookups)) {
-                        markLive(macho_file, atom_index, alive, reverse_lookups);
+                    if (refersLive(macho_file, atom_index, alive.*)) {
+                        markLive(macho_file, atom_index, alive);
                         loop = true;
                     }
                 }
