@@ -53,26 +53,43 @@ pub fn writeUnwindInfo(macho_file: *MachO) !void {
 
     for (macho_file.objects.items) |*object, object_id| {
         const unwind_records = object.getUnwindRecords();
-        try records.ensureUnusedCapacity(unwind_records.len);
+        // Contents of unwind records does not have to cover all symbol in executable section
+        // so we need insert them ourselves.
+        try records.ensureUnusedCapacity(object.exec_atoms.items.len);
 
-        for (unwind_records) |record, record_id| {
-            var out_record = record;
+        for (object.exec_atoms.items) |atom_index| {
+            // TODO dead stripped?
+            const record_id = object.unwind_records_lookup.get(atom_index) orelse {
+                const atom = macho_file.getAtom(atom_index);
+                const sym = macho_file.getSymbol(atom.getSymbolWithLoc());
+                records.appendAssumeCapacity(.{
+                    .rangeStart = sym.n_value,
+                    .rangeLength = @intCast(u32, atom.size),
+                    .compactUnwindEncoding = 0,
+                    .personalityFunction = 0,
+                    .lsda = 0,
+                });
+                continue;
+            };
+            var record = unwind_records[record_id];
             try relocateRecord(
                 macho_file,
                 @intCast(u31, object_id),
                 record_id,
-                &out_record,
+                &record,
             );
 
-            log.debug("Unwind record at offset 0x{x}", .{record_id * @sizeOf(macho.compact_unwind_entry)});
-            log.debug("  start: 0x{x}", .{out_record.rangeStart});
-            log.debug("  length: 0x{x}", .{out_record.rangeLength});
-            log.debug("  compact encoding: 0x{x:0>8}", .{out_record.compactUnwindEncoding});
-            log.debug("  personality: 0x{x}", .{out_record.personalityFunction});
-            log.debug("  LSDA: 0x{x}", .{out_record.lsda});
-
-            records.appendAssumeCapacity(out_record);
+            records.appendAssumeCapacity(record);
         }
+    }
+
+    for (records.items) |record, i| {
+        log.debug("Unwind record at offset 0x{x}", .{i * @sizeOf(macho.compact_unwind_entry)});
+        log.debug("  start: 0x{x}", .{record.rangeStart});
+        log.debug("  length: 0x{x}", .{record.rangeLength});
+        log.debug("  compact encoding: 0x{x:0>8}", .{record.compactUnwindEncoding});
+        log.debug("  personality: 0x{x}", .{record.personalityFunction});
+        log.debug("  LSDA: 0x{x}", .{record.lsda});
     }
 
     // Collect personalities

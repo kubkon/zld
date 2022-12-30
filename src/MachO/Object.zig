@@ -61,7 +61,7 @@ atoms: std.ArrayListUnmanaged(AtomIndex) = .{},
 unwind_info_sect: ?macho.section_64 = null,
 unwind_relocs_lookup: []RelocEntry = undefined,
 exec_atoms: std.ArrayListUnmanaged(AtomIndex) = .{},
-unwind_records_lookup: std.AutoHashMapUnmanaged(u32, u32) = .{},
+unwind_records_lookup: std.AutoHashMapUnmanaged(AtomIndex, u32) = .{},
 
 const RelocEntry = struct { start: u32, len: u32 };
 
@@ -650,9 +650,11 @@ fn parseUnwindInfo(self: *Object, macho_file: *MachO, object_id: u31) !void {
         self.unwind_relocs_lookup[record_id] = rel_pos;
 
         // Find function symbol that this record describes
-        const rel = relocs[rel_pos.start..][0];
+        const rel = relocs[rel_pos.start..][rel_pos.len - 1];
         const target = unwind_info.parseRelocTarget(macho_file, record, record_id, object_id, rel);
-        self.unwind_records_lookup.putAssumeCapacityNoClobber(target.sym_index, @intCast(u32, record_id));
+        assert(target.getFile() == object_id);
+        const atom_index = self.getAtomIndexForSymbol(target.sym_index).?;
+        self.unwind_records_lookup.putAssumeCapacityNoClobber(atom_index, @intCast(u32, record_id));
     }
 }
 
