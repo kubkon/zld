@@ -32,6 +32,15 @@ pub fn scanUnwindInfo(macho_file: *MachO, reverse_lookups: [][]u32) !void {
     }
 }
 
+pub fn calcUnwindInfoSectionSize(macho_file: *MachO) !void {
+    const sect_id = macho_file.getSectionByName("__TEXT", "__unwind_info") orelse return;
+    const sect = &macho_file.sections.items(.header)[sect_id];
+
+    // TODO finish this!
+    sect.size = 0x1000;
+    sect.@"align" = 2;
+}
+
 pub fn writeUnwindInfo(macho_file: *MachO, reverse_lookups: [][]u32) !void {
     const gpa = macho_file.base.allocator;
 

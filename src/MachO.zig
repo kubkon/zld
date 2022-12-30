@@ -387,6 +387,7 @@ pub fn flush(self: *MachO) !void {
     try self.createDyldStubBinderGotAtom();
 
     try self.calcSectionSizes(reverse_lookups);
+    try unwind_info.calcUnwindInfoSectionSize(self);
     try self.pruneAndSortSections();
     try self.createSegments();
     try self.allocateSegments();
@@ -1947,6 +1948,7 @@ fn writeAtoms(self: *MachO, reverse_lookups: [][]u32) !void {
         const header = slice.items(.header)[sect_id];
         var atom_index = first_atom_index;
 
+        if (atom_index == 0) continue;
         if (header.isZerofill()) continue;
 
         var buffer = std.ArrayList(u8).init(gpa);
@@ -2060,6 +2062,11 @@ fn pruneAndSortSections(self: *MachO) !void {
         var i: u8 = 0;
         while (i < slice.len) : (i += 1) {
             const section = self.sections.get(i);
+            log.warn("section {s},{s} {d}", .{
+                section.header.segName(),
+                section.header.sectName(),
+                section.first_atom_index,
+            });
             if (section.header.size == 0) {
                 log.debug("pruning section {s},{s}", .{
                     section.header.segName(),
@@ -2091,6 +2098,8 @@ fn calcSectionSizes(self: *MachO, reverse_lookups: [][]u32) !void {
         }
 
         var atom_index = slice.items(.first_atom_index)[sect_id];
+        if (atom_index == 0) continue;
+
         header.size = 0;
         header.@"align" = 0;
 
@@ -2195,8 +2204,6 @@ fn allocateSegment(self: *MachO, segment_index: u8, init_size: u64) !void {
 
     const slice = self.sections.slice();
     for (slice.items(.header)[indexes.start..indexes.end]) |*header, sect_id| {
-        var atom_index = slice.items(.first_atom_index)[indexes.start + sect_id];
-
         const alignment = try math.powi(u32, 2, header.@"align");
         const start_aligned = mem.alignForwardGeneric(u64, start, alignment);
         const n_sect = @intCast(u8, indexes.start + sect_id + 1);
@@ -2206,6 +2213,9 @@ fn allocateSegment(self: *MachO, segment_index: u8, init_size: u64) !void {
         else
             @intCast(u32, segment.fileoff + start_aligned);
         header.addr = segment.vmaddr + start_aligned;
+
+        var atom_index = slice.items(.first_atom_index)[indexes.start + sect_id];
+        if (atom_index == 0) continue; // No atoms, nothing to do
 
         log.debug("allocating local symbols in sect({d}, '{s},{s}')", .{
             n_sect,
@@ -2279,7 +2289,7 @@ pub fn initSection(
     log.debug("creating section '{s},{s}'", .{ segname, sectname });
     const index = @intCast(u8, self.sections.slice().len);
     try self.sections.append(gpa, .{
-        .segment_index = undefined,
+        .segment_index = undefined, // Segments will be created automatically later down the pipeline.
         .header = .{
             .sectname = makeStaticString(sectname),
             .segname = makeStaticString(segname),
@@ -2287,8 +2297,8 @@ pub fn initSection(
             .reserved1 = opts.reserved1,
             .reserved2 = opts.reserved2,
         },
-        .first_atom_index = undefined,
-        .last_atom_index = undefined,
+        .first_atom_index = 0,
+        .last_atom_index = 0,
     });
     return index;
 }
@@ -2459,6 +2469,7 @@ fn collectRebaseData(self: *MachO, pointers: *std.ArrayList(bind.Pointer)) !void
 
         const cpu_arch = self.options.target.cpu_arch.?;
         var atom_index = slice.items(.first_atom_index)[sect_id];
+        if (atom_index == 0) continue;
 
         while (true) {
             const atom = self.getAtom(atom_index);
@@ -2590,6 +2601,7 @@ fn collectBindData(self: *MachO, pointers: *std.ArrayList(bind.Pointer), reverse
 
         const cpu_arch = self.options.target.cpu_arch.?;
         var atom_index = slice.items(.first_atom_index)[sect_id];
+        if (atom_index == 0) continue;
 
         while (true) {
             const atom = self.getAtom(atom_index);
@@ -4072,6 +4084,8 @@ fn logAtoms(self: *MachO) void {
     const slice = self.sections.slice();
     for (slice.items(.first_atom_index)) |first_atom_index, sect_id| {
         var atom_index = first_atom_index;
+        if (atom_index == 0) continue;
+
         const header = slice.items(.header)[sect_id];
 
         log.debug("{s},{s}", .{ header.segName(), header.sectName() });

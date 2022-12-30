@@ -67,6 +67,7 @@ pub fn createThunks(macho_file: *MachO, sect_id: u8, reverse_lookups: [][]u32) !
 
     const gpa = macho_file.base.allocator;
     const first_atom_index = macho_file.sections.items(.first_atom_index)[sect_id];
+    assert(first_atom_index != 0);
 
     header.size = 0;
     header.@"align" = 0;
