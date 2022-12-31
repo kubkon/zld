@@ -20,6 +20,7 @@ const usage =
     \\--global-base=<value>              Value from where the global data will start
     \\--import-memory                    Import memory from the host environment
     \\--import-table                     Import function table from the host environment
+    \\--export-table                     Export function table to the host environment
     \\--initial-memory=<value>           Initial size of the linear memory
     \\--max-memory=<value>               Maximum size of the linear memory
     \\--merge-data-segments[=false]      Enable merging data segments (default=true)
@@ -45,6 +46,8 @@ global_base: ?u32 = null,
 import_memory: bool = false,
 /// Tells the linker we will import the function table from the host environment
 import_table: bool = false,
+/// Tells the linker we will export the function table to the host environment
+export_table: bool = false,
 /// Sets the initial memory of the data section
 /// Providing a value too low will result in a linking error.
 initial_memory: ?u32 = null,
@@ -84,6 +87,7 @@ pub fn parseArgs(arena: Allocator, context: Zld.MainCtx) !Options {
     var global_base: ?u32 = null;
     var import_memory: bool = false;
     var import_table: bool = false;
+    var export_table: bool = false;
     var initial_memory: ?u32 = null;
     var max_memory: ?u32 = null;
     var merge_data_segments = true;
@@ -119,6 +123,8 @@ pub fn parseArgs(arena: Allocator, context: Zld.MainCtx) !Options {
             import_memory = true;
         } else if (mem.eql(u8, arg, "--import-table")) {
             import_table = true;
+        } else if (mem.eql(u8, arg, "--export-table")) {
+            export_table = true;
         } else if (mem.startsWith(u8, arg, "--initial-memory")) {
             const index = mem.indexOfScalar(u8, arg, '=') orelse context.printFailure("Missing '=' symbol and value for initial memory", .{});
             initial_memory = std.fmt.parseInt(u32, arg[index + 1 ..], 10) catch context.printFailure(
@@ -186,6 +192,7 @@ pub fn parseArgs(arena: Allocator, context: Zld.MainCtx) !Options {
         .global_base = global_base,
         .import_memory = import_memory,
         .import_table = import_table,
+        .export_table = export_table,
         .initial_memory = initial_memory,
         .max_memory = max_memory,
         .merge_data_segments = merge_data_segments,
