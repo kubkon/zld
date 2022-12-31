@@ -840,7 +840,13 @@ fn setupLinkerSymbols(wasm: *Wasm) !void {
     {
         const loc = try wasm.createSyntheticSymbol("__indirect_function_table", .table);
         const symbol = loc.getSymbol(wasm);
-        symbol.setFlag(.WASM_SYM_VISIBILITY_HIDDEN);
+        if (wasm.options.export_table) {
+            symbol.setFlag(.WASM_SYM_EXPORTED);
+        } else if (wasm.options.import_table) {
+            symbol.setUndefined(true);
+        } else {
+            symbol.setFlag(.WASM_SYM_VISIBILITY_HIDDEN);
+        }
         // do need to create table here, as we only create it if there's any
         // function pointers to be stored. This is done in `mergeSections`
     }
