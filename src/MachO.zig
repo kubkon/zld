@@ -382,7 +382,7 @@ pub fn flush(self: *MachO) !void {
     try self.createDyldStubBinderGotAtom();
 
     try self.calcSectionSizes();
-    try unwind_info.calcUnwindInfoSectionSize(self);
+    try unwind_info.calcUnwindInfoSectionSizes(self);
     try self.pruneAndSortSections();
     try self.createSegments();
     try self.allocateSegments();
@@ -915,6 +915,13 @@ pub fn getOutputSection(self: *MachO, sect: macho.section_64) !?u8 {
             });
             break :blk null;
         }
+        // We handle unwind info separately.
+        if (mem.eql(u8, "__TEXT", segname) and mem.eql(u8, "__eh_frame", sectname)) {
+            break :blk null;
+        }
+        if (mem.eql(u8, "__LD", segname) and mem.eql(u8, "__compact_unwind", sectname)) {
+            break :blk null;
+        }
 
         if (sect.isCode()) {
             break :blk self.getSectionByName("__TEXT", "__text") orelse try self.initSection(
@@ -929,12 +936,6 @@ pub fn getOutputSection(self: *MachO, sect: macho.section_64) !?u8 {
         }
 
         if (sect.isDebug()) {
-            // TODO debug attributes
-            if (mem.eql(u8, "__LD", segname) and mem.eql(u8, "__compact_unwind", sectname)) {
-                log.debug("TODO compact unwind section: type 0x{x}, name '{s},{s}'", .{
-                    sect.flags, segname, sectname,
-                });
-            }
             break :blk null;
         }
 
@@ -986,13 +987,6 @@ pub fn getOutputSection(self: *MachO, sect: macho.section_64) !?u8 {
                 );
             },
             macho.S_COALESCED => {
-                // TODO unwind info
-                if (mem.eql(u8, "__TEXT", segname) and mem.eql(u8, "__eh_frame", sectname)) {
-                    log.debug("TODO eh frame section: type 0x{x}, name '{s},{s}'", .{
-                        sect.flags, segname, sectname,
-                    });
-                    break :blk null;
-                }
                 break :blk self.getSectionByName(segname, sectname) orelse try self.initSection(
                     segname,
                     sectname,
@@ -2209,50 +2203,50 @@ fn allocateSegment(self: *MachO, segment_index: u8, init_size: u64) !void {
         header.addr = segment.vmaddr + start_aligned;
 
         var atom_index = slice.items(.first_atom_index)[indexes.start + sect_id];
-        if (atom_index == 0) continue; // No atoms, nothing to do
-
-        log.debug("allocating local symbols in sect({d}, '{s},{s}')", .{
-            n_sect,
-            header.segName(),
-            header.sectName(),
-        });
-
-        while (true) {
-            const atom = self.getAtom(atom_index);
-            const sym = self.getSymbolPtr(atom.getSymbolWithLoc());
-            sym.n_value += header.addr;
-            sym.n_sect = n_sect;
-
-            log.debug("  ATOM(%{d}, '{s}') @{x}", .{
-                atom.sym_index,
-                self.getSymbolName(atom.getSymbolWithLoc()),
-                sym.n_value,
+        if (atom_index > 0) {
+            log.debug("allocating local symbols in sect({d}, '{s},{s}')", .{
+                n_sect,
+                header.segName(),
+                header.sectName(),
             });
 
-            if (atom.getFile() != null) {
-                // Update each symbol contained within the atom
-                var it = Atom.getInnerSymbolsIterator(self, atom_index);
-                while (it.next()) |sym_loc| {
-                    const inner_sym = self.getSymbolPtr(sym_loc);
-                    inner_sym.n_value = sym.n_value + Atom.calcInnerSymbolOffset(
-                        self,
-                        atom_index,
-                        sym_loc.sym_index,
-                    );
-                    inner_sym.n_sect = n_sect;
+            while (true) {
+                const atom = self.getAtom(atom_index);
+                const sym = self.getSymbolPtr(atom.getSymbolWithLoc());
+                sym.n_value += header.addr;
+                sym.n_sect = n_sect;
+
+                log.debug("  ATOM(%{d}, '{s}') @{x}", .{
+                    atom.sym_index,
+                    self.getSymbolName(atom.getSymbolWithLoc()),
+                    sym.n_value,
+                });
+
+                if (atom.getFile() != null) {
+                    // Update each symbol contained within the atom
+                    var it = Atom.getInnerSymbolsIterator(self, atom_index);
+                    while (it.next()) |sym_loc| {
+                        const inner_sym = self.getSymbolPtr(sym_loc);
+                        inner_sym.n_value = sym.n_value + Atom.calcInnerSymbolOffset(
+                            self,
+                            atom_index,
+                            sym_loc.sym_index,
+                        );
+                        inner_sym.n_sect = n_sect;
+                    }
+
+                    // If there is a section alias, update it now too
+                    if (Atom.getSectionAlias(self, atom_index)) |sym_loc| {
+                        const alias = self.getSymbolPtr(sym_loc);
+                        alias.n_value = sym.n_value;
+                        alias.n_sect = n_sect;
+                    }
                 }
 
-                // If there is a section alias, update it now too
-                if (Atom.getSectionAlias(self, atom_index)) |sym_loc| {
-                    const alias = self.getSymbolPtr(sym_loc);
-                    alias.n_value = sym.n_value;
-                    alias.n_sect = n_sect;
-                }
+                if (atom.next_index) |next_index| {
+                    atom_index = next_index;
+                } else break;
             }
-
-            if (atom.next_index) |next_index| {
-                atom_index = next_index;
-            } else break;
         }
 
         start = start_aligned + header.size;

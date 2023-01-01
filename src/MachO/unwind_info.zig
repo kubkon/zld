@@ -31,12 +31,21 @@ pub fn scanUnwindInfo(macho_file: *MachO) !void {
     }
 }
 
-pub fn calcUnwindInfoSectionSize(macho_file: *MachO) !void {
-    const sect_id = macho_file.getSectionByName("__TEXT", "__unwind_info") orelse return;
-    const sect = &macho_file.sections.items(.header)[sect_id];
+pub fn calcUnwindInfoSectionSizes(macho_file: *MachO) !void {
+    var sect_id = macho_file.getSectionByName("__TEXT", "__unwind_info") orelse return;
+    var sect = &macho_file.sections.items(.header)[sect_id];
 
     // TODO finish this!
     sect.size = 0x1000;
+    sect.@"align" = 2;
+
+    sect_id = macho_file.getSectionByName("__TEXT", "__eh_frame") orelse return;
+    sect = &macho_file.sections.items(.header)[sect_id];
+
+    for (macho_file.objects.items) |object| {
+        const source_sect = object.eh_frame_sect orelse continue;
+        sect.size += source_sect.size;
+    }
     sect.@"align" = 2;
 }
 

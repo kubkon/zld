@@ -58,6 +58,7 @@ relocs_lookup: []RelocEntry = undefined,
 
 atoms: std.ArrayListUnmanaged(AtomIndex) = .{},
 
+eh_frame_sect: ?macho.section_64 = null,
 unwind_info_sect: ?macho.section_64 = null,
 unwind_relocs_lookup: []RelocEntry = undefined,
 exec_atoms: std.ArrayListUnmanaged(AtomIndex) = .{},
@@ -198,6 +199,9 @@ pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch)
         const sym_name_len = mem.sliceTo(@ptrCast([*:0]const u8, self.in_strtab.?.ptr + sym.n_strx), 0).len + 1;
         self.strtab_lookup[i] = @intCast(u32, sym_name_len);
     }
+
+    // Parse __TEXT,__eh_frame if one exists.
+    self.eh_frame_sect = self.getSourceSectionByName("__TEXT", "__eh_frame");
 
     // Parse __LD,__compact_unwind if one exists.
     self.unwind_info_sect = self.getSourceSectionByName("__LD", "__compact_unwind");
@@ -637,14 +641,21 @@ fn parseUnwindInfo(self: *Object, macho_file: *MachO, object_id: u31) !void {
         @intCast(u32, self.exec_atoms.items.len),
     );
 
-    const relocs = self.getRelocs(sect);
     const unwind_records = self.getUnwindRecords();
-    for (unwind_records) |record, record_id| {
+    const needs_eh_frame = for (unwind_records) |record| {
         const enc = try macho.UnwindEncodingArm64.fromU32(record.compactUnwindEncoding);
-        if (enc == .dwarf) {
-            log.err("TODO: handle DWARF CFI as compact unwind encoding value", .{});
-            return error.HandleDwarfCompactEncoding;
+        if (enc == .dwarf) break true;
+    } else false;
+    if (needs_eh_frame) {
+        if (self.eh_frame_sect == null) {
+            log.err("missing __TEXT,__eh_frame section", .{});
+            return error.MissingUnwindInfo;
         }
+        _ = try macho_file.initSection("__TEXT", "__eh_frame", .{});
+    }
+
+    const relocs = self.getRelocs(sect);
+    for (unwind_records) |record, record_id| {
         const offset = record_id * @sizeOf(macho.compact_unwind_entry);
         const rel_pos = filterRelocs(
             relocs,
