@@ -640,6 +640,11 @@ fn parseUnwindInfo(self: *Object, macho_file: *MachO, object_id: u31) !void {
     const relocs = self.getRelocs(sect);
     const unwind_records = self.getUnwindRecords();
     for (unwind_records) |record, record_id| {
+        const enc = try macho.UnwindEncodingArm64.fromU32(record.compactUnwindEncoding);
+        if (enc == .dwarf) {
+            log.err("TODO: handle DWARF CFI as compact unwind encoding value", .{});
+            return error.HandleDwarfCompactEncoding;
+        }
         const offset = record_id * @sizeOf(macho.compact_unwind_entry);
         const rel_pos = filterRelocs(
             relocs,
