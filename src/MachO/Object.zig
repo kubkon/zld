@@ -57,17 +57,21 @@ globals_lookup: []i64 = undefined,
 relocs_lookup: []RelocEntry = undefined,
 
 atoms: std.ArrayListUnmanaged(AtomIndex) = .{},
+exec_atoms: std.ArrayListUnmanaged(AtomIndex) = .{},
 
 eh_frame_sect: ?macho.section_64 = null,
+eh_frame_relocs_lookup: std.AutoArrayHashMapUnmanaged(u64, RelocEntry) = .{},
+eh_frame_records_lookup: std.AutoHashMapUnmanaged(AtomIndex, u64) = .{},
+
 unwind_info_sect: ?macho.section_64 = null,
 unwind_relocs_lookup: []RelocEntry = undefined,
-exec_atoms: std.ArrayListUnmanaged(AtomIndex) = .{},
 unwind_records_lookup: std.AutoHashMapUnmanaged(AtomIndex, u32) = .{},
 
 const RelocEntry = struct { start: u32, len: u32 };
 
 pub fn deinit(self: *Object, gpa: Allocator) void {
     self.atoms.deinit(gpa);
+    self.exec_atoms.deinit(gpa);
     gpa.free(self.name);
     gpa.free(self.contents);
     if (self.in_symtab) |_| {
@@ -81,10 +85,11 @@ pub fn deinit(self: *Object, gpa: Allocator) void {
         gpa.free(self.globals_lookup);
         gpa.free(self.relocs_lookup);
     }
+    self.eh_frame_relocs_lookup.deinit(gpa);
+    self.eh_frame_records_lookup.deinit(gpa);
     if (self.unwind_info_sect) |_| {
         gpa.free(self.unwind_relocs_lookup);
     }
-    self.exec_atoms.deinit(gpa);
     self.unwind_records_lookup.deinit(gpa);
 }
 
@@ -631,15 +636,27 @@ fn cacheRelocs(self: *Object, macho_file: *MachO, atom_index: AtomIndex) !void {
     } else filterRelocs(relocs, 0, atom.size);
 }
 
-fn parseUnwindInfo(self: *Object, macho_file: *MachO, object_id: u31) !void {
-    const sect = self.unwind_info_sect orelse return;
+fn parseEhFrameRecords(self: *Object, macho_file: *MachO, object_id: u31) !void {
+    _ = object_id;
+    const sect = self.eh_frame_sect orelse return;
+    _ = sect;
 
-    _ = try macho_file.initSection("__TEXT", "__unwind_info", .{});
+    _ = try macho_file.initSection("__TEXT", "__eh_frame", .{});
 
-    try self.unwind_records_lookup.ensureTotalCapacity(
+    try self.eh_frame_records_lookup.ensureTotalCapacity(
         macho_file.base.allocator,
         @intCast(u32, self.exec_atoms.items.len),
     );
+}
+
+fn parseUnwindInfo(self: *Object, macho_file: *MachO, object_id: u31) !void {
+    const sect = self.unwind_info_sect orelse return;
+
+    const gpa = macho_file.base.allocator;
+
+    _ = try macho_file.initSection("__TEXT", "__unwind_info", .{});
+
+    try self.unwind_records_lookup.ensureTotalCapacity(gpa, @intCast(u32, self.exec_atoms.items.len));
 
     const unwind_records = self.getUnwindRecords();
     const needs_eh_frame = for (unwind_records) |record| {
@@ -649,9 +666,41 @@ fn parseUnwindInfo(self: *Object, macho_file: *MachO, object_id: u31) !void {
     if (needs_eh_frame) {
         if (self.eh_frame_sect == null) {
             log.err("missing __TEXT,__eh_frame section", .{});
-            return error.MissingUnwindInfo;
+            log.err("  in object {s}", .{self.name});
+            return error.MissingEhFrameSection;
         }
+
         _ = try macho_file.initSection("__TEXT", "__eh_frame", .{});
+
+        const relocs = self.getRelocs(self.eh_frame_sect.?);
+
+        try self.eh_frame_relocs_lookup.ensureTotalCapacity(gpa, unwind_records.len);
+        try self.eh_frame_records_lookup.ensureTotalCapacity(gpa, @intCast(u32, self.exec_atoms.items.len));
+
+        var it = self.getEhFrameIterator();
+        while (try it.next()) |record| switch (record.tag) {
+            .cie => {},
+            .fde => {
+                const offset = it.pos - record.getSize();
+                const rel_pos = filterRelocs(relocs, offset, offset + record.getSize());
+                assert(rel_pos.len > 0); // TODO convert to an error as the eh frame is malformed
+                self.eh_frame_relocs_lookup.putAssumeCapacityNoClobber(offset, rel_pos);
+
+                // Find function symbol that this record describes
+                const rel = relocs[rel_pos.start..][rel_pos.len - 1];
+                const target = unwind_info.parseRelocTarget(
+                    macho_file,
+                    object_id,
+                    rel,
+                    it.data[offset..],
+                    @intCast(i32, offset),
+                );
+                log.warn("{x} => {s}", .{ offset, macho_file.getSymbolName(target) });
+                assert(target.getFile() == object_id);
+                const atom_index = self.getAtomIndexForSymbol(target.sym_index).?;
+                self.eh_frame_records_lookup.putAssumeCapacityNoClobber(atom_index, offset);
+            },
+        };
     }
 
     const relocs = self.getRelocs(sect);
@@ -667,7 +716,13 @@ fn parseUnwindInfo(self: *Object, macho_file: *MachO, object_id: u31) !void {
 
         // Find function symbol that this record describes
         const rel = relocs[rel_pos.start..][rel_pos.len - 1];
-        const target = unwind_info.parseRelocTarget(macho_file, record, record_id, object_id, rel);
+        const target = unwind_info.parseRelocTarget(
+            macho_file,
+            object_id,
+            rel,
+            mem.asBytes(&record),
+            @intCast(i32, offset),
+        );
         assert(target.getFile() == object_id);
         const atom_index = self.getAtomIndexForSymbol(target.sym_index).?;
         self.unwind_records_lookup.putAssumeCapacityNoClobber(atom_index, @intCast(u32, record_id));
@@ -812,4 +867,10 @@ pub fn getUnwindRecords(self: Object) []align(1) const macho.compact_unwind_entr
     const data = self.getSectionContents(sect);
     const num_entries = @divExact(data.len, @sizeOf(macho.compact_unwind_entry));
     return @ptrCast([*]align(1) const macho.compact_unwind_entry, data)[0..num_entries];
+}
+
+pub fn getEhFrameIterator(self: Object) unwind_info.EhFrameIterator {
+    const sect = self.eh_frame_sect orelse return .{ .data = &[0]u8{} };
+    const data = self.getSectionContents(sect);
+    return .{ .data = data };
 }
