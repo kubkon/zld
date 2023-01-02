@@ -90,6 +90,19 @@ pub fn symbolLoc(atom: *const Atom) Wasm.SymbolWithLoc {
     return .{ .file = atom.file, .sym_index = atom.sym_index };
 }
 
+/// Returns the virtual address of the `Atom`. This is the address starting
+/// from the first entry within a section.
+pub fn getVA(atom: *const Atom, wasm_bin: *const Wasm, symbol: *const Symbol) u32 {
+    if (symbol.tag == .function) return atom.offset;
+    std.debug.assert(symbol.tag == .data);
+    const merge_segment = wasm_bin.options.merge_data_segments;
+    const segment_info = wasm_bin.objects.items[atom.file].segment_info;
+    const segment_name = segment_info[symbol.index].outputName(merge_segment);
+    const segment_index = wasm_bin.data_segments.get(segment_name).?;
+    const segment = wasm_bin.segments.items[segment_index];
+    return segment.offset + atom.offset;
+}
+
 /// Resolves the relocations within the atom, writing the new value
 /// at the calculated offset.
 pub fn resolveRelocs(atom: *Atom, wasm_bin: *const Wasm) void {
@@ -142,7 +155,7 @@ pub fn resolveRelocs(atom: *Atom, wasm_bin: *const Wasm) void {
 /// The final value must be casted to the correct size.
 fn relocationValue(atom: *Atom, relocation: types.Relocation, wasm_bin: *const Wasm) u64 {
     const target_loc = (Wasm.SymbolWithLoc{ .file = atom.file, .sym_index = relocation.index }).finalLoc(wasm_bin);
-    const symbol = target_loc.getSymbol(wasm_bin).*;
+    const symbol = target_loc.getSymbol(wasm_bin);
     switch (relocation.relocation_type) {
         .R_WASM_FUNCTION_INDEX_LEB => return symbol.index,
         .R_WASM_TABLE_NUMBER_LEB => return symbol.index,
@@ -169,14 +182,9 @@ fn relocationValue(atom: *Atom, relocation: types.Relocation, wasm_bin: *const W
             if (symbol.isUndefined()) {
                 return 0;
             }
-            const merge_segment = wasm_bin.options.merge_data_segments;
             const target_atom = wasm_bin.symbol_atom.get(target_loc).?;
-            const segment_info = wasm_bin.objects.items[target_atom.file].segment_info;
-            const segment_name = segment_info[symbol.index].outputName(merge_segment);
-            const segment_index = wasm_bin.data_segments.get(segment_name).?;
-            const segment = wasm_bin.segments.items[segment_index];
-            const rel_value = @intCast(i32, target_atom.offset + segment.offset) + relocation.addend;
-            return @intCast(u32, rel_value);
+            const va = @intCast(i32, target_atom.getVA(wasm_bin, symbol));
+            return @intCast(u32, va + relocation.addend);
         },
         .R_WASM_EVENT_INDEX_LEB => return symbol.index,
         .R_WASM_SECTION_OFFSET_I32 => {
