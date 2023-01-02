@@ -6,27 +6,58 @@ const math = std.math;
 const mem = std.mem;
 const trace = @import("../tracy.zig").trace;
 
+const Allocator = mem.Allocator;
 const Atom = @import("Atom.zig");
 const MachO = @import("../MachO.zig");
 const Object = @import("Object.zig");
 
 pub fn scanUnwindInfo(macho_file: *MachO) !void {
+    const gpa = macho_file.base.allocator;
+
     for (macho_file.objects.items) |*object, object_id| {
         const unwind_records = object.getUnwindRecords();
-        for (unwind_records) |record, record_id| {
-            const relocs = getRecordRelocs(macho_file, @intCast(u31, object_id), record_id);
-            for (relocs) |rel| {
-                if (isPersonalityFunction(record_id, rel)) {
-                    // Personality function; add GOT pointer.
-                    const target = parseRelocTarget(
-                        macho_file,
-                        @intCast(u31, object_id),
-                        rel,
-                        mem.asBytes(&record),
-                        @intCast(i32, record_id * @sizeOf(macho.compact_unwind_entry)),
-                    );
-                    try Atom.addGotEntry(macho_file, target);
-                }
+
+        var cies = std.AutoHashMap(u32, void).init(gpa);
+        defer cies.deinit();
+
+        var it = object.getEhFrameIterator();
+
+        for (object.exec_atoms.items) |atom_index| {
+            const record_id = object.unwind_records_lookup.get(atom_index) orelse continue;
+            const record = unwind_records[record_id];
+            const enc = try macho.UnwindEncodingArm64.fromU32(record.compactUnwindEncoding);
+            switch (enc) {
+                .frame, .frameless => {
+                    const relocs = getRecordRelocs(macho_file, @intCast(u31, object_id), record_id);
+                    for (relocs) |rel| if (isPersonalityFunction(record_id, rel)) {
+                        // Personality function; add GOT pointer.
+                        const target = parseRelocTarget(
+                            macho_file,
+                            @intCast(u31, object_id),
+                            rel,
+                            mem.asBytes(&record),
+                            @intCast(i32, record_id * @sizeOf(macho.compact_unwind_entry)),
+                        );
+                        try Atom.addGotEntry(macho_file, target);
+                    };
+                },
+                .dwarf => {
+                    const fde_offset = object.eh_frame_records_lookup.get(atom_index).?; // TODO turn into an error
+                    it.seekTo(fde_offset);
+                    const fde = (try it.next()).?;
+
+                    const cie_ptr = fde.getCiePointer();
+                    const cie_offset = fde_offset + 4 - cie_ptr;
+
+                    if (!cies.contains(cie_offset)) {
+                        try cies.putNoClobber(cie_offset, {});
+                        it.seekTo(cie_offset);
+                        const cie = (try it.next()).?;
+                        try cie.scan(macho_file, @intCast(u31, object_id), cie_offset);
+                    }
+
+                    try fde.scan(macho_file, @intCast(u31, object_id), fde_offset);
+                },
             }
         }
     }
@@ -42,6 +73,7 @@ pub fn calcUnwindInfoSectionSizes(macho_file: *MachO) !void {
 
     sect_id = macho_file.getSectionByName("__TEXT", "__eh_frame") orelse return;
     sect = &macho_file.sections.items(.header)[sect_id];
+    sect.size = 0;
 
     for (macho_file.objects.items) |object| {
         const source_sect = object.eh_frame_sect orelse continue;
@@ -50,14 +82,21 @@ pub fn calcUnwindInfoSectionSizes(macho_file: *MachO) !void {
     sect.@"align" = 2;
 }
 
-fn writeEhFrames(macho_file: *MachO, object_id: u31, offset: u24) !u24 {
-    const object = &macho_file.objects.items[object_id];
-    const source_sect = object.eh_frame_sect orelse return offset;
-    const data = object.getSectionContents(source_sect);
-    const sect_id = macho_file.getSectionByName("__TEXT", "__eh_frame").?;
+fn writeEhFrames(macho_file: *MachO, eh_records: anytype) !void {
+    const sect_id = macho_file.getSectionByName("__TEXT", "__eh_frame") orelse return;
     const sect = &macho_file.sections.items(.header)[sect_id];
-    try macho_file.base.file.pwriteAll(data, sect.offset + offset);
-    return offset + @intCast(u24, source_sect.size);
+
+    const gpa = macho_file.base.allocator;
+    var buffer = std.ArrayList(u8).init(gpa);
+    defer buffer.deinit();
+    const writer = buffer.writer();
+
+    for (eh_records) |record| {
+        try writer.writeIntLittle(u32, record.size);
+        try buffer.appendSlice(record.data);
+    }
+
+    try macho_file.base.file.pwriteAll(buffer.items, sect.offset);
 }
 
 pub fn writeUnwindInfo(macho_file: *MachO) !void {
@@ -68,11 +107,22 @@ pub fn writeUnwindInfo(macho_file: *MachO) !void {
     const seg_id = macho_file.sections.items(.segment_index)[sect_id];
     const seg = macho_file.segments.items[seg_id];
 
+    const eh_sect_addr = if (macho_file.getSectionByName("__TEXT", "__eh_frame")) |eh_sect_id|
+        macho_file.sections.items(.header)[eh_sect_id].addr
+    else
+        null;
+
     // List of all relocated records
     var records = std.ArrayList(macho.compact_unwind_entry).init(gpa);
     defer records.deinit();
 
-    var eh_frame_offset: u24 = 0;
+    var eh_records = std.AutoArrayHashMap(u32, EhFrameIterator.Record(true)).init(gpa);
+    defer {
+        for (eh_records.values()) |*rec| {
+            rec.deinit(gpa);
+        }
+        eh_records.deinit();
+    }
 
     // TODO dead stripping
     for (macho_file.objects.items) |*object, object_id| {
@@ -80,9 +130,15 @@ pub fn writeUnwindInfo(macho_file: *MachO) !void {
         // Contents of unwind records does not have to cover all symbol in executable section
         // so we need insert them ourselves.
         try records.ensureUnusedCapacity(object.exec_atoms.items.len);
+        if (object.eh_frame_sect != null) {
+            try eh_records.ensureUnusedCapacity(2 * @intCast(u32, object.exec_atoms.items.len));
+        }
 
-        // If the source object has DWARF CFI, write it now.
-        eh_frame_offset = try writeEhFrames(macho_file, @intCast(u31, object_id), eh_frame_offset);
+        var cies = std.AutoHashMap(u32, u32).init(gpa);
+        defer cies.deinit();
+
+        var eh_it = object.getEhFrameIterator();
+        var eh_frame_offset: u32 = 0;
 
         for (object.exec_atoms.items) |atom_index| {
             const record_id = object.unwind_records_lookup.get(atom_index) orelse {
@@ -98,6 +154,8 @@ pub fn writeUnwindInfo(macho_file: *MachO) !void {
                 continue;
             };
             var record = unwind_records[record_id];
+            var enc = try macho.UnwindEncodingArm64.fromU32(record.compactUnwindEncoding);
+
             try relocateRecord(
                 macho_file,
                 @intCast(u31, object_id),
@@ -112,15 +170,50 @@ pub fn writeUnwindInfo(macho_file: *MachO) !void {
                 record.lsda -= seg.vmaddr;
             }
 
-            var enc = try macho.UnwindEncodingArm64.fromU32(record.compactUnwindEncoding);
             if (enc == .dwarf) {
-                enc.dwarf.section_offset += eh_frame_offset;
-                record.compactUnwindEncoding = enc.toU32();
+                const fde_record_offset = object.eh_frame_records_lookup.get(atom_index).?; // TODO turn into an error
+                eh_it.seekTo(fde_record_offset);
+                const source_fde_record = (try eh_it.next()).?;
+
+                const cie_ptr = source_fde_record.getCiePointer();
+                const cie_offset = fde_record_offset + 4 - cie_ptr;
+
+                const gop = try cies.getOrPut(cie_offset);
+                if (!gop.found_existing) {
+                    eh_it.seekTo(cie_offset);
+                    const source_cie_record = (try eh_it.next()).?;
+                    var cie_record = try source_cie_record.toOwned(gpa);
+                    try cie_record.relocate(macho_file, @intCast(u31, object_id), .{
+                        .source_offset = cie_offset,
+                        .out_offset = eh_frame_offset,
+                        .sect_addr = eh_sect_addr.?,
+                    });
+                    eh_records.putAssumeCapacityNoClobber(eh_frame_offset, cie_record);
+                    gop.value_ptr.* = eh_frame_offset;
+                    eh_frame_offset += cie_record.getSize();
+                }
+
+                var fde_record = try source_fde_record.toOwned(gpa);
+                fde_record.setCiePointer(eh_frame_offset + 4 - gop.value_ptr.*);
+                try fde_record.relocate(macho_file, @intCast(u31, object_id), .{
+                    .source_offset = fde_record_offset,
+                    .out_offset = eh_frame_offset,
+                    .sect_addr = eh_sect_addr.?,
+                });
+                eh_records.putAssumeCapacityNoClobber(eh_frame_offset, fde_record);
+                eh_frame_offset += fde_record.getSize();
+
+                // enc.dwarf.section_offset += eh_frame_offset;
+                // record.compactUnwindEncoding = enc.toU32();
+
             }
 
             records.appendAssumeCapacity(record);
         }
     }
+
+    // Write __eh_frame data (if any)
+    try writeEhFrames(macho_file, eh_records.values());
 
     // Collect personalities
     var personalities = std.AutoArrayHashMap(u32, void).init(gpa);
@@ -312,7 +405,7 @@ fn relocateRecord(
             object_id,
             rel,
             mem.asBytes(record),
-            @intCast(i32, record_id * @sizeOf(macho.compact_unwind_entry)),
+            base_offset,
         );
         const rel_offset = @intCast(u32, rel.r_address - base_offset);
         const is_via_got = isPersonalityFunction(record_id, rel); // Personality function is via GOT.
@@ -407,83 +500,156 @@ inline fn isPersonalityFunction(record_id: usize, rel: macho.relocation_info) bo
     return rel_offset == 16;
 }
 
-// const FrameDescriptionEntry = struct {
-//     header: DwarfHeader,
-//     cie_pointer: u64,
-//     pc_begin: u64,
-//     pc_range: u64,
-//     augmentation_data: []const u8,
-//     instructions: []const u8,
-
-//     fn parse(header: DwarfHeader, cie_pointer: u64, addr_size: u16, buffer: []const u8) !FrameDescriptionEntry {
-//         var stream = std.io.fixedBufferStream(buffer);
-//         var creader = std.io.countingReader(stream.reader());
-//         const reader = creader.reader();
-
-//         const pc_begin = if (addr_size == 8) try reader.readIntLittle(u64) else try reader.readIntLittle(u32);
-//         const pc_range = if (addr_size == 8) try reader.readIntLittle(u64) else try reader.readIntLittle(u32);
-
-//         const augmentation_length = try leb.readULEB128(u64, reader);
-//         const augmentation_data = buffer[creader.bytes_read..][0..augmentation_length];
-//         creader.bytes_read += augmentation_length;
-//         stream.pos += augmentation_length;
-
-//         const nread = creader.bytes_read + header.size() + (if (header.is64Bit()) @as(u64, 8) else 4);
-//         const instructions = buffer[creader.bytes_read..][0 .. header.length + header.size() - nread];
-
-//         return FrameDescriptionEntry{
-//             .header = header,
-//             .cie_pointer = cie_pointer,
-//             .pc_begin = pc_begin,
-//             .pc_range = pc_range,
-//             .augmentation_data = augmentation_data,
-//             .instructions = instructions,
-//         };
-//     }
-// };
-
 pub const EhFrameIterator = struct {
     data: []const u8,
-    pos: usize = 0,
+    pos: u32 = 0,
 
-    pub const Record = struct {
-        tag: Tag,
-        is_64bit: bool,
-        size: u64,
-        data: []const u8,
+    pub const Tag = enum { cie, fde };
 
-        pub const Tag = enum { cie, fde };
+    pub fn Record(comptime mutable: bool) type {
+        return struct {
+            tag: Tag,
+            size: u32,
+            data: if (mutable) []u8 else []const u8,
 
-        pub fn getSize(rec: Record) u64 {
-            const header: u64 = if (rec.is_64bit) 12 else 4;
-            return header + rec.size;
-        }
-    };
+            pub inline fn getSize(rec: @This()) u32 {
+                return 4 + rec.size;
+            }
 
-    pub fn next(it: *EhFrameIterator) !?Record {
+            pub fn deinit(rec: *@This(), gpa: Allocator) void {
+                comptime assert(mutable);
+                gpa.free(rec.data);
+            }
+
+            pub fn getRelocs(
+                macho_file: *MachO,
+                object_id: u31,
+                source_offset: u32,
+            ) []align(1) const macho.relocation_info {
+                const object = &macho_file.objects.items[object_id];
+                const rel_pos = object.eh_frame_relocs_lookup.get(source_offset) orelse
+                    return &[0]macho.relocation_info{};
+                const all_relocs = object.getRelocs(object.eh_frame_sect.?);
+                return all_relocs[rel_pos.start..][0..rel_pos.len];
+            }
+
+            pub fn scan(rec: @This(), macho_file: *MachO, object_id: u31, source_offset: u32) !void {
+                const relocs = @This().getRelocs(macho_file, object_id, source_offset);
+
+                for (relocs) |rel| {
+                    const rel_type = @intToEnum(macho.reloc_type_arm64, rel.r_type);
+
+                    switch (rel_type) {
+                        .ARM64_RELOC_SUBTRACTOR,
+                        .ARM64_RELOC_UNSIGNED,
+                        => {},
+                        .ARM64_RELOC_POINTER_TO_GOT => {
+                            const target = parseRelocTarget(
+                                macho_file,
+                                object_id,
+                                rel,
+                                rec.data,
+                                @intCast(i32, source_offset) + 4,
+                            );
+                            try Atom.addGotEntry(macho_file, target);
+                        },
+                        else => unreachable,
+                    }
+                }
+            }
+
+            pub fn relocate(rec: *@This(), macho_file: *MachO, object_id: u31, ctx: struct {
+                source_offset: u32,
+                out_offset: u32,
+                sect_addr: u64,
+            }) !void {
+                comptime assert(mutable);
+
+                const relocs = @This().getRelocs(macho_file, object_id, ctx.source_offset);
+
+                for (relocs) |rel| {
+                    const rel_type = @intToEnum(macho.reloc_type_arm64, rel.r_type);
+                    const target = parseRelocTarget(
+                        macho_file,
+                        object_id,
+                        rel,
+                        rec.data,
+                        @intCast(i32, ctx.source_offset) + 4,
+                    );
+                    const rel_offset = @intCast(u32, rel.r_address - @intCast(i32, ctx.source_offset) - 4);
+                    const source_addr = ctx.sect_addr + rel_offset + ctx.out_offset + 4;
+
+                    switch (rel_type) {
+                        .ARM64_RELOC_SUBTRACTOR => {
+                            // Address of the __eh_frame in the source object file
+                        },
+                        .ARM64_RELOC_POINTER_TO_GOT => {
+                            const target_addr = try Atom.getRelocTargetAddress(macho_file, target, true, false);
+                            const result = math.cast(i32, @intCast(i64, target_addr) - @intCast(i64, source_addr)) orelse
+                                return error.Overflow;
+                            mem.writeIntLittle(i32, rec.data[rel_offset..][0..4], result);
+                        },
+                        .ARM64_RELOC_UNSIGNED => {
+                            assert(rel.r_extern == 1);
+                            const target_addr = try Atom.getRelocTargetAddress(macho_file, target, false, false);
+                            const result = @intCast(i64, target_addr) - @intCast(i64, source_addr);
+                            log.warn("{s} {x}, {x}, {x}", .{
+                                macho_file.getSymbolName(target),
+                                source_addr,
+                                target_addr,
+                                result,
+                            });
+                            // const result = @intCast(i64, target_addr) - @intCast(i64, ctx.sect_addr) + addend;
+                            mem.writeIntLittle(i64, rec.data[rel_offset..][0..8], @intCast(i64, result));
+                        },
+                        else => unreachable,
+                    }
+                }
+            }
+
+            pub fn getCiePointer(rec: @This()) u32 {
+                assert(rec.tag == .fde);
+                return mem.readIntLittle(u32, rec.data[0..4]);
+            }
+
+            pub fn setCiePointer(rec: *@This(), ptr: u32) void {
+                assert(rec.tag == .fde);
+                mem.writeIntLittle(u32, rec.data[0..4], ptr);
+            }
+
+            pub fn toOwned(rec: @This(), gpa: Allocator) Allocator.Error!Record(true) {
+                const data = try gpa.dupe(u8, rec.data);
+                return Record(true){
+                    .tag = rec.tag,
+                    .size = rec.size,
+                    .data = data,
+                };
+            }
+        };
+    }
+
+    pub fn next(it: *EhFrameIterator) !?Record(false) {
         if (it.pos >= it.data.len) return null;
 
         var stream = std.io.fixedBufferStream(it.data[it.pos..]);
         const reader = stream.reader();
 
-        var size: u64 = try reader.readIntLittle(u32);
-        const is_64bit = size == 0xFFFFFFFF;
-        if (is_64bit) {
-            size = try reader.readIntLittle(u64);
+        var size = try reader.readIntLittle(u32);
+        if (size == 0xFFFFFFFF) {
+            log.err("MachO doesn't support 64bit DWARF CFI __eh_frame records", .{});
+            return error.UnsupportedDwarfCfiFormat;
         }
 
-        const id = if (is_64bit) try reader.readIntLittle(u64) else try reader.readIntLittle(u32);
-        const tag: Record.Tag = if (id == 0) .cie else .fde;
-        const offset: usize = if (is_64bit) 12 else 4;
-        const record = Record{
+        const id = try reader.readIntLittle(u32);
+        const tag: Tag = if (id == 0) .cie else .fde;
+        const offset: u32 = 4;
+        const record = Record(false){
             .tag = tag,
-            .is_64bit = is_64bit,
             .size = size,
             .data = it.data[it.pos + offset ..][0..size],
         };
 
-        const usize_size = math.cast(usize, size) orelse return error.Overflow;
-        it.pos += usize_size + offset;
+        it.pos += size + offset;
 
         return record;
     }
@@ -492,9 +658,8 @@ pub const EhFrameIterator = struct {
         it.pos = 0;
     }
 
-    pub fn seekTo(it: *EhFrameIterator, amt: isize) void {
-        const pos = @intCast(isize, it.pos) + amt;
+    pub fn seekTo(it: *EhFrameIterator, pos: u32) void {
         assert(pos >= 0 and pos < it.data.len);
-        it.pos = @intCast(usize, pos);
+        it.pos = pos;
     }
 };
