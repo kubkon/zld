@@ -201,11 +201,15 @@ pub fn writeUnwindInfo(macho_file: *MachO) !void {
                     .sect_addr = eh_sect_addr.?,
                 });
                 eh_records.putAssumeCapacityNoClobber(eh_frame_offset, fde_record);
+
+                enc.dwarf.section_offset = @intCast(u24, eh_frame_offset);
+                log.warn("{s} {x}", .{
+                    macho_file.getSymbolName(macho_file.getAtom(atom_index).getSymbolWithLoc()),
+                    enc.dwarf.section_offset,
+                });
+                record.compactUnwindEncoding = enc.toU32();
+
                 eh_frame_offset += fde_record.getSize();
-
-                // enc.dwarf.section_offset += eh_frame_offset;
-                // record.compactUnwindEncoding = enc.toU32();
-
             }
 
             records.appendAssumeCapacity(record);
@@ -265,7 +269,7 @@ pub fn writeUnwindInfo(macho_file: *MachO) !void {
 
     var common_encodings = std.AutoArrayHashMap(u32, void).init(gpa);
     defer common_encodings.deinit();
-    log.debug("Common encodings", .{});
+    log.debug("Common encodings:", .{});
     {
         var it = common_encodings_counts.iterator();
         while (it.next()) |entry| {
@@ -355,7 +359,7 @@ pub fn writeUnwindInfo(macho_file: *MachO) !void {
     try writer.writeStruct(macho.unwind_info_compressed_second_level_page_header{
         .entryPageOffset = 0,
         .entryCount = @intCast(u16, records.items.len),
-        .encodingsPageOffset = @intCast(u16, lsda_end_offset + @sizeOf(macho.unwind_info_compressed_second_level_page_header)),
+        .encodingsPageOffset = @sizeOf(macho.unwind_info_compressed_second_level_page_header),
         .encodingsCount = @intCast(u16, page_encodings.count()),
     });
 
@@ -593,13 +597,6 @@ pub const EhFrameIterator = struct {
                             assert(rel.r_extern == 1);
                             const target_addr = try Atom.getRelocTargetAddress(macho_file, target, false, false);
                             const result = @intCast(i64, target_addr) - @intCast(i64, source_addr);
-                            log.warn("{s} {x}, {x}, {x}", .{
-                                macho_file.getSymbolName(target),
-                                source_addr,
-                                target_addr,
-                                result,
-                            });
-                            // const result = @intCast(i64, target_addr) - @intCast(i64, ctx.sect_addr) + addend;
                             mem.writeIntLittle(i64, rec.data[rel_offset..][0..8], @intCast(i64, result));
                         },
                         else => unreachable,
