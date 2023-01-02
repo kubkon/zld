@@ -792,16 +792,11 @@ fn setupExports(wasm: *Wasm) !void {
         const name = sym_loc.getName(wasm);
         const exported: std.wasm.Export = if (symbol.tag == .data) exp: {
             const atom = wasm.symbol_atom.get(sym_loc).?;
-            const merge_segment = wasm.options.merge_data_segments;
-            const segment_info = wasm.objects.items[atom.file].segment_info;
-            const segment_name = segment_info[symbol.index].outputName(merge_segment);
-            const segment_index = wasm.data_segments.get(segment_name).?;
-            const segment = wasm.segments.items[segment_index];
-            const addr_value = @bitCast(i32, atom.offset + segment.offset);
+            const va = atom.getVA(wasm, symbol);
             const offset = wasm.imports.globalCount();
             const global_index = try wasm.globals.append(wasm.base.allocator, offset, .{
                 .global_type = .{ .valtype = .i32, .mutable = false },
-                .init = .{ .i32_const = addr_value },
+                .init = .{ .i32_const = @intCast(i32, va) },
             });
             break :exp .{
                 .name = name,
