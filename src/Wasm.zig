@@ -504,7 +504,7 @@ fn resolveSymbolsInObject(wasm: *Wasm, object_index: u16) !void {
             return error.SymbolMismatchingType;
         }
 
-        if (existing_sym.isUndefined() and symbol.isUndefined()) {
+        if (existing_sym.isUndefined() and symbol.isUndefined() and symbol.tag == .function) {
             const file_index = existing_loc.file.?;
             const obj = wasm.objects.items[file_index];
             const name_index = obj.findImport(symbol.tag.externalType(), existing_sym.index).module_name;
@@ -547,8 +547,10 @@ fn resolveSymbolsInObject(wasm: *Wasm, object_index: u16) !void {
             }
         }
 
-        // when both symbols are weak, we skip overwriting
-        if (existing_sym.isWeak() and symbol.isWeak()) {
+        // when both symbols are weak, we skip overwriting unless the existing
+        // symbol is weak and the new one isn't, in which case we *do* overwrite it.
+        if (existing_sym.isWeak() and symbol.isWeak()) blk: {
+            if (existing_sym.isUndefined() and !symbol.isUndefined()) break :blk;
             try wasm.discarded.put(wasm.base.allocator, location, existing_loc);
             continue;
         }
