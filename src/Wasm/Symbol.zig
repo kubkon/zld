@@ -157,7 +157,6 @@ pub fn format(symbol: Symbol, comptime fmt: []const u8, options: std.fmt.FormatO
         .section => 'S',
         .event => 'E',
         .table => 'T',
-        .dead => '-',
     };
     const visible: []const u8 = if (symbol.isVisible()) "yes" else "no";
     const binding: []const u8 = if (symbol.isLocal()) "local" else "global";
