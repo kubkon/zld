@@ -1,5 +1,6 @@
 const std = @import("std");
 const assert = std.debug.assert;
+const leb = std.leb;
 const log = std.log.scoped(.unwind_info);
 const macho = std.macho;
 const math = std.math;
@@ -203,12 +204,24 @@ pub fn writeUnwindInfo(macho_file: *MachO) !void {
                 eh_records.putAssumeCapacityNoClobber(eh_frame_offset, fde_record);
 
                 enc.dwarf.section_offset = @intCast(u24, eh_frame_offset);
-                log.warn("{s} {x}", .{
-                    macho_file.getSymbolName(macho_file.getAtom(atom_index).getSymbolWithLoc()),
-                    enc.dwarf.section_offset,
-                });
-                record.compactUnwindEncoding = enc.toU32();
 
+                const cie_record = eh_records.get(eh_frame_offset + 4 - fde_record.getCiePointer()).?;
+                const personality_ptr = try cie_record.getPersonalityPointer(.{
+                    .base_addr = eh_sect_addr.?,
+                    .base_offset = eh_frame_offset + 4 - fde_record.getCiePointer(),
+                });
+                const lsda_ptr = try fde_record.getLsdaPointer(cie_record, .{
+                    .base_addr = eh_sect_addr.?,
+                    .base_offset = eh_frame_offset,
+                });
+                if (personality_ptr) |ptr| {
+                    record.personalityFunction = ptr - seg.vmaddr;
+                }
+                if (lsda_ptr) |ptr| {
+                    record.lsda = ptr - seg.vmaddr;
+                }
+
+                record.compactUnwindEncoding = enc.toU32();
                 eh_frame_offset += fde_record.getSize();
             }
 
@@ -614,6 +627,61 @@ pub const EhFrameIterator = struct {
                 mem.writeIntLittle(u32, rec.data[0..4], ptr);
             }
 
+            pub fn getAugmentationString(rec: @This()) []const u8 {
+                assert(rec.tag == .cie);
+                return mem.sliceTo(@ptrCast([*:0]const u8, rec.data.ptr + 5), 0);
+            }
+
+            pub fn getPersonalityPointer(rec: @This(), ctx: struct {
+                base_addr: u64,
+                base_offset: u64,
+            }) !?u64 {
+                assert(rec.tag == .cie);
+                const aug_str = rec.getAugmentationString();
+
+                var stream = std.io.fixedBufferStream(rec.data[9 + aug_str.len ..]);
+                var creader = std.io.countingReader(stream.reader());
+                const reader = creader.reader();
+
+                for (aug_str) |ch, i| switch (ch) {
+                    'z' => if (i > 0) {
+                        return error.MalformedAugmentationString;
+                    } else {
+                        _ = try leb.readULEB128(u64, reader);
+                    },
+                    'R' => {
+                        _ = try reader.readByte();
+                    },
+                    'P' => {
+                        const enc = try reader.readByte();
+                        const offset = ctx.base_offset + 13 + aug_str.len + creader.bytes_read;
+                        const ptr = try getEncodedPointer(enc, @intCast(i64, ctx.base_addr + offset), reader);
+                        return ptr;
+                    },
+                    'L' => {
+                        _ = try reader.readByte();
+                    },
+                    'S', 'B', 'G' => {},
+                    else => return error.UnknownAugmentationStringValue,
+                };
+
+                return null;
+            }
+
+            pub fn getLsdaPointer(rec: @This(), cie: @This(), ctx: struct {
+                base_addr: u64,
+                base_offset: u64,
+            }) !?u64 {
+                assert(rec.tag == .fde);
+                const enc = (try cie.getLsdaEncoding()) orelse return null;
+                var stream = std.io.fixedBufferStream(rec.data[20..]);
+                const reader = stream.reader();
+                _ = try reader.readByte();
+                const offset = ctx.base_offset + 25;
+                const ptr = try getEncodedPointer(enc, @intCast(i64, ctx.base_addr + offset), reader);
+                return ptr;
+            }
+
             pub fn toOwned(rec: @This(), gpa: Allocator) Allocator.Error!Record(true) {
                 const data = try gpa.dupe(u8, rec.data);
                 return Record(true){
@@ -621,6 +689,69 @@ pub const EhFrameIterator = struct {
                     .size = rec.size,
                     .data = data,
                 };
+            }
+
+            fn getLsdaEncoding(rec: @This()) !?u8 {
+                assert(rec.tag == .cie);
+                const aug_str = rec.getAugmentationString();
+
+                const base_offset = 9 + aug_str.len;
+                var stream = std.io.fixedBufferStream(rec.data[base_offset..]);
+                var creader = std.io.countingReader(stream.reader());
+                const reader = creader.reader();
+
+                for (aug_str) |ch, i| switch (ch) {
+                    'z' => if (i > 0) {
+                        return error.MalformedAugmentationString;
+                    } else {
+                        _ = try leb.readULEB128(u64, reader);
+                    },
+                    'R' => {
+                        _ = try reader.readByte();
+                    },
+                    'P' => {
+                        const enc = try reader.readByte();
+                        _ = try getEncodedPointer(enc, 0, reader);
+                    },
+                    'L' => {
+                        const enc = try reader.readByte();
+                        return enc;
+                    },
+                    'S', 'B', 'G' => {},
+                    else => return error.UnknownAugmentationStringValue,
+                };
+
+                return null;
+            }
+
+            fn getEncodedPointer(enc: u8, pcrel_offset: i64, reader: anytype) !?u64 {
+                if (enc == EH_PE.omit) return null;
+
+                var ptr: i64 = switch (enc & 0x0F) {
+                    EH_PE.absptr => @bitCast(i64, try reader.readIntLittle(u64)),
+                    EH_PE.udata2 => @bitCast(i16, try reader.readIntLittle(u16)),
+                    EH_PE.udata4 => @bitCast(i32, try reader.readIntLittle(u32)),
+                    EH_PE.udata8 => @bitCast(i64, try reader.readIntLittle(u64)),
+                    EH_PE.uleb128 => @bitCast(i64, try leb.readULEB128(u64, reader)),
+                    EH_PE.sdata2 => try reader.readIntLittle(i16),
+                    EH_PE.sdata4 => try reader.readIntLittle(i32),
+                    EH_PE.sdata8 => try reader.readIntLittle(i64),
+                    EH_PE.sleb128 => try leb.readILEB128(i64, reader),
+                    else => return null,
+                };
+
+                switch (enc & 0x70) {
+                    EH_PE.absptr => {},
+                    EH_PE.pcrel => ptr += pcrel_offset,
+                    EH_PE.datarel,
+                    EH_PE.textrel,
+                    EH_PE.funcrel,
+                    EH_PE.aligned,
+                    => return null,
+                    else => return null,
+                }
+
+                return @bitCast(u64, ptr);
             }
         };
     }
@@ -659,4 +790,23 @@ pub const EhFrameIterator = struct {
         assert(pos >= 0 and pos < it.data.len);
         it.pos = pos;
     }
+};
+
+pub const EH_PE = struct {
+    pub const absptr = 0x00;
+    pub const uleb128 = 0x01;
+    pub const udata2 = 0x02;
+    pub const udata4 = 0x03;
+    pub const udata8 = 0x04;
+    pub const sleb128 = 0x09;
+    pub const sdata2 = 0x0A;
+    pub const sdata4 = 0x0B;
+    pub const sdata8 = 0x0C;
+    pub const pcrel = 0x10;
+    pub const textrel = 0x20;
+    pub const datarel = 0x30;
+    pub const funcrel = 0x40;
+    pub const aligned = 0x50;
+    pub const indirect = 0x80;
+    pub const omit = 0xFF;
 };
