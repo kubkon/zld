@@ -743,9 +743,9 @@ fn mergeTypes(wasm: *Wasm) !void {
                 value.type = try wasm.func_types.append(wasm.base.allocator, object.func_types[value.type]);
                 continue;
             } else if (!dirty.contains(symbol.index)) {
-                log.debug("Adding type from function '{s}'", .{object.string_table.get(symbol.name)});
                 const func = &wasm.functions.items.values()[symbol.index - wasm.imports.functionCount()];
                 func.type_index = try wasm.func_types.append(wasm.base.allocator, object.func_types[func.type_index]);
+                dirty.putAssumeCapacity(symbol.index, {});
             }
         }
     }
