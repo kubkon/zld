@@ -61,7 +61,7 @@ exec_atoms: std.ArrayListUnmanaged(AtomIndex) = .{},
 
 eh_frame_sect: ?macho.section_64 = null,
 eh_frame_relocs_lookup: std.AutoArrayHashMapUnmanaged(u32, RelocEntry) = .{},
-eh_frame_records_lookup: std.AutoHashMapUnmanaged(AtomIndex, u32) = .{},
+eh_frame_records_lookup: std.AutoArrayHashMapUnmanaged(AtomIndex, u32) = .{},
 
 unwind_info_sect: ?macho.section_64 = null,
 unwind_relocs_lookup: []RelocEntry = undefined,

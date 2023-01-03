@@ -9,6 +9,7 @@ const trace = @import("../tracy.zig").trace;
 
 const Allocator = mem.Allocator;
 const Atom = @import("Atom.zig");
+const AtomIndex = MachO.AtomIndex;
 const MachO = @import("../MachO.zig");
 const Object = @import("Object.zig");
 
@@ -108,22 +109,9 @@ pub fn writeUnwindInfo(macho_file: *MachO) !void {
     const seg_id = macho_file.sections.items(.segment_index)[sect_id];
     const seg = macho_file.segments.items[seg_id];
 
-    const eh_sect_addr = if (macho_file.getSectionByName("__TEXT", "__eh_frame")) |eh_sect_id|
-        macho_file.sections.items(.header)[eh_sect_id].addr
-    else
-        null;
-
     // List of all relocated records
-    var records = std.ArrayList(macho.compact_unwind_entry).init(gpa);
+    var records = std.AutoArrayHashMap(AtomIndex, macho.compact_unwind_entry).init(gpa);
     defer records.deinit();
-
-    var eh_records = std.AutoArrayHashMap(u32, EhFrameIterator.Record(true)).init(gpa);
-    defer {
-        for (eh_records.values()) |*rec| {
-            rec.deinit(gpa);
-        }
-        eh_records.deinit();
-    }
 
     // TODO dead stripping
     for (macho_file.objects.items) |*object, object_id| {
@@ -131,21 +119,12 @@ pub fn writeUnwindInfo(macho_file: *MachO) !void {
         // Contents of unwind records does not have to cover all symbol in executable section
         // so we need insert them ourselves.
         try records.ensureUnusedCapacity(object.exec_atoms.items.len);
-        if (object.eh_frame_sect != null) {
-            try eh_records.ensureUnusedCapacity(2 * @intCast(u32, object.exec_atoms.items.len));
-        }
-
-        var cies = std.AutoHashMap(u32, u32).init(gpa);
-        defer cies.deinit();
-
-        var eh_it = object.getEhFrameIterator();
-        var eh_frame_offset: u32 = 0;
 
         for (object.exec_atoms.items) |atom_index| {
             const record_id = object.unwind_records_lookup.get(atom_index) orelse {
                 const atom = macho_file.getAtom(atom_index);
                 const sym = macho_file.getSymbol(atom.getSymbolWithLoc());
-                records.appendAssumeCapacity(.{
+                records.putAssumeCapacityNoClobber(atom_index, .{
                     .rangeStart = sym.n_value - seg.vmaddr,
                     .rangeLength = @intCast(u32, atom.size),
                     .compactUnwindEncoding = 0,
@@ -155,8 +134,6 @@ pub fn writeUnwindInfo(macho_file: *MachO) !void {
                 continue;
             };
             var record = unwind_records[record_id];
-            var enc = try macho.UnwindEncodingArm64.fromU32(record.compactUnwindEncoding);
-
             try relocateRecord(
                 macho_file,
                 @intCast(u31, object_id),
@@ -170,8 +147,38 @@ pub fn writeUnwindInfo(macho_file: *MachO) !void {
             if (record.lsda > 0) {
                 record.lsda -= seg.vmaddr;
             }
+            records.putAssumeCapacityNoClobber(atom_index, record);
+        }
+    }
 
-            if (enc == .dwarf) {
+    if (macho_file.getSectionByName("__TEXT", "__eh_frame")) |eh_sect_id| {
+        const eh_sect_addr = macho_file.sections.items(.header)[eh_sect_id].addr;
+
+        // List of all CIEs and FDEs indexed by
+        var eh_records = std.AutoArrayHashMap(u32, EhFrameIterator.Record(true)).init(gpa);
+        defer {
+            for (eh_records.values()) |*rec| {
+                rec.deinit(gpa);
+            }
+            eh_records.deinit();
+        }
+
+        // TODO dead stripping
+        for (macho_file.objects.items) |*object, object_id| {
+            try eh_records.ensureUnusedCapacity(2 * @intCast(u32, object.exec_atoms.items.len));
+
+            var cies = std.AutoHashMap(u32, u32).init(gpa);
+            defer cies.deinit();
+
+            var eh_it = object.getEhFrameIterator();
+            var eh_frame_offset: u32 = 0;
+
+            for (object.eh_frame_records_lookup.keys()) |atom_index| {
+                const record = records.getPtr(atom_index) orelse continue; // TODO are we gonna tombstone or remove?
+                var enc = try macho.UnwindEncodingArm64.fromU32(record.compactUnwindEncoding);
+
+                assert(enc == .dwarf);
+
                 const fde_record_offset = object.eh_frame_records_lookup.get(atom_index).?; // TODO turn into an error
                 eh_it.seekTo(fde_record_offset);
                 const source_fde_record = (try eh_it.next()).?;
@@ -187,7 +194,7 @@ pub fn writeUnwindInfo(macho_file: *MachO) !void {
                     try cie_record.relocate(macho_file, @intCast(u31, object_id), .{
                         .source_offset = cie_offset,
                         .out_offset = eh_frame_offset,
-                        .sect_addr = eh_sect_addr.?,
+                        .sect_addr = eh_sect_addr,
                     });
                     eh_records.putAssumeCapacityNoClobber(eh_frame_offset, cie_record);
                     gop.value_ptr.* = eh_frame_offset;
@@ -199,7 +206,7 @@ pub fn writeUnwindInfo(macho_file: *MachO) !void {
                 try fde_record.relocate(macho_file, @intCast(u31, object_id), .{
                     .source_offset = fde_record_offset,
                     .out_offset = eh_frame_offset,
-                    .sect_addr = eh_sect_addr.?,
+                    .sect_addr = eh_sect_addr,
                 });
                 eh_records.putAssumeCapacityNoClobber(eh_frame_offset, fde_record);
 
@@ -207,11 +214,11 @@ pub fn writeUnwindInfo(macho_file: *MachO) !void {
 
                 const cie_record = eh_records.get(eh_frame_offset + 4 - fde_record.getCiePointer()).?;
                 const personality_ptr = try cie_record.getPersonalityPointer(.{
-                    .base_addr = eh_sect_addr.?,
+                    .base_addr = eh_sect_addr,
                     .base_offset = eh_frame_offset + 4 - fde_record.getCiePointer(),
                 });
                 const lsda_ptr = try fde_record.getLsdaPointer(cie_record, .{
-                    .base_addr = eh_sect_addr.?,
+                    .base_addr = eh_sect_addr,
                     .base_offset = eh_frame_offset,
                 });
                 if (personality_ptr) |ptr| {
@@ -224,19 +231,17 @@ pub fn writeUnwindInfo(macho_file: *MachO) !void {
                 record.compactUnwindEncoding = enc.toU32();
                 eh_frame_offset += fde_record.getSize();
             }
-
-            records.appendAssumeCapacity(record);
         }
-    }
 
-    // Write __eh_frame data (if any)
-    try writeEhFrames(macho_file, eh_records.values());
+        // Write __eh_frame data (if any)
+        try writeEhFrames(macho_file, eh_records.values());
+    }
 
     // Collect personalities
     var personalities = std.AutoArrayHashMap(u32, void).init(gpa);
     defer personalities.deinit();
 
-    for (records.items) |record| {
+    for (records.values()) |record| {
         if (record.personalityFunction == 0) continue;
         _ = try personalities.put(@intCast(u32, record.personalityFunction), {});
     }
@@ -247,7 +252,8 @@ pub fn writeUnwindInfo(macho_file: *MachO) !void {
     }
 
     // Fix-up encodings that require personality pointer
-    for (records.items) |*record| {
+    for (records.keys()) |key| {
+        const record = records.getPtr(key).?;
         if (record.personalityFunction == 0) continue;
         const offset = @intCast(u32, record.personalityFunction);
         var enc = try macho.UnwindEncodingArm64.fromU32(record.compactUnwindEncoding);
@@ -259,7 +265,7 @@ pub fn writeUnwindInfo(macho_file: *MachO) !void {
         record.compactUnwindEncoding = enc.toU32();
     }
 
-    for (records.items) |record, i| {
+    for (records.values()) |record, i| {
         log.debug("Unwind record at offset 0x{x}", .{i * @sizeOf(macho.compact_unwind_entry)});
         log.debug("  start: 0x{x}", .{record.rangeStart});
         log.debug("  length: 0x{x}", .{record.rangeLength});
@@ -272,7 +278,7 @@ pub fn writeUnwindInfo(macho_file: *MachO) !void {
     var common_encodings_counts = std.AutoHashMap(u32, u32).init(gpa);
     defer common_encodings_counts.deinit();
 
-    for (records.items) |record| {
+    for (records.values()) |record| {
         const gop = try common_encodings_counts.getOrPut(record.compactUnwindEncoding);
         if (!gop.found_existing) {
             gop.value_ptr.* = 0;
@@ -317,8 +323,8 @@ pub fn writeUnwindInfo(macho_file: *MachO) !void {
     try writer.writeAll(mem.sliceAsBytes(common_encodings.keys()));
     try writer.writeAll(mem.sliceAsBytes(personalities.keys()));
 
-    const first_record = records.items[0];
-    const last_record = records.items[records.items.len - 1];
+    const first_record = records.values()[0];
+    const last_record = records.values()[records.values().len - 1];
     const sentinel_address = @intCast(u32, last_record.rangeStart + last_record.rangeLength);
 
     const index_headers_backpatch = cwriter.bytes_written;
@@ -337,7 +343,7 @@ pub fn writeUnwindInfo(macho_file: *MachO) !void {
     mem.writeIntLittle(u32, buffer.items[index_headers_backpatch + 8 ..][0..4], lsda_start_offset);
 
     log.debug("LSDAs:", .{});
-    for (records.items) |record| {
+    for (records.values()) |record| {
         if (record.lsda == 0) continue;
         log.debug("  {x}, lsda({x})", .{ record.rangeStart, record.lsda });
         try writer.writeStruct(macho.unwind_info_section_header_lsda_index_entry{
@@ -360,7 +366,7 @@ pub fn writeUnwindInfo(macho_file: *MachO) !void {
     defer page_encodings.deinit();
 
     log.debug("Page encodings", .{});
-    for (records.items) |record| {
+    for (records.values()) |record| {
         if (common_encodings.contains(record.compactUnwindEncoding)) continue;
         try page_encodings.putNoClobber(record.compactUnwindEncoding, {});
         log.debug("  {d}: 0x{x:0>8}", .{
@@ -371,7 +377,7 @@ pub fn writeUnwindInfo(macho_file: *MachO) !void {
 
     try writer.writeStruct(macho.unwind_info_compressed_second_level_page_header{
         .entryPageOffset = 0,
-        .entryCount = @intCast(u16, records.items.len),
+        .entryCount = @intCast(u16, records.values().len),
         .encodingsPageOffset = @sizeOf(macho.unwind_info_compressed_second_level_page_header),
         .encodingsCount = @intCast(u16, page_encodings.count()),
     });
@@ -384,7 +390,7 @@ pub fn writeUnwindInfo(macho_file: *MachO) !void {
     mem.writeIntLittle(u16, buffer.items[lsda_end_offset + 4 ..][0..2], page_offset);
 
     log.debug("Compressed page entries", .{});
-    for (records.items) |record, i| {
+    for (records.values()) |record, i| {
         const compressed = macho.UnwindInfoCompressedEntry{
             .funcOffset = @intCast(u24, record.rangeStart - first_record.rangeStart),
             .encodingIndex = if (common_encodings.getIndex(record.compactUnwindEncoding)) |id|
