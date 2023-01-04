@@ -15,11 +15,11 @@ pub const Functions = struct {
     /// Holds the list of function type indexes.
     /// The list is built from merging all defined functions into this single list.
     /// Once appended, it becomes immutable and should not be mutated outside this list.
-    items: std.AutoArrayHashMapUnmanaged(struct { file: u16, index: u32 }, std.wasm.Func) = .{},
+    items: std.AutoArrayHashMapUnmanaged(struct { file: ?u16, index: u32 }, std.wasm.Func) = .{},
 
     /// Adds a new function to the section while also setting the function index
     /// of the `Func` itself.
-    pub fn append(self: *Functions, gpa: Allocator, ref: struct { file: u16, index: u32 }, offset: u32, func: std.wasm.Func) !u32 {
+    pub fn append(self: *Functions, gpa: Allocator, ref: struct { file: ?u16, index: u32 }, offset: u32, func: std.wasm.Func) !u32 {
         const gop = try self.items.getOrPut(
             gpa,
             .{ .file = ref.file, .index = ref.index },

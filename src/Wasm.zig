@@ -103,10 +103,32 @@ debug_str_index: ?u32 = null,
 /// The index of the segment representing the custom '.debug_pubtypes' section.
 debug_abbrev_index: ?u32 = null,
 
+/// List of initialization functions, these must be called in order of priority
+/// by the synthetic __wasm_call_ctors function.
+init_funcs: std.ArrayListUnmanaged(InitFuncLoc) = .{},
+
 pub const Segment = struct {
     alignment: u32,
     size: u32,
     offset: u32,
+};
+
+/// Contains the location of the function symbol, as well as
+/// the priority itself of the initialization function.
+pub const InitFuncLoc = struct {
+    file: u16,
+    index: u32,
+    priority: u32,
+
+    /// From a given `InitFuncLoc` returns the corresponding function symbol
+    pub fn getSymbol(loc: InitFuncLoc, wasm: *const Wasm) *Symbol {
+        return getSymbolLoc(loc).getSymbol(wasm);
+    }
+
+    /// Turns the given `InitFuncLoc` into a `SymbolWithLoc`
+    pub fn getSymbolLoc(loc: InitFuncLoc) SymbolWithLoc {
+        return .{ .file = loc.file, .sym_index = loc.index };
+    }
 };
 
 /// Describes the location of a symbol
@@ -347,6 +369,7 @@ pub fn dataCount(wasm: Wasm) u32 {
 pub fn flush(wasm: *Wasm) !void {
     try wasm.parsePositionals(wasm.options.positionals);
     try wasm.setupLinkerSymbols();
+    try wasm.setupInitFunctions();
     for (wasm.objects.items) |_, obj_idx| {
         try wasm.resolveSymbolsInObject(@intCast(u16, obj_idx));
     }
@@ -362,6 +385,7 @@ pub fn flush(wasm: *Wasm) !void {
     wasm.mapFunctionTable();
     try wasm.mergeSections();
     try wasm.mergeTypes();
+    try wasm.initializeCallCtorsFunction();
     try wasm.setupExports();
 
     try @import("Wasm/emit_wasm.zig").emit(wasm);
@@ -743,6 +767,7 @@ fn mergeTypes(wasm: *Wasm) !void {
                 value.type = try wasm.func_types.append(wasm.base.allocator, object.func_types[value.type]);
                 continue;
             } else if (!dirty.contains(symbol.index)) {
+                log.debug("Adding type from function '{s}'", .{object.string_table.get(symbol.name)});
                 const func = &wasm.functions.items.values()[symbol.index - wasm.imports.functionCount()];
                 func.type_index = try wasm.func_types.append(wasm.base.allocator, object.func_types[func.type_index]);
                 dirty.putAssumeCapacity(symbol.index, {});
@@ -847,6 +872,14 @@ fn setupLinkerSymbols(wasm: *Wasm) !void {
         // do need to create table here, as we only create it if there's any
         // function pointers to be stored. This is done in `mergeSections`
     }
+
+    // __wasm_call_ctors
+    {
+        const loc = try wasm.createSyntheticSymbol("__wasm_call_ctors", .function);
+        const symbol = loc.getSymbol(wasm);
+        symbol.setFlag(.WASM_SYM_VISIBILITY_HIDDEN);
+        // We set the type and function index later so we do not need to merge them later.
+    }
 }
 
 /// For a given name, creates a new global synthetic symbol.
@@ -864,6 +897,98 @@ fn createSyntheticSymbol(wasm: *Wasm, name: []const u8, tag: Symbol.Tag) !Symbol
     try wasm.resolved_symbols.putNoClobber(wasm.base.allocator, loc, {});
     try wasm.global_symbols.putNoClobber(wasm.base.allocator, name_offset, loc);
     return loc;
+}
+
+/// Obtains all initfuncs from each object file, verifies its function signature,
+/// and then appends it to our final `init_funcs` list.
+/// After all functions have been inserted, the functions will be ordered based
+/// on their priority.
+fn setupInitFunctions(wasm: *Wasm) !void {
+    for (wasm.objects.items) |object, file_index| {
+        try wasm.init_funcs.ensureUnusedCapacity(wasm.base.allocator, object.init_funcs.len);
+        for (object.init_funcs) |init_func| {
+            const symbol = object.symtable[init_func.symbol_index];
+            const func = object.functions[symbol.index];
+            const ty: std.wasm.Type = object.func_types[func.type_index];
+            if (ty.params.len != 0) {
+                log.err("constructor functions cannot take arguments: '{s}'", .{object.string_table.get(symbol.name)});
+                return error.InvalidInitFunc;
+            }
+            log.debug("appended init func '{s}'\n", .{object.string_table.get(symbol.name)});
+            wasm.init_funcs.appendAssumeCapacity(.{
+                .index = init_func.symbol_index,
+                .file = @intCast(u16, file_index),
+                .priority = init_func.priority,
+            });
+        }
+    }
+
+    // sort the initfunctions based on their priority
+    std.sort.sort(InitFuncLoc, wasm.init_funcs.items, {}, struct {
+        fn lessThan(ctx: void, lhs: InitFuncLoc, rhs: InitFuncLoc) bool {
+            _ = ctx;
+            return lhs.priority < rhs.priority;
+        }
+    }.lessThan);
+}
+
+fn initializeCallCtorsFunction(wasm: *Wasm) !void {
+    var function_body = std.ArrayList(u8).init(wasm.base.allocator);
+    defer function_body.deinit();
+    const writer = function_body.writer();
+
+    // Write locals count (we have none)
+    try leb.writeULEB128(writer, @as(u32, 0));
+
+    // call constructors
+    for (wasm.init_funcs.items) |init_func_loc| {
+        const symbol = init_func_loc.getSymbol(wasm);
+        const func = wasm.functions.items.values()[symbol.index];
+        const ty = wasm.func_types.items.items[func.type_index];
+
+        // Call function by its function index
+        try writer.writeByte(std.wasm.opcode(.call));
+        try leb.writeULEB128(writer, symbol.index);
+
+        // drop all returned values from the stack as __wasm_call_ctors has no return value
+        for (ty.returns) |_| {
+            try writer.writeByte(std.wasm.opcode(.drop));
+        }
+    }
+
+    // End function body
+    try writer.writeByte(std.wasm.opcode(.end));
+
+    const loc = wasm.global_symbols.get(wasm.string_table.getOffset("__wasm_call_ctors").?).?;
+    // Update the symbol
+    const symbol = loc.getSymbol(wasm);
+    // create type (() -> nil)
+    const ty_index = try wasm.func_types.append(wasm.base.allocator, .{ .params = &.{}, .returns = &.{} });
+    // create function with above type
+    symbol.index = try wasm.functions.append(
+        wasm.base.allocator,
+        .{ .file = null, .index = loc.sym_index },
+        wasm.imports.functionCount(),
+        .{ .type_index = ty_index },
+    );
+
+    // create the atom that will be output into the final binary
+    const atom = try wasm.base.allocator.create(Atom);
+    errdefer wasm.base.allocator.destroy(atom);
+    atom.* = .{
+        .size = @intCast(u32, function_body.items.len),
+        .offset = 0,
+        .sym_index = loc.sym_index,
+        .file = null,
+        .alignment = 1,
+        .next = null,
+        .prev = null,
+        .code = function_body.moveToUnmanaged(),
+    };
+    try wasm.managed_atoms.append(wasm.base.allocator, atom);
+    try wasm.appendAtomAtIndex(wasm.base.allocator, wasm.code_section_index.?, atom);
+    try wasm.symbol_atom.putNoClobber(wasm.base.allocator, loc, atom);
+    atom.offset = atom.prev.?.offset + atom.prev.?.size;
 }
 
 fn mergeImports(wasm: *Wasm) !void {
