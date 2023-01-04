@@ -119,7 +119,7 @@ pub const IndirectPointer = struct {
     }
 };
 
-pub const SymbolWithLoc = struct {
+pub const SymbolWithLoc = extern struct {
     // Index into the respective symbol table.
     sym_index: u32,
 
@@ -385,6 +385,7 @@ pub fn flush(self: *MachO) !void {
     try self.createDyldStubBinderGotAtom();
 
     try self.calcSectionSizes();
+    try UnwindInfo.calcUnwindInfoSectionSizes(self);
     try unwind_info.collect(self);
     try self.pruneAndSortSections();
     try self.createSegments();
@@ -400,6 +401,7 @@ pub fn flush(self: *MachO) !void {
     }
 
     try self.writeAtoms();
+    try unwind_info.write(self, self.base.file);
     try self.writeLinkeditSegmentData();
 
     // If the last section of __DATA segment is zerofill section, we need to ensure
