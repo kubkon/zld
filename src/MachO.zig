@@ -16,6 +16,7 @@ const meta = std.meta;
 const aarch64 = @import("aarch64.zig");
 const bind = @import("MachO/bind.zig");
 const dead_strip = @import("MachO/dead_strip.zig");
+const eh_frame = @import("MachO/eh_frame.zig");
 const fat = @import("MachO/fat.zig");
 const load_commands = @import("MachO/load_commands.zig");
 const thunks = @import("MachO/thunks.zig");
@@ -401,7 +402,8 @@ pub fn flush(self: *MachO) !void {
     }
 
     try self.writeAtoms();
-    try unwind_info.write(self, self.base.file);
+    try eh_frame.write(self, &unwind_info);
+    try unwind_info.write(self);
     try self.writeLinkeditSegmentData();
 
     // If the last section of __DATA segment is zerofill section, we need to ensure
