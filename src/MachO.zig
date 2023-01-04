@@ -18,7 +18,6 @@ const bind = @import("MachO/bind.zig");
 const dead_strip = @import("MachO/dead_strip.zig");
 const fat = @import("MachO/fat.zig");
 const load_commands = @import("MachO/load_commands.zig");
-const unwind_info = @import("MachO/unwind_info.zig");
 const thunks = @import("MachO/thunks.zig");
 const trace = @import("tracy.zig").trace;
 
@@ -36,6 +35,7 @@ const LibStub = @import("tapi.zig").LibStub;
 const StringTable = @import("strtab.zig").StringTable;
 const ThreadPool = @import("ThreadPool.zig");
 const Trie = @import("MachO/Trie.zig");
+const UnwindInfo = @import("MachO/UnwindInfo.zig");
 const Zld = @import("Zld.zig");
 
 pub const base_tag = Zld.Tag.macho;
@@ -377,12 +377,15 @@ pub fn flush(self: *MachO) !void {
             try Atom.scanAtomRelocs(self, atom_index, relocs);
         }
     }
-    try unwind_info.scanUnwindInfo(self);
+
+    var unwind_info = UnwindInfo{ .gpa = self.base.allocator };
+    defer unwind_info.deinit();
+    try unwind_info.scanRelocs(self);
 
     try self.createDyldStubBinderGotAtom();
 
     try self.calcSectionSizes();
-    try unwind_info.calcUnwindInfoSectionSizes(self);
+    try unwind_info.collect(self);
     try self.pruneAndSortSections();
     try self.createSegments();
     try self.allocateSegments();
@@ -397,7 +400,6 @@ pub fn flush(self: *MachO) !void {
     }
 
     try self.writeAtoms();
-    try unwind_info.writeUnwindInfo(self);
     try self.writeLinkeditSegmentData();
 
     // If the last section of __DATA segment is zerofill section, we need to ensure
