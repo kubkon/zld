@@ -2,6 +2,7 @@ const UnwindInfo = @This();
 
 const std = @import("std");
 const assert = std.debug.assert;
+const eh_frame = @import("eh_frame.zig");
 const leb = std.leb;
 const log = std.log.scoped(.unwind_info);
 const macho = std.macho;
@@ -12,7 +13,7 @@ const trace = @import("../tracy.zig").trace;
 const Allocator = mem.Allocator;
 const Atom = @import("Atom.zig");
 const AtomIndex = MachO.AtomIndex;
-const EhFrameRecord = @import("EhFrameRecord.zig");
+const EhFrameRecord = eh_frame.EhFrameRecord;
 const MachO = @import("../MachO.zig");
 const Object = @import("Object.zig");
 
@@ -33,9 +34,14 @@ pub fn deinit(info: *UnwindInfo) void {
 }
 
 pub fn scanRelocs(info: UnwindInfo, macho_file: *MachO) !void {
-    _ = info;
     for (macho_file.objects.items) |*object, object_id| {
         const unwind_records = object.getUnwindRecords();
+
+        var cies = std.AutoHashMap(u32, void).init(info.gpa);
+        defer cies.deinit();
+
+        var it = object.getEhFrameRecordsIterator();
+
         for (object.exec_atoms.items) |atom_index| {
             const record_id = object.unwind_records_lookup.get(atom_index) orelse continue;
             const record = unwind_records[record_id];
@@ -57,7 +63,21 @@ pub fn scanRelocs(info: UnwindInfo, macho_file: *MachO) !void {
                     try Atom.addGotEntry(macho_file, target);
                 },
                 .dwarf => {
-                    // Done separately
+                    const fde_offset = object.eh_frame_records_lookup.get(atom_index).?; // TODO turn into an error
+                    it.seekTo(fde_offset);
+                    const fde = (try it.next()).?;
+
+                    const cie_ptr = fde.getCiePointer();
+                    const cie_offset = fde_offset + 4 - cie_ptr;
+
+                    if (!cies.contains(cie_offset)) {
+                        try cies.putNoClobber(cie_offset, {});
+                        it.seekTo(cie_offset);
+                        const cie = (try it.next()).?;
+                        try cie.scanRelocs(macho_file, @intCast(u31, object_id), cie_offset);
+                    }
+
+                    try fde.scanRelocs(macho_file, @intCast(u31, object_id), fde_offset);
                 },
             }
         }
@@ -76,38 +96,67 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
         try info.records.ensureUnusedCapacity(info.gpa, object.exec_atoms.items.len);
         try info.records_lookup.ensureUnusedCapacity(info.gpa, @intCast(u32, object.exec_atoms.items.len));
 
+        var cies = std.AutoHashMap(u32, void).init(info.gpa);
+        defer cies.deinit();
+
+        var it = object.getEhFrameRecordsIterator();
+
         for (object.exec_atoms.items) |atom_index| {
             var record = if (object.unwind_records_lookup.get(atom_index)) |record_id| blk: {
                 var record = unwind_records[record_id];
-                if (getPersonalityFunctionReloc(
-                    macho_file,
-                    @intCast(u31, object_id),
-                    record_id,
-                )) |rel| {
-                    // Personality function; add GOT pointer.
-                    const target = parseRelocTarget(
+                var enc = try macho.UnwindEncodingArm64.fromU32(record.compactUnwindEncoding);
+                switch (enc) {
+                    .frame, .frameless => if (getPersonalityFunctionReloc(
                         macho_file,
                         @intCast(u31, object_id),
-                        rel,
-                        mem.asBytes(&record),
-                        @intCast(i32, record_id * @sizeOf(macho.compact_unwind_entry)),
-                    );
-                    const personality_index = info.getPersonalityFunction(target) orelse inner: {
-                        const personality_index = @intCast(u2, info.personalities.items.len);
-                        info.personalities.appendAssumeCapacity(target);
-                        break :inner personality_index;
-                    };
+                        record_id,
+                    )) |rel| {
+                        // Personality function; add GOT pointer.
+                        const target = parseRelocTarget(
+                            macho_file,
+                            @intCast(u31, object_id),
+                            rel,
+                            mem.asBytes(&record),
+                            @intCast(i32, record_id * @sizeOf(macho.compact_unwind_entry)),
+                        );
+                        const personality_index = info.getPersonalityFunction(target) orelse inner: {
+                            const personality_index = @intCast(u2, info.personalities.items.len);
+                            info.personalities.appendAssumeCapacity(target);
+                            break :inner personality_index;
+                        };
 
-                    record.personalityFunction = personality_index + 1;
+                        record.personalityFunction = personality_index + 1;
 
-                    var enc = try macho.UnwindEncodingArm64.fromU32(record.compactUnwindEncoding);
-                    switch (enc) {
-                        .frame => |*x| x.personality_index = personality_index + 1,
-                        .frameless => |*x| x.personality_index = personality_index + 1,
-                        .dwarf => |*x| x.personality_index = personality_index + 1,
-                    }
-                    record.compactUnwindEncoding = enc.toU32();
+                        switch (enc) {
+                            .frame => |*x| x.personality_index = personality_index + 1,
+                            .frameless => |*x| x.personality_index = personality_index + 1,
+                            else => unreachable,
+                        }
+                    },
+                    .dwarf => |*x| {
+                        const fde_offset = object.eh_frame_records_lookup.get(atom_index).?;
+                        it.seekTo(fde_offset);
+                        const fde = (try it.next()).?;
+                        const cie_ptr = fde.getCiePointer();
+                        const cie_offset = fde_offset + 4 - cie_ptr;
+
+                        if (fde.getPersonalityPointerReloc(
+                            macho_file,
+                            @intCast(u31, object_id),
+                            cie_offset,
+                        )) |target| {
+                            const personality_index = info.getPersonalityFunction(target) orelse inner: {
+                                const personality_index = @intCast(u2, info.personalities.items.len);
+                                info.personalities.appendAssumeCapacity(target);
+                                break :inner personality_index;
+                            };
+
+                            record.personalityFunction = personality_index + 1;
+                            x.personality_index = personality_index + 1;
+                        }
+                    },
                 }
+                record.compactUnwindEncoding = enc.toU32();
                 break :blk record;
             } else macho.compact_unwind_entry{
                 .rangeStart = 0,

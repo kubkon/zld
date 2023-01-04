@@ -4,6 +4,7 @@ const std = @import("std");
 const build_options = @import("build_options");
 const assert = std.debug.assert;
 const dwarf = std.dwarf;
+const eh_frame = @import("eh_frame.zig");
 const fs = std.fs;
 const io = std.io;
 const log = std.log.scoped(.macho);
@@ -17,7 +18,6 @@ const Allocator = mem.Allocator;
 const Atom = @import("Atom.zig");
 const AtomIndex = MachO.AtomIndex;
 const DwarfInfo = @import("DwarfInfo.zig");
-const EhFrameRecord = @import("EhFrameRecord.zig");
 const LoadCommandIterator = macho.LoadCommandIterator;
 const MachO = @import("../MachO.zig");
 const SymbolWithLoc = MachO.SymbolWithLoc;
@@ -667,7 +667,7 @@ fn parseUnwindInfo(self: *Object, macho_file: *MachO, object_id: u31) !void {
         try self.eh_frame_relocs_lookup.ensureTotalCapacity(gpa, 2 * unwind_records.len);
         try self.eh_frame_records_lookup.ensureTotalCapacity(gpa, @intCast(u32, self.exec_atoms.items.len));
 
-        var it = self.getEhFrameRecordIterator();
+        var it = self.getEhFrameRecordsIterator();
         while (try it.next()) |record| {
             const offset = it.pos - record.getSize();
             const rel_pos = filterRelocs(relocs, offset, offset + record.getSize());
@@ -867,7 +867,7 @@ pub fn getUnwindRecords(self: Object) []align(1) const macho.compact_unwind_entr
     return @ptrCast([*]align(1) const macho.compact_unwind_entry, data)[0..num_entries];
 }
 
-pub fn getEhFrameRecordIterator(self: Object) EhFrameRecord.Iterator {
+pub fn getEhFrameRecordsIterator(self: Object) eh_frame.Iterator {
     const sect = self.eh_frame_sect orelse return .{ .data = &[0]u8{} };
     const data = self.getSectionContents(sect);
     return .{ .data = data };
