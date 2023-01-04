@@ -13,7 +13,7 @@ const Allocator = mem.Allocator;
 /// Local symbol index
 sym_index: u32,
 /// Index into a list of object files
-file: u16,
+file: ?u16,
 /// Size of the atom, used to calculate section sizes in the final binary
 size: u32,
 /// List of relocations belonging to this atom
@@ -36,7 +36,7 @@ prev: ?*Atom,
 /// Represents a default empty wasm `Atom`
 pub const empty: Atom = .{
     .alignment = 0,
-    .file = 0,
+    .file = null,
     .next = null,
     .offset = 0,
     .prev = null,
@@ -49,7 +49,7 @@ pub fn create(gpa: Allocator) !*Atom {
     const atom = try gpa.create(Atom);
     atom.* = .{
         .alignment = 0,
-        .file = undefined,
+        .file = null,
         .next = null,
         .offset = 0,
         .prev = null,
@@ -96,7 +96,7 @@ pub fn getVA(atom: *const Atom, wasm_bin: *const Wasm, symbol: *const Symbol) u3
     if (symbol.tag == .function) return atom.offset;
     std.debug.assert(symbol.tag == .data);
     const merge_segment = wasm_bin.options.merge_data_segments;
-    const segment_info = wasm_bin.objects.items[atom.file].segment_info;
+    const segment_info = wasm_bin.objects.items[atom.file.?].segment_info;
     const segment_name = segment_info[symbol.index].outputName(merge_segment);
     const segment_index = wasm_bin.data_segments.get(segment_name).?;
     const segment = wasm_bin.segments.items[segment_index];
@@ -165,7 +165,7 @@ fn relocationValue(atom: *Atom, relocation: types.Relocation, wasm_bin: *const W
         .R_WASM_TABLE_INDEX_SLEB64,
         => return wasm_bin.elements.indirect_functions.get(target_loc) orelse 0,
         .R_WASM_TYPE_INDEX_LEB => {
-            const original_type = wasm_bin.objects.items[atom.file].func_types[relocation.index];
+            const original_type = wasm_bin.objects.items[atom.file.?].func_types[relocation.index];
             return wasm_bin.func_types.find(original_type).?;
         },
         .R_WASM_GLOBAL_INDEX_I32,
