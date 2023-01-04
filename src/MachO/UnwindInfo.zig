@@ -478,42 +478,6 @@ fn getRelocs(
     return relocs[rel_pos.start..][0..rel_pos.len];
 }
 
-fn relocate(
-    macho_file: *MachO,
-    object_id: u31,
-    record_id: usize,
-    record: *macho.compact_unwind_entry,
-) !void {
-    const object = &macho_file.objects.items[object_id];
-    const relocs = getRelocs(macho_file, object_id, record_id);
-    const bytes = mem.asBytes(record);
-    const base_offset = @intCast(i32, record_id * @sizeOf(macho.compact_unwind_entry));
-
-    for (relocs) |rel| {
-        const target = parseRelocTarget(
-            macho_file,
-            object_id,
-            rel,
-            mem.asBytes(record),
-            base_offset,
-        );
-        const rel_offset = @intCast(u32, rel.r_address - base_offset);
-        const is_via_got = isPersonalityFunction(record_id, rel); // Personality function is via GOT.
-        const target_base_addr = try Atom.getRelocTargetAddress(macho_file, target, is_via_got, false);
-        var addend = mem.readIntLittle(i64, bytes[rel_offset..][0..8]);
-
-        if (rel.r_extern == 0) {
-            const base_addr = if (target.sym_index > object.source_address_lookup.len)
-                @intCast(i64, object.getSourceSection(@intCast(u16, rel.r_symbolnum - 1)).addr)
-            else
-                object.source_address_lookup[target.sym_index];
-            addend -= base_addr;
-        }
-
-        mem.writeIntLittle(i64, bytes[rel_offset..][0..8], @intCast(i64, target_base_addr) + addend);
-    }
-}
-
 fn isPersonalityFunction(record_id: usize, rel: macho.relocation_info) bool {
     const base_offset = @intCast(i32, record_id * @sizeOf(macho.compact_unwind_entry));
     const rel_offset = rel.r_address - base_offset;
