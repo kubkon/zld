@@ -181,7 +181,11 @@ pub fn emit(wasm: *Wasm) !void {
                     break;
                 }
             }
-            std.debug.assert(current_offset == segment.size);
+            // when the last atom was unresolved and we skipped writing last few 0's so do it now
+            if (current_offset != segment.size) {
+                try writer.writeByteNTimes(0, segment.size - current_offset);
+                current_offset += segment.size - current_offset;
+            }
         }
 
         try emitSectionHeader(file, offset, .data, data_count);
