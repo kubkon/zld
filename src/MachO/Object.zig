@@ -336,14 +336,14 @@ fn sectionLessThanByAddress(ctx: void, lhs: SortedSection, rhs: SortedSection) b
     return lhs.header.addr < rhs.header.addr;
 }
 
-pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u31) !void {
+pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
     log.debug("splitting object({d}, {s}) into atoms", .{ object_id, self.name });
 
     try self.splitRegularSections(macho_file, object_id);
     try self.parseUnwindInfo(macho_file, object_id);
 }
 
-pub fn splitRegularSections(self: *Object, macho_file: *MachO, object_id: u31) !void {
+pub fn splitRegularSections(self: *Object, macho_file: *MachO, object_id: u32) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -537,7 +537,7 @@ pub fn splitRegularSections(self: *Object, macho_file: *MachO, object_id: u31) !
 fn createAtomFromSubsection(
     self: *Object,
     macho_file: *MachO,
-    object_id: u31,
+    object_id: u32,
     sym_index: u32,
     inner_sym_index: u32,
     inner_nsyms_trailing: u32,
@@ -550,7 +550,7 @@ fn createAtomFromSubsection(
     const atom = macho_file.getAtomPtr(atom_index);
     atom.inner_sym_index = inner_sym_index;
     atom.inner_nsyms_trailing = inner_nsyms_trailing;
-    atom.file = object_id;
+    atom.file = object_id + 1;
     self.symtab[sym_index].n_sect = out_sect_id + 1;
 
     log.debug("creating ATOM(%{d}, '{s}') in sect({d}, '{s},{s}') in object({d})", .{
@@ -636,7 +636,7 @@ fn cacheRelocs(self: *Object, macho_file: *MachO, atom_index: AtomIndex) !void {
     } else filterRelocs(relocs, 0, atom.size);
 }
 
-fn parseUnwindInfo(self: *Object, macho_file: *MachO, object_id: u31) !void {
+fn parseUnwindInfo(self: *Object, macho_file: *MachO, object_id: u32) !void {
     const sect = self.unwind_info_sect orelse return;
 
     log.debug("parsing unwind info", .{});

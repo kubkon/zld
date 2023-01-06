@@ -30,12 +30,12 @@ pub fn scanUnwindInfo(macho_file: *MachO) !void {
             const enc = try macho.UnwindEncodingArm64.fromU32(record.compactUnwindEncoding);
             switch (enc) {
                 .frame, .frameless => {
-                    const relocs = getRecordRelocs(macho_file, @intCast(u31, object_id), record_id);
+                    const relocs = getRecordRelocs(macho_file, @intCast(u32, object_id), record_id);
                     for (relocs) |rel| if (isPersonalityFunction(record_id, rel)) {
                         // Personality function; add GOT pointer.
                         const target = parseRelocTarget(
                             macho_file,
-                            @intCast(u31, object_id),
+                            @intCast(u32, object_id),
                             rel,
                             mem.asBytes(&record),
                             @intCast(i32, record_id * @sizeOf(macho.compact_unwind_entry)),
@@ -55,10 +55,10 @@ pub fn scanUnwindInfo(macho_file: *MachO) !void {
                         try cies.putNoClobber(cie_offset, {});
                         it.seekTo(cie_offset);
                         const cie = (try it.next()).?;
-                        try cie.scan(macho_file, @intCast(u31, object_id), cie_offset);
+                        try cie.scan(macho_file, @intCast(u32, object_id), cie_offset);
                     }
 
-                    try fde.scan(macho_file, @intCast(u31, object_id), fde_offset);
+                    try fde.scan(macho_file, @intCast(u32, object_id), fde_offset);
                 },
             }
         }
@@ -460,7 +460,7 @@ pub fn getRecordRelocs(
 
 pub fn parseRelocTarget(
     macho_file: *MachO,
-    object_id: u31,
+    object_id: u32,
     rel: macho.relocation_info,
     code: []const u8,
     base_offset: i32,
@@ -495,18 +495,18 @@ pub fn parseRelocTarget(
             if (target_sym_index > 0) {
                 return MachO.SymbolWithLoc{
                     .sym_index = @intCast(u32, first_sym_index + target_sym_index - 1),
-                    .file = object_id,
+                    .file = object_id + 1,
                 };
             }
         }
 
         // Start of section is not contained anywhere, return synthetic atom.
         const sym_index = object.getSectionAliasSymbolIndex(sect_id);
-        return MachO.SymbolWithLoc{ .sym_index = sym_index, .file = object_id };
+        return MachO.SymbolWithLoc{ .sym_index = sym_index, .file = object_id + 1 };
     }
 
     const sym_index = object.reverse_symtab_lookup[rel.r_symbolnum];
-    const sym_loc = MachO.SymbolWithLoc{ .sym_index = sym_index, .file = object_id };
+    const sym_loc = MachO.SymbolWithLoc{ .sym_index = sym_index, .file = object_id + 1 };
     const sym = macho_file.getSymbol(sym_loc);
 
     if (sym.sect() and !sym.ext()) {

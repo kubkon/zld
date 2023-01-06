@@ -55,7 +55,7 @@ pub fn write(macho_file: *MachO, unwind_info: *UnwindInfo) !void {
                 eh_it.seekTo(cie_offset);
                 const source_cie_record = (try eh_it.next()).?;
                 var cie_record = try source_cie_record.toOwned(gpa);
-                try cie_record.relocate(macho_file, @intCast(u31, object_id), .{
+                try cie_record.relocate(macho_file, @intCast(u32, object_id), .{
                     .source_offset = cie_offset,
                     .out_offset = eh_frame_offset,
                     .sect_addr = sect.addr,
@@ -67,7 +67,7 @@ pub fn write(macho_file: *MachO, unwind_info: *UnwindInfo) !void {
 
             var fde_record = try source_fde_record.toOwned(gpa);
             fde_record.setCiePointer(eh_frame_offset + 4 - gop.value_ptr.*);
-            try fde_record.relocate(macho_file, @intCast(u31, object_id), .{
+            try fde_record.relocate(macho_file, @intCast(u32, object_id), .{
                 .source_offset = fde_record_offset,
                 .out_offset = eh_frame_offset,
                 .sect_addr = sect.addr,
@@ -132,7 +132,7 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
         pub fn scanRelocs(
             rec: Record,
             macho_file: *MachO,
-            object_id: u31,
+            object_id: u32,
             source_offset: u32,
         ) !void {
             if (rec.getPersonalityPointerReloc(macho_file, object_id, source_offset)) |target| {
@@ -143,7 +143,7 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
         pub fn getPersonalityPointerReloc(
             rec: Record,
             macho_file: *MachO,
-            object_id: u31,
+            object_id: u32,
             source_offset: u32,
         ) ?MachO.SymbolWithLoc {
             const relocs = getRelocs(macho_file, object_id, source_offset);
@@ -169,7 +169,7 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
             return null;
         }
 
-        pub fn relocate(rec: *Record, macho_file: *MachO, object_id: u31, ctx: struct {
+        pub fn relocate(rec: *Record, macho_file: *MachO, object_id: u32, ctx: struct {
             source_offset: u32,
             out_offset: u32,
             sect_addr: u64,
@@ -343,7 +343,7 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
 
 pub fn getRelocs(
     macho_file: *MachO,
-    object_id: u31,
+    object_id: u32,
     source_offset: u32,
 ) []align(1) const macho.relocation_info {
     const object = &macho_file.objects.items[object_id];

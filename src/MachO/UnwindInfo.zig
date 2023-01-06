@@ -51,13 +51,13 @@ pub fn scanRelocs(info: UnwindInfo, macho_file: *MachO) !void {
             switch (enc) {
                 .frame, .frameless => if (getPersonalityFunctionReloc(
                     macho_file,
-                    @intCast(u31, object_id),
+                    @intCast(u32, object_id),
                     record_id,
                 )) |rel| {
                     // Personality function; add GOT pointer.
                     const target = parseRelocTarget(
                         macho_file,
-                        @intCast(u31, object_id),
+                        @intCast(u32, object_id),
                         rel,
                         mem.asBytes(&record),
                         @intCast(i32, record_id * @sizeOf(macho.compact_unwind_entry)),
@@ -76,10 +76,10 @@ pub fn scanRelocs(info: UnwindInfo, macho_file: *MachO) !void {
                         try cies.putNoClobber(cie_offset, {});
                         it.seekTo(cie_offset);
                         const cie = (try it.next()).?;
-                        try cie.scanRelocs(macho_file, @intCast(u31, object_id), cie_offset);
+                        try cie.scanRelocs(macho_file, @intCast(u32, object_id), cie_offset);
                     }
 
-                    try fde.scanRelocs(macho_file, @intCast(u31, object_id), fde_offset);
+                    try fde.scanRelocs(macho_file, @intCast(u32, object_id), fde_offset);
                 },
             }
         }
@@ -111,12 +111,12 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
                     .frame, .frameless => {
                         if (getPersonalityFunctionReloc(
                             macho_file,
-                            @intCast(u31, object_id),
+                            @intCast(u32, object_id),
                             record_id,
                         )) |rel| {
                             const target = parseRelocTarget(
                                 macho_file,
-                                @intCast(u31, object_id),
+                                @intCast(u32, object_id),
                                 rel,
                                 mem.asBytes(&record),
                                 @intCast(i32, record_id * @sizeOf(macho.compact_unwind_entry)),
@@ -136,20 +136,15 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
                             }
                         }
 
-                        if (getLsdaReloc(macho_file, @intCast(u31, object_id), record_id)) |rel| {
+                        if (getLsdaReloc(macho_file, @intCast(u32, object_id), record_id)) |rel| {
                             const target = parseRelocTarget(
                                 macho_file,
-                                @intCast(u31, object_id),
+                                @intCast(u32, object_id),
                                 rel,
                                 mem.asBytes(&record),
                                 @intCast(i32, record_id * @sizeOf(macho.compact_unwind_entry)),
                             );
                             record.lsda = @bitCast(u64, target);
-                        } else {
-                            record.lsda = @bitCast(u64, MachO.SymbolWithLoc{
-                                .sym_index = 0,
-                                .file = -1,
-                            });
                         }
                     },
                     .dwarf => |*x| {
@@ -163,7 +158,7 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
 
                         if (cie.getPersonalityPointerReloc(
                             macho_file,
-                            @intCast(u31, object_id),
+                            @intCast(u32, object_id),
                             cie_offset,
                         )) |target| {
                             const personality_index = info.getPersonalityFunction(target) orelse inner: {
@@ -184,7 +179,7 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
                 .rangeLength = 0,
                 .compactUnwindEncoding = 0,
                 .personalityFunction = 0,
-                .lsda = @bitCast(u64, MachO.SymbolWithLoc{ .sym_index = 0, .file = -1 }),
+                .lsda = 0,
             };
 
             const atom = macho_file.getAtom(atom_index);
@@ -242,7 +237,7 @@ pub fn write(info: *UnwindInfo, macho_file: *MachO) !void {
             rec.personalityFunction = personalities.items[rec.personalityFunction - 1];
         }
 
-        // TODO clean this up!
+        // TODO clean this up in macho.zig
         if (rec.compactUnwindEncoding > 0) {
             const enc = try macho.UnwindEncodingArm64.fromU32(rec.compactUnwindEncoding);
             switch (enc) {
@@ -251,14 +246,10 @@ pub fn write(info: *UnwindInfo, macho_file: *MachO) !void {
                     if (lsda_target.getFile()) |_| {
                         const sym = macho_file.getSymbol(lsda_target);
                         rec.lsda = sym.n_value - seg.vmaddr;
-                    } else {
-                        rec.lsda = 0;
                     }
                 },
                 .dwarf => {}, // Handled separately
             }
-        } else {
-            rec.lsda = 0;
         }
     }
 
@@ -410,7 +401,7 @@ pub fn write(info: *UnwindInfo, macho_file: *MachO) !void {
 
 pub fn parseRelocTarget(
     macho_file: *MachO,
-    object_id: u31,
+    object_id: u32,
     rel: macho.relocation_info,
     code: []const u8,
     base_offset: i32,
@@ -445,18 +436,18 @@ pub fn parseRelocTarget(
             if (target_sym_index > 0) {
                 return MachO.SymbolWithLoc{
                     .sym_index = @intCast(u32, first_sym_index + target_sym_index - 1),
-                    .file = object_id,
+                    .file = object_id + 1,
                 };
             }
         }
 
         // Start of section is not contained anywhere, return synthetic atom.
         const sym_index = object.getSectionAliasSymbolIndex(sect_id);
-        return MachO.SymbolWithLoc{ .sym_index = sym_index, .file = object_id };
+        return MachO.SymbolWithLoc{ .sym_index = sym_index, .file = object_id + 1 };
     }
 
     const sym_index = object.reverse_symtab_lookup[rel.r_symbolnum];
-    const sym_loc = MachO.SymbolWithLoc{ .sym_index = sym_index, .file = object_id };
+    const sym_loc = MachO.SymbolWithLoc{ .sym_index = sym_index, .file = object_id + 1 };
     const sym = macho_file.getSymbol(sym_loc);
 
     if (sym.sect() and !sym.ext()) {
@@ -469,7 +460,7 @@ pub fn parseRelocTarget(
 
 fn getRelocs(
     macho_file: *MachO,
-    object_id: u31,
+    object_id: u32,
     record_id: usize,
 ) []align(1) const macho.relocation_info {
     const object = &macho_file.objects.items[object_id];
@@ -486,7 +477,7 @@ fn isPersonalityFunction(record_id: usize, rel: macho.relocation_info) bool {
 
 fn getPersonalityFunctionReloc(
     macho_file: *MachO,
-    object_id: u31,
+    object_id: u32,
     record_id: usize,
 ) ?macho.relocation_info {
     const relocs = getRelocs(macho_file, object_id, record_id);
@@ -509,7 +500,7 @@ fn isLsda(record_id: usize, rel: macho.relocation_info) bool {
     return rel_offset == 24;
 }
 
-fn getLsdaReloc(macho_file: *MachO, object_id: u31, record_id: usize) ?macho.relocation_info {
+fn getLsdaReloc(macho_file: *MachO, object_id: u32, record_id: usize) ?macho.relocation_info {
     const relocs = getRelocs(macho_file, object_id, record_id);
     for (relocs) |rel| {
         if (isLsda(record_id, rel)) return rel;

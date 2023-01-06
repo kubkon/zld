@@ -50,10 +50,10 @@ fn collectRoots(macho_file: *MachO, roots: *AtomTable) !void {
             const atom_index = object.getAtomIndexForSymbol(global.sym_index).?; // panic here means fatal error
             _ = try roots.getOrPut(atom_index);
 
-            log.debug("root(ATOM({d}, %{d}, {d}))", .{
+            log.debug("root(ATOM({d}, %{d}, {?d}))", .{
                 atom_index,
                 macho_file.getAtom(atom_index).sym_index,
-                macho_file.getAtom(atom_index).file,
+                macho_file.getAtom(atom_index).getFile(),
             });
         },
         else => |other| {
@@ -68,10 +68,10 @@ fn collectRoots(macho_file: *MachO, roots: *AtomTable) !void {
                 const atom_index = object.getAtomIndexForSymbol(global.sym_index).?; // panic here means fatal error
                 _ = try roots.getOrPut(atom_index);
 
-                log.debug("root(ATOM({d}, %{d}, {d}))", .{
+                log.debug("root(ATOM({d}, %{d}, {?d}))", .{
                     atom_index,
                     macho_file.getAtom(atom_index).sym_index,
-                    macho_file.getAtom(atom_index).file,
+                    macho_file.getAtom(atom_index).getFile(),
                 });
             }
         },
@@ -84,10 +84,10 @@ fn collectRoots(macho_file: *MachO, roots: *AtomTable) !void {
             if (object.getAtomIndexForSymbol(global.sym_index)) |atom_index| {
                 _ = try roots.getOrPut(atom_index);
 
-                log.debug("root(ATOM({d}, %{d}, {d}))", .{
+                log.debug("root(ATOM({d}, %{d}, {?d}))", .{
                     atom_index,
                     macho_file.getAtom(atom_index).sym_index,
-                    macho_file.getAtom(atom_index).file,
+                    macho_file.getAtom(atom_index).getFile(),
                 });
             }
             break;
@@ -123,10 +123,10 @@ fn collectRoots(macho_file: *MachO, roots: *AtomTable) !void {
             if (is_gc_root) {
                 try roots.putNoClobber(atom_index, {});
 
-                log.debug("root(ATOM({d}, %{d}, {d}))", .{
+                log.debug("root(ATOM({d}, %{d}, {?d}))", .{
                     atom_index,
                     macho_file.getAtom(atom_index).sym_index,
-                    macho_file.getAtom(atom_index).file,
+                    macho_file.getAtom(atom_index).getFile(),
                 });
             }
         }
@@ -146,7 +146,7 @@ fn markLive(
     const atom = macho_file.getAtom(atom_index);
     const sym_loc = atom.getSymbolWithLoc();
 
-    log.debug("mark(ATOM({d}, %{d}, {d}))", .{ atom_index, sym_loc.sym_index, sym_loc.file });
+    log.debug("mark(ATOM({d}, %{d}, {?d}))", .{ atom_index, sym_loc.sym_index, sym_loc.getFile() });
 
     alive.putAssumeCapacityNoClobber(atom_index, {});
 
@@ -181,10 +181,10 @@ fn markLive(
 
         const object = macho_file.objects.items[target.getFile().?];
         const target_atom_index = object.getAtomIndexForSymbol(target.sym_index).?;
-        log.debug("  following ATOM({d}, %{d}, {d})", .{
+        log.debug("  following ATOM({d}, %{d}, {?d})", .{
             target_atom_index,
             macho_file.getAtom(target_atom_index).sym_index,
-            macho_file.getAtom(target_atom_index).file,
+            macho_file.getAtom(target_atom_index).getFile(),
         });
 
         markLive(macho_file, target_atom_index, alive);
@@ -198,7 +198,11 @@ fn refersLive(macho_file: *MachO, atom_index: AtomIndex, alive: AtomTable) bool 
     const atom = macho_file.getAtom(atom_index);
     const sym_loc = atom.getSymbolWithLoc();
 
-    log.debug("refersLive(ATOM({d}, %{d}, {d}))", .{ atom_index, sym_loc.sym_index, sym_loc.file });
+    log.debug("refersLive(ATOM({d}, %{d}, {?d}))", .{
+        atom_index,
+        sym_loc.sym_index,
+        sym_loc.getFile(),
+    });
 
     const cpu_arch = macho_file.options.target.cpu_arch.?;
 
@@ -224,10 +228,10 @@ fn refersLive(macho_file: *MachO, atom_index: AtomIndex, alive: AtomTable) bool 
         };
         if (alive.contains(target_atom_index)) {
             if (alive.contains(target_atom_index)) {
-                log.debug("  refers live ATOM({d}, %{d}, {d})", .{
+                log.debug("  refers live ATOM({d}, %{d}, {?d})", .{
                     target_atom_index,
                     macho_file.getAtom(target_atom_index).sym_index,
-                    macho_file.getAtom(target_atom_index).file,
+                    macho_file.getAtom(target_atom_index).getFile(),
                 });
                 return true;
             }
@@ -292,10 +296,10 @@ fn prune(macho_file: *MachO, alive: AtomTable) void {
             const atom = macho_file.getAtom(atom_index);
             const sym_loc = atom.getSymbolWithLoc();
 
-            log.debug("prune(ATOM({d}, %{d}, {d}))", .{
+            log.debug("prune(ATOM({d}, %{d}, {?d}))", .{
                 atom_index,
                 sym_loc.sym_index,
-                sym_loc.file,
+                sym_loc.getFile(),
             });
             log.debug("  {s} in {s}", .{ macho_file.getSymbolName(sym_loc), object.name });
 

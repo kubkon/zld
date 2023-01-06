@@ -37,9 +37,9 @@ sym_index: u32,
 inner_sym_index: u32,
 inner_nsyms_trailing: u32,
 
-/// -1 means symbol defined by the linker.
-/// Otherwise, it is the index into appropriate object file.
-file: i32,
+/// 0 means symbol defined by the linker.
+/// Otherwise, it is the index into appropriate object file (indexing from 1).
+file: u32,
 
 /// Size and alignment of this atom
 /// Unlike in Elf, we need to store the size of this symbol as part of
@@ -58,16 +58,16 @@ pub const empty = Atom{
     .sym_index = 0,
     .inner_sym_index = 0,
     .inner_nsyms_trailing = 0,
-    .file = -1,
+    .file = 0,
     .size = 0,
     .alignment = 0,
     .prev_index = null,
     .next_index = null,
 };
 
-pub inline fn getFile(self: Atom) ?u31 {
-    if (self.file == -1) return null;
-    return @intCast(u31, self.file);
+pub inline fn getFile(self: Atom) ?u32 {
+    if (self.file == 0) return null;
+    return self.file - 1;
 }
 
 pub inline fn getSymbolWithLoc(self: Atom) SymbolWithLoc {
@@ -80,7 +80,7 @@ pub inline fn getSymbolWithLoc(self: Atom) SymbolWithLoc {
 const InnerSymIterator = struct {
     sym_index: u32,
     count: u32,
-    file: i32,
+    file: u32,
 
     pub fn next(it: *@This()) ?SymbolWithLoc {
         if (it.count == 0) return null;
@@ -466,7 +466,7 @@ pub fn getRelocTargetAddress(
     log.debug("    | target ATOM(%{d}, '{s}') in object({?})", .{
         target_atom.sym_index,
         macho_file.getSymbolName(target_atom.getSymbolWithLoc()),
-        target_atom.file,
+        target_atom.getFile(),
     });
     const target_sym = macho_file.getSymbol(target_atom.getSymbolWithLoc());
     assert(target_sym.n_desc != MachO.N_DEAD);
@@ -530,11 +530,11 @@ fn resolveRelocsArm64(
             .ARM64_RELOC_SUBTRACTOR => {
                 assert(subtractor == null);
 
-                log.debug("  RELA({s}) @ {x} => %{d} in object({d})", .{
+                log.debug("  RELA({s}) @ {x} => %{d} in object({?d})", .{
                     @tagName(rel_type),
                     rel.r_address,
                     rel.r_symbolnum,
-                    atom.file,
+                    atom.getFile(),
                 });
 
                 subtractor = parseRelocTarget(macho_file, atom_index, rel);
@@ -546,12 +546,12 @@ fn resolveRelocsArm64(
         const target = parseRelocTarget(macho_file, atom_index, rel);
         const rel_offset = @intCast(u32, rel.r_address - context.base_offset);
 
-        log.debug("  RELA({s}) @ {x} => %{d} ('{s}') in object({?})", .{
+        log.debug("  RELA({s}) @ {x} => %{d} ('{s}') in object({?d})", .{
             @tagName(rel_type),
             rel.r_address,
             target.sym_index,
             macho_file.getSymbolName(target),
-            target.file,
+            target.getFile(),
         });
 
         const source_addr = blk: {
@@ -576,9 +576,9 @@ fn resolveRelocsArm64(
                 } else target;
                 log.debug("  source {s} (object({?})), target {s} (object({?}))", .{
                     macho_file.getSymbolName(atom.getSymbolWithLoc()),
-                    atom.file,
+                    atom.getFile(),
                     macho_file.getSymbolName(target),
-                    macho_file.getAtom(getRelocTargetAtomIndex(macho_file, target, false).?).file,
+                    macho_file.getAtom(getRelocTargetAtomIndex(macho_file, target, false).?).getFile(),
                 });
 
                 const displacement = if (calcPcRelativeDisplacementArm64(
@@ -809,11 +809,11 @@ fn resolveRelocsX86(
             .X86_64_RELOC_SUBTRACTOR => {
                 assert(subtractor == null);
 
-                log.debug("  RELA({s}) @ {x} => %{d} in object({d})", .{
+                log.debug("  RELA({s}) @ {x} => %{d} in object({?d})", .{
                     @tagName(rel_type),
                     rel.r_address,
                     rel.r_symbolnum,
-                    atom.file,
+                    atom.getFile(),
                 });
 
                 subtractor = parseRelocTarget(macho_file, atom_index, rel);
@@ -825,11 +825,11 @@ fn resolveRelocsX86(
         const target = parseRelocTarget(macho_file, atom_index, rel);
         const rel_offset = @intCast(u32, rel.r_address - context.base_offset);
 
-        log.debug("  RELA({s}) @ {x} => %{d} in object({?})", .{
+        log.debug("  RELA({s}) @ {x} => %{d} in object({?d})", .{
             @tagName(rel_type),
             rel.r_address,
             target.sym_index,
-            target.file,
+            target.getFile(),
         });
 
         const source_addr = blk: {

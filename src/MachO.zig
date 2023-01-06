@@ -124,12 +124,12 @@ pub const SymbolWithLoc = extern struct {
     // Index into the respective symbol table.
     sym_index: u32,
 
-    // -1 means it's a synthetic global.
-    file: i32 = -1,
+    // 0 means it's a synthetic global.
+    file: u32 = 0,
 
-    pub inline fn getFile(self: SymbolWithLoc) ?u31 {
-        if (self.file == -1) return null;
-        return @intCast(u31, self.file);
+    pub inline fn getFile(self: SymbolWithLoc) ?u32 {
+        if (self.file == 0) return null;
+        return self.file - 1;
     }
 
     pub inline fn eql(self: SymbolWithLoc, other: SymbolWithLoc) bool {
@@ -1520,7 +1520,7 @@ fn resolveSymbolsInObject(self: *MachO, object_id: u16, resolver: *SymbolResolve
             continue;
         }
 
-        const sym_loc = SymbolWithLoc{ .sym_index = sym_index, .file = object_id };
+        const sym_loc = SymbolWithLoc{ .sym_index = sym_index, .file = object_id + 1 };
 
         const global_index = resolver.table.get(sym_name) orelse {
             const gpa = self.base.allocator;
@@ -1965,7 +1965,7 @@ fn writeAtoms(self: *MachO) !void {
             log.debug("  (adding ATOM(%{d}, '{s}') from object({?}) to buffer)", .{
                 atom.sym_index,
                 self.getSymbolName(atom.getSymbolWithLoc()),
-                atom.file,
+                atom.getFile(),
             });
             if (padding_size > 0) {
                 log.debug("    (with padding {x})", .{padding_size});
@@ -3989,7 +3989,7 @@ fn logSymtab(self: *MachO) void {
             sym.n_value,
             sym.n_sect,
             logSymAttributes(sym, &buf),
-            global.file,
+            global.getFile(),
         });
     }
 
@@ -4024,7 +4024,7 @@ fn logSymtab(self: *MachO) void {
                 i,
                 atom_sym.n_value,
                 entry.target.sym_index,
-                entry.target.file,
+                entry.target.getFile(),
                 logSymAttributes(target_sym, buf[0..4]),
             });
         }
@@ -4107,7 +4107,7 @@ pub fn logAtom(self: *MachO, atom_index: AtomIndex, logger: anytype) void {
         sym.n_value,
         atom.size,
         atom.alignment,
-        atom.file,
+        atom.getFile(),
         sym.n_sect,
     });
 
