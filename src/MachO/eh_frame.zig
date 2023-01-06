@@ -42,7 +42,7 @@ pub fn scanRelocs(macho_file: *MachO) !void {
     }
 }
 
-pub fn calcEhFrameSectionSize(macho_file: *MachO) void {
+pub fn calcSectionSize(macho_file: *MachO) void {
     const sect_id = macho_file.getSectionByName("__TEXT", "__eh_frame") orelse return;
     const sect = &macho_file.sections.items(.header)[sect_id];
     sect.size = 0;
@@ -79,11 +79,6 @@ pub fn write(macho_file: *MachO, unwind_info: *UnwindInfo) !void {
         var eh_frame_offset: u32 = 0;
 
         for (object.eh_frame_records_lookup.keys()) |atom_index| {
-            const record_id = unwind_info.records_lookup.get(atom_index) orelse continue; // TODO are we gonna tombstone or remove?
-            const record = &unwind_info.records.items[record_id];
-            var enc = try macho.UnwindEncodingArm64.fromU32(record.compactUnwindEncoding);
-            assert(enc == .dwarf);
-
             const fde_record_offset = object.eh_frame_records_lookup.get(atom_index).?; // TODO turn into an error
             eh_it.seekTo(fde_record_offset);
             const source_fde_record = (try eh_it.next()).?;
@@ -115,18 +110,25 @@ pub fn write(macho_file: *MachO, unwind_info: *UnwindInfo) !void {
             });
             eh_records.putAssumeCapacityNoClobber(eh_frame_offset, fde_record);
 
-            enc.dwarf.section_offset = @intCast(u24, eh_frame_offset);
+            if (unwind_info.records_lookup.get(atom_index)) |record_id| {
+                const record = &unwind_info.records.items[record_id];
+                assert(try UnwindInfo.isDwarf(record.*));
+                var enc = macho.UnwindEncodingArm64.fromU32(record.compactUnwindEncoding) catch
+                    unreachable;
+                enc.dwarf.section_offset = @intCast(u24, eh_frame_offset);
+                record.compactUnwindEncoding = enc.toU32();
 
-            const cie_record = eh_records.get(eh_frame_offset + 4 - fde_record.getCiePointer()).?;
-            const lsda_ptr = try fde_record.getLsdaPointer(cie_record, .{
-                .base_addr = sect.addr,
-                .base_offset = eh_frame_offset,
-            });
-            if (lsda_ptr) |ptr| {
-                record.lsda = ptr - seg.vmaddr;
+                const cie_record = eh_records.get(
+                    eh_frame_offset + 4 - fde_record.getCiePointer(),
+                ).?;
+                const lsda_ptr = try fde_record.getLsdaPointer(cie_record, .{
+                    .base_addr = sect.addr,
+                    .base_offset = eh_frame_offset,
+                });
+                if (lsda_ptr) |ptr| {
+                    record.lsda = ptr - seg.vmaddr;
+                }
             }
-
-            record.compactUnwindEncoding = enc.toU32();
             eh_frame_offset += fde_record.getSize();
         }
     }
