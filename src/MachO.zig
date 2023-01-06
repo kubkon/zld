@@ -379,15 +379,19 @@ pub fn flush(self: *MachO) !void {
         }
     }
 
-    var unwind_info = UnwindInfo{ .gpa = self.base.allocator };
-    defer unwind_info.deinit();
-    try unwind_info.scanRelocs(self);
+    try eh_frame.scanRelocs(self);
+    try UnwindInfo.scanRelocs(self);
 
     try self.createDyldStubBinderGotAtom();
 
     try self.calcSectionSizes();
-    try UnwindInfo.calcUnwindInfoSectionSizes(self);
+
+    eh_frame.calcEhFrameSectionSize(self);
+    var unwind_info = UnwindInfo{ .gpa = self.base.allocator };
+    defer unwind_info.deinit();
     try unwind_info.collect(self);
+    try unwind_info.calcRequiredSize(self);
+
     try self.pruneAndSortSections();
     try self.createSegments();
     try self.allocateSegments();

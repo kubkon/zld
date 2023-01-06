@@ -35,15 +35,9 @@ pub fn deinit(info: *UnwindInfo) void {
     info.personalities.deinit(info.gpa);
 }
 
-pub fn scanRelocs(info: UnwindInfo, macho_file: *MachO) !void {
+pub fn scanRelocs(macho_file: *MachO) !void {
     for (macho_file.objects.items) |*object, object_id| {
         const unwind_records = object.getUnwindRecords();
-
-        var cies = std.AutoHashMap(u32, void).init(info.gpa);
-        defer cies.deinit();
-
-        var it = object.getEhFrameRecordsIterator();
-
         for (object.exec_atoms.items) |atom_index| {
             const record_id = object.unwind_records_lookup.get(atom_index) orelse continue;
             const record = unwind_records[record_id];
@@ -64,23 +58,7 @@ pub fn scanRelocs(info: UnwindInfo, macho_file: *MachO) !void {
                     );
                     try Atom.addGotEntry(macho_file, target);
                 },
-                .dwarf => {
-                    const fde_offset = object.eh_frame_records_lookup.get(atom_index).?; // TODO turn into an error
-                    it.seekTo(fde_offset);
-                    const fde = (try it.next()).?;
-
-                    const cie_ptr = fde.getCiePointer();
-                    const cie_offset = fde_offset + 4 - cie_ptr;
-
-                    if (!cies.contains(cie_offset)) {
-                        try cies.putNoClobber(cie_offset, {});
-                        it.seekTo(cie_offset);
-                        const cie = (try it.next()).?;
-                        try cie.scanRelocs(macho_file, @intCast(u32, object_id), cie_offset);
-                    }
-
-                    try fde.scanRelocs(macho_file, @intCast(u32, object_id), fde_offset);
-                },
+                .dwarf => {}, // Handled separately
             }
         }
     }
@@ -203,7 +181,16 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
     }
 
     // TODO dedup records here
-    // TODO calculate required __TEXT,__unwind_info size
+}
+
+pub fn calcRequiredSize(info: UnwindInfo, macho_file: *MachO) !void {
+    _ = info;
+    const sect_id = macho_file.getSectionByName("__TEXT", "__unwind_info") orelse return;
+    const sect = &macho_file.sections.items(.header)[sect_id];
+
+    // TODO finish this!
+    sect.size = 0x1000;
+    sect.@"align" = 2;
 }
 
 pub fn write(info: *UnwindInfo, macho_file: *MachO) !void {
@@ -506,24 +493,4 @@ fn getLsdaReloc(macho_file: *MachO, object_id: u32, record_id: usize) ?macho.rel
         if (isLsda(record_id, rel)) return rel;
     }
     return null;
-}
-
-// TODO just a temp; remove!
-pub fn calcUnwindInfoSectionSizes(macho_file: *MachO) !void {
-    var sect_id = macho_file.getSectionByName("__TEXT", "__unwind_info") orelse return;
-    var sect = &macho_file.sections.items(.header)[sect_id];
-
-    // TODO finish this!
-    sect.size = 0x1000;
-    sect.@"align" = 2;
-
-    sect_id = macho_file.getSectionByName("__TEXT", "__eh_frame") orelse return;
-    sect = &macho_file.sections.items(.header)[sect_id];
-    sect.size = 0;
-
-    for (macho_file.objects.items) |object| {
-        const source_sect = object.eh_frame_sect orelse continue;
-        sect.size += source_sect.size;
-    }
-    sect.@"align" = 2;
 }

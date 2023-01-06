@@ -638,18 +638,13 @@ fn cacheRelocs(self: *Object, macho_file: *MachO, atom_index: AtomIndex) !void {
 }
 
 fn parseEhFrameSection(self: *Object, macho_file: *MachO, object_id: u32) !void {
+    const sect = self.eh_frame_sect orelse return;
+
     log.debug("parsing __TEXT,__eh_frame section", .{});
 
     const gpa = macho_file.base.allocator;
-
-    if (self.eh_frame_sect == null) {
-        log.err("missing __TEXT,__eh_frame section", .{});
-        log.err("  in object {s}", .{self.name});
-        return error.MissingEhFrameSection;
-    }
-
     _ = try macho_file.initSection("__TEXT", "__eh_frame", .{});
-    const relocs = self.getRelocs(self.eh_frame_sect.?);
+    const relocs = self.getRelocs(sect);
 
     var it = self.getEhFrameRecordsIterator();
     var record_count: u32 = 0;

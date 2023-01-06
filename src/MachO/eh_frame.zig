@@ -13,6 +13,47 @@ const Atom = @import("Atom.zig");
 const MachO = @import("../MachO.zig");
 const UnwindInfo = @import("UnwindInfo.zig");
 
+pub fn scanRelocs(macho_file: *MachO) !void {
+    const gpa = macho_file.base.allocator;
+
+    for (macho_file.objects.items) |*object, object_id| {
+        var cies = std.AutoHashMap(u32, void).init(gpa);
+        defer cies.deinit();
+
+        var it = object.getEhFrameRecordsIterator();
+
+        for (object.exec_atoms.items) |atom_index| {
+            const fde_offset = object.eh_frame_records_lookup.get(atom_index) orelse continue;
+            it.seekTo(fde_offset);
+            const fde = (try it.next()).?;
+
+            const cie_ptr = fde.getCiePointer();
+            const cie_offset = fde_offset + 4 - cie_ptr;
+
+            if (!cies.contains(cie_offset)) {
+                try cies.putNoClobber(cie_offset, {});
+                it.seekTo(cie_offset);
+                const cie = (try it.next()).?;
+                try cie.scanRelocs(macho_file, @intCast(u32, object_id), cie_offset);
+            }
+
+            try fde.scanRelocs(macho_file, @intCast(u32, object_id), fde_offset);
+        }
+    }
+}
+
+pub fn calcEhFrameSectionSize(macho_file: *MachO) void {
+    const sect_id = macho_file.getSectionByName("__TEXT", "__eh_frame") orelse return;
+    const sect = &macho_file.sections.items(.header)[sect_id];
+    sect.size = 0;
+
+    for (macho_file.objects.items) |object| {
+        const source_sect = object.eh_frame_sect orelse continue;
+        sect.size += source_sect.size;
+    }
+    sect.@"align" = 2;
+}
+
 pub fn write(macho_file: *MachO, unwind_info: *UnwindInfo) !void {
     const sect_id = macho_file.getSectionByName("__TEXT", "__eh_frame") orelse return;
     const sect = macho_file.sections.items(.header)[sect_id];
