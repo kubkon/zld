@@ -340,6 +340,7 @@ pub fn splitIntoAtoms(self: *Object, macho_file: *MachO, object_id: u32) !void {
     log.debug("splitting object({d}, {s}) into atoms", .{ object_id, self.name });
 
     try self.splitRegularSections(macho_file, object_id);
+    try self.parseEhFrameSection(macho_file, object_id);
     try self.parseUnwindInfo(macho_file, object_id);
 }
 
@@ -636,6 +637,55 @@ fn cacheRelocs(self: *Object, macho_file: *MachO, atom_index: AtomIndex) !void {
     } else filterRelocs(relocs, 0, atom.size);
 }
 
+fn parseEhFrameSection(self: *Object, macho_file: *MachO, object_id: u32) !void {
+    log.debug("parsing __TEXT,__eh_frame section", .{});
+
+    const gpa = macho_file.base.allocator;
+
+    if (self.eh_frame_sect == null) {
+        log.err("missing __TEXT,__eh_frame section", .{});
+        log.err("  in object {s}", .{self.name});
+        return error.MissingEhFrameSection;
+    }
+
+    _ = try macho_file.initSection("__TEXT", "__eh_frame", .{});
+    const relocs = self.getRelocs(self.eh_frame_sect.?);
+
+    var it = self.getEhFrameRecordsIterator();
+    var record_count: u32 = 0;
+    while (try it.next()) |_| {
+        record_count += 1;
+    }
+
+    try self.eh_frame_relocs_lookup.ensureTotalCapacity(gpa, record_count);
+    try self.eh_frame_records_lookup.ensureTotalCapacity(gpa, record_count);
+
+    it.reset();
+
+    while (try it.next()) |record| {
+        const offset = it.pos - record.getSize();
+        const rel_pos = filterRelocs(relocs, offset, offset + record.getSize());
+        self.eh_frame_relocs_lookup.putAssumeCapacityNoClobber(offset, rel_pos);
+
+        if (record.tag == .fde) {
+            assert(rel_pos.len > 0); // TODO convert to an error as the FDE eh frame is malformed
+            // Find function symbol that this record describes
+            const rel = relocs[rel_pos.start..][rel_pos.len - 1];
+            const target = UnwindInfo.parseRelocTarget(
+                macho_file,
+                object_id,
+                rel,
+                it.data[offset..],
+                @intCast(i32, offset),
+            );
+            log.debug("FDE at offset {x} tracks {s}", .{ offset, macho_file.getSymbolName(target) });
+            assert(target.getFile() == object_id);
+            const atom_index = self.getAtomIndexForSymbol(target.sym_index).?;
+            self.eh_frame_records_lookup.putAssumeCapacityNoClobber(atom_index, offset);
+        }
+    }
+}
+
 fn parseUnwindInfo(self: *Object, macho_file: *MachO, object_id: u32) !void {
     const sect = self.unwind_info_sect orelse return;
 
@@ -659,36 +709,6 @@ fn parseUnwindInfo(self: *Object, macho_file: *MachO, object_id: u32) !void {
             log.err("missing __TEXT,__eh_frame section", .{});
             log.err("  in object {s}", .{self.name});
             return error.MissingEhFrameSection;
-        }
-
-        _ = try macho_file.initSection("__TEXT", "__eh_frame", .{});
-        const relocs = self.getRelocs(self.eh_frame_sect.?);
-
-        try self.eh_frame_relocs_lookup.ensureTotalCapacity(gpa, 2 * unwind_records.len);
-        try self.eh_frame_records_lookup.ensureTotalCapacity(gpa, @intCast(u32, self.exec_atoms.items.len));
-
-        var it = self.getEhFrameRecordsIterator();
-        while (try it.next()) |record| {
-            const offset = it.pos - record.getSize();
-            const rel_pos = filterRelocs(relocs, offset, offset + record.getSize());
-            self.eh_frame_relocs_lookup.putAssumeCapacityNoClobber(offset, rel_pos);
-
-            if (record.tag == .fde) {
-                assert(rel_pos.len > 0); // TODO convert to an error as the FDE eh frame is malformed
-                // Find function symbol that this record describes
-                const rel = relocs[rel_pos.start..][rel_pos.len - 1];
-                const target = UnwindInfo.parseRelocTarget(
-                    macho_file,
-                    object_id,
-                    rel,
-                    it.data[offset..],
-                    @intCast(i32, offset),
-                );
-                log.debug("FDE at offset {x} tracks {s}", .{ offset, macho_file.getSymbolName(target) });
-                assert(target.getFile() == object_id);
-                const atom_index = self.getAtomIndexForSymbol(target.sym_index).?;
-                self.eh_frame_records_lookup.putAssumeCapacityNoClobber(atom_index, offset);
-            }
         }
     }
 
