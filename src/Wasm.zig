@@ -528,24 +528,30 @@ fn resolveSymbolsInObject(wasm: *Wasm, object_index: u16) !void {
             return error.SymbolMismatchingType;
         }
 
-        if (existing_sym.isUndefined() and symbol.isUndefined() and symbol.tag == .function) {
-            const file_index = existing_loc.file.?;
-            const obj = wasm.objects.items[file_index];
-            const name_index = obj.findImport(symbol.tag.externalType(), existing_sym.index).module_name;
-            const existing_name = obj.string_table.get(name_index);
+        // only verify module/import name for function symbols
+        if (existing_sym.isUndefined() and symbol.isUndefined()) {
+            if (symbol.tag == .function) {
+                const file_index = existing_loc.file.?;
+                const obj = wasm.objects.items[file_index];
+                const name_index = obj.findImport(symbol.tag.externalType(), existing_sym.index).module_name;
+                const existing_name = obj.string_table.get(name_index);
 
-            const module_index = object.findImport(symbol.tag.externalType(), symbol.index).module_name;
-            const module_name = object.string_table.get(module_index);
-            if (!mem.eql(u8, existing_name, module_name)) {
-                log.err("symbol '{s}' module name mismatch. Expected '{s}', but found '{s}'", .{
-                    sym_name,
-                    existing_name,
-                    module_name,
-                });
-                log.err("  first definition in '{s}'", .{existing_file_path});
-                log.err("  next definition in '{s}'", .{object.name});
-                return error.ModuleNameMismatch;
+                const module_index = object.findImport(symbol.tag.externalType(), symbol.index).module_name;
+                const module_name = object.string_table.get(module_index);
+                if (!mem.eql(u8, existing_name, module_name)) {
+                    log.err("symbol '{s}' module name mismatch. Expected '{s}', but found '{s}'", .{
+                        sym_name,
+                        existing_name,
+                        module_name,
+                    });
+                    log.err("  first definition in '{s}'", .{existing_file_path});
+                    log.err("  next definition in '{s}'", .{object.name});
+                    return error.ModuleNameMismatch;
+                }
             }
+
+            try wasm.discarded.put(wasm.base.allocator, location, existing_loc);
+            continue; // both undefined so skip overwriting existing symbol and discard the new symbol
         }
 
         if (existing_sym.tag == .global) {
@@ -1278,7 +1284,10 @@ fn setupStart(wasm: *Wasm) !void {
         return error.MissingSymbol;
     };
 
-    const symbol_with_loc: SymbolWithLoc = wasm.global_symbols.get(entry_name_offset).?;
+    const symbol_with_loc: SymbolWithLoc = wasm.global_symbols.get(entry_name_offset) orelse {
+        log.err("Entry symbol '{s}' is not a global symbol", .{entry_name});
+        return error.MissingSymbol;
+    };
     const symbol = symbol_with_loc.getSymbol(wasm);
     if (symbol.tag != .function) {
         log.err("Entry symbol '{s}' is not a function", .{entry_name});
