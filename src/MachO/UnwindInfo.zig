@@ -27,17 +27,18 @@ records_lookup: std.AutoHashMapUnmanaged(AtomIndex, u32) = .{},
 
 /// List of all personalities referenced by either unwind info entries
 /// or __eh_frame entries.
-personalities: std.ArrayListUnmanaged(MachO.SymbolWithLoc) = .{},
+personalities: [max_personalities]MachO.SymbolWithLoc = undefined,
+personalities_count: u2 = 0,
 
 common_encodings: [max_common_encodings]macho.compact_unwind_encoding_t = undefined,
 common_encodings_count: u7 = 0,
 
+const max_personalities = 3;
 const max_common_encodings = 127;
 
 pub fn deinit(info: *UnwindInfo) void {
     info.records.deinit(info.gpa);
     info.records_lookup.deinit(info.gpa);
-    info.personalities.deinit(info.gpa);
 }
 
 pub fn scanRelocs(macho_file: *MachO) !void {
@@ -70,8 +71,6 @@ pub fn scanRelocs(macho_file: *MachO) !void {
 }
 
 pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
-    try info.personalities.ensureTotalCapacityPrecise(info.gpa, 3);
-
     // TODO handle dead stripping
     for (macho_file.objects.items) |*object, object_id| {
         const unwind_records = object.getUnwindRecords();
@@ -105,8 +104,9 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
                                 @intCast(i32, record_id * @sizeOf(macho.compact_unwind_entry)),
                             );
                             const personality_index = info.getPersonalityFunction(target) orelse inner: {
-                                const personality_index = @intCast(u2, info.personalities.items.len);
-                                info.personalities.appendAssumeCapacity(target);
+                                const personality_index = info.personalities_count;
+                                info.personalities[personality_index] = target;
+                                info.personalities_count += 1;
                                 break :inner personality_index;
                             };
 
@@ -144,8 +144,9 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
                             cie_offset,
                         )) |target| {
                             const personality_index = info.getPersonalityFunction(target) orelse inner: {
-                                const personality_index = @intCast(u2, info.personalities.items.len);
-                                info.personalities.appendAssumeCapacity(target);
+                                const personality_index = info.personalities_count;
+                                info.personalities[personality_index] = target;
+                                info.personalities_count += 1;
                                 break :inner personality_index;
                             };
 
@@ -257,17 +258,16 @@ pub fn write(info: *UnwindInfo, macho_file: *MachO) !void {
         records.appendAssumeCapacity(rec);
     }
 
-    var personalities = try std.ArrayList(u32).initCapacity(info.gpa, 3);
-    defer personalities.deinit();
+    var personalities: [max_personalities]u32 = undefined;
 
-    for (info.personalities.items) |target| {
+    for (info.personalities[0..info.personalities_count]) |target, i| {
         const atom_index = macho_file.getGotAtomIndexForSymbol(target).?;
         const atom = macho_file.getAtom(atom_index);
         const sym = macho_file.getSymbol(atom.getSymbolWithLoc());
-        personalities.appendAssumeCapacity(@intCast(u32, sym.n_value - seg.vmaddr));
+        personalities[i] = @intCast(u32, sym.n_value - seg.vmaddr);
     }
 
-    for (personalities.items) |offset, i| {
+    for (personalities[0..info.personalities_count]) |offset, i| {
         log.debug("Personalities:", .{});
         log.debug("  {d}: 0x{x}", .{ i, offset });
     }
@@ -276,7 +276,7 @@ pub fn write(info: *UnwindInfo, macho_file: *MachO) !void {
         // Finalize missing address values
         rec.rangeStart += text_sect.addr - seg.vmaddr;
         if (rec.personalityFunction > 0) {
-            rec.personalityFunction = personalities.items[rec.personalityFunction - 1];
+            rec.personalityFunction = personalities[rec.personalityFunction - 1];
         }
 
         if (rec.compactUnwindEncoding > 0) {
@@ -313,7 +313,7 @@ pub fn write(info: *UnwindInfo, macho_file: *MachO) !void {
     const common_encodings_offset: u32 = @sizeOf(macho.unwind_info_section_header);
     const common_encodings_count: u32 = info.common_encodings_count;
     const personalities_offset: u32 = common_encodings_offset + common_encodings_count * @sizeOf(u32);
-    const personalities_count: u32 = @intCast(u32, personalities.items.len);
+    const personalities_count: u32 = info.personalities_count;
     const indexes_offset: u32 = personalities_offset + personalities_count * @sizeOf(u32);
     const indexes_count: u32 = 2;
 
@@ -326,7 +326,7 @@ pub fn write(info: *UnwindInfo, macho_file: *MachO) !void {
         .indexCount = indexes_count,
     });
     try writer.writeAll(mem.sliceAsBytes(info.common_encodings[0..info.common_encodings_count]));
-    try writer.writeAll(mem.sliceAsBytes(personalities.items));
+    try writer.writeAll(mem.sliceAsBytes(personalities[0..info.personalities_count]));
 
     const first_record = records.items[0];
     const last_record = records.items[records.items.len - 1];
@@ -508,8 +508,12 @@ fn getPersonalityFunctionReloc(
 }
 
 fn getPersonalityFunction(info: UnwindInfo, global_index: MachO.SymbolWithLoc) ?u2 {
-    for (info.personalities.items) |val, i| {
-        if (val.eql(global_index)) return @intCast(u2, i);
+    comptime var index: u2 = 0;
+    inline while (index < max_personalities) : (index += 1) {
+        if (index >= info.personalities_count) return null;
+        if (info.personalities[index].eql(global_index)) {
+            return index;
+        }
     }
     return null;
 }
