@@ -29,6 +29,11 @@ records_lookup: std.AutoHashMapUnmanaged(AtomIndex, u32) = .{},
 /// or __eh_frame entries.
 personalities: std.ArrayListUnmanaged(MachO.SymbolWithLoc) = .{},
 
+common_encodings: [max_common_encodings]macho.compact_unwind_encoding_t = undefined,
+common_encodings_count: u7 = 0,
+
+const max_common_encodings = 127;
+
 pub fn deinit(info: *UnwindInfo) void {
     info.records.deinit(info.gpa);
     info.records_lookup.deinit(info.gpa);
@@ -179,14 +184,47 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
         }
     }
 
-    for (info.records.items) |record, i| {
+    // Calculate common encodings
+    const CommonEncWithCount = struct {
+        enc: macho.compact_unwind_encoding_t,
+        count: u8,
+
+        fn greaterThan(ctx: void, lhs: @This(), rhs: @This()) bool {
+            _ = ctx;
+            return lhs.count > rhs.count;
+        }
+    };
+
+    var common_encodings_counts = std.AutoArrayHashMap(
+        macho.compact_unwind_encoding_t,
+        CommonEncWithCount,
+    ).init(info.gpa);
+    defer common_encodings_counts.deinit();
+
+    for (info.records.items) |record| {
         if (isNull(record)) continue;
-        log.debug("Unwind record at offset 0x{x}", .{i * @sizeOf(macho.compact_unwind_entry)});
-        log.debug("  start: 0x{x}", .{record.rangeStart});
-        log.debug("  length: 0x{x}", .{record.rangeLength});
-        log.debug("  compact encoding: 0x{x:0>8}", .{record.compactUnwindEncoding});
-        log.debug("  personality: 0x{x}", .{record.personalityFunction});
-        log.debug("  LSDA: 0x{x}", .{record.lsda});
+        if (try isDwarf(record)) continue;
+        const enc = record.compactUnwindEncoding;
+        const gop = try common_encodings_counts.getOrPut(enc);
+        if (!gop.found_existing) {
+            gop.value_ptr.* = .{
+                .enc = enc,
+                .count = 0,
+            };
+        }
+        gop.value_ptr.count += 1;
+    }
+
+    var slice = common_encodings_counts.values();
+    std.sort.sort(CommonEncWithCount, slice, {}, CommonEncWithCount.greaterThan);
+
+    var i: u7 = 0;
+    while (i < max_common_encodings) : (i += 1) {
+        if (i >= slice.len) break;
+        if (slice[i].count < 2) continue;
+        info.common_encodings[i] = slice[i].enc;
+        info.common_encodings_count += 1;
+        log.debug("adding common encoding: {d} => 0x{x:0>8}", .{ i, info.common_encodings[i] });
     }
 }
 
@@ -241,7 +279,6 @@ pub fn write(info: *UnwindInfo, macho_file: *MachO) !void {
             rec.personalityFunction = personalities.items[rec.personalityFunction - 1];
         }
 
-        // TODO clean this up in macho.zig
         if (rec.compactUnwindEncoding > 0) {
             const enc = try macho.UnwindEncodingArm64.fromU32(rec.compactUnwindEncoding);
             switch (enc) {
@@ -266,30 +303,6 @@ pub fn write(info: *UnwindInfo, macho_file: *MachO) !void {
         log.debug("  LSDA: 0x{x}", .{record.lsda});
     }
 
-    // Find common encodings
-    var common_encodings_counts = std.AutoHashMap(u32, u32).init(info.gpa);
-    defer common_encodings_counts.deinit();
-
-    for (records.items) |record| {
-        const gop = try common_encodings_counts.getOrPut(record.compactUnwindEncoding);
-        if (!gop.found_existing) {
-            gop.value_ptr.* = 0;
-        }
-        gop.value_ptr.* += 1;
-    }
-
-    var common_encodings = std.AutoArrayHashMap(u32, void).init(info.gpa);
-    defer common_encodings.deinit();
-    log.debug("Common encodings:", .{});
-    {
-        var it = common_encodings_counts.iterator();
-        while (it.next()) |entry| {
-            if (entry.value_ptr.* == 1) continue;
-            try common_encodings.putNoClobber(entry.key_ptr.*, {});
-            log.debug("  {d}: 0x{x:0>8}", .{ common_encodings.getIndex(entry.key_ptr.*).?, entry.key_ptr.* });
-        }
-    }
-
     // TODO how do I work out how many records can go in a single page?
     // I think we might need to partition the address space into pages
     var buffer = std.ArrayList(u8).init(info.gpa);
@@ -298,7 +311,7 @@ pub fn write(info: *UnwindInfo, macho_file: *MachO) !void {
     const writer = cwriter.writer();
 
     const common_encodings_offset: u32 = @sizeOf(macho.unwind_info_section_header);
-    const common_encodings_count: u32 = @intCast(u32, common_encodings.count());
+    const common_encodings_count: u32 = info.common_encodings_count;
     const personalities_offset: u32 = common_encodings_offset + common_encodings_count * @sizeOf(u32);
     const personalities_count: u32 = @intCast(u32, personalities.items.len);
     const indexes_offset: u32 = personalities_offset + personalities_count * @sizeOf(u32);
@@ -312,7 +325,7 @@ pub fn write(info: *UnwindInfo, macho_file: *MachO) !void {
         .indexSectionOffset = indexes_offset,
         .indexCount = indexes_count,
     });
-    try writer.writeAll(mem.sliceAsBytes(common_encodings.keys()));
+    try writer.writeAll(mem.sliceAsBytes(info.common_encodings[0..info.common_encodings_count]));
     try writer.writeAll(mem.sliceAsBytes(personalities.items));
 
     const first_record = records.items[0];
@@ -361,7 +374,7 @@ pub fn write(info: *UnwindInfo, macho_file: *MachO) !void {
     log.debug("Page encodings", .{});
     for (records.items) |record| {
         if (isNull(record)) continue;
-        if (common_encodings.contains(record.compactUnwindEncoding)) continue;
+        if (info.getCommonEncoding(record.compactUnwindEncoding) != null) continue;
         try page_encodings.putNoClobber(record.compactUnwindEncoding, {});
         log.debug("  {d}: 0x{x:0>8}", .{
             page_encodings.getIndex(record.compactUnwindEncoding).?,
@@ -388,10 +401,10 @@ pub fn write(info: *UnwindInfo, macho_file: *MachO) !void {
         if (isNull(record)) continue;
         const compressed = macho.UnwindInfoCompressedEntry{
             .funcOffset = @intCast(u24, record.rangeStart - first_record.rangeStart),
-            .encodingIndex = if (common_encodings.getIndex(record.compactUnwindEncoding)) |id|
+            .encodingIndex = if (info.getCommonEncoding(record.compactUnwindEncoding)) |id|
                 @intCast(u8, id)
             else
-                @intCast(u8, common_encodings.count() + page_encodings.getIndex(record.compactUnwindEncoding).?),
+                @intCast(u8, info.common_encodings_count + page_encodings.getIndex(record.compactUnwindEncoding).?),
         };
         log.debug("  {d}: {x}, enc({d}) => {x}, {}", .{
             i,
@@ -541,4 +554,15 @@ inline fn nullRecord() macho.compact_unwind_entry {
         .personalityFunction = 0,
         .lsda = 0,
     };
+}
+
+fn getCommonEncoding(info: UnwindInfo, enc: macho.compact_unwind_encoding_t) ?u7 {
+    comptime var index: u7 = 0;
+    inline while (index < max_common_encodings) : (index += 1) {
+        if (index >= info.common_encodings_count) return null;
+        if (info.common_encodings[index] == enc) {
+            return index;
+        }
+    }
+    return null;
 }
