@@ -30,11 +30,16 @@ records_lookup: std.AutoHashMapUnmanaged(AtomIndex, u32) = .{},
 personalities: [max_personalities]MachO.SymbolWithLoc = undefined,
 personalities_count: u2 = 0,
 
+/// List of common encodings sorted in descending order with the most common first.
 common_encodings: [max_common_encodings]macho.compact_unwind_encoding_t = undefined,
 common_encodings_count: u7 = 0,
 
 const max_personalities = 3;
 const max_common_encodings = 127;
+const max_second_level_page_bytes = 0x1000;
+const max_second_level_page_words = max_second_level_page_bytes / @sizeOf(u32);
+const max_regular_second_level_entries = (max_second_level_page_bytes - @sizeOf(macho.unwind_info_regular_second_level_page_header)) / @sizeOf(macho.unwind_info_regular_second_level_entry);
+const max_compressed_second_level_entries = (max_second_level_page_bytes - @sizeOf(macho.unwind_info_compressed_second_level_page_header)) / @sizeOf(u32);
 
 pub fn deinit(info: *UnwindInfo) void {
     info.records.deinit(info.gpa);
@@ -71,17 +76,23 @@ pub fn scanRelocs(macho_file: *MachO) !void {
 }
 
 pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
+    var records = std.ArrayList(macho.compact_unwind_entry).init(info.gpa);
+    defer records.deinit();
+
+    var atom_indexes = std.ArrayList(AtomIndex).init(info.gpa);
+    defer atom_indexes.deinit();
+
+    var cies = std.AutoHashMap(u32, void).init(info.gpa);
+    defer cies.deinit();
+
     // TODO handle dead stripping
     for (macho_file.objects.items) |*object, object_id| {
         const unwind_records = object.getUnwindRecords();
 
         // Contents of unwind records does not have to cover all symbol in executable section
         // so we need insert them ourselves.
-        try info.records.ensureUnusedCapacity(info.gpa, object.exec_atoms.items.len);
-        try info.records_lookup.ensureUnusedCapacity(info.gpa, @intCast(u32, object.exec_atoms.items.len));
-
-        var cies = std.AutoHashMap(u32, void).init(info.gpa);
-        defer cies.deinit();
+        try records.ensureUnusedCapacity(object.exec_atoms.items.len);
+        try atom_indexes.ensureUnusedCapacity(object.exec_atoms.items.len);
 
         var it = object.getEhFrameRecordsIterator();
 
@@ -164,25 +175,42 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
             record.rangeStart = sym.n_value;
             record.rangeLength = @intCast(u32, atom.size);
 
-            const record_id = @intCast(u32, info.records.items.len);
-            info.records.appendAssumeCapacity(record);
-            info.records_lookup.putAssumeCapacityNoClobber(atom_index, record_id);
+            records.appendAssumeCapacity(record);
+            atom_indexes.appendAssumeCapacity(atom_index);
+
+            cies.clearRetainingCapacity();
         }
     }
 
     // Fold records here
-    if (info.records.items.len > 1) {
-        var i: usize = 1;
-        while (i < info.records.items.len) : (i += 1) {
-            const prev = &info.records.items[i - 1];
-            const curr = &info.records.items[i];
-            const is_dwarf = try isDwarf(curr.*);
-            if (is_dwarf or
-                (prev.compactUnwindEncoding != curr.compactUnwindEncoding) or
-                (prev.personalityFunction != curr.personalityFunction) or
-                curr.lsda > 0) continue;
-            curr.* = nullRecord();
-        }
+    try info.records.ensureTotalCapacity(info.gpa, records.items.len);
+    try info.records_lookup.ensureTotalCapacity(info.gpa, @intCast(u32, atom_indexes.items.len));
+
+    var maybe_prev: ?macho.compact_unwind_entry = null;
+    for (records.items) |record, i| {
+        const record_id = blk: {
+            if (maybe_prev) |prev| {
+                const is_dwarf = try isDwarf(record);
+                if (is_dwarf or
+                    (prev.compactUnwindEncoding != record.compactUnwindEncoding) or
+                    (prev.personalityFunction != record.personalityFunction) or
+                    record.lsda > 0)
+                {
+                    const record_id = @intCast(u32, info.records.items.len);
+                    info.records.appendAssumeCapacity(record);
+                    maybe_prev = record;
+                    break :blk record_id;
+                } else {
+                    break :blk @intCast(u32, info.records.items.len);
+                }
+            } else {
+                const record_id = @intCast(u32, info.records.items.len);
+                info.records.appendAssumeCapacity(record);
+                maybe_prev = record;
+                break :blk record_id;
+            }
+        };
+        info.records_lookup.putAssumeCapacityNoClobber(atom_indexes.items[i], record_id);
     }
 
     // Calculate common encodings
@@ -203,7 +231,7 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
     defer common_encodings_counts.deinit();
 
     for (info.records.items) |record| {
-        if (isNull(record)) continue;
+        assert(!isNull(record));
         if (try isDwarf(record)) continue;
         const enc = record.compactUnwindEncoding;
         const gop = try common_encodings_counts.getOrPut(enc);
@@ -229,14 +257,35 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
     }
 }
 
-pub fn calcRequiredSize(info: UnwindInfo, macho_file: *MachO) !void {
-    _ = info;
+pub fn calcSectionSize(info: UnwindInfo, macho_file: *MachO) !void {
     const sect_id = macho_file.getSectionByName("__TEXT", "__unwind_info") orelse return;
     const sect = &macho_file.sections.items(.header)[sect_id];
+
+    _ = try info.calcRequiredSize();
 
     // TODO finish this!
     sect.size = 0x1000;
     sect.@"align" = 2;
+}
+
+fn calcRequiredSize(info: UnwindInfo) !usize {
+    var total_size: usize = 0;
+    total_size += @sizeOf(macho.unwind_info_section_header);
+    total_size += info.common_encodings_count * @sizeOf(macho.compact_unwind_encoding_t);
+    total_size += @intCast(u32, info.personalities_count) * @sizeOf(u32);
+
+    var cwriter = std.io.countingWriter(std.io.null_writer);
+    // const writer = cwriter.writer();
+
+    const first = info.records.items[0];
+    const last = info.records.items[info.records.items.len - 1];
+    log.warn("{x} - {x} = {x}", .{
+        last.rangeStart + last.rangeLength,
+        first.rangeStart,
+        last.rangeStart + last.rangeLength - first.rangeStart,
+    });
+
+    return total_size + cwriter.bytes_written;
 }
 
 pub fn write(info: *UnwindInfo, macho_file: *MachO) !void {
@@ -247,16 +296,6 @@ pub fn write(info: *UnwindInfo, macho_file: *MachO) !void {
 
     const text_sect_id = macho_file.getSectionByName("__TEXT", "__text").?;
     const text_sect = macho_file.sections.items(.header)[text_sect_id];
-
-    var records = try std.ArrayList(macho.compact_unwind_entry).initCapacity(
-        info.gpa,
-        info.records.items.len,
-    );
-    defer records.deinit();
-    for (info.records.items) |rec| {
-        if (isNull(rec)) continue;
-        records.appendAssumeCapacity(rec);
-    }
 
     var personalities: [max_personalities]u32 = undefined;
 
@@ -272,7 +311,7 @@ pub fn write(info: *UnwindInfo, macho_file: *MachO) !void {
         log.debug("  {d}: 0x{x}", .{ i, offset });
     }
 
-    for (records.items) |*rec| {
+    for (info.records.items) |*rec| {
         // Finalize missing address values
         rec.rangeStart += text_sect.addr - seg.vmaddr;
         if (rec.personalityFunction > 0) {
@@ -294,7 +333,7 @@ pub fn write(info: *UnwindInfo, macho_file: *MachO) !void {
         }
     }
 
-    for (records.items) |record, i| {
+    for (info.records.items) |record, i| {
         log.debug("Unwind record at offset 0x{x}", .{i * @sizeOf(macho.compact_unwind_entry)});
         log.debug("  start: 0x{x}", .{record.rangeStart});
         log.debug("  length: 0x{x}", .{record.rangeLength});
@@ -328,8 +367,8 @@ pub fn write(info: *UnwindInfo, macho_file: *MachO) !void {
     try writer.writeAll(mem.sliceAsBytes(info.common_encodings[0..info.common_encodings_count]));
     try writer.writeAll(mem.sliceAsBytes(personalities[0..info.personalities_count]));
 
-    const first_record = records.items[0];
-    const last_record = records.items[records.items.len - 1];
+    const first_record = info.records.items[0];
+    const last_record = info.records.items[info.records.items.len - 1];
     const sentinel_address = @intCast(u32, last_record.rangeStart + last_record.rangeLength);
 
     const index_headers_backpatch = cwriter.bytes_written;
@@ -348,7 +387,7 @@ pub fn write(info: *UnwindInfo, macho_file: *MachO) !void {
     mem.writeIntLittle(u32, buffer.items[index_headers_backpatch + 8 ..][0..4], lsda_start_offset);
 
     log.debug("LSDAs:", .{});
-    for (records.items) |record| {
+    for (info.records.items) |record| {
         if (isNull(record)) continue;
         if (record.lsda == 0) continue;
         log.debug("  {x}, lsda({x})", .{ record.rangeStart, record.lsda });
@@ -372,7 +411,7 @@ pub fn write(info: *UnwindInfo, macho_file: *MachO) !void {
     defer page_encodings.deinit();
 
     log.debug("Page encodings", .{});
-    for (records.items) |record| {
+    for (info.records.items) |record| {
         if (isNull(record)) continue;
         if (info.getCommonEncoding(record.compactUnwindEncoding) != null) continue;
         try page_encodings.putNoClobber(record.compactUnwindEncoding, {});
@@ -384,7 +423,7 @@ pub fn write(info: *UnwindInfo, macho_file: *MachO) !void {
 
     try writer.writeStruct(macho.unwind_info_compressed_second_level_page_header{
         .entryPageOffset = 0,
-        .entryCount = @intCast(u16, records.items.len),
+        .entryCount = @intCast(u16, info.records.items.len),
         .encodingsPageOffset = @sizeOf(macho.unwind_info_compressed_second_level_page_header),
         .encodingsCount = @intCast(u16, page_encodings.count()),
     });
@@ -397,7 +436,7 @@ pub fn write(info: *UnwindInfo, macho_file: *MachO) !void {
     mem.writeIntLittle(u16, buffer.items[lsda_end_offset + 4 ..][0..2], page_offset);
 
     log.debug("Compressed page entries", .{});
-    for (records.items) |record, i| {
+    for (info.records.items) |record, i| {
         if (isNull(record)) continue;
         const compressed = macho.UnwindInfoCompressedEntry{
             .funcOffset = @intCast(u24, record.rangeStart - first_record.rangeStart),
