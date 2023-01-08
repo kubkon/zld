@@ -216,7 +216,7 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
     // Calculate common encodings
     const CommonEncWithCount = struct {
         enc: macho.compact_unwind_encoding_t,
-        count: u8,
+        count: u32,
 
         fn greaterThan(ctx: void, lhs: @This(), rhs: @This()) bool {
             _ = ctx;
@@ -261,7 +261,8 @@ pub fn calcSectionSize(info: UnwindInfo, macho_file: *MachO) !void {
     const sect_id = macho_file.getSectionByName("__TEXT", "__unwind_info") orelse return;
     const sect = &macho_file.sections.items(.header)[sect_id];
 
-    _ = try info.calcRequiredSize();
+    const size = try info.calcRequiredSize();
+    log.warn("size = {x}", .{size});
 
     // TODO finish this!
     sect.size = 0x1000;
@@ -271,21 +272,24 @@ pub fn calcSectionSize(info: UnwindInfo, macho_file: *MachO) !void {
 fn calcRequiredSize(info: UnwindInfo) !usize {
     var total_size: usize = 0;
     total_size += @sizeOf(macho.unwind_info_section_header);
-    total_size += info.common_encodings_count * @sizeOf(macho.compact_unwind_encoding_t);
-    total_size += @intCast(u32, info.personalities_count) * @sizeOf(u32);
+    total_size += @intCast(usize, info.common_encodings_count) * @sizeOf(macho.compact_unwind_encoding_t);
+    total_size += @intCast(usize, info.personalities_count) * @sizeOf(u32);
 
-    var cwriter = std.io.countingWriter(std.io.null_writer);
-    // const writer = cwriter.writer();
+    assert(info.records.items.len > 0);
 
-    const first = info.records.items[0];
-    const last = info.records.items[info.records.items.len - 1];
-    log.warn("{x} - {x} = {x}", .{
-        last.rangeStart + last.rangeLength,
-        first.rangeStart,
-        last.rangeStart + last.rangeLength - first.rangeStart,
-    });
+    const page_count = ((info.records.items.len - 1) / max_regular_second_level_entries) + 2;
+    log.warn("page_count = {d}", .{page_count});
+    total_size += page_count * @sizeOf(macho.unwind_info_section_header_index_entry);
 
-    return total_size + cwriter.bytes_written;
+    var lsda_count: usize = 0;
+    for (info.records.items) |rec| {
+        if (rec.lsda == 0) continue;
+        lsda_count += 1;
+    }
+    total_size += lsda_count * @sizeOf(macho.unwind_info_section_header_lsda_index_entry);
+    total_size += page_count * max_second_level_page_bytes;
+
+    return total_size;
 }
 
 pub fn write(info: *UnwindInfo, macho_file: *MachO) !void {
@@ -388,7 +392,6 @@ pub fn write(info: *UnwindInfo, macho_file: *MachO) !void {
 
     log.debug("LSDAs:", .{});
     for (info.records.items) |record| {
-        if (isNull(record)) continue;
         if (record.lsda == 0) continue;
         log.debug("  {x}, lsda({x})", .{ record.rangeStart, record.lsda });
         try writer.writeStruct(macho.unwind_info_section_header_lsda_index_entry{
@@ -412,7 +415,6 @@ pub fn write(info: *UnwindInfo, macho_file: *MachO) !void {
 
     log.debug("Page encodings", .{});
     for (info.records.items) |record| {
-        if (isNull(record)) continue;
         if (info.getCommonEncoding(record.compactUnwindEncoding) != null) continue;
         try page_encodings.putNoClobber(record.compactUnwindEncoding, {});
         log.debug("  {d}: 0x{x:0>8}", .{
@@ -437,7 +439,6 @@ pub fn write(info: *UnwindInfo, macho_file: *MachO) !void {
 
     log.debug("Compressed page entries", .{});
     for (info.records.items) |record, i| {
-        if (isNull(record)) continue;
         const compressed = macho.UnwindInfoCompressedEntry{
             .funcOffset = @intCast(u24, record.rangeStart - first_record.rangeStart),
             .encodingIndex = if (info.getCommonEncoding(record.compactUnwindEncoding)) |id|
