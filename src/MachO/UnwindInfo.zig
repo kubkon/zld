@@ -36,6 +36,7 @@ common_encodings_count: u7 = 0,
 
 /// List of record indexes containing an LSDA pointer.
 lsdas: std.ArrayListUnmanaged(RecordIndex) = .{},
+lsdas_lookup: std.AutoHashMapUnmanaged(RecordIndex, u32) = .{},
 
 /// List of second level pages.
 pages: std.ArrayListUnmanaged(Page) = .{},
@@ -60,30 +61,133 @@ const max_compressed_second_level_entries =
 const compressed_entry_func_offset_mask = ~@as(u24, 0);
 
 const Page = struct {
-    kind: macho.UNWIND_SECOND_LEVEL,
+    kind: enum { regular, compressed },
     start: RecordIndex,
-    count: u32,
-    page_encodings: [max_common_encodings]macho.compact_unwind_encoding_t = undefined,
+    count: u16,
+    page_encodings: [max_common_encodings]RecordIndex = undefined,
     page_encodings_count: u7 = 0,
 
-    fn appendPageEncoding(page: *Page, enc: macho.compact_unwind_encoding_t) void {
+    fn appendPageEncoding(page: *Page, record_id: RecordIndex) void {
         assert(page.page_encodings_count <= max_common_encodings);
-        page.page_encodings[page.page_encodings_count] = enc;
+        page.page_encodings[page.page_encodings_count] = record_id;
         page.page_encodings_count += 1;
     }
 
-    fn getPageEncoding(page: *const Page, enc: macho.compact_unwind_encoding_t) ?u7 {
+    fn getPageEncoding(
+        page: *const Page,
+        info: *const UnwindInfo,
+        enc: macho.compact_unwind_encoding_t,
+    ) ?u7 {
         comptime var index: u7 = 0;
         inline while (index < max_common_encodings) : (index += 1) {
             if (index >= page.page_encodings_count) return null;
-            if (page.page_encodings[index] == enc) {
+            const record_id = page.page_encodings[index];
+            const record = info.records.items[record_id];
+            if (record.compactUnwindEncoding == enc) {
                 return index;
             }
         }
         return null;
     }
 
-    // fn write(page: *const Page, writer: anytype) !void {}
+    fn format(
+        page: *const Page,
+        comptime unused_format_string: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = page;
+        _ = unused_format_string;
+        _ = options;
+        _ = writer;
+        @compileError("do not format Page directly; use page.fmtDebug()");
+    }
+
+    const DumpCtx = struct {
+        page: *const Page,
+        info: *const UnwindInfo,
+    };
+
+    fn dump(
+        ctx: DumpCtx,
+        comptime unused_format_string: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) @TypeOf(writer).Error!void {
+        _ = options;
+        comptime assert(unused_format_string.len == 0);
+        try writer.writeAll("Page:\n");
+        try writer.print("  kind: {s}\n", .{@tagName(ctx.page.kind)});
+        try writer.print("  entries: {d} - {d}\n", .{
+            ctx.page.start,
+            ctx.page.start + ctx.page.count,
+        });
+        try writer.print("  encodings (count = {d})\n", .{ctx.page.page_encodings_count});
+        for (ctx.page.page_encodings[0..ctx.page.page_encodings_count]) |record_id, i| {
+            const record = ctx.info.records.items[record_id];
+            const enc = record.compactUnwindEncoding;
+            try writer.print("    {d}: 0x{x:0>8}\n", .{ ctx.info.common_encodings_count + i, enc });
+        }
+    }
+
+    fn fmtDebug(page: *const Page, info: *const UnwindInfo) std.fmt.Formatter(dump) {
+        return .{ .data = .{
+            .page = page,
+            .info = info,
+        } };
+    }
+
+    fn write(page: *const Page, info: *const UnwindInfo, writer: anytype) !void {
+        switch (page.kind) {
+            .regular => {
+                try writer.writeStruct(macho.unwind_info_regular_second_level_page_header{
+                    .entryPageOffset = @sizeOf(macho.unwind_info_regular_second_level_page_header),
+                    .entryCount = page.count,
+                });
+
+                for (info.records.items[page.start..][0..page.count]) |record| {
+                    try writer.writeStruct(macho.unwind_info_regular_second_level_entry{
+                        .functionOffset = @intCast(u32, record.rangeStart),
+                        .encoding = record.compactUnwindEncoding,
+                    });
+                }
+            },
+            .compressed => {
+                const entry_offset = @sizeOf(macho.unwind_info_compressed_second_level_page_header) +
+                    page.page_encodings_count * @sizeOf(u32);
+                try writer.writeStruct(macho.unwind_info_compressed_second_level_page_header{
+                    .entryPageOffset = entry_offset,
+                    .entryCount = page.count,
+                    .encodingsPageOffset = @sizeOf(
+                        macho.unwind_info_compressed_second_level_page_header,
+                    ),
+                    .encodingsCount = page.page_encodings_count,
+                });
+
+                for (page.page_encodings[0..page.page_encodings_count]) |record_id| {
+                    const enc = info.records.items[record_id].compactUnwindEncoding;
+                    try writer.writeIntLittle(u32, enc);
+                }
+
+                assert(page.count > 0);
+                const first_entry = info.records.items[page.start];
+                for (info.records.items[page.start..][0..page.count]) |record| {
+                    const enc_index = blk: {
+                        if (info.getCommonEncoding(record.compactUnwindEncoding)) |id| {
+                            break :blk id;
+                        }
+                        const ncommon = info.common_encodings_count;
+                        break :blk ncommon + page.getPageEncoding(info, record.compactUnwindEncoding).?;
+                    };
+                    const compressed = macho.UnwindInfoCompressedEntry{
+                        .funcOffset = @intCast(u24, record.rangeStart - first_entry.rangeStart),
+                        .encodingIndex = @intCast(u8, enc_index),
+                    };
+                    try writer.writeStruct(compressed);
+                }
+            },
+        }
+    }
 };
 
 pub fn deinit(info: *UnwindInfo) void {
@@ -91,6 +195,7 @@ pub fn deinit(info: *UnwindInfo) void {
     info.records_lookup.deinit(info.gpa);
     info.pages.deinit(info.gpa);
     info.lsdas.deinit(info.gpa);
+    info.lsdas_lookup.deinit(info.gpa);
 }
 
 pub fn scanRelocs(macho_file: *MachO) !void {
@@ -229,7 +334,7 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
         }
     }
 
-    // Fold records here
+    // Fold records
     try info.records.ensureTotalCapacity(info.gpa, records.items.len);
     try info.records_lookup.ensureTotalCapacity(info.gpa, @intCast(u32, atom_indexes.items.len));
 
@@ -323,16 +428,17 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
             while (space_left >= 1 and i < info.records.items.len) {
                 const record = info.records.items[i];
                 const enc = record.compactUnwindEncoding;
+                const is_dwarf = try isDwarf(record);
 
                 if (record.rangeStart >= range_start_max) {
                     break;
                 } else if (info.getCommonEncoding(enc) != null or
-                    page.getPageEncoding(enc) != null)
+                    page.getPageEncoding(info, enc) != null and !is_dwarf)
                 {
                     i += 1;
                     space_left -= 1;
                 } else if (space_left >= 2 and encoding_count < max_compact_encodings) {
-                    page.appendPageEncoding(enc);
+                    page.appendPageEncoding(i);
                     i += 1;
                     space_left -= 2;
                 } else {
@@ -340,33 +446,29 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
                 }
             }
 
-            page.count = i - page.start;
+            page.count = @intCast(u16, i - page.start);
 
             if (i < info.records.items.len and page.count < max_regular_second_level_entries) {
-                page.kind = .REGULAR;
+                page.kind = .regular;
                 page.count = @min(
                     max_regular_second_level_entries,
-                    @intCast(u32, info.records.items.len) - page.start,
+                    @intCast(u16, info.records.items.len - page.start),
                 );
                 i = page.start + page.count;
             } else {
-                page.kind = .COMPRESSED;
+                page.kind = .compressed;
             }
 
-            log.debug("Page:", .{});
-            log.debug("  kind: {s}", .{@tagName(page.kind)});
-            log.debug("  entries: {d} - {d}", .{ page.start, page.start + page.count });
-            log.debug("  encodings (count = {d}):", .{page.page_encodings_count});
-            for (page.page_encodings[0..page.page_encodings_count]) |enc, j| {
-                log.debug("    {d}: 0x{x:0>8}", .{ info.common_encodings_count + j, enc });
-            }
+            log.debug("{}", .{page.fmtDebug(info)});
 
             try info.pages.append(info.gpa, page);
         }
     }
 
     // Save indices of records requiring LSDA relocation
+    try info.lsdas_lookup.ensureTotalCapacity(info.gpa, @intCast(u32, info.records.items.len));
     for (info.records.items) |rec, i| {
+        info.lsdas_lookup.putAssumeCapacityNoClobber(@intCast(RecordIndex, i), @intCast(u32, info.lsdas.items.len));
         if (rec.lsda == 0) continue;
         try info.lsdas.append(info.gpa, @intCast(RecordIndex, i));
     }
@@ -376,10 +478,10 @@ pub fn calcSectionSize(info: UnwindInfo, macho_file: *MachO) !void {
     const sect_id = macho_file.getSectionByName("__TEXT", "__unwind_info") orelse return;
     const sect = &macho_file.sections.items(.header)[sect_id];
     sect.@"align" = 2;
-    sect.size = try info.calcRequiredSize();
+    sect.size = info.calcRequiredSize();
 }
 
-fn calcRequiredSize(info: UnwindInfo) !usize {
+fn calcRequiredSize(info: UnwindInfo) usize {
     var total_size: usize = 0;
     total_size += @sizeOf(macho.unwind_info_section_header);
     total_size +=
@@ -445,10 +547,12 @@ pub fn write(info: *UnwindInfo, macho_file: *MachO) !void {
         log.debug("  LSDA: 0x{x}", .{record.lsda});
     }
 
-    // TODO how do I work out how many records can go in a single page?
-    // I think we might need to partition the address space into pages
     var buffer = std.ArrayList(u8).init(info.gpa);
     defer buffer.deinit();
+
+    const size = info.calcRequiredSize();
+    try buffer.ensureTotalCapacityPrecise(size);
+
     var cwriter = std.io.countingWriter(buffer.writer());
     const writer = cwriter.writer();
 
@@ -457,7 +561,7 @@ pub fn write(info: *UnwindInfo, macho_file: *MachO) !void {
     const personalities_offset: u32 = common_encodings_offset + common_encodings_count * @sizeOf(u32);
     const personalities_count: u32 = info.personalities_count;
     const indexes_offset: u32 = personalities_offset + personalities_count * @sizeOf(u32);
-    const indexes_count: u32 = 2;
+    const indexes_count: u32 = @intCast(u32, info.pages.items.len + 1);
 
     try writer.writeStruct(macho.unwind_info_section_header{
         .commonEncodingsArraySectionOffset = common_encodings_offset,
@@ -470,89 +574,44 @@ pub fn write(info: *UnwindInfo, macho_file: *MachO) !void {
     try writer.writeAll(mem.sliceAsBytes(info.common_encodings[0..info.common_encodings_count]));
     try writer.writeAll(mem.sliceAsBytes(personalities[0..info.personalities_count]));
 
-    const first_record = info.records.items[0];
-    const last_record = info.records.items[info.records.items.len - 1];
-    const sentinel_address = @intCast(u32, last_record.rangeStart + last_record.rangeLength);
+    const pages_base_offset = @intCast(u32, size - (info.pages.items.len * second_level_page_bytes));
+    const lsda_base_offset = @intCast(u32, pages_base_offset -
+        (info.lsdas.items.len * @sizeOf(macho.unwind_info_section_header_lsda_index_entry)));
+    for (info.pages.items) |page, i| {
+        assert(page.count > 0);
+        const first_entry = info.records.items[page.start];
+        try writer.writeStruct(macho.unwind_info_section_header_index_entry{
+            .functionOffset = @intCast(u32, first_entry.rangeStart),
+            .secondLevelPagesSectionOffset = @intCast(u32, pages_base_offset + i * second_level_page_bytes),
+            .lsdaIndexArraySectionOffset = lsda_base_offset +
+                info.lsdas_lookup.get(page.start).? * @sizeOf(macho.unwind_info_section_header_lsda_index_entry),
+        });
+    }
 
-    const index_headers_backpatch = cwriter.bytes_written;
-    try writer.writeStruct(macho.unwind_info_section_header_index_entry{
-        .functionOffset = @intCast(u32, first_record.rangeStart),
-        .secondLevelPagesSectionOffset = 0,
-        .lsdaIndexArraySectionOffset = 0,
-    });
+    const last_entry = info.records.items[info.records.items.len - 1];
+    const sentinel_address = @intCast(u32, last_entry.rangeStart + last_entry.rangeLength);
     try writer.writeStruct(macho.unwind_info_section_header_index_entry{
         .functionOffset = sentinel_address,
         .secondLevelPagesSectionOffset = 0,
-        .lsdaIndexArraySectionOffset = 0,
+        .lsdaIndexArraySectionOffset = lsda_base_offset +
+            @intCast(u32, info.lsdas.items.len) * @sizeOf(macho.unwind_info_section_header_lsda_index_entry),
     });
 
-    const lsda_start_offset = @intCast(u32, cwriter.bytes_written);
-    mem.writeIntLittle(u32, buffer.items[index_headers_backpatch + 8 ..][0..4], lsda_start_offset);
-
-    log.debug("LSDAs:", .{});
-    for (info.records.items) |record| {
-        if (record.lsda == 0) continue;
-        log.debug("  {x}, lsda({x})", .{ record.rangeStart, record.lsda });
+    for (info.lsdas.items) |record_id| {
+        const record = info.records.items[record_id];
         try writer.writeStruct(macho.unwind_info_section_header_lsda_index_entry{
             .functionOffset = @intCast(u32, record.rangeStart),
             .lsdaOffset = @intCast(u32, record.lsda),
         });
     }
 
-    const lsda_end_offset = @intCast(u32, cwriter.bytes_written);
-    mem.writeIntLittle(u32, buffer.items[index_headers_backpatch + 4 ..][0..4], lsda_end_offset);
-    mem.writeIntLittle(
-        u32,
-        buffer.items[index_headers_backpatch +
-            (indexes_count - 1) * @sizeOf(macho.unwind_info_section_header_index_entry) +
-            8 ..][0..4],
-        lsda_end_offset,
-    );
-
-    var page_encodings = std.AutoArrayHashMap(u32, void).init(info.gpa);
-    defer page_encodings.deinit();
-
-    log.debug("Page encodings", .{});
-    for (info.records.items) |record| {
-        if (info.getCommonEncoding(record.compactUnwindEncoding) != null) continue;
-        try page_encodings.putNoClobber(record.compactUnwindEncoding, {});
-        log.debug("  {d}: 0x{x:0>8}", .{
-            page_encodings.getIndex(record.compactUnwindEncoding).?,
-            record.compactUnwindEncoding,
-        });
+    for (info.pages.items) |page| {
+        try page.write(info, writer);
     }
 
-    try writer.writeStruct(macho.unwind_info_compressed_second_level_page_header{
-        .entryPageOffset = 0,
-        .entryCount = @intCast(u16, info.records.items.len),
-        .encodingsPageOffset = @sizeOf(macho.unwind_info_compressed_second_level_page_header),
-        .encodingsCount = @intCast(u16, page_encodings.count()),
-    });
-
-    for (page_encodings.keys()) |enc| {
-        try writer.writeIntLittle(u32, enc);
-    }
-
-    const page_offset = @intCast(u16, cwriter.bytes_written - lsda_end_offset);
-    mem.writeIntLittle(u16, buffer.items[lsda_end_offset + 4 ..][0..2], page_offset);
-
-    log.debug("Compressed page entries", .{});
-    for (info.records.items) |record, i| {
-        const compressed = macho.UnwindInfoCompressedEntry{
-            .funcOffset = @intCast(u24, record.rangeStart - first_record.rangeStart),
-            .encodingIndex = if (info.getCommonEncoding(record.compactUnwindEncoding)) |id|
-                @intCast(u8, id)
-            else
-                @intCast(u8, info.common_encodings_count + page_encodings.getIndex(record.compactUnwindEncoding).?),
-        };
-        log.debug("  {d}: {x}, enc({d}) => {x}, {}", .{
-            i,
-            compressed.funcOffset,
-            compressed.encodingIndex,
-            @bitCast(u32, compressed),
-            compressed,
-        });
-        try writer.writeStruct(compressed);
+    const padding = buffer.items.len - cwriter.bytes_written;
+    if (padding > 0) {
+        mem.set(u8, buffer.items[cwriter.bytes_written..], 0);
     }
 
     try macho_file.base.file.pwriteAll(buffer.items, sect.offset);
