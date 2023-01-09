@@ -23,7 +23,7 @@ gpa: Allocator,
 /// List of all unwind records gathered from all objects and sorted
 /// by source function address.
 records: std.ArrayListUnmanaged(macho.compact_unwind_entry) = .{},
-records_lookup: std.AutoHashMapUnmanaged(AtomIndex, u32) = .{},
+records_lookup: std.AutoHashMapUnmanaged(AtomIndex, RecordIndex) = .{},
 
 /// List of all personalities referenced by either unwind info entries
 /// or __eh_frame entries.
@@ -34,16 +34,63 @@ personalities_count: u2 = 0,
 common_encodings: [max_common_encodings]macho.compact_unwind_encoding_t = undefined,
 common_encodings_count: u7 = 0,
 
+/// List of record indexes containing an LSDA pointer.
+lsdas: std.ArrayListUnmanaged(RecordIndex) = .{},
+
+/// List of second level pages.
+pages: std.ArrayListUnmanaged(Page) = .{},
+
+const RecordIndex = u32;
+
 const max_personalities = 3;
 const max_common_encodings = 127;
-const max_second_level_page_bytes = 0x1000;
-const max_second_level_page_words = max_second_level_page_bytes / @sizeOf(u32);
-const max_regular_second_level_entries = (max_second_level_page_bytes - @sizeOf(macho.unwind_info_regular_second_level_page_header)) / @sizeOf(macho.unwind_info_regular_second_level_entry);
-const max_compressed_second_level_entries = (max_second_level_page_bytes - @sizeOf(macho.unwind_info_compressed_second_level_page_header)) / @sizeOf(u32);
+const max_compact_encodings = 256;
+
+const second_level_page_bytes = 0x1000;
+const second_level_page_words = second_level_page_bytes / @sizeOf(u32);
+
+const max_regular_second_level_entries =
+    (second_level_page_bytes - @sizeOf(macho.unwind_info_regular_second_level_page_header)) /
+    @sizeOf(macho.unwind_info_regular_second_level_entry);
+
+const max_compressed_second_level_entries =
+    (second_level_page_bytes - @sizeOf(macho.unwind_info_compressed_second_level_page_header)) /
+    @sizeOf(u32);
+
+const compressed_entry_func_offset_mask = ~@as(u24, 0);
+
+const Page = struct {
+    kind: macho.UNWIND_SECOND_LEVEL,
+    start: RecordIndex,
+    count: u32,
+    page_encodings: [max_common_encodings]macho.compact_unwind_encoding_t = undefined,
+    page_encodings_count: u7 = 0,
+
+    fn appendPageEncoding(page: *Page, enc: macho.compact_unwind_encoding_t) void {
+        assert(page.page_encodings_count <= max_common_encodings);
+        page.page_encodings[page.page_encodings_count] = enc;
+        page.page_encodings_count += 1;
+    }
+
+    fn getPageEncoding(page: *const Page, enc: macho.compact_unwind_encoding_t) ?u7 {
+        comptime var index: u7 = 0;
+        inline while (index < max_common_encodings) : (index += 1) {
+            if (index >= page.page_encodings_count) return null;
+            if (page.page_encodings[index] == enc) {
+                return index;
+            }
+        }
+        return null;
+    }
+
+    // fn write(page: *const Page, writer: anytype) !void {}
+};
 
 pub fn deinit(info: *UnwindInfo) void {
     info.records.deinit(info.gpa);
     info.records_lookup.deinit(info.gpa);
+    info.pages.deinit(info.gpa);
+    info.lsdas.deinit(info.gpa);
 }
 
 pub fn scanRelocs(macho_file: *MachO) !void {
@@ -196,15 +243,15 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
                     (prev.personalityFunction != record.personalityFunction) or
                     record.lsda > 0)
                 {
-                    const record_id = @intCast(u32, info.records.items.len);
+                    const record_id = @intCast(RecordIndex, info.records.items.len);
                     info.records.appendAssumeCapacity(record);
                     maybe_prev = record;
                     break :blk record_id;
                 } else {
-                    break :blk @intCast(u32, info.records.items.len);
+                    break :blk @intCast(RecordIndex, info.records.items.len);
                 }
             } else {
-                const record_id = @intCast(u32, info.records.items.len);
+                const record_id = @intCast(RecordIndex, info.records.items.len);
                 info.records.appendAssumeCapacity(record);
                 maybe_prev = record;
                 break :blk record_id;
@@ -214,81 +261,133 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
     }
 
     // Calculate common encodings
-    const CommonEncWithCount = struct {
-        enc: macho.compact_unwind_encoding_t,
-        count: u32,
+    {
+        const CommonEncWithCount = struct {
+            enc: macho.compact_unwind_encoding_t,
+            count: u32,
 
-        fn greaterThan(ctx: void, lhs: @This(), rhs: @This()) bool {
-            _ = ctx;
-            return lhs.count > rhs.count;
+            fn greaterThan(ctx: void, lhs: @This(), rhs: @This()) bool {
+                _ = ctx;
+                return lhs.count > rhs.count;
+            }
+        };
+
+        var common_encodings_counts = std.AutoArrayHashMap(
+            macho.compact_unwind_encoding_t,
+            CommonEncWithCount,
+        ).init(info.gpa);
+        defer common_encodings_counts.deinit();
+
+        for (info.records.items) |record| {
+            assert(!isNull(record));
+            if (try isDwarf(record)) continue;
+            const enc = record.compactUnwindEncoding;
+            const gop = try common_encodings_counts.getOrPut(enc);
+            if (!gop.found_existing) {
+                gop.value_ptr.* = .{
+                    .enc = enc,
+                    .count = 0,
+                };
+            }
+            gop.value_ptr.count += 1;
         }
-    };
 
-    var common_encodings_counts = std.AutoArrayHashMap(
-        macho.compact_unwind_encoding_t,
-        CommonEncWithCount,
-    ).init(info.gpa);
-    defer common_encodings_counts.deinit();
+        var slice = common_encodings_counts.values();
+        std.sort.sort(CommonEncWithCount, slice, {}, CommonEncWithCount.greaterThan);
 
-    for (info.records.items) |record| {
-        assert(!isNull(record));
-        if (try isDwarf(record)) continue;
-        const enc = record.compactUnwindEncoding;
-        const gop = try common_encodings_counts.getOrPut(enc);
-        if (!gop.found_existing) {
-            gop.value_ptr.* = .{
-                .enc = enc,
-                .count = 0,
-            };
+        var i: u7 = 0;
+        while (i < max_common_encodings) : (i += 1) {
+            if (i >= slice.len) break;
+            if (slice[i].count < 2) continue;
+            info.common_encodings[i] = slice[i].enc;
+            info.common_encodings_count += 1;
+            log.debug("adding common encoding: {d} => 0x{x:0>8}", .{ i, info.common_encodings[i] });
         }
-        gop.value_ptr.count += 1;
     }
 
-    var slice = common_encodings_counts.values();
-    std.sort.sort(CommonEncWithCount, slice, {}, CommonEncWithCount.greaterThan);
+    // Compute page allocations
+    {
+        var i: u32 = 0;
+        while (i < info.records.items.len) {
+            const range_start_max: u64 =
+                info.records.items[i].rangeStart + compressed_entry_func_offset_mask;
+            var encoding_count = info.common_encodings_count;
+            var space_left: u32 = second_level_page_words -
+                @sizeOf(macho.unwind_info_compressed_second_level_page_header) / @sizeOf(u32);
+            var page = Page{
+                .kind = undefined,
+                .start = i,
+                .count = 0,
+            };
 
-    var i: u7 = 0;
-    while (i < max_common_encodings) : (i += 1) {
-        if (i >= slice.len) break;
-        if (slice[i].count < 2) continue;
-        info.common_encodings[i] = slice[i].enc;
-        info.common_encodings_count += 1;
-        log.debug("adding common encoding: {d} => 0x{x:0>8}", .{ i, info.common_encodings[i] });
+            while (space_left >= 1 and i < info.records.items.len) {
+                const record = info.records.items[i];
+                const enc = record.compactUnwindEncoding;
+
+                if (record.rangeStart >= range_start_max) {
+                    break;
+                } else if (info.getCommonEncoding(enc) != null or
+                    page.getPageEncoding(enc) != null)
+                {
+                    i += 1;
+                    space_left -= 1;
+                } else if (space_left >= 2 and encoding_count < max_compact_encodings) {
+                    page.appendPageEncoding(enc);
+                    i += 1;
+                    space_left -= 2;
+                } else {
+                    break;
+                }
+            }
+
+            page.count = i - page.start;
+
+            if (i < info.records.items.len and page.count < max_regular_second_level_entries) {
+                page.kind = .REGULAR;
+                page.count = @min(
+                    max_regular_second_level_entries,
+                    @intCast(u32, info.records.items.len) - page.start,
+                );
+                i = page.start + page.count;
+            } else {
+                page.kind = .COMPRESSED;
+            }
+
+            log.debug("Page:", .{});
+            log.debug("  kind: {s}", .{@tagName(page.kind)});
+            log.debug("  entries: {d} - {d}", .{ page.start, page.start + page.count });
+            log.debug("  encodings (count = {d}):", .{page.page_encodings_count});
+            for (page.page_encodings[0..page.page_encodings_count]) |enc, j| {
+                log.debug("    {d}: 0x{x:0>8}", .{ info.common_encodings_count + j, enc });
+            }
+
+            try info.pages.append(info.gpa, page);
+        }
+    }
+
+    // Save indices of records requiring LSDA relocation
+    for (info.records.items) |rec, i| {
+        if (rec.lsda == 0) continue;
+        try info.lsdas.append(info.gpa, @intCast(RecordIndex, i));
     }
 }
 
 pub fn calcSectionSize(info: UnwindInfo, macho_file: *MachO) !void {
     const sect_id = macho_file.getSectionByName("__TEXT", "__unwind_info") orelse return;
     const sect = &macho_file.sections.items(.header)[sect_id];
-
-    const size = try info.calcRequiredSize();
-    log.warn("size = {x}", .{size});
-
-    // TODO finish this!
-    sect.size = 0x1000;
     sect.@"align" = 2;
+    sect.size = try info.calcRequiredSize();
 }
 
 fn calcRequiredSize(info: UnwindInfo) !usize {
     var total_size: usize = 0;
     total_size += @sizeOf(macho.unwind_info_section_header);
-    total_size += @intCast(usize, info.common_encodings_count) * @sizeOf(macho.compact_unwind_encoding_t);
+    total_size +=
+        @intCast(usize, info.common_encodings_count) * @sizeOf(macho.compact_unwind_encoding_t);
     total_size += @intCast(usize, info.personalities_count) * @sizeOf(u32);
-
-    assert(info.records.items.len > 0);
-
-    const page_count = ((info.records.items.len - 1) / max_regular_second_level_entries) + 2;
-    log.warn("page_count = {d}", .{page_count});
-    total_size += page_count * @sizeOf(macho.unwind_info_section_header_index_entry);
-
-    var lsda_count: usize = 0;
-    for (info.records.items) |rec| {
-        if (rec.lsda == 0) continue;
-        lsda_count += 1;
-    }
-    total_size += lsda_count * @sizeOf(macho.unwind_info_section_header_lsda_index_entry);
-    total_size += page_count * max_second_level_page_bytes;
-
+    total_size += (info.pages.items.len + 1) * @sizeOf(macho.unwind_info_section_header_index_entry);
+    total_size += info.lsdas.items.len * @sizeOf(macho.unwind_info_section_header_lsda_index_entry);
+    total_size += info.pages.items.len * second_level_page_bytes;
     return total_size;
 }
 
