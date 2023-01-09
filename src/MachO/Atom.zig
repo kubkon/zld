@@ -65,7 +65,7 @@ pub const empty = Atom{
     .next_index = null,
 };
 
-pub inline fn getFile(self: Atom) ?u32 {
+pub fn getFile(self: Atom) ?u32 {
     if (self.file == 0) return null;
     return self.file - 1;
 }

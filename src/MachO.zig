@@ -127,12 +127,12 @@ pub const SymbolWithLoc = extern struct {
     // 0 means it's a synthetic global.
     file: u32 = 0,
 
-    pub inline fn getFile(self: SymbolWithLoc) ?u32 {
+    pub fn getFile(self: SymbolWithLoc) ?u32 {
         if (self.file == 0) return null;
         return self.file - 1;
     }
 
-    pub inline fn eql(self: SymbolWithLoc, other: SymbolWithLoc) bool {
+    pub fn eql(self: SymbolWithLoc, other: SymbolWithLoc) bool {
         return self.file == other.file and self.sym_index == other.sym_index;
     }
 };
@@ -2301,7 +2301,7 @@ pub fn initSection(
     return index;
 }
 
-inline fn getSegmentPrecedence(segname: []const u8) u4 {
+fn getSegmentPrecedence(segname: []const u8) u4 {
     if (mem.eql(u8, segname, "__PAGEZERO")) return 0x0;
     if (mem.eql(u8, segname, "__TEXT")) return 0x1;
     if (mem.eql(u8, segname, "__DATA_CONST")) return 0x2;
@@ -2310,14 +2310,14 @@ inline fn getSegmentPrecedence(segname: []const u8) u4 {
     return 0x4;
 }
 
-inline fn getSegmentMemoryProtection(segname: []const u8) macho.vm_prot_t {
+fn getSegmentMemoryProtection(segname: []const u8) macho.vm_prot_t {
     if (mem.eql(u8, segname, "__PAGEZERO")) return macho.PROT.NONE;
     if (mem.eql(u8, segname, "__TEXT")) return macho.PROT.READ | macho.PROT.EXEC;
     if (mem.eql(u8, segname, "__LINKEDIT")) return macho.PROT.READ;
     return macho.PROT.READ | macho.PROT.WRITE;
 }
 
-inline fn getSectionPrecedence(header: macho.section_64) u8 {
+fn getSectionPrecedence(header: macho.section_64) u8 {
     const segment_precedence: u4 = getSegmentPrecedence(header.segName());
     const section_precedence: u4 = blk: {
         if (header.isCode()) {
@@ -3543,12 +3543,12 @@ pub fn makeStaticString(bytes: []const u8) [16]u8 {
     return buf;
 }
 
-pub inline fn getAtomPtr(self: *MachO, atom_index: AtomIndex) *Atom {
+pub fn getAtomPtr(self: *MachO, atom_index: AtomIndex) *Atom {
     assert(atom_index < self.atoms.items.len);
     return &self.atoms.items[atom_index];
 }
 
-pub inline fn getAtom(self: MachO, atom_index: AtomIndex) Atom {
+pub fn getAtom(self: MachO, atom_index: AtomIndex) Atom {
     assert(atom_index < self.atoms.items.len);
     return self.atoms.items[atom_index];
 }
@@ -3559,17 +3559,17 @@ fn getSegmentByName(self: MachO, segname: []const u8) ?u8 {
     } else return null;
 }
 
-pub inline fn getSegment(self: MachO, sect_id: u8) macho.segment_command_64 {
+pub fn getSegment(self: MachO, sect_id: u8) macho.segment_command_64 {
     const index = self.sections.items(.segment_index)[sect_id];
     return self.segments.items[index];
 }
 
-pub inline fn getSegmentPtr(self: *MachO, sect_id: u8) *macho.segment_command_64 {
+pub fn getSegmentPtr(self: *MachO, sect_id: u8) *macho.segment_command_64 {
     const index = self.sections.items(.segment_index)[sect_id];
     return &self.segments.items[index];
 }
 
-pub inline fn getLinkeditSegmentPtr(self: *MachO) *macho.segment_command_64 {
+pub fn getLinkeditSegmentPtr(self: *MachO) *macho.segment_command_64 {
     assert(self.segments.items.len > 0);
     const seg = &self.segments.items[self.segments.items.len - 1];
     assert(mem.eql(u8, seg.segName(), "__LINKEDIT"));
