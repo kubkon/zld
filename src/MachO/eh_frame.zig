@@ -5,7 +5,6 @@ const math = std.math;
 const mem = std.mem;
 const leb = std.leb;
 const log = std.log.scoped(.eh_frame);
-const parseRelocTarget = @import("UnwindInfo.zig").parseRelocTarget;
 
 const Allocator = mem.Allocator;
 const AtomIndex = MachO.AtomIndex;
@@ -199,14 +198,16 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
                     .ARM64_RELOC_UNSIGNED,
                     => {},
                     .ARM64_RELOC_POINTER_TO_GOT => {
-                        const target = parseRelocTarget(
+                        const target = UnwindInfo.parseRelocTarget(
                             macho_file,
                             object_id,
                             rel,
                             rec.data,
                             @intCast(i32, source_offset) + 4,
                         );
-                        return target;
+                        const object = macho_file.objects.items[object_id];
+                        const global = object.getGlobal(macho_file, target.sym_index) orelse target;
+                        return global;
                     },
                     else => unreachable,
                 }
@@ -225,7 +226,7 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
 
             for (relocs) |rel| {
                 const rel_type = @intToEnum(macho.reloc_type_arm64, rel.r_type);
-                const target = parseRelocTarget(
+                const target = UnwindInfo.parseRelocTarget(
                     macho_file,
                     object_id,
                     rel,
@@ -240,7 +241,9 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
                         // Address of the __eh_frame in the source object file
                     },
                     .ARM64_RELOC_POINTER_TO_GOT => {
-                        const target_addr = try Atom.getRelocTargetAddress(macho_file, target, true, false);
+                        const object = macho_file.objects.items[object_id];
+                        const global = object.getGlobal(macho_file, target.sym_index) orelse target;
+                        const target_addr = try Atom.getRelocTargetAddress(macho_file, global, true, false);
                         const result = math.cast(i32, @intCast(i64, target_addr) - @intCast(i64, source_addr)) orelse
                             return error.Overflow;
                         mem.writeIntLittle(i32, rec.data[rel_offset..][0..4], result);

@@ -219,7 +219,8 @@ pub fn scanRelocs(macho_file: *MachO) !void {
                         mem.asBytes(&record),
                         @intCast(i32, record_id * @sizeOf(macho.compact_unwind_entry)),
                     );
-                    try Atom.addGotEntry(macho_file, target);
+                    const global = object.getGlobal(macho_file, target.sym_index) orelse target;
+                    try Atom.addGotEntry(macho_file, global);
                 },
                 .dwarf => {}, // Handled separately
             }
@@ -239,6 +240,7 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
 
     // TODO handle dead stripping
     for (macho_file.objects.items) |*object, object_id| {
+        log.debug("collecting unwind records in {s}", .{object.name});
         const unwind_records = object.getUnwindRecords();
 
         // Contents of unwind records does not have to cover all symbol in executable section
@@ -266,9 +268,10 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
                                 mem.asBytes(&record),
                                 @intCast(i32, record_id * @sizeOf(macho.compact_unwind_entry)),
                             );
-                            const personality_index = info.getPersonalityFunction(target) orelse inner: {
+                            const global = object.getGlobal(macho_file, target.sym_index) orelse target;
+                            const personality_index = info.getPersonalityFunction(global) orelse inner: {
                                 const personality_index = info.personalities_count;
-                                info.personalities[personality_index] = target;
+                                info.personalities[personality_index] = global;
                                 info.personalities_count += 1;
                                 break :inner personality_index;
                             };
@@ -353,7 +356,7 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
                     maybe_prev = record;
                     break :blk record_id;
                 } else {
-                    break :blk @intCast(RecordIndex, info.records.items.len);
+                    break :blk @intCast(RecordIndex, info.records.items.len - 1);
                 }
             } else {
                 const record_id = @intCast(RecordIndex, info.records.items.len);
@@ -666,14 +669,7 @@ pub fn parseRelocTarget(
 
     const sym_index = object.reverse_symtab_lookup[rel.r_symbolnum];
     const sym_loc = MachO.SymbolWithLoc{ .sym_index = sym_index, .file = object_id + 1 };
-    const sym = macho_file.getSymbol(sym_loc);
-
-    if (sym.sect() and !sym.ext()) {
-        return sym_loc;
-    } else if (object.globals_lookup[sym_index] > -1) {
-        const global_index = @intCast(u32, object.globals_lookup[sym_index]);
-        return macho_file.globals.items[global_index];
-    } else return sym_loc;
+    return sym_loc;
 }
 
 fn getRelocs(

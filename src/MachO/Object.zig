@@ -642,8 +642,11 @@ fn parseEhFrameSection(self: *Object, macho_file: *MachO, object_id: u32) !void 
 
     log.debug("parsing __TEXT,__eh_frame section", .{});
 
+    if (macho_file.getSectionByName("__TEXT", "__eh_frame") == null) {
+        _ = try macho_file.initSection("__TEXT", "__eh_frame", .{});
+    }
+
     const gpa = macho_file.base.allocator;
-    _ = try macho_file.initSection("__TEXT", "__eh_frame", .{});
     const relocs = self.getRelocs(sect);
 
     var it = self.getEhFrameRecordsIterator();
@@ -688,7 +691,9 @@ fn parseUnwindInfo(self: *Object, macho_file: *MachO, object_id: u32) !void {
 
     const gpa = macho_file.base.allocator;
 
-    _ = try macho_file.initSection("__TEXT", "__unwind_info", .{});
+    if (macho_file.getSectionByName("__TEXT", "__unwind_info") == null) {
+        _ = try macho_file.initSection("__TEXT", "__unwind_info", .{});
+    }
 
     try self.unwind_records_lookup.ensureTotalCapacity(gpa, @intCast(u32, self.exec_atoms.items.len));
 
@@ -886,4 +891,10 @@ pub fn getEhFrameRecordsIterator(self: Object) eh_frame.Iterator {
     const sect = self.eh_frame_sect orelse return .{ .data = &[0]u8{} };
     const data = self.getSectionContents(sect);
     return .{ .data = data };
+}
+
+pub fn getGlobal(self: Object, macho_file: *MachO, sym_index: u32) ?SymbolWithLoc {
+    if (self.globals_lookup[sym_index] == -1) return null;
+    const global_index = @intCast(u32, self.globals_lookup[sym_index]);
+    return macho_file.globals.items[global_index];
 }
