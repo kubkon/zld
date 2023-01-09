@@ -50,7 +50,7 @@ pub fn calcSectionSize(macho_file: *MachO) void {
         const source_sect = object.eh_frame_sect orelse continue;
         sect.size += source_sect.size;
     }
-    sect.@"align" = 2;
+    sect.@"align" = 3;
 }
 
 pub fn write(macho_file: *MachO, unwind_info: *UnwindInfo) !void {
