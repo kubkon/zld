@@ -69,6 +69,8 @@ pub fn write(macho_file: *MachO, unwind_info: *UnwindInfo) !void {
         eh_records.deinit();
     }
 
+    var eh_frame_offset: u32 = 0;
+
     for (macho_file.objects.items) |*object, object_id| {
         try eh_records.ensureUnusedCapacity(2 * @intCast(u32, object.exec_atoms.items.len));
 
@@ -76,7 +78,6 @@ pub fn write(macho_file: *MachO, unwind_info: *UnwindInfo) !void {
         defer cies.deinit();
 
         var eh_it = object.getEhFrameRecordsIterator();
-        var eh_frame_offset: u32 = 0;
 
         for (object.eh_frame_records_lookup.keys()) |atom_index| {
             const fde_record_offset = object.eh_frame_records_lookup.get(atom_index).?; // TODO turn into an error
@@ -110,9 +111,10 @@ pub fn write(macho_file: *MachO, unwind_info: *UnwindInfo) !void {
             });
             eh_records.putAssumeCapacityNoClobber(eh_frame_offset, fde_record);
 
-            if (unwind_info.records_lookup.get(atom_index)) |record_id| {
+            if (unwind_info.records_lookup.get(atom_index)) |record_id| blk: {
                 const record = &unwind_info.records.items[record_id];
-                assert(try UnwindInfo.isDwarf(record.*));
+                const is_dwarf = try UnwindInfo.isDwarf(record.*);
+                if (!is_dwarf) break :blk;
                 var enc = macho.UnwindEncodingArm64.fromU32(record.compactUnwindEncoding) catch
                     unreachable;
                 enc.dwarf.section_offset = @intCast(u24, eh_frame_offset);
