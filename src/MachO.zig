@@ -2334,10 +2334,11 @@ fn getSectionPrecedence(header: macho.section_64) u8 {
             macho.S_ZEROFILL => break :blk 0xf,
             macho.S_THREAD_LOCAL_REGULAR => break :blk 0xd,
             macho.S_THREAD_LOCAL_ZEROFILL => break :blk 0xe,
-            else => if (mem.eql(u8, "__eh_frame", header.sectName()))
-                break :blk 0xf
-            else
-                break :blk 0x3,
+            else => {
+                if (mem.eql(u8, "__unwind_info", header.sectName())) break :blk 0xe;
+                if (mem.eql(u8, "__eh_frame", header.sectName())) break :blk 0xf;
+                break :blk 0x3;
+            },
         }
     };
     return (@intCast(u8, segment_precedence) << 4) + section_precedence;
