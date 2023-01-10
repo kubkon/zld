@@ -64,11 +64,11 @@ const Page = struct {
     kind: enum { regular, compressed },
     start: RecordIndex,
     count: u16,
-    page_encodings: [max_common_encodings]RecordIndex = undefined,
-    page_encodings_count: u7 = 0,
+    page_encodings: [max_compact_encodings]RecordIndex = undefined,
+    page_encodings_count: u8 = 0,
 
     fn appendPageEncoding(page: *Page, record_id: RecordIndex) void {
-        assert(page.page_encodings_count <= max_common_encodings);
+        assert(page.page_encodings_count <= max_compact_encodings);
         page.page_encodings[page.page_encodings_count] = record_id;
         page.page_encodings_count += 1;
     }
@@ -77,9 +77,9 @@ const Page = struct {
         page: *const Page,
         info: *const UnwindInfo,
         enc: macho.compact_unwind_encoding_t,
-    ) ?u7 {
-        comptime var index: u7 = 0;
-        inline while (index < max_common_encodings) : (index += 1) {
+    ) ?u8 {
+        comptime var index: u8 = 0;
+        inline while (index < max_compact_encodings) : (index += 1) {
             if (index >= page.page_encodings_count) return null;
             const record_id = page.page_encodings[index];
             const record = info.records.items[record_id];
@@ -419,7 +419,7 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
         while (i < info.records.items.len) {
             const range_start_max: u64 =
                 info.records.items[i].rangeStart + compressed_entry_func_offset_mask;
-            var encoding_count = info.common_encodings_count;
+            var encoding_count: u9 = info.common_encodings_count;
             var space_left: u32 = second_level_page_words -
                 @sizeOf(macho.unwind_info_compressed_second_level_page_header) / @sizeOf(u32);
             var page = Page{
@@ -444,6 +444,7 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
                     page.appendPageEncoding(i);
                     i += 1;
                     space_left -= 2;
+                    encoding_count += 1;
                 } else {
                     break;
                 }
