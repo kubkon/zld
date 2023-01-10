@@ -203,6 +203,7 @@ pub fn scanRelocs(macho_file: *MachO) !void {
         const unwind_records = object.getUnwindRecords();
         for (object.exec_atoms.items) |atom_index| {
             const record_id = object.unwind_records_lookup.get(atom_index) orelse continue;
+            if (object.unwind_relocs_lookup[record_id].dead) continue;
             const record = unwind_records[record_id];
             const enc = try macho.UnwindEncodingArm64.fromU32(record.compactUnwindEncoding);
             switch (enc) {
@@ -252,6 +253,7 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
 
         for (object.exec_atoms.items) |atom_index| {
             var record = if (object.unwind_records_lookup.get(atom_index)) |record_id| blk: {
+                if (object.unwind_relocs_lookup[record_id].dead) continue;
                 var record = unwind_records[record_id];
                 var enc = try macho.UnwindEncodingArm64.fromU32(record.compactUnwindEncoding);
                 switch (enc) {
@@ -679,7 +681,7 @@ fn getRelocs(
     record_id: usize,
 ) []align(1) const macho.relocation_info {
     const object = &macho_file.objects.items[object_id];
-    const rel_pos = object.unwind_relocs_lookup[record_id];
+    const rel_pos = object.unwind_relocs_lookup[record_id].reloc;
     const relocs = object.getRelocs(object.unwind_info_sect.?);
     return relocs[rel_pos.start..][0..rel_pos.len];
 }

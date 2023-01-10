@@ -60,14 +60,24 @@ atoms: std.ArrayListUnmanaged(AtomIndex) = .{},
 exec_atoms: std.ArrayListUnmanaged(AtomIndex) = .{},
 
 eh_frame_sect: ?macho.section_64 = null,
-eh_frame_relocs_lookup: std.AutoArrayHashMapUnmanaged(u32, RelocEntry) = .{},
+eh_frame_relocs_lookup: std.AutoArrayHashMapUnmanaged(u32, EhFrameRecord) = .{},
 eh_frame_records_lookup: std.AutoArrayHashMapUnmanaged(AtomIndex, u32) = .{},
 
 unwind_info_sect: ?macho.section_64 = null,
-unwind_relocs_lookup: []RelocEntry = undefined,
+unwind_relocs_lookup: []UnwindRecord = undefined,
 unwind_records_lookup: std.AutoHashMapUnmanaged(AtomIndex, u32) = .{},
 
 const RelocEntry = struct { start: u32, len: u32 };
+
+const EhFrameRecord = struct {
+    dead: bool,
+    reloc: RelocEntry,
+};
+
+const UnwindRecord = struct {
+    dead: bool,
+    reloc: RelocEntry,
+};
 
 pub fn deinit(self: *Object, gpa: Allocator) void {
     self.atoms.deinit(gpa);
@@ -211,10 +221,13 @@ pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch)
     // Parse __LD,__compact_unwind if one exists.
     self.unwind_info_sect = self.getSourceSectionByName("__LD", "__compact_unwind");
     if (self.unwind_info_sect) |_| {
-        self.unwind_relocs_lookup = try allocator.alloc(RelocEntry, self.getUnwindRecords().len);
-        mem.set(RelocEntry, self.unwind_relocs_lookup, .{
-            .start = 0,
-            .len = 0,
+        self.unwind_relocs_lookup = try allocator.alloc(UnwindRecord, self.getUnwindRecords().len);
+        mem.set(UnwindRecord, self.unwind_relocs_lookup, .{
+            .dead = true,
+            .reloc = .{
+                .start = 0,
+                .len = 0,
+            },
         });
     }
 }
@@ -663,7 +676,10 @@ fn parseEhFrameSection(self: *Object, macho_file: *MachO, object_id: u32) !void 
     while (try it.next()) |record| {
         const offset = it.pos - record.getSize();
         const rel_pos = filterRelocs(relocs, offset, offset + record.getSize());
-        self.eh_frame_relocs_lookup.putAssumeCapacityNoClobber(offset, rel_pos);
+        self.eh_frame_relocs_lookup.putAssumeCapacityNoClobber(offset, .{
+            .dead = false,
+            .reloc = rel_pos,
+        });
 
         if (record.tag == .fde) {
             assert(rel_pos.len > 0); // TODO convert to an error as the FDE eh frame is malformed
@@ -677,6 +693,11 @@ fn parseEhFrameSection(self: *Object, macho_file: *MachO, object_id: u32) !void 
                 @intCast(i32, offset),
             );
             log.debug("FDE at offset {x} tracks {s}", .{ offset, macho_file.getSymbolName(target) });
+            const global = self.getGlobal(macho_file, target.sym_index) orelse target;
+            if (global.getFile() != object_id) {
+                self.eh_frame_relocs_lookup.getPtr(offset).?.dead = true;
+            }
+
             assert(target.getFile() == object_id);
             const atom_index = self.getAtomIndexForSymbol(target.sym_index).?;
             self.eh_frame_records_lookup.putAssumeCapacityNoClobber(atom_index, offset);
@@ -687,7 +708,7 @@ fn parseEhFrameSection(self: *Object, macho_file: *MachO, object_id: u32) !void 
 fn parseUnwindInfo(self: *Object, macho_file: *MachO, object_id: u32) !void {
     const sect = self.unwind_info_sect orelse return;
 
-    log.debug("parsing unwind info", .{});
+    log.debug("parsing unwind info in {s}", .{self.name});
 
     const gpa = macho_file.base.allocator;
 
@@ -721,7 +742,10 @@ fn parseUnwindInfo(self: *Object, macho_file: *MachO, object_id: u32) !void {
             offset + @sizeOf(macho.compact_unwind_entry),
         );
         assert(rel_pos.len > 0); // TODO convert to an error as the unwind info is malformed
-        self.unwind_relocs_lookup[record_id] = rel_pos;
+        self.unwind_relocs_lookup[record_id] = .{
+            .dead = false,
+            .reloc = rel_pos,
+        };
 
         // Find function symbol that this record describes
         const rel = relocs[rel_pos.start..][rel_pos.len - 1];
@@ -732,8 +756,11 @@ fn parseUnwindInfo(self: *Object, macho_file: *MachO, object_id: u32) !void {
             mem.asBytes(&record),
             @intCast(i32, offset),
         );
-        log.debug("unwind record {d} tracks {s}", .{ record_id, macho_file.getSymbolName(target) });
-        assert(target.getFile() == object_id);
+        const global = self.getGlobal(macho_file, target.sym_index) orelse target;
+        if (global.getFile() != object_id) {
+            self.unwind_relocs_lookup[record_id].dead = true;
+        }
+
         const atom_index = self.getAtomIndexForSymbol(target.sym_index).?;
         self.unwind_records_lookup.putAssumeCapacityNoClobber(atom_index, @intCast(u32, record_id));
     }

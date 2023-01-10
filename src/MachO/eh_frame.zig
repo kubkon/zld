@@ -23,6 +23,7 @@ pub fn scanRelocs(macho_file: *MachO) !void {
 
         for (object.exec_atoms.items) |atom_index| {
             const fde_offset = object.eh_frame_records_lookup.get(atom_index) orelse continue;
+            if (object.eh_frame_relocs_lookup.get(fde_offset).?.dead) continue;
             it.seekTo(fde_offset);
             const fde = (try it.next()).?;
 
@@ -80,6 +81,8 @@ pub fn write(macho_file: *MachO, unwind_info: *UnwindInfo) !void {
 
         for (object.eh_frame_records_lookup.keys()) |atom_index| {
             const fde_record_offset = object.eh_frame_records_lookup.get(atom_index).?; // TODO turn into an error
+            if (object.eh_frame_relocs_lookup.get(fde_record_offset).?.dead) continue;
+
             eh_it.seekTo(fde_record_offset);
             const source_fde_record = (try eh_it.next()).?;
 
@@ -101,6 +104,13 @@ pub fn write(macho_file: *MachO, unwind_info: *UnwindInfo) !void {
                 eh_frame_offset += cie_record.getSize();
             }
 
+            // TODO skip this if no __compact_unwind is present
+            if (unwind_info.records_lookup.get(atom_index)) |record_id| {
+                const record = &unwind_info.records.items[record_id];
+                const is_dwarf = try UnwindInfo.isDwarf(record.*);
+                if (!is_dwarf) continue;
+            }
+
             var fde_record = try source_fde_record.toOwned(gpa);
             fde_record.setCiePointer(eh_frame_offset + 4 - gop.value_ptr.*);
             try fde_record.relocate(macho_file, @intCast(u32, object_id), .{
@@ -110,10 +120,8 @@ pub fn write(macho_file: *MachO, unwind_info: *UnwindInfo) !void {
             });
             eh_records.putAssumeCapacityNoClobber(eh_frame_offset, fde_record);
 
-            if (unwind_info.records_lookup.get(atom_index)) |record_id| blk: {
+            if (unwind_info.records_lookup.get(atom_index)) |record_id| {
                 const record = &unwind_info.records.items[record_id];
-                const is_dwarf = try UnwindInfo.isDwarf(record.*);
-                if (!is_dwarf) break :blk;
                 var enc = macho.UnwindEncodingArm64.fromU32(record.compactUnwindEncoding) catch
                     unreachable;
                 enc.dwarf.section_offset = @intCast(u24, eh_frame_offset);
@@ -395,10 +403,10 @@ pub fn getRelocs(
     source_offset: u32,
 ) []align(1) const macho.relocation_info {
     const object = &macho_file.objects.items[object_id];
-    const rel_pos = object.eh_frame_relocs_lookup.get(source_offset) orelse
+    const urel = object.eh_frame_relocs_lookup.get(source_offset) orelse
         return &[0]macho.relocation_info{};
     const all_relocs = object.getRelocs(object.eh_frame_sect.?);
-    return all_relocs[rel_pos.start..][0..rel_pos.len];
+    return all_relocs[urel.reloc.start..][0..urel.reloc.len];
 }
 
 pub const Iterator = struct {
