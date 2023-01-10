@@ -41,20 +41,20 @@ pub const empty: Atom = .{
     .offset = 0,
     .prev = null,
     .size = 0,
-    .sym_index = 0,
+    .sym_index = undefined,
 };
 
 /// Creates a new Atom with default fields
 pub fn create(gpa: Allocator) !*Atom {
     const atom = try gpa.create(Atom);
     atom.* = .{
+        .sym_index = undefined,
         .alignment = 0,
         .file = null,
         .next = null,
         .offset = 0,
         .prev = null,
         .size = 0,
-        .sym_index = 0,
     };
     return atom;
 }
@@ -107,22 +107,9 @@ pub fn getVA(atom: *const Atom, wasm_bin: *const Wasm, symbol: *const Symbol) u3
 /// at the calculated offset.
 pub fn resolveRelocs(atom: *Atom, wasm_bin: *const Wasm) void {
     if (atom.relocs.items.len == 0) return;
-    const sym_name = atom.symbolLoc().getName(wasm_bin);
-
-    log.debug("Resolving relocs in atom '{s}' count({d})", .{
-        sym_name,
-        atom.relocs.items.len,
-    });
 
     for (atom.relocs.items) |reloc| {
         const value = atom.relocationValue(reloc, wasm_bin);
-        log.debug("Relocating '{s}' referenced in '{s}' offset=0x{x:0>8} value={d}", .{
-            (Wasm.SymbolWithLoc{ .file = atom.file, .sym_index = reloc.index }).getName(wasm_bin),
-            sym_name,
-            reloc.offset,
-            value,
-        });
-
         switch (reloc.relocation_type) {
             .R_WASM_TABLE_INDEX_I32,
             .R_WASM_FUNCTION_OFFSET_I32,

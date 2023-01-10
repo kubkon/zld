@@ -18,6 +18,7 @@ const usage =
     \\-o [path]                          Output path of the binary
     \\--entry <entry>                    Name of entry point symbol
     \\--global-base=<value>              Value from where the global data will start
+    \\--import-symbols                   Allows references to undefined symbols
     \\--import-memory                    Import memory from the host environment
     \\--import-table                     Import function table from the host environment
     \\--export-table                     Export function table to the host environment
@@ -42,6 +43,10 @@ positionals: []const []const u8,
 entry_name: ?[]const u8 = null,
 /// Points to where the global data will start
 global_base: ?u32 = null,
+/// Allow undefined symbols to be imported into the linker.
+/// By default the linker will emit an error instead when one or multiple
+/// undefined references are found.
+import_symbols: bool = false,
 /// Tells the linker we will import memory from the host environment
 import_memory: bool = false,
 /// Tells the linker we will import the function table from the host environment
@@ -85,6 +90,7 @@ pub fn parseArgs(arena: Allocator, context: Zld.MainCtx) !Options {
     var positionals = std.ArrayList([]const u8).init(arena);
     var entry_name: ?[]const u8 = null;
     var global_base: ?u32 = null;
+    var import_symbols: bool = false;
     var import_memory: bool = false;
     var import_table: bool = false;
     var export_table: bool = false;
@@ -119,6 +125,8 @@ pub fn parseArgs(arena: Allocator, context: Zld.MainCtx) !Options {
                 "Could not parse value '{s}' into integer",
                 .{arg[index + 1 ..]},
             );
+        } else if (mem.eql(u8, arg, "--import-symbols")) {
+            import_symbols = true;
         } else if (mem.eql(u8, arg, "--import-memory")) {
             import_memory = true;
         } else if (mem.eql(u8, arg, "--import-table")) {
@@ -190,6 +198,7 @@ pub fn parseArgs(arena: Allocator, context: Zld.MainCtx) !Options {
         .positionals = positionals.items,
         .entry_name = entry_name,
         .global_base = global_base,
+        .import_symbols = import_symbols,
         .import_memory = import_memory,
         .import_table = import_table,
         .export_table = export_table,

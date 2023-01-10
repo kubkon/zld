@@ -374,6 +374,7 @@ pub fn flush(wasm: *Wasm) !void {
         try wasm.resolveSymbolsInObject(@intCast(u16, obj_idx));
     }
     try wasm.resolveSymbolsInArchives();
+    try wasm.checkUndefinedSymbols();
     for (wasm.objects.items) |*object, obj_idx| {
         try object.parseIntoAtoms(@intCast(u16, obj_idx), wasm);
     }
@@ -905,6 +906,32 @@ fn createSyntheticSymbol(wasm: *Wasm, name: []const u8, tag: Symbol.Tag) !Symbol
     return loc;
 }
 
+/// Verifies if we have any undefined, non-function symbols left.
+/// Emits an error if one or multiple undefined references are found.
+/// This will be disabled when the user passes `--import-symbols`
+fn checkUndefinedSymbols(wasm: *const Wasm) !void {
+    if (wasm.options.import_symbols) return;
+
+    var found_undefined_symbols = false;
+    for (wasm.undefs.values()) |undef| {
+        const symbol = undef.getSymbol(wasm);
+        if (symbol.tag == .data) {
+            found_undefined_symbols = true;
+            const file_name = wasm.objects.items[undef.file.?].name;
+            const obj = wasm.objects.items[undef.file.?];
+            const name_index = if (symbol.tag == .function) name_index: {
+                break :name_index obj.findImport(symbol.tag.externalType(), symbol.index).name;
+            } else symbol.name;
+            const import_name = obj.string_table.get(name_index);
+            log.err("could not resolve undefined symbol '{s}'", .{import_name});
+            log.err("  defined in '{s}'", .{file_name});
+        }
+    }
+    if (found_undefined_symbols) {
+        return error.UndefinedSymbol;
+    }
+}
+
 /// Obtains all initfuncs from each object file, verifies its function signature,
 /// and then appends it to our final `init_funcs` list.
 /// After all functions have been inserted, the functions will be ordered based
@@ -1257,22 +1284,21 @@ fn allocateAtoms(wasm: *Wasm) !void {
         var offset: u32 = 0;
         while (true) {
             const symbol_loc = atom.symbolLoc();
-            if (!wasm.resolved_symbols.contains(symbol_loc)) {
-                atom = atom.next orelse break;
-                continue;
+            if (wasm.code_section_index) |index| {
+                if (entry.key_ptr.* == index) {
+                    if (!wasm.resolved_symbols.contains(symbol_loc)) {
+                        atom = atom.next orelse break;
+                        continue;
+                    }
+                }
             }
-            offset = std.mem.alignForwardGeneric(u32, offset, atom.alignment);
+            // offset = std.mem.alignForwardGeneric(u32, offset, atom.alignment);
             atom.offset = offset;
-            log.debug("Atom '{s}' allocated from 0x{x:0>8} to 0x{x:0>8} size={d}", .{
-                symbol_loc.getName(wasm),
-                offset,
-                offset + atom.size,
-                atom.size,
-            });
             offset += atom.size;
             atom = atom.next orelse break;
         }
-        segment.size = std.mem.alignForwardGeneric(u32, offset, segment.alignment);
+        // segment.size = std.mem.alignForwardGeneric(u32, offset, segment.alignment);
+        segment.size = offset;
     }
 }
 

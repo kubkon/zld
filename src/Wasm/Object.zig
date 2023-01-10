@@ -109,7 +109,7 @@ const RelocatableData = struct {
         };
     }
 
-    /// Returns the index within a section itrelocatable_data, or in case of a debug section,
+    /// Returns the index within a section, or in case of a debug section,
     /// returns the section index within the object file.
     pub fn getIndex(relocatable_data: RelocatableData) u32 {
         if (relocatable_data.type == .debug) return relocatable_data.section_index;
@@ -813,22 +813,15 @@ fn Parser(comptime ReaderType: type) type {
                 },
                 else => {
                     symbol.index = try leb.readULEB128(u32, reader);
-                    var maybe_import: ?types.Import = null;
-
                     const is_undefined = symbol.isUndefined();
-                    if (is_undefined) {
-                        maybe_import = parser.object.findImport(symbol.tag.externalType(), symbol.index);
-                    }
                     const explicit_name = symbol.hasFlag(.WASM_SYM_EXPLICIT_NAME);
-                    if (!(is_undefined and !explicit_name)) {
+                    symbol.name = if (!is_undefined or (is_undefined and explicit_name)) name: {
                         const name_len = try leb.readULEB128(u32, reader);
                         const name = try gpa.alloc(u8, name_len);
                         defer gpa.free(name);
                         try reader.readNoEof(name);
-                        symbol.name = try parser.object.string_table.put(gpa, name);
-                    } else {
-                        symbol.name = maybe_import.?.name;
-                    }
+                        break :name try parser.object.string_table.put(gpa, name);
+                    } else parser.object.findImport(symbol.tag.externalType(), symbol.index).name;
                 },
             }
             return symbol;
@@ -927,12 +920,8 @@ pub fn parseIntoAtoms(object: *Object, object_index: u16, wasm_bin: *Wasm) !void
             continue; // found unknown section, so skip parsing into atom as we do not know how to handle it.
         };
 
-        const atom = try wasm_bin.base.allocator.create(Atom);
-        atom.* = Atom.empty;
-        errdefer {
-            atom.deinit(wasm_bin.base.allocator);
-            wasm_bin.base.allocator.destroy(atom);
-        }
+        const atom = try Atom.create(wasm_bin.base.allocator);
+        errdefer atom.deinit(wasm_bin.base.allocator);
 
         try wasm_bin.managed_atoms.append(wasm_bin.base.allocator, atom);
         atom.file = object_index;
@@ -975,6 +964,9 @@ pub fn parseIntoAtoms(object: *Object, object_index: u16, wasm_bin: *Wasm) !void
                     atom.sym_index = idx;
                 }
             }
+        } else {
+            // ensure we do not try to read the symbol index of an atom that's not represented by a symbol.
+            atom.sym_index = undefined;
         }
 
         const segment: *Wasm.Segment = &wasm_bin.segments.items[final_index];
@@ -983,7 +975,6 @@ pub fn parseIntoAtoms(object: *Object, object_index: u16, wasm_bin: *Wasm) !void
         }
 
         try wasm_bin.appendAtomAtIndex(wasm_bin.base.allocator, final_index, atom);
-        log.debug("Parsed into atom: '{s}' at segment index {d}", .{ object.string_table.get(object.symtable[atom.sym_index].name), final_index });
     }
 }
 
