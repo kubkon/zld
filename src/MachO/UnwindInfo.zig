@@ -154,7 +154,7 @@ const Page = struct {
             },
             .compressed => {
                 const entry_offset = @sizeOf(macho.unwind_info_compressed_second_level_page_header) +
-                    page.page_encodings_count * @sizeOf(u32);
+                    @intCast(u16, page.page_encodings_count) * @sizeOf(u32);
                 try writer.writeStruct(macho.unwind_info_compressed_second_level_page_header{
                     .entryPageOffset = entry_offset,
                     .entryCount = page.count,
@@ -459,7 +459,7 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
 
         var i: u7 = 0;
         while (i < slice.len) : (i += 1) {
-            if (i > max_common_encodings) break;
+            if (i >= max_common_encodings) break;
             info.appendCommonEncoding(slice[i].id);
             log.debug("adding common encoding: {d} => 0x{x:0>8}", .{
                 i,
@@ -490,8 +490,8 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
 
                 if (record.rangeStart >= range_start_max) {
                     break;
-                } else if (info.getCommonEncoding(enc) != null or
-                    page.getPageEncoding(info, enc) != null and !is_dwarf)
+                } else if ((info.getCommonEncoding(enc) != null or
+                    page.getPageEncoding(info, enc) != null) and !is_dwarf)
                 {
                     i += 1;
                     space_left -= 1;
@@ -509,10 +509,10 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
 
             if (i < info.records.items.len and page.count < max_regular_second_level_entries) {
                 page.kind = .regular;
-                page.count = @min(
+                page.count = @intCast(u16, @min(
                     max_regular_second_level_entries,
-                    @intCast(u16, info.records.items.len - page.start),
-                );
+                    info.records.items.len - page.start,
+                ));
                 i = page.start + page.count;
             } else {
                 page.kind = .compressed;
