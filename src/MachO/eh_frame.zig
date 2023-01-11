@@ -42,16 +42,49 @@ pub fn scanRelocs(macho_file: *MachO) !void {
     }
 }
 
-pub fn calcSectionSize(macho_file: *MachO) void {
+pub fn calcSectionSize(macho_file: *MachO, unwind_info: *const UnwindInfo) !void {
     const sect_id = macho_file.getSectionByName("__TEXT", "__eh_frame") orelse return;
     const sect = &macho_file.sections.items(.header)[sect_id];
+    sect.@"align" = 3;
     sect.size = 0;
 
-    for (macho_file.objects.items) |object| {
-        const source_sect = object.eh_frame_sect orelse continue;
-        sect.size += source_sect.size;
+    const gpa = macho_file.base.allocator;
+    var size: u32 = 0;
+
+    for (macho_file.objects.items) |*object| {
+        var cies = std.AutoHashMap(u32, u32).init(gpa);
+        defer cies.deinit();
+
+        var eh_it = object.getEhFrameRecordsIterator();
+
+        for (object.eh_frame_records_lookup.keys()) |atom_index| {
+            const fde_record_offset = object.eh_frame_records_lookup.get(atom_index).?; // TODO turn into an error
+            if (object.eh_frame_relocs_lookup.get(fde_record_offset).?.dead) continue;
+            // TODO skip this check if no __compact_unwind is present
+            if (unwind_info.records_lookup.get(atom_index)) |record_id| {
+                const record = &unwind_info.records.items[record_id];
+                const is_dwarf = try UnwindInfo.isDwarf(record.*);
+                if (!is_dwarf) continue;
+            }
+
+            eh_it.seekTo(fde_record_offset);
+            const source_fde_record = (try eh_it.next()).?;
+
+            const cie_ptr = source_fde_record.getCiePointer();
+            const cie_offset = fde_record_offset + 4 - cie_ptr;
+
+            const gop = try cies.getOrPut(cie_offset);
+            if (!gop.found_existing) {
+                eh_it.seekTo(cie_offset);
+                const source_cie_record = (try eh_it.next()).?;
+                gop.value_ptr.* = size;
+                size += source_cie_record.getSize();
+            }
+            size += source_fde_record.getSize();
+        }
     }
-    sect.@"align" = 3;
+
+    sect.size = size;
 }
 
 pub fn write(macho_file: *MachO, unwind_info: *UnwindInfo) !void {
@@ -82,6 +115,12 @@ pub fn write(macho_file: *MachO, unwind_info: *UnwindInfo) !void {
         for (object.eh_frame_records_lookup.keys()) |atom_index| {
             const fde_record_offset = object.eh_frame_records_lookup.get(atom_index).?; // TODO turn into an error
             if (object.eh_frame_relocs_lookup.get(fde_record_offset).?.dead) continue;
+            // TODO skip this check if no __compact_unwind is present
+            if (unwind_info.records_lookup.get(atom_index)) |record_id| {
+                const record = &unwind_info.records.items[record_id];
+                const is_dwarf = try UnwindInfo.isDwarf(record.*);
+                if (!is_dwarf) continue;
+            }
 
             eh_it.seekTo(fde_record_offset);
             const source_fde_record = (try eh_it.next()).?;
@@ -102,13 +141,6 @@ pub fn write(macho_file: *MachO, unwind_info: *UnwindInfo) !void {
                 eh_records.putAssumeCapacityNoClobber(eh_frame_offset, cie_record);
                 gop.value_ptr.* = eh_frame_offset;
                 eh_frame_offset += cie_record.getSize();
-            }
-
-            // TODO skip this if no __compact_unwind is present
-            if (unwind_info.records_lookup.get(atom_index)) |record_id| {
-                const record = &unwind_info.records.items[record_id];
-                const is_dwarf = try UnwindInfo.isDwarf(record.*);
-                if (!is_dwarf) continue;
             }
 
             var fde_record = try source_fde_record.toOwned(gpa);

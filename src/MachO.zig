@@ -386,10 +386,11 @@ pub fn flush(self: *MachO) !void {
 
     try self.calcSectionSizes();
 
-    eh_frame.calcSectionSize(self);
     var unwind_info = UnwindInfo{ .gpa = self.base.allocator };
     defer unwind_info.deinit();
     try unwind_info.collect(self);
+
+    try eh_frame.calcSectionSize(self, &unwind_info);
     try unwind_info.calcSectionSize(self);
 
     try self.pruneAndSortSections();
