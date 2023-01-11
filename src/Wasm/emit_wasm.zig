@@ -153,10 +153,6 @@ pub fn emit(wasm: *Wasm) !void {
 
             var current_offset: u32 = 0;
             while (true) {
-                if (!wasm.resolved_symbols.contains(atom.symbolLoc())) {
-                    atom = atom.next orelse break;
-                    continue;
-                }
                 atom.resolveRelocs(wasm);
                 // TODO: Verify if this is faster than allocating segment's size
                 // Setting all zeroes, memcopy all segments and then writing.

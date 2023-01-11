@@ -41,20 +41,20 @@ pub const empty: Atom = .{
     .offset = 0,
     .prev = null,
     .size = 0,
-    .sym_index = 0,
+    .sym_index = undefined,
 };
 
 /// Creates a new Atom with default fields
 pub fn create(gpa: Allocator) !*Atom {
     const atom = try gpa.create(Atom);
     atom.* = .{
+        .sym_index = undefined,
         .alignment = 0,
         .file = null,
         .next = null,
         .offset = 0,
         .prev = null,
         .size = 0,
-        .sym_index = 0,
     };
     return atom;
 }
@@ -95,8 +95,9 @@ pub fn symbolLoc(atom: *const Atom) Wasm.SymbolWithLoc {
 pub fn getVA(atom: *const Atom, wasm_bin: *const Wasm, symbol: *const Symbol) u32 {
     if (symbol.tag == .function) return atom.offset;
     std.debug.assert(symbol.tag == .data);
+    const file_index = atom.file orelse return atom.offset; // offset contains VA for synthetic atoms
     const merge_segment = wasm_bin.options.merge_data_segments;
-    const segment_info = wasm_bin.objects.items[atom.file.?].segment_info;
+    const segment_info = wasm_bin.objects.items[file_index].segment_info;
     const segment_name = segment_info[symbol.index].outputName(merge_segment);
     const segment_index = wasm_bin.data_segments.get(segment_name).?;
     const segment = wasm_bin.segments.items[segment_index];
@@ -107,22 +108,9 @@ pub fn getVA(atom: *const Atom, wasm_bin: *const Wasm, symbol: *const Symbol) u3
 /// at the calculated offset.
 pub fn resolveRelocs(atom: *Atom, wasm_bin: *const Wasm) void {
     if (atom.relocs.items.len == 0) return;
-    const sym_name = atom.symbolLoc().getName(wasm_bin);
-
-    log.debug("Resolving relocs in atom '{s}' count({d})", .{
-        sym_name,
-        atom.relocs.items.len,
-    });
 
     for (atom.relocs.items) |reloc| {
         const value = atom.relocationValue(reloc, wasm_bin);
-        log.debug("Relocating '{s}' referenced in '{s}' offset=0x{x:0>8} value={d}", .{
-            (Wasm.SymbolWithLoc{ .file = atom.file, .sym_index = reloc.index }).getName(wasm_bin),
-            sym_name,
-            reloc.offset,
-            value,
-        });
-
         switch (reloc.relocation_type) {
             .R_WASM_TABLE_INDEX_I32,
             .R_WASM_FUNCTION_OFFSET_I32,
