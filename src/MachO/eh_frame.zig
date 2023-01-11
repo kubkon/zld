@@ -57,15 +57,12 @@ pub fn calcSectionSize(macho_file: *MachO, unwind_info: *const UnwindInfo) !void
 
         var eh_it = object.getEhFrameRecordsIterator();
 
-        for (object.eh_frame_records_lookup.keys()) |atom_index| {
-            const fde_record_offset = object.eh_frame_records_lookup.get(atom_index).?; // TODO turn into an error
+        for (object.exec_atoms.items) |atom_index| {
+            const fde_record_offset = object.eh_frame_records_lookup.get(atom_index) orelse continue;
             if (object.eh_frame_relocs_lookup.get(fde_record_offset).?.dead) continue;
-            // TODO skip this check if no __compact_unwind is present
-            if (unwind_info.records_lookup.get(atom_index)) |record_id| {
-                const record = &unwind_info.records.items[record_id];
-                const is_dwarf = try UnwindInfo.isDwarf(record.*);
-                if (!is_dwarf) continue;
-            }
+
+            const record_id = unwind_info.records_lookup.get(atom_index) orelse continue;
+            const record = &unwind_info.records.items[record_id];
 
             eh_it.seekTo(fde_record_offset);
             const source_fde_record = (try eh_it.next()).?;
@@ -80,6 +77,11 @@ pub fn calcSectionSize(macho_file: *MachO, unwind_info: *const UnwindInfo) !void
                 gop.value_ptr.* = size;
                 size += source_cie_record.getSize();
             }
+
+            // TODO skip this check if no __compact_unwind is present
+            const is_dwarf = try UnwindInfo.isDwarf(record.*);
+            if (!is_dwarf) continue;
+
             size += source_fde_record.getSize();
         }
     }
@@ -112,15 +114,12 @@ pub fn write(macho_file: *MachO, unwind_info: *UnwindInfo) !void {
 
         var eh_it = object.getEhFrameRecordsIterator();
 
-        for (object.eh_frame_records_lookup.keys()) |atom_index| {
-            const fde_record_offset = object.eh_frame_records_lookup.get(atom_index).?; // TODO turn into an error
+        for (object.exec_atoms.items) |atom_index| {
+            const fde_record_offset = object.eh_frame_records_lookup.get(atom_index) orelse continue;
             if (object.eh_frame_relocs_lookup.get(fde_record_offset).?.dead) continue;
-            // TODO skip this check if no __compact_unwind is present
-            if (unwind_info.records_lookup.get(atom_index)) |record_id| {
-                const record = &unwind_info.records.items[record_id];
-                const is_dwarf = try UnwindInfo.isDwarf(record.*);
-                if (!is_dwarf) continue;
-            }
+
+            const record_id = unwind_info.records_lookup.get(atom_index) orelse continue;
+            const record = &unwind_info.records.items[record_id];
 
             eh_it.seekTo(fde_record_offset);
             const source_fde_record = (try eh_it.next()).?;
@@ -143,6 +142,10 @@ pub fn write(macho_file: *MachO, unwind_info: *UnwindInfo) !void {
                 eh_frame_offset += cie_record.getSize();
             }
 
+            // TODO skip this check if no __compact_unwind is present
+            const is_dwarf = try UnwindInfo.isDwarf(record.*);
+            if (!is_dwarf) continue;
+
             var fde_record = try source_fde_record.toOwned(gpa);
             fde_record.setCiePointer(eh_frame_offset + 4 - gop.value_ptr.*);
             try fde_record.relocate(macho_file, @intCast(u32, object_id), .{
@@ -152,24 +155,22 @@ pub fn write(macho_file: *MachO, unwind_info: *UnwindInfo) !void {
             });
             eh_records.putAssumeCapacityNoClobber(eh_frame_offset, fde_record);
 
-            if (unwind_info.records_lookup.get(atom_index)) |record_id| {
-                const record = &unwind_info.records.items[record_id];
-                var enc = macho.UnwindEncodingArm64.fromU32(record.compactUnwindEncoding) catch
-                    unreachable;
-                enc.dwarf.section_offset = @intCast(u24, eh_frame_offset);
-                record.compactUnwindEncoding = enc.toU32();
+            var enc = macho.UnwindEncodingArm64.fromU32(record.compactUnwindEncoding) catch
+                unreachable;
+            enc.dwarf.section_offset = @intCast(u24, eh_frame_offset);
+            record.compactUnwindEncoding = enc.toU32();
 
-                const cie_record = eh_records.get(
-                    eh_frame_offset + 4 - fde_record.getCiePointer(),
-                ).?;
-                const lsda_ptr = try fde_record.getLsdaPointer(cie_record, .{
-                    .base_addr = sect.addr,
-                    .base_offset = eh_frame_offset,
-                });
-                if (lsda_ptr) |ptr| {
-                    record.lsda = ptr - seg.vmaddr;
-                }
+            const cie_record = eh_records.get(
+                eh_frame_offset + 4 - fde_record.getCiePointer(),
+            ).?;
+            const lsda_ptr = try fde_record.getLsdaPointer(cie_record, .{
+                .base_addr = sect.addr,
+                .base_offset = eh_frame_offset,
+            });
+            if (lsda_ptr) |ptr| {
+                record.lsda = ptr - seg.vmaddr;
             }
+
             eh_frame_offset += fde_record.getSize();
         }
     }
@@ -245,9 +246,7 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
                             rec.data,
                             @intCast(i32, source_offset) + 4,
                         );
-                        const object = macho_file.objects.items[object_id];
-                        const global = object.getGlobal(macho_file, target.sym_index) orelse target;
-                        return global;
+                        return target;
                     },
                     else => unreachable,
                 }
@@ -281,9 +280,7 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
                         // Address of the __eh_frame in the source object file
                     },
                     .ARM64_RELOC_POINTER_TO_GOT => {
-                        const object = macho_file.objects.items[object_id];
-                        const global = object.getGlobal(macho_file, target.sym_index) orelse target;
-                        const target_addr = try Atom.getRelocTargetAddress(macho_file, global, true, false);
+                        const target_addr = try Atom.getRelocTargetAddress(macho_file, target, true, false);
                         const result = math.cast(i32, @intCast(i64, target_addr) - @intCast(i64, source_addr)) orelse
                             return error.Overflow;
                         mem.writeIntLittle(i32, rec.data[rel_offset..][0..4], result);

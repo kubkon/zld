@@ -693,14 +693,12 @@ fn parseEhFrameSection(self: *Object, macho_file: *MachO, object_id: u32) !void 
                 @intCast(i32, offset),
             );
             log.debug("FDE at offset {x} tracks {s}", .{ offset, macho_file.getSymbolName(target) });
-            const global = self.getGlobal(macho_file, target.sym_index) orelse target;
-            if (global.getFile() != object_id) {
+            if (target.getFile() != object_id) {
                 self.eh_frame_relocs_lookup.getPtr(offset).?.dead = true;
+            } else {
+                const atom_index = self.getAtomIndexForSymbol(target.sym_index).?;
+                self.eh_frame_records_lookup.putAssumeCapacityNoClobber(atom_index, offset);
             }
-
-            assert(target.getFile() == object_id);
-            const atom_index = self.getAtomIndexForSymbol(target.sym_index).?;
-            self.eh_frame_records_lookup.putAssumeCapacityNoClobber(atom_index, offset);
         }
     }
 }
@@ -756,13 +754,12 @@ fn parseUnwindInfo(self: *Object, macho_file: *MachO, object_id: u32) !void {
             mem.asBytes(&record),
             @intCast(i32, offset),
         );
-        const global = self.getGlobal(macho_file, target.sym_index) orelse target;
-        if (global.getFile() != object_id) {
+        if (target.getFile() != object_id) {
             self.unwind_relocs_lookup[record_id].dead = true;
+        } else {
+            const atom_index = self.getAtomIndexForSymbol(target.sym_index).?;
+            self.unwind_records_lookup.putAssumeCapacityNoClobber(atom_index, @intCast(u32, record_id));
         }
-
-        const atom_index = self.getAtomIndexForSymbol(target.sym_index).?;
-        self.unwind_records_lookup.putAssumeCapacityNoClobber(atom_index, @intCast(u32, record_id));
     }
 }
 
@@ -918,10 +915,4 @@ pub fn getEhFrameRecordsIterator(self: Object) eh_frame.Iterator {
     const sect = self.eh_frame_sect orelse return .{ .data = &[0]u8{} };
     const data = self.getSectionContents(sect);
     return .{ .data = data };
-}
-
-pub fn getGlobal(self: Object, macho_file: *MachO, sym_index: u32) ?SymbolWithLoc {
-    if (self.globals_lookup[sym_index] == -1) return null;
-    const global_index = @intCast(u32, self.globals_lookup[sym_index]);
-    return macho_file.globals.items[global_index];
 }
