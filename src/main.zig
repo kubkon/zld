@@ -19,39 +19,41 @@ const usage =
 
 var log_scopes: std.ArrayList([]const u8) = std.ArrayList([]const u8).init(gpa);
 
-pub fn log(
-    comptime level: std.log.Level,
-    comptime scope: @TypeOf(.EnumLiteral),
-    comptime format: []const u8,
-    args: anytype,
-) void {
-    // Hide debug messages unless:
-    // * logging enabled with `-Dlog`.
-    // * the --debug-log arg for the scope has been provided
-    if (@enumToInt(level) > @enumToInt(std.log.level) or
-        @enumToInt(level) > @enumToInt(std.log.Level.info))
-    {
-        if (!build_options.enable_logging) return;
+pub const std_options = struct {
+    pub fn logFn(
+        comptime level: std.log.Level,
+        comptime scope: @TypeOf(.EnumLiteral),
+        comptime format: []const u8,
+        args: anytype,
+    ) void {
+        // Hide debug messages unless:
+        // * logging enabled with `-Dlog`.
+        // * the --debug-log arg for the scope has been provided
+        if (@enumToInt(level) > @enumToInt(std.options.log_level) or
+            @enumToInt(level) > @enumToInt(std.log.Level.info))
+        {
+            if (!build_options.enable_logging) return;
 
-        const scope_name = @tagName(scope);
-        for (log_scopes.items) |log_scope| {
-            if (mem.eql(u8, log_scope, scope_name)) break;
-        } else return;
+            const scope_name = @tagName(scope);
+            for (log_scopes.items) |log_scope| {
+                if (mem.eql(u8, log_scope, scope_name)) break;
+            } else return;
+        }
+
+        // We only recognize 4 log levels in this application.
+        const level_txt = switch (level) {
+            .err => "error",
+            .warn => "warning",
+            .info => "info",
+            .debug => "debug",
+        };
+        const prefix1 = level_txt;
+        const prefix2 = if (scope == .default) ": " else "(" ++ @tagName(scope) ++ "): ";
+
+        // Print the message to stderr, silently ignoring any errors
+        std.debug.print(prefix1 ++ prefix2 ++ format ++ "\n", args);
     }
-
-    // We only recognize 4 log levels in this application.
-    const level_txt = switch (level) {
-        .err => "error",
-        .warn => "warning",
-        .info => "info",
-        .debug => "debug",
-    };
-    const prefix1 = level_txt;
-    const prefix2 = if (scope == .default) ": " else "(" ++ @tagName(scope) ++ "): ";
-
-    // Print the message to stderr, silently ignoring any errors
-    std.debug.print(prefix1 ++ prefix2 ++ format ++ "\n", args);
-}
+};
 
 pub fn main() !void {
     const all_args = try std.process.argsAlloc(gpa);
