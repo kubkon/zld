@@ -95,8 +95,9 @@ pub fn symbolLoc(atom: *const Atom) Wasm.SymbolWithLoc {
 pub fn getVA(atom: *const Atom, wasm_bin: *const Wasm, symbol: *const Symbol) u32 {
     if (symbol.tag == .function) return atom.offset;
     std.debug.assert(symbol.tag == .data);
+    const file_index = atom.file orelse return atom.offset; // offset contains VA for synthetic atoms
     const merge_segment = wasm_bin.options.merge_data_segments;
-    const segment_info = wasm_bin.objects.items[atom.file.?].segment_info;
+    const segment_info = wasm_bin.objects.items[file_index].segment_info;
     const segment_name = segment_info[symbol.index].outputName(merge_segment);
     const segment_index = wasm_bin.data_segments.get(segment_name).?;
     const segment = wasm_bin.segments.items[segment_index];
