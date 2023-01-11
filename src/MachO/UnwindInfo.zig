@@ -670,7 +670,12 @@ pub fn write(info: *UnwindInfo, macho_file: *MachO) !void {
     }
 
     for (info.pages.items) |page| {
+        const start = cwriter.bytes_written;
         try page.write(info, writer);
+        const nwritten = cwriter.bytes_written - start;
+        if (nwritten < second_level_page_bytes) {
+            try writer.writeByteNTimes(0, second_level_page_bytes - nwritten);
+        }
     }
 
     const padding = buffer.items.len - cwriter.bytes_written;
