@@ -31,7 +31,7 @@ personalities: [max_personalities]MachO.SymbolWithLoc = undefined,
 personalities_count: u2 = 0,
 
 /// List of common encodings sorted in descending order with the most common first.
-common_encodings: [max_common_encodings]macho.compact_unwind_encoding_t = undefined,
+common_encodings: [max_common_encodings]RecordIndex = undefined,
 common_encodings_count: u7 = 0,
 
 /// List of record indexes containing an LSDA pointer.
@@ -373,29 +373,82 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
     // Calculate common encodings
     {
         const CommonEncWithCount = struct {
-            enc: macho.compact_unwind_encoding_t,
+            id: RecordIndex,
             count: u32,
 
-            fn greaterThan(ctx: void, lhs: @This(), rhs: @This()) bool {
-                _ = ctx;
+            fn greaterThan(ctx: *const UnwindInfo, lhs: @This(), rhs: @This()) bool {
+                if (lhs.count == rhs.count) {
+                    const lhs_rec = ctx.records.items[lhs.id];
+                    const rhs_rec = ctx.records.items[rhs.id];
+                    return lhs_rec.rangeStart > rhs_rec.rangeStart;
+                }
                 return lhs.count > rhs.count;
             }
         };
 
-        var common_encodings_counts = std.AutoArrayHashMap(
-            macho.compact_unwind_encoding_t,
+        const IndexContext = struct {
+            info: *const UnwindInfo,
+
+            pub fn hash(ctx: @This(), key: RecordIndex) u32 {
+                const rec = ctx.info.records.items[key];
+                return rec.compactUnwindEncoding;
+            }
+
+            pub fn eql(ctx: @This(), key1: RecordIndex, key2: RecordIndex, b_index: usize) bool {
+                _ = b_index;
+                const enc1 = ctx.info.records.items[key1].compactUnwindEncoding;
+                const enc2 = ctx.info.records.items[key2].compactUnwindEncoding;
+                if (enc1 > 0) {
+                    const typed = macho.UnwindEncodingArm64.fromU32(enc1) catch unreachable; // TODO rework interface
+                    if (typed == .dwarf) return false;
+                }
+                if (enc2 > 0) {
+                    const typed = macho.UnwindEncodingArm64.fromU32(enc2) catch unreachable; // TODO rework interface
+                    if (typed == .dwarf) return false;
+                }
+                return enc1 == enc2;
+            }
+        };
+
+        const IndexAdapter = struct {
+            info: *const UnwindInfo,
+
+            pub fn hash(ctx: @This(), key: macho.compact_unwind_encoding_t) u32 {
+                _ = ctx;
+                return key;
+            }
+
+            pub fn eql(ctx: @This(), key1: macho.compact_unwind_encoding_t, key2: RecordIndex, b_index: usize) bool {
+                _ = b_index;
+                if (key1 > 0) {
+                    const typed = macho.UnwindEncodingArm64.fromU32(key1) catch unreachable; // TODO rework interface
+                    if (typed == .dwarf) return false;
+                }
+                const enc = ctx.info.records.items[key2].compactUnwindEncoding;
+                if (enc > 0) {
+                    const typed = macho.UnwindEncodingArm64.fromU32(enc) catch unreachable; // TODO rework interface
+                    if (typed == .dwarf) return false;
+                }
+                return key1 == enc;
+            }
+        };
+
+        var common_encodings_counts = std.ArrayHashMap(
+            RecordIndex,
             CommonEncWithCount,
-        ).init(info.gpa);
+            IndexContext,
+            false,
+        ).initContext(info.gpa, .{ .info = info });
         defer common_encodings_counts.deinit();
 
-        for (info.records.items) |record| {
+        for (info.records.items) |record, record_index| {
             assert(!isNull(record));
-            if (try isDwarf(record)) continue;
             const enc = record.compactUnwindEncoding;
-            const gop = try common_encodings_counts.getOrPut(enc);
+            const gop = try common_encodings_counts.getOrPutAdapted(enc, IndexAdapter{ .info = info });
             if (!gop.found_existing) {
+                gop.key_ptr.* = @intCast(RecordIndex, record_index);
                 gop.value_ptr.* = .{
-                    .enc = enc,
+                    .id = @intCast(RecordIndex, record_index),
                     .count = 0,
                 };
             }
@@ -403,15 +456,16 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
         }
 
         var slice = common_encodings_counts.values();
-        std.sort.sort(CommonEncWithCount, slice, {}, CommonEncWithCount.greaterThan);
+        std.sort.sort(CommonEncWithCount, slice, info, CommonEncWithCount.greaterThan);
 
         var i: u7 = 0;
-        while (i < max_common_encodings) : (i += 1) {
-            if (i >= slice.len) break;
-            if (slice[i].count < 2) continue;
-            info.common_encodings[i] = slice[i].enc;
-            info.common_encodings_count += 1;
-            log.debug("adding common encoding: {d} => 0x{x:0>8}", .{ i, info.common_encodings[i] });
+        while (i < slice.len) : (i += 1) {
+            if (i > max_common_encodings) break;
+            info.appendCommonEncoding(slice[i].id);
+            log.debug("adding common encoding: {d} => 0x{x:0>8}", .{
+                i,
+                info.records.items[info.common_encodings[i]].compactUnwindEncoding,
+            });
         }
     }
 
@@ -577,7 +631,12 @@ pub fn write(info: *UnwindInfo, macho_file: *MachO) !void {
         .indexSectionOffset = indexes_offset,
         .indexCount = indexes_count,
     });
-    try writer.writeAll(mem.sliceAsBytes(info.common_encodings[0..info.common_encodings_count]));
+
+    for (info.common_encodings[0..info.common_encodings_count]) |record_id| {
+        const enc = info.records.items[record_id].compactUnwindEncoding;
+        try writer.writeIntLittle(u32, enc);
+    }
+
     try writer.writeAll(mem.sliceAsBytes(personalities[0..info.personalities_count]));
 
     const pages_base_offset = @intCast(u32, size - (info.pages.items.len * second_level_page_bytes));
@@ -757,11 +816,19 @@ inline fn nullRecord() macho.compact_unwind_entry {
     };
 }
 
+fn appendCommonEncoding(info: *UnwindInfo, record_id: RecordIndex) void {
+    assert(info.common_encodings_count <= max_common_encodings);
+    info.common_encodings[info.common_encodings_count] = record_id;
+    info.common_encodings_count += 1;
+}
+
 fn getCommonEncoding(info: UnwindInfo, enc: macho.compact_unwind_encoding_t) ?u7 {
     comptime var index: u7 = 0;
     inline while (index < max_common_encodings) : (index += 1) {
         if (index >= info.common_encodings_count) return null;
-        if (info.common_encodings[index] == enc) {
+        const record_id = info.common_encodings[index];
+        const record = info.records.items[record_id];
+        if (record.compactUnwindEncoding == enc) {
             return index;
         }
     }
