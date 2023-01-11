@@ -199,6 +199,8 @@ pub fn deinit(info: *UnwindInfo) void {
 }
 
 pub fn scanRelocs(macho_file: *MachO) !void {
+    if (macho_file.getSectionByName("__TEXT", "__unwind_info") == null) return;
+
     for (macho_file.objects.items) |*object, object_id| {
         const unwind_records = object.getUnwindRecords();
         for (object.exec_atoms.items) |atom_index| {
@@ -230,14 +232,13 @@ pub fn scanRelocs(macho_file: *MachO) !void {
 }
 
 pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
+    if (macho_file.getSectionByName("__TEXT", "__unwind_info") == null) return;
+
     var records = std.ArrayList(macho.compact_unwind_entry).init(info.gpa);
     defer records.deinit();
 
     var atom_indexes = std.ArrayList(AtomIndex).init(info.gpa);
     defer atom_indexes.deinit();
-
-    var cies = std.AutoHashMap(u32, void).init(info.gpa);
-    defer cies.deinit();
 
     // TODO handle dead stripping
     for (macho_file.objects.items) |*object, object_id| {
@@ -334,8 +335,6 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
 
             records.appendAssumeCapacity(record);
             atom_indexes.appendAssumeCapacity(atom_index);
-
-            cies.clearRetainingCapacity();
         }
     }
 
