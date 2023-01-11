@@ -369,12 +369,12 @@ pub fn dataCount(wasm: Wasm) u32 {
 pub fn flush(wasm: *Wasm) !void {
     try wasm.parsePositionals(wasm.options.positionals);
     try wasm.setupLinkerSymbols();
-    try wasm.setupInitFunctions();
     for (wasm.objects.items) |_, obj_idx| {
         try wasm.resolveSymbolsInObject(@intCast(u16, obj_idx));
     }
     try wasm.resolveSymbolsInArchives();
     try wasm.resolveLazySymbols();
+    try wasm.setupInitFunctions();
     try wasm.checkUndefinedSymbols();
     for (wasm.objects.items) |*object, obj_idx| {
         try object.parseIntoAtoms(@intCast(u16, obj_idx), wasm);
@@ -963,8 +963,10 @@ fn setupInitFunctions(wasm: *Wasm) !void {
         try wasm.init_funcs.ensureUnusedCapacity(wasm.base.allocator, object.init_funcs.len);
         for (object.init_funcs) |init_func| {
             const symbol = object.symtable[init_func.symbol_index];
-            const func = object.functions[symbol.index];
-            const ty: std.wasm.Type = object.func_types[func.type_index];
+            const func_index = symbol.index - object.importedCountByKind(.function);
+            const func = object.functions[func_index];
+            const ty = object.func_types[func.type_index];
+
             if (ty.params.len != 0) {
                 log.err("constructor functions cannot take arguments: '{s}'", .{object.string_table.get(symbol.name)});
                 return error.InvalidInitFunc;
@@ -996,9 +998,10 @@ fn initializeCallCtorsFunction(wasm: *Wasm) !void {
     try leb.writeULEB128(writer, @as(u32, 0));
 
     // call constructors
+    const import_count = wasm.imports.functionCount();
     for (wasm.init_funcs.items) |init_func_loc| {
         const symbol = init_func_loc.getSymbol(wasm);
-        const func = wasm.functions.items.values()[symbol.index];
+        const func = wasm.functions.items.values()[symbol.index - import_count];
         const ty = wasm.func_types.items.items[func.type_index];
 
         // Call function by its function index
