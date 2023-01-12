@@ -2388,14 +2388,14 @@ fn writeLinkeditSegmentData(self: *MachO) !void {
 fn collectRebaseDataFromContainer(
     self: *MachO,
     sect_id: u8,
-    pointers: *std.ArrayList(bind.Pointer),
+    rebase: *bind.Rebase,
     container: anytype,
 ) !void {
     const slice = self.sections.slice();
     const segment_index = slice.items(.segment_index)[sect_id];
     const seg = self.getSegment(sect_id);
 
-    try pointers.ensureUnusedCapacity(container.items.len);
+    try rebase.entries.ensureUnusedCapacity(self.base.allocator, container.items.len);
 
     for (container.items) |entry| {
         const target_sym = entry.getTargetSymbol(self);
@@ -2404,23 +2404,24 @@ fn collectRebaseDataFromContainer(
         const atom_sym = entry.getAtomSymbol(self);
         const base_offset = atom_sym.n_value - seg.vmaddr;
 
-        log.debug("    | rebase at {x}", .{base_offset});
+        log.debug("    | rebase at {x}", .{atom_sym.n_value});
 
-        pointers.appendAssumeCapacity(.{
+        rebase.entries.appendAssumeCapacity(.{
             .offset = base_offset,
             .segment_id = segment_index,
         });
     }
 }
 
-fn collectRebaseData(self: *MachO, pointers: *std.ArrayList(bind.Pointer)) !void {
+fn collectRebaseData(self: *MachO, rebase: *bind.Rebase) !void {
     log.debug("collecting rebase data", .{});
 
     // First, unpack GOT entries
     if (self.getSectionByName("__DATA_CONST", "__got")) |sect_id| {
-        try self.collectRebaseDataFromContainer(sect_id, pointers, self.got_entries);
+        try self.collectRebaseDataFromContainer(sect_id, rebase, self.got_entries);
     }
 
+    const gpa = self.base.allocator;
     const slice = self.sections.slice();
 
     // Next, unpact lazy pointers
@@ -2430,16 +2431,16 @@ fn collectRebaseData(self: *MachO, pointers: *std.ArrayList(bind.Pointer)) !void
         const seg = self.getSegment(sect_id);
         var atom_index = slice.items(.first_atom_index)[sect_id];
 
-        try pointers.ensureUnusedCapacity(self.stubs.items.len);
+        try rebase.entries.ensureUnusedCapacity(gpa, self.stubs.items.len);
 
         while (true) {
             const atom = self.getAtom(atom_index);
             const sym = self.getSymbol(atom.getSymbolWithLoc());
             const base_offset = sym.n_value - seg.vmaddr;
 
-            log.debug("    | rebase at {x}", .{base_offset});
+            log.debug("    | rebase at {x}", .{sym.n_value});
 
-            pointers.appendAssumeCapacity(.{
+            rebase.entries.appendAssumeCapacity(.{
                 .offset = base_offset,
                 .segment_id = segment_index,
             });
@@ -2483,7 +2484,11 @@ fn collectRebaseData(self: *MachO, pointers: *std.ArrayList(bind.Pointer)) !void
             };
 
             if (should_rebase) {
-                log.debug("  ATOM({d}, %{d}, '{s}')", .{ atom_index, atom.sym_index, self.getSymbolName(atom.getSymbolWithLoc()) });
+                log.debug("  ATOM({d}, %{d}, '{s}')", .{
+                    atom_index,
+                    atom.sym_index,
+                    self.getSymbolName(atom.getSymbolWithLoc()),
+                });
 
                 const object = self.objects.items[atom.getFile().?];
                 const base_rel_offset: i32 = blk: {
@@ -2511,9 +2516,9 @@ fn collectRebaseData(self: *MachO, pointers: *std.ArrayList(bind.Pointer)) !void
                     const base_offset = @intCast(i32, sym.n_value - segment.vmaddr);
                     const rel_offset = rel.r_address - base_rel_offset;
                     const offset = @intCast(u64, base_offset + rel_offset);
-                    log.debug("    | rebase at {x}", .{offset});
+                    log.debug("    | rebase at {x}", .{offset + segment.vmaddr});
 
-                    try pointers.append(.{
+                    try rebase.entries.append(gpa, .{
                         .offset = offset,
                         .segment_id = segment_index,
                     });
@@ -2525,6 +2530,8 @@ fn collectRebaseData(self: *MachO, pointers: *std.ArrayList(bind.Pointer)) !void
             } else break;
         }
     }
+
+    try rebase.finalize(gpa);
 }
 
 fn collectBindDataFromContainer(
@@ -2777,9 +2784,9 @@ fn collectExportData(self: *MachO, trie: *Trie) !void {
 fn writeDyldInfoData(self: *MachO) !void {
     const gpa = self.base.allocator;
 
-    var rebase_pointers = std.ArrayList(bind.Pointer).init(gpa);
-    defer rebase_pointers.deinit();
-    try self.collectRebaseData(&rebase_pointers);
+    var rebase = bind.Rebase{};
+    defer rebase.deinit(gpa);
+    try self.collectRebaseData(&rebase);
 
     var bind_pointers = std.ArrayList(bind.Pointer).init(gpa);
     defer bind_pointers.deinit();
@@ -2796,7 +2803,7 @@ fn writeDyldInfoData(self: *MachO) !void {
     const link_seg = self.getLinkeditSegmentPtr();
     assert(mem.isAlignedGeneric(u64, link_seg.fileoff, @alignOf(u64)));
     const rebase_off = link_seg.fileoff;
-    const rebase_size = try bind.rebaseInfoSize(rebase_pointers.items);
+    const rebase_size = rebase.size();
     const rebase_size_aligned = mem.alignForwardGeneric(u64, rebase_size, @alignOf(u64));
     log.debug("writing rebase info from 0x{x} to 0x{x}", .{ rebase_off, rebase_off + rebase_size_aligned });
 
@@ -2829,7 +2836,7 @@ fn writeDyldInfoData(self: *MachO) !void {
     var stream = std.io.fixedBufferStream(buffer);
     const writer = stream.writer();
 
-    try bind.writeRebaseInfo(rebase_pointers.items, writer);
+    try rebase.write(writer);
     try stream.seekTo(bind_off - rebase_off);
 
     try bind.writeBindInfo(bind_pointers.items, writer);
