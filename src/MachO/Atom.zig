@@ -594,7 +594,7 @@ fn resolveRelocsArm64(
                         macho_file,
                         actual_target,
                     ).?);
-                    log.debug("    | target_addr = 0x{x}", .{thunk_sym.n_value});
+                    log.debug("    | target_addr = 0x{x} (thunk)", .{thunk_sym.n_value});
                     break :blk try calcPcRelativeDisplacementArm64(source_addr, thunk_sym.n_value);
                 };
 

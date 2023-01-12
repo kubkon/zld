@@ -504,29 +504,42 @@ pub fn splitRegularSections(self: *Object, macho_file: *MachO, object_id: u32) !
                 else
                     sect.@"align";
 
-                const atom_index = try self.createAtomFromSubsection(
-                    macho_file,
-                    object_id,
-                    atom_sym_index,
-                    atom_sym_index + 1,
-                    nsyms_trailing,
-                    atom_size,
-                    atom_align,
-                    out_sect_id,
-                );
+                const skip_atom = blk: {
+                    const atom_sym = self.symtab[atom_sym_index];
+                    if (!atom_sym.ext()) break :blk false;
+                    if (self.globals_lookup[atom_sym_index] > -1) {
+                        const global_index = @intCast(u32, self.globals_lookup[atom_sym_index]);
+                        const global = macho_file.globals.items[global_index];
+                        break :blk global.getFile() != object_id;
+                    }
+                    break :blk false;
+                };
 
-                // TODO rework this at the relocation level
-                if (cpu_arch == .x86_64 and addr == sect.addr) {
-                    // In x86_64 relocs, it can so happen that the compiler refers to the same
-                    // atom by both the actual assigned symbol and the start of the section. In this
-                    // case, we need to link the two together so add an alias.
-                    const alias_index = self.getSectionAliasSymbolIndex(sect_id);
-                    self.atom_by_index_table[alias_index] = atom_index;
+                if (!skip_atom) {
+                    const atom_index = try self.createAtomFromSubsection(
+                        macho_file,
+                        object_id,
+                        atom_sym_index,
+                        atom_sym_index + 1,
+                        nsyms_trailing,
+                        atom_size,
+                        atom_align,
+                        out_sect_id,
+                    );
+
+                    // TODO rework this at the relocation level
+                    if (cpu_arch == .x86_64 and addr == sect.addr) {
+                        // In x86_64 relocs, it can so happen that the compiler refers to the same
+                        // atom by both the actual assigned symbol and the start of the section. In this
+                        // case, we need to link the two together so add an alias.
+                        const alias_index = self.getSectionAliasSymbolIndex(sect_id);
+                        self.atom_by_index_table[alias_index] = atom_index;
+                    }
+                    if (!sect.isZerofill()) {
+                        try self.cacheRelocs(macho_file, atom_index);
+                    }
+                    macho_file.addAtomToSection(atom_index);
                 }
-                if (!sect.isZerofill()) {
-                    try self.cacheRelocs(macho_file, atom_index);
-                }
-                macho_file.addAtomToSection(atom_index);
             }
         } else {
             const alias_index = self.getSectionAliasSymbolIndex(sect_id);
