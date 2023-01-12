@@ -1,13 +1,17 @@
 const std = @import("std");
+const assert = std.debug.assert;
 const leb = std.leb;
 const macho = std.macho;
 
+// TODO split it up into rebase, bind/weak-bind and lazy-bind specific
+// containers and perform compact encoding on them.
 pub const Pointer = struct {
     offset: u64,
     segment_id: u16,
     dylib_ordinal: ?i64 = null,
     name: ?[]const u8 = null,
     bind_flags: u4 = 0,
+    addend: ?i64 = null,
 };
 
 pub fn rebaseInfoSize(pointers: []const Pointer) !u64 {
@@ -53,8 +57,13 @@ pub fn bindInfoSize(pointers: []const Pointer) !u64 {
         size += 1;
 
         size += 1;
-
         try leb.writeILEB128(writer, pointer.offset);
+
+        if (pointer.addend) |addend| {
+            size += 1;
+            try leb.writeILEB128(writer, addend);
+        }
+
         size += 1;
     }
 
@@ -81,6 +90,12 @@ pub fn writeBindInfo(pointers: []const Pointer, writer: anytype) !void {
         try writer.writeByte(macho.BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | @truncate(u4, pointer.segment_id));
 
         try leb.writeILEB128(writer, pointer.offset);
+
+        if (pointer.addend) |addend| {
+            try writer.writeByte(macho.BIND_OPCODE_SET_ADDEND_SLEB);
+            try leb.writeILEB128(writer, addend);
+        }
+
         try writer.writeByte(macho.BIND_OPCODE_DO_BIND);
     }
 
@@ -115,6 +130,8 @@ pub fn lazyBindInfoSize(pointers: []const Pointer) !u64 {
 
 pub fn writeLazyBindInfo(pointers: []const Pointer, writer: anytype) !void {
     for (pointers) |pointer| {
+        assert(pointer.addend == null);
+
         try writer.writeByte(macho.BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | @truncate(u4, pointer.segment_id));
 
         try leb.writeILEB128(writer, pointer.offset);

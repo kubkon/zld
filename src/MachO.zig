@@ -2645,6 +2645,8 @@ fn collectBindData(self: *MachO, pointers: *std.ArrayList(bind.Pointer)) !void {
                     const bind_sym = self.getSymbol(global);
                     if (!bind_sym.undf()) continue;
 
+                    const code = Atom.getAtomCode(self, atom_index);
+                    const addend = mem.readIntLittle(i64, code[0..8]);
                     const base_offset = @intCast(i32, sym.n_value - segment.vmaddr);
                     const rel_offset = rel.r_address - base_rel_offset;
                     const offset = @intCast(u64, base_offset + rel_offset);
@@ -2656,6 +2658,7 @@ fn collectBindData(self: *MachO, pointers: *std.ArrayList(bind.Pointer)) !void {
                         bind_sym_name,
                         dylib_ordinal,
                     });
+                    log.debug("    | with addend {x}", .{addend});
                     if (bind_sym.weakRef()) {
                         log.debug("    | marking as weak ref ", .{});
                         flags |= @truncate(u4, macho.BIND_SYMBOL_FLAGS_WEAK_IMPORT);
@@ -2666,6 +2669,7 @@ fn collectBindData(self: *MachO, pointers: *std.ArrayList(bind.Pointer)) !void {
                         .dylib_ordinal = dylib_ordinal,
                         .name = bind_sym_name,
                         .bind_flags = flags,
+                        .addend = addend,
                     });
                 }
             }
