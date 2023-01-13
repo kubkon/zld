@@ -3,9 +3,9 @@ const assert = std.debug.assert;
 const leb = std.leb;
 const log = std.log.scoped(.bind);
 const macho = std.macho;
+const testing = std.testing;
 
 const Allocator = std.mem.Allocator;
-const MachO = @import("../MachO.zig");
 
 pub const Rebase = struct {
     entries: std.ArrayListUnmanaged(Entry) = .{},
@@ -33,30 +33,30 @@ pub const Rebase = struct {
         return @intCast(u64, rebase.buffer.items.len);
     }
 
-    pub fn finalize(rebase: *Rebase, gpa: Allocator, macho_file: *MachO) !void {
+    pub fn finalize(rebase: *Rebase, gpa: Allocator) !void {
         if (rebase.entries.items.len == 0) return;
 
         const writer = rebase.buffer.writer(gpa);
 
         std.sort.sort(Entry, rebase.entries.items, {}, Entry.lessThan);
 
-        var ss = rebase.entries.items[0].segment_id;
-        for (rebase.entries.items) |entry, i| {
-            const nn = entry.segment_id;
-            if (i == 0 or nn > ss) {
-                ss = nn;
-                log.warn("SEGMENT {d}", .{ss});
-            }
-            const vmaddr = macho_file.segments.items[ss].vmaddr;
-            log.warn("    {x}", .{vmaddr + entry.offset});
-        }
+        // var ss = rebase.entries.items[0].segment_id;
+        // for (rebase.entries.items) |entry, i| {
+        //     const nn = entry.segment_id;
+        //     if (i == 0 or nn > ss) {
+        //         ss = nn;
+        //         log.warn("SEGMENT {d}", .{ss});
+        //     }
+        //     const vmaddr = macho_file.segments.items[ss].vmaddr;
+        //     log.warn("    {x}", .{vmaddr + entry.offset});
+        // }
 
         var count: usize = 1;
         var skip: u64 = 0;
         var prev = rebase.entries.items[0];
-        var vmaddr = macho_file.segments.items[prev.segment_id].vmaddr;
+        // var vmaddr = macho_file.segments.items[prev.segment_id].vmaddr;
 
-        try writer.writeByte(macho.REBASE_OPCODE_SET_TYPE_IMM | @truncate(u4, macho.REBASE_TYPE_POINTER));
+        try setTypePointer(writer);
         try setSegmentOffset(prev.segment_id, prev.offset, writer);
 
         var i: usize = 1;
@@ -69,24 +69,16 @@ pub const Rebase = struct {
                     try emitTimes(count, writer);
                 }
                 try setSegmentOffset(next.segment_id, next.offset, writer);
-                vmaddr = macho_file.segments.items[next.segment_id].vmaddr;
+                // vmaddr = macho_file.segments.items[next.segment_id].vmaddr;
             } else {
                 var delta = next.offset - prev.offset - @sizeOf(u64);
                 if (delta == 0 and skip == 0) {
                     count += 1;
-                    log.warn("        {x} - {x} = {x}", .{
-                        vmaddr + next.offset,
-                        vmaddr + prev.offset,
-                        delta,
-                    });
+                    log.warn("        {x} - {x} = {x}", .{ next.offset, prev.offset, delta });
                 } else if ((skip == 0 or delta == skip) and count == 1) {
                     skip = delta;
                     count += 1;
-                    log.warn("        {x} - {x} = {x} (S)", .{
-                        vmaddr + next.offset,
-                        vmaddr + prev.offset,
-                        delta,
-                    });
+                    log.warn("        {x} - {x} = {x} (S)", .{ next.offset, prev.offset, delta });
                 } else {
                     if (skip > 0 and count > 1) {
                         log.warn("      delta = {x}, skip = {x}", .{ delta, skip });
@@ -126,6 +118,11 @@ pub const Rebase = struct {
         try writer.writeByte(macho.REBASE_OPCODE_DONE);
     }
 
+    fn setTypePointer(writer: anytype) !void {
+        log.warn(">>> set type: {d}", .{macho.REBASE_TYPE_POINTER});
+        try writer.writeByte(macho.REBASE_OPCODE_SET_TYPE_IMM | @truncate(u4, macho.REBASE_TYPE_POINTER));
+    }
+
     fn setSegmentOffset(segment_id: u8, offset: u64, writer: anytype) !void {
         log.warn(">>> set segment: {d} and offset: {x}", .{ segment_id, offset });
         try writer.writeByte(macho.REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | @truncate(u4, segment_id));
@@ -140,7 +137,7 @@ pub const Rebase = struct {
 
     fn emitTimes(count: usize, writer: anytype) !void {
         log.warn(">>> emit with count: {d}", .{count});
-        if (count < 0xf) {
+        if (count <= 0xf) {
             try writer.writeByte(macho.REBASE_OPCODE_DO_REBASE_IMM_TIMES | @truncate(u4, count));
         } else {
             try writer.writeByte(macho.REBASE_OPCODE_DO_REBASE_ULEB_TIMES);
@@ -288,4 +285,121 @@ pub fn writeLazyBindInfo(pointers: []const Pointer, writer: anytype) !void {
         try writer.writeByte(macho.BIND_OPCODE_DO_BIND);
         try writer.writeByte(macho.BIND_OPCODE_DONE);
     }
+}
+
+test "rebase - emitTimes - IMM" {
+    const gpa = testing.allocator;
+
+    var rebase = Rebase{};
+    defer rebase.deinit(gpa);
+
+    var i: u64 = 0;
+    while (i < 10) : (i += 1) {
+        try rebase.entries.append(gpa, .{
+            .segment_id = 1,
+            .offset = i * @sizeOf(u64),
+        });
+    }
+
+    try rebase.finalize(gpa);
+
+    try testing.expectEqualSlices(u8, &[_]u8{
+        macho.REBASE_OPCODE_SET_TYPE_IMM | macho.REBASE_TYPE_POINTER,
+        macho.REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | 1,
+        0x0,
+        macho.REBASE_OPCODE_DO_REBASE_IMM_TIMES | 10,
+        macho.REBASE_OPCODE_DONE,
+    }, rebase.buffer.items);
+}
+
+test "rebase - emitTimes - ULEB" {
+    const gpa = testing.allocator;
+
+    var rebase = Rebase{};
+    defer rebase.deinit(gpa);
+
+    var i: u64 = 0;
+    while (i < 100) : (i += 1) {
+        try rebase.entries.append(gpa, .{
+            .segment_id = 1,
+            .offset = i * @sizeOf(u64),
+        });
+    }
+
+    try rebase.finalize(gpa);
+
+    try testing.expectEqualSlices(u8, &[_]u8{
+        macho.REBASE_OPCODE_SET_TYPE_IMM | macho.REBASE_TYPE_POINTER,
+        macho.REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | 1,
+        0x0,
+        macho.REBASE_OPCODE_DO_REBASE_ULEB_TIMES,
+        0x64,
+        macho.REBASE_OPCODE_DONE,
+    }, rebase.buffer.items);
+}
+
+test "rebase - emitTimes followed by addAddr followed by emitTimes" {
+    const gpa = testing.allocator;
+
+    var rebase = Rebase{};
+    defer rebase.deinit(gpa);
+
+    var offset: u64 = 0;
+    var i: u64 = 0;
+    while (i < 15) : (i += 1) {
+        try rebase.entries.append(gpa, .{
+            .segment_id = 1,
+            .offset = offset,
+        });
+        offset += @sizeOf(u64);
+    }
+
+    offset += @sizeOf(u64);
+
+    try rebase.entries.append(gpa, .{
+        .segment_id = 1,
+        .offset = offset,
+    });
+
+    try rebase.finalize(gpa);
+
+    try testing.expectEqualSlices(u8, &[_]u8{
+        macho.REBASE_OPCODE_SET_TYPE_IMM | macho.REBASE_TYPE_POINTER,
+        macho.REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | 1,
+        0x0,
+        macho.REBASE_OPCODE_DO_REBASE_IMM_TIMES | 15,
+        macho.REBASE_OPCODE_ADD_ADDR_ULEB,
+        0x8,
+        macho.REBASE_OPCODE_DO_REBASE_IMM_TIMES | 1,
+        macho.REBASE_OPCODE_DONE,
+    }, rebase.buffer.items);
+}
+
+test "rebase - emitTimesSkip" {
+    const gpa = testing.allocator;
+
+    var rebase = Rebase{};
+    defer rebase.deinit(gpa);
+
+    var offset: u64 = 0;
+    var i: u64 = 0;
+    while (i < 15) : (i += 1) {
+        try rebase.entries.append(gpa, .{
+            .segment_id = 1,
+            .offset = offset,
+        });
+        offset += 2 * @sizeOf(u64);
+    }
+
+    try rebase.finalize(gpa);
+
+    try testing.expectEqualSlices(u8, &[_]u8{
+        macho.REBASE_OPCODE_SET_TYPE_IMM | macho.REBASE_TYPE_POINTER,
+        macho.REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | 1,
+        0x0,
+        macho.REBASE_OPCODE_DO_REBASE_ULEB_TIMES_SKIPPING_ULEB,
+        0xf,
+        0x8,
+        macho.REBASE_OPCODE_DONE,
+    }, rebase.buffer.items);
 }

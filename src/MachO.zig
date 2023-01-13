@@ -2534,7 +2534,7 @@ fn collectRebaseData(self: *MachO, rebase: *bind.Rebase) !void {
         }
     }
 
-    try rebase.finalize(gpa, self);
+    try rebase.finalize(gpa);
 }
 
 fn collectBindDataFromContainer(
