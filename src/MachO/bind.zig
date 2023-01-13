@@ -5,6 +5,7 @@ const log = std.log.scoped(.bind);
 const macho = std.macho;
 
 const Allocator = std.mem.Allocator;
+const MachO = @import("../MachO.zig");
 
 pub const Rebase = struct {
     entries: std.ArrayListUnmanaged(Entry) = .{},
@@ -14,12 +15,12 @@ pub const Rebase = struct {
         offset: u64,
         segment_id: u8,
 
-        pub fn greaterThan(ctx: void, entry: Entry, other: Entry) bool {
+        pub fn lessThan(ctx: void, entry: Entry, other: Entry) bool {
             _ = ctx;
             if (entry.segment_id == other.segment_id) {
-                return entry.offset > other.offset;
+                return entry.offset < other.offset;
             }
-            return entry.segment_id > other.segment_id;
+            return entry.segment_id < other.segment_id;
         }
     };
 
@@ -32,49 +33,83 @@ pub const Rebase = struct {
         return @intCast(u64, rebase.buffer.items.len);
     }
 
-    pub fn finalize(rebase: *Rebase, gpa: Allocator) !void {
+    pub fn finalize(rebase: *Rebase, gpa: Allocator, macho_file: *MachO) !void {
         if (rebase.entries.items.len == 0) return;
 
         const writer = rebase.buffer.writer(gpa);
 
-        std.sort.sort(Entry, rebase.entries.items, {}, Entry.greaterThan);
+        std.sort.sort(Entry, rebase.entries.items, {}, Entry.lessThan);
+
+        var ss = rebase.entries.items[0].segment_id;
+        for (rebase.entries.items) |entry, i| {
+            const nn = entry.segment_id;
+            if (i == 0 or nn > ss) {
+                ss = nn;
+                log.warn("SEGMENT {d}", .{ss});
+            }
+            const vmaddr = macho_file.segments.items[ss].vmaddr;
+            log.warn("    {x}", .{vmaddr + entry.offset});
+        }
 
         var count: usize = 1;
-        var prev = rebase.entries.pop();
+        var skip: u64 = 0;
+        var prev = rebase.entries.items[0];
+        var vmaddr = macho_file.segments.items[prev.segment_id].vmaddr;
 
         try writer.writeByte(macho.REBASE_OPCODE_SET_TYPE_IMM | @truncate(u4, macho.REBASE_TYPE_POINTER));
-        try writer.writeByte(macho.REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | @truncate(u4, prev.segment_id));
-        try std.leb.writeULEB128(writer, prev.offset);
-        log.debug("rebase: starting segment: {d}", .{prev.segment_id});
-        log.debug("        start offset: {x}", .{prev.offset});
+        try setSegmentOffset(prev.segment_id, prev.offset, writer);
 
-        while (rebase.entries.popOrNull()) |next| {
+        var i: usize = 1;
+        while (i < rebase.entries.items.len) : (i += 1) {
+            var next = rebase.entries.items[i];
             if (prev.segment_id != next.segment_id) {
-                try writer.writeByte(macho.REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | @truncate(u4, next.segment_id));
-                try std.leb.writeULEB128(writer, next.offset);
-                log.debug("rebase: changing segments: {d} -> {d}", .{ prev.segment_id, next.segment_id });
-                log.debug("        new start offset: {x}", .{next.offset});
-            } else {
-                log.debug("rebase: prev offset: {x}, next offset: {x}", .{ prev.offset, next.offset });
-                const delta = next.offset - prev.offset - @sizeOf(u64);
-                if (delta == 0) {
-                    count += 1;
+                if (skip > 0) {
+                    try emitTimesSkip(count, skip, writer);
                 } else {
-                    if (count > 0) {
-                        log.debug("rebase: do with count: {d}", .{count});
-                        if (count < 0xf) {
-                            try writer.writeByte(macho.REBASE_OPCODE_DO_REBASE_IMM_TIMES | @truncate(u4, count));
-                        } else {
-                            try writer.writeByte(macho.REBASE_OPCODE_DO_REBASE_ULEB_TIMES);
-                            try std.leb.writeULEB128(writer, count);
+                    try emitTimes(count, writer);
+                }
+                try setSegmentOffset(next.segment_id, next.offset, writer);
+                vmaddr = macho_file.segments.items[next.segment_id].vmaddr;
+            } else {
+                var delta = next.offset - prev.offset - @sizeOf(u64);
+                if (delta == 0 and skip == 0) {
+                    count += 1;
+                    log.warn("        {x} - {x} = {x}", .{
+                        vmaddr + next.offset,
+                        vmaddr + prev.offset,
+                        delta,
+                    });
+                } else if ((skip == 0 or delta == skip) and count == 1) {
+                    skip = delta;
+                    count += 1;
+                    log.warn("        {x} - {x} = {x} (S)", .{
+                        vmaddr + next.offset,
+                        vmaddr + prev.offset,
+                        delta,
+                    });
+                } else {
+                    if (skip > 0 and count > 1) {
+                        log.warn("      delta = {x}, skip = {x}", .{ delta, skip });
+                        if (delta < skip) {
+                            // We went one too far, rewind...
+                            count -= 1;
+                            i -= 1;
+                            next = prev;
+                            delta = skip;
+                            log.warn(">>> rewind", .{});
                         }
-                        try writer.writeByte(macho.REBASE_OPCODE_ADD_ADDR_ULEB);
-                        try std.leb.writeULEB128(writer, delta);
+                        try emitTimesSkip(count, skip, writer);
+                        if (delta > skip) {
+                            try addAddr(delta - skip, writer);
+                        }
+                        count = 1;
+                        skip = 0;
+                    } else if (count > 1) {
+                        try emitTimes(count, writer);
+                        try addAddr(delta, writer);
                         count = 1;
                     } else {
-                        log.debug("rebase: do add: {x}", .{delta});
-                        try writer.writeByte(macho.REBASE_OPCODE_DO_REBASE_ADD_ADDR_ULEB);
-                        try std.leb.writeULEB128(writer, delta);
+                        try emitAddAddr(delta, writer);
                     }
                 }
             }
@@ -82,7 +117,48 @@ pub const Rebase = struct {
             prev = next;
         }
 
+        if (skip > 0) {
+            try emitTimesSkip(count, skip, writer);
+        } else {
+            try emitTimes(count, writer);
+        }
+
         try writer.writeByte(macho.REBASE_OPCODE_DONE);
+    }
+
+    fn setSegmentOffset(segment_id: u8, offset: u64, writer: anytype) !void {
+        log.warn(">>> set segment: {d} and offset: {x}", .{ segment_id, offset });
+        try writer.writeByte(macho.REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | @truncate(u4, segment_id));
+        try std.leb.writeULEB128(writer, offset);
+    }
+
+    fn emitAddAddr(addr: u64, writer: anytype) !void {
+        log.warn(">>> emit with add: {x}", .{addr});
+        try writer.writeByte(macho.REBASE_OPCODE_DO_REBASE_ADD_ADDR_ULEB);
+        try std.leb.writeULEB128(writer, addr);
+    }
+
+    fn emitTimes(count: usize, writer: anytype) !void {
+        log.warn(">>> emit with count: {d}", .{count});
+        if (count < 0xf) {
+            try writer.writeByte(macho.REBASE_OPCODE_DO_REBASE_IMM_TIMES | @truncate(u4, count));
+        } else {
+            try writer.writeByte(macho.REBASE_OPCODE_DO_REBASE_ULEB_TIMES);
+            try std.leb.writeULEB128(writer, count);
+        }
+    }
+
+    fn emitTimesSkip(count: usize, skip: u64, writer: anytype) !void {
+        log.warn(">>> emit with count: {d} and skip: {x}", .{ count, skip });
+        try writer.writeByte(macho.REBASE_OPCODE_DO_REBASE_ULEB_TIMES_SKIPPING_ULEB);
+        try std.leb.writeULEB128(writer, count);
+        try std.leb.writeULEB128(writer, skip);
+    }
+
+    fn addAddr(addr: u64, writer: anytype) !void {
+        log.warn(">>> add: {x}", .{addr});
+        try writer.writeByte(macho.REBASE_OPCODE_ADD_ADDR_ULEB);
+        try std.leb.writeULEB128(writer, addr);
     }
 
     pub fn write(rebase: Rebase, writer: anytype) !void {

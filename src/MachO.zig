@@ -2512,6 +2512,9 @@ fn collectRebaseData(self: *MachO, rebase: *bind.Rebase) !void {
                         },
                         else => unreachable,
                     }
+                    const target = Atom.parseRelocTarget(self, atom_index, rel);
+                    const target_sym = self.getSymbol(target);
+                    if (target_sym.undf()) continue;
 
                     const base_offset = @intCast(i32, sym.n_value - segment.vmaddr);
                     const rel_offset = rel.r_address - base_rel_offset;
@@ -2531,7 +2534,7 @@ fn collectRebaseData(self: *MachO, rebase: *bind.Rebase) !void {
         }
     }
 
-    try rebase.finalize(gpa);
+    try rebase.finalize(gpa, self);
 }
 
 fn collectBindDataFromContainer(
