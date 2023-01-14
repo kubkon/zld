@@ -101,20 +101,19 @@ pub const Rebase = struct {
             if (next) |n| {
                 if (cmp.count == 1 and cmp.delta == 0) {
                     try emitTimes(2, writer);
+                    try addAddr(n.delta, writer);
                 } else if (cmp.count == 1) {
                     try emitAddAddr(cmp.delta, writer);
-                    continue;
                 } else if (cmp.delta == 0) {
                     try emitTimes(cmp.count + 1, writer);
+                    try addAddr(n.delta, writer);
+                } else if (n.delta < cmp.delta) {
+                    try emitTimesSkip(cmp.count, cmp.delta, writer);
+                    try emitAddAddr(cmp.delta, writer);
                 } else {
-                    const count: usize = count: {
-                        if (n.delta < cmp.delta)
-                            break :count cmp.count - 1;
-                        break :count cmp.count;
-                    };
-                    try emitTimesSkip(count + 1, cmp.delta, writer);
+                    try emitTimesSkip(cmp.count + 1, cmp.delta, writer);
+                    try addAddr(n.delta, writer);
                 }
-                try addAddr(n.delta, writer);
             } else {
                 if (cmp.count == 1) {
                     try emitTimes(1, writer);
@@ -294,6 +293,34 @@ pub fn writeLazyBindInfo(pointers: []const Pointer, writer: anytype) !void {
         try writer.writeByte(macho.BIND_OPCODE_DO_BIND);
         try writer.writeByte(macho.BIND_OPCODE_DONE);
     }
+}
+
+test "rebase - no entries" {
+    const gpa = testing.allocator;
+
+    var rebase = Rebase{};
+    defer rebase.deinit(gpa);
+
+    try rebase.finalize(gpa);
+    try testing.expectEqual(@as(u64, 0), rebase.size());
+}
+
+test "rebase - single entry" {
+    const gpa = testing.allocator;
+
+    var rebase = Rebase{};
+    defer rebase.deinit(gpa);
+    try rebase.entries.append(gpa, .{
+        .segment_id = 1,
+        .offset = 0x10,
+    });
+    try rebase.finalize(gpa);
+    try testing.expectEqualSlices(u8, &[_]u8{
+        macho.REBASE_OPCODE_SET_TYPE_IMM | macho.REBASE_TYPE_POINTER,
+        macho.REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | 1,
+        0x10,
+        macho.REBASE_OPCODE_DONE,
+    }, rebase.buffer.items);
 }
 
 test "rebase - emitTimes - IMM" {
@@ -511,6 +538,26 @@ test "rebase - complex 2" {
         .segment_id = 2,
         .offset = 0x18,
     });
+    try rebase.entries.append(gpa, .{
+        .segment_id = 3,
+        .offset = 0x0,
+    });
+    try rebase.entries.append(gpa, .{
+        .segment_id = 3,
+        .offset = 0x20,
+    });
+    try rebase.entries.append(gpa, .{
+        .segment_id = 3,
+        .offset = 0x40,
+    });
+    try rebase.entries.append(gpa, .{
+        .segment_id = 3,
+        .offset = 0x60,
+    });
+    try rebase.entries.append(gpa, .{
+        .segment_id = 3,
+        .offset = 0x68,
+    });
     try rebase.finalize(gpa);
 
     try testing.expectEqualSlices(u8, &[_]u8{
@@ -529,6 +576,14 @@ test "rebase - complex 2" {
         macho.REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | 2,
         0x0,
         macho.REBASE_OPCODE_DO_REBASE_IMM_TIMES | 4,
+        macho.REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | 3,
+        0x0,
+        macho.REBASE_OPCODE_DO_REBASE_ULEB_TIMES_SKIPPING_ULEB,
+        0x3,
+        0x18,
+        macho.REBASE_OPCODE_DO_REBASE_ADD_ADDR_ULEB,
+        0x18,
+        macho.REBASE_OPCODE_DO_REBASE_IMM_TIMES | 1,
         macho.REBASE_OPCODE_DONE,
     }, rebase.buffer.items);
 }
