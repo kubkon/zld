@@ -40,82 +40,91 @@ pub const Rebase = struct {
 
         std.sort.sort(Entry, rebase.entries.items, {}, Entry.lessThan);
 
-        // var ss = rebase.entries.items[0].segment_id;
-        // for (rebase.entries.items) |entry, i| {
-        //     const nn = entry.segment_id;
-        //     if (i == 0 or nn > ss) {
-        //         ss = nn;
-        //         log.warn("SEGMENT {d}", .{ss});
-        //     }
-        //     const vmaddr = macho_file.segments.items[ss].vmaddr;
-        //     log.warn("    {x}", .{vmaddr + entry.offset});
-        // }
-
-        var count: usize = 1;
-        var skip: u64 = 0;
-        var prev = rebase.entries.items[0];
-        // var vmaddr = macho_file.segments.items[prev.segment_id].vmaddr;
-
         try setTypePointer(writer);
-        try setSegmentOffset(prev.segment_id, prev.offset, writer);
+
+        var start: usize = 0;
+        var seg_id: ?u8 = null;
+        for (rebase.entries.items) |entry, i| {
+            if (seg_id != null and seg_id.? == entry.segment_id) continue;
+            try finalizeSegment(gpa, rebase.entries.items[start..i], writer);
+            seg_id = entry.segment_id;
+            start = i;
+        }
+
+        try finalizeSegment(gpa, rebase.entries.items[start..], writer);
+        try writer.writeByte(macho.REBASE_OPCODE_DONE);
+    }
+
+    fn finalizeSegment(gpa: Allocator, entries: []const Entry, writer: anytype) !void {
+        if (entries.len == 0) return;
+
+        const first_entry = entries[0];
+        try setSegmentOffset(first_entry.segment_id, first_entry.offset, writer);
+
+        const Compressed = struct {
+            count: usize,
+            delta: u64,
+        };
+
+        var compressed = try std.ArrayList(Compressed).initCapacity(gpa, entries.len);
+        defer compressed.deinit();
 
         var i: usize = 1;
-        while (i < rebase.entries.items.len) : (i += 1) {
-            var next = rebase.entries.items[i];
-            if (prev.segment_id != next.segment_id) {
-                if (skip > 0) {
-                    try emitTimesSkip(count, skip, writer);
-                } else {
-                    try emitTimes(count, writer);
-                }
-                try setSegmentOffset(next.segment_id, next.offset, writer);
-                // vmaddr = macho_file.segments.items[next.segment_id].vmaddr;
+        while (i < entries.len) : (i += 1) {
+            const delta = entries[i].offset - entries[i - 1].offset - @sizeOf(u64);
+            log.warn("delta = {x}", .{delta});
+            if (compressed.items.len == 0) {
+                compressed.appendAssumeCapacity(.{
+                    .count = 1,
+                    .delta = delta,
+                });
+                continue;
+            }
+            const last = &compressed.items[compressed.items.len - 1];
+            if (last.delta == delta) {
+                last.count += 1;
             } else {
-                var delta = next.offset - prev.offset - @sizeOf(u64);
-                if (delta == 0 and skip == 0) {
-                    count += 1;
-                    log.warn("        {x} - {x} = {x}", .{ next.offset, prev.offset, delta });
-                } else if ((skip == 0 or delta == skip) and count == 1) {
-                    skip = delta;
-                    count += 1;
-                    log.warn("        {x} - {x} = {x} (S)", .{ next.offset, prev.offset, delta });
+                compressed.appendAssumeCapacity(.{
+                    .count = 1,
+                    .delta = delta,
+                });
+            }
+        }
+
+        for (compressed.items) |cmp, cmp_i| {
+            log.warn("cmp = {}", .{cmp});
+            const next: ?Compressed = if (cmp_i + 1 < compressed.items.len)
+                compressed.items[cmp_i + 1]
+            else
+                null;
+
+            if (next) |n| {
+                if (cmp.count == 1 and cmp.delta == 0) {
+                    try emitTimes(2, writer);
+                } else if (cmp.count == 1) {
+                    try emitAddAddr(cmp.delta, writer);
+                    continue;
+                } else if (cmp.delta == 0) {
+                    try emitTimes(cmp.count + 1, writer);
                 } else {
-                    if (skip > 0 and count > 1) {
-                        log.warn("      delta = {x}, skip = {x}", .{ delta, skip });
-                        if (delta < skip) {
-                            // We went one too far, rewind...
-                            count -= 1;
-                            i -= 1;
-                            next = prev;
-                            delta = skip;
-                            log.warn(">>> rewind", .{});
-                        }
-                        try emitTimesSkip(count, skip, writer);
-                        if (delta > skip) {
-                            try addAddr(delta - skip, writer);
-                        }
-                        count = 1;
-                        skip = 0;
-                    } else if (count > 1) {
-                        try emitTimes(count, writer);
-                        try addAddr(delta, writer);
-                        count = 1;
-                    } else {
-                        try emitAddAddr(delta, writer);
-                    }
+                    const count: usize = count: {
+                        if (n.delta < cmp.delta)
+                            break :count cmp.count - 1;
+                        break :count cmp.count;
+                    };
+                    try emitTimesSkip(count + 1, cmp.delta, writer);
+                }
+                try addAddr(n.delta, writer);
+            } else {
+                if (cmp.count == 1) {
+                    try emitTimes(1, writer);
+                } else if (cmp.delta == 0) {
+                    try emitTimes(cmp.count + 1, writer);
+                } else {
+                    try emitTimesSkip(cmp.count + 1, cmp.delta, writer);
                 }
             }
-
-            prev = next;
         }
-
-        if (skip > 0) {
-            try emitTimesSkip(count, skip, writer);
-        } else {
-            try emitTimes(count, writer);
-        }
-
-        try writer.writeByte(macho.REBASE_OPCODE_DONE);
     }
 
     fn setTypePointer(writer: anytype) !void {
@@ -400,6 +409,126 @@ test "rebase - emitTimesSkip" {
         macho.REBASE_OPCODE_DO_REBASE_ULEB_TIMES_SKIPPING_ULEB,
         0xf,
         0x8,
+        macho.REBASE_OPCODE_DONE,
+    }, rebase.buffer.items);
+}
+
+test "rebase - complex" {
+    const gpa = testing.allocator;
+
+    var rebase = Rebase{};
+    defer rebase.deinit(gpa);
+
+    try rebase.entries.append(gpa, .{
+        .segment_id = 1,
+        .offset = 0,
+    });
+    try rebase.entries.append(gpa, .{
+        .segment_id = 1,
+        .offset = 0x10,
+    });
+    try rebase.entries.append(gpa, .{
+        .segment_id = 1,
+        .offset = 0x40,
+    });
+    try rebase.entries.append(gpa, .{
+        .segment_id = 1,
+        .offset = 0x48,
+    });
+    try rebase.entries.append(gpa, .{
+        .segment_id = 1,
+        .offset = 0x50,
+    });
+    try rebase.entries.append(gpa, .{
+        .segment_id = 1,
+        .offset = 0x58,
+    });
+    try rebase.entries.append(gpa, .{
+        .segment_id = 1,
+        .offset = 0x70,
+    });
+    try rebase.finalize(gpa);
+
+    try testing.expectEqualSlices(u8, &[_]u8{
+        macho.REBASE_OPCODE_SET_TYPE_IMM | macho.REBASE_TYPE_POINTER,
+        macho.REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | 1,
+        0x0,
+        macho.REBASE_OPCODE_DO_REBASE_ADD_ADDR_ULEB,
+        0x8,
+        macho.REBASE_OPCODE_DO_REBASE_ADD_ADDR_ULEB,
+        0x28,
+        macho.REBASE_OPCODE_DO_REBASE_IMM_TIMES | 4,
+        macho.REBASE_OPCODE_ADD_ADDR_ULEB,
+        0x10,
+        macho.REBASE_OPCODE_DO_REBASE_IMM_TIMES | 1,
+        macho.REBASE_OPCODE_DONE,
+    }, rebase.buffer.items);
+}
+
+test "rebase - complex 2" {
+    const gpa = testing.allocator;
+
+    var rebase = Rebase{};
+    defer rebase.deinit(gpa);
+
+    try rebase.entries.append(gpa, .{
+        .segment_id = 1,
+        .offset = 0,
+    });
+    try rebase.entries.append(gpa, .{
+        .segment_id = 1,
+        .offset = 0x10,
+    });
+    try rebase.entries.append(gpa, .{
+        .segment_id = 1,
+        .offset = 0x28,
+    });
+    try rebase.entries.append(gpa, .{
+        .segment_id = 1,
+        .offset = 0x48,
+    });
+    try rebase.entries.append(gpa, .{
+        .segment_id = 1,
+        .offset = 0x78,
+    });
+    try rebase.entries.append(gpa, .{
+        .segment_id = 1,
+        .offset = 0xb8,
+    });
+    try rebase.entries.append(gpa, .{
+        .segment_id = 2,
+        .offset = 0x0,
+    });
+    try rebase.entries.append(gpa, .{
+        .segment_id = 2,
+        .offset = 0x8,
+    });
+    try rebase.entries.append(gpa, .{
+        .segment_id = 2,
+        .offset = 0x10,
+    });
+    try rebase.entries.append(gpa, .{
+        .segment_id = 2,
+        .offset = 0x18,
+    });
+    try rebase.finalize(gpa);
+
+    try testing.expectEqualSlices(u8, &[_]u8{
+        macho.REBASE_OPCODE_SET_TYPE_IMM | macho.REBASE_TYPE_POINTER,
+        macho.REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | 1,
+        0x0,
+        macho.REBASE_OPCODE_DO_REBASE_ADD_ADDR_ULEB,
+        0x8,
+        macho.REBASE_OPCODE_DO_REBASE_ADD_ADDR_ULEB,
+        0x10,
+        macho.REBASE_OPCODE_DO_REBASE_ADD_ADDR_ULEB,
+        0x18,
+        macho.REBASE_OPCODE_DO_REBASE_ADD_ADDR_ULEB,
+        0x28,
+        macho.REBASE_OPCODE_DO_REBASE_IMM_TIMES | 1,
+        macho.REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | 2,
+        0x0,
+        macho.REBASE_OPCODE_DO_REBASE_IMM_TIMES | 4,
         macho.REBASE_OPCODE_DONE,
     }, rebase.buffer.items);
 }
