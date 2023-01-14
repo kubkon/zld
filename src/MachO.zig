@@ -33,6 +33,7 @@ const Md5 = std.crypto.hash.Md5;
 const Object = @import("MachO/Object.zig");
 pub const Options = @import("MachO/Options.zig");
 const LibStub = @import("tapi.zig").LibStub;
+const Rebase = @import("MachO/dyld_info/Rebase.zig");
 const StringTable = @import("strtab.zig").StringTable;
 const ThreadPool = @import("ThreadPool.zig");
 const Trie = @import("MachO/Trie.zig");
@@ -2388,7 +2389,7 @@ fn writeLinkeditSegmentData(self: *MachO) !void {
 fn collectRebaseDataFromContainer(
     self: *MachO,
     sect_id: u8,
-    rebase: *bind.Rebase,
+    rebase: *Rebase,
     container: anytype,
 ) !void {
     const slice = self.sections.slice();
@@ -2413,7 +2414,7 @@ fn collectRebaseDataFromContainer(
     }
 }
 
-fn collectRebaseData(self: *MachO, rebase: *bind.Rebase) !void {
+fn collectRebaseData(self: *MachO, rebase: *Rebase) !void {
     log.debug("collecting rebase data", .{});
 
     // First, unpack GOT entries
@@ -2787,7 +2788,7 @@ fn collectExportData(self: *MachO, trie: *Trie) !void {
 fn writeDyldInfoData(self: *MachO) !void {
     const gpa = self.base.allocator;
 
-    var rebase = bind.Rebase{};
+    var rebase = Rebase{};
     defer rebase.deinit(gpa);
     try self.collectRebaseData(&rebase);
 
