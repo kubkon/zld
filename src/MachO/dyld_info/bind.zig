@@ -310,7 +310,7 @@ fn generateTestContext() !TestContext {
     return ctx;
 }
 
-test "no entries" {
+test "bind - no entries" {
     const gpa = testing.allocator;
 
     var test_context = try generateTestContext();
@@ -323,7 +323,7 @@ test "no entries" {
     try testing.expectEqual(@as(u64, 0), bind.size());
 }
 
-test "single entry" {
+test "bind - single entry" {
     const gpa = testing.allocator;
 
     var test_context = try generateTestContext();
@@ -355,6 +355,65 @@ test "single entry" {
         0x0,
         macho.BIND_OPCODE_SET_TYPE_IMM | 1,
         macho.BIND_OPCODE_SET_DYLIB_ORDINAL_IMM | 1,
+        macho.BIND_OPCODE_DO_BIND,
+        macho.BIND_OPCODE_DONE,
+    }, bind.buffer.items);
+}
+
+test "bind - multiple occurrences within the same segment" {
+    const gpa = testing.allocator;
+
+    var test_context = try generateTestContext();
+    defer test_context.deinit(gpa);
+
+    var bind = Bind(TestContext, TestContext.Target){};
+    defer bind.deinit(gpa);
+
+    try bind.entries.append(gpa, .{
+        .offset = 0x10,
+        .segment_id = 1,
+        .target = TestContext.Target{ .index = 0 },
+        .addend = 0,
+    });
+    try bind.entries.append(gpa, .{
+        .offset = 0x18,
+        .segment_id = 1,
+        .target = TestContext.Target{ .index = 0 },
+        .addend = 0,
+    });
+    try bind.entries.append(gpa, .{
+        .offset = 0x20,
+        .segment_id = 1,
+        .target = TestContext.Target{ .index = 0 },
+        .addend = 0,
+    });
+    try bind.entries.append(gpa, .{
+        .offset = 0x28,
+        .segment_id = 1,
+        .target = TestContext.Target{ .index = 0 },
+        .addend = 0,
+    });
+
+    try bind.finalize(gpa, test_context);
+    try testing.expectEqualSlices(u8, &[_]u8{
+        macho.BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | 1,
+        0x10,
+        macho.BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM | 0,
+        0x5f,
+        0x69,
+        0x6d,
+        0x70,
+        0x6f,
+        0x72,
+        0x74,
+        0x5f,
+        0x31,
+        0x0,
+        macho.BIND_OPCODE_SET_TYPE_IMM | 1,
+        macho.BIND_OPCODE_SET_DYLIB_ORDINAL_IMM | 1,
+        macho.BIND_OPCODE_DO_BIND,
+        macho.BIND_OPCODE_DO_BIND,
+        macho.BIND_OPCODE_DO_BIND,
         macho.BIND_OPCODE_DO_BIND,
         macho.BIND_OPCODE_DONE,
     }, bind.buffer.items);

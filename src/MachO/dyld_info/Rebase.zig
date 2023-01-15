@@ -316,8 +316,7 @@ test "rebase - emitTimes followed by addAddr followed by emitTimes" {
         macho.REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | 1,
         0x0,
         macho.REBASE_OPCODE_DO_REBASE_IMM_TIMES | 15,
-        macho.REBASE_OPCODE_ADD_ADDR_ULEB,
-        0x8,
+        macho.REBASE_OPCODE_ADD_ADDR_IMM_SCALED | 1,
         macho.REBASE_OPCODE_DO_REBASE_IMM_TIMES | 1,
         macho.REBASE_OPCODE_DONE,
     }, rebase.buffer.items);
@@ -395,11 +394,9 @@ test "rebase - complex" {
         macho.REBASE_OPCODE_DO_REBASE_ULEB_TIMES_SKIPPING_ULEB,
         0x2,
         0x8,
-        macho.REBASE_OPCODE_ADD_ADDR_ULEB,
-        0x20,
+        macho.REBASE_OPCODE_ADD_ADDR_IMM_SCALED | 4,
         macho.REBASE_OPCODE_DO_REBASE_IMM_TIMES | 4,
-        macho.REBASE_OPCODE_ADD_ADDR_ULEB,
-        0x10,
+        macho.REBASE_OPCODE_ADD_ADDR_IMM_SCALED | 2,
         macho.REBASE_OPCODE_DO_REBASE_IMM_TIMES | 1,
         macho.REBASE_OPCODE_DONE,
     }, rebase.buffer.items);
@@ -480,13 +477,11 @@ test "rebase - complex 2" {
         macho.REBASE_OPCODE_DO_REBASE_ULEB_TIMES_SKIPPING_ULEB,
         0x2,
         0x8,
-        macho.REBASE_OPCODE_ADD_ADDR_ULEB,
-        0x8,
+        macho.REBASE_OPCODE_ADD_ADDR_IMM_SCALED | 1,
         macho.REBASE_OPCODE_DO_REBASE_ULEB_TIMES_SKIPPING_ULEB,
         0x2,
         0x18,
-        macho.REBASE_OPCODE_ADD_ADDR_ULEB,
-        0x10,
+        macho.REBASE_OPCODE_ADD_ADDR_IMM_SCALED | 2,
         macho.REBASE_OPCODE_DO_REBASE_ULEB_TIMES_SKIPPING_ULEB,
         0x2,
         0x38,
@@ -503,7 +498,7 @@ test "rebase - complex 2" {
     }, rebase.buffer.items);
 }
 
-test "composite" {
+test "rebase - composite" {
     const gpa = testing.allocator;
 
     var rebase = Rebase{};
@@ -574,14 +569,11 @@ test "composite" {
         macho.REBASE_OPCODE_DO_REBASE_ULEB_TIMES_SKIPPING_ULEB,
         0x2,
         0x28,
-        macho.REBASE_OPCODE_ADD_ADDR_ULEB,
-        0x38,
+        macho.REBASE_OPCODE_ADD_ADDR_IMM_SCALED | 7,
         macho.REBASE_OPCODE_DO_REBASE_IMM_TIMES | 3,
-        macho.REBASE_OPCODE_ADD_ADDR_ULEB,
-        0x8,
+        macho.REBASE_OPCODE_ADD_ADDR_IMM_SCALED | 1,
         macho.REBASE_OPCODE_DO_REBASE_IMM_TIMES | 8,
-        macho.REBASE_OPCODE_ADD_ADDR_ULEB,
-        0x8,
+        macho.REBASE_OPCODE_ADD_ADDR_IMM_SCALED | 1,
         macho.REBASE_OPCODE_DO_REBASE_IMM_TIMES | 1,
         macho.REBASE_OPCODE_DONE,
     }, rebase.buffer.items);
