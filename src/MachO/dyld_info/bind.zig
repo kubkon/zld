@@ -6,9 +6,8 @@ const macho = std.macho;
 const testing = std.testing;
 
 const Allocator = std.mem.Allocator;
-const MachO = @import("../../MachO.zig");
 
-pub fn Bind(comptime Ctx: type) type {
+pub fn Bind(comptime Ctx: type, comptime Target: type) type {
     return struct {
         entries: std.ArrayListUnmanaged(Entry) = .{},
         buffer: std.ArrayListUnmanaged(u8) = .{},
@@ -16,12 +15,12 @@ pub fn Bind(comptime Ctx: type) type {
         const Self = @This();
 
         const Entry = struct {
-            target: MachO.SymbolWithLoc,
+            target: Target,
             offset: u64,
             segment_id: u8,
             addend: i64,
 
-            pub fn lessThan(ctx: *const Ctx, entry: Entry, other: Entry) bool {
+            pub fn lessThan(ctx: Ctx, entry: Entry, other: Entry) bool {
                 if (entry.segment_id == other.segment_id) {
                     if (entry.target.eql(other.target)) {
                         return entry.offset < other.offset;
@@ -43,7 +42,7 @@ pub fn Bind(comptime Ctx: type) type {
             return @intCast(u64, self.buffer.items.len);
         }
 
-        pub fn finalize(self: *Self, gpa: Allocator, ctx: *const Ctx) !void {
+        pub fn finalize(self: *Self, gpa: Allocator, ctx: Ctx) !void {
             if (self.entries.items.len == 0) return;
 
             const writer = self.buffer.writer(gpa);
@@ -71,7 +70,7 @@ pub fn Bind(comptime Ctx: type) type {
             try done(writer);
         }
 
-        fn finalizeTarget(entries: []const Entry, ctx: *const Ctx, writer: anytype) !void {
+        fn finalizeTarget(entries: []const Entry, ctx: Ctx, writer: anytype) !void {
             if (entries.len == 0) return;
 
             const first = entries[0];
@@ -249,4 +248,114 @@ pub fn Bind(comptime Ctx: type) type {
             try writer.writeAll(self.buffer.items);
         }
     };
+}
+
+const TestContext = struct {
+    symbols: std.ArrayListUnmanaged(macho.nlist_64) = .{},
+    strtab: std.ArrayListUnmanaged(u8) = .{},
+
+    const Target = struct {
+        index: u32,
+
+        fn eql(this: Target, other: Target) bool {
+            return this.index == other.index;
+        }
+    };
+
+    fn deinit(ctx: *TestContext, gpa: Allocator) void {
+        ctx.symbols.deinit(gpa);
+        ctx.strtab.deinit(gpa);
+    }
+
+    fn addSymbol(ctx: *TestContext, gpa: Allocator, name: []const u8, ordinal: i16, flags: u16) !void {
+        const n_strx = try ctx.addString(gpa, name);
+        var n_desc = @bitCast(u16, ordinal * macho.N_SYMBOL_RESOLVER);
+        n_desc |= flags;
+        try ctx.symbols.append(gpa, .{
+            .n_value = 0,
+            .n_strx = n_strx,
+            .n_desc = n_desc,
+            .n_type = macho.N_EXT,
+            .n_sect = 0,
+        });
+    }
+
+    fn addString(ctx: *TestContext, gpa: Allocator, name: []const u8) !u32 {
+        const n_strx = @intCast(u32, ctx.strtab.items.len);
+        try ctx.strtab.appendSlice(gpa, name);
+        try ctx.strtab.append(gpa, 0);
+        return n_strx;
+    }
+
+    fn getSymbol(ctx: TestContext, target: Target) macho.nlist_64 {
+        return ctx.symbols.items[target.index];
+    }
+
+    fn getSymbolName(ctx: TestContext, target: Target) []const u8 {
+        const sym = ctx.getSymbol(target);
+        assert(sym.n_strx < ctx.strtab.items.len);
+        return std.mem.sliceTo(@ptrCast([*:0]const u8, ctx.strtab.items.ptr + sym.n_strx), 0);
+    }
+};
+
+fn generateTestContext() !TestContext {
+    const gpa = testing.allocator;
+    var ctx = TestContext{};
+    try ctx.addSymbol(gpa, "_import_1", 1, 0);
+    try ctx.addSymbol(gpa, "_import_2", 1, 0);
+    try ctx.addSymbol(gpa, "_import_3", 1, 0);
+    try ctx.addSymbol(gpa, "_import_4", 2, 0);
+    try ctx.addSymbol(gpa, "_import_5_weak", 2, macho.N_WEAK_REF);
+    try ctx.addSymbol(gpa, "_import_6", 2, 0);
+    return ctx;
+}
+
+test "no entries" {
+    const gpa = testing.allocator;
+
+    var test_context = try generateTestContext();
+    defer test_context.deinit(gpa);
+
+    var bind = Bind(TestContext, TestContext.Target){};
+    defer bind.deinit(gpa);
+
+    try bind.finalize(gpa, test_context);
+    try testing.expectEqual(@as(u64, 0), bind.size());
+}
+
+test "single entry" {
+    const gpa = testing.allocator;
+
+    var test_context = try generateTestContext();
+    defer test_context.deinit(gpa);
+
+    var bind = Bind(TestContext, TestContext.Target){};
+    defer bind.deinit(gpa);
+
+    try bind.entries.append(gpa, .{
+        .offset = 0x10,
+        .segment_id = 1,
+        .target = TestContext.Target{ .index = 0 },
+        .addend = 0,
+    });
+    try bind.finalize(gpa, test_context);
+    try testing.expectEqualSlices(u8, &[_]u8{
+        macho.BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | 1,
+        0x10,
+        macho.BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM | 0,
+        0x5f,
+        0x69,
+        0x6d,
+        0x70,
+        0x6f,
+        0x72,
+        0x74,
+        0x5f,
+        0x31,
+        0x0,
+        macho.BIND_OPCODE_SET_TYPE_IMM | 1,
+        macho.BIND_OPCODE_SET_DYLIB_ORDINAL_IMM | 1,
+        macho.BIND_OPCODE_DO_BIND,
+        macho.BIND_OPCODE_DONE,
+    }, bind.buffer.items);
 }

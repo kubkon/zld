@@ -2542,7 +2542,7 @@ fn collectRebaseData(self: *MachO, rebase: *Rebase) !void {
 fn collectBindDataFromContainer(
     self: *MachO,
     sect_id: u8,
-    b: *Bind(MachO),
+    b: *Bind(*const MachO, MachO.SymbolWithLoc),
     container: anytype,
 ) !void {
     const slice = self.sections.slice();
@@ -2577,7 +2577,7 @@ fn collectBindDataFromContainer(
     }
 }
 
-fn collectBindData(self: *MachO, b: *Bind(MachO)) !void {
+fn collectBindData(self: *MachO, b: *Bind(*const MachO, MachO.SymbolWithLoc)) !void {
     log.debug("collecting bind data", .{});
 
     const gpa = self.base.allocator;
@@ -2790,7 +2790,7 @@ fn writeDyldInfoData(self: *MachO) !void {
     defer rebase.deinit(gpa);
     try self.collectRebaseData(&rebase);
 
-    var b = Bind(MachO){};
+    var b = Bind(*const MachO, MachO.SymbolWithLoc){};
     defer b.deinit(gpa);
     try self.collectBindData(&b);
 
