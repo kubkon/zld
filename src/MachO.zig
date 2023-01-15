@@ -26,6 +26,7 @@ const Allocator = mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const Archive = @import("MachO/Archive.zig");
 const Atom = @import("MachO/Atom.zig");
+const Bind = @import("MachO/dyld_info/bind.zig").Bind;
 const CodeSignature = @import("MachO/CodeSignature.zig");
 const Dylib = @import("MachO/Dylib.zig");
 const DwarfInfo = @import("MachO/DwarfInfo.zig");
@@ -2541,14 +2542,15 @@ fn collectRebaseData(self: *MachO, rebase: *Rebase) !void {
 fn collectBindDataFromContainer(
     self: *MachO,
     sect_id: u8,
-    pointers: *std.ArrayList(bind.Pointer),
+    b: *Bind(MachO),
     container: anytype,
 ) !void {
     const slice = self.sections.slice();
     const segment_index = slice.items(.segment_index)[sect_id];
     const seg = self.getSegment(sect_id);
 
-    try pointers.ensureUnusedCapacity(container.items.len);
+    const gpa = self.base.allocator;
+    try b.entries.ensureUnusedCapacity(gpa, container.items.len);
 
     for (container.items) |entry| {
         const bind_sym_name = entry.getTargetSymbolName(self);
@@ -2557,9 +2559,7 @@ fn collectBindDataFromContainer(
 
         const sym = entry.getAtomSymbol(self);
         const base_offset = sym.n_value - seg.vmaddr;
-
         const dylib_ordinal = @divTrunc(@bitCast(i16, bind_sym.n_desc), macho.N_SYMBOL_RESOLVER);
-        var flags: u4 = 0;
         log.debug("    | bind at {x}, import('{s}') in dylib({d})", .{
             base_offset,
             bind_sym_name,
@@ -2567,29 +2567,29 @@ fn collectBindDataFromContainer(
         });
         if (bind_sym.weakRef()) {
             log.debug("    | marking as weak ref ", .{});
-            flags |= @truncate(u4, macho.BIND_SYMBOL_FLAGS_WEAK_IMPORT);
         }
-        pointers.appendAssumeCapacity(.{
+        b.entries.appendAssumeCapacity(.{
+            .target = entry.target,
             .offset = base_offset,
             .segment_id = segment_index,
-            .dylib_ordinal = dylib_ordinal,
-            .name = bind_sym_name,
-            .bind_flags = flags,
+            .addend = 0,
         });
     }
 }
 
-fn collectBindData(self: *MachO, pointers: *std.ArrayList(bind.Pointer)) !void {
+fn collectBindData(self: *MachO, b: *Bind(MachO)) !void {
     log.debug("collecting bind data", .{});
+
+    const gpa = self.base.allocator;
 
     // First, unpack GOT section
     if (self.getSectionByName("__DATA_CONST", "__got")) |sect_id| {
-        try self.collectBindDataFromContainer(sect_id, pointers, self.got_entries);
+        try self.collectBindDataFromContainer(sect_id, b, self.got_entries);
     }
 
     // Next, unpack TLV pointers section
     if (self.getSectionByName("__DATA", "__thread_ptrs")) |sect_id| {
-        try self.collectBindDataFromContainer(sect_id, pointers, self.tlv_ptr_entries);
+        try self.collectBindDataFromContainer(sect_id, b, self.tlv_ptr_entries);
     }
 
     // Finally, unpack the rest.
@@ -2663,7 +2663,6 @@ fn collectBindData(self: *MachO, pointers: *std.ArrayList(bind.Pointer)) !void {
                     const offset = @intCast(u64, base_offset + rel_offset);
 
                     const dylib_ordinal = @divTrunc(@bitCast(i16, bind_sym.n_desc), macho.N_SYMBOL_RESOLVER);
-                    var flags: u4 = 0;
                     log.debug("    | bind at {x}, import('{s}') in dylib({d})", .{
                         base_offset,
                         bind_sym_name,
@@ -2672,14 +2671,11 @@ fn collectBindData(self: *MachO, pointers: *std.ArrayList(bind.Pointer)) !void {
                     log.debug("    | with addend {x}", .{addend});
                     if (bind_sym.weakRef()) {
                         log.debug("    | marking as weak ref ", .{});
-                        flags |= @truncate(u4, macho.BIND_SYMBOL_FLAGS_WEAK_IMPORT);
                     }
-                    try pointers.append(.{
+                    try b.entries.append(gpa, .{
+                        .target = global,
                         .offset = offset,
                         .segment_id = segment_index,
-                        .dylib_ordinal = dylib_ordinal,
-                        .name = bind_sym_name,
-                        .bind_flags = flags,
                         .addend = addend,
                     });
                 }
@@ -2689,6 +2685,8 @@ fn collectBindData(self: *MachO, pointers: *std.ArrayList(bind.Pointer)) !void {
             } else break;
         }
     }
+
+    try b.finalize(gpa, self);
 }
 
 fn collectLazyBindData(self: *MachO, pointers: *std.ArrayList(bind.Pointer)) !void {
@@ -2792,9 +2790,9 @@ fn writeDyldInfoData(self: *MachO) !void {
     defer rebase.deinit(gpa);
     try self.collectRebaseData(&rebase);
 
-    var bind_pointers = std.ArrayList(bind.Pointer).init(gpa);
-    defer bind_pointers.deinit();
-    try self.collectBindData(&bind_pointers);
+    var b = Bind(MachO){};
+    defer b.deinit(gpa);
+    try self.collectBindData(&b);
 
     var lazy_bind_pointers = std.ArrayList(bind.Pointer).init(gpa);
     defer lazy_bind_pointers.deinit();
@@ -2812,7 +2810,7 @@ fn writeDyldInfoData(self: *MachO) !void {
     log.debug("writing rebase info from 0x{x} to 0x{x}", .{ rebase_off, rebase_off + rebase_size_aligned });
 
     const bind_off = rebase_off + rebase_size_aligned;
-    const bind_size = try bind.bindInfoSize(bind_pointers.items);
+    const bind_size = b.size();
     const bind_size_aligned = mem.alignForwardGeneric(u64, bind_size, @alignOf(u64));
     log.debug("writing bind info from 0x{x} to 0x{x}", .{ bind_off, bind_off + bind_size_aligned });
 
@@ -2843,7 +2841,7 @@ fn writeDyldInfoData(self: *MachO) !void {
     try rebase.write(writer);
     try stream.seekTo(bind_off - rebase_off);
 
-    try bind.writeBindInfo(bind_pointers.items, writer);
+    try b.write(writer);
     try stream.seekTo(lazy_bind_off - rebase_off);
 
     try bind.writeLazyBindInfo(lazy_bind_pointers.items, writer);
@@ -3629,12 +3627,17 @@ pub fn getSymbolPtr(self: *MachO, sym_with_loc: SymbolWithLoc) *macho.nlist_64 {
 }
 
 /// Returns symbol described by `sym_with_loc` descriptor.
-pub fn getSymbol(self: *MachO, sym_with_loc: SymbolWithLoc) macho.nlist_64 {
-    return self.getSymbolPtr(sym_with_loc).*;
+pub fn getSymbol(self: *const MachO, sym_with_loc: SymbolWithLoc) macho.nlist_64 {
+    if (sym_with_loc.getFile()) |file| {
+        const object = &self.objects.items[file];
+        return object.symtab[sym_with_loc.sym_index];
+    } else {
+        return self.locals.items[sym_with_loc.sym_index];
+    }
 }
 
 /// Returns name of the symbol described by `sym_with_loc` descriptor.
-pub fn getSymbolName(self: *MachO, sym_with_loc: SymbolWithLoc) []const u8 {
+pub fn getSymbolName(self: *const MachO, sym_with_loc: SymbolWithLoc) []const u8 {
     if (sym_with_loc.getFile()) |file| {
         const object = self.objects.items[file];
         return object.getSymbolName(sym_with_loc.sym_index);
