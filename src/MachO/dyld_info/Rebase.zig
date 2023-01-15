@@ -185,6 +185,13 @@ fn rebaseTimesSkip(count: usize, skip: u64, writer: anytype) !void {
 
 fn addAddr(addr: u64, writer: anytype) !void {
     log.debug(">>> add: {x}", .{addr});
+    if (std.mem.isAligned(addr, @sizeOf(u64))) {
+        const imm = @divExact(addr, @sizeOf(u64));
+        if (imm <= 0xf) {
+            try writer.writeByte(macho.REBASE_OPCODE_ADD_ADDR_IMM_SCALED | @truncate(u4, imm));
+            return;
+        }
+    }
     try writer.writeByte(macho.REBASE_OPCODE_ADD_ADDR_ULEB);
     try std.leb.writeULEB128(writer, addr);
 }
