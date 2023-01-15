@@ -53,7 +53,7 @@ pub fn finalize(rebase: *Rebase, gpa: Allocator) !void {
     }
 
     try finalizeSegment(rebase.entries.items[start..], writer);
-    try writer.writeByte(macho.REBASE_OPCODE_DONE);
+    try done(writer);
 }
 
 fn finalizeSegment(entries: []const Entry, writer: anytype) !void {
@@ -187,6 +187,11 @@ fn addAddr(addr: u64, writer: anytype) !void {
     log.debug(">>> add: {x}", .{addr});
     try writer.writeByte(macho.REBASE_OPCODE_ADD_ADDR_ULEB);
     try std.leb.writeULEB128(writer, addr);
+}
+
+fn done(writer: anytype) !void {
+    log.debug(">>> done", .{});
+    try writer.writeByte(macho.REBASE_OPCODE_DONE);
 }
 
 pub fn write(rebase: Rebase, writer: anytype) !void {
