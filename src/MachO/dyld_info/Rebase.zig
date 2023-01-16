@@ -123,17 +123,11 @@ fn finalizeSegment(entries: []const Entry, writer: anytype) !void {
                 if (delta == 0) {
                     count += 1;
                     offset += @sizeOf(u64) + skip;
-                    continue;
-                }
-
-                if (count == 1) {
-                    try rebaseAddAddr(delta, writer);
-                    offset += @sizeOf(u64);
                 } else {
                     try rebaseTimesSkip(count, skip, writer);
+                    state = .start;
+                    i -= 1;
                 }
-                state = .start;
-                i -= 1;
             },
         }
     }
