@@ -654,6 +654,18 @@ fn resolveLazySymbols(wasm: *Wasm) !void {
         // va/offset will be set during `setupMemory`
         try wasm.symbol_atom.put(wasm.base.allocator, loc, atom);
     }
+
+    if (wasm.undefs.fetchSwapRemove("__heap_end")) |kv| {
+        const loc = try wasm.createSyntheticSymbol("__heap_end", .data);
+        try wasm.discarded.putNoClobber(wasm.base.allocator, kv.value, loc);
+        _ = wasm.resolved_symbols.swapRemove(loc);
+
+        const atom = try Atom.create(wasm.base.allocator);
+        atom.size = 0;
+        atom.sym_index = loc.sym_index;
+        atom.file = null;
+        try wasm.symbol_atom.put(wasm.base.allocator, loc, atom);
+    }
 }
 
 /// From a given symbol location, returns its `wasm.GlobalType`.
@@ -1142,10 +1154,17 @@ fn setupMemory(wasm: *Wasm) !void {
         memory_ptr = initial_memory;
     }
 
+    memory_ptr = std.mem.alignForwardGeneric(u64, memory_ptr, page_size);
+
     // In case we do not import memory, but define it ourselves,
     // set the minimum amount of pages on the memory section.
-    wasm.memories.limits.min = @intCast(u32, std.mem.alignForwardGeneric(u64, memory_ptr, page_size) / page_size);
+    wasm.memories.limits.min = @intCast(u32, memory_ptr / page_size);
     log.debug("Total memory pages: {d}", .{wasm.memories.limits.min});
+
+    if (wasm.findGlobalSymbol("__heap_end")) |loc| {
+        const atom = wasm.symbol_atom.get(loc).?;
+        atom.offset = @intCast(u32, memory_ptr);
+    }
 
     if (wasm.options.max_memory) |max_memory| {
         if (!std.mem.isAlignedGeneric(u64, max_memory, page_size)) {
