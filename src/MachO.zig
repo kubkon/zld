@@ -2569,7 +2569,6 @@ fn collectBindDataFromContainer(
             log.debug("    | marking as weak ref ", .{});
         }
         b.entries.appendAssumeCapacity(.{
-            .vmaddr = seg.vmaddr,
             .target = entry.target,
             .offset = base_offset,
             .segment_id = segment_index,
@@ -2665,17 +2664,16 @@ fn collectBindData(self: *MachO, b: *Bind(*const MachO, MachO.SymbolWithLoc)) !v
                     const addend = mem.readIntLittle(i64, code[rel_offset..][0..8]);
 
                     const dylib_ordinal = @divTrunc(@bitCast(i16, bind_sym.n_desc), macho.N_SYMBOL_RESOLVER);
-                    log.warn("bind at {x}, import('{s}') in dylib({d})", .{
+                    log.debug("bind at {x}, import('{s}') in dylib({d})", .{
                         segment.vmaddr + offset,
                         bind_sym_name,
                         dylib_ordinal,
                     });
-                    log.warn("    | with addend {x}", .{addend});
+                    log.debug("    | with addend {x}", .{addend});
                     if (bind_sym.weakRef()) {
                         log.debug("    | marking as weak ref ", .{});
                     }
                     try b.entries.append(gpa, .{
-                        .vmaddr = segment.vmaddr,
                         .target = global,
                         .offset = offset,
                         .segment_id = segment_index,

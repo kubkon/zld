@@ -15,7 +15,6 @@ pub fn Bind(comptime Ctx: type, comptime Target: type) type {
         const Self = @This();
 
         const Entry = struct {
-            vmaddr: u64,
             target: Target,
             offset: u64,
             segment_id: u8,
@@ -50,14 +49,6 @@ pub fn Bind(comptime Ctx: type, comptime Target: type) type {
 
             std.sort.sort(Entry, self.entries.items, ctx, Entry.lessThan);
 
-            for (self.entries.items) |entry| {
-                log.warn("{x} => {s} + {x}", .{
-                    entry.vmaddr + entry.offset,
-                    ctx.getSymbolName(entry.target),
-                    entry.addend,
-                });
-            }
-
             var start: usize = 0;
             var seg_id: ?u8 = null;
             for (self.entries.items) |entry, i| {
@@ -77,58 +68,49 @@ pub fn Bind(comptime Ctx: type, comptime Target: type) type {
             const seg_id = entries[0].segment_id;
             try setSegmentOffset(seg_id, 0, writer);
 
-            var start: usize = 0;
             var offset: u64 = 0;
-            var target: ?Target = null;
-            for (entries) |entry, i| {
-                if (target != null and target.?.eql(entry.target)) continue;
-                offset = try finalizeTarget(entries[start..i], offset, ctx, writer);
-                target = entry.target;
-                start = i;
-            }
-
-            _ = try finalizeTarget(entries[start..], offset, ctx, writer);
-        }
-
-        fn finalizeTarget(entries: []const Entry, base_offset: u64, ctx: Ctx, writer: anytype) !u64 {
-            if (entries.len == 0) return base_offset;
-
-            const first = entries[0];
-            const sym = ctx.getSymbol(first.target);
-            const name = ctx.getSymbolName(first.target);
-            const flags: u8 = if (sym.weakRef())
-                macho.BIND_SYMBOL_FLAGS_WEAK_IMPORT
-            else
-                0;
-            const ordinal = @divTrunc(@bitCast(i16, sym.n_desc), macho.N_SYMBOL_RESOLVER);
-
-            try setSymbol(name, flags, writer);
-            try setTypePointer(writer);
-            try setDylibOrdinal(ordinal, writer);
-
-            var addend = first.addend;
-            try setAddend(addend, writer);
-
-            var offset: u64 = base_offset;
+            var addend: i64 = 0;
             var count: usize = 0;
             var skip: u64 = 0;
+            var target: ?Target = null;
+
             var state: enum {
                 start,
-                single,
-                times_skip,
+                bind_single,
+                bind_times_skip,
             } = .start;
 
             var i: usize = 0;
             while (i < entries.len) : (i += 1) {
-                log.warn("{x}, {d}, {x}, {?x}, {s}", .{ offset, count, skip, addend, @tagName(state) });
                 const current = entries[i];
-                log.warn("  => {x}", .{current.offset});
+                if (target == null or !target.?.eql(current.target)) {
+                    switch (state) {
+                        .start => {},
+                        .bind_single => try bind(writer),
+                        .bind_times_skip => try bindTimesSkip(count, skip, writer),
+                    }
+                    state = .start;
+                    target = current.target;
+
+                    const sym = ctx.getSymbol(current.target);
+                    const name = ctx.getSymbolName(current.target);
+                    const flags: u8 = if (sym.weakRef()) macho.BIND_SYMBOL_FLAGS_WEAK_IMPORT else 0;
+                    const ordinal = @divTrunc(@bitCast(i16, sym.n_desc), macho.N_SYMBOL_RESOLVER);
+
+                    try setSymbol(name, flags, writer);
+                    try setTypePointer(writer);
+                    try setDylibOrdinal(ordinal, writer);
+
+                    if (current.addend != addend) {
+                        addend = current.addend;
+                        try setAddend(addend, writer);
+                    }
+                }
+
+                log.debug("{x}, {d}, {x}, {?x}, {s}", .{ offset, count, skip, addend, @tagName(state) });
+                log.debug("  => {x}", .{current.offset});
                 switch (state) {
                     .start => {
-                        if (current.addend != addend) {
-                            addend = current.addend;
-                            try setAddend(addend, writer);
-                        }
                         if (current.offset < offset) {
                             try addAddr(@bitCast(u64, @intCast(i64, current.offset) - @intCast(i64, offset)), writer);
                             offset = offset - (offset - current.offset);
@@ -137,23 +119,23 @@ pub fn Bind(comptime Ctx: type, comptime Target: type) type {
                             try addAddr(delta, writer);
                             offset += delta;
                         }
-                        state = .single;
+                        state = .bind_single;
                         offset += @sizeOf(u64);
                         count = 1;
                     },
-                    .single => {
+                    .bind_single => {
                         if (current.offset == offset) {
                             try bind(writer);
                             state = .start;
                         } else if (current.offset > offset) {
                             const delta = current.offset - offset;
-                            state = .times_skip;
+                            state = .bind_times_skip;
                             skip = @intCast(u64, delta);
                             offset += skip;
                         } else unreachable;
                         i -= 1;
                     },
-                    .times_skip => {
+                    .bind_times_skip => {
                         if (current.offset < offset) {
                             count -= 1;
                             if (count == 1) {
@@ -178,32 +160,26 @@ pub fn Bind(comptime Ctx: type, comptime Target: type) type {
 
             switch (state) {
                 .start => unreachable,
-                .single => {
-                    try bind(writer);
-                },
-                .times_skip => {
-                    try bindTimesSkip(count, skip, writer);
-                },
+                .bind_single => try bind(writer),
+                .bind_times_skip => try bindTimesSkip(count, skip, writer),
             }
-
-            return offset;
         }
 
         fn setSegmentOffset(segment_id: u8, offset: u64, writer: anytype) !void {
-            log.warn(">>> set segment: {d} and offset: {x}", .{ segment_id, offset });
+            log.debug(">>> set segment: {d} and offset: {x}", .{ segment_id, offset });
             try writer.writeByte(macho.BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | @truncate(u4, segment_id));
             try std.leb.writeULEB128(writer, offset);
         }
 
         fn setSymbol(name: []const u8, flags: u8, writer: anytype) !void {
-            log.warn(">>> set symbol: {s} with flags: {x}", .{ name, flags });
+            log.debug(">>> set symbol: {s} with flags: {x}", .{ name, flags });
             try writer.writeByte(macho.BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM | @truncate(u4, flags));
             try writer.writeAll(name);
             try writer.writeByte(0);
         }
 
         fn setTypePointer(writer: anytype) !void {
-            log.warn(">>> set type: {d}", .{macho.BIND_TYPE_POINTER});
+            log.debug(">>> set type: {d}", .{macho.BIND_TYPE_POINTER});
             try writer.writeByte(macho.BIND_OPCODE_SET_TYPE_IMM | @truncate(u4, macho.BIND_TYPE_POINTER));
         }
 
@@ -216,12 +192,12 @@ pub fn Bind(comptime Ctx: type, comptime Target: type) type {
                     => {},
                     else => unreachable, // Invalid dylib special binding
                 }
-                log.warn(">>> set dylib special: {d}", .{ordinal});
+                log.debug(">>> set dylib special: {d}", .{ordinal});
                 const cast = @bitCast(u16, ordinal);
                 try writer.writeByte(macho.BIND_OPCODE_SET_DYLIB_SPECIAL_IMM | @truncate(u4, cast));
             } else {
                 const cast = @bitCast(u16, ordinal);
-                log.warn(">>> set dylib ordinal: {d}", .{ordinal});
+                log.debug(">>> set dylib ordinal: {d}", .{ordinal});
                 if (cast <= 0xf) {
                     try writer.writeByte(macho.BIND_OPCODE_SET_DYLIB_ORDINAL_IMM | @truncate(u4, cast));
                 } else {
@@ -232,18 +208,18 @@ pub fn Bind(comptime Ctx: type, comptime Target: type) type {
         }
 
         fn setAddend(addend: i64, writer: anytype) !void {
-            log.warn(">>> set addend: {x}", .{addend});
+            log.debug(">>> set addend: {x}", .{addend});
             try writer.writeByte(macho.BIND_OPCODE_SET_ADDEND_SLEB);
             try std.leb.writeILEB128(writer, addend);
         }
 
         fn bind(writer: anytype) !void {
-            log.warn(">>> bind", .{});
+            log.debug(">>> bind", .{});
             try writer.writeByte(macho.BIND_OPCODE_DO_BIND);
         }
 
         fn bindAddAddr(addr: u64, writer: anytype) !void {
-            log.warn(">>> bind with add: {x}", .{addr});
+            log.debug(">>> bind with add: {x}", .{addr});
             if (std.mem.isAligned(addr, @sizeOf(u64))) {
                 const imm = @divExact(addr, @sizeOf(u64));
                 if (imm <= 0xf) {
@@ -258,20 +234,20 @@ pub fn Bind(comptime Ctx: type, comptime Target: type) type {
         }
 
         fn bindTimesSkip(count: usize, skip: u64, writer: anytype) !void {
-            log.warn(">>> bind with count: {d} and skip: {x}", .{ count, skip });
+            log.debug(">>> bind with count: {d} and skip: {x}", .{ count, skip });
             try writer.writeByte(macho.BIND_OPCODE_DO_BIND_ULEB_TIMES_SKIPPING_ULEB);
             try std.leb.writeULEB128(writer, count);
             try std.leb.writeULEB128(writer, skip);
         }
 
         fn addAddr(addr: u64, writer: anytype) !void {
-            log.warn(">>> add: {x}", .{addr});
+            log.debug(">>> add: {x}", .{addr});
             try writer.writeByte(macho.BIND_OPCODE_ADD_ADDR_ULEB);
             try std.leb.writeULEB128(writer, addr);
         }
 
         fn done(writer: anytype) !void {
-            log.warn(">>> done", .{});
+            log.debug(">>> done", .{});
             try writer.writeByte(macho.BIND_OPCODE_DONE);
         }
 
@@ -387,8 +363,6 @@ test "bind - single entry" {
         0x0,
         macho.BIND_OPCODE_SET_TYPE_IMM | 1,
         macho.BIND_OPCODE_SET_DYLIB_ORDINAL_IMM | 1,
-        macho.BIND_OPCODE_SET_ADDEND_SLEB,
-        0x0,
         macho.BIND_OPCODE_ADD_ADDR_ULEB,
         0x10,
         macho.BIND_OPCODE_DO_BIND,
@@ -447,8 +421,6 @@ test "bind - multiple occurrences within the same segment" {
         0x0,
         macho.BIND_OPCODE_SET_TYPE_IMM | 1,
         macho.BIND_OPCODE_SET_DYLIB_ORDINAL_IMM | 1,
-        macho.BIND_OPCODE_SET_ADDEND_SLEB,
-        0x0,
         macho.BIND_OPCODE_ADD_ADDR_ULEB,
         0x10,
         macho.BIND_OPCODE_DO_BIND,
