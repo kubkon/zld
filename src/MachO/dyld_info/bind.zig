@@ -86,8 +86,8 @@ pub fn Bind(comptime Ctx: type, comptime Target: type) type {
                 if (target == null or !target.?.eql(current.target)) {
                     switch (state) {
                         .start => {},
-                        .bind_single => try bind(writer),
-                        .bind_times_skip => try bindTimesSkip(count, skip, writer),
+                        .bind_single => try doBind(writer),
+                        .bind_times_skip => try doBindTimesSkip(count, skip, writer),
                     }
                     state = .start;
                     target = current.target;
@@ -125,7 +125,7 @@ pub fn Bind(comptime Ctx: type, comptime Target: type) type {
                     },
                     .bind_single => {
                         if (current.offset == offset) {
-                            try bind(writer);
+                            try doBind(writer);
                             state = .start;
                         } else if (current.offset > offset) {
                             const delta = current.offset - offset;
@@ -139,9 +139,9 @@ pub fn Bind(comptime Ctx: type, comptime Target: type) type {
                         if (current.offset < offset) {
                             count -= 1;
                             if (count == 1) {
-                                try bindAddAddr(skip, writer);
+                                try doBindAddAddr(skip, writer);
                             } else {
-                                try bindTimesSkip(count, skip, writer);
+                                try doBindTimesSkip(count, skip, writer);
                             }
                             state = .start;
                             offset = offset - (@sizeOf(u64) + skip);
@@ -150,7 +150,7 @@ pub fn Bind(comptime Ctx: type, comptime Target: type) type {
                             count += 1;
                             offset += @sizeOf(u64) + skip;
                         } else {
-                            try bindTimesSkip(count, skip, writer);
+                            try doBindTimesSkip(count, skip, writer);
                             state = .start;
                             i -= 1;
                         }
@@ -160,95 +160,9 @@ pub fn Bind(comptime Ctx: type, comptime Target: type) type {
 
             switch (state) {
                 .start => unreachable,
-                .bind_single => try bind(writer),
-                .bind_times_skip => try bindTimesSkip(count, skip, writer),
+                .bind_single => try doBind(writer),
+                .bind_times_skip => try doBindTimesSkip(count, skip, writer),
             }
-        }
-
-        fn setSegmentOffset(segment_id: u8, offset: u64, writer: anytype) !void {
-            log.debug(">>> set segment: {d} and offset: {x}", .{ segment_id, offset });
-            try writer.writeByte(macho.BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | @truncate(u4, segment_id));
-            try std.leb.writeULEB128(writer, offset);
-        }
-
-        fn setSymbol(name: []const u8, flags: u8, writer: anytype) !void {
-            log.debug(">>> set symbol: {s} with flags: {x}", .{ name, flags });
-            try writer.writeByte(macho.BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM | @truncate(u4, flags));
-            try writer.writeAll(name);
-            try writer.writeByte(0);
-        }
-
-        fn setTypePointer(writer: anytype) !void {
-            log.debug(">>> set type: {d}", .{macho.BIND_TYPE_POINTER});
-            try writer.writeByte(macho.BIND_OPCODE_SET_TYPE_IMM | @truncate(u4, macho.BIND_TYPE_POINTER));
-        }
-
-        fn setDylibOrdinal(ordinal: i16, writer: anytype) !void {
-            if (ordinal <= 0) {
-                switch (ordinal) {
-                    macho.BIND_SPECIAL_DYLIB_SELF,
-                    macho.BIND_SPECIAL_DYLIB_MAIN_EXECUTABLE,
-                    macho.BIND_SPECIAL_DYLIB_FLAT_LOOKUP,
-                    => {},
-                    else => unreachable, // Invalid dylib special binding
-                }
-                log.debug(">>> set dylib special: {d}", .{ordinal});
-                const cast = @bitCast(u16, ordinal);
-                try writer.writeByte(macho.BIND_OPCODE_SET_DYLIB_SPECIAL_IMM | @truncate(u4, cast));
-            } else {
-                const cast = @bitCast(u16, ordinal);
-                log.debug(">>> set dylib ordinal: {d}", .{ordinal});
-                if (cast <= 0xf) {
-                    try writer.writeByte(macho.BIND_OPCODE_SET_DYLIB_ORDINAL_IMM | @truncate(u4, cast));
-                } else {
-                    try writer.writeByte(macho.BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB);
-                    try std.leb.writeULEB128(writer, cast);
-                }
-            }
-        }
-
-        fn setAddend(addend: i64, writer: anytype) !void {
-            log.debug(">>> set addend: {x}", .{addend});
-            try writer.writeByte(macho.BIND_OPCODE_SET_ADDEND_SLEB);
-            try std.leb.writeILEB128(writer, addend);
-        }
-
-        fn bind(writer: anytype) !void {
-            log.debug(">>> bind", .{});
-            try writer.writeByte(macho.BIND_OPCODE_DO_BIND);
-        }
-
-        fn bindAddAddr(addr: u64, writer: anytype) !void {
-            log.debug(">>> bind with add: {x}", .{addr});
-            if (std.mem.isAligned(addr, @sizeOf(u64))) {
-                const imm = @divExact(addr, @sizeOf(u64));
-                if (imm <= 0xf) {
-                    try writer.writeByte(
-                        macho.BIND_OPCODE_DO_BIND_ADD_ADDR_IMM_SCALED | @truncate(u4, imm),
-                    );
-                    return;
-                }
-            }
-            try writer.writeByte(macho.BIND_OPCODE_DO_BIND_ADD_ADDR_ULEB);
-            try std.leb.writeULEB128(writer, addr);
-        }
-
-        fn bindTimesSkip(count: usize, skip: u64, writer: anytype) !void {
-            log.debug(">>> bind with count: {d} and skip: {x}", .{ count, skip });
-            try writer.writeByte(macho.BIND_OPCODE_DO_BIND_ULEB_TIMES_SKIPPING_ULEB);
-            try std.leb.writeULEB128(writer, count);
-            try std.leb.writeULEB128(writer, skip);
-        }
-
-        fn addAddr(addr: u64, writer: anytype) !void {
-            log.debug(">>> add: {x}", .{addr});
-            try writer.writeByte(macho.BIND_OPCODE_ADD_ADDR_ULEB);
-            try std.leb.writeULEB128(writer, addr);
-        }
-
-        fn done(writer: anytype) !void {
-            log.debug(">>> done", .{});
-            try writer.writeByte(macho.BIND_OPCODE_DONE);
         }
 
         pub fn write(self: Self, writer: anytype) !void {
@@ -256,6 +170,148 @@ pub fn Bind(comptime Ctx: type, comptime Target: type) type {
             try writer.writeAll(self.buffer.items);
         }
     };
+}
+
+pub fn LazyBind(comptime Ctx: type, comptime Target: type) type {
+    return struct {
+        entries: std.ArrayListUnmanaged(Entry) = .{},
+        buffer: std.ArrayListUnmanaged(u8) = .{},
+
+        const Self = @This();
+
+        const Entry = struct {
+            target: Target,
+            offset: u64,
+            segment_id: u8,
+            addend: i64,
+        };
+
+        pub fn deinit(self: *Self, gpa: Allocator) void {
+            self.entries.deinit(gpa);
+            self.buffer.deinit(gpa);
+        }
+
+        pub fn size(self: Self) u64 {
+            return @intCast(u64, self.buffer.items.len);
+        }
+
+        pub fn finalize(self: *Self, gpa: Allocator, ctx: Ctx) !void {
+            if (self.entries.items.len == 0) return;
+
+            const writer = self.buffer.writer(gpa);
+            var addend: i64 = 0;
+
+            for (self.entries.items) |entry| {
+                const sym = ctx.getSymbol(entry.target);
+                const name = ctx.getSymbolName(entry.target);
+                const flags: u8 = if (sym.weakRef()) macho.BIND_SYMBOL_FLAGS_WEAK_IMPORT else 0;
+                const ordinal = @divTrunc(@bitCast(i16, sym.n_desc), macho.N_SYMBOL_RESOLVER);
+
+                try setSegmentOffset(entry.segment_id, entry.offset, writer);
+                try setSymbol(name, flags, writer);
+                try setDylibOrdinal(ordinal, writer);
+
+                if (entry.addend != addend) {
+                    try setAddend(entry.addend, writer);
+                    addend = entry.addend;
+                }
+
+                try doBind(writer);
+                try done(writer);
+            }
+        }
+
+        pub fn write(self: Self, writer: anytype) !void {
+            if (self.size() == 0) return;
+            try writer.writeAll(self.buffer.items);
+        }
+    };
+}
+
+fn setSegmentOffset(segment_id: u8, offset: u64, writer: anytype) !void {
+    log.debug(">>> set segment: {d} and offset: {x}", .{ segment_id, offset });
+    try writer.writeByte(macho.BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | @truncate(u4, segment_id));
+    try std.leb.writeULEB128(writer, offset);
+}
+
+fn setSymbol(name: []const u8, flags: u8, writer: anytype) !void {
+    log.debug(">>> set symbol: {s} with flags: {x}", .{ name, flags });
+    try writer.writeByte(macho.BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM | @truncate(u4, flags));
+    try writer.writeAll(name);
+    try writer.writeByte(0);
+}
+
+fn setTypePointer(writer: anytype) !void {
+    log.debug(">>> set type: {d}", .{macho.BIND_TYPE_POINTER});
+    try writer.writeByte(macho.BIND_OPCODE_SET_TYPE_IMM | @truncate(u4, macho.BIND_TYPE_POINTER));
+}
+
+fn setDylibOrdinal(ordinal: i16, writer: anytype) !void {
+    if (ordinal <= 0) {
+        switch (ordinal) {
+            macho.BIND_SPECIAL_DYLIB_SELF,
+            macho.BIND_SPECIAL_DYLIB_MAIN_EXECUTABLE,
+            macho.BIND_SPECIAL_DYLIB_FLAT_LOOKUP,
+            => {},
+            else => unreachable, // Invalid dylib special binding
+        }
+        log.debug(">>> set dylib special: {d}", .{ordinal});
+        const cast = @bitCast(u16, ordinal);
+        try writer.writeByte(macho.BIND_OPCODE_SET_DYLIB_SPECIAL_IMM | @truncate(u4, cast));
+    } else {
+        const cast = @bitCast(u16, ordinal);
+        log.debug(">>> set dylib ordinal: {d}", .{ordinal});
+        if (cast <= 0xf) {
+            try writer.writeByte(macho.BIND_OPCODE_SET_DYLIB_ORDINAL_IMM | @truncate(u4, cast));
+        } else {
+            try writer.writeByte(macho.BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB);
+            try std.leb.writeULEB128(writer, cast);
+        }
+    }
+}
+
+fn setAddend(addend: i64, writer: anytype) !void {
+    log.debug(">>> set addend: {x}", .{addend});
+    try writer.writeByte(macho.BIND_OPCODE_SET_ADDEND_SLEB);
+    try std.leb.writeILEB128(writer, addend);
+}
+
+fn doBind(writer: anytype) !void {
+    log.debug(">>> bind", .{});
+    try writer.writeByte(macho.BIND_OPCODE_DO_BIND);
+}
+
+fn doBindAddAddr(addr: u64, writer: anytype) !void {
+    log.debug(">>> bind with add: {x}", .{addr});
+    if (std.mem.isAligned(addr, @sizeOf(u64))) {
+        const imm = @divExact(addr, @sizeOf(u64));
+        if (imm <= 0xf) {
+            try writer.writeByte(
+                macho.BIND_OPCODE_DO_BIND_ADD_ADDR_IMM_SCALED | @truncate(u4, imm),
+            );
+            return;
+        }
+    }
+    try writer.writeByte(macho.BIND_OPCODE_DO_BIND_ADD_ADDR_ULEB);
+    try std.leb.writeULEB128(writer, addr);
+}
+
+fn doBindTimesSkip(count: usize, skip: u64, writer: anytype) !void {
+    log.debug(">>> bind with count: {d} and skip: {x}", .{ count, skip });
+    try writer.writeByte(macho.BIND_OPCODE_DO_BIND_ULEB_TIMES_SKIPPING_ULEB);
+    try std.leb.writeULEB128(writer, count);
+    try std.leb.writeULEB128(writer, skip);
+}
+
+fn addAddr(addr: u64, writer: anytype) !void {
+    log.debug(">>> add: {x}", .{addr});
+    try writer.writeByte(macho.BIND_OPCODE_ADD_ADDR_ULEB);
+    try std.leb.writeULEB128(writer, addr);
+}
+
+fn done(writer: anytype) !void {
+    log.debug(">>> done", .{});
+    try writer.writeByte(macho.BIND_OPCODE_DONE);
 }
 
 const TestContext = struct {
@@ -609,6 +665,67 @@ test "bind - complex" {
         0xff,
         0xff,
         0x1,
+        macho.BIND_OPCODE_DO_BIND,
+        macho.BIND_OPCODE_DONE,
+    }, bind.buffer.items);
+}
+
+test "lazy bind" {
+    const gpa = testing.allocator;
+
+    var test_context = try generateTestContext();
+    defer test_context.deinit(gpa);
+
+    var bind = LazyBind(TestContext, TestContext.Target){};
+    defer bind.deinit(gpa);
+
+    try bind.entries.append(gpa, .{
+        .offset = 0x10,
+        .segment_id = 1,
+        .target = TestContext.Target{ .index = 0 },
+        .addend = 0,
+    });
+    try bind.entries.append(gpa, .{
+        .offset = 0x20,
+        .segment_id = 2,
+        .target = TestContext.Target{ .index = 1 },
+        .addend = 0x10,
+    });
+
+    try bind.finalize(gpa, test_context);
+    try testing.expectEqualSlices(u8, &[_]u8{
+        macho.BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | 1,
+        0x10,
+        macho.BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM | 0,
+        0x5f,
+        0x69,
+        0x6d,
+        0x70,
+        0x6f,
+        0x72,
+        0x74,
+        0x5f,
+        0x31,
+        0x0,
+        macho.BIND_OPCODE_SET_DYLIB_ORDINAL_IMM | 1,
+        macho.BIND_OPCODE_DO_BIND,
+        macho.BIND_OPCODE_DONE,
+        macho.BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | 2,
+        0x20,
+        macho.BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM | 0,
+        0x5f,
+        0x69,
+        0x6d,
+        0x70,
+        0x6f,
+        0x72,
+        0x74,
+        0x5f,
+        0x32,
+        0x0,
+        macho.BIND_OPCODE_SET_DYLIB_ORDINAL_IMM | 1,
+        macho.BIND_OPCODE_SET_ADDEND_SLEB,
+        0x10,
         macho.BIND_OPCODE_DO_BIND,
         macho.BIND_OPCODE_DONE,
     }, bind.buffer.items);
