@@ -2560,8 +2560,8 @@ fn collectBindDataFromContainer(
         const sym = entry.getAtomSymbol(self);
         const base_offset = sym.n_value - seg.vmaddr;
         const dylib_ordinal = @divTrunc(@bitCast(i16, bind_sym.n_desc), macho.N_SYMBOL_RESOLVER);
-        log.debug("    | bind at {x}, import('{s}') in dylib({d})", .{
-            base_offset,
+        log.debug("bind at {x}, import('{s}') in dylib({d})", .{
+            seg.vmaddr + base_offset,
             bind_sym_name,
             dylib_ordinal,
         });
@@ -2569,6 +2569,7 @@ fn collectBindDataFromContainer(
             log.debug("    | marking as weak ref ", .{});
         }
         b.entries.appendAssumeCapacity(.{
+            .vmaddr = seg.vmaddr,
             .target = entry.target,
             .offset = base_offset,
             .segment_id = segment_index,
@@ -2656,23 +2657,25 @@ fn collectBindData(self: *MachO, b: *Bind(*const MachO, MachO.SymbolWithLoc)) !v
                     const bind_sym = self.getSymbol(global);
                     if (!bind_sym.undf()) continue;
 
-                    const code = Atom.getAtomCode(self, atom_index);
-                    const addend = mem.readIntLittle(i64, code[0..8]);
-                    const base_offset = @intCast(i32, sym.n_value - segment.vmaddr);
-                    const rel_offset = rel.r_address - base_rel_offset;
+                    const base_offset = sym.n_value - segment.vmaddr;
+                    const rel_offset = @intCast(u32, rel.r_address - base_rel_offset);
                     const offset = @intCast(u64, base_offset + rel_offset);
 
+                    const code = Atom.getAtomCode(self, atom_index);
+                    const addend = mem.readIntLittle(i64, code[rel_offset..][0..8]);
+
                     const dylib_ordinal = @divTrunc(@bitCast(i16, bind_sym.n_desc), macho.N_SYMBOL_RESOLVER);
-                    log.debug("    | bind at {x}, import('{s}') in dylib({d})", .{
-                        base_offset,
+                    log.warn("bind at {x}, import('{s}') in dylib({d})", .{
+                        segment.vmaddr + offset,
                         bind_sym_name,
                         dylib_ordinal,
                     });
-                    log.debug("    | with addend {x}", .{addend});
+                    log.warn("    | with addend {x}", .{addend});
                     if (bind_sym.weakRef()) {
                         log.debug("    | marking as weak ref ", .{});
                     }
                     try b.entries.append(gpa, .{
+                        .vmaddr = segment.vmaddr,
                         .target = global,
                         .offset = offset,
                         .segment_id = segment_index,

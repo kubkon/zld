@@ -15,6 +15,7 @@ pub fn Bind(comptime Ctx: type, comptime Target: type) type {
         const Self = @This();
 
         const Entry = struct {
+            vmaddr: u64,
             target: Target,
             offset: u64,
             segment_id: u8,
@@ -49,6 +50,14 @@ pub fn Bind(comptime Ctx: type, comptime Target: type) type {
 
             std.sort.sort(Entry, self.entries.items, ctx, Entry.lessThan);
 
+            for (self.entries.items) |entry| {
+                log.warn("{x} => {s} + {x}", .{
+                    entry.vmaddr + entry.offset,
+                    ctx.getSymbolName(entry.target),
+                    entry.addend,
+                });
+            }
+
             var start: usize = 0;
             var seg_id: ?u8 = null;
             for (self.entries.items) |entry, i| {
@@ -66,10 +75,10 @@ pub fn Bind(comptime Ctx: type, comptime Target: type) type {
             if (entries.len == 0) return;
 
             const seg_id = entries[0].segment_id;
-            try setSegmentOffset(seg_id, entries[0].offset, writer);
+            try setSegmentOffset(seg_id, 0, writer);
 
             var start: usize = 0;
-            var offset = @intCast(i64, entries[0].offset);
+            var offset: u64 = 0;
             var target: ?Target = null;
             for (entries) |entry, i| {
                 if (target != null and target.?.eql(entry.target)) continue;
@@ -81,7 +90,7 @@ pub fn Bind(comptime Ctx: type, comptime Target: type) type {
             _ = try finalizeTarget(entries[start..], offset, ctx, writer);
         }
 
-        fn finalizeTarget(entries: []const Entry, base_offset: i64, ctx: Ctx, writer: anytype) !i64 {
+        fn finalizeTarget(entries: []const Entry, base_offset: u64, ctx: Ctx, writer: anytype) !u64 {
             if (entries.len == 0) return base_offset;
 
             const first = entries[0];
@@ -100,9 +109,9 @@ pub fn Bind(comptime Ctx: type, comptime Target: type) type {
             var addend = first.addend;
             try setAddend(addend, writer);
 
-            var offset: i64 = base_offset;
+            var offset: u64 = base_offset;
             var count: usize = 0;
-            var skip: i64 = 0;
+            var skip: u64 = 0;
             var state: enum {
                 start,
                 single,
@@ -120,8 +129,11 @@ pub fn Bind(comptime Ctx: type, comptime Target: type) type {
                             addend = current.addend;
                             try setAddend(addend, writer);
                         }
-                        const delta = @intCast(i64, current.offset) - offset;
-                        if (delta != 0) {
+                        if (current.offset < offset) {
+                            try addAddr(@bitCast(u64, @intCast(i64, current.offset) - @intCast(i64, offset)), writer);
+                            offset = offset - (offset - current.offset);
+                        } else if (current.offset > offset) {
+                            const delta = current.offset - offset;
                             try addAddr(delta, writer);
                             offset += delta;
                         }
@@ -130,20 +142,29 @@ pub fn Bind(comptime Ctx: type, comptime Target: type) type {
                         count = 1;
                     },
                     .single => {
-                        const delta = @intCast(i64, current.offset) - offset;
-                        if (delta == 0) {
+                        if (current.offset == offset) {
                             try bind(writer);
                             state = .start;
-                        } else {
+                        } else if (current.offset > offset) {
+                            const delta = current.offset - offset;
                             state = .times_skip;
-                            skip = delta;
+                            skip = @intCast(u64, delta);
                             offset += skip;
-                        }
+                        } else unreachable;
                         i -= 1;
                     },
                     .times_skip => {
-                        const delta = @intCast(i64, current.offset) - offset;
-                        if (delta == 0) {
+                        if (current.offset < offset) {
+                            count -= 1;
+                            if (count == 1) {
+                                try bindAddAddr(skip, writer);
+                            } else {
+                                try bindTimesSkip(count, skip, writer);
+                            }
+                            state = .start;
+                            offset = offset - (@sizeOf(u64) + skip);
+                            i -= 2;
+                        } else if (current.offset == offset) {
                             count += 1;
                             offset += @sizeOf(u64) + skip;
                         } else {
@@ -236,17 +257,17 @@ pub fn Bind(comptime Ctx: type, comptime Target: type) type {
             try std.leb.writeULEB128(writer, addr);
         }
 
-        fn bindTimesSkip(count: usize, skip: i64, writer: anytype) !void {
+        fn bindTimesSkip(count: usize, skip: u64, writer: anytype) !void {
             log.warn(">>> bind with count: {d} and skip: {x}", .{ count, skip });
             try writer.writeByte(macho.BIND_OPCODE_DO_BIND_ULEB_TIMES_SKIPPING_ULEB);
             try std.leb.writeULEB128(writer, count);
-            try std.leb.writeULEB128(writer, @intCast(u64, skip));
+            try std.leb.writeULEB128(writer, skip);
         }
 
-        fn addAddr(addr: i64, writer: anytype) !void {
+        fn addAddr(addr: u64, writer: anytype) !void {
             log.warn(">>> add: {x}", .{addr});
             try writer.writeByte(macho.BIND_OPCODE_ADD_ADDR_ULEB);
-            try std.leb.writeULEB128(writer, @bitCast(u64, addr));
+            try std.leb.writeULEB128(writer, addr);
         }
 
         fn done(writer: anytype) !void {
@@ -352,7 +373,7 @@ test "bind - single entry" {
     try bind.finalize(gpa, test_context);
     try testing.expectEqualSlices(u8, &[_]u8{
         macho.BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | 1,
-        0x10,
+        0x0,
         macho.BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM | 0,
         0x5f,
         0x69,
@@ -366,6 +387,10 @@ test "bind - single entry" {
         0x0,
         macho.BIND_OPCODE_SET_TYPE_IMM | 1,
         macho.BIND_OPCODE_SET_DYLIB_ORDINAL_IMM | 1,
+        macho.BIND_OPCODE_SET_ADDEND_SLEB,
+        0x0,
+        macho.BIND_OPCODE_ADD_ADDR_ULEB,
+        0x10,
         macho.BIND_OPCODE_DO_BIND,
         macho.BIND_OPCODE_DONE,
     }, bind.buffer.items);
@@ -408,7 +433,7 @@ test "bind - multiple occurrences within the same segment" {
     try bind.finalize(gpa, test_context);
     try testing.expectEqualSlices(u8, &[_]u8{
         macho.BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | 1,
-        0x10,
+        0x0,
         macho.BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM | 0,
         0x5f,
         0x69,
@@ -422,6 +447,10 @@ test "bind - multiple occurrences within the same segment" {
         0x0,
         macho.BIND_OPCODE_SET_TYPE_IMM | 1,
         macho.BIND_OPCODE_SET_DYLIB_ORDINAL_IMM | 1,
+        macho.BIND_OPCODE_SET_ADDEND_SLEB,
+        0x0,
+        macho.BIND_OPCODE_ADD_ADDR_ULEB,
+        0x10,
         macho.BIND_OPCODE_DO_BIND,
         macho.BIND_OPCODE_DO_BIND,
         macho.BIND_OPCODE_DO_BIND,
