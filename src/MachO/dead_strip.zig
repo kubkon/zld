@@ -1,5 +1,6 @@
 const std = @import("std");
 const assert = std.debug.assert;
+const eh_frame = @import("eh_frame.zig");
 const log = std.log.scoped(.dead_strip);
 const macho = std.macho;
 const math = std.math;
@@ -11,10 +12,11 @@ const AtomIndex = MachO.AtomIndex;
 const Atom = @import("Atom.zig");
 const MachO = @import("../MachO.zig");
 const SymbolWithLoc = MachO.SymbolWithLoc;
+const UnwindInfo = @import("UnwindInfo.zig");
 
 const AtomTable = std.AutoHashMap(AtomIndex, void);
 
-pub fn gcAtoms(macho_file: *MachO) Allocator.Error!void {
+pub fn gcAtoms(macho_file: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -30,7 +32,7 @@ pub fn gcAtoms(macho_file: *MachO) Allocator.Error!void {
     try alive.ensureTotalCapacity(@intCast(u32, macho_file.atoms.items.len));
 
     try collectRoots(macho_file, &roots);
-    mark(macho_file, roots, &alive);
+    try mark(macho_file, roots, &alive);
     prune(macho_file, alive);
 }
 
@@ -75,23 +77,6 @@ fn collectRoots(macho_file: *MachO, roots: *AtomTable) !void {
                 });
             }
         },
-    }
-
-    // TODO just a temp until we learn how to parse unwind records
-    for (macho_file.globals.items) |global| {
-        if (mem.eql(u8, "___gxx_personality_v0", macho_file.getSymbolName(global))) {
-            const object = macho_file.objects.items[global.getFile().?];
-            if (object.getAtomIndexForSymbol(global.sym_index)) |atom_index| {
-                _ = try roots.getOrPut(atom_index);
-
-                log.debug("root(ATOM({d}, %{d}, {?d}))", .{
-                    atom_index,
-                    macho_file.getAtom(atom_index).sym_index,
-                    macho_file.getAtom(atom_index).getFile(),
-                });
-            }
-            break;
-        }
     }
 
     for (macho_file.objects.items) |object| {
@@ -241,7 +226,7 @@ fn refersLive(macho_file: *MachO, atom_index: AtomIndex, alive: AtomTable) bool 
     return false;
 }
 
-fn mark(macho_file: *MachO, roots: AtomTable, alive: *AtomTable) void {
+fn mark(macho_file: *MachO, roots: AtomTable, alive: *AtomTable) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -275,6 +260,116 @@ fn mark(macho_file: *MachO, roots: AtomTable, alive: *AtomTable) void {
                     }
                 }
             }
+        }
+    }
+
+    for (macho_file.objects.items) |object, object_id| {
+        // Traverse unwind and eh_frame records noting if the source symbol has been marked, and if so,
+        // marking all references as live.
+        // TODO I am currently assuming there will always be __unwind_info section emitted which implies
+        // we will not traverse __eh_frame in isolation. This however is only true for more recent versions
+        // of macOS so if there is a feature request to handle earlier versions of macOS, the following
+        // bit code needs updating as well.
+        if (object.hasUnwindRecords()) {
+            try markUnwindRecords(macho_file, @intCast(u32, object_id), alive);
+        }
+    }
+}
+
+fn markUnwindRecords(macho_file: *MachO, object_id: u32, alive: *AtomTable) !void {
+    const object = &macho_file.objects.items[object_id];
+
+    const unwind_records = object.getUnwindRecords();
+    var it = object.getEhFrameRecordsIterator();
+
+    for (object.exec_atoms.items) |atom_index| {
+        const record_id = object.unwind_records_lookup.get(atom_index) orelse continue;
+        if (object.unwind_relocs_lookup[record_id].dead) continue; // already marked, nothing to do
+        if (!alive.contains(atom_index)) {
+            // Mark the record dead and continue.
+            object.unwind_relocs_lookup[record_id].dead = true;
+            if (object.eh_frame_records_lookup.get(atom_index)) |fde_offset| {
+                object.eh_frame_relocs_lookup.getPtr(fde_offset).?.dead = true;
+            }
+            continue;
+        }
+
+        const record = unwind_records[record_id];
+        const enc = try macho.UnwindEncodingArm64.fromU32(record.compactUnwindEncoding);
+
+        switch (enc) {
+            .frame, .frameless => {
+                if (UnwindInfo.getPersonalityFunctionReloc(macho_file, object_id, record_id)) |rel| {
+                    const target = UnwindInfo.parseRelocTarget(
+                        macho_file,
+                        object_id,
+                        rel,
+                        mem.asBytes(&record),
+                        @intCast(i32, record_id * @sizeOf(macho.compact_unwind_entry)),
+                    );
+                    const target_sym = macho_file.getSymbol(target);
+                    if (!target_sym.undf()) {
+                        const target_object = macho_file.objects.items[target.getFile().?];
+                        const target_atom_index = target_object.getAtomIndexForSymbol(target.sym_index).?;
+                        markLive(macho_file, target_atom_index, alive);
+                    }
+                }
+
+                if (UnwindInfo.getLsdaReloc(macho_file, object_id, record_id)) |rel| {
+                    const target = UnwindInfo.parseRelocTarget(
+                        macho_file,
+                        object_id,
+                        rel,
+                        mem.asBytes(&record),
+                        @intCast(i32, record_id * @sizeOf(macho.compact_unwind_entry)),
+                    );
+                    const target_object = macho_file.objects.items[target.getFile().?];
+                    const target_atom_index = target_object.getAtomIndexForSymbol(target.sym_index).?;
+                    markLive(macho_file, target_atom_index, alive);
+                }
+            },
+            .dwarf => {
+                const fde_offset = object.eh_frame_records_lookup.get(atom_index).?;
+                it.seekTo(fde_offset);
+                const fde = (try it.next()).?;
+
+                const cie_ptr = fde.getCiePointer();
+                const cie_offset = fde_offset + 4 - cie_ptr;
+                it.seekTo(cie_offset);
+                const cie = (try it.next()).?;
+
+                {
+                    // Mark FDE references which should include any referenced LSDA record
+                    const relocs = eh_frame.getRelocs(macho_file, object_id, fde_offset);
+                    for (relocs) |rel| {
+                        const target = UnwindInfo.parseRelocTarget(
+                            macho_file,
+                            object_id,
+                            rel,
+                            fde.data,
+                            @intCast(i32, fde_offset) + 4,
+                        );
+                        const target_sym = macho_file.getSymbol(target);
+                        if (!target_sym.undf()) blk: {
+                            const target_object = macho_file.objects.items[target.getFile().?];
+                            const target_atom_index = target_object.getAtomIndexForSymbol(target.sym_index) orelse
+                                break :blk;
+                            markLive(macho_file, target_atom_index, alive);
+                        }
+                    }
+                }
+
+                // Mark CIE references which should include any referenced personalities
+                // that are defined locally.
+                if (cie.getPersonalityPointerReloc(macho_file, object_id, cie_offset)) |target| {
+                    const target_sym = macho_file.getSymbol(target);
+                    if (!target_sym.undf()) {
+                        const target_object = macho_file.objects.items[target.getFile().?];
+                        const target_atom_index = target_object.getAtomIndexForSymbol(target.sym_index).?;
+                        markLive(macho_file, target_atom_index, alive);
+                    }
+                }
+            },
         }
     }
 }

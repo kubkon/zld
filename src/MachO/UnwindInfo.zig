@@ -241,7 +241,7 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
 
     // TODO handle dead stripping
     for (macho_file.objects.items) |*object, object_id| {
-        log.debug("collecting unwind records in {s}", .{object.name});
+        log.debug("collecting unwind records in {s} ({d})", .{ object.name, object_id });
         const unwind_records = object.getUnwindRecords();
 
         // Contents of unwind records does not have to cover all symbol in executable section
@@ -324,10 +324,17 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
                 }
                 record.compactUnwindEncoding = enc.toU32();
                 break :blk record;
-            } else nullRecord();
+            } else blk: {
+                const atom = macho_file.getAtom(atom_index);
+                const sym = macho_file.getSymbol(atom.getSymbolWithLoc());
+                if (sym.n_desc == MachO.N_DEAD) continue;
+                break :blk nullRecord();
+            };
 
             const atom = macho_file.getAtom(atom_index);
-            const sym = macho_file.getSymbol(atom.getSymbolWithLoc());
+            const sym_loc = atom.getSymbolWithLoc();
+            const sym = macho_file.getSymbol(sym_loc);
+            assert(sym.n_desc != MachO.N_DEAD);
             record.rangeStart = sym.n_value;
             record.rangeLength = @intCast(u32, atom.size);
 
@@ -706,6 +713,7 @@ fn getRelocs(
     record_id: usize,
 ) []align(1) const macho.relocation_info {
     const object = &macho_file.objects.items[object_id];
+    assert(object.hasUnwindRecords());
     const rel_pos = object.unwind_relocs_lookup[record_id].reloc;
     const relocs = object.getRelocs(object.unwind_info_sect.?);
     return relocs[rel_pos.start..][0..rel_pos.len];
@@ -717,7 +725,7 @@ fn isPersonalityFunction(record_id: usize, rel: macho.relocation_info) bool {
     return rel_offset == 16;
 }
 
-fn getPersonalityFunctionReloc(
+pub fn getPersonalityFunctionReloc(
     macho_file: *MachO,
     object_id: u32,
     record_id: usize,
@@ -746,7 +754,7 @@ fn isLsda(record_id: usize, rel: macho.relocation_info) bool {
     return rel_offset == 24;
 }
 
-fn getLsdaReloc(macho_file: *MachO, object_id: u32, record_id: usize) ?macho.relocation_info {
+pub fn getLsdaReloc(macho_file: *MachO, object_id: u32, record_id: usize) ?macho.relocation_info {
     const relocs = getRelocs(macho_file, object_id, record_id);
     for (relocs) |rel| {
         if (isLsda(record_id, rel)) return rel;

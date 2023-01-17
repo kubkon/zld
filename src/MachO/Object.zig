@@ -92,7 +92,7 @@ pub fn deinit(self: *Object, gpa: Allocator) void {
     }
     self.eh_frame_relocs_lookup.deinit(gpa);
     self.eh_frame_records_lookup.deinit(gpa);
-    if (self.unwind_info_sect) |_| {
+    if (self.hasUnwindRecords()) {
         gpa.free(self.unwind_relocs_lookup);
     }
     self.unwind_records_lookup.deinit(gpa);
@@ -215,7 +215,7 @@ pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch)
 
     // Parse __LD,__compact_unwind if one exists.
     self.unwind_info_sect = self.getSourceSectionByName("__LD", "__compact_unwind");
-    if (self.unwind_info_sect) |_| {
+    if (self.hasUnwindRecords()) {
         self.unwind_relocs_lookup = try allocator.alloc(Record, self.getUnwindRecords().len);
         mem.set(Record, self.unwind_relocs_lookup, .{
             .dead = true,
@@ -899,11 +899,19 @@ pub fn getAtomIndexForSymbol(self: Object, sym_index: u32) ?AtomIndex {
     return atom_index;
 }
 
+pub fn hasUnwindRecords(self: Object) bool {
+    return self.unwind_info_sect != null;
+}
+
 pub fn getUnwindRecords(self: Object) []align(1) const macho.compact_unwind_entry {
     const sect = self.unwind_info_sect orelse return &[0]macho.compact_unwind_entry{};
     const data = self.getSectionContents(sect);
     const num_entries = @divExact(data.len, @sizeOf(macho.compact_unwind_entry));
     return @ptrCast([*]align(1) const macho.compact_unwind_entry, data)[0..num_entries];
+}
+
+pub fn hasEhFrameRecords(self: Object) bool {
+    return self.eh_frame_sect != null;
 }
 
 pub fn getEhFrameRecordsIterator(self: Object) eh_frame.Iterator {

@@ -432,6 +432,7 @@ pub fn getRelocs(
     source_offset: u32,
 ) []align(1) const macho.relocation_info {
     const object = &macho_file.objects.items[object_id];
+    assert(object.hasEhFrameRecords());
     const urel = object.eh_frame_relocs_lookup.get(source_offset) orelse
         return &[0]macho.relocation_info{};
     const all_relocs = object.getRelocs(object.eh_frame_sect.?);
