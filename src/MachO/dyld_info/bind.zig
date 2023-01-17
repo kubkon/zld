@@ -176,6 +176,7 @@ pub fn LazyBind(comptime Ctx: type, comptime Target: type) type {
     return struct {
         entries: std.ArrayListUnmanaged(Entry) = .{},
         buffer: std.ArrayListUnmanaged(u8) = .{},
+        offsets: std.ArrayListUnmanaged(u32) = .{},
 
         const Self = @This();
 
@@ -189,6 +190,7 @@ pub fn LazyBind(comptime Ctx: type, comptime Target: type) type {
         pub fn deinit(self: *Self, gpa: Allocator) void {
             self.entries.deinit(gpa);
             self.buffer.deinit(gpa);
+            self.offsets.deinit(gpa);
         }
 
         pub fn size(self: Self) u64 {
@@ -198,10 +200,16 @@ pub fn LazyBind(comptime Ctx: type, comptime Target: type) type {
         pub fn finalize(self: *Self, gpa: Allocator, ctx: Ctx) !void {
             if (self.entries.items.len == 0) return;
 
-            const writer = self.buffer.writer(gpa);
+            try self.offsets.ensureTotalCapacityPrecise(gpa, self.entries.items.len);
+
+            var cwriter = std.io.countingWriter(self.buffer.writer(gpa));
+            const writer = cwriter.writer();
+
             var addend: i64 = 0;
 
             for (self.entries.items) |entry| {
+                self.offsets.appendAssumeCapacity(@intCast(u32, cwriter.bytes_written));
+
                 const sym = ctx.getSymbol(entry.target);
                 const name = ctx.getSymbolName(entry.target);
                 const flags: u8 = if (sym.weakRef()) macho.BIND_SYMBOL_FLAGS_WEAK_IMPORT else 0;

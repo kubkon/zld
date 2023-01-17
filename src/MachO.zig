@@ -2852,7 +2852,7 @@ fn writeDyldInfoData(self: *MachO) !void {
     });
 
     try self.base.file.pwriteAll(buffer, rebase_off);
-    try self.populateLazyBindOffsetsInStubHelper(buffer[lazy_bind_off - rebase_off ..][0..lazy_bind_size]);
+    try self.populateLazyBindOffsetsInStubHelper(lazy_bind);
 
     self.dyld_info_cmd.rebase_off = @intCast(u32, rebase_off);
     self.dyld_info_cmd.rebase_size = @intCast(u32, rebase_size_aligned);
@@ -2864,125 +2864,37 @@ fn writeDyldInfoData(self: *MachO) !void {
     self.dyld_info_cmd.export_size = @intCast(u32, export_size_aligned);
 }
 
-fn populateLazyBindOffsetsInStubHelper(self: *MachO, buffer: []const u8) !void {
-    const gpa = self.base.allocator;
+fn populateLazyBindOffsetsInStubHelper(self: *MachO, lazy_bind: LazyBind) !void {
+    if (lazy_bind.size() == 0) return;
 
-    const stub_helper_section_index = self.getSectionByName("__TEXT", "__stub_helper") orelse return;
-    const la_symbol_ptr_section_index = self.getSectionByName("__DATA", "__la_symbol_ptr") orelse return;
-
-    if (self.stub_helper_preamble_sym_index == null) return;
+    const stub_helper_section_index = self.getSectionByName("__TEXT", "__stub_helper").?;
+    assert(self.stub_helper_preamble_sym_index != null);
 
     const section = self.sections.get(stub_helper_section_index);
-    const last_atom_index = section.last_atom_index;
-
-    var table = std.AutoHashMap(u64, AtomIndex).init(gpa);
-    defer table.deinit();
-
-    {
-        var stub_atom_index = last_atom_index;
-        var laptr_atom_index = self.sections.items(.last_atom_index)[la_symbol_ptr_section_index];
-
-        const base_addr = blk: {
-            const segment_index = self.getSegmentByName("__DATA").?;
-            const seg = self.segments.items[segment_index];
-            break :blk seg.vmaddr;
-        };
-
-        while (true) {
-            const stub_atom = self.getAtom(stub_atom_index);
-            const laptr_atom = self.getAtom(laptr_atom_index);
-            const laptr_off = blk: {
-                const sym = self.getSymbolPtr(laptr_atom.getSymbolWithLoc());
-                break :blk sym.n_value - base_addr;
-            };
-
-            try table.putNoClobber(laptr_off, stub_atom_index);
-
-            if (laptr_atom.prev_index) |prev_index| {
-                laptr_atom_index = prev_index;
-                stub_atom_index = stub_atom.prev_index.?;
-            } else break;
-        }
-    }
-
-    var stream = std.io.fixedBufferStream(buffer);
-    var reader = stream.reader();
-    var offsets = std.ArrayList(struct { sym_offset: u64, offset: u32 }).init(gpa);
-    try offsets.append(.{ .sym_offset = undefined, .offset = 0 });
-    defer offsets.deinit();
-    var valid_block = false;
-
-    while (true) {
-        const inst = reader.readByte() catch |err| switch (err) {
-            error.EndOfStream => break,
-        };
-        const opcode: u8 = inst & macho.BIND_OPCODE_MASK;
-
-        switch (opcode) {
-            macho.BIND_OPCODE_DO_BIND => {
-                valid_block = true;
-            },
-            macho.BIND_OPCODE_DONE => {
-                if (valid_block) {
-                    const offset = try stream.getPos();
-                    try offsets.append(.{ .sym_offset = undefined, .offset = @intCast(u32, offset) });
-                }
-                valid_block = false;
-            },
-            macho.BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM => {
-                var next = try reader.readByte();
-                while (next != @as(u8, 0)) {
-                    next = try reader.readByte();
-                }
-            },
-            macho.BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB => {
-                var inserted = offsets.pop();
-                inserted.sym_offset = try std.leb.readULEB128(u64, reader);
-                try offsets.append(inserted);
-            },
-            macho.BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB => {
-                _ = try std.leb.readULEB128(u64, reader);
-            },
-            macho.BIND_OPCODE_SET_ADDEND_SLEB => {
-                _ = try std.leb.readILEB128(i64, reader);
-            },
-            macho.BIND_OPCODE_SET_DYLIB_ORDINAL_IMM,
-            macho.BIND_OPCODE_SET_DYLIB_SPECIAL_IMM,
-            => {},
-            macho.BIND_OPCODE_SET_TYPE_IMM,
-            macho.BIND_OPCODE_ADD_ADDR_ULEB,
-            macho.BIND_OPCODE_DO_BIND_ADD_ADDR_IMM_SCALED,
-            macho.BIND_OPCODE_DO_BIND_ADD_ADDR_ULEB,
-            macho.BIND_OPCODE_DO_BIND_ULEB_TIMES_SKIPPING_ULEB,
-            => unreachable, // not allowed
-            else => unreachable, // unhandled opcode; should never happen
-        }
-    }
-
-    const header = self.sections.items(.header)[stub_helper_section_index];
     const stub_offset: u4 = switch (self.options.target.cpu_arch.?) {
         .x86_64 => 1,
         .aarch64 => 2 * @sizeOf(u32),
         else => unreachable,
     };
-    var buf: [@sizeOf(u32)]u8 = undefined;
-    _ = offsets.pop();
+    const header = section.header;
+    var atom_index = section.first_atom_index;
+    atom_index = self.getAtom(atom_index).next_index.?; // skip preamble
 
-    while (offsets.popOrNull()) |bind_offset| {
-        const atom_index = table.get(bind_offset.sym_offset).?;
+    var index: usize = 0;
+    while (true) {
         const atom = self.getAtom(atom_index);
-        const sym = self.getSymbol(atom.getSymbolWithLoc());
+        const atom_sym = self.getSymbol(atom.getSymbolWithLoc());
+        const file_offset = header.offset + atom_sym.n_value - header.addr + stub_offset;
+        const bind_offset = lazy_bind.offsets.items[index];
 
-        const file_offset = header.offset + sym.n_value - header.addr + stub_offset;
-        mem.writeIntLittle(u32, &buf, bind_offset.offset);
+        log.debug("writing lazy bind offset 0x{x} in stub helper at 0x{x}", .{ bind_offset, file_offset });
 
-        log.debug("writing lazy bind offset in stub helper of 0x{x} for symbol {s} at offset 0x{x}", .{
-            bind_offset.offset,
-            self.getSymbolName(atom.getSymbolWithLoc()),
-            file_offset,
-        });
+        try self.base.file.pwriteAll(mem.asBytes(&bind_offset), file_offset);
 
-        try self.base.file.pwriteAll(&buf, file_offset);
+        if (atom.next_index) |next_index| {
+            atom_index = next_index;
+            index += 1;
+        } else break;
     }
 }
 
