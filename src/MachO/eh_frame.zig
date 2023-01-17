@@ -64,6 +64,10 @@ pub fn calcSectionSize(macho_file: *MachO, unwind_info: *const UnwindInfo) !void
             const record_id = unwind_info.records_lookup.get(atom_index) orelse continue;
             const record = &unwind_info.records.items[record_id];
 
+            // TODO skip this check if no __compact_unwind is present
+            const is_dwarf = try UnwindInfo.isDwarf(record.*);
+            if (!is_dwarf) continue;
+
             eh_it.seekTo(fde_record_offset);
             const source_fde_record = (try eh_it.next()).?;
 
@@ -77,10 +81,6 @@ pub fn calcSectionSize(macho_file: *MachO, unwind_info: *const UnwindInfo) !void
                 gop.value_ptr.* = size;
                 size += source_cie_record.getSize();
             }
-
-            // TODO skip this check if no __compact_unwind is present
-            const is_dwarf = try UnwindInfo.isDwarf(record.*);
-            if (!is_dwarf) continue;
 
             size += source_fde_record.getSize();
         }
@@ -121,6 +121,10 @@ pub fn write(macho_file: *MachO, unwind_info: *UnwindInfo) !void {
             const record_id = unwind_info.records_lookup.get(atom_index) orelse continue;
             const record = &unwind_info.records.items[record_id];
 
+            // TODO skip this check if no __compact_unwind is present
+            const is_dwarf = try UnwindInfo.isDwarf(record.*);
+            if (!is_dwarf) continue;
+
             eh_it.seekTo(fde_record_offset);
             const source_fde_record = (try eh_it.next()).?;
 
@@ -141,10 +145,6 @@ pub fn write(macho_file: *MachO, unwind_info: *UnwindInfo) !void {
                 gop.value_ptr.* = eh_frame_offset;
                 eh_frame_offset += cie_record.getSize();
             }
-
-            // TODO skip this check if no __compact_unwind is present
-            const is_dwarf = try UnwindInfo.isDwarf(record.*);
-            if (!is_dwarf) continue;
 
             var fde_record = try source_fde_record.toOwned(gpa);
             fde_record.setCiePointer(eh_frame_offset + 4 - gop.value_ptr.*);
