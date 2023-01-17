@@ -60,21 +60,16 @@ atoms: std.ArrayListUnmanaged(AtomIndex) = .{},
 exec_atoms: std.ArrayListUnmanaged(AtomIndex) = .{},
 
 eh_frame_sect: ?macho.section_64 = null,
-eh_frame_relocs_lookup: std.AutoArrayHashMapUnmanaged(u32, EhFrameRecord) = .{},
+eh_frame_relocs_lookup: std.AutoArrayHashMapUnmanaged(u32, Record) = .{},
 eh_frame_records_lookup: std.AutoArrayHashMapUnmanaged(AtomIndex, u32) = .{},
 
 unwind_info_sect: ?macho.section_64 = null,
-unwind_relocs_lookup: []UnwindRecord = undefined,
+unwind_relocs_lookup: []Record = undefined,
 unwind_records_lookup: std.AutoHashMapUnmanaged(AtomIndex, u32) = .{},
 
 const RelocEntry = struct { start: u32, len: u32 };
 
-const EhFrameRecord = struct {
-    dead: bool,
-    reloc: RelocEntry,
-};
-
-const UnwindRecord = struct {
+const Record = struct {
     dead: bool,
     reloc: RelocEntry,
 };
@@ -221,8 +216,8 @@ pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch)
     // Parse __LD,__compact_unwind if one exists.
     self.unwind_info_sect = self.getSourceSectionByName("__LD", "__compact_unwind");
     if (self.unwind_info_sect) |_| {
-        self.unwind_relocs_lookup = try allocator.alloc(UnwindRecord, self.getUnwindRecords().len);
-        mem.set(UnwindRecord, self.unwind_relocs_lookup, .{
+        self.unwind_relocs_lookup = try allocator.alloc(Record, self.getUnwindRecords().len);
+        mem.set(Record, self.unwind_relocs_lookup, .{
             .dead = true,
             .reloc = .{
                 .start = 0,
@@ -504,42 +499,29 @@ pub fn splitRegularSections(self: *Object, macho_file: *MachO, object_id: u32) !
                 else
                     sect.@"align";
 
-                const skip_atom = blk: {
-                    const atom_sym = self.symtab[atom_sym_index];
-                    if (!atom_sym.ext()) break :blk false;
-                    if (self.globals_lookup[atom_sym_index] > -1) {
-                        const global_index = @intCast(u32, self.globals_lookup[atom_sym_index]);
-                        const global = macho_file.globals.items[global_index];
-                        break :blk global.getFile() != object_id;
-                    }
-                    break :blk false;
-                };
+                const atom_index = try self.createAtomFromSubsection(
+                    macho_file,
+                    object_id,
+                    atom_sym_index,
+                    atom_sym_index + 1,
+                    nsyms_trailing,
+                    atom_size,
+                    atom_align,
+                    out_sect_id,
+                );
 
-                if (!skip_atom) {
-                    const atom_index = try self.createAtomFromSubsection(
-                        macho_file,
-                        object_id,
-                        atom_sym_index,
-                        atom_sym_index + 1,
-                        nsyms_trailing,
-                        atom_size,
-                        atom_align,
-                        out_sect_id,
-                    );
-
-                    // TODO rework this at the relocation level
-                    if (cpu_arch == .x86_64 and addr == sect.addr) {
-                        // In x86_64 relocs, it can so happen that the compiler refers to the same
-                        // atom by both the actual assigned symbol and the start of the section. In this
-                        // case, we need to link the two together so add an alias.
-                        const alias_index = self.getSectionAliasSymbolIndex(sect_id);
-                        self.atom_by_index_table[alias_index] = atom_index;
-                    }
-                    if (!sect.isZerofill()) {
-                        try self.cacheRelocs(macho_file, atom_index);
-                    }
-                    macho_file.addAtomToSection(atom_index);
+                // TODO rework this at the relocation level
+                if (cpu_arch == .x86_64 and addr == sect.addr) {
+                    // In x86_64 relocs, it can so happen that the compiler refers to the same
+                    // atom by both the actual assigned symbol and the start of the section. In this
+                    // case, we need to link the two together so add an alias.
+                    const alias_index = self.getSectionAliasSymbolIndex(sect_id);
+                    self.atom_by_index_table[alias_index] = atom_index;
                 }
+                if (!sect.isZerofill()) {
+                    try self.cacheRelocs(macho_file, atom_index);
+                }
+                macho_file.addAtomToSection(atom_index);
             }
         } else {
             const alias_index = self.getSectionAliasSymbolIndex(sect_id);
