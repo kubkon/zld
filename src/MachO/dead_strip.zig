@@ -306,16 +306,42 @@ fn markUnwindRecords(macho_file: *MachO, object_id: u32, alive: *AtomTable) !voi
             it.seekTo(cie_offset);
             const cie = (try it.next()).?;
 
-            const lsda_ptr = try fde.getLsdaPointer(cie, .{
-                .base_addr = object.eh_frame_sect.?.addr,
-                .base_offset = fde_offset,
-            });
-            if (lsda_ptr) |lsda_address| {
-                // Mark LSDA record as live
-                const sym_index = object.getSymbolByAddress(lsda_address, null);
-                const target_atom_index = object.getAtomIndexForSymbol(sym_index).?;
-                markLive(macho_file, target_atom_index, alive);
+            switch (cpu_arch) {
+                .aarch64 => {
+                    // Mark FDE references which should include any referenced LSDA record
+                    const relocs = eh_frame.getRelocs(macho_file, object_id, fde_offset);
+                    for (relocs) |rel| {
+                        const target = UnwindInfo.parseRelocTarget(
+                            macho_file,
+                            object_id,
+                            rel,
+                            fde.data,
+                            @intCast(i32, fde_offset) + 4,
+                        );
+                        const target_sym = macho_file.getSymbol(target);
+                        if (!target_sym.undf()) blk: {
+                            const target_object = macho_file.objects.items[target.getFile().?];
+                            const target_atom_index = target_object.getAtomIndexForSymbol(target.sym_index) orelse
+                                break :blk;
+                            markLive(macho_file, target_atom_index, alive);
+                        }
+                    }
+                },
+                .x86_64 => {
+                    const lsda_ptr = try fde.getLsdaPointer(cie, .{
+                        .base_addr = object.eh_frame_sect.?.addr,
+                        .base_offset = fde_offset,
+                    });
+                    if (lsda_ptr) |lsda_address| {
+                        // Mark LSDA record as live
+                        const sym_index = object.getSymbolByAddress(lsda_address, null);
+                        const target_atom_index = object.getAtomIndexForSymbol(sym_index).?;
+                        markLive(macho_file, target_atom_index, alive);
+                    }
+                },
+                else => unreachable,
             }
+
             // Mark CIE references which should include any referenced personalities
             // that are defined locally.
             if (cie.getPersonalityPointerReloc(macho_file, object_id, cie_offset)) |target| {

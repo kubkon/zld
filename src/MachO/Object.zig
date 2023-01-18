@@ -655,7 +655,7 @@ fn parseEhFrameSection(self: *Object, macho_file: *MachO, object_id: u32) !void 
     }
 
     const gpa = macho_file.base.allocator;
-    const arch = macho_file.options.target.cpu_arch.?;
+    const cpu_arch = macho_file.options.target.cpu_arch.?;
     const relocs = self.getRelocs(sect);
 
     var it = self.getEhFrameRecordsIterator();
@@ -671,7 +671,7 @@ fn parseEhFrameSection(self: *Object, macho_file: *MachO, object_id: u32) !void 
 
     while (try it.next()) |record| {
         const offset = it.pos - record.getSize();
-        const rel_pos = switch (arch) {
+        const rel_pos = switch (cpu_arch) {
             .aarch64 => filterRelocs(relocs, offset, offset + record.getSize()),
             .x86_64 => RelocEntry{ .start = 0, .len = 0 },
             else => unreachable,
@@ -682,15 +682,36 @@ fn parseEhFrameSection(self: *Object, macho_file: *MachO, object_id: u32) !void 
         });
 
         if (record.tag == .fde) {
-            const target_address = record.getTargetSymbolAddress(.{
-                .base_addr = sect.addr,
-                .base_offset = offset,
-            });
-            const target_sym_index = self.getSymbolByAddress(target_address, null);
-            const target = if (self.getGlobal(target_sym_index)) |global_index|
-                macho_file.globals.items[global_index]
-            else
-                MachO.SymbolWithLoc{ .sym_index = target_sym_index, .file = object_id + 1 };
+            const target = blk: {
+                switch (cpu_arch) {
+                    .aarch64 => {
+                        assert(rel_pos.len > 0); // TODO convert to an error as the FDE eh frame is malformed
+                        // Find function symbol that this record describes
+                        const rel = relocs[rel_pos.start..][rel_pos.len - 1];
+                        const target = UnwindInfo.parseRelocTarget(
+                            macho_file,
+                            object_id,
+                            rel,
+                            it.data[offset..],
+                            @intCast(i32, offset),
+                        );
+                        break :blk target;
+                    },
+                    .x86_64 => {
+                        const target_address = record.getTargetSymbolAddress(.{
+                            .base_addr = sect.addr,
+                            .base_offset = offset,
+                        });
+                        const target_sym_index = self.getSymbolByAddress(target_address, null);
+                        const target = if (self.getGlobal(target_sym_index)) |global_index|
+                            macho_file.globals.items[global_index]
+                        else
+                            MachO.SymbolWithLoc{ .sym_index = target_sym_index, .file = object_id + 1 };
+                        break :blk target;
+                    },
+                    else => unreachable,
+                }
+            };
             log.debug("FDE at offset {x} tracks {s}", .{ offset, macho_file.getSymbolName(target) });
             if (target.getFile() != object_id) {
                 self.eh_frame_relocs_lookup.getPtr(offset).?.dead = true;

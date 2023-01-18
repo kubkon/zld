@@ -36,8 +36,6 @@ pub fn scanRelocs(macho_file: *MachO) !void {
                 const cie = (try it.next()).?;
                 try cie.scanRelocs(macho_file, @intCast(u32, object_id), cie_offset);
             }
-
-            try fde.scanRelocs(macho_file, @intCast(u32, object_id), fde_offset);
         }
     }
 }
