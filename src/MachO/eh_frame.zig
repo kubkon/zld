@@ -63,10 +63,10 @@ pub fn calcSectionSize(macho_file: *MachO, unwind_info: *const UnwindInfo) !void
             if (object.eh_frame_relocs_lookup.get(fde_record_offset).?.dead) continue;
 
             const record_id = unwind_info.records_lookup.get(atom_index) orelse continue;
-            const record = &unwind_info.records.items[record_id];
+            const record = unwind_info.records.items[record_id];
 
             // TODO skip this check if no __compact_unwind is present
-            const is_dwarf = try UnwindInfo.isDwarf(record.*, cpu_arch);
+            const is_dwarf = UnwindInfo.UnwindEncoding.isDwarf(record.compactUnwindEncoding, cpu_arch);
             if (!is_dwarf) continue;
 
             eh_it.seekTo(fde_record_offset);
@@ -125,7 +125,7 @@ pub fn write(macho_file: *MachO, unwind_info: *UnwindInfo) !void {
             const record = &unwind_info.records.items[record_id];
 
             // TODO skip this check if no __compact_unwind is present
-            const is_dwarf = try UnwindInfo.isDwarf(record.*, cpu_arch);
+            const is_dwarf = UnwindInfo.UnwindEncoding.isDwarf(record.compactUnwindEncoding, cpu_arch);
             if (!is_dwarf) continue;
 
             eh_it.seekTo(fde_record_offset);
@@ -182,10 +182,11 @@ pub fn write(macho_file: *MachO, unwind_info: *UnwindInfo) !void {
 
             eh_records.putAssumeCapacityNoClobber(eh_frame_offset, fde_record);
 
-            var enc = macho.UnwindEncodingArm64.fromU32(record.compactUnwindEncoding) catch
-                unreachable;
-            enc.dwarf.section_offset = @intCast(u24, eh_frame_offset);
-            record.compactUnwindEncoding = enc.toU32();
+            UnwindInfo.UnwindEncoding.setDwarfSectionOffset(
+                &record.compactUnwindEncoding,
+                cpu_arch,
+                @intCast(u24, eh_frame_offset),
+            );
 
             const cie_record = eh_records.get(
                 eh_frame_offset + 4 - fde_record.getCiePointer(),

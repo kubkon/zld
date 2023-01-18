@@ -296,7 +296,7 @@ fn markUnwindRecords(macho_file: *MachO, object_id: u32, alive: *AtomTable) !voi
         }
 
         const record = unwind_records[record_id];
-        if (try UnwindInfo.isDwarf(record, cpu_arch)) {
+        if (UnwindInfo.UnwindEncoding.isDwarf(record.compactUnwindEncoding, cpu_arch)) {
             const fde_offset = object.eh_frame_records_lookup.get(atom_index).?;
             it.seekTo(fde_offset);
             const fde = (try it.next()).?;
@@ -326,80 +326,35 @@ fn markUnwindRecords(macho_file: *MachO, object_id: u32, alive: *AtomTable) !voi
                     markLive(macho_file, target_atom_index, alive);
                 }
             }
-        } else switch (cpu_arch) {
-            .aarch64 => {
-                const enc = try macho.UnwindEncodingArm64.fromU32(record.compactUnwindEncoding);
-                switch (enc) {
-                    .frame, .frameless => {
-                        if (UnwindInfo.getPersonalityFunctionReloc(macho_file, object_id, record_id)) |rel| {
-                            const target = UnwindInfo.parseRelocTarget(
-                                macho_file,
-                                object_id,
-                                rel,
-                                mem.asBytes(&record),
-                                @intCast(i32, record_id * @sizeOf(macho.compact_unwind_entry)),
-                            );
-                            const target_sym = macho_file.getSymbol(target);
-                            if (!target_sym.undf()) {
-                                const target_object = macho_file.objects.items[target.getFile().?];
-                                const target_atom_index = target_object.getAtomIndexForSymbol(target.sym_index).?;
-                                markLive(macho_file, target_atom_index, alive);
-                            }
-                        }
-
-                        if (UnwindInfo.getLsdaReloc(macho_file, object_id, record_id)) |rel| {
-                            const target = UnwindInfo.parseRelocTarget(
-                                macho_file,
-                                object_id,
-                                rel,
-                                mem.asBytes(&record),
-                                @intCast(i32, record_id * @sizeOf(macho.compact_unwind_entry)),
-                            );
-                            const target_object = macho_file.objects.items[target.getFile().?];
-                            const target_atom_index = target_object.getAtomIndexForSymbol(target.sym_index).?;
-                            markLive(macho_file, target_atom_index, alive);
-                        }
-                    },
-                    .dwarf => unreachable,
+        } else {
+            if (UnwindInfo.getPersonalityFunctionReloc(macho_file, object_id, record_id)) |rel| {
+                const target = UnwindInfo.parseRelocTarget(
+                    macho_file,
+                    object_id,
+                    rel,
+                    mem.asBytes(&record),
+                    @intCast(i32, record_id * @sizeOf(macho.compact_unwind_entry)),
+                );
+                const target_sym = macho_file.getSymbol(target);
+                if (!target_sym.undf()) {
+                    const target_object = macho_file.objects.items[target.getFile().?];
+                    const target_atom_index = target_object.getAtomIndexForSymbol(target.sym_index).?;
+                    markLive(macho_file, target_atom_index, alive);
                 }
-            },
-            .x86_64 => {
-                const enc = try UnwindInfo.UnwindEncodingX86_64.fromU32(record.compactUnwindEncoding);
-                switch (enc) {
-                    .frame, .frameless => {
-                        if (UnwindInfo.getPersonalityFunctionReloc(macho_file, object_id, record_id)) |rel| {
-                            const target = UnwindInfo.parseRelocTarget(
-                                macho_file,
-                                object_id,
-                                rel,
-                                mem.asBytes(&record),
-                                @intCast(i32, record_id * @sizeOf(macho.compact_unwind_entry)),
-                            );
-                            const target_sym = macho_file.getSymbol(target);
-                            if (!target_sym.undf()) {
-                                const target_object = macho_file.objects.items[target.getFile().?];
-                                const target_atom_index = target_object.getAtomIndexForSymbol(target.sym_index).?;
-                                markLive(macho_file, target_atom_index, alive);
-                            }
-                        }
+            }
 
-                        if (UnwindInfo.getLsdaReloc(macho_file, object_id, record_id)) |rel| {
-                            const target = UnwindInfo.parseRelocTarget(
-                                macho_file,
-                                object_id,
-                                rel,
-                                mem.asBytes(&record),
-                                @intCast(i32, record_id * @sizeOf(macho.compact_unwind_entry)),
-                            );
-                            const target_object = macho_file.objects.items[target.getFile().?];
-                            const target_atom_index = target_object.getAtomIndexForSymbol(target.sym_index).?;
-                            markLive(macho_file, target_atom_index, alive);
-                        }
-                    },
-                    .dwarf => unreachable,
-                }
-            },
-            else => unreachable,
+            if (UnwindInfo.getLsdaReloc(macho_file, object_id, record_id)) |rel| {
+                const target = UnwindInfo.parseRelocTarget(
+                    macho_file,
+                    object_id,
+                    rel,
+                    mem.asBytes(&record),
+                    @intCast(i32, record_id * @sizeOf(macho.compact_unwind_entry)),
+                );
+                const target_object = macho_file.objects.items[target.getFile().?];
+                const target_atom_index = target_object.getAtomIndexForSymbol(target.sym_index).?;
+                markLive(macho_file, target_atom_index, alive);
+            }
         }
     }
 }

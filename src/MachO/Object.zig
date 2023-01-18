@@ -719,7 +719,7 @@ fn parseUnwindInfo(self: *Object, macho_file: *MachO, object_id: u32) !void {
     const unwind_records = self.getUnwindRecords();
 
     const needs_eh_frame = for (unwind_records) |record| {
-        if (try UnwindInfo.isDwarf(record, cpu_arch)) break true;
+        if (UnwindInfo.UnwindEncoding.isDwarf(record.compactUnwindEncoding, cpu_arch)) break true;
     } else false;
 
     if (needs_eh_frame) {

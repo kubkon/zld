@@ -201,58 +201,29 @@ pub fn deinit(info: *UnwindInfo) void {
 pub fn scanRelocs(macho_file: *MachO) !void {
     if (macho_file.getSectionByName("__TEXT", "__unwind_info") == null) return;
 
-    const arch = macho_file.options.target.cpu_arch.?;
-
+    const cpu_arch = macho_file.options.target.cpu_arch.?;
     for (macho_file.objects.items) |*object, object_id| {
         const unwind_records = object.getUnwindRecords();
         for (object.exec_atoms.items) |atom_index| {
             const record_id = object.unwind_records_lookup.get(atom_index) orelse continue;
             if (object.unwind_relocs_lookup[record_id].dead) continue;
             const record = unwind_records[record_id];
-            switch (arch) {
-                .aarch64 => {
-                    const enc = try macho.UnwindEncodingArm64.fromU32(record.compactUnwindEncoding);
-                    switch (enc) {
-                        .frame, .frameless => if (getPersonalityFunctionReloc(
-                            macho_file,
-                            @intCast(u32, object_id),
-                            record_id,
-                        )) |rel| {
-                            // Personality function; add GOT pointer.
-                            const target = parseRelocTarget(
-                                macho_file,
-                                @intCast(u32, object_id),
-                                rel,
-                                mem.asBytes(&record),
-                                @intCast(i32, record_id * @sizeOf(macho.compact_unwind_entry)),
-                            );
-                            try Atom.addGotEntry(macho_file, target);
-                        },
-                        .dwarf => {}, // Handled separately
-                    }
-                },
-                .x86_64 => {
-                    const enc = try UnwindEncodingX86_64.fromU32(record.compactUnwindEncoding);
-                    switch (enc) {
-                        .frame, .frameless => if (getPersonalityFunctionReloc(
-                            macho_file,
-                            @intCast(u32, object_id),
-                            record_id,
-                        )) |rel| {
-                            // Personality function; add GOT pointer.
-                            const target = parseRelocTarget(
-                                macho_file,
-                                @intCast(u32, object_id),
-                                rel,
-                                mem.asBytes(&record),
-                                @intCast(i32, record_id * @sizeOf(macho.compact_unwind_entry)),
-                            );
-                            try Atom.addGotEntry(macho_file, target);
-                        },
-                        .dwarf => {}, // Handled separately
-                    }
-                },
-                else => unreachable,
+            if (!UnwindEncoding.isDwarf(record.compactUnwindEncoding, cpu_arch)) {
+                if (getPersonalityFunctionReloc(
+                    macho_file,
+                    @intCast(u32, object_id),
+                    record_id,
+                )) |rel| {
+                    // Personality function; add GOT pointer.
+                    const target = parseRelocTarget(
+                        macho_file,
+                        @intCast(u32, object_id),
+                        rel,
+                        mem.asBytes(&record),
+                        @intCast(i32, record_id * @sizeOf(macho.compact_unwind_entry)),
+                    );
+                    try Atom.addGotEntry(macho_file, target);
+                }
             }
         }
     }
@@ -286,152 +257,65 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
                 if (object.unwind_relocs_lookup[record_id].dead) continue;
                 var record = unwind_records[record_id];
 
-                const enc: u32 = enc: {
-                    switch (cpu_arch) {
-                        .aarch64 => {
-                            var enc = try macho.UnwindEncodingArm64.fromU32(record.compactUnwindEncoding);
-                            switch (enc) {
-                                .frame, .frameless => {
-                                    if (getPersonalityFunctionReloc(
-                                        macho_file,
-                                        @intCast(u32, object_id),
-                                        record_id,
-                                    )) |rel| {
-                                        const target = parseRelocTarget(
-                                            macho_file,
-                                            @intCast(u32, object_id),
-                                            rel,
-                                            mem.asBytes(&record),
-                                            @intCast(i32, record_id * @sizeOf(macho.compact_unwind_entry)),
-                                        );
-                                        const personality_index = info.getPersonalityFunction(target) orelse inner: {
-                                            const personality_index = info.personalities_count;
-                                            info.personalities[personality_index] = target;
-                                            info.personalities_count += 1;
-                                            break :inner personality_index;
-                                        };
+                if (UnwindEncoding.isDwarf(record.compactUnwindEncoding, cpu_arch)) {
+                    const fde_offset = object.eh_frame_records_lookup.get(atom_index).?;
+                    it.seekTo(fde_offset);
+                    const fde = (try it.next()).?;
+                    const cie_ptr = fde.getCiePointer();
+                    const cie_offset = fde_offset + 4 - cie_ptr;
+                    it.seekTo(cie_offset);
+                    const cie = (try it.next()).?;
 
-                                        record.personalityFunction = personality_index + 1;
-                                        switch (enc) {
-                                            .frame => |*x| x.personality_index = personality_index + 1,
-                                            .frameless => |*x| x.personality_index = personality_index + 1,
-                                            .dwarf => unreachable,
-                                        }
-                                    }
+                    if (cie.getPersonalityPointerReloc(
+                        macho_file,
+                        @intCast(u32, object_id),
+                        cie_offset,
+                    )) |target| {
+                        const personality_index = info.getPersonalityFunction(target) orelse inner: {
+                            const personality_index = info.personalities_count;
+                            info.personalities[personality_index] = target;
+                            info.personalities_count += 1;
+                            break :inner personality_index;
+                        };
 
-                                    if (getLsdaReloc(macho_file, @intCast(u32, object_id), record_id)) |rel| {
-                                        const target = parseRelocTarget(
-                                            macho_file,
-                                            @intCast(u32, object_id),
-                                            rel,
-                                            mem.asBytes(&record),
-                                            @intCast(i32, record_id * @sizeOf(macho.compact_unwind_entry)),
-                                        );
-                                        record.lsda = @bitCast(u64, target);
-                                    }
-                                },
-                                .dwarf => |*x| {
-                                    const fde_offset = object.eh_frame_records_lookup.get(atom_index).?;
-                                    it.seekTo(fde_offset);
-                                    const fde = (try it.next()).?;
-                                    const cie_ptr = fde.getCiePointer();
-                                    const cie_offset = fde_offset + 4 - cie_ptr;
-                                    it.seekTo(cie_offset);
-                                    const cie = (try it.next()).?;
-
-                                    if (cie.getPersonalityPointerReloc(
-                                        macho_file,
-                                        @intCast(u32, object_id),
-                                        cie_offset,
-                                    )) |target| {
-                                        const personality_index = info.getPersonalityFunction(target) orelse inner: {
-                                            const personality_index = info.personalities_count;
-                                            info.personalities[personality_index] = target;
-                                            info.personalities_count += 1;
-                                            break :inner personality_index;
-                                        };
-
-                                        record.personalityFunction = personality_index + 1;
-                                        x.personality_index = personality_index + 1;
-                                    }
-                                },
-                            }
-                            break :enc enc.toU32();
-                        },
-                        .x86_64 => {
-                            var enc = try UnwindEncodingX86_64.fromU32(record.compactUnwindEncoding);
-                            switch (enc) {
-                                .frame, .frameless => {
-                                    if (getPersonalityFunctionReloc(
-                                        macho_file,
-                                        @intCast(u32, object_id),
-                                        record_id,
-                                    )) |rel| {
-                                        const target = parseRelocTarget(
-                                            macho_file,
-                                            @intCast(u32, object_id),
-                                            rel,
-                                            mem.asBytes(&record),
-                                            @intCast(i32, record_id * @sizeOf(macho.compact_unwind_entry)),
-                                        );
-                                        const personality_index = info.getPersonalityFunction(target) orelse inner: {
-                                            const personality_index = info.personalities_count;
-                                            info.personalities[personality_index] = target;
-                                            info.personalities_count += 1;
-                                            break :inner personality_index;
-                                        };
-
-                                        record.personalityFunction = personality_index + 1;
-                                        switch (enc) {
-                                            .frame => |*x| x.personality_index = personality_index + 1,
-                                            .frameless => |*x| x.personality_index = personality_index + 1,
-                                            .dwarf => unreachable,
-                                        }
-                                    }
-
-                                    if (getLsdaReloc(macho_file, @intCast(u32, object_id), record_id)) |rel| {
-                                        const target = parseRelocTarget(
-                                            macho_file,
-                                            @intCast(u32, object_id),
-                                            rel,
-                                            mem.asBytes(&record),
-                                            @intCast(i32, record_id * @sizeOf(macho.compact_unwind_entry)),
-                                        );
-                                        record.lsda = @bitCast(u64, target);
-                                    }
-                                },
-                                .dwarf => |*x| {
-                                    const fde_offset = object.eh_frame_records_lookup.get(atom_index).?;
-                                    it.seekTo(fde_offset);
-                                    const fde = (try it.next()).?;
-                                    const cie_ptr = fde.getCiePointer();
-                                    const cie_offset = fde_offset + 4 - cie_ptr;
-                                    it.seekTo(cie_offset);
-                                    const cie = (try it.next()).?;
-
-                                    if (cie.getPersonalityPointerReloc(
-                                        macho_file,
-                                        @intCast(u32, object_id),
-                                        cie_offset,
-                                    )) |target| {
-                                        const personality_index = info.getPersonalityFunction(target) orelse inner: {
-                                            const personality_index = info.personalities_count;
-                                            info.personalities[personality_index] = target;
-                                            info.personalities_count += 1;
-                                            break :inner personality_index;
-                                        };
-
-                                        record.personalityFunction = personality_index + 1;
-                                        x.personality_index = personality_index + 1;
-                                    }
-                                },
-                            }
-                            break :enc enc.toU32();
-                        },
-                        else => unreachable,
+                        record.personalityFunction = personality_index + 1;
+                        UnwindEncoding.setPersonalityIndex(&record.compactUnwindEncoding, personality_index + 1);
                     }
-                };
-                record.compactUnwindEncoding = enc;
+                } else {
+                    if (getPersonalityFunctionReloc(
+                        macho_file,
+                        @intCast(u32, object_id),
+                        record_id,
+                    )) |rel| {
+                        const target = parseRelocTarget(
+                            macho_file,
+                            @intCast(u32, object_id),
+                            rel,
+                            mem.asBytes(&record),
+                            @intCast(i32, record_id * @sizeOf(macho.compact_unwind_entry)),
+                        );
+                        const personality_index = info.getPersonalityFunction(target) orelse inner: {
+                            const personality_index = info.personalities_count;
+                            info.personalities[personality_index] = target;
+                            info.personalities_count += 1;
+                            break :inner personality_index;
+                        };
+
+                        record.personalityFunction = personality_index + 1;
+                        UnwindEncoding.setPersonalityIndex(&record.compactUnwindEncoding, personality_index + 1);
+                    }
+
+                    if (getLsdaReloc(macho_file, @intCast(u32, object_id), record_id)) |rel| {
+                        const target = parseRelocTarget(
+                            macho_file,
+                            @intCast(u32, object_id),
+                            rel,
+                            mem.asBytes(&record),
+                            @intCast(i32, record_id * @sizeOf(macho.compact_unwind_entry)),
+                        );
+                        record.lsda = @bitCast(u64, target);
+                    }
+                }
                 break :blk record;
             } else blk: {
                 const atom = macho_file.getAtom(atom_index);
@@ -460,7 +344,7 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
     for (records.items) |record, i| {
         const record_id = blk: {
             if (maybe_prev) |prev| {
-                const is_dwarf = try isDwarf(record, cpu_arch);
+                const is_dwarf = UnwindEncoding.isDwarf(record.compactUnwindEncoding, cpu_arch);
                 if (is_dwarf or
                     (prev.compactUnwindEncoding != record.compactUnwindEncoding) or
                     (prev.personalityFunction != record.personalityFunction) or
@@ -523,7 +407,7 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
 
         for (info.records.items) |record| {
             assert(!isNull(record));
-            if (try isDwarf(record, cpu_arch)) continue;
+            if (UnwindEncoding.isDwarf(record.compactUnwindEncoding, cpu_arch)) continue;
             const enc = record.compactUnwindEncoding;
             const gop = try common_encodings_counts.getOrPut(enc);
             if (!gop.found_existing) {
@@ -565,7 +449,7 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
             while (space_left >= 1 and i < info.records.items.len) {
                 const record = info.records.items[i];
                 const enc = record.compactUnwindEncoding;
-                const is_dwarf = try isDwarf(record, cpu_arch);
+                const is_dwarf = UnwindEncoding.isDwarf(record.compactUnwindEncoding, cpu_arch);
 
                 if (record.rangeStart >= range_start_max) {
                     break;
@@ -659,35 +543,11 @@ pub fn write(info: *UnwindInfo, macho_file: *MachO) !void {
             rec.personalityFunction = personalities[rec.personalityFunction - 1];
         }
 
-        if (rec.compactUnwindEncoding > 0) {
-            switch (cpu_arch) {
-                .aarch64 => {
-                    const enc = try macho.UnwindEncodingArm64.fromU32(rec.compactUnwindEncoding);
-                    switch (enc) {
-                        .frame, .frameless => {
-                            const lsda_target = @bitCast(MachO.SymbolWithLoc, rec.lsda);
-                            if (lsda_target.getFile()) |_| {
-                                const sym = macho_file.getSymbol(lsda_target);
-                                rec.lsda = sym.n_value - seg.vmaddr;
-                            }
-                        },
-                        .dwarf => {}, // Handled separately
-                    }
-                },
-                .x86_64 => {
-                    const enc = try UnwindEncodingX86_64.fromU32(rec.compactUnwindEncoding);
-                    switch (enc) {
-                        .frame, .frameless => {
-                            const lsda_target = @bitCast(MachO.SymbolWithLoc, rec.lsda);
-                            if (lsda_target.getFile()) |_| {
-                                const sym = macho_file.getSymbol(lsda_target);
-                                rec.lsda = sym.n_value - seg.vmaddr;
-                            }
-                        },
-                        .dwarf => {}, // Handled separately
-                    }
-                },
-                else => unreachable,
+        if (rec.compactUnwindEncoding > 0 and !UnwindEncoding.isDwarf(rec.compactUnwindEncoding, cpu_arch)) {
+            const lsda_target = @bitCast(MachO.SymbolWithLoc, rec.lsda);
+            if (lsda_target.getFile()) |_| {
+                const sym = macho_file.getSymbol(lsda_target);
+                rec.lsda = sym.n_value - seg.vmaddr;
             }
         }
     }
@@ -867,29 +727,6 @@ pub fn getLsdaReloc(macho_file: *MachO, object_id: u32, record_id: usize) ?macho
     return null;
 }
 
-pub fn isDwarf(rec: macho.compact_unwind_entry, cpu_arch: std.Target.Cpu.Arch) !bool {
-    assert(!isNull(rec));
-    if (rec.compactUnwindEncoding == 0) return false;
-
-    switch (cpu_arch) {
-        .aarch64 => {
-            const enc = try macho.UnwindEncodingArm64.fromU32(rec.compactUnwindEncoding);
-            return switch (enc) {
-                .frame, .frameless => false,
-                .dwarf => true,
-            };
-        },
-        .x86_64 => {
-            const enc = try UnwindEncodingX86_64.fromU32(rec.compactUnwindEncoding);
-            return switch (enc) {
-                .frame, .frameless => false,
-                .dwarf => true,
-            };
-        },
-        else => unreachable,
-    }
-}
-
 pub fn isNull(rec: macho.compact_unwind_entry) bool {
     return rec.rangeStart == 0 and
         rec.rangeLength == 0 and
@@ -925,87 +762,67 @@ fn getCommonEncoding(info: UnwindInfo, enc: macho.compact_unwind_encoding_t) ?u7
     return null;
 }
 
-pub const UnwindEncodingX86_64 = union(enum) {
-    frame: Frame,
-    frameless: Frameless,
-    dwarf: Dwarf,
-
-    pub const Frame = packed struct {
-        frame_registers: u15,
-        unused: u1 = 0,
-        frame_offset: u8,
-        mode: Mode = .ebp_frame,
-        personality_index: u2,
-        has_lsda: u1,
-        start: u1,
+pub const UnwindEncoding = struct {
+    pub const UNWIND_X86_64_MODE = enum(u4) {
+        none = 0,
+        ebp_frame = 1,
+        stack_immd = 2,
+        stack_ind = 3,
+        dwarf = 4,
     };
 
-    pub const Frameless = packed struct {
-        stack_reg_permutation: u10,
-        stack_reg_count: u3,
-        stack_adjust: u3,
-        stack_size: u8,
-        mode: Mode,
-        personality_index: u2,
-        has_lsda: u1,
-        start: u1,
+    pub const UNWIND_ARM64_MODE = enum(u4) {
+        none = 0,
+        frameless = 2,
+        dwarf = 3,
+        frame = 4,
     };
 
-    pub const Dwarf = packed struct {
-        section_offset: u24,
-        mode: Mode = .dwarf,
-        personality_index: u2,
-        has_lsda: u1,
-        start: u1,
-    };
+    pub const UNWIND_MODE_MASK: u32 = 0x0F000000;
+    pub const UNWIND_PERSONALITY_INDEX_MASK: u32 = 0x30000000;
+    pub const UNWIND_HAS_LSDA_MASK: u32 = 0x40000000;
 
-    pub const Mode = enum(u4) {
-        ebp_frame = 0x1,
-        stack_immd = 0x2,
-        stack_ind = 0x3,
-        dwarf = 0x4,
-        _,
-    };
-
-    pub const mode_mask: u32 = 0x0F000000;
-
-    pub fn fromU32(enc: u32) !UnwindEncodingX86_64 {
-        const m = (enc & mode_mask) >> 24;
-        return switch (@intToEnum(Mode, m)) {
-            .ebp_frame => .{ .frame = @bitCast(Frame, enc) },
-            .stack_immd, .stack_ind => .{ .frameless = @bitCast(Frameless, enc) },
-            .dwarf => .{ .dwarf = @bitCast(Dwarf, enc) },
-            else => return error.UnknownEncoding,
-        };
+    pub fn getMode(enc: macho.compact_unwind_encoding_t) u4 {
+        const mode = @truncate(u4, (enc & UNWIND_MODE_MASK) >> 24);
+        return mode;
     }
 
-    pub fn toU32(enc: UnwindEncodingX86_64) u32 {
-        return switch (enc) {
-            inline else => |x| @bitCast(u32, x),
-        };
+    pub fn isDwarf(enc: macho.compact_unwind_encoding_t, cpu_arch: std.Target.Cpu.Arch) bool {
+        switch (cpu_arch) {
+            .aarch64 => return @intToEnum(UNWIND_ARM64_MODE, getMode(enc)) == .dwarf,
+            .x86_64 => return @intToEnum(UNWIND_X86_64_MODE, getMode(enc)) == .dwarf,
+            else => unreachable,
+        }
     }
 
-    pub fn start(enc: UnwindEncodingX86_64) bool {
-        return switch (enc) {
-            inline else => |x| x.start == 0b1,
-        };
+    pub fn hasLsda(enc: macho.compact_unwind_encoding_t) bool {
+        const has_lsda = @truncate(u1, (enc & UNWIND_HAS_LSDA_MASK) >> 31);
+        return has_lsda == 1;
     }
 
-    pub fn hasLsda(enc: UnwindEncodingX86_64) bool {
-        return switch (enc) {
-            inline else => |x| x.has_lsda == 0b1,
-        };
+    pub fn setHasLsda(enc: *macho.compact_unwind_encoding_t, has_lsda: bool) void {
+        const mask = @intCast(u32, @boolToInt(has_lsda)) << 31;
+        enc.* |= mask;
     }
 
-    pub fn personalityIndex(enc: UnwindEncodingX86_64) u2 {
-        return switch (enc) {
-            inline else => |x| x.personality_index,
-        };
+    pub fn getPersonalityIndex(enc: macho.compact_unwind_encoding_t) u2 {
+        const index = @truncate(u2, (enc & UNWIND_PERSONALITY_INDEX_MASK) >> 28);
+        return index;
     }
 
-    pub fn mode(enc: UnwindEncodingX86_64) Mode {
-        return switch (enc) {
-            inline else => |x| x.mode,
-        };
+    pub fn setPersonalityIndex(enc: *macho.compact_unwind_encoding_t, index: u2) void {
+        const mask = @intCast(u32, index) << 28;
+        enc.* |= mask;
+    }
+
+    pub fn getDwarfSectionOffset(enc: macho.compact_unwind_encoding_t, cpu_arch: std.Target.Cpu.Arch) u24 {
+        assert(isDwarf(enc, cpu_arch));
+        const offset = @truncate(u24, enc);
+        return offset;
+    }
+
+    pub fn setDwarfSectionOffset(enc: *macho.compact_unwind_encoding_t, cpu_arch: std.Target.Cpu.Arch, offset: u24) void {
+        assert(isDwarf(enc.*, cpu_arch));
+        enc.* |= offset;
     }
 };
