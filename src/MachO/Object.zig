@@ -655,6 +655,7 @@ fn parseEhFrameSection(self: *Object, macho_file: *MachO, object_id: u32) !void 
     }
 
     const gpa = macho_file.base.allocator;
+    const arch = macho_file.options.target.cpu_arch.?;
     const relocs = self.getRelocs(sect);
 
     var it = self.getEhFrameRecordsIterator();
@@ -670,23 +671,26 @@ fn parseEhFrameSection(self: *Object, macho_file: *MachO, object_id: u32) !void 
 
     while (try it.next()) |record| {
         const offset = it.pos - record.getSize();
-        const rel_pos = filterRelocs(relocs, offset, offset + record.getSize());
+        const rel_pos = switch (arch) {
+            .aarch64 => filterRelocs(relocs, offset, offset + record.getSize()),
+            .x86_64 => RelocEntry{ .start = 0, .len = 0 },
+            else => unreachable,
+        };
         self.eh_frame_relocs_lookup.putAssumeCapacityNoClobber(offset, .{
             .dead = false,
             .reloc = rel_pos,
         });
 
         if (record.tag == .fde) {
-            assert(rel_pos.len > 0); // TODO convert to an error as the FDE eh frame is malformed
-            // Find function symbol that this record describes
-            const rel = relocs[rel_pos.start..][rel_pos.len - 1];
-            const target = UnwindInfo.parseRelocTarget(
-                macho_file,
-                object_id,
-                rel,
-                it.data[offset..],
-                @intCast(i32, offset),
-            );
+            const target_address = record.getTargetSymbolAddress(.{
+                .base_addr = sect.addr,
+                .base_offset = offset,
+            });
+            const target_sym_index = self.getSymbolByAddress(target_address, null);
+            const target = if (self.getGlobal(target_sym_index)) |global_index|
+                macho_file.globals.items[global_index]
+            else
+                MachO.SymbolWithLoc{ .sym_index = target_sym_index, .file = object_id + 1 };
             log.debug("FDE at offset {x} tracks {s}", .{ offset, macho_file.getSymbolName(target) });
             if (target.getFile() != object_id) {
                 self.eh_frame_relocs_lookup.getPtr(offset).?.dead = true;
@@ -704,6 +708,7 @@ fn parseUnwindInfo(self: *Object, macho_file: *MachO, object_id: u32) !void {
     log.debug("parsing unwind info in {s}", .{self.name});
 
     const gpa = macho_file.base.allocator;
+    const cpu_arch = macho_file.options.target.cpu_arch.?;
 
     if (macho_file.getSectionByName("__TEXT", "__unwind_info") == null) {
         _ = try macho_file.initSection("__TEXT", "__unwind_info", .{});
@@ -714,8 +719,7 @@ fn parseUnwindInfo(self: *Object, macho_file: *MachO, object_id: u32) !void {
     const unwind_records = self.getUnwindRecords();
 
     const needs_eh_frame = for (unwind_records) |record| {
-        const enc = try macho.UnwindEncodingArm64.fromU32(record.compactUnwindEncoding);
-        if (enc == .dwarf) break true;
+        if (try UnwindInfo.isDwarf(record, cpu_arch)) break true;
     } else false;
 
     if (needs_eh_frame) {
@@ -891,6 +895,41 @@ pub fn getSymbolName(self: Object, index: u32) []const u8 {
     const len = self.strtab_lookup[index];
 
     return strtab[start..][0 .. len - 1 :0];
+}
+
+pub fn getSymbolByAddress(self: Object, addr: u64, sect_hint: ?u8) u32 {
+    // Find containing atom
+    const Predicate = struct {
+        addr: i64,
+
+        pub fn predicate(pred: @This(), other: i64) bool {
+            return if (other == -1) true else other > pred.addr;
+        }
+    };
+
+    if (sect_hint) |sect_id| {
+        if (self.source_section_index_lookup[sect_id] > -1) {
+            const first_sym_index = @intCast(usize, self.source_section_index_lookup[sect_id]);
+            const target_sym_index = MachO.lsearch(i64, self.source_address_lookup[first_sym_index..], Predicate{
+                .addr = @intCast(i64, addr),
+            });
+            if (target_sym_index > 0) {
+                return @intCast(u32, first_sym_index + target_sym_index - 1);
+            }
+        }
+        return self.getSectionAliasSymbolIndex(sect_id);
+    }
+
+    const target_sym_index = MachO.lsearch(i64, self.source_address_lookup, Predicate{
+        .addr = @intCast(i64, addr),
+    });
+    assert(target_sym_index > 0);
+    return @intCast(u32, target_sym_index - 1);
+}
+
+pub fn getGlobal(self: Object, sym_index: u32) ?u32 {
+    if (self.globals_lookup[sym_index] == -1) return null;
+    return @intCast(u32, self.globals_lookup[sym_index]);
 }
 
 pub fn getAtomIndexForSymbol(self: Object, sym_index: u32) ?AtomIndex {

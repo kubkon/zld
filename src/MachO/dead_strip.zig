@@ -278,6 +278,7 @@ fn mark(macho_file: *MachO, roots: AtomTable, alive: *AtomTable) !void {
 
 fn markUnwindRecords(macho_file: *MachO, object_id: u32, alive: *AtomTable) !void {
     const object = &macho_file.objects.items[object_id];
+    const cpu_arch = macho_file.options.target.cpu_arch.?;
 
     const unwind_records = object.getUnwindRecords();
     var it = object.getEhFrameRecordsIterator();
@@ -295,81 +296,110 @@ fn markUnwindRecords(macho_file: *MachO, object_id: u32, alive: *AtomTable) !voi
         }
 
         const record = unwind_records[record_id];
-        const enc = try macho.UnwindEncodingArm64.fromU32(record.compactUnwindEncoding);
+        if (try UnwindInfo.isDwarf(record, cpu_arch)) {
+            const fde_offset = object.eh_frame_records_lookup.get(atom_index).?;
+            it.seekTo(fde_offset);
+            const fde = (try it.next()).?;
 
-        switch (enc) {
-            .frame, .frameless => {
-                if (UnwindInfo.getPersonalityFunctionReloc(macho_file, object_id, record_id)) |rel| {
-                    const target = UnwindInfo.parseRelocTarget(
-                        macho_file,
-                        object_id,
-                        rel,
-                        mem.asBytes(&record),
-                        @intCast(i32, record_id * @sizeOf(macho.compact_unwind_entry)),
-                    );
-                    const target_sym = macho_file.getSymbol(target);
-                    if (!target_sym.undf()) {
-                        const target_object = macho_file.objects.items[target.getFile().?];
-                        const target_atom_index = target_object.getAtomIndexForSymbol(target.sym_index).?;
-                        markLive(macho_file, target_atom_index, alive);
-                    }
-                }
+            const cie_ptr = fde.getCiePointer();
+            const cie_offset = fde_offset + 4 - cie_ptr;
+            it.seekTo(cie_offset);
+            const cie = (try it.next()).?;
 
-                if (UnwindInfo.getLsdaReloc(macho_file, object_id, record_id)) |rel| {
-                    const target = UnwindInfo.parseRelocTarget(
-                        macho_file,
-                        object_id,
-                        rel,
-                        mem.asBytes(&record),
-                        @intCast(i32, record_id * @sizeOf(macho.compact_unwind_entry)),
-                    );
+            const lsda_ptr = try fde.getLsdaPointer(cie, .{
+                .base_addr = object.eh_frame_sect.?.addr,
+                .base_offset = fde_offset,
+            });
+            if (lsda_ptr) |lsda_address| {
+                // Mark LSDA record as live
+                const sym_index = object.getSymbolByAddress(lsda_address, null);
+                const target_atom_index = object.getAtomIndexForSymbol(sym_index).?;
+                markLive(macho_file, target_atom_index, alive);
+            }
+            // Mark CIE references which should include any referenced personalities
+            // that are defined locally.
+            if (cie.getPersonalityPointerReloc(macho_file, object_id, cie_offset)) |target| {
+                const target_sym = macho_file.getSymbol(target);
+                if (!target_sym.undf()) {
                     const target_object = macho_file.objects.items[target.getFile().?];
                     const target_atom_index = target_object.getAtomIndexForSymbol(target.sym_index).?;
                     markLive(macho_file, target_atom_index, alive);
                 }
-            },
-            .dwarf => {
-                const fde_offset = object.eh_frame_records_lookup.get(atom_index).?;
-                it.seekTo(fde_offset);
-                const fde = (try it.next()).?;
+            }
+        } else switch (cpu_arch) {
+            .aarch64 => {
+                const enc = try macho.UnwindEncodingArm64.fromU32(record.compactUnwindEncoding);
+                switch (enc) {
+                    .frame, .frameless => {
+                        if (UnwindInfo.getPersonalityFunctionReloc(macho_file, object_id, record_id)) |rel| {
+                            const target = UnwindInfo.parseRelocTarget(
+                                macho_file,
+                                object_id,
+                                rel,
+                                mem.asBytes(&record),
+                                @intCast(i32, record_id * @sizeOf(macho.compact_unwind_entry)),
+                            );
+                            const target_sym = macho_file.getSymbol(target);
+                            if (!target_sym.undf()) {
+                                const target_object = macho_file.objects.items[target.getFile().?];
+                                const target_atom_index = target_object.getAtomIndexForSymbol(target.sym_index).?;
+                                markLive(macho_file, target_atom_index, alive);
+                            }
+                        }
 
-                const cie_ptr = fde.getCiePointer();
-                const cie_offset = fde_offset + 4 - cie_ptr;
-                it.seekTo(cie_offset);
-                const cie = (try it.next()).?;
-
-                {
-                    // Mark FDE references which should include any referenced LSDA record
-                    const relocs = eh_frame.getRelocs(macho_file, object_id, fde_offset);
-                    for (relocs) |rel| {
-                        const target = UnwindInfo.parseRelocTarget(
-                            macho_file,
-                            object_id,
-                            rel,
-                            fde.data,
-                            @intCast(i32, fde_offset) + 4,
-                        );
-                        const target_sym = macho_file.getSymbol(target);
-                        if (!target_sym.undf()) blk: {
+                        if (UnwindInfo.getLsdaReloc(macho_file, object_id, record_id)) |rel| {
+                            const target = UnwindInfo.parseRelocTarget(
+                                macho_file,
+                                object_id,
+                                rel,
+                                mem.asBytes(&record),
+                                @intCast(i32, record_id * @sizeOf(macho.compact_unwind_entry)),
+                            );
                             const target_object = macho_file.objects.items[target.getFile().?];
-                            const target_atom_index = target_object.getAtomIndexForSymbol(target.sym_index) orelse
-                                break :blk;
+                            const target_atom_index = target_object.getAtomIndexForSymbol(target.sym_index).?;
                             markLive(macho_file, target_atom_index, alive);
                         }
-                    }
-                }
-
-                // Mark CIE references which should include any referenced personalities
-                // that are defined locally.
-                if (cie.getPersonalityPointerReloc(macho_file, object_id, cie_offset)) |target| {
-                    const target_sym = macho_file.getSymbol(target);
-                    if (!target_sym.undf()) {
-                        const target_object = macho_file.objects.items[target.getFile().?];
-                        const target_atom_index = target_object.getAtomIndexForSymbol(target.sym_index).?;
-                        markLive(macho_file, target_atom_index, alive);
-                    }
+                    },
+                    .dwarf => unreachable,
                 }
             },
+            .x86_64 => {
+                const enc = try UnwindInfo.UnwindEncodingX86_64.fromU32(record.compactUnwindEncoding);
+                switch (enc) {
+                    .frame, .frameless => {
+                        if (UnwindInfo.getPersonalityFunctionReloc(macho_file, object_id, record_id)) |rel| {
+                            const target = UnwindInfo.parseRelocTarget(
+                                macho_file,
+                                object_id,
+                                rel,
+                                mem.asBytes(&record),
+                                @intCast(i32, record_id * @sizeOf(macho.compact_unwind_entry)),
+                            );
+                            const target_sym = macho_file.getSymbol(target);
+                            if (!target_sym.undf()) {
+                                const target_object = macho_file.objects.items[target.getFile().?];
+                                const target_atom_index = target_object.getAtomIndexForSymbol(target.sym_index).?;
+                                markLive(macho_file, target_atom_index, alive);
+                            }
+                        }
+
+                        if (UnwindInfo.getLsdaReloc(macho_file, object_id, record_id)) |rel| {
+                            const target = UnwindInfo.parseRelocTarget(
+                                macho_file,
+                                object_id,
+                                rel,
+                                mem.asBytes(&record),
+                                @intCast(i32, record_id * @sizeOf(macho.compact_unwind_entry)),
+                            );
+                            const target_object = macho_file.objects.items[target.getFile().?];
+                            const target_atom_index = target_object.getAtomIndexForSymbol(target.sym_index).?;
+                            markLive(macho_file, target_atom_index, alive);
+                        }
+                    },
+                    .dwarf => unreachable,
+                }
+            },
+            else => unreachable,
         }
     }
 }

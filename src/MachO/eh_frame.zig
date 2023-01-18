@@ -48,6 +48,7 @@ pub fn calcSectionSize(macho_file: *MachO, unwind_info: *const UnwindInfo) !void
     sect.@"align" = 3;
     sect.size = 0;
 
+    const cpu_arch = macho_file.options.target.cpu_arch.?;
     const gpa = macho_file.base.allocator;
     var size: u32 = 0;
 
@@ -65,7 +66,7 @@ pub fn calcSectionSize(macho_file: *MachO, unwind_info: *const UnwindInfo) !void
             const record = &unwind_info.records.items[record_id];
 
             // TODO skip this check if no __compact_unwind is present
-            const is_dwarf = try UnwindInfo.isDwarf(record.*);
+            const is_dwarf = try UnwindInfo.isDwarf(record.*, cpu_arch);
             if (!is_dwarf) continue;
 
             eh_it.seekTo(fde_record_offset);
@@ -95,6 +96,8 @@ pub fn write(macho_file: *MachO, unwind_info: *UnwindInfo) !void {
     const seg_id = macho_file.sections.items(.segment_index)[sect_id];
     const seg = macho_file.segments.items[seg_id];
 
+    const cpu_arch = macho_file.options.target.cpu_arch.?;
+
     const gpa = macho_file.base.allocator;
     var eh_records = std.AutoArrayHashMap(u32, EhFrameRecord(true)).init(gpa);
     defer {
@@ -122,7 +125,7 @@ pub fn write(macho_file: *MachO, unwind_info: *UnwindInfo) !void {
             const record = &unwind_info.records.items[record_id];
 
             // TODO skip this check if no __compact_unwind is present
-            const is_dwarf = try UnwindInfo.isDwarf(record.*);
+            const is_dwarf = try UnwindInfo.isDwarf(record.*, cpu_arch);
             if (!is_dwarf) continue;
 
             eh_it.seekTo(fde_record_offset);
@@ -153,6 +156,30 @@ pub fn write(macho_file: *MachO, unwind_info: *UnwindInfo) !void {
                 .out_offset = eh_frame_offset,
                 .sect_addr = sect.addr,
             });
+
+            switch (cpu_arch) {
+                .aarch64 => {}, // relocs take care of LSDA pointers
+                .x86_64 => {
+                    // We need to parse LSDA pointer and relocate ourselves.
+                    const cie_record = eh_records.get(
+                        eh_frame_offset + 4 - fde_record.getCiePointer(),
+                    ).?;
+                    const source_lsda_ptr = try fde_record.getLsdaPointer(cie_record, .{
+                        .base_addr = object.eh_frame_sect.?.addr,
+                        .base_offset = fde_record_offset,
+                    });
+                    if (source_lsda_ptr) |ptr| {
+                        const sym_index = object.getSymbolByAddress(ptr, null);
+                        const sym = object.symtab[sym_index];
+                        try fde_record.setLsdaPointer(cie_record, sym.n_value, .{
+                            .base_addr = sect.addr,
+                            .base_offset = eh_frame_offset,
+                        });
+                    }
+                },
+                else => unreachable,
+            }
+
             eh_records.putAssumeCapacityNoClobber(eh_frame_offset, fde_record);
 
             var enc = macho.UnwindEncodingArm64.fromU32(record.compactUnwindEncoding) catch
@@ -225,31 +252,61 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
             }
         }
 
+        pub fn getTargetSymbolAddress(rec: Record, ctx: struct {
+            base_addr: u64,
+            base_offset: u64,
+        }) u64 {
+            assert(rec.tag == .fde);
+            const addend = mem.readIntLittle(i64, rec.data[4..][0..8]);
+            return @intCast(u64, @intCast(i64, ctx.base_addr + ctx.base_offset + 8) + addend);
+        }
+
+        pub fn setTargetSymbolAddress(rec: *Record, value: u64, ctx: struct {
+            base_addr: u64,
+            base_offset: u64,
+        }) !void {
+            assert(rec.tag == .fde);
+            const addend = @intCast(i64, value) - @intCast(i64, ctx.base_addr + ctx.base_offset + 8);
+            mem.writeIntLittle(i64, addend, rec.data[4..][0..8]);
+        }
+
         pub fn getPersonalityPointerReloc(
             rec: Record,
             macho_file: *MachO,
             object_id: u32,
             source_offset: u32,
         ) ?MachO.SymbolWithLoc {
+            const cpu_arch = macho_file.options.target.cpu_arch.?;
             const relocs = getRelocs(macho_file, object_id, source_offset);
             for (relocs) |rel| {
-                const rel_type = @intToEnum(macho.reloc_type_arm64, rel.r_type);
-                switch (rel_type) {
-                    .ARM64_RELOC_SUBTRACTOR,
-                    .ARM64_RELOC_UNSIGNED,
-                    => {},
-                    .ARM64_RELOC_POINTER_TO_GOT => {
-                        const target = UnwindInfo.parseRelocTarget(
-                            macho_file,
-                            object_id,
-                            rel,
-                            rec.data,
-                            @intCast(i32, source_offset) + 4,
-                        );
-                        return target;
+                switch (cpu_arch) {
+                    .aarch64 => {
+                        const rel_type = @intToEnum(macho.reloc_type_arm64, rel.r_type);
+                        switch (rel_type) {
+                            .ARM64_RELOC_SUBTRACTOR,
+                            .ARM64_RELOC_UNSIGNED,
+                            => continue,
+                            .ARM64_RELOC_POINTER_TO_GOT => {},
+                            else => unreachable,
+                        }
+                    },
+                    .x86_64 => {
+                        const rel_type = @intToEnum(macho.reloc_type_x86_64, rel.r_type);
+                        switch (rel_type) {
+                            .X86_64_RELOC_GOT => {},
+                            else => unreachable,
+                        }
                     },
                     else => unreachable,
                 }
+                const target = UnwindInfo.parseRelocTarget(
+                    macho_file,
+                    object_id,
+                    rel,
+                    rec.data,
+                    @intCast(i32, source_offset) + 4,
+                );
+                return target;
             }
             return null;
         }
@@ -261,10 +318,10 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
         }) !void {
             comptime assert(is_mutable);
 
+            const cpu_arch = macho_file.options.target.cpu_arch.?;
             const relocs = getRelocs(macho_file, object_id, ctx.source_offset);
 
             for (relocs) |rel| {
-                const rel_type = @intToEnum(macho.reloc_type_arm64, rel.r_type);
                 const target = UnwindInfo.parseRelocTarget(
                     macho_file,
                     object_id,
@@ -275,21 +332,40 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
                 const rel_offset = @intCast(u32, rel.r_address - @intCast(i32, ctx.source_offset) - 4);
                 const source_addr = ctx.sect_addr + rel_offset + ctx.out_offset + 4;
 
-                switch (rel_type) {
-                    .ARM64_RELOC_SUBTRACTOR => {
-                        // Address of the __eh_frame in the source object file
+                switch (cpu_arch) {
+                    .aarch64 => {
+                        const rel_type = @intToEnum(macho.reloc_type_arm64, rel.r_type);
+                        switch (rel_type) {
+                            .ARM64_RELOC_SUBTRACTOR => {
+                                // Address of the __eh_frame in the source object file
+                            },
+                            .ARM64_RELOC_POINTER_TO_GOT => {
+                                const target_addr = try Atom.getRelocTargetAddress(macho_file, target, true, false);
+                                const result = math.cast(i32, @intCast(i64, target_addr) - @intCast(i64, source_addr)) orelse
+                                    return error.Overflow;
+                                mem.writeIntLittle(i32, rec.data[rel_offset..][0..4], result);
+                            },
+                            .ARM64_RELOC_UNSIGNED => {
+                                assert(rel.r_extern == 1);
+                                const target_addr = try Atom.getRelocTargetAddress(macho_file, target, false, false);
+                                const result = @intCast(i64, target_addr) - @intCast(i64, source_addr);
+                                mem.writeIntLittle(i64, rec.data[rel_offset..][0..8], @intCast(i64, result));
+                            },
+                            else => unreachable,
+                        }
                     },
-                    .ARM64_RELOC_POINTER_TO_GOT => {
-                        const target_addr = try Atom.getRelocTargetAddress(macho_file, target, true, false);
-                        const result = math.cast(i32, @intCast(i64, target_addr) - @intCast(i64, source_addr)) orelse
-                            return error.Overflow;
-                        mem.writeIntLittle(i32, rec.data[rel_offset..][0..4], result);
-                    },
-                    .ARM64_RELOC_UNSIGNED => {
-                        assert(rel.r_extern == 1);
-                        const target_addr = try Atom.getRelocTargetAddress(macho_file, target, false, false);
-                        const result = @intCast(i64, target_addr) - @intCast(i64, source_addr);
-                        mem.writeIntLittle(i64, rec.data[rel_offset..][0..8], @intCast(i64, result));
+                    .x86_64 => {
+                        const rel_type = @intToEnum(macho.reloc_type_x86_64, rel.r_type);
+                        switch (rel_type) {
+                            .X86_64_RELOC_GOT => {
+                                const target_addr = try Atom.getRelocTargetAddress(macho_file, target, true, false);
+                                const addend = mem.readIntLittle(i32, rec.data[rel_offset..][0..4]);
+                                const adjusted_target_addr = @intCast(u64, @intCast(i64, target_addr) + addend);
+                                const disp = try Atom.calcPcRelativeDisplacementX86(source_addr, adjusted_target_addr, 0);
+                                mem.writeIntLittle(i32, rec.data[rel_offset..][0..4], disp);
+                            },
+                            else => unreachable,
+                        }
                     },
                     else => unreachable,
                 }
@@ -361,6 +437,18 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
             return ptr;
         }
 
+        pub fn setLsdaPointer(rec: *Record, cie: Record, value: u64, ctx: struct {
+            base_addr: u64,
+            base_offset: u64,
+        }) !void {
+            assert(rec.tag == .fde);
+            const enc = (try cie.getLsdaEncoding()) orelse unreachable;
+            var stream = std.io.fixedBufferStream(rec.data[21..]);
+            const writer = stream.writer();
+            const offset = ctx.base_offset + 25;
+            try setEncodedPointer(enc, @intCast(i64, ctx.base_addr + offset), value, writer);
+        }
+
         fn getLsdaEncoding(rec: Record) !?u8 {
             assert(rec.tag == .cie);
             const aug_str = rec.getAugmentationString();
@@ -422,6 +510,36 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
             }
 
             return @bitCast(u64, ptr);
+        }
+
+        fn setEncodedPointer(enc: u8, pcrel_offset: i64, value: u64, writer: anytype) !void {
+            if (enc == EH_PE.omit) return;
+
+            var actual = @intCast(i64, value);
+
+            switch (enc & 0x70) {
+                EH_PE.absptr => {},
+                EH_PE.pcrel => actual -= pcrel_offset,
+                EH_PE.datarel,
+                EH_PE.textrel,
+                EH_PE.funcrel,
+                EH_PE.aligned,
+                => unreachable,
+                else => unreachable,
+            }
+
+            switch (enc & 0x0F) {
+                EH_PE.absptr => try writer.writeIntLittle(u64, @bitCast(u64, actual)),
+                EH_PE.udata2 => try writer.writeIntLittle(u16, @bitCast(u16, @intCast(i16, actual))),
+                EH_PE.udata4 => try writer.writeIntLittle(u32, @bitCast(u32, @intCast(i32, actual))),
+                EH_PE.udata8 => try writer.writeIntLittle(u64, @bitCast(u64, actual)),
+                EH_PE.uleb128 => try leb.writeULEB128(writer, @bitCast(u64, actual)),
+                EH_PE.sdata2 => try writer.writeIntLittle(i16, @intCast(i16, actual)),
+                EH_PE.sdata4 => try writer.writeIntLittle(i32, @intCast(i32, actual)),
+                EH_PE.sdata8 => try writer.writeIntLittle(i64, actual),
+                EH_PE.sleb128 => try leb.writeILEB128(writer, actual),
+                else => unreachable,
+            }
         }
     };
 }
