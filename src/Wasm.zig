@@ -666,6 +666,13 @@ fn resolveLazySymbols(wasm: *Wasm) !void {
         atom.file = null;
         try wasm.symbol_atom.put(wasm.base.allocator, loc, atom);
     }
+
+    // TODO: When we implement shared-memory, we must only create the
+    // symbol when shared-memory is disabled.
+    if (wasm.undefs.fetchSwapRemove("__tls_base")) {
+        const loc = try wasm.createSyntheticSymbol("__tls_base", .global);
+        try wasm.discarded.putNoClobber(wasm.base.allocator, kv.value, loc);
+    }
 }
 
 /// From a given symbol location, returns its `wasm.GlobalType`.
@@ -1115,9 +1122,22 @@ fn setupMemory(wasm: *Wasm) !void {
     }
 
     var offset: u32 = @intCast(u32, memory_ptr);
-    for (wasm.data_segments.values()) |segment_index| {
-        const segment = &wasm.segments.items[segment_index];
+    var seg_it = wasm.data_segments.iterator();
+    while (seg_it.next()) |entry| {
+        const segment = &wasm.segments.items[entry.value_ptr.*];
         memory_ptr = std.mem.alignForwardGeneric(u64, memory_ptr, segment.alignment);
+
+        // set TLS-related symbols
+        if (mem.eql(u8, entry.key_ptr.*, ".tdata")) {
+            if (wasm.findGlobalSymbol("__tls_base")) |loc| {
+                const sym = loc.getSymbol(wasm);
+                sym.index = try wasm.globals.append(wasm.base.allocator, wasm.imports.globalCount, .{
+                    .global_type = .{ .valtype = .i32_const, .mutable = false },
+                    .init = .{ .i32_const = @intCast(i32, memory_ptr) },
+                });
+            }
+        }
+
         memory_ptr += segment.size;
         segment.offset = offset;
         offset += segment.size;
