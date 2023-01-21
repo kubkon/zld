@@ -183,6 +183,7 @@ pub fn parseArgs(arena: Allocator, ctx: Zld.MainCtx) !Options {
     var entry: ?[]const u8 = null;
     var strip: bool = false;
     var allow_undef: bool = false;
+    var search_strategy: ?SearchStrategy = null;
 
     var target: ?CrossTarget = if (comptime builtin.target.isDarwin())
         CrossTarget.fromTarget(builtin.target)
@@ -218,6 +219,10 @@ pub fn parseArgs(arena: Allocator, ctx: Zld.MainCtx) !Options {
             try ctx.log_scopes.append(scope);
         } else if (mem.eql(u8, arg, "-syslibroot")) {
             syslibroot = args_iter.next() orelse ctx.printFailure("Expected path after {s}", .{arg});
+        } else if (mem.eql(u8, arg, "-search_paths_first")) {
+            search_strategy = .paths_first;
+        } else if (mem.eql(u8, arg, "-search_dylib_first")) {
+            search_strategy = .dylibs_first;
         } else if (mem.eql(u8, arg, "-framework") or mem.eql(u8, arg, "-weak_framework")) {
             const name = args_iter.next() orelse ctx.printFailure("Expected framework name after {s}", .{arg});
             try frameworks.put(name, .{});
@@ -473,6 +478,7 @@ pub fn parseArgs(arena: Allocator, ctx: Zld.MainCtx) !Options {
         .entry = entry,
         .strip = strip,
         .allow_undef = allow_undef,
+        .search_strategy = search_strategy,
     };
 }
 

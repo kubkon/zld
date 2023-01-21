@@ -61,12 +61,13 @@ pub const Thunk = struct {
     }
 };
 
-pub fn createThunks(macho_file: *MachO, sect_id: u8, reverse_lookups: [][]u32) !void {
+pub fn createThunks(macho_file: *MachO, sect_id: u8) !void {
     const header = &macho_file.sections.items(.header)[sect_id];
     if (header.size == 0) return;
 
     const gpa = macho_file.base.allocator;
     const first_atom_index = macho_file.sections.items(.first_atom_index)[sect_id];
+    assert(first_atom_index != 0);
 
     header.size = 0;
     header.@"align" = 0;
@@ -131,7 +132,6 @@ pub fn createThunks(macho_file: *MachO, sect_id: u8, reverse_lookups: [][]u32) !
             try scanRelocs(
                 macho_file,
                 atom_index,
-                reverse_lookups[atom.getFile().?],
                 allocated,
                 thunk_index,
                 group_end,
@@ -205,7 +205,6 @@ fn allocateThunk(
 fn scanRelocs(
     macho_file: *MachO,
     atom_index: AtomIndex,
-    reverse_lookup: []u32,
     allocated: std.AutoHashMap(AtomIndex, void),
     thunk_index: ThunkIndex,
     group_end: AtomIndex,
@@ -222,7 +221,7 @@ fn scanRelocs(
     for (relocs) |rel| {
         if (!relocNeedsThunk(rel)) continue;
 
-        const target = Atom.parseRelocTarget(macho_file, atom_index, rel, reverse_lookup);
+        const target = Atom.parseRelocTarget(macho_file, atom_index, rel);
         if (isReachable(macho_file, atom_index, rel, base_offset, target, allocated)) continue;
 
         log.debug("{x}: source = {s}@{x}, target = {s}@{x} unreachable", .{
@@ -299,7 +298,8 @@ fn isReachable(
     if (!allocated.contains(target_atom_index)) return false;
 
     const source_addr = source_sym.n_value + @intCast(u32, rel.r_address - base_offset);
-    const target_addr = Atom.getRelocTargetAddress(macho_file, rel, target, false) catch unreachable;
+    const is_via_got = Atom.relocRequiresGot(macho_file, rel);
+    const target_addr = Atom.getRelocTargetAddress(macho_file, target, is_via_got, false) catch unreachable;
     _ = Atom.calcPcRelativeDisplacementArm64(source_addr, target_addr) catch
         return false;
 
