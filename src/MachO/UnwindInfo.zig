@@ -763,40 +763,26 @@ fn getCommonEncoding(info: UnwindInfo, enc: macho.compact_unwind_encoding_t) ?u7
 }
 
 pub const UnwindEncoding = struct {
-    pub const UNWIND_X86_64_MODE = enum(u4) {
-        none = 0,
-        ebp_frame = 1,
-        stack_immd = 2,
-        stack_ind = 3,
-        dwarf = 4,
-    };
-
-    pub const UNWIND_ARM64_MODE = enum(u4) {
-        none = 0,
-        frameless = 2,
-        dwarf = 3,
-        frame = 4,
-    };
-
-    pub const UNWIND_MODE_MASK: u32 = 0x0F000000;
-    pub const UNWIND_PERSONALITY_INDEX_MASK: u32 = 0x30000000;
-    pub const UNWIND_HAS_LSDA_MASK: u32 = 0x40000000;
-
     pub fn getMode(enc: macho.compact_unwind_encoding_t) u4 {
-        const mode = @truncate(u4, (enc & UNWIND_MODE_MASK) >> 24);
-        return mode;
+        comptime assert(macho.UNWIND_ARM64_MODE_MASK == macho.UNWIND_X86_64_MODE_MASK);
+        return @truncate(u4, (enc & macho.UNWIND_ARM64_MODE_MASK) >> 24);
     }
 
     pub fn isDwarf(enc: macho.compact_unwind_encoding_t, cpu_arch: std.Target.Cpu.Arch) bool {
-        switch (cpu_arch) {
-            .aarch64 => return @intToEnum(UNWIND_ARM64_MODE, getMode(enc)) == .dwarf,
-            .x86_64 => return @intToEnum(UNWIND_X86_64_MODE, getMode(enc)) == .dwarf,
+        const mode = getMode(enc);
+        return switch (cpu_arch) {
+            .aarch64 => @intToEnum(macho.UNWIND_ARM64_MODE, mode) == .DWARF,
+            .x86_64 => @intToEnum(macho.UNWIND_X86_64_MODE, mode) == .DWARF,
             else => unreachable,
-        }
+        };
+    }
+
+    pub fn setMode(enc: *macho.compact_unwind_encoding_t, mode: anytype) void {
+        enc.* |= @intCast(u32, @enumToInt(mode)) << 24;
     }
 
     pub fn hasLsda(enc: macho.compact_unwind_encoding_t) bool {
-        const has_lsda = @truncate(u1, (enc & UNWIND_HAS_LSDA_MASK) >> 31);
+        const has_lsda = @truncate(u1, (enc & macho.UNWIND_HAS_LSDA) >> 31);
         return has_lsda == 1;
     }
 
@@ -806,7 +792,7 @@ pub const UnwindEncoding = struct {
     }
 
     pub fn getPersonalityIndex(enc: macho.compact_unwind_encoding_t) u2 {
-        const index = @truncate(u2, (enc & UNWIND_PERSONALITY_INDEX_MASK) >> 28);
+        const index = @truncate(u2, (enc & macho.UNWIND_PERSONALITY_MASK) >> 28);
         return index;
     }
 
