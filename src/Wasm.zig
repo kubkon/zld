@@ -66,7 +66,11 @@ tables: sections.Tables = .{},
 /// Output memory section, this will only be used when `options.import_memory`
 /// is set to false. The limits will be set, based on the total data section size
 /// and other configuration options.
-memories: std.wasm.Memory = .{ .limits = .{ .min = 0, .max = null } },
+memories: types.Memory = .{ .limits = .{
+    .flags = 0,
+    .min = 0,
+    .max = null,
+} },
 /// Output global section
 globals: sections.Globals = .{},
 /// Output export section
@@ -737,7 +741,7 @@ fn mergeSections(wasm: *Wasm) !void {
             wasm.imports.tableCount(),
             .{
                 // index starts at 1, so add 1 extra element
-                .limits = .{ .min = function_pointers + 1, .max = function_pointers + 1 },
+                .limits = .{ .flags = 0x1, .min = function_pointers + 1, .max = function_pointers + 1 },
                 .reftype = .funcref,
             },
         );
@@ -1131,8 +1135,8 @@ fn setupMemory(wasm: *Wasm) !void {
         if (mem.eql(u8, entry.key_ptr.*, ".tdata")) {
             if (wasm.findGlobalSymbol("__tls_base")) |loc| {
                 const sym = loc.getSymbol(wasm);
-                sym.index = try wasm.globals.append(wasm.base.allocator, wasm.imports.globalCount, .{
-                    .global_type = .{ .valtype = .i32_const, .mutable = false },
+                sym.index = try wasm.globals.append(wasm.base.allocator, wasm.imports.globalCount(), .{
+                    .global_type = .{ .valtype = .i32, .mutable = false },
                     .init = .{ .i32_const = @intCast(i32, memory_ptr) },
                 });
             }
@@ -1201,6 +1205,10 @@ fn setupMemory(wasm: *Wasm) !void {
             return error.MemoryTooBig;
         }
         wasm.memories.limits.max = @intCast(u32, max_memory / page_size);
+        wasm.memories.limits.setFlag(.WASM_LIMITS_FLAG_HAS_MAX);
+        if (wasm.options.shared_memory) {
+            wasm.memories.limits.setFlag(.WASM_LIMITS_FLAG_IS_SHARED);
+        }
         log.debug("Maximum memory pages: {?d}", .{wasm.memories.limits.max});
     }
 }

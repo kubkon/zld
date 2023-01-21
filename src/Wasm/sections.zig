@@ -66,7 +66,7 @@ pub const Imports = struct {
     /// within this map.
     imported_tables: std.ArrayHashMapUnmanaged(
         ImportKey,
-        struct { index: u32, table: std.wasm.Table },
+        struct { index: u32, table: types.Table },
         ImportKey.Ctx,
         true,
     ) = .{},
@@ -309,11 +309,11 @@ pub const Tables = struct {
     /// The list of tables that have been merged from all
     /// object files. This does not include any linker-defined
     /// tables. Once inserted in this list, the object becomes immutable.
-    items: std.ArrayListUnmanaged(std.wasm.Table) = .{},
+    items: std.ArrayListUnmanaged(types.Table) = .{},
 
     /// Appends a new table to the list of tables and sets its index to
     /// the position within the list of tables.
-    pub fn append(self: *Tables, gpa: Allocator, offset: u32, table: std.wasm.Table) !u32 {
+    pub fn append(self: *Tables, gpa: Allocator, offset: u32, table: types.Table) !u32 {
         const index = offset + self.count();
         try self.items.append(gpa, table);
         return index;

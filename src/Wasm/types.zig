@@ -99,7 +99,23 @@ pub const Relocation = struct {
 pub const Import = struct {
     module_name: u32,
     name: u32,
-    kind: std.wasm.Import.Kind,
+    kind: Kind,
+
+    pub const Kind = union(std.wasm.ExternalKind) {
+        function: u32,
+        table: Table,
+        memory: Limits,
+        global: std.wasm.GlobalType,
+    };
+};
+
+pub const Memory = struct {
+    limits: Limits,
+};
+
+pub const Table = struct {
+    limits: Limits,
+    reftype: std.wasm.RefType,
 };
 
 /// Unlike the `Export` object defined by the wasm spec, and existing
@@ -265,3 +281,22 @@ pub const known_features = std.ComptimeStringMap(Feature.Tag, .{
     .{ "tail-call", .tail_call },
     .{ "shared-mem", .shared_mem },
 });
+
+pub const Limits = struct {
+    flags: u32 = 0,
+    min: u32,
+    max: ?u32,
+
+    pub const Flags = enum(u32) {
+        WASM_LIMITS_FLAG_HAS_MAX = 0x1,
+        WASM_LIMITS_FLAG_IS_SHARED = 0x2,
+    };
+
+    pub fn hasFlag(limits: Limits, flag: Flags) bool {
+        return limits & @enumToInt(flag) != 0;
+    }
+
+    pub fn setFlag(limits: *Limits, flag: Flags) void {
+        limits.flags |= @enumToInt(flag);
+    }
+};

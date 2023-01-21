@@ -28,9 +28,9 @@ imports: []const types.Import = &.{},
 /// Parsed function section
 functions: []const std.wasm.Func = &.{},
 /// Parsed table section
-tables: []const std.wasm.Table = &.{},
+tables: []const types.Table = &.{},
 /// Parsed memory section
-memories: []const std.wasm.Memory = &.{},
+memories: []const types.Memory = &.{},
 /// Parsed global section
 globals: []const std.wasm.Global = &.{},
 /// Parsed export section
@@ -438,7 +438,7 @@ fn Parser(comptime ReaderType: type) type {
                             try reader.readNoEof(name);
 
                             const kind = try readEnum(std.wasm.ExternalKind, reader);
-                            const kind_value: std.wasm.Import.Kind = switch (kind) {
+                            const kind_value: types.Import.Kind = switch (kind) {
                                 .function => .{ .function = try readLeb(u32, reader) },
                                 .memory => .{ .memory = try readLimits(reader) },
                                 .global => .{ .global = .{
@@ -868,10 +868,11 @@ fn readEnum(comptime T: type, reader: anytype) !T {
     }
 }
 
-fn readLimits(reader: anytype) !std.wasm.Limits {
+fn readLimits(reader: anytype) !types.Limits {
     const flags = try readLeb(u1, reader);
     const min = try readLeb(u32, reader);
-    return std.wasm.Limits{
+    return .{
+        .flags = flags,
         .min = min,
         .max = if (flags == 0) null else try readLeb(u32, reader),
     };
