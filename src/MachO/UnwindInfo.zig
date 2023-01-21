@@ -250,37 +250,13 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
         try records.ensureUnusedCapacity(object.exec_atoms.items.len);
         try atom_indexes.ensureUnusedCapacity(object.exec_atoms.items.len);
 
-        var it = object.getEhFrameRecordsIterator();
-
         for (object.exec_atoms.items) |atom_index| {
             var record = if (object.unwind_records_lookup.get(atom_index)) |record_id| blk: {
                 if (object.unwind_relocs_lookup[record_id].dead) continue;
                 var record = unwind_records[record_id];
 
                 if (UnwindEncoding.isDwarf(record.compactUnwindEncoding, cpu_arch)) {
-                    const fde_offset = object.eh_frame_records_lookup.get(atom_index).?;
-                    it.seekTo(fde_offset);
-                    const fde = (try it.next()).?;
-                    const cie_ptr = fde.getCiePointer();
-                    const cie_offset = fde_offset + 4 - cie_ptr;
-                    it.seekTo(cie_offset);
-                    const cie = (try it.next()).?;
-
-                    if (cie.getPersonalityPointerReloc(
-                        macho_file,
-                        @intCast(u32, object_id),
-                        cie_offset,
-                    )) |target| {
-                        const personality_index = info.getPersonalityFunction(target) orelse inner: {
-                            const personality_index = info.personalities_count;
-                            info.personalities[personality_index] = target;
-                            info.personalities_count += 1;
-                            break :inner personality_index;
-                        };
-
-                        record.personalityFunction = personality_index + 1;
-                        UnwindEncoding.setPersonalityIndex(&record.compactUnwindEncoding, personality_index + 1);
-                    }
+                    try info.collectPersonalityFromDwarf(macho_file, @intCast(u32, object_id), atom_index, &record);
                 } else {
                     if (getPersonalityFunctionReloc(
                         macho_file,
@@ -321,6 +297,21 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
                 const atom = macho_file.getAtom(atom_index);
                 const sym = macho_file.getSymbol(atom.getSymbolWithLoc());
                 if (sym.n_desc == MachO.N_DEAD) continue;
+
+                if (!object.hasUnwindRecords()) {
+                    if (object.eh_frame_records_lookup.get(atom_index)) |fde_offset| {
+                        if (object.eh_frame_relocs_lookup.get(fde_offset).?.dead) continue;
+                        var record = nullRecord();
+                        try info.collectPersonalityFromDwarf(macho_file, @intCast(u32, object_id), atom_index, &record);
+                        switch (cpu_arch) {
+                            .aarch64 => UnwindEncoding.setMode(&record.compactUnwindEncoding, macho.UNWIND_ARM64_MODE.DWARF),
+                            .x86_64 => UnwindEncoding.setMode(&record.compactUnwindEncoding, macho.UNWIND_X86_64_MODE.DWARF),
+                            else => unreachable,
+                        }
+                        break :blk record;
+                    }
+                }
+
                 break :blk nullRecord();
             };
 
@@ -493,6 +484,40 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
         info.lsdas_lookup.putAssumeCapacityNoClobber(@intCast(RecordIndex, i), @intCast(u32, info.lsdas.items.len));
         if (rec.lsda == 0) continue;
         try info.lsdas.append(info.gpa, @intCast(RecordIndex, i));
+    }
+}
+
+fn collectPersonalityFromDwarf(
+    info: *UnwindInfo,
+    macho_file: *MachO,
+    object_id: u32,
+    atom_index: u32,
+    record: *macho.compact_unwind_entry,
+) !void {
+    const object = &macho_file.objects.items[object_id];
+    var it = object.getEhFrameRecordsIterator();
+    const fde_offset = object.eh_frame_records_lookup.get(atom_index).?;
+    it.seekTo(fde_offset);
+    const fde = (try it.next()).?;
+    const cie_ptr = fde.getCiePointer();
+    const cie_offset = fde_offset + 4 - cie_ptr;
+    it.seekTo(cie_offset);
+    const cie = (try it.next()).?;
+
+    if (cie.getPersonalityPointerReloc(
+        macho_file,
+        @intCast(u32, object_id),
+        cie_offset,
+    )) |target| {
+        const personality_index = info.getPersonalityFunction(target) orelse inner: {
+            const personality_index = info.personalities_count;
+            info.personalities[personality_index] = target;
+            info.personalities_count += 1;
+            break :inner personality_index;
+        };
+
+        record.personalityFunction = personality_index + 1;
+        UnwindEncoding.setPersonalityIndex(&record.compactUnwindEncoding, personality_index + 1);
     }
 }
 
