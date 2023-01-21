@@ -667,11 +667,11 @@ fn resolveLazySymbols(wasm: *Wasm) !void {
         try wasm.symbol_atom.put(wasm.base.allocator, loc, atom);
     }
 
-    // TODO: When we implement shared-memory, we must only create the
-    // symbol when shared-memory is disabled.
-    if (wasm.undefs.fetchSwapRemove("__tls_base")) {
-        const loc = try wasm.createSyntheticSymbol("__tls_base", .global);
-        try wasm.discarded.putNoClobber(wasm.base.allocator, kv.value, loc);
+    if (!wasm.options.shared_memory) {
+        if (wasm.undefs.fetchSwapRemove("__tls_base")) |kv| {
+            const loc = try wasm.createSyntheticSymbol("__tls_base", .global);
+            try wasm.discarded.putNoClobber(wasm.base.allocator, kv.value, loc);
+        }
     }
 }
 
@@ -1186,7 +1186,8 @@ fn setupMemory(wasm: *Wasm) !void {
         atom.offset = @intCast(u32, memory_ptr);
     }
 
-    if (wasm.options.max_memory) |max_memory| {
+    if (wasm.options.max_memory != null or wasm.options.shared_memory) {
+        const max_memory = wasm.options.max_memory orelse memory_ptr;
         if (!std.mem.isAlignedGeneric(u64, max_memory, page_size)) {
             log.err("Maximum memory must be {d}-byte aligned", .{page_size});
             return error.MissAlignment;

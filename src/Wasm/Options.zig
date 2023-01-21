@@ -32,6 +32,7 @@ const usage =
     \\--strip                            Strip all debug information and symbol names
     \\--export-dynamic                   Dynamically export non-hidden symbols
     \\--export=<value>                   Force exporting a global symbol (fails when symbol does not exist)
+    \\--shared-memory                    Use shared linear memory (requires atomics and bulk memory)
 ;
 
 /// Result path of the binary
@@ -80,6 +81,9 @@ export_dynamic: bool = false,
 /// Forcefully exports a symbol by its name, fails when the symbol
 /// is unresolved.
 exports: []const []const u8,
+/// Enables shared linear memory. Requires to have the features
+/// atomics and bulk-memory enabled.
+shared_memory: bool = false,
 
 pub fn parseArgs(arena: Allocator, context: Zld.MainCtx) !Options {
     if (context.args.len == 0) {
@@ -105,6 +109,7 @@ pub fn parseArgs(arena: Allocator, context: Zld.MainCtx) !Options {
     var strip: ?bool = null;
     var export_dynamic: bool = false;
     var exports = std.ArrayList([]const u8).init(arena);
+    var shared_memory: bool = false;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -177,6 +182,8 @@ pub fn parseArgs(arena: Allocator, context: Zld.MainCtx) !Options {
         } else if (mem.startsWith(u8, arg, "--export")) {
             const index = mem.indexOfScalar(u8, arg, '=') orelse context.printFailure("Missing '=' symbol and value for symbol name", .{});
             try exports.append(arg[index + 1 ..]);
+        } else if (mem.eql(u8, arg, "--shared-memory")) {
+            shared_memory = true;
         } else {
             try positionals.append(arg);
         }
@@ -212,5 +219,6 @@ pub fn parseArgs(arena: Allocator, context: Zld.MainCtx) !Options {
         .strip = strip orelse false,
         .export_dynamic = export_dynamic,
         .exports = exports.items,
+        .shared_memory = shared_memory,
     };
 }
