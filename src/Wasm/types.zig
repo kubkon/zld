@@ -234,8 +234,10 @@ pub const Feature = struct {
             return @intToEnum(Tag, @enumToInt(feature));
         }
 
-        pub fn toString(tag: Tag) []const u8 {
-            return switch (tag) {
+        pub fn format(tag: Tag, comptime fmt: []const u8, opt: std.fmt.FormatOptions, writer: anytype) !void {
+            _ = fmt;
+            _ = opt;
+            try writer.writeAll(switch (tag) {
                 .atomics => "atomics",
                 .bulk_memory => "bulk-memory",
                 .exception_handling => "exception-handling",
@@ -249,7 +251,7 @@ pub const Feature = struct {
                 .simd128 => "simd128",
                 .tail_call => "tail-call",
                 .shared_mem => "shared-mem",
-            };
+            });
         }
     };
 
@@ -262,7 +264,7 @@ pub const Feature = struct {
     pub fn format(feature: Feature, comptime fmt: []const u8, opt: std.fmt.FormatOptions, writer: anytype) !void {
         _ = opt;
         _ = fmt;
-        try writer.print("{c} {s}", .{ feature.prefix, feature.tag.toString() });
+        try writer.print("{c} {}", .{ feature.prefix, feature.tag });
     }
 };
 

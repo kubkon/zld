@@ -1424,6 +1424,9 @@ fn validateFeatures(wasm: *Wasm) !void {
         }
     }
 
+    // will be set to true when there's any TLS segment found in any of the object files
+    var has_tls = false;
+
     // extract all the used, disallowed and required features from each
     // linked object file so we can test them.
     for (wasm.objects.items) |object, object_index| {
@@ -1442,6 +1445,12 @@ fn validateFeatures(wasm: *Wasm) !void {
                 },
             }
         }
+
+        for (object.segment_info) |segment| {
+            if (segment.isTLS()) {
+                has_tls = true;
+            }
+        }
     }
 
     // when we infer the features, we allow each feature found in the 'used' set
@@ -1454,7 +1463,7 @@ fn validateFeatures(wasm: *Wasm) !void {
         if (infer) {
             allowed.enable(feature);
         } else if (!allowed.isEnabled(feature)) {
-            log.err("feature '{s}' not allowed, but used by linked object", .{feature.toString()});
+            log.err("feature '{}' not allowed, but used by linked object", .{feature});
             log.err("  defined in '{s}'", .{wasm.objects.items[used_set >> 1].name});
             valid_feature_set = false;
         }
@@ -1462,6 +1471,31 @@ fn validateFeatures(wasm: *Wasm) !void {
 
     if (!valid_feature_set) {
         return error.InvalidFeatureSet;
+    }
+
+    if (wasm.options.shared_memory) {
+        const disallowed_feature = disallowed[@enumToInt(types.Feature.Tag.shared_mem)];
+        if (@truncate(u1, disallowed_feature) != 0) {
+            log.err(
+                "--shared-memory is disallowed by '{s}' because it wasn't compiled with 'atomics' and 'bulk-memory' features enabled",
+                .{wasm.objects.items[disallowed_feature >> 1].name},
+            );
+            valid_feature_set = false;
+        }
+
+        for ([_]types.Feature.Tag{ .atomics, .bulk_memory }) |feature| {
+            if (!allowed.isEnabled(feature)) {
+                log.err("feature '{}' is not used but is required for --shared-memory", .{feature});
+            }
+        }
+    }
+
+    if (has_tls) {
+        for ([_]types.Feature.Tag{ .atomics, .bulk_memory }) |feature| {
+            if (!allowed.isEnabled(feature)) {
+                log.err("feature '{}' is not used but is required for thread-local storage", .{feature});
+            }
+        }
     }
 
     // For each linked object, validate the required and disallowed features
@@ -1472,7 +1506,7 @@ fn validateFeatures(wasm: *Wasm) !void {
             // from here a feature is always used
             const disallowed_feature = disallowed[@enumToInt(feature.tag)];
             if (@truncate(u1, disallowed_feature) != 0) {
-                log.err("feature '{s}' is disallowed, but used by linked object", .{feature.tag.toString()});
+                log.err("feature '{}' is disallowed, but used by linked object", .{feature.tag});
                 log.err("  disallowed by '{s}'", .{wasm.objects.items[disallowed_feature >> 1].name});
                 log.err("  used in '{s}'", .{object.name});
                 valid_feature_set = false;
@@ -1485,7 +1519,7 @@ fn validateFeatures(wasm: *Wasm) !void {
         for (required) |required_feature, feature_index| {
             const is_required = @truncate(u1, required_feature) != 0;
             if (is_required and !object_used_features[feature_index]) {
-                log.err("feature '{s}' is required but not used in linked object", .{(@intToEnum(types.Feature.Tag, feature_index)).toString()});
+                log.err("feature '{}' is required but not used in linked object", .{(@intToEnum(types.Feature.Tag, feature_index))});
                 log.err("  required by '{s}'", .{wasm.objects.items[required_feature >> 1].name});
                 log.err("  missing in '{s}'", .{object.name});
                 valid_feature_set = false;

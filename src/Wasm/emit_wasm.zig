@@ -602,7 +602,8 @@ fn emitFeaturesSection(file: fs.File, wasm: *const Wasm, writer: anytype) !void 
         if (wasm.used_features.isEnabled(feature_tag)) {
             const feature: types.Feature = .{ .prefix = .used, .tag = feature_tag };
             try leb.writeULEB128(writer, @enumToInt(feature.prefix));
-            const feature_name = feature.tag.toString();
+            var buf: [100]u8 = undefined;
+            const feature_name = try std.fmt.bufPrint(&buf, "{}", .{feature.tag});
             try leb.writeULEB128(writer, @intCast(u32, feature_name.len));
             try writer.writeAll(feature_name);
         }
