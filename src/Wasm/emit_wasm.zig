@@ -145,10 +145,15 @@ pub fn emit(wasm: *Wasm) !void {
             if (std.mem.eql(u8, entry.key_ptr.*, ".bss") and !wasm.options.import_memory) continue;
             const atom_index = entry.value_ptr.*;
             var atom = wasm.atoms.getPtr(atom_index).?.*.getFirst();
-            const segment = wasm.segments.items[atom_index];
+            const segment: Wasm.Segment = wasm.segments.items[atom_index];
 
-            try leb.writeULEB128(writer, @as(u32, 0)); // flag and memory index (always 0);
-            try emitInitExpression(.{ .i32_const = @bitCast(i32, segment.offset) }, writer);
+            try leb.writeULEB128(writer, segment.flags);
+            if (segment.flags & @enumToInt(Wasm.Segment.Flag.WASM_DATA_SEGMENT_HAS_MEMINDEX) != 0) {
+                try leb.writeULEB128(writer, @as(u32, 0)); // memory is always index 0 as we only have 1 memory entry
+            }
+            if (!segment.isPassive()) {
+                try emitInitExpression(.{ .i32_const = @bitCast(i32, segment.offset) }, writer);
+            }
             try leb.writeULEB128(writer, segment.size);
 
             var current_offset: u32 = 0;

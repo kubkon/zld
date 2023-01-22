@@ -115,6 +115,16 @@ pub const Segment = struct {
     alignment: u32,
     size: u32,
     offset: u32,
+    flags: u32,
+
+    pub const Flag = enum(u32) {
+        WASM_DATA_SEGMENT_IS_PASSIVE = 0x01,
+        WASM_DATA_SEGMENT_HAS_MEMINDEX = 0x02,
+    };
+
+    pub fn isPassive(segment: Segment) bool {
+        return segment.flags & @enumToInt(Flag.WASM_DATA_SEGMENT_IS_PASSIVE) != 0;
+    }
 };
 
 /// Contains the location of the function symbol, as well as
@@ -1228,7 +1238,16 @@ pub fn getMatchingSegment(wasm: *Wasm, gpa: Allocator, object_index: u16, reloca
             const result = try wasm.data_segments.getOrPut(gpa, segment_name);
             if (!result.found_existing) {
                 result.value_ptr.* = index;
-                try wasm.appendDummySegment(gpa);
+                var flags: u32 = 0;
+                if (wasm.options.shared_memory) {
+                    flags |= @enumToInt(Segment.Flag.WASM_DATA_SEGMENT_IS_PASSIVE);
+                }
+                try wasm.segments.append(gpa, .{
+                    .alignment = 1,
+                    .size = 0,
+                    .offset = 0,
+                    .flags = flags,
+                });
                 return index;
             } else return result.value_ptr.*;
         },
@@ -1302,6 +1321,7 @@ fn appendDummySegment(wasm: *Wasm, gpa: Allocator) !void {
         .alignment = 1,
         .size = 0,
         .offset = 0,
+        .flags = 0,
     });
 }
 
