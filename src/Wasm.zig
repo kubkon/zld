@@ -900,6 +900,9 @@ fn setupExports(wasm: *Wasm) !void {
 }
 
 /// Creates symbols that are made by the linker, rather than the compiler/object file
+/// TODO: We should support re-merging synthetic symbols so we can create the corresponding
+/// symbol objects initially here and later update them. It makes them safer to use, for
+/// insignificant performance degredation.
 fn setupLinkerSymbols(wasm: *Wasm) !void {
     // stack pointer symbol
     {
@@ -934,6 +937,35 @@ fn setupLinkerSymbols(wasm: *Wasm) !void {
         const symbol = loc.getSymbol(wasm);
         symbol.setFlag(.WASM_SYM_VISIBILITY_HIDDEN);
         // We set the type and function index later so we do not need to merge them later.
+    }
+
+    // shared-memory symbols for TLS support
+    if (wasm.options.shared_memory) {
+        // __tls_base
+        {
+            const loc = try wasm.createSyntheticSymbol("__tls_base", .global);
+            const symbol = loc.getSymbol(wasm);
+            symbol.setFlag(.WASM_SYM_VISIBILITY_HIDDEN);
+        }
+        // __tls_size
+        {
+            const loc = try wasm.createSyntheticSymbol("__tls_size", .global);
+            const symbol = loc.getSymbol(wasm);
+            symbol.setFlag(.WASM_SYM_VISIBILITY_HIDDEN);
+        }
+        // __tls_align
+        {
+            const loc = try wasm.createSyntheticSymbol("__tls_align", .global);
+            const symbol = loc.getSymbol(wasm);
+            symbol.setFlag(.WASM_SYM_VISIBILITY_HIDDEN);
+        }
+
+        // __tls_init
+        {
+            const loc = try wasm.createSyntheticSymbol("__tls_init", .function);
+            const symbol = loc.getSymbol(wasm);
+            symbol.setFlag(.WASM_SYM_VISIBILITY_HIDDEN);
+        }
     }
 }
 
@@ -1138,16 +1170,29 @@ fn setupMemory(wasm: *Wasm) !void {
     var offset: u32 = @intCast(u32, memory_ptr);
     var seg_it = wasm.data_segments.iterator();
     while (seg_it.next()) |entry| {
-        const segment = &wasm.segments.items[entry.value_ptr.*];
+        const segment: *Segment = &wasm.segments.items[entry.value_ptr.*];
         memory_ptr = std.mem.alignForwardGeneric(u64, memory_ptr, segment.alignment);
 
         // set TLS-related symbols
         if (mem.eql(u8, entry.key_ptr.*, ".tdata")) {
+            if (wasm.findGlobalSymbol("__tls_size")) |loc| {
+                const sym = loc.getSymbol(wasm);
+                sym.index = try wasm.globals.append(wasm.base.allocator, global_count, .{
+                    .global_type = .{ .valtype = .i32, .mutable = false },
+                    .init = .{ .i32_const = @intCast(i32, segment.size) },
+                });
+            }
+            if (wasm.findGlobalSymbol("__tls_align")) |loc| {
+                sym.index = try wasm.globals.append(wasm.base.allocator, global_count, .{
+                    .global_type = .{ .valtype = .i32, .mutable = false },
+                    .init = .{ .i32_const = @intCast(i32, segment.alignment) },
+                });
+            }
             if (wasm.findGlobalSymbol("__tls_base")) |loc| {
                 const sym = loc.getSymbol(wasm);
                 sym.index = try wasm.globals.append(wasm.base.allocator, wasm.imports.globalCount(), .{
-                    .global_type = .{ .valtype = .i32, .mutable = false },
-                    .init = .{ .i32_const = @intCast(i32, memory_ptr) },
+                    .global_type = .{ .valtype = .i32, .mutable = wasm.options.shared_memory },
+                    .init = .{ .i32_const = if (wasm.options.shared_memory) @as(i32, 0) else @intCast(i32, memory_ptr) },
                 });
             }
         }
