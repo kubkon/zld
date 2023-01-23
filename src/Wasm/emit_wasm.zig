@@ -101,6 +101,13 @@ pub fn emit(wasm: *Wasm) !void {
         try emitElement(wasm, writer);
         try emitSectionHeader(file, offset, .element, 1);
     }
+
+    const data_count = wasm.dataCount();
+    if (data_count > 0 and wasm.options.shared_memory) {
+        const offset = try reserveSectionHeader(file);
+        try emitSectionHeader(file, offset, .data_count, data_count);
+    }
+
     if (wasm.code_section_index) |index| {
         log.debug("Writing 'Code' section ({d})", .{wasm.functions.count()});
         const offset = try reserveSectionHeader(file);
@@ -134,8 +141,7 @@ pub fn emit(wasm: *Wasm) !void {
         try emitSectionHeader(file, offset, .code, wasm.functions.count());
     }
 
-    if (wasm.data_segments.count() != 0) {
-        const data_count = @intCast(u32, wasm.dataCount());
+    if (data_count != 0) {
         log.debug("Writing 'Data' section ({d})", .{data_count});
         const offset = try reserveSectionHeader(file);
 
