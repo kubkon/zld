@@ -402,6 +402,7 @@ pub fn flush(wasm: *Wasm) !void {
     try wasm.mergeSections();
     try wasm.mergeTypes();
     try wasm.initializeCallCtorsFunction();
+    try wasm.initializeTLSFunction();
     try wasm.setupExports();
 
     try @import("Wasm/emit_wasm.zig").emit(wasm);
@@ -962,7 +963,7 @@ fn setupLinkerSymbols(wasm: *Wasm) !void {
 
         // __tls_init
         {
-            const loc = try wasm.createSyntheticSymbol("__tls_init", .function);
+            const loc = try wasm.createSyntheticSymbol("__wasm_init_tls", .function);
             const symbol = loc.getSymbol(wasm);
             symbol.setFlag(.WASM_SYM_VISIBILITY_HIDDEN);
         }
@@ -1082,11 +1083,24 @@ fn initializeCallCtorsFunction(wasm: *Wasm) !void {
     // End function body
     try writer.writeByte(std.wasm.opcode(.end));
 
-    const loc = wasm.findGlobalSymbol("__wasm_call_ctors").?;
+    try wasm.createSyntheticFunction(
+        "__wasm_call_ctors",
+        std.wasm.Type{ .params = &.{}, .returns = &.{} },
+        function_body,
+    );
+}
+
+fn createSyntheticFunction(
+    wasm: *Wasm,
+    symbol_name: []const u8,
+    func_ty: std.wasm.Type,
+    function_body: std.ArrayList(u8),
+) !void {
+    const loc = wasm.findGlobalSymbol(symbol_name).?;
     // Update the symbol
     const symbol = loc.getSymbol(wasm);
     // create type (() -> nil)
-    const ty_index = try wasm.func_types.append(wasm.base.allocator, .{ .params = &.{}, .returns = &.{} });
+    const ty_index = try wasm.func_types.append(wasm.base.allocator, func_ty);
     // create function with above type
     symbol.index = try wasm.functions.append(
         wasm.base.allocator,
@@ -1112,6 +1126,60 @@ fn initializeCallCtorsFunction(wasm: *Wasm) !void {
     try wasm.appendAtomAtIndex(wasm.base.allocator, wasm.code_section_index.?, atom);
     try wasm.symbol_atom.putNoClobber(wasm.base.allocator, loc, atom);
     atom.offset = atom.prev.?.offset + atom.prev.?.size;
+}
+
+fn initializeTLSFunction(wasm: *Wasm) !void {
+    if (!wasm.options.shared_memory) return;
+
+    var function_body = std.ArrayList(u8).init(wasm.base.allocator);
+    defer function_body.deinit();
+    const writer = function_body.writer();
+
+    // locals
+    try writer.writeByte(0);
+
+    // If there's a TLS segment, initialize it during runtime using the bulk-memory feature
+    if (wasm.data_segments.getIndex(".tdata")) |data_index| {
+        const segment_index = wasm.data_segments.entries[data_index].value_ptr.*;
+        const segment = wasm.segments.items[segment_index];
+
+        const param_local: u32 = 0;
+
+        try writer.writeByte(std.wasm.opcode(.local_get));
+        try leb.writeULEB128(writer, param_local);
+
+        const tls_base_loc = wasm.findGlobalSymbol("__tls_base").?;
+        try writer.writeByte(std.wasm.opcode(.global_get));
+        try leb.writeULEB128(writer, tls_base_loc.getSymbol(wasm).index);
+
+        // load stack values for the bulk-memory operation
+        {
+            try writer.writeByte(std.wasm.opcode(.local_get));
+            try leb.writeULEB128(writer, param_local);
+
+            try writer.writeByte(std.wasm.opcode(.i32_const));
+            try leb.writeULEB128(writer, @as(u32, 0)); //segment offset
+
+            try writer.writeByte(std.wasm.opcode(.i32_const));
+            try leb.writeULEB128(writer, @as(u32, segment.size)); //segment offset
+        }
+
+        // perform the bulk-memory operation to initialize the data segment
+        try writer.writeByte(std.wasm.opcode(.prefixed));
+        try leb.writeULEB128(writer, @enumToInt(std.wasm.PrefixedOpcode.memory_init));
+        // segment immediate
+        try leb.writeULEB128(writer, @intCast(u32, data_index));
+        // memory index immediate (always 0)
+        try writer.writeByte(writer, @as(u32, 0));
+    }
+
+    try writer.writeByte(std.wasm.opcode(.end));
+
+    try wasm.createSyntheticFunction(
+        "__wasm_init_tls",
+        std.wasm.Type{ .params = &.{.i32}, .returns = &.{} },
+        function_body,
+    );
 }
 
 fn mergeImports(wasm: *Wasm) !void {
