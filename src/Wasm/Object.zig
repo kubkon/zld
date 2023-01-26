@@ -943,13 +943,31 @@ pub fn parseIntoAtoms(object: *Object, object_index: u16, wasm_bin: *Wasm) !void
                 var reloc = relocation;
                 reloc.offset -= relocatable_data.offset;
                 try atom.relocs.append(wasm_bin.base.allocator, reloc);
+            }
 
-                if (relocation.isTableIndex()) {
+            switch (relocation.relocation_type) {
+                .R_WASM_TABLE_INDEX_I32,
+                .R_WASM_TABLE_INDEX_I64,
+                .R_WASM_TABLE_INDEX_SLEB,
+                .R_WASM_TABLE_INDEX_SLEB64,
+                => {
                     try wasm_bin.elements.indirect_functions.put(wasm_bin.base.allocator, .{
                         .file = object_index,
                         .sym_index = relocation.index,
                     }, 0);
-                }
+                },
+                .R_WASM_GLOBAL_INDEX_I32,
+                .R_WASM_GLOBAL_INDEX_LEB,
+                => {
+                    const sym = object.symtable[relocation.index];
+                    if (sym.tag != .global) {
+                        try wasm_bin.globals.addGOTEntry(
+                            wasm_bin.base.allocator,
+                            .{ .file = object_index, .sym_index = relocation.index },
+                        );
+                    }
+                },
+                else => {},
             }
         }
 

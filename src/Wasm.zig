@@ -393,6 +393,7 @@ pub fn flush(wasm: *Wasm) !void {
     for (wasm.objects.items) |*object, obj_idx| {
         try object.parseIntoAtoms(@intCast(u16, obj_idx), wasm);
     }
+    try wasm.setupTLSRelocationsFunction();
     try wasm.validateFeatures();
     try wasm.setupStart();
     try wasm.mergeImports();
@@ -1055,6 +1056,49 @@ fn setupInitFunctions(wasm: *Wasm) !void {
     }.lessThan);
 }
 
+fn setupTLSRelocationsFunction(wasm: *Wasm) !void {
+    // When we have TLS GOT entries and shared memory is enabled,
+    // we must perform runtime relocations or else we don't create the function.
+    if (!(wasm.options.shared_memory and wasm.globals.requiresTLSReloc(wasm))) {
+        return;
+    }
+
+    // const loc = try wasm.createSyntheticSymbol("__wasm_apply_global_tls_relocs");
+    var function_body = std.ArrayList(u8).init(wasm.base.allocator);
+    defer function_body.deinit();
+    const writer = function_body.writer();
+
+    // locals (we have none)
+    try writer.writeByte(0);
+    for (wasm.globals.got_symbols.items) |got_loc, got_index| {
+        const sym: *Symbol = got_loc.getSymbol(wasm);
+        if (!sym.isTLS()) continue; // only relocate TLS symbols
+        if (sym.tag == .data and sym.isDefined()) {
+            // get __tls_base
+            try writer.writeByte(std.wasm.opcode(.global_get));
+            try leb.writeULEB128(writer, wasm.findGlobalSymbol("__tls_base").?.getSymbol(wasm).index);
+
+            // add the virtual address of the symbol
+            try writer.writeByte(std.wasm.opcode(.i32_const));
+            const va = wasm.symbol_atom.get(got_loc).?.getVA(wasm, sym);
+            try leb.writeULEB128(writer, va);
+        } else if (sym.tag == .function) {
+            @panic("TODO: relocate GOT entry of function");
+        } else continue;
+
+        try writer.writeByte(std.wasm.opcode(.i32_add));
+        try writer.writeByte(std.wasm.opcode(.global_set));
+        try leb.writeULEB128(writer, wasm.imports.globalCount() + wasm.globals.count() + @intCast(u32, got_index));
+    }
+    try writer.writeByte(std.wasm.opcode(.end));
+
+    try wasm.createSyntheticFunction(
+        "__",
+        std.wasm.Type{ .params = &.{}, .returns = &.{} },
+        &function_body,
+    );
+}
+
 fn initializeCallCtorsFunction(wasm: *Wasm) !void {
     var function_body = std.ArrayList(u8).init(wasm.base.allocator);
     defer function_body.deinit();
@@ -1086,7 +1130,7 @@ fn initializeCallCtorsFunction(wasm: *Wasm) !void {
     try wasm.createSyntheticFunction(
         "__wasm_call_ctors",
         std.wasm.Type{ .params = &.{}, .returns = &.{} },
-        function_body,
+        &function_body,
     );
 }
 
@@ -1094,9 +1138,11 @@ fn createSyntheticFunction(
     wasm: *Wasm,
     symbol_name: []const u8,
     func_ty: std.wasm.Type,
-    function_body: std.ArrayList(u8),
+    function_body: *std.ArrayList(u8),
 ) !void {
-    const loc = wasm.findGlobalSymbol(symbol_name).?;
+    const loc = wasm.findGlobalSymbol(symbol_name) orelse
+        try wasm.createSyntheticSymbol(symbol_name, .function);
+
     // Update the symbol
     const symbol = loc.getSymbol(wasm);
     // create type (() -> nil)
@@ -1140,7 +1186,7 @@ fn initializeTLSFunction(wasm: *Wasm) !void {
 
     // If there's a TLS segment, initialize it during runtime using the bulk-memory feature
     if (wasm.data_segments.getIndex(".tdata")) |data_index| {
-        const segment_index = wasm.data_segments.entries[data_index].value_ptr.*;
+        const segment_index = wasm.data_segments.entries.items(.value)[data_index];
         const segment = wasm.segments.items[segment_index];
 
         const param_local: u32 = 0;
@@ -1170,7 +1216,7 @@ fn initializeTLSFunction(wasm: *Wasm) !void {
         // segment immediate
         try leb.writeULEB128(writer, @intCast(u32, data_index));
         // memory index immediate (always 0)
-        try writer.writeByte(writer, @as(u32, 0));
+        try writer.writeByte(@as(u32, 0));
     }
 
     try writer.writeByte(std.wasm.opcode(.end));
@@ -1178,7 +1224,7 @@ fn initializeTLSFunction(wasm: *Wasm) !void {
     try wasm.createSyntheticFunction(
         "__wasm_init_tls",
         std.wasm.Type{ .params = &.{.i32}, .returns = &.{} },
-        function_body,
+        &function_body,
     );
 }
 
@@ -1243,6 +1289,7 @@ fn setupMemory(wasm: *Wasm) !void {
 
         // set TLS-related symbols
         if (mem.eql(u8, entry.key_ptr.*, ".tdata")) {
+            const global_count = wasm.imports.globalCount();
             if (wasm.findGlobalSymbol("__tls_size")) |loc| {
                 const sym = loc.getSymbol(wasm);
                 sym.index = try wasm.globals.append(wasm.base.allocator, global_count, .{
@@ -1251,6 +1298,7 @@ fn setupMemory(wasm: *Wasm) !void {
                 });
             }
             if (wasm.findGlobalSymbol("__tls_align")) |loc| {
+                const sym = loc.getSymbol(wasm);
                 sym.index = try wasm.globals.append(wasm.base.allocator, global_count, .{
                     .global_type = .{ .valtype = .i32, .mutable = false },
                     .init = .{ .i32_const = @intCast(i32, segment.alignment) },

@@ -206,30 +206,32 @@ pub const Globals = struct {
     /// Once appended to this list, they should no longer be mutated
     items: std.ArrayListUnmanaged(std.wasm.Global) = .{},
     /// List of internal GOT symbols
-    got_symbols: std.ArrayListUnmanaged(*Symbol) = .{},
+    got_symbols: std.ArrayListUnmanaged(Wasm.SymbolWithLoc) = .{},
 
     /// Appends a new global and sets the `global_idx` on the global based on the
     /// current count of globals and the given `offset`.
-    pub fn append(self: *Globals, gpa: Allocator, offset: u32, global: std.wasm.Global) !u32 {
-        const index = offset + @intCast(u32, self.items.items.len);
-        try self.items.append(gpa, global);
+    pub fn append(globals: *Globals, gpa: Allocator, offset: u32, global: std.wasm.Global) !u32 {
+        const index = offset + @intCast(u32, globals.items.items.len);
+        try globals.items.append(gpa, global);
         return index;
     }
 
     /// Appends a new entry to the internal GOT
-    pub fn addGOTEntry(self: *Globals, gpa: Allocator, symbol: *Symbol, wasm_bin: *Wasm) !void {
-        if (symbol.kind == .function) {
-            try wasm_bin.tables.createIndirectFunctionTable(gpa, wasm_bin);
-            // try wasm_bin.elements.appendSymbol(gpa, symbol);
-            @panic("TODO: Implement GOT entries");
-        }
+    pub fn addGOTEntry(globals: *Globals, gpa: Allocator, loc: Wasm.SymbolWithLoc) !void {
+        try globals.got_symbols.append(gpa, loc);
+    }
 
-        try self.got_symbols.append(gpa, symbol);
+    /// Returns true for when any GOT entry is a TLS symbol
+    pub fn requiresTLSReloc(globals: *const Globals, wasm: *const Wasm) bool {
+        for (globals.got_symbols.items) |loc| {
+            if (loc.getSymbol(wasm).isTLS()) return true;
+        }
+        return false;
     }
 
     /// Returns the total amount of globals of the global section
-    pub fn count(self: Globals) u32 {
-        return @intCast(u32, self.items.items.len);
+    pub fn count(globals: Globals) u32 {
+        return @intCast(u32, globals.items.items.len);
     }
 
     /// Creates a new linker-defined global with the given mutability and value type.
@@ -238,21 +240,21 @@ pub const Globals = struct {
     ///
     /// This will automatically set `init` to `null` and can manually be updated at a later point using
     /// the returned pointer.
-    pub fn create(self: *Globals, gpa: Allocator, mutability: enum { mutable, immutable }, valtype: types.ValueType) !*types.Global {
-        const index = self.count();
-        try self.items.append(gpa, .{
+    pub fn create(globals: *Globals, gpa: Allocator, mutability: enum { mutable, immutable }, valtype: types.ValueType) !*types.Global {
+        const index = globals.count();
+        try globals.items.append(gpa, .{
             .valtype = valtype,
             .mutable = mutability == .mutable,
             .init = null,
             .global_idx = index,
         });
-        return &self.items.items[index];
+        return &globals.items.items[index];
     }
 
-    pub fn deinit(self: *Globals, gpa: Allocator) void {
-        self.items.deinit(gpa);
-        self.got_symbols.deinit(gpa);
-        self.* = undefined;
+    pub fn deinit(globals: *Globals, gpa: Allocator) void {
+        globals.items.deinit(gpa);
+        globals.got_symbols.deinit(gpa);
+        globals.* = undefined;
     }
 };
 
