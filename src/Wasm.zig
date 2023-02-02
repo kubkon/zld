@@ -1518,6 +1518,21 @@ fn setupMemory(wasm: *Wasm) !void {
         offset += segment.size;
     }
 
+    // create the memory init flag which is used by the init memory function
+    if (wasm.options.shared_memory and wasm.hasPassiveInitializationSegments()) {
+        // align to pointer size
+        memory_ptr = mem.alignForwardGeneric(u64, memory_ptr, 4);
+        const loc = try wasm.createSyntheticSymbol("__wasm_init_memory_flag", .data);
+        const sym = loc.getSymbol(wasm);
+        const atom = try Atom.create(wasm.base.allocator);
+        atom.size = 0;
+        atom.sym_index = loc.sym_index;
+        atom.file = null;
+        try wasm.symbol_atom.put(wasm.base.allocator, loc, atom);
+        atom.offset = @intCast(u32, memory_ptr);
+        memory_ptr += 4;
+    }
+
     if (!place_stack_first) {
         memory_ptr = std.mem.alignForwardGeneric(u64, memory_ptr, stack_alignment);
         memory_ptr += stack_size;
