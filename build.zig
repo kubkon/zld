@@ -11,20 +11,28 @@ const Step = std.build.Step;
 
 pub fn build(b: *Builder) void {
     const target = b.standardTargetOptions(.{});
-    const mode = b.standardReleaseOptions();
+    const mode = b.standardOptimizeOption(.{});
 
     const enable_logging = b.option(bool, "log", "Whether to enable logging") orelse false;
     const is_qemu_enabled = b.option(bool, "enable-qemu", "Use QEMU to run cross compiled foreign architecture tests") orelse false;
     const enable_tracy = b.option([]const u8, "tracy", "Enable Tracy integration. Supply path to Tracy source");
 
-    const lib = b.addStaticLibrary("zld", "src/Zld.zig");
-    lib.setTarget(target);
-    lib.setBuildMode(mode);
+    const lib = b.addStaticLibrary(.{
+        .name = "zld",
+        .root_source_file = .{ .path = "src/Zld.zig" },
+        .target = target,
+        .optimize = mode,
+    });
+
     lib.addPackagePath("dis_x86_64", "zig-dis-x86_64/src/dis_x86_64.zig");
 
-    const exe = b.addExecutable("zld", "src/main.zig");
-    exe.setTarget(target);
-    exe.setBuildMode(mode);
+    const exe = b.addExecutable(.{
+        .name = "zld",
+        .root_source_file = .{ .path = "src/main.zig" },
+        .target = target,
+        .optimize = mode,
+    });
+
     exe.addPackagePath("dis_x86_64", "zig-dis-x86_64/src/dis_x86_64.zig");
     exe.linkLibC();
 
@@ -69,8 +77,10 @@ pub fn build(b: *Builder) void {
     });
     gen_symlinks.step.dependOn(&exe.step);
 
-    const tests = b.addTest("src/test.zig");
-    tests.setBuildMode(mode);
+    const tests = b.addTest(.{
+        .root_source_file = .{ .path = "src/test.zig" },
+        .optimize = mode,
+    });
     tests.addPackagePath("end_to_end_tests", "test/test.zig");
     tests.addPackagePath("dis_x86_64", "zig-dis-x86_64/src/dis_x86_64.zig");
 
