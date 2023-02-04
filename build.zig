@@ -81,7 +81,11 @@ pub fn build(b: *Builder) void {
         .root_source_file = .{ .path = "src/test.zig" },
         .optimize = mode,
     });
-    tests.addPackagePath("end_to_end_tests", "test/test.zig");
+    tests.addPackage(.{
+        .name = "end_to_end_tests",
+        .source = .{ .path = "test/test.zig" },
+        .dependencies = &.{.{ .name = "test_base", .source = .{ .path = "src/test.zig" } }},
+    });
     tests.addPackagePath("dis_x86_64", "zig-dis-x86_64/src/dis_x86_64.zig");
 
     const test_opts = b.addOptions();

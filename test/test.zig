@@ -1,6 +1,6 @@
 const std = @import("std");
 const CrossTarget = std.zig.CrossTarget;
-const TestContext = @import("../src/test.zig").TestContext;
+const TestContext = @import("test_base").TestContext;
 
 const linux_x86_64 = CrossTarget{
     .cpu_arch = .x86_64,
