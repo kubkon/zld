@@ -413,12 +413,12 @@ pub fn flush(wasm: *Wasm) !void {
         try object.parseIntoAtoms(@intCast(u16, obj_idx), wasm);
     }
     try wasm.validateFeatures();
-    try wasm.setupInitMemoryFunction();
-    try wasm.setupTLSRelocationsFunction();
     try wasm.setupStart();
     try wasm.mergeImports();
     try wasm.allocateAtoms();
     try wasm.setupMemory();
+    try wasm.setupInitMemoryFunction();
+    try wasm.setupTLSRelocationsFunction();
     wasm.mapFunctionTable();
     try wasm.mergeSections();
     try wasm.mergeTypes();
@@ -1523,7 +1523,6 @@ fn setupMemory(wasm: *Wasm) !void {
         // align to pointer size
         memory_ptr = mem.alignForwardGeneric(u64, memory_ptr, 4);
         const loc = try wasm.createSyntheticSymbol("__wasm_init_memory_flag", .data);
-        const sym = loc.getSymbol(wasm);
         const atom = try Atom.create(wasm.base.allocator);
         atom.size = 0;
         atom.sym_index = loc.sym_index;
