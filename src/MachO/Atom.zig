@@ -132,7 +132,7 @@ pub fn calcInnerSymbolOffset(macho_file: *MachO, atom_index: AtomIndex, sym_inde
         sym.n_value
     else blk: {
         const nbase = @intCast(u32, object.in_symtab.?.len);
-        const sect_id = @intCast(u16, atom.sym_index - nbase);
+        const sect_id = @intCast(u8, atom.sym_index - nbase);
         const source_sect = object.getSourceSection(sect_id);
         break :blk source_sect.addr;
     };
@@ -176,7 +176,7 @@ pub fn getRelocContext(macho_file: *MachO, atom_index: AtomIndex) RelocContext {
         };
     }
     const nbase = @intCast(u32, object.in_symtab.?.len);
-    const sect_id = @intCast(u16, atom.sym_index - nbase);
+    const sect_id = @intCast(u8, atom.sym_index - nbase);
     const source_sect = object.getSourceSection(sect_id);
     return .{
         .base_addr = source_sect.addr,
@@ -734,7 +734,7 @@ fn resolveRelocsArm64(
 
                 if (rel.r_extern == 0) {
                     const base_addr = if (target.sym_index > object.source_address_lookup.len)
-                        @intCast(i64, object.getSourceSection(@intCast(u16, rel.r_symbolnum - 1)).addr)
+                        @intCast(i64, object.getSourceSection(@intCast(u8, rel.r_symbolnum - 1)).addr)
                     else
                         object.source_address_lookup[target.sym_index];
                     ptr_addend -= base_addr;
@@ -894,7 +894,7 @@ fn resolveRelocsX86(
 
                 if (rel.r_extern == 0) {
                     const base_addr = if (target.sym_index > object.source_address_lookup.len)
-                        @intCast(i64, object.getSourceSection(@intCast(u16, rel.r_symbolnum - 1)).addr)
+                        @intCast(i64, object.getSourceSection(@intCast(u8, rel.r_symbolnum - 1)).addr)
                     else
                         object.source_address_lookup[target.sym_index];
                     addend += @intCast(i32, @intCast(i64, context.base_addr) + rel.r_address + 4 -
@@ -916,7 +916,7 @@ fn resolveRelocsX86(
 
                 if (rel.r_extern == 0) {
                     const base_addr = if (target.sym_index > object.source_address_lookup.len)
-                        @intCast(i64, object.getSourceSection(@intCast(u16, rel.r_symbolnum - 1)).addr)
+                        @intCast(i64, object.getSourceSection(@intCast(u8, rel.r_symbolnum - 1)).addr)
                     else
                         object.source_address_lookup[target.sym_index];
                     addend -= base_addr;
@@ -960,7 +960,7 @@ pub fn getAtomCode(macho_file: *MachO, atom_index: AtomIndex) []const u8 {
         // we are dealing with either an entire section, or part of it, but also
         // starting at the beginning.
         const nbase = @intCast(u32, object.in_symtab.?.len);
-        const sect_id = @intCast(u16, atom.sym_index - nbase);
+        const sect_id = @intCast(u8, atom.sym_index - nbase);
         const source_sect = object.getSourceSection(sect_id);
         assert(!source_sect.isZerofill());
         const code = object.getSectionContents(source_sect);
@@ -973,28 +973,25 @@ pub fn getAtomCode(macho_file: *MachO, atom_index: AtomIndex) []const u8 {
     return code[offset..][0..atom.size];
 }
 
-pub fn getAtomRelocs(macho_file: *MachO, atom_index: AtomIndex) []align(1) const macho.relocation_info {
+pub fn getAtomRelocs(macho_file: *MachO, atom_index: AtomIndex) []const macho.relocation_info {
     const atom = macho_file.getAtom(atom_index);
     assert(atom.getFile() != null); // Synthetic atom shouldn't need to unique for relocs.
     const object = macho_file.objects.items[atom.getFile().?];
     const cache = object.relocs_lookup[atom.sym_index];
 
-    const source_sect = if (object.getSourceSymbol(atom.sym_index)) |source_sym| blk: {
-        const source_sect = object.getSourceSection(source_sym.n_sect - 1);
-        assert(!source_sect.isZerofill());
-        break :blk source_sect;
+    const source_sect_id = if (object.getSourceSymbol(atom.sym_index)) |source_sym| blk: {
+        break :blk source_sym.n_sect - 1;
     } else blk: {
         // If there was no matching symbol present in the source symtab, this means
         // we are dealing with either an entire section, or part of it, but also
         // starting at the beginning.
         const nbase = @intCast(u32, object.in_symtab.?.len);
-        const sect_id = @intCast(u16, atom.sym_index - nbase);
-        const source_sect = object.getSourceSection(sect_id);
-        assert(!source_sect.isZerofill());
-        break :blk source_sect;
+        const sect_id = @intCast(u8, atom.sym_index - nbase);
+        break :blk sect_id;
     };
-
-    const relocs = object.getRelocs(source_sect);
+    const source_sect = object.getSourceSection(source_sect_id);
+    assert(!source_sect.isZerofill());
+    const relocs = object.getRelocs(source_sect_id);
     return relocs[cache.start..][0..cache.len];
 }
 
