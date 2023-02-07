@@ -17,14 +17,11 @@ pub fn build(b: *Builder) void {
     const is_qemu_enabled = b.option(bool, "enable-qemu", "Use QEMU to run cross compiled foreign architecture tests") orelse false;
     const enable_tracy = b.option([]const u8, "tracy", "Enable Tracy integration. Supply path to Tracy source");
 
-    const lib = b.addStaticLibrary(.{
-        .name = "zld",
-        .root_source_file = .{ .path = "src/Zld.zig" },
-        .target = target,
-        .optimize = mode,
+    b.addModule(.{
+        .name = "dis_x86_64",
+        .source_file = .{ .path = "zig-dis-x86_64/src/dis_x86_64.zig" },
     });
-
-    lib.addPackagePath("dis_x86_64", "zig-dis-x86_64/src/dis_x86_64.zig");
+    const dis_x86_64 = b.modules.get("dis_x86_64").?;
 
     const exe = b.addExecutable(.{
         .name = "zld",
@@ -32,8 +29,7 @@ pub fn build(b: *Builder) void {
         .target = target,
         .optimize = mode,
     });
-
-    exe.addPackagePath("dis_x86_64", "zig-dis-x86_64/src/dis_x86_64.zig");
+    exe.addModule("dis_x86_64", dis_x86_64);
     exe.linkLibC();
 
     const exe_opts = b.addOptions();
@@ -58,7 +54,6 @@ pub fn build(b: *Builder) void {
         exe.addSystemIncludePath("/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include");
         exe.addCSourceFile(client_cpp, tracy_c_flags);
         exe.linkSystemLibraryName("c++");
-        exe.linkLibC();
         exe.strip = false;
 
         if (target.isWindows()) {
@@ -81,12 +76,11 @@ pub fn build(b: *Builder) void {
         .root_source_file = .{ .path = "src/test.zig" },
         .optimize = mode,
     });
-    tests.addPackage(.{
-        .name = "end_to_end_tests",
-        .source = .{ .path = "test/test.zig" },
-        .dependencies = &.{.{ .name = "test_base", .source = .{ .path = "src/test.zig" } }},
-    });
-    tests.addPackagePath("dis_x86_64", "zig-dis-x86_64/src/dis_x86_64.zig");
+    const test_base = b.createModule(.{ .source_file = .{ .path = "src/test.zig" } });
+    const e2e_tests = b.createModule(.{ .source_file = .{ .path = "test/test.zig" } });
+    e2e_tests.dependencies.put("test_base", test_base) catch @panic("OOM");
+    tests.addModule("end_to_end_tests", e2e_tests);
+    tests.addModule("dis_x86_64", dis_x86_64);
 
     const test_opts = b.addOptions();
     tests.addOptions("build_options", test_opts);
