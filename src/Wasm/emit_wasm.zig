@@ -36,12 +36,12 @@ pub fn emit(wasm: *Wasm) !void {
         const offset = try reserveSectionHeader(file);
 
         if (wasm.options.import_memory) {
-            const mem_import: std.wasm.Import = .{
-                .module_name = "env",
-                .name = "memory",
+            const mem_import: types.Import = .{
+                .module_name = wasm.string_table.getOffset("env").?,
+                .name = wasm.string_table.getOffset("memory").?,
                 .kind = .{ .memory = wasm.memories.limits },
             };
-            try emitImport(mem_import, writer);
+            try emitImport(wasm, mem_import, writer);
         }
 
         for (wasm.imports.symbols()) |sym_with_loc| {
@@ -101,6 +101,13 @@ pub fn emit(wasm: *Wasm) !void {
         try emitElement(wasm, writer);
         try emitSectionHeader(file, offset, .element, 1);
     }
+
+    const data_count = wasm.dataCount();
+    if (data_count > 0 and wasm.options.shared_memory) {
+        const offset = try reserveSectionHeader(file);
+        try emitSectionHeader(file, offset, .data_count, data_count);
+    }
+
     if (wasm.code_section_index) |index| {
         log.debug("Writing 'Code' section ({d})", .{wasm.functions.count()});
         const offset = try reserveSectionHeader(file);
@@ -134,8 +141,7 @@ pub fn emit(wasm: *Wasm) !void {
         try emitSectionHeader(file, offset, .code, wasm.functions.count());
     }
 
-    if (wasm.data_segments.count() != 0) {
-        const data_count = @intCast(u32, wasm.dataCount());
+    if (data_count != 0) {
         log.debug("Writing 'Data' section ({d})", .{data_count});
         const offset = try reserveSectionHeader(file);
 
@@ -145,10 +151,15 @@ pub fn emit(wasm: *Wasm) !void {
             if (std.mem.eql(u8, entry.key_ptr.*, ".bss") and !wasm.options.import_memory) continue;
             const atom_index = entry.value_ptr.*;
             var atom = wasm.atoms.getPtr(atom_index).?.*.getFirst();
-            const segment = wasm.segments.items[atom_index];
+            const segment: Wasm.Segment = wasm.segments.items[atom_index];
 
-            try leb.writeULEB128(writer, @as(u32, 0)); // flag and memory index (always 0);
-            try emitInitExpression(.{ .i32_const = @bitCast(i32, segment.offset) }, writer);
+            try leb.writeULEB128(writer, segment.flags);
+            if (segment.flags & @enumToInt(Wasm.Segment.Flag.WASM_DATA_SEGMENT_HAS_MEMINDEX) != 0) {
+                try leb.writeULEB128(writer, @as(u32, 0)); // memory is always index 0 as we only have 1 memory entry
+            }
+            if (!segment.isPassive()) {
+                try emitInitExpression(.{ .i32_const = @bitCast(i32, segment.offset) }, writer);
+            }
             try leb.writeULEB128(writer, segment.size);
 
             var current_offset: u32 = 0;
@@ -337,18 +348,18 @@ fn emitType(type_entry: std.wasm.Type, writer: anytype) !void {
     }
 }
 
-fn emitImportSymbol(wasm: *const Wasm, sym_loc: Wasm.SymbolWithLoc, writer: anytype) !void {
+fn emitImportSymbol(wasm: *Wasm, sym_loc: Wasm.SymbolWithLoc, writer: anytype) !void {
     const symbol = sym_loc.getSymbol(wasm).*;
 
-    const import: std.wasm.Import = switch (symbol.tag) {
+    const import: types.Import = switch (symbol.tag) {
         .function => import: {
             const value = wasm.imports.imported_functions.values()[symbol.index];
             const key = wasm.imports.imported_functions.keys()[symbol.index];
             std.debug.assert(value.index == symbol.index);
             break :import .{
                 .kind = .{ .function = value.type },
-                .module_name = key.module_name,
-                .name = key.name,
+                .module_name = try wasm.string_table.put(wasm.base.allocator, key.module_name),
+                .name = try wasm.string_table.put(wasm.base.allocator, key.name),
             };
         },
         .global => import: {
@@ -357,8 +368,8 @@ fn emitImportSymbol(wasm: *const Wasm, sym_loc: Wasm.SymbolWithLoc, writer: anyt
             std.debug.assert(value.index == symbol.index);
             break :import .{
                 .kind = .{ .global = value.global },
-                .module_name = key.module_name,
-                .name = key.name,
+                .module_name = try wasm.string_table.put(wasm.base.allocator, key.module_name),
+                .name = try wasm.string_table.put(wasm.base.allocator, key.name),
             };
         },
         .table => import: {
@@ -367,22 +378,24 @@ fn emitImportSymbol(wasm: *const Wasm, sym_loc: Wasm.SymbolWithLoc, writer: anyt
             std.debug.assert(value.index == symbol.index);
             break :import .{
                 .kind = .{ .table = value.table },
-                .module_name = key.module_name,
-                .name = key.name,
+                .module_name = try wasm.string_table.put(wasm.base.allocator, key.module_name),
+                .name = try wasm.string_table.put(wasm.base.allocator, key.name),
             };
         },
         else => unreachable,
     };
 
-    try emitImport(import, writer);
+    try emitImport(wasm, import, writer);
 }
 
-fn emitImport(import_entry: std.wasm.Import, writer: anytype) !void {
-    try leb.writeULEB128(writer, @intCast(u32, import_entry.module_name.len));
-    try writer.writeAll(import_entry.module_name);
+fn emitImport(wasm: *Wasm, import_entry: types.Import, writer: anytype) !void {
+    const module_name = wasm.string_table.get(import_entry.module_name);
+    try leb.writeULEB128(writer, @intCast(u32, module_name.len));
+    try writer.writeAll(module_name);
 
-    try leb.writeULEB128(writer, @intCast(u32, import_entry.name.len));
-    try writer.writeAll(import_entry.name);
+    const name = wasm.string_table.get(import_entry.name);
+    try leb.writeULEB128(writer, @intCast(u32, name.len));
+    try writer.writeAll(name);
 
     try leb.writeULEB128(writer, @enumToInt(import_entry.kind));
     switch (import_entry.kind) {
@@ -400,21 +413,17 @@ fn emitFunction(func: std.wasm.Func, writer: anytype) !void {
     try leb.writeULEB128(writer, func.type_index);
 }
 
-fn emitTable(table: std.wasm.Table, writer: anytype) !void {
+fn emitTable(table: types.Table, writer: anytype) !void {
     try leb.writeULEB128(writer, @enumToInt(table.reftype));
     try emitLimits(table.limits, writer);
 }
 
-fn emitLimits(limits: std.wasm.Limits, writer: anytype) !void {
-    try leb.writeULEB128(writer, @boolToInt(limits.max != null));
+fn emitLimits(limits: types.Limits, writer: anytype) !void {
+    try leb.writeULEB128(writer, limits.flags);
     try leb.writeULEB128(writer, limits.min);
     if (limits.max) |max| {
         try leb.writeULEB128(writer, max);
     }
-}
-
-fn emitMemory(mem: types.Memory, writer: anytype) !void {
-    try emitLimits(mem.limits, writer);
 }
 
 fn emitGlobal(global: std.wasm.Global, writer: anytype) !void {
@@ -604,7 +613,8 @@ fn emitFeaturesSection(file: fs.File, wasm: *const Wasm, writer: anytype) !void 
         if (wasm.used_features.isEnabled(feature_tag)) {
             const feature: types.Feature = .{ .prefix = .used, .tag = feature_tag };
             try leb.writeULEB128(writer, @enumToInt(feature.prefix));
-            const feature_name = feature.tag.toString();
+            var buf: [100]u8 = undefined;
+            const feature_name = try std.fmt.bufPrint(&buf, "{}", .{feature.tag});
             try leb.writeULEB128(writer, @intCast(u32, feature_name.len));
             try writer.writeAll(feature_name);
         }

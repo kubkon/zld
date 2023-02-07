@@ -111,6 +111,10 @@ pub fn setGlobal(symbol: *Symbol, is_global: bool) void {
     }
 }
 
+pub fn isTLS(symbol: Symbol) bool {
+    return symbol.flags & @enumToInt(Flag.WASM_SYM_TLS) != 0;
+}
+
 pub fn isDefined(symbol: Symbol) bool {
     return !symbol.isUndefined();
 }

@@ -28,9 +28,9 @@ imports: []const types.Import = &.{},
 /// Parsed function section
 functions: []const std.wasm.Func = &.{},
 /// Parsed table section
-tables: []const std.wasm.Table = &.{},
+tables: []const types.Table = &.{},
 /// Parsed memory section
-memories: []const std.wasm.Memory = &.{},
+memories: []const types.Memory = &.{},
 /// Parsed global section
 globals: []const std.wasm.Global = &.{},
 /// Parsed export section
@@ -438,7 +438,7 @@ fn Parser(comptime ReaderType: type) type {
                             try reader.readNoEof(name);
 
                             const kind = try readEnum(std.wasm.ExternalKind, reader);
-                            const kind_value: std.wasm.Import.Kind = switch (kind) {
+                            const kind_value: types.Import.Kind = switch (kind) {
                                 .function => .{ .function = try readLeb(u32, reader) },
                                 .memory => .{ .memory = try readLimits(reader) },
                                 .global => .{ .global = .{
@@ -699,6 +699,12 @@ fn Parser(comptime ReaderType: type) type {
                             segment.alignment,
                             segment.flags,
                         });
+
+                        // support legacy object files that specified being TLS by the name instead of the TLS flag.
+                        if (!segment.isTLS() and (std.mem.startsWith(u8, segment.name, ".tdata") or std.mem.startsWith(u8, segment.name, ".tbss"))) {
+                            // set the flag so we can simply check for the flag in the rest of the linker.
+                            segment.flags |= @enumToInt(types.Segment.Flags.WASM_SEG_FLAG_TLS);
+                        }
                     }
                     parser.object.segment_info = segments;
                 },
@@ -862,10 +868,11 @@ fn readEnum(comptime T: type, reader: anytype) !T {
     }
 }
 
-fn readLimits(reader: anytype) !std.wasm.Limits {
+fn readLimits(reader: anytype) !types.Limits {
     const flags = try readLeb(u1, reader);
     const min = try readLeb(u32, reader);
-    return std.wasm.Limits{
+    return .{
+        .flags = flags,
         .min = min,
         .max = if (flags == 0) null else try readLeb(u32, reader),
     };
@@ -936,13 +943,31 @@ pub fn parseIntoAtoms(object: *Object, object_index: u16, wasm_bin: *Wasm) !void
                 var reloc = relocation;
                 reloc.offset -= relocatable_data.offset;
                 try atom.relocs.append(wasm_bin.base.allocator, reloc);
+            }
 
-                if (relocation.isTableIndex()) {
+            switch (relocation.relocation_type) {
+                .R_WASM_TABLE_INDEX_I32,
+                .R_WASM_TABLE_INDEX_I64,
+                .R_WASM_TABLE_INDEX_SLEB,
+                .R_WASM_TABLE_INDEX_SLEB64,
+                => {
                     try wasm_bin.elements.indirect_functions.put(wasm_bin.base.allocator, .{
                         .file = object_index,
                         .sym_index = relocation.index,
                     }, 0);
-                }
+                },
+                .R_WASM_GLOBAL_INDEX_I32,
+                .R_WASM_GLOBAL_INDEX_LEB,
+                => {
+                    const sym = object.symtable[relocation.index];
+                    if (sym.tag != .global) {
+                        try wasm_bin.globals.addGOTEntry(
+                            wasm_bin.base.allocator,
+                            .{ .file = object_index, .sym_index = relocation.index },
+                        );
+                    }
+                },
+                else => {},
             }
         }
 
