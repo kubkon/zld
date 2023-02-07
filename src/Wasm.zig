@@ -325,7 +325,14 @@ fn parsePositionals(wasm: *Wasm, files: []const []const u8) !void {
 /// Attempts to parse an object file. Returns `false` when given path
 /// does not represent an object file.
 fn parseObjectFile(wasm: *Wasm, gpa: Allocator, path: []const u8) !bool {
-    const file = try fs.cwd().openFile(path, .{});
+    const file = fs.cwd().openFile(path, .{}) catch |err| switch (err) {
+        error.FileNotFound => {
+            log.err("File not found: '{s}'", .{path});
+            return err;
+        },
+        else => |e| return e,
+    };
+
     var object = Object.create(gpa, file, path, null) catch |err| switch (err) {
         error.InvalidMagicByte, error.NotObjectFile => {
             return false;
@@ -346,7 +353,13 @@ fn parseObjectFile(wasm: *Wasm, gpa: Allocator, path: []const u8) !bool {
 /// When false, it will only link with object files that contain symbols that
 /// are referenced by other object files or Zig code.
 fn parseArchive(wasm: *Wasm, gpa: Allocator, path: []const u8, force_load: bool) !bool {
-    const file = try fs.cwd().openFile(path, .{});
+    const file = fs.cwd().openFile(path, .{}) catch |err| switch (err) {
+        error.FileNotFound => {
+            log.err("File not found: '{s}'", .{path});
+            return err;
+        },
+        else => |e| return e,
+    };
     errdefer file.close();
 
     var archive: Archive = .{
