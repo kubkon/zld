@@ -664,7 +664,7 @@ fn cacheRelocs(self: *Object, macho_file: *MachO, atom_index: AtomIndex) !void {
         // we are dealing with either an entire section, or part of it, but also
         // starting at the beginning.
         const nbase = @intCast(u32, self.in_symtab.?.len);
-        const sect_id = @intCast(u16, atom.sym_index - nbase);
+        const sect_id = @intCast(u8, atom.sym_index - nbase);
         break :blk sect_id;
     };
     const source_sect = self.getSourceSection(source_sect_id);
@@ -874,14 +874,14 @@ pub fn getSourceSections(self: Object) []const macho.section_64 {
     } else unreachable;
 }
 
-pub fn parseDataInCode(self: Object, gpa: Allocator) !void {
+pub fn parseDataInCode(self: *Object, gpa: Allocator) !void {
     var it = LoadCommandIterator{
         .ncmds = self.header.ncmds,
         .buffer = self.contents[@sizeOf(macho.mach_header_64)..][0..self.header.sizeofcmds],
     };
     const cmd = while (it.next()) |cmd| {
         switch (cmd.cmd()) {
-            .DATA_IN_CODE => cmd.cast(macho.linkedit_data_command).?,
+            .DATA_IN_CODE => break cmd.cast(macho.linkedit_data_command).?,
             else => {},
         }
     } else return;

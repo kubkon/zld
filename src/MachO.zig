@@ -3294,8 +3294,8 @@ fn writeUuid(self: *MachO, args: struct {
         // Exclude region comprising all symbol stabs.
         const nlocals = self.dysymtab_cmd.nlocalsym;
 
-        const locals = try self.gpa.alloc(macho.nlist_64, nlocals);
-        defer self.gpa.free(locals);
+        const locals = try self.base.allocator.alloc(macho.nlist_64, nlocals);
+        defer self.base.allocator.free(locals);
 
         const locals_buf = @ptrCast([*]u8, locals.ptr)[0 .. @sizeOf(macho.nlist_64) * nlocals];
         const amt = try self.base.file.preadAll(locals_buf, self.symtab_cmd.symoff);
