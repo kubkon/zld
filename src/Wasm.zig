@@ -415,14 +415,14 @@ pub fn dataCount(wasm: Wasm) u32 {
 pub fn flush(wasm: *Wasm) !void {
     try wasm.parsePositionals(wasm.options.positionals);
     try wasm.setupLinkerSymbols();
-    for (wasm.objects.items) |_, obj_idx| {
+    for (wasm.objects.items, 0..) |_, obj_idx| {
         try wasm.resolveSymbolsInObject(@intCast(u16, obj_idx));
     }
     try wasm.resolveSymbolsInArchives();
     try wasm.resolveLazySymbols();
     try wasm.setupInitFunctions();
     try wasm.checkUndefinedSymbols();
-    for (wasm.objects.items) |*object, obj_idx| {
+    for (wasm.objects.items, 0..) |*object, obj_idx| {
         try object.parseIntoAtoms(@intCast(u16, obj_idx), wasm);
     }
     try wasm.validateFeatures();
@@ -516,7 +516,7 @@ fn resolveSymbolsInObject(wasm: *Wasm, object_index: u16) !void {
     const object: Object = wasm.objects.items[object_index];
     log.debug("Resolving symbols in object: '{s}'", .{object.name});
 
-    for (object.symtable) |symbol, i| {
+    for (object.symtable, 0..) |symbol, i| {
         const sym_index = @intCast(u32, i);
         const location: SymbolWithLoc = .{
             .file = object_index,
@@ -1059,7 +1059,7 @@ fn checkUndefinedSymbols(wasm: *const Wasm) !void {
 /// After all functions have been inserted, the functions will be ordered based
 /// on their priority.
 fn setupInitFunctions(wasm: *Wasm) !void {
-    for (wasm.objects.items) |object, file_index| {
+    for (wasm.objects.items, 0..) |object, file_index| {
         try wasm.init_funcs.ensureUnusedCapacity(wasm.base.allocator, object.init_funcs.len);
         for (object.init_funcs) |init_func| {
             const symbol = object.symtable[init_func.symbol_index];
@@ -1275,7 +1275,7 @@ fn setupTLSRelocationsFunction(wasm: *Wasm) !void {
 
     // locals (we have none)
     try writer.writeByte(0);
-    for (wasm.globals.got_symbols.items) |got_loc, got_index| {
+    for (wasm.globals.got_symbols.items, 0..) |got_loc, got_index| {
         const sym: *Symbol = got_loc.getSymbol(wasm);
         if (!sym.isTLS()) continue; // only relocate TLS symbols
         if (sym.tag == .data and sym.isDefined()) {
@@ -1837,7 +1837,7 @@ fn validateFeatures(wasm: *Wasm) !void {
 
     // extract all the used, disallowed and required features from each
     // linked object file so we can test them.
-    for (wasm.objects.items) |object, object_index| {
+    for (wasm.objects.items, 0..) |object, object_index| {
         for (object.features) |feature| {
             const value = @intCast(u16, object_index) << 1 | @as(u1, 1);
             switch (feature.prefix) {
@@ -1864,7 +1864,7 @@ fn validateFeatures(wasm: *Wasm) !void {
     // when we infer the features, we allow each feature found in the 'used' set
     // and insert it into the 'allowed' set. When features are not inferred,
     // we validate that a used feature is allowed.
-    for (used) |used_set, used_index| {
+    for (used, 0..) |used_set, used_index| {
         const is_enabled = @truncate(u1, used_set) != 0;
         if (!is_enabled) continue;
         const feature = @intToEnum(types.Feature.Tag, used_index);
@@ -1924,7 +1924,7 @@ fn validateFeatures(wasm: *Wasm) !void {
         }
 
         // validate the linked object file has each required feature
-        for (required) |required_feature, feature_index| {
+        for (required, 0..) |required_feature, feature_index| {
             const is_required = @truncate(u1, required_feature) != 0;
             if (is_required and !object_used_features[feature_index]) {
                 log.err("feature '{}' is required but not used in linked object", .{(@intToEnum(types.Feature.Tag, feature_index))});

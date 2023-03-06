@@ -17,11 +17,9 @@ pub fn build(b: *Builder) void {
     const is_qemu_enabled = b.option(bool, "enable-qemu", "Use QEMU to run cross compiled foreign architecture tests") orelse false;
     const enable_tracy = b.option([]const u8, "tracy", "Enable Tracy integration. Supply path to Tracy source");
 
-    b.addModule(.{
-        .name = "dis_x86_64",
+    const dis_x86_64 = b.addModule("dis_x86_64", .{
         .source_file = .{ .path = "zig-dis-x86_64/src/dis_x86_64.zig" },
     });
-    const dis_x86_64 = b.modules.get("dis_x86_64").?;
 
     const exe = b.addExecutable(.{
         .name = "zld",
@@ -76,11 +74,8 @@ pub fn build(b: *Builder) void {
         .root_source_file = .{ .path = "src/test.zig" },
         .optimize = mode,
     });
-    const test_base = b.createModule(.{ .source_file = .{ .path = "src/test.zig" } });
-    const e2e_tests = b.createModule(.{ .source_file = .{ .path = "test/test.zig" } });
-    e2e_tests.dependencies.put("test_base", test_base) catch @panic("OOM");
-    tests.addModule("end_to_end_tests", e2e_tests);
     tests.addModule("dis_x86_64", dis_x86_64);
+    tests.main_pkg_path = "."; // set root directory as main package path for our tests
 
     const test_opts = b.addOptions();
     tests.addOptions("build_options", test_opts);

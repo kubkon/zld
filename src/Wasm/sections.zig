@@ -286,7 +286,7 @@ pub const Types = struct {
     /// the type section. When it does exist, it will return its index
     /// otherwise, returns `null`.
     pub fn find(self: Types, func_type: std.wasm.Type) ?u32 {
-        return for (self.items.items) |ty, index| {
+        return for (self.items.items, 0..) |ty, index| {
             if (ty.eql(func_type)) {
                 return @intCast(u32, index);
             }

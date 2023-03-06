@@ -321,7 +321,7 @@ fn createThunkAtom(macho_file: *MachO) !AtomIndex {
 fn getThunkIndex(macho_file: *MachO, atom_index: AtomIndex) ?ThunkIndex {
     const atom = macho_file.getAtom(atom_index);
     const sym = macho_file.getSymbol(atom.getSymbolWithLoc());
-    for (macho_file.thunks.items) |thunk, i| {
+    for (macho_file.thunks.items, 0..) |thunk, i| {
         if (thunk.len == 0) continue;
 
         const thunk_atom_index = thunk.getStartAtomIndex();

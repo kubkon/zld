@@ -263,7 +263,7 @@ fn mark(macho_file: *MachO, roots: AtomTable, alive: *AtomTable) !void {
         }
     }
 
-    for (macho_file.objects.items) |_, object_id| {
+    for (macho_file.objects.items, 0..) |_, object_id| {
         // Traverse unwind and eh_frame records noting if the source symbol has been marked, and if so,
         // marking all references as live.
         try markUnwindRecords(macho_file, @intCast(u32, object_id), alive);

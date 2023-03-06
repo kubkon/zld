@@ -215,7 +215,7 @@ pub fn flush(self: *Elf) !void {
     try self.parsePositionals(positionals.items);
     try self.parseLibs(libs.keys());
 
-    for (self.objects.items) |_, object_id| {
+    for (self.objects.items, 0..) |_, object_id| {
         try self.resolveSymbolsInObject(@intCast(u16, object_id));
     }
     try self.resolveSymbolsInArchives();
@@ -236,7 +236,7 @@ pub fn flush(self: *Elf) !void {
         try object.scanInputSections(self);
     }
 
-    for (self.objects.items) |*object, object_id| {
+    for (self.objects.items, 0..) |*object, object_id| {
         try object.splitIntoAtoms(self.base.allocator, @intCast(u16, object_id), self);
     }
 
@@ -517,7 +517,7 @@ fn insertSection(self: *Elf, shdr: elf.Elf64_Shdr, shdr_name: []const u8) !u16 {
     // allocated within each respective segment. Of course, it is good practice to have
     // the sections sorted, but it's a useful hack we can use for the debug builds in
     // self-hosted Zig compiler.
-    const insertion_index = for (self.sections.items(.shdr)) |oshdr, i| {
+    const insertion_index = for (self.sections.items(.shdr), 0..) |oshdr, i| {
         const oshdr_name = self.shstrtab.getAssumeExists(oshdr.sh_name);
         if (getSectionPrecedence(oshdr, oshdr_name) > precedence) break @intCast(u16, i);
     } else @intCast(u16, self.sections.items(.shdr).len);
@@ -725,7 +725,7 @@ fn resolveSymbolsInObject(self: *Elf, object_id: u16) !void {
 
     log.debug("resolving symbols in {s}", .{object.name});
 
-    for (object.symtab.items) |sym, i| {
+    for (object.symtab.items, 0..) |sym, i| {
         const sym_id = @intCast(u32, i);
         const sym_name = self.getSymbolName(.{ .sym_index = sym_id, .file = object_id });
         const st_bind = sym.st_info >> 4;
@@ -1115,7 +1115,7 @@ fn allocateNonAllocSections(self: *Elf) !void {
 
 fn allocateAtoms(self: *Elf) !void {
     const slice = self.sections.slice();
-    for (slice.items(.last_atom)) |last_atom, i| {
+    for (slice.items(.last_atom), 0..) |last_atom, i| {
         var atom = last_atom orelse continue;
         const shdr_ndx = @intCast(u16, i);
         const shdr = slice.items(.shdr)[shdr_ndx];
@@ -1194,7 +1194,7 @@ pub fn logAtom(self: *Elf, atom: *const Atom, comptime logger: anytype) void {
 
 fn logAtoms(self: *Elf) void {
     const slice = self.sections.slice();
-    for (slice.items(.last_atom)) |last_atom, i| {
+    for (slice.items(.last_atom), 0..) |last_atom, i| {
         var atom = last_atom orelse continue;
         const ndx = @intCast(u16, i);
         const shdr = slice.items(.shdr)[ndx];
@@ -1216,7 +1216,7 @@ fn logAtoms(self: *Elf) void {
 
 fn writeAtoms(self: *Elf) !void {
     const slice = self.sections.slice();
-    for (slice.items(.last_atom)) |last_atom, i| {
+    for (slice.items(.last_atom), 0..) |last_atom, i| {
         var atom = last_atom orelse continue;
         const shdr_ndx = @intCast(u16, i);
         const shdr = slice.items(.shdr)[shdr_ndx];
@@ -1301,7 +1301,7 @@ fn writeSymtab(self: *Elf) !void {
     });
 
     for (self.objects.items) |object| {
-        for (object.symtab.items) |sym, sym_id| {
+        for (object.symtab.items, 0..) |sym, sym_id| {
             if (sym.st_name == 0) continue;
             const st_bind = sym.st_info >> 4;
             const st_type = sym.st_info & 0xf;
@@ -1421,7 +1421,7 @@ fn writeHeader(self: *Elf) !void {
 }
 
 pub fn getSectionByName(self: *Elf, name: []const u8) ?u16 {
-    for (self.sections.items(.shdr)) |shdr, i| {
+    for (self.sections.items(.shdr), 0..) |shdr, i| {
         const this_name = self.shstrtab.getAssumeExists(shdr.sh_name);
         if (mem.eql(u8, this_name, name)) return @intCast(u16, i);
     } else return null;
@@ -1478,7 +1478,7 @@ pub fn getEntryPoint(self: Elf) error{EntrypointNotFound}!SymbolWithLoc {
 
 fn logSections(self: Elf) void {
     log.debug("sections:", .{});
-    for (self.sections.items(.shdr)) |shdr, i| {
+    for (self.sections.items(.shdr), 0..) |shdr, i| {
         log.debug("  sect({d}): {s} @{x}, sizeof({x})", .{
             i,
             self.shstrtab.getAssumeExists(shdr.sh_name),
@@ -1491,7 +1491,7 @@ fn logSections(self: Elf) void {
 fn logSymtab(self: Elf) void {
     for (self.objects.items) |object| {
         log.debug("locals in {s}", .{object.name});
-        for (object.symtab.items) |sym, i| {
+        for (object.symtab.items, 0..) |sym, i| {
             // const st_type = sym.st_info & 0xf;
             const st_bind = sym.st_info >> 4;
             // if (st_bind != elf.STB_LOCAL or st_type != elf.STT_SECTION) continue;

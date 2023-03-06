@@ -83,7 +83,7 @@ pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch)
 
     if (self.header.e_shnum == 0) return;
 
-    for (self.getShdrs()) |shdr, i| switch (shdr.sh_type) {
+    for (self.getShdrs(), 0..) |shdr, i| switch (shdr.sh_type) {
         elf.SHT_SYMTAB => {
             self.symtab_index = @intCast(u16, i);
             const nsyms = @divExact(shdr.sh_size, @sizeOf(elf.Elf64_Sym));
@@ -137,28 +137,28 @@ pub fn splitIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
     var rel_shdrs = std.AutoHashMap(u16, u16).init(allocator);
     defer rel_shdrs.deinit();
 
-    for (shdrs) |shdr, i| switch (shdr.sh_type) {
+    for (shdrs, 0..) |shdr, i| switch (shdr.sh_type) {
         elf.SHT_REL, elf.SHT_RELA => {
             try rel_shdrs.putNoClobber(@intCast(u16, shdr.sh_info), @intCast(u16, i));
         },
         else => {},
     };
 
-    for (shdrs) |shdr, i| switch (shdr.sh_type) {
+    for (shdrs, 0..) |shdr, i| switch (shdr.sh_type) {
         elf.SHT_PROGBITS, elf.SHT_NOBITS => {
             try symbols_by_shndx.putNoClobber(@intCast(u16, i), std.ArrayList(u32).init(allocator));
         },
         else => {},
     };
 
-    for (self.getSourceSymtab()) |sym, sym_id| {
+    for (self.getSourceSymtab(), 0..) |sym, sym_id| {
         if (sym.st_shndx == elf.SHN_UNDEF) continue;
         if (elf.SHN_LORESERVE <= sym.st_shndx and sym.st_shndx < elf.SHN_HIRESERVE) continue;
         const map = symbols_by_shndx.getPtr(sym.st_shndx) orelse continue;
         try map.append(@intCast(u32, sym_id));
     }
 
-    for (shdrs) |shdr, i| switch (shdr.sh_type) {
+    for (shdrs, 0..) |shdr, i| switch (shdr.sh_type) {
         elf.SHT_PROGBITS, elf.SHT_NOBITS => {
             const ndx = @intCast(u16, i);
             const shdr_name = self.getShString(shdr.sh_name);

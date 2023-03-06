@@ -123,7 +123,7 @@ const Page = struct {
             ctx.page.start + ctx.page.count,
         });
         try writer.print("  encodings (count = {d})\n", .{ctx.page.page_encodings_count});
-        for (ctx.page.page_encodings[0..ctx.page.page_encodings_count]) |record_id, i| {
+        for (ctx.page.page_encodings[0..ctx.page.page_encodings_count], 0..) |record_id, i| {
             const record = ctx.info.records.items[record_id];
             const enc = record.compactUnwindEncoding;
             try writer.print("    {d}: 0x{x:0>8}\n", .{ ctx.info.common_encodings_count + i, enc });
@@ -202,7 +202,7 @@ pub fn scanRelocs(macho_file: *MachO) !void {
     if (macho_file.getSectionByName("__TEXT", "__unwind_info") == null) return;
 
     const cpu_arch = macho_file.options.target.cpu_arch.?;
-    for (macho_file.objects.items) |*object, object_id| {
+    for (macho_file.objects.items, 0..) |*object, object_id| {
         const unwind_records = object.getUnwindRecords();
         for (object.exec_atoms.items) |atom_index| {
             const record_id = object.unwind_records_lookup.get(atom_index) orelse continue;
@@ -241,7 +241,7 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
     defer atom_indexes.deinit();
 
     // TODO handle dead stripping
-    for (macho_file.objects.items) |*object, object_id| {
+    for (macho_file.objects.items, 0..) |*object, object_id| {
         log.debug("collecting unwind records in {s} ({d})", .{ object.name, object_id });
         const unwind_records = object.getUnwindRecords();
 
@@ -332,7 +332,7 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
     try info.records_lookup.ensureTotalCapacity(info.gpa, @intCast(u32, atom_indexes.items.len));
 
     var maybe_prev: ?macho.compact_unwind_entry = null;
-    for (records.items) |record, i| {
+    for (records.items, 0..) |record, i| {
         const record_id = blk: {
             if (maybe_prev) |prev| {
                 const is_dwarf = UnwindEncoding.isDwarf(record.compactUnwindEncoding, cpu_arch);
@@ -480,7 +480,7 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
 
     // Save indices of records requiring LSDA relocation
     try info.lsdas_lookup.ensureTotalCapacity(info.gpa, @intCast(u32, info.records.items.len));
-    for (info.records.items) |rec, i| {
+    for (info.records.items, 0..) |rec, i| {
         info.lsdas_lookup.putAssumeCapacityNoClobber(@intCast(RecordIndex, i), @intCast(u32, info.lsdas.items.len));
         if (rec.lsda == 0) continue;
         try info.lsdas.append(info.gpa, @intCast(RecordIndex, i));
@@ -553,7 +553,7 @@ pub fn write(info: *UnwindInfo, macho_file: *MachO) !void {
     const cpu_arch = macho_file.options.target.cpu_arch.?;
 
     log.debug("Personalities:", .{});
-    for (info.personalities[0..info.personalities_count]) |target, i| {
+    for (info.personalities[0..info.personalities_count], 0..) |target, i| {
         const atom_index = macho_file.getGotAtomIndexForSymbol(target).?;
         const atom = macho_file.getAtom(atom_index);
         const sym = macho_file.getSymbol(atom.getSymbolWithLoc());
@@ -577,7 +577,7 @@ pub fn write(info: *UnwindInfo, macho_file: *MachO) !void {
         }
     }
 
-    for (info.records.items) |record, i| {
+    for (info.records.items, 0..) |record, i| {
         log.debug("Unwind record at offset 0x{x}", .{i * @sizeOf(macho.compact_unwind_entry)});
         log.debug("  start: 0x{x}", .{record.rangeStart});
         log.debug("  length: 0x{x}", .{record.rangeLength});
@@ -617,7 +617,7 @@ pub fn write(info: *UnwindInfo, macho_file: *MachO) !void {
     const pages_base_offset = @intCast(u32, size - (info.pages.items.len * second_level_page_bytes));
     const lsda_base_offset = @intCast(u32, pages_base_offset -
         (info.lsdas.items.len * @sizeOf(macho.unwind_info_section_header_lsda_index_entry)));
-    for (info.pages.items) |page, i| {
+    for (info.pages.items, 0..) |page, i| {
         assert(page.count > 0);
         const first_entry = info.records.items[page.start];
         try writer.writeStruct(macho.unwind_info_section_header_index_entry{
