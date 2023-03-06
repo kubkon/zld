@@ -351,7 +351,7 @@ pub fn parseFromStub(
     var matcher = try TargetMatcher.init(allocator, target);
     defer matcher.deinit();
 
-    for (lib_stub.inner) |elem, stub_index| {
+    for (lib_stub.inner, 0..) |elem, stub_index| {
         const is_match = switch (elem) {
             .v3 => |stub| matcher.matchesArch(stub.archs),
             .v4 => |stub| matcher.matchesTarget(stub.targets),

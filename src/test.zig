@@ -24,7 +24,7 @@ test "end-to-end" {
     var ctx = TestContext.init();
     defer ctx.deinit();
 
-    try @import("end_to_end_tests").addCases(&ctx);
+    try @import("../test/test.zig").addCases(&ctx);
     try ctx.run();
 }
 

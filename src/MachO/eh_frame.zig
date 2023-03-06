@@ -15,7 +15,7 @@ const UnwindInfo = @import("UnwindInfo.zig");
 pub fn scanRelocs(macho_file: *MachO) !void {
     const gpa = macho_file.base.allocator;
 
-    for (macho_file.objects.items) |*object, object_id| {
+    for (macho_file.objects.items, 0..) |*object, object_id| {
         var cies = std.AutoHashMap(u32, void).init(gpa);
         defer cies.deinit();
 
@@ -107,7 +107,7 @@ pub fn write(macho_file: *MachO, unwind_info: *UnwindInfo) !void {
 
     var eh_frame_offset: u32 = 0;
 
-    for (macho_file.objects.items) |*object, object_id| {
+    for (macho_file.objects.items, 0..) |*object, object_id| {
         try eh_records.ensureUnusedCapacity(2 * @intCast(u32, object.exec_atoms.items.len));
 
         var cies = std.AutoHashMap(u32, u32).init(gpa);
@@ -406,7 +406,7 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
             var creader = std.io.countingReader(stream.reader());
             const reader = creader.reader();
 
-            for (aug_str) |ch, i| switch (ch) {
+            for (aug_str, 0..) |ch, i| switch (ch) {
                 'z' => if (i > 0) {
                     return error.MalformedAugmentationString;
                 } else {
@@ -466,7 +466,7 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
             var creader = std.io.countingReader(stream.reader());
             const reader = creader.reader();
 
-            for (aug_str) |ch, i| switch (ch) {
+            for (aug_str, 0..) |ch, i| switch (ch) {
                 'z' => if (i > 0) {
                     return error.MalformedAugmentationString;
                 } else {
