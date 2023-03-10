@@ -430,6 +430,7 @@ pub fn flush(wasm: *Wasm) !void {
     try wasm.mergeImports();
     try wasm.allocateAtoms();
     try wasm.setupMemory();
+    wasm.allocateVirtualAddresses();
     try wasm.setupInitMemoryFunction();
     try wasm.setupTLSRelocationsFunction();
     wasm.mapFunctionTable();
@@ -695,25 +696,12 @@ fn resolveLazySymbols(wasm: *Wasm) !void {
         const loc = try wasm.createSyntheticSymbol("__heap_base", .data);
         try wasm.discarded.putNoClobber(wasm.base.allocator, kv.value, loc);
         _ = wasm.resolved_symbols.swapRemove(loc); // we don't want to emit this symbol, only use it for relocations.
-
-        const atom = try Atom.create(wasm.base.allocator);
-        atom.size = 0;
-        atom.sym_index = loc.sym_index;
-        atom.file = null;
-        // va/offset will be set during `setupMemory`
-        try wasm.symbol_atom.put(wasm.base.allocator, loc, atom);
     }
 
     if (wasm.undefs.fetchSwapRemove("__heap_end")) |kv| {
         const loc = try wasm.createSyntheticSymbol("__heap_end", .data);
         try wasm.discarded.putNoClobber(wasm.base.allocator, kv.value, loc);
         _ = wasm.resolved_symbols.swapRemove(loc);
-
-        const atom = try Atom.create(wasm.base.allocator);
-        atom.size = 0;
-        atom.sym_index = loc.sym_index;
-        atom.file = null;
-        try wasm.symbol_atom.put(wasm.base.allocator, loc, atom);
     }
 
     if (!wasm.options.shared_memory) {
@@ -908,12 +896,10 @@ fn setupExports(wasm: *Wasm) !void {
 
         const name = sym_loc.getName(wasm);
         const exported: std.wasm.Export = if (symbol.tag == .data) exp: {
-            const atom = wasm.symbol_atom.get(sym_loc).?;
-            const va = atom.getVA(wasm, symbol);
             const offset = wasm.imports.globalCount();
             const global_index = try wasm.globals.append(wasm.base.allocator, offset, .{
                 .global_type = .{ .valtype = .i32, .mutable = false },
-                .init = .{ .i32_const = @intCast(i32, va) },
+                .init = .{ .i32_const = @intCast(i32, symbol.virtual_address) },
             });
             break :exp .{
                 .name = name,
@@ -1015,6 +1001,7 @@ fn createSyntheticSymbol(wasm: *Wasm, name: []const u8, tag: Symbol.Tag) !Symbol
         .flags = 0,
         .tag = tag,
         .index = undefined,
+        .virtual_address = undefined,
     });
     try wasm.resolved_symbols.putNoClobber(wasm.base.allocator, loc, {});
     try wasm.global_symbols.put(wasm.base.allocator, name_offset, loc);
@@ -1103,8 +1090,7 @@ fn setupInitMemoryFunction(wasm: *Wasm) !void {
         // when we have passive initialization segments and shared memory
         // `setupMemory` will create this symbol and set its virtual address.
         const loc = wasm.findGlobalSymbol("__wasm_init_memory_flag").?;
-        const atom = wasm.symbol_atom.get(loc).?;
-        break :address atom.getVA(wasm, loc.getSymbol(wasm));
+        break :address loc.getSymbol(wasm).virtual_address;
     } else 0;
 
     var function_body = std.ArrayList(u8).init(wasm.base.allocator);
@@ -1285,7 +1271,7 @@ fn setupTLSRelocationsFunction(wasm: *Wasm) !void {
 
             // add the virtual address of the symbol
             try writer.writeByte(std.wasm.opcode(.i32_const));
-            const va = wasm.symbol_atom.get(got_loc).?.getVA(wasm, sym);
+            const va = got_loc.getSymbol(wasm).virtual_address;
             try leb.writeULEB128(writer, va);
         } else if (sym.tag == .function) {
             @panic("TODO: relocate GOT entry of function");
@@ -1536,12 +1522,7 @@ fn setupMemory(wasm: *Wasm) !void {
         // align to pointer size
         memory_ptr = mem.alignForwardGeneric(u64, memory_ptr, 4);
         const loc = try wasm.createSyntheticSymbol("__wasm_init_memory_flag", .data);
-        const atom = try Atom.create(wasm.base.allocator);
-        atom.size = 0;
-        atom.sym_index = loc.sym_index;
-        atom.file = null;
-        try wasm.symbol_atom.put(wasm.base.allocator, loc, atom);
-        atom.offset = @intCast(u32, memory_ptr);
+        loc.getSymbol(wasm).virtual_address = @intCast(u32, memory_ptr);
         memory_ptr += 4;
     }
 
@@ -1552,8 +1533,7 @@ fn setupMemory(wasm: *Wasm) !void {
     }
 
     if (wasm.findGlobalSymbol("__heap_base")) |loc| {
-        const atom = wasm.symbol_atom.get(loc).?;
-        atom.offset = @intCast(u32, mem.alignForwardGeneric(u64, memory_ptr, heap_alignment));
+        loc.getSymbol(wasm).virtual_address = @intCast(u32, mem.alignForwardGeneric(u64, memory_ptr, heap_alignment));
     }
 
     // Setup the max amount of pages
@@ -1584,8 +1564,7 @@ fn setupMemory(wasm: *Wasm) !void {
     log.debug("Total memory pages: {d}", .{wasm.memories.limits.min});
 
     if (wasm.findGlobalSymbol("__heap_end")) |loc| {
-        const atom = wasm.symbol_atom.get(loc).?;
-        atom.offset = @intCast(u32, memory_ptr);
+        loc.getSymbol(wasm).virtual_address = @intCast(u32, memory_ptr);
     }
 
     if (wasm.options.max_memory != null or wasm.options.shared_memory) {
@@ -1608,6 +1587,28 @@ fn setupMemory(wasm: *Wasm) !void {
             wasm.memories.limits.setFlag(.WASM_LIMITS_FLAG_IS_SHARED);
         }
         log.debug("Maximum memory pages: {?d}", .{wasm.memories.limits.max});
+    }
+}
+
+/// For each data symbol, sets the virtual address.
+fn allocateVirtualAddresses(wasm: *Wasm) void {
+    for (wasm.resolved_symbols.keys()) |loc| {
+        const symbol = loc.getSymbol(wasm);
+        if (symbol.tag != .data) {
+            continue; // only data symbols have virtual addresses
+        }
+        const atom = wasm.symbol_atom.get(loc) orelse {
+            // synthetic symbol that does not contain an atom
+            continue;
+        };
+
+        const file_index = atom.file.?;
+        const merge_segment = wasm.options.merge_data_segments;
+        const segment_info = wasm.objects.items[file_index].segment_info;
+        const segment_name = segment_info[symbol.index].outputName(merge_segment);
+        const segment_index = wasm.data_segments.get(segment_name).?;
+        const segment = wasm.segments.items[segment_index];
+        symbol.virtual_address = atom.offset + segment.offset;
     }
 }
 
