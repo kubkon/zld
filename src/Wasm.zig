@@ -66,10 +66,10 @@ tables: sections.Tables = .{},
 /// Output memory section, this will only be used when `options.import_memory`
 /// is set to false. The limits will be set, based on the total data section size
 /// and other configuration options.
-memories: types.Memory = .{ .limits = .{
+memories: std.wasm.Memory = .{ .limits = .{
     .flags = 0,
     .min = 0,
-    .max = null,
+    .max = undefined,
 } },
 /// Output global section
 globals: sections.Globals = .{},
@@ -431,12 +431,12 @@ pub fn flush(wasm: *Wasm) !void {
     try wasm.allocateAtoms();
     try wasm.setupMemory();
     wasm.allocateVirtualAddresses();
-    try wasm.setupInitMemoryFunction();
-    try wasm.setupTLSRelocationsFunction();
     wasm.mapFunctionTable();
     try wasm.mergeSections();
     try wasm.mergeTypes();
     try wasm.initializeCallCtorsFunction();
+    try wasm.setupInitMemoryFunction();
+    try wasm.setupTLSRelocationsFunction();
     try wasm.initializeTLSFunction();
     try wasm.setupExports();
 
@@ -1119,8 +1119,8 @@ fn setupInitMemoryFunction(wasm: *Wasm) !void {
         try leb.writeULEB128(writer, @as(u32, 0));
         try writer.writeByte(std.wasm.opcode(.i32_const));
         try leb.writeULEB128(writer, @as(u32, 1));
-        try writer.writeByte(0xfe); // atomic prefix (TODO: Add this to zig's std)
-        try leb.writeULEB128(writer, @as(u32, 0x48)); // i32.atomic.rmw.cmpxchg
+        try writer.writeByte(std.wasm.opcode(.atomics_prefix));
+        try leb.writeULEB128(writer, std.wasm.atomicsOpcode(.i32_atomic_rmw_cmpxchg));
         try leb.writeULEB128(writer, @as(u32, 2)); // alignment
         try leb.writeULEB128(writer, @as(u32, 0)); // offset
 
@@ -1160,13 +1160,13 @@ fn setupInitMemoryFunction(wasm: *Wasm) !void {
             try leb.writeULEB128(writer, @as(u32, 0));
             try writer.writeByte(std.wasm.opcode(.i32_const));
             try leb.writeULEB128(writer, segment.size);
-            try writer.writeByte(std.wasm.opcode(.prefixed));
+            try writer.writeByte(std.wasm.opcode(.misc_prefix));
             if (std.mem.eql(u8, entry.key_ptr.*, ".bss")) {
                 // fill bss segment with zeroes
-                try leb.writeULEB128(writer, @enumToInt(std.wasm.PrefixedOpcode.memory_fill));
+                try leb.writeULEB128(writer, std.wasm.miscOpcode(.memory_fill));
             } else {
                 // initialize the segment
-                try leb.writeULEB128(writer, @enumToInt(std.wasm.PrefixedOpcode.memory_init));
+                try leb.writeULEB128(writer, std.wasm.miscOpcode(.memory_init));
                 try leb.writeULEB128(writer, segment_index);
             }
             try writer.writeByte(0); // memory index immediate
@@ -1179,8 +1179,8 @@ fn setupInitMemoryFunction(wasm: *Wasm) !void {
         try leb.writeULEB128(writer, flag_address);
         try writer.writeByte(std.wasm.opcode(.i32_const));
         try leb.writeULEB128(writer, @as(u32, 2));
-        try writer.writeByte(0xfe); // atomics prefix
-        try leb.writeULEB128(writer, @as(u32, 0x17)); // i32.atomic.store
+        try writer.writeByte(std.wasm.opcode(.atomics_prefix));
+        try leb.writeULEB128(writer, std.wasm.atomicsOpcode(.i32_atomic_store));
         try leb.writeULEB128(writer, @as(u32, 2)); // alignment
         try leb.writeULEB128(writer, @as(u32, 0)); // offset
 
@@ -1189,8 +1189,8 @@ fn setupInitMemoryFunction(wasm: *Wasm) !void {
         try leb.writeULEB128(writer, flag_address);
         try writer.writeByte(std.wasm.opcode(.i32_const));
         try leb.writeILEB128(writer, @as(i32, -1)); // number of waiters
-        try writer.writeByte(0xfe); // atomics prefix
-        try leb.writeULEB128(writer, @as(u32, 0x0)); // memory.atomic.notify
+        try writer.writeByte(std.wasm.opcode(.atomics_prefix));
+        try leb.writeULEB128(writer, std.wasm.atomicsOpcode(.memory_atomic_notify));
         try leb.writeULEB128(writer, @as(u32, 2)); // alignment
         try leb.writeULEB128(writer, @as(u32, 0)); // offset
         try writer.writeByte(std.wasm.opcode(.drop));
@@ -1207,8 +1207,8 @@ fn setupInitMemoryFunction(wasm: *Wasm) !void {
         try leb.writeULEB128(writer, @as(u32, 1)); // expected flag value
         try writer.writeByte(std.wasm.opcode(.i32_const));
         try leb.writeILEB128(writer, @as(i32, -1)); // timeout
-        try writer.writeByte(0xfe); // atomics prefix
-        try leb.writeULEB128(writer, @as(u32, 0x1)); // memory.atomic.wait32
+        try writer.writeByte(std.wasm.opcode(.atomics_prefix));
+        try leb.writeULEB128(writer, std.wasm.atomicsOpcode(.memory_atomic_wait32));
         try leb.writeULEB128(writer, @as(u32, 2)); // alignment
         try leb.writeULEB128(writer, @as(u32, 0)); // offset
         try writer.writeByte(std.wasm.opcode(.drop));
@@ -1230,8 +1230,8 @@ fn setupInitMemoryFunction(wasm: *Wasm) !void {
                 continue;
             }
 
-            try writer.writeByte(std.wasm.opcode(.prefixed));
-            try leb.writeULEB128(writer, @enumToInt(std.wasm.PrefixedOpcode.data_drop));
+            try writer.writeByte(std.wasm.opcode(.misc_prefix));
+            try leb.writeULEB128(writer, std.wasm.miscOpcode(.data_drop));
             try leb.writeULEB128(writer, segment_index);
         }
     }
@@ -1402,8 +1402,8 @@ fn initializeTLSFunction(wasm: *Wasm) !void {
         }
 
         // perform the bulk-memory operation to initialize the data segment
-        try writer.writeByte(std.wasm.opcode(.prefixed));
-        try leb.writeULEB128(writer, @enumToInt(std.wasm.PrefixedOpcode.memory_init));
+        try writer.writeByte(std.wasm.opcode(.misc_prefix));
+        try leb.writeULEB128(writer, std.wasm.miscOpcode(.memory_init));
         // segment immediate
         try leb.writeULEB128(writer, @intCast(u32, data_index));
         // memory index immediate (always 0)
@@ -1436,7 +1436,7 @@ fn mergeImports(wasm: *Wasm) !void {
             .module_name = "env",
             .name = "__indirect_function_table",
         }, .{ .index = symbol.index, .table = .{
-            .limits = .{ .min = wasm.elements.functionCount(), .max = null },
+            .limits = .{ .flags = 0x0, .min = wasm.elements.functionCount(), .max = undefined },
             .reftype = .funcref,
         } });
         try wasm.imports.imported_symbols.append(wasm.base.allocator, loc);

@@ -36,12 +36,12 @@ pub fn emit(wasm: *Wasm) !void {
         const offset = try reserveSectionHeader(file);
 
         if (wasm.options.import_memory) {
-            const mem_import: types.Import = .{
-                .module_name = wasm.string_table.getOffset("env").?,
-                .name = wasm.string_table.getOffset("memory").?,
+            const mem_import: std.wasm.Import = .{
+                .module_name = "env",
+                .name = "memory",
                 .kind = .{ .memory = wasm.memories.limits },
             };
-            try emitImport(wasm, mem_import, writer);
+            try emitImport(mem_import, writer);
         }
 
         for (wasm.imports.symbols()) |sym_with_loc| {
@@ -351,15 +351,15 @@ fn emitType(type_entry: std.wasm.Type, writer: anytype) !void {
 fn emitImportSymbol(wasm: *Wasm, sym_loc: Wasm.SymbolWithLoc, writer: anytype) !void {
     const symbol = sym_loc.getSymbol(wasm).*;
 
-    const import: types.Import = switch (symbol.tag) {
+    const import: std.wasm.Import = switch (symbol.tag) {
         .function => import: {
             const value = wasm.imports.imported_functions.values()[symbol.index];
             const key = wasm.imports.imported_functions.keys()[symbol.index];
             std.debug.assert(value.index == symbol.index);
             break :import .{
                 .kind = .{ .function = value.type },
-                .module_name = try wasm.string_table.put(wasm.base.allocator, key.module_name),
-                .name = try wasm.string_table.put(wasm.base.allocator, key.name),
+                .module_name = key.module_name,
+                .name = key.name,
             };
         },
         .global => import: {
@@ -368,8 +368,8 @@ fn emitImportSymbol(wasm: *Wasm, sym_loc: Wasm.SymbolWithLoc, writer: anytype) !
             std.debug.assert(value.index == symbol.index);
             break :import .{
                 .kind = .{ .global = value.global },
-                .module_name = try wasm.string_table.put(wasm.base.allocator, key.module_name),
-                .name = try wasm.string_table.put(wasm.base.allocator, key.name),
+                .module_name = key.module_name,
+                .name = key.name,
             };
         },
         .table => import: {
@@ -378,22 +378,22 @@ fn emitImportSymbol(wasm: *Wasm, sym_loc: Wasm.SymbolWithLoc, writer: anytype) !
             std.debug.assert(value.index == symbol.index);
             break :import .{
                 .kind = .{ .table = value.table },
-                .module_name = try wasm.string_table.put(wasm.base.allocator, key.module_name),
-                .name = try wasm.string_table.put(wasm.base.allocator, key.name),
+                .module_name = key.module_name,
+                .name = key.name,
             };
         },
         else => unreachable,
     };
 
-    try emitImport(wasm, import, writer);
+    try emitImport(import, writer);
 }
 
-fn emitImport(wasm: *Wasm, import_entry: types.Import, writer: anytype) !void {
-    const module_name = wasm.string_table.get(import_entry.module_name);
+fn emitImport(import_entry: std.wasm.Import, writer: anytype) !void {
+    const module_name = import_entry.module_name;
     try leb.writeULEB128(writer, @intCast(u32, module_name.len));
     try writer.writeAll(module_name);
 
-    const name = wasm.string_table.get(import_entry.name);
+    const name = import_entry.name;
     try leb.writeULEB128(writer, @intCast(u32, name.len));
     try writer.writeAll(name);
 
@@ -413,16 +413,16 @@ fn emitFunction(func: std.wasm.Func, writer: anytype) !void {
     try leb.writeULEB128(writer, func.type_index);
 }
 
-fn emitTable(table: types.Table, writer: anytype) !void {
+fn emitTable(table: std.wasm.Table, writer: anytype) !void {
     try leb.writeULEB128(writer, @enumToInt(table.reftype));
     try emitLimits(table.limits, writer);
 }
 
-fn emitLimits(limits: types.Limits, writer: anytype) !void {
+fn emitLimits(limits: std.wasm.Limits, writer: anytype) !void {
     try leb.writeULEB128(writer, limits.flags);
     try leb.writeULEB128(writer, limits.min);
-    if (limits.max) |max| {
-        try leb.writeULEB128(writer, max);
+    if (limits.hasFlag(.WASM_LIMITS_FLAG_HAS_MAX)) {
+        try leb.writeULEB128(writer, limits.max);
     }
 }
 
