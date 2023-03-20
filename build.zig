@@ -68,7 +68,9 @@ pub fn build(b: *Builder) void {
         "ld64",
         "wasm-zld",
     });
-    gen_symlinks.step.dependOn(&exe.step);
+    if (exe.install_step) |install_step| {
+        gen_symlinks.step.dependOn(&install_step.step);
+    }
 
     const tests = b.addTest(.{
         .root_source_file = .{ .path = "src/test.zig" },
