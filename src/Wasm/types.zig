@@ -99,14 +99,7 @@ pub const Relocation = struct {
 pub const Import = struct {
     module_name: u32,
     name: u32,
-    kind: Kind,
-
-    pub const Kind = union(std.wasm.ExternalKind) {
-        function: u32,
-        table: Table,
-        memory: Limits,
-        global: std.wasm.GlobalType,
-    };
+    kind: std.wasm.Import.Kind,
 };
 
 pub const Memory = struct {
