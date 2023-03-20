@@ -61,7 +61,7 @@ pub fn build(b: *Builder) void {
     }
     exe.install();
 
-    const gen_symlinks = symlinks(exe, &[_][]const u8{
+    const gen_symlinks = symlinks(b, exe, &[_][]const u8{
         "ld.zld",
         "ld",
         "ld64.zld",
@@ -86,9 +86,9 @@ pub fn build(b: *Builder) void {
     test_step.dependOn(&tests.step);
 }
 
-fn symlinks(exe: *LibExeObjStep, names: []const []const u8) *CreateSymlinksStep {
-    const step = CreateSymlinksStep.create(exe.builder, exe.getOutputSource(), names);
-    exe.builder.getInstallStep().dependOn(&step.step);
+fn symlinks(builder: *Builder, exe: *LibExeObjStep, names: []const []const u8) *CreateSymlinksStep {
+    const step = CreateSymlinksStep.create(builder, exe.getOutputSource(), names);
+    builder.getInstallStep().dependOn(&step.step);
     return step;
 }
 
@@ -108,24 +108,29 @@ const CreateSymlinksStep = struct {
         const self = builder.allocator.create(CreateSymlinksStep) catch unreachable;
         self.* = CreateSymlinksStep{
             .builder = builder,
-            .step = Step.init(.log, builder.fmt("symlinks to {s}", .{
+            .step = Step.init(.{ .id = .custom, .name = builder.fmt("symlinks to {s}", .{
                 source.getDisplayName(),
-            }), builder.allocator, make),
+            }), .owner = builder, .makeFn = make }),
             .source = source,
             .targets = builder.dupeStrings(targets),
         };
         return self;
     }
 
-    fn make(step: *Step) anyerror!void {
+    fn make(step: *Step, prog_node: *std.Progress.Node) anyerror!void {
         const self = @fieldParentPtr(CreateSymlinksStep, "step", step);
         const rel_source = fs.path.basename(self.source.getPath(self.builder));
-        for (self.targets) |target| {
+
+        var node = prog_node.start("creating symlinks", self.targets.len);
+        node.activate();
+        defer node.end();
+        for (self.targets, 0..) |target, i| {
             const target_path = self.builder.getInstallPath(.bin, target);
             fs.atomicSymLink(self.builder.allocator, rel_source, target_path) catch |err| {
                 log.err("Unable to symlink {s} -> {s}", .{ rel_source, target_path });
                 return err;
             };
+            node.setCompletedItems(i + 1);
         }
     }
 };
