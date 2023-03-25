@@ -85,7 +85,7 @@ pub fn build(b: *Builder) void {
     test_opts.addOption(bool, "enable_logging", enable_logging);
 
     const test_step = b.step("test", "Run library and end-to-end tests");
-    test_step.dependOn(&tests.step);
+    test_step.dependOn(&tests.run().step);
 }
 
 fn symlinks(builder: *Builder, exe: *LibExeObjStep, names: []const []const u8) *CreateSymlinksStep {
