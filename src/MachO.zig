@@ -3055,7 +3055,7 @@ fn addLocalToSymtab(self: *MachO, sym_loc: SymbolWithLoc, locals: *std.ArrayList
     if (self.symbolIsTemp(sym_loc)) return; // local temp symbol, skip
 
     var out_sym = sym;
-    out_sym.n_strx = try self.strtab.insert(self.gpa, self.getSymbolName(sym_loc));
+    out_sym.n_strx = try self.strtab.insert(self.base.allocator, self.getSymbolName(sym_loc));
     try locals.append(out_sym);
 }
 

@@ -207,7 +207,7 @@ pub fn parseRelocTarget(macho_file: *MachO, ctx: struct {
             else
                 mem.readIntLittle(u32, ctx.code[rel_offset..][0..4]);
         } else blk: {
-            assert(macho_file.options.target.cpu.arch == .x86_64);
+            assert(macho_file.options.target.cpu_arch.? == .x86_64);
             const correction: u3 = switch (@intToEnum(macho.reloc_type_x86_64, ctx.rel.r_type)) {
                 .X86_64_RELOC_SIGNED => 0,
                 .X86_64_RELOC_SIGNED_1 => 1,
