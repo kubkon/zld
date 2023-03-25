@@ -217,11 +217,20 @@ fn scanRelocs(
         break :blk @intCast(i32, source_sym.n_value - source_sect.addr);
     } else 0;
 
+    const code = Atom.getAtomCode(macho_file, atom_index);
     const relocs = Atom.getAtomRelocs(macho_file, atom_index);
+    const ctx = Atom.getRelocContext(macho_file, atom_index);
+
     for (relocs) |rel| {
         if (!relocNeedsThunk(rel)) continue;
 
-        const target = Atom.parseRelocTarget(macho_file, atom_index, rel);
+        const target = Atom.parseRelocTarget(macho_file, .{
+            .object_id = atom.getFile().?,
+            .rel = rel,
+            .code = code,
+            .base_offset = ctx.base_offset,
+            .base_addr = ctx.base_addr,
+        });
         if (isReachable(macho_file, atom_index, rel, base_offset, target, allocated)) continue;
 
         log.debug("{x}: source = {s}@{x}, target = {s}@{x} unreachable", .{

@@ -307,13 +307,12 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
                     },
                     else => unreachable,
                 }
-                const target = UnwindInfo.parseRelocTarget(
-                    macho_file,
-                    object_id,
-                    rel,
-                    rec.data,
-                    @intCast(i32, source_offset) + 4,
-                );
+                const target = Atom.parseRelocTarget(macho_file, .{
+                    .object_id = object_id,
+                    .rel = rel,
+                    .code = rec.data,
+                    .base_offset = @intCast(i32, source_offset) + 4,
+                });
                 return target;
             }
             return null;
@@ -330,13 +329,12 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
             const relocs = getRelocs(macho_file, object_id, ctx.source_offset);
 
             for (relocs) |rel| {
-                const target = UnwindInfo.parseRelocTarget(
-                    macho_file,
-                    object_id,
-                    rel,
-                    rec.data,
-                    @intCast(i32, ctx.source_offset) + 4,
-                );
+                const target = Atom.parseRelocTarget(macho_file, .{
+                    .object_id = object_id,
+                    .rel = rel,
+                    .code = rec.data,
+                    .base_offset = @intCast(i32, ctx.source_offset) + 4,
+                });
                 const rel_offset = @intCast(u32, rel.r_address - @intCast(i32, ctx.source_offset) - 4);
                 const source_addr = ctx.sect_addr + rel_offset + ctx.out_offset + 4;
 
