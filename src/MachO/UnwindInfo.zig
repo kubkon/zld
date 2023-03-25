@@ -215,13 +215,12 @@ pub fn scanRelocs(macho_file: *MachO) !void {
                     record_id,
                 )) |rel| {
                     // Personality function; add GOT pointer.
-                    const target = parseRelocTarget(
-                        macho_file,
-                        @intCast(u32, object_id),
-                        rel,
-                        mem.asBytes(&record),
-                        @intCast(i32, record_id * @sizeOf(macho.compact_unwind_entry)),
-                    );
+                    const target = Atom.parseRelocTarget(macho_file, .{
+                        .object_id = @intCast(u32, object_id),
+                        .rel = rel,
+                        .code = mem.asBytes(&record),
+                        .base_offset = @intCast(i32, record_id * @sizeOf(macho.compact_unwind_entry)),
+                    });
                     try Atom.addGotEntry(macho_file, target);
                 }
             }
@@ -263,13 +262,12 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
                         @intCast(u32, object_id),
                         record_id,
                     )) |rel| {
-                        const target = parseRelocTarget(
-                            macho_file,
-                            @intCast(u32, object_id),
-                            rel,
-                            mem.asBytes(&record),
-                            @intCast(i32, record_id * @sizeOf(macho.compact_unwind_entry)),
-                        );
+                        const target = Atom.parseRelocTarget(macho_file, .{
+                            .object_id = @intCast(u32, object_id),
+                            .rel = rel,
+                            .code = mem.asBytes(&record),
+                            .base_offset = @intCast(i32, record_id * @sizeOf(macho.compact_unwind_entry)),
+                        });
                         const personality_index = info.getPersonalityFunction(target) orelse inner: {
                             const personality_index = info.personalities_count;
                             info.personalities[personality_index] = target;
@@ -282,13 +280,12 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
                     }
 
                     if (getLsdaReloc(macho_file, @intCast(u32, object_id), record_id)) |rel| {
-                        const target = parseRelocTarget(
-                            macho_file,
-                            @intCast(u32, object_id),
-                            rel,
-                            mem.asBytes(&record),
-                            @intCast(i32, record_id * @sizeOf(macho.compact_unwind_entry)),
-                        );
+                        const target = Atom.parseRelocTarget(macho_file, .{
+                            .object_id = @intCast(u32, object_id),
+                            .rel = rel,
+                            .code = mem.asBytes(&record),
+                            .base_offset = @intCast(i32, record_id * @sizeOf(macho.compact_unwind_entry)),
+                        });
                         record.lsda = @bitCast(u64, target);
                     }
                 }
@@ -660,41 +657,6 @@ pub fn write(info: *UnwindInfo, macho_file: *MachO) !void {
     }
 
     try macho_file.base.file.pwriteAll(buffer.items, sect.offset);
-}
-
-pub fn parseRelocTarget(
-    macho_file: *MachO,
-    object_id: u32,
-    rel: macho.relocation_info,
-    code: []const u8,
-    base_offset: i32,
-) MachO.SymbolWithLoc {
-    const tracy = trace(@src());
-    defer tracy.end();
-
-    const object = &macho_file.objects.items[object_id];
-
-    const sym_index = if (rel.r_extern == 0) blk: {
-        const sect_id = @intCast(u8, rel.r_symbolnum - 1);
-        const rel_offset = @intCast(u32, rel.r_address - base_offset);
-        assert(rel.r_pcrel == 0 and rel.r_length == 3);
-        const address_in_section = mem.readIntLittle(u64, code[rel_offset..][0..8]);
-        const sym_index = object.getSymbolByAddress(address_in_section, sect_id);
-        break :blk sym_index;
-    } else object.reverse_symtab_lookup[rel.r_symbolnum];
-
-    const sym_loc = MachO.SymbolWithLoc{ .sym_index = sym_index, .file = object_id + 1 };
-    const sym = macho_file.getSymbol(sym_loc);
-
-    if (sym.sect() and !sym.ext()) {
-        // Make sure we are not dealing with a local alias.
-        const atom_index = object.getAtomIndexForSymbol(sym_index) orelse
-            return sym_loc;
-        const atom = macho_file.getAtom(atom_index);
-        return atom.getSymbolWithLoc();
-    } else if (object.getGlobal(sym_index)) |global_index| {
-        return macho_file.globals.items[global_index];
-    } else return sym_loc;
 }
 
 fn getRelocs(macho_file: *MachO, object_id: u32, record_id: usize) []const macho.relocation_info {

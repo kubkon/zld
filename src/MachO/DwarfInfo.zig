@@ -26,7 +26,7 @@ const CompileUnitIterator = struct {
     pub fn next(self: *CompileUnitIterator) !?CompileUnit {
         if (self.pos >= self.ctx.debug_info.len) return null;
 
-        var stream = std.io.fixedBufferStream(self.ctx.debug_info);
+        var stream = std.io.fixedBufferStream(self.ctx.debug_info[self.pos..]);
         var creader = std.io.countingReader(stream.reader());
         const reader = creader.reader();
 
@@ -35,7 +35,7 @@ const CompileUnitIterator = struct {
 
         const cu = CompileUnit{
             .cuh = cuh,
-            .debug_info_off = creader.bytes_read,
+            .debug_info_off = self.pos + creader.bytes_read,
         };
 
         self.pos += total_length;
@@ -184,7 +184,7 @@ const AbbrevEntryIterator = struct {
             return AbbrevEntry.null();
         }
 
-        const abbrev_pos = lookup.get(kind) orelse return error.MalformedDwarf;
+        const abbrev_pos = lookup.get(kind) orelse return null;
         const len = try findAbbrevEntrySize(
             self.ctx,
             abbrev_pos.pos,
@@ -282,21 +282,6 @@ pub const Attribute = struct {
             dwarf.FORM.data8 => mem.readIntLittle(u64, debug_info[0..8]),
             dwarf.FORM.udata => try leb.readULEB128(u64, reader),
             dwarf.FORM.sdata => try leb.readILEB128(i64, reader),
-            else => null,
-        };
-    }
-
-    pub fn getReference(self: Attribute, ctx: DwarfInfo) !?u64 {
-        const debug_info = self.getDebugInfo(ctx);
-        var stream = std.io.fixedBufferStream(debug_info);
-        const reader = stream.reader();
-
-        return switch (self.form) {
-            dwarf.FORM.ref1 => debug_info[0],
-            dwarf.FORM.ref2 => mem.readIntLittle(u16, debug_info[0..2]),
-            dwarf.FORM.ref4 => mem.readIntLittle(u32, debug_info[0..4]),
-            dwarf.FORM.ref8 => mem.readIntLittle(u64, debug_info[0..8]),
-            dwarf.FORM.ref_udata => try leb.readULEB128(u64, reader),
             else => null,
         };
     }
