@@ -303,7 +303,6 @@ pub const TestContext = struct {
                         .directory = std.fs.cwd(),
                         .sub_path = output_path,
                     },
-                    .target = case.target,
                     .output_mode = .exe,
                     .positionals = objects.items,
                     .libs = libs,

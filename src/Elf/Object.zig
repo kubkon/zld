@@ -39,7 +39,7 @@ pub fn deinit(self: *Object, allocator: Allocator) void {
     allocator.free(self.data);
 }
 
-pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch) !void {
+pub fn parse(self: *Object, allocator: Allocator) !void {
     var stream = std.io.fixedBufferStream(self.data);
     const reader = stream.reader();
 
@@ -62,18 +62,11 @@ pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch)
         return error.TODOElf32bitSupport;
     }
     if (self.header.e_type != elf.ET.REL) {
-        log.debug("Invalid file type {any}, expected ET.REL", .{self.header.e_type});
+        log.err("Invalid file type {any}, expected ET.REL", .{self.header.e_type});
         return error.NotObject;
     }
-    if (self.header.e_machine != cpu_arch.toElfMachine()) {
-        log.debug("Invalid architecture {any}, expected {any}", .{
-            self.header.e_machine,
-            cpu_arch.toElfMachine(),
-        });
-        return error.InvalidCpuArch;
-    }
     if (self.header.e_version != 1) {
-        log.debug("Invalid ELF version {d}, expected 1", .{self.header.e_version});
+        log.err("Invalid ELF version {d}, expected 1", .{self.header.e_version});
         return error.NotObject;
     }
 

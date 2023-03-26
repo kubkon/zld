@@ -7,7 +7,6 @@ const mem = std.mem;
 const process = std.process;
 
 const Allocator = mem.Allocator;
-const CrossTarget = std.zig.CrossTarget;
 const Elf = @import("../Elf.zig");
 const Zld = @import("../Zld.zig");
 
@@ -32,7 +31,6 @@ const usage =
 
 emit: Zld.Emit,
 output_mode: Zld.OutputMode,
-target: CrossTarget,
 positionals: []const Zld.LinkObject,
 libs: std.StringArrayHashMap(Zld.SystemLib),
 lib_dirs: []const []const u8,
@@ -130,7 +128,6 @@ pub fn parseArgs(arena: Allocator, ctx: Zld.MainCtx) !Options {
             .directory = std.fs.cwd(),
             .sub_path = out_path orelse "a.out",
         },
-        .target = CrossTarget.fromTarget(builtin.target),
         .output_mode = if (shared) .lib else .exe,
         .positionals = positionals.items,
         .libs = libs,

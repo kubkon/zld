@@ -171,7 +171,7 @@ fn getExtName(self: Archive, off: u32) []const u8 {
     return mem.sliceTo(@ptrCast([*:'\n']const u8, self.extnames_strtab.items.ptr + off), 0);
 }
 
-pub fn parseObject(self: Archive, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch, offset: u32) !Object {
+pub fn parseObject(self: Archive, allocator: Allocator, offset: u32) !Object {
     const reader = self.file.reader();
     try reader.context.seekTo(offset);
 
@@ -205,7 +205,7 @@ pub fn parseObject(self: Archive, allocator: Allocator, cpu_arch: std.Target.Cpu
         .data = data,
     };
 
-    try object.parse(allocator, cpu_arch);
+    try object.parse(allocator);
 
     return object;
 }

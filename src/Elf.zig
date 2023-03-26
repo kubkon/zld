@@ -24,11 +24,13 @@ pub const base_tag = Zld.Tag.elf;
 
 base: Zld,
 options: Options,
+cpu_arch: ?std.Target.Cpu.Arch = null,
+entry: ?u64 = 0,
+shoff: ?u64 = 0,
 
 archives: std.ArrayListUnmanaged(Archive) = .{},
 objects: std.ArrayListUnmanaged(Object) = .{},
 
-header: ?elf.Elf64_Ehdr = null,
 phdrs: std.ArrayListUnmanaged(elf.Elf64_Phdr) = .{},
 
 sections: std.MultiArrayList(Section) = .{},
@@ -260,13 +262,13 @@ pub fn flush(self: *Elf) !void {
             if (self.globals.get("__init_array_start")) |global| {
                 assert(global.file == null);
                 const sym = &self.locals.items[global.sym_index];
-                sym.st_value = self.header.?.e_entry;
+                sym.st_value = self.entry.?;
                 sym.st_shndx = self.text_sect_index.?;
             }
             if (self.globals.get("__init_array_end")) |global| {
                 assert(global.file == null);
                 const sym = &self.locals.items[global.sym_index];
-                sym.st_value = self.header.?.e_entry;
+                sym.st_value = self.entry.?;
                 sym.st_shndx = self.text_sect_index.?;
             }
         }
@@ -274,13 +276,13 @@ pub fn flush(self: *Elf) !void {
             if (self.globals.get("__fini_array_start")) |global| {
                 assert(global.file == null);
                 const sym = &self.locals.items[global.sym_index];
-                sym.st_value = self.header.?.e_entry;
+                sym.st_value = self.entry.?;
                 sym.st_shndx = self.text_sect_index.?;
             }
             if (self.globals.get("__fini_array_end")) |global| {
                 assert(global.file == null);
                 const sym = &self.locals.items[global.sym_index];
-                sym.st_value = self.header.?.e_entry;
+                sym.st_value = self.entry.?;
                 sym.st_shndx = self.text_sect_index.?;
             }
         }
@@ -303,40 +305,6 @@ pub fn flush(self: *Elf) !void {
 
 fn populateMetadata(self: *Elf) !void {
     const gpa = self.base.allocator;
-    if (self.header == null) {
-        var header = elf.Elf64_Ehdr{
-            .e_ident = undefined,
-            .e_type = switch (self.options.output_mode) {
-                .exe => elf.ET.EXEC,
-                .lib => elf.ET.DYN,
-            },
-            .e_machine = self.options.target.cpu_arch.?.toElfMachine(),
-            .e_version = 1,
-            .e_entry = 0,
-            .e_phoff = @sizeOf(elf.Elf64_Ehdr),
-            .e_shoff = 0,
-            .e_flags = 0,
-            .e_ehsize = @sizeOf(elf.Elf64_Ehdr),
-            .e_phentsize = @sizeOf(elf.Elf64_Phdr),
-            .e_phnum = 0,
-            .e_shentsize = @sizeOf(elf.Elf64_Shdr),
-            .e_shnum = 0,
-            .e_shstrndx = 0,
-        };
-        // Magic
-        mem.copy(u8, header.e_ident[0..4], "\x7fELF");
-        // Class
-        header.e_ident[4] = elf.ELFCLASS64;
-        // Endianness
-        header.e_ident[5] = elf.ELFDATA2LSB;
-        // ELF version
-        header.e_ident[6] = 1;
-        // OS ABI, often set to 0 regardless of target platform
-        // ABI Version, possibly used by glibc but not by static executables
-        // padding
-        mem.set(u8, header.e_ident[7..][0..9], 0);
-        self.header = header;
-    }
     if (self.phdr_seg_index == null) {
         const offset = @sizeOf(elf.Elf64_Ehdr);
         const size = @sizeOf(elf.Elf64_Phdr);
@@ -668,7 +636,6 @@ fn parseObject(self: *Elf, path: []const u8) !bool {
     defer file.close();
 
     const name = try gpa.dupe(u8, path);
-    const cpu_arch = self.options.target.cpu_arch.?;
     const file_stat = try file.stat();
     const file_size = math.cast(usize, file_stat.size) orelse return error.Overflow;
     const data = try file.readToEndAllocOptions(gpa, file_size, file_size, @alignOf(u64), null);
@@ -678,13 +645,25 @@ fn parseObject(self: *Elf, path: []const u8) !bool {
         .data = data,
     };
 
-    object.parse(gpa, cpu_arch) catch |err| switch (err) {
+    object.parse(gpa) catch |err| switch (err) {
         error.EndOfStream, error.NotObject => {
             object.deinit(self.base.allocator);
             return false;
         },
         else => |e| return e,
     };
+
+    if (self.cpu_arch == null) {
+        self.cpu_arch = object.header.e_machine.toTargetCpuArch().?;
+    }
+    const cpu_arch = self.cpu_arch.?;
+    if (cpu_arch != object.header.e_machine.toTargetCpuArch().?) {
+        log.err("Invalid architecture {any}, expected {any}", .{
+            object.header.e_machine,
+            cpu_arch.toElfMachine(),
+        });
+        return error.InvalidCpuArch;
+    }
 
     try self.objects.append(gpa, object);
 
@@ -810,11 +789,15 @@ fn resolveSymbolsInArchives(self: *Elf) !void {
             assert(offsets.items.len > 0);
 
             const object_id = @intCast(u16, self.objects.items.len);
-            const object = try archive.parseObject(
-                self.base.allocator,
-                self.options.target.cpu_arch.?,
-                offsets.items[0],
-            );
+            const object = try archive.parseObject(self.base.allocator, offsets.items[0]);
+            const cpu_arch = self.cpu_arch.?;
+            if (cpu_arch != object.header.e_machine.toTargetCpuArch().?) {
+                log.err("Invalid architecture {any}, expected {any}", .{
+                    object.header.e_machine,
+                    cpu_arch.toElfMachine(),
+                });
+                return error.InvalidCpuArch;
+            }
             try self.objects.append(self.base.allocator, object);
             try self.resolveSymbolsInObject(object_id);
 
@@ -1257,7 +1240,7 @@ fn setEntryPoint(self: *Elf) !void {
     if (self.options.output_mode != .exe) return;
     const global = try self.getEntryPoint();
     const sym = self.getSymbol(global);
-    self.header.?.e_entry = sym.st_value;
+    self.entry = sym.st_value;
 }
 
 fn setStackSize(self: *Elf) !void {
@@ -1388,12 +1371,10 @@ fn writeShStrtab(self: *Elf) !void {
 }
 
 fn writePhdrs(self: *Elf) !void {
+    const phoff = @sizeOf(elf.Elf64_Ehdr);
     const phdrs_size = self.phdrs.items.len * @sizeOf(elf.Elf64_Phdr);
-    log.debug("writing program headers from 0x{x} to 0x{x}", .{
-        self.header.?.e_phoff,
-        self.header.?.e_phoff + phdrs_size,
-    });
-    try self.base.file.pwriteAll(mem.sliceAsBytes(self.phdrs.items), self.header.?.e_phoff);
+    log.debug("writing program headers from 0x{x} to 0x{x}", .{ phoff, phoff + phdrs_size });
+    try self.base.file.pwriteAll(mem.sliceAsBytes(self.phdrs.items), phoff);
 }
 
 fn writeShdrs(self: *Elf) !void {
@@ -1403,21 +1384,46 @@ fn writeShdrs(self: *Elf) !void {
         break :blk shdr.sh_offset + shdr.sh_size;
     };
     const shdrs_size = self.sections.items(.shdr).len * @sizeOf(elf.Elf64_Shdr);
-    const e_shoff = mem.alignForwardGeneric(u64, offset, @alignOf(elf.Elf64_Shdr));
-    log.debug("writing section headers from 0x{x} to 0x{x}", .{
-        e_shoff,
-        e_shoff + shdrs_size,
-    });
-    try self.base.file.pwriteAll(mem.sliceAsBytes(self.sections.items(.shdr)), e_shoff);
-    self.header.?.e_shoff = e_shoff;
+    const shoff = mem.alignForwardGeneric(u64, offset, @alignOf(elf.Elf64_Shdr));
+    log.debug("writing section headers from 0x{x} to 0x{x}", .{ shoff, shoff + shdrs_size });
+    try self.base.file.pwriteAll(mem.sliceAsBytes(self.sections.items(.shdr)), shoff);
+    self.shoff = shoff;
 }
 
 fn writeHeader(self: *Elf) !void {
-    self.header.?.e_shstrndx = self.shstrtab_sect_index.?;
-    self.header.?.e_phnum = @intCast(u16, self.phdrs.items.len);
-    self.header.?.e_shnum = @intCast(u16, self.sections.items(.shdr).len);
-    log.debug("writing ELF header {} at 0x{x}", .{ self.header.?, 0 });
-    try self.base.file.pwriteAll(mem.asBytes(&self.header.?), 0);
+    var header = elf.Elf64_Ehdr{
+        .e_ident = undefined,
+        .e_type = switch (self.options.output_mode) {
+            .exe => elf.ET.EXEC,
+            .lib => elf.ET.DYN,
+        },
+        .e_machine = self.cpu_arch.?.toElfMachine(),
+        .e_version = 1,
+        .e_entry = self.entry.?,
+        .e_phoff = @sizeOf(elf.Elf64_Ehdr),
+        .e_shoff = self.shoff.?,
+        .e_flags = 0,
+        .e_ehsize = @sizeOf(elf.Elf64_Ehdr),
+        .e_phentsize = @sizeOf(elf.Elf64_Phdr),
+        .e_phnum = @intCast(u16, self.phdrs.items.len),
+        .e_shentsize = @sizeOf(elf.Elf64_Shdr),
+        .e_shnum = @intCast(u16, self.sections.items(.shdr).len),
+        .e_shstrndx = self.shstrtab_sect_index.?,
+    };
+    // Magic
+    mem.copy(u8, header.e_ident[0..4], "\x7fELF");
+    // Class
+    header.e_ident[4] = elf.ELFCLASS64;
+    // Endianness
+    header.e_ident[5] = elf.ELFDATA2LSB;
+    // ELF version
+    header.e_ident[6] = 1;
+    // OS ABI, often set to 0 regardless of target platform
+    // ABI Version, possibly used by glibc but not by static executables
+    // padding
+    mem.set(u8, header.e_ident[7..][0..9], 0);
+    log.debug("writing ELF header {} at 0x{x}", .{ header, 0 });
+    try self.base.file.pwriteAll(mem.asBytes(&header), 0);
 }
 
 pub fn getSectionByName(self: *Elf, name: []const u8) ?u16 {
