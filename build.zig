@@ -13,7 +13,7 @@ pub fn build(b: *Builder) void {
     const target = b.standardTargetOptions(.{});
     const mode = b.standardOptimizeOption(.{});
 
-    const enable_logging = b.option(bool, "log", "Whether to enable logging") orelse false;
+    const enable_logging = b.option(bool, "log", "Whether to enable logging") orelse (mode == .Debug);
     const is_qemu_enabled = b.option(bool, "enable-qemu", "Use QEMU to run cross compiled foreign architecture tests") orelse false;
     const enable_tracy = b.option([]const u8, "tracy", "Enable Tracy integration. Supply path to Tracy source");
 
