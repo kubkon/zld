@@ -149,6 +149,9 @@ const SymbolResolver = struct {
 /// Default path to dyld
 const default_dyld_path: [*:0]const u8 = "/usr/lib/dyld";
 
+/// Default implicit entrypoint symbol name.
+const default_entry_point: []const u8 = "_main";
+
 /// Default virtual memory offset corresponds to the size of __PAGEZERO segment and
 /// start of __TEXT segment.
 const default_pagezero_vmsize: u64 = 0x100000000;
@@ -352,11 +355,8 @@ pub fn flush(self: *MachO) !void {
     }
 
     if (self.options.output_mode == .exe) {
-        const entry_name = self.options.entry orelse "_main";
-        const global_index = resolver.table.get(entry_name) orelse {
-            log.err("entrypoint '{s}' not found", .{entry_name});
-            return error.MissingMainEntrypoint;
-        };
+        const entry_name = self.options.entry orelse default_entry_point;
+        const global_index = resolver.table.get(entry_name).?; // Error was flagged earlier
         self.entry_index = global_index;
     }
 
@@ -1474,6 +1474,21 @@ fn resolveSymbols(self: *MachO, resolver: *SymbolResolver) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
+    // We add the specified entrypoint as the first unresolved symbols so that
+    // we search for it in libraries should there be no object files specified
+    // on the linker line.
+    if (self.options.output_mode == .exe) {
+        const entry_name = self.options.entry orelse default_entry_point;
+        const sym_index = try self.allocateSymbol();
+        const sym_loc = SymbolWithLoc{ .sym_index = sym_index };
+        const sym = self.getSymbolPtr(sym_loc);
+        sym.n_strx = try self.strtab.insert(self.base.allocator, entry_name);
+        sym.n_type = macho.N_UNDF | macho.N_EXT;
+        const global_index = try self.addGlobal(sym_loc);
+        try resolver.table.putNoClobber(entry_name, global_index);
+        try resolver.unresolved.putNoClobber(global_index, {});
+    }
+
     for (self.objects.items, 0..) |_, object_id| {
         try self.resolveSymbolsInObject(@intCast(u16, object_id), resolver);
     }
@@ -1529,9 +1544,7 @@ fn resolveSymbolsInObject(self: *MachO, object_id: u16, resolver: *SymbolResolve
         const sym_loc = SymbolWithLoc{ .sym_index = sym_index, .file = object_id + 1 };
 
         const global_index = resolver.table.get(sym_name) orelse {
-            const gpa = self.base.allocator;
-            const global_index = @intCast(u32, self.globals.items.len);
-            try self.globals.append(gpa, sym_loc);
+            const global_index = try self.addGlobal(sym_loc);
             try resolver.table.putNoClobber(sym_name, global_index);
             if (sym.undf() and !sym.tentative()) {
                 try resolver.unresolved.putNoClobber(global_index, {});
@@ -1588,8 +1601,10 @@ fn resolveSymbolsInObject(self: *MachO, object_id: u16, resolver: *SymbolResolve
         };
 
         if (update_global) {
-            const global_object = &self.objects.items[global.getFile().?];
-            global_object.globals_lookup[global.sym_index] = global_index;
+            if (global.getFile()) |file| {
+                const global_object = &self.objects.items[file];
+                global_object.globals_lookup[global.sym_index] = global_index;
+            }
             _ = resolver.unresolved.swapRemove(resolver.table.get(sym_name).?);
             global.* = sym_loc;
         } else {
@@ -1724,9 +1739,7 @@ fn createMhExecuteHeaderSymbol(self: *MachO, resolver: *SymbolResolver) !void {
         global.* = sym_loc;
         self.mh_execute_header_index = global_index;
     } else {
-        const global_index = @intCast(u32, self.globals.items.len);
-        try self.globals.append(gpa, sym_loc);
-        self.mh_execute_header_index = global_index;
+        self.mh_execute_header_index = try self.addGlobal(sym_loc);
     }
 }
 
@@ -1906,6 +1919,12 @@ pub fn allocateSymbol(self: *MachO) !u32 {
         .n_value = 0,
     };
     return index;
+}
+
+fn addGlobal(self: *MachO, sym_loc: SymbolWithLoc) !u32 {
+    const global_index = @intCast(u32, self.globals.items.len);
+    try self.globals.append(self.base.allocator, sym_loc);
+    return global_index;
 }
 
 fn allocateSpecialSymbols(self: *MachO) !void {
