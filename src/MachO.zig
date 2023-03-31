@@ -370,6 +370,16 @@ pub fn flush(self: *MachO) !void {
     try self.createTentativeDefAtoms();
     try self.createStubHelperPreambleAtom();
 
+    if (self.options.output_mode == .exe) {
+        const global = self.getEntryPoint();
+        if (self.getSymbol(global).undf()) {
+            // We do one additional check here in case the entry point was found in one of the dylibs.
+            // (I actually have no idea what this would imply but it is a possible outcome and so we
+            // support it.)
+            try Atom.addStub(self, global);
+        }
+    }
+
     for (self.objects.items) |object| {
         for (object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index);
@@ -480,8 +490,18 @@ pub fn flush(self: *MachO) !void {
         const seg = self.segments.items[seg_id];
         const global = self.getEntryPoint();
         const sym = self.getSymbol(global);
+
+        const addr: u64 = if (sym.undf()) blk: {
+            // In this case, the symbol has been resolved in one of dylibs and so we point
+            // to the stub as its vmaddr value.
+            const stub_atom_index = self.getStubsAtomIndexForSymbol(global).?;
+            const stub_atom = self.getAtom(stub_atom_index);
+            const stub_sym = self.getSymbol(stub_atom.getSymbolWithLoc());
+            break :blk stub_sym.n_value;
+        } else sym.n_value;
+
         try lc_writer.writeStruct(macho.entry_point_command{
-            .entryoff = @intCast(u32, sym.n_value - seg.vmaddr),
+            .entryoff = @intCast(u32, addr - seg.vmaddr),
             .stacksize = self.options.stack_size orelse 0,
         });
     } else {
