@@ -12,11 +12,12 @@ const AtomIndex = MachO.AtomIndex;
 const Atom = @import("Atom.zig");
 const MachO = @import("../MachO.zig");
 const SymbolWithLoc = MachO.SymbolWithLoc;
+const SymbolResolver = MachO.SymbolResolver;
 const UnwindInfo = @import("UnwindInfo.zig");
 
 const AtomTable = std.AutoHashMap(AtomIndex, void);
 
-pub fn gcAtoms(macho_file: *MachO) !void {
+pub fn gcAtoms(macho_file: *MachO, resolver: *const SymbolResolver) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -31,12 +32,25 @@ pub fn gcAtoms(macho_file: *MachO) !void {
     var alive = AtomTable.init(arena.allocator());
     try alive.ensureTotalCapacity(@intCast(u32, macho_file.atoms.items.len));
 
-    try collectRoots(macho_file, &roots);
+    try collectRoots(macho_file, &roots, resolver);
     try mark(macho_file, roots, &alive);
     prune(macho_file, alive);
 }
 
-fn collectRoots(macho_file: *MachO, roots: *AtomTable) !void {
+fn addRoot(macho_file: *MachO, roots: *AtomTable, file: u32, sym_loc: SymbolWithLoc) !void {
+    const sym = macho_file.getSymbol(sym_loc);
+    assert(!sym.undf());
+    const object = &macho_file.objects.items[file];
+    const atom_index = object.getAtomIndexForSymbol(sym_loc.sym_index).?; // panic here means fatal error
+    log.debug("root(ATOM({d}, %{d}, {d}))", .{
+        atom_index,
+        macho_file.getAtom(atom_index).sym_index,
+        file,
+    });
+    _ = try roots.getOrPut(atom_index);
+}
+
+fn collectRoots(macho_file: *MachO, roots: *AtomTable, resolver: *const SymbolResolver) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -48,15 +62,11 @@ fn collectRoots(macho_file: *MachO, roots: *AtomTable) !void {
         .exe => {
             // Add entrypoint as GC root
             const global: SymbolWithLoc = macho_file.getEntryPoint();
-            const object = macho_file.objects.items[global.getFile().?];
-            const atom_index = object.getAtomIndexForSymbol(global.sym_index).?; // panic here means fatal error
-            _ = try roots.getOrPut(atom_index);
-
-            log.debug("root(ATOM({d}, %{d}, {?d}))", .{
-                atom_index,
-                macho_file.getAtom(atom_index).sym_index,
-                macho_file.getAtom(atom_index).getFile(),
-            });
+            if (global.getFile()) |file| {
+                try addRoot(macho_file, roots, file, global);
+            } else {
+                assert(macho_file.getSymbol(global).undf()); // Stub as our entrypoint is in a dylib.
+            }
         },
         else => |other| {
             assert(other == .lib);
@@ -65,18 +75,20 @@ fn collectRoots(macho_file: *MachO, roots: *AtomTable) !void {
                 const sym = macho_file.getSymbol(global);
                 if (sym.undf()) continue;
 
-                const file = global.getFile() orelse continue; // synthetic globals are atomless
-                const object = macho_file.objects.items[file];
-                const atom_index = object.getAtomIndexForSymbol(global.sym_index).?; // panic here means fatal error
-                _ = try roots.getOrPut(atom_index);
-
-                log.debug("root(ATOM({d}, %{d}, {?d}))", .{
-                    atom_index,
-                    macho_file.getAtom(atom_index).sym_index,
-                    macho_file.getAtom(atom_index).getFile(),
-                });
+                if (global.getFile()) |file| {
+                    try addRoot(macho_file, roots, file, global);
+                }
             }
         },
+    }
+
+    // Add all symbols force-defined by the user.
+    for (macho_file.options.force_undefined_symbols.keys()) |sym_name| {
+        const global_index = resolver.table.get(sym_name).?;
+        const global = macho_file.globals.items[global_index];
+        const sym = macho_file.getSymbol(global);
+        assert(!sym.undf());
+        try addRoot(macho_file, roots, global.getFile().?, global);
     }
 
     for (macho_file.objects.items) |object| {

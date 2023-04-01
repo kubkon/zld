@@ -391,7 +391,7 @@ pub fn addGotEntry(macho_file: *MachO, target: MachO.SymbolWithLoc) !void {
     try macho_file.got_table.putNoClobber(gpa, target, got_index);
 }
 
-fn addStub(macho_file: *MachO, target: MachO.SymbolWithLoc) !void {
+pub fn addStub(macho_file: *MachO, target: MachO.SymbolWithLoc) !void {
     const target_sym = macho_file.getSymbol(target);
     if (!target_sym.undf()) return;
     if (macho_file.stubs_table.contains(target)) return;
