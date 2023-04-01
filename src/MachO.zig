@@ -140,7 +140,7 @@ pub const SymbolWithLoc = extern struct {
     }
 };
 
-const SymbolResolver = struct {
+pub const SymbolResolver = struct {
     arena: Allocator,
     table: std.StringHashMap(u32),
     unresolved: std.AutoArrayHashMap(u32, void),
@@ -363,7 +363,7 @@ pub fn flush(self: *MachO) !void {
     try self.splitIntoAtoms();
 
     if (self.options.dead_strip) {
-        try dead_strip.gcAtoms(self);
+        try dead_strip.gcAtoms(self, &resolver);
     }
 
     try self.createDyldPrivateAtom();
@@ -1490,6 +1490,17 @@ fn createTentativeDefAtoms(self: *MachO) !void {
     }
 }
 
+fn forceSymbolDefined(self: *MachO, name: []const u8, resolver: *SymbolResolver) !void {
+    const sym_index = try self.allocateSymbol();
+    const sym_loc = SymbolWithLoc{ .sym_index = sym_index };
+    const sym = self.getSymbolPtr(sym_loc);
+    sym.n_strx = try self.strtab.insert(self.base.allocator, name);
+    sym.n_type = macho.N_UNDF | macho.N_EXT;
+    const global_index = try self.addGlobal(sym_loc);
+    try resolver.table.putNoClobber(name, global_index);
+    try resolver.unresolved.putNoClobber(global_index, {});
+}
+
 fn resolveSymbols(self: *MachO, resolver: *SymbolResolver) !void {
     const tracy = trace(@src());
     defer tracy.end();
@@ -1499,14 +1510,12 @@ fn resolveSymbols(self: *MachO, resolver: *SymbolResolver) !void {
     // on the linker line.
     if (self.options.output_mode == .exe) {
         const entry_name = self.options.entry orelse default_entry_point;
-        const sym_index = try self.allocateSymbol();
-        const sym_loc = SymbolWithLoc{ .sym_index = sym_index };
-        const sym = self.getSymbolPtr(sym_loc);
-        sym.n_strx = try self.strtab.insert(self.base.allocator, entry_name);
-        sym.n_type = macho.N_UNDF | macho.N_EXT;
-        const global_index = try self.addGlobal(sym_loc);
-        try resolver.table.putNoClobber(entry_name, global_index);
-        try resolver.unresolved.putNoClobber(global_index, {});
+        try self.forceSymbolDefined(entry_name, resolver);
+    }
+
+    // Force resolution of any symbols requested by the user.
+    for (self.options.force_undefined_symbols.keys()) |sym_name| {
+        try self.forceSymbolDefined(sym_name, resolver);
     }
 
     for (self.objects.items, 0..) |_, object_id| {

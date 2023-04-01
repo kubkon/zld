@@ -251,6 +251,7 @@ pub const TestContext = struct {
             var lib_dirs = std.ArrayList([]const u8).init(arena);
             var frameworks = std.StringArrayHashMap(Zld.SystemLib).init(arena);
             var framework_dirs = std.ArrayList([]const u8).init(arena);
+            var force_undefined_symbols = std.StringArrayHashMap(void).init(arena);
 
             const host = try std.zig.system.NativeTargetInfo.detect(.{});
             const target_info = try std.zig.system.NativeTargetInfo.detect(case.target);
@@ -297,6 +298,7 @@ pub const TestContext = struct {
                     .framework_dirs = framework_dirs.items,
                     .rpath_list = &[0][]const u8{},
                     .dead_strip = true,
+                    .force_undefined_symbols = force_undefined_symbols,
                 } },
                 .elf => .{ .elf = .{
                     .emit = .{

@@ -46,6 +46,9 @@ const usage =
     \\-e [name]
     \\    Specifies the entry point of main executable
     \\
+    \\-u [name]
+    \\    Specifies symbol which has to be resolved at link time for the link to succeed.
+    \\
     \\-force_load [path]
     \\    Loads all members of the specified static archive library
     \\
@@ -144,6 +147,7 @@ syslibroot: ?[]const u8 = null,
 stack_size: ?u64 = null,
 strip: bool = false,
 entry: ?[]const u8 = null,
+force_undefined_symbols: std.StringArrayHashMap(void),
 current_version: ?std.builtin.Version = null,
 compatibility_version: ?std.builtin.Version = null,
 install_name: ?[]const u8 = null,
@@ -181,6 +185,7 @@ pub fn parseArgs(arena: Allocator, ctx: Zld.MainCtx) !Options {
     var dead_strip: bool = false;
     var dead_strip_dylibs: bool = false;
     var entry: ?[]const u8 = null;
+    var force_undefined_symbols = std.StringArrayHashMap(void).init(arena);
     var strip: bool = false;
     var allow_undef: bool = false;
     var search_strategy: ?SearchStrategy = null;
@@ -293,6 +298,9 @@ pub fn parseArgs(arena: Allocator, ctx: Zld.MainCtx) !Options {
             dead_strip_dylibs = true;
         } else if (mem.eql(u8, arg, "-e")) {
             entry = args_iter.next() orelse ctx.printFailure("Expected symbol name after {s}", .{arg});
+        } else if (mem.eql(u8, arg, "-u")) {
+            const symbol_name = args_iter.next() orelse ctx.printFailure("Expected symbol name after {s}", .{arg});
+            try force_undefined_symbols.put(symbol_name, {});
         } else if (mem.eql(u8, arg, "-S")) {
             strip = true;
         } else if (mem.eql(u8, arg, "-force_load")) {
@@ -476,6 +484,7 @@ pub fn parseArgs(arena: Allocator, ctx: Zld.MainCtx) !Options {
         .headerpad_max_install_names = headerpad_max_install_names,
         .pagezero_size = pagezero_size,
         .entry = entry,
+        .force_undefined_symbols = force_undefined_symbols,
         .strip = strip,
         .allow_undef = allow_undef,
         .search_strategy = search_strategy,
