@@ -3,13 +3,8 @@ const fs = std.fs;
 const log = std.log;
 
 const Allocator = std.mem.Allocator;
-const Builder = std.build.Builder;
-const FileSource = std.build.FileSource;
-const LibExeObjStep = std.build.LibExeObjStep;
-const InstallDir = std.build.InstallDir;
-const Step = std.build.Step;
 
-pub fn build(b: *Builder) void {
+pub fn build(b: *std.Build.Builder) void {
     const target = b.standardTargetOptions(.{});
     const mode = b.standardOptimizeOption(.{});
 
@@ -59,18 +54,15 @@ pub fn build(b: *Builder) void {
             exe.linkSystemLibrary("ws2_32");
         }
     }
-    exe.install();
-
-    const gen_symlinks = symlinks(b, exe, &[_][]const u8{
+    const install = b.addInstallArtifact(exe);
+    const symlinks = addSymlinks(b, install, &[_][]const u8{
         "ld.zld",
         "ld",
         "ld64.zld",
         "ld64",
         "wasm-zld",
     });
-    if (exe.install_step) |install_step| {
-        gen_symlinks.step.dependOn(&install_step.step);
-    }
+    symlinks.step.dependOn(&install.step);
 
     const tests = b.addTest(.{
         .root_source_file = .{ .path = "src/test.zig" },
@@ -85,11 +77,15 @@ pub fn build(b: *Builder) void {
     test_opts.addOption(bool, "enable_logging", enable_logging);
 
     const test_step = b.step("test", "Run library and end-to-end tests");
-    test_step.dependOn(&tests.run().step);
+    test_step.dependOn(&b.addRunArtifact(tests).step);
 }
 
-fn symlinks(builder: *Builder, exe: *LibExeObjStep, names: []const []const u8) *CreateSymlinksStep {
-    const step = CreateSymlinksStep.create(builder, exe.getOutputSource(), names);
+fn addSymlinks(
+    builder: *std.Build.Builder,
+    install: *std.Build.InstallArtifactStep,
+    names: []const []const u8,
+) *CreateSymlinksStep {
+    const step = CreateSymlinksStep.create(builder, install, names);
     builder.getInstallStep().dependOn(&step.step);
     return step;
 }
@@ -97,31 +93,35 @@ fn symlinks(builder: *Builder, exe: *LibExeObjStep, names: []const []const u8) *
 const CreateSymlinksStep = struct {
     pub const base_id = .custom;
 
-    step: Step,
-    builder: *Builder,
-    source: FileSource,
+    step: std.Build.Step,
+    builder: *std.Build.Builder,
+    install: *std.Build.InstallArtifactStep,
     targets: []const []const u8,
 
     pub fn create(
-        builder: *Builder,
-        source: FileSource,
+        builder: *std.Build.Builder,
+        install: *std.Build.InstallArtifactStep,
         targets: []const []const u8,
     ) *CreateSymlinksStep {
         const self = builder.allocator.create(CreateSymlinksStep) catch unreachable;
         self.* = CreateSymlinksStep{
             .builder = builder,
-            .step = Step.init(.{ .id = .custom, .name = builder.fmt("symlinks to {s}", .{
-                source.getDisplayName(),
-            }), .owner = builder, .makeFn = make }),
-            .source = source,
+            .step = std.Build.Step.init(.{
+                .id = .custom,
+                .name = builder.fmt("symlinks to {s}", .{install.artifact.name}),
+                .owner = builder,
+                .makeFn = make,
+            }),
+            .install = install,
             .targets = builder.dupeStrings(targets),
         };
         return self;
     }
 
-    fn make(step: *Step, prog_node: *std.Progress.Node) anyerror!void {
+    fn make(step: *std.Build.Step, prog_node: *std.Progress.Node) anyerror!void {
         const self = @fieldParentPtr(CreateSymlinksStep, "step", step);
-        const rel_source = fs.path.basename(self.source.getPath(self.builder));
+        const install_path = self.install.artifact.getOutputSource().getPath(self.builder);
+        const rel_source = fs.path.basename(install_path);
 
         var node = prog_node.start("creating symlinks", self.targets.len);
         node.activate();
