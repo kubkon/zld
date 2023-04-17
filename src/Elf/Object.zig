@@ -273,9 +273,9 @@ pub fn splitIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
                                 const inst = maybe_inst orelse break :opt;
 
                                 // TODO can we optimise anything that isn't an RM encoding?
-                                if (inst.encoding.op_en != .rm) break :opt;
-                                if (inst.op2 != .mem) break :opt;
-                                if (inst.op2.mem != .rip) break :opt;
+                                if (inst.encoding.data.op_en != .rm) break :opt;
+                                if (inst.ops[1] != .mem) break :opt;
+                                if (inst.ops[1].mem != .rip) break :opt;
 
                                 var stream = std.io.fixedBufferStream(code[rel.r_offset - 3 ..][0..7]);
                                 const writer = stream.writer();
@@ -283,11 +283,7 @@ pub fn splitIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
                                 switch (inst.encoding.mnemonic) {
                                     .mov => {
                                         // rewrite to LEA
-                                        const new_inst = try Instruction.new(.lea, .{
-                                            .prefix = inst.prefix,
-                                            .op1 = inst.op1,
-                                            .op2 = inst.op2,
-                                        });
+                                        const new_inst = try Instruction.new(inst.prefix, .lea, &inst.ops);
                                         try new_inst.encode(writer);
                                         const r_sym = rel.r_sym();
                                         rel.r_info = (@intCast(u64, r_sym) << 32) | elf.R_X86_64_PC32;
@@ -297,11 +293,10 @@ pub fn splitIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
                                     },
                                     .cmp => {
                                         // rewrite to CMP MI encoding
-                                        const new_inst = try Instruction.new(.cmp, .{
-                                            .prefix = inst.prefix,
-                                            .op1 = inst.op1,
+                                        const new_inst = try Instruction.new(inst.prefix, .cmp, &.{
+                                            inst.ops[0],
                                             // TODO: hack to force imm32s in the assembler
-                                            .op2 = .{ .imm = Immediate.s(-129) },
+                                            .{ .imm = Immediate.s(-129) },
                                         });
                                         try new_inst.encode(writer);
 
@@ -341,9 +336,9 @@ pub fn splitIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
                                 const maybe_inst = disassembler.next() catch break :blk;
                                 const inst = maybe_inst orelse break :blk;
 
-                                if (inst.encoding.op_en != .rm) break :blk;
-                                if (inst.op2 != .mem) break :blk;
-                                if (inst.op2.mem != .rip) break :blk;
+                                if (inst.encoding.data.op_en != .rm) break :blk;
+                                if (inst.ops[1] != .mem) break :blk;
+                                if (inst.ops[1].mem != .rip) break :blk;
 
                                 var stream = std.io.fixedBufferStream(code[rel.r_offset - 3 ..][0..7]);
                                 const writer = stream.writer();
@@ -351,11 +346,10 @@ pub fn splitIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
                                 switch (inst.encoding.mnemonic) {
                                     .mov => {
                                         // rewrite to MOV MI encoding
-                                        const new_inst = try Instruction.new(.mov, .{
-                                            .prefix = inst.prefix,
-                                            .op1 = inst.op1,
+                                        const new_inst = try Instruction.new(inst.prefix, .mov, &.{
+                                            inst.ops[0],
                                             // TODO: hack to force imm32s in the assembler
-                                            .op2 = .{ .imm = Immediate.s(-129) },
+                                            .{ .imm = Immediate.s(-129) },
                                         });
                                         try new_inst.encode(writer);
 

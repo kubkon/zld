@@ -890,18 +890,14 @@ fn resolveRelocsX86(
                     // We need to rewrite the opcode from movq to leaq.
                     var disassembler = Disassembler.init(atom_code[rel_offset - 3 ..]);
                     var inst = (try disassembler.next()) orelse unreachable;
-                    assert(inst.encoding.op_en == .rm);
+                    assert(inst.encoding.data.op_en == .rm);
                     assert(inst.encoding.mnemonic == .mov);
-                    inst.op2.mem.rip.disp = disp;
+                    inst.ops[1].mem.rip.disp = disp;
 
                     var stream = std.io.fixedBufferStream(atom_code[rel_offset - 3 ..][0..7]);
                     const writer = stream.writer();
 
-                    const new_inst = try Instruction.new(.lea, .{
-                        .prefix = inst.prefix,
-                        .op1 = inst.op1,
-                        .op2 = inst.op2,
-                    });
+                    const new_inst = try Instruction.new(inst.prefix, .lea, &inst.ops);
                     try new_inst.encode(writer);
                 } else {
                     mem.writeIntLittle(i32, atom_code[rel_offset..][0..4], disp);
