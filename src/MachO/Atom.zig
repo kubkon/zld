@@ -889,26 +889,19 @@ fn resolveRelocsX86(
                 if (macho_file.tlv_ptr_table.get(target) == null) {
                     // We need to rewrite the opcode from movq to leaq.
                     var disassembler = Disassembler.init(atom_code[rel_offset - 3 ..]);
-                    const inst = (try disassembler.next()) orelse unreachable;
-                    assert(inst.enc == .rm);
-                    assert(inst.tag == .mov);
-                    const rm = inst.data.rm;
-                    const dst = rm.reg;
-                    const src = rm.reg_or_mem.mem;
+                    var inst = (try disassembler.next()) orelse unreachable;
+                    assert(inst.encoding.op_en == .rm);
+                    assert(inst.encoding.mnemonic == .mov);
+                    inst.op2.mem.rip.disp = disp;
 
                     var stream = std.io.fixedBufferStream(atom_code[rel_offset - 3 ..][0..7]);
                     const writer = stream.writer();
 
-                    const new_inst = Instruction{
-                        .tag = .lea,
-                        .enc = .rm,
-                        .data = Instruction.Data.rm(dst, RegisterOrMemory.mem(.{
-                            .ptr_size = src.ptr_size,
-                            .scale_index = src.scale_index,
-                            .base = src.base,
-                            .disp = disp,
-                        })),
-                    };
+                    const new_inst = try Instruction.new(.lea, .{
+                        .prefix = inst.prefix,
+                        .op1 = inst.op1,
+                        .op2 = inst.op2,
+                    });
                     try new_inst.encode(writer);
                 } else {
                     mem.writeIntLittle(i32, atom_code[rel_offset..][0..4], disp);

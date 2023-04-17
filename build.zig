@@ -12,11 +12,11 @@ pub fn build(b: *std.Build.Builder) void {
     const is_qemu_enabled = b.option(bool, "enable-qemu", "Use QEMU to run cross compiled foreign architecture tests") orelse false;
     const enable_tracy = b.option([]const u8, "tracy", "Enable Tracy integration. Supply path to Tracy source");
 
-    const dis_x86_64 = b.addModule("dis_x86_64", .{
-        .source_file = .{ .path = "zig-dis-x86_64/src/dis_x86_64.zig" },
-    });
-
     const yaml = b.dependency("zig-yaml", .{
+        .target = target,
+        .optimize = mode,
+    });
+    const dis_x86_64 = b.dependency("zig-dis-x86_64", .{
         .target = target,
         .optimize = mode,
     });
@@ -28,7 +28,7 @@ pub fn build(b: *std.Build.Builder) void {
         .optimize = mode,
     });
     exe.addModule("yaml", yaml.module("yaml"));
-    exe.addModule("dis_x86_64", dis_x86_64);
+    exe.addModule("dis_x86_64", dis_x86_64.module("dis_x86_64"));
     exe.linkLibC();
 
     const exe_opts = b.addOptions();
@@ -75,7 +75,7 @@ pub fn build(b: *std.Build.Builder) void {
         .optimize = mode,
     });
     tests.addModule("yaml", yaml.module("yaml"));
-    tests.addModule("dis_x86_64", dis_x86_64);
+    tests.addModule("dis_x86_64", dis_x86_64.module("dis_x86_64"));
     tests.main_pkg_path = "."; // set root directory as main package path for our tests
 
     const test_opts = b.addOptions();
