@@ -4,7 +4,7 @@ const mem = std.mem;
 const log = std.log.scoped(.tapi);
 
 const Allocator = mem.Allocator;
-const Yaml = @import("tapi/yaml.zig").Yaml;
+const Yaml = @import("yaml").Yaml;
 
 const VersionField = union(enum) {
     string: []const u8,

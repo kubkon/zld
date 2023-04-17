@@ -15,7 +15,7 @@ const Elf = @import("../Elf.zig");
 const dis_x86_64 = @import("dis_x86_64");
 const Disassembler = dis_x86_64.Disassembler;
 const Instruction = dis_x86_64.Instruction;
-const RegisterOrMemory = dis_x86_64.RegisterOrMemory;
+const Immediate = dis_x86_64.Immediate;
 
 name: []const u8,
 data: []align(@alignOf(u64)) const u8,
@@ -156,7 +156,7 @@ pub fn splitIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
             const ndx = @intCast(u16, i);
             const shdr_name = self.getShString(shdr.sh_name);
 
-            log.debug("  parsing section '{s}'", .{shdr_name});
+            log.debug("parsing section '{s}'", .{shdr_name});
 
             const tshdr_ndx = (try elf_file.getOutputSection(shdr, shdr_name)) orelse {
                 log.debug("unhandled section", .{});
@@ -273,44 +273,43 @@ pub fn splitIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
                                 const inst = maybe_inst orelse break :opt;
 
                                 // TODO can we optimise anything that isn't an RM encoding?
-                                if (inst.enc != .rm) break :opt;
-                                const rm = inst.data.rm;
-                                if (rm.reg_or_mem != .mem) break :opt;
-                                if (rm.reg_or_mem.mem.base != .rip) break :opt;
-                                const dst = rm.reg;
-                                const src = rm.reg_or_mem;
+                                if (inst.encoding.op_en != .rm) break :opt;
+                                if (inst.op2 != .mem) break :opt;
+                                if (inst.op2.mem != .rip) break :opt;
 
                                 var stream = std.io.fixedBufferStream(code[rel.r_offset - 3 ..][0..7]);
                                 const writer = stream.writer();
 
-                                switch (inst.tag) {
+                                switch (inst.encoding.mnemonic) {
                                     .mov => {
                                         // rewrite to LEA
-                                        const new_inst = Instruction{
-                                            .tag = .lea,
-                                            .enc = .rm,
-                                            .data = Instruction.Data.rm(dst, src),
-                                        };
+                                        const new_inst = try Instruction.new(.lea, .{
+                                            .prefix = inst.prefix,
+                                            .op1 = inst.op1,
+                                            .op2 = inst.op2,
+                                        });
                                         try new_inst.encode(writer);
-
                                         const r_sym = rel.r_sym();
                                         rel.r_info = (@intCast(u64, r_sym) << 32) | elf.R_X86_64_PC32;
-                                        log.debug("rewriting R_X86_64_REX_GOTPCRELX -> R_X86_64_PC32: MOV -> LEA", .{});
+                                        log.debug("rewriting R_X86_64_REX_GOTPCRELX -> R_X86_64_PC32", .{});
+                                        log.debug("  {} -> {}", .{ inst, new_inst });
                                         break :blk;
                                     },
                                     .cmp => {
                                         // rewrite to CMP MI encoding
-                                        const new_inst = Instruction{
-                                            .tag = .cmp,
-                                            .enc = .mi,
-                                            .data = Instruction.Data.mi(RegisterOrMemory.reg(dst), 0x0),
-                                        };
+                                        const new_inst = try Instruction.new(.cmp, .{
+                                            .prefix = inst.prefix,
+                                            .op1 = inst.op1,
+                                            // TODO: hack to force imm32s in the assembler
+                                            .op2 = .{ .imm = Immediate.s(-129) },
+                                        });
                                         try new_inst.encode(writer);
 
                                         const r_sym = rel.r_sym();
                                         rel.r_info = (@intCast(u64, r_sym) << 32) | elf.R_X86_64_32;
                                         rel.r_addend = 0;
-                                        log.debug("rewriting R_X86_64_REX_GOTPCRELX -> R_X86_64_32: CMP r64, r/m64 -> CMP r/m64, imm32", .{});
+                                        log.debug("rewriting R_X86_64_REX_GOTPCRELX -> R_X86_64_32", .{});
+                                        log.debug("  {} -> {}", .{ inst, new_inst });
 
                                         break :blk;
                                     },
@@ -342,29 +341,29 @@ pub fn splitIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
                                 const maybe_inst = disassembler.next() catch break :blk;
                                 const inst = maybe_inst orelse break :blk;
 
-                                if (inst.enc != .rm) break :blk;
-                                const rm = inst.data.rm;
-                                if (rm.reg_or_mem != .mem) break :blk;
-                                if (rm.reg_or_mem.mem.base != .rip) break :blk;
-                                const dst = rm.reg;
+                                if (inst.encoding.op_en != .rm) break :blk;
+                                if (inst.op2 != .mem) break :blk;
+                                if (inst.op2.mem != .rip) break :blk;
 
                                 var stream = std.io.fixedBufferStream(code[rel.r_offset - 3 ..][0..7]);
                                 const writer = stream.writer();
 
-                                switch (inst.tag) {
+                                switch (inst.encoding.mnemonic) {
                                     .mov => {
                                         // rewrite to MOV MI encoding
-                                        const new_inst = Instruction{
-                                            .tag = .mov,
-                                            .enc = .mi,
-                                            .data = Instruction.Data.mi(RegisterOrMemory.reg(dst), 0x0),
-                                        };
+                                        const new_inst = try Instruction.new(.mov, .{
+                                            .prefix = inst.prefix,
+                                            .op1 = inst.op1,
+                                            // TODO: hack to force imm32s in the assembler
+                                            .op2 = .{ .imm = Immediate.s(-129) },
+                                        });
                                         try new_inst.encode(writer);
 
                                         const r_sym = rel.r_sym();
                                         rel.r_info = (@intCast(u64, r_sym) << 32) | elf.R_X86_64_TPOFF32;
                                         rel.r_addend = 0;
-                                        log.debug("rewriting R_X86_64_GOTTPOFF -> R_X86_64_TPOFF32: MOV r64, r/m64 -> MOV r/m64, imm32", .{});
+                                        log.debug("rewriting R_X86_64_GOTTPOFF -> R_X86_64_TPOFF32", .{});
+                                        log.debug("  {} -> {}", .{ inst, new_inst });
                                     },
                                     else => {},
                                 }

@@ -1,0 +1,15 @@
+.{
+    .name = "zld",
+    .version = "0.0.3",
+
+    .dependencies = .{
+        .@"zig-yaml" = .{
+            .url = "https://github.com/kubkon/zig-yaml/archive/a145b28935028afb8e1ce26f75b311b2b40e842d.tar.gz",
+            .hash = "122019bf9a63f61f24202cdda8601ac55326c640c4de56622983f1c3e796bd37f67a",
+        },
+        .@"zig-dis-x86_64" = .{
+            .url = "https://github.com/kubkon/zig-dis-x86_64/archive/d41e84800131537587ce0c7aff7a7329b8705354.tar.gz",
+            .hash = "1220130fb3dc66bd17f31ffc50c148e99e77a582b558545cdd533e9f76c816946b0e",
+        },
+    },
+}
