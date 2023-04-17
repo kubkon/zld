@@ -113,12 +113,27 @@ pub fn openPath(allocator: Allocator, tag: Tag, options: Options, thread_pool: *
 
 pub fn deinit(base: *Zld) void {
     switch (base.tag) {
-        .elf => @fieldParentPtr(Elf, "base", base).deinit(),
-        .macho => @fieldParentPtr(MachO, "base", base).deinit(),
-        .coff => @fieldParentPtr(Coff, "base", base).deinit(),
-        .wasm => @fieldParentPtr(Wasm, "base", base).deinit(),
+        .elf => {
+            const parent = @fieldParentPtr(Elf, "base", base);
+            parent.deinit();
+            base.allocator.destroy(parent);
+        },
+        .macho => {
+            const parent = @fieldParentPtr(MachO, "base", base);
+            parent.deinit();
+            base.allocator.destroy(parent);
+        },
+        .coff => {
+            const parent = @fieldParentPtr(Coff, "base", base);
+            parent.deinit();
+            base.allocator.destroy(parent);
+        },
+        .wasm => {
+            const parent = @fieldParentPtr(Wasm, "base", base);
+            parent.deinit();
+            base.allocator.destroy(parent);
+        },
     }
-    base.allocator.destroy(base);
 }
 
 pub fn flush(base: *Zld) !void {
