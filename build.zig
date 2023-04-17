@@ -16,12 +16,18 @@ pub fn build(b: *std.Build.Builder) void {
         .source_file = .{ .path = "zig-dis-x86_64/src/dis_x86_64.zig" },
     });
 
+    const yaml = b.dependency("zig-yaml", .{
+        .target = target,
+        .optimize = mode,
+    });
+
     const exe = b.addExecutable(.{
         .name = "zld",
         .root_source_file = .{ .path = "src/main.zig" },
         .target = target,
         .optimize = mode,
     });
+    exe.addModule("yaml", yaml.module("yaml"));
     exe.addModule("dis_x86_64", dis_x86_64);
     exe.linkLibC();
 
@@ -68,6 +74,7 @@ pub fn build(b: *std.Build.Builder) void {
         .root_source_file = .{ .path = "src/test.zig" },
         .optimize = mode,
     });
+    tests.addModule("yaml", yaml.module("yaml"));
     tests.addModule("dis_x86_64", dis_x86_64);
     tests.main_pkg_path = "."; // set root directory as main package path for our tests
 

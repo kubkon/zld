@@ -1,0 +1,11 @@
+.{
+    .name = "zld",
+    .version = "0.0.3",
+
+    .dependencies = .{
+        .@"zig-yaml" = .{
+            .url = "https://github.com/kubkon/zig-yaml/archive/a145b28935028afb8e1ce26f75b311b2b40e842d.tar.gz",
+            .hash = "122019bf9a63f61f24202cdda8601ac55326c640c4de56622983f1c3e796bd37f67a",
+        },
+    },
+}
