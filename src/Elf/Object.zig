@@ -19,10 +19,12 @@ const Immediate = dis_x86_64.Immediate;
 
 name: []const u8,
 data: []align(@alignOf(u64)) const u8,
+
 header: elf.Elf64_Ehdr = undefined,
 symtab_index: ?u16 = null,
 
 symtab: std.ArrayListUnmanaged(elf.Elf64_Sym) = .{},
+first_global: ?u32 = null,
 
 atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
 atom_table: std.AutoHashMapUnmanaged(u32, Atom.Index) = .{},
@@ -84,6 +86,11 @@ pub fn parse(self: *Object, allocator: Allocator) !void {
             [*]const elf.Elf64_Sym,
             @alignCast(@alignOf(elf.Elf64_Sym), symtab.ptr),
         )[0..nsyms]);
+
+        self.first_global = for (self.symtab.items, 0..) |sym, i| switch (sym.st_bind()) {
+            elf.STB_WEAK, elf.STB_GLOBAL => break @intCast(u32, i),
+            else => {},
+        } else null;
     }
 }
 

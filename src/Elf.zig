@@ -704,71 +704,56 @@ fn resolveSymbolsInObject(self: *Elf, object_id: u16) !void {
 
     log.debug("resolving symbols in {s}", .{object.name});
 
-    for (object.symtab.items, 0..) |sym, i| {
-        const sym_id = @intCast(u32, i);
+    const start = object.first_global orelse return;
+
+    for (object.symtab.items[start..], 0..) |sym, i| {
+        const sym_id = @intCast(u32, start + i);
         const sym_name = self.getSymbolName(.{ .sym_index = sym_id, .file = object_id });
-        const st_bind = sym.st_info >> 4;
-        const st_type = sym.st_info & 0xf;
 
-        switch (st_bind) {
-            elf.STB_LOCAL => {
-                log.debug("  (symbol '{s}' local to object; skipping...)", .{sym_name});
-                continue;
-            },
-            elf.STB_WEAK, elf.STB_GLOBAL => {
-                const name = try self.base.allocator.dupe(u8, sym_name);
-                const glob_ndx = @intCast(u32, self.globals.values().len);
-                const res = try self.globals.getOrPut(self.base.allocator, name);
-                defer if (res.found_existing) self.base.allocator.free(name);
+        const name = try self.base.allocator.dupe(u8, sym_name);
+        const glob_ndx = @intCast(u32, self.globals.values().len);
+        const res = try self.globals.getOrPut(self.base.allocator, name);
+        defer if (res.found_existing) self.base.allocator.free(name);
 
-                if (!res.found_existing) {
-                    res.value_ptr.* = .{
-                        .sym_index = sym_id,
-                        .file = object_id,
-                    };
-                    if (sym.st_shndx == elf.SHN_UNDEF and st_type == elf.STT_NOTYPE) {
-                        try self.unresolved.putNoClobber(self.base.allocator, glob_ndx, {});
-                    }
-                    continue;
-                }
-
-                const global = res.value_ptr.*;
-                const linked_obj = self.objects.items[global.file.?];
-                const linked_sym = linked_obj.symtab.items[global.sym_index];
-                const linked_sym_bind = linked_sym.st_info >> 4;
-
-                if (sym.st_shndx == elf.SHN_UNDEF and st_type == elf.STT_NOTYPE) {
-                    log.debug("  (symbol '{s}' already defined; skipping...)", .{sym_name});
-                    continue;
-                }
-
-                if (linked_sym.st_shndx != elf.SHN_UNDEF) {
-                    if (linked_sym_bind == elf.STB_GLOBAL and st_bind == elf.STB_GLOBAL) {
-                        log.err("symbol '{s}' defined multiple times", .{sym_name});
-                        log.err("  first definition in '{s}'", .{linked_obj.name});
-                        log.err("  next definition in '{s}'", .{object.name});
-                        return error.MultipleSymbolDefinitions;
-                    }
-
-                    if (st_bind == elf.STB_WEAK) {
-                        log.debug("  (symbol '{s}' already defined; skipping...)", .{sym_name});
-                        continue;
-                    }
-                }
-                _ = self.unresolved.fetchSwapRemove(@intCast(u32, self.globals.getIndex(name).?));
-
-                res.value_ptr.* = .{
-                    .sym_index = sym_id,
-                    .file = object_id,
-                };
-            },
-            else => {
-                log.err("unhandled symbol binding type: {}", .{st_bind});
-                log.err("  symbol '{s}'", .{sym_name});
-                log.err("  first definition in '{s}'", .{object.name});
-                return error.UnhandledSymbolBindType;
-            },
+        if (!res.found_existing) {
+            res.value_ptr.* = .{
+                .sym_index = sym_id,
+                .file = object_id,
+            };
+            if (sym.st_shndx == elf.SHN_UNDEF and sym.st_type() == elf.STT_NOTYPE) {
+                try self.unresolved.putNoClobber(self.base.allocator, glob_ndx, {});
+            }
+            continue;
         }
+
+        const global = res.value_ptr.*;
+        const linked_obj = self.objects.items[global.file.?];
+        const linked_sym = linked_obj.symtab.items[global.sym_index];
+
+        if (sym.st_shndx == elf.SHN_UNDEF and sym.st_type() == elf.STT_NOTYPE) {
+            log.debug("  (symbol '{s}' already defined; skipping...)", .{sym_name});
+            continue;
+        }
+
+        if (linked_sym.st_shndx != elf.SHN_UNDEF) {
+            if (linked_sym.st_bind() == elf.STB_GLOBAL and sym.st_bind() == elf.STB_GLOBAL) {
+                log.err("symbol '{s}' defined multiple times", .{sym_name});
+                log.err("  first definition in '{s}'", .{linked_obj.name});
+                log.err("  next definition in '{s}'", .{object.name});
+                return error.MultipleSymbolDefinitions;
+            }
+
+            if (sym.st_bind() == elf.STB_WEAK) {
+                log.debug("  (symbol '{s}' already defined; skipping...)", .{sym_name});
+                continue;
+            }
+        }
+        _ = self.unresolved.fetchSwapRemove(@intCast(u32, self.globals.getIndex(name).?));
+
+        res.value_ptr.* = .{
+            .sym_index = sym_id,
+            .file = object_id,
+        };
     }
 }
 
