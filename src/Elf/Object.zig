@@ -72,17 +72,19 @@ pub fn parse(self: *Object, allocator: Allocator) !void {
 
     if (self.header.e_shnum == 0) return;
 
-    for (self.getShdrs(), 0..) |shdr, i| switch (shdr.sh_type) {
-        elf.SHT_SYMTAB => {
-            self.symtab_index = @intCast(u16, i);
-            const nsyms = @divExact(shdr.sh_size, @sizeOf(elf.Elf64_Sym));
-            try self.symtab.appendSlice(allocator, @ptrCast(
-                [*]const elf.Elf64_Sym,
-                @alignCast(@alignOf(elf.Elf64_Sym), &self.data[shdr.sh_offset]),
-            )[0..nsyms]);
-        },
+    self.symtab_index = for (self.getShdrs(), 0..) |shdr, i| switch (shdr.sh_type) {
+        elf.SHT_SYMTAB => break @intCast(u16, i),
         else => {},
-    };
+    } else null;
+
+    if (self.symtab_index) |index| {
+        const symtab = self.getShdrContents(index);
+        const nsyms = @divExact(symtab.len, @sizeOf(elf.Elf64_Sym));
+        try self.symtab.appendSlice(allocator, @ptrCast(
+            [*]const elf.Elf64_Sym,
+            @alignCast(@alignOf(elf.Elf64_Sym), symtab.ptr),
+        )[0..nsyms]);
+    }
 }
 
 pub fn scanInputSections(self: *Object, elf_file: *Elf) !void {
