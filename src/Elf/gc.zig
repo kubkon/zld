@@ -14,27 +14,28 @@ pub fn gcAtoms(elf_file: *Elf) !void {
     defer arena_allocator.deinit();
     const arena = arena_allocator.allocator();
 
-    var roots = std.AutoHashMap(*Atom, void).init(arena);
+    var roots = std.AutoHashMap(Atom.Index, void).init(arena);
     try collectRoots(&roots, elf_file);
 
-    var alive = std.AutoHashMap(*Atom, void).init(arena);
+    var alive = std.AutoHashMap(Atom.Index, void).init(arena);
     try mark(roots, &alive, elf_file);
 
     try prune(arena, alive, elf_file);
 }
 
-fn removeAtomFromSection(atom: *Atom, match: u16, elf_file: *Elf) void {
+fn removeAtomFromSection(atom_index: Atom.Index, match: u16, elf_file: *Elf) void {
     var section = elf_file.sections.get(match);
 
     // If we want to enable GC for incremental codepath, we need to take into
     // account any padding that might have been left here.
+    const atom = elf_file.getAtom(atom_index);
     section.shdr.sh_size -= atom.size;
 
     if (atom.prev) |prev| {
-        prev.next = atom.next;
+        elf_file.getAtomPtr(prev).next = atom.next;
     }
     if (atom.next) |next| {
-        next.prev = atom.prev;
+        elf_file.getAtomPtr(next).prev = atom.prev;
     } else {
         if (atom.prev) |prev| {
             section.last_atom = prev;
@@ -48,27 +49,27 @@ fn removeAtomFromSection(atom: *Atom, match: u16, elf_file: *Elf) void {
     elf_file.sections.set(match, section);
 }
 
-fn collectRoots(roots: *std.AutoHashMap(*Atom, void), elf_file: *Elf) !void {
+fn collectRoots(roots: *std.AutoHashMap(Atom.Index, void), elf_file: *Elf) !void {
     const output_mode = elf_file.options.output_mode;
 
     switch (output_mode) {
         .exe => {
             for (&[_][]const u8{ "_init", "_fini" }) |sym_name| {
                 const global = elf_file.globals.get(sym_name) orelse continue;
-                const atom = elf_file.getAtomForSymbol(global).?;
-                _ = try roots.getOrPut(atom);
+                const atom_index = elf_file.getAtomIndexForSymbol(global).?;
+                _ = try roots.getOrPut(atom_index);
             }
             const global = try elf_file.getEntryPoint();
-            const atom = elf_file.getAtomForSymbol(global).?;
-            _ = try roots.getOrPut(atom);
+            const atom_index = elf_file.getAtomIndexForSymbol(global).?;
+            _ = try roots.getOrPut(atom_index);
         },
         else => |other| {
             assert(other == .lib);
             for (elf_file.globals.values()) |global| {
                 const sym = elf_file.getSymbol(global);
                 if (sym.st_shndx == elf.SHN_UNDEF) continue;
-                const atom = elf_file.getAtomForSymbol(global).?;
-                _ = try roots.getOrPut(atom);
+                const atom_index = elf_file.getAtomIndexForSymbol(global).?;
+                _ = try roots.getOrPut(atom_index);
             }
         },
     }
@@ -76,7 +77,8 @@ fn collectRoots(roots: *std.AutoHashMap(*Atom, void), elf_file: *Elf) !void {
     for (elf_file.objects.items) |object| {
         const shdrs = object.getShdrs();
 
-        for (object.managed_atoms.items) |atom| {
+        for (object.atoms.items) |atom_index| {
+            const atom = elf_file.getAtom(atom_index);
             const sym = object.getSourceSymbol(atom.sym_index) orelse continue;
             const shdr = shdrs[sym.st_shndx];
             const sh_name = object.getShString(shdr.sh_name);
@@ -93,26 +95,31 @@ fn collectRoots(roots: *std.AutoHashMap(*Atom, void), elf_file: *Elf) !void {
                 break :blk false;
             };
             if (is_gc_root) {
-                _ = try roots.getOrPut(atom);
+                _ = try roots.getOrPut(atom_index);
             }
         }
     }
 }
 
-fn markLive(atom: *Atom, alive: *std.AutoHashMap(*Atom, void), elf_file: *Elf) anyerror!void {
-    const gop = try alive.getOrPut(atom);
+fn markLive(atom_index: Atom.Index, alive: *std.AutoHashMap(Atom.Index, void), elf_file: *Elf) anyerror!void {
+    const gop = try alive.getOrPut(atom_index);
     if (gop.found_existing) return;
 
     log.debug("marking live", .{});
+    const atom = elf_file.getAtom(atom_index);
     elf_file.logAtom(atom, log);
 
     for (atom.relocs.items) |rel| {
-        const target_atom = atom.getTargetAtom(elf_file, rel) orelse continue;
-        try markLive(target_atom, alive, elf_file);
+        const target_atom_index = atom.getTargetAtomIndex(elf_file, rel) orelse continue;
+        try markLive(target_atom_index, alive, elf_file);
     }
 }
 
-fn mark(roots: std.AutoHashMap(*Atom, void), alive: *std.AutoHashMap(*Atom, void), elf_file: *Elf) !void {
+fn mark(
+    roots: std.AutoHashMap(Atom.Index, void),
+    alive: *std.AutoHashMap(Atom.Index, void),
+    elf_file: *Elf,
+) !void {
     try alive.ensureUnusedCapacity(roots.count());
 
     var it = roots.keyIterator();
@@ -121,15 +128,16 @@ fn mark(roots: std.AutoHashMap(*Atom, void), alive: *std.AutoHashMap(*Atom, void
     }
 }
 
-fn prune(arena: Allocator, alive: std.AutoHashMap(*Atom, void), elf_file: *Elf) !void {
+fn prune(arena: Allocator, alive: std.AutoHashMap(Atom.Index, void), elf_file: *Elf) !void {
     // Any section that ends up here will be updated, that is,
     // its size and alignment recalculated.
     var gc_sections = std.AutoHashMap(u16, void).init(arena);
 
     for (elf_file.objects.items) |object| {
-        for (object.managed_atoms.items) |atom| {
-            if (alive.contains(atom)) continue;
+        for (object.atoms.items) |atom_index| {
+            if (alive.contains(atom_index)) continue;
 
+            const atom = elf_file.getAtom(atom_index);
             const global = atom.getSymbolWithLoc();
             const sym = atom.getSymbolPtr(elf_file);
             const tshdr = elf_file.sections.items(.shdr)[sym.st_shndx];
@@ -142,7 +150,7 @@ fn prune(arena: Allocator, alive: std.AutoHashMap(*Atom, void), elf_file: *Elf) 
             log.debug("pruning:", .{});
             elf_file.logAtom(atom, log);
             sym.st_other = Elf.STV_GC;
-            removeAtomFromSection(atom, sym.st_shndx, elf_file);
+            removeAtomFromSection(atom_index, sym.st_shndx, elf_file);
             _ = try gc_sections.put(sym.st_shndx, {});
 
             for (atom.contained.items) |sym_off| {
@@ -154,7 +162,8 @@ fn prune(arena: Allocator, alive: std.AutoHashMap(*Atom, void), elf_file: *Elf) 
             }
 
             if (elf_file.got_entries_map.contains(global)) {
-                const got_atom = elf_file.got_entries_map.get(global).?;
+                const got_atom_index = elf_file.got_entries_map.get(global).?;
+                const got_atom = elf_file.getAtom(got_atom_index);
                 const got_sym = got_atom.getSymbolPtr(elf_file);
                 got_sym.st_other = Elf.STV_GC;
             }
@@ -165,8 +174,8 @@ fn prune(arena: Allocator, alive: std.AutoHashMap(*Atom, void), elf_file: *Elf) 
             if (sym.st_other != Elf.STV_GC) continue;
 
             // TODO tombstone
-            const atom = elf_file.got_entries_map.get(sym_loc).?;
-            removeAtomFromSection(atom, sym.st_shndx, elf_file);
+            const atom_index = elf_file.got_entries_map.get(sym_loc).?;
+            removeAtomFromSection(atom_index, sym.st_shndx, elf_file);
             _ = try gc_sections.put(sym.st_shndx, {});
         }
     }
@@ -180,20 +189,24 @@ fn prune(arena: Allocator, alive: std.AutoHashMap(*Atom, void), elf_file: *Elf) 
         section.shdr.sh_addralign = 0;
         section.shdr.sh_size = 0;
 
-        var atom = section.last_atom.?;
+        var atom_index = section.last_atom.?;
 
-        while (atom.prev) |prev| {
-            atom = prev;
+        while (true) {
+            const atom = elf_file.getAtom(atom_index);
+            if (atom.prev) |prev| {
+                atom_index = prev;
+            } else break;
         }
 
         while (true) {
+            const atom = elf_file.getAtom(atom_index);
             const aligned_end_addr = mem.alignForwardGeneric(u64, section.shdr.sh_size, atom.alignment);
             const padding = aligned_end_addr - section.shdr.sh_size;
             section.shdr.sh_size += padding + atom.size;
             section.shdr.sh_addralign = @max(section.shdr.sh_addralign, atom.alignment);
 
             if (atom.next) |next| {
-                atom = next;
+                atom_index = next;
             } else break;
         }
 

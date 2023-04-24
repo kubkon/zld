@@ -24,16 +24,12 @@ symtab_index: ?u16 = null,
 
 symtab: std.ArrayListUnmanaged(elf.Elf64_Sym) = .{},
 
-managed_atoms: std.ArrayListUnmanaged(*Atom) = .{},
-atom_table: std.AutoHashMapUnmanaged(u32, *Atom) = .{},
+atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
+atom_table: std.AutoHashMapUnmanaged(u32, Atom.Index) = .{},
 
 pub fn deinit(self: *Object, allocator: Allocator) void {
     self.symtab.deinit(allocator);
-    for (self.managed_atoms.items) |atom| {
-        atom.deinit(allocator);
-        allocator.destroy(atom);
-    }
-    self.managed_atoms.deinit(allocator);
+    self.atoms.deinit(allocator);
     self.atom_table.deinit(allocator);
     allocator.free(self.name);
     allocator.free(self.data);
@@ -165,13 +161,9 @@ pub fn splitIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
 
             const syms = symbols_by_shndx.get(ndx).?;
 
-            const atom = try Atom.createEmpty(allocator);
-            errdefer {
-                atom.deinit(allocator);
-                allocator.destroy(atom);
-            }
-            try self.managed_atoms.append(allocator, atom);
-
+            const atom_index = try elf_file.addAtom();
+            try self.atoms.append(allocator, atom_index);
+            const atom = elf_file.getAtomPtr(atom_index);
             atom.file = object_id;
             atom.size = @intCast(u32, shdr.sh_size);
             atom.alignment = @intCast(u32, shdr.sh_addralign);
@@ -208,7 +200,7 @@ pub fn splitIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
                     .sym_index = sym_id,
                     .offset = sym.st_value,
                 });
-                try self.atom_table.putNoClobber(allocator, sym_id, atom);
+                try self.atom_table.putNoClobber(allocator, sym_id, atom_index);
             }
 
             atom.sym_index = sym_index orelse blk: {
@@ -223,7 +215,7 @@ pub fn splitIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
                 });
                 break :blk index;
             };
-            try self.atom_table.putNoClobber(allocator, atom.sym_index, atom);
+            try self.atom_table.putNoClobber(allocator, atom.sym_index, atom_index);
 
             var code = if (shdr.sh_type == elf.SHT_NOBITS) blk: {
                 var code = try allocator.alloc(u8, atom.size);
@@ -381,7 +373,7 @@ pub fn splitIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
             }
 
             try atom.code.appendSlice(allocator, code);
-            try elf_file.addAtomToSection(atom, tshdr_ndx);
+            try elf_file.addAtomToSection(atom_index, tshdr_ndx);
         },
         else => {},
     };
@@ -448,7 +440,7 @@ pub fn getSymbolName(self: Object, index: u32) []const u8 {
     return self.getString(sym.st_name);
 }
 
-pub fn getAtomForSymbol(self: Object, sym_index: u32) ?*Atom {
+pub fn getAtomIndexForSymbol(self: Object, sym_index: u32) ?Atom.Index {
     return self.atom_table.get(sym_index);
 }
 

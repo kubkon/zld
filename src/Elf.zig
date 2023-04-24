@@ -55,14 +55,14 @@ locals: std.ArrayListUnmanaged(elf.Elf64_Sym) = .{},
 globals: std.StringArrayHashMapUnmanaged(SymbolWithLoc) = .{},
 unresolved: std.AutoArrayHashMapUnmanaged(u32, void) = .{},
 
-got_entries_map: std.AutoArrayHashMapUnmanaged(SymbolWithLoc, *Atom) = .{},
+got_entries_map: std.AutoArrayHashMapUnmanaged(SymbolWithLoc, Atom.Index) = .{},
 
-managed_atoms: std.ArrayListUnmanaged(*Atom) = .{},
-atom_table: std.AutoHashMapUnmanaged(u32, *Atom) = .{},
+atoms: std.ArrayListUnmanaged(Atom) = .{},
+atom_table: std.AutoHashMapUnmanaged(u32, Atom.Index) = .{},
 
 const Section = struct {
     shdr: elf.Elf64_Shdr,
-    last_atom: ?*Atom,
+    last_atom: ?Atom.Index,
 };
 
 /// Special st_other value used internally by zld to mark symbol
@@ -114,31 +114,31 @@ fn createEmpty(gpa: Allocator, options: Options, thread_pool: *ThreadPool) !*Elf
 }
 
 pub fn deinit(self: *Elf) void {
-    for (self.managed_atoms.items) |atom| {
-        atom.deinit(self.base.allocator);
-        self.base.allocator.destroy(atom);
+    const gpa = self.base.allocator;
+    for (self.atoms.items) |*atom| {
+        atom.deinit(gpa);
     }
-    self.managed_atoms.deinit(self.base.allocator);
+    self.atoms.deinit(gpa);
     for (self.globals.keys()) |key| {
-        self.base.allocator.free(key);
+        gpa.free(key);
     }
-    self.atom_table.deinit(self.base.allocator);
-    self.got_entries_map.deinit(self.base.allocator);
-    self.unresolved.deinit(self.base.allocator);
-    self.globals.deinit(self.base.allocator);
-    self.locals.deinit(self.base.allocator);
-    self.shstrtab.deinit(self.base.allocator);
-    self.strtab.deinit(self.base.allocator);
-    self.phdrs.deinit(self.base.allocator);
-    self.sections.deinit(self.base.allocator);
+    self.atom_table.deinit(gpa);
+    self.got_entries_map.deinit(gpa);
+    self.unresolved.deinit(gpa);
+    self.globals.deinit(gpa);
+    self.locals.deinit(gpa);
+    self.shstrtab.deinit(gpa);
+    self.strtab.deinit(gpa);
+    self.phdrs.deinit(gpa);
+    self.sections.deinit(gpa);
     for (self.objects.items) |*object| {
-        object.deinit(self.base.allocator);
+        object.deinit(gpa);
     }
-    self.objects.deinit(self.base.allocator);
+    self.objects.deinit(gpa);
     for (self.archives.items) |*archive| {
-        archive.deinit(self.base.allocator);
+        archive.deinit(gpa);
     }
-    self.archives.deinit(self.base.allocator);
+    self.archives.deinit(gpa);
 }
 
 pub fn closeFiles(self: *const Elf) void {
@@ -850,7 +850,7 @@ fn resolveSpecialSymbols(self: *Elf) !void {
     }
 }
 
-pub fn createGotAtom(self: *Elf, target: SymbolWithLoc) !*Atom {
+pub fn createGotAtom(self: *Elf, target: SymbolWithLoc) !Atom.Index {
     if (self.got_sect_index == null) {
         self.got_sect_index = try self.insertSection(.{
             .sh_name = 0,
@@ -868,13 +868,8 @@ pub fn createGotAtom(self: *Elf, target: SymbolWithLoc) !*Atom {
 
     log.debug("creating GOT atom for target {}", .{target});
 
-    const atom = try Atom.createEmpty(self.base.allocator);
-    errdefer {
-        atom.deinit(self.base.allocator);
-        self.base.allocator.destroy(atom);
-    }
-    try self.managed_atoms.append(self.base.allocator, atom);
-
+    const atom_index = try self.addAtom();
+    const atom = self.getAtomPtr(atom_index);
     atom.file = null;
     atom.size = @sizeOf(u64);
     atom.alignment = @alignOf(u64);
@@ -907,21 +902,23 @@ pub fn createGotAtom(self: *Elf, target: SymbolWithLoc) !*Atom {
     });
     atom.sym_index = sym_index;
 
-    try self.atom_table.putNoClobber(self.base.allocator, atom.sym_index, atom);
-    try self.addAtomToSection(atom, self.got_sect_index.?);
+    try self.atom_table.putNoClobber(self.base.allocator, atom.sym_index, atom_index);
+    try self.addAtomToSection(atom_index, self.got_sect_index.?);
 
-    return atom;
+    return atom_index;
 }
 
-pub fn addAtomToSection(self: *Elf, atom: *Atom, sect_id: u16) !void {
+pub fn addAtomToSection(self: *Elf, atom_index: Atom.Index, sect_id: u16) !void {
+    const atom = self.getAtomPtr(atom_index);
     const sym = atom.getSymbolPtr(self);
     sym.st_shndx = sect_id;
     var section = self.sections.get(sect_id);
     if (section.shdr.sh_size > 0) {
-        section.last_atom.?.next = atom;
+        const last_atom = self.getAtomPtr(section.last_atom.?);
+        last_atom.next = atom_index;
         atom.prev = section.last_atom.?;
     }
-    section.last_atom = atom;
+    section.last_atom = atom_index;
     const aligned_end_addr = mem.alignForwardGeneric(u64, section.shdr.sh_size, atom.alignment);
     const padding = aligned_end_addr - section.shdr.sh_size;
     section.shdr.sh_size += padding + atom.size;
@@ -1099,19 +1096,23 @@ fn allocateNonAllocSections(self: *Elf) !void {
 fn allocateAtoms(self: *Elf) !void {
     const slice = self.sections.slice();
     for (slice.items(.last_atom), 0..) |last_atom, i| {
-        var atom = last_atom orelse continue;
+        var atom_index = last_atom orelse continue;
         const shdr_ndx = @intCast(u16, i);
         const shdr = slice.items(.shdr)[shdr_ndx];
 
         // Find the first atom
-        while (atom.prev) |prev| {
-            atom = prev;
+        while (true) {
+            const atom = self.getAtom(atom_index);
+            if (atom.prev) |prev| {
+                atom_index = prev;
+            } else break;
         }
 
         log.debug("allocating atoms in '{s}' section", .{self.shstrtab.getAssumeExists(shdr.sh_name)});
 
         var base_addr: u64 = shdr.sh_addr;
         while (true) {
+            const atom = self.getAtom(atom_index);
             base_addr = mem.alignForwardGeneric(u64, base_addr, atom.alignment);
 
             const sym = atom.getSymbolPtr(self);
@@ -1138,13 +1139,13 @@ fn allocateAtoms(self: *Elf) !void {
             base_addr += atom.size;
 
             if (atom.next) |next| {
-                atom = next;
+                atom_index = next;
             } else break;
         }
     }
 }
 
-pub fn logAtom(self: *Elf, atom: *const Atom, comptime logger: anytype) void {
+pub fn logAtom(self: *Elf, atom: Atom, comptime logger: anytype) void {
     const sym = atom.getSymbol(self);
     const sym_name = atom.getName(self);
     logger.debug("  ATOM(%{d}, '{s}') @ {x} (sizeof({x}), alignof({x})) in object({?}) in sect({d})", .{
@@ -1178,20 +1179,24 @@ pub fn logAtom(self: *Elf, atom: *const Atom, comptime logger: anytype) void {
 fn logAtoms(self: *Elf) void {
     const slice = self.sections.slice();
     for (slice.items(.last_atom), 0..) |last_atom, i| {
-        var atom = last_atom orelse continue;
+        var atom_index = last_atom orelse continue;
         const ndx = @intCast(u16, i);
         const shdr = slice.items(.shdr)[ndx];
 
         log.debug(">>> {s}", .{self.shstrtab.getAssumeExists(shdr.sh_name)});
 
-        while (atom.prev) |prev| {
-            atom = prev;
+        while (true) {
+            const atom = self.getAtom(atom_index);
+            if (atom.prev) |prev| {
+                atom_index = prev;
+            } else break;
         }
 
         while (true) {
+            const atom = self.getAtom(atom_index);
             self.logAtom(atom, log);
             if (atom.next) |next| {
-                atom = next;
+                atom_index = next;
             } else break;
         }
     }
@@ -1200,7 +1205,7 @@ fn logAtoms(self: *Elf) void {
 fn writeAtoms(self: *Elf) !void {
     const slice = self.sections.slice();
     for (slice.items(.last_atom), 0..) |last_atom, i| {
-        var atom = last_atom orelse continue;
+        var atom_index = last_atom orelse continue;
         const shdr_ndx = @intCast(u16, i);
         const shdr = slice.items(.shdr)[shdr_ndx];
 
@@ -1208,8 +1213,11 @@ fn writeAtoms(self: *Elf) !void {
         if (shdr.sh_type == elf.SHT_NOBITS) continue;
 
         // Find the first atom
-        while (atom.prev) |prev| {
-            atom = prev;
+        while (true) {
+            const atom = self.getAtom(atom_index);
+            if (atom.prev) |prev| {
+                atom_index = prev;
+            } else break;
         }
 
         log.debug("writing atoms in '{s}' section", .{self.shstrtab.getAssumeExists(shdr.sh_name)});
@@ -1219,6 +1227,7 @@ fn writeAtoms(self: *Elf) !void {
         mem.set(u8, buffer, 0);
 
         while (true) {
+            const atom = self.getAtomPtr(atom_index);
             const sym = atom.getSymbol(self);
             try atom.resolveRelocs(self);
             const off = sym.st_value - shdr.sh_addr;
@@ -1228,7 +1237,7 @@ fn writeAtoms(self: *Elf) !void {
             mem.copy(u8, buffer[off..][0..atom.size], atom.code.items);
 
             if (atom.next) |next| {
-                atom = next;
+                atom_index = next;
             } else break;
         }
 
@@ -1461,10 +1470,10 @@ pub fn getSymbolName(self: *Elf, sym_with_loc: SymbolWithLoc) []const u8 {
 
 /// Returns atom if there is an atom referenced by the symbol described by `sym_with_loc` descriptor.
 /// Returns null on failure.
-pub fn getAtomForSymbol(self: *Elf, sym_with_loc: SymbolWithLoc) ?*Atom {
+pub fn getAtomIndexForSymbol(self: *Elf, sym_with_loc: SymbolWithLoc) ?Atom.Index {
     if (sym_with_loc.file) |file| {
         const object = self.objects.items[file];
-        return object.getAtomForSymbol(sym_with_loc.sym_index);
+        return object.getAtomIndexForSymbol(sym_with_loc.sym_index);
     } else {
         return self.atom_table.get(sym_with_loc.sym_index);
     }
@@ -1480,6 +1489,23 @@ pub fn getEntryPoint(self: Elf) error{EntrypointNotFound}!SymbolWithLoc {
         return error.EntrypointNotFound;
     };
     return global;
+}
+
+pub fn getAtom(self: Elf, atom_index: Atom.Index) Atom {
+    assert(atom_index < self.atoms.items.len);
+    return self.atoms.items[atom_index];
+}
+
+pub fn getAtomPtr(self: *Elf, atom_index: Atom.Index) *Atom {
+    assert(atom_index < self.atoms.items.len);
+    return &self.atoms.items[atom_index];
+}
+
+pub fn addAtom(self: *Elf) !Atom.Index {
+    const index = @intCast(u32, self.atoms.items.len);
+    const atom = try self.atoms.addOne(self.base.allocator);
+    atom.* = Atom.empty;
+    return index;
 }
 
 fn logSections(self: Elf) void {

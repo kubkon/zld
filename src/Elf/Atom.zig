@@ -38,8 +38,10 @@ alignment: u32,
 relocs: std.ArrayListUnmanaged(elf.Elf64_Rela) = .{},
 
 /// Points to the previous and next neighbours
-next: ?*Atom,
-prev: ?*Atom,
+next: ?Index,
+prev: ?Index,
+
+pub const Index = u32;
 
 pub const SymbolAtOffset = struct {
     sym_index: u32,
@@ -57,18 +59,14 @@ pub const SymbolAtOffset = struct {
     }
 };
 
-pub fn createEmpty(allocator: Allocator) !*Atom {
-    const self = try allocator.create(Atom);
-    self.* = .{
-        .sym_index = 0,
-        .file = undefined,
-        .size = 0,
-        .alignment = 0,
-        .prev = null,
-        .next = null,
-    };
-    return self;
-}
+pub const empty = Atom{
+    .sym_index = 0,
+    .file = undefined,
+    .size = 0,
+    .alignment = 0,
+    .prev = null,
+    .next = null,
+};
 
 pub fn deinit(self: *Atom, allocator: Allocator) void {
     self.relocs.deinit(allocator);
@@ -115,7 +113,7 @@ pub fn getName(self: Atom, elf_file: *Elf) []const u8 {
     });
 }
 
-pub fn getTargetAtom(self: Atom, elf_file: *Elf, rel: elf.Elf64_Rela) ?*Atom {
+pub fn getTargetAtomIndex(self: Atom, elf_file: *Elf, rel: elf.Elf64_Rela) ?Atom.Index {
     const sym = self.getSymbol(elf_file);
     const is_got_atom = if (elf_file.got_sect_index) |ndx| ndx == sym.st_shndx else false;
 
@@ -127,7 +125,7 @@ pub fn getTargetAtom(self: Atom, elf_file: *Elf, rel: elf.Elf64_Rela) ?*Atom {
         // Now, r_addend in those cases contains the index to the object file where
         // the target symbol is defined.
         const file: ?u32 = if (rel.r_addend > -1) @intCast(u32, rel.r_addend) else null;
-        return elf_file.getAtomForSymbol(.{
+        return elf_file.getAtomIndexForSymbol(.{
             .sym_index = r_sym,
             .file = file,
         });
@@ -142,8 +140,8 @@ pub fn getTargetAtom(self: Atom, elf_file: *Elf, rel: elf.Elf64_Rela) ?*Atom {
     switch (r_type) {
         elf.R_X86_64_REX_GOTPCRELX, elf.R_X86_64_GOTPCRELX, elf.R_X86_64_GOTPCREL => {
             const global = elf_file.globals.get(tsym_name).?;
-            const got_atom = elf_file.got_entries_map.get(global).?;
-            return got_atom;
+            const got_atom_index = elf_file.got_entries_map.get(global).?;
+            return got_atom_index;
         },
         else => {
             const tsym = elf_file.getSymbol(.{
@@ -157,10 +155,10 @@ pub fn getTargetAtom(self: Atom, elf_file: *Elf, rel: elf.Elf64_Rela) ?*Atom {
 
             if (!is_local) {
                 const global = elf_file.globals.get(tsym_name).?;
-                return elf_file.getAtomForSymbol(global);
+                return elf_file.getAtomIndexForSymbol(global);
             }
 
-            return elf_file.getAtomForSymbol(.{
+            return elf_file.getAtomIndexForSymbol(.{
                 .sym_index = r_sym,
                 .file = self.file,
             });
@@ -288,7 +286,7 @@ pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
             elf.R_X86_64_REX_GOTPCRELX, elf.R_X86_64_GOTPCREL => outer: {
                 const source = @intCast(i64, sym.st_value + rel.r_offset);
                 const global = elf_file.globals.get(tsym_name).?;
-                const got_atom = elf_file.got_entries_map.get(global) orelse {
+                const got_atom_index = elf_file.got_entries_map.get(global) orelse {
                     log.debug("TODO R_X86_64_REX_GOTPCRELX unhandled: no GOT entry found", .{});
                     log.debug("TODO R_X86_64_REX_GOTPCRELX: {x}: [0x{x} => 0x{x}] ({s})", .{
                         rel.r_offset,
@@ -298,6 +296,7 @@ pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
                     });
                     break :outer;
                 };
+                const got_atom = elf_file.getAtom(got_atom_index);
                 const target: i64 = blk: {
                     if (got_atom.file) |file| {
                         const actual_object = elf_file.objects.items[file];
