@@ -25,9 +25,6 @@ sym_index: u32,
 /// null means global synthetic symbol table.
 file: ?u32,
 
-/// List of symbols contained within this atom
-contained: std.ArrayListUnmanaged(SymbolAtOffset) = .{},
-
 /// Size of this atom
 /// TODO is this really needed given that size is a field of a symbol?
 size: u32,
@@ -47,22 +44,6 @@ prev: ?Index,
 
 pub const Index = u32;
 
-pub const SymbolAtOffset = struct {
-    sym_index: u32,
-    offset: u64,
-
-    pub fn format(
-        self: SymbolAtOffset,
-        comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
-        _ = fmt;
-        _ = options;
-        try std.fmt.format(writer, "{{ {d}: .offset = {d} }}", .{ self.sym_index, self.offset });
-    }
-};
-
 pub const empty = Atom{
     .sym_index = 0,
     .file = undefined,
@@ -73,10 +54,6 @@ pub const empty = Atom{
     .prev = null,
     .next = null,
 };
-
-pub fn deinit(self: *Atom, allocator: Allocator) void {
-    self.contained.deinit(allocator);
-}
 
 pub fn getSymbol(self: Atom, elf_file: *Elf) elf.Elf64_Sym {
     return self.getSymbolPtr(elf_file).*;

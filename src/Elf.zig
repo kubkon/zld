@@ -117,9 +117,6 @@ fn createEmpty(gpa: Allocator, options: Options, thread_pool: *ThreadPool) !*Elf
 
 pub fn deinit(self: *Elf) void {
     const gpa = self.base.allocator;
-    for (self.atoms.items) |*atom| {
-        atom.deinit(gpa);
-    }
     self.atoms.deinit(gpa);
     for (self.globals.keys()) |key| {
         gpa.free(key);
@@ -1118,14 +1115,18 @@ fn allocateAtoms(self: *Elf) !void {
                 base_addr + atom.size,
             });
 
-            // Update each symbol contained within the TextBlock
-            for (atom.contained.items) |sym_at_off| {
-                const contained_sym = self.getSymbolPtr(.{
-                    .sym_index = sym_at_off.sym_index,
-                    .file = atom.file,
-                });
-                contained_sym.st_value = base_addr + sym_at_off.offset;
-                contained_sym.st_shndx = shdr_ndx;
+            // Update each symbol contained within the Atom
+            // Do it the long way for now until we get rid of synthetic sections first...
+            if (atom.file) |file| {
+                const object = &self.objects.items[file];
+                for (object.symtab.items, 0..) |*inner_sym, inner_sym_i| {
+                    const inner_sym_index = @intCast(u32, inner_sym_i);
+                    if (atom.sym_index == inner_sym_i) continue;
+                    const other_atom_index = object.atom_table.get(inner_sym_index) orelse continue;
+                    if (other_atom_index != atom_index) continue;
+                    inner_sym.st_value += base_addr;
+                    inner_sym.st_shndx = shdr_ndx;
+                }
             }
 
             base_addr += atom.size;
@@ -1500,7 +1501,7 @@ fn logSymtab(self: Elf) void {
     }
 }
 
-pub fn logAtom(self: *Elf, atom: Atom, comptime logger: anytype) void {
+pub fn logAtom(self: *Elf, atom: Atom, atom_index: Atom.Index, comptime logger: anytype) void {
     const sym = atom.getSymbol(self);
     const sym_name = atom.getName(self);
     logger.debug("  ATOM(%{d}, '{s}') @ {x} (sizeof({x}), alignof({x})) in object({?}) in sect({d})", .{
@@ -1513,21 +1514,18 @@ pub fn logAtom(self: *Elf, atom: Atom, comptime logger: anytype) void {
         sym.st_shndx,
     });
 
-    for (atom.contained.items) |sym_off| {
-        const inner_sym = self.getSymbol(.{
-            .sym_index = sym_off.sym_index,
-            .file = atom.file,
-        });
-        const inner_sym_name = self.getSymbolName(.{
-            .sym_index = sym_off.sym_index,
-            .file = atom.file,
-        });
-        logger.debug("    (%{d}, '{s}') @ {x} ({x})", .{
-            sym_off.sym_index,
-            inner_sym_name,
-            inner_sym.st_value,
-            sym_off.offset,
-        });
+    if (atom.file) |file| {
+        const object = self.objects.items[file];
+        for (object.symtab.items, 0..) |inner_sym, i| {
+            const other_atom_index = object.atom_table.get(@intCast(u32, i)) orelse continue;
+            if (other_atom_index != atom_index) continue;
+            const inner_sym_name = self.getSymbolName(.{ .sym_index = @intCast(u32, i), .file = atom.file });
+            logger.debug("    (%{d}, '{s}') @ {x}", .{
+                i,
+                inner_sym_name,
+                inner_sym.st_value,
+            });
+        }
     }
 }
 
@@ -1549,7 +1547,7 @@ fn logAtoms(self: *Elf) void {
 
         while (true) {
             const atom = self.getAtom(atom_index);
-            self.logAtom(atom, log);
+            self.logAtom(atom, atom_index, log);
             if (atom.next) |next| {
                 atom_index = next;
             } else break;

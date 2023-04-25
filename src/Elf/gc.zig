@@ -107,7 +107,7 @@ fn markLive(atom_index: Atom.Index, alive: *std.AutoHashMap(Atom.Index, void), e
 
     log.debug("marking live", .{});
     const atom = elf_file.getAtom(atom_index);
-    elf_file.logAtom(atom, log);
+    elf_file.logAtom(atom, atom_index, log);
 
     for (atom.getRelocs(elf_file)) |rel| {
         const target_atom_index = atom.getTargetAtomIndex(elf_file, rel) orelse continue;
@@ -148,17 +148,19 @@ fn prune(arena: Allocator, alive: std.AutoHashMap(Atom.Index, void), elf_file: *
             if (mem.startsWith(u8, tshdr_name, ".comment")) continue;
 
             log.debug("pruning:", .{});
-            elf_file.logAtom(atom, log);
+            elf_file.logAtom(atom, atom_index, log);
             sym.st_other = Elf.STV_GC;
             removeAtomFromSection(atom_index, sym.st_shndx, elf_file);
             _ = try gc_sections.put(sym.st_shndx, {});
 
-            for (atom.contained.items) |sym_off| {
-                const inner = elf_file.getSymbolPtr(.{
-                    .sym_index = sym_off.sym_index,
-                    .file = atom.file,
-                });
-                inner.st_other = Elf.STV_GC;
+            if (atom.file) |_| {
+                for (object.symtab.items, 0..) |*inner_sym, inner_sym_i| {
+                    const inner_sym_index = @intCast(u32, inner_sym_i);
+                    if (atom.sym_index == inner_sym_i) continue;
+                    const other_atom_index = object.atom_table.get(inner_sym_index) orelse continue;
+                    if (other_atom_index != atom_index) continue;
+                    inner_sym.st_other = Elf.STV_GC;
+                }
             }
 
             if (elf_file.got_entries_map.contains(global)) {
