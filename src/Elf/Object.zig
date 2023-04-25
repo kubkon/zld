@@ -13,13 +13,15 @@ const Atom = @import("Atom.zig");
 const Elf = @import("../Elf.zig");
 
 name: []const u8,
-data: []align(@alignOf(u64)) const u8,
+data: []const u8,
 
 header: elf.Elf64_Ehdr = undefined,
-symtab_index: ?u16 = null,
+s_symtab: []align(1) const elf.Elf64_Sym = &[0]elf.Elf64_Sym{},
+s_strtab: []const u8 = &[0]u8{},
+s_shstrtab: []const u8 = &[0]u8{},
+first_global: ?u32 = null,
 
 symtab: std.ArrayListUnmanaged(elf.Elf64_Sym) = .{},
-first_global: ?u32 = null,
 
 atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
 atom_table: std.AutoHashMapUnmanaged(u32, Atom.Index) = .{},
@@ -69,23 +71,24 @@ pub fn parse(self: *Object, allocator: Allocator) !void {
 
     if (self.header.e_shnum == 0) return;
 
-    self.symtab_index = for (self.getShdrs(), 0..) |shdr, i| switch (shdr.sh_type) {
+    const shdrs = self.getShdrs();
+    self.s_shstrtab = self.getShdrContents(self.header.e_shstrndx);
+
+    const symtab_index = for (self.getShdrs(), 0..) |shdr, i| switch (shdr.sh_type) {
         elf.SHT_SYMTAB => break @intCast(u16, i),
         else => {},
     } else null;
 
-    if (self.symtab_index) |index| {
+    if (symtab_index) |index| {
+        const shdr = shdrs[index];
+        self.first_global = shdr.sh_info;
+
         const symtab = self.getShdrContents(index);
         const nsyms = @divExact(symtab.len, @sizeOf(elf.Elf64_Sym));
-        try self.symtab.appendSlice(allocator, @ptrCast(
-            [*]const elf.Elf64_Sym,
-            @alignCast(@alignOf(elf.Elf64_Sym), symtab.ptr),
-        )[0..nsyms]);
+        self.s_symtab = @ptrCast([*]align(1) const elf.Elf64_Sym, symtab.ptr)[0..nsyms];
+        self.s_strtab = self.getShdrContents(@intCast(u16, shdr.sh_link));
 
-        self.first_global = for (self.symtab.items, 0..) |sym, i| switch (sym.st_bind()) {
-            elf.STB_WEAK, elf.STB_GLOBAL => break @intCast(u32, i),
-            else => {},
-        } else null;
+        try self.symtab.appendUnalignedSlice(allocator, self.s_symtab);
     }
 }
 
@@ -144,7 +147,7 @@ pub fn splitIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
         else => {},
     };
 
-    for (self.getSourceSymtab(), 0..) |sym, sym_id| {
+    for (self.s_symtab, 0..) |sym, sym_id| {
         if (sym.st_shndx == elf.SHN_UNDEF) continue;
         if (elf.SHN_LORESERVE <= sym.st_shndx and sym.st_shndx < elf.SHN_HIRESERVE) continue;
         const map = symbols_by_shndx.getPtr(sym.st_shndx) orelse continue;
@@ -389,35 +392,14 @@ pub inline fn getShdrContents(self: Object, index: u16) []const u8 {
     return self.data[shdr.sh_offset..][0..shdr.sh_size];
 }
 
-pub fn getSourceSymtab(self: Object) []const elf.Elf64_Sym {
-    const index = self.symtab_index orelse return &[0]elf.Elf64_Sym{};
-    const shdr = self.getShdrs()[index];
-    const nsyms = @divExact(shdr.sh_size, @sizeOf(elf.Elf64_Sym));
-    return @ptrCast(
-        [*]const elf.Elf64_Sym,
-        @alignCast(@alignOf(elf.Elf64_Sym), &self.data[shdr.sh_offset]),
-    )[0..nsyms];
-}
-
-pub fn getSourceStrtab(self: Object) []const u8 {
-    const index = self.symtab_index orelse return &[0]u8{};
-    const shdr = self.getShdrs()[index];
-    return self.getShdrContents(@intCast(u16, shdr.sh_link));
-}
-
-pub fn getSourceShstrtab(self: Object) []const u8 {
-    return self.getShdrContents(self.header.e_shstrndx);
-}
-
 pub fn getSourceSymbol(self: Object, index: u32) ?elf.Elf64_Sym {
-    const symtab = self.getSourceSymtab();
-    if (index >= symtab.len) return null;
-    return symtab[index];
+    if (index >= self.s_symtab.len) return null;
+    return self.s_symtab[index];
 }
 
 pub fn getSourceSymbolName(self: Object, index: u32) []const u8 {
-    const sym = self.getSourceSymtab()[index];
-    if (sym.st_info & 0xf == elf.STT_SECTION) {
+    const sym = self.getSourceSymbol(index) orelse return "";
+    if (sym.st_type() == elf.STT_SECTION) {
         const shdr = self.getShdrs()[sym.st_shndx];
         return self.getShString(shdr.sh_name);
     } else {
@@ -443,13 +425,11 @@ pub fn getAtomIndexForSymbol(self: Object, sym_index: u32) ?Atom.Index {
 }
 
 pub fn getString(self: Object, off: u32) []const u8 {
-    const strtab = self.getSourceStrtab();
-    assert(off < strtab.len);
-    return mem.sliceTo(@ptrCast([*:0]const u8, strtab.ptr + off), 0);
+    assert(off < self.s_strtab.len);
+    return mem.sliceTo(@ptrCast([*:0]const u8, self.s_strtab.ptr + off), 0);
 }
 
 pub fn getShString(self: Object, off: u32) []const u8 {
-    const shstrtab = self.getSourceShstrtab();
-    assert(off < shstrtab.len);
-    return mem.sliceTo(@ptrCast([*:0]const u8, shstrtab.ptr + off), 0);
+    assert(off < self.s_shstrtab.len);
+    return mem.sliceTo(@ptrCast([*:0]const u8, self.s_shstrtab.ptr + off), 0);
 }

@@ -150,8 +150,8 @@ pub fn getTargetAtomIndex(self: Atom, elf_file: *Elf, rel: elf.Elf64_Rela) ?Atom
                 .sym_index = r_sym,
                 .file = self.file,
             });
-            const tsym_st_bind = tsym.st_info >> 4;
-            const tsym_st_type = tsym.st_info & 0xf;
+            const tsym_st_bind = tsym.st_bind();
+            const tsym_st_type = tsym.st_type();
             const is_section = tsym_st_type == elf.STT_SECTION;
             const is_local = is_section or tsym_st_bind == elf.STB_LOCAL;
 
@@ -177,8 +177,8 @@ fn getTargetAddress(self: Atom, r_sym: u32, elf_file: *Elf) u64 {
         .sym_index = r_sym,
         .file = self.file,
     });
-    const tsym_st_bind = tsym.st_info >> 4;
-    const tsym_st_type = tsym.st_info & 0xf;
+    const tsym_st_bind = tsym.st_bind();
+    const tsym_st_type = tsym.st_type();
     const is_section = tsym_st_type == elf.STT_SECTION;
     const is_local = is_section or tsym_st_bind == elf.STB_LOCAL;
     log.debug("  (getTargetAddress: %{d}: {s}, local? {})", .{ r_sym, tsym_name, is_local });
@@ -220,7 +220,7 @@ fn isDefinitionAvailable(elf_file: *Elf, global: Elf.SymbolWithLoc) bool {
         const object = elf_file.objects.items[file];
         break :sym object.symtab.items[global.sym_index];
     } else elf_file.locals.items[global.sym_index];
-    return sym.st_info & 0xf != elf.STT_NOTYPE or sym.st_shndx != elf.SHN_UNDEF;
+    return sym.st_type() != elf.STT_NOTYPE or sym.st_shndx != elf.SHN_UNDEF;
 }
 
 pub fn resolveRelocs(self: Atom, atom_index: Atom.Index, elf_file: *Elf, writer: anytype) !void {
@@ -270,7 +270,7 @@ pub fn resolveRelocs(self: Atom, atom_index: Atom.Index, elf_file: *Elf, writer:
             .sym_index = r_sym,
             .file = self.file,
         });
-        const tsym_st_type = tsym.st_info & 0xf;
+        const tsym_st_type = tsym.st_type();
 
         switch (r_type) {
             elf.R_X86_64_NONE => {},

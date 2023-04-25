@@ -194,7 +194,7 @@ pub fn parseObject(self: Archive, allocator: Allocator, offset: u32) !Object {
         break :blk try std.fmt.allocPrint(allocator, "{s}({s})", .{ path, object_name });
     };
     const object_size = try hdr.size();
-    const data = try allocator.allocWithOptions(u8, object_size, @alignOf(u64), null);
+    const data = try allocator.alloc(u8, object_size);
     const amt = try reader.readAll(data);
     if (amt != object_size) {
         return error.Io;

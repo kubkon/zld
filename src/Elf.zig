@@ -649,7 +649,7 @@ fn parseObject(self: *Elf, path: []const u8) !bool {
     const name = try gpa.dupe(u8, path);
     const file_stat = try file.stat();
     const file_size = math.cast(usize, file_stat.size) orelse return error.Overflow;
-    const data = try file.readToEndAllocOptions(gpa, file_size, file_size, @alignOf(u64), null);
+    const data = try file.readToEndAlloc(gpa, file_size);
 
     var object = Object{
         .name = name,
