@@ -23,7 +23,7 @@ const Immediate = dis_x86_64.Immediate;
 sym_index: u32,
 
 /// null means global synthetic symbol table.
-file: ?u32,
+file: u32,
 
 /// Size of this atom
 /// TODO is this really needed given that size is a field of a symbol?
@@ -46,7 +46,7 @@ pub const Index = u32;
 
 pub const empty = Atom{
     .sym_index = 0,
-    .file = undefined,
+    .file = 0,
     .size = 0,
     .alignment = 0,
     .shndx = 0,
@@ -78,15 +78,13 @@ pub fn getName(self: Atom, elf_file: *Elf) []const u8 {
 }
 
 pub fn getCode(self: Atom, elf_file: *Elf) []const u8 {
-    assert(self.file != null);
-    const object = elf_file.objects.items[self.file.?];
+    const object = elf_file.objects.items[self.file];
     return object.getShdrContents(self.shndx);
 }
 
 pub fn getRelocs(self: Atom, elf_file: *Elf) []align(1) const elf.Elf64_Rela {
     if (self.relocs_shndx == @bitCast(u16, @as(i16, -1))) return &[0]elf.Elf64_Rela{};
-    assert(self.file != null);
-    const object = elf_file.objects.items[self.file.?];
+    const object = elf_file.objects.items[self.file];
     const bytes = object.getShdrContents(self.relocs_shndx);
     const nrelocs = @divExact(bytes.len, @sizeOf(elf.Elf64_Rela));
     return @ptrCast([*]align(1) const elf.Elf64_Rela, bytes)[0..nrelocs];
@@ -148,9 +146,8 @@ fn getTargetAddress(self: Atom, rel: elf.Elf64_Rela, elf_file: *Elf) ?u64 {
 }
 
 pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
-    const file = self.file orelse return;
     const gpa = elf_file.base.allocator;
-    const object = elf_file.objects.items[file];
+    const object = elf_file.objects.items[self.file];
     for (self.getRelocs(elf_file)) |rel| {
         // While traversing relocations, synthesize any missing atom.
         // TODO synthesize PLT atoms, GOT atoms, etc.
@@ -183,20 +180,14 @@ fn isDefinitionAvailable(elf_file: *Elf, global: Elf.SymbolWithLoc) bool {
     return sym.st_type() != elf.STT_NOTYPE or sym.st_shndx != elf.SHN_UNDEF;
 }
 
-pub fn resolveRelocs(self: Atom, atom_index: Atom.Index, elf_file: *Elf, writer: anytype) !void {
+pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
     const gpa = elf_file.base.allocator;
     const sym = self.getSymbol(elf_file);
 
-    const code = if (self.file) |_|
-        try gpa.dupe(u8, self.getCode(elf_file))
-    else
-        try gpa.alloc(u8, 8);
+    const code = try gpa.dupe(u8, self.getCode(elf_file));
     defer gpa.free(code);
 
-    const relocs = if (self.file) |_|
-        self.getRelocs(elf_file)
-    else
-        &[1]elf.Elf64_Rela{elf_file.relocs.get(atom_index).?};
+    const relocs = self.getRelocs(elf_file);
 
     for (relocs) |rel| {
         const tsym_loc = Elf.SymbolWithLoc{

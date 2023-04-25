@@ -66,8 +66,6 @@ got_section: SyntheticSection(SymbolWithLoc, *Elf, .{
 atoms: std.ArrayListUnmanaged(Atom) = .{},
 atom_table: std.AutoHashMapUnmanaged(u32, Atom.Index) = .{},
 
-relocs: std.AutoHashMapUnmanaged(Atom.Index, elf.Elf64_Rela) = .{},
-
 const Section = struct {
     shdr: elf.Elf64_Shdr,
     last_atom: ?Atom.Index,
@@ -128,7 +126,6 @@ pub fn deinit(self: *Elf) void {
         gpa.free(key);
     }
     self.atom_table.deinit(gpa);
-    self.relocs.deinit(gpa);
     self.got_section.deinit(gpa);
     self.unresolved.deinit(gpa);
     self.globals.deinit(gpa);
@@ -1073,16 +1070,14 @@ fn allocateAtoms(self: *Elf) !void {
 
             // Update each symbol contained within the Atom
             // Do it the long way for now until we get rid of synthetic sections first...
-            if (atom.file) |file| {
-                const object = &self.objects.items[file];
-                for (object.symtab.items, 0..) |*inner_sym, inner_sym_i| {
-                    const inner_sym_index = @intCast(u32, inner_sym_i);
-                    if (atom.sym_index == inner_sym_i) continue;
-                    const other_atom_index = object.atom_table.get(inner_sym_index) orelse continue;
-                    if (other_atom_index != atom_index) continue;
-                    inner_sym.st_value += base_addr;
-                    inner_sym.st_shndx = shdr_ndx;
-                }
+            const object = &self.objects.items[atom.file];
+            for (object.symtab.items, 0..) |*inner_sym, inner_sym_i| {
+                const inner_sym_index = @intCast(u32, inner_sym_i);
+                if (atom.sym_index == inner_sym_i) continue;
+                const other_atom_index = object.atom_table.get(inner_sym_index) orelse continue;
+                if (other_atom_index != atom_index) continue;
+                inner_sym.st_value += base_addr;
+                inner_sym.st_shndx = shdr_ndx;
             }
 
             base_addr += atom.size;
@@ -1130,7 +1125,7 @@ fn writeAtoms(self: *Elf) !void {
                 shdr.sh_offset + off,
             });
             try stream.seekTo(off);
-            try atom.resolveRelocs(atom_index, self, stream.writer());
+            try atom.resolveRelocs(self, stream.writer());
 
             if (atom.next) |next| {
                 atom_index = next;
@@ -1503,18 +1498,16 @@ pub fn logAtom(self: *Elf, atom: Atom, atom_index: Atom.Index, comptime logger: 
         sym.st_shndx,
     });
 
-    if (atom.file) |file| {
-        const object = self.objects.items[file];
-        for (object.symtab.items, 0..) |inner_sym, i| {
-            const other_atom_index = object.atom_table.get(@intCast(u32, i)) orelse continue;
-            if (other_atom_index != atom_index) continue;
-            const inner_sym_name = self.getSymbolName(.{ .sym_index = @intCast(u32, i), .file = atom.file });
-            logger.debug("    (%{d}, '{s}') @ {x}", .{
-                i,
-                inner_sym_name,
-                inner_sym.st_value,
-            });
-        }
+    const object = self.objects.items[atom.file];
+    for (object.symtab.items, 0..) |inner_sym, i| {
+        const other_atom_index = object.atom_table.get(@intCast(u32, i)) orelse continue;
+        if (other_atom_index != atom_index) continue;
+        const inner_sym_name = self.getSymbolName(.{ .sym_index = @intCast(u32, i), .file = atom.file });
+        logger.debug("    (%{d}, '{s}') @ {x}", .{
+            i,
+            inner_sym_name,
+            inner_sym.st_value,
+        });
     }
 }
 

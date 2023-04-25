@@ -152,14 +152,12 @@ fn prune(arena: Allocator, alive: std.AutoHashMap(Atom.Index, void), elf_file: *
             removeAtomFromSection(atom_index, sym.st_shndx, elf_file);
             _ = try gc_sections.put(sym.st_shndx, {});
 
-            if (atom.file) |_| {
-                for (object.symtab.items, 0..) |*inner_sym, inner_sym_i| {
-                    const inner_sym_index = @intCast(u32, inner_sym_i);
-                    if (atom.sym_index == inner_sym_i) continue;
-                    const other_atom_index = object.atom_table.get(inner_sym_index) orelse continue;
-                    if (other_atom_index != atom_index) continue;
-                    inner_sym.st_other = Elf.STV_GC;
-                }
+            for (object.symtab.items, 0..) |*inner_sym, inner_sym_i| {
+                const inner_sym_index = @intCast(u32, inner_sym_i);
+                if (atom.sym_index == inner_sym_i) continue;
+                const other_atom_index = object.atom_table.get(inner_sym_index) orelse continue;
+                if (other_atom_index != atom_index) continue;
+                inner_sym.st_other = Elf.STV_GC;
             }
         }
     }
