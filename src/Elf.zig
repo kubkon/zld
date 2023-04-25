@@ -60,6 +60,8 @@ got_entries_map: std.AutoArrayHashMapUnmanaged(SymbolWithLoc, Atom.Index) = .{},
 atoms: std.ArrayListUnmanaged(Atom) = .{},
 atom_table: std.AutoHashMapUnmanaged(u32, Atom.Index) = .{},
 
+relocs: std.AutoHashMapUnmanaged(Atom.Index, elf.Elf64_Rela) = .{},
+
 const Section = struct {
     shdr: elf.Elf64_Shdr,
     last_atom: ?Atom.Index,
@@ -123,6 +125,7 @@ pub fn deinit(self: *Elf) void {
         gpa.free(key);
     }
     self.atom_table.deinit(gpa);
+    self.relocs.deinit(gpa);
     self.got_entries_map.deinit(gpa);
     self.unresolved.deinit(gpa);
     self.globals.deinit(gpa);
@@ -246,6 +249,13 @@ pub fn flush(self: *Elf) !void {
         try gc.gcAtoms(self);
     }
 
+    for (self.objects.items) |object| {
+        for (object.atoms.items) |atom_index| {
+            const atom = self.getAtom(atom_index);
+            try atom.scanRelocs(self);
+        }
+    }
+
     try self.setStackSize();
     try self.allocateLoadRSeg();
     try self.allocateLoadRESeg();
@@ -289,6 +299,7 @@ pub fn flush(self: *Elf) !void {
     }
 
     if (build_options.enable_logging) {
+        self.logObjects();
         self.logSymtab();
         self.logSections();
         self.logAtoms();
@@ -859,16 +870,11 @@ pub fn createGotAtom(self: *Elf, target: SymbolWithLoc) !Atom.Index {
     atom.size = @sizeOf(u64);
     atom.alignment = @alignOf(u64);
 
-    var code = try self.base.allocator.alloc(u8, @sizeOf(u64));
-    defer self.base.allocator.free(code);
-    mem.set(u8, code, 0);
-    try atom.code.appendSlice(self.base.allocator, code);
-
     const tsym_name = self.getSymbolName(target);
     const r_sym = @intCast(u64, target.sym_index) << 32;
     const r_addend: i64 = target.file orelse -1;
     const r_info = r_sym | elf.R_X86_64_64;
-    try atom.relocs.append(self.base.allocator, .{
+    try self.relocs.putNoClobber(self.base.allocator, atom_index, .{
         .r_offset = 0,
         .r_info = r_info,
         .r_addend = r_addend,
@@ -1105,7 +1111,8 @@ fn allocateAtoms(self: *Elf) !void {
             sym.st_shndx = shdr_ndx;
             sym.st_size = atom.size;
 
-            log.debug("  atom '{s}' allocated from 0x{x} to 0x{x}", .{
+            log.debug("  ATOM(%{d},'{s}') allocated from 0x{x} to 0x{x}", .{
+                atom.sym_index,
                 atom.getName(self),
                 base_addr,
                 base_addr + atom.size,
@@ -1123,63 +1130,6 @@ fn allocateAtoms(self: *Elf) !void {
 
             base_addr += atom.size;
 
-            if (atom.next) |next| {
-                atom_index = next;
-            } else break;
-        }
-    }
-}
-
-pub fn logAtom(self: *Elf, atom: Atom, comptime logger: anytype) void {
-    const sym = atom.getSymbol(self);
-    const sym_name = atom.getName(self);
-    logger.debug("  ATOM(%{d}, '{s}') @ {x} (sizeof({x}), alignof({x})) in object({?}) in sect({d})", .{
-        atom.sym_index,
-        sym_name,
-        sym.st_value,
-        sym.st_size,
-        atom.alignment,
-        atom.file,
-        sym.st_shndx,
-    });
-
-    for (atom.contained.items) |sym_off| {
-        const inner_sym = self.getSymbol(.{
-            .sym_index = sym_off.sym_index,
-            .file = atom.file,
-        });
-        const inner_sym_name = self.getSymbolName(.{
-            .sym_index = sym_off.sym_index,
-            .file = atom.file,
-        });
-        logger.debug("    (%{d}, '{s}') @ {x} ({x})", .{
-            sym_off.sym_index,
-            inner_sym_name,
-            inner_sym.st_value,
-            sym_off.offset,
-        });
-    }
-}
-
-fn logAtoms(self: *Elf) void {
-    const slice = self.sections.slice();
-    for (slice.items(.last_atom), 0..) |last_atom, i| {
-        var atom_index = last_atom orelse continue;
-        const ndx = @intCast(u16, i);
-        const shdr = slice.items(.shdr)[ndx];
-
-        log.debug(">>> {s}", .{self.shstrtab.getAssumeExists(shdr.sh_name)});
-
-        while (true) {
-            const atom = self.getAtom(atom_index);
-            if (atom.prev) |prev| {
-                atom_index = prev;
-            } else break;
-        }
-
-        while (true) {
-            const atom = self.getAtom(atom_index);
-            self.logAtom(atom, log);
             if (atom.next) |next| {
                 atom_index = next;
             } else break;
@@ -1211,15 +1161,19 @@ fn writeAtoms(self: *Elf) !void {
         defer self.base.allocator.free(buffer);
         mem.set(u8, buffer, 0);
 
+        var stream = std.io.fixedBufferStream(buffer);
+
         while (true) {
             const atom = self.getAtomPtr(atom_index);
             const sym = atom.getSymbol(self);
-            try atom.resolveRelocs(self);
             const off = sym.st_value - shdr.sh_addr;
-
-            log.debug("  writing atom '{s}' at offset 0x{x}", .{ atom.getName(self), shdr.sh_offset + off });
-
-            mem.copy(u8, buffer[off..][0..atom.size], atom.code.items);
+            log.debug("  writing ATOM(%{d},'{s}') at offset 0x{x}", .{
+                atom.sym_index,
+                atom.getName(self),
+                shdr.sh_offset + off,
+            });
+            try stream.seekTo(off);
+            try atom.resolveRelocs(atom_index, self, stream.writer());
 
             if (atom.next) |next| {
                 atom_index = next;
@@ -1493,6 +1447,13 @@ pub fn addAtom(self: *Elf) !Atom.Index {
     return index;
 }
 
+fn logObjects(self: Elf) void {
+    log.debug("objects:", .{});
+    for (self.objects.items, 0..) |object, i| {
+        log.debug("  {d}: {s}", .{ i, object.name });
+    }
+}
+
 fn logSections(self: Elf) void {
     log.debug("sections:", .{});
     for (self.sections.items(.shdr), 0..) |shdr, i| {
@@ -1506,8 +1467,8 @@ fn logSections(self: Elf) void {
 }
 
 fn logSymtab(self: Elf) void {
-    for (self.objects.items) |object| {
-        log.debug("locals in {s}", .{object.name});
+    for (self.objects.items, 0..) |object, object_id| {
+        log.debug("object({d}):", .{object_id});
         for (object.symtab.items, 0..) |sym, i| {
             // const st_type = sym.st_info & 0xf;
             const st_bind = sym.st_info >> 4;
@@ -1535,6 +1496,63 @@ fn logSymtab(self: Elf) void {
                 self.strtab.getAssumeExists(sym.st_name),
                 sym.st_value,
             });
+        }
+    }
+}
+
+pub fn logAtom(self: *Elf, atom: Atom, comptime logger: anytype) void {
+    const sym = atom.getSymbol(self);
+    const sym_name = atom.getName(self);
+    logger.debug("  ATOM(%{d}, '{s}') @ {x} (sizeof({x}), alignof({x})) in object({?}) in sect({d})", .{
+        atom.sym_index,
+        sym_name,
+        sym.st_value,
+        sym.st_size,
+        atom.alignment,
+        atom.file,
+        sym.st_shndx,
+    });
+
+    for (atom.contained.items) |sym_off| {
+        const inner_sym = self.getSymbol(.{
+            .sym_index = sym_off.sym_index,
+            .file = atom.file,
+        });
+        const inner_sym_name = self.getSymbolName(.{
+            .sym_index = sym_off.sym_index,
+            .file = atom.file,
+        });
+        logger.debug("    (%{d}, '{s}') @ {x} ({x})", .{
+            sym_off.sym_index,
+            inner_sym_name,
+            inner_sym.st_value,
+            sym_off.offset,
+        });
+    }
+}
+
+fn logAtoms(self: *Elf) void {
+    const slice = self.sections.slice();
+    for (slice.items(.last_atom), 0..) |last_atom, i| {
+        var atom_index = last_atom orelse continue;
+        const ndx = @intCast(u16, i);
+        const shdr = slice.items(.shdr)[ndx];
+
+        log.debug(">>> {s}", .{self.shstrtab.getAssumeExists(shdr.sh_name)});
+
+        while (true) {
+            const atom = self.getAtom(atom_index);
+            if (atom.prev) |prev| {
+                atom_index = prev;
+            } else break;
+        }
+
+        while (true) {
+            const atom = self.getAtom(atom_index);
+            self.logAtom(atom, log);
+            if (atom.next) |next| {
+                atom_index = next;
+            } else break;
         }
     }
 }

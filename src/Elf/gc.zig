@@ -109,7 +109,7 @@ fn markLive(atom_index: Atom.Index, alive: *std.AutoHashMap(Atom.Index, void), e
     const atom = elf_file.getAtom(atom_index);
     elf_file.logAtom(atom, log);
 
-    for (atom.relocs.items) |rel| {
+    for (atom.getRelocs(elf_file)) |rel| {
         const target_atom_index = atom.getTargetAtomIndex(elf_file, rel) orelse continue;
         try markLive(target_atom_index, alive, elf_file);
     }

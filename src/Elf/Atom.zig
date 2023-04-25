@@ -2,13 +2,17 @@ const Atom = @This();
 
 const std = @import("std");
 const assert = std.debug.assert;
+const dis_x86_64 = @import("dis_x86_64");
 const elf = std.elf;
 const log = std.log.scoped(.elf);
 const math = std.math;
 const mem = std.mem;
 
 const Allocator = mem.Allocator;
+const Disassembler = dis_x86_64.Disassembler;
 const Elf = @import("../Elf.zig");
+const Instruction = dis_x86_64.Instruction;
+const Immediate = dis_x86_64.Immediate;
 
 /// Each decl always gets a local symbol with the fully qualified name.
 /// The vaddr and size are found here directly.
@@ -24,9 +28,6 @@ file: ?u32,
 /// List of symbols contained within this atom
 contained: std.ArrayListUnmanaged(SymbolAtOffset) = .{},
 
-/// Code (may be non-relocated) this atom represents
-code: std.ArrayListUnmanaged(u8) = .{},
-
 /// Size of this atom
 /// TODO is this really needed given that size is a field of a symbol?
 size: u32,
@@ -34,8 +35,11 @@ size: u32,
 /// Alignment of this atom. Unlike in MachO, minimum alignment is 1.
 alignment: u32,
 
-/// List of relocations belonging to this atom.
-relocs: std.ArrayListUnmanaged(elf.Elf64_Rela) = .{},
+/// Index of the input section.
+shndx: u16,
+
+/// Index of the input section containing this atom's relocs.
+relocs_shndx: u16,
 
 /// Points to the previous and next neighbours
 next: ?Index,
@@ -64,31 +68,14 @@ pub const empty = Atom{
     .file = undefined,
     .size = 0,
     .alignment = 0,
+    .shndx = 0,
+    .relocs_shndx = @bitCast(u16, @as(i16, -1)),
     .prev = null,
     .next = null,
 };
 
 pub fn deinit(self: *Atom, allocator: Allocator) void {
-    self.relocs.deinit(allocator);
-    self.code.deinit(allocator);
     self.contained.deinit(allocator);
-}
-
-pub fn format(self: Atom, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
-    _ = fmt;
-    _ = options;
-    try std.fmt.format(writer, "Atom {{ ", .{});
-    try std.fmt.format(writer, "  .sym_index = {d}, ", .{self.sym_index});
-    try std.fmt.format(writer, "  .file = {d}, ", .{self.file});
-    try std.fmt.format(writer, "  .contained = {any}, ", .{self.contained.items});
-    try std.fmt.format(writer, "  .code = {x}, ", .{std.fmt.fmtSliceHexLower(if (self.code.items.len > 64)
-        self.code.items[0..64]
-    else
-        self.code.items)});
-    try std.fmt.format(writer, "  .size = {d}, ", .{self.size});
-    try std.fmt.format(writer, "  .alignment = {d}, ", .{self.alignment});
-    try std.fmt.format(writer, "  .relocs = {any}, ", .{self.relocs.items});
-    try std.fmt.format(writer, "}}", .{});
 }
 
 pub fn getSymbol(self: Atom, elf_file: *Elf) elf.Elf64_Sym {
@@ -111,6 +98,21 @@ pub fn getName(self: Atom, elf_file: *Elf) []const u8 {
         .sym_index = self.sym_index,
         .file = self.file,
     });
+}
+
+pub fn getCode(self: Atom, elf_file: *Elf) []const u8 {
+    assert(self.file != null);
+    const object = elf_file.objects.items[self.file.?];
+    return object.getShdrContents(self.shndx);
+}
+
+pub fn getRelocs(self: Atom, elf_file: *Elf) []align(1) const elf.Elf64_Rela {
+    if (self.relocs_shndx == @bitCast(u16, @as(i16, -1))) return &[0]elf.Elf64_Rela{};
+    assert(self.file != null);
+    const object = elf_file.objects.items[self.file.?];
+    const bytes = object.getShdrContents(self.relocs_shndx);
+    const nrelocs = @divExact(bytes.len, @sizeOf(elf.Elf64_Rela));
+    return @ptrCast([*]align(1) const elf.Elf64_Rela, bytes)[0..nrelocs];
 }
 
 pub fn getTargetAtomIndex(self: Atom, elf_file: *Elf, rel: elf.Elf64_Rela) ?Atom.Index {
@@ -190,14 +192,54 @@ fn getTargetAddress(self: Atom, r_sym: u32, elf_file: *Elf) u64 {
     return tsym.st_value;
 }
 
-pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
-    const sym = self.getSymbol(elf_file);
-    const sym_name = self.getName(elf_file);
-    log.debug("resolving relocs in atom '{s}'", .{sym_name});
+pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
+    const file = self.file orelse return;
+    const gpa = elf_file.base.allocator;
+    const object = elf_file.objects.items[file];
+    for (self.getRelocs(elf_file)) |rel| {
+        // While traversing relocations, synthesize any missing atom.
+        // TODO synthesize PLT atoms, GOT atoms, etc.
+        const tsym_name = object.getSourceSymbolName(rel.r_sym());
+        switch (rel.r_type()) {
+            elf.R_X86_64_REX_GOTPCRELX, elf.R_X86_64_GOTPCREL => blk: {
+                const global = elf_file.globals.get(tsym_name).?;
+                if (elf_file.got_entries_map.contains(global)) break :blk;
+                log.debug("R_X86_64_GOTPCREL: creating GOT atom: [() -> {s}]", .{
+                    tsym_name,
+                });
+                const got_atom = try elf_file.createGotAtom(global);
+                try elf_file.got_entries_map.putNoClobber(gpa, global, got_atom);
+            },
+            else => {},
+        }
+    }
+}
 
+fn isDefinitionAvailable(elf_file: *Elf, global: Elf.SymbolWithLoc) bool {
+    const sym = if (global.file) |file| sym: {
+        const object = elf_file.objects.items[file];
+        break :sym object.symtab.items[global.sym_index];
+    } else elf_file.locals.items[global.sym_index];
+    return sym.st_info & 0xf != elf.STT_NOTYPE or sym.st_shndx != elf.SHN_UNDEF;
+}
+
+pub fn resolveRelocs(self: Atom, atom_index: Atom.Index, elf_file: *Elf, writer: anytype) !void {
+    const gpa = elf_file.base.allocator;
+    const sym = self.getSymbol(elf_file);
     const is_got_atom = if (elf_file.got_sect_index) |ndx| ndx == sym.st_shndx else false;
 
-    for (self.relocs.items) |rel| {
+    const code = if (self.file) |_|
+        try gpa.dupe(u8, self.getCode(elf_file))
+    else
+        try gpa.alloc(u8, 8);
+    defer gpa.free(code);
+
+    const relocs = if (self.file) |_|
+        self.getRelocs(elf_file)
+    else
+        &[1]elf.Elf64_Rela{elf_file.relocs.get(atom_index).?};
+
+    for (relocs) |rel| {
         const r_sym = rel.r_sym();
         const r_type = rel.r_type();
 
@@ -216,7 +258,7 @@ pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
                 .file = file,
             });
             log.debug("R_X86_64_64: (GOT) {x}: [() => 0x{x}] ({s})", .{ rel.r_offset, target, tsym_name });
-            mem.writeIntLittle(u64, self.code.items[rel.r_offset..][0..8], target);
+            mem.writeIntLittle(u64, code[rel.r_offset..][0..8], target);
             continue;
         }
 
@@ -235,7 +277,7 @@ pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
             elf.R_X86_64_64 => {
                 const target = @intCast(i64, self.getTargetAddress(r_sym, elf_file)) + rel.r_addend;
                 log.debug("R_X86_64_64: {x}: [() => 0x{x}] ({s})", .{ rel.r_offset, target, tsym_name });
-                mem.writeIntLittle(i64, self.code.items[rel.r_offset..][0..8], target);
+                mem.writeIntLittle(i64, code[rel.r_offset..][0..8], target);
             },
             elf.R_X86_64_PC32 => {
                 const source = @intCast(i64, sym.st_value + rel.r_offset);
@@ -247,7 +289,7 @@ pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
                     target,
                     tsym_name,
                 });
-                mem.writeIntLittle(i32, self.code.items[rel.r_offset..][0..4], displacement);
+                mem.writeIntLittle(i32, code[rel.r_offset..][0..4], displacement);
             },
             elf.R_X86_64_PLT32 => {
                 const source = @intCast(i64, sym.st_value + rel.r_offset);
@@ -259,7 +301,7 @@ pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
                     target,
                     tsym_name,
                 });
-                mem.writeIntLittle(i32, self.code.items[rel.r_offset..][0..4], displacement);
+                mem.writeIntLittle(i32, code[rel.r_offset..][0..4], displacement);
             },
             elf.R_X86_64_32 => {
                 const target = self.getTargetAddress(r_sym, elf_file);
@@ -270,7 +312,7 @@ pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
                     return error.RelocationOverflow;
                 };
                 log.debug("R_X86_64_32: {x}: [() => 0x{x}] ({s})", .{ rel.r_offset, scaled, tsym_name });
-                mem.writeIntLittle(u32, self.code.items[rel.r_offset..][0..4], scaled);
+                mem.writeIntLittle(u32, code[rel.r_offset..][0..4], scaled);
             },
             elf.R_X86_64_32S => {
                 const target = self.getTargetAddress(r_sym, elf_file);
@@ -281,7 +323,7 @@ pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
                     return error.RelocationOverflow;
                 };
                 log.debug("R_X86_64_32S: {x}: [() => 0x{x}] ({s})", .{ rel.r_offset, scaled, tsym_name });
-                mem.writeIntLittle(i32, self.code.items[rel.r_offset..][0..4], scaled);
+                mem.writeIntLittle(i32, code[rel.r_offset..][0..4], scaled);
             },
             elf.R_X86_64_REX_GOTPCRELX, elf.R_X86_64_GOTPCREL => outer: {
                 const source = @intCast(i64, sym.st_value + rel.r_offset);
@@ -313,7 +355,7 @@ pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
                     tsym_name,
                 });
                 const displacement = @intCast(i32, target - source + rel.r_addend);
-                mem.writeIntLittle(i32, self.code.items[rel.r_offset..][0..4], displacement);
+                mem.writeIntLittle(i32, code[rel.r_offset..][0..4], displacement);
             },
             elf.R_X86_64_TPOFF32 => {
                 assert(tsym_st_type == elf.STT_TLS);
@@ -334,7 +376,7 @@ pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
                     tls_offset,
                     tsym_name,
                 });
-                mem.writeIntLittle(u32, self.code.items[rel.r_offset..][0..4], tls_offset);
+                mem.writeIntLittle(u32, code[rel.r_offset..][0..4], tls_offset);
             },
             elf.R_X86_64_DTPOFF64 => {
                 const source = sym.st_value + rel.r_offset;
@@ -377,4 +419,6 @@ pub fn resolveRelocs(self: *Atom, elf_file: *Elf) !void {
             },
         }
     }
+
+    try writer.writeAll(code);
 }

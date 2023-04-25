@@ -12,11 +12,6 @@ const Allocator = mem.Allocator;
 const Atom = @import("Atom.zig");
 const Elf = @import("../Elf.zig");
 
-const dis_x86_64 = @import("dis_x86_64");
-const Disassembler = dis_x86_64.Disassembler;
-const Instruction = dis_x86_64.Instruction;
-const Immediate = dis_x86_64.Immediate;
-
 name: []const u8,
 data: []align(@alignOf(u64)) const u8,
 
@@ -176,6 +171,11 @@ pub fn splitIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
             atom.file = object_id;
             atom.size = @intCast(u32, shdr.sh_size);
             atom.alignment = @intCast(u32, shdr.sh_addralign);
+            atom.shndx = ndx;
+
+            if (rel_shdrs.get(ndx)) |rel_ndx| {
+                atom.relocs_shndx = rel_ndx;
+            }
 
             // TODO if --gc-sections and there is exactly one contained symbol,
             // we can prune the main one. For example, in this situation we
@@ -191,8 +191,7 @@ pub fn splitIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
 
             for (syms.items) |sym_id| {
                 const sym = self.getSourceSymbol(sym_id).?;
-                const is_sect_sym = sym.st_info & 0xf == elf.STT_SECTION;
-                if (is_sect_sym) {
+                if (sym.st_type() == elf.STT_SECTION) {
                     const osym = self.getSymbolPtr(sym_id);
                     osym.* = .{
                         .st_name = 0,
@@ -225,168 +224,158 @@ pub fn splitIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
                 break :blk index;
             };
             try self.atom_table.putNoClobber(allocator, atom.sym_index, atom_index);
-
-            var code = if (shdr.sh_type == elf.SHT_NOBITS) blk: {
-                var code = try allocator.alloc(u8, atom.size);
-                mem.set(u8, code, 0);
-                break :blk code;
-            } else try allocator.dupe(u8, self.getShdrContents(ndx));
-            defer allocator.free(code);
-
-            if (rel_shdrs.get(ndx)) |rel_ndx| {
-                const rel_shdr = shdrs[rel_ndx];
-                const raw_relocs = self.getShdrContents(rel_ndx);
-
-                const nrelocs = @divExact(rel_shdr.sh_size, rel_shdr.sh_entsize);
-                try atom.relocs.ensureTotalCapacityPrecise(allocator, nrelocs);
-
-                var count: usize = 0;
-                while (count < nrelocs) : (count += 1) {
-                    const bytes = raw_relocs[count * rel_shdr.sh_entsize ..][0..rel_shdr.sh_entsize];
-                    var rel = blk: {
-                        if (rel_shdr.sh_type == elf.SHT_REL) {
-                            const rel = @ptrCast(*const elf.Elf64_Rel, @alignCast(@alignOf(elf.Elf64_Rel), bytes)).*;
-                            // TODO parse addend from the placeholder
-                            // const addend = mem.readIntLittle(i32, code[rel.r_offset..][0..4]);
-                            // break :blk .{
-                            //     .r_offset = rel.r_offset,
-                            //     .r_info = rel.r_info,
-                            //     .r_addend = addend,
-                            // };
-                            log.err("TODO need to parse addend embedded in the relocation placeholder for SHT_REL", .{});
-                            log.err("  for relocation {}", .{rel});
-                            return error.TODOParseAddendFromPlaceholder;
-                        }
-
-                        break :blk @ptrCast(*const elf.Elf64_Rela, @alignCast(@alignOf(elf.Elf64_Rela), bytes)).*;
-                    };
-
-                    // While traversing relocations, synthesize any missing atom.
-                    // TODO synthesize PLT atoms, GOT atoms, etc.
-                    const tsym_name = self.getSourceSymbolName(rel.r_sym());
-                    switch (rel.r_type()) {
-                        elf.R_X86_64_REX_GOTPCRELX => blk: {
-                            const global = elf_file.globals.get(tsym_name).?;
-                            if (isDefinitionAvailable(elf_file, global)) opt: {
-                                // Link-time constant, try to optimize it away.
-                                var disassembler = Disassembler.init(code[rel.r_offset - 3 ..]);
-                                const maybe_inst = disassembler.next() catch break :opt;
-                                const inst = maybe_inst orelse break :opt;
-
-                                // TODO can we optimise anything that isn't an RM encoding?
-                                if (inst.encoding.data.op_en != .rm) break :opt;
-                                if (inst.ops[1] != .mem) break :opt;
-                                if (inst.ops[1].mem != .rip) break :opt;
-
-                                var stream = std.io.fixedBufferStream(code[rel.r_offset - 3 ..][0..7]);
-                                const writer = stream.writer();
-
-                                switch (inst.encoding.mnemonic) {
-                                    .mov => {
-                                        // rewrite to LEA
-                                        const new_inst = try Instruction.new(inst.prefix, .lea, &inst.ops);
-                                        try new_inst.encode(writer);
-                                        const r_sym = rel.r_sym();
-                                        rel.r_info = (@intCast(u64, r_sym) << 32) | elf.R_X86_64_PC32;
-                                        log.debug("rewriting R_X86_64_REX_GOTPCRELX -> R_X86_64_PC32", .{});
-                                        log.debug("  {} -> {}", .{ inst, new_inst });
-                                        break :blk;
-                                    },
-                                    .cmp => {
-                                        // rewrite to CMP MI encoding
-                                        const new_inst = try Instruction.new(inst.prefix, .cmp, &.{
-                                            inst.ops[0],
-                                            // TODO: hack to force imm32s in the assembler
-                                            .{ .imm = Immediate.s(-129) },
-                                        });
-                                        try new_inst.encode(writer);
-
-                                        const r_sym = rel.r_sym();
-                                        rel.r_info = (@intCast(u64, r_sym) << 32) | elf.R_X86_64_32;
-                                        rel.r_addend = 0;
-                                        log.debug("rewriting R_X86_64_REX_GOTPCRELX -> R_X86_64_32", .{});
-                                        log.debug("  {} -> {}", .{ inst, new_inst });
-
-                                        break :blk;
-                                    },
-                                    else => {},
-                                }
-                            }
-
-                            if (elf_file.got_entries_map.contains(global)) break :blk;
-                            log.debug("R_X86_64_REX_GOTPCRELX: creating GOT atom: [() -> {s}]", .{
-                                tsym_name,
-                            });
-                            const got_atom = try elf_file.createGotAtom(global);
-                            try elf_file.got_entries_map.putNoClobber(allocator, global, got_atom);
-                        },
-                        elf.R_X86_64_GOTPCREL => blk: {
-                            const global = elf_file.globals.get(tsym_name).?;
-                            if (elf_file.got_entries_map.contains(global)) break :blk;
-                            log.debug("R_X86_64_GOTPCREL: creating GOT atom: [() -> {s}]", .{
-                                tsym_name,
-                            });
-                            const got_atom = try elf_file.createGotAtom(global);
-                            try elf_file.got_entries_map.putNoClobber(allocator, global, got_atom);
-                        },
-                        elf.R_X86_64_GOTTPOFF => blk: {
-                            const global = elf_file.globals.get(tsym_name).?;
-                            if (isDefinitionAvailable(elf_file, global)) {
-                                // Link-time constant, try to optimize it away.
-                                var disassembler = Disassembler.init(code[rel.r_offset - 3 ..]);
-                                const maybe_inst = disassembler.next() catch break :blk;
-                                const inst = maybe_inst orelse break :blk;
-
-                                if (inst.encoding.data.op_en != .rm) break :blk;
-                                if (inst.ops[1] != .mem) break :blk;
-                                if (inst.ops[1].mem != .rip) break :blk;
-
-                                var stream = std.io.fixedBufferStream(code[rel.r_offset - 3 ..][0..7]);
-                                const writer = stream.writer();
-
-                                switch (inst.encoding.mnemonic) {
-                                    .mov => {
-                                        // rewrite to MOV MI encoding
-                                        const new_inst = try Instruction.new(inst.prefix, .mov, &.{
-                                            inst.ops[0],
-                                            // TODO: hack to force imm32s in the assembler
-                                            .{ .imm = Immediate.s(-129) },
-                                        });
-                                        try new_inst.encode(writer);
-
-                                        const r_sym = rel.r_sym();
-                                        rel.r_info = (@intCast(u64, r_sym) << 32) | elf.R_X86_64_TPOFF32;
-                                        rel.r_addend = 0;
-                                        log.debug("rewriting R_X86_64_GOTTPOFF -> R_X86_64_TPOFF32", .{});
-                                        log.debug("  {} -> {}", .{ inst, new_inst });
-                                    },
-                                    else => {},
-                                }
-                            }
-                        },
-                        elf.R_X86_64_DTPOFF64 => {
-                            const global = elf_file.globals.get(tsym_name).?;
-                            if (isDefinitionAvailable(elf_file, global)) {
-                                // rewrite into TPOFF32
-                                const r_sym = rel.r_sym();
-                                rel.r_info = (@intCast(u64, r_sym) << 32) | elf.R_X86_64_TPOFF32;
-                                rel.r_addend = 0;
-                                log.debug("rewriting R_X86_64_DTPOFF64 -> R_X86_64_TPOFF32", .{});
-                            }
-                        },
-                        else => {},
-                    }
-
-                    atom.relocs.appendAssumeCapacity(rel);
-                }
-            }
-
-            try atom.code.appendSlice(allocator, code);
             try elf_file.addAtomToSection(atom_index, tshdr_ndx);
         },
         else => {},
     };
 }
+// if (rel_shdrs.get(ndx)) |rel_ndx| {
+//     const rel_shdr = shdrs[rel_ndx];
+//     const raw_relocs = self.getShdrContents(rel_ndx);
+
+//     const nrelocs = @divExact(rel_shdr.sh_size, rel_shdr.sh_entsize);
+//     try atom.relocs.ensureTotalCapacityPrecise(allocator, nrelocs);
+
+//     var count: usize = 0;
+//     while (count < nrelocs) : (count += 1) {
+//         const bytes = raw_relocs[count * rel_shdr.sh_entsize ..][0..rel_shdr.sh_entsize];
+//         var rel = blk: {
+//             if (rel_shdr.sh_type == elf.SHT_REL) {
+//                 const rel = @ptrCast(*const elf.Elf64_Rel, @alignCast(@alignOf(elf.Elf64_Rel), bytes)).*;
+//                 // TODO parse addend from the placeholder
+//                 // const addend = mem.readIntLittle(i32, code[rel.r_offset..][0..4]);
+//                 // break :blk .{
+//                 //     .r_offset = rel.r_offset,
+//                 //     .r_info = rel.r_info,
+//                 //     .r_addend = addend,
+//                 // };
+//                 log.err("TODO need to parse addend embedded in the relocation placeholder for SHT_REL", .{});
+//                 log.err("  for relocation {}", .{rel});
+//                 return error.TODOParseAddendFromPlaceholder;
+//             }
+
+//             break :blk @ptrCast(*const elf.Elf64_Rela, @alignCast(@alignOf(elf.Elf64_Rela), bytes)).*;
+//         };
+
+//         // While traversing relocations, synthesize any missing atom.
+//         // TODO synthesize PLT atoms, GOT atoms, etc.
+//         const tsym_name = self.getSourceSymbolName(rel.r_sym());
+//         switch (rel.r_type()) {
+//             elf.R_X86_64_REX_GOTPCRELX => blk: {
+//                 const global = elf_file.globals.get(tsym_name).?;
+//                 if (isDefinitionAvailable(elf_file, global)) opt: {
+//                     // Link-time constant, try to optimize it away.
+//                     var disassembler = Disassembler.init(code[rel.r_offset - 3 ..]);
+//                     const maybe_inst = disassembler.next() catch break :opt;
+//                     const inst = maybe_inst orelse break :opt;
+
+//                     // TODO can we optimise anything that isn't an RM encoding?
+//                     if (inst.encoding.data.op_en != .rm) break :opt;
+//                     if (inst.ops[1] != .mem) break :opt;
+//                     if (inst.ops[1].mem != .rip) break :opt;
+
+//                     var stream = std.io.fixedBufferStream(code[rel.r_offset - 3 ..][0..7]);
+//                     const writer = stream.writer();
+
+//                     switch (inst.encoding.mnemonic) {
+//                         .mov => {
+//                             // rewrite to LEA
+//                             const new_inst = try Instruction.new(inst.prefix, .lea, &inst.ops);
+//                             try new_inst.encode(writer);
+//                             const r_sym = rel.r_sym();
+//                             rel.r_info = (@intCast(u64, r_sym) << 32) | elf.R_X86_64_PC32;
+//                             log.debug("rewriting R_X86_64_REX_GOTPCRELX -> R_X86_64_PC32", .{});
+//                             log.debug("  {} -> {}", .{ inst, new_inst });
+//                             break :blk;
+//                         },
+//                         .cmp => {
+//                             // rewrite to CMP MI encoding
+//                             const new_inst = try Instruction.new(inst.prefix, .cmp, &.{
+//                                 inst.ops[0],
+//                                 // TODO: hack to force imm32s in the assembler
+//                                 .{ .imm = Immediate.s(-129) },
+//                             });
+//                             try new_inst.encode(writer);
+
+//                             const r_sym = rel.r_sym();
+//                             rel.r_info = (@intCast(u64, r_sym) << 32) | elf.R_X86_64_32;
+//                             rel.r_addend = 0;
+//                             log.debug("rewriting R_X86_64_REX_GOTPCRELX -> R_X86_64_32", .{});
+//                             log.debug("  {} -> {}", .{ inst, new_inst });
+
+//                             break :blk;
+//                         },
+//                         else => {},
+//                     }
+//                 }
+
+//                 if (elf_file.got_entries_map.contains(global)) break :blk;
+//                 log.debug("R_X86_64_REX_GOTPCRELX: creating GOT atom: [() -> {s}]", .{
+//                     tsym_name,
+//                 });
+//                 const got_atom = try elf_file.createGotAtom(global);
+//                 try elf_file.got_entries_map.putNoClobber(allocator, global, got_atom);
+//             },
+//             elf.R_X86_64_GOTPCREL => blk: {
+//                 const global = elf_file.globals.get(tsym_name).?;
+//                 if (elf_file.got_entries_map.contains(global)) break :blk;
+//                 log.debug("R_X86_64_GOTPCREL: creating GOT atom: [() -> {s}]", .{
+//                     tsym_name,
+//                 });
+//                 const got_atom = try elf_file.createGotAtom(global);
+//                 try elf_file.got_entries_map.putNoClobber(allocator, global, got_atom);
+//             },
+//             elf.R_X86_64_GOTTPOFF => blk: {
+//                 const global = elf_file.globals.get(tsym_name).?;
+//                 if (isDefinitionAvailable(elf_file, global)) {
+//                     // Link-time constant, try to optimize it away.
+//                     var disassembler = Disassembler.init(code[rel.r_offset - 3 ..]);
+//                     const maybe_inst = disassembler.next() catch break :blk;
+//                     const inst = maybe_inst orelse break :blk;
+
+//                     if (inst.encoding.data.op_en != .rm) break :blk;
+//                     if (inst.ops[1] != .mem) break :blk;
+//                     if (inst.ops[1].mem != .rip) break :blk;
+
+//                     var stream = std.io.fixedBufferStream(code[rel.r_offset - 3 ..][0..7]);
+//                     const writer = stream.writer();
+
+//                     switch (inst.encoding.mnemonic) {
+//                         .mov => {
+//                             // rewrite to MOV MI encoding
+//                             const new_inst = try Instruction.new(inst.prefix, .mov, &.{
+//                                 inst.ops[0],
+//                                 // TODO: hack to force imm32s in the assembler
+//                                 .{ .imm = Immediate.s(-129) },
+//                             });
+//                             try new_inst.encode(writer);
+
+//                             const r_sym = rel.r_sym();
+//                             rel.r_info = (@intCast(u64, r_sym) << 32) | elf.R_X86_64_TPOFF32;
+//                             rel.r_addend = 0;
+//                             log.debug("rewriting R_X86_64_GOTTPOFF -> R_X86_64_TPOFF32", .{});
+//                             log.debug("  {} -> {}", .{ inst, new_inst });
+//                         },
+//                         else => {},
+//                     }
+//                 }
+//             },
+//             elf.R_X86_64_DTPOFF64 => {
+//                 const global = elf_file.globals.get(tsym_name).?;
+//                 if (isDefinitionAvailable(elf_file, global)) {
+//                     // rewrite into TPOFF32
+//                     const r_sym = rel.r_sym();
+//                     rel.r_info = (@intCast(u64, r_sym) << 32) | elf.R_X86_64_TPOFF32;
+//                     rel.r_addend = 0;
+//                     log.debug("rewriting R_X86_64_DTPOFF64 -> R_X86_64_TPOFF32", .{});
+//                 }
+//             },
+//             else => {},
+//         }
+
+//         atom.relocs.appendAssumeCapacity(rel);
+//     }
+// }
 
 pub inline fn getShdrs(self: Object) []const elf.Elf64_Shdr {
     return @ptrCast(
@@ -395,7 +384,7 @@ pub inline fn getShdrs(self: Object) []const elf.Elf64_Shdr {
     )[0..self.header.e_shnum];
 }
 
-inline fn getShdrContents(self: Object, index: u16) []const u8 {
+pub inline fn getShdrContents(self: Object, index: u16) []const u8 {
     const shdr = self.getShdrs()[index];
     return self.data[shdr.sh_offset..][0..shdr.sh_size];
 }
@@ -463,12 +452,4 @@ pub fn getShString(self: Object, off: u32) []const u8 {
     const shstrtab = self.getSourceShstrtab();
     assert(off < shstrtab.len);
     return mem.sliceTo(@ptrCast([*:0]const u8, shstrtab.ptr + off), 0);
-}
-
-fn isDefinitionAvailable(elf_file: *Elf, global: Elf.SymbolWithLoc) bool {
-    const sym = if (global.file) |file| sym: {
-        const object = elf_file.objects.items[file];
-        break :sym object.symtab.items[global.sym_index];
-    } else elf_file.locals.items[global.sym_index];
-    return sym.st_info & 0xf != elf.STT_NOTYPE or sym.st_shndx != elf.SHN_UNDEF;
 }
