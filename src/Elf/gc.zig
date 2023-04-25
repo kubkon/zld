@@ -138,7 +138,6 @@ fn prune(arena: Allocator, alive: std.AutoHashMap(Atom.Index, void), elf_file: *
             if (alive.contains(atom_index)) continue;
 
             const atom = elf_file.getAtom(atom_index);
-            const global = atom.getSymbolWithLoc();
             const sym = atom.getSymbolPtr(elf_file);
             const tshdr = elf_file.sections.items(.shdr)[sym.st_shndx];
             const tshdr_name = elf_file.shstrtab.getAssumeExists(tshdr.sh_name);
@@ -162,23 +161,6 @@ fn prune(arena: Allocator, alive: std.AutoHashMap(Atom.Index, void), elf_file: *
                     inner_sym.st_other = Elf.STV_GC;
                 }
             }
-
-            if (elf_file.got_entries_map.contains(global)) {
-                const got_atom_index = elf_file.got_entries_map.get(global).?;
-                const got_atom = elf_file.getAtom(got_atom_index);
-                const got_sym = got_atom.getSymbolPtr(elf_file);
-                got_sym.st_other = Elf.STV_GC;
-            }
-        }
-
-        for (elf_file.got_entries_map.keys()) |sym_loc| {
-            const sym = elf_file.getSymbol(sym_loc);
-            if (sym.st_other != Elf.STV_GC) continue;
-
-            // TODO tombstone
-            const atom_index = elf_file.got_entries_map.get(sym_loc).?;
-            removeAtomFromSection(atom_index, sym.st_shndx, elf_file);
-            _ = try gc_sections.put(sym.st_shndx, {});
         }
     }
 

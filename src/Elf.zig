@@ -17,6 +17,7 @@ const Atom = @import("Elf/Atom.zig");
 const Object = @import("Elf/Object.zig");
 pub const Options = @import("Elf/Options.zig");
 const StringTable = @import("strtab.zig").StringTable;
+const SyntheticSection = @import("synthetic_section.zig").SyntheticSection;
 const ThreadPool = @import("ThreadPool.zig");
 const Zld = @import("Zld.zig");
 
@@ -55,7 +56,12 @@ locals: std.ArrayListUnmanaged(elf.Elf64_Sym) = .{},
 globals: std.StringArrayHashMapUnmanaged(SymbolWithLoc) = .{},
 unresolved: std.AutoArrayHashMapUnmanaged(u32, void) = .{},
 
-got_entries_map: std.AutoArrayHashMapUnmanaged(SymbolWithLoc, Atom.Index) = .{},
+got_section: SyntheticSection(SymbolWithLoc, *Elf, .{
+    .log_scope = .got_section,
+    .entry_size = @sizeOf(u64),
+    .baseAddrFn = Elf.getGotBaseAddress,
+    .writeFn = Elf.writeGotEntry,
+}) = .{},
 
 atoms: std.ArrayListUnmanaged(Atom) = .{},
 atom_table: std.AutoHashMapUnmanaged(u32, Atom.Index) = .{},
@@ -123,7 +129,7 @@ pub fn deinit(self: *Elf) void {
     }
     self.atom_table.deinit(gpa);
     self.relocs.deinit(gpa);
-    self.got_entries_map.deinit(gpa);
+    self.got_section.deinit(gpa);
     self.unresolved.deinit(gpa);
     self.globals.deinit(gpa);
     self.locals.deinit(gpa);
@@ -254,6 +260,7 @@ pub fn flush(self: *Elf) !void {
     }
 
     try self.setStackSize();
+    try self.setSyntheticSections();
     try self.allocateLoadRSeg();
     try self.allocateLoadRESeg();
     try self.allocateLoadRWSeg();
@@ -298,11 +305,13 @@ pub fn flush(self: *Elf) !void {
     if (build_options.enable_logging) {
         self.logObjects();
         self.logSymtab();
+        log.debug("{}", .{self.got_section});
         self.logSections();
         self.logAtoms();
     }
 
     try self.writeAtoms();
+    try self.writeSyntheticSections();
     try self.writePhdrs();
     try self.writeSymtab();
     try self.writeStrtab();
@@ -843,59 +852,6 @@ fn resolveSpecialSymbols(self: *Elf) !void {
     }
 }
 
-pub fn createGotAtom(self: *Elf, target: SymbolWithLoc) !Atom.Index {
-    if (self.got_sect_index == null) {
-        self.got_sect_index = try self.insertSection(.{
-            .sh_name = 0,
-            .sh_type = elf.SHT_PROGBITS,
-            .sh_flags = elf.SHF_WRITE | elf.SHF_ALLOC,
-            .sh_addr = 0,
-            .sh_offset = 0,
-            .sh_size = 0,
-            .sh_link = 0,
-            .sh_info = 0,
-            .sh_addralign = @alignOf(u64),
-            .sh_entsize = 0,
-        }, ".got");
-    }
-
-    log.debug("creating GOT atom for target {}", .{target});
-
-    const atom_index = try self.addAtom();
-    const atom = self.getAtomPtr(atom_index);
-    atom.file = null;
-    atom.size = @sizeOf(u64);
-    atom.alignment = @alignOf(u64);
-
-    const tsym_name = self.getSymbolName(target);
-    const r_sym = @intCast(u64, target.sym_index) << 32;
-    const r_addend: i64 = target.file orelse -1;
-    const r_info = r_sym | elf.R_X86_64_64;
-    try self.relocs.putNoClobber(self.base.allocator, atom_index, .{
-        .r_offset = 0,
-        .r_info = r_info,
-        .r_addend = r_addend,
-    });
-
-    const tmp_name = try std.fmt.allocPrint(self.base.allocator, ".got.{s}", .{tsym_name});
-    defer self.base.allocator.free(tmp_name);
-    const sym_index = @intCast(u32, self.locals.items.len);
-    try self.locals.append(self.base.allocator, .{
-        .st_name = try self.strtab.insert(self.base.allocator, tmp_name),
-        .st_info = (elf.STB_LOCAL << 4) | elf.STT_OBJECT,
-        .st_other = 1,
-        .st_shndx = 0,
-        .st_value = 0,
-        .st_size = @sizeOf(u64),
-    });
-    atom.sym_index = sym_index;
-
-    try self.atom_table.putNoClobber(self.base.allocator, atom.sym_index, atom_index);
-    try self.addAtomToSection(atom_index, self.got_sect_index.?);
-
-    return atom_index;
-}
-
 pub fn addAtomToSection(self: *Elf, atom_index: Atom.Index, sect_id: u16) !void {
     const atom = self.getAtomPtr(atom_index);
     const sym = atom.getSymbolPtr(self);
@@ -1213,6 +1169,27 @@ fn setStackSize(self: *Elf) !void {
     phdr.p_memsz = stack_size;
 }
 
+fn setSyntheticSections(self: *Elf) !void {
+    // Currently, we only have .got to worry about.
+    if (self.got_sect_index) |shndx| {
+        const shdr = &self.sections.items(.shdr)[shndx];
+        shdr.sh_size = self.got_section.size();
+        shdr.sh_addralign = @sizeOf(u64);
+    }
+}
+
+fn writeSyntheticSections(self: *Elf) !void {
+    const gpa = self.base.allocator;
+    // Currently, we only have .got to worry about.
+    if (self.got_sect_index) |shndx| {
+        const shdr = self.sections.items(.shdr)[shndx];
+        var buffer = try std.ArrayList(u8).initCapacity(gpa, self.got_section.size());
+        defer buffer.deinit();
+        try self.got_section.write(self, buffer.writer());
+        try self.base.file.pwriteAll(buffer.items, shdr.sh_offset);
+    }
+}
+
 fn writeSymtab(self: *Elf) !void {
     const offset: u64 = blk: {
         const shdr = self.sections.items(.shdr)[self.symtab_sect_index.? - 1];
@@ -1380,6 +1357,18 @@ pub fn getSectionByName(self: *Elf, name: []const u8) ?u16 {
         const this_name = self.shstrtab.getAssumeExists(shdr.sh_name);
         if (mem.eql(u8, this_name, name)) return @intCast(u16, i);
     } else return null;
+}
+
+fn getGotBaseAddress(self: *Elf) u64 {
+    const shndx = self.got_sect_index orelse return 0;
+    const shdr = self.sections.items(.shdr)[shndx];
+    return shdr.sh_addr;
+}
+
+fn writeGotEntry(self: *Elf, entry: SymbolWithLoc, writer: anytype) !void {
+    if (self.got_sect_index == null) return;
+    const sym = self.getSymbol(entry);
+    try writer.writeIntLittle(u64, sym.st_value);
 }
 
 /// Returns pointer-to-symbol described by `sym_with_loc` descriptor.
