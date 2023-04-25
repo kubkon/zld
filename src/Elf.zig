@@ -6,7 +6,7 @@ const builtin = @import("builtin");
 const assert = std.debug.assert;
 const elf = std.elf;
 const fs = std.fs;
-const gc = @import("Elf/gc.zig");
+// const gc = @import("Elf/gc.zig");
 const log = std.log.scoped(.elf);
 const math = std.math;
 const mem = std.mem;
@@ -245,9 +245,9 @@ pub fn flush(self: *Elf) !void {
         try object.splitIntoAtoms(self.base.allocator, @intCast(u16, object_id), self);
     }
 
-    if (self.options.gc_sections) {
-        try gc.gcAtoms(self);
-    }
+    // if (self.options.gc_sections) {
+    //     try gc.gcAtoms(self);
+    // }
 
     for (self.objects.items) |object| {
         for (object.atoms.items) |atom_index| {
@@ -851,8 +851,7 @@ fn resolveSpecialSymbols(self: *Elf) !void {
 
 pub fn addAtomToSection(self: *Elf, atom_index: Atom.Index, sect_id: u16) !void {
     const atom = self.getAtomPtr(atom_index);
-    const sym = atom.getSymbolPtr(self);
-    sym.st_shndx = sect_id;
+    atom.out_shndx = sect_id;
     var section = self.sections.get(sect_id);
     if (section.shdr.sh_size > 0) {
         const last_atom = self.getAtomPtr(section.last_atom.?);
@@ -1053,16 +1052,14 @@ fn allocateAtoms(self: *Elf) !void {
 
         var base_addr: u64 = shdr.sh_addr;
         while (true) {
-            const atom = self.getAtom(atom_index);
+            const atom = self.getAtomPtr(atom_index);
             base_addr = mem.alignForwardGeneric(u64, base_addr, atom.alignment);
 
-            const sym = atom.getSymbolPtr(self);
-            sym.st_value = base_addr;
-            sym.st_shndx = shdr_ndx;
-            sym.st_size = atom.size;
+            atom.value = base_addr;
+            atom.out_shndx = shdr_ndx;
 
             log.debug("  ATOM(%{d},'{s}') allocated from 0x{x} to 0x{x}", .{
-                atom.sym_index,
+                atom_index,
                 atom.getName(self),
                 base_addr,
                 base_addr + atom.size,
@@ -1073,7 +1070,6 @@ fn allocateAtoms(self: *Elf) !void {
             const object = &self.objects.items[atom.file];
             for (object.symtab.items, 0..) |*inner_sym, inner_sym_i| {
                 const inner_sym_index = @intCast(u32, inner_sym_i);
-                if (atom.sym_index == inner_sym_i) continue;
                 const other_atom_index = object.atom_table.get(inner_sym_index) orelse continue;
                 if (other_atom_index != atom_index) continue;
                 inner_sym.st_value += base_addr;
@@ -1117,10 +1113,9 @@ fn writeAtoms(self: *Elf) !void {
 
         while (true) {
             const atom = self.getAtomPtr(atom_index);
-            const sym = atom.getSymbol(self);
-            const off = sym.st_value - shdr.sh_addr;
+            const off = atom.value - shdr.sh_addr;
             log.debug("  writing ATOM(%{d},'{s}') at offset 0x{x}", .{
-                atom.sym_index,
+                atom_index,
                 atom.getName(self),
                 shdr.sh_offset + off,
             });
@@ -1486,16 +1481,15 @@ fn logSymtab(self: Elf) void {
 }
 
 pub fn logAtom(self: *Elf, atom: Atom, atom_index: Atom.Index, comptime logger: anytype) void {
-    const sym = atom.getSymbol(self);
-    const sym_name = atom.getName(self);
+    const name = atom.getName(self);
     logger.debug("  ATOM(%{d}, '{s}') @ {x} (sizeof({x}), alignof({x})) in object({?}) in sect({d})", .{
-        atom.sym_index,
-        sym_name,
-        sym.st_value,
-        sym.st_size,
+        atom_index,
+        name,
+        atom.value,
+        atom.size,
         atom.alignment,
         atom.file,
-        sym.st_shndx,
+        atom.out_shndx,
     });
 
     const object = self.objects.items[atom.file];

@@ -14,13 +14,11 @@ const Elf = @import("../Elf.zig");
 const Instruction = dis_x86_64.Instruction;
 const Immediate = dis_x86_64.Immediate;
 
-/// Each decl always gets a local symbol with the fully qualified name.
-/// The vaddr and size are found here directly.
-/// The file offset is found by computing the vaddr offset from the section vaddr
-/// the symbol references, and adding that to the file offset of the section.
-/// If this field is 0, it means the codegen size = 0 and there is no symbol or
-/// offset table entry.
-sym_index: u32,
+/// Address allocated for this Atom.
+value: u64,
+
+/// Name of this Atom.
+name: u32,
 
 /// null means global synthetic symbol table.
 file: u32,
@@ -35,6 +33,9 @@ alignment: u32,
 /// Index of the input section.
 shndx: u16,
 
+/// Index of the output section.
+out_shndx: u16,
+
 /// Index of the input section containing this atom's relocs.
 relocs_shndx: u16,
 
@@ -45,36 +46,21 @@ prev: ?Index,
 pub const Index = u32;
 
 pub const empty = Atom{
-    .sym_index = 0,
+    .value = 0,
+    .name = 0,
     .file = 0,
     .size = 0,
     .alignment = 0,
     .shndx = 0,
+    .out_shndx = 0,
     .relocs_shndx = @bitCast(u16, @as(i16, -1)),
     .prev = null,
     .next = null,
 };
 
-pub fn getSymbol(self: Atom, elf_file: *Elf) elf.Elf64_Sym {
-    return self.getSymbolPtr(elf_file).*;
-}
-
-pub fn getSymbolPtr(self: Atom, elf_file: *Elf) *elf.Elf64_Sym {
-    return elf_file.getSymbolPtr(.{
-        .sym_index = self.sym_index,
-        .file = self.file,
-    });
-}
-
-pub fn getSymbolWithLoc(self: Atom) Elf.SymbolWithLoc {
-    return .{ .sym_index = self.sym_index, .file = self.file };
-}
-
 pub fn getName(self: Atom, elf_file: *Elf) []const u8 {
-    return elf_file.getSymbolName(.{
-        .sym_index = self.sym_index,
-        .file = self.file,
-    });
+    const object = elf_file.objects.items[self.file];
+    return object.getShString(self.name);
 }
 
 pub fn getCode(self: Atom, elf_file: *Elf) []const u8 {
@@ -182,11 +168,8 @@ fn isDefinitionAvailable(elf_file: *Elf, global: Elf.SymbolWithLoc) bool {
 
 pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
     const gpa = elf_file.base.allocator;
-    const sym = self.getSymbol(elf_file);
-
     const code = try gpa.dupe(u8, self.getCode(elf_file));
     defer gpa.free(code);
-
     const relocs = self.getRelocs(elf_file);
 
     for (relocs) |rel| {
@@ -197,7 +180,7 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
         const tsym = elf_file.getSymbol(tsym_loc);
         const tsym_name = elf_file.getSymbolName(tsym_loc);
         const tsym_st_type = tsym.st_type();
-        const source = @intCast(i64, sym.st_value + rel.r_offset);
+        const source = @intCast(i64, self.value + rel.r_offset);
         const target = @intCast(i64, self.getTargetAddress(rel, elf_file).?);
 
         const r_type = rel.r_type();

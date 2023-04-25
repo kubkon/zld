@@ -172,6 +172,7 @@ pub fn splitIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
             try self.atoms.append(allocator, atom_index);
             const atom = elf_file.getAtomPtr(atom_index);
             atom.file = object_id;
+            atom.name = shdr.sh_name;
             atom.size = @intCast(u32, shdr.sh_size);
             atom.alignment = @intCast(u32, shdr.sh_addralign);
             atom.shndx = ndx;
@@ -180,49 +181,10 @@ pub fn splitIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_f
                 atom.relocs_shndx = rel_ndx;
             }
 
-            // TODO if --gc-sections and there is exactly one contained symbol,
-            // we can prune the main one. For example, in this situation we
-            // get something like this:
-            //
-            // .text.__udivti3
-            //    => __udivti3
-            //
-            // which can be pruned to:
-            //
-            // __udivti3
-            var sym_index: ?u32 = null;
-
             for (syms.items) |sym_id| {
-                const sym = self.getSourceSymbol(sym_id).?;
-                if (sym.st_type() == elf.STT_SECTION) {
-                    const osym = self.getSymbolPtr(sym_id);
-                    osym.* = .{
-                        .st_name = 0,
-                        .st_info = (elf.STB_LOCAL << 4) | elf.STT_OBJECT,
-                        .st_other = 0,
-                        .st_shndx = 0,
-                        .st_value = 0,
-                        .st_size = sym.st_size,
-                    };
-                    sym_index = sym_id;
-                    continue;
-                }
                 try self.atom_table.putNoClobber(allocator, sym_id, atom_index);
             }
 
-            atom.sym_index = sym_index orelse blk: {
-                const index = @intCast(u32, self.symtab.items.len);
-                try self.symtab.append(allocator, .{
-                    .st_name = 0,
-                    .st_info = (elf.STB_LOCAL << 4) | elf.STT_OBJECT,
-                    .st_other = 0,
-                    .st_shndx = 0,
-                    .st_value = 0,
-                    .st_size = atom.size,
-                });
-                break :blk index;
-            };
-            try self.atom_table.putNoClobber(allocator, atom.sym_index, atom_index);
             try elf_file.addAtomToSection(atom_index, tshdr_ndx);
         },
         else => {},
