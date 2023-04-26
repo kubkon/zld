@@ -26,6 +26,30 @@ symtab: std.ArrayListUnmanaged(elf.Elf64_Sym) = .{},
 atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
 atom_table: std.AutoHashMapUnmanaged(u32, Atom.Index) = .{},
 
+pub fn isValid(self: Object) bool {
+    var stream = std.io.fixedBufferStream(self.data);
+    const header = stream.reader().readStruct(elf.Elf64_Ehdr) catch return false;
+
+    if (!mem.eql(u8, header.e_ident[0..4], "\x7fELF")) {
+        log.debug("Invalid ELF magic {s}, expected \x7fELF", .{header.e_ident[0..4]});
+        return false;
+    }
+    if (header.e_ident[elf.EI_VERSION] != 1) {
+        log.debug("Unknown ELF version {d}, expected 1", .{header.e_ident[elf.EI_VERSION]});
+        return false;
+    }
+    if (header.e_type != elf.ET.REL) {
+        log.err("Invalid file type {any}, expected ET.REL", .{header.e_type});
+        return false;
+    }
+    if (header.e_version != 1) {
+        log.err("Invalid ELF version {d}, expected 1", .{header.e_version});
+        return false;
+    }
+
+    return true;
+}
+
 pub fn deinit(self: *Object, allocator: Allocator) void {
     self.symtab.deinit(allocator);
     self.atoms.deinit(allocator);
@@ -39,35 +63,6 @@ pub fn parse(self: *Object, allocator: Allocator) !void {
     const reader = stream.reader();
 
     self.header = try reader.readStruct(elf.Elf64_Ehdr);
-
-    if (!mem.eql(u8, self.header.e_ident[0..4], "\x7fELF")) {
-        log.debug("Invalid ELF magic {s}, expected \x7fELF", .{self.header.e_ident[0..4]});
-        return error.NotObject;
-    }
-    if (self.header.e_ident[elf.EI_VERSION] != 1) {
-        log.debug("Unknown ELF version {d}, expected 1", .{self.header.e_ident[elf.EI_VERSION]});
-        return error.NotObject;
-    }
-    if (self.header.e_ident[elf.EI_DATA] != elf.ELFDATA2LSB) {
-        log.err("TODO big endian support", .{});
-        return error.TODOBigEndianSupport;
-    }
-    if (self.header.e_ident[elf.EI_CLASS] != elf.ELFCLASS64) {
-        log.err("TODO 32bit support", .{});
-        return error.TODOElf32bitSupport;
-    }
-    if (self.header.e_type != elf.ET.REL) {
-        log.err("Invalid file type {any}, expected ET.REL", .{self.header.e_type});
-        return error.NotObject;
-    }
-    if (self.header.e_version != 1) {
-        log.err("Invalid ELF version {d}, expected 1", .{self.header.e_version});
-        return error.NotObject;
-    }
-
-    assert(self.header.e_entry == 0);
-    assert(self.header.e_phoff == 0);
-    assert(self.header.e_phnum == 0);
 
     if (self.header.e_shnum == 0) return;
 

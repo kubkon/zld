@@ -8,6 +8,7 @@ const log = std.log.scoped(.elf);
 const mem = std.mem;
 
 const Allocator = mem.Allocator;
+const Elf = @import("../Elf.zig");
 const Object = @import("Object.zig");
 
 file: fs.File,
@@ -171,7 +172,7 @@ fn getExtName(self: Archive, off: u32) []const u8 {
     return mem.sliceTo(@ptrCast([*:'\n']const u8, self.extnames_strtab.items.ptr + off), 0);
 }
 
-pub fn parseObject(self: Archive, allocator: Allocator, offset: u32) !Object {
+pub fn parseObject(self: Archive, allocator: Allocator, offset: u32, elf_file: *Elf) !*Object {
     const reader = self.file.reader();
     try reader.context.seekTo(offset);
 
@@ -200,12 +201,23 @@ pub fn parseObject(self: Archive, allocator: Allocator, offset: u32) !Object {
         return error.Io;
     }
 
-    var object = Object{
+    const candidate = Object{
         .name = full_name,
         .data = data,
     };
 
+    const object = try elf_file.objects.addOne(allocator);
+    object.* = candidate;
     try object.parse(allocator);
+
+    const cpu_arch = elf_file.cpu_arch.?;
+    if (cpu_arch != object.header.e_machine.toTargetCpuArch().?) {
+        log.err("Invalid architecture {any}, expected {any}", .{
+            object.header.e_machine,
+            cpu_arch.toElfMachine(),
+        });
+        return error.InvalidCpuArch;
+    }
 
     return object;
 }

@@ -654,18 +654,15 @@ fn parseObject(self: *Elf, path: []const u8) !bool {
     const file_size = math.cast(usize, file_stat.size) orelse return error.Overflow;
     const data = try file.readToEndAlloc(gpa, file_size);
 
-    var object = Object{
+    const candidate = Object{
         .name = name,
         .data = data,
     };
+    if (!candidate.isValid()) return false;
 
-    object.parse(gpa) catch |err| switch (err) {
-        error.EndOfStream, error.NotObject => {
-            object.deinit(self.base.allocator);
-            return false;
-        },
-        else => |e| return e,
-    };
+    const object = try self.objects.addOne(gpa);
+    object.* = candidate;
+    try object.parse(gpa);
 
     if (self.cpu_arch == null) {
         self.cpu_arch = object.header.e_machine.toTargetCpuArch().?;
@@ -678,8 +675,6 @@ fn parseObject(self: *Elf, path: []const u8) !bool {
         });
         return error.InvalidCpuArch;
     }
-
-    try self.objects.append(gpa, object);
 
     return true;
 }
@@ -788,16 +783,7 @@ fn resolveSymbolsInArchives(self: *Elf) !void {
             assert(offsets.items.len > 0);
 
             const object_id = @intCast(u16, self.objects.items.len);
-            const object = try archive.parseObject(self.base.allocator, offsets.items[0]);
-            const cpu_arch = self.cpu_arch.?;
-            if (cpu_arch != object.header.e_machine.toTargetCpuArch().?) {
-                log.err("Invalid architecture {any}, expected {any}", .{
-                    object.header.e_machine,
-                    cpu_arch.toElfMachine(),
-                });
-                return error.InvalidCpuArch;
-            }
-            try self.objects.append(self.base.allocator, object);
+            _ = try archive.parseObject(self.base.allocator, offsets.items[0], self);
             try self.resolveSymbolsInObject(object_id);
 
             continue :loop;
