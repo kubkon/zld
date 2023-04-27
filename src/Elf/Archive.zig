@@ -172,7 +172,9 @@ fn getExtName(self: Archive, off: u32) []const u8 {
     return mem.sliceTo(@ptrCast([*:'\n']const u8, self.extnames_strtab.items.ptr + off), 0);
 }
 
-pub fn parseObject(self: Archive, allocator: Allocator, offset: u32, elf_file: *Elf) !*Object {
+pub fn parseObject(self: Archive, offset: u32, object_id: u32, elf_file: *Elf) !*Object {
+    const gpa = elf_file.base.allocator;
+
     const reader = self.file.reader();
     try reader.context.seekTo(offset);
 
@@ -192,10 +194,10 @@ pub fn parseObject(self: Archive, allocator: Allocator, offset: u32, elf_file: *
     const full_name = blk: {
         var buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
         const path = try std.os.realpath(self.name, &buffer);
-        break :blk try std.fmt.allocPrint(allocator, "{s}({s})", .{ path, object_name });
+        break :blk try std.fmt.allocPrint(gpa, "{s}({s})", .{ path, object_name });
     };
     const object_size = try hdr.size();
-    const data = try allocator.alloc(u8, object_size);
+    const data = try gpa.alloc(u8, object_size);
     const amt = try reader.readAll(data);
     if (amt != object_size) {
         return error.Io;
@@ -204,11 +206,12 @@ pub fn parseObject(self: Archive, allocator: Allocator, offset: u32, elf_file: *
     const candidate = Object{
         .name = full_name,
         .data = data,
+        .object_id = object_id,
     };
 
-    const object = try elf_file.objects.addOne(allocator);
+    const object = try elf_file.objects.addOne(gpa);
     object.* = candidate;
-    try object.parse(allocator);
+    try object.parse(elf_file);
 
     const cpu_arch = elf_file.cpu_arch.?;
     if (cpu_arch != object.header.e_machine.toTargetCpuArch().?) {

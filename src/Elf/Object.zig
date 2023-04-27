@@ -1,19 +1,6 @@
-const Object = @This();
-
-const std = @import("std");
-const assert = std.debug.assert;
-const elf = std.elf;
-const fs = std.fs;
-const log = std.log.scoped(.elf);
-const math = std.math;
-const mem = std.mem;
-
-const Allocator = mem.Allocator;
-const Atom = @import("Atom.zig");
-const Elf = @import("../Elf.zig");
-
 name: []const u8,
 data: []const u8,
+object_id: u32,
 
 header: elf.Elf64_Ehdr = undefined,
 s_symtab: []align(1) const elf.Elf64_Sym = &[0]elf.Elf64_Sym{},
@@ -21,10 +8,10 @@ s_strtab: []const u8 = &[0]u8{},
 s_shstrtab: []const u8 = &[0]u8{},
 first_global: ?u32 = null,
 
-symtab: std.ArrayListUnmanaged(elf.Elf64_Sym) = .{},
+locals: std.ArrayListUnmanaged(Symbol) = .{},
+globals: std.ArrayListUnmanaged(u32) = .{},
 
 atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
-atom_table: std.AutoHashMapUnmanaged(u32, Atom.Index) = .{},
 
 pub fn isValid(self: Object) bool {
     var stream = std.io.fixedBufferStream(self.data);
@@ -51,14 +38,14 @@ pub fn isValid(self: Object) bool {
 }
 
 pub fn deinit(self: *Object, allocator: Allocator) void {
-    self.symtab.deinit(allocator);
+    self.locals.deinit(allocator);
+    self.globals.deinit(allocator);
     self.atoms.deinit(allocator);
-    self.atom_table.deinit(allocator);
     allocator.free(self.name);
     allocator.free(self.data);
 }
 
-pub fn parse(self: *Object, allocator: Allocator) !void {
+pub fn parse(self: *Object, elf_file: *Elf) !void {
     var stream = std.io.fixedBufferStream(self.data);
     const reader = stream.reader();
 
@@ -82,107 +69,136 @@ pub fn parse(self: *Object, allocator: Allocator) !void {
         const nsyms = @divExact(symtab.len, @sizeOf(elf.Elf64_Sym));
         self.s_symtab = @ptrCast([*]align(1) const elf.Elf64_Sym, symtab.ptr)[0..nsyms];
         self.s_strtab = self.getShdrContents(@intCast(u16, shdr.sh_link));
-
-        try self.symtab.appendUnalignedSlice(allocator, self.s_symtab);
-    }
-}
-
-pub fn scanInputSections(self: *Object, elf_file: *Elf) !void {
-    for (self.getShdrs()) |shdr| switch (shdr.sh_type) {
-        elf.SHT_PROGBITS, elf.SHT_NOBITS => {
-            const shdr_name = self.getShString(shdr.sh_name);
-            if (shdr.sh_flags & elf.SHF_GROUP != 0) {
-                log.err("section '{s}' is part of a section group", .{shdr_name});
-                return error.HandleSectionGroups;
-            }
-
-            const tshdr_ndx = (try elf_file.getOutputSection(shdr, shdr_name)) orelse {
-                log.debug("unhandled section", .{});
-                continue;
-            };
-            const out_shdr = elf_file.sections.items(.shdr)[tshdr_ndx];
-            log.debug("mapping '{s}' into output sect({d}, '{s}')", .{
-                shdr_name,
-                tshdr_ndx,
-                elf_file.shstrtab.getAssumeExists(out_shdr.sh_name),
-            });
-        },
-        else => {},
-    };
-}
-
-pub fn splitIntoAtoms(self: *Object, allocator: Allocator, object_id: u16, elf_file: *Elf) !void {
-    log.debug("parsing '{s}' into atoms", .{self.name});
-
-    var symbols_by_shndx = std.AutoHashMap(u16, std.ArrayList(u32)).init(allocator);
-    defer {
-        var it = symbols_by_shndx.valueIterator();
-        while (it.next()) |value| {
-            value.deinit();
-        }
-        symbols_by_shndx.deinit();
     }
 
+    try self.initAtoms(elf_file);
+    try self.initSymtab(elf_file);
+}
+
+fn initAtoms(self: *Object, elf_file: *Elf) !void {
     const shdrs = self.getShdrs();
+    try self.atoms.resize(elf_file.base.allocator, shdrs.len);
+    mem.set(Atom.Index, self.atoms.items, 0);
 
-    var rel_shdrs = std.AutoHashMap(u16, u16).init(allocator);
-    defer rel_shdrs.deinit();
+    for (shdrs, 0..) |shdr, i| {
+        if (shdr.sh_flags & elf.SHF_EXCLUDE != 0 and
+            shdr.sh_flags & elf.SHF_ALLOC == 0 and
+            // shdr.sh_type != elf.SHT_LLVM_ADDRSIG) continue;
+            shdr.sh_type != elf.SHT_LOOS + 0xfff4c03) continue;
 
+        switch (shdr.sh_type) {
+            elf.SHT_GROUP => @panic("TODO"),
+            elf.SHT_SYMTAB_SHNDX => @panic("TODO"),
+            elf.SHT_NULL,
+            elf.SHT_REL,
+            elf.SHT_RELA,
+            elf.SHT_SYMTAB,
+            elf.SHT_STRTAB,
+            => {},
+            else => {
+                const atom_index = try elf_file.addAtom();
+                const atom = elf_file.getAtom(atom_index).?;
+                const name = self.getShString(shdr.sh_name);
+                atom.atom_index = atom_index;
+                atom.name = try elf_file.strtab.insert(elf_file.base.allocator, name);
+                atom.file = self.object_id;
+                atom.size = @intCast(u32, shdr.sh_size);
+                atom.alignment = math.log2_int(u64, shdr.sh_addralign);
+                atom.shndx = @intCast(u16, i);
+                self.atoms.items[i] = atom_index;
+            },
+        }
+    }
+
+    // Parse relocs sections if any.
     for (shdrs, 0..) |shdr, i| switch (shdr.sh_type) {
         elf.SHT_REL, elf.SHT_RELA => {
-            try rel_shdrs.putNoClobber(@intCast(u16, shdr.sh_info), @intCast(u16, i));
+            const atom_index = self.atoms.items[shdr.sh_info];
+            elf_file.getAtom(atom_index).?.relocs_shndx = @intCast(u16, i);
         },
         else => {},
     };
+}
 
-    for (shdrs, 0..) |shdr, i| switch (shdr.sh_type) {
-        elf.SHT_PROGBITS, elf.SHT_NOBITS => {
-            try symbols_by_shndx.putNoClobber(@intCast(u16, i), std.ArrayList(u32).init(allocator));
-        },
-        else => {},
-    };
+fn initSymtab(self: *Object, elf_file: *Elf) !void {
+    const gpa = elf_file.base.allocator;
+    const symtab = self.s_symtab;
+    const first_global = self.first_global orelse symtab.len;
+    const shdrs = self.getShdrs();
 
-    for (self.s_symtab, 0..) |sym, sym_id| {
-        if (sym.st_shndx == elf.SHN_UNDEF) continue;
-        if (elf.SHN_LORESERVE <= sym.st_shndx and sym.st_shndx < elf.SHN_HIRESERVE) continue;
-        const map = symbols_by_shndx.getPtr(sym.st_shndx) orelse continue;
-        try map.append(@intCast(u32, sym_id));
+    try self.locals.ensureTotalCapacityPrecise(gpa, first_global);
+    try self.globals.ensureTotalCapacityPrecise(gpa, symtab.len - first_global);
+
+    for (symtab[0..first_global], 0..) |sym, i| {
+        const symbol = self.locals.addOneAssumeCapacity();
+        const name = blk: {
+            if (sym.st_name == 0 and sym.st_type() == elf.STT_SECTION) {
+                const shdr = shdrs[sym.st_shndx];
+                break :blk self.getShString(shdr.sh_name);
+            }
+            break :blk self.getString(sym.st_name);
+        };
+        symbol.* = .{
+            .value = sym.st_value,
+            .name = try elf_file.strtab.insert(gpa, name),
+            .sym_idx = @intCast(u32, i),
+            .atom = if (sym.st_shndx == elf.SHN_ABS) 0 else self.atoms.items[sym.st_shndx],
+        };
     }
 
-    for (shdrs, 0..) |shdr, i| switch (shdr.sh_type) {
-        elf.SHT_PROGBITS, elf.SHT_NOBITS => {
-            const ndx = @intCast(u16, i);
-            const shdr_name = self.getShString(shdr.sh_name);
+    for (symtab[first_global..]) |sym| {
+        const name = self.getString(sym.st_name);
+        const global_index = try elf_file.getOrCreateGlobal(name);
+        self.globals.addOneAssumeCapacity().* = global_index;
+    }
+}
 
-            log.debug("parsing section '{s}'", .{shdr_name});
+pub fn resolveSymbols(self: Object, elf_file: *Elf) !void {
+    const first_global = self.first_global orelse return;
+    for (self.globals.items, 0..) |index, i| {
+        const sym_idx = @intCast(u32, first_global + i);
+        const this_sym = self.s_symtab[sym_idx];
 
-            const tshdr_ndx = (try elf_file.getOutputSection(shdr, shdr_name)) orelse {
-                log.debug("unhandled section", .{});
-                continue;
+        if (this_sym.st_shndx == elf.SHN_UNDEF) continue;
+
+        const global = elf_file.getGlobal(index);
+        if (getSymbolPrecedence(this_sym) < global.getSymbolPrecedence(elf_file)) {
+            const name = global.name;
+            global.* = .{
+                .value = this_sym.st_value,
+                .name = name,
+                .atom = self.atoms.items[this_sym.st_shndx],
+                .sym_idx = sym_idx,
             };
+        }
+    }
+}
 
-            const syms = symbols_by_shndx.get(ndx).?;
+pub fn checkDuplicates(self: Object, elf_file: *Elf) void {
+    const first_global = self.first_global orelse return;
+    for (self.globals.items, 0..) |index, i| {
+        const sym_idx = @intCast(u32, first_global + i);
+        const this_sym = self.s_symtab[sym_idx];
+        const global = elf_file.getGlobal(index);
+        const atom = global.getAtom(elf_file) orelse continue;
+        const global_file = atom.getFile(elf_file);
 
-            const atom_index = try elf_file.addAtom();
-            try self.atoms.append(allocator, atom_index);
-            const atom = elf_file.getAtomPtr(atom_index);
-            atom.file = object_id;
-            atom.name = shdr.sh_name;
-            atom.size = @intCast(u32, shdr.sh_size);
-            atom.alignment = @intCast(u32, shdr.sh_addralign);
-            atom.shndx = ndx;
+        if (self.object_id == global_file.object_id or
+            this_sym.st_shndx == elf.SHN_UNDEF or
+            this_sym.st_bind() == elf.STB_WEAK) continue;
+        log.err("multiple definition: {s}: {s}: {s}", .{ self.name, global_file.name, global.getName(elf_file) });
+    }
+}
 
-            if (rel_shdrs.get(ndx)) |rel_ndx| {
-                atom.relocs_shndx = rel_ndx;
-            }
-
-            for (syms.items) |sym_id| {
-                try self.atom_table.putNoClobber(allocator, sym_id, atom_index);
-            }
-
-            try elf_file.addAtomToSection(atom_index, tshdr_ndx);
-        },
-        else => {},
+/// Encodes symbol precedence so that the following ordering applies:
+/// * strong defined
+/// * weak defined
+/// * undefined
+pub inline fn getSymbolPrecedence(sym: elf.Elf64_Sym) u4 {
+    return switch (sym.st_bind()) {
+        elf.STB_GLOBAL => 0,
+        elf.STB_WEAK => 1,
+        else => 0xf,
     };
 }
 
@@ -198,44 +214,27 @@ pub inline fn getShdrContents(self: Object, index: u16) []const u8 {
     return self.data[shdr.sh_offset..][0..shdr.sh_size];
 }
 
-pub fn getSourceSymbol(self: Object, index: u32) ?elf.Elf64_Sym {
-    if (index >= self.s_symtab.len) return null;
-    return self.s_symtab[index];
-}
-
-pub fn getSourceSymbolName(self: Object, index: u32) []const u8 {
-    const sym = self.getSourceSymbol(index) orelse return "";
-    if (sym.st_type() == elf.STT_SECTION) {
-        const shdr = self.getShdrs()[sym.st_shndx];
-        return self.getShString(shdr.sh_name);
-    } else {
-        return self.getString(sym.st_name);
-    }
-}
-
-pub fn getSymbolPtr(self: *Object, index: u32) *elf.Elf64_Sym {
-    return &self.symtab.items[index];
-}
-
-pub fn getSymbol(self: Object, index: u32) elf.Elf64_Sym {
-    return self.symtab.items[index];
-}
-
-pub fn getSymbolName(self: Object, index: u32) []const u8 {
-    const sym = self.getSymbol(index);
-    return self.getString(sym.st_name);
-}
-
-pub fn getAtomIndexForSymbol(self: Object, sym_index: u32) ?Atom.Index {
-    return self.atom_table.get(sym_index);
-}
-
-pub fn getString(self: Object, off: u32) []const u8 {
+inline fn getString(self: Object, off: u32) [:0]const u8 {
     assert(off < self.s_strtab.len);
     return mem.sliceTo(@ptrCast([*:0]const u8, self.s_strtab.ptr + off), 0);
 }
 
-pub fn getShString(self: Object, off: u32) []const u8 {
+inline fn getShString(self: Object, off: u32) [:0]const u8 {
     assert(off < self.s_shstrtab.len);
     return mem.sliceTo(@ptrCast([*:0]const u8, self.s_shstrtab.ptr + off), 0);
 }
+
+const Object = @This();
+
+const std = @import("std");
+const assert = std.debug.assert;
+const elf = std.elf;
+const fs = std.fs;
+const log = std.log.scoped(.elf);
+const math = std.math;
+const mem = std.mem;
+
+const Allocator = mem.Allocator;
+const Atom = @import("Atom.zig");
+const Elf = @import("../Elf.zig");
+const Symbol = @import("Symbol.zig");

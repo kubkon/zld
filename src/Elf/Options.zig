@@ -14,6 +14,7 @@ const usage =
     \\Usage: {s} [files...]
     \\
     \\General Options:
+    \\--allow-multiple-definition   Allow multiple definitions
     \\--entry=[name], -e [name]     Set name of the entry point symbol
     \\--gc-sections                 Force removal of functions and data that are unreachable by the entry point or exported symbols
     \\-l[name]                      Specify library to link against
@@ -39,6 +40,7 @@ stack_size: ?u64 = null,
 strip: bool = false,
 entry: ?[]const u8 = null,
 gc_sections: bool = false,
+allow_multiple_definition: bool = false,
 
 pub fn parseArgs(arena: Allocator, ctx: Zld.MainCtx) !Options {
     if (ctx.args.len == 0) {
@@ -54,6 +56,7 @@ pub fn parseArgs(arena: Allocator, ctx: Zld.MainCtx) !Options {
     var shared: bool = false;
     var gc_sections: bool = false;
     var entry: ?[]const u8 = null;
+    var allow_multiple_definition: bool = false;
 
     const Iterator = struct {
         args: []const []const u8,
@@ -111,6 +114,8 @@ pub fn parseArgs(arena: Allocator, ctx: Zld.MainCtx) !Options {
             entry = arg["--entry=".len..];
         } else if (mem.eql(u8, arg, "-e")) {
             entry = args_iter.next() orelse ctx.printFailure("Expected name after {s}", .{arg});
+        } else if (mem.eql(u8, arg, "--allow-multiple-definition")) {
+            allow_multiple_definition = true;
         } else {
             try positionals.append(.{
                 .path = arg,
@@ -136,5 +141,6 @@ pub fn parseArgs(arena: Allocator, ctx: Zld.MainCtx) !Options {
         .stack_size = stack_size,
         .gc_sections = gc_sections,
         .entry = entry,
+        .allow_multiple_definition = allow_multiple_definition,
     };
 }

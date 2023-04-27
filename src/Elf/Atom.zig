@@ -1,19 +1,3 @@
-const Atom = @This();
-
-const std = @import("std");
-const assert = std.debug.assert;
-const dis_x86_64 = @import("dis_x86_64");
-const elf = std.elf;
-const log = std.log.scoped(.elf);
-const math = std.math;
-const mem = std.mem;
-
-const Allocator = mem.Allocator;
-const Disassembler = dis_x86_64.Disassembler;
-const Elf = @import("../Elf.zig");
-const Instruction = dis_x86_64.Instruction;
-const Immediate = dis_x86_64.Immediate;
-
 /// Address allocated for this Atom.
 value: u64,
 
@@ -24,11 +8,10 @@ name: u32,
 file: u32,
 
 /// Size of this atom
-/// TODO is this really needed given that size is a field of a symbol?
 size: u32,
 
-/// Alignment of this atom. Unlike in MachO, minimum alignment is 1.
-alignment: u32,
+/// Alignment of this atom as a power of two.
+alignment: u8,
 
 /// Index of the input section.
 shndx: u16,
@@ -38,6 +21,8 @@ out_shndx: u16,
 
 /// Index of the input section containing this atom's relocs.
 relocs_shndx: u16,
+
+atom_index: Index,
 
 /// Points to the previous and next neighbours
 next: ?Index,
@@ -54,23 +39,27 @@ pub const empty = Atom{
     .shndx = 0,
     .out_shndx = 0,
     .relocs_shndx = @bitCast(u16, @as(i16, -1)),
+    .atom_index = 0,
     .prev = null,
     .next = null,
 };
 
 pub fn getName(self: Atom, elf_file: *Elf) []const u8 {
-    const object = elf_file.objects.items[self.file];
-    return object.getShString(self.name);
+    return Elf.getString(elf_file.strtab.items.ptr, self.name);
 }
 
 pub fn getCode(self: Atom, elf_file: *Elf) []const u8 {
-    const object = elf_file.objects.items[self.file];
+    const object = self.getFile(elf_file);
     return object.getShdrContents(self.shndx);
+}
+
+pub inline fn getFile(self: Atom, elf_file: *Elf) *Object {
+    return &elf_file.objects.items[self.file];
 }
 
 pub fn getRelocs(self: Atom, elf_file: *Elf) []align(1) const elf.Elf64_Rela {
     if (self.relocs_shndx == @bitCast(u16, @as(i16, -1))) return &[0]elf.Elf64_Rela{};
-    const object = elf_file.objects.items[self.file];
+    const object = self.getFile(elf_file);
     const bytes = object.getShdrContents(self.relocs_shndx);
     const nrelocs = @divExact(bytes.len, @sizeOf(elf.Elf64_Rela));
     return @ptrCast([*]align(1) const elf.Elf64_Rela, bytes)[0..nrelocs];
@@ -133,7 +122,7 @@ fn getTargetAddress(self: Atom, rel: elf.Elf64_Rela, elf_file: *Elf) ?u64 {
 
 pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
     const gpa = elf_file.base.allocator;
-    const object = elf_file.objects.items[self.file];
+    const object = self.getFile(elf_file);
     for (self.getRelocs(elf_file)) |rel| {
         // While traversing relocations, synthesize any missing atom.
         // TODO synthesize PLT atoms, GOT atoms, etc.
@@ -284,3 +273,20 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
 
     try writer.writeAll(code);
 }
+
+const Atom = @This();
+
+const std = @import("std");
+const assert = std.debug.assert;
+const dis_x86_64 = @import("dis_x86_64");
+const elf = std.elf;
+const log = std.log.scoped(.elf);
+const math = std.math;
+const mem = std.mem;
+
+const Allocator = mem.Allocator;
+const Disassembler = dis_x86_64.Disassembler;
+const Elf = @import("../Elf.zig");
+const Instruction = dis_x86_64.Instruction;
+const Immediate = dis_x86_64.Immediate;
+const Object = @import("Object.zig");
