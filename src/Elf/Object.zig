@@ -242,21 +242,20 @@ pub fn fmtSymtab(self: Object, elf_file: *Elf) std.fmt.Formatter(formatSymtab) {
     } };
 }
 
-const FormatSymtabContext = struct {
+const FormatContext = struct {
     object_id: u32,
     elf_file: *Elf,
 };
 
 fn formatSymtab(
-    ctx: FormatSymtabContext,
+    ctx: FormatContext,
     comptime unused_fmt_string: []const u8,
     options: std.fmt.FormatOptions,
     writer: anytype,
 ) !void {
     _ = unused_fmt_string;
     _ = options;
-    const object = &ctx.elf_file.objects.items[ctx.object_id];
-    try writer.print(">>>{d} : {s}\n", .{ ctx.object_id, object.name });
+    const object = ctx.elf_file.getFile(ctx.object_id) orelse return;
     try writer.writeAll("  locals\n");
     for (object.locals.items) |sym| {
         try writer.print("    {}\n", .{sym.fmt(ctx.elf_file)});
@@ -265,6 +264,29 @@ fn formatSymtab(
     for (object.globals.items) |index| {
         const global = ctx.elf_file.getGlobal(index);
         try writer.print("    {}\n", .{global.fmt(ctx.elf_file)});
+    }
+}
+
+pub fn fmtAtoms(self: Object, elf_file: *Elf) std.fmt.Formatter(formatAtoms) {
+    return .{ .data = .{
+        .object_id = self.object_id,
+        .elf_file = elf_file,
+    } };
+}
+
+fn formatAtoms(
+    ctx: FormatContext,
+    comptime unused_fmt_string: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = unused_fmt_string;
+    _ = options;
+    const object = ctx.elf_file.getFile(ctx.object_id) orelse return;
+    try writer.writeAll("  atoms\n");
+    for (object.atoms.items) |atom_index| {
+        const atom = ctx.elf_file.getAtom(atom_index) orelse continue;
+        try writer.print("    {}\n", .{atom.fmt(ctx.elf_file)});
     }
 }
 

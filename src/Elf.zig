@@ -220,8 +220,10 @@ pub fn flush(self: *Elf) !void {
 
     try self.resolveSymbols();
 
-    for (self.objects.items) |object| {
-        log.warn("{}", .{object.fmtSymtab(self)});
+    for (self.objects.items, 0..) |object, object_id| {
+        if (object_id == 0) continue;
+        log.warn(">>>{d} : {s}", .{ object_id, object.name });
+        log.warn("{}{}", .{ object.fmtAtoms(self), object.fmtSymtab(self) });
     }
 
     if (!self.options.allow_multiple_definition) {
@@ -1215,13 +1217,6 @@ pub fn getGlobal(self: *Elf, index: u32) *Symbol {
     return &self.globals.items[index];
 }
 
-fn logObjects(self: Elf) void {
-    log.debug("objects:", .{});
-    for (self.objects.items, 0..) |object, i| {
-        log.debug("  {d}: {s}", .{ i, object.name });
-    }
-}
-
 fn logSections(self: Elf) void {
     log.debug("sections:", .{});
     for (self.sections.items(.shdr), 0..) |shdr, i| {
@@ -1231,90 +1226,5 @@ fn logSections(self: Elf) void {
             shdr.sh_offset,
             shdr.sh_size,
         });
-    }
-}
-
-fn logSymtab(self: Elf) void {
-    for (self.objects.items, 0..) |object, object_id| {
-        log.debug("object({d}):", .{object_id});
-        for (object.symtab.items, 0..) |sym, i| {
-            // const st_type = sym.st_info & 0xf;
-            const st_bind = sym.st_info >> 4;
-            // if (st_bind != elf.STB_LOCAL or st_type != elf.STT_SECTION) continue;
-            if (st_bind != elf.STB_LOCAL) continue;
-            log.debug("  {d}: {s}: {}", .{ i, object.getSymbolName(@intCast(u32, i)), sym });
-        }
-    }
-
-    log.debug("globals:", .{});
-    for (self.globals.values()) |global| {
-        if (global.file) |file| {
-            const object = self.objects.items[file];
-            const sym = object.symtab.items[global.sym_index];
-            log.debug("  {d}: {s}: 0x{x}, {s}", .{
-                global.sym_index,
-                object.getSymbolName(global.sym_index),
-                sym.st_value,
-                object.name,
-            });
-        } else {
-            const sym = self.locals.items[global.sym_index];
-            log.debug("  {d}: {s}: 0x{x}", .{
-                global.sym_index,
-                self.strtab.getAssumeExists(sym.st_name),
-                sym.st_value,
-            });
-        }
-    }
-}
-
-pub fn logAtom(self: *Elf, atom: Atom, atom_index: Atom.Index, comptime logger: anytype) void {
-    const name = atom.getName(self);
-    logger.debug("  ATOM(%{d}, '{s}') @ {x} (sizeof({x}), alignof({x})) in object({?}) in sect({d})", .{
-        atom_index,
-        name,
-        atom.value,
-        atom.size,
-        atom.alignment,
-        atom.file,
-        atom.out_shndx,
-    });
-
-    const object = self.objects.items[atom.file];
-    for (object.symtab.items, 0..) |inner_sym, i| {
-        const other_atom_index = object.atom_table.get(@intCast(u32, i)) orelse continue;
-        if (other_atom_index != atom_index) continue;
-        const inner_sym_name = self.getSymbolName(.{ .sym_index = @intCast(u32, i), .file = atom.file });
-        logger.debug("    (%{d}, '{s}') @ {x}", .{
-            i,
-            inner_sym_name,
-            inner_sym.st_value,
-        });
-    }
-}
-
-fn logAtoms(self: *Elf) void {
-    const slice = self.sections.slice();
-    for (slice.items(.last_atom), 0..) |last_atom, i| {
-        var atom_index = last_atom orelse continue;
-        const ndx = @intCast(u16, i);
-        const shdr = slice.items(.shdr)[ndx];
-
-        log.debug(">>> {s}", .{self.shstrtab.getAssumeExists(shdr.sh_name)});
-
-        while (true) {
-            const atom = self.getAtom(atom_index);
-            if (atom.prev) |prev| {
-                atom_index = prev;
-            } else break;
-        }
-
-        while (true) {
-            const atom = self.getAtom(atom_index);
-            self.logAtom(atom, atom_index, log);
-            if (atom.next) |next| {
-                atom_index = next;
-            } else break;
-        }
     }
 }

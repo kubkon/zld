@@ -4,7 +4,6 @@ value: u64,
 /// Name of this Atom.
 name: u32,
 
-/// null means global synthetic symbol table.
 file: u32,
 
 /// Size of this atom
@@ -45,7 +44,7 @@ pub const empty = Atom{
 };
 
 pub fn getName(self: Atom, elf_file: *Elf) []const u8 {
-    return Elf.getString(elf_file.strtab.items.ptr, self.name);
+    return elf_file.getString(self.name);
 }
 
 pub fn getCode(self: Atom, elf_file: *Elf) []const u8 {
@@ -264,6 +263,46 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
     }
 
     try writer.writeAll(code);
+}
+
+pub fn format(
+    atom: Atom,
+    comptime unused_fmt_string: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = atom;
+    _ = unused_fmt_string;
+    _ = options;
+    _ = writer;
+    @compileError("do not format symbols directly");
+}
+
+pub fn fmt(atom: Atom, elf_file: *Elf) std.fmt.Formatter(format2) {
+    return .{ .data = .{
+        .atom = atom,
+        .elf_file = elf_file,
+    } };
+}
+
+const FormatContext = struct {
+    atom: Atom,
+    elf_file: *Elf,
+};
+
+fn format2(
+    ctx: FormatContext,
+    comptime unused_fmt_string: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = options;
+    _ = unused_fmt_string;
+    const atom = ctx.atom;
+    try writer.print("%%%{d} : {s} : @{x} : align({x}) : size({x})", .{
+        atom.atom_index, atom.getName(ctx.elf_file), atom.value,
+        atom.alignment,  atom.size,
+    });
 }
 
 const Atom = @This();
