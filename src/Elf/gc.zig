@@ -71,19 +71,9 @@ fn markLive(atom: *Atom, elf_file: *Elf) void {
     atom.is_alive = true;
     log.debug("marking live atom %%%{d}", .{atom.atom_index});
     const object = atom.getFile(elf_file);
-    const nlocals = object.getNumLocals();
     for (atom.getRelocs(elf_file)) |rel| {
-        const index = rel.r_sym();
-        const target_atom = if (index >= nlocals) blk: {
-            // It's a global!
-            assert(object.first_global != null);
-            const global_index = object.globals.items[index - nlocals];
-            const global = elf_file.getGlobal(global_index);
-            break :blk global.getAtom(elf_file);
-        } else blk: {
-            const local = object.locals.items[index];
-            break :blk local.getAtom(elf_file).?;
-        };
+        const target_sym = object.getSymbol(rel.r_sym(), elf_file);
+        const target_atom = target_sym.getAtom(elf_file);
         if (target_atom) |ta| {
             markLive(ta, elf_file);
         }

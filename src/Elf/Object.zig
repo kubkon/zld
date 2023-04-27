@@ -226,13 +226,22 @@ pub inline fn getSymbolPrecedence(sym: elf.Elf64_Sym) u4 {
     };
 }
 
-pub inline fn getNumLocals(self: Object) u32 {
-    return self.first_global orelse @intCast(u32, self.locals.items.len);
-}
-
 pub inline fn getSourceSymbol(self: Object, index: u32) elf.Elf64_Sym {
     assert(index < self.symtab.len);
     return self.symtab[index];
+}
+
+pub fn getSymbol(self: *Object, index: u32, elf_file: *Elf) *Symbol {
+    assert(index < self.symtab.len);
+    const nlocals = self.first_global orelse self.locals.items.len;
+    if (index >= nlocals) {
+        // It's a global!
+        assert(self.first_global != null);
+        const global_index = self.globals.items[index - nlocals];
+        return elf_file.getGlobal(global_index);
+    } else {
+        return &self.locals.items[index];
+    }
 }
 
 pub inline fn getShdrs(self: Object) []align(1) const elf.Elf64_Shdr {

@@ -65,7 +65,7 @@ globals: std.ArrayListUnmanaged(Symbol) = .{},
 globals_table: std.StringHashMapUnmanaged(u32) = .{},
 strtab: StringTable(.strtab) = .{},
 
-got_section: SyntheticSection(SymbolWithLoc, *Elf, .{
+got_section: SyntheticSection(u32, *Elf, .{
     .log_scope = .got_section,
     .entry_size = @sizeOf(u64),
     .baseAddrFn = Elf.getGotBaseAddress,
@@ -245,6 +245,8 @@ pub fn flush(self: *Elf) !void {
         try gc.gcAtoms(self);
     }
 
+    try self.scanRelocs();
+
     for (self.objects.items, 0..) |object, object_id| {
         log.debug(">>>{d} : {s}", .{ object_id, object.name });
         log.debug("{}{}", .{ object.fmtAtoms(self), object.fmtSymtab(self) });
@@ -253,6 +255,8 @@ pub fn flush(self: *Elf) !void {
         log.debug("linker-defined", .{});
         log.debug("{}", .{object.fmtSymtab(self)});
     }
+    log.debug("GOT", .{});
+    log.debug("{}", .{self.got_section});
 
     return error.Todo;
 
@@ -624,6 +628,14 @@ fn checkDuplicates(self: *Elf) void {
 fn checkUndefined(self: *Elf) void {
     for (self.objects.items) |object| {
         object.checkUndefined(self);
+    }
+}
+
+fn scanRelocs(self: *Elf) !void {
+    for (self.atoms.items) |*atom| {
+        if (atom.atom_index == 0) continue;
+        if (!atom.is_alive) continue;
+        try atom.scanRelocs(self);
     }
 }
 
@@ -1130,9 +1142,9 @@ fn getGotBaseAddress(self: *Elf) u64 {
     return shdr.sh_addr;
 }
 
-fn writeGotEntry(self: *Elf, entry: SymbolWithLoc, writer: anytype) !void {
+fn writeGotEntry(self: *Elf, entry: u32, writer: anytype) !void {
     if (self.got_sect_index == null) return;
-    const sym = self.getSymbol(entry);
+    const sym = self.getGlobal(entry);
     try writer.writeIntLittle(u64, sym.st_value);
 }
 

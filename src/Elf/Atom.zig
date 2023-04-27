@@ -133,10 +133,11 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
     for (self.getRelocs(elf_file)) |rel| {
         // While traversing relocations, synthesize any missing atom.
         // TODO synthesize PLT atoms, GOT atoms, etc.
-        const tsym_name = object.getSourceSymbolName(rel.r_sym());
+        const tsym = object.getSymbol(rel.r_sym(), elf_file);
+        const tsym_name = tsym.getName(elf_file);
         switch (rel.r_type()) {
             elf.R_X86_64_REX_GOTPCRELX, elf.R_X86_64_GOTPCREL => {
-                const global = elf_file.globals.get(tsym_name).?;
+                const global = elf_file.globals_table.get(tsym_name).?;
                 const gop = try elf_file.got_section.getOrCreate(gpa, global);
                 if (!gop.found_existing) {
                     log.debug("{s}: creating GOT entry: [() -> {s}]", .{
