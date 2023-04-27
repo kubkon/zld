@@ -2,7 +2,7 @@ name: []const u8,
 data: []const u8,
 object_id: u32,
 
-header: elf.Elf64_Ehdr = undefined,
+header: ?elf.Elf64_Ehdr = null,
 s_symtab: []align(1) const elf.Elf64_Sym = &[0]elf.Elf64_Sym{},
 s_strtab: []const u8 = &[0]u8{},
 s_shstrtab: []const u8 = &[0]u8{},
@@ -51,10 +51,10 @@ pub fn parse(self: *Object, elf_file: *Elf) !void {
 
     self.header = try reader.readStruct(elf.Elf64_Ehdr);
 
-    if (self.header.e_shnum == 0) return;
+    if (self.header.?.e_shnum == 0) return;
 
     const shdrs = self.getShdrs();
-    self.s_shstrtab = self.getShdrContents(self.header.e_shstrndx);
+    self.s_shstrtab = self.getShdrContents(self.header.?.e_shstrndx);
 
     const symtab_index = for (self.getShdrs(), 0..) |shdr, i| switch (shdr.sh_type) {
         elf.SHT_SYMTAB => break @intCast(u16, i),
@@ -143,6 +143,7 @@ fn initSymtab(self: *Object, elf_file: *Elf) !void {
             .name = try elf_file.strtab.insert(gpa, name),
             .sym_idx = @intCast(u32, i),
             .atom = if (sym.st_shndx == elf.SHN_ABS) 0 else self.atoms.items[sym.st_shndx],
+            .file = self.object_id,
         };
     }
 
@@ -180,8 +181,7 @@ pub fn checkDuplicates(self: Object, elf_file: *Elf) void {
         const sym_idx = @intCast(u32, first_global + i);
         const this_sym = self.s_symtab[sym_idx];
         const global = elf_file.getGlobal(index);
-        const atom = global.getAtom(elf_file) orelse continue;
-        const global_file = atom.getFile(elf_file);
+        const global_file = global.getFile(elf_file) orelse continue;
 
         if (self.object_id == global_file.object_id or
             this_sym.st_shndx == elf.SHN_UNDEF or
@@ -202,11 +202,9 @@ pub inline fn getSymbolPrecedence(sym: elf.Elf64_Sym) u4 {
     };
 }
 
-pub inline fn getShdrs(self: Object) []const elf.Elf64_Shdr {
-    return @ptrCast(
-        [*]const elf.Elf64_Shdr,
-        @alignCast(@alignOf(elf.Elf64_Shdr), &self.data[self.header.e_shoff]),
-    )[0..self.header.e_shnum];
+pub inline fn getShdrs(self: Object) []align(1) const elf.Elf64_Shdr {
+    const header = self.header orelse return &[0]elf.Elf64_Shdr{};
+    return @ptrCast([*]align(1) const elf.Elf64_Shdr, self.data.ptr + header.e_shoff)[0..header.e_shnum];
 }
 
 pub inline fn getShdrContents(self: Object, index: u16) []const u8 {
@@ -222,6 +220,52 @@ inline fn getString(self: Object, off: u32) [:0]const u8 {
 inline fn getShString(self: Object, off: u32) [:0]const u8 {
     assert(off < self.s_shstrtab.len);
     return mem.sliceTo(@ptrCast([*:0]const u8, self.s_shstrtab.ptr + off), 0);
+}
+
+pub fn format(
+    self: Object,
+    comptime unused_fmt_string: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = self;
+    _ = unused_fmt_string;
+    _ = options;
+    _ = writer;
+    @compileError("do not format objects directly");
+}
+
+pub fn fmtSymtab(self: Object, elf_file: *Elf) std.fmt.Formatter(formatSymtab) {
+    return .{ .data = .{
+        .object_id = self.object_id,
+        .elf_file = elf_file,
+    } };
+}
+
+const FormatSymtabContext = struct {
+    object_id: u32,
+    elf_file: *Elf,
+};
+
+fn formatSymtab(
+    ctx: FormatSymtabContext,
+    comptime unused_fmt_string: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = unused_fmt_string;
+    _ = options;
+    const object = &ctx.elf_file.objects.items[ctx.object_id];
+    try writer.print(">>>{d} : {s}\n", .{ ctx.object_id, object.name });
+    try writer.writeAll("  locals\n");
+    for (object.locals.items) |sym| {
+        try writer.print("    {}\n", .{sym.fmt(ctx.elf_file)});
+    }
+    try writer.writeAll("  globals\n");
+    for (object.globals.items) |index| {
+        const global = ctx.elf_file.getGlobal(index);
+        try writer.print("    {}\n", .{global.fmt(ctx.elf_file)});
+    }
 }
 
 const Object = @This();

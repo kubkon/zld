@@ -214,9 +214,9 @@ pub fn parseObject(self: Archive, offset: u32, object_id: u32, elf_file: *Elf) !
     try object.parse(elf_file);
 
     const cpu_arch = elf_file.cpu_arch.?;
-    if (cpu_arch != object.header.e_machine.toTargetCpuArch().?) {
+    if (cpu_arch != object.header.?.e_machine.toTargetCpuArch().?) {
         log.err("Invalid architecture {any}, expected {any}", .{
-            object.header.e_machine,
+            object.header.?.e_machine,
             cpu_arch.toElfMachine(),
         });
         return error.InvalidCpuArch;

@@ -207,6 +207,11 @@ pub fn flush(self: *Elf) !void {
         positionals.appendAssumeCapacity(obj.path);
     }
 
+    try self.objects.append(self.base.allocator, .{
+        .name = "",
+        .data = "",
+        .object_id = 0,
+    });
     try self.strtab.buffer.append(self.base.allocator, 0);
     try self.atoms.append(self.base.allocator, Atom.empty); // null atom
 
@@ -214,6 +219,10 @@ pub fn flush(self: *Elf) !void {
     try self.parseLibs(libs.keys());
 
     try self.resolveSymbols();
+
+    for (self.objects.items) |object| {
+        log.warn("{}", .{object.fmtSymtab(self)});
+    }
 
     if (!self.options.allow_multiple_definition) {
         self.checkDuplicates();
@@ -517,12 +526,12 @@ fn parseObject(self: *Elf, path: []const u8) !bool {
     try object.parse(self);
 
     if (self.cpu_arch == null) {
-        self.cpu_arch = object.header.e_machine.toTargetCpuArch().?;
+        self.cpu_arch = object.header.?.e_machine.toTargetCpuArch().?;
     }
     const cpu_arch = self.cpu_arch.?;
-    if (cpu_arch != object.header.e_machine.toTargetCpuArch().?) {
+    if (cpu_arch != object.header.?.e_machine.toTargetCpuArch().?) {
         log.err("Invalid architecture {any}, expected {any}", .{
-            object.header.e_machine,
+            object.header.?.e_machine,
             cpu_arch.toElfMachine(),
         });
         return error.InvalidCpuArch;
@@ -1157,6 +1166,11 @@ fn writeGotEntry(self: *Elf, entry: SymbolWithLoc, writer: anytype) !void {
 pub inline fn getString(self: *Elf, off: u32) [:0]const u8 {
     assert(off < self.strtab.buffer.items.len);
     return mem.sliceTo(@ptrCast([*:0]const u8, self.strtab.buffer.items.ptr + off), 0);
+}
+
+pub fn getFile(self: *Elf, index: u32) ?*Object {
+    if (index == 0) return null;
+    return &self.objects.items[index];
 }
 
 /// Returns symbol localtion corresponding to the set entry point.
