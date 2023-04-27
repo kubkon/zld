@@ -226,6 +226,10 @@ pub inline fn getSymbolPrecedence(sym: elf.Elf64_Sym) u4 {
     };
 }
 
+pub inline fn getNumLocals(self: Object) u32 {
+    return self.first_global orelse @intCast(u32, self.locals.items.len);
+}
+
 pub inline fn getSourceSymbol(self: Object, index: u32) elf.Elf64_Sym {
     assert(index < self.symtab.len);
     return self.symtab[index];

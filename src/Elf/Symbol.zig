@@ -22,7 +22,6 @@ pub fn getName(symbol: Symbol, elf_file: *Elf) [:0]const u8 {
 }
 
 pub fn getAtom(symbol: Symbol, elf_file: *Elf) ?*Atom {
-    assert(symbol.file != null);
     return elf_file.getAtom(symbol.atom);
 }
 

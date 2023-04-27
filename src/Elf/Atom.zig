@@ -23,6 +23,8 @@ relocs_shndx: u16,
 
 atom_index: Index,
 
+is_alive: bool,
+
 /// Points to the previous and next neighbours
 next: ?Index,
 prev: ?Index,
@@ -39,6 +41,7 @@ pub const empty = Atom{
     .out_shndx = 0,
     .relocs_shndx = @bitCast(u16, @as(i16, -1)),
     .atom_index = 0,
+    .is_alive = false,
     .prev = null,
     .next = null,
 };
@@ -54,6 +57,11 @@ pub fn getCode(self: Atom, elf_file: *Elf) []const u8 {
 
 pub inline fn getFile(self: Atom, elf_file: *Elf) *Object {
     return &elf_file.objects.items[self.file];
+}
+
+pub fn getInputShdr(self: Atom, elf_file: *Elf) elf.Elf64_Shdr {
+    const object = self.getFile(elf_file);
+    return object.getShdrs()[self.shndx];
 }
 
 pub fn getRelocs(self: Atom, elf_file: *Elf) []align(1) const elf.Elf64_Rela {
@@ -303,6 +311,9 @@ fn format2(
         atom.atom_index, atom.getName(ctx.elf_file), atom.value,
         atom.alignment,  atom.size,
     });
+    if (ctx.elf_file.options.gc_sections and !atom.is_alive) {
+        try writer.writeAll(" : [*]");
+    }
 }
 
 const Atom = @This();

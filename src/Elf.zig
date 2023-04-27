@@ -6,7 +6,7 @@ const builtin = @import("builtin");
 const assert = std.debug.assert;
 const elf = std.elf;
 const fs = std.fs;
-// const gc = @import("Elf/gc.zig");
+const gc = @import("Elf/gc.zig");
 const log = std.log.scoped(.elf);
 const math = std.math;
 const mem = std.mem;
@@ -58,6 +58,8 @@ init_array_end_sym_index: ?u32 = null,
 fini_array_start_sym_index: ?u32 = null,
 fini_array_end_sym_index: ?u32 = null,
 
+entry_index: ?u32 = null,
+
 globals: std.ArrayListUnmanaged(Symbol) = .{},
 // TODO convert to context-adapted
 globals_table: std.StringHashMapUnmanaged(u32) = .{},
@@ -77,10 +79,6 @@ const Section = struct {
     phdr: u8,
     last_atom: ?Atom.Index,
 };
-
-/// Special st_other value used internally by zld to mark symbol
-/// as GCed.
-pub const STV_GC: u8 = std.math.maxInt(u8);
 
 pub const SymbolWithLoc = struct {
     /// Index in the respective symbol table.
@@ -234,26 +232,29 @@ pub fn flush(self: *Elf) !void {
 
     try self.resolveSyntheticSymbols();
 
-    for (self.objects.items, 0..) |object, object_id| {
-        log.warn(">>>{d} : {s}", .{ object_id, object.name });
-        log.warn("{}{}", .{ object.fmtAtoms(self), object.fmtSymtab(self) });
-    }
-    if (self.internal_object) |object| {
-        log.warn("linker-defined", .{});
-        log.warn("{}", .{object.fmtSymtab(self)});
-    }
-
     self.checkUndefined();
 
+    // Set the entrypoint if found
+    self.entry_index = blk: {
+        if (self.options.output_mode != .exe) break :blk null;
+        const entry_name = self.options.entry orelse "_start";
+        break :blk self.globals_table.get(entry_name) orelse null;
+    };
+
+    if (self.options.gc_sections) {
+        try gc.gcAtoms(self);
+    }
+
+    for (self.objects.items, 0..) |object, object_id| {
+        log.debug(">>>{d} : {s}", .{ object_id, object.name });
+        log.debug("{}{}", .{ object.fmtAtoms(self), object.fmtSymtab(self) });
+    }
+    if (self.internal_object) |object| {
+        log.debug("linker-defined", .{});
+        log.debug("{}", .{object.fmtSymtab(self)});
+    }
+
     return error.Todo;
-
-    // for (self.objects.items, 0..) |*object, object_id| {
-    //     try object.splitIntoAtoms(self.base.allocator, @intCast(u16, object_id), self);
-    // }
-
-    // // if (self.options.gc_sections) {
-    // //     try gc.gcAtoms(self);
-    // // }
 
     // for (self.objects.items) |object| {
     //     for (object.atoms.items) |atom_index| {
@@ -986,7 +987,6 @@ fn writeSymtab(self: *Elf) !void {
             if (st_type == elf.STT_NOTYPE) continue;
             if (sym.st_other == @enumToInt(elf.STV.INTERNAL)) continue;
             if (sym.st_other == @enumToInt(elf.STV.HIDDEN)) continue;
-            if (sym.st_other == STV_GC) continue;
 
             const sym_name = object.getSymbolName(@intCast(u32, sym_id));
             var out_sym = sym;
@@ -1000,7 +1000,6 @@ fn writeSymtab(self: *Elf) !void {
         if (st_bind != elf.STB_LOCAL) continue;
         if (sym.st_other == @enumToInt(elf.STV.INTERNAL)) continue;
         if (sym.st_other == @enumToInt(elf.STV.HIDDEN)) continue;
-        if (sym.st_other == STV_GC) continue;
         try symtab.append(sym);
     }
 
@@ -1010,7 +1009,6 @@ fn writeSymtab(self: *Elf) !void {
     for (self.globals.values()) |global| {
         var sym = self.getSymbol(global);
         assert(sym.st_name > 0);
-        if (sym.st_other == STV_GC) continue;
         // TODO refactor
         if (sym.st_info >> 4 == elf.STB_LOCAL) continue;
         const sym_name = self.getSymbolName(global);
@@ -1145,14 +1143,10 @@ pub inline fn getString(self: *Elf, off: u32) [:0]const u8 {
 
 /// Returns symbol localtion corresponding to the set entry point.
 /// Asserts output mode is executable.
-pub fn getEntryPoint(self: Elf) error{EntrypointNotFound}!SymbolWithLoc {
+pub fn getEntryPoint(self: Elf) ?Symbol {
     assert(self.options.output_mode == .exe);
     const entry_name = self.options.entry orelse "_start";
-    const global = self.globals.get(entry_name) orelse {
-        log.err("entrypoint '{s}' not found", .{entry_name});
-        return error.EntrypointNotFound;
-    };
-    return global;
+    return self.globals.get(entry_name) orelse null;
 }
 
 pub fn addAtom(self: *Elf) !Atom.Index {
