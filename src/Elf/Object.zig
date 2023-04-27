@@ -3,9 +3,9 @@ data: []const u8,
 object_id: u32,
 
 header: ?elf.Elf64_Ehdr = null,
-s_symtab: []align(1) const elf.Elf64_Sym = &[0]elf.Elf64_Sym{},
-s_strtab: []const u8 = &[0]u8{},
-s_shstrtab: []const u8 = &[0]u8{},
+symtab: []align(1) const elf.Elf64_Sym = &[0]elf.Elf64_Sym{},
+strtab: []const u8 = &[0]u8{},
+shstrtab: []const u8 = &[0]u8{},
 first_global: ?u32 = null,
 
 locals: std.ArrayListUnmanaged(Symbol) = .{},
@@ -54,7 +54,7 @@ pub fn parse(self: *Object, elf_file: *Elf) !void {
     if (self.header.?.e_shnum == 0) return;
 
     const shdrs = self.getShdrs();
-    self.s_shstrtab = self.getShdrContents(self.header.?.e_shstrndx);
+    self.shstrtab = self.getShdrContents(self.header.?.e_shstrndx);
 
     const symtab_index = for (self.getShdrs(), 0..) |shdr, i| switch (shdr.sh_type) {
         elf.SHT_SYMTAB => break @intCast(u16, i),
@@ -67,8 +67,8 @@ pub fn parse(self: *Object, elf_file: *Elf) !void {
 
         const symtab = self.getShdrContents(index);
         const nsyms = @divExact(symtab.len, @sizeOf(elf.Elf64_Sym));
-        self.s_symtab = @ptrCast([*]align(1) const elf.Elf64_Sym, symtab.ptr)[0..nsyms];
-        self.s_strtab = self.getShdrContents(@intCast(u16, shdr.sh_link));
+        self.symtab = @ptrCast([*]align(1) const elf.Elf64_Sym, symtab.ptr)[0..nsyms];
+        self.strtab = self.getShdrContents(@intCast(u16, shdr.sh_link));
     }
 
     try self.initAtoms(elf_file);
@@ -122,14 +122,13 @@ fn initAtoms(self: *Object, elf_file: *Elf) !void {
 
 fn initSymtab(self: *Object, elf_file: *Elf) !void {
     const gpa = elf_file.base.allocator;
-    const symtab = self.s_symtab;
-    const first_global = self.first_global orelse symtab.len;
+    const first_global = self.first_global orelse self.symtab.len;
     const shdrs = self.getShdrs();
 
     try self.locals.ensureTotalCapacityPrecise(gpa, first_global);
-    try self.globals.ensureTotalCapacityPrecise(gpa, symtab.len - first_global);
+    try self.globals.ensureTotalCapacityPrecise(gpa, self.symtab.len - first_global);
 
-    for (symtab[0..first_global], 0..) |sym, i| {
+    for (self.symtab[0..first_global], 0..) |sym, i| {
         const symbol = self.locals.addOneAssumeCapacity();
         const name = blk: {
             if (sym.st_name == 0 and sym.st_type() == elf.STT_SECTION) {
@@ -147,10 +146,15 @@ fn initSymtab(self: *Object, elf_file: *Elf) !void {
         };
     }
 
-    for (symtab[first_global..]) |sym| {
+    for (self.symtab[first_global..], 0..) |sym, i| {
+        const sym_idx = @intCast(u32, first_global + i);
         const name = self.getString(sym.st_name);
-        const global_index = try elf_file.getOrCreateGlobal(name);
-        self.globals.addOneAssumeCapacity().* = global_index;
+        const gop = try elf_file.getOrCreateGlobal(name);
+        if (!gop.found_existing) {
+            const global = elf_file.getGlobal(gop.index);
+            self.setGlobal(sym_idx, global);
+        }
+        self.globals.addOneAssumeCapacity().* = gop.index;
     }
 }
 
@@ -158,30 +162,40 @@ pub fn resolveSymbols(self: Object, elf_file: *Elf) !void {
     const first_global = self.first_global orelse return;
     for (self.globals.items, 0..) |index, i| {
         const sym_idx = @intCast(u32, first_global + i);
-        const this_sym = self.s_symtab[sym_idx];
+        const this_sym = self.symtab[sym_idx];
 
         if (this_sym.st_shndx == elf.SHN_UNDEF) continue;
 
         const global = elf_file.getGlobal(index);
         if (getSymbolPrecedence(this_sym) < global.getSymbolPrecedence(elf_file)) {
-            const name = global.name;
-            global.* = .{
-                .value = this_sym.st_value,
-                .name = name,
-                .atom = self.atoms.items[this_sym.st_shndx],
-                .sym_idx = sym_idx,
-            };
+            self.setGlobal(sym_idx, global);
         }
     }
+}
+
+fn setGlobal(self: Object, sym_idx: u32, global: *Symbol) void {
+    const sym = self.symtab[sym_idx];
+    const name = global.name;
+    const atom = if (sym.st_shndx == elf.SHN_UNDEF or sym.st_shndx == elf.SHN_ABS)
+        0
+    else
+        self.atoms.items[sym.st_shndx];
+    global.* = .{
+        .value = sym.st_value,
+        .name = name,
+        .atom = atom,
+        .sym_idx = sym_idx,
+        .file = self.object_id,
+    };
 }
 
 pub fn checkDuplicates(self: Object, elf_file: *Elf) void {
     const first_global = self.first_global orelse return;
     for (self.globals.items, 0..) |index, i| {
         const sym_idx = @intCast(u32, first_global + i);
-        const this_sym = self.s_symtab[sym_idx];
+        const this_sym = self.symtab[sym_idx];
         const global = elf_file.getGlobal(index);
-        const global_file = global.getFile(elf_file) orelse continue;
+        const global_file = global.getObject(elf_file) orelse continue;
 
         if (self.object_id == global_file.object_id or
             this_sym.st_shndx == elf.SHN_UNDEF or
@@ -190,16 +204,31 @@ pub fn checkDuplicates(self: Object, elf_file: *Elf) void {
     }
 }
 
+pub fn checkUndefined(self: Object, elf_file: *Elf) void {
+    for (self.globals.items) |index| {
+        const global = elf_file.getGlobal(index);
+        if (global.isUndef(elf_file)) {
+            log.err("undefined reference: {s}: {s}", .{ self.name, global.getName(elf_file) });
+        }
+    }
+}
+
 /// Encodes symbol precedence so that the following ordering applies:
 /// * strong defined
 /// * weak defined
 /// * undefined
 pub inline fn getSymbolPrecedence(sym: elf.Elf64_Sym) u4 {
+    if (sym.st_shndx == elf.SHN_UNDEF) return 0xf;
     return switch (sym.st_bind()) {
         elf.STB_GLOBAL => 0,
         elf.STB_WEAK => 1,
         else => 0xf,
     };
+}
+
+pub inline fn getSourceSymbol(self: Object, index: u32) elf.Elf64_Sym {
+    assert(index < self.symtab.len);
+    return self.symtab[index];
 }
 
 pub inline fn getShdrs(self: Object) []align(1) const elf.Elf64_Shdr {
@@ -213,13 +242,13 @@ pub inline fn getShdrContents(self: Object, index: u16) []const u8 {
 }
 
 inline fn getString(self: Object, off: u32) [:0]const u8 {
-    assert(off < self.s_strtab.len);
-    return mem.sliceTo(@ptrCast([*:0]const u8, self.s_strtab.ptr + off), 0);
+    assert(off < self.strtab.len);
+    return mem.sliceTo(@ptrCast([*:0]const u8, self.strtab.ptr + off), 0);
 }
 
 inline fn getShString(self: Object, off: u32) [:0]const u8 {
-    assert(off < self.s_shstrtab.len);
-    return mem.sliceTo(@ptrCast([*:0]const u8, self.s_shstrtab.ptr + off), 0);
+    assert(off < self.shstrtab.len);
+    return mem.sliceTo(@ptrCast([*:0]const u8, self.shstrtab.ptr + off), 0);
 }
 
 pub fn format(
@@ -235,15 +264,15 @@ pub fn format(
     @compileError("do not format objects directly");
 }
 
-pub fn fmtSymtab(self: Object, elf_file: *Elf) std.fmt.Formatter(formatSymtab) {
+pub fn fmtSymtab(self: *const Object, elf_file: *Elf) std.fmt.Formatter(formatSymtab) {
     return .{ .data = .{
-        .object_id = self.object_id,
+        .object = self,
         .elf_file = elf_file,
     } };
 }
 
 const FormatContext = struct {
-    object_id: u32,
+    object: *const Object,
     elf_file: *Elf,
 };
 
@@ -255,7 +284,7 @@ fn formatSymtab(
 ) !void {
     _ = unused_fmt_string;
     _ = options;
-    const object = ctx.elf_file.getFile(ctx.object_id) orelse return;
+    const object = ctx.object;
     try writer.writeAll("  locals\n");
     for (object.locals.items) |sym| {
         try writer.print("    {}\n", .{sym.fmt(ctx.elf_file)});
@@ -267,9 +296,9 @@ fn formatSymtab(
     }
 }
 
-pub fn fmtAtoms(self: Object, elf_file: *Elf) std.fmt.Formatter(formatAtoms) {
+pub fn fmtAtoms(self: *const Object, elf_file: *Elf) std.fmt.Formatter(formatAtoms) {
     return .{ .data = .{
-        .object_id = self.object_id,
+        .object = self,
         .elf_file = elf_file,
     } };
 }
@@ -282,7 +311,7 @@ fn formatAtoms(
 ) !void {
     _ = unused_fmt_string;
     _ = options;
-    const object = ctx.elf_file.getFile(ctx.object_id) orelse return;
+    const object = ctx.object;
     try writer.writeAll("  atoms\n");
     for (object.atoms.items) |atom_index| {
         const atom = ctx.elf_file.getAtom(atom_index) orelse continue;

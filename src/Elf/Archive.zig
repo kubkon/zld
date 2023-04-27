@@ -203,14 +203,12 @@ pub fn parseObject(self: Archive, offset: u32, object_id: u32, elf_file: *Elf) !
         return error.Io;
     }
 
-    const candidate = Object{
+    const object = try elf_file.objects.addOne(gpa);
+    object.* = .{
         .name = full_name,
         .data = data,
         .object_id = object_id,
     };
-
-    const object = try elf_file.objects.addOne(gpa);
-    object.* = candidate;
     try object.parse(elf_file);
 
     const cpu_arch = elf_file.cpu_arch.?;

@@ -48,17 +48,17 @@ pub fn getName(self: Atom, elf_file: *Elf) []const u8 {
 }
 
 pub fn getCode(self: Atom, elf_file: *Elf) []const u8 {
-    const object = self.getFile(elf_file).?;
+    const object = self.getFile(elf_file);
     return object.getShdrContents(self.shndx);
 }
 
 pub inline fn getFile(self: Atom, elf_file: *Elf) *Object {
-    return elf_file.getFile(self.file).?;
+    return &elf_file.objects.items[self.file];
 }
 
 pub fn getRelocs(self: Atom, elf_file: *Elf) []align(1) const elf.Elf64_Rela {
     if (self.relocs_shndx == @bitCast(u16, @as(i16, -1))) return &[0]elf.Elf64_Rela{};
-    const object = self.getFile(elf_file).?;
+    const object = self.getFile(elf_file);
     const bytes = object.getShdrContents(self.relocs_shndx);
     const nrelocs = @divExact(bytes.len, @sizeOf(elf.Elf64_Rela));
     return @ptrCast([*]align(1) const elf.Elf64_Rela, bytes)[0..nrelocs];
@@ -121,7 +121,7 @@ fn getTargetAddress(self: Atom, rel: elf.Elf64_Rela, elf_file: *Elf) ?u64 {
 
 pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
     const gpa = elf_file.base.allocator;
-    const object = self.getFile(elf_file).?;
+    const object = self.getFile(elf_file);
     for (self.getRelocs(elf_file)) |rel| {
         // While traversing relocations, synthesize any missing atom.
         // TODO synthesize PLT atoms, GOT atoms, etc.

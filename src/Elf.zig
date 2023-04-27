@@ -14,6 +14,7 @@ const mem = std.mem;
 const Allocator = mem.Allocator;
 const Archive = @import("Elf/Archive.zig");
 const Atom = @import("Elf/Atom.zig");
+const InternalObject = @import("Elf/InternalObject.zig");
 const Object = @import("Elf/Object.zig");
 pub const Options = @import("Elf/Options.zig");
 const StringTable = @import("strtab.zig").StringTable;
@@ -34,10 +35,7 @@ archives: std.ArrayListUnmanaged(Archive) = .{},
 objects: std.ArrayListUnmanaged(Object) = .{},
 
 phdrs: std.ArrayListUnmanaged(elf.Elf64_Phdr) = .{},
-
 sections: std.MultiArrayList(Section) = .{},
-
-strtab: StringTable(.strtab) = .{},
 
 phdr_seg_index: ?u16 = null,
 load_r_seg_index: ?u16 = null,
@@ -52,9 +50,18 @@ symtab_sect_index: ?u16 = null,
 strtab_sect_index: ?u16 = null,
 shstrtab_sect_index: ?u16 = null,
 
+/// Internal linker state for coordinating symbol resolution and synthetics
+internal_object: ?InternalObject = null,
+dynamic_sym_index: ?u32 = null,
+init_array_start_sym_index: ?u32 = null,
+init_array_end_sym_index: ?u32 = null,
+fini_array_start_sym_index: ?u32 = null,
+fini_array_end_sym_index: ?u32 = null,
+
 globals: std.ArrayListUnmanaged(Symbol) = .{},
 // TODO convert to context-adapted
 globals_table: std.StringHashMapUnmanaged(u32) = .{},
+strtab: StringTable(.strtab) = .{},
 
 got_section: SyntheticSection(SymbolWithLoc, *Elf, .{
     .log_scope = .got_section,
@@ -67,6 +74,7 @@ atoms: std.ArrayListUnmanaged(Atom) = .{},
 
 const Section = struct {
     shdr: elf.Elf64_Shdr,
+    phdr: u8,
     last_atom: ?Atom.Index,
 };
 
@@ -132,6 +140,9 @@ pub fn deinit(self: *Elf) void {
         archive.deinit(gpa);
     }
     self.archives.deinit(gpa);
+    if (self.internal_object) |*object| {
+        object.deinit(gpa);
+    }
 }
 
 pub fn closeFiles(self: *const Elf) void {
@@ -207,45 +218,34 @@ pub fn flush(self: *Elf) !void {
         positionals.appendAssumeCapacity(obj.path);
     }
 
-    try self.objects.append(self.base.allocator, .{
-        .name = "",
-        .data = "",
-        .object_id = 0,
-    });
     try self.strtab.buffer.append(self.base.allocator, 0);
     try self.atoms.append(self.base.allocator, Atom.empty); // null atom
 
     try self.parsePositionals(positionals.items);
     try self.parseLibs(libs.keys());
 
-    try self.resolveSymbols();
+    self.internal_object = InternalObject{};
 
-    for (self.objects.items, 0..) |object, object_id| {
-        if (object_id == 0) continue;
-        log.warn(">>>{d} : {s}", .{ object_id, object.name });
-        log.warn("{}{}", .{ object.fmtAtoms(self), object.fmtSymtab(self) });
-    }
+    try self.resolveSymbols();
 
     if (!self.options.allow_multiple_definition) {
         self.checkDuplicates();
     }
 
+    try self.resolveSyntheticSymbols();
+
+    for (self.objects.items, 0..) |object, object_id| {
+        log.warn(">>>{d} : {s}", .{ object_id, object.name });
+        log.warn("{}{}", .{ object.fmtAtoms(self), object.fmtSymtab(self) });
+    }
+    if (self.internal_object) |object| {
+        log.warn("linker-defined", .{});
+        log.warn("{}", .{object.fmtSymtab(self)});
+    }
+
+    self.checkUndefined();
+
     return error.Todo;
-
-    // for (self.unresolved.keys()) |ndx| {
-    //     const global = self.globals.values()[ndx];
-    //     const object = self.objects.items[global.file.?];
-    //     const sym_name = self.getSymbolName(global);
-    //     log.err("undefined reference to symbol '{s}'", .{sym_name});
-    //     log.err("  first referenced in '{s}'", .{object.name});
-    // }
-    // if (self.unresolved.count() > 0) {
-    //     return error.UndefinedSymbolReference;
-    // }
-
-    // for (self.objects.items) |*object| {
-    //     try object.scanInputSections(self);
-    // }
 
     // for (self.objects.items, 0..) |*object, object_id| {
     //     try object.splitIntoAtoms(self.base.allocator, @intCast(u16, object_id), self);
@@ -576,7 +576,6 @@ fn resolveSymbols(self: *Elf) !void {
         try object.resolveSymbols(self);
     }
     try self.resolveSymbolsInArchives();
-    // try self.resolveSpecialSymbols();
 }
 
 fn resolveSymbolsInArchives(self: *Elf) !void {
@@ -586,7 +585,7 @@ fn resolveSymbolsInArchives(self: *Elf) !void {
     loop: while (next_sym < self.globals.items.len) {
         const global = self.globals.items[next_sym];
         const global_name = global.getName(self);
-        if (global.getAtom(self) == null) for (self.archives.items) |archive| {
+        if (global.isUndef(self)) for (self.archives.items) |archive| {
             // Check if the entry exists in a static archive.
             const offsets = archive.toc.get(global_name) orelse {
                 // No hit.
@@ -605,51 +604,25 @@ fn resolveSymbolsInArchives(self: *Elf) !void {
     }
 }
 
-fn resolveSpecialSymbols(self: *Elf) !void {
-    var next_sym: usize = 0;
-    loop: while (next_sym < self.unresolved.count()) {
-        const global = &self.globals.values()[self.unresolved.keys()[next_sym]];
-        const sym_name = self.getSymbolName(global.*);
-
-        if (mem.eql(u8, sym_name, "__init_array_start") or
-            mem.eql(u8, sym_name, "__init_array_end") or
-            mem.eql(u8, sym_name, "__fini_array_start") or
-            mem.eql(u8, sym_name, "__fini_array_end") or
-            mem.eql(u8, sym_name, "_DYNAMIC"))
-        {
-            const local: elf.Elf64_Sym = if (mem.eql(u8, sym_name, "_DYNAMIC")) .{
-                .st_name = try self.strtab.insert(self.base.allocator, sym_name),
-                .st_info = elf.STB_WEAK << 4,
-                .st_other = 0,
-                .st_shndx = 0,
-                .st_value = 0,
-                .st_size = 0,
-            } else .{
-                .st_name = try self.strtab.insert(self.base.allocator, sym_name),
-                .st_info = 0,
-                .st_other = 0,
-                .st_shndx = 1, // TODO should this be hardcoded?
-                .st_value = 0,
-                .st_size = 0,
-            };
-            const sym_index = @intCast(u32, self.locals.items.len);
-            try self.locals.append(self.base.allocator, local);
-            global.* = .{
-                .sym_index = sym_index,
-                .file = null,
-            };
-            _ = self.unresolved.fetchSwapRemove(@intCast(u32, self.globals.getIndex(sym_name).?));
-
-            continue :loop;
-        }
-
-        next_sym += 1;
-    }
+fn resolveSyntheticSymbols(self: *Elf) !void {
+    const object = &(self.internal_object orelse return);
+    self.dynamic_sym_index = try object.addSyntheticGlobal("_DYNAMIC", self);
+    self.init_array_start_sym_index = try object.addSyntheticGlobal("__init_array_start", self);
+    self.init_array_end_sym_index = try object.addSyntheticGlobal("__init_array_end", self);
+    self.fini_array_start_sym_index = try object.addSyntheticGlobal("__fini_array_start", self);
+    self.fini_array_end_sym_index = try object.addSyntheticGlobal("__fini_array_end", self);
+    try object.resolveSymbols(self);
 }
 
 fn checkDuplicates(self: *Elf) void {
     for (self.objects.items) |object| {
         object.checkDuplicates(self);
+    }
+}
+
+fn checkUndefined(self: *Elf) void {
+    for (self.objects.items) |object| {
+        object.checkUndefined(self);
     }
 }
 
@@ -1170,11 +1143,6 @@ pub inline fn getString(self: *Elf, off: u32) [:0]const u8 {
     return mem.sliceTo(@ptrCast([*:0]const u8, self.strtab.buffer.items.ptr + off), 0);
 }
 
-pub fn getFile(self: *Elf, index: u32) ?*Object {
-    if (index == 0) return null;
-    return &self.objects.items[index];
-}
-
 /// Returns symbol localtion corresponding to the set entry point.
 /// Asserts output mode is executable.
 pub fn getEntryPoint(self: Elf) error{EntrypointNotFound}!SymbolWithLoc {
@@ -1200,7 +1168,12 @@ pub fn getAtom(self: Elf, atom_index: Atom.Index) ?*Atom {
     return &self.atoms.items[atom_index];
 }
 
-pub fn getOrCreateGlobal(self: *Elf, name: [:0]const u8) !u32 {
+const GetOrCreateGlobalResult = struct {
+    found_existing: bool,
+    index: u32,
+};
+
+pub fn getOrCreateGlobal(self: *Elf, name: [:0]const u8) !GetOrCreateGlobalResult {
     const gpa = self.base.allocator;
     const gop = try self.globals_table.getOrPut(gpa, name);
     if (!gop.found_existing) {
@@ -1209,7 +1182,10 @@ pub fn getOrCreateGlobal(self: *Elf, name: [:0]const u8) !u32 {
         global.* = .{ .name = try self.strtab.insert(gpa, name) };
         gop.value_ptr.* = index;
     }
-    return gop.value_ptr.*;
+    return .{
+        .found_existing = gop.found_existing,
+        .index = gop.value_ptr.*,
+    };
 }
 
 pub fn getGlobal(self: *Elf, index: u32) *Symbol {
