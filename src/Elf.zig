@@ -263,6 +263,7 @@ pub fn flush(self: *Elf) !void {
     try self.scanRelocs();
     try self.initSections();
     try self.calcSectionSizes();
+    try self.sortSections();
     // try self.setStackSize();
 
     if (wip_dump_state) {
@@ -330,36 +331,6 @@ pub fn flush(self: *Elf) !void {
     // try self.writeHeader();
 }
 
-fn getSectionPrecedence(shdr: elf.Elf64_Shdr, name: []const u8) u4 {
-    const flags = shdr.sh_flags;
-    switch (shdr.sh_type) {
-        elf.SHT_NULL => return 0,
-        elf.SHT_PREINIT_ARRAY,
-        elf.SHT_INIT_ARRAY,
-        elf.SHT_FINI_ARRAY,
-        => return 2,
-        elf.SHT_PROGBITS => if (flags & elf.SHF_ALLOC != 0) {
-            if (flags & elf.SHF_EXECINSTR != 0) {
-                return 2;
-            } else if (flags & elf.SHF_WRITE != 0) {
-                return if (flags & elf.SHF_TLS != 0) 3 else 5;
-            } else {
-                return 1;
-            }
-        } else {
-            if (mem.startsWith(u8, name, ".debug")) {
-                return 7;
-            } else {
-                return 8;
-            }
-        },
-        elf.SHT_NOBITS => return if (flags & elf.SHF_TLS != 0) 4 else 6,
-        elf.SHT_SYMTAB => return 0xa,
-        elf.SHT_STRTAB => return 0xb,
-        else => return 0xf,
-    }
-}
-
 fn initSections(self: *Elf) !void {
     for (self.atoms.items, 0..) |*atom, index| {
         if (index == 0) continue;
@@ -401,6 +372,68 @@ fn calcSectionSizes(self: *Elf) !void {
         }
 
         slice.set(atom.out_shndx, section);
+    }
+}
+
+fn getSectionPrecedence(self: *Elf, shdr: elf.Elf64_Shdr) u4 {
+    const flags = shdr.sh_flags;
+    switch (shdr.sh_type) {
+        elf.SHT_NULL => return 0,
+        elf.SHT_PREINIT_ARRAY,
+        elf.SHT_INIT_ARRAY,
+        elf.SHT_FINI_ARRAY,
+        => return 2,
+        elf.SHT_PROGBITS => if (flags & elf.SHF_ALLOC != 0) {
+            if (flags & elf.SHF_EXECINSTR != 0) {
+                return 2;
+            } else if (flags & elf.SHF_WRITE != 0) {
+                return if (flags & elf.SHF_TLS != 0) 3 else 5;
+            } else {
+                return 1;
+            }
+        } else {
+            const name = self.shstrtab.getAssumeExists(shdr.sh_name);
+            if (mem.startsWith(u8, name, ".debug")) {
+                return 7;
+            } else {
+                return 8;
+            }
+        },
+        elf.SHT_NOBITS => return if (flags & elf.SHF_TLS != 0) 4 else 6,
+        elf.SHT_SYMTAB => return 0xa,
+        elf.SHT_STRTAB => return 0xb,
+        else => return 0xf,
+    }
+}
+
+fn sortSections(self: *Elf) !void {
+    const SortSection = struct {
+        elf_file: *Elf,
+
+        pub fn lessThan(elf_file: *Elf, lhs: Section, rhs: Section) bool {
+            return elf_file.getSectionPrecedence(lhs.shdr) < elf_file.getSectionPrecedence(rhs.shdr);
+        }
+    };
+
+    const gpa = self.base.allocator;
+    const slice = self.sections.slice();
+    var sections = std.ArrayList(Section).init(gpa);
+    defer sections.deinit();
+    try sections.ensureTotalCapacity(slice.len);
+
+    {
+        var i: u8 = 0;
+        while (i < slice.len) : (i += 1) {
+            const section = self.sections.get(i);
+            sections.appendAssumeCapacity(section);
+        }
+    }
+
+    std.sort.sort(Section, sections.items, self, SortSection.lessThan);
+
+    self.sections.shrinkRetainingCapacity(0);
+    for (sections.items) |out| {
+        self.sections.appendAssumeCapacity(out);
     }
 }
 
