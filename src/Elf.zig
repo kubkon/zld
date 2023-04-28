@@ -79,7 +79,7 @@ const wip_dump_state = true;
 
 const Section = struct {
     shdr: elf.Elf64_Shdr,
-    phdr: u8,
+    phdr: ?u16,
     first_atom: ?Atom.Index,
     last_atom: ?Atom.Index,
 };
@@ -264,7 +264,7 @@ pub fn flush(self: *Elf) !void {
         const shdr = atom.getInputShdr(self);
         const name = atom.getName(self);
         const mark_dead = blk: {
-            if (shdr.sh_type == 0x70000001) break :blk true; // SHT_X86_64_UNWIND
+            if (shdr.sh_type == 0x70000001) break :blk true; // TODO SHT_X86_64_UNWIND
             if (mem.startsWith(u8, name, ".note")) break :blk true;
             if (mem.startsWith(u8, name, ".comment")) break :blk true;
             if (mem.startsWith(u8, name, ".llvm_addrsig")) break :blk true;
@@ -277,6 +277,7 @@ pub fn flush(self: *Elf) !void {
     try self.initSections();
     try self.calcSectionSizes();
     try self.sortSections();
+    try self.initSegments();
     try self.allocateSegments();
     // try self.setStackSize();
 
@@ -472,8 +473,109 @@ fn sortSections(self: *Elf) !void {
     }
 }
 
+fn initSegments(self: *Elf) !void {
+    // We preallocate space for PHDR segment
+    self.phdr_seg_index = try self.addSegment(.{
+        .type = elf.PT_PHDR,
+        .flags = elf.PF_R,
+        .@"align" = @alignOf(elf.Elf64_Phdr),
+    });
+
+    // Then, we proceed in creating segments for all alloc sections.
+    // Note that the sections are now sorted in the most optimal order meaning we expect
+    // one of each segment. This of course isn't enforced by the loader, so if we decide
+    // to tackle this differently, we need to tweak this logic.
+    for (self.sections.items(.shdr), 0..) |shdr, i| {
+        const phdr = &self.sections.items(.phdr)[i];
+        if (shdr.sh_flags & elf.SHF_ALLOC == 0) continue;
+        const write = shdr.sh_flags & elf.SHF_WRITE != 0;
+        const exec = shdr.sh_flags & elf.SHF_EXECINSTR != 0;
+        if (write and exec) {
+            log.err("TODO executable segment is writeable", .{});
+            return error.ExecWrite;
+        }
+        phdr.* = blk: {
+            if (exec) {
+                const phdr_index = self.load_re_seg_index orelse try self.addSegment(.{
+                    .type = elf.PT_LOAD,
+                    .flags = elf.PF_X | elf.PF_R,
+                    .@"align" = 0x1000,
+                });
+                self.load_re_seg_index = phdr_index;
+                break :blk phdr_index;
+            }
+            if (write) {
+                const phdr_index = self.load_rw_seg_index orelse try self.addSegment(.{
+                    .type = elf.PT_LOAD,
+                    .flags = elf.PF_W | elf.PF_R,
+                    .@"align" = 0x1000,
+                });
+                self.load_rw_seg_index = phdr_index;
+                break :blk phdr_index;
+            }
+            const phdr_index = self.load_r_seg_index orelse try self.addSegment(.{
+                .type = elf.PT_LOAD,
+                .flags = elf.PF_R,
+                .@"align" = 0x1000,
+            });
+            self.load_r_seg_index = phdr_index;
+            break :blk phdr_index;
+        };
+    }
+}
+
 fn allocateSegments(self: *Elf) !void {
-    _ = self;
+    var offset: u64 = 0;
+    var vaddr: u64 = default_base_addr;
+    // Now that we have initialized segments, we can go ahead and allocate them in memory.
+    // We start with the PHDR segment which contains all program headers.
+    if (self.phdr_seg_index) |index| {
+        const phdr = &self.phdrs.items[index];
+        const size = self.phdrs.items.len * @sizeOf(elf.Elf64_Phdr);
+        offset += @sizeOf(elf.Elf64_Ehdr);
+        vaddr += offset;
+
+        phdr.p_offset = offset;
+        phdr.p_vaddr = vaddr;
+        phdr.p_paddr = vaddr;
+        phdr.p_filesz = size;
+        phdr.p_memsz = size;
+
+        offset += size;
+        vaddr += size;
+    }
+
+    for (self.phdrs.items[1..], 1..) |*phdr, phdr_index| {
+        const sect_range = self.getSectionIndexes(@intCast(u16, phdr_index));
+        const start = sect_range.start;
+        const end = sect_range.end;
+        if (start == end) continue;
+
+        const slice = self.sections.slice();
+
+        var file_align: u64 = 0;
+        var filesz: u64 = 0;
+        var memsz: u64 = 0;
+        for (slice.items(.shdr)[start..end]) |shdr| {
+            file_align = @max(file_align, shdr.sh_addralign);
+            if (shdr.sh_type != elf.SHT_NOBITS) {
+                filesz = mem.alignForwardGeneric(u64, filesz, shdr.sh_addralign) + shdr.sh_size;
+            }
+            memsz = mem.alignForwardGeneric(u64, memsz, shdr.sh_addralign) + shdr.sh_size;
+        }
+
+        offset = mem.alignForwardGeneric(u64, offset, file_align);
+        vaddr = mem.alignForwardGeneric(u64, vaddr, phdr.p_align) + @rem(offset, phdr.p_align);
+
+        phdr.p_offset = offset;
+        phdr.p_vaddr = vaddr;
+        phdr.p_paddr = vaddr;
+        phdr.p_filesz = filesz;
+        phdr.p_memsz = memsz;
+
+        offset += filesz;
+        vaddr += memsz;
+    }
 }
 
 fn parsePositionals(self: *Elf, files: []const []const u8) !void {
@@ -1115,7 +1217,7 @@ pub fn addSection(self: *Elf, opts: struct {
             .sh_addralign = opts.addralign,
             .sh_entsize = opts.entsize,
         },
-        .phdr = undefined,
+        .phdr = null,
         .first_atom = null,
         .last_atom = null,
     });
@@ -1127,6 +1229,35 @@ pub fn getSectionByName(self: *Elf, name: [:0]const u8) ?u16 {
         const this_name = self.shstrtab.getAssumeExists(shdr.sh_name);
         if (mem.eql(u8, this_name, name)) return @intCast(u16, i);
     } else return null;
+}
+
+fn addSegment(self: *Elf, opts: struct {
+    type: u32 = 0,
+    flags: u32 = 0,
+    @"align": u64 = 0,
+}) !u16 {
+    const index = @intCast(u16, self.phdrs.items.len);
+    try self.phdrs.append(self.base.allocator, .{
+        .p_type = opts.type,
+        .p_flags = opts.flags,
+        .p_offset = 0,
+        .p_vaddr = 0,
+        .p_paddr = 0,
+        .p_filesz = 0,
+        .p_memsz = 0,
+        .p_align = opts.@"align",
+    });
+    return index;
+}
+
+pub fn getSectionIndexes(self: *Elf, phdr_index: u16) struct { start: u16, end: u16 } {
+    const start: u16 = for (self.sections.items(.phdr), 0..) |phdr, i| {
+        if (phdr != null and phdr.? == phdr_index) break @intCast(u16, i);
+    } else @intCast(u16, self.sections.slice().len);
+    const end: u16 = for (self.sections.items(.phdr)[start..], 0..) |phdr, i| {
+        if (phdr == null or phdr.? != phdr_index) break @intCast(u16, start + i);
+    } else start;
+    return .{ .start = start, .end = end };
 }
 
 fn getGotBaseAddress(self: *Elf) u64 {
@@ -1200,9 +1331,35 @@ fn formatSections(
     _ = options;
     _ = unused_fmt_string;
     for (self.sections.items(.shdr), 0..) |shdr, i| {
-        try writer.print("sect({d}) : {s} : @{x} : align({x}) : size({x})\n", .{
-            i,                 self.shstrtab.getAssumeExists(shdr.sh_name), shdr.sh_addr,
+        try writer.print("sect({d}) : {s} : @{x} ({x}) : align({x}) : size({x})\n", .{
+            i,                 self.shstrtab.getAssumeExists(shdr.sh_name), shdr.sh_offset, shdr.sh_addr,
             shdr.sh_addralign, shdr.sh_size,
+        });
+    }
+}
+
+fn fmtSegments(self: *Elf) std.fmt.Formatter(formatSegments) {
+    return .{ .data = self };
+}
+
+fn formatSegments(
+    self: *Elf,
+    comptime unused_fmt_string: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = options;
+    _ = unused_fmt_string;
+    for (self.phdrs.items, 0..) |phdr, i| {
+        const write = phdr.p_flags & elf.PF_W != 0;
+        const read = phdr.p_flags & elf.PF_R != 0;
+        const exec = phdr.p_flags & elf.PF_X != 0;
+        var flags: [3]u8 = [_]u8{'_'} ** 3;
+        if (exec) flags[0] = 'X';
+        if (write) flags[1] = 'W';
+        if (read) flags[2] = 'R';
+        try writer.print("phdr({d}) : {s} : @{x} ({x}) : align({x}) : filesz({x}) : memsz({x})\n", .{
+            i, flags, phdr.p_offset, phdr.p_vaddr, phdr.p_align, phdr.p_filesz, phdr.p_memsz,
         });
     }
 }
@@ -1231,4 +1388,6 @@ fn fmtDumpState(
     try writer.print("{}\n", .{self.got_section});
     try writer.writeAll("Output sections\n");
     try writer.print("{}\n", .{self.fmtSections()});
+    try writer.writeAll("Output segments\n");
+    try writer.print("{}\n", .{self.fmtSegments()});
 }
