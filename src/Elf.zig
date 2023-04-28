@@ -279,6 +279,8 @@ pub fn flush(self: *Elf) !void {
     try self.sortSections();
     try self.initSegments();
     try self.allocateSegments();
+    try self.allocateAllocSections();
+    try self.allocateAtoms();
     // try self.setStackSize();
 
     if (wip_dump_state) {
@@ -398,8 +400,8 @@ fn calcSectionSizes(self: *Elf) !void {
         } else {
             assert(section.first_atom == null);
             section.first_atom = @intCast(u32, atom_index);
-            section.last_atom = @intCast(u32, atom_index);
         }
+        section.last_atom = @intCast(u32, atom_index);
 
         slice.set(atom.out_shndx, section);
     }
@@ -551,12 +553,10 @@ fn allocateSegments(self: *Elf) !void {
         const end = sect_range.end;
         if (start == end) continue;
 
-        const slice = self.sections.slice();
-
         var file_align: u64 = 0;
         var filesz: u64 = 0;
         var memsz: u64 = 0;
-        for (slice.items(.shdr)[start..end]) |shdr| {
+        for (self.sections.items(.shdr)[start..end]) |shdr| {
             file_align = @max(file_align, shdr.sh_addralign);
             if (shdr.sh_type != elf.SHT_NOBITS) {
                 filesz = mem.alignForwardGeneric(u64, filesz, shdr.sh_addralign) + shdr.sh_size;
@@ -575,6 +575,47 @@ fn allocateSegments(self: *Elf) !void {
 
         offset += filesz;
         vaddr += memsz;
+    }
+}
+
+fn allocateAllocSections(self: *Elf) !void {
+    for (self.phdrs.items[1..], 1..) |phdr, phdr_index| {
+        const sect_range = self.getSectionIndexes(@intCast(u16, phdr_index));
+        const start = sect_range.start;
+        const end = sect_range.end;
+        if (start == end) continue;
+
+        var offset = phdr.p_offset;
+        var vaddr = phdr.p_vaddr;
+        for (self.sections.items(.shdr)[start..end]) |*shdr| {
+            offset = mem.alignForwardGeneric(u64, offset, shdr.sh_addralign);
+            vaddr = mem.alignForwardGeneric(u64, vaddr, shdr.sh_addralign);
+
+            shdr.sh_offset = offset;
+            shdr.sh_addr = vaddr;
+
+            if (shdr.sh_type != elf.SHT_NOBITS) {
+                offset += shdr.sh_size;
+            }
+            vaddr += shdr.sh_size;
+        }
+    }
+}
+
+fn allocateAtoms(self: *Elf) !void {
+    const slice = self.sections.slice();
+    for (slice.items(.shdr), 0..) |shdr, i| {
+        var atom_index = slice.items(.first_atom)[i] orelse continue;
+
+        while (true) {
+            const atom = self.getAtom(atom_index).?;
+            assert(atom.is_alive);
+            atom.value += shdr.sh_addr;
+
+            if (atom.next) |next| {
+                atom_index = next;
+            } else break;
+        }
     }
 }
 
@@ -900,58 +941,6 @@ fn allocateNonAllocSections(self: *Elf) !void {
             shdr.sh_offset,
             shdr.sh_offset + shdr.sh_size,
         });
-    }
-}
-
-fn allocateAtoms(self: *Elf) !void {
-    const slice = self.sections.slice();
-    for (slice.items(.last_atom), 0..) |last_atom, i| {
-        var atom_index = last_atom orelse continue;
-        const shdr_ndx = @intCast(u16, i);
-        const shdr = slice.items(.shdr)[shdr_ndx];
-
-        // Find the first atom
-        while (true) {
-            const atom = self.getAtom(atom_index);
-            if (atom.prev) |prev| {
-                atom_index = prev;
-            } else break;
-        }
-
-        log.debug("allocating atoms in '{s}' section", .{self.shstrtab.getAssumeExists(shdr.sh_name)});
-
-        var base_addr: u64 = shdr.sh_addr;
-        while (true) {
-            const atom = self.getAtom(atom_index);
-            base_addr = mem.alignForwardGeneric(u64, base_addr, atom.alignment);
-
-            atom.value = base_addr;
-            atom.out_shndx = shdr_ndx;
-
-            log.debug("  ATOM(%{d},'{s}') allocated from 0x{x} to 0x{x}", .{
-                atom_index,
-                atom.getName(self),
-                base_addr,
-                base_addr + atom.size,
-            });
-
-            // Update each symbol contained within the Atom
-            // Do it the long way for now until we get rid of synthetic sections first...
-            const object = &self.objects.items[atom.file];
-            for (object.symtab.items, 0..) |*inner_sym, inner_sym_i| {
-                const inner_sym_index = @intCast(u32, inner_sym_i);
-                const other_atom_index = object.atom_table.get(inner_sym_index) orelse continue;
-                if (other_atom_index != atom_index) continue;
-                inner_sym.st_value += base_addr;
-                inner_sym.st_shndx = shdr_ndx;
-            }
-
-            base_addr += atom.size;
-
-            if (atom.next) |next| {
-                atom_index = next;
-            } else break;
-        }
     }
 }
 
