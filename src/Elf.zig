@@ -373,6 +373,12 @@ fn calcSectionSizes(self: *Elf) !void {
 
         slice.set(atom.out_shndx, section);
     }
+
+    if (self.got_sect_index) |index| {
+        const shdr = &self.sections.items(.shdr)[index];
+        shdr.sh_size = self.got_section.size();
+        shdr.sh_addralign = @sizeOf(u64);
+    }
 }
 
 fn getSectionPrecedence(self: *Elf, shdr: elf.Elf64_Shdr) u4 {
@@ -897,15 +903,6 @@ fn setStackSize(self: *Elf) !void {
     };
     const phdr = &self.phdrs.items[gnu_stack_phdr_index];
     phdr.p_memsz = stack_size;
-}
-
-fn setSyntheticSections(self: *Elf) !void {
-    // Currently, we only have .got to worry about.
-    if (self.got_sect_index) |shndx| {
-        const shdr = &self.sections.items(.shdr)[shndx];
-        shdr.sh_size = self.got_section.size();
-        shdr.sh_addralign = @sizeOf(u64);
-    }
 }
 
 fn writeSyntheticSections(self: *Elf) !void {
