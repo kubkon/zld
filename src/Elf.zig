@@ -264,6 +264,7 @@ pub fn flush(self: *Elf) !void {
     try self.initSections();
     try self.calcSectionSizes();
     try self.sortSections();
+    try self.allocateSegments();
     // try self.setStackSize();
 
     if (wip_dump_state) {
@@ -345,6 +346,23 @@ fn initSections(self: *Elf) !void {
             .flags = elf.SHF_ALLOC | elf.SHF_WRITE,
         });
     }
+
+    self.strtab_sect_index = try self.addSection(.{
+        .name = ".shstrtab",
+        .type = elf.SHT_STRTAB,
+        .entsize = 1,
+    });
+    self.strtab_sect_index = try self.addSection(.{
+        .name = ".strtab",
+        .type = elf.SHT_STRTAB,
+        .entsize = 1,
+    });
+    self.symtab_sect_index = try self.addSection(.{
+        .name = ".symtab",
+        .type = elf.SHT_SYMTAB,
+        .link = self.strtab_sect_index.?,
+        .addralign = @alignOf(elf.Elf64_Sym),
+    });
 }
 
 fn calcSectionSizes(self: *Elf) !void {
@@ -441,6 +459,10 @@ fn sortSections(self: *Elf) !void {
     for (sections.items) |out| {
         self.sections.appendAssumeCapacity(out);
     }
+}
+
+fn allocateSegments(self: *Elf) !void {
+    _ = self;
 }
 
 fn parsePositionals(self: *Elf, files: []const []const u8) !void {
@@ -600,23 +622,6 @@ fn scanRelocs(self: *Elf) !void {
         if (!atom.is_alive) continue;
         try atom.scanRelocs(self);
     }
-}
-
-pub fn addAtomToSection(self: *Elf, atom_index: Atom.Index, sect_id: u16) !void {
-    const atom = self.getAtom(atom_index);
-    atom.out_shndx = sect_id;
-    var section = self.sections.get(sect_id);
-    if (section.shdr.sh_size > 0) {
-        const last_atom = self.getAtom(section.last_atom.?);
-        last_atom.next = atom_index;
-        atom.prev = section.last_atom.?;
-    }
-    section.last_atom = atom_index;
-    const aligned_end_addr = mem.alignForwardGeneric(u64, section.shdr.sh_size, atom.alignment);
-    const padding = aligned_end_addr - section.shdr.sh_size;
-    section.shdr.sh_size += padding + atom.size;
-    section.shdr.sh_addralign = @max(section.shdr.sh_addralign, atom.alignment);
-    self.sections.set(sect_id, section);
 }
 
 fn allocateSection(self: *Elf, shdr: *elf.Elf64_Shdr, phdr: *elf.Elf64_Phdr) !void {
@@ -1080,7 +1085,9 @@ pub fn addSection(self: *Elf, opts: struct {
     name: [:0]const u8,
     type: u32 = elf.SHT_NULL,
     flags: u64 = 0,
+    link: u32 = 0,
     info: u32 = 0,
+    addralign: u64 = 0,
     entsize: u64 = 0,
 }) !u16 {
     const gpa = self.base.allocator;
@@ -1095,7 +1102,7 @@ pub fn addSection(self: *Elf, opts: struct {
             .sh_size = 0,
             .sh_link = 0,
             .sh_info = opts.info,
-            .sh_addralign = 0,
+            .sh_addralign = opts.addralign,
             .sh_entsize = opts.entsize,
         },
         .phdr = undefined,
