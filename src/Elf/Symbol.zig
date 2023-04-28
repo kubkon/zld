@@ -18,7 +18,7 @@ pub fn isUndef(symbol: Symbol, elf_file: *Elf) bool {
 }
 
 pub fn getName(symbol: Symbol, elf_file: *Elf) [:0]const u8 {
-    return elf_file.getString(symbol.name);
+    return elf_file.strtab.getAssumeExists(symbol.name);
 }
 
 pub fn getAtom(symbol: Symbol, elf_file: *Elf) ?*Atom {
@@ -84,11 +84,11 @@ fn format2(
     } else {
         if (symbol.getObject(ctx.elf_file)) |object| {
             if (symbol.getAtom(ctx.elf_file)) |atom| {
-                try writer.print(" : in atom %%%{d}", .{atom.atom_index});
+                try writer.print(" : in atom({d})", .{atom.atom_index});
             } else {
                 try writer.writeAll(" : absolute");
             }
-            try writer.print(" : in file >>>{d}", .{object.object_id});
+            try writer.print(" : in file({d})", .{object.object_id});
         } else {
             try writer.writeAll(" : synthetic");
         }

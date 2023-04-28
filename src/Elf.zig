@@ -52,17 +52,19 @@ shstrtab_sect_index: ?u16 = null,
 
 /// Internal linker state for coordinating symbol resolution and synthetics
 internal_object: ?InternalObject = null,
-dynamic_sym_index: ?u32 = null,
-init_array_start_sym_index: ?u32 = null,
-init_array_end_sym_index: ?u32 = null,
-fini_array_start_sym_index: ?u32 = null,
-fini_array_end_sym_index: ?u32 = null,
+dynamic_index: ?u32 = null,
+init_array_start_index: ?u32 = null,
+init_array_end_index: ?u32 = null,
+fini_array_start_index: ?u32 = null,
+fini_array_end_index: ?u32 = null,
 
 entry_index: ?u32 = null,
 
 globals: std.ArrayListUnmanaged(Symbol) = .{},
 // TODO convert to context-adapted
 globals_table: std.StringHashMapUnmanaged(u32) = .{},
+
+shstrtab: StringTable(.shstrtab) = .{},
 strtab: StringTable(.strtab) = .{},
 
 got_section: SyntheticSection(u32, *Elf, .{
@@ -73,6 +75,8 @@ got_section: SyntheticSection(u32, *Elf, .{
 }) = .{},
 
 atoms: std.ArrayListUnmanaged(Atom) = .{},
+
+const wip_dump_state = true;
 
 const Section = struct {
     shdr: elf.Elf64_Shdr,
@@ -124,6 +128,7 @@ fn createEmpty(gpa: Allocator, options: Options, thread_pool: *ThreadPool) !*Elf
 
 pub fn deinit(self: *Elf) void {
     const gpa = self.base.allocator;
+    self.shstrtab.deinit(gpa);
     self.strtab.deinit(gpa);
     self.atoms.deinit(gpa);
     self.globals.deinit(gpa);
@@ -174,7 +179,9 @@ fn resolveLib(
 }
 
 pub fn flush(self: *Elf) !void {
-    var arena_allocator = std.heap.ArenaAllocator.init(self.base.allocator);
+    const gpa = self.base.allocator;
+
+    var arena_allocator = std.heap.ArenaAllocator.init(gpa);
     defer arena_allocator.deinit();
     const arena = arena_allocator.allocator();
 
@@ -216,8 +223,13 @@ pub fn flush(self: *Elf) !void {
         positionals.appendAssumeCapacity(obj.path);
     }
 
-    try self.strtab.buffer.append(self.base.allocator, 0);
-    try self.atoms.append(self.base.allocator, Atom.empty); // null atom
+    // Append empty string to strtab and shstrtab.
+    try self.strtab.buffer.append(gpa, 0);
+    try self.shstrtab.buffer.append(gpa, 0);
+    // Append null section.
+    _ = try self.addSection(.{ .name = "" });
+    // Append null atom.
+    try self.atoms.append(gpa, Atom.empty);
 
     try self.parsePositionals(positionals.items);
     try self.parseLibs(libs.keys());
@@ -243,31 +255,21 @@ pub fn flush(self: *Elf) !void {
 
     if (self.options.gc_sections) {
         try gc.gcAtoms(self);
+    } else for (self.atoms.items, 0..) |*atom, index| {
+        if (index == 0) continue;
+        atom.is_alive = true;
     }
 
     try self.scanRelocs();
+    try self.initOutputSections();
+    // try self.setStackSize();
 
-    for (self.objects.items, 0..) |object, object_id| {
-        log.debug(">>>{d} : {s}", .{ object_id, object.name });
-        log.debug("{}{}", .{ object.fmtAtoms(self), object.fmtSymtab(self) });
+    if (wip_dump_state) {
+        std.debug.print("{}", .{self.dumpState()});
     }
-    if (self.internal_object) |object| {
-        log.debug("linker-defined", .{});
-        log.debug("{}", .{object.fmtSymtab(self)});
-    }
-    log.debug("GOT", .{});
-    log.debug("{}", .{self.got_section});
 
     return error.Todo;
 
-    // for (self.objects.items) |object| {
-    //     for (object.atoms.items) |atom_index| {
-    //         const atom = self.getAtom(atom_index);
-    //         try atom.scanRelocs(self);
-    //     }
-    // }
-
-    // try self.setStackSize();
     // try self.setSyntheticSections();
     // try self.allocateLoadRSeg();
     // try self.allocateLoadRESeg();
@@ -328,7 +330,7 @@ pub fn flush(self: *Elf) !void {
     // try self.writeHeader();
 }
 
-fn getSectionPrecedence(shdr: elf.Elf64_Shdr, shdr_name: []const u8) u4 {
+fn getSectionPrecedence(shdr: elf.Elf64_Shdr, name: []const u8) u4 {
     const flags = shdr.sh_flags;
     switch (shdr.sh_type) {
         elf.SHT_NULL => return 0,
@@ -345,7 +347,7 @@ fn getSectionPrecedence(shdr: elf.Elf64_Shdr, shdr_name: []const u8) u4 {
                 return 1;
             }
         } else {
-            if (mem.startsWith(u8, shdr_name, ".debug")) {
+            if (mem.startsWith(u8, name, ".debug")) {
                 return 7;
             } else {
                 return 8;
@@ -358,126 +360,20 @@ fn getSectionPrecedence(shdr: elf.Elf64_Shdr, shdr_name: []const u8) u4 {
     }
 }
 
-fn insertSection(self: *Elf, shdr: elf.Elf64_Shdr, shdr_name: []const u8) !u16 {
-    const precedence = getSectionPrecedence(shdr, shdr_name);
-    // Actually, the order doesn't really matter as long as the sections are correctly
-    // allocated within each respective segment. Of course, it is good practice to have
-    // the sections sorted, but it's a useful hack we can use for the debug builds in
-    // self-hosted Zig compiler.
-    const insertion_index = for (self.sections.items(.shdr), 0..) |oshdr, i| {
-        const oshdr_name = self.shstrtab.getAssumeExists(oshdr.sh_name);
-        if (getSectionPrecedence(oshdr, oshdr_name) > precedence) break @intCast(u16, i);
-    } else @intCast(u16, self.sections.items(.shdr).len);
-    log.debug("inserting section '{s}' at index {d}", .{
-        shdr_name,
-        insertion_index,
-    });
-    for (&[_]*?u16{
-        &self.text_sect_index,
-        &self.got_sect_index,
-        &self.symtab_sect_index,
-        &self.strtab_sect_index,
-        &self.shstrtab_sect_index,
-    }) |maybe_index| {
-        const index = maybe_index.* orelse continue;
-        if (insertion_index <= index) maybe_index.* = index + 1;
+fn initOutputSections(self: *Elf) !void {
+    for (self.atoms.items, 0..) |*atom, index| {
+        if (index == 0) continue;
+        if (!atom.is_alive) continue;
+        try atom.initOutputSection(self);
     }
-    try self.sections.insert(self.base.allocator, insertion_index, .{
-        .shdr = .{
-            .sh_name = try self.shstrtab.insert(self.base.allocator, shdr_name),
-            .sh_type = shdr.sh_type,
-            .sh_flags = shdr.sh_flags,
-            .sh_addr = 0,
-            .sh_offset = 0,
-            .sh_size = 0,
-            .sh_link = 0,
-            .sh_info = shdr.sh_info,
-            .sh_addralign = shdr.sh_addralign,
-            .sh_entsize = shdr.sh_entsize,
-        },
-        .last_atom = null,
-    });
-    return insertion_index;
-}
 
-pub fn getOutputSection(self: *Elf, shdr: elf.Elf64_Shdr, shdr_name: []const u8) !?u16 {
-    const flags = shdr.sh_flags;
-    const res: ?u16 = blk: {
-        if (flags & elf.SHF_EXCLUDE != 0) break :blk null;
-        const out_name: []const u8 = name: {
-            switch (shdr.sh_type) {
-                elf.SHT_NULL => break :blk 0,
-                elf.SHT_PROGBITS => {
-                    if (flags & elf.SHF_ALLOC == 0) break :name shdr_name;
-                    if (flags & elf.SHF_EXECINSTR != 0) {
-                        if (mem.startsWith(u8, shdr_name, ".init")) {
-                            break :name ".init";
-                        } else if (mem.startsWith(u8, shdr_name, ".fini")) {
-                            break :name ".fini";
-                        } else if (mem.startsWith(u8, shdr_name, ".init_array")) {
-                            break :name ".init_array";
-                        } else if (mem.startsWith(u8, shdr_name, ".fini_array")) {
-                            break :name ".fini_array";
-                        } else {
-                            break :name ".text";
-                        }
-                    }
-                    if (flags & elf.SHF_WRITE != 0) {
-                        if (flags & elf.SHF_TLS != 0) {
-                            if (self.tls_seg_index == null) {
-                                self.tls_seg_index = @intCast(u16, self.phdrs.items.len);
-                                try self.phdrs.append(self.base.allocator, .{
-                                    .p_type = elf.PT_TLS,
-                                    .p_flags = elf.PF_R,
-                                    .p_offset = 0,
-                                    .p_vaddr = default_base_addr,
-                                    .p_paddr = default_base_addr,
-                                    .p_filesz = 0,
-                                    .p_memsz = 0,
-                                    .p_align = 0,
-                                });
-                            }
-                            break :name ".tdata";
-                        } else if (mem.startsWith(u8, shdr_name, ".data.rel.ro")) {
-                            break :name ".data.rel.ro";
-                        } else {
-                            break :name ".data";
-                        }
-                    }
-                    break :name ".rodata";
-                },
-                elf.SHT_NOBITS => {
-                    if (flags & elf.SHF_TLS != 0) {
-                        if (self.tls_seg_index == null) {
-                            self.tls_seg_index = @intCast(u16, self.phdrs.items.len);
-                            try self.phdrs.append(self.base.allocator, .{
-                                .p_type = elf.PT_TLS,
-                                .p_flags = elf.PF_R,
-                                .p_offset = 0,
-                                .p_vaddr = default_base_addr,
-                                .p_paddr = default_base_addr,
-                                .p_filesz = 0,
-                                .p_memsz = 0,
-                                .p_align = 0,
-                            });
-                        }
-                        break :name ".tbss";
-                    } else {
-                        break :name ".bss";
-                    }
-                },
-                else => break :name shdr_name,
-            }
-        };
-        const res = self.getSectionByName(out_name) orelse try self.insertSection(shdr, out_name);
-        if (mem.eql(u8, out_name, ".text")) {
-            if (self.text_sect_index == null) {
-                self.text_sect_index = res;
-            }
-        }
-        break :blk res;
-    };
-    return res;
+    if (self.got_section.count() > 0) {
+        self.got_sect_index = try self.addSection(.{
+            .name = ".got",
+            .type = elf.SHT_PROGBITS,
+            .flags = elf.SHF_ALLOC | elf.SHF_WRITE,
+        });
+    }
 }
 
 fn parsePositionals(self: *Elf, files: []const []const u8) !void {
@@ -611,11 +507,11 @@ fn resolveSymbolsInArchives(self: *Elf) !void {
 
 fn resolveSyntheticSymbols(self: *Elf) !void {
     const object = &(self.internal_object orelse return);
-    self.dynamic_sym_index = try object.addSyntheticGlobal("_DYNAMIC", self);
-    self.init_array_start_sym_index = try object.addSyntheticGlobal("__init_array_start", self);
-    self.init_array_end_sym_index = try object.addSyntheticGlobal("__init_array_end", self);
-    self.fini_array_start_sym_index = try object.addSyntheticGlobal("__fini_array_start", self);
-    self.fini_array_end_sym_index = try object.addSyntheticGlobal("__fini_array_end", self);
+    self.dynamic_index = try object.addSyntheticGlobal("_DYNAMIC", self);
+    self.init_array_start_index = try object.addSyntheticGlobal("__init_array_start", self);
+    self.init_array_end_index = try object.addSyntheticGlobal("__init_array_end", self);
+    self.fini_array_start_index = try object.addSyntheticGlobal("__fini_array_start", self);
+    self.fini_array_end_index = try object.addSyntheticGlobal("__fini_array_end", self);
     try object.resolveSymbols(self);
 }
 
@@ -1129,7 +1025,35 @@ fn writeHeader(self: *Elf) !void {
     try self.base.file.pwriteAll(mem.asBytes(&header), 0);
 }
 
-pub fn getSectionByName(self: *Elf, name: []const u8) ?u16 {
+pub fn addSection(self: *Elf, opts: struct {
+    name: [:0]const u8,
+    type: u32 = elf.SHT_NULL,
+    flags: u64 = 0,
+    info: u32 = 0,
+    entsize: u64 = 0,
+}) !u16 {
+    const gpa = self.base.allocator;
+    const index = @intCast(u16, self.sections.slice().len);
+    try self.sections.append(gpa, .{
+        .shdr = .{
+            .sh_name = try self.shstrtab.insert(gpa, opts.name),
+            .sh_type = opts.type,
+            .sh_flags = opts.flags,
+            .sh_addr = 0,
+            .sh_offset = 0,
+            .sh_size = 0,
+            .sh_link = 0,
+            .sh_info = opts.info,
+            .sh_addralign = 0,
+            .sh_entsize = opts.entsize,
+        },
+        .phdr = undefined,
+        .last_atom = null,
+    });
+    return index;
+}
+
+pub fn getSectionByName(self: *Elf, name: [:0]const u8) ?u16 {
     for (self.sections.items(.shdr), 0..) |shdr, i| {
         const this_name = self.shstrtab.getAssumeExists(shdr.sh_name);
         if (mem.eql(u8, this_name, name)) return @intCast(u16, i);
@@ -1146,11 +1070,6 @@ fn writeGotEntry(self: *Elf, entry: u32, writer: anytype) !void {
     if (self.got_sect_index == null) return;
     const sym = self.getGlobal(entry);
     try writer.writeIntLittle(u64, sym.st_value);
-}
-
-pub inline fn getString(self: *Elf, off: u32) [:0]const u8 {
-    assert(off < self.strtab.buffer.items.len);
-    return mem.sliceTo(@ptrCast([*:0]const u8, self.strtab.buffer.items.ptr + off), 0);
 }
 
 /// Returns symbol localtion corresponding to the set entry point.
@@ -1199,14 +1118,48 @@ pub fn getGlobal(self: *Elf, index: u32) *Symbol {
     return &self.globals.items[index];
 }
 
-fn logSections(self: Elf) void {
-    log.debug("sections:", .{});
+fn fmtSections(self: *Elf) std.fmt.Formatter(formatSections) {
+    return .{ .data = self };
+}
+
+fn formatSections(
+    self: *Elf,
+    comptime unused_fmt_string: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = options;
+    _ = unused_fmt_string;
     for (self.sections.items(.shdr), 0..) |shdr, i| {
-        log.debug("  sect({d}): {s} @{x}, sizeof({x})", .{
-            i,
-            self.shstrtab.getAssumeExists(shdr.sh_name),
-            shdr.sh_offset,
-            shdr.sh_size,
+        try writer.print("sect({d}) : {s} : @{x} : align({x}) : size({x})\n", .{
+            i,                 self.shstrtab.getAssumeExists(shdr.sh_name), shdr.sh_addr,
+            shdr.sh_addralign, shdr.sh_size,
         });
     }
+}
+
+fn dumpState(self: *Elf) std.fmt.Formatter(fmtDumpState) {
+    return .{ .data = self };
+}
+
+fn fmtDumpState(
+    self: *Elf,
+    comptime unused_fmt_string: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = options;
+    _ = unused_fmt_string;
+    for (self.objects.items, 0..) |object, object_id| {
+        try writer.print("file({d}) : {s}\n", .{ object_id, object.name });
+        try writer.print("{}{}\n", .{ object.fmtAtoms(self), object.fmtSymtab(self) });
+    }
+    if (self.internal_object) |object| {
+        try writer.writeAll("linker-defined\n");
+        try writer.print("{}\n", .{object.fmtSymtab(self)});
+    }
+    try writer.writeAll("GOT\n");
+    try writer.print("{}\n", .{self.got_section});
+    try writer.writeAll("Output sections\n");
+    try writer.print("{}\n", .{self.fmtSections()});
 }
