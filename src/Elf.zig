@@ -28,7 +28,6 @@ pub const base_tag = Zld.Tag.elf;
 base: Zld,
 options: Options,
 cpu_arch: ?std.Target.Cpu.Arch = null,
-entry: ?u64 = 0,
 shoff: ?u64 = 0,
 
 archives: std.ArrayListUnmanaged(Archive) = .{},
@@ -81,6 +80,7 @@ const wip_dump_state = true;
 const Section = struct {
     shdr: elf.Elf64_Shdr,
     phdr: u8,
+    first_atom: ?Atom.Index,
     last_atom: ?Atom.Index,
 };
 
@@ -261,7 +261,8 @@ pub fn flush(self: *Elf) !void {
     }
 
     try self.scanRelocs();
-    try self.initOutputSections();
+    try self.initSections();
+    try self.calcSectionSizes();
     // try self.setStackSize();
 
     if (wip_dump_state) {
@@ -276,7 +277,6 @@ pub fn flush(self: *Elf) !void {
     // try self.allocateLoadRWSeg();
     // try self.allocateNonAllocSections();
     // try self.allocateAtoms();
-    // try self.setEntryPoint();
 
     // {
     //     // TODO this should be put in its own logic but probably is linked to
@@ -360,7 +360,7 @@ fn getSectionPrecedence(shdr: elf.Elf64_Shdr, name: []const u8) u4 {
     }
 }
 
-fn initOutputSections(self: *Elf) !void {
+fn initSections(self: *Elf) !void {
     for (self.atoms.items, 0..) |*atom, index| {
         if (index == 0) continue;
         if (!atom.is_alive) continue;
@@ -373,6 +373,34 @@ fn initOutputSections(self: *Elf) !void {
             .type = elf.SHT_PROGBITS,
             .flags = elf.SHF_ALLOC | elf.SHF_WRITE,
         });
+    }
+}
+
+fn calcSectionSizes(self: *Elf) !void {
+    var slice = self.sections.slice();
+    for (self.atoms.items, 0..) |*atom, atom_index| {
+        if (atom_index == 0) continue;
+        if (!atom.is_alive) continue;
+
+        var section = slice.get(atom.out_shndx);
+        const alignment = try math.powi(u64, 2, atom.alignment);
+        const addr = mem.alignForwardGeneric(u64, section.shdr.sh_size, alignment);
+        const padding = addr - section.shdr.sh_size;
+        atom.value = addr;
+        section.shdr.sh_size += padding + atom.size;
+        section.shdr.sh_addralign = @max(section.shdr.sh_addralign, alignment);
+
+        if (section.last_atom) |last_atom_index| {
+            const last_atom = self.getAtom(last_atom_index).?;
+            last_atom.next = @intCast(u32, atom_index);
+            atom.prev = last_atom_index;
+        } else {
+            assert(section.first_atom == null);
+            section.first_atom = @intCast(u32, atom_index);
+            section.last_atom = @intCast(u32, atom_index);
+        }
+
+        slice.set(atom.out_shndx, section);
     }
 }
 
@@ -817,13 +845,6 @@ fn writeAtoms(self: *Elf) !void {
     }
 }
 
-fn setEntryPoint(self: *Elf) !void {
-    if (self.options.output_mode != .exe) return;
-    const global = try self.getEntryPoint();
-    const sym = self.getSymbol(global);
-    self.entry = sym.st_value;
-}
-
 fn setStackSize(self: *Elf) !void {
     const stack_size = self.options.stack_size orelse return;
     const gnu_stack_phdr_index = self.gnu_stack_phdr_index orelse blk: {
@@ -1048,6 +1069,7 @@ pub fn addSection(self: *Elf, opts: struct {
             .sh_entsize = opts.entsize,
         },
         .phdr = undefined,
+        .first_atom = null,
         .last_atom = null,
     });
     return index;
