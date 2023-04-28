@@ -255,9 +255,22 @@ pub fn flush(self: *Elf) !void {
 
     if (self.options.gc_sections) {
         try gc.gcAtoms(self);
-    } else for (self.atoms.items, 0..) |*atom, index| {
-        if (index == 0) continue;
+    } else for (self.atoms.items[1..]) |*atom| {
         atom.is_alive = true;
+    }
+
+    // TODO this is just a temp until proper functionality is actually added
+    for (self.atoms.items[1..]) |*atom| {
+        const shdr = atom.getInputShdr(self);
+        const name = atom.getName(self);
+        const mark_dead = blk: {
+            if (shdr.sh_type == 0x70000001) break :blk true; // SHT_X86_64_UNWIND
+            if (mem.startsWith(u8, name, ".note")) break :blk true;
+            if (mem.startsWith(u8, name, ".comment")) break :blk true;
+            if (mem.startsWith(u8, name, ".llvm_addrsig")) break :blk true;
+            break :blk false;
+        };
+        if (mark_dead) atom.is_alive = false;
     }
 
     try self.scanRelocs();
@@ -333,8 +346,7 @@ pub fn flush(self: *Elf) !void {
 }
 
 fn initSections(self: *Elf) !void {
-    for (self.atoms.items, 0..) |*atom, index| {
-        if (index == 0) continue;
+    for (self.atoms.items[1..]) |*atom| {
         if (!atom.is_alive) continue;
         try atom.initOutputSection(self);
     }
@@ -367,8 +379,7 @@ fn initSections(self: *Elf) !void {
 
 fn calcSectionSizes(self: *Elf) !void {
     var slice = self.sections.slice();
-    for (self.atoms.items, 0..) |*atom, atom_index| {
-        if (atom_index == 0) continue;
+    for (self.atoms.items[1..], 1..) |*atom, atom_index| {
         if (!atom.is_alive) continue;
 
         var section = slice.get(atom.out_shndx);
@@ -617,8 +628,7 @@ fn checkUndefined(self: *Elf) void {
 }
 
 fn scanRelocs(self: *Elf) !void {
-    for (self.atoms.items) |*atom| {
-        if (atom.atom_index == 0) continue;
+    for (self.atoms.items[1..]) |*atom| {
         if (!atom.is_alive) continue;
         try atom.scanRelocs(self);
     }
