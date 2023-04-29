@@ -10,6 +10,8 @@ file: ?u32 = null,
 
 atom: Atom.Index = 0,
 
+shndx: u32 = 0,
+
 sym_idx: u32 = 0,
 
 pub fn isUndef(symbol: Symbol, elf_file: *Elf) bool {
@@ -82,13 +84,16 @@ fn format2(
     if (symbol.isUndef(ctx.elf_file)) {
         try writer.writeAll(" : undefined");
     } else {
+        if (symbol.shndx == 0) {
+            try writer.writeAll(" : absolute");
+        } else {
+            try writer.print(" : sect({d})", .{symbol.shndx});
+        }
         if (symbol.getObject(ctx.elf_file)) |object| {
             if (symbol.getAtom(ctx.elf_file)) |atom| {
-                try writer.print(" : in atom({d})", .{atom.atom_index});
-            } else {
-                try writer.writeAll(" : absolute");
+                try writer.print(" : atom({d})", .{atom.atom_index});
             }
-            try writer.print(" : in file({d})", .{object.object_id});
+            try writer.print(" : file({d})", .{object.object_id});
         } else {
             try writer.writeAll(" : synthetic");
         }

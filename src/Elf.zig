@@ -278,9 +278,12 @@ pub fn flush(self: *Elf) !void {
     try self.calcSectionSizes();
     try self.sortSections();
     try self.initSegments();
-    try self.allocateSegments();
-    try self.allocateAllocSections();
-    try self.allocateAtoms();
+    self.allocateSegments();
+    self.allocateAllocSections();
+    self.allocateAtoms();
+    self.allocateLocals();
+    self.allocateGlobals();
+    self.allocateSyntheticSymbols();
     // try self.setStackSize();
 
     if (wip_dump_state) {
@@ -445,33 +448,52 @@ fn getSectionPrecedence(self: *Elf, shdr: elf.Elf64_Shdr) u4 {
 }
 
 fn sortSections(self: *Elf) !void {
-    const SortSection = struct {
-        elf_file: *Elf,
+    const Entry = struct {
+        shndx: u16,
 
-        pub fn lessThan(elf_file: *Elf, lhs: Section, rhs: Section) bool {
-            return elf_file.getSectionPrecedence(lhs.shdr) < elf_file.getSectionPrecedence(rhs.shdr);
+        pub fn get(this: @This(), elf_file: *Elf) elf.Elf64_Shdr {
+            return elf_file.sections.items(.shdr)[this.shndx];
+        }
+
+        pub fn lessThan(elf_file: *Elf, lhs: @This(), rhs: @This()) bool {
+            return elf_file.getSectionPrecedence(lhs.get(elf_file)) < elf_file.getSectionPrecedence(rhs.get(elf_file));
         }
     };
 
     const gpa = self.base.allocator;
-    const slice = self.sections.slice();
-    var sections = std.ArrayList(Section).init(gpa);
-    defer sections.deinit();
-    try sections.ensureTotalCapacity(slice.len);
 
-    {
-        var i: u8 = 0;
-        while (i < slice.len) : (i += 1) {
-            const section = self.sections.get(i);
-            sections.appendAssumeCapacity(section);
-        }
+    var entries = try std.ArrayList(Entry).initCapacity(gpa, self.sections.slice().len);
+    defer entries.deinit();
+    for (0..self.sections.slice().len) |shndx| {
+        entries.appendAssumeCapacity(.{ .shndx = @intCast(u16, shndx) });
     }
 
-    std.sort.sort(Section, sections.items, self, SortSection.lessThan);
+    std.sort.sort(Entry, entries.items, self, Entry.lessThan);
 
-    self.sections.shrinkRetainingCapacity(0);
-    for (sections.items) |out| {
-        self.sections.appendAssumeCapacity(out);
+    const backlinks = try gpa.alloc(u16, entries.items.len);
+    defer gpa.free(backlinks);
+    for (entries.items, 0..) |entry, i| {
+        backlinks[entry.shndx] = @intCast(u16, i);
+    }
+
+    var slice = self.sections.toOwnedSlice();
+    defer slice.deinit(gpa);
+
+    try self.sections.ensureTotalCapacity(gpa, slice.len);
+    for (entries.items) |sorted| {
+        self.sections.appendAssumeCapacity(slice.get(sorted.shndx));
+    }
+
+    for (&[_]*?u16{
+        &self.text_sect_index,
+        &self.got_sect_index,
+        &self.symtab_sect_index,
+        &self.strtab_sect_index,
+        &self.shstrtab_sect_index,
+    }) |maybe_index| {
+        if (maybe_index.*) |*index| {
+            index.* = backlinks[index.*];
+        }
     }
 }
 
@@ -526,7 +548,7 @@ fn initSegments(self: *Elf) !void {
     }
 }
 
-fn allocateSegments(self: *Elf) !void {
+fn allocateSegments(self: *Elf) void {
     var offset: u64 = 0;
     var vaddr: u64 = default_base_addr;
     // Now that we have initialized segments, we can go ahead and allocate them in memory.
@@ -578,7 +600,7 @@ fn allocateSegments(self: *Elf) !void {
     }
 }
 
-fn allocateAllocSections(self: *Elf) !void {
+fn allocateAllocSections(self: *Elf) void {
     for (self.phdrs.items[1..], 1..) |phdr, phdr_index| {
         const sect_range = self.getSectionIndexes(@intCast(u16, phdr_index));
         const start = sect_range.start;
@@ -602,7 +624,7 @@ fn allocateAllocSections(self: *Elf) !void {
     }
 }
 
-fn allocateAtoms(self: *Elf) !void {
+fn allocateAtoms(self: *Elf) void {
     const slice = self.sections.slice();
     for (slice.items(.shdr), 0..) |shdr, i| {
         var atom_index = slice.items(.first_atom)[i] orelse continue;
@@ -615,6 +637,71 @@ fn allocateAtoms(self: *Elf) !void {
             if (atom.next) |next| {
                 atom_index = next;
             } else break;
+        }
+    }
+}
+
+fn allocateLocals(self: *Elf) void {
+    for (self.objects.items) |*object| {
+        for (object.locals.items) |*symbol| {
+            const atom = symbol.getAtom(self) orelse continue;
+            if (!atom.is_alive) continue;
+            symbol.value += atom.value;
+            symbol.shndx = atom.out_shndx;
+        }
+    }
+}
+
+fn allocateGlobals(self: *Elf) void {
+    for (self.globals.items) |*global| {
+        const atom = global.getAtom(self) orelse continue;
+        if (!atom.is_alive) continue;
+        global.value += atom.value;
+        global.shndx = atom.out_shndx;
+    }
+}
+
+fn allocateSyntheticSymbols(self: *Elf) void {
+    if (self.dynamic_index) |index| {
+        if (self.got_sect_index) |got_index| {
+            const shdr = self.sections.items(.shdr)[got_index];
+            self.getGlobal(index).value = shdr.sh_addr;
+        }
+    }
+    if (self.init_array_start_index) |index| {
+        const global = self.getGlobal(index);
+        if (self.text_sect_index) |text_index| {
+            global.shndx = text_index;
+        }
+        if (self.entry_index) |entry_index| {
+            global.value = self.getGlobal(entry_index).value;
+        }
+    }
+    if (self.init_array_end_index) |index| {
+        const global = self.getGlobal(index);
+        if (self.text_sect_index) |text_index| {
+            global.shndx = text_index;
+        }
+        if (self.entry_index) |entry_index| {
+            global.value = self.getGlobal(entry_index).value;
+        }
+    }
+    if (self.fini_array_start_index) |index| {
+        const global = self.getGlobal(index);
+        if (self.text_sect_index) |text_index| {
+            global.shndx = text_index;
+        }
+        if (self.entry_index) |entry_index| {
+            global.value = self.getGlobal(entry_index).value;
+        }
+    }
+    if (self.fini_array_end_index) |index| {
+        const global = self.getGlobal(index);
+        if (self.text_sect_index) |text_index| {
+            global.shndx = text_index;
+        }
+        if (self.entry_index) |entry_index| {
+            global.value = self.getGlobal(entry_index).value;
         }
     }
 }
