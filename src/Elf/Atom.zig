@@ -47,7 +47,7 @@ pub const empty = Atom{
 };
 
 pub fn getName(self: Atom, elf_file: *Elf) [:0]const u8 {
-    return elf_file.strtab.getAssumeExists(self.name);
+    return elf_file.string_intern.getAssumeExists(self.name);
 }
 
 pub fn getCode(self: Atom, elf_file: *Elf) []const u8 {
@@ -126,61 +126,6 @@ pub fn initOutputSection(self: *Atom, elf_file: *Elf) !void {
     self.out_shndx = out_shndx;
 }
 
-pub fn getTargetAtomIndex(self: Atom, elf_file: *Elf, rel: elf.Elf64_Rela) ?Atom.Index {
-    const r_sym = rel.r_sym();
-    const r_type = rel.r_type();
-    const tsym_name = elf_file.getSymbolName(.{
-        .sym_index = r_sym,
-        .file = self.file,
-    });
-    log.debug("  (getTargetAtom: %{d}: {s}, r_type={d})", .{ r_sym, tsym_name, r_type });
-    const tsym = elf_file.getSymbol(.{
-        .sym_index = r_sym,
-        .file = self.file,
-    });
-    const tsym_st_bind = tsym.st_bind();
-    const tsym_st_type = tsym.st_type();
-    const is_section = tsym_st_type == elf.STT_SECTION;
-    const is_local = is_section or tsym_st_bind == elf.STB_LOCAL;
-
-    if (!is_local) {
-        const global = elf_file.globals.get(tsym_name).?;
-        return elf_file.getAtomIndexForSymbol(global);
-    }
-
-    return elf_file.getAtomIndexForSymbol(.{
-        .sym_index = r_sym,
-        .file = self.file,
-    });
-}
-
-fn getTargetAddress(self: Atom, rel: elf.Elf64_Rela, elf_file: *Elf) ?u64 {
-    const sym_loc = Elf.SymbolWithLoc{
-        .sym_index = rel.r_sym(),
-        .file = self.file,
-    };
-    const sym_name = elf_file.getSymbolName(sym_loc);
-    switch (rel.r_type()) {
-        elf.R_X86_64_REX_GOTPCRELX, elf.R_X86_64_GOTPCREL => {
-            const global = elf_file.globals.get(sym_name).?;
-            return elf_file.got_section.getAddress(global, elf_file);
-        },
-        else => {},
-    }
-
-    const sym = elf_file.getSymbol(sym_loc);
-    const is_section = sym.st_type() == elf.STT_SECTION;
-    const is_local = is_section or sym.st_bind() == elf.STB_LOCAL;
-    log.debug("  (getTargetAddress: %{d}: {s}, local? {})", .{ rel.r_sym(), sym_name, is_local });
-
-    if (!is_local) {
-        const global = elf_file.globals.get(sym_name).?;
-        return elf_file.getSymbol(global).st_value;
-    }
-
-    return sym.st_value;
-}
-
 pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
     const gpa = elf_file.base.allocator;
     const object = self.getFile(elf_file);
@@ -214,112 +159,86 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
     const code = try gpa.dupe(u8, self.getCode(elf_file));
     defer gpa.free(code);
     const relocs = self.getRelocs(elf_file);
+    const object = self.getFile(elf_file);
 
     for (relocs) |rel| {
-        const tsym_loc = Elf.SymbolWithLoc{
-            .sym_index = rel.r_sym(),
-            .file = self.file,
-        };
-        const tsym = elf_file.getSymbol(tsym_loc);
-        const tsym_name = elf_file.getSymbolName(tsym_loc);
-        const tsym_st_type = tsym.st_type();
-        const source = @intCast(i64, self.value + rel.r_offset);
-        const target = @intCast(i64, self.getTargetAddress(rel, elf_file).?);
+        const target = object.getSymbol(rel.r_sym(), elf_file);
+        const target_name = target.getName(elf_file);
+        const source_addr = @intCast(i64, self.value + rel.r_offset);
 
         const r_type = rel.r_type();
         switch (r_type) {
             elf.R_X86_64_NONE => {},
             elf.R_X86_64_64 => {
-                const actual_target = target + rel.r_addend;
-                log.debug("64: {x}: [() => 0x{x}] ({s})", .{ rel.r_offset, actual_target, tsym_name });
-                mem.writeIntLittle(i64, code[rel.r_offset..][0..8], actual_target);
+                const target_addr = @intCast(i64, target.value) + rel.r_addend;
+                log.debug("64: {x}: [() => 0x{x}] ({s})", .{ rel.r_offset, target_addr, target_name });
+                mem.writeIntLittle(i64, code[rel.r_offset..][0..8], target_addr);
             },
             elf.R_X86_64_PC32,
             elf.R_X86_64_PLT32,
-            elf.R_X86_64_GOTPCREL,
-            elf.R_X86_64_REX_GOTPCRELX,
             => {
-                const displacement = @intCast(i32, target - source + rel.r_addend);
+                const displacement = @intCast(i32, @intCast(i64, target.value) - source_addr + rel.r_addend);
                 log.debug("{s}: {x}: [0x{x} => 0x{x}] ({s})", .{
                     switch (r_type) {
                         elf.R_X86_64_PC32 => "PC32",
                         elf.R_X86_64_PLT32 => "PLT32",
+                        else => unreachable,
+                    },
+                    rel.r_offset,
+                    source_addr,
+                    target.value,
+                    target_name,
+                });
+                mem.writeIntLittle(i32, code[rel.r_offset..][0..4], displacement);
+            },
+            elf.R_X86_64_GOTPCREL,
+            elf.R_X86_64_REX_GOTPCRELX,
+            => {
+                const global = elf_file.globals_table.get(target_name).?;
+                const target_addr = @intCast(i64, elf_file.got_section.getAddress(global, elf_file).?);
+                const displacement = @intCast(i32, target_addr - source_addr + rel.r_addend);
+                log.debug("{s}: {x}: [0x{x} => 0x{x}] ({s})", .{
+                    switch (r_type) {
                         elf.R_X86_64_GOTPCREL => "GOTPCREL",
                         elf.R_X86_64_REX_GOTPCRELX => "REX_GOTPCRELX",
                         else => unreachable,
                     },
                     rel.r_offset,
-                    source,
-                    target,
-                    tsym_name,
+                    source_addr,
+                    target_addr,
+                    target_name,
                 });
                 mem.writeIntLittle(i32, code[rel.r_offset..][0..4], displacement);
             },
             elf.R_X86_64_32 => {
-                const scaled = math.cast(u32, target + rel.r_addend) orelse {
+                const target_addr = @intCast(i64, target.value) + rel.r_addend;
+                const scaled = math.cast(u32, target_addr) orelse {
                     log.err("32: target value overflows 32bits", .{});
-                    log.err("  target value 0x{x}", .{target + rel.r_addend});
-                    log.err("  target symbol {s}", .{tsym_name});
+                    log.err("  target value 0x{x}", .{target_addr});
+                    log.err("  target symbol {s}", .{target_name});
                     return error.RelocationOverflow;
                 };
-                log.debug("32: {x}: [() => 0x{x}] ({s})", .{ rel.r_offset, scaled, tsym_name });
+                log.debug("32: {x}: [() => 0x{x}] ({s})", .{ rel.r_offset, scaled, target_name });
                 mem.writeIntLittle(u32, code[rel.r_offset..][0..4], scaled);
             },
             elf.R_X86_64_32S => {
-                const scaled = math.cast(i32, target + rel.r_addend) orelse {
+                const target_addr = @intCast(i64, target.value) + rel.r_addend;
+                const scaled = math.cast(i32, target_addr) orelse {
                     log.err("32S: target value overflows 32bits", .{});
-                    log.err("  target value 0x{x}", .{target + rel.r_addend});
-                    log.err("  target symbol {s}", .{tsym_name});
+                    log.err("  target value 0x{x}", .{target_addr});
+                    log.err("  target symbol {s}", .{target_name});
                     return error.RelocationOverflow;
                 };
-                log.debug("32S: {x}: [() => 0x{x}] ({s})", .{ rel.r_offset, scaled, tsym_name });
+                log.debug("32S: {x}: [() => 0x{x}] ({s})", .{ rel.r_offset, scaled, target_name });
                 mem.writeIntLittle(i32, code[rel.r_offset..][0..4], scaled);
-            },
-            elf.R_X86_64_TPOFF32 => {
-                assert(tsym_st_type == elf.STT_TLS);
-                const base_addr: u64 = base_addr: {
-                    const index = if (elf_file.getSectionByName(".tbss")) |index|
-                        index
-                    else
-                        elf_file.getSectionByName(".tdata").?;
-                    const shdr = elf_file.sections.items(.shdr)[index];
-                    break :base_addr shdr.sh_addr + shdr.sh_size;
-                };
-                const tls_offset = @truncate(u32, @bitCast(u64, -(@intCast(i64, base_addr) - target) + rel.r_addend));
-                log.debug("TPOFF32: {x}: [0x{x} => 0x{x} (TLS)] ({s})", .{
-                    rel.r_offset,
-                    source,
-                    tls_offset,
-                    tsym_name,
-                });
-                mem.writeIntLittle(u32, code[rel.r_offset..][0..4], tls_offset);
-            },
-            elf.R_X86_64_DTPOFF64,
-            elf.R_X86_64_GOTTPOFF,
-            elf.R_X86_64_TLSGD,
-            => {
-                // TODO I believe here we should emit a dynamic relocation pointing
-                // at a GOT cell.
-                log.debug("TODO {s}: {x}: [0x{x} => 0x{x}] ({s})", .{
-                    switch (r_type) {
-                        elf.R_X86_64_DTPOFF64 => "DTPOFF64",
-                        elf.R_X86_64_GOTTPOFF => "GOTTPOFF",
-                        elf.R_X86_64_TLSGD => "TLSGD",
-                        else => unreachable,
-                    },
-                    rel.r_offset,
-                    source,
-                    tsym.st_value,
-                    tsym_name,
-                });
             },
             else => {
                 log.debug("TODO {d}: {x}: [0x{x} => 0x{x}] ({s})", .{
                     r_type,
                     rel.r_offset,
-                    source,
-                    tsym.st_value,
-                    tsym_name,
+                    source_addr,
+                    target.value,
+                    target_name,
                 });
             },
         }

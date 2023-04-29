@@ -63,8 +63,11 @@ globals: std.ArrayListUnmanaged(Symbol) = .{},
 // TODO convert to context-adapted
 globals_table: std.StringHashMapUnmanaged(u32) = .{},
 
+string_intern: StringTable(.string_intern) = .{},
+
 shstrtab: StringTable(.shstrtab) = .{},
 strtab: StringTable(.strtab) = .{},
+symtab: std.ArrayListUnmanaged(elf.Elf64_Sym) = .{},
 
 got_section: SyntheticSection(u32, *Elf, .{
     .log_scope = .got_section,
@@ -128,6 +131,8 @@ fn createEmpty(gpa: Allocator, options: Options, thread_pool: *ThreadPool) !*Elf
 
 pub fn deinit(self: *Elf) void {
     const gpa = self.base.allocator;
+    self.string_intern.deinit(gpa);
+    self.symtab.deinit(gpa);
     self.shstrtab.deinit(gpa);
     self.strtab.deinit(gpa);
     self.atoms.deinit(gpa);
@@ -223,7 +228,8 @@ pub fn flush(self: *Elf) !void {
         positionals.appendAssumeCapacity(obj.path);
     }
 
-    // Append empty string to strtab and shstrtab.
+    // Append empty string to string tables.
+    try self.string_intern.buffer.append(gpa, 0);
     try self.strtab.buffer.append(gpa, 0);
     try self.shstrtab.buffer.append(gpa, 0);
     // Append null section.
@@ -284,65 +290,19 @@ pub fn flush(self: *Elf) !void {
     self.allocateLocals();
     self.allocateGlobals();
     self.allocateSyntheticSymbols();
-    // try self.setStackSize();
+    try self.setSymtab();
+    self.setShstrtab();
+    self.allocateNonAllocSections();
 
     if (wip_dump_state) {
         std.debug.print("{}", .{self.dumpState()});
     }
 
+    try self.writeAtoms();
+    // try self.writeSyntheticSections();
+
     return error.Todo;
 
-    // try self.setSyntheticSections();
-    // try self.allocateLoadRSeg();
-    // try self.allocateLoadRESeg();
-    // try self.allocateLoadRWSeg();
-    // try self.allocateNonAllocSections();
-    // try self.allocateAtoms();
-
-    // {
-    //     // TODO this should be put in its own logic but probably is linked to
-    //     // C++ handling so leaving it here until I gather more knowledge on
-    //     // those special symbols.
-    //     if (self.getSectionByName(".init_array") == null) {
-    //         if (self.globals.get("__init_array_start")) |global| {
-    //             assert(global.file == null);
-    //             const sym = &self.locals.items[global.sym_index];
-    //             sym.st_value = self.entry.?;
-    //             sym.st_shndx = self.text_sect_index.?;
-    //         }
-    //         if (self.globals.get("__init_array_end")) |global| {
-    //             assert(global.file == null);
-    //             const sym = &self.locals.items[global.sym_index];
-    //             sym.st_value = self.entry.?;
-    //             sym.st_shndx = self.text_sect_index.?;
-    //         }
-    //     }
-    //     if (self.getSectionByName(".fini_array") == null) {
-    //         if (self.globals.get("__fini_array_start")) |global| {
-    //             assert(global.file == null);
-    //             const sym = &self.locals.items[global.sym_index];
-    //             sym.st_value = self.entry.?;
-    //             sym.st_shndx = self.text_sect_index.?;
-    //         }
-    //         if (self.globals.get("__fini_array_end")) |global| {
-    //             assert(global.file == null);
-    //             const sym = &self.locals.items[global.sym_index];
-    //             sym.st_value = self.entry.?;
-    //             sym.st_shndx = self.text_sect_index.?;
-    //         }
-    //     }
-    // }
-
-    // if (build_options.enable_logging) {
-    //     self.logObjects();
-    //     self.logSymtab();
-    //     log.debug("{}", .{self.got_section});
-    //     self.logSections();
-    //     self.logAtoms();
-    // }
-
-    // try self.writeAtoms();
-    // try self.writeSyntheticSections();
     // try self.writePhdrs();
     // try self.writeSymtab();
     // try self.writeStrtab();
@@ -362,18 +322,21 @@ fn initSections(self: *Elf) !void {
             .name = ".got",
             .type = elf.SHT_PROGBITS,
             .flags = elf.SHF_ALLOC | elf.SHF_WRITE,
+            .addralign = @alignOf(u64),
         });
     }
 
-    self.strtab_sect_index = try self.addSection(.{
+    self.shstrtab_sect_index = try self.addSection(.{
         .name = ".shstrtab",
         .type = elf.SHT_STRTAB,
         .entsize = 1,
+        .addralign = 1,
     });
     self.strtab_sect_index = try self.addSection(.{
         .name = ".strtab",
         .type = elf.SHT_STRTAB,
         .entsize = 1,
+        .addralign = 1,
     });
     self.symtab_sect_index = try self.addSection(.{
         .name = ".symtab",
@@ -624,6 +587,18 @@ fn allocateAllocSections(self: *Elf) void {
     }
 }
 
+fn allocateNonAllocSections(self: *Elf) void {
+    var offset: u64 = 0;
+    for (self.sections.items(.shdr)) |*shdr| {
+        defer offset = shdr.sh_offset + shdr.sh_size;
+
+        if (shdr.sh_type == elf.SHT_NULL) continue;
+        if (shdr.sh_flags & elf.SHF_ALLOC != 0) continue;
+
+        shdr.sh_offset = mem.alignForwardGeneric(u64, offset, shdr.sh_addralign);
+    }
+}
+
 fn allocateAtoms(self: *Elf) void {
     const slice = self.sections.slice();
     for (slice.items(.shdr), 0..) |shdr, i| {
@@ -864,190 +839,74 @@ fn scanRelocs(self: *Elf) !void {
     }
 }
 
-fn allocateSection(self: *Elf, shdr: *elf.Elf64_Shdr, phdr: *elf.Elf64_Phdr) !void {
-    const base_addr = phdr.p_vaddr + phdr.p_memsz;
-    shdr.sh_addr = mem.alignForwardGeneric(u64, base_addr, shdr.sh_addralign);
-    const p_memsz = shdr.sh_addr + shdr.sh_size - base_addr;
+fn setSymtab(self: *Elf) !void {
+    const gpa = self.base.allocator;
 
-    const base_offset = phdr.p_offset + phdr.p_filesz;
-    shdr.sh_offset = mem.alignForwardGeneric(u64, base_offset, shdr.sh_addralign);
-    const p_filesz = shdr.sh_offset + shdr.sh_size - base_offset;
-
-    if (shdr.sh_type == elf.SHT_NOBITS) {
-        log.debug("allocating section '{s}' from 0x{x} to 0x{x} (no physical size)", .{
-            self.shstrtab.getAssumeExists(shdr.sh_name),
-            shdr.sh_addr,
-            shdr.sh_addr + shdr.sh_size,
-        });
-    } else {
-        log.debug("allocating section '{s}' from 0x{x} to 0x{x} (0x{x} - 0x{x})", .{
-            self.shstrtab.getAssumeExists(shdr.sh_name),
-            shdr.sh_addr,
-            shdr.sh_addr + shdr.sh_size,
-            shdr.sh_offset,
-            shdr.sh_offset + shdr.sh_size,
-        });
-        phdr.p_filesz += p_filesz;
-    }
-
-    phdr.p_memsz += p_memsz;
-}
-
-const SegmentBase = struct {
-    offset: u64,
-    vaddr: u64,
-    init_size: u64 = 0,
-    alignment: ?u32 = null,
-};
-
-fn allocateSegment(self: *Elf, phdr_ndx: u16, shdr_ndxs: []const ?u16, base: SegmentBase) !void {
-    const phdr = &self.phdrs.items[phdr_ndx];
-
-    var min_align: u64 = 0;
-    for (shdr_ndxs) |maybe_shdr_ndx| {
-        const shdr_ndx = maybe_shdr_ndx orelse continue;
-        const shdr = self.sections.items(.shdr)[shdr_ndx];
-        min_align = @max(min_align, shdr.sh_addralign);
-    }
-
-    const p_align = base.alignment orelse min_align;
-    const p_offset = mem.alignForwardGeneric(u64, base.offset, min_align);
-    const p_vaddr = mem.alignForwardGeneric(u64, base.vaddr, p_align) + @rem(p_offset, p_align);
-
-    phdr.p_offset = p_offset;
-    phdr.p_vaddr = p_vaddr;
-    phdr.p_paddr = p_vaddr;
-    phdr.p_filesz = base.init_size;
-    phdr.p_memsz = base.init_size;
-    phdr.p_align = p_align;
-
-    // This assumes ordering of section headers matches ordering of sections in file
-    // so that the segments are contiguous in memory.
-    for (shdr_ndxs) |maybe_shdr_ndx| {
-        const shdr_ndx = maybe_shdr_ndx orelse continue;
-        const shdr = &self.sections.items(.shdr)[shdr_ndx];
-        try self.allocateSection(shdr, phdr);
-    }
-
-    log.debug("allocating segment of type {x} and flags {x}:", .{ phdr.p_type, phdr.p_flags });
-    log.debug("  in file from 0x{x} to 0x{x}", .{ phdr.p_offset, phdr.p_offset + phdr.p_filesz });
-    log.debug("  in memory from 0x{x} to 0x{x}", .{ phdr.p_vaddr, phdr.p_vaddr + phdr.p_memsz });
-}
-
-fn allocateLoadRSeg(self: *Elf) !void {
-    const init_size = @sizeOf(elf.Elf64_Ehdr) + self.phdrs.items.len * @sizeOf(elf.Elf64_Phdr);
-    try self.allocateSegment(self.load_r_seg_index.?, &.{
-        self.getSectionByName(".rodata"),
-    }, .{
-        .offset = 0,
-        .vaddr = default_base_addr,
-        .init_size = init_size,
-        .alignment = 0x1000,
-    });
-}
-
-fn allocateLoadRESeg(self: *Elf) !void {
-    const prev_seg = self.phdrs.items[self.load_r_seg_index.?];
-    try self.allocateSegment(self.load_re_seg_index.?, &.{
-        self.getSectionByName(".text"),
-        self.getSectionByName(".init"),
-        self.getSectionByName(".init_array"),
-        self.getSectionByName(".fini"),
-        self.getSectionByName(".fini_array"),
-    }, .{
-        .offset = prev_seg.p_offset + prev_seg.p_filesz,
-        .vaddr = prev_seg.p_vaddr + prev_seg.p_memsz,
-        .alignment = 0x1000,
-    });
-
-    if (self.tls_seg_index) |tls_seg_index| blk: {
-        if (self.getSectionByName(".tdata")) |_| break :blk; // TLS segment contains tdata section, hence it will be part of RW
-        const phdr = self.phdrs.items[self.load_re_seg_index.?];
-        try self.allocateSegment(tls_seg_index, &.{
-            self.getSectionByName(".tdata"),
-            self.getSectionByName(".tbss"),
-        }, .{
-            .offset = phdr.p_offset + phdr.p_filesz,
-            .vaddr = phdr.p_vaddr + phdr.p_memsz,
-        });
-    }
-}
-
-fn allocateLoadRWSeg(self: *Elf) !void {
-    const base: SegmentBase = base: {
-        if (self.tls_seg_index) |tls_seg_index| blk: {
-            if (self.getSectionByName(".tdata")) |_| break :blk;
-            const prev_seg = self.phdrs.items[tls_seg_index];
-            break :base .{
-                .offset = prev_seg.p_offset + prev_seg.p_filesz,
-                .vaddr = prev_seg.p_vaddr + prev_seg.p_memsz,
-                .alignment = 0x1000,
-            };
+    for (self.objects.items) |object| {
+        for (object.locals.items) |sym| {
+            const s_sym = sym.getSourceSymbol(self);
+            switch (s_sym.st_type()) {
+                elf.STT_SECTION, elf.STT_NOTYPE => continue,
+                else => {},
+            }
+            switch (@intToEnum(elf.STV, s_sym.st_other)) {
+                .INTERNAL, .HIDDEN => continue,
+                else => {},
+            }
+            const name = try self.strtab.insert(gpa, sym.getName(self));
+            try self.symtab.append(gpa, .{
+                .st_name = name,
+                .st_info = s_sym.st_info,
+                .st_other = s_sym.st_other,
+                .st_shndx = sym.shndx,
+                .st_value = sym.value,
+                .st_size = 0,
+            });
         }
-        const prev_seg = self.phdrs.items[self.load_re_seg_index.?];
-        break :base .{
-            .offset = prev_seg.p_offset + prev_seg.p_filesz,
-            .vaddr = prev_seg.p_vaddr + prev_seg.p_memsz,
-            .alignment = 0x1000,
-        };
-    };
-    try self.allocateSegment(self.load_rw_seg_index.?, &.{
-        self.getSectionByName(".tdata"),
-        self.getSectionByName(".data.rel.ro"),
-        self.getSectionByName(".got"),
-        self.getSectionByName(".data"),
-        self.getSectionByName(".bss"),
-    }, base);
+    }
 
-    const phdr = self.phdrs.items[self.load_rw_seg_index.?];
-
-    if (self.getSectionByName(".tdata")) |_| {
-        try self.allocateSegment(self.tls_seg_index.?, &.{
-            self.getSectionByName(".tdata"),
-            self.getSectionByName(".tbss"),
-        }, .{
-            .offset = phdr.p_offset,
-            .vaddr = phdr.p_vaddr,
+    for (self.globals.items) |sym| {
+        const s_sym = sym.getSourceSymbol(self);
+        switch (@intToEnum(elf.STV, s_sym.st_other)) {
+            .INTERNAL, .HIDDEN => continue,
+            else => {},
+        }
+        const name = try self.strtab.insert(gpa, sym.getName(self));
+        try self.symtab.append(gpa, .{
+            .st_name = name,
+            .st_info = s_sym.st_info,
+            .st_other = s_sym.st_other,
+            .st_shndx = sym.shndx,
+            .st_value = sym.value,
+            .st_size = 0,
         });
+    }
+
+    // Set the section sizes
+    {
+        const shdr = &self.sections.items(.shdr)[self.symtab_sect_index.?];
+        shdr.sh_size = self.symtab.items.len * @sizeOf(elf.Elf64_Sym);
+    }
+    {
+        const shdr = &self.sections.items(.shdr)[self.strtab_sect_index.?];
+        shdr.sh_size = self.strtab.buffer.items.len;
     }
 }
 
-fn allocateNonAllocSections(self: *Elf) !void {
-    var offset: u64 = 0;
-    for (self.sections.items(.shdr)) |*shdr| {
-        defer {
-            offset = shdr.sh_offset + shdr.sh_size;
-        }
-
-        if (shdr.sh_type == elf.SHT_NULL) continue;
-        if (shdr.sh_flags & elf.SHF_ALLOC != 0) continue;
-
-        shdr.sh_offset = mem.alignForwardGeneric(u64, offset, shdr.sh_addralign);
-        log.debug("setting '{s}' non-alloc section's offsets from 0x{x} to 0x{x}", .{
-            self.shstrtab.getAssumeExists(shdr.sh_name),
-            shdr.sh_offset,
-            shdr.sh_offset + shdr.sh_size,
-        });
-    }
+fn setShstrtab(self: *Elf) void {
+    const shdr = &self.sections.items(.shdr)[self.shstrtab_sect_index.?];
+    shdr.sh_size = self.shstrtab.buffer.items.len;
 }
 
 fn writeAtoms(self: *Elf) !void {
     const slice = self.sections.slice();
-    for (slice.items(.last_atom), 0..) |last_atom, i| {
-        var atom_index = last_atom orelse continue;
-        const shdr_ndx = @intCast(u16, i);
-        const shdr = slice.items(.shdr)[shdr_ndx];
+    for (slice.items(.first_atom), 0..) |first_atom, i| {
+        var atom_index = first_atom orelse continue;
+        const shndx = @intCast(u16, i);
+        const shdr = slice.items(.shdr)[shndx];
 
         // TODO zero prefill .bss and .tbss if have presence in file
         if (shdr.sh_type == elf.SHT_NOBITS) continue;
-
-        // Find the first atom
-        while (true) {
-            const atom = self.getAtom(atom_index);
-            if (atom.prev) |prev| {
-                atom_index = prev;
-            } else break;
-        }
 
         log.debug("writing atoms in '{s}' section", .{self.shstrtab.getAssumeExists(shdr.sh_name)});
 
@@ -1058,9 +917,9 @@ fn writeAtoms(self: *Elf) !void {
         var stream = std.io.fixedBufferStream(buffer);
 
         while (true) {
-            const atom = self.getAtom(atom_index);
+            const atom = self.getAtom(atom_index).?;
             const off = atom.value - shdr.sh_addr;
-            log.debug("  writing ATOM(%{d},'{s}') at offset 0x{x}", .{
+            log.debug("writing ATOM(%{d},'{s}') at offset 0x{x}", .{
                 atom_index,
                 atom.getName(self),
                 shdr.sh_offset + off,
@@ -1380,7 +1239,7 @@ pub fn getOrCreateGlobal(self: *Elf, name: [:0]const u8) !GetOrCreateGlobalResul
     if (!gop.found_existing) {
         const index = @intCast(u32, self.globals.items.len);
         const global = try self.globals.addOne(gpa);
-        global.* = .{ .name = try self.strtab.insert(gpa, name) };
+        global.* = .{ .name = try self.string_intern.insert(gpa, name) };
         gop.value_ptr.* = index;
     }
     return .{

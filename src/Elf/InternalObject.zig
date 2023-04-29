@@ -12,7 +12,7 @@ pub fn addSyntheticGlobal(self: *InternalObject, name: [:0]const u8, elf_file: *
     try self.symtab.ensureUnusedCapacity(gpa, 1);
     try self.globals.ensureUnusedCapacity(gpa, 1);
     self.symtab.appendAssumeCapacity(.{
-        .st_name = try elf_file.strtab.insert(gpa, name),
+        .st_name = try elf_file.string_intern.insert(gpa, name),
         .st_info = elf.STB_GLOBAL << 4,
         .st_other = @enumToInt(elf.STV.HIDDEN),
         .st_shndx = elf.SHN_ABS,

@@ -10,7 +10,7 @@ file: ?u32 = null,
 
 atom: Atom.Index = 0,
 
-shndx: u32 = 0,
+shndx: u16 = 0,
 
 sym_idx: u32 = 0,
 
@@ -20,7 +20,7 @@ pub fn isUndef(symbol: Symbol, elf_file: *Elf) bool {
 }
 
 pub fn getName(symbol: Symbol, elf_file: *Elf) [:0]const u8 {
-    return elf_file.strtab.getAssumeExists(symbol.name);
+    return elf_file.string_intern.getAssumeExists(symbol.name);
 }
 
 pub fn getAtom(symbol: Symbol, elf_file: *Elf) ?*Atom {

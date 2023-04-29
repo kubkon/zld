@@ -100,7 +100,7 @@ fn initAtoms(self: *Object, elf_file: *Elf) !void {
                 const atom = elf_file.getAtom(atom_index).?;
                 const name = self.getShString(shdr.sh_name);
                 atom.atom_index = atom_index;
-                atom.name = try elf_file.strtab.insert(elf_file.base.allocator, name);
+                atom.name = try elf_file.string_intern.insert(elf_file.base.allocator, name);
                 atom.file = self.object_id;
                 atom.size = @intCast(u32, shdr.sh_size);
                 atom.alignment = math.log2_int(u64, shdr.sh_addralign);
@@ -139,7 +139,7 @@ fn initSymtab(self: *Object, elf_file: *Elf) !void {
         };
         symbol.* = .{
             .value = sym.st_value,
-            .name = try elf_file.strtab.insert(gpa, name),
+            .name = try elf_file.string_intern.insert(gpa, name),
             .sym_idx = @intCast(u32, i),
             .atom = if (sym.st_shndx == elf.SHN_ABS) 0 else self.atoms.items[sym.st_shndx],
             .file = self.object_id,
