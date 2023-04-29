@@ -299,7 +299,7 @@ pub fn flush(self: *Elf) !void {
     }
 
     try self.writeAtoms();
-    // try self.writeSyntheticSections();
+    try self.writeSyntheticSections();
 
     return error.Todo;
 
@@ -1204,7 +1204,7 @@ fn getGotBaseAddress(self: *Elf) u64 {
 fn writeGotEntry(self: *Elf, entry: u32, writer: anytype) !void {
     if (self.got_sect_index == null) return;
     const sym = self.getGlobal(entry);
-    try writer.writeIntLittle(u64, sym.st_value);
+    try writer.writeIntLittle(u64, sym.value);
 }
 
 /// Returns symbol localtion corresponding to the set entry point.
