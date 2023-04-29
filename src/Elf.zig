@@ -286,6 +286,7 @@ pub fn flush(self: *Elf) !void {
     try self.initSegments();
     self.allocateSegments();
     self.allocateAllocSections();
+    self.setPhdrSegment();
     self.allocateAtoms();
     self.allocateLocals();
     self.allocateGlobals();
@@ -516,25 +517,10 @@ fn initSegments(self: *Elf) !void {
 }
 
 fn allocateSegments(self: *Elf) void {
+    // Now that we have initialized segments, we can go ahead and allocate them in memory.
     var offset: u64 = 0;
     var vaddr: u64 = default_base_addr;
-    // Now that we have initialized segments, we can go ahead and allocate them in memory.
-    // We start with the PHDR segment which contains all program headers.
-    if (self.phdr_seg_index) |index| {
-        const phdr = &self.phdrs.items[index];
-        const size = self.phdrs.items.len * @sizeOf(elf.Elf64_Phdr);
-        offset += @sizeOf(elf.Elf64_Ehdr);
-        vaddr += offset;
-
-        phdr.p_offset = offset;
-        phdr.p_vaddr = vaddr;
-        phdr.p_paddr = vaddr;
-        phdr.p_filesz = size;
-        phdr.p_memsz = size;
-
-        offset += size;
-        vaddr += size;
-    }
+    const base_size = self.phdrs.items.len * @sizeOf(elf.Elf64_Phdr) + @sizeOf(elf.Elf64_Ehdr);
 
     for (self.phdrs.items[1..], 1..) |*phdr, phdr_index| {
         const sect_range = self.getSectionIndexes(@intCast(u16, phdr_index));
@@ -543,8 +529,8 @@ fn allocateSegments(self: *Elf) void {
         if (start == end) continue;
 
         var file_align: u64 = 0;
-        var filesz: u64 = 0;
-        var memsz: u64 = 0;
+        var filesz: u64 = if (phdr_index == 1) base_size else 0;
+        var memsz: u64 = if (phdr_index == 1) base_size else 0;
         for (self.sections.items(.shdr)[start..end]) |shdr| {
             file_align = @max(file_align, shdr.sh_addralign);
             if (shdr.sh_type != elf.SHT_NOBITS) {
@@ -567,7 +553,22 @@ fn allocateSegments(self: *Elf) void {
     }
 }
 
+fn setPhdrSegment(self: *Elf) void {
+    const index = self.phdr_seg_index orelse return;
+    const phdr = &self.phdrs.items[index];
+    const size = self.phdrs.items.len * @sizeOf(elf.Elf64_Phdr);
+    const offset = @sizeOf(elf.Elf64_Ehdr);
+    const vaddr = default_base_addr + offset;
+    phdr.p_offset = offset;
+    phdr.p_vaddr = vaddr;
+    phdr.p_paddr = vaddr;
+    phdr.p_filesz = size;
+    phdr.p_memsz = size;
+}
+
 fn allocateAllocSections(self: *Elf) void {
+    const phdrs_offset = self.phdrs.items.len * @sizeOf(elf.Elf64_Phdr) + @sizeOf(elf.Elf64_Ehdr);
+
     for (self.phdrs.items[1..], 1..) |phdr, phdr_index| {
         const sect_range = self.getSectionIndexes(@intCast(u16, phdr_index));
         const start = sect_range.start;
@@ -576,6 +577,12 @@ fn allocateAllocSections(self: *Elf) void {
 
         var offset = phdr.p_offset;
         var vaddr = phdr.p_vaddr;
+
+        if (phdr_index == 1) {
+            offset += phdrs_offset;
+            vaddr += phdrs_offset;
+        }
+
         for (self.sections.items(.shdr)[start..end]) |*shdr| {
             offset = mem.alignForwardGeneric(u64, offset, shdr.sh_addralign);
             vaddr = mem.alignForwardGeneric(u64, vaddr, shdr.sh_addralign);
