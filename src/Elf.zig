@@ -259,12 +259,6 @@ pub fn flush(self: *Elf) !void {
         break :blk self.globals_table.get(entry_name) orelse null;
     };
 
-    if (self.options.gc_sections) {
-        try gc.gcAtoms(self);
-    } else for (self.atoms.items[1..]) |*atom| {
-        atom.is_alive = true;
-    }
-
     // TODO this is just a temp until proper functionality is actually added
     for (self.atoms.items[1..]) |*atom| {
         const shdr = atom.getInputShdr(self);
@@ -277,6 +271,10 @@ pub fn flush(self: *Elf) !void {
             break :blk false;
         };
         if (mark_dead) atom.is_alive = false;
+    }
+
+    if (self.options.gc_sections) {
+        try gc.gcAtoms(self);
     }
 
     try self.scanRelocs();
@@ -855,6 +853,9 @@ fn setSymtab(self: *Elf) !void {
 
     for (self.objects.items) |object| {
         for (object.locals.items) |sym| {
+            if (sym.getAtom(self)) |atom| {
+                if (!atom.is_alive) continue;
+            }
             const s_sym = sym.getSourceSymbol(self);
             switch (s_sym.st_type()) {
                 elf.STT_SECTION, elf.STT_NOTYPE => continue,
@@ -883,6 +884,9 @@ fn setSymtab(self: *Elf) !void {
     }
 
     for (self.globals.items) |sym| {
+        if (sym.getAtom(self)) |atom| {
+            if (!atom.is_alive) continue;
+        }
         const s_sym = sym.getSourceSymbol(self);
         switch (@intToEnum(elf.STV, s_sym.st_other)) {
             .INTERNAL, .HIDDEN => continue,

@@ -26,7 +26,10 @@ relocs_shndx: u16 = 0,
 atom_index: Index = 0,
 
 /// Specifies whether this atom is alive or has been garbage collected.
-is_alive: bool = false,
+is_alive: bool = true,
+
+/// Specifies if the atom has been visited during garbage collection.
+is_visited: bool = false,
 
 /// Points to the previous and next neighbours
 next: ?Index = null,
