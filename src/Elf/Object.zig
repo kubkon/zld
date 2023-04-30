@@ -231,13 +231,15 @@ pub inline fn getSourceSymbol(self: Object, index: u32) elf.Elf64_Sym {
     return self.symtab[index];
 }
 
-pub fn getSymbol(self: *Object, index: u32, elf_file: *Elf) *Symbol {
+pub fn getGlobalIndex(self: Object, index: u32) ?u32 {
     assert(index < self.symtab.len);
     const nlocals = self.first_global orelse self.locals.items.len;
-    if (index >= nlocals) {
-        // It's a global!
-        assert(self.first_global != null);
-        const global_index = self.globals.items[index - nlocals];
+    if (index < nlocals) return null;
+    return self.globals.items[index - nlocals];
+}
+
+pub fn getSymbol(self: *Object, index: u32, elf_file: *Elf) *Symbol {
+    if (self.getGlobalIndex(index)) |global_index| {
         return elf_file.getGlobal(global_index);
     } else {
         return &self.locals.items[index];

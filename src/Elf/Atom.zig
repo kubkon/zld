@@ -132,11 +132,9 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
     for (self.getRelocs(elf_file)) |rel| {
         // While traversing relocations, synthesize any missing atom.
         // TODO synthesize PLT atoms, GOT atoms, etc.
-        const tsym = object.getSymbol(rel.r_sym(), elf_file);
-        const tsym_name = tsym.getName(elf_file);
         switch (rel.r_type()) {
             elf.R_X86_64_REX_GOTPCRELX, elf.R_X86_64_GOTPCREL => {
-                const global = elf_file.globals_table.get(tsym_name).?;
+                const global = object.getGlobalIndex(rel.r_sym()).?;
                 const gop = try elf_file.got_section.getOrCreate(gpa, global);
                 if (!gop.found_existing) {
                     log.debug("{s}: creating GOT entry: [() -> {s}]", .{
@@ -145,7 +143,7 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
                             elf.R_X86_64_GOTPCREL => "GOTPCREL",
                             else => unreachable,
                         },
-                        tsym_name,
+                        object.getSymbol(rel.r_sym(), elf_file).getName(elf_file),
                     });
                 }
             },
@@ -194,7 +192,7 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
             elf.R_X86_64_GOTPCREL,
             elf.R_X86_64_REX_GOTPCRELX,
             => {
-                const global = elf_file.globals_table.get(target_name).?;
+                const global = object.getGlobalIndex(rel.r_sym()).?;
                 const target_addr = @intCast(i64, elf_file.got_section.getAddress(global, elf_file).?);
                 const displacement = @intCast(i32, target_addr - source_addr + rel.r_addend);
                 log.debug("{s}: {x}: [0x{x} => 0x{x}] ({s})", .{
