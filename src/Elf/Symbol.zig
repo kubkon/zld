@@ -1,17 +1,25 @@
 //! Represents a defined symbol.
 
+/// Allocated address value of this symbol.
 value: u64 = 0,
 
+/// Offset into the linker's intern table.
 name: u32 = 0,
 
 /// File where this symbol is defined.
 /// null means linker-defined synthetic symbol.
 file: ?u32 = null,
 
+/// Atom containing this symbol if any.
+/// Index of 0 means there is no associated atom with this symbol.
+/// Use `getAtom` to get the pointer to the atom.
 atom: Atom.Index = 0,
 
+/// Assigned output section index for this atom.
 shndx: u16 = 0,
 
+/// Index of the source symbol this symbol references.
+/// Use `getSourceSymbol` to pull the source symbol from the relevant file.
 sym_idx: u32 = 0,
 
 pub fn isUndef(symbol: Symbol, elf_file: *Elf) bool {

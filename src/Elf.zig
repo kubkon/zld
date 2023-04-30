@@ -235,7 +235,7 @@ pub fn flush(self: *Elf) !void {
     // Append null section.
     _ = try self.addSection(.{ .name = "" });
     // Append null atom.
-    try self.atoms.append(gpa, Atom.empty);
+    try self.atoms.append(gpa, .{});
 
     try self.parsePositionals(positionals.items);
     try self.parseLibs(libs.keys());
@@ -1134,7 +1134,7 @@ fn writeGotEntry(self: *Elf, entry: u32, writer: anytype) !void {
 pub fn addAtom(self: *Elf) !Atom.Index {
     const index = @intCast(u32, self.atoms.items.len);
     const atom = try self.atoms.addOne(self.base.allocator);
-    atom.* = Atom.empty;
+    atom.* = .{};
     return index;
 }
 

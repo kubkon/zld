@@ -1,72 +1,60 @@
 /// Address allocated for this Atom.
-value: u64,
+value: u64 = 0,
 
 /// Name of this Atom.
-name: u32,
+name: u32 = 0,
 
-file: u32,
+/// Index into linker's objects table.
+object_id: u32 = 0,
 
 /// Size of this atom
-size: u32,
+size: u32 = 0,
 
 /// Alignment of this atom as a power of two.
-alignment: u8,
+alignment: u8 = 0,
 
 /// Index of the input section.
-shndx: u16,
+shndx: u16 = 0,
 
 /// Index of the output section.
-out_shndx: u16,
+out_shndx: u16 = 0,
 
 /// Index of the input section containing this atom's relocs.
-relocs_shndx: u16,
+relocs_shndx: u16 = 0,
 
-atom_index: Index,
+/// Index of this atom in the linker's atoms table.
+atom_index: Index = 0,
 
-is_alive: bool,
+/// Specifies whether this atom is alive or has been garbage collected.
+is_alive: bool = false,
 
 /// Points to the previous and next neighbours
-next: ?Index,
-prev: ?Index,
+next: ?Index = null,
+prev: ?Index = null,
 
 pub const Index = u32;
-
-pub const empty = Atom{
-    .value = 0,
-    .name = 0,
-    .file = 0,
-    .size = 0,
-    .alignment = 0,
-    .shndx = 0,
-    .out_shndx = 0,
-    .relocs_shndx = @bitCast(u16, @as(i16, -1)),
-    .atom_index = 0,
-    .is_alive = false,
-    .prev = null,
-    .next = null,
-};
 
 pub fn getName(self: Atom, elf_file: *Elf) [:0]const u8 {
     return elf_file.string_intern.getAssumeExists(self.name);
 }
 
 pub fn getCode(self: Atom, elf_file: *Elf) []const u8 {
-    const object = self.getFile(elf_file);
+    const object = self.getObject(elf_file);
     return object.getShdrContents(self.shndx);
 }
 
-pub inline fn getFile(self: Atom, elf_file: *Elf) *Object {
-    return &elf_file.objects.items[self.file];
+pub inline fn getObject(self: Atom, elf_file: *Elf) *Object {
+    return &elf_file.objects.items[self.object_id];
 }
 
 pub fn getInputShdr(self: Atom, elf_file: *Elf) elf.Elf64_Shdr {
-    const object = self.getFile(elf_file);
+    const object = self.getObject(elf_file);
     return object.getShdrs()[self.shndx];
 }
 
 pub fn getRelocs(self: Atom, elf_file: *Elf) []align(1) const elf.Elf64_Rela {
     if (self.relocs_shndx == @bitCast(u16, @as(i16, -1))) return &[0]elf.Elf64_Rela{};
-    const object = self.getFile(elf_file);
+    const object = self.getObject(elf_file);
     const bytes = object.getShdrContents(self.relocs_shndx);
     const nrelocs = @divExact(bytes.len, @sizeOf(elf.Elf64_Rela));
     return @ptrCast([*]align(1) const elf.Elf64_Rela, bytes)[0..nrelocs];
@@ -128,7 +116,7 @@ pub fn initOutputSection(self: *Atom, elf_file: *Elf) !void {
 
 pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
     const gpa = elf_file.base.allocator;
-    const object = self.getFile(elf_file);
+    const object = self.getObject(elf_file);
     for (self.getRelocs(elf_file)) |rel| {
         // While traversing relocations, synthesize any missing atom.
         // TODO synthesize PLT atoms, GOT atoms, etc.
@@ -157,7 +145,7 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
     const code = try gpa.dupe(u8, self.getCode(elf_file));
     defer gpa.free(code);
     const relocs = self.getRelocs(elf_file);
-    const object = self.getFile(elf_file);
+    const object = self.getObject(elf_file);
 
     for (relocs) |rel| {
         const target = object.getSymbol(rel.r_sym(), elf_file);

@@ -70,7 +70,7 @@ fn markLive(atom: *Atom, elf_file: *Elf) void {
     if (atom.is_alive) return;
     atom.is_alive = true;
     log.debug("marking live atom %%%{d}", .{atom.atom_index});
-    const object = atom.getFile(elf_file);
+    const object = atom.getObject(elf_file);
     for (atom.getRelocs(elf_file)) |rel| {
         const target_sym = object.getSymbol(rel.r_sym(), elf_file);
         const target_atom = target_sym.getAtom(elf_file);

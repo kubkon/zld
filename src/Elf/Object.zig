@@ -101,7 +101,7 @@ fn initAtoms(self: *Object, elf_file: *Elf) !void {
                 const name = self.getShString(shdr.sh_name);
                 atom.atom_index = atom_index;
                 atom.name = try elf_file.string_intern.insert(elf_file.base.allocator, name);
-                atom.file = self.object_id;
+                atom.object_id = self.object_id;
                 atom.size = @intCast(u32, shdr.sh_size);
                 atom.alignment = math.log2_int(u64, shdr.sh_addralign);
                 atom.shndx = @intCast(u16, i);
