@@ -96,6 +96,7 @@ pub const SymbolWithLoc = struct {
 };
 
 const default_base_addr: u64 = 0x200000;
+const default_page_size: u64 = 0x1000;
 
 pub fn openPath(allocator: Allocator, options: Options, thread_pool: *ThreadPool) !*Elf {
     const file = try options.emit.directory.createFile(options.emit.sub_path, .{
@@ -489,7 +490,7 @@ fn initSegments(self: *Elf) !void {
                 const phdr_index = self.load_re_seg_index orelse try self.addSegment(.{
                     .type = elf.PT_LOAD,
                     .flags = elf.PF_X | elf.PF_R,
-                    .@"align" = 0x1000,
+                    .@"align" = default_page_size,
                 });
                 self.load_re_seg_index = phdr_index;
                 break :blk phdr_index;
@@ -498,7 +499,7 @@ fn initSegments(self: *Elf) !void {
                 const phdr_index = self.load_rw_seg_index orelse try self.addSegment(.{
                     .type = elf.PT_LOAD,
                     .flags = elf.PF_W | elf.PF_R,
-                    .@"align" = 0x1000,
+                    .@"align" = default_page_size,
                 });
                 self.load_rw_seg_index = phdr_index;
                 break :blk phdr_index;
@@ -506,7 +507,7 @@ fn initSegments(self: *Elf) !void {
             const phdr_index = self.load_r_seg_index orelse try self.addSegment(.{
                 .type = elf.PT_LOAD,
                 .flags = elf.PF_R,
-                .@"align" = 0x1000,
+                .@"align" = default_page_size,
             });
             self.load_r_seg_index = phdr_index;
             break :blk phdr_index;
