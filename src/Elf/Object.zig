@@ -78,7 +78,7 @@ pub fn parse(self: *Object, elf_file: *Elf) !void {
 fn initAtoms(self: *Object, elf_file: *Elf) !void {
     const shdrs = self.getShdrs();
     try self.atoms.resize(elf_file.base.allocator, shdrs.len);
-    mem.set(Atom.Index, self.atoms.items, 0);
+    @memset(self.atoms.items, 0);
 
     for (shdrs, 0..) |shdr, i| {
         if (shdr.sh_flags & elf.SHF_EXCLUDE != 0 and

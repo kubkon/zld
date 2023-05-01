@@ -81,7 +81,7 @@ fn markLive(atom: *Atom, elf_file: *Elf, indent: usize) void {
     assert(atom.is_visited);
     const inn = elf_file.base.allocator.alloc(u8, indent) catch unreachable;
     defer elf_file.base.allocator.free(inn);
-    mem.set(u8, inn, ' ');
+    @memset(inn, ' ');
     const object = atom.getObject(elf_file);
     for (atom.getRelocs(elf_file)) |rel| {
         const target_sym = object.getSymbol(rel.r_sym(), elf_file);

@@ -442,7 +442,7 @@ pub fn flush(self: *MachO) !void {
             log.debug("zeroing out zerofill area of length {x} at {x}", .{ size, start });
             var padding = try self.base.allocator.alloc(u8, size);
             defer self.base.allocator.free(padding);
-            mem.set(u8, padding, 0);
+            @memset(padding, 0);
             try self.base.file.pwriteAll(padding, start);
         }
     }
@@ -2861,7 +2861,7 @@ fn writeDyldInfoData(self: *MachO) !void {
 
     var buffer = try gpa.alloc(u8, needed_size);
     defer gpa.free(buffer);
-    mem.set(u8, buffer, 0);
+    @memset(buffer, 0);
 
     var stream = std.io.fixedBufferStream(buffer);
     const writer = stream.writer();
@@ -3077,8 +3077,8 @@ fn writeDataInCode(self: *MachO) !void {
 
     const buffer = try self.base.allocator.alloc(u8, needed_size_aligned);
     defer self.base.allocator.free(buffer);
-    mem.set(u8, buffer, 0);
-    mem.copy(u8, buffer, mem.sliceAsBytes(out_dice.items));
+    @memset(buffer, 0);
+    @memcpy(buffer, mem.sliceAsBytes(out_dice.items));
 
     log.debug("writing data-in-code from 0x{x} to 0x{x}", .{ offset, offset + needed_size_aligned });
 
@@ -3209,8 +3209,8 @@ fn writeStrtab(self: *MachO) !void {
 
     const buffer = try self.base.allocator.alloc(u8, needed_size_aligned);
     defer self.base.allocator.free(buffer);
-    mem.set(u8, buffer, 0);
-    mem.copy(u8, buffer, self.strtab.buffer.items);
+    @memset(buffer, 0);
+    @memcpy(buffer, self.strtab.buffer.items);
 
     try self.base.file.pwriteAll(buffer, offset);
 
@@ -3944,7 +3944,7 @@ fn logSymtab(self: *MachO) void {
         scoped_log.debug("  object({d}): {s}", .{ id, object.name });
         for (object.symtab, 0..) |sym, sym_id| {
             if (object.in_symtab == null) continue;
-            mem.set(u8, &buf, '_');
+            @memset(&buf, '_');
             scoped_log.debug("    %{d}: {s} @{x} in sect({d}), {s}", .{
                 sym_id,
                 object.getSymbolName(@intCast(u32, sym_id)),

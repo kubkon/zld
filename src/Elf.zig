@@ -941,7 +941,7 @@ fn writeAtoms(self: *Elf) !void {
 
         var buffer = try self.base.allocator.alloc(u8, shdr.sh_size);
         defer self.base.allocator.free(buffer);
-        mem.set(u8, buffer, 0);
+        @memset(buffer, 0);
 
         var stream = std.io.fixedBufferStream(buffer);
 
@@ -1051,7 +1051,7 @@ fn writeHeader(self: *Elf) !void {
     // OS ABI, often set to 0 regardless of target platform
     // ABI Version, possibly used by glibc but not by static executables
     // padding
-    mem.set(u8, header.e_ident[7..][0..9], 0);
+    @memset(header.e_ident[7..][0..9], 0);
     log.debug("writing ELF header {} at 0x{x}", .{ header, 0 });
     try self.base.file.pwriteAll(mem.asBytes(&header), 0);
 }
