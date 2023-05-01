@@ -26,7 +26,6 @@ fn collectRoots(roots: *std.ArrayList(*Atom), elf_file: *Elf) !void {
                 const global = elf_file.getGlobal(index);
                 const atom = global.getAtom(elf_file).?;
                 if (markAtom(atom)) {
-                    log.debug("adding as root atom atom({d})", .{atom.atom_index});
                     try roots.append(atom);
                 }
             }
@@ -35,7 +34,6 @@ fn collectRoots(roots: *std.ArrayList(*Atom), elf_file: *Elf) !void {
             assert(other == .lib);
             for (elf_file.globals.items) |global| if (global.getAtom(elf_file)) |atom| {
                 if (markAtom(atom)) {
-                    log.debug("adding as root atom atom({d})", .{atom.atom_index});
                     try roots.append(atom);
                 }
             };
@@ -61,7 +59,6 @@ fn collectRoots(roots: *std.ArrayList(*Atom), elf_file: *Elf) !void {
             break :blk false;
         };
         if (is_gc_root and markAtom(atom)) {
-            log.debug("adding as root atom({d})", .{atom.atom_index});
             try roots.append(atom);
         }
 
@@ -77,27 +74,31 @@ fn markAtom(atom: *Atom) bool {
     return atom.is_alive and !already_visited;
 }
 
-fn markLive(atom: *Atom, elf_file: *Elf, indent: usize) void {
+fn markLive(atom: *Atom, elf_file: *Elf) void {
+    if (wip_dump_live_atoms) {
+        dump_live_atoms.incr();
+    }
     assert(atom.is_visited);
-    const inn = elf_file.base.allocator.alloc(u8, indent) catch unreachable;
-    defer elf_file.base.allocator.free(inn);
-    @memset(inn, ' ');
     const object = atom.getObject(elf_file);
     for (atom.getRelocs(elf_file)) |rel| {
         const target_sym = object.getSymbol(rel.r_sym(), elf_file);
         const target_atom = target_sym.getAtom(elf_file) orelse continue;
         target_atom.is_alive = true;
-        log.debug("{s}marking live atom({d})", .{ inn, target_atom.atom_index });
+        if (wip_dump_live_atoms) {
+            std.debug.print("{}marking live atom({d})\n", .{ dump_live_atoms, target_atom.atom_index });
+        }
         if (markAtom(target_atom)) {
-            markLive(target_atom, elf_file, indent + 1);
+            markLive(target_atom, elf_file);
         }
     }
 }
 
 fn mark(roots: std.ArrayList(*Atom), elf_file: *Elf) void {
     for (roots.items) |root| {
-        log.debug("root atom({d})", .{root.atom_index});
-        markLive(root, elf_file, 1);
+        if (wip_dump_live_atoms) {
+            std.debug.print("root atom({d})\n", .{root.atom_index});
+        }
+        markLive(root, elf_file);
     }
 }
 
@@ -108,3 +109,38 @@ fn prune(elf_file: *Elf) void {
         }
     }
 }
+
+pub fn dumpPrunedAtoms(elf_file: *Elf) !void {
+    const stderr = std.io.getStdErr().writer();
+    for (elf_file.atoms.items[1..]) |atom| {
+        if (!atom.is_alive) {
+            try stderr.print("ld.zld: removing unused section '{s}' in file '{s}'\n", .{
+                atom.getName(elf_file),
+                atom.getObject(elf_file).name,
+            });
+        }
+    }
+}
+
+const wip_dump_live_atoms = false;
+
+const Level = struct {
+    value: usize = 0,
+
+    fn incr(self: *@This()) void {
+        self.value += 1;
+    }
+
+    pub fn format(
+        self: *const @This(),
+        comptime unused_fmt_string: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = unused_fmt_string;
+        _ = options;
+        try writer.writeByteNTimes(' ', self.value);
+    }
+};
+
+var dump_live_atoms: Level = .{};

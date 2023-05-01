@@ -78,7 +78,7 @@ got_section: SyntheticSection(u32, *Elf, .{
 
 atoms: std.ArrayListUnmanaged(Atom) = .{},
 
-const wip_dump_state = true;
+const wip_dump_state = false;
 
 const Section = struct {
     shdr: elf.Elf64_Shdr,
@@ -276,6 +276,10 @@ pub fn flush(self: *Elf) !void {
 
     if (self.options.gc_sections) {
         try gc.gcAtoms(self);
+
+        if (self.options.print_gc_sections) {
+            try gc.dumpPrunedAtoms(self);
+        }
     }
 
     try self.scanRelocs();

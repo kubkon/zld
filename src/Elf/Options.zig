@@ -16,7 +16,9 @@ const usage =
     \\General Options:
     \\--allow-multiple-definition   Allow multiple definitions
     \\--entry=[name], -e [name]     Set name of the entry point symbol
-    \\--gc-sections                 Force removal of functions and data that are unreachable by the entry point or exported symbols
+    \\--gc-sections                 Remove unused sections
+    \\--no-gc-sections              Don't remove unused sections (default)
+    \\--print-gc-sections           List removed unused sections to stderr
     \\-l[name]                      Specify library to link against
     \\-L[path]                      Specify library search dir
     \\--rpath=[path], -R [path]     Specify runtime path
@@ -40,6 +42,7 @@ stack_size: ?u64 = null,
 strip: bool = false,
 entry: ?[]const u8 = null,
 gc_sections: bool = false,
+print_gc_sections: bool = false,
 allow_multiple_definition: bool = false,
 
 pub fn parseArgs(arena: Allocator, ctx: Zld.MainCtx) !Options {
@@ -55,6 +58,7 @@ pub fn parseArgs(arena: Allocator, ctx: Zld.MainCtx) !Options {
     var stack_size: ?u64 = null;
     var shared: bool = false;
     var gc_sections: bool = false;
+    var print_gc_sections: bool = false;
     var entry: ?[]const u8 = null;
     var allow_multiple_definition: bool = false;
 
@@ -96,6 +100,10 @@ pub fn parseArgs(arena: Allocator, ctx: Zld.MainCtx) !Options {
             std.log.warn("TODO unhandled argument '-z {s}'", .{arg["-z".len..]});
         } else if (mem.eql(u8, arg, "--gc-sections")) {
             gc_sections = true;
+        } else if (mem.eql(u8, arg, "--no-gc-sections")) {
+            gc_sections = false;
+        } else if (mem.eql(u8, arg, "--print-gc-sections")) {
+            print_gc_sections = true;
         } else if (mem.eql(u8, arg, "--as-needed")) {
             std.log.warn("TODO unhandled argument '--as-needed'", .{});
         } else if (mem.eql(u8, arg, "--allow-shlib-undefined")) {
@@ -140,6 +148,7 @@ pub fn parseArgs(arena: Allocator, ctx: Zld.MainCtx) !Options {
         .rpath_list = rpath_list.items,
         .stack_size = stack_size,
         .gc_sections = gc_sections,
+        .print_gc_sections = print_gc_sections,
         .entry = entry,
         .allow_multiple_definition = allow_multiple_definition,
     };
