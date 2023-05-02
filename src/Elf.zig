@@ -288,7 +288,12 @@ pub fn flush(self: *Elf) !void {
     try self.setSymtab();
     self.setShstrtab();
     self.allocateNonAllocSections();
-    self.setShoff();
+
+    self.shoff = blk: {
+        const shdr = self.sections.items(.shdr)[self.sections.len - 1];
+        const offset = shdr.sh_offset + shdr.sh_size;
+        break :blk mem.alignForwardGeneric(u64, offset, @alignOf(elf.Elf64_Shdr));
+    };
 
     if (wip_dump_state) {
         std.debug.print("{}", .{self.dumpState()});
@@ -931,14 +936,6 @@ fn setSymtab(self: *Elf) !void {
 fn setShstrtab(self: *Elf) void {
     const shdr = &self.sections.items(.shdr)[self.shstrtab_sect_index.?];
     shdr.sh_size = self.shstrtab.buffer.items.len;
-}
-
-fn setShoff(self: *Elf) void {
-    const offset: u64 = blk: {
-        const shdr = self.sections.items(.shdr)[self.sections.len - 1];
-        break :blk shdr.sh_offset + shdr.sh_size;
-    };
-    self.shoff = mem.alignForwardGeneric(u64, offset, @alignOf(elf.Elf64_Shdr));
 }
 
 fn writeAtoms(self: *Elf) !void {
