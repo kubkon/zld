@@ -281,7 +281,6 @@ pub fn flush(self: *Elf) !void {
     try self.initSegments();
     self.allocateSegments();
     self.allocateAllocSections();
-    self.setPhdrSegment();
     self.allocateAtoms();
     self.allocateLocals();
     self.allocateGlobals();
@@ -461,53 +460,60 @@ fn sortSections(self: *Elf) !void {
 }
 
 fn initSegments(self: *Elf) !void {
-    // We preallocate space for PHDR segment
-    self.phdr_seg_index = try self.addSegment(.{
-        .type = elf.PT_PHDR,
-        .flags = elf.PF_R,
-        .@"align" = @alignOf(elf.Elf64_Phdr),
-    });
+    // Add PHDR segment
+    {
+        const size = self.phdrs.items.len * @sizeOf(elf.Elf64_Phdr);
+        const offset = @sizeOf(elf.Elf64_Ehdr);
+        self.phdr_seg_index = try self.addSegment(.{
+            .type = elf.PT_PHDR,
+            .flags = elf.PF_R,
+            .@"align" = @alignOf(elf.Elf64_Phdr),
+            .offset = offset,
+            .addr = default_base_addr + offset,
+            .filesz = size,
+            .memsz = size,
+        });
+    }
 
     // Then, we proceed in creating segments for all alloc sections.
-    // Note that the sections are now sorted in the most optimal order meaning we expect
-    // one of each segment. This of course isn't enforced by the loader, so if we decide
-    // to tackle this differently, we need to tweak this logic.
-    for (self.sections.items(.shdr), 0..) |shdr, i| {
-        const phdr = &self.sections.items(.phdr)[i];
+    const first_phdr = @intCast(u16, self.phdrs.items.len);
+    var last_phdr: ?u16 = null;
+    for (self.sections.items(.shdr)) |shdr| {
         if (shdr.sh_flags & elf.SHF_ALLOC == 0) continue;
         const write = shdr.sh_flags & elf.SHF_WRITE != 0;
         const exec = shdr.sh_flags & elf.SHF_EXECINSTR != 0;
-        if (write and exec) {
-            log.err("TODO executable segment is writeable", .{});
-            return error.ExecWrite;
-        }
-        phdr.* = blk: {
-            if (exec) {
-                const phdr_index = self.load_re_seg_index orelse try self.addSegment(.{
-                    .type = elf.PT_LOAD,
-                    .flags = elf.PF_X | elf.PF_R,
-                    .@"align" = default_page_size,
-                });
-                self.load_re_seg_index = phdr_index;
-                break :blk phdr_index;
-            }
-            if (write) {
-                const phdr_index = self.load_rw_seg_index orelse try self.addSegment(.{
-                    .type = elf.PT_LOAD,
-                    .flags = elf.PF_W | elf.PF_R,
-                    .@"align" = default_page_size,
-                });
-                self.load_rw_seg_index = phdr_index;
-                break :blk phdr_index;
-            }
-            const phdr_index = self.load_r_seg_index orelse try self.addSegment(.{
+        var flags: u32 = elf.PF_R;
+        if (write) flags |= elf.PF_W;
+        if (exec) flags |= elf.PF_X;
+
+        const last_phdr_index = last_phdr orelse {
+            last_phdr = try self.addSegment(.{
                 .type = elf.PT_LOAD,
-                .flags = elf.PF_R,
+                .flags = flags,
                 .@"align" = default_page_size,
             });
-            self.load_r_seg_index = phdr_index;
-            break :blk phdr_index;
+            continue;
         };
+        const phdr = self.phdrs.items[last_phdr_index];
+        if (phdr.p_flags != flags) {
+            last_phdr = try self.addSegment(.{
+                .type = elf.PT_LOAD,
+                .flags = flags,
+                .@"align" = default_page_size,
+            });
+        }
+    }
+
+    var phdr_index = first_phdr;
+    for (self.sections.items(.shdr), 0..) |shdr, i| {
+        if (shdr.sh_flags & elf.SHF_ALLOC == 0) continue;
+        const write = shdr.sh_flags & elf.SHF_WRITE != 0;
+        const exec = shdr.sh_flags & elf.SHF_EXECINSTR != 0;
+        var flags: u32 = elf.PF_R;
+        if (write) flags |= elf.PF_W;
+        if (exec) flags |= elf.PF_X;
+        if (self.phdrs.items[phdr_index].p_flags != flags) phdr_index += 1;
+        self.sections.items(.phdr)[i] = phdr_index;
     }
 
     // Add PT_GNU_STACK segment that controls some stack attributes that apparently may or may not
@@ -524,17 +530,32 @@ fn allocateSegments(self: *Elf) void {
     // Now that we have initialized segments, we can go ahead and allocate them in memory.
     var offset: u64 = 0;
     var vaddr: u64 = default_base_addr;
-    const base_size = self.phdrs.items.len * @sizeOf(elf.Elf64_Phdr) + @sizeOf(elf.Elf64_Ehdr);
+    var base_size: u64 = @sizeOf(elf.Elf64_Ehdr);
+    if (self.phdr_seg_index) |index| {
+        const phdr = self.phdrs.items[index];
+        assert(phdr.p_filesz == phdr.p_memsz);
+        base_size += phdr.p_filesz;
+    }
+    const first_phdr_index = blk: {
+        if (self.phdr_seg_index) |index| break :blk index;
+        break :blk 0;
+    };
 
-    for (self.phdrs.items[1..], 1..) |*phdr, phdr_index| {
+    for (self.phdrs.items[first_phdr_index..], first_phdr_index..) |*phdr, phdr_index| {
         const sect_range = self.getSectionIndexes(@intCast(u16, phdr_index));
         const start = sect_range.start;
         const end = sect_range.end;
         if (start == end) continue;
 
+        var filesz: u64 = 0;
+        var memsz: u64 = 0;
         var file_align: u64 = 0;
-        var filesz: u64 = if (phdr_index == 1) base_size else 0;
-        var memsz: u64 = if (phdr_index == 1) base_size else 0;
+
+        if (phdr_index == first_phdr_index) {
+            filesz += base_size;
+            memsz += base_size;
+        }
+
         for (self.sections.items(.shdr)[start..end]) |shdr| {
             file_align = @max(file_align, shdr.sh_addralign);
             if (shdr.sh_type != elf.SHT_NOBITS) {
@@ -555,19 +576,6 @@ fn allocateSegments(self: *Elf) void {
         offset += filesz;
         vaddr += memsz;
     }
-}
-
-fn setPhdrSegment(self: *Elf) void {
-    const index = self.phdr_seg_index orelse return;
-    const phdr = &self.phdrs.items[index];
-    const size = self.phdrs.items.len * @sizeOf(elf.Elf64_Phdr);
-    const offset = @sizeOf(elf.Elf64_Ehdr);
-    const vaddr = default_base_addr + offset;
-    phdr.p_offset = offset;
-    phdr.p_vaddr = vaddr;
-    phdr.p_paddr = vaddr;
-    phdr.p_filesz = size;
-    phdr.p_memsz = size;
 }
 
 fn allocateAllocSections(self: *Elf) void {
@@ -1104,16 +1112,19 @@ fn addSegment(self: *Elf, opts: struct {
     type: u32 = 0,
     flags: u32 = 0,
     @"align": u64 = 0,
+    offset: u64 = 0,
+    addr: u64 = 0,
+    filesz: u64 = 0,
     memsz: u64 = 0,
 }) !u16 {
     const index = @intCast(u16, self.phdrs.items.len);
     try self.phdrs.append(self.base.allocator, .{
         .p_type = opts.type,
         .p_flags = opts.flags,
-        .p_offset = 0,
-        .p_vaddr = 0,
-        .p_paddr = 0,
-        .p_filesz = 0,
+        .p_offset = opts.offset,
+        .p_vaddr = opts.addr,
+        .p_paddr = opts.addr,
+        .p_filesz = opts.filesz,
         .p_memsz = opts.memsz,
         .p_align = opts.@"align",
     });
