@@ -41,7 +41,6 @@ load_r_seg_index: ?u16 = null,
 load_re_seg_index: ?u16 = null,
 load_rw_seg_index: ?u16 = null,
 tls_seg_index: ?u16 = null,
-gnu_stack_seg_index: ?u16 = null,
 
 text_sect_index: ?u16 = null,
 got_sect_index: ?u16 = null,
@@ -513,7 +512,7 @@ fn initSegments(self: *Elf) !void {
 
     // Add PT_GNU_STACK segment that controls some stack attributes that apparently may or may not
     // be respected by the OS.
-    self.gnu_stack_seg_index = try self.addSegment(.{
+    _ = try self.addSegment(.{
         .type = elf.PT_GNU_STACK,
         .flags = if (self.options.execstack) elf.PF_W | elf.PF_R | elf.PF_X else elf.PF_W | elf.PF_R,
         .@"align" = 1,
