@@ -3210,7 +3210,7 @@ fn writeStrtab(self: *MachO) !void {
     const buffer = try self.base.allocator.alloc(u8, needed_size_aligned);
     defer self.base.allocator.free(buffer);
     @memset(buffer, 0);
-    @memcpy(buffer, self.strtab.buffer.items);
+    @memcpy(buffer[0..self.strtab.buffer.items.len], self.strtab.buffer.items);
 
     try self.base.file.pwriteAll(buffer, offset);
 
