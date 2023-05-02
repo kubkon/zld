@@ -137,6 +137,7 @@ pub fn deinit(self: *Elf) void {
     self.strtab.deinit(gpa);
     self.atoms.deinit(gpa);
     self.globals.deinit(gpa);
+    self.globals_table.deinit(gpa);
     self.got_section.deinit(gpa);
     self.phdrs.deinit(gpa);
     self.sections.deinit(gpa);
@@ -743,22 +744,19 @@ fn parseObject(self: *Elf, path: []const u8) !bool {
     };
     defer file.close();
 
-    const name = try gpa.dupe(u8, path);
+    if (!Object.isValid(file)) return false;
+
     const file_stat = try file.stat();
     const file_size = math.cast(usize, file_stat.size) orelse return error.Overflow;
     const data = try file.readToEndAlloc(gpa, file_size);
 
-    const candidate = Object{
-        .name = name,
-        .data = data,
-        .object_id = undefined,
-    };
-    if (!candidate.isValid()) return false;
-
     const object_id = @intCast(u32, self.objects.items.len);
     const object = try self.objects.addOne(gpa);
-    object.* = candidate;
-    object.object_id = object_id;
+    object.* = .{
+        .name = try gpa.dupe(u8, path),
+        .data = data,
+        .object_id = object_id,
+    };
     try object.parse(self);
 
     if (self.cpu_arch == null) {
@@ -990,8 +988,7 @@ fn writeSyntheticSections(self: *Elf) !void {
 
 fn writeSymtab(self: *Elf) !void {
     const shdr = self.sections.items(.shdr)[self.symtab_sect_index.?];
-    log.debug("writing '{s}' contents from 0x{x} to 0x{x}", .{
-        self.shstrtab.getAssumeExists(shdr.sh_name),
+    log.debug("writing '.symtab' contents from 0x{x} to 0x{x}", .{
         shdr.sh_offset,
         shdr.sh_offset + shdr.sh_size,
     });
@@ -1000,8 +997,7 @@ fn writeSymtab(self: *Elf) !void {
 
 fn writeStrtab(self: *Elf) !void {
     const shdr = self.sections.items(.shdr)[self.strtab_sect_index.?];
-    log.debug("writing '{s}' contents from 0x{x} to 0x{x}", .{
-        self.shstrtab.getAssumeExists(shdr.sh_name),
+    log.debug("writing '.strtab' contents from 0x{x} to 0x{x}", .{
         shdr.sh_offset,
         shdr.sh_offset + shdr.sh_size,
     });

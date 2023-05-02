@@ -15,9 +15,9 @@ atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
 
 needs_exec_stack: bool = false,
 
-pub fn isValid(self: Object) bool {
-    var stream = std.io.fixedBufferStream(self.data);
-    const header = stream.reader().readStruct(elf.Elf64_Ehdr) catch return false;
+pub fn isValid(file: std.fs.File) bool {
+    const header = file.reader().readStruct(elf.Elf64_Ehdr) catch return false;
+    defer file.seekTo(0) catch {};
 
     if (!mem.eql(u8, header.e_ident[0..4], "\x7fELF")) {
         log.debug("Invalid ELF magic {s}, expected \x7fELF", .{header.e_ident[0..4]});

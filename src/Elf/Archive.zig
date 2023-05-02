@@ -196,8 +196,10 @@ pub fn parseObject(self: Archive, offset: u32, object_id: u32, elf_file: *Elf) !
         const path = try std.os.realpath(self.name, &buffer);
         break :blk try std.fmt.allocPrint(gpa, "{s}({s})", .{ path, object_name });
     };
+    errdefer gpa.free(full_name);
     const object_size = try hdr.size();
     const data = try gpa.alloc(u8, object_size);
+    errdefer gpa.free(data);
     const amt = try reader.readAll(data);
     if (amt != object_size) {
         return error.Io;
