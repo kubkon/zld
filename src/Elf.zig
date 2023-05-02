@@ -41,7 +41,7 @@ load_r_seg_index: ?u16 = null,
 load_re_seg_index: ?u16 = null,
 load_rw_seg_index: ?u16 = null,
 tls_seg_index: ?u16 = null,
-gnu_stack_phdr_index: ?u16 = null,
+gnu_stack_seg_index: ?u16 = null,
 
 text_sect_index: ?u16 = null,
 got_sect_index: ?u16 = null,
@@ -253,26 +253,19 @@ pub fn flush(self: *Elf) !void {
 
     self.checkUndefined();
 
+    if (self.options.execstack_if_needed) {
+        for (self.objects.items) |object| if (object.needs_exec_stack) {
+            self.options.execstack = true;
+            break;
+        };
+    }
+
     // Set the entrypoint if found
     self.entry_index = blk: {
         if (self.options.output_mode != .exe) break :blk null;
         const entry_name = self.options.entry orelse "_start";
         break :blk self.globals_table.get(entry_name) orelse null;
     };
-
-    // TODO this is just a temp until proper functionality is actually added
-    for (self.atoms.items[1..]) |*atom| {
-        const shdr = atom.getInputShdr(self);
-        const name = atom.getName(self);
-        const mark_dead = blk: {
-            if (shdr.sh_type == 0x70000001) break :blk true; // TODO SHT_X86_64_UNWIND
-            if (mem.startsWith(u8, name, ".note")) break :blk true;
-            if (mem.startsWith(u8, name, ".comment")) break :blk true;
-            if (mem.startsWith(u8, name, ".llvm_addrsig")) break :blk true;
-            break :blk false;
-        };
-        if (mark_dead) atom.is_alive = false;
-    }
 
     if (self.options.gc_sections) {
         try gc.gcAtoms(self);
@@ -517,6 +510,15 @@ fn initSegments(self: *Elf) !void {
             break :blk phdr_index;
         };
     }
+
+    // Add PT_GNU_STACK segment that controls some stack attributes that apparently may or may not
+    // be respected by the OS.
+    self.gnu_stack_seg_index = try self.addSegment(.{
+        .type = elf.PT_GNU_STACK,
+        .flags = if (self.options.execstack) elf.PF_W | elf.PF_R | elf.PF_X else elf.PF_W | elf.PF_R,
+        .@"align" = 1,
+        .memsz = self.options.stack_size orelse 0,
+    });
 }
 
 fn allocateSegments(self: *Elf) void {
@@ -1103,6 +1105,7 @@ fn addSegment(self: *Elf, opts: struct {
     type: u32 = 0,
     flags: u32 = 0,
     @"align": u64 = 0,
+    memsz: u64 = 0,
 }) !u16 {
     const index = @intCast(u16, self.phdrs.items.len);
     try self.phdrs.append(self.base.allocator, .{
@@ -1112,7 +1115,7 @@ fn addSegment(self: *Elf, opts: struct {
         .p_vaddr = 0,
         .p_paddr = 0,
         .p_filesz = 0,
-        .p_memsz = 0,
+        .p_memsz = opts.memsz,
         .p_align = opts.@"align",
     });
     return index;

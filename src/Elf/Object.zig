@@ -13,6 +13,8 @@ globals: std.ArrayListUnmanaged(u32) = .{},
 
 atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
 
+needs_exec_stack: bool = false,
+
 pub fn isValid(self: Object) bool {
     var stream = std.io.fixedBufferStream(self.data);
     const header = stream.reader().readStruct(elf.Elf64_Ehdr) catch return false;
@@ -96,9 +98,22 @@ fn initAtoms(self: *Object, elf_file: *Elf) !void {
             elf.SHT_STRTAB,
             => {},
             else => {
+                const name = self.getShString(shdr.sh_name);
+
+                if (mem.eql(u8, ".note.GNU-stack", name)) {
+                    if (shdr.sh_flags & elf.SHF_EXECINSTR != 0) {
+                        if (!elf_file.options.execstack or !elf_file.options.execstack_if_needed) {
+                            log.warn("{s}: may cause segmentation fault as this file requested executable stack", .{self.name});
+                        }
+                        self.needs_exec_stack = true;
+                    }
+                    continue;
+                }
+                // TODO this is just a temp until proper functionality is actually added
+                if (self.ignoreShdr(@intCast(u32, i))) continue;
+
                 const atom_index = try elf_file.addAtom();
                 const atom = elf_file.getAtom(atom_index).?;
-                const name = self.getShString(shdr.sh_name);
                 atom.atom_index = atom_index;
                 atom.name = try elf_file.string_intern.insert(elf_file.base.allocator, name);
                 atom.object_id = self.object_id;
@@ -113,11 +128,26 @@ fn initAtoms(self: *Object, elf_file: *Elf) !void {
     // Parse relocs sections if any.
     for (shdrs, 0..) |shdr, i| switch (shdr.sh_type) {
         elf.SHT_REL, elf.SHT_RELA => {
+            // TODO this is just a temp until proper functionality is actually added
+            if (self.ignoreShdr(shdr.sh_info)) continue;
             const atom_index = self.atoms.items[shdr.sh_info];
             elf_file.getAtom(atom_index).?.relocs_shndx = @intCast(u16, i);
         },
         else => {},
     };
+}
+
+fn ignoreShdr(self: Object, index: u32) bool {
+    const shdr = self.getShdrs()[index];
+    const name = self.getShString(shdr.sh_name);
+    const ignore = blk: {
+        if (shdr.sh_type == 0x70000001) break :blk true; // TODO SHT_X86_64_UNWIND
+        if (mem.startsWith(u8, name, ".note")) break :blk true;
+        if (mem.startsWith(u8, name, ".comment")) break :blk true;
+        if (mem.startsWith(u8, name, ".llvm_addrsig")) break :blk true;
+        break :blk false;
+    };
+    return ignore;
 }
 
 fn initSymtab(self: *Object, elf_file: *Elf) !void {
