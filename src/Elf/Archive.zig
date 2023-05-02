@@ -8,6 +8,7 @@ const log = std.log.scoped(.elf);
 const mem = std.mem;
 
 const Allocator = mem.Allocator;
+const Elf = @import("../Elf.zig");
 const Object = @import("Object.zig");
 
 file: fs.File,
@@ -171,7 +172,9 @@ fn getExtName(self: Archive, off: u32) []const u8 {
     return mem.sliceTo(@ptrCast([*:'\n']const u8, self.extnames_strtab.items.ptr + off), 0);
 }
 
-pub fn parseObject(self: Archive, allocator: Allocator, offset: u32) !Object {
+pub fn parseObject(self: Archive, offset: u32, object_id: u32, elf_file: *Elf) !*Object {
+    const gpa = elf_file.base.allocator;
+
     const reader = self.file.reader();
     try reader.context.seekTo(offset);
 
@@ -191,21 +194,33 @@ pub fn parseObject(self: Archive, allocator: Allocator, offset: u32) !Object {
     const full_name = blk: {
         var buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
         const path = try std.os.realpath(self.name, &buffer);
-        break :blk try std.fmt.allocPrint(allocator, "{s}({s})", .{ path, object_name });
+        break :blk try std.fmt.allocPrint(gpa, "{s}({s})", .{ path, object_name });
     };
+    errdefer gpa.free(full_name);
     const object_size = try hdr.size();
-    const data = try allocator.allocWithOptions(u8, object_size, @alignOf(u64), null);
+    const data = try gpa.alloc(u8, object_size);
+    errdefer gpa.free(data);
     const amt = try reader.readAll(data);
     if (amt != object_size) {
         return error.Io;
     }
 
-    var object = Object{
+    const object = try elf_file.objects.addOne(gpa);
+    object.* = .{
         .name = full_name,
         .data = data,
+        .object_id = object_id,
     };
+    try object.parse(elf_file);
 
-    try object.parse(allocator);
+    const cpu_arch = elf_file.cpu_arch.?;
+    if (cpu_arch != object.header.?.e_machine.toTargetCpuArch().?) {
+        log.err("Invalid architecture {any}, expected {any}", .{
+            object.header.?.e_machine,
+            cpu_arch.toElfMachine(),
+        });
+        return error.InvalidCpuArch;
+    }
 
     return object;
 }

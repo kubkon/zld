@@ -14,8 +14,11 @@ const usage =
     \\Usage: {s} [files...]
     \\
     \\General Options:
+    \\--allow-multiple-definition   Allow multiple definitions
     \\--entry=[name], -e [name]     Set name of the entry point symbol
-    \\--gc-sections                 Force removal of functions and data that are unreachable by the entry point or exported symbols
+    \\--gc-sections                 Remove unused sections
+    \\--no-gc-sections              Don't remove unused sections (default)
+    \\--print-gc-sections           List removed unused sections to stderr
     \\-l[name]                      Specify library to link against
     \\-L[path]                      Specify library search dir
     \\--rpath=[path], -R [path]     Specify runtime path
@@ -23,6 +26,9 @@ const usage =
     \\-o [path]                     Specify output path for the final artifact
     \\-z [arg]                      Set linker extension flags
     \\  stack-size=[value]          Override default stack size
+    \\  execstack                   Require executable stack
+    \\  noexecstack                 Force stack non-executable
+    \\  execstack-if-needed         Make the stack executable if the input file explicitly requests it
     \\-h, --help                    Print this help and exit
     \\--debug-log [scope]           Turn on debugging logs for [scope] (requires zld compiled with -Dlog)
     \\
@@ -35,10 +41,19 @@ positionals: []const Zld.LinkObject,
 libs: std.StringArrayHashMap(Zld.SystemLib),
 lib_dirs: []const []const u8,
 rpath_list: []const []const u8,
-stack_size: ?u64 = null,
 strip: bool = false,
 entry: ?[]const u8 = null,
 gc_sections: bool = false,
+print_gc_sections: bool = false,
+allow_multiple_definition: bool = false,
+/// -z flags
+/// Overrides default stack size.
+stack_size: ?u64 = null,
+/// Marks the writeable segments as executable.
+execstack: bool = false,
+/// Marks the writeable segments as executable only if requested by an input object file
+/// via sh_flags of the input .note.GNU-stack section.
+execstack_if_needed: bool = false,
 
 pub fn parseArgs(arena: Allocator, ctx: Zld.MainCtx) !Options {
     if (ctx.args.len == 0) {
@@ -50,10 +65,14 @@ pub fn parseArgs(arena: Allocator, ctx: Zld.MainCtx) !Options {
     var lib_dirs = std.ArrayList([]const u8).init(arena);
     var rpath_list = std.ArrayList([]const u8).init(arena);
     var out_path: ?[]const u8 = null;
-    var stack_size: ?u64 = null;
     var shared: bool = false;
     var gc_sections: bool = false;
+    var print_gc_sections: bool = false;
     var entry: ?[]const u8 = null;
+    var allow_multiple_definition: bool = false;
+    var stack_size: ?u64 = null;
+    var execstack: bool = false;
+    var execstack_if_needed: bool = false;
 
     const Iterator = struct {
         args: []const []const u8,
@@ -85,7 +104,13 @@ pub fn parseArgs(arena: Allocator, ctx: Zld.MainCtx) !Options {
             const z_arg = args_iter.next() orelse
                 ctx.printFailure("Expected another argument after {s}", .{arg});
             if (mem.startsWith(u8, z_arg, "stack-size=")) {
-                stack_size = try std.fmt.parseInt(u64, z_arg["stack-size=".len..], 10);
+                stack_size = try std.fmt.parseInt(u64, z_arg["stack-size=".len..], 0);
+            } else if (mem.eql(u8, z_arg, "execstack")) {
+                execstack = true;
+            } else if (mem.eql(u8, z_arg, "noexecstack")) {
+                execstack = false;
+            } else if (mem.eql(u8, z_arg, "execstack-if-needed")) {
+                execstack_if_needed = true;
             } else {
                 std.log.warn("TODO unhandled argument '-z {s}'", .{z_arg});
             }
@@ -93,6 +118,10 @@ pub fn parseArgs(arena: Allocator, ctx: Zld.MainCtx) !Options {
             std.log.warn("TODO unhandled argument '-z {s}'", .{arg["-z".len..]});
         } else if (mem.eql(u8, arg, "--gc-sections")) {
             gc_sections = true;
+        } else if (mem.eql(u8, arg, "--no-gc-sections")) {
+            gc_sections = false;
+        } else if (mem.eql(u8, arg, "--print-gc-sections")) {
+            print_gc_sections = true;
         } else if (mem.eql(u8, arg, "--as-needed")) {
             std.log.warn("TODO unhandled argument '--as-needed'", .{});
         } else if (mem.eql(u8, arg, "--allow-shlib-undefined")) {
@@ -111,6 +140,8 @@ pub fn parseArgs(arena: Allocator, ctx: Zld.MainCtx) !Options {
             entry = arg["--entry=".len..];
         } else if (mem.eql(u8, arg, "-e")) {
             entry = args_iter.next() orelse ctx.printFailure("Expected name after {s}", .{arg});
+        } else if (mem.eql(u8, arg, "--allow-multiple-definition")) {
+            allow_multiple_definition = true;
         } else {
             try positionals.append(.{
                 .path = arg,
@@ -134,7 +165,11 @@ pub fn parseArgs(arena: Allocator, ctx: Zld.MainCtx) !Options {
         .lib_dirs = lib_dirs.items,
         .rpath_list = rpath_list.items,
         .stack_size = stack_size,
-        .gc_sections = gc_sections,
+        .print_gc_sections = print_gc_sections,
         .entry = entry,
+        .allow_multiple_definition = allow_multiple_definition,
+        .gc_sections = gc_sections,
+        .execstack = execstack,
+        .execstack_if_needed = execstack_if_needed,
     };
 }

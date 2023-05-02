@@ -100,13 +100,13 @@ pub fn StringTable(comptime log_scope: @Type(.EnumLiteral)) type {
             });
         }
 
-        pub fn get(self: Self, off: u32) ?[]const u8 {
+        pub fn get(self: Self, off: u32) ?[:0]const u8 {
             log.debug("getting string at 0x{x}", .{off});
             if (off >= self.buffer.items.len) return null;
             return mem.sliceTo(@ptrCast([*:0]const u8, self.buffer.items.ptr + off), 0);
         }
 
-        pub fn getAssumeExists(self: Self, off: u32) []const u8 {
+        pub fn getAssumeExists(self: Self, off: u32) [:0]const u8 {
             return self.get(off) orelse unreachable;
         }
     };

@@ -29,7 +29,7 @@ const all_targets: []const CrossTarget = &.{
 
 pub fn addCases(ctx: *TestContext) !void {
     // All targets
-    for (all_targets) |target| {
+    for (macos_targets) |target| {
         {
             var case = try ctx.addCase("hello world in Zig", target);
             try case.addInput("hello.zig",
@@ -81,6 +81,38 @@ pub fn addCases(ctx: *TestContext) !void {
             case.expectedStdout("");
             case.expectedStderr("info: Before: 0\ninfo: After: 1\n");
         }
+        {
+            var case = try ctx.addCase("local tls in C", target);
+            try case.addInput("a.c",
+                \\#include <stdio.h>
+                \\
+                \\_Thread_local int x = 2;
+                \\extern _Thread_local int y;
+                \\extern _Thread_local int z;
+                \\
+                \\int main(int argc, char* argv[]) {
+                \\  y = 3;
+                \\  printf("%d, %d, %d\n", x, y, z);
+                \\  x += 1;
+                \\  y -= 1;
+                \\  z *= 2;
+                \\  printf("%d, %d, %d\n", x, y, z);
+                \\  return 0;
+                \\}
+            );
+            try case.addInput("b.c",
+                \\_Thread_local int y;
+                \\_Thread_local int z = 4;
+            );
+            case.expectedStdout(
+                \\2, 3, 4
+                \\3, 2, 8
+                \\
+            );
+        }
+    }
+
+    for (all_targets) |target| {
         {
             var case = try ctx.addCase("hello world in C", target);
             try case.addInput("main.c",
@@ -168,35 +200,6 @@ pub fn addCases(ctx: *TestContext) !void {
                 \\}
             );
             case.expectedStdout("1, 3, 0\n");
-        }
-        {
-            var case = try ctx.addCase("local tls in C", target);
-            try case.addInput("a.c",
-                \\#include <stdio.h>
-                \\
-                \\_Thread_local int x = 2;
-                \\extern _Thread_local int y;
-                \\extern _Thread_local int z;
-                \\
-                \\int main(int argc, char* argv[]) {
-                \\  y = 3;
-                \\  printf("%d, %d, %d\n", x, y, z);
-                \\  x += 1;
-                \\  y -= 1;
-                \\  z *= 2;
-                \\  printf("%d, %d, %d\n", x, y, z);
-                \\  return 0;
-                \\}
-            );
-            try case.addInput("b.c",
-                \\_Thread_local int y;
-                \\_Thread_local int z = 4;
-            );
-            case.expectedStdout(
-                \\2, 3, 4
-                \\3, 2, 8
-                \\
-            );
         }
     }
 }

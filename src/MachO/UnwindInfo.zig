@@ -653,7 +653,7 @@ pub fn write(info: *UnwindInfo, macho_file: *MachO) !void {
 
     const padding = buffer.items.len - cwriter.bytes_written;
     if (padding > 0) {
-        mem.set(u8, buffer.items[cwriter.bytes_written..], 0);
+        @memset(buffer.items[cwriter.bytes_written..], 0);
     }
 
     try macho_file.base.file.pwriteAll(buffer.items, sect.offset);
