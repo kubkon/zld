@@ -1854,6 +1854,7 @@ pub fn deinit(self: *MachO) void {
     }
     self.objects.deinit(gpa);
     for (self.archives.items) |*archive| {
+        archive.file.close();
         archive.deinit(gpa);
     }
     self.archives.deinit(gpa);
@@ -1867,12 +1868,6 @@ pub fn deinit(self: *MachO) void {
     self.segments.deinit(gpa);
     self.sections.deinit(gpa);
     self.atoms.deinit(gpa);
-}
-
-pub fn closeFiles(self: *const MachO) void {
-    for (self.archives.items) |archive| {
-        archive.file.close();
-    }
 }
 
 fn createSegments(self: *MachO) !void {

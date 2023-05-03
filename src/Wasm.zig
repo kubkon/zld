@@ -310,10 +310,6 @@ fn hasPassiveInitializationSegments(wasm: *const Wasm) bool {
     return false;
 }
 
-pub fn closeFiles(wasm: *const Wasm) void {
-    _ = wasm;
-}
-
 fn parsePositionals(wasm: *Wasm, files: []const []const u8) !void {
     for (files) |path| {
         if (try wasm.parseObjectFile(wasm.base.allocator, path)) continue;

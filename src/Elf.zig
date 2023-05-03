@@ -146,17 +146,12 @@ pub fn deinit(self: *Elf) void {
     }
     self.objects.deinit(gpa);
     for (self.archives.items) |*archive| {
+        archive.file.close();
         archive.deinit(gpa);
     }
     self.archives.deinit(gpa);
     if (self.internal_object) |*object| {
         object.deinit(gpa);
-    }
-}
-
-pub fn closeFiles(self: *const Elf) void {
-    for (self.archives.items) |archive| {
-        archive.file.close();
     }
 }
 
