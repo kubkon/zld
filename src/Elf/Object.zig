@@ -230,7 +230,11 @@ pub fn checkDuplicates(self: Object, elf_file: *Elf) void {
         if (self.object_id == global_file.object_id or
             this_sym.st_shndx == elf.SHN_UNDEF or
             this_sym.st_bind() == elf.STB_WEAK) continue;
-        log.err("multiple definition: {s}: {s}: {s}", .{ self.name, global_file.name, global.getName(elf_file) });
+        elf_file.base.fatal("multiple definition: {s}: {s}: {s}", .{
+            self.name,
+            global_file.name,
+            global.getName(elf_file),
+        });
     }
 }
 
@@ -238,7 +242,7 @@ pub fn checkUndefined(self: Object, elf_file: *Elf) void {
     for (self.globals.items) |index| {
         const global = elf_file.getGlobal(index);
         if (global.isUndef(elf_file)) {
-            log.err("undefined reference: {s}: {s}", .{ self.name, global.getName(elf_file) });
+            elf_file.base.fatal("undefined reference: {s}: {s}", .{ self.name, global.getName(elf_file) });
         }
     }
 }

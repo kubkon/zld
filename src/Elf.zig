@@ -1,30 +1,3 @@
-const Elf = @This();
-
-const std = @import("std");
-const build_options = @import("build_options");
-const builtin = @import("builtin");
-const assert = std.debug.assert;
-const elf = std.elf;
-const fs = std.fs;
-const gc = @import("Elf/gc.zig");
-const log = std.log.scoped(.elf);
-const math = std.math;
-const mem = std.mem;
-
-const Allocator = mem.Allocator;
-const Archive = @import("Elf/Archive.zig");
-const Atom = @import("Elf/Atom.zig");
-const InternalObject = @import("Elf/InternalObject.zig");
-const Object = @import("Elf/Object.zig");
-pub const Options = @import("Elf/Options.zig");
-const StringTable = @import("strtab.zig").StringTable;
-const Symbol = @import("Elf/Symbol.zig");
-const SyntheticSection = @import("synthetic_section.zig").SyntheticSection;
-const ThreadPool = @import("ThreadPool.zig");
-const Zld = @import("Zld.zig");
-
-pub const base_tag = Zld.Tag.elf;
-
 base: Zld,
 options: Options,
 cpu_arch: ?std.Target.Cpu.Arch = null,
@@ -77,6 +50,7 @@ got_section: SyntheticSection(u32, *Elf, .{
 
 atoms: std.ArrayListUnmanaged(Atom) = .{},
 
+pub const base_tag = Zld.Tag.elf;
 const wip_dump_state = false;
 
 const Section = struct {
@@ -190,7 +164,10 @@ pub fn flush(self: *Elf) !void {
     for (self.options.lib_dirs) |dir| {
         // Verify that search path actually exists
         var tmp = fs.cwd().openDir(dir, .{}) catch |err| switch (err) {
-            error.FileNotFound => continue,
+            error.FileNotFound => {
+                self.base.warn("Library search directory not found for '-L{s}'", .{dir});
+                continue;
+            },
             else => |e| return e,
         };
         defer tmp.close();
@@ -201,20 +178,20 @@ pub fn flush(self: *Elf) !void {
     var libs = std.StringArrayHashMap(Zld.SystemLib).init(arena);
     var lib_not_found = false;
     for (self.options.libs.keys()) |lib_name| {
-        for (&[_][]const u8{ ".dylib", ".a" }) |ext| {
+        for (&[_][]const u8{ ".so", ".a" }) |ext| {
             if (try resolveLib(arena, lib_dirs.items, lib_name, ext)) |full_path| {
                 try libs.put(full_path, self.options.libs.get(lib_name).?);
                 break;
             }
         } else {
-            log.warn("library not found for '-l{s}'", .{lib_name});
+            self.base.warn("Library not found for '-l{s}'", .{lib_name});
             lib_not_found = true;
         }
     }
-    if (lib_not_found) {
-        log.warn("Library search paths:", .{});
+    if (lib_not_found and lib_dirs.items.len > 0) {
+        self.base.warn("Library search paths:", .{});
         for (lib_dirs.items) |dir| {
-            log.warn("  {s}", .{dir});
+            self.base.warn("  {s}", .{dir});
         }
     }
 
@@ -246,7 +223,19 @@ pub fn flush(self: *Elf) !void {
 
     try self.resolveSyntheticSymbols();
 
+    // Set the entrypoint if found
+    self.entry_index = blk: {
+        if (self.options.output_mode != .exe) break :blk null;
+        const entry_name = self.options.entry orelse "_start";
+        break :blk self.globals_table.get(entry_name) orelse null;
+    };
+    if (self.options.output_mode == .exe and self.entry_index == null) {
+        self.base.fatal("no entrypoint found: '{s}'", .{self.options.entry orelse "_start"});
+    }
+
     self.checkUndefined();
+
+    self.base.reportWarningsAndErrorsAndExit();
 
     if (self.options.execstack_if_needed) {
         for (self.objects.items) |object| if (object.needs_exec_stack) {
@@ -254,13 +243,6 @@ pub fn flush(self: *Elf) !void {
             break;
         };
     }
-
-    // Set the entrypoint if found
-    self.entry_index = blk: {
-        if (self.options.output_mode != .exe) break :blk null;
-        const entry_name = self.options.entry orelse "_start";
-        break :blk self.globals_table.get(entry_name) orelse null;
-    };
 
     if (self.options.gc_sections) {
         try gc.gcAtoms(self);
@@ -718,7 +700,7 @@ fn parsePositionals(self: *Elf, files: []const []const u8) !void {
         if (try self.parseObject(full_path)) continue;
         if (try self.parseArchive(full_path)) continue;
 
-        log.warn("unknown filetype for positional input file: '{s}'", .{file_name});
+        self.base.warn("unknown filetype for positional input file: '{s}'", .{file_name});
     }
 }
 
@@ -727,7 +709,7 @@ fn parseLibs(self: *Elf, libs: []const []const u8) !void {
         log.debug("parsing lib path '{s}'", .{lib});
         if (try self.parseArchive(lib)) continue;
 
-        log.warn("unknown filetype for a library: '{s}'", .{lib});
+        self.base.warn("unknown filetype for a library: '{s}'", .{lib});
     }
 }
 
@@ -1252,3 +1234,27 @@ fn fmtDumpState(
     try writer.writeAll("Output segments\n");
     try writer.print("{}\n", .{self.fmtSegments()});
 }
+
+const std = @import("std");
+const build_options = @import("build_options");
+const builtin = @import("builtin");
+const assert = std.debug.assert;
+const elf = std.elf;
+const fs = std.fs;
+const gc = @import("Elf/gc.zig");
+const log = std.log.scoped(.elf);
+const math = std.math;
+const mem = std.mem;
+
+const Allocator = mem.Allocator;
+const Archive = @import("Elf/Archive.zig");
+const Atom = @import("Elf/Atom.zig");
+const Elf = @This();
+const InternalObject = @import("Elf/InternalObject.zig");
+const Object = @import("Elf/Object.zig");
+pub const Options = @import("Elf/Options.zig");
+const StringTable = @import("strtab.zig").StringTable;
+const Symbol = @import("Elf/Symbol.zig");
+const SyntheticSection = @import("synthetic_section.zig").SyntheticSection;
+const ThreadPool = @import("ThreadPool.zig");
+const Zld = @import("Zld.zig");
