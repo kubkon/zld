@@ -9,7 +9,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos, ubuntu, windows]
+        # https://github.com/kubkon/zld/issues/44
+        # os: [macos, ubuntu, windows]
+        os: [macos, ubuntu]
 
     steps:
     - if: matrix.os == 'windows'
