@@ -112,6 +112,7 @@ pub fn openPath(allocator: Allocator, tag: Tag, options: Options, thread_pool: *
 }
 
 pub fn deinit(base: *Zld) void {
+    base.file.close();
     switch (base.tag) {
         .elf => {
             const parent = @fieldParentPtr(Elf, "base", base);
@@ -143,15 +144,4 @@ pub fn flush(base: *Zld) !void {
         .coff => try @fieldParentPtr(Coff, "base", base).flush(),
         .wasm => try @fieldParentPtr(Wasm, "base", base).flush(),
     }
-    base.closeFiles();
-}
-
-fn closeFiles(base: *const Zld) void {
-    switch (base.tag) {
-        .elf => @fieldParentPtr(Elf, "base", base).closeFiles(),
-        .macho => @fieldParentPtr(MachO, "base", base).closeFiles(),
-        .coff => @fieldParentPtr(Coff, "base", base).closeFiles(),
-        .wasm => @fieldParentPtr(Wasm, "base", base).closeFiles(),
-    }
-    base.file.close();
 }

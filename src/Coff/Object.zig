@@ -103,6 +103,7 @@ pub const IMAGE_SYM_CLASS_CLR_TOKEN = 107;
 // }
 
 pub fn deinit(self: *Object, allocator: Allocator) void {
+    self.file.close();
     self.symtab.deinit(allocator);
     self.shdrtab.deinit(allocator);
     allocator.free(self.strtab);

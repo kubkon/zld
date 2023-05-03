@@ -61,12 +61,6 @@ pub fn deinit(self: *Coff) void {
     self.objects.deinit(self.base.allocator);
 }
 
-pub fn closeFiles(self: *const Coff) void {
-    for (self.objects.items) |object| {
-        object.file.close();
-    }
-}
-
 pub fn flush(self: *Coff) !void {
     const gpa = self.base.allocator;
 

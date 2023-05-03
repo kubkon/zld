@@ -212,9 +212,14 @@ pub const TestContext = struct {
                 }
             }
 
+            // Our target-specific lib directory.
+            const lib_dir = try std.fs.path.join(arena, &[_][]const u8{
+                "test", "assets", target_triple,
+            });
+
             // compiler_rt
             const compiler_rt_path = try std.fs.path.join(arena, &[_][]const u8{
-                "test", "assets", target_triple, "libcompiler_rt.a",
+                lib_dir, "libcompiler_rt.a",
             });
             try objects.append(.{ .path = compiler_rt_path, .must_link = false });
 
@@ -222,23 +227,23 @@ pub const TestContext = struct {
                 if (requires_crts) {
                     // crt1
                     const crt1_path = try std.fs.path.join(arena, &[_][]const u8{
-                        "test", "assets", target_triple, "crt1.o",
+                        lib_dir, "crt1.o",
                     });
                     try objects.append(.{ .path = crt1_path, .must_link = true });
                     // crti
                     const crti_path = try std.fs.path.join(arena, &[_][]const u8{
-                        "test", "assets", target_triple, "crti.o",
+                        lib_dir, "crti.o",
                     });
                     try objects.append(.{ .path = crti_path, .must_link = true });
                     // crtn
                     const crtn_path = try std.fs.path.join(arena, &[_][]const u8{
-                        "test", "assets", target_triple, "crtn.o",
+                        lib_dir, "crtn.o",
                     });
                     try objects.append(.{ .path = crtn_path, .must_link = true });
                 }
                 // libc
                 const libc_path = try std.fs.path.join(arena, &[_][]const u8{
-                    "test", "assets", target_triple, "libc.a",
+                    lib_dir, "libc.a",
                 });
                 try objects.append(.{ .path = libc_path, .must_link = false });
             }
@@ -253,33 +258,24 @@ pub const TestContext = struct {
             var framework_dirs = std.ArrayList([]const u8).init(arena);
             var force_undefined_symbols = std.StringArrayHashMap(void).init(arena);
 
+            try lib_dirs.append(lib_dir);
+
             const host = try std.zig.system.NativeTargetInfo.detect(.{});
             const target_info = try std.zig.system.NativeTargetInfo.detect(case.target);
             var syslibroot: ?[]const u8 = null;
 
             if (case.target.isDarwin()) {
                 try libs.put("System", .{});
-                try lib_dirs.append("/usr/lib");
-                try framework_dirs.append("/System/Library/Frameworks");
-
-                if (std.zig.system.darwin.isDarwinSDKInstalled(arena)) {
-                    if (std.zig.system.darwin.getDarwinSDK(arena, host.target)) |sdk| {
-                        syslibroot = sdk.path;
-                    }
-                }
+                try lib_dirs.append("test/assets/any-macos-none");
             }
 
             const tag: Zld.Tag = switch (case.target.os_tag.?) {
-                .macos,
-                .ios,
-                .watchos,
-                .tvos,
-                => .macho,
+                .macos, .ios, .watchos, .tvos => .macho,
                 .linux => .elf,
                 .windows => .coff,
                 else => unreachable,
             };
-            var opts: Zld.Options = switch (tag) {
+            const opts: Zld.Options = switch (tag) {
                 .macho => .{ .macho = .{
                     .emit = .{
                         .directory = std.fs.cwd(),
@@ -330,18 +326,19 @@ pub const TestContext = struct {
             try thread_pool.init(gpa);
             defer thread_pool.deinit();
 
-            const zld = try Zld.openPath(gpa, tag, opts, &thread_pool);
-            defer zld.deinit();
+            {
+                const zld = try Zld.openPath(gpa, tag, opts, &thread_pool);
+                defer zld.deinit();
+                try zld.flush();
+            }
 
             var argv = std.ArrayList([]const u8).init(arena);
             outer: {
                 switch (host.getExternalExecutor(target_info, .{})) {
                     .native => {
-                        try zld.flush();
                         try argv.append("./a.out");
                     },
                     .qemu => |qemu_bin_name| if (build_options.enable_qemu) {
-                        try zld.flush();
                         try argv.append(qemu_bin_name);
                         try argv.append("./a.out");
                     } else {
