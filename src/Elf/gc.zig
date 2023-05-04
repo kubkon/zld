@@ -1,7 +1,8 @@
 const std = @import("std");
+const build_options = @import("build_options");
 const assert = std.debug.assert;
 const elf = std.elf;
-const log = std.log.scoped(.elf);
+const gc_track_live_log = std.log.scoped(.gc_track_live);
 const mem = std.mem;
 
 const Allocator = mem.Allocator;
@@ -75,18 +76,19 @@ fn markAtom(atom: *Atom) bool {
 }
 
 fn markLive(atom: *Atom, elf_file: *Elf) void {
-    if (wip_dump_live_atoms) {
-        dump_live_atoms.incr();
+    if (build_options.enable_logging) {
+        track_live_level.incr();
     }
+
     assert(atom.is_visited);
     const object = atom.getObject(elf_file);
     for (atom.getRelocs(elf_file)) |rel| {
         const target_sym = object.getSymbol(rel.r_sym(), elf_file);
         const target_atom = target_sym.getAtom(elf_file) orelse continue;
         target_atom.is_alive = true;
-        if (wip_dump_live_atoms) {
-            std.debug.print("{}marking live atom({d})\n", .{ dump_live_atoms, target_atom.atom_index });
-        }
+
+        gc_track_live_log.debug("{}marking live atom({d})\n", .{ track_live_level, target_atom.atom_index });
+
         if (markAtom(target_atom)) {
             markLive(target_atom, elf_file);
         }
@@ -95,9 +97,7 @@ fn markLive(atom: *Atom, elf_file: *Elf) void {
 
 fn mark(roots: std.ArrayList(*Atom), elf_file: *Elf) void {
     for (roots.items) |root| {
-        if (wip_dump_live_atoms) {
-            std.debug.print("root atom({d})\n", .{root.atom_index});
-        }
+        gc_track_live_log.debug("root atom({d})\n", .{root.atom_index});
         markLive(root, elf_file);
     }
 }
@@ -122,8 +122,6 @@ pub fn dumpPrunedAtoms(elf_file: *Elf) !void {
     }
 }
 
-const wip_dump_live_atoms = false;
-
 const Level = struct {
     value: usize = 0,
 
@@ -143,4 +141,4 @@ const Level = struct {
     }
 };
 
-var dump_live_atoms: Level = .{};
+var track_live_level: Level = .{};

@@ -29,42 +29,28 @@ positionals: []const Zld.LinkObject,
 libs: std.StringArrayHashMap(Zld.SystemLib),
 lib_dirs: []const []const u8,
 
-pub fn parseArgs(arena: Allocator, ctx: Zld.MainCtx) !Options {
-    if (ctx.args.len == 0) {
-        ctx.printSuccess(usage, .{ctx.cmd});
-    }
+const cmd = "link.zld";
+
+pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options {
+    if (args.len == 0) ctx.fatal(usage, .{cmd});
 
     var positionals = std.ArrayList(Zld.LinkObject).init(arena);
     var libs = std.StringArrayHashMap(Zld.SystemLib).init(arena);
     var lib_dirs = std.ArrayList([]const u8).init(arena);
     var out_path: ?[]const u8 = null;
 
-    const Iterator = struct {
-        args: []const []const u8,
-        i: usize = 0,
-        fn next(it: *@This()) ?[]const u8 {
-            if (it.i >= it.args.len) {
-                return null;
-            }
-            defer it.i += 1;
-            return it.args[it.i];
-        }
-    };
-    var args_iter = Iterator{ .args = ctx.args };
-
-    while (args_iter.next()) |arg| {
+    var it = Zld.Options.ArgsIterator{ .args = args };
+    while (it.next()) |arg| {
         if (mem.eql(u8, arg, "--help") or mem.eql(u8, arg, "-h")) {
-            ctx.printSuccess(usage, .{ctx.cmd});
+            ctx.fatal(usage, .{cmd});
         } else if (mem.eql(u8, arg, "--debug-log")) {
-            const scope = args_iter.next() orelse ctx.printFailure("Expected log scope after {s}", .{arg});
-            try ctx.log_scopes.append(scope);
+            try ctx.log_scopes.append(it.nextOrFatal(ctx));
         } else if (mem.startsWith(u8, arg, "-l")) {
             try libs.put(arg[2..], .{});
         } else if (mem.startsWith(u8, arg, "-L")) {
             try lib_dirs.append(arg[2..]);
         } else if (mem.eql(u8, arg, "-o")) {
-            out_path = args_iter.next() orelse
-                ctx.printFailure("Expected output path after {s}", .{arg});
+            out_path = it.nextOrFatal(ctx);
         } else {
             try positionals.append(.{
                 .path = arg,
@@ -73,9 +59,7 @@ pub fn parseArgs(arena: Allocator, ctx: Zld.MainCtx) !Options {
         }
     }
 
-    if (positionals.items.len == 0) {
-        ctx.printFailure("Expected at least one input .o file", .{});
-    }
+    if (positionals.items.len == 0) ctx.fatal("Expected at least one input .o file", .{});
 
     return Options{
         .emit = .{

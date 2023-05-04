@@ -160,17 +160,17 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
             elf.R_X86_64_NONE => {},
             elf.R_X86_64_64 => {
                 const target_addr = @intCast(i64, target.value) + rel.r_addend;
-                log.debug("64: {x}: [() => 0x{x}] ({s})", .{ rel.r_offset, target_addr, target_name });
+                relocs_log.debug("R_X86_64_64: {x}: [() => 0x{x}] ({s})", .{ rel.r_offset, target_addr, target_name });
                 mem.writeIntLittle(i64, code[rel.r_offset..][0..8], target_addr);
             },
             elf.R_X86_64_PC32,
             elf.R_X86_64_PLT32,
             => {
                 const displacement = @intCast(i32, @intCast(i64, target.value) - source_addr + rel.r_addend);
-                log.debug("{s}: {x}: [0x{x} => 0x{x}] ({s})", .{
+                relocs_log.debug("{s}: {x}: [0x{x} => 0x{x}] ({s})", .{
                     switch (r_type) {
-                        elf.R_X86_64_PC32 => "PC32",
-                        elf.R_X86_64_PLT32 => "PLT32",
+                        elf.R_X86_64_PC32 => "R_X86_64_PC32",
+                        elf.R_X86_64_PLT32 => "R_X86_64_PLT32",
                         else => unreachable,
                     },
                     rel.r_offset,
@@ -186,10 +186,10 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
                 const global = object.getGlobalIndex(rel.r_sym()).?;
                 const target_addr = @intCast(i64, elf_file.got_section.getAddress(global, elf_file).?);
                 const displacement = @intCast(i32, target_addr - source_addr + rel.r_addend);
-                log.debug("{s}: {x}: [0x{x} => 0x{x}] ({s})", .{
+                relocs_log.debug("{s}: {x}: [0x{x} => 0x{x}] ({s})", .{
                     switch (r_type) {
-                        elf.R_X86_64_GOTPCREL => "GOTPCREL",
-                        elf.R_X86_64_REX_GOTPCRELX => "REX_GOTPCRELX",
+                        elf.R_X86_64_GOTPCREL => "R_X86_64_GOTPCREL",
+                        elf.R_X86_64_REX_GOTPCRELX => "R_X86_64_REX_GOTPCRELX",
                         else => unreachable,
                     },
                     rel.r_offset,
@@ -201,28 +201,34 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
             },
             elf.R_X86_64_32 => {
                 const target_addr = @intCast(i64, target.value) + rel.r_addend;
-                const scaled = math.cast(u32, target_addr) orelse {
-                    log.err("32: target value overflows 32bits", .{});
-                    log.err("  target value 0x{x}", .{target_addr});
-                    log.err("  target symbol {s}", .{target_name});
-                    return error.RelocationOverflow;
+                const scaled = math.cast(u32, target_addr) orelse blk: {
+                    elf_file.base.fatal("{s}: R_X86_64_32: {x}: target value overflows 32 bits: '{s}' at {x}", .{
+                        object.name,
+                        source_addr,
+                        target_name,
+                        target_addr,
+                    });
+                    break :blk 0;
                 };
-                log.debug("32: {x}: [() => 0x{x}] ({s})", .{ rel.r_offset, scaled, target_name });
+                relocs_log.debug("R_X86_64_32: {x}: [() => 0x{x}] ({s})", .{ rel.r_offset, scaled, target_name });
                 mem.writeIntLittle(u32, code[rel.r_offset..][0..4], scaled);
             },
             elf.R_X86_64_32S => {
                 const target_addr = @intCast(i64, target.value) + rel.r_addend;
-                const scaled = math.cast(i32, target_addr) orelse {
-                    log.err("32S: target value overflows 32bits", .{});
-                    log.err("  target value 0x{x}", .{target_addr});
-                    log.err("  target symbol {s}", .{target_name});
-                    return error.RelocationOverflow;
+                const scaled = math.cast(i32, target_addr) orelse blk: {
+                    elf_file.base.fatal("{s}: R_X86_64_32S: {x}: target value overflows 32 bits: '{s}' at {x}", .{
+                        object.name,
+                        source_addr,
+                        target_name,
+                        target_addr,
+                    });
+                    break :blk 0;
                 };
-                log.debug("32S: {x}: [() => 0x{x}] ({s})", .{ rel.r_offset, scaled, target_name });
+                relocs_log.debug("R_X86_64_32S: {x}: [() => 0x{x}] ({s})", .{ rel.r_offset, scaled, target_name });
                 mem.writeIntLittle(i32, code[rel.r_offset..][0..4], scaled);
             },
             else => {
-                log.debug("TODO {d}: {x}: [0x{x} => 0x{x}] ({s})", .{
+                relocs_log.debug("TODO {d}: {x}: [0x{x} => 0x{x}] ({s})", .{
                     r_type,
                     rel.r_offset,
                     source_addr,
@@ -286,6 +292,7 @@ const assert = std.debug.assert;
 const dis_x86_64 = @import("dis_x86_64");
 const elf = std.elf;
 const log = std.log.scoped(.elf);
+const relocs_log = std.log.scoped(.relocs);
 const math = std.math;
 const mem = std.mem;
 

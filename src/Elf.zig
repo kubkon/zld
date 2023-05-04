@@ -1,30 +1,3 @@
-const Elf = @This();
-
-const std = @import("std");
-const build_options = @import("build_options");
-const builtin = @import("builtin");
-const assert = std.debug.assert;
-const elf = std.elf;
-const fs = std.fs;
-const gc = @import("Elf/gc.zig");
-const log = std.log.scoped(.elf);
-const math = std.math;
-const mem = std.mem;
-
-const Allocator = mem.Allocator;
-const Archive = @import("Elf/Archive.zig");
-const Atom = @import("Elf/Atom.zig");
-const InternalObject = @import("Elf/InternalObject.zig");
-const Object = @import("Elf/Object.zig");
-pub const Options = @import("Elf/Options.zig");
-const StringTable = @import("strtab.zig").StringTable;
-const Symbol = @import("Elf/Symbol.zig");
-const SyntheticSection = @import("synthetic_section.zig").SyntheticSection;
-const ThreadPool = @import("ThreadPool.zig");
-const Zld = @import("Zld.zig");
-
-pub const base_tag = Zld.Tag.elf;
-
 base: Zld,
 options: Options,
 cpu_arch: ?std.Target.Cpu.Arch = null,
@@ -77,7 +50,7 @@ got_section: SyntheticSection(u32, *Elf, .{
 
 atoms: std.ArrayListUnmanaged(Atom) = .{},
 
-const wip_dump_state = false;
+pub const base_tag = Zld.Tag.elf;
 
 const Section = struct {
     shdr: elf.Elf64_Shdr,
@@ -190,7 +163,10 @@ pub fn flush(self: *Elf) !void {
     for (self.options.lib_dirs) |dir| {
         // Verify that search path actually exists
         var tmp = fs.cwd().openDir(dir, .{}) catch |err| switch (err) {
-            error.FileNotFound => continue,
+            error.FileNotFound => {
+                self.base.warn("Library search directory not found for '-L{s}'", .{dir});
+                continue;
+            },
             else => |e| return e,
         };
         defer tmp.close();
@@ -201,20 +177,20 @@ pub fn flush(self: *Elf) !void {
     var libs = std.StringArrayHashMap(Zld.SystemLib).init(arena);
     var lib_not_found = false;
     for (self.options.libs.keys()) |lib_name| {
-        for (&[_][]const u8{ ".dylib", ".a" }) |ext| {
+        for (&[_][]const u8{ ".so", ".a" }) |ext| {
             if (try resolveLib(arena, lib_dirs.items, lib_name, ext)) |full_path| {
                 try libs.put(full_path, self.options.libs.get(lib_name).?);
                 break;
             }
         } else {
-            log.warn("library not found for '-l{s}'", .{lib_name});
+            self.base.warn("Library not found for '-l{s}'", .{lib_name});
             lib_not_found = true;
         }
     }
-    if (lib_not_found) {
-        log.warn("Library search paths:", .{});
+    if (lib_not_found and lib_dirs.items.len > 0) {
+        self.base.warn("Library search paths:", .{});
         for (lib_dirs.items) |dir| {
-            log.warn("  {s}", .{dir});
+            self.base.warn("  {s}", .{dir});
         }
     }
 
@@ -242,18 +218,10 @@ pub fn flush(self: *Elf) !void {
 
     if (!self.options.allow_multiple_definition) {
         self.checkDuplicates();
+        self.base.reportWarningsAndErrorsAndExit();
     }
 
     try self.resolveSyntheticSymbols();
-
-    self.checkUndefined();
-
-    if (self.options.execstack_if_needed) {
-        for (self.objects.items) |object| if (object.needs_exec_stack) {
-            self.options.execstack = true;
-            break;
-        };
-    }
 
     // Set the entrypoint if found
     self.entry_index = blk: {
@@ -261,6 +229,19 @@ pub fn flush(self: *Elf) !void {
         const entry_name = self.options.entry orelse "_start";
         break :blk self.globals_table.get(entry_name) orelse null;
     };
+    if (self.options.output_mode == .exe and self.entry_index == null) {
+        self.base.fatal("no entrypoint found: '{s}'", .{self.options.entry orelse "_start"});
+    }
+
+    self.checkUndefined();
+    self.base.reportWarningsAndErrorsAndExit();
+
+    if (self.options.execstack_if_needed) {
+        for (self.objects.items) |object| if (object.needs_exec_stack) {
+            self.options.execstack = true;
+            break;
+        };
+    }
 
     if (self.options.gc_sections) {
         try gc.gcAtoms(self);
@@ -291,9 +272,7 @@ pub fn flush(self: *Elf) !void {
         break :blk mem.alignForwardGeneric(u64, offset, @alignOf(elf.Elf64_Shdr));
     };
 
-    if (wip_dump_state) {
-        std.debug.print("{}", .{self.dumpState()});
-    }
+    state_log.debug("{}", .{self.dumpState()});
 
     try self.writeAtoms();
     try self.writeSyntheticSections();
@@ -303,6 +282,8 @@ pub fn flush(self: *Elf) !void {
     try self.writeShStrtab();
     try self.writeShdrs();
     try self.writeHeader();
+
+    self.base.reportWarningsAndErrorsAndExit();
 }
 
 fn initSections(self: *Elf) !void {
@@ -718,7 +699,7 @@ fn parsePositionals(self: *Elf, files: []const []const u8) !void {
         if (try self.parseObject(full_path)) continue;
         if (try self.parseArchive(full_path)) continue;
 
-        log.warn("unknown filetype for positional input file: '{s}'", .{file_name});
+        self.base.warn("unknown filetype for positional input file: '{s}'", .{file_name});
     }
 }
 
@@ -727,7 +708,7 @@ fn parseLibs(self: *Elf, libs: []const []const u8) !void {
         log.debug("parsing lib path '{s}'", .{lib});
         if (try self.parseArchive(lib)) continue;
 
-        log.warn("unknown filetype for a library: '{s}'", .{lib});
+        self.base.warn("unknown filetype for a library: '{s}'", .{lib});
     }
 }
 
@@ -739,7 +720,23 @@ fn parseObject(self: *Elf, path: []const u8) !bool {
     };
     defer file.close();
 
-    if (!Object.isValid(file)) return false;
+    const header = try file.reader().readStruct(elf.Elf64_Ehdr);
+    try file.seekTo(0);
+
+    if (!Object.isValidHeader(&header)) return false;
+
+    const cpu_arch = self.cpu_arch orelse blk: {
+        self.cpu_arch = header.e_machine.toTargetCpuArch().?;
+        break :blk self.cpu_arch.?;
+    };
+    if (cpu_arch != header.e_machine.toTargetCpuArch().?) {
+        self.base.fatal("{s}: invalid architecture '{s}', expected '{s}'", .{
+            path,
+            @tagName(header.e_machine),
+            @tagName(cpu_arch.toElfMachine()),
+        });
+        return false;
+    }
 
     const file_stat = try file.stat();
     const file_size = math.cast(usize, file_stat.size) orelse return error.Overflow;
@@ -754,18 +751,6 @@ fn parseObject(self: *Elf, path: []const u8) !bool {
     };
     try object.parse(self);
 
-    if (self.cpu_arch == null) {
-        self.cpu_arch = object.header.?.e_machine.toTargetCpuArch().?;
-    }
-    const cpu_arch = self.cpu_arch.?;
-    if (cpu_arch != object.header.?.e_machine.toTargetCpuArch().?) {
-        log.err("Invalid architecture {any}, expected {any}", .{
-            object.header.?.e_machine,
-            cpu_arch.toElfMachine(),
-        });
-        return error.InvalidCpuArch;
-    }
-
     return true;
 }
 
@@ -777,23 +762,17 @@ fn parseArchive(self: *Elf, path: []const u8) !bool {
     };
     errdefer file.close();
 
-    const name = try gpa.dupe(u8, path);
-    const reader = file.reader();
+    const magic = try file.reader().readBytesNoEof(Archive.SARMAG);
+    try file.seekTo(0);
 
-    var archive = Archive{
-        .name = name,
+    if (!Archive.isValidMagic(&magic)) return false;
+
+    const archive = try self.archives.addOne(gpa);
+    archive.* = .{
+        .name = try gpa.dupe(u8, path),
         .file = file,
     };
-
-    archive.parse(gpa, reader) catch |err| switch (err) {
-        error.EndOfStream, error.NotArchive => {
-            archive.deinit(gpa);
-            return false;
-        },
-        else => |e| return e,
-    };
-
-    try self.archives.append(gpa, archive);
+    try archive.parse(gpa, self);
 
     return true;
 }
@@ -820,8 +799,30 @@ fn resolveSymbolsInArchives(self: *Elf) !void {
             };
             assert(offsets.items.len > 0);
 
+            const extracted = archive.getObject(offsets.items[0], self) catch |err| switch (err) {
+                error.InvalidHeader => continue,
+                else => |e| return e,
+            };
+
+            const header = blk: {
+                var stream = std.io.fixedBufferStream(extracted.data);
+                break :blk try stream.reader().readStruct(elf.Elf64_Ehdr);
+            };
+            const cpu_arch = self.cpu_arch.?;
+            if (cpu_arch != header.e_machine.toTargetCpuArch().?) {
+                self.base.fatal("{s}: invalid architecture '{s}', expected '{s}'", .{
+                    extracted.name,
+                    @tagName(header.e_machine),
+                    @tagName(cpu_arch.toElfMachine()),
+                });
+                continue;
+            }
+
             const object_id = @intCast(u16, self.objects.items.len);
-            const object = try archive.parseObject(offsets.items[0], object_id, self);
+            const object = try self.objects.addOne(self.base.allocator);
+            object.* = extracted;
+            object.object_id = object_id;
+            try object.parse(self);
             try object.resolveSymbols(self);
 
             continue :loop;
@@ -1252,3 +1253,28 @@ fn fmtDumpState(
     try writer.writeAll("Output segments\n");
     try writer.print("{}\n", .{self.fmtSegments()});
 }
+
+const std = @import("std");
+const build_options = @import("build_options");
+const builtin = @import("builtin");
+const assert = std.debug.assert;
+const elf = std.elf;
+const fs = std.fs;
+const gc = @import("Elf/gc.zig");
+const log = std.log.scoped(.elf);
+const state_log = std.log.scoped(.state);
+const math = std.math;
+const mem = std.mem;
+
+const Allocator = mem.Allocator;
+const Archive = @import("Elf/Archive.zig");
+const Atom = @import("Elf/Atom.zig");
+const Elf = @This();
+const InternalObject = @import("Elf/InternalObject.zig");
+const Object = @import("Elf/Object.zig");
+pub const Options = @import("Elf/Options.zig");
+const StringTable = @import("strtab.zig").StringTable;
+const Symbol = @import("Elf/Symbol.zig");
+const SyntheticSection = @import("synthetic_section.zig").SyntheticSection;
+const ThreadPool = @import("ThreadPool.zig");
+const Zld = @import("Zld.zig");

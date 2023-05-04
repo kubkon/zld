@@ -85,12 +85,11 @@ exports: []const []const u8,
 /// atomics and bulk-memory enabled.
 shared_memory: bool = false,
 
-pub fn parseArgs(arena: Allocator, context: Zld.MainCtx) !Options {
-    if (context.args.len == 0) {
-        context.printSuccess(usage, .{context.cmd});
-    }
+const cmd = "wasm-zld";
 
-    const args = context.args;
+pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options {
+    if (args.len == 0) ctx.fatal(usage, .{cmd});
+
     var positionals = std.ArrayList([]const u8).init(arena);
     var entry_name: ?[]const u8 = null;
     var global_base: ?u32 = null;
@@ -111,25 +110,18 @@ pub fn parseArgs(arena: Allocator, context: Zld.MainCtx) !Options {
     var exports = std.ArrayList([]const u8).init(arena);
     var shared_memory: bool = false;
 
-    var i: usize = 0;
-    while (i < args.len) : (i += 1) {
-        const arg = args[i];
+    var it = Zld.Options.ArgsIterator{ .args = args };
+    while (it.next()) |arg| {
         if (mem.eql(u8, arg, "-h") or mem.eql(u8, arg, "--help")) {
-            context.printSuccess(usage, .{context.cmd});
+            ctx.fatal(usage, .{cmd});
         } else if (mem.eql(u8, arg, "--debug-log")) {
-            if (i + 1 >= args.len) context.printFailure("Missing scope for debug log", .{});
-            i += 1;
-            try context.log_scopes.append(args[i]);
+            try ctx.log_scopes.append(it.nextOrFatal(ctx));
         } else if (mem.eql(u8, arg, "--entry")) {
-            if (i + 1 >= args.len) context.printFailure("Missing entry name argument", .{});
-            entry_name = args[i + 1];
-            i += 1;
-        } else if (mem.startsWith(u8, arg, "--global-base")) {
-            const index = mem.indexOfScalar(u8, arg, '=') orelse context.printFailure("Missing '=' symbol and value for global base", .{});
-            global_base = std.fmt.parseInt(u32, arg[index + 1 ..], 10) catch context.printFailure(
-                "Could not parse value '{s}' into integer",
-                .{arg[index + 1 ..]},
-            );
+            entry_name = it.nextOrFatal(ctx);
+        } else if (mem.startsWith(u8, arg, "--global-base=")) {
+            const value = arg["--global-base=".len..];
+            global_base = std.fmt.parseInt(u32, value, 10) catch
+                ctx.fatal("Could not parse value '{s}' into integer", .{value});
         } else if (mem.eql(u8, arg, "--import-symbols")) {
             import_symbols = true;
         } else if (mem.eql(u8, arg, "--import-memory")) {
@@ -138,18 +130,14 @@ pub fn parseArgs(arena: Allocator, context: Zld.MainCtx) !Options {
             import_table = true;
         } else if (mem.eql(u8, arg, "--export-table")) {
             export_table = true;
-        } else if (mem.startsWith(u8, arg, "--initial-memory")) {
-            const index = mem.indexOfScalar(u8, arg, '=') orelse context.printFailure("Missing '=' symbol and value for initial memory", .{});
-            initial_memory = std.fmt.parseInt(u32, arg[index + 1 ..], 10) catch context.printFailure(
-                "Could not parse value '{s}' into integer",
-                .{arg[index + 1 ..]},
-            );
-        } else if (mem.startsWith(u8, arg, "--max-memory")) {
-            const index = mem.indexOfScalar(u8, arg, '=') orelse context.printFailure("Missing '=' symbol and value for max memory", .{});
-            max_memory = std.fmt.parseInt(u32, arg[index + 1 ..], 10) catch context.printFailure(
-                "Could not parse value '{s}' into integer",
-                .{arg[index + 1 ..]},
-            );
+        } else if (mem.startsWith(u8, arg, "--initial-memory=")) {
+            const value = arg["--initial-memory=".len..];
+            initial_memory = std.fmt.parseInt(u32, value, 10) catch
+                ctx.fatal("Could not parse value '{s}' into integer", .{value});
+        } else if (mem.startsWith(u8, arg, "--max-memory=")) {
+            const value = arg["--max-memory=".len..];
+            max_memory = std.fmt.parseInt(u32, value, 10) catch
+                ctx.fatal("Could not parse value '{s}' into integer", .{value});
         } else if (mem.startsWith(u8, arg, "--merge-data-segments")) {
             merge_data_segments = true;
             if (mem.indexOfScalar(u8, arg, '=')) |index| {
@@ -162,26 +150,19 @@ pub fn parseArgs(arena: Allocator, context: Zld.MainCtx) !Options {
         } else if (mem.eql(u8, arg, "--stack-first")) {
             stack_first = true;
         } else if (mem.startsWith(u8, arg, "--stack-size")) {
-            const index = mem.indexOfScalar(u8, arg, '=') orelse context.printFailure("Missing '=' symbol and value for stack size", .{});
-            stack_size = std.fmt.parseInt(u32, arg[index + 1 ..], 10) catch context.printFailure(
-                "Could not parse value '{s}' into integer",
-                .{arg[index + 1 ..]},
-            );
+            const value = arg["--stack-size=".len..];
+            stack_size = std.fmt.parseInt(u32, value, 10) catch
+                ctx.fatal("Could not parse value '{s}' into integer", .{value});
         } else if (mem.eql(u8, arg, "-o")) {
-            if (i + 1 >= args.len) context.printFailure("Missing output file argument", .{});
-            output_path = args[i + 1];
-            i += 1;
-        } else if (mem.startsWith(u8, arg, "--features")) {
-            const index = mem.indexOfScalar(u8, arg, '=') orelse context.printFailure("Missing '=' symbol and value for features list", .{});
-            features = arg[index + 1 ..];
-            i += 1;
+            output_path = it.nextOrFatal(ctx);
+        } else if (mem.startsWith(u8, arg, "--features=")) {
+            features = arg["--features=".len..];
         } else if (mem.eql(u8, arg, "--strip")) {
             strip = true;
         } else if (mem.eql(u8, arg, "--export-dynamic")) {
             export_dynamic = true;
-        } else if (mem.startsWith(u8, arg, "--export")) {
-            const index = mem.indexOfScalar(u8, arg, '=') orelse context.printFailure("Missing '=' symbol and value for symbol name", .{});
-            try exports.append(arg[index + 1 ..]);
+        } else if (mem.startsWith(u8, arg, "--export=")) {
+            try exports.append(arg["--export=".len..]);
         } else if (mem.eql(u8, arg, "--shared-memory")) {
             shared_memory = true;
         } else {
@@ -189,13 +170,8 @@ pub fn parseArgs(arena: Allocator, context: Zld.MainCtx) !Options {
         }
     }
 
-    if (positionals.items.len == 0) {
-        context.printFailure("Expected one or more object files, none were given", .{});
-    }
-
-    if (output_path == null) {
-        context.printFailure("Missing output path", .{});
-    }
+    if (positionals.items.len == 0) ctx.fatal("Expected one or more object files, none were given", .{});
+    if (output_path == null) ctx.fatal("Missing output path", .{});
 
     return Options{
         .emit = .{

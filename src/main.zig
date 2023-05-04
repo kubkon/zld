@@ -4,6 +4,7 @@ const build_options = @import("build_options");
 const mem = std.mem;
 
 const Allocator = mem.Allocator;
+const ThreadPool = @import("ThreadPool.zig");
 const Zld = @import("Zld.zig");
 
 const gpa = std.heap.c_allocator;
@@ -55,10 +56,20 @@ pub const std_options = struct {
     }
 };
 
-pub fn main() !void {
-    const all_args = try std.process.argsAlloc(gpa);
-    defer std.process.argsFree(gpa, all_args);
+fn fatal(comptime format: []const u8, args: anytype) noreturn {
+    ret: {
+        const msg = std.fmt.allocPrint(gpa, format, args) catch break :ret;
+        std.io.getStdErr().writeAll(msg) catch {};
+    }
+    std.process.exit(1);
+}
 
+pub fn main() !void {
+    var arena_allocator = std.heap.ArenaAllocator.init(gpa);
+    defer arena_allocator.deinit();
+    const arena = arena_allocator.allocator();
+
+    const all_args = try std.process.argsAlloc(arena);
     const cmd = std.fs.path.basename(all_args[0]);
     const tag: Zld.Tag = blk: {
         if (mem.eql(u8, cmd, "ld.zld") or mem.eql(u8, cmd, "ld")) {
@@ -74,10 +85,17 @@ pub fn main() !void {
             std.process.exit(0);
         }
     };
-    return Zld.main(tag, .{
-        .gpa = gpa,
-        .cmd = cmd,
-        .args = all_args[1..],
+
+    const opts = try Zld.Options.parse(arena, tag, all_args[1..], .{
+        .fatal = fatal,
         .log_scopes = &log_scopes,
     });
+
+    var thread_pool: ThreadPool = undefined;
+    try thread_pool.init(gpa);
+    defer thread_pool.deinit();
+
+    const zld = try Zld.openPath(gpa, tag, opts, &thread_pool);
+    defer zld.deinit();
+    try zld.flush();
 }
