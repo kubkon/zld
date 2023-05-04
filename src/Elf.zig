@@ -219,6 +219,7 @@ pub fn flush(self: *Elf) !void {
 
     if (!self.options.allow_multiple_definition) {
         self.checkDuplicates();
+        self.base.reportWarningsAndErrorsAndExit();
     }
 
     try self.resolveSyntheticSymbols();
@@ -234,7 +235,6 @@ pub fn flush(self: *Elf) !void {
     }
 
     self.checkUndefined();
-
     self.base.reportWarningsAndErrorsAndExit();
 
     if (self.options.execstack_if_needed) {
@@ -285,6 +285,8 @@ pub fn flush(self: *Elf) !void {
     try self.writeShStrtab();
     try self.writeShdrs();
     try self.writeHeader();
+
+    self.base.reportWarningsAndErrorsAndExit();
 }
 
 fn initSections(self: *Elf) !void {
