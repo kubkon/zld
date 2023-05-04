@@ -25,9 +25,9 @@ extnames_strtab: std.ArrayListUnmanaged(u8) = .{},
 // `struct ar_hdr', and as many bytes of member file data as its `ar_size'
 // member indicates, for each member file.
 /// String that begins an archive file.
-const ARMAG: *const [SARMAG:0]u8 = "!<arch>\n";
+pub const ARMAG: *const [SARMAG:0]u8 = "!<arch>\n";
 /// Size of that string.
-const SARMAG: u4 = 8;
+pub const SARMAG: u4 = 8;
 
 /// String in ar_fmag at the end of each header.
 const ARFMAG: *const [2:0]u8 = "`\n";
@@ -69,16 +69,15 @@ const ar_hdr = extern struct {
     fn getValue(raw: []const u8) []const u8 {
         return mem.trimRight(u8, raw, &[_]u8{@as(u8, 0x20)});
     }
-
-    fn read(reader: anytype) !ar_hdr {
-        const header = try reader.readStruct(ar_hdr);
-        if (!mem.eql(u8, &header.ar_fmag, ARFMAG)) {
-            log.debug("invalid header delimiter: expected '{s}', found '{s}'", .{ ARFMAG, header.ar_fmag });
-            return error.NotArchive;
-        }
-        return header;
-    }
 };
+
+pub fn isValidMagic(magic: []const u8) bool {
+    if (!mem.eql(u8, magic, ARMAG)) {
+        log.debug("invalid archive magic: expected '{s}', found '{s}'", .{ ARMAG, magic });
+        return false;
+    }
+    return true;
+}
 
 pub fn deinit(self: *Archive, allocator: Allocator) void {
     self.extnames_strtab.deinit(allocator);
@@ -92,22 +91,29 @@ pub fn deinit(self: *Archive, allocator: Allocator) void {
     allocator.free(self.name);
 }
 
-pub fn parse(self: *Archive, allocator: Allocator, reader: anytype) !void {
-    const magic = try reader.readBytesNoEof(SARMAG);
-    if (!mem.eql(u8, &magic, ARMAG)) {
-        log.debug("invalid magic: expected '{s}', found '{s}'", .{ ARMAG, magic });
-        return error.NotArchive;
-    }
+pub fn parse(self: *Archive, allocator: Allocator, elf_file: *Elf) !void {
+    const reader = self.file.reader();
+    _ = try reader.readBytesNoEof(SARMAG);
 
     {
         // Parse lookup table
-        const hdr = try ar_hdr.read(reader);
+        const hdr = try reader.readStruct(ar_hdr);
+
+        if (!mem.eql(u8, &hdr.ar_fmag, ARFMAG)) {
+            return elf_file.base.fatal(
+                "{s}: invalid header delimiter: expected '{s}', found '{s}'",
+                .{ self.name, ARFMAG, hdr.ar_fmag },
+            );
+        }
+
         const size = try hdr.size();
         const ar_name = ar_hdr.getValue(&hdr.ar_name);
 
         if (!mem.eql(u8, ar_name, "/")) {
-            log.err("expected symbol lookup table as first data section; instead found {s}", .{&hdr.ar_name});
-            return error.NoSymbolLookupTableInArchive;
+            return elf_file.base.fatal(
+                "{s}: expected symbol lookup table as first data section; instead found '{s}'",
+                .{ self.name, &hdr.ar_name },
+            );
         }
 
         var buffer = try allocator.alloc(u8, size);
@@ -149,7 +155,15 @@ pub fn parse(self: *Archive, allocator: Allocator, reader: anytype) !void {
 
     blk: {
         // Try parsing extended names table
-        const hdr = try ar_hdr.read(reader);
+        const hdr = try reader.readStruct(ar_hdr);
+
+        if (!mem.eql(u8, &hdr.ar_fmag, ARFMAG)) {
+            return elf_file.base.fatal(
+                "{s}: invalid header delimiter: expected '{s}', found '{s}'",
+                .{ self.name, ARFMAG, hdr.ar_fmag },
+            );
+        }
+
         const size = try hdr.size();
         const name = ar_hdr.getValue(&hdr.ar_name);
 
@@ -172,13 +186,22 @@ fn getExtName(self: Archive, off: u32) []const u8 {
     return mem.sliceTo(@ptrCast([*:'\n']const u8, self.extnames_strtab.items.ptr + off), 0);
 }
 
-pub fn parseObject(self: Archive, offset: u32, object_id: u32, elf_file: *Elf) !*Object {
+pub fn getObject(self: Archive, offset: u32, elf_file: *Elf) !Object {
     const gpa = elf_file.base.allocator;
 
     const reader = self.file.reader();
     try reader.context.seekTo(offset);
 
-    const hdr = try ar_hdr.read(reader);
+    const hdr = try reader.readStruct(ar_hdr);
+
+    if (!mem.eql(u8, &hdr.ar_fmag, ARFMAG)) {
+        elf_file.base.fatal(
+            "{s}: invalid header delimiter: expected '{s}', found '{s}'",
+            .{ self.name, ARFMAG, hdr.ar_fmag },
+        );
+        return error.InvalidHeader;
+    }
+
     const name = blk: {
         const name = ar_hdr.getValue(&hdr.ar_name);
         if (name[0] == '/') {
@@ -197,30 +220,15 @@ pub fn parseObject(self: Archive, offset: u32, object_id: u32, elf_file: *Elf) !
         break :blk try std.fmt.allocPrint(gpa, "{s}({s})", .{ path, object_name });
     };
     errdefer gpa.free(full_name);
+
     const object_size = try hdr.size();
     const data = try gpa.alloc(u8, object_size);
     errdefer gpa.free(data);
+
     const amt = try reader.readAll(data);
     if (amt != object_size) {
         return error.Io;
     }
 
-    const object = try elf_file.objects.addOne(gpa);
-    object.* = .{
-        .name = full_name,
-        .data = data,
-        .object_id = object_id,
-    };
-    try object.parse(elf_file);
-
-    const cpu_arch = elf_file.cpu_arch.?;
-    if (cpu_arch != object.header.?.e_machine.toTargetCpuArch().?) {
-        log.err("Invalid architecture {any}, expected {any}", .{
-            object.header.?.e_machine,
-            cpu_arch.toElfMachine(),
-        });
-        return error.InvalidCpuArch;
-    }
-
-    return object;
+    return .{ .name = full_name, .data = data, .object_id = undefined };
 }

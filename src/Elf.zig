@@ -721,7 +721,23 @@ fn parseObject(self: *Elf, path: []const u8) !bool {
     };
     defer file.close();
 
-    if (!Object.isValid(file)) return false;
+    const header = try file.reader().readStruct(elf.Elf64_Ehdr);
+    try file.seekTo(0);
+
+    if (!Object.isValidHeader(&header)) return false;
+
+    const cpu_arch = self.cpu_arch orelse blk: {
+        self.cpu_arch = header.e_machine.toTargetCpuArch().?;
+        break :blk self.cpu_arch.?;
+    };
+    if (cpu_arch != header.e_machine.toTargetCpuArch().?) {
+        self.base.fatal("{s}: invalid architecture '{s}', expected '{s}'", .{
+            path,
+            @tagName(header.e_machine),
+            @tagName(cpu_arch.toElfMachine()),
+        });
+        return false;
+    }
 
     const file_stat = try file.stat();
     const file_size = math.cast(usize, file_stat.size) orelse return error.Overflow;
@@ -736,18 +752,6 @@ fn parseObject(self: *Elf, path: []const u8) !bool {
     };
     try object.parse(self);
 
-    if (self.cpu_arch == null) {
-        self.cpu_arch = object.header.?.e_machine.toTargetCpuArch().?;
-    }
-    const cpu_arch = self.cpu_arch.?;
-    if (cpu_arch != object.header.?.e_machine.toTargetCpuArch().?) {
-        log.err("Invalid architecture {any}, expected {any}", .{
-            object.header.?.e_machine,
-            cpu_arch.toElfMachine(),
-        });
-        return error.InvalidCpuArch;
-    }
-
     return true;
 }
 
@@ -759,23 +763,17 @@ fn parseArchive(self: *Elf, path: []const u8) !bool {
     };
     errdefer file.close();
 
-    const name = try gpa.dupe(u8, path);
-    const reader = file.reader();
+    const magic = try file.reader().readBytesNoEof(Archive.SARMAG);
+    try file.seekTo(0);
 
-    var archive = Archive{
-        .name = name,
+    if (!Archive.isValidMagic(&magic)) return false;
+
+    const archive = try self.archives.addOne(gpa);
+    archive.* = .{
+        .name = try gpa.dupe(u8, path),
         .file = file,
     };
-
-    archive.parse(gpa, reader) catch |err| switch (err) {
-        error.EndOfStream, error.NotArchive => {
-            archive.deinit(gpa);
-            return false;
-        },
-        else => |e| return e,
-    };
-
-    try self.archives.append(gpa, archive);
+    try archive.parse(gpa, self);
 
     return true;
 }
@@ -802,8 +800,30 @@ fn resolveSymbolsInArchives(self: *Elf) !void {
             };
             assert(offsets.items.len > 0);
 
+            const extracted = archive.getObject(offsets.items[0], self) catch |err| switch (err) {
+                error.InvalidHeader => continue,
+                else => |e| return e,
+            };
+
+            const header = blk: {
+                var stream = std.io.fixedBufferStream(extracted.data);
+                break :blk try stream.reader().readStruct(elf.Elf64_Ehdr);
+            };
+            const cpu_arch = self.cpu_arch.?;
+            if (cpu_arch != header.e_machine.toTargetCpuArch().?) {
+                self.base.fatal("{s}: invalid architecture '{s}', expected '{s}'", .{
+                    extracted.name,
+                    @tagName(header.e_machine),
+                    @tagName(cpu_arch.toElfMachine()),
+                });
+                continue;
+            }
+
             const object_id = @intCast(u16, self.objects.items.len);
-            const object = try archive.parseObject(offsets.items[0], object_id, self);
+            const object = try self.objects.addOne(self.base.allocator);
+            object.* = extracted;
+            object.object_id = object_id;
+            try object.parse(self);
             try object.resolveSymbols(self);
 
             continue :loop;

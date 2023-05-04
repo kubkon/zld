@@ -15,27 +15,23 @@ atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
 
 needs_exec_stack: bool = false,
 
-pub fn isValid(file: std.fs.File) bool {
-    const header = file.reader().readStruct(elf.Elf64_Ehdr) catch return false;
-    defer file.seekTo(0) catch {};
-
+pub fn isValidHeader(header: *const elf.Elf64_Ehdr) bool {
     if (!mem.eql(u8, header.e_ident[0..4], "\x7fELF")) {
-        log.debug("Invalid ELF magic {s}, expected \x7fELF", .{header.e_ident[0..4]});
+        log.debug("invalid ELF magic '{s}', expected \x7fELF", .{header.e_ident[0..4]});
         return false;
     }
     if (header.e_ident[elf.EI_VERSION] != 1) {
-        log.debug("Unknown ELF version {d}, expected 1", .{header.e_ident[elf.EI_VERSION]});
+        log.debug("unknown ELF version '{d}', expected 1", .{header.e_ident[elf.EI_VERSION]});
         return false;
     }
     if (header.e_type != elf.ET.REL) {
-        log.err("Invalid file type {any}, expected ET.REL", .{header.e_type});
+        log.debug("invalid file type '{s}', expected ET.REL", .{@tagName(header.e_type)});
         return false;
     }
     if (header.e_version != 1) {
-        log.err("Invalid ELF version {d}, expected 1", .{header.e_version});
+        log.debug("invalid ELF version '{d}', expected 1", .{header.e_version});
         return false;
     }
-
     return true;
 }
 
@@ -103,7 +99,10 @@ fn initAtoms(self: *Object, elf_file: *Elf) !void {
                 if (mem.eql(u8, ".note.GNU-stack", name)) {
                     if (shdr.sh_flags & elf.SHF_EXECINSTR != 0) {
                         if (!elf_file.options.execstack or !elf_file.options.execstack_if_needed) {
-                            log.warn("{s}: may cause segmentation fault as this file requested executable stack", .{self.name});
+                            elf_file.base.warn(
+                                "{s}: may cause segmentation fault as this file requested executable stack",
+                                .{self.name},
+                            );
                         }
                         self.needs_exec_stack = true;
                     }
