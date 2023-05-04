@@ -3,24 +3,29 @@ const usage =
     \\
     \\General Options:
     \\--allow-multiple-definition   Allow multiple definitions
-    \\--entry=[name], -e [name]     Set name of the entry point symbol
+    \\--Bstatic                     Do not link against shared libraries
+    \\--end-group                   Ignored for compatibility with GNU
+    \\--entry=[value], -e [value]   Set name of the entry point symbol
     \\--gc-sections                 Remove unused sections
     \\--no-gc-sections              Don't remove unused sections (default)
     \\--print-gc-sections           List removed unused sections to stderr
-    \\-l[name]                      Specify library to link against
-    \\-L[path]                      Specify library search dir
-    \\--rpath=[path], -R [path]     Specify runtime path
+    \\-l[value]                     Specify library to link against
+    \\-L[value]                     Specify library search dir
+    \\-m [value]                    Set target emulation
+    \\--rpath=[value], -R [value]   Specify runtime path
     \\--shared                      Create dynamic library
-    \\-o [path]                     Specify output path for the final artifact
-    \\-z [arg]                      Set linker extension flags
+    \\--static                      Alias for --Bstatic
+    \\--start-group                 Ignored for compatibility with GNU
+    \\-o [value]                    Specify output path for the final artifact
+    \\-z                            Set linker extension flags
     \\  stack-size=[value]          Override default stack size
     \\  execstack                   Require executable stack
     \\  noexecstack                 Force stack non-executable
     \\  execstack-if-needed         Make the stack executable if the input file explicitly requests it
     \\-h, --help                    Print this help and exit
-    \\--debug-log [scope]           Turn on debugging logs for [scope] (requires zld compiled with -Dlog)
+    \\--debug-log [value]           Turn on debugging logs for [value] (requires zld compiled with -Dlog)
     \\
-    \\ld.zld: supported targets: elf64-x86-64
+    \\ld.zld: supported targets: elf_x86_64
 ;
 
 const cmd = "ld.zld";
@@ -44,6 +49,8 @@ execstack: bool = false,
 /// Marks the writeable segments as executable only if requested by an input object file
 /// via sh_flags of the input .note.GNU-stack section.
 execstack_if_needed: bool = false,
+cpu_arch: ?std.Target.Cpu.Arch = null,
+static: bool = false,
 
 pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options {
     if (args.len == 0) ctx.fatal(usage, .{cmd});
@@ -61,6 +68,8 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
     var stack_size: ?u64 = null;
     var execstack: bool = false;
     var execstack_if_needed: bool = false;
+    var cpu_arch: ?std.Target.Cpu.Arch = null;
+    var static: bool = false;
 
     var it = Zld.Options.ArgsIterator{ .args = args };
     while (it.next()) |arg| {
@@ -107,14 +116,34 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             shared = true;
         } else if (mem.startsWith(u8, arg, "--rpath=")) {
             try rpath_list.append(arg["--rpath=".len..]);
+        } else if (mem.eql(u8, arg, "-rpath")) {
+            try rpath_list.append(it.nextOrFatal(ctx));
         } else if (mem.eql(u8, arg, "-R")) {
             try rpath_list.append(it.nextOrFatal(ctx));
         } else if (mem.startsWith(u8, arg, "--entry=")) {
             entry = arg["--entry=".len..];
         } else if (mem.eql(u8, arg, "-e")) {
             entry = it.nextOrFatal(ctx);
+        } else if (mem.eql(u8, arg, "-m")) {
+            const target = it.nextOrFatal(ctx);
+            if (mem.eql(u8, target, "elf_x86_64")) {
+                cpu_arch = .x86_64;
+            } else {
+                ctx.fatal("unknown target emulation '{s}'", .{target});
+            }
         } else if (mem.eql(u8, arg, "--allow-multiple-definition")) {
             allow_multiple_definition = true;
+        } else if (mem.eql(u8, arg, "--static") or mem.eql(u8, arg, "-static")) {
+            static = true;
+        } else if (mem.startsWith(u8, arg, "--B") or mem.startsWith(u8, arg, "-B")) {
+            const b_arg = it.nextOrFatal(ctx);
+            if (mem.eql(u8, b_arg, "static")) {
+                static = true;
+            } else {
+                ctx.fatal("unknown argument '--B{s}'", .{b_arg});
+            }
+        } else if (mem.eql(u8, arg, "--start-group") or mem.eql(u8, arg, "--end-group")) {
+            // Currently ignored
         } else {
             try positionals.append(.{
                 .path = arg,
@@ -142,6 +171,8 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         .gc_sections = gc_sections,
         .execstack = execstack,
         .execstack_if_needed = execstack_if_needed,
+        .cpu_arch = cpu_arch,
+        .static = static,
     };
 }
 

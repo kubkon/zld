@@ -1,6 +1,5 @@
 base: Zld,
 options: Options,
-cpu_arch: ?std.Target.Cpu.Arch = null,
 shoff: ?u64 = 0,
 
 archives: std.ArrayListUnmanaged(Archive) = .{},
@@ -690,7 +689,13 @@ fn parsePositionals(self: *Elf, files: []const []const u8) !void {
     for (files) |file_name| {
         const full_path = full_path: {
             var buffer: [fs.MAX_PATH_BYTES]u8 = undefined;
-            const path = try std.fs.realpath(file_name, &buffer);
+            const path = std.fs.realpath(file_name, &buffer) catch |err| switch (err) {
+                error.FileNotFound => {
+                    self.base.fatal("file not found '{s}'", .{file_name});
+                    continue;
+                },
+                else => |e| return e,
+            };
             break :full_path try self.base.allocator.dupe(u8, path);
         };
         defer self.base.allocator.free(full_path);
@@ -725,9 +730,9 @@ fn parseObject(self: *Elf, path: []const u8) !bool {
 
     if (!Object.isValidHeader(&header)) return false;
 
-    const cpu_arch = self.cpu_arch orelse blk: {
-        self.cpu_arch = header.e_machine.toTargetCpuArch().?;
-        break :blk self.cpu_arch.?;
+    const cpu_arch = self.options.cpu_arch orelse blk: {
+        self.options.cpu_arch = header.e_machine.toTargetCpuArch().?;
+        break :blk self.options.cpu_arch.?;
     };
     if (cpu_arch != header.e_machine.toTargetCpuArch().?) {
         self.base.fatal("{s}: invalid architecture '{s}', expected '{s}'", .{
@@ -782,6 +787,10 @@ fn resolveSymbols(self: *Elf) !void {
         try object.resolveSymbols(self);
     }
     try self.resolveSymbolsInArchives();
+
+    if (self.options.static) return;
+
+    // TODO resolve symbols in shared libraries
 }
 
 fn resolveSymbolsInArchives(self: *Elf) !void {
@@ -808,7 +817,7 @@ fn resolveSymbolsInArchives(self: *Elf) !void {
                 var stream = std.io.fixedBufferStream(extracted.data);
                 break :blk try stream.reader().readStruct(elf.Elf64_Ehdr);
             };
-            const cpu_arch = self.cpu_arch.?;
+            const cpu_arch = self.options.cpu_arch.?;
             if (cpu_arch != header.e_machine.toTargetCpuArch().?) {
                 self.base.fatal("{s}: invalid architecture '{s}', expected '{s}'", .{
                     extracted.name,
@@ -1030,7 +1039,7 @@ fn writeHeader(self: *Elf) !void {
             .exe => elf.ET.EXEC,
             .lib => elf.ET.DYN,
         },
-        .e_machine = self.cpu_arch.?.toElfMachine(),
+        .e_machine = self.options.cpu_arch.?.toElfMachine(),
         .e_version = 1,
         .e_entry = if (self.entry_index) |index| self.getGlobal(index).value else 0,
         .e_phoff = @sizeOf(elf.Elf64_Ehdr),
