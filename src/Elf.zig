@@ -176,11 +176,14 @@ pub fn flush(self: *Elf) !void {
     var libs = std.StringArrayHashMap(Zld.SystemLib).init(arena);
     var lib_not_found = false;
     for (self.options.libs.keys()) |lib_name| {
-        for (&[_][]const u8{ ".so", ".a" }) |ext| {
-            if (try resolveLib(arena, lib_dirs.items, lib_name, ext)) |full_path| {
+        if (!self.options.static) {
+            if (try resolveLib(arena, lib_dirs.items, lib_name, ".so")) |full_path| {
                 try libs.put(full_path, self.options.libs.get(lib_name).?);
-                break;
+                continue;
             }
+        }
+        if (try resolveLib(arena, lib_dirs.items, lib_name, ".a")) |full_path| {
+            try libs.put(full_path, self.options.libs.get(lib_name).?);
         } else {
             self.base.warn("Library not found for '-l{s}'", .{lib_name});
             lib_not_found = true;
