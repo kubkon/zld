@@ -23,9 +23,11 @@ const usage =
     \\  noexecstack                 Force stack non-executable
     \\  execstack-if-needed         Make the stack executable if the input file explicitly requests it
     \\-h, --help                    Print this help and exit
+    \\--verbose                     Print full linker invocation to stderr
     \\--debug-log [value]           Turn on debugging logs for [value] (requires zld compiled with -Dlog)
     \\
-    \\ld.zld: supported targets: elf_x86_64
+    \\ld.zld: supported targets: elf64-x86-64
+    \\ld.zld: supported emulations: elf_x86_64
 ;
 
 const cmd = "ld.zld";
@@ -70,6 +72,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
     var execstack_if_needed: bool = false;
     var cpu_arch: ?std.Target.Cpu.Arch = null;
     var static: bool = false;
+    var verbose: bool = false;
 
     var it = Zld.Options.ArgsIterator{ .args = args };
     while (it.next()) |arg| {
@@ -144,12 +147,22 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             }
         } else if (mem.eql(u8, arg, "--start-group") or mem.eql(u8, arg, "--end-group")) {
             // Currently ignored
+        } else if (mem.eql(u8, arg, "--verbose")) {
+            verbose = true;
         } else {
             try positionals.append(.{
                 .path = arg,
                 .must_link = true,
             });
         }
+    }
+
+    if (verbose) {
+        std.debug.print("{s} ", .{cmd});
+        for (args[0 .. args.len - 1]) |arg| {
+            std.debug.print("{s} ", .{arg});
+        }
+        std.debug.print("{s}\n", .{args[args.len - 1]});
     }
 
     if (positionals.items.len == 0) ctx.fatal("Expected at least one input .o file", .{});
