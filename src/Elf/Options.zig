@@ -1,15 +1,3 @@
-const Options = @This();
-
-const std = @import("std");
-const builtin = @import("builtin");
-const io = std.io;
-const mem = std.mem;
-const process = std.process;
-
-const Allocator = mem.Allocator;
-const Elf = @import("../Elf.zig");
-const Zld = @import("../Zld.zig");
-
 const usage =
     \\Usage: {s} [files...]
     \\
@@ -35,6 +23,8 @@ const usage =
     \\ld.zld: supported targets: elf64-x86-64
 ;
 
+const cmd = "ld.zld";
+
 emit: Zld.Emit,
 output_mode: Zld.OutputMode,
 positionals: []const Zld.LinkObject,
@@ -54,8 +44,6 @@ execstack: bool = false,
 /// Marks the writeable segments as executable only if requested by an input object file
 /// via sh_flags of the input .note.GNU-stack section.
 execstack_if_needed: bool = false,
-
-const cmd = "ld.zld";
 
 pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options {
     if (args.len == 0) ctx.fatal(usage, .{cmd});
@@ -156,3 +144,14 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         .execstack_if_needed = execstack_if_needed,
     };
 }
+
+const std = @import("std");
+const builtin = @import("builtin");
+const io = std.io;
+const mem = std.mem;
+const process = std.process;
+
+const Allocator = mem.Allocator;
+const Elf = @import("../Elf.zig");
+const Options = @This();
+const Zld = @import("../Zld.zig");

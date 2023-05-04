@@ -1,16 +1,3 @@
-const Archive = @This();
-
-const std = @import("std");
-const assert = std.debug.assert;
-const elf = std.elf;
-const fs = std.fs;
-const log = std.log.scoped(.elf);
-const mem = std.mem;
-
-const Allocator = mem.Allocator;
-const Elf = @import("../Elf.zig");
-const Object = @import("Object.zig");
-
 file: fs.File,
 name: []const u8,
 
@@ -232,3 +219,15 @@ pub fn getObject(self: Archive, offset: u32, elf_file: *Elf) !Object {
 
     return .{ .name = full_name, .data = data, .object_id = undefined };
 }
+
+const std = @import("std");
+const assert = std.debug.assert;
+const elf = std.elf;
+const fs = std.fs;
+const log = std.log.scoped(.elf);
+const mem = std.mem;
+
+const Allocator = mem.Allocator;
+const Archive = @This();
+const Elf = @import("../Elf.zig");
+const Object = @import("Object.zig");

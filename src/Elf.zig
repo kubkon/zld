@@ -51,7 +51,6 @@ got_section: SyntheticSection(u32, *Elf, .{
 atoms: std.ArrayListUnmanaged(Atom) = .{},
 
 pub const base_tag = Zld.Tag.elf;
-const wip_dump_state = false;
 
 const Section = struct {
     shdr: elf.Elf64_Shdr,
@@ -273,9 +272,7 @@ pub fn flush(self: *Elf) !void {
         break :blk mem.alignForwardGeneric(u64, offset, @alignOf(elf.Elf64_Shdr));
     };
 
-    if (wip_dump_state) {
-        std.debug.print("{}", .{self.dumpState()});
-    }
+    state_log.debug("{}", .{self.dumpState()});
 
     try self.writeAtoms();
     try self.writeSyntheticSections();
@@ -1265,6 +1262,7 @@ const elf = std.elf;
 const fs = std.fs;
 const gc = @import("Elf/gc.zig");
 const log = std.log.scoped(.elf);
+const state_log = std.log.scoped(.state);
 const math = std.math;
 const mem = std.mem;
 
