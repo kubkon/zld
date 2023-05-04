@@ -55,10 +55,10 @@ execstack: bool = false,
 /// via sh_flags of the input .note.GNU-stack section.
 execstack_if_needed: bool = false,
 
-pub fn parseArgs(arena: Allocator, ctx: Zld.MainCtx) !Options {
-    if (ctx.args.len == 0) {
-        ctx.printSuccess(usage, .{ctx.cmd});
-    }
+const cmd = "ld.zld";
+
+pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options {
+    if (args.len == 0) ctx.fatal(usage, .{cmd});
 
     var positionals = std.ArrayList(Zld.LinkObject).init(arena);
     var libs = std.StringArrayHashMap(Zld.SystemLib).init(arena);
@@ -74,37 +74,24 @@ pub fn parseArgs(arena: Allocator, ctx: Zld.MainCtx) !Options {
     var execstack: bool = false;
     var execstack_if_needed: bool = false;
 
-    const Iterator = struct {
-        args: []const []const u8,
-        i: usize = 0,
-        fn next(it: *@This()) ?[]const u8 {
-            if (it.i >= it.args.len) {
-                return null;
-            }
-            defer it.i += 1;
-            return it.args[it.i];
-        }
-    };
-    var args_iter = Iterator{ .args = ctx.args };
-
-    while (args_iter.next()) |arg| {
+    var it = Zld.Options.ArgsIterator{ .args = args };
+    while (it.next()) |arg| {
         if (mem.eql(u8, arg, "--help") or mem.eql(u8, arg, "-h")) {
-            ctx.printSuccess(usage, .{ctx.cmd});
+            ctx.fatal(usage, .{cmd});
         } else if (mem.eql(u8, arg, "--debug-log")) {
-            const scope = args_iter.next() orelse ctx.printFailure("Expected log scope after {s}", .{arg});
-            try ctx.log_scopes.append(scope);
+            try ctx.log_scopes.append(it.nextOrFatal(ctx));
         } else if (mem.startsWith(u8, arg, "-l")) {
             try libs.put(arg[2..], .{});
         } else if (mem.startsWith(u8, arg, "-L")) {
             try lib_dirs.append(arg[2..]);
         } else if (mem.eql(u8, arg, "-o")) {
-            out_path = args_iter.next() orelse
-                ctx.printFailure("Expected output path after {s}", .{arg});
+            out_path = it.nextOrFatal(ctx);
         } else if (mem.eql(u8, arg, "-z")) {
-            const z_arg = args_iter.next() orelse
-                ctx.printFailure("Expected another argument after {s}", .{arg});
+            const z_arg = it.nextOrFatal(ctx);
             if (mem.startsWith(u8, z_arg, "stack-size=")) {
-                stack_size = try std.fmt.parseInt(u64, z_arg["stack-size=".len..], 0);
+                const value = z_arg["stack-size=".len..];
+                stack_size = std.fmt.parseInt(u64, value, 0) catch
+                    ctx.fatal("Could not parse value '{s}' into integer", .{value});
             } else if (mem.eql(u8, z_arg, "execstack")) {
                 execstack = true;
             } else if (mem.eql(u8, z_arg, "noexecstack")) {
@@ -112,10 +99,10 @@ pub fn parseArgs(arena: Allocator, ctx: Zld.MainCtx) !Options {
             } else if (mem.eql(u8, z_arg, "execstack-if-needed")) {
                 execstack_if_needed = true;
             } else {
-                std.log.warn("TODO unhandled argument '-z {s}'", .{z_arg});
+                ctx.fatal("TODO unhandled argument '-z {s}'", .{z_arg});
             }
         } else if (mem.startsWith(u8, arg, "-z")) {
-            std.log.warn("TODO unhandled argument '-z {s}'", .{arg["-z".len..]});
+            ctx.fatal("TODO unhandled argument '-z {s}'", .{arg["-z".len..]});
         } else if (mem.eql(u8, arg, "--gc-sections")) {
             gc_sections = true;
         } else if (mem.eql(u8, arg, "--no-gc-sections")) {
@@ -123,23 +110,21 @@ pub fn parseArgs(arena: Allocator, ctx: Zld.MainCtx) !Options {
         } else if (mem.eql(u8, arg, "--print-gc-sections")) {
             print_gc_sections = true;
         } else if (mem.eql(u8, arg, "--as-needed")) {
-            std.log.warn("TODO unhandled argument '--as-needed'", .{});
+            ctx.fatal("TODO unhandled argument '--as-needed'", .{});
         } else if (mem.eql(u8, arg, "--allow-shlib-undefined")) {
-            std.log.warn("TODO unhandled argument '--allow-shlib-undefined'", .{});
+            ctx.fatal("TODO unhandled argument '--allow-shlib-undefined'", .{});
         } else if (mem.startsWith(u8, arg, "-O")) {
-            std.log.warn("TODO unhandled argument '-O{s}'", .{arg["-O".len..]});
+            ctx.fatal("TODO unhandled argument '-O{s}'", .{arg["-O".len..]});
         } else if (mem.eql(u8, arg, "--shared")) {
             shared = true;
         } else if (mem.startsWith(u8, arg, "--rpath=")) {
             try rpath_list.append(arg["--rpath=".len..]);
         } else if (mem.eql(u8, arg, "-R")) {
-            const rpath = args_iter.next() orelse
-                ctx.printFailure("Expected path after {s}", .{arg});
-            try rpath_list.append(rpath);
+            try rpath_list.append(it.nextOrFatal(ctx));
         } else if (mem.startsWith(u8, arg, "--entry=")) {
             entry = arg["--entry=".len..];
         } else if (mem.eql(u8, arg, "-e")) {
-            entry = args_iter.next() orelse ctx.printFailure("Expected name after {s}", .{arg});
+            entry = it.nextOrFatal(ctx);
         } else if (mem.eql(u8, arg, "--allow-multiple-definition")) {
             allow_multiple_definition = true;
         } else {
@@ -150,9 +135,7 @@ pub fn parseArgs(arena: Allocator, ctx: Zld.MainCtx) !Options {
         }
     }
 
-    if (positionals.items.len == 0) {
-        ctx.printFailure("Expected at least one input .o file", .{});
-    }
+    if (positionals.items.len == 0) ctx.fatal("Expected at least one input .o file", .{});
 
     return Options{
         .emit = .{

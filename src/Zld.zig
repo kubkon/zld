@@ -37,55 +37,33 @@ pub const Options = union {
     macho: MachO.Options,
     coff: Coff.Options,
     wasm: Wasm.Options,
-};
 
-pub const MainCtx = struct {
-    gpa: Allocator,
-    cmd: []const u8,
-    args: []const []const u8,
-    log_scopes: *std.ArrayList([]const u8),
+    pub const ArgsIterator = struct {
+        args: []const []const u8,
+        i: usize = 0,
 
-    pub fn printSuccess(ctx: MainCtx, comptime format: []const u8, args: anytype) noreturn {
-        ret: {
-            const msg = std.fmt.allocPrint(ctx.gpa, format, args) catch break :ret;
-            std.io.getStdOut().writeAll(msg) catch {};
+        pub fn next(it: *@This()) ?[]const u8 {
+            if (it.i >= it.args.len) return null;
+            defer it.i += 1;
+            return it.args[it.i];
         }
-        std.process.exit(0);
-    }
 
-    pub fn printFailure(ctx: MainCtx, comptime format: []const u8, args: anytype) noreturn {
-        ret: {
-            const msg = std.fmt.allocPrint(ctx.gpa, format, args) catch break :ret;
-            std.io.getStdErr().writeAll(msg) catch {};
+        pub fn nextOrFatal(it: *@This(), ctx: anytype) []const u8 {
+            const arg = it.next() orelse
+                ctx.fatal("Expected parameter after '{s}'", .{it.args[it.i - 1]});
+            return arg;
         }
-        std.process.exit(1);
-    }
-};
-
-pub fn main(tag: Tag, ctx: MainCtx) !void {
-    const tracy = trace(@src());
-    defer tracy.end();
-
-    var arena_allocator = std.heap.ArenaAllocator.init(ctx.gpa);
-    defer arena_allocator.deinit();
-    const arena = arena_allocator.allocator();
-
-    const opts: Options = switch (tag) {
-        .elf => .{ .elf = try Elf.Options.parseArgs(arena, ctx) },
-        .macho => .{ .macho = try MachO.Options.parseArgs(arena, ctx) },
-        .coff => .{ .coff = try Coff.Options.parseArgs(arena, ctx) },
-        .wasm => .{ .wasm = try Wasm.Options.parseArgs(arena, ctx) },
     };
 
-    var thread_pool: ThreadPool = undefined;
-    try thread_pool.init(ctx.gpa);
-    defer thread_pool.deinit();
-
-    const zld = try openPath(ctx.gpa, tag, opts, &thread_pool);
-    defer zld.deinit();
-
-    try zld.flush();
-}
+    pub fn parse(arena: Allocator, tag: Tag, args: []const []const u8, ctx: anytype) !Options {
+        return switch (tag) {
+            .elf => .{ .elf = try Elf.Options.parse(arena, args, ctx) },
+            .macho => .{ .macho = try MachO.Options.parse(arena, args, ctx) },
+            .coff => .{ .coff = try Coff.Options.parse(arena, args, ctx) },
+            .wasm => .{ .wasm = try Wasm.Options.parse(arena, args, ctx) },
+        };
+    }
+};
 
 pub fn openPath(allocator: Allocator, tag: Tag, options: Options, thread_pool: *ThreadPool) !*Zld {
     return switch (tag) {
