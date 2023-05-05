@@ -177,17 +177,15 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
         // While traversing relocations, synthesize any missing atom.
         // TODO synthesize PLT atoms, GOT atoms, etc.
         switch (rel.r_type()) {
-            elf.R_X86_64_REX_GOTPCRELX, elf.R_X86_64_GOTPCREL => {
+            elf.R_X86_64_GOTPCREL,
+            elf.R_X86_64_GOTPCRELX,
+            elf.R_X86_64_REX_GOTPCRELX,
+            => {
                 const global = object.getGlobalIndex(rel.r_sym()).?;
                 const gop = try elf_file.got_section.getOrCreate(gpa, global);
                 if (!gop.found_existing) {
-                    log.debug("{s}: creating GOT entry: [() -> {s}]", .{
-                        switch (rel.r_type()) {
-                            elf.R_X86_64_REX_GOTPCRELX => "REX_GOTPCRELX",
-                            elf.R_X86_64_GOTPCREL => "GOTPCREL",
-                            else => unreachable,
-                        },
-                        object.getSymbol(rel.r_sym(), elf_file).getName(elf_file),
+                    log.debug("{}: creating GOT entry: [() -> {s}]", .{
+                        fmtRelocType(rel.r_type()), object.getSymbol(rel.r_sym(), elf_file).getName(elf_file),
                     });
                 }
             },
@@ -213,19 +211,20 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
             elf.R_X86_64_NONE => {},
             elf.R_X86_64_64 => {
                 const target_addr = @intCast(i64, target.value) + rel.r_addend;
-                relocs_log.debug("R_X86_64_64: {x}: [() => 0x{x}] ({s})", .{ rel.r_offset, target_addr, target_name });
+                relocs_log.debug("{}: {x}: [() => 0x{x}] ({s})", .{
+                    fmtRelocType(r_type),
+                    rel.r_offset,
+                    target_addr,
+                    target_name,
+                });
                 mem.writeIntLittle(i64, code[rel.r_offset..][0..8], target_addr);
             },
             elf.R_X86_64_PC32,
             elf.R_X86_64_PLT32,
             => {
                 const displacement = @intCast(i32, @intCast(i64, target.value) - source_addr + rel.r_addend);
-                relocs_log.debug("{s}: {x}: [0x{x} => 0x{x}] ({s})", .{
-                    switch (r_type) {
-                        elf.R_X86_64_PC32 => "R_X86_64_PC32",
-                        elf.R_X86_64_PLT32 => "R_X86_64_PLT32",
-                        else => unreachable,
-                    },
+                relocs_log.debug("{}: {x}: [0x{x} => 0x{x}] ({s})", .{
+                    fmtRelocType(r_type),
                     rel.r_offset,
                     source_addr,
                     target.value,
@@ -234,17 +233,14 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
                 mem.writeIntLittle(i32, code[rel.r_offset..][0..4], displacement);
             },
             elf.R_X86_64_GOTPCREL,
+            elf.R_X86_64_GOTPCRELX,
             elf.R_X86_64_REX_GOTPCRELX,
             => {
                 const global = object.getGlobalIndex(rel.r_sym()).?;
                 const target_addr = @intCast(i64, elf_file.got_section.getAddress(global, elf_file).?);
                 const displacement = @intCast(i32, target_addr - source_addr + rel.r_addend);
-                relocs_log.debug("{s}: {x}: [0x{x} => 0x{x}] ({s})", .{
-                    switch (r_type) {
-                        elf.R_X86_64_GOTPCREL => "R_X86_64_GOTPCREL",
-                        elf.R_X86_64_REX_GOTPCRELX => "R_X86_64_REX_GOTPCRELX",
-                        else => unreachable,
-                    },
+                relocs_log.debug("{}: {x}: [0x{x} => 0x{x}] ({s})", .{
+                    fmtRelocType(r_type),
                     rel.r_offset,
                     source_addr,
                     target_addr,
@@ -255,44 +251,110 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
             elf.R_X86_64_32 => {
                 const target_addr = @intCast(i64, target.value) + rel.r_addend;
                 const scaled = math.cast(u32, target_addr) orelse blk: {
-                    elf_file.base.fatal("{s}: R_X86_64_32: {x}: target value overflows 32 bits: '{s}' at {x}", .{
+                    elf_file.base.fatal("{s}: {}: {x}: target value overflows 32 bits: '{s}' at {x}", .{
                         object.name,
+                        fmtRelocType(r_type),
                         source_addr,
                         target_name,
                         target_addr,
                     });
                     break :blk 0;
                 };
-                relocs_log.debug("R_X86_64_32: {x}: [() => 0x{x}] ({s})", .{ rel.r_offset, scaled, target_name });
+                relocs_log.debug("{}: {x}: [() => 0x{x}] ({s})", .{
+                    fmtRelocType(r_type),
+                    rel.r_offset,
+                    scaled,
+                    target_name,
+                });
                 mem.writeIntLittle(u32, code[rel.r_offset..][0..4], scaled);
             },
             elf.R_X86_64_32S => {
                 const target_addr = @intCast(i64, target.value) + rel.r_addend;
                 const scaled = math.cast(i32, target_addr) orelse blk: {
-                    elf_file.base.fatal("{s}: R_X86_64_32S: {x}: target value overflows 32 bits: '{s}' at {x}", .{
+                    elf_file.base.fatal("{s}: {}: {x}: target value overflows 32 bits: '{s}' at {x}", .{
                         object.name,
+                        fmtRelocType(r_type),
                         source_addr,
                         target_name,
                         target_addr,
                     });
                     break :blk 0;
                 };
-                relocs_log.debug("R_X86_64_32S: {x}: [() => 0x{x}] ({s})", .{ rel.r_offset, scaled, target_name });
+                relocs_log.debug("{}: {x}: [() => 0x{x}] ({s})", .{
+                    fmtRelocType(r_type),
+                    rel.r_offset,
+                    scaled,
+                    target_name,
+                });
                 mem.writeIntLittle(i32, code[rel.r_offset..][0..4], scaled);
             },
             else => {
-                relocs_log.debug("TODO {d}: {x}: [0x{x} => 0x{x}] ({s})", .{
-                    r_type,
-                    rel.r_offset,
-                    source_addr,
-                    target.value,
-                    target_name,
-                });
+                elf_file.base.fatal("unhandled relocation type: {}", .{fmtRelocType(r_type)});
             },
         }
     }
 
     try writer.writeAll(code);
+}
+
+fn fmtRelocType(r_type: u32) std.fmt.Formatter(formatRelocType) {
+    return .{ .data = r_type };
+}
+
+fn formatRelocType(
+    r_type: u32,
+    comptime unused_fmt_string: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = options;
+    _ = unused_fmt_string;
+    const str = switch (r_type) {
+        elf.R_X86_64_NONE => "R_X86_64_NONE",
+        elf.R_X86_64_64 => "R_X86_64_64",
+        elf.R_X86_64_PC32 => "R_X86_64_PC32",
+        elf.R_X86_64_GOT32 => "R_X86_64_GOT32",
+        elf.R_X86_64_PLT32 => "R_X86_64_PLT32",
+        elf.R_X86_64_COPY => "R_X86_64_COPY",
+        elf.R_X86_64_GLOB_DAT => "R_X86_64_GLOB_DAT",
+        elf.R_X86_64_JUMP_SLOT => "R_X86_64_JUMP_SLOT",
+        elf.R_X86_64_RELATIVE => "R_X86_64_RELATIVE",
+        elf.R_X86_64_GOTPCREL => "R_X86_64_GOTPCREL",
+        elf.R_X86_64_32 => "R_X86_64_32",
+        elf.R_X86_64_32S => "R_X86_64_32S",
+        elf.R_X86_64_16 => "R_X86_64_16",
+        elf.R_X86_64_PC16 => "R_X86_64_PC16",
+        elf.R_X86_64_8 => "R_X86_64_8",
+        elf.R_X86_64_PC8 => "R_X86_64_PC8",
+        elf.R_X86_64_DTPMOD64 => "R_X86_64_DTPMOD64",
+        elf.R_X86_64_DTPOFF64 => "R_X86_64_DTPOFF64",
+        elf.R_X86_64_TPOFF64 => "R_X86_64_TPOFF64",
+        elf.R_X86_64_TLSGD => "R_X86_64_TLSGD",
+        elf.R_X86_64_TLSLD => "R_X86_64_TLSLD",
+        elf.R_X86_64_DTPOFF32 => "R_X86_64_DTPOFF32",
+        elf.R_X86_64_GOTTPOFF => "R_X86_64_GOTTPOFF",
+        elf.R_X86_64_TPOFF32 => "R_X86_64_TPOFF32",
+        elf.R_X86_64_PC64 => "R_X86_64_PC64",
+        elf.R_X86_64_GOTOFF64 => "R_X86_64_GOTOFF64",
+        elf.R_X86_64_GOTPC32 => "R_X86_64_GOTPC32",
+        elf.R_X86_64_GOT64 => "R_X86_64_GOT64",
+        elf.R_X86_64_GOTPCREL64 => "R_X86_64_GOTPCREL64",
+        elf.R_X86_64_GOTPC64 => "R_X86_64_GOTPC64",
+        elf.R_X86_64_GOTPLT64 => "R_X86_64_GOTPLT64",
+        elf.R_X86_64_PLTOFF64 => "R_X86_64_PLTOFF64",
+        elf.R_X86_64_SIZE32 => "R_X86_64_SIZE32",
+        elf.R_X86_64_SIZE64 => "R_X86_64_SIZE64",
+        elf.R_X86_64_GOTPC32_TLSDESC => "R_X86_64_GOTPC32_TLSDESC",
+        elf.R_X86_64_TLSDESC_CALL => "R_X86_64_TLSDESC_CALL",
+        elf.R_X86_64_TLSDESC => "R_X86_64_TLSDESC",
+        elf.R_X86_64_IRELATIVE => "R_X86_64_IRELATIVE",
+        elf.R_X86_64_RELATIVE64 => "R_X86_64_RELATIVE64",
+        elf.R_X86_64_GOTPCRELX => "R_X86_64_GOTPCRELX",
+        elf.R_X86_64_REX_GOTPCRELX => "R_X86_64_REX_GOTPCRELX",
+        elf.R_X86_64_NUM => "R_X86_64_NUM",
+        else => "R_X86_64_UNKNOWN",
+    };
+    try writer.print("{s}({d})", .{ str, r_type });
 }
 
 pub fn format(
