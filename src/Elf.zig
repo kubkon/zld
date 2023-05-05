@@ -454,7 +454,6 @@ fn sortSections(self: *Elf) !void {
 fn initSegments(self: *Elf) !void {
     // Add PHDR segment
     {
-        const size = self.phdrs.items.len * @sizeOf(elf.Elf64_Phdr);
         const offset = @sizeOf(elf.Elf64_Ehdr);
         self.phdr_seg_index = try self.addSegment(.{
             .type = elf.PT_PHDR,
@@ -462,8 +461,6 @@ fn initSegments(self: *Elf) !void {
             .@"align" = @alignOf(elf.Elf64_Phdr),
             .offset = offset,
             .addr = default_base_addr + offset,
-            .filesz = size,
-            .memsz = size,
         });
     }
 
@@ -516,6 +513,15 @@ fn initSegments(self: *Elf) !void {
         .@"align" = 1,
         .memsz = self.options.stack_size orelse 0,
     });
+
+    // Backpatch size of the PHDR segment now that we now how many program headers
+    // we actually have.
+    if (self.phdr_seg_index) |index| {
+        const phdr = &self.phdrs.items[index];
+        const size = self.phdrs.items.len * @sizeOf(elf.Elf64_Phdr);
+        phdr.p_filesz = size;
+        phdr.p_memsz = size;
+    }
 }
 
 fn allocateSegments(self: *Elf) void {
@@ -529,7 +535,7 @@ fn allocateSegments(self: *Elf) void {
         base_size += phdr.p_filesz;
     }
     const first_phdr_index = blk: {
-        if (self.phdr_seg_index) |index| break :blk index;
+        if (self.phdr_seg_index) |index| break :blk index + 1;
         break :blk 0;
     };
 
@@ -537,11 +543,10 @@ fn allocateSegments(self: *Elf) void {
         const sect_range = self.getSectionIndexes(@intCast(u16, phdr_index));
         const start = sect_range.start;
         const end = sect_range.end;
-        if (start == end) continue;
 
         var filesz: u64 = 0;
         var memsz: u64 = 0;
-        var file_align: u64 = 0;
+        var file_align: u64 = 1;
 
         if (phdr_index == first_phdr_index) {
             filesz += base_size;
