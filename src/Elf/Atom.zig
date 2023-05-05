@@ -46,6 +46,32 @@ pub fn getCode(self: Atom, elf_file: *Elf) []const u8 {
     return object.getShdrContents(self.shndx);
 }
 
+/// Returns atom's code and optionally uncompresses data if required (for compressed sections).
+/// Caller owns the memory.
+pub fn getCodeUncompressAlloc(self: Atom, elf_file: *Elf) ![]u8 {
+    const gpa = elf_file.base.allocator;
+    const data = self.getCode(elf_file);
+    const shdr = self.getInputShdr(elf_file);
+    if (shdr.sh_flags & elf.SHF_COMPRESSED != 0) {
+        const chdr = @ptrCast(*align(1) const elf.Elf64_Chdr, data.ptr).*;
+        switch (chdr.ch_type) {
+            1 => { // ELFCOMPRESS_ZLIB
+                var stream = std.io.fixedBufferStream(data[@sizeOf(elf.Elf64_Chdr)..]);
+                var zlib_stream = try std.compress.zlib.zlibStream(gpa, stream.reader());
+                defer zlib_stream.deinit();
+                const decomp = try gpa.alloc(u8, chdr.ch_size);
+                const nread = try zlib_stream.reader().readAll(decomp);
+                if (nread != decomp.len) {
+                    return error.Io;
+                }
+                return decomp;
+            },
+            else => @panic("TODO unhandled compression scheme"),
+        }
+        @panic("TODO");
+    } else return gpa.dupe(u8, data);
+}
+
 pub inline fn getObject(self: Atom, elf_file: *Elf) *Object {
     return &elf_file.objects.items[self.object_id];
 }
@@ -145,7 +171,7 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
 
 pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
     const gpa = elf_file.base.allocator;
-    const code = try gpa.dupe(u8, self.getCode(elf_file));
+    const code = try self.getCodeUncompressAlloc(elf_file);
     defer gpa.free(code);
     const relocs = self.getRelocs(elf_file);
     const object = self.getObject(elf_file);

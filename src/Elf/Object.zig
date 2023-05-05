@@ -95,6 +95,7 @@ fn initAtoms(self: *Object, elf_file: *Elf) !void {
             => {},
             else => {
                 const name = self.getShString(shdr.sh_name);
+                const shndx = @intCast(u16, i);
 
                 if (mem.eql(u8, ".note.GNU-stack", name)) {
                     if (shdr.sh_flags & elf.SHF_EXECINSTR != 0) {
@@ -109,17 +110,8 @@ fn initAtoms(self: *Object, elf_file: *Elf) !void {
                     continue;
                 }
                 // TODO this is just a temp until proper functionality is actually added
-                if (self.ignoreShdr(@intCast(u32, i))) continue;
-
-                const atom_index = try elf_file.addAtom();
-                const atom = elf_file.getAtom(atom_index).?;
-                atom.atom_index = atom_index;
-                atom.name = try elf_file.string_intern.insert(elf_file.base.allocator, name);
-                atom.object_id = self.object_id;
-                atom.size = @intCast(u32, shdr.sh_size);
-                atom.alignment = math.log2_int(u64, shdr.sh_addralign);
-                atom.shndx = @intCast(u16, i);
-                self.atoms.items[i] = atom_index;
+                if (self.ignoreShdr(shndx)) continue;
+                try self.addAtom(shdr, shndx, name, elf_file);
             },
         }
     }
@@ -134,6 +126,26 @@ fn initAtoms(self: *Object, elf_file: *Elf) !void {
         },
         else => {},
     };
+}
+
+fn addAtom(self: *Object, shdr: elf.Elf64_Shdr, shndx: u16, name: [:0]const u8, elf_file: *Elf) !void {
+    const atom_index = try elf_file.addAtom();
+    const atom = elf_file.getAtom(atom_index).?;
+    atom.atom_index = atom_index;
+    atom.name = try elf_file.string_intern.insert(elf_file.base.allocator, name);
+    atom.object_id = self.object_id;
+    atom.shndx = shndx;
+    self.atoms.items[shndx] = atom_index;
+
+    if (shdr.sh_flags & elf.SHF_COMPRESSED != 0) {
+        const data = self.getShdrContents(shndx);
+        const chdr = @ptrCast(*align(1) const elf.Elf64_Chdr, data.ptr).*;
+        atom.size = @intCast(u32, chdr.ch_size);
+        atom.alignment = math.log2_int(u64, chdr.ch_addralign);
+    } else {
+        atom.size = @intCast(u32, shdr.sh_size);
+        atom.alignment = math.log2_int(u64, shdr.sh_addralign);
+    }
 }
 
 fn ignoreShdr(self: Object, index: u32) bool {
