@@ -91,53 +91,80 @@ pub fn getRelocs(self: Atom, elf_file: *Elf) []align(1) const elf.Elf64_Rela {
 
 pub fn initOutputSection(self: *Atom, elf_file: *Elf) !void {
     const shdr = self.getInputShdr(elf_file);
-    const flags = shdr.sh_flags;
     const name = self.getName(elf_file);
-    const out_name = switch (shdr.sh_type) {
+    const flags = shdr.sh_flags;
+    const @"type" = shdr.sh_type;
+    const is_tls = flags & elf.SHF_TLS != 0;
+    const is_alloc = flags & elf.SHF_ALLOC != 0;
+    const is_write = flags & elf.SHF_WRITE != 0;
+    const is_exec = flags & elf.SHF_EXECINSTR != 0;
+    const opts: Elf.AddSectionOpts = switch (@"type") {
         elf.SHT_NULL => unreachable,
-        elf.SHT_PROGBITS => name: {
-            if (flags & elf.SHF_ALLOC == 0) break :name name;
-            if (flags & elf.SHF_EXECINSTR != 0) {
-                if (mem.startsWith(u8, name, ".init")) {
-                    break :name ".init";
-                } else if (mem.startsWith(u8, name, ".fini")) {
-                    break :name ".fini";
-                } else if (mem.startsWith(u8, name, ".init_array")) {
-                    break :name ".init_array";
-                } else if (mem.startsWith(u8, name, ".fini_array")) {
-                    break :name ".fini_array";
-                } else {
-                    break :name ".text";
-                }
-            }
-            if (flags & elf.SHF_WRITE != 0) {
-                if (flags & elf.SHF_TLS != 0) {
-                    break :name ".tdata";
-                } else if (mem.startsWith(u8, name, ".data.rel.ro")) {
-                    break :name ".data.rel.ro";
-                } else {
-                    break :name ".data";
-                }
-            }
-            break :name ".rodata";
+        elf.SHT_NOBITS => blk: {
+            var out_flags: u32 = elf.SHF_ALLOC | elf.SHF_WRITE;
+            if (is_tls) out_flags |= elf.SHF_TLS;
+            break :blk .{
+                .flags = out_flags,
+                .name = if (is_tls) ".tbss" else ".bss",
+                .type = @"type",
+            };
         },
-        elf.SHT_NOBITS => name: {
-            if (flags & elf.SHF_TLS != 0) {
-                break :name ".tbss";
-            } else {
-                break :name ".bss";
+        elf.SHT_PROGBITS => blk: {
+            if (!is_alloc) break :blk .{
+                .name = name,
+                .type = @"type",
+                .flags = flags & ~@as(u32, elf.SHF_COMPRESSED),
+            };
+
+            if (is_exec) {
+                const out_name = if (mem.eql(u8, name, ".init"))
+                    ".init"
+                else if (mem.eql(u8, name, ".fini")) ".fini" else ".text";
+                var out_flags: u32 = elf.SHF_ALLOC | elf.SHF_EXECINSTR;
+                if (is_write) out_flags |= elf.SHF_WRITE;
+                break :blk .{
+                    .flags = out_flags,
+                    .name = out_name,
+                    .type = @"type",
+                };
             }
+
+            if (is_write) {
+                const out_name = if (mem.startsWith(u8, name, ".data.rel.ro"))
+                    ".data.rel.ro"
+                else if (is_tls)
+                    ".tdata"
+                else
+                    ".data";
+                break :blk .{
+                    .flags = elf.SHF_ALLOC | elf.SHF_WRITE,
+                    .name = out_name,
+                    .type = @"type",
+                };
+            }
+
+            break :blk .{
+                .flags = elf.SHF_ALLOC,
+                .name = ".rodata",
+                .type = @"type",
+            };
         },
-        else => name,
+        elf.SHT_INIT_ARRAY, elf.SHT_FINI_ARRAY => .{
+            .flags = elf.SHF_ALLOC | elf.SHF_WRITE,
+            .name = if (shdr.sh_type == elf.SHT_INIT_ARRAY) ".init_array" else ".fini_array",
+            .type = @"type",
+        },
+        // TODO handle more section types
+        else => .{
+            .name = name,
+            .type = @"type",
+            .flags = flags,
+            .info = shdr.sh_info,
+            .entsize = shdr.sh_entsize,
+        },
     };
-    const out_shndx = elf_file.getSectionByName(out_name) orelse try elf_file.addSection(.{
-        .name = out_name,
-        .type = shdr.sh_type,
-        .flags = shdr.sh_flags,
-        .info = shdr.sh_info,
-        .entsize = shdr.sh_entsize,
-    });
-    if (mem.eql(u8, ".text", out_name)) {
+    const out_shndx = elf_file.getSectionByName(opts.name) orelse try elf_file.addSection(opts);
+    if (mem.eql(u8, ".text", opts.name)) {
         elf_file.text_sect_index = out_shndx;
     }
     self.out_shndx = out_shndx;

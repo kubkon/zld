@@ -1095,7 +1095,7 @@ fn writeHeader(self: *Elf) !void {
     try self.base.file.pwriteAll(mem.asBytes(&header), 0);
 }
 
-pub fn addSection(self: *Elf, opts: struct {
+pub const AddSectionOpts = struct {
     name: [:0]const u8,
     type: u32 = elf.SHT_NULL,
     flags: u64 = 0,
@@ -1103,7 +1103,9 @@ pub fn addSection(self: *Elf, opts: struct {
     info: u32 = 0,
     addralign: u64 = 0,
     entsize: u64 = 0,
-}) !u16 {
+};
+
+pub fn addSection(self: *Elf, opts: AddSectionOpts) !u16 {
     const gpa = self.base.allocator;
     const index = @intCast(u16, self.sections.slice().len);
     try self.sections.append(gpa, .{
