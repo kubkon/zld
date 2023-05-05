@@ -1,6 +1,5 @@
 base: Zld,
 options: Options,
-cpu_arch: ?std.Target.Cpu.Arch = null,
 shoff: ?u64 = 0,
 
 archives: std.ArrayListUnmanaged(Archive) = .{},
@@ -28,6 +27,7 @@ init_array_start_index: ?u32 = null,
 init_array_end_index: ?u32 = null,
 fini_array_start_index: ?u32 = null,
 fini_array_end_index: ?u32 = null,
+got_index: ?u32 = null,
 
 entry_index: ?u32 = null,
 
@@ -177,11 +177,14 @@ pub fn flush(self: *Elf) !void {
     var libs = std.StringArrayHashMap(Zld.SystemLib).init(arena);
     var lib_not_found = false;
     for (self.options.libs.keys()) |lib_name| {
-        for (&[_][]const u8{ ".so", ".a" }) |ext| {
-            if (try resolveLib(arena, lib_dirs.items, lib_name, ext)) |full_path| {
+        if (!self.options.static) {
+            if (try resolveLib(arena, lib_dirs.items, lib_name, ".so")) |full_path| {
                 try libs.put(full_path, self.options.libs.get(lib_name).?);
-                break;
+                continue;
             }
+        }
+        if (try resolveLib(arena, lib_dirs.items, lib_name, ".a")) |full_path| {
+            try libs.put(full_path, self.options.libs.get(lib_name).?);
         } else {
             self.base.warn("Library not found for '-l{s}'", .{lib_name});
             lib_not_found = true;
@@ -216,13 +219,6 @@ pub fn flush(self: *Elf) !void {
 
     try self.resolveSymbols();
 
-    if (!self.options.allow_multiple_definition) {
-        self.checkDuplicates();
-        self.base.reportWarningsAndErrorsAndExit();
-    }
-
-    try self.resolveSyntheticSymbols();
-
     // Set the entrypoint if found
     self.entry_index = blk: {
         if (self.options.output_mode != .exe) break :blk null;
@@ -233,16 +229,6 @@ pub fn flush(self: *Elf) !void {
         self.base.fatal("no entrypoint found: '{s}'", .{self.options.entry orelse "_start"});
     }
 
-    self.checkUndefined();
-    self.base.reportWarningsAndErrorsAndExit();
-
-    if (self.options.execstack_if_needed) {
-        for (self.objects.items) |object| if (object.needs_exec_stack) {
-            self.options.execstack = true;
-            break;
-        };
-    }
-
     if (self.options.gc_sections) {
         try gc.gcAtoms(self);
 
@@ -251,17 +237,37 @@ pub fn flush(self: *Elf) !void {
         }
     }
 
+    if (!self.options.allow_multiple_definition) {
+        self.checkDuplicates();
+        self.base.reportWarningsAndErrorsAndExit();
+    }
+
+    try self.resolveSyntheticSymbols();
+
+    if (self.options.execstack_if_needed) {
+        for (self.objects.items) |object| if (object.needs_exec_stack) {
+            self.options.execstack = true;
+            break;
+        };
+    }
+
+    self.claimUnresolved();
     try self.scanRelocs();
     try self.initSections();
-    try self.calcSectionSizes();
     try self.sortSections();
     try self.initSegments();
+
+    self.checkUndefined();
+    self.base.reportWarningsAndErrorsAndExit();
+
+    try self.calcSectionSizes();
     self.allocateSegments();
     self.allocateAllocSections();
     self.allocateAtoms();
     self.allocateLocals();
     self.allocateGlobals();
     self.allocateSyntheticSymbols();
+
     try self.setSymtab();
     self.setShstrtab();
     self.allocateNonAllocSections();
@@ -423,6 +429,10 @@ fn sortSections(self: *Elf) !void {
         self.sections.appendAssumeCapacity(slice.get(sorted.shndx));
     }
 
+    for (self.atoms.items[1..]) |*atom| {
+        atom.out_shndx = backlinks[atom.out_shndx];
+    }
+
     for (&[_]*?u16{
         &self.text_sect_index,
         &self.got_sect_index,
@@ -444,7 +454,6 @@ fn sortSections(self: *Elf) !void {
 fn initSegments(self: *Elf) !void {
     // Add PHDR segment
     {
-        const size = self.phdrs.items.len * @sizeOf(elf.Elf64_Phdr);
         const offset = @sizeOf(elf.Elf64_Ehdr);
         self.phdr_seg_index = try self.addSegment(.{
             .type = elf.PT_PHDR,
@@ -452,8 +461,6 @@ fn initSegments(self: *Elf) !void {
             .@"align" = @alignOf(elf.Elf64_Phdr),
             .offset = offset,
             .addr = default_base_addr + offset,
-            .filesz = size,
-            .memsz = size,
         });
     }
 
@@ -506,6 +513,15 @@ fn initSegments(self: *Elf) !void {
         .@"align" = 1,
         .memsz = self.options.stack_size orelse 0,
     });
+
+    // Backpatch size of the PHDR segment now that we now how many program headers
+    // we actually have.
+    if (self.phdr_seg_index) |index| {
+        const phdr = &self.phdrs.items[index];
+        const size = self.phdrs.items.len * @sizeOf(elf.Elf64_Phdr);
+        phdr.p_filesz = size;
+        phdr.p_memsz = size;
+    }
 }
 
 fn allocateSegments(self: *Elf) void {
@@ -519,7 +535,7 @@ fn allocateSegments(self: *Elf) void {
         base_size += phdr.p_filesz;
     }
     const first_phdr_index = blk: {
-        if (self.phdr_seg_index) |index| break :blk index;
+        if (self.phdr_seg_index) |index| break :blk index + 1;
         break :blk 0;
     };
 
@@ -527,11 +543,10 @@ fn allocateSegments(self: *Elf) void {
         const sect_range = self.getSectionIndexes(@intCast(u16, phdr_index));
         const start = sect_range.start;
         const end = sect_range.end;
-        if (start == end) continue;
 
         var filesz: u64 = 0;
         var memsz: u64 = 0;
-        var file_align: u64 = 0;
+        var file_align: u64 = 1;
 
         if (phdr_index == first_phdr_index) {
             filesz += base_size;
@@ -684,13 +699,25 @@ fn allocateSyntheticSymbols(self: *Elf) void {
             global.value = self.getGlobal(entry_index).value;
         }
     }
+    if (self.got_index) |index| {
+        if (self.got_sect_index) |sect_index| {
+            const shdr = self.sections.items(.shdr)[sect_index];
+            self.getGlobal(index).value = shdr.sh_addr;
+        }
+    }
 }
 
 fn parsePositionals(self: *Elf, files: []const []const u8) !void {
     for (files) |file_name| {
         const full_path = full_path: {
             var buffer: [fs.MAX_PATH_BYTES]u8 = undefined;
-            const path = try std.fs.realpath(file_name, &buffer);
+            const path = std.fs.realpath(file_name, &buffer) catch |err| switch (err) {
+                error.FileNotFound => {
+                    self.base.fatal("file not found '{s}'", .{file_name});
+                    continue;
+                },
+                else => |e| return e,
+            };
             break :full_path try self.base.allocator.dupe(u8, path);
         };
         defer self.base.allocator.free(full_path);
@@ -725,9 +752,9 @@ fn parseObject(self: *Elf, path: []const u8) !bool {
 
     if (!Object.isValidHeader(&header)) return false;
 
-    const cpu_arch = self.cpu_arch orelse blk: {
-        self.cpu_arch = header.e_machine.toTargetCpuArch().?;
-        break :blk self.cpu_arch.?;
+    const cpu_arch = self.options.cpu_arch orelse blk: {
+        self.options.cpu_arch = header.e_machine.toTargetCpuArch().?;
+        break :blk self.options.cpu_arch.?;
     };
     if (cpu_arch != header.e_machine.toTargetCpuArch().?) {
         self.base.fatal("{s}: invalid architecture '{s}', expected '{s}'", .{
@@ -808,7 +835,7 @@ fn resolveSymbolsInArchives(self: *Elf) !void {
                 var stream = std.io.fixedBufferStream(extracted.data);
                 break :blk try stream.reader().readStruct(elf.Elf64_Ehdr);
             };
-            const cpu_arch = self.cpu_arch.?;
+            const cpu_arch = self.options.cpu_arch.?;
             if (cpu_arch != header.e_machine.toTargetCpuArch().?) {
                 self.base.fatal("{s}: invalid architecture '{s}', expected '{s}'", .{
                     extracted.name,
@@ -839,6 +866,7 @@ fn resolveSyntheticSymbols(self: *Elf) !void {
     self.init_array_end_index = try object.addSyntheticGlobal("__init_array_end", self);
     self.fini_array_start_index = try object.addSyntheticGlobal("__fini_array_start", self);
     self.fini_array_end_index = try object.addSyntheticGlobal("__fini_array_end", self);
+    self.got_index = try object.addSyntheticGlobal("_GLOBAL_OFFSET_TABLE_", self);
     try object.resolveSymbols(self);
 }
 
@@ -851,6 +879,19 @@ fn checkDuplicates(self: *Elf) void {
 fn checkUndefined(self: *Elf) void {
     for (self.objects.items) |object| {
         object.checkUndefined(self);
+    }
+}
+
+fn claimUnresolved(self: *Elf) void {
+    for (self.objects.items) |*object| {
+        for (object.globals.items) |index| {
+            const global = self.getGlobal(index);
+
+            if (global.isUndef(self) and global.isWeak(self)) {
+                global.value = 0;
+                continue;
+            }
+        }
     }
 }
 
@@ -1030,7 +1071,7 @@ fn writeHeader(self: *Elf) !void {
             .exe => elf.ET.EXEC,
             .lib => elf.ET.DYN,
         },
-        .e_machine = self.cpu_arch.?.toElfMachine(),
+        .e_machine = self.options.cpu_arch.?.toElfMachine(),
         .e_version = 1,
         .e_entry = if (self.entry_index) |index| self.getGlobal(index).value else 0,
         .e_phoff = @sizeOf(elf.Elf64_Ehdr),
@@ -1059,7 +1100,7 @@ fn writeHeader(self: *Elf) !void {
     try self.base.file.pwriteAll(mem.asBytes(&header), 0);
 }
 
-pub fn addSection(self: *Elf, opts: struct {
+pub const AddSectionOpts = struct {
     name: [:0]const u8,
     type: u32 = elf.SHT_NULL,
     flags: u64 = 0,
@@ -1067,7 +1108,9 @@ pub fn addSection(self: *Elf, opts: struct {
     info: u32 = 0,
     addralign: u64 = 0,
     entsize: u64 = 0,
-}) !u16 {
+};
+
+pub fn addSection(self: *Elf, opts: AddSectionOpts) !u16 {
     const gpa = self.base.allocator;
     const index = @intCast(u16, self.sections.slice().len);
     try self.sections.append(gpa, .{
