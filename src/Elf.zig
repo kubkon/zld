@@ -27,6 +27,7 @@ init_array_start_index: ?u32 = null,
 init_array_end_index: ?u32 = null,
 fini_array_start_index: ?u32 = null,
 fini_array_end_index: ?u32 = null,
+got_index: ?u32 = null,
 
 entry_index: ?u32 = null,
 
@@ -218,13 +219,6 @@ pub fn flush(self: *Elf) !void {
 
     try self.resolveSymbols();
 
-    if (!self.options.allow_multiple_definition) {
-        self.checkDuplicates();
-        self.base.reportWarningsAndErrorsAndExit();
-    }
-
-    try self.resolveSyntheticSymbols();
-
     // Set the entrypoint if found
     self.entry_index = blk: {
         if (self.options.output_mode != .exe) break :blk null;
@@ -235,16 +229,6 @@ pub fn flush(self: *Elf) !void {
         self.base.fatal("no entrypoint found: '{s}'", .{self.options.entry orelse "_start"});
     }
 
-    self.checkUndefined();
-    self.base.reportWarningsAndErrorsAndExit();
-
-    if (self.options.execstack_if_needed) {
-        for (self.objects.items) |object| if (object.needs_exec_stack) {
-            self.options.execstack = true;
-            break;
-        };
-    }
-
     if (self.options.gc_sections) {
         try gc.gcAtoms(self);
 
@@ -253,17 +237,37 @@ pub fn flush(self: *Elf) !void {
         }
     }
 
+    if (!self.options.allow_multiple_definition) {
+        self.checkDuplicates();
+        self.base.reportWarningsAndErrorsAndExit();
+    }
+
+    try self.resolveSyntheticSymbols();
+
+    if (self.options.execstack_if_needed) {
+        for (self.objects.items) |object| if (object.needs_exec_stack) {
+            self.options.execstack = true;
+            break;
+        };
+    }
+
+    self.claimUnresolved();
     try self.scanRelocs();
     try self.initSections();
-    try self.calcSectionSizes();
     try self.sortSections();
     try self.initSegments();
+
+    self.checkUndefined();
+    self.base.reportWarningsAndErrorsAndExit();
+
+    try self.calcSectionSizes();
     self.allocateSegments();
     self.allocateAllocSections();
     self.allocateAtoms();
     self.allocateLocals();
     self.allocateGlobals();
     self.allocateSyntheticSymbols();
+
     try self.setSymtab();
     self.setShstrtab();
     self.allocateNonAllocSections();
@@ -423,6 +427,10 @@ fn sortSections(self: *Elf) !void {
     try self.sections.ensureTotalCapacity(gpa, slice.len);
     for (entries.items) |sorted| {
         self.sections.appendAssumeCapacity(slice.get(sorted.shndx));
+    }
+
+    for (self.atoms.items[1..]) |*atom| {
+        atom.out_shndx = backlinks[atom.out_shndx];
     }
 
     for (&[_]*?u16{
@@ -686,6 +694,12 @@ fn allocateSyntheticSymbols(self: *Elf) void {
             global.value = self.getGlobal(entry_index).value;
         }
     }
+    if (self.got_index) |index| {
+        if (self.got_sect_index) |sect_index| {
+            const shdr = self.sections.items(.shdr)[sect_index];
+            self.getGlobal(index).value = shdr.sh_addr;
+        }
+    }
 }
 
 fn parsePositionals(self: *Elf, files: []const []const u8) !void {
@@ -790,10 +804,6 @@ fn resolveSymbols(self: *Elf) !void {
         try object.resolveSymbols(self);
     }
     try self.resolveSymbolsInArchives();
-
-    if (self.options.static) return;
-
-    // TODO resolve symbols in shared libraries
 }
 
 fn resolveSymbolsInArchives(self: *Elf) !void {
@@ -851,6 +861,7 @@ fn resolveSyntheticSymbols(self: *Elf) !void {
     self.init_array_end_index = try object.addSyntheticGlobal("__init_array_end", self);
     self.fini_array_start_index = try object.addSyntheticGlobal("__fini_array_start", self);
     self.fini_array_end_index = try object.addSyntheticGlobal("__fini_array_end", self);
+    self.got_index = try object.addSyntheticGlobal("_GLOBAL_OFFSET_TABLE_", self);
     try object.resolveSymbols(self);
 }
 
@@ -863,6 +874,19 @@ fn checkDuplicates(self: *Elf) void {
 fn checkUndefined(self: *Elf) void {
     for (self.objects.items) |object| {
         object.checkUndefined(self);
+    }
+}
+
+fn claimUnresolved(self: *Elf) void {
+    for (self.objects.items) |*object| {
+        for (object.globals.items) |index| {
+            const global = self.getGlobal(index);
+
+            if (global.isUndef(self) and global.isWeak(self)) {
+                global.value = 0;
+                continue;
+            }
+        }
     }
 }
 

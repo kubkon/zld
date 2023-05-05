@@ -240,7 +240,7 @@ pub fn checkDuplicates(self: Object, elf_file: *Elf) void {
 pub fn checkUndefined(self: Object, elf_file: *Elf) void {
     for (self.globals.items) |index| {
         const global = elf_file.getGlobal(index);
-        if (global.isUndef(elf_file)) {
+        if (global.isUndef(elf_file) and !global.isWeak(elf_file)) {
             elf_file.base.fatal("undefined reference: {s}: {s}", .{ self.name, global.getName(elf_file) });
         }
     }
