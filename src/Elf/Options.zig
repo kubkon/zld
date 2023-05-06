@@ -16,6 +16,7 @@ const usage =
     \\--shared                      Create dynamic library
     \\--static                      Alias for --Bstatic
     \\--start-group                 Ignored for compatibility with GNU
+    \\--strip-debug, -S             Strip .debug_ sections
     \\-o [value]                    Specify output path for the final artifact
     \\-z                            Set linker extension flags
     \\  stack-size=[value]          Override default stack size
@@ -38,7 +39,7 @@ positionals: []const Zld.LinkObject,
 libs: std.StringArrayHashMap(Zld.SystemLib),
 lib_dirs: []const []const u8,
 rpath_list: []const []const u8,
-strip: bool = false,
+strip_debug: bool = false,
 entry: ?[]const u8 = null,
 gc_sections: bool = false,
 print_gc_sections: bool = false,
@@ -72,6 +73,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
     var execstack_if_needed: bool = false;
     var cpu_arch: ?std.Target.Cpu.Arch = null;
     var static: bool = false;
+    var strip_debug: bool = false;
     var verbose: bool = false;
 
     var it = Zld.Options.ArgsIterator{ .args = args };
@@ -147,6 +149,8 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             }
         } else if (mem.eql(u8, arg, "--start-group") or mem.eql(u8, arg, "--end-group")) {
             // Currently ignored
+        } else if (mem.eql(u8, arg, "--strip-debug") or mem.eql(u8, arg, "-S")) {
+            strip_debug = true;
         } else if (mem.eql(u8, arg, "--verbose")) {
             verbose = true;
         } else {
@@ -186,6 +190,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         .execstack_if_needed = execstack_if_needed,
         .cpu_arch = cpu_arch,
         .static = static,
+        .strip_debug = strip_debug,
     };
 }
 

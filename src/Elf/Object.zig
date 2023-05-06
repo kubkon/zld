@@ -109,8 +109,7 @@ fn initAtoms(self: *Object, elf_file: *Elf) !void {
                     }
                     continue;
                 }
-                // TODO this is just a temp until proper functionality is actually added
-                if (self.ignoreShdr(shndx)) continue;
+                if (self.skipShdr(shndx, elf_file)) continue;
                 try self.addAtom(shdr, shndx, name, elf_file);
             },
         }
@@ -119,10 +118,10 @@ fn initAtoms(self: *Object, elf_file: *Elf) !void {
     // Parse relocs sections if any.
     for (shdrs, 0..) |shdr, i| switch (shdr.sh_type) {
         elf.SHT_REL, elf.SHT_RELA => {
-            // TODO this is just a temp until proper functionality is actually added
-            if (self.ignoreShdr(shdr.sh_info)) continue;
             const atom_index = self.atoms.items[shdr.sh_info];
-            elf_file.getAtom(atom_index).?.relocs_shndx = @intCast(u16, i);
+            if (elf_file.getAtom(atom_index)) |atom| {
+                atom.relocs_shndx = @intCast(u16, i);
+            }
         },
         else => {},
     };
@@ -148,7 +147,7 @@ fn addAtom(self: *Object, shdr: elf.Elf64_Shdr, shndx: u16, name: [:0]const u8, 
     }
 }
 
-fn ignoreShdr(self: Object, index: u32) bool {
+fn skipShdr(self: Object, index: u32, elf_file: *Elf) bool {
     const shdr = self.getShdrs()[index];
     const name = self.getShString(shdr.sh_name);
     const ignore = blk: {
@@ -156,6 +155,9 @@ fn ignoreShdr(self: Object, index: u32) bool {
         if (mem.startsWith(u8, name, ".note")) break :blk true;
         if (mem.startsWith(u8, name, ".comment")) break :blk true;
         if (mem.startsWith(u8, name, ".llvm_addrsig")) break :blk true;
+        if (elf_file.options.strip_debug and
+            shdr.sh_flags & elf.SHF_ALLOC == 0 and
+            mem.startsWith(u8, name, ".debug")) break :blk true;
         break :blk false;
     };
     return ignore;
