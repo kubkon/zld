@@ -3,6 +3,8 @@ const usage =
     \\
     \\General Options:
     \\--allow-multiple-definition   Allow multiple definitions
+    \\--as-needed                   Only set DT_NEEDED for shared libraries if used
+    \\--no-as-needed                Always set DT_NEEDED for shared libraries (default)
     \\--Bstatic                     Do not link against shared libraries
     \\--end-group                   Ignored for compatibility with GNU
     \\--entry=[value], -e [value]   Set name of the entry point symbol
@@ -56,6 +58,7 @@ execstack: bool = false,
 execstack_if_needed: bool = false,
 cpu_arch: ?std.Target.Cpu.Arch = null,
 static: bool = false,
+needed: bool = true,
 
 pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options {
     if (args.len == 0) ctx.fatal(usage, .{cmd});
@@ -78,6 +81,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
     var strip_debug: bool = false;
     var strip_all: bool = false;
     var verbose: bool = false;
+    var needed: bool = true;
 
     var it = Zld.Options.ArgsIterator{ .args = args };
     while (it.next()) |arg| {
@@ -86,7 +90,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         } else if (mem.eql(u8, arg, "--debug-log")) {
             try ctx.log_scopes.append(it.nextOrFatal(ctx));
         } else if (mem.startsWith(u8, arg, "-l")) {
-            try libs.put(arg[2..], .{});
+            try libs.put(arg[2..], .{ .needed = needed });
         } else if (mem.startsWith(u8, arg, "-L")) {
             try lib_dirs.append(arg[2..]);
         } else if (mem.eql(u8, arg, "-o")) {
@@ -114,8 +118,6 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             gc_sections = false;
         } else if (mem.eql(u8, arg, "--print-gc-sections")) {
             print_gc_sections = true;
-        } else if (mem.eql(u8, arg, "--as-needed")) {
-            ctx.fatal("TODO unhandled argument '--as-needed'", .{});
         } else if (mem.eql(u8, arg, "--allow-shlib-undefined")) {
             ctx.fatal("TODO unhandled argument '--allow-shlib-undefined'", .{});
         } else if (mem.startsWith(u8, arg, "-O")) {
@@ -156,6 +158,10 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             strip_debug = true;
         } else if (mem.eql(u8, arg, "--strip-all") or mem.eql(u8, arg, "-s")) {
             strip_all = true;
+        } else if (mem.eql(u8, arg, "--as-needed")) {
+            needed = false;
+        } else if (mem.eql(u8, arg, "--no-as-needed")) {
+            needed = true;
         } else if (mem.eql(u8, arg, "--verbose")) {
             verbose = true;
         } else {
