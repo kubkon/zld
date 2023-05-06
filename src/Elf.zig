@@ -313,19 +313,22 @@ fn initSections(self: *Elf) !void {
         .entsize = 1,
         .addralign = 1,
     });
-    self.strtab_sect_index = try self.addSection(.{
-        .name = ".strtab",
-        .type = elf.SHT_STRTAB,
-        .entsize = 1,
-        .addralign = 1,
-    });
-    self.symtab_sect_index = try self.addSection(.{
-        .name = ".symtab",
-        .type = elf.SHT_SYMTAB,
-        .link = self.strtab_sect_index.?,
-        .addralign = @alignOf(elf.Elf64_Sym),
-        .entsize = @sizeOf(elf.Elf64_Sym),
-    });
+
+    if (!self.options.strip_all) {
+        self.strtab_sect_index = try self.addSection(.{
+            .name = ".strtab",
+            .type = elf.SHT_STRTAB,
+            .entsize = 1,
+            .addralign = 1,
+        });
+        self.symtab_sect_index = try self.addSection(.{
+            .name = ".symtab",
+            .type = elf.SHT_SYMTAB,
+            .link = self.strtab_sect_index.?,
+            .addralign = @alignOf(elf.Elf64_Sym),
+            .entsize = @sizeOf(elf.Elf64_Sym),
+        });
+    }
 }
 
 fn calcSectionSizes(self: *Elf) !void {
@@ -445,8 +448,8 @@ fn sortSections(self: *Elf) !void {
         }
     }
 
-    {
-        const shdr = &self.sections.items(.shdr)[self.symtab_sect_index.?];
+    if (self.symtab_sect_index) |index| {
+        const shdr = &self.sections.items(.shdr)[index];
         shdr.sh_link = self.strtab_sect_index.?;
     }
 }
@@ -903,6 +906,7 @@ fn scanRelocs(self: *Elf) !void {
 }
 
 fn setSymtab(self: *Elf) !void {
+    const symtab_sect_index = self.symtab_sect_index orelse return;
     const gpa = self.base.allocator;
 
     for (self.objects.items) |object| {
@@ -933,7 +937,7 @@ fn setSymtab(self: *Elf) !void {
 
     // Denote start of globals.
     {
-        const shdr = &self.sections.items(.shdr)[self.symtab_sect_index.?];
+        const shdr = &self.sections.items(.shdr)[symtab_sect_index];
         shdr.sh_info = @intCast(u32, self.symtab.items.len);
     }
 
@@ -959,7 +963,7 @@ fn setSymtab(self: *Elf) !void {
 
     // Set the section sizes
     {
-        const shdr = &self.sections.items(.shdr)[self.symtab_sect_index.?];
+        const shdr = &self.sections.items(.shdr)[symtab_sect_index];
         shdr.sh_size = self.symtab.items.len * @sizeOf(elf.Elf64_Sym);
     }
     {
@@ -1024,7 +1028,8 @@ fn writeSyntheticSections(self: *Elf) !void {
 }
 
 fn writeSymtab(self: *Elf) !void {
-    const shdr = self.sections.items(.shdr)[self.symtab_sect_index.?];
+    const index = self.symtab_sect_index orelse return;
+    const shdr = self.sections.items(.shdr)[index];
     log.debug("writing '.symtab' contents from 0x{x} to 0x{x}", .{
         shdr.sh_offset,
         shdr.sh_offset + shdr.sh_size,
@@ -1033,7 +1038,8 @@ fn writeSymtab(self: *Elf) !void {
 }
 
 fn writeStrtab(self: *Elf) !void {
-    const shdr = self.sections.items(.shdr)[self.strtab_sect_index.?];
+    const index = self.strtab_sect_index orelse return;
+    const shdr = self.sections.items(.shdr)[index];
     log.debug("writing '.strtab' contents from 0x{x} to 0x{x}", .{
         shdr.sh_offset,
         shdr.sh_offset + shdr.sh_size,

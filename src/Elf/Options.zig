@@ -16,6 +16,7 @@ const usage =
     \\--shared                      Create dynamic library
     \\--static                      Alias for --Bstatic
     \\--start-group                 Ignored for compatibility with GNU
+    \\--strip-all, -s               Strip all symbols. Implies --strip-debug
     \\--strip-debug, -S             Strip .debug_ sections
     \\-o [value]                    Specify output path for the final artifact
     \\-z                            Set linker extension flags
@@ -40,6 +41,7 @@ libs: std.StringArrayHashMap(Zld.SystemLib),
 lib_dirs: []const []const u8,
 rpath_list: []const []const u8,
 strip_debug: bool = false,
+strip_all: bool = false,
 entry: ?[]const u8 = null,
 gc_sections: bool = false,
 print_gc_sections: bool = false,
@@ -74,6 +76,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
     var cpu_arch: ?std.Target.Cpu.Arch = null;
     var static: bool = false;
     var strip_debug: bool = false;
+    var strip_all: bool = false;
     var verbose: bool = false;
 
     var it = Zld.Options.ArgsIterator{ .args = args };
@@ -151,6 +154,8 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             // Currently ignored
         } else if (mem.eql(u8, arg, "--strip-debug") or mem.eql(u8, arg, "-S")) {
             strip_debug = true;
+        } else if (mem.eql(u8, arg, "--strip-all") or mem.eql(u8, arg, "-s")) {
+            strip_all = true;
         } else if (mem.eql(u8, arg, "--verbose")) {
             verbose = true;
         } else {
@@ -191,6 +196,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         .cpu_arch = cpu_arch,
         .static = static,
         .strip_debug = strip_debug,
+        .strip_all = strip_all,
     };
 }
 

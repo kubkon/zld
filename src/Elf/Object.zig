@@ -155,7 +155,7 @@ fn skipShdr(self: Object, index: u32, elf_file: *Elf) bool {
         if (mem.startsWith(u8, name, ".note")) break :blk true;
         if (mem.startsWith(u8, name, ".comment")) break :blk true;
         if (mem.startsWith(u8, name, ".llvm_addrsig")) break :blk true;
-        if (elf_file.options.strip_debug and
+        if ((elf_file.options.strip_debug or elf_file.options.strip_all) and
             shdr.sh_flags & elf.SHF_ALLOC == 0 and
             mem.startsWith(u8, name, ".debug")) break :blk true;
         break :blk false;
