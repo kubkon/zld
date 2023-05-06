@@ -59,14 +59,6 @@ const Section = struct {
     last_atom: ?Atom.Index,
 };
 
-pub const SymbolWithLoc = struct {
-    /// Index in the respective symbol table.
-    sym_index: u32,
-
-    /// null means it's a synthetic global.
-    file: ?u32,
-};
-
 const default_base_addr: u64 = 0x200000;
 const default_page_size: u64 = 0x1000;
 
