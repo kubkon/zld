@@ -47,8 +47,7 @@ fn collectRoots(roots: *std.ArrayList(*Atom), elf_file: *Elf) !void {
         const shdr = atom.getInputShdr(elf_file);
         const name = atom.getName(elf_file);
         const is_gc_root = blk: {
-            if (shdr.sh_flags & (1 << 21) != 0) break :blk true;
-            // if (shdr.sh_flags & elf.SHF_GNU_RETAIN != 0) break :blk true;
+            if (shdr.sh_flags & elf.SHF_GNU_RETAIN != 0) break :blk true;
             if (shdr.sh_type == elf.SHT_NOTE) break :blk true;
             if (shdr.sh_type == elf.SHT_PREINIT_ARRAY) break :blk true;
             if (shdr.sh_type == elf.SHT_INIT_ARRAY) break :blk true;

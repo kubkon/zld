@@ -81,8 +81,7 @@ fn initAtoms(self: *Object, elf_file: *Elf) !void {
     for (shdrs, 0..) |shdr, i| {
         if (shdr.sh_flags & elf.SHF_EXCLUDE != 0 and
             shdr.sh_flags & elf.SHF_ALLOC == 0 and
-            // shdr.sh_type != elf.SHT_LLVM_ADDRSIG) continue;
-            shdr.sh_type != elf.SHT_LOOS + 0xfff4c03) continue;
+            shdr.sh_type != elf.SHT_LLVM_ADDRSIG) continue;
 
         switch (shdr.sh_type) {
             elf.SHT_GROUP => @panic("TODO"),
@@ -151,7 +150,7 @@ fn skipShdr(self: Object, index: u32, elf_file: *Elf) bool {
     const shdr = self.getShdrs()[index];
     const name = self.getShString(shdr.sh_name);
     const ignore = blk: {
-        if (shdr.sh_type == 0x70000001) break :blk true; // TODO SHT_X86_64_UNWIND
+        if (shdr.sh_type == elf.SHT_X86_64_UNWIND) break :blk true;
         if (mem.startsWith(u8, name, ".note")) break :blk true;
         if (mem.startsWith(u8, name, ".comment")) break :blk true;
         if (mem.startsWith(u8, name, ".llvm_addrsig")) break :blk true;
