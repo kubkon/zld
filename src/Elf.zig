@@ -504,7 +504,6 @@ fn initSegments(self: *Elf) !void {
     _ = try self.addSegment(.{
         .type = elf.PT_GNU_STACK,
         .flags = if (self.options.execstack) elf.PF_W | elf.PF_R | elf.PF_X else elf.PF_W | elf.PF_R,
-        .@"align" = 1,
         .memsz = self.options.stack_size orelse 0,
     });
 
@@ -531,6 +530,8 @@ fn allocateSegments(self: *Elf) void {
 
     const first_phdr_index = if (self.phdr_seg_index) |index| index + 1 else 0;
     for (self.phdrs.items[first_phdr_index..], first_phdr_index..) |*phdr, phdr_index| {
+        if (phdr.p_type == elf.PT_GNU_STACK) continue;
+
         const sect_range = self.getSectionIndexes(@intCast(u16, phdr_index));
         const start = sect_range.start;
         const end = sect_range.end;
