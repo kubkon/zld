@@ -354,7 +354,7 @@ fn formatRelocType(
         elf.R_X86_64_NUM => "R_X86_64_NUM",
         else => "R_X86_64_UNKNOWN",
     };
-    try writer.print("{s}({d})", .{ str, r_type });
+    try writer.print("{s}", .{str});
 }
 
 pub fn format(
