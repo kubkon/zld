@@ -459,9 +459,16 @@ fn initSegments(self: *Elf) !void {
         });
     }
 
+    // The first loadable segment is always read-only even if there is no
+    // read-only section to load. We need a read-only loadable segment
+    // to coalesce PHDR segment into together with the Ehdr.
+    var last_phdr: u16 = try self.addSegment(.{
+        .type = elf.PT_LOAD,
+        .flags = elf.PF_R,
+        .@"align" = default_page_size,
+    });
+
     // Then, we proceed in creating segments for all alloc sections.
-    const first_phdr = @intCast(u16, self.phdrs.items.len);
-    var last_phdr: ?u16 = null;
     for (self.sections.items(.shdr)) |shdr| {
         if (shdr.sh_flags & elf.SHF_ALLOC == 0) continue;
         const write = shdr.sh_flags & elf.SHF_WRITE != 0;
@@ -470,15 +477,7 @@ fn initSegments(self: *Elf) !void {
         if (write) flags |= elf.PF_W;
         if (exec) flags |= elf.PF_X;
 
-        const last_phdr_index = last_phdr orelse {
-            last_phdr = try self.addSegment(.{
-                .type = elf.PT_LOAD,
-                .flags = flags,
-                .@"align" = default_page_size,
-            });
-            continue;
-        };
-        const phdr = self.phdrs.items[last_phdr_index];
+        const phdr = self.phdrs.items[last_phdr];
         if (phdr.p_flags != flags) {
             last_phdr = try self.addSegment(.{
                 .type = elf.PT_LOAD,
@@ -488,7 +487,7 @@ fn initSegments(self: *Elf) !void {
         }
     }
 
-    var phdr_index = first_phdr;
+    var phdr_index = if (self.phdr_seg_index) |index| index + 1 else 0;
     for (self.sections.items(.shdr), 0..) |shdr, i| {
         if (shdr.sh_flags & elf.SHF_ALLOC == 0) continue;
         const write = shdr.sh_flags & elf.SHF_WRITE != 0;
@@ -529,11 +528,8 @@ fn allocateSegments(self: *Elf) void {
         assert(phdr.p_filesz == phdr.p_memsz);
         base_size += phdr.p_filesz;
     }
-    const first_phdr_index = blk: {
-        if (self.phdr_seg_index) |index| break :blk index + 1;
-        break :blk 0;
-    };
 
+    const first_phdr_index = if (self.phdr_seg_index) |index| index + 1 else 0;
     for (self.phdrs.items[first_phdr_index..], first_phdr_index..) |*phdr, phdr_index| {
         const sect_range = self.getSectionIndexes(@intCast(u16, phdr_index));
         const start = sect_range.start;
