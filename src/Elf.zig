@@ -1,6 +1,6 @@
 base: Zld,
 options: Options,
-shoff: ?u64 = 0,
+shoff: u64 = 0,
 
 archives: std.ArrayListUnmanaged(Archive) = .{},
 objects: std.ArrayListUnmanaged(Object) = .{},
@@ -1051,10 +1051,9 @@ fn writePhdrs(self: *Elf) !void {
 }
 
 fn writeShdrs(self: *Elf) !void {
-    const shoff = self.shoff.?;
     const size = self.sections.items(.shdr).len * @sizeOf(elf.Elf64_Shdr);
-    log.debug("writing section headers from 0x{x} to 0x{x}", .{ shoff, shoff + size });
-    try self.base.file.pwriteAll(mem.sliceAsBytes(self.sections.items(.shdr)), shoff);
+    log.debug("writing section headers from 0x{x} to 0x{x}", .{ self.shoff, self.shoff + size });
+    try self.base.file.pwriteAll(mem.sliceAsBytes(self.sections.items(.shdr)), self.shoff);
 }
 
 fn writeHeader(self: *Elf) !void {
@@ -1068,7 +1067,7 @@ fn writeHeader(self: *Elf) !void {
         .e_version = 1,
         .e_entry = if (self.entry_index) |index| self.getGlobal(index).value else 0,
         .e_phoff = @sizeOf(elf.Elf64_Ehdr),
-        .e_shoff = self.shoff.?,
+        .e_shoff = self.shoff,
         .e_flags = 0,
         .e_ehsize = @sizeOf(elf.Elf64_Ehdr),
         .e_phentsize = @sizeOf(elf.Elf64_Phdr),
