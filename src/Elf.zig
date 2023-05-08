@@ -356,7 +356,7 @@ fn calcSectionSizes(self: *Elf) !void {
     }
 }
 
-fn getSectionPrecedence(self: *Elf, shdr: elf.Elf64_Shdr) u4 {
+fn getSectionRank(self: *Elf, shdr: elf.Elf64_Shdr) u4 {
     const flags = shdr.sh_flags;
     switch (shdr.sh_type) {
         elf.SHT_NULL => return 0,
@@ -396,7 +396,7 @@ fn sortSections(self: *Elf) !void {
         }
 
         pub fn lessThan(elf_file: *Elf, lhs: @This(), rhs: @This()) bool {
-            return elf_file.getSectionPrecedence(lhs.get(elf_file)) < elf_file.getSectionPrecedence(rhs.get(elf_file));
+            return elf_file.getSectionRank(lhs.get(elf_file)) < elf_file.getSectionRank(rhs.get(elf_file));
         }
     };
 
