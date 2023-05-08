@@ -53,9 +53,9 @@ pub fn getSourceSymbol(symbol: Symbol, elf_file: *Elf) elf.Elf64_Sym {
     }
 }
 
-pub fn getSymbolPrecedence(symbol: Symbol, elf_file: *Elf) u4 {
+pub fn getSymbolRank(symbol: Symbol, elf_file: *Elf) u4 {
     const sym = symbol.getSourceSymbol(elf_file);
-    return Object.getSymbolPrecedence(sym);
+    return Object.getSymbolRank(sym);
 }
 
 pub fn format(

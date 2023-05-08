@@ -209,7 +209,7 @@ pub fn resolveSymbols(self: Object, elf_file: *Elf) !void {
         if (this_sym.st_shndx == elf.SHN_UNDEF) continue;
 
         const global = elf_file.getGlobal(index);
-        if (getSymbolPrecedence(this_sym) < global.getSymbolPrecedence(elf_file)) {
+        if (getSymbolRank(this_sym) < global.getSymbolRank(elf_file)) {
             self.setGlobal(sym_idx, global);
         }
     }
@@ -259,11 +259,11 @@ pub fn checkUndefined(self: Object, elf_file: *Elf) void {
     }
 }
 
-/// Encodes symbol precedence so that the following ordering applies:
+/// Encodes symbol rank so that the following ordering applies:
 /// * strong defined
 /// * weak defined
 /// * undefined
-pub inline fn getSymbolPrecedence(sym: elf.Elf64_Sym) u4 {
+pub inline fn getSymbolRank(sym: elf.Elf64_Sym) u4 {
     if (sym.st_shndx == elf.SHN_UNDEF) return 0xf;
     return switch (sym.st_bind()) {
         elf.STB_GLOBAL => 0,

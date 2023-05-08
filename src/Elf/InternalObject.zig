@@ -42,7 +42,7 @@ pub fn resolveSymbols(self: *InternalObject, elf_file: *Elf) !void {
         if (this_sym.st_shndx == elf.SHN_UNDEF) continue;
 
         const global = elf_file.getGlobal(index);
-        if (Object.getSymbolPrecedence(this_sym) < global.getSymbolPrecedence(elf_file)) {
+        if (Object.getSymbolRank(this_sym) < global.getSymbolRank(elf_file)) {
             global.* = .{
                 .value = 0,
                 .name = global.name,
