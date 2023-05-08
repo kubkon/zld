@@ -574,7 +574,6 @@ fn allocateAllocSections(self: *Elf) void {
         const sect_range = self.getSectionIndexes(@intCast(u16, phdr_index));
         const start = sect_range.start;
         const end = sect_range.end;
-        if (start == end) continue;
 
         var offset = phdr.p_offset;
         var vaddr = phdr.p_vaddr;
