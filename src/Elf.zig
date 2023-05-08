@@ -973,7 +973,6 @@ fn writeAtoms(self: *Elf) !void {
         const shndx = @intCast(u16, i);
         const shdr = slice.items(.shdr)[shndx];
 
-        // TODO zero prefill .bss and .tbss if have presence in file
         if (shdr.sh_type == elf.SHT_NOBITS) continue;
 
         log.debug("writing atoms in '{s}' section", .{self.shstrtab.getAssumeExists(shdr.sh_name)});
