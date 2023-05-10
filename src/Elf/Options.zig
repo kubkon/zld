@@ -6,6 +6,8 @@ const usage =
     \\--as-needed                   Only set DT_NEEDED for shared libraries if used
     \\--no-as-needed                Always set DT_NEEDED for shared libraries (default)
     \\--Bstatic                     Do not link against shared libraries
+    \\--dynamic-linker=[value], -I [value]      
+    \\                              Set the dynamic linker to use
     \\--end-group                   Ignored for compatibility with GNU
     \\--entry=[value], -e [value]   Set name of the entry point symbol
     \\--gc-sections                 Remove unused sections
@@ -59,6 +61,7 @@ execstack_if_needed: bool = false,
 cpu_arch: ?std.Target.Cpu.Arch = null,
 static: bool = false,
 needed: bool = true,
+dynamic_linker: ?[]const u8 = null,
 
 pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options {
     if (args.len == 0) ctx.fatal(usage, .{cmd});
@@ -82,91 +85,81 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
     var strip_all: bool = false;
     var verbose: bool = false;
     var needed: bool = true;
+    var dynamic_linker: ?[]const u8 = null;
 
     var it = Zld.Options.ArgsIterator{ .args = args };
-    while (it.next()) |arg| {
-        if (mem.eql(u8, arg, "--help") or mem.eql(u8, arg, "-h")) {
+    var p = ArgParser(@TypeOf(ctx)){ .it = &it, .ctx = ctx };
+    while (p.hasMore()) {
+        if (p.flag2("help") or p.flag1("h")) {
             ctx.fatal(usage, .{cmd});
-        } else if (mem.eql(u8, arg, "--debug-log")) {
-            try ctx.log_scopes.append(it.nextOrFatal(ctx));
-        } else if (mem.startsWith(u8, arg, "-l")) {
-            try libs.put(arg[2..], .{ .needed = needed });
-        } else if (mem.startsWith(u8, arg, "-L")) {
-            try lib_dirs.append(arg[2..]);
-        } else if (mem.eql(u8, arg, "-o")) {
-            out_path = it.nextOrFatal(ctx);
-        } else if (mem.eql(u8, arg, "-z")) {
-            const z_arg = it.nextOrFatal(ctx);
-            if (mem.startsWith(u8, z_arg, "stack-size=")) {
-                const value = z_arg["stack-size=".len..];
-                stack_size = std.fmt.parseInt(u64, value, 0) catch
-                    ctx.fatal("Could not parse value '{s}' into integer", .{value});
-            } else if (mem.eql(u8, z_arg, "execstack")) {
-                execstack = true;
-            } else if (mem.eql(u8, z_arg, "noexecstack")) {
-                execstack = false;
-            } else if (mem.eql(u8, z_arg, "execstack-if-needed")) {
-                execstack_if_needed = true;
-            } else {
-                ctx.fatal("TODO unhandled argument '-z {s}'", .{z_arg});
-            }
-        } else if (mem.startsWith(u8, arg, "-z")) {
-            ctx.fatal("TODO unhandled argument '-z {s}'", .{arg["-z".len..]});
-        } else if (mem.eql(u8, arg, "--gc-sections")) {
+        } else if (p.arg2("debug-log")) |scope| {
+            try ctx.log_scopes.append(scope);
+        } else if (p.arg1("l")) |lib| {
+            try libs.put(lib, .{ .needed = needed });
+        } else if (p.arg1("L")) |dir| {
+            try lib_dirs.append(dir);
+        } else if (p.arg1("o")) |path| {
+            out_path = path;
+        } else if (p.flagAny("gc-sections")) {
             gc_sections = true;
-        } else if (mem.eql(u8, arg, "--no-gc-sections")) {
+        } else if (p.flagAny("no-gc-sections")) {
             gc_sections = false;
-        } else if (mem.eql(u8, arg, "--print-gc-sections")) {
+        } else if (p.flagAny("print-gc-sections")) {
             print_gc_sections = true;
-        } else if (mem.eql(u8, arg, "--allow-shlib-undefined")) {
-            ctx.fatal("TODO unhandled argument '--allow-shlib-undefined'", .{});
-        } else if (mem.startsWith(u8, arg, "-O")) {
-            ctx.fatal("TODO unhandled argument '-O{s}'", .{arg["-O".len..]});
-        } else if (mem.eql(u8, arg, "--shared")) {
+        } else if (p.flagAny("shared")) {
             shared = true;
-        } else if (mem.startsWith(u8, arg, "--rpath=")) {
-            try rpath_list.append(arg["--rpath=".len..]);
-        } else if (mem.eql(u8, arg, "-rpath")) {
-            try rpath_list.append(it.nextOrFatal(ctx));
-        } else if (mem.eql(u8, arg, "-R")) {
-            try rpath_list.append(it.nextOrFatal(ctx));
-        } else if (mem.startsWith(u8, arg, "--entry=")) {
-            entry = arg["--entry=".len..];
-        } else if (mem.eql(u8, arg, "-e")) {
-            entry = it.nextOrFatal(ctx);
-        } else if (mem.eql(u8, arg, "-m")) {
-            const target = it.nextOrFatal(ctx);
+        } else if (p.argAny("rpath")) |path| {
+            try rpath_list.append(path);
+        } else if (p.arg1("R")) |path| {
+            try rpath_list.append(path);
+        } else if (p.argAny("entry")) |name| {
+            entry = name;
+        } else if (p.arg1("e")) |name| {
+            entry = name;
+        } else if (p.arg1("m")) |target| {
             if (mem.eql(u8, target, "elf_x86_64")) {
                 cpu_arch = .x86_64;
             } else {
                 ctx.fatal("unknown target emulation '{s}'", .{target});
             }
-        } else if (mem.eql(u8, arg, "--allow-multiple-definition")) {
+        } else if (p.flagAny("allow-multiple-definition")) {
             allow_multiple_definition = true;
-        } else if (mem.eql(u8, arg, "--static") or mem.eql(u8, arg, "-static")) {
+        } else if (p.flagAny("static")) {
             static = true;
-        } else if (mem.startsWith(u8, arg, "--B") or mem.startsWith(u8, arg, "-B")) {
-            const b_arg = it.nextOrFatal(ctx);
+        } else if (p.argAny("B")) |b_arg| {
             if (mem.eql(u8, b_arg, "static")) {
                 static = true;
             } else {
                 ctx.fatal("unknown argument '--B{s}'", .{b_arg});
             }
-        } else if (mem.eql(u8, arg, "--start-group") or mem.eql(u8, arg, "--end-group")) {
-            // Currently ignored
-        } else if (mem.eql(u8, arg, "--strip-debug") or mem.eql(u8, arg, "-S")) {
+        } else if (p.flagAny("start-group") or p.flagAny("end-group")) {
+            // Ignored
+        } else if (p.flagAny("strip-debug") or p.flag1("S")) {
             strip_debug = true;
-        } else if (mem.eql(u8, arg, "--strip-all") or mem.eql(u8, arg, "-s")) {
+        } else if (p.flagAny("strip-all") or p.flag1("s")) {
             strip_all = true;
-        } else if (mem.eql(u8, arg, "--as-needed")) {
+        } else if (p.flagAny("as-needed")) {
             needed = false;
-        } else if (mem.eql(u8, arg, "--no-as-needed")) {
+        } else if (p.flagAny("no-as-needed")) {
             needed = true;
-        } else if (mem.eql(u8, arg, "--verbose")) {
+        } else if (p.argAny("dynamic-linker")) |path| {
+            dynamic_linker = path;
+        } else if (p.arg1("I")) |path| {
+            dynamic_linker = path;
+        } else if (p.flagAny("verbose")) {
             verbose = true;
+        } else if (p.argZ("stack-size")) |value| {
+            stack_size = std.fmt.parseInt(u64, value, 0) catch
+                ctx.fatal("Could not parse value '{s}' into integer", .{value});
+        } else if (p.flagZ("execstack")) {
+            execstack = true;
+        } else if (p.flagZ("noexecstack")) {
+            execstack = false;
+        } else if (p.flagZ("execstack-if-needed")) {
+            execstack_if_needed = true;
         } else {
             try positionals.append(.{
-                .path = arg,
+                .path = p.arg,
                 .must_link = true,
             });
         }
@@ -203,6 +196,119 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         .static = static,
         .strip_debug = strip_debug,
         .strip_all = strip_all,
+        .dynamic_linker = dynamic_linker,
+    };
+}
+
+fn ArgParser(comptime Ctx: type) type {
+    return struct {
+        arg: []const u8 = undefined,
+        it: *Zld.Options.ArgsIterator,
+        ctx: Ctx,
+
+        fn hasMore(p: *Self) bool {
+            p.arg = p.it.next() orelse return false;
+            return true;
+        }
+
+        fn flagAny(p: *Self, comptime pat: []const u8) bool {
+            return p.flag2(pat) or p.flag1(pat);
+        }
+
+        fn flag2(p: *Self, comptime pat: []const u8) bool {
+            return p.flagPrefix(pat, "--");
+        }
+
+        fn flag1(p: *Self, comptime pat: []const u8) bool {
+            return p.flagPrefix(pat, "-");
+        }
+
+        fn flagZ(p: *Self, comptime pat: []const u8) bool {
+            const prefix = "-z";
+            const i = p.it.i;
+            const actual_flag = blk: {
+                if (mem.eql(u8, p.arg, prefix)) {
+                    break :blk p.it.nextOrFatal(p.ctx);
+                }
+                if (mem.startsWith(u8, p.arg, prefix)) {
+                    break :blk p.arg[prefix.len..];
+                }
+                return false;
+            };
+            if (mem.eql(u8, actual_flag, pat)) return true;
+            p.it.i = i;
+            return false;
+        }
+
+        fn flagPrefix(p: *Self, comptime pat: []const u8, comptime prefix: []const u8) bool {
+            if (mem.startsWith(u8, p.arg, prefix)) {
+                const actual_arg = p.arg[prefix.len..];
+                if (mem.eql(u8, actual_arg, pat)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        fn argAny(p: *Self, comptime pat: []const u8) ?[]const u8 {
+            if (p.arg2(pat)) |value| return value;
+            return p.arg1(pat);
+        }
+
+        fn arg2(p: *Self, comptime pat: []const u8) ?[]const u8 {
+            return p.argPrefix(pat, "--");
+        }
+
+        fn arg1(p: *Self, comptime pat: []const u8) ?[]const u8 {
+            return p.argPrefix(pat, "-");
+        }
+
+        fn argZ(p: *Self, comptime pat: []const u8) ?[]const u8 {
+            const prefix = "-z";
+            const i = p.it.i;
+            const actual_arg = blk: {
+                if (mem.eql(u8, p.arg, prefix)) {
+                    break :blk p.it.nextOrFatal(p.ctx);
+                }
+                if (mem.startsWith(u8, p.arg, prefix)) {
+                    break :blk p.arg[prefix.len..];
+                }
+                return null;
+            };
+            if (mem.startsWith(u8, actual_arg, pat)) {
+                if (mem.indexOf(u8, actual_arg, "=")) |index| {
+                    if (index == pat.len) {
+                        const value = actual_arg[index + 1 ..];
+                        return value;
+                    }
+                }
+            }
+            p.it.i = i;
+            return null;
+        }
+
+        fn argPrefix(p: *Self, comptime pat: []const u8, comptime prefix: []const u8) ?[]const u8 {
+            if (mem.startsWith(u8, p.arg, prefix)) {
+                const actual_arg = p.arg[prefix.len..];
+                if (mem.eql(u8, actual_arg, pat)) {
+                    return p.it.nextOrFatal(p.ctx);
+                }
+                if (pat.len == 1 and mem.eql(u8, actual_arg[0..pat.len], pat)) {
+                    return actual_arg[pat.len..];
+                }
+                if (mem.startsWith(u8, actual_arg, pat)) {
+                    if (mem.indexOf(u8, actual_arg, "=")) |index| {
+                        if (index == pat.len) {
+                            const value = actual_arg[index + 1 ..];
+                            return value;
+                        }
+                    }
+                }
+            }
+            return null;
+        }
+
+        const Self = @This();
     };
 }
 
