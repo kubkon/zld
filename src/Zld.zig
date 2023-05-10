@@ -23,8 +23,9 @@ pub const OutputMode = enum {
 };
 
 pub const SystemLib = struct {
-    needed: bool = false,
+    needed: bool = true,
     weak: bool = false,
+    static: bool = false,
 };
 
 pub const LinkObject = struct {

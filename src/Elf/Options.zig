@@ -18,6 +18,8 @@ const usage =
     \\-l[value]                     Specify library to link against
     \\-L[value]                     Specify library search dir
     \\-m [value]                    Set target emulation
+    \\--pop-state                   Restore the states saved by --push-state
+    \\--push-state                  Save the current state of --as-needed, -static and --whole-archive
     \\--rpath=[value], -R [value]   Specify runtime path
     \\--shared                      Create dynamic library
     \\--static                      Alias for --Bstatic
@@ -61,8 +63,6 @@ execstack: bool = false,
 /// via sh_flags of the input .note.GNU-stack section.
 execstack_if_needed: bool = false,
 cpu_arch: ?std.Target.Cpu.Arch = null,
-static: bool = false,
-needed: bool = true,
 dynamic_linker: ?[]const u8 = null,
 eh_frame_hdr: bool = false,
 
@@ -86,6 +86,13 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         .rpath_list = undefined,
     };
 
+    const State = struct {
+        needed: bool,
+        static: bool,
+    };
+    var stack = std.ArrayList(State).init(arena);
+    var state = State{ .needed = true, .static = false };
+
     var it = Zld.Options.ArgsIterator{ .args = args };
     var p = ArgParser(@TypeOf(ctx)){ .it = &it, .ctx = ctx };
     while (p.hasMore()) {
@@ -94,7 +101,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         } else if (p.arg2("debug-log")) |scope| {
             try ctx.log_scopes.append(scope);
         } else if (p.arg1("l")) |lib| {
-            try libs.put(lib, .{ .needed = opts.needed });
+            try libs.put(lib, .{ .needed = state.needed, .static = state.static });
         } else if (p.arg1("L")) |dir| {
             try lib_dirs.append(dir);
         } else if (p.arg1("o")) |path| {
@@ -124,10 +131,10 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         } else if (p.flagAny("allow-multiple-definition")) {
             opts.allow_multiple_definition = true;
         } else if (p.flagAny("static")) {
-            opts.static = true;
+            state.static = true;
         } else if (p.argAny("B")) |b_arg| {
             if (mem.eql(u8, b_arg, "static")) {
-                opts.static = true;
+                state.static = true;
             } else {
                 ctx.fatal("unknown argument '--B{s}'", .{b_arg});
             }
@@ -138,9 +145,13 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         } else if (p.flagAny("strip-all") or p.flag1("s")) {
             opts.strip_all = true;
         } else if (p.flagAny("as-needed")) {
-            opts.needed = false;
+            state.needed = false;
         } else if (p.flagAny("no-as-needed")) {
-            opts.needed = true;
+            state.needed = true;
+        } else if (p.flagAny("push-state")) {
+            try stack.append(state);
+        } else if (p.flagAny("pop-state")) {
+            state = stack.popOrNull() orelse ctx.fatal("no state pushed before pop", .{});
         } else if (p.argAny("dynamic-linker")) |path| {
             opts.dynamic_linker = path;
         } else if (p.arg1("I")) |path| {

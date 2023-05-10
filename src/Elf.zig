@@ -168,8 +168,8 @@ pub fn flush(self: *Elf) !void {
 
     var libs = std.StringArrayHashMap(Zld.SystemLib).init(arena);
     var lib_not_found = false;
-    for (self.options.libs.keys()) |lib_name| {
-        if (!self.options.static) {
+    for (self.options.libs.keys(), self.options.libs.values()) |lib_name, opts| {
+        if (!opts.static) {
             if (try resolveLib(arena, lib_dirs.items, lib_name, ".so")) |full_path| {
                 try libs.put(full_path, self.options.libs.get(lib_name).?);
                 continue;
