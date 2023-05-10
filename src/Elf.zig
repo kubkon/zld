@@ -725,6 +725,8 @@ fn parseLibs(self: *Elf, libs: []const []const u8) !void {
     for (libs) |lib| {
         log.debug("parsing lib path '{s}'", .{lib});
         if (try self.parseArchive(lib)) continue;
+        // if (try self.parseDso(lib)) continue;
+        if (try self.parseLdScript(lib)) continue;
 
         self.base.warn("unknown filetype for a library: '{s}'", .{lib});
     }
@@ -732,10 +734,7 @@ fn parseLibs(self: *Elf, libs: []const []const u8) !void {
 
 fn parseObject(self: *Elf, path: []const u8) !bool {
     const gpa = self.base.allocator;
-    const file = fs.cwd().openFile(path, .{}) catch |err| switch (err) {
-        error.FileNotFound => return false,
-        else => |e| return e,
-    };
+    const file = try fs.cwd().openFile(path, .{});
     defer file.close();
 
     const header = try file.reader().readStruct(elf.Elf64_Ehdr);
@@ -774,10 +773,7 @@ fn parseObject(self: *Elf, path: []const u8) !bool {
 
 fn parseArchive(self: *Elf, path: []const u8) !bool {
     const gpa = self.base.allocator;
-    const file = fs.cwd().openFile(path, .{}) catch |err| switch (err) {
-        error.FileNotFound => return false,
-        else => |e| return e,
-    };
+    const file = try fs.cwd().openFile(path, .{});
     errdefer file.close();
 
     const magic = try file.reader().readBytesNoEof(Archive.SARMAG);
@@ -793,6 +789,20 @@ fn parseArchive(self: *Elf, path: []const u8) !bool {
     try archive.parse(gpa, self);
 
     return true;
+}
+
+fn parseDso(self: *Elf, path: []const u8) !bool {
+    _ = self;
+    _ = path;
+    // TODO
+    return false;
+}
+
+fn parseLdScript(self: *Elf, path: []const u8) !bool {
+    const file = try fs.cwd().openFile(path, .{});
+    defer file.close();
+    _ = self;
+    return false;
 }
 
 fn resolveSymbols(self: *Elf) !void {
