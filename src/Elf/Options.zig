@@ -9,6 +9,8 @@ const usage =
     \\--dynamic-linker=[value], -I [value]      
     \\                              Set the dynamic linker to use
     \\--end-group                   Ignored for compatibility with GNU
+    \\--eh-frame-hdr                Create .eh_frame_hdr section
+    \\--no-eh-frame-hdr             Don't create .eh_frame_hdr section
     \\--entry=[value], -e [value]   Set name of the entry point symbol
     \\--gc-sections                 Remove unused sections
     \\--no-gc-sections              Don't remove unused sections (default)
@@ -62,6 +64,7 @@ cpu_arch: ?std.Target.Cpu.Arch = null,
 static: bool = false,
 needed: bool = true,
 dynamic_linker: ?[]const u8 = null,
+eh_frame_hdr: bool = false,
 
 pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options {
     if (args.len == 0) ctx.fatal(usage, .{cmd});
@@ -70,22 +73,18 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
     var libs = std.StringArrayHashMap(Zld.SystemLib).init(arena);
     var lib_dirs = std.ArrayList([]const u8).init(arena);
     var rpath_list = std.ArrayList([]const u8).init(arena);
-    var out_path: ?[]const u8 = null;
-    var shared: bool = false;
-    var gc_sections: bool = false;
-    var print_gc_sections: bool = false;
-    var entry: ?[]const u8 = null;
-    var allow_multiple_definition: bool = false;
-    var stack_size: ?u64 = null;
-    var execstack: bool = false;
-    var execstack_if_needed: bool = false;
-    var cpu_arch: ?std.Target.Cpu.Arch = null;
-    var static: bool = false;
-    var strip_debug: bool = false;
-    var strip_all: bool = false;
-    var verbose: bool = false;
-    var needed: bool = true;
-    var dynamic_linker: ?[]const u8 = null;
+    var verbose = false;
+    var opts: Options = .{
+        .emit = .{
+            .directory = std.fs.cwd(),
+            .sub_path = "a.out",
+        },
+        .output_mode = .exe,
+        .positionals = undefined,
+        .libs = undefined,
+        .lib_dirs = undefined,
+        .rpath_list = undefined,
+    };
 
     var it = Zld.Options.ArgsIterator{ .args = args };
     var p = ArgParser(@TypeOf(ctx)){ .it = &it, .ctx = ctx };
@@ -95,68 +94,72 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         } else if (p.arg2("debug-log")) |scope| {
             try ctx.log_scopes.append(scope);
         } else if (p.arg1("l")) |lib| {
-            try libs.put(lib, .{ .needed = needed });
+            try libs.put(lib, .{ .needed = opts.needed });
         } else if (p.arg1("L")) |dir| {
             try lib_dirs.append(dir);
         } else if (p.arg1("o")) |path| {
-            out_path = path;
+            opts.emit.sub_path = path;
         } else if (p.flagAny("gc-sections")) {
-            gc_sections = true;
+            opts.gc_sections = true;
         } else if (p.flagAny("no-gc-sections")) {
-            gc_sections = false;
+            opts.gc_sections = false;
         } else if (p.flagAny("print-gc-sections")) {
-            print_gc_sections = true;
+            opts.print_gc_sections = true;
         } else if (p.flagAny("shared")) {
-            shared = true;
+            opts.output_mode = .lib;
         } else if (p.argAny("rpath")) |path| {
             try rpath_list.append(path);
         } else if (p.arg1("R")) |path| {
             try rpath_list.append(path);
         } else if (p.argAny("entry")) |name| {
-            entry = name;
+            opts.entry = name;
         } else if (p.arg1("e")) |name| {
-            entry = name;
+            opts.entry = name;
         } else if (p.arg1("m")) |target| {
             if (mem.eql(u8, target, "elf_x86_64")) {
-                cpu_arch = .x86_64;
+                opts.cpu_arch = .x86_64;
             } else {
                 ctx.fatal("unknown target emulation '{s}'", .{target});
             }
         } else if (p.flagAny("allow-multiple-definition")) {
-            allow_multiple_definition = true;
+            opts.allow_multiple_definition = true;
         } else if (p.flagAny("static")) {
-            static = true;
+            opts.static = true;
         } else if (p.argAny("B")) |b_arg| {
             if (mem.eql(u8, b_arg, "static")) {
-                static = true;
+                opts.static = true;
             } else {
                 ctx.fatal("unknown argument '--B{s}'", .{b_arg});
             }
         } else if (p.flagAny("start-group") or p.flagAny("end-group")) {
             // Ignored
         } else if (p.flagAny("strip-debug") or p.flag1("S")) {
-            strip_debug = true;
+            opts.strip_debug = true;
         } else if (p.flagAny("strip-all") or p.flag1("s")) {
-            strip_all = true;
+            opts.strip_all = true;
         } else if (p.flagAny("as-needed")) {
-            needed = false;
+            opts.needed = false;
         } else if (p.flagAny("no-as-needed")) {
-            needed = true;
+            opts.needed = true;
         } else if (p.argAny("dynamic-linker")) |path| {
-            dynamic_linker = path;
+            opts.dynamic_linker = path;
         } else if (p.arg1("I")) |path| {
-            dynamic_linker = path;
+            opts.dynamic_linker = path;
+        } else if (p.flagAny("eh-frame-hdr")) {
+            opts.eh_frame_hdr = true;
+        } else if (p.flagAny("no-eh-frame-hdr")) {
+            opts.eh_frame_hdr = false;
         } else if (p.flagAny("verbose")) {
             verbose = true;
         } else if (p.argZ("stack-size")) |value| {
-            stack_size = std.fmt.parseInt(u64, value, 0) catch
+            opts.stack_size = std.fmt.parseInt(u64, value, 0) catch
                 ctx.fatal("Could not parse value '{s}' into integer", .{value});
         } else if (p.flagZ("execstack")) {
-            execstack = true;
+            opts.execstack = true;
         } else if (p.flagZ("noexecstack")) {
-            execstack = false;
+            opts.execstack = false;
         } else if (p.flagZ("execstack-if-needed")) {
-            execstack_if_needed = true;
+            opts.execstack_if_needed = true;
         } else {
             try positionals.append(.{
                 .path = p.arg,
@@ -175,29 +178,12 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
 
     if (positionals.items.len == 0) ctx.fatal("Expected at least one input .o file", .{});
 
-    return Options{
-        .emit = .{
-            .directory = std.fs.cwd(),
-            .sub_path = out_path orelse "a.out",
-        },
-        .output_mode = if (shared) .lib else .exe,
-        .positionals = positionals.items,
-        .libs = libs,
-        .lib_dirs = lib_dirs.items,
-        .rpath_list = rpath_list.items,
-        .stack_size = stack_size,
-        .print_gc_sections = print_gc_sections,
-        .entry = entry,
-        .allow_multiple_definition = allow_multiple_definition,
-        .gc_sections = gc_sections,
-        .execstack = execstack,
-        .execstack_if_needed = execstack_if_needed,
-        .cpu_arch = cpu_arch,
-        .static = static,
-        .strip_debug = strip_debug,
-        .strip_all = strip_all,
-        .dynamic_linker = dynamic_linker,
-    };
+    opts.positionals = positionals.items;
+    opts.libs = libs;
+    opts.lib_dirs = lib_dirs.items;
+    opts.rpath_list = rpath_list.items;
+
+    return opts;
 }
 
 fn ArgParser(comptime Ctx: type) type {
