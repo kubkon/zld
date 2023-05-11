@@ -799,9 +799,15 @@ fn parseDso(self: *Elf, path: []const u8) !bool {
 }
 
 fn parseLdScript(self: *Elf, path: []const u8) !bool {
+    const gpa = self.base.allocator;
     const file = try fs.cwd().openFile(path, .{});
     defer file.close();
-    _ = self;
+    const data = try file.readToEndAlloc(gpa, std.math.maxInt(u32));
+    defer gpa.free(data);
+
+    var script = LdScript{};
+    try script.parse(data, self);
+
     return false;
 }
 
@@ -1316,6 +1322,7 @@ const Archive = @import("Elf/Archive.zig");
 const Atom = @import("Elf/Atom.zig");
 const Elf = @This();
 const InternalObject = @import("Elf/InternalObject.zig");
+const LdScript = @import("Elf/LdScript.zig");
 const Object = @import("Elf/Object.zig");
 pub const Options = @import("Elf/Options.zig");
 const StringTable = @import("strtab.zig").StringTable;
