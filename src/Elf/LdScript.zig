@@ -4,6 +4,76 @@ pub fn parse(scr: *LdScript, data: []const u8, elf_file: *Elf) !void {
     _ = scr;
 }
 
+const Command = enum {
+    output_format,
+    group,
+    as_needed,
+
+    fn fromString(s: []const u8) ?Command {
+        inline for (@typeInfo(Command).Enum.fields) |field| {
+            comptime var buf: [field.name.len]u8 = undefined;
+            inline for (field.name, 0..) |c, i| {
+                buf[i] = comptime std.ascii.toUpper(c);
+            }
+            if (std.mem.eql(u8, &buf, s)) return @field(Command, field.name);
+        }
+        return null;
+    }
+};
+
+const Parser = struct {
+    source: []const u8,
+    it: *TokenIterator,
+
+    fn outputFormat(p: *Parser) !std.Target.Cpu.Arch {
+        const cmd_tok_id = try p.require(.command);
+        const cmd = p.getCommand(cmd_tok_id);
+        assert(cmd == .output_format);
+        const value = value: {
+            if (p.skip(&.{.lparen})) {
+                const value_id = try p.require(.literal);
+                const value = p.it.tokens[value_id];
+                _ = try p.require(.rparen);
+                break :value value.get(p.source);
+            } else if (p.skip(&.{ .new_line, .lbrace })) {
+                const value_id = try p.require(.literal);
+                const value = p.it.tokens[value_id];
+                _ = p.skip(&.{.new_line});
+                _ = try p.require(.rbrace);
+                break :value value.get(p.source);
+            } else return error.UnexpectedToken;
+        };
+        if (std.mem.eql(u8, value, "elf64-x86-64")) return .x86_64;
+        return error.UnknownCpuArch;
+    }
+
+    fn skip(p: *Parser, comptime ids: []const Token.Id) bool {
+        const pos = p.it.pos;
+        inline for (ids) |id| {
+            const tok = p.it.next() orelse return false;
+            if (tok.id != id) {
+                p.it.seekTo(pos);
+                return false;
+            }
+        }
+        return true;
+    }
+
+    fn require(p: *Parser, comptime id: Token.Id) !Token.Index {
+        const pos = p.it.pos;
+        const tok = p.it.next() orelse return error.UnexpectedToken;
+        if (tok.id == id) return pos;
+        p.it.seekBy(-1);
+        return error.UnexpectedToken;
+    }
+
+    fn getCommand(p: *Parser, index: Token.Index) Command {
+        const tok = p.it.tokens[index];
+        assert(tok.id == .command);
+        return Command.fromString(tok.get(p.source)).?;
+    }
+};
+
 const Token = struct {
     id: Id,
     start: usize,
@@ -28,16 +98,14 @@ const Token = struct {
     };
 
     const Index = usize;
-};
 
-const Command = enum {
-    output_format,
-    group,
-    as_needed,
+    inline fn get(tok: Token, source: []const u8) []const u8 {
+        return source[tok.start..tok.end];
+    }
 };
 
 const Tokenizer = struct {
-    buffer: []const u8,
+    source: []const u8,
     index: usize = 0,
 
     fn matchesPattern(comptime pattern: []const u8, slice: []const u8) bool {
@@ -51,19 +119,11 @@ const Tokenizer = struct {
     }
 
     fn matches(tok: Tokenizer, comptime pattern: []const u8) bool {
-        return matchesPattern(pattern, tok.buffer[tok.index..]);
+        return matchesPattern(pattern, tok.source[tok.index..]);
     }
 
     fn isCommand(tok: Tokenizer, start: usize, end: usize) bool {
-        const candidate = tok.buffer[start..end];
-        inline for (@typeInfo(Command).Enum.fields) |field| {
-            comptime var buf: [field.name.len]u8 = undefined;
-            inline for (field.name, 0..) |c, i| {
-                buf[i] = comptime std.ascii.toUpper(c);
-            }
-            if (std.mem.eql(u8, &buf, candidate)) return true;
-        }
-        return false;
+        return if (Command.fromString(tok.source[start..end]) == null) false else true;
     }
 
     fn next(tok: *Tokenizer) Token {
@@ -79,8 +139,8 @@ const Tokenizer = struct {
             literal,
         } = .start;
 
-        while (tok.index < tok.buffer.len) : (tok.index += 1) {
-            const c = tok.buffer[tok.index];
+        while (tok.index < tok.source.len) : (tok.index += 1) {
+            const c = tok.source[tok.index];
             switch (state) {
                 .start => switch (c) {
                     ' ', '\t' => result.start += 1,
@@ -182,9 +242,38 @@ const Tokenizer = struct {
         result.end = tok.index;
         return result;
     }
+};
 
-    inline fn get(tok: Tokenizer, token: Token) []const u8 {
-        return tok.buffer[token.start..token.end];
+const TokenIterator = struct {
+    tokens: []const Token,
+    pos: Token.Index = 0,
+
+    fn next(it: *TokenIterator) ?Token {
+        const token = it.peek() orelse return null;
+        it.pos += 1;
+        return token;
+    }
+
+    fn peek(it: TokenIterator) ?Token {
+        if (it.pos >= it.tokens.len) return null;
+        return it.tokens[it.pos];
+    }
+
+    inline fn reset(it: *TokenIterator) void {
+        it.pos = 0;
+    }
+
+    inline fn seekTo(it: *TokenIterator, pos: Token.Index) void {
+        it.pos = pos;
+    }
+
+    fn seekBy(it: *TokenIterator, offset: isize) void {
+        const new_pos = @bitCast(isize, it.pos) + offset;
+        if (new_pos < 0) {
+            it.pos = 0;
+        } else {
+            it.pos = @intCast(usize, new_pos);
+        }
     }
 };
 
@@ -194,11 +283,11 @@ fn testExpectedTokens(input: []const u8, expected: []const Token.Id) !void {
     var given = std.ArrayList(Token.Id).init(testing.allocator);
     defer given.deinit();
 
-    var tokenizer = Tokenizer{ .buffer = input };
+    var tokenizer = Tokenizer{ .source = input };
     while (true) {
         const tok = tokenizer.next();
         if (tok.id == .invalid) {
-            std.debug.print("  {s} => '{s}'\n", .{ @tagName(tok.id), tokenizer.get(tok) });
+            std.debug.print("  {s} => '{s}'\n", .{ @tagName(tok.id), tok.get(input) });
         }
         try given.append(tok.id);
         if (tok.id == .eof) break;
@@ -241,7 +330,27 @@ test "Tokenizer - libc.so" {
     });
 }
 
+test "Parser - output format" {
+    const source =
+        \\OUTPUT_FORMAT(elf64-x86-64)
+    ;
+    var tokenizer = Tokenizer{ .source = source };
+    var tokens = std.ArrayList(Token).init(testing.allocator);
+    defer tokens.deinit();
+    while (true) {
+        const tok = tokenizer.next();
+        try testing.expect(tok.id != .invalid);
+        try tokens.append(tok);
+        if (tok.id == .eof) break;
+    }
+    var it = TokenIterator{ .tokens = tokens.items };
+    var parser = Parser{ .source = source, .it = &it };
+    const cpu_arch = try parser.outputFormat();
+    try testing.expectEqual(cpu_arch, .x86_64);
+}
+
 const LdScript = @This();
 
 const std = @import("std");
+const assert = std.debug.assert;
 const Elf = @import("../Elf.zig");
