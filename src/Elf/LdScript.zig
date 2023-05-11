@@ -26,18 +26,15 @@ const Parser = struct {
     it: *TokenIterator,
 
     fn outputFormat(p: *Parser) !std.Target.Cpu.Arch {
-        const cmd_tok_id = try p.require(.command);
-        const cmd = p.getCommand(cmd_tok_id);
-        assert(cmd == .output_format);
         const value = value: {
             if (p.skip(&.{.lparen})) {
                 const value_id = try p.require(.literal);
-                const value = p.it.tokens[value_id];
+                const value = p.it.get(value_id);
                 _ = try p.require(.rparen);
                 break :value value.get(p.source);
             } else if (p.skip(&.{ .new_line, .lbrace })) {
                 const value_id = try p.require(.literal);
-                const value = p.it.tokens[value_id];
+                const value = p.it.get(value_id);
                 _ = p.skip(&.{.new_line});
                 _ = try p.require(.rbrace);
                 break :value value.get(p.source);
@@ -45,6 +42,38 @@ const Parser = struct {
         };
         if (std.mem.eql(u8, value, "elf64-x86-64")) return .x86_64;
         return error.UnknownCpuArch;
+    }
+
+    fn group(p: *Parser, libs: *std.StringArrayHashMap(Zld.SystemLib)) !void {
+        if (!p.skip(&.{.lparen})) return error.UnexpectedToken;
+
+        while (true) {
+            if (p.maybe(.literal)) |tok_id| {
+                const tok = p.it.get(tok_id);
+                const lib = tok.get(p.source);
+                try libs.put(lib, .{ .needed = true });
+            } else if (p.maybe(.command)) |cmd_id| {
+                const cmd = p.getCommand(cmd_id);
+                switch (cmd) {
+                    .as_needed => try p.asNeeded(libs),
+                    else => return error.UnexpectedToken,
+                }
+            } else break;
+        }
+
+        _ = try p.require(.rparen);
+    }
+
+    fn asNeeded(p: *Parser, libs: *std.StringArrayHashMap(Zld.SystemLib)) !void {
+        if (!p.skip(&.{.lparen})) return error.UnexpectedToken;
+
+        while (p.maybe(.literal)) |tok_id| {
+            const tok = p.it.get(tok_id);
+            const lib = tok.get(p.source);
+            try libs.put(lib, .{ .needed = false });
+        }
+
+        _ = try p.require(.rparen);
     }
 
     fn skip(p: *Parser, comptime ids: []const Token.Id) bool {
@@ -59,16 +88,20 @@ const Parser = struct {
         return true;
     }
 
-    fn require(p: *Parser, comptime id: Token.Id) !Token.Index {
+    fn maybe(p: *Parser, comptime id: Token.Id) ?Token.Index {
         const pos = p.it.pos;
-        const tok = p.it.next() orelse return error.UnexpectedToken;
+        const tok = p.it.next() orelse return null;
         if (tok.id == id) return pos;
         p.it.seekBy(-1);
-        return error.UnexpectedToken;
+        return null;
+    }
+
+    fn require(p: *Parser, comptime id: Token.Id) !Token.Index {
+        return p.maybe(id) orelse return error.UnexpectedToken;
     }
 
     fn getCommand(p: *Parser, index: Token.Index) Command {
-        const tok = p.it.tokens[index];
+        const tok = p.it.get(index);
         assert(tok.id == .command);
         return Command.fromString(tok.get(p.source)).?;
     }
@@ -275,6 +308,11 @@ const TokenIterator = struct {
             it.pos = @intCast(usize, new_pos);
         }
     }
+
+    inline fn get(it: *TokenIterator, pos: Token.Index) Token {
+        assert(pos < it.tokens.len);
+        return it.tokens[pos];
+    }
 };
 
 const testing = std.testing;
@@ -319,7 +357,7 @@ test "Tokenizer - libc.so" {
         \\   Use the shared library, but some functions are only in
         \\   the static library, so try that secondarily.  */
         \\OUTPUT_FORMAT(elf64-x86-64)
-        \\GROUP ( /glibc-2.34-210/lib/libc.so.6 /glibc-2.34-210/lib/libc_nonshared.a  AS_NEEDED ( /glibc-2.34-210/lib/ld-linux-x86-64.so.2 ) )
+        \\GROUP ( /a/b/c.so.6 /a/d/e.a  AS_NEEDED ( /f/g/h.so.2 ) )
     , &.{
         .comment, .new_line, // GNU comment
         .command, .lparen, .literal, .rparen, .new_line, // output format
@@ -345,12 +383,49 @@ test "Parser - output format" {
     }
     var it = TokenIterator{ .tokens = tokens.items };
     var parser = Parser{ .source = source, .it = &it };
+    const tok_id = try parser.require(.command);
+    try testing.expectEqual(parser.getCommand(tok_id), .output_format);
     const cpu_arch = try parser.outputFormat();
     try testing.expectEqual(cpu_arch, .x86_64);
+}
+
+test "Parser - group with as-needed" {
+    const source =
+        \\GROUP ( /a/b/c.so.6 /a/d/e.a  AS_NEEDED ( /f/g/h.so.2 ) )
+    ;
+    var tokenizer = Tokenizer{ .source = source };
+    var tokens = std.ArrayList(Token).init(testing.allocator);
+    defer tokens.deinit();
+    while (true) {
+        const tok = tokenizer.next();
+        try testing.expect(tok.id != .invalid);
+        try tokens.append(tok);
+        if (tok.id == .eof) break;
+    }
+    var it = TokenIterator{ .tokens = tokens.items };
+    var parser = Parser{ .source = source, .it = &it };
+
+    var libs = std.StringArrayHashMap(Zld.SystemLib).init(testing.allocator);
+    defer libs.deinit();
+    const tok_id = try parser.require(.command);
+    try testing.expectEqual(parser.getCommand(tok_id), .group);
+    try parser.group(&libs);
+
+    const names = libs.keys();
+    const opts = libs.values();
+    try testing.expectEqualStrings("/a/b/c.so.6", names[0]);
+    try testing.expect(opts[0].needed);
+    try testing.expectEqualStrings("/a/d/e.a", names[1]);
+    try testing.expect(opts[1].needed);
+    try testing.expectEqualStrings("/f/g/h.so.2", names[2]);
+    try testing.expect(!opts[2].needed);
 }
 
 const LdScript = @This();
 
 const std = @import("std");
 const assert = std.debug.assert;
+
+const Allocator = std.mem.Allocator;
 const Elf = @import("../Elf.zig");
+const Zld = @import("../Zld.zig");
