@@ -1,8 +1,91 @@
-pub fn parse(scr: *LdScript, data: []const u8, elf_file: *Elf) !void {
-    _ = elf_file;
-    _ = data;
-    _ = scr;
+cpu_arch: ?std.Target.Cpu.Arch = null,
+libs: std.StringArrayHashMapUnmanaged(Zld.SystemLib) = .{},
+
+pub fn deinit(scr: *LdScript, allocator: Allocator) void {
+    scr.libs.deinit(allocator);
 }
+
+pub fn parse(scr: *LdScript, data: []const u8, elf_file: *Elf) !void {
+    const gpa = elf_file.base.allocator;
+    var tokenizer = Tokenizer{ .source = data };
+    var tokens = std.ArrayList(Token).init(gpa);
+    defer tokens.deinit();
+    var line_col = std.ArrayList(LineColumn).init(gpa);
+    defer line_col.deinit();
+
+    var line: usize = 0;
+    var prev_line_last_col: usize = 0;
+
+    while (true) {
+        const tok = tokenizer.next();
+        try tokens.append(tok);
+        const column = tok.start - prev_line_last_col;
+        try line_col.append(.{ .line = line, .column = column });
+        switch (tok.id) {
+            .invalid => elf_file.base.fatal("invalid token in ld script: '{s}' ({d}:{d})", .{
+                tok.get(data),
+                line,
+                column,
+            }),
+            .new_line => {
+                line += 1;
+                prev_line_last_col = tok.end;
+            },
+            .eof => break,
+            else => {},
+        }
+    }
+
+    var it = TokenIterator{ .tokens = tokens.items };
+    var parser = Parser{ .source = data, .it = &it };
+    var libs = std.StringArrayHashMap(Zld.SystemLib).init(gpa);
+    scr.doParse(.{
+        .parser = &parser,
+        .libs = &libs,
+    }) catch |err| switch (err) {
+        error.UnexpectedToken => {
+            const last_token_id = parser.it.pos - 1;
+            const last_token = parser.it.get(last_token_id);
+            const lcol = line_col.items[last_token_id];
+            elf_file.base.fatal("unexpected token in ld script: {s} : '{s}' ({d}:{d})", .{
+                @tagName(last_token.id),
+                last_token.get(data),
+                lcol.line,
+                lcol.column,
+            });
+        },
+        else => |e| return e,
+    };
+    scr.libs = libs.unmanaged;
+}
+
+fn doParse(scr: *LdScript, ctx: struct {
+    parser: *Parser,
+    libs: *std.StringArrayHashMap(Zld.SystemLib),
+}) !void {
+    while (true) {
+        ctx.parser.skipAny(&.{ .comment, .new_line });
+
+        if (ctx.parser.maybe(.command)) |cmd_id| {
+            const cmd = ctx.parser.getCommand(cmd_id);
+            switch (cmd) {
+                .output_format => scr.cpu_arch = try ctx.parser.outputFormat(),
+                .group => try ctx.parser.group(ctx.libs),
+                else => return error.UnexpectedToken,
+            }
+        } else break;
+    }
+
+    if (ctx.parser.it.next()) |tok| switch (tok.id) {
+        .eof => {},
+        else => return error.UnexpectedToken,
+    };
+}
+
+const LineColumn = struct {
+    line: usize,
+    column: usize,
+};
 
 const Command = enum {
     output_format,
@@ -86,6 +169,15 @@ const Parser = struct {
             }
         }
         return true;
+    }
+
+    fn skipAny(p: *Parser, comptime ids: []const Token.Id) void {
+        outer: while (p.it.next()) |tok| {
+            inline for (ids) |id| {
+                if (id == tok.id) continue :outer;
+            }
+            break p.it.seekBy(-1);
+        }
     }
 
     fn maybe(p: *Parser, comptime id: Token.Id) ?Token.Index {

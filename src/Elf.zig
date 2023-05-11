@@ -716,8 +716,10 @@ fn parsePositionals(self: *Elf, files: []const []const u8) !void {
 
         if (try self.parseObject(full_path)) continue;
         if (try self.parseArchive(full_path)) continue;
+        // if (try self.parseDso(full_path)) continue;
+        if (try self.parseLdScript(full_path)) continue;
 
-        self.base.warn("unknown filetype for positional input file: '{s}'", .{file_name});
+        self.base.fatal("unknown filetype for positional input file: '{s}'", .{file_name});
     }
 }
 
@@ -728,7 +730,7 @@ fn parseLibs(self: *Elf, libs: []const []const u8) !void {
         // if (try self.parseDso(lib)) continue;
         if (try self.parseLdScript(lib)) continue;
 
-        self.base.warn("unknown filetype for a library: '{s}'", .{lib});
+        self.base.fatal("unknown filetype for a library: '{s}'", .{lib});
     }
 }
 
@@ -806,7 +808,27 @@ fn parseLdScript(self: *Elf, path: []const u8) !bool {
     defer gpa.free(data);
 
     var script = LdScript{};
+    defer script.deinit(gpa);
     try script.parse(data, self);
+
+    if (script.cpu_arch) |scr_cpu_arch| {
+        const cpu_arch = self.options.cpu_arch orelse blk: {
+            self.options.cpu_arch = scr_cpu_arch;
+            break :blk self.options.cpu_arch.?;
+        };
+        if (cpu_arch != scr_cpu_arch) {
+            self.base.fatal("{s}: invalid architecture '{s}', expected '{s}'", .{
+                path,
+                @tagName(scr_cpu_arch.toElfMachine()),
+                @tagName(cpu_arch.toElfMachine()),
+            });
+            return false;
+        }
+    }
+
+    for (script.libs.keys(), script.libs.values()) |name, opts| {
+        log.debug("{s} => {}", .{ name, opts });
+    }
 
     return false;
 }
