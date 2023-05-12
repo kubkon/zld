@@ -71,8 +71,8 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
 
     var positionals = std.ArrayList(Zld.LinkObject).init(arena);
     var libs = std.StringArrayHashMap(Zld.SystemLib).init(arena);
-    var search_dirs = std.ArrayList([]const u8).init(arena);
-    var rpath_list = std.ArrayList([]const u8).init(arena);
+    var search_dirs = std.StringArrayHashMap(void).init(arena);
+    var rpath_list = std.StringArrayHashMap(void).init(arena);
     var verbose = false;
     var opts: Options = .{
         .emit = .{
@@ -103,7 +103,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         } else if (p.arg1("l")) |lib| {
             try libs.put(lib, .{ .needed = state.needed, .static = state.static });
         } else if (p.arg1("L")) |dir| {
-            try search_dirs.append(dir);
+            try search_dirs.put(dir, {});
         } else if (p.arg1("o")) |path| {
             opts.emit.sub_path = path;
         } else if (p.flagAny("gc-sections")) {
@@ -115,9 +115,9 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         } else if (p.flagAny("shared")) {
             opts.output_mode = .lib;
         } else if (p.argAny("rpath")) |path| {
-            try rpath_list.append(path);
+            try rpath_list.put(path, {});
         } else if (p.arg1("R")) |path| {
-            try rpath_list.append(path);
+            try rpath_list.put(path, {});
         } else if (p.argAny("entry")) |name| {
             opts.entry = name;
         } else if (p.arg1("e")) |name| {
@@ -191,8 +191,8 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
 
     opts.positionals = positionals.items;
     opts.libs = libs;
-    opts.search_dirs = search_dirs.items;
-    opts.rpath_list = rpath_list.items;
+    opts.search_dirs = search_dirs.keys();
+    opts.rpath_list = rpath_list.keys();
 
     return opts;
 }
