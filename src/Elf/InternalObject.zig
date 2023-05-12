@@ -1,3 +1,4 @@
+index: u32,
 symtab: std.ArrayListUnmanaged(elf.Elf64_Sym) = .{},
 globals: std.ArrayListUnmanaged(u32) = .{},
 
@@ -26,7 +27,7 @@ pub fn addSyntheticGlobal(self: *InternalObject, name: [:0]const u8, elf_file: *
             .value = 0,
             .name = global.name,
             .atom = 0,
-            .file = null,
+            .file = self.index,
             .sym_idx = sym_idx,
         };
     }
@@ -34,7 +35,7 @@ pub fn addSyntheticGlobal(self: *InternalObject, name: [:0]const u8, elf_file: *
     return gop.index;
 }
 
-pub fn resolveSymbols(self: *InternalObject, elf_file: *Elf) !void {
+pub fn resolveSymbols(self: InternalObject, elf_file: *Elf) void {
     for (self.globals.items, 0..) |index, i| {
         const sym_idx = @intCast(u32, i);
         const this_sym = self.symtab.items[sym_idx];
@@ -47,7 +48,7 @@ pub fn resolveSymbols(self: *InternalObject, elf_file: *Elf) !void {
                 .value = 0,
                 .name = global.name,
                 .atom = 0,
-                .file = null,
+                .file = self.index,
                 .sym_idx = sym_idx,
             };
         }

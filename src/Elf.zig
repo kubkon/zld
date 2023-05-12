@@ -3,7 +3,7 @@ options: Options,
 shoff: u64 = 0,
 
 archives: std.ArrayListUnmanaged(Archive) = .{},
-objects: std.ArrayListUnmanaged(Object) = .{},
+files: std.MultiArrayList(File) = .{},
 
 phdrs: std.ArrayListUnmanaged(elf.Elf64_Phdr) = .{},
 sections: std.MultiArrayList(Section) = .{},
@@ -20,8 +20,7 @@ symtab_sect_index: ?u16 = null,
 strtab_sect_index: ?u16 = null,
 shstrtab_sect_index: ?u16 = null,
 
-/// Internal linker state for coordinating symbol resolution and synthetics
-internal_object: ?InternalObject = null,
+internal_object_index: ?u32 = null,
 dynamic_index: ?u32 = null,
 init_array_start_index: ?u32 = null,
 init_array_end_index: ?u32 = null,
@@ -51,6 +50,25 @@ got_section: SyntheticSection(u32, *Elf, .{
 atoms: std.ArrayListUnmanaged(Atom) = .{},
 
 pub const base_tag = Zld.Tag.elf;
+
+const File = union(enum) {
+    internal: InternalObject,
+    object: Object,
+    shared: SharedObject,
+
+    fn getName(file: File) []const u8 {
+        return switch (file) {
+            .internal => "internal",
+            inline else => |x| x.name,
+        };
+    }
+
+    fn resolveSymbols(file: File, elf_file: *Elf) void {
+        switch (file) {
+            inline else => |x| x.resolveSymbols(elf_file),
+        }
+    }
+};
 
 const Section = struct {
     shdr: elf.Elf64_Shdr,
@@ -106,18 +124,17 @@ pub fn deinit(self: *Elf) void {
     self.got_section.deinit(gpa);
     self.phdrs.deinit(gpa);
     self.sections.deinit(gpa);
-    for (self.objects.items) |*object| {
-        object.deinit(gpa);
-    }
-    self.objects.deinit(gpa);
+    for (self.files.items(.tags), self.files.items(.data)) |tag, *data| switch (tag) {
+        .internal => data.internal.deinit(gpa),
+        .object => data.object.deinit(gpa),
+        .shared => data.shared.deinit(gpa),
+    };
+    self.files.deinit(gpa);
     for (self.archives.items) |*archive| {
         archive.file.close();
         archive.deinit(gpa);
     }
     self.archives.deinit(gpa);
-    if (self.internal_object) |*object| {
-        object.deinit(gpa);
-    }
 }
 
 fn resolveLib(
@@ -207,7 +224,11 @@ pub fn flush(self: *Elf) !void {
     try self.parsePositionals(positionals.items);
     try self.parseLibs(libs.keys());
 
-    self.internal_object = InternalObject{};
+    {
+        const index = @intCast(u32, try self.files.addOne(gpa));
+        self.files.set(index, .{ .internal = .{ .index = index } });
+        self.internal_object_index = index;
+    }
 
     try self.resolveSymbols();
 
@@ -237,9 +258,12 @@ pub fn flush(self: *Elf) !void {
     try self.resolveSyntheticSymbols();
 
     if (self.options.execstack_if_needed) {
-        for (self.objects.items) |object| if (object.needs_exec_stack) {
-            self.options.execstack = true;
-            break;
+        for (self.files.items(.tags), self.files.items(.data)) |tag, data| switch (tag) {
+            .object => if (data.object.needs_exec_stack) {
+                self.options.execstack = true;
+                break;
+            },
+            else => {},
         };
     }
 
@@ -628,14 +652,17 @@ fn allocateAtoms(self: *Elf) void {
 }
 
 fn allocateLocals(self: *Elf) void {
-    for (self.objects.items) |*object| {
-        for (object.locals.items) |*symbol| {
-            const atom = symbol.getAtom(self) orelse continue;
-            if (!atom.is_alive) continue;
-            symbol.value += atom.value;
-            symbol.shndx = atom.out_shndx;
-        }
-    }
+    for (self.files.items(.tags), self.files.items(.data)) |tag, *data| switch (tag) {
+        .object => {
+            for (data.object.locals.items) |*symbol| {
+                const atom = symbol.getAtom(self) orelse continue;
+                if (!atom.is_alive) continue;
+                symbol.value += atom.value;
+                symbol.shndx = atom.out_shndx;
+            }
+        },
+        else => {},
+    };
 }
 
 fn allocateGlobals(self: *Elf) void {
@@ -761,13 +788,13 @@ fn parseObject(self: *Elf, path: []const u8) !bool {
     const file_size = math.cast(usize, file_stat.size) orelse return error.Overflow;
     const data = try file.readToEndAlloc(gpa, file_size);
 
-    const object_id = @intCast(u32, self.objects.items.len);
-    const object = try self.objects.addOne(gpa);
-    object.* = .{
+    const index = @intCast(u32, try self.files.addOne(gpa));
+    self.files.set(index, .{ .object = .{
         .name = try gpa.dupe(u8, path),
         .data = data,
-        .object_id = object_id,
-    };
+        .index = index,
+    } });
+    const object = &self.files.items(.data)[index].object;
     try object.parse(self);
 
     return true;
@@ -834,8 +861,9 @@ fn parseLdScript(self: *Elf, path: []const u8) !bool {
 }
 
 fn resolveSymbols(self: *Elf) !void {
-    for (self.objects.items) |object| {
-        try object.resolveSymbols(self);
+    const slice = self.files.slice();
+    for (0..slice.len) |index| {
+        slice.get(index).resolveSymbols(self);
     }
     try self.resolveSymbolsInArchives();
 }
@@ -874,12 +902,15 @@ fn resolveSymbolsInArchives(self: *Elf) !void {
                 continue;
             }
 
-            const object_id = @intCast(u16, self.objects.items.len);
-            const object = try self.objects.addOne(self.base.allocator);
-            object.* = extracted;
-            object.object_id = object_id;
+            const index = @intCast(u32, try self.files.addOne(self.base.allocator));
+            self.files.set(index, .{ .object = .{
+                .name = extracted.name,
+                .data = extracted.data,
+                .index = index,
+            } });
+            const object = &self.files.items(.data)[index].object;
             try object.parse(self);
-            try object.resolveSymbols(self);
+            object.resolveSymbols(self);
 
             continue :loop;
         };
@@ -889,39 +920,45 @@ fn resolveSymbolsInArchives(self: *Elf) !void {
 }
 
 fn resolveSyntheticSymbols(self: *Elf) !void {
-    const object = &(self.internal_object orelse return);
-    self.dynamic_index = try object.addSyntheticGlobal("_DYNAMIC", self);
-    self.init_array_start_index = try object.addSyntheticGlobal("__init_array_start", self);
-    self.init_array_end_index = try object.addSyntheticGlobal("__init_array_end", self);
-    self.fini_array_start_index = try object.addSyntheticGlobal("__fini_array_start", self);
-    self.fini_array_end_index = try object.addSyntheticGlobal("__fini_array_end", self);
-    self.got_index = try object.addSyntheticGlobal("_GLOBAL_OFFSET_TABLE_", self);
-    try object.resolveSymbols(self);
+    const index = self.internal_object_index orelse return;
+    const internal = &self.files.items(.data)[index].internal;
+    self.dynamic_index = try internal.addSyntheticGlobal("_DYNAMIC", self);
+    self.init_array_start_index = try internal.addSyntheticGlobal("__init_array_start", self);
+    self.init_array_end_index = try internal.addSyntheticGlobal("__init_array_end", self);
+    self.fini_array_start_index = try internal.addSyntheticGlobal("__fini_array_start", self);
+    self.fini_array_end_index = try internal.addSyntheticGlobal("__fini_array_end", self);
+    self.got_index = try internal.addSyntheticGlobal("_GLOBAL_OFFSET_TABLE_", self);
+    internal.resolveSymbols(self);
 }
 
 fn checkDuplicates(self: *Elf) void {
-    for (self.objects.items) |object| {
-        object.checkDuplicates(self);
-    }
+    for (self.files.items(.tags), self.files.items(.data)) |tag, data| switch (tag) {
+        .object => data.object.checkDuplicates(self),
+        else => {},
+    };
 }
 
 fn checkUndefined(self: *Elf) void {
-    for (self.objects.items) |object| {
-        object.checkUndefined(self);
-    }
+    for (self.files.items(.tags), self.files.items(.data)) |tag, data| switch (tag) {
+        .object => data.object.checkUndefined(self),
+        else => {},
+    };
 }
 
 fn claimUnresolved(self: *Elf) void {
-    for (self.objects.items) |*object| {
-        for (object.globals.items) |index| {
-            const global = self.getGlobal(index);
+    for (self.files.items(.tags), self.files.items(.data)) |tag, *data| switch (tag) {
+        .object => {
+            for (data.object.globals.items) |index| {
+                const global = self.getGlobal(index);
 
-            if (global.isUndef(self) and global.isWeak(self)) {
-                global.value = 0;
-                continue;
+                if (global.isUndef(self) and global.isWeak(self)) {
+                    global.value = 0;
+                    continue;
+                }
             }
-        }
-    }
+        },
+        else => {},
+    };
 }
 
 fn scanRelocs(self: *Elf) !void {
@@ -935,31 +972,35 @@ fn setSymtab(self: *Elf) !void {
     const symtab_sect_index = self.symtab_sect_index orelse return;
     const gpa = self.base.allocator;
 
-    for (self.objects.items) |object| {
-        for (object.locals.items) |sym| {
-            if (sym.getAtom(self)) |atom| {
-                if (!atom.is_alive) continue;
+    for (self.files.items(.tags), self.files.items(.data)) |tag, data| switch (tag) {
+        .object => {
+            const object = data.object;
+            for (object.locals.items) |sym| {
+                if (sym.getAtom(self)) |atom| {
+                    if (!atom.is_alive) continue;
+                }
+                const s_sym = sym.getSourceSymbol(self);
+                switch (s_sym.st_type()) {
+                    elf.STT_SECTION, elf.STT_NOTYPE => continue,
+                    else => {},
+                }
+                switch (@intToEnum(elf.STV, s_sym.st_other)) {
+                    .INTERNAL, .HIDDEN => continue,
+                    else => {},
+                }
+                const name = try self.strtab.insert(gpa, sym.getName(self));
+                try self.symtab.append(gpa, .{
+                    .st_name = name,
+                    .st_info = s_sym.st_info,
+                    .st_other = s_sym.st_other,
+                    .st_shndx = sym.shndx,
+                    .st_value = sym.value,
+                    .st_size = 0,
+                });
             }
-            const s_sym = sym.getSourceSymbol(self);
-            switch (s_sym.st_type()) {
-                elf.STT_SECTION, elf.STT_NOTYPE => continue,
-                else => {},
-            }
-            switch (@intToEnum(elf.STV, s_sym.st_other)) {
-                .INTERNAL, .HIDDEN => continue,
-                else => {},
-            }
-            const name = try self.strtab.insert(gpa, sym.getName(self));
-            try self.symtab.append(gpa, .{
-                .st_name = name,
-                .st_info = s_sym.st_info,
-                .st_other = s_sym.st_other,
-                .st_shndx = sym.shndx,
-                .st_value = sym.value,
-                .st_size = 0,
-            });
-        }
-    }
+        },
+        else => {},
+    };
 
     // Denote start of globals.
     {
@@ -1311,13 +1352,15 @@ fn fmtDumpState(
 ) !void {
     _ = options;
     _ = unused_fmt_string;
-    for (self.objects.items, 0..) |object, object_id| {
-        try writer.print("file({d}) : {s}\n", .{ object_id, object.name });
-        try writer.print("{}{}\n", .{ object.fmtAtoms(self), object.fmtSymtab(self) });
-    }
-    if (self.internal_object) |object| {
-        try writer.writeAll("linker-defined\n");
-        try writer.print("{}\n", .{object.fmtSymtab(self)});
+    const slice = self.files.slice();
+    for (0..slice.len) |index| {
+        const file = slice.get(index);
+        try writer.print("file({d}) : {s}\n", .{ index, file.getName() });
+        switch (file) {
+            .internal => |internal| try writer.print("{}\n", .{internal.fmtSymtab(self)}),
+            .object => |object| try writer.print("{}{}\n", .{ object.fmtAtoms(self), object.fmtSymtab(self) }),
+            .shared => @panic("TODO"),
+        }
     }
     try writer.writeAll("GOT\n");
     try writer.print("{}\n", .{self.got_section});
@@ -1347,6 +1390,7 @@ const InternalObject = @import("Elf/InternalObject.zig");
 const LdScript = @import("Elf/LdScript.zig");
 const Object = @import("Elf/Object.zig");
 pub const Options = @import("Elf/Options.zig");
+const SharedObject = @import("Elf/SharedObject.zig");
 const StringTable = @import("strtab.zig").StringTable;
 const Symbol = @import("Elf/Symbol.zig");
 const SyntheticSection = @import("synthetic_section.zig").SyntheticSection;

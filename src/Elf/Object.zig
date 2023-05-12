@@ -1,6 +1,6 @@
 name: []const u8,
 data: []const u8,
-object_id: u32,
+index: u32,
 
 header: ?elf.Elf64_Ehdr = null,
 symtab: []align(1) const elf.Elf64_Sym = &[0]elf.Elf64_Sym{},
@@ -131,7 +131,7 @@ fn addAtom(self: *Object, shdr: elf.Elf64_Shdr, shndx: u16, name: [:0]const u8, 
     const atom = elf_file.getAtom(atom_index).?;
     atom.atom_index = atom_index;
     atom.name = try elf_file.string_intern.insert(elf_file.base.allocator, name);
-    atom.object_id = self.object_id;
+    atom.file = self.index;
     atom.shndx = shndx;
     self.atoms.items[shndx] = atom_index;
 
@@ -184,7 +184,7 @@ fn initSymtab(self: *Object, elf_file: *Elf) !void {
             .name = try elf_file.string_intern.insert(gpa, name),
             .sym_idx = @intCast(u32, i),
             .atom = if (sym.st_shndx == elf.SHN_ABS) 0 else self.atoms.items[sym.st_shndx],
-            .file = self.object_id,
+            .file = self.index,
         };
     }
 
@@ -200,7 +200,7 @@ fn initSymtab(self: *Object, elf_file: *Elf) !void {
     }
 }
 
-pub fn resolveSymbols(self: Object, elf_file: *Elf) !void {
+pub fn resolveSymbols(self: Object, elf_file: *Elf) void {
     const first_global = self.first_global orelse return;
     for (self.globals.items, 0..) |index, i| {
         const sym_idx = @intCast(u32, first_global + i);
@@ -227,7 +227,7 @@ fn setGlobal(self: Object, sym_idx: u32, global: *Symbol) void {
         .name = name,
         .atom = atom,
         .sym_idx = sym_idx,
-        .file = self.object_id,
+        .file = self.index,
     };
 }
 
@@ -239,7 +239,7 @@ pub fn checkDuplicates(self: Object, elf_file: *Elf) void {
         const global = elf_file.getGlobal(index);
         const global_file = global.getObject(elf_file) orelse continue;
 
-        if (self.object_id == global_file.object_id or
+        if (self.index == global_file.index or
             this_sym.st_shndx == elf.SHN_UNDEF or
             this_sym.st_bind() == elf.STB_WEAK) continue;
         elf_file.base.fatal("multiple definition: {s}: {s}: {s}", .{

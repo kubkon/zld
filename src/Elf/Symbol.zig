@@ -7,8 +7,7 @@ value: u64 = 0,
 name: u32 = 0,
 
 /// File where this symbol is defined.
-/// null means linker-defined synthetic symbol.
-file: ?u32 = null,
+file: u32 = 0,
 
 /// Atom containing this symbol if any.
 /// Index of 0 means there is no associated atom with this symbol.
@@ -40,17 +39,33 @@ pub fn getAtom(symbol: Symbol, elf_file: *Elf) ?*Atom {
     return elf_file.getAtom(symbol.atom);
 }
 
+pub fn getInternalObject(symbol: Symbol, elf_file: *Elf) ?*InternalObject {
+    const tag = elf_file.files.items(.tags)[symbol.file];
+    if (tag != .internal) return null;
+    return &elf_file.files.items(.data)[symbol.file].internal;
+}
+
 pub fn getObject(symbol: Symbol, elf_file: *Elf) ?*Object {
-    const file = symbol.file orelse return null;
-    return &elf_file.objects.items[file];
+    const tag = elf_file.files.items(.tags)[symbol.file];
+    if (tag != .object) return null;
+    return &elf_file.files.items(.data)[symbol.file].object;
+}
+
+pub fn getSharedObject(symbol: Symbol, elf_file: *Elf) ?*SharedObject {
+    const tag = elf_file.files.items(.tags)[symbol.file];
+    if (tag != .shared) return null;
+    return &elf_file.files.items(.data)[symbol.file].shared;
 }
 
 pub fn getSourceSymbol(symbol: Symbol, elf_file: *Elf) elf.Elf64_Sym {
-    if (symbol.getObject(elf_file)) |object| {
+    if (symbol.getInternalObject(elf_file)) |internal| {
+        return internal.symtab.items[symbol.sym_idx];
+    } else if (symbol.getObject(elf_file)) |object| {
         return object.symtab[symbol.sym_idx];
-    } else {
-        return elf_file.internal_object.?.symtab.items[symbol.sym_idx];
-    }
+    } else if (symbol.getSharedObject(elf_file)) |shared| {
+        _ = shared;
+        @panic("TODO");
+    } else unreachable;
 }
 
 pub fn getSymbolRank(symbol: Symbol, elf_file: *Elf) u4 {
@@ -102,14 +117,16 @@ fn format2(
         } else {
             try writer.print(" : sect({d})", .{symbol.shndx});
         }
-        if (symbol.getObject(ctx.elf_file)) |object| {
+        if (symbol.getInternalObject(ctx.elf_file)) |internal| {
+            try writer.print(" : internal({d})", .{internal.index});
+        } else if (symbol.getObject(ctx.elf_file)) |object| {
             if (symbol.getAtom(ctx.elf_file)) |atom| {
                 try writer.print(" : atom({d})", .{atom.atom_index});
             }
-            try writer.print(" : file({d})", .{object.object_id});
-        } else {
-            try writer.writeAll(" : synthetic");
-        }
+            try writer.print(" : file({d})", .{object.index});
+        } else if (symbol.getSharedObject(ctx.elf_file)) |shared| {
+            try writer.print(" : file({d})", .{shared.index});
+        } else unreachable;
     }
 }
 
@@ -119,5 +136,7 @@ const elf = std.elf;
 
 const Atom = @import("Atom.zig");
 const Elf = @import("../Elf.zig");
+const InternalObject = @import("InternalObject.zig");
 const Object = @import("Object.zig");
+const SharedObject = @import("SharedObject.zig");
 const Symbol = @This();

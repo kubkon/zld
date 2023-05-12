@@ -4,8 +4,8 @@ value: u64 = 0,
 /// Name of this Atom.
 name: u32 = 0,
 
-/// Index into linker's objects table.
-object_id: u32 = 0,
+/// Index into linker's input file table.
+file: u32 = 0,
 
 /// Size of this atom
 size: u32 = 0,
@@ -72,8 +72,10 @@ pub fn getCodeUncompressAlloc(self: Atom, elf_file: *Elf) ![]u8 {
     } else return gpa.dupe(u8, data);
 }
 
-pub inline fn getObject(self: Atom, elf_file: *Elf) *Object {
-    return &elf_file.objects.items[self.object_id];
+pub fn getObject(self: Atom, elf_file: *Elf) *Object {
+    const tag = elf_file.files.items(.tags)[self.file];
+    assert(tag == .object);
+    return &elf_file.files.items(.data)[self.file].object;
 }
 
 pub fn getInputShdr(self: Atom, elf_file: *Elf) elf.Elf64_Shdr {

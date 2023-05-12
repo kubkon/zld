@@ -217,7 +217,7 @@ pub fn getObject(self: Archive, offset: u32, elf_file: *Elf) !Object {
         return error.Io;
     }
 
-    return .{ .name = full_name, .data = data, .object_id = undefined };
+    return .{ .name = full_name, .data = data, .index = undefined };
 }
 
 const std = @import("std");
