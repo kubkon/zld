@@ -46,7 +46,7 @@ emit: Zld.Emit,
 output_mode: Zld.OutputMode,
 positionals: []const Zld.LinkObject,
 libs: std.StringArrayHashMap(Zld.SystemLib),
-lib_dirs: []const []const u8,
+search_dirs: []const []const u8,
 rpath_list: []const []const u8,
 strip_debug: bool = false,
 strip_all: bool = false,
@@ -71,7 +71,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
 
     var positionals = std.ArrayList(Zld.LinkObject).init(arena);
     var libs = std.StringArrayHashMap(Zld.SystemLib).init(arena);
-    var lib_dirs = std.ArrayList([]const u8).init(arena);
+    var search_dirs = std.ArrayList([]const u8).init(arena);
     var rpath_list = std.ArrayList([]const u8).init(arena);
     var verbose = false;
     var opts: Options = .{
@@ -82,7 +82,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         .output_mode = .exe,
         .positionals = undefined,
         .libs = undefined,
-        .lib_dirs = undefined,
+        .search_dirs = undefined,
         .rpath_list = undefined,
     };
 
@@ -103,7 +103,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         } else if (p.arg1("l")) |lib| {
             try libs.put(lib, .{ .needed = state.needed, .static = state.static });
         } else if (p.arg1("L")) |dir| {
-            try lib_dirs.append(dir);
+            try search_dirs.append(dir);
         } else if (p.arg1("o")) |path| {
             opts.emit.sub_path = path;
         } else if (p.flagAny("gc-sections")) {
@@ -191,7 +191,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
 
     opts.positionals = positionals.items;
     opts.libs = libs;
-    opts.lib_dirs = lib_dirs.items;
+    opts.search_dirs = search_dirs.items;
     opts.rpath_list = rpath_list.items;
 
     return opts;

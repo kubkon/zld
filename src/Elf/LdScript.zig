@@ -22,11 +22,14 @@ pub fn parse(scr: *LdScript, data: []const u8, elf_file: *Elf) !void {
         const column = tok.start - prev_line_last_col;
         try line_col.append(.{ .line = line, .column = column });
         switch (tok.id) {
-            .invalid => elf_file.base.fatal("invalid token in ld script: '{s}' ({d}:{d})", .{
-                tok.get(data),
-                line,
-                column,
-            }),
+            .invalid => {
+                elf_file.base.fatal("invalid token in ld script: '{s}' ({d}:{d})", .{
+                    tok.get(data),
+                    line,
+                    column,
+                });
+                return error.InvalidScript;
+            },
             .new_line => {
                 line += 1;
                 prev_line_last_col = tok.end;
@@ -53,6 +56,7 @@ pub fn parse(scr: *LdScript, data: []const u8, elf_file: *Elf) !void {
                 lcol.line,
                 lcol.column,
             });
+            return error.InvalidScript;
         },
         else => |e| return e,
     };
