@@ -851,8 +851,13 @@ fn parseShared(self: *Elf, path: []const u8, opts: Zld.SystemLib) !bool {
     defer file.close();
 
     const header = try file.reader().readStruct(elf.Elf64_Ehdr);
+    try file.seekTo(0);
+
     if (!SharedObject.isValidHeader(&header)) return false;
     self.validateOrSetCpuArch(path, header.e_machine.toTargetCpuArch().?);
+
+    const data = try file.readToEndAllocOptions(gpa, std.math.maxInt(u32), null, @alignOf(elf.Elf64_Ehdr), null);
+    defer gpa.free(data);
 
     const index = @intCast(u32, try self.files.addOne(gpa));
     self.files.set(index, .{ .shared = .{
@@ -861,7 +866,7 @@ fn parseShared(self: *Elf, path: []const u8, opts: Zld.SystemLib) !bool {
         .needed = opts.needed,
     } });
     const dso = &self.files.items(.data)[index].shared;
-    try dso.parse(self);
+    try dso.parse(data, self);
 
     return true;
 }
