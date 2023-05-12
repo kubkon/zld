@@ -28,6 +28,17 @@ const HashTable = struct {
         allocator.free(ht.data);
     }
 
+    fn get(ht: *const HashTable, name: [:0]const u8, ctx: *const SharedObject) ?u32 {
+        const h = hasher(name);
+        var index = ht.buckets[h % ht.buckets.len];
+        while (index != STN_UNDEF) : (index = ht.chain[index]) {
+            const sym = ctx.getSourceSymbol(index);
+            const sym_name = ctx.getString(sym.st_name);
+            if (mem.eql(u8, name, sym_name)) return index;
+        }
+        return null;
+    }
+
     fn hasher(name: [:0]const u8) u32 {
         var h: u32 = 0;
         var g: u32 = 0;
@@ -47,6 +58,8 @@ const HashTable = struct {
         try std.testing.expectEqual(hasher("syscall"), 0xb09985c);
     }
 };
+
+const STN_UNDEF = 0;
 
 pub fn isValidHeader(header: *const elf.Elf64_Ehdr) bool {
     if (!mem.eql(u8, header.e_ident[0..4], "\x7fELF")) {
@@ -98,6 +111,9 @@ pub fn parse(self: *SharedObject, data: []const u8, elf_file: *Elf) !void {
     const nbucket = mem.readIntLittle(u32, raw_hash_table[0..4]);
     const nchain = mem.readIntLittle(u32, raw_hash_table[4..8]);
     self.hash_table = try HashTable.init(gpa, raw_hash_table, nbucket, nchain);
+
+    const sym_index = self.hash_table.?.get("puts", self);
+    log.warn("puts @{?d}", .{sym_index});
 }
 
 pub fn resolveSymbols(self: SharedObject, elf_file: *Elf) void {
@@ -117,6 +133,16 @@ inline fn getShdrContents(data: []const u8, shdr: elf.Elf64_Shdr) []const u8 {
     return data[shdr.sh_offset..][0..shdr.sh_size];
 }
 
+pub inline fn getSourceSymbol(self: *const SharedObject, index: u32) elf.Elf64_Sym {
+    assert(index < self.symtab.items.len);
+    return self.symtab.items[index];
+}
+
+pub inline fn getString(self: *const SharedObject, off: u32) [:0]const u8 {
+    assert(off < self.strtab.items.len);
+    return mem.sliceTo(@ptrCast([*:0]const u8, self.strtab.items.ptr + off), 0);
+}
+
 test {
     _ = std.testing.refAllDecls(HashTable);
 }
@@ -124,6 +150,7 @@ test {
 const SharedObject = @This();
 
 const std = @import("std");
+const assert = std.debug.assert;
 const elf = std.elf;
 const log = std.log.scoped(.elf);
 const mem = std.mem;
