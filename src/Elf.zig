@@ -4,6 +4,7 @@ options: Options,
 shoff: u64 = 0,
 
 archives: std.ArrayListUnmanaged(Archive) = .{},
+shared_objects: std.ArrayListUnmanaged(u32) = .{},
 files: std.MultiArrayList(File) = .{},
 
 phdrs: std.ArrayListUnmanaged(elf.Elf64_Phdr) = .{},
@@ -130,6 +131,7 @@ pub fn deinit(self: *Elf) void {
         archive.deinit(gpa);
     }
     self.archives.deinit(gpa);
+    self.shared_objects.deinit(gpa);
     self.arena.promote(gpa).deinit();
 }
 
@@ -865,6 +867,7 @@ fn parseShared(self: *Elf, arena: Allocator, path: []const u8, opts: Zld.SystemL
     } });
     const dso = &self.files.items(.data)[index].shared;
     try dso.parse(self);
+    try self.shared_objects.append(gpa, index);
 
     return true;
 }
@@ -924,14 +927,15 @@ fn resolveSymbols(self: *Elf) !void {
         else => {},
     };
     try self.resolveSymbolsInArchives();
+    self.resolveSymbolsInSharedObjects();
 }
 
 fn resolveSymbolsInArchives(self: *Elf) !void {
     if (self.archives.items.len == 0) return;
 
-    var next_sym: usize = 0;
-    loop: while (next_sym < self.globals.items.len) {
-        const global = self.globals.items[next_sym];
+    var next_sym: u32 = 0;
+    while (next_sym < self.globals.items.len) {
+        const global = self.getGlobal(next_sym);
         const global_name = global.getName(self);
         if (global.isUndef(self)) for (self.archives.items) |archive| {
             // Check if the entry exists in a static archive.
@@ -961,8 +965,31 @@ fn resolveSymbolsInArchives(self: *Elf) !void {
             const object = &self.files.items(.data)[index].object;
             try object.parse(self);
             object.resolveSymbols(self);
+        };
 
-            continue :loop;
+        next_sym += 1;
+    }
+}
+
+fn resolveSymbolsInSharedObjects(self: *Elf) void {
+    if (self.shared_objects.items.len == 0) return;
+
+    var next_sym: u32 = 0;
+    while (next_sym < self.globals.items.len) {
+        const global = self.getGlobal(next_sym);
+        const global_name = global.getName(self);
+        if (global.isUndef(self)) for (self.shared_objects.items) |index| {
+            const shared = &self.files.items(.data)[index].shared;
+            const sym_index = shared.getSourceSymbolIndex(global_name) orelse continue;
+            const sym = shared.getSourceSymbol(sym_index);
+            global.* = .{
+                .value = sym.st_value,
+                .name = global.name,
+                .atom = 0,
+                .sym_idx = sym_index,
+                .file = shared.index,
+            };
+            shared.needed = true;
         };
 
         next_sym += 1;
@@ -1406,10 +1433,13 @@ fn fmtDumpState(
     for (0..slice.len) |index| {
         const file = slice.get(index);
         try writer.print("file({d}) : {s}\n", .{ index, file.getName() });
+        if (file == .shared and !file.shared.needed) {
+            try writer.writeAll(" : [*]");
+        }
         switch (file) {
             .internal => |internal| try writer.print("{}\n", .{internal.fmtSymtab(self)}),
             .object => |object| try writer.print("{}{}\n", .{ object.fmtAtoms(self), object.fmtSymtab(self) }),
-            .shared => @panic("TODO"),
+            .shared => |shared| try writer.print("{}\n", .{shared.fmtSymtab(self)}),
         }
     }
     try writer.writeAll("GOT\n");

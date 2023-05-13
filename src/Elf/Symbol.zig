@@ -61,10 +61,9 @@ pub fn getSourceSymbol(symbol: Symbol, elf_file: *Elf) elf.Elf64_Sym {
     if (symbol.getInternalObject(elf_file)) |internal| {
         return internal.symtab.items[symbol.sym_idx];
     } else if (symbol.getObject(elf_file)) |object| {
-        return object.symtab[symbol.sym_idx];
+        return object.getSourceSymbol(symbol.sym_idx);
     } else if (symbol.getSharedObject(elf_file)) |shared| {
-        _ = shared;
-        @panic("TODO");
+        return shared.getSourceSymbol(symbol.sym_idx);
     } else unreachable;
 }
 
