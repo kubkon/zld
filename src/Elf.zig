@@ -1,4 +1,5 @@
 base: Zld,
+arena: std.heap.ArenaAllocator.State,
 options: Options,
 shoff: u64 = 0,
 
@@ -62,12 +63,6 @@ const File = union(enum) {
             inline else => |x| x.name,
         };
     }
-
-    fn resolveSymbols(file: File, elf_file: *Elf) void {
-        switch (file) {
-            inline else => |x| x.resolveSymbols(elf_file),
-        }
-    }
 };
 
 const Section = struct {
@@ -106,6 +101,7 @@ fn createEmpty(gpa: Allocator, options: Options, thread_pool: *ThreadPool) !*Elf
             .file = undefined,
             .thread_pool = thread_pool,
         },
+        .arena = std.heap.ArenaAllocator.init(gpa).state,
         .options = options,
     };
 
@@ -131,10 +127,10 @@ pub fn deinit(self: *Elf) void {
     };
     self.files.deinit(gpa);
     for (self.archives.items) |*archive| {
-        archive.file.close();
         archive.deinit(gpa);
     }
     self.archives.deinit(gpa);
+    self.arena.promote(gpa).deinit();
 }
 
 fn resolveLib(
@@ -206,8 +202,7 @@ pub fn flush(self: *Elf) !void {
     // Append null atom.
     try self.atoms.append(gpa, .{});
 
-    var arena_allocator = std.heap.ArenaAllocator.init(gpa);
-    defer arena_allocator.deinit();
+    var arena_allocator = self.arena.promote(gpa);
     const arena = arena_allocator.allocator();
 
     var search_dirs = std.ArrayList([]const u8).init(arena);
@@ -758,16 +753,14 @@ const ParseLibsCtx = struct {
 };
 
 fn parsePositional(self: *Elf, pos: Zld.LinkObject, ctx: ParseLibsCtx) !void {
-    const gpa = self.base.allocator;
     const full_path = full_path: {
         var buffer: [fs.MAX_PATH_BYTES]u8 = undefined;
         const path = std.fs.realpath(pos.path, &buffer) catch |err| switch (err) {
             error.FileNotFound => return self.base.fatal("file not found '{s}'", .{pos.path}),
             else => |e| return e,
         };
-        break :full_path try gpa.dupe(u8, path);
+        break :full_path try ctx.arena.dupe(u8, path);
     };
-    defer gpa.free(full_path);
 
     log.debug("parsing input file path '{s}'", .{full_path});
 
@@ -809,13 +802,12 @@ fn parseObject(self: *Elf, path: []const u8) !bool {
     if (!Object.isValidHeader(&header)) return false;
     self.validateOrSetCpuArch(path, header.e_machine.toTargetCpuArch().?);
 
-    const file_stat = try file.stat();
-    const file_size = math.cast(usize, file_stat.size) orelse return error.Overflow;
-    const data = try file.readToEndAlloc(gpa, file_size);
+    var arena = self.arena.promote(gpa);
+    const data = try file.readToEndAlloc(arena.allocator(), std.math.maxInt(u32));
 
     const index = @intCast(u32, try self.files.addOne(gpa));
     self.files.set(index, .{ .object = .{
-        .name = try gpa.dupe(u8, path),
+        .name = path,
         .data = data,
         .index = index,
     } });
@@ -828,19 +820,22 @@ fn parseObject(self: *Elf, path: []const u8) !bool {
 fn parseArchive(self: *Elf, path: []const u8) !bool {
     const gpa = self.base.allocator;
     const file = try fs.cwd().openFile(path, .{});
-    errdefer file.close();
+    defer file.close();
 
     const magic = try file.reader().readBytesNoEof(Archive.SARMAG);
     try file.seekTo(0);
 
     if (!Archive.isValidMagic(&magic)) return false;
 
+    var arena = self.arena.promote(gpa);
+    const data = try file.readToEndAlloc(arena.allocator(), std.math.maxInt(u32));
+
     const archive = try self.archives.addOne(gpa);
     archive.* = .{
-        .name = try gpa.dupe(u8, path),
-        .file = file,
+        .name = path,
+        .data = data,
     };
-    try archive.parse(gpa, self);
+    try archive.parse(self);
 
     return true;
 }
@@ -856,17 +851,18 @@ fn parseShared(self: *Elf, path: []const u8, opts: Zld.SystemLib) !bool {
     if (!SharedObject.isValidHeader(&header)) return false;
     self.validateOrSetCpuArch(path, header.e_machine.toTargetCpuArch().?);
 
-    const data = try file.readToEndAllocOptions(gpa, std.math.maxInt(u32), null, @alignOf(elf.Elf64_Ehdr), null);
-    defer gpa.free(data);
+    var arena = self.arena.promote(gpa);
+    const data = try file.readToEndAlloc(arena.allocator(), std.math.maxInt(u32));
 
     const index = @intCast(u32, try self.files.addOne(gpa));
     self.files.set(index, .{ .shared = .{
-        .name = try gpa.dupe(u8, path),
+        .name = path,
+        .data = data,
         .index = index,
         .needed = opts.needed,
     } });
     const dso = &self.files.items(.data)[index].shared;
-    try dso.parse(data, self);
+    try dso.parse(self);
 
     return true;
 }
@@ -920,10 +916,11 @@ fn validateOrSetCpuArch(self: *Elf, name: []const u8, cpu_arch: std.Target.Cpu.A
 }
 
 fn resolveSymbols(self: *Elf) !void {
-    const slice = self.files.slice();
-    for (0..slice.len) |index| {
-        slice.get(index).resolveSymbols(self);
-    }
+    for (self.files.items(.tags), self.files.items(.data)) |tag, data| switch (tag) {
+        .object => data.object.resolveSymbols(self),
+        .internal => data.internal.resolveSymbols(self),
+        else => {},
+    };
     try self.resolveSymbolsInArchives();
 }
 

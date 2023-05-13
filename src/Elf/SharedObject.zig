@@ -1,4 +1,5 @@
 name: []const u8,
+data: []const u8,
 index: u32,
 needed: bool,
 
@@ -90,29 +91,28 @@ pub fn isValidHeader(header: *const elf.Elf64_Ehdr) bool {
 pub fn deinit(self: *SharedObject, allocator: Allocator) void {
     self.symtab.deinit(allocator);
     self.strtab.deinit(allocator);
-    allocator.free(self.name);
     if (self.hash_table) |*ht| {
         ht.deinit(allocator);
     }
 }
 
-pub fn parse(self: *SharedObject, data: []const u8, elf_file: *Elf) !void {
+pub fn parse(self: *SharedObject, elf_file: *Elf) !void {
     const gpa = elf_file.base.allocator;
-    const header = getEhdr(data);
-    const shdrs = getShdrs(data, header);
+    const header = getEhdr(self.data);
+    const shdrs = getShdrs(self.data, header);
 
     // TODO prefer SHT_GNU_HASH to SHT_HASH
     for (shdrs) |shdr| switch (shdr.sh_type) {
         elf.SHT_DYNSYM => {
-            const symtab = getShdrContents(data, shdr);
+            const symtab = getShdrContents(self.data, shdr);
             const nsyms = @divExact(symtab.len, @sizeOf(elf.Elf64_Sym));
             const syms = @ptrCast([*]align(1) const elf.Elf64_Sym, symtab.ptr)[0..nsyms];
             try self.symtab.appendUnalignedSlice(gpa, syms);
 
             const strtab_shdr = shdrs[shdr.sh_link];
-            try self.strtab.appendUnalignedSlice(gpa, getShdrContents(data, strtab_shdr));
+            try self.strtab.appendUnalignedSlice(gpa, getShdrContents(self.data, strtab_shdr));
         },
-        elf.SHT_HASH => try self.initHashTable(gpa, data, shdr),
+        elf.SHT_HASH => try self.initHashTable(gpa, self.data, shdr),
         else => {},
     };
 

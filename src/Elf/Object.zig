@@ -39,8 +39,6 @@ pub fn deinit(self: *Object, allocator: Allocator) void {
     self.locals.deinit(allocator);
     self.globals.deinit(allocator);
     self.atoms.deinit(allocator);
-    allocator.free(self.name);
-    allocator.free(self.data);
 }
 
 pub fn parse(self: *Object, elf_file: *Elf) !void {
