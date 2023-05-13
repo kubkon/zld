@@ -100,6 +100,8 @@ pub fn parse(self: *Archive, elf_file: *Elf) !void {
             );
         }
 
+        const checkpoint = try stream.getPos();
+        const size = try hdr.size();
         const nsyms = try reader.readIntBig(u32);
 
         var offsets = std.ArrayList(u32).init(gpa);
@@ -125,7 +127,7 @@ pub fn parse(self: *Archive, elf_file: *Elf) !void {
             try res.value_ptr.append(gpa, offsets.items[i]);
             pos += sym_name.len + 1;
         }
-        try stream.seekTo(pos);
+        try stream.seekTo(checkpoint + size);
     }
 
     blk: {
