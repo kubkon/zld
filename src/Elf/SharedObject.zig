@@ -7,9 +7,8 @@ strtab: std.ArrayListUnmanaged(u8) = .{},
 hash_table: ?HashTable = null,
 
 const HashTable = struct {
-    data: []const u8,
-    buckets: []align(1) const u32,
-    chain: []align(1) const u32,
+    buckets: std.ArrayListUnmanaged(u32) = .{},
+    chain: std.ArrayListUnmanaged(u32) = .{},
 
     fn init(allocator: Allocator, data: []const u8, nbucket: u32, nchain: u32) !HashTable {
         const bucketoff: usize = 8;
@@ -25,14 +24,25 @@ const HashTable = struct {
     }
 
     fn deinit(ht: *HashTable, allocator: Allocator) void {
-        allocator.free(ht.data);
+        ht.buckets.deinit(allocator);
+        ht.chain.deinit(allocator);
     }
 
-    fn get(ht: *const HashTable, name: [:0]const u8, ctx: *const SharedObject) ?u32 {
+    const Ctx = struct {
+        symtab: []const elf.Elf64_Sym,
+        strtab: []const u8,
+
+        inline fn getString(ctx: Ctx, off: u32) [:0]const u8 {
+            assert(off < ctx.strtab.len);
+            return mem.sliceTo(@ptrCast([*:0]const u8, ctx.strtab.ptr + off), 0);
+        }
+    };
+
+    fn get(ht: *const HashTable, name: [:0]const u8, ctx: Ctx) ?u32 {
         const h = hasher(name);
-        var index = ht.buckets[h % ht.buckets.len];
-        while (index != STN_UNDEF) : (index = ht.chain[index]) {
-            const sym = ctx.getSourceSymbol(index);
+        var index = ht.buckets.items[h % ht.buckets.items.len];
+        while (index != STN_UNDEF) : (index = ht.chain.items[index]) {
+            const sym = ctx.symtab[index];
             const sym_name = ctx.getString(sym.st_name);
             if (mem.eql(u8, name, sym_name)) return index;
         }
@@ -92,28 +102,41 @@ pub fn parse(self: *SharedObject, data: []const u8, elf_file: *Elf) !void {
     const shdrs = getShdrs(data, header);
 
     // TODO prefer SHT_GNU_HASH to SHT_HASH
-    const hash_shdr = for (shdrs) |shdr| switch (shdr.sh_type) {
-        elf.SHT_HASH => break shdr,
+    for (shdrs) |shdr| switch (shdr.sh_type) {
+        elf.SHT_DYNSYM => {
+            const symtab = getShdrContents(data, shdr);
+            const nsyms = @divExact(symtab.len, @sizeOf(elf.Elf64_Sym));
+            const syms = @ptrCast([*]align(1) const elf.Elf64_Sym, symtab.ptr)[0..nsyms];
+            try self.symtab.appendUnalignedSlice(gpa, syms);
+
+            const strtab_shdr = shdrs[shdr.sh_link];
+            try self.strtab.appendUnalignedSlice(gpa, getShdrContents(data, strtab_shdr));
+        },
+        elf.SHT_HASH => try self.initHashTable(gpa, data, shdr),
         else => {},
-    } else @panic("TODO create hash table manually I guess");
-    const symtab_shdr = shdrs[hash_shdr.sh_link];
-    const strtab_shdr = shdrs[symtab_shdr.sh_link];
+    };
 
-    // Parse dynamic symbol and string tables
-    const symtab = getShdrContents(data, symtab_shdr);
-    const nsyms = @divExact(symtab.len, @sizeOf(elf.Elf64_Sym));
-    const syms = @ptrCast([*]align(1) const elf.Elf64_Sym, symtab.ptr)[0..nsyms];
-    try self.symtab.appendUnalignedSlice(gpa, syms);
-    try self.strtab.appendUnalignedSlice(gpa, getShdrContents(data, strtab_shdr));
-
-    // Parse hash table
-    const raw_hash_table = getShdrContents(data, hash_shdr);
-    const nbucket = mem.readIntLittle(u32, raw_hash_table[0..4]);
-    const nchain = mem.readIntLittle(u32, raw_hash_table[4..8]);
-    self.hash_table = try HashTable.init(gpa, raw_hash_table, nbucket, nchain);
-
-    const sym_index = self.hash_table.?.get("puts", self);
+    const sym_index = self.hash_table.?.get("puts", .{
+        .symtab = self.symtab.items,
+        .strtab = self.strtab.items,
+    });
     log.warn("puts @{?d}", .{sym_index});
+}
+
+fn initHashTable(self: *SharedObject, allocator: Allocator, data: []const u8, shdr: elf.Elf64_Shdr) !void {
+    const raw = getShdrContents(data, shdr);
+    const len = @divExact(raw.len, @sizeOf(u32));
+    const hash_table = @ptrCast([*]align(1) const u32, raw.ptr)[0..len];
+    const nbucket = hash_table[0];
+    const nchain = hash_table[1];
+    const bucketoff: usize = 2;
+    const chainoff: usize = bucketoff + nbucket;
+    const buckets = hash_table[bucketoff..][0..nbucket];
+    const chain = hash_table[chainoff..][0..nchain];
+    var ht = HashTable{};
+    try ht.buckets.appendUnalignedSlice(allocator, buckets);
+    try ht.chain.appendUnalignedSlice(allocator, chain);
+    self.hash_table = ht;
 }
 
 pub fn resolveSymbols(self: SharedObject, elf_file: *Elf) void {
