@@ -136,6 +136,8 @@ pub fn deinit(self: *Elf) void {
     }
     self.archives.deinit(gpa);
     self.shared_objects.deinit(gpa);
+    self.dynsymtab.deinit(gpa);
+    self.dynstrtab.deinit(gpa);
     self.arena.promote(gpa).deinit();
 }
 
