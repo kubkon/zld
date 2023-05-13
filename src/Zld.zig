@@ -212,7 +212,10 @@ pub fn reportWarningsAndErrors(base: *Zld) !void {
 }
 
 pub fn reportWarningsAndErrorsAndExit(base: *Zld) void {
-    base.reportWarningsAndErrors() catch process.exit(1);
+    base.reportWarningsAndErrors() catch {
+        base.deinit();
+        process.exit(1);
+    };
 }
 
 const std = @import("std");
