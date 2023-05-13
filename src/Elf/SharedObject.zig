@@ -3,8 +3,11 @@ data: []const u8,
 index: u32,
 needed: bool,
 
-symtab: std.ArrayListUnmanaged(elf.Elf64_Sym) = .{},
-strtab: std.ArrayListUnmanaged(u8) = .{},
+header: ?elf.Elf64_Ehdr = null,
+symtab: []align(1) const elf.Elf64_Sym = &[0]elf.Elf64_Sym{},
+strtab: []const u8 = &[0]u8{},
+
+hash_index: ?u16 = null,
 hash_table: ?HashTable = null,
 
 const HashTable = struct {
@@ -30,7 +33,7 @@ const HashTable = struct {
     }
 
     const Ctx = struct {
-        symtab: []const elf.Elf64_Sym,
+        symtab: []align(1) const elf.Elf64_Sym,
         strtab: []const u8,
 
         inline fn getString(ctx: Ctx, off: u32) [:0]const u8 {
@@ -89,42 +92,43 @@ pub fn isValidHeader(header: *const elf.Elf64_Ehdr) bool {
 }
 
 pub fn deinit(self: *SharedObject, allocator: Allocator) void {
-    self.symtab.deinit(allocator);
-    self.strtab.deinit(allocator);
     if (self.hash_table) |*ht| {
         ht.deinit(allocator);
     }
 }
 
 pub fn parse(self: *SharedObject, elf_file: *Elf) !void {
-    const gpa = elf_file.base.allocator;
-    const header = getEhdr(self.data);
-    const shdrs = getShdrs(self.data, header);
+    var stream = std.io.fixedBufferStream(self.data);
+    const reader = stream.reader();
+
+    self.header = try reader.readStruct(elf.Elf64_Ehdr);
+    const shdrs = self.getShdrs();
 
     // TODO prefer SHT_GNU_HASH to SHT_HASH
-    for (shdrs) |shdr| switch (shdr.sh_type) {
+    for (shdrs, 0..) |shdr, i| switch (shdr.sh_type) {
         elf.SHT_DYNSYM => {
-            const symtab = getShdrContents(self.data, shdr);
+            const symtab = self.getShdrContents(@intCast(u16, i));
             const nsyms = @divExact(symtab.len, @sizeOf(elf.Elf64_Sym));
-            const syms = @ptrCast([*]align(1) const elf.Elf64_Sym, symtab.ptr)[0..nsyms];
-            try self.symtab.appendUnalignedSlice(gpa, syms);
-
-            const strtab_shdr = shdrs[shdr.sh_link];
-            try self.strtab.appendUnalignedSlice(gpa, getShdrContents(self.data, strtab_shdr));
+            self.symtab = @ptrCast([*]align(1) const elf.Elf64_Sym, symtab.ptr)[0..nsyms];
+            self.strtab = self.getShdrContents(@intCast(u16, shdr.sh_link));
         },
-        elf.SHT_HASH => try self.initHashTable(gpa, self.data, shdr),
+        elf.SHT_HASH => self.hash_index = @intCast(u16, i),
         else => {},
     };
 
-    const sym_index = self.hash_table.?.get("puts", .{
-        .symtab = self.symtab.items,
-        .strtab = self.strtab.items,
-    });
-    log.warn("puts @{?d}", .{sym_index});
+    if (self.hash_index) |index| {
+        try self.initHashTable(index, elf_file);
+        const sym_index = self.hash_table.?.get("puts", .{
+            .symtab = self.symtab,
+            .strtab = self.strtab,
+        });
+        log.warn("puts @{?d}", .{sym_index});
+    }
 }
 
-fn initHashTable(self: *SharedObject, allocator: Allocator, data: []const u8, shdr: elf.Elf64_Shdr) !void {
-    const raw = getShdrContents(data, shdr);
+fn initHashTable(self: *SharedObject, index: u16, elf_file: *Elf) !void {
+    const gpa = elf_file.base.allocator;
+    const raw = self.getShdrContents(index);
     const len = @divExact(raw.len, @sizeOf(u32));
     const hash_table = @ptrCast([*]align(1) const u32, raw.ptr)[0..len];
     const nbucket = hash_table[0];
@@ -134,8 +138,8 @@ fn initHashTable(self: *SharedObject, allocator: Allocator, data: []const u8, sh
     const buckets = hash_table[bucketoff..][0..nbucket];
     const chain = hash_table[chainoff..][0..nchain];
     var ht = HashTable{};
-    try ht.buckets.appendUnalignedSlice(allocator, buckets);
-    try ht.chain.appendUnalignedSlice(allocator, chain);
+    try ht.buckets.appendUnalignedSlice(gpa, buckets);
+    try ht.chain.appendUnalignedSlice(gpa, chain);
     self.hash_table = ht;
 }
 
@@ -144,26 +148,24 @@ pub fn resolveSymbols(self: SharedObject, elf_file: *Elf) void {
     _ = elf_file;
 }
 
-inline fn getEhdr(data: []const u8) elf.Elf64_Ehdr {
-    return @ptrCast(*align(1) const elf.Elf64_Ehdr, data.ptr).*;
+pub inline fn getShdrs(self: SharedObject) []align(1) const elf.Elf64_Shdr {
+    const header = self.header orelse return &[0]elf.Elf64_Shdr{};
+    return @ptrCast([*]align(1) const elf.Elf64_Shdr, self.data.ptr + header.e_shoff)[0..header.e_shnum];
 }
 
-inline fn getShdrs(data: []const u8, header: elf.Elf64_Ehdr) []align(1) const elf.Elf64_Shdr {
-    return @ptrCast([*]align(1) const elf.Elf64_Shdr, data.ptr + header.e_shoff)[0..header.e_shnum];
-}
-
-inline fn getShdrContents(data: []const u8, shdr: elf.Elf64_Shdr) []const u8 {
-    return data[shdr.sh_offset..][0..shdr.sh_size];
+pub inline fn getShdrContents(self: SharedObject, index: u16) []const u8 {
+    const shdr = self.getShdrs()[index];
+    return self.data[shdr.sh_offset..][0..shdr.sh_size];
 }
 
 pub inline fn getSourceSymbol(self: *const SharedObject, index: u32) elf.Elf64_Sym {
     assert(index < self.symtab.items.len);
-    return self.symtab.items[index];
+    return self.symtab[index];
 }
 
-pub inline fn getString(self: *const SharedObject, off: u32) [:0]const u8 {
-    assert(off < self.strtab.items.len);
-    return mem.sliceTo(@ptrCast([*:0]const u8, self.strtab.items.ptr + off), 0);
+pub inline fn getString(self: SharedObject, off: u32) [:0]const u8 {
+    assert(off < self.strtab.len);
+    return mem.sliceTo(@ptrCast([*:0]const u8, self.strtab.ptr + off), 0);
 }
 
 test {
