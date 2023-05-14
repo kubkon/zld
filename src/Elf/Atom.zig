@@ -73,9 +73,7 @@ pub fn getCodeUncompressAlloc(self: Atom, elf_file: *Elf) ![]u8 {
 }
 
 pub fn getObject(self: Atom, elf_file: *Elf) *Object {
-    const tag = elf_file.files.items(.tags)[self.file];
-    assert(tag == .object);
-    return &elf_file.files.items(.data)[self.file].object;
+    return elf_file.getObject(self.file).?;
 }
 
 pub fn getInputShdr(self: Atom, elf_file: *Elf) elf.Elf64_Shdr {

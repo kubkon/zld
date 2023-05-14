@@ -40,21 +40,17 @@ pub fn getAtom(symbol: Symbol, elf_file: *Elf) ?*Atom {
 }
 
 pub fn getInternalObject(symbol: Symbol, elf_file: *Elf) ?*InternalObject {
-    const tag = elf_file.files.items(.tags)[symbol.file];
-    if (tag != .internal) return null;
-    return &elf_file.files.items(.data)[symbol.file].internal;
+    const internal = elf_file.getInternalObject() orelse return null;
+    if (internal.index != symbol.file) return null;
+    return internal;
 }
 
-pub fn getObject(symbol: Symbol, elf_file: *Elf) ?*Object {
-    const tag = elf_file.files.items(.tags)[symbol.file];
-    if (tag != .object) return null;
-    return &elf_file.files.items(.data)[symbol.file].object;
+pub inline fn getObject(symbol: Symbol, elf_file: *Elf) ?*Object {
+    return elf_file.getObject(symbol.file);
 }
 
-pub fn getSharedObject(symbol: Symbol, elf_file: *Elf) ?*SharedObject {
-    const tag = elf_file.files.items(.tags)[symbol.file];
-    if (tag != .shared) return null;
-    return &elf_file.files.items(.data)[symbol.file].shared;
+pub inline fn getSharedObject(symbol: Symbol, elf_file: *Elf) ?*SharedObject {
+    return elf_file.getSharedObject(symbol.file);
 }
 
 pub fn getSourceSymbol(symbol: Symbol, elf_file: *Elf) elf.Elf64_Sym {
