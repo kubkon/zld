@@ -1,7 +1,7 @@
 archive: ?[]const u8 = null,
 name: []const u8,
 data: []const u8,
-index: u32,
+index: Elf.File.Index,
 
 header: ?elf.Elf64_Ehdr = null,
 symtab: []align(1) const elf.Elf64_Sym = &[0]elf.Elf64_Sym{},
@@ -214,7 +214,7 @@ pub fn resolveSymbols(self: Object, elf_file: *Elf) void {
         if (this_sym.st_shndx == elf.SHN_UNDEF) continue;
 
         const global = elf_file.getGlobal(index);
-        if (getSymbolRank(this_sym) < global.getSymbolRank(elf_file)) {
+        if (self.asFile().getSymbolRank(this_sym, !self.alive) < global.getSymbolRank(elf_file)) {
             self.setGlobal(sym_idx, global);
         }
     }
@@ -265,24 +265,6 @@ pub fn checkUndefined(self: Object, elf_file: *Elf) void {
             elf_file.base.fatal("undefined reference: {s}: {s}", .{ self.name, global.getName(elf_file) });
         }
     }
-}
-
-/// Encodes symbol rank so that the following ordering applies:
-/// * strong defined
-/// * weak defined
-/// * undefined
-pub inline fn getSymbolRank(sym: elf.Elf64_Sym) u4 {
-    if (sym.st_shndx == elf.SHN_UNDEF) return 0xf;
-    return switch (sym.st_bind()) {
-        elf.STB_GLOBAL => 0,
-        elf.STB_WEAK => 1,
-        else => 0xf,
-    };
-}
-
-pub inline fn getSourceSymbol(self: Object, index: u32) elf.Elf64_Sym {
-    assert(index < self.symtab.len);
-    return self.symtab[index];
 }
 
 pub fn getGlobalIndex(self: Object, index: u32) ?u32 {
@@ -338,6 +320,10 @@ inline fn getString(self: Object, off: u32) [:0]const u8 {
 inline fn getShString(self: Object, off: u32) [:0]const u8 {
     assert(off < self.shstrtab.len);
     return mem.sliceTo(@ptrCast([*:0]const u8, self.shstrtab.ptr + off), 0);
+}
+
+pub fn asFile(self: Object) Elf.File {
+    return .{ .object = self };
 }
 
 pub fn format(

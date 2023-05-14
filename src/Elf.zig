@@ -57,16 +57,58 @@ atoms: std.ArrayListUnmanaged(Atom) = .{},
 
 pub const base_tag = Zld.Tag.elf;
 
-const File = union(enum) {
+pub const File = union(enum) {
+    null: void,
     internal: InternalObject,
     object: Object,
     shared: SharedObject,
 
     fn getNameAlloc(file: File, allocator: Allocator) ![]const u8 {
         return switch (file) {
+            .null => allocator.dupe(u8, "null"),
             .internal => allocator.dupe(u8, "internal"),
             .object => |x| x.getNameAlloc(allocator),
             inline else => |x| allocator.dupe(u8, x.name),
+        };
+    }
+
+    fn resolveSymbols(file: File, elf_file: *Elf) void {
+        switch (file) {
+            .null => {},
+            inline else => |x| x.resolveSymbols(elf_file),
+        }
+    }
+
+    /// Encodes symbol rank so that the following ordering applies:
+    /// * strong defined
+    /// * weak defined
+    /// * strong in lib (dso/archive)
+    /// * weak in lib (dso/archive)
+    /// * unclaimed
+    pub fn getSymbolRank(file: File, sym: elf.Elf64_Sym, in_archive: bool) u4 {
+        if (file == .shared or in_archive) return switch (sym.st_bind()) {
+            elf.STB_GLOBAL => 2,
+            else => 3,
+        };
+        return switch (sym.st_bind()) {
+            elf.STB_GLOBAL => 0,
+            else => 1,
+        };
+    }
+
+    pub const Index = u32;
+};
+
+pub const FilePtr = union(enum) {
+    internal: *InternalObject,
+    object: *Object,
+    shared: *SharedObject,
+
+    pub fn deref(ptr: FilePtr) File {
+        return switch (ptr) {
+            .internal => |x| .{ .internal = x.* },
+            .object => |x| .{ .object = x.* },
+            .shared => |x| .{ .shared = x.* },
         };
     }
 };
@@ -127,6 +169,7 @@ pub fn deinit(self: *Elf) void {
     self.phdrs.deinit(gpa);
     self.sections.deinit(gpa);
     for (self.files.items(.tags), self.files.items(.data)) |tag, *data| switch (tag) {
+        .null => {},
         .internal => data.internal.deinit(gpa),
         .object => data.object.deinit(gpa),
         .shared => data.shared.deinit(gpa),
@@ -225,6 +268,8 @@ pub fn flush(self: *Elf) !void {
         .st_value = 0,
         .st_size = 0,
     });
+    // Append null file.
+    try self.files.append(gpa, .null);
 
     var arena_allocator = self.arena.promote(gpa);
     defer self.arena = arena_allocator.state;
@@ -270,16 +315,15 @@ pub fn flush(self: *Elf) !void {
     self.base.reportWarningsAndErrorsAndExit();
 
     {
-        const index = @intCast(u32, try self.files.addOne(gpa));
+        const index = @intCast(File.Index, try self.files.addOne(gpa));
         self.files.set(index, .{ .internal = .{ .index = index } });
         self.internal_object_index = index;
     }
 
+    try self.resolveSymbols();
     log.debug("{}", .{self.dumpState()});
 
     if (true) return error.Todo;
-
-    try self.resolveSymbols();
 
     // Set the entrypoint if found
     self.entry_index = blk: {
@@ -308,7 +352,7 @@ pub fn flush(self: *Elf) !void {
 
     if (self.options.execstack_if_needed) {
         for (self.objects.items) |index| {
-            if (self.getObject(index).?.needs_exec_stack) {
+            if (self.getFile(index).?.object.needs_exec_stack) {
                 self.options.execstack = true;
                 break;
             }
@@ -728,7 +772,7 @@ fn allocateAtoms(self: *Elf) void {
 
 fn allocateLocals(self: *Elf) void {
     for (self.objects.items) |index| {
-        for (self.getObject(index).?.locals.items) |*symbol| {
+        for (self.getFile(index).?.object.locals.items) |*symbol| {
             const atom = symbol.getAtom(self) orelse continue;
             if (!atom.is_alive) continue;
             symbol.value += atom.value;
@@ -891,7 +935,7 @@ fn parseArchive(self: *Elf, arena: Allocator, path: []const u8) !bool {
     var it = archive.offsets.keyIterator();
     while (it.next()) |offset| {
         var extracted = try archive.getObject(arena, offset.*, self);
-        const index = @intCast(u32, try self.files.addOne(gpa));
+        const index = @intCast(File.Index, try self.files.addOne(gpa));
         extracted.index = index;
         self.files.set(index, .{ .object = extracted });
         const object = &self.files.items(.data)[index].object;
@@ -915,7 +959,7 @@ fn parseShared(self: *Elf, arena: Allocator, path: []const u8, opts: Zld.SystemL
 
     const data = try file.readToEndAlloc(arena, std.math.maxInt(u32));
 
-    const index = @intCast(u32, try self.files.addOne(gpa));
+    const index = @intCast(File.Index, try self.files.addOne(gpa));
     self.files.set(index, .{ .shared = .{
         .name = path,
         .data = data,
@@ -979,82 +1023,8 @@ fn validateOrSetCpuArch(self: *Elf, name: []const u8, cpu_arch: std.Target.Cpu.A
 }
 
 fn resolveSymbols(self: *Elf) !void {
-    for (self.objects.items) |index| {
-        self.getObject(index).?.resolveSymbols(self);
-    }
-    if (self.getInternalObject()) |internal| internal.resolveSymbols(self);
-    try self.resolveSymbolsInArchives();
-    try self.resolveSymbolsInSharedObjects();
-}
-
-fn resolveSymbolsInArchives(self: *Elf) !void {
-    if (self.archives.items.len == 0) return;
-
-    const gpa = self.base.allocator;
-
-    var next_sym: u32 = 0;
-    while (next_sym < self.globals.items.len) {
-        const global = self.getGlobal(next_sym);
-        const global_name = global.getName(self);
-        if (global.isUndef(self)) for (self.archives.items) |archive| {
-            // Check if the entry exists in a static archive.
-            const offsets = archive.toc.get(global_name) orelse {
-                // No hit.
-                continue;
-            };
-            assert(offsets.items.len > 0);
-
-            const extracted = archive.getObject(offsets.items[0], self) catch |err| switch (err) {
-                error.InvalidHeader => continue,
-                else => |e| return e,
-            };
-
-            const header = blk: {
-                var stream = std.io.fixedBufferStream(extracted.data);
-                break :blk try stream.reader().readStruct(elf.Elf64_Ehdr);
-            };
-            self.validateOrSetCpuArch(extracted.name, header.e_machine.toTargetCpuArch().?);
-
-            const index = @intCast(u32, try self.files.addOne(gpa));
-            self.files.set(index, .{ .object = .{
-                .name = extracted.name,
-                .data = extracted.data,
-                .index = index,
-            } });
-            const object = &self.files.items(.data)[index].object;
-            try object.parse(self);
-            try self.objects.append(gpa, index);
-            object.resolveSymbols(self);
-        };
-
-        next_sym += 1;
-    }
-}
-
-fn resolveSymbolsInSharedObjects(self: *Elf) !void {
-    if (self.shared_objects.items.len == 0) return;
-
-    var next_sym: u32 = 0;
-    while (next_sym < self.globals.items.len) {
-        const global = self.getGlobal(next_sym);
-        const global_name = global.getName(self);
-        if (global.isUndef(self)) for (self.shared_objects.items) |index| {
-            const shared = self.getSharedObject(index).?;
-            const sym_index = shared.getSourceSymbolIndex(global_name) orelse continue;
-            const sym = shared.getSourceSymbol(sym_index);
-            global.* = .{
-                .value = sym.st_value,
-                .name = global.name,
-                .atom = 0,
-                .sym_idx = sym_index,
-                .file = shared.index,
-            };
-            shared.needed = true;
-            try shared.globals.append(self.base.allocator, next_sym);
-        };
-
-        next_sym += 1;
-    }
+    const slice = self.files.slice();
+    for (0..slice.len) |index| slice.get(index).resolveSymbols(self);
 }
 
 fn resolveSyntheticSymbols(self: *Elf) !void {
@@ -1070,19 +1040,19 @@ fn resolveSyntheticSymbols(self: *Elf) !void {
 
 fn checkDuplicates(self: *Elf) void {
     for (self.objects.items) |index| {
-        self.getObject(index).?.checkDuplicates(self);
+        self.getFile(index).?.object.checkDuplicates(self);
     }
 }
 
 fn checkUndefined(self: *Elf) void {
     for (self.objects.items) |index| {
-        self.getObject(index).?.checkUndefined(self);
+        self.getFile(index).?.object.checkUndefined(self);
     }
 }
 
 fn claimUnresolved(self: *Elf) void {
     for (self.objects.items) |index| {
-        for (self.getObject(index).?.globals.items) |sym_index| {
+        for (self.getFile(index).?.object.globals.items) |sym_index| {
             const global = self.getGlobal(sym_index);
 
             if (global.isUndef(self) and global.isWeak(self)) {
@@ -1105,7 +1075,7 @@ fn setSymtab(self: *Elf) !void {
     const gpa = self.base.allocator;
 
     for (self.objects.items) |index| {
-        const object = self.getObject(index).?;
+        const object = self.getFile(index).?.object;
         for (object.locals.items) |sym| {
             if (sym.getAtom(self)) |atom| {
                 if (!atom.is_alive) continue;
@@ -1412,22 +1382,14 @@ pub fn getSectionIndexes(self: *Elf, phdr_index: u16) struct { start: u16, end: 
     return .{ .start = start, .end = end };
 }
 
-pub fn getInternalObject(self: *Elf) ?*InternalObject {
-    const index = self.internal_object_index orelse return null;
-    assert(self.files.items(.tags)[index] == .internal);
-    return &self.files.items(.data)[index].internal;
-}
-
-pub fn getObject(self: *Elf, index: u32) ?*Object {
+pub fn getFile(self: *Elf, index: File.Index) ?FilePtr {
     const tag = self.files.items(.tags)[index];
-    if (tag != .object) return null;
-    return &self.files.items(.data)[index].object;
-}
-
-pub fn getSharedObject(self: *Elf, index: u32) ?*SharedObject {
-    const tag = self.files.items(.tags)[index];
-    if (tag != .shared) return null;
-    return &self.files.items(.data)[index].shared;
+    return switch (tag) {
+        .null => null,
+        .internal => .{ .internal = &self.files.items(.data)[index].internal },
+        .object => .{ .object = &self.files.items(.data)[index].object },
+        .shared => .{ .shared = &self.files.items(.data)[index].shared },
+    };
 }
 
 fn getGotBaseAddress(self: *Elf) u64 {
@@ -1543,7 +1505,7 @@ fn fmtDumpState(
         const file = slice.get(index);
         const name = file.getNameAlloc(self.base.allocator) catch unreachable;
         defer self.base.allocator.free(name);
-        try writer.print("file({d}) : {s}\n", .{ index, name });
+        try writer.print("file({d}) : {s}", .{ index, name });
         switch (file) {
             .object => |object| if (!object.alive) try writer.writeAll(" : [*]"),
             .shared => |shared| if (!shared.alive) try writer.writeAll(" : [*]"),
@@ -1551,6 +1513,7 @@ fn fmtDumpState(
         }
         try writer.writeByte('\n');
         switch (file) {
+            .null => {},
             .internal => |internal| try writer.print("{}\n", .{internal.fmtSymtab(self)}),
             .object => |object| try writer.print("{}{}\n", .{ object.fmtAtoms(self), object.fmtSymtab(self) }),
             .shared => |shared| try writer.print("{}\n", .{shared.fmtSymtab(self)}),

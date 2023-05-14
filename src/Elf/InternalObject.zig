@@ -1,4 +1,4 @@
-index: u32,
+index: Elf.File.Index,
 symtab: std.ArrayListUnmanaged(elf.Elf64_Sym) = .{},
 globals: std.ArrayListUnmanaged(u32) = .{},
 
@@ -43,7 +43,7 @@ pub fn resolveSymbols(self: InternalObject, elf_file: *Elf) void {
         if (this_sym.st_shndx == elf.SHN_UNDEF) continue;
 
         const global = elf_file.getGlobal(index);
-        if (Object.getSymbolRank(this_sym) < global.getSymbolRank(elf_file)) {
+        if (self.asFile().getSymbolRank(this_sym, false) < global.getSymbolRank(elf_file)) {
             global.* = .{
                 .value = 0,
                 .name = global.name,
@@ -53,6 +53,10 @@ pub fn resolveSymbols(self: InternalObject, elf_file: *Elf) void {
             };
         }
     }
+}
+
+pub fn asFile(self: InternalObject) Elf.File {
+    return .{ .internal = self };
 }
 
 pub fn fmtSymtab(self: InternalObject, elf_file: *Elf) std.fmt.Formatter(formatSymtab) {

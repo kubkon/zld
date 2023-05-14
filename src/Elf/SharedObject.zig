@@ -1,6 +1,6 @@
 name: []const u8,
 data: []const u8,
-index: u32,
+index: Elf.File.Index,
 
 header: ?elf.Elf64_Ehdr = null,
 symtab: []align(1) const elf.Elf64_Sym = &[0]elf.Elf64_Sym{},
@@ -83,6 +83,20 @@ fn setGlobal(self: SharedObject, sym_idx: u32, global: *Symbol) void {
     };
 }
 
+pub fn resolveSymbols(self: SharedObject, elf_file: *Elf) void {
+    for (self.globals.items, 0..) |index, i| {
+        const sym_idx = @intCast(u32, i);
+        const this_sym = self.symtab[sym_idx];
+
+        if (this_sym.st_shndx == elf.SHN_UNDEF) continue;
+
+        const global = elf_file.getGlobal(index);
+        if (self.asFile().getSymbolRank(this_sym, false) < global.getSymbolRank(elf_file)) {
+            self.setGlobal(sym_idx, global);
+        }
+    }
+}
+
 pub inline fn getShdrs(self: SharedObject) []align(1) const elf.Elf64_Shdr {
     const header = self.header orelse return &[0]elf.Elf64_Shdr{};
     return @ptrCast([*]align(1) const elf.Elf64_Shdr, self.data.ptr + header.e_shoff)[0..header.e_shnum];
@@ -93,19 +107,13 @@ pub inline fn getShdrContents(self: SharedObject, index: u16) []const u8 {
     return self.data[shdr.sh_offset..][0..shdr.sh_size];
 }
 
-pub inline fn getSourceSymbol(self: SharedObject, index: u32) elf.Elf64_Sym {
-    assert(index < self.symtab.len);
-    return self.symtab[index];
-}
-
-pub fn getSourceSymbolIndex(self: SharedObject, name: [:0]const u8) ?u32 {
-    const ht = self.hash_table orelse return null;
-    return ht.get(name, self);
-}
-
 pub inline fn getString(self: SharedObject, off: u32) [:0]const u8 {
     assert(off < self.strtab.len);
     return mem.sliceTo(@ptrCast([*:0]const u8, self.strtab.ptr + off), 0);
+}
+
+pub fn asFile(self: SharedObject) Elf.File {
+    return .{ .shared = self };
 }
 
 pub fn format(

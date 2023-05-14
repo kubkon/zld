@@ -7,7 +7,7 @@ value: u64 = 0,
 name: u32 = 0,
 
 /// File where this symbol is defined.
-file: u32 = 0,
+file: Elf.File.Index = 0,
 
 /// Atom containing this symbol if any.
 /// Index of 0 means there is no associated atom with this symbol.
@@ -42,33 +42,26 @@ pub fn getAtom(symbol: Symbol, elf_file: *Elf) ?*Atom {
     return elf_file.getAtom(symbol.atom);
 }
 
-pub fn getInternalObject(symbol: Symbol, elf_file: *Elf) ?*InternalObject {
-    const internal = elf_file.getInternalObject() orelse return null;
-    if (internal.index != symbol.file) return null;
-    return internal;
-}
-
-pub inline fn getObject(symbol: Symbol, elf_file: *Elf) ?*Object {
-    return elf_file.getObject(symbol.file);
-}
-
-pub inline fn getSharedObject(symbol: Symbol, elf_file: *Elf) ?*SharedObject {
-    return elf_file.getSharedObject(symbol.file);
+pub inline fn getFile(symbol: Symbol, elf_file: *Elf) ?Elf.FilePtr {
+    return elf_file.getFile(symbol.file);
 }
 
 pub fn getSourceSymbol(symbol: Symbol, elf_file: *Elf) elf.Elf64_Sym {
-    if (symbol.getInternalObject(elf_file)) |internal| {
-        return internal.symtab.items[symbol.sym_idx];
-    } else if (symbol.getObject(elf_file)) |object| {
-        return object.getSourceSymbol(symbol.sym_idx);
-    } else if (symbol.getSharedObject(elf_file)) |shared| {
-        return shared.getSourceSymbol(symbol.sym_idx);
-    } else unreachable;
+    const file = symbol.getFile(elf_file) orelse unreachable;
+    return switch (file) {
+        .internal => |x| x.symtab.items[symbol.sym_idx],
+        inline else => |x| x.symtab[symbol.sym_idx],
+    };
 }
 
 pub fn getSymbolRank(symbol: Symbol, elf_file: *Elf) u4 {
+    const file = symbol.getFile(elf_file) orelse return 0xf;
     const sym = symbol.getSourceSymbol(elf_file);
-    return Object.getSymbolRank(sym);
+    const in_archive = switch (file) {
+        .object => |x| !x.alive,
+        else => false,
+    };
+    return file.deref().getSymbolRank(sym, in_archive);
 }
 
 pub fn format(
@@ -106,26 +99,21 @@ fn format2(
     _ = unused_fmt_string;
     const symbol = ctx.symbol;
     try writer.print("%{d} : {s} : @{x}", .{ symbol.sym_idx, symbol.getName(ctx.elf_file), symbol.value });
-
-    if (symbol.isUndef(ctx.elf_file)) {
-        try writer.writeAll(" : undefined");
-    } else {
+    if (symbol.getFile(ctx.elf_file)) |file| {
         if (symbol.shndx == 0) {
             try writer.writeAll(" : absolute");
         } else {
             try writer.print(" : sect({d})", .{symbol.shndx});
         }
-        if (symbol.getInternalObject(ctx.elf_file)) |internal| {
-            try writer.print(" : internal({d})", .{internal.index});
-        } else if (symbol.getObject(ctx.elf_file)) |object| {
-            if (symbol.getAtom(ctx.elf_file)) |atom| {
-                try writer.print(" : atom({d})", .{atom.atom_index});
-            }
-            try writer.print(" : file({d})", .{object.index});
-        } else if (symbol.getSharedObject(ctx.elf_file)) |shared| {
-            try writer.print(" : file({d})", .{shared.index});
-        } else unreachable;
-    }
+        if (symbol.getAtom(ctx.elf_file)) |atom| {
+            try writer.print(" : atom({d})", .{atom.atom_index});
+        }
+        switch (file) {
+            .internal => |x| try writer.print(" : internal({d})", .{x.index}),
+            .object => |x| try writer.print(" : object({d})", .{x.index}),
+            .shared => |x| try writer.print(" : shared({d})", .{x.index}),
+        }
+    } else try writer.writeAll(" : unresolved");
 }
 
 const std = @import("std");
