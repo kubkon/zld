@@ -3,7 +3,6 @@ arena: std.heap.ArenaAllocator.State,
 options: Options,
 shoff: u64 = 0,
 
-archives: std.ArrayListUnmanaged(Archive) = .{},
 objects: std.ArrayListUnmanaged(u32) = .{},
 shared_objects: std.ArrayListUnmanaged(u32) = .{},
 files: std.MultiArrayList(File) = .{},
@@ -63,10 +62,11 @@ const File = union(enum) {
     object: Object,
     shared: SharedObject,
 
-    fn getName(file: File) []const u8 {
+    fn getNameAlloc(file: File, allocator: Allocator) ![]const u8 {
         return switch (file) {
-            .internal => "internal",
-            inline else => |x| x.name,
+            .internal => allocator.dupe(u8, "internal"),
+            .object => |x| x.getNameAlloc(allocator),
+            inline else => |x| allocator.dupe(u8, x.name),
         };
     }
 };
@@ -132,10 +132,6 @@ pub fn deinit(self: *Elf) void {
         .shared => data.shared.deinit(gpa),
     };
     self.files.deinit(gpa);
-    for (self.archives.items) |*archive| {
-        archive.deinit(gpa);
-    }
-    self.archives.deinit(gpa);
     self.objects.deinit(gpa);
     self.shared_objects.deinit(gpa);
     self.dynsymtab.deinit(gpa);
@@ -278,6 +274,10 @@ pub fn flush(self: *Elf) !void {
         self.files.set(index, .{ .internal = .{ .index = index } });
         self.internal_object_index = index;
     }
+
+    log.debug("{}", .{self.dumpState()});
+
+    if (true) return error.Todo;
 
     try self.resolveSymbols();
 
@@ -884,13 +884,20 @@ fn parseArchive(self: *Elf, arena: Allocator, path: []const u8) !bool {
     if (!Archive.isValidMagic(&magic)) return false;
 
     const data = try file.readToEndAlloc(arena, std.math.maxInt(u32));
-
-    const archive = try self.archives.addOne(gpa);
-    archive.* = .{
-        .name = path,
-        .data = data,
-    };
+    var archive = Archive{ .name = path, .data = data };
+    defer archive.deinit(gpa);
     try archive.parse(self);
+
+    var it = archive.offsets.keyIterator();
+    while (it.next()) |offset| {
+        var extracted = try archive.getObject(arena, offset.*, self);
+        const index = @intCast(u32, try self.files.addOne(gpa));
+        extracted.index = index;
+        self.files.set(index, .{ .object = extracted });
+        const object = &self.files.items(.data)[index].object;
+        try object.parse(self);
+        try self.objects.append(gpa, index);
+    }
 
     return true;
 }
@@ -914,6 +921,7 @@ fn parseShared(self: *Elf, arena: Allocator, path: []const u8, opts: Zld.SystemL
         .data = data,
         .index = index,
         .needed = opts.needed,
+        .alive = !opts.needed,
     } });
     const dso = &self.files.items(.data)[index].shared;
     try dso.parse(self);
@@ -1533,10 +1541,15 @@ fn fmtDumpState(
     const slice = self.files.slice();
     for (0..slice.len) |index| {
         const file = slice.get(index);
-        try writer.print("file({d}) : {s}\n", .{ index, file.getName() });
-        if (file == .shared and !file.shared.needed) {
-            try writer.writeAll(" : [*]");
+        const name = file.getNameAlloc(self.base.allocator) catch unreachable;
+        defer self.base.allocator.free(name);
+        try writer.print("file({d}) : {s}\n", .{ index, name });
+        switch (file) {
+            .object => |object| if (!object.alive) try writer.writeAll(" : [*]"),
+            .shared => |shared| if (!shared.alive) try writer.writeAll(" : [*]"),
+            else => {},
         }
+        try writer.writeByte('\n');
         switch (file) {
             .internal => |internal| try writer.print("{}\n", .{internal.fmtSymtab(self)}),
             .object => |object| try writer.print("{}{}\n", .{ object.fmtAtoms(self), object.fmtSymtab(self) }),

@@ -1,11 +1,7 @@
 name: []const u8,
 data: []const u8,
 
-/// Parsed table of contents.
-/// Each symbol name points to a list of all definition
-/// sites within the current static archive.
-toc: std.StringArrayHashMapUnmanaged(std.ArrayListUnmanaged(u32)) = .{},
-
+offsets: std.AutoHashMapUnmanaged(u32, void) = .{},
 extnames_strtab: []const u8 = &[0]u8{},
 
 // Archive files start with the ARMAG identifying string.  Then follows a
@@ -67,10 +63,7 @@ pub fn isValidMagic(magic: []const u8) bool {
 }
 
 pub fn deinit(self: *Archive, allocator: Allocator) void {
-    for (self.toc.values()) |*value| {
-        value.deinit(allocator);
-    }
-    self.toc.deinit(allocator);
+    self.offsets.deinit(allocator);
 }
 
 pub fn parse(self: *Archive, elf_file: *Elf) !void {
@@ -104,29 +97,14 @@ pub fn parse(self: *Archive, elf_file: *Elf) !void {
         const size = try hdr.size();
         const nsyms = try reader.readIntBig(u32);
 
-        var offsets = std.ArrayList(u32).init(gpa);
-        defer offsets.deinit();
-        try offsets.ensureTotalCapacity(nsyms);
+        try self.offsets.ensureTotalCapacity(gpa, nsyms);
 
         var i: usize = 0;
         while (i < nsyms) : (i += 1) {
             const offset = try reader.readIntBig(u32);
-            offsets.appendAssumeCapacity(offset);
+            self.offsets.putAssumeCapacity(offset, {});
         }
 
-        i = 0;
-        var pos: usize = try stream.getPos();
-        while (i < nsyms) : (i += 1) {
-            const sym_name = mem.sliceTo(@ptrCast([*:0]const u8, self.data.ptr + pos), 0);
-            const res = try self.toc.getOrPut(gpa, sym_name);
-
-            if (!res.found_existing) {
-                res.value_ptr.* = .{};
-            }
-
-            try res.value_ptr.append(gpa, offsets.items[i]);
-            pos += sym_name.len + 1;
-        }
         try stream.seekTo(checkpoint + size);
     }
 
@@ -157,7 +135,7 @@ fn getExtName(self: Archive, off: u32) []const u8 {
     return mem.sliceTo(@ptrCast([*:'\n']const u8, self.extnames_strtab.ptr + off), 0);
 }
 
-pub fn getObject(self: Archive, offset: u32, elf_file: *Elf) !Object {
+pub fn getObject(self: Archive, arena: Allocator, offset: u32, elf_file: *Elf) !Object {
     var stream = std.io.fixedBufferStream(self.data[offset..]);
     const reader = stream.reader();
 
@@ -177,7 +155,7 @@ pub fn getObject(self: Archive, offset: u32, elf_file: *Elf) !Object {
             const off = try std.fmt.parseInt(u32, name[1..], 10);
             break :blk self.getExtName(off);
         }
-        break :blk name;
+        break :blk try arena.dupe(u8, name);
     };
     const object_name = name[0 .. name.len - 1]; // to account for trailing '/'
 
@@ -186,9 +164,11 @@ pub fn getObject(self: Archive, offset: u32, elf_file: *Elf) !Object {
     const object_size = try hdr.size();
 
     return .{
+        .archive = self.name,
         .name = object_name,
         .data = self.data[offset + stream.pos ..][0..object_size],
         .index = undefined,
+        .alive = false,
     };
 }
 

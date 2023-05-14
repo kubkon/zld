@@ -1,3 +1,4 @@
+archive: ?[]const u8 = null,
 name: []const u8,
 data: []const u8,
 index: u32,
@@ -14,6 +15,7 @@ globals: std.ArrayListUnmanaged(u32) = .{},
 atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
 
 needs_exec_stack: bool = false,
+alive: bool = true,
 
 pub fn isValidHeader(header: *const elf.Elf64_Ehdr) bool {
     if (!mem.eql(u8, header.e_ident[0..4], "\x7fELF")) {
@@ -82,8 +84,6 @@ fn initAtoms(self: *Object, elf_file: *Elf) !void {
             shdr.sh_type != elf.SHT_LLVM_ADDRSIG) continue;
 
         switch (shdr.sh_type) {
-            elf.SHT_GROUP => @panic("TODO"),
-            elf.SHT_SYMTAB_SHNDX => @panic("TODO"),
             elf.SHT_NULL,
             elf.SHT_REL,
             elf.SHT_RELA,
@@ -148,7 +148,14 @@ fn skipShdr(self: Object, index: u32, elf_file: *Elf) bool {
     const shdr = self.getShdrs()[index];
     const name = self.getShString(shdr.sh_name);
     const ignore = blk: {
-        if (shdr.sh_type == elf.SHT_X86_64_UNWIND) break :blk true;
+        switch (shdr.sh_type) {
+            elf.SHT_X86_64_UNWIND,
+            elf.SHT_GROUP,
+            elf.SHT_SYMTAB_SHNDX,
+            => break :blk true,
+
+            else => {},
+        }
         if (mem.startsWith(u8, name, ".note")) break :blk true;
         if (mem.startsWith(u8, name, ".comment")) break :blk true;
         if (mem.startsWith(u8, name, ".llvm_addrsig")) break :blk true;
@@ -216,10 +223,13 @@ pub fn resolveSymbols(self: Object, elf_file: *Elf) void {
 fn setGlobal(self: Object, sym_idx: u32, global: *Symbol) void {
     const sym = self.symtab[sym_idx];
     const name = global.name;
-    const atom = if (sym.st_shndx == elf.SHN_UNDEF or sym.st_shndx == elf.SHN_ABS)
-        0
-    else
-        self.atoms.items[sym.st_shndx];
+    const atom = switch (sym.st_shndx) {
+        elf.SHN_UNDEF,
+        elf.SHN_ABS,
+        elf.SHN_COMMON,
+        => 0,
+        else => self.atoms.items[sym.st_shndx],
+    };
     global.* = .{
         .value = sym.st_value,
         .name = name,
@@ -288,6 +298,26 @@ pub fn getSymbol(self: *Object, index: u32, elf_file: *Elf) *Symbol {
     } else {
         return &self.locals.items[index];
     }
+}
+
+pub fn getName(self: Object, buffer: []u8) ![]const u8 {
+    const size = if (self.archive) |path| path.len + self.name.len + 2 else self.name.len;
+    if (buffer.len < size) return error.NoSpaceLeft;
+    if (self.archive) |path| {
+        @memcpy(buffer[0..path.len], path);
+        buffer[path.len] = '(';
+        @memcpy(buffer[path.len + 1 ..][0..self.name.len], self.name);
+        buffer[path.len + self.name.len + 1] = ')';
+    } else {
+        @memcpy(buffer[0..self.name.len], self.name);
+    }
+    return buffer[0..size];
+}
+
+pub fn getNameAlloc(self: Object, allocator: Allocator) ![]const u8 {
+    const size = if (self.archive) |path| path.len + self.name.len + 2 else self.name.len;
+    const name = try allocator.alloc(u8, size);
+    return self.getName(name);
 }
 
 pub inline fn getShdrs(self: Object) []align(1) const elf.Elf64_Shdr {

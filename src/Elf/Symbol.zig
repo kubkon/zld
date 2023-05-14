@@ -21,6 +21,9 @@ shndx: u16 = 0,
 /// Use `getSourceSymbol` to pull the source symbol from the relevant file.
 sym_idx: u32 = 0,
 
+/// Whether the symbol is imported from a shared object at runtime.
+import: bool = false,
+
 pub fn isUndef(symbol: Symbol, elf_file: *Elf) bool {
     const sym = symbol.getSourceSymbol(elf_file);
     return sym.st_shndx == elf.SHN_UNDEF;

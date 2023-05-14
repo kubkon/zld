@@ -1,7 +1,6 @@
 name: []const u8,
 data: []const u8,
 index: u32,
-needed: bool,
 
 header: ?elf.Elf64_Ehdr = null,
 symtab: []align(1) const elf.Elf64_Sym = &[0]elf.Elf64_Sym{},
@@ -10,6 +9,9 @@ strtab: []const u8 = &[0]u8{},
 hash_table: ?HashTable = null,
 
 globals: std.ArrayListUnmanaged(u32) = .{},
+
+needed: bool,
+alive: bool,
 
 pub fn isValidHeader(header: *const elf.Elf64_Ehdr) bool {
     if (!mem.eql(u8, header.e_ident[0..4], "\x7fELF")) {
