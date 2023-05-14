@@ -6,8 +6,6 @@ header: ?elf.Elf64_Ehdr = null,
 symtab: []align(1) const elf.Elf64_Sym = &[0]elf.Elf64_Sym{},
 strtab: []const u8 = &[0]u8{},
 
-hash_table: ?HashTable = null,
-
 globals: std.ArrayListUnmanaged(u32) = .{},
 
 needed: bool,
@@ -40,31 +38,48 @@ pub fn parse(self: *SharedObject, elf_file: *Elf) !void {
     self.header = try reader.readStruct(elf.Elf64_Ehdr);
     const shdrs = self.getShdrs();
 
-    for (shdrs, 0..) |shdr, i| switch (shdr.sh_type) {
-        elf.SHT_DYNSYM => {
-            const symtab = self.getShdrContents(@intCast(u16, i));
-            const nsyms = @divExact(symtab.len, @sizeOf(elf.Elf64_Sym));
-            self.symtab = @ptrCast([*]align(1) const elf.Elf64_Sym, symtab.ptr)[0..nsyms];
-            self.strtab = self.getShdrContents(@intCast(u16, shdr.sh_link));
-        },
-        elf.SHT_HASH => self.initHashTable(@intCast(u16, i)),
+    const dynsym_index = for (shdrs, 0..) |shdr, i| switch (shdr.sh_type) {
+        elf.SHT_DYNSYM => break @intCast(u16, i),
         else => {},
-    };
+    } else null;
 
-    if (self.hash_table == null) return elf_file.base.fatal("{s}: no .hash section in DSO", .{self.name});
+    if (dynsym_index) |index| {
+        const shdr = shdrs[index];
+        const symtab = self.getShdrContents(index);
+        const nsyms = @divExact(symtab.len, @sizeOf(elf.Elf64_Sym));
+        self.symtab = @ptrCast([*]align(1) const elf.Elf64_Sym, symtab.ptr)[0..nsyms];
+        self.strtab = self.getShdrContents(@intCast(u16, shdr.sh_link));
+    }
+
+    try self.initSymtab(elf_file);
 }
 
-fn initHashTable(self: *SharedObject, index: u16) void {
-    const raw = self.getShdrContents(index);
-    const len = @divExact(raw.len, @sizeOf(u32));
-    const hash_table = @ptrCast([*]align(1) const u32, raw.ptr)[0..len];
-    const nbucket = hash_table[0];
-    const nchain = hash_table[1];
-    const bucketoff: usize = 2;
-    const chainoff: usize = bucketoff + nbucket;
-    self.hash_table = .{
-        .buckets = hash_table[bucketoff..][0..nbucket],
-        .chain = hash_table[chainoff..][0..nchain],
+fn initSymtab(self: *SharedObject, elf_file: *Elf) !void {
+    const gpa = elf_file.base.allocator;
+
+    try self.globals.ensureTotalCapacityPrecise(gpa, self.symtab.len);
+
+    for (self.symtab, 0..) |sym, i| {
+        const sym_idx = @intCast(u32, i);
+        const name = self.getString(sym.st_name);
+        const gop = try elf_file.getOrCreateGlobal(name);
+        if (!gop.found_existing) {
+            const global = elf_file.getGlobal(gop.index);
+            self.setGlobal(sym_idx, global);
+        }
+        self.globals.addOneAssumeCapacity().* = gop.index;
+    }
+}
+
+fn setGlobal(self: SharedObject, sym_idx: u32, global: *Symbol) void {
+    const sym = self.symtab[sym_idx];
+    const name = global.name;
+    global.* = .{
+        .value = sym.st_value,
+        .name = name,
+        .atom = 0,
+        .sym_idx = sym_idx,
+        .file = self.index,
     };
 }
 
@@ -136,43 +151,6 @@ fn formatSymtab(
 
 const SharedObject = @This();
 
-const STN_UNDEF = 0;
-
-const HashTable = struct {
-    buckets: []align(1) const u32,
-    chain: []align(1) const u32,
-
-    fn get(ht: *const HashTable, name: [:0]const u8, ctx: SharedObject) ?u32 {
-        const h = hasher(name);
-        var index = ht.buckets[h % ht.buckets.len];
-        while (index != STN_UNDEF) : (index = ht.chain[index]) {
-            const sym = ctx.getSourceSymbol(index);
-            const sym_name = ctx.getString(sym.st_name);
-            if (mem.eql(u8, name, sym_name)) return index;
-        }
-        return null;
-    }
-
-    fn hasher(name: [:0]const u8) u32 {
-        var h: u32 = 0;
-        var g: u32 = 0;
-        for (name) |c| {
-            h = (h << 4) + c;
-            g = h & 0xf0000000;
-            if (g > 0) h ^= g >> 24;
-            h &= ~g;
-        }
-        return h;
-    }
-
-    test "hasher" {
-        try std.testing.expectEqual(hasher(""), 0);
-        try std.testing.expectEqual(hasher("printf"), 0x77905a6);
-        try std.testing.expectEqual(hasher("exit"), 0x6cf04);
-        try std.testing.expectEqual(hasher("syscall"), 0xb09985c);
-    }
-};
-
 const std = @import("std");
 const assert = std.debug.assert;
 const elf = std.elf;
@@ -181,7 +159,4 @@ const mem = std.mem;
 
 const Allocator = mem.Allocator;
 const Elf = @import("../Elf.zig");
-
-test {
-    _ = std.testing.refAllDecls(HashTable);
-}
+const Symbol = @import("Symbol.zig");
