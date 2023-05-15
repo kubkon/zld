@@ -55,8 +55,8 @@ pub fn getSourceSymbol(symbol: Symbol, elf_file: *Elf) elf.Elf64_Sym {
     };
 }
 
-pub fn getSymbolRank(symbol: Symbol, elf_file: *Elf) u4 {
-    const file = symbol.getFile(elf_file) orelse return 0xf;
+pub fn getSymbolRank(symbol: Symbol, elf_file: *Elf) u32 {
+    const file = symbol.getFile(elf_file) orelse return std.math.maxInt(u32);
     const sym = symbol.getSourceSymbol(elf_file);
     const in_archive = switch (file) {
         .object => |x| !x.alive,

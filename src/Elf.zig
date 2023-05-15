@@ -105,15 +105,18 @@ pub const File = union(enum) {
     /// * strong in lib (dso/archive)
     /// * weak in lib (dso/archive)
     /// * unclaimed
-    pub fn getSymbolRank(file: File, sym: elf.Elf64_Sym, in_archive: bool) u4 {
-        if (file == .shared or in_archive) return switch (sym.st_bind()) {
-            elf.STB_GLOBAL => 2,
-            else => 3,
+    pub fn getSymbolRank(file: File, sym: elf.Elf64_Sym, in_archive: bool) u32 {
+        const base: u4 = blk: {
+            if (file == .shared or in_archive) break :blk switch (sym.st_bind()) {
+                elf.STB_GLOBAL => 3,
+                else => 4,
+            };
+            break :blk switch (sym.st_bind()) {
+                elf.STB_GLOBAL => 1,
+                else => 2,
+            };
         };
-        return switch (sym.st_bind()) {
-            elf.STB_GLOBAL => 0,
-            else => 1,
-        };
+        return (@as(u32, base) << 24) + file.getIndex();
     }
 
     pub const Index = u32;
