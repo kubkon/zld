@@ -434,9 +434,12 @@ pub fn flush(self: *Elf) !void {
 }
 
 fn initSections(self: *Elf) !void {
-    for (self.atoms.items[1..]) |*atom| {
-        if (!atom.is_alive) continue;
-        try atom.initOutputSection(self);
+    for (self.objects.items) |index| {
+        for (self.getFile(index).?.object.atoms.items) |atom_index| {
+            const atom = self.getAtom(atom_index) orelse continue;
+            if (!atom.is_alive) continue;
+            try atom.initOutputSection(self);
+        }
     }
 
     if (self.got_section.count() > 0) {
@@ -492,28 +495,31 @@ fn initSections(self: *Elf) !void {
 
 fn calcSectionSizes(self: *Elf) !void {
     var slice = self.sections.slice();
-    for (self.atoms.items[1..], 1..) |*atom, atom_index| {
-        if (!atom.is_alive) continue;
+    for (self.objects.items) |index| {
+        for (self.getFile(index).?.object.atoms.items) |atom_index| {
+            const atom = self.getAtom(atom_index) orelse continue;
+            if (!atom.is_alive) continue;
 
-        var section = slice.get(atom.out_shndx);
-        const alignment = try math.powi(u64, 2, atom.alignment);
-        const addr = mem.alignForwardGeneric(u64, section.shdr.sh_size, alignment);
-        const padding = addr - section.shdr.sh_size;
-        atom.value = addr;
-        section.shdr.sh_size += padding + atom.size;
-        section.shdr.sh_addralign = @max(section.shdr.sh_addralign, alignment);
+            var section = slice.get(atom.out_shndx);
+            const alignment = try math.powi(u64, 2, atom.alignment);
+            const addr = mem.alignForwardGeneric(u64, section.shdr.sh_size, alignment);
+            const padding = addr - section.shdr.sh_size;
+            atom.value = addr;
+            section.shdr.sh_size += padding + atom.size;
+            section.shdr.sh_addralign = @max(section.shdr.sh_addralign, alignment);
 
-        if (section.last_atom) |last_atom_index| {
-            const last_atom = self.getAtom(last_atom_index).?;
-            last_atom.next = @intCast(u32, atom_index);
-            atom.prev = last_atom_index;
-        } else {
-            assert(section.first_atom == null);
-            section.first_atom = @intCast(u32, atom_index);
+            if (section.last_atom) |last_atom_index| {
+                const last_atom = self.getAtom(last_atom_index).?;
+                last_atom.next = @intCast(u32, atom_index);
+                atom.prev = last_atom_index;
+            } else {
+                assert(section.first_atom == null);
+                section.first_atom = @intCast(u32, atom_index);
+            }
+            section.last_atom = @intCast(u32, atom_index);
+
+            slice.set(atom.out_shndx, section);
         }
-        section.last_atom = @intCast(u32, atom_index);
-
-        slice.set(atom.out_shndx, section);
     }
 
     if (self.got_sect_index) |index| {
@@ -595,8 +601,12 @@ fn sortSections(self: *Elf) !void {
         self.sections.appendAssumeCapacity(slice.get(sorted.shndx));
     }
 
-    for (self.atoms.items[1..]) |*atom| {
-        atom.out_shndx = backlinks[atom.out_shndx];
+    for (self.objects.items) |index| {
+        for (self.getFile(index).?.object.atoms.items) |atom_index| {
+            const atom = self.getAtom(atom_index) orelse continue;
+            if (!atom.is_alive) continue;
+            atom.out_shndx = backlinks[atom.out_shndx];
+        }
     }
 
     for (&[_]*?u16{
@@ -1188,9 +1198,12 @@ fn claimUnresolved(self: *Elf) void {
 }
 
 fn scanRelocs(self: *Elf) !void {
-    for (self.atoms.items[1..]) |*atom| {
-        if (!atom.is_alive) continue;
-        try atom.scanRelocs(self);
+    for (self.objects.items) |index| {
+        for (self.getFile(index).?.object.atoms.items) |atom_index| {
+            const atom = self.getAtom(atom_index) orelse continue;
+            if (!atom.is_alive) continue;
+            try atom.scanRelocs(self);
+        }
     }
 }
 
