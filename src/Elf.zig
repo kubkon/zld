@@ -1648,7 +1648,7 @@ fn fmtDumpState(
     _ = unused_fmt_string;
     for (self.objects.items) |index| {
         const object = self.getFile(index).?.object;
-        try writer.print("file({d}) : ", .{index});
+        try writer.print("object({d}) : ", .{index});
         if (object.archive) |path| {
             try writer.print("{s}({s})", .{ path, object.name });
         } else try writer.print("{s}", .{object.name});
@@ -1657,14 +1657,14 @@ fn fmtDumpState(
     }
     for (self.shared_objects.items) |index| {
         const shared = self.getFile(index).?.shared;
-        try writer.print("file({d}) : ", .{index});
+        try writer.print("shared({d}) : ", .{index});
         try writer.print("{s}", .{shared.name});
         if (!shared.alive) try writer.writeAll(" : [*]\n");
         try writer.print("{}\n", .{shared.fmtSymtab(self)});
     }
     if (self.internal_object_index) |index| {
         const internal = self.getFile(index).?.internal;
-        try writer.print("file({d}) : internal\n", .{index});
+        try writer.print("internal({d}) : internal\n", .{index});
         try writer.print("{}\n", .{internal.fmtSymtab(self)});
     }
     try writer.writeAll("GOT\n");
