@@ -63,20 +63,25 @@ pub const File = union(enum) {
     object: Object,
     shared: SharedObject,
 
-    fn getNameAlloc(file: File, allocator: Allocator) ![]const u8 {
-        return switch (file) {
-            .null => allocator.dupe(u8, "null"),
-            .internal => allocator.dupe(u8, "internal"),
-            .object => |x| x.getNameAlloc(allocator),
-            inline else => |x| allocator.dupe(u8, x.name),
-        };
-    }
-
     fn resolveSymbols(file: File, elf_file: *Elf) void {
         switch (file) {
-            .null => {},
+            .null => unreachable,
             inline else => |x| x.resolveSymbols(elf_file),
         }
+    }
+
+    fn resetGlobals(file: File, elf_file: *Elf) void {
+        switch (file) {
+            .null => unreachable,
+            inline else => |x| x.resetGlobals(elf_file),
+        }
+    }
+
+    pub fn isAlive(file: File) bool {
+        return switch (file) {
+            .null => unreachable,
+            inline else => |x| x.alive,
+        };
     }
 
     /// Encodes symbol rank so that the following ordering applies:
@@ -110,6 +115,19 @@ pub const FilePtr = union(enum) {
             .object => |x| .{ .object = x.* },
             .shared => |x| .{ .shared = x.* },
         };
+    }
+
+    pub fn setAlive(ptr: FilePtr) void {
+        switch (ptr) {
+            inline else => |x| x.alive = true,
+        }
+    }
+
+    pub fn markLive(ptr: FilePtr, elf_file: *Elf) void {
+        switch (ptr) {
+            .internal => {},
+            inline else => |x| x.markLive(elf_file),
+        }
     }
 };
 
@@ -1022,9 +1040,60 @@ fn validateOrSetCpuArch(self: *Elf, name: []const u8, cpu_arch: std.Target.Cpu.A
     }
 }
 
+/// When resolving symbols, we approach the problem similarly to `mold`.
+/// 1. Resolve symbols across all objects (including those preemptively extracted archives).
+/// 2. Resolve symbols across all shared objects.
+/// 3. Mark live objects (see `Elf.markLive`)
+/// 4. Reset state of all resolved globals since we will redo this bit on the pruned set.
+/// 5. Remove references to dead objects/shared objects
+/// 6. Re-run symbol resolution on pruned objects and shared objects sets.
 fn resolveSymbols(self: *Elf) !void {
-    const slice = self.files.slice();
-    for (0..slice.len) |index| slice.get(index).resolveSymbols(self);
+    // Resolve symbols on the set of all objects and shared objects (even if some are unneeded).
+    for (self.objects.items) |index| self.getFile(index).?.deref().resolveSymbols(self);
+    for (self.shared_objects.items) |index| self.getFile(index).?.deref().resolveSymbols(self);
+
+    // Mark live objects.
+    self.markLive();
+
+    // Reset state of all globals after marking live objects.
+    for (self.objects.items) |index| self.getFile(index).?.deref().resetGlobals(self);
+    for (self.shared_objects.items) |index| self.getFile(index).?.deref().resetGlobals(self);
+
+    // Prune dead objects and shared objects.
+    var i: usize = 0;
+    while (i < self.objects.items.len) {
+        const index = self.objects.items[i];
+        if (!self.getFile(index).?.deref().isAlive()) {
+            _ = self.objects.swapRemove(i);
+        } else i += 1;
+    }
+
+    i = 0;
+    while (i < self.shared_objects.items.len) {
+        const index = self.shared_objects.items[i];
+        if (!self.getFile(index).?.deref().isAlive()) {
+            _ = self.shared_objects.swapRemove(i);
+        } else i += 1;
+    }
+
+    // Re-resolve the symbols.
+    for (self.objects.items) |index| self.getFile(index).?.deref().resolveSymbols(self);
+    for (self.shared_objects.items) |index| self.getFile(index).?.deref().resolveSymbols(self);
+}
+
+/// Traverses all objects and shared objects marking any object referenced by
+/// a live object/shared object as alive itself.
+/// This routine will prune unneeded objects extracted from archives and
+/// unneeded shared objects.
+fn markLive(self: *Elf) void {
+    for (self.objects.items) |index| {
+        const file = self.getFile(index).?;
+        if (file.deref().isAlive()) file.markLive(self);
+    }
+    for (self.shared_objects.items) |index| {
+        const file = self.getFile(index).?;
+        if (file.deref().isAlive()) file.markLive(self);
+    }
 }
 
 fn resolveSyntheticSymbols(self: *Elf) !void {
@@ -1500,24 +1569,26 @@ fn fmtDumpState(
 ) !void {
     _ = options;
     _ = unused_fmt_string;
-    const slice = self.files.slice();
-    for (0..slice.len) |index| {
-        const file = slice.get(index);
-        const name = file.getNameAlloc(self.base.allocator) catch unreachable;
-        defer self.base.allocator.free(name);
-        try writer.print("file({d}) : {s}", .{ index, name });
-        switch (file) {
-            .object => |object| if (!object.alive) try writer.writeAll(" : [*]"),
-            .shared => |shared| if (!shared.alive) try writer.writeAll(" : [*]"),
-            else => {},
-        }
-        try writer.writeByte('\n');
-        switch (file) {
-            .null => {},
-            .internal => |internal| try writer.print("{}\n", .{internal.fmtSymtab(self)}),
-            .object => |object| try writer.print("{}{}\n", .{ object.fmtAtoms(self), object.fmtSymtab(self) }),
-            .shared => |shared| try writer.print("{}\n", .{shared.fmtSymtab(self)}),
-        }
+    for (self.objects.items) |index| {
+        const object = self.getFile(index).?.object;
+        try writer.print("file({d}) : ", .{index});
+        if (object.archive) |path| {
+            try writer.print("{s}({s})", .{ path, object.name });
+        } else try writer.print("{s}", .{object.name});
+        if (!object.alive) try writer.writeAll(" : [*]\n");
+        try writer.print("{}{}\n", .{ object.fmtAtoms(self), object.fmtSymtab(self) });
+    }
+    for (self.shared_objects.items) |index| {
+        const shared = self.getFile(index).?.shared;
+        try writer.print("file({d}) : ", .{index});
+        try writer.print("{s}", .{shared.name});
+        if (!shared.alive) try writer.writeAll(" : [*]\n");
+        try writer.print("{}\n", .{shared.fmtSymtab(self)});
+    }
+    if (self.internal_object_index) |index| {
+        const internal = self.getFile(index).?.internal;
+        try writer.print("file({d}) : internal\n", .{index});
+        try writer.print("{}\n", .{internal.fmtSymtab(self)});
     }
     try writer.writeAll("GOT\n");
     try writer.print("{}\n", .{self.got_section});

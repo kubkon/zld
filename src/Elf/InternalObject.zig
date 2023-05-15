@@ -1,6 +1,7 @@
 index: Elf.File.Index,
 symtab: std.ArrayListUnmanaged(elf.Elf64_Sym) = .{},
 globals: std.ArrayListUnmanaged(u32) = .{},
+alive: bool = true,
 
 pub fn deinit(self: *InternalObject, allocator: Allocator) void {
     self.symtab.deinit(allocator);
@@ -9,7 +10,6 @@ pub fn deinit(self: *InternalObject, allocator: Allocator) void {
 
 pub fn addSyntheticGlobal(self: *InternalObject, name: [:0]const u8, elf_file: *Elf) !u32 {
     const gpa = elf_file.base.allocator;
-    const sym_idx = @intCast(u32, self.symtab.items.len);
     try self.symtab.ensureUnusedCapacity(gpa, 1);
     try self.globals.ensureUnusedCapacity(gpa, 1);
     self.symtab.appendAssumeCapacity(.{
@@ -21,16 +21,6 @@ pub fn addSyntheticGlobal(self: *InternalObject, name: [:0]const u8, elf_file: *
         .st_size = 0,
     });
     const gop = try elf_file.getOrCreateGlobal(name);
-    if (!gop.found_existing) {
-        const global = elf_file.getGlobal(gop.index);
-        global.* = .{
-            .value = 0,
-            .name = global.name,
-            .atom = 0,
-            .file = self.index,
-            .sym_idx = sym_idx,
-        };
-    }
     self.globals.addOneAssumeCapacity().* = gop.index;
     return gop.index;
 }
@@ -52,6 +42,15 @@ pub fn resolveSymbols(self: InternalObject, elf_file: *Elf) void {
                 .sym_idx = sym_idx,
             };
         }
+    }
+}
+
+pub fn resetGlobals(self: InternalObject, elf_file: *Elf) void {
+    for (self.globals.items) |index| {
+        const global = elf_file.getGlobal(index);
+        const name = global.name;
+        global.* = .{};
+        global.name = name;
     }
 }
 

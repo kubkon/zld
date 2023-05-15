@@ -193,14 +193,9 @@ fn initSymtab(self: *Object, elf_file: *Elf) !void {
         };
     }
 
-    for (self.symtab[first_global..], 0..) |sym, i| {
-        const sym_idx = @intCast(u32, first_global + i);
+    for (self.symtab[first_global..]) |sym| {
         const name = self.getString(sym.st_name);
         const gop = try elf_file.getOrCreateGlobal(name);
-        if (!gop.found_existing) {
-            const global = elf_file.getGlobal(gop.index);
-            self.setGlobal(sym_idx, global);
-        }
         self.globals.addOneAssumeCapacity().* = gop.index;
     }
 }
@@ -215,28 +210,44 @@ pub fn resolveSymbols(self: Object, elf_file: *Elf) void {
 
         const global = elf_file.getGlobal(index);
         if (self.asFile().getSymbolRank(this_sym, !self.alive) < global.getSymbolRank(elf_file)) {
-            self.setGlobal(sym_idx, global);
+            const atom = switch (this_sym.st_shndx) {
+                elf.SHN_ABS, elf.SHN_COMMON => 0,
+                else => self.atoms.items[this_sym.st_shndx],
+            };
+            global.* = .{
+                .value = this_sym.st_value,
+                .name = global.name,
+                .atom = atom,
+                .sym_idx = sym_idx,
+                .file = self.index,
+            };
         }
     }
 }
 
-fn setGlobal(self: Object, sym_idx: u32, global: *Symbol) void {
-    const sym = self.symtab[sym_idx];
-    const name = global.name;
-    const atom = switch (sym.st_shndx) {
-        elf.SHN_UNDEF,
-        elf.SHN_ABS,
-        elf.SHN_COMMON,
-        => 0,
-        else => self.atoms.items[sym.st_shndx],
-    };
-    global.* = .{
-        .value = sym.st_value,
-        .name = name,
-        .atom = atom,
-        .sym_idx = sym_idx,
-        .file = self.index,
-    };
+pub fn resetGlobals(self: Object, elf_file: *Elf) void {
+    for (self.globals.items) |index| {
+        const global = elf_file.getGlobal(index);
+        const name = global.name;
+        global.* = .{};
+        global.name = name;
+    }
+}
+
+pub fn markLive(self: *Object, elf_file: *Elf) void {
+    const first_global = self.first_global orelse return;
+    for (self.globals.items, 0..) |index, i| {
+        const sym_idx = first_global + i;
+        const sym = self.symtab[sym_idx];
+        if (sym.st_bind() == elf.STB_WEAK) continue;
+
+        const global = elf_file.getGlobal(index);
+        const file = global.getFile(elf_file) orelse continue;
+        if (sym.st_shndx == elf.SHN_UNDEF and !file.deref().isAlive()) {
+            file.setAlive();
+            file.markLive(elf_file);
+        }
+    }
 }
 
 pub fn checkDuplicates(self: Object, elf_file: *Elf) void {
@@ -280,26 +291,6 @@ pub fn getSymbol(self: *Object, index: u32, elf_file: *Elf) *Symbol {
     } else {
         return &self.locals.items[index];
     }
-}
-
-pub fn getName(self: Object, buffer: []u8) ![]const u8 {
-    const size = if (self.archive) |path| path.len + self.name.len + 2 else self.name.len;
-    if (buffer.len < size) return error.NoSpaceLeft;
-    if (self.archive) |path| {
-        @memcpy(buffer[0..path.len], path);
-        buffer[path.len] = '(';
-        @memcpy(buffer[path.len + 1 ..][0..self.name.len], self.name);
-        buffer[path.len + self.name.len + 1] = ')';
-    } else {
-        @memcpy(buffer[0..self.name.len], self.name);
-    }
-    return buffer[0..size];
-}
-
-pub fn getNameAlloc(self: Object, allocator: Allocator) ![]const u8 {
-    const size = if (self.archive) |path| path.len + self.name.len + 2 else self.name.len;
-    const name = try allocator.alloc(u8, size);
-    return self.getName(name);
 }
 
 pub inline fn getShdrs(self: Object) []align(1) const elf.Elf64_Shdr {

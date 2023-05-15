@@ -59,28 +59,11 @@ fn initSymtab(self: *SharedObject, elf_file: *Elf) !void {
 
     try self.globals.ensureTotalCapacityPrecise(gpa, self.symtab.len);
 
-    for (self.symtab, 0..) |sym, i| {
-        const sym_idx = @intCast(u32, i);
+    for (self.symtab) |sym| {
         const name = self.getString(sym.st_name);
         const gop = try elf_file.getOrCreateGlobal(name);
-        if (!gop.found_existing) {
-            const global = elf_file.getGlobal(gop.index);
-            self.setGlobal(sym_idx, global);
-        }
         self.globals.addOneAssumeCapacity().* = gop.index;
     }
-}
-
-fn setGlobal(self: SharedObject, sym_idx: u32, global: *Symbol) void {
-    const sym = self.symtab[sym_idx];
-    const name = global.name;
-    global.* = .{
-        .value = sym.st_value,
-        .name = name,
-        .atom = 0,
-        .sym_idx = sym_idx,
-        .file = self.index,
-    };
 }
 
 pub fn resolveSymbols(self: SharedObject, elf_file: *Elf) void {
@@ -92,7 +75,36 @@ pub fn resolveSymbols(self: SharedObject, elf_file: *Elf) void {
 
         const global = elf_file.getGlobal(index);
         if (self.asFile().getSymbolRank(this_sym, false) < global.getSymbolRank(elf_file)) {
-            self.setGlobal(sym_idx, global);
+            global.* = .{
+                .value = this_sym.st_value,
+                .name = global.name,
+                .atom = 0,
+                .sym_idx = sym_idx,
+                .file = self.index,
+            };
+        }
+    }
+}
+
+pub fn resetGlobals(self: SharedObject, elf_file: *Elf) void {
+    for (self.globals.items) |index| {
+        const global = elf_file.getGlobal(index);
+        const name = global.name;
+        global.* = .{};
+        global.name = name;
+    }
+}
+
+pub fn markLive(self: *SharedObject, elf_file: *Elf) void {
+    for (self.globals.items) |index| {
+        const sym = self.symtab[index];
+        if (sym.st_shndx != elf.SHN_UNDEF) continue;
+
+        const global = elf_file.getGlobal(index);
+        const file = global.getFile(elf_file) orelse continue;
+        if (!file.deref().isAlive()) {
+            file.setAlive();
+            file.markLive(elf_file);
         }
     }
 }
