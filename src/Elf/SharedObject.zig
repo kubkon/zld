@@ -96,8 +96,8 @@ pub fn resetGlobals(self: SharedObject, elf_file: *Elf) void {
 }
 
 pub fn markLive(self: *SharedObject, elf_file: *Elf) void {
-    for (self.globals.items) |index| {
-        const sym = self.symtab[index];
+    for (self.globals.items, 0..) |index, i| {
+        const sym = self.symtab[i];
         if (sym.st_shndx != elf.SHN_UNDEF) continue;
 
         const global = elf_file.getGlobal(index);
