@@ -63,6 +63,21 @@ pub const File = union(enum) {
     object: Object,
     shared: SharedObject,
 
+    pub fn getIndex(file: File) Index {
+        return switch (file) {
+            .null => unreachable,
+            inline else => |x| x.index,
+        };
+    }
+
+    pub fn getPath(file: File) []const u8 {
+        return switch (file) {
+            .null, .internal => unreachable,
+            .object => |x| x.name, // TODO wrap in archive path if extracted
+            .shared => |x| x.name,
+        };
+    }
+
     fn resolveSymbols(file: File, elf_file: *Elf) void {
         switch (file) {
             .null => unreachable,
@@ -339,9 +354,6 @@ pub fn flush(self: *Elf) !void {
     }
 
     try self.resolveSymbols();
-    log.debug("{}", .{self.dumpState()});
-
-    if (true) return error.Todo;
 
     // Set the entrypoint if found
     self.entry_index = blk: {
@@ -800,11 +812,15 @@ fn allocateLocals(self: *Elf) void {
 }
 
 fn allocateGlobals(self: *Elf) void {
-    for (self.globals.items) |*global| {
-        const atom = global.getAtom(self) orelse continue;
-        if (!atom.is_alive) continue;
-        global.value += atom.value;
-        global.shndx = atom.out_shndx;
+    for (self.objects.items) |index| {
+        for (self.getFile(index).?.object.globals.items) |global_index| {
+            const global = self.getGlobal(global_index);
+            const atom = global.getAtom(self) orelse continue;
+            if (!atom.is_alive) continue;
+            if (global.getFile(self).?.object.index != index) continue;
+            global.value += atom.value;
+            global.shndx = atom.out_shndx;
+        }
     }
 }
 
@@ -1097,7 +1113,8 @@ fn markLive(self: *Elf) void {
 }
 
 fn resolveSyntheticSymbols(self: *Elf) !void {
-    const internal = self.getInternalObject() orelse return;
+    const internal_index = self.internal_object_index orelse return;
+    const internal = self.getFile(internal_index).?.internal;
     self.dynamic_index = try internal.addSyntheticGlobal("_DYNAMIC", self);
     self.init_array_start_index = try internal.addSyntheticGlobal("__init_array_start", self);
     self.init_array_end_index = try internal.addSyntheticGlobal("__init_array_end", self);
@@ -1108,26 +1125,34 @@ fn resolveSyntheticSymbols(self: *Elf) !void {
 }
 
 fn checkDuplicates(self: *Elf) void {
-    for (self.objects.items) |index| {
-        self.getFile(index).?.object.checkDuplicates(self);
-    }
+    for (self.objects.items) |index| self.getFile(index).?.object.checkDuplicates(self);
 }
 
 fn checkUndefined(self: *Elf) void {
-    for (self.objects.items) |index| {
-        self.getFile(index).?.object.checkUndefined(self);
-    }
+    for (self.objects.items) |index| self.getFile(index).?.object.checkUndefined(self);
 }
 
 fn claimUnresolved(self: *Elf) void {
     for (self.objects.items) |index| {
-        for (self.getFile(index).?.object.globals.items) |sym_index| {
-            const global = self.getGlobal(sym_index);
+        const object = self.getFile(index).?.object;
+        const first_global = object.first_global orelse return;
+        for (object.globals.items, 0..) |global_index, i| {
+            const sym_idx = @intCast(u32, first_global + i);
+            const sym = object.symtab[sym_idx];
+            if (sym.st_shndx != elf.SHN_UNDEF) continue;
 
-            if (global.isUndef(self) and global.isWeak(self)) {
-                global.value = 0;
-                continue;
+            const global = self.getGlobal(global_index);
+            if (global.getFile(self)) |_| {
+                if (global.getSourceSymbol(self).st_shndx != elf.SHN_UNDEF) continue;
             }
+
+            global.* = .{
+                .value = 0,
+                .name = global.name,
+                .atom = 0,
+                .sym_idx = sym_idx,
+                .file = object.index,
+            };
         }
     }
 }
@@ -1176,24 +1201,28 @@ fn setSymtab(self: *Elf) !void {
         shdr.sh_info = @intCast(u32, self.symtab.items.len);
     }
 
-    for (self.globals.items) |sym| {
-        if (sym.getAtom(self)) |atom| {
-            if (!atom.is_alive) continue;
+    for (self.objects.items) |index| {
+        const object = self.getFile(index).?.object;
+        for (object.globals.items) |global_index| {
+            const global = self.getGlobal(global_index);
+            if (global.getAtom(self)) |atom| {
+                if (!atom.is_alive) continue;
+            }
+            const sym = global.getSourceSymbol(self);
+            switch (@intToEnum(elf.STV, sym.st_other)) {
+                .INTERNAL, .HIDDEN => continue,
+                else => {},
+            }
+            const name = try self.strtab.insert(gpa, global.getName(self));
+            try self.symtab.append(gpa, .{
+                .st_name = name,
+                .st_info = sym.st_info,
+                .st_other = sym.st_other,
+                .st_shndx = global.shndx,
+                .st_value = global.value,
+                .st_size = 0,
+            });
         }
-        const s_sym = sym.getSourceSymbol(self);
-        switch (@intToEnum(elf.STV, s_sym.st_other)) {
-            .INTERNAL, .HIDDEN => continue,
-            else => {},
-        }
-        const name = try self.strtab.insert(gpa, sym.getName(self));
-        try self.symtab.append(gpa, .{
-            .st_name = name,
-            .st_info = s_sym.st_info,
-            .st_other = s_sym.st_other,
-            .st_shndx = sym.shndx,
-            .st_value = sym.value,
-            .st_size = 0,
-        });
     }
 
     // Set the section sizes
@@ -1216,18 +1245,23 @@ fn setDynsymtab(self: *Elf) !void {
     const dynsymtab_sect_index = self.dynsymtab_sect_index orelse return;
     const gpa = self.base.allocator;
 
-    for (self.globals.items) |sym| {
-        if (sym.getSharedObject(self) == null) continue;
-        const s_sym = sym.getSourceSymbol(self);
-        const name = try self.dynstrtab.insert(gpa, sym.getName(self));
-        try self.dynsymtab.append(gpa, .{
-            .st_name = name,
-            .st_info = s_sym.st_info,
-            .st_other = s_sym.st_other,
-            .st_shndx = elf.SHN_UNDEF,
-            .st_value = 0,
-            .st_size = 0,
-        });
+    for (self.objects.items) |index| {
+        const object = self.getFile(index).?.object;
+        for (object.globals.items) |global_index| {
+            const global = self.getGlobal(global_index);
+            const file = global.getFile(self).?;
+            if (file != .shared) continue;
+            const sym = global.getSourceSymbol(self);
+            const name = try self.dynstrtab.insert(gpa, global.getName(self));
+            try self.dynsymtab.append(gpa, .{
+                .st_name = name,
+                .st_info = sym.st_info,
+                .st_other = sym.st_other,
+                .st_shndx = elf.SHN_UNDEF,
+                .st_value = 0,
+                .st_size = 0,
+            });
+        }
     }
 
     // Set the section sizes

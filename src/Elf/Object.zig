@@ -256,14 +256,14 @@ pub fn checkDuplicates(self: Object, elf_file: *Elf) void {
         const sym_idx = @intCast(u32, first_global + i);
         const this_sym = self.symtab[sym_idx];
         const global = elf_file.getGlobal(index);
-        const global_file = global.getObject(elf_file) orelse continue;
+        const global_file = global.getFile(elf_file) orelse continue;
 
-        if (self.index == global_file.index or
+        if (self.index == global_file.deref().getIndex() or
             this_sym.st_shndx == elf.SHN_UNDEF or
             this_sym.st_bind() == elf.STB_WEAK) continue;
         elf_file.base.fatal("multiple definition: {s}: {s}: {s}", .{
             self.name,
-            global_file.name,
+            global_file.deref().getPath(),
             global.getName(elf_file),
         });
     }
@@ -272,7 +272,7 @@ pub fn checkDuplicates(self: Object, elf_file: *Elf) void {
 pub fn checkUndefined(self: Object, elf_file: *Elf) void {
     for (self.globals.items) |index| {
         const global = elf_file.getGlobal(index);
-        if (global.isUndef(elf_file) and !global.isWeak(elf_file)) {
+        if (global.getFile(elf_file) == null) {
             elf_file.base.fatal("undefined reference: {s}: {s}", .{ self.name, global.getName(elf_file) });
         }
     }

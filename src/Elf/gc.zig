@@ -33,11 +33,15 @@ fn collectRoots(roots: *std.ArrayList(*Atom), elf_file: *Elf) !void {
         },
         else => |other| {
             assert(other == .lib);
-            for (elf_file.globals.items) |global| if (global.getAtom(elf_file)) |atom| {
-                if (markAtom(atom)) {
-                    try roots.append(atom);
-                }
-            };
+            for (elf_file.objects.items) |index| {
+                const object = elf_file.getFile(index).?.object;
+                for (object.globals.items) |global_index|
+                    if (elf_file.getGlobal(global_index).getAtom(elf_file)) |atom| {
+                        if (markAtom(atom)) {
+                            try roots.append(atom);
+                        }
+                    };
+            }
         },
     }
 

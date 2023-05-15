@@ -24,16 +24,6 @@ sym_idx: u32 = 0,
 /// Whether the symbol is imported from a shared object at runtime.
 import: bool = false,
 
-pub fn isUndef(symbol: Symbol, elf_file: *Elf) bool {
-    const sym = symbol.getSourceSymbol(elf_file);
-    return sym.st_shndx == elf.SHN_UNDEF;
-}
-
-pub fn isWeak(symbol: Symbol, elf_file: *Elf) bool {
-    const sym = symbol.getSourceSymbol(elf_file);
-    return sym.st_bind() == elf.STB_WEAK;
-}
-
 pub fn getName(symbol: Symbol, elf_file: *Elf) [:0]const u8 {
     return elf_file.string_intern.getAssumeExists(symbol.name);
 }
