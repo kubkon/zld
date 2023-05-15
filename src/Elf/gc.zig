@@ -19,30 +19,15 @@ pub fn gcAtoms(elf_file: *Elf) !void {
 }
 
 fn collectRoots(roots: *std.ArrayList(*Atom), elf_file: *Elf) !void {
-    const output_mode = elf_file.options.output_mode;
-
-    switch (output_mode) {
-        .exe => {
-            if (elf_file.entry_index) |index| {
-                const global = elf_file.getGlobal(index);
-                const atom = global.getAtom(elf_file).?;
-                if (markAtom(atom)) {
-                    try roots.append(atom);
+    for (elf_file.objects.items) |index| {
+        for (elf_file.getFile(index).?.object.globals.items) |global_index| {
+            const global = elf_file.getGlobal(global_index);
+            if (global.getFile(elf_file)) |file| {
+                if (file.deref().getIndex() == index and global.@"export") {
+                    if (global.getAtom(elf_file)) |atom| if (markAtom(atom)) try roots.append(atom);
                 }
             }
-        },
-        else => |other| {
-            assert(other == .lib);
-            for (elf_file.objects.items) |index| {
-                const object = elf_file.getFile(index).?.object;
-                for (object.globals.items) |global_index|
-                    if (elf_file.getGlobal(global_index).getAtom(elf_file)) |atom| {
-                        if (markAtom(atom)) {
-                            try roots.append(atom);
-                        }
-                    };
-            }
-        },
+        }
     }
 
     for (elf_file.atoms.items[1..]) |*atom| {

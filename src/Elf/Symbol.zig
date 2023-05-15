@@ -21,8 +21,19 @@ shndx: u16 = 0,
 /// Use `getSourceSymbol` to pull the source symbol from the relevant file.
 sym_idx: u32 = 0,
 
-/// Whether the symbol is imported from a shared object at runtime.
+/// Whether the symbol is imported at runtime.
 import: bool = false,
+
+/// Whether the symbol is exported at runtime.
+@"export": bool = false,
+
+pub fn isAbs(symbol: Symbol, elf_file: *Elf) bool {
+    const file = symbol.getFile(elf_file).?;
+    if (file == .shared)
+        return symbol.getSourceSymbol(elf_file).st_shndx == elf.SHN_ABS;
+
+    return !symbol.import and symbol.getAtom(elf_file) == null and symbol.shndx == 0;
+}
 
 pub fn getName(symbol: Symbol, elf_file: *Elf) [:0]const u8 {
     return elf_file.string_intern.getAssumeExists(symbol.name);
@@ -37,7 +48,7 @@ pub inline fn getFile(symbol: Symbol, elf_file: *Elf) ?Elf.FilePtr {
 }
 
 pub fn getSourceSymbol(symbol: Symbol, elf_file: *Elf) elf.Elf64_Sym {
-    const file = symbol.getFile(elf_file) orelse unreachable;
+    const file = symbol.getFile(elf_file).?;
     return switch (file) {
         .internal => |x| x.symtab.items[symbol.sym_idx],
         inline else => |x| x.symtab[symbol.sym_idx],
@@ -90,13 +101,22 @@ fn format2(
     const symbol = ctx.symbol;
     try writer.print("%{d} : {s} : @{x}", .{ symbol.sym_idx, symbol.getName(ctx.elf_file), symbol.value });
     if (symbol.getFile(ctx.elf_file)) |file| {
-        if (symbol.shndx == 0) {
+        if (symbol.isAbs(ctx.elf_file)) {
             try writer.writeAll(" : absolute");
-        } else {
+        } else if (symbol.shndx != 0) {
             try writer.print(" : sect({d})", .{symbol.shndx});
         }
         if (symbol.getAtom(ctx.elf_file)) |atom| {
             try writer.print(" : atom({d})", .{atom.atom_index});
+        }
+        if (symbol.@"export" and symbol.import) {
+            try writer.writeAll(" : EI");
+        } else if (symbol.@"export" and !symbol.import) {
+            try writer.writeAll(" : E_");
+        } else if (!symbol.@"export" and symbol.import) {
+            try writer.writeAll(" : _I");
+        } else {
+            try writer.writeAll(" : __");
         }
         switch (file) {
             .internal => |x| try writer.print(" : internal({d})", .{x.index}),

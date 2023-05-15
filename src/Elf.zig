@@ -355,6 +355,8 @@ pub fn flush(self: *Elf) !void {
 
     try self.resolveSymbols();
 
+    try self.markImportsAndExports();
+
     // Set the entrypoint if found
     self.entry_index = blk: {
         if (self.options.output_mode != .exe) break :blk null;
@@ -1109,6 +1111,31 @@ fn markLive(self: *Elf) void {
     for (self.shared_objects.items) |index| {
         const file = self.getFile(index).?;
         if (file.deref().isAlive()) file.markLive(self);
+    }
+}
+
+fn markImportsAndExports(self: *Elf) !void {
+    for (self.shared_objects.items) |index| {
+        for (self.getFile(index).?.shared.globals.items) |global_index| {
+            const global = self.getGlobal(global_index);
+            if (global.getFile(self)) |file| {
+                if (file != .shared) global.@"export" = true;
+            }
+        }
+    }
+
+    for (self.objects.items) |index| {
+        for (self.getFile(index).?.object.globals.items) |global_index| {
+            const global = self.getGlobal(global_index);
+            if (global.getFile(self)) |file| {
+                if (file == .shared and !global.isAbs(self)) {
+                    global.import = true;
+                    continue;
+                }
+
+                if (file.deref().getIndex() == index) global.@"export" = true;
+            }
+        }
     }
 }
 
