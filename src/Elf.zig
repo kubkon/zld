@@ -10,11 +10,6 @@ files: std.MultiArrayList(File) = .{},
 sections: std.MultiArrayList(Section) = .{},
 phdrs: std.ArrayListUnmanaged(elf.Elf64_Phdr) = .{},
 
-first_load_seg_index: u16 = 0,
-phdr_seg_index: ?u16 = null,
-interp_seg_index: ?u16 = null,
-tls_seg_index: ?u16 = null,
-
 text_sect_index: ?u16 = null,
 got_sect_index: ?u16 = null,
 symtab_sect_index: ?u16 = null,
@@ -492,6 +487,14 @@ fn initSections(self: *Elf) !void {
             .entsize = 1,
             .addralign = 1,
         });
+        self.dynamic_sect_index = try self.addSection(.{
+            .name = ".dynamic",
+            .flags = elf.SHF_ALLOC | elf.SHF_WRITE,
+            .type = elf.SHT_DYNAMIC,
+            .entsize = @sizeOf(elf.Elf64_Dyn),
+            .addralign = @alignOf(elf.Elf64_Dyn),
+            .link = self.dynstrtab_sect_index.?,
+        });
         self.dynsymtab_sect_index = try self.addSection(.{
             .name = ".dynsym",
             .flags = elf.SHF_ALLOC,
@@ -548,7 +551,7 @@ fn calcSectionSizes(self: *Elf) !void {
 
 fn initPhdrs(self: *Elf) !void {
     // Add PHDR phdr
-    self.phdr_seg_index = try self.addPhdr(.{
+    const phdr_index = try self.addPhdr(.{
         .type = elf.PT_PHDR,
         .flags = elf.PF_R,
         .@"align" = @alignOf(elf.Elf64_Phdr),
@@ -559,7 +562,7 @@ fn initPhdrs(self: *Elf) !void {
     // Add INTERP phdr if required
     if (self.interp_sect_index) |index| {
         const shdr = self.sections.items(.shdr)[index];
-        self.interp_seg_index = try self.addPhdr(.{
+        _ = try self.addPhdr(.{
             .type = elf.PT_INTERP,
             .flags = elf.PF_R,
             .@"align" = 1,
@@ -603,6 +606,19 @@ fn initPhdrs(self: *Elf) !void {
         }
     }
 
+    if (self.dynamic_sect_index) |index| {
+        const shdr = self.sections.items(.shdr)[index];
+        _ = try self.addPhdr(.{
+            .type = elf.PT_DYNAMIC,
+            .flags = elf.PF_R | elf.PF_W,
+            .@"align" = shdr.sh_addralign,
+            .offset = shdr.sh_offset,
+            .addr = shdr.sh_addr,
+            .memsz = shdr.sh_size,
+            .filesz = shdr.sh_size,
+        });
+    }
+
     // Add PT_GNU_STACK phdr that controls some stack attributes that apparently may or may not
     // be respected by the OS.
     _ = try self.addPhdr(.{
@@ -612,8 +628,8 @@ fn initPhdrs(self: *Elf) !void {
     });
 
     // Backpatch size of the PHDR phdr
-    if (self.phdr_seg_index) |index| {
-        const phdr = &self.phdrs.items[index];
+    {
+        const phdr = &self.phdrs.items[phdr_index];
         const size = @sizeOf(elf.Elf64_Phdr) * self.phdrs.items.len;
         phdr.p_filesz = size;
         phdr.p_memsz = size;
@@ -679,28 +695,27 @@ fn allocateSections(self: *Elf) !void {
 }
 
 fn getSectionRank(self: *Elf, shndx: u16) u8 {
-    if (maybeEql(u16, self.interp_sect_index, shndx)) return 1;
-    if (maybeEql(u16, self.dynsymtab_sect_index, shndx)) return 2;
-    if (maybeEql(u16, self.dynstrtab_sect_index, shndx)) return 3;
-    if (maybeEql(u16, self.symtab_sect_index, shndx)) return 0xf9;
-    if (maybeEql(u16, self.strtab_sect_index, shndx)) return 0xfa;
-
     const shdr = self.sections.items(.shdr)[shndx];
     const name = self.shstrtab.getAssumeExists(shdr.sh_name);
     const flags = shdr.sh_flags;
     switch (shdr.sh_type) {
         elf.SHT_NULL => return 0,
+        elf.SHT_DYNSYM => return 2,
 
         elf.SHT_PREINIT_ARRAY,
         elf.SHT_INIT_ARRAY,
         elf.SHT_FINI_ARRAY,
         => return 0xf1,
 
+        elf.SHT_DYNAMIC => return 0xf2,
+
         elf.SHT_PROGBITS => if (flags & elf.SHF_ALLOC != 0) {
             if (flags & elf.SHF_EXECINSTR != 0) {
                 return 0xf1;
             } else if (flags & elf.SHF_WRITE != 0) {
                 return if (flags & elf.SHF_TLS != 0) 0xf2 else 0xf4;
+            } else if (mem.eql(u8, name, ".interp")) {
+                return 1;
             } else {
                 return 0xf0;
             }
@@ -713,6 +728,8 @@ fn getSectionRank(self: *Elf, shndx: u16) u8 {
         },
 
         elf.SHT_NOBITS => return if (flags & elf.SHF_TLS != 0) 0xf3 else 0xf5,
+        elf.SHT_SYMTAB => return 0xf9,
+        elf.SHT_STRTAB => return if (mem.eql(u8, name, ".dynstr")) 3 else 0xfa,
         else => return 0xff,
     }
 }
@@ -777,6 +794,11 @@ fn sortSections(self: *Elf) !void {
     if (self.symtab_sect_index) |index| {
         const shdr = &self.sections.items(.shdr)[index];
         shdr.sh_link = self.strtab_sect_index.?;
+    }
+
+    if (self.dynamic_sect_index) |index| {
+        const shdr = &self.sections.items(.shdr)[index];
+        shdr.sh_link = self.dynstrtab_sect_index.?;
     }
 
     if (self.dynsymtab_sect_index) |index| {
@@ -1550,11 +1572,6 @@ pub fn getOrCreateGlobal(self: *Elf, name: [:0]const u8) !GetOrCreateGlobalResul
 pub fn getGlobal(self: *Elf, index: u32) *Symbol {
     assert(index < self.globals.items.len);
     return &self.globals.items[index];
-}
-
-fn maybeEql(comptime T: type, maybe: ?T, other: T) bool {
-    const this = maybe orelse return false;
-    return this == other;
 }
 
 fn fmtSections(self: *Elf) std.fmt.Formatter(formatSections) {
