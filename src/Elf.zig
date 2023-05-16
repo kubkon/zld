@@ -7,13 +7,11 @@ objects: std.ArrayListUnmanaged(u32) = .{},
 shared_objects: std.ArrayListUnmanaged(u32) = .{},
 files: std.MultiArrayList(File) = .{},
 
-phdrs: std.ArrayListUnmanaged(elf.Elf64_Phdr) = .{},
+segments: std.MultiArrayList(Segment) = .{},
 sections: std.MultiArrayList(Section) = .{},
 
+first_load_seg_index: u16 = 0,
 phdr_seg_index: ?u16 = null,
-load_r_seg_index: ?u16 = null,
-load_re_seg_index: ?u16 = null,
-load_rw_seg_index: ?u16 = null,
 tls_seg_index: ?u16 = null,
 
 text_sect_index: ?u16 = null,
@@ -21,6 +19,8 @@ got_sect_index: ?u16 = null,
 symtab_sect_index: ?u16 = null,
 strtab_sect_index: ?u16 = null,
 shstrtab_sect_index: ?u16 = null,
+interp_sect_index: ?u16 = null,
+dynamic_sect_index: ?u16 = null,
 dynsymtab_sect_index: ?u16 = null,
 dynstrtab_sect_index: ?u16 = null,
 
@@ -156,6 +156,11 @@ const Section = struct {
     last_atom: ?Atom.Index,
 };
 
+const Segment = struct {
+    phdr: elf.Elf64_Phdr,
+    file_align: u64,
+};
+
 const default_base_addr: u64 = 0x200000;
 const default_page_size: u64 = 0x1000;
 
@@ -202,7 +207,7 @@ pub fn deinit(self: *Elf) void {
     self.globals.deinit(gpa);
     self.globals_table.deinit(gpa);
     self.got_section.deinit(gpa);
-    self.phdrs.deinit(gpa);
+    self.segments.deinit(gpa);
     self.sections.deinit(gpa);
     for (self.files.items(.tags), self.files.items(.data)) |tag, *data| switch (tag) {
         .null => {},
@@ -357,7 +362,6 @@ pub fn flush(self: *Elf) !void {
     }
 
     try self.resolveSymbols();
-
     try self.markImportsAndExports();
 
     // Set the entrypoint if found
@@ -404,16 +408,20 @@ pub fn flush(self: *Elf) !void {
     self.base.reportWarningsAndErrorsAndExit();
 
     try self.setDynsymtab();
+    try self.setSymtab();
+    self.setShstrtab();
     try self.calcSectionSizes();
+
+    self.allocateSectionsFile();
+    state_log.debug("{}", .{self.dumpState()});
+    if (true) return error.Todo;
+    self.calcLoadSegmentSizes();
     self.allocateSegments();
     self.allocateAllocSections();
     self.allocateAtoms();
     self.allocateLocals();
     self.allocateGlobals();
     self.allocateSyntheticSymbols();
-
-    try self.setSymtab();
-    self.setShstrtab();
     self.allocateNonAllocSections();
 
     self.shoff = blk: {
@@ -474,6 +482,15 @@ fn initSections(self: *Elf) !void {
         });
     }
 
+    if (self.options.dynamic_linker != null) {
+        self.interp_sect_index = try self.addSection(.{
+            .name = ".interp",
+            .type = elf.SHT_PROGBITS,
+            .flags = elf.SHF_ALLOC,
+            .addralign = 1,
+        });
+    }
+
     if (self.shared_objects.items.len > 0) {
         self.dynstrtab_sect_index = try self.addSection(.{
             .name = ".dynstr",
@@ -527,40 +544,59 @@ fn calcSectionSizes(self: *Elf) !void {
         shdr.sh_size = self.got_section.size();
         shdr.sh_addralign = @sizeOf(u64);
     }
+
+    if (self.interp_sect_index) |index| {
+        const shdr = &self.sections.items(.shdr)[index];
+        const size = self.options.dynamic_linker.?.len + 1;
+        shdr.sh_size = size;
+        shdr.sh_addralign = 1;
+    }
 }
 
-fn getSectionRank(self: *Elf, shdr: elf.Elf64_Shdr) u4 {
+fn allocateSectionsFile(self: *Elf) void {
+    var offset: u64 = @sizeOf(elf.Elf64_Ehdr) + self.segments.slice().len * @sizeOf(elf.Elf64_Phdr);
+    for (self.sections.items(.shdr)[1..]) |*shdr| {
+        defer offset = shdr.sh_offset + shdr.sh_size;
+        shdr.sh_offset = mem.alignForwardGeneric(u64, offset, shdr.sh_addralign);
+    }
+}
+
+fn getSectionRank(self: *Elf, shndx: u16) u8 {
+    if (maybeEql(u16, self.interp_sect_index, shndx)) return 1;
+    if (maybeEql(u16, self.dynsymtab_sect_index, shndx)) return 2;
+    if (maybeEql(u16, self.dynstrtab_sect_index, shndx)) return 3;
+    if (maybeEql(u16, self.symtab_sect_index, shndx)) return 0xf9;
+    if (maybeEql(u16, self.strtab_sect_index, shndx)) return 0xfa;
+
+    const shdr = self.sections.items(.shdr)[shndx];
+    const name = self.shstrtab.getAssumeExists(shdr.sh_name);
     const flags = shdr.sh_flags;
     switch (shdr.sh_type) {
         elf.SHT_NULL => return 0,
-        elf.SHT_DYNSYM => return 1,
 
         elf.SHT_PREINIT_ARRAY,
         elf.SHT_INIT_ARRAY,
         elf.SHT_FINI_ARRAY,
-        => return 2,
+        => return 0xf1,
 
         elf.SHT_PROGBITS => if (flags & elf.SHF_ALLOC != 0) {
             if (flags & elf.SHF_EXECINSTR != 0) {
-                return 2;
+                return 0xf1;
             } else if (flags & elf.SHF_WRITE != 0) {
-                return if (flags & elf.SHF_TLS != 0) 3 else 5;
+                return if (flags & elf.SHF_TLS != 0) 0xf2 else 0xf4;
             } else {
-                return 1;
+                return 0xf0;
             }
         } else {
-            const name = self.shstrtab.getAssumeExists(shdr.sh_name);
             if (mem.startsWith(u8, name, ".debug")) {
-                return 7;
+                return 0xf6;
             } else {
-                return 8;
+                return 0xf7;
             }
         },
 
-        elf.SHT_NOBITS => return if (flags & elf.SHF_TLS != 0) 4 else 6,
-        elf.SHT_SYMTAB => return 0xa,
-        elf.SHT_STRTAB => return if (flags & elf.SHF_ALLOC != 0) 1 else 0xb,
-        else => return 0xf,
+        elf.SHT_NOBITS => return if (flags & elf.SHF_TLS != 0) 0xf3 else 0xf5,
+        else => return 0xff,
     }
 }
 
@@ -568,12 +604,8 @@ fn sortSections(self: *Elf) !void {
     const Entry = struct {
         shndx: u16,
 
-        pub fn get(this: @This(), elf_file: *Elf) elf.Elf64_Shdr {
-            return elf_file.sections.items(.shdr)[this.shndx];
-        }
-
         pub fn lessThan(elf_file: *Elf, lhs: @This(), rhs: @This()) bool {
-            return elf_file.getSectionRank(lhs.get(elf_file)) < elf_file.getSectionRank(rhs.get(elf_file));
+            return elf_file.getSectionRank(lhs.shndx) < elf_file.getSectionRank(rhs.shndx);
         }
     };
 
@@ -615,6 +647,8 @@ fn sortSections(self: *Elf) !void {
         &self.symtab_sect_index,
         &self.strtab_sect_index,
         &self.shstrtab_sect_index,
+        &self.interp_sect_index,
+        &self.dynamic_sect_index,
         &self.dynsymtab_sect_index,
         &self.dynstrtab_sect_index,
     }) |maybe_index| {
@@ -636,25 +670,30 @@ fn sortSections(self: *Elf) !void {
 
 fn initSegments(self: *Elf) !void {
     // Add PHDR segment
-    {
-        const offset = @sizeOf(elf.Elf64_Ehdr);
-        self.phdr_seg_index = try self.addSegment(.{
-            .type = elf.PT_PHDR,
+    self.phdr_seg_index = try self.addSegment(.{
+        .type = elf.PT_PHDR,
+        .flags = elf.PF_R,
+        .@"align" = @alignOf(elf.Elf64_Phdr),
+    });
+
+    // Add INTERP segment if required
+    if (self.interp_sect_index) |index| {
+        self.sections.items(.phdr)[index] = try self.addSegment(.{
+            .type = elf.PT_INTERP,
             .flags = elf.PF_R,
-            .@"align" = @alignOf(elf.Elf64_Phdr),
-            .offset = offset,
-            .addr = default_base_addr + offset,
+            .@"align" = 1,
         });
     }
 
     // The first loadable segment is always read-only even if there is no
     // read-only section to load. We need a read-only loadable segment
     // to coalesce PHDR segment into together with the Ehdr.
-    var last_phdr: u16 = try self.addSegment(.{
+    self.first_load_seg_index = try self.addSegment(.{
         .type = elf.PT_LOAD,
         .flags = elf.PF_R,
         .@"align" = default_page_size,
     });
+    var last_phdr = self.first_load_seg_index;
 
     // Then, we proceed in creating segments for all alloc sections.
     for (self.sections.items(.shdr)) |shdr| {
@@ -665,7 +704,7 @@ fn initSegments(self: *Elf) !void {
         if (write) flags |= elf.PF_W;
         if (exec) flags |= elf.PF_X;
 
-        const phdr = self.phdrs.items[last_phdr];
+        const phdr = self.segments.items(.phdr)[last_phdr];
         if (phdr.p_flags != flags) {
             last_phdr = try self.addSegment(.{
                 .type = elf.PT_LOAD,
@@ -675,16 +714,18 @@ fn initSegments(self: *Elf) !void {
         }
     }
 
-    var phdr_index = if (self.phdr_seg_index) |index| index + 1 else 0;
+    var phdr_index = self.first_load_seg_index;
     for (self.sections.items(.shdr), 0..) |shdr, i| {
+        const shndx = @intCast(u16, i);
+        if (maybeEql(u16, self.interp_sect_index, shndx)) continue;
         if (shdr.sh_flags & elf.SHF_ALLOC == 0) continue;
         const write = shdr.sh_flags & elf.SHF_WRITE != 0;
         const exec = shdr.sh_flags & elf.SHF_EXECINSTR != 0;
         var flags: u32 = elf.PF_R;
         if (write) flags |= elf.PF_W;
         if (exec) flags |= elf.PF_X;
-        if (self.phdrs.items[phdr_index].p_flags != flags) phdr_index += 1;
-        self.sections.items(.phdr)[i] = phdr_index;
+        if (self.segments.items(.phdr)[phdr_index].p_flags != flags) phdr_index += 1;
+        self.sections.items(.phdr)[shndx] = phdr_index;
     }
 
     // Add PT_GNU_STACK segment that controls some stack attributes that apparently may or may not
@@ -698,67 +739,92 @@ fn initSegments(self: *Elf) !void {
     // Backpatch size of the PHDR segment now that we now how many program headers
     // we actually have.
     if (self.phdr_seg_index) |index| {
-        const phdr = &self.phdrs.items[index];
-        const size = self.phdrs.items.len * @sizeOf(elf.Elf64_Phdr);
+        const phdr = &self.segments.items(.phdr)[index];
+        const size = self.segments.slice().len * @sizeOf(elf.Elf64_Phdr);
         phdr.p_filesz = size;
         phdr.p_memsz = size;
     }
 }
 
-fn allocateSegments(self: *Elf) void {
-    // Now that we have initialized segments, we can go ahead and allocate them in memory.
-    var offset: u64 = 0;
-    var vaddr: u64 = default_base_addr;
-    var base_size: u64 = @sizeOf(elf.Elf64_Ehdr);
-    if (self.phdr_seg_index) |index| {
-        const phdr = self.phdrs.items[index];
-        assert(phdr.p_filesz == phdr.p_memsz);
-        base_size += phdr.p_filesz;
-    }
-
-    const first_phdr_index = if (self.phdr_seg_index) |index| index + 1 else 0;
-    for (self.phdrs.items[first_phdr_index..], first_phdr_index..) |*phdr, phdr_index| {
-        if (phdr.p_type == elf.PT_GNU_STACK) continue;
-
+fn calcLoadSegmentSizes(self: *Elf) void {
+    const first_index = self.first_load_seg_index;
+    for (self.segments.items(.phdr)[first_index..], first_index..) |*phdr, phdr_index| {
+        const file_align = &self.segments.items(.file_align)[phdr_index];
         const sect_range = self.getSectionIndexes(@intCast(u16, phdr_index));
         const start = sect_range.start;
         const end = sect_range.end;
 
-        var filesz: u64 = 0;
-        var memsz: u64 = 0;
-        var file_align: u64 = 1;
-
-        if (phdr_index == first_phdr_index) {
-            filesz += base_size;
-            memsz += base_size;
-        }
-
         for (self.sections.items(.shdr)[start..end]) |shdr| {
-            file_align = @max(file_align, shdr.sh_addralign);
+            file_align.* = @max(file_align.*, shdr.sh_addralign);
             if (shdr.sh_type != elf.SHT_NOBITS) {
-                filesz = mem.alignForwardGeneric(u64, filesz, shdr.sh_addralign) + shdr.sh_size;
+                phdr.p_filesz = mem.alignForwardGeneric(u64, phdr.p_filesz, shdr.sh_addralign) + shdr.sh_size;
             }
-            memsz = mem.alignForwardGeneric(u64, memsz, shdr.sh_addralign) + shdr.sh_size;
+            phdr.p_memsz = mem.alignForwardGeneric(u64, phdr.p_memsz, shdr.sh_addralign) + shdr.sh_size;
         }
+    }
 
+    const load_phdr = &self.segments.items(.phdr)[first_index];
+    load_phdr.p_filesz += @sizeOf(elf.Elf64_Ehdr);
+
+    if (self.phdr_seg_index) |index| {
+        const phdr = self.segments.items(.phdr)[index];
+        load_phdr.p_filesz += mem.alignForwardGeneric(u64, phdr.p_filesz, phdr.p_align);
+    }
+
+    if (self.interp_sect_index) |index| {
+        const phdr_index = self.sections.items(.phdr)[index].?;
+        const phdr = self.segments.items(.phdr)[phdr_index];
+        load_phdr.p_filesz += mem.alignForwardGeneric(u64, phdr.p_filesz, phdr.p_align);
+    }
+
+    load_phdr.p_memsz = load_phdr.p_filesz;
+}
+
+fn allocateSegments(self: *Elf) void {
+    // Now that we have initialized segments, we can go ahead and allocate them in file and memory.
+    var offset: u64 = @sizeOf(elf.Elf64_Ehdr);
+    var vaddr: u64 = default_base_addr + offset;
+
+    // First, allocate segments that are not PT_LOAD.
+    // They already have sizes pre-set so we just allocate.
+    const first_phdr = self.first_load_seg_index;
+    for (self.segments.items(.phdr)[0..first_phdr]) |*phdr| {
+        offset = mem.alignForwardGeneric(u64, offset, phdr.p_align);
+        vaddr = mem.alignForwardGeneric(u64, vaddr, phdr.p_align);
+
+        phdr.p_offset = offset;
+        phdr.p_vaddr = vaddr;
+        phdr.p_paddr = vaddr;
+
+        offset += phdr.p_filesz;
+        vaddr += phdr.p_memsz;
+    }
+
+    // The first loadable segment has to also encompass the headers, program header table, interp, etc.
+    offset = 0;
+    vaddr = default_base_addr;
+
+    for (self.segments.items(.phdr)[first_phdr..], first_phdr..) |*phdr, i| {
+        if (phdr.p_type == elf.PT_GNU_STACK) continue;
+
+        const file_align = self.segments.items(.file_align)[i];
         offset = mem.alignForwardGeneric(u64, offset, file_align);
         vaddr = mem.alignForwardGeneric(u64, vaddr, phdr.p_align) + @rem(offset, phdr.p_align);
 
         phdr.p_offset = offset;
         phdr.p_vaddr = vaddr;
         phdr.p_paddr = vaddr;
-        phdr.p_filesz = filesz;
-        phdr.p_memsz = memsz;
 
-        offset += filesz;
-        vaddr += memsz;
+        offset += phdr.p_filesz;
+        vaddr += phdr.p_memsz;
     }
 }
 
 fn allocateAllocSections(self: *Elf) void {
-    const phdrs_offset = self.phdrs.items.len * @sizeOf(elf.Elf64_Phdr) + @sizeOf(elf.Elf64_Ehdr);
+    const phdrs_offset = self.segments.slice().len * @sizeOf(elf.Elf64_Phdr) + @sizeOf(elf.Elf64_Ehdr);
 
-    for (self.phdrs.items[1..], 1..) |phdr, phdr_index| {
+    const first_index = self.first_load_seg_index;
+    for (self.segments.items(.phdr)[first_index..], first_index..) |phdr, phdr_index| {
         const sect_range = self.getSectionIndexes(@intCast(u16, phdr_index));
         const start = sect_range.start;
         const end = sect_range.end;
@@ -1292,8 +1358,7 @@ fn setDynsymtab(self: *Elf) !void {
         const object = self.getFile(index).?.object;
         for (object.globals.items) |global_index| {
             const global = self.getGlobal(global_index);
-            const file = global.getFile(self).?;
-            if (file != .shared) continue;
+            if (!global.import) continue;
             const sym = global.getSourceSymbol(self);
             const name = try self.dynstrtab.insert(gpa, global.getName(self));
             try self.dynsymtab.append(gpa, .{
@@ -1408,9 +1473,9 @@ fn writeSyntheticSections(self: *Elf) !void {
 
 fn writePhdrs(self: *Elf) !void {
     const phoff = @sizeOf(elf.Elf64_Ehdr);
-    const phdrs_size = self.phdrs.items.len * @sizeOf(elf.Elf64_Phdr);
+    const phdrs_size = self.segments.slice().len * @sizeOf(elf.Elf64_Phdr);
     log.debug("writing program headers from 0x{x} to 0x{x}", .{ phoff, phoff + phdrs_size });
-    try self.base.file.pwriteAll(mem.sliceAsBytes(self.phdrs.items), phoff);
+    try self.base.file.pwriteAll(mem.sliceAsBytes(self.segments.items(.phdr)), phoff);
 }
 
 fn writeShdrs(self: *Elf) !void {
@@ -1434,7 +1499,7 @@ fn writeHeader(self: *Elf) !void {
         .e_flags = 0,
         .e_ehsize = @sizeOf(elf.Elf64_Ehdr),
         .e_phentsize = @sizeOf(elf.Elf64_Phdr),
-        .e_phnum = @intCast(u16, self.phdrs.items.len),
+        .e_phnum = @intCast(u16, self.segments.slice().len),
         .e_shentsize = @sizeOf(elf.Elf64_Shdr),
         .e_shnum = @intCast(u16, self.sections.items(.shdr).len),
         .e_shstrndx = self.shstrtab_sect_index.?,
@@ -1467,8 +1532,8 @@ pub const AddSectionOpts = struct {
 
 pub fn addSection(self: *Elf, opts: AddSectionOpts) !u16 {
     const gpa = self.base.allocator;
-    const index = @intCast(u16, self.sections.slice().len);
-    try self.sections.append(gpa, .{
+    const index = @intCast(u16, try self.sections.addOne(gpa));
+    self.sections.set(index, .{
         .shdr = .{
             .sh_name = try self.shstrtab.insert(gpa, opts.name),
             .sh_type = opts.type,
@@ -1504,16 +1569,19 @@ fn addSegment(self: *Elf, opts: struct {
     filesz: u64 = 0,
     memsz: u64 = 0,
 }) !u16 {
-    const index = @intCast(u16, self.phdrs.items.len);
-    try self.phdrs.append(self.base.allocator, .{
-        .p_type = opts.type,
-        .p_flags = opts.flags,
-        .p_offset = opts.offset,
-        .p_vaddr = opts.addr,
-        .p_paddr = opts.addr,
-        .p_filesz = opts.filesz,
-        .p_memsz = opts.memsz,
-        .p_align = opts.@"align",
+    const index = @intCast(u16, try self.segments.addOne(self.base.allocator));
+    self.segments.set(index, .{
+        .phdr = .{
+            .p_type = opts.type,
+            .p_flags = opts.flags,
+            .p_offset = opts.offset,
+            .p_vaddr = opts.addr,
+            .p_paddr = opts.addr,
+            .p_filesz = opts.filesz,
+            .p_memsz = opts.memsz,
+            .p_align = opts.@"align",
+        },
+        .file_align = 0,
     });
     return index;
 }
@@ -1588,6 +1656,11 @@ pub fn getGlobal(self: *Elf, index: u32) *Symbol {
     return &self.globals.items[index];
 }
 
+fn maybeEql(comptime T: type, maybe: ?T, other: T) bool {
+    const this = maybe orelse return false;
+    return this == other;
+}
+
 fn fmtSections(self: *Elf) std.fmt.Formatter(formatSections) {
     return .{ .data = self };
 }
@@ -1620,7 +1693,7 @@ fn formatSegments(
 ) !void {
     _ = options;
     _ = unused_fmt_string;
-    for (self.phdrs.items, 0..) |phdr, i| {
+    for (self.segments.items(.phdr), 0..) |phdr, i| {
         const write = phdr.p_flags & elf.PF_W != 0;
         const read = phdr.p_flags & elf.PF_R != 0;
         const exec = phdr.p_flags & elf.PF_X != 0;
