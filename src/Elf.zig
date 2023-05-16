@@ -153,7 +153,7 @@ pub const FilePtr = union(enum) {
 const Section = struct {
     shdr: elf.Elf64_Shdr,
     first_atom: ?Atom.Index,
-    last_atom: ?Atom.Index, // TODO remove this
+    last_atom: ?Atom.Index,
 };
 
 const Segment = struct {
