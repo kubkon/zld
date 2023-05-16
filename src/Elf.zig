@@ -7,11 +7,12 @@ objects: std.ArrayListUnmanaged(u32) = .{},
 shared_objects: std.ArrayListUnmanaged(u32) = .{},
 files: std.MultiArrayList(File) = .{},
 
-segments: std.MultiArrayList(Segment) = .{},
 sections: std.MultiArrayList(Section) = .{},
+phdrs: std.ArrayListUnmanaged(elf.Elf64_Phdr) = .{},
 
 first_load_seg_index: u16 = 0,
 phdr_seg_index: ?u16 = null,
+interp_seg_index: ?u16 = null,
 tls_seg_index: ?u16 = null,
 
 text_sect_index: ?u16 = null,
@@ -151,14 +152,14 @@ pub const FilePtr = union(enum) {
 
 const Section = struct {
     shdr: elf.Elf64_Shdr,
-    phdr: ?u16,
     first_atom: ?Atom.Index,
-    last_atom: ?Atom.Index,
+    last_atom: ?Atom.Index, // TODO remove this
 };
 
 const Segment = struct {
     phdr: elf.Elf64_Phdr,
     file_align: u64,
+    shdrs: std.ArrayListUnmanaged(u16) = .{},
 };
 
 const default_base_addr: u64 = 0x200000;
@@ -207,7 +208,7 @@ pub fn deinit(self: *Elf) void {
     self.globals.deinit(gpa);
     self.globals_table.deinit(gpa);
     self.got_section.deinit(gpa);
-    self.segments.deinit(gpa);
+    self.phdrs.deinit(gpa);
     self.sections.deinit(gpa);
     for (self.files.items(.tags), self.files.items(.data)) |tag, *data| switch (tag) {
         .null => {},
@@ -400,29 +401,27 @@ pub fn flush(self: *Elf) !void {
 
     self.claimUnresolved();
     try self.scanRelocs();
-    try self.initSections();
-    try self.sortSections();
-    try self.initSegments();
-
     self.checkUndefined();
     self.base.reportWarningsAndErrorsAndExit();
 
+    try self.initSections();
+    try self.sortSections();
+    try self.calcSectionSizes();
     try self.setDynsymtab();
     try self.setSymtab();
     self.setShstrtab();
-    try self.calcSectionSizes();
 
-    self.allocateSectionsFile();
+    try self.allocateSections();
     state_log.debug("{}", .{self.dumpState()});
     if (true) return error.Todo;
-    self.calcLoadSegmentSizes();
-    self.allocateSegments();
+    // try self.initSegments();
+    // self.calcLoadSegmentSizes();
+    // self.allocateSegments();
     self.allocateAllocSections();
     self.allocateAtoms();
     self.allocateLocals();
     self.allocateGlobals();
     self.allocateSyntheticSymbols();
-    self.allocateNonAllocSections();
 
     self.shoff = blk: {
         const shdr = self.sections.items(.shdr)[self.sections.len - 1];
@@ -553,11 +552,119 @@ fn calcSectionSizes(self: *Elf) !void {
     }
 }
 
-fn allocateSectionsFile(self: *Elf) void {
-    var offset: u64 = @sizeOf(elf.Elf64_Ehdr) + self.segments.slice().len * @sizeOf(elf.Elf64_Phdr);
+fn initPhdrs(self: *Elf) !void {
+    // Add PHDR phdr
+    self.phdr_seg_index = try self.addSegment(.{
+        .type = elf.PT_PHDR,
+        .flags = elf.PF_R,
+        .@"align" = @alignOf(elf.Elf64_Phdr),
+    });
+
+    // Add INTERP phdr if required
+    if (self.interp_sect_index) |_| {
+        self.interp_seg_index = try self.addSegment(.{
+            .type = elf.PT_INTERP,
+            .flags = elf.PF_R,
+            .@"align" = 1,
+        });
+    }
+
+    // Add LOAD phdrs
+    var last_phdr: ?u16 = null;
+    const slice = self.sections.slice();
+    var shndx: usize = 0;
+    while (shndx < slice.len) {
+        const shdr = slice.items(.shdr)[shndx];
+        if (shdr.sh_flags & elf.SHF_ALLOC == 0) {
+            shndx += 1;
+            continue;
+        }
+        last_phdr = try self.addSegment(.{
+            .type = elf.PT_LOAD,
+            .flags = shdrToPhdrFlags(shdr.sh_flags),
+            .@"align" = default_page_size,
+            .addr = if (last_phdr == null) default_base_addr else shdr.sh_addr,
+        });
+        const p_flags = self.phdrs.items[last_phdr.?].p_flags;
+        try self.addShdrToPhdr(last_phdr.?, shdr);
+        shndx += 1;
+
+        while (shndx < slice.len) : (shndx += 1) {
+            const next = slice.items(.shdr)[shndx];
+            if (p_flags == shdrToPhdrFlags(next.sh_flags) and
+                next.sh_offset - shdr.sh_offset == next.sh_addr - shdr.sh_addr)
+            {
+                try self.addShdrToPhdr(last_phdr.?, next);
+                continue;
+            }
+            break;
+        }
+    }
+
+    // Add PT_GNU_STACK phdr that controls some stack attributes that apparently may or may not
+    // be respected by the OS.
+    _ = try self.addSegment(.{
+        .type = elf.PT_GNU_STACK,
+        .flags = if (self.options.execstack) elf.PF_W | elf.PF_R | elf.PF_X else elf.PF_W | elf.PF_R,
+        .memsz = self.options.stack_size orelse 0,
+    });
+}
+
+fn addShdrToPhdr(self: *Elf, phdr_index: u16, shdr: elf.Elf64_Shdr) !void {
+    const phdr = &self.phdrs.items[phdr_index];
+    phdr.p_align = @max(phdr.p_align, shdr.sh_addralign);
+    if (shdr.sh_type != elf.SHT_NOBITS) {
+        phdr.p_filesz = shdr.sh_addr + shdr.sh_size - phdr.p_vaddr;
+    }
+    phdr.p_memsz = shdr.sh_addr + shdr.sh_size - phdr.p_vaddr;
+}
+
+fn shdrToPhdrFlags(sh_flags: u64) u32 {
+    const write = sh_flags & elf.SHF_WRITE != 0;
+    const exec = sh_flags & elf.SHF_EXECINSTR != 0;
+    var out_flags: u32 = elf.PF_R;
+    if (write) out_flags |= elf.PF_W;
+    if (exec) out_flags |= elf.PF_X;
+    return out_flags;
+}
+
+fn allocateSectionsInMemory(self: *Elf, base_offset: u64) !void {
+    var addr = default_base_addr + base_offset;
+    for (self.sections.items(.shdr)[1..], 1..) |*shdr, i| {
+        if (shdr.sh_flags & elf.SHF_ALLOC == 0) continue;
+        if (i != 1) {
+            const prev_shdr = self.sections.items(.shdr)[i - 1];
+            if (shdrToPhdrFlags(shdr.sh_flags) != shdrToPhdrFlags(prev_shdr.sh_flags)) {
+                // We need advance by page size
+                addr += default_page_size;
+            }
+        }
+
+        addr = mem.alignForwardGeneric(u64, addr, shdr.sh_addralign);
+        shdr.sh_addr = addr;
+        addr += shdr.sh_size;
+    }
+}
+
+fn allocatesSectionsInFile(self: *Elf, base_offset: u64) void {
+    var offset = base_offset;
     for (self.sections.items(.shdr)[1..]) |*shdr| {
-        defer offset = shdr.sh_offset + shdr.sh_size;
+        defer if (shdr.sh_type != elf.SHT_NOBITS) {
+            offset = shdr.sh_offset + shdr.sh_size;
+        };
         shdr.sh_offset = mem.alignForwardGeneric(u64, offset, shdr.sh_addralign);
+    }
+}
+
+fn allocateSections(self: *Elf) !void {
+    while (true) {
+        const nphdrs = self.phdrs.items.len;
+        const base_offset: u64 = @sizeOf(elf.Elf64_Ehdr) + nphdrs * @sizeOf(elf.Elf64_Phdr);
+        try self.allocateSectionsInMemory(base_offset);
+        self.allocatesSectionsInFile(base_offset);
+        self.phdrs.clearRetainingCapacity();
+        try self.initPhdrs();
+        if (nphdrs == self.phdrs.items.len) break;
     }
 }
 
@@ -669,6 +776,8 @@ fn sortSections(self: *Elf) !void {
 }
 
 fn initSegments(self: *Elf) !void {
+    const gpa = self.base.allocator;
+
     // Add PHDR segment
     self.phdr_seg_index = try self.addSegment(.{
         .type = elf.PT_PHDR,
@@ -678,11 +787,13 @@ fn initSegments(self: *Elf) !void {
 
     // Add INTERP segment if required
     if (self.interp_sect_index) |index| {
-        self.sections.items(.phdr)[index] = try self.addSegment(.{
+        const seg_index = try self.addSegment(.{
             .type = elf.PT_INTERP,
             .flags = elf.PF_R,
             .@"align" = 1,
         });
+        try self.segments.items(.shdrs)[seg_index].append(gpa, index);
+        self.interp_seg_index = seg_index;
     }
 
     // The first loadable segment is always read-only even if there is no
@@ -725,7 +836,7 @@ fn initSegments(self: *Elf) !void {
         if (write) flags |= elf.PF_W;
         if (exec) flags |= elf.PF_X;
         if (self.segments.items(.phdr)[phdr_index].p_flags != flags) phdr_index += 1;
-        self.sections.items(.phdr)[shndx] = phdr_index;
+        try self.segments.items(.shdrs)[phdr_index].append(gpa, shndx);
     }
 
     // Add PT_GNU_STACK segment that controls some stack attributes that apparently may or may not
@@ -849,18 +960,6 @@ fn allocateAllocSections(self: *Elf) void {
             }
             vaddr += shdr.sh_size;
         }
-    }
-}
-
-fn allocateNonAllocSections(self: *Elf) void {
-    var offset: u64 = 0;
-    for (self.sections.items(.shdr)) |*shdr| {
-        defer offset = shdr.sh_offset + shdr.sh_size;
-
-        if (shdr.sh_type == elf.SHT_NULL) continue;
-        if (shdr.sh_flags & elf.SHF_ALLOC != 0) continue;
-
-        shdr.sh_offset = mem.alignForwardGeneric(u64, offset, shdr.sh_addralign);
     }
 }
 
@@ -1422,20 +1521,21 @@ fn writeAtoms(self: *Elf) !void {
 
 fn writeSyntheticSections(self: *Elf) !void {
     const gpa = self.base.allocator;
+    if (self.interp_sect_index) |shndx| {
+        const shdr = self.sections.items(.shdr)[shndx];
+        var buffer = try gpa.alloc(u8, shdr.sh_size);
+        defer gpa.free(buffer);
+        const dylinker = self.options.dynamic_linker.?;
+        @memcpy(buffer[0..dylinker.len], dylinker);
+        buffer[dylinker.len] = 0;
+        try self.base.file.pwriteAll(buffer, shdr.sh_offset);
+    }
     if (self.dynsymtab_sect_index) |shndx| {
         const shdr = self.sections.items(.shdr)[shndx];
-        log.debug("writing '.dynsym' contents from 0x{x} to 0x{x}", .{
-            shdr.sh_offset,
-            shdr.sh_offset + shdr.sh_size,
-        });
         try self.base.file.pwriteAll(mem.sliceAsBytes(self.dynsymtab.items), shdr.sh_offset);
     }
     if (self.dynstrtab_sect_index) |shndx| {
         const shdr = self.sections.items(.shdr)[shndx];
-        log.debug("writing '.dynstr' contents from 0x{x} to 0x{x}", .{
-            shdr.sh_offset,
-            shdr.sh_offset + shdr.sh_size,
-        });
         try self.base.file.pwriteAll(self.dynstrtab.buffer.items, shdr.sh_offset);
     }
     if (self.got_sect_index) |shndx| {
@@ -1447,35 +1547,23 @@ fn writeSyntheticSections(self: *Elf) !void {
     }
     if (self.symtab_sect_index) |shndx| {
         const shdr = self.sections.items(.shdr)[shndx];
-        log.debug("writing '.symtab' contents from 0x{x} to 0x{x}", .{
-            shdr.sh_offset,
-            shdr.sh_offset + shdr.sh_size,
-        });
         try self.base.file.pwriteAll(mem.sliceAsBytes(self.symtab.items), shdr.sh_offset);
     }
     if (self.strtab_sect_index) |shndx| {
         const shdr = self.sections.items(.shdr)[shndx];
-        log.debug("writing '.strtab' contents from 0x{x} to 0x{x}", .{
-            shdr.sh_offset,
-            shdr.sh_offset + shdr.sh_size,
-        });
         try self.base.file.pwriteAll(self.strtab.buffer.items, shdr.sh_offset);
     }
     if (self.shstrtab_sect_index) |shndx| {
         const shdr = self.sections.items(.shdr)[shndx];
-        log.debug("writing '.shstrtab' contents from 0x{x} to 0x{x}", .{
-            shdr.sh_offset,
-            shdr.sh_offset + shdr.sh_size,
-        });
         try self.base.file.pwriteAll(self.shstrtab.buffer.items, shdr.sh_offset);
     }
 }
 
 fn writePhdrs(self: *Elf) !void {
     const phoff = @sizeOf(elf.Elf64_Ehdr);
-    const phdrs_size = self.segments.slice().len * @sizeOf(elf.Elf64_Phdr);
+    const phdrs_size = self.phdrs.items.len * @sizeOf(elf.Elf64_Phdr);
     log.debug("writing program headers from 0x{x} to 0x{x}", .{ phoff, phoff + phdrs_size });
-    try self.base.file.pwriteAll(mem.sliceAsBytes(self.segments.items(.phdr)), phoff);
+    try self.base.file.pwriteAll(mem.sliceAsBytes(self.phdrs.items), phoff);
 }
 
 fn writeShdrs(self: *Elf) !void {
@@ -1546,7 +1634,6 @@ pub fn addSection(self: *Elf, opts: AddSectionOpts) !u16 {
             .sh_addralign = opts.addralign,
             .sh_entsize = opts.entsize,
         },
-        .phdr = null,
         .first_atom = null,
         .last_atom = null,
     });
@@ -1569,19 +1656,16 @@ fn addSegment(self: *Elf, opts: struct {
     filesz: u64 = 0,
     memsz: u64 = 0,
 }) !u16 {
-    const index = @intCast(u16, try self.segments.addOne(self.base.allocator));
-    self.segments.set(index, .{
-        .phdr = .{
-            .p_type = opts.type,
-            .p_flags = opts.flags,
-            .p_offset = opts.offset,
-            .p_vaddr = opts.addr,
-            .p_paddr = opts.addr,
-            .p_filesz = opts.filesz,
-            .p_memsz = opts.memsz,
-            .p_align = opts.@"align",
-        },
-        .file_align = 0,
+    const index = @intCast(u16, self.phdrs.items.len);
+    try self.phdrs.append(self.base.allocator, .{
+        .p_type = opts.type,
+        .p_flags = opts.flags,
+        .p_offset = opts.offset,
+        .p_vaddr = opts.addr,
+        .p_paddr = opts.addr,
+        .p_filesz = opts.filesz,
+        .p_memsz = opts.memsz,
+        .p_align = opts.@"align",
     });
     return index;
 }
@@ -1693,7 +1777,7 @@ fn formatSegments(
 ) !void {
     _ = options;
     _ = unused_fmt_string;
-    for (self.segments.items(.phdr), 0..) |phdr, i| {
+    for (self.phdrs.items, 0..) |phdr, i| {
         const write = phdr.p_flags & elf.PF_W != 0;
         const read = phdr.p_flags & elf.PF_R != 0;
         const exec = phdr.p_flags & elf.PF_X != 0;
