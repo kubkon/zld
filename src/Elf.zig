@@ -558,14 +558,21 @@ fn initPhdrs(self: *Elf) !void {
         .type = elf.PT_PHDR,
         .flags = elf.PF_R,
         .@"align" = @alignOf(elf.Elf64_Phdr),
+        .addr = default_base_addr + @sizeOf(elf.Elf64_Ehdr),
+        .offset = @sizeOf(elf.Elf64_Ehdr),
     });
 
     // Add INTERP phdr if required
-    if (self.interp_sect_index) |_| {
+    if (self.interp_sect_index) |index| {
+        const shdr = self.sections.items(.shdr)[index];
         self.interp_seg_index = try self.addSegment(.{
             .type = elf.PT_INTERP,
             .flags = elf.PF_R,
             .@"align" = 1,
+            .offset = shdr.sh_offset,
+            .addr = shdr.sh_addr,
+            .filesz = shdr.sh_size,
+            .memsz = shdr.sh_size,
         });
     }
 
@@ -582,7 +589,8 @@ fn initPhdrs(self: *Elf) !void {
         last_phdr = try self.addSegment(.{
             .type = elf.PT_LOAD,
             .flags = shdrToPhdrFlags(shdr.sh_flags),
-            .@"align" = default_page_size,
+            .@"align" = @max(default_page_size, shdr.sh_addralign),
+            .offset = if (last_phdr == null) 0 else shdr.sh_offset,
             .addr = if (last_phdr == null) default_base_addr else shdr.sh_addr,
         });
         const p_flags = self.phdrs.items[last_phdr.?].p_flags;
@@ -608,6 +616,14 @@ fn initPhdrs(self: *Elf) !void {
         .flags = if (self.options.execstack) elf.PF_W | elf.PF_R | elf.PF_X else elf.PF_W | elf.PF_R,
         .memsz = self.options.stack_size orelse 0,
     });
+
+    // Backpatch size of the PHDR phdr
+    if (self.phdr_seg_index) |index| {
+        const phdr = &self.phdrs.items[index];
+        const size = @sizeOf(elf.Elf64_Phdr) * self.phdrs.items.len;
+        phdr.p_filesz = size;
+        phdr.p_memsz = size;
+    }
 }
 
 fn addShdrToPhdr(self: *Elf, phdr_index: u16, shdr: elf.Elf64_Shdr) !void {
