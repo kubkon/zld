@@ -6,6 +6,8 @@ header: ?elf.Elf64_Ehdr = null,
 symtab: []align(1) const elf.Elf64_Sym = &[0]elf.Elf64_Sym{},
 strtab: []const u8 = &[0]u8{},
 
+dynamic_sect_index: ?u16 = null,
+
 globals: std.ArrayListUnmanaged(u32) = .{},
 
 needed: bool,
@@ -38,10 +40,12 @@ pub fn parse(self: *SharedObject, elf_file: *Elf) !void {
     self.header = try reader.readStruct(elf.Elf64_Ehdr);
     const shdrs = self.getShdrs();
 
-    const dynsym_index = for (shdrs, 0..) |shdr, i| switch (shdr.sh_type) {
-        elf.SHT_DYNSYM => break @intCast(u16, i),
+    var dynsym_index: ?u16 = null;
+    for (shdrs, 0..) |shdr, i| switch (shdr.sh_type) {
+        elf.SHT_DYNSYM => dynsym_index = @intCast(u16, i),
+        elf.SHT_DYNAMIC => self.dynamic_sect_index = @intCast(u16, i),
         else => {},
-    } else null;
+    };
 
     if (dynsym_index) |index| {
         const shdr = shdrs[index];
@@ -126,6 +130,18 @@ pub inline fn getString(self: SharedObject, off: u32) [:0]const u8 {
 
 pub fn asFile(self: SharedObject) Elf.File {
     return .{ .shared = self };
+}
+
+pub fn getSoname(self: SharedObject) []const u8 {
+    const shndx = self.dynamic_sect_index orelse return self.name;
+    const data = self.getShdrContents(shndx);
+    const nentries = @divExact(data.len, @sizeOf(elf.Elf64_Dyn));
+    const entries = @ptrCast([*]align(1) const elf.Elf64_Dyn, data.ptr)[0..nentries];
+    const soname = for (entries) |entry| switch (entry.d_tag) {
+        elf.DT_SONAME => break self.getString(@intCast(u32, entry.d_val)),
+        else => {},
+    } else self.name;
+    return soname;
 }
 
 pub fn format(

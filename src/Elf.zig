@@ -939,6 +939,8 @@ fn parseLdScript(self: *Elf, arena: Allocator, path: []const u8, opts: Zld.Syste
     const data = try file.readToEndAlloc(gpa, std.math.maxInt(u32));
     defer gpa.free(data);
 
+    log.debug("parsing ld linker script path '{s}'", .{path});
+
     var script = LdScript{};
     defer script.deinit(gpa);
     script.parse(data, self) catch |err| switch (err) {
@@ -1571,6 +1573,7 @@ fn fmtDumpState(
         const shared = self.getFile(index).?.shared;
         try writer.print("shared({d}) : ", .{index});
         try writer.print("{s}", .{shared.name});
+        try writer.print(" : needed({})", .{shared.needed});
         if (!shared.alive) try writer.writeAll(" : [*]\n");
         try writer.print("{}\n", .{shared.fmtSymtab(self)});
     }
@@ -1695,7 +1698,7 @@ const DynamicSection = struct {
 
     fn addNeeded(dt: *DynamicSection, shared: *const SharedObject, elf_file: *Elf) !void {
         const gpa = elf_file.base.allocator;
-        const off = try elf_file.dynstrtab.insert(gpa, shared.name);
+        const off = try elf_file.dynstrtab.insert(gpa, shared.getSoname());
         try dt.needed.append(gpa, off);
     }
 
