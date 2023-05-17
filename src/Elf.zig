@@ -42,6 +42,8 @@ symtab: std.ArrayListUnmanaged(elf.Elf64_Sym) = .{},
 dynsymtab: std.ArrayListUnmanaged(elf.Elf64_Sym) = .{},
 dynstrtab: StringTable(.dynstrtab) = .{},
 
+dynamic_section: DynamicSection = .{},
+
 got_section: SyntheticSection(u32, *Elf, .{
     .log_scope = .got_section,
     .entry_size = @sizeOf(u64),
@@ -50,115 +52,6 @@ got_section: SyntheticSection(u32, *Elf, .{
 }) = .{},
 
 atoms: std.ArrayListUnmanaged(Atom) = .{},
-
-pub const base_tag = Zld.Tag.elf;
-
-pub const File = union(enum) {
-    null: void,
-    internal: InternalObject,
-    object: Object,
-    shared: SharedObject,
-
-    pub fn getIndex(file: File) Index {
-        return switch (file) {
-            .null => unreachable,
-            inline else => |x| x.index,
-        };
-    }
-
-    pub fn getPath(file: File) []const u8 {
-        return switch (file) {
-            .null, .internal => unreachable,
-            .object => |x| x.name, // TODO wrap in archive path if extracted
-            .shared => |x| x.name,
-        };
-    }
-
-    fn resolveSymbols(file: File, elf_file: *Elf) void {
-        switch (file) {
-            .null => unreachable,
-            inline else => |x| x.resolveSymbols(elf_file),
-        }
-    }
-
-    fn resetGlobals(file: File, elf_file: *Elf) void {
-        switch (file) {
-            .null => unreachable,
-            inline else => |x| x.resetGlobals(elf_file),
-        }
-    }
-
-    pub fn isAlive(file: File) bool {
-        return switch (file) {
-            .null => unreachable,
-            inline else => |x| x.alive,
-        };
-    }
-
-    /// Encodes symbol rank so that the following ordering applies:
-    /// * strong defined
-    /// * weak defined
-    /// * strong in lib (dso/archive)
-    /// * weak in lib (dso/archive)
-    /// * unclaimed
-    pub fn getSymbolRank(file: File, sym: elf.Elf64_Sym, in_archive: bool) u32 {
-        const base: u4 = blk: {
-            if (file == .shared or in_archive) break :blk switch (sym.st_bind()) {
-                elf.STB_GLOBAL => 3,
-                else => 4,
-            };
-            break :blk switch (sym.st_bind()) {
-                elf.STB_GLOBAL => 1,
-                else => 2,
-            };
-        };
-        return (@as(u32, base) << 24) + file.getIndex();
-    }
-
-    pub const Index = u32;
-};
-
-pub const FilePtr = union(enum) {
-    internal: *InternalObject,
-    object: *Object,
-    shared: *SharedObject,
-
-    pub fn deref(ptr: FilePtr) File {
-        return switch (ptr) {
-            .internal => |x| .{ .internal = x.* },
-            .object => |x| .{ .object = x.* },
-            .shared => |x| .{ .shared = x.* },
-        };
-    }
-
-    pub fn setAlive(ptr: FilePtr) void {
-        switch (ptr) {
-            inline else => |x| x.alive = true,
-        }
-    }
-
-    pub fn markLive(ptr: FilePtr, elf_file: *Elf) void {
-        switch (ptr) {
-            .internal => {},
-            inline else => |x| x.markLive(elf_file),
-        }
-    }
-};
-
-const Section = struct {
-    shdr: elf.Elf64_Shdr,
-    first_atom: ?Atom.Index,
-    last_atom: ?Atom.Index,
-};
-
-const Segment = struct {
-    phdr: elf.Elf64_Phdr,
-    file_align: u64,
-    shdrs: std.ArrayListUnmanaged(u16) = .{},
-};
-
-const default_base_addr: u64 = 0x200000;
-const default_page_size: u64 = 0x1000;
 
 pub fn openPath(allocator: Allocator, options: Options, thread_pool: *ThreadPool) !*Elf {
     const file = try options.emit.directory.createFile(options.emit.sub_path, .{
@@ -216,6 +109,7 @@ pub fn deinit(self: *Elf) void {
     self.shared_objects.deinit(gpa);
     self.dynsymtab.deinit(gpa);
     self.dynstrtab.deinit(gpa);
+    self.dynamic_section.deinit(gpa);
     self.arena.promote(gpa).deinit();
 }
 
@@ -401,6 +295,7 @@ pub fn flush(self: *Elf) !void {
 
     try self.initSections();
     try self.sortSections();
+    try self.setDynamic();
     try self.calcSectionSizes();
     try self.setDynsymtab();
     try self.setSymtab();
@@ -546,6 +441,11 @@ fn calcSectionSizes(self: *Elf) !void {
         const size = self.options.dynamic_linker.?.len + 1;
         shdr.sh_size = size;
         shdr.sh_addralign = 1;
+    }
+
+    if (self.dynamic_sect_index) |index| {
+        const shdr = &self.sections.items(.shdr)[index];
+        shdr.sh_size = self.dynamic_section.size(self);
     }
 }
 
@@ -1293,6 +1193,18 @@ fn setShstrtab(self: *Elf) void {
     shdr.sh_size = self.shstrtab.buffer.items.len;
 }
 
+fn setDynamic(self: *Elf) !void {
+    if (self.dynamic_sect_index == null) return;
+
+    try self.dynamic_section.setRpath(self.options.rpath_list, self);
+
+    for (self.shared_objects.items) |index| {
+        const shared = self.getFile(index).?.shared;
+        if (!shared.alive) continue;
+        try self.dynamic_section.addNeeded(shared, self);
+    }
+}
+
 fn setDynsymtab(self: *Elf) !void {
     const dynsymtab_sect_index = self.dynsymtab_sect_index orelse return;
     const gpa = self.base.allocator;
@@ -1374,14 +1286,25 @@ fn writeSyntheticSections(self: *Elf) !void {
         buffer[dylinker.len] = 0;
         try self.base.file.pwriteAll(buffer, shdr.sh_offset);
     }
+
+    if (self.dynamic_sect_index) |shndx| {
+        const shdr = self.sections.items(.shdr)[shndx];
+        var buffer = try std.ArrayList(u8).initCapacity(gpa, self.dynamic_section.size(self));
+        defer buffer.deinit();
+        try self.dynamic_section.write(self, buffer.writer());
+        try self.base.file.pwriteAll(buffer.items, shdr.sh_offset);
+    }
+
     if (self.dynsymtab_sect_index) |shndx| {
         const shdr = self.sections.items(.shdr)[shndx];
         try self.base.file.pwriteAll(mem.sliceAsBytes(self.dynsymtab.items), shdr.sh_offset);
     }
+
     if (self.dynstrtab_sect_index) |shndx| {
         const shdr = self.sections.items(.shdr)[shndx];
         try self.base.file.pwriteAll(self.dynstrtab.buffer.items, shdr.sh_offset);
     }
+
     if (self.got_sect_index) |shndx| {
         const shdr = self.sections.items(.shdr)[shndx];
         var buffer = try std.ArrayList(u8).initCapacity(gpa, self.got_section.size());
@@ -1389,14 +1312,17 @@ fn writeSyntheticSections(self: *Elf) !void {
         try self.got_section.write(self, buffer.writer());
         try self.base.file.pwriteAll(buffer.items, shdr.sh_offset);
     }
+
     if (self.symtab_sect_index) |shndx| {
         const shdr = self.sections.items(.shdr)[shndx];
         try self.base.file.pwriteAll(mem.sliceAsBytes(self.symtab.items), shdr.sh_offset);
     }
+
     if (self.strtab_sect_index) |shndx| {
         const shdr = self.sections.items(.shdr)[shndx];
         try self.base.file.pwriteAll(self.strtab.buffer.items, shdr.sh_offset);
     }
+
     if (self.shstrtab_sect_index) |shndx| {
         const shdr = self.sections.items(.shdr)[shndx];
         try self.base.file.pwriteAll(self.shstrtab.buffer.items, shdr.sh_offset);
@@ -1660,6 +1586,210 @@ fn fmtDumpState(
     try writer.writeAll("Output phdrs\n");
     try writer.print("{}\n", .{self.fmtPhdrs()});
 }
+
+pub const File = union(enum) {
+    null: void,
+    internal: InternalObject,
+    object: Object,
+    shared: SharedObject,
+
+    pub fn getIndex(file: File) Index {
+        return switch (file) {
+            .null => unreachable,
+            inline else => |x| x.index,
+        };
+    }
+
+    pub fn getPath(file: File) []const u8 {
+        return switch (file) {
+            .null, .internal => unreachable,
+            .object => |x| x.name, // TODO wrap in archive path if extracted
+            .shared => |x| x.name,
+        };
+    }
+
+    fn resolveSymbols(file: File, elf_file: *Elf) void {
+        switch (file) {
+            .null => unreachable,
+            inline else => |x| x.resolveSymbols(elf_file),
+        }
+    }
+
+    fn resetGlobals(file: File, elf_file: *Elf) void {
+        switch (file) {
+            .null => unreachable,
+            inline else => |x| x.resetGlobals(elf_file),
+        }
+    }
+
+    pub fn isAlive(file: File) bool {
+        return switch (file) {
+            .null => unreachable,
+            inline else => |x| x.alive,
+        };
+    }
+
+    /// Encodes symbol rank so that the following ordering applies:
+    /// * strong defined
+    /// * weak defined
+    /// * strong in lib (dso/archive)
+    /// * weak in lib (dso/archive)
+    /// * unclaimed
+    pub fn getSymbolRank(file: File, sym: elf.Elf64_Sym, in_archive: bool) u32 {
+        const base: u4 = blk: {
+            if (file == .shared or in_archive) break :blk switch (sym.st_bind()) {
+                elf.STB_GLOBAL => 3,
+                else => 4,
+            };
+            break :blk switch (sym.st_bind()) {
+                elf.STB_GLOBAL => 1,
+                else => 2,
+            };
+        };
+        return (@as(u32, base) << 24) + file.getIndex();
+    }
+
+    pub const Index = u32;
+};
+
+pub const FilePtr = union(enum) {
+    internal: *InternalObject,
+    object: *Object,
+    shared: *SharedObject,
+
+    pub fn deref(ptr: FilePtr) File {
+        return switch (ptr) {
+            .internal => |x| .{ .internal = x.* },
+            .object => |x| .{ .object = x.* },
+            .shared => |x| .{ .shared = x.* },
+        };
+    }
+
+    pub fn setAlive(ptr: FilePtr) void {
+        switch (ptr) {
+            inline else => |x| x.alive = true,
+        }
+    }
+
+    pub fn markLive(ptr: FilePtr, elf_file: *Elf) void {
+        switch (ptr) {
+            .internal => {},
+            inline else => |x| x.markLive(elf_file),
+        }
+    }
+};
+
+const Section = struct {
+    shdr: elf.Elf64_Shdr,
+    first_atom: ?Atom.Index,
+    last_atom: ?Atom.Index,
+};
+
+const DynamicSection = struct {
+    needed: std.ArrayListUnmanaged(u32) = .{},
+    rpath: u32 = 0,
+
+    fn deinit(dt: *DynamicSection, allocator: Allocator) void {
+        dt.needed.deinit(allocator);
+    }
+
+    fn addNeeded(dt: *DynamicSection, shared: *const SharedObject, elf_file: *Elf) !void {
+        const gpa = elf_file.base.allocator;
+        const off = try elf_file.dynstrtab.insert(gpa, shared.name);
+        try dt.needed.append(gpa, off);
+    }
+
+    fn setRpath(dt: *DynamicSection, rpath_list: []const []const u8, elf_file: *Elf) !void {
+        if (rpath_list.len == 0) return;
+        const gpa = elf_file.base.allocator;
+        var rpath = std.ArrayList(u8).init(gpa);
+        defer rpath.deinit();
+        for (rpath_list, 0..) |path, i| {
+            if (i > 0) try rpath.append(':');
+            try rpath.appendSlice(path);
+        }
+        dt.rpath = try elf_file.dynstrtab.insert(gpa, rpath.items);
+    }
+
+    fn size(dt: DynamicSection, elf_file: *Elf) usize {
+        var nentries: usize = 0;
+        nentries += dt.needed.items.len; // NEEDED
+        if (dt.rpath > 0) nentries += 1; // RUNPATH
+        if (elf_file.getSectionByName(".init") != null) nentries += 1; // INIT
+        if (elf_file.getSectionByName(".fini") != null) nentries += 1; // FINI
+        if (elf_file.getSectionByName(".init_array") != null) nentries += 2; // INIT_ARRAY
+        if (elf_file.getSectionByName(".fini_array") != null) nentries += 2; // FINI_ARRAY
+        nentries += 1; // SYMTAB
+        nentries += 1; // SYMENT
+        nentries += 1; // STRTAB
+        nentries += 1; // STRSZ
+        nentries += 1; // NULL
+        return nentries * @sizeOf(elf.Elf64_Dyn);
+    }
+
+    fn write(dt: DynamicSection, elf_file: *Elf, writer: anytype) !void {
+        // NEEDED
+        for (dt.needed.items) |off| {
+            try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_NEEDED, .d_val = off });
+        }
+
+        // RUNPATH
+        // TODO add option in Options to revert to old RPATH tag
+        if (dt.rpath > 0) {
+            try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_RUNPATH, .d_val = dt.rpath });
+        }
+
+        // INIT
+        if (elf_file.getSectionByName(".init")) |shndx| {
+            const addr = elf_file.sections.items(.shdr)[shndx].sh_addr;
+            try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_INIT, .d_val = addr });
+        }
+
+        // FINI
+        if (elf_file.getSectionByName(".fini")) |shndx| {
+            const addr = elf_file.sections.items(.shdr)[shndx].sh_addr;
+            try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_FINI, .d_val = addr });
+        }
+
+        // INIT_ARRAY
+        if (elf_file.getSectionByName(".init_array")) |shndx| {
+            const shdr = elf_file.sections.items(.shdr)[shndx];
+            try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_INIT_ARRAY, .d_val = shdr.sh_addr });
+            try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_INIT_ARRAYSZ, .d_val = shdr.sh_size });
+        }
+
+        // FINI_ARRAY
+        if (elf_file.getSectionByName(".fini_array")) |shndx| {
+            const shdr = elf_file.sections.items(.shdr)[shndx];
+            try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_FINI_ARRAY, .d_val = shdr.sh_addr });
+            try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_FINI_ARRAYSZ, .d_val = shdr.sh_size });
+        }
+
+        // SYMTAB + SYMENT
+        {
+            assert(elf_file.dynsymtab_sect_index != null);
+            const shdr = elf_file.sections.items(.shdr)[elf_file.dynsymtab_sect_index.?];
+            try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_SYMTAB, .d_val = shdr.sh_addr });
+            try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_SYMENT, .d_val = shdr.sh_entsize });
+        }
+
+        // STRTAB + STRSZ
+        {
+            assert(elf_file.dynstrtab_sect_index != null);
+            const shdr = elf_file.sections.items(.shdr)[elf_file.dynstrtab_sect_index.?];
+            try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_STRTAB, .d_val = shdr.sh_addr });
+            try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_STRSZ, .d_val = shdr.sh_size });
+        }
+
+        // NULL
+        try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_NULL, .d_val = 0 });
+    }
+};
+
+const default_base_addr: u64 = 0x200000;
+const default_page_size: u64 = 0x1000;
+
+pub const base_tag = Zld.Tag.elf;
 
 const std = @import("std");
 const build_options = @import("build_options");
