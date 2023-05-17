@@ -39,7 +39,7 @@ string_intern: StringTable(.string_intern) = .{},
 
 shstrtab: StringTable(.shstrtab) = .{},
 strtab: StringTable(.strtab) = .{},
-symtab: std.ArrayListUnmanaged(elf.Elf64_Sym) = .{},
+symtab: SymtabSection = .{},
 dynsymtab: std.ArrayListUnmanaged(elf.Elf64_Sym) = .{},
 dynstrtab: StringTable(.dynstrtab) = .{},
 
@@ -92,8 +92,8 @@ pub fn deinit(self: *Elf) void {
     const gpa = self.base.allocator;
     self.string_intern.deinit(gpa);
     self.symtab.deinit(gpa);
-    self.shstrtab.deinit(gpa);
     self.strtab.deinit(gpa);
+    self.shstrtab.deinit(gpa);
     self.atoms.deinit(gpa);
     self.globals.deinit(gpa);
     self.globals_table.deinit(gpa);
@@ -178,22 +178,14 @@ pub fn flush(self: *Elf) !void {
 
     // Append empty string to string tables.
     try self.string_intern.buffer.append(gpa, 0);
-    try self.strtab.buffer.append(gpa, 0);
     try self.shstrtab.buffer.append(gpa, 0);
+    try self.strtab.buffer.append(gpa, 0);
     try self.dynstrtab.buffer.append(gpa, 0);
     // Append null section.
     _ = try self.addSection(.{ .name = "" });
     // Append null atom.
     try self.atoms.append(gpa, .{});
     // Append null symbols.
-    try self.symtab.append(gpa, .{
-        .st_name = 0,
-        .st_info = 0,
-        .st_other = 0,
-        .st_shndx = 0,
-        .st_value = 0,
-        .st_size = 0,
-    });
     try self.dynsymtab.append(gpa, .{
         .st_name = 0,
         .st_info = 0,
@@ -476,7 +468,7 @@ fn calcSectionSizes(self: *Elf) !void {
 
     if (self.symtab_sect_index) |index| {
         const shdr = &self.sections.items(.shdr)[index];
-        shdr.sh_size = self.symtab.items.len * @sizeOf(elf.Elf64_Sym);
+        shdr.sh_size = self.symtab.size();
     }
 
     if (self.strtab_sect_index) |index| {
@@ -1167,65 +1159,8 @@ fn scanRelocs(self: *Elf) !void {
 }
 
 fn setSymtab(self: *Elf) !void {
-    const symtab_sect_index = self.symtab_sect_index orelse return;
-    const gpa = self.base.allocator;
-
-    for (self.objects.items) |index| {
-        const object = self.getFile(index).?.object;
-        for (object.locals.items) |sym| {
-            if (sym.getAtom(self)) |atom| {
-                if (!atom.is_alive) continue;
-            }
-            const s_sym = sym.getSourceSymbol(self);
-            switch (s_sym.st_type()) {
-                elf.STT_SECTION, elf.STT_NOTYPE => continue,
-                else => {},
-            }
-            switch (@intToEnum(elf.STV, s_sym.st_other)) {
-                .INTERNAL, .HIDDEN => continue,
-                else => {},
-            }
-            const name = try self.strtab.insert(gpa, sym.getName(self));
-            try self.symtab.append(gpa, .{
-                .st_name = name,
-                .st_info = s_sym.st_info,
-                .st_other = s_sym.st_other,
-                .st_shndx = sym.shndx,
-                .st_value = sym.value,
-                .st_size = 0,
-            });
-        }
-    }
-
-    // Denote start of globals.
-    {
-        const shdr = &self.sections.items(.shdr)[symtab_sect_index];
-        shdr.sh_info = @intCast(u32, self.symtab.items.len);
-    }
-
-    for (self.objects.items) |index| {
-        const object = self.getFile(index).?.object;
-        for (object.globals.items) |global_index| {
-            const global = self.getGlobal(global_index);
-            if (global.getAtom(self)) |atom| {
-                if (!atom.is_alive) continue;
-            }
-            const sym = global.getSourceSymbol(self);
-            switch (@intToEnum(elf.STV, sym.st_other)) {
-                .INTERNAL, .HIDDEN => continue,
-                else => {},
-            }
-            const name = try self.strtab.insert(gpa, global.getName(self));
-            try self.symtab.append(gpa, .{
-                .st_name = name,
-                .st_info = sym.st_info,
-                .st_other = sym.st_other,
-                .st_shndx = global.shndx,
-                .st_value = global.value,
-                .st_size = 0,
-            });
-        }
-    }
+    if (self.symtab_sect_index == null) return;
+    try self.symtab.set(self);
 }
 
 fn setDynamic(self: *Elf) !void {
@@ -1349,8 +1284,12 @@ fn writeSyntheticSections(self: *Elf) !void {
     }
 
     if (self.symtab_sect_index) |shndx| {
-        const shdr = self.sections.items(.shdr)[shndx];
-        try self.base.file.pwriteAll(mem.sliceAsBytes(self.symtab.items), shdr.sh_offset);
+        const shdr = &self.sections.items(.shdr)[shndx];
+        shdr.sh_info = self.symtab.globalIndex();
+        var buffer = try std.ArrayList(u8).initCapacity(gpa, self.symtab.size());
+        defer buffer.deinit();
+        try self.symtab.write(self, buffer.writer());
+        try self.base.file.pwriteAll(buffer.items, shdr.sh_offset);
     }
 
     if (self.strtab_sect_index) |shndx| {
@@ -1878,6 +1817,114 @@ const HashSection = struct {
             h &= ~g;
         }
         return h;
+    }
+};
+
+const SymtabSection = struct {
+    symbols: std.ArrayListUnmanaged(SymRef) = .{},
+    first_global: u32 = 0,
+
+    const SymRef = struct {
+        file: u32,
+        index: u32,
+        off: u32,
+    };
+
+    fn deinit(symtab: *SymtabSection, allocator: Allocator) void {
+        symtab.symbols.deinit(allocator);
+    }
+
+    fn globalIndex(symtab: SymtabSection) u32 {
+        return symtab.first_global + 1;
+    }
+
+    fn set(symtab: *SymtabSection, elf_file: *Elf) !void {
+        const gpa = elf_file.base.allocator;
+        for (elf_file.objects.items) |index| {
+            const object = elf_file.getFile(index).?.object;
+            for (object.locals.items, 0..) |sym, sym_index| {
+                if (sym.getAtom(elf_file)) |atom| {
+                    if (!atom.is_alive) continue;
+                }
+                const s_sym = sym.getSourceSymbol(elf_file);
+                switch (s_sym.st_type()) {
+                    elf.STT_SECTION, elf.STT_NOTYPE => continue,
+                    else => {},
+                }
+                switch (@intToEnum(elf.STV, s_sym.st_other)) {
+                    .INTERNAL, .HIDDEN => continue,
+                    else => {},
+                }
+                try symtab.symbols.append(gpa, .{
+                    .file = @intCast(u32, index),
+                    .index = @intCast(u32, sym_index),
+                    .off = try elf_file.strtab.insert(gpa, sym.getName(elf_file)),
+                });
+            }
+        }
+
+        // Denote start of globals.
+        symtab.first_global = @intCast(u32, symtab.symbols.items.len);
+
+        for (elf_file.objects.items) |index| {
+            const object = elf_file.getFile(index).?.object;
+            for (object.globals.items) |global_index| {
+                const global = elf_file.getGlobal(global_index);
+                if (global.getAtom(elf_file)) |atom| {
+                    if (!atom.is_alive) continue;
+                }
+                const sym = global.getSourceSymbol(elf_file);
+                switch (@intToEnum(elf.STV, sym.st_other)) {
+                    .INTERNAL, .HIDDEN => continue,
+                    else => {},
+                }
+                try symtab.symbols.append(gpa, .{
+                    .file = 0,
+                    .index = @intCast(u32, global_index),
+                    .off = try elf_file.strtab.insert(gpa, global.getName(elf_file)),
+                });
+            }
+        }
+    }
+
+    fn size(symtab: SymtabSection) usize {
+        return (symtab.symbols.items.len + 1) * @sizeOf(elf.Elf64_Sym);
+    }
+
+    fn write(symtab: SymtabSection, elf_file: *Elf, writer: anytype) !void {
+        try writer.writeStruct(elf.Elf64_Sym{
+            .st_name = 0,
+            .st_info = 0,
+            .st_other = 0,
+            .st_shndx = 0,
+            .st_value = 0,
+            .st_size = 0,
+        });
+        for (symtab.symbols.items[0..symtab.first_global]) |sym_ref| {
+            const object = elf_file.getFile(sym_ref.file).?.object;
+            const sym = object.getSymbol(sym_ref.index, elf_file);
+            const s_sym = sym.getSourceSymbol(elf_file);
+            try writer.writeStruct(elf.Elf64_Sym{
+                .st_name = sym_ref.off,
+                .st_info = s_sym.st_info,
+                .st_other = s_sym.st_other,
+                .st_shndx = sym.shndx,
+                .st_value = sym.value,
+                .st_size = 0,
+            });
+        }
+        for (symtab.symbols.items[symtab.first_global..]) |sym_ref| {
+            const global = elf_file.getGlobal(sym_ref.index);
+            const s_sym = global.getSourceSymbol(elf_file);
+            try writer.writeStruct(elf.Elf64_Sym{
+                .st_name = sym_ref.off,
+                .st_info = s_sym.st_info,
+                .st_other = s_sym.st_other,
+                .st_shndx = global.shndx,
+                .st_value = global.value,
+                .st_size = 0,
+            });
+        }
     }
 };
 
