@@ -19,6 +19,7 @@ interp_sect_index: ?u16 = null,
 dynamic_sect_index: ?u16 = null,
 dynsymtab_sect_index: ?u16 = null,
 dynstrtab_sect_index: ?u16 = null,
+hash_sect_index: ?u16 = null,
 
 internal_object_index: ?u32 = null,
 dynamic_index: ?u32 = null,
@@ -43,6 +44,7 @@ dynsymtab: std.ArrayListUnmanaged(elf.Elf64_Sym) = .{},
 dynstrtab: StringTable(.dynstrtab) = .{},
 
 dynamic_section: DynamicSection = .{},
+hash_section: HashSection = .{},
 
 got_section: SyntheticSection(u32, *Elf, .{
     .log_scope = .got_section,
@@ -110,6 +112,7 @@ pub fn deinit(self: *Elf) void {
     self.dynsymtab.deinit(gpa);
     self.dynstrtab.deinit(gpa);
     self.dynamic_section.deinit(gpa);
+    self.hash_section.deinit(gpa);
     self.arena.promote(gpa).deinit();
 }
 
@@ -296,10 +299,10 @@ pub fn flush(self: *Elf) !void {
     try self.initSections();
     try self.sortSections();
     try self.setDynamic();
-    try self.calcSectionSizes();
     try self.setDynsymtab();
+    try self.setHash();
     try self.setSymtab();
-    self.setShstrtab();
+    try self.calcSectionSizes();
 
     try self.allocateSections();
     self.allocateAtoms();
@@ -398,6 +401,14 @@ fn initSections(self: *Elf) !void {
             .addralign = @alignOf(elf.Elf64_Sym),
             .entsize = @sizeOf(elf.Elf64_Sym),
         });
+        self.hash_sect_index = try self.addSection(.{
+            .name = ".hash",
+            .flags = elf.SHF_ALLOC,
+            .type = elf.SHT_HASH,
+            .addralign = 4,
+            .entsize = 4,
+            .link = self.dynsymtab_sect_index.?,
+        });
     }
 }
 
@@ -443,9 +454,39 @@ fn calcSectionSizes(self: *Elf) !void {
         shdr.sh_addralign = 1;
     }
 
+    if (self.hash_sect_index) |index| {
+        const shdr = &self.sections.items(.shdr)[index];
+        shdr.sh_size = self.hash_section.size();
+    }
+
     if (self.dynamic_sect_index) |index| {
         const shdr = &self.sections.items(.shdr)[index];
         shdr.sh_size = self.dynamic_section.size(self);
+    }
+
+    if (self.dynsymtab_sect_index) |index| {
+        const shdr = &self.sections.items(.shdr)[index];
+        shdr.sh_size = self.dynsymtab.items.len * @sizeOf(elf.Elf64_Sym);
+    }
+
+    if (self.dynstrtab_sect_index) |index| {
+        const shdr = &self.sections.items(.shdr)[index];
+        shdr.sh_size = self.dynstrtab.buffer.items.len;
+    }
+
+    if (self.symtab_sect_index) |index| {
+        const shdr = &self.sections.items(.shdr)[index];
+        shdr.sh_size = self.symtab.items.len * @sizeOf(elf.Elf64_Sym);
+    }
+
+    if (self.strtab_sect_index) |index| {
+        const shdr = &self.sections.items(.shdr)[index];
+        shdr.sh_size = self.strtab.buffer.items.len;
+    }
+
+    if (self.shstrtab_sect_index) |index| {
+        const shdr = &self.sections.items(.shdr)[index];
+        shdr.sh_size = self.shstrtab.buffer.items.len;
     }
 }
 
@@ -601,6 +642,7 @@ fn getSectionRank(self: *Elf, shndx: u16) u8 {
     switch (shdr.sh_type) {
         elf.SHT_NULL => return 0,
         elf.SHT_DYNSYM => return 2,
+        elf.SHT_HASH => return 3,
 
         elf.SHT_PREINIT_ARRAY,
         elf.SHT_INIT_ARRAY,
@@ -629,7 +671,7 @@ fn getSectionRank(self: *Elf, shndx: u16) u8 {
 
         elf.SHT_NOBITS => return if (flags & elf.SHF_TLS != 0) 0xf3 else 0xf5,
         elf.SHT_SYMTAB => return 0xf9,
-        elf.SHT_STRTAB => return if (mem.eql(u8, name, ".dynstr")) 3 else 0xfa,
+        elf.SHT_STRTAB => return if (mem.eql(u8, name, ".dynstr")) 4 else 0xfa,
         else => return 0xff,
     }
 }
@@ -685,6 +727,7 @@ fn sortSections(self: *Elf) !void {
         &self.dynamic_sect_index,
         &self.dynsymtab_sect_index,
         &self.dynstrtab_sect_index,
+        &self.hash_sect_index,
     }) |maybe_index| {
         if (maybe_index.*) |*index| {
             index.* = backlinks[index.*];
@@ -704,6 +747,11 @@ fn sortSections(self: *Elf) !void {
     if (self.dynsymtab_sect_index) |index| {
         const shdr = &self.sections.items(.shdr)[index];
         shdr.sh_link = self.dynstrtab_sect_index.?;
+    }
+
+    if (self.hash_sect_index) |index| {
+        const shdr = &self.sections.items(.shdr)[index];
+        shdr.sh_link = self.dynsymtab_sect_index.?;
     }
 }
 
@@ -1178,21 +1226,6 @@ fn setSymtab(self: *Elf) !void {
             });
         }
     }
-
-    // Set the section sizes
-    {
-        const shdr = &self.sections.items(.shdr)[symtab_sect_index];
-        shdr.sh_size = self.symtab.items.len * @sizeOf(elf.Elf64_Sym);
-    }
-    {
-        const shdr = &self.sections.items(.shdr)[self.strtab_sect_index.?];
-        shdr.sh_size = self.strtab.buffer.items.len;
-    }
-}
-
-fn setShstrtab(self: *Elf) void {
-    const shdr = &self.sections.items(.shdr)[self.shstrtab_sect_index.?];
-    shdr.sh_size = self.shstrtab.buffer.items.len;
 }
 
 fn setDynamic(self: *Elf) !void {
@@ -1208,7 +1241,7 @@ fn setDynamic(self: *Elf) !void {
 }
 
 fn setDynsymtab(self: *Elf) !void {
-    const dynsymtab_sect_index = self.dynsymtab_sect_index orelse return;
+    if (self.dynsymtab_sect_index == null) return;
     const gpa = self.base.allocator;
 
     for (self.objects.items) |index| {
@@ -1228,16 +1261,11 @@ fn setDynsymtab(self: *Elf) !void {
             });
         }
     }
+}
 
-    // Set the section sizes
-    {
-        const shdr = &self.sections.items(.shdr)[dynsymtab_sect_index];
-        shdr.sh_size = self.dynsymtab.items.len * @sizeOf(elf.Elf64_Sym);
-    }
-    {
-        const shdr = &self.sections.items(.shdr)[self.dynstrtab_sect_index.?];
-        shdr.sh_size = self.dynstrtab.buffer.items.len;
-    }
+fn setHash(self: *Elf) !void {
+    if (self.hash_sect_index == null) return;
+    try self.hash_section.generate(self);
 }
 
 fn writeAtoms(self: *Elf) !void {
@@ -1287,6 +1315,11 @@ fn writeSyntheticSections(self: *Elf) !void {
         @memcpy(buffer[0..dylinker.len], dylinker);
         buffer[dylinker.len] = 0;
         try self.base.file.pwriteAll(buffer, shdr.sh_offset);
+    }
+
+    if (self.hash_sect_index) |shndx| {
+        const shdr = self.sections.items(.shdr)[shndx];
+        try self.base.file.pwriteAll(self.hash_section.buffer.items, shdr.sh_offset);
     }
 
     if (self.dynamic_sect_index) |shndx| {
@@ -1722,6 +1755,7 @@ const DynamicSection = struct {
         if (elf_file.getSectionByName(".fini") != null) nentries += 1; // FINI
         if (elf_file.getSectionByName(".init_array") != null) nentries += 2; // INIT_ARRAY
         if (elf_file.getSectionByName(".fini_array") != null) nentries += 2; // FINI_ARRAY
+        nentries += 1; // HASH
         nentries += 1; // SYMTAB
         nentries += 1; // SYMENT
         nentries += 1; // STRTAB
@@ -1768,6 +1802,12 @@ const DynamicSection = struct {
             try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_FINI_ARRAYSZ, .d_val = shdr.sh_size });
         }
 
+        {
+            assert(elf_file.hash_sect_index != null);
+            const addr = elf_file.sections.items(.shdr)[elf_file.hash_sect_index.?].sh_addr;
+            try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_HASH, .d_val = addr });
+        }
+
         // SYMTAB + SYMENT
         {
             assert(elf_file.dynsymtab_sect_index != null);
@@ -1786,6 +1826,58 @@ const DynamicSection = struct {
 
         // NULL
         try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_NULL, .d_val = 0 });
+    }
+};
+
+const HashSection = struct {
+    buffer: std.ArrayListUnmanaged(u8) = .{},
+
+    fn deinit(hs: *HashSection, allocator: Allocator) void {
+        hs.buffer.deinit(allocator);
+    }
+
+    fn generate(hs: *HashSection, elf_file: *Elf) !void {
+        if (elf_file.dynsymtab.items.len == 0) return;
+
+        const gpa = elf_file.base.allocator;
+        const symtab = elf_file.dynsymtab.items;
+
+        var buckets = try gpa.alloc(u32, symtab.len);
+        defer gpa.free(buckets);
+        @memset(buckets, 0);
+
+        var chains = try gpa.alloc(u32, symtab.len);
+        defer gpa.free(chains);
+        @memset(chains, 0);
+
+        for (symtab[1..], 1..) |sym, i| {
+            const name = elf_file.dynstrtab.getAssumeExists(sym.st_name);
+            const hash = hasher(name) % buckets.len;
+            chains[@intCast(u32, i)] = buckets[hash];
+            buckets[hash] = @intCast(u32, i);
+        }
+
+        try hs.buffer.ensureTotalCapacityPrecise(gpa, (2 + symtab.len * 2) * 4);
+        hs.buffer.writer(gpa).writeIntLittle(u32, @intCast(u32, symtab.len)) catch unreachable;
+        hs.buffer.writer(gpa).writeIntLittle(u32, @intCast(u32, symtab.len)) catch unreachable;
+        hs.buffer.writer(gpa).writeAll(mem.sliceAsBytes(buckets)) catch unreachable;
+        hs.buffer.writer(gpa).writeAll(mem.sliceAsBytes(chains)) catch unreachable;
+    }
+
+    inline fn size(hs: HashSection) usize {
+        return hs.buffer.items.len;
+    }
+
+    fn hasher(name: [:0]const u8) u32 {
+        var h: u32 = 0;
+        var g: u32 = 0;
+        for (name) |c| {
+            h = (h << 4) + c;
+            g = h & 0xf0000000;
+            if (g > 0) h ^= g >> 24;
+            h &= ~g;
+        }
+        return h;
     }
 };
 
