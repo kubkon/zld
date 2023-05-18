@@ -186,15 +186,7 @@ pub fn flush(self: *Elf) !void {
     // Append null atom.
     try self.atoms.append(gpa, .{});
     // Append null symbols.
-    try self.dynsymtab.append(gpa, .{
-        .st_name = 0,
-        .st_info = 0,
-        .st_other = 0,
-        .st_shndx = 0,
-        .st_value = 0,
-        .st_size = 0,
-    });
-    try self.symbols_extra.append(gpa, 0);
+    try self.dynsymtab.append(gpa, null_sym);
     try self.symbols_extra.append(gpa, 0);
     // Append null file.
     try self.files.append(gpa, .null);
@@ -330,7 +322,7 @@ fn initSections(self: *Elf) !void {
         }
     }
 
-    if (self.got_section.size() > 0) {
+    if (self.got_section.symbols.items.len > 0) {
         self.got_sect_index = try self.addSection(.{
             .name = ".got",
             .type = elf.SHT_PROGBITS,
@@ -339,12 +331,12 @@ fn initSections(self: *Elf) !void {
         });
     }
 
-    if (self.plt_section.sizePlt() > 0) {
+    if (self.plt_section.symbols.items.len > 0) {
         self.plt_sect_index = try self.addSection(.{
             .name = ".plt",
             .type = elf.SHT_PROGBITS,
             .flags = elf.SHF_ALLOC | elf.SHF_EXECINSTR,
-            .addralign = 1,
+            .addralign = 16,
         });
         self.got_plt_sect_index = try self.addSection(.{
             .name = ".got.plt",
@@ -459,7 +451,7 @@ fn calcSectionSizes(self: *Elf) !void {
     if (self.plt_sect_index) |index| {
         const shdr = &self.sections.items(.shdr)[index];
         shdr.sh_size = self.plt_section.sizePlt();
-        shdr.sh_addralign = 1;
+        shdr.sh_addralign = 16;
     }
 
     if (self.got_plt_sect_index) |index| {
@@ -668,15 +660,15 @@ fn getSectionRank(self: *Elf, shndx: u16) u8 {
         elf.SHT_PREINIT_ARRAY,
         elf.SHT_INIT_ARRAY,
         elf.SHT_FINI_ARRAY,
-        => return 0xf1,
+        => return 0xf2,
 
-        elf.SHT_DYNAMIC => return 0xf2,
+        elf.SHT_DYNAMIC => return 0xf3,
 
         elf.SHT_PROGBITS => if (flags & elf.SHF_ALLOC != 0) {
             if (flags & elf.SHF_EXECINSTR != 0) {
                 return 0xf1;
             } else if (flags & elf.SHF_WRITE != 0) {
-                return if (flags & elf.SHF_TLS != 0) 0xf2 else 0xf4;
+                return if (flags & elf.SHF_TLS != 0) 0xf3 else 0xf5;
             } else if (mem.eql(u8, name, ".interp")) {
                 return 1;
             } else {
@@ -684,13 +676,13 @@ fn getSectionRank(self: *Elf, shndx: u16) u8 {
             }
         } else {
             if (mem.startsWith(u8, name, ".debug")) {
-                return 0xf6;
-            } else {
                 return 0xf7;
+            } else {
+                return 0xf8;
             }
         },
 
-        elf.SHT_NOBITS => return if (flags & elf.SHF_TLS != 0) 0xf3 else 0xf5,
+        elf.SHT_NOBITS => return if (flags & elf.SHF_TLS != 0) 0xf4 else 0xf6,
         elf.SHT_SYMTAB => return 0xf9,
         elf.SHT_STRTAB => return if (mem.eql(u8, name, ".dynstr")) 4 else 0xfa,
         else => return 0xff,
@@ -749,6 +741,8 @@ fn sortSections(self: *Elf) !void {
         &self.dynsymtab_sect_index,
         &self.dynstrtab_sect_index,
         &self.hash_sect_index,
+        &self.plt_sect_index,
+        &self.got_plt_sect_index,
     }) |maybe_index| {
         if (maybe_index.*) |*index| {
             index.* = backlinks[index.*];
@@ -2033,13 +2027,17 @@ const GotSection = struct {
     fn write(got: GotSection, elf_file: *Elf, writer: anytype) !void {
         for (got.symbols.items) |sym_index| {
             const sym = elf_file.getSymbol(sym_index);
-            try writer.writeIntLittle(u64, sym.value);
+            const value = if (sym.import) 0 else sym.value;
+            try writer.writeIntLittle(u64, value);
         }
     }
 };
 
-const PltSection = struct {
+pub const PltSection = struct {
     symbols: std.ArrayListUnmanaged(u32) = .{},
+
+    pub const plt_preamble_size = 32;
+    const got_plt_preamble_size = 24;
 
     fn deinit(plt: *PltSection, allocator: Allocator) void {
         plt.symbols.deinit(allocator);
@@ -2057,26 +2055,43 @@ const PltSection = struct {
     }
 
     fn sizePlt(plt: PltSection) usize {
-        _ = plt;
-        @panic("TODO");
+        return plt_preamble_size + plt.symbols.items.len * 16;
     }
 
     fn sizeGotPlt(plt: PltSection) usize {
-        return plt.symbols.items.len * 8;
+        return got_plt_preamble_size + plt.symbols.items.len * 8;
     }
 
     fn writePlt(plt: PltSection, elf_file: *Elf, writer: anytype) !void {
-        _ = plt;
-        _ = elf_file;
-        _ = writer;
-        @panic("TODO");
+        const plt_addr = elf_file.sections.items(.shdr)[elf_file.plt_sect_index.?].sh_addr;
+        const got_plt_addr = elf_file.sections.items(.shdr)[elf_file.got_plt_sect_index.?].sh_addr;
+
+        var preamble = [_]u8{
+            0xf3, 0x0f, 0x1e, 0xfa, // endbr64
+            0x41, 0x53, // push r11
+            0xff, 0x35, 0x00, 0x00, 0x00, 0x00, // push qword ptr [rip]
+            0xff, 0x25, 0x00, 0x00, 0x00, 0x00, // jmp qword ptr [rip]
+        };
+        try writer.writeAll(&preamble);
+        try writer.writeByteNTimes(0xcc, plt_preamble_size - preamble.len);
+
+        for (0..plt.symbols.items.len) |i| {
+            const target_addr = got_plt_addr + got_plt_preamble_size + i * 8;
+            const source_addr = plt_addr + plt_preamble_size + i * 16;
+            const disp = @intCast(i64, target_addr) - @intCast(i64, source_addr + 12) + 4;
+            var entry = [_]u8{
+                0xf3, 0x0f, 0x1e, 0xfa, // endbr64
+                0x41, 0xbb, 0x00, 0x00, 0x00, 0x00, // jmp r11d, 0x0
+                0xff, 0x25, 0x00, 0x00, 0x00, 0x00, // jmp qword ptr [rip]
+            };
+            mem.writeIntLittle(i32, entry[12..][0..4], @intCast(i32, disp));
+            try writer.writeAll(&entry);
+        }
     }
 
     fn writeGotPlt(plt: PltSection, elf_file: *Elf, writer: anytype) !void {
-        _ = plt;
         _ = elf_file;
-        _ = writer;
-        @panic("TODO");
+        try writer.writeByteNTimes(0x0, got_plt_preamble_size + plt.symbols.items.len * 8);
     }
 };
 
