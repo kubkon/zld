@@ -14,6 +14,8 @@ text_sect_index: ?u16 = null,
 plt_sect_index: ?u16 = null,
 got_sect_index: ?u16 = null,
 got_plt_sect_index: ?u16 = null,
+rela_dyn_sect_index: ?u16 = null,
+rela_plt_sect_index: ?u16 = null,
 symtab_sect_index: ?u16 = null,
 strtab_sect_index: ?u16 = null,
 shstrtab_sect_index: ?u16 = null,
@@ -329,6 +331,16 @@ fn initSections(self: *Elf) !void {
             .flags = elf.SHF_ALLOC | elf.SHF_WRITE,
             .addralign = @alignOf(u64),
         });
+
+        if (self.got_section.needs_rela) {
+            self.rela_dyn_sect_index = try self.addSection(.{
+                .name = ".rela.dyn",
+                .type = elf.SHT_RELA,
+                .flags = elf.SHF_ALLOC,
+                .addralign = @alignOf(elf.Elf64_Rela),
+                .entsize = @sizeOf(elf.Elf64_Rela),
+            });
+        }
     }
 
     if (self.plt_section.symbols.items.len > 0) {
@@ -343,6 +355,13 @@ fn initSections(self: *Elf) !void {
             .type = elf.SHT_PROGBITS,
             .flags = elf.SHF_ALLOC | elf.SHF_WRITE,
             .addralign = @alignOf(u64),
+        });
+        self.rela_plt_sect_index = try self.addSection(.{
+            .name = ".rela.plt",
+            .type = elf.SHT_RELA,
+            .flags = elf.SHF_ALLOC,
+            .addralign = @alignOf(elf.Elf64_Rela),
+            .entsize = @sizeOf(elf.Elf64_Rela),
         });
     }
 
@@ -363,7 +382,6 @@ fn initSections(self: *Elf) !void {
         self.symtab_sect_index = try self.addSection(.{
             .name = ".symtab",
             .type = elf.SHT_SYMTAB,
-            .link = self.strtab_sect_index.?,
             .addralign = @alignOf(elf.Elf64_Sym),
             .entsize = @sizeOf(elf.Elf64_Sym),
         });
@@ -392,13 +410,11 @@ fn initSections(self: *Elf) !void {
             .type = elf.SHT_DYNAMIC,
             .entsize = @sizeOf(elf.Elf64_Dyn),
             .addralign = @alignOf(elf.Elf64_Dyn),
-            .link = self.dynstrtab_sect_index.?,
         });
         self.dynsymtab_sect_index = try self.addSection(.{
             .name = ".dynsym",
             .flags = elf.SHF_ALLOC,
             .type = elf.SHT_DYNSYM,
-            .link = self.dynstrtab_sect_index.?,
             .addralign = @alignOf(elf.Elf64_Sym),
             .entsize = @sizeOf(elf.Elf64_Sym),
         });
@@ -408,7 +424,6 @@ fn initSections(self: *Elf) !void {
             .type = elf.SHT_HASH,
             .addralign = 4,
             .entsize = 4,
-            .link = self.dynsymtab_sect_index.?,
         });
     }
 }
@@ -444,7 +459,7 @@ fn calcSectionSizes(self: *Elf) !void {
 
     if (self.got_sect_index) |index| {
         const shdr = &self.sections.items(.shdr)[index];
-        shdr.sh_size = self.got_section.size();
+        shdr.sh_size = self.got_section.sizeGot();
         shdr.sh_addralign = @alignOf(u64);
     }
 
@@ -458,6 +473,16 @@ fn calcSectionSizes(self: *Elf) !void {
         const shdr = &self.sections.items(.shdr)[index];
         shdr.sh_size = self.plt_section.sizeGotPlt();
         shdr.sh_addralign = @alignOf(u64);
+    }
+
+    if (self.rela_dyn_sect_index) |index| {
+        const shdr = &self.sections.items(.shdr)[index];
+        shdr.sh_size = self.got_section.sizeRela(self);
+    }
+
+    if (self.rela_plt_sect_index) |index| {
+        const shdr = &self.sections.items(.shdr)[index];
+        shdr.sh_size = self.plt_section.sizeRela();
     }
 
     if (self.interp_sect_index) |index| {
@@ -664,6 +689,8 @@ fn getSectionRank(self: *Elf, shndx: u16) u8 {
 
         elf.SHT_DYNAMIC => return 0xf3,
 
+        elf.SHT_RELA => return 0xf,
+
         elf.SHT_PROGBITS => if (flags & elf.SHF_ALLOC != 0) {
             if (flags & elf.SHF_EXECINSTR != 0) {
                 return 0xf1;
@@ -743,6 +770,8 @@ fn sortSections(self: *Elf) !void {
         &self.hash_sect_index,
         &self.plt_sect_index,
         &self.got_plt_sect_index,
+        &self.rela_dyn_sect_index,
+        &self.rela_plt_sect_index,
     }) |maybe_index| {
         if (maybe_index.*) |*index| {
             index.* = backlinks[index.*];
@@ -767,6 +796,17 @@ fn sortSections(self: *Elf) !void {
     if (self.hash_sect_index) |index| {
         const shdr = &self.sections.items(.shdr)[index];
         shdr.sh_link = self.dynsymtab_sect_index.?;
+    }
+
+    if (self.rela_dyn_sect_index) |index| {
+        const shdr = &self.sections.items(.shdr)[index];
+        shdr.sh_link = self.dynsymtab_sect_index.?;
+    }
+
+    if (self.rela_plt_sect_index) |index| {
+        const shdr = &self.sections.items(.shdr)[index];
+        shdr.sh_link = self.dynsymtab_sect_index.?;
+        shdr.sh_info = self.plt_sect_index.?;
     }
 }
 
@@ -1188,6 +1228,7 @@ fn scanRelocs(self: *Elf) !void {
         if (symbol.flags.got) {
             log.debug("'{s}' needs GOT", .{symbol.getName(self)});
             try self.got_section.addSymbol(index, self);
+            if (symbol.import) self.got_section.needs_rela = true;
         }
         if (symbol.flags.plt) {
             log.debug("'{s}' needs PLT", .{symbol.getName(self)});
@@ -1316,9 +1357,17 @@ fn writeSyntheticSections(self: *Elf) !void {
 
     if (self.got_sect_index) |shndx| {
         const shdr = self.sections.items(.shdr)[shndx];
-        var buffer = try std.ArrayList(u8).initCapacity(gpa, self.got_section.size());
+        var buffer = try std.ArrayList(u8).initCapacity(gpa, self.got_section.sizeGot());
         defer buffer.deinit();
-        try self.got_section.write(self, buffer.writer());
+        try self.got_section.writeGot(self, buffer.writer());
+        try self.base.file.pwriteAll(buffer.items, shdr.sh_offset);
+    }
+
+    if (self.rela_dyn_sect_index) |shndx| {
+        const shdr = self.sections.items(.shdr)[shndx];
+        var buffer = try std.ArrayList(u8).initCapacity(gpa, self.got_section.sizeRela(self));
+        defer buffer.deinit();
+        try self.got_section.writeRela(self, buffer.writer());
         try self.base.file.pwriteAll(buffer.items, shdr.sh_offset);
     }
 
@@ -1335,6 +1384,14 @@ fn writeSyntheticSections(self: *Elf) !void {
         var buffer = try std.ArrayList(u8).initCapacity(gpa, self.plt_section.sizeGotPlt());
         defer buffer.deinit();
         try self.plt_section.writeGotPlt(self, buffer.writer());
+        try self.base.file.pwriteAll(buffer.items, shdr.sh_offset);
+    }
+
+    if (self.rela_plt_sect_index) |shndx| {
+        const shdr = self.sections.items(.shdr)[shndx];
+        var buffer = try std.ArrayList(u8).initCapacity(gpa, self.plt_section.sizeRela());
+        defer buffer.deinit();
+        try self.plt_section.writeRela(self, buffer.writer());
         try self.base.file.pwriteAll(buffer.items, shdr.sh_offset);
     }
 
@@ -2007,6 +2064,7 @@ const SymtabSection = struct {
 
 const GotSection = struct {
     symbols: std.ArrayListUnmanaged(u32) = .{},
+    needs_rela: bool = false,
 
     fn deinit(got: *GotSection, allocator: Allocator) void {
         got.symbols.deinit(allocator);
@@ -2023,15 +2081,40 @@ const GotSection = struct {
         try got.symbols.append(elf_file.base.allocator, sym_index);
     }
 
-    fn size(got: GotSection) usize {
+    fn sizeGot(got: GotSection) usize {
         return got.symbols.items.len * 8;
     }
 
-    fn write(got: GotSection, elf_file: *Elf, writer: anytype) !void {
+    fn sizeRela(got: GotSection, elf_file: *Elf) usize {
+        var size: usize = 0;
+        for (got.symbols.items) |sym_index| {
+            const sym = elf_file.getSymbol(sym_index);
+            if (sym.import) size += @sizeOf(elf.Elf64_Rela);
+        }
+        return size;
+    }
+
+    fn writeGot(got: GotSection, elf_file: *Elf, writer: anytype) !void {
         for (got.symbols.items) |sym_index| {
             const sym = elf_file.getSymbol(sym_index);
             const value = if (sym.import) 0 else sym.value;
             try writer.writeIntLittle(u64, value);
+        }
+    }
+
+    fn writeRela(got: GotSection, elf_file: *Elf, writer: anytype) !void {
+        for (got.symbols.items, 0..) |sym_index, i| {
+            const sym = elf_file.getSymbol(sym_index);
+            if (sym.import) {
+                const r_offset = i * 8;
+                const r_sym: u64 = 1; // TODO save dynsym index in Extra
+                const r_type: u32 = elf.R_X86_64_GLOB_DAT;
+                try writer.writeStruct(elf.Elf64_Rela{
+                    .r_offset = r_offset,
+                    .r_info = (r_sym << 32) | r_type,
+                    .r_addend = 0,
+                });
+            }
         }
     }
 };
@@ -2063,6 +2146,10 @@ pub const PltSection = struct {
 
     fn sizeGotPlt(plt: PltSection) usize {
         return got_plt_preamble_size + plt.symbols.items.len * 8;
+    }
+
+    fn sizeRela(plt: PltSection) usize {
+        return plt.symbols.items.len * @sizeOf(elf.Elf64_Rela);
     }
 
     fn writePlt(plt: PltSection, elf_file: *Elf, writer: anytype) !void {
@@ -2110,6 +2197,22 @@ pub const PltSection = struct {
         for (0..plt.symbols.items.len) |_| {
             // [N]: .plt
             try writer.writeIntLittle(u64, plt_addr);
+        }
+    }
+
+    fn writeRela(plt: PltSection, elf_file: *Elf, writer: anytype) !void {
+        for (plt.symbols.items, 0..) |sym_index, i| {
+            const sym = elf_file.getSymbol(sym_index);
+            if (sym.import) {
+                const r_offset = plt_preamble_size + i * 16 + 6;
+                const r_sym: u64 = 2; // TODO save dynsym index in Extra
+                const r_type: u32 = elf.R_X86_64_JUMP_SLOT;
+                try writer.writeStruct(elf.Elf64_Rela{
+                    .r_offset = r_offset,
+                    .r_info = (r_sym << 32) | r_type,
+                    .r_addend = 0,
+                });
+            }
         }
     }
 };
