@@ -11,7 +11,9 @@ sections: std.MultiArrayList(Section) = .{},
 phdrs: std.ArrayListUnmanaged(elf.Elf64_Phdr) = .{},
 
 text_sect_index: ?u16 = null,
+plt_sect_index: ?u16 = null,
 got_sect_index: ?u16 = null,
+got_plt_sect_index: ?u16 = null,
 symtab_sect_index: ?u16 = null,
 strtab_sect_index: ?u16 = null,
 shstrtab_sect_index: ?u16 = null,
@@ -47,6 +49,7 @@ dynstrtab: StringTable(.dynstrtab) = .{},
 dynamic_section: DynamicSection = .{},
 hash_section: HashSection = .{},
 got_section: GotSection = .{},
+plt_section: PltSection = .{},
 
 atoms: std.ArrayListUnmanaged(Atom) = .{},
 
@@ -94,6 +97,7 @@ pub fn deinit(self: *Elf) void {
     self.symbols_extra.deinit(gpa);
     self.globals.deinit(gpa);
     self.got_section.deinit(gpa);
+    self.plt_section.deinit(gpa);
     self.phdrs.deinit(gpa);
     self.sections.deinit(gpa);
     for (self.files.items(.tags), self.files.items(.data)) |tag, *data| switch (tag) {
@@ -335,6 +339,21 @@ fn initSections(self: *Elf) !void {
         });
     }
 
+    if (self.plt_section.sizePlt() > 0) {
+        self.plt_sect_index = try self.addSection(.{
+            .name = ".plt",
+            .type = elf.SHT_PROGBITS,
+            .flags = elf.SHF_ALLOC | elf.SHF_EXECINSTR,
+            .addralign = 1,
+        });
+        self.got_plt_sect_index = try self.addSection(.{
+            .name = ".got.plt",
+            .type = elf.SHT_PROGBITS,
+            .flags = elf.SHF_ALLOC | elf.SHF_WRITE,
+            .addralign = @alignOf(u64),
+        });
+    }
+
     self.shstrtab_sect_index = try self.addSection(.{
         .name = ".shstrtab",
         .type = elf.SHT_STRTAB,
@@ -434,7 +453,19 @@ fn calcSectionSizes(self: *Elf) !void {
     if (self.got_sect_index) |index| {
         const shdr = &self.sections.items(.shdr)[index];
         shdr.sh_size = self.got_section.size();
-        shdr.sh_addralign = @sizeOf(u64);
+        shdr.sh_addralign = @alignOf(u64);
+    }
+
+    if (self.plt_sect_index) |index| {
+        const shdr = &self.sections.items(.shdr)[index];
+        shdr.sh_size = self.plt_section.sizePlt();
+        shdr.sh_addralign = 1;
+    }
+
+    if (self.got_plt_sect_index) |index| {
+        const shdr = &self.sections.items(.shdr)[index];
+        shdr.sh_size = self.plt_section.sizeGotPlt();
+        shdr.sh_addralign = @alignOf(u64);
     }
 
     if (self.interp_sect_index) |index| {
@@ -1157,12 +1188,14 @@ fn scanRelocs(self: *Elf) !void {
     }
 
     for (self.symbols.items, 0..) |*symbol, i| {
+        const index = @intCast(u32, i);
         if (symbol.flags.got) {
             log.debug("'{s}' needs GOT", .{symbol.getName(self)});
-            try self.got_section.addSymbol(@intCast(u32, i), self);
+            try self.got_section.addSymbol(index, self);
         }
         if (symbol.flags.plt) {
             log.debug("'{s}' needs PLT", .{symbol.getName(self)});
+            try self.plt_section.addSymbol(index, self);
         }
     }
 }
@@ -1289,6 +1322,22 @@ fn writeSyntheticSections(self: *Elf) !void {
         var buffer = try std.ArrayList(u8).initCapacity(gpa, self.got_section.size());
         defer buffer.deinit();
         try self.got_section.write(self, buffer.writer());
+        try self.base.file.pwriteAll(buffer.items, shdr.sh_offset);
+    }
+
+    if (self.plt_sect_index) |shndx| {
+        const shdr = self.sections.items(.shdr)[shndx];
+        var buffer = try std.ArrayList(u8).initCapacity(gpa, self.plt_section.sizePlt());
+        defer buffer.deinit();
+        try self.plt_section.writePlt(self, buffer.writer());
+        try self.base.file.pwriteAll(buffer.items, shdr.sh_offset);
+    }
+
+    if (self.got_plt_sect_index) |shndx| {
+        const shdr = self.sections.items(.shdr)[shndx];
+        var buffer = try std.ArrayList(u8).initCapacity(gpa, self.plt_section.sizeGotPlt());
+        defer buffer.deinit();
+        try self.plt_section.writeGotPlt(self, buffer.writer());
         try self.base.file.pwriteAll(buffer.items, shdr.sh_offset);
     }
 
@@ -1586,7 +1635,8 @@ fn fmtDumpState(
         if (object.archive) |path| {
             try writer.print("{s}({s})", .{ path, object.name });
         } else try writer.print("{s}", .{object.name});
-        if (!object.alive) try writer.writeAll(" : [*]\n");
+        if (!object.alive) try writer.writeAll(" : [*]");
+        try writer.writeByte('\n');
         try writer.print("{}{}\n", .{ object.fmtAtoms(self), object.fmtSymtab(self) });
     }
     for (self.shared_objects.items) |index| {
@@ -1594,7 +1644,8 @@ fn fmtDumpState(
         try writer.print("shared({d}) : ", .{index});
         try writer.print("{s}", .{shared.name});
         try writer.print(" : needed({})", .{shared.needed});
-        if (!shared.alive) try writer.writeAll(" : [*]\n");
+        if (!shared.alive) try writer.writeAll(" : [*]");
+        try writer.writeByte('\n');
         try writer.print("{}\n", .{shared.fmtSymtab(self)});
     }
     if (self.internal_object_index) |index| {
@@ -1604,6 +1655,11 @@ fn fmtDumpState(
     }
     try writer.writeAll("GOT\n");
     for (self.got_section.symbols.items, 0..) |sym_index, i| {
+        try writer.print("  {d} => {d} '{s}'\n", .{ i, sym_index, self.getSymbol(sym_index).getName(self) });
+    }
+    try writer.writeByte('\n');
+    try writer.writeAll("PLT\n");
+    for (self.plt_section.symbols.items, 0..) |sym_index, i| {
         try writer.print("  {d} => {d} '{s}'\n", .{ i, sym_index, self.getSymbol(sym_index).getName(self) });
     }
     try writer.writeByte('\n');
@@ -1979,6 +2035,48 @@ const GotSection = struct {
             const sym = elf_file.getSymbol(sym_index);
             try writer.writeIntLittle(u64, sym.value);
         }
+    }
+};
+
+const PltSection = struct {
+    symbols: std.ArrayListUnmanaged(u32) = .{},
+
+    fn deinit(plt: *PltSection, allocator: Allocator) void {
+        plt.symbols.deinit(allocator);
+    }
+
+    fn addSymbol(plt: *PltSection, sym_index: u32, elf_file: *Elf) !void {
+        const index = @intCast(u32, plt.symbols.items.len);
+        const symbol = elf_file.getSymbol(sym_index);
+        if (symbol.getExtra(elf_file)) |extra| {
+            var new_extra = extra;
+            new_extra.plt = index;
+            symbol.setExtra(new_extra, elf_file);
+        } else try symbol.addExtra(.{ .plt = index }, elf_file);
+        try plt.symbols.append(elf_file.base.allocator, sym_index);
+    }
+
+    fn sizePlt(plt: PltSection) usize {
+        _ = plt;
+        @panic("TODO");
+    }
+
+    fn sizeGotPlt(plt: PltSection) usize {
+        return plt.symbols.items.len * 8;
+    }
+
+    fn writePlt(plt: PltSection, elf_file: *Elf, writer: anytype) !void {
+        _ = plt;
+        _ = elf_file;
+        _ = writer;
+        @panic("TODO");
+    }
+
+    fn writeGotPlt(plt: PltSection, elf_file: *Elf, writer: anytype) !void {
+        _ = plt;
+        _ = elf_file;
+        _ = writer;
+        @panic("TODO");
     }
 };
 
