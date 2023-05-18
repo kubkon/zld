@@ -20,8 +20,8 @@ pub fn gcAtoms(elf_file: *Elf) !void {
 
 fn collectRoots(roots: *std.ArrayList(*Atom), elf_file: *Elf) !void {
     for (elf_file.objects.items) |index| {
-        for (elf_file.getFile(index).?.object.globals.items) |global_index| {
-            const global = elf_file.getGlobal(global_index);
+        for (elf_file.getFile(index).?.object.getGlobals()) |global_index| {
+            const global = elf_file.getSymbol(global_index);
             if (global.getFile(elf_file)) |file| {
                 if (file.deref().getIndex() == index and global.@"export") {
                     if (global.getAtom(elf_file)) |atom| if (markAtom(atom)) try roots.append(atom);

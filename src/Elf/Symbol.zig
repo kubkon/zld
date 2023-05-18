@@ -70,46 +70,15 @@ pub fn getSymbolRank(symbol: Symbol, elf_file: *Elf) u32 {
 }
 
 pub fn addExtra(symbol: *Symbol, extra: Extra, elf_file: *Elf) !void {
-    const fields = @typeInfo(Extra).Struct.fields;
-    try elf_file.globals_extra.ensureUnusedCapacity(elf_file.base.allocator, fields.len);
-    symbol.addExtraAssumeCapacity(extra, elf_file);
+    symbol.extra = try elf_file.addSymbolExtra(extra);
 }
 
-pub fn addExtraAssumeCapacity(symbol: *Symbol, extra: Extra, elf_file: *Elf) void {
-    symbol.extra = @intCast(u32, elf_file.globals_extra.items.len);
-    const fields = @typeInfo(Extra).Struct.fields;
-    inline for (fields) |field| {
-        elf_file.globals_extra.appendAssumeCapacity(switch (field.type) {
-            u32 => @field(extra, field.name),
-            else => @compileError("bad field type"),
-        });
-    }
+pub inline fn getExtra(symbol: Symbol, elf_file: *Elf) ?Extra {
+    return elf_file.getSymbolExtra(symbol.extra);
 }
 
-pub fn getExtra(symbol: Symbol, elf_file: *Elf) ?Extra {
-    if (symbol.extra == 0) return null;
-    const fields = @typeInfo(Extra).Struct.fields;
-    var i: usize = symbol.extra;
-    var result: Extra = undefined;
-    inline for (fields) |field| {
-        @field(result, field.name) = switch (field.type) {
-            u32 => elf_file.globals_extra.items[i],
-            else => @compileError("bad field type"),
-        };
-        i += 1;
-    }
-    return result;
-}
-
-pub fn setExtra(symbol: Symbol, extra: Extra, elf_file: *Elf) void {
-    assert(symbol.extra > 0);
-    const fields = @typeInfo(Extra).Struct.fields;
-    inline for (fields, 0..) |field, i| {
-        elf_file.globals_extra.items[symbol.extra + i] = switch (field.type) {
-            u32 => @field(extra, field.name),
-            else => @compileError("bad field type"),
-        };
-    }
+pub inline fn setExtra(symbol: Symbol, extra: Extra, elf_file: *Elf) void {
+    elf_file.setSymbolExtra(symbol.extra, extra);
 }
 
 pub fn format(

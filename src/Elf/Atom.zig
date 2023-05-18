@@ -180,16 +180,13 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
             elf.R_X86_64_GOTPCRELX,
             elf.R_X86_64_REX_GOTPCRELX,
             => {
-                const global_index = object.getGlobalIndex(rel.r_sym()).?;
-                const global = elf_file.getGlobal(global_index);
-                global.flags.got = true;
+                const symbol = object.getSymbol(rel.r_sym(), elf_file);
+                symbol.flags.got = true;
             },
             elf.R_X86_64_PLT32 => {
-                if (object.getGlobalIndex(rel.r_sym())) |global_index| {
-                    const global = elf_file.getGlobal(global_index);
-                    if (global.import) {
-                        global.flags.plt = true;
-                    }
+                const symbol = object.getSymbol(rel.r_sym(), elf_file);
+                if (symbol.import) {
+                    symbol.flags.plt = true;
                 }
             },
             else => {},
@@ -239,13 +236,11 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
             elf.R_X86_64_GOTPCRELX,
             elf.R_X86_64_REX_GOTPCRELX,
             => {
-                const global_index = object.getGlobalIndex(rel.r_sym()).?;
-                const global = elf_file.getGlobal(global_index);
-                const target_addr = if (global.flags.got) blk: {
-                    const extra = global.getExtra(elf_file).?;
+                const target_addr = if (target.flags.got) blk: {
+                    const extra = target.getExtra(elf_file).?;
                     const base = elf_file.sections.items(.shdr)[elf_file.got_sect_index.?].sh_addr;
                     break :blk base + extra.got * @sizeOf(u64);
-                } else global.value;
+                } else target.value;
                 const displacement = @intCast(i32, @intCast(i64, target_addr) - source_addr + rel.r_addend);
                 relocs_log.debug("{}: {x}: [0x{x} => 0x{x}] ({s})", .{
                     fmtRelocType(r_type),

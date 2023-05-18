@@ -8,7 +8,7 @@ strtab: []const u8 = &[0]u8{},
 
 dynamic_sect_index: ?u16 = null,
 
-globals: std.ArrayListUnmanaged(u32) = .{},
+symbols: std.ArrayListUnmanaged(u32) = .{},
 
 needed: bool,
 alive: bool,
@@ -30,7 +30,7 @@ pub fn isValidHeader(header: *const elf.Elf64_Ehdr) bool {
 }
 
 pub fn deinit(self: *SharedObject, allocator: Allocator) void {
-    self.globals.deinit(allocator);
+    self.symbols.deinit(allocator);
 }
 
 pub fn parse(self: *SharedObject, elf_file: *Elf) !void {
@@ -61,23 +61,23 @@ pub fn parse(self: *SharedObject, elf_file: *Elf) !void {
 fn initSymtab(self: *SharedObject, elf_file: *Elf) !void {
     const gpa = elf_file.base.allocator;
 
-    try self.globals.ensureTotalCapacityPrecise(gpa, self.symtab.len);
+    try self.symbols.ensureTotalCapacityPrecise(gpa, self.symtab.len);
 
     for (self.symtab) |sym| {
         const name = self.getString(sym.st_name);
         const gop = try elf_file.getOrCreateGlobal(name);
-        self.globals.addOneAssumeCapacity().* = gop.index;
+        self.symbols.addOneAssumeCapacity().* = gop.index;
     }
 }
 
 pub fn resolveSymbols(self: SharedObject, elf_file: *Elf) void {
-    for (self.globals.items, 0..) |index, i| {
+    for (self.symbols.items, 0..) |index, i| {
         const sym_idx = @intCast(u32, i);
         const this_sym = self.symtab[sym_idx];
 
         if (this_sym.st_shndx == elf.SHN_UNDEF) continue;
 
-        const global = elf_file.getGlobal(index);
+        const global = elf_file.getSymbol(index);
         if (self.asFile().getSymbolRank(this_sym, false) < global.getSymbolRank(elf_file)) {
             global.* = .{
                 .value = this_sym.st_value,
@@ -91,8 +91,8 @@ pub fn resolveSymbols(self: SharedObject, elf_file: *Elf) void {
 }
 
 pub fn resetGlobals(self: SharedObject, elf_file: *Elf) void {
-    for (self.globals.items) |index| {
-        const global = elf_file.getGlobal(index);
+    for (self.symbols.items) |index| {
+        const global = elf_file.getSymbol(index);
         const name = global.name;
         global.* = .{};
         global.name = name;
@@ -100,11 +100,11 @@ pub fn resetGlobals(self: SharedObject, elf_file: *Elf) void {
 }
 
 pub fn markLive(self: *SharedObject, elf_file: *Elf) void {
-    for (self.globals.items, 0..) |index, i| {
+    for (self.symbols.items, 0..) |index, i| {
         const sym = self.symtab[i];
         if (sym.st_shndx != elf.SHN_UNDEF) continue;
 
-        const global = elf_file.getGlobal(index);
+        const global = elf_file.getSymbol(index);
         const file = global.getFile(elf_file) orelse continue;
         if (!file.deref().isAlive()) {
             file.setAlive();
@@ -144,6 +144,10 @@ pub fn getSoname(self: SharedObject) []const u8 {
     return soname;
 }
 
+pub inline fn getGlobals(self: SharedObject) []const u32 {
+    return self.symbols.items;
+}
+
 pub fn format(
     self: SharedObject,
     comptime unused_fmt_string: []const u8,
@@ -179,8 +183,8 @@ fn formatSymtab(
     _ = options;
     const shared = ctx.shared;
     try writer.writeAll("  globals\n");
-    for (shared.globals.items) |index| {
-        const global = ctx.elf_file.getGlobal(index);
+    for (shared.symbols.items) |index| {
+        const global = ctx.elf_file.getSymbol(index);
         try writer.print("    {}\n", .{global.fmt(ctx.elf_file)});
     }
 }

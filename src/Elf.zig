@@ -31,10 +31,10 @@ got_index: ?u32 = null,
 
 entry_index: ?u32 = null,
 
-globals: std.ArrayListUnmanaged(Symbol) = .{},
-globals_extra: std.ArrayListUnmanaged(u32) = .{},
+symbols: std.ArrayListUnmanaged(Symbol) = .{},
+symbols_extra: std.ArrayListUnmanaged(u32) = .{},
 // TODO convert to context-adapted
-globals_table: std.StringHashMapUnmanaged(u32) = .{},
+globals: std.StringHashMapUnmanaged(u32) = .{},
 
 string_intern: StringTable(.string_intern) = .{},
 
@@ -90,9 +90,9 @@ pub fn deinit(self: *Elf) void {
     self.strtab.deinit(gpa);
     self.shstrtab.deinit(gpa);
     self.atoms.deinit(gpa);
+    self.symbols.deinit(gpa);
+    self.symbols_extra.deinit(gpa);
     self.globals.deinit(gpa);
-    self.globals_extra.deinit(gpa);
-    self.globals_table.deinit(gpa);
     self.got_section.deinit(gpa);
     self.phdrs.deinit(gpa);
     self.sections.deinit(gpa);
@@ -190,8 +190,8 @@ pub fn flush(self: *Elf) !void {
         .st_value = 0,
         .st_size = 0,
     });
-    try self.globals_extra.append(gpa, 0);
-    try self.globals_extra.append(gpa, 0);
+    try self.symbols_extra.append(gpa, 0);
+    try self.symbols_extra.append(gpa, 0);
     // Append null file.
     try self.files.append(gpa, .null);
 
@@ -251,7 +251,7 @@ pub fn flush(self: *Elf) !void {
     self.entry_index = blk: {
         if (self.options.output_mode != .exe) break :blk null;
         const entry_name = self.options.entry orelse "_start";
-        break :blk self.globals_table.get(entry_name) orelse null;
+        break :blk self.globals.get(entry_name) orelse null;
     };
     if (self.options.output_mode == .exe and self.entry_index == null) {
         self.base.fatal("no entrypoint found: '{s}'", .{self.options.entry orelse "_start"});
@@ -764,19 +764,20 @@ fn allocateAtoms(self: *Elf) void {
 
 fn allocateLocals(self: *Elf) void {
     for (self.objects.items) |index| {
-        for (self.getFile(index).?.object.locals.items) |*symbol| {
-            const atom = symbol.getAtom(self) orelse continue;
+        for (self.getFile(index).?.object.getLocals()) |local_index| {
+            const local = self.getSymbol(local_index);
+            const atom = local.getAtom(self) orelse continue;
             if (!atom.is_alive) continue;
-            symbol.value += atom.value;
-            symbol.shndx = atom.out_shndx;
+            local.value += atom.value;
+            local.shndx = atom.out_shndx;
         }
     }
 }
 
 fn allocateGlobals(self: *Elf) void {
     for (self.objects.items) |index| {
-        for (self.getFile(index).?.object.globals.items) |global_index| {
-            const global = self.getGlobal(global_index);
+        for (self.getFile(index).?.object.getGlobals()) |global_index| {
+            const global = self.getSymbol(global_index);
             const atom = global.getAtom(self) orelse continue;
             if (!atom.is_alive) continue;
             if (global.getFile(self).?.object.index != index) continue;
@@ -790,49 +791,49 @@ fn allocateSyntheticSymbols(self: *Elf) void {
     if (self.dynamic_index) |index| {
         if (self.got_sect_index) |got_index| {
             const shdr = self.sections.items(.shdr)[got_index];
-            self.getGlobal(index).value = shdr.sh_addr;
+            self.getSymbol(index).value = shdr.sh_addr;
         }
     }
     if (self.init_array_start_index) |index| {
-        const global = self.getGlobal(index);
+        const global = self.getSymbol(index);
         if (self.text_sect_index) |text_index| {
             global.shndx = text_index;
         }
         if (self.entry_index) |entry_index| {
-            global.value = self.getGlobal(entry_index).value;
+            global.value = self.getSymbol(entry_index).value;
         }
     }
     if (self.init_array_end_index) |index| {
-        const global = self.getGlobal(index);
+        const global = self.getSymbol(index);
         if (self.text_sect_index) |text_index| {
             global.shndx = text_index;
         }
         if (self.entry_index) |entry_index| {
-            global.value = self.getGlobal(entry_index).value;
+            global.value = self.getSymbol(entry_index).value;
         }
     }
     if (self.fini_array_start_index) |index| {
-        const global = self.getGlobal(index);
+        const global = self.getSymbol(index);
         if (self.text_sect_index) |text_index| {
             global.shndx = text_index;
         }
         if (self.entry_index) |entry_index| {
-            global.value = self.getGlobal(entry_index).value;
+            global.value = self.getSymbol(entry_index).value;
         }
     }
     if (self.fini_array_end_index) |index| {
-        const global = self.getGlobal(index);
+        const global = self.getSymbol(index);
         if (self.text_sect_index) |text_index| {
             global.shndx = text_index;
         }
         if (self.entry_index) |entry_index| {
-            global.value = self.getGlobal(entry_index).value;
+            global.value = self.getSymbol(entry_index).value;
         }
     }
     if (self.got_index) |index| {
         if (self.got_sect_index) |sect_index| {
             const shdr = self.sections.items(.shdr)[sect_index];
-            self.getGlobal(index).value = shdr.sh_addr;
+            self.getSymbol(index).value = shdr.sh_addr;
         }
     }
 }
@@ -1078,8 +1079,8 @@ fn markLive(self: *Elf) void {
 
 fn markImportsAndExports(self: *Elf) !void {
     for (self.shared_objects.items) |index| {
-        for (self.getFile(index).?.shared.globals.items) |global_index| {
-            const global = self.getGlobal(global_index);
+        for (self.getFile(index).?.shared.getGlobals()) |global_index| {
+            const global = self.getSymbol(global_index);
             if (global.getFile(self)) |file| {
                 if (file != .shared) global.@"export" = true;
             }
@@ -1087,8 +1088,8 @@ fn markImportsAndExports(self: *Elf) !void {
     }
 
     for (self.objects.items) |index| {
-        for (self.getFile(index).?.object.globals.items) |global_index| {
-            const global = self.getGlobal(global_index);
+        for (self.getFile(index).?.object.getGlobals()) |global_index| {
+            const global = self.getSymbol(global_index);
             if (global.getFile(self)) |file| {
                 if (file == .shared and !global.isAbs(self)) {
                     global.import = true;
@@ -1125,12 +1126,12 @@ fn claimUnresolved(self: *Elf) void {
     for (self.objects.items) |index| {
         const object = self.getFile(index).?.object;
         const first_global = object.first_global orelse return;
-        for (object.globals.items, 0..) |global_index, i| {
+        for (object.getGlobals(), 0..) |global_index, i| {
             const sym_idx = @intCast(u32, first_global + i);
             const sym = object.symtab[sym_idx];
             if (sym.st_shndx != elf.SHN_UNDEF) continue;
 
-            const global = self.getGlobal(global_index);
+            const global = self.getSymbol(global_index);
             if (global.getFile(self)) |_| {
                 if (global.getSourceSymbol(self).st_shndx != elf.SHN_UNDEF) continue;
             }
@@ -1155,13 +1156,13 @@ fn scanRelocs(self: *Elf) !void {
         }
     }
 
-    for (self.globals.items, 0..) |*global, i| {
-        if (global.flags.got) {
-            log.warn("{s} needs GOT", .{global.getName(self)});
+    for (self.symbols.items, 0..) |*symbol, i| {
+        if (symbol.flags.got) {
+            log.debug("'{s}' needs GOT", .{symbol.getName(self)});
             try self.got_section.addSymbol(@intCast(u32, i), self);
         }
-        if (global.flags.plt) {
-            log.warn("{s} needs PLT", .{global.getName(self)});
+        if (symbol.flags.plt) {
+            log.debug("'{s}' needs PLT", .{symbol.getName(self)});
         }
     }
 }
@@ -1189,8 +1190,8 @@ fn setDynsymtab(self: *Elf) !void {
 
     for (self.objects.items) |index| {
         const object = self.getFile(index).?.object;
-        for (object.globals.items) |global_index| {
-            const global = self.getGlobal(global_index);
+        for (object.getGlobals()) |global_index| {
+            const global = self.getSymbol(global_index);
             if (!global.import) continue;
             const sym = global.getSourceSymbol(self);
             const name = try self.dynstrtab.insert(gpa, global.getName(self));
@@ -1333,7 +1334,7 @@ fn writeHeader(self: *Elf) !void {
         },
         .e_machine = self.options.cpu_arch.?.toElfMachine(),
         .e_version = 1,
-        .e_entry = if (self.entry_index) |index| self.getGlobal(index).value else 0,
+        .e_entry = if (self.entry_index) |index| self.getSymbol(index).value else 0,
         .e_phoff = @sizeOf(elf.Elf64_Ehdr),
         .e_shoff = self.shoff,
         .e_flags = 0,
@@ -1445,6 +1446,62 @@ pub fn getAtom(self: Elf, atom_index: Atom.Index) ?*Atom {
     return &self.atoms.items[atom_index];
 }
 
+pub fn addSymbol(self: *Elf) !u32 {
+    const index = @intCast(u32, self.symbols.items.len);
+    const symbol = try self.symbols.addOne(self.base.allocator);
+    symbol.* = .{};
+    return index;
+}
+
+pub fn getSymbol(self: *Elf, index: u32) *Symbol {
+    assert(index < self.symbols.items.len);
+    return &self.symbols.items[index];
+}
+
+pub fn addSymbolExtra(self: *Elf, extra: Symbol.Extra) !u32 {
+    const fields = @typeInfo(Symbol.Extra).Struct.fields;
+    try self.symbols_extra.ensureUnusedCapacity(self.base.allocator, fields.len);
+    return self.addSymbolExtraAssumeCapacity(extra);
+}
+
+pub fn addSymbolExtraAssumeCapacity(self: *Elf, extra: Symbol.Extra) u32 {
+    const index = @intCast(u32, self.symbols_extra.items.len);
+    const fields = @typeInfo(Symbol.Extra).Struct.fields;
+    inline for (fields) |field| {
+        self.symbols_extra.appendAssumeCapacity(switch (field.type) {
+            u32 => @field(extra, field.name),
+            else => @compileError("bad field type"),
+        });
+    }
+    return index;
+}
+
+pub fn getSymbolExtra(self: *Elf, index: u32) ?Symbol.Extra {
+    if (index == 0) return null;
+    const fields = @typeInfo(Symbol.Extra).Struct.fields;
+    var i: usize = index;
+    var result: Symbol.Extra = undefined;
+    inline for (fields) |field| {
+        @field(result, field.name) = switch (field.type) {
+            u32 => self.symbols_extra.items[i],
+            else => @compileError("bad field type"),
+        };
+        i += 1;
+    }
+    return result;
+}
+
+pub fn setSymbolExtra(self: *Elf, index: u32, extra: Symbol.Extra) void {
+    assert(index > 0);
+    const fields = @typeInfo(Symbol.Extra).Struct.fields;
+    inline for (fields, 0..) |field, i| {
+        self.symbols_extra.items[index + i] = switch (field.type) {
+            u32 => @field(extra, field.name),
+            else => @compileError("bad field type"),
+        };
+    }
+}
+
 const GetOrCreateGlobalResult = struct {
     found_existing: bool,
     index: u32,
@@ -1452,22 +1509,17 @@ const GetOrCreateGlobalResult = struct {
 
 pub fn getOrCreateGlobal(self: *Elf, name: [:0]const u8) !GetOrCreateGlobalResult {
     const gpa = self.base.allocator;
-    const gop = try self.globals_table.getOrPut(gpa, name);
+    const gop = try self.globals.getOrPut(gpa, name);
     if (!gop.found_existing) {
-        const index = @intCast(u32, self.globals.items.len);
-        const global = try self.globals.addOne(gpa);
-        global.* = .{ .name = try self.string_intern.insert(gpa, name) };
+        const index = try self.addSymbol();
+        const global = self.getSymbol(index);
+        global.name = try self.string_intern.insert(gpa, name);
         gop.value_ptr.* = index;
     }
     return .{
         .found_existing = gop.found_existing,
         .index = gop.value_ptr.*,
     };
-}
-
-pub fn getGlobal(self: *Elf, index: u32) *Symbol {
-    assert(index < self.globals.items.len);
-    return &self.globals.items[index];
 }
 
 fn fmtSections(self: *Elf) std.fmt.Formatter(formatSections) {
@@ -1552,7 +1604,7 @@ fn fmtDumpState(
     }
     try writer.writeAll("GOT\n");
     for (self.got_section.symbols.items, 0..) |sym_index, i| {
-        try writer.print("  {d} => {d} '{s}'\n", .{ i, sym_index, self.getGlobal(sym_index).getName(self) });
+        try writer.print("  {d} => {d} '{s}'\n", .{ i, sym_index, self.getSymbol(sym_index).getName(self) });
     }
     try writer.writeByte('\n');
     try writer.writeAll("Output sections\n");
@@ -1820,14 +1872,8 @@ const HashSection = struct {
 };
 
 const SymtabSection = struct {
-    symbols: std.ArrayListUnmanaged(SymRef) = .{},
+    symbols: std.ArrayListUnmanaged(struct { index: u32, off: u32 }) = .{},
     first_global: u32 = 0,
-
-    const SymRef = struct {
-        file: u32,
-        index: u32,
-        off: u32,
-    };
 
     fn deinit(symtab: *SymtabSection, allocator: Allocator) void {
         symtab.symbols.deinit(allocator);
@@ -1841,11 +1887,12 @@ const SymtabSection = struct {
         const gpa = elf_file.base.allocator;
         for (elf_file.objects.items) |index| {
             const object = elf_file.getFile(index).?.object;
-            for (object.locals.items, 0..) |sym, sym_index| {
-                if (sym.getAtom(elf_file)) |atom| {
+            for (object.getLocals()) |local_index| {
+                const local = elf_file.getSymbol(local_index);
+                if (local.getAtom(elf_file)) |atom| {
                     if (!atom.is_alive) continue;
                 }
-                const s_sym = sym.getSourceSymbol(elf_file);
+                const s_sym = local.getSourceSymbol(elf_file);
                 switch (s_sym.st_type()) {
                     elf.STT_SECTION, elf.STT_NOTYPE => continue,
                     else => {},
@@ -1855,9 +1902,8 @@ const SymtabSection = struct {
                     else => {},
                 }
                 try symtab.symbols.append(gpa, .{
-                    .file = @intCast(u32, index),
-                    .index = @intCast(u32, sym_index),
-                    .off = try elf_file.strtab.insert(gpa, sym.getName(elf_file)),
+                    .index = local_index,
+                    .off = try elf_file.strtab.insert(gpa, local.getName(elf_file)),
                 });
             }
         }
@@ -1867,8 +1913,8 @@ const SymtabSection = struct {
 
         for (elf_file.objects.items) |index| {
             const object = elf_file.getFile(index).?.object;
-            for (object.globals.items) |global_index| {
-                const global = elf_file.getGlobal(global_index);
+            for (object.getGlobals()) |global_index| {
+                const global = elf_file.getSymbol(global_index);
                 if (global.getAtom(elf_file)) |atom| {
                     if (!atom.is_alive) continue;
                 }
@@ -1878,8 +1924,7 @@ const SymtabSection = struct {
                     else => {},
                 }
                 try symtab.symbols.append(gpa, .{
-                    .file = 0,
-                    .index = @intCast(u32, global_index),
+                    .index = global_index,
                     .off = try elf_file.strtab.insert(gpa, global.getName(elf_file)),
                 });
             }
@@ -1891,17 +1936,9 @@ const SymtabSection = struct {
     }
 
     fn write(symtab: SymtabSection, elf_file: *Elf, writer: anytype) !void {
-        try writer.writeStruct(elf.Elf64_Sym{
-            .st_name = 0,
-            .st_info = 0,
-            .st_other = 0,
-            .st_shndx = 0,
-            .st_value = 0,
-            .st_size = 0,
-        });
-        for (symtab.symbols.items[0..symtab.first_global]) |sym_ref| {
-            const object = elf_file.getFile(sym_ref.file).?.object;
-            const sym = object.getSymbol(sym_ref.index, elf_file);
+        try writer.writeStruct(null_sym);
+        for (symtab.symbols.items) |sym_ref| {
+            const sym = elf_file.getSymbol(sym_ref.index);
             const s_sym = sym.getSourceSymbol(elf_file);
             try writer.writeStruct(elf.Elf64_Sym{
                 .st_name = sym_ref.off,
@@ -1909,18 +1946,6 @@ const SymtabSection = struct {
                 .st_other = s_sym.st_other,
                 .st_shndx = sym.shndx,
                 .st_value = sym.value,
-                .st_size = 0,
-            });
-        }
-        for (symtab.symbols.items[symtab.first_global..]) |sym_ref| {
-            const global = elf_file.getGlobal(sym_ref.index);
-            const s_sym = global.getSourceSymbol(elf_file);
-            try writer.writeStruct(elf.Elf64_Sym{
-                .st_name = sym_ref.off,
-                .st_info = s_sym.st_info,
-                .st_other = s_sym.st_other,
-                .st_shndx = global.shndx,
-                .st_value = global.value,
                 .st_size = 0,
             });
         }
@@ -1936,7 +1961,7 @@ const GotSection = struct {
 
     fn addSymbol(got: *GotSection, sym_index: u32, elf_file: *Elf) !void {
         const index = @intCast(u32, got.symbols.items.len);
-        const symbol = elf_file.getGlobal(sym_index);
+        const symbol = elf_file.getSymbol(sym_index);
         if (symbol.getExtra(elf_file)) |extra| {
             var new_extra = extra;
             new_extra.got = index;
@@ -1951,7 +1976,7 @@ const GotSection = struct {
 
     fn write(got: GotSection, elf_file: *Elf, writer: anytype) !void {
         for (got.symbols.items) |sym_index| {
-            const sym = elf_file.getGlobal(sym_index);
+            const sym = elf_file.getSymbol(sym_index);
             try writer.writeIntLittle(u64, sym.value);
         }
     }
@@ -1959,6 +1984,15 @@ const GotSection = struct {
 
 const default_base_addr: u64 = 0x200000;
 const default_page_size: u64 = 0x1000;
+
+const null_sym = elf.Elf64_Sym{
+    .st_name = 0,
+    .st_info = 0,
+    .st_other = 0,
+    .st_shndx = 0,
+    .st_value = 0,
+    .st_size = 0,
+};
 
 pub const base_tag = Zld.Tag.elf;
 
