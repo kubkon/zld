@@ -32,6 +32,7 @@ got_index: ?u32 = null,
 entry_index: ?u32 = null,
 
 globals: std.ArrayListUnmanaged(Symbol) = .{},
+globals_extra: std.ArrayListUnmanaged(u32) = .{},
 // TODO convert to context-adapted
 globals_table: std.StringHashMapUnmanaged(u32) = .{},
 
@@ -45,13 +46,7 @@ dynstrtab: StringTable(.dynstrtab) = .{},
 
 dynamic_section: DynamicSection = .{},
 hash_section: HashSection = .{},
-
-got_section: SyntheticSection(u32, *Elf, .{
-    .log_scope = .got_section,
-    .entry_size = @sizeOf(u64),
-    .baseAddrFn = Elf.getGotBaseAddress,
-    .writeFn = Elf.writeGotEntry,
-}) = .{},
+got_section: GotSection = .{},
 
 atoms: std.ArrayListUnmanaged(Atom) = .{},
 
@@ -96,6 +91,7 @@ pub fn deinit(self: *Elf) void {
     self.shstrtab.deinit(gpa);
     self.atoms.deinit(gpa);
     self.globals.deinit(gpa);
+    self.globals_extra.deinit(gpa);
     self.globals_table.deinit(gpa);
     self.got_section.deinit(gpa);
     self.phdrs.deinit(gpa);
@@ -194,6 +190,8 @@ pub fn flush(self: *Elf) !void {
         .st_value = 0,
         .st_size = 0,
     });
+    try self.globals_extra.append(gpa, 0);
+    try self.globals_extra.append(gpa, 0);
     // Append null file.
     try self.files.append(gpa, .null);
 
@@ -328,7 +326,7 @@ fn initSections(self: *Elf) !void {
         }
     }
 
-    if (self.got_section.count() > 0) {
+    if (self.got_section.size() > 0) {
         self.got_sect_index = try self.addSection(.{
             .name = ".got",
             .type = elf.SHT_PROGBITS,
@@ -1156,6 +1154,16 @@ fn scanRelocs(self: *Elf) !void {
             try atom.scanRelocs(self);
         }
     }
+
+    for (self.globals.items, 0..) |*global, i| {
+        if (global.flags.got) {
+            log.warn("{s} needs GOT", .{global.getName(self)});
+            try self.got_section.addSymbol(@intCast(u32, i), self);
+        }
+        if (global.flags.plt) {
+            log.warn("{s} needs PLT", .{global.getName(self)});
+        }
+    }
 }
 
 fn setSymtab(self: *Elf) !void {
@@ -1424,18 +1432,6 @@ pub fn getFile(self: *Elf, index: File.Index) ?FilePtr {
     };
 }
 
-fn getGotBaseAddress(self: *Elf) u64 {
-    const shndx = self.got_sect_index orelse return 0;
-    const shdr = self.sections.items(.shdr)[shndx];
-    return shdr.sh_addr;
-}
-
-fn writeGotEntry(self: *Elf, entry: u32, writer: anytype) !void {
-    if (self.got_sect_index == null) return;
-    const sym = self.getGlobal(entry);
-    try writer.writeIntLittle(u64, sym.value);
-}
-
 pub fn addAtom(self: *Elf) !Atom.Index {
     const index = @intCast(u32, self.atoms.items.len);
     const atom = try self.atoms.addOne(self.base.allocator);
@@ -1555,7 +1551,10 @@ fn fmtDumpState(
         try writer.print("{}\n", .{internal.fmtSymtab(self)});
     }
     try writer.writeAll("GOT\n");
-    try writer.print("{}\n", .{self.got_section});
+    for (self.got_section.symbols.items, 0..) |sym_index, i| {
+        try writer.print("  {d} => {d} '{s}'\n", .{ i, sym_index, self.getGlobal(sym_index).getName(self) });
+    }
+    try writer.writeByte('\n');
     try writer.writeAll("Output sections\n");
     try writer.print("{}\n", .{self.fmtSections()});
     try writer.writeAll("Output phdrs\n");
@@ -1928,6 +1927,36 @@ const SymtabSection = struct {
     }
 };
 
+const GotSection = struct {
+    symbols: std.ArrayListUnmanaged(u32) = .{},
+
+    fn deinit(got: *GotSection, allocator: Allocator) void {
+        got.symbols.deinit(allocator);
+    }
+
+    fn addSymbol(got: *GotSection, sym_index: u32, elf_file: *Elf) !void {
+        const index = @intCast(u32, got.symbols.items.len);
+        const symbol = elf_file.getGlobal(sym_index);
+        if (symbol.getExtra(elf_file)) |extra| {
+            var new_extra = extra;
+            new_extra.got = index;
+            symbol.setExtra(new_extra, elf_file);
+        } else try symbol.addExtra(.{ .got = index }, elf_file);
+        try got.symbols.append(elf_file.base.allocator, sym_index);
+    }
+
+    fn size(got: GotSection) usize {
+        return got.symbols.items.len * 8;
+    }
+
+    fn write(got: GotSection, elf_file: *Elf, writer: anytype) !void {
+        for (got.symbols.items) |sym_index| {
+            const sym = elf_file.getGlobal(sym_index);
+            try writer.writeIntLittle(u64, sym.value);
+        }
+    }
+};
+
 const default_base_addr: u64 = 0x200000;
 const default_page_size: u64 = 0x1000;
 
@@ -1956,6 +1985,5 @@ pub const Options = @import("Elf/Options.zig");
 const SharedObject = @import("Elf/SharedObject.zig");
 const StringTable = @import("strtab.zig").StringTable;
 const Symbol = @import("Elf/Symbol.zig");
-const SyntheticSection = @import("synthetic_section.zig").SyntheticSection;
 const ThreadPool = @import("ThreadPool.zig");
 const Zld = @import("Zld.zig");

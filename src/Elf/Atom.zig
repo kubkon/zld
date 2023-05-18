@@ -171,7 +171,6 @@ pub fn initOutputSection(self: *Atom, elf_file: *Elf) !void {
 }
 
 pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
-    const gpa = elf_file.base.allocator;
     const object = self.getObject(elf_file);
     for (self.getRelocs(elf_file)) |rel| {
         // While traversing relocations, synthesize any missing atom.
@@ -181,12 +180,16 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
             elf.R_X86_64_GOTPCRELX,
             elf.R_X86_64_REX_GOTPCRELX,
             => {
-                const global = object.getGlobalIndex(rel.r_sym()).?;
-                const gop = try elf_file.got_section.getOrCreate(gpa, global);
-                if (!gop.found_existing) {
-                    log.debug("{}: creating GOT entry: [() -> {s}]", .{
-                        fmtRelocType(rel.r_type()), object.getSymbol(rel.r_sym(), elf_file).getName(elf_file),
-                    });
+                const global_index = object.getGlobalIndex(rel.r_sym()).?;
+                const global = elf_file.getGlobal(global_index);
+                global.flags.got = true;
+            },
+            elf.R_X86_64_PLT32 => {
+                if (object.getGlobalIndex(rel.r_sym())) |global_index| {
+                    const global = elf_file.getGlobal(global_index);
+                    if (global.import) {
+                        global.flags.plt = true;
+                    }
                 }
             },
             else => {},
@@ -236,9 +239,14 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
             elf.R_X86_64_GOTPCRELX,
             elf.R_X86_64_REX_GOTPCRELX,
             => {
-                const global = object.getGlobalIndex(rel.r_sym()).?;
-                const target_addr = @intCast(i64, elf_file.got_section.getAddress(global, elf_file).?);
-                const displacement = @intCast(i32, target_addr - source_addr + rel.r_addend);
+                const global_index = object.getGlobalIndex(rel.r_sym()).?;
+                const global = elf_file.getGlobal(global_index);
+                const target_addr = if (global.flags.got) blk: {
+                    const extra = global.getExtra(elf_file).?;
+                    const base = elf_file.sections.items(.shdr)[elf_file.got_sect_index.?].sh_addr;
+                    break :blk base + extra.got * @sizeOf(u64);
+                } else global.value;
+                const displacement = @intCast(i32, @intCast(i64, target_addr) - source_addr + rel.r_addend);
                 relocs_log.debug("{}: {x}: [0x{x} => 0x{x}] ({s})", .{
                     fmtRelocType(r_type),
                     rel.r_offset,
