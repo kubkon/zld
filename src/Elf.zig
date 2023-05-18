@@ -856,9 +856,14 @@ fn allocateSyntheticSymbols(self: *Elf) void {
         }
     }
     if (self.got_index) |index| {
-        if (self.got_sect_index) |sect_index| {
-            const shdr = self.sections.items(.shdr)[sect_index];
-            self.getSymbol(index).value = shdr.sh_addr;
+        const symbol = self.getSymbol(index);
+        for (&[_]?u16{ self.got_plt_sect_index, self.got_sect_index }) |maybe_sect_index| {
+            if (maybe_sect_index) |sect_index| {
+                const shdr = self.sections.items(.shdr)[sect_index];
+                symbol.value = shdr.sh_addr;
+                symbol.shndx = sect_index;
+                break;
+            }
         }
     }
 }
@@ -1302,7 +1307,8 @@ fn writeSyntheticSections(self: *Elf) !void {
     }
 
     if (self.dynsymtab_sect_index) |shndx| {
-        const shdr = self.sections.items(.shdr)[shndx];
+        const shdr = &self.sections.items(.shdr)[shndx];
+        shdr.sh_info = 1;
         try self.base.file.pwriteAll(mem.sliceAsBytes(self.dynsymtab.items), shdr.sh_offset);
     }
 
@@ -2069,20 +2075,24 @@ pub const PltSection = struct {
         var preamble = [_]u8{
             0xf3, 0x0f, 0x1e, 0xfa, // endbr64
             0x41, 0x53, // push r11
-            0xff, 0x35, 0x00, 0x00, 0x00, 0x00, // push qword ptr [rip]
-            0xff, 0x25, 0x00, 0x00, 0x00, 0x00, // jmp qword ptr [rip]
+            0xff, 0x35, 0x00, 0x00, 0x00, 0x00, // push qword ptr [rip] -> .got.plt[1]
+            0xff, 0x25, 0x00, 0x00, 0x00, 0x00, // jmp qword ptr [rip] -> .got.plt[2]
         };
+        var disp = @intCast(i64, got_plt_addr + 8) - @intCast(i64, plt_addr + 8) - 4;
+        mem.writeIntLittle(i32, preamble[8..][0..4], @intCast(i32, disp));
+        disp = @intCast(i64, got_plt_addr + 16) - @intCast(i64, plt_addr + 14) - 4;
+        mem.writeIntLittle(i32, preamble[14..][0..4], @intCast(i32, disp));
         try writer.writeAll(&preamble);
         try writer.writeByteNTimes(0xcc, plt_preamble_size - preamble.len);
 
         for (0..plt.symbols.items.len) |i| {
             const target_addr = got_plt_addr + got_plt_preamble_size + i * 8;
             const source_addr = plt_addr + plt_preamble_size + i * 16;
-            const disp = @intCast(i64, target_addr) - @intCast(i64, source_addr + 12) + 4;
+            disp = @intCast(i64, target_addr) - @intCast(i64, source_addr + 12) - 4;
             var entry = [_]u8{
                 0xf3, 0x0f, 0x1e, 0xfa, // endbr64
                 0x41, 0xbb, 0x00, 0x00, 0x00, 0x00, // jmp r11d, 0x0
-                0xff, 0x25, 0x00, 0x00, 0x00, 0x00, // jmp qword ptr [rip]
+                0xff, 0x25, 0x00, 0x00, 0x00, 0x00, // jmp qword ptr [rip] -> .got.plt[N]
             };
             mem.writeIntLittle(i32, entry[12..][0..4], @intCast(i32, disp));
             try writer.writeAll(&entry);
