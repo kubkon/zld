@@ -814,10 +814,11 @@ fn allocateGlobals(self: *Elf) void {
 
 fn allocateSyntheticSymbols(self: *Elf) void {
     if (self.dynamic_index) |index| {
-        if (self.got_sect_index) |got_index| {
-            const shdr = self.sections.items(.shdr)[got_index];
-            self.getSymbol(index).value = shdr.sh_addr;
-        }
+        const shndx = self.dynamic_sect_index orelse self.got_sect_index.?;
+        const shdr = self.sections.items(.shdr)[shndx];
+        const symbol = self.getSymbol(index);
+        symbol.value = shdr.sh_addr;
+        symbol.shndx = shndx;
     }
     if (self.init_array_start_index) |index| {
         const global = self.getSymbol(index);
@@ -856,15 +857,11 @@ fn allocateSyntheticSymbols(self: *Elf) void {
         }
     }
     if (self.got_index) |index| {
+        const shndx = self.got_plt_sect_index orelse self.got_sect_index.?;
+        const shdr = self.sections.items(.shdr)[shndx];
         const symbol = self.getSymbol(index);
-        for (&[_]?u16{ self.got_plt_sect_index, self.got_sect_index }) |maybe_sect_index| {
-            if (maybe_sect_index) |sect_index| {
-                const shdr = self.sections.items(.shdr)[sect_index];
-                symbol.value = shdr.sh_addr;
-                symbol.shndx = sect_index;
-                break;
-            }
-        }
+        symbol.value = shdr.sh_addr;
+        symbol.shndx = shndx;
     }
 }
 
@@ -2100,8 +2097,20 @@ pub const PltSection = struct {
     }
 
     fn writeGotPlt(plt: PltSection, elf_file: *Elf, writer: anytype) !void {
-        _ = elf_file;
-        try writer.writeByteNTimes(0x0, got_plt_preamble_size + plt.symbols.items.len * 8);
+        {
+            // [0]: _DYNAMIC
+            const symbol = elf_file.getSymbol(elf_file.dynamic_index.?);
+            try writer.writeIntLittle(u64, symbol.value);
+        }
+        // [1]: 0x0
+        // [2]: 0x0
+        try writer.writeIntLittle(u64, 0x0);
+        try writer.writeIntLittle(u64, 0x0);
+        const plt_addr = elf_file.sections.items(.shdr)[elf_file.plt_sect_index.?].sh_addr;
+        for (0..plt.symbols.items.len) |_| {
+            // [N]: .plt
+            try writer.writeIntLittle(u64, plt_addr);
+        }
     }
 };
 
