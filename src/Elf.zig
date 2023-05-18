@@ -1855,6 +1855,9 @@ const DynamicSection = struct {
         if (elf_file.getSectionByName(".fini") != null) nentries += 1; // FINI
         if (elf_file.getSectionByName(".init_array") != null) nentries += 2; // INIT_ARRAY
         if (elf_file.getSectionByName(".fini_array") != null) nentries += 2; // FINI_ARRAY
+        if (elf_file.rela_dyn_sect_index != null) nentries += 3; // RELA
+        if (elf_file.rela_plt_sect_index != null) nentries += 3; // JMPREL
+        if (elf_file.got_plt_sect_index != null) nentries += 1; // PLTGOT
         nentries += 1; // HASH
         nentries += 1; // SYMTAB
         nentries += 1; // SYMENT
@@ -1900,6 +1903,30 @@ const DynamicSection = struct {
             const shdr = elf_file.sections.items(.shdr)[shndx];
             try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_FINI_ARRAY, .d_val = shdr.sh_addr });
             try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_FINI_ARRAYSZ, .d_val = shdr.sh_size });
+        }
+
+        // RELA
+        if (elf_file.rela_dyn_sect_index) |shndx| {
+            const shdr = elf_file.sections.items(.shdr)[shndx];
+            const relasz = elf_file.got_section.sizeRela(elf_file);
+            try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_RELA, .d_val = shdr.sh_addr });
+            try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_RELASZ, .d_val = relasz });
+            try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_RELAENT, .d_val = shdr.sh_entsize });
+        }
+
+        // JMPREL
+        if (elf_file.rela_plt_sect_index) |shndx| {
+            const shdr = elf_file.sections.items(.shdr)[shndx];
+            const relasz = elf_file.plt_section.sizeRela();
+            try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_JMPREL, .d_val = shdr.sh_addr });
+            try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_PLTRELSZ, .d_val = relasz });
+            try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_PLTREL, .d_val = elf.DT_RELA });
+        }
+
+        // PLTGOT
+        if (elf_file.got_plt_sect_index) |shndx| {
+            const addr = elf_file.sections.items(.shdr)[shndx].sh_addr;
+            try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_PLTGOT, .d_val = addr });
         }
 
         {
@@ -2103,10 +2130,11 @@ const GotSection = struct {
     }
 
     fn writeRela(got: GotSection, elf_file: *Elf, writer: anytype) !void {
+        const base_addr = elf_file.sections.items(.shdr)[elf_file.got_sect_index.?].sh_addr;
         for (got.symbols.items, 0..) |sym_index, i| {
             const sym = elf_file.getSymbol(sym_index);
             if (sym.import) {
-                const r_offset = i * 8;
+                const r_offset = base_addr + i * 8;
                 const r_sym: u64 = 1; // TODO save dynsym index in Extra
                 const r_type: u32 = elf.R_X86_64_GLOB_DAT;
                 try writer.writeStruct(elf.Elf64_Rela{
@@ -2201,10 +2229,11 @@ pub const PltSection = struct {
     }
 
     fn writeRela(plt: PltSection, elf_file: *Elf, writer: anytype) !void {
+        const base_addr = elf_file.sections.items(.shdr)[elf_file.got_plt_sect_index.?].sh_addr;
         for (plt.symbols.items, 0..) |sym_index, i| {
             const sym = elf_file.getSymbol(sym_index);
             if (sym.import) {
-                const r_offset = plt_preamble_size + i * 16 + 6;
+                const r_offset = base_addr + got_plt_preamble_size + i * 8;
                 const r_sym: u64 = 2; // TODO save dynsym index in Extra
                 const r_type: u32 = elf.R_X86_64_JUMP_SLOT;
                 try writer.writeStruct(elf.Elf64_Rela{
