@@ -39,6 +39,10 @@ pub fn isAbs(symbol: Symbol, elf_file: *Elf) bool {
     return !symbol.import and symbol.getAtom(elf_file) == null and symbol.shndx == 0;
 }
 
+pub fn isLocal(symbol: Symbol) bool {
+    return !(symbol.import or symbol.@"export");
+}
+
 pub fn getName(symbol: Symbol, elf_file: *Elf) [:0]const u8 {
     return elf_file.string_intern.getAssumeExists(symbol.name);
 }

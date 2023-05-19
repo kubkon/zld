@@ -58,6 +58,10 @@ pub fn asFile(self: InternalObject) Elf.File {
     return .{ .internal = self };
 }
 
+pub inline fn getGlobals(self: InternalObject) []const u32 {
+    return self.symbols.items;
+}
+
 pub fn fmtSymtab(self: InternalObject, elf_file: *Elf) std.fmt.Formatter(formatSymtab) {
     return .{ .data = .{
         .self = self,
@@ -79,7 +83,7 @@ fn formatSymtab(
     _ = unused_fmt_string;
     _ = options;
     try writer.writeAll("  globals\n");
-    for (ctx.self.symbols.items) |index| {
+    for (ctx.self.getGlobals()) |index| {
         const global = ctx.elf_file.getSymbol(index);
         try writer.print("    {}\n", .{global.fmt(ctx.elf_file)});
     }

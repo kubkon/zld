@@ -1147,10 +1147,7 @@ fn markImportsAndExports(self: *Elf) !void {
             if (global.getFile(self)) |file| {
                 if (file == .shared and !global.isAbs(self)) {
                     global.import = true;
-                    continue;
                 }
-
-                if (file.deref().getIndex() == index) global.@"export" = true;
             }
         }
     }
@@ -1992,25 +1989,43 @@ const SymtabSection = struct {
 
     fn set(symtab: *SymtabSection, elf_file: *Elf) !void {
         const gpa = elf_file.base.allocator;
+
         for (elf_file.objects.items) |index| {
             const object = elf_file.getFile(index).?.object;
             for (object.getLocals()) |local_index| {
                 const local = elf_file.getSymbol(local_index);
-                if (local.getAtom(elf_file)) |atom| {
-                    if (!atom.is_alive) continue;
-                }
+                if (local.getAtom(elf_file)) |atom| if (!atom.is_alive) continue;
                 const s_sym = local.getSourceSymbol(elf_file);
                 switch (s_sym.st_type()) {
                     elf.STT_SECTION, elf.STT_NOTYPE => continue,
                     else => {},
                 }
-                switch (@intToEnum(elf.STV, s_sym.st_other)) {
-                    .INTERNAL, .HIDDEN => continue,
-                    else => {},
-                }
                 try symtab.symbols.append(gpa, .{
                     .index = local_index,
                     .off = try elf_file.strtab.insert(gpa, local.getName(elf_file)),
+                });
+            }
+
+            for (object.getGlobals()) |global_index| {
+                const global = elf_file.getSymbol(global_index);
+                if (!global.isLocal()) continue;
+                if (global.getFile(elf_file)) |file| if (file.deref().getIndex() != index) continue;
+                if (global.getAtom(elf_file)) |atom| if (!atom.is_alive) continue;
+                try symtab.symbols.append(gpa, .{
+                    .index = global_index,
+                    .off = try elf_file.strtab.insert(gpa, global.getName(elf_file)),
+                });
+            }
+        }
+
+        if (elf_file.internal_object_index) |index| {
+            const internal = elf_file.getFile(index).?.internal;
+            for (internal.getGlobals()) |global_index| {
+                const global = elf_file.getSymbol(global_index);
+                if (global.getFile(elf_file)) |file| if (file.deref().getIndex() != index) continue;
+                try symtab.symbols.append(gpa, .{
+                    .index = global_index,
+                    .off = try elf_file.strtab.insert(gpa, global.getName(elf_file)),
                 });
             }
         }
@@ -2022,14 +2037,22 @@ const SymtabSection = struct {
             const object = elf_file.getFile(index).?.object;
             for (object.getGlobals()) |global_index| {
                 const global = elf_file.getSymbol(global_index);
-                if (global.getAtom(elf_file)) |atom| {
-                    if (!atom.is_alive) continue;
-                }
-                const sym = global.getSourceSymbol(elf_file);
-                switch (@intToEnum(elf.STV, sym.st_other)) {
-                    .INTERNAL, .HIDDEN => continue,
-                    else => {},
-                }
+                if (global.isLocal()) continue;
+                if (global.getFile(elf_file)) |file| if (file.deref().getIndex() != index) continue;
+                if (global.getAtom(elf_file)) |atom| if (!atom.is_alive) continue;
+                try symtab.symbols.append(gpa, .{
+                    .index = global_index,
+                    .off = try elf_file.strtab.insert(gpa, global.getName(elf_file)),
+                });
+            }
+        }
+
+        for (elf_file.shared_objects.items) |index| {
+            const shared = elf_file.getFile(index).?.shared;
+            for (shared.getGlobals()) |global_index| {
+                const global = elf_file.getSymbol(global_index);
+                if (global.isLocal()) continue;
+                if (global.getFile(elf_file)) |file| if (file.deref().getIndex() != index) continue;
                 try symtab.symbols.append(gpa, .{
                     .index = global_index,
                     .off = try elf_file.strtab.insert(gpa, global.getName(elf_file)),
@@ -2044,16 +2067,29 @@ const SymtabSection = struct {
 
     fn write(symtab: SymtabSection, elf_file: *Elf, writer: anytype) !void {
         try writer.writeStruct(null_sym);
-        for (symtab.symbols.items) |sym_ref| {
+        for (symtab.symbols.items[0..symtab.first_global]) |sym_ref| {
             const sym = elf_file.getSymbol(sym_ref.index);
             const s_sym = sym.getSourceSymbol(elf_file);
             try writer.writeStruct(elf.Elf64_Sym{
                 .st_name = sym_ref.off,
-                .st_info = s_sym.st_info,
+                .st_info = s_sym.st_type(),
                 .st_other = s_sym.st_other,
                 .st_shndx = sym.shndx,
                 .st_value = sym.value,
-                .st_size = 0,
+                .st_size = s_sym.st_size,
+            });
+        }
+
+        for (symtab.symbols.items[symtab.first_global..]) |sym_ref| {
+            const sym = elf_file.getSymbol(sym_ref.index);
+            const s_sym = sym.getSourceSymbol(elf_file);
+            try writer.writeStruct(elf.Elf64_Sym{
+                .st_name = sym_ref.off,
+                .st_info = (@as(u8, elf.STB_GLOBAL) << 4) | s_sym.st_type(),
+                .st_other = s_sym.st_other,
+                .st_shndx = if (sym.import) elf.SHN_UNDEF else sym.shndx,
+                .st_value = if (sym.import) 0 else sym.value,
+                .st_size = s_sym.st_size,
             });
         }
     }

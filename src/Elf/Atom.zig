@@ -68,7 +68,6 @@ pub fn getCodeUncompressAlloc(self: Atom, elf_file: *Elf) ![]u8 {
             },
             else => @panic("TODO unhandled compression scheme"),
         }
-        @panic("TODO");
     } else return gpa.dupe(u8, data);
 }
 
@@ -173,8 +172,8 @@ pub fn initOutputSection(self: *Atom, elf_file: *Elf) !void {
 pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
     const object = self.getObject(elf_file);
     for (self.getRelocs(elf_file)) |rel| {
-        // While traversing relocations, synthesize any missing atom.
-        // TODO synthesize PLT atoms, GOT atoms, etc.
+        // While traversing relocations, mark symbols that require special handling such as
+        // pointer indirection via GOT, or a stub trampoline via PLT.
         switch (rel.r_type()) {
             elf.R_X86_64_GOTPCREL,
             elf.R_X86_64_GOTPCRELX,
