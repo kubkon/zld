@@ -586,7 +586,7 @@ fn initPhdrs(self: *Elf) !void {
         }
     }
 
-    // Add TLS phdrs
+    // Add TLS phdr
     {
         var shndx: usize = 0;
         outer: while (shndx < slice.len) {
@@ -682,6 +682,13 @@ fn allocateSectionsInMemory(self: *Elf, base_offset: u64) !void {
     var addr = default_base_addr + base_offset;
     outer: for (self.sections.items(.shdr)[1..], 1..) |*shdr, i| {
         if (!shdrIsAlloc(shdr)) continue;
+        if (i != 1) {
+            const prev_shdr = self.sections.items(.shdr)[i - 1];
+            if (shdrToPhdrFlags(shdr.sh_flags) != shdrToPhdrFlags(prev_shdr.sh_flags)) {
+                // We need advance by page size
+                addr += default_page_size;
+            }
+        }
         if (shdrIsTbss(shdr)) {
             var tbss_addr = addr;
             for (self.sections.items(.shdr)[i..]) |*tbss_shdr| {
@@ -689,13 +696,6 @@ fn allocateSectionsInMemory(self: *Elf, base_offset: u64) !void {
                 tbss_addr = mem.alignForwardGeneric(u64, tbss_addr, tbss_shdr.sh_addralign);
                 tbss_shdr.sh_addr = tbss_addr;
                 tbss_addr += tbss_shdr.sh_size;
-            }
-        }
-        if (i != 1) {
-            const prev_shdr = self.sections.items(.shdr)[i - 1];
-            if (shdrToPhdrFlags(shdr.sh_flags) != shdrToPhdrFlags(prev_shdr.sh_flags)) {
-                // We need advance by page size
-                addr += default_page_size;
             }
         }
 
@@ -1320,6 +1320,7 @@ fn writeAtoms(self: *Elf) !void {
 
         while (true) {
             const atom = self.getAtom(atom_index).?;
+            assert(atom.is_alive);
             const off = atom.value - shdr.sh_addr;
             log.debug("writing ATOM(%{d},'{s}') at offset 0x{x}", .{
                 atom_index,
