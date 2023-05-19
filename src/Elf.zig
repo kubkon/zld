@@ -551,38 +551,69 @@ fn initPhdrs(self: *Elf) !void {
     }
 
     // Add LOAD phdrs
-    var last_phdr: ?u16 = null;
     const slice = self.sections.slice();
-    var shndx: usize = 0;
-    while (shndx < slice.len) {
-        const shdr = slice.items(.shdr)[shndx];
-        if (shdr.sh_flags & elf.SHF_ALLOC == 0) {
-            shndx += 1;
-            continue;
-        }
-        last_phdr = try self.addPhdr(.{
-            .type = elf.PT_LOAD,
-            .flags = shdrToPhdrFlags(shdr.sh_flags),
-            .@"align" = @max(default_page_size, shdr.sh_addralign),
-            .offset = if (last_phdr == null) 0 else shdr.sh_offset,
-            .addr = if (last_phdr == null) default_base_addr else shdr.sh_addr,
-        });
-        const p_flags = self.phdrs.items[last_phdr.?].p_flags;
-        try self.addShdrToPhdr(last_phdr.?, shdr);
-        shndx += 1;
-
-        while (shndx < slice.len) : (shndx += 1) {
-            const next = slice.items(.shdr)[shndx];
-            if (p_flags == shdrToPhdrFlags(next.sh_flags) and
-                next.sh_offset - shdr.sh_offset == next.sh_addr - shdr.sh_addr)
-            {
-                try self.addShdrToPhdr(last_phdr.?, next);
+    {
+        var last_phdr: ?u16 = null;
+        var shndx: usize = 0;
+        while (shndx < slice.len) {
+            const shdr = &slice.items(.shdr)[shndx];
+            if (!shdrIsAlloc(shdr) or shdrIsTbss(shdr)) {
+                shndx += 1;
                 continue;
             }
-            break;
+            last_phdr = try self.addPhdr(.{
+                .type = elf.PT_LOAD,
+                .flags = shdrToPhdrFlags(shdr.sh_flags),
+                .@"align" = @max(default_page_size, shdr.sh_addralign),
+                .offset = if (last_phdr == null) 0 else shdr.sh_offset,
+                .addr = if (last_phdr == null) default_base_addr else shdr.sh_addr,
+            });
+            const p_flags = self.phdrs.items[last_phdr.?].p_flags;
+            try self.addShdrToPhdr(last_phdr.?, shdr);
+            shndx += 1;
+
+            while (shndx < slice.len) : (shndx += 1) {
+                const next = &slice.items(.shdr)[shndx];
+                if (shdrIsTbss(next)) continue;
+                if (p_flags == shdrToPhdrFlags(next.sh_flags)) {
+                    if (shdrIsBss(next) or next.sh_offset - shdr.sh_offset == next.sh_addr - shdr.sh_addr) {
+                        try self.addShdrToPhdr(last_phdr.?, next);
+                        continue;
+                    }
+                }
+                break;
+            }
         }
     }
 
+    // Add TLS phdrs
+    {
+        var shndx: usize = 0;
+        outer: while (shndx < slice.len) {
+            const shdr = &slice.items(.shdr)[shndx];
+            if (!shdrIsTls(shdr)) {
+                shndx += 1;
+                continue;
+            }
+            var last_phdr = try self.addPhdr(.{
+                .type = elf.PT_TLS,
+                .flags = elf.PF_R,
+                .@"align" = shdr.sh_addralign,
+                .offset = shdr.sh_offset,
+                .addr = shdr.sh_addr,
+            });
+            try self.addShdrToPhdr(last_phdr, shdr);
+            shndx += 1;
+
+            while (shndx < slice.len) : (shndx += 1) {
+                const next = &slice.items(.shdr)[shndx];
+                if (!shdrIsTls(next)) continue :outer;
+                try self.addShdrToPhdr(last_phdr, next);
+            }
+        }
+    }
+
+    // Add DYNAMIC phdr
     if (self.dynamic_sect_index) |index| {
         const shdr = self.sections.items(.shdr)[index];
         _ = try self.addPhdr(.{
@@ -613,7 +644,7 @@ fn initPhdrs(self: *Elf) !void {
     }
 }
 
-fn addShdrToPhdr(self: *Elf, phdr_index: u16, shdr: elf.Elf64_Shdr) !void {
+fn addShdrToPhdr(self: *Elf, phdr_index: u16, shdr: *const elf.Elf64_Shdr) !void {
     const phdr = &self.phdrs.items[phdr_index];
     phdr.p_align = @max(phdr.p_align, shdr.sh_addralign);
     if (shdr.sh_type != elf.SHT_NOBITS) {
@@ -631,10 +662,35 @@ fn shdrToPhdrFlags(sh_flags: u64) u32 {
     return out_flags;
 }
 
+inline fn shdrIsAlloc(shdr: *const elf.Elf64_Shdr) bool {
+    return shdr.sh_flags & elf.SHF_ALLOC != 0;
+}
+
+inline fn shdrIsBss(shdr: *const elf.Elf64_Shdr) bool {
+    return shdr.sh_type == elf.SHT_NOBITS and !shdrIsTls(shdr);
+}
+
+inline fn shdrIsTbss(shdr: *const elf.Elf64_Shdr) bool {
+    return shdr.sh_type == elf.SHT_NOBITS and shdrIsTls(shdr);
+}
+
+inline fn shdrIsTls(shdr: *const elf.Elf64_Shdr) bool {
+    return shdr.sh_flags & elf.SHF_TLS != 0;
+}
+
 fn allocateSectionsInMemory(self: *Elf, base_offset: u64) !void {
     var addr = default_base_addr + base_offset;
-    for (self.sections.items(.shdr)[1..], 1..) |*shdr, i| {
-        if (shdr.sh_flags & elf.SHF_ALLOC == 0) continue;
+    outer: for (self.sections.items(.shdr)[1..], 1..) |*shdr, i| {
+        if (!shdrIsAlloc(shdr)) continue;
+        if (shdrIsTbss(shdr)) {
+            var tbss_addr = addr;
+            for (self.sections.items(.shdr)[i..]) |*tbss_shdr| {
+                if (!shdrIsTbss(tbss_shdr)) continue :outer;
+                tbss_addr = mem.alignForwardGeneric(u64, tbss_addr, tbss_shdr.sh_addralign);
+                tbss_shdr.sh_addr = tbss_addr;
+                tbss_addr += tbss_shdr.sh_size;
+            }
+        }
         if (i != 1) {
             const prev_shdr = self.sections.items(.shdr)[i - 1];
             if (shdrToPhdrFlags(shdr.sh_flags) != shdrToPhdrFlags(prev_shdr.sh_flags)) {
@@ -652,10 +708,9 @@ fn allocateSectionsInMemory(self: *Elf, base_offset: u64) !void {
 fn allocatesSectionsInFile(self: *Elf, base_offset: u64) void {
     var offset = base_offset;
     for (self.sections.items(.shdr)[1..]) |*shdr| {
-        defer if (shdr.sh_type != elf.SHT_NOBITS) {
-            offset = shdr.sh_offset + shdr.sh_size;
-        };
+        if (shdr.sh_type == elf.SHT_NOBITS) continue;
         shdr.sh_offset = mem.alignForwardGeneric(u64, offset, shdr.sh_addralign);
+        offset = shdr.sh_offset + shdr.sh_size;
     }
 }
 

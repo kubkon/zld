@@ -135,8 +135,10 @@ pub fn initOutputSection(self: *Atom, elf_file: *Elf) !void {
                     ".tdata"
                 else
                     ".data";
+                var out_flags: u32 = elf.SHF_ALLOC | elf.SHF_WRITE;
+                if (is_tls) out_flags |= elf.SHF_TLS;
                 break :blk .{
-                    .flags = elf.SHF_ALLOC | elf.SHF_WRITE,
+                    .flags = out_flags,
                     .name = out_name,
                     .type = @"type",
                 };
@@ -305,6 +307,24 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
                     target_name,
                 });
                 mem.writeIntLittle(i32, code[rel.r_offset..][0..4], scaled);
+            },
+            elf.R_X86_64_DTPOFF32, elf.R_X86_64_TPOFF32 => {
+                const target_addr = @intCast(i64, target.value) + rel.r_addend;
+                const tp_addr = blk: {
+                    const phdr = for (elf_file.phdrs.items) |phdr| switch (phdr.p_type) {
+                        elf.PT_TLS => break phdr,
+                        else => {},
+                    } else null;
+                    break :blk @intCast(i64, phdr.?.p_vaddr + phdr.?.p_memsz);
+                };
+                const actual_target_addr = @truncate(i32, target_addr - tp_addr);
+                relocs_log.debug("  {}: {x}: [() => 0x{x}] ({s})", .{
+                    fmtRelocType(r_type),
+                    rel.r_offset,
+                    actual_target_addr,
+                    target_name,
+                });
+                mem.writeIntLittle(i32, code[rel.r_offset..][0..4], actual_target_addr);
             },
             else => {
                 elf_file.base.fatal("unhandled relocation type: {}", .{fmtRelocType(r_type)});
