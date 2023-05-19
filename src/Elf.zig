@@ -851,53 +851,42 @@ fn allocateGlobals(self: *Elf) void {
 }
 
 fn allocateSyntheticSymbols(self: *Elf) void {
-    if (self.dynamic_index) |index| {
+    // _DYNAMIC
+    {
         const shndx = self.dynamic_sect_index orelse self.got_sect_index.?;
         const shdr = self.sections.items(.shdr)[shndx];
-        const symbol = self.getSymbol(index);
+        const symbol = self.getSymbol(self.dynamic_index.?);
         symbol.value = shdr.sh_addr;
         symbol.shndx = shndx;
     }
-    if (self.init_array_start_index) |index| {
-        const global = self.getSymbol(index);
-        if (self.text_sect_index) |text_index| {
-            global.shndx = text_index;
-        }
-        if (self.entry_index) |entry_index| {
-            global.value = self.getSymbol(entry_index).value;
-        }
+
+    // __init_array_start, __init_array_end
+    if (self.getSectionByName(".init_array")) |shndx| {
+        const start_sym = self.getSymbol(self.init_array_start_index.?);
+        const end_sym = self.getSymbol(self.init_array_end_index.?);
+        const shdr = self.sections.items(.shdr)[shndx];
+        start_sym.shndx = shndx;
+        start_sym.value = shdr.sh_addr;
+        end_sym.shndx = shndx;
+        end_sym.value = shdr.sh_addr + shdr.sh_size;
     }
-    if (self.init_array_end_index) |index| {
-        const global = self.getSymbol(index);
-        if (self.text_sect_index) |text_index| {
-            global.shndx = text_index;
-        }
-        if (self.entry_index) |entry_index| {
-            global.value = self.getSymbol(entry_index).value;
-        }
+
+    // __fini_array_start, __fini_array_end
+    if (self.getSectionByName(".fini_array")) |shndx| {
+        const start_sym = self.getSymbol(self.fini_array_start_index.?);
+        const end_sym = self.getSymbol(self.fini_array_end_index.?);
+        const shdr = self.sections.items(.shdr)[shndx];
+        start_sym.shndx = shndx;
+        start_sym.value = shdr.sh_addr;
+        end_sym.shndx = shndx;
+        end_sym.value = shdr.sh_addr + shdr.sh_size;
     }
-    if (self.fini_array_start_index) |index| {
-        const global = self.getSymbol(index);
-        if (self.text_sect_index) |text_index| {
-            global.shndx = text_index;
-        }
-        if (self.entry_index) |entry_index| {
-            global.value = self.getSymbol(entry_index).value;
-        }
-    }
-    if (self.fini_array_end_index) |index| {
-        const global = self.getSymbol(index);
-        if (self.text_sect_index) |text_index| {
-            global.shndx = text_index;
-        }
-        if (self.entry_index) |entry_index| {
-            global.value = self.getSymbol(entry_index).value;
-        }
-    }
-    if (self.got_index) |index| {
+
+    // _GLOBAL_OFFSET_TABLE_
+    {
         const shndx = self.got_plt_sect_index orelse self.got_sect_index.?;
         const shdr = self.sections.items(.shdr)[shndx];
-        const symbol = self.getSymbol(index);
+        const symbol = self.getSymbol(self.got_index.?);
         symbol.value = shdr.sh_addr;
         symbol.shndx = shndx;
     }
