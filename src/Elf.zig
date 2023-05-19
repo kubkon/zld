@@ -45,7 +45,7 @@ string_intern: StringTable(.string_intern) = .{},
 shstrtab: StringTable(.shstrtab) = .{},
 strtab: StringTable(.strtab) = .{},
 symtab: SymtabSection = .{},
-dynsymtab: std.ArrayListUnmanaged(elf.Elf64_Sym) = .{},
+dynsym: DynsymSection = .{},
 dynstrtab: StringTable(.dynstrtab) = .{},
 
 dynamic_section: DynamicSection = .{},
@@ -111,7 +111,7 @@ pub fn deinit(self: *Elf) void {
     self.files.deinit(gpa);
     self.objects.deinit(gpa);
     self.shared_objects.deinit(gpa);
-    self.dynsymtab.deinit(gpa);
+    self.dynsym.deinit(gpa);
     self.dynstrtab.deinit(gpa);
     self.dynamic_section.deinit(gpa);
     self.hash_section.deinit(gpa);
@@ -188,7 +188,6 @@ pub fn flush(self: *Elf) !void {
     // Append null atom.
     try self.atoms.append(gpa, .{});
     // Append null symbols.
-    try self.dynsymtab.append(gpa, null_sym);
     try self.symbols_extra.append(gpa, 0);
     // Append null file.
     try self.files.append(gpa, .null);
@@ -287,7 +286,6 @@ pub fn flush(self: *Elf) !void {
     try self.initSections();
     try self.sortSections();
     try self.setDynamic();
-    try self.setDynsymtab();
     try self.setHash();
     try self.setSymtab();
     try self.calcSectionSizes();
@@ -504,7 +502,7 @@ fn calcSectionSizes(self: *Elf) !void {
 
     if (self.dynsymtab_sect_index) |index| {
         const shdr = &self.sections.items(.shdr)[index];
-        shdr.sh_size = self.dynsymtab.items.len * @sizeOf(elf.Elf64_Sym);
+        shdr.sh_size = self.dynsym.size();
     }
 
     if (self.dynstrtab_sect_index) |index| {
@@ -1225,6 +1223,9 @@ fn scanRelocs(self: *Elf) !void {
 
     for (self.symbols.items, 0..) |*symbol, i| {
         const index = @intCast(u32, i);
+        if (symbol.import) {
+            try self.dynsym.addSymbol(index, self);
+        }
         if (symbol.flags.got) {
             log.debug("'{s}' needs GOT", .{symbol.getName(self)});
             try self.got_section.addSymbol(index, self);
@@ -1251,29 +1252,6 @@ fn setDynamic(self: *Elf) !void {
         const shared = self.getFile(index).?.shared;
         if (!shared.alive) continue;
         try self.dynamic_section.addNeeded(shared, self);
-    }
-}
-
-fn setDynsymtab(self: *Elf) !void {
-    if (self.dynsymtab_sect_index == null) return;
-    const gpa = self.base.allocator;
-
-    for (self.objects.items) |index| {
-        const object = self.getFile(index).?.object;
-        for (object.getGlobals()) |global_index| {
-            const global = self.getSymbol(global_index);
-            if (!global.import) continue;
-            const sym = global.getSourceSymbol(self);
-            const name = try self.dynstrtab.insert(gpa, global.getName(self));
-            try self.dynsymtab.append(gpa, .{
-                .st_name = name,
-                .st_info = sym.st_info,
-                .st_other = sym.st_other,
-                .st_shndx = elf.SHN_UNDEF,
-                .st_value = 0,
-                .st_size = 0,
-            });
-        }
     }
 }
 
@@ -1347,7 +1325,10 @@ fn writeSyntheticSections(self: *Elf) !void {
     if (self.dynsymtab_sect_index) |shndx| {
         const shdr = &self.sections.items(.shdr)[shndx];
         shdr.sh_info = 1;
-        try self.base.file.pwriteAll(mem.sliceAsBytes(self.dynsymtab.items), shdr.sh_offset);
+        var buffer = try std.ArrayList(u8).initCapacity(gpa, self.dynsym.size());
+        defer buffer.deinit();
+        try self.dynsym.write(self, buffer.writer());
+        try self.base.file.pwriteAll(buffer.items, shdr.sh_offset);
     }
 
     if (self.dynstrtab_sect_index) |shndx| {
@@ -1964,29 +1945,29 @@ const HashSection = struct {
     }
 
     fn generate(hs: *HashSection, elf_file: *Elf) !void {
-        if (elf_file.dynsymtab.items.len == 0) return;
+        if (elf_file.dynsym.count() == 1) return;
 
         const gpa = elf_file.base.allocator;
-        const symtab = elf_file.dynsymtab.items;
+        const nsyms = elf_file.dynsym.count();
 
-        var buckets = try gpa.alloc(u32, symtab.len);
+        var buckets = try gpa.alloc(u32, nsyms);
         defer gpa.free(buckets);
         @memset(buckets, 0);
 
-        var chains = try gpa.alloc(u32, symtab.len);
+        var chains = try gpa.alloc(u32, nsyms);
         defer gpa.free(chains);
         @memset(chains, 0);
 
-        for (symtab[1..], 1..) |sym, i| {
-            const name = elf_file.dynstrtab.getAssumeExists(sym.st_name);
+        for (elf_file.dynsym.symbols.items[1..], 1..) |sym_ref, i| {
+            const name = elf_file.dynstrtab.getAssumeExists(sym_ref.off);
             const hash = hasher(name) % buckets.len;
             chains[@intCast(u32, i)] = buckets[hash];
             buckets[hash] = @intCast(u32, i);
         }
 
-        try hs.buffer.ensureTotalCapacityPrecise(gpa, (2 + symtab.len * 2) * 4);
-        hs.buffer.writer(gpa).writeIntLittle(u32, @intCast(u32, symtab.len)) catch unreachable;
-        hs.buffer.writer(gpa).writeIntLittle(u32, @intCast(u32, symtab.len)) catch unreachable;
+        try hs.buffer.ensureTotalCapacityPrecise(gpa, (2 + nsyms * 2) * 4);
+        hs.buffer.writer(gpa).writeIntLittle(u32, @intCast(u32, nsyms)) catch unreachable;
+        hs.buffer.writer(gpa).writeIntLittle(u32, @intCast(u32, nsyms)) catch unreachable;
         hs.buffer.writer(gpa).writeAll(mem.sliceAsBytes(buckets)) catch unreachable;
         hs.buffer.writer(gpa).writeAll(mem.sliceAsBytes(chains)) catch unreachable;
     }
@@ -2089,6 +2070,51 @@ const SymtabSection = struct {
     }
 };
 
+const DynsymSection = struct {
+    symbols: std.ArrayListUnmanaged(struct { index: u32, off: u32 }) = .{},
+
+    fn deinit(dynsym: *DynsymSection, allocator: Allocator) void {
+        dynsym.symbols.deinit(allocator);
+    }
+
+    fn addSymbol(dynsym: *DynsymSection, sym_index: u32, elf_file: *Elf) !void {
+        const gpa = elf_file.base.allocator;
+        const index = @intCast(u32, dynsym.symbols.items.len + 1);
+        const sym = elf_file.getSymbol(sym_index);
+        if (sym.getExtra(elf_file)) |extra| {
+            var new_extra = extra;
+            new_extra.dynamic = index;
+            sym.setExtra(new_extra, elf_file);
+        } else try sym.addExtra(.{ .dynamic = index }, elf_file);
+        const name = try elf_file.dynstrtab.insert(gpa, sym.getName(elf_file));
+        try dynsym.symbols.append(gpa, .{ .index = sym_index, .off = name });
+    }
+
+    inline fn size(dynsym: DynsymSection) usize {
+        return dynsym.count() * @sizeOf(elf.Elf64_Sym);
+    }
+
+    inline fn count(dynsym: DynsymSection) u32 {
+        return @intCast(u32, dynsym.symbols.items.len + 1);
+    }
+
+    fn write(dynsym: DynsymSection, elf_file: *Elf, writer: anytype) !void {
+        try writer.writeStruct(null_sym);
+        for (dynsym.symbols.items) |sym_ref| {
+            const sym = elf_file.getSymbol(sym_ref.index);
+            const s_sym = sym.getSourceSymbol(elf_file);
+            try writer.writeStruct(elf.Elf64_Sym{
+                .st_name = sym_ref.off,
+                .st_info = s_sym.st_info,
+                .st_other = s_sym.st_other,
+                .st_shndx = elf.SHN_UNDEF,
+                .st_value = 0,
+                .st_size = 0,
+            });
+        }
+    }
+};
+
 const GotSection = struct {
     symbols: std.ArrayListUnmanaged(u32) = .{},
     needs_rela: bool = false,
@@ -2134,8 +2160,9 @@ const GotSection = struct {
         for (got.symbols.items, 0..) |sym_index, i| {
             const sym = elf_file.getSymbol(sym_index);
             if (sym.import) {
+                const extra = sym.getExtra(elf_file).?;
                 const r_offset = base_addr + i * 8;
-                const r_sym: u64 = 1; // TODO save dynsym index in Extra
+                const r_sym: u64 = extra.dynamic;
                 const r_type: u32 = elf.R_X86_64_GLOB_DAT;
                 try writer.writeStruct(elf.Elf64_Rela{
                     .r_offset = r_offset,
@@ -2232,16 +2259,16 @@ pub const PltSection = struct {
         const base_addr = elf_file.sections.items(.shdr)[elf_file.got_plt_sect_index.?].sh_addr;
         for (plt.symbols.items, 0..) |sym_index, i| {
             const sym = elf_file.getSymbol(sym_index);
-            if (sym.import) {
-                const r_offset = base_addr + got_plt_preamble_size + i * 8;
-                const r_sym: u64 = 2; // TODO save dynsym index in Extra
-                const r_type: u32 = elf.R_X86_64_JUMP_SLOT;
-                try writer.writeStruct(elf.Elf64_Rela{
-                    .r_offset = r_offset,
-                    .r_info = (r_sym << 32) | r_type,
-                    .r_addend = 0,
-                });
-            }
+            assert(sym.import);
+            const extra = sym.getExtra(elf_file).?;
+            const r_offset = base_addr + got_plt_preamble_size + i * 8;
+            const r_sym: u64 = extra.dynamic;
+            const r_type: u32 = elf.R_X86_64_JUMP_SLOT;
+            try writer.writeStruct(elf.Elf64_Rela{
+                .r_offset = r_offset,
+                .r_info = (r_sym << 32) | r_type,
+                .r_addend = 0,
+            });
         }
     }
 };

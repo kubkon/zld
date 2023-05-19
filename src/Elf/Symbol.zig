@@ -150,6 +150,7 @@ pub const Flags = packed struct {
 pub const Extra = struct {
     got: u32 = 0,
     plt: u32 = 0,
+    dynamic: u32 = 0,
 };
 
 const std = @import("std");
