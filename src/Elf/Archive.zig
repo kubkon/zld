@@ -1,12 +1,8 @@
-file: fs.File,
 name: []const u8,
+data: []const u8,
 
-/// Parsed table of contents.
-/// Each symbol name points to a list of all definition
-/// sites within the current static archive.
-toc: std.StringArrayHashMapUnmanaged(std.ArrayListUnmanaged(u32)) = .{},
-
-extnames_strtab: std.ArrayListUnmanaged(u8) = .{},
+offsets: std.AutoHashMapUnmanaged(u32, void) = .{},
+extnames_strtab: []const u8 = &[0]u8{},
 
 // Archive files start with the ARMAG identifying string.  Then follows a
 // `struct ar_hdr', and as many bytes of member file data as its `ar_size'
@@ -67,19 +63,14 @@ pub fn isValidMagic(magic: []const u8) bool {
 }
 
 pub fn deinit(self: *Archive, allocator: Allocator) void {
-    self.extnames_strtab.deinit(allocator);
-    for (self.toc.keys()) |*key| {
-        allocator.free(key.*);
-    }
-    for (self.toc.values()) |*value| {
-        value.deinit(allocator);
-    }
-    self.toc.deinit(allocator);
-    allocator.free(self.name);
+    self.offsets.deinit(allocator);
 }
 
-pub fn parse(self: *Archive, allocator: Allocator, elf_file: *Elf) !void {
-    const reader = self.file.reader();
+pub fn parse(self: *Archive, elf_file: *Elf) !void {
+    const gpa = elf_file.base.allocator;
+
+    var stream = std.io.fixedBufferStream(self.data);
+    const reader = stream.reader();
     _ = try reader.readBytesNoEof(SARMAG);
 
     {
@@ -89,11 +80,10 @@ pub fn parse(self: *Archive, allocator: Allocator, elf_file: *Elf) !void {
         if (!mem.eql(u8, &hdr.ar_fmag, ARFMAG)) {
             return elf_file.base.fatal(
                 "{s}: invalid header delimiter: expected '{s}', found '{s}'",
-                .{ self.name, ARFMAG, hdr.ar_fmag },
+                .{ self.name, std.fmt.fmtSliceEscapeLower(ARFMAG), std.fmt.fmtSliceEscapeLower(&hdr.ar_fmag) },
             );
         }
 
-        const size = try hdr.size();
         const ar_name = ar_hdr.getValue(&hdr.ar_name);
 
         if (!mem.eql(u8, ar_name, "/")) {
@@ -103,41 +93,19 @@ pub fn parse(self: *Archive, allocator: Allocator, elf_file: *Elf) !void {
             );
         }
 
-        var buffer = try allocator.alloc(u8, size);
-        defer allocator.free(buffer);
+        const checkpoint = try stream.getPos();
+        const size = try hdr.size();
+        const nsyms = try reader.readIntBig(u32);
 
-        try reader.readNoEof(buffer);
-
-        var inner_stream = std.io.fixedBufferStream(buffer);
-        var inner_reader = inner_stream.reader();
-
-        const nsyms = try inner_reader.readIntBig(u32);
-
-        var offsets = std.ArrayList(u32).init(allocator);
-        defer offsets.deinit();
-        try offsets.ensureTotalCapacity(nsyms);
+        try self.offsets.ensureTotalCapacity(gpa, nsyms);
 
         var i: usize = 0;
         while (i < nsyms) : (i += 1) {
-            const offset = try inner_reader.readIntBig(u32);
-            offsets.appendAssumeCapacity(offset);
+            const offset = try reader.readIntBig(u32);
+            self.offsets.putAssumeCapacity(offset, {});
         }
 
-        i = 0;
-        var pos: usize = try inner_stream.getPos();
-        while (i < nsyms) : (i += 1) {
-            const sym_name = mem.sliceTo(@ptrCast([*:0]const u8, buffer.ptr + pos), 0);
-            const owned_name = try allocator.dupe(u8, sym_name);
-            const res = try self.toc.getOrPut(allocator, owned_name);
-            defer if (res.found_existing) allocator.free(owned_name);
-
-            if (!res.found_existing) {
-                res.value_ptr.* = .{};
-            }
-
-            try res.value_ptr.append(allocator, offsets.items[i]);
-            pos += sym_name.len + 1;
-        }
+        try stream.seekTo(checkpoint + size);
     }
 
     blk: {
@@ -147,7 +115,7 @@ pub fn parse(self: *Archive, allocator: Allocator, elf_file: *Elf) !void {
         if (!mem.eql(u8, &hdr.ar_fmag, ARFMAG)) {
             return elf_file.base.fatal(
                 "{s}: invalid header delimiter: expected '{s}', found '{s}'",
-                .{ self.name, ARFMAG, hdr.ar_fmag },
+                .{ self.name, std.fmt.fmtSliceEscapeLower(ARFMAG), std.fmt.fmtSliceEscapeLower(&hdr.ar_fmag) },
             );
         }
 
@@ -158,33 +126,25 @@ pub fn parse(self: *Archive, allocator: Allocator, elf_file: *Elf) !void {
             break :blk;
         }
 
-        var buffer = try allocator.alloc(u8, size);
-        defer allocator.free(buffer);
-
-        try reader.readNoEof(buffer);
-        try self.extnames_strtab.appendSlice(allocator, buffer);
+        self.extnames_strtab = self.data[stream.pos..][0..size];
     }
-
-    try reader.context.seekTo(0);
 }
 
 fn getExtName(self: Archive, off: u32) []const u8 {
-    assert(off < self.extnames_strtab.items.len);
-    return mem.sliceTo(@ptrCast([*:'\n']const u8, self.extnames_strtab.items.ptr + off), 0);
+    assert(off < self.extnames_strtab.len);
+    return mem.sliceTo(@ptrCast([*:'\n']const u8, self.extnames_strtab.ptr + off), 0);
 }
 
-pub fn getObject(self: Archive, offset: u32, elf_file: *Elf) !Object {
-    const gpa = elf_file.base.allocator;
-
-    const reader = self.file.reader();
-    try reader.context.seekTo(offset);
+pub fn getObject(self: Archive, arena: Allocator, offset: u32, elf_file: *Elf) !Object {
+    var stream = std.io.fixedBufferStream(self.data[offset..]);
+    const reader = stream.reader();
 
     const hdr = try reader.readStruct(ar_hdr);
 
     if (!mem.eql(u8, &hdr.ar_fmag, ARFMAG)) {
         elf_file.base.fatal(
             "{s}: invalid header delimiter: expected '{s}', found '{s}'",
-            .{ self.name, ARFMAG, hdr.ar_fmag },
+            .{ self.name, std.fmt.fmtSliceEscapeLower(ARFMAG), std.fmt.fmtSliceEscapeLower(&hdr.ar_fmag) },
         );
         return error.InvalidHeader;
     }
@@ -195,29 +155,21 @@ pub fn getObject(self: Archive, offset: u32, elf_file: *Elf) !Object {
             const off = try std.fmt.parseInt(u32, name[1..], 10);
             break :blk self.getExtName(off);
         }
-        break :blk name;
+        break :blk try arena.dupe(u8, name);
     };
     const object_name = name[0 .. name.len - 1]; // to account for trailing '/'
 
     log.debug("extracting object '{s}' from archive '{s}'", .{ object_name, self.name });
 
-    const full_name = blk: {
-        var buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
-        const path = try std.os.realpath(self.name, &buffer);
-        break :blk try std.fmt.allocPrint(gpa, "{s}({s})", .{ path, object_name });
-    };
-    errdefer gpa.free(full_name);
-
     const object_size = try hdr.size();
-    const data = try gpa.alloc(u8, object_size);
-    errdefer gpa.free(data);
 
-    const amt = try reader.readAll(data);
-    if (amt != object_size) {
-        return error.Io;
-    }
-
-    return .{ .name = full_name, .data = data, .object_id = undefined };
+    return .{
+        .archive = self.name,
+        .name = object_name,
+        .data = self.data[offset + stream.pos ..][0..object_size],
+        .index = undefined,
+        .alive = false,
+    };
 }
 
 const std = @import("std");

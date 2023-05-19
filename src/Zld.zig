@@ -23,8 +23,9 @@ pub const OutputMode = enum {
 };
 
 pub const SystemLib = struct {
-    needed: bool = false,
+    needed: bool = true,
     weak: bool = false,
+    static: bool = false,
 };
 
 pub const LinkObject = struct {
@@ -211,7 +212,10 @@ pub fn reportWarningsAndErrors(base: *Zld) !void {
 }
 
 pub fn reportWarningsAndErrorsAndExit(base: *Zld) void {
-    base.reportWarningsAndErrors() catch process.exit(1);
+    base.reportWarningsAndErrors() catch {
+        base.deinit();
+        process.exit(1);
+    };
 }
 
 const std = @import("std");

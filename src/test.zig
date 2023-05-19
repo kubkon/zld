@@ -253,12 +253,12 @@ pub const TestContext = struct {
             });
 
             var libs = std.StringArrayHashMap(Zld.SystemLib).init(arena);
-            var lib_dirs = std.ArrayList([]const u8).init(arena);
+            var search_dirs = std.ArrayList([]const u8).init(arena);
             var frameworks = std.StringArrayHashMap(Zld.SystemLib).init(arena);
             var framework_dirs = std.ArrayList([]const u8).init(arena);
             var force_undefined_symbols = std.StringArrayHashMap(void).init(arena);
 
-            try lib_dirs.append(lib_dir);
+            try search_dirs.append(lib_dir);
 
             const host = try std.zig.system.NativeTargetInfo.detect(.{});
             const target_info = try std.zig.system.NativeTargetInfo.detect(case.target);
@@ -266,7 +266,7 @@ pub const TestContext = struct {
 
             if (case.target.isDarwin()) {
                 try libs.put("System", .{});
-                try lib_dirs.append("test/assets/any-macos-none");
+                try search_dirs.append("test/assets/any-macos-none");
             }
 
             const tag: Zld.Tag = switch (case.target.os_tag.?) {
@@ -290,7 +290,7 @@ pub const TestContext = struct {
                     .positionals = objects.items,
                     .libs = libs,
                     .frameworks = frameworks,
-                    .lib_dirs = lib_dirs.items,
+                    .lib_dirs = search_dirs.items,
                     .framework_dirs = framework_dirs.items,
                     .rpath_list = &[0][]const u8{},
                     .dead_strip = true,
@@ -304,7 +304,7 @@ pub const TestContext = struct {
                     .output_mode = .exe,
                     .positionals = objects.items,
                     .libs = libs,
-                    .lib_dirs = lib_dirs.items,
+                    .search_dirs = search_dirs.items,
                     .rpath_list = &[0][]const u8{},
                     .gc_sections = true,
                 } },
