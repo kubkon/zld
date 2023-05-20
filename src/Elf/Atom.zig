@@ -260,8 +260,50 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
 
             elf.R_X86_64_GOTPCREL,
             elf.R_X86_64_GOTPCRELX,
-            elf.R_X86_64_REX_GOTPCRELX,
             => {
+                const target_addr = if (target.flags.got) blk: {
+                    const extra = target.getExtra(elf_file).?;
+                    break :blk elf_file.getGotAddress() + extra.got * @sizeOf(u64);
+                } else target.value;
+                const displacement = @intCast(i32, @intCast(i64, target_addr) - source_addr + rel.r_addend);
+                relocs_log.debug("  {}: {x}: [0x{x} => 0x{x}] ({s})", .{
+                    fmtRelocType(r_type),
+                    rel.r_offset,
+                    source_addr,
+                    target_addr,
+                    target_name,
+                });
+                try cwriter.writeIntLittle(i32, displacement);
+            },
+
+            elf.R_X86_64_REX_GOTPCRELX => {
+                if (!target.import and !target.isAbs(elf_file)) blk: {
+                    var disas = Disassembler.init(code[rel.r_offset - 3 ..]);
+                    var inst = (try disas.next()) orelse unreachable;
+                    relocs_log.debug("  relaxing {}", .{fmtRelocType(r_type)});
+                    const disp = @intCast(i32, @intCast(i64, target.value) - source_addr + rel.r_addend);
+                    inst.ops[1].mem.rip.disp = disp;
+                    const new_inst = switch (inst.encoding.mnemonic) {
+                        .mov => try Instruction.new(inst.prefix, .lea, &inst.ops),
+                        .cmp => try Instruction.new(inst.prefix, .cmp, &.{
+                            inst.ops[0],
+                            // TODO: hack to force imm32s in the assembler
+                            .{ .imm = Immediate.s(-129) },
+                        }),
+                        else => break :blk,
+                    };
+                    relocs_log.debug("    {} => {}", .{ inst, new_inst });
+                    relocs_log.debug("  {}: {x}: [0x{x} => 0x{x}] ({s})", .{
+                        fmtRelocType(r_type),
+                        rel.r_offset,
+                        source_addr,
+                        target.value,
+                        target_name,
+                    });
+                    try stream.seekBy(-3);
+                    try new_inst.encode(cwriter, .{});
+                    continue;
+                }
                 const target_addr = if (target.flags.got) blk: {
                     const extra = target.getExtra(elf_file).?;
                     break :blk elf_file.getGotAddress() + extra.got * @sizeOf(u64);
