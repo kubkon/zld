@@ -10,6 +10,8 @@ files: std.MultiArrayList(File) = .{},
 sections: std.MultiArrayList(Section) = .{},
 phdrs: std.ArrayListUnmanaged(elf.Elf64_Phdr) = .{},
 
+tls_phdr_index: ?u16 = null,
+
 text_sect_index: ?u16 = null,
 plt_sect_index: ?u16 = null,
 got_sect_index: ?u16 = null,
@@ -595,20 +597,20 @@ fn initPhdrs(self: *Elf) !void {
                 shndx += 1;
                 continue;
             }
-            var last_phdr = try self.addPhdr(.{
+            self.tls_phdr_index = try self.addPhdr(.{
                 .type = elf.PT_TLS,
                 .flags = elf.PF_R,
                 .@"align" = shdr.sh_addralign,
                 .offset = shdr.sh_offset,
                 .addr = shdr.sh_addr,
             });
-            try self.addShdrToPhdr(last_phdr, shdr);
+            try self.addShdrToPhdr(self.tls_phdr_index.?, shdr);
             shndx += 1;
 
             while (shndx < slice.len) : (shndx += 1) {
                 const next = &slice.items(.shdr)[shndx];
                 if (!shdrIsTls(next)) continue :outer;
-                try self.addShdrToPhdr(last_phdr, next);
+                try self.addShdrToPhdr(self.tls_phdr_index.?, next);
             }
         }
     }
@@ -1646,6 +1648,24 @@ pub fn getOrCreateGlobal(self: *Elf, name: [:0]const u8) !GetOrCreateGlobalResul
         .found_existing = gop.found_existing,
         .index = gop.value_ptr.*,
     };
+}
+
+pub fn getGotAddress(self: *Elf) u64 {
+    const shndx = self.got_sect_index orelse return 0;
+    const shdr = self.sections.items(.shdr)[shndx];
+    return shdr.sh_addr;
+}
+
+pub fn getTpAddress(self: *Elf) u64 {
+    const index = self.tls_phdr_index orelse return 0;
+    const phdr = self.phdrs.items[index];
+    return mem.alignForwardGeneric(u64, phdr.p_vaddr + phdr.p_memsz, phdr.p_align);
+}
+
+pub fn getDtpAddress(self: *Elf) u64 {
+    const index = self.tls_phdr_index orelse return 0;
+    const phdr = self.phdrs.items[index];
+    return phdr.p_vaddr;
 }
 
 fn fmtSections(self: *Elf) std.fmt.Formatter(formatSections) {

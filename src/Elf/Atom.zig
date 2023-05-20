@@ -204,14 +204,20 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
 
     relocs_log.debug("{x}: {s}", .{ self.value, self.getName(elf_file) });
 
+    var stream = std.io.fixedBufferStream(code);
+    const cwriter = stream.writer();
+
     for (relocs) |rel| {
         const target = object.getSymbol(rel.r_sym(), elf_file);
         const target_name = target.getName(elf_file);
         const source_addr = @intCast(i64, self.value + rel.r_offset);
 
+        try stream.seekTo(rel.r_offset);
+
         const r_type = rel.r_type();
         switch (r_type) {
             elf.R_X86_64_NONE => {},
+
             elf.R_X86_64_64 => {
                 const target_addr = @intCast(i64, target.value) + rel.r_addend;
                 relocs_log.debug("  {}: {x}: [() => 0x{x}] ({s})", .{
@@ -220,8 +226,9 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
                     target_addr,
                     target_name,
                 });
-                mem.writeIntLittle(i64, code[rel.r_offset..][0..8], target_addr);
+                try cwriter.writeIntLittle(i64, target_addr);
             },
+
             elf.R_X86_64_PLT32 => {
                 const target_addr = if (target.flags.plt) blk: {
                     const extra = target.getExtra(elf_file).?;
@@ -236,8 +243,9 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
                     target_addr,
                     target_name,
                 });
-                mem.writeIntLittle(i32, code[rel.r_offset..][0..4], displacement);
+                try cwriter.writeIntLittle(i32, displacement);
             },
+
             elf.R_X86_64_PC32 => {
                 const displacement = @intCast(i32, @intCast(i64, target.value) - source_addr + rel.r_addend);
                 relocs_log.debug("  {}: {x}: [0x{x} => 0x{x}] ({s})", .{
@@ -247,16 +255,16 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
                     target.value,
                     target_name,
                 });
-                mem.writeIntLittle(i32, code[rel.r_offset..][0..4], displacement);
+                try cwriter.writeIntLittle(i32, displacement);
             },
+
             elf.R_X86_64_GOTPCREL,
             elf.R_X86_64_GOTPCRELX,
             elf.R_X86_64_REX_GOTPCRELX,
             => {
                 const target_addr = if (target.flags.got) blk: {
                     const extra = target.getExtra(elf_file).?;
-                    const base = elf_file.sections.items(.shdr)[elf_file.got_sect_index.?].sh_addr;
-                    break :blk base + extra.got * @sizeOf(u64);
+                    break :blk elf_file.getGotAddress() + extra.got * @sizeOf(u64);
                 } else target.value;
                 const displacement = @intCast(i32, @intCast(i64, target_addr) - source_addr + rel.r_addend);
                 relocs_log.debug("  {}: {x}: [0x{x} => 0x{x}] ({s})", .{
@@ -266,57 +274,36 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
                     target_addr,
                     target_name,
                 });
-                mem.writeIntLittle(i32, code[rel.r_offset..][0..4], displacement);
+                try cwriter.writeIntLittle(i32, displacement);
             },
+
             elf.R_X86_64_32 => {
                 const target_addr = @intCast(i64, target.value) + rel.r_addend;
-                const scaled = math.cast(u32, target_addr) orelse blk: {
-                    elf_file.base.fatal("{s}: {}: {x}: target value overflows 32 bits: '{s}' at {x}", .{
-                        object.name,
-                        fmtRelocType(r_type),
-                        source_addr,
-                        target_name,
-                        target_addr,
-                    });
-                    break :blk 0;
-                };
+                const scaled = @truncate(u32, @intCast(u64, target_addr));
                 relocs_log.debug("  {}: {x}: [() => 0x{x}] ({s})", .{
                     fmtRelocType(r_type),
                     rel.r_offset,
                     scaled,
                     target_name,
                 });
-                mem.writeIntLittle(u32, code[rel.r_offset..][0..4], scaled);
+                try cwriter.writeIntLittle(u32, scaled);
             },
+
             elf.R_X86_64_32S => {
                 const target_addr = @intCast(i64, target.value) + rel.r_addend;
-                const scaled = math.cast(i32, target_addr) orelse blk: {
-                    elf_file.base.fatal("{s}: {}: {x}: target value overflows 32 bits: '{s}' at {x}", .{
-                        object.name,
-                        fmtRelocType(r_type),
-                        source_addr,
-                        target_name,
-                        target_addr,
-                    });
-                    break :blk 0;
-                };
+                const scaled = @truncate(i32, target_addr);
                 relocs_log.debug("  {}: {x}: [() => 0x{x}] ({s})", .{
                     fmtRelocType(r_type),
                     rel.r_offset,
                     scaled,
                     target_name,
                 });
-                mem.writeIntLittle(i32, code[rel.r_offset..][0..4], scaled);
+                try cwriter.writeIntLittle(i32, scaled);
             },
-            elf.R_X86_64_DTPOFF32, elf.R_X86_64_TPOFF32 => {
+
+            elf.R_X86_64_TPOFF32 => {
                 const target_addr = @intCast(i64, target.value) + rel.r_addend;
-                const tp_addr = blk: {
-                    const phdr = for (elf_file.phdrs.items) |phdr| switch (phdr.p_type) {
-                        elf.PT_TLS => break phdr,
-                        else => {},
-                    } else null;
-                    break :blk @intCast(i64, phdr.?.p_vaddr + phdr.?.p_memsz);
-                };
+                const tp_addr = @intCast(i64, elf_file.getTpAddress());
                 const actual_target_addr = @truncate(i32, target_addr - tp_addr);
                 relocs_log.debug("  {}: {x}: [() => 0x{x}] ({s})", .{
                     fmtRelocType(r_type),
@@ -324,11 +311,49 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
                     actual_target_addr,
                     target_name,
                 });
-                mem.writeIntLittle(i32, code[rel.r_offset..][0..4], actual_target_addr);
+                try cwriter.writeIntLittle(i32, actual_target_addr);
             },
-            else => {
-                elf_file.base.fatal("unhandled relocation type: {}", .{fmtRelocType(r_type)});
+
+            elf.R_X86_64_TPOFF64 => {
+                const target_addr = @intCast(i64, target.value) + rel.r_addend;
+                const tp_addr = @intCast(i64, elf_file.getTpAddress());
+                const actual_target_addr = target_addr - tp_addr;
+                relocs_log.debug("  {}: {x}: [() => 0x{x}] ({s})", .{
+                    fmtRelocType(r_type),
+                    rel.r_offset,
+                    actual_target_addr,
+                    target_name,
+                });
+                try cwriter.writeIntLittle(i64, actual_target_addr);
             },
+
+            elf.R_X86_64_DTPOFF32 => {
+                const target_addr = @intCast(i64, target.value) + rel.r_addend;
+                const dtp_addr = @intCast(i64, elf_file.getDtpAddress());
+                const actual_target_addr = @truncate(i32, target_addr - dtp_addr);
+                relocs_log.debug("  {}: {x}: [() => 0x{x}] ({s})", .{
+                    fmtRelocType(r_type),
+                    rel.r_offset,
+                    actual_target_addr,
+                    target_name,
+                });
+                try cwriter.writeIntLittle(i32, actual_target_addr);
+            },
+
+            elf.R_X86_64_DTPOFF64 => {
+                const target_addr = @intCast(i64, target.value) + rel.r_addend;
+                const dtp_addr = @intCast(i64, elf_file.getDtpAddress());
+                const actual_target_addr = target_addr - dtp_addr;
+                relocs_log.debug("  {}: {x}: [() => 0x{x}] ({s})", .{
+                    fmtRelocType(r_type),
+                    rel.r_offset,
+                    actual_target_addr,
+                    target_name,
+                });
+                try cwriter.writeIntLittle(i64, actual_target_addr);
+            },
+
+            else => elf_file.base.fatal("unhandled relocation type: {}", .{fmtRelocType(r_type)}),
         }
     }
 
