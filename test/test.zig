@@ -29,7 +29,7 @@ const all_targets: []const CrossTarget = &.{
 
 pub fn addCases(ctx: *TestContext) !void {
     // All targets
-    for (macos_targets) |target| {
+    for (all_targets) |target| {
         {
             var case = try ctx.addCase("hello world in Zig", target);
             try case.addInput("hello.zig",
@@ -110,9 +110,7 @@ pub fn addCases(ctx: *TestContext) !void {
                 \\
             );
         }
-    }
 
-    for (all_targets) |target| {
         {
             var case = try ctx.addCase("hello world in C", target);
             try case.addInput("main.c",

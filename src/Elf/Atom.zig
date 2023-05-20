@@ -395,6 +395,35 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
                 try cwriter.writeIntLittle(i64, actual_target_addr);
             },
 
+            elf.R_X86_64_GOTTPOFF => {
+                var disas = Disassembler.init(code[rel.r_offset - 3 ..]);
+                var inst = (try disas.next()) orelse unreachable;
+                const target_addr = @intCast(i64, target.value) - @intCast(i64, elf_file.getTpAddress());
+                relocs_log.debug("  relaxing {}", .{fmtRelocType(r_type)});
+                var new_inst = switch (inst.encoding.mnemonic) {
+                    .mov => try Instruction.new(inst.prefix, .mov, &.{
+                        inst.ops[0],
+                        // TODO: hack to force imm32s in the assembler
+                        .{ .imm = Immediate.s(-129) },
+                    }),
+                    else => {
+                        elf_file.base.fatal("TODO rewrite GOTTPOFF", .{});
+                        continue;
+                    },
+                };
+                new_inst.ops[1].imm = Immediate.s(@intCast(i32, target_addr));
+                relocs_log.debug("    {} => {}", .{ inst, new_inst });
+                relocs_log.debug("  {}: {x}: [0x{x} => 0x{x}] ({s})", .{
+                    fmtRelocType(r_type),
+                    rel.r_offset,
+                    source_addr,
+                    target_addr,
+                    target_name,
+                });
+                try stream.seekBy(-3);
+                try new_inst.encode(cwriter, .{});
+            },
+
             else => elf_file.base.fatal("unhandled relocation type: {}", .{fmtRelocType(r_type)}),
         }
     }
