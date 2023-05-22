@@ -70,7 +70,7 @@ pub fn getSymbolRank(symbol: Symbol, elf_file: *Elf) u32 {
         .object => |x| !x.alive,
         else => false,
     };
-    return file.deref().getSymbolRank(sym, in_archive);
+    return file.getSymbolRank(sym, in_archive);
 }
 
 pub inline fn getGotAddress(symbol: Symbol, elf_file: *Elf) u64 {
