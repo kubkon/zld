@@ -1141,21 +1141,21 @@ fn validateOrSetCpuArch(self: *Elf, name: []const u8, cpu_arch: std.Target.Cpu.A
 /// 6. Re-run symbol resolution on pruned objects and shared objects sets.
 fn resolveSymbols(self: *Elf) !void {
     // Resolve symbols on the set of all objects and shared objects (even if some are unneeded).
-    for (self.objects.items) |index| self.getFile(index).?.deref().resolveSymbols(self);
-    for (self.shared_objects.items) |index| self.getFile(index).?.deref().resolveSymbols(self);
+    for (self.objects.items) |index| self.getFile(index).?.resolveSymbols(self);
+    for (self.shared_objects.items) |index| self.getFile(index).?.resolveSymbols(self);
 
     // Mark live objects.
     self.markLive();
 
     // Reset state of all globals after marking live objects.
-    for (self.objects.items) |index| self.getFile(index).?.deref().resetGlobals(self);
-    for (self.shared_objects.items) |index| self.getFile(index).?.deref().resetGlobals(self);
+    for (self.objects.items) |index| self.getFile(index).?.resetGlobals(self);
+    for (self.shared_objects.items) |index| self.getFile(index).?.resetGlobals(self);
 
     // Prune dead objects and shared objects.
     var i: usize = 0;
     while (i < self.objects.items.len) {
         const index = self.objects.items[i];
-        if (!self.getFile(index).?.deref().isAlive()) {
+        if (!self.getFile(index).?.isAlive()) {
             _ = self.objects.swapRemove(i);
         } else i += 1;
     }
@@ -1163,14 +1163,14 @@ fn resolveSymbols(self: *Elf) !void {
     i = 0;
     while (i < self.shared_objects.items.len) {
         const index = self.shared_objects.items[i];
-        if (!self.getFile(index).?.deref().isAlive()) {
+        if (!self.getFile(index).?.isAlive()) {
             _ = self.shared_objects.swapRemove(i);
         } else i += 1;
     }
 
     // Re-resolve the symbols.
-    for (self.objects.items) |index| self.getFile(index).?.deref().resolveSymbols(self);
-    for (self.shared_objects.items) |index| self.getFile(index).?.deref().resolveSymbols(self);
+    for (self.objects.items) |index| self.getFile(index).?.resolveSymbols(self);
+    for (self.shared_objects.items) |index| self.getFile(index).?.resolveSymbols(self);
 }
 
 /// Traverses all objects and shared objects marking any object referenced by
@@ -1180,11 +1180,11 @@ fn resolveSymbols(self: *Elf) !void {
 fn markLive(self: *Elf) void {
     for (self.objects.items) |index| {
         const file = self.getFile(index).?;
-        if (file.deref().isAlive()) file.markLive(self);
+        if (file.isAlive()) file.markLive(self);
     }
     for (self.shared_objects.items) |index| {
         const file = self.getFile(index).?;
-        if (file.deref().isAlive()) file.markLive(self);
+        if (file.isAlive()) file.markLive(self);
     }
 }
 
@@ -1778,38 +1778,42 @@ pub const File = union(enum) {
     object: Object,
     shared: SharedObject,
 
-    pub fn getIndex(file: File) Index {
+    pub const Index = u32;
+};
+
+pub const FilePtr = union(enum) {
+    internal: *InternalObject,
+    object: *Object,
+    shared: *SharedObject,
+
+    pub fn getIndex(file: FilePtr) File.Index {
         return switch (file) {
-            .null => unreachable,
             inline else => |x| x.index,
         };
     }
 
-    pub fn getPath(file: File) []const u8 {
+    pub fn getPath(file: FilePtr) []const u8 {
         return switch (file) {
-            .null, .internal => unreachable,
+            .internal => unreachable,
             .object => |x| x.name, // TODO wrap in archive path if extracted
             .shared => |x| x.name,
         };
     }
 
-    fn resolveSymbols(file: File, elf_file: *Elf) void {
+    fn resolveSymbols(file: FilePtr, elf_file: *Elf) void {
         switch (file) {
-            .null => unreachable,
             inline else => |x| x.resolveSymbols(elf_file),
         }
     }
 
-    fn resetGlobals(file: File, elf_file: *Elf) void {
+    fn resetGlobals(file: FilePtr, elf_file: *Elf) void {
         switch (file) {
-            .null => unreachable,
             inline else => |x| x.resetGlobals(elf_file),
         }
     }
 
-    pub fn isAlive(file: File) bool {
+    pub fn isAlive(file: FilePtr) bool {
         return switch (file) {
-            .null => unreachable,
             inline else => |x| x.alive,
         };
     }
@@ -1820,7 +1824,7 @@ pub const File = union(enum) {
     /// * strong in lib (dso/archive)
     /// * weak in lib (dso/archive)
     /// * unclaimed
-    pub fn getSymbolRank(file: File, sym: elf.Elf64_Sym, in_archive: bool) u32 {
+    pub fn getSymbolRank(file: FilePtr, sym: elf.Elf64_Sym, in_archive: bool) u32 {
         const base: u4 = blk: {
             if (file == .shared or in_archive) break :blk switch (sym.st_bind()) {
                 elf.STB_GLOBAL => 3,
@@ -1834,30 +1838,14 @@ pub const File = union(enum) {
         return (@as(u32, base) << 24) + file.getIndex();
     }
 
-    pub const Index = u32;
-};
-
-pub const FilePtr = union(enum) {
-    internal: *InternalObject,
-    object: *Object,
-    shared: *SharedObject,
-
-    pub fn deref(ptr: FilePtr) File {
-        return switch (ptr) {
-            .internal => |x| .{ .internal = x.* },
-            .object => |x| .{ .object = x.* },
-            .shared => |x| .{ .shared = x.* },
-        };
-    }
-
-    pub fn setAlive(ptr: FilePtr) void {
-        switch (ptr) {
+    pub fn setAlive(file: FilePtr) void {
+        switch (file) {
             inline else => |x| x.alive = true,
         }
     }
 
-    pub fn markLive(ptr: FilePtr, elf_file: *Elf) void {
-        switch (ptr) {
+    pub fn markLive(file: FilePtr, elf_file: *Elf) void {
+        switch (file) {
             .internal => {},
             inline else => |x| x.markLive(elf_file),
         }
@@ -1878,7 +1866,7 @@ const DynamicSection = struct {
         dt.needed.deinit(allocator);
     }
 
-    fn addNeeded(dt: *DynamicSection, shared: *const SharedObject, elf_file: *Elf) !void {
+    fn addNeeded(dt: *DynamicSection, shared: *SharedObject, elf_file: *Elf) !void {
         const gpa = elf_file.base.allocator;
         const off = try elf_file.dynstrtab.insert(gpa, shared.getSoname());
         try dt.needed.append(gpa, off);
@@ -2091,7 +2079,7 @@ const SymtabSection = struct {
             for (object.getGlobals()) |global_index| {
                 const global = elf_file.getSymbol(global_index);
                 if (!global.isLocal()) continue;
-                if (global.getFile(elf_file)) |file| if (file.deref().getIndex() != index) continue;
+                if (global.getFile(elf_file)) |file| if (file.getIndex() != index) continue;
                 if (global.getAtom(elf_file)) |atom| if (!atom.is_alive) continue;
                 try symtab.symbols.append(gpa, .{
                     .index = global_index,
@@ -2104,7 +2092,7 @@ const SymtabSection = struct {
             const internal = elf_file.getFile(index).?.internal;
             for (internal.getGlobals()) |global_index| {
                 const global = elf_file.getSymbol(global_index);
-                if (global.getFile(elf_file)) |file| if (file.deref().getIndex() != index) continue;
+                if (global.getFile(elf_file)) |file| if (file.getIndex() != index) continue;
                 try symtab.symbols.append(gpa, .{
                     .index = global_index,
                     .off = try elf_file.strtab.insert(gpa, global.getName(elf_file)),
@@ -2120,7 +2108,7 @@ const SymtabSection = struct {
             for (object.getGlobals()) |global_index| {
                 const global = elf_file.getSymbol(global_index);
                 if (global.isLocal()) continue;
-                if (global.getFile(elf_file)) |file| if (file.deref().getIndex() != index) continue;
+                if (global.getFile(elf_file)) |file| if (file.getIndex() != index) continue;
                 if (global.getAtom(elf_file)) |atom| if (!atom.is_alive) continue;
                 try symtab.symbols.append(gpa, .{
                     .index = global_index,
@@ -2134,7 +2122,7 @@ const SymtabSection = struct {
             for (shared.getGlobals()) |global_index| {
                 const global = elf_file.getSymbol(global_index);
                 if (global.isLocal()) continue;
-                if (global.getFile(elf_file)) |file| if (file.deref().getIndex() != index) continue;
+                if (global.getFile(elf_file)) |file| if (file.getIndex() != index) continue;
                 try symtab.symbols.append(gpa, .{
                     .index = global_index,
                     .off = try elf_file.strtab.insert(gpa, global.getName(elf_file)),

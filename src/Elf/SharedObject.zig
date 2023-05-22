@@ -70,7 +70,7 @@ fn initSymtab(self: *SharedObject, elf_file: *Elf) !void {
     }
 }
 
-pub fn resolveSymbols(self: SharedObject, elf_file: *Elf) void {
+pub fn resolveSymbols(self: *SharedObject, elf_file: *Elf) void {
     for (self.symbols.items, 0..) |index, i| {
         const sym_idx = @intCast(u32, i);
         const this_sym = self.symtab[sym_idx];
@@ -90,7 +90,7 @@ pub fn resolveSymbols(self: SharedObject, elf_file: *Elf) void {
     }
 }
 
-pub fn resetGlobals(self: SharedObject, elf_file: *Elf) void {
+pub fn resetGlobals(self: *SharedObject, elf_file: *Elf) void {
     for (self.symbols.items) |index| {
         const global = elf_file.getSymbol(index);
         const name = global.name;
@@ -106,33 +106,33 @@ pub fn markLive(self: *SharedObject, elf_file: *Elf) void {
 
         const global = elf_file.getSymbol(index);
         const file = global.getFile(elf_file) orelse continue;
-        if (!file.deref().isAlive()) {
+        if (!file.isAlive()) {
             file.setAlive();
             file.markLive(elf_file);
         }
     }
 }
 
-pub inline fn getShdrs(self: SharedObject) []align(1) const elf.Elf64_Shdr {
+pub inline fn getShdrs(self: *SharedObject) []align(1) const elf.Elf64_Shdr {
     const header = self.header orelse return &[0]elf.Elf64_Shdr{};
     return @ptrCast([*]align(1) const elf.Elf64_Shdr, self.data.ptr + header.e_shoff)[0..header.e_shnum];
 }
 
-pub inline fn getShdrContents(self: SharedObject, index: u16) []const u8 {
+pub inline fn getShdrContents(self: *SharedObject, index: u16) []const u8 {
     const shdr = self.getShdrs()[index];
     return self.data[shdr.sh_offset..][0..shdr.sh_size];
 }
 
-pub inline fn getString(self: SharedObject, off: u32) [:0]const u8 {
+pub inline fn getString(self: *SharedObject, off: u32) [:0]const u8 {
     assert(off < self.strtab.len);
     return mem.sliceTo(@ptrCast([*:0]const u8, self.strtab.ptr + off), 0);
 }
 
-pub fn asFile(self: SharedObject) Elf.File {
+pub fn asFile(self: *SharedObject) Elf.FilePtr {
     return .{ .shared = self };
 }
 
-pub fn getSoname(self: SharedObject) []const u8 {
+pub fn getSoname(self: *SharedObject) []const u8 {
     const shndx = self.dynamic_sect_index orelse return self.name;
     const data = self.getShdrContents(shndx);
     const nentries = @divExact(data.len, @sizeOf(elf.Elf64_Dyn));
@@ -144,12 +144,12 @@ pub fn getSoname(self: SharedObject) []const u8 {
     return soname;
 }
 
-pub inline fn getGlobals(self: SharedObject) []const u32 {
+pub inline fn getGlobals(self: *SharedObject) []const u32 {
     return self.symbols.items;
 }
 
 pub fn format(
-    self: SharedObject,
+    self: *SharedObject,
     comptime unused_fmt_string: []const u8,
     options: std.fmt.FormatOptions,
     writer: anytype,
@@ -161,7 +161,7 @@ pub fn format(
     @compileError("do not format shared objects directly");
 }
 
-pub fn fmtSymtab(self: *const SharedObject, elf_file: *Elf) std.fmt.Formatter(formatSymtab) {
+pub fn fmtSymtab(self: *SharedObject, elf_file: *Elf) std.fmt.Formatter(formatSymtab) {
     return .{ .data = .{
         .shared = self,
         .elf_file = elf_file,
@@ -169,7 +169,7 @@ pub fn fmtSymtab(self: *const SharedObject, elf_file: *Elf) std.fmt.Formatter(fo
 }
 
 const FormatContext = struct {
-    shared: *const SharedObject,
+    shared: *SharedObject,
     elf_file: *Elf,
 };
 

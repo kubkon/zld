@@ -25,7 +25,7 @@ pub fn addSyntheticGlobal(self: *InternalObject, name: [:0]const u8, elf_file: *
     return gop.index;
 }
 
-pub fn resolveSymbols(self: InternalObject, elf_file: *Elf) void {
+pub fn resolveSymbols(self: *InternalObject, elf_file: *Elf) void {
     for (self.symbols.items, 0..) |index, i| {
         const sym_idx = @intCast(u32, i);
         const this_sym = self.symtab.items[sym_idx];
@@ -45,7 +45,7 @@ pub fn resolveSymbols(self: InternalObject, elf_file: *Elf) void {
     }
 }
 
-pub fn resetGlobals(self: InternalObject, elf_file: *Elf) void {
+pub fn resetGlobals(self: *InternalObject, elf_file: *Elf) void {
     for (self.symbols.items) |index| {
         const global = elf_file.getSymbol(index);
         const name = global.name;
@@ -54,15 +54,15 @@ pub fn resetGlobals(self: InternalObject, elf_file: *Elf) void {
     }
 }
 
-pub fn asFile(self: InternalObject) Elf.File {
+pub fn asFile(self: *InternalObject) Elf.FilePtr {
     return .{ .internal = self };
 }
 
-pub inline fn getGlobals(self: InternalObject) []const u32 {
+pub inline fn getGlobals(self: *InternalObject) []const u32 {
     return self.symbols.items;
 }
 
-pub fn fmtSymtab(self: InternalObject, elf_file: *Elf) std.fmt.Formatter(formatSymtab) {
+pub fn fmtSymtab(self: *InternalObject, elf_file: *Elf) std.fmt.Formatter(formatSymtab) {
     return .{ .data = .{
         .self = self,
         .elf_file = elf_file,
@@ -70,7 +70,7 @@ pub fn fmtSymtab(self: InternalObject, elf_file: *Elf) std.fmt.Formatter(formatS
 }
 
 const FormatContext = struct {
-    self: InternalObject,
+    self: *InternalObject,
     elf_file: *Elf,
 };
 
