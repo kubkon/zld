@@ -211,6 +211,7 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
         const target = object.getSymbol(rel.r_sym(), elf_file);
         const target_name = target.getName(elf_file);
         const source_addr = @intCast(i64, self.value + rel.r_offset);
+        const target_addr = @intCast(i64, target.value) + rel.r_addend;
 
         try stream.seekTo(rel.r_offset);
 
@@ -219,7 +220,6 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
             elf.R_X86_64_NONE => {},
 
             elf.R_X86_64_64 => {
-                const target_addr = @intCast(i64, target.value) + rel.r_addend;
                 relocs_log.debug("  {}: {x}: [() => 0x{x}] ({s})", .{
                     fmtRelocType(r_type),
                     rel.r_offset,
@@ -230,12 +230,11 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
             },
 
             elf.R_X86_64_PLT32 => {
-                const target_addr = if (target.flags.plt) blk: {
-                    const extra = target.getExtra(elf_file).?;
-                    const base = elf_file.sections.items(.shdr)[elf_file.plt_sect_index.?].sh_addr;
-                    break :blk base + Elf.PltSection.plt_preamble_size + extra.plt * 16;
-                } else target.value;
-                const displacement = @intCast(i32, @intCast(i64, target_addr) - source_addr + rel.r_addend);
+                const actual_target_addr = if (target.flags.plt)
+                    @intCast(i64, target.getPltAddress(elf_file)) + rel.r_addend
+                else
+                    target_addr;
+                const displacement = @intCast(i32, actual_target_addr - source_addr);
                 relocs_log.debug("  {}: {x}: [0x{x} => 0x{x}] ({s})", .{
                     fmtRelocType(r_type),
                     rel.r_offset,
@@ -247,25 +246,7 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
             },
 
             elf.R_X86_64_PC32 => {
-                const displacement = @intCast(i32, @intCast(i64, target.value) - source_addr + rel.r_addend);
-                relocs_log.debug("  {}: {x}: [0x{x} => 0x{x}] ({s})", .{
-                    fmtRelocType(r_type),
-                    rel.r_offset,
-                    source_addr,
-                    target.value,
-                    target_name,
-                });
-                try cwriter.writeIntLittle(i32, displacement);
-            },
-
-            elf.R_X86_64_GOTPCREL,
-            elf.R_X86_64_GOTPCRELX,
-            => {
-                const target_addr = if (target.flags.got) blk: {
-                    const extra = target.getExtra(elf_file).?;
-                    break :blk elf_file.getGotAddress() + extra.got * @sizeOf(u64);
-                } else target.value;
-                const displacement = @intCast(i32, @intCast(i64, target_addr) - source_addr + rel.r_addend);
+                const displacement = @intCast(i32, target_addr - source_addr);
                 relocs_log.debug("  {}: {x}: [0x{x} => 0x{x}] ({s})", .{
                     fmtRelocType(r_type),
                     rel.r_offset,
@@ -276,12 +257,30 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
                 try cwriter.writeIntLittle(i32, displacement);
             },
 
+            elf.R_X86_64_GOTPCREL,
+            elf.R_X86_64_GOTPCRELX,
+            => {
+                const actual_target_addr = if (target.flags.got)
+                    @intCast(i64, target.getGotAddress(elf_file)) + rel.r_addend
+                else
+                    target_addr;
+                const displacement = @intCast(i32, actual_target_addr - source_addr);
+                relocs_log.debug("  {}: {x}: [0x{x} => 0x{x}] ({s})", .{
+                    fmtRelocType(r_type),
+                    rel.r_offset,
+                    source_addr,
+                    actual_target_addr,
+                    target_name,
+                });
+                try cwriter.writeIntLittle(i32, displacement);
+            },
+
             elf.R_X86_64_REX_GOTPCRELX => {
                 if (!target.import and !target.isAbs(elf_file)) blk: {
                     var disas = Disassembler.init(code[rel.r_offset - 3 ..]);
                     var inst = (try disas.next()) orelse unreachable;
                     relocs_log.debug("  relaxing {}", .{fmtRelocType(r_type)});
-                    const disp = @intCast(i32, @intCast(i64, target.value) - source_addr + rel.r_addend);
+                    const disp = @intCast(i32, target_addr - source_addr);
                     inst.ops[1].mem.rip.disp = disp;
                     const new_inst = switch (inst.encoding.mnemonic) {
                         .mov => try Instruction.new(inst.prefix, .lea, &inst.ops),
@@ -297,30 +296,29 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
                         fmtRelocType(r_type),
                         rel.r_offset,
                         source_addr,
-                        target.value,
+                        target_addr,
                         target_name,
                     });
                     try stream.seekBy(-3);
                     try new_inst.encode(cwriter, .{});
                     continue;
                 }
-                const target_addr = if (target.flags.got) blk: {
-                    const extra = target.getExtra(elf_file).?;
-                    break :blk elf_file.getGotAddress() + extra.got * @sizeOf(u64);
-                } else target.value;
-                const displacement = @intCast(i32, @intCast(i64, target_addr) - source_addr + rel.r_addend);
+                const actual_target_addr = if (target.flags.got)
+                    @intCast(i64, target.getGotAddress(elf_file)) + rel.r_addend
+                else
+                    target_addr;
+                const displacement = @intCast(i32, actual_target_addr - source_addr);
                 relocs_log.debug("  {}: {x}: [0x{x} => 0x{x}] ({s})", .{
                     fmtRelocType(r_type),
                     rel.r_offset,
                     source_addr,
-                    target_addr,
+                    actual_target_addr,
                     target_name,
                 });
                 try cwriter.writeIntLittle(i32, displacement);
             },
 
             elf.R_X86_64_32 => {
-                const target_addr = @intCast(i64, target.value) + rel.r_addend;
                 const scaled = @truncate(u32, @intCast(u64, target_addr));
                 relocs_log.debug("  {}: {x}: [() => 0x{x}] ({s})", .{
                     fmtRelocType(r_type),
@@ -332,7 +330,6 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
             },
 
             elf.R_X86_64_32S => {
-                const target_addr = @intCast(i64, target.value) + rel.r_addend;
                 const scaled = @truncate(i32, target_addr);
                 relocs_log.debug("  {}: {x}: [() => 0x{x}] ({s})", .{
                     fmtRelocType(r_type),
@@ -344,7 +341,6 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
             },
 
             elf.R_X86_64_TPOFF32 => {
-                const target_addr = @intCast(i64, target.value) + rel.r_addend;
                 const tp_addr = @intCast(i64, elf_file.getTpAddress());
                 const actual_target_addr = @truncate(i32, target_addr - tp_addr);
                 relocs_log.debug("  {}: {x}: [() => 0x{x}] ({s})", .{
@@ -357,7 +353,6 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
             },
 
             elf.R_X86_64_TPOFF64 => {
-                const target_addr = @intCast(i64, target.value) + rel.r_addend;
                 const tp_addr = @intCast(i64, elf_file.getTpAddress());
                 const actual_target_addr = target_addr - tp_addr;
                 relocs_log.debug("  {}: {x}: [() => 0x{x}] ({s})", .{
@@ -370,7 +365,6 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
             },
 
             elf.R_X86_64_DTPOFF32 => {
-                const target_addr = @intCast(i64, target.value) + rel.r_addend;
                 const dtp_addr = @intCast(i64, elf_file.getDtpAddress());
                 const actual_target_addr = @truncate(i32, target_addr - dtp_addr);
                 relocs_log.debug("  {}: {x}: [() => 0x{x}] ({s})", .{
@@ -383,7 +377,6 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
             },
 
             elf.R_X86_64_DTPOFF64 => {
-                const target_addr = @intCast(i64, target.value) + rel.r_addend;
                 const dtp_addr = @intCast(i64, elf_file.getDtpAddress());
                 const actual_target_addr = target_addr - dtp_addr;
                 relocs_log.debug("  {}: {x}: [() => 0x{x}] ({s})", .{
@@ -398,7 +391,7 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
             elf.R_X86_64_GOTTPOFF => {
                 var disas = Disassembler.init(code[rel.r_offset - 3 ..]);
                 var inst = (try disas.next()) orelse unreachable;
-                const target_addr = @intCast(i64, target.value) - @intCast(i64, elf_file.getTpAddress());
+                const actual_target_addr = @intCast(i64, target.value) - @intCast(i64, elf_file.getTpAddress());
                 relocs_log.debug("  relaxing {}", .{fmtRelocType(r_type)});
                 var new_inst = switch (inst.encoding.mnemonic) {
                     .mov => try Instruction.new(inst.prefix, .mov, &.{
@@ -411,13 +404,13 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
                         continue;
                     },
                 };
-                new_inst.ops[1].imm = Immediate.s(@intCast(i32, target_addr));
+                new_inst.ops[1].imm = Immediate.s(@intCast(i32, actual_target_addr));
                 relocs_log.debug("    {} => {}", .{ inst, new_inst });
                 relocs_log.debug("  {}: {x}: [0x{x} => 0x{x}] ({s})", .{
                     fmtRelocType(r_type),
                     rel.r_offset,
                     source_addr,
-                    target_addr,
+                    actual_target_addr,
                     target_name,
                 });
                 try stream.seekBy(-3);
