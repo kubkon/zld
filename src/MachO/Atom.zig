@@ -898,7 +898,7 @@ fn resolveRelocsX86(
                     const writer = stream.writer();
 
                     const new_inst = try Instruction.new(inst.prefix, .lea, &inst.ops);
-                    try new_inst.encode(writer);
+                    try new_inst.encode(writer, .{});
                 } else {
                     mem.writeIntLittle(i32, atom_code[rel_offset..][0..4], disp);
                 }
