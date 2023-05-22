@@ -195,6 +195,38 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
     }
 }
 
+fn getTargetAddress(symbol: *const Symbol, r_type: u32, elf_file: *Elf) u64 {
+    return switch (r_type) {
+        elf.R_X86_64_NONE => unreachable,
+
+        elf.R_X86_64_64,
+        elf.R_X86_64_32,
+        elf.R_X86_64_32S,
+        elf.R_X86_64_PC32,
+        elf.R_X86_64_TPOFF32,
+        elf.R_X86_64_TPOFF64,
+        elf.R_X86_64_DTPOFF32,
+        elf.R_X86_64_DTPOFF64,
+        elf.R_X86_64_GOTTPOFF,
+        => symbol.value,
+
+        elf.R_X86_64_PLT32 => if (symbol.flags.plt) symbol.getPltAddress(elf_file) else symbol.value,
+
+        elf.R_X86_64_GOTPCREL,
+        elf.R_X86_64_GOTPCRELX,
+        => if (symbol.flags.got) symbol.getGotAddress(elf_file) else symbol.value,
+
+        elf.R_X86_64_REX_GOTPCRELX => if (!symbol.import and !symbol.isAbs(elf_file))
+            symbol.value
+        else if (symbol.flags.got)
+            symbol.getGotAddress(elf_file)
+        else
+            symbol.value,
+
+        else => 0, // error will be flaged in `resolveRelocs`
+    };
+}
+
 pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
     const gpa = elf_file.base.allocator;
     const code = try self.getCodeUncompressAlloc(elf_file);
@@ -208,213 +240,68 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
     const cwriter = stream.writer();
 
     for (relocs) |rel| {
+        const r_type = rel.r_type();
+
+        if (r_type == elf.R_X86_64_NONE) continue;
+
         const target = object.getSymbol(rel.r_sym(), elf_file);
         const target_name = target.getName(elf_file);
         const source_addr = @intCast(i64, self.value + rel.r_offset);
-        const target_addr = @intCast(i64, target.value) + rel.r_addend;
+        const target_addr = @intCast(i64, getTargetAddress(target, r_type, elf_file)) + rel.r_addend;
+
+        relocs_log.debug("  {s}: {x}: [0x{x} => 0x{x}] ({s})", .{
+            fmtRelocType(r_type),
+            rel.r_offset,
+            source_addr,
+            target_addr,
+            target_name,
+        });
 
         try stream.seekTo(rel.r_offset);
 
-        const r_type = rel.r_type();
         switch (r_type) {
-            elf.R_X86_64_NONE => {},
+            elf.R_X86_64_NONE => unreachable,
 
-            elf.R_X86_64_64 => {
-                relocs_log.debug("  {}: {x}: [() => 0x{x}] ({s})", .{
-                    fmtRelocType(r_type),
-                    rel.r_offset,
-                    target_addr,
-                    target_name,
-                });
-                try cwriter.writeIntLittle(i64, target_addr);
-            },
+            elf.R_X86_64_64 => try cwriter.writeIntLittle(i64, target_addr),
 
-            elf.R_X86_64_PLT32 => {
-                const actual_target_addr = if (target.flags.plt)
-                    @intCast(i64, target.getPltAddress(elf_file)) + rel.r_addend
-                else
-                    target_addr;
-                const displacement = @intCast(i32, actual_target_addr - source_addr);
-                relocs_log.debug("  {}: {x}: [0x{x} => 0x{x}] ({s})", .{
-                    fmtRelocType(r_type),
-                    rel.r_offset,
-                    source_addr,
-                    target_addr,
-                    target_name,
-                });
-                try cwriter.writeIntLittle(i32, displacement);
-            },
-
-            elf.R_X86_64_PC32 => {
-                const displacement = @intCast(i32, target_addr - source_addr);
-                relocs_log.debug("  {}: {x}: [0x{x} => 0x{x}] ({s})", .{
-                    fmtRelocType(r_type),
-                    rel.r_offset,
-                    source_addr,
-                    target_addr,
-                    target_name,
-                });
-                try cwriter.writeIntLittle(i32, displacement);
-            },
-
+            elf.R_X86_64_PLT32,
+            elf.R_X86_64_PC32,
             elf.R_X86_64_GOTPCREL,
             elf.R_X86_64_GOTPCRELX,
-            => {
-                const actual_target_addr = if (target.flags.got)
-                    @intCast(i64, target.getGotAddress(elf_file)) + rel.r_addend
-                else
-                    target_addr;
-                const displacement = @intCast(i32, actual_target_addr - source_addr);
-                relocs_log.debug("  {}: {x}: [0x{x} => 0x{x}] ({s})", .{
-                    fmtRelocType(r_type),
-                    rel.r_offset,
-                    source_addr,
-                    actual_target_addr,
-                    target_name,
-                });
-                try cwriter.writeIntLittle(i32, displacement);
-            },
+            => try cwriter.writeIntLittle(i32, @intCast(i32, target_addr - source_addr)),
 
             elf.R_X86_64_REX_GOTPCRELX => {
                 if (!target.import and !target.isAbs(elf_file)) blk: {
-                    var disas = Disassembler.init(code[rel.r_offset - 3 ..]);
-                    var inst = (try disas.next()) orelse unreachable;
-                    relocs_log.debug("  relaxing {}", .{fmtRelocType(r_type)});
-                    const disp = @intCast(i32, target_addr - source_addr);
-                    inst.ops[1].mem.rip.disp = disp;
-                    const new_inst = switch (inst.encoding.mnemonic) {
-                        .mov => try Instruction.new(inst.prefix, .lea, &inst.ops),
-                        .cmp => try Instruction.new(inst.prefix, .cmp, &.{
-                            inst.ops[0],
-                            // TODO: hack to force imm32s in the assembler
-                            .{ .imm = Immediate.s(-129) },
-                        }),
-                        else => break :blk,
-                    };
-                    relocs_log.debug("    {} => {}", .{ inst, new_inst });
-                    relocs_log.debug("  {}: {x}: [0x{x} => 0x{x}] ({s})", .{
-                        fmtRelocType(r_type),
-                        rel.r_offset,
-                        source_addr,
-                        target_addr,
-                        target_name,
-                    });
-                    try stream.seekBy(-3);
-                    try new_inst.encode(cwriter, .{});
-                    continue;
+                    relaxRexGotpcrelx(code[rel.r_offset - 3 ..]) catch break :blk;
                 }
-                const actual_target_addr = if (target.flags.got)
-                    @intCast(i64, target.getGotAddress(elf_file)) + rel.r_addend
-                else
-                    target_addr;
-                const displacement = @intCast(i32, actual_target_addr - source_addr);
-                relocs_log.debug("  {}: {x}: [0x{x} => 0x{x}] ({s})", .{
-                    fmtRelocType(r_type),
-                    rel.r_offset,
-                    source_addr,
-                    actual_target_addr,
-                    target_name,
-                });
-                try cwriter.writeIntLittle(i32, displacement);
+                try cwriter.writeIntLittle(i32, @intCast(i32, target_addr - source_addr));
             },
 
-            elf.R_X86_64_32 => {
-                const scaled = @truncate(u32, @intCast(u64, target_addr));
-                relocs_log.debug("  {}: {x}: [() => 0x{x}] ({s})", .{
-                    fmtRelocType(r_type),
-                    rel.r_offset,
-                    scaled,
-                    target_name,
-                });
-                try cwriter.writeIntLittle(u32, scaled);
-            },
+            elf.R_X86_64_32 => try cwriter.writeIntLittle(u32, @truncate(u32, @intCast(u64, target_addr))),
 
-            elf.R_X86_64_32S => {
-                const scaled = @truncate(i32, target_addr);
-                relocs_log.debug("  {}: {x}: [() => 0x{x}] ({s})", .{
-                    fmtRelocType(r_type),
-                    rel.r_offset,
-                    scaled,
-                    target_name,
-                });
-                try cwriter.writeIntLittle(i32, scaled);
-            },
+            elf.R_X86_64_32S => try cwriter.writeIntLittle(i32, @truncate(i32, target_addr)),
 
-            elf.R_X86_64_TPOFF32 => {
-                const tp_addr = @intCast(i64, elf_file.getTpAddress());
-                const actual_target_addr = @truncate(i32, target_addr - tp_addr);
-                relocs_log.debug("  {}: {x}: [() => 0x{x}] ({s})", .{
-                    fmtRelocType(r_type),
-                    rel.r_offset,
-                    actual_target_addr,
-                    target_name,
-                });
-                try cwriter.writeIntLittle(i32, actual_target_addr);
-            },
+            elf.R_X86_64_TPOFF32,
+            elf.R_X86_64_DTPOFF32,
+            => try cwriter.writeIntLittle(
+                i32,
+                @truncate(i32, target_addr - @intCast(i64, elf_file.getTpAddress())),
+            ),
 
-            elf.R_X86_64_TPOFF64 => {
-                const tp_addr = @intCast(i64, elf_file.getTpAddress());
-                const actual_target_addr = target_addr - tp_addr;
-                relocs_log.debug("  {}: {x}: [() => 0x{x}] ({s})", .{
-                    fmtRelocType(r_type),
-                    rel.r_offset,
-                    actual_target_addr,
-                    target_name,
-                });
-                try cwriter.writeIntLittle(i64, actual_target_addr);
-            },
-
-            elf.R_X86_64_DTPOFF32 => {
-                const dtp_addr = @intCast(i64, elf_file.getDtpAddress());
-                const actual_target_addr = @truncate(i32, target_addr - dtp_addr);
-                relocs_log.debug("  {}: {x}: [() => 0x{x}] ({s})", .{
-                    fmtRelocType(r_type),
-                    rel.r_offset,
-                    actual_target_addr,
-                    target_name,
-                });
-                try cwriter.writeIntLittle(i32, actual_target_addr);
-            },
-
-            elf.R_X86_64_DTPOFF64 => {
-                const dtp_addr = @intCast(i64, elf_file.getDtpAddress());
-                const actual_target_addr = target_addr - dtp_addr;
-                relocs_log.debug("  {}: {x}: [() => 0x{x}] ({s})", .{
-                    fmtRelocType(r_type),
-                    rel.r_offset,
-                    actual_target_addr,
-                    target_name,
-                });
-                try cwriter.writeIntLittle(i64, actual_target_addr);
-            },
+            elf.R_X86_64_TPOFF64,
+            elf.R_X86_64_DTPOFF64,
+            => try cwriter.writeIntLittle(
+                i64,
+                target_addr - @intCast(i64, elf_file.getTpAddress()),
+            ),
 
             elf.R_X86_64_GOTTPOFF => {
-                var disas = Disassembler.init(code[rel.r_offset - 3 ..]);
-                var inst = (try disas.next()) orelse unreachable;
-                const actual_target_addr = @intCast(i64, target.value) - @intCast(i64, elf_file.getTpAddress());
-                relocs_log.debug("  relaxing {}", .{fmtRelocType(r_type)});
-                var new_inst = switch (inst.encoding.mnemonic) {
-                    .mov => try Instruction.new(inst.prefix, .mov, &.{
-                        inst.ops[0],
-                        // TODO: hack to force imm32s in the assembler
-                        .{ .imm = Immediate.s(-129) },
-                    }),
-                    else => {
-                        elf_file.base.fatal("TODO rewrite GOTTPOFF", .{});
-                        continue;
-                    },
-                };
-                new_inst.ops[1].imm = Immediate.s(@intCast(i32, actual_target_addr));
-                relocs_log.debug("    {} => {}", .{ inst, new_inst });
-                relocs_log.debug("  {}: {x}: [0x{x} => 0x{x}] ({s})", .{
-                    fmtRelocType(r_type),
-                    rel.r_offset,
-                    source_addr,
-                    actual_target_addr,
-                    target_name,
-                });
-                try stream.seekBy(-3);
-                try new_inst.encode(cwriter, .{});
+                relaxGottpoff(code[rel.r_offset - 3 ..]) catch
+                    elf_file.base.fatal("TODO could not rewrite GOTTPOFF", .{});
+                try cwriter.writeIntLittle(
+                    i32,
+                    @intCast(i32, @intCast(i64, target.value) - @intCast(i64, elf_file.getTpAddress())),
+                );
             },
 
             else => elf_file.base.fatal("unhandled relocation type: {}", .{fmtRelocType(r_type)}),
@@ -422,6 +309,39 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
     }
 
     try writer.writeAll(code);
+}
+
+fn relaxRexGotpcrelx(code: []u8) !void {
+    var disas = Disassembler.init(code);
+    var inst = (try disas.next()) orelse return error.DisassemblerError;
+    const new_inst = switch (inst.encoding.mnemonic) {
+        .mov => try Instruction.new(inst.prefix, .lea, &inst.ops),
+        .cmp => try Instruction.new(inst.prefix, .cmp, &.{
+            inst.ops[0],
+            // TODO: hack to force imm32s in the assembler
+            .{ .imm = Immediate.s(-129) },
+        }),
+        else => return error.UnknownInputInstruction,
+    };
+    relocs_log.debug("    relaxing {} => {}", .{ inst.encoding, new_inst.encoding });
+    var stream = std.io.fixedBufferStream(code);
+    try new_inst.encode(stream.writer(), .{});
+}
+
+fn relaxGottpoff(code: []u8) !void {
+    var disas = Disassembler.init(code);
+    var inst = (try disas.next()) orelse return error.DisassemblerError;
+    var new_inst = switch (inst.encoding.mnemonic) {
+        .mov => try Instruction.new(inst.prefix, .mov, &.{
+            inst.ops[0],
+            // TODO: hack to force imm32s in the assembler
+            .{ .imm = Immediate.s(-129) },
+        }),
+        else => return error.UnknownInputInstruction,
+    };
+    relocs_log.debug("    relaxing {} => {}", .{ inst.encoding, new_inst.encoding });
+    var stream = std.io.fixedBufferStream(code);
+    try new_inst.encode(stream.writer(), .{});
 }
 
 fn fmtRelocType(r_type: u32) std.fmt.Formatter(formatRelocType) {
@@ -434,8 +354,8 @@ fn formatRelocType(
     options: std.fmt.FormatOptions,
     writer: anytype,
 ) !void {
-    _ = options;
     _ = unused_fmt_string;
+    _ = options;
     const str = switch (r_type) {
         elf.R_X86_64_NONE => "R_X86_64_NONE",
         elf.R_X86_64_64 => "R_X86_64_64",
@@ -544,3 +464,4 @@ const Elf = @import("../Elf.zig");
 const Instruction = dis_x86_64.Instruction;
 const Immediate = dis_x86_64.Immediate;
 const Object = @import("Object.zig");
+const Symbol = @import("Symbol.zig");
