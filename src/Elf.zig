@@ -237,6 +237,24 @@ pub fn flush(self: *Elf) !void {
     }
     self.base.reportWarningsAndErrorsAndExit();
 
+    // Dedup DSOs
+    {
+        var seen_dsos = std.StringHashMap(void).init(gpa);
+        defer seen_dsos.deinit();
+        try seen_dsos.ensureTotalCapacity(@intCast(u32, self.shared_objects.items.len));
+
+        var i: usize = 0;
+        while (i < self.shared_objects.items.len) {
+            const index = self.shared_objects.items[i];
+            const shared = self.getFile(index).?.shared;
+            const soname = shared.getSoname();
+            const gop = seen_dsos.getOrPutAssumeCapacity(soname);
+            if (gop.found_existing) {
+                _ = self.shared_objects.swapRemove(i);
+            } else i += 1;
+        }
+    }
+
     {
         const index = @intCast(File.Index, try self.files.addOne(gpa));
         self.files.set(index, .{ .internal = .{ .index = index } });
