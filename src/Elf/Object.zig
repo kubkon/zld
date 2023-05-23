@@ -206,6 +206,12 @@ pub fn resolveSymbols(self: *Object, elf_file: *Elf) void {
 
         if (this_sym.st_shndx == elf.SHN_UNDEF) continue;
 
+        if (this_sym.st_shndx != elf.SHN_ABS and this_sym.st_shndx != elf.SHN_COMMON) {
+            const atom_index = self.atoms.items[this_sym.st_shndx];
+            const atom = elf_file.getAtom(atom_index) orelse continue;
+            if (!atom.is_alive) continue;
+        }
+
         const global = elf_file.getSymbol(index);
         if (self.asFile().getSymbolRank(this_sym, !self.alive) < global.getSymbolRank(elf_file)) {
             const atom = switch (this_sym.st_shndx) {
@@ -259,6 +265,13 @@ pub fn checkDuplicates(self: *Object, elf_file: *Elf) void {
         if (self.index == global_file.getIndex() or
             this_sym.st_shndx == elf.SHN_UNDEF or
             this_sym.st_bind() == elf.STB_WEAK) continue;
+
+        if (this_sym.st_shndx != elf.SHN_ABS) {
+            const atom_index = self.atoms.items[this_sym.st_shndx];
+            const atom = elf_file.getAtom(atom_index) orelse continue;
+            if (!atom.is_alive) continue;
+        }
+
         elf_file.base.fatal("multiple definition: {}: {}: {s}", .{
             self.fmtPath(),
             global_file.fmtPath(),
