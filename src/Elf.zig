@@ -237,6 +237,24 @@ pub fn flush(self: *Elf) !void {
     }
     self.base.reportWarningsAndErrorsAndExit();
 
+    // Dedup DSOs
+    {
+        var seen_dsos = std.StringHashMap(void).init(gpa);
+        defer seen_dsos.deinit();
+        try seen_dsos.ensureTotalCapacity(@intCast(u32, self.shared_objects.items.len));
+
+        var i: usize = 0;
+        while (i < self.shared_objects.items.len) {
+            const index = self.shared_objects.items[i];
+            const shared = self.getFile(index).?.shared;
+            const soname = shared.getSoname();
+            const gop = seen_dsos.getOrPutAssumeCapacity(soname);
+            if (gop.found_existing) {
+                _ = self.shared_objects.swapRemove(i);
+            } else i += 1;
+        }
+    }
+
     {
         const index = @intCast(File.Index, try self.files.addOne(gpa));
         self.files.set(index, .{ .internal = .{ .index = index } });
@@ -1014,7 +1032,7 @@ fn parseObject(self: *Elf, arena: Allocator, path: []const u8) !bool {
 
     const index = @intCast(u32, try self.files.addOne(gpa));
     self.files.set(index, .{ .object = .{
-        .name = path,
+        .path = path,
         .data = data,
         .index = index,
     } });
@@ -1036,7 +1054,7 @@ fn parseArchive(self: *Elf, arena: Allocator, path: []const u8) !bool {
     if (!Archive.isValidMagic(&magic)) return false;
 
     const data = try file.readToEndAlloc(arena, std.math.maxInt(u32));
-    var archive = Archive{ .name = path, .data = data };
+    var archive = Archive{ .path = path, .data = data };
     defer archive.deinit(gpa);
     try archive.parse(self);
 
@@ -1069,7 +1087,7 @@ fn parseShared(self: *Elf, arena: Allocator, path: []const u8, opts: Zld.SystemL
 
     const index = @intCast(File.Index, try self.files.addOne(gpa));
     self.files.set(index, .{ .shared = .{
-        .name = path,
+        .path = path,
         .data = data,
         .index = index,
         .needed = opts.needed,
@@ -1742,10 +1760,7 @@ fn fmtDumpState(
     _ = unused_fmt_string;
     for (self.objects.items) |index| {
         const object = self.getFile(index).?.object;
-        try writer.print("object({d}) : ", .{index});
-        if (object.archive) |path| {
-            try writer.print("{s}({s})", .{ path, object.name });
-        } else try writer.print("{s}", .{object.name});
+        try writer.print("object({d}) : {}", .{ index, object.fmtPath() });
         if (!object.alive) try writer.writeAll(" : [*]");
         try writer.writeByte('\n');
         try writer.print("{}{}\n", .{ object.fmtAtoms(self), object.fmtSymtab(self) });
@@ -1753,7 +1768,7 @@ fn fmtDumpState(
     for (self.shared_objects.items) |index| {
         const shared = self.getFile(index).?.shared;
         try writer.print("shared({d}) : ", .{index});
-        try writer.print("{s}", .{shared.name});
+        try writer.print("{s}", .{shared.path});
         try writer.print(" : needed({})", .{shared.needed});
         if (!shared.alive) try writer.writeAll(" : [*]");
         try writer.writeByte('\n');

@@ -1,4 +1,4 @@
-name: []const u8,
+path: []const u8,
 data: []const u8,
 index: File.Index,
 
@@ -133,14 +133,14 @@ pub fn asFile(self: *SharedObject) File {
 }
 
 pub fn getSoname(self: *SharedObject) []const u8 {
-    const shndx = self.dynamic_sect_index orelse return self.name;
+    const shndx = self.dynamic_sect_index orelse return self.path;
     const data = self.getShdrContents(shndx);
     const nentries = @divExact(data.len, @sizeOf(elf.Elf64_Dyn));
     const entries = @ptrCast([*]align(1) const elf.Elf64_Dyn, data.ptr)[0..nentries];
     const soname = for (entries) |entry| switch (entry.d_tag) {
         elf.DT_SONAME => break self.getString(@intCast(u32, entry.d_val)),
         else => {},
-    } else self.name;
+    } else self.path;
     return soname;
 }
 

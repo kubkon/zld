@@ -1,4 +1,4 @@
-name: []const u8,
+path: []const u8,
 data: []const u8,
 
 offsets: std.AutoHashMapUnmanaged(u32, void) = .{},
@@ -80,7 +80,7 @@ pub fn parse(self: *Archive, elf_file: *Elf) !void {
         if (!mem.eql(u8, &hdr.ar_fmag, ARFMAG)) {
             return elf_file.base.fatal(
                 "{s}: invalid header delimiter: expected '{s}', found '{s}'",
-                .{ self.name, std.fmt.fmtSliceEscapeLower(ARFMAG), std.fmt.fmtSliceEscapeLower(&hdr.ar_fmag) },
+                .{ self.path, std.fmt.fmtSliceEscapeLower(ARFMAG), std.fmt.fmtSliceEscapeLower(&hdr.ar_fmag) },
             );
         }
 
@@ -89,7 +89,7 @@ pub fn parse(self: *Archive, elf_file: *Elf) !void {
         if (!mem.eql(u8, ar_name, "/")) {
             return elf_file.base.fatal(
                 "{s}: expected symbol lookup table as first data section; instead found '{s}'",
-                .{ self.name, &hdr.ar_name },
+                .{ self.path, &hdr.ar_name },
             );
         }
 
@@ -115,7 +115,7 @@ pub fn parse(self: *Archive, elf_file: *Elf) !void {
         if (!mem.eql(u8, &hdr.ar_fmag, ARFMAG)) {
             return elf_file.base.fatal(
                 "{s}: invalid header delimiter: expected '{s}', found '{s}'",
-                .{ self.name, std.fmt.fmtSliceEscapeLower(ARFMAG), std.fmt.fmtSliceEscapeLower(&hdr.ar_fmag) },
+                .{ self.path, std.fmt.fmtSliceEscapeLower(ARFMAG), std.fmt.fmtSliceEscapeLower(&hdr.ar_fmag) },
             );
         }
 
@@ -144,7 +144,7 @@ pub fn getObject(self: Archive, arena: Allocator, offset: u32, elf_file: *Elf) !
     if (!mem.eql(u8, &hdr.ar_fmag, ARFMAG)) {
         elf_file.base.fatal(
             "{s}: invalid header delimiter: expected '{s}', found '{s}'",
-            .{ self.name, std.fmt.fmtSliceEscapeLower(ARFMAG), std.fmt.fmtSliceEscapeLower(&hdr.ar_fmag) },
+            .{ self.path, std.fmt.fmtSliceEscapeLower(ARFMAG), std.fmt.fmtSliceEscapeLower(&hdr.ar_fmag) },
         );
         return error.InvalidHeader;
     }
@@ -159,13 +159,13 @@ pub fn getObject(self: Archive, arena: Allocator, offset: u32, elf_file: *Elf) !
     };
     const object_name = name[0 .. name.len - 1]; // to account for trailing '/'
 
-    log.debug("extracting object '{s}' from archive '{s}'", .{ object_name, self.name });
+    log.debug("extracting object '{s}' from archive '{s}'", .{ object_name, self.path });
 
     const object_size = try hdr.size();
 
     return .{
-        .archive = self.name,
-        .name = object_name,
+        .archive = self.path,
+        .path = object_name,
         .data = self.data[offset + stream.pos ..][0..object_size],
         .index = undefined,
         .alive = false,
