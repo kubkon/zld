@@ -1,7 +1,7 @@
 archive: ?[]const u8 = null,
 name: []const u8,
 data: []const u8,
-index: Elf.File.Index,
+index: File.Index,
 
 header: ?elf.Elf64_Ehdr = null,
 symtab: []align(1) const elf.Elf64_Sym = &[0]elf.Elf64_Sym{},
@@ -310,7 +310,7 @@ inline fn getShString(self: *Object, off: u32) [:0]const u8 {
     return mem.sliceTo(@ptrCast([*:0]const u8, self.shstrtab.ptr + off), 0);
 }
 
-pub fn asFile(self: *Object) Elf.FilePtr {
+pub fn asFile(self: *Object) File {
     return .{ .object = self };
 }
 
@@ -396,4 +396,5 @@ const mem = std.mem;
 const Allocator = mem.Allocator;
 const Atom = @import("Atom.zig");
 const Elf = @import("../Elf.zig");
+const File = @import("file.zig").File;
 const Symbol = @import("Symbol.zig");
