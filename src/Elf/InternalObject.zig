@@ -1,4 +1,4 @@
-index: Elf.File.Index,
+index: File.Index,
 symtab: std.ArrayListUnmanaged(elf.Elf64_Sym) = .{},
 symbols: std.ArrayListUnmanaged(u32) = .{},
 alive: bool = true,
@@ -54,7 +54,7 @@ pub fn resetGlobals(self: *InternalObject, elf_file: *Elf) void {
     }
 }
 
-pub fn asFile(self: *InternalObject) Elf.FilePtr {
+pub fn asFile(self: *InternalObject) File {
     return .{ .internal = self };
 }
 
@@ -94,5 +94,6 @@ const elf = std.elf;
 
 const Allocator = std.mem.Allocator;
 const Elf = @import("../Elf.zig");
+const File = @import("file.zig").File;
 const InternalObject = @This();
 const Object = @import("Object.zig");

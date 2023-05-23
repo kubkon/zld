@@ -1,6 +1,6 @@
 name: []const u8,
 data: []const u8,
-index: Elf.File.Index,
+index: File.Index,
 
 header: ?elf.Elf64_Ehdr = null,
 symtab: []align(1) const elf.Elf64_Sym = &[0]elf.Elf64_Sym{},
@@ -128,7 +128,7 @@ pub inline fn getString(self: *SharedObject, off: u32) [:0]const u8 {
     return mem.sliceTo(@ptrCast([*:0]const u8, self.strtab.ptr + off), 0);
 }
 
-pub fn asFile(self: *SharedObject) Elf.FilePtr {
+pub fn asFile(self: *SharedObject) File {
     return .{ .shared = self };
 }
 
@@ -199,4 +199,5 @@ const mem = std.mem;
 
 const Allocator = mem.Allocator;
 const Elf = @import("../Elf.zig");
+const File = @import("file.zig").File;
 const Symbol = @import("Symbol.zig");

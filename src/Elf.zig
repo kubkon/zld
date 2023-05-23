@@ -5,7 +5,7 @@ shoff: u64 = 0,
 
 objects: std.ArrayListUnmanaged(u32) = .{},
 shared_objects: std.ArrayListUnmanaged(u32) = .{},
-files: std.MultiArrayList(File) = .{},
+files: std.MultiArrayList(File.Entry) = .{},
 
 sections: std.MultiArrayList(Section) = .{},
 phdrs: std.ArrayListUnmanaged(elf.Elf64_Phdr) = .{},
@@ -1551,7 +1551,7 @@ fn addPhdr(self: *Elf, opts: struct {
     return index;
 }
 
-pub fn getFile(self: *Elf, index: File.Index) ?FilePtr {
+pub fn getFile(self: *Elf, index: File.Index) ?File {
     const tag = self.files.items(.tags)[index];
     return switch (tag) {
         .null => null,
@@ -1771,86 +1771,6 @@ fn fmtDumpState(
     try writer.writeAll("Output phdrs\n");
     try writer.print("{}\n", .{self.fmtPhdrs()});
 }
-
-pub const File = union(enum) {
-    null: void,
-    internal: InternalObject,
-    object: Object,
-    shared: SharedObject,
-
-    pub const Index = u32;
-};
-
-pub const FilePtr = union(enum) {
-    internal: *InternalObject,
-    object: *Object,
-    shared: *SharedObject,
-
-    pub fn getIndex(file: FilePtr) File.Index {
-        return switch (file) {
-            inline else => |x| x.index,
-        };
-    }
-
-    pub fn getPath(file: FilePtr) []const u8 {
-        return switch (file) {
-            .internal => unreachable,
-            .object => |x| x.name, // TODO wrap in archive path if extracted
-            .shared => |x| x.name,
-        };
-    }
-
-    fn resolveSymbols(file: FilePtr, elf_file: *Elf) void {
-        switch (file) {
-            inline else => |x| x.resolveSymbols(elf_file),
-        }
-    }
-
-    fn resetGlobals(file: FilePtr, elf_file: *Elf) void {
-        switch (file) {
-            inline else => |x| x.resetGlobals(elf_file),
-        }
-    }
-
-    pub fn isAlive(file: FilePtr) bool {
-        return switch (file) {
-            inline else => |x| x.alive,
-        };
-    }
-
-    /// Encodes symbol rank so that the following ordering applies:
-    /// * strong defined
-    /// * weak defined
-    /// * strong in lib (dso/archive)
-    /// * weak in lib (dso/archive)
-    /// * unclaimed
-    pub fn getSymbolRank(file: FilePtr, sym: elf.Elf64_Sym, in_archive: bool) u32 {
-        const base: u4 = blk: {
-            if (file == .shared or in_archive) break :blk switch (sym.st_bind()) {
-                elf.STB_GLOBAL => 3,
-                else => 4,
-            };
-            break :blk switch (sym.st_bind()) {
-                elf.STB_GLOBAL => 1,
-                else => 2,
-            };
-        };
-        return (@as(u32, base) << 24) + file.getIndex();
-    }
-
-    pub fn setAlive(file: FilePtr) void {
-        switch (file) {
-            inline else => |x| x.alive = true,
-        }
-    }
-
-    pub fn markLive(file: FilePtr, elf_file: *Elf) void {
-        switch (file) {
-            .internal => {},
-            inline else => |x| x.markLive(elf_file),
-        }
-    }
-};
 
 const Section = struct {
     shdr: elf.Elf64_Shdr,
@@ -2398,6 +2318,7 @@ const Allocator = mem.Allocator;
 const Archive = @import("Elf/Archive.zig");
 const Atom = @import("Elf/Atom.zig");
 const Elf = @This();
+const File = @import("Elf/file.zig").File;
 const InternalObject = @import("Elf/InternalObject.zig");
 const LdScript = @import("Elf/LdScript.zig");
 const Object = @import("Elf/Object.zig");

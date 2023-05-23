@@ -7,7 +7,7 @@ value: u64 = 0,
 name: u32 = 0,
 
 /// File where this symbol is defined.
-file: Elf.File.Index = 0,
+file: File.Index = 0,
 
 /// Atom containing this symbol if any.
 /// Index of 0 means there is no associated atom with this symbol.
@@ -51,7 +51,7 @@ pub fn getAtom(symbol: Symbol, elf_file: *Elf) ?*Atom {
     return elf_file.getAtom(symbol.atom);
 }
 
-pub inline fn getFile(symbol: Symbol, elf_file: *Elf) ?Elf.FilePtr {
+pub inline fn getFile(symbol: Symbol, elf_file: *Elf) ?File {
     return elf_file.getFile(symbol.file);
 }
 
@@ -173,6 +173,7 @@ const elf = std.elf;
 
 const Atom = @import("Atom.zig");
 const Elf = @import("../Elf.zig");
+const File = @import("file.zig").File;
 const InternalObject = @import("InternalObject.zig");
 const Object = @import("Object.zig");
 const SharedObject = @import("SharedObject.zig");
