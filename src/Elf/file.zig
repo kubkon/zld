@@ -9,12 +9,23 @@ pub const File = union(enum) {
         };
     }
 
-    pub fn getPath(file: File) []const u8 {
-        return switch (file) {
+    pub fn fmtPath(file: File) std.fmt.Formatter(formatPath) {
+        return .{ .data = file };
+    }
+
+    fn formatPath(
+        file: File,
+        comptime unused_fmt_string: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = unused_fmt_string;
+        _ = options;
+        switch (file) {
             .internal => unreachable,
-            .object => |x| x.name, // TODO wrap in archive path if extracted
-            .shared => |x| x.name,
-        };
+            .object => |x| try writer.print("{}", .{x.fmtPath()}),
+            .shared => |x| try writer.writeAll(x.name),
+        }
     }
 
     pub fn resolveSymbols(file: File, elf_file: *Elf) void {
@@ -81,6 +92,7 @@ pub const File = union(enum) {
 const std = @import("std");
 const elf = std.elf;
 
+const Allocator = std.mem.Allocator;
 const Elf = @import("../Elf.zig");
 const InternalObject = @import("InternalObject.zig");
 const Object = @import("Object.zig");

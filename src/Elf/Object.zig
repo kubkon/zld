@@ -1,5 +1,5 @@
 archive: ?[]const u8 = null,
-name: []const u8,
+path: []const u8,
 data: []const u8,
 index: File.Index,
 
@@ -95,8 +95,8 @@ fn initAtoms(self: *Object, elf_file: *Elf) !void {
                     if (shdr.sh_flags & elf.SHF_EXECINSTR != 0) {
                         if (!elf_file.options.execstack or !elf_file.options.execstack_if_needed) {
                             elf_file.base.warn(
-                                "{s}: may cause segmentation fault as this file requested executable stack",
-                                .{self.name},
+                                "{}: may cause segmentation fault as this file requested executable stack",
+                                .{self.fmtPath()},
                             );
                         }
                         self.needs_exec_stack = true;
@@ -259,9 +259,9 @@ pub fn checkDuplicates(self: *Object, elf_file: *Elf) void {
         if (self.index == global_file.getIndex() or
             this_sym.st_shndx == elf.SHN_UNDEF or
             this_sym.st_bind() == elf.STB_WEAK) continue;
-        elf_file.base.fatal("multiple definition: {s}: {s}: {s}", .{
-            self.name,
-            global_file.getPath(),
+        elf_file.base.fatal("multiple definition: {}: {}: {s}", .{
+            self.fmtPath(),
+            global_file.fmtPath(),
             global.getName(elf_file),
         });
     }
@@ -271,7 +271,7 @@ pub fn checkUndefined(self: *Object, elf_file: *Elf) void {
     for (self.getGlobals()) |index| {
         const global = elf_file.getSymbol(index);
         if (global.getFile(elf_file) == null) {
-            elf_file.base.fatal("undefined reference: {s}: {s}", .{ self.name, global.getName(elf_file) });
+            elf_file.base.fatal("undefined reference: {}: {s}", .{ self.fmtPath(), global.getName(elf_file) });
         }
     }
 }
@@ -381,6 +381,26 @@ fn formatAtoms(
         const atom = ctx.elf_file.getAtom(atom_index) orelse continue;
         try writer.print("    {}\n", .{atom.fmt(ctx.elf_file)});
     }
+}
+
+pub fn fmtPath(self: *Object) std.fmt.Formatter(formatPath) {
+    return .{ .data = self };
+}
+
+fn formatPath(
+    object: *Object,
+    comptime unused_fmt_string: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = unused_fmt_string;
+    _ = options;
+    if (object.archive) |path| {
+        try writer.writeAll(path);
+        try writer.writeByte('(');
+        try writer.writeAll(object.path);
+        try writer.writeByte(')');
+    } else try writer.writeAll(object.path);
 }
 
 const Object = @This();

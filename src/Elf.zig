@@ -1014,7 +1014,7 @@ fn parseObject(self: *Elf, arena: Allocator, path: []const u8) !bool {
 
     const index = @intCast(u32, try self.files.addOne(gpa));
     self.files.set(index, .{ .object = .{
-        .name = path,
+        .path = path,
         .data = data,
         .index = index,
     } });
@@ -1742,10 +1742,7 @@ fn fmtDumpState(
     _ = unused_fmt_string;
     for (self.objects.items) |index| {
         const object = self.getFile(index).?.object;
-        try writer.print("object({d}) : ", .{index});
-        if (object.archive) |path| {
-            try writer.print("{s}({s})", .{ path, object.name });
-        } else try writer.print("{s}", .{object.name});
+        try writer.print("object({d}) : {}", .{ index, object.fmtPath() });
         if (!object.alive) try writer.writeAll(" : [*]");
         try writer.writeByte('\n');
         try writer.print("{}{}\n", .{ object.fmtAtoms(self), object.fmtSymtab(self) });

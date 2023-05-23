@@ -165,7 +165,7 @@ pub fn getObject(self: Archive, arena: Allocator, offset: u32, elf_file: *Elf) !
 
     return .{
         .archive = self.name,
-        .name = object_name,
+        .path = object_name,
         .data = self.data[offset + stream.pos ..][0..object_size],
         .index = undefined,
         .alive = false,
