@@ -1069,7 +1069,7 @@ fn parseShared(self: *Elf, arena: Allocator, path: []const u8, opts: Zld.SystemL
 
     const index = @intCast(File.Index, try self.files.addOne(gpa));
     self.files.set(index, .{ .shared = .{
-        .name = path,
+        .path = path,
         .data = data,
         .index = index,
         .needed = opts.needed,
@@ -1750,7 +1750,7 @@ fn fmtDumpState(
     for (self.shared_objects.items) |index| {
         const shared = self.getFile(index).?.shared;
         try writer.print("shared({d}) : ", .{index});
-        try writer.print("{s}", .{shared.name});
+        try writer.print("{s}", .{shared.path});
         try writer.print(" : needed({})", .{shared.needed});
         if (!shared.alive) try writer.writeAll(" : [*]");
         try writer.writeByte('\n');

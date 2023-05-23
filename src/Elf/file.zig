@@ -24,7 +24,7 @@ pub const File = union(enum) {
         switch (file) {
             .internal => unreachable,
             .object => |x| try writer.print("{}", .{x.fmtPath()}),
-            .shared => |x| try writer.writeAll(x.name),
+            .shared => |x| try writer.writeAll(x.path),
         }
     }
 
