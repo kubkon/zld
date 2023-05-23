@@ -73,14 +73,18 @@ pub fn getSymbolRank(symbol: Symbol, elf_file: *Elf) u32 {
     return file.getSymbolRank(sym, in_archive);
 }
 
-pub inline fn getGotAddress(symbol: Symbol, elf_file: *Elf) u64 {
-    const extra = symbol.getExtra(elf_file).?;
-    return elf_file.getGotEntryAddress(extra.got);
+pub fn getAddress(symbol: Symbol, elf_file: *Elf) u64 {
+    if (symbol.flags.plt) {
+        const extra = symbol.getExtra(elf_file).?;
+        return elf_file.getPltEntryAddress(extra.plt);
+    }
+    return symbol.value;
 }
 
-pub inline fn getPltAddress(symbol: Symbol, elf_file: *Elf) u64 {
+pub fn getGotAddress(symbol: Symbol, elf_file: *Elf) u64 {
+    if (!symbol.flags.got) return 0;
     const extra = symbol.getExtra(elf_file).?;
-    return elf_file.getPltEntryAddress(extra.plt);
+    return elf_file.getGotEntryAddress(extra.got);
 }
 
 pub fn addExtra(symbol: *Symbol, extra: Extra, elf_file: *Elf) !void {

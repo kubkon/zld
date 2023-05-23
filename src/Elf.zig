@@ -1650,16 +1650,24 @@ pub fn getOrCreateGlobal(self: *Elf, name: [:0]const u8) !GetOrCreateGlobalResul
     };
 }
 
-pub fn getGotEntryAddress(self: *Elf, index: u32) u64 {
-    const shndx = self.got_sect_index.?;
+pub fn getGotAddress(self: *Elf) u64 {
+    const shndx = self.got_sect_index orelse return 0;
     const shdr = self.sections.items(.shdr)[shndx];
-    return shdr.sh_addr + index * @sizeOf(u64);
+    return shdr.sh_addr;
 }
 
-pub fn getPltEntryAddress(self: *Elf, index: u32) u64 {
-    const shndx = self.plt_sect_index.?;
+pub inline fn getGotEntryAddress(self: *Elf, index: u32) u64 {
+    return self.getGotAddress() + index * @sizeOf(u64);
+}
+
+pub fn getPltAddress(self: *Elf) u64 {
+    const shndx = self.plt_sect_index orelse return 0;
     const shdr = self.sections.items(.shdr)[shndx];
-    return shdr.sh_addr + PltSection.plt_preamble_size + index * 16;
+    return shdr.sh_addr;
+}
+
+pub inline fn getPltEntryAddress(self: *Elf, index: u32) u64 {
+    return self.getPltAddress() + PltSection.plt_preamble_size + index * 16;
 }
 
 pub fn getTpAddress(self: *Elf) u64 {
