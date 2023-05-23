@@ -1036,7 +1036,7 @@ fn parseArchive(self: *Elf, arena: Allocator, path: []const u8) !bool {
     if (!Archive.isValidMagic(&magic)) return false;
 
     const data = try file.readToEndAlloc(arena, std.math.maxInt(u32));
-    var archive = Archive{ .name = path, .data = data };
+    var archive = Archive{ .path = path, .data = data };
     defer archive.deinit(gpa);
     try archive.parse(self);
 
