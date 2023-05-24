@@ -244,6 +244,8 @@ pub fn resolveSymbols(self: *Object, elf_file: *Elf) void {
             if (!atom.is_alive) continue;
         }
 
+        if (this_sym.st_shndx == elf.SHN_COMMON) @panic("TODO");
+
         const global = elf_file.getSymbol(index);
         if (self.asFile().getSymbolRank(this_sym, !self.alive) < global.getSymbolRank(elf_file)) {
             const atom = switch (this_sym.st_shndx) {
