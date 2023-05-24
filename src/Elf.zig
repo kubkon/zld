@@ -3,8 +3,8 @@ arena: std.heap.ArenaAllocator.State,
 options: Options,
 shoff: u64 = 0,
 
-objects: std.ArrayListUnmanaged(u32) = .{},
-shared_objects: std.ArrayListUnmanaged(u32) = .{},
+objects: std.ArrayListUnmanaged(File.Index) = .{},
+shared_objects: std.ArrayListUnmanaged(File.Index) = .{},
 files: std.MultiArrayList(File.Entry) = .{},
 
 sections: std.MultiArrayList(Section) = .{},
@@ -57,6 +57,10 @@ plt: PltSection = .{},
 
 atoms: std.ArrayListUnmanaged(Atom) = .{},
 
+comdat_groups: std.ArrayListUnmanaged(ComdatGroup) = .{},
+comdat_groups_owners: std.ArrayListUnmanaged(ComdatGroupOwner) = .{},
+comdat_groups_table: std.StringHashMapUnmanaged(ComdatGroupOwner.Index) = .{},
+
 pub fn openPath(allocator: Allocator, options: Options, thread_pool: *ThreadPool) !*Elf {
     const file = try options.emit.directory.createFile(options.emit.sub_path, .{
         .truncate = true,
@@ -97,6 +101,9 @@ pub fn deinit(self: *Elf) void {
     self.strtab.deinit(gpa);
     self.shstrtab.deinit(gpa);
     self.atoms.deinit(gpa);
+    self.comdat_groups.deinit(gpa);
+    self.comdat_groups_owners.deinit(gpa);
+    self.comdat_groups_table.deinit(gpa);
     self.symbols.deinit(gpa);
     self.symbols_extra.deinit(gpa);
     self.globals.deinit(gpa);
@@ -1184,6 +1191,34 @@ fn resolveSymbols(self: *Elf) !void {
         } else i += 1;
     }
 
+    // Dedup comdat groups.
+    for (self.objects.items) |index| {
+        const object = self.getFile(index).?.object;
+        for (object.comdat_groups.items) |cg_index| {
+            const cg = self.getComdatGroup(cg_index);
+            const cg_owner = self.getComdatGroupOwner(cg.owner);
+            const owner_file_index = if (self.getFile(cg_owner.file)) |file|
+                file.object.index
+            else
+                std.math.maxInt(File.Index);
+            cg_owner.file = @min(owner_file_index, index);
+        }
+    }
+
+    for (self.objects.items) |index| {
+        const object = self.getFile(index).?.object;
+        for (object.comdat_groups.items) |cg_index| {
+            const cg = self.getComdatGroup(cg_index);
+            const cg_owner = self.getComdatGroupOwner(cg.owner);
+            if (cg_owner.file != index) {
+                for (object.getComdatGroupMembers(cg.shndx)) |shndx| {
+                    const atom_index = object.atoms.items[shndx];
+                    if (self.getAtom(atom_index)) |atom| atom.is_alive = false;
+                }
+            }
+        }
+    }
+
     // Re-resolve the symbols.
     for (self.objects.items) |index| self.getFile(index).?.resolveSymbols(self);
     for (self.shared_objects.items) |index| self.getFile(index).?.resolveSymbols(self);
@@ -1666,6 +1701,42 @@ pub fn getOrCreateGlobal(self: *Elf, name: [:0]const u8) !GetOrCreateGlobalResul
     };
 }
 
+const GetOrCreateComdatGroupOwnerResult = struct {
+    found_existing: bool,
+    index: ComdatGroupOwner.Index,
+};
+
+pub fn getOrCreateComdatGroupOwner(self: *Elf, name: [:0]const u8) !GetOrCreateComdatGroupOwnerResult {
+    const gpa = self.base.allocator;
+    const gop = try self.comdat_groups_table.getOrPut(gpa, name);
+    if (!gop.found_existing) {
+        const index = @intCast(ComdatGroupOwner.Index, self.comdat_groups_owners.items.len);
+        const owner = try self.comdat_groups_owners.addOne(gpa);
+        owner.* = .{};
+        gop.value_ptr.* = index;
+    }
+    return .{
+        .found_existing = gop.found_existing,
+        .index = gop.value_ptr.*,
+    };
+}
+
+pub fn addComdatGroup(self: *Elf) !ComdatGroup.Index {
+    const index = @intCast(ComdatGroup.Index, self.comdat_groups.items.len);
+    _ = try self.comdat_groups.addOne(self.base.allocator);
+    return index;
+}
+
+pub inline fn getComdatGroup(self: *Elf, index: ComdatGroup.Index) *ComdatGroup {
+    assert(index < self.comdat_groups.items.len);
+    return &self.comdat_groups.items[index];
+}
+
+pub inline fn getComdatGroupOwner(self: *Elf, index: ComdatGroupOwner.Index) *ComdatGroupOwner {
+    assert(index < self.comdat_groups_owners.items.len);
+    return &self.comdat_groups_owners.items[index];
+}
+
 pub fn getGotAddress(self: *Elf) u64 {
     const shndx = self.got_sect_index orelse return 0;
     const shdr = self.sections.items(.shdr)[shndx];
@@ -1761,7 +1832,11 @@ fn fmtDumpState(
         try writer.print("object({d}) : {}", .{ index, object.fmtPath() });
         if (!object.alive) try writer.writeAll(" : [*]");
         try writer.writeByte('\n');
-        try writer.print("{}{}\n", .{ object.fmtAtoms(self), object.fmtSymtab(self) });
+        try writer.print("{}{}{}\n", .{
+            object.fmtAtoms(self),
+            object.fmtSymtab(self),
+            object.fmtComdatGroups(self),
+        });
     }
     for (self.shared_objects.items) |index| {
         const shared = self.getFile(index).?.shared;
@@ -1797,6 +1872,19 @@ const Section = struct {
     shdr: elf.Elf64_Shdr,
     first_atom: ?Atom.Index,
     last_atom: ?Atom.Index,
+};
+
+const ComdatGroupOwner = struct {
+    file: File.Index = 0,
+
+    const Index = u32;
+};
+
+pub const ComdatGroup = struct {
+    owner: ComdatGroupOwner.Index,
+    shndx: u16,
+
+    pub const Index = u32;
 };
 
 const default_base_addr: u64 = 0x200000;
