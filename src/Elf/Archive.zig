@@ -1,8 +1,8 @@
 path: []const u8,
 data: []const u8,
 
-offsets: std.AutoHashMapUnmanaged(u32, void) = .{},
-extnames_strtab: []const u8 = &[0]u8{},
+objects: std.ArrayListUnmanaged(Object) = .{},
+strtab: []const u8 = &[0]u8{},
 
 // Archive files start with the ARMAG identifying string.  Then follows a
 // `struct ar_hdr', and as many bytes of member file data as its `ar_size'
@@ -52,6 +52,14 @@ const ar_hdr = extern struct {
     fn getValue(raw: []const u8) []const u8 {
         return mem.trimRight(u8, raw, &[_]u8{@as(u8, 0x20)});
     }
+
+    fn isStrtab(self: ar_hdr) bool {
+        return mem.eql(u8, getValue(&self.ar_name), "//");
+    }
+
+    fn isSymtab(self: ar_hdr) bool {
+        return mem.eql(u8, getValue(&self.ar_name), "/");
+    }
 };
 
 pub fn isValidMagic(magic: []const u8) bool {
@@ -63,54 +71,22 @@ pub fn isValidMagic(magic: []const u8) bool {
 }
 
 pub fn deinit(self: *Archive, allocator: Allocator) void {
-    self.offsets.deinit(allocator);
+    self.objects.deinit(allocator);
 }
 
-pub fn parse(self: *Archive, elf_file: *Elf) !void {
+pub fn parse(self: *Archive, arena: Allocator, elf_file: *Elf) !void {
     const gpa = elf_file.base.allocator;
 
     var stream = std.io.fixedBufferStream(self.data);
     const reader = stream.reader();
     _ = try reader.readBytesNoEof(SARMAG);
 
-    {
-        // Parse lookup table
-        const hdr = try reader.readStruct(ar_hdr);
-
-        if (!mem.eql(u8, &hdr.ar_fmag, ARFMAG)) {
-            return elf_file.base.fatal(
-                "{s}: invalid header delimiter: expected '{s}', found '{s}'",
-                .{ self.path, std.fmt.fmtSliceEscapeLower(ARFMAG), std.fmt.fmtSliceEscapeLower(&hdr.ar_fmag) },
-            );
+    while (true) {
+        if (stream.pos % 2 != 0) {
+            stream.pos += 1;
         }
 
-        const ar_name = ar_hdr.getValue(&hdr.ar_name);
-
-        if (!mem.eql(u8, ar_name, "/")) {
-            return elf_file.base.fatal(
-                "{s}: expected symbol lookup table as first data section; instead found '{s}'",
-                .{ self.path, &hdr.ar_name },
-            );
-        }
-
-        const checkpoint = try stream.getPos();
-        const size = try hdr.size();
-        const nsyms = try reader.readIntBig(u32);
-
-        try self.offsets.ensureTotalCapacity(gpa, nsyms);
-
-        var i: usize = 0;
-        while (i < nsyms) : (i += 1) {
-            const offset = try reader.readIntBig(u32);
-            self.offsets.putAssumeCapacity(offset, {});
-        }
-
-        try stream.seekTo(checkpoint + size);
-    }
-
-    blk: {
-        // Try parsing extended names table
-        const hdr = try reader.readStruct(ar_hdr);
+        const hdr = reader.readStruct(ar_hdr) catch break;
 
         if (!mem.eql(u8, &hdr.ar_fmag, ARFMAG)) {
             return elf_file.base.fatal(
@@ -120,56 +96,45 @@ pub fn parse(self: *Archive, elf_file: *Elf) !void {
         }
 
         const size = try hdr.size();
-        const name = ar_hdr.getValue(&hdr.ar_name);
-
-        if (!mem.eql(u8, name, "//")) {
-            break :blk;
+        defer {
+            _ = stream.seekBy(size) catch {};
         }
 
-        self.extnames_strtab = self.data[stream.pos..][0..size];
+        if (hdr.isSymtab()) continue;
+        if (hdr.isStrtab()) {
+            self.strtab = self.data[stream.pos..][0..size];
+            continue;
+        }
+
+        const name = ar_hdr.getValue(&hdr.ar_name);
+
+        if (mem.eql(u8, name, "__.SYMDEF") or mem.eql(u8, name, "__.SYMDEF SORTED")) continue;
+
+        const object_name = blk: {
+            if (name[0] == '/') {
+                const off = try std.fmt.parseInt(u32, name[1..], 10);
+                break :blk self.getString(off);
+            }
+            break :blk name;
+        };
+
+        const object = Object{
+            .archive = self.path,
+            .path = try arena.dupe(u8, object_name[0 .. object_name.len - 1]), // To account for trailing '/'
+            .data = self.data[stream.pos..][0..size],
+            .index = undefined,
+            .alive = false,
+        };
+
+        log.debug("extracting object '{s}' from archive '{s}'", .{ object.path, self.path });
+
+        try self.objects.append(gpa, object);
     }
 }
 
-fn getExtName(self: Archive, off: u32) []const u8 {
-    assert(off < self.extnames_strtab.len);
-    return mem.sliceTo(@ptrCast([*:'\n']const u8, self.extnames_strtab.ptr + off), 0);
-}
-
-pub fn getObject(self: Archive, arena: Allocator, offset: u32, elf_file: *Elf) !Object {
-    var stream = std.io.fixedBufferStream(self.data[offset..]);
-    const reader = stream.reader();
-
-    const hdr = try reader.readStruct(ar_hdr);
-
-    if (!mem.eql(u8, &hdr.ar_fmag, ARFMAG)) {
-        elf_file.base.fatal(
-            "{s}: invalid header delimiter: expected '{s}', found '{s}'",
-            .{ self.path, std.fmt.fmtSliceEscapeLower(ARFMAG), std.fmt.fmtSliceEscapeLower(&hdr.ar_fmag) },
-        );
-        return error.InvalidHeader;
-    }
-
-    const name = blk: {
-        const name = ar_hdr.getValue(&hdr.ar_name);
-        if (name[0] == '/') {
-            const off = try std.fmt.parseInt(u32, name[1..], 10);
-            break :blk self.getExtName(off);
-        }
-        break :blk try arena.dupe(u8, name);
-    };
-    const object_name = name[0 .. name.len - 1]; // to account for trailing '/'
-
-    log.debug("extracting object '{s}' from archive '{s}'", .{ object_name, self.path });
-
-    const object_size = try hdr.size();
-
-    return .{
-        .archive = self.path,
-        .path = object_name,
-        .data = self.data[offset + stream.pos ..][0..object_size],
-        .index = undefined,
-        .alive = false,
-    };
+fn getString(self: Archive, off: u32) []const u8 {
+    assert(off < self.strtab.len);
+    return mem.sliceTo(@ptrCast([*:'\n']const u8, self.strtab.ptr + off), 0);
 }
 
 const std = @import("std");

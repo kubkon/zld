@@ -1056,15 +1056,13 @@ fn parseArchive(self: *Elf, arena: Allocator, path: []const u8) !bool {
     const data = try file.readToEndAlloc(arena, std.math.maxInt(u32));
     var archive = Archive{ .path = path, .data = data };
     defer archive.deinit(gpa);
-    try archive.parse(self);
+    try archive.parse(arena, self);
 
-    var it = archive.offsets.keyIterator();
-    while (it.next()) |offset| {
-        var extracted = try archive.getObject(arena, offset.*, self);
+    for (archive.objects.items) |extracted| {
         const index = @intCast(File.Index, try self.files.addOne(gpa));
-        extracted.index = index;
         self.files.set(index, .{ .object = extracted });
         const object = &self.files.items(.data)[index].object;
+        object.index = index;
         try object.parse(self);
         try self.objects.append(gpa, index);
     }
