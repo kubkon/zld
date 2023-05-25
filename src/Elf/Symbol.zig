@@ -27,6 +27,9 @@ import: bool = false,
 /// Whether the symbol is exported at runtime.
 @"export": bool = false,
 
+/// Whether the symbol makes into the output symtab or not.
+output_symtab: bool = false,
+
 flags: Flags = .{},
 
 extra: u32 = 0,
@@ -41,6 +44,13 @@ pub fn isAbs(symbol: Symbol, elf_file: *Elf) bool {
 
 pub fn isLocal(symbol: Symbol) bool {
     return !(symbol.import or symbol.@"export");
+}
+
+pub fn isIFunc(symbol: Symbol, elf_file: *Elf) bool {
+    const file = symbol.getFile(elf_file).?;
+    const s_sym = symbol.getSourceSymbol(elf_file);
+    const is_ifunc = s_sym.st_type() == elf.STT_GNU_IFUNC;
+    return is_ifunc and file != .shared;
 }
 
 pub fn getName(symbol: Symbol, elf_file: *Elf) [:0]const u8 {
@@ -97,6 +107,23 @@ pub inline fn getExtra(symbol: Symbol, elf_file: *Elf) ?Extra {
 
 pub inline fn setExtra(symbol: Symbol, extra: Extra, elf_file: *Elf) void {
     elf_file.setSymbolExtra(symbol.extra, extra);
+}
+
+pub inline fn asElfSym(symbol: Symbol, st_name: u32, elf_file: *Elf) elf.Elf64_Sym {
+    const s_sym = symbol.getSourceSymbol(elf_file);
+    const st_type = switch (s_sym.st_type()) {
+        elf.STT_GNU_IFUNC => elf.STT_FUNC,
+        else => |st_type| st_type,
+    };
+    const st_bind: u8 = if (symbol.isLocal()) 0 else elf.STB_GLOBAL;
+    return elf.Elf64_Sym{
+        .st_name = st_name,
+        .st_info = (st_bind << 4) | st_type,
+        .st_other = s_sym.st_other,
+        .st_shndx = if (symbol.import) elf.SHN_UNDEF else symbol.shndx,
+        .st_value = if (symbol.import) 0 else symbol.value,
+        .st_size = s_sym.st_size,
+    };
 }
 
 pub fn format(

@@ -174,6 +174,14 @@ pub fn initOutputSection(self: *Atom, elf_file: *Elf) !void {
 pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
     const object = self.getObject(elf_file);
     for (self.getRelocs(elf_file)) |rel| {
+        if (rel.r_type() == elf.R_X86_64_NONE) continue;
+
+        const symbol = object.getSymbol(rel.r_sym(), elf_file);
+        if (symbol.isIFunc(elf_file)) {
+            symbol.flags.got = true;
+            symbol.flags.plt = true;
+        }
+
         // While traversing relocations, mark symbols that require special handling such as
         // pointer indirection via GOT, or a stub trampoline via PLT.
         switch (rel.r_type()) {
@@ -181,11 +189,9 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
             elf.R_X86_64_GOTPCRELX,
             elf.R_X86_64_REX_GOTPCRELX,
             => {
-                const symbol = object.getSymbol(rel.r_sym(), elf_file);
                 symbol.flags.got = true;
             },
             elf.R_X86_64_PLT32 => {
-                const symbol = object.getSymbol(rel.r_sym(), elf_file);
                 if (symbol.import) {
                     symbol.flags.plt = true;
                 }
@@ -254,7 +260,7 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
             elf.R_X86_64_GOTPCREL => try cwriter.writeIntLittle(i32, @intCast(i32, G + GOT + A - P)),
 
             elf.R_X86_64_GOTPCRELX => {
-                if (!target.import and !target.isAbs(elf_file)) blk: {
+                if (!target.import and !target.isIFunc(elf_file) and !target.isAbs(elf_file)) blk: {
                     var inst_code = code[rel.r_offset - 3 ..];
                     var disas = Disassembler.init(inst_code);
                     var inst = (try disas.next()) orelse break :blk;
@@ -280,7 +286,7 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
             },
 
             elf.R_X86_64_REX_GOTPCRELX => {
-                if (!target.import and !target.isAbs(elf_file)) blk: {
+                if (!target.import and !target.isIFunc(elf_file) and !target.isAbs(elf_file)) blk: {
                     var inst_code = code[rel.r_offset - 3 ..];
                     var disas = Disassembler.init(inst_code);
                     var inst = (try disas.next()) orelse break :blk;

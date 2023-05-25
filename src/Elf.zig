@@ -45,8 +45,6 @@ globals: std.StringHashMapUnmanaged(u32) = .{},
 string_intern: StringTable(.string_intern) = .{},
 
 shstrtab: StringTable(.shstrtab) = .{},
-strtab: StringTable(.strtab) = .{},
-symtab: SymtabSection = .{},
 dynsym: DynsymSection = .{},
 dynstrtab: StringTable(.dynstrtab) = .{},
 
@@ -97,8 +95,6 @@ fn createEmpty(gpa: Allocator, options: Options, thread_pool: *ThreadPool) !*Elf
 pub fn deinit(self: *Elf) void {
     const gpa = self.base.allocator;
     self.string_intern.deinit(gpa);
-    self.symtab.deinit(gpa);
-    self.strtab.deinit(gpa);
     self.shstrtab.deinit(gpa);
     self.atoms.deinit(gpa);
     self.comdat_groups.deinit(gpa);
@@ -190,7 +186,6 @@ pub fn flush(self: *Elf) !void {
     // Append empty string to string tables.
     try self.string_intern.buffer.append(gpa, 0);
     try self.shstrtab.buffer.append(gpa, 0);
-    try self.strtab.buffer.append(gpa, 0);
     try self.dynstrtab.buffer.append(gpa, 0);
     // Append null section.
     _ = try self.addSection(.{ .name = "" });
@@ -314,7 +309,6 @@ pub fn flush(self: *Elf) !void {
     try self.sortSections();
     try self.setDynamic();
     try self.setHash();
-    try self.setSymtab();
     try self.calcSectionSizes();
 
     try self.allocateSections();
@@ -537,20 +531,96 @@ fn calcSectionSizes(self: *Elf) !void {
         shdr.sh_size = self.dynstrtab.buffer.items.len;
     }
 
-    if (self.symtab_sect_index) |index| {
-        const shdr = &self.sections.items(.shdr)[index];
-        shdr.sh_size = self.symtab.size();
-    }
-
-    if (self.strtab_sect_index) |index| {
-        const shdr = &self.sections.items(.shdr)[index];
-        shdr.sh_size = self.strtab.buffer.items.len;
+    if (!self.options.strip_all) {
+        try self.calcSymtabSize();
     }
 
     if (self.shstrtab_sect_index) |index| {
         const shdr = &self.sections.items(.shdr)[index];
         shdr.sh_size = self.shstrtab.buffer.items.len;
     }
+}
+
+fn calcSymtabSize(self: *Elf) !void {
+    if (self.options.strip_all) return;
+
+    var sizes = SymtabSize{};
+
+    for (self.objects.items) |index| {
+        const object = self.getFile(index).?.object;
+        try object.calcSymtabSize(self);
+        sizes.nlocals += object.output_symtab_size.nlocals;
+        sizes.nglobals += object.output_symtab_size.nglobals;
+        sizes.strsize += object.output_symtab_size.strsize;
+    }
+    for (self.shared_objects.items) |index| {
+        const shared = self.getFile(index).?.shared;
+        try shared.calcSymtabSize(self);
+        sizes.nglobals += shared.output_symtab_size.nglobals;
+        sizes.strsize += shared.output_symtab_size.strsize;
+    }
+    if (self.internal_object_index) |index| {
+        const internal = self.getFile(index).?.internal;
+        try internal.calcSymtabSize(self);
+        sizes.nlocals += internal.output_symtab_size.nlocals;
+        sizes.strsize += internal.output_symtab_size.strsize;
+    }
+
+    {
+        const shdr = &self.sections.items(.shdr)[self.symtab_sect_index.?];
+        shdr.sh_size = (sizes.nlocals + 1 + sizes.nglobals) * @sizeOf(elf.Elf64_Sym);
+        shdr.sh_info = sizes.nlocals + 1;
+    }
+    {
+        const shdr = &self.sections.items(.shdr)[self.strtab_sect_index.?];
+        shdr.sh_size = sizes.strsize;
+    }
+}
+
+fn writeSymtab(self: *Elf) !void {
+    if (self.options.strip_all) return;
+
+    const gpa = self.base.allocator;
+    const symtab_shdr = self.sections.items(.shdr)[self.symtab_sect_index.?];
+    const strtab_shdr = self.sections.items(.shdr)[self.strtab_sect_index.?];
+
+    var symtab = try gpa.alloc(elf.Elf64_Sym, @divExact(symtab_shdr.sh_size, @sizeOf(elf.Elf64_Sym)));
+    defer gpa.free(symtab);
+    symtab[0] = null_sym;
+
+    var strtab = StringTable(.strtab){};
+    defer strtab.deinit(gpa);
+    try strtab.buffer.append(gpa, 0);
+
+    var ctx = WriteSymtabCtx{
+        .ilocal = 1,
+        .iglobal = symtab_shdr.sh_info,
+        .symtab = symtab,
+        .strtab = &strtab,
+    };
+
+    for (self.objects.items) |index| {
+        const object = self.getFile(index).?.object;
+        try object.writeSymtab(self, ctx);
+        ctx.ilocal += object.output_symtab_size.nlocals;
+        ctx.iglobal += object.output_symtab_size.nglobals;
+    }
+    if (self.internal_object_index) |index| {
+        const internal = self.getFile(index).?.internal;
+        try internal.writeSymtab(self, ctx);
+        ctx.ilocal += internal.output_symtab_size.nlocals;
+    }
+    for (self.shared_objects.items) |index| {
+        const shared = self.getFile(index).?.shared;
+        try shared.writeSymtab(self, ctx);
+        ctx.iglobal += shared.output_symtab_size.nglobals;
+    }
+
+    const strtab_padding = strtab_shdr.sh_size - strtab.buffer.items.len;
+    try strtab.buffer.writer(gpa).writeByteNTimes(0, strtab_padding);
+
+    try self.base.file.pwriteAll(mem.sliceAsBytes(symtab), symtab_shdr.sh_offset);
+    try self.base.file.pwriteAll(strtab.buffer.items, strtab_shdr.sh_offset);
 }
 
 fn initPhdrs(self: *Elf) !void {
@@ -1332,11 +1402,6 @@ fn scanRelocs(self: *Elf) !void {
     }
 }
 
-fn setSymtab(self: *Elf) !void {
-    if (self.symtab_sect_index == null) return;
-    try self.symtab.set(self);
-}
-
 fn setDynamic(self: *Elf) !void {
     if (self.dynamic_sect_index == null) return;
 
@@ -1471,18 +1536,8 @@ fn writeSyntheticSections(self: *Elf) !void {
         try self.base.file.pwriteAll(buffer.items, shdr.sh_offset);
     }
 
-    if (self.symtab_sect_index) |shndx| {
-        const shdr = &self.sections.items(.shdr)[shndx];
-        shdr.sh_info = self.symtab.globalIndex();
-        var buffer = try std.ArrayList(u8).initCapacity(gpa, self.symtab.size());
-        defer buffer.deinit();
-        try self.symtab.write(self, buffer.writer());
-        try self.base.file.pwriteAll(buffer.items, shdr.sh_offset);
-    }
-
-    if (self.strtab_sect_index) |shndx| {
-        const shdr = self.sections.items(.shdr)[shndx];
-        try self.base.file.pwriteAll(self.strtab.buffer.items, shdr.sh_offset);
+    if (!self.options.strip_all) {
+        try self.writeSymtab();
     }
 
     if (self.shstrtab_sect_index) |shndx| {
@@ -1887,6 +1942,19 @@ pub const ComdatGroup = struct {
     pub const Index = u32;
 };
 
+pub const SymtabSize = struct {
+    nlocals: u32 = 0,
+    nglobals: u32 = 0,
+    strsize: u32 = 0,
+};
+
+pub const WriteSymtabCtx = struct {
+    ilocal: u32,
+    iglobal: u32,
+    symtab: []elf.Elf64_Sym,
+    strtab: *StringTable(.strtab),
+};
+
 const default_base_addr: u64 = 0x200000;
 const default_page_size: u64 = 0x1000;
 
@@ -1931,6 +1999,5 @@ const PltSection = synthetic.PltSection;
 const SharedObject = @import("Elf/SharedObject.zig");
 const StringTable = @import("strtab.zig").StringTable;
 const Symbol = @import("Elf/Symbol.zig");
-const SymtabSection = synthetic.SymtabSection;
 const ThreadPool = @import("ThreadPool.zig");
 const Zld = @import("Zld.zig");
