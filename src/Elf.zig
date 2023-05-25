@@ -553,17 +553,25 @@ fn calcSymtabSize(self: *Elf) !void {
         sizes.nglobals += object.output_symtab_size.nglobals;
         sizes.strsize += object.output_symtab_size.strsize;
     }
+
     for (self.shared_objects.items) |index| {
         const shared = self.getFile(index).?.shared;
         try shared.calcSymtabSize(self);
         sizes.nglobals += shared.output_symtab_size.nglobals;
         sizes.strsize += shared.output_symtab_size.strsize;
     }
+
     if (self.internal_object_index) |index| {
         const internal = self.getFile(index).?.internal;
         try internal.calcSymtabSize(self);
         sizes.nlocals += internal.output_symtab_size.nlocals;
         sizes.strsize += internal.output_symtab_size.strsize;
+    }
+
+    if (self.got_sect_index) |_| {
+        try self.got.calcSymtabSize(self);
+        sizes.nlocals += self.got.output_symtab_size.nlocals;
+        sizes.strsize += self.got.output_symtab_size.strsize;
     }
 
     {
@@ -605,11 +613,18 @@ fn writeSymtab(self: *Elf) !void {
         ctx.ilocal += object.output_symtab_size.nlocals;
         ctx.iglobal += object.output_symtab_size.nglobals;
     }
+
     if (self.internal_object_index) |index| {
         const internal = self.getFile(index).?.internal;
         try internal.writeSymtab(self, ctx);
         ctx.ilocal += internal.output_symtab_size.nlocals;
     }
+
+    if (self.got_sect_index) |_| {
+        try self.got.writeSymtab(self, ctx);
+        ctx.ilocal += self.got.output_symtab_size.nlocals;
+    }
+
     for (self.shared_objects.items) |index| {
         const shared = self.getFile(index).?.shared;
         try shared.writeSymtab(self, ctx);

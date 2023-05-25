@@ -251,6 +251,7 @@ pub const DynsymSection = struct {
 pub const GotSection = struct {
     symbols: std.ArrayListUnmanaged(u32) = .{},
     needs_rela: bool = false,
+    output_symtab_size: Elf.SymtabSize = .{},
 
     pub fn deinit(got: *GotSection, allocator: Allocator) void {
         got.symbols.deinit(allocator);
@@ -303,6 +304,39 @@ pub const GotSection = struct {
                     .r_addend = 0,
                 });
             }
+        }
+    }
+
+    pub fn calcSymtabSize(got: *GotSection, elf_file: *Elf) !void {
+        if (elf_file.options.strip_all) return;
+
+        got.output_symtab_size.nlocals = @intCast(u32, got.symbols.items.len);
+        for (got.symbols.items) |sym_index| {
+            const sym = elf_file.getSymbol(sym_index);
+            got.output_symtab_size.strsize += @intCast(u32, sym.getName(elf_file).len + "$got".len + 1);
+        }
+    }
+
+    pub fn writeSymtab(got: GotSection, elf_file: *Elf, ctx: Elf.WriteSymtabCtx) !void {
+        if (elf_file.options.strip_all) return;
+
+        const gpa = elf_file.base.allocator;
+
+        var ilocal = ctx.ilocal;
+        for (got.symbols.items, 0..) |sym_index, i| {
+            const sym = elf_file.getSymbol(sym_index);
+            const name = try std.fmt.allocPrint(gpa, "{s}$got", .{sym.getName(elf_file)});
+            defer gpa.free(name);
+            const st_name = try ctx.strtab.insert(gpa, name);
+            ctx.symtab[ilocal] = .{
+                .st_name = st_name,
+                .st_info = elf.STT_OBJECT,
+                .st_other = 0,
+                .st_shndx = elf_file.got_sect_index.?,
+                .st_value = elf_file.getGotEntryAddress(@intCast(u32, i)),
+                .st_size = @sizeOf(u64),
+            };
+            ilocal += 1;
         }
     }
 };
