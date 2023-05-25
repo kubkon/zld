@@ -307,9 +307,13 @@ pub const SymtabSection = struct {
         for (symtab.symbols.items[symtab.first_global..]) |sym_ref| {
             const sym = elf_file.getSymbol(sym_ref.index);
             const s_sym = sym.getSourceSymbol(elf_file);
+            const st_type = switch (s_sym.st_type()) {
+                elf.STT_GNU_IFUNC => elf.STT_FUNC,
+                else => |st_type| st_type,
+            };
             try writer.writeStruct(elf.Elf64_Sym{
                 .st_name = sym_ref.off,
-                .st_info = (@as(u8, elf.STB_GLOBAL) << 4) | s_sym.st_type(),
+                .st_info = (@as(u8, elf.STB_GLOBAL) << 4) | st_type,
                 .st_other = s_sym.st_other,
                 .st_shndx = if (sym.import) elf.SHN_UNDEF else sym.shndx,
                 .st_value = if (sym.import) 0 else sym.value,
@@ -352,9 +356,13 @@ pub const DynsymSection = struct {
         for (dynsym.symbols.items) |sym_ref| {
             const sym = elf_file.getSymbol(sym_ref.index);
             const s_sym = sym.getSourceSymbol(elf_file);
+            const st_type = switch (s_sym.st_type()) {
+                elf.STT_GNU_IFUNC => elf.STT_FUNC,
+                else => |st_type| st_type,
+            };
             try writer.writeStruct(elf.Elf64_Sym{
                 .st_name = sym_ref.off,
-                .st_info = s_sym.st_info,
+                .st_info = (@as(u8, elf.STB_GLOBAL) << 4) | st_type,
                 .st_other = s_sym.st_other,
                 .st_shndx = elf.SHN_UNDEF,
                 .st_value = 0,
