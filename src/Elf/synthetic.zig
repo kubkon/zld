@@ -41,6 +41,8 @@ pub const DynamicSection = struct {
         nentries += 1; // STRTAB
         nentries += 1; // STRSZ
         nentries += 1; // NULL
+        nentries += 1; // FLAGS
+        nentries += 1; // FLAGS_1
         return nentries * @sizeOf(elf.Elf64_Dyn);
     }
 
@@ -126,6 +128,18 @@ pub const DynamicSection = struct {
             const shdr = elf_file.sections.items(.shdr)[elf_file.dynstrtab_sect_index.?];
             try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_STRTAB, .d_val = shdr.sh_addr });
             try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_STRSZ, .d_val = shdr.sh_size });
+        }
+
+        // FLAGS + FLAGS_1
+        {
+            var flags: u64 = 0;
+            var flags_1: u64 = 0;
+            if (elf_file.options.z_now) {
+                flags |= 8; // TODO add elf.DF_BIND_NOW;
+                flags_1 |= 1; // TODO add elf.DF_1_NOW;
+            }
+            try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_FLAGS, .d_val = flags });
+            try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_FLAGS_1, .d_val = flags_1 });
         }
 
         // NULL

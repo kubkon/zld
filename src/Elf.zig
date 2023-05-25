@@ -296,10 +296,10 @@ pub fn flush(self: *Elf) !void {
 
     try self.resolveSyntheticSymbols();
 
-    if (self.options.execstack_if_needed) {
+    if (self.options.z_execstack_if_needed) {
         for (self.objects.items) |index| {
             if (self.getFile(index).?.object.needs_exec_stack) {
-                self.options.execstack = true;
+                self.options.z_execstack = true;
                 break;
             }
         }
@@ -658,8 +658,8 @@ fn initPhdrs(self: *Elf) !void {
     // be respected by the OS.
     _ = try self.addPhdr(.{
         .type = elf.PT_GNU_STACK,
-        .flags = if (self.options.execstack) elf.PF_W | elf.PF_R | elf.PF_X else elf.PF_W | elf.PF_R,
-        .memsz = self.options.stack_size orelse 0,
+        .flags = if (self.options.z_execstack) elf.PF_W | elf.PF_R | elf.PF_X else elf.PF_W | elf.PF_R,
+        .memsz = self.options.z_stack_size orelse 0,
     });
 
     // Backpatch size of the PHDR phdr

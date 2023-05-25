@@ -132,7 +132,7 @@ fn initAtoms(self: *Object, elf_file: *Elf) !void {
 
                 if (mem.eql(u8, ".note.GNU-stack", name)) {
                     if (shdr.sh_flags & elf.SHF_EXECINSTR != 0) {
-                        if (!elf_file.options.execstack or !elf_file.options.execstack_if_needed) {
+                        if (!elf_file.options.z_execstack or !elf_file.options.z_execstack_if_needed) {
                             elf_file.base.warn(
                                 "{}: may cause segmentation fault as this file requested executable stack",
                                 .{self.fmtPath()},
