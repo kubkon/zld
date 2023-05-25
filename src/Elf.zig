@@ -574,6 +574,12 @@ fn calcSymtabSize(self: *Elf) !void {
         sizes.strsize += self.got.output_symtab_size.strsize;
     }
 
+    if (self.plt_sect_index) |_| {
+        try self.plt.calcSymtabSize(self);
+        sizes.nlocals += self.plt.output_symtab_size.nlocals;
+        sizes.strsize += self.plt.output_symtab_size.strsize;
+    }
+
     {
         const shdr = &self.sections.items(.shdr)[self.symtab_sect_index.?];
         shdr.sh_size = (sizes.nlocals + 1 + sizes.nglobals) * @sizeOf(elf.Elf64_Sym);
@@ -623,6 +629,11 @@ fn writeSymtab(self: *Elf) !void {
     if (self.got_sect_index) |_| {
         try self.got.writeSymtab(self, ctx);
         ctx.ilocal += self.got.output_symtab_size.nlocals;
+    }
+
+    if (self.plt_sect_index) |_| {
+        try self.plt.writeSymtab(self, ctx);
+        ctx.ilocal += self.plt.output_symtab_size.nlocals;
     }
 
     for (self.shared_objects.items) |index| {

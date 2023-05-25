@@ -343,6 +343,7 @@ pub const GotSection = struct {
 
 pub const PltSection = struct {
     symbols: std.ArrayListUnmanaged(u32) = .{},
+    output_symtab_size: Elf.SymtabSize = .{},
 
     pub const plt_preamble_size = 32;
     const got_plt_preamble_size = 24;
@@ -436,6 +437,39 @@ pub const PltSection = struct {
                 .r_info = (r_sym << 32) | r_type,
                 .r_addend = 0,
             });
+        }
+    }
+
+    pub fn calcSymtabSize(plt: *PltSection, elf_file: *Elf) !void {
+        if (elf_file.options.strip_all) return;
+
+        plt.output_symtab_size.nlocals = @intCast(u32, plt.symbols.items.len);
+        for (plt.symbols.items) |sym_index| {
+            const sym = elf_file.getSymbol(sym_index);
+            plt.output_symtab_size.strsize += @intCast(u32, sym.getName(elf_file).len + "$plt".len + 1);
+        }
+    }
+
+    pub fn writeSymtab(plt: PltSection, elf_file: *Elf, ctx: Elf.WriteSymtabCtx) !void {
+        if (elf_file.options.strip_all) return;
+
+        const gpa = elf_file.base.allocator;
+
+        var ilocal = ctx.ilocal;
+        for (plt.symbols.items, 0..) |sym_index, i| {
+            const sym = elf_file.getSymbol(sym_index);
+            const name = try std.fmt.allocPrint(gpa, "{s}$plt", .{sym.getName(elf_file)});
+            defer gpa.free(name);
+            const st_name = try ctx.strtab.insert(gpa, name);
+            ctx.symtab[ilocal] = .{
+                .st_name = st_name,
+                .st_info = elf.STT_FUNC,
+                .st_other = 0,
+                .st_shndx = elf_file.plt_sect_index.?,
+                .st_value = elf_file.getPltEntryAddress(@intCast(u32, i)),
+                .st_size = 16,
+            };
+            ilocal += 1;
         }
     }
 };
