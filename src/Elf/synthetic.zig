@@ -43,6 +43,7 @@ pub const DynamicSection = struct {
         nentries += 1; // NULL
         nentries += 1; // FLAGS
         nentries += 1; // FLAGS_1
+        nentries += 1; // DEBUG
         return nentries * @sizeOf(elf.Elf64_Dyn);
     }
 
@@ -129,6 +130,9 @@ pub const DynamicSection = struct {
             try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_STRTAB, .d_val = shdr.sh_addr });
             try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_STRSZ, .d_val = shdr.sh_size });
         }
+
+        // DEBUG
+        try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_DEBUG, .d_val = 0 });
 
         // FLAGS + FLAGS_1
         {
