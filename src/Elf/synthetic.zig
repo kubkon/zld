@@ -410,9 +410,10 @@ pub const PltSection = struct {
             disp = @intCast(i64, target_addr) - @intCast(i64, source_addr + 12) - 4;
             var entry = [_]u8{
                 0xf3, 0x0f, 0x1e, 0xfa, // endbr64
-                0x41, 0xbb, 0x00, 0x00, 0x00, 0x00, // jmp r11d, 0x0
+                0x41, 0xbb, 0x00, 0x00, 0x00, 0x00, // mov r11d, N
                 0xff, 0x25, 0x00, 0x00, 0x00, 0x00, // jmp qword ptr [rip] -> .got.plt[N]
             };
+            mem.writeIntLittle(i32, entry[6..][0..4], @intCast(i32, i));
             mem.writeIntLittle(i32, entry[12..][0..4], @intCast(i32, disp));
             try writer.writeAll(&entry);
         }
