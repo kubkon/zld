@@ -35,6 +35,7 @@ init_array_end_index: ?u32 = null,
 fini_array_start_index: ?u32 = null,
 fini_array_end_index: ?u32 = null,
 got_index: ?u32 = null,
+plt_index: ?u32 = null,
 
 entry_index: ?u32 = null,
 
@@ -260,7 +261,7 @@ pub fn flush(self: *Elf) !void {
             const soname = shared.getSoname();
             const gop = seen_dsos.getOrPutAssumeCapacity(soname);
             if (gop.found_existing) {
-                _ = self.shared_objects.swapRemove(i);
+                _ = self.shared_objects.orderedRemove(i);
             } else i += 1;
         }
     }
@@ -1103,6 +1104,14 @@ fn allocateSyntheticSymbols(self: *Elf) void {
         symbol.value = shdr.sh_addr;
         symbol.shndx = shndx;
     }
+
+    // _PROCEDURE_LINKAGE_TABLE_
+    if (self.plt_sect_index) |shndx| {
+        const shdr = self.sections.items(.shdr)[shndx];
+        const symbol = self.getSymbol(self.plt_index.?);
+        symbol.value = shdr.sh_addr;
+        symbol.shndx = shndx;
+    }
 }
 
 fn parsePositional(self: *Elf, arena: Allocator, obj: Elf.LinkObject, search_dirs: []const []const u8) anyerror!void {
@@ -1271,7 +1280,7 @@ fn resolveSymbols(self: *Elf) !void {
     while (i < self.objects.items.len) {
         const index = self.objects.items[i];
         if (!self.getFile(index).?.isAlive()) {
-            _ = self.objects.swapRemove(i);
+            _ = self.objects.orderedRemove(i);
         } else i += 1;
     }
 
@@ -1279,7 +1288,7 @@ fn resolveSymbols(self: *Elf) !void {
     while (i < self.shared_objects.items.len) {
         const index = self.shared_objects.items[i];
         if (!self.getFile(index).?.isAlive()) {
-            _ = self.shared_objects.swapRemove(i);
+            _ = self.shared_objects.orderedRemove(i);
         } else i += 1;
     }
 
@@ -1362,6 +1371,7 @@ fn resolveSyntheticSymbols(self: *Elf) !void {
     self.fini_array_start_index = try internal.addSyntheticGlobal("__fini_array_start", self);
     self.fini_array_end_index = try internal.addSyntheticGlobal("__fini_array_end", self);
     self.got_index = try internal.addSyntheticGlobal("_GLOBAL_OFFSET_TABLE_", self);
+    self.plt_index = try internal.addSyntheticGlobal("_PROCEDURE_LINKAGE_TABLE_", self);
     internal.resolveSymbols(self);
 }
 

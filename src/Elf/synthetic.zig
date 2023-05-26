@@ -138,8 +138,18 @@ pub const DynamicSection = struct {
                 flags |= 8; // TODO add elf.DF_BIND_NOW;
                 flags_1 |= 1; // TODO add elf.DF_1_NOW;
             }
-            try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_FLAGS, .d_val = flags });
-            try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_FLAGS_1, .d_val = flags_1 });
+
+            if (flags > 0) {
+                try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_FLAGS, .d_val = flags });
+            } else {
+                try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_NULL, .d_val = 0 });
+            }
+
+            if (flags_1 > 0) {
+                try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_FLAGS_1, .d_val = flags_1 });
+            } else {
+                try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_NULL, .d_val = 0 });
+            }
         }
 
         // NULL
