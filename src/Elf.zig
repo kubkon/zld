@@ -1136,7 +1136,7 @@ fn parseLib(
         return self.base.fatal("{s}: library not found", .{lib_name});
     const gop = try ctx.libs.getOrPut(full_path);
     if (gop.found_existing) {
-        // TODO should we check for differing AS_NEEDED directives and modify parsed DSO?
+        gop.value_ptr.needed = gop.value_ptr.needed and lib_info.needed;
         return;
     }
     gop.value_ptr.* = lib_info;
@@ -1222,7 +1222,7 @@ fn parseShared(self: *Elf, arena: Allocator, path: []const u8, opts: Zld.SystemL
         .data = data,
         .index = index,
         .needed = opts.needed,
-        .alive = !opts.needed,
+        .alive = opts.needed,
     } });
     const dso = &self.files.items(.data)[index].shared;
     try dso.parse(self);
@@ -1257,7 +1257,7 @@ fn parseLdScript(self: *Elf, arena: Allocator, path: []const u8, opts: Zld.Syste
             break :blk mem.trimLeft(u8, s_name["-l".len..], " ");
         } else s_name;
         const static = opts.static or s_opts.static;
-        const needed = opts.needed or s_opts.needed;
+        const needed = opts.needed and s_opts.needed;
         try self.parseLib(arena, actual_name, .{
             .static = static,
             .needed = needed,
