@@ -225,12 +225,13 @@ const mem = std.mem;
 const process = std.process;
 const trace = @import("tracy.zig").trace;
 
+pub const Elf = @import("Elf.zig");
+pub const MachO = @import("MachO.zig");
+pub const Coff = @import("Coff.zig");
+pub const Wasm = @import("Wasm.zig");
+
 const Allocator = mem.Allocator;
 const CrossTarget = std.zig.CrossTarget;
-const Elf = @import("Elf.zig");
 const ErrorBundle = std.zig.ErrorBundle;
-const MachO = @import("MachO.zig");
-const Coff = @import("Coff.zig");
-const Wasm = @import("Wasm.zig");
 const ThreadPool = @import("ThreadPool.zig");
 const Zld = @This();
