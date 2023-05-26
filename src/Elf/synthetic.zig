@@ -290,12 +290,11 @@ pub const GotSection = struct {
     }
 
     pub fn writeRela(got: GotSection, elf_file: *Elf, writer: anytype) !void {
-        const base_addr = elf_file.sections.items(.shdr)[elf_file.got_sect_index.?].sh_addr;
         for (got.symbols.items, 0..) |sym_index, i| {
             const sym = elf_file.getSymbol(sym_index);
             if (sym.import) {
                 const extra = sym.getExtra(elf_file).?;
-                const r_offset = base_addr + i * 8;
+                const r_offset = elf_file.getGotEntryAddress(@intCast(u32, i));
                 const r_sym: u64 = extra.dynamic;
                 const r_type: u32 = elf.R_X86_64_GLOB_DAT;
                 try writer.writeStruct(elf.Elf64_Rela{
@@ -346,7 +345,7 @@ pub const PltSection = struct {
     output_symtab_size: Elf.SymtabSize = .{},
 
     pub const plt_preamble_size = 32;
-    const got_plt_preamble_size = 24;
+    pub const got_plt_preamble_size = 24;
 
     pub fn deinit(plt: *PltSection, allocator: Allocator) void {
         plt.symbols.deinit(allocator);
@@ -376,9 +375,8 @@ pub const PltSection = struct {
     }
 
     pub fn writePlt(plt: PltSection, elf_file: *Elf, writer: anytype) !void {
-        const plt_addr = elf_file.sections.items(.shdr)[elf_file.plt_sect_index.?].sh_addr;
-        const got_plt_addr = elf_file.sections.items(.shdr)[elf_file.got_plt_sect_index.?].sh_addr;
-
+        const plt_addr = elf_file.getPltAddress();
+        const got_plt_addr = elf_file.getGotPltAddress();
         var preamble = [_]u8{
             0xf3, 0x0f, 0x1e, 0xfa, // endbr64
             0x41, 0x53, // push r11
@@ -393,8 +391,8 @@ pub const PltSection = struct {
         try writer.writeByteNTimes(0xcc, plt_preamble_size - preamble.len);
 
         for (0..plt.symbols.items.len) |i| {
-            const target_addr = got_plt_addr + got_plt_preamble_size + i * 8;
-            const source_addr = plt_addr + plt_preamble_size + i * 16;
+            const target_addr = elf_file.getGotPltEntryAddress(@intCast(u32, i));
+            const source_addr = elf_file.getPltEntryAddress(@intCast(u32, i));
             disp = @intCast(i64, target_addr) - @intCast(i64, source_addr + 12) - 4;
             var entry = [_]u8{
                 0xf3, 0x0f, 0x1e, 0xfa, // endbr64
@@ -416,7 +414,7 @@ pub const PltSection = struct {
         // [2]: 0x0
         try writer.writeIntLittle(u64, 0x0);
         try writer.writeIntLittle(u64, 0x0);
-        const plt_addr = elf_file.sections.items(.shdr)[elf_file.plt_sect_index.?].sh_addr;
+        const plt_addr = elf_file.getPltAddress();
         for (0..plt.symbols.items.len) |_| {
             // [N]: .plt
             try writer.writeIntLittle(u64, plt_addr);
@@ -424,12 +422,11 @@ pub const PltSection = struct {
     }
 
     pub fn writeRela(plt: PltSection, elf_file: *Elf, writer: anytype) !void {
-        const base_addr = elf_file.sections.items(.shdr)[elf_file.got_plt_sect_index.?].sh_addr;
         for (plt.symbols.items, 0..) |sym_index, i| {
             const sym = elf_file.getSymbol(sym_index);
             assert(sym.import);
             const extra = sym.getExtra(elf_file).?;
-            const r_offset = base_addr + got_plt_preamble_size + i * 8;
+            const r_offset = elf_file.getGotPltEntryAddress(@intCast(u32, i));
             const r_sym: u64 = extra.dynamic;
             const r_type: u32 = elf.R_X86_64_JUMP_SLOT;
             try writer.writeStruct(elf.Elf64_Rela{
@@ -467,6 +464,80 @@ pub const PltSection = struct {
                 .st_other = 0,
                 .st_shndx = elf_file.plt_sect_index.?,
                 .st_value = elf_file.getPltEntryAddress(@intCast(u32, i)),
+                .st_size = 16,
+            };
+            ilocal += 1;
+        }
+    }
+};
+
+pub const PltGotSection = struct {
+    symbols: std.ArrayListUnmanaged(u32) = .{},
+    output_symtab_size: Elf.SymtabSize = .{},
+
+    pub fn deinit(plt_got: *PltGotSection, allocator: Allocator) void {
+        plt_got.symbols.deinit(allocator);
+    }
+
+    pub fn addSymbol(plt_got: *PltGotSection, sym_index: u32, elf_file: *Elf) !void {
+        const index = @intCast(u32, plt_got.symbols.items.len);
+        const symbol = elf_file.getSymbol(sym_index);
+        if (symbol.getExtra(elf_file)) |extra| {
+            var new_extra = extra;
+            new_extra.plt_got = index;
+            symbol.setExtra(new_extra, elf_file);
+        } else try symbol.addExtra(.{ .plt_got = index }, elf_file);
+        try plt_got.symbols.append(elf_file.base.allocator, sym_index);
+    }
+
+    pub fn size(plt_got: PltGotSection) usize {
+        return plt_got.symbols.items.len * 16;
+    }
+
+    pub fn write(plt_got: PltGotSection, elf_file: *Elf, writer: anytype) !void {
+        for (plt_got.symbols.items, 0..) |sym_index, i| {
+            const sym = elf_file.getSymbol(sym_index);
+            assert(sym.import);
+            const extra = sym.getExtra(elf_file).?;
+            const target_addr = elf_file.getGotEntryAddress(extra.got);
+            const source_addr = elf_file.getPltGotEntryAddress(@intCast(u32, i));
+            const disp = @intCast(i64, target_addr) - @intCast(i64, source_addr + 6) - 4;
+            var entry = [_]u8{
+                0xf3, 0x0f, 0x1e, 0xfa, // endbr64
+                0xff, 0x25, 0x00, 0x00, 0x00, 0x00, // jmp qword ptr [rip] -> .got[N]
+            };
+            mem.writeIntLittle(i32, entry[6..][0..4], @intCast(i32, disp));
+            try writer.writeAll(&entry);
+        }
+    }
+
+    pub fn calcSymtabSize(plt_got: *PltGotSection, elf_file: *Elf) !void {
+        if (elf_file.options.strip_all) return;
+
+        plt_got.output_symtab_size.nlocals = @intCast(u32, plt_got.symbols.items.len);
+        for (plt_got.symbols.items) |sym_index| {
+            const sym = elf_file.getSymbol(sym_index);
+            plt_got.output_symtab_size.strsize += @intCast(u32, sym.getName(elf_file).len + "$pltgot".len + 1);
+        }
+    }
+
+    pub fn writeSymtab(plt_got: PltGotSection, elf_file: *Elf, ctx: Elf.WriteSymtabCtx) !void {
+        if (elf_file.options.strip_all) return;
+
+        const gpa = elf_file.base.allocator;
+
+        var ilocal = ctx.ilocal;
+        for (plt_got.symbols.items, 0..) |sym_index, i| {
+            const sym = elf_file.getSymbol(sym_index);
+            const name = try std.fmt.allocPrint(gpa, "{s}$pltgot", .{sym.getName(elf_file)});
+            defer gpa.free(name);
+            const st_name = try ctx.strtab.insert(gpa, name);
+            ctx.symtab[ilocal] = .{
+                .st_name = st_name,
+                .st_info = elf.STT_FUNC,
+                .st_other = 0,
+                .st_shndx = elf_file.plt_got_sect_index.?,
+                .st_value = elf_file.getPltGotEntryAddress(@intCast(u32, i)),
                 .st_size = 16,
             };
             ilocal += 1;

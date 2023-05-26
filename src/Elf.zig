@@ -16,6 +16,7 @@ text_sect_index: ?u16 = null,
 plt_sect_index: ?u16 = null,
 got_sect_index: ?u16 = null,
 got_plt_sect_index: ?u16 = null,
+plt_got_sect_index: ?u16 = null,
 rela_dyn_sect_index: ?u16 = null,
 rela_plt_sect_index: ?u16 = null,
 symtab_sect_index: ?u16 = null,
@@ -52,6 +53,7 @@ dynamic: DynamicSection = .{},
 hash: HashSection = .{},
 got: GotSection = .{},
 plt: PltSection = .{},
+plt_got: PltGotSection = .{},
 
 atoms: std.ArrayListUnmanaged(Atom) = .{},
 
@@ -105,6 +107,7 @@ pub fn deinit(self: *Elf) void {
     self.globals.deinit(gpa);
     self.got.deinit(gpa);
     self.plt.deinit(gpa);
+    self.plt_got.deinit(gpa);
     self.phdrs.deinit(gpa);
     self.sections.deinit(gpa);
     for (self.files.items(.tags), self.files.items(.data)) |tag, *data| switch (tag) {
@@ -384,6 +387,15 @@ fn initSections(self: *Elf) !void {
         });
     }
 
+    if (self.plt_got.symbols.items.len > 0) {
+        self.plt_got_sect_index = try self.addSection(.{
+            .name = ".plt.got",
+            .type = elf.SHT_PROGBITS,
+            .flags = elf.SHF_ALLOC | elf.SHF_EXECINSTR,
+            .addralign = 16,
+        });
+    }
+
     self.shstrtab_sect_index = try self.addSection(.{
         .name = ".shstrtab",
         .type = elf.SHT_STRTAB,
@@ -494,6 +506,12 @@ fn calcSectionSizes(self: *Elf) !void {
         shdr.sh_addralign = @alignOf(u64);
     }
 
+    if (self.plt_got_sect_index) |index| {
+        const shdr = &self.sections.items(.shdr)[index];
+        shdr.sh_size = self.plt_got.size();
+        shdr.sh_addralign = 16;
+    }
+
     if (self.rela_dyn_sect_index) |index| {
         const shdr = &self.sections.items(.shdr)[index];
         shdr.sh_size = self.got.sizeRela(self);
@@ -580,6 +598,12 @@ fn calcSymtabSize(self: *Elf) !void {
         sizes.strsize += self.plt.output_symtab_size.strsize;
     }
 
+    if (self.plt_got_sect_index) |_| {
+        try self.plt_got.calcSymtabSize(self);
+        sizes.nlocals += self.plt_got.output_symtab_size.nlocals;
+        sizes.strsize += self.plt_got.output_symtab_size.strsize;
+    }
+
     {
         const shdr = &self.sections.items(.shdr)[self.symtab_sect_index.?];
         shdr.sh_size = (sizes.nlocals + 1 + sizes.nglobals) * @sizeOf(elf.Elf64_Sym);
@@ -634,6 +658,11 @@ fn writeSymtab(self: *Elf) !void {
     if (self.plt_sect_index) |_| {
         try self.plt.writeSymtab(self, ctx);
         ctx.ilocal += self.plt.output_symtab_size.nlocals;
+    }
+
+    if (self.plt_got_sect_index) |_| {
+        try self.plt_got.writeSymtab(self, ctx);
+        ctx.ilocal += self.plt_got.output_symtab_size.nlocals;
     }
 
     for (self.shared_objects.items) |index| {
@@ -946,6 +975,7 @@ fn sortSections(self: *Elf) !void {
         &self.hash_sect_index,
         &self.plt_sect_index,
         &self.got_plt_sect_index,
+        &self.plt_got_sect_index,
         &self.rela_dyn_sect_index,
         &self.rela_plt_sect_index,
     }) |maybe_index| {
@@ -1414,6 +1444,7 @@ fn scanRelocs(self: *Elf) !void {
     for (self.symbols.items, 0..) |*symbol, i| {
         const index = @intCast(u32, i);
         if (symbol.import) {
+            log.debug("'{s}' is imported", .{symbol.getName(self)});
             try self.dynsym.addSymbol(index, self);
         }
         if (symbol.flags.got) {
@@ -1422,8 +1453,13 @@ fn scanRelocs(self: *Elf) !void {
             if (symbol.import) self.got.needs_rela = true;
         }
         if (symbol.flags.plt) {
-            log.debug("'{s}' needs PLT", .{symbol.getName(self)});
-            try self.plt.addSymbol(index, self);
+            if (symbol.flags.got) {
+                log.debug("'{s}' needs PLTGOT", .{symbol.getName(self)});
+                try self.plt_got.addSymbol(index, self);
+            } else {
+                log.debug("'{s}' needs PLT", .{symbol.getName(self)});
+                try self.plt.addSymbol(index, self);
+            }
         }
     }
 }
@@ -1551,6 +1587,14 @@ fn writeSyntheticSections(self: *Elf) !void {
         var buffer = try std.ArrayList(u8).initCapacity(gpa, self.plt.sizeGotPlt());
         defer buffer.deinit();
         try self.plt.writeGotPlt(self, buffer.writer());
+        try self.base.file.pwriteAll(buffer.items, shdr.sh_offset);
+    }
+
+    if (self.plt_got_sect_index) |shndx| {
+        const shdr = self.sections.items(.shdr)[shndx];
+        var buffer = try std.ArrayList(u8).initCapacity(gpa, self.plt_got.size());
+        defer buffer.deinit();
+        try self.plt_got.write(self, buffer.writer());
         try self.base.file.pwriteAll(buffer.items, shdr.sh_offset);
     }
 
@@ -1818,24 +1862,40 @@ pub inline fn getComdatGroupOwner(self: *Elf, index: ComdatGroupOwner.Index) *Co
     return &self.comdat_groups_owners.items[index];
 }
 
-pub fn getGotAddress(self: *Elf) u64 {
-    const shndx = self.got_sect_index orelse return 0;
-    const shdr = self.sections.items(.shdr)[shndx];
-    return shdr.sh_addr;
+pub inline fn getSectionAddress(self: *Elf, shndx: u16) u64 {
+    return self.sections.items(.shdr)[shndx].sh_addr;
+}
+
+pub inline fn getGotAddress(self: *Elf) u64 {
+    return if (self.got_sect_index) |shndx| self.getSectionAddress(shndx) else 0;
+}
+
+pub inline fn getPltAddress(self: *Elf) u64 {
+    return if (self.plt_sect_index) |shndx| self.getSectionAddress(shndx) else 0;
+}
+
+pub inline fn getGotPltAddress(self: *Elf) u64 {
+    return if (self.got_plt_sect_index) |shndx| self.getSectionAddress(shndx) else 0;
+}
+
+pub inline fn getPltGotAddress(self: *Elf) u64 {
+    return if (self.plt_got_sect_index) |shndx| self.getSectionAddress(shndx) else 0;
 }
 
 pub inline fn getGotEntryAddress(self: *Elf, index: u32) u64 {
     return self.getGotAddress() + index * @sizeOf(u64);
 }
 
-pub fn getPltAddress(self: *Elf) u64 {
-    const shndx = self.plt_sect_index orelse return 0;
-    const shdr = self.sections.items(.shdr)[shndx];
-    return shdr.sh_addr;
-}
-
 pub inline fn getPltEntryAddress(self: *Elf, index: u32) u64 {
     return self.getPltAddress() + PltSection.plt_preamble_size + index * 16;
+}
+
+pub inline fn getGotPltEntryAddress(self: *Elf, index: u32) u64 {
+    return self.getGotPltAddress() + PltSection.got_plt_preamble_size + index * @sizeOf(u64);
+}
+
+pub inline fn getPltGotEntryAddress(self: *Elf, index: u32) u64 {
+    return self.getPltGotAddress() + index * 16;
 }
 
 pub fn getTpAddress(self: *Elf) u64 {
@@ -2022,6 +2082,7 @@ const LdScript = @import("Elf/LdScript.zig");
 const Object = @import("Elf/Object.zig");
 pub const Options = @import("Elf/Options.zig");
 const PltSection = synthetic.PltSection;
+const PltGotSection = synthetic.PltGotSection;
 const SharedObject = @import("Elf/SharedObject.zig");
 const StringTable = @import("strtab.zig").StringTable;
 const Symbol = @import("Elf/Symbol.zig");

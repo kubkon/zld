@@ -86,6 +86,9 @@ pub fn getSymbolRank(symbol: Symbol, elf_file: *Elf) u32 {
 pub fn getAddress(symbol: Symbol, elf_file: *Elf) u64 {
     if (symbol.flags.plt) {
         const extra = symbol.getExtra(elf_file).?;
+        if (symbol.flags.got) {
+            return elf_file.getPltGotEntryAddress(extra.plt_got);
+        }
         return elf_file.getPltEntryAddress(extra.plt);
     }
     return symbol.value;
@@ -195,6 +198,7 @@ pub const Flags = packed struct {
 pub const Extra = struct {
     got: u32 = 0,
     plt: u32 = 0,
+    plt_got: u32 = 0,
     dynamic: u32 = 0,
 };
 
