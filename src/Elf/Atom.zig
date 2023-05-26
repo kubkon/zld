@@ -31,10 +31,6 @@ is_alive: bool = true,
 /// Specifies if the atom has been visited during garbage collection.
 is_visited: bool = false,
 
-/// Points to the previous and next neighbours
-next: ?Index = null,
-prev: ?Index = null,
-
 pub const Index = u32;
 
 pub fn getName(self: Atom, elf_file: *Elf) [:0]const u8 {
