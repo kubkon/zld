@@ -13,6 +13,8 @@ symbols: std.ArrayListUnmanaged(u32) = .{},
 needed: bool,
 alive: bool,
 
+output_symtab_size: Elf.SymtabSize = .{},
+
 pub fn isValidHeader(header: *const elf.Elf64_Ehdr) bool {
     if (!mem.eql(u8, header.e_ident[0..4], "\x7fELF")) {
         log.debug("invalid ELF magic '{s}', expected \x7fELF", .{header.e_ident[0..4]});
@@ -110,6 +112,35 @@ pub fn markLive(self: *SharedObject, elf_file: *Elf) void {
             file.setAlive();
             file.markLive(elf_file);
         }
+    }
+}
+
+pub fn calcSymtabSize(self: *SharedObject, elf_file: *Elf) !void {
+    if (elf_file.options.strip_all) return;
+
+    for (self.getGlobals()) |global_index| {
+        const global = elf_file.getSymbol(global_index);
+        if (global.getFile(elf_file)) |file| if (file.getIndex() != self.index) continue;
+        if (global.isLocal()) continue;
+        global.output_symtab = true;
+        self.output_symtab_size.nglobals += 1;
+        self.output_symtab_size.strsize += @intCast(u32, global.getName(elf_file).len + 1);
+    }
+}
+
+pub fn writeSymtab(self: *SharedObject, elf_file: *Elf, ctx: Elf.WriteSymtabCtx) !void {
+    if (elf_file.options.strip_all) return;
+
+    const gpa = elf_file.base.allocator;
+
+    var iglobal = ctx.iglobal;
+    for (self.getGlobals()) |global_index| {
+        const global = elf_file.getSymbol(global_index);
+        if (global.getFile(elf_file)) |file| if (file.getIndex() != self.index) continue;
+        if (!global.output_symtab) continue;
+        const st_name = try ctx.strtab.insert(gpa, global.getName(elf_file));
+        ctx.symtab[iglobal] = global.asElfSym(st_name, elf_file);
+        iglobal += 1;
     }
 }
 

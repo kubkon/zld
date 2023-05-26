@@ -269,6 +269,11 @@ pub const TestContext = struct {
                 try search_dirs.append("test/assets/any-macos-none");
             }
 
+            var elf_objects = std.ArrayList(Zld.Elf.LinkObject).init(arena);
+            for (objects.items) |obj| {
+                try elf_objects.append(.{ .path = obj.path });
+            }
+
             const tag: Zld.Tag = switch (case.target.os_tag.?) {
                 .macos, .ios, .watchos, .tvos => .macho,
                 .linux => .elf,
@@ -302,8 +307,7 @@ pub const TestContext = struct {
                         .sub_path = output_path,
                     },
                     .output_mode = .exe,
-                    .positionals = objects.items,
-                    .libs = libs,
+                    .positionals = elf_objects.items,
                     .search_dirs = search_dirs.items,
                     .rpath_list = &[0][]const u8{},
                     .gc_sections = true,

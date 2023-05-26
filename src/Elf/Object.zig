@@ -11,9 +11,12 @@ first_global: ?u32 = null,
 
 symbols: std.ArrayListUnmanaged(u32) = .{},
 atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
+comdat_groups: std.ArrayListUnmanaged(Elf.ComdatGroup.Index) = .{},
 
 needs_exec_stack: bool = false,
 alive: bool = true,
+
+output_symtab_size: Elf.SymtabSize = .{},
 
 pub fn isValidHeader(header: *const elf.Elf64_Ehdr) bool {
     if (!mem.eql(u8, header.e_ident[0..4], "\x7fELF")) {
@@ -38,6 +41,7 @@ pub fn isValidHeader(header: *const elf.Elf64_Ehdr) bool {
 pub fn deinit(self: *Object, allocator: Allocator) void {
     self.symbols.deinit(allocator);
     self.atoms.deinit(allocator);
+    self.comdat_groups.deinit(allocator);
 }
 
 pub fn parse(self: *Object, elf_file: *Elf) !void {
@@ -81,19 +85,56 @@ fn initAtoms(self: *Object, elf_file: *Elf) !void {
             shdr.sh_type != elf.SHT_LLVM_ADDRSIG) continue;
 
         switch (shdr.sh_type) {
+            elf.SHT_GROUP => {
+                if (shdr.sh_info >= self.symtab.len) {
+                    elf_file.base.fatal("{}: invalid symbol index in sh_info", .{self.fmtPath()});
+                    continue;
+                }
+                const group_info_sym = self.symtab[shdr.sh_info];
+                const group_signature = blk: {
+                    if (group_info_sym.st_name == 0 and group_info_sym.st_type() == elf.STT_SECTION) {
+                        const sym_shdr = shdrs[group_info_sym.st_shndx];
+                        break :blk self.getShString(sym_shdr.sh_name);
+                    }
+                    break :blk self.getString(group_info_sym.st_name);
+                };
+
+                const shndx = @intCast(u16, i);
+                const group_raw_data = self.getShdrContents(shndx);
+                const group_nmembers = @divExact(group_raw_data.len, @sizeOf(u32));
+                const group_members = @ptrCast([*]align(1) const u32, group_raw_data.ptr)[0..group_nmembers];
+
+                if (group_members[0] != 0x1) { // GRP_COMDAT
+                    elf_file.base.fatal("{}: unknown SHT_GROUP format", .{self.fmtPath()});
+                    continue;
+                }
+
+                const gop = try elf_file.getOrCreateComdatGroupOwner(group_signature);
+                const comdat_group_index = try elf_file.addComdatGroup();
+                const comdat_group = elf_file.getComdatGroup(comdat_group_index);
+                comdat_group.* = .{
+                    .owner = gop.index,
+                    .shndx = shndx,
+                };
+                try self.comdat_groups.append(elf_file.base.allocator, comdat_group_index);
+            },
+
+            elf.SHT_SYMTAB_SHNDX => @panic("TODO"),
+
             elf.SHT_NULL,
             elf.SHT_REL,
             elf.SHT_RELA,
             elf.SHT_SYMTAB,
             elf.SHT_STRTAB,
             => {},
+
             else => {
                 const name = self.getShString(shdr.sh_name);
                 const shndx = @intCast(u16, i);
 
                 if (mem.eql(u8, ".note.GNU-stack", name)) {
                     if (shdr.sh_flags & elf.SHF_EXECINSTR != 0) {
-                        if (!elf_file.options.execstack or !elf_file.options.execstack_if_needed) {
+                        if (!elf_file.options.z_execstack or !elf_file.options.z_execstack_if_needed) {
                             elf_file.base.warn(
                                 "{}: may cause segmentation fault as this file requested executable stack",
                                 .{self.fmtPath()},
@@ -145,14 +186,7 @@ fn skipShdr(self: *Object, index: u32, elf_file: *Elf) bool {
     const shdr = self.getShdrs()[index];
     const name = self.getShString(shdr.sh_name);
     const ignore = blk: {
-        switch (shdr.sh_type) {
-            elf.SHT_X86_64_UNWIND,
-            elf.SHT_GROUP,
-            elf.SHT_SYMTAB_SHNDX,
-            => break :blk true,
-
-            else => {},
-        }
+        if (shdr.sh_type == elf.SHT_X86_64_UNWIND) break :blk true;
         if (mem.startsWith(u8, name, ".note")) break :blk true;
         if (mem.startsWith(u8, name, ".comment")) break :blk true;
         if (mem.startsWith(u8, name, ".llvm_addrsig")) break :blk true;
@@ -289,6 +323,66 @@ pub fn checkUndefined(self: *Object, elf_file: *Elf) void {
     }
 }
 
+pub fn calcSymtabSize(self: *Object, elf_file: *Elf) !void {
+    if (elf_file.options.strip_all) return;
+
+    for (self.getLocals()) |local_index| {
+        const local = elf_file.getSymbol(local_index);
+        if (local.getAtom(elf_file)) |atom| if (!atom.is_alive) continue;
+        const s_sym = local.getSourceSymbol(elf_file);
+        switch (s_sym.st_type()) {
+            elf.STT_SECTION, elf.STT_NOTYPE => continue,
+            else => {},
+        }
+        local.output_symtab = true;
+        self.output_symtab_size.nlocals += 1;
+        self.output_symtab_size.strsize += @intCast(u32, local.getName(elf_file).len + 1);
+    }
+
+    for (self.getGlobals()) |global_index| {
+        const global = elf_file.getSymbol(global_index);
+        if (global.getFile(elf_file)) |file| if (file.getIndex() != self.index) continue;
+        if (global.getAtom(elf_file)) |atom| if (!atom.is_alive) continue;
+        global.output_symtab = true;
+        if (global.isLocal()) {
+            self.output_symtab_size.nlocals += 1;
+        } else {
+            self.output_symtab_size.nglobals += 1;
+        }
+        self.output_symtab_size.strsize += @intCast(u32, global.getName(elf_file).len + 1);
+    }
+}
+
+pub fn writeSymtab(self: *Object, elf_file: *Elf, ctx: Elf.WriteSymtabCtx) !void {
+    if (elf_file.options.strip_all) return;
+
+    const gpa = elf_file.base.allocator;
+
+    var ilocal = ctx.ilocal;
+    for (self.getLocals()) |local_index| {
+        const local = elf_file.getSymbol(local_index);
+        if (!local.output_symtab) continue;
+        const st_name = try ctx.strtab.insert(gpa, local.getName(elf_file));
+        ctx.symtab[ilocal] = local.asElfSym(st_name, elf_file);
+        ilocal += 1;
+    }
+
+    var iglobal = ctx.iglobal;
+    for (self.getGlobals()) |global_index| {
+        const global = elf_file.getSymbol(global_index);
+        if (global.getFile(elf_file)) |file| if (file.getIndex() != self.index) continue;
+        if (!global.output_symtab) continue;
+        const st_name = try ctx.strtab.insert(gpa, global.getName(elf_file));
+        if (global.isLocal()) {
+            ctx.symtab[ilocal] = global.asElfSym(st_name, elf_file);
+            ilocal += 1;
+        } else {
+            ctx.symtab[iglobal] = global.asElfSym(st_name, elf_file);
+            iglobal += 1;
+        }
+    }
+}
+
 pub fn getLocals(self: *Object) []const u32 {
     const end = self.first_global orelse self.symbols.items.len;
     return self.symbols.items[0..end];
@@ -321,6 +415,13 @@ inline fn getString(self: *Object, off: u32) [:0]const u8 {
 inline fn getShString(self: *Object, off: u32) [:0]const u8 {
     assert(off < self.shstrtab.len);
     return mem.sliceTo(@ptrCast([*:0]const u8, self.shstrtab.ptr + off), 0);
+}
+
+pub fn getComdatGroupMembers(self: *Object, index: u16) []align(1) const u32 {
+    const raw = self.getShdrContents(index);
+    const nmembers = @divExact(raw.len, @sizeOf(u32));
+    const members = @ptrCast([*]align(1) const u32, raw.ptr)[1..nmembers];
+    return members;
 }
 
 pub fn asFile(self: *Object) File {
@@ -393,6 +494,36 @@ fn formatAtoms(
     for (object.atoms.items) |atom_index| {
         const atom = ctx.elf_file.getAtom(atom_index) orelse continue;
         try writer.print("    {}\n", .{atom.fmt(ctx.elf_file)});
+    }
+}
+
+pub fn fmtComdatGroups(self: *Object, elf_file: *Elf) std.fmt.Formatter(formatComdatGroups) {
+    return .{ .data = .{
+        .object = self,
+        .elf_file = elf_file,
+    } };
+}
+
+fn formatComdatGroups(
+    ctx: FormatContext,
+    comptime unused_fmt_string: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = unused_fmt_string;
+    _ = options;
+    const object = ctx.object;
+    const elf_file = ctx.elf_file;
+    try writer.writeAll("  comdat groups\n");
+    for (object.comdat_groups.items) |cg_index| {
+        const cg = elf_file.getComdatGroup(cg_index);
+        const cg_owner = elf_file.getComdatGroupOwner(cg.owner);
+        if (cg_owner.file != object.index) continue;
+        for (object.getComdatGroupMembers(cg.shndx)) |shndx| {
+            const atom_index = object.atoms.items[shndx];
+            const atom = elf_file.getAtom(atom_index) orelse continue;
+            try writer.print("    atom({d}) : {s}\n", .{ atom_index, atom.getName(elf_file) });
+        }
     }
 }
 

@@ -174,6 +174,14 @@ pub fn initOutputSection(self: *Atom, elf_file: *Elf) !void {
 pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
     const object = self.getObject(elf_file);
     for (self.getRelocs(elf_file)) |rel| {
+        if (rel.r_type() == elf.R_X86_64_NONE) continue;
+
+        const symbol = object.getSymbol(rel.r_sym(), elf_file);
+        if (symbol.isIFunc(elf_file)) {
+            symbol.flags.got = true;
+            symbol.flags.plt = true;
+        }
+
         // While traversing relocations, mark symbols that require special handling such as
         // pointer indirection via GOT, or a stub trampoline via PLT.
         switch (rel.r_type()) {
@@ -181,11 +189,9 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
             elf.R_X86_64_GOTPCRELX,
             elf.R_X86_64_REX_GOTPCRELX,
             => {
-                const symbol = object.getSymbol(rel.r_sym(), elf_file);
                 symbol.flags.got = true;
             },
             elf.R_X86_64_PLT32 => {
-                const symbol = object.getSymbol(rel.r_sym(), elf_file);
                 if (symbol.import) {
                     symbol.flags.plt = true;
                 }
@@ -254,8 +260,25 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
             elf.R_X86_64_GOTPCREL => try cwriter.writeIntLittle(i32, @intCast(i32, G + GOT + A - P)),
 
             elf.R_X86_64_GOTPCRELX => {
-                if (!target.import and !target.isAbs(elf_file)) blk: {
-                    relaxGotpcrelx(code[rel.r_offset - 2 ..]) catch break :blk;
+                if (!target.import and !target.isIFunc(elf_file) and !target.isAbs(elf_file)) blk: {
+                    var inst_code = code[rel.r_offset - 3 ..];
+                    var disas = Disassembler.init(inst_code);
+                    var inst = (try disas.next()) orelse break :blk;
+                    const new_inst = switch (inst.encoding.mnemonic) {
+                        .call => try Instruction.new(inst.prefix, .call, &.{
+                            // TODO: hack to force imm32s in the assembler
+                            .{ .imm = Immediate.s(-129) },
+                        }),
+                        .jmp => try Instruction.new(inst.prefix, .jmp, &.{
+                            // TODO: hack to force imm32s in the assembler
+                            .{ .imm = Immediate.s(-129) },
+                        }),
+                        else => break :blk,
+                    };
+                    relocs_log.debug("    relaxing {} => {}", .{ inst.encoding, new_inst.encoding });
+                    var inst_stream = std.io.fixedBufferStream(inst_code);
+                    try (try Instruction.new(.none, .nop, &.{})).encode(inst_stream.writer(), .{});
+                    try new_inst.encode(inst_stream.writer(), .{});
                     try cwriter.writeIntLittle(i32, @intCast(i32, S + A - P));
                     continue;
                 }
@@ -263,9 +286,32 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
             },
 
             elf.R_X86_64_REX_GOTPCRELX => {
-                if (!target.import and !target.isAbs(elf_file)) blk: {
-                    relaxRexGotpcrelx(code[rel.r_offset - 3 ..]) catch break :blk;
-                    try cwriter.writeIntLittle(i32, @intCast(i32, S + A - P));
+                if (!target.import and !target.isIFunc(elf_file) and !target.isAbs(elf_file)) blk: {
+                    var inst_code = code[rel.r_offset - 3 ..];
+                    var disas = Disassembler.init(inst_code);
+                    var inst = (try disas.next()) orelse break :blk;
+                    switch (inst.encoding.mnemonic) {
+                        .mov => {
+                            const new_inst = try Instruction.new(inst.prefix, .lea, &inst.ops);
+                            relocs_log.debug("    relaxing {} => {}", .{ inst.encoding, new_inst.encoding });
+                            var inst_stream = std.io.fixedBufferStream(inst_code);
+                            try new_inst.encode(inst_stream.writer(), .{});
+                            try cwriter.writeIntLittle(i32, @intCast(i32, S + A - P));
+                        },
+                        .cmp => {
+                            if (math.cast(i32, S) == null) break :blk;
+                            const new_inst = try Instruction.new(inst.prefix, .cmp, &.{
+                                inst.ops[0],
+                                // TODO: hack to force imm32s in the assembler
+                                .{ .imm = Immediate.s(-129) },
+                            });
+                            relocs_log.debug("    relaxing {} => {}", .{ inst.encoding, new_inst.encoding });
+                            var inst_stream = std.io.fixedBufferStream(inst_code);
+                            try new_inst.encode(inst_stream.writer(), .{});
+                            try cwriter.writeIntLittle(i32, @intCast(i32, S));
+                        },
+                        else => break :blk,
+                    }
                     continue;
                 }
                 try cwriter.writeIntLittle(i32, @intCast(i32, G + GOT + A - P));
@@ -279,9 +325,27 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
             elf.R_X86_64_DTPOFF64 => try cwriter.writeIntLittle(i64, S + A - DTP),
 
             elf.R_X86_64_GOTTPOFF => {
-                relaxGottpoff(code[rel.r_offset - 3 ..]) catch
-                    elf_file.base.fatal("TODO could not rewrite GOTTPOFF", .{});
-                try cwriter.writeIntLittle(i32, @intCast(i32, S - TP));
+                blk: {
+                    var inst_code = code[rel.r_offset - 3 ..];
+                    var disas = Disassembler.init(inst_code);
+                    var inst = (try disas.next()) orelse break :blk;
+                    switch (inst.encoding.mnemonic) {
+                        .mov => {
+                            const new_inst = try Instruction.new(inst.prefix, .mov, &.{
+                                inst.ops[0],
+                                // TODO: hack to force imm32s in the assembler
+                                .{ .imm = Immediate.s(-129) },
+                            });
+                            relocs_log.debug("    relaxing {} => {}", .{ inst.encoding, new_inst.encoding });
+                            var inst_stream = std.io.fixedBufferStream(inst_code);
+                            try new_inst.encode(inst_stream.writer(), .{});
+                            try cwriter.writeIntLittle(i32, @intCast(i32, S - TP));
+                        },
+                        else => break :blk,
+                    }
+                    continue;
+                }
+                elf_file.base.fatal("TODO could not rewrite GOTTPOFF", .{});
             },
 
             else => elf_file.base.fatal("unhandled relocation type: {}", .{fmtRelocType(r_type)}),
@@ -289,60 +353,6 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
     }
 
     try writer.writeAll(code);
-}
-
-fn relaxRexGotpcrelx(code: []u8) !void {
-    var disas = Disassembler.init(code);
-    var inst = (try disas.next()) orelse return error.DisassemblerError;
-    const new_inst = switch (inst.encoding.mnemonic) {
-        .mov => try Instruction.new(inst.prefix, .lea, &inst.ops),
-        .cmp => try Instruction.new(inst.prefix, .cmp, &.{
-            inst.ops[0],
-            // TODO: hack to force imm32s in the assembler
-            .{ .imm = Immediate.s(-129) },
-        }),
-        else => return error.UnknownInputInstruction,
-    };
-    relocs_log.debug("    relaxing {} => {}", .{ inst.encoding, new_inst.encoding });
-    var stream = std.io.fixedBufferStream(code);
-    try new_inst.encode(stream.writer(), .{});
-}
-
-fn relaxGotpcrelx(code: []u8) !void {
-    var disas = Disassembler.init(code);
-    var inst = (try disas.next()) orelse return error.DisassemblerError;
-    relocs_log.debug("{}", .{inst});
-    const new_inst = switch (inst.encoding.mnemonic) {
-        .call => try Instruction.new(inst.prefix, .call, &.{
-            // TODO: hack to force imm32s in the assembler
-            .{ .imm = Immediate.s(-129) },
-        }),
-        .jmp => try Instruction.new(inst.prefix, .jmp, &.{
-            // TODO: hack to force imm32s in the assembler
-            .{ .imm = Immediate.s(-129) },
-        }),
-        else => return error.UnknownInputInstruction,
-    };
-    relocs_log.debug("    relaxing {} => {}", .{ inst.encoding, new_inst.encoding });
-    var stream = std.io.fixedBufferStream(code);
-    try (try Instruction.new(.none, .nop, &.{})).encode(stream.writer(), .{});
-    try new_inst.encode(stream.writer(), .{});
-}
-
-fn relaxGottpoff(code: []u8) !void {
-    var disas = Disassembler.init(code);
-    var inst = (try disas.next()) orelse return error.DisassemblerError;
-    var new_inst = switch (inst.encoding.mnemonic) {
-        .mov => try Instruction.new(inst.prefix, .mov, &.{
-            inst.ops[0],
-            // TODO: hack to force imm32s in the assembler
-            .{ .imm = Immediate.s(-129) },
-        }),
-        else => return error.UnknownInputInstruction,
-    };
-    relocs_log.debug("    relaxing {} => {}", .{ inst.encoding, new_inst.encoding });
-    var stream = std.io.fixedBufferStream(code);
-    try new_inst.encode(stream.writer(), .{});
 }
 
 fn fmtRelocType(r_type: u32) std.fmt.Formatter(formatRelocType) {
