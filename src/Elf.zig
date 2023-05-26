@@ -316,6 +316,8 @@ pub fn flush(self: *Elf) !void {
 
     try self.initSections();
     try self.sortSections();
+    self.addAtomsToSections();
+    try self.sortInitFini();
     try self.setDynamic();
     try self.setHash();
     try self.calcSectionSizes();
@@ -341,6 +343,60 @@ pub fn flush(self: *Elf) !void {
     try self.writeHeader();
 
     self.base.reportWarningsAndErrorsAndExit();
+}
+
+fn sortInitFini(self: *Elf) !void {
+    const gpa = self.base.allocator;
+
+    const Entry = struct {
+        priority: u16,
+        idx: Atom.Index,
+
+        pub fn lessThan(ctx: void, lhs: @This(), rhs: @This()) bool {
+            _ = ctx;
+            return lhs.priority < rhs.priority;
+        }
+    };
+
+    for (self.sections.items(.shdr), 0..) |shdr, shndx| switch (shdr.sh_type) {
+        elf.SHT_INIT_ARRAY, elf.SHT_FINI_ARRAY, elf.SHT_PREINIT_ARRAY => {
+            var atom_index = self.sections.items(.first_atom)[shndx] orelse continue;
+            var entries = std.ArrayList(Entry).init(gpa);
+            defer entries.deinit();
+            while (true) {
+                const atom = self.getAtom(atom_index).?;
+                const name = atom.getName(self);
+                var it = mem.splitBackwards(u8, name, ".");
+                const priority = std.fmt.parseUnsigned(u16, it.first(), 10) catch std.math.maxInt(u16);
+                try entries.append(.{ .priority = priority, .idx = atom_index });
+                if (atom.next) |next| {
+                    atom_index = next;
+                } else break;
+            }
+
+            std.sort.sort(Entry, entries.items, {}, Entry.lessThan);
+
+            var first_atom = &self.sections.items(.first_atom)[shndx];
+            var last_atom = &self.sections.items(.last_atom)[shndx];
+            first_atom.* = null;
+            last_atom.* = null;
+
+            for (entries.items) |entry| {
+                const atom = self.getAtom(entry.idx).?;
+                atom.next = null;
+                atom.prev = null;
+                if (last_atom.*) |last_atom_index| {
+                    const latom = self.getAtom(last_atom_index).?;
+                    latom.next = entry.idx;
+                    atom.prev = last_atom_index;
+                } else {
+                    first_atom.* = entry.idx;
+                }
+                last_atom.* = entry.idx;
+            }
+        },
+        else => {},
+    };
 }
 
 fn initSections(self: *Elf) !void {
@@ -465,7 +521,7 @@ fn initSections(self: *Elf) !void {
     }
 }
 
-fn calcSectionSizes(self: *Elf) !void {
+fn addAtomsToSections(self: *Elf) void {
     var slice = self.sections.slice();
     for (self.objects.items) |index| {
         for (self.getFile(index).?.object.atoms.items) |atom_index| {
@@ -473,13 +529,6 @@ fn calcSectionSizes(self: *Elf) !void {
             if (!atom.is_alive) continue;
 
             var section = slice.get(atom.out_shndx);
-            const alignment = try math.powi(u64, 2, atom.alignment);
-            const addr = mem.alignForwardGeneric(u64, section.shdr.sh_size, alignment);
-            const padding = addr - section.shdr.sh_size;
-            atom.value = addr;
-            section.shdr.sh_size += padding + atom.size;
-            section.shdr.sh_addralign = @max(section.shdr.sh_addralign, alignment);
-
             if (section.last_atom) |last_atom_index| {
                 const last_atom = self.getAtom(last_atom_index).?;
                 last_atom.next = @intCast(u32, atom_index);
@@ -491,6 +540,25 @@ fn calcSectionSizes(self: *Elf) !void {
             section.last_atom = @intCast(u32, atom_index);
 
             slice.set(atom.out_shndx, section);
+        }
+    }
+}
+
+fn calcSectionSizes(self: *Elf) !void {
+    for (self.sections.items(.shdr), self.sections.items(.first_atom)) |*shdr, first_atom| {
+        var atom_index = first_atom orelse continue;
+        while (true) {
+            const atom = self.getAtom(atom_index).?;
+            const alignment = try math.powi(u64, 2, atom.alignment);
+            const addr = mem.alignForwardGeneric(u64, shdr.sh_size, alignment);
+            const padding = addr - shdr.sh_size;
+            atom.value = addr;
+            shdr.sh_size += padding + atom.size;
+            shdr.sh_addralign = @max(shdr.sh_addralign, alignment);
+
+            if (atom.next) |next| {
+                atom_index = next;
+            } else break;
         }
     }
 
