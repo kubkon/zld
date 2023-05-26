@@ -616,7 +616,7 @@ fn calcSymtabSize(self: *Elf) !void {
     }
     {
         const shdr = &self.sections.items(.shdr)[self.strtab_sect_index.?];
-        shdr.sh_size = sizes.strsize;
+        shdr.sh_size = sizes.strsize + 1;
     }
 }
 
