@@ -110,6 +110,9 @@ pub fn deinit(self: *Elf) void {
     self.plt.deinit(gpa);
     self.plt_got.deinit(gpa);
     self.phdrs.deinit(gpa);
+    for (self.sections.items(.atoms)) |*atoms| {
+        atoms.deinit(gpa);
+    }
     self.sections.deinit(gpa);
     for (self.files.items(.tags), self.files.items(.data)) |tag, *data| switch (tag) {
         .null => {},
@@ -316,6 +319,8 @@ pub fn flush(self: *Elf) !void {
 
     try self.initSections();
     try self.sortSections();
+    try self.addAtomsToSections();
+    try self.sortInitFini();
     try self.setDynamic();
     try self.setHash();
     try self.calcSectionSizes();
@@ -341,6 +346,47 @@ pub fn flush(self: *Elf) !void {
     try self.writeHeader();
 
     self.base.reportWarningsAndErrorsAndExit();
+}
+
+fn sortInitFini(self: *Elf) !void {
+    const gpa = self.base.allocator;
+
+    const Entry = struct {
+        priority: u16,
+        atom_index: Atom.Index,
+
+        pub fn lessThan(ctx: void, lhs: @This(), rhs: @This()) bool {
+            _ = ctx;
+            return lhs.priority < rhs.priority;
+        }
+    };
+
+    for (self.sections.items(.shdr), 0..) |shdr, shndx| switch (shdr.sh_type) {
+        elf.SHT_INIT_ARRAY, elf.SHT_FINI_ARRAY, elf.SHT_PREINIT_ARRAY => {
+            const atoms = &self.sections.items(.atoms)[shndx];
+            if (atoms.items.len == 0) continue;
+
+            var entries = std.ArrayList(Entry).init(gpa);
+            try entries.ensureTotalCapacityPrecise(atoms.items.len);
+            defer entries.deinit();
+
+            for (atoms.items) |atom_index| {
+                const atom = self.getAtom(atom_index).?;
+                const name = atom.getName(self);
+                var it = mem.splitBackwards(u8, name, ".");
+                const priority = std.fmt.parseUnsigned(u16, it.first(), 10) catch std.math.maxInt(u16);
+                entries.appendAssumeCapacity(.{ .priority = priority, .atom_index = atom_index });
+            }
+
+            std.sort.sort(Entry, entries.items, {}, Entry.lessThan);
+
+            atoms.clearRetainingCapacity();
+            for (entries.items) |entry| {
+                atoms.appendAssumeCapacity(entry.atom_index);
+            }
+        },
+        else => {},
+    };
 }
 
 fn initSections(self: *Elf) !void {
@@ -465,32 +511,29 @@ fn initSections(self: *Elf) !void {
     }
 }
 
-fn calcSectionSizes(self: *Elf) !void {
-    var slice = self.sections.slice();
+fn addAtomsToSections(self: *Elf) !void {
     for (self.objects.items) |index| {
         for (self.getFile(index).?.object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index) orelse continue;
             if (!atom.is_alive) continue;
+            const atoms = &self.sections.items(.atoms)[atom.out_shndx];
+            try atoms.append(self.base.allocator, atom_index);
+        }
+    }
+}
 
-            var section = slice.get(atom.out_shndx);
+fn calcSectionSizes(self: *Elf) !void {
+    for (self.sections.items(.shdr), self.sections.items(.atoms)) |*shdr, atoms| {
+        if (atoms.items.len == 0) continue;
+
+        for (atoms.items) |atom_index| {
+            const atom = self.getAtom(atom_index).?;
             const alignment = try math.powi(u64, 2, atom.alignment);
-            const addr = mem.alignForwardGeneric(u64, section.shdr.sh_size, alignment);
-            const padding = addr - section.shdr.sh_size;
+            const addr = mem.alignForwardGeneric(u64, shdr.sh_size, alignment);
+            const padding = addr - shdr.sh_size;
             atom.value = addr;
-            section.shdr.sh_size += padding + atom.size;
-            section.shdr.sh_addralign = @max(section.shdr.sh_addralign, alignment);
-
-            if (section.last_atom) |last_atom_index| {
-                const last_atom = self.getAtom(last_atom_index).?;
-                last_atom.next = @intCast(u32, atom_index);
-                atom.prev = last_atom_index;
-            } else {
-                assert(section.first_atom == null);
-                section.first_atom = @intCast(u32, atom_index);
-            }
-            section.last_atom = @intCast(u32, atom_index);
-
-            slice.set(atom.out_shndx, section);
+            shdr.sh_size += padding + atom.size;
+            shdr.sh_addralign = @max(shdr.sh_addralign, alignment);
         }
     }
 
@@ -1023,18 +1066,12 @@ fn sortSections(self: *Elf) !void {
 }
 
 fn allocateAtoms(self: *Elf) void {
-    const slice = self.sections.slice();
-    for (slice.items(.shdr), 0..) |shdr, i| {
-        var atom_index = slice.items(.first_atom)[i] orelse continue;
-
-        while (true) {
+    for (self.sections.items(.shdr), self.sections.items(.atoms)) |shdr, atoms| {
+        if (atoms.items.len == 0) continue;
+        for (atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index).?;
             assert(atom.is_alive);
             atom.value += shdr.sh_addr;
-
-            if (atom.next) |next| {
-                atom_index = next;
-            } else break;
         }
     }
 }
@@ -1459,11 +1496,8 @@ fn setHash(self: *Elf) !void {
 
 fn writeAtoms(self: *Elf) !void {
     const slice = self.sections.slice();
-    for (slice.items(.first_atom), 0..) |first_atom, i| {
-        var atom_index = first_atom orelse continue;
-        const shndx = @intCast(u16, i);
-        const shdr = slice.items(.shdr)[shndx];
-
+    for (slice.items(.shdr), slice.items(.atoms)) |shdr, atoms| {
+        if (atoms.items.len == 0) continue;
         if (shdr.sh_type == elf.SHT_NOBITS) continue;
 
         log.debug("writing atoms in '{s}' section", .{self.shstrtab.getAssumeExists(shdr.sh_name)});
@@ -1474,7 +1508,7 @@ fn writeAtoms(self: *Elf) !void {
 
         var stream = std.io.fixedBufferStream(buffer);
 
-        while (true) {
+        for (atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index).?;
             assert(atom.is_alive);
             const off = atom.value - shdr.sh_addr;
@@ -1485,10 +1519,6 @@ fn writeAtoms(self: *Elf) !void {
             });
             try stream.seekTo(off);
             try atom.resolveRelocs(self, stream.writer());
-
-            if (atom.next) |next| {
-                atom_index = next;
-            } else break;
         }
 
         try self.base.file.pwriteAll(buffer, shdr.sh_offset);
@@ -1667,8 +1697,6 @@ pub fn addSection(self: *Elf, opts: AddSectionOpts) !u16 {
             .sh_addralign = opts.addralign,
             .sh_entsize = opts.entsize,
         },
-        .first_atom = null,
-        .last_atom = null,
     });
     return index;
 }
@@ -1993,8 +2021,7 @@ pub const LinkObject = struct {
 
 const Section = struct {
     shdr: elf.Elf64_Shdr,
-    first_atom: ?Atom.Index,
-    last_atom: ?Atom.Index,
+    atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
 };
 
 const ComdatGroupOwner = struct {
