@@ -45,8 +45,7 @@ const cmd = "ld.zld";
 
 emit: Zld.Emit,
 output_mode: Zld.OutputMode,
-positionals: []const Zld.LinkObject,
-libs: std.StringArrayHashMap(Zld.SystemLib),
+positionals: []const Elf.LinkObject,
 search_dirs: []const []const u8,
 rpath_list: []const []const u8,
 strip_debug: bool = false,
@@ -72,8 +71,7 @@ z_now: bool = false,
 pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options {
     if (args.len == 0) ctx.fatal(usage, .{cmd});
 
-    var positionals = std.ArrayList(Zld.LinkObject).init(arena);
-    var libs = std.StringArrayHashMap(Zld.SystemLib).init(arena);
+    var positionals = std.ArrayList(Elf.LinkObject).init(arena);
     var search_dirs = std.StringArrayHashMap(void).init(arena);
     var rpath_list = std.StringArrayHashMap(void).init(arena);
     var verbose = false;
@@ -84,7 +82,6 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         },
         .output_mode = .exe,
         .positionals = undefined,
-        .libs = undefined,
         .search_dirs = undefined,
         .rpath_list = undefined,
     };
@@ -104,7 +101,11 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         } else if (p.arg2("debug-log")) |scope| {
             try ctx.log_scopes.append(scope);
         } else if (p.arg1("l")) |lib| {
-            try libs.put(lib, .{ .needed = state.needed, .static = state.static });
+            try positionals.append(.{
+                .path = try std.fmt.allocPrint(arena, "-l{s}", .{lib}),
+                .needed = state.needed,
+                .static = state.static,
+            });
         } else if (p.arg1("L")) |dir| {
             try search_dirs.put(dir, {});
         } else if (p.arg1("o")) |path| {
@@ -177,10 +178,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         } else if (p.flagZ("now")) {
             opts.z_now = true;
         } else {
-            try positionals.append(.{
-                .path = p.arg,
-                .must_link = true,
-            });
+            try positionals.append(.{ .path = p.arg });
         }
     }
 
@@ -192,10 +190,9 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         std.debug.print("{s}\n", .{args[args.len - 1]});
     }
 
-    if (positionals.items.len == 0) ctx.fatal("Expected at least one input .o file", .{});
+    if (positionals.items.len == 0) ctx.fatal("Expected at least one input object file", .{});
 
     opts.positionals = positionals.items;
-    opts.libs = libs;
     opts.search_dirs = search_dirs.keys();
     opts.rpath_list = rpath_list.keys();
 

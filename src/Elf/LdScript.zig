@@ -1,8 +1,8 @@
 cpu_arch: ?std.Target.Cpu.Arch = null,
-libs: std.StringArrayHashMapUnmanaged(Zld.SystemLib) = .{},
+args: std.ArrayListUnmanaged(Elf.LinkObject) = .{},
 
 pub fn deinit(scr: *LdScript, allocator: Allocator) void {
-    scr.libs.deinit(allocator);
+    scr.args.deinit(allocator);
 }
 
 pub fn parse(scr: *LdScript, data: []const u8, elf_file: *Elf) !void {
@@ -41,10 +41,10 @@ pub fn parse(scr: *LdScript, data: []const u8, elf_file: *Elf) !void {
 
     var it = TokenIterator{ .tokens = tokens.items };
     var parser = Parser{ .source = data, .it = &it };
-    var libs = std.StringArrayHashMap(Zld.SystemLib).init(gpa);
+    var args = std.ArrayList(Elf.LinkObject).init(gpa);
     scr.doParse(.{
         .parser = &parser,
-        .libs = &libs,
+        .args = &args,
     }) catch |err| switch (err) {
         error.UnexpectedToken => {
             const last_token_id = parser.it.pos - 1;
@@ -60,12 +60,12 @@ pub fn parse(scr: *LdScript, data: []const u8, elf_file: *Elf) !void {
         },
         else => |e| return e,
     };
-    scr.libs = libs.unmanaged;
+    scr.args = args.moveToUnmanaged();
 }
 
 fn doParse(scr: *LdScript, ctx: struct {
     parser: *Parser,
-    libs: *std.StringArrayHashMap(Zld.SystemLib),
+    args: *std.ArrayList(Elf.LinkObject),
 }) !void {
     while (true) {
         ctx.parser.skipAny(&.{ .comment, .new_line });
@@ -74,7 +74,7 @@ fn doParse(scr: *LdScript, ctx: struct {
             const cmd = ctx.parser.getCommand(cmd_id);
             switch (cmd) {
                 .output_format => scr.cpu_arch = try ctx.parser.outputFormat(),
-                .group => try ctx.parser.group(ctx.libs),
+                .group => try ctx.parser.group(ctx.args),
                 else => return error.UnexpectedToken,
             }
         } else break;
@@ -131,18 +131,18 @@ const Parser = struct {
         return error.UnknownCpuArch;
     }
 
-    fn group(p: *Parser, libs: *std.StringArrayHashMap(Zld.SystemLib)) !void {
+    fn group(p: *Parser, args: *std.ArrayList(Elf.LinkObject)) !void {
         if (!p.skip(&.{.lparen})) return error.UnexpectedToken;
 
         while (true) {
             if (p.maybe(.literal)) |tok_id| {
                 const tok = p.it.get(tok_id);
-                const lib = tok.get(p.source);
-                try libs.put(lib, .{ .needed = true });
+                const path = tok.get(p.source);
+                try args.append(.{ .path = path, .needed = true });
             } else if (p.maybe(.command)) |cmd_id| {
                 const cmd = p.getCommand(cmd_id);
                 switch (cmd) {
-                    .as_needed => try p.asNeeded(libs),
+                    .as_needed => try p.asNeeded(args),
                     else => return error.UnexpectedToken,
                 }
             } else break;
@@ -151,13 +151,13 @@ const Parser = struct {
         _ = try p.require(.rparen);
     }
 
-    fn asNeeded(p: *Parser, libs: *std.StringArrayHashMap(Zld.SystemLib)) !void {
+    fn asNeeded(p: *Parser, args: *std.ArrayList(Elf.LinkObject)) !void {
         if (!p.skip(&.{.lparen})) return error.UnexpectedToken;
 
         while (p.maybe(.literal)) |tok_id| {
             const tok = p.it.get(tok_id);
-            const lib = tok.get(p.source);
-            try libs.put(lib, .{ .needed = false });
+            const path = tok.get(p.source);
+            try args.append(.{ .path = path, .needed = false });
         }
 
         _ = try p.require(.rparen);
@@ -501,20 +501,18 @@ test "Parser - group with as-needed" {
     var it = TokenIterator{ .tokens = tokens.items };
     var parser = Parser{ .source = source, .it = &it };
 
-    var libs = std.StringArrayHashMap(Zld.SystemLib).init(testing.allocator);
-    defer libs.deinit();
+    var args = std.ArrayList(Elf.LinkObject).init(testing.allocator);
+    defer args.deinit();
     const tok_id = try parser.require(.command);
     try testing.expectEqual(parser.getCommand(tok_id), .group);
-    try parser.group(&libs);
+    try parser.group(&args);
 
-    const names = libs.keys();
-    const opts = libs.values();
-    try testing.expectEqualStrings("/a/b/c.so.6", names[0]);
-    try testing.expect(opts[0].needed);
-    try testing.expectEqualStrings("/a/d/e.a", names[1]);
-    try testing.expect(opts[1].needed);
-    try testing.expectEqualStrings("/f/g/h.so.2", names[2]);
-    try testing.expect(!opts[2].needed);
+    try testing.expectEqualStrings("/a/b/c.so.6", args.items[0].path);
+    try testing.expect(args.items[0].needed);
+    try testing.expectEqualStrings("/a/d/e.a", args.items[1].path);
+    try testing.expect(args.items[1].needed);
+    try testing.expectEqualStrings("/f/g/h.so.2", args.items[2].path);
+    try testing.expect(!args.items[2].needed);
 }
 
 const LdScript = @This();
@@ -524,4 +522,3 @@ const assert = std.debug.assert;
 
 const Allocator = std.mem.Allocator;
 const Elf = @import("../Elf.zig");
-const Zld = @import("../Zld.zig");

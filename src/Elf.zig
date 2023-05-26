@@ -126,40 +126,58 @@ pub fn deinit(self: *Elf) void {
     self.arena.promote(gpa).deinit();
 }
 
-fn resolveLib(
+fn resolveFile(
+    self: *Elf,
     arena: Allocator,
+    obj: Elf.LinkObject,
     search_dirs: []const []const u8,
-    name: []const u8,
-    opts: Zld.SystemLib,
-) !?[]const u8 {
-    if (fs.path.isAbsolute(name)) return try arena.dupe(u8, name);
-    if (!opts.static) {
-        const search_name = blk: {
-            if (hasSharedLibraryExt(name)) break :blk name;
-            break :blk try std.fmt.allocPrint(arena, "lib{s}.so", .{name});
+) !Elf.LinkObject {
+    const full_path = full_path: {
+        if (mem.startsWith(u8, obj.path, "-l")) {
+            const path = obj.path["-l".len..];
+            if (!obj.static) {
+                const search_name = try std.fmt.allocPrint(arena, "lib{s}.so", .{path});
+                if (try resolveFileInDir(arena, search_dirs, search_name)) |full_path| break :full_path full_path;
+            }
+            const search_name = try std.fmt.allocPrint(arena, "lib{s}.a", .{path});
+            if (try resolveFileInDir(arena, search_dirs, search_name)) |full_path| break :full_path full_path;
+            self.base.fatal("{s}: library not found", .{path});
+            return error.ResolveFail;
+        }
+
+        const path = path: {
+            var buffer: [fs.MAX_PATH_BYTES]u8 = undefined;
+            const path = std.fs.realpath(obj.path, &buffer) catch |err| switch (err) {
+                error.FileNotFound => {
+                    if (try resolveFileInDir(arena, search_dirs, obj.path)) |path| break :path path;
+                    self.base.fatal("file not found '{s}'", .{obj.path});
+                    return error.ResolveFail;
+                },
+                else => |e| return e,
+            };
+            break :path try arena.dupe(u8, path);
         };
-        if (try resolveLibPath(arena, search_dirs, search_name)) |full_path| return full_path;
-    }
-    const search_name = blk: {
-        if (mem.endsWith(u8, name, ".a")) break :blk name;
-        break :blk try std.fmt.allocPrint(arena, "lib{s}.a", .{name});
+        break :full_path path;
     };
-    if (try resolveLibPath(arena, search_dirs, search_name)) |full_path| return full_path;
+    return .{
+        .path = full_path,
+        .needed = obj.needed,
+        .static = obj.static,
+    };
+}
+
+fn resolveFileInDir(arena: Allocator, search_dirs: []const []const u8, search_name: []const u8) !?[]const u8 {
+    for (search_dirs) |dir| {
+        const full_path = try fs.path.join(arena, &[_][]const u8{ dir, search_name });
+        if (checkFileExists(full_path)) return full_path;
+    }
     return null;
 }
 
-fn resolveLibPath(arena: Allocator, search_dirs: []const []const u8, search_name: []const u8) !?[]const u8 {
-    for (search_dirs) |dir| {
-        const full_path = try fs.path.join(arena, &[_][]const u8{ dir, search_name });
-        // Check if the file exists.
-        const tmp = fs.cwd().openFile(full_path, .{}) catch |err| switch (err) {
-            error.FileNotFound => continue,
-            else => |e| return e,
-        };
-        defer tmp.close();
-        return full_path;
-    }
-    return null;
+fn checkFileExists(path: []const u8) bool {
+    const tmp = fs.cwd().openFile(path, .{}) catch return false;
+    defer tmp.close();
+    return true;
 }
 
 fn hasSharedLibraryExt(filename: []const u8) bool {
@@ -217,21 +235,8 @@ pub fn flush(self: *Elf) !void {
         try search_dirs.append(dir);
     }
 
-    var libs = std.StringArrayHashMap(Zld.SystemLib).init(arena);
-
-    const parse_ctx = ParseLibsCtx{
-        .search_dirs = search_dirs.items,
-        .libs = &libs,
-    };
-
     for (self.options.positionals) |obj| {
-        try self.parsePositional(arena, obj, parse_ctx);
-    }
-
-    self.base.reportWarningsAndErrorsAndExit();
-
-    for (self.options.libs.keys(), self.options.libs.values()) |lib_name, lib_info| {
-        try self.parseLib(arena, lib_name, lib_info, parse_ctx);
+        try self.parsePositional(arena, obj, search_dirs.items);
     }
 
     if (self.base.errors.items.len > 0) {
@@ -1100,72 +1105,38 @@ fn allocateSyntheticSymbols(self: *Elf) void {
     }
 }
 
-const ParseLibsCtx = struct {
-    search_dirs: []const []const u8,
-    libs: *std.StringArrayHashMap(Zld.SystemLib),
-};
-
-fn parsePositional(self: *Elf, arena: Allocator, pos: Zld.LinkObject, ctx: ParseLibsCtx) !void {
-    const full_path = full_path: {
-        var buffer: [fs.MAX_PATH_BYTES]u8 = undefined;
-        const path = std.fs.realpath(pos.path, &buffer) catch |err| switch (err) {
-            error.FileNotFound => return self.base.fatal("file not found '{s}'", .{pos.path}),
-            else => |e| return e,
-        };
-        break :full_path try arena.dupe(u8, path);
+fn parsePositional(self: *Elf, arena: Allocator, obj: Elf.LinkObject, search_dirs: []const []const u8) anyerror!void {
+    const resolved_obj = self.resolveFile(arena, obj, search_dirs) catch |err| switch (err) {
+        error.ResolveFail => return,
+        else => |e| return e,
     };
 
-    log.debug("parsing input file path '{s}'", .{full_path});
+    log.debug("parsing positional argument '{s}'", .{resolved_obj.path});
 
-    if (try self.parseObject(arena, full_path)) return;
-    if (try self.parseArchive(arena, full_path)) return;
-    if (try self.parseShared(arena, full_path, .{})) return;
-    if (try self.parseLdScript(arena, full_path, .{}, ctx)) return;
+    if (try self.parseObject(arena, resolved_obj)) return;
+    if (try self.parseArchive(arena, resolved_obj)) return;
+    if (try self.parseShared(arena, resolved_obj)) return;
+    if (try self.parseLdScript(arena, resolved_obj, search_dirs)) return;
 
-    self.base.fatal("unknown filetype for positional input file: '{s}'", .{pos.path});
+    self.base.fatal("unknown filetype for positional argument: '{s}'", .{resolved_obj.path});
 }
 
-fn parseLib(
-    self: *Elf,
-    arena: Allocator,
-    lib_name: []const u8,
-    lib_info: Zld.SystemLib,
-    ctx: ParseLibsCtx,
-) anyerror!void {
-    const full_path = (try resolveLib(arena, ctx.search_dirs, lib_name, lib_info)) orelse
-        return self.base.fatal("{s}: library not found", .{lib_name});
-    const gop = try ctx.libs.getOrPut(full_path);
-    if (gop.found_existing) {
-        gop.value_ptr.needed = gop.value_ptr.needed and lib_info.needed;
-        return;
-    }
-    gop.value_ptr.* = lib_info;
-
-    log.debug("parsing lib path '{s}'", .{full_path});
-
-    if (try self.parseArchive(arena, full_path)) return;
-    if (try self.parseShared(arena, full_path, lib_info)) return;
-    if (try self.parseLdScript(arena, full_path, lib_info, ctx)) return;
-
-    self.base.fatal("unknown filetype for a library: '{s}'", .{full_path});
-}
-
-fn parseObject(self: *Elf, arena: Allocator, path: []const u8) !bool {
+fn parseObject(self: *Elf, arena: Allocator, obj: Elf.LinkObject) !bool {
     const gpa = self.base.allocator;
-    const file = try fs.cwd().openFile(path, .{});
+    const file = try fs.cwd().openFile(obj.path, .{});
     defer file.close();
 
     const header = try file.reader().readStruct(elf.Elf64_Ehdr);
     try file.seekTo(0);
 
     if (!Object.isValidHeader(&header)) return false;
-    self.validateOrSetCpuArch(path, header.e_machine.toTargetCpuArch().?);
+    self.validateOrSetCpuArch(obj.path, header.e_machine.toTargetCpuArch().?);
 
     const data = try file.readToEndAlloc(arena, std.math.maxInt(u32));
 
     const index = @intCast(u32, try self.files.addOne(gpa));
     self.files.set(index, .{ .object = .{
-        .path = path,
+        .path = obj.path,
         .data = data,
         .index = index,
     } });
@@ -1176,9 +1147,9 @@ fn parseObject(self: *Elf, arena: Allocator, path: []const u8) !bool {
     return true;
 }
 
-fn parseArchive(self: *Elf, arena: Allocator, path: []const u8) !bool {
+fn parseArchive(self: *Elf, arena: Allocator, obj: Elf.LinkObject) !bool {
     const gpa = self.base.allocator;
-    const file = try fs.cwd().openFile(path, .{});
+    const file = try fs.cwd().openFile(obj.path, .{});
     defer file.close();
 
     const magic = try file.reader().readBytesNoEof(Archive.SARMAG);
@@ -1187,7 +1158,7 @@ fn parseArchive(self: *Elf, arena: Allocator, path: []const u8) !bool {
     if (!Archive.isValidMagic(&magic)) return false;
 
     const data = try file.readToEndAlloc(arena, std.math.maxInt(u32));
-    var archive = Archive{ .path = path, .data = data };
+    var archive = Archive{ .path = obj.path, .data = data };
     defer archive.deinit(gpa);
     try archive.parse(arena, self);
 
@@ -1203,26 +1174,26 @@ fn parseArchive(self: *Elf, arena: Allocator, path: []const u8) !bool {
     return true;
 }
 
-fn parseShared(self: *Elf, arena: Allocator, path: []const u8, opts: Zld.SystemLib) !bool {
+fn parseShared(self: *Elf, arena: Allocator, obj: Elf.LinkObject) !bool {
     const gpa = self.base.allocator;
-    const file = try fs.cwd().openFile(path, .{});
+    const file = try fs.cwd().openFile(obj.path, .{});
     defer file.close();
 
     const header = try file.reader().readStruct(elf.Elf64_Ehdr);
     try file.seekTo(0);
 
     if (!SharedObject.isValidHeader(&header)) return false;
-    self.validateOrSetCpuArch(path, header.e_machine.toTargetCpuArch().?);
+    self.validateOrSetCpuArch(obj.path, header.e_machine.toTargetCpuArch().?);
 
     const data = try file.readToEndAlloc(arena, std.math.maxInt(u32));
 
     const index = @intCast(File.Index, try self.files.addOne(gpa));
     self.files.set(index, .{ .shared = .{
-        .path = path,
+        .path = obj.path,
         .data = data,
         .index = index,
-        .needed = opts.needed,
-        .alive = opts.needed,
+        .needed = obj.needed,
+        .alive = obj.needed,
     } });
     const dso = &self.files.items(.data)[index].shared;
     try dso.parse(self);
@@ -1231,14 +1202,14 @@ fn parseShared(self: *Elf, arena: Allocator, path: []const u8, opts: Zld.SystemL
     return true;
 }
 
-fn parseLdScript(self: *Elf, arena: Allocator, path: []const u8, opts: Zld.SystemLib, ctx: ParseLibsCtx) !bool {
+fn parseLdScript(self: *Elf, arena: Allocator, obj: Elf.LinkObject, search_dirs: []const []const u8) !bool {
     const gpa = self.base.allocator;
-    const file = try fs.cwd().openFile(path, .{});
+    const file = try fs.cwd().openFile(obj.path, .{});
     defer file.close();
     const data = try file.readToEndAlloc(gpa, std.math.maxInt(u32));
     defer gpa.free(data);
 
-    log.debug("parsing ld linker script path '{s}'", .{path});
+    log.debug("parsing ld linker script path '{s}'", .{obj.path});
 
     var script = LdScript{};
     defer script.deinit(gpa);
@@ -1248,20 +1219,15 @@ fn parseLdScript(self: *Elf, arena: Allocator, path: []const u8, opts: Zld.Syste
     };
 
     if (script.cpu_arch) |cpu_arch| {
-        self.validateOrSetCpuArch(path, cpu_arch);
+        self.validateOrSetCpuArch(obj.path, cpu_arch);
     }
 
-    for (script.libs.keys(), script.libs.values()) |s_name, s_opts| {
-        const actual_name = if (mem.startsWith(u8, s_name, "-l")) blk: {
-            // I cannot believe we are forced to check this at this stage...
-            break :blk mem.trimLeft(u8, s_name["-l".len..], " ");
-        } else s_name;
-        const static = opts.static or s_opts.static;
-        const needed = opts.needed and s_opts.needed;
-        try self.parseLib(arena, actual_name, .{
-            .static = static,
-            .needed = needed,
-        }, ctx);
+    for (script.args.items) |s_obj| {
+        try self.parsePositional(arena, .{
+            .path = s_obj.path,
+            .static = obj.static or s_obj.static,
+            .needed = obj.needed and s_obj.needed,
+        }, search_dirs);
     }
 
     return true;
@@ -2008,6 +1974,12 @@ fn fmtDumpState(
     try writer.writeAll("Output phdrs\n");
     try writer.print("{}\n", .{self.fmtPhdrs()});
 }
+
+pub const LinkObject = struct {
+    path: []const u8,
+    needed: bool = true,
+    static: bool = false,
+};
 
 const Section = struct {
     shdr: elf.Elf64_Shdr,
