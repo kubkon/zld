@@ -24,6 +24,24 @@ pub const DynamicSection = struct {
         dt.rpath = try elf_file.dynstrtab.insert(gpa, rpath.items);
     }
 
+    fn getFlags(dt: DynamicSection, elf_file: *Elf) ?u64 {
+        _ = dt;
+        var flags: u64 = 0;
+        if (elf_file.options.z_now) {
+            flags |= 8; // TODO add elf.DF_BIND_NOW;
+        }
+        return if (flags > 0) flags else null;
+    }
+
+    fn getFlags1(dt: DynamicSection, elf_file: *Elf) ?u64 {
+        _ = dt;
+        var flags_1: u64 = 0;
+        if (elf_file.options.z_now) {
+            flags_1 |= 1; // TODO add elf.DF_1_NOW;
+        }
+        return if (flags_1 > 0) flags_1 else null;
+    }
+
     pub fn size(dt: DynamicSection, elf_file: *Elf) usize {
         var nentries: usize = 0;
         nentries += dt.needed.items.len; // NEEDED
@@ -41,8 +59,8 @@ pub const DynamicSection = struct {
         nentries += 1; // STRTAB
         nentries += 1; // STRSZ
         nentries += 1; // NULL
-        nentries += 1; // FLAGS
-        nentries += 1; // FLAGS_1
+        if (dt.getFlags(elf_file) != null) nentries += 1; // FLAGS
+        if (dt.getFlags1(elf_file) != null) nentries += 1; // FLAGS_1
         nentries += 1; // DEBUG
         return nentries * @sizeOf(elf.Elf64_Dyn);
     }
@@ -131,30 +149,17 @@ pub const DynamicSection = struct {
             try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_STRSZ, .d_val = shdr.sh_size });
         }
 
+        // FLAGS
+        if (dt.getFlags(elf_file)) |flags| {
+            try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_FLAGS, .d_val = flags });
+        }
+        // FLAGS_1
+        if (dt.getFlags1(elf_file)) |flags_1| {
+            try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_FLAGS_1, .d_val = flags_1 });
+        }
+
         // DEBUG
         try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_DEBUG, .d_val = 0 });
-
-        // FLAGS + FLAGS_1
-        {
-            var flags: u64 = 0;
-            var flags_1: u64 = 0;
-            if (elf_file.options.z_now) {
-                flags |= 8; // TODO add elf.DF_BIND_NOW;
-                flags_1 |= 1; // TODO add elf.DF_1_NOW;
-            }
-
-            if (flags > 0) {
-                try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_FLAGS, .d_val = flags });
-            } else {
-                try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_NULL, .d_val = 0 });
-            }
-
-            if (flags_1 > 0) {
-                try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_FLAGS_1, .d_val = flags_1 });
-            } else {
-                try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_NULL, .d_val = 0 });
-            }
-        }
 
         // NULL
         try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_NULL, .d_val = 0 });
