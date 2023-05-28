@@ -1504,7 +1504,7 @@ fn writeAtoms(self: *Elf) !void {
 
         var buffer = try self.base.allocator.alloc(u8, shdr.sh_size);
         defer self.base.allocator.free(buffer);
-        @memset(buffer, 0);
+        @memset(buffer, 0xcc); // int3s
 
         var stream = std.io.fixedBufferStream(buffer);
 
