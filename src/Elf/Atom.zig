@@ -244,12 +244,13 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
         // Address of the dynamic thread pointer.
         const DTP = @intCast(i64, elf_file.getDtpAddress());
 
-        relocs_log.debug("  {s}: {x}: [P:0x{x} => S:0x{x} (G:0x{x})] ({s})", .{
+        relocs_log.debug("  {s}: {x}: [{x} => {x}] G({x}) A({x}) ({s})", .{
             fmtRelocType(r_type),
             rel.r_offset,
             P,
             S,
             G + GOT,
+            A,
             target.getName(elf_file),
         });
 

@@ -525,6 +525,7 @@ pub const PltGotSection = struct {
             var entry = [_]u8{
                 0xf3, 0x0f, 0x1e, 0xfa, // endbr64
                 0xff, 0x25, 0x00, 0x00, 0x00, 0x00, // jmp qword ptr [rip] -> .got[N]
+                0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
             };
             mem.writeIntLittle(i32, entry[6..][0..4], @intCast(i32, disp));
             try writer.writeAll(&entry);

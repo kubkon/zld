@@ -2037,6 +2037,16 @@ fn fmtDumpState(
         try writer.print("  {d} => {d} '{s}'\n", .{ i, sym_index, self.getSymbol(sym_index).getName(self) });
     }
     try writer.writeByte('\n');
+    try writer.writeAll("PLTGOT\n");
+    for (self.plt_got.symbols.items, 0..) |sym_index, i| {
+        try writer.print("  {d} => {d} '{s}'\n", .{ i, sym_index, self.getSymbol(sym_index).getName(self) });
+    }
+    try writer.writeByte('\n');
+    try writer.writeAll("COPYREL\n");
+    for (self.copy_rel.symbols.items, 0..) |sym_index, i| {
+        try writer.print("  {d} => {d} '{s}'\n", .{ i, sym_index, self.getSymbol(sym_index).getName(self) });
+    }
+    try writer.writeByte('\n');
     try writer.writeAll("Output sections\n");
     try writer.print("{}\n", .{self.fmtSections()});
     try writer.writeAll("Output phdrs\n");

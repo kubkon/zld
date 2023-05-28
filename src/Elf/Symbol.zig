@@ -85,8 +85,7 @@ pub fn getSymbolRank(symbol: Symbol, elf_file: *Elf) u32 {
 
 pub fn getAddress(symbol: Symbol, elf_file: *Elf) u64 {
     if (symbol.flags.copy_rel) {
-        const shdr = elf_file.sections.items(.shdr)[elf_file.copy_rel_sect_index.?];
-        return shdr.sh_addr + symbol.value;
+        return elf_file.getSectionAddress(elf_file.copy_rel_sect_index.?) + symbol.value;
     }
     if (symbol.flags.plt) {
         const extra = symbol.getExtra(elf_file).?;
