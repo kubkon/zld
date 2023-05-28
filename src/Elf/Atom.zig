@@ -187,11 +187,19 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
             => {
                 symbol.flags.got = true;
             },
+
             elf.R_X86_64_PLT32 => {
                 if (symbol.import) {
                     symbol.flags.plt = true;
                 }
             },
+
+            elf.R_X86_64_PC32 => {
+                if (symbol.import and symbol.getSourceSymbol(elf_file).st_type() != elf.STT_FUNC) {
+                    symbol.flags.copy_rel = true;
+                }
+            },
+
             else => {},
         }
     }

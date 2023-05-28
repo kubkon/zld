@@ -193,6 +193,7 @@ fn format2(
 pub const Flags = packed struct {
     got: bool = false,
     plt: bool = false,
+    copy_rel: bool = false,
 };
 
 pub const Extra = struct {

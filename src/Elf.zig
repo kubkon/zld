@@ -1474,6 +1474,9 @@ fn scanRelocs(self: *Elf) !void {
                 try self.plt.addSymbol(index, self);
             }
         }
+        if (symbol.flags.copy_rel) {
+            log.debug("'{s}' needs COPYREL!", .{symbol.getName(self)});
+        }
     }
 }
 
