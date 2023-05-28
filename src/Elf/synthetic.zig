@@ -565,6 +565,47 @@ pub const PltGotSection = struct {
     }
 };
 
+pub const CopyRelSection = struct {
+    symbols: std.ArrayListUnmanaged(u32) = .{},
+
+    pub fn deinit(copy_rel: *CopyRelSection, allocator: Allocator) void {
+        copy_rel.symbols.deinit(allocator);
+    }
+
+    pub fn addSymbol(copy_rel: *CopyRelSection, sym_index: u32, elf_file: *Elf) !void {
+        const index = @intCast(u32, copy_rel.symbols.items.len);
+        const symbol = elf_file.getSymbol(sym_index);
+        if (symbol.getExtra(elf_file)) |extra| {
+            var new_extra = extra;
+            new_extra.copy_rel = index;
+            symbol.setExtra(new_extra, elf_file);
+        } else try symbol.addExtra(.{ .copy_rel = index }, elf_file);
+        try copy_rel.symbols.append(elf_file.base.allocator, sym_index);
+
+        // TODO find aliases and add them too
+    }
+
+    pub fn sizeRela(copy_rel: CopyRelSection) usize {
+        return copy_rel.symbols.items.len * @sizeOf(elf.Elf64_Rela);
+    }
+
+    pub fn writeRela(copy_rel: CopyRelSection, elf_file: *Elf, writer: anytype) !void {
+        for (copy_rel.symbols.items) |sym_index| {
+            const sym = elf_file.getSymbol(sym_index);
+            assert(sym.import);
+            const extra = sym.getExtra(elf_file).?;
+            const r_offset = sym.getAddress(elf_file);
+            const r_sym: u64 = extra.dynamic;
+            const r_type: u32 = elf.R_X86_64_COPY;
+            try writer.writeStruct(elf.Elf64_Rela{
+                .r_offset = r_offset,
+                .r_info = (r_sym << 32) | r_type,
+                .r_addend = 0,
+            });
+        }
+    }
+};
+
 const std = @import("std");
 const assert = std.debug.assert;
 const elf = std.elf;

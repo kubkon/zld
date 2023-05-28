@@ -19,6 +19,7 @@ got_plt_sect_index: ?u16 = null,
 plt_got_sect_index: ?u16 = null,
 rela_dyn_sect_index: ?u16 = null,
 rela_plt_sect_index: ?u16 = null,
+copy_rel_sect_index: ?u16 = null,
 symtab_sect_index: ?u16 = null,
 strtab_sect_index: ?u16 = null,
 shstrtab_sect_index: ?u16 = null,
@@ -55,6 +56,7 @@ hash: HashSection = .{},
 got: GotSection = .{},
 plt: PltSection = .{},
 plt_got: PltGotSection = .{},
+copy_rel: CopyRelSection = .{},
 
 atoms: std.ArrayListUnmanaged(Atom) = .{},
 
@@ -406,7 +408,7 @@ fn initSections(self: *Elf) !void {
             .addralign = @alignOf(u64),
         });
 
-        if (self.got.needs_rela) {
+        if (self.got.needs_rela or self.copy_rel.symbols.items.len > 0) {
             self.rela_dyn_sect_index = try self.addSection(.{
                 .name = ".rela.dyn",
                 .type = elf.SHT_RELA,
@@ -445,6 +447,14 @@ fn initSections(self: *Elf) !void {
             .type = elf.SHT_PROGBITS,
             .flags = elf.SHF_ALLOC | elf.SHF_EXECINSTR,
             .addralign = 16,
+        });
+    }
+
+    if (self.copy_rel.symbols.items.len > 0) {
+        self.copy_rel_sect_index = try self.addSection(.{
+            .name = ".copyrel",
+            .type = elf.SHT_NOBITS,
+            .flags = elf.SHF_ALLOC | elf.SHF_WRITE,
         });
     }
 
@@ -563,12 +573,23 @@ fn calcSectionSizes(self: *Elf) !void {
 
     if (self.rela_dyn_sect_index) |index| {
         const shdr = &self.sections.items(.shdr)[index];
-        shdr.sh_size = self.got.sizeRela(self);
+        shdr.sh_size = self.got.sizeRela(self) + self.copy_rel.sizeRela();
     }
 
     if (self.rela_plt_sect_index) |index| {
         const shdr = &self.sections.items(.shdr)[index];
         shdr.sh_size = self.plt.sizeRela();
+    }
+
+    if (self.copy_rel_sect_index) |index| {
+        const shdr = &self.sections.items(.shdr)[index];
+        for (self.copy_rel.symbols.items) |sym_index| {
+            const symbol = self.getSymbol(sym_index);
+            const alignment = try math.powi(u64, 2, symbol.getAlignment(self));
+            symbol.value = mem.alignForwardGeneric(u64, shdr.sh_size, alignment);
+            shdr.sh_addralign = @max(shdr.sh_addralign, alignment);
+            shdr.sh_size += symbol.value + symbol.getSourceSymbol(self).st_size;
+        }
     }
 
     if (self.interp_sect_index) |index| {
@@ -1027,6 +1048,7 @@ fn sortSections(self: *Elf) !void {
         &self.plt_got_sect_index,
         &self.rela_dyn_sect_index,
         &self.rela_plt_sect_index,
+        &self.copy_rel_sect_index,
     }) |maybe_index| {
         if (maybe_index.*) |*index| {
             index.* = backlinks[index.*];
@@ -1476,6 +1498,7 @@ fn scanRelocs(self: *Elf) !void {
         }
         if (symbol.flags.copy_rel) {
             log.debug("'{s}' needs COPYREL!", .{symbol.getName(self)});
+            try self.copy_rel.addSymbol(index, self);
         }
     }
 }
@@ -1577,9 +1600,13 @@ fn writeSyntheticSections(self: *Elf) !void {
 
     if (self.rela_dyn_sect_index) |shndx| {
         const shdr = self.sections.items(.shdr)[shndx];
-        var buffer = try std.ArrayList(u8).initCapacity(gpa, self.got.sizeRela(self));
+        var buffer = try std.ArrayList(u8).initCapacity(
+            gpa,
+            self.got.sizeRela(self) + self.copy_rel.sizeRela(),
+        );
         defer buffer.deinit();
         try self.got.writeRela(self, buffer.writer());
+        try self.copy_rel.writeRela(self, buffer.writer());
         try self.base.file.pwriteAll(buffer.items, shdr.sh_offset);
     }
 
@@ -2083,6 +2110,7 @@ const mem = std.mem;
 const Allocator = mem.Allocator;
 const Archive = @import("Elf/Archive.zig");
 const Atom = @import("Elf/Atom.zig");
+const CopyRelSection = synthetic.CopyRelSection;
 const DynamicSection = synthetic.DynamicSection;
 const DynsymSection = synthetic.DynsymSection;
 const Elf = @This();

@@ -84,6 +84,10 @@ pub fn getSymbolRank(symbol: Symbol, elf_file: *Elf) u32 {
 }
 
 pub fn getAddress(symbol: Symbol, elf_file: *Elf) u64 {
+    if (symbol.flags.copy_rel) {
+        const shdr = elf_file.sections.items(.shdr)[elf_file.copy_rel_sect_index.?];
+        return shdr.sh_addr + symbol.value;
+    }
     if (symbol.flags.plt) {
         const extra = symbol.getExtra(elf_file).?;
         if (symbol.flags.got) {
@@ -98,6 +102,12 @@ pub fn getGotAddress(symbol: Symbol, elf_file: *Elf) u64 {
     if (!symbol.flags.got) return 0;
     const extra = symbol.getExtra(elf_file).?;
     return elf_file.getGotEntryAddress(extra.got);
+}
+
+pub fn getAlignment(symbol: Symbol, elf_file: *Elf) u64 {
+    if (symbol.getFile(elf_file) == null) return 0;
+    const s_sym = symbol.getSourceSymbol(elf_file);
+    return @ctz(s_sym.st_value);
 }
 
 pub fn addExtra(symbol: *Symbol, extra: Extra, elf_file: *Elf) !void {
@@ -119,12 +129,22 @@ pub inline fn asElfSym(symbol: Symbol, st_name: u32, elf_file: *Elf) elf.Elf64_S
         else => |st_type| st_type,
     };
     const st_bind: u8 = if (symbol.isLocal()) 0 else elf.STB_GLOBAL;
+    const st_shndx = blk: {
+        if (symbol.flags.copy_rel) break :blk elf_file.copy_rel_sect_index.?;
+        if (symbol.import) break :blk elf.SHN_UNDEF;
+        break :blk symbol.shndx;
+    };
+    const st_value = blk: {
+        if (symbol.flags.copy_rel) break :blk symbol.getAddress(elf_file);
+        if (symbol.import) break :blk 0;
+        break :blk symbol.value;
+    };
     return elf.Elf64_Sym{
         .st_name = st_name,
         .st_info = (st_bind << 4) | st_type,
         .st_other = s_sym.st_other,
-        .st_shndx = if (symbol.import) elf.SHN_UNDEF else symbol.shndx,
-        .st_value = if (symbol.import) 0 else symbol.value,
+        .st_shndx = st_shndx,
+        .st_value = st_value,
         .st_size = s_sym.st_size,
     };
 }
@@ -201,6 +221,7 @@ pub const Extra = struct {
     plt: u32 = 0,
     plt_got: u32 = 0,
     dynamic: u32 = 0,
+    copy_rel: u32 = 0,
 };
 
 const std = @import("std");
