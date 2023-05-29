@@ -246,7 +246,8 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
     }
 }
 
-pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
+pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
+    assert(self.getInputShdr(elf_file).sh_flags & elf.SHF_ALLOC != 0);
     const gpa = elf_file.base.allocator;
     const code = try self.getCodeUncompressAlloc(elf_file);
     defer gpa.free(code);
@@ -471,6 +472,84 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
             },
 
             else => elf_file.base.fatal("unhandled relocation type: {}", .{fmtRelocType(r_type)}),
+        }
+    }
+
+    try writer.writeAll(code);
+}
+
+pub fn resolveRelocsNonAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
+    assert(self.getInputShdr(elf_file).sh_flags & elf.SHF_ALLOC == 0);
+    const gpa = elf_file.base.allocator;
+    const code = try self.getCodeUncompressAlloc(elf_file);
+    defer gpa.free(code);
+    const relocs = self.getRelocs(elf_file);
+    const object = self.getObject(elf_file);
+
+    relocs_log.debug("{x}: {s}", .{ self.value, self.getName(elf_file) });
+
+    var stream = std.io.fixedBufferStream(code);
+    const cwriter = stream.writer();
+
+    var i: usize = 0;
+    while (i < relocs.len) : (i += 1) {
+        const rel = relocs[i];
+        const r_type = rel.r_type();
+
+        if (r_type == elf.R_X86_64_NONE) continue;
+
+        const target = object.getSymbol(rel.r_sym(), elf_file);
+
+        // We will use equation format to resolve relocations:
+        // https://intezer.com/blog/malware-analysis/executable-and-linkable-format-101-part-3-relocations/
+        //
+        const P = self.value + rel.r_offset;
+        // Addend from the relocation.
+        const A = rel.r_addend;
+        // Address of the target symbol - can be address of the symbol within an atom or address of PLT stub.
+        const S = @intCast(i64, target.getAddress(elf_file));
+        // Address of the global offset table.
+        const GOT = if (elf_file.got_sect_index) |shndx|
+            @intCast(i64, elf_file.getSectionAddress(shndx))
+        else
+            0;
+        // Address of the dynamic thread pointer.
+        const DTP = @intCast(i64, elf_file.getDtpAddress());
+
+        relocs_log.debug("  {s}: {x}: [{x} => {x}] A({x}) ({s})", .{
+            fmtRelocType(r_type),
+            rel.r_offset,
+            P,
+            S,
+            A,
+            target.getName(elf_file),
+        });
+
+        try stream.seekTo(rel.r_offset);
+
+        switch (r_type) {
+            elf.R_X86_64_NONE => unreachable,
+            elf.R_X86_64_8 => try cwriter.writeIntLittle(u8, @bitCast(u8, @intCast(i8, S + A))),
+            elf.R_X86_64_16 => try cwriter.writeIntLittle(u16, @bitCast(u16, @intCast(i16, S + A))),
+            elf.R_X86_64_32 => try cwriter.writeIntLittle(u32, @bitCast(u32, @intCast(i32, S + A))),
+            elf.R_X86_64_32S => try cwriter.writeIntLittle(i32, @intCast(i32, S + A)),
+            elf.R_X86_64_64 => try cwriter.writeIntLittle(i64, S + A),
+            elf.R_X86_64_DTPOFF32 => try cwriter.writeIntLittle(i32, @intCast(i32, S + A - DTP)),
+            elf.R_X86_64_DTPOFF64 => try cwriter.writeIntLittle(i64, S + A - DTP),
+            elf.R_X86_64_GOTOFF64 => try cwriter.writeIntLittle(i64, S + A - GOT),
+            elf.R_X86_64_GOTPC64 => try cwriter.writeIntLittle(i64, GOT + A),
+            elf.R_X86_64_SIZE32 => {
+                const size = @intCast(i64, target.getSourceSymbol(elf_file).st_size);
+                try cwriter.writeIntLittle(u32, @bitCast(u32, @intCast(i32, size + A)));
+            },
+            elf.R_X86_64_SIZE64 => {
+                const size = @intCast(i64, target.getSourceSymbol(elf_file).st_size);
+                try cwriter.writeIntLittle(i64, @intCast(i64, size + A));
+            },
+            else => elf_file.base.fatal("{s}: invalid relocation type for non-alloc section: {}", .{
+                self.getName(elf_file),
+                fmtRelocType(r_type),
+            }),
         }
     }
 

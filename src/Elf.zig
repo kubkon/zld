@@ -1581,14 +1581,18 @@ fn writeAtoms(self: *Elf) !void {
         for (atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index).?;
             assert(atom.is_alive);
-            const off = atom.value - shdr.sh_addr;
+            const off = if (shdr.sh_flags & elf.SHF_ALLOC == 0) atom.value else atom.value - shdr.sh_addr;
             log.debug("writing ATOM(%{d},'{s}') at offset 0x{x}", .{
                 atom_index,
                 atom.getName(self),
                 shdr.sh_offset + off,
             });
             try stream.seekTo(off);
-            try atom.resolveRelocs(self, stream.writer());
+
+            if (shdr.sh_flags & elf.SHF_ALLOC == 0)
+                try atom.resolveRelocsNonAlloc(self, stream.writer())
+            else
+                try atom.resolveRelocsAlloc(self, stream.writer());
         }
 
         try self.base.file.pwriteAll(buffer, shdr.sh_offset);
