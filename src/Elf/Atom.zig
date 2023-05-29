@@ -196,6 +196,15 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
 
             elf.R_X86_64_PC32 => {
                 if (symbol.import and symbol.getSourceSymbol(elf_file).st_type() != elf.STT_FUNC) {
+                    if (elf_file.options.z_nocopyreloc) {
+                        elf_file.base.fatal("{s}: {} relocation at offset 0x{x} against symbol '{s}' cannot be used; recompile with {s}", .{
+                            self.getName(elf_file),
+                            fmtRelocType(rel.r_type()),
+                            rel.r_offset,
+                            symbol.getName(elf_file),
+                            if (symbol.isAbs(elf_file)) "-fno-PIC" else "-fPIC",
+                        });
+                    }
                     symbol.flags.copy_rel = true;
                 }
             },

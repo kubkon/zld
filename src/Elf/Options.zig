@@ -35,6 +35,7 @@ const usage =
     \\  noexecstack                 Force stack non-executable
     \\  execstack-if-needed         Make the stack executable if the input file explicitly requests it
     \\  now                         Disable lazy function resolution
+    \\  nocopyreloc                 Do not create copy relocations
     \\-h, --help                    Print this help and exit
     \\--verbose                     Print full linker invocation to stderr
     \\--debug-log [value]           Turn on debugging logs for [value] (requires zld compiled with -Dlog)
@@ -70,6 +71,8 @@ z_execstack: bool = false,
 z_execstack_if_needed: bool = false,
 /// Disables lazy function resolution.
 z_now: bool = false,
+/// Do not create copy relocations
+z_nocopyreloc: bool = false,
 
 pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options {
     if (args.len == 0) ctx.fatal(usage, .{cmd});
@@ -177,6 +180,8 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             opts.z_execstack_if_needed = true;
         } else if (p.flagZ("now")) {
             opts.z_now = true;
+        } else if (p.flagZ("nocopyreloc")) {
+            opts.z_nocopyreloc = true;
         } else {
             try positionals.append(.{ .tag = .path, .path = p.arg });
         }
