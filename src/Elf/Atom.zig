@@ -304,17 +304,17 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
                             try encode(&.{inst}, inst_code);
                             try cwriter.writeIntLittle(i32, @intCast(i32, S + A - P));
                         },
-                        .cmp => {
-                            if (math.cast(i32, S) == null) break :blk;
-                            const inst = try Instruction.new(old_inst.prefix, .cmp, &.{
-                                old_inst.ops[0],
-                                // TODO: hack to force imm32s in the assembler
-                                .{ .imm = Immediate.s(-129) },
-                            });
-                            relocs_log.debug("    relaxing {} => {}", .{ old_inst.encoding, inst.encoding });
-                            try encode(&.{inst}, inst_code);
-                            try cwriter.writeIntLittle(i32, @intCast(i32, S));
-                        },
+                        // .cmp => {
+                        //     if (math.cast(i32, S) == null) break :blk;
+                        //     const inst = try Instruction.new(old_inst.prefix, .cmp, &.{
+                        //         old_inst.ops[0],
+                        //         // TODO: hack to force imm32s in the assembler
+                        //         .{ .imm = Immediate.s(-129) },
+                        //     });
+                        //     relocs_log.debug("    relaxing {} => {}", .{ old_inst.encoding, inst.encoding });
+                        //     try encode(&.{inst}, inst_code);
+                        //     try cwriter.writeIntLittle(i32, @intCast(i32, S));
+                        // },
                         else => break :blk,
                     }
                     continue;
