@@ -181,6 +181,22 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
         // While traversing relocations, mark symbols that require special handling such as
         // pointer indirection via GOT, or a stub trampoline via PLT.
         switch (rel.r_type()) {
+            elf.R_X86_64_64 => {
+                if (symbol.import and symbol.getSourceSymbol(elf_file).st_type() != elf.STT_FUNC) {
+                    symbol.flags.copy_rel = true;
+                }
+            },
+
+            elf.R_X86_64_32,
+            elf.R_X86_64_32S,
+            => {
+                if (symbol.import and symbol.getSourceSymbol(elf_file).st_type() != elf.STT_FUNC) {
+                    elf_file.base.fatal("TODO import in a position-dependent executable in {}", .{
+                        fmtRelocType(rel.r_type()),
+                    });
+                }
+            },
+
             elf.R_X86_64_GOTPCREL,
             elf.R_X86_64_GOTPCRELX,
             elf.R_X86_64_REX_GOTPCRELX,

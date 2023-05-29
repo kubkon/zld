@@ -1507,6 +1507,7 @@ fn scanRelocs(self: *Elf) !void {
         for (self.getFile(index).?.object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index) orelse continue;
             if (!atom.is_alive) continue;
+            if (atom.getInputShdr(self).sh_flags & elf.SHF_ALLOC == 0) continue;
             try atom.scanRelocs(self);
         }
     }
