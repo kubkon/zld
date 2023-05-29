@@ -135,9 +135,9 @@ pub fn deinit(self: *Elf) void {
 fn resolveFile(
     self: *Elf,
     arena: Allocator,
-    obj: Elf.LinkObject,
+    obj: LinkObject,
     search_dirs: []const []const u8,
-) !Elf.LinkObject {
+) !LinkObject {
     const full_path = full_path: {
         if (mem.startsWith(u8, obj.path, "-l")) {
             const path = obj.path["-l".len..];
@@ -241,7 +241,11 @@ pub fn flush(self: *Elf) !void {
         try search_dirs.append(dir);
     }
 
-    for (self.options.positionals) |obj| {
+    var positionals = std.ArrayList(LinkObject).init(arena);
+    try self.unpackPositionals(&positionals);
+    self.base.reportWarningsAndErrorsAndExit();
+
+    for (positionals.items) |obj| {
         try self.parsePositional(arena, obj, search_dirs.items);
     }
 
@@ -970,7 +974,7 @@ fn getSectionRank(self: *Elf, shndx: u16) u8 {
             if (flags & elf.SHF_EXECINSTR != 0) {
                 return 0xf1;
             } else if (flags & elf.SHF_WRITE != 0) {
-                return if (flags & elf.SHF_TLS != 0) 0xf3 else 0xf5;
+                return if (flags & elf.SHF_TLS != 0) 0xf4 else 0xf6;
             } else if (mem.eql(u8, name, ".interp")) {
                 return 1;
             } else {
@@ -978,15 +982,15 @@ fn getSectionRank(self: *Elf, shndx: u16) u8 {
             }
         } else {
             if (mem.startsWith(u8, name, ".debug")) {
-                return 0xf7;
-            } else {
                 return 0xf8;
+            } else {
+                return 0xf9;
             }
         },
 
-        elf.SHT_NOBITS => return if (flags & elf.SHF_TLS != 0) 0xf4 else 0xf6,
-        elf.SHT_SYMTAB => return 0xf9,
-        elf.SHT_STRTAB => return if (mem.eql(u8, name, ".dynstr")) 4 else 0xfa,
+        elf.SHT_NOBITS => return if (flags & elf.SHF_TLS != 0) 0xf5 else 0xf7,
+        elf.SHT_SYMTAB => return 0xfa,
+        elf.SHT_STRTAB => return if (mem.eql(u8, name, ".dynstr")) 4 else 0xfb,
         else => return 0xff,
     }
 }
@@ -1173,7 +1177,36 @@ fn allocateSyntheticSymbols(self: *Elf) void {
     }
 }
 
-fn parsePositional(self: *Elf, arena: Allocator, obj: Elf.LinkObject, search_dirs: []const []const u8) anyerror!void {
+fn unpackPositionals(self: *Elf, positionals: *std.ArrayList(LinkObject)) !void {
+    const State = struct {
+        needed: bool,
+        static: bool,
+    };
+
+    try positionals.ensureTotalCapacity(self.options.positionals.len);
+
+    var stack = std.ArrayList(State).init(self.base.allocator);
+    defer stack.deinit();
+
+    var state = State{ .needed = true, .static = self.options.static };
+
+    for (self.options.positionals) |arg| switch (arg.tag) {
+        .path => positionals.appendAssumeCapacity(.{ .path = arg.path }),
+        .library => positionals.appendAssumeCapacity(.{
+            .path = arg.path,
+            .needed = state.needed,
+            .static = state.static,
+        }),
+        .static => state.static = true,
+        .dynamic => state.static = false,
+        .as_needed => state.needed = false,
+        .no_as_needed => state.needed = true,
+        .push_state => try stack.append(state),
+        .pop_state => state = stack.popOrNull() orelse return self.base.fatal("no state pushed before pop", .{}),
+    };
+}
+
+fn parsePositional(self: *Elf, arena: Allocator, obj: LinkObject, search_dirs: []const []const u8) anyerror!void {
     const resolved_obj = self.resolveFile(arena, obj, search_dirs) catch |err| switch (err) {
         error.ResolveFail => return,
         else => |e| return e,
@@ -1189,7 +1222,7 @@ fn parsePositional(self: *Elf, arena: Allocator, obj: Elf.LinkObject, search_dir
     self.base.fatal("unknown filetype for positional argument: '{s}'", .{resolved_obj.path});
 }
 
-fn parseObject(self: *Elf, arena: Allocator, obj: Elf.LinkObject) !bool {
+fn parseObject(self: *Elf, arena: Allocator, obj: LinkObject) !bool {
     const gpa = self.base.allocator;
     const file = try fs.cwd().openFile(obj.path, .{});
     defer file.close();
@@ -1215,7 +1248,7 @@ fn parseObject(self: *Elf, arena: Allocator, obj: Elf.LinkObject) !bool {
     return true;
 }
 
-fn parseArchive(self: *Elf, arena: Allocator, obj: Elf.LinkObject) !bool {
+fn parseArchive(self: *Elf, arena: Allocator, obj: LinkObject) !bool {
     const gpa = self.base.allocator;
     const file = try fs.cwd().openFile(obj.path, .{});
     defer file.close();
@@ -1242,7 +1275,7 @@ fn parseArchive(self: *Elf, arena: Allocator, obj: Elf.LinkObject) !bool {
     return true;
 }
 
-fn parseShared(self: *Elf, arena: Allocator, obj: Elf.LinkObject) !bool {
+fn parseShared(self: *Elf, arena: Allocator, obj: LinkObject) !bool {
     const gpa = self.base.allocator;
     const file = try fs.cwd().openFile(obj.path, .{});
     defer file.close();
@@ -1270,7 +1303,7 @@ fn parseShared(self: *Elf, arena: Allocator, obj: Elf.LinkObject) !bool {
     return true;
 }
 
-fn parseLdScript(self: *Elf, arena: Allocator, obj: Elf.LinkObject, search_dirs: []const []const u8) !bool {
+fn parseLdScript(self: *Elf, arena: Allocator, obj: LinkObject, search_dirs: []const []const u8) !bool {
     const gpa = self.base.allocator;
     const file = try fs.cwd().openFile(obj.path, .{});
     defer file.close();

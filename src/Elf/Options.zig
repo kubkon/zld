@@ -6,6 +6,8 @@ const usage =
     \\--as-needed                   Only set DT_NEEDED for shared libraries if used
     \\--no-as-needed                Always set DT_NEEDED for shared libraries (default)
     \\--Bstatic                     Do not link against shared libraries
+    \\--Bdynamic                    Link against shared libraries (default)
+    \\--dynamic                     Alias for --Bdynamic
     \\--dynamic-linker=[value], -I [value]      
     \\                              Set the dynamic linker to use
     \\--end-group                   Ignored for compatibility with GNU
@@ -45,7 +47,7 @@ const cmd = "ld.zld";
 
 emit: Zld.Emit,
 output_mode: Zld.OutputMode,
-positionals: []const Elf.LinkObject,
+positionals: []const Positional,
 search_dirs: []const []const u8,
 rpath_list: []const []const u8,
 strip_debug: bool = false,
@@ -57,6 +59,7 @@ allow_multiple_definition: bool = false,
 cpu_arch: ?std.Target.Cpu.Arch = null,
 dynamic_linker: ?[]const u8 = null,
 eh_frame_hdr: bool = false,
+static: bool = false,
 /// -z flags
 /// Overrides default stack size.
 z_stack_size: ?u64 = null,
@@ -71,7 +74,7 @@ z_now: bool = false,
 pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options {
     if (args.len == 0) ctx.fatal(usage, .{cmd});
 
-    var positionals = std.ArrayList(Elf.LinkObject).init(arena);
+    var positionals = std.ArrayList(Positional).init(arena);
     var search_dirs = std.StringArrayHashMap(void).init(arena);
     var rpath_list = std.StringArrayHashMap(void).init(arena);
     var verbose = false;
@@ -86,13 +89,6 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         .rpath_list = undefined,
     };
 
-    const State = struct {
-        needed: bool,
-        static: bool,
-    };
-    var stack = std.ArrayList(State).init(arena);
-    var state = State{ .needed = true, .static = false };
-
     var it = Zld.Options.ArgsIterator{ .args = args };
     var p = ArgParser(@TypeOf(ctx)){ .it = &it, .ctx = ctx };
     while (p.hasMore()) {
@@ -101,11 +97,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         } else if (p.arg2("debug-log")) |scope| {
             try ctx.log_scopes.append(scope);
         } else if (p.arg1("l")) |lib| {
-            try positionals.append(.{
-                .path = try std.fmt.allocPrint(arena, "-l{s}", .{lib}),
-                .needed = state.needed,
-                .static = state.static,
-            });
+            try positionals.append(.{ .tag = .library, .path = try std.fmt.allocPrint(arena, "-l{s}", .{lib}) });
         } else if (p.arg1("L")) |dir| {
             try search_dirs.put(dir, {});
         } else if (p.arg1("o")) |path| {
@@ -135,10 +127,18 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         } else if (p.flagAny("allow-multiple-definition")) {
             opts.allow_multiple_definition = true;
         } else if (p.flagAny("static")) {
-            state.static = true;
+            opts.static = true;
+            try positionals.append(.{ .tag = .static });
+        } else if (p.flagAny("dynamic")) {
+            opts.static = false;
+            try positionals.append(.{ .tag = .dynamic });
         } else if (p.argAny("B")) |b_arg| {
             if (mem.eql(u8, b_arg, "static")) {
-                state.static = true;
+                opts.static = true;
+                try positionals.append(.{ .tag = .static });
+            } else if (mem.eql(u8, b_arg, "dynamic")) {
+                opts.static = false;
+                try positionals.append(.{ .tag = .dynamic });
             } else {
                 ctx.fatal("unknown argument '--B{s}'", .{b_arg});
             }
@@ -149,13 +149,13 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         } else if (p.flagAny("strip-all") or p.flag1("s")) {
             opts.strip_all = true;
         } else if (p.flagAny("as-needed")) {
-            state.needed = false;
+            try positionals.append(.{ .tag = .as_needed });
         } else if (p.flagAny("no-as-needed")) {
-            state.needed = true;
+            try positionals.append(.{ .tag = .no_as_needed });
         } else if (p.flagAny("push-state")) {
-            try stack.append(state);
+            try positionals.append(.{ .tag = .push_state });
         } else if (p.flagAny("pop-state")) {
-            state = stack.popOrNull() orelse ctx.fatal("no state pushed before pop", .{});
+            try positionals.append(.{ .tag = .pop_state });
         } else if (p.argAny("dynamic-linker")) |path| {
             opts.dynamic_linker = path;
         } else if (p.arg1("I")) |path| {
@@ -178,7 +178,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         } else if (p.flagZ("now")) {
             opts.z_now = true;
         } else {
-            try positionals.append(.{ .path = p.arg });
+            try positionals.append(.{ .tag = .path, .path = p.arg });
         }
     }
 
@@ -190,7 +190,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         std.debug.print("{s}\n", .{args[args.len - 1]});
     }
 
-    if (positionals.items.len == 0) ctx.fatal("Expected at least one input object file", .{});
+    if (positionals.items.len == 0) ctx.fatal("Expected at least one positional argument", .{});
 
     opts.positionals = positionals.items;
     opts.search_dirs = search_dirs.keys();
@@ -311,6 +311,22 @@ fn ArgParser(comptime Ctx: type) type {
     };
 }
 
+pub const Positional = struct {
+    tag: Tag,
+    path: []const u8 = "",
+
+    pub const Tag = enum {
+        path,
+        library,
+        static,
+        dynamic,
+        as_needed,
+        no_as_needed,
+        push_state,
+        pop_state,
+    };
+};
+
 const std = @import("std");
 const builtin = @import("builtin");
 const io = std.io;
@@ -318,6 +334,5 @@ const mem = std.mem;
 const process = std.process;
 
 const Allocator = mem.Allocator;
-const Elf = @import("../Elf.zig");
 const Options = @This();
 const Zld = @import("../Zld.zig");
