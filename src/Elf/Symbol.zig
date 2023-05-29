@@ -215,6 +215,7 @@ pub const Flags = packed struct {
     got: bool = false,
     plt: bool = false,
     copy_rel: bool = false,
+    tlsgd: bool = false,
 };
 
 pub const Extra = struct {

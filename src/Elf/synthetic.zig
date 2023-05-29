@@ -270,6 +270,7 @@ pub const DynsymSection = struct {
 pub const GotSection = struct {
     symbols: std.ArrayListUnmanaged(u32) = .{},
     needs_rela: bool = false,
+    emit_tlsld: bool = false,
     output_symtab_size: Elf.SymtabSize = .{},
 
     pub fn deinit(got: *GotSection, allocator: Allocator) void {
@@ -288,7 +289,9 @@ pub const GotSection = struct {
     }
 
     pub fn sizeGot(got: GotSection) usize {
-        return got.symbols.items.len * 8;
+        var size = got.symbols.items.len * 8;
+        if (got.emit_tlsld) size += 8;
+        return size;
     }
 
     pub fn sizeRela(got: GotSection, elf_file: *Elf) usize {
@@ -305,6 +308,10 @@ pub const GotSection = struct {
             const sym = elf_file.getSymbol(sym_index);
             const value = if (sym.import) 0 else sym.value;
             try writer.writeIntLittle(u64, value);
+        }
+
+        if (got.emit_tlsld) {
+            try writer.writeIntLittle(u64, 1); // TODO we assume executable output here
         }
     }
 
@@ -333,6 +340,11 @@ pub const GotSection = struct {
             const sym = elf_file.getSymbol(sym_index);
             got.output_symtab_size.strsize += @intCast(u32, sym.getName(elf_file).len + "$got".len + 1);
         }
+
+        if (got.emit_tlsld) {
+            got.output_symtab_size.nlocals += 1;
+            got.output_symtab_size.strsize += @intCast(u32, "$tlsld".len + 1);
+        }
     }
 
     pub fn writeSymtab(got: GotSection, elf_file: *Elf, ctx: Elf.WriteSymtabCtx) !void {
@@ -341,7 +353,7 @@ pub const GotSection = struct {
         const gpa = elf_file.base.allocator;
 
         var ilocal = ctx.ilocal;
-        for (got.symbols.items, 0..) |sym_index, i| {
+        for (got.symbols.items) |sym_index| {
             const sym = elf_file.getSymbol(sym_index);
             const name = try std.fmt.allocPrint(gpa, "{s}$got", .{sym.getName(elf_file)});
             defer gpa.free(name);
@@ -351,7 +363,20 @@ pub const GotSection = struct {
                 .st_info = elf.STT_OBJECT,
                 .st_other = 0,
                 .st_shndx = elf_file.got_sect_index.?,
-                .st_value = elf_file.getGotEntryAddress(@intCast(u32, i)),
+                .st_value = elf_file.getGotEntryAddress(ilocal),
+                .st_size = @sizeOf(u64),
+            };
+            ilocal += 1;
+        }
+
+        if (got.emit_tlsld) {
+            const st_name = try ctx.strtab.insert(gpa, "$tlsld");
+            ctx.symtab[ilocal] = .{
+                .st_name = st_name,
+                .st_info = elf.STT_OBJECT,
+                .st_other = 0,
+                .st_shndx = elf_file.got_sect_index.?,
+                .st_value = elf_file.getTlsLdAddress(),
                 .st_size = @sizeOf(u64),
             };
             ilocal += 1;

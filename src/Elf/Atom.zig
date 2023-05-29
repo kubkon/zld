@@ -209,6 +209,22 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
                 }
             },
 
+            elf.R_X86_64_TLSGD => {
+                if (elf_file.options.static or (elf_file.options.relax and !symbol.import)) {
+                    // Relax if building with -static flag as __tls_get_addr() will not be present in libc.a
+                } else {
+                    symbol.flags.tlsgd = true;
+                }
+            },
+
+            elf.R_X86_64_TLSLD => {
+                if (elf_file.options.static or elf_file.options.relax) {
+                    // Relax if building with -static flag as __tls_get_addr() will not be present in libc.a
+                } else {
+                    elf_file.needs_tlsld = true;
+                }
+            },
+
             else => {},
         }
     }
@@ -361,6 +377,10 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
             },
 
             elf.R_X86_64_TLSGD => {
+                if (target.flags.tlsgd) {
+                    elf_file.base.fatal("TODO get TLSGD address of the symbol '{s}'", .{target.getName(elf_file)});
+                    continue;
+                }
                 const next_rel = relocs[i + 1];
                 i += 1;
 
@@ -389,6 +409,10 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
             },
 
             elf.R_X86_64_TLSLD => {
+                if (elf_file.got.emit_tlsld) {
+                    try cwriter.writeIntLittle(i32, @intCast(i32, @intCast(i64, elf_file.getTlsLdAddress()) + A - P));
+                    continue;
+                }
                 const next_rel = relocs[i + 1];
                 i += 1;
                 const value = @intCast(i32, TP - DTP);

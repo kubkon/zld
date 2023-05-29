@@ -22,6 +22,8 @@ const usage =
     \\-m [value]                    Set target emulation
     \\--pop-state                   Restore the states saved by --push-state
     \\--push-state                  Save the current state of --as-needed, -static and --whole-archive
+    \\--relax                       Optimize instructions (default)
+    \\--no-relax                    Don't optimize instructions
     \\--rpath=[value], -R [value]   Specify runtime path
     \\--shared                      Create dynamic library
     \\--static                      Alias for --Bstatic
@@ -61,6 +63,7 @@ cpu_arch: ?std.Target.Cpu.Arch = null,
 dynamic_linker: ?[]const u8 = null,
 eh_frame_hdr: bool = false,
 static: bool = false,
+relax: bool = true,
 /// -z flags
 /// Overrides default stack size.
 z_stack_size: ?u64 = null,
@@ -167,6 +170,10 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             opts.eh_frame_hdr = true;
         } else if (p.flagAny("no-eh-frame-hdr")) {
             opts.eh_frame_hdr = false;
+        } else if (p.flagAny("relax")) {
+            opts.relax = true;
+        } else if (p.flagAny("no-relax")) {
+            opts.relax = false;
         } else if (p.flagAny("verbose")) {
             verbose = true;
         } else if (p.argZ("stack-size")) |value| {

@@ -64,6 +64,8 @@ comdat_groups: std.ArrayListUnmanaged(ComdatGroup) = .{},
 comdat_groups_owners: std.ArrayListUnmanaged(ComdatGroupOwner) = .{},
 comdat_groups_table: std.StringHashMapUnmanaged(ComdatGroupOwner.Index) = .{},
 
+needs_tlsld: bool = false,
+
 pub fn openPath(allocator: Allocator, options: Options, thread_pool: *ThreadPool) !*Elf {
     const file = try options.emit.directory.createFile(options.emit.sub_path, .{
         .truncate = true,
@@ -1533,6 +1535,14 @@ fn scanRelocs(self: *Elf) !void {
             log.debug("'{s}' needs COPYREL!", .{symbol.getName(self)});
             try self.copy_rel.addSymbol(index, self);
         }
+        if (symbol.flags.tlsgd) {
+            log.warn("'{s}' needs TLSGD!", .{symbol.getName(self)});
+        }
+    }
+
+    if (self.needs_tlsld) {
+        log.warn("needs TLSLD", .{});
+        self.got.emit_tlsld = true;
     }
 }
 
@@ -1947,6 +1957,10 @@ pub inline fn getGotPltEntryAddress(self: *Elf, index: u32) u64 {
 
 pub inline fn getPltGotEntryAddress(self: *Elf, index: u32) u64 {
     return self.getSectionAddress(self.plt_got_sect_index.?) + index * 16;
+}
+
+pub inline fn getTlsLdAddress(self: *Elf) u64 {
+    return self.getGotEntryAddress(@intCast(u32, self.got.symbols.items.len));
 }
 
 pub fn getTpAddress(self: *Elf) u64 {
