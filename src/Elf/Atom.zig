@@ -236,7 +236,10 @@ pub fn resolveRelocs(self: Atom, elf_file: *Elf, writer: anytype) !void {
         // Address of the target symbol - can be address of the symbol within an atom or address of PLT stub.
         const S = @intCast(i64, target.getAddress(elf_file));
         // Address of the global offset table.
-        const GOT = @intCast(i64, elf_file.getGotAddress());
+        const GOT = if (elf_file.got_sect_index) |shndx|
+            @intCast(i64, elf_file.getSectionAddress(shndx))
+        else
+            0;
         // Relative offset to the start of the global offset table.
         const G = @intCast(i64, target.getGotAddress(elf_file)) - GOT;
         // Address of the thread pointer.

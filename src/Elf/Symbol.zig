@@ -90,8 +90,10 @@ pub fn getAddress(symbol: Symbol, elf_file: *Elf) u64 {
     if (symbol.flags.plt) {
         const extra = symbol.getExtra(elf_file).?;
         if (symbol.flags.got) {
+            // We have a non-lazy bound function pointer, use that!
             return elf_file.getPltGotEntryAddress(extra.plt_got);
         }
+        // Lazy-bound function it is!
         return elf_file.getPltEntryAddress(extra.plt);
     }
     return symbol.value;

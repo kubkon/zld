@@ -1900,36 +1900,20 @@ pub inline fn getSectionAddress(self: *Elf, shndx: u16) u64 {
     return self.sections.items(.shdr)[shndx].sh_addr;
 }
 
-pub inline fn getGotAddress(self: *Elf) u64 {
-    return if (self.got_sect_index) |shndx| self.getSectionAddress(shndx) else 0;
-}
-
-pub inline fn getPltAddress(self: *Elf) u64 {
-    return if (self.plt_sect_index) |shndx| self.getSectionAddress(shndx) else 0;
-}
-
-pub inline fn getGotPltAddress(self: *Elf) u64 {
-    return if (self.got_plt_sect_index) |shndx| self.getSectionAddress(shndx) else 0;
-}
-
-pub inline fn getPltGotAddress(self: *Elf) u64 {
-    return if (self.plt_got_sect_index) |shndx| self.getSectionAddress(shndx) else 0;
-}
-
 pub inline fn getGotEntryAddress(self: *Elf, index: u32) u64 {
-    return self.getGotAddress() + index * @sizeOf(u64);
+    return self.getSectionAddress(self.got_sect_index.?) + index * @sizeOf(u64);
 }
 
 pub inline fn getPltEntryAddress(self: *Elf, index: u32) u64 {
-    return self.getPltAddress() + PltSection.plt_preamble_size + index * 16;
+    return self.getSectionAddress(self.plt_sect_index.?) + PltSection.plt_preamble_size + index * 16;
 }
 
 pub inline fn getGotPltEntryAddress(self: *Elf, index: u32) u64 {
-    return self.getGotPltAddress() + PltSection.got_plt_preamble_size + index * @sizeOf(u64);
+    return self.getSectionAddress(self.got_plt_sect_index.?) + PltSection.got_plt_preamble_size + index * @sizeOf(u64);
 }
 
 pub inline fn getPltGotEntryAddress(self: *Elf, index: u32) u64 {
-    return self.getPltGotAddress() + index * 16;
+    return self.getSectionAddress(self.plt_got_sect_index.?) + index * 16;
 }
 
 pub fn getTpAddress(self: *Elf) u64 {

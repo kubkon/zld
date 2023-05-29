@@ -394,8 +394,8 @@ pub const PltSection = struct {
     }
 
     pub fn writePlt(plt: PltSection, elf_file: *Elf, writer: anytype) !void {
-        const plt_addr = elf_file.getPltAddress();
-        const got_plt_addr = elf_file.getGotPltAddress();
+        const plt_addr = elf_file.getSectionAddress(elf_file.plt_sect_index.?);
+        const got_plt_addr = elf_file.getSectionAddress(elf_file.got_plt_sect_index.?);
         var preamble = [_]u8{
             0xf3, 0x0f, 0x1e, 0xfa, // endbr64
             0x41, 0x53, // push r11
@@ -434,7 +434,7 @@ pub const PltSection = struct {
         // [2]: 0x0
         try writer.writeIntLittle(u64, 0x0);
         try writer.writeIntLittle(u64, 0x0);
-        const plt_addr = elf_file.getPltAddress();
+        const plt_addr = elf_file.getSectionAddress(elf_file.plt_sect_index.?);
         for (0..plt.symbols.items.len) |_| {
             // [N]: .plt
             try writer.writeIntLittle(u64, plt_addr);
