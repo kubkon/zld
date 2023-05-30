@@ -169,10 +169,15 @@ pub fn initOutputSection(self: *Atom, elf_file: *Elf) !void {
 
 pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
     const object = self.getObject(elf_file);
-    for (self.getRelocs(elf_file)) |rel| {
+    const relocs = self.getRelocs(elf_file);
+    var i: usize = 0;
+    while (i < relocs.len) : (i += 1) {
+        const rel = relocs[i];
+
         if (rel.r_type() == elf.R_X86_64_NONE) continue;
 
         const symbol = object.getSymbol(rel.r_sym(), elf_file);
+
         if (symbol.isIFunc(elf_file)) {
             symbol.flags.got = true;
             symbol.flags.plt = true;
@@ -226,16 +231,24 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
             },
 
             elf.R_X86_64_TLSGD => {
+                // TODO verify followed by appropriate relocation such as PLT32 __tls_get_addr
+
                 if (elf_file.options.static or (elf_file.options.relax and !symbol.import)) {
                     // Relax if building with -static flag as __tls_get_addr() will not be present in libc.a
+                    // We skip the next relocation.
+                    i += 1;
                 } else {
                     symbol.flags.tlsgd = true;
                 }
             },
 
             elf.R_X86_64_TLSLD => {
+                // TODO verify followed by appropriate relocation such as PLT32 __tls_get_addr
+
                 if (elf_file.options.static or elf_file.options.relax) {
                     // Relax if building with -static flag as __tls_get_addr() will not be present in libc.a
+                    // We skip the next relocation.
+                    i += 1;
                 } else {
                     elf_file.needs_tlsld = true;
                 }
