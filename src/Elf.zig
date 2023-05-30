@@ -37,6 +37,7 @@ fini_array_start_index: ?u32 = null,
 fini_array_end_index: ?u32 = null,
 got_index: ?u32 = null,
 plt_index: ?u32 = null,
+dso_handle_index: ?u32 = null,
 
 entry_index: ?u32 = null,
 
@@ -322,7 +323,6 @@ pub fn flush(self: *Elf) !void {
 
     self.claimUnresolved();
     try self.scanRelocs();
-    self.checkUndefined();
     self.base.reportWarningsAndErrorsAndExit();
 
     try self.initSections();
@@ -1199,6 +1199,14 @@ fn allocateSyntheticSymbols(self: *Elf) void {
         symbol.value = shdr.sh_addr;
         symbol.shndx = shndx;
     }
+
+    // __dso_handle
+    if (self.dso_handle_index) |index| {
+        const shdr = self.sections.items(.shdr)[0];
+        const symbol = self.getSymbol(index);
+        symbol.value = shdr.sh_addr;
+        symbol.shndx = 0;
+    }
 }
 
 fn unpackPositionals(self: *Elf, positionals: *std.ArrayList(LinkObject)) !void {
@@ -1488,15 +1496,15 @@ fn resolveSyntheticSymbols(self: *Elf) !void {
     self.fini_array_end_index = try internal.addSyntheticGlobal("__fini_array_end", self);
     self.got_index = try internal.addSyntheticGlobal("_GLOBAL_OFFSET_TABLE_", self);
     self.plt_index = try internal.addSyntheticGlobal("_PROCEDURE_LINKAGE_TABLE_", self);
+    if (self.globals.get("__dso_handle")) |index| {
+        if (self.getSymbol(index).getFile(self) == null)
+            self.dso_handle_index = try internal.addSyntheticGlobal("__dso_handle", self);
+    }
     internal.resolveSymbols(self);
 }
 
 fn checkDuplicates(self: *Elf) void {
     for (self.objects.items) |index| self.getFile(index).?.object.checkDuplicates(self);
-}
-
-fn checkUndefined(self: *Elf) void {
-    for (self.objects.items) |index| self.getFile(index).?.object.checkUndefined(self);
 }
 
 fn claimUnresolved(self: *Elf) void {

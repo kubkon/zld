@@ -176,6 +176,7 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
         const rel = relocs[i];
 
         if (rel.r_type() == elf.R_X86_64_NONE) continue;
+        if (self.reportUndefSymbol(rel, elf_file)) continue;
 
         const symbol = object.getSymbol(rel.r_sym(), elf_file);
 
@@ -258,6 +259,39 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
             else => {},
         }
     }
+}
+
+fn reportUndefSymbol(self: Atom, rel: elf.Elf64_Rela, elf_file: *Elf) bool {
+    const object = self.getObject(elf_file);
+    const sym = object.getSymbol(rel.r_sym(), elf_file);
+    const s_rel_sym = object.symtab[rel.r_sym()];
+
+    // Check for violation of One Definition Rule for COMDATs.
+    if (sym.getFile(elf_file) == null) {
+        elf_file.base.fatal("{}: {s}: {s} refers to a discarded COMDAT section", .{
+            object.fmtPath(),
+            self.getName(elf_file),
+            sym.getName(elf_file),
+        });
+        return true;
+    }
+
+    // Next, report any undefined non-weak symbols that are not imports.
+    const s_sym = sym.getSourceSymbol(elf_file);
+    if (s_rel_sym.st_shndx == elf.SHN_UNDEF and
+        s_rel_sym.st_bind() == elf.STB_GLOBAL and
+        sym.sym_idx > 0 and
+        !sym.import and
+        s_sym.st_shndx == elf.SHN_UNDEF)
+    {
+        elf_file.base.fatal("{}: {s}: {s} undefined symbol", .{
+            object.fmtPath(),
+            self.getName(elf_file),
+            sym.getName(elf_file),
+        });
+    }
+
+    return false;
 }
 
 pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
