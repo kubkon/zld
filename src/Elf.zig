@@ -907,6 +907,28 @@ inline fn shdrIsTls(shdr: *const elf.Elf64_Shdr) bool {
 }
 
 fn allocateSectionsInMemory(self: *Elf, base_offset: u64) !void {
+    const Align = struct {
+        tls_start_align: u64 = 1,
+        first_tls_shndx: ?u16 = null,
+
+        inline fn isFirstTlsShdr(this: @This(), shndx: u16) bool {
+            if (this.first_tls_shndx) |tshndx| return tshndx == shndx;
+            return false;
+        }
+
+        inline fn @"align"(this: @This(), shndx: u16, sh_addralign: u64, addr: u64) u64 {
+            const alignment = if (this.isFirstTlsShdr(shndx)) this.tls_start_align else sh_addralign;
+            return mem.alignForwardGeneric(u64, addr, alignment);
+        }
+    };
+
+    var alignment = Align{};
+    for (self.sections.items(.shdr)[1..], 1..) |*shdr, shndx| {
+        if (!shdrIsTls(shdr)) continue;
+        if (alignment.first_tls_shndx == null) alignment.first_tls_shndx = @intCast(u16, shndx);
+        alignment.tls_start_align = @max(alignment.tls_start_align, shdr.sh_addralign);
+    }
+
     var addr = default_base_addr + base_offset;
     outer: for (self.sections.items(.shdr)[1..], 1..) |*shdr, i| {
         if (!shdrIsAlloc(shdr)) continue;
@@ -921,13 +943,13 @@ fn allocateSectionsInMemory(self: *Elf, base_offset: u64) !void {
             var tbss_addr = addr;
             for (self.sections.items(.shdr)[i..]) |*tbss_shdr| {
                 if (!shdrIsTbss(tbss_shdr)) continue :outer;
-                tbss_addr = mem.alignForwardGeneric(u64, tbss_addr, tbss_shdr.sh_addralign);
+                tbss_addr = alignment.@"align"(@intCast(u16, i), shdr.sh_addralign, tbss_addr);
                 tbss_shdr.sh_addr = tbss_addr;
                 tbss_addr += tbss_shdr.sh_size;
             }
         }
 
-        addr = mem.alignForwardGeneric(u64, addr, shdr.sh_addralign);
+        addr = alignment.@"align"(@intCast(u16, i), shdr.sh_addralign, addr);
         shdr.sh_addr = addr;
         addr += shdr.sh_size;
     }
