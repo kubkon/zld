@@ -545,9 +545,9 @@ fn calcSectionSizes(self: *Elf) !void {
         for (atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index).?;
             const alignment = try math.powi(u64, 2, atom.alignment);
-            const addr = mem.alignForwardGeneric(u64, shdr.sh_size, alignment);
-            const padding = addr - shdr.sh_size;
-            atom.value = addr;
+            const offset = mem.alignForwardGeneric(u64, shdr.sh_size, alignment);
+            const padding = offset - shdr.sh_size;
+            atom.value = offset;
             shdr.sh_size += padding + atom.size;
             shdr.sh_addralign = @max(shdr.sh_addralign, alignment);
         }
@@ -902,7 +902,7 @@ inline fn shdrIsTbss(shdr: *const elf.Elf64_Shdr) bool {
     return shdr.sh_type == elf.SHT_NOBITS and shdrIsTls(shdr);
 }
 
-inline fn shdrIsTls(shdr: *const elf.Elf64_Shdr) bool {
+pub inline fn shdrIsTls(shdr: *const elf.Elf64_Shdr) bool {
     return shdr.sh_flags & elf.SHF_TLS != 0;
 }
 
@@ -1997,6 +1997,10 @@ pub fn getTpAddress(self: *Elf) u64 {
 }
 
 pub fn getDtpAddress(self: *Elf) u64 {
+    return self.getTlsAddress();
+}
+
+pub inline fn getTlsAddress(self: *Elf) u64 {
     const index = self.tls_phdr_index orelse return 0;
     const phdr = self.phdrs.items[index];
     return phdr.p_vaddr;

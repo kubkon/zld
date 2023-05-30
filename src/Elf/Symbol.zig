@@ -138,6 +138,8 @@ pub inline fn asElfSym(symbol: Symbol, st_name: u32, elf_file: *Elf) elf.Elf64_S
     const st_value = blk: {
         if (symbol.flags.copy_rel) break :blk symbol.getAddress(elf_file);
         if (symbol.import) break :blk 0;
+        const shdr = &elf_file.sections.items(.shdr)[st_shndx];
+        if (Elf.shdrIsTls(shdr)) break :blk symbol.value - elf_file.getTlsAddress();
         break :blk symbol.value;
     };
     return elf.Elf64_Sym{

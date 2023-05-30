@@ -150,6 +150,7 @@ pub fn initOutputSection(self: *Atom, elf_file: *Elf) !void {
             .flags = elf.SHF_ALLOC | elf.SHF_WRITE,
             .name = if (shdr.sh_type == elf.SHT_INIT_ARRAY) ".init_array" else ".fini_array",
             .type = @"type",
+            .entsize = shdr.sh_entsize,
         },
         // TODO handle more section types
         else => .{
@@ -379,8 +380,8 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
 
             elf.R_X86_64_32 => try cwriter.writeIntLittle(u32, @truncate(u32, @intCast(u64, S + A))),
             elf.R_X86_64_32S => try cwriter.writeIntLittle(i32, @truncate(i32, S + A)),
-            elf.R_X86_64_TPOFF32 => try cwriter.writeIntLittle(i32, @truncate(i32, S - TP)),
-            elf.R_X86_64_TPOFF64 => try cwriter.writeIntLittle(i64, S - TP),
+            elf.R_X86_64_TPOFF32 => try cwriter.writeIntLittle(i32, @truncate(i32, S + A - TP)),
+            elf.R_X86_64_TPOFF64 => try cwriter.writeIntLittle(i64, S + A - TP),
             elf.R_X86_64_DTPOFF32 => try cwriter.writeIntLittle(i32, @truncate(i32, S + A - DTP)),
             elf.R_X86_64_DTPOFF64 => try cwriter.writeIntLittle(i64, S + A - DTP),
 
@@ -415,26 +416,20 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
                 i += 1;
 
                 switch (next_rel.r_type()) {
-                    elf.R_X86_64_PLT32,
-                    elf.R_X86_64_PC32,
-                    elf.R_X86_64_GOTPCREL,
-                    elf.R_X86_64_GOTPCRELX,
-                    => {
+                    elf.R_X86_64_PLT32 => {
                         var insts = [_]u8{
-                            0x64, 0x48, 0x8b, 0x04, 0x25, 0, 0, 0, 0, // mov fs:0, rax
-                            0x48, 0x81, 0xc0, 0, 0, 0, 0, // add TP off, rax
+                            0x64, 0x48, 0x8b, 0x04, 0x25, 0, 0, 0, 0, // movq %fs:0,%rax
+                            0x48, 0x8d, 0x80, 0, 0, 0, 0, // leaq x@tpoff(%rax),%rax
                         };
                         mem.writeIntLittle(i32, insts[12..][0..4], @intCast(i32, S - TP));
                         try stream.seekBy(-4);
                         try cwriter.writeAll(&insts);
                     },
 
-                    elf.R_X86_64_PLTOFF64 => elf_file.base.fatal("TODO rewrite {} when followed by {}", .{
+                    else => elf_file.base.fatal("TODO rewrite {} when followed by {}", .{
                         fmtRelocType(r_type),
                         fmtRelocType(next_rel.r_type()),
                     }),
-
-                    else => unreachable,
                 }
             },
 
@@ -445,42 +440,20 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
                 }
                 const next_rel = relocs[i + 1];
                 i += 1;
-                const value = @intCast(i32, TP - DTP);
 
                 switch (next_rel.r_type()) {
-                    elf.R_X86_64_PLT32,
-                    elf.R_X86_64_PC32,
-                    => {
+                    elf.R_X86_64_PLT32 => {
                         var insts = [_]u8{
-                            0x31, 0xc0, // xor eax, eax
-                            0x64, 0x48, 0x8b, 0x0, // mov fs:(rax), rax
-                            0x48, 0x2d, 0, 0, 0, 0, // sub TLS size, rax
+                            0x66, 0x66, 0x66, 0x64, 0x48, 0x8b, 0x04, 0x25, 0, 0, 0, 0, // movq %fs:0,%rax
                         };
-                        mem.writeIntLittle(i32, insts[8..][0..4], value);
                         try stream.seekBy(-3);
                         try cwriter.writeAll(&insts);
                     },
 
-                    elf.R_X86_64_GOTPCREL,
-                    elf.R_X86_64_GOTPCRELX,
-                    => {
-                        var insts = [_]u8{
-                            0x31, 0xc0, // xor eax, eax
-                            0x64, 0x48, 0x8b, 0x0, // mov fs:(rax), rax
-                            0x48, 0x2d, 0, 0, 0, 0, // sub TLS size, rax
-                            0x90, // nop
-                        };
-                        mem.writeIntLittle(i32, insts[8..][0..4], value);
-                        try stream.seekBy(-3);
-                        try cwriter.writeAll(&insts);
-                    },
-
-                    elf.R_X86_64_PLTOFF64 => elf_file.base.fatal("TODO rewrite {} when followed by {}", .{
+                    else => elf_file.base.fatal("TODO rewrite {} when followed by {}", .{
                         fmtRelocType(r_type),
                         fmtRelocType(next_rel.r_type()),
                     }),
-
-                    else => unreachable,
                 }
             },
 
