@@ -6,8 +6,8 @@ header: ?elf.Elf64_Ehdr = null,
 symtab: []align(1) const elf.Elf64_Sym = &[0]elf.Elf64_Sym{},
 strtab: []const u8 = &[0]u8{},
 /// Version symtab contains version strings of the symbols if present.
-versymtab: []align(1) const elf.Elf64_Versym = &[0]elf.Elf64_Versym{},
-verstrings: std.ArrayListUnmanaged(u32) = .{},
+versyms: []align(1) const elf.Elf64_Versym = &[0]elf.Elf64_Versym{},
+verdefs: std.AutoHashMapUnmanaged(elf.Elf64_Versym, u32) = .{},
 
 dynamic_sect_index: ?u16 = null,
 
@@ -35,7 +35,7 @@ pub fn isValidHeader(header: *const elf.Elf64_Ehdr) bool {
 }
 
 pub fn deinit(self: *SharedObject, allocator: Allocator) void {
-    self.verstrings.deinit(allocator);
+    self.verdefs.deinit(allocator);
     self.symbols.deinit(allocator);
 }
 
@@ -80,15 +80,13 @@ fn parseVersions(self: *SharedObject, elf_file: *Elf) !void {
     if (versym_index == null or verdef_index == null) return;
 
     const versymtab = self.getShdrContents(versym_index.?);
-    self.versymtab = @ptrCast([*]align(1) const elf.Elf64_Versym, versymtab.ptr)[0..self.symtab.len];
+    self.versyms = @ptrCast([*]align(1) const elf.Elf64_Versym, versymtab.ptr)[0..self.symtab.len];
 
     const verdefs = self.getShdrContents(verdef_index.?);
     const nverdefs = self.getVerdefNum();
 
     const gpa = elf_file.base.allocator;
-    var lookup = std.AutoHashMap(elf.Elf64_Versym, u32).init(gpa);
-    defer lookup.deinit();
-    try lookup.ensureTotalCapacity(nverdefs);
+    try self.verdefs.ensureTotalCapacity(gpa, nverdefs);
 
     {
         var i: u32 = 0;
@@ -100,16 +98,10 @@ fn parseVersions(self: *SharedObject, elf_file: *Elf) !void {
                 @ptrCast(*align(1) const elf.Elf64_Verdaux, verdefs.ptr + offset + verdef.vd_aux).vda_name
             else
                 0;
-            lookup.putAssumeCapacityNoClobber(verdef.vd_ndx, vda_name);
+            self.verdefs.putAssumeCapacityNoClobber(verdef.vd_ndx, vda_name);
 
             offset += verdef.vd_next;
         }
-    }
-
-    try self.verstrings.resize(gpa, self.symtab.len);
-    for (self.versymtab, 0..) |ver, i| {
-        const vda_name = lookup.get(ver) orelse 0;
-        self.verstrings.items[i] = vda_name;
     }
 }
 
@@ -139,7 +131,7 @@ pub fn resolveSymbols(self: *SharedObject, elf_file: *Elf) void {
                 .name = global.name,
                 .atom = 0,
                 .sym_idx = sym_idx,
-                .ver_idx = self.versymtab[sym_idx],
+                .ver_idx = self.versyms[sym_idx],
                 .file = self.index,
             };
         }
@@ -213,9 +205,9 @@ pub inline fn getString(self: *SharedObject, off: u32) [:0]const u8 {
     return mem.sliceTo(@ptrCast([*:0]const u8, self.strtab.ptr + off), 0);
 }
 
-pub inline fn getVersionString(self: *SharedObject, index: u32) ?[:0]const u8 {
-    if (self.versymtab.len == 0) return null;
-    const off = self.verstrings.items[index];
+pub inline fn getVersionString(self: *SharedObject, index: elf.Elf64_Versym) ?[:0]const u8 {
+    if (self.versyms.len == 0) return null;
+    const off = self.verdefs.get(index) orelse return null;
     return self.getString(off);
 }
 

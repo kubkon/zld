@@ -56,6 +56,8 @@ string_intern: StringTable(.string_intern) = .{},
 shstrtab: StringTable(.shstrtab) = .{},
 dynsym: DynsymSection = .{},
 dynstrtab: StringTable(.dynstrtab) = .{},
+versym: std.ArrayListUnmanaged(elf.Elf64_Versym) = .{},
+verneed: VerneedSection = .{},
 
 dynamic: DynamicSection = .{},
 hash: HashSection = .{},
@@ -137,6 +139,8 @@ pub fn deinit(self: *Elf) void {
     self.dynstrtab.deinit(gpa);
     self.dynamic.deinit(gpa);
     self.hash.deinit(gpa);
+    self.versym.deinit(gpa);
+    self.verneed.deinit(gpa);
     {
         var it = self.undefs.valueIterator();
         while (it.next()) |notes| {
@@ -342,6 +346,7 @@ pub fn flush(self: *Elf) !void {
     try self.sortInitFini();
     try self.setDynamic();
     try self.setHash();
+    try self.setVerSymtab();
     try self.calcSectionSizes();
 
     try self.allocateSections();
@@ -537,7 +542,7 @@ fn initSections(self: *Elf) !void {
         });
 
         const needs_versions = for (self.shared_objects.items) |index| {
-            if (self.getFile(index).?.shared.versymtab.len > 0) break true;
+            if (self.getFile(index).?.shared.versyms.len > 0) break true;
         } else false;
         if (needs_versions) {
             self.versym_sect_index = try self.addSection(.{
@@ -653,6 +658,16 @@ fn calcSectionSizes(self: *Elf) !void {
     if (self.dynstrtab_sect_index) |index| {
         const shdr = &self.sections.items(.shdr)[index];
         shdr.sh_size = self.dynstrtab.buffer.items.len;
+    }
+
+    if (self.versym_sect_index) |index| {
+        const shdr = &self.sections.items(.shdr)[index];
+        shdr.sh_size = self.versym.items.len * @sizeOf(elf.Elf64_Versym);
+    }
+
+    if (self.verneed_sect_index) |index| {
+        const shdr = &self.sections.items(.shdr)[index];
+        shdr.sh_size = self.verneed.size();
     }
 
     if (!self.options.strip_all) {
@@ -1674,6 +1689,18 @@ fn setDynamic(self: *Elf) !void {
     }
 }
 
+fn setVerSymtab(self: *Elf) !void {
+    if (self.versym_sect_index == null) return;
+    try self.versym.resize(self.base.allocator, self.dynsym.count());
+    @memset(self.versym.items, VER_NDX_LOCAL);
+
+    if (self.verneed_sect_index) |shndx| {
+        try self.verneed.generate(self);
+        const shdr = &self.sections.items(.shdr)[shndx];
+        shdr.sh_info = @intCast(u32, self.verneed.verneed.items.len);
+    }
+}
+
 fn setHash(self: *Elf) !void {
     if (self.hash_sect_index == null) return;
     try self.hash.generate(self);
@@ -1732,6 +1759,19 @@ fn writeSyntheticSections(self: *Elf) !void {
     if (self.hash_sect_index) |shndx| {
         const shdr = self.sections.items(.shdr)[shndx];
         try self.base.file.pwriteAll(self.hash.buffer.items, shdr.sh_offset);
+    }
+
+    if (self.versym_sect_index) |shndx| {
+        const shdr = self.sections.items(.shdr)[shndx];
+        try self.base.file.pwriteAll(mem.sliceAsBytes(self.versym.items), shdr.sh_offset);
+    }
+
+    if (self.verneed_sect_index) |shndx| {
+        const shdr = self.sections.items(.shdr)[shndx];
+        var buffer = try std.ArrayList(u8).initCapacity(gpa, self.verneed.size());
+        defer buffer.deinit();
+        try self.verneed.write(buffer.writer());
+        try self.base.file.pwriteAll(buffer.items, shdr.sh_offset);
     }
 
     if (self.dynamic_sect_index) |shndx| {
@@ -2310,4 +2350,5 @@ const SharedObject = @import("Elf/SharedObject.zig");
 const StringTable = @import("strtab.zig").StringTable;
 const Symbol = @import("Elf/Symbol.zig");
 const ThreadPool = @import("ThreadPool.zig");
+const VerneedSection = synthetic.VerneedSection;
 const Zld = @import("Zld.zig");
