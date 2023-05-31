@@ -415,10 +415,27 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
 
             elf.R_X86_64_32 => try cwriter.writeIntLittle(u32, @truncate(u32, @intCast(u64, S + A))),
             elf.R_X86_64_32S => try cwriter.writeIntLittle(i32, @truncate(i32, S + A)),
+
             elf.R_X86_64_TPOFF32 => try cwriter.writeIntLittle(i32, @truncate(i32, S + A - TP)),
             elf.R_X86_64_TPOFF64 => try cwriter.writeIntLittle(i64, S + A - TP),
-            elf.R_X86_64_DTPOFF32 => try cwriter.writeIntLittle(i32, @truncate(i32, S + A - DTP)),
-            elf.R_X86_64_DTPOFF64 => try cwriter.writeIntLittle(i64, S + A - DTP),
+
+            elf.R_X86_64_DTPOFF32 => {
+                if (elf_file.got.emit_tlsld) {
+                    try cwriter.writeIntLittle(i32, @truncate(i32, S + A - DTP));
+                } else {
+                    // Relax to TPOFF32
+                    try cwriter.writeIntLittle(i32, @truncate(i32, S + A - TP));
+                }
+            },
+
+            elf.R_X86_64_DTPOFF64 => {
+                if (elf_file.got.emit_tlsld) {
+                    try cwriter.writeIntLittle(i64, S + A - DTP);
+                } else {
+                    // Relax to TPOFF64
+                    try cwriter.writeIntLittle(i64, S + A - TP);
+                }
+            },
 
             elf.R_X86_64_GOTTPOFF => {
                 blk: {
