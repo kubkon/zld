@@ -8,8 +8,8 @@
             .hash = "122019bf9a63f61f24202cdda8601ac55326c640c4de56622983f1c3e796bd37f67a",
         },
         .@"zig-dis-x86_64" = .{
-            .url = "https://github.com/kubkon/zig-dis-x86_64/archive/77c083bdd10b5588baeca10c5d98fb332b0ececb.tar.gz",
-            .hash = "1220ca332db73046df80b37bb824104d8bceeec7099c07ed27aa26ed2fb22679ed97",
+            .url = "https://github.com/kubkon/zig-dis-x86_64/archive/89f81df48d6f5dfb6c7050243483d92b5fe40a4a.tar.gz",
+            .hash = "1220dea598e960ebbf64f290bb3e1741ac32dced4c1cadff87de0b9fd1bb771cae87",
         },
     },
 }

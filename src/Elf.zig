@@ -395,7 +395,7 @@ fn sortInitFini(self: *Elf) !void {
                 entries.appendAssumeCapacity(.{ .priority = priority, .atom_index = atom_index });
             }
 
-            std.sort.sort(Entry, entries.items, {}, Entry.lessThan);
+            mem.sort(Entry, entries.items, {}, Entry.lessThan);
 
             atoms.clearRetainingCapacity();
             for (entries.items) |entry| {
@@ -1045,7 +1045,7 @@ fn sortSections(self: *Elf) !void {
         entries.appendAssumeCapacity(.{ .shndx = @intCast(u16, shndx) });
     }
 
-    std.sort.sort(Entry, entries.items, self, Entry.lessThan);
+    mem.sort(Entry, entries.items, self, Entry.lessThan);
 
     const backlinks = try gpa.alloc(u16, entries.items.len);
     defer gpa.free(backlinks);

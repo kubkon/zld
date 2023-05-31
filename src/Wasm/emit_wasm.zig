@@ -133,7 +133,7 @@ pub fn emit(wasm: *Wasm) !void {
             }
         }.sort;
 
-        std.sort.sort(*Atom, sorted_atoms.items, wasm, atom_sort_fn);
+        std.mem.sort(*Atom, sorted_atoms.items, wasm, atom_sort_fn);
         for (sorted_atoms.items) |sorted_atom| {
             try leb.writeULEB128(writer, sorted_atom.size);
             try writer.writeAll(sorted_atom.code.items);
@@ -223,8 +223,8 @@ pub fn emit(wasm: *Wasm) !void {
             }
         }
 
-        std.sort.sort(Wasm.SymbolWithLoc, funcs.values(), wasm, lessThan);
-        std.sort.sort(Wasm.SymbolWithLoc, globals.items, wasm, lessThan);
+        std.mem.sort(Wasm.SymbolWithLoc, funcs.values(), wasm, lessThan);
+        std.mem.sort(Wasm.SymbolWithLoc, globals.items, wasm, lessThan);
 
         const offset = try reserveCustomSectionHeader(file);
         try leb.writeULEB128(writer, @intCast(u32, "name".len));

@@ -1064,7 +1064,7 @@ fn setupInitFunctions(wasm: *Wasm) !void {
     }
 
     // sort the initfunctions based on their priority
-    std.sort.sort(InitFuncLoc, wasm.init_funcs.items, {}, struct {
+    std.mem.sort(InitFuncLoc, wasm.init_funcs.items, {}, struct {
         fn lessThan(ctx: void, lhs: InitFuncLoc, rhs: InitFuncLoc) bool {
             _ = ctx;
             return lhs.priority < rhs.priority;
@@ -1748,7 +1748,7 @@ fn sortDataSegments(wasm: *Wasm, gpa: Allocator) !void {
         }
     };
 
-    std.sort.sort([]const u8, keys, {}, SortContext.sort);
+    std.mem.sort([]const u8, keys, {}, SortContext.sort);
     for (keys) |key| {
         const segment_index = wasm.data_segments.get(key).?;
         new_mapping.putAssumeCapacity(key, segment_index);
