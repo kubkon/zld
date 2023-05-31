@@ -196,9 +196,7 @@ fn formatName(
         Elf.VER_NDX_LOCAL, Elf.VER_NDX_GLOBAL => {},
         else => {
             const shared = symbol.getFile(elf_file).?.shared;
-            if (shared.getVersionString(symbol.ver_idx)) |version| {
-                try writer.print("@{s}", .{version});
-            }
+            try writer.print("@{s}", .{shared.getVersionString(symbol.ver_idx)});
         },
     }
 }

@@ -316,7 +316,7 @@ pub const VerneedSection = struct {
 
             fn getVersionString(this: @This(), ctx: *Elf) [:0]const u8 {
                 const shared = ctx.getFile(this.shared).?.shared;
-                return shared.getVersionString(this.version).?;
+                return shared.getVersionString(this.version);
             }
 
             pub fn lessThan(ctx: *Elf, lhs: @This(), rhs: @This()) bool {
@@ -332,14 +332,14 @@ pub const VerneedSection = struct {
 
         for (dynsyms, 1..) |dynsym, i| {
             const symbol = elf_file.getSymbol(dynsym.index);
-            if (!symbol.import) continue;
-            const shared = symbol.getFile(elf_file).?.shared;
-            _ = shared.getVersionString(symbol.ver_idx) orelse continue;
-            verneed.appendAssumeCapacity(.{
-                .idx = i,
-                .shared = shared.index,
-                .version = symbol.ver_idx,
-            });
+            if (symbol.import and symbol.ver_idx > Elf.VER_NDX_GLOBAL) {
+                const shared = symbol.getFile(elf_file).?.shared;
+                verneed.appendAssumeCapacity(.{
+                    .idx = i,
+                    .shared = shared.index,
+                    .version = symbol.ver_idx,
+                });
+            }
         }
 
         mem.sort(SymWithVersion, verneed.items, elf_file, SymWithVersion.lessThan);

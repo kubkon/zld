@@ -7,7 +7,7 @@ symtab: []align(1) const elf.Elf64_Sym = &[0]elf.Elf64_Sym{},
 strtab: []const u8 = &[0]u8{},
 /// Version symtab contains version strings of the symbols if present.
 versyms: []align(1) const elf.Elf64_Versym = &[0]elf.Elf64_Versym{},
-verdefs: std.AutoHashMapUnmanaged(elf.Elf64_Versym, u32) = .{},
+verdefs: std.ArrayListUnmanaged(u32) = .{},
 
 dynamic_sect_index: ?u16 = null,
 
@@ -86,7 +86,9 @@ fn parseVersions(self: *SharedObject, elf_file: *Elf) !void {
     const nverdefs = self.getVerdefNum();
 
     const gpa = elf_file.base.allocator;
-    try self.verdefs.ensureTotalCapacity(gpa, nverdefs);
+    try self.verdefs.ensureTotalCapacityPrecise(gpa, 2 + nverdefs);
+    self.verdefs.appendAssumeCapacity(0);
+    self.verdefs.appendAssumeCapacity(0);
 
     {
         var i: u32 = 0;
@@ -98,7 +100,7 @@ fn parseVersions(self: *SharedObject, elf_file: *Elf) !void {
                 @ptrCast(*align(1) const elf.Elf64_Verdaux, verdefs.ptr + offset + verdef.vd_aux).vda_name
             else
                 0;
-            self.verdefs.putAssumeCapacityNoClobber(verdef.vd_ndx, vda_name);
+            self.verdefs.appendAssumeCapacity(vda_name);
 
             offset += verdef.vd_next;
         }
@@ -131,7 +133,7 @@ pub fn resolveSymbols(self: *SharedObject, elf_file: *Elf) void {
                 .name = global.name,
                 .atom = 0,
                 .sym_idx = sym_idx,
-                .ver_idx = self.versyms[sym_idx],
+                .ver_idx = self.versyms[sym_idx] & Elf.VERSYM_VERSION,
                 .file = self.index,
             };
         }
@@ -205,9 +207,9 @@ pub inline fn getString(self: *SharedObject, off: u32) [:0]const u8 {
     return mem.sliceTo(@ptrCast([*:0]const u8, self.strtab.ptr + off), 0);
 }
 
-pub inline fn getVersionString(self: *SharedObject, index: elf.Elf64_Versym) ?[:0]const u8 {
-    if (self.versyms.len == 0) return null;
-    const off = self.verdefs.get(index) orelse return null;
+pub inline fn getVersionString(self: *SharedObject, index: elf.Elf64_Versym) [:0]const u8 {
+    if (self.versyms.len == 0) return "";
+    const off = self.verdefs.items[Elf.VERSYM_VERSION & index];
     return self.getString(off);
 }
 
