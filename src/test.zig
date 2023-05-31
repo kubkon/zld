@@ -269,9 +269,9 @@ pub const TestContext = struct {
                 try search_dirs.append("test/assets/any-macos-none");
             }
 
-            var elf_objects = std.ArrayList(Zld.Elf.LinkObject).init(arena);
+            var elf_positionals = std.ArrayList(Zld.Elf.Options.Positional).init(arena);
             for (objects.items) |obj| {
-                try elf_objects.append(.{ .path = obj.path });
+                try elf_positionals.append(.{ .tag = .path, .path = obj.path });
             }
 
             const tag: Zld.Tag = switch (case.target.os_tag.?) {
@@ -307,7 +307,7 @@ pub const TestContext = struct {
                         .sub_path = output_path,
                     },
                     .output_mode = .exe,
-                    .positionals = elf_objects.items,
+                    .positionals = elf_positionals.items,
                     .search_dirs = search_dirs.items,
                     .rpath_list = &[0][]const u8{},
                     .gc_sections = true,
