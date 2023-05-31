@@ -357,25 +357,26 @@ pub const VerneedSection = struct {
             } else {
                 last_verneed = try vern.addVerneed(ver.getSoname(elf_file), elf_file);
                 last_vernaux = try vern.addVernaux(last_verneed, ver.getVersionString(elf_file), elf_file);
-                last = ver;
             }
+            last = ver;
             versyms[ver.idx] = last_vernaux.vna_other;
         }
 
         // Fixup offsets
         var count: usize = 0;
-        var off: u32 = 0;
+        var verneed_off: u32 = 0;
+        var vernaux_off: u32 = @intCast(u32, vern.verneed.items.len) * @sizeOf(elf.Elf64_Verneed);
         for (vern.verneed.items, 0..) |*vsym, vsym_i| {
-            off += @sizeOf(elf.Elf64_Verneed);
-            vsym.vn_aux = off;
+            if (vsym_i < vern.verneed.items.len - 1) vsym.vn_next = @sizeOf(elf.Elf64_Verneed);
+            vsym.vn_aux = vernaux_off - verneed_off;
             var inner_off: u32 = 0;
             for (vern.vernaux.items[count..][0..vsym.vn_cnt], 0..) |*vaux, vaux_i| {
+                if (vaux_i < vsym.vn_cnt - 1) vaux.vna_next = @sizeOf(elf.Elf64_Vernaux);
                 inner_off += @sizeOf(elf.Elf64_Vernaux);
-                if (vaux_i < vsym.vn_cnt - 1) vaux.vna_next = inner_off;
             }
-            off += inner_off;
+            vernaux_off += inner_off;
+            verneed_off += @sizeOf(elf.Elf64_Verneed);
             count += vsym.vn_cnt;
-            if (vsym_i < vern.verneed.items.len - 1) vsym.vn_next = off;
         }
     }
 
