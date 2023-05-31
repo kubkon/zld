@@ -84,11 +84,16 @@ pub fn getSymbolRank(symbol: Symbol, elf_file: *Elf) u32 {
 }
 
 pub fn getAddress(symbol: Symbol, elf_file: *Elf) u64 {
+    if (symbol.flags.copy_rel) {
+        return elf_file.getSectionAddress(elf_file.copy_rel_sect_index.?) + symbol.value;
+    }
     if (symbol.flags.plt) {
         const extra = symbol.getExtra(elf_file).?;
         if (symbol.flags.got) {
+            // We have a non-lazy bound function pointer, use that!
             return elf_file.getPltGotEntryAddress(extra.plt_got);
         }
+        // Lazy-bound function it is!
         return elf_file.getPltEntryAddress(extra.plt);
     }
     return symbol.value;
@@ -98,6 +103,12 @@ pub fn getGotAddress(symbol: Symbol, elf_file: *Elf) u64 {
     if (!symbol.flags.got) return 0;
     const extra = symbol.getExtra(elf_file).?;
     return elf_file.getGotEntryAddress(extra.got);
+}
+
+pub fn getAlignment(symbol: Symbol, elf_file: *Elf) u64 {
+    if (symbol.getFile(elf_file) == null) return 0;
+    const s_sym = symbol.getSourceSymbol(elf_file);
+    return @ctz(s_sym.st_value);
 }
 
 pub fn addExtra(symbol: *Symbol, extra: Extra, elf_file: *Elf) !void {
@@ -119,12 +130,24 @@ pub inline fn asElfSym(symbol: Symbol, st_name: u32, elf_file: *Elf) elf.Elf64_S
         else => |st_type| st_type,
     };
     const st_bind: u8 = if (symbol.isLocal()) 0 else elf.STB_GLOBAL;
+    const st_shndx = blk: {
+        if (symbol.flags.copy_rel) break :blk elf_file.copy_rel_sect_index.?;
+        if (symbol.import) break :blk elf.SHN_UNDEF;
+        break :blk symbol.shndx;
+    };
+    const st_value = blk: {
+        if (symbol.flags.copy_rel) break :blk symbol.getAddress(elf_file);
+        if (symbol.import) break :blk 0;
+        const shdr = &elf_file.sections.items(.shdr)[st_shndx];
+        if (Elf.shdrIsTls(shdr)) break :blk symbol.value - elf_file.getTlsAddress();
+        break :blk symbol.value;
+    };
     return elf.Elf64_Sym{
         .st_name = st_name,
         .st_info = (st_bind << 4) | st_type,
         .st_other = s_sym.st_other,
-        .st_shndx = if (symbol.import) elf.SHN_UNDEF else symbol.shndx,
-        .st_value = if (symbol.import) 0 else symbol.value,
+        .st_shndx = st_shndx,
+        .st_value = st_value,
         .st_size = s_sym.st_size,
     };
 }
@@ -166,7 +189,11 @@ fn format2(
     try writer.print("%{d} : {s} : @{x}", .{ symbol.sym_idx, symbol.getName(ctx.elf_file), symbol.value });
     if (symbol.getFile(ctx.elf_file)) |file| {
         if (symbol.isAbs(ctx.elf_file)) {
-            try writer.writeAll(" : absolute");
+            if (symbol.getSourceSymbol(ctx.elf_file).st_shndx == elf.SHN_UNDEF) {
+                try writer.writeAll(" : undef");
+            } else {
+                try writer.writeAll(" : absolute");
+            }
         } else if (symbol.shndx != 0) {
             try writer.print(" : sect({d})", .{symbol.shndx});
         }
@@ -193,6 +220,8 @@ fn format2(
 pub const Flags = packed struct {
     got: bool = false,
     plt: bool = false,
+    copy_rel: bool = false,
+    tlsgd: bool = false,
 };
 
 pub const Extra = struct {
@@ -200,6 +229,7 @@ pub const Extra = struct {
     plt: u32 = 0,
     plt_got: u32 = 0,
     dynamic: u32 = 0,
+    copy_rel: u32 = 0,
 };
 
 const std = @import("std");

@@ -24,6 +24,24 @@ pub const DynamicSection = struct {
         dt.rpath = try elf_file.dynstrtab.insert(gpa, rpath.items);
     }
 
+    fn getFlags(dt: DynamicSection, elf_file: *Elf) ?u64 {
+        _ = dt;
+        var flags: u64 = 0;
+        if (elf_file.options.z_now) {
+            flags |= 8; // TODO add elf.DF_BIND_NOW;
+        }
+        return if (flags > 0) flags else null;
+    }
+
+    fn getFlags1(dt: DynamicSection, elf_file: *Elf) ?u64 {
+        _ = dt;
+        var flags_1: u64 = 0;
+        if (elf_file.options.z_now) {
+            flags_1 |= 1; // TODO add elf.DF_1_NOW;
+        }
+        return if (flags_1 > 0) flags_1 else null;
+    }
+
     pub fn size(dt: DynamicSection, elf_file: *Elf) usize {
         var nentries: usize = 0;
         nentries += dt.needed.items.len; // NEEDED
@@ -41,8 +59,8 @@ pub const DynamicSection = struct {
         nentries += 1; // STRTAB
         nentries += 1; // STRSZ
         nentries += 1; // NULL
-        nentries += 1; // FLAGS
-        nentries += 1; // FLAGS_1
+        if (dt.getFlags(elf_file) != null) nentries += 1; // FLAGS
+        if (dt.getFlags1(elf_file) != null) nentries += 1; // FLAGS_1
         nentries += 1; // DEBUG
         return nentries * @sizeOf(elf.Elf64_Dyn);
     }
@@ -131,30 +149,17 @@ pub const DynamicSection = struct {
             try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_STRSZ, .d_val = shdr.sh_size });
         }
 
+        // FLAGS
+        if (dt.getFlags(elf_file)) |flags| {
+            try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_FLAGS, .d_val = flags });
+        }
+        // FLAGS_1
+        if (dt.getFlags1(elf_file)) |flags_1| {
+            try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_FLAGS_1, .d_val = flags_1 });
+        }
+
         // DEBUG
         try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_DEBUG, .d_val = 0 });
-
-        // FLAGS + FLAGS_1
-        {
-            var flags: u64 = 0;
-            var flags_1: u64 = 0;
-            if (elf_file.options.z_now) {
-                flags |= 8; // TODO add elf.DF_BIND_NOW;
-                flags_1 |= 1; // TODO add elf.DF_1_NOW;
-            }
-
-            if (flags > 0) {
-                try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_FLAGS, .d_val = flags });
-            } else {
-                try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_NULL, .d_val = 0 });
-            }
-
-            if (flags_1 > 0) {
-                try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_FLAGS_1, .d_val = flags_1 });
-            } else {
-                try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_NULL, .d_val = 0 });
-            }
-        }
 
         // NULL
         try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_NULL, .d_val = 0 });
@@ -265,6 +270,7 @@ pub const DynsymSection = struct {
 pub const GotSection = struct {
     symbols: std.ArrayListUnmanaged(u32) = .{},
     needs_rela: bool = false,
+    emit_tlsld: bool = false,
     output_symtab_size: Elf.SymtabSize = .{},
 
     pub fn deinit(got: *GotSection, allocator: Allocator) void {
@@ -283,7 +289,9 @@ pub const GotSection = struct {
     }
 
     pub fn sizeGot(got: GotSection) usize {
-        return got.symbols.items.len * 8;
+        var size = got.symbols.items.len * 8;
+        if (got.emit_tlsld) size += 8;
+        return size;
     }
 
     pub fn sizeRela(got: GotSection, elf_file: *Elf) usize {
@@ -300,6 +308,10 @@ pub const GotSection = struct {
             const sym = elf_file.getSymbol(sym_index);
             const value = if (sym.import) 0 else sym.value;
             try writer.writeIntLittle(u64, value);
+        }
+
+        if (got.emit_tlsld) {
+            try writer.writeIntLittle(u64, 1); // TODO we assume executable output here
         }
     }
 
@@ -328,6 +340,11 @@ pub const GotSection = struct {
             const sym = elf_file.getSymbol(sym_index);
             got.output_symtab_size.strsize += @intCast(u32, sym.getName(elf_file).len + "$got".len + 1);
         }
+
+        if (got.emit_tlsld) {
+            got.output_symtab_size.nlocals += 1;
+            got.output_symtab_size.strsize += @intCast(u32, "$tlsld".len + 1);
+        }
     }
 
     pub fn writeSymtab(got: GotSection, elf_file: *Elf, ctx: Elf.WriteSymtabCtx) !void {
@@ -336,7 +353,7 @@ pub const GotSection = struct {
         const gpa = elf_file.base.allocator;
 
         var ilocal = ctx.ilocal;
-        for (got.symbols.items, 0..) |sym_index, i| {
+        for (got.symbols.items) |sym_index| {
             const sym = elf_file.getSymbol(sym_index);
             const name = try std.fmt.allocPrint(gpa, "{s}$got", .{sym.getName(elf_file)});
             defer gpa.free(name);
@@ -346,7 +363,20 @@ pub const GotSection = struct {
                 .st_info = elf.STT_OBJECT,
                 .st_other = 0,
                 .st_shndx = elf_file.got_sect_index.?,
-                .st_value = elf_file.getGotEntryAddress(@intCast(u32, i)),
+                .st_value = elf_file.getGotEntryAddress(ilocal),
+                .st_size = @sizeOf(u64),
+            };
+            ilocal += 1;
+        }
+
+        if (got.emit_tlsld) {
+            const st_name = try ctx.strtab.insert(gpa, "$tlsld");
+            ctx.symtab[ilocal] = .{
+                .st_name = st_name,
+                .st_info = elf.STT_OBJECT,
+                .st_other = 0,
+                .st_shndx = elf_file.got_sect_index.?,
+                .st_value = elf_file.getTlsLdAddress(),
                 .st_size = @sizeOf(u64),
             };
             ilocal += 1;
@@ -389,8 +419,8 @@ pub const PltSection = struct {
     }
 
     pub fn writePlt(plt: PltSection, elf_file: *Elf, writer: anytype) !void {
-        const plt_addr = elf_file.getPltAddress();
-        const got_plt_addr = elf_file.getGotPltAddress();
+        const plt_addr = elf_file.getSectionAddress(elf_file.plt_sect_index.?);
+        const got_plt_addr = elf_file.getSectionAddress(elf_file.got_plt_sect_index.?);
         var preamble = [_]u8{
             0xf3, 0x0f, 0x1e, 0xfa, // endbr64
             0x41, 0x53, // push r11
@@ -429,7 +459,7 @@ pub const PltSection = struct {
         // [2]: 0x0
         try writer.writeIntLittle(u64, 0x0);
         try writer.writeIntLittle(u64, 0x0);
-        const plt_addr = elf_file.getPltAddress();
+        const plt_addr = elf_file.getSectionAddress(elf_file.plt_sect_index.?);
         for (0..plt.symbols.items.len) |_| {
             // [N]: .plt
             try writer.writeIntLittle(u64, plt_addr);
@@ -520,6 +550,7 @@ pub const PltGotSection = struct {
             var entry = [_]u8{
                 0xf3, 0x0f, 0x1e, 0xfa, // endbr64
                 0xff, 0x25, 0x00, 0x00, 0x00, 0x00, // jmp qword ptr [rip] -> .got[N]
+                0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
             };
             mem.writeIntLittle(i32, entry[6..][0..4], @intCast(i32, disp));
             try writer.writeAll(&entry);
@@ -556,6 +587,47 @@ pub const PltGotSection = struct {
                 .st_size = 16,
             };
             ilocal += 1;
+        }
+    }
+};
+
+pub const CopyRelSection = struct {
+    symbols: std.ArrayListUnmanaged(u32) = .{},
+
+    pub fn deinit(copy_rel: *CopyRelSection, allocator: Allocator) void {
+        copy_rel.symbols.deinit(allocator);
+    }
+
+    pub fn addSymbol(copy_rel: *CopyRelSection, sym_index: u32, elf_file: *Elf) !void {
+        const index = @intCast(u32, copy_rel.symbols.items.len);
+        const symbol = elf_file.getSymbol(sym_index);
+        if (symbol.getExtra(elf_file)) |extra| {
+            var new_extra = extra;
+            new_extra.copy_rel = index;
+            symbol.setExtra(new_extra, elf_file);
+        } else try symbol.addExtra(.{ .copy_rel = index }, elf_file);
+        try copy_rel.symbols.append(elf_file.base.allocator, sym_index);
+
+        // TODO find aliases and add them too
+    }
+
+    pub fn sizeRela(copy_rel: CopyRelSection) usize {
+        return copy_rel.symbols.items.len * @sizeOf(elf.Elf64_Rela);
+    }
+
+    pub fn writeRela(copy_rel: CopyRelSection, elf_file: *Elf, writer: anytype) !void {
+        for (copy_rel.symbols.items) |sym_index| {
+            const sym = elf_file.getSymbol(sym_index);
+            assert(sym.import);
+            const extra = sym.getExtra(elf_file).?;
+            const r_offset = sym.getAddress(elf_file);
+            const r_sym: u64 = extra.dynamic;
+            const r_type: u32 = elf.R_X86_64_COPY;
+            try writer.writeStruct(elf.Elf64_Rela{
+                .r_offset = r_offset,
+                .r_info = (r_sym << 32) | r_type,
+                .r_addend = 0,
+            });
         }
     }
 };

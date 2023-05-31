@@ -314,15 +314,6 @@ pub fn checkDuplicates(self: *Object, elf_file: *Elf) void {
     }
 }
 
-pub fn checkUndefined(self: *Object, elf_file: *Elf) void {
-    for (self.getGlobals()) |index| {
-        const global = elf_file.getSymbol(index);
-        if (global.getFile(elf_file) == null) {
-            elf_file.base.fatal("undefined reference: {}: {s}", .{ self.fmtPath(), global.getName(elf_file) });
-        }
-    }
-}
-
 pub fn calcSymtabSize(self: *Object, elf_file: *Elf) !void {
     if (elf_file.options.strip_all) return;
 

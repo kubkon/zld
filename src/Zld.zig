@@ -2,8 +2,8 @@ tag: Tag,
 allocator: Allocator,
 file: fs.File,
 thread_pool: *ThreadPool,
-warnings: std.ArrayListUnmanaged([]const u8) = .{},
-errors: std.ArrayListUnmanaged([]const u8) = .{},
+warnings: std.ArrayListUnmanaged(ErrorMsg) = .{},
+errors: std.ArrayListUnmanaged(ErrorMsg) = .{},
 
 pub const Tag = enum {
     coff,
@@ -66,6 +66,19 @@ pub const Options = union {
     }
 };
 
+pub const ErrorMsg = struct {
+    msg: []const u8,
+    notes: ?[]ErrorMsg = null,
+
+    fn deinit(err: *ErrorMsg, allocator: Allocator) void {
+        allocator.free(err.msg);
+        if (err.notes) |notes| {
+            for (notes) |*note| note.deinit(allocator);
+            allocator.free(notes);
+        }
+    }
+};
+
 pub fn openPath(allocator: Allocator, tag: Tag, options: Options, thread_pool: *ThreadPool) !*Zld {
     return switch (tag) {
         .macho => &(try MachO.openPath(allocator, options.macho, thread_pool)).base,
@@ -77,12 +90,12 @@ pub fn openPath(allocator: Allocator, tag: Tag, options: Options, thread_pool: *
 
 pub fn deinit(base: *Zld) void {
     base.file.close();
-    for (base.warnings.items) |msg| {
-        base.allocator.free(msg);
+    for (base.warnings.items) |*msg| {
+        msg.deinit(base.allocator);
     }
     base.warnings.deinit(base.allocator);
-    for (base.errors.items) |msg| {
-        base.allocator.free(msg);
+    for (base.errors.items) |*msg| {
+        msg.deinit(base.allocator);
     }
     base.errors.deinit(base.allocator);
     switch (base.tag) {
@@ -121,13 +134,13 @@ pub fn flush(base: *Zld) !void {
 pub fn warn(base: *Zld, comptime format: []const u8, args: anytype) void {
     base.warnings.ensureUnusedCapacity(base.allocator, 1) catch return;
     const msg = std.fmt.allocPrint(base.allocator, format, args) catch return;
-    base.warnings.appendAssumeCapacity(msg);
+    base.warnings.appendAssumeCapacity(.{ .msg = msg });
 }
 
 pub fn fatal(base: *Zld, comptime format: []const u8, args: anytype) void {
     base.errors.ensureUnusedCapacity(base.allocator, 1) catch return;
     const msg = std.fmt.allocPrint(base.allocator, format, args) catch return;
-    base.errors.appendAssumeCapacity(msg);
+    base.errors.appendAssumeCapacity(.{ .msg = msg });
 }
 
 pub fn getAllWarningsAlloc(base: *Zld) !ErrorBundle {
@@ -136,7 +149,8 @@ pub fn getAllWarningsAlloc(base: *Zld) !ErrorBundle {
     defer bundle.deinit();
 
     for (base.warnings.items) |msg| {
-        try bundle.addRootErrorMessage(.{ .msg = try bundle.addString(msg) });
+        assert(msg.notes == null);
+        try bundle.addRootErrorMessage(.{ .msg = try bundle.addString(msg.msg) });
     }
 
     return bundle.toOwnedBundle("");
@@ -148,7 +162,17 @@ pub fn getAllErrorsAlloc(base: *Zld) !ErrorBundle {
     defer bundle.deinit();
 
     for (base.errors.items) |msg| {
-        try bundle.addRootErrorMessage(.{ .msg = try bundle.addString(msg) });
+        const notes = msg.notes orelse &[0]ErrorMsg{};
+        try bundle.addRootErrorMessage(.{
+            .msg = try bundle.addString(msg.msg),
+            .notes_len = @intCast(u32, notes.len),
+        });
+        const notes_start = try bundle.reserveNotes(@intCast(u32, notes.len));
+        for (notes_start.., notes) |index, note| {
+            bundle.extra.items[index] = @enumToInt(bundle.addErrorMessageAssumeCapacity(.{
+                .msg = try bundle.addString(note.msg),
+            }));
+        }
     }
 
     return bundle.toOwnedBundle("");
@@ -163,7 +187,7 @@ fn renderWarningToStdErr(eb: ErrorBundle) void {
 
 fn renderWarningToWriter(eb: ErrorBundle, writer: anytype) !void {
     for (eb.getMessages()) |msg| {
-        try renderWarningMessageToWriter(eb, msg, writer, "warning", .Cyan, 0);
+        try renderWarningMessageToWriter(eb, msg, writer, "warning", .cyan, 0);
     }
 }
 
@@ -172,27 +196,27 @@ fn renderWarningMessageToWriter(
     err_msg_index: ErrorBundle.MessageIndex,
     stderr: anytype,
     kind: []const u8,
-    color: std.debug.TTY.Color,
+    color: std.io.tty.Color,
     indent: usize,
 ) anyerror!void {
-    const ttyconf = std.debug.detectTTYConfig(std.io.getStdErr());
+    const ttyconf = std.io.tty.detectConfig(std.io.getStdErr());
     const err_msg = eb.getErrorMessage(err_msg_index);
     try ttyconf.setColor(stderr, color);
     try stderr.writeByteNTimes(' ', indent);
     try stderr.writeAll(kind);
     try stderr.writeAll(": ");
-    try ttyconf.setColor(stderr, .Reset);
+    try ttyconf.setColor(stderr, .reset);
     const msg = eb.nullTerminatedString(err_msg.msg);
     if (err_msg.count == 1) {
         try stderr.print("{s}\n", .{msg});
     } else {
         try stderr.print("{s}", .{msg});
-        try ttyconf.setColor(stderr, .Dim);
+        try ttyconf.setColor(stderr, .dim);
         try stderr.print(" ({d} times)\n", .{err_msg.count});
     }
-    try ttyconf.setColor(stderr, .Reset);
+    try ttyconf.setColor(stderr, .reset);
     for (eb.getNotes(err_msg_index)) |note| {
-        try renderWarningMessageToWriter(eb, note, stderr, "note", .White, indent + 4);
+        try renderWarningMessageToWriter(eb, note, stderr, "note", .white, indent + 4);
     }
 }
 
@@ -206,7 +230,7 @@ pub fn reportWarningsAndErrors(base: *Zld) !void {
     var errors = try base.getAllErrorsAlloc();
     defer errors.deinit(base.allocator);
     if (errors.errorMessageCount() > 0) {
-        errors.renderToStdErr(.{ .ttyconf = std.debug.detectTTYConfig(std.io.getStdErr()) });
+        errors.renderToStdErr(.{ .ttyconf = std.io.tty.detectConfig(std.io.getStdErr()) });
         return error.LinkFail;
     }
 }
@@ -219,6 +243,7 @@ pub fn reportWarningsAndErrorsAndExit(base: *Zld) void {
 }
 
 const std = @import("std");
+const assert = std.debug.assert;
 const fs = std.fs;
 const io = std.io;
 const mem = std.mem;
