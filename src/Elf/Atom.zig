@@ -518,6 +518,7 @@ pub fn resolveRelocsNonAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void 
         const r_type = rel.r_type();
 
         if (r_type == elf.R_X86_64_NONE) continue;
+        if (try self.reportUndefSymbol(rel, elf_file)) continue;
 
         const target = object.getSymbol(rel.r_sym(), elf_file);
 

@@ -333,8 +333,6 @@ pub fn flush(self: *Elf) !void {
 
     self.claimUnresolved();
     try self.scanRelocs();
-    try self.reportUndefs();
-    self.base.reportWarningsAndErrorsAndExit();
 
     try self.initSections();
     try self.sortSections();
@@ -1590,6 +1588,9 @@ fn scanRelocs(self: *Elf) !void {
         }
     }
 
+    try self.reportUndefs();
+    self.base.reportWarningsAndErrorsAndExit();
+
     for (self.symbols.items, 0..) |*symbol, i| {
         const index = @intCast(u32, i);
         if (symbol.import) {
@@ -1675,6 +1676,9 @@ fn writeAtoms(self: *Elf) !void {
 
         try self.base.file.pwriteAll(buffer, shdr.sh_offset);
     }
+
+    try self.reportUndefs();
+    self.base.reportWarningsAndErrorsAndExit();
 }
 
 fn writeSyntheticSections(self: *Elf) !void {
