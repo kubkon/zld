@@ -139,6 +139,7 @@ pub fn resolveSymbols(self: *SharedObject, elf_file: *Elf) void {
                 .name = global.name,
                 .atom = 0,
                 .sym_idx = sym_idx,
+                .ver_idx = self.versymtab[sym_idx],
                 .file = self.index,
             };
         }
