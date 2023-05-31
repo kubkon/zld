@@ -28,6 +28,8 @@ dynamic_sect_index: ?u16 = null,
 dynsymtab_sect_index: ?u16 = null,
 dynstrtab_sect_index: ?u16 = null,
 hash_sect_index: ?u16 = null,
+versym_sect_index: ?u16 = null,
+verneed_sect_index: ?u16 = null,
 
 internal_object_index: ?u32 = null,
 dynamic_index: ?u32 = null,
@@ -533,6 +535,25 @@ fn initSections(self: *Elf) !void {
             .addralign = 4,
             .entsize = 4,
         });
+
+        const needs_versions = for (self.shared_objects.items) |index| {
+            if (self.getFile(index).?.shared.versymtab.len > 0) break true;
+        } else false;
+        if (needs_versions) {
+            self.versym_sect_index = try self.addSection(.{
+                .name = ".gnu.version",
+                .flags = elf.SHF_ALLOC,
+                .type = SHT_GNU_versym,
+                .addralign = @alignOf(elf.Elf64_Versym),
+                .entsize = @sizeOf(elf.Elf64_Versym),
+            });
+            self.verneed_sect_index = try self.addSection(.{
+                .name = ".gnu.version_r",
+                .flags = elf.SHF_ALLOC,
+                .type = SHT_GNU_verneed,
+                .addralign = @alignOf(elf.Elf64_Verneed),
+            });
+        }
     }
 }
 
@@ -993,6 +1014,9 @@ fn getSectionRank(self: *Elf, shndx: u16) u8 {
         elf.SHT_NULL => return 0,
         elf.SHT_DYNSYM => return 2,
         elf.SHT_HASH => return 3,
+        SHT_GNU_versym => return 4,
+        SHT_GNU_verdef => return 4,
+        SHT_GNU_verneed => return 4,
 
         elf.SHT_PREINIT_ARRAY,
         elf.SHT_INIT_ARRAY,
@@ -1086,6 +1110,8 @@ fn sortSections(self: *Elf) !void {
         &self.rela_dyn_sect_index,
         &self.rela_plt_sect_index,
         &self.copy_rel_sect_index,
+        &self.versym_sect_index,
+        &self.verneed_sect_index,
     }) |maybe_index| {
         if (maybe_index.*) |*index| {
             index.* = backlinks[index.*];
@@ -1110,6 +1136,16 @@ fn sortSections(self: *Elf) !void {
     if (self.hash_sect_index) |index| {
         const shdr = &self.sections.items(.shdr)[index];
         shdr.sh_link = self.dynsymtab_sect_index.?;
+    }
+
+    if (self.versym_sect_index) |index| {
+        const shdr = &self.sections.items(.shdr)[index];
+        shdr.sh_link = self.dynsymtab_sect_index.?;
+    }
+
+    if (self.verneed_sect_index) |index| {
+        const shdr = &self.sections.items(.shdr)[index];
+        shdr.sh_link = self.dynstrtab_sect_index.?;
     }
 
     if (self.rela_dyn_sect_index) |index| {
