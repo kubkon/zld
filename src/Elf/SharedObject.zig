@@ -5,6 +5,9 @@ index: File.Index,
 header: ?elf.Elf64_Ehdr = null,
 symtab: []align(1) const elf.Elf64_Sym = &[0]elf.Elf64_Sym{},
 strtab: []const u8 = &[0]u8{},
+/// Version symtab contains version strings of the symbols if present.
+versymtab: []align(1) const elf.Elf64_Versym = &[0]elf.Elf64_Versym{},
+verstrings: std.ArrayListUnmanaged(u32) = .{},
 
 dynamic_sect_index: ?u16 = null,
 
@@ -32,6 +35,7 @@ pub fn isValidHeader(header: *const elf.Elf64_Ehdr) bool {
 }
 
 pub fn deinit(self: *SharedObject, allocator: Allocator) void {
+    self.verstrings.deinit(allocator);
     self.symbols.deinit(allocator);
 }
 
@@ -58,6 +62,55 @@ pub fn parse(self: *SharedObject, elf_file: *Elf) !void {
     }
 
     try self.initSymtab(elf_file);
+    try self.parseVersions(elf_file);
+}
+
+fn parseVersions(self: *SharedObject, elf_file: *Elf) !void {
+    if (self.symtab.len == 0) return;
+
+    const shdrs = self.getShdrs();
+    var versym_index: ?u16 = null;
+    var verdef_index: ?u16 = null;
+    for (shdrs, 0..) |shdr, i| switch (shdr.sh_type) {
+        Elf.SHT_GNU_versym => versym_index = @intCast(u16, i),
+        Elf.SHT_GNU_verdef => verdef_index = @intCast(u16, i),
+        else => {},
+    };
+
+    if (versym_index == null or verdef_index == null) return;
+
+    const versymtab = self.getShdrContents(versym_index.?);
+    self.versymtab = @ptrCast([*]align(1) const elf.Elf64_Versym, versymtab.ptr)[0..self.symtab.len];
+
+    const verdefs = self.getShdrContents(verdef_index.?);
+    const nverdefs = self.getVerdefNum();
+
+    const gpa = elf_file.base.allocator;
+    var lookup = std.AutoHashMap(elf.Elf64_Versym, u32).init(gpa);
+    defer lookup.deinit();
+    try lookup.ensureTotalCapacity(nverdefs);
+
+    {
+        var i: u32 = 0;
+        var offset: u32 = 0;
+        while (i < nverdefs) : (i += 1) {
+            const verdef = @ptrCast(*align(1) const elf.Elf64_Verdef, verdefs.ptr + offset).*;
+
+            const vda_name = if (verdef.vd_cnt > 0)
+                @ptrCast(*align(1) const elf.Elf64_Verdaux, verdefs.ptr + offset + verdef.vd_aux).vda_name
+            else
+                0;
+            lookup.putAssumeCapacityNoClobber(verdef.vd_ndx, vda_name);
+
+            offset += verdef.vd_next;
+        }
+    }
+
+    try self.verstrings.resize(gpa, self.symtab.len);
+    for (self.versymtab, 0..) |ver, i| {
+        const vda_name = lookup.get(ver) orelse 0;
+        self.verstrings.items[i] = vda_name;
+    }
 }
 
 fn initSymtab(self: *SharedObject, elf_file: *Elf) !void {
@@ -159,20 +212,39 @@ pub inline fn getString(self: *SharedObject, off: u32) [:0]const u8 {
     return mem.sliceTo(@ptrCast([*:0]const u8, self.strtab.ptr + off), 0);
 }
 
+pub inline fn getVersionString(self: *SharedObject, index: u32) ?[:0]const u8 {
+    if (self.versymtab.len == 0) return null;
+    const off = self.verstrings.items[index];
+    return self.getString(off);
+}
+
 pub fn asFile(self: *SharedObject) File {
     return .{ .shared = self };
 }
 
-pub fn getSoname(self: *SharedObject) []const u8 {
-    const shndx = self.dynamic_sect_index orelse return self.path;
-    const data = self.getShdrContents(shndx);
-    const nentries = @divExact(data.len, @sizeOf(elf.Elf64_Dyn));
-    const entries = @ptrCast([*]align(1) const elf.Elf64_Dyn, data.ptr)[0..nentries];
-    const soname = for (entries) |entry| switch (entry.d_tag) {
-        elf.DT_SONAME => break self.getString(@intCast(u32, entry.d_val)),
+fn getDynamicTable(self: *SharedObject) []align(1) const elf.Elf64_Dyn {
+    const shndx = self.dynamic_sect_index orelse return &[0]elf.Elf64_Dyn{};
+    const raw = self.getShdrContents(shndx);
+    const num = @divExact(raw.len, @sizeOf(elf.Elf64_Dyn));
+    return @ptrCast([*]align(1) const elf.Elf64_Dyn, raw.ptr)[0..num];
+}
+
+fn getVerdefNum(self: *SharedObject) u32 {
+    const entries = self.getDynamicTable();
+    for (entries) |entry| switch (entry.d_tag) {
+        elf.DT_VERDEFNUM => return @intCast(u32, entry.d_val),
         else => {},
-    } else self.path;
-    return soname;
+    };
+    return 0;
+}
+
+pub fn getSoname(self: *SharedObject) []const u8 {
+    const entries = self.getDynamicTable();
+    for (entries) |entry| switch (entry.d_tag) {
+        elf.DT_SONAME => return self.getString(@intCast(u32, entry.d_val)),
+        else => {},
+    };
+    return self.path;
 }
 
 pub inline fn getGlobals(self: *SharedObject) []const u32 {

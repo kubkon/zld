@@ -2226,6 +2226,21 @@ pub const null_sym = elf.Elf64_Sym{
 
 pub const base_tag = Zld.Tag.elf;
 
+pub const VERSYM_HIDDEN = 0x8000;
+pub const VERSYM_VERSION = 0x7fff;
+
+/// Symbol is local
+pub const VER_NDX_LOCAL = 0;
+/// Symbol is global
+pub const VER_NDX_GLOBAL = 1;
+
+// VERDEF
+pub const SHT_GNU_verdef = 0x6ffffffd;
+// VERNEED
+pub const SHT_GNU_verneed = 0x6ffffffe;
+// VERSYM
+pub const SHT_GNU_versym = 0x6fffffff;
+
 const std = @import("std");
 const build_options = @import("build_options");
 const builtin = @import("builtin");
