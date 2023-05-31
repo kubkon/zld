@@ -176,7 +176,7 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
         const rel = relocs[i];
 
         if (rel.r_type() == elf.R_X86_64_NONE) continue;
-        if (self.reportUndefSymbol(rel, elf_file)) continue;
+        if (try self.reportUndefSymbol(rel, elf_file)) continue;
 
         const symbol = object.getSymbol(rel.r_sym(), elf_file);
 
@@ -261,7 +261,7 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
     }
 }
 
-fn reportUndefSymbol(self: Atom, rel: elf.Elf64_Rela, elf_file: *Elf) bool {
+fn reportUndefSymbol(self: Atom, rel: elf.Elf64_Rela, elf_file: *Elf) !bool {
     const object = self.getObject(elf_file);
     const sym = object.getSymbol(rel.r_sym(), elf_file);
     const s_rel_sym = object.symtab[rel.r_sym()];
@@ -284,11 +284,12 @@ fn reportUndefSymbol(self: Atom, rel: elf.Elf64_Rela, elf_file: *Elf) bool {
         !sym.import and
         s_sym.st_shndx == elf.SHN_UNDEF)
     {
-        elf_file.base.fatal("{}: {s}: {s} undefined symbol", .{
-            object.fmtPath(),
-            self.getName(elf_file),
-            sym.getName(elf_file),
-        });
+        const gpa = elf_file.base.allocator;
+        const gop = try elf_file.undefs.getOrPut(gpa, object.symbols.items[rel.r_sym()]);
+        if (!gop.found_existing) {
+            gop.value_ptr.* = .{};
+        }
+        try gop.value_ptr.append(gpa, self.atom_index);
     }
 
     return false;

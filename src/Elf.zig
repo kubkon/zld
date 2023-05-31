@@ -45,6 +45,9 @@ symbols: std.ArrayListUnmanaged(Symbol) = .{},
 symbols_extra: std.ArrayListUnmanaged(u32) = .{},
 // TODO convert to context-adapted
 globals: std.StringHashMapUnmanaged(u32) = .{},
+/// This table will be populated after `scanRelocs` has run.
+/// Key is symbol index.
+undefs: std.AutoHashMapUnmanaged(u32, std.ArrayListUnmanaged(Atom.Index)) = .{},
 
 string_intern: StringTable(.string_intern) = .{},
 
@@ -132,6 +135,13 @@ pub fn deinit(self: *Elf) void {
     self.dynstrtab.deinit(gpa);
     self.dynamic.deinit(gpa);
     self.hash.deinit(gpa);
+    {
+        var it = self.undefs.valueIterator();
+        while (it.next()) |notes| {
+            notes.deinit(gpa);
+        }
+        self.undefs.deinit(gpa);
+    }
     self.arena.promote(gpa).deinit();
 }
 
@@ -323,6 +333,7 @@ pub fn flush(self: *Elf) !void {
 
     self.claimUnresolved();
     try self.scanRelocs();
+    try self.reportUndefs();
     self.base.reportWarningsAndErrorsAndExit();
 
     try self.initSections();
@@ -1529,6 +1540,43 @@ fn claimUnresolved(self: *Elf) void {
                 .file = object.index,
             };
         }
+    }
+}
+
+fn reportUndefs(self: *Elf) !void {
+    if (self.undefs.count() == 0) return;
+
+    const max_notes = 4;
+
+    const gpa = self.base.allocator;
+    var it = self.undefs.iterator();
+    while (it.next()) |entry| {
+        const undef_sym = self.getSymbol(entry.key_ptr.*);
+        const notes = entry.value_ptr.*;
+        const nnotes = @min(notes.items.len, max_notes) + @boolToInt(notes.items.len > max_notes);
+
+        var err = Zld.ErrorMsg{
+            .msg = try std.fmt.allocPrint(gpa, "undefined symbol: {s}", .{undef_sym.getName(self)}),
+        };
+        err.notes = try gpa.alloc(Zld.ErrorMsg, nnotes);
+
+        var inote: usize = 0;
+        while (inote < nnotes) : (inote += 1) {
+            const atom = self.getAtom(notes.items[inote]).?;
+            const object = atom.getObject(self);
+            err.notes.?[inote] = Zld.ErrorMsg{
+                .msg = try std.fmt.allocPrint(gpa, "referenced by {}:{s}", .{ object.fmtPath(), atom.getName(self) }),
+            };
+        }
+
+        if (notes.items.len > max_notes) {
+            const remaining = notes.items.len - max_notes;
+            err.notes.?[max_notes] = Zld.ErrorMsg{
+                .msg = try std.fmt.allocPrint(gpa, "referenced {d} more times", .{remaining}),
+            };
+        }
+
+        try self.base.errors.append(gpa, err);
     }
 }
 

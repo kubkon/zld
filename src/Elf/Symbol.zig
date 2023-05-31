@@ -189,7 +189,11 @@ fn format2(
     try writer.print("%{d} : {s} : @{x}", .{ symbol.sym_idx, symbol.getName(ctx.elf_file), symbol.value });
     if (symbol.getFile(ctx.elf_file)) |file| {
         if (symbol.isAbs(ctx.elf_file)) {
-            try writer.writeAll(" : absolute");
+            if (symbol.getSourceSymbol(ctx.elf_file).st_shndx == elf.SHN_UNDEF) {
+                try writer.writeAll(" : undef");
+            } else {
+                try writer.writeAll(" : absolute");
+            }
         } else if (symbol.shndx != 0) {
             try writer.print(" : sect({d})", .{symbol.shndx});
         }
