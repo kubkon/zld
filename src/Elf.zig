@@ -631,10 +631,10 @@ fn calcSectionSizes(self: *Elf) !void {
         const shdr = &self.sections.items(.shdr)[index];
         for (self.copy_rel.symbols.items) |sym_index| {
             const symbol = self.getSymbol(sym_index);
-            const alignment = try math.powi(u64, 2, symbol.getAlignment(self));
+            const alignment = try symbol.getAlignment(self);
             symbol.value = mem.alignForwardGeneric(u64, shdr.sh_size, alignment);
             shdr.sh_addralign = @max(shdr.sh_addralign, alignment);
-            shdr.sh_size += symbol.value + symbol.getSourceSymbol(self).st_size;
+            shdr.sh_size = symbol.value + symbol.getSourceSymbol(self).st_size;
         }
     }
 

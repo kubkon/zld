@@ -101,10 +101,16 @@ pub fn getGotAddress(symbol: Symbol, elf_file: *Elf) u64 {
     return elf_file.getGotEntryAddress(extra.got);
 }
 
-pub fn getAlignment(symbol: Symbol, elf_file: *Elf) u64 {
-    if (symbol.getFile(elf_file) == null) return 0;
+pub fn getAlignment(symbol: Symbol, elf_file: *Elf) !u64 {
+    const file = symbol.getFile(elf_file) orelse return 0;
+    const shared = file.shared;
     const s_sym = symbol.getSourceSymbol(elf_file);
-    return @ctz(s_sym.st_value);
+    const shdr = shared.getShdrs()[s_sym.st_shndx];
+    const alignment = @max(1, shdr.sh_addralign);
+    return if (s_sym.st_value == 0)
+        alignment
+    else
+        @min(alignment, try std.math.powi(u64, 2, @ctz(s_sym.st_value)));
 }
 
 pub fn addExtra(symbol: *Symbol, extra: Extra, elf_file: *Elf) !void {
