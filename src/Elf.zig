@@ -72,6 +72,7 @@ comdat_groups_owners: std.ArrayListUnmanaged(ComdatGroupOwner) = .{},
 comdat_groups_table: std.AutoHashMapUnmanaged(u32, ComdatGroupOwner.Index) = .{},
 
 needs_tlsld: bool = false,
+default_sym_version: elf.Elf64_Versym,
 
 pub fn openPath(allocator: Allocator, options: Options, thread_pool: *ThreadPool) !*Elf {
     const file = try options.emit.directory.createFile(options.emit.sub_path, .{
@@ -101,6 +102,10 @@ fn createEmpty(gpa: Allocator, options: Options, thread_pool: *ThreadPool) !*Elf
         },
         .arena = std.heap.ArenaAllocator.init(gpa).state,
         .options = options,
+        .default_sym_version = if (options.output_mode == .lib or options.export_dynamic)
+            VER_NDX_GLOBAL
+        else
+            VER_NDX_LOCAL,
     };
 
     return self;
@@ -1537,9 +1542,15 @@ fn markImportsAndExports(self: *Elf) !void {
     for (self.objects.items) |index| {
         for (self.getFile(index).?.object.getGlobals()) |global_index| {
             const global = self.getSymbol(global_index);
+            if (global.ver_idx == VER_NDX_LOCAL) continue;
+
             if (global.getFile(self)) |file| {
                 if (file == .shared and !global.isAbs(self)) {
                     global.flags.import = true;
+                }
+
+                if (file.getIndex() == index) {
+                    global.flags.@"export" = true;
                 }
             }
         }
@@ -1589,6 +1600,7 @@ fn claimUnresolved(self: *Elf) void {
                 .atom = 0,
                 .sym_idx = sym_idx,
                 .file = object.index,
+                .ver_idx = self.default_sym_version,
             };
         }
     }
@@ -1694,7 +1706,11 @@ fn setDynamic(self: *Elf) !void {
 fn setVerSymtab(self: *Elf) !void {
     if (self.versym_sect_index == null) return;
     try self.versym.resize(self.base.allocator, self.dynsym.count());
-    @memset(self.versym.items, VER_NDX_LOCAL);
+    self.versym.items[0] = VER_NDX_LOCAL;
+    for (self.dynsym.symbols.items, 1..) |dynsym, i| {
+        const sym = self.getSymbol(dynsym.index);
+        self.versym.items[i] = sym.ver_idx;
+    }
 
     if (self.verneed_sect_index) |shndx| {
         try self.verneed.generate(self);

@@ -12,6 +12,8 @@ const usage =
     \\                              Set the dynamic linker to use
     \\--end-group                   Ignored for compatibility with GNU
     \\--eh-frame-hdr                Create .eh_frame_hdr section
+    \\--export-dynamic, -E          Export all dynamic symbols
+    \\--no-export-dynamic           Don't export all dynamic symbols
     \\--no-eh-frame-hdr             Don't create .eh_frame_hdr section
     \\--entry=[value], -e [value]   Set name of the entry point symbol
     \\--gc-sections                 Remove unused sections
@@ -64,6 +66,7 @@ dynamic_linker: ?[]const u8 = null,
 eh_frame_hdr: bool = false,
 static: bool = false,
 relax: bool = true,
+export_dynamic: bool = false,
 /// -z flags
 /// Overrides default stack size.
 z_stack_size: ?u64 = null,
@@ -120,6 +123,12 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             try rpath_list.put(path, {});
         } else if (p.arg1("R")) |path| {
             try rpath_list.put(path, {});
+        } else if (p.flagAny("export-dynamic")) {
+            opts.export_dynamic = true;
+        } else if (p.flag1("E")) {
+            opts.export_dynamic = true;
+        } else if (p.flagAny("no-export-dynamic")) {
+            opts.export_dynamic = false;
         } else if (p.argAny("entry")) |name| {
             opts.entry = name;
         } else if (p.arg1("e")) |name| {

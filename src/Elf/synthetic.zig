@@ -266,21 +266,15 @@ pub const DynsymSection = struct {
             pub fn lessThan(ctx: *Elf, lhs: Dynsym, rhs: Dynsym) bool {
                 const lhs_sym = ctx.getSymbol(lhs.index);
                 const lhs_esym = lhs_sym.asElfSym(lhs.off, ctx);
-                const lhs_is_undef = lhs_esym.st_shndx == elf.SHN_UNDEF;
 
                 const rhs_sym = ctx.getSymbol(rhs.index);
                 const rhs_esym = rhs_sym.asElfSym(rhs.off, ctx);
-                const rhs_is_undef = rhs_esym.st_shndx == elf.SHN_UNDEF;
 
-                if (lhs_is_undef and rhs_is_undef) {
-                    const lhs_file_index = lhs_sym.getFile(ctx).?.getIndex();
-                    const rhs_file_index = rhs_sym.getFile(ctx).?.getIndex();
-                    if (lhs_file_index == rhs_file_index) {
-                        return lhs_sym.sym_idx < rhs_sym.sym_idx;
-                    } else return lhs_file_index < rhs_file_index;
-                } else if (!lhs_is_undef and !rhs_is_undef) {
-                    return lhs_esym.st_value < rhs_esym.st_value;
-                } else return lhs_is_undef;
+                if (lhs_sym.flags.@"export" != rhs_sym.flags.@"export") {
+                    return rhs_sym.flags.@"export";
+                }
+
+                return lhs_esym.st_value < rhs_esym.st_value;
             }
         };
 

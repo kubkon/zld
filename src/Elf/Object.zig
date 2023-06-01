@@ -260,6 +260,7 @@ pub fn resolveSymbols(self: *Object, elf_file: *Elf) void {
                 .atom = atom,
                 .sym_idx = sym_idx,
                 .file = self.index,
+                .ver_idx = elf_file.default_sym_version,
             };
             if (this_sym.st_bind() == elf.STB_WEAK) global.flags.weak = true;
         }

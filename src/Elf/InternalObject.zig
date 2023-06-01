@@ -43,6 +43,7 @@ pub fn resolveSymbols(self: *InternalObject, elf_file: *Elf) void {
                 .atom = 0,
                 .file = self.index,
                 .sym_idx = sym_idx,
+                .ver_idx = elf_file.default_sym_version,
             };
         }
     }
