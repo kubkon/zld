@@ -542,7 +542,7 @@ fn initSections(self: *Elf) !void {
         });
 
         const needs_versions = for (self.shared_objects.items) |index| {
-            if (self.getFile(index).?.shared.versyms.items.len > 0) break true;
+            if (self.getFile(index).?.shared.versym_sect_index != null) break true;
         } else false;
         if (needs_versions) {
             self.versym_sect_index = try self.addSection(.{
