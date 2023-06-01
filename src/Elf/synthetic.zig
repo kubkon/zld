@@ -273,19 +273,7 @@ pub const DynsymSection = struct {
         try writer.writeStruct(Elf.null_sym);
         for (dynsym.symbols.items) |sym_ref| {
             const sym = elf_file.getSymbol(sym_ref.index);
-            const s_sym = sym.getSourceSymbol(elf_file);
-            const st_type = switch (s_sym.st_type()) {
-                elf.STT_GNU_IFUNC => elf.STT_FUNC,
-                else => |st_type| st_type,
-            };
-            try writer.writeStruct(elf.Elf64_Sym{
-                .st_name = sym_ref.off,
-                .st_info = (@as(u8, elf.STB_GLOBAL) << 4) | st_type,
-                .st_other = s_sym.st_other,
-                .st_shndx = elf.SHN_UNDEF,
-                .st_value = 0,
-                .st_size = 0,
-            });
+            try writer.writeStruct(sym.asElfSym(sym_ref.off, elf_file));
         }
     }
 };
@@ -332,7 +320,7 @@ pub const VerneedSection = struct {
 
         for (dynsyms, 1..) |dynsym, i| {
             const symbol = elf_file.getSymbol(dynsym.index);
-            if (symbol.import and symbol.ver_idx & Elf.VERSYM_VERSION > Elf.VER_NDX_GLOBAL) {
+            if (symbol.flags.import and symbol.ver_idx & Elf.VERSYM_VERSION > Elf.VER_NDX_GLOBAL) {
                 const shared = symbol.getFile(elf_file).?.shared;
                 verneed.appendAssumeCapacity(.{
                     .idx = i,
@@ -454,7 +442,7 @@ pub const GotSection = struct {
         var size: usize = 0;
         for (got.symbols.items) |sym_index| {
             const sym = elf_file.getSymbol(sym_index);
-            if (sym.import) size += @sizeOf(elf.Elf64_Rela);
+            if (sym.flags.import) size += @sizeOf(elf.Elf64_Rela);
         }
         return size;
     }
@@ -462,7 +450,7 @@ pub const GotSection = struct {
     pub fn writeGot(got: GotSection, elf_file: *Elf, writer: anytype) !void {
         for (got.symbols.items) |sym_index| {
             const sym = elf_file.getSymbol(sym_index);
-            const value = if (sym.import) 0 else sym.value;
+            const value = if (sym.flags.import) 0 else sym.value;
             try writer.writeIntLittle(u64, value);
         }
 
@@ -474,7 +462,7 @@ pub const GotSection = struct {
     pub fn writeRela(got: GotSection, elf_file: *Elf, writer: anytype) !void {
         for (got.symbols.items, 0..) |sym_index, i| {
             const sym = elf_file.getSymbol(sym_index);
-            if (sym.import) {
+            if (sym.flags.import) {
                 const extra = sym.getExtra(elf_file).?;
                 const r_offset = elf_file.getGotEntryAddress(@intCast(u32, i));
                 const r_sym: u64 = extra.dynamic;
@@ -625,7 +613,7 @@ pub const PltSection = struct {
     pub fn writeRela(plt: PltSection, elf_file: *Elf, writer: anytype) !void {
         for (plt.symbols.items, 0..) |sym_index, i| {
             const sym = elf_file.getSymbol(sym_index);
-            assert(sym.import);
+            assert(sym.flags.import);
             const extra = sym.getExtra(elf_file).?;
             const r_offset = elf_file.getGotPltEntryAddress(@intCast(u32, i));
             const r_sym: u64 = extra.dynamic;
@@ -698,7 +686,7 @@ pub const PltGotSection = struct {
     pub fn write(plt_got: PltGotSection, elf_file: *Elf, writer: anytype) !void {
         for (plt_got.symbols.items, 0..) |sym_index, i| {
             const sym = elf_file.getSymbol(sym_index);
-            assert(sym.import);
+            assert(sym.flags.import);
             const extra = sym.getExtra(elf_file).?;
             const target_addr = elf_file.getGotEntryAddress(extra.got);
             const source_addr = elf_file.getPltGotEntryAddress(@intCast(u32, i));
@@ -774,7 +762,7 @@ pub const CopyRelSection = struct {
     pub fn writeRela(copy_rel: CopyRelSection, elf_file: *Elf, writer: anytype) !void {
         for (copy_rel.symbols.items) |sym_index| {
             const sym = elf_file.getSymbol(sym_index);
-            assert(sym.import);
+            assert(sym.flags.import);
             const extra = sym.getExtra(elf_file).?;
             const r_offset = sym.getAddress(elf_file);
             const r_sym: u64 = extra.dynamic;

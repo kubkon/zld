@@ -1528,7 +1528,7 @@ fn markImportsAndExports(self: *Elf) !void {
         for (self.getFile(index).?.shared.getGlobals()) |global_index| {
             const global = self.getSymbol(global_index);
             if (global.getFile(self)) |file| {
-                if (file != .shared) global.@"export" = true;
+                if (file != .shared) global.flags.@"export" = true;
             }
         }
     }
@@ -1538,7 +1538,7 @@ fn markImportsAndExports(self: *Elf) !void {
             const global = self.getSymbol(global_index);
             if (global.getFile(self)) |file| {
                 if (file == .shared and !global.isAbs(self)) {
-                    global.import = true;
+                    global.flags.import = true;
                 }
             }
         }
@@ -1645,14 +1645,14 @@ fn scanRelocs(self: *Elf) !void {
 
     for (self.symbols.items, 0..) |*symbol, i| {
         const index = @intCast(u32, i);
-        if (symbol.import) {
-            log.debug("'{s}' is imported", .{symbol.getName(self)});
+        if (!symbol.isLocal()) {
+            log.debug("'{s}' is non-local", .{symbol.getName(self)});
             try self.dynsym.addSymbol(index, self);
         }
         if (symbol.flags.got) {
             log.debug("'{s}' needs GOT", .{symbol.getName(self)});
             try self.got.addSymbol(index, self);
-            if (symbol.import) self.got.needs_rela = true;
+            if (symbol.flags.import) self.got.needs_rela = true;
         }
         if (symbol.flags.plt) {
             if (symbol.flags.got) {

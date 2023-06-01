@@ -185,7 +185,7 @@ pub fn calcSymtabSize(self: *SharedObject, elf_file: *Elf) !void {
         const global = elf_file.getSymbol(global_index);
         if (global.getFile(elf_file)) |file| if (file.getIndex() != self.index) continue;
         if (global.isLocal()) continue;
-        global.output_symtab = true;
+        global.flags.output_symtab = true;
         self.output_symtab_size.nglobals += 1;
         self.output_symtab_size.strsize += @intCast(u32, global.getName(elf_file).len + 1);
     }
@@ -200,7 +200,7 @@ pub fn writeSymtab(self: *SharedObject, elf_file: *Elf, ctx: Elf.WriteSymtabCtx)
     for (self.getGlobals()) |global_index| {
         const global = elf_file.getSymbol(global_index);
         if (global.getFile(elf_file)) |file| if (file.getIndex() != self.index) continue;
-        if (!global.output_symtab) continue;
+        if (!global.flags.output_symtab) continue;
         const st_name = try ctx.strtab.insert(gpa, global.getName(elf_file));
         ctx.symtab[iglobal] = global.asElfSym(st_name, elf_file);
         iglobal += 1;

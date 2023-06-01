@@ -189,7 +189,7 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
         // pointer indirection via GOT, or a stub trampoline via PLT.
         switch (rel.r_type()) {
             elf.R_X86_64_64 => {
-                if (symbol.import and symbol.getSourceSymbol(elf_file).st_type() != elf.STT_FUNC) {
+                if (symbol.flags.import and symbol.getSourceSymbol(elf_file).st_type() != elf.STT_FUNC) {
                     symbol.flags.copy_rel = true;
                 }
             },
@@ -197,7 +197,7 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
             elf.R_X86_64_32,
             elf.R_X86_64_32S,
             => {
-                if (symbol.import and symbol.getSourceSymbol(elf_file).st_type() != elf.STT_FUNC) {
+                if (symbol.flags.import and symbol.getSourceSymbol(elf_file).st_type() != elf.STT_FUNC) {
                     elf_file.base.fatal("TODO import in a position-dependent executable in {}", .{
                         fmtRelocType(rel.r_type()),
                     });
@@ -212,13 +212,13 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
             },
 
             elf.R_X86_64_PLT32 => {
-                if (symbol.import) {
+                if (symbol.flags.import) {
                     symbol.flags.plt = true;
                 }
             },
 
             elf.R_X86_64_PC32 => {
-                if (symbol.import and symbol.getSourceSymbol(elf_file).st_type() != elf.STT_FUNC) {
+                if (symbol.flags.import and symbol.getSourceSymbol(elf_file).st_type() != elf.STT_FUNC) {
                     if (elf_file.options.z_nocopyreloc) {
                         elf_file.base.fatal("{s}: {} relocation at offset 0x{x} against symbol '{s}' cannot be used; recompile with {s}", .{
                             self.getName(elf_file),
@@ -235,7 +235,7 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
             elf.R_X86_64_TLSGD => {
                 // TODO verify followed by appropriate relocation such as PLT32 __tls_get_addr
 
-                if (elf_file.options.static or (elf_file.options.relax and !symbol.import)) {
+                if (elf_file.options.static or (elf_file.options.relax and !symbol.flags.import)) {
                     // Relax if building with -static flag as __tls_get_addr() will not be present in libc.a
                     // We skip the next relocation.
                     i += 1;
@@ -281,7 +281,7 @@ fn reportUndefSymbol(self: Atom, rel: elf.Elf64_Rela, elf_file: *Elf) !bool {
     if (s_rel_sym.st_shndx == elf.SHN_UNDEF and
         s_rel_sym.st_bind() == elf.STB_GLOBAL and
         sym.sym_idx > 0 and
-        !sym.import and
+        !sym.flags.import and
         s_sym.st_shndx == elf.SHN_UNDEF)
     {
         const gpa = elf_file.base.allocator;
@@ -361,7 +361,7 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
             elf.R_X86_64_GOTPCREL => try cwriter.writeIntLittle(i32, @intCast(i32, G + GOT + A - P)),
 
             elf.R_X86_64_GOTPCRELX => {
-                if (!target.import and !target.isIFunc(elf_file) and !target.isAbs(elf_file)) blk: {
+                if (!target.flags.import and !target.isIFunc(elf_file) and !target.isAbs(elf_file)) blk: {
                     var inst_code = code[rel.r_offset - 3 ..];
                     const old_inst = disassemble(inst_code) orelse break :blk;
                     const inst = switch (old_inst.encoding.mnemonic) {
@@ -385,7 +385,7 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
             },
 
             elf.R_X86_64_REX_GOTPCRELX => {
-                if (!target.import and !target.isIFunc(elf_file) and !target.isAbs(elf_file)) blk: {
+                if (!target.flags.import and !target.isIFunc(elf_file) and !target.isAbs(elf_file)) blk: {
                     var inst_code = code[rel.r_offset - 3 ..];
                     const old_inst = disassemble(inst_code) orelse break :blk;
                     switch (old_inst.encoding.mnemonic) {

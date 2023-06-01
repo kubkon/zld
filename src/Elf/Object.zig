@@ -261,6 +261,7 @@ pub fn resolveSymbols(self: *Object, elf_file: *Elf) void {
                 .sym_idx = sym_idx,
                 .file = self.index,
             };
+            if (this_sym.st_bind() == elf.STB_WEAK) global.flags.weak = true;
         }
     }
 }
@@ -327,7 +328,7 @@ pub fn calcSymtabSize(self: *Object, elf_file: *Elf) !void {
             elf.STT_SECTION, elf.STT_NOTYPE => continue,
             else => {},
         }
-        local.output_symtab = true;
+        local.flags.output_symtab = true;
         self.output_symtab_size.nlocals += 1;
         self.output_symtab_size.strsize += @intCast(u32, local.getName(elf_file).len + 1);
     }
@@ -336,7 +337,7 @@ pub fn calcSymtabSize(self: *Object, elf_file: *Elf) !void {
         const global = elf_file.getSymbol(global_index);
         if (global.getFile(elf_file)) |file| if (file.getIndex() != self.index) continue;
         if (global.getAtom(elf_file)) |atom| if (!atom.is_alive) continue;
-        global.output_symtab = true;
+        global.flags.output_symtab = true;
         if (global.isLocal()) {
             self.output_symtab_size.nlocals += 1;
         } else {
@@ -354,7 +355,7 @@ pub fn writeSymtab(self: *Object, elf_file: *Elf, ctx: Elf.WriteSymtabCtx) !void
     var ilocal = ctx.ilocal;
     for (self.getLocals()) |local_index| {
         const local = elf_file.getSymbol(local_index);
-        if (!local.output_symtab) continue;
+        if (!local.flags.output_symtab) continue;
         const st_name = try ctx.strtab.insert(gpa, local.getName(elf_file));
         ctx.symtab[ilocal] = local.asElfSym(st_name, elf_file);
         ilocal += 1;
@@ -364,7 +365,7 @@ pub fn writeSymtab(self: *Object, elf_file: *Elf, ctx: Elf.WriteSymtabCtx) !void
     for (self.getGlobals()) |global_index| {
         const global = elf_file.getSymbol(global_index);
         if (global.getFile(elf_file)) |file| if (file.getIndex() != self.index) continue;
-        if (!global.output_symtab) continue;
+        if (!global.flags.output_symtab) continue;
         const st_name = try ctx.strtab.insert(gpa, global.getName(elf_file));
         if (global.isLocal()) {
             ctx.symtab[ilocal] = global.asElfSym(st_name, elf_file);
