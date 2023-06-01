@@ -332,7 +332,7 @@ pub const VerneedSection = struct {
 
         for (dynsyms, 1..) |dynsym, i| {
             const symbol = elf_file.getSymbol(dynsym.index);
-            if (symbol.import and symbol.ver_idx > Elf.VER_NDX_GLOBAL) {
+            if (symbol.import and symbol.ver_idx & Elf.VERSYM_VERSION > Elf.VER_NDX_GLOBAL) {
                 const shared = symbol.getFile(elf_file).?.shared;
                 verneed.appendAssumeCapacity(.{
                     .idx = i,

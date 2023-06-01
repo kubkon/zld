@@ -6,8 +6,8 @@ header: ?elf.Elf64_Ehdr = null,
 symtab: []align(1) const elf.Elf64_Sym = &[0]elf.Elf64_Sym{},
 strtab: []const u8 = &[0]u8{},
 /// Version symtab contains version strings of the symbols if present.
-versyms: []align(1) const elf.Elf64_Versym = &[0]elf.Elf64_Versym{},
-verdefs: std.ArrayListUnmanaged(u32) = .{},
+versyms: std.ArrayListUnmanaged(elf.Elf64_Versym) = .{},
+verstrings: std.ArrayListUnmanaged(u32) = .{},
 
 dynamic_sect_index: ?u16 = null,
 
@@ -35,7 +35,8 @@ pub fn isValidHeader(header: *const elf.Elf64_Ehdr) bool {
 }
 
 pub fn deinit(self: *SharedObject, allocator: Allocator) void {
-    self.verdefs.deinit(allocator);
+    self.versyms.deinit(allocator);
+    self.verstrings.deinit(allocator);
     self.symbols.deinit(allocator);
 }
 
@@ -79,31 +80,39 @@ fn parseVersions(self: *SharedObject, elf_file: *Elf) !void {
 
     if (versym_index == null or verdef_index == null) return;
 
-    const versymtab = self.getShdrContents(versym_index.?);
-    self.versyms = @ptrCast([*]align(1) const elf.Elf64_Versym, versymtab.ptr)[0..self.symtab.len];
+    const gpa = elf_file.base.allocator;
 
     const verdefs = self.getShdrContents(verdef_index.?);
     const nverdefs = self.getVerdefNum();
 
-    const gpa = elf_file.base.allocator;
-    try self.verdefs.ensureTotalCapacityPrecise(gpa, 2 + nverdefs);
-    self.verdefs.appendAssumeCapacity(0);
-    self.verdefs.appendAssumeCapacity(0);
+    try self.verstrings.resize(gpa, nverdefs + 2);
+    self.verstrings.items[Elf.VER_NDX_LOCAL] = 0;
+    self.verstrings.items[Elf.VER_NDX_GLOBAL] = 0;
 
     {
         var i: u32 = 0;
         var offset: u32 = 0;
         while (i < nverdefs) : (i += 1) {
             const verdef = @ptrCast(*align(1) const elf.Elf64_Verdef, verdefs.ptr + offset).*;
-
+            defer offset += verdef.vd_next;
+            if (verdef.vd_flags == Elf.VER_FLG_BASE) continue; // Skip BASE entry
             const vda_name = if (verdef.vd_cnt > 0)
                 @ptrCast(*align(1) const elf.Elf64_Verdaux, verdefs.ptr + offset + verdef.vd_aux).vda_name
             else
                 0;
-            self.verdefs.appendAssumeCapacity(vda_name);
-
-            offset += verdef.vd_next;
+            self.verstrings.items[verdef.vd_ndx] = vda_name;
         }
+    }
+
+    const versyms_raw = self.getShdrContents(versym_index.?);
+    const versyms = @ptrCast([*]align(1) const elf.Elf64_Versym, versyms_raw.ptr)[0..self.symtab.len];
+    try self.versyms.ensureTotalCapacityPrecise(gpa, versyms.len);
+    for (versyms) |ver| {
+        const normalized_ver = if (ver & Elf.VERSYM_VERSION >= self.verstrings.items.len - 1)
+            Elf.VER_NDX_GLOBAL
+        else
+            ver;
+        self.versyms.appendAssumeCapacity(normalized_ver);
     }
 }
 
@@ -133,7 +142,7 @@ pub fn resolveSymbols(self: *SharedObject, elf_file: *Elf) void {
                 .name = global.name,
                 .atom = 0,
                 .sym_idx = sym_idx,
-                .ver_idx = self.versyms[sym_idx] & Elf.VERSYM_VERSION,
+                .ver_idx = self.versyms.items[sym_idx],
                 .file = self.index,
             };
         }
@@ -208,8 +217,8 @@ pub inline fn getString(self: *SharedObject, off: u32) [:0]const u8 {
 }
 
 pub inline fn getVersionString(self: *SharedObject, index: elf.Elf64_Versym) [:0]const u8 {
-    if (self.versyms.len == 0) return "";
-    const off = self.verdefs.items[Elf.VERSYM_VERSION & index];
+    if (self.versyms.items.len == 0) return "";
+    const off = self.verstrings.items[index & Elf.VERSYM_VERSION];
     return self.getString(off);
 }
 

@@ -542,7 +542,7 @@ fn initSections(self: *Elf) !void {
         });
 
         const needs_versions = for (self.shared_objects.items) |index| {
-            if (self.getFile(index).?.shared.versyms.len > 0) break true;
+            if (self.getFile(index).?.shared.versyms.items.len > 0) break true;
         } else false;
         if (needs_versions) {
             self.versym_sect_index = try self.addSection(.{
@@ -2309,6 +2309,11 @@ pub const VERSYM_VERSION = 0x7fff;
 pub const VER_NDX_LOCAL = 0;
 /// Symbol is global
 pub const VER_NDX_GLOBAL = 1;
+
+/// Version definition of the file itself
+pub const VER_FLG_BASE = 1;
+/// Weak version identifier
+pub const VER_FLG_WEAK = 2;
 
 // VERDEF
 pub const SHT_GNU_verdef = 0x6ffffffd;

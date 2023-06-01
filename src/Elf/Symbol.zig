@@ -192,7 +192,7 @@ fn formatName(
     const elf_file = ctx.elf_file;
     const symbol = ctx.symbol;
     try writer.writeAll(symbol.getName(elf_file));
-    switch (symbol.ver_idx) {
+    switch (symbol.ver_idx & Elf.VERSYM_VERSION) {
         Elf.VER_NDX_LOCAL, Elf.VER_NDX_GLOBAL => {},
         else => {
             const shared = symbol.getFile(elf_file).?.shared;
