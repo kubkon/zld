@@ -62,13 +62,11 @@ pub fn parse(self: *SharedObject, elf_file: *Elf) !void {
         self.strtab = self.getShdrContents(@intCast(u16, shdr.sh_link));
     }
 
-    try self.initSymtab(elf_file);
     try self.parseVersions(elf_file);
+    try self.initSymtab(elf_file);
 }
 
 fn parseVersions(self: *SharedObject, elf_file: *Elf) !void {
-    if (self.symtab.len == 0) return;
-
     const shdrs = self.getShdrs();
     var versym_index: ?u16 = null;
     var verdef_index: ?u16 = null;
@@ -105,7 +103,8 @@ fn parseVersions(self: *SharedObject, elf_file: *Elf) !void {
     }
 
     const versyms_raw = self.getShdrContents(versym_index.?);
-    const versyms = @ptrCast([*]align(1) const elf.Elf64_Versym, versyms_raw.ptr)[0..self.symtab.len];
+    const nversyms = @divExact(versyms_raw.len, @sizeOf(elf.Elf64_Versym));
+    const versyms = @ptrCast([*]align(1) const elf.Elf64_Versym, versyms_raw.ptr)[0..nversyms];
     try self.versyms.ensureTotalCapacityPrecise(gpa, versyms.len);
     for (versyms) |ver| {
         const normalized_ver = if (ver & Elf.VERSYM_VERSION >= self.verstrings.items.len - 1)
@@ -121,9 +120,16 @@ fn initSymtab(self: *SharedObject, elf_file: *Elf) !void {
 
     try self.symbols.ensureTotalCapacityPrecise(gpa, self.symtab.len);
 
-    for (self.symtab) |sym| {
+    for (self.symtab, 0..) |sym, i| {
+        const hidden = self.versyms.items.len > 0 and self.versyms.items[i] & Elf.VERSYM_HIDDEN != 0;
         const name = self.getString(sym.st_name);
-        const gop = try elf_file.getOrCreateGlobal(name);
+        // We need to garble up the name so that we don't pick this symbol
+        // during symbol resolution. Thank you GNU!
+        const off = if (hidden) try elf_file.internString("{s}@{s}", .{
+            name,
+            self.getVersionString(self.versyms.items[i]),
+        }) else try elf_file.internString("{s}", .{name});
+        const gop = try elf_file.getOrCreateGlobal(off);
         self.symbols.addOneAssumeCapacity().* = gop.index;
     }
 }

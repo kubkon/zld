@@ -45,8 +45,7 @@ entry_index: ?u32 = null,
 
 symbols: std.ArrayListUnmanaged(Symbol) = .{},
 symbols_extra: std.ArrayListUnmanaged(u32) = .{},
-// TODO convert to context-adapted
-globals: std.StringHashMapUnmanaged(u32) = .{},
+globals: std.AutoHashMapUnmanaged(u32, u32) = .{},
 /// This table will be populated after `scanRelocs` has run.
 /// Key is symbol index.
 undefs: std.AutoHashMapUnmanaged(u32, std.ArrayListUnmanaged(Atom.Index)) = .{},
@@ -70,7 +69,7 @@ atoms: std.ArrayListUnmanaged(Atom) = .{},
 
 comdat_groups: std.ArrayListUnmanaged(ComdatGroup) = .{},
 comdat_groups_owners: std.ArrayListUnmanaged(ComdatGroupOwner) = .{},
-comdat_groups_table: std.StringHashMapUnmanaged(ComdatGroupOwner.Index) = .{},
+comdat_groups_table: std.AutoHashMapUnmanaged(u32, ComdatGroupOwner.Index) = .{},
 
 needs_tlsld: bool = false,
 
@@ -307,7 +306,7 @@ pub fn flush(self: *Elf) !void {
     self.entry_index = blk: {
         if (self.options.output_mode != .exe) break :blk null;
         const entry_name = self.options.entry orelse "_start";
-        break :blk self.globals.get(entry_name) orelse null;
+        break :blk self.getGlobalByName(entry_name);
     };
     if (self.options.output_mode == .exe and self.entry_index == null) {
         self.base.fatal("no entrypoint found: '{s}'", .{self.options.entry orelse "_start"});
@@ -1556,10 +1555,12 @@ fn resolveSyntheticSymbols(self: *Elf) !void {
     self.fini_array_end_index = try internal.addSyntheticGlobal("__fini_array_end", self);
     self.got_index = try internal.addSyntheticGlobal("_GLOBAL_OFFSET_TABLE_", self);
     self.plt_index = try internal.addSyntheticGlobal("_PROCEDURE_LINKAGE_TABLE_", self);
-    if (self.globals.get("__dso_handle")) |index| {
+
+    if (self.getGlobalByName("__dso_handle")) |index| {
         if (self.getSymbol(index).getFile(self) == null)
             self.dso_handle_index = try internal.addSyntheticGlobal("__dso_handle", self);
     }
+
     internal.resolveSymbols(self);
 }
 
@@ -2046,18 +2047,25 @@ pub fn setSymbolExtra(self: *Elf, index: u32, extra: Symbol.Extra) void {
     }
 }
 
+pub fn internString(self: *Elf, comptime format: []const u8, args: anytype) !u32 {
+    const gpa = self.base.allocator;
+    const string = try std.fmt.allocPrintZ(gpa, format, args);
+    defer gpa.free(string);
+    return self.string_intern.insert(gpa, string);
+}
+
 const GetOrCreateGlobalResult = struct {
     found_existing: bool,
     index: u32,
 };
 
-pub fn getOrCreateGlobal(self: *Elf, name: [:0]const u8) !GetOrCreateGlobalResult {
+pub fn getOrCreateGlobal(self: *Elf, off: u32) !GetOrCreateGlobalResult {
     const gpa = self.base.allocator;
-    const gop = try self.globals.getOrPut(gpa, name);
+    const gop = try self.globals.getOrPut(gpa, off);
     if (!gop.found_existing) {
         const index = try self.addSymbol();
         const global = self.getSymbol(index);
-        global.name = try self.string_intern.insert(gpa, name);
+        global.name = off;
         gop.value_ptr.* = index;
     }
     return .{
@@ -2066,14 +2074,19 @@ pub fn getOrCreateGlobal(self: *Elf, name: [:0]const u8) !GetOrCreateGlobalResul
     };
 }
 
+pub fn getGlobalByName(self: *Elf, name: []const u8) ?u32 {
+    const off = self.string_intern.getOffset(name) orelse return null;
+    return self.globals.get(off);
+}
+
 const GetOrCreateComdatGroupOwnerResult = struct {
     found_existing: bool,
     index: ComdatGroupOwner.Index,
 };
 
-pub fn getOrCreateComdatGroupOwner(self: *Elf, name: [:0]const u8) !GetOrCreateComdatGroupOwnerResult {
+pub fn getOrCreateComdatGroupOwner(self: *Elf, off: u32) !GetOrCreateComdatGroupOwnerResult {
     const gpa = self.base.allocator;
-    const gop = try self.comdat_groups_table.getOrPut(gpa, name);
+    const gop = try self.comdat_groups_table.getOrPut(gpa, off);
     if (!gop.found_existing) {
         const index = @intCast(ComdatGroupOwner.Index, self.comdat_groups_owners.items.len);
         const owner = try self.comdat_groups_owners.addOne(gpa);

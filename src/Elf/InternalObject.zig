@@ -22,7 +22,8 @@ pub fn addSyntheticGlobal(self: *InternalObject, name: [:0]const u8, elf_file: *
         .st_value = 0,
         .st_size = 0,
     });
-    const gop = try elf_file.getOrCreateGlobal(name);
+    const off = try elf_file.internString("{s}", .{name});
+    const gop = try elf_file.getOrCreateGlobal(off);
     self.symbols.addOneAssumeCapacity().* = gop.index;
     return gop.index;
 }

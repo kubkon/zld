@@ -109,7 +109,8 @@ fn initAtoms(self: *Object, elf_file: *Elf) !void {
                     continue;
                 }
 
-                const gop = try elf_file.getOrCreateComdatGroupOwner(group_signature);
+                const group_signature_off = try elf_file.internString("{s}", .{group_signature});
+                const gop = try elf_file.getOrCreateComdatGroupOwner(group_signature_off);
                 const comdat_group_index = try elf_file.addComdatGroup();
                 const comdat_group = elf_file.getComdatGroup(comdat_group_index);
                 comdat_group.* = .{
@@ -227,7 +228,8 @@ fn initSymtab(self: *Object, elf_file: *Elf) !void {
 
     for (self.symtab[first_global..]) |sym| {
         const name = self.getString(sym.st_name);
-        const gop = try elf_file.getOrCreateGlobal(name);
+        const off = try elf_file.internString("{s}", .{name});
+        const gop = try elf_file.getOrCreateGlobal(off);
         self.symbols.addOneAssumeCapacity().* = gop.index;
     }
 }
