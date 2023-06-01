@@ -28,6 +28,8 @@ dynamic_sect_index: ?u16 = null,
 dynsymtab_sect_index: ?u16 = null,
 dynstrtab_sect_index: ?u16 = null,
 hash_sect_index: ?u16 = null,
+versym_sect_index: ?u16 = null,
+verneed_sect_index: ?u16 = null,
 
 internal_object_index: ?u32 = null,
 dynamic_index: ?u32 = null,
@@ -43,8 +45,7 @@ entry_index: ?u32 = null,
 
 symbols: std.ArrayListUnmanaged(Symbol) = .{},
 symbols_extra: std.ArrayListUnmanaged(u32) = .{},
-// TODO convert to context-adapted
-globals: std.StringHashMapUnmanaged(u32) = .{},
+globals: std.AutoHashMapUnmanaged(u32, u32) = .{},
 /// This table will be populated after `scanRelocs` has run.
 /// Key is symbol index.
 undefs: std.AutoHashMapUnmanaged(u32, std.ArrayListUnmanaged(Atom.Index)) = .{},
@@ -54,6 +55,8 @@ string_intern: StringTable(.string_intern) = .{},
 shstrtab: StringTable(.shstrtab) = .{},
 dynsym: DynsymSection = .{},
 dynstrtab: StringTable(.dynstrtab) = .{},
+versym: std.ArrayListUnmanaged(elf.Elf64_Versym) = .{},
+verneed: VerneedSection = .{},
 
 dynamic: DynamicSection = .{},
 hash: HashSection = .{},
@@ -66,7 +69,7 @@ atoms: std.ArrayListUnmanaged(Atom) = .{},
 
 comdat_groups: std.ArrayListUnmanaged(ComdatGroup) = .{},
 comdat_groups_owners: std.ArrayListUnmanaged(ComdatGroupOwner) = .{},
-comdat_groups_table: std.StringHashMapUnmanaged(ComdatGroupOwner.Index) = .{},
+comdat_groups_table: std.AutoHashMapUnmanaged(u32, ComdatGroupOwner.Index) = .{},
 
 needs_tlsld: bool = false,
 
@@ -135,6 +138,8 @@ pub fn deinit(self: *Elf) void {
     self.dynstrtab.deinit(gpa);
     self.dynamic.deinit(gpa);
     self.hash.deinit(gpa);
+    self.versym.deinit(gpa);
+    self.verneed.deinit(gpa);
     {
         var it = self.undefs.valueIterator();
         while (it.next()) |notes| {
@@ -301,7 +306,7 @@ pub fn flush(self: *Elf) !void {
     self.entry_index = blk: {
         if (self.options.output_mode != .exe) break :blk null;
         const entry_name = self.options.entry orelse "_start";
-        break :blk self.globals.get(entry_name) orelse null;
+        break :blk self.getGlobalByName(entry_name);
     };
     if (self.options.output_mode == .exe and self.entry_index == null) {
         self.base.fatal("no entrypoint found: '{s}'", .{self.options.entry orelse "_start"});
@@ -340,6 +345,7 @@ pub fn flush(self: *Elf) !void {
     try self.sortInitFini();
     try self.setDynamic();
     try self.setHash();
+    try self.setVerSymtab();
     try self.calcSectionSizes();
 
     try self.allocateSections();
@@ -533,6 +539,25 @@ fn initSections(self: *Elf) !void {
             .addralign = 4,
             .entsize = 4,
         });
+
+        const needs_versions = for (self.shared_objects.items) |index| {
+            if (self.getFile(index).?.shared.versyms.items.len > 0) break true;
+        } else false;
+        if (needs_versions) {
+            self.versym_sect_index = try self.addSection(.{
+                .name = ".gnu.version",
+                .flags = elf.SHF_ALLOC,
+                .type = SHT_GNU_versym,
+                .addralign = @alignOf(elf.Elf64_Versym),
+                .entsize = @sizeOf(elf.Elf64_Versym),
+            });
+            self.verneed_sect_index = try self.addSection(.{
+                .name = ".gnu.version_r",
+                .flags = elf.SHF_ALLOC,
+                .type = SHT_GNU_verneed,
+                .addralign = @alignOf(elf.Elf64_Verneed),
+            });
+        }
     }
 }
 
@@ -632,6 +657,16 @@ fn calcSectionSizes(self: *Elf) !void {
     if (self.dynstrtab_sect_index) |index| {
         const shdr = &self.sections.items(.shdr)[index];
         shdr.sh_size = self.dynstrtab.buffer.items.len;
+    }
+
+    if (self.versym_sect_index) |index| {
+        const shdr = &self.sections.items(.shdr)[index];
+        shdr.sh_size = self.versym.items.len * @sizeOf(elf.Elf64_Versym);
+    }
+
+    if (self.verneed_sect_index) |index| {
+        const shdr = &self.sections.items(.shdr)[index];
+        shdr.sh_size = self.verneed.size();
     }
 
     if (!self.options.strip_all) {
@@ -993,6 +1028,9 @@ fn getSectionRank(self: *Elf, shndx: u16) u8 {
         elf.SHT_NULL => return 0,
         elf.SHT_DYNSYM => return 2,
         elf.SHT_HASH => return 3,
+        SHT_GNU_versym => return 4,
+        SHT_GNU_verdef => return 4,
+        SHT_GNU_verneed => return 4,
 
         elf.SHT_PREINIT_ARRAY,
         elf.SHT_INIT_ARRAY,
@@ -1086,6 +1124,8 @@ fn sortSections(self: *Elf) !void {
         &self.rela_dyn_sect_index,
         &self.rela_plt_sect_index,
         &self.copy_rel_sect_index,
+        &self.versym_sect_index,
+        &self.verneed_sect_index,
     }) |maybe_index| {
         if (maybe_index.*) |*index| {
             index.* = backlinks[index.*];
@@ -1110,6 +1150,16 @@ fn sortSections(self: *Elf) !void {
     if (self.hash_sect_index) |index| {
         const shdr = &self.sections.items(.shdr)[index];
         shdr.sh_link = self.dynsymtab_sect_index.?;
+    }
+
+    if (self.versym_sect_index) |index| {
+        const shdr = &self.sections.items(.shdr)[index];
+        shdr.sh_link = self.dynsymtab_sect_index.?;
+    }
+
+    if (self.verneed_sect_index) |index| {
+        const shdr = &self.sections.items(.shdr)[index];
+        shdr.sh_link = self.dynstrtab_sect_index.?;
     }
 
     if (self.rela_dyn_sect_index) |index| {
@@ -1505,10 +1555,12 @@ fn resolveSyntheticSymbols(self: *Elf) !void {
     self.fini_array_end_index = try internal.addSyntheticGlobal("__fini_array_end", self);
     self.got_index = try internal.addSyntheticGlobal("_GLOBAL_OFFSET_TABLE_", self);
     self.plt_index = try internal.addSyntheticGlobal("_PROCEDURE_LINKAGE_TABLE_", self);
-    if (self.globals.get("__dso_handle")) |index| {
+
+    if (self.getGlobalByName("__dso_handle")) |index| {
         if (self.getSymbol(index).getFile(self) == null)
             self.dso_handle_index = try internal.addSyntheticGlobal("__dso_handle", self);
     }
+
     internal.resolveSymbols(self);
 }
 
@@ -1638,6 +1690,18 @@ fn setDynamic(self: *Elf) !void {
     }
 }
 
+fn setVerSymtab(self: *Elf) !void {
+    if (self.versym_sect_index == null) return;
+    try self.versym.resize(self.base.allocator, self.dynsym.count());
+    @memset(self.versym.items, VER_NDX_LOCAL);
+
+    if (self.verneed_sect_index) |shndx| {
+        try self.verneed.generate(self);
+        const shdr = &self.sections.items(.shdr)[shndx];
+        shdr.sh_info = @intCast(u32, self.verneed.verneed.items.len);
+    }
+}
+
 fn setHash(self: *Elf) !void {
     if (self.hash_sect_index == null) return;
     try self.hash.generate(self);
@@ -1696,6 +1760,19 @@ fn writeSyntheticSections(self: *Elf) !void {
     if (self.hash_sect_index) |shndx| {
         const shdr = self.sections.items(.shdr)[shndx];
         try self.base.file.pwriteAll(self.hash.buffer.items, shdr.sh_offset);
+    }
+
+    if (self.versym_sect_index) |shndx| {
+        const shdr = self.sections.items(.shdr)[shndx];
+        try self.base.file.pwriteAll(mem.sliceAsBytes(self.versym.items), shdr.sh_offset);
+    }
+
+    if (self.verneed_sect_index) |shndx| {
+        const shdr = self.sections.items(.shdr)[shndx];
+        var buffer = try std.ArrayList(u8).initCapacity(gpa, self.verneed.size());
+        defer buffer.deinit();
+        try self.verneed.write(buffer.writer());
+        try self.base.file.pwriteAll(buffer.items, shdr.sh_offset);
     }
 
     if (self.dynamic_sect_index) |shndx| {
@@ -1970,18 +2047,25 @@ pub fn setSymbolExtra(self: *Elf, index: u32, extra: Symbol.Extra) void {
     }
 }
 
+pub fn internString(self: *Elf, comptime format: []const u8, args: anytype) !u32 {
+    const gpa = self.base.allocator;
+    const string = try std.fmt.allocPrintZ(gpa, format, args);
+    defer gpa.free(string);
+    return self.string_intern.insert(gpa, string);
+}
+
 const GetOrCreateGlobalResult = struct {
     found_existing: bool,
     index: u32,
 };
 
-pub fn getOrCreateGlobal(self: *Elf, name: [:0]const u8) !GetOrCreateGlobalResult {
+pub fn getOrCreateGlobal(self: *Elf, off: u32) !GetOrCreateGlobalResult {
     const gpa = self.base.allocator;
-    const gop = try self.globals.getOrPut(gpa, name);
+    const gop = try self.globals.getOrPut(gpa, off);
     if (!gop.found_existing) {
         const index = try self.addSymbol();
         const global = self.getSymbol(index);
-        global.name = try self.string_intern.insert(gpa, name);
+        global.name = off;
         gop.value_ptr.* = index;
     }
     return .{
@@ -1990,14 +2074,19 @@ pub fn getOrCreateGlobal(self: *Elf, name: [:0]const u8) !GetOrCreateGlobalResul
     };
 }
 
+pub fn getGlobalByName(self: *Elf, name: []const u8) ?u32 {
+    const off = self.string_intern.getOffset(name) orelse return null;
+    return self.globals.get(off);
+}
+
 const GetOrCreateComdatGroupOwnerResult = struct {
     found_existing: bool,
     index: ComdatGroupOwner.Index,
 };
 
-pub fn getOrCreateComdatGroupOwner(self: *Elf, name: [:0]const u8) !GetOrCreateComdatGroupOwnerResult {
+pub fn getOrCreateComdatGroupOwner(self: *Elf, off: u32) !GetOrCreateComdatGroupOwnerResult {
     const gpa = self.base.allocator;
-    const gop = try self.comdat_groups_table.getOrPut(gpa, name);
+    const gop = try self.comdat_groups_table.getOrPut(gpa, off);
     if (!gop.found_existing) {
         const index = @intCast(ComdatGroupOwner.Index, self.comdat_groups_owners.items.len);
         const owner = try self.comdat_groups_owners.addOne(gpa);
@@ -2226,6 +2315,26 @@ pub const null_sym = elf.Elf64_Sym{
 
 pub const base_tag = Zld.Tag.elf;
 
+pub const VERSYM_HIDDEN = 0x8000;
+pub const VERSYM_VERSION = 0x7fff;
+
+/// Symbol is local
+pub const VER_NDX_LOCAL = 0;
+/// Symbol is global
+pub const VER_NDX_GLOBAL = 1;
+
+/// Version definition of the file itself
+pub const VER_FLG_BASE = 1;
+/// Weak version identifier
+pub const VER_FLG_WEAK = 2;
+
+// VERDEF
+pub const SHT_GNU_verdef = 0x6ffffffd;
+// VERNEED
+pub const SHT_GNU_verneed = 0x6ffffffe;
+// VERSYM
+pub const SHT_GNU_versym = 0x6fffffff;
+
 const std = @import("std");
 const build_options = @import("build_options");
 const builtin = @import("builtin");
@@ -2259,4 +2368,5 @@ const SharedObject = @import("Elf/SharedObject.zig");
 const StringTable = @import("strtab.zig").StringTable;
 const Symbol = @import("Elf/Symbol.zig");
 const ThreadPool = @import("ThreadPool.zig");
+const VerneedSection = synthetic.VerneedSection;
 const Zld = @import("Zld.zig");

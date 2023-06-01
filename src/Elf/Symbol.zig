@@ -21,6 +21,10 @@ shndx: u16 = 0,
 /// Use `getSourceSymbol` to pull the source symbol from the relevant file.
 sym_idx: u32 = 0,
 
+/// Index of the source version symbol this symbol references if any.
+/// If the symbol is unversioned it will have either VER_NDX_LOCAL or VER_NDX_GLOBAL.
+ver_idx: elf.Elf64_Versym = Elf.VER_NDX_LOCAL,
+
 /// Whether the symbol is imported at runtime.
 import: bool = false,
 
@@ -165,17 +169,44 @@ pub fn format(
     @compileError("do not format symbols directly");
 }
 
-pub fn fmt(symbol: Symbol, elf_file: *Elf) std.fmt.Formatter(format2) {
+const FormatContext = struct {
+    symbol: Symbol,
+    elf_file: *Elf,
+};
+
+pub fn fmtName(symbol: Symbol, elf_file: *Elf) std.fmt.Formatter(formatName) {
     return .{ .data = .{
         .symbol = symbol,
         .elf_file = elf_file,
     } };
 }
 
-const FormatContext = struct {
-    symbol: Symbol,
-    elf_file: *Elf,
-};
+fn formatName(
+    ctx: FormatContext,
+    comptime unused_fmt_string: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = options;
+    _ = unused_fmt_string;
+    const elf_file = ctx.elf_file;
+    const symbol = ctx.symbol;
+    try writer.writeAll(symbol.getName(elf_file));
+    switch (symbol.ver_idx & Elf.VERSYM_VERSION) {
+        Elf.VER_NDX_LOCAL, Elf.VER_NDX_GLOBAL => {},
+        else => {
+            const shared = symbol.getFile(elf_file).?.shared;
+            try writer.print("@{s}", .{shared.getVersionString(symbol.ver_idx)});
+        },
+    }
+}
+
+pub fn fmt(symbol: Symbol, elf_file: *Elf) std.fmt.Formatter(format2) {
+    return .{ .data = .{
+        .symbol = symbol,
+        .elf_file = elf_file,
+    } };
+}
 
 fn format2(
     ctx: FormatContext,
@@ -186,7 +217,7 @@ fn format2(
     _ = options;
     _ = unused_fmt_string;
     const symbol = ctx.symbol;
-    try writer.print("%{d} : {s} : @{x}", .{ symbol.sym_idx, symbol.getName(ctx.elf_file), symbol.value });
+    try writer.print("%{d} : {s} : @{x}", .{ symbol.sym_idx, symbol.fmtName(ctx.elf_file), symbol.value });
     if (symbol.getFile(ctx.elf_file)) |file| {
         if (symbol.isAbs(ctx.elf_file)) {
             if (symbol.getSourceSymbol(ctx.elf_file).st_shndx == elf.SHN_UNDEF) {

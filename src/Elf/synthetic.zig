@@ -58,10 +58,12 @@ pub const DynamicSection = struct {
         nentries += 1; // SYMENT
         nentries += 1; // STRTAB
         nentries += 1; // STRSZ
-        nentries += 1; // NULL
+        if (elf_file.versym_sect_index != null) nentries += 1; // VERSYM
+        if (elf_file.verneed_sect_index != null) nentries += 2; // VERNEED
         if (dt.getFlags(elf_file) != null) nentries += 1; // FLAGS
         if (dt.getFlags1(elf_file) != null) nentries += 1; // FLAGS_1
         nentries += 1; // DEBUG
+        nentries += 1; // NULL
         return nentries * @sizeOf(elf.Elf64_Dyn);
     }
 
@@ -149,6 +151,22 @@ pub const DynamicSection = struct {
             try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_STRSZ, .d_val = shdr.sh_size });
         }
 
+        // VERSYM
+        if (elf_file.versym_sect_index) |shndx| {
+            const addr = elf_file.sections.items(.shdr)[shndx].sh_addr;
+            try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_VERSYM, .d_val = addr });
+        }
+
+        // VERNEED + VERNEEDNUM
+        if (elf_file.verneed_sect_index) |shndx| {
+            const addr = elf_file.sections.items(.shdr)[shndx].sh_addr;
+            try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_VERNEED, .d_val = addr });
+            try writer.writeStruct(elf.Elf64_Dyn{
+                .d_tag = elf.DT_VERNEEDNUM,
+                .d_val = elf_file.verneed.verneed.items.len,
+            });
+        }
+
         // FLAGS
         if (dt.getFlags(elf_file)) |flags| {
             try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_FLAGS, .d_val = flags });
@@ -205,7 +223,7 @@ pub const HashSection = struct {
         return hs.buffer.items.len;
     }
 
-    fn hasher(name: [:0]const u8) u32 {
+    pub fn hasher(name: [:0]const u8) u32 {
         var h: u32 = 0;
         var g: u32 = 0;
         for (name) |c| {
@@ -219,7 +237,12 @@ pub const HashSection = struct {
 };
 
 pub const DynsymSection = struct {
-    symbols: std.ArrayListUnmanaged(struct { index: u32, off: u32 }) = .{},
+    symbols: std.ArrayListUnmanaged(Dynsym) = .{},
+
+    pub const Dynsym = struct {
+        index: u32,
+        off: u32,
+    };
 
     pub fn deinit(dynsym: *DynsymSection, allocator: Allocator) void {
         dynsym.symbols.deinit(allocator);
@@ -264,6 +287,139 @@ pub const DynsymSection = struct {
                 .st_size = 0,
             });
         }
+    }
+};
+
+pub const VerneedSection = struct {
+    verneed: std.ArrayListUnmanaged(elf.Elf64_Verneed) = .{},
+    vernaux: std.ArrayListUnmanaged(elf.Elf64_Vernaux) = .{},
+    index: elf.Elf64_Versym = Elf.VER_NDX_GLOBAL + 1,
+
+    pub fn deinit(vern: *VerneedSection, allocator: Allocator) void {
+        vern.verneed.deinit(allocator);
+        vern.vernaux.deinit(allocator);
+    }
+
+    pub fn generate(vern: *VerneedSection, elf_file: *Elf) !void {
+        const dynsyms = elf_file.dynsym.symbols.items;
+        var versyms = elf_file.versym.items;
+
+        const SymWithVersion = struct {
+            idx: usize,
+            shared: u32,
+            version: elf.Elf64_Versym,
+
+            fn getSoname(this: @This(), ctx: *Elf) []const u8 {
+                const shared = ctx.getFile(this.shared).?.shared;
+                return shared.getSoname();
+            }
+
+            fn getVersionString(this: @This(), ctx: *Elf) [:0]const u8 {
+                const shared = ctx.getFile(this.shared).?.shared;
+                return shared.getVersionString(this.version);
+            }
+
+            pub fn lessThan(ctx: *Elf, lhs: @This(), rhs: @This()) bool {
+                if (lhs.shared == rhs.shared) return lhs.version < rhs.version;
+                return mem.lessThan(u8, lhs.getSoname(ctx), rhs.getSoname(ctx));
+            }
+        };
+
+        const gpa = elf_file.base.allocator;
+        var verneed = std.ArrayList(SymWithVersion).init(gpa);
+        defer verneed.deinit();
+        try verneed.ensureTotalCapacity(dynsyms.len);
+
+        for (dynsyms, 1..) |dynsym, i| {
+            const symbol = elf_file.getSymbol(dynsym.index);
+            if (symbol.import and symbol.ver_idx & Elf.VERSYM_VERSION > Elf.VER_NDX_GLOBAL) {
+                const shared = symbol.getFile(elf_file).?.shared;
+                verneed.appendAssumeCapacity(.{
+                    .idx = i,
+                    .shared = shared.index,
+                    .version = symbol.ver_idx,
+                });
+            }
+        }
+
+        mem.sort(SymWithVersion, verneed.items, elf_file, SymWithVersion.lessThan);
+
+        var last = verneed.items[0];
+        var last_verneed = try vern.addVerneed(last.getSoname(elf_file), elf_file);
+        var last_vernaux = try vern.addVernaux(last_verneed, last.getVersionString(elf_file), elf_file);
+        versyms[last.idx] = last_vernaux.vna_other;
+
+        for (verneed.items[1..]) |ver| {
+            if (ver.shared == last.shared) {
+                if (ver.version != last.version) {
+                    last_vernaux = try vern.addVernaux(last_verneed, ver.getVersionString(elf_file), elf_file);
+                }
+            } else {
+                last_verneed = try vern.addVerneed(ver.getSoname(elf_file), elf_file);
+                last_vernaux = try vern.addVernaux(last_verneed, ver.getVersionString(elf_file), elf_file);
+            }
+            last = ver;
+            versyms[ver.idx] = last_vernaux.vna_other;
+        }
+
+        // Fixup offsets
+        var count: usize = 0;
+        var verneed_off: u32 = 0;
+        var vernaux_off: u32 = @intCast(u32, vern.verneed.items.len) * @sizeOf(elf.Elf64_Verneed);
+        for (vern.verneed.items, 0..) |*vsym, vsym_i| {
+            if (vsym_i < vern.verneed.items.len - 1) vsym.vn_next = @sizeOf(elf.Elf64_Verneed);
+            vsym.vn_aux = vernaux_off - verneed_off;
+            var inner_off: u32 = 0;
+            for (vern.vernaux.items[count..][0..vsym.vn_cnt], 0..) |*vaux, vaux_i| {
+                if (vaux_i < vsym.vn_cnt - 1) vaux.vna_next = @sizeOf(elf.Elf64_Vernaux);
+                inner_off += @sizeOf(elf.Elf64_Vernaux);
+            }
+            vernaux_off += inner_off;
+            verneed_off += @sizeOf(elf.Elf64_Verneed);
+            count += vsym.vn_cnt;
+        }
+    }
+
+    fn addVerneed(vern: *VerneedSection, soname: []const u8, elf_file: *Elf) !*elf.Elf64_Verneed {
+        const gpa = elf_file.base.allocator;
+        const sym = try vern.verneed.addOne(gpa);
+        sym.* = .{
+            .vn_version = 1,
+            .vn_cnt = 0,
+            .vn_file = try elf_file.dynstrtab.insert(gpa, soname),
+            .vn_aux = 0,
+            .vn_next = 0,
+        };
+        return sym;
+    }
+
+    fn addVernaux(
+        vern: *VerneedSection,
+        verneed_sym: *elf.Elf64_Verneed,
+        version: [:0]const u8,
+        elf_file: *Elf,
+    ) !elf.Elf64_Vernaux {
+        const gpa = elf_file.base.allocator;
+        const sym = try vern.vernaux.addOne(gpa);
+        sym.* = .{
+            .vna_hash = HashSection.hasher(version),
+            .vna_flags = 0,
+            .vna_other = vern.index,
+            .vna_name = try elf_file.dynstrtab.insert(gpa, version),
+            .vna_next = 0,
+        };
+        verneed_sym.vn_cnt += 1;
+        vern.index += 1;
+        return sym.*;
+    }
+
+    pub fn size(vern: VerneedSection) usize {
+        return vern.verneed.items.len * @sizeOf(elf.Elf64_Verneed) + vern.vernaux.items.len * @sizeOf(elf.Elf64_Vernaux);
+    }
+
+    pub fn write(vern: VerneedSection, writer: anytype) !void {
+        try writer.writeAll(mem.sliceAsBytes(vern.verneed.items));
+        try writer.writeAll(mem.sliceAsBytes(vern.vernaux.items));
     }
 };
 
