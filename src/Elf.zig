@@ -344,6 +344,7 @@ pub fn flush(self: *Elf) !void {
     try self.addAtomsToSections();
     try self.sortInitFini();
     try self.setDynamic();
+    self.dynsym.sort(self);
     try self.setHash();
     try self.setVerSymtab();
     try self.calcSectionSizes();
