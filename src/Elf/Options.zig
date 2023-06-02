@@ -22,6 +22,8 @@ const usage =
     \\-l[value]                     Specify library to link against
     \\-L[value]                     Specify library search dir
     \\-m [value]                    Set target emulation
+    \\--pie, --pic-executable       Create a position independent executable
+    \\--no-pie                      Create a position dependent executable (default)
     \\--pop-state                   Restore the states saved by --push-state
     \\--push-state                  Save the current state of --as-needed, -static and --whole-archive
     \\--relax                       Optimize instructions (default)
@@ -67,6 +69,7 @@ eh_frame_hdr: bool = false,
 static: bool = false,
 relax: bool = true,
 export_dynamic: bool = false,
+pie: bool = false,
 /// -z flags
 /// Overrides default stack size.
 z_stack_size: ?u64 = null,
@@ -123,12 +126,14 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             try rpath_list.put(path, {});
         } else if (p.arg1("R")) |path| {
             try rpath_list.put(path, {});
-        } else if (p.flagAny("export-dynamic")) {
-            opts.export_dynamic = true;
-        } else if (p.flag1("E")) {
+        } else if (p.flagAny("export-dynamic") or p.flag1("E")) {
             opts.export_dynamic = true;
         } else if (p.flagAny("no-export-dynamic")) {
             opts.export_dynamic = false;
+        } else if (p.flagAny("pie") or p.flagAny("pic-executable")) {
+            opts.pie = true;
+        } else if (p.flagAny("no-pie")) {
+            opts.pie = false;
         } else if (p.argAny("entry")) |name| {
             opts.entry = name;
         } else if (p.arg1("e")) |name| {

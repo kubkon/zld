@@ -189,19 +189,13 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
         // pointer indirection via GOT, or a stub trampoline via PLT.
         switch (rel.r_type()) {
             elf.R_X86_64_64 => {
-                if (symbol.flags.import and symbol.getSourceSymbol(elf_file).st_type() != elf.STT_FUNC) {
-                    symbol.flags.copy_rel = true;
-                }
+                self.scanReloc(symbol, rel, getDynAbsRelocAction(symbol, elf_file), elf_file);
             },
 
             elf.R_X86_64_32,
             elf.R_X86_64_32S,
             => {
-                if (symbol.flags.import and symbol.getSourceSymbol(elf_file).st_type() != elf.STT_FUNC) {
-                    elf_file.base.fatal("TODO import in a position-dependent executable in {}", .{
-                        fmtRelocType(rel.r_type()),
-                    });
-                }
+                self.scanReloc(symbol, rel, getAbsRelocAction(symbol, elf_file), elf_file);
             },
 
             elf.R_X86_64_GOTPCREL,
@@ -218,18 +212,7 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
             },
 
             elf.R_X86_64_PC32 => {
-                if (symbol.flags.import and symbol.getSourceSymbol(elf_file).st_type() != elf.STT_FUNC) {
-                    if (elf_file.options.z_nocopyreloc) {
-                        elf_file.base.fatal("{s}: {} relocation at offset 0x{x} against symbol '{s}' cannot be used; recompile with {s}", .{
-                            self.getName(elf_file),
-                            fmtRelocType(rel.r_type()),
-                            rel.r_offset,
-                            symbol.getName(elf_file),
-                            if (symbol.isAbs(elf_file)) "-fno-PIC" else "-fPIC",
-                        });
-                    }
-                    symbol.flags.copy_rel = true;
-                }
+                self.scanReloc(symbol, rel, getPcRelocAction(symbol, elf_file), elf_file);
             },
 
             elf.R_X86_64_TLSGD => {
@@ -259,6 +242,137 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
             else => {},
         }
     }
+}
+
+fn scanReloc(self: Atom, symbol: *Symbol, rel: elf.Elf64_Rela, action: RelocAction, elf_file: *Elf) void {
+    const is_writeable = self.getInputShdr(elf_file).sh_flags & elf.SHF_WRITE != 0;
+    const object = self.getObject(elf_file);
+
+    switch (action) {
+        .none => {},
+        .@"error" => self.relocError(symbol, rel, elf_file),
+        .copyrel => {
+            if (elf_file.options.z_nocopyreloc) self.relocError(symbol, rel, elf_file);
+            symbol.flags.copy_rel = true;
+        },
+        .dyn_copyrel => {
+            if (is_writeable or elf_file.options.z_nocopyreloc) {
+                object.num_dynrelocs += 1;
+            } else {
+                symbol.flags.copy_rel = true;
+            }
+        },
+        .plt => {
+            symbol.flags.plt = true;
+        },
+        .dyn_cplt => {
+            if (is_writeable) {
+                object.num_dynrelocs += 1;
+            } else {
+                self.unhandledRelocError(symbol, rel, action, elf_file);
+            }
+        },
+        .dynrel => {
+            object.num_dynrelocs += 1;
+        },
+        else => self.unhandledRelocError(symbol, rel, action, elf_file),
+    }
+}
+
+inline fn unhandledRelocError(
+    self: Atom,
+    symbol: *const Symbol,
+    rel: elf.Elf64_Rela,
+    action: RelocAction,
+    elf_file: *Elf,
+) void {
+    elf_file.base.fatal("{s}: unhandled {} relocation at offset 0x{x} against symbol '{s}': action {s}", .{
+        self.getName(elf_file),
+        fmtRelocType(rel.r_type()),
+        rel.r_offset,
+        symbol.getName(elf_file),
+        @tagName(action),
+    });
+}
+
+inline fn relocError(self: Atom, symbol: *const Symbol, rel: elf.Elf64_Rela, elf_file: *Elf) void {
+    elf_file.base.fatal("{s}: {} relocation at offset 0x{x} against symbol '{s}' cannot be used; recompile with {s}", .{
+        self.getName(elf_file),
+        fmtRelocType(rel.r_type()),
+        rel.r_offset,
+        symbol.getName(elf_file),
+        if (symbol.isAbs(elf_file)) "-fno-PIC" else "-fPIC",
+    });
+}
+
+const RelocAction = enum {
+    none,
+    @"error",
+    copyrel,
+    dyn_copyrel,
+    plt,
+    dyn_cplt,
+    cplt,
+    dynrel,
+    baserel,
+    ifunc,
+};
+
+fn getPcRelocAction(symbol: *const Symbol, elf_file: *Elf) RelocAction {
+    // zig fmt: off
+    const table: [3][4]RelocAction = .{
+        //  Abs       Local   Import data  Import func
+        .{ .@"error", .none,  .@"error",   .plt  }, // Shared object
+        .{ .@"error", .none,  .copyrel,    .plt  }, // PIE
+        .{ .none,     .none,  .copyrel,    .cplt }, // Non-PIE
+    };
+    // zig fmt: on
+    const output = getOutputType(elf_file);
+    const data = getDataType(symbol, elf_file);
+    return table[output][data];
+}
+
+fn getAbsRelocAction(symbol: *const Symbol, elf_file: *Elf) RelocAction {
+    // zig fmt: off
+    const table: [3][4]RelocAction = .{
+        //  Abs    Local       Import data  Import func
+        .{ .none,  .@"error",  .@"error",   .@"error"  }, // Shared object
+        .{ .none,  .@"error",  .@"error",   .@"error"  }, // PIE
+        .{ .none,  .none,      .copyrel,    .cplt      }, // Non-PIE
+    };
+    // zig fmt: on
+    const output = getOutputType(elf_file);
+    const data = getDataType(symbol, elf_file);
+    return table[output][data];
+}
+
+fn getDynAbsRelocAction(symbol: *const Symbol, elf_file: *Elf) RelocAction {
+    if (symbol.isIFunc(elf_file)) return .ifunc;
+    // zig fmt: off
+    const table: [3][4]RelocAction = .{
+        //  Abs    Local       Import data   Import func
+        .{ .none,  .baserel,  .dynrel,       .dynrel    }, // Shared object
+        .{ .none,  .baserel,  .dynrel,       .dynrel    }, // PIE
+        .{ .none,  .none,     .dyn_copyrel,  .dyn_cplt  }, // Non-PIE
+    };
+    // zig fmt: on
+    const output = getOutputType(elf_file);
+    const data = getDataType(symbol, elf_file);
+    return table[output][data];
+}
+
+inline fn getOutputType(elf_file: *Elf) u2 {
+    return switch (elf_file.options.output_mode) {
+        .lib => 0,
+        .exe => if (elf_file.options.pie) 1 else 2,
+    };
+}
+
+inline fn getDataType(symbol: *const Symbol, elf_file: *Elf) u2 {
+    if (symbol.isAbs(elf_file)) return 0;
+    if (!symbol.flags.import) return 1;
+    if (symbol.getType(elf_file) != elf.STT_FUNC) return 2;
+    return 3;
 }
 
 fn reportUndefSymbol(self: Atom, rel: elf.Elf64_Rela, elf_file: *Elf) !bool {

@@ -42,11 +42,15 @@ pub fn isLocal(symbol: Symbol) bool {
     return !(symbol.flags.import or symbol.flags.@"export");
 }
 
-pub fn isIFunc(symbol: Symbol, elf_file: *Elf) bool {
+pub inline fn isIFunc(symbol: Symbol, elf_file: *Elf) bool {
+    return symbol.getType(elf_file) == elf.STT_GNU_IFUNC;
+}
+
+pub fn getType(symbol: Symbol, elf_file: *Elf) u4 {
     const file = symbol.getFile(elf_file).?;
     const s_sym = symbol.getSourceSymbol(elf_file);
-    const is_ifunc = s_sym.st_type() == elf.STT_GNU_IFUNC;
-    return is_ifunc and file != .shared;
+    if (s_sym.st_type() == elf.STT_GNU_IFUNC and file == .shared) return elf.STT_FUNC;
+    return s_sym.st_type();
 }
 
 pub fn getName(symbol: Symbol, elf_file: *Elf) [:0]const u8 {

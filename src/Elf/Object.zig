@@ -15,6 +15,7 @@ comdat_groups: std.ArrayListUnmanaged(Elf.ComdatGroup.Index) = .{},
 
 needs_exec_stack: bool = false,
 alive: bool = true,
+num_dynrelocs: u32 = 0,
 
 output_symtab_size: Elf.SymtabSize = .{},
 
