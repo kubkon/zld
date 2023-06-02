@@ -34,6 +34,7 @@ const usage =
     \\--start-group                 Ignored for compatibility with GNU
     \\--strip-all, -s               Strip all symbols. Implies --strip-debug
     \\--strip-debug, -S             Strip .debug_ sections
+    \\--warn-common                 Warn about duplicate common symbols
     \\-o [value]                    Specify output path for the final artifact
     \\-z                            Set linker extension flags
     \\  stack-size=[value]          Override default stack size
@@ -70,6 +71,7 @@ static: bool = false,
 relax: bool = true,
 export_dynamic: bool = false,
 pie: bool = false,
+warn_common: bool = false,
 /// -z flags
 /// Overrides default stack size.
 z_stack_size: ?u64 = null,
@@ -146,6 +148,8 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             }
         } else if (p.flagAny("allow-multiple-definition")) {
             opts.allow_multiple_definition = true;
+        } else if (p.flagAny("warn-common")) {
+            opts.warn_common = true;
         } else if (p.flagAny("static")) {
             opts.static = true;
             try positionals.append(.{ .tag = .static });

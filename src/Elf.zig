@@ -310,6 +310,7 @@ pub fn flush(self: *Elf) !void {
     }
 
     try self.resolveSymbols();
+    try self.convertCommonSymbols();
     try self.markImportsAndExports();
 
     // Set the entrypoint if found
@@ -1542,6 +1543,12 @@ fn markLive(self: *Elf) void {
     for (self.shared_objects.items) |index| {
         const file = self.getFile(index).?;
         if (file.isAlive()) file.markLive(self);
+    }
+}
+
+fn convertCommonSymbols(self: *Elf) !void {
+    for (self.objects.items) |index| {
+        try self.getFile(index).?.object.convertCommonSymbols(self);
     }
 }
 

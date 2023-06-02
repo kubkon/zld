@@ -73,7 +73,7 @@ pub fn getObject(self: Atom, elf_file: *Elf) *Object {
 
 pub fn getInputShdr(self: Atom, elf_file: *Elf) elf.Elf64_Shdr {
     const object = self.getObject(elf_file);
-    return object.getShdrs()[self.shndx];
+    return object.getShdr(self.shndx);
 }
 
 pub fn getRelocs(self: Atom, elf_file: *Elf) []align(1) const elf.Elf64_Rela {
