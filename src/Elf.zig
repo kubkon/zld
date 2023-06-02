@@ -28,6 +28,7 @@ dynamic_sect_index: ?u16 = null,
 dynsymtab_sect_index: ?u16 = null,
 dynstrtab_sect_index: ?u16 = null,
 hash_sect_index: ?u16 = null,
+gnu_hash_sect_index: ?u16 = null,
 versym_sect_index: ?u16 = null,
 verneed_sect_index: ?u16 = null,
 
@@ -60,6 +61,7 @@ verneed: VerneedSection = .{},
 
 dynamic: DynamicSection = .{},
 hash: HashSection = .{},
+gnu_hash: GnuHashSection = .{},
 got: GotSection = .{},
 plt: PltSection = .{},
 plt_got: PltGotSection = .{},
@@ -355,7 +357,7 @@ pub fn flush(self: *Elf) !void {
     try self.addAtomsToSections();
     try self.sortInitFini();
     try self.setDynamic();
-    self.dynsym.sort(self);
+    self.setDynsym();
     try self.setHash();
     try self.setVerSymtab();
     try self.calcSectionSizes();
@@ -558,6 +560,13 @@ fn initSections(self: *Elf) !void {
             .addralign = 4,
             .entsize = 4,
         });
+        self.gnu_hash_sect_index = try self.addSection(.{
+            .name = ".gnu.hash",
+            .flags = elf.SHF_ALLOC,
+            .type = elf.SHT_HASH,
+            .addralign = 4,
+            .entsize = 4,
+        });
 
         const needs_versions = for (self.shared_objects.items) |index| {
             if (self.getFile(index).?.shared.versym_sect_index != null) break true;
@@ -658,6 +667,11 @@ fn calcSectionSizes(self: *Elf) !void {
     if (self.hash_sect_index) |index| {
         const shdr = &self.sections.items(.shdr)[index];
         shdr.sh_size = self.hash.size();
+    }
+
+    if (self.gnu_hash_sect_index) |index| {
+        const shdr = &self.sections.items(.shdr)[index];
+        shdr.sh_size = self.gnu_hash.size(self);
     }
 
     if (self.dynamic_sect_index) |index| {
@@ -921,6 +935,7 @@ fn initPhdrs(self: *Elf) !void {
         .type = elf.PT_GNU_STACK,
         .flags = if (self.options.z_execstack) elf.PF_W | elf.PF_R | elf.PF_X else elf.PF_W | elf.PF_R,
         .memsz = self.options.z_stack_size orelse 0,
+        .@"align" = 1,
     });
 
     // Backpatch size of the PHDR phdr
@@ -1134,6 +1149,7 @@ fn sortSections(self: *Elf) !void {
         &self.dynsymtab_sect_index,
         &self.dynstrtab_sect_index,
         &self.hash_sect_index,
+        &self.gnu_hash_sect_index,
         &self.plt_sect_index,
         &self.got_plt_sect_index,
         &self.plt_got_sect_index,
@@ -1164,6 +1180,11 @@ fn sortSections(self: *Elf) !void {
     }
 
     if (self.hash_sect_index) |index| {
+        const shdr = &self.sections.items(.shdr)[index];
+        shdr.sh_link = self.dynsymtab_sect_index.?;
+    }
+
+    if (self.gnu_hash_sect_index) |index| {
         const shdr = &self.sections.items(.shdr)[index];
         shdr.sh_link = self.dynsymtab_sect_index.?;
     }
@@ -1719,6 +1740,11 @@ fn setDynamic(self: *Elf) !void {
     }
 }
 
+fn setDynsym(self: *Elf) void {
+    if (self.gnu_hash_sect_index == null) return;
+    self.dynsym.sort(self);
+}
+
 fn setVerSymtab(self: *Elf) !void {
     if (self.versym_sect_index == null) return;
     try self.versym.resize(self.base.allocator, self.dynsym.count());
@@ -1736,8 +1762,9 @@ fn setVerSymtab(self: *Elf) !void {
 }
 
 fn setHash(self: *Elf) !void {
-    if (self.hash_sect_index == null) return;
-    try self.hash.generate(self);
+    if (self.hash_sect_index != null) {
+        try self.hash.generate(self);
+    }
 }
 
 fn writeAtoms(self: *Elf) !void {
@@ -1793,6 +1820,14 @@ fn writeSyntheticSections(self: *Elf) !void {
     if (self.hash_sect_index) |shndx| {
         const shdr = self.sections.items(.shdr)[shndx];
         try self.base.file.pwriteAll(self.hash.buffer.items, shdr.sh_offset);
+    }
+
+    if (self.gnu_hash_sect_index) |shndx| {
+        const shdr = self.sections.items(.shdr)[shndx];
+        var buffer = try std.ArrayList(u8).initCapacity(gpa, self.gnu_hash.size(self));
+        defer buffer.deinit();
+        try self.gnu_hash.write(self, buffer.writer());
+        try self.base.file.pwriteAll(buffer.items, shdr.sh_offset);
     }
 
     if (self.versym_sect_index) |shndx| {
@@ -2408,6 +2443,7 @@ const DynamicSection = synthetic.DynamicSection;
 const DynsymSection = synthetic.DynsymSection;
 const Elf = @This();
 const File = @import("Elf/file.zig").File;
+const GnuHashSection = synthetic.GnuHashSection;
 const GotSection = synthetic.GotSection;
 const HashSection = synthetic.HashSection;
 const InternalObject = @import("Elf/InternalObject.zig");

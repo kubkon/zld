@@ -234,6 +234,98 @@ pub const HashSection = struct {
     }
 };
 
+pub const GnuHashSection = struct {
+    num_buckets: u32 = 0,
+    num_bloom: u32 = 1,
+
+    pub const load_factor = 8;
+    pub const header_size = 16;
+    pub const bloom_shift = 26;
+
+    fn getExports(elf_file: *Elf) []const DynsymSection.Dynsym {
+        const start = for (elf_file.dynsym.symbols.items, 0..) |dsym, i| {
+            const sym = elf_file.getSymbol(dsym.index);
+            if (sym.flags.@"export") break i;
+        } else elf_file.dynsym.symbols.items.len;
+        return elf_file.dynsym.symbols.items[start..];
+    }
+
+    pub fn size(hash: *GnuHashSection, elf_file: *Elf) usize {
+        const num_exports = @intCast(u32, getExports(elf_file).len);
+        if (num_exports > 0) {
+            const num_bits = num_exports * 12;
+            hash.num_bloom = std.math.log2_int_ceil(u32, @divTrunc(num_bits, 64));
+        }
+        return header_size + hash.num_bloom * 8 + hash.num_buckets * 4 + num_exports * 4;
+    }
+
+    pub fn write(hash: GnuHashSection, elf_file: *Elf, writer: anytype) !void {
+        const exports = getExports(elf_file);
+        const export_off = @intCast(u32, elf_file.dynsym.symbols.items.len - exports.len);
+        try writer.writeIntLittle(u32, hash.num_buckets);
+        try writer.writeIntLittle(u32, export_off);
+        try writer.writeIntLittle(u32, hash.num_bloom);
+        try writer.writeIntLittle(u32, bloom_shift);
+
+        const gpa = elf_file.base.allocator;
+        const hashes = try gpa.alloc(u32, exports.len);
+        defer gpa.free(hashes);
+        const indices = try gpa.alloc(u32, exports.len);
+        defer gpa.free(indices);
+
+        // Compose and write the bloom filter
+        const bloom = try gpa.alloc(u64, hash.num_bloom);
+        defer gpa.free(bloom);
+
+        for (exports, 0..) |dsym, i| {
+            const sym = elf_file.getSymbol(dsym.index);
+            const h = hasher(sym.getName(elf_file));
+            hashes[i] = h;
+            indices[i] = h % hash.num_buckets;
+            const idx = @divTrunc(h, 64) % hash.num_bloom;
+            bloom[idx] |= @as(u64, 1) << @intCast(u6, h % 64);
+            bloom[idx] |= @as(u64, 1) << @intCast(u6, (h >> bloom_shift) % 64);
+        }
+
+        try writer.writeAll(mem.sliceAsBytes(bloom));
+
+        // Fill in the hash bucket indices
+        const buckets = try gpa.alloc(u32, hash.num_buckets);
+        defer gpa.free(buckets);
+
+        for (0..exports.len) |i| {
+            if (buckets[indices[i]] == 0) {
+                buckets[indices[i]] = @intCast(u32, i + export_off);
+            }
+        }
+
+        try writer.writeAll(mem.sliceAsBytes(buckets));
+
+        // Finally, write the hash table
+        const table = try gpa.alloc(u32, exports.len);
+        defer gpa.free(table);
+
+        for (0..exports.len) |i| {
+            const h = hashes[i];
+            if (i == exports.len - 1 or indices[i] != indices[i + 1]) {
+                table[i] = h | 1;
+            } else {
+                table[i] = h & ~@as(u32, 1);
+            }
+        }
+
+        try writer.writeAll(mem.sliceAsBytes(table));
+    }
+
+    pub fn hasher(name: [:0]const u8) u32 {
+        var h: u32 = 5381;
+        for (name) |c| {
+            h = (h << 5) + h + c;
+        }
+        return h;
+    }
+};
+
 pub const DynsymSection = struct {
     symbols: std.ArrayListUnmanaged(Dynsym) = .{},
 
@@ -264,18 +356,27 @@ pub const DynsymSection = struct {
         const Sort = struct {
             pub fn lessThan(ctx: *Elf, lhs: Dynsym, rhs: Dynsym) bool {
                 const lhs_sym = ctx.getSymbol(lhs.index);
-                const lhs_esym = lhs_sym.asElfSym(lhs.off, ctx);
-
                 const rhs_sym = ctx.getSymbol(rhs.index);
-                const rhs_esym = rhs_sym.asElfSym(rhs.off, ctx);
 
                 if (lhs_sym.flags.@"export" != rhs_sym.flags.@"export") {
                     return rhs_sym.flags.@"export";
                 }
 
-                return lhs_esym.st_value < rhs_esym.st_value;
+                // TODO cache hash values
+                const nbuckets = ctx.gnu_hash.num_buckets;
+                const lhs_hash = GnuHashSection.hasher(lhs_sym.getName(ctx)) % nbuckets;
+                const rhs_hash = GnuHashSection.hasher(rhs_sym.getName(ctx)) % nbuckets;
+                return lhs_hash < rhs_hash;
             }
         };
+
+        var num_exports: u32 = 0;
+        for (dynsym.symbols.items) |dsym| {
+            const sym = elf_file.getSymbol(dsym.index);
+            if (sym.flags.@"export") num_exports += 1;
+        }
+
+        elf_file.gnu_hash.num_buckets = @divFloor(num_exports, GnuHashSection.load_factor) + 1;
 
         std.mem.sort(Dynsym, dynsym.symbols.items, elf_file, Sort.lessThan);
 

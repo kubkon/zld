@@ -150,7 +150,6 @@ pub fn initOutputSection(self: *Atom, elf_file: *Elf) !void {
             .flags = elf.SHF_ALLOC | elf.SHF_WRITE,
             .name = if (shdr.sh_type == elf.SHT_INIT_ARRAY) ".init_array" else ".fini_array",
             .type = @"type",
-            .entsize = shdr.sh_entsize,
         },
         // TODO handle more section types
         else => .{
