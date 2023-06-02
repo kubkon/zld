@@ -271,6 +271,8 @@ pub const Flags = packed struct {
 
     /// Whether the symbol contains COPYREL directive.
     copy_rel: bool = false,
+    has_copy_rel: bool = false,
+    has_dynamic: bool = false,
 
     /// Whether the symbol contains TLSGD indirection.
     tlsgd: bool = false,

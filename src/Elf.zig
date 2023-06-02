@@ -645,14 +645,7 @@ fn calcSectionSizes(self: *Elf) !void {
     }
 
     if (self.copy_rel_sect_index) |index| {
-        const shdr = &self.sections.items(.shdr)[index];
-        for (self.copy_rel.symbols.items) |sym_index| {
-            const symbol = self.getSymbol(sym_index);
-            const alignment = try symbol.getAlignment(self);
-            symbol.value = mem.alignForwardGeneric(u64, shdr.sh_size, alignment);
-            shdr.sh_addralign = @max(shdr.sh_addralign, alignment);
-            shdr.sh_size = symbol.value + symbol.getSourceSymbol(self).st_size;
-        }
+        try self.copy_rel.calcSectionSize(index, self);
     }
 
     if (self.interp_sect_index) |index| {
@@ -1681,7 +1674,7 @@ fn scanRelocs(self: *Elf) !void {
 
     for (self.symbols.items, 0..) |*symbol, i| {
         const index = @intCast(u32, i);
-        if (!symbol.isLocal()) {
+        if (!symbol.isLocal() and !symbol.flags.has_dynamic) {
             log.debug("'{s}' is non-local", .{symbol.getName(self)});
             try self.dynsym.addSymbol(index, self);
         }
@@ -1699,7 +1692,7 @@ fn scanRelocs(self: *Elf) !void {
                 try self.plt.addSymbol(index, self);
             }
         }
-        if (symbol.flags.copy_rel) {
+        if (symbol.flags.copy_rel and !symbol.flags.has_copy_rel) {
             log.debug("'{s}' needs COPYREL!", .{symbol.getName(self)});
             try self.copy_rel.addSymbol(index, self);
         }
@@ -2308,7 +2301,13 @@ fn fmtDumpState(
     try writer.writeByte('\n');
     try writer.writeAll("COPYREL\n");
     for (self.copy_rel.symbols.items, 0..) |sym_index, i| {
-        try writer.print("  {d} => {d} '{s}'\n", .{ i, sym_index, self.getSymbol(sym_index).getName(self) });
+        const symbol = self.getSymbol(sym_index);
+        try writer.print("  {d}@{x} => {d} '{s}'\n", .{
+            i,
+            symbol.getAddress(self),
+            sym_index,
+            symbol.getName(self),
+        });
     }
     try writer.writeByte('\n');
     try writer.writeAll("Output sections\n");

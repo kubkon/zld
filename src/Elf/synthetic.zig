@@ -250,6 +250,7 @@ pub const DynsymSection = struct {
         const gpa = elf_file.base.allocator;
         const index = @intCast(u32, dynsym.symbols.items.len + 1);
         const sym = elf_file.getSymbol(sym_index);
+        sym.flags.has_dynamic = true;
         if (sym.getExtra(elf_file)) |extra| {
             var new_extra = extra;
             new_extra.dynamic = index;
@@ -769,6 +770,8 @@ pub const CopyRelSection = struct {
     pub fn addSymbol(copy_rel: *CopyRelSection, sym_index: u32, elf_file: *Elf) !void {
         const index = @intCast(u32, copy_rel.symbols.items.len);
         const symbol = elf_file.getSymbol(sym_index);
+        symbol.flags.has_copy_rel = true;
+
         if (symbol.getExtra(elf_file)) |extra| {
             var new_extra = extra;
             new_extra.copy_rel = index;
@@ -776,14 +779,48 @@ pub const CopyRelSection = struct {
         } else try symbol.addExtra(.{ .copy_rel = index }, elf_file);
         try copy_rel.symbols.append(elf_file.base.allocator, sym_index);
 
-        // TODO find aliases and add them too
+        const shared = symbol.getFile(elf_file).?.shared;
+        if (shared.aliases == null) {
+            try shared.initSymbolAliases(elf_file);
+        }
+
+        const aliases = shared.getSymbolAliases(sym_index, elf_file);
+        for (aliases) |alias| {
+            if (alias == sym_index) continue;
+            const alias_sym = elf_file.getSymbol(alias);
+            alias_sym.flags.import = true;
+            alias_sym.flags.@"export" = true;
+            alias_sym.flags.has_copy_rel = true;
+            alias_sym.flags.copy_rel = true;
+            alias_sym.flags.weak = false;
+            try elf_file.dynsym.addSymbol(alias, elf_file);
+        }
+    }
+
+    pub fn calcSectionSize(copy_rel: CopyRelSection, shndx: u16, elf_file: *Elf) !void {
+        const shdr = &elf_file.sections.items(.shdr)[shndx];
+        for (copy_rel.symbols.items) |sym_index| {
+            const symbol = elf_file.getSymbol(sym_index);
+            const shared = symbol.getFile(elf_file).?.shared;
+            const alignment = try symbol.getAlignment(elf_file);
+            symbol.value = mem.alignForwardGeneric(u64, shdr.sh_size, alignment);
+            shdr.sh_addralign = @max(shdr.sh_addralign, alignment);
+            shdr.sh_size = symbol.value + symbol.getSourceSymbol(elf_file).st_size;
+
+            const aliases = shared.getSymbolAliases(sym_index, elf_file);
+            for (aliases) |alias| {
+                if (alias == sym_index) continue;
+                const alias_sym = elf_file.getSymbol(alias);
+                alias_sym.value = symbol.value;
+            }
+        }
     }
 
     pub fn addRela(copy_rel: CopyRelSection, elf_file: *Elf) !void {
         try elf_file.rela_dyn.ensureUnusedCapacity(elf_file.base.allocator, copy_rel.numRela());
         for (copy_rel.symbols.items) |sym_index| {
             const sym = elf_file.getSymbol(sym_index);
-            assert(sym.flags.import);
+            assert(sym.flags.import and sym.flags.copy_rel);
             const extra = sym.getExtra(elf_file).?;
             elf_file.addRelaDynAssumeCapacity(.{
                 .offset = sym.getAddress(elf_file),

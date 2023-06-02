@@ -14,6 +14,7 @@ versym_sect_index: ?u16 = null,
 verdef_sect_index: ?u16 = null,
 
 symbols: std.ArrayListUnmanaged(u32) = .{},
+aliases: ?std.ArrayListUnmanaged(u32) = null,
 
 needed: bool,
 alive: bool,
@@ -40,6 +41,7 @@ pub fn deinit(self: *SharedObject, allocator: Allocator) void {
     self.versyms.deinit(allocator);
     self.verstrings.deinit(allocator);
     self.symbols.deinit(allocator);
+    if (self.aliases) |*aliases| aliases.deinit(allocator);
 }
 
 pub fn parse(self: *SharedObject, elf_file: *Elf) !void {
@@ -257,6 +259,53 @@ pub fn getSoname(self: *SharedObject) []const u8 {
 
 pub inline fn getGlobals(self: *SharedObject) []const u32 {
     return self.symbols.items;
+}
+
+pub fn initSymbolAliases(self: *SharedObject, elf_file: *Elf) !void {
+    assert(self.aliases == null);
+
+    const SortAlias = struct {
+        pub fn lessThan(ctx: *Elf, lhs: u32, rhs: u32) bool {
+            const lhs_sym = ctx.getSymbol(lhs).getSourceSymbol(ctx);
+            const rhs_sym = ctx.getSymbol(rhs).getSourceSymbol(ctx);
+            return lhs_sym.st_value < rhs_sym.st_value;
+        }
+    };
+
+    const gpa = elf_file.base.allocator;
+    var aliases = std.ArrayList(u32).init(gpa);
+    defer aliases.deinit();
+    try aliases.ensureTotalCapacityPrecise(self.getGlobals().len);
+
+    for (self.getGlobals()) |index| {
+        const global = elf_file.getSymbol(index);
+        const global_file = global.getFile(elf_file) orelse continue;
+        if (global_file.getIndex() != self.index) continue;
+        aliases.appendAssumeCapacity(index);
+    }
+
+    std.mem.sort(u32, aliases.items, elf_file, SortAlias.lessThan);
+
+    self.aliases = aliases.moveToUnmanaged();
+}
+
+pub fn getSymbolAliases(self: *SharedObject, index: u32, elf_file: *Elf) []const u32 {
+    assert(self.aliases != null);
+
+    const symbol = elf_file.getSymbol(index).getSourceSymbol(elf_file);
+    const aliases = self.aliases.?;
+
+    const start = for (aliases.items, 0..) |alias, i| {
+        const alias_sym = elf_file.getSymbol(alias).getSourceSymbol(elf_file);
+        if (symbol.st_value == alias_sym.st_value) break i;
+    } else aliases.items.len;
+
+    const end = for (aliases.items[start..], 0..) |alias, i| {
+        const alias_sym = elf_file.getSymbol(alias).getSourceSymbol(elf_file);
+        if (symbol.st_value < alias_sym.st_value) break i + start;
+    } else aliases.items.len;
+
+    return aliases.items[start..end];
 }
 
 pub fn format(
