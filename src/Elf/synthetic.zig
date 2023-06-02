@@ -108,18 +108,16 @@ pub const DynamicSection = struct {
         // RELA
         if (elf_file.rela_dyn_sect_index) |shndx| {
             const shdr = elf_file.sections.items(.shdr)[shndx];
-            const relasz = elf_file.got.sizeRela(elf_file);
             try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_RELA, .d_val = shdr.sh_addr });
-            try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_RELASZ, .d_val = relasz });
+            try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_RELASZ, .d_val = shdr.sh_size });
             try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_RELAENT, .d_val = shdr.sh_entsize });
         }
 
         // JMPREL
         if (elf_file.rela_plt_sect_index) |shndx| {
             const shdr = elf_file.sections.items(.shdr)[shndx];
-            const relasz = elf_file.plt.sizeRela();
             try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_JMPREL, .d_val = shdr.sh_addr });
-            try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_PLTRELSZ, .d_val = relasz });
+            try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_PLTRELSZ, .d_val = shdr.sh_size });
             try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_PLTREL, .d_val = elf.DT_RELA });
         }
 
@@ -459,22 +457,13 @@ pub const GotSection = struct {
         try got.symbols.append(elf_file.base.allocator, sym_index);
     }
 
-    pub fn sizeGot(got: GotSection) usize {
-        var size = got.symbols.items.len * 8;
-        if (got.emit_tlsld) size += 8;
-        return size;
+    pub fn size(got: GotSection) usize {
+        var s = got.symbols.items.len * 8;
+        if (got.emit_tlsld) s += 8;
+        return s;
     }
 
-    pub fn sizeRela(got: GotSection, elf_file: *Elf) usize {
-        var size: usize = 0;
-        for (got.symbols.items) |sym_index| {
-            const sym = elf_file.getSymbol(sym_index);
-            if (sym.flags.import) size += @sizeOf(elf.Elf64_Rela);
-        }
-        return size;
-    }
-
-    pub fn writeGot(got: GotSection, elf_file: *Elf, writer: anytype) !void {
+    pub fn write(got: GotSection, elf_file: *Elf, writer: anytype) !void {
         for (got.symbols.items) |sym_index| {
             const sym = elf_file.getSymbol(sym_index);
             const value = if (sym.flags.import) 0 else sym.value;
@@ -486,21 +475,28 @@ pub const GotSection = struct {
         }
     }
 
-    pub fn writeRela(got: GotSection, elf_file: *Elf, writer: anytype) !void {
+    pub fn addRela(got: GotSection, elf_file: *Elf) !void {
+        try elf_file.rela_dyn.ensureUnusedCapacity(elf_file.base.allocator, got.numRela(elf_file));
         for (got.symbols.items, 0..) |sym_index, i| {
             const sym = elf_file.getSymbol(sym_index);
             if (sym.flags.import) {
                 const extra = sym.getExtra(elf_file).?;
-                const r_offset = elf_file.getGotEntryAddress(@intCast(u32, i));
-                const r_sym: u64 = extra.dynamic;
-                const r_type: u32 = elf.R_X86_64_GLOB_DAT;
-                try writer.writeStruct(elf.Elf64_Rela{
-                    .r_offset = r_offset,
-                    .r_info = (r_sym << 32) | r_type,
-                    .r_addend = 0,
+                elf_file.addRelaDynAssumeCapacity(.{
+                    .offset = elf_file.getGotEntryAddress(@intCast(u32, i)),
+                    .sym = extra.dynamic,
+                    .type = elf.R_X86_64_GLOB_DAT,
                 });
             }
         }
+    }
+
+    pub fn numRela(got: GotSection, elf_file: *Elf) usize {
+        var num: usize = 0;
+        for (got.symbols.items) |sym_index| {
+            const sym = elf_file.getSymbol(sym_index);
+            if (sym.flags.import) num += 1;
+        }
+        return num;
     }
 
     pub fn calcSymtabSize(got: *GotSection, elf_file: *Elf) !void {
@@ -585,10 +581,6 @@ pub const PltSection = struct {
         return got_plt_preamble_size + plt.symbols.items.len * 8;
     }
 
-    pub fn sizeRela(plt: PltSection) usize {
-        return plt.symbols.items.len * @sizeOf(elf.Elf64_Rela);
-    }
-
     pub fn writePlt(plt: PltSection, elf_file: *Elf, writer: anytype) !void {
         const plt_addr = elf_file.getSectionAddress(elf_file.plt_sect_index.?);
         const got_plt_addr = elf_file.getSectionAddress(elf_file.got_plt_sect_index.?);
@@ -637,7 +629,8 @@ pub const PltSection = struct {
         }
     }
 
-    pub fn writeRela(plt: PltSection, elf_file: *Elf, writer: anytype) !void {
+    pub fn addRela(plt: PltSection, elf_file: *Elf) !void {
+        try elf_file.rela_plt.ensureUnusedCapacity(elf_file.base.allocator, plt.numRela());
         for (plt.symbols.items, 0..) |sym_index, i| {
             const sym = elf_file.getSymbol(sym_index);
             assert(sym.flags.import);
@@ -645,12 +638,16 @@ pub const PltSection = struct {
             const r_offset = elf_file.getGotPltEntryAddress(@intCast(u32, i));
             const r_sym: u64 = extra.dynamic;
             const r_type: u32 = elf.R_X86_64_JUMP_SLOT;
-            try writer.writeStruct(elf.Elf64_Rela{
+            elf_file.rela_plt.appendAssumeCapacity(.{
                 .r_offset = r_offset,
                 .r_info = (r_sym << 32) | r_type,
                 .r_addend = 0,
             });
         }
+    }
+
+    pub fn numRela(plt: PltSection) usize {
+        return plt.symbols.items.len;
     }
 
     pub fn calcSymtabSize(plt: *PltSection, elf_file: *Elf) !void {
@@ -782,24 +779,22 @@ pub const CopyRelSection = struct {
         // TODO find aliases and add them too
     }
 
-    pub fn sizeRela(copy_rel: CopyRelSection) usize {
-        return copy_rel.symbols.items.len * @sizeOf(elf.Elf64_Rela);
-    }
-
-    pub fn writeRela(copy_rel: CopyRelSection, elf_file: *Elf, writer: anytype) !void {
+    pub fn addRela(copy_rel: CopyRelSection, elf_file: *Elf) !void {
+        try elf_file.rela_dyn.ensureUnusedCapacity(elf_file.base.allocator, copy_rel.numRela());
         for (copy_rel.symbols.items) |sym_index| {
             const sym = elf_file.getSymbol(sym_index);
             assert(sym.flags.import);
             const extra = sym.getExtra(elf_file).?;
-            const r_offset = sym.getAddress(elf_file);
-            const r_sym: u64 = extra.dynamic;
-            const r_type: u32 = elf.R_X86_64_COPY;
-            try writer.writeStruct(elf.Elf64_Rela{
-                .r_offset = r_offset,
-                .r_info = (r_sym << 32) | r_type,
-                .r_addend = 0,
+            elf_file.addRelaDynAssumeCapacity(.{
+                .offset = sym.getAddress(elf_file),
+                .sym = extra.dynamic,
+                .type = elf.R_X86_64_COPY,
             });
         }
+    }
+
+    pub fn numRela(copy_rel: CopyRelSection) usize {
+        return copy_rel.symbols.items.len;
     }
 };
 

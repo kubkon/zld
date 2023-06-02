@@ -466,7 +466,15 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
 
         switch (r_type) {
             elf.R_X86_64_NONE => unreachable,
-            elf.R_X86_64_64 => try cwriter.writeIntLittle(i64, S + A),
+            elf.R_X86_64_64 => {
+                try self.resolveDynAbsReloc(
+                    target,
+                    rel,
+                    getDynAbsRelocAction(target, elf_file),
+                    elf_file,
+                    cwriter,
+                );
+            },
 
             elf.R_X86_64_PLT32,
             elf.R_X86_64_PC32,
@@ -628,6 +636,67 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
     }
 
     try writer.writeAll(code);
+}
+
+fn resolveDynAbsReloc(
+    self: Atom,
+    target: *const Symbol,
+    rel: elf.Elf64_Rela,
+    action: RelocAction,
+    elf_file: *Elf,
+    writer: anytype,
+) !void {
+    const P = self.value + rel.r_offset;
+    const A = rel.r_addend;
+    const S = @intCast(i64, target.getAddress(elf_file));
+    const is_writeable = self.getInputShdr(elf_file).sh_flags & elf.SHF_WRITE != 0;
+    const object = self.getObject(elf_file);
+
+    try elf_file.rela_dyn.ensureUnusedCapacity(elf_file.base.allocator, object.num_dynrelocs);
+
+    switch (action) {
+        .copyrel,
+        .cplt,
+        .none,
+        => try writer.writeIntLittle(i32, @truncate(i32, S + A)),
+
+        .dyn_copyrel => {
+            if (is_writeable or elf_file.options.z_nocopyreloc) {
+                elf_file.addRelaDynAssumeCapacity(.{
+                    .offset = P,
+                    .sym = target.getExtra(elf_file).?.dynamic,
+                    .type = elf.R_X86_64_64,
+                    .addend = A,
+                });
+            } else {
+                try writer.writeIntLittle(i32, @truncate(i32, S + A));
+            }
+        },
+
+        .dyn_cplt => {
+            if (is_writeable) {
+                elf_file.addRelaDynAssumeCapacity(.{
+                    .offset = P,
+                    .sym = target.getExtra(elf_file).?.dynamic,
+                    .type = elf.R_X86_64_64,
+                    .addend = A,
+                });
+            } else {
+                try writer.writeIntLittle(i32, @truncate(i32, S + A));
+            }
+        },
+
+        .dynrel => {
+            elf_file.addRelaDynAssumeCapacity(.{
+                .offset = P,
+                .sym = target.getExtra(elf_file).?.dynamic,
+                .type = elf.R_X86_64_64,
+                .addend = A,
+            });
+        },
+
+        else => self.unhandledRelocError(target, rel, action, elf_file),
+    }
 }
 
 pub fn resolveRelocsNonAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {

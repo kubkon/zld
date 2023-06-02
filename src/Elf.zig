@@ -64,6 +64,8 @@ got: GotSection = .{},
 plt: PltSection = .{},
 plt_got: PltGotSection = .{},
 copy_rel: CopyRelSection = .{},
+rela_dyn: std.ArrayListUnmanaged(elf.Elf64_Rela) = .{},
+rela_plt: std.ArrayListUnmanaged(elf.Elf64_Rela) = .{},
 
 atoms: std.ArrayListUnmanaged(Atom) = .{},
 
@@ -145,6 +147,9 @@ pub fn deinit(self: *Elf) void {
     self.hash.deinit(gpa);
     self.versym.deinit(gpa);
     self.verneed.deinit(gpa);
+    self.copy_rel.deinit(gpa);
+    self.rela_dyn.deinit(gpa);
+    self.rela_plt.deinit(gpa);
     {
         var it = self.undefs.valueIterator();
         while (it.next()) |notes| {
@@ -434,16 +439,23 @@ fn initSections(self: *Elf) !void {
             .flags = elf.SHF_ALLOC | elf.SHF_WRITE,
             .addralign = @alignOf(u64),
         });
+    }
 
-        if (self.got.needs_rela or self.copy_rel.symbols.items.len > 0) {
-            self.rela_dyn_sect_index = try self.addSection(.{
-                .name = ".rela.dyn",
-                .type = elf.SHT_RELA,
-                .flags = elf.SHF_ALLOC,
-                .addralign = @alignOf(elf.Elf64_Rela),
-                .entsize = @sizeOf(elf.Elf64_Rela),
-            });
+    const needs_rela_dyn = blk: {
+        if (self.got.needs_rela or self.copy_rel.symbols.items.len > 0) break :blk true;
+        for (self.objects.items) |index| {
+            if (self.getFile(index).?.object.num_dynrelocs > 0) break :blk true;
         }
+        break :blk false;
+    };
+    if (needs_rela_dyn) {
+        self.rela_dyn_sect_index = try self.addSection(.{
+            .name = ".rela.dyn",
+            .type = elf.SHT_RELA,
+            .flags = elf.SHF_ALLOC,
+            .addralign = @alignOf(elf.Elf64_Rela),
+            .entsize = @sizeOf(elf.Elf64_Rela),
+        });
     }
 
     if (self.plt.symbols.items.len > 0) {
@@ -595,7 +607,7 @@ fn calcSectionSizes(self: *Elf) !void {
 
     if (self.got_sect_index) |index| {
         const shdr = &self.sections.items(.shdr)[index];
-        shdr.sh_size = self.got.sizeGot();
+        shdr.sh_size = self.got.size();
         shdr.sh_addralign = @alignOf(u64);
     }
 
@@ -617,14 +629,18 @@ fn calcSectionSizes(self: *Elf) !void {
         shdr.sh_addralign = 16;
     }
 
-    if (self.rela_dyn_sect_index) |index| {
-        const shdr = &self.sections.items(.shdr)[index];
-        shdr.sh_size = self.got.sizeRela(self) + self.copy_rel.sizeRela();
+    if (self.rela_dyn_sect_index) |shndx| {
+        const shdr = &self.sections.items(.shdr)[shndx];
+        var num = self.got.numRela(self) + self.copy_rel.numRela();
+        for (self.objects.items) |index| {
+            num += self.getFile(index).?.object.num_dynrelocs;
+        }
+        shdr.sh_size = num * @sizeOf(elf.Elf64_Rela);
     }
 
     if (self.rela_plt_sect_index) |index| {
         const shdr = &self.sections.items(.shdr)[index];
-        shdr.sh_size = self.plt.sizeRela();
+        shdr.sh_size = self.plt.numRela() * @sizeOf(elf.Elf64_Rela);
     }
 
     if (self.copy_rel_sect_index) |index| {
@@ -1816,22 +1832,17 @@ fn writeSyntheticSections(self: *Elf) !void {
 
     if (self.got_sect_index) |shndx| {
         const shdr = self.sections.items(.shdr)[shndx];
-        var buffer = try std.ArrayList(u8).initCapacity(gpa, self.got.sizeGot());
+        var buffer = try std.ArrayList(u8).initCapacity(gpa, self.got.size());
         defer buffer.deinit();
-        try self.got.writeGot(self, buffer.writer());
+        try self.got.write(self, buffer.writer());
         try self.base.file.pwriteAll(buffer.items, shdr.sh_offset);
     }
 
     if (self.rela_dyn_sect_index) |shndx| {
         const shdr = self.sections.items(.shdr)[shndx];
-        var buffer = try std.ArrayList(u8).initCapacity(
-            gpa,
-            self.got.sizeRela(self) + self.copy_rel.sizeRela(),
-        );
-        defer buffer.deinit();
-        try self.got.writeRela(self, buffer.writer());
-        try self.copy_rel.writeRela(self, buffer.writer());
-        try self.base.file.pwriteAll(buffer.items, shdr.sh_offset);
+        try self.got.addRela(self);
+        try self.copy_rel.addRela(self);
+        try self.base.file.pwriteAll(mem.sliceAsBytes(self.rela_dyn.items), shdr.sh_offset);
     }
 
     if (self.plt_sect_index) |shndx| {
@@ -1860,10 +1871,8 @@ fn writeSyntheticSections(self: *Elf) !void {
 
     if (self.rela_plt_sect_index) |shndx| {
         const shdr = self.sections.items(.shdr)[shndx];
-        var buffer = try std.ArrayList(u8).initCapacity(gpa, self.plt.sizeRela());
-        defer buffer.deinit();
-        try self.plt.writeRela(self, buffer.writer());
-        try self.base.file.pwriteAll(buffer.items, shdr.sh_offset);
+        try self.plt.addRela(self);
+        try self.base.file.pwriteAll(mem.sliceAsBytes(self.rela_plt.items), shdr.sh_offset);
     }
 
     if (!self.options.strip_all) {
@@ -2130,6 +2139,26 @@ pub inline fn getComdatGroup(self: *Elf, index: ComdatGroup.Index) *ComdatGroup 
 pub inline fn getComdatGroupOwner(self: *Elf, index: ComdatGroupOwner.Index) *ComdatGroupOwner {
     assert(index < self.comdat_groups_owners.items.len);
     return &self.comdat_groups_owners.items[index];
+}
+
+const RelaDyn = struct {
+    offset: u64,
+    sym: u64,
+    type: u32,
+    addend: i64 = 0,
+};
+
+pub inline fn addRelaDyn(self: *Elf, opts: RelaDyn) !void {
+    try self.rela_dyn.ensureUnusedCapacity(self.base.alloctor, 1);
+    self.addRelaDynAssumeCapacity(opts);
+}
+
+pub inline fn addRelaDynAssumeCapacity(self: *Elf, opts: RelaDyn) void {
+    self.rela_dyn.appendAssumeCapacity(.{
+        .r_offset = opts.offset,
+        .r_info = (opts.sym << 32) | opts.type,
+        .r_addend = opts.addend,
+    });
 }
 
 pub inline fn getSectionAddress(self: *Elf, shndx: u16) u64 {
