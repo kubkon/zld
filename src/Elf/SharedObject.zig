@@ -10,8 +10,11 @@ versyms: std.ArrayListUnmanaged(elf.Elf64_Versym) = .{},
 verstrings: std.ArrayListUnmanaged(u32) = .{},
 
 dynamic_sect_index: ?u16 = null,
+versym_sect_index: ?u16 = null,
+verdef_sect_index: ?u16 = null,
 
 symbols: std.ArrayListUnmanaged(u32) = .{},
+aliases: ?std.ArrayListUnmanaged(u32) = null,
 
 needed: bool,
 alive: bool,
@@ -38,6 +41,7 @@ pub fn deinit(self: *SharedObject, allocator: Allocator) void {
     self.versyms.deinit(allocator);
     self.verstrings.deinit(allocator);
     self.symbols.deinit(allocator);
+    if (self.aliases) |*aliases| aliases.deinit(allocator);
 }
 
 pub fn parse(self: *SharedObject, elf_file: *Elf) !void {
@@ -51,6 +55,8 @@ pub fn parse(self: *SharedObject, elf_file: *Elf) !void {
     for (shdrs, 0..) |shdr, i| switch (shdr.sh_type) {
         elf.SHT_DYNSYM => dynsym_index = @intCast(u16, i),
         elf.SHT_DYNAMIC => self.dynamic_sect_index = @intCast(u16, i),
+        Elf.SHT_GNU_versym => self.versym_sect_index = @intCast(u16, i),
+        Elf.SHT_GNU_verdef => self.verdef_sect_index = @intCast(u16, i),
         else => {},
     };
 
@@ -67,27 +73,17 @@ pub fn parse(self: *SharedObject, elf_file: *Elf) !void {
 }
 
 fn parseVersions(self: *SharedObject, elf_file: *Elf) !void {
-    const shdrs = self.getShdrs();
-    var versym_index: ?u16 = null;
-    var verdef_index: ?u16 = null;
-    for (shdrs, 0..) |shdr, i| switch (shdr.sh_type) {
-        Elf.SHT_GNU_versym => versym_index = @intCast(u16, i),
-        Elf.SHT_GNU_verdef => verdef_index = @intCast(u16, i),
-        else => {},
-    };
-
-    if (versym_index == null or verdef_index == null) return;
-
     const gpa = elf_file.base.allocator;
 
-    const verdefs = self.getShdrContents(verdef_index.?);
-    const nverdefs = self.getVerdefNum();
-
-    try self.verstrings.resize(gpa, nverdefs + 2);
+    try self.verstrings.resize(gpa, 2);
     self.verstrings.items[Elf.VER_NDX_LOCAL] = 0;
     self.verstrings.items[Elf.VER_NDX_GLOBAL] = 0;
 
-    {
+    if (self.verdef_sect_index) |shndx| {
+        const verdefs = self.getShdrContents(shndx);
+        const nverdefs = self.getVerdefNum();
+        try self.verstrings.resize(gpa, self.verstrings.items.len + nverdefs);
+
         var i: u32 = 0;
         var offset: u32 = 0;
         while (i < nverdefs) : (i += 1) {
@@ -102,16 +98,21 @@ fn parseVersions(self: *SharedObject, elf_file: *Elf) !void {
         }
     }
 
-    const versyms_raw = self.getShdrContents(versym_index.?);
-    const nversyms = @divExact(versyms_raw.len, @sizeOf(elf.Elf64_Versym));
-    const versyms = @ptrCast([*]align(1) const elf.Elf64_Versym, versyms_raw.ptr)[0..nversyms];
-    try self.versyms.ensureTotalCapacityPrecise(gpa, versyms.len);
-    for (versyms) |ver| {
-        const normalized_ver = if (ver & Elf.VERSYM_VERSION >= self.verstrings.items.len - 1)
-            Elf.VER_NDX_GLOBAL
-        else
-            ver;
-        self.versyms.appendAssumeCapacity(normalized_ver);
+    try self.versyms.ensureTotalCapacityPrecise(gpa, self.symtab.len);
+
+    if (self.versym_sect_index) |shndx| {
+        const versyms_raw = self.getShdrContents(shndx);
+        const nversyms = @divExact(versyms_raw.len, @sizeOf(elf.Elf64_Versym));
+        const versyms = @ptrCast([*]align(1) const elf.Elf64_Versym, versyms_raw.ptr)[0..nversyms];
+        for (versyms) |ver| {
+            const normalized_ver = if (ver & Elf.VERSYM_VERSION >= self.verstrings.items.len - 1)
+                Elf.VER_NDX_GLOBAL
+            else
+                ver;
+            self.versyms.appendAssumeCapacity(normalized_ver);
+        }
+    } else for (0..self.symtab.len) |_| {
+        self.versyms.appendAssumeCapacity(Elf.VER_NDX_GLOBAL);
     }
 }
 
@@ -121,7 +122,7 @@ fn initSymtab(self: *SharedObject, elf_file: *Elf) !void {
     try self.symbols.ensureTotalCapacityPrecise(gpa, self.symtab.len);
 
     for (self.symtab, 0..) |sym, i| {
-        const hidden = self.versyms.items.len > 0 and self.versyms.items[i] & Elf.VERSYM_HIDDEN != 0;
+        const hidden = self.versyms.items[i] & Elf.VERSYM_HIDDEN != 0;
         const name = self.getString(sym.st_name);
         // We need to garble up the name so that we don't pick this symbol
         // during symbol resolution. Thank you GNU!
@@ -185,7 +186,7 @@ pub fn calcSymtabSize(self: *SharedObject, elf_file: *Elf) !void {
         const global = elf_file.getSymbol(global_index);
         if (global.getFile(elf_file)) |file| if (file.getIndex() != self.index) continue;
         if (global.isLocal()) continue;
-        global.output_symtab = true;
+        global.flags.output_symtab = true;
         self.output_symtab_size.nglobals += 1;
         self.output_symtab_size.strsize += @intCast(u32, global.getName(elf_file).len + 1);
     }
@@ -200,7 +201,7 @@ pub fn writeSymtab(self: *SharedObject, elf_file: *Elf, ctx: Elf.WriteSymtabCtx)
     for (self.getGlobals()) |global_index| {
         const global = elf_file.getSymbol(global_index);
         if (global.getFile(elf_file)) |file| if (file.getIndex() != self.index) continue;
-        if (!global.output_symtab) continue;
+        if (!global.flags.output_symtab) continue;
         const st_name = try ctx.strtab.insert(gpa, global.getName(elf_file));
         ctx.symtab[iglobal] = global.asElfSym(st_name, elf_file);
         iglobal += 1;
@@ -223,7 +224,6 @@ pub inline fn getString(self: *SharedObject, off: u32) [:0]const u8 {
 }
 
 pub inline fn getVersionString(self: *SharedObject, index: elf.Elf64_Versym) [:0]const u8 {
-    if (self.versyms.items.len == 0) return "";
     const off = self.verstrings.items[index & Elf.VERSYM_VERSION];
     return self.getString(off);
 }
@@ -259,6 +259,53 @@ pub fn getSoname(self: *SharedObject) []const u8 {
 
 pub inline fn getGlobals(self: *SharedObject) []const u32 {
     return self.symbols.items;
+}
+
+pub fn initSymbolAliases(self: *SharedObject, elf_file: *Elf) !void {
+    assert(self.aliases == null);
+
+    const SortAlias = struct {
+        pub fn lessThan(ctx: *Elf, lhs: u32, rhs: u32) bool {
+            const lhs_sym = ctx.getSymbol(lhs).getSourceSymbol(ctx);
+            const rhs_sym = ctx.getSymbol(rhs).getSourceSymbol(ctx);
+            return lhs_sym.st_value < rhs_sym.st_value;
+        }
+    };
+
+    const gpa = elf_file.base.allocator;
+    var aliases = std.ArrayList(u32).init(gpa);
+    defer aliases.deinit();
+    try aliases.ensureTotalCapacityPrecise(self.getGlobals().len);
+
+    for (self.getGlobals()) |index| {
+        const global = elf_file.getSymbol(index);
+        const global_file = global.getFile(elf_file) orelse continue;
+        if (global_file.getIndex() != self.index) continue;
+        aliases.appendAssumeCapacity(index);
+    }
+
+    std.mem.sort(u32, aliases.items, elf_file, SortAlias.lessThan);
+
+    self.aliases = aliases.moveToUnmanaged();
+}
+
+pub fn getSymbolAliases(self: *SharedObject, index: u32, elf_file: *Elf) []const u32 {
+    assert(self.aliases != null);
+
+    const symbol = elf_file.getSymbol(index).getSourceSymbol(elf_file);
+    const aliases = self.aliases.?;
+
+    const start = for (aliases.items, 0..) |alias, i| {
+        const alias_sym = elf_file.getSymbol(alias).getSourceSymbol(elf_file);
+        if (symbol.st_value == alias_sym.st_value) break i;
+    } else aliases.items.len;
+
+    const end = for (aliases.items[start..], 0..) |alias, i| {
+        const alias_sym = elf_file.getSymbol(alias).getSourceSymbol(elf_file);
+        if (symbol.st_value < alias_sym.st_value) break i + start;
+    } else aliases.items.len;
+
+    return aliases.items[start..end];
 }
 
 pub fn format(

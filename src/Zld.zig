@@ -90,13 +90,9 @@ pub fn openPath(allocator: Allocator, tag: Tag, options: Options, thread_pool: *
 
 pub fn deinit(base: *Zld) void {
     base.file.close();
-    for (base.warnings.items) |*msg| {
-        msg.deinit(base.allocator);
-    }
+    assert(base.warnings.items.len == 0);
     base.warnings.deinit(base.allocator);
-    for (base.errors.items) |*msg| {
-        msg.deinit(base.allocator);
-    }
+    assert(base.errors.items.len == 0);
     base.errors.deinit(base.allocator);
     switch (base.tag) {
         .elf => {
@@ -148,7 +144,9 @@ pub fn getAllWarningsAlloc(base: *Zld) !ErrorBundle {
     try bundle.init(base.allocator);
     defer bundle.deinit();
 
-    for (base.warnings.items) |msg| {
+    while (base.warnings.popOrNull()) |msg| {
+        var mut_msg = msg;
+        defer mut_msg.deinit(base.allocator);
         assert(msg.notes == null);
         try bundle.addRootErrorMessage(.{ .msg = try bundle.addString(msg.msg) });
     }
@@ -161,7 +159,9 @@ pub fn getAllErrorsAlloc(base: *Zld) !ErrorBundle {
     try bundle.init(base.allocator);
     defer bundle.deinit();
 
-    for (base.errors.items) |msg| {
+    while (base.errors.popOrNull()) |msg| {
+        var mut_msg = msg;
+        defer mut_msg.deinit(base.allocator);
         const notes = msg.notes orelse &[0]ErrorMsg{};
         try bundle.addRootErrorMessage(.{
             .msg = try bundle.addString(msg.msg),

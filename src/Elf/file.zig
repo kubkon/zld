@@ -51,9 +51,12 @@ pub const File = union(enum) {
     /// * weak defined
     /// * strong in lib (dso/archive)
     /// * weak in lib (dso/archive)
+    /// * common
+    /// * common in lib (archive)
     /// * unclaimed
     pub fn getSymbolRank(file: File, sym: elf.Elf64_Sym, in_archive: bool) u32 {
-        const base: u4 = blk: {
+        const base: u3 = blk: {
+            if (sym.st_shndx == elf.SHN_COMMON) break :blk if (in_archive) 6 else 5;
             if (file == .shared or in_archive) break :blk switch (sym.st_bind()) {
                 elf.STB_GLOBAL => 3,
                 else => 4,

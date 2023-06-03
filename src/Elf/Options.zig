@@ -12,6 +12,8 @@ const usage =
     \\                              Set the dynamic linker to use
     \\--end-group                   Ignored for compatibility with GNU
     \\--eh-frame-hdr                Create .eh_frame_hdr section
+    \\--export-dynamic, -E          Export all dynamic symbols
+    \\--no-export-dynamic           Don't export all dynamic symbols
     \\--no-eh-frame-hdr             Don't create .eh_frame_hdr section
     \\--entry=[value], -e [value]   Set name of the entry point symbol
     \\--gc-sections                 Remove unused sections
@@ -20,6 +22,8 @@ const usage =
     \\-l[value]                     Specify library to link against
     \\-L[value]                     Specify library search dir
     \\-m [value]                    Set target emulation
+    \\--pie, --pic-executable       Create a position independent executable
+    \\--no-pie                      Create a position dependent executable (default)
     \\--pop-state                   Restore the states saved by --push-state
     \\--push-state                  Save the current state of --as-needed, -static and --whole-archive
     \\--relax                       Optimize instructions (default)
@@ -30,6 +34,7 @@ const usage =
     \\--start-group                 Ignored for compatibility with GNU
     \\--strip-all, -s               Strip all symbols. Implies --strip-debug
     \\--strip-debug, -S             Strip .debug_ sections
+    \\--warn-common                 Warn about duplicate common symbols
     \\-o [value]                    Specify output path for the final artifact
     \\-z                            Set linker extension flags
     \\  stack-size=[value]          Override default stack size
@@ -64,6 +69,9 @@ dynamic_linker: ?[]const u8 = null,
 eh_frame_hdr: bool = false,
 static: bool = false,
 relax: bool = true,
+export_dynamic: bool = false,
+pie: bool = false,
+warn_common: bool = false,
 /// -z flags
 /// Overrides default stack size.
 z_stack_size: ?u64 = null,
@@ -120,6 +128,14 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             try rpath_list.put(path, {});
         } else if (p.arg1("R")) |path| {
             try rpath_list.put(path, {});
+        } else if (p.flagAny("export-dynamic") or p.flag1("E")) {
+            opts.export_dynamic = true;
+        } else if (p.flagAny("no-export-dynamic")) {
+            opts.export_dynamic = false;
+        } else if (p.flagAny("pie") or p.flagAny("pic-executable")) {
+            opts.pie = true;
+        } else if (p.flagAny("no-pie")) {
+            opts.pie = false;
         } else if (p.argAny("entry")) |name| {
             opts.entry = name;
         } else if (p.arg1("e")) |name| {
@@ -132,6 +148,8 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             }
         } else if (p.flagAny("allow-multiple-definition")) {
             opts.allow_multiple_definition = true;
+        } else if (p.flagAny("warn-common")) {
+            opts.warn_common = true;
         } else if (p.flagAny("static")) {
             opts.static = true;
             try positionals.append(.{ .tag = .static });

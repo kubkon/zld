@@ -54,6 +54,7 @@ pub const DynamicSection = struct {
         if (elf_file.rela_plt_sect_index != null) nentries += 3; // JMPREL
         if (elf_file.got_plt_sect_index != null) nentries += 1; // PLTGOT
         nentries += 1; // HASH
+        if (elf_file.gnu_hash_sect_index != null) nentries += 1; // GNU_HASH
         nentries += 1; // SYMTAB
         nentries += 1; // SYMENT
         nentries += 1; // STRTAB
@@ -108,18 +109,16 @@ pub const DynamicSection = struct {
         // RELA
         if (elf_file.rela_dyn_sect_index) |shndx| {
             const shdr = elf_file.sections.items(.shdr)[shndx];
-            const relasz = elf_file.got.sizeRela(elf_file);
             try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_RELA, .d_val = shdr.sh_addr });
-            try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_RELASZ, .d_val = relasz });
+            try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_RELASZ, .d_val = shdr.sh_size });
             try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_RELAENT, .d_val = shdr.sh_entsize });
         }
 
         // JMPREL
         if (elf_file.rela_plt_sect_index) |shndx| {
             const shdr = elf_file.sections.items(.shdr)[shndx];
-            const relasz = elf_file.plt.sizeRela();
             try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_JMPREL, .d_val = shdr.sh_addr });
-            try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_PLTRELSZ, .d_val = relasz });
+            try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_PLTRELSZ, .d_val = shdr.sh_size });
             try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_PLTREL, .d_val = elf.DT_RELA });
         }
 
@@ -133,6 +132,11 @@ pub const DynamicSection = struct {
             assert(elf_file.hash_sect_index != null);
             const addr = elf_file.sections.items(.shdr)[elf_file.hash_sect_index.?].sh_addr;
             try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_HASH, .d_val = addr });
+        }
+
+        if (elf_file.gnu_hash_sect_index) |shndx| {
+            const addr = elf_file.sections.items(.shdr)[shndx].sh_addr;
+            try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_GNU_HASH, .d_val = addr });
         }
 
         // SYMTAB + SYMENT
@@ -205,7 +209,7 @@ pub const HashSection = struct {
         defer gpa.free(chains);
         @memset(chains, 0);
 
-        for (elf_file.dynsym.symbols.items[1..], 1..) |sym_ref, i| {
+        for (elf_file.dynsym.symbols.items, 1..) |sym_ref, i| {
             const name = elf_file.dynstrtab.getAssumeExists(sym_ref.off);
             const hash = hasher(name) % buckets.len;
             chains[@intCast(u32, i)] = buckets[hash];
@@ -236,6 +240,116 @@ pub const HashSection = struct {
     }
 };
 
+pub const GnuHashSection = struct {
+    num_buckets: u32 = 0,
+    num_bloom: u32 = 1,
+    num_exports: u32 = 0,
+
+    pub const load_factor = 8;
+    pub const header_size = 16;
+    pub const bloom_shift = 26;
+
+    fn getExports(elf_file: *Elf) []const DynsymSection.Dynsym {
+        const start = for (elf_file.dynsym.symbols.items, 0..) |dsym, i| {
+            const sym = elf_file.getSymbol(dsym.index);
+            if (sym.flags.@"export") break i;
+        } else elf_file.dynsym.symbols.items.len;
+        return elf_file.dynsym.symbols.items[start..];
+    }
+
+    inline fn bitCeil(x: u64) u64 {
+        if (@popCount(x) == 1) return x;
+        return @intCast(u64, @as(u128, 1) << (64 - @clz(x)));
+    }
+
+    pub fn calcSize(hash: *GnuHashSection, elf_file: *Elf) !void {
+        hash.num_exports = @intCast(u32, getExports(elf_file).len);
+        if (hash.num_exports > 0) {
+            const num_bits = hash.num_exports * 12;
+            hash.num_bloom = @intCast(u32, bitCeil(@divTrunc(num_bits, 64)));
+        }
+    }
+
+    pub fn size(hash: GnuHashSection) usize {
+        return header_size + hash.num_bloom * 8 + hash.num_buckets * 4 + hash.num_exports * 4;
+    }
+
+    pub fn write(hash: GnuHashSection, elf_file: *Elf, writer: anytype) !void {
+        const exports = getExports(elf_file);
+        const export_off = elf_file.dynsym.count() - hash.num_exports;
+
+        var counting = std.io.countingWriter(writer);
+        const cwriter = counting.writer();
+
+        try cwriter.writeIntLittle(u32, hash.num_buckets);
+        try cwriter.writeIntLittle(u32, export_off);
+        try cwriter.writeIntLittle(u32, hash.num_bloom);
+        try cwriter.writeIntLittle(u32, bloom_shift);
+
+        const gpa = elf_file.base.allocator;
+        const hashes = try gpa.alloc(u32, exports.len);
+        defer gpa.free(hashes);
+        const indices = try gpa.alloc(u32, exports.len);
+        defer gpa.free(indices);
+
+        // Compose and write the bloom filter
+        const bloom = try gpa.alloc(u64, hash.num_bloom);
+        defer gpa.free(bloom);
+        @memset(bloom, 0);
+
+        for (exports, 0..) |dsym, i| {
+            const sym = elf_file.getSymbol(dsym.index);
+            const h = hasher(sym.getName(elf_file));
+            hashes[i] = h;
+            indices[i] = h % hash.num_buckets;
+            const idx = @divTrunc(h, 64) % hash.num_bloom;
+            bloom[idx] |= @as(u64, 1) << @intCast(u6, h % 64);
+            bloom[idx] |= @as(u64, 1) << @intCast(u6, (h >> bloom_shift) % 64);
+        }
+
+        try cwriter.writeAll(mem.sliceAsBytes(bloom));
+
+        // Fill in the hash bucket indices
+        const buckets = try gpa.alloc(u32, hash.num_buckets);
+        defer gpa.free(buckets);
+        @memset(buckets, 0);
+
+        for (0..hash.num_exports) |i| {
+            if (buckets[indices[i]] == 0) {
+                buckets[indices[i]] = @intCast(u32, i + export_off);
+            }
+        }
+
+        try cwriter.writeAll(mem.sliceAsBytes(buckets));
+
+        // Finally, write the hash table
+        const table = try gpa.alloc(u32, hash.num_exports);
+        defer gpa.free(table);
+        @memset(table, 0);
+
+        for (0..hash.num_exports) |i| {
+            const h = hashes[i];
+            if (i == exports.len - 1 or indices[i] != indices[i + 1]) {
+                table[i] = h | 1;
+            } else {
+                table[i] = h & ~@as(u32, 1);
+            }
+        }
+
+        try cwriter.writeAll(mem.sliceAsBytes(table));
+
+        assert(counting.bytes_written == hash.size());
+    }
+
+    pub fn hasher(name: [:0]const u8) u32 {
+        var h: u32 = 5381;
+        for (name) |c| {
+            h = (h << 5) +% h +% c;
+        }
+        return h;
+    }
+};
+
 pub const DynsymSection = struct {
     symbols: std.ArrayListUnmanaged(Dynsym) = .{},
 
@@ -252,6 +366,7 @@ pub const DynsymSection = struct {
         const gpa = elf_file.base.allocator;
         const index = @intCast(u32, dynsym.symbols.items.len + 1);
         const sym = elf_file.getSymbol(sym_index);
+        sym.flags.has_dynamic = true;
         if (sym.getExtra(elf_file)) |extra| {
             var new_extra = extra;
             new_extra.dynamic = index;
@@ -259,6 +374,45 @@ pub const DynsymSection = struct {
         } else try sym.addExtra(.{ .dynamic = index }, elf_file);
         const name = try elf_file.dynstrtab.insert(gpa, sym.getName(elf_file));
         try dynsym.symbols.append(gpa, .{ .index = sym_index, .off = name });
+    }
+
+    pub fn sort(dynsym: *DynsymSection, elf_file: *Elf) void {
+        const Sort = struct {
+            pub fn lessThan(ctx: *Elf, lhs: Dynsym, rhs: Dynsym) bool {
+                const lhs_sym = ctx.getSymbol(lhs.index);
+                const rhs_sym = ctx.getSymbol(rhs.index);
+
+                if (lhs_sym.flags.@"export" != rhs_sym.flags.@"export") {
+                    return rhs_sym.flags.@"export";
+                }
+
+                // TODO cache hash values
+                const nbuckets = ctx.gnu_hash.num_buckets;
+                const lhs_hash = GnuHashSection.hasher(lhs_sym.getName(ctx)) % nbuckets;
+                const rhs_hash = GnuHashSection.hasher(rhs_sym.getName(ctx)) % nbuckets;
+
+                if (lhs_hash == rhs_hash)
+                    return lhs_sym.getExtra(ctx).?.dynamic < rhs_sym.getExtra(ctx).?.dynamic;
+                return lhs_hash < rhs_hash;
+            }
+        };
+
+        var num_exports: u32 = 0;
+        for (dynsym.symbols.items) |dsym| {
+            const sym = elf_file.getSymbol(dsym.index);
+            if (sym.flags.@"export") num_exports += 1;
+        }
+
+        elf_file.gnu_hash.num_buckets = @divTrunc(num_exports, GnuHashSection.load_factor) + 1;
+
+        std.mem.sort(Dynsym, dynsym.symbols.items, elf_file, Sort.lessThan);
+
+        for (dynsym.symbols.items, 1..) |dsym, index| {
+            const sym = elf_file.getSymbol(dsym.index);
+            var extra = sym.getExtra(elf_file).?;
+            extra.dynamic = @intCast(u32, index);
+            sym.setExtra(extra, elf_file);
+        }
     }
 
     pub inline fn size(dynsym: DynsymSection) usize {
@@ -273,19 +427,7 @@ pub const DynsymSection = struct {
         try writer.writeStruct(Elf.null_sym);
         for (dynsym.symbols.items) |sym_ref| {
             const sym = elf_file.getSymbol(sym_ref.index);
-            const s_sym = sym.getSourceSymbol(elf_file);
-            const st_type = switch (s_sym.st_type()) {
-                elf.STT_GNU_IFUNC => elf.STT_FUNC,
-                else => |st_type| st_type,
-            };
-            try writer.writeStruct(elf.Elf64_Sym{
-                .st_name = sym_ref.off,
-                .st_info = (@as(u8, elf.STB_GLOBAL) << 4) | st_type,
-                .st_other = s_sym.st_other,
-                .st_shndx = elf.SHN_UNDEF,
-                .st_value = 0,
-                .st_size = 0,
-            });
+            try writer.writeStruct(sym.asElfSym(sym_ref.off, elf_file));
         }
     }
 };
@@ -332,7 +474,7 @@ pub const VerneedSection = struct {
 
         for (dynsyms, 1..) |dynsym, i| {
             const symbol = elf_file.getSymbol(dynsym.index);
-            if (symbol.import and symbol.ver_idx & Elf.VERSYM_VERSION > Elf.VER_NDX_GLOBAL) {
+            if (symbol.flags.import and symbol.ver_idx & Elf.VERSYM_VERSION > Elf.VER_NDX_GLOBAL) {
                 const shared = symbol.getFile(elf_file).?.shared;
                 verneed.appendAssumeCapacity(.{
                     .idx = i,
@@ -444,25 +586,16 @@ pub const GotSection = struct {
         try got.symbols.append(elf_file.base.allocator, sym_index);
     }
 
-    pub fn sizeGot(got: GotSection) usize {
-        var size = got.symbols.items.len * 8;
-        if (got.emit_tlsld) size += 8;
-        return size;
+    pub fn size(got: GotSection) usize {
+        var s = got.symbols.items.len * 8;
+        if (got.emit_tlsld) s += 8;
+        return s;
     }
 
-    pub fn sizeRela(got: GotSection, elf_file: *Elf) usize {
-        var size: usize = 0;
+    pub fn write(got: GotSection, elf_file: *Elf, writer: anytype) !void {
         for (got.symbols.items) |sym_index| {
             const sym = elf_file.getSymbol(sym_index);
-            if (sym.import) size += @sizeOf(elf.Elf64_Rela);
-        }
-        return size;
-    }
-
-    pub fn writeGot(got: GotSection, elf_file: *Elf, writer: anytype) !void {
-        for (got.symbols.items) |sym_index| {
-            const sym = elf_file.getSymbol(sym_index);
-            const value = if (sym.import) 0 else sym.value;
+            const value = if (sym.flags.import) 0 else sym.value;
             try writer.writeIntLittle(u64, value);
         }
 
@@ -471,21 +604,28 @@ pub const GotSection = struct {
         }
     }
 
-    pub fn writeRela(got: GotSection, elf_file: *Elf, writer: anytype) !void {
+    pub fn addRela(got: GotSection, elf_file: *Elf) !void {
+        try elf_file.rela_dyn.ensureUnusedCapacity(elf_file.base.allocator, got.numRela(elf_file));
         for (got.symbols.items, 0..) |sym_index, i| {
             const sym = elf_file.getSymbol(sym_index);
-            if (sym.import) {
+            if (sym.flags.import) {
                 const extra = sym.getExtra(elf_file).?;
-                const r_offset = elf_file.getGotEntryAddress(@intCast(u32, i));
-                const r_sym: u64 = extra.dynamic;
-                const r_type: u32 = elf.R_X86_64_GLOB_DAT;
-                try writer.writeStruct(elf.Elf64_Rela{
-                    .r_offset = r_offset,
-                    .r_info = (r_sym << 32) | r_type,
-                    .r_addend = 0,
+                elf_file.addRelaDynAssumeCapacity(.{
+                    .offset = elf_file.getGotEntryAddress(@intCast(u32, i)),
+                    .sym = extra.dynamic,
+                    .type = elf.R_X86_64_GLOB_DAT,
                 });
             }
         }
+    }
+
+    pub fn numRela(got: GotSection, elf_file: *Elf) usize {
+        var num: usize = 0;
+        for (got.symbols.items) |sym_index| {
+            const sym = elf_file.getSymbol(sym_index);
+            if (sym.flags.import) num += 1;
+        }
+        return num;
     }
 
     pub fn calcSymtabSize(got: *GotSection, elf_file: *Elf) !void {
@@ -570,10 +710,6 @@ pub const PltSection = struct {
         return got_plt_preamble_size + plt.symbols.items.len * 8;
     }
 
-    pub fn sizeRela(plt: PltSection) usize {
-        return plt.symbols.items.len * @sizeOf(elf.Elf64_Rela);
-    }
-
     pub fn writePlt(plt: PltSection, elf_file: *Elf, writer: anytype) !void {
         const plt_addr = elf_file.getSectionAddress(elf_file.plt_sect_index.?);
         const got_plt_addr = elf_file.getSectionAddress(elf_file.got_plt_sect_index.?);
@@ -622,20 +758,25 @@ pub const PltSection = struct {
         }
     }
 
-    pub fn writeRela(plt: PltSection, elf_file: *Elf, writer: anytype) !void {
+    pub fn addRela(plt: PltSection, elf_file: *Elf) !void {
+        try elf_file.rela_plt.ensureUnusedCapacity(elf_file.base.allocator, plt.numRela());
         for (plt.symbols.items, 0..) |sym_index, i| {
             const sym = elf_file.getSymbol(sym_index);
-            assert(sym.import);
+            assert(sym.flags.import);
             const extra = sym.getExtra(elf_file).?;
             const r_offset = elf_file.getGotPltEntryAddress(@intCast(u32, i));
             const r_sym: u64 = extra.dynamic;
             const r_type: u32 = elf.R_X86_64_JUMP_SLOT;
-            try writer.writeStruct(elf.Elf64_Rela{
+            elf_file.rela_plt.appendAssumeCapacity(.{
                 .r_offset = r_offset,
                 .r_info = (r_sym << 32) | r_type,
                 .r_addend = 0,
             });
         }
+    }
+
+    pub fn numRela(plt: PltSection) usize {
+        return plt.symbols.items.len;
     }
 
     pub fn calcSymtabSize(plt: *PltSection, elf_file: *Elf) !void {
@@ -698,7 +839,7 @@ pub const PltGotSection = struct {
     pub fn write(plt_got: PltGotSection, elf_file: *Elf, writer: anytype) !void {
         for (plt_got.symbols.items, 0..) |sym_index, i| {
             const sym = elf_file.getSymbol(sym_index);
-            assert(sym.import);
+            assert(sym.flags.import);
             const extra = sym.getExtra(elf_file).?;
             const target_addr = elf_file.getGotEntryAddress(extra.got);
             const source_addr = elf_file.getPltGotEntryAddress(@intCast(u32, i));
@@ -757,6 +898,11 @@ pub const CopyRelSection = struct {
     pub fn addSymbol(copy_rel: *CopyRelSection, sym_index: u32, elf_file: *Elf) !void {
         const index = @intCast(u32, copy_rel.symbols.items.len);
         const symbol = elf_file.getSymbol(sym_index);
+        symbol.flags.import = true;
+        symbol.flags.@"export" = true;
+        symbol.flags.has_copy_rel = true;
+        symbol.flags.weak = false;
+
         if (symbol.getExtra(elf_file)) |extra| {
             var new_extra = extra;
             new_extra.copy_rel = index;
@@ -764,27 +910,59 @@ pub const CopyRelSection = struct {
         } else try symbol.addExtra(.{ .copy_rel = index }, elf_file);
         try copy_rel.symbols.append(elf_file.base.allocator, sym_index);
 
-        // TODO find aliases and add them too
+        const shared = symbol.getFile(elf_file).?.shared;
+        if (shared.aliases == null) {
+            try shared.initSymbolAliases(elf_file);
+        }
+
+        const aliases = shared.getSymbolAliases(sym_index, elf_file);
+        for (aliases) |alias| {
+            if (alias == sym_index) continue;
+            const alias_sym = elf_file.getSymbol(alias);
+            alias_sym.flags.import = true;
+            alias_sym.flags.@"export" = true;
+            alias_sym.flags.has_copy_rel = true;
+            alias_sym.flags.copy_rel = true;
+            alias_sym.flags.weak = false;
+            try elf_file.dynsym.addSymbol(alias, elf_file);
+        }
     }
 
-    pub fn sizeRela(copy_rel: CopyRelSection) usize {
-        return copy_rel.symbols.items.len * @sizeOf(elf.Elf64_Rela);
+    pub fn calcSectionSize(copy_rel: CopyRelSection, shndx: u16, elf_file: *Elf) !void {
+        const shdr = &elf_file.sections.items(.shdr)[shndx];
+        for (copy_rel.symbols.items) |sym_index| {
+            const symbol = elf_file.getSymbol(sym_index);
+            const shared = symbol.getFile(elf_file).?.shared;
+            const alignment = try symbol.getAlignment(elf_file);
+            symbol.value = mem.alignForwardGeneric(u64, shdr.sh_size, alignment);
+            shdr.sh_addralign = @max(shdr.sh_addralign, alignment);
+            shdr.sh_size = symbol.value + symbol.getSourceSymbol(elf_file).st_size;
+
+            const aliases = shared.getSymbolAliases(sym_index, elf_file);
+            for (aliases) |alias| {
+                if (alias == sym_index) continue;
+                const alias_sym = elf_file.getSymbol(alias);
+                alias_sym.value = symbol.value;
+            }
+        }
     }
 
-    pub fn writeRela(copy_rel: CopyRelSection, elf_file: *Elf, writer: anytype) !void {
+    pub fn addRela(copy_rel: CopyRelSection, elf_file: *Elf) !void {
+        try elf_file.rela_dyn.ensureUnusedCapacity(elf_file.base.allocator, copy_rel.numRela());
         for (copy_rel.symbols.items) |sym_index| {
             const sym = elf_file.getSymbol(sym_index);
-            assert(sym.import);
+            assert(sym.flags.import and sym.flags.copy_rel);
             const extra = sym.getExtra(elf_file).?;
-            const r_offset = sym.getAddress(elf_file);
-            const r_sym: u64 = extra.dynamic;
-            const r_type: u32 = elf.R_X86_64_COPY;
-            try writer.writeStruct(elf.Elf64_Rela{
-                .r_offset = r_offset,
-                .r_info = (r_sym << 32) | r_type,
-                .r_addend = 0,
+            elf_file.addRelaDynAssumeCapacity(.{
+                .offset = sym.getAddress(elf_file),
+                .sym = extra.dynamic,
+                .type = elf.R_X86_64_COPY,
             });
         }
+    }
+
+    pub fn numRela(copy_rel: CopyRelSection) usize {
+        return copy_rel.symbols.items.len;
     }
 };
 

@@ -25,15 +25,7 @@ sym_idx: u32 = 0,
 /// If the symbol is unversioned it will have either VER_NDX_LOCAL or VER_NDX_GLOBAL.
 ver_idx: elf.Elf64_Versym = Elf.VER_NDX_LOCAL,
 
-/// Whether the symbol is imported at runtime.
-import: bool = false,
-
-/// Whether the symbol is exported at runtime.
-@"export": bool = false,
-
-/// Whether the symbol makes into the output symtab or not.
-output_symtab: bool = false,
-
+/// Misc flags for the symbol packaged as packed struct for compression.
 flags: Flags = .{},
 
 extra: u32 = 0,
@@ -43,18 +35,22 @@ pub fn isAbs(symbol: Symbol, elf_file: *Elf) bool {
     if (file == .shared)
         return symbol.getSourceSymbol(elf_file).st_shndx == elf.SHN_ABS;
 
-    return !symbol.import and symbol.getAtom(elf_file) == null and symbol.shndx == 0;
+    return !symbol.flags.import and symbol.getAtom(elf_file) == null and symbol.shndx == 0;
 }
 
 pub fn isLocal(symbol: Symbol) bool {
-    return !(symbol.import or symbol.@"export");
+    return !(symbol.flags.import or symbol.flags.@"export");
 }
 
-pub fn isIFunc(symbol: Symbol, elf_file: *Elf) bool {
+pub inline fn isIFunc(symbol: Symbol, elf_file: *Elf) bool {
+    return symbol.getType(elf_file) == elf.STT_GNU_IFUNC;
+}
+
+pub fn getType(symbol: Symbol, elf_file: *Elf) u4 {
     const file = symbol.getFile(elf_file).?;
     const s_sym = symbol.getSourceSymbol(elf_file);
-    const is_ifunc = s_sym.st_type() == elf.STT_GNU_IFUNC;
-    return is_ifunc and file != .shared;
+    if (s_sym.st_type() == elf.STT_GNU_IFUNC and file == .shared) return elf.STT_FUNC;
+    return s_sym.st_type();
 }
 
 pub fn getName(symbol: Symbol, elf_file: *Elf) [:0]const u8 {
@@ -109,10 +105,16 @@ pub fn getGotAddress(symbol: Symbol, elf_file: *Elf) u64 {
     return elf_file.getGotEntryAddress(extra.got);
 }
 
-pub fn getAlignment(symbol: Symbol, elf_file: *Elf) u64 {
-    if (symbol.getFile(elf_file) == null) return 0;
+pub fn getAlignment(symbol: Symbol, elf_file: *Elf) !u64 {
+    const file = symbol.getFile(elf_file) orelse return 0;
+    const shared = file.shared;
     const s_sym = symbol.getSourceSymbol(elf_file);
-    return @ctz(s_sym.st_value);
+    const shdr = shared.getShdrs()[s_sym.st_shndx];
+    const alignment = @max(1, shdr.sh_addralign);
+    return if (s_sym.st_value == 0)
+        alignment
+    else
+        @min(alignment, try std.math.powi(u64, 2, @ctz(s_sym.st_value)));
 }
 
 pub fn addExtra(symbol: *Symbol, extra: Extra, elf_file: *Elf) !void {
@@ -133,15 +135,19 @@ pub inline fn asElfSym(symbol: Symbol, st_name: u32, elf_file: *Elf) elf.Elf64_S
         elf.STT_GNU_IFUNC => elf.STT_FUNC,
         else => |st_type| st_type,
     };
-    const st_bind: u8 = if (symbol.isLocal()) 0 else elf.STB_GLOBAL;
+    const st_bind: u8 = blk: {
+        if (symbol.isLocal()) break :blk 0;
+        if (symbol.flags.weak) break :blk elf.STB_WEAK;
+        break :blk elf.STB_GLOBAL;
+    };
     const st_shndx = blk: {
         if (symbol.flags.copy_rel) break :blk elf_file.copy_rel_sect_index.?;
-        if (symbol.import) break :blk elf.SHN_UNDEF;
+        if (symbol.flags.import) break :blk elf.SHN_UNDEF;
         break :blk symbol.shndx;
     };
     const st_value = blk: {
         if (symbol.flags.copy_rel) break :blk symbol.getAddress(elf_file);
-        if (symbol.import) break :blk 0;
+        if (symbol.flags.import) break :blk 0;
         const shdr = &elf_file.sections.items(.shdr)[st_shndx];
         if (Elf.shdrIsTls(shdr)) break :blk symbol.value - elf_file.getTlsAddress();
         break :blk symbol.value;
@@ -231,15 +237,11 @@ fn format2(
         if (symbol.getAtom(ctx.elf_file)) |atom| {
             try writer.print(" : atom({d})", .{atom.atom_index});
         }
-        if (symbol.@"export" and symbol.import) {
-            try writer.writeAll(" : EI");
-        } else if (symbol.@"export" and !symbol.import) {
-            try writer.writeAll(" : E_");
-        } else if (!symbol.@"export" and symbol.import) {
-            try writer.writeAll(" : _I");
-        } else {
-            try writer.writeAll(" : __");
-        }
+        var buf: [2]u8 = .{'_'} ** 2;
+        if (symbol.flags.@"export") buf[0] = 'E';
+        if (symbol.flags.import) buf[1] = 'I';
+        try writer.print(" : {s}", .{&buf});
+        if (symbol.flags.weak) try writer.writeAll(" : weak");
         switch (file) {
             .internal => |x| try writer.print(" : internal({d})", .{x.index}),
             .object => |x| try writer.print(" : object({d})", .{x.index}),
@@ -249,9 +251,30 @@ fn format2(
 }
 
 pub const Flags = packed struct {
+    /// Whether the symbol is imported at runtime.
+    import: bool = false,
+
+    /// Whether the symbol is exported at runtime.
+    @"export": bool = false,
+
+    /// Whether this symbol is weak.
+    weak: bool = false,
+
+    /// Whether the symbol makes into the output symtab or not.
+    output_symtab: bool = false,
+
+    /// Whether the symbol contains GOT indirection.
     got: bool = false,
+
+    /// Whether the symbol contains PLT indirection.
     plt: bool = false,
+
+    /// Whether the symbol contains COPYREL directive.
     copy_rel: bool = false,
+    has_copy_rel: bool = false,
+    has_dynamic: bool = false,
+
+    /// Whether the symbol contains TLSGD indirection.
     tlsgd: bool = false,
 };
 

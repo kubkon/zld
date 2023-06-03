@@ -28,6 +28,7 @@ dynamic_sect_index: ?u16 = null,
 dynsymtab_sect_index: ?u16 = null,
 dynstrtab_sect_index: ?u16 = null,
 hash_sect_index: ?u16 = null,
+gnu_hash_sect_index: ?u16 = null,
 versym_sect_index: ?u16 = null,
 verneed_sect_index: ?u16 = null,
 
@@ -60,10 +61,13 @@ verneed: VerneedSection = .{},
 
 dynamic: DynamicSection = .{},
 hash: HashSection = .{},
+gnu_hash: GnuHashSection = .{},
 got: GotSection = .{},
 plt: PltSection = .{},
 plt_got: PltGotSection = .{},
 copy_rel: CopyRelSection = .{},
+rela_dyn: std.ArrayListUnmanaged(elf.Elf64_Rela) = .{},
+rela_plt: std.ArrayListUnmanaged(elf.Elf64_Rela) = .{},
 
 atoms: std.ArrayListUnmanaged(Atom) = .{},
 
@@ -72,6 +76,7 @@ comdat_groups_owners: std.ArrayListUnmanaged(ComdatGroupOwner) = .{},
 comdat_groups_table: std.AutoHashMapUnmanaged(u32, ComdatGroupOwner.Index) = .{},
 
 needs_tlsld: bool = false,
+default_sym_version: elf.Elf64_Versym,
 
 pub fn openPath(allocator: Allocator, options: Options, thread_pool: *ThreadPool) !*Elf {
     const file = try options.emit.directory.createFile(options.emit.sub_path, .{
@@ -101,6 +106,10 @@ fn createEmpty(gpa: Allocator, options: Options, thread_pool: *ThreadPool) !*Elf
         },
         .arena = std.heap.ArenaAllocator.init(gpa).state,
         .options = options,
+        .default_sym_version = if (options.output_mode == .lib or options.export_dynamic)
+            VER_NDX_GLOBAL
+        else
+            VER_NDX_LOCAL,
     };
 
     return self;
@@ -140,6 +149,9 @@ pub fn deinit(self: *Elf) void {
     self.hash.deinit(gpa);
     self.versym.deinit(gpa);
     self.verneed.deinit(gpa);
+    self.copy_rel.deinit(gpa);
+    self.rela_dyn.deinit(gpa);
+    self.rela_plt.deinit(gpa);
     {
         var it = self.undefs.valueIterator();
         while (it.next()) |notes| {
@@ -300,6 +312,7 @@ pub fn flush(self: *Elf) !void {
     }
 
     try self.resolveSymbols();
+    try self.convertCommonSymbols();
     try self.markImportsAndExports();
 
     // Set the entrypoint if found
@@ -344,7 +357,8 @@ pub fn flush(self: *Elf) !void {
     try self.addAtomsToSections();
     try self.sortInitFini();
     try self.setDynamic();
-    try self.setHash();
+    self.setDynsym();
+    try self.setHashes();
     try self.setVerSymtab();
     try self.calcSectionSizes();
 
@@ -428,16 +442,23 @@ fn initSections(self: *Elf) !void {
             .flags = elf.SHF_ALLOC | elf.SHF_WRITE,
             .addralign = @alignOf(u64),
         });
+    }
 
-        if (self.got.needs_rela or self.copy_rel.symbols.items.len > 0) {
-            self.rela_dyn_sect_index = try self.addSection(.{
-                .name = ".rela.dyn",
-                .type = elf.SHT_RELA,
-                .flags = elf.SHF_ALLOC,
-                .addralign = @alignOf(elf.Elf64_Rela),
-                .entsize = @sizeOf(elf.Elf64_Rela),
-            });
+    const needs_rela_dyn = blk: {
+        if (self.got.needs_rela or self.copy_rel.symbols.items.len > 0) break :blk true;
+        for (self.objects.items) |index| {
+            if (self.getFile(index).?.object.num_dynrelocs > 0) break :blk true;
         }
+        break :blk false;
+    };
+    if (needs_rela_dyn) {
+        self.rela_dyn_sect_index = try self.addSection(.{
+            .name = ".rela.dyn",
+            .type = elf.SHT_RELA,
+            .flags = elf.SHF_ALLOC,
+            .addralign = @alignOf(elf.Elf64_Rela),
+            .entsize = @sizeOf(elf.Elf64_Rela),
+        });
     }
 
     if (self.plt.symbols.items.len > 0) {
@@ -539,9 +560,15 @@ fn initSections(self: *Elf) !void {
             .addralign = 4,
             .entsize = 4,
         });
+        self.gnu_hash_sect_index = try self.addSection(.{
+            .name = ".gnu.hash",
+            .flags = elf.SHF_ALLOC,
+            .type = SHT_GNU_HASH,
+            .addralign = 8,
+        });
 
         const needs_versions = for (self.shared_objects.items) |index| {
-            if (self.getFile(index).?.shared.versyms.items.len > 0) break true;
+            if (self.getFile(index).?.shared.versym_sect_index != null) break true;
         } else false;
         if (needs_versions) {
             self.versym_sect_index = try self.addSection(.{
@@ -589,7 +616,7 @@ fn calcSectionSizes(self: *Elf) !void {
 
     if (self.got_sect_index) |index| {
         const shdr = &self.sections.items(.shdr)[index];
-        shdr.sh_size = self.got.sizeGot();
+        shdr.sh_size = self.got.size();
         shdr.sh_addralign = @alignOf(u64);
     }
 
@@ -611,25 +638,22 @@ fn calcSectionSizes(self: *Elf) !void {
         shdr.sh_addralign = 16;
     }
 
-    if (self.rela_dyn_sect_index) |index| {
-        const shdr = &self.sections.items(.shdr)[index];
-        shdr.sh_size = self.got.sizeRela(self) + self.copy_rel.sizeRela();
+    if (self.rela_dyn_sect_index) |shndx| {
+        const shdr = &self.sections.items(.shdr)[shndx];
+        var num = self.got.numRela(self) + self.copy_rel.numRela();
+        for (self.objects.items) |index| {
+            num += self.getFile(index).?.object.num_dynrelocs;
+        }
+        shdr.sh_size = num * @sizeOf(elf.Elf64_Rela);
     }
 
     if (self.rela_plt_sect_index) |index| {
         const shdr = &self.sections.items(.shdr)[index];
-        shdr.sh_size = self.plt.sizeRela();
+        shdr.sh_size = self.plt.numRela() * @sizeOf(elf.Elf64_Rela);
     }
 
     if (self.copy_rel_sect_index) |index| {
-        const shdr = &self.sections.items(.shdr)[index];
-        for (self.copy_rel.symbols.items) |sym_index| {
-            const symbol = self.getSymbol(sym_index);
-            const alignment = try math.powi(u64, 2, symbol.getAlignment(self));
-            symbol.value = mem.alignForwardGeneric(u64, shdr.sh_size, alignment);
-            shdr.sh_addralign = @max(shdr.sh_addralign, alignment);
-            shdr.sh_size += symbol.value + symbol.getSourceSymbol(self).st_size;
-        }
+        try self.copy_rel.calcSectionSize(index, self);
     }
 
     if (self.interp_sect_index) |index| {
@@ -642,6 +666,11 @@ fn calcSectionSizes(self: *Elf) !void {
     if (self.hash_sect_index) |index| {
         const shdr = &self.sections.items(.shdr)[index];
         shdr.sh_size = self.hash.size();
+    }
+
+    if (self.gnu_hash_sect_index) |index| {
+        const shdr = &self.sections.items(.shdr)[index];
+        shdr.sh_size = self.gnu_hash.size();
     }
 
     if (self.dynamic_sect_index) |index| {
@@ -905,6 +934,7 @@ fn initPhdrs(self: *Elf) !void {
         .type = elf.PT_GNU_STACK,
         .flags = if (self.options.z_execstack) elf.PF_W | elf.PF_R | elf.PF_X else elf.PF_W | elf.PF_R,
         .memsz = self.options.z_stack_size orelse 0,
+        .@"align" = 1,
     });
 
     // Backpatch size of the PHDR phdr
@@ -1028,6 +1058,7 @@ fn getSectionRank(self: *Elf, shndx: u16) u8 {
         elf.SHT_NULL => return 0,
         elf.SHT_DYNSYM => return 2,
         elf.SHT_HASH => return 3,
+        SHT_GNU_HASH => return 3,
         SHT_GNU_versym => return 4,
         SHT_GNU_verdef => return 4,
         SHT_GNU_verneed => return 4,
@@ -1118,6 +1149,7 @@ fn sortSections(self: *Elf) !void {
         &self.dynsymtab_sect_index,
         &self.dynstrtab_sect_index,
         &self.hash_sect_index,
+        &self.gnu_hash_sect_index,
         &self.plt_sect_index,
         &self.got_plt_sect_index,
         &self.plt_got_sect_index,
@@ -1148,6 +1180,11 @@ fn sortSections(self: *Elf) !void {
     }
 
     if (self.hash_sect_index) |index| {
+        const shdr = &self.sections.items(.shdr)[index];
+        shdr.sh_link = self.dynsymtab_sect_index.?;
+    }
+
+    if (self.gnu_hash_sect_index) |index| {
         const shdr = &self.sections.items(.shdr)[index];
         shdr.sh_link = self.dynsymtab_sect_index.?;
     }
@@ -1261,7 +1298,7 @@ fn allocateSyntheticSymbols(self: *Elf) void {
 
     // __dso_handle
     if (self.dso_handle_index) |index| {
-        const shdr = self.sections.items(.shdr)[0];
+        const shdr = self.sections.items(.shdr)[1];
         const symbol = self.getSymbol(index);
         symbol.value = shdr.sh_addr;
         symbol.shndx = 0;
@@ -1523,23 +1560,35 @@ fn markLive(self: *Elf) void {
     }
 }
 
+fn convertCommonSymbols(self: *Elf) !void {
+    for (self.objects.items) |index| {
+        try self.getFile(index).?.object.convertCommonSymbols(self);
+    }
+}
+
 fn markImportsAndExports(self: *Elf) !void {
     for (self.shared_objects.items) |index| {
         for (self.getFile(index).?.shared.getGlobals()) |global_index| {
             const global = self.getSymbol(global_index);
-            if (global.getFile(self)) |file| {
-                if (file != .shared) global.@"export" = true;
-            }
+            const file = global.getFile(self) orelse continue;
+            const vis = @intToEnum(elf.STV, global.getSourceSymbol(self).st_other);
+            if (file != .shared and vis != .HIDDEN) global.flags.@"export" = true;
         }
     }
 
     for (self.objects.items) |index| {
         for (self.getFile(index).?.object.getGlobals()) |global_index| {
             const global = self.getSymbol(global_index);
-            if (global.getFile(self)) |file| {
-                if (file == .shared and !global.isAbs(self)) {
-                    global.import = true;
-                }
+            if (global.ver_idx == VER_NDX_LOCAL) continue;
+            const file = global.getFile(self) orelse continue;
+            const vis = @intToEnum(elf.STV, global.getSourceSymbol(self).st_other);
+            if (vis == .HIDDEN) continue;
+            if (file == .shared and !global.isAbs(self)) {
+                global.flags.import = true;
+                continue;
+            }
+            if (file.getIndex() == index) {
+                global.flags.@"export" = true;
             }
         }
     }
@@ -1588,6 +1637,7 @@ fn claimUnresolved(self: *Elf) void {
                 .atom = 0,
                 .sym_idx = sym_idx,
                 .file = object.index,
+                .ver_idx = self.default_sym_version,
             };
         }
     }
@@ -1645,14 +1695,14 @@ fn scanRelocs(self: *Elf) !void {
 
     for (self.symbols.items, 0..) |*symbol, i| {
         const index = @intCast(u32, i);
-        if (symbol.import) {
-            log.debug("'{s}' is imported", .{symbol.getName(self)});
+        if (!symbol.isLocal() and !symbol.flags.has_dynamic) {
+            log.debug("'{s}' is non-local", .{symbol.getName(self)});
             try self.dynsym.addSymbol(index, self);
         }
         if (symbol.flags.got) {
             log.debug("'{s}' needs GOT", .{symbol.getName(self)});
             try self.got.addSymbol(index, self);
-            if (symbol.import) self.got.needs_rela = true;
+            if (symbol.flags.import) self.got.needs_rela = true;
         }
         if (symbol.flags.plt) {
             if (symbol.flags.got) {
@@ -1663,7 +1713,7 @@ fn scanRelocs(self: *Elf) !void {
                 try self.plt.addSymbol(index, self);
             }
         }
-        if (symbol.flags.copy_rel) {
+        if (symbol.flags.copy_rel and !symbol.flags.has_copy_rel) {
             log.debug("'{s}' needs COPYREL!", .{symbol.getName(self)});
             try self.copy_rel.addSymbol(index, self);
         }
@@ -1690,10 +1740,19 @@ fn setDynamic(self: *Elf) !void {
     }
 }
 
+fn setDynsym(self: *Elf) void {
+    if (self.gnu_hash_sect_index == null) return;
+    self.dynsym.sort(self);
+}
+
 fn setVerSymtab(self: *Elf) !void {
     if (self.versym_sect_index == null) return;
     try self.versym.resize(self.base.allocator, self.dynsym.count());
-    @memset(self.versym.items, VER_NDX_LOCAL);
+    self.versym.items[0] = VER_NDX_LOCAL;
+    for (self.dynsym.symbols.items, 1..) |dynsym, i| {
+        const sym = self.getSymbol(dynsym.index);
+        self.versym.items[i] = sym.ver_idx;
+    }
 
     if (self.verneed_sect_index) |shndx| {
         try self.verneed.generate(self);
@@ -1702,9 +1761,13 @@ fn setVerSymtab(self: *Elf) !void {
     }
 }
 
-fn setHash(self: *Elf) !void {
-    if (self.hash_sect_index == null) return;
-    try self.hash.generate(self);
+fn setHashes(self: *Elf) !void {
+    if (self.hash_sect_index != null) {
+        try self.hash.generate(self);
+    }
+    if (self.gnu_hash_sect_index != null) {
+        try self.gnu_hash.calcSize(self);
+    }
 }
 
 fn writeAtoms(self: *Elf) !void {
@@ -1762,6 +1825,14 @@ fn writeSyntheticSections(self: *Elf) !void {
         try self.base.file.pwriteAll(self.hash.buffer.items, shdr.sh_offset);
     }
 
+    if (self.gnu_hash_sect_index) |shndx| {
+        const shdr = self.sections.items(.shdr)[shndx];
+        var buffer = try std.ArrayList(u8).initCapacity(gpa, self.gnu_hash.size());
+        defer buffer.deinit();
+        try self.gnu_hash.write(self, buffer.writer());
+        try self.base.file.pwriteAll(buffer.items, shdr.sh_offset);
+    }
+
     if (self.versym_sect_index) |shndx| {
         const shdr = self.sections.items(.shdr)[shndx];
         try self.base.file.pwriteAll(mem.sliceAsBytes(self.versym.items), shdr.sh_offset);
@@ -1799,22 +1870,18 @@ fn writeSyntheticSections(self: *Elf) !void {
 
     if (self.got_sect_index) |shndx| {
         const shdr = self.sections.items(.shdr)[shndx];
-        var buffer = try std.ArrayList(u8).initCapacity(gpa, self.got.sizeGot());
+        var buffer = try std.ArrayList(u8).initCapacity(gpa, self.got.size());
         defer buffer.deinit();
-        try self.got.writeGot(self, buffer.writer());
+        try self.got.write(self, buffer.writer());
         try self.base.file.pwriteAll(buffer.items, shdr.sh_offset);
     }
 
     if (self.rela_dyn_sect_index) |shndx| {
         const shdr = self.sections.items(.shdr)[shndx];
-        var buffer = try std.ArrayList(u8).initCapacity(
-            gpa,
-            self.got.sizeRela(self) + self.copy_rel.sizeRela(),
-        );
-        defer buffer.deinit();
-        try self.got.writeRela(self, buffer.writer());
-        try self.copy_rel.writeRela(self, buffer.writer());
-        try self.base.file.pwriteAll(buffer.items, shdr.sh_offset);
+        try self.got.addRela(self);
+        try self.copy_rel.addRela(self);
+        self.sortRelaDyn();
+        try self.base.file.pwriteAll(mem.sliceAsBytes(self.rela_dyn.items), shdr.sh_offset);
     }
 
     if (self.plt_sect_index) |shndx| {
@@ -1843,10 +1910,8 @@ fn writeSyntheticSections(self: *Elf) !void {
 
     if (self.rela_plt_sect_index) |shndx| {
         const shdr = self.sections.items(.shdr)[shndx];
-        var buffer = try std.ArrayList(u8).initCapacity(gpa, self.plt.sizeRela());
-        defer buffer.deinit();
-        try self.plt.writeRela(self, buffer.writer());
-        try self.base.file.pwriteAll(buffer.items, shdr.sh_offset);
+        try self.plt.addRela(self);
+        try self.base.file.pwriteAll(mem.sliceAsBytes(self.rela_plt.items), shdr.sh_offset);
     }
 
     if (!self.options.strip_all) {
@@ -2115,6 +2180,37 @@ pub inline fn getComdatGroupOwner(self: *Elf, index: ComdatGroupOwner.Index) *Co
     return &self.comdat_groups_owners.items[index];
 }
 
+const RelaDyn = struct {
+    offset: u64,
+    sym: u64,
+    type: u32,
+    addend: i64 = 0,
+};
+
+pub inline fn addRelaDyn(self: *Elf, opts: RelaDyn) !void {
+    try self.rela_dyn.ensureUnusedCapacity(self.base.alloctor, 1);
+    self.addRelaDynAssumeCapacity(opts);
+}
+
+pub inline fn addRelaDynAssumeCapacity(self: *Elf, opts: RelaDyn) void {
+    self.rela_dyn.appendAssumeCapacity(.{
+        .r_offset = opts.offset,
+        .r_info = (opts.sym << 32) | opts.type,
+        .r_addend = opts.addend,
+    });
+}
+
+fn sortRelaDyn(self: *Elf) void {
+    const Sort = struct {
+        pub fn lessThan(ctx: void, lhs: elf.Elf64_Rela, rhs: elf.Elf64_Rela) bool {
+            _ = ctx;
+            if (lhs.r_sym() == rhs.r_sym()) return lhs.r_offset < rhs.r_offset;
+            return lhs.r_sym() < rhs.r_sym();
+        }
+    };
+    mem.sort(elf.Elf64_Rela, self.rela_dyn.items, {}, Sort.lessThan);
+}
+
 pub inline fn getSectionAddress(self: *Elf, shndx: u16) u64 {
     return self.sections.items(.shdr)[shndx].sh_addr;
 }
@@ -2255,7 +2351,13 @@ fn fmtDumpState(
     try writer.writeByte('\n');
     try writer.writeAll("COPYREL\n");
     for (self.copy_rel.symbols.items, 0..) |sym_index, i| {
-        try writer.print("  {d} => {d} '{s}'\n", .{ i, sym_index, self.getSymbol(sym_index).getName(self) });
+        const symbol = self.getSymbol(sym_index);
+        try writer.print("  {d}@{x} => {d} '{s}'\n", .{
+            i,
+            symbol.getAddress(self),
+            sym_index,
+            symbol.getName(self),
+        });
     }
     try writer.writeByte('\n');
     try writer.writeAll("Output sections\n");
@@ -2334,6 +2436,8 @@ pub const SHT_GNU_verdef = 0x6ffffffd;
 pub const SHT_GNU_verneed = 0x6ffffffe;
 // VERSYM
 pub const SHT_GNU_versym = 0x6fffffff;
+// GNU_HASH
+pub const SHT_GNU_HASH = 0x6ffffff6;
 
 const std = @import("std");
 const build_options = @import("build_options");
@@ -2356,6 +2460,7 @@ const DynamicSection = synthetic.DynamicSection;
 const DynsymSection = synthetic.DynsymSection;
 const Elf = @This();
 const File = @import("Elf/file.zig").File;
+const GnuHashSection = synthetic.GnuHashSection;
 const GotSection = synthetic.GotSection;
 const HashSection = synthetic.HashSection;
 const InternalObject = @import("Elf/InternalObject.zig");

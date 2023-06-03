@@ -28,7 +28,7 @@ fn collectRoots(roots: *std.ArrayList(*Atom), elf_file: *Elf) !void {
         for (elf_file.getFile(index).?.object.getGlobals()) |global_index| {
             const global = elf_file.getSymbol(global_index);
             if (global.getFile(elf_file)) |file| {
-                if (file.getIndex() == index and global.@"export") {
+                if (file.getIndex() == index and global.flags.@"export") {
                     if (global.getAtom(elf_file)) |atom| if (markAtom(atom)) try roots.append(atom);
                 }
             }

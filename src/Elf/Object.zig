@@ -12,9 +12,11 @@ first_global: ?u32 = null,
 symbols: std.ArrayListUnmanaged(u32) = .{},
 atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
 comdat_groups: std.ArrayListUnmanaged(Elf.ComdatGroup.Index) = .{},
+dummy_shdrs: std.ArrayListUnmanaged(elf.Elf64_Shdr) = .{},
 
 needs_exec_stack: bool = false,
 alive: bool = true,
+num_dynrelocs: u32 = 0,
 
 output_symtab_size: Elf.SymtabSize = .{},
 
@@ -42,6 +44,7 @@ pub fn deinit(self: *Object, allocator: Allocator) void {
     self.symbols.deinit(allocator);
     self.atoms.deinit(allocator);
     self.comdat_groups.deinit(allocator);
+    self.dummy_shdrs.deinit(allocator);
 }
 
 pub fn parse(self: *Object, elf_file: *Elf) !void {
@@ -260,7 +263,9 @@ pub fn resolveSymbols(self: *Object, elf_file: *Elf) void {
                 .atom = atom,
                 .sym_idx = sym_idx,
                 .file = self.index,
+                .ver_idx = elf_file.default_sym_version,
             };
+            if (this_sym.st_bind() == elf.STB_WEAK) global.flags.weak = true;
         }
     }
 }
@@ -300,7 +305,8 @@ pub fn checkDuplicates(self: *Object, elf_file: *Elf) void {
 
         if (self.index == global_file.getIndex() or
             this_sym.st_shndx == elf.SHN_UNDEF or
-            this_sym.st_bind() == elf.STB_WEAK) continue;
+            this_sym.st_bind() == elf.STB_WEAK or
+            this_sym.st_shndx == elf.SHN_COMMON) continue;
 
         if (this_sym.st_shndx != elf.SHN_ABS) {
             const atom_index = self.atoms.items[this_sym.st_shndx];
@@ -316,6 +322,65 @@ pub fn checkDuplicates(self: *Object, elf_file: *Elf) void {
     }
 }
 
+/// We will create dummy shdrs per each resolved common symbols to make it
+/// play nicely with the rest of the system.
+pub fn convertCommonSymbols(self: *Object, elf_file: *Elf) !void {
+    const first_global = self.first_global orelse return;
+    for (self.getGlobals(), 0..) |index, i| {
+        const sym_idx = @intCast(u32, first_global + i);
+        const this_sym = self.symtab[sym_idx];
+        if (this_sym.st_shndx != elf.SHN_COMMON) continue;
+
+        const global = elf_file.getSymbol(index);
+        const global_file = global.getFile(elf_file).?;
+        if (global_file.getIndex() != self.index) {
+            if (elf_file.options.warn_common) {
+                elf_file.base.warn("{}: multiple common symbols: {s}", .{
+                    self.fmtPath(),
+                    global.getName(elf_file),
+                });
+            }
+            continue;
+        }
+
+        const gpa = elf_file.base.allocator;
+
+        const atom_index = try elf_file.addAtom();
+        try self.atoms.append(gpa, atom_index);
+
+        const atom = elf_file.getAtom(atom_index).?;
+        atom.atom_index = atom_index;
+        atom.name = global.name;
+        atom.file = self.index;
+        atom.size = @intCast(u32, this_sym.st_size);
+        const alignment = this_sym.st_value;
+        atom.alignment = math.log2_int(u64, alignment);
+
+        const is_tls = global.getType(elf_file) == elf.STT_TLS;
+        var sh_flags: u32 = elf.SHF_ALLOC | elf.SHF_WRITE;
+        if (is_tls) sh_flags |= elf.SHF_TLS;
+        const shndx = @intCast(u16, self.getShdrs().len + self.dummy_shdrs.items.len);
+        const shdr = try self.dummy_shdrs.addOne(gpa);
+        shdr.* = .{
+            .sh_name = 0,
+            .sh_type = elf.SHT_NOBITS,
+            .sh_flags = sh_flags,
+            .sh_addr = 0,
+            .sh_offset = 0,
+            .sh_size = this_sym.st_size,
+            .sh_link = 0,
+            .sh_info = 0,
+            .sh_addralign = alignment,
+            .sh_entsize = 0,
+        };
+        atom.shndx = shndx;
+
+        global.value = 0;
+        global.atom = atom_index;
+        global.flags.weak = false;
+    }
+}
+
 pub fn calcSymtabSize(self: *Object, elf_file: *Elf) !void {
     if (elf_file.options.strip_all) return;
 
@@ -327,7 +392,7 @@ pub fn calcSymtabSize(self: *Object, elf_file: *Elf) !void {
             elf.STT_SECTION, elf.STT_NOTYPE => continue,
             else => {},
         }
-        local.output_symtab = true;
+        local.flags.output_symtab = true;
         self.output_symtab_size.nlocals += 1;
         self.output_symtab_size.strsize += @intCast(u32, local.getName(elf_file).len + 1);
     }
@@ -336,7 +401,7 @@ pub fn calcSymtabSize(self: *Object, elf_file: *Elf) !void {
         const global = elf_file.getSymbol(global_index);
         if (global.getFile(elf_file)) |file| if (file.getIndex() != self.index) continue;
         if (global.getAtom(elf_file)) |atom| if (!atom.is_alive) continue;
-        global.output_symtab = true;
+        global.flags.output_symtab = true;
         if (global.isLocal()) {
             self.output_symtab_size.nlocals += 1;
         } else {
@@ -354,7 +419,7 @@ pub fn writeSymtab(self: *Object, elf_file: *Elf, ctx: Elf.WriteSymtabCtx) !void
     var ilocal = ctx.ilocal;
     for (self.getLocals()) |local_index| {
         const local = elf_file.getSymbol(local_index);
-        if (!local.output_symtab) continue;
+        if (!local.flags.output_symtab) continue;
         const st_name = try ctx.strtab.insert(gpa, local.getName(elf_file));
         ctx.symtab[ilocal] = local.asElfSym(st_name, elf_file);
         ilocal += 1;
@@ -364,7 +429,7 @@ pub fn writeSymtab(self: *Object, elf_file: *Elf, ctx: Elf.WriteSymtabCtx) !void
     for (self.getGlobals()) |global_index| {
         const global = elf_file.getSymbol(global_index);
         if (global.getFile(elf_file)) |file| if (file.getIndex() != self.index) continue;
-        if (!global.output_symtab) continue;
+        if (!global.flags.output_symtab) continue;
         const st_name = try ctx.strtab.insert(gpa, global.getName(elf_file));
         if (global.isLocal()) {
             ctx.symtab[ilocal] = global.asElfSym(st_name, elf_file);
@@ -396,8 +461,16 @@ pub inline fn getShdrs(self: *Object) []align(1) const elf.Elf64_Shdr {
 }
 
 pub inline fn getShdrContents(self: *Object, index: u16) []const u8 {
+    assert(index < self.getShdrs().len);
     const shdr = self.getShdrs()[index];
     return self.data[shdr.sh_offset..][0..shdr.sh_size];
+}
+
+pub fn getShdr(self: *Object, index: u16) elf.Elf64_Shdr {
+    const shdrs = self.getShdrs();
+    assert(index < shdrs.len + self.dummy_shdrs.items.len);
+    if (index < shdrs.len) return shdrs[index];
+    return self.dummy_shdrs.items[index - shdrs.len];
 }
 
 inline fn getString(self: *Object, off: u32) [:0]const u8 {
