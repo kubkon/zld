@@ -209,7 +209,7 @@ pub const HashSection = struct {
         defer gpa.free(chains);
         @memset(chains, 0);
 
-        for (elf_file.dynsym.symbols.items[1..], 1..) |sym_ref, i| {
+        for (elf_file.dynsym.symbols.items, 1..) |sym_ref, i| {
             const name = elf_file.dynstrtab.getAssumeExists(sym_ref.off);
             const hash = hasher(name) % buckets.len;
             chains[@intCast(u32, i)] = buckets[hash];
