@@ -1298,7 +1298,7 @@ fn allocateSyntheticSymbols(self: *Elf) void {
 
     // __dso_handle
     if (self.dso_handle_index) |index| {
-        const shdr = self.sections.items(.shdr)[0];
+        const shdr = self.sections.items(.shdr)[1];
         const symbol = self.getSymbol(index);
         symbol.value = shdr.sh_addr;
         symbol.shndx = 0;
