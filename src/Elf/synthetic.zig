@@ -320,7 +320,7 @@ pub const GnuHashSection = struct {
     pub fn hasher(name: [:0]const u8) u32 {
         var h: u32 = 5381;
         for (name) |c| {
-            h = (h << 5) + h + c;
+            h = (h << 5) +% h +% c;
         }
         return h;
     }
