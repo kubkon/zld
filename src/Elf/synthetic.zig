@@ -898,7 +898,10 @@ pub const CopyRelSection = struct {
     pub fn addSymbol(copy_rel: *CopyRelSection, sym_index: u32, elf_file: *Elf) !void {
         const index = @intCast(u32, copy_rel.symbols.items.len);
         const symbol = elf_file.getSymbol(sym_index);
+        symbol.flags.import = true;
+        symbol.flags.@"export" = true;
         symbol.flags.has_copy_rel = true;
+        symbol.flags.weak = false;
 
         if (symbol.getExtra(elf_file)) |extra| {
             var new_extra = extra;

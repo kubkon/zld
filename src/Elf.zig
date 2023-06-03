@@ -1585,6 +1585,7 @@ fn markImportsAndExports(self: *Elf) !void {
             if (vis == .HIDDEN) continue;
             if (file == .shared and !global.isAbs(self)) {
                 global.flags.import = true;
+                continue;
             }
             if (file.getIndex() == index) {
                 global.flags.@"export" = true;
