@@ -243,6 +243,7 @@ pub const HashSection = struct {
 pub const GnuHashSection = struct {
     num_buckets: u32 = 0,
     num_bloom: u32 = 1,
+    num_exports: u32 = 0,
 
     pub const load_factor = 8;
     pub const header_size = 16;
@@ -256,22 +257,29 @@ pub const GnuHashSection = struct {
         return elf_file.dynsym.symbols.items[start..];
     }
 
-    pub fn size(hash: *GnuHashSection, elf_file: *Elf) usize {
-        const num_exports = @intCast(u32, getExports(elf_file).len);
-        if (num_exports > 0) {
-            const num_bits = num_exports * 12;
+    pub fn calcSize(hash: *GnuHashSection, elf_file: *Elf) !void {
+        hash.num_exports = @intCast(u32, getExports(elf_file).len);
+        if (hash.num_exports > 0) {
+            const num_bits = hash.num_exports * 12;
             hash.num_bloom = std.math.log2_int_ceil(u32, @divTrunc(num_bits, 64));
         }
-        return header_size + hash.num_bloom * 8 + hash.num_buckets * 4 + num_exports * 4;
+    }
+
+    pub fn size(hash: GnuHashSection) usize {
+        return header_size + hash.num_bloom * 8 + hash.num_buckets * 4 + hash.num_exports * 4;
     }
 
     pub fn write(hash: GnuHashSection, elf_file: *Elf, writer: anytype) !void {
         const exports = getExports(elf_file);
-        const export_off = @intCast(u32, elf_file.dynsym.symbols.items.len - exports.len);
-        try writer.writeIntLittle(u32, hash.num_buckets);
-        try writer.writeIntLittle(u32, export_off);
-        try writer.writeIntLittle(u32, hash.num_bloom);
-        try writer.writeIntLittle(u32, bloom_shift);
+        const export_off = elf_file.dynsym.count() - hash.num_exports;
+
+        var counting = std.io.countingWriter(writer);
+        const cwriter = counting.writer();
+
+        try cwriter.writeIntLittle(u32, hash.num_buckets);
+        try cwriter.writeIntLittle(u32, export_off);
+        try cwriter.writeIntLittle(u32, hash.num_bloom);
+        try cwriter.writeIntLittle(u32, bloom_shift);
 
         const gpa = elf_file.base.allocator;
         const hashes = try gpa.alloc(u32, exports.len);
@@ -282,6 +290,7 @@ pub const GnuHashSection = struct {
         // Compose and write the bloom filter
         const bloom = try gpa.alloc(u64, hash.num_bloom);
         defer gpa.free(bloom);
+        @memset(bloom, 0);
 
         for (exports, 0..) |dsym, i| {
             const sym = elf_file.getSymbol(dsym.index);
@@ -293,25 +302,27 @@ pub const GnuHashSection = struct {
             bloom[idx] |= @as(u64, 1) << @intCast(u6, (h >> bloom_shift) % 64);
         }
 
-        try writer.writeAll(mem.sliceAsBytes(bloom));
+        try cwriter.writeAll(mem.sliceAsBytes(bloom));
 
         // Fill in the hash bucket indices
         const buckets = try gpa.alloc(u32, hash.num_buckets);
         defer gpa.free(buckets);
+        @memset(buckets, 0);
 
-        for (0..exports.len) |i| {
+        for (0..hash.num_exports) |i| {
             if (buckets[indices[i]] == 0) {
                 buckets[indices[i]] = @intCast(u32, i + export_off);
             }
         }
 
-        try writer.writeAll(mem.sliceAsBytes(buckets));
+        try cwriter.writeAll(mem.sliceAsBytes(buckets));
 
         // Finally, write the hash table
-        const table = try gpa.alloc(u32, exports.len);
+        const table = try gpa.alloc(u32, hash.num_exports);
         defer gpa.free(table);
+        @memset(table, 0);
 
-        for (0..exports.len) |i| {
+        for (0..hash.num_exports) |i| {
             const h = hashes[i];
             if (i == exports.len - 1 or indices[i] != indices[i + 1]) {
                 table[i] = h | 1;
@@ -320,7 +331,9 @@ pub const GnuHashSection = struct {
             }
         }
 
-        try writer.writeAll(mem.sliceAsBytes(table));
+        try cwriter.writeAll(mem.sliceAsBytes(table));
+
+        assert(counting.bytes_written == hash.size());
     }
 
     pub fn hasher(name: [:0]const u8) u32 {

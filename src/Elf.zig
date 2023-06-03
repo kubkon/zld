@@ -358,7 +358,7 @@ pub fn flush(self: *Elf) !void {
     try self.sortInitFini();
     try self.setDynamic();
     self.setDynsym();
-    try self.setHash();
+    try self.setHashes();
     try self.setVerSymtab();
     try self.calcSectionSizes();
 
@@ -670,7 +670,7 @@ fn calcSectionSizes(self: *Elf) !void {
 
     if (self.gnu_hash_sect_index) |index| {
         const shdr = &self.sections.items(.shdr)[index];
-        shdr.sh_size = self.gnu_hash.size(self);
+        shdr.sh_size = self.gnu_hash.size();
     }
 
     if (self.dynamic_sect_index) |index| {
@@ -1761,9 +1761,12 @@ fn setVerSymtab(self: *Elf) !void {
     }
 }
 
-fn setHash(self: *Elf) !void {
+fn setHashes(self: *Elf) !void {
     if (self.hash_sect_index != null) {
         try self.hash.generate(self);
+    }
+    if (self.gnu_hash_sect_index != null) {
+        try self.gnu_hash.calcSize(self);
     }
 }
 
@@ -1824,7 +1827,7 @@ fn writeSyntheticSections(self: *Elf) !void {
 
     if (self.gnu_hash_sect_index) |shndx| {
         const shdr = self.sections.items(.shdr)[shndx];
-        var buffer = try std.ArrayList(u8).initCapacity(gpa, self.gnu_hash.size(self));
+        var buffer = try std.ArrayList(u8).initCapacity(gpa, self.gnu_hash.size());
         defer buffer.deinit();
         try self.gnu_hash.write(self, buffer.writer());
         try self.base.file.pwriteAll(buffer.items, shdr.sh_offset);
