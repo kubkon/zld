@@ -1880,6 +1880,7 @@ fn writeSyntheticSections(self: *Elf) !void {
         const shdr = self.sections.items(.shdr)[shndx];
         try self.got.addRela(self);
         try self.copy_rel.addRela(self);
+        self.sortRelaDyn();
         try self.base.file.pwriteAll(mem.sliceAsBytes(self.rela_dyn.items), shdr.sh_offset);
     }
 
@@ -2197,6 +2198,17 @@ pub inline fn addRelaDynAssumeCapacity(self: *Elf, opts: RelaDyn) void {
         .r_info = (opts.sym << 32) | opts.type,
         .r_addend = opts.addend,
     });
+}
+
+fn sortRelaDyn(self: *Elf) void {
+    const Sort = struct {
+        pub fn lessThan(ctx: void, lhs: elf.Elf64_Rela, rhs: elf.Elf64_Rela) bool {
+            _ = ctx;
+            if (lhs.r_sym() == rhs.r_sym()) return lhs.r_offset < rhs.r_offset;
+            return lhs.r_sym() < rhs.r_sym();
+        }
+    };
+    mem.sort(elf.Elf64_Rela, self.rela_dyn.items, {}, Sort.lessThan);
 }
 
 pub inline fn getSectionAddress(self: *Elf, shndx: u16) u64 {
