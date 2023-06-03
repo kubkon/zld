@@ -505,24 +505,8 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
 
             elf.R_X86_64_TPOFF32 => try cwriter.writeIntLittle(i32, @truncate(i32, S + A - TP)),
             elf.R_X86_64_TPOFF64 => try cwriter.writeIntLittle(i64, S + A - TP),
-
-            elf.R_X86_64_DTPOFF32 => {
-                if (elf_file.got.emit_tlsld) {
-                    try cwriter.writeIntLittle(i32, @truncate(i32, S + A - DTP));
-                } else {
-                    // Relax to TPOFF32
-                    try cwriter.writeIntLittle(i32, @truncate(i32, S + A - TP));
-                }
-            },
-
-            elf.R_X86_64_DTPOFF64 => {
-                if (elf_file.got.emit_tlsld) {
-                    try cwriter.writeIntLittle(i64, S + A - DTP);
-                } else {
-                    // Relax to TPOFF64
-                    try cwriter.writeIntLittle(i64, S + A - TP);
-                }
-            },
+            elf.R_X86_64_DTPOFF32 => try cwriter.writeIntLittle(i32, @truncate(i32, S + A - DTP)),
+            elf.R_X86_64_DTPOFF64 => try cwriter.writeIntLittle(i64, S + A - DTP),
 
             elf.R_X86_64_GOTTPOFF => {
                 blk: {
@@ -549,50 +533,28 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
             elf.R_X86_64_TLSGD => {
                 if (target.flags.tlsgd) {
                     elf_file.base.fatal("TODO get TLSGD address of the symbol '{s}'", .{target.getName(elf_file)});
-                    continue;
-                }
-                const next_rel = relocs[i + 1];
-                i += 1;
-
-                switch (next_rel.r_type()) {
-                    elf.R_X86_64_PLT32 => {
-                        var insts = [_]u8{
-                            0x64, 0x48, 0x8b, 0x04, 0x25, 0, 0, 0, 0, // movq %fs:0,%rax
-                            0x48, 0x8d, 0x80, 0, 0, 0, 0, // leaq x@tpoff(%rax),%rax
-                        };
-                        mem.writeIntLittle(i32, insts[12..][0..4], @intCast(i32, S - TP));
-                        try stream.seekBy(-4);
-                        try cwriter.writeAll(&insts);
-                    },
-
-                    else => elf_file.base.fatal("TODO rewrite {} when followed by {}", .{
-                        fmtRelocType(r_type),
-                        fmtRelocType(next_rel.r_type()),
-                    }),
+                } else {
+                    try relaxTlsGdToLe(
+                        relocs[i .. i + 2],
+                        @intCast(i32, S - TP),
+                        elf_file,
+                        &stream,
+                    );
+                    i += 1;
                 }
             },
 
             elf.R_X86_64_TLSLD => {
                 if (elf_file.got.emit_tlsld) {
                     try cwriter.writeIntLittle(i32, @intCast(i32, @intCast(i64, elf_file.getTlsLdAddress()) + A - P));
-                    continue;
-                }
-                const next_rel = relocs[i + 1];
-                i += 1;
-
-                switch (next_rel.r_type()) {
-                    elf.R_X86_64_PLT32 => {
-                        var insts = [_]u8{
-                            0x66, 0x66, 0x66, 0x64, 0x48, 0x8b, 0x04, 0x25, 0, 0, 0, 0, // movq %fs:0,%rax
-                        };
-                        try stream.seekBy(-3);
-                        try cwriter.writeAll(&insts);
-                    },
-
-                    else => elf_file.base.fatal("TODO rewrite {} when followed by {}", .{
-                        fmtRelocType(r_type),
-                        fmtRelocType(next_rel.r_type()),
-                    }),
+                } else {
+                    try relaxTlsLdToLe(
+                        relocs[i .. i + 2],
+                        @intCast(i32, TP - @intCast(i64, elf_file.getTlsAddress())),
+                        elf_file,
+                        &stream,
+                    );
+                    i += 1;
                 }
             },
 
@@ -770,6 +732,53 @@ fn relaxRexGotpcrelx(code: []u8) !void {
             encode(&.{inst}, code) catch return error.RelaxFail;
         },
         else => return error.RelaxFail,
+    }
+}
+
+fn relaxTlsGdToLe(rels: []align(1) const elf.Elf64_Rela, value: i32, elf_file: *Elf, stream: anytype) !void {
+    assert(rels.len == 2);
+    const writer = stream.writer();
+    switch (rels[1].r_type()) {
+        elf.R_X86_64_PC32,
+        elf.R_X86_64_PLT32,
+        => {
+            var insts = [_]u8{
+                0x64, 0x48, 0x8b, 0x04, 0x25, 0, 0, 0, 0, // movq %fs:0,%rax
+                0x48, 0x81, 0xc0, 0, 0, 0, 0, // add $tp_offset, %rax
+            };
+            mem.writeIntLittle(i32, insts[12..][0..4], value);
+            try stream.seekBy(-4);
+            try writer.writeAll(&insts);
+        },
+
+        else => elf_file.base.fatal("TODO rewrite {} when followed by {}", .{
+            fmtRelocType(rels[0].r_type()),
+            fmtRelocType(rels[1].r_type()),
+        }),
+    }
+}
+
+fn relaxTlsLdToLe(rels: []align(1) const elf.Elf64_Rela, value: i32, elf_file: *Elf, stream: anytype) !void {
+    assert(rels.len == 2);
+    const writer = stream.writer();
+    switch (rels[1].r_type()) {
+        elf.R_X86_64_PC32,
+        elf.R_X86_64_PLT32,
+        => {
+            var insts = [_]u8{
+                0x31, 0xc0, // xor %eax, %eax
+                0x64, 0x48, 0x8b, 0, // mov %fs:(%rax), %rax
+                0x48, 0x2d, 0, 0, 0, 0, // sub $tls_size, %rax
+            };
+            mem.writeIntLittle(i32, insts[8..][0..4], value);
+            try stream.seekBy(-3);
+            try writer.writeAll(&insts);
+        },
+
+        else => elf_file.base.fatal("TODO rewrite {} when followed by {}", .{
+            fmtRelocType(rels[0].r_type()),
+            fmtRelocType(rels[1].r_type()),
+        }),
     }
 }
 
