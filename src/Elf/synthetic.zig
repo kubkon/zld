@@ -257,11 +257,16 @@ pub const GnuHashSection = struct {
         return elf_file.dynsym.symbols.items[start..];
     }
 
+    inline fn bitCeil(x: u64) u64 {
+        if (@popCount(x) == 1) return x;
+        return @intCast(u64, @as(u128, 1) << (64 - @clz(x)));
+    }
+
     pub fn calcSize(hash: *GnuHashSection, elf_file: *Elf) !void {
         hash.num_exports = @intCast(u32, getExports(elf_file).len);
         if (hash.num_exports > 0) {
             const num_bits = hash.num_exports * 12;
-            hash.num_bloom = std.math.log2_int_ceil(u32, @divTrunc(num_bits, 64));
+            hash.num_bloom = @intCast(u32, bitCeil(@divTrunc(num_bits, 64)));
         }
     }
 
@@ -385,6 +390,9 @@ pub const DynsymSection = struct {
                 const nbuckets = ctx.gnu_hash.num_buckets;
                 const lhs_hash = GnuHashSection.hasher(lhs_sym.getName(ctx)) % nbuckets;
                 const rhs_hash = GnuHashSection.hasher(rhs_sym.getName(ctx)) % nbuckets;
+
+                if (lhs_hash == rhs_hash)
+                    return lhs_sym.getExtra(ctx).?.dynamic < rhs_sym.getExtra(ctx).?.dynamic;
                 return lhs_hash < rhs_hash;
             }
         };
@@ -395,7 +403,7 @@ pub const DynsymSection = struct {
             if (sym.flags.@"export") num_exports += 1;
         }
 
-        elf_file.gnu_hash.num_buckets = @divFloor(num_exports, GnuHashSection.load_factor) + 1;
+        elf_file.gnu_hash.num_buckets = @divTrunc(num_exports, GnuHashSection.load_factor) + 1;
 
         std.mem.sort(Dynsym, dynsym.symbols.items, elf_file, Sort.lessThan);
 

@@ -1570,9 +1570,9 @@ fn markImportsAndExports(self: *Elf) !void {
     for (self.shared_objects.items) |index| {
         for (self.getFile(index).?.shared.getGlobals()) |global_index| {
             const global = self.getSymbol(global_index);
-            if (global.getFile(self)) |file| {
-                if (file != .shared) global.flags.@"export" = true;
-            }
+            const file = global.getFile(self) orelse continue;
+            const vis = @intToEnum(elf.STV, global.getSourceSymbol(self).st_other);
+            if (file != .shared and vis != .HIDDEN) global.flags.@"export" = true;
         }
     }
 
@@ -1580,15 +1580,14 @@ fn markImportsAndExports(self: *Elf) !void {
         for (self.getFile(index).?.object.getGlobals()) |global_index| {
             const global = self.getSymbol(global_index);
             if (global.ver_idx == VER_NDX_LOCAL) continue;
-
-            if (global.getFile(self)) |file| {
-                if (file == .shared and !global.isAbs(self)) {
-                    global.flags.import = true;
-                }
-
-                if (file.getIndex() == index) {
-                    global.flags.@"export" = true;
-                }
+            const file = global.getFile(self) orelse continue;
+            const vis = @intToEnum(elf.STV, global.getSourceSymbol(self).st_other);
+            if (vis == .HIDDEN) continue;
+            if (file == .shared and !global.isAbs(self)) {
+                global.flags.import = true;
+            }
+            if (file.getIndex() == index) {
+                global.flags.@"export" = true;
             }
         }
     }
