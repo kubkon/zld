@@ -150,6 +150,7 @@ pub fn initOutputSection(self: *Atom, elf_file: *Elf) !void {
             .flags = elf.SHF_ALLOC | elf.SHF_WRITE,
             .name = if (shdr.sh_type == elf.SHT_INIT_ARRAY) ".init_array" else ".fini_array",
             .type = @"type",
+            .entsize = shdr.sh_entsize,
         },
         // TODO handle more section types
         else => .{
@@ -483,22 +484,7 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
 
             elf.R_X86_64_GOTPCRELX => {
                 if (!target.flags.import and !target.isIFunc(elf_file) and !target.isAbs(elf_file)) blk: {
-                    var inst_code = code[rel.r_offset - 3 ..];
-                    const old_inst = disassemble(inst_code) orelse break :blk;
-                    const inst = switch (old_inst.encoding.mnemonic) {
-                        .call => try Instruction.new(old_inst.prefix, .call, &.{
-                            // TODO: hack to force imm32s in the assembler
-                            .{ .imm = Immediate.s(-129) },
-                        }),
-                        .jmp => try Instruction.new(old_inst.prefix, .jmp, &.{
-                            // TODO: hack to force imm32s in the assembler
-                            .{ .imm = Immediate.s(-129) },
-                        }),
-                        else => break :blk,
-                    };
-                    relocs_log.debug("    relaxing {} => {}", .{ old_inst.encoding, inst.encoding });
-                    const nop = try Instruction.new(.none, .nop, &.{});
-                    try encode(&.{ nop, inst }, inst_code);
+                    relaxGotpcrelx(code[rel.r_offset - 3 ..]) catch break :blk;
                     try cwriter.writeIntLittle(i32, @intCast(i32, S + A - P));
                     continue;
                 }
@@ -507,28 +493,8 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
 
             elf.R_X86_64_REX_GOTPCRELX => {
                 if (!target.flags.import and !target.isIFunc(elf_file) and !target.isAbs(elf_file)) blk: {
-                    var inst_code = code[rel.r_offset - 3 ..];
-                    const old_inst = disassemble(inst_code) orelse break :blk;
-                    switch (old_inst.encoding.mnemonic) {
-                        .mov => {
-                            const inst = try Instruction.new(old_inst.prefix, .lea, &old_inst.ops);
-                            relocs_log.debug("    relaxing {} => {}", .{ old_inst.encoding, inst.encoding });
-                            try encode(&.{inst}, inst_code);
-                            try cwriter.writeIntLittle(i32, @intCast(i32, S + A - P));
-                        },
-                        // .cmp => {
-                        //     if (math.cast(i32, S) == null) break :blk;
-                        //     const inst = try Instruction.new(old_inst.prefix, .cmp, &.{
-                        //         old_inst.ops[0],
-                        //         // TODO: hack to force imm32s in the assembler
-                        //         .{ .imm = Immediate.s(-129) },
-                        //     });
-                        //     relocs_log.debug("    relaxing {} => {}", .{ old_inst.encoding, inst.encoding });
-                        //     try encode(&.{inst}, inst_code);
-                        //     try cwriter.writeIntLittle(i32, @intCast(i32, S));
-                        // },
-                        else => break :blk,
-                    }
+                    relaxRexGotpcrelx(code[rel.r_offset - 3 ..]) catch break :blk;
+                    try cwriter.writeIntLittle(i32, @intCast(i32, S + A - P));
                     continue;
                 }
                 try cwriter.writeIntLittle(i32, @intCast(i32, G + GOT + A - P));
@@ -775,6 +741,36 @@ pub fn resolveRelocsNonAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void 
     }
 
     try writer.writeAll(code);
+}
+
+fn relaxGotpcrelx(code: []u8) !void {
+    const old_inst = disassemble(code) orelse return error.RelaxFail;
+    const inst = switch (old_inst.encoding.mnemonic) {
+        .call => try Instruction.new(old_inst.prefix, .call, &.{
+            // TODO: hack to force imm32s in the assembler
+            .{ .imm = Immediate.s(-129) },
+        }),
+        .jmp => try Instruction.new(old_inst.prefix, .jmp, &.{
+            // TODO: hack to force imm32s in the assembler
+            .{ .imm = Immediate.s(-129) },
+        }),
+        else => return error.RelaxFail,
+    };
+    relocs_log.debug("    relaxing {} => {}", .{ old_inst.encoding, inst.encoding });
+    const nop = try Instruction.new(.none, .nop, &.{});
+    encode(&.{ nop, inst }, code) catch return error.RelaxFail;
+}
+
+fn relaxRexGotpcrelx(code: []u8) !void {
+    const old_inst = disassemble(code) orelse return error.RelaxFail;
+    switch (old_inst.encoding.mnemonic) {
+        .mov => {
+            const inst = try Instruction.new(old_inst.prefix, .lea, &old_inst.ops);
+            relocs_log.debug("    relaxing {} => {}", .{ old_inst.encoding, inst.encoding });
+            encode(&.{inst}, code) catch return error.RelaxFail;
+        },
+        else => return error.RelaxFail,
+    }
 }
 
 fn disassemble(code: []const u8) ?Instruction {
