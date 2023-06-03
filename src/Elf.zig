@@ -563,9 +563,8 @@ fn initSections(self: *Elf) !void {
         self.gnu_hash_sect_index = try self.addSection(.{
             .name = ".gnu.hash",
             .flags = elf.SHF_ALLOC,
-            .type = elf.SHT_HASH,
-            .addralign = 4,
-            .entsize = 4,
+            .type = SHT_GNU_HASH,
+            .addralign = 8,
         });
 
         const needs_versions = for (self.shared_objects.items) |index| {
@@ -1059,6 +1058,7 @@ fn getSectionRank(self: *Elf, shndx: u16) u8 {
         elf.SHT_NULL => return 0,
         elf.SHT_DYNSYM => return 2,
         elf.SHT_HASH => return 3,
+        SHT_GNU_HASH => return 3,
         SHT_GNU_versym => return 4,
         SHT_GNU_verdef => return 4,
         SHT_GNU_verneed => return 4,
@@ -2421,6 +2421,8 @@ pub const SHT_GNU_verdef = 0x6ffffffd;
 pub const SHT_GNU_verneed = 0x6ffffffe;
 // VERSYM
 pub const SHT_GNU_versym = 0x6fffffff;
+// GNU_HASH
+pub const SHT_GNU_HASH = 0x6ffffff6;
 
 const std = @import("std");
 const build_options = @import("build_options");

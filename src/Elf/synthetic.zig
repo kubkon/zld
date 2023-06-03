@@ -54,6 +54,7 @@ pub const DynamicSection = struct {
         if (elf_file.rela_plt_sect_index != null) nentries += 3; // JMPREL
         if (elf_file.got_plt_sect_index != null) nentries += 1; // PLTGOT
         nentries += 1; // HASH
+        if (elf_file.gnu_hash_sect_index != null) nentries += 1; // GNU_HASH
         nentries += 1; // SYMTAB
         nentries += 1; // SYMENT
         nentries += 1; // STRTAB
@@ -131,6 +132,11 @@ pub const DynamicSection = struct {
             assert(elf_file.hash_sect_index != null);
             const addr = elf_file.sections.items(.shdr)[elf_file.hash_sect_index.?].sh_addr;
             try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_HASH, .d_val = addr });
+        }
+
+        if (elf_file.gnu_hash_sect_index) |shndx| {
+            const addr = elf_file.sections.items(.shdr)[shndx].sh_addr;
+            try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_GNU_HASH, .d_val = addr });
         }
 
         // SYMTAB + SYMENT
