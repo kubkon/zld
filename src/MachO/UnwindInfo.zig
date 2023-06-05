@@ -501,7 +501,8 @@ fn collectPersonalityFromDwarf(
     it.seekTo(cie_offset);
     const cie = (try it.next()).?;
 
-    if (cie.getPersonalityPointerReloc(
+    if (eh_frame.getPersonalityPointerReloc(
+        cie,
         macho_file,
         @intCast(u32, object_id),
         cie_offset,
