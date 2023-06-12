@@ -14,6 +14,9 @@ atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
 comdat_groups: std.ArrayListUnmanaged(Elf.ComdatGroup.Index) = .{},
 dummy_shdrs: std.ArrayListUnmanaged(elf.Elf64_Shdr) = .{},
 
+fdes: std.ArrayListUnmanaged(Fde) = .{},
+cies: std.ArrayListUnmanaged(Cie) = .{},
+
 needs_exec_stack: bool = false,
 alive: bool = true,
 num_dynrelocs: u32 = 0,
@@ -45,6 +48,8 @@ pub fn deinit(self: *Object, allocator: Allocator) void {
     self.atoms.deinit(allocator);
     self.comdat_groups.deinit(allocator);
     self.dummy_shdrs.deinit(allocator);
+    self.fdes.deinit(allocator);
+    self.cies.deinit(allocator);
 }
 
 pub fn parse(self: *Object, elf_file: *Elf) !void {
@@ -75,6 +80,13 @@ pub fn parse(self: *Object, elf_file: *Elf) !void {
 
     try self.initAtoms(elf_file);
     try self.initSymtab(elf_file);
+
+    for (self.getShdrs(), 0..) |shdr, i| {
+        const atom = elf_file.getAtom(self.atoms.items[i]) orelse continue;
+        if (!atom.is_alive) continue;
+        if (shdr.sh_type == elf.SHT_X86_64_UNWIND or mem.eql(u8, atom.getName(elf_file), ".eh_frame"))
+            try self.parseEhFrame(@intCast(u16, i), elf_file);
+    }
 }
 
 fn initAtoms(self: *Object, elf_file: *Elf) !void {
@@ -148,6 +160,7 @@ fn initAtoms(self: *Object, elf_file: *Elf) !void {
                     }
                     continue;
                 }
+
                 if (self.skipShdr(shndx, elf_file)) continue;
                 try self.addAtom(shdr, shndx, name, elf_file);
             },
@@ -190,7 +203,6 @@ fn skipShdr(self: *Object, index: u32, elf_file: *Elf) bool {
     const shdr = self.getShdrs()[index];
     const name = self.getShString(shdr.sh_name);
     const ignore = blk: {
-        if (shdr.sh_type == elf.SHT_X86_64_UNWIND) break :blk true;
         if (mem.startsWith(u8, name, ".note")) break :blk true;
         if (mem.startsWith(u8, name, ".comment")) break :blk true;
         if (mem.startsWith(u8, name, ".llvm_addrsig")) break :blk true;
@@ -235,6 +247,108 @@ fn initSymtab(self: *Object, elf_file: *Elf) !void {
         const gop = try elf_file.getOrCreateGlobal(off);
         self.symbols.addOneAssumeCapacity().* = gop.index;
     }
+}
+
+fn parseEhFrame(self: *Object, shndx: u16, elf_file: *Elf) !void {
+    const relocs_shndx = for (self.getShdrs(), 0..) |shdr, i| switch (shdr.sh_type) {
+        elf.SHT_RELA => if (shdr.sh_info == shndx) break @intCast(u16, i),
+        else => {},
+    } else {
+        elf_file.base.fatal("{s}: missing reloc section for unwind info section", .{self.fmtPath()});
+        return;
+    };
+
+    const gpa = elf_file.base.allocator;
+    const raw = self.getShdrContents(shndx);
+    const relocs = self.getRelocs(relocs_shndx);
+    const fdes_start = self.fdes.items.len;
+    const cies_start = self.cies.items.len;
+
+    var it = eh_frame.NewIterator{ .data = raw };
+    while (try it.next()) |rec| {
+        const rel_range = filterRelocs(relocs, rec.offset, rec.size + 4);
+        switch (rec.tag) {
+            .cie => try self.cies.append(gpa, .{
+                .inner = rec.cie(),
+                .rel_index = @intCast(u32, rel_range.start),
+                .rel_num = @intCast(u32, rel_range.len),
+                .rel_shndx = relocs_shndx,
+                .file = self.index,
+            }),
+            .fde => try self.fdes.append(gpa, .{
+                .inner = rec.fde(),
+                .rel_index = @intCast(u32, rel_range.start),
+                .rel_num = @intCast(u32, rel_range.len),
+                .rel_shndx = relocs_shndx,
+                .file = self.index,
+            }),
+        }
+    }
+
+    // Tie each FDE to its CIE
+    for (self.fdes.items[fdes_start..]) |*fde| {
+        const cie_ptr = fde.inner.offset + 4 - fde.inner.getCiePointer();
+        const cie_index = for (self.cies.items[cies_start..], cies_start..) |cie, cie_index| {
+            if (cie.inner.offset == cie_ptr) break @intCast(u32, cie_index);
+        } else {
+            elf_file.base.fatal("{s}: no matching CIE found for FDE at offset {x}", .{
+                self.fmtPath(),
+                fde.inner.offset,
+            });
+            continue;
+        };
+        fde.inner.cie_index = cie_index;
+    }
+
+    // Tie each FDE record to its matching atom
+    const SortFdes = struct {
+        pub fn lessThan(ctx: *Elf, lhs: Fde, rhs: Fde) bool {
+            const lhs_atom = lhs.getAtom(ctx);
+            const rhs_atom = rhs.getAtom(ctx);
+            return lhs_atom.getPriority(ctx) < rhs_atom.getPriority(ctx);
+        }
+    };
+    mem.sort(Fde, self.fdes.items[fdes_start..], elf_file, SortFdes.lessThan);
+
+    // Create a back-link from atom to FDEs
+    var i: u32 = @intCast(u32, fdes_start);
+    while (i < self.fdes.items.len) {
+        const fde = self.fdes.items[i];
+        const atom = fde.getAtom(elf_file);
+        atom.fde_start = i;
+        i += 1;
+        while (i < self.fdes.items.len) : (i += 1) {
+            const next_fde = self.fdes.items[i];
+            if (atom.atom_index != next_fde.getAtom(elf_file).atom_index) break;
+        }
+        atom.fde_end = i;
+    }
+}
+
+fn filterRelocs(
+    relocs: []align(1) const elf.Elf64_Rela,
+    start: u64,
+    len: u64,
+) struct { start: u64, len: u64 } {
+    const Predicate = struct {
+        value: u64,
+
+        pub fn predicate(self: @This(), rel: elf.Elf64_Rela) bool {
+            return rel.r_offset < self.value;
+        }
+    };
+    const LPredicate = struct {
+        value: u64,
+
+        pub fn predicate(self: @This(), rel: elf.Elf64_Rela) bool {
+            return rel.r_offset >= self.value;
+        }
+    };
+
+    const f_start = Zld.binarySearch(elf.Elf64_Rela, relocs, Predicate{ .value = start });
+    const f_len = Zld.linearSearch(elf.Elf64_Rela, relocs[f_start..], LPredicate{ .value = start + len });
+
+    return .{ .start = f_start, .len = f_len };
 }
 
 pub fn resolveSymbols(self: *Object, elf_file: *Elf) void {
@@ -460,13 +574,13 @@ pub inline fn getShdrs(self: *Object) []align(1) const elf.Elf64_Shdr {
     return @ptrCast([*]align(1) const elf.Elf64_Shdr, self.data.ptr + header.e_shoff)[0..header.e_shnum];
 }
 
-pub inline fn getShdrContents(self: *Object, index: u16) []const u8 {
+pub inline fn getShdrContents(self: *Object, index: u32) []const u8 {
     assert(index < self.getShdrs().len);
     const shdr = self.getShdrs()[index];
     return self.data[shdr.sh_offset..][0..shdr.sh_size];
 }
 
-pub fn getShdr(self: *Object, index: u16) elf.Elf64_Shdr {
+pub fn getShdr(self: *Object, index: u32) elf.Elf64_Shdr {
     const shdrs = self.getShdrs();
     assert(index < shdrs.len + self.dummy_shdrs.items.len);
     if (index < shdrs.len) return shdrs[index];
@@ -492,6 +606,12 @@ pub fn getComdatGroupMembers(self: *Object, index: u16) []align(1) const u32 {
 
 pub fn asFile(self: *Object) File {
     return .{ .object = self };
+}
+
+pub fn getRelocs(self: *Object, shndx: u32) []align(1) const elf.Elf64_Rela {
+    const raw = self.getShdrContents(shndx);
+    const num = @divExact(raw.len, @sizeOf(elf.Elf64_Rela));
+    return @ptrCast([*]align(1) const elf.Elf64_Rela, raw.ptr)[0..num];
 }
 
 pub fn format(
@@ -563,6 +683,50 @@ fn formatAtoms(
     }
 }
 
+pub fn fmtCies(self: *Object, elf_file: *Elf) std.fmt.Formatter(formatCies) {
+    return .{ .data = .{
+        .object = self,
+        .elf_file = elf_file,
+    } };
+}
+
+fn formatCies(
+    ctx: FormatContext,
+    comptime unused_fmt_string: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = unused_fmt_string;
+    _ = options;
+    const object = ctx.object;
+    try writer.writeAll("  cies\n");
+    for (object.cies.items, 0..) |cie, i| {
+        try writer.print("    cie({d}) : {}\n", .{ i, cie.fmt(ctx.elf_file) });
+    }
+}
+
+pub fn fmtFdes(self: *Object, elf_file: *Elf) std.fmt.Formatter(formatFdes) {
+    return .{ .data = .{
+        .object = self,
+        .elf_file = elf_file,
+    } };
+}
+
+fn formatFdes(
+    ctx: FormatContext,
+    comptime unused_fmt_string: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = unused_fmt_string;
+    _ = options;
+    const object = ctx.object;
+    try writer.writeAll("  fdes\n");
+    for (object.fdes.items, 0..) |fde, i| {
+        try writer.print("    fde({d}) : {}\n", .{ i, fde.fmt(ctx.elf_file) });
+    }
+}
+
 pub fn fmtComdatGroups(self: *Object, elf_file: *Elf) std.fmt.Formatter(formatComdatGroups) {
     return .{ .data = .{
         .object = self,
@@ -615,8 +779,128 @@ fn formatPath(
 
 const Object = @This();
 
+pub const Fde = struct {
+    inner: eh_frame.Fde,
+    rel_index: u32,
+    rel_num: u32 = 0,
+    rel_shndx: u32 = 0,
+    file: u32 = 0,
+    alive: bool = true,
+
+    pub fn getAtom(fde: Fde, elf_file: *Elf) *Atom {
+        const object = elf_file.getFile(fde.file).?.object;
+        const relocs = fde.getRelocs(elf_file);
+        const rel = relocs[0];
+        const sym = object.symtab[rel.r_sym()];
+        const atom_index = object.atoms.items[sym.st_shndx];
+        return elf_file.getAtom(atom_index).?;
+    }
+
+    pub fn getRelocs(fde: Fde, elf_file: *Elf) []align(1) const elf.Elf64_Rela {
+        const object = elf_file.getFile(fde.file).?.object;
+        return object.getRelocs(fde.rel_shndx)[fde.rel_index..][0..fde.rel_num];
+    }
+
+    pub fn format(
+        fde: Fde,
+        comptime unused_fmt_string: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = fde;
+        _ = unused_fmt_string;
+        _ = options;
+        _ = writer;
+        @compileError("do not format FDEs directly");
+    }
+
+    pub fn fmt(fde: Fde, elf_file: *Elf) std.fmt.Formatter(format2) {
+        return .{ .data = .{
+            .fde = fde,
+            .elf_file = elf_file,
+        } };
+    }
+
+    const FdeFormatContext = struct {
+        fde: Fde,
+        elf_file: *Elf,
+    };
+
+    fn format2(
+        ctx: FdeFormatContext,
+        comptime unused_fmt_string: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = unused_fmt_string;
+        _ = options;
+        const fde = ctx.fde;
+        try writer.print("@{x} : size({x}) : cie({d}) : {s}", .{
+            fde.inner.offset,
+            fde.inner.size,
+            fde.inner.cie_index,
+            fde.getAtom(ctx.elf_file).getName(ctx.elf_file),
+        });
+    }
+};
+
+pub const Cie = struct {
+    inner: eh_frame.Cie,
+    rel_index: u32,
+    rel_num: u32 = 0,
+    rel_shndx: u32 = 0,
+    file: u32 = 0,
+    alive: bool = true,
+
+    pub fn getRelocs(cie: Cie, elf_file: *Elf) []align(1) const elf.Elf64_Rela {
+        const object = elf_file.getFile(cie.file).?.object;
+        return object.getRelocs(cie.rel_shndx)[cie.rel_index..][0..cie.rel_num];
+    }
+
+    pub fn format(
+        cie: Cie,
+        comptime unused_fmt_string: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = cie;
+        _ = unused_fmt_string;
+        _ = options;
+        _ = writer;
+        @compileError("do not format CIEs directly");
+    }
+
+    pub fn fmt(cie: Cie, elf_file: *Elf) std.fmt.Formatter(format2) {
+        return .{ .data = .{
+            .cie = cie,
+            .elf_file = elf_file,
+        } };
+    }
+
+    const CieFormatContext = struct {
+        cie: Cie,
+        elf_file: *Elf,
+    };
+
+    fn format2(
+        ctx: CieFormatContext,
+        comptime unused_fmt_string: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = unused_fmt_string;
+        _ = options;
+        const cie = ctx.cie;
+        try writer.print("@{x} : size({x})", .{
+            cie.inner.offset,
+            cie.inner.size,
+        });
+    }
+};
+
 const std = @import("std");
 const assert = std.debug.assert;
+const eh_frame = @import("../eh_frame.zig");
 const elf = std.elf;
 const fs = std.fs;
 const log = std.log.scoped(.elf);
@@ -628,3 +912,4 @@ const Atom = @import("Atom.zig");
 const Elf = @import("../Elf.zig");
 const File = @import("file.zig").File;
 const Symbol = @import("Symbol.zig");
+const Zld = @import("../Zld.zig");

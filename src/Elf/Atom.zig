@@ -31,6 +31,9 @@ is_alive: bool = true,
 /// Specifies if the atom has been visited during garbage collection.
 is_visited: bool = false,
 
+fde_start: u32 = 0,
+fde_end: u32 = 0,
+
 pub const Index = u32;
 
 pub fn getName(self: Atom, elf_file: *Elf) [:0]const u8 {
@@ -76,12 +79,15 @@ pub fn getInputShdr(self: Atom, elf_file: *Elf) elf.Elf64_Shdr {
     return object.getShdr(self.shndx);
 }
 
+pub fn getPriority(self: Atom, elf_file: *Elf) u64 {
+    const object = self.getObject(elf_file);
+    return (@intCast(u64, object.index) << 32) | @intCast(u64, self.shndx);
+}
+
 pub fn getRelocs(self: Atom, elf_file: *Elf) []align(1) const elf.Elf64_Rela {
     if (self.relocs_shndx == @bitCast(u16, @as(i16, -1))) return &[0]elf.Elf64_Rela{};
     const object = self.getObject(elf_file);
-    const bytes = object.getShdrContents(self.relocs_shndx);
-    const nrelocs = @divExact(bytes.len, @sizeOf(elf.Elf64_Rela));
-    return @ptrCast([*]align(1) const elf.Elf64_Rela, bytes)[0..nrelocs];
+    return object.getRelocs(self.relocs_shndx);
 }
 
 pub fn initOutputSection(self: *Atom, elf_file: *Elf) !void {
@@ -890,11 +896,22 @@ fn format2(
     _ = options;
     _ = unused_fmt_string;
     const atom = ctx.atom;
+    const elf_file = ctx.elf_file;
     try writer.print("atom({d}) : {s} : @{x} : sect({d}) : align({x}) : size({x})", .{
-        atom.atom_index, atom.getName(ctx.elf_file), atom.value,
-        atom.out_shndx,  atom.alignment,             atom.size,
+        atom.atom_index, atom.getName(elf_file), atom.value,
+        atom.out_shndx,  atom.alignment,         atom.size,
     });
-    if (ctx.elf_file.options.gc_sections and !atom.is_alive) {
+    if (atom.fde_start != atom.fde_end) {
+        const object = atom.getObject(elf_file);
+        try writer.writeAll(" : fdes{ ");
+        for (object.fdes.items[atom.fde_start..atom.fde_end], atom.fde_start..) |fde, i| {
+            try writer.print("{d}", .{i});
+            if (!fde.alive) try writer.writeAll("([*])");
+            if (i < atom.fde_end - 1) try writer.writeAll(", ");
+        }
+        try writer.writeAll(" }");
+    }
+    if (elf_file.options.gc_sections and !atom.is_alive) {
         try writer.writeAll(" : [*]");
     }
 }
