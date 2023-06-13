@@ -2486,7 +2486,7 @@ pub const WriteSymtabCtx = struct {
 
 const default_base_addr: u64 = 0x200000;
 const default_page_size: u64 = 0x1000;
-const eh_frame_hdr_header_size: u64 = 12;
+pub const eh_frame_hdr_header_size: u64 = 12;
 
 pub const null_sym = elf.Elf64_Sym{
     .st_name = 0,
