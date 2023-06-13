@@ -1,21 +1,32 @@
 pub const Fde = struct {
     offset: u64,
     size: u64,
-    data: []const u8,
     cie_index: u32,
     rel_index: u32 = 0,
     rel_num: u32 = 0,
     rel_shndx: u32 = 0,
+    shndx: u32 = 0,
     file: u32 = 0,
     alive: bool = true,
     out_offset: u64 = 0,
 
-    pub fn getCiePointer(fde: Fde) u32 {
-        return std.mem.readIntLittle(u32, fde.data[0..4]);
+    pub inline fn getObject(fde: Fde, elf_file: *Elf) *Object {
+        return elf_file.getFile(fde.file).?.object;
+    }
+
+    pub fn getData(fde: Fde, elf_file: *Elf) []const u8 {
+        const object = fde.getObject(elf_file);
+        const data = object.getShdrContents(fde.shndx);
+        return data[fde.offset..][0..fde.size];
+    }
+
+    pub fn getCiePointer(fde: Fde, elf_file: *Elf) u32 {
+        const data = fde.getData(elf_file);
+        return std.mem.readIntLittle(u32, data[0..4]);
     }
 
     pub fn getAtom(fde: Fde, elf_file: *Elf) *Atom {
-        const object = elf_file.getFile(fde.file).?.object;
+        const object = fde.getObject(elf_file);
         const relocs = fde.getRelocs(elf_file);
         const rel = relocs[0];
         const sym = object.symtab[rel.r_sym()];
@@ -24,7 +35,7 @@ pub const Fde = struct {
     }
 
     pub fn getRelocs(fde: Fde, elf_file: *Elf) []align(1) const elf.Elf64_Rela {
-        const object = elf_file.getFile(fde.file).?.object;
+        const object = fde.getObject(elf_file);
         return object.getRelocs(fde.rel_shndx)[fde.rel_index..][0..fde.rel_num];
     }
 
@@ -74,15 +85,25 @@ pub const Fde = struct {
 pub const Cie = struct {
     offset: u64,
     size: u64,
-    data: []const u8,
     rel_index: u32 = 0,
     rel_num: u32 = 0,
     rel_shndx: u32 = 0,
+    shndx: u32 = 0,
     file: u32 = 0,
     out_offset: u64 = 0,
 
+    pub inline fn getObject(cie: Cie, elf_file: *Elf) *Object {
+        return elf_file.getFile(cie.file).?.object;
+    }
+
+    pub fn getData(cie: Cie, elf_file: *Elf) []const u8 {
+        const object = cie.getObject(elf_file);
+        const data = object.getShdrContents(cie.shndx);
+        return data[cie.offset..][0..cie.size];
+    }
+
     pub fn getRelocs(cie: Cie, elf_file: *Elf) []align(1) const elf.Elf64_Rela {
-        const object = elf_file.getFile(cie.file).?.object;
+        const object = cie.getObject(elf_file);
         return object.getRelocs(cie.rel_shndx)[cie.rel_index..][0..cie.rel_num];
     }
 
@@ -135,26 +156,6 @@ pub const Iterator = struct {
         tag: enum { fde, cie },
         offset: u64,
         size: u64,
-        data: []const u8,
-
-        pub fn fde(rec: Record) Fde {
-            assert(rec.tag == .fde);
-            return .{
-                .offset = rec.offset,
-                .size = rec.size,
-                .data = rec.data,
-                .cie_index = undefined,
-            };
-        }
-
-        pub fn cie(rec: Record) Cie {
-            assert(rec.tag == .cie);
-            return .{
-                .offset = rec.offset,
-                .size = rec.size,
-                .data = rec.data,
-            };
-        }
     };
 
     pub fn next(it: *Iterator) !?Record {
@@ -172,7 +173,6 @@ pub const Iterator = struct {
             .tag = if (id == 0) .cie else .fde,
             .offset = it.pos,
             .size = size,
-            .data = it.data[it.pos..][0..size],
         };
         it.pos += size;
 
@@ -200,3 +200,4 @@ const elf = std.elf;
 const Allocator = std.mem.Allocator;
 const Atom = @import("Atom.zig");
 const Elf = @import("../Elf.zig");
+const Object = @import("Object.zig");

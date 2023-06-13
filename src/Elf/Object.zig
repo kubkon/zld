@@ -268,28 +268,31 @@ fn parseEhFrame(self: *Object, shndx: u16, elf_file: *Elf) !void {
     while (try it.next()) |rec| {
         const rel_range = filterRelocs(relocs, rec.offset, rec.size + 4);
         switch (rec.tag) {
-            .cie => {
-                var cie = rec.cie();
-                cie.rel_index = @intCast(u32, rel_range.start);
-                cie.rel_num = @intCast(u32, rel_range.len);
-                cie.rel_shndx = relocs_shndx;
-                cie.file = self.index;
-                try self.cies.append(gpa, cie);
-            },
-            .fde => {
-                var fde = rec.fde();
-                fde.rel_index = @intCast(u32, rel_range.start);
-                fde.rel_num = @intCast(u32, rel_range.len);
-                fde.rel_shndx = relocs_shndx;
-                fde.file = self.index;
-                try self.fdes.append(gpa, fde);
-            },
+            .cie => try self.cies.append(gpa, .{
+                .offset = rec.offset,
+                .size = rec.size,
+                .rel_index = @intCast(u32, rel_range.start),
+                .rel_num = @intCast(u32, rel_range.len),
+                .rel_shndx = relocs_shndx,
+                .shndx = shndx,
+                .file = self.index,
+            }),
+            .fde => try self.fdes.append(gpa, .{
+                .offset = rec.offset,
+                .size = rec.size,
+                .cie_index = undefined,
+                .rel_index = @intCast(u32, rel_range.start),
+                .rel_num = @intCast(u32, rel_range.len),
+                .rel_shndx = relocs_shndx,
+                .shndx = shndx,
+                .file = self.index,
+            }),
         }
     }
 
     // Tie each FDE to its CIE
     for (self.fdes.items[fdes_start..]) |*fde| {
-        const cie_ptr = fde.offset + 4 - fde.getCiePointer();
+        const cie_ptr = fde.offset + 4 - fde.getCiePointer(elf_file);
         const cie_index = for (self.cies.items[cies_start..], cies_start..) |cie, cie_index| {
             if (cie.offset == cie_ptr) break @intCast(u32, cie_index);
         } else {
