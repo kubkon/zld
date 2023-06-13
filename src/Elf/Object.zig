@@ -351,6 +351,29 @@ fn filterRelocs(
     return .{ .start = f_start, .len = f_len };
 }
 
+pub fn scanRelocs(self: *Object, elf_file: *Elf) !void {
+    for (self.atoms.items) |atom_index| {
+        const atom = elf_file.getAtom(atom_index) orelse continue;
+        if (!atom.is_alive) continue;
+        if (atom.getInputShdr(elf_file).sh_flags & elf.SHF_ALLOC == 0) continue;
+        try atom.scanRelocs(elf_file);
+    }
+
+    for (self.cies.items) |cie| {
+        for (cie.getRelocs(elf_file)) |rel| {
+            const sym = self.getSymbol(rel.r_sym(), elf_file);
+            if (sym.flags.import) {
+                if (sym.getType(elf_file) != elf.STT_FUNC)
+                    elf_file.base.fatal("{s}: {s}: CIE referencing external data reference", .{
+                        self.fmtPath(),
+                        sym.getName(elf_file),
+                    });
+                sym.flags.plt = true;
+            }
+        }
+    }
+}
+
 pub fn resolveSymbols(self: *Object, elf_file: *Elf) void {
     const first_global = self.first_global orelse return;
     for (self.getGlobals(), 0..) |index, i| {
