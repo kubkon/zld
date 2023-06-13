@@ -21,7 +21,7 @@ pub fn gcAtoms(elf_file: *Elf) !void {
 fn collectRoots(roots: *std.ArrayList(*Atom), elf_file: *Elf) !void {
     if (elf_file.entry_index) |index| {
         const global = elf_file.getSymbol(index);
-        if (global.getAtom(elf_file)) |atom| if (markAtom(atom)) try roots.append(atom);
+        try markSymbol(global, roots, elf_file);
     }
 
     for (elf_file.objects.items) |index| {
@@ -29,14 +29,16 @@ fn collectRoots(roots: *std.ArrayList(*Atom), elf_file: *Elf) !void {
             const global = elf_file.getSymbol(global_index);
             if (global.getFile(elf_file)) |file| {
                 if (file.getIndex() == index and global.flags.@"export") {
-                    if (global.getAtom(elf_file)) |atom| if (markAtom(atom)) try roots.append(atom);
+                    try markSymbol(global, roots, elf_file);
                 }
             }
         }
     }
 
     for (elf_file.objects.items) |index| {
-        for (elf_file.getFile(index).?.object.atoms.items) |atom_index| {
+        const object = elf_file.getFile(index).?.object;
+
+        for (object.atoms.items) |atom_index| {
             const atom = elf_file.getAtom(atom_index) orelse continue;
             if (!atom.is_alive) continue;
 
@@ -62,7 +64,20 @@ fn collectRoots(roots: *std.ArrayList(*Atom), elf_file: *Elf) !void {
                 atom.is_visited = true;
             }
         }
+
+        // Mark every atom referenced by CIE as alive.
+        for (object.cies.items) |cie| {
+            for (cie.getRelocs(elf_file)) |rel| {
+                const sym = object.getSymbol(rel.r_sym(), elf_file);
+                try markSymbol(sym, roots, elf_file);
+            }
+        }
     }
+}
+
+fn markSymbol(sym: *Symbol, roots: *std.ArrayList(*Atom), elf_file: *Elf) !void {
+    const atom = sym.getAtom(elf_file) orelse return;
+    if (markAtom(atom)) try roots.append(atom);
 }
 
 fn markAtom(atom: *Atom) bool {
