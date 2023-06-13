@@ -90,8 +90,8 @@ pub fn getRelocs(self: Atom, elf_file: *Elf) []align(1) const elf.Elf64_Rela {
     return object.getRelocs(self.relocs_shndx);
 }
 
-pub fn getFdes(self: Atom, elf_file: *Elf) []Object.Fde {
-    if (self.fde_start == self.fde_end) return &[0]Object.Fde{};
+pub fn getFdes(self: Atom, elf_file: *Elf) []Fde {
+    if (self.fde_start == self.fde_end) return &[0]Fde{};
     const object = self.getObject(elf_file);
     return object.fdes.items[self.fde_start..self.fde_end];
 }
@@ -941,6 +941,7 @@ const mem = std.mem;
 const Allocator = mem.Allocator;
 const Disassembler = dis_x86_64.Disassembler;
 const Elf = @import("../Elf.zig");
+const Fde = @import("eh_frame.zig").Fde;
 const Instruction = dis_x86_64.Instruction;
 const Immediate = dis_x86_64.Immediate;
 const Object = @import("Object.zig");
