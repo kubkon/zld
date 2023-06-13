@@ -116,9 +116,34 @@ pub const Cie = struct {
     }
 };
 
+pub const EhFrameSection = struct {
+    buffer: std.ArrayListUnmanaged(u8) = .{},
+
+    pub fn deinit(eh: *EhFrameSection, allocator: Allocator) void {
+        eh.buffer.deinit(allocator);
+    }
+
+    pub fn generate(eh: *EhFrameSection, elf_file: *Elf) !void {
+        _ = eh;
+        _ = elf_file;
+    }
+
+    pub fn size(eh: *EhFrameSection) usize {
+        _ = eh;
+        return 0;
+    }
+
+    pub fn write(eh: EhFrameSection, elf_file: *Elf, writer: anytype) !void {
+        _ = elf_file;
+        _ = eh;
+        _ = writer;
+    }
+};
+
 const std = @import("std");
 const eh_frame = @import("../eh_frame.zig");
 const elf = std.elf;
+const Allocator = std.mem.Allocator;
 const Atom = @import("Atom.zig");
 const Elf = @import("../Elf.zig");
 pub const NewIterator = eh_frame.NewIterator;

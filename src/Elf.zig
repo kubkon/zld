@@ -60,6 +60,7 @@ dynstrtab: StringTable(.dynstrtab) = .{},
 versym: std.ArrayListUnmanaged(elf.Elf64_Versym) = .{},
 verneed: VerneedSection = .{},
 
+eh_frame: EhFrameSection = .{},
 dynamic: DynamicSection = .{},
 hash: HashSection = .{},
 gnu_hash: GnuHashSection = .{},
@@ -127,6 +128,7 @@ pub fn deinit(self: *Elf) void {
     self.symbols.deinit(gpa);
     self.symbols_extra.deinit(gpa);
     self.globals.deinit(gpa);
+    self.eh_frame.deinit(gpa);
     self.got.deinit(gpa);
     self.plt.deinit(gpa);
     self.plt_got.deinit(gpa);
@@ -357,6 +359,7 @@ pub fn flush(self: *Elf) !void {
     try self.initSections();
     try self.sortSections();
     try self.addAtomsToSections();
+    try self.setEhFrame();
     try self.sortInitFini();
     try self.setDynamic();
     self.setDynsym();
@@ -626,6 +629,12 @@ fn calcSectionSizes(self: *Elf) !void {
             shdr.sh_size += padding + atom.size;
             shdr.sh_addralign = @max(shdr.sh_addralign, alignment);
         }
+    }
+
+    if (self.eh_frame_sect_index) |index| {
+        const shdr = &self.sections.items(.shdr)[index];
+        shdr.sh_size = self.eh_frame.size();
+        shdr.sh_addralign = @alignOf(u64);
     }
 
     if (self.got_sect_index) |index| {
@@ -1752,6 +1761,11 @@ fn scanRelocs(self: *Elf) !void {
     }
 }
 
+fn setEhFrame(self: *Elf) !void {
+    if (self.eh_frame_sect_index == null) return;
+    try self.eh_frame.generate(self);
+}
+
 fn setDynamic(self: *Elf) !void {
     if (self.dynamic_sect_index == null) return;
 
@@ -1890,6 +1904,14 @@ fn writeSyntheticSections(self: *Elf) !void {
     if (self.dynstrtab_sect_index) |shndx| {
         const shdr = self.sections.items(.shdr)[shndx];
         try self.base.file.pwriteAll(self.dynstrtab.buffer.items, shdr.sh_offset);
+    }
+
+    if (self.eh_frame_sect_index) |shndx| {
+        const shdr = self.sections.items(.shdr)[shndx];
+        var buffer = try std.ArrayList(u8).initCapacity(gpa, self.eh_frame.size());
+        defer buffer.deinit();
+        try self.eh_frame.write(self, buffer.writer());
+        try self.base.file.pwriteAll(buffer.items, shdr.sh_offset);
     }
 
     if (self.got_sect_index) |shndx| {
@@ -2484,6 +2506,7 @@ const Atom = @import("Elf/Atom.zig");
 const CopyRelSection = synthetic.CopyRelSection;
 const DynamicSection = synthetic.DynamicSection;
 const DynsymSection = synthetic.DynsymSection;
+const EhFrameSection = @import("Elf/eh_frame.zig").EhFrameSection;
 const Elf = @This();
 const File = @import("Elf/file.zig").File;
 const GnuHashSection = synthetic.GnuHashSection;
