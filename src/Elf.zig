@@ -13,6 +13,7 @@ phdrs: std.ArrayListUnmanaged(elf.Elf64_Phdr) = .{},
 tls_phdr_index: ?u16 = null,
 
 text_sect_index: ?u16 = null,
+eh_frame_sect_index: ?u16 = null,
 plt_sect_index: ?u16 = null,
 got_sect_index: ?u16 = null,
 got_plt_sect_index: ?u16 = null,
@@ -434,6 +435,18 @@ fn initSections(self: *Elf) !void {
             if (!atom.alive) continue;
             try atom.initOutputSection(self);
         }
+    }
+
+    const needs_eh_frame = for (self.objects.items) |index| {
+        if (self.getFile(index).?.object.cies.items.len > 0) break true;
+    } else false;
+    if (needs_eh_frame) {
+        self.eh_frame_sect_index = try self.addSection(.{
+            .name = ".eh_frame",
+            .type = elf.SHT_PROGBITS,
+            .flags = elf.SHF_ALLOC,
+            .addralign = @alignOf(u64),
+        });
     }
 
     if (self.got.symbols.items.len > 0) {
@@ -1141,6 +1154,7 @@ fn sortSections(self: *Elf) !void {
 
     for (&[_]*?u16{
         &self.text_sect_index,
+        &self.eh_frame_sect_index,
         &self.got_sect_index,
         &self.symtab_sect_index,
         &self.strtab_sect_index,
