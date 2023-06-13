@@ -264,40 +264,42 @@ fn parseEhFrame(self: *Object, shndx: u16, elf_file: *Elf) !void {
     const fdes_start = self.fdes.items.len;
     const cies_start = self.cies.items.len;
 
-    var it = eh_frame.NewIterator{ .data = raw };
+    var it = eh_frame.Iterator{ .data = raw };
     while (try it.next()) |rec| {
         const rel_range = filterRelocs(relocs, rec.offset, rec.size + 4);
         switch (rec.tag) {
-            .cie => try self.cies.append(gpa, .{
-                .inner = rec.cie(),
-                .rel_index = @intCast(u32, rel_range.start),
-                .rel_num = @intCast(u32, rel_range.len),
-                .rel_shndx = relocs_shndx,
-                .file = self.index,
-            }),
-            .fde => try self.fdes.append(gpa, .{
-                .inner = rec.fde(),
-                .rel_index = @intCast(u32, rel_range.start),
-                .rel_num = @intCast(u32, rel_range.len),
-                .rel_shndx = relocs_shndx,
-                .file = self.index,
-            }),
+            .cie => {
+                var cie = rec.cie();
+                cie.rel_index = @intCast(u32, rel_range.start);
+                cie.rel_num = @intCast(u32, rel_range.len);
+                cie.rel_shndx = relocs_shndx;
+                cie.file = self.index;
+                try self.cies.append(gpa, cie);
+            },
+            .fde => {
+                var fde = rec.fde();
+                fde.rel_index = @intCast(u32, rel_range.start);
+                fde.rel_num = @intCast(u32, rel_range.len);
+                fde.rel_shndx = relocs_shndx;
+                fde.file = self.index;
+                try self.fdes.append(gpa, fde);
+            },
         }
     }
 
     // Tie each FDE to its CIE
     for (self.fdes.items[fdes_start..]) |*fde| {
-        const cie_ptr = fde.inner.offset + 4 - fde.inner.getCiePointer();
+        const cie_ptr = fde.offset + 4 - fde.getCiePointer();
         const cie_index = for (self.cies.items[cies_start..], cies_start..) |cie, cie_index| {
-            if (cie.inner.offset == cie_ptr) break @intCast(u32, cie_index);
+            if (cie.offset == cie_ptr) break @intCast(u32, cie_index);
         } else {
             elf_file.base.fatal("{s}: no matching CIE found for FDE at offset {x}", .{
                 self.fmtPath(),
-                fde.inner.offset,
+                fde.offset,
             });
             continue;
         };
-        fde.inner.cie_index = cie_index;
+        fde.cie_index = cie_index;
     }
 
     // Tie each FDE record to its matching atom

@@ -1,10 +1,18 @@
 pub const Fde = struct {
-    inner: eh_frame.Fde,
-    rel_index: u32,
+    offset: u64,
+    size: u64,
+    data: []const u8,
+    cie_index: u32,
+    rel_index: u32 = 0,
     rel_num: u32 = 0,
     rel_shndx: u32 = 0,
     file: u32 = 0,
     alive: bool = true,
+    out_offset: u64 = 0,
+
+    pub fn getCiePointer(fde: Fde) u32 {
+        return std.mem.readIntLittle(u32, fde.data[0..4]);
+    }
 
     pub fn getAtom(fde: Fde, elf_file: *Elf) *Atom {
         const object = elf_file.getFile(fde.file).?.object;
@@ -55,20 +63,23 @@ pub const Fde = struct {
         _ = options;
         const fde = ctx.fde;
         try writer.print("@{x} : size({x}) : cie({d}) : {s}", .{
-            fde.inner.offset,
-            fde.inner.size,
-            fde.inner.cie_index,
+            fde.offset,
+            fde.size,
+            fde.cie_index,
             fde.getAtom(ctx.elf_file).getName(ctx.elf_file),
         });
     }
 };
 
 pub const Cie = struct {
-    inner: eh_frame.Cie,
-    rel_index: u32,
+    offset: u64,
+    size: u64,
+    data: []const u8,
+    rel_index: u32 = 0,
     rel_num: u32 = 0,
     rel_shndx: u32 = 0,
     file: u32 = 0,
+    out_offset: u64 = 0,
 
     pub fn getRelocs(cie: Cie, elf_file: *Elf) []align(1) const elf.Elf64_Rela {
         const object = elf_file.getFile(cie.file).?.object;
@@ -110,40 +121,82 @@ pub const Cie = struct {
         _ = options;
         const cie = ctx.cie;
         try writer.print("@{x} : size({x})", .{
-            cie.inner.offset,
-            cie.inner.size,
+            cie.offset,
+            cie.size,
         });
     }
 };
 
-pub const EhFrameSection = struct {
-    buffer: std.ArrayListUnmanaged(u8) = .{},
+pub const Iterator = struct {
+    data: []const u8,
+    pos: u64 = 0,
 
-    pub fn deinit(eh: *EhFrameSection, allocator: Allocator) void {
-        eh.buffer.deinit(allocator);
-    }
+    pub const Record = struct {
+        tag: enum { fde, cie },
+        offset: u64,
+        size: u64,
+        data: []const u8,
 
-    pub fn generate(eh: *EhFrameSection, elf_file: *Elf) !void {
-        _ = eh;
-        _ = elf_file;
-    }
+        pub fn fde(rec: Record) Fde {
+            assert(rec.tag == .fde);
+            return .{
+                .offset = rec.offset,
+                .size = rec.size,
+                .data = rec.data,
+                .cie_index = undefined,
+            };
+        }
 
-    pub fn size(eh: *EhFrameSection) usize {
-        _ = eh;
-        return 0;
-    }
+        pub fn cie(rec: Record) Cie {
+            assert(rec.tag == .cie);
+            return .{
+                .offset = rec.offset,
+                .size = rec.size,
+                .data = rec.data,
+            };
+        }
+    };
 
-    pub fn write(eh: EhFrameSection, elf_file: *Elf, writer: anytype) !void {
-        _ = elf_file;
-        _ = eh;
-        _ = writer;
+    pub fn next(it: *Iterator) !?Record {
+        if (it.pos >= it.data.len) return null;
+
+        var stream = std.io.fixedBufferStream(it.data[it.pos..]);
+        const reader = stream.reader();
+
+        var size = try reader.readIntLittle(u32);
+        it.pos += 4;
+        if (size == 0xFFFFFFFF) @panic("TODO");
+
+        const id = try reader.readIntLittle(u32);
+        const record = Record{
+            .tag = if (id == 0) .cie else .fde,
+            .offset = it.pos,
+            .size = size,
+            .data = it.data[it.pos..][0..size],
+        };
+        it.pos += size;
+
+        return record;
     }
 };
 
+pub fn generateEhFrame(elf_file: *Elf) !void {
+    _ = elf_file;
+}
+
+pub fn calcEhFrameSize(elf_file: *Elf) usize {
+    _ = elf_file;
+    return 0;
+}
+
+pub fn writeEhFrame(elf_file: *Elf, writer: anytype) !void {
+    _ = elf_file;
+    _ = writer;
+}
+
 const std = @import("std");
-const eh_frame = @import("../eh_frame.zig");
+const assert = std.debug.assert;
 const elf = std.elf;
 const Allocator = std.mem.Allocator;
 const Atom = @import("Atom.zig");
 const Elf = @import("../Elf.zig");
-pub const NewIterator = eh_frame.NewIterator;

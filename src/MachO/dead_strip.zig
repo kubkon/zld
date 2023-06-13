@@ -427,7 +427,7 @@ fn markEhFrameRecord(macho_file: *MachO, object_id: u32, atom_index: AtomIndex, 
 
     // Mark CIE references which should include any referenced personalities
     // that are defined locally.
-    if (eh_frame.getPersonalityPointerReloc(cie, macho_file, object_id, cie_offset)) |target| {
+    if (cie.getPersonalityPointerReloc(macho_file, object_id, cie_offset)) |target| {
         const target_sym = macho_file.getSymbol(target);
         if (!target_sym.undf()) {
             const target_object = macho_file.objects.items[target.getFile().?];

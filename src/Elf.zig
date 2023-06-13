@@ -60,7 +60,6 @@ dynstrtab: StringTable(.dynstrtab) = .{},
 versym: std.ArrayListUnmanaged(elf.Elf64_Versym) = .{},
 verneed: VerneedSection = .{},
 
-eh_frame: EhFrameSection = .{},
 dynamic: DynamicSection = .{},
 hash: HashSection = .{},
 gnu_hash: GnuHashSection = .{},
@@ -128,7 +127,6 @@ pub fn deinit(self: *Elf) void {
     self.symbols.deinit(gpa);
     self.symbols_extra.deinit(gpa);
     self.globals.deinit(gpa);
-    self.eh_frame.deinit(gpa);
     self.got.deinit(gpa);
     self.plt.deinit(gpa);
     self.plt_got.deinit(gpa);
@@ -359,7 +357,7 @@ pub fn flush(self: *Elf) !void {
     try self.initSections();
     try self.sortSections();
     try self.addAtomsToSections();
-    try self.setEhFrame();
+    try eh_frame.generateEhFrame(self);
     try self.sortInitFini();
     try self.setDynamic();
     self.setDynsym();
@@ -633,7 +631,7 @@ fn calcSectionSizes(self: *Elf) !void {
 
     if (self.eh_frame_sect_index) |index| {
         const shdr = &self.sections.items(.shdr)[index];
-        shdr.sh_size = self.eh_frame.size();
+        shdr.sh_size = eh_frame.calcEhFrameSize(self);
         shdr.sh_addralign = @alignOf(u64);
     }
 
@@ -1761,11 +1759,6 @@ fn scanRelocs(self: *Elf) !void {
     }
 }
 
-fn setEhFrame(self: *Elf) !void {
-    if (self.eh_frame_sect_index == null) return;
-    try self.eh_frame.generate(self);
-}
-
 fn setDynamic(self: *Elf) !void {
     if (self.dynamic_sect_index == null) return;
 
@@ -1908,9 +1901,9 @@ fn writeSyntheticSections(self: *Elf) !void {
 
     if (self.eh_frame_sect_index) |shndx| {
         const shdr = self.sections.items(.shdr)[shndx];
-        var buffer = try std.ArrayList(u8).initCapacity(gpa, self.eh_frame.size());
+        var buffer = try std.ArrayList(u8).initCapacity(gpa, eh_frame.calcEhFrameSize(self));
         defer buffer.deinit();
-        try self.eh_frame.write(self, buffer.writer());
+        try eh_frame.writeEhFrame(self, buffer.writer());
         try self.base.file.pwriteAll(buffer.items, shdr.sh_offset);
     }
 
@@ -2491,6 +2484,7 @@ const std = @import("std");
 const build_options = @import("build_options");
 const builtin = @import("builtin");
 const assert = std.debug.assert;
+const eh_frame = @import("Elf/eh_frame.zig");
 const elf = std.elf;
 const fs = std.fs;
 const gc = @import("Elf/gc.zig");
@@ -2506,7 +2500,6 @@ const Atom = @import("Elf/Atom.zig");
 const CopyRelSection = synthetic.CopyRelSection;
 const DynamicSection = synthetic.DynamicSection;
 const DynsymSection = synthetic.DynsymSection;
-const EhFrameSection = @import("Elf/eh_frame.zig").EhFrameSection;
 const Elf = @This();
 const File = @import("Elf/file.zig").File;
 const GnuHashSection = synthetic.GnuHashSection;
