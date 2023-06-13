@@ -431,7 +431,7 @@ fn initSections(self: *Elf) !void {
     for (self.objects.items) |index| {
         for (self.getFile(index).?.object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index) orelse continue;
-            if (!atom.is_alive) continue;
+            if (!atom.alive) continue;
             try atom.initOutputSection(self);
         }
     }
@@ -593,7 +593,7 @@ fn addAtomsToSections(self: *Elf) !void {
     for (self.objects.items) |index| {
         for (self.getFile(index).?.object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index) orelse continue;
-            if (!atom.is_alive) continue;
+            if (!atom.alive) continue;
             const atoms = &self.sections.items(.atoms)[atom.out_shndx];
             try atoms.append(self.base.allocator, atom_index);
         }
@@ -1134,7 +1134,7 @@ fn sortSections(self: *Elf) !void {
     for (self.objects.items) |index| {
         for (self.getFile(index).?.object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index) orelse continue;
-            if (!atom.is_alive) continue;
+            if (!atom.alive) continue;
             atom.out_shndx = backlinks[atom.out_shndx];
         }
     }
@@ -1217,7 +1217,7 @@ fn allocateAtoms(self: *Elf) void {
         if (atoms.items.len == 0) continue;
         for (atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index).?;
-            assert(atom.is_alive);
+            assert(atom.alive);
             atom.value += shdr.sh_addr;
         }
     }
@@ -1228,7 +1228,7 @@ fn allocateLocals(self: *Elf) void {
         for (self.getFile(index).?.object.getLocals()) |local_index| {
             const local = self.getSymbol(local_index);
             const atom = local.getAtom(self) orelse continue;
-            if (!atom.is_alive) continue;
+            if (!atom.alive) continue;
             local.value += atom.value;
             local.shndx = atom.out_shndx;
         }
@@ -1240,7 +1240,7 @@ fn allocateGlobals(self: *Elf) void {
         for (self.getFile(index).?.object.getGlobals()) |global_index| {
             const global = self.getSymbol(global_index);
             const atom = global.getAtom(self) orelse continue;
-            if (!atom.is_alive) continue;
+            if (!atom.alive) continue;
             if (global.getFile(self).?.object.index != index) continue;
             global.value += atom.value;
             global.shndx = atom.out_shndx;
@@ -1535,7 +1535,7 @@ fn resolveSymbols(self: *Elf) !void {
             if (cg_owner.file != index) {
                 for (object.getComdatGroupMembers(cg.shndx)) |shndx| {
                     const atom_index = object.atoms.items[shndx];
-                    if (self.getAtom(atom_index)) |atom| atom.is_alive = false;
+                    if (self.getAtom(atom_index)) |atom| atom.alive = false;
                 }
             }
         }
@@ -1570,7 +1570,7 @@ fn markEhFrameAtomsDead(self: *Elf) void {
             const atom = self.getAtom(atom_index) orelse continue;
             const is_eh_frame = atom.getInputShdr(self).sh_type == elf.SHT_X86_64_UNWIND or
                 mem.eql(u8, atom.getName(self), ".eh_frame");
-            if (atom.is_alive and is_eh_frame) atom.is_alive = false;
+            if (atom.alive and is_eh_frame) atom.alive = false;
         }
     }
 }
@@ -1796,7 +1796,7 @@ fn writeAtoms(self: *Elf) !void {
 
         for (atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index).?;
-            assert(atom.is_alive);
+            assert(atom.alive);
             const off = if (shdr.sh_flags & elf.SHF_ALLOC == 0) atom.value else atom.value - shdr.sh_addr;
             log.debug("writing ATOM(%{d},'{s}') at offset 0x{x}", .{
                 atom_index,

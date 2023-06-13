@@ -26,10 +26,10 @@ relocs_shndx: u16 = 0,
 atom_index: Index = 0,
 
 /// Specifies whether this atom is alive or has been garbage collected.
-is_alive: bool = true,
+alive: bool = true,
 
 /// Specifies if the atom has been visited during garbage collection.
-is_visited: bool = false,
+visited: bool = false,
 
 fde_start: u32 = 0,
 fde_end: u32 = 0,
@@ -90,7 +90,7 @@ pub fn getRelocs(self: Atom, elf_file: *Elf) []align(1) const elf.Elf64_Rela {
     return object.getRelocs(self.relocs_shndx);
 }
 
-pub fn getFdes(self: Atom, elf_file: *Elf) []const Object.Fde {
+pub fn getFdes(self: Atom, elf_file: *Elf) []Object.Fde {
     if (self.fde_start == self.fde_end) return &[0]Object.Fde{};
     const object = self.getObject(elf_file);
     return object.fdes.items[self.fde_start..self.fde_end];
@@ -922,7 +922,7 @@ fn format2(
         }
         try writer.writeAll(" }");
     }
-    if (elf_file.options.gc_sections and !atom.is_alive) {
+    if (elf_file.options.gc_sections and !atom.alive) {
         try writer.writeAll(" : [*]");
     }
 }

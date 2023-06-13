@@ -83,7 +83,7 @@ pub fn parse(self: *Object, elf_file: *Elf) !void {
 
     for (self.getShdrs(), 0..) |shdr, i| {
         const atom = elf_file.getAtom(self.atoms.items[i]) orelse continue;
-        if (!atom.is_alive) continue;
+        if (!atom.alive) continue;
         if (shdr.sh_type == elf.SHT_X86_64_UNWIND or mem.eql(u8, atom.getName(elf_file), ".eh_frame"))
             try self.parseEhFrame(@intCast(u16, i), elf_file);
     }
@@ -354,7 +354,7 @@ fn filterRelocs(
 pub fn scanRelocs(self: *Object, elf_file: *Elf) !void {
     for (self.atoms.items) |atom_index| {
         const atom = elf_file.getAtom(atom_index) orelse continue;
-        if (!atom.is_alive) continue;
+        if (!atom.alive) continue;
         if (atom.getInputShdr(elf_file).sh_flags & elf.SHF_ALLOC == 0) continue;
         try atom.scanRelocs(elf_file);
     }
@@ -385,7 +385,7 @@ pub fn resolveSymbols(self: *Object, elf_file: *Elf) void {
         if (this_sym.st_shndx != elf.SHN_ABS and this_sym.st_shndx != elf.SHN_COMMON) {
             const atom_index = self.atoms.items[this_sym.st_shndx];
             const atom = elf_file.getAtom(atom_index) orelse continue;
-            if (!atom.is_alive) continue;
+            if (!atom.alive) continue;
         }
 
         const global = elf_file.getSymbol(index);
@@ -448,7 +448,7 @@ pub fn checkDuplicates(self: *Object, elf_file: *Elf) void {
         if (this_sym.st_shndx != elf.SHN_ABS) {
             const atom_index = self.atoms.items[this_sym.st_shndx];
             const atom = elf_file.getAtom(atom_index) orelse continue;
-            if (!atom.is_alive) continue;
+            if (!atom.alive) continue;
         }
 
         elf_file.base.fatal("multiple definition: {}: {}: {s}", .{
@@ -523,7 +523,7 @@ pub fn calcSymtabSize(self: *Object, elf_file: *Elf) !void {
 
     for (self.getLocals()) |local_index| {
         const local = elf_file.getSymbol(local_index);
-        if (local.getAtom(elf_file)) |atom| if (!atom.is_alive) continue;
+        if (local.getAtom(elf_file)) |atom| if (!atom.alive) continue;
         const s_sym = local.getSourceSymbol(elf_file);
         switch (s_sym.st_type()) {
             elf.STT_SECTION, elf.STT_NOTYPE => continue,
@@ -537,7 +537,7 @@ pub fn calcSymtabSize(self: *Object, elf_file: *Elf) !void {
     for (self.getGlobals()) |global_index| {
         const global = elf_file.getSymbol(global_index);
         if (global.getFile(elf_file)) |file| if (file.getIndex() != self.index) continue;
-        if (global.getAtom(elf_file)) |atom| if (!atom.is_alive) continue;
+        if (global.getAtom(elf_file)) |atom| if (!atom.alive) continue;
         global.flags.output_symtab = true;
         if (global.isLocal()) {
             self.output_symtab_size.nlocals += 1;
@@ -873,7 +873,6 @@ pub const Cie = struct {
     rel_num: u32 = 0,
     rel_shndx: u32 = 0,
     file: u32 = 0,
-    alive: bool = true,
 
     pub fn getRelocs(cie: Cie, elf_file: *Elf) []align(1) const elf.Elf64_Rela {
         const object = elf_file.getFile(cie.file).?.object;
