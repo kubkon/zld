@@ -13,6 +13,7 @@ phdrs: std.ArrayListUnmanaged(elf.Elf64_Phdr) = .{},
 tls_phdr_index: ?u16 = null,
 
 text_sect_index: ?u16 = null,
+eh_frame_hdr_sect_index: ?u16 = null,
 eh_frame_sect_index: ?u16 = null,
 plt_sect_index: ?u16 = null,
 got_sect_index: ?u16 = null,
@@ -447,6 +448,16 @@ fn initSections(self: *Elf) !void {
             .flags = elf.SHF_ALLOC,
             .addralign = @alignOf(u64),
         });
+
+        if (self.options.eh_frame_hdr) {
+            self.eh_frame_hdr_sect_index = try self.addSection(.{
+                .name = ".eh_frame_hdr",
+                .type = elf.SHT_PROGBITS,
+                .flags = elf.SHF_ALLOC,
+                .size = eh_frame_hdr_header_size,
+                .addralign = @alignOf(u32),
+            });
+        }
     }
 
     if (self.got.symbols.items.len > 0) {
@@ -632,6 +643,12 @@ fn calcSectionSizes(self: *Elf) !void {
         const shdr = &self.sections.items(.shdr)[index];
         shdr.sh_size = eh_frame.calcEhFrameSize(self);
         shdr.sh_addralign = @alignOf(u64);
+    }
+
+    if (self.eh_frame_hdr_sect_index) |index| {
+        const shdr = &self.sections.items(.shdr)[index];
+        shdr.sh_size = eh_frame.calcEhFrameHdrSize(self);
+        shdr.sh_addralign = @alignOf(u32);
     }
 
     if (self.got_sect_index) |index| {
@@ -948,6 +965,20 @@ fn initPhdrs(self: *Elf) !void {
         });
     }
 
+    // Add PT_GNU_EH_FRAME phdr if required.
+    if (self.eh_frame_hdr_sect_index) |index| {
+        const shdr = self.sections.items(.shdr)[index];
+        _ = try self.addPhdr(.{
+            .type = elf.PT_GNU_EH_FRAME,
+            .flags = elf.PF_R,
+            .@"align" = shdr.sh_addralign,
+            .offset = shdr.sh_offset,
+            .addr = shdr.sh_addr,
+            .memsz = shdr.sh_size,
+            .filesz = shdr.sh_size,
+        });
+    }
+
     // Add PT_GNU_STACK phdr that controls some stack attributes that apparently may or may not
     // be respected by the OS.
     _ = try self.addPhdr(.{
@@ -1161,6 +1192,7 @@ fn sortSections(self: *Elf) !void {
     for (&[_]*?u16{
         &self.text_sect_index,
         &self.eh_frame_sect_index,
+        &self.eh_frame_hdr_sect_index,
         &self.got_sect_index,
         &self.symtab_sect_index,
         &self.strtab_sect_index,
@@ -1906,6 +1938,14 @@ fn writeSyntheticSections(self: *Elf) !void {
         try self.base.file.pwriteAll(buffer.items, shdr.sh_offset);
     }
 
+    if (self.eh_frame_hdr_sect_index) |shndx| {
+        const shdr = self.sections.items(.shdr)[shndx];
+        var buffer = try std.ArrayList(u8).initCapacity(gpa, eh_frame.calcEhFrameHdrSize(self));
+        defer buffer.deinit();
+        try eh_frame.writeEhFrameHdr(self, buffer.writer());
+        try self.base.file.pwriteAll(buffer.items, shdr.sh_offset);
+    }
+
     if (self.got_sect_index) |shndx| {
         const shdr = self.sections.items(.shdr)[shndx];
         var buffer = try std.ArrayList(u8).initCapacity(gpa, self.got.size());
@@ -2019,6 +2059,7 @@ pub const AddSectionOpts = struct {
     info: u32 = 0,
     addralign: u64 = 0,
     entsize: u64 = 0,
+    size: u64 = 0,
 };
 
 pub fn addSection(self: *Elf, opts: AddSectionOpts) !u16 {
@@ -2031,7 +2072,7 @@ pub fn addSection(self: *Elf, opts: AddSectionOpts) !u16 {
             .sh_flags = opts.flags,
             .sh_addr = 0,
             .sh_offset = 0,
-            .sh_size = 0,
+            .sh_size = opts.size,
             .sh_link = 0,
             .sh_info = opts.info,
             .sh_addralign = opts.addralign,
@@ -2445,6 +2486,7 @@ pub const WriteSymtabCtx = struct {
 
 const default_base_addr: u64 = 0x200000;
 const default_page_size: u64 = 0x1000;
+const eh_frame_hdr_header_size: u64 = 12;
 
 pub const null_sym = elf.Elf64_Sym{
     .st_name = 0,
