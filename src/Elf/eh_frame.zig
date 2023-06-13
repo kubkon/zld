@@ -20,9 +20,18 @@ pub const Fde = struct {
         return data[fde.offset..][0..fde.size];
     }
 
+    pub fn getCie(fde: Fde, elf_file: *Elf) Cie {
+        const object = fde.getObject(elf_file);
+        return object.cies.items[fde.cie_index];
+    }
+
     pub fn getCiePointer(fde: Fde, elf_file: *Elf) u32 {
         const data = fde.getData(elf_file);
         return std.mem.readIntLittle(u32, data[0..4]);
+    }
+
+    pub inline fn getSize(fde: Fde) u64 {
+        return fde.size + 4;
     }
 
     pub fn getAtom(fde: Fde, elf_file: *Elf) *Atom {
@@ -100,6 +109,10 @@ pub const Cie = struct {
         const object = cie.getObject(elf_file);
         const data = object.getShdrContents(cie.shndx);
         return data[cie.offset..][0..cie.size];
+    }
+
+    pub inline fn getSize(cie: Cie) u64 {
+        return cie.size + 4;
     }
 
     pub fn getRelocs(cie: Cie, elf_file: *Elf) []align(1) const elf.Elf64_Rela {
@@ -180,18 +193,98 @@ pub const Iterator = struct {
     }
 };
 
-pub fn generateEhFrame(elf_file: *Elf) !void {
-    _ = elf_file;
+pub fn calcEhFrameSize(elf_file: *Elf) usize {
+    var offset: u64 = 0;
+    for (elf_file.objects.items) |index| {
+        const object = elf_file.getFile(index).?.object;
+        // TODO dedup CIE records among object files
+        for (object.cies.items) |*cie| {
+            cie.out_offset = offset;
+            offset += cie.getSize();
+        }
+    }
+
+    for (elf_file.objects.items) |index| {
+        const object = elf_file.getFile(index).?.object;
+        for (object.fdes.items) |*fde| {
+            if (!fde.alive) continue;
+            fde.out_offset = offset;
+            offset += fde.getSize();
+        }
+    }
+    return offset + 4;
 }
 
-pub fn calcEhFrameSize(elf_file: *Elf) usize {
-    _ = elf_file;
-    return 0;
+fn resolveReloc(
+    rel: elf.Elf64_Rela,
+    value: i64,
+    offset: i64,
+    elf_file: *Elf,
+    writer: anytype,
+) !void {
+    const shdr_addr = @intCast(i64, elf_file.sections.items(.shdr)[elf_file.eh_frame_sect_index.?].sh_addr);
+    switch (rel.r_type()) {
+        elf.R_X86_64_32 => try writer.writeIntLittle(i32, @truncate(i32, value)),
+        elf.R_X86_64_64 => try writer.writeIntLittle(i64, value),
+        elf.R_X86_64_PC32 => try writer.writeIntLittle(i32, @intCast(i32, value - shdr_addr - offset)),
+        elf.R_X86_64_PC64 => try writer.writeIntLittle(i64, value - shdr_addr - offset),
+        else => unreachable,
+    }
 }
 
 pub fn writeEhFrame(elf_file: *Elf, writer: anytype) !void {
-    _ = elf_file;
-    _ = writer;
+    const gpa = elf_file.base.allocator;
+    for (elf_file.objects.items) |index| {
+        const object = elf_file.getFile(index).?.object;
+
+        for (object.cies.items) |cie| {
+            const data = try gpa.dupe(u8, cie.getData(elf_file));
+            defer gpa.free(data);
+
+            var stream = std.io.fixedBufferStream(data);
+
+            for (cie.getRelocs(elf_file)) |rel| {
+                const sym = object.getSymbol(rel.r_sym(), elf_file);
+                const value = @intCast(i64, sym.value) + rel.r_addend;
+                const offset = @intCast(i64, cie.out_offset + rel.r_offset - cie.offset);
+                try stream.seekTo(rel.r_offset - cie.offset);
+                try resolveReloc(rel, value, offset, elf_file, stream.writer());
+            }
+
+            try writer.writeIntLittle(u32, @intCast(u32, cie.size));
+            try writer.writeAll(data);
+        }
+    }
+
+    for (elf_file.objects.items) |index| {
+        const object = elf_file.getFile(index).?.object;
+
+        for (object.fdes.items) |fde| {
+            if (!fde.alive) continue;
+
+            const data = try gpa.dupe(u8, fde.getData(elf_file));
+            defer gpa.free(data);
+
+            var stream = std.io.fixedBufferStream(data);
+            try stream.writer().writeIntLittle(
+                i32,
+                @truncate(i32, @intCast(i64, fde.out_offset + 4) - @intCast(i64, fde.getCie(elf_file).out_offset)),
+            );
+
+            for (fde.getRelocs(elf_file)) |rel| {
+                const sym = object.getSymbol(rel.r_sym(), elf_file);
+                const value = @intCast(i64, sym.value) + rel.r_addend;
+                const offset = @intCast(i64, fde.out_offset + rel.r_offset - fde.offset);
+                try stream.seekTo(rel.r_offset - fde.offset);
+                try resolveReloc(rel, value, offset, elf_file, stream.writer());
+            }
+
+            try writer.writeIntLittle(u32, @intCast(u32, fde.size));
+            try writer.writeAll(data);
+        }
+    }
+
+    try writer.writeIntLittle(u32, 0);
 }
 
 const std = @import("std");

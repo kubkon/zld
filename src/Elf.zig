@@ -357,7 +357,6 @@ pub fn flush(self: *Elf) !void {
     try self.initSections();
     try self.sortSections();
     try self.addAtomsToSections();
-    try eh_frame.generateEhFrame(self);
     try self.sortInitFini();
     try self.setDynamic();
     self.setDynsym();
