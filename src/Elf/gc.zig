@@ -93,16 +93,23 @@ fn markLive(atom: *Atom, elf_file: *Elf) void {
 
     assert(atom.is_visited);
     const object = atom.getObject(elf_file);
+
+    for (atom.getFdes(elf_file)) |fde| {
+        for (fde.getRelocs(elf_file)[1..]) |rel| {
+            const target_sym = object.getSymbol(rel.r_sym(), elf_file);
+            const target_atom = target_sym.getAtom(elf_file) orelse continue;
+            target_atom.is_alive = true;
+            gc_track_live_log.debug("{}marking live atom({d})", .{ track_live_level, target_atom.atom_index });
+            if (markAtom(target_atom)) markLive(target_atom, elf_file);
+        }
+    }
+
     for (atom.getRelocs(elf_file)) |rel| {
         const target_sym = object.getSymbol(rel.r_sym(), elf_file);
         const target_atom = target_sym.getAtom(elf_file) orelse continue;
         target_atom.is_alive = true;
-
         gc_track_live_log.debug("{}marking live atom({d})", .{ track_live_level, target_atom.atom_index });
-
-        if (markAtom(target_atom)) {
-            markLive(target_atom, elf_file);
-        }
+        if (markAtom(target_atom)) markLive(target_atom, elf_file);
     }
 }
 

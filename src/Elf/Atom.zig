@@ -90,10 +90,16 @@ pub fn getRelocs(self: Atom, elf_file: *Elf) []align(1) const elf.Elf64_Rela {
     return object.getRelocs(self.relocs_shndx);
 }
 
+pub fn getFdes(self: Atom, elf_file: *Elf) []const Object.Fde {
+    if (self.fde_start == self.fde_end) return &[0]Object.Fde{};
+    const object = self.getObject(elf_file);
+    return object.fdes.items[self.fde_start..self.fde_end];
+}
+
 pub fn initOutputSection(self: *Atom, elf_file: *Elf) !void {
     const shdr = self.getInputShdr(elf_file);
     const name = self.getName(elf_file);
-    const flags = shdr.sh_flags;
+    const flags = shdr.sh_flags & ~@as(u64, elf.SHF_COMPRESSED | elf.SHF_GROUP | elf.SHF_GNU_RETAIN);
     const @"type" = shdr.sh_type;
     const is_tls = flags & elf.SHF_TLS != 0;
     const is_alloc = flags & elf.SHF_ALLOC != 0;
@@ -114,7 +120,7 @@ pub fn initOutputSection(self: *Atom, elf_file: *Elf) !void {
             if (!is_alloc) break :blk .{
                 .name = name,
                 .type = @"type",
-                .flags = flags & ~@as(u32, elf.SHF_COMPRESSED),
+                .flags = flags,
             };
 
             if (is_exec) {
@@ -146,9 +152,14 @@ pub fn initOutputSection(self: *Atom, elf_file: *Elf) !void {
                 };
             }
 
+            const out_name = if (mem.startsWith(u8, name, ".gcc_except_table"))
+                ".gcc_except_table"
+            else
+                ".rodata";
+
             break :blk .{
                 .flags = elf.SHF_ALLOC,
-                .name = ".rodata",
+                .name = out_name,
                 .type = @"type",
             };
         },
