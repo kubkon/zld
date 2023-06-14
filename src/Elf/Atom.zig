@@ -26,10 +26,16 @@ relocs_shndx: u16 = 0,
 atom_index: Index = 0,
 
 /// Specifies whether this atom is alive or has been garbage collected.
-is_alive: bool = true,
+alive: bool = true,
 
 /// Specifies if the atom has been visited during garbage collection.
-is_visited: bool = false,
+visited: bool = false,
+
+/// Start index of FDEs referencing this atom.
+fde_start: u32 = 0,
+
+/// End index of FDEs referencing this atom.
+fde_end: u32 = 0,
 
 pub const Index = u32;
 
@@ -76,18 +82,27 @@ pub fn getInputShdr(self: Atom, elf_file: *Elf) elf.Elf64_Shdr {
     return object.getShdr(self.shndx);
 }
 
+pub fn getPriority(self: Atom, elf_file: *Elf) u64 {
+    const object = self.getObject(elf_file);
+    return (@intCast(u64, object.index) << 32) | @intCast(u64, self.shndx);
+}
+
 pub fn getRelocs(self: Atom, elf_file: *Elf) []align(1) const elf.Elf64_Rela {
     if (self.relocs_shndx == @bitCast(u16, @as(i16, -1))) return &[0]elf.Elf64_Rela{};
     const object = self.getObject(elf_file);
-    const bytes = object.getShdrContents(self.relocs_shndx);
-    const nrelocs = @divExact(bytes.len, @sizeOf(elf.Elf64_Rela));
-    return @ptrCast([*]align(1) const elf.Elf64_Rela, bytes)[0..nrelocs];
+    return object.getRelocs(self.relocs_shndx);
+}
+
+pub fn getFdes(self: Atom, elf_file: *Elf) []Fde {
+    if (self.fde_start == self.fde_end) return &[0]Fde{};
+    const object = self.getObject(elf_file);
+    return object.fdes.items[self.fde_start..self.fde_end];
 }
 
 pub fn initOutputSection(self: *Atom, elf_file: *Elf) !void {
     const shdr = self.getInputShdr(elf_file);
     const name = self.getName(elf_file);
-    const flags = shdr.sh_flags;
+    const flags = shdr.sh_flags & ~@as(u64, elf.SHF_COMPRESSED | elf.SHF_GROUP | elf.SHF_GNU_RETAIN);
     const @"type" = shdr.sh_type;
     const is_tls = flags & elf.SHF_TLS != 0;
     const is_alloc = flags & elf.SHF_ALLOC != 0;
@@ -108,7 +123,7 @@ pub fn initOutputSection(self: *Atom, elf_file: *Elf) !void {
             if (!is_alloc) break :blk .{
                 .name = name,
                 .type = @"type",
-                .flags = flags & ~@as(u32, elf.SHF_COMPRESSED),
+                .flags = flags,
             };
 
             if (is_exec) {
@@ -140,9 +155,14 @@ pub fn initOutputSection(self: *Atom, elf_file: *Elf) !void {
                 };
             }
 
+            const out_name = if (mem.startsWith(u8, name, ".gcc_except_table"))
+                ".gcc_except_table"
+            else
+                ".rodata";
+
             break :blk .{
                 .flags = elf.SHF_ALLOC,
-                .name = ".rodata",
+                .name = out_name,
                 .type = @"type",
             };
         },
@@ -796,7 +816,7 @@ fn encode(insts: []const Instruction, code: []u8) !void {
     }
 }
 
-fn fmtRelocType(r_type: u32) std.fmt.Formatter(formatRelocType) {
+pub fn fmtRelocType(r_type: u32) std.fmt.Formatter(formatRelocType) {
     return .{ .data = r_type };
 }
 
@@ -890,11 +910,21 @@ fn format2(
     _ = options;
     _ = unused_fmt_string;
     const atom = ctx.atom;
+    const elf_file = ctx.elf_file;
     try writer.print("atom({d}) : {s} : @{x} : sect({d}) : align({x}) : size({x})", .{
-        atom.atom_index, atom.getName(ctx.elf_file), atom.value,
-        atom.out_shndx,  atom.alignment,             atom.size,
+        atom.atom_index, atom.getName(elf_file), atom.value,
+        atom.out_shndx,  atom.alignment,         atom.size,
     });
-    if (ctx.elf_file.options.gc_sections and !atom.is_alive) {
+    if (atom.fde_start != atom.fde_end) {
+        try writer.writeAll(" : fdes{ ");
+        for (atom.getFdes(elf_file), atom.fde_start..) |fde, i| {
+            try writer.print("{d}", .{i});
+            if (!fde.alive) try writer.writeAll("([*])");
+            if (i < atom.fde_end - 1) try writer.writeAll(", ");
+        }
+        try writer.writeAll(" }");
+    }
+    if (elf_file.options.gc_sections and !atom.alive) {
         try writer.writeAll(" : [*]");
     }
 }
@@ -913,6 +943,7 @@ const mem = std.mem;
 const Allocator = mem.Allocator;
 const Disassembler = dis_x86_64.Disassembler;
 const Elf = @import("../Elf.zig");
+const Fde = @import("eh_frame.zig").Fde;
 const Instruction = dis_x86_64.Instruction;
 const Immediate = dis_x86_64.Immediate;
 const Object = @import("Object.zig");

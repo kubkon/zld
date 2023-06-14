@@ -3017,8 +3017,8 @@ fn filterDataInCode(
         }
     };
 
-    const start = MachO.lsearch(macho.data_in_code_entry, dices, Predicate{ .addr = start_addr });
-    const end = MachO.lsearch(macho.data_in_code_entry, dices[start..], Predicate{ .addr = end_addr }) + start;
+    const start = Zld.linearSearch(macho.data_in_code_entry, dices, Predicate{ .addr = start_addr });
+    const end = Zld.linearSearch(macho.data_in_code_entry, dices[start..], Predicate{ .addr = end_addr }) + start;
 
     return dices[start..end];
 }
@@ -3641,37 +3641,6 @@ pub fn getEntryPoint(self: MachO) SymbolWithLoc {
 
 inline fn requiresThunks(self: MachO) bool {
     return self.options.target.cpu_arch.? == .aarch64;
-}
-
-/// Binary search
-pub fn bsearch(comptime T: type, haystack: []align(1) const T, predicate: anytype) usize {
-    if (!@hasDecl(@TypeOf(predicate), "predicate"))
-        @compileError("Predicate is required to define fn predicate(@This(), T) bool");
-
-    var min: usize = 0;
-    var max: usize = haystack.len;
-    while (min < max) {
-        const index = (min + max) / 2;
-        const curr = haystack[index];
-        if (predicate.predicate(curr)) {
-            min = index + 1;
-        } else {
-            max = index;
-        }
-    }
-    return min;
-}
-
-/// Linear search
-pub fn lsearch(comptime T: type, haystack: []align(1) const T, predicate: anytype) usize {
-    if (!@hasDecl(@TypeOf(predicate), "predicate"))
-        @compileError("Predicate is required to define fn predicate(@This(), T) bool");
-
-    var i: usize = 0;
-    while (i < haystack.len) : (i += 1) {
-        if (predicate.predicate(haystack[i])) break;
-    }
-    return i;
 }
 
 pub fn generateSymbolStabs(self: *MachO, object: Object, locals: *std.ArrayList(macho.nlist_64)) !void {

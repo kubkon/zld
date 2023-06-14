@@ -11,7 +11,7 @@ const usage =
     \\--dynamic-linker=[value], -I [value]      
     \\                              Set the dynamic linker to use
     \\--end-group                   Ignored for compatibility with GNU
-    \\--eh-frame-hdr                Create .eh_frame_hdr section
+    \\--eh-frame-hdr                Create .eh_frame_hdr section (default)
     \\--export-dynamic, -E          Export all dynamic symbols
     \\--no-export-dynamic           Don't export all dynamic symbols
     \\--no-eh-frame-hdr             Don't create .eh_frame_hdr section
@@ -66,7 +66,7 @@ print_gc_sections: bool = false,
 allow_multiple_definition: bool = false,
 cpu_arch: ?std.Target.Cpu.Arch = null,
 dynamic_linker: ?[]const u8 = null,
-eh_frame_hdr: bool = false,
+eh_frame_hdr: bool = true,
 static: bool = false,
 relax: bool = true,
 export_dynamic: bool = false,

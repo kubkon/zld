@@ -13,6 +13,8 @@ phdrs: std.ArrayListUnmanaged(elf.Elf64_Phdr) = .{},
 tls_phdr_index: ?u16 = null,
 
 text_sect_index: ?u16 = null,
+eh_frame_hdr_sect_index: ?u16 = null,
+eh_frame_sect_index: ?u16 = null,
 plt_sect_index: ?u16 = null,
 got_sect_index: ?u16 = null,
 got_plt_sect_index: ?u16 = null,
@@ -312,6 +314,7 @@ pub fn flush(self: *Elf) !void {
     }
 
     try self.resolveSymbols();
+    self.markEhFrameAtomsDead();
     try self.convertCommonSymbols();
     try self.markImportsAndExports();
 
@@ -430,8 +433,29 @@ fn initSections(self: *Elf) !void {
     for (self.objects.items) |index| {
         for (self.getFile(index).?.object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index) orelse continue;
-            if (!atom.is_alive) continue;
+            if (!atom.alive) continue;
             try atom.initOutputSection(self);
+        }
+    }
+
+    const needs_eh_frame = for (self.objects.items) |index| {
+        if (self.getFile(index).?.object.cies.items.len > 0) break true;
+    } else false;
+    if (needs_eh_frame) {
+        self.eh_frame_sect_index = try self.addSection(.{
+            .name = ".eh_frame",
+            .type = elf.SHT_PROGBITS,
+            .flags = elf.SHF_ALLOC,
+            .addralign = @alignOf(u64),
+        });
+
+        if (self.options.eh_frame_hdr) {
+            self.eh_frame_hdr_sect_index = try self.addSection(.{
+                .name = ".eh_frame_hdr",
+                .type = elf.SHT_PROGBITS,
+                .flags = elf.SHF_ALLOC,
+                .addralign = @alignOf(u32),
+            });
         }
     }
 
@@ -592,7 +616,7 @@ fn addAtomsToSections(self: *Elf) !void {
     for (self.objects.items) |index| {
         for (self.getFile(index).?.object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index) orelse continue;
-            if (!atom.is_alive) continue;
+            if (!atom.alive) continue;
             const atoms = &self.sections.items(.atoms)[atom.out_shndx];
             try atoms.append(self.base.allocator, atom_index);
         }
@@ -612,6 +636,18 @@ fn calcSectionSizes(self: *Elf) !void {
             shdr.sh_size += padding + atom.size;
             shdr.sh_addralign = @max(shdr.sh_addralign, alignment);
         }
+    }
+
+    if (self.eh_frame_sect_index) |index| {
+        const shdr = &self.sections.items(.shdr)[index];
+        shdr.sh_size = eh_frame.calcEhFrameSize(self);
+        shdr.sh_addralign = @alignOf(u64);
+    }
+
+    if (self.eh_frame_hdr_sect_index) |index| {
+        const shdr = &self.sections.items(.shdr)[index];
+        shdr.sh_size = eh_frame.calcEhFrameHdrSize(self);
+        shdr.sh_addralign = @alignOf(u32);
     }
 
     if (self.got_sect_index) |index| {
@@ -928,6 +964,20 @@ fn initPhdrs(self: *Elf) !void {
         });
     }
 
+    // Add PT_GNU_EH_FRAME phdr if required.
+    if (self.eh_frame_hdr_sect_index) |index| {
+        const shdr = self.sections.items(.shdr)[index];
+        _ = try self.addPhdr(.{
+            .type = elf.PT_GNU_EH_FRAME,
+            .flags = elf.PF_R,
+            .@"align" = shdr.sh_addralign,
+            .offset = shdr.sh_offset,
+            .addr = shdr.sh_addr,
+            .memsz = shdr.sh_size,
+            .filesz = shdr.sh_size,
+        });
+    }
+
     // Add PT_GNU_STACK phdr that controls some stack attributes that apparently may or may not
     // be respected by the OS.
     _ = try self.addPhdr(.{
@@ -1133,13 +1183,15 @@ fn sortSections(self: *Elf) !void {
     for (self.objects.items) |index| {
         for (self.getFile(index).?.object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index) orelse continue;
-            if (!atom.is_alive) continue;
+            if (!atom.alive) continue;
             atom.out_shndx = backlinks[atom.out_shndx];
         }
     }
 
     for (&[_]*?u16{
         &self.text_sect_index,
+        &self.eh_frame_sect_index,
+        &self.eh_frame_hdr_sect_index,
         &self.got_sect_index,
         &self.symtab_sect_index,
         &self.strtab_sect_index,
@@ -1216,7 +1268,7 @@ fn allocateAtoms(self: *Elf) void {
         if (atoms.items.len == 0) continue;
         for (atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index).?;
-            assert(atom.is_alive);
+            assert(atom.alive);
             atom.value += shdr.sh_addr;
         }
     }
@@ -1227,7 +1279,7 @@ fn allocateLocals(self: *Elf) void {
         for (self.getFile(index).?.object.getLocals()) |local_index| {
             const local = self.getSymbol(local_index);
             const atom = local.getAtom(self) orelse continue;
-            if (!atom.is_alive) continue;
+            if (!atom.alive) continue;
             local.value += atom.value;
             local.shndx = atom.out_shndx;
         }
@@ -1239,7 +1291,7 @@ fn allocateGlobals(self: *Elf) void {
         for (self.getFile(index).?.object.getGlobals()) |global_index| {
             const global = self.getSymbol(global_index);
             const atom = global.getAtom(self) orelse continue;
-            if (!atom.is_alive) continue;
+            if (!atom.alive) continue;
             if (global.getFile(self).?.object.index != index) continue;
             global.value += atom.value;
             global.shndx = atom.out_shndx;
@@ -1534,7 +1586,7 @@ fn resolveSymbols(self: *Elf) !void {
             if (cg_owner.file != index) {
                 for (object.getComdatGroupMembers(cg.shndx)) |shndx| {
                     const atom_index = object.atoms.items[shndx];
-                    if (self.getAtom(atom_index)) |atom| atom.is_alive = false;
+                    if (self.getAtom(atom_index)) |atom| atom.alive = false;
                 }
             }
         }
@@ -1557,6 +1609,20 @@ fn markLive(self: *Elf) void {
     for (self.shared_objects.items) |index| {
         const file = self.getFile(index).?;
         if (file.isAlive()) file.markLive(self);
+    }
+}
+
+fn markEhFrameAtomsDead(self: *Elf) void {
+    for (self.objects.items) |index| {
+        const file = self.getFile(index).?;
+        if (!file.isAlive()) continue;
+        const object = file.object;
+        for (object.atoms.items) |atom_index| {
+            const atom = self.getAtom(atom_index) orelse continue;
+            const is_eh_frame = atom.getInputShdr(self).sh_type == elf.SHT_X86_64_UNWIND or
+                mem.eql(u8, atom.getName(self), ".eh_frame");
+            if (atom.alive and is_eh_frame) atom.alive = false;
+        }
     }
 }
 
@@ -1682,12 +1748,7 @@ fn reportUndefs(self: *Elf) !void {
 
 fn scanRelocs(self: *Elf) !void {
     for (self.objects.items) |index| {
-        for (self.getFile(index).?.object.atoms.items) |atom_index| {
-            const atom = self.getAtom(atom_index) orelse continue;
-            if (!atom.is_alive) continue;
-            if (atom.getInputShdr(self).sh_flags & elf.SHF_ALLOC == 0) continue;
-            try atom.scanRelocs(self);
-        }
+        try self.getFile(index).?.object.scanRelocs(self);
     }
 
     try self.reportUndefs();
@@ -1786,7 +1847,7 @@ fn writeAtoms(self: *Elf) !void {
 
         for (atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index).?;
-            assert(atom.is_alive);
+            assert(atom.alive);
             const off = if (shdr.sh_flags & elf.SHF_ALLOC == 0) atom.value else atom.value - shdr.sh_addr;
             log.debug("writing ATOM(%{d},'{s}') at offset 0x{x}", .{
                 atom_index,
@@ -1866,6 +1927,22 @@ fn writeSyntheticSections(self: *Elf) !void {
     if (self.dynstrtab_sect_index) |shndx| {
         const shdr = self.sections.items(.shdr)[shndx];
         try self.base.file.pwriteAll(self.dynstrtab.buffer.items, shdr.sh_offset);
+    }
+
+    if (self.eh_frame_sect_index) |shndx| {
+        const shdr = self.sections.items(.shdr)[shndx];
+        var buffer = try std.ArrayList(u8).initCapacity(gpa, eh_frame.calcEhFrameSize(self));
+        defer buffer.deinit();
+        try eh_frame.writeEhFrame(self, buffer.writer());
+        try self.base.file.pwriteAll(buffer.items, shdr.sh_offset);
+    }
+
+    if (self.eh_frame_hdr_sect_index) |shndx| {
+        const shdr = self.sections.items(.shdr)[shndx];
+        var buffer = try std.ArrayList(u8).initCapacity(gpa, eh_frame.calcEhFrameHdrSize(self));
+        defer buffer.deinit();
+        try eh_frame.writeEhFrameHdr(self, buffer.writer());
+        try self.base.file.pwriteAll(buffer.items, shdr.sh_offset);
     }
 
     if (self.got_sect_index) |shndx| {
@@ -1981,6 +2058,7 @@ pub const AddSectionOpts = struct {
     info: u32 = 0,
     addralign: u64 = 0,
     entsize: u64 = 0,
+    size: u64 = 0,
 };
 
 pub fn addSection(self: *Elf, opts: AddSectionOpts) !u16 {
@@ -2314,8 +2392,10 @@ fn fmtDumpState(
         try writer.print("object({d}) : {}", .{ index, object.fmtPath() });
         if (!object.alive) try writer.writeAll(" : [*]");
         try writer.writeByte('\n');
-        try writer.print("{}{}{}\n", .{
+        try writer.print("{}{}{}{}{}\n", .{
             object.fmtAtoms(self),
+            object.fmtCies(self),
+            object.fmtFdes(self),
             object.fmtSymtab(self),
             object.fmtComdatGroups(self),
         });
@@ -2443,6 +2523,7 @@ const std = @import("std");
 const build_options = @import("build_options");
 const builtin = @import("builtin");
 const assert = std.debug.assert;
+const eh_frame = @import("Elf/eh_frame.zig");
 const elf = std.elf;
 const fs = std.fs;
 const gc = @import("Elf/gc.zig");
