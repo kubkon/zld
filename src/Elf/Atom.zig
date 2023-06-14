@@ -31,7 +31,10 @@ alive: bool = true,
 /// Specifies if the atom has been visited during garbage collection.
 visited: bool = false,
 
+/// Start index of FDEs referencing this atom.
 fde_start: u32 = 0,
+
+/// End index of FDEs referencing this atom.
 fde_end: u32 = 0,
 
 pub const Index = u32;
@@ -913,9 +916,8 @@ fn format2(
         atom.out_shndx,  atom.alignment,         atom.size,
     });
     if (atom.fde_start != atom.fde_end) {
-        const object = atom.getObject(elf_file);
         try writer.writeAll(" : fdes{ ");
-        for (object.fdes.items[atom.fde_start..atom.fde_end], atom.fde_start..) |fde, i| {
+        for (atom.getFdes(elf_file), atom.fde_start..) |fde, i| {
             try writer.print("{d}", .{i});
             if (!fde.alive) try writer.writeAll("([*])");
             if (i < atom.fde_end - 1) try writer.writeAll(", ");

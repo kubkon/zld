@@ -237,7 +237,7 @@ pub fn calcEhFrameHdrSize(elf_file: *Elf) usize {
             count += 1;
         }
     }
-    return Elf.eh_frame_hdr_header_size + count * 8;
+    return eh_frame_hdr_header_size + count * 8;
 }
 
 fn resolveReloc(rec: anytype, sym: *const Symbol, rel: elf.Elf64_Rela, elf_file: *Elf, data: []u8) !void {
@@ -318,7 +318,7 @@ pub fn writeEhFrameHdr(elf_file: *Elf, writer: anytype) !void {
 
     const eh_frame_shdr = elf_file.sections.items(.shdr)[elf_file.eh_frame_sect_index.?];
     const eh_frame_hdr_shdr = elf_file.sections.items(.shdr)[elf_file.eh_frame_hdr_sect_index.?];
-    const num_fdes = @intCast(u32, @divExact(eh_frame_hdr_shdr.sh_size - Elf.eh_frame_hdr_header_size, 8));
+    const num_fdes = @intCast(u32, @divExact(eh_frame_hdr_shdr.sh_size - eh_frame_hdr_header_size, 8));
     try writer.writeIntLittle(
         u32,
         @bitCast(u32, @truncate(
@@ -368,6 +368,8 @@ pub fn writeEhFrameHdr(elf_file: *Elf, writer: anytype) !void {
     std.mem.sort(Entry, entries.items, {}, Entry.lessThan);
     try writer.writeAll(std.mem.sliceAsBytes(entries.items));
 }
+
+const eh_frame_hdr_header_size: u64 = 12;
 
 const EH_PE = struct {
     pub const absptr = 0x00;

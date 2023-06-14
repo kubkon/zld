@@ -454,7 +454,6 @@ fn initSections(self: *Elf) !void {
                 .name = ".eh_frame_hdr",
                 .type = elf.SHT_PROGBITS,
                 .flags = elf.SHF_ALLOC,
-                .size = eh_frame_hdr_header_size,
                 .addralign = @alignOf(u32),
             });
         }
@@ -2072,7 +2071,7 @@ pub fn addSection(self: *Elf, opts: AddSectionOpts) !u16 {
             .sh_flags = opts.flags,
             .sh_addr = 0,
             .sh_offset = 0,
-            .sh_size = opts.size,
+            .sh_size = 0,
             .sh_link = 0,
             .sh_info = opts.info,
             .sh_addralign = opts.addralign,
@@ -2486,7 +2485,6 @@ pub const WriteSymtabCtx = struct {
 
 const default_base_addr: u64 = 0x200000;
 const default_page_size: u64 = 0x1000;
-pub const eh_frame_hdr_header_size: u64 = 12;
 
 pub const null_sym = elf.Elf64_Sym{
     .st_name = 0,
