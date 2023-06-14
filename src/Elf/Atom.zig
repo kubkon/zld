@@ -813,7 +813,7 @@ fn encode(insts: []const Instruction, code: []u8) !void {
     }
 }
 
-fn fmtRelocType(r_type: u32) std.fmt.Formatter(formatRelocType) {
+pub fn fmtRelocType(r_type: u32) std.fmt.Formatter(formatRelocType) {
     return .{ .data = r_type };
 }
 

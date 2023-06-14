@@ -1,4 +1,5 @@
 pub const Fde = struct {
+    /// Includes 4byte size cell.
     offset: u64,
     size: u64,
     cie_index: u32,
@@ -8,16 +9,22 @@ pub const Fde = struct {
     shndx: u32 = 0,
     file: u32 = 0,
     alive: bool = true,
+    /// Includes 4byte size cell.
     out_offset: u64 = 0,
 
     pub inline fn getObject(fde: Fde, elf_file: *Elf) *Object {
         return elf_file.getFile(fde.file).?.object;
     }
 
+    pub inline fn getAddress(fde: Fde, elf_file: *Elf) u64 {
+        const shdr = elf_file.sections.items(.shdr)[elf_file.eh_frame_sect_index.?];
+        return shdr.sh_addr + fde.out_offset;
+    }
+
     pub fn getData(fde: Fde, elf_file: *Elf) []const u8 {
         const object = fde.getObject(elf_file);
         const data = object.getShdrContents(fde.shndx);
-        return data[fde.offset..][0..fde.size];
+        return data[fde.offset..][0..fde.getSize()];
     }
 
     pub fn getCie(fde: Fde, elf_file: *Elf) Cie {
@@ -27,7 +34,7 @@ pub const Fde = struct {
 
     pub fn getCiePointer(fde: Fde, elf_file: *Elf) u32 {
         const data = fde.getData(elf_file);
-        return std.mem.readIntLittle(u32, data[0..4]);
+        return std.mem.readIntLittle(u32, data[4..8]);
     }
 
     pub inline fn getSize(fde: Fde) u64 {
@@ -84,7 +91,7 @@ pub const Fde = struct {
         const fde = ctx.fde;
         try writer.print("@{x} : size({x}) : cie({d}) : {s}", .{
             fde.offset,
-            fde.size,
+            fde.getSize(),
             fde.cie_index,
             fde.getAtom(ctx.elf_file).getName(ctx.elf_file),
         });
@@ -92,6 +99,7 @@ pub const Fde = struct {
 };
 
 pub const Cie = struct {
+    /// Includes 4byte size cell.
     offset: u64,
     size: u64,
     rel_index: u32 = 0,
@@ -99,16 +107,22 @@ pub const Cie = struct {
     rel_shndx: u32 = 0,
     shndx: u32 = 0,
     file: u32 = 0,
+    /// Includes 4byte size cell.
     out_offset: u64 = 0,
 
     pub inline fn getObject(cie: Cie, elf_file: *Elf) *Object {
         return elf_file.getFile(cie.file).?.object;
     }
 
+    pub inline fn getAddress(cie: Cie, elf_file: *Elf) u64 {
+        const shdr = elf_file.sections.items(.shdr)[elf_file.eh_frame_sect_index.?];
+        return shdr.sh_addr + cie.out_offset;
+    }
+
     pub fn getData(cie: Cie, elf_file: *Elf) []const u8 {
         const object = cie.getObject(elf_file);
         const data = object.getShdrContents(cie.shndx);
-        return data[cie.offset..][0..cie.size];
+        return data[cie.offset..][0..cie.getSize()];
     }
 
     pub inline fn getSize(cie: Cie) u64 {
@@ -156,7 +170,7 @@ pub const Cie = struct {
         const cie = ctx.cie;
         try writer.print("@{x} : size({x})", .{
             cie.offset,
-            cie.size,
+            cie.getSize(),
         });
     }
 };
@@ -178,7 +192,6 @@ pub const Iterator = struct {
         const reader = stream.reader();
 
         var size = try reader.readIntLittle(u32);
-        it.pos += 4;
         if (size == 0xFFFFFFFF) @panic("TODO");
 
         const id = try reader.readIntLittle(u32);
@@ -187,7 +200,7 @@ pub const Iterator = struct {
             .offset = it.pos,
             .size = size,
         };
-        it.pos += size;
+        it.pos += size + 4;
 
         return record;
     }
@@ -212,7 +225,8 @@ pub fn calcEhFrameSize(elf_file: *Elf) usize {
             offset += fde.getSize();
         }
     }
-    return offset + 4;
+
+    return offset + 4; // NULL terminator
 }
 
 pub fn calcEhFrameHdrSize(elf_file: *Elf) usize {
@@ -226,19 +240,27 @@ pub fn calcEhFrameHdrSize(elf_file: *Elf) usize {
     return Elf.eh_frame_hdr_header_size + count * 8;
 }
 
-fn resolveReloc(
-    rel: elf.Elf64_Rela,
-    value: i64,
-    offset: i64,
-    elf_file: *Elf,
-    writer: anytype,
-) !void {
-    const shdr_addr = @intCast(i64, elf_file.sections.items(.shdr)[elf_file.eh_frame_sect_index.?].sh_addr);
+fn resolveReloc(rec: anytype, sym: *const Symbol, rel: elf.Elf64_Rela, elf_file: *Elf, data: []u8) !void {
+    const offset = rel.r_offset - rec.offset;
+    const P = @intCast(i64, rec.getAddress(elf_file) + offset);
+    const S = @intCast(i64, sym.getAddress(elf_file));
+    const A = rel.r_addend;
+
+    std.log.warn("  {s}: {x}: [{x} => {x}] A({x}) ({s})", .{
+        Atom.fmtRelocType(rel.r_type()),
+        offset,
+        P,
+        S,
+        A,
+        sym.getName(elf_file),
+    });
+
+    var where = data[offset..];
     switch (rel.r_type()) {
-        elf.R_X86_64_32 => try writer.writeIntLittle(i32, @truncate(i32, value)),
-        elf.R_X86_64_64 => try writer.writeIntLittle(i64, value),
-        elf.R_X86_64_PC32 => try writer.writeIntLittle(i32, @intCast(i32, value - shdr_addr - offset)),
-        elf.R_X86_64_PC64 => try writer.writeIntLittle(i64, value - shdr_addr - offset),
+        elf.R_X86_64_32 => std.mem.writeIntLittle(i32, where[0..4], @truncate(i32, S)),
+        elf.R_X86_64_64 => std.mem.writeIntLittle(i64, where[0..8], S),
+        elf.R_X86_64_PC32 => std.mem.writeIntLittle(i32, where[0..4], @intCast(i32, S - P + A)),
+        elf.R_X86_64_PC64 => std.mem.writeIntLittle(i64, where[0..8], S - P + A),
         else => unreachable,
     }
 }
@@ -252,17 +274,11 @@ pub fn writeEhFrame(elf_file: *Elf, writer: anytype) !void {
             const data = try gpa.dupe(u8, cie.getData(elf_file));
             defer gpa.free(data);
 
-            var stream = std.io.fixedBufferStream(data);
-
             for (cie.getRelocs(elf_file)) |rel| {
                 const sym = object.getSymbol(rel.r_sym(), elf_file);
-                const value = @intCast(i64, sym.value) + rel.r_addend;
-                const offset = @intCast(i64, cie.out_offset + rel.r_offset - cie.offset);
-                try stream.seekTo(rel.r_offset - cie.offset);
-                try resolveReloc(rel, value, offset, elf_file, stream.writer());
+                try resolveReloc(cie, sym, rel, elf_file, data);
             }
 
-            try writer.writeIntLittle(u32, @intCast(u32, cie.size));
             try writer.writeAll(data);
         }
     }
@@ -276,21 +292,17 @@ pub fn writeEhFrame(elf_file: *Elf, writer: anytype) !void {
             const data = try gpa.dupe(u8, fde.getData(elf_file));
             defer gpa.free(data);
 
-            var stream = std.io.fixedBufferStream(data);
-            try stream.writer().writeIntLittle(
+            std.mem.writeIntLittle(
                 i32,
+                data[4..8],
                 @truncate(i32, @intCast(i64, fde.out_offset + 4) - @intCast(i64, fde.getCie(elf_file).out_offset)),
             );
 
             for (fde.getRelocs(elf_file)) |rel| {
                 const sym = object.getSymbol(rel.r_sym(), elf_file);
-                const value = @intCast(i64, sym.getAddress(elf_file)) + rel.r_addend;
-                const offset = @intCast(i64, fde.out_offset + rel.r_offset - fde.offset);
-                try stream.seekTo(rel.r_offset - fde.offset);
-                try resolveReloc(rel, value, offset, elf_file, stream.writer());
+                try resolveReloc(fde, sym, rel, elf_file, data);
             }
 
-            try writer.writeIntLittle(u32, @intCast(u32, fde.size));
             try writer.writeAll(data);
         }
     }
@@ -311,7 +323,7 @@ pub fn writeEhFrameHdr(elf_file: *Elf, writer: anytype) !void {
         u32,
         @bitCast(u32, @truncate(
             i32,
-            @intCast(i64, eh_frame_shdr.sh_addr) - @intCast(i64, eh_frame_hdr_shdr.sh_addr) + 4,
+            @intCast(i64, eh_frame_shdr.sh_addr) - @intCast(i64, eh_frame_hdr_shdr.sh_addr) - 4,
         )),
     );
     try writer.writeIntLittle(u32, num_fdes);
@@ -339,15 +351,15 @@ pub fn writeEhFrameHdr(elf_file: *Elf, writer: anytype) !void {
             assert(relocs.len > 0); // Should this be an error? Things are completely broken anyhow if this trips...
             const rel = relocs[0];
             const sym = object.getSymbol(rel.r_sym(), elf_file);
-            const value = @intCast(i64, sym.getAddress(elf_file)) + rel.r_addend;
+            const offset = rel.r_offset - fde.offset;
+            const P = @intCast(i64, fde.getAddress(elf_file) + offset);
+            const S = @intCast(i64, sym.getAddress(elf_file));
+            const A = rel.r_addend;
             entries.appendAssumeCapacity(.{
-                .init_addr = @bitCast(u32, @truncate(i32, value - @intCast(i64, eh_frame_hdr_shdr.sh_addr))),
+                .init_addr = @bitCast(u32, @truncate(i32, S + A - @intCast(i64, eh_frame_hdr_shdr.sh_addr))),
                 .fde_addr = @bitCast(
                     u32,
-                    @truncate(
-                        i32,
-                        @intCast(i64, eh_frame_shdr.sh_addr + fde.out_offset) - @intCast(i64, eh_frame_hdr_shdr.sh_addr),
-                    ),
+                    @truncate(i32, P - @intCast(i64, eh_frame_hdr_shdr.sh_addr)),
                 ),
             });
         }
@@ -383,3 +395,4 @@ const Allocator = std.mem.Allocator;
 const Atom = @import("Atom.zig");
 const Elf = @import("../Elf.zig");
 const Object = @import("Object.zig");
+const Symbol = @import("Symbol.zig");
