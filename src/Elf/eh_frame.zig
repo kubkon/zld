@@ -267,6 +267,11 @@ fn resolveReloc(rec: anytype, sym: *const Symbol, rel: elf.Elf64_Rela, elf_file:
 
 pub fn writeEhFrame(elf_file: *Elf, writer: anytype) !void {
     const gpa = elf_file.base.allocator;
+
+    relocs_log.debug("{x}: .eh_frame", .{
+        elf_file.sections.items(.shdr)[elf_file.eh_frame_sect_index.?].sh_addr,
+    });
+
     for (elf_file.objects.items) |index| {
         const object = elf_file.getFile(index).?.object;
 
