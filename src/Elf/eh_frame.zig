@@ -246,7 +246,7 @@ fn resolveReloc(rec: anytype, sym: *const Symbol, rel: elf.Elf64_Rela, elf_file:
     const S = @intCast(i64, sym.getAddress(elf_file));
     const A = rel.r_addend;
 
-    std.log.warn("  {s}: {x}: [{x} => {x}] A({x}) ({s})", .{
+    relocs_log.debug("  {s}: {x}: [{x} => {x}] A({x}) ({s})", .{
         Atom.fmtRelocType(rel.r_type()),
         offset,
         P,
@@ -391,6 +391,8 @@ const EH_PE = struct {
 const std = @import("std");
 const assert = std.debug.assert;
 const elf = std.elf;
+const relocs_log = std.log.scoped(.relocs);
+
 const Allocator = std.mem.Allocator;
 const Atom = @import("Atom.zig");
 const Elf = @import("../Elf.zig");
