@@ -640,7 +640,7 @@ fn calcSectionSizes(self: *Elf) !void {
 
     if (self.eh_frame_sect_index) |index| {
         const shdr = &self.sections.items(.shdr)[index];
-        shdr.sh_size = eh_frame.calcEhFrameSize(self);
+        shdr.sh_size = try eh_frame.calcEhFrameSize(self);
         shdr.sh_addralign = @alignOf(u64);
     }
 
@@ -1931,7 +1931,7 @@ fn writeSyntheticSections(self: *Elf) !void {
 
     if (self.eh_frame_sect_index) |shndx| {
         const shdr = self.sections.items(.shdr)[shndx];
-        var buffer = try std.ArrayList(u8).initCapacity(gpa, eh_frame.calcEhFrameSize(self));
+        var buffer = try std.ArrayList(u8).initCapacity(gpa, shdr.sh_size);
         defer buffer.deinit();
         try eh_frame.writeEhFrame(self, buffer.writer());
         try self.base.file.pwriteAll(buffer.items, shdr.sh_offset);
@@ -1939,7 +1939,7 @@ fn writeSyntheticSections(self: *Elf) !void {
 
     if (self.eh_frame_hdr_sect_index) |shndx| {
         const shdr = self.sections.items(.shdr)[shndx];
-        var buffer = try std.ArrayList(u8).initCapacity(gpa, eh_frame.calcEhFrameHdrSize(self));
+        var buffer = try std.ArrayList(u8).initCapacity(gpa, shdr.sh_size);
         defer buffer.deinit();
         try eh_frame.writeEhFrameHdr(self, buffer.writer());
         try self.base.file.pwriteAll(buffer.items, shdr.sh_offset);

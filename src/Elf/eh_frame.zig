@@ -95,6 +95,7 @@ pub const Fde = struct {
             fde.cie_index,
             fde.getAtom(ctx.elf_file).getName(ctx.elf_file),
         });
+        if (!fde.alive) try writer.writeAll(" : [*]");
     }
 };
 
@@ -109,6 +110,7 @@ pub const Cie = struct {
     file: u32 = 0,
     /// Includes 4byte size cell.
     out_offset: u64 = 0,
+    alive: bool = true,
 
     pub inline fn getObject(cie: Cie, elf_file: *Elf) *Object {
         return elf_file.getFile(cie.file).?.object;
@@ -132,6 +134,25 @@ pub const Cie = struct {
     pub fn getRelocs(cie: Cie, elf_file: *Elf) []align(1) const elf.Elf64_Rela {
         const object = cie.getObject(elf_file);
         return object.getRelocs(cie.rel_shndx)[cie.rel_index..][0..cie.rel_num];
+    }
+
+    pub fn eql(cie: Cie, other: Cie, elf_file: *Elf) bool {
+        if (!std.mem.eql(u8, cie.getData(elf_file), other.getData(elf_file))) return false;
+
+        const cie_relocs = cie.getRelocs(elf_file);
+        const other_relocs = other.getRelocs(elf_file);
+        if (cie_relocs.len != other_relocs.len) return false;
+
+        for (cie_relocs, other_relocs) |cie_rel, other_rel| {
+            if (cie_rel.r_offset - cie.offset != other_rel.r_offset - other.offset) return false;
+            if (cie_rel.r_type() != other_rel.r_type()) return false;
+            if (cie_rel.r_addend != other_rel.r_addend) return false;
+
+            const cie_sym = cie.getObject(elf_file).getSymbol(cie_rel.r_sym(), elf_file);
+            const other_sym = other.getObject(elf_file).getSymbol(other_rel.r_sym(), elf_file);
+            if (!std.mem.eql(u8, std.mem.asBytes(&cie_sym), std.mem.asBytes(&other_sym))) return false;
+        }
+        return true;
     }
 
     pub fn format(
@@ -172,6 +193,7 @@ pub const Cie = struct {
             cie.offset,
             cie.getSize(),
         });
+        if (!cie.alive) try writer.writeAll(" : [*]");
     }
 };
 
@@ -206,14 +228,28 @@ pub const Iterator = struct {
     }
 };
 
-pub fn calcEhFrameSize(elf_file: *Elf) usize {
+pub fn calcEhFrameSize(elf_file: *Elf) !usize {
     var offset: u64 = 0;
+
+    var cies = std.ArrayList(Cie).init(elf_file.base.allocator);
+    defer cies.deinit();
+
     for (elf_file.objects.items) |index| {
         const object = elf_file.getFile(index).?.object;
-        // TODO dedup CIE records among object files
-        for (object.cies.items) |*cie| {
+
+        outer: for (object.cies.items) |*cie| {
+            for (cies.items) |other| if (other.eql(cie.*, elf_file)) {
+                // We already have a CIE record that has the exact same contents, so instead of
+                // duplicating them, we mark this one dead and set its output offset to be
+                // equal to that of the alive record. This way, we won't have to rewrite
+                // Fde.cie_index field when committing the records to file.
+                cie.alive = false;
+                cie.out_offset = other.out_offset;
+                continue :outer;
+            };
             cie.out_offset = offset;
             offset += cie.getSize();
+            try cies.append(cie.*);
         }
     }
 
@@ -276,6 +312,8 @@ pub fn writeEhFrame(elf_file: *Elf, writer: anytype) !void {
         const object = elf_file.getFile(index).?.object;
 
         for (object.cies.items) |cie| {
+            if (!cie.alive) continue;
+
             const data = try gpa.dupe(u8, cie.getData(elf_file));
             defer gpa.free(data);
 
