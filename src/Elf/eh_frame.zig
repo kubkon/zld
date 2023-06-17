@@ -110,7 +110,7 @@ pub const Cie = struct {
     file: u32 = 0,
     /// Includes 4byte size cell.
     out_offset: u64 = 0,
-    alive: bool = true,
+    alive: bool = false,
 
     pub inline fn getObject(cie: Cie, elf_file: *Elf) *Object {
         return elf_file.getFile(cie.file).?.object;
@@ -238,15 +238,17 @@ pub fn calcEhFrameSize(elf_file: *Elf) !usize {
         const object = elf_file.getFile(index).?.object;
 
         outer: for (object.cies.items) |*cie| {
-            for (cies.items) |other| if (other.eql(cie.*, elf_file)) {
-                // We already have a CIE record that has the exact same contents, so instead of
-                // duplicating them, we mark this one dead and set its output offset to be
-                // equal to that of the alive record. This way, we won't have to rewrite
-                // Fde.cie_index field when committing the records to file.
-                cie.alive = false;
-                cie.out_offset = other.out_offset;
-                continue :outer;
-            };
+            for (cies.items) |other| {
+                if (other.eql(cie.*, elf_file)) {
+                    // We already have a CIE record that has the exact same contents, so instead of
+                    // duplicating them, we mark this one dead and set its output offset to be
+                    // equal to that of the alive record. This way, we won't have to rewrite
+                    // Fde.cie_index field when committing the records to file.
+                    cie.out_offset = other.out_offset;
+                    continue :outer;
+                }
+            }
+            cie.alive = true;
             cie.out_offset = offset;
             offset += cie.getSize();
             try cies.append(cie.*);
