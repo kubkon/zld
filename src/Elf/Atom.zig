@@ -99,6 +99,12 @@ pub fn getFdes(self: Atom, elf_file: *Elf) []Fde {
     return object.fdes.items[self.fde_start..self.fde_end];
 }
 
+pub fn markFdesDead(self: Atom, elf_file: *Elf) void {
+    for (self.getFdes(elf_file)) |*fde| {
+        fde.alive = false;
+    }
+}
+
 pub fn initOutputSection(self: *Atom, elf_file: *Elf) !void {
     const shdr = self.getInputShdr(elf_file);
     const name = self.getName(elf_file);

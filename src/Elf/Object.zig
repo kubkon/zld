@@ -254,7 +254,7 @@ fn parseEhFrame(self: *Object, shndx: u16, elf_file: *Elf) !void {
         elf.SHT_RELA => if (shdr.sh_info == shndx) break @intCast(u16, i),
         else => {},
     } else {
-        elf_file.base.fatal("{s}: missing reloc section for unwind info section", .{self.fmtPath()});
+        log.debug("{s}: missing reloc section for unwind info section", .{self.fmtPath()});
         return;
     };
 

@@ -1586,7 +1586,10 @@ fn resolveSymbols(self: *Elf) !void {
             if (cg_owner.file != index) {
                 for (object.getComdatGroupMembers(cg.shndx)) |shndx| {
                     const atom_index = object.atoms.items[shndx];
-                    if (self.getAtom(atom_index)) |atom| atom.alive = false;
+                    if (self.getAtom(atom_index)) |atom| {
+                        atom.alive = false;
+                        atom.markFdesDead(self);
+                    }
                 }
             }
         }

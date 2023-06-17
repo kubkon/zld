@@ -119,7 +119,7 @@ fn prune(elf_file: *Elf) void {
             const atom = elf_file.getAtom(atom_index) orelse continue;
             if (atom.alive and !atom.visited) {
                 atom.alive = false;
-                for (atom.getFdes(elf_file)) |*fde| fde.alive = false;
+                atom.markFdesDead(elf_file);
             }
         }
     }
