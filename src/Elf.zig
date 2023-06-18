@@ -375,7 +375,7 @@ pub fn flush(self: *Elf) !void {
     self.shoff = blk: {
         const shdr = self.sections.items(.shdr)[self.sections.len - 1];
         const offset = shdr.sh_offset + shdr.sh_size;
-        break :blk mem.alignForwardGeneric(u64, offset, @alignOf(elf.Elf64_Shdr));
+        break :blk mem.alignForward(u64, offset, @alignOf(elf.Elf64_Shdr));
     };
 
     state_log.debug("{}", .{self.dumpState()});
@@ -631,7 +631,7 @@ fn calcSectionSizes(self: *Elf) !void {
         for (atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index).?;
             const alignment = try math.powi(u64, 2, atom.alignment);
-            const offset = mem.alignForwardGeneric(u64, shdr.sh_size, alignment);
+            const offset = mem.alignForward(u64, shdr.sh_size, alignment);
             const padding = offset - shdr.sh_size;
             atom.value = offset;
             shdr.sh_size += padding + atom.size;
@@ -1043,7 +1043,7 @@ fn allocateSectionsInMemory(self: *Elf, base_offset: u64) !void {
 
         inline fn @"align"(this: @This(), shndx: u16, sh_addralign: u64, addr: u64) u64 {
             const alignment = if (this.isFirstTlsShdr(shndx)) this.tls_start_align else sh_addralign;
-            return mem.alignForwardGeneric(u64, addr, alignment);
+            return mem.alignForward(u64, addr, alignment);
         }
     };
 
@@ -1084,7 +1084,7 @@ fn allocatesSectionsInFile(self: *Elf, base_offset: u64) void {
     var offset = base_offset;
     for (self.sections.items(.shdr)[1..]) |*shdr| {
         if (shdr.sh_type == elf.SHT_NOBITS) continue;
-        shdr.sh_offset = mem.alignForwardGeneric(u64, offset, shdr.sh_addralign);
+        shdr.sh_offset = mem.alignForward(u64, offset, shdr.sh_addralign);
         offset = shdr.sh_offset + shdr.sh_size;
     }
 }
@@ -2337,7 +2337,7 @@ pub inline fn getTlsLdAddress(self: *Elf) u64 {
 pub fn getTpAddress(self: *Elf) u64 {
     const index = self.tls_phdr_index orelse return 0;
     const phdr = self.phdrs.items[index];
-    return mem.alignForwardGeneric(u64, phdr.p_vaddr + phdr.p_memsz, phdr.p_align);
+    return mem.alignForward(u64, phdr.p_vaddr + phdr.p_memsz, phdr.p_align);
 }
 
 pub fn getDtpAddress(self: *Elf) u64 {

@@ -1470,7 +1470,7 @@ fn setupMemory(wasm: *Wasm) !void {
     } else 0;
 
     if (place_stack_first) {
-        memory_ptr = std.mem.alignForwardGeneric(u64, memory_ptr, stack_alignment);
+        memory_ptr = std.mem.alignForward(u64, memory_ptr, stack_alignment);
         memory_ptr += stack_size;
         // We always put the stack pointer global at index 0
         wasm.globals.items.items[0].init.i32_const = @bitCast(i32, @intCast(u32, memory_ptr));
@@ -1480,7 +1480,7 @@ fn setupMemory(wasm: *Wasm) !void {
     var seg_it = wasm.data_segments.iterator();
     while (seg_it.next()) |entry| {
         const segment: *Segment = &wasm.segments.items[entry.value_ptr.*];
-        memory_ptr = std.mem.alignForwardGeneric(u64, memory_ptr, segment.alignment);
+        memory_ptr = std.mem.alignForward(u64, memory_ptr, segment.alignment);
 
         // set TLS-related symbols
         if (mem.eql(u8, entry.key_ptr.*, ".tdata")) {
@@ -1516,20 +1516,20 @@ fn setupMemory(wasm: *Wasm) !void {
     // create the memory init flag which is used by the init memory function
     if (wasm.options.shared_memory and wasm.hasPassiveInitializationSegments()) {
         // align to pointer size
-        memory_ptr = mem.alignForwardGeneric(u64, memory_ptr, 4);
+        memory_ptr = mem.alignForward(u64, memory_ptr, 4);
         const loc = try wasm.createSyntheticSymbol("__wasm_init_memory_flag", .data);
         loc.getSymbol(wasm).virtual_address = @intCast(u32, memory_ptr);
         memory_ptr += 4;
     }
 
     if (!place_stack_first) {
-        memory_ptr = std.mem.alignForwardGeneric(u64, memory_ptr, stack_alignment);
+        memory_ptr = std.mem.alignForward(u64, memory_ptr, stack_alignment);
         memory_ptr += stack_size;
         wasm.globals.items.items[0].init.i32_const = @bitCast(i32, @intCast(u32, memory_ptr));
     }
 
     if (wasm.findGlobalSymbol("__heap_base")) |loc| {
-        loc.getSymbol(wasm).virtual_address = @intCast(u32, mem.alignForwardGeneric(u64, memory_ptr, heap_alignment));
+        loc.getSymbol(wasm).virtual_address = @intCast(u32, mem.alignForward(u64, memory_ptr, heap_alignment));
     }
 
     // Setup the max amount of pages
@@ -1552,7 +1552,7 @@ fn setupMemory(wasm: *Wasm) !void {
         memory_ptr = initial_memory;
     }
 
-    memory_ptr = std.mem.alignForwardGeneric(u64, memory_ptr, page_size);
+    memory_ptr = std.mem.alignForward(u64, memory_ptr, page_size);
 
     // In case we do not import memory, but define it ourselves,
     // set the minimum amount of pages on the memory section.
@@ -1776,12 +1776,12 @@ fn allocateAtoms(wasm: *Wasm) !void {
                     }
                 }
             }
-            offset = std.mem.alignForwardGeneric(u32, offset, atom.alignment);
+            offset = std.mem.alignForward(u32, offset, atom.alignment);
             atom.offset = offset;
             offset += atom.size;
             atom = atom.next orelse break;
         }
-        segment.size = std.mem.alignForwardGeneric(u32, offset, segment.alignment);
+        segment.size = std.mem.alignForward(u32, offset, segment.alignment);
     }
 }
 

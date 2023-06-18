@@ -934,7 +934,7 @@ pub const CopyRelSection = struct {
             const symbol = elf_file.getSymbol(sym_index);
             const shared = symbol.getFile(elf_file).?.shared;
             const alignment = try symbol.getAlignment(elf_file);
-            symbol.value = mem.alignForwardGeneric(u64, shdr.sh_size, alignment);
+            symbol.value = mem.alignForward(u64, shdr.sh_size, alignment);
             shdr.sh_addralign = @max(shdr.sh_addralign, alignment);
             shdr.sh_size = symbol.value + symbol.getSourceSymbol(elf_file).st_size;
 

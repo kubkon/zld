@@ -134,8 +134,8 @@ const usage =
 emit: Zld.Emit,
 output_mode: Zld.OutputMode,
 target: CrossTarget,
-platform_version: std.builtin.Version,
-sdk_version: std.builtin.Version,
+platform_version: std.SemanticVersion,
+sdk_version: std.SemanticVersion,
 positionals: []const Zld.LinkObject,
 libs: std.StringArrayHashMap(Zld.SystemLib),
 frameworks: std.StringArrayHashMap(Zld.SystemLib),
@@ -148,8 +148,8 @@ stack_size: ?u64 = null,
 strip: bool = false,
 entry: ?[]const u8 = null,
 force_undefined_symbols: std.StringArrayHashMap(void),
-current_version: ?std.builtin.Version = null,
-compatibility_version: ?std.builtin.Version = null,
+current_version: ?std.SemanticVersion = null,
+compatibility_version: ?std.SemanticVersion = null,
 install_name: ?[]const u8 = null,
 entitlements: ?[]const u8 = null,
 pagezero_size: ?u64 = null,
@@ -177,8 +177,8 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
     var dynamic: bool = false;
     var dylib: bool = false;
     var install_name: ?[]const u8 = null;
-    var current_version: ?std.builtin.Version = null;
-    var compatibility_version: ?std.builtin.Version = null;
+    var current_version: ?std.SemanticVersion = null;
+    var compatibility_version: ?std.SemanticVersion = null;
     var headerpad: ?u32 = null;
     var headerpad_max_install_names: bool = false;
     var pagezero_size: ?u64 = null;
@@ -194,11 +194,11 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         CrossTarget.fromTarget(builtin.target)
     else
         null;
-    var platform_version: ?std.builtin.Version = if (comptime builtin.target.isDarwin())
+    var platform_version: ?std.SemanticVersion = if (comptime builtin.target.isDarwin())
         builtin.target.os.version_range.semver.min
     else
         null;
-    var sdk_version: ?std.builtin.Version = if (comptime builtin.target.isDarwin())
+    var sdk_version: ?std.SemanticVersion = if (comptime builtin.target.isDarwin())
         builtin.target.os.version_range.semver.min
     else
         null;
@@ -247,11 +247,11 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             try rpath_list.append(it.nextOrFatal(ctx));
         } else if (mem.eql(u8, arg, "-compatibility_version")) {
             const raw = it.nextOrFatal(ctx);
-            compatibility_version = std.builtin.Version.parse(raw) catch
+            compatibility_version = std.SemanticVersion.parse(raw) catch
                 ctx.fatal("Unable to parse version from '{s}'", .{raw});
         } else if (mem.eql(u8, arg, "-current_version")) {
             const raw = it.nextOrFatal(ctx);
-            current_version = std.builtin.Version.parse(raw) catch
+            current_version = std.SemanticVersion.parse(raw) catch
                 ctx.fatal("Unable to parse version from '{s}'", .{raw});
         } else if (mem.eql(u8, arg, "-install_name")) {
             install_name = it.nextOrFatal(ctx);
@@ -377,9 +377,9 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
                 tt.abi = tmp_target.abi;
             }
 
-            platform_version = std.builtin.Version.parse(min_v) catch
+            platform_version = std.SemanticVersion.parse(min_v) catch
                 ctx.fatal("Unable to parse version from '{s}'", .{min_v});
-            sdk_version = std.builtin.Version.parse(sdk_v) catch
+            sdk_version = std.SemanticVersion.parse(sdk_v) catch
                 ctx.fatal("Unable to parse version from '{s}'", .{sdk_v});
         } else if (mem.eql(u8, arg, "-undefined")) {
             const treatment = it.nextOrFatal(ctx);

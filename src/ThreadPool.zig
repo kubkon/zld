@@ -30,7 +30,7 @@ pub fn init(pool: *ThreadPool, allocator: std.mem.Allocator) !void {
         return;
     }
 
-    const thread_count = std.math.max(1, std.Thread.getCpuCount() catch 1);
+    const thread_count = @max(1, std.Thread.getCpuCount() catch 1);
     pool.threads = try allocator.alloc(std.Thread, thread_count);
     errdefer allocator.free(pool.threads);
 

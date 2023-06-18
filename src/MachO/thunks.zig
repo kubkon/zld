@@ -101,7 +101,7 @@ pub fn createThunks(macho_file: *MachO, sect_id: u8) !void {
 
         while (true) {
             const atom = macho_file.getAtom(group_end);
-            offset = mem.alignForwardGeneric(u64, offset, try math.powi(u32, 2, atom.alignment));
+            offset = mem.alignForward(u64, offset, try math.powi(u32, 2, atom.alignment));
 
             const sym = macho_file.getSymbolPtr(atom.getSymbolWithLoc());
             sym.n_value = offset;
@@ -144,7 +144,7 @@ pub fn createThunks(macho_file: *MachO, sect_id: u8) !void {
             } else break;
         }
 
-        offset = mem.alignForwardGeneric(u64, offset, Thunk.getAlignment());
+        offset = mem.alignForward(u64, offset, Thunk.getAlignment());
         allocateThunk(macho_file, thunk_index, offset, header);
         offset += macho_file.thunks.items[thunk_index].getSize();
 
@@ -184,7 +184,7 @@ fn allocateThunk(
     var offset = base_offset;
     while (true) {
         const atom = macho_file.getAtom(atom_index);
-        offset = mem.alignForwardGeneric(u64, offset, Thunk.getAlignment());
+        offset = mem.alignForward(u64, offset, Thunk.getAlignment());
 
         const sym = macho_file.getSymbolPtr(atom.getSymbolWithLoc());
         sym.n_value = offset;
