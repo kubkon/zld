@@ -288,19 +288,18 @@ fn resolveReloc(rec: anytype, sym: *const Symbol, rel: elf.Elf64_Rela, elf_file:
     const S = @intCast(i64, sym.getAddress(elf_file));
     const A = rel.r_addend;
 
-    relocs_log.debug("  {s}: {x}: [{x} => {x}] A({x}) ({s})", .{
+    relocs_log.debug("  {s}: {x}: [{x} => {x}] ({s})", .{
         Atom.fmtRelocType(rel.r_type()),
         offset,
         P,
-        S,
-        A,
+        S + A,
         sym.getName(elf_file),
     });
 
     var where = data[offset..];
     switch (rel.r_type()) {
-        elf.R_X86_64_32 => std.mem.writeIntLittle(i32, where[0..4], @truncate(i32, S)),
-        elf.R_X86_64_64 => std.mem.writeIntLittle(i64, where[0..8], S),
+        elf.R_X86_64_32 => std.mem.writeIntLittle(i32, where[0..4], @truncate(i32, S + A)),
+        elf.R_X86_64_64 => std.mem.writeIntLittle(i64, where[0..8], S + A),
         elf.R_X86_64_PC32 => std.mem.writeIntLittle(i32, where[0..4], @intCast(i32, S - P + A)),
         elf.R_X86_64_PC64 => std.mem.writeIntLittle(i64, where[0..8], S - P + A),
         else => unreachable,
@@ -400,8 +399,7 @@ pub fn writeEhFrameHdr(elf_file: *Elf, writer: anytype) !void {
             assert(relocs.len > 0); // Should this be an error? Things are completely broken anyhow if this trips...
             const rel = relocs[0];
             const sym = object.getSymbol(rel.r_sym(), elf_file);
-            const offset = rel.r_offset - fde.offset;
-            const P = @intCast(i64, fde.getAddress(elf_file) + offset);
+            const P = @intCast(i64, fde.getAddress(elf_file));
             const S = @intCast(i64, sym.getAddress(elf_file));
             const A = rel.r_addend;
             entries.appendAssumeCapacity(.{
