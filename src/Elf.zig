@@ -43,6 +43,7 @@ fini_array_end_index: ?u32 = null,
 got_index: ?u32 = null,
 plt_index: ?u32 = null,
 dso_handle_index: ?u32 = null,
+gnu_eh_frame_hdr_index: ?u32 = null,
 
 entry_index: ?u32 = null,
 
@@ -1355,6 +1356,14 @@ fn allocateSyntheticSymbols(self: *Elf) void {
         symbol.value = shdr.sh_addr;
         symbol.shndx = 0;
     }
+
+    // __GNU_EH_FRAME_HDR
+    if (self.eh_frame_hdr_sect_index) |shndx| {
+        const shdr = self.sections.items(.shdr)[shndx];
+        const symbol = self.getSymbol(self.gnu_eh_frame_hdr_index.?);
+        symbol.value = shdr.sh_addr;
+        symbol.shndx = shndx;
+    }
 }
 
 fn unpackPositionals(self: *Elf, positionals: *std.ArrayList(LinkObject)) !void {
@@ -1673,6 +1682,10 @@ fn resolveSyntheticSymbols(self: *Elf) !void {
     self.fini_array_end_index = try internal.addSyntheticGlobal("__fini_array_end", self);
     self.got_index = try internal.addSyntheticGlobal("_GLOBAL_OFFSET_TABLE_", self);
     self.plt_index = try internal.addSyntheticGlobal("_PROCEDURE_LINKAGE_TABLE_", self);
+
+    if (self.options.eh_frame_hdr) {
+        self.gnu_eh_frame_hdr_index = try internal.addSyntheticGlobal("__GNU_EH_FRAME_HDR", self);
+    }
 
     if (self.getGlobalByName("__dso_handle")) |index| {
         if (self.getSymbol(index).getFile(self) == null)
