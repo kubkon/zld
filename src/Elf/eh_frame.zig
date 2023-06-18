@@ -89,11 +89,13 @@ pub const Fde = struct {
         _ = unused_fmt_string;
         _ = options;
         const fde = ctx.fde;
+        const elf_file = ctx.elf_file;
+        const base_addr = elf_file.sections.items(.shdr)[elf_file.eh_frame_sect_index.?].sh_addr;
         try writer.print("@{x} : size({x}) : cie({d}) : {s}", .{
-            fde.offset,
+            base_addr + fde.out_offset,
             fde.getSize(),
             fde.cie_index,
-            fde.getAtom(ctx.elf_file).getName(ctx.elf_file),
+            fde.getAtom(elf_file).getName(elf_file),
         });
         if (!fde.alive) try writer.writeAll(" : [*]");
     }
@@ -189,8 +191,10 @@ pub const Cie = struct {
         _ = unused_fmt_string;
         _ = options;
         const cie = ctx.cie;
+        const elf_file = ctx.elf_file;
+        const base_addr = elf_file.sections.items(.shdr)[elf_file.eh_frame_sect_index.?].sh_addr;
         try writer.print("@{x} : size({x})", .{
-            cie.offset,
+            base_addr + cie.out_offset,
             cie.getSize(),
         });
         if (!cie.alive) try writer.writeAll(" : [*]");
