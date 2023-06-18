@@ -478,13 +478,12 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
         // Address of the dynamic thread pointer.
         const DTP = @intCast(i64, elf_file.getDtpAddress());
 
-        relocs_log.debug("  {s}: {x}: [{x} => {x}] G({x}) A({x}) ({s})", .{
+        relocs_log.debug("  {s}: {x}: [{x} => {x}] G({x}) ({s})", .{
             fmtRelocType(r_type),
             rel.r_offset,
             P,
-            S,
-            G + GOT,
-            A,
+            S + A,
+            G + GOT + A,
             target.getName(elf_file),
         });
 
@@ -691,12 +690,11 @@ pub fn resolveRelocsNonAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void 
         // Address of the dynamic thread pointer.
         const DTP = @intCast(i64, elf_file.getDtpAddress());
 
-        relocs_log.debug("  {s}: {x}: [{x} => {x}] A({x}) ({s})", .{
+        relocs_log.debug("  {s}: {x}: [{x} => {x}] ({s})", .{
             fmtRelocType(r_type),
             rel.r_offset,
             P,
-            S,
-            A,
+            S + A,
             target.getName(elf_file),
         });
 
