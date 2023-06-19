@@ -21,9 +21,10 @@ pub fn calcUuid(
     out: *[Md5.digest_length]u8,
 ) !void {
     const num_chunks = thread_pool.threads.len * 0x10;
-    const chunk_size = @divTrunc(file_size + num_chunks - 1, num_chunks);
+    const chunk_size = @divTrunc(file_size, num_chunks);
+    const actual_num_chunks = if (@rem(file_size, num_chunks) > 0) num_chunks + 1 else num_chunks;
 
-    const hashes = try allocator.alloc([Md5.digest_length]u8, num_chunks);
+    const hashes = try allocator.alloc([Md5.digest_length]u8, actual_num_chunks);
     defer allocator.free(hashes);
 
     var hasher = Hasher(Md5){ .allocator = allocator, .thread_pool = thread_pool };
@@ -32,7 +33,7 @@ pub fn calcUuid(
         .max_file_size = file_size,
     });
 
-    const final_buffer = try allocator.alloc(u8, num_chunks * Md5.digest_length);
+    const final_buffer = try allocator.alloc(u8, actual_num_chunks * Md5.digest_length);
     defer allocator.free(final_buffer);
 
     for (hashes, 0..) |hash, i| {

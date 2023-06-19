@@ -34,7 +34,10 @@ pub fn ParallelHasher(comptime Hasher: type) type {
 
                 for (out, results, 0..) |*out_buf, *result, i| {
                     const fstart = i * opts.chunk_size;
-                    const fsize = if (fstart + opts.chunk_size > file_size) file_size - fstart else opts.chunk_size;
+                    const fsize = if (fstart + opts.chunk_size > file_size)
+                        file_size - fstart
+                    else
+                        opts.chunk_size;
                     wg.start();
                     try self.thread_pool.spawn(worker, .{
                         file,
