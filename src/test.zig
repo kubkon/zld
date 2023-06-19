@@ -11,7 +11,7 @@ const ChildProcess = std.ChildProcess;
 const Target = std.Target;
 const CrossTarget = std.zig.CrossTarget;
 const tmpDir = testing.tmpDir;
-const ThreadPool = @import("ThreadPool.zig");
+const ThreadPool = std.Thread.Pool;
 const Zld = @import("Zld.zig");
 
 const gpa = testing.allocator;
@@ -327,7 +327,7 @@ pub const TestContext = struct {
             };
 
             var thread_pool: ThreadPool = undefined;
-            try thread_pool.init(gpa);
+            try thread_pool.init(.{ .allocator = gpa });
             defer thread_pool.deinit();
 
             {

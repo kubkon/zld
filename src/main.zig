@@ -4,7 +4,7 @@ const build_options = @import("build_options");
 const mem = std.mem;
 
 const Allocator = mem.Allocator;
-const ThreadPool = @import("ThreadPool.zig");
+const ThreadPool = std.Thread.Pool;
 const Zld = @import("Zld.zig");
 
 const gpa = std.heap.c_allocator;
@@ -92,7 +92,7 @@ pub fn main() !void {
     });
 
     var thread_pool: ThreadPool = undefined;
-    try thread_pool.init(gpa);
+    try thread_pool.init(.{ .allocator = gpa });
     defer thread_pool.deinit();
 
     const zld = try Zld.openPath(gpa, tag, opts, &thread_pool);
