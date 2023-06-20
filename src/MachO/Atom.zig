@@ -289,9 +289,6 @@ fn scanAtomRelocsArm64(
             .sym_index = sym_index,
             .file = atom.file,
         };
-        const sym = macho_file.getSymbol(sym_loc);
-
-        if (sym.sect() and !sym.ext()) continue;
 
         const target = if (object.getGlobal(sym_index)) |global_index|
             macho_file.globals.items[global_index]
@@ -338,9 +335,6 @@ fn scanAtomRelocsX86(macho_file: *MachO, atom_index: AtomIndex, relocs: []align(
             .sym_index = sym_index,
             .file = atom.file,
         };
-        const sym = macho_file.getSymbol(sym_loc);
-
-        if (sym.sect() and !sym.ext()) continue;
 
         const target = if (object.getGlobal(sym_index)) |global_index|
             macho_file.globals.items[global_index]
