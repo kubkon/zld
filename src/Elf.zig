@@ -2574,6 +2574,6 @@ const PltGotSection = synthetic.PltGotSection;
 const SharedObject = @import("Elf/SharedObject.zig");
 const StringTable = @import("strtab.zig").StringTable;
 const Symbol = @import("Elf/Symbol.zig");
-const ThreadPool = @import("ThreadPool.zig");
+const ThreadPool = std.Thread.Pool;
 const VerneedSection = synthetic.VerneedSection;
 const Zld = @import("Zld.zig");

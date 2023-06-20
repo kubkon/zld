@@ -289,5 +289,5 @@ pub const Wasm = @import("Wasm.zig");
 const Allocator = mem.Allocator;
 const CrossTarget = std.zig.CrossTarget;
 const ErrorBundle = std.zig.ErrorBundle;
-const ThreadPool = @import("ThreadPool.zig");
+const ThreadPool = std.Thread.Pool;
 const Zld = @This();

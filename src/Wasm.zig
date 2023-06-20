@@ -10,7 +10,7 @@ const Symbol = @import("Wasm/Symbol.zig");
 const sections = @import("Wasm/sections.zig");
 const types = @import("Wasm/types.zig");
 pub const Options = @import("Wasm/Options.zig");
-const ThreadPool = @import("ThreadPool.zig");
+const ThreadPool = std.Thread.Pool;
 
 const leb = std.leb;
 const fs = std.fs;
