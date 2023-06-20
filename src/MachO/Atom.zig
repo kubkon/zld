@@ -208,7 +208,7 @@ pub fn parseRelocTarget(macho_file: *MachO, ctx: struct {
                 mem.readIntLittle(u32, ctx.code[rel_offset..][0..4]);
         } else blk: {
             assert(macho_file.options.target.cpu_arch.? == .x86_64);
-            const correction: u3 = switch (@intToEnum(macho.reloc_type_x86_64, ctx.rel.r_type)) {
+            const correction: u3 = switch (@enumFromInt(macho.reloc_type_x86_64, ctx.rel.r_type)) {
                 .X86_64_RELOC_SIGNED => 0,
                 .X86_64_RELOC_SIGNED_1 => 1,
                 .X86_64_RELOC_SIGNED_2 => 2,
@@ -273,7 +273,7 @@ fn scanAtomRelocsArm64(
     relocs: []align(1) const macho.relocation_info,
 ) !void {
     for (relocs) |rel| {
-        const rel_type = @intToEnum(macho.reloc_type_arm64, rel.r_type);
+        const rel_type = @enumFromInt(macho.reloc_type_arm64, rel.r_type);
 
         switch (rel_type) {
             .ARM64_RELOC_ADDEND, .ARM64_RELOC_SUBTRACTOR => continue,
@@ -319,7 +319,7 @@ fn scanAtomRelocsArm64(
 
 fn scanAtomRelocsX86(macho_file: *MachO, atom_index: AtomIndex, relocs: []align(1) const macho.relocation_info) !void {
     for (relocs) |rel| {
-        const rel_type = @intToEnum(macho.reloc_type_x86_64, rel.r_type);
+        const rel_type = @enumFromInt(macho.reloc_type_x86_64, rel.r_type);
 
         switch (rel_type) {
             .X86_64_RELOC_SUBTRACTOR => continue,
@@ -497,7 +497,7 @@ fn resolveRelocsArm64(
     var subtractor: ?SymbolWithLoc = null;
 
     for (atom_relocs) |rel| {
-        const rel_type = @intToEnum(macho.reloc_type_arm64, rel.r_type);
+        const rel_type = @enumFromInt(macho.reloc_type_arm64, rel.r_type);
 
         switch (rel_type) {
             .ARM64_RELOC_ADDEND => {
@@ -796,7 +796,7 @@ fn resolveRelocsX86(
     var subtractor: ?SymbolWithLoc = null;
 
     for (atom_relocs) |rel| {
-        const rel_type = @intToEnum(macho.reloc_type_x86_64, rel.r_type);
+        const rel_type = @enumFromInt(macho.reloc_type_x86_64, rel.r_type);
 
         switch (rel_type) {
             .X86_64_RELOC_SUBTRACTOR => {
@@ -1054,14 +1054,14 @@ pub fn calcPageOffset(target_addr: u64, kind: PageOffsetInstKind) !u12 {
 
 pub fn relocRequiresGot(macho_file: *MachO, rel: macho.relocation_info) bool {
     switch (macho_file.options.target.cpu_arch.?) {
-        .aarch64 => switch (@intToEnum(macho.reloc_type_arm64, rel.r_type)) {
+        .aarch64 => switch (@enumFromInt(macho.reloc_type_arm64, rel.r_type)) {
             .ARM64_RELOC_GOT_LOAD_PAGE21,
             .ARM64_RELOC_GOT_LOAD_PAGEOFF12,
             .ARM64_RELOC_POINTER_TO_GOT,
             => return true,
             else => return false,
         },
-        .x86_64 => switch (@intToEnum(macho.reloc_type_x86_64, rel.r_type)) {
+        .x86_64 => switch (@enumFromInt(macho.reloc_type_x86_64, rel.r_type)) {
             .X86_64_RELOC_GOT,
             .X86_64_RELOC_GOT_LOAD,
             => return true,

@@ -2530,12 +2530,12 @@ fn collectRebaseData(self: *MachO, rebase: *Rebase) !void {
                 for (relocs) |rel| {
                     switch (cpu_arch) {
                         .aarch64 => {
-                            const rel_type = @intToEnum(macho.reloc_type_arm64, rel.r_type);
+                            const rel_type = @enumFromInt(macho.reloc_type_arm64, rel.r_type);
                             if (rel_type != .ARM64_RELOC_UNSIGNED) continue;
                             if (rel.r_length != 3) continue;
                         },
                         .x86_64 => {
-                            const rel_type = @intToEnum(macho.reloc_type_x86_64, rel.r_type);
+                            const rel_type = @enumFromInt(macho.reloc_type_x86_64, rel.r_type);
                             if (rel_type != .X86_64_RELOC_UNSIGNED) continue;
                             if (rel.r_length != 3) continue;
                         },
@@ -2663,12 +2663,12 @@ fn collectBindData(self: *MachO, bind: *Bind) !void {
                 for (relocs) |rel| {
                     switch (cpu_arch) {
                         .aarch64 => {
-                            const rel_type = @intToEnum(macho.reloc_type_arm64, rel.r_type);
+                            const rel_type = @enumFromInt(macho.reloc_type_arm64, rel.r_type);
                             if (rel_type != .ARM64_RELOC_UNSIGNED) continue;
                             if (rel.r_length != 3) continue;
                         },
                         .x86_64 => {
-                            const rel_type = @intToEnum(macho.reloc_type_x86_64, rel.r_type);
+                            const rel_type = @enumFromInt(macho.reloc_type_x86_64, rel.r_type);
                             if (rel_type != .X86_64_RELOC_UNSIGNED) continue;
                             if (rel.r_length != 3) continue;
                         },

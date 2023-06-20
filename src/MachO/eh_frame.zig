@@ -289,7 +289,7 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
             for (relocs) |rel| {
                 switch (cpu_arch) {
                     .aarch64 => {
-                        const rel_type = @intToEnum(macho.reloc_type_arm64, rel.r_type);
+                        const rel_type = @enumFromInt(macho.reloc_type_arm64, rel.r_type);
                         switch (rel_type) {
                             .ARM64_RELOC_SUBTRACTOR,
                             .ARM64_RELOC_UNSIGNED,
@@ -299,7 +299,7 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
                         }
                     },
                     .x86_64 => {
-                        const rel_type = @intToEnum(macho.reloc_type_x86_64, rel.r_type);
+                        const rel_type = @enumFromInt(macho.reloc_type_x86_64, rel.r_type);
                         switch (rel_type) {
                             .X86_64_RELOC_GOT => {},
                             else => unreachable,
@@ -340,7 +340,7 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
 
                 switch (cpu_arch) {
                     .aarch64 => {
-                        const rel_type = @intToEnum(macho.reloc_type_arm64, rel.r_type);
+                        const rel_type = @enumFromInt(macho.reloc_type_arm64, rel.r_type);
                         switch (rel_type) {
                             .ARM64_RELOC_SUBTRACTOR => {
                                 // Address of the __eh_frame in the source object file
@@ -361,7 +361,7 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
                         }
                     },
                     .x86_64 => {
-                        const rel_type = @intToEnum(macho.reloc_type_x86_64, rel.r_type);
+                        const rel_type = @enumFromInt(macho.reloc_type_x86_64, rel.r_type);
                         switch (rel_type) {
                             .X86_64_RELOC_GOT => {
                                 const target_addr = try Atom.getRelocTargetAddress(macho_file, target, true, false);

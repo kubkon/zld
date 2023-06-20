@@ -292,7 +292,7 @@ pub fn writeBuildVersionLC(options: *const Options, lc_writer: anytype) !void {
         .ntools = 1,
     });
     try lc_writer.writeAll(mem.asBytes(&macho.build_tool_version{
-        .tool = @intToEnum(macho.TOOL, 0x6),
+        .tool = @enumFromInt(macho.TOOL, 0x6),
         .version = 0x0,
     }));
 }

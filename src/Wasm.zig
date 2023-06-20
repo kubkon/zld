@@ -131,7 +131,7 @@ pub const Segment = struct {
     }
 
     pub inline fn isPassive(segment: Segment) bool {
-        return segment.flags & @enumToInt(Flag.WASM_DATA_SEGMENT_IS_PASSIVE) != 0;
+        return segment.flags & @intFromEnum(Flag.WASM_DATA_SEGMENT_IS_PASSIVE) != 0;
     }
 };
 
@@ -210,18 +210,18 @@ const FeatureSet = struct {
         /// Returns the next feature in the set
         pub fn next(it: *Iterator) ?types.Feature.Tag {
             const index = it.inner.next() orelse return null;
-            return @intToEnum(types.Feature.Tag, index);
+            return @enumFromInt(types.Feature.Tag, index);
         }
     };
 
     /// Returns true when a given `feature` is enabled
     pub fn isEnabled(set: FeatureSet, feature: types.Feature.Tag) bool {
-        return set.set.isSet(@enumToInt(feature));
+        return set.set.isSet(@intFromEnum(feature));
     }
 
     /// Enables the given `feature`
     pub fn enable(set: *FeatureSet, feature: types.Feature.Tag) void {
-        set.set.set(@enumToInt(feature));
+        set.set.set(@intFromEnum(feature));
     }
 
     /// The amount of features that have been set
@@ -1625,7 +1625,7 @@ pub fn getMatchingSegment(wasm: *Wasm, gpa: Allocator, object_index: u16, reloca
                 result.value_ptr.* = index;
                 var flags: u32 = 0;
                 if (wasm.options.shared_memory) {
-                    flags |= @enumToInt(Segment.Flag.WASM_DATA_SEGMENT_IS_PASSIVE);
+                    flags |= @intFromEnum(Segment.Flag.WASM_DATA_SEGMENT_IS_PASSIVE);
                 }
                 try wasm.segments.append(gpa, .{
                     .alignment = 1,
@@ -1839,14 +1839,14 @@ fn validateFeatures(wasm: *Wasm) !void {
             const value = @intCast(u16, object_index) << 1 | @as(u1, 1);
             switch (feature.prefix) {
                 .used => {
-                    used[@enumToInt(feature.tag)] = value;
+                    used[@intFromEnum(feature.tag)] = value;
                 },
                 .disallowed => {
-                    disallowed[@enumToInt(feature.tag)] = value;
+                    disallowed[@intFromEnum(feature.tag)] = value;
                 },
                 .required => {
-                    required[@enumToInt(feature.tag)] = value;
-                    used[@enumToInt(feature.tag)] = value;
+                    required[@intFromEnum(feature.tag)] = value;
+                    used[@intFromEnum(feature.tag)] = value;
                 },
             }
         }
@@ -1864,7 +1864,7 @@ fn validateFeatures(wasm: *Wasm) !void {
     for (used, 0..) |used_set, used_index| {
         const is_enabled = @truncate(u1, used_set) != 0;
         if (!is_enabled) continue;
-        const feature = @intToEnum(types.Feature.Tag, used_index);
+        const feature = @enumFromInt(types.Feature.Tag, used_index);
         if (infer) {
             allowed.enable(feature);
         } else if (!allowed.isEnabled(feature)) {
@@ -1879,7 +1879,7 @@ fn validateFeatures(wasm: *Wasm) !void {
     }
 
     if (wasm.options.shared_memory) {
-        const disallowed_feature = disallowed[@enumToInt(types.Feature.Tag.shared_mem)];
+        const disallowed_feature = disallowed[@intFromEnum(types.Feature.Tag.shared_mem)];
         if (@truncate(u1, disallowed_feature) != 0) {
             log.err(
                 "--shared-memory is disallowed by '{s}' because it wasn't compiled with 'atomics' and 'bulk-memory' features enabled",
@@ -1909,7 +1909,7 @@ fn validateFeatures(wasm: *Wasm) !void {
         for (object.features) |feature| {
             if (feature.prefix == .disallowed) continue; // already defined in 'disallowed' set.
             // from here a feature is always used
-            const disallowed_feature = disallowed[@enumToInt(feature.tag)];
+            const disallowed_feature = disallowed[@intFromEnum(feature.tag)];
             if (@truncate(u1, disallowed_feature) != 0) {
                 log.err("feature '{}' is disallowed, but used by linked object", .{feature.tag});
                 log.err("  disallowed by '{s}'", .{wasm.objects.items[disallowed_feature >> 1].name});
@@ -1917,14 +1917,14 @@ fn validateFeatures(wasm: *Wasm) !void {
                 valid_feature_set = false;
             }
 
-            object_used_features[@enumToInt(feature.tag)] = true;
+            object_used_features[@intFromEnum(feature.tag)] = true;
         }
 
         // validate the linked object file has each required feature
         for (required, 0..) |required_feature, feature_index| {
             const is_required = @truncate(u1, required_feature) != 0;
             if (is_required and !object_used_features[feature_index]) {
-                log.err("feature '{}' is required but not used in linked object", .{(@intToEnum(types.Feature.Tag, feature_index))});
+                log.err("feature '{}' is required but not used in linked object", .{(@enumFromInt(types.Feature.Tag, feature_index))});
                 log.err("  required by '{s}'", .{wasm.objects.items[required_feature >> 1].name});
                 log.err("  missing in '{s}'", .{object.name});
                 valid_feature_set = false;

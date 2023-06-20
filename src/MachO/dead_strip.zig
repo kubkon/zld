@@ -157,7 +157,7 @@ fn markLive(macho_file: *MachO, atom_index: AtomIndex, alive: *AtomTable) void {
 
     for (relocs) |rel| {
         const target = switch (cpu_arch) {
-            .aarch64 => switch (@intToEnum(macho.reloc_type_arm64, rel.r_type)) {
+            .aarch64 => switch (@enumFromInt(macho.reloc_type_arm64, rel.r_type)) {
                 .ARM64_RELOC_ADDEND => continue,
                 else => Atom.parseRelocTarget(macho_file, .{
                     .object_id = atom.getFile().?,
@@ -224,7 +224,7 @@ fn refersLive(macho_file: *MachO, atom_index: AtomIndex, alive: AtomTable) bool 
 
     for (relocs) |rel| {
         const target = switch (cpu_arch) {
-            .aarch64 => switch (@intToEnum(macho.reloc_type_arm64, rel.r_type)) {
+            .aarch64 => switch (@enumFromInt(macho.reloc_type_arm64, rel.r_type)) {
                 .ARM64_RELOC_ADDEND => continue,
                 else => Atom.parseRelocTarget(macho_file, .{
                     .object_id = atom.getFile().?,

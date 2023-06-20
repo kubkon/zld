@@ -119,7 +119,7 @@ pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch)
         return error.NotObject;
     }
 
-    if (header.machine != @enumToInt(cpu_arch.toCoffMachine())) {
+    if (header.machine != @intFromEnum(cpu_arch.toCoffMachine())) {
         log.debug("Invalid architecture {any}, expected {any}", .{
             header.machine,
             cpu_arch.toCoffMachine(),

@@ -31,7 +31,7 @@ pub fn emit(wasm: *Wasm) !void {
         try emitSectionHeader(file, offset, .type, wasm.func_types.count());
     }
     if (wasm.imports.symbolCount() != 0 or wasm.options.import_memory) {
-        const count = wasm.imports.symbolCount() + @boolToInt(wasm.options.import_memory);
+        const count = wasm.imports.symbolCount() + @intFromBool(wasm.options.import_memory);
         log.debug("Writing 'Imports' section ({d})", .{count});
         const offset = try reserveSectionHeader(file);
 
@@ -154,7 +154,7 @@ pub fn emit(wasm: *Wasm) !void {
             const segment: Wasm.Segment = wasm.segments.items[atom_index];
 
             try leb.writeULEB128(writer, segment.flags);
-            if (segment.flags & @enumToInt(Wasm.Segment.Flag.WASM_DATA_SEGMENT_HAS_MEMINDEX) != 0) {
+            if (segment.flags & @intFromEnum(Wasm.Segment.Flag.WASM_DATA_SEGMENT_HAS_MEMINDEX) != 0) {
                 try leb.writeULEB128(writer, @as(u32, 0)); // memory is always index 0 as we only have 1 memory entry
             }
             if (!segment.isPassive()) {
@@ -311,7 +311,7 @@ fn reserveCustomSectionHeader(file: fs.File) !u64 {
 fn emitSectionHeader(file: fs.File, offset: u64, section_type: std.wasm.Section, entries: usize) !void {
     // section id, section byte size, section entry count
     var buf: [1 + 5 + 5]u8 = undefined;
-    buf[0] = @enumToInt(section_type);
+    buf[0] = @intFromEnum(section_type);
 
     const pos = try file.getPos();
     const byte_size = pos + 5 - offset; // +5 due to 'entries' also being part of byte size
@@ -340,11 +340,11 @@ fn emitType(type_entry: std.wasm.Type, writer: anytype) !void {
     try leb.writeULEB128(writer, @as(u8, 0x60)); //functype
     try leb.writeULEB128(writer, @intCast(u32, type_entry.params.len));
     for (type_entry.params) |para_ty| {
-        try leb.writeULEB128(writer, @enumToInt(para_ty));
+        try leb.writeULEB128(writer, @intFromEnum(para_ty));
     }
     try leb.writeULEB128(writer, @intCast(u32, type_entry.returns.len));
     for (type_entry.returns) |ret_ty| {
-        try leb.writeULEB128(writer, @enumToInt(ret_ty));
+        try leb.writeULEB128(writer, @intFromEnum(ret_ty));
     }
 }
 
@@ -397,13 +397,13 @@ fn emitImport(import_entry: std.wasm.Import, writer: anytype) !void {
     try leb.writeULEB128(writer, @intCast(u32, name.len));
     try writer.writeAll(name);
 
-    try leb.writeULEB128(writer, @enumToInt(import_entry.kind));
+    try leb.writeULEB128(writer, @intFromEnum(import_entry.kind));
     switch (import_entry.kind) {
         .function => |type_index| try leb.writeULEB128(writer, type_index),
         .table => |table| try emitTable(table, writer),
         .global => |global| {
-            try leb.writeULEB128(writer, @enumToInt(global.valtype));
-            try leb.writeULEB128(writer, @boolToInt(global.mutable));
+            try leb.writeULEB128(writer, @intFromEnum(global.valtype));
+            try leb.writeULEB128(writer, @intFromBool(global.mutable));
         },
         .memory => |mem| try emitLimits(mem, writer),
     }
@@ -414,7 +414,7 @@ fn emitFunction(func: std.wasm.Func, writer: anytype) !void {
 }
 
 fn emitTable(table: std.wasm.Table, writer: anytype) !void {
-    try leb.writeULEB128(writer, @enumToInt(table.reftype));
+    try leb.writeULEB128(writer, @intFromEnum(table.reftype));
     try emitLimits(table.limits, writer);
 }
 
@@ -427,8 +427,8 @@ fn emitLimits(limits: std.wasm.Limits, writer: anytype) !void {
 }
 
 fn emitGlobal(global: std.wasm.Global, writer: anytype) !void {
-    try leb.writeULEB128(writer, @enumToInt(global.global_type.valtype));
-    try leb.writeULEB128(writer, @boolToInt(global.global_type.mutable));
+    try leb.writeULEB128(writer, @intFromEnum(global.global_type.valtype));
+    try leb.writeULEB128(writer, @intFromBool(global.global_type.mutable));
     try emitInitExpression(global.init, writer);
 }
 
@@ -450,7 +450,7 @@ fn emitInitExpression(init: std.wasm.InitExpression, writer: anytype) !void {
 fn emitExport(exported: std.wasm.Export, writer: anytype) !void {
     try leb.writeULEB128(writer, @intCast(u32, exported.name.len));
     try writer.writeAll(exported.name);
-    try leb.writeULEB128(writer, @enumToInt(exported.kind));
+    try leb.writeULEB128(writer, @intFromEnum(exported.kind));
     try leb.writeULEB128(writer, exported.index);
 }
 
@@ -612,7 +612,7 @@ fn emitFeaturesSection(file: fs.File, wasm: *const Wasm, writer: anytype) !void 
     while (it.next()) |feature_tag| {
         if (wasm.used_features.isEnabled(feature_tag)) {
             const feature: types.Feature = .{ .prefix = .used, .tag = feature_tag };
-            try leb.writeULEB128(writer, @enumToInt(feature.prefix));
+            try leb.writeULEB128(writer, @intFromEnum(feature.prefix));
             var buf: [100]u8 = undefined;
             const feature_name = try std.fmt.bufPrint(&buf, "{}", .{feature.tag});
             try leb.writeULEB128(writer, @intCast(u32, feature_name.len));

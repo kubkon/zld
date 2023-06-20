@@ -1649,7 +1649,7 @@ fn markImportsAndExports(self: *Elf) !void {
         for (self.getFile(index).?.shared.getGlobals()) |global_index| {
             const global = self.getSymbol(global_index);
             const file = global.getFile(self) orelse continue;
-            const vis = @intToEnum(elf.STV, global.getSourceSymbol(self).st_other);
+            const vis = @enumFromInt(elf.STV, global.getSourceSymbol(self).st_other);
             if (file != .shared and vis != .HIDDEN) global.flags.@"export" = true;
         }
     }
@@ -1659,7 +1659,7 @@ fn markImportsAndExports(self: *Elf) !void {
             const global = self.getSymbol(global_index);
             if (global.ver_idx == VER_NDX_LOCAL) continue;
             const file = global.getFile(self) orelse continue;
-            const vis = @intToEnum(elf.STV, global.getSourceSymbol(self).st_other);
+            const vis = @enumFromInt(elf.STV, global.getSourceSymbol(self).st_other);
             if (vis == .HIDDEN) continue;
             if (file == .shared and !global.isAbs(self)) {
                 global.flags.import = true;
@@ -1735,7 +1735,7 @@ fn reportUndefs(self: *Elf) !void {
     while (it.next()) |entry| {
         const undef_sym = self.getSymbol(entry.key_ptr.*);
         const notes = entry.value_ptr.*;
-        const nnotes = @min(notes.items.len, max_notes) + @boolToInt(notes.items.len > max_notes);
+        const nnotes = @min(notes.items.len, max_notes) + @intFromBool(notes.items.len > max_notes);
 
         var err = Zld.ErrorMsg{
             .msg = try std.fmt.allocPrint(gpa, "undefined symbol: {s}", .{undef_sym.getName(self)}),

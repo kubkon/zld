@@ -57,7 +57,7 @@ pub fn getCodeUncompressAlloc(self: Atom, elf_file: *Elf) ![]u8 {
     if (shdr.sh_flags & elf.SHF_COMPRESSED != 0) {
         const chdr = @ptrCast(*align(1) const elf.Elf64_Chdr, data.ptr).*;
         switch (chdr.ch_type) {
-            1 => { // ELFCOMPRESS_ZLIB
+            .ZLIB => {
                 var stream = std.io.fixedBufferStream(data[@sizeOf(elf.Elf64_Chdr)..]);
                 var zlib_stream = try std.compress.zlib.decompressStream(gpa, stream.reader());
                 defer zlib_stream.deinit();

@@ -137,7 +137,7 @@ pub const Segment = struct {
     flags: u32,
 
     pub fn isTLS(segment: Segment) bool {
-        return segment.flags & @enumToInt(Flags.WASM_SEG_FLAG_TLS) != 0;
+        return segment.flags & @intFromEnum(Flags.WASM_SEG_FLAG_TLS) != 0;
     }
 
     /// Returns the name as how it will be output into the final object
@@ -224,7 +224,7 @@ pub const Feature = struct {
 
         /// From a given cpu feature, returns its linker feature
         pub fn fromCpuFeature(feature: std.Target.wasm.Feature) Tag {
-            return @intToEnum(Tag, @enumToInt(feature));
+            return @enumFromInt(Tag, @intFromEnum(feature));
         }
 
         pub fn format(tag: Tag, comptime fmt: []const u8, opt: std.fmt.FormatOptions, writer: anytype) !void {
@@ -288,10 +288,10 @@ pub const Limits = struct {
     };
 
     pub fn hasFlag(limits: Limits, flag: Flags) bool {
-        return limits & @enumToInt(flag) != 0;
+        return limits & @intFromEnum(flag) != 0;
     }
 
     pub fn setFlag(limits: *Limits, flag: Flags) void {
-        limits.flags |= @enumToInt(flag);
+        limits.flags |= @intFromEnum(flag);
     }
 };

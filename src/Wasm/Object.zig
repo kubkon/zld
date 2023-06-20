@@ -373,7 +373,7 @@ fn Parser(comptime ReaderType: type) type {
                 const len = try readLeb(u32, parser.reader.reader());
                 var limited_reader = std.io.limitedReader(parser.reader.reader(), len);
                 const reader = limited_reader.reader();
-                switch (@intToEnum(std.wasm.Section, byte)) {
+                switch (@enumFromInt(std.wasm.Section, byte)) {
                     .custom => {
                         const name_len = try readLeb(u32, reader);
                         const name = try gpa.alloc(u8, name_len);
@@ -628,7 +628,7 @@ fn Parser(comptime ReaderType: type) type {
 
             for (relocations) |*relocation| {
                 const rel_type = try leb.readULEB128(u8, reader);
-                const rel_type_enum = @intToEnum(types.Relocation.RelocationType, rel_type);
+                const rel_type_enum = @enumFromInt(types.Relocation.RelocationType, rel_type);
                 relocation.* = .{
                     .relocation_type = rel_type_enum,
                     .offset = try leb.readULEB128(u32, reader),
@@ -671,7 +671,7 @@ fn Parser(comptime ReaderType: type) type {
         /// such as access to the `import` section to find the name of a symbol.
         fn parseSubsection(parser: *ObjectParser, gpa: Allocator, reader: anytype) !void {
             const sub_type = try leb.readULEB128(u8, reader);
-            log.debug("Found subsection: {s}", .{@tagName(@intToEnum(types.SubsectionType, sub_type))});
+            log.debug("Found subsection: {s}", .{@tagName(@enumFromInt(types.SubsectionType, sub_type))});
             const payload_len = try leb.readULEB128(u32, reader);
             if (payload_len == 0) return;
 
@@ -681,7 +681,7 @@ fn Parser(comptime ReaderType: type) type {
             // every subsection contains a 'count' field
             const count = try leb.readULEB128(u32, limited_reader);
 
-            switch (@intToEnum(types.SubsectionType, sub_type)) {
+            switch (@enumFromInt(types.SubsectionType, sub_type)) {
                 .WASM_SEGMENT_INFO => {
                     const segments = try gpa.alloc(types.Segment, count);
                     errdefer gpa.free(segments);
@@ -704,7 +704,7 @@ fn Parser(comptime ReaderType: type) type {
                         // support legacy object files that specified being TLS by the name instead of the TLS flag.
                         if (!segment.isTLS() and (std.mem.startsWith(u8, segment.name, ".tdata") or std.mem.startsWith(u8, segment.name, ".tbss"))) {
                             // set the flag so we can simply check for the flag in the rest of the linker.
-                            segment.flags |= @enumToInt(types.Segment.Flags.WASM_SEG_FLAG_TLS);
+                            segment.flags |= @intFromEnum(types.Segment.Flags.WASM_SEG_FLAG_TLS);
                         }
                     }
                     parser.object.segment_info = segments;
@@ -740,7 +740,7 @@ fn Parser(comptime ReaderType: type) type {
                         errdefer gpa.free(symbols);
                         for (symbols) |*symbol| {
                             symbol.* = .{
-                                .kind = @intToEnum(types.ComdatSym.Type, try leb.readULEB128(u8, reader)),
+                                .kind = @enumFromInt(types.ComdatSym.Type, try leb.readULEB128(u8, reader)),
                                 .index = try leb.readULEB128(u32, reader),
                             };
                         }
@@ -784,7 +784,7 @@ fn Parser(comptime ReaderType: type) type {
         /// requires access to `Object` to find the name of a symbol when it's
         /// an import and flag `WASM_SYM_EXPLICIT_NAME` is not set.
         fn parseSymbol(parser: *ObjectParser, gpa: Allocator, reader: anytype) !Symbol {
-            const tag = @intToEnum(Symbol.Tag, try leb.readULEB128(u8, reader));
+            const tag = @enumFromInt(Symbol.Tag, try leb.readULEB128(u8, reader));
             const flags = try leb.readULEB128(u32, reader);
             var symbol: Symbol = .{
                 .flags = flags,
@@ -865,7 +865,7 @@ fn readLeb(comptime T: type, reader: anytype) !T {
 /// Asserts `T` is an enum
 fn readEnum(comptime T: type, reader: anytype) !T {
     switch (@typeInfo(T)) {
-        .Enum => |enum_type| return @intToEnum(T, try readLeb(enum_type.tag_type, reader)),
+        .Enum => |enum_type| return @enumFromInt(T, try readLeb(enum_type.tag_type, reader)),
         else => @compileError("T must be an enum. Instead was given type " ++ @typeName(T)),
     }
 }
@@ -886,7 +886,7 @@ fn readLimits(reader: anytype) !std.wasm.Limits {
 
 fn readInit(reader: anytype) !std.wasm.InitExpression {
     const opcode = try reader.readByte();
-    const init_expr: std.wasm.InitExpression = switch (@intToEnum(std.wasm.Opcode, opcode)) {
+    const init_expr: std.wasm.InitExpression = switch (@enumFromInt(std.wasm.Opcode, opcode)) {
         .i32_const => .{ .i32_const = try readLeb(i32, reader) },
         .global_get => .{ .global_get = try readLeb(u32, reader) },
         else => |tag| std.debug.panic("TODO: initexpression for other opcodes: {}", .{tag}),

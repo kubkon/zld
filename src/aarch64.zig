@@ -24,16 +24,16 @@ pub const Register = enum(u7) {
     sp, wsp,
 
     pub fn id(self: Register) u6 {
-        return switch (@enumToInt(self)) {
-            0...63 => return @as(u6, @truncate(u5, @enumToInt(self))),
+        return switch (@intFromEnum(self)) {
+            0...63 => return @as(u6, @truncate(u5, @intFromEnum(self))),
             64...65 => 32,
             else => unreachable,
         };
     }
 
     pub fn enc(self: Register) u5 {
-        return switch (@enumToInt(self)) {
-            0...63 => return @truncate(u5, @enumToInt(self)),
+        return switch (@intFromEnum(self)) {
+            0...63 => return @truncate(u5, @intFromEnum(self)),
             64...65 => 31,
             else => unreachable,
         };
@@ -41,7 +41,7 @@ pub const Register = enum(u7) {
 
     /// Returns the bit-width of the register.
     pub fn size(self: Register) u7 {
-        return switch (@enumToInt(self)) {
+        return switch (@intFromEnum(self)) {
             0...31 => 64,
             32...63 => 32,
             64 => 64,
@@ -52,9 +52,9 @@ pub const Register = enum(u7) {
 
     /// Convert from any register to its 64 bit alias.
     pub fn to64(self: Register) Register {
-        return switch (@enumToInt(self)) {
+        return switch (@intFromEnum(self)) {
             0...31 => self,
-            32...63 => @intToEnum(Register, @enumToInt(self) - 32),
+            32...63 => @enumFromInt(Register, @intFromEnum(self) - 32),
             64 => .sp,
             65 => .sp,
             else => unreachable,
@@ -63,8 +63,8 @@ pub const Register = enum(u7) {
 
     /// Convert from any register to its 32 bit alias.
     pub fn to32(self: Register) Register {
-        return switch (@enumToInt(self)) {
-            0...31 => @intToEnum(Register, @enumToInt(self) + 32),
+        return switch (@intFromEnum(self)) {
+            0...31 => @enumFromInt(Register, @intFromEnum(self) + 32),
             32...63 => self,
             64 => .wsp,
             65 => .wsp,
@@ -138,12 +138,12 @@ pub const FloatingPointRegister = enum(u8) {
     b24, b25, b26, b27, b28, b29, b30, b31,
 
     pub fn id(self: FloatingPointRegister) u5 {
-        return @truncate(u5, @enumToInt(self));
+        return @truncate(u5, @intFromEnum(self));
     }
 
     /// Returns the bit-width of the register.
     pub fn size(self: FloatingPointRegister) u8 {
-        return switch (@enumToInt(self)) {
+        return switch (@intFromEnum(self)) {
             0...31 => 128,
             32...63 => 64,
             64...95 => 32,
@@ -155,27 +155,27 @@ pub const FloatingPointRegister = enum(u8) {
 
     /// Convert from any register to its 128 bit alias.
     pub fn to128(self: FloatingPointRegister) FloatingPointRegister {
-        return @intToEnum(FloatingPointRegister, self.id());
+        return @enumFromInt(FloatingPointRegister, self.id());
     }
 
     /// Convert from any register to its 64 bit alias.
     pub fn to64(self: FloatingPointRegister) FloatingPointRegister {
-        return @intToEnum(FloatingPointRegister, @as(u8, self.id()) + 32);
+        return @enumFromInt(FloatingPointRegister, @as(u8, self.id()) + 32);
     }
 
     /// Convert from any register to its 32 bit alias.
     pub fn to32(self: FloatingPointRegister) FloatingPointRegister {
-        return @intToEnum(FloatingPointRegister, @as(u8, self.id()) + 64);
+        return @enumFromInt(FloatingPointRegister, @as(u8, self.id()) + 64);
     }
 
     /// Convert from any register to its 16 bit alias.
     pub fn to16(self: FloatingPointRegister) FloatingPointRegister {
-        return @intToEnum(FloatingPointRegister, @as(u8, self.id()) + 96);
+        return @enumFromInt(FloatingPointRegister, @as(u8, self.id()) + 96);
     }
 
     /// Convert from any register to its 8 bit alias.
     pub fn to8(self: FloatingPointRegister) FloatingPointRegister {
-        return @intToEnum(FloatingPointRegister, @as(u8, self.id()) + 128);
+        return @enumFromInt(FloatingPointRegister, @as(u8, self.id()) + 128);
     }
 };
 
@@ -781,7 +781,7 @@ pub const Instruction = union(enum) {
                         .rn = rn.enc(),
                         .rt2 = rt2.enc(),
                         .imm7 = imm7,
-                        .load = @boolToInt(load),
+                        .load = @intFromBool(load),
                         .encoding = encoding,
                         .opc = 0b00,
                     },
@@ -796,7 +796,7 @@ pub const Instruction = union(enum) {
                         .rn = rn.enc(),
                         .rt2 = rt2.enc(),
                         .imm7 = imm7,
-                        .load = @boolToInt(load),
+                        .load = @intFromBool(load),
                         .encoding = encoding,
                         .opc = 0b10,
                     },
@@ -890,7 +890,7 @@ pub const Instruction = union(enum) {
                 .imm6 = amount,
                 .rm = rm.enc(),
                 .n = n,
-                .shift = @enumToInt(shift),
+                .shift = @intFromEnum(shift),
                 .opc = opc,
                 .sf = switch (rd.size()) {
                     32 => 0b0,
@@ -917,7 +917,7 @@ pub const Instruction = union(enum) {
                 .rd = rd.enc(),
                 .rn = rn.enc(),
                 .imm12 = imm12,
-                .sh = @boolToInt(shift),
+                .sh = @intFromBool(shift),
                 .s = s,
                 .op = op,
                 .sf = switch (rd.size()) {
@@ -1006,7 +1006,7 @@ pub const Instruction = union(enum) {
                 .rn = rn.enc(),
                 .imm6 = imm6,
                 .rm = rm.enc(),
-                .shift = @enumToInt(shift),
+                .shift = @intFromEnum(shift),
                 .s = s,
                 .op = op,
                 .sf = switch (rd.size()) {
@@ -1043,7 +1043,7 @@ pub const Instruction = union(enum) {
                 .rd = rd.enc(),
                 .rn = rn.enc(),
                 .imm3 = imm3,
-                .option = @enumToInt(extend),
+                .option = @intFromEnum(extend),
                 .rm = rm.enc(),
                 .s = s,
                 .op = op,
@@ -1066,7 +1066,7 @@ pub const Instruction = union(enum) {
 
         return Instruction{
             .conditional_branch = .{
-                .cond = @enumToInt(cond),
+                .cond = @intFromEnum(cond),
                 .o0 = o0,
                 .imm19 = @bitCast(u19, @intCast(i19, offset >> 2)),
                 .o1 = o1,
@@ -1112,7 +1112,7 @@ pub const Instruction = union(enum) {
                 .rd = rd.enc(),
                 .rn = rn.enc(),
                 .op2 = op2,
-                .cond = @enumToInt(cond),
+                .cond = @intFromEnum(cond),
                 .rm = rm.enc(),
                 .s = s,
                 .op = op,
@@ -1274,7 +1274,7 @@ pub const Instruction = union(enum) {
     };
 
     pub fn ldp(rt1: Register, rt2: Register, rn: Register, offset: LoadStorePairOffset) Instruction {
-        return loadStoreRegisterPair(rt1, rt2, rn, offset.offset, @enumToInt(offset.encoding), true);
+        return loadStoreRegisterPair(rt1, rt2, rn, offset.offset, @intFromEnum(offset.encoding), true);
     }
 
     pub fn ldnp(rt1: Register, rt2: Register, rn: Register, offset: i9) Instruction {
@@ -1282,7 +1282,7 @@ pub const Instruction = union(enum) {
     }
 
     pub fn stp(rt1: Register, rt2: Register, rn: Register, offset: LoadStorePairOffset) Instruction {
-        return loadStoreRegisterPair(rt1, rt2, rn, offset.offset, @enumToInt(offset.encoding), false);
+        return loadStoreRegisterPair(rt1, rt2, rn, offset.offset, @intFromEnum(offset.encoding), false);
     }
 
     pub fn stnp(rt1: Register, rt2: Register, rn: Register, offset: i9) Instruction {

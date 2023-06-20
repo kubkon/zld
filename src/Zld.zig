@@ -169,7 +169,7 @@ pub fn getAllErrorsAlloc(base: *Zld) !ErrorBundle {
         });
         const notes_start = try bundle.reserveNotes(@intCast(u32, notes.len));
         for (notes_start.., notes) |index, note| {
-            bundle.extra.items[index] = @enumToInt(bundle.addErrorMessageAssumeCapacity(.{
+            bundle.extra.items[index] = @intFromEnum(bundle.addErrorMessageAssumeCapacity(.{
                 .msg = try bundle.addString(note.msg),
             }));
         }

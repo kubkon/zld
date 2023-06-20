@@ -30,8 +30,8 @@ pub const std_options = struct {
         // Hide debug messages unless:
         // * logging enabled with `-Dlog`.
         // * the --debug-log arg for the scope has been provided
-        if (@enumToInt(level) > @enumToInt(std.options.log_level) or
-            @enumToInt(level) > @enumToInt(std.log.Level.info))
+        if (@intFromEnum(level) > @intFromEnum(std.options.log_level) or
+            @intFromEnum(level) > @intFromEnum(std.log.Level.info))
         {
             if (!build_options.enable_logging) return;
 
