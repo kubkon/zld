@@ -27,7 +27,7 @@ pub fn scanRelocs(macho_file: *MachO) !void {
             it.seekTo(fde_offset);
             const fde = (try it.next()).?;
 
-            const cie_ptr = fde.getCiePointer();
+            const cie_ptr = fde.getCiePointerSource(@intCast(u32, object_id), macho_file, fde_offset);
             const cie_offset = fde_offset + 4 - cie_ptr;
 
             if (!cies.contains(cie_offset)) {
@@ -50,7 +50,7 @@ pub fn calcSectionSize(macho_file: *MachO, unwind_info: *const UnwindInfo) !void
     const gpa = macho_file.base.allocator;
     var size: u32 = 0;
 
-    for (macho_file.objects.items) |*object| {
+    for (macho_file.objects.items, 0..) |*object, object_id| {
         var cies = std.AutoHashMap(u32, u32).init(gpa);
         defer cies.deinit();
 
@@ -70,7 +70,7 @@ pub fn calcSectionSize(macho_file: *MachO, unwind_info: *const UnwindInfo) !void
             eh_it.seekTo(fde_record_offset);
             const source_fde_record = (try eh_it.next()).?;
 
-            const cie_ptr = source_fde_record.getCiePointer();
+            const cie_ptr = source_fde_record.getCiePointerSource(@intCast(u32, object_id), macho_file, fde_record_offset);
             const cie_offset = fde_record_offset + 4 - cie_ptr;
 
             const gop = try cies.getOrPut(cie_offset);
@@ -129,7 +129,7 @@ pub fn write(macho_file: *MachO, unwind_info: *UnwindInfo) !void {
             eh_it.seekTo(fde_record_offset);
             const source_fde_record = (try eh_it.next()).?;
 
-            const cie_ptr = source_fde_record.getCiePointer();
+            const cie_ptr = source_fde_record.getCiePointerSource(@intCast(u32, object_id), macho_file, fde_record_offset);
             const cie_offset = fde_record_offset + 4 - cie_ptr;
 
             const gop = try cies.getOrPut(cie_offset);
@@ -148,12 +148,12 @@ pub fn write(macho_file: *MachO, unwind_info: *UnwindInfo) !void {
             }
 
             var fde_record = try source_fde_record.toOwned(gpa);
-            fde_record.setCiePointer(eh_frame_offset + 4 - gop.value_ptr.*);
             try fde_record.relocate(macho_file, @intCast(u32, object_id), .{
                 .source_offset = fde_record_offset,
                 .out_offset = eh_frame_offset,
                 .sect_addr = sect.addr,
             });
+            fde_record.setCiePointer(eh_frame_offset + 4 - gop.value_ptr.*);
 
             switch (cpu_arch) {
                 .aarch64 => {}, // relocs take care of LSDA pointers
@@ -375,6 +375,29 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
                     },
                     else => unreachable,
                 }
+            }
+        }
+
+        pub fn getCiePointerSource(rec: Record, object_id: u32, macho_file: *MachO, offset: u32) u32 {
+            assert(rec.tag == .fde);
+            const cpu_arch = macho_file.options.target.cpu_arch.?;
+            const addend = mem.readIntLittle(u32, rec.data[0..4]);
+            switch (cpu_arch) {
+                .aarch64 => {
+                    const relocs = getRelocs(macho_file, object_id, offset);
+                    const maybe_rel = for (relocs) |rel| {
+                        if (rel.r_address - @intCast(i32, offset) == 4 and
+                            @enumFromInt(macho.reloc_type_arm64, rel.r_type) == .ARM64_RELOC_SUBTRACTOR)
+                            break rel;
+                    } else null;
+                    const rel = maybe_rel orelse return addend;
+                    const object = &macho_file.objects.items[object_id];
+                    const target_addr = object.in_symtab.?[rel.r_symbolnum].n_value;
+                    const sect = object.getSourceSection(object.eh_frame_sect_id.?);
+                    return @intCast(u32, sect.addr + offset - target_addr + addend);
+                },
+                .x86_64 => return addend,
+                else => unreachable,
             }
         }
 
