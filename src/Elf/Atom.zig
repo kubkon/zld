@@ -303,6 +303,10 @@ fn scanReloc(self: Atom, symbol: *Symbol, rel: elf.Elf64_Rela, action: RelocActi
             self.checkTextReloc(symbol, elf_file);
             object.num_dynrelocs += 1;
         },
+        .baserel => {
+            self.checkTextReloc(symbol, elf_file);
+            object.num_dynrelocs += 1;
+        },
         else => self.unhandledRelocError(symbol, rel, action, elf_file),
     }
 }
@@ -663,6 +667,14 @@ fn resolveDynAbsReloc(
                 .sym = target.getExtra(elf_file).?.dynamic,
                 .type = elf.R_X86_64_64,
                 .addend = A,
+            });
+        },
+
+        .baserel => {
+            elf_file.addRelaDynAssumeCapacity(.{
+                .offset = P,
+                .type = elf.R_X86_64_RELATIVE,
+                .addend = S + A,
             });
         },
 

@@ -2281,7 +2281,7 @@ pub inline fn getComdatGroupOwner(self: *Elf, index: ComdatGroupOwner.Index) *Co
 
 const RelaDyn = struct {
     offset: u64,
-    sym: u64,
+    sym: u64 = 0,
     type: u32,
     addend: i64 = 0,
 };
