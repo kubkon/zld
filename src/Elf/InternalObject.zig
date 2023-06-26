@@ -30,7 +30,7 @@ pub fn addSyntheticGlobal(self: *InternalObject, name: [:0]const u8, elf_file: *
 
 pub fn resolveSymbols(self: *InternalObject, elf_file: *Elf) void {
     for (self.symbols.items, 0..) |index, i| {
-        const sym_idx = @intCast(u32, i);
+        const sym_idx = @as(u32, @intCast(i));
         const this_sym = self.symtab.items[sym_idx];
 
         if (this_sym.st_shndx == elf.SHN_UNDEF) continue;
@@ -66,7 +66,7 @@ pub fn calcSymtabSize(self: *InternalObject, elf_file: *Elf) !void {
         if (global.getFile(elf_file)) |file| if (file.getIndex() != self.index) continue;
         global.flags.output_symtab = true;
         self.output_symtab_size.nlocals += 1;
-        self.output_symtab_size.strsize += @intCast(u32, global.getName(elf_file).len + 1);
+        self.output_symtab_size.strsize += @as(u32, @intCast(global.getName(elf_file).len + 1));
     }
 }
 

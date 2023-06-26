@@ -162,7 +162,7 @@ pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch)
         else => {},
     } else return;
 
-    self.in_symtab = @ptrCast([*]align(1) const macho.nlist_64, self.contents.ptr + symtab.symoff)[0..symtab.nsyms];
+    self.in_symtab = @as([*]align(1) const macho.nlist_64, @ptrCast(self.contents.ptr + symtab.symoff))[0..symtab.nsyms];
     self.in_strtab = self.contents[symtab.stroff..][0..symtab.strsize];
 
     self.symtab = try allocator.alloc(macho.nlist_64, self.in_symtab.?.len + nsects);
@@ -200,7 +200,7 @@ pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch)
     defer sorted_all_syms.deinit();
 
     for (self.in_symtab.?, 0..) |_, index| {
-        sorted_all_syms.appendAssumeCapacity(.{ .index = @intCast(u32, index) });
+        sorted_all_syms.appendAssumeCapacity(.{ .index = @as(u32, @intCast(index)) });
     }
 
     // We sort by type: defined < undefined, and
@@ -223,18 +223,18 @@ pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch)
             }
         }
         if (sym.sect() and section_index_lookup == null) {
-            section_index_lookup = .{ .start = @intCast(u32, i), .len = 1 };
+            section_index_lookup = .{ .start = @as(u32, @intCast(i)), .len = 1 };
         }
 
         prev_sect_id = sym.n_sect;
 
         self.symtab[i] = sym;
-        self.source_address_lookup[i] = if (sym.undf()) -1 else @intCast(i64, sym.n_value);
+        self.source_address_lookup[i] = if (sym.undf()) -1 else @as(i64, @intCast(sym.n_value));
         self.source_symtab_lookup[i] = sym_id.index;
-        self.reverse_symtab_lookup[sym_id.index] = @intCast(u32, i);
+        self.reverse_symtab_lookup[sym_id.index] = @as(u32, @intCast(i));
 
-        const sym_name_len = mem.sliceTo(@ptrCast([*:0]const u8, self.in_strtab.?.ptr + sym.n_strx), 0).len + 1;
-        self.strtab_lookup[i] = @intCast(u32, sym_name_len);
+        const sym_name_len = mem.sliceTo(@as([*:0]const u8, @ptrCast(self.in_strtab.?.ptr + sym.n_strx)), 0).len + 1;
+        self.strtab_lookup[i] = @as(u32, @intCast(sym_name_len));
     }
 
     // If there were no undefined symbols, make sure we populate the
@@ -265,7 +265,7 @@ const SymbolAtIndex = struct {
 
     fn getSymbolName(self: SymbolAtIndex, ctx: Context) []const u8 {
         const off = self.getSymbol(ctx).n_strx;
-        return mem.sliceTo(@ptrCast([*:0]const u8, ctx.in_strtab.?.ptr + off), 0);
+        return mem.sliceTo(@as([*:0]const u8, @ptrCast(ctx.in_strtab.?.ptr + off)), 0);
     }
 
     fn getSymbolSeniority(self: SymbolAtIndex, ctx: Context) u2 {
@@ -336,7 +336,7 @@ fn filterSymbolsBySection(symbols: []macho.nlist_64, n_sect: u8) struct {
         .n_sect = n_sect,
     });
 
-    return .{ .index = @intCast(u32, index), .len = @intCast(u32, len) };
+    return .{ .index = @as(u32, @intCast(index)), .len = @as(u32, @intCast(len)) };
 }
 
 fn filterSymbolsByAddress(symbols: []macho.nlist_64, start_addr: u64, end_addr: u64) struct {
@@ -358,7 +358,7 @@ fn filterSymbolsByAddress(symbols: []macho.nlist_64, start_addr: u64, end_addr: 
         .addr = end_addr,
     });
 
-    return .{ .index = @intCast(u32, index), .len = @intCast(u32, len) };
+    return .{ .index = @as(u32, @intCast(index)), .len = @as(u32, @intCast(len)) };
 }
 
 const SortedSection = struct {
@@ -398,7 +398,7 @@ pub fn splitRegularSections(self: *Object, macho_file: *MachO, object_id: u32) !
         };
         if (sect.size == 0) continue;
 
-        const sect_id = @intCast(u8, id);
+        const sect_id = @as(u8, @intCast(id));
         const sym = self.getSectionAliasSymbolPtr(sect_id);
         sym.* = .{
             .n_strx = 0,
@@ -415,7 +415,7 @@ pub fn splitRegularSections(self: *Object, macho_file: *MachO, object_id: u32) !
             const out_sect_id = (try macho_file.getOutputSection(sect)) orelse continue;
             if (sect.size == 0) continue;
 
-            const sect_id = @intCast(u8, id);
+            const sect_id = @as(u8, @intCast(id));
             const sym_index = self.getSectionAliasSymbolIndex(sect_id);
             const atom_index = try self.createAtomFromSubsection(
                 macho_file,
@@ -457,7 +457,7 @@ pub fn splitRegularSections(self: *Object, macho_file: *MachO, object_id: u32) !
     defer gpa.free(sorted_sections);
 
     for (sections, 0..) |sect, id| {
-        sorted_sections[id] = .{ .header = sect, .id = @intCast(u8, id) };
+        sorted_sections[id] = .{ .header = sect, .id = @as(u8, @intCast(id)) };
     }
 
     mem.sort(SortedSection, sorted_sections, {}, sectionLessThanByAddress);
@@ -649,7 +649,7 @@ fn filterRelocs(
     const start = Zld.binarySearch(macho.relocation_info, relocs, Predicate{ .addr = end_addr });
     const len = Zld.linearSearch(macho.relocation_info, relocs[start..], LPredicate{ .addr = start_addr });
 
-    return .{ .start = @intCast(u32, start), .len = @intCast(u32, len) };
+    return .{ .start = @as(u32, @intCast(start)), .len = @as(u32, @intCast(len)) };
 }
 
 /// Parse all relocs for the input section, and sort in descending order.
@@ -657,7 +657,7 @@ fn filterRelocs(
 /// section in a sorted manner which is simply not true.
 fn parseRelocs(self: *Object, gpa: Allocator, sect_id: u8) !void {
     const section = self.getSourceSection(sect_id);
-    const start = @intCast(u32, self.relocations.items.len);
+    const start = @as(u32, @intCast(self.relocations.items.len));
     if (self.getSourceRelocs(section)) |relocs| {
         try self.relocations.ensureUnusedCapacity(gpa, relocs.len);
         self.relocations.appendUnalignedSliceAssumeCapacity(relocs);
@@ -675,8 +675,8 @@ fn cacheRelocs(self: *Object, macho_file: *MachO, atom_index: AtomIndex) !void {
         // If there was no matching symbol present in the source symtab, this means
         // we are dealing with either an entire section, or part of it, but also
         // starting at the beginning.
-        const nbase = @intCast(u32, self.in_symtab.?.len);
-        const sect_id = @intCast(u8, atom.sym_index - nbase);
+        const nbase = @as(u32, @intCast(self.in_symtab.?.len));
+        const sect_id = @as(u8, @intCast(atom.sym_index - nbase));
         break :blk sect_id;
     };
     const source_sect = self.getSourceSection(source_sect_id);
@@ -739,15 +739,15 @@ fn parseEhFrameSection(self: *Object, macho_file: *MachO, object_id: u32) !void 
                         assert(rel_pos.len > 0); // TODO convert to an error as the FDE eh frame is malformed
                         // Find function symbol that this record describes
                         const rel = for (relocs[rel_pos.start..][0..rel_pos.len]) |rel| {
-                            if (rel.r_address - @intCast(i32, offset) == 8 and
-                                @enumFromInt(macho.reloc_type_arm64, rel.r_type) == .ARM64_RELOC_UNSIGNED)
+                            if (rel.r_address - @as(i32, @intCast(offset)) == 8 and
+                                @as(macho.reloc_type_arm64, @enumFromInt(rel.r_type)) == .ARM64_RELOC_UNSIGNED)
                                 break rel;
                         } else unreachable;
                         const target = Atom.parseRelocTarget(macho_file, .{
                             .object_id = object_id,
                             .rel = rel,
                             .code = it.data[offset..],
-                            .base_offset = @intCast(i32, offset),
+                            .base_offset = @as(i32, @intCast(offset)),
                         });
                         break :blk target;
                     },
@@ -800,7 +800,7 @@ fn parseUnwindInfo(self: *Object, macho_file: *MachO, object_id: u32) !void {
         _ = try macho_file.initSection("__TEXT", "__unwind_info", .{});
     }
 
-    try self.unwind_records_lookup.ensureTotalCapacity(gpa, @intCast(u32, self.exec_atoms.items.len));
+    try self.unwind_records_lookup.ensureTotalCapacity(gpa, @as(u32, @intCast(self.exec_atoms.items.len)));
 
     const unwind_records = self.getUnwindRecords();
 
@@ -836,14 +836,14 @@ fn parseUnwindInfo(self: *Object, macho_file: *MachO, object_id: u32) !void {
             .object_id = object_id,
             .rel = rel,
             .code = mem.asBytes(&record),
-            .base_offset = @intCast(i32, offset),
+            .base_offset = @as(i32, @intCast(offset)),
         });
         log.debug("unwind record {d} tracks {s}", .{ record_id, macho_file.getSymbolName(target) });
         if (target.getFile() != object_id) {
             self.unwind_relocs_lookup[record_id].dead = true;
         } else {
             const atom_index = self.getAtomIndexForSymbol(target.sym_index).?;
-            self.unwind_records_lookup.putAssumeCapacityNoClobber(atom_index, @intCast(u32, record_id));
+            self.unwind_records_lookup.putAssumeCapacityNoClobber(atom_index, @as(u32, @intCast(record_id)));
         }
     }
 }
@@ -871,7 +871,7 @@ pub fn getSourceSectionIndexByName(self: Object, segname: []const u8, sectname: 
     const sections = self.getSourceSections();
     for (sections, 0..) |sect, i| {
         if (mem.eql(u8, segname, sect.segName()) and mem.eql(u8, sectname, sect.sectName()))
-            return @intCast(u8, i);
+            return @as(u8, @intCast(i));
     } else return null;
 }
 
@@ -900,7 +900,7 @@ pub fn parseDataInCode(self: *Object, gpa: Allocator) !void {
         }
     } else return;
     const ndice = @divExact(cmd.datasize, @sizeOf(macho.data_in_code_entry));
-    const dice = @ptrCast([*]align(1) const macho.data_in_code_entry, self.contents.ptr + cmd.dataoff)[0..ndice];
+    const dice = @as([*]align(1) const macho.data_in_code_entry, @ptrCast(self.contents.ptr + cmd.dataoff))[0..ndice];
     try self.data_in_code.ensureTotalCapacityPrecise(gpa, dice.len);
     self.data_in_code.appendUnalignedSliceAssumeCapacity(dice);
     mem.sort(macho.data_in_code_entry, self.data_in_code.items, {}, diceLessThan);
@@ -947,12 +947,12 @@ pub fn parseDwarfInfo(self: Object) DwarfInfo {
 }
 
 pub fn getSectionContents(self: Object, sect: macho.section_64) []const u8 {
-    const size = @intCast(usize, sect.size);
+    const size = @as(usize, @intCast(sect.size));
     return self.contents[sect.offset..][0..size];
 }
 
 pub fn getSectionAliasSymbolIndex(self: Object, sect_id: u8) u32 {
-    const start = @intCast(u32, self.in_symtab.?.len);
+    const start = @as(u32, @intCast(self.in_symtab.?.len));
     return start + sect_id;
 }
 
@@ -966,7 +966,7 @@ pub fn getSectionAliasSymbolPtr(self: *Object, sect_id: u8) *macho.nlist_64 {
 
 fn getSourceRelocs(self: Object, sect: macho.section_64) ?[]align(1) const macho.relocation_info {
     if (sect.nreloc == 0) return null;
-    return @ptrCast([*]align(1) const macho.relocation_info, self.contents.ptr + sect.reloff)[0..sect.nreloc];
+    return @as([*]align(1) const macho.relocation_info, @ptrCast(self.contents.ptr + sect.reloff))[0..sect.nreloc];
 }
 
 pub fn getRelocs(self: Object, sect_id: u8) []const macho.relocation_info {
@@ -1007,25 +1007,25 @@ pub fn getSymbolByAddress(self: Object, addr: u64, sect_hint: ?u8) u32 {
             const target_sym_index = Zld.linearSearch(
                 i64,
                 self.source_address_lookup[lookup.start..][0..lookup.len],
-                Predicate{ .addr = @intCast(i64, addr) },
+                Predicate{ .addr = @as(i64, @intCast(addr)) },
             );
             if (target_sym_index > 0) {
-                return @intCast(u32, lookup.start + target_sym_index - 1);
+                return @as(u32, @intCast(lookup.start + target_sym_index - 1));
             }
         }
         return self.getSectionAliasSymbolIndex(sect_id);
     }
 
     const target_sym_index = Zld.linearSearch(i64, self.source_address_lookup, Predicate{
-        .addr = @intCast(i64, addr),
+        .addr = @as(i64, @intCast(addr)),
     });
     assert(target_sym_index > 0);
-    return @intCast(u32, target_sym_index - 1);
+    return @as(u32, @intCast(target_sym_index - 1));
 }
 
 pub fn getGlobal(self: Object, sym_index: u32) ?u32 {
     if (self.globals_lookup[sym_index] == -1) return null;
-    return @intCast(u32, self.globals_lookup[sym_index]);
+    return @as(u32, @intCast(self.globals_lookup[sym_index]));
 }
 
 pub fn getAtomIndexForSymbol(self: Object, sym_index: u32) ?AtomIndex {
@@ -1043,7 +1043,7 @@ pub fn getUnwindRecords(self: Object) []align(1) const macho.compact_unwind_entr
     const sect = self.getSourceSection(sect_id);
     const data = self.getSectionContents(sect);
     const num_entries = @divExact(data.len, @sizeOf(macho.compact_unwind_entry));
-    return @ptrCast([*]align(1) const macho.compact_unwind_entry, data)[0..num_entries];
+    return @as([*]align(1) const macho.compact_unwind_entry, @ptrCast(data))[0..num_entries];
 }
 
 pub fn hasEhFrameRecords(self: Object) bool {

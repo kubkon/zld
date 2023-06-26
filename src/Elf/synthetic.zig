@@ -212,13 +212,13 @@ pub const HashSection = struct {
         for (elf_file.dynsym.symbols.items, 1..) |sym_ref, i| {
             const name = elf_file.dynstrtab.getAssumeExists(sym_ref.off);
             const hash = hasher(name) % buckets.len;
-            chains[@intCast(u32, i)] = buckets[hash];
-            buckets[hash] = @intCast(u32, i);
+            chains[@as(u32, @intCast(i))] = buckets[hash];
+            buckets[hash] = @as(u32, @intCast(i));
         }
 
         try hs.buffer.ensureTotalCapacityPrecise(gpa, (2 + nsyms * 2) * 4);
-        hs.buffer.writer(gpa).writeIntLittle(u32, @intCast(u32, nsyms)) catch unreachable;
-        hs.buffer.writer(gpa).writeIntLittle(u32, @intCast(u32, nsyms)) catch unreachable;
+        hs.buffer.writer(gpa).writeIntLittle(u32, @as(u32, @intCast(nsyms))) catch unreachable;
+        hs.buffer.writer(gpa).writeIntLittle(u32, @as(u32, @intCast(nsyms))) catch unreachable;
         hs.buffer.writer(gpa).writeAll(mem.sliceAsBytes(buckets)) catch unreachable;
         hs.buffer.writer(gpa).writeAll(mem.sliceAsBytes(chains)) catch unreachable;
     }
@@ -259,14 +259,14 @@ pub const GnuHashSection = struct {
 
     inline fn bitCeil(x: u64) u64 {
         if (@popCount(x) == 1) return x;
-        return @intCast(u64, @as(u128, 1) << (64 - @clz(x)));
+        return @as(u64, @intCast(@as(u128, 1) << (64 - @clz(x))));
     }
 
     pub fn calcSize(hash: *GnuHashSection, elf_file: *Elf) !void {
-        hash.num_exports = @intCast(u32, getExports(elf_file).len);
+        hash.num_exports = @as(u32, @intCast(getExports(elf_file).len));
         if (hash.num_exports > 0) {
             const num_bits = hash.num_exports * 12;
-            hash.num_bloom = @intCast(u32, bitCeil(@divTrunc(num_bits, 64)));
+            hash.num_bloom = @as(u32, @intCast(bitCeil(@divTrunc(num_bits, 64))));
         }
     }
 
@@ -303,8 +303,8 @@ pub const GnuHashSection = struct {
             hashes[i] = h;
             indices[i] = h % hash.num_buckets;
             const idx = @divTrunc(h, 64) % hash.num_bloom;
-            bloom[idx] |= @as(u64, 1) << @intCast(u6, h % 64);
-            bloom[idx] |= @as(u64, 1) << @intCast(u6, (h >> bloom_shift) % 64);
+            bloom[idx] |= @as(u64, 1) << @as(u6, @intCast(h % 64));
+            bloom[idx] |= @as(u64, 1) << @as(u6, @intCast((h >> bloom_shift) % 64));
         }
 
         try cwriter.writeAll(mem.sliceAsBytes(bloom));
@@ -316,7 +316,7 @@ pub const GnuHashSection = struct {
 
         for (0..hash.num_exports) |i| {
             if (buckets[indices[i]] == 0) {
-                buckets[indices[i]] = @intCast(u32, i + export_off);
+                buckets[indices[i]] = @as(u32, @intCast(i + export_off));
             }
         }
 
@@ -364,7 +364,7 @@ pub const DynsymSection = struct {
 
     pub fn addSymbol(dynsym: *DynsymSection, sym_index: u32, elf_file: *Elf) !void {
         const gpa = elf_file.base.allocator;
-        const index = @intCast(u32, dynsym.symbols.items.len + 1);
+        const index = @as(u32, @intCast(dynsym.symbols.items.len + 1));
         const sym = elf_file.getSymbol(sym_index);
         sym.flags.has_dynamic = true;
         if (sym.getExtra(elf_file)) |extra| {
@@ -410,7 +410,7 @@ pub const DynsymSection = struct {
         for (dynsym.symbols.items, 1..) |dsym, index| {
             const sym = elf_file.getSymbol(dsym.index);
             var extra = sym.getExtra(elf_file).?;
-            extra.dynamic = @intCast(u32, index);
+            extra.dynamic = @as(u32, @intCast(index));
             sym.setExtra(extra, elf_file);
         }
     }
@@ -420,7 +420,7 @@ pub const DynsymSection = struct {
     }
 
     pub inline fn count(dynsym: DynsymSection) u32 {
-        return @intCast(u32, dynsym.symbols.items.len + 1);
+        return @as(u32, @intCast(dynsym.symbols.items.len + 1));
     }
 
     pub fn write(dynsym: DynsymSection, elf_file: *Elf, writer: anytype) !void {
@@ -507,7 +507,7 @@ pub const VerneedSection = struct {
         // Fixup offsets
         var count: usize = 0;
         var verneed_off: u32 = 0;
-        var vernaux_off: u32 = @intCast(u32, vern.verneed.items.len) * @sizeOf(elf.Elf64_Verneed);
+        var vernaux_off: u32 = @as(u32, @intCast(vern.verneed.items.len)) * @sizeOf(elf.Elf64_Verneed);
         for (vern.verneed.items, 0..) |*vsym, vsym_i| {
             if (vsym_i < vern.verneed.items.len - 1) vsym.vn_next = @sizeOf(elf.Elf64_Verneed);
             vsym.vn_aux = vernaux_off - verneed_off;
@@ -576,7 +576,7 @@ pub const GotSection = struct {
     }
 
     pub fn addSymbol(got: *GotSection, sym_index: u32, elf_file: *Elf) !void {
-        const index = @intCast(u32, got.symbols.items.len);
+        const index = @as(u32, @intCast(got.symbols.items.len));
         const symbol = elf_file.getSymbol(sym_index);
         if (symbol.getExtra(elf_file)) |extra| {
             var new_extra = extra;
@@ -611,7 +611,7 @@ pub const GotSection = struct {
             if (sym.flags.import) {
                 const extra = sym.getExtra(elf_file).?;
                 elf_file.addRelaDynAssumeCapacity(.{
-                    .offset = elf_file.getGotEntryAddress(@intCast(u32, i)),
+                    .offset = elf_file.getGotEntryAddress(@as(u32, @intCast(i))),
                     .sym = extra.dynamic,
                     .type = elf.R_X86_64_GLOB_DAT,
                 });
@@ -631,15 +631,15 @@ pub const GotSection = struct {
     pub fn calcSymtabSize(got: *GotSection, elf_file: *Elf) !void {
         if (elf_file.options.strip_all) return;
 
-        got.output_symtab_size.nlocals = @intCast(u32, got.symbols.items.len);
+        got.output_symtab_size.nlocals = @as(u32, @intCast(got.symbols.items.len));
         for (got.symbols.items) |sym_index| {
             const sym = elf_file.getSymbol(sym_index);
-            got.output_symtab_size.strsize += @intCast(u32, sym.getName(elf_file).len + "$got".len + 1);
+            got.output_symtab_size.strsize += @as(u32, @intCast(sym.getName(elf_file).len + "$got".len + 1));
         }
 
         if (got.emit_tlsld) {
             got.output_symtab_size.nlocals += 1;
-            got.output_symtab_size.strsize += @intCast(u32, "$tlsld".len + 1);
+            got.output_symtab_size.strsize += @as(u32, @intCast("$tlsld".len + 1));
         }
     }
 
@@ -692,7 +692,7 @@ pub const PltSection = struct {
     }
 
     pub fn addSymbol(plt: *PltSection, sym_index: u32, elf_file: *Elf) !void {
-        const index = @intCast(u32, plt.symbols.items.len);
+        const index = @as(u32, @intCast(plt.symbols.items.len));
         const symbol = elf_file.getSymbol(sym_index);
         if (symbol.getExtra(elf_file)) |extra| {
             var new_extra = extra;
@@ -719,24 +719,24 @@ pub const PltSection = struct {
             0xff, 0x35, 0x00, 0x00, 0x00, 0x00, // push qword ptr [rip] -> .got.plt[1]
             0xff, 0x25, 0x00, 0x00, 0x00, 0x00, // jmp qword ptr [rip] -> .got.plt[2]
         };
-        var disp = @intCast(i64, got_plt_addr + 8) - @intCast(i64, plt_addr + 8) - 4;
-        mem.writeIntLittle(i32, preamble[8..][0..4], @intCast(i32, disp));
-        disp = @intCast(i64, got_plt_addr + 16) - @intCast(i64, plt_addr + 14) - 4;
-        mem.writeIntLittle(i32, preamble[14..][0..4], @intCast(i32, disp));
+        var disp = @as(i64, @intCast(got_plt_addr + 8)) - @as(i64, @intCast(plt_addr + 8)) - 4;
+        mem.writeIntLittle(i32, preamble[8..][0..4], @as(i32, @intCast(disp)));
+        disp = @as(i64, @intCast(got_plt_addr + 16)) - @as(i64, @intCast(plt_addr + 14)) - 4;
+        mem.writeIntLittle(i32, preamble[14..][0..4], @as(i32, @intCast(disp)));
         try writer.writeAll(&preamble);
         try writer.writeByteNTimes(0xcc, plt_preamble_size - preamble.len);
 
         for (0..plt.symbols.items.len) |i| {
-            const target_addr = elf_file.getGotPltEntryAddress(@intCast(u32, i));
-            const source_addr = elf_file.getPltEntryAddress(@intCast(u32, i));
-            disp = @intCast(i64, target_addr) - @intCast(i64, source_addr + 12) - 4;
+            const target_addr = elf_file.getGotPltEntryAddress(@as(u32, @intCast(i)));
+            const source_addr = elf_file.getPltEntryAddress(@as(u32, @intCast(i)));
+            disp = @as(i64, @intCast(target_addr)) - @as(i64, @intCast(source_addr + 12)) - 4;
             var entry = [_]u8{
                 0xf3, 0x0f, 0x1e, 0xfa, // endbr64
                 0x41, 0xbb, 0x00, 0x00, 0x00, 0x00, // mov r11d, N
                 0xff, 0x25, 0x00, 0x00, 0x00, 0x00, // jmp qword ptr [rip] -> .got.plt[N]
             };
-            mem.writeIntLittle(i32, entry[6..][0..4], @intCast(i32, i));
-            mem.writeIntLittle(i32, entry[12..][0..4], @intCast(i32, disp));
+            mem.writeIntLittle(i32, entry[6..][0..4], @as(i32, @intCast(i)));
+            mem.writeIntLittle(i32, entry[12..][0..4], @as(i32, @intCast(disp)));
             try writer.writeAll(&entry);
         }
     }
@@ -764,7 +764,7 @@ pub const PltSection = struct {
             const sym = elf_file.getSymbol(sym_index);
             assert(sym.flags.import);
             const extra = sym.getExtra(elf_file).?;
-            const r_offset = elf_file.getGotPltEntryAddress(@intCast(u32, i));
+            const r_offset = elf_file.getGotPltEntryAddress(@as(u32, @intCast(i)));
             const r_sym: u64 = extra.dynamic;
             const r_type: u32 = elf.R_X86_64_JUMP_SLOT;
             elf_file.rela_plt.appendAssumeCapacity(.{
@@ -782,10 +782,10 @@ pub const PltSection = struct {
     pub fn calcSymtabSize(plt: *PltSection, elf_file: *Elf) !void {
         if (elf_file.options.strip_all) return;
 
-        plt.output_symtab_size.nlocals = @intCast(u32, plt.symbols.items.len);
+        plt.output_symtab_size.nlocals = @as(u32, @intCast(plt.symbols.items.len));
         for (plt.symbols.items) |sym_index| {
             const sym = elf_file.getSymbol(sym_index);
-            plt.output_symtab_size.strsize += @intCast(u32, sym.getName(elf_file).len + "$plt".len + 1);
+            plt.output_symtab_size.strsize += @as(u32, @intCast(sym.getName(elf_file).len + "$plt".len + 1));
         }
     }
 
@@ -805,7 +805,7 @@ pub const PltSection = struct {
                 .st_info = elf.STT_FUNC,
                 .st_other = 0,
                 .st_shndx = elf_file.plt_sect_index.?,
-                .st_value = elf_file.getPltEntryAddress(@intCast(u32, i)),
+                .st_value = elf_file.getPltEntryAddress(@as(u32, @intCast(i))),
                 .st_size = 16,
             };
             ilocal += 1;
@@ -822,7 +822,7 @@ pub const PltGotSection = struct {
     }
 
     pub fn addSymbol(plt_got: *PltGotSection, sym_index: u32, elf_file: *Elf) !void {
-        const index = @intCast(u32, plt_got.symbols.items.len);
+        const index = @as(u32, @intCast(plt_got.symbols.items.len));
         const symbol = elf_file.getSymbol(sym_index);
         if (symbol.getExtra(elf_file)) |extra| {
             var new_extra = extra;
@@ -842,14 +842,14 @@ pub const PltGotSection = struct {
             assert(sym.flags.import);
             const extra = sym.getExtra(elf_file).?;
             const target_addr = elf_file.getGotEntryAddress(extra.got);
-            const source_addr = elf_file.getPltGotEntryAddress(@intCast(u32, i));
-            const disp = @intCast(i64, target_addr) - @intCast(i64, source_addr + 6) - 4;
+            const source_addr = elf_file.getPltGotEntryAddress(@as(u32, @intCast(i)));
+            const disp = @as(i64, @intCast(target_addr)) - @as(i64, @intCast(source_addr + 6)) - 4;
             var entry = [_]u8{
                 0xf3, 0x0f, 0x1e, 0xfa, // endbr64
                 0xff, 0x25, 0x00, 0x00, 0x00, 0x00, // jmp qword ptr [rip] -> .got[N]
                 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
             };
-            mem.writeIntLittle(i32, entry[6..][0..4], @intCast(i32, disp));
+            mem.writeIntLittle(i32, entry[6..][0..4], @as(i32, @intCast(disp)));
             try writer.writeAll(&entry);
         }
     }
@@ -857,10 +857,10 @@ pub const PltGotSection = struct {
     pub fn calcSymtabSize(plt_got: *PltGotSection, elf_file: *Elf) !void {
         if (elf_file.options.strip_all) return;
 
-        plt_got.output_symtab_size.nlocals = @intCast(u32, plt_got.symbols.items.len);
+        plt_got.output_symtab_size.nlocals = @as(u32, @intCast(plt_got.symbols.items.len));
         for (plt_got.symbols.items) |sym_index| {
             const sym = elf_file.getSymbol(sym_index);
-            plt_got.output_symtab_size.strsize += @intCast(u32, sym.getName(elf_file).len + "$pltgot".len + 1);
+            plt_got.output_symtab_size.strsize += @as(u32, @intCast(sym.getName(elf_file).len + "$pltgot".len + 1));
         }
     }
 
@@ -880,7 +880,7 @@ pub const PltGotSection = struct {
                 .st_info = elf.STT_FUNC,
                 .st_other = 0,
                 .st_shndx = elf_file.plt_got_sect_index.?,
-                .st_value = elf_file.getPltGotEntryAddress(@intCast(u32, i)),
+                .st_value = elf_file.getPltGotEntryAddress(@as(u32, @intCast(i))),
                 .st_size = 16,
             };
             ilocal += 1;
@@ -896,7 +896,7 @@ pub const CopyRelSection = struct {
     }
 
     pub fn addSymbol(copy_rel: *CopyRelSection, sym_index: u32, elf_file: *Elf) !void {
-        const index = @intCast(u32, copy_rel.symbols.items.len);
+        const index = @as(u32, @intCast(copy_rel.symbols.items.len));
         const symbol = elf_file.getSymbol(sym_index);
         symbol.flags.import = true;
         symbol.flags.@"export" = true;

@@ -4,12 +4,12 @@
 
     .dependencies = .{
         .@"zig-yaml" = .{
-            .url = "https://github.com/kubkon/zig-yaml/archive/7c17c80c7e2b6affc50299589e08c95acc387500.tar.gz",
-            .hash = "1220612e05ed567cc017a5106a391ebbe81bae13834fa275c6e5e339ba635c9e4b58",
+            .url = "https://github.com/kubkon/zig-yaml/archive/3d3c7ae400243a37c6b422b6cba7173656984897.tar.gz",
+            .hash = "1220f0c7649b960b95377376700ffdc5ac7dd6607c1594f77d15e2a8bdaa01d1a7d9",
         },
         .@"zig-dis-x86_64" = .{
-            .url = "https://github.com/kubkon/zig-dis-x86_64/archive/6b68fdc176d50d181926eada6abf10b2b94a8542.tar.gz",
-            .hash = "122007a29a58ad6d1e59644af47289d38f8cfb95ed8f2673b5c51326c67d13b4b656",
+            .url = "https://github.com/kubkon/zig-dis-x86_64/archive/4d55c8a87611a068aead582ede924f736247ec8c.tar.gz",
+            .hash = "122011b4059546c8d82c04d3871df5c94df9bb5f6412ac7fbd55e11020b550a200b6",
         },
     },
 }

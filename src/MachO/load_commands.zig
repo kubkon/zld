@@ -109,7 +109,7 @@ fn calcLCsSize(gpa: Allocator, options: *const Options, ctx: CalcLCsSizeCtx, ass
         }
     }
 
-    return @intCast(u32, sizeofcmds);
+    return @as(u32, @intCast(sizeofcmds));
 }
 
 pub fn calcMinHeaderPad(gpa: Allocator, options: *const Options, ctx: CalcLCsSizeCtx) !u64 {
@@ -135,7 +135,7 @@ pub fn calcNumOfLCs(lc_buffer: []const u8) u32 {
     var pos: usize = 0;
     while (true) {
         if (pos >= lc_buffer.len) break;
-        const cmd = @ptrCast(*align(1) const macho.load_command, lc_buffer.ptr + pos).*;
+        const cmd = @as(*align(1) const macho.load_command, @ptrCast(lc_buffer.ptr + pos)).*;
         ncmds += 1;
         pos += cmd.cmdsize;
     }
@@ -144,11 +144,11 @@ pub fn calcNumOfLCs(lc_buffer: []const u8) u32 {
 
 pub fn writeDylinkerLC(lc_writer: anytype) !void {
     const name_len = mem.sliceTo(default_dyld_path, 0).len;
-    const cmdsize = @intCast(u32, mem.alignForward(
+    const cmdsize = @as(u32, @intCast(mem.alignForward(
         u64,
         @sizeOf(macho.dylinker_command) + name_len,
         @sizeOf(u64),
-    ));
+    )));
     try lc_writer.writeStruct(macho.dylinker_command{
         .cmd = .LOAD_DYLINKER,
         .cmdsize = cmdsize,
@@ -171,11 +171,11 @@ const WriteDylibLCCtx = struct {
 
 fn writeDylibLC(ctx: WriteDylibLCCtx, lc_writer: anytype) !void {
     const name_len = ctx.name.len + 1;
-    const cmdsize = @intCast(u32, mem.alignForward(
+    const cmdsize = @as(u32, @intCast(mem.alignForward(
         u64,
         @sizeOf(macho.dylib_command) + name_len,
         @sizeOf(u64),
-    ));
+    )));
     try lc_writer.writeStruct(macho.dylib_command{
         .cmd = ctx.cmd,
         .cmdsize = cmdsize,
@@ -211,8 +211,8 @@ pub fn writeDylibIdLC(options: *const Options, lc_writer: anytype) !void {
     try writeDylibLC(.{
         .cmd = .ID_DYLIB,
         .name = install_name,
-        .current_version = @intCast(u32, curr.major << 16 | curr.minor << 8 | curr.patch),
-        .compatibility_version = @intCast(u32, compat.major << 16 | compat.minor << 8 | compat.patch),
+        .current_version = @as(u32, @intCast(curr.major << 16 | curr.minor << 8 | curr.patch)),
+        .compatibility_version = @as(u32, @intCast(compat.major << 16 | compat.minor << 8 | compat.patch)),
     }, lc_writer);
 }
 
@@ -247,11 +247,11 @@ pub fn writeRpathLCs(gpa: Allocator, options: *const Options, lc_writer: anytype
 
     while (try it.next()) |rpath| {
         const rpath_len = rpath.len + 1;
-        const cmdsize = @intCast(u32, mem.alignForward(
+        const cmdsize = @as(u32, @intCast(mem.alignForward(
             u64,
             @sizeOf(macho.rpath_command) + rpath_len,
             @sizeOf(u64),
-        ));
+        )));
         try lc_writer.writeStruct(macho.rpath_command{
             .cmdsize = cmdsize,
             .path = @sizeOf(macho.rpath_command),
@@ -269,12 +269,12 @@ pub fn writeBuildVersionLC(options: *const Options, lc_writer: anytype) !void {
     const cmdsize = @sizeOf(macho.build_version_command) + @sizeOf(macho.build_tool_version);
     const platform_version = blk: {
         const ver = options.platform_version;
-        const platform_version = @intCast(u32, ver.major << 16 | ver.minor << 8);
+        const platform_version = @as(u32, @intCast(ver.major << 16 | ver.minor << 8));
         break :blk platform_version;
     };
     const sdk_version = blk: {
         const ver = options.sdk_version;
-        const sdk_version = @intCast(u32, ver.major << 16 | ver.minor << 8);
+        const sdk_version = @as(u32, @intCast(ver.major << 16 | ver.minor << 8));
         break :blk sdk_version;
     };
     const is_simulator_abi = options.target.abi.? == .simulator;
@@ -292,7 +292,7 @@ pub fn writeBuildVersionLC(options: *const Options, lc_writer: anytype) !void {
         .ntools = 1,
     });
     try lc_writer.writeAll(mem.asBytes(&macho.build_tool_version{
-        .tool = @enumFromInt(macho.TOOL, 0x6),
+        .tool = @as(macho.TOOL, @enumFromInt(0x6)),
         .version = 0x0,
     }));
 }

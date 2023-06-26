@@ -134,7 +134,7 @@ pub fn parse(self: *Archive, arena: Allocator, elf_file: *Elf) !void {
 
 fn getString(self: Archive, off: u32) []const u8 {
     assert(off < self.strtab.len);
-    return mem.sliceTo(@ptrCast([*:'\n']const u8, self.strtab.ptr + off), 0);
+    return mem.sliceTo(@as([*:'\n']const u8, @ptrCast(self.strtab.ptr + off)), 0);
 }
 
 const std = @import("std");

@@ -63,7 +63,7 @@ const Symbol = extern struct {
             const offset = mem.readIntNative(u32, self.name[4..]);
             return object.getString(offset);
         } else {
-            return mem.span(@ptrCast([*:0]const u8, &self.name));
+            return mem.span(@as([*:0]const u8, @ptrCast(&self.name)));
         }
     }
 };
@@ -184,5 +184,5 @@ fn parseStrtab(self: *Object, allocator: Allocator) !void {
 pub fn getString(self: *Object, off: u32) []const u8 {
     const local_offset = off - @sizeOf(u32);
     assert(local_offset < self.symtab.items.len);
-    return mem.span(@ptrCast([*:0]const u8, self.strtab.ptr + local_offset));
+    return mem.span(@as([*:0]const u8, @ptrCast(self.strtab.ptr + local_offset)));
 }

@@ -165,9 +165,9 @@ pub fn getAllErrorsAlloc(base: *Zld) !ErrorBundle {
         const notes = msg.notes orelse &[0]ErrorMsg{};
         try bundle.addRootErrorMessage(.{
             .msg = try bundle.addString(msg.msg),
-            .notes_len = @intCast(u32, notes.len),
+            .notes_len = @as(u32, @intCast(notes.len)),
         });
-        const notes_start = try bundle.reserveNotes(@intCast(u32, notes.len));
+        const notes_start = try bundle.reserveNotes(@as(u32, @intCast(notes.len)));
         for (notes_start.., notes) |index, note| {
             bundle.extra.items[index] = @intFromEnum(bundle.addErrorMessageAssumeCapacity(.{
                 .msg = try bundle.addString(note.msg),

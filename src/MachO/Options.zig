@@ -300,7 +300,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
 
             // First, try parsing platform as a numeric value.
             if (std.fmt.parseUnsigned(u32, platform, 10)) |ord| {
-                switch (@enumFromInt(macho.PLATFORM, ord)) {
+                switch (@as(macho.PLATFORM, @enumFromInt(ord))) {
                     .MACOS => tmp_target = .{
                         .os_tag = .macos,
                         .abi = .none,

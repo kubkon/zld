@@ -122,7 +122,7 @@ pub fn createThunks(macho_file: *MachO, sect_id: u8) !void {
         }
 
         // Insert thunk at group_end
-        const thunk_index = @intCast(u32, macho_file.thunks.items.len);
+        const thunk_index = @as(u32, @intCast(macho_file.thunks.items.len));
         try macho_file.thunks.append(gpa, .{ .start_index = undefined, .len = 0 });
 
         // Scan relocs in the group and create trampolines for any unreachable callsite.
@@ -165,7 +165,7 @@ pub fn createThunks(macho_file: *MachO, sect_id: u8) !void {
         }
     }
 
-    header.size = @intCast(u32, offset);
+    header.size = @as(u32, @intCast(offset));
 }
 
 fn allocateThunk(
@@ -214,7 +214,7 @@ fn scanRelocs(
 
     const base_offset = if (object.getSourceSymbol(atom.sym_index)) |source_sym| blk: {
         const source_sect = object.getSourceSection(source_sym.n_sect - 1);
-        break :blk @intCast(i32, source_sym.n_value - source_sect.addr);
+        break :blk @as(i32, @intCast(source_sym.n_value - source_sect.addr));
     } else 0;
 
     const code = Atom.getAtomCode(macho_file, atom_index);
@@ -280,7 +280,7 @@ fn scanRelocs(
 }
 
 inline fn relocNeedsThunk(rel: macho.relocation_info) bool {
-    const rel_type = @enumFromInt(macho.reloc_type_arm64, rel.r_type);
+    const rel_type = @as(macho.reloc_type_arm64, @enumFromInt(rel.r_type));
     return rel_type == .ARM64_RELOC_BRANCH26;
 }
 
@@ -306,7 +306,7 @@ fn isReachable(
 
     if (!allocated.contains(target_atom_index)) return false;
 
-    const source_addr = source_sym.n_value + @intCast(u32, rel.r_address - base_offset);
+    const source_addr = source_sym.n_value + @as(u32, @intCast(rel.r_address - base_offset));
     const is_via_got = Atom.relocRequiresGot(macho_file, rel);
     const target_addr = Atom.getRelocTargetAddress(macho_file, target, is_via_got, false) catch unreachable;
     _ = Atom.calcPcRelativeDisplacementArm64(source_addr, target_addr) catch
@@ -340,7 +340,7 @@ fn getThunkIndex(macho_file: *MachO, atom_index: AtomIndex) ?ThunkIndex {
         const end_addr = start_addr + thunk.getSize();
 
         if (start_addr <= sym.n_value and sym.n_value < end_addr) {
-            return @intCast(u32, i);
+            return @as(u32, @intCast(i));
         }
     }
     return null;

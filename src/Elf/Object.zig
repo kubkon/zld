@@ -64,7 +64,7 @@ pub fn parse(self: *Object, elf_file: *Elf) !void {
     self.shstrtab = self.getShdrContents(self.header.?.e_shstrndx);
 
     const symtab_index = for (self.getShdrs(), 0..) |shdr, i| switch (shdr.sh_type) {
-        elf.SHT_SYMTAB => break @intCast(u16, i),
+        elf.SHT_SYMTAB => break @as(u16, @intCast(i)),
         else => {},
     } else null;
 
@@ -74,8 +74,8 @@ pub fn parse(self: *Object, elf_file: *Elf) !void {
 
         const symtab = self.getShdrContents(index);
         const nsyms = @divExact(symtab.len, @sizeOf(elf.Elf64_Sym));
-        self.symtab = @ptrCast([*]align(1) const elf.Elf64_Sym, symtab.ptr)[0..nsyms];
-        self.strtab = self.getShdrContents(@intCast(u16, shdr.sh_link));
+        self.symtab = @as([*]align(1) const elf.Elf64_Sym, @ptrCast(symtab.ptr))[0..nsyms];
+        self.strtab = self.getShdrContents(@as(u16, @intCast(shdr.sh_link)));
     }
 
     try self.initAtoms(elf_file);
@@ -85,7 +85,7 @@ pub fn parse(self: *Object, elf_file: *Elf) !void {
         const atom = elf_file.getAtom(self.atoms.items[i]) orelse continue;
         if (!atom.alive) continue;
         if (shdr.sh_type == elf.SHT_X86_64_UNWIND or mem.eql(u8, atom.getName(elf_file), ".eh_frame"))
-            try self.parseEhFrame(@intCast(u16, i), elf_file);
+            try self.parseEhFrame(@as(u16, @intCast(i)), elf_file);
     }
 }
 
@@ -114,10 +114,10 @@ fn initAtoms(self: *Object, elf_file: *Elf) !void {
                     break :blk self.getString(group_info_sym.st_name);
                 };
 
-                const shndx = @intCast(u16, i);
+                const shndx = @as(u16, @intCast(i));
                 const group_raw_data = self.getShdrContents(shndx);
                 const group_nmembers = @divExact(group_raw_data.len, @sizeOf(u32));
-                const group_members = @ptrCast([*]align(1) const u32, group_raw_data.ptr)[0..group_nmembers];
+                const group_members = @as([*]align(1) const u32, @ptrCast(group_raw_data.ptr))[0..group_nmembers];
 
                 if (group_members[0] != 0x1) { // GRP_COMDAT
                     elf_file.base.fatal("{}: unknown SHT_GROUP format", .{self.fmtPath()});
@@ -146,7 +146,7 @@ fn initAtoms(self: *Object, elf_file: *Elf) !void {
 
             else => {
                 const name = self.getShString(shdr.sh_name);
-                const shndx = @intCast(u16, i);
+                const shndx = @as(u16, @intCast(i));
 
                 if (mem.eql(u8, ".note.GNU-stack", name)) {
                     if (shdr.sh_flags & elf.SHF_EXECINSTR != 0) {
@@ -172,7 +172,7 @@ fn initAtoms(self: *Object, elf_file: *Elf) !void {
         elf.SHT_REL, elf.SHT_RELA => {
             const atom_index = self.atoms.items[shdr.sh_info];
             if (elf_file.getAtom(atom_index)) |atom| {
-                atom.relocs_shndx = @intCast(u16, i);
+                atom.relocs_shndx = @as(u16, @intCast(i));
             }
         },
         else => {},
@@ -190,11 +190,11 @@ fn addAtom(self: *Object, shdr: elf.Elf64_Shdr, shndx: u16, name: [:0]const u8, 
 
     if (shdr.sh_flags & elf.SHF_COMPRESSED != 0) {
         const data = self.getShdrContents(shndx);
-        const chdr = @ptrCast(*align(1) const elf.Elf64_Chdr, data.ptr).*;
-        atom.size = @intCast(u32, chdr.ch_size);
+        const chdr = @as(*align(1) const elf.Elf64_Chdr, @ptrCast(data.ptr)).*;
+        atom.size = @as(u32, @intCast(chdr.ch_size));
         atom.alignment = math.log2_int(u64, chdr.ch_addralign);
     } else {
-        atom.size = @intCast(u32, shdr.sh_size);
+        atom.size = @as(u32, @intCast(shdr.sh_size));
         atom.alignment = math.log2_int(u64, shdr.sh_addralign);
     }
 }
@@ -235,7 +235,7 @@ fn initSymtab(self: *Object, elf_file: *Elf) !void {
         symbol.* = .{
             .value = sym.st_value,
             .name = try elf_file.string_intern.insert(gpa, name),
-            .sym_idx = @intCast(u32, i),
+            .sym_idx = @as(u32, @intCast(i)),
             .atom = if (sym.st_shndx == elf.SHN_ABS) 0 else self.atoms.items[sym.st_shndx],
             .file = self.index,
         };
@@ -251,7 +251,7 @@ fn initSymtab(self: *Object, elf_file: *Elf) !void {
 
 fn parseEhFrame(self: *Object, shndx: u16, elf_file: *Elf) !void {
     const relocs_shndx = for (self.getShdrs(), 0..) |shdr, i| switch (shdr.sh_type) {
-        elf.SHT_RELA => if (shdr.sh_info == shndx) break @intCast(u16, i),
+        elf.SHT_RELA => if (shdr.sh_info == shndx) break @as(u16, @intCast(i)),
         else => {},
     } else {
         log.debug("{s}: missing reloc section for unwind info section", .{self.fmtPath()});
@@ -271,8 +271,8 @@ fn parseEhFrame(self: *Object, shndx: u16, elf_file: *Elf) !void {
             .cie => try self.cies.append(gpa, .{
                 .offset = rec.offset,
                 .size = rec.size,
-                .rel_index = @intCast(u32, rel_range.start),
-                .rel_num = @intCast(u32, rel_range.len),
+                .rel_index = @as(u32, @intCast(rel_range.start)),
+                .rel_num = @as(u32, @intCast(rel_range.len)),
                 .rel_shndx = relocs_shndx,
                 .shndx = shndx,
                 .file = self.index,
@@ -281,8 +281,8 @@ fn parseEhFrame(self: *Object, shndx: u16, elf_file: *Elf) !void {
                 .offset = rec.offset,
                 .size = rec.size,
                 .cie_index = undefined,
-                .rel_index = @intCast(u32, rel_range.start),
-                .rel_num = @intCast(u32, rel_range.len),
+                .rel_index = @as(u32, @intCast(rel_range.start)),
+                .rel_num = @as(u32, @intCast(rel_range.len)),
                 .rel_shndx = relocs_shndx,
                 .shndx = shndx,
                 .file = self.index,
@@ -294,7 +294,7 @@ fn parseEhFrame(self: *Object, shndx: u16, elf_file: *Elf) !void {
     for (self.fdes.items[fdes_start..]) |*fde| {
         const cie_ptr = fde.offset + 4 - fde.getCiePointer(elf_file);
         const cie_index = for (self.cies.items[cies_start..], cies_start..) |cie, cie_index| {
-            if (cie.offset == cie_ptr) break @intCast(u32, cie_index);
+            if (cie.offset == cie_ptr) break @as(u32, @intCast(cie_index));
         } else {
             elf_file.base.fatal("{s}: no matching CIE found for FDE at offset {x}", .{
                 self.fmtPath(),
@@ -316,7 +316,7 @@ fn parseEhFrame(self: *Object, shndx: u16, elf_file: *Elf) !void {
     mem.sort(Fde, self.fdes.items[fdes_start..], elf_file, SortFdes.lessThan);
 
     // Create a back-link from atom to FDEs
-    var i: u32 = @intCast(u32, fdes_start);
+    var i: u32 = @as(u32, @intCast(fdes_start));
     while (i < self.fdes.items.len) {
         const fde = self.fdes.items[i];
         const atom = fde.getAtom(elf_file);
@@ -382,7 +382,7 @@ pub fn scanRelocs(self: *Object, elf_file: *Elf) !void {
 pub fn resolveSymbols(self: *Object, elf_file: *Elf) void {
     const first_global = self.first_global orelse return;
     for (self.getGlobals(), 0..) |index, i| {
-        const sym_idx = @intCast(u32, first_global + i);
+        const sym_idx = @as(u32, @intCast(first_global + i));
         const this_sym = self.symtab[sym_idx];
 
         if (this_sym.st_shndx == elf.SHN_UNDEF) continue;
@@ -440,7 +440,7 @@ pub fn markLive(self: *Object, elf_file: *Elf) void {
 pub fn checkDuplicates(self: *Object, elf_file: *Elf) void {
     const first_global = self.first_global orelse return;
     for (self.getGlobals(), 0..) |index, i| {
-        const sym_idx = @intCast(u32, first_global + i);
+        const sym_idx = @as(u32, @intCast(first_global + i));
         const this_sym = self.symtab[sym_idx];
         const global = elf_file.getSymbol(index);
         const global_file = global.getFile(elf_file) orelse continue;
@@ -469,7 +469,7 @@ pub fn checkDuplicates(self: *Object, elf_file: *Elf) void {
 pub fn convertCommonSymbols(self: *Object, elf_file: *Elf) !void {
     const first_global = self.first_global orelse return;
     for (self.getGlobals(), 0..) |index, i| {
-        const sym_idx = @intCast(u32, first_global + i);
+        const sym_idx = @as(u32, @intCast(first_global + i));
         const this_sym = self.symtab[sym_idx];
         if (this_sym.st_shndx != elf.SHN_COMMON) continue;
 
@@ -494,14 +494,14 @@ pub fn convertCommonSymbols(self: *Object, elf_file: *Elf) !void {
         atom.atom_index = atom_index;
         atom.name = global.name;
         atom.file = self.index;
-        atom.size = @intCast(u32, this_sym.st_size);
+        atom.size = @as(u32, @intCast(this_sym.st_size));
         const alignment = this_sym.st_value;
         atom.alignment = math.log2_int(u64, alignment);
 
         const is_tls = global.getType(elf_file) == elf.STT_TLS;
         var sh_flags: u32 = elf.SHF_ALLOC | elf.SHF_WRITE;
         if (is_tls) sh_flags |= elf.SHF_TLS;
-        const shndx = @intCast(u16, self.getShdrs().len + self.dummy_shdrs.items.len);
+        const shndx = @as(u16, @intCast(self.getShdrs().len + self.dummy_shdrs.items.len));
         const shdr = try self.dummy_shdrs.addOne(gpa);
         shdr.* = .{
             .sh_name = 0,
@@ -536,7 +536,7 @@ pub fn calcSymtabSize(self: *Object, elf_file: *Elf) !void {
         }
         local.flags.output_symtab = true;
         self.output_symtab_size.nlocals += 1;
-        self.output_symtab_size.strsize += @intCast(u32, local.getName(elf_file).len + 1);
+        self.output_symtab_size.strsize += @as(u32, @intCast(local.getName(elf_file).len + 1));
     }
 
     for (self.getGlobals()) |global_index| {
@@ -549,7 +549,7 @@ pub fn calcSymtabSize(self: *Object, elf_file: *Elf) !void {
         } else {
             self.output_symtab_size.nglobals += 1;
         }
-        self.output_symtab_size.strsize += @intCast(u32, global.getName(elf_file).len + 1);
+        self.output_symtab_size.strsize += @as(u32, @intCast(global.getName(elf_file).len + 1));
     }
 }
 
@@ -599,7 +599,7 @@ pub inline fn getSymbol(self: *Object, index: u32, elf_file: *Elf) *Symbol {
 
 pub inline fn getShdrs(self: *Object) []align(1) const elf.Elf64_Shdr {
     const header = self.header orelse return &[0]elf.Elf64_Shdr{};
-    return @ptrCast([*]align(1) const elf.Elf64_Shdr, self.data.ptr + header.e_shoff)[0..header.e_shnum];
+    return @as([*]align(1) const elf.Elf64_Shdr, @ptrCast(self.data.ptr + header.e_shoff))[0..header.e_shnum];
 }
 
 pub inline fn getShdrContents(self: *Object, index: u32) []const u8 {
@@ -617,18 +617,18 @@ pub fn getShdr(self: *Object, index: u32) elf.Elf64_Shdr {
 
 inline fn getString(self: *Object, off: u32) [:0]const u8 {
     assert(off < self.strtab.len);
-    return mem.sliceTo(@ptrCast([*:0]const u8, self.strtab.ptr + off), 0);
+    return mem.sliceTo(@as([*:0]const u8, @ptrCast(self.strtab.ptr + off)), 0);
 }
 
 inline fn getShString(self: *Object, off: u32) [:0]const u8 {
     assert(off < self.shstrtab.len);
-    return mem.sliceTo(@ptrCast([*:0]const u8, self.shstrtab.ptr + off), 0);
+    return mem.sliceTo(@as([*:0]const u8, @ptrCast(self.shstrtab.ptr + off)), 0);
 }
 
 pub fn getComdatGroupMembers(self: *Object, index: u16) []align(1) const u32 {
     const raw = self.getShdrContents(index);
     const nmembers = @divExact(raw.len, @sizeOf(u32));
-    const members = @ptrCast([*]align(1) const u32, raw.ptr)[1..nmembers];
+    const members = @as([*]align(1) const u32, @ptrCast(raw.ptr))[1..nmembers];
     return members;
 }
 
@@ -639,7 +639,7 @@ pub fn asFile(self: *Object) File {
 pub fn getRelocs(self: *Object, shndx: u32) []align(1) const elf.Elf64_Rela {
     const raw = self.getShdrContents(shndx);
     const num = @divExact(raw.len, @sizeOf(elf.Elf64_Rela));
-    return @ptrCast([*]align(1) const elf.Elf64_Rela, raw.ptr)[0..num];
+    return @as([*]align(1) const elf.Elf64_Rela, @ptrCast(raw.ptr))[0..num];
 }
 
 pub fn format(

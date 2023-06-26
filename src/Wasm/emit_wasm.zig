@@ -158,7 +158,7 @@ pub fn emit(wasm: *Wasm) !void {
                 try leb.writeULEB128(writer, @as(u32, 0)); // memory is always index 0 as we only have 1 memory entry
             }
             if (!segment.isPassive()) {
-                try emitInitExpression(.{ .i32_const = @bitCast(i32, segment.offset) }, writer);
+                try emitInitExpression(.{ .i32_const = @as(i32, @bitCast(segment.offset)) }, writer);
             }
             try leb.writeULEB128(writer, segment.size);
 
@@ -227,7 +227,7 @@ pub fn emit(wasm: *Wasm) !void {
         std.mem.sort(Wasm.SymbolWithLoc, globals.items, wasm, lessThan);
 
         const offset = try reserveCustomSectionHeader(file);
-        try leb.writeULEB128(writer, @intCast(u32, "name".len));
+        try leb.writeULEB128(writer, @as(u32, @intCast("name".len)));
         try writer.writeAll("name");
 
         try emitNameSection(wasm, 0x01, wasm.base.allocator, funcs.values(), writer);
@@ -252,7 +252,7 @@ fn emitSymbol(wasm: *const Wasm, loc: Wasm.SymbolWithLoc, writer: anytype) !void
     const symbol = loc.getSymbol(wasm);
     const name = loc.getName(wasm);
     try leb.writeULEB128(writer, symbol.index);
-    try leb.writeULEB128(writer, @intCast(u32, name.len));
+    try leb.writeULEB128(writer, @as(u32, @intCast(name.len)));
     try writer.writeAll(name);
 }
 
@@ -261,10 +261,10 @@ fn emitNameSection(wasm: *const Wasm, name_type: u8, gpa: std.mem.Allocator, ite
     defer section_list.deinit();
     const sec_writer = section_list.writer();
 
-    try leb.writeULEB128(sec_writer, @intCast(u32, items.len));
+    try leb.writeULEB128(sec_writer, @as(u32, @intCast(items.len)));
     for (items) |sym_loc| try emitSymbol(wasm, sym_loc, sec_writer);
     try leb.writeULEB128(writer, name_type);
-    try leb.writeULEB128(writer, @intCast(u32, section_list.items.len));
+    try leb.writeULEB128(writer, @as(u32, @intCast(section_list.items.len)));
     try writer.writeAll(section_list.items);
 }
 
@@ -276,12 +276,12 @@ fn emitDataNamesSection(wasm: *Wasm, gpa: std.mem.Allocator, writer: anytype) !v
     try leb.writeULEB128(sec_writer, wasm.dataCount());
     for (wasm.data_segments.keys(), 0..) |key, index| {
         if (std.mem.eql(u8, key, ".bss") and !wasm.options.import_memory) continue;
-        try leb.writeULEB128(sec_writer, @intCast(u32, index));
-        try leb.writeULEB128(sec_writer, @intCast(u32, key.len));
+        try leb.writeULEB128(sec_writer, @as(u32, @intCast(index)));
+        try leb.writeULEB128(sec_writer, @as(u32, @intCast(key.len)));
         try sec_writer.writeAll(key);
     }
     try leb.writeULEB128(writer, @as(u8, 0x09));
-    try leb.writeULEB128(writer, @intCast(u32, section_list.items.len));
+    try leb.writeULEB128(writer, @as(u32, @intCast(section_list.items.len)));
     try writer.writeAll(section_list.items);
 }
 
@@ -315,8 +315,8 @@ fn emitSectionHeader(file: fs.File, offset: u64, section_type: std.wasm.Section,
 
     const pos = try file.getPos();
     const byte_size = pos + 5 - offset; // +5 due to 'entries' also being part of byte size
-    leb.writeUnsignedFixed(5, buf[1..6], @intCast(u32, byte_size));
-    leb.writeUnsignedFixed(5, buf[6..], @intCast(u32, entries));
+    leb.writeUnsignedFixed(5, buf[1..6], @as(u32, @intCast(byte_size)));
+    leb.writeUnsignedFixed(5, buf[6..], @as(u32, @intCast(entries)));
     try file.pwriteAll(&buf, offset - buf.len);
     log.debug("Written section '{s}' offset=0x{x:0>8} size={d} count={d}", .{
         @tagName(section_type),
@@ -331,18 +331,18 @@ fn emitCustomHeader(file: fs.File, offset: u64) !void {
     buf[0] = 0; // 0 = 'custom' section
     const pos = try file.getPos();
     const byte_size = pos - offset;
-    leb.writeUnsignedFixed(5, buf[1..6], @intCast(u32, byte_size));
+    leb.writeUnsignedFixed(5, buf[1..6], @as(u32, @intCast(byte_size)));
     try file.pwriteAll(&buf, offset - buf.len);
 }
 
 fn emitType(type_entry: std.wasm.Type, writer: anytype) !void {
     log.debug("Writing type {}", .{type_entry});
     try leb.writeULEB128(writer, @as(u8, 0x60)); //functype
-    try leb.writeULEB128(writer, @intCast(u32, type_entry.params.len));
+    try leb.writeULEB128(writer, @as(u32, @intCast(type_entry.params.len)));
     for (type_entry.params) |para_ty| {
         try leb.writeULEB128(writer, @intFromEnum(para_ty));
     }
-    try leb.writeULEB128(writer, @intCast(u32, type_entry.returns.len));
+    try leb.writeULEB128(writer, @as(u32, @intCast(type_entry.returns.len)));
     for (type_entry.returns) |ret_ty| {
         try leb.writeULEB128(writer, @intFromEnum(ret_ty));
     }
@@ -390,11 +390,11 @@ fn emitImportSymbol(wasm: *Wasm, sym_loc: Wasm.SymbolWithLoc, writer: anytype) !
 
 fn emitImport(import_entry: std.wasm.Import, writer: anytype) !void {
     const module_name = import_entry.module_name;
-    try leb.writeULEB128(writer, @intCast(u32, module_name.len));
+    try leb.writeULEB128(writer, @as(u32, @intCast(module_name.len)));
     try writer.writeAll(module_name);
 
     const name = import_entry.name;
-    try leb.writeULEB128(writer, @intCast(u32, name.len));
+    try leb.writeULEB128(writer, @as(u32, @intCast(name.len)));
     try writer.writeAll(name);
 
     try leb.writeULEB128(writer, @intFromEnum(import_entry.kind));
@@ -448,7 +448,7 @@ fn emitInitExpression(init: std.wasm.InitExpression, writer: anytype) !void {
 }
 
 fn emitExport(exported: std.wasm.Export, writer: anytype) !void {
-    try leb.writeULEB128(writer, @intCast(u32, exported.name.len));
+    try leb.writeULEB128(writer, @as(u32, @intCast(exported.name.len)));
     try writer.writeAll(exported.name);
     try leb.writeULEB128(writer, @intFromEnum(exported.kind));
     try leb.writeULEB128(writer, exported.index);
@@ -477,7 +477,7 @@ const ProducerField = struct {
             var hasher = std.hash.Wyhash.init(0);
             hasher.update(field.value);
             hasher.update(field.version);
-            return @truncate(u32, hasher.final());
+            return @as(u32, @truncate(hasher.final()));
         }
 
         pub fn eql(ctx: Context, lhs: ProducerField, rhs: ProducerField, index: usize) bool {
@@ -549,11 +549,11 @@ fn emitProducerSection(file: fs.File, wasm: *const Wasm, gpa: std.mem.Allocator,
     }
 
     const producers = "producers";
-    try leb.writeULEB128(writer, @intCast(u32, producers.len));
+    try leb.writeULEB128(writer, @as(u32, @intCast(producers.len)));
     try writer.writeAll(producers);
 
     var fields_count: u32 = 1; // always have a processed-by field
-    const languages_count = @intCast(u32, languages_map.count());
+    const languages_count = @as(u32, @intCast(languages_map.count()));
 
     if (languages_count > 0) {
         fields_count += 1;
@@ -563,16 +563,16 @@ fn emitProducerSection(file: fs.File, wasm: *const Wasm, gpa: std.mem.Allocator,
 
     if (languages_count > 0) {
         const language = "language";
-        try leb.writeULEB128(writer, @intCast(u32, language.len));
+        try leb.writeULEB128(writer, @as(u32, @intCast(language.len)));
         try writer.writeAll(language);
 
         try leb.writeULEB128(writer, languages_count);
 
         for (languages_map.keys()) |field| {
-            try leb.writeULEB128(writer, @intCast(u32, field.value.len));
+            try leb.writeULEB128(writer, @as(u32, @intCast(field.value.len)));
             try writer.writeAll(field.value);
 
-            try leb.writeULEB128(writer, @intCast(u32, field.version.len));
+            try leb.writeULEB128(writer, @as(u32, @intCast(field.version.len)));
             try writer.writeAll(field.version);
         }
     }
@@ -580,17 +580,17 @@ fn emitProducerSection(file: fs.File, wasm: *const Wasm, gpa: std.mem.Allocator,
     // processed-by field (this is never empty as it's always populated by Zld itself)
     {
         const processed_by = "processed-by";
-        try leb.writeULEB128(writer, @intCast(u32, processed_by.len));
+        try leb.writeULEB128(writer, @as(u32, @intCast(processed_by.len)));
         try writer.writeAll(processed_by);
 
-        try leb.writeULEB128(writer, @intCast(u32, processed_map.count()));
+        try leb.writeULEB128(writer, @as(u32, @intCast(processed_map.count())));
 
         // versioned name
         for (processed_map.keys()) |field| {
-            try leb.writeULEB128(writer, @intCast(u32, field.value.len)); // len of "Zld"
+            try leb.writeULEB128(writer, @as(u32, @intCast(field.value.len))); // len of "Zld"
             try writer.writeAll(field.value);
 
-            try leb.writeULEB128(writer, @intCast(u32, field.version.len));
+            try leb.writeULEB128(writer, @as(u32, @intCast(field.version.len)));
             try writer.writeAll(field.version);
         }
     }
@@ -604,7 +604,7 @@ fn emitFeaturesSection(file: fs.File, wasm: *const Wasm, writer: anytype) !void 
     const header_offset = try reserveCustomSectionHeader(file);
 
     const target_features = "target_features";
-    try leb.writeULEB128(writer, @intCast(u32, target_features.len));
+    try leb.writeULEB128(writer, @as(u32, @intCast(target_features.len)));
     try writer.writeAll(target_features);
 
     try leb.writeULEB128(writer, used_count);
@@ -615,7 +615,7 @@ fn emitFeaturesSection(file: fs.File, wasm: *const Wasm, writer: anytype) !void 
             try leb.writeULEB128(writer, @intFromEnum(feature.prefix));
             var buf: [100]u8 = undefined;
             const feature_name = try std.fmt.bufPrint(&buf, "{}", .{feature.tag});
-            try leb.writeULEB128(writer, @intCast(u32, feature_name.len));
+            try leb.writeULEB128(writer, @as(u32, @intCast(feature_name.len)));
             try writer.writeAll(feature_name);
         }
     }
@@ -655,7 +655,7 @@ fn emitDebugSections(file: fs.File, wasm: *const Wasm, gpa: std.mem.Allocator, w
                 atom = atom.next orelse break;
             }
             const header_offset = try reserveCustomSectionHeader(file);
-            try leb.writeULEB128(writer, @intCast(u32, item.name.len));
+            try leb.writeULEB128(writer, @as(u32, @intCast(item.name.len)));
             try writer.writeAll(item.name);
 
             try writer.writeAll(debug_bytes.items);

@@ -284,8 +284,8 @@ pub fn calcEhFrameHdrSize(elf_file: *Elf) usize {
 
 fn resolveReloc(rec: anytype, sym: *const Symbol, rel: elf.Elf64_Rela, elf_file: *Elf, data: []u8) !void {
     const offset = rel.r_offset - rec.offset;
-    const P = @intCast(i64, rec.getAddress(elf_file) + offset);
-    const S = @intCast(i64, sym.getAddress(elf_file));
+    const P = @as(i64, @intCast(rec.getAddress(elf_file) + offset));
+    const S = @as(i64, @intCast(sym.getAddress(elf_file)));
     const A = rel.r_addend;
 
     relocs_log.debug("  {s}: {x}: [{x} => {x}] ({s})", .{
@@ -298,9 +298,9 @@ fn resolveReloc(rec: anytype, sym: *const Symbol, rel: elf.Elf64_Rela, elf_file:
 
     var where = data[offset..];
     switch (rel.r_type()) {
-        elf.R_X86_64_32 => std.mem.writeIntLittle(i32, where[0..4], @truncate(i32, S + A)),
+        elf.R_X86_64_32 => std.mem.writeIntLittle(i32, where[0..4], @as(i32, @truncate(S + A))),
         elf.R_X86_64_64 => std.mem.writeIntLittle(i64, where[0..8], S + A),
-        elf.R_X86_64_PC32 => std.mem.writeIntLittle(i32, where[0..4], @intCast(i32, S - P + A)),
+        elf.R_X86_64_PC32 => std.mem.writeIntLittle(i32, where[0..4], @as(i32, @intCast(S - P + A))),
         elf.R_X86_64_PC64 => std.mem.writeIntLittle(i64, where[0..8], S - P + A),
         else => unreachable,
     }
@@ -343,7 +343,7 @@ pub fn writeEhFrame(elf_file: *Elf, writer: anytype) !void {
             std.mem.writeIntLittle(
                 i32,
                 data[4..8],
-                @truncate(i32, @intCast(i64, fde.out_offset + 4) - @intCast(i64, fde.getCie(elf_file).out_offset)),
+                @as(i32, @truncate(@as(i64, @intCast(fde.out_offset + 4)) - @as(i64, @intCast(fde.getCie(elf_file).out_offset)))),
             );
 
             for (fde.getRelocs(elf_file)) |rel| {
@@ -366,13 +366,13 @@ pub fn writeEhFrameHdr(elf_file: *Elf, writer: anytype) !void {
 
     const eh_frame_shdr = elf_file.sections.items(.shdr)[elf_file.eh_frame_sect_index.?];
     const eh_frame_hdr_shdr = elf_file.sections.items(.shdr)[elf_file.eh_frame_hdr_sect_index.?];
-    const num_fdes = @intCast(u32, @divExact(eh_frame_hdr_shdr.sh_size - eh_frame_hdr_header_size, 8));
+    const num_fdes = @as(u32, @intCast(@divExact(eh_frame_hdr_shdr.sh_size - eh_frame_hdr_header_size, 8)));
     try writer.writeIntLittle(
         u32,
-        @bitCast(u32, @truncate(
+        @as(u32, @bitCast(@as(
             i32,
-            @intCast(i64, eh_frame_shdr.sh_addr) - @intCast(i64, eh_frame_hdr_shdr.sh_addr) - 4,
-        )),
+            @truncate(@as(i64, @intCast(eh_frame_shdr.sh_addr)) - @as(i64, @intCast(eh_frame_hdr_shdr.sh_addr)) - 4),
+        ))),
     );
     try writer.writeIntLittle(u32, num_fdes);
 
@@ -399,14 +399,14 @@ pub fn writeEhFrameHdr(elf_file: *Elf, writer: anytype) !void {
             assert(relocs.len > 0); // Should this be an error? Things are completely broken anyhow if this trips...
             const rel = relocs[0];
             const sym = object.getSymbol(rel.r_sym(), elf_file);
-            const P = @intCast(i64, fde.getAddress(elf_file));
-            const S = @intCast(i64, sym.getAddress(elf_file));
+            const P = @as(i64, @intCast(fde.getAddress(elf_file)));
+            const S = @as(i64, @intCast(sym.getAddress(elf_file)));
             const A = rel.r_addend;
             entries.appendAssumeCapacity(.{
-                .init_addr = @bitCast(u32, @truncate(i32, S + A - @intCast(i64, eh_frame_hdr_shdr.sh_addr))),
-                .fde_addr = @bitCast(
+                .init_addr = @as(u32, @bitCast(@as(i32, @truncate(S + A - @as(i64, @intCast(eh_frame_hdr_shdr.sh_addr)))))),
+                .fde_addr = @as(
                     u32,
-                    @truncate(i32, P - @intCast(i64, eh_frame_hdr_shdr.sh_addr)),
+                    @bitCast(@as(i32, @truncate(P - @as(i64, @intCast(eh_frame_hdr_shdr.sh_addr))))),
                 ),
             });
         }

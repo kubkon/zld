@@ -27,12 +27,12 @@ pub const Functions = struct {
         if (!gop.found_existing) {
             gop.value_ptr.* = func;
         }
-        return @intCast(u32, gop.index) + offset;
+        return @as(u32, @intCast(gop.index)) + offset;
     }
 
     /// Returns the count of entires within the function section
     pub fn count(self: *Functions) u32 {
-        return @intCast(u32, self.items.count());
+        return @as(u32, @intCast(self.items.count()));
     }
 
     pub fn deinit(self: *Functions, gpa: Allocator) void {
@@ -86,7 +86,7 @@ pub const Imports = struct {
                 hashFunc(&hasher, key.module_name.ptr);
                 hashFunc(&hasher, key.name.len);
                 hashFunc(&hasher, key.name.ptr);
-                return @truncate(u32, hasher.final());
+                return @as(u32, @truncate(hasher.final()));
             }
 
             pub fn eql(ctx: Ctx, lhs: ImportKey, rhs: ImportKey, index: usize) bool {
@@ -168,17 +168,17 @@ pub const Imports = struct {
 
     /// Returns the count of functions that have been imported (so far)
     pub fn functionCount(self: Imports) u32 {
-        return @intCast(u32, self.imported_functions.count());
+        return @as(u32, @intCast(self.imported_functions.count()));
     }
 
     /// Returns the count of tables that have been imported (so far)
     pub fn tableCount(self: Imports) u32 {
-        return @intCast(u32, self.imported_tables.count());
+        return @as(u32, @intCast(self.imported_tables.count()));
     }
 
     /// Returns the count of globals that have been imported (so far)
     pub fn globalCount(self: Imports) u32 {
-        return @intCast(u32, self.imported_globals.count());
+        return @as(u32, @intCast(self.imported_globals.count()));
     }
 
     pub fn deinit(self: *Imports, gpa: Allocator) void {
@@ -196,7 +196,7 @@ pub const Imports = struct {
 
     /// Returns the count of symbols which have been imported
     pub fn symbolCount(self: Imports) u32 {
-        return @intCast(u32, self.imported_symbols.items.len);
+        return @as(u32, @intCast(self.imported_symbols.items.len));
     }
 };
 
@@ -211,7 +211,7 @@ pub const Globals = struct {
     /// Appends a new global and sets the `global_idx` on the global based on the
     /// current count of globals and the given `offset`.
     pub fn append(globals: *Globals, gpa: Allocator, offset: u32, global: std.wasm.Global) !u32 {
-        const index = offset + @intCast(u32, globals.items.items.len);
+        const index = offset + @as(u32, @intCast(globals.items.items.len));
         try globals.items.append(gpa, global);
         return index;
     }
@@ -231,7 +231,7 @@ pub const Globals = struct {
 
     /// Returns the total amount of globals of the global section
     pub fn count(globals: Globals) u32 {
-        return @intCast(u32, globals.items.items.len);
+        return @as(u32, @intCast(globals.items.items.len));
     }
 
     /// Creates a new linker-defined global with the given mutability and value type.
@@ -288,14 +288,14 @@ pub const Types = struct {
     pub fn find(self: Types, func_type: std.wasm.Type) ?u32 {
         return for (self.items.items, 0..) |ty, index| {
             if (ty.eql(func_type)) {
-                return @intCast(u32, index);
+                return @as(u32, @intCast(index));
             }
         } else null;
     }
 
     /// Returns the amount of entries in the type section
     pub fn count(self: Types) u32 {
-        return @intCast(u32, self.items.items.len);
+        return @as(u32, @intCast(self.items.items.len));
     }
 
     pub fn deinit(self: *Types, gpa: Allocator) void {
@@ -323,7 +323,7 @@ pub const Tables = struct {
 
     /// Returns the amount of entries in the table section
     pub fn count(self: Tables) u32 {
-        return @intCast(u32, self.items.items.len);
+        return @as(u32, @intCast(self.items.items.len));
     }
 
     pub fn deinit(self: *Tables, gpa: Allocator) void {
@@ -347,7 +347,7 @@ pub const Exports = struct {
 
     /// Returns the amount of entries in the export section
     pub fn count(self: Exports) u32 {
-        return @intCast(u32, self.items.items.len);
+        return @as(u32, @intCast(self.items.items.len));
     }
 
     pub fn deinit(self: *Exports, gpa: Allocator) void {
@@ -362,7 +362,7 @@ pub const Elements = struct {
     indirect_functions: std.AutoHashMapUnmanaged(Wasm.SymbolWithLoc, u32) = .{},
 
     pub fn functionCount(self: Elements) u32 {
-        return @intCast(u32, self.indirect_functions.count());
+        return @as(u32, @intCast(self.indirect_functions.count()));
     }
 
     pub fn deinit(self: *Elements, gpa: Allocator) void {

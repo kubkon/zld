@@ -27,10 +27,10 @@ pub fn gcAtoms(macho_file: *MachO, resolver: *const SymbolResolver) !void {
     defer arena.deinit();
 
     var roots = AtomTable.init(arena.allocator());
-    try roots.ensureUnusedCapacity(@intCast(u32, macho_file.globals.items.len));
+    try roots.ensureUnusedCapacity(@as(u32, @intCast(macho_file.globals.items.len)));
 
     var alive = AtomTable.init(arena.allocator());
-    try alive.ensureTotalCapacity(@intCast(u32, macho_file.atoms.items.len));
+    try alive.ensureTotalCapacity(@as(u32, @intCast(macho_file.atoms.items.len)));
 
     try collectRoots(macho_file, &roots, resolver);
     try mark(macho_file, roots, &alive);
@@ -104,8 +104,8 @@ fn collectRoots(macho_file: *MachO, roots: *AtomTable, resolver: *const SymbolRe
                 const sect_id = if (object.getSourceSymbol(atom.sym_index)) |source_sym|
                     source_sym.n_sect - 1
                 else sect_id: {
-                    const nbase = @intCast(u32, object.in_symtab.?.len);
-                    const sect_id = @intCast(u8, atom.sym_index - nbase);
+                    const nbase = @as(u32, @intCast(object.in_symtab.?.len));
+                    const sect_id = @as(u8, @intCast(atom.sym_index - nbase));
                     break :sect_id sect_id;
                 };
                 const source_sect = object.getSourceSection(sect_id);
@@ -157,7 +157,7 @@ fn markLive(macho_file: *MachO, atom_index: AtomIndex, alive: *AtomTable) void {
 
     for (relocs) |rel| {
         const target = switch (cpu_arch) {
-            .aarch64 => switch (@enumFromInt(macho.reloc_type_arm64, rel.r_type)) {
+            .aarch64 => switch (@as(macho.reloc_type_arm64, @enumFromInt(rel.r_type))) {
                 .ARM64_RELOC_ADDEND => continue,
                 else => Atom.parseRelocTarget(macho_file, .{
                     .object_id = atom.getFile().?,
@@ -224,7 +224,7 @@ fn refersLive(macho_file: *MachO, atom_index: AtomIndex, alive: AtomTable) bool 
 
     for (relocs) |rel| {
         const target = switch (cpu_arch) {
-            .aarch64 => switch (@enumFromInt(macho.reloc_type_arm64, rel.r_type)) {
+            .aarch64 => switch (@as(macho.reloc_type_arm64, @enumFromInt(rel.r_type))) {
                 .ARM64_RELOC_ADDEND => continue,
                 else => Atom.parseRelocTarget(macho_file, .{
                     .object_id = atom.getFile().?,
@@ -285,8 +285,8 @@ fn mark(macho_file: *MachO, roots: AtomTable, alive: *AtomTable) !void {
                 const sect_id = if (object.getSourceSymbol(atom.sym_index)) |source_sym|
                     source_sym.n_sect - 1
                 else blk: {
-                    const nbase = @intCast(u32, object.in_symtab.?.len);
-                    const sect_id = @intCast(u8, atom.sym_index - nbase);
+                    const nbase = @as(u32, @intCast(object.in_symtab.?.len));
+                    const sect_id = @as(u8, @intCast(atom.sym_index - nbase));
                     break :blk sect_id;
                 };
                 const source_sect = object.getSourceSection(sect_id);
@@ -304,7 +304,7 @@ fn mark(macho_file: *MachO, roots: AtomTable, alive: *AtomTable) !void {
     for (macho_file.objects.items, 0..) |_, object_id| {
         // Traverse unwind and eh_frame records noting if the source symbol has been marked, and if so,
         // marking all references as live.
-        try markUnwindRecords(macho_file, @intCast(u32, object_id), alive);
+        try markUnwindRecords(macho_file, @as(u32, @intCast(object_id)), alive);
     }
 }
 
@@ -350,7 +350,7 @@ fn markUnwindRecords(macho_file: *MachO, object_id: u32, alive: *AtomTable) !voi
                     .object_id = object_id,
                     .rel = rel,
                     .code = mem.asBytes(&record),
-                    .base_offset = @intCast(i32, record_id * @sizeOf(macho.compact_unwind_entry)),
+                    .base_offset = @as(i32, @intCast(record_id * @sizeOf(macho.compact_unwind_entry))),
                 });
                 const target_sym = macho_file.getSymbol(target);
                 if (!target_sym.undf()) {
@@ -365,7 +365,7 @@ fn markUnwindRecords(macho_file: *MachO, object_id: u32, alive: *AtomTable) !voi
                     .object_id = object_id,
                     .rel = rel,
                     .code = mem.asBytes(&record),
-                    .base_offset = @intCast(i32, record_id * @sizeOf(macho.compact_unwind_entry)),
+                    .base_offset = @as(i32, @intCast(record_id * @sizeOf(macho.compact_unwind_entry))),
                 });
                 const target_object = macho_file.objects.items[target.getFile().?];
                 const target_atom_index = target_object.getAtomIndexForSymbol(target.sym_index).?;
@@ -398,7 +398,7 @@ fn markEhFrameRecord(macho_file: *MachO, object_id: u32, atom_index: AtomIndex, 
                     .object_id = object_id,
                     .rel = rel,
                     .code = fde.data,
-                    .base_offset = @intCast(i32, fde_offset) + 4,
+                    .base_offset = @as(i32, @intCast(fde_offset)) + 4,
                 });
                 const target_sym = macho_file.getSymbol(target);
                 if (!target_sym.undf()) blk: {

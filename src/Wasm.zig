@@ -210,7 +210,7 @@ const FeatureSet = struct {
         /// Returns the next feature in the set
         pub fn next(it: *Iterator) ?types.Feature.Tag {
             const index = it.inner.next() orelse return null;
-            return @enumFromInt(types.Feature.Tag, index);
+            return @as(types.Feature.Tag, @enumFromInt(index));
         }
     };
 
@@ -226,7 +226,7 @@ const FeatureSet = struct {
 
     /// The amount of features that have been set
     pub fn count(set: FeatureSet) u32 {
-        return @intCast(u32, set.set.count());
+        return @as(u32, @intCast(set.set.count()));
     }
 
     /// Returns an iterator through the features in the set by its index
@@ -412,14 +412,14 @@ pub fn flush(wasm: *Wasm) !void {
     try wasm.parsePositionals(wasm.options.positionals);
     try wasm.setupLinkerSymbols();
     for (wasm.objects.items, 0..) |_, obj_idx| {
-        try wasm.resolveSymbolsInObject(@intCast(u16, obj_idx));
+        try wasm.resolveSymbolsInObject(@as(u16, @intCast(obj_idx)));
     }
     try wasm.resolveSymbolsInArchives();
     try wasm.resolveLazySymbols();
     try wasm.setupInitFunctions();
     try wasm.checkUndefinedSymbols();
     for (wasm.objects.items, 0..) |*object, obj_idx| {
-        try object.parseIntoAtoms(@intCast(u16, obj_idx), wasm);
+        try object.parseIntoAtoms(@as(u16, @intCast(obj_idx)), wasm);
     }
     try wasm.validateFeatures();
     try wasm.setupStart();
@@ -472,7 +472,7 @@ pub const StringTable = struct {
         }
 
         try table.string_data.ensureUnusedCapacity(allocator, string.len + 1);
-        const offset = @intCast(u32, table.string_data.items.len);
+        const offset = @as(u32, @intCast(table.string_data.items.len));
 
         log.debug("writing new string '{s}' at offset 0x{x}", .{ string, offset });
 
@@ -488,7 +488,7 @@ pub const StringTable = struct {
     /// Asserts offset does not exceed bounds.
     pub fn get(table: StringTable, off: u32) []const u8 {
         assert(off < table.string_data.items.len);
-        return mem.sliceTo(@ptrCast([*:0]const u8, table.string_data.items.ptr + off), 0);
+        return mem.sliceTo(@as([*:0]const u8, @ptrCast(table.string_data.items.ptr + off)), 0);
     }
 
     /// Returns the offset of a given string when it exists.
@@ -514,7 +514,7 @@ fn resolveSymbolsInObject(wasm: *Wasm, object_index: u16) !void {
     log.debug("Resolving symbols in object: '{s}'", .{object.name});
 
     for (object.symtable, 0..) |symbol, i| {
-        const sym_index = @intCast(u32, i);
+        const sym_index = @as(u32, @intCast(i));
         const location: SymbolWithLoc = .{
             .file = object_index,
             .sym_index = sym_index,
@@ -670,7 +670,7 @@ fn resolveSymbolsInArchives(wasm: *Wasm) !void {
             // Symbol is found in unparsed object file within current archive.
             // Parse object and and resolve symbols again before we check remaining
             // undefined symbols.
-            const object_file_index = @intCast(u16, wasm.objects.items.len);
+            const object_file_index = @as(u16, @intCast(wasm.objects.items.len));
             var object = try archive.parseObject(wasm.base.allocator, offset.items[0]);
             try wasm.objects.append(wasm.base.allocator, object);
             try wasm.resolveSymbolsInObject(object_file_index);
@@ -895,7 +895,7 @@ fn setupExports(wasm: *Wasm) !void {
             const offset = wasm.imports.globalCount();
             const global_index = try wasm.globals.append(wasm.base.allocator, offset, .{
                 .global_type = .{ .valtype = .i32, .mutable = false },
-                .init = .{ .i32_const = @intCast(i32, symbol.virtual_address) },
+                .init = .{ .i32_const = @as(i32, @intCast(symbol.virtual_address)) },
             });
             break :exp .{
                 .name = name,
@@ -990,7 +990,7 @@ fn setupLinkerSymbols(wasm: *Wasm) !void {
 /// Leaves index undefined and the default flags (0).
 fn createSyntheticSymbol(wasm: *Wasm, name: []const u8, tag: Symbol.Tag) !SymbolWithLoc {
     const name_offset = try wasm.string_table.put(wasm.base.allocator, name);
-    const sym_index = @intCast(u32, wasm.synthetic_symbols.count());
+    const sym_index = @as(u32, @intCast(wasm.synthetic_symbols.count()));
     const loc: SymbolWithLoc = .{ .sym_index = sym_index, .file = null };
     try wasm.synthetic_symbols.putNoClobber(wasm.base.allocator, name, .{
         .name = name_offset,
@@ -1057,7 +1057,7 @@ fn setupInitFunctions(wasm: *Wasm) !void {
             log.debug("appended init func '{s}'\n", .{object.string_table.get(symbol.name)});
             wasm.init_funcs.appendAssumeCapacity(.{
                 .index = init_func.symbol_index,
-                .file = @intCast(u16, file_index),
+                .file = @as(u16, @intCast(file_index)),
                 .priority = init_func.priority,
             });
         }
@@ -1275,7 +1275,7 @@ fn setupTLSRelocationsFunction(wasm: *Wasm) !void {
 
         try writer.writeByte(std.wasm.opcode(.i32_add));
         try writer.writeByte(std.wasm.opcode(.global_set));
-        try leb.writeULEB128(writer, wasm.imports.globalCount() + wasm.globals.count() + @intCast(u32, got_index));
+        try leb.writeULEB128(writer, wasm.imports.globalCount() + wasm.globals.count() + @as(u32, @intCast(got_index)));
     }
     try writer.writeByte(std.wasm.opcode(.end));
 
@@ -1346,7 +1346,7 @@ fn createSyntheticFunction(
     const atom = try wasm.base.allocator.create(Atom);
     errdefer wasm.base.allocator.destroy(atom);
     atom.* = .{
-        .size = @intCast(u32, function_body.items.len),
+        .size = @as(u32, @intCast(function_body.items.len)),
         .offset = 0,
         .sym_index = loc.sym_index,
         .file = null,
@@ -1401,7 +1401,7 @@ fn initializeTLSFunction(wasm: *Wasm) !void {
         try writer.writeByte(std.wasm.opcode(.misc_prefix));
         try leb.writeULEB128(writer, std.wasm.miscOpcode(.memory_init));
         // segment immediate
-        try leb.writeULEB128(writer, @intCast(u32, data_index));
+        try leb.writeULEB128(writer, @as(u32, @intCast(data_index)));
         // memory index immediate (always 0)
         try writer.writeByte(@as(u32, 0));
     }
@@ -1473,10 +1473,10 @@ fn setupMemory(wasm: *Wasm) !void {
         memory_ptr = std.mem.alignForward(u64, memory_ptr, stack_alignment);
         memory_ptr += stack_size;
         // We always put the stack pointer global at index 0
-        wasm.globals.items.items[0].init.i32_const = @bitCast(i32, @intCast(u32, memory_ptr));
+        wasm.globals.items.items[0].init.i32_const = @as(i32, @bitCast(@as(u32, @intCast(memory_ptr))));
     }
 
-    var offset: u32 = @intCast(u32, memory_ptr);
+    var offset: u32 = @as(u32, @intCast(memory_ptr));
     var seg_it = wasm.data_segments.iterator();
     while (seg_it.next()) |entry| {
         const segment: *Segment = &wasm.segments.items[entry.value_ptr.*];
@@ -1489,21 +1489,21 @@ fn setupMemory(wasm: *Wasm) !void {
                 const sym = loc.getSymbol(wasm);
                 sym.index = try wasm.globals.append(wasm.base.allocator, global_count, .{
                     .global_type = .{ .valtype = .i32, .mutable = false },
-                    .init = .{ .i32_const = @intCast(i32, segment.size) },
+                    .init = .{ .i32_const = @as(i32, @intCast(segment.size)) },
                 });
             }
             if (wasm.findGlobalSymbol("__tls_align")) |loc| {
                 const sym = loc.getSymbol(wasm);
                 sym.index = try wasm.globals.append(wasm.base.allocator, global_count, .{
                     .global_type = .{ .valtype = .i32, .mutable = false },
-                    .init = .{ .i32_const = @intCast(i32, segment.alignment) },
+                    .init = .{ .i32_const = @as(i32, @intCast(segment.alignment)) },
                 });
             }
             if (wasm.findGlobalSymbol("__tls_base")) |loc| {
                 const sym = loc.getSymbol(wasm);
                 sym.index = try wasm.globals.append(wasm.base.allocator, wasm.imports.globalCount(), .{
                     .global_type = .{ .valtype = .i32, .mutable = wasm.options.shared_memory },
-                    .init = .{ .i32_const = if (wasm.options.shared_memory) @as(i32, 0) else @intCast(i32, memory_ptr) },
+                    .init = .{ .i32_const = if (wasm.options.shared_memory) @as(i32, 0) else @as(i32, @intCast(memory_ptr)) },
                 });
             }
         }
@@ -1518,18 +1518,18 @@ fn setupMemory(wasm: *Wasm) !void {
         // align to pointer size
         memory_ptr = mem.alignForward(u64, memory_ptr, 4);
         const loc = try wasm.createSyntheticSymbol("__wasm_init_memory_flag", .data);
-        loc.getSymbol(wasm).virtual_address = @intCast(u32, memory_ptr);
+        loc.getSymbol(wasm).virtual_address = @as(u32, @intCast(memory_ptr));
         memory_ptr += 4;
     }
 
     if (!place_stack_first) {
         memory_ptr = std.mem.alignForward(u64, memory_ptr, stack_alignment);
         memory_ptr += stack_size;
-        wasm.globals.items.items[0].init.i32_const = @bitCast(i32, @intCast(u32, memory_ptr));
+        wasm.globals.items.items[0].init.i32_const = @as(i32, @bitCast(@as(u32, @intCast(memory_ptr))));
     }
 
     if (wasm.findGlobalSymbol("__heap_base")) |loc| {
-        loc.getSymbol(wasm).virtual_address = @intCast(u32, mem.alignForward(u64, memory_ptr, heap_alignment));
+        loc.getSymbol(wasm).virtual_address = @as(u32, @intCast(mem.alignForward(u64, memory_ptr, heap_alignment)));
     }
 
     // Setup the max amount of pages
@@ -1556,11 +1556,11 @@ fn setupMemory(wasm: *Wasm) !void {
 
     // In case we do not import memory, but define it ourselves,
     // set the minimum amount of pages on the memory section.
-    wasm.memories.limits.min = @intCast(u32, memory_ptr / page_size);
+    wasm.memories.limits.min = @as(u32, @intCast(memory_ptr / page_size));
     log.debug("Total memory pages: {d}", .{wasm.memories.limits.min});
 
     if (wasm.findGlobalSymbol("__heap_end")) |loc| {
-        loc.getSymbol(wasm).virtual_address = @intCast(u32, memory_ptr);
+        loc.getSymbol(wasm).virtual_address = @as(u32, @intCast(memory_ptr));
     }
 
     if (wasm.options.max_memory != null or wasm.options.shared_memory) {
@@ -1577,7 +1577,7 @@ fn setupMemory(wasm: *Wasm) !void {
             log.err("Maximum memory exceeds maxmium amount {d}", .{max_memory_allowed});
             return error.MemoryTooBig;
         }
-        wasm.memories.limits.max = @intCast(u32, max_memory / page_size);
+        wasm.memories.limits.max = @as(u32, @intCast(max_memory / page_size));
         wasm.memories.limits.setFlag(.WASM_LIMITS_FLAG_HAS_MAX);
         if (wasm.options.shared_memory) {
             wasm.memories.limits.setFlag(.WASM_LIMITS_FLAG_IS_SHARED);
@@ -1614,7 +1614,7 @@ fn allocateVirtualAddresses(wasm: *Wasm) void {
 pub fn getMatchingSegment(wasm: *Wasm, gpa: Allocator, object_index: u16, relocatable_index: u32) !?u32 {
     const object: Object = wasm.objects.items[object_index];
     const relocatable_data = object.relocatable_data[relocatable_index];
-    const index = @intCast(u32, wasm.segments.items.len);
+    const index = @as(u32, @intCast(wasm.segments.items.len));
 
     switch (relocatable_data.type) {
         .data => {
@@ -1836,7 +1836,7 @@ fn validateFeatures(wasm: *Wasm) !void {
     // linked object file so we can test them.
     for (wasm.objects.items, 0..) |object, object_index| {
         for (object.features) |feature| {
-            const value = @intCast(u16, object_index) << 1 | @as(u1, 1);
+            const value = @as(u16, @intCast(object_index)) << 1 | @as(u1, 1);
             switch (feature.prefix) {
                 .used => {
                     used[@intFromEnum(feature.tag)] = value;
@@ -1862,9 +1862,9 @@ fn validateFeatures(wasm: *Wasm) !void {
     // and insert it into the 'allowed' set. When features are not inferred,
     // we validate that a used feature is allowed.
     for (used, 0..) |used_set, used_index| {
-        const is_enabled = @truncate(u1, used_set) != 0;
+        const is_enabled = @as(u1, @truncate(used_set)) != 0;
         if (!is_enabled) continue;
-        const feature = @enumFromInt(types.Feature.Tag, used_index);
+        const feature = @as(types.Feature.Tag, @enumFromInt(used_index));
         if (infer) {
             allowed.enable(feature);
         } else if (!allowed.isEnabled(feature)) {
@@ -1880,7 +1880,7 @@ fn validateFeatures(wasm: *Wasm) !void {
 
     if (wasm.options.shared_memory) {
         const disallowed_feature = disallowed[@intFromEnum(types.Feature.Tag.shared_mem)];
-        if (@truncate(u1, disallowed_feature) != 0) {
+        if (@as(u1, @truncate(disallowed_feature)) != 0) {
             log.err(
                 "--shared-memory is disallowed by '{s}' because it wasn't compiled with 'atomics' and 'bulk-memory' features enabled",
                 .{wasm.objects.items[disallowed_feature >> 1].name},
@@ -1910,7 +1910,7 @@ fn validateFeatures(wasm: *Wasm) !void {
             if (feature.prefix == .disallowed) continue; // already defined in 'disallowed' set.
             // from here a feature is always used
             const disallowed_feature = disallowed[@intFromEnum(feature.tag)];
-            if (@truncate(u1, disallowed_feature) != 0) {
+            if (@as(u1, @truncate(disallowed_feature)) != 0) {
                 log.err("feature '{}' is disallowed, but used by linked object", .{feature.tag});
                 log.err("  disallowed by '{s}'", .{wasm.objects.items[disallowed_feature >> 1].name});
                 log.err("  used in '{s}'", .{object.name});
@@ -1922,9 +1922,9 @@ fn validateFeatures(wasm: *Wasm) !void {
 
         // validate the linked object file has each required feature
         for (required, 0..) |required_feature, feature_index| {
-            const is_required = @truncate(u1, required_feature) != 0;
+            const is_required = @as(u1, @truncate(required_feature)) != 0;
             if (is_required and !object_used_features[feature_index]) {
-                log.err("feature '{}' is required but not used in linked object", .{(@enumFromInt(types.Feature.Tag, feature_index))});
+                log.err("feature '{}' is required but not used in linked object", .{(@as(types.Feature.Tag, @enumFromInt(feature_index)))});
                 log.err("  required by '{s}'", .{wasm.objects.items[required_feature >> 1].name});
                 log.err("  missing in '{s}'", .{object.name});
                 valid_feature_set = false;
@@ -1944,7 +1944,7 @@ fn validateFeatures(wasm: *Wasm) !void {
 pub fn getULEB128Size(uint_value: anytype) u32 {
     const T = @TypeOf(uint_value);
     const U = if (@typeInfo(T).Int.bits < 8) u8 else T;
-    var value = @intCast(U, uint_value);
+    var value = @as(U, @intCast(uint_value));
 
     var size: u32 = 0;
     while (value != 0) : (size += 1) {

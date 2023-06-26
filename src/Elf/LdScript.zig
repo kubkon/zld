@@ -397,11 +397,11 @@ const TokenIterator = struct {
     }
 
     fn seekBy(it: *TokenIterator, offset: isize) void {
-        const new_pos = @bitCast(isize, it.pos) + offset;
+        const new_pos = @as(isize, @bitCast(it.pos)) + offset;
         if (new_pos < 0) {
             it.pos = 0;
         } else {
-            it.pos = @intCast(usize, new_pos);
+            it.pos = @as(usize, @intCast(new_pos));
         }
     }
 

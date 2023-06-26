@@ -294,7 +294,7 @@ pub fn flush(self: *Elf) !void {
     {
         var seen_dsos = std.StringHashMap(void).init(gpa);
         defer seen_dsos.deinit();
-        try seen_dsos.ensureTotalCapacity(@intCast(u32, self.shared_objects.items.len));
+        try seen_dsos.ensureTotalCapacity(@as(u32, @intCast(self.shared_objects.items.len)));
 
         var i: usize = 0;
         while (i < self.shared_objects.items.len) {
@@ -309,7 +309,7 @@ pub fn flush(self: *Elf) !void {
     }
 
     {
-        const index = @intCast(File.Index, try self.files.addOne(gpa));
+        const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
         self.files.set(index, .{ .internal = .{ .index = index } });
         self.internal_object_index = index;
     }
@@ -1050,7 +1050,7 @@ fn allocateSectionsInMemory(self: *Elf, base_offset: u64) !void {
     var alignment = Align{};
     for (self.sections.items(.shdr)[1..], 1..) |*shdr, shndx| {
         if (!shdrIsTls(shdr)) continue;
-        if (alignment.first_tls_shndx == null) alignment.first_tls_shndx = @intCast(u16, shndx);
+        if (alignment.first_tls_shndx == null) alignment.first_tls_shndx = @as(u16, @intCast(shndx));
         alignment.tls_start_align = @max(alignment.tls_start_align, shdr.sh_addralign);
     }
 
@@ -1068,13 +1068,13 @@ fn allocateSectionsInMemory(self: *Elf, base_offset: u64) !void {
             var tbss_addr = addr;
             for (self.sections.items(.shdr)[i..]) |*tbss_shdr| {
                 if (!shdrIsTbss(tbss_shdr)) continue :outer;
-                tbss_addr = alignment.@"align"(@intCast(u16, i), shdr.sh_addralign, tbss_addr);
+                tbss_addr = alignment.@"align"(@as(u16, @intCast(i)), shdr.sh_addralign, tbss_addr);
                 tbss_shdr.sh_addr = tbss_addr;
                 tbss_addr += tbss_shdr.sh_size;
             }
         }
 
-        addr = alignment.@"align"(@intCast(u16, i), shdr.sh_addralign, addr);
+        addr = alignment.@"align"(@as(u16, @intCast(i)), shdr.sh_addralign, addr);
         shdr.sh_addr = addr;
         addr += shdr.sh_size;
     }
@@ -1162,7 +1162,7 @@ fn sortSections(self: *Elf) !void {
     var entries = try std.ArrayList(Entry).initCapacity(gpa, self.sections.slice().len);
     defer entries.deinit();
     for (0..self.sections.slice().len) |shndx| {
-        entries.appendAssumeCapacity(.{ .shndx = @intCast(u16, shndx) });
+        entries.appendAssumeCapacity(.{ .shndx = @as(u16, @intCast(shndx)) });
     }
 
     mem.sort(Entry, entries.items, self, Entry.lessThan);
@@ -1170,7 +1170,7 @@ fn sortSections(self: *Elf) !void {
     const backlinks = try gpa.alloc(u16, entries.items.len);
     defer gpa.free(backlinks);
     for (entries.items, 0..) |entry, i| {
-        backlinks[entry.shndx] = @intCast(u16, i);
+        backlinks[entry.shndx] = @as(u16, @intCast(i));
     }
 
     var slice = self.sections.toOwnedSlice();
@@ -1424,7 +1424,7 @@ fn parseObject(self: *Elf, arena: Allocator, obj: LinkObject) !bool {
 
     const data = try file.readToEndAlloc(arena, std.math.maxInt(u32));
 
-    const index = @intCast(u32, try self.files.addOne(gpa));
+    const index = @as(u32, @intCast(try self.files.addOne(gpa)));
     self.files.set(index, .{ .object = .{
         .path = obj.path,
         .data = data,
@@ -1453,7 +1453,7 @@ fn parseArchive(self: *Elf, arena: Allocator, obj: LinkObject) !bool {
     try archive.parse(arena, self);
 
     for (archive.objects.items) |extracted| {
-        const index = @intCast(File.Index, try self.files.addOne(gpa));
+        const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
         self.files.set(index, .{ .object = extracted });
         const object = &self.files.items(.data)[index].object;
         object.index = index;
@@ -1477,7 +1477,7 @@ fn parseShared(self: *Elf, arena: Allocator, obj: LinkObject) !bool {
 
     const data = try file.readToEndAlloc(arena, std.math.maxInt(u32));
 
-    const index = @intCast(File.Index, try self.files.addOne(gpa));
+    const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
     self.files.set(index, .{ .shared = .{
         .path = obj.path,
         .data = data,
@@ -1649,7 +1649,7 @@ fn markImportsAndExports(self: *Elf) !void {
         for (self.getFile(index).?.shared.getGlobals()) |global_index| {
             const global = self.getSymbol(global_index);
             const file = global.getFile(self) orelse continue;
-            const vis = @enumFromInt(elf.STV, global.getSourceSymbol(self).st_other);
+            const vis = @as(elf.STV, @enumFromInt(global.getSourceSymbol(self).st_other));
             if (file != .shared and vis != .HIDDEN) global.flags.@"export" = true;
         }
     }
@@ -1659,7 +1659,7 @@ fn markImportsAndExports(self: *Elf) !void {
             const global = self.getSymbol(global_index);
             if (global.ver_idx == VER_NDX_LOCAL) continue;
             const file = global.getFile(self) orelse continue;
-            const vis = @enumFromInt(elf.STV, global.getSourceSymbol(self).st_other);
+            const vis = @as(elf.STV, @enumFromInt(global.getSourceSymbol(self).st_other));
             if (vis == .HIDDEN) continue;
             if (file == .shared and !global.isAbs(self)) {
                 global.flags.import = true;
@@ -1704,7 +1704,7 @@ fn claimUnresolved(self: *Elf) void {
         const object = self.getFile(index).?.object;
         const first_global = object.first_global orelse return;
         for (object.getGlobals(), 0..) |global_index, i| {
-            const sym_idx = @intCast(u32, first_global + i);
+            const sym_idx = @as(u32, @intCast(first_global + i));
             const sym = object.symtab[sym_idx];
             if (sym.st_shndx != elf.SHN_UNDEF) continue;
 
@@ -1771,7 +1771,7 @@ fn scanRelocs(self: *Elf) !void {
     self.base.reportWarningsAndErrorsAndExit();
 
     for (self.symbols.items, 0..) |*symbol, i| {
-        const index = @intCast(u32, i);
+        const index = @as(u32, @intCast(i));
         if (!symbol.isLocal() and !symbol.flags.has_dynamic) {
             log.debug("'{s}' is non-local", .{symbol.getName(self)});
             try self.dynsym.addSymbol(index, self);
@@ -1834,7 +1834,7 @@ fn setVerSymtab(self: *Elf) !void {
     if (self.verneed_sect_index) |shndx| {
         try self.verneed.generate(self);
         const shdr = &self.sections.items(.shdr)[shndx];
-        shdr.sh_info = @intCast(u32, self.verneed.verneed.items.len);
+        shdr.sh_info = @as(u32, @intCast(self.verneed.verneed.items.len));
     }
 }
 
@@ -2050,9 +2050,9 @@ fn writeHeader(self: *Elf) !void {
         .e_flags = 0,
         .e_ehsize = @sizeOf(elf.Elf64_Ehdr),
         .e_phentsize = @sizeOf(elf.Elf64_Phdr),
-        .e_phnum = @intCast(u16, self.phdrs.items.len),
+        .e_phnum = @as(u16, @intCast(self.phdrs.items.len)),
         .e_shentsize = @sizeOf(elf.Elf64_Shdr),
-        .e_shnum = @intCast(u16, self.sections.items(.shdr).len),
+        .e_shnum = @as(u16, @intCast(self.sections.items(.shdr).len)),
         .e_shstrndx = self.shstrtab_sect_index.?,
     };
     // Magic
@@ -2084,7 +2084,7 @@ pub const AddSectionOpts = struct {
 
 pub fn addSection(self: *Elf, opts: AddSectionOpts) !u16 {
     const gpa = self.base.allocator;
-    const index = @intCast(u16, try self.sections.addOne(gpa));
+    const index = @as(u16, @intCast(try self.sections.addOne(gpa)));
     self.sections.set(index, .{
         .shdr = .{
             .sh_name = try self.shstrtab.insert(gpa, opts.name),
@@ -2105,7 +2105,7 @@ pub fn addSection(self: *Elf, opts: AddSectionOpts) !u16 {
 pub fn getSectionByName(self: *Elf, name: [:0]const u8) ?u16 {
     for (self.sections.items(.shdr), 0..) |shdr, i| {
         const this_name = self.shstrtab.getAssumeExists(shdr.sh_name);
-        if (mem.eql(u8, this_name, name)) return @intCast(u16, i);
+        if (mem.eql(u8, this_name, name)) return @as(u16, @intCast(i));
     } else return null;
 }
 
@@ -2118,7 +2118,7 @@ fn addPhdr(self: *Elf, opts: struct {
     filesz: u64 = 0,
     memsz: u64 = 0,
 }) !u16 {
-    const index = @intCast(u16, self.phdrs.items.len);
+    const index = @as(u16, @intCast(self.phdrs.items.len));
     try self.phdrs.append(self.base.allocator, .{
         .p_type = opts.type,
         .p_flags = opts.flags,
@@ -2143,7 +2143,7 @@ pub fn getFile(self: *Elf, index: File.Index) ?File {
 }
 
 pub fn addAtom(self: *Elf) !Atom.Index {
-    const index = @intCast(u32, self.atoms.items.len);
+    const index = @as(u32, @intCast(self.atoms.items.len));
     const atom = try self.atoms.addOne(self.base.allocator);
     atom.* = .{};
     return index;
@@ -2156,7 +2156,7 @@ pub fn getAtom(self: Elf, atom_index: Atom.Index) ?*Atom {
 }
 
 pub fn addSymbol(self: *Elf) !u32 {
-    const index = @intCast(u32, self.symbols.items.len);
+    const index = @as(u32, @intCast(self.symbols.items.len));
     const symbol = try self.symbols.addOne(self.base.allocator);
     symbol.* = .{};
     return index;
@@ -2174,7 +2174,7 @@ pub fn addSymbolExtra(self: *Elf, extra: Symbol.Extra) !u32 {
 }
 
 pub fn addSymbolExtraAssumeCapacity(self: *Elf, extra: Symbol.Extra) u32 {
-    const index = @intCast(u32, self.symbols_extra.items.len);
+    const index = @as(u32, @intCast(self.symbols_extra.items.len));
     const fields = @typeInfo(Symbol.Extra).Struct.fields;
     inline for (fields) |field| {
         self.symbols_extra.appendAssumeCapacity(switch (field.type) {
@@ -2252,7 +2252,7 @@ pub fn getOrCreateComdatGroupOwner(self: *Elf, off: u32) !GetOrCreateComdatGroup
     const gpa = self.base.allocator;
     const gop = try self.comdat_groups_table.getOrPut(gpa, off);
     if (!gop.found_existing) {
-        const index = @intCast(ComdatGroupOwner.Index, self.comdat_groups_owners.items.len);
+        const index = @as(ComdatGroupOwner.Index, @intCast(self.comdat_groups_owners.items.len));
         const owner = try self.comdat_groups_owners.addOne(gpa);
         owner.* = .{};
         gop.value_ptr.* = index;
@@ -2264,7 +2264,7 @@ pub fn getOrCreateComdatGroupOwner(self: *Elf, off: u32) !GetOrCreateComdatGroup
 }
 
 pub fn addComdatGroup(self: *Elf) !ComdatGroup.Index {
-    const index = @intCast(ComdatGroup.Index, self.comdat_groups.items.len);
+    const index = @as(ComdatGroup.Index, @intCast(self.comdat_groups.items.len));
     _ = try self.comdat_groups.addOne(self.base.allocator);
     return index;
 }
@@ -2331,7 +2331,7 @@ pub inline fn getPltGotEntryAddress(self: *Elf, index: u32) u64 {
 }
 
 pub inline fn getTlsLdAddress(self: *Elf) u64 {
-    return self.getGotEntryAddress(@intCast(u32, self.got.symbols.items.len));
+    return self.getGotEntryAddress(@as(u32, @intCast(self.got.symbols.items.len)));
 }
 
 pub fn getTpAddress(self: *Elf) u64 {

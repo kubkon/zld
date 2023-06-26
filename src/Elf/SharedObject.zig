@@ -53,10 +53,10 @@ pub fn parse(self: *SharedObject, elf_file: *Elf) !void {
 
     var dynsym_index: ?u16 = null;
     for (shdrs, 0..) |shdr, i| switch (shdr.sh_type) {
-        elf.SHT_DYNSYM => dynsym_index = @intCast(u16, i),
-        elf.SHT_DYNAMIC => self.dynamic_sect_index = @intCast(u16, i),
-        Elf.SHT_GNU_versym => self.versym_sect_index = @intCast(u16, i),
-        Elf.SHT_GNU_verdef => self.verdef_sect_index = @intCast(u16, i),
+        elf.SHT_DYNSYM => dynsym_index = @as(u16, @intCast(i)),
+        elf.SHT_DYNAMIC => self.dynamic_sect_index = @as(u16, @intCast(i)),
+        Elf.SHT_GNU_versym => self.versym_sect_index = @as(u16, @intCast(i)),
+        Elf.SHT_GNU_verdef => self.verdef_sect_index = @as(u16, @intCast(i)),
         else => {},
     };
 
@@ -64,8 +64,8 @@ pub fn parse(self: *SharedObject, elf_file: *Elf) !void {
         const shdr = shdrs[index];
         const symtab = self.getShdrContents(index);
         const nsyms = @divExact(symtab.len, @sizeOf(elf.Elf64_Sym));
-        self.symtab = @ptrCast([*]align(1) const elf.Elf64_Sym, symtab.ptr)[0..nsyms];
-        self.strtab = self.getShdrContents(@intCast(u16, shdr.sh_link));
+        self.symtab = @as([*]align(1) const elf.Elf64_Sym, @ptrCast(symtab.ptr))[0..nsyms];
+        self.strtab = self.getShdrContents(@as(u16, @intCast(shdr.sh_link)));
     }
 
     try self.parseVersions(elf_file);
@@ -87,11 +87,11 @@ fn parseVersions(self: *SharedObject, elf_file: *Elf) !void {
         var i: u32 = 0;
         var offset: u32 = 0;
         while (i < nverdefs) : (i += 1) {
-            const verdef = @ptrCast(*align(1) const elf.Elf64_Verdef, verdefs.ptr + offset).*;
+            const verdef = @as(*align(1) const elf.Elf64_Verdef, @ptrCast(verdefs.ptr + offset)).*;
             defer offset += verdef.vd_next;
             if (verdef.vd_flags == Elf.VER_FLG_BASE) continue; // Skip BASE entry
             const vda_name = if (verdef.vd_cnt > 0)
-                @ptrCast(*align(1) const elf.Elf64_Verdaux, verdefs.ptr + offset + verdef.vd_aux).vda_name
+                @as(*align(1) const elf.Elf64_Verdaux, @ptrCast(verdefs.ptr + offset + verdef.vd_aux)).vda_name
             else
                 0;
             self.verstrings.items[verdef.vd_ndx] = vda_name;
@@ -103,7 +103,7 @@ fn parseVersions(self: *SharedObject, elf_file: *Elf) !void {
     if (self.versym_sect_index) |shndx| {
         const versyms_raw = self.getShdrContents(shndx);
         const nversyms = @divExact(versyms_raw.len, @sizeOf(elf.Elf64_Versym));
-        const versyms = @ptrCast([*]align(1) const elf.Elf64_Versym, versyms_raw.ptr)[0..nversyms];
+        const versyms = @as([*]align(1) const elf.Elf64_Versym, @ptrCast(versyms_raw.ptr))[0..nversyms];
         for (versyms) |ver| {
             const normalized_ver = if (ver & Elf.VERSYM_VERSION >= self.verstrings.items.len - 1)
                 Elf.VER_NDX_GLOBAL
@@ -137,7 +137,7 @@ fn initSymtab(self: *SharedObject, elf_file: *Elf) !void {
 
 pub fn resolveSymbols(self: *SharedObject, elf_file: *Elf) void {
     for (self.symbols.items, 0..) |index, i| {
-        const sym_idx = @intCast(u32, i);
+        const sym_idx = @as(u32, @intCast(i));
         const this_sym = self.symtab[sym_idx];
 
         if (this_sym.st_shndx == elf.SHN_UNDEF) continue;
@@ -188,7 +188,7 @@ pub fn calcSymtabSize(self: *SharedObject, elf_file: *Elf) !void {
         if (global.isLocal()) continue;
         global.flags.output_symtab = true;
         self.output_symtab_size.nglobals += 1;
-        self.output_symtab_size.strsize += @intCast(u32, global.getName(elf_file).len + 1);
+        self.output_symtab_size.strsize += @as(u32, @intCast(global.getName(elf_file).len + 1));
     }
 }
 
@@ -210,7 +210,7 @@ pub fn writeSymtab(self: *SharedObject, elf_file: *Elf, ctx: Elf.WriteSymtabCtx)
 
 pub inline fn getShdrs(self: *SharedObject) []align(1) const elf.Elf64_Shdr {
     const header = self.header orelse return &[0]elf.Elf64_Shdr{};
-    return @ptrCast([*]align(1) const elf.Elf64_Shdr, self.data.ptr + header.e_shoff)[0..header.e_shnum];
+    return @as([*]align(1) const elf.Elf64_Shdr, @ptrCast(self.data.ptr + header.e_shoff))[0..header.e_shnum];
 }
 
 pub inline fn getShdrContents(self: *SharedObject, index: u16) []const u8 {
@@ -220,7 +220,7 @@ pub inline fn getShdrContents(self: *SharedObject, index: u16) []const u8 {
 
 pub inline fn getString(self: *SharedObject, off: u32) [:0]const u8 {
     assert(off < self.strtab.len);
-    return mem.sliceTo(@ptrCast([*:0]const u8, self.strtab.ptr + off), 0);
+    return mem.sliceTo(@as([*:0]const u8, @ptrCast(self.strtab.ptr + off)), 0);
 }
 
 pub inline fn getVersionString(self: *SharedObject, index: elf.Elf64_Versym) [:0]const u8 {
@@ -236,13 +236,13 @@ fn getDynamicTable(self: *SharedObject) []align(1) const elf.Elf64_Dyn {
     const shndx = self.dynamic_sect_index orelse return &[0]elf.Elf64_Dyn{};
     const raw = self.getShdrContents(shndx);
     const num = @divExact(raw.len, @sizeOf(elf.Elf64_Dyn));
-    return @ptrCast([*]align(1) const elf.Elf64_Dyn, raw.ptr)[0..num];
+    return @as([*]align(1) const elf.Elf64_Dyn, @ptrCast(raw.ptr))[0..num];
 }
 
 fn getVerdefNum(self: *SharedObject) u32 {
     const entries = self.getDynamicTable();
     for (entries) |entry| switch (entry.d_tag) {
-        elf.DT_VERDEFNUM => return @intCast(u32, entry.d_val),
+        elf.DT_VERDEFNUM => return @as(u32, @intCast(entry.d_val)),
         else => {},
     };
     return 0;
@@ -251,7 +251,7 @@ fn getVerdefNum(self: *SharedObject) u32 {
 pub fn getSoname(self: *SharedObject) []const u8 {
     const entries = self.getDynamicTable();
     for (entries) |entry| switch (entry.d_tag) {
-        elf.DT_SONAME => return self.getString(@intCast(u32, entry.d_val)),
+        elf.DT_SONAME => return self.getString(@as(u32, @intCast(entry.d_val))),
         else => {},
     };
     return self.path;
