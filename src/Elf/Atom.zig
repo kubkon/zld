@@ -283,6 +283,7 @@ fn scanReloc(self: Atom, symbol: *Symbol, rel: elf.Elf64_Rela, action: RelocActi
         },
         .dyn_copyrel => {
             if (is_writeable or elf_file.options.z_nocopyreloc) {
+                self.checkTextReloc(symbol, elf_file);
                 object.num_dynrelocs += 1;
             } else {
                 symbol.flags.copy_rel = true;
@@ -299,9 +300,27 @@ fn scanReloc(self: Atom, symbol: *Symbol, rel: elf.Elf64_Rela, action: RelocActi
             }
         },
         .dynrel => {
+            self.checkTextReloc(symbol, elf_file);
             object.num_dynrelocs += 1;
         },
         else => self.unhandledRelocError(symbol, rel, action, elf_file),
+    }
+}
+
+inline fn checkTextReloc(self: Atom, symbol: *const Symbol, elf_file: *Elf) void {
+    const is_writeable = self.getInputShdr(elf_file).sh_flags & elf.SHF_WRITE != 0;
+    if (!is_writeable) {
+        if (elf_file.options.z_text) {
+            elf_file.base.fatal("{s}: relocation against symbol '{s}' in read-only section", .{
+                self.getName(elf_file),
+                symbol.getName(elf_file),
+            });
+        } else {
+            // TODO
+            elf_file.base.fatal("{s}: TODO handle relocations in read-only section", .{
+                self.getName(elf_file),
+            });
+        }
     }
 }
 
