@@ -83,11 +83,13 @@ pub fn getSymbolRank(symbol: Symbol, elf_file: *Elf) u32 {
     return file.getSymbolRank(sym, in_archive);
 }
 
-pub fn getAddress(symbol: Symbol, elf_file: *Elf) u64 {
+pub fn getAddress(symbol: Symbol, opts: struct {
+    plt: bool = true,
+}, elf_file: *Elf) u64 {
     if (symbol.flags.copy_rel) {
         return elf_file.getSectionAddress(elf_file.copy_rel_sect_index.?) + symbol.value;
     }
-    if (symbol.flags.plt) {
+    if (symbol.flags.plt and opts.plt) {
         const extra = symbol.getExtra(elf_file).?;
         if (symbol.flags.got) {
             // We have a non-lazy bound function pointer, use that!
@@ -146,7 +148,7 @@ pub inline fn asElfSym(symbol: Symbol, st_name: u32, elf_file: *Elf) elf.Elf64_S
         break :blk symbol.shndx;
     };
     const st_value = blk: {
-        if (symbol.flags.copy_rel) break :blk symbol.getAddress(elf_file);
+        if (symbol.flags.copy_rel) break :blk symbol.getAddress(.{}, elf_file);
         if (symbol.flags.import) break :blk 0;
         const shdr = &elf_file.sections.items(.shdr)[st_shndx];
         if (Elf.shdrIsTls(shdr)) break :blk symbol.value - elf_file.getTlsAddress();

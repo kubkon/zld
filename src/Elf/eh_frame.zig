@@ -285,7 +285,7 @@ pub fn calcEhFrameHdrSize(elf_file: *Elf) usize {
 fn resolveReloc(rec: anytype, sym: *const Symbol, rel: elf.Elf64_Rela, elf_file: *Elf, data: []u8) !void {
     const offset = rel.r_offset - rec.offset;
     const P = @as(i64, @intCast(rec.getAddress(elf_file) + offset));
-    const S = @as(i64, @intCast(sym.getAddress(elf_file)));
+    const S = @as(i64, @intCast(sym.getAddress(.{}, elf_file)));
     const A = rel.r_addend;
 
     relocs_log.debug("  {s}: {x}: [{x} => {x}] ({s})", .{
@@ -400,7 +400,7 @@ pub fn writeEhFrameHdr(elf_file: *Elf, writer: anytype) !void {
             const rel = relocs[0];
             const sym = object.getSymbol(rel.r_sym(), elf_file);
             const P = @as(i64, @intCast(fde.getAddress(elf_file)));
-            const S = @as(i64, @intCast(sym.getAddress(elf_file)));
+            const S = @as(i64, @intCast(sym.getAddress(.{}, elf_file)));
             const A = rel.r_addend;
             entries.appendAssumeCapacity(.{
                 .init_addr = @as(u32, @bitCast(@as(i32, @truncate(S + A - @as(i64, @intCast(eh_frame_hdr_shdr.sh_addr)))))),

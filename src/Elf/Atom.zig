@@ -488,7 +488,7 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
         // Addend from the relocation.
         const A = rel.r_addend;
         // Address of the target symbol - can be address of the symbol within an atom or address of PLT stub.
-        const S = @as(i64, @intCast(target.getAddress(elf_file)));
+        const S = @as(i64, @intCast(target.getAddress(.{}, elf_file)));
         // Address of the global offset table.
         const GOT = if (elf_file.got_sect_index) |shndx|
             @as(i64, @intCast(elf_file.getSectionAddress(shndx)))
@@ -623,7 +623,7 @@ fn resolveDynAbsReloc(
 ) !void {
     const P = self.value + rel.r_offset;
     const A = rel.r_addend;
-    const S = @as(i64, @intCast(target.getAddress(elf_file)));
+    const S = @as(i64, @intCast(target.getAddress(.{}, elf_file)));
     const is_writeable = self.getInputShdr(elf_file).sh_flags & elf.SHF_WRITE != 0;
     const object = self.getObject(elf_file);
 
@@ -712,7 +712,7 @@ pub fn resolveRelocsNonAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void 
         // Addend from the relocation.
         const A = rel.r_addend;
         // Address of the target symbol - can be address of the symbol within an atom or address of PLT stub.
-        const S = @as(i64, @intCast(target.getAddress(elf_file)));
+        const S = @as(i64, @intCast(target.getAddress(.{}, elf_file)));
         // Address of the global offset table.
         const GOT = if (elf_file.got_sect_index) |shndx|
             @as(i64, @intCast(elf_file.getSectionAddress(shndx)))
