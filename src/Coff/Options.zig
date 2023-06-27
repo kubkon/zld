@@ -20,6 +20,7 @@ const usage =
     \\-o [path]                     Specify output path for the final artifact
     \\-h, --help                    Print this help and exit
     \\--debug-log [scope]           Turn on debugging logs for [scope] (requires zld compiled with -Dlog)
+    \\
 ;
 
 emit: Zld.Emit,

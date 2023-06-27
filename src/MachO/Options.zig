@@ -129,6 +129,7 @@ const usage =
     \\
     \\--debug-log [scope]
     \\    Turn on debugging logs for [scope] (requires zld compiled with -Dlog)
+    \\
 ;
 
 emit: Zld.Emit,

@@ -14,7 +14,7 @@ const usage =
     \\Call
     \\  ELF: ld.zld, ld
     \\  MachO: ld64.zld, ld64
-    \\  COFF: link-dl
+    \\  COFF: link-zld
     \\  Wasm: wasm-zld
 ;
 

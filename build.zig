@@ -66,6 +66,7 @@ pub fn build(b: *std.Build.Builder) void {
         "ld",
         "ld64.zld",
         "ld64",
+        "link-zld",
         "wasm-zld",
     });
     symlinks.step.dependOn(&install.step);
