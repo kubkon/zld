@@ -281,6 +281,12 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
 
             elf.R_X86_64_GOTPC32_TLSDESC => @panic("TODO"),
 
+            elf.R_X86_64_TPOFF32,
+            elf.R_X86_64_TPOFF64,
+            => {
+                if (is_shared) self.picError(symbol, rel, elf_file);
+            },
+
             elf.R_X86_64_GOTOFF64,
             elf.R_X86_64_DTPOFF32,
             elf.R_X86_64_DTPOFF64,
@@ -303,9 +309,17 @@ fn scanReloc(self: Atom, symbol: *Symbol, rel: elf.Elf64_Rela, action: RelocActi
 
     switch (action) {
         .none => {},
-        .@"error" => self.relocError(symbol, rel, elf_file),
+        .@"error" => if (symbol.isAbs(elf_file))
+            self.noPicError(symbol, rel, elf_file)
+        else
+            self.picError(symbol, rel, elf_file),
         .copyrel => {
-            if (elf_file.options.z_nocopyreloc) self.relocError(symbol, rel, elf_file);
+            if (elf_file.options.z_nocopyreloc) {
+                if (symbol.isAbs(elf_file))
+                    self.noPicError(symbol, rel, elf_file)
+                else
+                    self.picError(symbol, rel, elf_file);
+            }
             symbol.flags.copy_rel = true;
         },
         .dyn_copyrel => {
@@ -376,14 +390,28 @@ inline fn unhandledRelocError(
     });
 }
 
-inline fn relocError(self: Atom, symbol: *const Symbol, rel: elf.Elf64_Rela, elf_file: *Elf) void {
-    elf_file.base.fatal("{s}: {} relocation at offset 0x{x} against symbol '{s}' cannot be used; recompile with {s}", .{
-        self.getName(elf_file),
-        fmtRelocType(rel.r_type()),
-        rel.r_offset,
-        symbol.getName(elf_file),
-        if (symbol.isAbs(elf_file)) "-fno-PIC" else "-fPIC",
-    });
+inline fn noPicError(self: Atom, symbol: *const Symbol, rel: elf.Elf64_Rela, elf_file: *Elf) void {
+    elf_file.base.fatal(
+        "{s}: {} relocation at offset 0x{x} against symbol '{s}' cannot be used; recompile with -fno-PIC",
+        .{
+            self.getName(elf_file),
+            fmtRelocType(rel.r_type()),
+            rel.r_offset,
+            symbol.getName(elf_file),
+        },
+    );
+}
+
+inline fn picError(self: Atom, symbol: *const Symbol, rel: elf.Elf64_Rela, elf_file: *Elf) void {
+    elf_file.base.fatal(
+        "{s}: {} relocation at offset 0x{x} against symbol '{s}' cannot be used; recompile with -fPIC",
+        .{
+            self.getName(elf_file),
+            fmtRelocType(rel.r_type()),
+            rel.r_offset,
+            symbol.getName(elf_file),
+        },
+    );
 }
 
 const RelocAction = enum {
