@@ -91,7 +91,7 @@ pub fn getAddress(symbol: Symbol, opts: struct {
     }
     if (symbol.flags.plt and opts.plt) {
         const extra = symbol.getExtra(elf_file).?;
-        if (symbol.flags.got) {
+        if (!symbol.flags.is_canonical and symbol.flags.got) {
             // We have a non-lazy bound function pointer, use that!
             return elf_file.getPltGotEntryAddress(extra.plt_got);
         }
@@ -149,6 +149,8 @@ pub inline fn asElfSym(symbol: Symbol, st_name: u32, elf_file: *Elf) elf.Elf64_S
     };
     const st_value = blk: {
         if (symbol.flags.copy_rel) break :blk symbol.getAddress(.{}, elf_file);
+        if (symbol.flags.is_canonical and (symbol.getFile(elf_file).? == .shared or symbol.flags.import))
+            break :blk symbol.getAddress(.{}, elf_file);
         if (symbol.flags.import) break :blk 0;
         const shdr = &elf_file.sections.items(.shdr)[st_shndx];
         if (Elf.shdrIsTls(shdr)) break :blk symbol.value - elf_file.getTlsAddress();
