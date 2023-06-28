@@ -132,6 +132,7 @@ pub inline fn setExtra(symbol: Symbol, extra: Extra, elf_file: *Elf) void {
 }
 
 pub inline fn asElfSym(symbol: Symbol, st_name: u32, elf_file: *Elf) elf.Elf64_Sym {
+    const file = symbol.getFile(elf_file).?;
     const s_sym = symbol.getSourceSymbol(elf_file);
     const st_type = switch (s_sym.st_type()) {
         elf.STT_GNU_IFUNC => elf.STT_FUNC,
@@ -140,18 +141,20 @@ pub inline fn asElfSym(symbol: Symbol, st_name: u32, elf_file: *Elf) elf.Elf64_S
     const st_bind: u8 = blk: {
         if (symbol.isLocal()) break :blk 0;
         if (symbol.flags.weak) break :blk elf.STB_WEAK;
-        break :blk elf.STB_GLOBAL;
+        if (file == .shared) break :blk elf.STB_GLOBAL;
+        break :blk s_sym.st_bind();
     };
     const st_shndx = blk: {
         if (symbol.flags.copy_rel) break :blk elf_file.copy_rel_sect_index.?;
-        if (symbol.flags.import) break :blk elf.SHN_UNDEF;
+        if (file == .shared or s_sym.st_shndx == elf.SHN_UNDEF) break :blk elf.SHN_UNDEF;
         break :blk symbol.shndx;
     };
     const st_value = blk: {
         if (symbol.flags.copy_rel) break :blk symbol.getAddress(.{}, elf_file);
-        if (symbol.flags.is_canonical and (symbol.getFile(elf_file).? == .shared or symbol.flags.import))
-            break :blk symbol.getAddress(.{}, elf_file);
-        if (symbol.flags.import) break :blk 0;
+        if (file == .shared or s_sym.st_shndx == elf.SHN_UNDEF) {
+            if (symbol.flags.is_canonical) break :blk symbol.getAddress(.{}, elf_file);
+            break :blk 0;
+        }
         const shdr = &elf_file.sections.items(.shdr)[st_shndx];
         if (Elf.shdrIsTls(shdr)) break :blk symbol.value - elf_file.getTlsAddress();
         break :blk symbol.value;

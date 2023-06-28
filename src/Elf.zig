@@ -556,7 +556,7 @@ fn initSections(self: *Elf) !void {
         });
     }
 
-    if (self.shared_objects.items.len > 0 or self.options.pie) {
+    if (self.options.output_mode == .lib or self.shared_objects.items.len > 0 or self.options.pie) {
         self.dynstrtab_sect_index = try self.addSection(.{
             .name = ".dynstr",
             .flags = elf.SHF_ALLOC,
@@ -1657,14 +1657,17 @@ fn convertCommonSymbols(self: *Elf) !void {
 }
 
 fn markImportsAndExports(self: *Elf) !void {
-    for (self.shared_objects.items) |index| {
-        for (self.getFile(index).?.shared.getGlobals()) |global_index| {
-            const global = self.getSymbol(global_index);
-            const file = global.getFile(self) orelse continue;
-            const vis = @as(elf.STV, @enumFromInt(global.getSourceSymbol(self).st_other));
-            if (file != .shared and vis != .HIDDEN) global.flags.@"export" = true;
-        }
-    }
+    const is_shared = self.options.output_mode == .lib;
+
+    if (!is_shared)
+        for (self.shared_objects.items) |index| {
+            for (self.getFile(index).?.shared.getGlobals()) |global_index| {
+                const global = self.getSymbol(global_index);
+                const file = global.getFile(self) orelse continue;
+                const vis = @as(elf.STV, @enumFromInt(global.getSourceSymbol(self).st_other));
+                if (file != .shared and vis != .HIDDEN) global.flags.@"export" = true;
+            }
+        };
 
     for (self.objects.items) |index| {
         for (self.getFile(index).?.object.getGlobals()) |global_index| {
@@ -1679,6 +1682,10 @@ fn markImportsAndExports(self: *Elf) !void {
             }
             if (file.getIndex() == index) {
                 global.flags.@"export" = true;
+
+                if (is_shared and vis != .PROTECTED) {
+                    global.flags.import = true;
+                }
             }
         }
     }
@@ -1725,14 +1732,22 @@ fn claimUnresolved(self: *Elf) void {
                 if (global.getSourceSymbol(self).st_shndx != elf.SHN_UNDEF) continue;
             }
 
+            const is_import = blk: {
+                if (self.options.output_mode != .lib) break :blk false;
+                const vis = @as(elf.STV, @enumFromInt(sym.st_other));
+                if (vis == .HIDDEN) break :blk false;
+                break :blk true;
+            };
+
             global.* = .{
                 .value = 0,
                 .name = global.name,
                 .atom = 0,
                 .sym_idx = sym_idx,
                 .file = object.index,
-                .ver_idx = self.default_sym_version,
+                .ver_idx = if (is_import) VER_NDX_LOCAL else self.default_sym_version,
             };
+            global.flags.import = is_import;
         }
     }
 }
@@ -1807,11 +1822,11 @@ fn scanRelocs(self: *Elf) !void {
             }
         }
         if (symbol.flags.copy_rel and !symbol.flags.has_copy_rel) {
-            log.debug("'{s}' needs COPYREL!", .{symbol.getName(self)});
+            log.debug("'{s}' needs COPYREL", .{symbol.getName(self)});
             try self.copy_rel.addSymbol(index, self);
         }
         if (symbol.flags.tlsgd) {
-            log.warn("'{s}' needs TLSGD!", .{symbol.getName(self)});
+            log.warn("'{s}' needs TLSGD", .{symbol.getName(self)});
         }
     }
 

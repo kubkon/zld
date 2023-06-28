@@ -205,6 +205,7 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
         if (try self.reportUndefSymbol(rel, elf_file)) continue;
 
         const symbol = object.getSymbol(rel.r_sym(), elf_file);
+        const is_shared = elf_file.options.output_mode == .lib;
 
         if (symbol.isIFunc(elf_file)) {
             symbol.flags.got = true;
@@ -231,7 +232,9 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
                 symbol.flags.got = true;
             },
 
-            elf.R_X86_64_PLT32 => {
+            elf.R_X86_64_PLT32,
+            elf.R_X86_64_PLTOFF64,
+            => {
                 if (symbol.flags.import) {
                     symbol.flags.plt = true;
                 }
@@ -244,10 +247,14 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
             elf.R_X86_64_TLSGD => {
                 // TODO verify followed by appropriate relocation such as PLT32 __tls_get_addr
 
-                if (elf_file.options.static or (elf_file.options.relax and !symbol.flags.import)) {
+                if (elf_file.options.static or
+                    (elf_file.options.relax and !symbol.flags.import and !is_shared))
+                {
                     // Relax if building with -static flag as __tls_get_addr() will not be present in libc.a
                     // We skip the next relocation.
                     i += 1;
+                } else if (elf_file.options.relax and !symbol.flags.import and is_shared) {
+                    @panic("TODO");
                 } else {
                     symbol.flags.tlsgd = true;
                 }
@@ -256,7 +263,7 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
             elf.R_X86_64_TLSLD => {
                 // TODO verify followed by appropriate relocation such as PLT32 __tls_get_addr
 
-                if (elf_file.options.static or elf_file.options.relax) {
+                if (elf_file.options.static or (elf_file.options.relax and !is_shared)) {
                     // Relax if building with -static flag as __tls_get_addr() will not be present in libc.a
                     // We skip the next relocation.
                     i += 1;
@@ -265,7 +272,27 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
                 }
             },
 
-            else => {},
+            elf.R_X86_64_GOTTPOFF => {
+                const should_relax = elf_file.options.relax and !is_shared and !symbol.flags.import;
+                if (!should_relax) {
+                    @panic("TODO");
+                }
+            },
+
+            elf.R_X86_64_GOTPC32_TLSDESC => @panic("TODO"),
+
+            elf.R_X86_64_GOTOFF64,
+            elf.R_X86_64_DTPOFF32,
+            elf.R_X86_64_DTPOFF64,
+            elf.R_X86_64_SIZE32,
+            elf.R_X86_64_SIZE64,
+            elf.R_X86_64_TLSDESC_CALL,
+            => {},
+
+            else => elf_file.base.fatal("{s}: unknown relocation type: {}", .{
+                self.getName(elf_file),
+                fmtRelocType(rel.r_type()),
+            }),
         }
     }
 }

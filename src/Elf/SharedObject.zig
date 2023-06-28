@@ -254,7 +254,7 @@ pub fn getSoname(self: *SharedObject) []const u8 {
         elf.DT_SONAME => return self.getString(@as(u32, @intCast(entry.d_val))),
         else => {},
     };
-    return self.path;
+    return std.fs.path.basename(self.path);
 }
 
 pub inline fn getGlobals(self: *SharedObject) []const u32 {

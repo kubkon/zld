@@ -242,6 +242,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
     }
 
     if (positionals.items.len == 0) ctx.fatal("Expected at least one positional argument", .{});
+    if (opts.output_mode == .lib) opts.pic = true;
     if (opts.pic) opts.image_base = 0;
     if (opts.page_size) |page_size| {
         if (opts.image_base % page_size != 0) {
