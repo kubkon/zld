@@ -1794,7 +1794,11 @@ fn scanRelocs(self: *Elf) !void {
             if (symbol.flags.import) self.got.needs_rela = true;
         }
         if (symbol.flags.plt) {
-            if (symbol.flags.got) {
+            if (symbol.flags.is_canonical) {
+                log.debug("'{s}' needs CPLT", .{symbol.getName(self)});
+                symbol.flags.@"export" = true;
+                try self.plt.addSymbol(index, self);
+            } else if (symbol.flags.got) {
                 log.debug("'{s}' needs PLTGOT", .{symbol.getName(self)});
                 try self.plt_got.addSymbol(index, self);
             } else {

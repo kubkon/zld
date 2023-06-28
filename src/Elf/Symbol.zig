@@ -270,6 +270,8 @@ pub const Flags = packed struct {
 
     /// Whether the symbol contains PLT indirection.
     plt: bool = false,
+    /// Whether the PLT entry is canonical.
+    is_canonical: bool = false,
 
     /// Whether the symbol contains COPYREL directive.
     copy_rel: bool = false,

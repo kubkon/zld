@@ -292,11 +292,16 @@ fn scanReloc(self: Atom, symbol: *Symbol, rel: elf.Elf64_Rela, action: RelocActi
         .plt => {
             symbol.flags.plt = true;
         },
+        .cplt => {
+            symbol.flags.plt = true;
+            symbol.flags.is_canonical = true;
+        },
         .dyn_cplt => {
             if (is_writeable) {
                 object.num_dynrelocs += 1;
             } else {
-                self.unhandledRelocError(symbol, rel, action, elf_file);
+                symbol.flags.plt = true;
+                symbol.flags.is_canonical = true;
             }
         },
         .dynrel => {
