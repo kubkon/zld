@@ -2310,10 +2310,21 @@ pub inline fn addRelaDynAssumeCapacity(self: *Elf, opts: RelaDyn) void {
 
 fn sortRelaDyn(self: *Elf) void {
     const Sort = struct {
+        inline fn getRank(rel: elf.Elf64_Rela) u2 {
+            return switch (rel.r_type()) {
+                elf.R_X86_64_RELATIVE => 0,
+                elf.R_X86_64_IRELATIVE => 1,
+                else => 2,
+            };
+        }
+
         pub fn lessThan(ctx: void, lhs: elf.Elf64_Rela, rhs: elf.Elf64_Rela) bool {
             _ = ctx;
-            if (lhs.r_sym() == rhs.r_sym()) return lhs.r_offset < rhs.r_offset;
-            return lhs.r_sym() < rhs.r_sym();
+            if (getRank(lhs) == getRank(rhs)) {
+                if (lhs.r_sym() == rhs.r_sym()) return lhs.r_offset < rhs.r_offset;
+                return lhs.r_sym() < rhs.r_sym();
+            }
+            return getRank(lhs) < getRank(rhs);
         }
     };
     mem.sort(elf.Elf64_Rela, self.rela_dyn.items, {}, Sort.lessThan);
