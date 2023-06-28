@@ -39,6 +39,9 @@ pub const DynamicSection = struct {
         if (elf_file.options.z_now) {
             flags_1 |= 1; // TODO add elf.DF_1_NOW;
         }
+        if (elf_file.options.pie) {
+            flags_1 |= 0x8000000; // TODO add elf.DF_1_PIE;
+        }
         return if (flags_1 > 0) flags_1 else null;
     }
 
@@ -608,12 +611,24 @@ pub const GotSection = struct {
         try elf_file.rela_dyn.ensureUnusedCapacity(elf_file.base.allocator, got.numRela(elf_file));
         for (got.symbols.items, 0..) |sym_index, i| {
             const sym = elf_file.getSymbol(sym_index);
+            const offset = elf_file.getGotEntryAddress(@as(u32, @intCast(i)));
+            const extra = sym.getExtra(elf_file).?;
+
             if (sym.flags.import) {
-                const extra = sym.getExtra(elf_file).?;
                 elf_file.addRelaDynAssumeCapacity(.{
-                    .offset = elf_file.getGotEntryAddress(@as(u32, @intCast(i))),
+                    .offset = offset,
                     .sym = extra.dynamic,
                     .type = elf.R_X86_64_GLOB_DAT,
+                });
+                continue;
+            }
+
+            if (elf_file.options.pic and !sym.isAbs(elf_file)) {
+                elf_file.addRelaDynAssumeCapacity(.{
+                    .offset = offset,
+                    .sym = extra.dynamic,
+                    .type = elf.R_X86_64_RELATIVE,
+                    .addend = @intCast(sym.getAddress(.{ .plt = false }, elf_file)),
                 });
             }
         }
@@ -623,7 +638,11 @@ pub const GotSection = struct {
         var num: usize = 0;
         for (got.symbols.items) |sym_index| {
             const sym = elf_file.getSymbol(sym_index);
-            if (sym.flags.import) num += 1;
+            if (sym.flags.import) {
+                num += 1;
+                continue;
+            }
+            if (elf_file.options.pic and !sym.isAbs(elf_file)) num += 1;
         }
         return num;
     }
@@ -954,7 +973,7 @@ pub const CopyRelSection = struct {
             assert(sym.flags.import and sym.flags.copy_rel);
             const extra = sym.getExtra(elf_file).?;
             elf_file.addRelaDynAssumeCapacity(.{
-                .offset = sym.getAddress(elf_file),
+                .offset = sym.getAddress(.{}, elf_file),
                 .sym = extra.dynamic,
                 .type = elf.R_X86_64_COPY,
             });

@@ -283,6 +283,7 @@ fn scanReloc(self: Atom, symbol: *Symbol, rel: elf.Elf64_Rela, action: RelocActi
         },
         .dyn_copyrel => {
             if (is_writeable or elf_file.options.z_nocopyreloc) {
+                self.checkTextReloc(symbol, elf_file);
                 object.num_dynrelocs += 1;
             } else {
                 symbol.flags.copy_rel = true;
@@ -291,17 +292,44 @@ fn scanReloc(self: Atom, symbol: *Symbol, rel: elf.Elf64_Rela, action: RelocActi
         .plt => {
             symbol.flags.plt = true;
         },
+        .cplt => {
+            symbol.flags.plt = true;
+            symbol.flags.is_canonical = true;
+        },
         .dyn_cplt => {
             if (is_writeable) {
                 object.num_dynrelocs += 1;
             } else {
-                self.unhandledRelocError(symbol, rel, action, elf_file);
+                symbol.flags.plt = true;
+                symbol.flags.is_canonical = true;
             }
         },
         .dynrel => {
+            self.checkTextReloc(symbol, elf_file);
             object.num_dynrelocs += 1;
         },
-        else => self.unhandledRelocError(symbol, rel, action, elf_file),
+        .baserel => {
+            self.checkTextReloc(symbol, elf_file);
+            object.num_dynrelocs += 1;
+        },
+        .ifunc => self.unhandledRelocError(symbol, rel, action, elf_file),
+    }
+}
+
+inline fn checkTextReloc(self: Atom, symbol: *const Symbol, elf_file: *Elf) void {
+    const is_writeable = self.getInputShdr(elf_file).sh_flags & elf.SHF_WRITE != 0;
+    if (!is_writeable) {
+        if (elf_file.options.z_text) {
+            elf_file.base.fatal("{s}: relocation against symbol '{s}' in read-only section", .{
+                self.getName(elf_file),
+                symbol.getName(elf_file),
+            });
+        } else {
+            // TODO
+            elf_file.base.fatal("{s}: TODO handle relocations in read-only section", .{
+                self.getName(elf_file),
+            });
+        }
     }
 }
 
@@ -465,7 +493,7 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
         // Addend from the relocation.
         const A = rel.r_addend;
         // Address of the target symbol - can be address of the symbol within an atom or address of PLT stub.
-        const S = @as(i64, @intCast(target.getAddress(elf_file)));
+        const S = @as(i64, @intCast(target.getAddress(.{}, elf_file)));
         // Address of the global offset table.
         const GOT = if (elf_file.got_sect_index) |shndx|
             @as(i64, @intCast(elf_file.getSectionAddress(shndx)))
@@ -600,13 +628,17 @@ fn resolveDynAbsReloc(
 ) !void {
     const P = self.value + rel.r_offset;
     const A = rel.r_addend;
-    const S = @as(i64, @intCast(target.getAddress(elf_file)));
+    const S = @as(i64, @intCast(target.getAddress(.{}, elf_file)));
     const is_writeable = self.getInputShdr(elf_file).sh_flags & elf.SHF_WRITE != 0;
     const object = self.getObject(elf_file);
 
     try elf_file.rela_dyn.ensureUnusedCapacity(elf_file.base.allocator, object.num_dynrelocs);
 
     switch (action) {
+        .@"error",
+        .plt,
+        => unreachable,
+
         .copyrel,
         .cplt,
         .none,
@@ -647,7 +679,15 @@ fn resolveDynAbsReloc(
             });
         },
 
-        else => self.unhandledRelocError(target, rel, action, elf_file),
+        .baserel => {
+            elf_file.addRelaDynAssumeCapacity(.{
+                .offset = P,
+                .type = elf.R_X86_64_RELATIVE,
+                .addend = S + A,
+            });
+        },
+
+        .ifunc => self.unhandledRelocError(target, rel, action, elf_file),
     }
 }
 
@@ -681,7 +721,7 @@ pub fn resolveRelocsNonAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void 
         // Addend from the relocation.
         const A = rel.r_addend;
         // Address of the target symbol - can be address of the symbol within an atom or address of PLT stub.
-        const S = @as(i64, @intCast(target.getAddress(elf_file)));
+        const S = @as(i64, @intCast(target.getAddress(.{}, elf_file)));
         // Address of the global offset table.
         const GOT = if (elf_file.got_sect_index) |shndx|
             @as(i64, @intCast(elf_file.getSectionAddress(shndx)))

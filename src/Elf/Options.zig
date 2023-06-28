@@ -22,8 +22,10 @@ const usage =
     \\-l[value]                     Specify library to link against
     \\-L[value]                     Specify library search dir
     \\-m [value]                    Set target emulation
-    \\--pie, --pic-executable       Create a position independent executable
+    \\--pie                         Create a position independent executable
+    \\  --pic-executable
     \\--no-pie                      Create a position dependent executable (default)
+    \\  --no-pic-executable
     \\--pop-state                   Restore the states saved by --push-state
     \\--push-state                  Save the current state of --as-needed, -static and --whole-archive
     \\--relax                       Optimize instructions (default)
@@ -35,6 +37,7 @@ const usage =
     \\--strip-all, -s               Strip all symbols. Implies --strip-debug
     \\--strip-debug, -S             Strip .debug_ sections
     \\--warn-common                 Warn about duplicate common symbols
+    \\--image-base=[value]          Set the base address
     \\-o [value]                    Specify output path for the final artifact
     \\-z                            Set linker extension flags
     \\  stack-size=[value]          Override default stack size
@@ -43,6 +46,9 @@ const usage =
     \\  execstack-if-needed         Make the stack executable if the input file explicitly requests it
     \\  now                         Disable lazy function resolution
     \\  nocopyreloc                 Do not create copy relocations
+    \\  text                        Do not allow relocations against read-only segments (default)
+    \\  notext                      Allow relocations against read-only segments. Sets the DT_TEXTREL flag
+    \\                              in the .dynamic section
     \\-h, --help                    Print this help and exit
     \\--verbose                     Print full linker invocation to stderr
     \\--debug-log [value]           Turn on debugging logs for [value] (requires zld compiled with -Dlog)
@@ -70,7 +76,10 @@ eh_frame_hdr: bool = true,
 static: bool = false,
 relax: bool = true,
 export_dynamic: bool = false,
+image_base: u64 = 0x200000,
+page_size: ?u16 = null,
 pie: bool = false,
+pic: bool = false,
 warn_common: bool = false,
 /// -z flags
 /// Overrides default stack size.
@@ -82,8 +91,10 @@ z_execstack: bool = false,
 z_execstack_if_needed: bool = false,
 /// Disables lazy function resolution.
 z_now: bool = false,
-/// Do not create copy relocations
+/// Do not create copy relocations.
 z_nocopyreloc: bool = false,
+/// Do not allow relocations against read-only segments.
+z_text: bool = true,
 
 pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options {
     if (args.len == 0) ctx.fatal(usage, .{cmd});
@@ -116,6 +127,9 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             try search_dirs.put(dir, {});
         } else if (p.arg1("o")) |path| {
             opts.emit.sub_path = path;
+        } else if (p.arg1("image-base")) |value| {
+            opts.image_base = std.fmt.parseInt(u64, value, 0) catch
+                ctx.fatal("Could not parse value '{s}' into integer", .{value});
         } else if (p.flagAny("gc-sections")) {
             opts.gc_sections = true;
         } else if (p.flagAny("no-gc-sections")) {
@@ -133,8 +147,10 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         } else if (p.flagAny("no-export-dynamic")) {
             opts.export_dynamic = false;
         } else if (p.flagAny("pie") or p.flagAny("pic-executable")) {
+            opts.pic = true;
             opts.pie = true;
-        } else if (p.flagAny("no-pie")) {
+        } else if (p.flagAny("no-pie") or p.flagAny("no-pic-executable")) {
+            opts.pic = false;
             opts.pie = false;
         } else if (p.argAny("entry")) |name| {
             opts.entry = name;
@@ -143,6 +159,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         } else if (p.arg1("m")) |target| {
             if (mem.eql(u8, target, "elf_x86_64")) {
                 opts.cpu_arch = .x86_64;
+                opts.page_size = 0x1000;
             } else {
                 ctx.fatal("unknown target emulation '{s}'", .{target});
             }
@@ -207,6 +224,10 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             opts.z_now = true;
         } else if (p.flagZ("nocopyreloc")) {
             opts.z_nocopyreloc = true;
+        } else if (p.flagZ("text")) {
+            opts.z_text = true;
+        } else if (p.flagZ("notext")) {
+            opts.z_text = false;
         } else {
             try positionals.append(.{ .tag = .path, .path = p.arg });
         }
@@ -221,6 +242,15 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
     }
 
     if (positionals.items.len == 0) ctx.fatal("Expected at least one positional argument", .{});
+    if (opts.pic) opts.image_base = 0;
+    if (opts.page_size) |page_size| {
+        if (opts.image_base % page_size != 0) {
+            ctx.fatal("specified --image-base=0x{x} is not a multiple of page size of 0x{x}", .{
+                opts.image_base,
+                page_size,
+            });
+        }
+    }
 
     opts.positionals = positionals.items;
     opts.search_dirs = search_dirs.keys();

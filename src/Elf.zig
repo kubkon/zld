@@ -556,7 +556,7 @@ fn initSections(self: *Elf) !void {
         });
     }
 
-    if (self.shared_objects.items.len > 0) {
+    if (self.shared_objects.items.len > 0 or self.options.pie) {
         self.dynstrtab_sect_index = try self.addSection(.{
             .name = ".dynstr",
             .flags = elf.SHF_ALLOC,
@@ -870,7 +870,7 @@ fn initPhdrs(self: *Elf) !void {
         .type = elf.PT_PHDR,
         .flags = elf.PF_R,
         .@"align" = @alignOf(elf.Elf64_Phdr),
-        .addr = default_base_addr + @sizeOf(elf.Elf64_Ehdr),
+        .addr = self.options.image_base + @sizeOf(elf.Elf64_Ehdr),
         .offset = @sizeOf(elf.Elf64_Ehdr),
     });
 
@@ -902,9 +902,9 @@ fn initPhdrs(self: *Elf) !void {
             last_phdr = try self.addPhdr(.{
                 .type = elf.PT_LOAD,
                 .flags = shdrToPhdrFlags(shdr.sh_flags),
-                .@"align" = @max(default_page_size, shdr.sh_addralign),
+                .@"align" = @max(self.options.page_size.?, shdr.sh_addralign),
                 .offset = if (last_phdr == null) 0 else shdr.sh_offset,
-                .addr = if (last_phdr == null) default_base_addr else shdr.sh_addr,
+                .addr = if (last_phdr == null) self.options.image_base else shdr.sh_addr,
             });
             const p_flags = self.phdrs.items[last_phdr.?].p_flags;
             try self.addShdrToPhdr(last_phdr.?, shdr);
@@ -1054,14 +1054,14 @@ fn allocateSectionsInMemory(self: *Elf, base_offset: u64) !void {
         alignment.tls_start_align = @max(alignment.tls_start_align, shdr.sh_addralign);
     }
 
-    var addr = default_base_addr + base_offset;
+    var addr = self.options.image_base + base_offset;
     outer: for (self.sections.items(.shdr)[1..], 1..) |*shdr, i| {
         if (!shdrIsAlloc(shdr)) continue;
         if (i != 1) {
             const prev_shdr = self.sections.items(.shdr)[i - 1];
             if (shdrToPhdrFlags(shdr.sh_flags) != shdrToPhdrFlags(prev_shdr.sh_flags)) {
                 // We need advance by page size
-                addr += default_page_size;
+                addr += self.options.page_size.?;
             }
         }
         if (shdrIsTbss(shdr)) {
@@ -1526,6 +1526,18 @@ fn parseLdScript(self: *Elf, arena: Allocator, obj: LinkObject, search_dirs: []c
 fn validateOrSetCpuArch(self: *Elf, name: []const u8, cpu_arch: std.Target.Cpu.Arch) void {
     const self_cpu_arch = self.options.cpu_arch orelse blk: {
         self.options.cpu_arch = cpu_arch;
+        const page_size: u16 = switch (cpu_arch) {
+            .x86_64 => 0x1000,
+            else => @panic("TODO"),
+        };
+        // TODO move this error into Options
+        if (self.options.image_base % page_size != 0) {
+            self.base.fatal("specified --image-base=0x{x} is not a multiple of page size of 0x{x}", .{
+                self.options.image_base,
+                page_size,
+            });
+        }
+        self.options.page_size = page_size;
         break :blk self.options.cpu_arch.?;
     };
     if (self_cpu_arch != cpu_arch) {
@@ -1782,7 +1794,11 @@ fn scanRelocs(self: *Elf) !void {
             if (symbol.flags.import) self.got.needs_rela = true;
         }
         if (symbol.flags.plt) {
-            if (symbol.flags.got) {
+            if (symbol.flags.is_canonical) {
+                log.debug("'{s}' needs CPLT", .{symbol.getName(self)});
+                symbol.flags.@"export" = true;
+                try self.plt.addSymbol(index, self);
+            } else if (symbol.flags.got) {
                 log.debug("'{s}' needs PLTGOT", .{symbol.getName(self)});
                 try self.plt_got.addSymbol(index, self);
             } else {
@@ -2038,10 +2054,7 @@ fn writeShdrs(self: *Elf) !void {
 fn writeHeader(self: *Elf) !void {
     var header = elf.Elf64_Ehdr{
         .e_ident = undefined,
-        .e_type = switch (self.options.output_mode) {
-            .exe => elf.ET.EXEC,
-            .lib => elf.ET.DYN,
-        },
+        .e_type = if (self.options.pic) .DYN else .EXEC,
         .e_machine = self.options.cpu_arch.?.toElfMachine(),
         .e_version = 1,
         .e_entry = if (self.entry_index) |index| self.getSymbol(index).value else 0,
@@ -2281,7 +2294,7 @@ pub inline fn getComdatGroupOwner(self: *Elf, index: ComdatGroupOwner.Index) *Co
 
 const RelaDyn = struct {
     offset: u64,
-    sym: u64,
+    sym: u64 = 0,
     type: u32,
     addend: i64 = 0,
 };
@@ -2301,10 +2314,21 @@ pub inline fn addRelaDynAssumeCapacity(self: *Elf, opts: RelaDyn) void {
 
 fn sortRelaDyn(self: *Elf) void {
     const Sort = struct {
+        inline fn getRank(rel: elf.Elf64_Rela) u2 {
+            return switch (rel.r_type()) {
+                elf.R_X86_64_RELATIVE => 0,
+                elf.R_X86_64_IRELATIVE => 1,
+                else => 2,
+            };
+        }
+
         pub fn lessThan(ctx: void, lhs: elf.Elf64_Rela, rhs: elf.Elf64_Rela) bool {
             _ = ctx;
-            if (lhs.r_sym() == rhs.r_sym()) return lhs.r_offset < rhs.r_offset;
-            return lhs.r_sym() < rhs.r_sym();
+            if (getRank(lhs) == getRank(rhs)) {
+                if (lhs.r_sym() == rhs.r_sym()) return lhs.r_offset < rhs.r_offset;
+                return lhs.r_sym() < rhs.r_sym();
+            }
+            return getRank(lhs) < getRank(rhs);
         }
     };
     mem.sort(elf.Elf64_Rela, self.rela_dyn.items, {}, Sort.lessThan);
@@ -2455,7 +2479,7 @@ fn fmtDumpState(
         const symbol = self.getSymbol(sym_index);
         try writer.print("  {d}@{x} => {d} '{s}'\n", .{
             i,
-            symbol.getAddress(self),
+            symbol.getAddress(.{}, self),
             sym_index,
             symbol.getName(self),
         });
@@ -2503,9 +2527,6 @@ pub const WriteSymtabCtx = struct {
     symtab: []elf.Elf64_Sym,
     strtab: *StringTable(.strtab),
 };
-
-const default_base_addr: u64 = 0x200000;
-const default_page_size: u64 = 0x1000;
 
 pub const null_sym = elf.Elf64_Sym{
     .st_name = 0,
