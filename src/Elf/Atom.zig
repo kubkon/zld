@@ -312,7 +312,7 @@ fn scanReloc(self: Atom, symbol: *Symbol, rel: elf.Elf64_Rela, action: RelocActi
             self.checkTextReloc(symbol, elf_file);
             object.num_dynrelocs += 1;
         },
-        else => self.unhandledRelocError(symbol, rel, action, elf_file),
+        .ifunc => self.unhandledRelocError(symbol, rel, action, elf_file),
     }
 }
 
@@ -635,6 +635,10 @@ fn resolveDynAbsReloc(
     try elf_file.rela_dyn.ensureUnusedCapacity(elf_file.base.allocator, object.num_dynrelocs);
 
     switch (action) {
+        .@"error",
+        .plt,
+        => unreachable,
+
         .copyrel,
         .cplt,
         .none,
@@ -683,7 +687,7 @@ fn resolveDynAbsReloc(
             });
         },
 
-        else => self.unhandledRelocError(target, rel, action, elf_file),
+        .ifunc => self.unhandledRelocError(target, rel, action, elf_file),
     }
 }
 
