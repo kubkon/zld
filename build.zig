@@ -85,6 +85,10 @@ pub fn build(b: *std.Build.Builder) void {
 
     const test_step = b.step("test", "Run library and end-to-end tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
+
+    const elf_step = @import("test/test.zig").addElfTests(b);
+    elf_step.dependOn(&symlinks.step);
+    test_step.dependOn(elf_step);
 }
 
 fn addSymlinks(
