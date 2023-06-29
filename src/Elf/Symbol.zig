@@ -134,10 +134,7 @@ pub inline fn setExtra(symbol: Symbol, extra: Extra, elf_file: *Elf) void {
 pub inline fn asElfSym(symbol: Symbol, st_name: u32, elf_file: *Elf) elf.Elf64_Sym {
     const file = symbol.getFile(elf_file).?;
     const s_sym = symbol.getSourceSymbol(elf_file);
-    const st_type = switch (s_sym.st_type()) {
-        elf.STT_GNU_IFUNC => elf.STT_FUNC,
-        else => |st_type| st_type,
-    };
+    const st_type = symbol.getType(elf_file);
     const st_bind: u8 = blk: {
         if (symbol.isLocal()) break :blk 0;
         if (symbol.flags.weak) break :blk elf.STB_WEAK;

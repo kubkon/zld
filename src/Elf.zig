@@ -2332,8 +2332,8 @@ fn sortRelaDyn(self: *Elf) void {
         inline fn getRank(rel: elf.Elf64_Rela) u2 {
             return switch (rel.r_type()) {
                 elf.R_X86_64_RELATIVE => 0,
-                elf.R_X86_64_IRELATIVE => 1,
-                else => 2,
+                elf.R_X86_64_IRELATIVE => 2,
+                else => 1,
             };
         }
 

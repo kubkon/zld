@@ -626,10 +626,18 @@ pub const GotSection = struct {
                 continue;
             }
 
+            if (sym.isIFunc(elf_file)) {
+                elf_file.addRelaDynAssumeCapacity(.{
+                    .offset = offset,
+                    .type = elf.R_X86_64_IRELATIVE,
+                    .addend = @intCast(sym.getAddress(.{ .plt = false }, elf_file)),
+                });
+                continue;
+            }
+
             if (elf_file.options.pic and !sym.isAbs(elf_file)) {
                 elf_file.addRelaDynAssumeCapacity(.{
                     .offset = offset,
-                    .sym = extra.dynamic,
                     .type = elf.R_X86_64_RELATIVE,
                     .addend = @intCast(sym.getAddress(.{ .plt = false }, elf_file)),
                 });
@@ -645,6 +653,7 @@ pub const GotSection = struct {
                 num += 1;
                 continue;
             }
+            if (sym.isIFunc(elf_file)) num += 1;
             if (elf_file.options.pic and !sym.isAbs(elf_file)) num += 1;
         }
         return num;
@@ -861,7 +870,6 @@ pub const PltGotSection = struct {
     pub fn write(plt_got: PltGotSection, elf_file: *Elf, writer: anytype) !void {
         for (plt_got.symbols.items, 0..) |sym_index, i| {
             const sym = elf_file.getSymbol(sym_index);
-            assert(sym.flags.import);
             const extra = sym.getExtra(elf_file).?;
             const target_addr = elf_file.getGotEntryAddress(extra.got);
             const source_addr = elf_file.getPltGotEntryAddress(@as(u32, @intCast(i)));

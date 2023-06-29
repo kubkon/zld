@@ -44,6 +44,7 @@ const usage =
     \\  execstack                   Require executable stack
     \\  noexecstack                 Force stack non-executable
     \\  execstack-if-needed         Make the stack executable if the input file explicitly requests it
+    \\  lazy                        Enable lazy function resolution (default)
     \\  now                         Disable lazy function resolution
     \\  nocopyreloc                 Do not create copy relocations
     \\  text                        Do not allow relocations against read-only segments (default)
@@ -222,6 +223,8 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             opts.z_execstack_if_needed = true;
         } else if (p.flagZ("now")) {
             opts.z_now = true;
+        } else if (p.flagZ("lazy")) {
+            opts.z_now = false;
         } else if (p.flagZ("nocopyreloc")) {
             opts.z_nocopyreloc = true;
         } else if (p.flagZ("text")) {
