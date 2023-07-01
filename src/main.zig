@@ -16,6 +16,7 @@ const usage =
     \\  MachO: ld64.zld, ld64
     \\  COFF: link-zld
     \\  Wasm: wasm-zld
+    \\
 ;
 
 var log_scopes: std.ArrayList([]const u8) = std.ArrayList([]const u8).init(gpa);
