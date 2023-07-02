@@ -62,10 +62,9 @@ pub fn build(b: *std.Build.Builder) void {
     }
     const install = b.addInstallArtifact(exe);
     const symlinks = addSymlinks(b, install, &[_][]const u8{
-        "ld.zld",
         "ld",
+        "ld.zld",
         "ld64.zld",
-        "ld64",
         "wasm-zld",
     });
     symlinks.step.dependOn(&install.step);
@@ -89,6 +88,10 @@ pub fn build(b: *std.Build.Builder) void {
     const elf_step = @import("test/test.zig").addElfTests(b);
     elf_step.dependOn(&symlinks.step);
     test_step.dependOn(elf_step);
+
+    const macho_step = @import("test/test.zig").addMachOTests(b);
+    macho_step.dependOn(&symlinks.step);
+    test_step.dependOn(macho_step);
 }
 
 fn addSymlinks(

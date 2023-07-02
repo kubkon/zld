@@ -58,7 +58,7 @@ pub const std_options = struct {
 
 fn fatal(comptime format: []const u8, args: anytype) noreturn {
     ret: {
-        const msg = std.fmt.allocPrint(gpa, format, args) catch break :ret;
+        const msg = std.fmt.allocPrint(gpa, format ++ "\n", args) catch break :ret;
         std.io.getStdErr().writeAll(msg) catch {};
     }
     std.process.exit(1);
@@ -72,9 +72,15 @@ pub fn main() !void {
     const all_args = try std.process.argsAlloc(arena);
     const cmd = std.fs.path.basename(all_args[0]);
     const tag: Zld.Tag = blk: {
-        if (mem.eql(u8, cmd, "ld.zld") or mem.eql(u8, cmd, "ld")) {
+        if (mem.eql(u8, cmd, "ld")) break :blk switch (builtin.target.ofmt) {
+            .elf => .elf,
+            .macho => .macho,
+            .coff => .coff,
+            .wasm => .wasm,
+            else => |other| fatal("unsupported file format '{s}'", .{@tagName(other)}),
+        } else if (mem.eql(u8, cmd, "ld.zld")) {
             break :blk .elf;
-        } else if (mem.eql(u8, cmd, "ld64.zld") or mem.eql(u8, cmd, "ld64")) {
+        } else if (mem.eql(u8, cmd, "ld64.zld")) {
             break :blk .macho;
         } else if (mem.eql(u8, cmd, "link-zld")) {
             break :blk .coff;

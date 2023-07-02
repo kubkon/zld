@@ -94,6 +94,9 @@ const usage =
     \\-S
     \\    Do not put debug information (STABS or DWARF) in the output file
     \\
+    \\-no_deduplicate
+    \\    Do not run deduplication pass in linker
+    \\
     \\-search_paths_first
     \\    Search each dir in library search paths for `libx.dylib` then `libx.a`
     \\
@@ -159,6 +162,7 @@ headerpad_max_install_names: bool = false,
 dead_strip: bool = false,
 dead_strip_dylibs: bool = false,
 allow_undef: bool = false,
+no_deduplicate: bool = false,
 
 const cmd = "ld64.zld";
 
@@ -189,6 +193,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
     var strip: bool = false;
     var allow_undef: bool = false;
     var search_strategy: ?SearchStrategy = null;
+    var no_deduplicate: bool = false;
 
     var target: ?CrossTarget = if (comptime builtin.target.isDarwin())
         CrossTarget.fromTarget(builtin.target)
@@ -247,11 +252,11 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             try rpath_list.append(it.nextOrFatal(ctx));
         } else if (mem.eql(u8, arg, "-compatibility_version")) {
             const raw = it.nextOrFatal(ctx);
-            compatibility_version = std.SemanticVersion.parse(raw) catch
+            compatibility_version = parseVersion(raw) orelse
                 ctx.fatal("Unable to parse version from '{s}'", .{raw});
         } else if (mem.eql(u8, arg, "-current_version")) {
             const raw = it.nextOrFatal(ctx);
-            current_version = std.SemanticVersion.parse(raw) catch
+            current_version = parseVersion(raw) orelse
                 ctx.fatal("Unable to parse version from '{s}'", .{raw});
         } else if (mem.eql(u8, arg, "-install_name")) {
             install_name = it.nextOrFatal(ctx);
@@ -377,9 +382,9 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
                 tt.abi = tmp_target.abi;
             }
 
-            platform_version = std.SemanticVersion.parse(min_v) catch
+            platform_version = parseVersion(min_v) orelse
                 ctx.fatal("Unable to parse version from '{s}'", .{min_v});
-            sdk_version = std.SemanticVersion.parse(sdk_v) catch
+            sdk_version = parseVersion(sdk_v) orelse
                 ctx.fatal("Unable to parse version from '{s}'", .{sdk_v});
         } else if (mem.eql(u8, arg, "-undefined")) {
             const treatment = it.nextOrFatal(ctx);
@@ -394,13 +399,15 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             }
         } else if (mem.eql(u8, arg, "-lto_library")) {
             const lto_lib = it.nextOrFatal(ctx);
-            ctx.fatal("TODO unimplemented -lto_library {s} option", .{lto_lib});
+            std.log.debug("TODO unimplemented -lto_library {s} option", .{lto_lib});
         } else if (mem.eql(u8, arg, "-demangle")) {
-            ctx.fatal("TODO unimplemented -demangle option", .{});
+            std.log.debug("TODO unimplemented -demangle option", .{});
         } else if (mem.startsWith(u8, arg, "-l")) {
             try libs.put(arg[2..], .{});
         } else if (mem.startsWith(u8, arg, "-L")) {
             try lib_dirs.append(arg[2..]);
+        } else if (mem.eql(u8, arg, "-no_deduplicate")) {
+            no_deduplicate = true;
         } else {
             try positionals.append(.{
                 .path = arg,
@@ -450,6 +457,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         .strip = strip,
         .allow_undef = allow_undef,
         .search_strategy = search_strategy,
+        .no_deduplicate = no_deduplicate,
     };
 }
 
@@ -463,4 +471,16 @@ fn eatIntPrefix(arg: []const u8, radix: u8) []const u8 {
         }
     }
     return arg;
+}
+
+fn parseVersion(raw: []const u8) ?std.SemanticVersion {
+    var buffer: [128]u8 = undefined;
+    if (raw.len > buffer.len) return null;
+    @memcpy(buffer[0..raw.len], raw);
+    const len = if (mem.count(u8, raw, ".") < 2) blk: {
+        const patch_suffix = ".0";
+        buffer[raw.len..][0..patch_suffix.len].* = patch_suffix.*;
+        break :blk raw.len + patch_suffix.len;
+    } else raw.len;
+    return std.SemanticVersion.parse(buffer[0..len]) catch null;
 }
