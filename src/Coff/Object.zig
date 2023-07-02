@@ -18,55 +18,15 @@ symtab: std.ArrayListUnmanaged(Symbol) = .{},
 shdrtab: std.ArrayListUnmanaged(SectionHeader) = .{},
 strtab: []u8 = undefined,
 
-// TODO: Make these public in std.coff
-const CoffHeader = extern struct {
-    machine: u16,
-    number_of_sections: u16,
-    timedate_stamp: u32,
-    pointer_to_symbol_table: u32,
-    number_of_symbols: u32,
-    size_of_optional_header: u16,
-    characteristics: u16,
-};
+const CoffHeader = std.coff.CoffHeader;
 
 const IMAGE_FILE_MACHINE_I386 = 0x014c;
 const IMAGE_FILE_MACHINE_IA64 = 0x0200;
 const IMAGE_FILE_MACHINE_AMD64 = 0x8664;
 
-const SectionHeader = extern struct {
-    const Misc = packed union {
-        physical_address: u32,
-        virtual_size: u32,
-    };
+const SectionHeader = std.coff.SectionHeader;
 
-    name: [8]u8,
-    misc: Misc,
-    size_of_raw_data: u32,
-    pointer_to_raw_data: u32,
-    pointer_to_relocations: u32,
-    pointer_to_line_numbers: u32,
-    number_of_relocations: u16,
-    number_of_line_numbers: u16,
-    characteristics: u32,
-};
-
-const Symbol = extern struct {
-    name: [8]u8,
-    value: u32,
-    sect_num: i16,
-    type: u16,
-    storage_class: i8,
-    num_aux: u8,
-
-    pub fn getName(self: Symbol, object: *Object) []const u8 {
-        if (mem.readIntNative(u32, self.name[0..4]) == 0x0) {
-            const offset = mem.readIntNative(u32, self.name[4..]);
-            return object.getString(offset);
-        } else {
-            return mem.span(@as([*:0]const u8, @ptrCast(&self.name)));
-        }
-    }
-};
+const Symbol = std.coff.Symbol;
 
 pub const IMAGE_SYM_CLASS_END_OF_FUNCTION = 0xff;
 pub const IMAGE_SYM_CLASS_NULL = 0;
@@ -96,11 +56,10 @@ pub const IMAGE_SYM_CLASS_SECTION = 104;
 pub const IMAGE_SYM_CLASS_WEAK_EXTERNAL = 105;
 pub const IMAGE_SYM_CLASS_CLR_TOKEN = 107;
 
-// TODO
-// comptime {
-//     assert(@sizeOf(Symbol) == 18);
-//     assert(@sizeOf(CoffHeader) == 20);
-// }
+comptime {
+    assert(Symbol.sizeOf() == 18);
+    assert(@sizeOf(CoffHeader) == 20);
+}
 
 pub fn deinit(self: *Object, allocator: Allocator) void {
     self.file.close();
@@ -119,7 +78,7 @@ pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch)
         return error.NotObject;
     }
 
-    if (header.machine != @intFromEnum(cpu_arch.toCoffMachine())) {
+    if (header.machine != cpu_arch.toCoffMachine()) {
         log.debug("Invalid architecture {any}, expected {any}", .{
             header.machine,
             cpu_arch.toCoffMachine(),
@@ -152,10 +111,24 @@ fn parseSymtab(self: *Object, allocator: Allocator) !void {
     var i: usize = 0;
     var num_aux: usize = 0;
     while (i < self.header.number_of_symbols) : (i += 1) {
-        const symbol = try self.file.reader().readStruct(Symbol);
+        const symbol = sym_blk: {
+            var sym: Symbol = undefined;
+            var reader = self.file.reader();
+
+            if (8 != try reader.readAll(&sym.name)) {
+                return error.BadSymbolName;
+            }
+            sym.value = try reader.readIntLittle(u32);
+            sym.section_number = @enumFromInt(try reader.readIntLittle(u16));
+            sym.type = try reader.readStruct(std.coff.SymType);
+            sym.storage_class = @enumFromInt(try reader.readByte());
+            sym.number_of_aux_symbols = try reader.readByte();
+
+            break :sym_blk sym;
+        };
 
         // Ignore symbol if it has invalid section number
-        if (symbol.sect_num < 1 or symbol.sect_num > self.shdrtab.items.len) {
+        if (@intFromEnum(symbol.section_number) < 1 or @intFromEnum(symbol.section_number) > self.shdrtab.items.len) {
             continue;
         }
 
@@ -166,8 +139,8 @@ fn parseSymtab(self: *Object, allocator: Allocator) !void {
         }
 
         // Check for upcoming auxillary symbols
-        if (symbol.num_aux != 0) {
-            num_aux = symbol.num_aux;
+        if (symbol.number_of_aux_symbols != 0) {
+            num_aux = symbol.number_of_aux_symbols;
         }
 
         self.symtab.appendAssumeCapacity(symbol);
@@ -175,13 +148,17 @@ fn parseSymtab(self: *Object, allocator: Allocator) !void {
 }
 
 fn parseStrtab(self: *Object, allocator: Allocator) !void {
-    const string_table_size = (try self.file.reader().readIntNative(u32)) - @sizeOf(u32);
+    if (self.header.pointer_to_symbol_table == 0) return error.NoStringTable;
 
-    self.strtab = try allocator.alloc(u8, string_table_size);
-    _ = try self.file.reader().read(self.strtab);
+    const offset = self.header.pointer_to_symbol_table + coff.Symbol.sizeOf() * self.header.number_of_symbols;
+    try self.file.seekTo(offset);
+
+    const size = try self.file.reader().readIntLittle(u32);
+    self.strtab = try allocator.alloc(u8, size);
+    _ = try self.file.reader().readAll(self.strtab);
 }
 
-pub fn getString(self: *Object, off: u32) []const u8 {
+pub fn getString(self: *const Object, off: u32) []const u8 {
     const local_offset = off - @sizeOf(u32);
     assert(local_offset < self.symtab.items.len);
     return mem.span(@as([*:0]const u8, @ptrCast(self.strtab.ptr + local_offset)));

@@ -73,6 +73,22 @@ pub fn flush(self: *Coff) !void {
     }
 
     try self.parsePositionals(positionals.items);
+    for (self.objects.items) |*obj| {
+        log.debug("Object name: '{s}'", .{obj.name});
+        log.debug("Symbols: {}", .{obj.symtab.items.len});
+        for (obj.symtab.items) |sym| {
+            const name = sym.getName() orelse obj.getString(sym.getNameOffset().?);
+            log.debug("    Name: `{s}`", .{name});
+            log.debug("        Type:    {} {}", .{ sym.type.base_type, sym.type.complex_type });
+            log.debug("        Storage: {}", .{sym.storage_class});
+        }
+        log.debug("SectionHeaders: {}", .{obj.shdrtab.items.len});
+        for (obj.shdrtab.items) |sh| {
+            const name = sh.getName() orelse obj.getString(sh.getNameOffset().?);
+            log.debug("    Name: `{s}`", .{name});
+            log.debug("    Flags: {x}", .{@as(u32, @bitCast(sh.flags))});
+        }
+    }
 }
 
 fn parsePositionals(self: *Coff, files: []const []const u8) !void {
