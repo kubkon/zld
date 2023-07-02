@@ -13,6 +13,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&exe_step.step);
 
     const run_step = b.addSystemCommand(&.{"./a.out"});
+    run_step.has_side_effects = true;
     run_step.expectStdOutEqual("Hello, World!\n");
     run_step.step.dependOn(&exe_step.step);
     test_step.dependOn(&run_step.step);
