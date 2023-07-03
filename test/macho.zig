@@ -44,4 +44,8 @@ pub const cases = [_]Case{
         .build_root = "test/macho/needed-framework",
         .import = @import("macho/needed-framework//build.zig"),
     },
+    .{
+        .build_root = "test/macho/needed-library",
+        .import = @import("macho/needed-library//build.zig"),
+    },
 };
