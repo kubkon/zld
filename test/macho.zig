@@ -25,6 +25,10 @@ pub const cases = [_]Case{
         .import = @import("macho/entry-point/build.zig"),
     },
     .{
+        .build_root = "test/macho/entry-point-archive",
+        .import = @import("macho/entry-point-archive/build.zig"),
+    },
+    .{
         .build_root = "test/macho/hello-dynamic",
         .import = @import("macho/hello-dynamic/build.zig"),
     },
