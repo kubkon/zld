@@ -21,6 +21,7 @@ pub fn build(b: *std.Build) void {
         "-Wl,-needed-la",         "-B../../../zig-out/bin/",
         "-Wl,-dead_strip_dylibs",
     });
+    exe.step.dependOn(&lib.step);
     test_step.dependOn(&exe.step);
 
     const check = std.Build.Step.CheckObject.create(b, .{ .path = b.pathFromRoot("a.out") }, .macho);
