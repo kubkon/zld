@@ -5,6 +5,10 @@ pub const Case = struct {
 
 pub const cases = [_]Case{
     .{
+        .build_root = "test/macho/dead-strip",
+        .import = @import("macho/dead-strip/build.zig"),
+    },
+    .{
         .build_root = "test/macho/dylib",
         .import = @import("macho/dylib/build.zig"),
     },
