@@ -52,4 +52,8 @@ pub const cases = [_]Case{
         .build_root = "test/macho/pagezero-size",
         .import = @import("macho/pagezero-size/build.zig"),
     },
+    .{
+        .build_root = "test/macho/search-paths-first",
+        .import = @import("macho/search-paths-first/build.zig"),
+    },
 };

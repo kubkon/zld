@@ -68,15 +68,10 @@ pub fn build(b: *std.Build.Builder) void {
     });
     symlinks.step.dependOn(&install.step);
 
-    const test_step = b.step("test", "Run library and end-to-end tests");
-
-    const elf_step = @import("test/test.zig").addElfTests(b);
-    elf_step.dependOn(&symlinks.step);
-    test_step.dependOn(elf_step);
-
-    const macho_step = @import("test/test.zig").addMachOTests(b);
-    macho_step.dependOn(&symlinks.step);
-    test_step.dependOn(macho_step);
+    const test_step = b.step("test", "Run tests");
+    test_step.dependOn(&symlinks.step);
+    test_step.dependOn(@import("test/test.zig").addElfTests(b));
+    test_step.dependOn(@import("test/test.zig").addMachOTests(b));
 }
 
 fn addSymlinks(
