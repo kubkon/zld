@@ -40,4 +40,8 @@ pub const cases = [_]Case{
         .build_root = "test/macho/hello-dynamic",
         .import = @import("macho/hello-dynamic/build.zig"),
     },
+    .{
+        .build_root = "test/macho/needed-framework",
+        .import = @import("macho/needed-framework//build.zig"),
+    },
 };
