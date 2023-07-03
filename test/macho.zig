@@ -9,6 +9,10 @@ pub const cases = [_]Case{
         .import = @import("macho/dead-strip/build.zig"),
     },
     .{
+        .build_root = "test/macho/dead-strip-dylibs",
+        .import = @import("macho/dead-strip-dylibs/build.zig"),
+    },
+    .{
         .build_root = "test/macho/dylib",
         .import = @import("macho/dylib/build.zig"),
     },

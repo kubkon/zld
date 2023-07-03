@@ -220,8 +220,8 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             search_strategy = .paths_first;
         } else if (mem.eql(u8, arg, "-search_dylib_first")) {
             search_strategy = .dylibs_first;
-        } else if (mem.eql(u8, arg, "-framework") or mem.eql(u8, arg, "-weak_framework")) {
-            try frameworks.put(it.nextOrFatal(ctx), .{});
+        } else if (mem.eql(u8, arg, "-framework")) {
+            try frameworks.put(it.nextOrFatal(ctx), .{ .needed = false });
         } else if (mem.startsWith(u8, arg, "-F")) {
             try framework_dirs.append(arg[2..]);
         } else if (mem.startsWith(u8, arg, "-needed-l")) {
@@ -231,11 +231,11 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         } else if (mem.eql(u8, arg, "-needed_framework")) {
             try frameworks.put(it.nextOrFatal(ctx), .{ .needed = true });
         } else if (mem.startsWith(u8, arg, "-weak-l")) {
-            try libs.put(arg["-weak-l".len..], .{ .weak = true });
+            try libs.put(arg["-weak-l".len..], .{ .needed = false, .weak = true });
         } else if (mem.eql(u8, arg, "-weak_library")) {
-            try libs.put(it.nextOrFatal(ctx), .{ .weak = true });
+            try libs.put(it.nextOrFatal(ctx), .{ .needed = false, .weak = true });
         } else if (mem.eql(u8, arg, "-weak_framework")) {
-            try frameworks.put(it.nextOrFatal(ctx), .{ .weak = true });
+            try frameworks.put(it.nextOrFatal(ctx), .{ .needed = false, .weak = true });
         } else if (mem.eql(u8, arg, "-o")) {
             out_path = it.nextOrFatal(ctx);
         } else if (mem.eql(u8, arg, "-stack_size")) {
@@ -403,7 +403,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         } else if (mem.eql(u8, arg, "-demangle")) {
             std.log.debug("TODO unimplemented -demangle option", .{});
         } else if (mem.startsWith(u8, arg, "-l")) {
-            try libs.put(arg[2..], .{});
+            try libs.put(arg[2..], .{ .needed = false });
         } else if (mem.startsWith(u8, arg, "-L")) {
             try lib_dirs.append(arg[2..]);
         } else if (mem.eql(u8, arg, "-no_deduplicate")) {
