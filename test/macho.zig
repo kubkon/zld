@@ -17,6 +17,10 @@ pub const cases = [_]Case{
         .import = @import("macho/dylib/build.zig"),
     },
     .{
+        .build_root = "test/macho/empty-object",
+        .import = @import("macho/empty-object/build.zig"),
+    },
+    .{
         .build_root = "test/macho/hello-dynamic",
         .import = @import("macho/hello-dynamic/build.zig"),
     },
