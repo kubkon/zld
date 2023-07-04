@@ -56,4 +56,8 @@ pub const cases = [_]Case{
         .build_root = "test/macho/search-paths-first",
         .import = @import("macho/search-paths-first/build.zig"),
     },
+    .{
+        .build_root = "test/macho/search-dylibs-first",
+        .import = @import("macho/search-dylibs-first/build.zig"),
+    },
 };

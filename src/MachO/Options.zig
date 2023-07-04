@@ -218,7 +218,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             syslibroot = it.nextOrFatal(ctx);
         } else if (mem.eql(u8, arg, "-search_paths_first")) {
             search_strategy = .paths_first;
-        } else if (mem.eql(u8, arg, "-search_dylib_first")) {
+        } else if (mem.eql(u8, arg, "-search_dylibs_first")) {
             search_strategy = .dylibs_first;
         } else if (mem.eql(u8, arg, "-framework")) {
             try frameworks.put(it.nextOrFatal(ctx), .{ .needed = false });
