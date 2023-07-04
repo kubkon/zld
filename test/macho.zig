@@ -53,11 +53,15 @@ pub const cases = [_]Case{
         .import = @import("macho/pagezero-size/build.zig"),
     },
     .{
+        .build_root = "test/macho/search-dylibs-first",
+        .import = @import("macho/search-dylibs-first/build.zig"),
+    },
+    .{
         .build_root = "test/macho/search-paths-first",
         .import = @import("macho/search-paths-first/build.zig"),
     },
     .{
-        .build_root = "test/macho/search-dylibs-first",
-        .import = @import("macho/search-dylibs-first/build.zig"),
+        .build_root = "test/macho/stack-size",
+        .import = @import("macho/stack-size/build.zig"),
     },
 };
