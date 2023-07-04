@@ -64,4 +64,8 @@ pub const cases = [_]Case{
         .build_root = "test/macho/stack-size",
         .import = @import("macho/stack-size/build.zig"),
     },
+    .{
+        .build_root = "test/macho/unwind-info",
+        .import = @import("macho/unwind-info/build.zig"),
+    },
 };
