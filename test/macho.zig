@@ -118,7 +118,13 @@ fn testEmptyObject(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-empty-object", "");
 
     const exe = cc(b, opts.zld, null);
-    exe.addSourcePath("test/macho/empty-object/main.c", "main.c");
+    exe.addSourceBytes(
+        \\#include <stdio.h>
+        \\int main() {
+        \\  printf("Hello!\n");
+        \\  return 0;
+        \\}
+    , "main.c");
     exe.addSourceBytes("", "empty.c");
 
     const run = exe.run();
@@ -157,7 +163,7 @@ fn testEntryPointArchive(b: *Build, opts: Options) *Step {
 
     const obj = cc(b, opts.zld, "main.o");
     obj.addArg("-c");
-    obj.addSourcePath("test/macho/entry-point-archive/main.c", "main.c");
+    obj.addSimpleCMain();
 
     const lib = ar(b, "libmain.a");
     lib.addFileSource(obj.out);
