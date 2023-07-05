@@ -1,71 +1,65 @@
-pub const Case = struct {
-    build_root: []const u8,
-    import: type,
+pub fn addMachOTests(b: *Build, comp: *Compile) *Step {
+    const macho_step = b.step("test-macho", "Run MachO tests");
+    macho_step.dependOn(&comp.step);
+
+    const zld_path = WriteFile.create(b);
+    _ = zld_path.addCopyFile(comp.getOutputSource(), "ld");
+
+    const opts: Options = .{
+        .comp = comp,
+        .test_step = macho_step,
+        .zld_path = zld_path.getDirectorySource(),
+    };
+
+    if (builtin.target.ofmt == .macho) {
+        testDeadStrip(b, opts);
+    }
+
+    return macho_step;
+}
+
+const Options = struct {
+    comp: *Compile,
+    test_step: *Step,
+    zld_path: FileSource,
 };
 
-pub const cases = [_]Case{
-    .{
-        .build_root = "test/macho/dead-strip",
-        .import = @import("macho/dead-strip/build.zig"),
-    },
-    .{
-        .build_root = "test/macho/dead-strip-dylibs",
-        .import = @import("macho/dead-strip-dylibs/build.zig"),
-    },
-    .{
-        .build_root = "test/macho/dylib",
-        .import = @import("macho/dylib/build.zig"),
-    },
-    .{
-        .build_root = "test/macho/empty-object",
-        .import = @import("macho/empty-object/build.zig"),
-    },
-    .{
-        .build_root = "test/macho/entry-point",
-        .import = @import("macho/entry-point/build.zig"),
-    },
-    .{
-        .build_root = "test/macho/entry-point-archive",
-        .import = @import("macho/entry-point-archive/build.zig"),
-    },
-    .{
-        .build_root = "test/macho/entry-point-dylib",
-        .import = @import("macho/entry-point-dylib/build.zig"),
-    },
-    .{
-        .build_root = "test/macho/headerpad",
-        .import = @import("macho/headerpad/build.zig"),
-    },
-    .{
-        .build_root = "test/macho/hello-dynamic",
-        .import = @import("macho/hello-dynamic/build.zig"),
-    },
-    .{
-        .build_root = "test/macho/needed-framework",
-        .import = @import("macho/needed-framework//build.zig"),
-    },
-    .{
-        .build_root = "test/macho/needed-library",
-        .import = @import("macho/needed-library//build.zig"),
-    },
-    .{
-        .build_root = "test/macho/pagezero-size",
-        .import = @import("macho/pagezero-size/build.zig"),
-    },
-    .{
-        .build_root = "test/macho/search-dylibs-first",
-        .import = @import("macho/search-dylibs-first/build.zig"),
-    },
-    .{
-        .build_root = "test/macho/search-paths-first",
-        .import = @import("macho/search-paths-first/build.zig"),
-    },
-    .{
-        .build_root = "test/macho/stack-size",
-        .import = @import("macho/stack-size/build.zig"),
-    },
-    .{
-        .build_root = "test/macho/unwind-info",
-        .import = @import("macho/unwind-info/build.zig"),
-    },
-};
+fn testDeadStrip(b: *Build, opts: Options) void {
+    const prefix = "test/macho/dead-strip";
+    const main_c = WriteFile.create(b).addCopyFile(.{ .path = b.pathJoin(&.{ prefix, "main.c" }) }, "main.c");
+
+    const exe = Run.create(b, "cc");
+    exe.addArgs(&.{
+        "cc",
+        "-fno-lto",
+        "-dead_strip",
+    });
+    exe.addFileSourceArg(main_c);
+    exe.addArg("-o");
+    const a_out = exe.addOutputFileArg("a.out");
+    exe.addArg("-B");
+    exe.addDirectorySourceArg(opts.zld_path);
+
+    const run = Run.create(b, "run");
+    run.addFileSourceArg(a_out);
+    run.expectStdOutEqual("Hello!\n");
+    run.step.dependOn(&exe.step);
+    opts.test_step.dependOn(&run.step);
+
+    const check = CheckObject.create(b, a_out, .macho);
+    check.checkInSymtab();
+    check.checkNotPresent("{*} (__TEXT,__text) external _iAmUnused");
+    check.step.dependOn(&exe.step);
+    opts.test_step.dependOn(&check.step);
+}
+
+const std = @import("std");
+const builtin = @import("builtin");
+
+const Build = std.Build;
+const CheckObject = Step.CheckObject;
+const Compile = Step.Compile;
+const FileSource = Build.FileSource;
+const Run = Step.Run;
+const Step = Build.Step;
+const WriteFile = Step.WriteFile;

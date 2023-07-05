@@ -69,9 +69,7 @@ pub fn build(b: *std.Build.Builder) void {
     symlinks.step.dependOn(&install.step);
 
     const test_step = b.step("test", "Run tests");
-    test_step.dependOn(&symlinks.step);
-    test_step.dependOn(@import("test/test.zig").addElfTests(b));
-    test_step.dependOn(@import("test/test.zig").addMachOTests(b));
+    test_step.dependOn(@import("test/macho.zig").addMachOTests(b, exe));
 }
 
 fn addSymlinks(
