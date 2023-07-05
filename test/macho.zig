@@ -18,6 +18,7 @@ pub fn addMachOTests(b: *Build, comp: *Compile) *Step {
         macho_step.dependOn(testEntryPoint(b, opts));
         macho_step.dependOn(testEntryPointArchive(b, opts));
         macho_step.dependOn(testEntryPointDylib(b, opts));
+        macho_step.dependOn(testHeaderpad(b, opts));
     }
 
     return macho_step;
@@ -32,19 +33,17 @@ fn testDeadStrip(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-dead-strip", "");
 
     const exe = cc(b, opts.zld_path);
-    addSourcePath(exe.run, "test/macho/dead-strip/main.c", "main.c");
-    exe.run.addArg("-dead_strip");
+    exe.addSourcePath("test/macho/dead-strip/main.c", "main.c");
+    exe.addArg("-dead_strip");
 
-    const run = exec(b, exe.out);
+    const run = exe.run();
     run.expectStdOutEqual("Hello!\n");
-    run.step.dependOn(&exe.run.step);
     test_step.dependOn(&run.step);
 
-    const ch = check(b, exe.out);
-    ch.checkInSymtab();
-    ch.checkNotPresent("{*} (__TEXT,__text) external _iAmUnused");
-    ch.step.dependOn(&exe.run.step);
-    test_step.dependOn(&ch.step);
+    const check = exe.check();
+    check.checkInSymtab();
+    check.checkNotPresent("{*} (__TEXT,__text) external _iAmUnused");
+    test_step.dependOn(&check.step);
 
     return test_step;
 }
@@ -54,30 +53,27 @@ fn testDeadStripDylibs(b: *Build, opts: Options) *Step {
 
     {
         const exe = cc(b, opts.zld_path);
-        addSourcePath(exe.run, "test/macho/dead-strip-dylibs/main.c", "main.c");
-        exe.run.addArgs(&.{ "-framework", "Cocoa" });
+        exe.addSourcePath("test/macho/dead-strip-dylibs/main.c", "main.c");
+        exe.addArgs(&.{ "-framework", "Cocoa" });
 
-        const ch = check(b, exe.out);
-        ch.checkStart("cmd LOAD_DYLIB");
-        ch.checkNext("name {*}Cocoa");
-        ch.checkStart("cmd LOAD_DYLIB");
-        ch.checkNext("name {*}libobjc{*}.dylib");
-        ch.step.dependOn(&exe.run.step);
-        test_step.dependOn(&ch.step);
+        const check = exe.check();
+        check.checkStart("cmd LOAD_DYLIB");
+        check.checkNext("name {*}Cocoa");
+        check.checkStart("cmd LOAD_DYLIB");
+        check.checkNext("name {*}libobjc{*}.dylib");
+        test_step.dependOn(&check.step);
 
-        const run = exec(b, exe.out);
-        run.step.dependOn(&exe.run.step);
+        const run = exe.run();
         test_step.dependOn(&run.step);
     }
 
     {
         const exe = cc(b, opts.zld_path);
-        addSourcePath(exe.run, "test/macho/dead-strip-dylibs/main.c", "main.c");
-        exe.run.addArgs(&.{ "-framework", "Cocoa", "-Wl,-dead_strip_dylibs" });
+        exe.addSourcePath("test/macho/dead-strip-dylibs/main.c", "main.c");
+        exe.addArgs(&.{ "-framework", "Cocoa", "-Wl,-dead_strip_dylibs" });
 
-        const run = exec(b, exe.out);
+        const run = exe.run();
         run.expectExitCode(@as(u8, @bitCast(@as(i8, -2))));
-        run.step.dependOn(&exe.run.step);
         test_step.dependOn(&run.step);
     }
 
@@ -88,21 +84,20 @@ fn testDylib(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-dylib", "");
 
     const dylib = cc(b, opts.zld_path);
-    dylib.run.addArg("-shared");
-    addSourcePath(dylib.run, "test/macho/dylib/a.c", "a.c");
+    dylib.addArg("-shared");
+    dylib.addSourcePath("test/macho/dylib/a.c", "a.c");
 
     const dylib_fs = WriteFile.create(b);
     _ = dylib_fs.addCopyFile(dylib.out, "liba.dylib");
 
     const exe = cc(b, opts.zld_path);
-    addSourcePath(exe.run, "test/macho/dylib/main.c", "main.c");
-    exe.run.addArg("-la");
-    exe.run.addArg("-L");
-    exe.run.addDirectorySourceArg(dylib_fs.getDirectorySource());
+    exe.addSourcePath("test/macho/dylib/main.c", "main.c");
+    exe.addArg("-la");
+    exe.addArg("-L");
+    exe.addDirectorySource(dylib_fs.getDirectorySource());
 
-    const run = exec(b, exe.out);
+    const run = exe.run();
     run.expectStdOutEqual("Hello world");
-    run.step.dependOn(&exe.run.step);
     test_step.dependOn(&run.step);
 
     return test_step;
@@ -112,12 +107,11 @@ fn testEmptyObject(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-empty-object", "");
 
     const exe = cc(b, opts.zld_path);
-    addSourcePath(exe.run, "test/macho/empty-object/main.c", "main.c");
-    addSourceBytes(exe.run, "", "empty.c");
+    exe.addSourcePath("test/macho/empty-object/main.c", "main.c");
+    exe.addSourceBytes("", "empty.c");
 
-    const run = exec(b, exe.out);
+    const run = exe.run();
     run.expectStdOutEqual("Hello!\n");
-    run.step.dependOn(&exe.run.step);
     test_step.dependOn(&run.step);
 
     return test_step;
@@ -127,24 +121,22 @@ fn testEntryPoint(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-entry-point", "");
 
     const exe = cc(b, opts.zld_path);
-    addSourcePath(exe.run, "test/macho/entry-point/main.c", "main.c");
-    exe.run.addArg("-Wl,-e,_non_main");
+    exe.addSourcePath("test/macho/entry-point/main.c", "main.c");
+    exe.addArg("-Wl,-e,_non_main");
 
-    const run = exec(b, exe.out);
+    const run = exe.run();
     run.expectStdOutEqual("42");
-    run.step.dependOn(&exe.run.step);
     test_step.dependOn(&run.step);
 
-    const ch = check(b, exe.out);
-    ch.checkStart("segname __TEXT");
-    ch.checkNext("vmaddr {vmaddr}");
-    ch.checkStart("cmd MAIN");
-    ch.checkNext("entryoff {entryoff}");
-    ch.checkInSymtab();
-    ch.checkNext("{n_value} (__TEXT,__text) external _non_main");
-    ch.checkComputeCompare("vmaddr entryoff +", .{ .op = .eq, .value = .{ .variable = "n_value" } });
-    ch.step.dependOn(&exe.run.step);
-    test_step.dependOn(&ch.step);
+    const check = exe.check();
+    check.checkStart("segname __TEXT");
+    check.checkNext("vmaddr {vmaddr}");
+    check.checkStart("cmd MAIN");
+    check.checkNext("entryoff {entryoff}");
+    check.checkInSymtab();
+    check.checkNext("{n_value} (__TEXT,__text) external _non_main");
+    check.checkComputeCompare("vmaddr entryoff +", .{ .op = .eq, .value = .{ .variable = "n_value" } });
+    test_step.dependOn(&check.step);
 
     return test_step;
 }
@@ -153,22 +145,21 @@ fn testEntryPointArchive(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-entry-point-archive", "");
 
     const obj = cc(b, opts.zld_path);
-    obj.run.addArg("-c");
-    addSourcePath(obj.run, "test/macho/entry-point-archive/main.c", "main.c");
+    obj.addArg("-c");
+    obj.addSourcePath("test/macho/entry-point-archive/main.c", "main.c");
 
     const lib = ar(b, "libmain.a");
-    lib.run.addFileSourceArg(obj.out);
+    lib.addFileSource(obj.out);
 
     const lib_fs = WriteFile.create(b);
     _ = lib_fs.addCopyFile(lib.out, "libmain.a");
 
     const exe = cc(b, opts.zld_path);
-    exe.run.addArg("-lmain");
-    exe.run.addArg("-L");
-    exe.run.addDirectorySourceArg(lib_fs.getDirectorySource());
+    exe.addArg("-lmain");
+    exe.addArg("-L");
+    exe.addDirectorySource(lib_fs.getDirectorySource());
 
-    const run = exec(b, exe.out);
-    run.step.dependOn(&exe.run.step);
+    const run = exe.run();
     test_step.dependOn(&run.step);
 
     return test_step;
@@ -178,83 +169,211 @@ fn testEntryPointDylib(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-entry-point-dylib", "");
 
     const dylib = cc(b, opts.zld_path);
-    dylib.run.addArgs(&.{ "-shared", "-Wl,-undefined,dynamic_lookup" });
-    addSourcePath(dylib.run, "test/macho/entry-point-dylib/bootstrap.c", "bootstrap.c");
+    dylib.addArgs(&.{ "-shared", "-Wl,-undefined,dynamic_lookup" });
+    dylib.addSourcePath("test/macho/entry-point-dylib/bootstrap.c", "bootstrap.c");
 
     const dylib_fs = WriteFile.create(b);
     _ = dylib_fs.addCopyFile(dylib.out, "libbootstrap.dylib");
 
     const exe = cc(b, opts.zld_path);
-    addSourcePath(exe.run, "test/macho/entry-point-dylib/main.c", "main.c");
-    exe.run.addArgs(&.{ "-Wl,-e,_bootstrap", "-Wl,-u,_my_main", "-lbootstrap", "-L" });
-    exe.run.addDirectorySourceArg(dylib_fs.getDirectorySource());
+    exe.addSourcePath("test/macho/entry-point-dylib/main.c", "main.c");
+    exe.addArgs(&.{ "-Wl,-e,_bootstrap", "-Wl,-u,_my_main", "-lbootstrap", "-L" });
+    exe.addDirectorySource(dylib_fs.getDirectorySource());
 
-    const ch = check(b, exe.out);
-    ch.checkStart("segname __TEXT");
-    ch.checkNext("vmaddr {text_vmaddr}");
-    ch.checkStart("sectname __stubs");
-    ch.checkNext("addr {stubs_vmaddr}");
-    ch.checkStart("cmd MAIN");
-    ch.checkNext("entryoff {entryoff}");
-    ch.checkComputeCompare("text_vmaddr entryoff +", .{
+    const check = exe.check();
+    check.checkStart("segname __TEXT");
+    check.checkNext("vmaddr {text_vmaddr}");
+    check.checkStart("sectname __stubs");
+    check.checkNext("addr {stubs_vmaddr}");
+    check.checkStart("cmd MAIN");
+    check.checkNext("entryoff {entryoff}");
+    check.checkComputeCompare("text_vmaddr entryoff +", .{
         .op = .eq,
         .value = .{ .variable = "stubs_vmaddr" }, // The entrypoint should be a synthetic stub
     });
-    ch.step.dependOn(&exe.run.step);
-    test_step.dependOn(&ch.step);
+    test_step.dependOn(&check.step);
 
-    const run = exec(b, exe.out);
+    const run = exe.run();
     run.expectStdOutEqual("Hello!\n");
-    run.step.dependOn(&exe.run.step);
     test_step.dependOn(&run.step);
 
     return test_step;
 }
 
+fn testHeaderpad(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-headerpad", "");
+
+    const flags: []const []const u8 = &.{
+        "-framework", "CoreFoundation",
+        "-framework", "Foundation",
+        "-framework", "Cocoa",
+        "-framework", "CoreGraphics",
+        "-framework", "CoreHaptics",
+        "-framework", "CoreAudio",
+        "-framework", "AVFoundation",
+        "-framework", "CoreImage",
+        "-framework", "CoreLocation",
+        "-framework", "CoreML",
+        "-framework", "CoreVideo",
+        "-framework", "CoreText",
+        "-framework", "CryptoKit",
+        "-framework", "GameKit",
+        "-framework", "SwiftUI",
+        "-framework", "StoreKit",
+        "-framework", "SpriteKit",
+    };
+
+    {
+        const exe = cc(b, opts.zld_path);
+        exe.addArgs(flags);
+        exe.addArg("-Wl,-headerpad_max_install_names");
+        exe.addSimpleCMain();
+
+        const check = exe.check();
+        check.checkStart("sectname __text");
+        check.checkNext("offset {offset}");
+        switch (builtin.cpu.arch) {
+            .aarch64 => check.checkComputeCompare("offset", .{ .op = .gte, .value = .{ .literal = 0x4000 } }),
+            .x86_64 => check.checkComputeCompare("offset", .{ .op = .gte, .value = .{ .literal = 0x1000 } }),
+            else => unreachable,
+        }
+        test_step.dependOn(&check.step);
+
+        const run = exe.run();
+        test_step.dependOn(&run.step);
+    }
+
+    {
+        const exe = cc(b, opts.zld_path);
+        exe.addArgs(flags);
+        exe.addArg("-Wl,-headerpad,0x10000");
+        exe.addSimpleCMain();
+
+        const check = exe.check();
+        check.checkStart("sectname __text");
+        check.checkNext("offset {offset}");
+        check.checkComputeCompare("offset", .{ .op = .gte, .value = .{ .literal = 0x10000 } });
+        test_step.dependOn(&check.step);
+
+        const run = exe.run();
+        test_step.dependOn(&run.step);
+    }
+
+    {
+        const exe = cc(b, opts.zld_path);
+        exe.addArgs(flags);
+        exe.addArg("-Wl,-headerpad,0x10000");
+        exe.addArg("-Wl,-headerpad_max_install_names");
+        exe.addSimpleCMain();
+
+        const check = exe.check();
+        check.checkStart("sectname __text");
+        check.checkNext("offset {offset}");
+        check.checkComputeCompare("offset", .{ .op = .gte, .value = .{ .literal = 0x10000 } });
+        test_step.dependOn(&check.step);
+
+        const run = exe.run();
+        test_step.dependOn(&run.step);
+    }
+
+    {
+        const exe = cc(b, opts.zld_path);
+        exe.addArgs(flags);
+        exe.addArg("-Wl,-headerpad,0x1000");
+        exe.addArg("-Wl,-headerpad_max_install_names");
+        exe.addSimpleCMain();
+
+        const check = exe.check();
+        check.checkStart("sectname __text");
+        check.checkNext("offset {offset}");
+        switch (builtin.cpu.arch) {
+            .aarch64 => check.checkComputeCompare("offset", .{ .op = .gte, .value = .{ .literal = 0x4000 } }),
+            .x86_64 => check.checkComputeCompare("offset", .{ .op = .gte, .value = .{ .literal = 0x1000 } }),
+            else => unreachable,
+        }
+        test_step.dependOn(&check.step);
+
+        const run = exe.run();
+        test_step.dependOn(&run.step);
+    }
+
+    return test_step;
+}
+
 const SysCmd = struct {
-    run: *Run,
+    cmd: *Run,
     out: FileSource,
+
+    fn addArg(sys_cmd: SysCmd, arg: []const u8) void {
+        sys_cmd.cmd.addArg(arg);
+    }
+
+    fn addArgs(sys_cmd: SysCmd, args: []const []const u8) void {
+        sys_cmd.cmd.addArgs(args);
+    }
+
+    fn addFileSource(sys_cmd: SysCmd, file: FileSource) void {
+        sys_cmd.cmd.addFileSourceArg(file);
+    }
+
+    fn addDirectorySource(sys_cmd: SysCmd, dir: FileSource) void {
+        sys_cmd.cmd.addDirectorySourceArg(dir);
+    }
+
+    fn addSourcePath(sys_cmd: SysCmd, path: []const u8, basename: []const u8) void {
+        const b = sys_cmd.cmd.step.owner;
+        const wf = WriteFile.create(b);
+        const file = wf.addCopyFile(.{ .path = path }, basename);
+        sys_cmd.cmd.addFileSourceArg(file);
+    }
+
+    fn addSourceBytes(sys_cmd: SysCmd, bytes: []const u8, basename: []const u8) void {
+        const b = sys_cmd.cmd.step.owner;
+        const wf = WriteFile.create(b);
+        const file = wf.add(basename, bytes);
+        sys_cmd.cmd.addFileSourceArg(file);
+    }
+
+    fn addSimpleCMain(sys_cmd: SysCmd) void {
+        const main =
+            \\int main(int argc, char* argv[]) {
+            \\  return 0;
+            \\}
+        ;
+        sys_cmd.addSourceBytes(main, "main.c");
+    }
+
+    fn check(sys_cmd: SysCmd) *CheckObject {
+        const b = sys_cmd.cmd.step.owner;
+        const ch = CheckObject.create(b, sys_cmd.out, .macho);
+        ch.step.dependOn(&sys_cmd.cmd.step);
+        return ch;
+    }
+
+    fn run(sys_cmd: SysCmd) *Run {
+        const b = sys_cmd.cmd.step.owner;
+        const r = Run.create(b, "exec");
+        r.addFileSourceArg(sys_cmd.out);
+        r.step.dependOn(&sys_cmd.cmd.step);
+        return r;
+    }
 };
 
 fn cc(b: *Build, zld_path: FileSource) SysCmd {
-    const run = Run.create(b, "cc");
-    run.addArgs(&.{ "cc", "-fno-lto" });
-    run.addArg("-o");
-    const out = run.addOutputFileArg("a.out");
-    run.addArg("-B");
-    run.addDirectorySourceArg(zld_path);
-    return .{ .run = run, .out = out };
-}
-
-fn addSourcePath(run: *Run, path: []const u8, basename: []const u8) void {
-    const b = run.step.owner;
-    const wf = WriteFile.create(b);
-    const file = wf.addCopyFile(.{ .path = path }, basename);
-    run.addFileSourceArg(file);
-}
-
-fn addSourceBytes(run: *Run, bytes: []const u8, basename: []const u8) void {
-    const b = run.step.owner;
-    const wf = WriteFile.create(b);
-    const file = wf.add(basename, bytes);
-    run.addFileSourceArg(file);
+    const cmd = Run.create(b, "cc");
+    cmd.addArgs(&.{ "cc", "-fno-lto" });
+    cmd.addArg("-o");
+    const out = cmd.addOutputFileArg("a.out");
+    cmd.addArg("-B");
+    cmd.addDirectorySourceArg(zld_path);
+    return .{ .cmd = cmd, .out = out };
 }
 
 fn ar(b: *Build, name: []const u8) SysCmd {
-    const run = Run.create(b, "ar");
-    run.addArgs(&.{ "ar", "rcs" });
-    const out = run.addOutputFileArg(name);
-    return .{ .run = run, .out = out };
-}
-
-fn exec(b: *Build, out: FileSource) *Run {
-    const run = Run.create(b, "exec");
-    run.addFileSourceArg(out);
-    return run;
-}
-
-fn check(b: *Build, out: FileSource) *CheckObject {
-    return CheckObject.create(b, out, .macho);
+    const cmd = Run.create(b, "ar");
+    cmd.addArgs(&.{ "ar", "rcs" });
+    const out = cmd.addOutputFileArg(name);
+    return .{ .cmd = cmd, .out = out };
 }
 
 const std = @import("std");
