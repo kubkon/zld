@@ -19,6 +19,7 @@ pub fn addMachOTests(b: *Build, comp: *Compile) *Step {
         macho_step.dependOn(testEntryPointArchive(b, opts));
         macho_step.dependOn(testEntryPointDylib(b, opts));
         macho_step.dependOn(testHeaderpad(b, opts));
+        macho_step.dependOn(testHello(b, opts));
     }
 
     return macho_step;
@@ -296,6 +297,24 @@ fn testHeaderpad(b: *Build, opts: Options) *Step {
         const run = exe.run();
         test_step.dependOn(&run.step);
     }
+
+    return test_step;
+}
+
+fn testHello(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-hello", "");
+
+    const exe = cc(b, opts.zld_path);
+    exe.addSourceBytes(
+        \\#include <stdio.h>
+        \\int main() {
+        \\  printf("Hello, World!\n");
+        \\  return 0;
+        \\}
+    , "main.c");
+
+    const run = exe.run();
+    test_step.dependOn(&run.step);
 
     return test_step;
 }
