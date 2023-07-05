@@ -1,6 +1,6 @@
 # zld
 
-Zig's lld drop-in replacement, called ZigLD or `zld` for short
+Zig's ld drop-in replacement, called ZigLD or `zld` for short
 
 ## Quick start guide
 
