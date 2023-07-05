@@ -17,6 +17,7 @@ pub fn addMachOTests(b: *Build, comp: *Compile) *Step {
         macho_step.dependOn(testEmptyObject(b, opts));
         macho_step.dependOn(testEntryPoint(b, opts));
         macho_step.dependOn(testEntryPointArchive(b, opts));
+        macho_step.dependOn(testEntryPointDylib(b, opts));
     }
 
     return macho_step;
@@ -167,7 +168,43 @@ fn testEntryPointArchive(b: *Build, opts: Options) *Step {
     exe.run.addDirectorySourceArg(lib_fs.getDirectorySource());
 
     const run = exec(b, exe.out);
-    // run.expectExitCode(1);
+    run.step.dependOn(&exe.run.step);
+    test_step.dependOn(&run.step);
+
+    return test_step;
+}
+
+fn testEntryPointDylib(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-entry-point-dylib", "");
+
+    const dylib = cc(b, opts.zld_path);
+    dylib.run.addArgs(&.{ "-shared", "-Wl,-undefined,dynamic_lookup" });
+    addSourcePath(dylib.run, "test/macho/entry-point-dylib/bootstrap.c", "bootstrap.c");
+
+    const dylib_fs = WriteFile.create(b);
+    _ = dylib_fs.addCopyFile(dylib.out, "libbootstrap.dylib");
+
+    const exe = cc(b, opts.zld_path);
+    addSourcePath(exe.run, "test/macho/entry-point-dylib/main.c", "main.c");
+    exe.run.addArgs(&.{ "-Wl,-e,_bootstrap", "-Wl,-u,_my_main", "-lbootstrap", "-L" });
+    exe.run.addDirectorySourceArg(dylib_fs.getDirectorySource());
+
+    const ch = check(b, exe.out);
+    ch.checkStart("segname __TEXT");
+    ch.checkNext("vmaddr {text_vmaddr}");
+    ch.checkStart("sectname __stubs");
+    ch.checkNext("addr {stubs_vmaddr}");
+    ch.checkStart("cmd MAIN");
+    ch.checkNext("entryoff {entryoff}");
+    ch.checkComputeCompare("text_vmaddr entryoff +", .{
+        .op = .eq,
+        .value = .{ .variable = "stubs_vmaddr" }, // The entrypoint should be a synthetic stub
+    });
+    ch.step.dependOn(&exe.run.step);
+    test_step.dependOn(&ch.step);
+
+    const run = exec(b, exe.out);
+    run.expectStdOutEqual("Hello!\n");
     run.step.dependOn(&exe.run.step);
     test_step.dependOn(&run.step);
 
