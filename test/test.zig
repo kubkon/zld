@@ -13,6 +13,7 @@ pub fn addTests(b: *Build, comp: *Compile) *Step {
     };
 
     test_step.dependOn(macho.addMachOTests(b, opts));
+    test_step.dependOn(elf.addElfTests(b, opts));
 
     return test_step;
 }
@@ -42,13 +43,6 @@ pub const SysCmd = struct {
 
     pub fn addDirectorySource(sys_cmd: SysCmd, dir: FileSource) void {
         sys_cmd.cmd.addDirectorySourceArg(dir);
-    }
-
-    pub fn addSourcePath(sys_cmd: SysCmd, path: []const u8, basename: []const u8) void {
-        const b = sys_cmd.cmd.step.owner;
-        const wf = WriteFile.create(b);
-        const file = wf.addCopyFile(.{ .path = path }, basename);
-        sys_cmd.cmd.addFileSourceArg(file);
     }
 
     pub fn addSourceBytes(sys_cmd: SysCmd, bytes: []const u8, basename: []const u8) void {
