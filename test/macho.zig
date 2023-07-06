@@ -26,13 +26,17 @@ pub fn addMachOTests(b: *Build, comp: *Compile) *Step {
     macho_step.dependOn(testEntryPointDylib(b, opts));
     macho_step.dependOn(testHeaderpad(b, opts));
     macho_step.dependOn(testHello(b, opts));
+    macho_step.dependOn(testLayout(b, opts));
     macho_step.dependOn(testNeededFramework(b, opts));
     macho_step.dependOn(testNeededLibrary(b, opts));
     macho_step.dependOn(testPagezeroSize(b, opts));
     macho_step.dependOn(testSearchDylibsFirst(b, opts));
     macho_step.dependOn(testSearchPathsFirst(b, opts));
     macho_step.dependOn(testStackSize(b, opts));
+    macho_step.dependOn(testTls(b, opts));
     macho_step.dependOn(testUnwindInfo(b, opts));
+    macho_step.dependOn(testWeakFramework(b, opts));
+    macho_step.dependOn(testWeakLibrary(b, opts));
 
     return macho_step;
 }
@@ -330,6 +334,119 @@ fn testHello(b: *Build, opts: Options) *Step {
     return test_step;
 }
 
+fn testLayout(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-layout", "");
+
+    const exe = cc(b, opts.zld, null);
+    exe.addSourceBytes(
+        \\#include <stdio.h>
+        \\int main() {
+        \\  printf("Hello, World!\n");
+        \\  return 0;
+        \\}
+    , "main.c");
+
+    const check = exe.check();
+    check.checkStart("cmd SEGMENT_64");
+    check.checkNext("segname __LINKEDIT");
+    check.checkNext("fileoff {fileoff}");
+    check.checkNext("filesz {filesz}");
+    check.checkStart("cmd DYLD_INFO_ONLY");
+    check.checkNext("rebaseoff {rebaseoff}");
+    check.checkNext("rebasesize {rebasesize}");
+    check.checkNext("bindoff {bindoff}");
+    check.checkNext("bindsize {bindsize}");
+    check.checkNext("lazybindoff {lazybindoff}");
+    check.checkNext("lazybindsize {lazybindsize}");
+    check.checkNext("exportoff {exportoff}");
+    check.checkNext("exportsize {exportsize}");
+    check.checkStart("cmd FUNCTION_STARTS");
+    check.checkNext("dataoff {fstartoff}");
+    check.checkNext("datasize {fstartsize}");
+    check.checkStart("cmd DATA_IN_CODE");
+    check.checkNext("dataoff {diceoff}");
+    check.checkNext("datasize {dicesize}");
+    check.checkStart("cmd SYMTAB");
+    check.checkNext("symoff {symoff}");
+    check.checkNext("nsyms {symnsyms}");
+    check.checkNext("stroff {stroff}");
+    check.checkNext("strsize {strsize}");
+    check.checkStart("cmd DYSYMTAB");
+    check.checkNext("indirectsymoff {dysymoff}");
+    check.checkNext("nindirectsyms {dysymnsyms}");
+
+    switch (builtin.cpu.arch) {
+        .aarch64 => {
+            check.checkStart("cmd CODE_SIGNATURE");
+            check.checkNext("dataoff {codesigoff}");
+            check.checkNext("datasize {codesigsize}");
+        },
+        .x86_64 => {},
+        else => unreachable,
+    }
+
+    // DYLD_INFO_ONLY subsections are in order: rebase < bind < lazy < export,
+    // and there are no gaps between them
+    check.checkComputeCompare("rebaseoff rebasesize +", .{ .op = .eq, .value = .{ .variable = "bindoff" } });
+    check.checkComputeCompare("bindoff bindsize +", .{ .op = .eq, .value = .{ .variable = "lazybindoff" } });
+    check.checkComputeCompare("lazybindoff lazybindsize +", .{ .op = .eq, .value = .{ .variable = "exportoff" } });
+
+    // FUNCTION_STARTS directly follows DYLD_INFO_ONLY (no gap)
+    check.checkComputeCompare("exportoff exportsize +", .{ .op = .eq, .value = .{ .variable = "fstartoff" } });
+
+    // DATA_IN_CODE directly follows FUNCTION_STARTS (no gap)
+    check.checkComputeCompare("fstartoff fstartsize +", .{ .op = .eq, .value = .{ .variable = "diceoff" } });
+
+    // SYMTAB directly follows DATA_IN_CODE (no gap)
+    check.checkComputeCompare("diceoff dicesize +", .{ .op = .eq, .value = .{ .variable = "symoff" } });
+
+    // DYSYMTAB directly follows SYMTAB (no gap)
+    check.checkComputeCompare("symnsyms 16 symoff * +", .{ .op = .eq, .value = .{ .variable = "dysymoff" } });
+
+    // STRTAB follows DYSYMTAB with possible gap
+    check.checkComputeCompare("dysymnsyms 4 dysymoff * +", .{ .op = .lte, .value = .{ .variable = "stroff" } });
+
+    // all LINKEDIT sections apart from CODE_SIGNATURE are 8-bytes aligned
+    check.checkComputeCompare("rebaseoff 8 %", .{ .op = .eq, .value = .{ .literal = 0 } });
+    check.checkComputeCompare("bindoff 8 %", .{ .op = .eq, .value = .{ .literal = 0 } });
+    check.checkComputeCompare("lazybindoff 8 %", .{ .op = .eq, .value = .{ .literal = 0 } });
+    check.checkComputeCompare("exportoff 8 %", .{ .op = .eq, .value = .{ .literal = 0 } });
+    check.checkComputeCompare("fstartoff 8 %", .{ .op = .eq, .value = .{ .literal = 0 } });
+    check.checkComputeCompare("diceoff 8 %", .{ .op = .eq, .value = .{ .literal = 0 } });
+    check.checkComputeCompare("symoff 8 %", .{ .op = .eq, .value = .{ .literal = 0 } });
+    check.checkComputeCompare("stroff 8 %", .{ .op = .eq, .value = .{ .literal = 0 } });
+    check.checkComputeCompare("dysymoff 8 %", .{ .op = .eq, .value = .{ .literal = 0 } });
+
+    switch (builtin.cpu.arch) {
+        .aarch64 => {
+            // LINKEDIT segment does not extend beyond, or does not include, CODE_SIGNATURE data
+            check.checkComputeCompare("fileoff filesz codesigoff codesigsize + - -", .{
+                .op = .eq,
+                .value = .{ .literal = 0 },
+            });
+
+            // CODE_SIGNATURE data offset is 16-bytes aligned
+            check.checkComputeCompare("codesigoff 16 %", .{ .op = .eq, .value = .{ .literal = 0 } });
+        },
+        .x86_64 => {
+            // LINKEDIT segment does not extend beyond, or does not include, strtab data
+            check.checkComputeCompare("fileoff filesz stroff strsize + - -", .{
+                .op = .eq,
+                .value = .{ .literal = 0 },
+            });
+        },
+        else => unreachable,
+    }
+
+    test_step.dependOn(&check.step);
+
+    const run = exe.run();
+    run.expectStdOutEqual("Hello, World!\n");
+    test_step.dependOn(&run.step);
+
+    return test_step;
+}
+
 fn testNeededFramework(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-needed-framework", "");
 
@@ -490,6 +607,25 @@ fn testStackSize(b: *Build, opts: Options) *Step {
     return test_step;
 }
 
+fn testTls(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-tls", "");
+
+    const dylib = cc(b, opts.zld, "liba.dylib");
+    dylib.addArg("-shared");
+    dylib.addSourcePath("test/macho/tls/a.c", "a.c");
+
+    const exe = cc(b, opts.zld, null);
+    exe.addSourcePath("test/macho/tls/main.c", "main.c");
+    exe.addArgs(&.{ "-la", "-L" });
+    exe.addDirectorySource(dylib.saveOutput("liba.dylib").dir);
+
+    const run = exe.run();
+    run.expectStdOutEqual("2 2");
+    test_step.dependOn(&run.step);
+
+    return test_step;
+}
+
 fn testUnwindInfo(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-unwind-info", "");
 
@@ -534,6 +670,52 @@ fn testUnwindInfo(b: *Build, opts: Options) *Step {
     check.checkInSymtab();
     check.checkNext("{*} external ___gxx_personality_v0");
     test_step.dependOn(&check.step);
+
+    return test_step;
+}
+
+fn testWeakFramework(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-weak-framework", "");
+
+    const exe = cc(b, opts.zld, null);
+    exe.addSimpleCMain();
+    exe.addArgs(&.{ "-weak_framework", "Cocoa" });
+
+    const run = exe.run();
+    test_step.dependOn(&run.step);
+
+    const check = exe.check();
+    check.checkStart("cmd LOAD_WEAK_DYLIB");
+    check.checkNext("name {*}Cocoa");
+    test_step.dependOn(&check.step);
+
+    return test_step;
+}
+
+fn testWeakLibrary(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-weak-library", "");
+
+    const dylib = cc(b, opts.zld, "liba.dylib");
+    dylib.addArg("-shared");
+    dylib.addSourcePath("test/macho/weak-library/a.c", "a.c");
+
+    const exe = cc(b, opts.zld, null);
+    exe.addSourcePath("test/macho/weak-library/main.c", "main.c");
+    exe.addArgs(&.{ "-weak-la", "-L" });
+    exe.addDirectorySource(dylib.saveOutput("liba.dylib").dir);
+
+    const check = exe.check();
+    check.checkStart("cmd LOAD_WEAK_DYLIB");
+    check.checkNext("name {*}liba.dylib");
+    check.checkInSymtab();
+    check.checkNext("(undefined) weak external _a (from liba)");
+    check.checkInSymtab();
+    check.checkNext("(undefined) weak external _asStr (from liba)");
+    test_step.dependOn(&check.step);
+
+    const run = exe.run();
+    run.expectStdOutEqual("42 42");
+    test_step.dependOn(&run.step);
 
     return test_step;
 }
