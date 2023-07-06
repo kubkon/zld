@@ -703,28 +703,146 @@ fn testTls(b: *Build, opts: Options) *Step {
 fn testUnwindInfo(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-unwind-info", "");
 
-    const flags: []const []const u8 = &.{ "-std=c++17", "-Itest/macho/unwind-info", "-c" };
+    const flags: []const []const u8 = &.{ "-std=c++17", "-c" };
+    const all_h = FileSourceWithDir.fromBytes(b,
+        \\#ifndef ALL
+        \\#define ALL
+        \\
+        \\#include <cstddef>
+        \\#include <string>
+        \\#include <stdexcept>
+        \\
+        \\struct SimpleString {
+        \\  SimpleString(size_t max_size);
+        \\  ~SimpleString();
+        \\
+        \\  void print(const char* tag) const;
+        \\  bool append_line(const char* x);
+        \\
+        \\private:
+        \\  size_t max_size;
+        \\  char* buffer;
+        \\  size_t length;
+        \\};
+        \\
+        \\struct SimpleStringOwner {
+        \\  SimpleStringOwner(const char* x);
+        \\  ~SimpleStringOwner();
+        \\
+        \\private:
+        \\  SimpleString string;
+        \\};
+        \\
+        \\class Error: public std::exception {
+        \\public:
+        \\  explicit Error(const char* msg) : msg{ msg } {}
+        \\  virtual ~Error() noexcept {}
+        \\  virtual const char* what() const noexcept {
+        \\    return msg.c_str();
+        \\  }
+        \\
+        \\protected:
+        \\  std::string msg;
+        \\};
+        \\
+        \\#endif
+    , "all.h");
 
     const exe = ld(b, opts.zld, null, opts.sdk_path);
     exe.addArg("-lc++");
 
     {
         const obj = cc(b, opts.zld, "main.o");
-        obj.addSourcePath("test/macho/unwind-info/main.cpp", "main.cpp");
+        obj.addSourceBytes(
+            \\#include "all.h"
+            \\#include <cstdio>
+            \\
+            \\void fn_c() {
+            \\  SimpleStringOwner c{ "cccccccccc" };
+            \\}
+            \\
+            \\void fn_b() {
+            \\  SimpleStringOwner b{ "b" };
+            \\  fn_c();
+            \\}
+            \\
+            \\int main() {
+            \\  try {
+            \\    SimpleStringOwner a{ "a" };
+            \\    fn_b();
+            \\    SimpleStringOwner d{ "d" };
+            \\  } catch (const Error& e) {
+            \\    printf("Error: %s\n", e.what());
+            \\  } catch(const std::exception& e) {
+            \\    printf("Exception: %s\n", e.what());
+            \\  }
+            \\  return 0;
+            \\}
+        , "main.cpp");
+        obj.addArg("-I");
+        obj.addDirectorySource(all_h.dir);
         obj.addArgs(flags);
         exe.addFileSource(obj.saveOutput("main.o").file);
     }
 
     {
         const obj = cc(b, opts.zld, "simple_string.o");
-        obj.addSourcePath("test/macho/unwind-info/simple_string.cpp", "simple_string.cpp");
+        obj.addSourceBytes(
+            \\#include "all.h"
+            \\#include <cstdio>
+            \\#include <cstring>
+            \\
+            \\SimpleString::SimpleString(size_t max_size)
+            \\: max_size{ max_size }, length{} {
+            \\  if (max_size == 0) {
+            \\    throw Error{ "Max size must be at least 1." };
+            \\  }
+            \\  buffer = new char[max_size];
+            \\  buffer[0] = 0;
+            \\}
+            \\
+            \\SimpleString::~SimpleString() {
+            \\  delete[] buffer;
+            \\}
+            \\
+            \\void SimpleString::print(const char* tag) const {
+            \\  printf("%s: %s", tag, buffer);
+            \\}
+            \\
+            \\bool SimpleString::append_line(const char* x) {
+            \\  const auto x_len = strlen(x);
+            \\  if (x_len + length + 2 > max_size) return false;
+            \\  std::strncpy(buffer + length, x, max_size - length);
+            \\  length += x_len;
+            \\  buffer[length++] = '\n';
+            \\  buffer[length] = 0;
+            \\  return true;
+            \\}
+        , "simple_string.cpp");
+        obj.addArg("-I");
+        obj.addDirectorySource(all_h.dir);
         obj.addArgs(flags);
         exe.addFileSource(obj.saveOutput("simple_string.o").file);
     }
 
     {
         const obj = cc(b, opts.zld, "simple_string_owner.o");
-        obj.addSourcePath("test/macho/unwind-info/simple_string_owner.cpp", "simple_string_owner.cpp");
+        obj.addSourceBytes(
+            \\#include "all.h"
+            \\
+            \\SimpleStringOwner::SimpleStringOwner(const char* x) : string{ 10 } {
+            \\  if (!string.append_line(x)) {
+            \\    throw Error{ "Not enough memory!" };
+            \\  }
+            \\  string.print("Constructed");
+            \\}
+            \\
+            \\SimpleStringOwner::~SimpleStringOwner() {
+            \\  string.print("About to destroy");
+            \\}
+        , "simple_string_owner.cpp");
+        obj.addArg("-I");
+        obj.addDirectorySource(all_h.dir);
         obj.addArgs(flags);
         exe.addFileSource(obj.saveOutput("simple_string_owner.o").file);
     }
@@ -881,6 +999,13 @@ const FileSourceWithDir = struct {
         const wf = WriteFile.create(b);
         const dir = wf.getDirectorySource();
         const file = wf.addCopyFile(in_file, basename);
+        return .{ .dir = dir, .file = file };
+    }
+
+    fn fromBytes(b: *Build, bytes: []const u8, basename: []const u8) FileSourceWithDir {
+        const wf = WriteFile.create(b);
+        const dir = wf.getDirectorySource();
+        const file = wf.add(basename, bytes);
         return .{ .dir = dir, .file = file };
     }
 };
