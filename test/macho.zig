@@ -30,8 +30,7 @@ pub fn addMachOTests(b: *Build, comp: *Compile) *Step {
     macho_step.dependOn(testNeededFramework(b, opts));
     macho_step.dependOn(testNeededLibrary(b, opts));
     macho_step.dependOn(testPagezeroSize(b, opts));
-    macho_step.dependOn(testSearchDylibsFirst(b, opts));
-    macho_step.dependOn(testSearchPathsFirst(b, opts));
+    macho_step.dependOn(testSearchStrategy(b, opts));
     macho_step.dependOn(testStackSize(b, opts));
     macho_step.dependOn(testTls(b, opts));
     macho_step.dependOn(testUnwindInfo(b, opts));
@@ -51,7 +50,19 @@ fn testDeadStrip(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-dead-strip", "");
 
     const exe = cc(b, opts.zld, null);
-    exe.addSourcePath("test/macho/dead-strip/main.c", "main.c");
+    exe.addSourceBytes(
+        \\#include <stdio.h>
+        \\void printMe() {
+        \\  printf("Hello!\n");
+        \\}
+        \\int main() {
+        \\  printMe();
+        \\  return 0;
+        \\}
+        \\void iAmUnused() {
+        \\  printf("YOU SHALL NOT PASS!\n");
+        \\}
+    , "main.c");
     exe.addArg("-dead_strip");
 
     const run = exe.run();
@@ -68,10 +79,22 @@ fn testDeadStrip(b: *Build, opts: Options) *Step {
 
 fn testDeadStripDylibs(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-dead-strip-dylibs", "");
+    const main_c =
+        \\#include <objc/runtime.h>
+        \\int main() {
+        \\  if (objc_getClass("NSObject") == 0) {
+        \\    return -1;
+        \\  }
+        \\  if (objc_getClass("NSApplication") == 0) {
+        \\    return -2;
+        \\  }
+        \\  return 0;
+        \\}
+    ;
 
     {
         const exe = cc(b, opts.zld, null);
-        exe.addSourcePath("test/macho/dead-strip-dylibs/main.c", "main.c");
+        exe.addSourceBytes(main_c, "main.c");
         exe.addArgs(&.{ "-framework", "Cocoa" });
 
         const check = exe.check();
@@ -87,7 +110,7 @@ fn testDeadStripDylibs(b: *Build, opts: Options) *Step {
 
     {
         const exe = cc(b, opts.zld, null);
-        exe.addSourcePath("test/macho/dead-strip-dylibs/main.c", "main.c");
+        exe.addSourceBytes(main_c, "main.c");
         exe.addArgs(&.{ "-framework", "Cocoa", "-Wl,-dead_strip_dylibs" });
 
         const run = exe.run();
@@ -103,10 +126,24 @@ fn testDylib(b: *Build, opts: Options) *Step {
 
     const dylib = cc(b, opts.zld, "liba.dylib");
     dylib.addArg("-shared");
-    dylib.addSourcePath("test/macho/dylib/a.c", "a.c");
+    dylib.addSourceBytes(
+        \\#include<stdio.h>
+        \\char world[] = "world";
+        \\char* hello() {
+        \\  return "Hello";
+        \\}
+    , "a.c");
 
     const exe = cc(b, opts.zld, null);
-    exe.addSourcePath("test/macho/dylib/main.c", "main.c");
+    exe.addSourceBytes(
+        \\#include<stdio.h>
+        \\char* hello();
+        \\extern char world[];
+        \\int main() {
+        \\  printf("%s %s", hello(), world);
+        \\  return 0;
+        \\}
+    , "main.c");
     exe.addArg("-la");
     exe.addArg("-L");
     exe.addDirectorySource(dylib.saveOutput("liba.dylib").dir);
@@ -142,7 +179,13 @@ fn testEntryPoint(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-entry-point", "");
 
     const exe = cc(b, opts.zld, null);
-    exe.addSourcePath("test/macho/entry-point/main.c", "main.c");
+    exe.addSourceBytes(
+        \\#include<stdio.h>
+        \\int non_main() {
+        \\  printf("%d", 42);
+        \\  return 0;
+        \\}
+    , "main.c");
     exe.addArg("-Wl,-e,_non_main");
 
     const run = exe.run();
@@ -188,10 +231,21 @@ fn testEntryPointDylib(b: *Build, opts: Options) *Step {
 
     const dylib = cc(b, opts.zld, "libbootstrap.dylib");
     dylib.addArgs(&.{ "-shared", "-Wl,-undefined,dynamic_lookup" });
-    dylib.addSourcePath("test/macho/entry-point-dylib/bootstrap.c", "bootstrap.c");
+    dylib.addSourceBytes(
+        \\extern int my_main();
+        \\int bootstrap() {
+        \\  return my_main();
+        \\}
+    , "bootstrap.c");
 
     const exe = cc(b, opts.zld, null);
-    exe.addSourcePath("test/macho/entry-point-dylib/main.c", "main.c");
+    exe.addSourceBytes(
+        \\#include<stdio.h>
+        \\int my_main() {
+        \\  fprintf(stdout, "Hello!\n");
+        \\  return 0;
+        \\}
+    , "main.c");
     exe.addArgs(&.{ "-Wl,-e,_bootstrap", "-Wl,-u,_my_main", "-lbootstrap", "-L" });
     exe.addDirectorySource(dylib.saveOutput("libbootstrap.dylib").dir);
 
@@ -521,70 +575,73 @@ fn testPagezeroSize(b: *Build, opts: Options) *Step {
     return test_step;
 }
 
-fn testSearchDylibsFirst(b: *Build, opts: Options) *Step {
-    const test_step = b.step("test-search-dylibs-first", "");
+fn testSearchStrategy(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-search-strategy", "");
 
     const obj = cc(b, opts.zld, "a.o");
     obj.addArg("-c");
-    obj.addSourcePath("test/macho/search-dylibs-first/a.c", "a.c");
+    obj.addSourceBytes(
+        \\#include<stdio.h>
+        \\char world[] = "world";
+        \\char* hello() {
+        \\  return "Hello";
+        \\}
+    , "a.c");
 
     const lib = ar(b, "liba.a");
     lib.addFileSource(obj.out);
 
-    const dylib = cc(b, opts.zld, "liba.dylib");
-    dylib.addArg("-shared");
-    dylib.addSourcePath("test/macho/search-dylibs-first/a.c", "a.c");
+    const dylib = ld(b, opts.zld, "liba.dylib", opts.sdk_path);
+    dylib.addArg("-dylib");
+    dylib.addFileSource(obj.out);
 
-    const exe = cc(b, opts.zld, null);
-    exe.addSourcePath("test/macho/search-dylibs-first/main.c", "main.c");
-    exe.addArgs(&.{ "-Wl,-search_dylibs_first", "-la" });
-    exe.addArg("-L");
-    exe.addDirectorySource(lib.saveOutput("liba.a").dir);
-    exe.addArg("-L");
-    exe.addDirectorySource(dylib.saveOutput("liba.dylib").dir);
+    const main_c =
+        \\#include<stdio.h>
+        \\char* hello();
+        \\extern char world[];
+        \\int main() {
+        \\  printf("%s %s", hello(), world);
+        \\  return 0;
+        \\}
+    ;
 
-    const run = exe.run();
-    run.expectStdOutEqual("Hello world");
-    test_step.dependOn(&run.step);
+    {
+        const exe = cc(b, opts.zld, null);
+        exe.addSourceBytes(main_c, "main.c");
+        exe.addArgs(&.{ "-Wl,-search_dylibs_first", "-la" });
+        exe.addArg("-L");
+        exe.addDirectorySource(lib.saveOutput("liba.a").dir);
+        exe.addArg("-L");
+        exe.addDirectorySource(dylib.saveOutput("liba.dylib").dir);
 
-    const check = exe.check();
-    check.checkStart("cmd LOAD_DYLIB");
-    check.checkNext("name {*}liba.dylib");
-    test_step.dependOn(&check.step);
+        const run = exe.run();
+        run.expectStdOutEqual("Hello world");
+        test_step.dependOn(&run.step);
 
-    return test_step;
-}
+        const check = exe.check();
+        check.checkStart("cmd LOAD_DYLIB");
+        check.checkNext("name {*}liba.dylib");
+        test_step.dependOn(&check.step);
+    }
 
-fn testSearchPathsFirst(b: *Build, opts: Options) *Step {
-    const test_step = b.step("test-search-paths-first", "");
+    {
+        const exe = cc(b, opts.zld, null);
+        exe.addSourceBytes(main_c, "main.c");
+        exe.addArgs(&.{ "-Wl,-search_paths_first", "-la" });
+        exe.addArg("-L");
+        exe.addDirectorySource(lib.saveOutput("liba.a").dir);
+        exe.addArg("-L");
+        exe.addDirectorySource(dylib.saveOutput("liba.dylib").dir);
 
-    const obj = cc(b, opts.zld, "a.o");
-    obj.addArg("-c");
-    obj.addSourcePath("test/macho/search-paths-first/a.c", "a.c");
+        const run = exe.run();
+        run.expectStdOutEqual("Hello world");
+        test_step.dependOn(&run.step);
 
-    const lib = ar(b, "liba.a");
-    lib.addFileSource(obj.out);
-
-    const dylib = cc(b, opts.zld, "liba.dylib");
-    dylib.addArg("-shared");
-    dylib.addSourcePath("test/macho/search-paths-first/a.c", "a.c");
-
-    const exe = cc(b, opts.zld, null);
-    exe.addSourcePath("test/macho/search-paths-first/main.c", "main.c");
-    exe.addArgs(&.{ "-Wl,-search_paths_first", "-la" });
-    exe.addArg("-L");
-    exe.addDirectorySource(lib.saveOutput("liba.a").dir);
-    exe.addArg("-L");
-    exe.addDirectorySource(dylib.saveOutput("liba.dylib").dir);
-
-    const run = exe.run();
-    run.expectStdOutEqual("Hello world");
-    test_step.dependOn(&run.step);
-
-    const check = exe.check();
-    check.checkStart("cmd LOAD_DYLIB");
-    check.checkNotPresent("name {*}liba.dylib");
-    test_step.dependOn(&check.step);
+        const check = exe.check();
+        check.checkStart("cmd LOAD_DYLIB");
+        check.checkNotPresent("name {*}liba.dylib");
+        test_step.dependOn(&check.step);
+    }
 
     return test_step;
 }
@@ -612,15 +669,32 @@ fn testTls(b: *Build, opts: Options) *Step {
 
     const dylib = cc(b, opts.zld, "liba.dylib");
     dylib.addArg("-shared");
-    dylib.addSourcePath("test/macho/tls/a.c", "a.c");
+    dylib.addSourceBytes(
+        \\_Thread_local int a;
+        \\int getA() {
+        \\  return a;
+        \\}
+    , "a.c");
 
     const exe = cc(b, opts.zld, null);
-    exe.addSourcePath("test/macho/tls/main.c", "main.c");
+    exe.addSourceBytes(
+        \\#include<stdio.h>
+        \\extern _Thread_local int a;
+        \\extern int getA();
+        \\int getA2() {
+        \\  return a;
+        \\}
+        \\int main() {
+        \\  a = 2;
+        \\  printf("%d %d %d", a, getA(), getA2());
+        \\  return 0;
+        \\}
+    , "main.c");
     exe.addArgs(&.{ "-la", "-L" });
     exe.addDirectorySource(dylib.saveOutput("liba.dylib").dir);
 
     const run = exe.run();
-    run.expectStdOutEqual("2 2");
+    run.expectStdOutEqual("2 2 2");
     test_step.dependOn(&run.step);
 
     return test_step;
@@ -697,10 +771,26 @@ fn testWeakLibrary(b: *Build, opts: Options) *Step {
 
     const dylib = cc(b, opts.zld, "liba.dylib");
     dylib.addArg("-shared");
-    dylib.addSourcePath("test/macho/weak-library/a.c", "a.c");
+    dylib.addSourceBytes(
+        \\#include<stdio.h>
+        \\int a = 42;
+        \\const char* asStr() {
+        \\  static char str[3];
+        \\  sprintf(str, "%d", 42);
+        \\  return str;
+        \\}
+    , "a.c");
 
     const exe = cc(b, opts.zld, null);
-    exe.addSourcePath("test/macho/weak-library/main.c", "main.c");
+    exe.addSourceBytes(
+        \\#include<stdio.h>
+        \\extern int a;
+        \\extern const char* asStr();
+        \\int main() {
+        \\  printf("%d %s", a, asStr());
+        \\  return 0;
+        \\}
+    , "main.c");
     exe.addArgs(&.{ "-weak-la", "-L" });
     exe.addDirectorySource(dylib.saveOutput("liba.dylib").dir);
 
