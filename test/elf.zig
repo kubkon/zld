@@ -25,6 +25,7 @@ fn testDsoIfunc(b: *Build, opts: Options) *Step {
         \\  return real_foobar;
         \\}
     , "a.c");
+    const dylib_out = dylib.saveOutputAs("liba.so");
 
     const exe = cc(b, null, opts);
     exe.addSourceBytes(
@@ -33,9 +34,9 @@ fn testDsoIfunc(b: *Build, opts: Options) *Step {
         \\  foobar();
         \\}
     , "main.c");
-    exe.addArgs(&.{ "-Wl,-rpath,.", "-la" });
-    exe.addArg("-L");
-    exe.addDirectorySource(dylib.saveOutputAs("liba.so").dir);
+    exe.addArg("-la");
+    exe.addPrefixedDirectorySource("-L", dylib_out.dir);
+    exe.addPrefixedDirectorySource("-Wl,-rpath,", dylib_out.dir);
 
     const run = exe.run();
     run.expectStdOutEqual("Hello world\n");

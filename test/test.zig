@@ -41,8 +41,16 @@ pub const SysCmd = struct {
         sys_cmd.cmd.addFileSourceArg(file);
     }
 
+    pub fn addPrefixedFileSource(sys_cmd: SysCmd, prefix: []const u8, file: FileSource) void {
+        sys_cmd.cmd.addPrefixedFileSourceArg(prefix, file);
+    }
+
     pub fn addDirectorySource(sys_cmd: SysCmd, dir: FileSource) void {
         sys_cmd.cmd.addDirectorySourceArg(dir);
+    }
+
+    pub fn addPrefixedDirectorySource(sys_cmd: SysCmd, prefix: []const u8, dir: FileSource) void {
+        sys_cmd.cmd.addPrefixedDirectorySourceArg(prefix, dir);
     }
 
     pub fn addSourceBytes(sys_cmd: SysCmd, bytes: []const u8, basename: []const u8) void {
@@ -111,8 +119,7 @@ pub fn cc(b: *Build, name: ?[]const u8, opts: Options) SysCmd {
     cmd.addArgs(&.{ "cc", "-fno-lto" });
     cmd.addArg("-o");
     const out = cmd.addOutputFileArg(name orelse "a.out");
-    cmd.addArg("-B");
-    cmd.addDirectorySourceArg(opts.zld.dir);
+    cmd.addPrefixedDirectorySourceArg("-B", opts.zld.dir);
     return .{ .cmd = cmd, .out = out };
 }
 

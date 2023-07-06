@@ -125,8 +125,7 @@ fn testDylib(b: *Build, opts: Options) *Step {
         \\}
     , "main.c");
     exe.addArg("-la");
-    exe.addArg("-L");
-    exe.addDirectorySource(dylib.saveOutputAs("liba.dylib").dir);
+    exe.addPrefixedDirectorySource("-L", dylib.saveOutputAs("liba.dylib").dir);
 
     const run = exe.run();
     run.expectStdOutEqual("Hello world");
@@ -197,8 +196,7 @@ fn testEntryPointArchive(b: *Build, opts: Options) *Step {
 
     const exe = cc(b, null, opts);
     exe.addArg("-lmain");
-    exe.addArg("-L");
-    exe.addDirectorySource(lib.saveOutputAs("libmain.a").dir);
+    exe.addPrefixedDirectorySource("-L", lib.saveOutputAs("libmain.a").dir);
 
     const run = exe.run();
     test_step.dependOn(&run.step);
@@ -226,8 +224,8 @@ fn testEntryPointDylib(b: *Build, opts: Options) *Step {
         \\  return 0;
         \\}
     , "main.c");
-    exe.addArgs(&.{ "-Wl,-e,_bootstrap", "-Wl,-u,_my_main", "-lbootstrap", "-L" });
-    exe.addDirectorySource(dylib.saveOutputAs("libbootstrap.dylib").dir);
+    exe.addArgs(&.{ "-Wl,-e,_bootstrap", "-Wl,-u,_my_main", "-lbootstrap" });
+    exe.addPrefixedDirectorySource("-L", dylib.saveOutputAs("libbootstrap.dylib").dir);
 
     const check = exe.check();
     check.checkStart("segname __TEXT");
@@ -508,8 +506,8 @@ fn testNeededLibrary(b: *Build, opts: Options) *Step {
 
     const exe = cc(b, null, opts);
     exe.addSimpleCMain();
-    exe.addArgs(&.{ "-Wl,-needed-la", "-Wl,-dead_strip_dylibs", "-L" });
-    exe.addDirectorySource(dylib.saveOutputAs("liba.dylib").dir);
+    exe.addArgs(&.{ "-Wl,-needed-la", "-Wl,-dead_strip_dylibs" });
+    exe.addPrefixedDirectorySource("-L", dylib.saveOutputAs("liba.dylib").dir);
 
     const check = exe.check();
     check.checkStart("cmd LOAD_DYLIB");
@@ -589,10 +587,8 @@ fn testSearchStrategy(b: *Build, opts: Options) *Step {
         const exe = cc(b, null, opts);
         exe.addSourceBytes(main_c, "main.c");
         exe.addArgs(&.{ "-Wl,-search_dylibs_first", "-la" });
-        exe.addArg("-L");
-        exe.addDirectorySource(lib.saveOutputAs("liba.a").dir);
-        exe.addArg("-L");
-        exe.addDirectorySource(dylib.saveOutputAs("liba.dylib").dir);
+        exe.addPrefixedDirectorySource("-L", lib.saveOutputAs("liba.a").dir);
+        exe.addPrefixedDirectorySource("-L", dylib.saveOutputAs("liba.dylib").dir);
 
         const run = exe.run();
         run.expectStdOutEqual("Hello world");
@@ -608,10 +604,8 @@ fn testSearchStrategy(b: *Build, opts: Options) *Step {
         const exe = cc(b, null, opts);
         exe.addSourceBytes(main_c, "main.c");
         exe.addArgs(&.{ "-Wl,-search_paths_first", "-la" });
-        exe.addArg("-L");
-        exe.addDirectorySource(lib.saveOutputAs("liba.a").dir);
-        exe.addArg("-L");
-        exe.addDirectorySource(dylib.saveOutputAs("liba.dylib").dir);
+        exe.addPrefixedDirectorySource("-L", lib.saveOutputAs("liba.a").dir);
+        exe.addPrefixedDirectorySource("-L", dylib.saveOutputAs("liba.dylib").dir);
 
         const run = exe.run();
         run.expectStdOutEqual("Hello world");
@@ -670,8 +664,8 @@ fn testTls(b: *Build, opts: Options) *Step {
         \\  return 0;
         \\}
     , "main.c");
-    exe.addArgs(&.{ "-la", "-L" });
-    exe.addDirectorySource(dylib.saveOutputAs("liba.dylib").dir);
+    exe.addArg("-la");
+    exe.addPrefixedDirectorySource("-L", dylib.saveOutputAs("liba.dylib").dir);
 
     const run = exe.run();
     run.expectStdOutEqual("2 2 2");
@@ -759,8 +753,7 @@ fn testUnwindInfo(b: *Build, opts: Options) *Step {
             \\  return 0;
             \\}
         , "main.cpp");
-        obj.addArg("-I");
-        obj.addDirectorySource(all_h.dir);
+        obj.addPrefixedDirectorySource("-I", all_h.dir);
         obj.addArgs(flags);
         exe.addFileSource(obj.saveOutputAs("main.o").file);
     }
@@ -799,8 +792,7 @@ fn testUnwindInfo(b: *Build, opts: Options) *Step {
             \\  return true;
             \\}
         , "simple_string.cpp");
-        obj.addArg("-I");
-        obj.addDirectorySource(all_h.dir);
+        obj.addPrefixedDirectorySource("-I", all_h.dir);
         obj.addArgs(flags);
         exe.addFileSource(obj.saveOutputAs("simple_string.o").file);
     }
@@ -821,8 +813,7 @@ fn testUnwindInfo(b: *Build, opts: Options) *Step {
             \\  string.print("About to destroy");
             \\}
         , "simple_string_owner.cpp");
-        obj.addArg("-I");
-        obj.addDirectorySource(all_h.dir);
+        obj.addPrefixedDirectorySource("-I", all_h.dir);
         obj.addArgs(flags);
         exe.addFileSource(obj.saveOutputAs("simple_string_owner.o").file);
     }
@@ -889,8 +880,8 @@ fn testWeakLibrary(b: *Build, opts: Options) *Step {
         \\  return 0;
         \\}
     , "main.c");
-    exe.addArgs(&.{ "-weak-la", "-L" });
-    exe.addDirectorySource(dylib.saveOutputAs("liba.dylib").dir);
+    exe.addArg("-weak-la");
+    exe.addPrefixedDirectorySource("-L", dylib.saveOutputAs("liba.dylib").dir);
 
     const check = exe.check();
     check.checkStart("cmd LOAD_WEAK_DYLIB");
