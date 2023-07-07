@@ -60,9 +60,20 @@ pub const SysCmd = struct {
         sys_cmd.cmd.addFileSourceArg(file);
     }
 
-    pub fn addSimpleCMain(sys_cmd: SysCmd) void {
+    pub fn addEmptyMain(sys_cmd: SysCmd) void {
         const main =
             \\int main(int argc, char* argv[]) {
+            \\  return 0;
+            \\}
+        ;
+        sys_cmd.addSourceBytes(main, "main.c");
+    }
+
+    pub fn addHelloWorldMain(sys_cmd: SysCmd) void {
+        const main =
+            \\#include <stdio.h>
+            \\int main(int argc, char* argv[]) {
+            \\  printf("Hello world!\n");
             \\  return 0;
             \\}
         ;
@@ -80,12 +91,32 @@ pub const SysCmd = struct {
         return ch;
     }
 
-    pub fn run(sys_cmd: SysCmd) *Run {
+    pub fn run(sys_cmd: SysCmd) RunSysCmd {
         const b = sys_cmd.cmd.step.owner;
         const r = Run.create(b, "exec");
         r.addFileSourceArg(sys_cmd.out);
         r.step.dependOn(&sys_cmd.cmd.step);
-        return r;
+        return .{ .run = r };
+    }
+};
+
+pub const RunSysCmd = struct {
+    run: *Run,
+
+    pub inline fn expectHelloWorld(rsc: RunSysCmd) void {
+        rsc.run.expectStdOutEqual("Hello world!\n");
+    }
+
+    pub inline fn expectStdOutEqual(rsc: RunSysCmd, exp: []const u8) void {
+        rsc.run.expectStdOutEqual(exp);
+    }
+
+    pub inline fn expectExitCode(rsc: RunSysCmd, code: u8) void {
+        rsc.run.expectExitCode(code);
+    }
+
+    pub inline fn step(rsc: RunSysCmd) *Step {
+        return &rsc.run.step;
     }
 };
 
@@ -113,35 +144,6 @@ pub const FileSourceWithDir = struct {
         return .{ .dir = dir, .file = file };
     }
 };
-
-pub fn cc(b: *Build, name: ?[]const u8, opts: Options) SysCmd {
-    const cmd = Run.create(b, "cc");
-    cmd.addArgs(&.{ "cc", "-fno-lto" });
-    cmd.addArg("-o");
-    const out = cmd.addOutputFileArg(name orelse "a.out");
-    cmd.addPrefixedDirectorySourceArg("-B", opts.zld.dir);
-    return .{ .cmd = cmd, .out = out };
-}
-
-pub fn ar(b: *Build, name: []const u8) SysCmd {
-    const cmd = Run.create(b, "ar");
-    cmd.addArgs(&.{ "ar", "rcs" });
-    const out = cmd.addOutputFileArg(name);
-    return .{ .cmd = cmd, .out = out };
-}
-
-pub fn ld(b: *Build, name: ?[]const u8, opts: Options) SysCmd {
-    const cmd = Run.create(b, "ld");
-    cmd.addFileSourceArg(opts.zld.file);
-    cmd.addArg("-dynamic");
-    cmd.addArg("-o");
-    const out = cmd.addOutputFileArg(name orelse "a.out");
-    cmd.addArgs(&.{ "-lSystem", "-lc" });
-    if (opts.sdk_path) |sdk| {
-        cmd.addArgs(&.{ "-syslibroot", sdk.path });
-    }
-    return .{ .cmd = cmd, .out = out };
-}
 
 const std = @import("std");
 const builtin = @import("builtin");

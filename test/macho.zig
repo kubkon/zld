@@ -27,7 +27,7 @@ pub fn addMachOTests(b: *Build, opts: Options) *Step {
 }
 
 fn testDeadStrip(b: *Build, opts: Options) *Step {
-    const test_step = b.step("test-dead-strip", "");
+    const test_step = b.step("test-macho-dead-strip", "");
 
     const exe = cc(b, null, opts);
     exe.addSourceBytes(
@@ -47,7 +47,7 @@ fn testDeadStrip(b: *Build, opts: Options) *Step {
 
     const run = exe.run();
     run.expectStdOutEqual("Hello!\n");
-    test_step.dependOn(&run.step);
+    test_step.dependOn(run.step());
 
     const check = exe.check();
     check.checkInSymtab();
@@ -58,7 +58,7 @@ fn testDeadStrip(b: *Build, opts: Options) *Step {
 }
 
 fn testDeadStripDylibs(b: *Build, opts: Options) *Step {
-    const test_step = b.step("test-dead-strip-dylibs", "");
+    const test_step = b.step("test-macho-dead-strip-dylibs", "");
     const main_c =
         \\#include <objc/runtime.h>
         \\int main() {
@@ -85,7 +85,7 @@ fn testDeadStripDylibs(b: *Build, opts: Options) *Step {
         test_step.dependOn(&check.step);
 
         const run = exe.run();
-        test_step.dependOn(&run.step);
+        test_step.dependOn(run.step());
     }
 
     {
@@ -95,14 +95,14 @@ fn testDeadStripDylibs(b: *Build, opts: Options) *Step {
 
         const run = exe.run();
         run.expectExitCode(@as(u8, @bitCast(@as(i8, -2))));
-        test_step.dependOn(&run.step);
+        test_step.dependOn(run.step());
     }
 
     return test_step;
 }
 
 fn testDylib(b: *Build, opts: Options) *Step {
-    const test_step = b.step("test-dylib", "");
+    const test_step = b.step("test-macho-dylib", "");
 
     const dylib = cc(b, "liba.dylib", opts);
     dylib.addArg("-shared");
@@ -129,33 +129,27 @@ fn testDylib(b: *Build, opts: Options) *Step {
 
     const run = exe.run();
     run.expectStdOutEqual("Hello world");
-    test_step.dependOn(&run.step);
+    test_step.dependOn(run.step());
 
     return test_step;
 }
 
 fn testEmptyObject(b: *Build, opts: Options) *Step {
-    const test_step = b.step("test-empty-object", "");
+    const test_step = b.step("test-macho-empty-object", "");
 
     const exe = cc(b, null, opts);
-    exe.addSourceBytes(
-        \\#include <stdio.h>
-        \\int main() {
-        \\  printf("Hello!\n");
-        \\  return 0;
-        \\}
-    , "main.c");
+    exe.addHelloWorldMain();
     exe.addSourceBytes("", "empty.c");
 
     const run = exe.run();
-    run.expectStdOutEqual("Hello!\n");
-    test_step.dependOn(&run.step);
+    run.expectHelloWorld();
+    test_step.dependOn(run.step());
 
     return test_step;
 }
 
 fn testEntryPoint(b: *Build, opts: Options) *Step {
-    const test_step = b.step("test-entry-point", "");
+    const test_step = b.step("test-macho-entry-point", "");
 
     const exe = cc(b, null, opts);
     exe.addSourceBytes(
@@ -169,7 +163,7 @@ fn testEntryPoint(b: *Build, opts: Options) *Step {
 
     const run = exe.run();
     run.expectStdOutEqual("42");
-    test_step.dependOn(&run.step);
+    test_step.dependOn(run.step());
 
     const check = exe.check();
     check.checkStart("segname __TEXT");
@@ -185,11 +179,11 @@ fn testEntryPoint(b: *Build, opts: Options) *Step {
 }
 
 fn testEntryPointArchive(b: *Build, opts: Options) *Step {
-    const test_step = b.step("test-entry-point-archive", "");
+    const test_step = b.step("test-macho-entry-point-archive", "");
 
     const obj = cc(b, "main.o", opts);
     obj.addArg("-c");
-    obj.addSimpleCMain();
+    obj.addEmptyMain();
 
     const lib = ar(b, "libmain.a");
     lib.addFileSource(obj.out);
@@ -199,13 +193,13 @@ fn testEntryPointArchive(b: *Build, opts: Options) *Step {
     exe.addPrefixedDirectorySource("-L", lib.saveOutputAs("libmain.a").dir);
 
     const run = exe.run();
-    test_step.dependOn(&run.step);
+    test_step.dependOn(run.step());
 
     return test_step;
 }
 
 fn testEntryPointDylib(b: *Build, opts: Options) *Step {
-    const test_step = b.step("test-entry-point-dylib", "");
+    const test_step = b.step("test-macho-entry-point-dylib", "");
 
     const dylib = cc(b, "libbootstrap.dylib", opts);
     dylib.addArgs(&.{ "-shared", "-Wl,-undefined,dynamic_lookup" });
@@ -242,13 +236,13 @@ fn testEntryPointDylib(b: *Build, opts: Options) *Step {
 
     const run = exe.run();
     run.expectStdOutEqual("Hello!\n");
-    test_step.dependOn(&run.step);
+    test_step.dependOn(run.step());
 
     return test_step;
 }
 
 fn testHeaderpad(b: *Build, opts: Options) *Step {
-    const test_step = b.step("test-headerpad", "");
+    const test_step = b.step("test-macho-headerpad", "");
 
     const flags: []const []const u8 = &.{
         "-framework", "CoreFoundation",
@@ -274,7 +268,7 @@ fn testHeaderpad(b: *Build, opts: Options) *Step {
         const exe = cc(b, null, opts);
         exe.addArgs(flags);
         exe.addArg("-Wl,-headerpad_max_install_names");
-        exe.addSimpleCMain();
+        exe.addEmptyMain();
 
         const check = exe.check();
         check.checkStart("sectname __text");
@@ -287,14 +281,14 @@ fn testHeaderpad(b: *Build, opts: Options) *Step {
         test_step.dependOn(&check.step);
 
         const run = exe.run();
-        test_step.dependOn(&run.step);
+        test_step.dependOn(run.step());
     }
 
     {
         const exe = cc(b, null, opts);
         exe.addArgs(flags);
         exe.addArg("-Wl,-headerpad,0x10000");
-        exe.addSimpleCMain();
+        exe.addEmptyMain();
 
         const check = exe.check();
         check.checkStart("sectname __text");
@@ -303,7 +297,7 @@ fn testHeaderpad(b: *Build, opts: Options) *Step {
         test_step.dependOn(&check.step);
 
         const run = exe.run();
-        test_step.dependOn(&run.step);
+        test_step.dependOn(run.step());
     }
 
     {
@@ -311,7 +305,7 @@ fn testHeaderpad(b: *Build, opts: Options) *Step {
         exe.addArgs(flags);
         exe.addArg("-Wl,-headerpad,0x10000");
         exe.addArg("-Wl,-headerpad_max_install_names");
-        exe.addSimpleCMain();
+        exe.addEmptyMain();
 
         const check = exe.check();
         check.checkStart("sectname __text");
@@ -320,7 +314,7 @@ fn testHeaderpad(b: *Build, opts: Options) *Step {
         test_step.dependOn(&check.step);
 
         const run = exe.run();
-        test_step.dependOn(&run.step);
+        test_step.dependOn(run.step());
     }
 
     {
@@ -328,7 +322,7 @@ fn testHeaderpad(b: *Build, opts: Options) *Step {
         exe.addArgs(flags);
         exe.addArg("-Wl,-headerpad,0x1000");
         exe.addArg("-Wl,-headerpad_max_install_names");
-        exe.addSimpleCMain();
+        exe.addEmptyMain();
 
         const check = exe.check();
         check.checkStart("sectname __text");
@@ -341,42 +335,30 @@ fn testHeaderpad(b: *Build, opts: Options) *Step {
         test_step.dependOn(&check.step);
 
         const run = exe.run();
-        test_step.dependOn(&run.step);
+        test_step.dependOn(run.step());
     }
 
     return test_step;
 }
 
 fn testHello(b: *Build, opts: Options) *Step {
-    const test_step = b.step("test-hello", "");
+    const test_step = b.step("test-macho-hello", "");
 
     const exe = cc(b, null, opts);
-    exe.addSourceBytes(
-        \\#include <stdio.h>
-        \\int main() {
-        \\  printf("Hello, World!\n");
-        \\  return 0;
-        \\}
-    , "main.c");
+    exe.addHelloWorldMain();
 
     const run = exe.run();
-    run.expectStdOutEqual("Hello, World!\n");
-    test_step.dependOn(&run.step);
+    run.expectHelloWorld();
+    test_step.dependOn(run.step());
 
     return test_step;
 }
 
 fn testLayout(b: *Build, opts: Options) *Step {
-    const test_step = b.step("test-layout", "");
+    const test_step = b.step("test-macho-layout", "");
 
     const exe = cc(b, null, opts);
-    exe.addSourceBytes(
-        \\#include <stdio.h>
-        \\int main() {
-        \\  printf("Hello, World!\n");
-        \\  return 0;
-        \\}
-    , "main.c");
+    exe.addHelloWorldMain();
 
     const check = exe.check();
     check.checkStart("cmd SEGMENT_64");
@@ -473,18 +455,18 @@ fn testLayout(b: *Build, opts: Options) *Step {
     test_step.dependOn(&check.step);
 
     const run = exe.run();
-    run.expectStdOutEqual("Hello, World!\n");
-    test_step.dependOn(&run.step);
+    run.expectHelloWorld();
+    test_step.dependOn(run.step());
 
     return test_step;
 }
 
 fn testNeededFramework(b: *Build, opts: Options) *Step {
-    const test_step = b.step("test-needed-framework", "");
+    const test_step = b.step("test-macho-needed-framework", "");
 
     const exe = cc(b, null, opts);
     exe.addArgs(&.{ "-Wl,-needed_framework,Cocoa", "-Wl,-dead_strip_dylibs" });
-    exe.addSimpleCMain();
+    exe.addEmptyMain();
 
     const check = exe.check();
     check.checkStart("cmd LOAD_DYLIB");
@@ -492,20 +474,20 @@ fn testNeededFramework(b: *Build, opts: Options) *Step {
     test_step.dependOn(&check.step);
 
     const run = exe.run();
-    test_step.dependOn(&run.step);
+    test_step.dependOn(run.step());
 
     return test_step;
 }
 
 fn testNeededLibrary(b: *Build, opts: Options) *Step {
-    const test_step = b.step("test-needed-library", "");
+    const test_step = b.step("test-macho-needed-library", "");
 
     const dylib = cc(b, "liba.dylib", opts);
     dylib.addArg("-shared");
     dylib.addSourceBytes("int a = 42;", "a.c");
 
     const exe = cc(b, null, opts);
-    exe.addSimpleCMain();
+    exe.addEmptyMain();
     exe.addArgs(&.{ "-Wl,-needed-la", "-Wl,-dead_strip_dylibs" });
     exe.addPrefixedDirectorySource("-L", dylib.saveOutputAs("liba.dylib").dir);
 
@@ -515,18 +497,18 @@ fn testNeededLibrary(b: *Build, opts: Options) *Step {
     test_step.dependOn(&check.step);
 
     const run = exe.run();
-    test_step.dependOn(&run.step);
+    test_step.dependOn(run.step());
 
     return test_step;
 }
 
 fn testPagezeroSize(b: *Build, opts: Options) *Step {
-    const test_step = b.step("test-pagezero-size", "");
+    const test_step = b.step("test-macho-pagezero-size", "");
 
     {
         const exe = cc(b, null, opts);
         exe.addArg("-Wl,-pagezero_size,0x4000");
-        exe.addSimpleCMain();
+        exe.addEmptyMain();
 
         const check = exe.check();
         check.checkStart("LC 0");
@@ -541,7 +523,7 @@ fn testPagezeroSize(b: *Build, opts: Options) *Step {
     {
         const exe = cc(b, null, opts);
         exe.addArg("-Wl,-pagezero_size,0");
-        exe.addSimpleCMain();
+        exe.addEmptyMain();
 
         const check = exe.check();
         check.checkStart("LC 0");
@@ -554,7 +536,7 @@ fn testPagezeroSize(b: *Build, opts: Options) *Step {
 }
 
 fn testSearchStrategy(b: *Build, opts: Options) *Step {
-    const test_step = b.step("test-search-strategy", "");
+    const test_step = b.step("test-macho-search-strategy", "");
 
     const obj = cc(b, "a.o", opts);
     obj.addArg("-c");
@@ -592,7 +574,7 @@ fn testSearchStrategy(b: *Build, opts: Options) *Step {
 
         const run = exe.run();
         run.expectStdOutEqual("Hello world");
-        test_step.dependOn(&run.step);
+        test_step.dependOn(run.step());
 
         const check = exe.check();
         check.checkStart("cmd LOAD_DYLIB");
@@ -609,7 +591,7 @@ fn testSearchStrategy(b: *Build, opts: Options) *Step {
 
         const run = exe.run();
         run.expectStdOutEqual("Hello world");
-        test_step.dependOn(&run.step);
+        test_step.dependOn(run.step());
 
         const check = exe.check();
         check.checkStart("cmd LOAD_DYLIB");
@@ -621,14 +603,14 @@ fn testSearchStrategy(b: *Build, opts: Options) *Step {
 }
 
 fn testStackSize(b: *Build, opts: Options) *Step {
-    const test_step = b.step("test-stack-size", "");
+    const test_step = b.step("test-macho-stack-size", "");
 
     const exe = cc(b, null, opts);
-    exe.addSimpleCMain();
+    exe.addEmptyMain();
     exe.addArg("-Wl,-stack_size,0x100000000");
 
     const run = exe.run();
-    test_step.dependOn(&run.step);
+    test_step.dependOn(run.step());
 
     const check = exe.check();
     check.checkStart("cmd MAIN");
@@ -639,7 +621,7 @@ fn testStackSize(b: *Build, opts: Options) *Step {
 }
 
 fn testTls(b: *Build, opts: Options) *Step {
-    const test_step = b.step("test-tls", "");
+    const test_step = b.step("test-macho-tls", "");
 
     const dylib = cc(b, "liba.dylib", opts);
     dylib.addArg("-shared");
@@ -669,13 +651,13 @@ fn testTls(b: *Build, opts: Options) *Step {
 
     const run = exe.run();
     run.expectStdOutEqual("2 2 2");
-    test_step.dependOn(&run.step);
+    test_step.dependOn(run.step());
 
     return test_step;
 }
 
 fn testUnwindInfo(b: *Build, opts: Options) *Step {
-    const test_step = b.step("test-unwind-info", "");
+    const test_step = b.step("test-macho-unwind-info", "");
 
     const flags: []const []const u8 = &.{ "-std=c++17", "-c" };
     const all_h = FileSourceWithDir.fromBytes(b,
@@ -827,7 +809,7 @@ fn testUnwindInfo(b: *Build, opts: Options) *Step {
         \\Error: Not enough memory!
         \\
     );
-    test_step.dependOn(&run.step);
+    test_step.dependOn(run.step());
 
     const check = exe.check();
     check.checkInSymtab();
@@ -838,14 +820,14 @@ fn testUnwindInfo(b: *Build, opts: Options) *Step {
 }
 
 fn testWeakFramework(b: *Build, opts: Options) *Step {
-    const test_step = b.step("test-weak-framework", "");
+    const test_step = b.step("test-macho-weak-framework", "");
 
     const exe = cc(b, null, opts);
-    exe.addSimpleCMain();
+    exe.addEmptyMain();
     exe.addArgs(&.{ "-weak_framework", "Cocoa" });
 
     const run = exe.run();
-    test_step.dependOn(&run.step);
+    test_step.dependOn(run.step());
 
     const check = exe.check();
     check.checkStart("cmd LOAD_WEAK_DYLIB");
@@ -856,7 +838,7 @@ fn testWeakFramework(b: *Build, opts: Options) *Step {
 }
 
 fn testWeakLibrary(b: *Build, opts: Options) *Step {
-    const test_step = b.step("test-weak-library", "");
+    const test_step = b.step("test-macho-weak-library", "");
 
     const dylib = cc(b, "liba.dylib", opts);
     dylib.addArg("-shared");
@@ -894,21 +876,48 @@ fn testWeakLibrary(b: *Build, opts: Options) *Step {
 
     const run = exe.run();
     run.expectStdOutEqual("42 42");
-    test_step.dependOn(&run.step);
+    test_step.dependOn(run.step());
 
     return test_step;
+}
+
+fn cc(b: *Build, name: ?[]const u8, opts: Options) SysCmd {
+    const cmd = Run.create(b, "cc");
+    cmd.addArgs(&.{ "cc", "-fno-lto" });
+    cmd.addArg("-o");
+    const out = cmd.addOutputFileArg(name orelse "a.out");
+    cmd.addPrefixedDirectorySourceArg("-B", opts.zld.dir);
+    return .{ .cmd = cmd, .out = out };
+}
+
+fn ar(b: *Build, name: []const u8) SysCmd {
+    const cmd = Run.create(b, "ar");
+    cmd.addArgs(&.{ "ar", "rcs" });
+    const out = cmd.addOutputFileArg(name);
+    return .{ .cmd = cmd, .out = out };
+}
+
+fn ld(b: *Build, name: ?[]const u8, opts: Options) SysCmd {
+    const cmd = Run.create(b, "ld");
+    cmd.addFileSourceArg(opts.zld.file);
+    cmd.addArg("-dynamic");
+    cmd.addArg("-o");
+    const out = cmd.addOutputFileArg(name orelse "a.out");
+    cmd.addArgs(&.{ "-lSystem", "-lc" });
+    if (opts.sdk_path) |sdk| {
+        cmd.addArgs(&.{ "-syslibroot", sdk.path });
+    }
+    return .{ .cmd = cmd, .out = out };
 }
 
 const std = @import("std");
 const builtin = @import("builtin");
 const common = @import("test.zig");
-const ar = common.ar;
-const cc = common.cc;
-const ld = common.ld;
 
 const Build = std.Build;
 const Compile = Step.Compile;
 const FileSourceWithDir = common.FileSourceWithDir;
 const Options = common.Options;
+const Run = Step.Run;
 const Step = Build.Step;
 const SysCmd = common.SysCmd;
