@@ -1,203 +1,159 @@
-const std = @import("std");
-const CrossTarget = std.zig.CrossTarget;
-const TestContext = @import("../src/test.zig").TestContext;
+pub fn addTests(b: *Build, comp: *Compile) *Step {
+    const test_step = b.step("test-system-tools", "Run all system tools tests");
+    test_step.dependOn(&comp.step);
 
-const linux_x86_64 = CrossTarget{
-    .cpu_arch = .x86_64,
-    .os_tag = .linux,
-    .abi = .musl,
-};
-const macos_x86_64 = CrossTarget{
-    .cpu_arch = .x86_64,
-    .os_tag = .macos,
-    .abi = .none,
-};
-const macos_aarch64 = CrossTarget{
-    .cpu_arch = .aarch64,
-    .os_tag = .macos,
-    .abi = .none,
-};
-const macos_targets: []const CrossTarget = &.{
-    macos_x86_64,
-    macos_aarch64,
-};
-const all_targets: []const CrossTarget = &.{
-    linux_x86_64,
-    macos_x86_64,
-    macos_aarch64,
-};
+    const zld = FileSourceWithDir.fromFileSource(b, comp.getOutputSource(), "ld");
+    const sdk_path = if (builtin.target.isDarwin())
+        std.zig.system.darwin.getDarwinSDK(b.allocator, builtin.target)
+    else
+        null;
+    const opts: Options = .{
+        .zld = zld,
+        .sdk_path = sdk_path,
+    };
 
-pub fn addCases(ctx: *TestContext) !void {
-    // All targets
-    for (all_targets) |target| {
-        {
-            var case = try ctx.addCase("hello world in Zig", target);
-            try case.addInput("hello.zig",
-                \\const std = @import("std");
-                \\
-                \\pub fn main() anyerror!void {
-                \\    const stdout = std.io.getStdOut().writer();
-                \\    try stdout.print("Hello, World!\n", .{});
-                \\}
-            );
-            case.expectedStdout("Hello, World!\n");
-        }
-        {
-            var case = try ctx.addCase("stack traces in Zig", target);
-            try case.addInput("panic.zig",
-                \\const std = @import("std");
-                \\
-                \\pub fn main() void {
-                \\    unreachable;
-                \\}
-            );
-            case.expectedStdout("");
-            // TODO figure out if we can test the resultant stack trace info
-            // case.expectedStderr(
-            //     \\thread 5731434 panic: reached unreachable code
-            //     \\/Users/kubkon/dev/zld/zig-cache/tmp/ObL4MD7CSJolhrZC/panic.zig:4:5: 0x104d4bef3 in main (panic)
-            //     \\    unreachable;
-            //     \\    ^
-            //     \\/opt/zig/lib/zig/std/start.zig:335:22: 0x104d4c03f in std.start.main (panic)
-            //     \\            root.main();
-            //     \\                     ^
-            //     \\???:?:?: 0x190c74f33 in ??? (???)
-            //     \\Panicked during a panic. Aborting.
-            // );
-        }
-        {
-            var case = try ctx.addCase("tlv in Zig", target);
-            try case.addInput("tlv.zig",
-                \\const std = @import("std");
-                \\
-                \\threadlocal var globl: usize = 0;
-                \\
-                \\pub fn main() void {
-                \\    std.log.info("Before: {}", .{globl});
-                \\    globl += 1;
-                \\    std.log.info("After: {}", .{globl});
-                \\}
-            );
-            case.expectedStdout("");
-            case.expectedStderr("info: Before: 0\ninfo: After: 1\n");
-        }
-        {
-            var case = try ctx.addCase("local tls in C", target);
-            try case.addInput("a.c",
-                \\#include <stdio.h>
-                \\
-                \\_Thread_local int x = 2;
-                \\extern _Thread_local int y;
-                \\extern _Thread_local int z;
-                \\
-                \\int main(int argc, char* argv[]) {
-                \\  y = 3;
-                \\  printf("%d, %d, %d\n", x, y, z);
-                \\  x += 1;
-                \\  y -= 1;
-                \\  z *= 2;
-                \\  printf("%d, %d, %d\n", x, y, z);
-                \\  return 0;
-                \\}
-            );
-            try case.addInput("b.c",
-                \\_Thread_local int y;
-                \\_Thread_local int z = 4;
-            );
-            case.expectedStdout(
-                \\2, 3, 4
-                \\3, 2, 8
-                \\
-            );
-        }
+    test_step.dependOn(macho.addMachOTests(b, opts));
+    test_step.dependOn(elf.addElfTests(b, opts));
 
-        {
-            var case = try ctx.addCase("hello world in C", target);
-            try case.addInput("main.c",
-                \\#include <stdio.h>
-                \\
-                \\int main() {
-                \\    fprintf(stdout, "Hello, World!\n");
-                \\    return 0;
-                \\}
-            );
-            case.expectedStdout("Hello, World!\n");
-        }
-        {
-            var case = try ctx.addCase("simple multi object in C", target);
-            try case.addInput("add.h",
-                \\#ifndef ADD_H
-                \\#define ADD_H
-                \\
-                \\int add(int a, int b);
-                \\
-                \\#endif
-            );
-            try case.addInput("add.c",
-                \\#include "add.h"
-                \\
-                \\int add(int a, int b) {
-                \\    return a + b;
-                \\}
-            );
-            try case.addInput("main.c",
-                \\#include <stdio.h>
-                \\#include "add.h"
-                \\
-                \\int main() {
-                \\    int a = 1;
-                \\    int b = 2;
-                \\    int res = add(1, 2);
-                \\    printf("%d + %d = %d\n", a, b, res);
-                \\    return 0;
-                \\}
-            );
-            case.expectedStdout("1 + 2 = 3\n");
-        }
-        {
-            var case = try ctx.addCase("multiple imports in C", target);
-            try case.addInput("main.c",
-                \\#include <stdio.h>
-                \\#include <stdlib.h>
-                \\
-                \\int main() {
-                \\    fprintf(stdout, "Hello, World!\n");
-                \\    exit(0);
-                \\    return 0;
-                \\}
-            );
-            case.expectedStdout("Hello, World!\n");
-        }
-        {
-            var case = try ctx.addCase("zero-init statics in C", target);
-            try case.addInput("main.c",
-                \\#include <stdio.h>
-                \\
-                \\static int aGlobal = 1;
-                \\
-                \\int main() {
-                \\    printf("aGlobal=%d\n", aGlobal);
-                \\    aGlobal -= 1;
-                \\    return aGlobal;
-                \\}
-            );
-            case.expectedStdout("aGlobal=1\n");
-        }
-        {
-            var case = try ctx.addCase("zerofill test in C", target);
-            try case.addInput("bss.c",
-                \\#include <stdio.h>
-                \\
-                \\static int buf[0x100000];
-                \\
-                \\int main(int argc, char* argv[]) {
-                \\  buf[0] = 1;
-                \\  buf[1] = 3;
-                \\  printf("%d, %d, %d\n", buf[0], buf[1], buf[0x100000-1]);
-                \\  return 0;
-                \\}
-            );
-            case.expectedStdout("1, 3, 0\n");
-        }
-    }
+    return test_step;
 }
+
+pub const Options = struct {
+    zld: FileSourceWithDir,
+    sdk_path: ?std.zig.system.darwin.DarwinSDK = null,
+};
+
+/// A system command that tracks the command itself via `cmd` Step.Run and output file
+/// via `out` FileSource.
+pub const SysCmd = struct {
+    cmd: *Run,
+    out: FileSource,
+
+    pub fn addArg(sys_cmd: SysCmd, arg: []const u8) void {
+        sys_cmd.cmd.addArg(arg);
+    }
+
+    pub fn addArgs(sys_cmd: SysCmd, args: []const []const u8) void {
+        sys_cmd.cmd.addArgs(args);
+    }
+
+    pub fn addFileSource(sys_cmd: SysCmd, file: FileSource) void {
+        sys_cmd.cmd.addFileSourceArg(file);
+    }
+
+    pub fn addPrefixedFileSource(sys_cmd: SysCmd, prefix: []const u8, file: FileSource) void {
+        sys_cmd.cmd.addPrefixedFileSourceArg(prefix, file);
+    }
+
+    pub fn addDirectorySource(sys_cmd: SysCmd, dir: FileSource) void {
+        sys_cmd.cmd.addDirectorySourceArg(dir);
+    }
+
+    pub fn addPrefixedDirectorySource(sys_cmd: SysCmd, prefix: []const u8, dir: FileSource) void {
+        sys_cmd.cmd.addPrefixedDirectorySourceArg(prefix, dir);
+    }
+
+    pub fn addSourceBytes(sys_cmd: SysCmd, bytes: []const u8, basename: []const u8) void {
+        const b = sys_cmd.cmd.step.owner;
+        const wf = WriteFile.create(b);
+        const file = wf.add(basename, bytes);
+        sys_cmd.cmd.addFileSourceArg(file);
+    }
+
+    pub fn addEmptyMain(sys_cmd: SysCmd) void {
+        const main =
+            \\int main(int argc, char* argv[]) {
+            \\  return 0;
+            \\}
+        ;
+        sys_cmd.addSourceBytes(main, "main.c");
+    }
+
+    pub fn addHelloWorldMain(sys_cmd: SysCmd) void {
+        const main =
+            \\#include <stdio.h>
+            \\int main(int argc, char* argv[]) {
+            \\  printf("Hello world!\n");
+            \\  return 0;
+            \\}
+        ;
+        sys_cmd.addSourceBytes(main, "main.c");
+    }
+
+    pub fn saveOutputAs(sys_cmd: SysCmd, basename: []const u8) FileSourceWithDir {
+        return FileSourceWithDir.fromFileSource(sys_cmd.cmd.step.owner, sys_cmd.out, basename);
+    }
+
+    pub fn check(sys_cmd: SysCmd) *CheckObject {
+        const b = sys_cmd.cmd.step.owner;
+        const ch = CheckObject.create(b, sys_cmd.out, .macho);
+        ch.step.dependOn(&sys_cmd.cmd.step);
+        return ch;
+    }
+
+    pub fn run(sys_cmd: SysCmd) RunSysCmd {
+        const b = sys_cmd.cmd.step.owner;
+        const r = Run.create(b, "exec");
+        r.addFileSourceArg(sys_cmd.out);
+        r.step.dependOn(&sys_cmd.cmd.step);
+        return .{ .run = r };
+    }
+};
+
+pub const RunSysCmd = struct {
+    run: *Run,
+
+    pub inline fn expectHelloWorld(rsc: RunSysCmd) void {
+        rsc.run.expectStdOutEqual("Hello world!\n");
+    }
+
+    pub inline fn expectStdOutEqual(rsc: RunSysCmd, exp: []const u8) void {
+        rsc.run.expectStdOutEqual(exp);
+    }
+
+    pub inline fn expectExitCode(rsc: RunSysCmd, code: u8) void {
+        rsc.run.expectExitCode(code);
+    }
+
+    pub inline fn step(rsc: RunSysCmd) *Step {
+        return &rsc.run.step;
+    }
+};
+
+/// When going over different linking scenarios, we usually want to save a file
+/// at a particular location however we do not specify the path to file explicitly
+/// on the linker line. Instead, we specify its basename like `-la` and provide
+/// the search directory with a matching companion flag `-L.`.
+/// This abstraction tie the full path of a file with its immediate directory to make
+/// the above scenario possible.
+pub const FileSourceWithDir = struct {
+    dir: FileSource,
+    file: FileSource,
+
+    pub fn fromFileSource(b: *Build, in_file: FileSource, basename: []const u8) FileSourceWithDir {
+        const wf = WriteFile.create(b);
+        const dir = wf.getDirectorySource();
+        const file = wf.addCopyFile(in_file, basename);
+        return .{ .dir = dir, .file = file };
+    }
+
+    pub fn fromBytes(b: *Build, bytes: []const u8, basename: []const u8) FileSourceWithDir {
+        const wf = WriteFile.create(b);
+        const dir = wf.getDirectorySource();
+        const file = wf.add(basename, bytes);
+        return .{ .dir = dir, .file = file };
+    }
+};
+
+const std = @import("std");
+const builtin = @import("builtin");
+const elf = @import("elf.zig");
+const macho = @import("macho.zig");
+
+const Build = std.Build;
+const CheckObject = Step.CheckObject;
+const Compile = Step.Compile;
+const FileSource = Build.FileSource;
+const Run = Step.Run;
+const Step = Build.Step;
+const WriteFile = Step.WriteFile;

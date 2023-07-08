@@ -205,6 +205,7 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
         if (try self.reportUndefSymbol(rel, elf_file)) continue;
 
         const symbol = object.getSymbol(rel.r_sym(), elf_file);
+        const is_shared = elf_file.options.output_mode == .lib;
 
         if (symbol.isIFunc(elf_file)) {
             symbol.flags.got = true;
@@ -231,7 +232,9 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
                 symbol.flags.got = true;
             },
 
-            elf.R_X86_64_PLT32 => {
+            elf.R_X86_64_PLT32,
+            elf.R_X86_64_PLTOFF64,
+            => {
                 if (symbol.flags.import) {
                     symbol.flags.plt = true;
                 }
@@ -244,10 +247,14 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
             elf.R_X86_64_TLSGD => {
                 // TODO verify followed by appropriate relocation such as PLT32 __tls_get_addr
 
-                if (elf_file.options.static or (elf_file.options.relax and !symbol.flags.import)) {
+                if (elf_file.options.static or
+                    (elf_file.options.relax and !symbol.flags.import and !is_shared))
+                {
                     // Relax if building with -static flag as __tls_get_addr() will not be present in libc.a
                     // We skip the next relocation.
                     i += 1;
+                } else if (elf_file.options.relax and !symbol.flags.import and is_shared) {
+                    @panic("TODO");
                 } else {
                     symbol.flags.tlsgd = true;
                 }
@@ -256,7 +263,7 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
             elf.R_X86_64_TLSLD => {
                 // TODO verify followed by appropriate relocation such as PLT32 __tls_get_addr
 
-                if (elf_file.options.static or elf_file.options.relax) {
+                if (elf_file.options.static or (elf_file.options.relax and !is_shared)) {
                     // Relax if building with -static flag as __tls_get_addr() will not be present in libc.a
                     // We skip the next relocation.
                     i += 1;
@@ -265,7 +272,33 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
                 }
             },
 
-            else => {},
+            elf.R_X86_64_GOTTPOFF => {
+                const should_relax = elf_file.options.relax and !is_shared and !symbol.flags.import;
+                if (!should_relax) {
+                    @panic("TODO");
+                }
+            },
+
+            elf.R_X86_64_GOTPC32_TLSDESC => @panic("TODO"),
+
+            elf.R_X86_64_TPOFF32,
+            elf.R_X86_64_TPOFF64,
+            => {
+                if (is_shared) self.picError(symbol, rel, elf_file);
+            },
+
+            elf.R_X86_64_GOTOFF64,
+            elf.R_X86_64_DTPOFF32,
+            elf.R_X86_64_DTPOFF64,
+            elf.R_X86_64_SIZE32,
+            elf.R_X86_64_SIZE64,
+            elf.R_X86_64_TLSDESC_CALL,
+            => {},
+
+            else => elf_file.base.fatal("{s}: unknown relocation type: {}", .{
+                self.getName(elf_file),
+                fmtRelocType(rel.r_type()),
+            }),
         }
     }
 }
@@ -276,9 +309,17 @@ fn scanReloc(self: Atom, symbol: *Symbol, rel: elf.Elf64_Rela, action: RelocActi
 
     switch (action) {
         .none => {},
-        .@"error" => self.relocError(symbol, rel, elf_file),
+        .@"error" => if (symbol.isAbs(elf_file))
+            self.noPicError(symbol, rel, elf_file)
+        else
+            self.picError(symbol, rel, elf_file),
         .copyrel => {
-            if (elf_file.options.z_nocopyreloc) self.relocError(symbol, rel, elf_file);
+            if (elf_file.options.z_nocopyreloc) {
+                if (symbol.isAbs(elf_file))
+                    self.noPicError(symbol, rel, elf_file)
+                else
+                    self.picError(symbol, rel, elf_file);
+            }
             symbol.flags.copy_rel = true;
         },
         .dyn_copyrel => {
@@ -349,14 +390,28 @@ inline fn unhandledRelocError(
     });
 }
 
-inline fn relocError(self: Atom, symbol: *const Symbol, rel: elf.Elf64_Rela, elf_file: *Elf) void {
-    elf_file.base.fatal("{s}: {} relocation at offset 0x{x} against symbol '{s}' cannot be used; recompile with {s}", .{
-        self.getName(elf_file),
-        fmtRelocType(rel.r_type()),
-        rel.r_offset,
-        symbol.getName(elf_file),
-        if (symbol.isAbs(elf_file)) "-fno-PIC" else "-fPIC",
-    });
+inline fn noPicError(self: Atom, symbol: *const Symbol, rel: elf.Elf64_Rela, elf_file: *Elf) void {
+    elf_file.base.fatal(
+        "{s}: {} relocation at offset 0x{x} against symbol '{s}' cannot be used; recompile with -fno-PIC",
+        .{
+            self.getName(elf_file),
+            fmtRelocType(rel.r_type()),
+            rel.r_offset,
+            symbol.getName(elf_file),
+        },
+    );
+}
+
+inline fn picError(self: Atom, symbol: *const Symbol, rel: elf.Elf64_Rela, elf_file: *Elf) void {
+    elf_file.base.fatal(
+        "{s}: {} relocation at offset 0x{x} against symbol '{s}' cannot be used; recompile with -fPIC",
+        .{
+            self.getName(elf_file),
+            fmtRelocType(rel.r_type()),
+            rel.r_offset,
+            symbol.getName(elf_file),
+        },
+    );
 }
 
 const RelocAction = enum {

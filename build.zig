@@ -9,7 +9,6 @@ pub fn build(b: *std.Build.Builder) void {
     const mode = b.standardOptimizeOption(.{});
 
     const enable_logging = b.option(bool, "log", "Whether to enable logging") orelse (mode == .Debug);
-    const is_qemu_enabled = b.option(bool, "enable-qemu", "Use QEMU to run cross compiled foreign architecture tests") orelse false;
     const enable_tracy = b.option([]const u8, "tracy", "Enable Tracy integration. Supply path to Tracy source");
 
     const yaml = b.dependency("zig-yaml", .{
@@ -62,29 +61,15 @@ pub fn build(b: *std.Build.Builder) void {
     }
     const install = b.addInstallArtifact(exe);
     const symlinks = addSymlinks(b, install, &[_][]const u8{
-        "ld.zld",
         "ld",
+        "ld.zld",
         "ld64.zld",
-        "ld64",
         "wasm-zld",
     });
     symlinks.step.dependOn(&install.step);
 
-    const tests = b.addTest(.{
-        .root_source_file = .{ .path = "src/test.zig" },
-        .optimize = mode,
-    });
-    tests.addModule("yaml", yaml.module("yaml"));
-    tests.addModule("dis_x86_64", dis_x86_64.module("dis_x86_64"));
-    tests.main_pkg_path = "."; // set root directory as main package path for our tests
-
-    const test_opts = b.addOptions();
-    tests.addOptions("build_options", test_opts);
-    test_opts.addOption(bool, "enable_qemu", is_qemu_enabled);
-    test_opts.addOption(bool, "enable_logging", enable_logging);
-
-    const test_step = b.step("test", "Run library and end-to-end tests");
-    test_step.dependOn(&b.addRunArtifact(tests).step);
+    const test_step = b.step("test", "Run tests");
+    test_step.dependOn(@import("test/test.zig").addTests(b, exe));
 }
 
 fn addSymlinks(

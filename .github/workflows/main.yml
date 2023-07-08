@@ -24,6 +24,5 @@ jobs:
         version: master
     - run: zig version
     - run: zig fmt --check src 
-    - run: zig build test
-    - run: zig build install
+    - run: zig build test --summary all
 

@@ -46,6 +46,7 @@ pub const DynamicSection = struct {
     }
 
     pub fn size(dt: DynamicSection, elf_file: *Elf) usize {
+        const is_shared = elf_file.options.output_mode == .lib;
         var nentries: usize = 0;
         nentries += dt.needed.items.len; // NEEDED
         if (dt.rpath > 0) nentries += 1; // RUNPATH
@@ -66,12 +67,14 @@ pub const DynamicSection = struct {
         if (elf_file.verneed_sect_index != null) nentries += 2; // VERNEED
         if (dt.getFlags(elf_file) != null) nentries += 1; // FLAGS
         if (dt.getFlags1(elf_file) != null) nentries += 1; // FLAGS_1
-        nentries += 1; // DEBUG
+        if (!is_shared) nentries += 1; // DEBUG
         nentries += 1; // NULL
         return nentries * @sizeOf(elf.Elf64_Dyn);
     }
 
     pub fn write(dt: DynamicSection, elf_file: *Elf, writer: anytype) !void {
+        const is_shared = elf_file.options.output_mode == .lib;
+
         // NEEDED
         for (dt.needed.items) |off| {
             try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_NEEDED, .d_val = off });
@@ -184,7 +187,7 @@ pub const DynamicSection = struct {
         }
 
         // DEBUG
-        try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_DEBUG, .d_val = 0 });
+        if (!is_shared) try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_DEBUG, .d_val = 0 });
 
         // NULL
         try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_NULL, .d_val = 0 });
@@ -623,10 +626,18 @@ pub const GotSection = struct {
                 continue;
             }
 
+            if (sym.isIFunc(elf_file)) {
+                elf_file.addRelaDynAssumeCapacity(.{
+                    .offset = offset,
+                    .type = elf.R_X86_64_IRELATIVE,
+                    .addend = @intCast(sym.getAddress(.{ .plt = false }, elf_file)),
+                });
+                continue;
+            }
+
             if (elf_file.options.pic and !sym.isAbs(elf_file)) {
                 elf_file.addRelaDynAssumeCapacity(.{
                     .offset = offset,
-                    .sym = extra.dynamic,
                     .type = elf.R_X86_64_RELATIVE,
                     .addend = @intCast(sym.getAddress(.{ .plt = false }, elf_file)),
                 });
@@ -642,6 +653,7 @@ pub const GotSection = struct {
                 num += 1;
                 continue;
             }
+            if (sym.isIFunc(elf_file)) num += 1;
             if (elf_file.options.pic and !sym.isAbs(elf_file)) num += 1;
         }
         return num;
@@ -858,7 +870,6 @@ pub const PltGotSection = struct {
     pub fn write(plt_got: PltGotSection, elf_file: *Elf, writer: anytype) !void {
         for (plt_got.symbols.items, 0..) |sym_index, i| {
             const sym = elf_file.getSymbol(sym_index);
-            assert(sym.flags.import);
             const extra = sym.getExtra(elf_file).?;
             const target_addr = elf_file.getGotEntryAddress(extra.got);
             const source_addr = elf_file.getPltGotEntryAddress(@as(u32, @intCast(i)));
