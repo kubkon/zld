@@ -238,6 +238,8 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             } else {
                 ctx.fatal("TODO handle '--build-id={s}'", .{value});
             }
+        } else if (p.flagAny("build-id")) {
+            opts.build_id = .none;
         } else if (p.flagAny("no-build-id")) {
             opts.build_id = .none;
         } else if (p.argAny("hash-style")) |value| {
@@ -376,6 +378,9 @@ fn ArgParser(comptime Ctx: type) type {
             const i = p.it.i;
             const actual_arg = blk: {
                 if (mem.eql(u8, p.arg, prefix)) {
+                    if (p.it.peek()) |next| {
+                        if (mem.startsWith(u8, next, "-")) return null;
+                    }
                     break :blk p.it.nextOrFatal(p.ctx);
                 }
                 if (mem.startsWith(u8, p.arg, prefix)) {
@@ -399,6 +404,9 @@ fn ArgParser(comptime Ctx: type) type {
             if (mem.startsWith(u8, p.arg, prefix)) {
                 const actual_arg = p.arg[prefix.len..];
                 if (mem.eql(u8, actual_arg, pat)) {
+                    if (p.it.peek()) |next| {
+                        if (mem.startsWith(u8, next, "-")) return null;
+                    }
                     return p.it.nextOrFatal(p.ctx);
                 }
                 if (pat.len == 1 and mem.eql(u8, actual_arg[0..pat.len], pat)) {

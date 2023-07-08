@@ -54,6 +54,14 @@ pub const Options = union {
                 ctx.fatal("Expected parameter after '{s}'", .{it.args[it.i - 1]});
             return arg;
         }
+
+        pub fn peek(it: *@This()) ?[]const u8 {
+            const arg = it.next();
+            defer if (it.i > 0) {
+                it.i -= 1;
+            };
+            return arg;
+        }
     };
 
     pub fn parse(arena: Allocator, tag: Tag, args: []const []const u8, ctx: anytype) !Options {
