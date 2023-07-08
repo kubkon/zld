@@ -7,6 +7,11 @@ const usage =
     \\--no-as-needed                Always set DT_NEEDED for shared libraries (default)
     \\--Bstatic                     Do not link against shared libraries
     \\--Bdynamic                    Link against shared libraries (default)
+    \\--build-id=[none,md5,sha1,sha256,uuid,HEXSTRING]
+    \\                              Generate build ID
+    \\--no-build-id                 Don't generate build ID
+    \\--hash-style=[none,sysv,gnu,both]
+    \\                              Set hash style
     \\--dynamic                     Alias for --Bdynamic
     \\--dynamic-linker=[value], -I [value]      
     \\                              Set the dynamic linker to use
@@ -50,6 +55,8 @@ const usage =
     \\  text                        Do not allow relocations against read-only segments (default)
     \\  notext                      Allow relocations against read-only segments. Sets the DT_TEXTREL flag
     \\                              in the .dynamic section
+    \\  relro                       Make some sections read-only after dynamic relocations
+    \\  norelro                     Don't apply relro security optimisation (default)
     \\-h, --help                    Print this help and exit
     \\--verbose                     Print full linker invocation to stderr
     \\--debug-log [value]           Turn on debugging logs for [value] (requires zld compiled with -Dlog)
@@ -82,6 +89,8 @@ page_size: ?u16 = null,
 pie: bool = false,
 pic: bool = false,
 warn_common: bool = false,
+build_id: ?BuildId = null,
+hash_style: ?HashStyle = null,
 /// -z flags
 /// Overrides default stack size.
 z_stack_size: ?u64 = null,
@@ -96,6 +105,9 @@ z_now: bool = false,
 z_nocopyreloc: bool = false,
 /// Do not allow relocations against read-only segments.
 z_text: bool = true,
+/// Make some sections read-only after dynamic relocations.
+/// TODO make this default to true.
+z_relro: bool = false,
 
 pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options {
     if (args.len == 0) ctx.fatal(usage, .{cmd});
@@ -212,6 +224,34 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             opts.relax = false;
         } else if (p.flagAny("verbose")) {
             verbose = true;
+        } else if (p.argAny("build-id")) |value| {
+            if (std.mem.eql(u8, "none", value)) {
+                opts.build_id = .none;
+            } else if (std.mem.eql(u8, "md5", value)) {
+                opts.build_id = .md5;
+            } else if (std.mem.eql(u8, "sha1", value)) {
+                opts.build_id = .sha1;
+            } else if (std.mem.eql(u8, "sha256", value)) {
+                opts.build_id = .sha256;
+            } else if (std.mem.eql(u8, "uuid", value)) {
+                opts.build_id = .uuid;
+            } else {
+                ctx.fatal("TODO handle '--build-id={s}'", .{value});
+            }
+        } else if (p.flagAny("no-build-id")) {
+            opts.build_id = .none;
+        } else if (p.argAny("hash-style")) |value| {
+            if (std.mem.eql(u8, "none", value)) {
+                opts.hash_style = .none;
+            } else if (std.mem.eql(u8, "gnu", value)) {
+                opts.hash_style = .gnu;
+            } else if (std.mem.eql(u8, "sysv", value)) {
+                opts.hash_style = .sysv;
+            } else if (std.mem.eql(u8, "both", value)) {
+                opts.hash_style = .both;
+            } else {
+                ctx.fatal("invalid hash-style value '--hash-style={s}'", .{value});
+            }
         } else if (p.argZ("stack-size")) |value| {
             opts.z_stack_size = std.fmt.parseInt(u64, value, 0) catch
                 ctx.fatal("Could not parse value '{s}' into integer", .{value});
@@ -231,6 +271,11 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             opts.z_text = true;
         } else if (p.flagZ("notext")) {
             opts.z_text = false;
+        } else if (p.flagZ("relro")) {
+            opts.z_relro = true;
+            ctx.fatal("TODO handle '-z relro'", .{});
+        } else if (p.flagZ("norelro")) {
+            opts.z_relro = false;
         } else {
             try positionals.append(.{ .tag = .path, .path = p.arg });
         }
@@ -389,6 +434,22 @@ pub const Positional = struct {
         push_state,
         pop_state,
     };
+};
+
+pub const BuildId = enum {
+    none,
+    md5,
+    sha1,
+    sha256,
+    uuid,
+    hex,
+};
+
+pub const HashStyle = enum {
+    none,
+    sysv,
+    gnu,
+    both,
 };
 
 const std = @import("std");
