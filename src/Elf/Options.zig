@@ -236,7 +236,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             } else if (std.mem.eql(u8, "uuid", value)) {
                 opts.build_id = .uuid;
             } else {
-                ctx.fatal("TODO handle '--build-id={s}'", .{value});
+                ctx.fatal("invalid build-id value '--build-id={s}'", .{value});
             }
         } else if (p.flagAny("build-id")) {
             opts.build_id = .none;
@@ -275,7 +275,6 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             opts.z_text = false;
         } else if (p.flagZ("relro")) {
             opts.z_relro = true;
-            ctx.fatal("TODO handle '-z relro'", .{});
         } else if (p.flagZ("norelro")) {
             opts.z_relro = false;
         } else {
