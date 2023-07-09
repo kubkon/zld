@@ -1257,7 +1257,7 @@ fn sortSections(self: *Elf) !void {
 
     if (self.rela_dyn_sect_index) |index| {
         const shdr = &self.sections.items(.shdr)[index];
-        shdr.sh_link = self.dynsymtab_sect_index.?;
+        shdr.sh_link = self.dynsymtab_sect_index orelse 0;
     }
 
     if (self.rela_plt_sect_index) |index| {
@@ -1830,7 +1830,7 @@ fn scanRelocs(self: *Elf) !void {
         if (symbol.flags.got) {
             log.debug("'{s}' needs GOT", .{symbol.getName(self)});
             try self.got.addSymbol(index, self);
-            if (symbol.flags.import) self.got.needs_rela = true;
+            if (symbol.flags.import or symbol.isIFunc(self)) self.got.needs_rela = true;
         }
         if (symbol.flags.plt) {
             if (symbol.flags.is_canonical) {

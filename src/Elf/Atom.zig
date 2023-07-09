@@ -309,10 +309,12 @@ fn scanReloc(self: Atom, symbol: *Symbol, rel: elf.Elf64_Rela, action: RelocActi
 
     switch (action) {
         .none => {},
+
         .@"error" => if (symbol.isAbs(elf_file))
             self.noPicError(symbol, rel, elf_file)
         else
             self.picError(symbol, rel, elf_file),
+
         .copyrel => {
             if (elf_file.options.z_nocopyreloc) {
                 if (symbol.isAbs(elf_file))
@@ -322,6 +324,7 @@ fn scanReloc(self: Atom, symbol: *Symbol, rel: elf.Elf64_Rela, action: RelocActi
             }
             symbol.flags.copy_rel = true;
         },
+
         .dyn_copyrel => {
             if (is_writeable or elf_file.options.z_nocopyreloc) {
                 self.checkTextReloc(symbol, elf_file);
@@ -330,13 +333,16 @@ fn scanReloc(self: Atom, symbol: *Symbol, rel: elf.Elf64_Rela, action: RelocActi
                 symbol.flags.copy_rel = true;
             }
         },
+
         .plt => {
             symbol.flags.plt = true;
         },
+
         .cplt => {
             symbol.flags.plt = true;
             symbol.flags.is_canonical = true;
         },
+
         .dyn_cplt => {
             if (is_writeable) {
                 object.num_dynrelocs += 1;
@@ -345,14 +351,17 @@ fn scanReloc(self: Atom, symbol: *Symbol, rel: elf.Elf64_Rela, action: RelocActi
                 symbol.flags.is_canonical = true;
             }
         },
+
         .dynrel => {
             self.checkTextReloc(symbol, elf_file);
             object.num_dynrelocs += 1;
         },
+
         .baserel => {
             self.checkTextReloc(symbol, elf_file);
             object.num_dynrelocs += 1;
         },
+
         .ifunc => self.unhandledRelocError(symbol, rel, action, elf_file),
     }
 }
