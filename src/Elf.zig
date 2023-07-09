@@ -47,6 +47,8 @@ got_index: ?u32 = null,
 plt_index: ?u32 = null,
 dso_handle_index: ?u32 = null,
 gnu_eh_frame_hdr_index: ?u32 = null,
+rela_iplt_start: ?u32 = null,
+rela_iplt_end: ?u32 = null,
 
 entry_index: ?u32 = null,
 
@@ -1385,6 +1387,20 @@ fn allocateSyntheticSymbols(self: *Elf) void {
         symbol.value = shdr.sh_addr;
         symbol.shndx = shndx;
     }
+
+    // __rela_iplt_start, __rela_iplt_end
+    if (self.rela_dyn_sect_index != null and self.options.static and !self.options.pie) {
+        const shndx = self.rela_dyn_sect_index.?;
+        const shdr = self.sections.items(.shdr)[shndx];
+        const end_addr = shdr.sh_addr + shdr.sh_size;
+        const start_addr = end_addr - self.getNumIRelativeRelocs() * @sizeOf(elf.Elf64_Rela);
+        const start_sym = self.getSymbol(self.rela_iplt_start.?);
+        const end_sym = self.getSymbol(self.rela_iplt_end.?);
+        start_sym.value = start_addr;
+        start_sym.shndx = shndx;
+        end_sym.value = end_addr;
+        end_sym.shndx = shndx;
+    }
 }
 
 fn unpackPositionals(self: *Elf, positionals: *std.ArrayList(LinkObject)) !void {
@@ -1734,6 +1750,9 @@ fn resolveSyntheticSymbols(self: *Elf) !void {
         if (self.getSymbol(index).getFile(self) == null)
             self.dso_handle_index = try internal.addSyntheticGlobal("__dso_handle", self);
     }
+
+    self.rela_iplt_start = try internal.addSyntheticGlobal("__rela_iplt_start", self);
+    self.rela_iplt_end = try internal.addSyntheticGlobal("__rela_iplt_end", self);
 
     internal.resolveSymbols(self);
 }
@@ -2371,6 +2390,17 @@ fn sortRelaDyn(self: *Elf) void {
         }
     };
     mem.sort(elf.Elf64_Rela, self.rela_dyn.items, {}, Sort.lessThan);
+}
+
+fn getNumIRelativeRelocs(self: *Elf) usize {
+    var count: usize = 0;
+
+    for (self.got.symbols.items) |sym_index| {
+        const sym = self.getSymbol(sym_index);
+        if (sym.isIFunc(self)) count += 1;
+    }
+
+    return count;
 }
 
 pub inline fn getSectionAddress(self: *Elf, shndx: u16) u64 {
