@@ -36,10 +36,13 @@ verneed_sect_index: ?u16 = null,
 
 internal_object_index: ?u32 = null,
 dynamic_index: ?u32 = null,
+ehdr_start_index: ?u32 = null,
 init_array_start_index: ?u32 = null,
 init_array_end_index: ?u32 = null,
 fini_array_start_index: ?u32 = null,
 fini_array_end_index: ?u32 = null,
+preinit_array_start_index: ?u32 = null,
+preinit_array_end_index: ?u32 = null,
 got_index: ?u32 = null,
 plt_index: ?u32 = null,
 dso_handle_index: ?u32 = null,
@@ -1310,6 +1313,13 @@ fn allocateSyntheticSymbols(self: *Elf) void {
         symbol.shndx = shndx;
     }
 
+    // __ehdr_start
+    {
+        const symbol = self.getSymbol(self.ehdr_start_index.?);
+        symbol.value = self.options.image_base;
+        symbol.shndx = 1;
+    }
+
     // __init_array_start, __init_array_end
     if (self.getSectionByName(".init_array")) |shndx| {
         const start_sym = self.getSymbol(self.init_array_start_index.?);
@@ -1325,6 +1335,17 @@ fn allocateSyntheticSymbols(self: *Elf) void {
     if (self.getSectionByName(".fini_array")) |shndx| {
         const start_sym = self.getSymbol(self.fini_array_start_index.?);
         const end_sym = self.getSymbol(self.fini_array_end_index.?);
+        const shdr = self.sections.items(.shdr)[shndx];
+        start_sym.shndx = shndx;
+        start_sym.value = shdr.sh_addr;
+        end_sym.shndx = shndx;
+        end_sym.value = shdr.sh_addr + shdr.sh_size;
+    }
+
+    // __preinit_array_start, __preinit_array_end
+    if (self.getSectionByName(".preinit_array")) |shndx| {
+        const start_sym = self.getSymbol(self.preinit_array_start_index.?);
+        const end_sym = self.getSymbol(self.preinit_array_end_index.?);
         const shdr = self.sections.items(.shdr)[shndx];
         start_sym.shndx = shndx;
         start_sym.value = shdr.sh_addr;
@@ -1695,10 +1716,13 @@ fn resolveSyntheticSymbols(self: *Elf) !void {
     const internal_index = self.internal_object_index orelse return;
     const internal = self.getFile(internal_index).?.internal;
     self.dynamic_index = try internal.addSyntheticGlobal("_DYNAMIC", self);
+    self.ehdr_start_index = try internal.addSyntheticGlobal("__ehdr_start", self);
     self.init_array_start_index = try internal.addSyntheticGlobal("__init_array_start", self);
     self.init_array_end_index = try internal.addSyntheticGlobal("__init_array_end", self);
     self.fini_array_start_index = try internal.addSyntheticGlobal("__fini_array_start", self);
     self.fini_array_end_index = try internal.addSyntheticGlobal("__fini_array_end", self);
+    self.preinit_array_start_index = try internal.addSyntheticGlobal("__preinit_array_start", self);
+    self.preinit_array_end_index = try internal.addSyntheticGlobal("__preinit_array_end", self);
     self.got_index = try internal.addSyntheticGlobal("_GLOBAL_OFFSET_TABLE_", self);
     self.plt_index = try internal.addSyntheticGlobal("_PROCEDURE_LINKAGE_TABLE_", self);
 
