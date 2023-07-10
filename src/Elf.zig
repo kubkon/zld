@@ -74,6 +74,7 @@ hash: HashSection = .{},
 gnu_hash: GnuHashSection = .{},
 got: GotSection = .{},
 plt: PltSection = .{},
+got_plt: GotPltSection = .{},
 plt_got: PltGotSection = .{},
 copy_rel: CopyRelSection = .{},
 rela_dyn: std.ArrayListUnmanaged(elf.Elf64_Rela) = .{},
@@ -475,6 +476,13 @@ fn initSections(self: *Elf) !void {
             .flags = elf.SHF_ALLOC | elf.SHF_WRITE,
             .addralign = @alignOf(u64),
         });
+
+        self.got_plt_sect_index = try self.addSection(.{
+            .name = ".got.plt",
+            .type = elf.SHT_PROGBITS,
+            .flags = elf.SHF_ALLOC | elf.SHF_WRITE,
+            .addralign = @alignOf(u64),
+        });
     }
 
     const needs_rela_dyn = blk: {
@@ -500,12 +508,6 @@ fn initSections(self: *Elf) !void {
             .type = elf.SHT_PROGBITS,
             .flags = elf.SHF_ALLOC | elf.SHF_EXECINSTR,
             .addralign = 16,
-        });
-        self.got_plt_sect_index = try self.addSection(.{
-            .name = ".got.plt",
-            .type = elf.SHT_PROGBITS,
-            .flags = elf.SHF_ALLOC | elf.SHF_WRITE,
-            .addralign = @alignOf(u64),
         });
         self.rela_plt_sect_index = try self.addSection(.{
             .name = ".rela.plt",
@@ -667,13 +669,13 @@ fn calcSectionSizes(self: *Elf) !void {
 
     if (self.plt_sect_index) |index| {
         const shdr = &self.sections.items(.shdr)[index];
-        shdr.sh_size = self.plt.sizePlt();
+        shdr.sh_size = self.plt.size();
         shdr.sh_addralign = 16;
     }
 
     if (self.got_plt_sect_index) |index| {
         const shdr = &self.sections.items(.shdr)[index];
-        shdr.sh_size = self.plt.sizeGotPlt();
+        shdr.sh_size = self.got_plt.size(self);
         shdr.sh_addralign = @alignOf(u64);
     }
 
@@ -2107,17 +2109,17 @@ fn writeSyntheticSections(self: *Elf) !void {
 
     if (self.plt_sect_index) |shndx| {
         const shdr = self.sections.items(.shdr)[shndx];
-        var buffer = try std.ArrayList(u8).initCapacity(gpa, self.plt.sizePlt());
+        var buffer = try std.ArrayList(u8).initCapacity(gpa, self.plt.size());
         defer buffer.deinit();
-        try self.plt.writePlt(self, buffer.writer());
+        try self.plt.write(self, buffer.writer());
         try self.base.file.pwriteAll(buffer.items, shdr.sh_offset);
     }
 
     if (self.got_plt_sect_index) |shndx| {
         const shdr = self.sections.items(.shdr)[shndx];
-        var buffer = try std.ArrayList(u8).initCapacity(gpa, self.plt.sizeGotPlt());
+        var buffer = try std.ArrayList(u8).initCapacity(gpa, self.got_plt.size(self));
         defer buffer.deinit();
-        try self.plt.writeGotPlt(self, buffer.writer());
+        try self.got_plt.write(self, buffer.writer());
         try self.base.file.pwriteAll(buffer.items, shdr.sh_offset);
     }
 
@@ -2480,11 +2482,11 @@ pub inline fn getGotEntryAddress(self: *Elf, index: u32) u64 {
 }
 
 pub inline fn getPltEntryAddress(self: *Elf, index: u32) u64 {
-    return self.getSectionAddress(self.plt_sect_index.?) + PltSection.plt_preamble_size + index * 16;
+    return self.getSectionAddress(self.plt_sect_index.?) + PltSection.preamble_size + index * 16;
 }
 
 pub inline fn getGotPltEntryAddress(self: *Elf, index: u32) u64 {
-    return self.getSectionAddress(self.got_plt_sect_index.?) + PltSection.got_plt_preamble_size + index * @sizeOf(u64);
+    return self.getSectionAddress(self.got_plt_sect_index.?) + GotPltSection.preamble_size + index * @sizeOf(u64);
 }
 
 pub inline fn getPltGotEntryAddress(self: *Elf, index: u32) u64 {
@@ -2722,6 +2724,7 @@ const Elf = @This();
 const File = @import("Elf/file.zig").File;
 const GnuHashSection = synthetic.GnuHashSection;
 const GotSection = synthetic.GotSection;
+const GotPltSection = synthetic.GotPltSection;
 const HashSection = synthetic.HashSection;
 const InternalObject = @import("Elf/InternalObject.zig");
 const LdScript = @import("Elf/LdScript.zig");
