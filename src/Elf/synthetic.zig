@@ -649,12 +649,8 @@ pub const GotSection = struct {
         var num: usize = 0;
         for (got.symbols.items) |sym_index| {
             const sym = elf_file.getSymbol(sym_index);
-            if (sym.flags.import) {
+            if (sym.flags.import or sym.isIFunc(elf_file) or (elf_file.options.pic and !sym.isAbs(elf_file)))
                 num += 1;
-                continue;
-            }
-            if (sym.isIFunc(elf_file)) num += 1;
-            if (elf_file.options.pic and !sym.isAbs(elf_file)) num += 1;
         }
         return num;
     }
@@ -715,8 +711,7 @@ pub const PltSection = struct {
     symbols: std.ArrayListUnmanaged(u32) = .{},
     output_symtab_size: Elf.SymtabSize = .{},
 
-    pub const plt_preamble_size = 32;
-    pub const got_plt_preamble_size = 24;
+    pub const preamble_size = 32;
 
     pub fn deinit(plt: *PltSection, allocator: Allocator) void {
         plt.symbols.deinit(allocator);
@@ -733,15 +728,11 @@ pub const PltSection = struct {
         try plt.symbols.append(elf_file.base.allocator, sym_index);
     }
 
-    pub fn sizePlt(plt: PltSection) usize {
-        return plt_preamble_size + plt.symbols.items.len * 16;
+    pub fn size(plt: PltSection) usize {
+        return preamble_size + plt.symbols.items.len * 16;
     }
 
-    pub fn sizeGotPlt(plt: PltSection) usize {
-        return got_plt_preamble_size + plt.symbols.items.len * 8;
-    }
-
-    pub fn writePlt(plt: PltSection, elf_file: *Elf, writer: anytype) !void {
+    pub fn write(plt: PltSection, elf_file: *Elf, writer: anytype) !void {
         const plt_addr = elf_file.getSectionAddress(elf_file.plt_sect_index.?);
         const got_plt_addr = elf_file.getSectionAddress(elf_file.got_plt_sect_index.?);
         var preamble = [_]u8{
@@ -755,7 +746,7 @@ pub const PltSection = struct {
         disp = @as(i64, @intCast(got_plt_addr + 16)) - @as(i64, @intCast(plt_addr + 14)) - 4;
         mem.writeIntLittle(i32, preamble[14..][0..4], @as(i32, @intCast(disp)));
         try writer.writeAll(&preamble);
-        try writer.writeByteNTimes(0xcc, plt_preamble_size - preamble.len);
+        try writer.writeByteNTimes(0xcc, preamble_size - preamble.len);
 
         for (0..plt.symbols.items.len) |i| {
             const target_addr = elf_file.getGotPltEntryAddress(@as(u32, @intCast(i)));
@@ -769,23 +760,6 @@ pub const PltSection = struct {
             mem.writeIntLittle(i32, entry[6..][0..4], @as(i32, @intCast(i)));
             mem.writeIntLittle(i32, entry[12..][0..4], @as(i32, @intCast(disp)));
             try writer.writeAll(&entry);
-        }
-    }
-
-    pub fn writeGotPlt(plt: PltSection, elf_file: *Elf, writer: anytype) !void {
-        {
-            // [0]: _DYNAMIC
-            const symbol = elf_file.getSymbol(elf_file.dynamic_index.?);
-            try writer.writeIntLittle(u64, symbol.value);
-        }
-        // [1]: 0x0
-        // [2]: 0x0
-        try writer.writeIntLittle(u64, 0x0);
-        try writer.writeIntLittle(u64, 0x0);
-        const plt_addr = elf_file.getSectionAddress(elf_file.plt_sect_index.?);
-        for (0..plt.symbols.items.len) |_| {
-            // [N]: .plt
-            try writer.writeIntLittle(u64, plt_addr);
         }
     }
 
@@ -840,6 +814,35 @@ pub const PltSection = struct {
                 .st_size = 16,
             };
             ilocal += 1;
+        }
+    }
+};
+
+pub const GotPltSection = struct {
+    pub const preamble_size = 24;
+
+    pub fn size(got_plt: GotPltSection, elf_file: *Elf) usize {
+        _ = got_plt;
+        return preamble_size + elf_file.plt.symbols.items.len * 8;
+    }
+
+    pub fn write(got_plt: GotPltSection, elf_file: *Elf, writer: anytype) !void {
+        _ = got_plt;
+        {
+            // [0]: _DYNAMIC
+            const symbol = elf_file.getSymbol(elf_file.dynamic_index.?);
+            try writer.writeIntLittle(u64, symbol.value);
+        }
+        // [1]: 0x0
+        // [2]: 0x0
+        try writer.writeIntLittle(u64, 0x0);
+        try writer.writeIntLittle(u64, 0x0);
+        if (elf_file.plt_sect_index) |shndx| {
+            const plt_addr = elf_file.getSectionAddress(shndx);
+            for (0..elf_file.plt.symbols.items.len) |_| {
+                // [N]: .plt
+                try writer.writeIntLittle(u64, plt_addr);
+            }
         }
     }
 };

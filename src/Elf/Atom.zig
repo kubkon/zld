@@ -183,7 +183,12 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
                 self.scanReloc(symbol, rel, getAbsRelocAction(symbol, elf_file), elf_file);
             },
 
+            elf.R_X86_64_GOT32,
+            elf.R_X86_64_GOT64,
+            elf.R_X86_64_GOTPC32,
+            elf.R_X86_64_GOTPC64,
             elf.R_X86_64_GOTPCREL,
+            elf.R_X86_64_GOTPCREL64,
             elf.R_X86_64_GOTPCRELX,
             elf.R_X86_64_REX_GOTPCRELX,
             => {
@@ -522,10 +527,15 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
         // Address of the target symbol - can be address of the symbol within an atom or address of PLT stub.
         const S = @as(i64, @intCast(target.getAddress(.{}, elf_file)));
         // Address of the global offset table.
-        const GOT = if (elf_file.got_sect_index) |shndx|
-            @as(i64, @intCast(elf_file.getSectionAddress(shndx)))
-        else
-            0;
+        const GOT = blk: {
+            const shndx = if (elf_file.got_plt_sect_index) |shndx|
+                shndx
+            else if (elf_file.got_sect_index) |shndx|
+                shndx
+            else
+                null;
+            break :blk if (shndx) |index| @as(i64, @intCast(elf_file.getSectionAddress(index))) else 0;
+        };
         // Relative offset to the start of the global offset table.
         const G = @as(i64, @intCast(target.getGotAddress(elf_file))) - GOT;
         // Address of the thread pointer.
@@ -561,10 +571,12 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
             => try cwriter.writeIntLittle(i32, @as(i32, @intCast(S + A - P))),
 
             elf.R_X86_64_GOTPCREL => try cwriter.writeIntLittle(i32, @as(i32, @intCast(G + GOT + A - P))),
+            elf.R_X86_64_GOTPC32 => try cwriter.writeIntLittle(i32, @as(i32, @intCast(GOT + A - P))),
+            elf.R_X86_64_GOTPC64 => try cwriter.writeIntLittle(i64, GOT + A - P),
 
             elf.R_X86_64_GOTPCRELX => {
                 if (!target.flags.import and !target.isIFunc(elf_file) and !target.isAbs(elf_file)) blk: {
-                    relaxGotpcrelx(code[rel.r_offset - 3 ..]) catch break :blk;
+                    relaxGotpcrelx(code[rel.r_offset - 2 ..]) catch break :blk;
                     try cwriter.writeIntLittle(i32, @as(i32, @intCast(S + A - P)));
                     continue;
                 }
