@@ -15,6 +15,7 @@ const usage =
     \\--dynamic                     Alias for --Bdynamic
     \\--dynamic-linker=[value], -I [value]      
     \\                              Set the dynamic linker to use
+    \\--no-dynamic-linker           Don't set the dynamic linker
     \\--end-group                   Ignored for compatibility with GNU
     \\--eh-frame-hdr                Create .eh_frame_hdr section (default)
     \\--export-dynamic, -E          Export all dynamic symbols
@@ -212,6 +213,8 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             try positionals.append(.{ .tag = .pop_state });
         } else if (p.argAny("dynamic-linker")) |path| {
             opts.dynamic_linker = path;
+        } else if (p.flagAny("no-dynamic-linker")) {
+            opts.dynamic_linker = null;
         } else if (p.arg1("I")) |path| {
             opts.dynamic_linker = path;
         } else if (p.flagAny("eh-frame-hdr")) {

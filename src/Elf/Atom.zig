@@ -328,13 +328,15 @@ inline fn checkTextReloc(self: Atom, symbol: *const Symbol, elf_file: *Elf) void
     const is_writeable = self.getInputShdr(elf_file).sh_flags & elf.SHF_WRITE != 0;
     if (!is_writeable) {
         if (elf_file.options.z_text) {
-            elf_file.base.fatal("{s}: relocation against symbol '{s}' in read-only section", .{
+            elf_file.base.fatal("{s}: {s}: relocation against symbol '{s}' in read-only section", .{
+                self.getObject(elf_file).fmtPath(),
                 self.getName(elf_file),
                 symbol.getName(elf_file),
             });
         } else {
             // TODO
-            elf_file.base.fatal("{s}: TODO handle relocations in read-only section", .{
+            elf_file.base.fatal("{s}: {s}: TODO handle relocations in read-only section", .{
+                self.getObject(elf_file).fmtPath(),
                 self.getName(elf_file),
             });
         }
@@ -348,7 +350,8 @@ inline fn unhandledRelocError(
     action: RelocAction,
     elf_file: *Elf,
 ) void {
-    elf_file.base.fatal("{s}: unhandled {} relocation at offset 0x{x} against symbol '{s}': action {s}", .{
+    elf_file.base.fatal("{s}: {s}: unhandled {} relocation at offset 0x{x} against symbol '{s}': action {s}", .{
+        self.getObject(elf_file).fmtPath(),
         self.getName(elf_file),
         fmtRelocType(rel.r_type()),
         rel.r_offset,
@@ -359,8 +362,9 @@ inline fn unhandledRelocError(
 
 inline fn noPicError(self: Atom, symbol: *const Symbol, rel: elf.Elf64_Rela, elf_file: *Elf) void {
     elf_file.base.fatal(
-        "{s}: {} relocation at offset 0x{x} against symbol '{s}' cannot be used; recompile with -fno-PIC",
+        "{s}: {s}: {} relocation at offset 0x{x} against symbol '{s}' cannot be used; recompile with -fno-PIC",
         .{
+            self.getObject(elf_file).fmtPath(),
             self.getName(elf_file),
             fmtRelocType(rel.r_type()),
             rel.r_offset,
@@ -371,8 +375,9 @@ inline fn noPicError(self: Atom, symbol: *const Symbol, rel: elf.Elf64_Rela, elf
 
 inline fn picError(self: Atom, symbol: *const Symbol, rel: elf.Elf64_Rela, elf_file: *Elf) void {
     elf_file.base.fatal(
-        "{s}: {} relocation at offset 0x{x} against symbol '{s}' cannot be used; recompile with -fPIC",
+        "{s}: {s}: {} relocation at offset 0x{x} against symbol '{s}' cannot be used; recompile with -fPIC",
         .{
+            self.getObject(elf_file).fmtPath(),
             self.getName(elf_file),
             fmtRelocType(rel.r_type()),
             rel.r_offset,
