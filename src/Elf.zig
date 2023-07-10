@@ -49,6 +49,7 @@ dso_handle_index: ?u32 = null,
 gnu_eh_frame_hdr_index: ?u32 = null,
 rela_iplt_start: ?u32 = null,
 rela_iplt_end: ?u32 = null,
+start_stop_indexes: std.ArrayListUnmanaged(u32) = .{},
 
 entry_index: ?u32 = null,
 
@@ -134,6 +135,7 @@ pub fn deinit(self: *Elf) void {
     self.symbols.deinit(gpa);
     self.symbols_extra.deinit(gpa);
     self.globals.deinit(gpa);
+    self.start_stop_indexes.deinit(gpa);
     self.got.deinit(gpa);
     self.plt.deinit(gpa);
     self.plt_got.deinit(gpa);
@@ -1401,6 +1403,22 @@ fn allocateSyntheticSymbols(self: *Elf) void {
         end_sym.value = end_addr;
         end_sym.shndx = shndx;
     }
+
+    // __start_*, __stop_*
+    {
+        var index: usize = 0;
+        while (index < self.start_stop_indexes.items.len) : (index += 2) {
+            const start = self.getSymbol(self.start_stop_indexes.items[index]);
+            const name = start.getName(self);
+            const stop = self.getSymbol(self.start_stop_indexes.items[index + 1]);
+            const shndx = self.getSectionByName(name["__start_".len..]).?;
+            const shdr = self.sections.items(.shdr)[shndx];
+            start.value = shdr.sh_addr;
+            start.shndx = shndx;
+            stop.value = shdr.sh_addr + shdr.sh_size;
+            stop.shndx = shndx;
+        }
+    }
 }
 
 fn unpackPositionals(self: *Elf, positionals: *std.ArrayList(LinkObject)) !void {
@@ -1753,6 +1771,24 @@ fn resolveSyntheticSymbols(self: *Elf) !void {
 
     self.rela_iplt_start = try internal.addSyntheticGlobal("__rela_iplt_start", self);
     self.rela_iplt_end = try internal.addSyntheticGlobal("__rela_iplt_end", self);
+
+    for (self.objects.items) |index| {
+        const object = self.getFile(index).?.object;
+        for (object.atoms.items) |atom_index| {
+            if (self.getStartStopBasename(atom_index)) |name| {
+                const gpa = self.base.allocator;
+                try self.start_stop_indexes.ensureUnusedCapacity(gpa, 2);
+
+                const start = try std.fmt.allocPrintZ(gpa, "__start_{s}", .{name});
+                defer gpa.free(start);
+                const stop = try std.fmt.allocPrintZ(gpa, "__stop_{s}", .{name});
+                defer gpa.free(stop);
+
+                self.start_stop_indexes.appendAssumeCapacity(try internal.addSyntheticGlobal(start, self));
+                self.start_stop_indexes.appendAssumeCapacity(try internal.addSyntheticGlobal(stop, self));
+            }
+        }
+    }
 
     internal.resolveSymbols(self);
 }
@@ -2401,6 +2437,25 @@ fn getNumIRelativeRelocs(self: *Elf) usize {
     }
 
     return count;
+}
+
+pub fn isCIdentifier(name: []const u8) bool {
+    if (name.len == 0) return false;
+    const first_c = name[0];
+    if (!std.ascii.isAlphabetic(first_c) and first_c != '_') return false;
+    for (name[1..]) |c| {
+        if (!std.ascii.isAlphanumeric(c) and c != '_') return false;
+    }
+    return true;
+}
+
+fn getStartStopBasename(self: *Elf, atom_index: Atom.Index) ?[]const u8 {
+    const atom = self.getAtom(atom_index) orelse return null;
+    const name = atom.getName(self);
+    if (atom.getInputShdr(self).sh_flags & elf.SHF_ALLOC != 0 and name.len > 0) {
+        if (isCIdentifier(name)) return name;
+    }
+    return null;
 }
 
 pub inline fn getSectionAddress(self: *Elf, shndx: u16) u64 {
