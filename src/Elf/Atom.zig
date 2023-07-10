@@ -576,7 +576,7 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
 
             elf.R_X86_64_GOTPCRELX => {
                 if (!target.flags.import and !target.isIFunc(elf_file) and !target.isAbs(elf_file)) blk: {
-                    relaxGotpcrelx(code[rel.r_offset - 3 ..]) catch break :blk;
+                    relaxGotpcrelx(code[rel.r_offset - 2 ..]) catch break :blk;
                     try cwriter.writeIntLittle(i32, @as(i32, @intCast(S + A - P)));
                     continue;
                 }
