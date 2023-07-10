@@ -361,9 +361,14 @@ fn Parser(comptime ReaderType: type) type {
             var debug_names = std.ArrayList(u8).init(gpa);
 
             errdefer {
-                while (relocatable_data.popOrNull()) |rel_data| {
-                    gpa.free(rel_data.data[0..rel_data.size]);
-                } else relocatable_data.deinit();
+                // only free the inner contents of relocatable_data if we didn't
+                // assign it to the object yet.
+                if (parser.object.relocatable_data.len == 0) {
+                    for (relocatable_data.items) |rel_data| {
+                        gpa.free(rel_data.data[0..rel_data.size]);
+                    }
+                    relocatable_data.deinit();
+                }
                 gpa.free(debug_names.items);
                 debug_names.deinit();
             }
@@ -627,8 +632,11 @@ fn Parser(comptime ReaderType: type) type {
             });
 
             for (relocations) |*relocation| {
-                const rel_type = try leb.readULEB128(u8, reader);
-                const rel_type_enum = @as(types.Relocation.RelocationType, @enumFromInt(rel_type));
+                const rel_type = try reader.readByte();
+                const rel_type_enum = std.meta.intToEnum(types.Relocation.RelocationType, rel_type) catch {
+                    log.err("Found unexpected relocation type {d} in object '{s}'", .{ rel_type, parser.object.name });
+                    return error.MalformedSection;
+                };
                 relocation.* = .{
                     .relocation_type = rel_type_enum,
                     .offset = try leb.readULEB128(u32, reader),

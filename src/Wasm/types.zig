@@ -50,6 +50,8 @@ pub const Relocation = struct {
                 .R_WASM_MEMORY_ADDR_LEB64,
                 .R_WASM_MEMORY_ADDR_SLEB64,
                 .R_WASM_MEMORY_ADDR_I64,
+                .R_WASM_MEMORY_ADDR_TLS_SLEB,
+                .R_WASM_MEMORY_ADDR_TLS_SLEB64,
                 .R_WASM_FUNCTION_OFFSET_I32,
                 .R_WASM_SECTION_OFFSET_I32,
                 => true,
