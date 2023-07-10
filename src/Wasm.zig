@@ -63,8 +63,8 @@ imports: sections.Imports = .{},
 functions: sections.Functions = .{},
 /// Output table section
 tables: sections.Tables = .{},
-/// Output memory section, this will only be used when `options.import_memory`
-/// is set to false. The limits will be set, based on the total data section size
+/// Output memory section, this will only be used when `options.export_memory`
+/// is set to `true`. The limits will be set, based on the total data section size
 /// and other configuration options.
 memories: std.wasm.Memory = .{ .limits = .{
     .flags = 0,
@@ -858,9 +858,7 @@ fn mergeTypes(wasm: *Wasm) !void {
 fn setupExports(wasm: *Wasm) !void {
     log.debug("Building exports from symbols", .{});
 
-    // When importing memory option is false,
-    // we export the memory.
-    if (!wasm.options.import_memory) {
+    if (wasm.options.export_memory) {
         try wasm.exports.append(wasm.base.allocator, .{ .name = "memory", .kind = .memory, .index = 0 });
     }
 
