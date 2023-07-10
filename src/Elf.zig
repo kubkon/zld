@@ -47,8 +47,8 @@ got_index: ?u32 = null,
 plt_index: ?u32 = null,
 dso_handle_index: ?u32 = null,
 gnu_eh_frame_hdr_index: ?u32 = null,
-rela_iplt_start: ?u32 = null,
-rela_iplt_end: ?u32 = null,
+rela_iplt_start_index: ?u32 = null,
+rela_iplt_end_index: ?u32 = null,
 start_stop_indexes: std.ArrayListUnmanaged(u32) = .{},
 
 entry_index: ?u32 = null,
@@ -1396,8 +1396,8 @@ fn allocateSyntheticSymbols(self: *Elf) void {
         const shdr = self.sections.items(.shdr)[shndx];
         const end_addr = shdr.sh_addr + shdr.sh_size;
         const start_addr = end_addr - self.getNumIRelativeRelocs() * @sizeOf(elf.Elf64_Rela);
-        const start_sym = self.getSymbol(self.rela_iplt_start.?);
-        const end_sym = self.getSymbol(self.rela_iplt_end.?);
+        const start_sym = self.getSymbol(self.rela_iplt_start_index.?);
+        const end_sym = self.getSymbol(self.rela_iplt_end_index.?);
         start_sym.value = start_addr;
         start_sym.shndx = shndx;
         end_sym.value = end_addr;
@@ -1769,8 +1769,8 @@ fn resolveSyntheticSymbols(self: *Elf) !void {
             self.dso_handle_index = try internal.addSyntheticGlobal("__dso_handle", self);
     }
 
-    self.rela_iplt_start = try internal.addSyntheticGlobal("__rela_iplt_start", self);
-    self.rela_iplt_end = try internal.addSyntheticGlobal("__rela_iplt_end", self);
+    self.rela_iplt_start_index = try internal.addSyntheticGlobal("__rela_iplt_start", self);
+    self.rela_iplt_end_index = try internal.addSyntheticGlobal("__rela_iplt_end", self);
 
     for (self.objects.items) |index| {
         const object = self.getFile(index).?.object;
