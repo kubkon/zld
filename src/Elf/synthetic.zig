@@ -649,12 +649,8 @@ pub const GotSection = struct {
         var num: usize = 0;
         for (got.symbols.items) |sym_index| {
             const sym = elf_file.getSymbol(sym_index);
-            if (sym.flags.import) {
+            if (sym.flags.import or sym.isIFunc(elf_file) or (elf_file.options.pic and !sym.isAbs(elf_file)))
                 num += 1;
-                continue;
-            }
-            if (sym.isIFunc(elf_file)) num += 1;
-            if (elf_file.options.pic and !sym.isAbs(elf_file)) num += 1;
         }
         return num;
     }
