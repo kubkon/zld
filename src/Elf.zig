@@ -36,14 +36,21 @@ verneed_sect_index: ?u16 = null,
 
 internal_object_index: ?u32 = null,
 dynamic_index: ?u32 = null,
+ehdr_start_index: ?u32 = null,
 init_array_start_index: ?u32 = null,
 init_array_end_index: ?u32 = null,
 fini_array_start_index: ?u32 = null,
 fini_array_end_index: ?u32 = null,
+preinit_array_start_index: ?u32 = null,
+preinit_array_end_index: ?u32 = null,
 got_index: ?u32 = null,
 plt_index: ?u32 = null,
 dso_handle_index: ?u32 = null,
 gnu_eh_frame_hdr_index: ?u32 = null,
+rela_iplt_start_index: ?u32 = null,
+rela_iplt_end_index: ?u32 = null,
+end_index: ?u32 = null,
+start_stop_indexes: std.ArrayListUnmanaged(u32) = .{},
 
 entry_index: ?u32 = null,
 
@@ -129,6 +136,7 @@ pub fn deinit(self: *Elf) void {
     self.symbols.deinit(gpa);
     self.symbols_extra.deinit(gpa);
     self.globals.deinit(gpa);
+    self.start_stop_indexes.deinit(gpa);
     self.got.deinit(gpa);
     self.plt.deinit(gpa);
     self.plt_got.deinit(gpa);
@@ -1254,7 +1262,7 @@ fn sortSections(self: *Elf) !void {
 
     if (self.rela_dyn_sect_index) |index| {
         const shdr = &self.sections.items(.shdr)[index];
-        shdr.sh_link = self.dynsymtab_sect_index.?;
+        shdr.sh_link = self.dynsymtab_sect_index orelse 0;
     }
 
     if (self.rela_plt_sect_index) |index| {
@@ -1310,6 +1318,13 @@ fn allocateSyntheticSymbols(self: *Elf) void {
         symbol.shndx = shndx;
     }
 
+    // __ehdr_start
+    {
+        const symbol = self.getSymbol(self.ehdr_start_index.?);
+        symbol.value = self.options.image_base;
+        symbol.shndx = 1;
+    }
+
     // __init_array_start, __init_array_end
     if (self.getSectionByName(".init_array")) |shndx| {
         const start_sym = self.getSymbol(self.init_array_start_index.?);
@@ -1325,6 +1340,17 @@ fn allocateSyntheticSymbols(self: *Elf) void {
     if (self.getSectionByName(".fini_array")) |shndx| {
         const start_sym = self.getSymbol(self.fini_array_start_index.?);
         const end_sym = self.getSymbol(self.fini_array_end_index.?);
+        const shdr = self.sections.items(.shdr)[shndx];
+        start_sym.shndx = shndx;
+        start_sym.value = shdr.sh_addr;
+        end_sym.shndx = shndx;
+        end_sym.value = shdr.sh_addr + shdr.sh_size;
+    }
+
+    // __preinit_array_start, __preinit_array_end
+    if (self.getSectionByName(".preinit_array")) |shndx| {
+        const start_sym = self.getSymbol(self.preinit_array_start_index.?);
+        const end_sym = self.getSymbol(self.preinit_array_end_index.?);
         const shdr = self.sections.items(.shdr)[shndx];
         start_sym.shndx = shndx;
         start_sym.value = shdr.sh_addr;
@@ -1363,6 +1389,47 @@ fn allocateSyntheticSymbols(self: *Elf) void {
         const symbol = self.getSymbol(self.gnu_eh_frame_hdr_index.?);
         symbol.value = shdr.sh_addr;
         symbol.shndx = shndx;
+    }
+
+    // __rela_iplt_start, __rela_iplt_end
+    if (self.rela_dyn_sect_index != null and self.options.static and !self.options.pie) {
+        const shndx = self.rela_dyn_sect_index.?;
+        const shdr = self.sections.items(.shdr)[shndx];
+        const end_addr = shdr.sh_addr + shdr.sh_size;
+        const start_addr = end_addr - self.getNumIRelativeRelocs() * @sizeOf(elf.Elf64_Rela);
+        const start_sym = self.getSymbol(self.rela_iplt_start_index.?);
+        const end_sym = self.getSymbol(self.rela_iplt_end_index.?);
+        start_sym.value = start_addr;
+        start_sym.shndx = shndx;
+        end_sym.value = end_addr;
+        end_sym.shndx = shndx;
+    }
+
+    // _end
+    {
+        const end_symbol = self.getSymbol(self.end_index.?);
+        for (self.sections.items(.shdr), 0..) |shdr, shndx| {
+            if (shdr.sh_flags & elf.SHF_ALLOC != 0) {
+                end_symbol.value = shdr.sh_addr + shdr.sh_size;
+                end_symbol.shndx = @intCast(shndx);
+            }
+        }
+    }
+
+    // __start_*, __stop_*
+    {
+        var index: usize = 0;
+        while (index < self.start_stop_indexes.items.len) : (index += 2) {
+            const start = self.getSymbol(self.start_stop_indexes.items[index]);
+            const name = start.getName(self);
+            const stop = self.getSymbol(self.start_stop_indexes.items[index + 1]);
+            const shndx = self.getSectionByName(name["__start_".len..]).?;
+            const shdr = self.sections.items(.shdr)[shndx];
+            start.value = shdr.sh_addr;
+            start.shndx = shndx;
+            stop.value = shdr.sh_addr + shdr.sh_size;
+            stop.shndx = shndx;
+        }
     }
 }
 
@@ -1695,12 +1762,16 @@ fn resolveSyntheticSymbols(self: *Elf) !void {
     const internal_index = self.internal_object_index orelse return;
     const internal = self.getFile(internal_index).?.internal;
     self.dynamic_index = try internal.addSyntheticGlobal("_DYNAMIC", self);
+    self.ehdr_start_index = try internal.addSyntheticGlobal("__ehdr_start", self);
     self.init_array_start_index = try internal.addSyntheticGlobal("__init_array_start", self);
     self.init_array_end_index = try internal.addSyntheticGlobal("__init_array_end", self);
     self.fini_array_start_index = try internal.addSyntheticGlobal("__fini_array_start", self);
     self.fini_array_end_index = try internal.addSyntheticGlobal("__fini_array_end", self);
+    self.preinit_array_start_index = try internal.addSyntheticGlobal("__preinit_array_start", self);
+    self.preinit_array_end_index = try internal.addSyntheticGlobal("__preinit_array_end", self);
     self.got_index = try internal.addSyntheticGlobal("_GLOBAL_OFFSET_TABLE_", self);
     self.plt_index = try internal.addSyntheticGlobal("_PROCEDURE_LINKAGE_TABLE_", self);
+    self.end_index = try internal.addSyntheticGlobal("_end", self);
 
     if (self.options.eh_frame_hdr) {
         self.gnu_eh_frame_hdr_index = try internal.addSyntheticGlobal("__GNU_EH_FRAME_HDR", self);
@@ -1709,6 +1780,27 @@ fn resolveSyntheticSymbols(self: *Elf) !void {
     if (self.getGlobalByName("__dso_handle")) |index| {
         if (self.getSymbol(index).getFile(self) == null)
             self.dso_handle_index = try internal.addSyntheticGlobal("__dso_handle", self);
+    }
+
+    self.rela_iplt_start_index = try internal.addSyntheticGlobal("__rela_iplt_start", self);
+    self.rela_iplt_end_index = try internal.addSyntheticGlobal("__rela_iplt_end", self);
+
+    for (self.objects.items) |index| {
+        const object = self.getFile(index).?.object;
+        for (object.atoms.items) |atom_index| {
+            if (self.getStartStopBasename(atom_index)) |name| {
+                const gpa = self.base.allocator;
+                try self.start_stop_indexes.ensureUnusedCapacity(gpa, 2);
+
+                const start = try std.fmt.allocPrintZ(gpa, "__start_{s}", .{name});
+                defer gpa.free(start);
+                const stop = try std.fmt.allocPrintZ(gpa, "__stop_{s}", .{name});
+                defer gpa.free(stop);
+
+                self.start_stop_indexes.appendAssumeCapacity(try internal.addSyntheticGlobal(start, self));
+                self.start_stop_indexes.appendAssumeCapacity(try internal.addSyntheticGlobal(stop, self));
+            }
+        }
     }
 
     internal.resolveSymbols(self);
@@ -1806,7 +1898,7 @@ fn scanRelocs(self: *Elf) !void {
         if (symbol.flags.got) {
             log.debug("'{s}' needs GOT", .{symbol.getName(self)});
             try self.got.addSymbol(index, self);
-            if (symbol.flags.import) self.got.needs_rela = true;
+            if (symbol.flags.import or symbol.isIFunc(self)) self.got.needs_rela = true;
         }
         if (symbol.flags.plt) {
             if (symbol.flags.is_canonical) {
@@ -2347,6 +2439,36 @@ fn sortRelaDyn(self: *Elf) void {
         }
     };
     mem.sort(elf.Elf64_Rela, self.rela_dyn.items, {}, Sort.lessThan);
+}
+
+fn getNumIRelativeRelocs(self: *Elf) usize {
+    var count: usize = 0;
+
+    for (self.got.symbols.items) |sym_index| {
+        const sym = self.getSymbol(sym_index);
+        if (sym.isIFunc(self)) count += 1;
+    }
+
+    return count;
+}
+
+pub fn isCIdentifier(name: []const u8) bool {
+    if (name.len == 0) return false;
+    const first_c = name[0];
+    if (!std.ascii.isAlphabetic(first_c) and first_c != '_') return false;
+    for (name[1..]) |c| {
+        if (!std.ascii.isAlphanumeric(c) and c != '_') return false;
+    }
+    return true;
+}
+
+fn getStartStopBasename(self: *Elf, atom_index: Atom.Index) ?[]const u8 {
+    const atom = self.getAtom(atom_index) orelse return null;
+    const name = atom.getName(self);
+    if (atom.getInputShdr(self).sh_flags & elf.SHF_ALLOC != 0 and name.len > 0) {
+        if (isCIdentifier(name)) return name;
+    }
+    return null;
 }
 
 pub inline fn getSectionAddress(self: *Elf, shndx: u16) u64 {

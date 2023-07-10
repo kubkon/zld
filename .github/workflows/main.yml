@@ -24,5 +24,5 @@ jobs:
         version: master
     - run: zig version
     - run: zig fmt --check src 
-    - run: zig build test --summary all
+    - run: zig build test --summary all -Dhas_static
 

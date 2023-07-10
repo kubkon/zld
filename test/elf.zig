@@ -9,6 +9,8 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testDsoPlt(b, opts));
         elf_step.dependOn(testIfuncDynamic(b, opts));
         elf_step.dependOn(testHelloDynamic(b, opts));
+        elf_step.dependOn(testHelloStatic(b, opts));
+        elf_step.dependOn(testTlsStatic(b, opts));
     }
 
     return elf_step;
@@ -230,6 +232,25 @@ fn testIfuncDynamic(b: *Build, opts: Options) *Step {
     return test_step;
 }
 
+fn testHelloStatic(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-hello-static", "");
+
+    if (!opts.has_static) {
+        skipTestStep(test_step);
+        return test_step;
+    }
+
+    const exe = cc(b, null, opts);
+    exe.addHelloWorldMain();
+    exe.addArg("-static");
+
+    const run = exe.run();
+    run.expectHelloWorld();
+    test_step.dependOn(run.step());
+
+    return test_step;
+}
+
 fn testHelloDynamic(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-hello-dynamic", "");
 
@@ -239,6 +260,42 @@ fn testHelloDynamic(b: *Build, opts: Options) *Step {
 
     const run = exe.run();
     run.expectHelloWorld();
+    test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+fn testTlsStatic(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-tls-static", "");
+
+    if (!opts.has_static) {
+        skipTestStep(test_step);
+        return test_step;
+    }
+
+    const exe = cc(b, null, opts);
+    exe.addSourceBytes(
+        \\#include <stdio.h>
+        \\_Thread_local int a = 10;
+        \\_Thread_local int b;
+        \\_Thread_local char c = 'a';
+        \\int main(int argc, char* argv[]) {
+        \\  printf("%d %d %c\n", a, b, c);
+        \\  a += 1;
+        \\  b += 1;
+        \\  c += 1;
+        \\  printf("%d %d %c\n", a, b, c);
+        \\  return 0;
+        \\}
+    , "main.c");
+    exe.addArg("-static");
+
+    const run = exe.run();
+    run.expectStdOutEqual(
+        \\10 0 a
+        \\11 1 b
+        \\
+    );
     test_step.dependOn(run.step());
 
     return test_step;
@@ -271,6 +328,7 @@ fn ld(b: *Build, name: ?[]const u8, opts: Options) SysCmd {
 const std = @import("std");
 const builtin = @import("builtin");
 const common = @import("test.zig");
+const skipTestStep = common.skipTestStep;
 
 const Build = std.Build;
 const Compile = Step.Compile;

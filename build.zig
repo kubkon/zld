@@ -68,8 +68,12 @@ pub fn build(b: *std.Build.Builder) void {
     });
     symlinks.step.dependOn(&install.step);
 
+    const has_static = b.option(bool, "has_static", "Whether the system compiler supports '-static' flag") orelse false;
+
     const test_step = b.step("test", "Run tests");
-    test_step.dependOn(@import("test/test.zig").addTests(b, exe));
+    test_step.dependOn(@import("test/test.zig").addTests(b, exe, .{
+        .has_static = has_static,
+    }));
 }
 
 fn addSymlinks(

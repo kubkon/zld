@@ -107,88 +107,46 @@ pub fn markFdesDead(self: Atom, elf_file: *Elf) void {
 
 pub fn initOutputSection(self: *Atom, elf_file: *Elf) !void {
     const shdr = self.getInputShdr(elf_file);
-    const name = self.getName(elf_file);
-    const flags = shdr.sh_flags & ~@as(u64, elf.SHF_COMPRESSED | elf.SHF_GROUP | elf.SHF_GNU_RETAIN);
-    const @"type" = shdr.sh_type;
-    const is_tls = flags & elf.SHF_TLS != 0;
-    const is_alloc = flags & elf.SHF_ALLOC != 0;
-    const is_write = flags & elf.SHF_WRITE != 0;
-    const is_exec = flags & elf.SHF_EXECINSTR != 0;
-    const opts: Elf.AddSectionOpts = switch (@"type") {
-        elf.SHT_NULL => unreachable,
-        elf.SHT_NOBITS => blk: {
-            var out_flags: u32 = elf.SHF_ALLOC | elf.SHF_WRITE;
-            if (is_tls) out_flags |= elf.SHF_TLS;
-            break :blk .{
-                .flags = out_flags,
-                .name = if (is_tls) ".tbss" else ".bss",
-                .type = @"type",
-            };
-        },
-        elf.SHT_PROGBITS => blk: {
-            if (!is_alloc) break :blk .{
-                .name = name,
-                .type = @"type",
-                .flags = flags,
-            };
-
-            if (is_exec) {
-                const out_name = if (mem.eql(u8, name, ".init"))
-                    ".init"
-                else if (mem.eql(u8, name, ".fini")) ".fini" else ".text";
-                var out_flags: u32 = elf.SHF_ALLOC | elf.SHF_EXECINSTR;
-                if (is_write) out_flags |= elf.SHF_WRITE;
-                break :blk .{
-                    .flags = out_flags,
-                    .name = out_name,
-                    .type = @"type",
-                };
+    const name = blk: {
+        const name = self.getName(elf_file);
+        if (shdr.sh_flags & elf.SHF_MERGE != 0) break :blk name;
+        const sh_name_prefixes: []const [:0]const u8 = &.{
+            ".text",       ".data.rel.ro", ".data", ".rodata", ".bss.rel.ro",       ".bss",
+            ".init_array", ".fini_array",  ".tbss", ".tdata",  ".gcc_except_table", ".ctors",
+            ".dtors",      ".gnu.warning",
+        };
+        inline for (sh_name_prefixes) |prefix| {
+            if (std.mem.eql(u8, name, prefix) or std.mem.startsWith(u8, name, prefix ++ ".")) {
+                break :blk prefix;
             }
-
-            if (is_write) {
-                const out_name = if (mem.startsWith(u8, name, ".data.rel.ro"))
-                    ".data.rel.ro"
-                else if (is_tls)
-                    ".tdata"
-                else
-                    ".data";
-                var out_flags: u32 = elf.SHF_ALLOC | elf.SHF_WRITE;
-                if (is_tls) out_flags |= elf.SHF_TLS;
-                break :blk .{
-                    .flags = out_flags,
-                    .name = out_name,
-                    .type = @"type",
-                };
-            }
-
-            const out_name = if (mem.startsWith(u8, name, ".gcc_except_table"))
-                ".gcc_except_table"
-            else
-                ".rodata";
-
-            break :blk .{
-                .flags = elf.SHF_ALLOC,
-                .name = out_name,
-                .type = @"type",
-            };
-        },
-        elf.SHT_INIT_ARRAY, elf.SHT_FINI_ARRAY => .{
-            .flags = elf.SHF_ALLOC | elf.SHF_WRITE,
-            .name = if (shdr.sh_type == elf.SHT_INIT_ARRAY) ".init_array" else ".fini_array",
-            .type = @"type",
-            .entsize = shdr.sh_entsize,
-        },
-        // TODO handle more section types
-        else => .{
-            .name = name,
-            .type = @"type",
-            .flags = flags,
-            .info = shdr.sh_info,
-            .entsize = shdr.sh_entsize,
-        },
+        }
+        break :blk name;
     };
-    const out_shndx = elf_file.getSectionByName(opts.name) orelse try elf_file.addSection(opts);
-    if (mem.eql(u8, ".text", opts.name)) {
+    const @"type" = switch (shdr.sh_type) {
+        elf.SHT_NULL => unreachable,
+        elf.SHT_PROGBITS => blk: {
+            if (std.mem.eql(u8, name, ".init_array") or std.mem.startsWith(u8, name, ".init_array."))
+                break :blk elf.SHT_INIT_ARRAY;
+            if (std.mem.eql(u8, name, ".fini_array") or std.mem.startsWith(u8, name, ".fini_array."))
+                break :blk elf.SHT_FINI_ARRAY;
+            break :blk shdr.sh_type;
+        },
+        elf.SHT_X86_64_UNWIND => elf.SHT_PROGBITS,
+        else => shdr.sh_type,
+    };
+    const flags = blk: {
+        const flags = shdr.sh_flags & ~@as(u64, elf.SHF_COMPRESSED | elf.SHF_GROUP | elf.SHF_GNU_RETAIN);
+        break :blk switch (@"type") {
+            elf.SHT_INIT_ARRAY, elf.SHT_FINI_ARRAY => flags | elf.SHF_WRITE,
+            else => flags,
+        };
+    };
+    const out_shndx = elf_file.getSectionByName(name) orelse try elf_file.addSection(.{
+        .type = @"type",
+        .flags = flags,
+        .name = name,
+    });
+    if (mem.eql(u8, ".text", name)) {
         elf_file.text_sect_index = out_shndx;
     }
     self.out_shndx = out_shndx;
@@ -309,10 +267,12 @@ fn scanReloc(self: Atom, symbol: *Symbol, rel: elf.Elf64_Rela, action: RelocActi
 
     switch (action) {
         .none => {},
+
         .@"error" => if (symbol.isAbs(elf_file))
             self.noPicError(symbol, rel, elf_file)
         else
             self.picError(symbol, rel, elf_file),
+
         .copyrel => {
             if (elf_file.options.z_nocopyreloc) {
                 if (symbol.isAbs(elf_file))
@@ -322,6 +282,7 @@ fn scanReloc(self: Atom, symbol: *Symbol, rel: elf.Elf64_Rela, action: RelocActi
             }
             symbol.flags.copy_rel = true;
         },
+
         .dyn_copyrel => {
             if (is_writeable or elf_file.options.z_nocopyreloc) {
                 self.checkTextReloc(symbol, elf_file);
@@ -330,13 +291,16 @@ fn scanReloc(self: Atom, symbol: *Symbol, rel: elf.Elf64_Rela, action: RelocActi
                 symbol.flags.copy_rel = true;
             }
         },
+
         .plt => {
             symbol.flags.plt = true;
         },
+
         .cplt => {
             symbol.flags.plt = true;
             symbol.flags.is_canonical = true;
         },
+
         .dyn_cplt => {
             if (is_writeable) {
                 object.num_dynrelocs += 1;
@@ -345,14 +309,17 @@ fn scanReloc(self: Atom, symbol: *Symbol, rel: elf.Elf64_Rela, action: RelocActi
                 symbol.flags.is_canonical = true;
             }
         },
+
         .dynrel => {
             self.checkTextReloc(symbol, elf_file);
             object.num_dynrelocs += 1;
         },
+
         .baserel => {
             self.checkTextReloc(symbol, elf_file);
             object.num_dynrelocs += 1;
         },
+
         .ifunc => self.unhandledRelocError(symbol, rel, action, elf_file),
     }
 }

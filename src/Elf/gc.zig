@@ -53,6 +53,7 @@ fn collectRoots(roots: *std.ArrayList(*Atom), elf_file: *Elf) !void {
                 if (mem.startsWith(u8, name, ".dtors")) break :blk true;
                 if (mem.startsWith(u8, name, ".init")) break :blk true;
                 if (mem.startsWith(u8, name, ".fini")) break :blk true;
+                if (Elf.isCIdentifier(name)) break :blk true;
                 break :blk false;
             };
             if (is_gc_root and markAtom(atom)) try roots.append(atom);
