@@ -49,6 +49,7 @@ dso_handle_index: ?u32 = null,
 gnu_eh_frame_hdr_index: ?u32 = null,
 rela_iplt_start_index: ?u32 = null,
 rela_iplt_end_index: ?u32 = null,
+end_index: ?u32 = null,
 start_stop_indexes: std.ArrayListUnmanaged(u32) = .{},
 
 entry_index: ?u32 = null,
@@ -1404,6 +1405,17 @@ fn allocateSyntheticSymbols(self: *Elf) void {
         end_sym.shndx = shndx;
     }
 
+    // _end
+    {
+        const end_symbol = self.getSymbol(self.end_index.?);
+        for (self.sections.items(.shdr), 0..) |shdr, shndx| {
+            if (shdr.sh_flags & elf.SHF_ALLOC != 0) {
+                end_symbol.value = shdr.sh_addr + shdr.sh_size;
+                end_symbol.shndx = @intCast(shndx);
+            }
+        }
+    }
+
     // __start_*, __stop_*
     {
         var index: usize = 0;
@@ -1759,6 +1771,7 @@ fn resolveSyntheticSymbols(self: *Elf) !void {
     self.preinit_array_end_index = try internal.addSyntheticGlobal("__preinit_array_end", self);
     self.got_index = try internal.addSyntheticGlobal("_GLOBAL_OFFSET_TABLE_", self);
     self.plt_index = try internal.addSyntheticGlobal("_PROCEDURE_LINKAGE_TABLE_", self);
+    self.end_index = try internal.addSyntheticGlobal("_end", self);
 
     if (self.options.eh_frame_hdr) {
         self.gnu_eh_frame_hdr_index = try internal.addSyntheticGlobal("__GNU_EH_FRAME_HDR", self);
