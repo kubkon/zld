@@ -75,8 +75,9 @@ pub fn flush(self: *Coff) !void {
     try self.parsePositionals(positionals.items);
     for (self.objects.items) |*obj| {
         log.debug("Object name: '{s}'", .{obj.name});
-        log.debug("Symbols: {}", .{obj.symtab.items.len});
-        for (obj.symtab.items) |sym| {
+        log.debug("Symbols: {}", .{obj.symtab.len()});
+        var it = obj.symtab.slice(0, null);
+        while (it.next()) |sym| {
             const name = sym.getName() orelse obj.getString(sym.getNameOffset().?);
             log.debug("    Name: `{s}`", .{name});
             log.debug("        Type:    {} {}", .{ sym.type.base_type, sym.type.complex_type });

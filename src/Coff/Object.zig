@@ -14,9 +14,9 @@ name: []const u8,
 
 header: CoffHeader = undefined,
 
-symtab: std.ArrayListUnmanaged(Symbol) = .{},
+symtab: std.coff.Symtab = undefined,
 shdrtab: std.ArrayListUnmanaged(SectionHeader) = .{},
-strtab: []u8 = undefined,
+strtab: std.coff.Strtab = undefined,
 
 const CoffHeader = std.coff.CoffHeader;
 
@@ -63,9 +63,9 @@ comptime {
 
 pub fn deinit(self: *Object, allocator: Allocator) void {
     self.file.close();
-    self.symtab.deinit(allocator);
     self.shdrtab.deinit(allocator);
-    allocator.free(self.strtab);
+    allocator.free(self.symtab.buffer);
+    allocator.free(self.strtab.buffer);
     allocator.free(self.name);
 }
 
@@ -104,47 +104,19 @@ fn parseShdrs(self: *Object, allocator: Allocator) !void {
 
 fn parseSymtab(self: *Object, allocator: Allocator) !void {
     const offset = self.header.pointer_to_symbol_table;
+    if (offset == 0) return error.NoSymtab;
     try self.file.seekTo(offset);
 
-    try self.symtab.ensureTotalCapacity(allocator, self.header.number_of_symbols);
+    const size = self.header.number_of_symbols * coff.Symbol.sizeOf();
+    var symtab_buffer = try allocator.alloc(u8, size);
+    errdefer allocator.free(symtab_buffer);
 
-    var i: usize = 0;
-    var num_aux: usize = 0;
-    while (i < self.header.number_of_symbols) : (i += 1) {
-        const symbol = sym_blk: {
-            var sym: Symbol = undefined;
-            var reader = self.file.reader();
-
-            if (8 != try reader.readAll(&sym.name)) {
-                return error.BadSymbolName;
-            }
-            sym.value = try reader.readIntLittle(u32);
-            sym.section_number = @enumFromInt(try reader.readIntLittle(u16));
-            sym.type = try reader.readStruct(std.coff.SymType);
-            sym.storage_class = @enumFromInt(try reader.readByte());
-            sym.number_of_aux_symbols = try reader.readByte();
-
-            break :sym_blk sym;
-        };
-
-        // Ignore symbol if it has invalid section number
-        if (@intFromEnum(symbol.section_number) < 1 or @intFromEnum(symbol.section_number) > self.shdrtab.items.len) {
-            continue;
-        }
-
-        // Ignore auxillary symbols
-        if (num_aux > 0) {
-            num_aux -= 1;
-            continue;
-        }
-
-        // Check for upcoming auxillary symbols
-        if (symbol.number_of_aux_symbols != 0) {
-            num_aux = symbol.number_of_aux_symbols;
-        }
-
-        self.symtab.appendAssumeCapacity(symbol);
+    const read = try self.file.reader().readAll(symtab_buffer);
+    if (read < size) {
+        log.debug("Expected size: {}, got: {}", .{ size, read });
+        return error.SymtabTooSmall;
     }
+    self.symtab = .{ .buffer = symtab_buffer };
 }
 
 fn parseStrtab(self: *Object, allocator: Allocator) !void {
@@ -153,13 +125,18 @@ fn parseStrtab(self: *Object, allocator: Allocator) !void {
     const offset = self.header.pointer_to_symbol_table + coff.Symbol.sizeOf() * self.header.number_of_symbols;
     try self.file.seekTo(offset);
 
-    const size = try self.file.reader().readIntLittle(u32);
-    self.strtab = try allocator.alloc(u8, size);
-    _ = try self.file.reader().readAll(self.strtab);
+    const size = try self.file.reader().readIntLittle(u32) - 4;
+    var strtab_buffer = try allocator.alloc(u8, size);
+    errdefer allocator.free(strtab_buffer);
+
+    const read = try self.file.reader().readAll(strtab_buffer);
+    if (read < size) {
+        log.debug("Expected size: {}, got: {}", .{ size, read });
+        return error.StrtabTooSmall;
+    }
+    self.strtab = .{ .buffer = strtab_buffer };
 }
 
 pub fn getString(self: *const Object, off: u32) []const u8 {
-    const local_offset = off - @sizeOf(u32);
-    assert(local_offset < self.symtab.items.len);
-    return mem.span(@as([*:0]const u8, @ptrCast(self.strtab.ptr + local_offset)));
+    return self.strtab.get(off);
 }
