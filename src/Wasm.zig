@@ -1587,7 +1587,7 @@ fn setupMemory(wasm: *Wasm) !void {
 /// For each data symbol, sets the virtual address.
 fn allocateVirtualAddresses(wasm: *Wasm) void {
     for (wasm.resolved_symbols.keys()) |loc| {
-        const symbol = loc.getSymbol(wasm);
+        const symbol: *Symbol = loc.getSymbol(wasm);
         if (symbol.tag != .data) {
             continue; // only data symbols have virtual addresses
         }
@@ -1602,7 +1602,11 @@ fn allocateVirtualAddresses(wasm: *Wasm) void {
         const segment_name = segment_info[symbol.index].outputName(merge_segment);
         const segment_index = wasm.data_segments.get(segment_name).?;
         const segment = wasm.segments.items[segment_index];
-        symbol.virtual_address = atom.offset + segment.offset;
+        if (symbol.hasFlag(.WASM_SYM_TLS)) {
+            symbol.virtual_address = atom.offset;
+        } else {
+            symbol.virtual_address = atom.offset + segment.offset;
+        }
     }
 }
 
@@ -1735,7 +1739,7 @@ fn sortDataSegments(wasm: *Wasm, gpa: Allocator) !void {
 
     const SortContext = struct {
         fn sort(_: void, lhs: []const u8, rhs: []const u8) bool {
-            return order(lhs) <= order(rhs);
+            return order(lhs) < order(rhs);
         }
 
         fn order(name: []const u8) u8 {
