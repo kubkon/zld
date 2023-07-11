@@ -155,6 +155,8 @@ pub fn initOutputSection(self: *Atom, elf_file: *Elf) !void {
 pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
     const object = self.getObject(elf_file);
     const relocs = self.getRelocs(elf_file);
+    const code = try self.getCodeUncompressAlloc(elf_file);
+    defer elf_file.base.allocator.free(code);
     var i: usize = 0;
     while (i < relocs.len) : (i += 1) {
         const rel = relocs[i];
@@ -236,7 +238,11 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
             },
 
             elf.R_X86_64_GOTTPOFF => {
-                const should_relax = elf_file.options.relax and !is_shared and !symbol.flags.import;
+                const should_relax = blk: {
+                    if (!elf_file.options.relax or is_shared or symbol.flags.import) break :blk false;
+                    relaxGotTpOff(code[rel.r_offset - 3 ..]) catch break :blk false;
+                    break :blk true;
+                };
                 if (!should_relax) {
                     @panic("TODO");
                 }
@@ -579,25 +585,9 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
             elf.R_X86_64_DTPOFF64 => try cwriter.writeIntLittle(i64, S + A - DTP),
 
             elf.R_X86_64_GOTTPOFF => {
-                blk: {
-                    var inst_code = code[rel.r_offset - 3 ..];
-                    const old_inst = disassemble(inst_code) orelse break :blk;
-                    switch (old_inst.encoding.mnemonic) {
-                        .mov => {
-                            const inst = try Instruction.new(old_inst.prefix, .mov, &.{
-                                old_inst.ops[0],
-                                // TODO: hack to force imm32s in the assembler
-                                .{ .imm = Immediate.s(-129) },
-                            });
-                            relocs_log.debug("    relaxing {} => {}", .{ old_inst.encoding, inst.encoding });
-                            try encode(&.{inst}, inst_code);
-                            try cwriter.writeIntLittle(i32, @as(i32, @intCast(S - TP)));
-                        },
-                        else => break :blk,
-                    }
-                    continue;
-                }
-                elf_file.base.fatal("TODO could not rewrite GOTTPOFF", .{});
+                relaxGotTpOff(code[rel.r_offset - 3 ..]) catch
+                    elf_file.base.fatal("TODO could not rewrite GOTTPOFF", .{});
+                try cwriter.writeIntLittle(i32, @as(i32, @intCast(S - TP)));
             },
 
             elf.R_X86_64_TLSGD => {
@@ -867,6 +857,22 @@ fn relaxTlsLdToLe(rels: []align(1) const elf.Elf64_Rela, value: i32, elf_file: *
             fmtRelocType(rels[0].r_type()),
             fmtRelocType(rels[1].r_type()),
         }),
+    }
+}
+
+fn relaxGotTpOff(code: []u8) !void {
+    const old_inst = disassemble(code) orelse return error.RelaxFail;
+    switch (old_inst.encoding.mnemonic) {
+        .mov => {
+            const inst = try Instruction.new(old_inst.prefix, .mov, &.{
+                old_inst.ops[0],
+                // TODO: hack to force imm32s in the assembler
+                .{ .imm = Immediate.s(-129) },
+            });
+            relocs_log.debug("    relaxing {} => {}", .{ old_inst.encoding, inst.encoding });
+            encode(&.{inst}, code) catch return error.RelaxFail;
+        },
+        else => return error.RelaxFail,
     }
 }
 
