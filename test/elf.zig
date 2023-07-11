@@ -8,6 +8,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testDsoIfunc(b, opts));
         elf_step.dependOn(testDsoPlt(b, opts));
         elf_step.dependOn(testIfuncDynamic(b, opts));
+        elf_step.dependOn(testIfuncNoPlt(b, opts));
         elf_step.dependOn(testIfuncStatic(b, opts));
         elf_step.dependOn(testIfuncStaticPie(b, opts));
         elf_step.dependOn(testHelloDynamic(b, opts));
@@ -230,6 +231,34 @@ fn testIfuncDynamic(b: *Build, opts: Options) *Step {
         run.expectStdOutEqual("Hello world\n");
         test_step.dependOn(run.step());
     }
+
+    return test_step;
+}
+
+fn testIfuncNoPlt(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-ifunc-noplt", "");
+
+    const exe = cc(b, null, opts);
+    exe.addSourceBytes(
+        \\#include <stdio.h>
+        \\__attribute__((ifunc("resolve_foo")))
+        \\void foo(void);
+        \\void hello(void) {
+        \\  printf("Hello world\n");
+        \\}
+        \\typedef void Fn();
+        \\Fn *resolve_foo(void) {
+        \\  return hello;
+        \\}
+        \\int main() {
+        \\  foo();
+        \\}
+    , "main.c");
+    exe.addArgs(&.{ "-fPIC", "-fno-plt" });
+
+    const run = exe.run();
+    run.expectStdOutEqual("Hello world\n");
+    test_step.dependOn(run.step());
 
     return test_step;
 }
