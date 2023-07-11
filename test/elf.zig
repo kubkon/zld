@@ -7,6 +7,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testCopyrelAlias(b, opts));
         elf_step.dependOn(testDsoIfunc(b, opts));
         elf_step.dependOn(testDsoPlt(b, opts));
+        elf_step.dependOn(testIfuncAlias(b, opts));
         elf_step.dependOn(testIfuncDynamic(b, opts));
         elf_step.dependOn(testIfuncFuncPtr(b, opts));
         elf_step.dependOn(testIfuncNoPlt(b, opts));
@@ -195,6 +196,28 @@ fn testDsoPlt(b: *Build, opts: Options) *Step {
     return test_step;
 }
 
+fn testIfuncAlias(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-ifunc-alias", "");
+
+    const exe = cc(b, null, opts);
+    exe.addSourceBytes(
+        \\#include <assert.h>
+        \\void foo() {}
+        \\int bar() __attribute__((ifunc("resolve_bar")));
+        \\void *resolve_bar() { return foo; }
+        \\void *bar2 = bar;
+        \\int main() {
+        \\  assert(bar == bar2);
+        \\}
+    , "main.c");
+    exe.addArg("-fPIC");
+
+    const run = exe.run();
+    test_step.dependOn(run.step());
+
+    return test_step;
+}
+
 fn testIfuncDynamic(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-ifunc-dynamic", "");
 
@@ -309,6 +332,7 @@ fn testIfuncStatic(b: *Build, opts: Options) *Step {
 
     const exe = cc(b, null, opts);
     exe.addSourceBytes(
+        \\#include <stdio.h>
         \\void foo() __attribute__((ifunc("resolve_foo")));
         \\void hello() {
         \\  printf("Hello world\n");

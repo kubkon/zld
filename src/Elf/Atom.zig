@@ -315,17 +315,12 @@ fn scanReloc(self: Atom, symbol: *Symbol, rel: elf.Elf64_Rela, action: RelocActi
             }
         },
 
-        .dynrel => {
+        .dynrel, .baserel, .ifunc => {
             self.checkTextReloc(symbol, elf_file);
             object.num_dynrelocs += 1;
-        },
 
-        .baserel => {
-            self.checkTextReloc(symbol, elf_file);
-            object.num_dynrelocs += 1;
+            if (action == .ifunc) elf_file.num_ifunc_dynrelocs += 1;
         },
-
-        .ifunc => self.unhandledRelocError(symbol, rel, action, elf_file),
     }
 }
 
@@ -346,23 +341,6 @@ inline fn checkTextReloc(self: Atom, symbol: *const Symbol, elf_file: *Elf) void
             });
         }
     }
-}
-
-inline fn unhandledRelocError(
-    self: Atom,
-    symbol: *const Symbol,
-    rel: elf.Elf64_Rela,
-    action: RelocAction,
-    elf_file: *Elf,
-) void {
-    elf_file.base.fatal("{s}: {s}: unhandled {} relocation at offset 0x{x} against symbol '{s}': action {s}", .{
-        self.getObject(elf_file).fmtPath(),
-        self.getName(elf_file),
-        fmtRelocType(rel.r_type()),
-        rel.r_offset,
-        symbol.getName(elf_file),
-        @tagName(action),
-    });
 }
 
 inline fn noPicError(self: Atom, symbol: *const Symbol, rel: elf.Elf64_Rela, elf_file: *Elf) void {
@@ -726,7 +704,14 @@ fn resolveDynAbsReloc(
             });
         },
 
-        .ifunc => self.unhandledRelocError(target, rel, action, elf_file),
+        .ifunc => {
+            const S_ = @as(i64, @intCast(target.getAddress(.{ .plt = false }, elf_file)));
+            elf_file.addRelaDynAssumeCapacity(.{
+                .offset = P,
+                .type = elf.R_X86_64_IRELATIVE,
+                .addend = S_ + A,
+            });
+        },
     }
 }
 

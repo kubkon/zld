@@ -87,6 +87,7 @@ comdat_groups_owners: std.ArrayListUnmanaged(ComdatGroupOwner) = .{},
 comdat_groups_table: std.AutoHashMapUnmanaged(u32, ComdatGroupOwner.Index) = .{},
 
 needs_tlsld: bool = false,
+num_ifunc_dynrelocs: usize = 0,
 default_sym_version: elf.Elf64_Versym,
 
 pub fn openPath(allocator: Allocator, options: Options, thread_pool: *ThreadPool) !*Elf {
@@ -2444,7 +2445,7 @@ fn sortRelaDyn(self: *Elf) void {
 }
 
 fn getNumIRelativeRelocs(self: *Elf) usize {
-    var count: usize = 0;
+    var count: usize = self.num_ifunc_dynrelocs;
 
     for (self.got.symbols.items) |sym_index| {
         const sym = self.getSymbol(sym_index);
