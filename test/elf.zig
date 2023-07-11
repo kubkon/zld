@@ -8,6 +8,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testDsoIfunc(b, opts));
         elf_step.dependOn(testDsoPlt(b, opts));
         elf_step.dependOn(testIfuncDynamic(b, opts));
+        elf_step.dependOn(testIfuncFuncPtr(b, opts));
         elf_step.dependOn(testIfuncNoPlt(b, opts));
         elf_step.dependOn(testIfuncStatic(b, opts));
         elf_step.dependOn(testIfuncStaticPie(b, opts));
@@ -231,6 +232,41 @@ fn testIfuncDynamic(b: *Build, opts: Options) *Step {
         run.expectStdOutEqual("Hello world\n");
         test_step.dependOn(run.step());
     }
+
+    return test_step;
+}
+
+fn testIfuncFuncPtr(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-ifunc-func-ptr", "");
+
+    const exe = cc(b, null, opts);
+    exe.addSourceBytes(
+        \\typedef int Fn();
+        \\int foo() __attribute__((ifunc("resolve_foo")));
+        \\int real_foo() { return 3; }
+        \\Fn *resolve_foo(void) {
+        \\  return real_foo;
+        \\}
+    , "a.c");
+    exe.addSourceBytes(
+        \\typedef int Fn();
+        \\int foo();
+        \\Fn *get_foo() { return foo; }
+    , "b.c");
+    exe.addSourceBytes(
+        \\#include <stdio.h>
+        \\typedef int Fn();
+        \\Fn *get_foo();
+        \\int main() {
+        \\  Fn *f = get_foo();
+        \\  printf("%d\n", f());
+        \\}
+    , "c.c");
+    exe.addArg("-fPIC");
+
+    const run = exe.run();
+    run.expectStdOutEqual("3\n");
+    test_step.dependOn(run.step());
 
     return test_step;
 }
