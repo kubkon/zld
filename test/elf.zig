@@ -8,6 +8,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testDsoIfunc(b, opts));
         elf_step.dependOn(testDsoPlt(b, opts));
         elf_step.dependOn(testIfuncDynamic(b, opts));
+        elf_step.dependOn(testIfuncStatic(b, opts));
         elf_step.dependOn(testIfuncStaticPie(b, opts));
         elf_step.dependOn(testHelloDynamic(b, opts));
         elf_step.dependOn(testHelloStatic(b, opts));
@@ -233,6 +234,37 @@ fn testIfuncDynamic(b: *Build, opts: Options) *Step {
     return test_step;
 }
 
+fn testIfuncStatic(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-ifunc-static", "");
+
+    if (!opts.has_static) {
+        skipTestStep(test_step);
+        return test_step;
+    }
+
+    const exe = cc(b, null, opts);
+    exe.addSourceBytes(
+        \\void foo() __attribute__((ifunc("resolve_foo")));
+        \\void hello() {
+        \\  printf("Hello world\n");
+        \\}
+        \\void *resolve_foo() {
+        \\  return hello;
+        \\}
+        \\int main() {
+        \\  foo();
+        \\  return 0;
+        \\}
+    , "main.c");
+    exe.addArgs(&.{ "-fPIC", "-static" });
+
+    const run = exe.run();
+    run.expectStdOutEqual("Hello world\n");
+    test_step.dependOn(run.step());
+
+    return test_step;
+}
+
 fn testIfuncStaticPie(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-ifunc-static-pie", "");
 
@@ -255,7 +287,7 @@ fn testIfuncStaticPie(b: *Build, opts: Options) *Step {
         \\  return 0;
         \\}
     , "main.c");
-    exe.addArgs(&.{ "-fPIC", "-static", "-pie" });
+    exe.addArgs(&.{ "-fPIC", "-static-pie" });
 
     const run = exe.run();
     run.expectStdOutEqual("Hello world\n");
