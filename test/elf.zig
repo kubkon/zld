@@ -256,7 +256,7 @@ fn testIfuncStatic(b: *Build, opts: Options) *Step {
         \\  return 0;
         \\}
     , "main.c");
-    exe.addArgs(&.{ "-fPIC", "-static" });
+    exe.addArgs(&.{"-static"});
 
     const run = exe.run();
     run.expectStdOutEqual("Hello world\n");
