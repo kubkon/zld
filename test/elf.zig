@@ -15,6 +15,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testIfuncStaticPie(b, opts));
         elf_step.dependOn(testHelloDynamic(b, opts));
         elf_step.dependOn(testHelloStatic(b, opts));
+        elf_step.dependOn(testTlsDso(b, opts));
         elf_step.dependOn(testTlsStatic(b, opts));
     }
 
@@ -413,6 +414,48 @@ fn testHelloDynamic(b: *Build, opts: Options) *Step {
 
     const run = exe.run();
     run.expectHelloWorld();
+    test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+fn testTlsDso(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-tls-dso", "");
+
+    const dso = cc(b, "a.so", opts);
+    dso.addSourceBytes(
+        \\extern _Thread_local int foo;
+        \\_Thread_local int bar;
+        \\int get_foo1() { return foo; }
+        \\int get_bar1() { return bar; }
+    , "a.c");
+    dso.addArgs(&.{ "-fPIC", "-shared" });
+    const dso_out = dso.saveOutputAs("a.so");
+
+    const exe = cc(b, null, opts);
+    exe.addSourceBytes(
+        \\#include <stdio.h>
+        \\_Thread_local int foo;
+        \\extern _Thread_local int bar;
+        \\int get_foo1();
+        \\int get_bar1();
+        \\int get_foo2() { return foo; }
+        \\int get_bar2() { return bar; }
+        \\int main() {
+        \\  foo = 5;
+        \\  bar = 3;
+        \\  printf("%d %d %d %d %d %d\n",
+        \\         foo, bar,
+        \\         get_foo1(), get_bar1(),
+        \\         get_foo2(), get_bar2());
+        \\  return 0;
+        \\}
+    , "main.c");
+    exe.addFileSource(dso_out.file);
+    exe.addPrefixedDirectorySource("-Wl,-rpath,", dso_out.dir);
+
+    const run = exe.run();
+    run.expectStdOutEqual("5 3 5 3 5 3\n");
     test_step.dependOn(run.step());
 
     return test_step;
