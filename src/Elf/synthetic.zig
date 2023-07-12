@@ -581,6 +581,7 @@ pub const GotSection = struct {
     const GotSymbol = union(enum) {
         got: u32,
         tlsgd: u32,
+        gottp: u32,
 
         pub inline fn getIndex(gt: GotSymbol) u32 {
             return switch (gt) {
@@ -617,10 +618,22 @@ pub const GotSection = struct {
         got.next_index += 2;
     }
 
+    pub fn addGotTpSymbol(got: *GotSection, sym_index: u32, elf_file: *Elf) !void {
+        const index = got.next_index;
+        const symbol = elf_file.getSymbol(sym_index);
+        if (symbol.getExtra(elf_file)) |extra| {
+            var new_extra = extra;
+            new_extra.gottp = index;
+            symbol.setExtra(new_extra, elf_file);
+        } else try symbol.addExtra(.{ .gottp = index }, elf_file);
+        try got.symbols.append(elf_file.base.allocator, .{ .gottp = sym_index });
+        got.next_index += 1;
+    }
+
     pub fn size(got: GotSection) usize {
         var s: usize = 0;
         for (got.symbols.items) |sym| switch (sym) {
-            .got => s += 8,
+            .got, .gottp => s += 8,
             .tlsgd => s += 16,
         };
         if (got.emit_tlsld) s += 8;
@@ -644,6 +657,15 @@ pub const GotSection = struct {
                     } else {
                         try writer.writeIntLittle(u64, if (is_shared) @as(u64, 0) else 1);
                         try writer.writeIntLittle(u64, symbol.getAddress(.{}, elf_file) - elf_file.getDtpAddress());
+                    }
+                },
+                .gottp => {
+                    if (symbol.flags.import) {
+                        try writer.writeIntLittle(u64, 0);
+                    } else if (is_shared) {
+                        try writer.writeIntLittle(u64, symbol.getAddress(.{}, elf_file) - elf_file.getTlsAddress());
+                    } else {
+                        try writer.writeIntLittle(u64, symbol.getAddress(.{}, elf_file) - elf_file.getTpAddress());
                     }
                 },
             }
@@ -692,6 +714,7 @@ pub const GotSection = struct {
                         });
                     }
                 },
+
                 .tlsgd => {
                     const offset = symbol.getTlsGdAddress(elf_file);
 
@@ -714,6 +737,24 @@ pub const GotSection = struct {
                         });
                     }
                 },
+
+                .gottp => {
+                    const offset = symbol.getGotTpAddress(elf_file);
+
+                    if (symbol.flags.import) {
+                        elf_file.addRelaDynAssumeCapacity(.{
+                            .offset = offset,
+                            .sym = extra.dynamic,
+                            .type = elf.R_X86_64_TPOFF64,
+                        });
+                    } else if (is_shared) {
+                        elf_file.addRelaDynAssumeCapacity(.{
+                            .offset = offset,
+                            .type = elf.R_X86_64_TPOFF64,
+                            .addend = @intCast(symbol.getGotTpAddress(elf_file) - elf_file.getTlsAddress()),
+                        });
+                    }
+                },
             }
         }
     }
@@ -729,11 +770,14 @@ pub const GotSection = struct {
                 {
                     num += 1;
                 },
+
                 .tlsgd => if (symbol.flags.import) {
                     num += 2;
                 } else if (is_shared) {
                     num += 1;
                 },
+
+                .gottp => num += 1,
             }
         }
         return num;
@@ -747,6 +791,7 @@ pub const GotSection = struct {
             const suffix_len = switch (sym) {
                 .tlsgd => "$tlsgd".len,
                 .got => "$got".len,
+                .gottp => "$gottp".len,
             };
             const symbol = elf_file.getSymbol(sym.getIndex());
             const name_len = symbol.getName(elf_file).len;
@@ -769,6 +814,7 @@ pub const GotSection = struct {
             const suffix = switch (sym) {
                 .tlsgd => "$tlsgd",
                 .got => "$got",
+                .gottp => "$gottp",
             };
             const symbol = elf_file.getSymbol(sym.getIndex());
             const name = try std.fmt.allocPrint(gpa, "{s}{s}", .{ symbol.getName(elf_file), suffix });
@@ -777,10 +823,11 @@ pub const GotSection = struct {
             const st_value = switch (sym) {
                 .tlsgd => symbol.getTlsGdAddress(elf_file),
                 .got => symbol.getGotAddress(elf_file),
+                .gottp => symbol.getGotTpAddress(elf_file),
             };
             const st_size: u64 = switch (sym) {
                 .tlsgd => 16,
-                .got => 8,
+                .got, .gottp => 8,
             };
             ctx.symtab[ilocal] = .{
                 .st_name = st_name,

@@ -105,10 +105,16 @@ pub fn getGotAddress(symbol: Symbol, elf_file: *Elf) u64 {
     return elf_file.getGotEntryAddress(extra.got);
 }
 
-pub inline fn getTlsGdAddress(symbol: Symbol, elf_file: *Elf) u64 {
+pub fn getTlsGdAddress(symbol: Symbol, elf_file: *Elf) u64 {
     if (!symbol.flags.tlsgd) return 0;
     const extra = symbol.getExtra(elf_file).?;
     return elf_file.getGotEntryAddress(extra.tlsgd);
+}
+
+pub fn getGotTpAddress(symbol: Symbol, elf_file: *Elf) u64 {
+    if (!symbol.flags.gottp) return 0;
+    const extra = symbol.getExtra(elf_file).?;
+    return elf_file.getGotEntryAddress(extra.gottp);
 }
 
 pub fn getAlignment(symbol: Symbol, elf_file: *Elf) !u64 {
@@ -286,6 +292,9 @@ pub const Flags = packed struct {
 
     /// Whether the symbol contains TLSGD indirection.
     tlsgd: bool = false,
+
+    /// Whether the symbol contains GOTTP indirection.
+    gottp: bool = false,
 };
 
 pub const Extra = struct {
@@ -295,6 +304,7 @@ pub const Extra = struct {
     dynamic: u32 = 0,
     copy_rel: u32 = 0,
     tlsgd: u32 = 0,
+    gottp: u32 = 0,
 };
 
 const std = @import("std");

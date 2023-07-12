@@ -244,7 +244,7 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
                     break :blk true;
                 };
                 if (!should_relax) {
-                    @panic("TODO");
+                    symbol.flags.gottp = true;
                 }
             },
 
@@ -585,9 +585,13 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
             elf.R_X86_64_DTPOFF64 => try cwriter.writeIntLittle(i64, S + A - DTP),
 
             elf.R_X86_64_GOTTPOFF => {
-                relaxGotTpOff(code[rel.r_offset - 3 ..]) catch
-                    elf_file.base.fatal("TODO could not rewrite GOTTPOFF", .{});
-                try cwriter.writeIntLittle(i32, @as(i32, @intCast(S - TP)));
+                if (target.flags.gottp) {
+                    const S_ = @as(i64, @intCast(target.getGotTpAddress(elf_file)));
+                    try cwriter.writeIntLittle(i32, @as(i32, @intCast(S_ + A - P)));
+                } else {
+                    try relaxGotTpOff(code[rel.r_offset - 3 ..]);
+                    try cwriter.writeIntLittle(i32, @as(i32, @intCast(S - TP)));
+                }
             },
 
             elf.R_X86_64_TLSGD => {
