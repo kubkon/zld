@@ -1199,8 +1199,8 @@ fn setupInitMemoryFunction(wasm: *Wasm) !void {
         try leb.writeULEB128(writer, flag_address);
         try writer.writeByte(std.wasm.opcode(.i32_const));
         try leb.writeULEB128(writer, @as(u32, 1)); // expected flag value
-        try writer.writeByte(std.wasm.opcode(.i32_const));
-        try leb.writeILEB128(writer, @as(i32, -1)); // timeout
+        try writer.writeByte(std.wasm.opcode(.i64_const));
+        try leb.writeILEB128(writer, @as(i64, -1)); // timeout
         try writer.writeByte(std.wasm.opcode(.atomics_prefix));
         try leb.writeULEB128(writer, std.wasm.atomicsOpcode(.memory_atomic_wait32));
         try leb.writeULEB128(writer, @as(u32, 2)); // alignment
@@ -1380,7 +1380,7 @@ fn initializeTLSFunction(wasm: *Wasm) !void {
         try leb.writeULEB128(writer, param_local);
 
         const tls_base_loc = wasm.findGlobalSymbol("__tls_base").?;
-        try writer.writeByte(std.wasm.opcode(.global_get));
+        try writer.writeByte(std.wasm.opcode(.global_set));
         try leb.writeULEB128(writer, tls_base_loc.getSymbol(wasm).index);
 
         // load stack values for the bulk-memory operation
@@ -1401,7 +1401,7 @@ fn initializeTLSFunction(wasm: *Wasm) !void {
         // segment immediate
         try leb.writeULEB128(writer, @as(u32, @intCast(data_index)));
         // memory index immediate (always 0)
-        try writer.writeByte(@as(u32, 0));
+        try writer.writeByte(0);
     }
 
     // If we have to perform any TLS relocations, call the corresponding function
