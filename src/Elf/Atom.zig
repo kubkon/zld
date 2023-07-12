@@ -592,7 +592,8 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
 
             elf.R_X86_64_TLSGD => {
                 if (target.flags.tlsgd) {
-                    elf_file.base.fatal("TODO get TLSGD address of the symbol '{s}'", .{target.getName(elf_file)});
+                    const S_ = @as(i64, @intCast(target.getTlsGdAddress(elf_file)));
+                    try cwriter.writeIntLittle(i32, @as(i32, @intCast(S_ + A - P)));
                 } else {
                     try relaxTlsGdToLe(
                         relocs[i .. i + 2],

@@ -1900,7 +1900,7 @@ fn scanRelocs(self: *Elf) !void {
         }
         if (symbol.flags.got) {
             log.debug("'{s}' needs GOT", .{symbol.getName(self)});
-            try self.got.addSymbol(index, self);
+            try self.got.addGotSymbol(index, self);
             if (symbol.flags.import or symbol.isIFunc(self)) self.got.needs_rela = true;
         }
         if (symbol.flags.plt) {
@@ -1921,7 +1921,8 @@ fn scanRelocs(self: *Elf) !void {
             try self.copy_rel.addSymbol(index, self);
         }
         if (symbol.flags.tlsgd) {
-            log.warn("'{s}' needs TLSGD", .{symbol.getName(self)});
+            log.debug("'{s}' needs TLSGD", .{symbol.getName(self)});
+            try self.got.addTlsGdSymbol(index, self);
         }
     }
 
@@ -2447,9 +2448,10 @@ fn sortRelaDyn(self: *Elf) void {
 fn getNumIRelativeRelocs(self: *Elf) usize {
     var count: usize = self.num_ifunc_dynrelocs;
 
-    for (self.got.symbols.items) |sym_index| {
-        const sym = self.getSymbol(sym_index);
-        if (sym.isIFunc(self)) count += 1;
+    for (self.got.symbols.items) |sym| {
+        if (sym != .got) continue;
+        const symbol = self.getSymbol(sym.getIndex());
+        if (symbol.isIFunc(self)) count += 1;
     }
 
     return count;
@@ -2600,8 +2602,12 @@ fn fmtDumpState(
         try writer.print("{}\n", .{internal.fmtSymtab(self)});
     }
     try writer.writeAll("GOT\n");
-    for (self.got.symbols.items, 0..) |sym_index, i| {
-        try writer.print("  {d} => {d} '{s}'\n", .{ i, sym_index, self.getSymbol(sym_index).getName(self) });
+    for (self.got.symbols.items) |sym| {
+        try writer.print("  ({s}) {d} '{s}'\n", .{
+            @tagName(sym),
+            sym.getIndex(),
+            self.getSymbol(sym.getIndex()).getName(self),
+        });
     }
     try writer.writeByte('\n');
     try writer.writeAll("PLT\n");
