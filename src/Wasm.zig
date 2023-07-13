@@ -414,16 +414,19 @@ pub fn flush(wasm: *Wasm) !void {
     for (wasm.objects.items, 0..) |_, obj_idx| {
         try wasm.resolveSymbolsInObject(@as(u16, @intCast(obj_idx)));
     }
+    try wasm.validateFeatures();
     try wasm.resolveSymbolsInArchives();
     try wasm.resolveLazySymbols();
-    try wasm.setupInitFunctions();
     try wasm.checkUndefinedSymbols();
+
+    try wasm.setupInitFunctions();
+    try wasm.setupStart();
+    try wasm.mergeImports();
+
     for (wasm.objects.items, 0..) |*object, obj_idx| {
         try object.parseIntoAtoms(@as(u16, @intCast(obj_idx)), wasm);
     }
-    try wasm.validateFeatures();
-    try wasm.setupStart();
-    try wasm.mergeImports();
+
     try wasm.allocateAtoms();
     try wasm.setupMemory();
     wasm.allocateVirtualAddresses();
@@ -434,6 +437,7 @@ pub fn flush(wasm: *Wasm) !void {
     try wasm.setupInitMemoryFunction();
     try wasm.setupTLSRelocationsFunction();
     try wasm.initializeTLSFunction();
+    try wasm.setupStartSection();
     try wasm.setupExports();
 
     try @import("Wasm/emit_wasm.zig").emit(wasm);
@@ -912,6 +916,13 @@ fn setupExports(wasm: *Wasm) !void {
         try wasm.exports.append(wasm.base.allocator, exported);
     }
     log.debug("Completed building exports. Total count: ({d})", .{wasm.exports.count()});
+}
+
+/// If required, sets the function index in the `start` section.
+fn setupStartSection(wasm: *Wasm) !void {
+    if (wasm.findGlobalSymbol("__wasm_init_memory")) |loc| {
+        wasm.entry = loc.getSymbol(wasm).index;
+    }
 }
 
 /// Creates symbols that are made by the linker, rather than the compiler/object file
@@ -1800,6 +1811,7 @@ fn setupStart(wasm: *Wasm) !void {
         log.err("Entry symbol '{s}' is not a function", .{entry_name});
         return error.InvalidEntryKind;
     }
+
     // Simply export the symbol as the start function is reserved
     // for synthetic symbols such as __wasm_start, __wasm_init_memory, and
     // __wasm_apply_global_relocs
