@@ -366,6 +366,7 @@ fn testIfuncStaticPie(b: *Build, opts: Options) *Step {
 
     const exe = cc(b, null, opts);
     exe.addSourceBytes(
+        \\#include <stdio.h>
         \\void foo() __attribute__((ifunc("resolve_foo")));
         \\void hello() {
         \\  printf("Hello world\n");
@@ -383,6 +384,15 @@ fn testIfuncStaticPie(b: *Build, opts: Options) *Step {
     const run = exe.run();
     run.expectStdOutEqual("Hello world\n");
     test_step.dependOn(run.step());
+
+    const check = exe.check();
+    check.checkStart("header");
+    check.checkNext("type DYN");
+    check.checkStart("shdr {*}");
+    check.checkNext("name .dynamic");
+    check.checkStart("shdr {*}");
+    check.checkNotPresent("name .interp");
+    test_step.dependOn(&check.step);
 
     return test_step;
 }
@@ -406,6 +416,8 @@ fn testHelloStatic(b: *Build, opts: Options) *Step {
     const check = exe.check();
     check.checkStart("header");
     check.checkNext("type EXEC");
+    check.checkStart("shdr {*}");
+    check.checkNotPresent("name .dynamic");
     test_step.dependOn(&check.step);
 
     return test_step;
@@ -425,6 +437,8 @@ fn testHelloDynamic(b: *Build, opts: Options) *Step {
     const check = exe.check();
     check.checkStart("header");
     check.checkNext("type EXEC");
+    check.checkStart("shdr {*}");
+    check.checkNext("name .dynamic");
     test_step.dependOn(&check.step);
 
     return test_step;
@@ -444,6 +458,8 @@ fn testHelloPie(b: *Build, opts: Options) *Step {
     const check = exe.check();
     check.checkStart("header");
     check.checkNext("type DYN");
+    check.checkStart("shdr {*}");
+    check.checkNext("name .dynamic");
     test_step.dependOn(&check.step);
 
     return test_step;
