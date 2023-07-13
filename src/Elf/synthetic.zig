@@ -441,7 +441,7 @@ pub const DynsymSection = struct {
 pub const VerneedSection = struct {
     verneed: std.ArrayListUnmanaged(elf.Elf64_Verneed) = .{},
     vernaux: std.ArrayListUnmanaged(elf.Elf64_Vernaux) = .{},
-    index: elf.Elf64_Versym = Elf.VER_NDX_GLOBAL + 1,
+    index: elf.Elf64_Versym = elf.VER_NDX_GLOBAL + 1,
 
     pub fn deinit(vern: *VerneedSection, allocator: Allocator) void {
         vern.verneed.deinit(allocator);
@@ -480,7 +480,7 @@ pub const VerneedSection = struct {
 
         for (dynsyms, 1..) |dynsym, i| {
             const symbol = elf_file.getSymbol(dynsym.index);
-            if (symbol.flags.import and symbol.ver_idx & Elf.VERSYM_VERSION > Elf.VER_NDX_GLOBAL) {
+            if (symbol.flags.import and symbol.ver_idx & elf.VERSYM_VERSION > elf.VER_NDX_GLOBAL) {
                 const shared = symbol.getFile(elf_file).?.shared;
                 verneed.appendAssumeCapacity(.{
                     .idx = i,

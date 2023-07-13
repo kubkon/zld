@@ -23,7 +23,7 @@ sym_idx: u32 = 0,
 
 /// Index of the source version symbol this symbol references if any.
 /// If the symbol is unversioned it will have either VER_NDX_LOCAL or VER_NDX_GLOBAL.
-ver_idx: elf.Elf64_Versym = Elf.VER_NDX_LOCAL,
+ver_idx: elf.Elf64_Versym = elf.VER_NDX_LOCAL,
 
 /// Misc flags for the symbol packaged as packed struct for compression.
 flags: Flags = .{},
@@ -212,8 +212,8 @@ fn formatName(
     const elf_file = ctx.elf_file;
     const symbol = ctx.symbol;
     try writer.writeAll(symbol.getName(elf_file));
-    switch (symbol.ver_idx & Elf.VERSYM_VERSION) {
-        Elf.VER_NDX_LOCAL, Elf.VER_NDX_GLOBAL => {},
+    switch (symbol.ver_idx & elf.VERSYM_VERSION) {
+        elf.VER_NDX_LOCAL, elf.VER_NDX_GLOBAL => {},
         else => {
             const shared = symbol.getFile(elf_file).?.shared;
             try writer.print("@{s}", .{shared.getVersionString(symbol.ver_idx)});

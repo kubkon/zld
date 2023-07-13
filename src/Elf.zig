@@ -119,9 +119,9 @@ fn createEmpty(gpa: Allocator, options: Options, thread_pool: *ThreadPool) !*Elf
         .arena = std.heap.ArenaAllocator.init(gpa).state,
         .options = options,
         .default_sym_version = if (options.output_mode == .lib or options.export_dynamic)
-            VER_NDX_GLOBAL
+            elf.VER_NDX_GLOBAL
         else
-            VER_NDX_LOCAL,
+            elf.VER_NDX_LOCAL,
     };
 
     return self;
@@ -599,7 +599,7 @@ fn initSections(self: *Elf) !void {
         self.gnu_hash_sect_index = try self.addSection(.{
             .name = ".gnu.hash",
             .flags = elf.SHF_ALLOC,
-            .type = SHT_GNU_HASH,
+            .type = elf.SHT_GNU_HASH,
             .addralign = 8,
         });
 
@@ -610,14 +610,14 @@ fn initSections(self: *Elf) !void {
             self.versym_sect_index = try self.addSection(.{
                 .name = ".gnu.version",
                 .flags = elf.SHF_ALLOC,
-                .type = SHT_GNU_versym,
+                .type = elf.SHT_GNU_VERSYM,
                 .addralign = @alignOf(elf.Elf64_Versym),
                 .entsize = @sizeOf(elf.Elf64_Versym),
             });
             self.verneed_sect_index = try self.addSection(.{
                 .name = ".gnu.version_r",
                 .flags = elf.SHF_ALLOC,
-                .type = SHT_GNU_verneed,
+                .type = elf.SHT_GNU_VERNEED,
                 .addralign = @alignOf(elf.Elf64_Verneed),
             });
         }
@@ -1120,10 +1120,10 @@ fn getSectionRank(self: *Elf, shndx: u16) u8 {
         elf.SHT_NULL => return 0,
         elf.SHT_DYNSYM => return 2,
         elf.SHT_HASH => return 3,
-        SHT_GNU_HASH => return 3,
-        SHT_GNU_versym => return 4,
-        SHT_GNU_verdef => return 4,
-        SHT_GNU_verneed => return 4,
+        elf.SHT_GNU_HASH => return 3,
+        elf.SHT_GNU_VERSYM => return 4,
+        elf.SHT_GNU_VERDEF => return 4,
+        elf.SHT_GNU_VERNEED => return 4,
 
         elf.SHT_PREINIT_ARRAY,
         elf.SHT_INIT_ARRAY,
@@ -1742,7 +1742,7 @@ fn markImportsAndExports(self: *Elf) !void {
     for (self.objects.items) |index| {
         for (self.getFile(index).?.object.getGlobals()) |global_index| {
             const global = self.getSymbol(global_index);
-            if (global.ver_idx == VER_NDX_LOCAL) continue;
+            if (global.ver_idx == elf.VER_NDX_LOCAL) continue;
             const file = global.getFile(self) orelse continue;
             const vis = @as(elf.STV, @enumFromInt(global.getSourceSymbol(self).st_other));
             if (vis == .HIDDEN) continue;
@@ -1840,7 +1840,7 @@ fn claimUnresolved(self: *Elf) void {
                 .atom = 0,
                 .sym_idx = sym_idx,
                 .file = object.index,
-                .ver_idx = if (is_import) VER_NDX_LOCAL else self.default_sym_version,
+                .ver_idx = if (is_import) elf.VER_NDX_LOCAL else self.default_sym_version,
             };
             global.flags.import = is_import;
         }
@@ -1956,7 +1956,7 @@ fn setDynsym(self: *Elf) void {
 fn setVerSymtab(self: *Elf) !void {
     if (self.versym_sect_index == null) return;
     try self.versym.resize(self.base.allocator, self.dynsym.count());
-    self.versym.items[0] = VER_NDX_LOCAL;
+    self.versym.items[0] = elf.VER_NDX_LOCAL;
     for (self.dynsym.symbols.items, 1..) |dynsym, i| {
         const sym = self.getSymbol(dynsym.index);
         self.versym.items[i] = sym.ver_idx;
@@ -2688,28 +2688,6 @@ pub const null_sym = elf.Elf64_Sym{
 };
 
 pub const base_tag = Zld.Tag.elf;
-
-pub const VERSYM_HIDDEN = 0x8000;
-pub const VERSYM_VERSION = 0x7fff;
-
-/// Symbol is local
-pub const VER_NDX_LOCAL = 0;
-/// Symbol is global
-pub const VER_NDX_GLOBAL = 1;
-
-/// Version definition of the file itself
-pub const VER_FLG_BASE = 1;
-/// Weak version identifier
-pub const VER_FLG_WEAK = 2;
-
-// VERDEF
-pub const SHT_GNU_verdef = 0x6ffffffd;
-// VERNEED
-pub const SHT_GNU_verneed = 0x6ffffffe;
-// VERSYM
-pub const SHT_GNU_versym = 0x6fffffff;
-// GNU_HASH
-pub const SHT_GNU_HASH = 0x6ffffff6;
 
 const std = @import("std");
 const build_options = @import("build_options");
