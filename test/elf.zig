@@ -14,6 +14,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testIfuncStatic(b, opts));
         elf_step.dependOn(testIfuncStaticPie(b, opts));
         elf_step.dependOn(testHelloDynamic(b, opts));
+        elf_step.dependOn(testHelloPie(b, opts));
         elf_step.dependOn(testHelloStatic(b, opts));
         elf_step.dependOn(testTlsDso(b, opts));
         elf_step.dependOn(testTlsStatic(b, opts));
@@ -402,6 +403,11 @@ fn testHelloStatic(b: *Build, opts: Options) *Step {
     run.expectHelloWorld();
     test_step.dependOn(run.step());
 
+    const check = exe.check();
+    check.checkStart("header");
+    check.checkNext("type EXEC");
+    test_step.dependOn(&check.step);
+
     return test_step;
 }
 
@@ -415,6 +421,30 @@ fn testHelloDynamic(b: *Build, opts: Options) *Step {
     const run = exe.run();
     run.expectHelloWorld();
     test_step.dependOn(run.step());
+
+    const check = exe.check();
+    check.checkStart("header");
+    check.checkNext("type EXEC");
+    test_step.dependOn(&check.step);
+
+    return test_step;
+}
+
+fn testHelloPie(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-hello-pie", "");
+
+    const exe = cc(b, null, opts);
+    exe.addHelloWorldMain();
+    exe.addArgs(&.{ "-fPIC", "-pie" });
+
+    const run = exe.run();
+    run.expectHelloWorld();
+    test_step.dependOn(run.step());
+
+    const check = exe.check();
+    check.checkStart("header");
+    check.checkNext("type DYN");
+    test_step.dependOn(&check.step);
 
     return test_step;
 }
