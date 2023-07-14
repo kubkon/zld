@@ -219,7 +219,7 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
                     // We skip the next relocation.
                     i += 1;
                 } else if (elf_file.options.relax and !symbol.flags.import and is_shared) {
-                    @panic("TODO");
+                    symbol.flags.gottp = true;
                 } else {
                     symbol.flags.tlsgd = true;
                 }
@@ -598,13 +598,12 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
                 if (target.flags.tlsgd) {
                     const S_ = @as(i64, @intCast(target.getTlsGdAddress(elf_file)));
                     try cwriter.writeIntLittle(i32, @as(i32, @intCast(S_ + A - P)));
+                } else if (target.flags.gottp) {
+                    const S_ = @as(i64, @intCast(target.getGotTpAddress(elf_file)));
+                    try relaxTlsGdToIe(relocs[i .. i + 2], @intCast(S_ - P), elf_file, &stream);
+                    i += 1;
                 } else {
-                    try relaxTlsGdToLe(
-                        relocs[i .. i + 2],
-                        @as(i32, @intCast(S - TP)),
-                        elf_file,
-                        &stream,
-                    );
+                    try relaxTlsGdToLe(relocs[i .. i + 2], @as(i32, @intCast(S - TP)), elf_file, &stream);
                     i += 1;
                 }
             },
@@ -815,6 +814,29 @@ fn relaxRexGotpcrelx(code: []u8) !void {
             encode(&.{inst}, code) catch return error.RelaxFail;
         },
         else => return error.RelaxFail,
+    }
+}
+
+fn relaxTlsGdToIe(rels: []align(1) const elf.Elf64_Rela, value: i32, elf_file: *Elf, stream: anytype) !void {
+    assert(rels.len == 2);
+    const writer = stream.writer();
+    switch (rels[1].r_type()) {
+        elf.R_X86_64_PC32,
+        elf.R_X86_64_PLT32,
+        => {
+            var insts = [_]u8{
+                0x64, 0x48, 0x8b, 0x04, 0x25, 0, 0, 0, 0, // movq %fs:0,%rax
+                0x48, 0x03, 0x05, 0, 0, 0, 0, // add foo@gottpoff(%rip), %rax
+            };
+            mem.writeIntLittle(i32, insts[12..][0..4], value - 12);
+            try stream.seekBy(-4);
+            try writer.writeAll(&insts);
+        },
+
+        else => elf_file.base.fatal("TODO rewrite {} when followed by {}", .{
+            fmtRelocType(rels[0].r_type()),
+            fmtRelocType(rels[1].r_type()),
+        }),
     }
 }
 
