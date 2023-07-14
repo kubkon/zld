@@ -1931,7 +1931,7 @@ fn scanRelocs(self: *Elf) !void {
     }
 
     if (self.needs_tlsld) {
-        log.warn("needs TLSLD", .{});
+        log.debug("needs TLSLD", .{});
         self.got.emit_tlsld = true;
     }
 }

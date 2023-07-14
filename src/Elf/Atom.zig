@@ -220,6 +220,7 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
                     i += 1;
                 } else if (elf_file.options.relax and !symbol.flags.import and is_shared) {
                     symbol.flags.gottp = true;
+                    i += 1;
                 } else {
                     symbol.flags.tlsgd = true;
                 }
