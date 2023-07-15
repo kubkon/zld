@@ -603,8 +603,9 @@ fn initSections(self: *Elf) !void {
             .addralign = 8,
         });
 
-        const needs_versions = for (self.shared_objects.items) |index| {
-            if (self.getFile(index).?.shared.versym_sect_index != null) break true;
+        const needs_versions = for (self.dynsym.symbols.items) |dynsym| {
+            const symbol = self.getSymbol(dynsym.index);
+            if (symbol.flags.import and symbol.ver_idx & elf.VERSYM_VERSION > elf.VER_NDX_GLOBAL) break true;
         } else false;
         if (needs_versions) {
             self.versym_sect_index = try self.addSection(.{
