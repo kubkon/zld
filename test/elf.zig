@@ -511,6 +511,22 @@ fn testTlsDso(b: *Build, opts: Options) *Step {
 fn testTlsGd(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-gd", "");
 
+    const main_c =
+        \\#include <stdio.h>
+        \\__attribute__((tls_model("global-dynamic"))) static _Thread_local int x1 = 1;
+        \\__attribute__((tls_model("global-dynamic"))) static _Thread_local int x2;
+        \\__attribute__((tls_model("global-dynamic"))) extern _Thread_local int x3;
+        \\__attribute__((tls_model("global-dynamic"))) extern _Thread_local int x4;
+        \\int get_x5();
+        \\int get_x6();
+        \\int main() {
+        \\  x2 = 2;
+        \\  printf("%d %d %d %d %d %d\n", x1, x2, x3, x4, get_x5(), get_x6());
+        \\  return 0;
+        \\}
+    ;
+    const exp_stdout = "1 2 3 4 5 6\n";
+
     const dso1 = cc(b, "a.so", opts);
     dso1.addSourceBytes(
         \\__attribute__((tls_model("global-dynamic"))) _Thread_local int x3 = 3;
@@ -529,29 +545,62 @@ fn testTlsGd(b: *Build, opts: Options) *Step {
     dso2.addArgs(&.{ "-shared", "-fPIC", "-Wl,-no-relax" });
     const dso2_out = dso2.saveOutputAs("b.so");
 
-    const exe = cc(b, null, opts);
-    exe.addSourceBytes(
-        \\#include <stdio.h>
-        \\__attribute__((tls_model("global-dynamic"))) static _Thread_local int x1 = 1;
-        \\__attribute__((tls_model("global-dynamic"))) static _Thread_local int x2;
-        \\__attribute__((tls_model("global-dynamic"))) extern _Thread_local int x3;
-        \\__attribute__((tls_model("global-dynamic"))) extern _Thread_local int x4;
-        \\int get_x5();
-        \\int get_x6();
-        \\int main() {
-        \\  x2 = 2;
-        \\  printf("%d %d %d %d %d %d\n", x1, x2, x3, x4, get_x5(), get_x6());
-        \\  return 0;
-        \\}
-    , "a.c");
-    exe.addFileSource(dso1_out.file);
-    exe.addFileSource(dso2_out.file);
-    exe.addPrefixedDirectorySource("-Wl,-rpath,", dso1_out.dir);
-    exe.addPrefixedDirectorySource("-Wl,-rpath,", dso2_out.dir);
+    {
+        const exe = cc(b, null, opts);
+        exe.addSourceBytes(main_c, "main.c");
+        exe.addFileSource(dso1_out.file);
+        exe.addFileSource(dso2_out.file);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", dso1_out.dir);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", dso2_out.dir);
 
-    const run = exe.run();
-    run.expectStdOutEqual("1 2 3 4 5 6\n");
-    test_step.dependOn(run.step());
+        const run = exe.run();
+        run.expectStdOutEqual(exp_stdout);
+        test_step.dependOn(run.step());
+    }
+
+    {
+        const exe = cc(b, null, opts);
+        exe.addSourceBytes(main_c, "main.c");
+        exe.addArg("-Wl,-no-relax");
+        exe.addFileSource(dso1_out.file);
+        exe.addFileSource(dso2_out.file);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", dso1_out.dir);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", dso2_out.dir);
+
+        const run = exe.run();
+        run.expectStdOutEqual(exp_stdout);
+        test_step.dependOn(run.step());
+    }
+
+    if (opts.has_static) {
+        {
+            const exe = cc(b, null, opts);
+            exe.addSourceBytes(main_c, "main.c");
+            exe.addArg("-static");
+            exe.addFileSource(dso1_out.file);
+            exe.addFileSource(dso2_out.file);
+            exe.addPrefixedDirectorySource("-Wl,-rpath,", dso1_out.dir);
+            exe.addPrefixedDirectorySource("-Wl,-rpath,", dso2_out.dir);
+
+            const run = exe.run();
+            run.expectStdOutEqual(exp_stdout);
+            test_step.dependOn(run.step());
+        }
+
+        {
+            const exe = cc(b, null, opts);
+            exe.addSourceBytes(main_c, "main.c");
+            exe.addArgs(&.{ "-static", "-Wl,-no-relax" });
+            exe.addFileSource(dso1_out.file);
+            exe.addFileSource(dso2_out.file);
+            exe.addPrefixedDirectorySource("-Wl,-rpath,", dso1_out.dir);
+            exe.addPrefixedDirectorySource("-Wl,-rpath,", dso2_out.dir);
+
+            const run = exe.run();
+            run.expectStdOutEqual(exp_stdout);
+            test_step.dependOn(run.step());
+        }
+    }
 
     return test_step;
 }
