@@ -218,7 +218,9 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
                     // Relax if building with -static flag as __tls_get_addr() will not be present in libc.a
                     // We skip the next relocation.
                     i += 1;
-                } else if (elf_file.options.relax and !symbol.flags.import and is_shared) {
+                } else if (elf_file.options.relax and !symbol.flags.import and is_shared and
+                    elf_file.options.z_nodlopen)
+                {
                     symbol.flags.gottp = true;
                     i += 1;
                 } else {

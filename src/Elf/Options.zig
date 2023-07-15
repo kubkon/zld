@@ -53,6 +53,7 @@ const usage =
     \\  lazy                        Enable lazy function resolution (default)
     \\  now                         Disable lazy function resolution
     \\  nocopyreloc                 Do not create copy relocations
+    \\  nodlopen                    Mark DSO not available to dlopen
     \\  text                        Do not allow relocations against read-only segments (default)
     \\  notext                      Allow relocations against read-only segments. Sets the DT_TEXTREL flag
     \\                              in the .dynamic section
@@ -104,6 +105,8 @@ z_execstack_if_needed: bool = false,
 z_now: bool = false,
 /// Do not create copy relocations.
 z_nocopyreloc: bool = false,
+/// Mark DSO not available for dlopen.
+z_nodlopen: bool = false,
 /// Do not allow relocations against read-only segments.
 z_text: bool = true,
 /// Make some sections read-only after dynamic relocations.
@@ -272,6 +275,8 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             opts.z_now = false;
         } else if (p.flagZ("nocopyreloc")) {
             opts.z_nocopyreloc = true;
+        } else if (p.flagZ("nodlopen")) {
+            opts.z_nodlopen = true;
         } else if (p.flagZ("text")) {
             opts.z_text = true;
         } else if (p.flagZ("notext")) {

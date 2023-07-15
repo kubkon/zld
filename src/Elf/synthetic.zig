@@ -28,7 +28,7 @@ pub const DynamicSection = struct {
         _ = dt;
         var flags: u64 = 0;
         if (elf_file.options.z_now) {
-            flags |= 8; // TODO add elf.DF_BIND_NOW;
+            flags |= elf.DF_BIND_NOW;
         }
         return if (flags > 0) flags else null;
     }
@@ -37,10 +37,13 @@ pub const DynamicSection = struct {
         _ = dt;
         var flags_1: u64 = 0;
         if (elf_file.options.z_now) {
-            flags_1 |= 1; // TODO add elf.DF_1_NOW;
+            flags_1 |= elf.DF_1_NOW;
         }
         if (elf_file.options.pie) {
-            flags_1 |= 0x8000000; // TODO add elf.DF_1_PIE;
+            flags_1 |= elf.DF_1_PIE;
+        }
+        if (elf_file.options.z_nodlopen) {
+            flags_1 |= elf.DF_1_NOOPEN;
         }
         return if (flags_1 > 0) flags_1 else null;
     }
