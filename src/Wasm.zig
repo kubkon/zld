@@ -1081,6 +1081,12 @@ fn setupInitFunctions(wasm: *Wasm) !void {
     }.lessThan);
 }
 
+/// Writes an unsigned 32-bit integer as a LEB128-encoded 'i32.const' value.
+fn writeI32Const(writer: anytype, val: u32) !void {
+    try writer.writeByte(std.wasm.opcode(.i32_const));
+    try leb.writeILEB128(writer, @as(i32, @bitCast(val)));
+}
+
 fn setupInitMemoryFunction(wasm: *Wasm) !void {
     // Passive segments are used to avoid memory being reinitialized on each
     // thread's instantiation. These passive segments are initialized and
@@ -1118,12 +1124,9 @@ fn setupInitMemoryFunction(wasm: *Wasm) !void {
         try writer.writeByte(std.wasm.block_empty); // block type
 
         // atomically check
-        try writer.writeByte(std.wasm.opcode(.i32_const));
-        try leb.writeULEB128(writer, flag_address);
-        try writer.writeByte(std.wasm.opcode(.i32_const));
-        try leb.writeULEB128(writer, @as(u32, 0));
-        try writer.writeByte(std.wasm.opcode(.i32_const));
-        try leb.writeULEB128(writer, @as(u32, 1));
+        try writeI32Const(writer, flag_address);
+        try writeI32Const(writer, 0);
+        try writeI32Const(writer, 1);
         try writer.writeByte(std.wasm.opcode(.atomics_prefix));
         try leb.writeULEB128(writer, std.wasm.atomicsOpcode(.i32_atomic_rmw_cmpxchg));
         try leb.writeULEB128(writer, @as(u32, 2)); // alignment
@@ -1147,24 +1150,20 @@ fn setupInitMemoryFunction(wasm: *Wasm) !void {
             // For non-BSS segments we do a memory.init.  Both these
             // instructions take as their first argument the destination
             // address.
-            try writer.writeByte(std.wasm.opcode(.i32_const));
-            try leb.writeULEB128(writer, segment.offset);
+            try writeI32Const(writer, segment.offset);
 
             if (wasm.options.shared_memory and std.mem.eql(u8, entry.key_ptr.*, ".tdata")) {
                 // When we initialize the TLS segment we also set the `__tls_base`
                 // global.  This allows the runtime to use this static copy of the
                 // TLS data for the first/main thread.
-                try writer.writeByte(std.wasm.opcode(.i32_const));
-                try leb.writeULEB128(writer, segment.offset);
+                try writeI32Const(writer, segment.offset);
                 try writer.writeByte(std.wasm.opcode(.global_set));
                 const loc = wasm.findGlobalSymbol("__tls_base").?;
                 try leb.writeULEB128(writer, loc.getSymbol(wasm).index);
             }
 
-            try writer.writeByte(std.wasm.opcode(.i32_const));
-            try leb.writeULEB128(writer, @as(u32, 0));
-            try writer.writeByte(std.wasm.opcode(.i32_const));
-            try leb.writeULEB128(writer, segment.size);
+            try writeI32Const(writer, 0);
+            try writeI32Const(writer, segment.size);
             try writer.writeByte(std.wasm.opcode(.misc_prefix));
             if (std.mem.eql(u8, entry.key_ptr.*, ".bss")) {
                 // fill bss segment with zeroes
@@ -1180,18 +1179,15 @@ fn setupInitMemoryFunction(wasm: *Wasm) !void {
 
     if (wasm.options.shared_memory) {
         // we set the init memory flag to value '2'
-        try writer.writeByte(std.wasm.opcode(.i32_const));
-        try leb.writeULEB128(writer, flag_address);
-        try writer.writeByte(std.wasm.opcode(.i32_const));
-        try leb.writeULEB128(writer, @as(u32, 2));
+        try writeI32Const(writer, flag_address);
+        try writeI32Const(writer, 2);
         try writer.writeByte(std.wasm.opcode(.atomics_prefix));
         try leb.writeULEB128(writer, std.wasm.atomicsOpcode(.i32_atomic_store));
         try leb.writeULEB128(writer, @as(u32, 2)); // alignment
         try leb.writeULEB128(writer, @as(u32, 0)); // offset
 
         // notify any waiters for segment initialization completion
-        try writer.writeByte(std.wasm.opcode(.i32_const));
-        try leb.writeULEB128(writer, flag_address);
+        try writeI32Const(writer, flag_address);
         try writer.writeByte(std.wasm.opcode(.i32_const));
         try leb.writeILEB128(writer, @as(i32, -1)); // number of waiters
         try writer.writeByte(std.wasm.opcode(.atomics_prefix));
@@ -1206,10 +1202,8 @@ fn setupInitMemoryFunction(wasm: *Wasm) !void {
 
         // wait for thread to initialize memory segments
         try writer.writeByte(std.wasm.opcode(.end)); // end $wait
-        try writer.writeByte(std.wasm.opcode(.i32_const));
-        try leb.writeULEB128(writer, flag_address);
-        try writer.writeByte(std.wasm.opcode(.i32_const));
-        try leb.writeULEB128(writer, @as(u32, 1)); // expected flag value
+        try writeI32Const(writer, flag_address);
+        try writeI32Const(writer, 1); // expected flag value
         try writer.writeByte(std.wasm.opcode(.i64_const));
         try leb.writeILEB128(writer, @as(i64, -1)); // timeout
         try writer.writeByte(std.wasm.opcode(.atomics_prefix));
