@@ -20,6 +20,7 @@ const usage =
     \\--global-base=<value>              Value from where the global data will start
     \\--import-symbols                   Allows references to undefined symbols
     \\--import-memory                    Import memory from the host environment
+    \\--export-memory                    Import memory from the host environment
     \\--import-table                     Import function table from the host environment
     \\--export-table                     Export function table to the host environment
     \\--initial-memory=<value>           Initial size of the linear memory
@@ -50,6 +51,8 @@ global_base: ?u32 = null,
 import_symbols: bool = false,
 /// Tells the linker we will import memory from the host environment
 import_memory: bool = false,
+/// Tells the linker we will export memory from the host environment
+export_memory: bool = false,
 /// Tells the linker we will import the function table from the host environment
 import_table: bool = false,
 /// Tells the linker we will export the function table to the host environment
@@ -95,6 +98,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
     var global_base: ?u32 = null;
     var import_symbols: bool = false;
     var import_memory: bool = false;
+    var export_memory: ?bool = null;
     var import_table: bool = false;
     var export_table: bool = false;
     var initial_memory: ?u32 = null;
@@ -126,6 +130,8 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             import_symbols = true;
         } else if (mem.eql(u8, arg, "--import-memory")) {
             import_memory = true;
+        } else if (mem.eql(u8, arg, "--export-memory")) {
+            export_memory = true;
         } else if (mem.eql(u8, arg, "--import-table")) {
             import_table = true;
         } else if (mem.eql(u8, arg, "--export-table")) {
@@ -183,6 +189,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         .global_base = global_base,
         .import_symbols = import_symbols,
         .import_memory = import_memory,
+        .export_memory = export_memory orelse !import_memory,
         .import_table = import_table,
         .export_table = export_table,
         .initial_memory = initial_memory,

@@ -63,8 +63,8 @@ imports: sections.Imports = .{},
 functions: sections.Functions = .{},
 /// Output table section
 tables: sections.Tables = .{},
-/// Output memory section, this will only be used when `options.import_memory`
-/// is set to false. The limits will be set, based on the total data section size
+/// Output memory section, this will only be used when `options.export_memory`
+/// is set to `true`. The limits will be set, based on the total data section size
 /// and other configuration options.
 memories: std.wasm.Memory = .{ .limits = .{
     .flags = 0,
@@ -414,16 +414,19 @@ pub fn flush(wasm: *Wasm) !void {
     for (wasm.objects.items, 0..) |_, obj_idx| {
         try wasm.resolveSymbolsInObject(@as(u16, @intCast(obj_idx)));
     }
+    try wasm.validateFeatures();
     try wasm.resolveSymbolsInArchives();
     try wasm.resolveLazySymbols();
-    try wasm.setupInitFunctions();
     try wasm.checkUndefinedSymbols();
+
+    try wasm.setupInitFunctions();
+    try wasm.setupStart();
+    try wasm.mergeImports();
+
     for (wasm.objects.items, 0..) |*object, obj_idx| {
         try object.parseIntoAtoms(@as(u16, @intCast(obj_idx)), wasm);
     }
-    try wasm.validateFeatures();
-    try wasm.setupStart();
-    try wasm.mergeImports();
+
     try wasm.allocateAtoms();
     try wasm.setupMemory();
     wasm.allocateVirtualAddresses();
@@ -434,6 +437,7 @@ pub fn flush(wasm: *Wasm) !void {
     try wasm.setupInitMemoryFunction();
     try wasm.setupTLSRelocationsFunction();
     try wasm.initializeTLSFunction();
+    try wasm.setupStartSection();
     try wasm.setupExports();
 
     try @import("Wasm/emit_wasm.zig").emit(wasm);
@@ -858,9 +862,7 @@ fn mergeTypes(wasm: *Wasm) !void {
 fn setupExports(wasm: *Wasm) !void {
     log.debug("Building exports from symbols", .{});
 
-    // When importing memory option is false,
-    // we export the memory.
-    if (!wasm.options.import_memory) {
+    if (wasm.options.export_memory) {
         try wasm.exports.append(wasm.base.allocator, .{ .name = "memory", .kind = .memory, .index = 0 });
     }
 
@@ -914,6 +916,13 @@ fn setupExports(wasm: *Wasm) !void {
         try wasm.exports.append(wasm.base.allocator, exported);
     }
     log.debug("Completed building exports. Total count: ({d})", .{wasm.exports.count()});
+}
+
+/// If required, sets the function index in the `start` section.
+fn setupStartSection(wasm: *Wasm) !void {
+    if (wasm.findGlobalSymbol("__wasm_init_memory")) |loc| {
+        wasm.entry = loc.getSymbol(wasm).index;
+    }
 }
 
 /// Creates symbols that are made by the linker, rather than the compiler/object file
@@ -1072,6 +1081,12 @@ fn setupInitFunctions(wasm: *Wasm) !void {
     }.lessThan);
 }
 
+/// Writes an unsigned 32-bit integer as a LEB128-encoded 'i32.const' value.
+fn writeI32Const(writer: anytype, val: u32) !void {
+    try writer.writeByte(std.wasm.opcode(.i32_const));
+    try leb.writeILEB128(writer, @as(i32, @bitCast(val)));
+}
+
 fn setupInitMemoryFunction(wasm: *Wasm) !void {
     // Passive segments are used to avoid memory being reinitialized on each
     // thread's instantiation. These passive segments are initialized and
@@ -1109,12 +1124,9 @@ fn setupInitMemoryFunction(wasm: *Wasm) !void {
         try writer.writeByte(std.wasm.block_empty); // block type
 
         // atomically check
-        try writer.writeByte(std.wasm.opcode(.i32_const));
-        try leb.writeULEB128(writer, flag_address);
-        try writer.writeByte(std.wasm.opcode(.i32_const));
-        try leb.writeULEB128(writer, @as(u32, 0));
-        try writer.writeByte(std.wasm.opcode(.i32_const));
-        try leb.writeULEB128(writer, @as(u32, 1));
+        try writeI32Const(writer, flag_address);
+        try writeI32Const(writer, 0);
+        try writeI32Const(writer, 1);
         try writer.writeByte(std.wasm.opcode(.atomics_prefix));
         try leb.writeULEB128(writer, std.wasm.atomicsOpcode(.i32_atomic_rmw_cmpxchg));
         try leb.writeULEB128(writer, @as(u32, 2)); // alignment
@@ -1138,24 +1150,20 @@ fn setupInitMemoryFunction(wasm: *Wasm) !void {
             // For non-BSS segments we do a memory.init.  Both these
             // instructions take as their first argument the destination
             // address.
-            try writer.writeByte(std.wasm.opcode(.i32_const));
-            try leb.writeULEB128(writer, segment.offset);
+            try writeI32Const(writer, segment.offset);
 
             if (wasm.options.shared_memory and std.mem.eql(u8, entry.key_ptr.*, ".tdata")) {
                 // When we initialize the TLS segment we also set the `__tls_base`
                 // global.  This allows the runtime to use this static copy of the
                 // TLS data for the first/main thread.
-                try writer.writeByte(std.wasm.opcode(.i32_const));
-                try leb.writeULEB128(writer, segment.offset);
+                try writeI32Const(writer, segment.offset);
                 try writer.writeByte(std.wasm.opcode(.global_set));
                 const loc = wasm.findGlobalSymbol("__tls_base").?;
                 try leb.writeULEB128(writer, loc.getSymbol(wasm).index);
             }
 
-            try writer.writeByte(std.wasm.opcode(.i32_const));
-            try leb.writeULEB128(writer, @as(u32, 0));
-            try writer.writeByte(std.wasm.opcode(.i32_const));
-            try leb.writeULEB128(writer, segment.size);
+            try writeI32Const(writer, 0);
+            try writeI32Const(writer, segment.size);
             try writer.writeByte(std.wasm.opcode(.misc_prefix));
             if (std.mem.eql(u8, entry.key_ptr.*, ".bss")) {
                 // fill bss segment with zeroes
@@ -1171,18 +1179,15 @@ fn setupInitMemoryFunction(wasm: *Wasm) !void {
 
     if (wasm.options.shared_memory) {
         // we set the init memory flag to value '2'
-        try writer.writeByte(std.wasm.opcode(.i32_const));
-        try leb.writeULEB128(writer, flag_address);
-        try writer.writeByte(std.wasm.opcode(.i32_const));
-        try leb.writeULEB128(writer, @as(u32, 2));
+        try writeI32Const(writer, flag_address);
+        try writeI32Const(writer, 2);
         try writer.writeByte(std.wasm.opcode(.atomics_prefix));
         try leb.writeULEB128(writer, std.wasm.atomicsOpcode(.i32_atomic_store));
         try leb.writeULEB128(writer, @as(u32, 2)); // alignment
         try leb.writeULEB128(writer, @as(u32, 0)); // offset
 
         // notify any waiters for segment initialization completion
-        try writer.writeByte(std.wasm.opcode(.i32_const));
-        try leb.writeULEB128(writer, flag_address);
+        try writeI32Const(writer, flag_address);
         try writer.writeByte(std.wasm.opcode(.i32_const));
         try leb.writeILEB128(writer, @as(i32, -1)); // number of waiters
         try writer.writeByte(std.wasm.opcode(.atomics_prefix));
@@ -1197,12 +1202,10 @@ fn setupInitMemoryFunction(wasm: *Wasm) !void {
 
         // wait for thread to initialize memory segments
         try writer.writeByte(std.wasm.opcode(.end)); // end $wait
-        try writer.writeByte(std.wasm.opcode(.i32_const));
-        try leb.writeULEB128(writer, flag_address);
-        try writer.writeByte(std.wasm.opcode(.i32_const));
-        try leb.writeULEB128(writer, @as(u32, 1)); // expected flag value
-        try writer.writeByte(std.wasm.opcode(.i32_const));
-        try leb.writeILEB128(writer, @as(i32, -1)); // timeout
+        try writeI32Const(writer, flag_address);
+        try writeI32Const(writer, 1); // expected flag value
+        try writer.writeByte(std.wasm.opcode(.i64_const));
+        try leb.writeILEB128(writer, @as(i64, -1)); // timeout
         try writer.writeByte(std.wasm.opcode(.atomics_prefix));
         try leb.writeULEB128(writer, std.wasm.atomicsOpcode(.memory_atomic_wait32));
         try leb.writeULEB128(writer, @as(u32, 2)); // alignment
@@ -1382,7 +1385,7 @@ fn initializeTLSFunction(wasm: *Wasm) !void {
         try leb.writeULEB128(writer, param_local);
 
         const tls_base_loc = wasm.findGlobalSymbol("__tls_base").?;
-        try writer.writeByte(std.wasm.opcode(.global_get));
+        try writer.writeByte(std.wasm.opcode(.global_set));
         try leb.writeULEB128(writer, tls_base_loc.getSymbol(wasm).index);
 
         // load stack values for the bulk-memory operation
@@ -1403,7 +1406,7 @@ fn initializeTLSFunction(wasm: *Wasm) !void {
         // segment immediate
         try leb.writeULEB128(writer, @as(u32, @intCast(data_index)));
         // memory index immediate (always 0)
-        try writer.writeByte(@as(u32, 0));
+        try writer.writeByte(0);
     }
 
     // If we have to perform any TLS relocations, call the corresponding function
@@ -1589,7 +1592,7 @@ fn setupMemory(wasm: *Wasm) !void {
 /// For each data symbol, sets the virtual address.
 fn allocateVirtualAddresses(wasm: *Wasm) void {
     for (wasm.resolved_symbols.keys()) |loc| {
-        const symbol = loc.getSymbol(wasm);
+        const symbol: *Symbol = loc.getSymbol(wasm);
         if (symbol.tag != .data) {
             continue; // only data symbols have virtual addresses
         }
@@ -1604,7 +1607,11 @@ fn allocateVirtualAddresses(wasm: *Wasm) void {
         const segment_name = segment_info[symbol.index].outputName(merge_segment);
         const segment_index = wasm.data_segments.get(segment_name).?;
         const segment = wasm.segments.items[segment_index];
-        symbol.virtual_address = atom.offset + segment.offset;
+        if (symbol.hasFlag(.WASM_SYM_TLS)) {
+            symbol.virtual_address = atom.offset;
+        } else {
+            symbol.virtual_address = atom.offset + segment.offset;
+        }
     }
 }
 
@@ -1737,7 +1744,7 @@ fn sortDataSegments(wasm: *Wasm, gpa: Allocator) !void {
 
     const SortContext = struct {
         fn sort(_: void, lhs: []const u8, rhs: []const u8) bool {
-            return order(lhs) <= order(rhs);
+            return order(lhs) < order(rhs);
         }
 
         fn order(name: []const u8) u8 {
@@ -1798,6 +1805,7 @@ fn setupStart(wasm: *Wasm) !void {
         log.err("Entry symbol '{s}' is not a function", .{entry_name});
         return error.InvalidEntryKind;
     }
+
     // Simply export the symbol as the start function is reserved
     // for synthetic symbols such as __wasm_start, __wasm_init_memory, and
     // __wasm_apply_global_relocs
