@@ -511,7 +511,8 @@ fn testTlsDso(b: *Build, opts: Options) *Step {
 fn testTlsGd(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-gd", "");
 
-    const main_c =
+    const main_o = cc(b, "main.o", opts);
+    main_o.addSourceBytes(
         \\#include <stdio.h>
         \\__attribute__((tls_model("global-dynamic"))) static _Thread_local int x1 = 1;
         \\__attribute__((tls_model("global-dynamic"))) static _Thread_local int x2;
@@ -524,30 +525,43 @@ fn testTlsGd(b: *Build, opts: Options) *Step {
         \\  printf("%d %d %d %d %d %d\n", x1, x2, x3, x4, get_x5(), get_x6());
         \\  return 0;
         \\}
-    ;
-    const exp_stdout = "1 2 3 4 5 6\n";
+    , "main.c");
+    main_o.addArgs(&.{ "-c", "-fPIC" });
+    const main_o_out = main_o.saveOutputAs("main.o");
 
-    const dso1 = cc(b, "a.so", opts);
-    dso1.addSourceBytes(
+    const a_o = cc(b, "a.o", opts);
+    a_o.addSourceBytes(
         \\__attribute__((tls_model("global-dynamic"))) _Thread_local int x3 = 3;
         \\__attribute__((tls_model("global-dynamic"))) static _Thread_local int x5 = 5;
         \\int get_x5() { return x5; }
     , "a.c");
-    dso1.addArgs(&.{ "-shared", "-fPIC" });
-    const dso1_out = dso1.saveOutputAs("a.so");
+    a_o.addArgs(&.{ "-c", "-fPIC" });
+    const a_o_out = a_o.saveOutputAs("a.o");
 
-    const dso2 = cc(b, "b.so", opts);
-    dso2.addSourceBytes(
+    const b_o = cc(b, "b.o", opts);
+    b_o.addSourceBytes(
         \\__attribute__((tls_model("global-dynamic"))) _Thread_local int x4 = 4;
         \\__attribute__((tls_model("global-dynamic"))) static _Thread_local int x6 = 6;
         \\int get_x6() { return x6; }
     , "b.c");
-    dso2.addArgs(&.{ "-shared", "-fPIC", "-Wl,-no-relax" });
+    b_o.addArgs(&.{ "-c", "-fPIC" });
+    const b_o_out = b_o.saveOutputAs("b.o");
+
+    const exp_stdout = "1 2 3 4 5 6\n";
+
+    const dso1 = cc(b, "a.so", opts);
+    dso1.addArg("-shared");
+    dso1.addFileSource(a_o_out.file);
+    const dso1_out = dso1.saveOutputAs("a.so");
+
+    const dso2 = cc(b, "b.so", opts);
+    dso2.addArgs(&.{ "-shared", "-Wl,-no-relax" });
+    dso2.addFileSource(b_o_out.file);
     const dso2_out = dso2.saveOutputAs("b.so");
 
     {
         const exe = cc(b, null, opts);
-        exe.addSourceBytes(main_c, "main.c");
+        exe.addFileSource(main_o_out.file);
         exe.addFileSource(dso1_out.file);
         exe.addFileSource(dso2_out.file);
         exe.addPrefixedDirectorySource("-Wl,-rpath,", dso1_out.dir);
@@ -560,7 +574,7 @@ fn testTlsGd(b: *Build, opts: Options) *Step {
 
     {
         const exe = cc(b, null, opts);
-        exe.addSourceBytes(main_c, "main.c");
+        exe.addFileSource(main_o_out.file);
         exe.addArg("-Wl,-no-relax");
         exe.addFileSource(dso1_out.file);
         exe.addFileSource(dso2_out.file);
@@ -575,12 +589,10 @@ fn testTlsGd(b: *Build, opts: Options) *Step {
     if (opts.has_static) {
         {
             const exe = cc(b, null, opts);
-            exe.addSourceBytes(main_c, "main.c");
+            exe.addFileSource(main_o_out.file);
+            exe.addFileSource(a_o_out.file);
+            exe.addFileSource(b_o_out.file);
             exe.addArg("-static");
-            exe.addFileSource(dso1_out.file);
-            exe.addFileSource(dso2_out.file);
-            exe.addPrefixedDirectorySource("-Wl,-rpath,", dso1_out.dir);
-            exe.addPrefixedDirectorySource("-Wl,-rpath,", dso2_out.dir);
 
             const run = exe.run();
             run.expectStdOutEqual(exp_stdout);
@@ -589,12 +601,10 @@ fn testTlsGd(b: *Build, opts: Options) *Step {
 
         {
             const exe = cc(b, null, opts);
-            exe.addSourceBytes(main_c, "main.c");
+            exe.addFileSource(main_o_out.file);
+            exe.addFileSource(a_o_out.file);
+            exe.addFileSource(b_o_out.file);
             exe.addArgs(&.{ "-static", "-Wl,-no-relax" });
-            exe.addFileSource(dso1_out.file);
-            exe.addFileSource(dso2_out.file);
-            exe.addPrefixedDirectorySource("-Wl,-rpath,", dso1_out.dir);
-            exe.addPrefixedDirectorySource("-Wl,-rpath,", dso2_out.dir);
 
             const run = exe.run();
             run.expectStdOutEqual(exp_stdout);
