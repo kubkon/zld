@@ -523,6 +523,39 @@ fn testTlsDesc(b: *Build, opts: Options) *Step {
         test_step.dependOn(run.step());
     }
 
+    {
+        const dso = cc(b, "a.so", opts);
+        dso.addFileSource(a_o_out.file);
+        dso.addArg("-shared");
+        const dso_out = dso.saveOutputAs("a.so");
+
+        const exe = cc(b, null, opts);
+        exe.addFileSource(main_o_out.file);
+        exe.addFileSource(dso_out.file);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", dso_out.dir);
+
+        const run = exe.run();
+        run.expectStdOutEqual(exp_stdout);
+        test_step.dependOn(run.step());
+    }
+
+    {
+        const dso = cc(b, "a.so", opts);
+        dso.addFileSource(a_o_out.file);
+        dso.addArgs(&.{ "-shared", "-Wl,-no-relax" });
+        const dso_out = dso.saveOutputAs("a.so");
+
+        const exe = cc(b, null, opts);
+        exe.addFileSource(main_o_out.file);
+        exe.addFileSource(dso_out.file);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", dso_out.dir);
+        exe.addArg("-Wl,-no-relax");
+
+        const run = exe.run();
+        run.expectStdOutEqual(exp_stdout);
+        test_step.dependOn(run.step());
+    }
+
     return test_step;
 }
 
