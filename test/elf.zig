@@ -23,6 +23,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testTlsGd(b, opts));
         elf_step.dependOn(testTlsIe(b, opts));
         elf_step.dependOn(testTlsLd(b, opts));
+        elf_step.dependOn(testTlsLdDso(b, opts));
         elf_step.dependOn(testTlsStatic(b, opts));
     }
 
@@ -910,6 +911,38 @@ fn testTlsLd(b: *Build, opts: Options) *Step {
         run.expectStdOutEqual(exp_stdout);
         test_step.dependOn(run.step());
     }
+
+    return test_step;
+}
+
+fn testTlsLdDso(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-tls-ld-dso", "");
+
+    const dso = cc(b, "a.so", opts);
+    dso.addSourceBytes(
+        \\static _Thread_local int def, def1;
+        \\int f0() { return ++def; }
+        \\int f1() { return ++def1 + def; }
+    , "a.c");
+    dso.addArgs(&.{ "-shared", "-fPIC", "-ftls-model=local-dynamic" });
+    const dso_out = dso.saveOutputAs("a.so");
+
+    const exe = cc(b, null, opts);
+    exe.addSourceBytes(
+        \\#include <stdio.h>
+        \\extern int f0();
+        \\extern int f1();
+        \\int main() {
+        \\  printf("%d %d\n", f0(), f1());
+        \\  return 0;
+        \\}
+    , "main.c");
+    exe.addFileSource(dso_out.file);
+    exe.addPrefixedDirectorySource("-Wl,-rpath,", dso_out.dir);
+
+    const run = exe.run();
+    run.expectStdOutEqual("1 1\n");
+    test_step.dependOn(run.step());
 
     return test_step;
 }

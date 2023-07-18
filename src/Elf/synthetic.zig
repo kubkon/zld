@@ -722,8 +722,7 @@ pub const GotSection = struct {
         }
 
         if (got.emit_tlsld) {
-            if (is_shared) @panic("TODO");
-            try writer.writeIntLittle(u64, 1); // TODO we assume executable output here
+            try writer.writeIntLittle(u64, if (is_shared) @as(u64, 0) else 1);
             try writer.writeIntLittle(u64, 0);
         }
     }
@@ -769,7 +768,6 @@ pub const GotSection = struct {
 
                 .tlsgd => {
                     const offset = symbol.getTlsGdAddress(elf_file);
-
                     if (symbol.flags.import) {
                         elf_file.addRelaDynAssumeCapacity(.{
                             .offset = offset,
@@ -792,7 +790,6 @@ pub const GotSection = struct {
 
                 .gottp => {
                     const offset = symbol.getGotTpAddress(elf_file);
-
                     if (symbol.flags.import) {
                         elf_file.addRelaDynAssumeCapacity(.{
                             .offset = offset,
@@ -810,7 +807,6 @@ pub const GotSection = struct {
 
                 .tlsdesc => {
                     const offset = symbol.getTlsDescAddress(elf_file);
-
                     elf_file.addRelaDynAssumeCapacity(.{
                         .offset = offset,
                         .sym = extra.dynamic,
@@ -818,6 +814,14 @@ pub const GotSection = struct {
                     });
                 },
             }
+        }
+
+        if (is_shared and got.emit_tlsld) {
+            const offset = elf_file.getTlsLdAddress();
+            elf_file.addRelaDynAssumeCapacity(.{
+                .offset = offset,
+                .type = elf.R_X86_64_DTPMOD64,
+            });
         }
     }
 
@@ -846,6 +850,7 @@ pub const GotSection = struct {
                 .tlsdesc => num += 1,
             }
         }
+        if (is_shared and got.emit_tlsld) num += 1;
         return num;
     }
 
