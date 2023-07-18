@@ -1931,6 +1931,7 @@ fn scanRelocs(self: *Elf) !void {
         }
         if (symbol.flags.tlsdesc) {
             log.debug("'{s}' needs TLSDESC", .{symbol.getName(self)});
+            try self.dynsym.addSymbol(index, self);
             try self.got.addTlsDescSymbol(index, self);
         }
     }

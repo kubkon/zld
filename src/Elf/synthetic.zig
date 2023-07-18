@@ -650,7 +650,7 @@ pub const GotSection = struct {
             symbol.setExtra(new_extra, elf_file);
         } else try symbol.addExtra(.{ .tlsdesc = index }, elf_file);
         try got.symbols.append(elf_file.base.allocator, .{ .tlsdesc = sym_index });
-        got.next_index += 1;
+        got.next_index += 2;
     }
 
     pub fn size(got: GotSection) usize {
@@ -804,7 +804,8 @@ pub const GotSection = struct {
                 },
 
                 .tlsdesc => {
-                    const offset = symbol.getTlsGdAddress(elf_file);
+                    const offset = symbol.getTlsDescAddress(elf_file);
+
                     elf_file.addRelaDynAssumeCapacity(.{
                         .offset = offset,
                         .sym = extra.dynamic,
