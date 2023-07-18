@@ -17,6 +17,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testHelloPie(b, opts));
         elf_step.dependOn(testHelloStatic(b, opts));
         elf_step.dependOn(testTlsDesc(b, opts));
+        elf_step.dependOn(testTlsDescImport(b, opts));
         elf_step.dependOn(testTlsDescStatic(b, opts));
         elf_step.dependOn(testTlsDso(b, opts));
         elf_step.dependOn(testTlsGd(b, opts));
@@ -555,6 +556,38 @@ fn testTlsDesc(b: *Build, opts: Options) *Step {
         run.expectStdOutEqual(exp_stdout);
         test_step.dependOn(run.step());
     }
+
+    return test_step;
+}
+
+fn testTlsDescImport(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-tls-desc-import", "");
+
+    const dso = cc(b, "a.so", opts);
+    dso.addSourceBytes(
+        \\_Thread_local int foo = 5;
+        \\_Thread_local int bar;
+    , "a.c");
+    dso.addArgs(&.{ "-fPIC", "-shared", "-mtls-dialect=gnu2" });
+    const dso_out = dso.saveOutputAs("a.so");
+
+    const exe = cc(b, null, opts);
+    exe.addSourceBytes(
+        \\#include <stdio.h>
+        \\extern _Thread_local int foo;
+        \\extern _Thread_local int bar;
+        \\int main() {
+        \\  bar = 7;
+        \\  printf("%d %d\n", foo, bar);
+        \\}
+    , "main.c");
+    exe.addArgs(&.{ "-fPIC", "-mtls-dialect=gnu2" });
+    exe.addFileSource(dso_out.file);
+    exe.addPrefixedDirectorySource("-Wl,-rpath,", dso_out.dir);
+
+    const run = exe.run();
+    run.expectStdOutEqual("5 7\n");
+    test_step.dependOn(run.step());
 
     return test_step;
 }
