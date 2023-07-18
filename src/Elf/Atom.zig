@@ -667,6 +667,7 @@ fn resolveDynAbsReloc(
                     .type = elf.R_X86_64_64,
                     .addend = A,
                 });
+                try applyDynamicReloc(A, elf_file, writer);
             } else {
                 try writer.writeIntLittle(i32, @as(i32, @truncate(S + A)));
             }
@@ -680,6 +681,7 @@ fn resolveDynAbsReloc(
                     .type = elf.R_X86_64_64,
                     .addend = A,
                 });
+                try applyDynamicReloc(A, elf_file, writer);
             } else {
                 try writer.writeIntLittle(i32, @as(i32, @truncate(S + A)));
             }
@@ -692,6 +694,7 @@ fn resolveDynAbsReloc(
                 .type = elf.R_X86_64_64,
                 .addend = A,
             });
+            try applyDynamicReloc(A, elf_file, writer);
         },
 
         .baserel => {
@@ -700,6 +703,7 @@ fn resolveDynAbsReloc(
                 .type = elf.R_X86_64_RELATIVE,
                 .addend = S + A,
             });
+            try applyDynamicReloc(S + A, elf_file, writer);
         },
 
         .ifunc => {
@@ -709,7 +713,14 @@ fn resolveDynAbsReloc(
                 .type = elf.R_X86_64_IRELATIVE,
                 .addend = S_ + A,
             });
+            try applyDynamicReloc(S_ + A, elf_file, writer);
         },
+    }
+}
+
+inline fn applyDynamicReloc(value: i64, elf_file: *Elf, writer: anytype) !void {
+    if (elf_file.options.apply_dynamic_relocs) {
+        try writer.writeIntLittle(i64, value);
     }
 }
 

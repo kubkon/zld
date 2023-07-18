@@ -652,12 +652,21 @@ pub const GotSection = struct {
 
     pub fn write(got: GotSection, elf_file: *Elf, writer: anytype) !void {
         const is_shared = elf_file.options.output_mode == .lib;
+        const apply_relocs = elf_file.options.apply_dynamic_relocs;
 
         for (got.symbols.items) |sym| {
             const symbol = elf_file.getSymbol(sym.getIndex());
             switch (sym) {
                 .got => {
-                    const value = if (symbol.flags.import) 0 else symbol.value;
+                    const value: u64 = blk: {
+                        const value = symbol.getAddress(.{ .plt = false }, elf_file);
+                        if (symbol.flags.import) break :blk 0;
+                        if (symbol.isIFunc(elf_file))
+                            break :blk if (apply_relocs) value else 0;
+                        if (elf_file.options.pic and !symbol.isAbs(elf_file))
+                            break :blk if (apply_relocs) value else 0;
+                        break :blk value;
+                    };
                     try writer.writeIntLittle(u64, value);
                 },
                 .tlsgd => {
@@ -674,7 +683,10 @@ pub const GotSection = struct {
                     if (symbol.flags.import) {
                         try writer.writeIntLittle(u64, 0);
                     } else if (is_shared) {
-                        const offset = symbol.getAddress(.{}, elf_file) - elf_file.getTlsAddress();
+                        const offset = if (apply_relocs)
+                            symbol.getAddress(.{}, elf_file) - elf_file.getTlsAddress()
+                        else
+                            0;
                         try writer.writeIntLittle(u64, offset);
                     } else {
                         const offset = @as(i64, @intCast(symbol.getAddress(.{}, elf_file))) -
@@ -771,7 +783,7 @@ pub const GotSection = struct {
                         elf_file.addRelaDynAssumeCapacity(.{
                             .offset = offset,
                             .type = elf.R_X86_64_TPOFF64,
-                            .addend = @intCast(symbol.getGotTpAddress(elf_file) - elf_file.getTlsAddress()),
+                            .addend = @intCast(symbol.getAddress(.{}, elf_file) - elf_file.getTlsAddress()),
                         });
                     }
                 },
