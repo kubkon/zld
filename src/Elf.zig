@@ -181,16 +181,40 @@ fn resolveFile(
     obj: LinkObject,
     search_dirs: []const []const u8,
 ) !LinkObject {
+    const GetFullPath = struct {
+        const Tag = enum {
+            dso,
+            ar,
+            none,
+        };
+
+        pub fn getFullPath(alloc: Allocator, dir: []const u8, path: []const u8, comptime tag: Tag) !?[]const u8 {
+            const suffix_str = switch (tag) {
+                .dso => "lib{s}.so",
+                .ar => "lib{s}.a",
+                .none => "{s}",
+            };
+            const full_path = try std.fmt.allocPrint(alloc, "{s}" ++ std.fs.path.sep_str ++ suffix_str, .{
+                dir,
+                path,
+            });
+            const tmp = fs.cwd().openFile(full_path, .{}) catch return null;
+            defer tmp.close();
+            return full_path;
+        }
+    };
+    const getFullPath = GetFullPath.getFullPath;
+
     const full_path = full_path: {
         if (mem.startsWith(u8, obj.path, "-l")) {
             const path = obj.path["-l".len..];
-            if (!obj.static) {
-                const search_name = try std.fmt.allocPrint(arena, "lib{s}.so", .{path});
-                if (try resolveFileInDir(arena, search_dirs, search_name)) |full_path| break :full_path full_path;
+            for (search_dirs) |search_dir| {
+                if (!obj.static) {
+                    if (try getFullPath(arena, search_dir, path, .dso)) |full_path| break :full_path full_path;
+                }
+                if (try getFullPath(arena, search_dir, path, .ar)) |full_path| break :full_path full_path;
             }
-            const search_name = try std.fmt.allocPrint(arena, "lib{s}.a", .{path});
-            if (try resolveFileInDir(arena, search_dirs, search_name)) |full_path| break :full_path full_path;
-            self.base.fatal("{s}: library not found", .{path});
+            self.base.fatal("library not found '{s}'", .{path});
             return error.ResolveFail;
         }
 
@@ -198,7 +222,9 @@ fn resolveFile(
             var buffer: [fs.MAX_PATH_BYTES]u8 = undefined;
             const path = std.fs.realpath(obj.path, &buffer) catch |err| switch (err) {
                 error.FileNotFound => {
-                    if (try resolveFileInDir(arena, search_dirs, obj.path)) |path| break :path path;
+                    for (search_dirs) |search_dir| {
+                        if (try getFullPath(arena, search_dir, obj.path, .none)) |path| break :path path;
+                    }
                     self.base.fatal("file not found '{s}'", .{obj.path});
                     return error.ResolveFail;
                 },
@@ -213,20 +239,6 @@ fn resolveFile(
         .needed = obj.needed,
         .static = obj.static,
     };
-}
-
-fn resolveFileInDir(arena: Allocator, search_dirs: []const []const u8, search_name: []const u8) !?[]const u8 {
-    for (search_dirs) |dir| {
-        const full_path = try fs.path.join(arena, &[_][]const u8{ dir, search_name });
-        if (checkFileExists(full_path)) return full_path;
-    }
-    return null;
-}
-
-fn checkFileExists(path: []const u8) bool {
-    const tmp = fs.cwd().openFile(path, .{}) catch return false;
-    defer tmp.close();
-    return true;
 }
 
 fn hasSharedLibraryExt(filename: []const u8) bool {
