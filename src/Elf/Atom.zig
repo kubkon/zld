@@ -251,9 +251,13 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
                 }
             },
 
-            elf.R_X86_64_TLSDESC_CALL,
-            elf.R_X86_64_GOTPC32_TLSDESC,
-            => @panic("TODO"),
+            elf.R_X86_64_GOTPC32_TLSDESC => {
+                const should_relax = elf_file.options.static or
+                    (elf_file.options.relax and !is_shared and !symbol.flags.import);
+                if (!should_relax) {
+                    symbol.flags.tlsdesc = true;
+                }
+            },
 
             elf.R_X86_64_TPOFF32,
             elf.R_X86_64_TPOFF64,
@@ -266,6 +270,7 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
             elf.R_X86_64_DTPOFF64,
             elf.R_X86_64_SIZE32,
             elf.R_X86_64_SIZE64,
+            elf.R_X86_64_TLSDESC_CALL,
             => {},
 
             else => elf_file.base.fatal("{s}: unknown relocation type: {}", .{
@@ -626,6 +631,21 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
                 }
             },
 
+            elf.R_X86_64_GOTPC32_TLSDESC => {
+                if (target.flags.tlsdesc) {
+                    const S_ = @as(i64, @intCast(target.getTlsDescAddress(elf_file)));
+                    try cwriter.writeIntLittle(i32, @as(i32, @intCast(S_ + A - P)));
+                } else {
+                    try relaxGotPcTlsDesc(code[rel.r_offset - 3 ..]);
+                    try cwriter.writeIntLittle(i32, @as(i32, @intCast(S - TP)));
+                }
+            },
+
+            elf.R_X86_64_TLSDESC_CALL => if (!target.flags.tlsdesc) {
+                // call -> nop
+                try cwriter.writeAll(&.{ 0x66, 0x90 });
+            },
+
             else => elf_file.base.fatal("unhandled relocation type: {}", .{fmtRelocType(r_type)}),
         }
     }
@@ -906,6 +926,22 @@ fn relaxGotTpOff(code: []u8) !void {
     const old_inst = disassemble(code) orelse return error.RelaxFail;
     switch (old_inst.encoding.mnemonic) {
         .mov => {
+            const inst = try Instruction.new(old_inst.prefix, .mov, &.{
+                old_inst.ops[0],
+                // TODO: hack to force imm32s in the assembler
+                .{ .imm = Immediate.s(-129) },
+            });
+            relocs_log.debug("    relaxing {} => {}", .{ old_inst.encoding, inst.encoding });
+            encode(&.{inst}, code) catch return error.RelaxFail;
+        },
+        else => return error.RelaxFail,
+    }
+}
+
+fn relaxGotPcTlsDesc(code: []u8) !void {
+    const old_inst = disassemble(code) orelse return error.RelaxFail;
+    switch (old_inst.encoding.mnemonic) {
+        .lea => {
             const inst = try Instruction.new(old_inst.prefix, .mov, &.{
                 old_inst.ops[0],
                 // TODO: hack to force imm32s in the assembler

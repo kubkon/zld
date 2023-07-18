@@ -592,6 +592,7 @@ pub const GotSection = struct {
         got: u32,
         tlsgd: u32,
         gottp: u32,
+        tlsdesc: u32,
 
         pub inline fn getIndex(gt: GotSymbol) u32 {
             return switch (gt) {
@@ -640,11 +641,23 @@ pub const GotSection = struct {
         got.next_index += 1;
     }
 
+    pub fn addTlsDescSymbol(got: *GotSection, sym_index: u32, elf_file: *Elf) !void {
+        const index = got.next_index;
+        const symbol = elf_file.getSymbol(sym_index);
+        if (symbol.getExtra(elf_file)) |extra| {
+            var new_extra = extra;
+            new_extra.tlsdesc = index;
+            symbol.setExtra(new_extra, elf_file);
+        } else try symbol.addExtra(.{ .tlsdesc = index }, elf_file);
+        try got.symbols.append(elf_file.base.allocator, .{ .tlsdesc = sym_index });
+        got.next_index += 1;
+    }
+
     pub fn size(got: GotSection) usize {
         var s: usize = 0;
         for (got.symbols.items) |sym| switch (sym) {
             .got, .gottp => s += 8,
-            .tlsgd => s += 16,
+            .tlsgd, .tlsdesc => s += 16,
         };
         if (got.emit_tlsld) s += 8;
         return s;
@@ -669,6 +682,7 @@ pub const GotSection = struct {
                     };
                     try writer.writeIntLittle(u64, value);
                 },
+
                 .tlsgd => {
                     if (symbol.flags.import) {
                         try writer.writeIntLittle(u64, 0);
@@ -679,6 +693,7 @@ pub const GotSection = struct {
                         try writer.writeIntLittle(u64, offset);
                     }
                 },
+
                 .gottp => {
                     if (symbol.flags.import) {
                         try writer.writeIntLittle(u64, 0);
@@ -694,10 +709,16 @@ pub const GotSection = struct {
                         try writer.writeIntLittle(u64, @as(u64, @bitCast(offset)));
                     }
                 },
+
+                .tlsdesc => {
+                    try writer.writeIntLittle(u64, 0);
+                    try writer.writeIntLittle(u64, 0);
+                },
             }
         }
 
         if (got.emit_tlsld) {
+            if (is_shared) @panic("TODO");
             try writer.writeIntLittle(u64, 1); // TODO we assume executable output here
         }
     }
@@ -781,6 +802,15 @@ pub const GotSection = struct {
                         });
                     }
                 },
+
+                .tlsdesc => {
+                    const offset = symbol.getTlsGdAddress(elf_file);
+                    elf_file.addRelaDynAssumeCapacity(.{
+                        .offset = offset,
+                        .sym = extra.dynamic,
+                        .type = elf.R_X86_64_TLSDESC,
+                    });
+                },
             }
         }
     }
@@ -806,6 +836,8 @@ pub const GotSection = struct {
                 .gottp => if (symbol.flags.import or is_shared) {
                     num += 1;
                 },
+
+                .tlsdesc => num += 1,
             }
         }
         return num;
@@ -820,6 +852,7 @@ pub const GotSection = struct {
                 .tlsgd => "$tlsgd".len,
                 .got => "$got".len,
                 .gottp => "$gottp".len,
+                .tlsdesc => "$tlsdesc".len,
             };
             const symbol = elf_file.getSymbol(sym.getIndex());
             const name_len = symbol.getName(elf_file).len;
@@ -843,6 +876,7 @@ pub const GotSection = struct {
                 .tlsgd => "$tlsgd",
                 .got => "$got",
                 .gottp => "$gottp",
+                .tlsdesc => "$tlsdesc",
             };
             const symbol = elf_file.getSymbol(sym.getIndex());
             const name = try std.fmt.allocPrint(gpa, "{s}{s}", .{ symbol.getName(elf_file), suffix });
@@ -852,9 +886,10 @@ pub const GotSection = struct {
                 .tlsgd => symbol.getTlsGdAddress(elf_file),
                 .got => symbol.getGotAddress(elf_file),
                 .gottp => symbol.getGotTpAddress(elf_file),
+                .tlsdesc => symbol.getTlsDescAddress(elf_file),
             };
             const st_size: u64 = switch (sym) {
-                .tlsgd => 16,
+                .tlsgd, .tlsdesc => 16,
                 .got, .gottp => 8,
             };
             ctx.symtab[ilocal] = .{

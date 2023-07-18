@@ -16,6 +16,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testHelloDynamic(b, opts));
         elf_step.dependOn(testHelloPie(b, opts));
         elf_step.dependOn(testHelloStatic(b, opts));
+        elf_step.dependOn(testTlsDescStatic(b, opts));
         elf_step.dependOn(testTlsDso(b, opts));
         elf_step.dependOn(testTlsGd(b, opts));
         elf_step.dependOn(testTlsStatic(b, opts));
@@ -462,6 +463,60 @@ fn testHelloPie(b: *Build, opts: Options) *Step {
     check.checkStart("shdr {*}");
     check.checkNext("name .dynamic");
     test_step.dependOn(&check.step);
+
+    return test_step;
+}
+
+fn testTlsDescStatic(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-tls-desc-static", "");
+
+    if (!opts.has_static) {
+        skipTestStep(test_step);
+        return test_step;
+    }
+
+    const main_o = cc(b, null, opts);
+    main_o.addSourceBytes(
+        \\#include <stdio.h>
+        \\extern _Thread_local int foo;
+        \\int main() {
+        \\  foo = 42;
+        \\  printf("%d\n", foo);
+        \\}
+    , "main.c");
+    main_o.addArgs(&.{ "-c", "-fPIC", "-mtls-dialect=gnu2" });
+    const main_o_out = main_o.saveOutputAs("main.o");
+
+    const a_o = cc(b, null, opts);
+    a_o.addSourceBytes(
+        \\_Thread_local int foo;
+    , "a.c");
+    a_o.addArgs(&.{ "-c", "-fPIC", "-mtls-dialect=gnu2" });
+    const a_o_out = a_o.saveOutputAs("a.o");
+
+    const exp_stdout = "42\n";
+
+    {
+        const exe = cc(b, null, opts);
+        exe.addFileSource(main_o_out.file);
+        exe.addFileSource(a_o_out.file);
+        exe.addArg("-static");
+
+        const run = exe.run();
+        run.expectStdOutEqual(exp_stdout);
+        test_step.dependOn(run.step());
+    }
+
+    {
+        const exe = cc(b, null, opts);
+        exe.addFileSource(main_o_out.file);
+        exe.addFileSource(a_o_out.file);
+        exe.addArgs(&.{ "-static", "-Wl,-no-relax" });
+
+        const run = exe.run();
+        run.expectStdOutEqual(exp_stdout);
+        test_step.dependOn(run.step());
+    }
 
     return test_step;
 }

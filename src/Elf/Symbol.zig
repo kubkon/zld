@@ -117,6 +117,12 @@ pub fn getGotTpAddress(symbol: Symbol, elf_file: *Elf) u64 {
     return elf_file.getGotEntryAddress(extra.gottp);
 }
 
+pub fn getTlsDescAddress(symbol: Symbol, elf_file: *Elf) u64 {
+    if (!symbol.flags.tlsdesc) return 0;
+    const extra = symbol.getExtra(elf_file).?;
+    return elf_file.getGotEntryAddress(extra.tlsdesc);
+}
+
 pub fn getAlignment(symbol: Symbol, elf_file: *Elf) !u64 {
     const file = symbol.getFile(elf_file) orelse return 0;
     const shared = file.shared;
@@ -295,6 +301,9 @@ pub const Flags = packed struct {
 
     /// Whether the symbol contains GOTTP indirection.
     gottp: bool = false,
+
+    /// Whether the symbol contains TLSDESC indirection.
+    tlsdesc: bool = false,
 };
 
 pub const Extra = struct {
@@ -305,6 +314,7 @@ pub const Extra = struct {
     copy_rel: u32 = 0,
     tlsgd: u32 = 0,
     gottp: u32 = 0,
+    tlsdesc: u32 = 0,
 };
 
 const std = @import("std");

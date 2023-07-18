@@ -1929,6 +1929,10 @@ fn scanRelocs(self: *Elf) !void {
             log.debug("'{s}' needs GOTTP", .{symbol.getName(self)});
             try self.got.addGotTpSymbol(index, self);
         }
+        if (symbol.flags.tlsdesc) {
+            log.debug("'{s}' needs TLSDESC", .{symbol.getName(self)});
+            try self.got.addTlsDescSymbol(index, self);
+        }
     }
 
     if (self.needs_tlsld) {
