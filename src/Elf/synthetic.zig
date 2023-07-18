@@ -30,6 +30,13 @@ pub const DynamicSection = struct {
         if (elf_file.options.z_now) {
             flags |= elf.DF_BIND_NOW;
         }
+        for (elf_file.got.symbols.items) |sym| switch (sym) {
+            .gottp => {
+                flags |= elf.DF_STATIC_TLS;
+                break;
+            },
+            else => {},
+        };
         return if (flags > 0) flags else null;
     }
 
@@ -659,16 +666,26 @@ pub const GotSection = struct {
                         try writer.writeIntLittle(u64, 0);
                     } else {
                         try writer.writeIntLittle(u64, if (is_shared) @as(u64, 0) else 1);
-                        try writer.writeIntLittle(u64, symbol.getAddress(.{}, elf_file) - elf_file.getDtpAddress());
+                        const offset = symbol.getAddress(.{}, elf_file) - elf_file.getDtpAddress();
+                        try writer.writeIntLittle(u64, offset);
                     }
                 },
                 .gottp => {
                     if (symbol.flags.import) {
                         try writer.writeIntLittle(u64, 0);
                     } else if (is_shared) {
-                        try writer.writeIntLittle(u64, symbol.getAddress(.{}, elf_file) - elf_file.getTlsAddress());
+                        const offset = symbol.getAddress(.{}, elf_file) - elf_file.getTlsAddress();
+                        try writer.writeIntLittle(u64, offset);
                     } else {
-                        try writer.writeIntLittle(u64, symbol.getAddress(.{}, elf_file) - elf_file.getTpAddress());
+                        const offset = @as(i64, @intCast(symbol.getAddress(.{}, elf_file))) -
+                            @as(i64, @intCast(elf_file.getTpAddress()));
+                        std.log.warn("{x} - {x} = {x} ({s})", .{
+                            symbol.getAddress(.{}, elf_file),
+                            elf_file.getTpAddress(),
+                            @as(u64, @bitCast(offset)),
+                            symbol.getName(elf_file),
+                        });
+                        try writer.writeIntLittle(u64, @as(u64, @bitCast(offset)));
                     }
                 },
             }

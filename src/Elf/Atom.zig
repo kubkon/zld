@@ -251,7 +251,9 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
                 }
             },
 
-            elf.R_X86_64_GOTPC32_TLSDESC => @panic("TODO"),
+            elf.R_X86_64_TLSDESC_CALL,
+            elf.R_X86_64_GOTPC32_TLSDESC,
+            => @panic("TODO"),
 
             elf.R_X86_64_TPOFF32,
             elf.R_X86_64_TPOFF64,
@@ -264,7 +266,6 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
             elf.R_X86_64_DTPOFF64,
             elf.R_X86_64_SIZE32,
             elf.R_X86_64_SIZE64,
-            elf.R_X86_64_TLSDESC_CALL,
             => {},
 
             else => elf_file.base.fatal("{s}: unknown relocation type: {}", .{
