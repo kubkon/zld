@@ -619,7 +619,8 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
 
             elf.R_X86_64_TLSLD => {
                 if (elf_file.got.emit_tlsld) {
-                    try cwriter.writeIntLittle(i32, @as(i32, @intCast(@as(i64, @intCast(elf_file.getTlsLdAddress())) + A - P)));
+                    const S_ = @as(i64, @intCast(elf_file.getTlsLdAddress()));
+                    try cwriter.writeIntLittle(i32, @as(i32, @intCast(S_ + A - P)));
                 } else {
                     try relaxTlsLdToLe(
                         relocs[i .. i + 2],

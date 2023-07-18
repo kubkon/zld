@@ -653,13 +653,17 @@ pub const GotSection = struct {
         got.next_index += 2;
     }
 
+    pub inline fn getTlsLdIndex(got: GotSection) u32 {
+        return got.next_index;
+    }
+
     pub fn size(got: GotSection) usize {
         var s: usize = 0;
         for (got.symbols.items) |sym| switch (sym) {
             .got, .gottp => s += 8,
             .tlsgd, .tlsdesc => s += 16,
         };
-        if (got.emit_tlsld) s += 8;
+        if (got.emit_tlsld) s += 16;
         return s;
     }
 
@@ -720,6 +724,7 @@ pub const GotSection = struct {
         if (got.emit_tlsld) {
             if (is_shared) @panic("TODO");
             try writer.writeIntLittle(u64, 1); // TODO we assume executable output here
+            try writer.writeIntLittle(u64, 0);
         }
     }
 
@@ -912,7 +917,7 @@ pub const GotSection = struct {
                 .st_other = 0,
                 .st_shndx = elf_file.got_sect_index.?,
                 .st_value = elf_file.getTlsLdAddress(),
-                .st_size = @sizeOf(u64),
+                .st_size = 16,
             };
             ilocal += 1;
         }

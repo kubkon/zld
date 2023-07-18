@@ -2507,7 +2507,7 @@ pub inline fn getPltGotEntryAddress(self: *Elf, index: u32) u64 {
 }
 
 pub inline fn getTlsLdAddress(self: *Elf) u64 {
-    return self.getGotEntryAddress(@as(u32, @intCast(self.got.symbols.items.len)));
+    return self.getGotEntryAddress(self.got.getTlsLdIndex());
 }
 
 pub fn getTpAddress(self: *Elf) u64 {
