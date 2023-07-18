@@ -3,67 +3,71 @@ const usage =
     \\
     \\General Options:
     \\--allow-multiple-definition   Allow multiple definitions
+    \\--apply-dynamic-relocs        Apply link-time values for dynamic relocations (default)
+    \\  --no-apply-dynamic-relocs
     \\--as-needed                   Only set DT_NEEDED for shared libraries if used
-    \\--no-as-needed                Always set DT_NEEDED for shared libraries (default)
-    \\--Bstatic                     Do not link against shared libraries
+    \\  --no-as-needed
+    \\--Bstatic, --static           Do not link against shared libraries
     \\--Bdynamic                    Link against shared libraries (default)
     \\--build-id=[none,md5,sha1,sha256,uuid,HEXSTRING]
     \\                              Generate build ID
-    \\--no-build-id                 Don't generate build ID
-    \\--hash-style=[none,sysv,gnu,both]
-    \\                              Set hash style
+    \\  --no-build-id
+    \\--debug-log [value]           Turn on debugging logs for [value] (requires zld compiled with -Dlog)
     \\--dynamic                     Alias for --Bdynamic
     \\--dynamic-linker=[value], -I [value]      
     \\                              Set the dynamic linker to use
-    \\--no-dynamic-linker           Don't set the dynamic linker
-    \\--end-group                   Ignored for compatibility with GNU
+    \\  --no-dynamic-linker
     \\--eh-frame-hdr                Create .eh_frame_hdr section (default)
-    \\--export-dynamic, -E          Export all dynamic symbols
-    \\--no-export-dynamic           Don't export all dynamic symbols
-    \\--no-eh-frame-hdr             Don't create .eh_frame_hdr section
+    \\  --no-eh-frame-hdr
+    \\--end-group                   Ignored for compatibility with GNU
     \\--entry=[value], -e [value]   Set name of the entry point symbol
+    \\--export-dynamic, -E          Export all dynamic symbols
+    \\  --no-export-dynamic
     \\--gc-sections                 Remove unused sections
-    \\--no-gc-sections              Don't remove unused sections (default)
-    \\--print-gc-sections           List removed unused sections to stderr
+    \\  --no-gc-sections
+    \\--hash-style=[none,sysv,gnu,both]
+    \\                              Set hash style
+    \\--help, -h                    Print this help and exit
+    \\--image-base=[value]          Set the base address
     \\-l[value]                     Specify library to link against
     \\-L[value]                     Specify library search dir
     \\-m [value]                    Set target emulation
-    \\--pie                         Create a position independent executable
-    \\  --pic-executable
-    \\--no-pie                      Create a position dependent executable (default)
-    \\  --no-pic-executable
+    \\-o [value]                    Specify output path for the final artifact
+    \\--pie, --pic-executable       Create a position independent executable
+    \\  --no-pie, --no-pic-executable
     \\--pop-state                   Restore the states saved by --push-state
+    \\--print-gc-sections           List removed unused sections to stderr
     \\--push-state                  Save the current state of --as-needed, -static and --whole-archive
     \\--relax                       Optimize instructions (default)
-    \\--no-relax                    Don't optimize instructions
+    \\  --no-relax
     \\--rpath=[value], -R [value]   Specify runtime path
     \\--shared                      Create dynamic library
-    \\--static                      Alias for --Bstatic
     \\--start-group                 Ignored for compatibility with GNU
     \\--strip-all, -s               Strip all symbols. Implies --strip-debug
     \\--strip-debug, -S             Strip .debug_ sections
     \\--warn-common                 Warn about duplicate common symbols
-    \\--image-base=[value]          Set the base address
-    \\-o [value]                    Specify output path for the final artifact
     \\-z                            Set linker extension flags
-    \\  stack-size=[value]          Override default stack size
     \\  execstack                   Require executable stack
-    \\  noexecstack                 Force stack non-executable
+    \\    noexecstack               
     \\  execstack-if-needed         Make the stack executable if the input file explicitly requests it
     \\  lazy                        Enable lazy function resolution (default)
-    \\  now                         Disable lazy function resolution
     \\  nocopyreloc                 Do not create copy relocations
+    \\  nodlopen                    Mark DSO not available to dlopen
+    \\  now                         Disable lazy function resolution
+    \\  stack-size=[value]          Override default stack size
     \\  text                        Do not allow relocations against read-only segments (default)
-    \\  notext                      Allow relocations against read-only segments. Sets the DT_TEXTREL flag
-    \\                              in the .dynamic section
+    \\    notext                    
     \\  relro                       Make some sections read-only after dynamic relocations
-    \\  norelro                     Don't apply relro security optimisation (default)
-    \\-h, --help                    Print this help and exit
+    \\    norelro                   
     \\--verbose                     Print full linker invocation to stderr
-    \\--debug-log [value]           Turn on debugging logs for [value] (requires zld compiled with -Dlog)
+    \\-v                            Print version
     \\
     \\ld.zld: supported targets: elf64-x86-64
     \\ld.zld: supported emulations: elf_x86_64
+;
+
+const version =
+    \\ld.zld 0.0.1 (compatible with GNU ld)
 ;
 
 const cmd = "ld.zld";
@@ -92,6 +96,7 @@ pic: bool = false,
 warn_common: bool = false,
 build_id: ?BuildId = null,
 hash_style: ?HashStyle = null,
+apply_dynamic_relocs: bool = true,
 /// -z flags
 /// Overrides default stack size.
 z_stack_size: ?u64 = null,
@@ -104,6 +109,8 @@ z_execstack_if_needed: bool = false,
 z_now: bool = false,
 /// Do not create copy relocations.
 z_nocopyreloc: bool = false,
+/// Mark DSO not available for dlopen.
+z_nodlopen: bool = false,
 /// Do not allow relocations against read-only segments.
 z_text: bool = true,
 /// Make some sections read-only after dynamic relocations.
@@ -117,6 +124,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
     var search_dirs = std.StringArrayHashMap(void).init(arena);
     var rpath_list = std.StringArrayHashMap(void).init(arena);
     var verbose = false;
+    var print_version = false;
     var opts: Options = .{
         .emit = .{
             .directory = std.fs.cwd(),
@@ -257,6 +265,12 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             } else {
                 ctx.fatal("invalid hash-style value '--hash-style={s}'", .{value});
             }
+        } else if (p.flagAny("apply-dynamic-relocs")) {
+            opts.apply_dynamic_relocs = true;
+        } else if (p.flagAny("no-apply-dynamic-relocs")) {
+            opts.apply_dynamic_relocs = false;
+        } else if (p.flag1("v")) {
+            print_version = true;
         } else if (p.argZ("stack-size")) |value| {
             opts.z_stack_size = std.fmt.parseInt(u64, value, 0) catch
                 ctx.fatal("Could not parse value '{s}' into integer", .{value});
@@ -272,6 +286,8 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             opts.z_now = false;
         } else if (p.flagZ("nocopyreloc")) {
             opts.z_nocopyreloc = true;
+        } else if (p.flagZ("nodlopen")) {
+            opts.z_nodlopen = true;
         } else if (p.flagZ("text")) {
             opts.z_text = true;
         } else if (p.flagZ("notext")) {
@@ -292,6 +308,8 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         }
         std.debug.print("{s}\n", .{args[args.len - 1]});
     }
+
+    if (print_version) ctx.warn("{s}", .{version});
 
     if (positionals.items.len == 0) ctx.fatal("Expected at least one positional argument", .{});
     if (opts.output_mode == .lib) opts.pic = true;

@@ -94,7 +94,7 @@ pub const SysCmd = struct {
 
     pub fn check(sys_cmd: SysCmd) *CheckObject {
         const b = sys_cmd.cmd.step.owner;
-        const ch = CheckObject.create(b, sys_cmd.out, .macho);
+        const ch = CheckObject.create(b, sys_cmd.out, builtin.target.ofmt);
         ch.step.dependOn(&sys_cmd.cmd.step);
         return ch;
     }

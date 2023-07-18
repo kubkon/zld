@@ -360,7 +360,9 @@ pub fn scanRelocs(self: *Object, elf_file: *Elf) !void {
     for (self.atoms.items) |atom_index| {
         const atom = elf_file.getAtom(atom_index) orelse continue;
         if (!atom.alive) continue;
-        if (atom.getInputShdr(elf_file).sh_flags & elf.SHF_ALLOC == 0) continue;
+        const shdr = atom.getInputShdr(elf_file);
+        if (shdr.sh_flags & elf.SHF_ALLOC == 0) continue;
+        if (shdr.sh_type == elf.SHT_NOBITS) continue;
         try atom.scanRelocs(elf_file);
     }
 

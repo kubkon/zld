@@ -155,6 +155,8 @@ pub fn initOutputSection(self: *Atom, elf_file: *Elf) !void {
 pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
     const object = self.getObject(elf_file);
     const relocs = self.getRelocs(elf_file);
+    const code = try self.getCodeUncompressAlloc(elf_file);
+    defer elf_file.base.allocator.free(code);
     var i: usize = 0;
     while (i < relocs.len) : (i += 1) {
         const rel = relocs[i];
@@ -216,8 +218,11 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
                     // Relax if building with -static flag as __tls_get_addr() will not be present in libc.a
                     // We skip the next relocation.
                     i += 1;
-                } else if (elf_file.options.relax and !symbol.flags.import and is_shared) {
-                    @panic("TODO");
+                } else if (elf_file.options.relax and !symbol.flags.import and is_shared and
+                    elf_file.options.z_nodlopen)
+                {
+                    symbol.flags.gottp = true;
+                    i += 1;
                 } else {
                     symbol.flags.tlsgd = true;
                 }
@@ -236,13 +241,23 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
             },
 
             elf.R_X86_64_GOTTPOFF => {
-                const should_relax = elf_file.options.relax and !is_shared and !symbol.flags.import;
+                const should_relax = blk: {
+                    if (!elf_file.options.relax or is_shared or symbol.flags.import) break :blk false;
+                    relaxGotTpOff(code[rel.r_offset - 3 ..]) catch break :blk false;
+                    break :blk true;
+                };
                 if (!should_relax) {
-                    @panic("TODO");
+                    symbol.flags.gottp = true;
                 }
             },
 
-            elf.R_X86_64_GOTPC32_TLSDESC => @panic("TODO"),
+            elf.R_X86_64_GOTPC32_TLSDESC => {
+                const should_relax = elf_file.options.static or
+                    (elf_file.options.relax and !is_shared and !symbol.flags.import);
+                if (!should_relax) {
+                    symbol.flags.tlsdesc = true;
+                }
+            },
 
             elf.R_X86_64_TPOFF32,
             elf.R_X86_64_TPOFF64,
@@ -579,44 +594,33 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
             elf.R_X86_64_DTPOFF64 => try cwriter.writeIntLittle(i64, S + A - DTP),
 
             elf.R_X86_64_GOTTPOFF => {
-                blk: {
-                    var inst_code = code[rel.r_offset - 3 ..];
-                    const old_inst = disassemble(inst_code) orelse break :blk;
-                    switch (old_inst.encoding.mnemonic) {
-                        .mov => {
-                            const inst = try Instruction.new(old_inst.prefix, .mov, &.{
-                                old_inst.ops[0],
-                                // TODO: hack to force imm32s in the assembler
-                                .{ .imm = Immediate.s(-129) },
-                            });
-                            relocs_log.debug("    relaxing {} => {}", .{ old_inst.encoding, inst.encoding });
-                            try encode(&.{inst}, inst_code);
-                            try cwriter.writeIntLittle(i32, @as(i32, @intCast(S - TP)));
-                        },
-                        else => break :blk,
-                    }
-                    continue;
+                if (target.flags.gottp) {
+                    const S_ = @as(i64, @intCast(target.getGotTpAddress(elf_file)));
+                    try cwriter.writeIntLittle(i32, @as(i32, @intCast(S_ + A - P)));
+                } else {
+                    try relaxGotTpOff(code[rel.r_offset - 3 ..]);
+                    try cwriter.writeIntLittle(i32, @as(i32, @intCast(S - TP)));
                 }
-                elf_file.base.fatal("TODO could not rewrite GOTTPOFF", .{});
             },
 
             elf.R_X86_64_TLSGD => {
                 if (target.flags.tlsgd) {
-                    elf_file.base.fatal("TODO get TLSGD address of the symbol '{s}'", .{target.getName(elf_file)});
+                    const S_ = @as(i64, @intCast(target.getTlsGdAddress(elf_file)));
+                    try cwriter.writeIntLittle(i32, @as(i32, @intCast(S_ + A - P)));
+                } else if (target.flags.gottp) {
+                    const S_ = @as(i64, @intCast(target.getGotTpAddress(elf_file)));
+                    try relaxTlsGdToIe(relocs[i .. i + 2], @intCast(S_ - P), elf_file, &stream);
+                    i += 1;
                 } else {
-                    try relaxTlsGdToLe(
-                        relocs[i .. i + 2],
-                        @as(i32, @intCast(S - TP)),
-                        elf_file,
-                        &stream,
-                    );
+                    try relaxTlsGdToLe(relocs[i .. i + 2], @as(i32, @intCast(S - TP)), elf_file, &stream);
                     i += 1;
                 }
             },
 
             elf.R_X86_64_TLSLD => {
                 if (elf_file.got.emit_tlsld) {
-                    try cwriter.writeIntLittle(i32, @as(i32, @intCast(@as(i64, @intCast(elf_file.getTlsLdAddress())) + A - P)));
+                    const S_ = @as(i64, @intCast(elf_file.getTlsLdAddress()));
+                    try cwriter.writeIntLittle(i32, @as(i32, @intCast(S_ + A - P)));
                 } else {
                     try relaxTlsLdToLe(
                         relocs[i .. i + 2],
@@ -626,6 +630,21 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
                     );
                     i += 1;
                 }
+            },
+
+            elf.R_X86_64_GOTPC32_TLSDESC => {
+                if (target.flags.tlsdesc) {
+                    const S_ = @as(i64, @intCast(target.getTlsDescAddress(elf_file)));
+                    try cwriter.writeIntLittle(i32, @as(i32, @intCast(S_ + A - P)));
+                } else {
+                    try relaxGotPcTlsDesc(code[rel.r_offset - 3 ..]);
+                    try cwriter.writeIntLittle(i32, @as(i32, @intCast(S - TP)));
+                }
+            },
+
+            elf.R_X86_64_TLSDESC_CALL => if (!target.flags.tlsdesc) {
+                // call -> nop
+                try cwriter.writeAll(&.{ 0x66, 0x90 });
             },
 
             else => elf_file.base.fatal("unhandled relocation type: {}", .{fmtRelocType(r_type)}),
@@ -669,6 +688,7 @@ fn resolveDynAbsReloc(
                     .type = elf.R_X86_64_64,
                     .addend = A,
                 });
+                try applyDynamicReloc(A, elf_file, writer);
             } else {
                 try writer.writeIntLittle(i32, @as(i32, @truncate(S + A)));
             }
@@ -682,6 +702,7 @@ fn resolveDynAbsReloc(
                     .type = elf.R_X86_64_64,
                     .addend = A,
                 });
+                try applyDynamicReloc(A, elf_file, writer);
             } else {
                 try writer.writeIntLittle(i32, @as(i32, @truncate(S + A)));
             }
@@ -694,6 +715,7 @@ fn resolveDynAbsReloc(
                 .type = elf.R_X86_64_64,
                 .addend = A,
             });
+            try applyDynamicReloc(A, elf_file, writer);
         },
 
         .baserel => {
@@ -702,6 +724,7 @@ fn resolveDynAbsReloc(
                 .type = elf.R_X86_64_RELATIVE,
                 .addend = S + A,
             });
+            try applyDynamicReloc(S + A, elf_file, writer);
         },
 
         .ifunc => {
@@ -711,7 +734,14 @@ fn resolveDynAbsReloc(
                 .type = elf.R_X86_64_IRELATIVE,
                 .addend = S_ + A,
             });
+            try applyDynamicReloc(S_ + A, elf_file, writer);
         },
+    }
+}
+
+inline fn applyDynamicReloc(value: i64, elf_file: *Elf, writer: anytype) !void {
+    if (elf_file.options.apply_dynamic_relocs) {
+        try writer.writeIntLittle(i64, value);
     }
 }
 
@@ -823,6 +853,29 @@ fn relaxRexGotpcrelx(code: []u8) !void {
     }
 }
 
+fn relaxTlsGdToIe(rels: []align(1) const elf.Elf64_Rela, value: i32, elf_file: *Elf, stream: anytype) !void {
+    assert(rels.len == 2);
+    const writer = stream.writer();
+    switch (rels[1].r_type()) {
+        elf.R_X86_64_PC32,
+        elf.R_X86_64_PLT32,
+        => {
+            var insts = [_]u8{
+                0x64, 0x48, 0x8b, 0x04, 0x25, 0, 0, 0, 0, // movq %fs:0,%rax
+                0x48, 0x03, 0x05, 0, 0, 0, 0, // add foo@gottpoff(%rip), %rax
+            };
+            mem.writeIntLittle(i32, insts[12..][0..4], value - 12);
+            try stream.seekBy(-4);
+            try writer.writeAll(&insts);
+        },
+
+        else => elf_file.base.fatal("TODO rewrite {} when followed by {}", .{
+            fmtRelocType(rels[0].r_type()),
+            fmtRelocType(rels[1].r_type()),
+        }),
+    }
+}
+
 fn relaxTlsGdToLe(rels: []align(1) const elf.Elf64_Rela, value: i32, elf_file: *Elf, stream: anytype) !void {
     assert(rels.len == 2);
     const writer = stream.writer();
@@ -867,6 +920,38 @@ fn relaxTlsLdToLe(rels: []align(1) const elf.Elf64_Rela, value: i32, elf_file: *
             fmtRelocType(rels[0].r_type()),
             fmtRelocType(rels[1].r_type()),
         }),
+    }
+}
+
+fn relaxGotTpOff(code: []u8) !void {
+    const old_inst = disassemble(code) orelse return error.RelaxFail;
+    switch (old_inst.encoding.mnemonic) {
+        .mov => {
+            const inst = try Instruction.new(old_inst.prefix, .mov, &.{
+                old_inst.ops[0],
+                // TODO: hack to force imm32s in the assembler
+                .{ .imm = Immediate.s(-129) },
+            });
+            relocs_log.debug("    relaxing {} => {}", .{ old_inst.encoding, inst.encoding });
+            encode(&.{inst}, code) catch return error.RelaxFail;
+        },
+        else => return error.RelaxFail,
+    }
+}
+
+fn relaxGotPcTlsDesc(code: []u8) !void {
+    const old_inst = disassemble(code) orelse return error.RelaxFail;
+    switch (old_inst.encoding.mnemonic) {
+        .lea => {
+            const inst = try Instruction.new(old_inst.prefix, .mov, &.{
+                old_inst.ops[0],
+                // TODO: hack to force imm32s in the assembler
+                .{ .imm = Immediate.s(-129) },
+            });
+            relocs_log.debug("    relaxing {} => {}", .{ old_inst.encoding, inst.encoding });
+            encode(&.{inst}, code) catch return error.RelaxFail;
+        },
+        else => return error.RelaxFail,
     }
 }
 

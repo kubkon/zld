@@ -23,7 +23,7 @@ sym_idx: u32 = 0,
 
 /// Index of the source version symbol this symbol references if any.
 /// If the symbol is unversioned it will have either VER_NDX_LOCAL or VER_NDX_GLOBAL.
-ver_idx: elf.Elf64_Versym = Elf.VER_NDX_LOCAL,
+ver_idx: elf.Elf64_Versym = elf.VER_NDX_LOCAL,
 
 /// Misc flags for the symbol packaged as packed struct for compression.
 flags: Flags = .{},
@@ -103,6 +103,24 @@ pub fn getGotAddress(symbol: Symbol, elf_file: *Elf) u64 {
     if (!symbol.flags.got) return 0;
     const extra = symbol.getExtra(elf_file).?;
     return elf_file.getGotEntryAddress(extra.got);
+}
+
+pub fn getTlsGdAddress(symbol: Symbol, elf_file: *Elf) u64 {
+    if (!symbol.flags.tlsgd) return 0;
+    const extra = symbol.getExtra(elf_file).?;
+    return elf_file.getGotEntryAddress(extra.tlsgd);
+}
+
+pub fn getGotTpAddress(symbol: Symbol, elf_file: *Elf) u64 {
+    if (!symbol.flags.gottp) return 0;
+    const extra = symbol.getExtra(elf_file).?;
+    return elf_file.getGotEntryAddress(extra.gottp);
+}
+
+pub fn getTlsDescAddress(symbol: Symbol, elf_file: *Elf) u64 {
+    if (!symbol.flags.tlsdesc) return 0;
+    const extra = symbol.getExtra(elf_file).?;
+    return elf_file.getGotEntryAddress(extra.tlsdesc);
 }
 
 pub fn getAlignment(symbol: Symbol, elf_file: *Elf) !u64 {
@@ -200,8 +218,8 @@ fn formatName(
     const elf_file = ctx.elf_file;
     const symbol = ctx.symbol;
     try writer.writeAll(symbol.getName(elf_file));
-    switch (symbol.ver_idx & Elf.VERSYM_VERSION) {
-        Elf.VER_NDX_LOCAL, Elf.VER_NDX_GLOBAL => {},
+    switch (symbol.ver_idx & elf.VERSYM_VERSION) {
+        elf.VER_NDX_LOCAL, elf.VER_NDX_GLOBAL => {},
         else => {
             const shared = symbol.getFile(elf_file).?.shared;
             try writer.print("@{s}", .{shared.getVersionString(symbol.ver_idx)});
@@ -280,6 +298,12 @@ pub const Flags = packed struct {
 
     /// Whether the symbol contains TLSGD indirection.
     tlsgd: bool = false,
+
+    /// Whether the symbol contains GOTTP indirection.
+    gottp: bool = false,
+
+    /// Whether the symbol contains TLSDESC indirection.
+    tlsdesc: bool = false,
 };
 
 pub const Extra = struct {
@@ -288,6 +312,9 @@ pub const Extra = struct {
     plt_got: u32 = 0,
     dynamic: u32 = 0,
     copy_rel: u32 = 0,
+    tlsgd: u32 = 0,
+    gottp: u32 = 0,
+    tlsdesc: u32 = 0,
 };
 
 const std = @import("std");

@@ -55,8 +55,8 @@ pub fn parse(self: *SharedObject, elf_file: *Elf) !void {
     for (shdrs, 0..) |shdr, i| switch (shdr.sh_type) {
         elf.SHT_DYNSYM => dynsym_index = @as(u16, @intCast(i)),
         elf.SHT_DYNAMIC => self.dynamic_sect_index = @as(u16, @intCast(i)),
-        Elf.SHT_GNU_versym => self.versym_sect_index = @as(u16, @intCast(i)),
-        Elf.SHT_GNU_verdef => self.verdef_sect_index = @as(u16, @intCast(i)),
+        elf.SHT_GNU_VERSYM => self.versym_sect_index = @as(u16, @intCast(i)),
+        elf.SHT_GNU_VERDEF => self.verdef_sect_index = @as(u16, @intCast(i)),
         else => {},
     };
 
@@ -76,8 +76,8 @@ fn parseVersions(self: *SharedObject, elf_file: *Elf) !void {
     const gpa = elf_file.base.allocator;
 
     try self.verstrings.resize(gpa, 2);
-    self.verstrings.items[Elf.VER_NDX_LOCAL] = 0;
-    self.verstrings.items[Elf.VER_NDX_GLOBAL] = 0;
+    self.verstrings.items[elf.VER_NDX_LOCAL] = 0;
+    self.verstrings.items[elf.VER_NDX_GLOBAL] = 0;
 
     if (self.verdef_sect_index) |shndx| {
         const verdefs = self.getShdrContents(shndx);
@@ -89,7 +89,7 @@ fn parseVersions(self: *SharedObject, elf_file: *Elf) !void {
         while (i < nverdefs) : (i += 1) {
             const verdef = @as(*align(1) const elf.Elf64_Verdef, @ptrCast(verdefs.ptr + offset)).*;
             defer offset += verdef.vd_next;
-            if (verdef.vd_flags == Elf.VER_FLG_BASE) continue; // Skip BASE entry
+            if (verdef.vd_flags == elf.VER_FLG_BASE) continue; // Skip BASE entry
             const vda_name = if (verdef.vd_cnt > 0)
                 @as(*align(1) const elf.Elf64_Verdaux, @ptrCast(verdefs.ptr + offset + verdef.vd_aux)).vda_name
             else
@@ -105,14 +105,14 @@ fn parseVersions(self: *SharedObject, elf_file: *Elf) !void {
         const nversyms = @divExact(versyms_raw.len, @sizeOf(elf.Elf64_Versym));
         const versyms = @as([*]align(1) const elf.Elf64_Versym, @ptrCast(versyms_raw.ptr))[0..nversyms];
         for (versyms) |ver| {
-            const normalized_ver = if (ver & Elf.VERSYM_VERSION >= self.verstrings.items.len - 1)
-                Elf.VER_NDX_GLOBAL
+            const normalized_ver = if (ver & elf.VERSYM_VERSION >= self.verstrings.items.len - 1)
+                elf.VER_NDX_GLOBAL
             else
                 ver;
             self.versyms.appendAssumeCapacity(normalized_ver);
         }
     } else for (0..self.symtab.len) |_| {
-        self.versyms.appendAssumeCapacity(Elf.VER_NDX_GLOBAL);
+        self.versyms.appendAssumeCapacity(elf.VER_NDX_GLOBAL);
     }
 }
 
@@ -122,7 +122,7 @@ fn initSymtab(self: *SharedObject, elf_file: *Elf) !void {
     try self.symbols.ensureTotalCapacityPrecise(gpa, self.symtab.len);
 
     for (self.symtab, 0..) |sym, i| {
-        const hidden = self.versyms.items[i] & Elf.VERSYM_HIDDEN != 0;
+        const hidden = self.versyms.items[i] & elf.VERSYM_HIDDEN != 0;
         const name = self.getString(sym.st_name);
         // We need to garble up the name so that we don't pick this symbol
         // during symbol resolution. Thank you GNU!
@@ -224,7 +224,7 @@ pub inline fn getString(self: *SharedObject, off: u32) [:0]const u8 {
 }
 
 pub inline fn getVersionString(self: *SharedObject, index: elf.Elf64_Versym) [:0]const u8 {
-    const off = self.verstrings.items[index & Elf.VERSYM_VERSION];
+    const off = self.verstrings.items[index & elf.VERSYM_VERSION];
     return self.getString(off);
 }
 
