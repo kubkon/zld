@@ -691,12 +691,6 @@ pub const GotSection = struct {
                     } else {
                         const offset = @as(i64, @intCast(symbol.getAddress(.{}, elf_file))) -
                             @as(i64, @intCast(elf_file.getTpAddress()));
-                        std.log.warn("{x} - {x} = {x} ({s})", .{
-                            symbol.getAddress(.{}, elf_file),
-                            elf_file.getTpAddress(),
-                            @as(u64, @bitCast(offset)),
-                            symbol.getName(elf_file),
-                        });
                         try writer.writeIntLittle(u64, @as(u64, @bitCast(offset)));
                     }
                 },
@@ -809,7 +803,9 @@ pub const GotSection = struct {
                     num += 1;
                 },
 
-                .gottp => num += 1,
+                .gottp => if (symbol.flags.import or is_shared) {
+                    num += 1;
+                },
             }
         }
         return num;
