@@ -60,9 +60,14 @@ const usage =
     \\  relro                       Make some sections read-only after dynamic relocations
     \\    norelro                   
     \\--verbose                     Print full linker invocation to stderr
+    \\-v                            Print version
     \\
     \\ld.zld: supported targets: elf64-x86-64
     \\ld.zld: supported emulations: elf_x86_64
+;
+
+const version =
+    \\ld.zld 0.0.1 (compatible with GNU ld)
 ;
 
 const cmd = "ld.zld";
@@ -119,6 +124,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
     var search_dirs = std.StringArrayHashMap(void).init(arena);
     var rpath_list = std.StringArrayHashMap(void).init(arena);
     var verbose = false;
+    var print_version = false;
     var opts: Options = .{
         .emit = .{
             .directory = std.fs.cwd(),
@@ -263,6 +269,8 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             opts.apply_dynamic_relocs = true;
         } else if (p.flagAny("no-apply-dynamic-relocs")) {
             opts.apply_dynamic_relocs = false;
+        } else if (p.flag1("v")) {
+            print_version = true;
         } else if (p.argZ("stack-size")) |value| {
             opts.z_stack_size = std.fmt.parseInt(u64, value, 0) catch
                 ctx.fatal("Could not parse value '{s}' into integer", .{value});
@@ -300,6 +308,8 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         }
         std.debug.print("{s}\n", .{args[args.len - 1]});
     }
+
+    if (print_version) ctx.warn("{s}", .{version});
 
     if (positionals.items.len == 0) ctx.fatal("Expected at least one positional argument", .{});
     if (opts.output_mode == .lib) opts.pic = true;
