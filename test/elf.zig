@@ -21,6 +21,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testTlsDescStatic(b, opts));
         elf_step.dependOn(testTlsDso(b, opts));
         elf_step.dependOn(testTlsGd(b, opts));
+        elf_step.dependOn(testTlsIe(b, opts));
         elf_step.dependOn(testTlsStatic(b, opts));
     }
 
@@ -790,6 +791,70 @@ fn testTlsGd(b: *Build, opts: Options) *Step {
             run.expectStdOutEqual(exp_stdout);
             test_step.dependOn(run.step());
         }
+    }
+
+    return test_step;
+}
+
+fn testTlsIe(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-tls-ie", "");
+
+    const dso = cc(b, "a.so", opts);
+    dso.addSourceBytes(
+        \\#include <stdio.h>
+        \\__attribute__((tls_model("initial-exec"))) static _Thread_local int foo;
+        \\__attribute__((tls_model("initial-exec"))) static _Thread_local int bar;
+        \\void set() {
+        \\  foo = 3;
+        \\  bar = 5;
+        \\}
+        \\void print() {
+        \\  printf("%d %d ", foo, bar);
+        \\}
+    , "a.c");
+    dso.addArgs(&.{ "-shared", "-fPIC" });
+    const dso_out = dso.saveOutputAs("a.so");
+
+    const main_o = cc(b, null, opts);
+    main_o.addSourceBytes(
+        \\#include <stdio.h>
+        \\_Thread_local int baz;
+        \\void set();
+        \\void print();
+        \\int main() {
+        \\  baz = 7;
+        \\  print();
+        \\  set();
+        \\  print();
+        \\  printf("%d\n", baz);
+        \\}
+    , "main.c");
+    main_o.addArg("-c");
+    const main_o_out = main_o.saveOutputAs("main.o");
+
+    const exp_stdout = "0 0 3 5 7\n";
+
+    {
+        const exe = cc(b, null, opts);
+        exe.addFileSource(main_o_out.file);
+        exe.addFileSource(dso_out.file);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", dso_out.dir);
+
+        const run = exe.run();
+        run.expectStdOutEqual(exp_stdout);
+        test_step.dependOn(run.step());
+    }
+
+    {
+        const exe = cc(b, null, opts);
+        exe.addFileSource(main_o_out.file);
+        exe.addFileSource(dso_out.file);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", dso_out.dir);
+        exe.addArg("-Wl,-no-relax");
+
+        const run = exe.run();
+        run.expectStdOutEqual(exp_stdout);
+        test_step.dependOn(run.step());
     }
 
     return test_step;
