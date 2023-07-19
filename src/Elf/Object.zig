@@ -432,7 +432,9 @@ pub fn markLive(self: *Object, elf_file: *Elf) void {
 
         const global = elf_file.getSymbol(index);
         const file = global.getFile(elf_file) orelse continue;
-        if (sym.st_shndx == elf.SHN_UNDEF and !file.isAlive()) {
+        const should_keep = sym.st_shndx == elf.SHN_UNDEF or
+            (sym.st_shndx == elf.SHN_COMMON and global.getSourceSymbol(elf_file).st_shndx != elf.SHN_COMMON);
+        if (should_keep and !file.isAlive()) {
             file.setAlive();
             file.markLive(elf_file);
         }

@@ -7,6 +7,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testAsNeeded(b, opts));
         elf_step.dependOn(testCanonicalPlt(b, opts));
         elf_step.dependOn(testCommon(b, opts));
+        elf_step.dependOn(testCommonArchive(b, opts));
         elf_step.dependOn(testCopyrel(b, opts));
         elf_step.dependOn(testCopyrelAlias(b, opts));
         elf_step.dependOn(testDsoIfunc(b, opts));
@@ -269,6 +270,84 @@ fn testCommon(b: *Build, opts: Options) *Step {
     const run = exe.run();
     run.expectStdOutEqual("0 5 42\n");
     test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+fn testCommonArchive(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-common-archive", "");
+
+    const a_o = cc(b, opts);
+    a_o.addCSource(
+        \\#include <stdio.h>
+        \\int foo;
+        \\int bar;
+        \\extern int baz;
+        \\__attribute__((weak)) int two();
+        \\int main() {
+        \\  printf("%d %d %d %d\n", foo, bar, baz, two ? two() : -1);
+        \\}
+    );
+    a_o.addArgs(&.{ "-fcommon", "-c" });
+    const a_o_out = a_o.saveOutputAs("a.o");
+
+    const b_o = cc(b, opts);
+    b_o.addCSource("int foo = 5;");
+    b_o.addArgs(&.{ "-fcommon", "-c" });
+    const b_o_out = b_o.saveOutputAs("b.o");
+
+    {
+        const c_o = cc(b, opts);
+        c_o.addCSource(
+            \\int bar;
+            \\int two() { return 2; }
+        );
+        c_o.addArgs(&.{ "-fcommon", "-c" });
+        const c_o_out = c_o.saveOutputAs("c.o");
+
+        const d_o = cc(b, opts);
+        d_o.addCSource("int baz;");
+        d_o.addArgs(&.{ "-fcommon", "-c" });
+        const d_o_out = d_o.saveOutputAs("d.o");
+
+        const lib = ar(b);
+        lib.addFileSource(b_o_out.file);
+        lib.addFileSource(c_o_out.file);
+        lib.addFileSource(d_o_out.file);
+        const lib_out = lib.saveOutputAs("libe.a");
+
+        const exe = cc(b, opts);
+        exe.addFileSource(a_o_out.file);
+        exe.addFileSource(lib_out.file);
+
+        const run = exe.run();
+        run.expectStdOutEqual("5 0 0 -1\n");
+        test_step.dependOn(run.step());
+    }
+
+    {
+        const e_o = cc(b, opts);
+        e_o.addCSource(
+            \\int bar = 0;
+            \\int baz = 7;
+            \\int two() { return 2; }
+        );
+        e_o.addArgs(&.{ "-fcommon", "-c" });
+        const e_o_out = e_o.saveOutputAs("e.o");
+
+        const lib = ar(b);
+        lib.addFileSource(b_o_out.file);
+        lib.addFileSource(e_o_out.file);
+        const lib_out = lib.saveOutputAs("libe.a");
+
+        const exe = cc(b, opts);
+        exe.addFileSource(a_o_out.file);
+        exe.addFileSource(lib_out.file);
+
+        const run = exe.run();
+        run.expectStdOutEqual("5 0 7 2\n");
+        test_step.dependOn(run.step());
+    }
 
     return test_step;
 }
@@ -1206,10 +1285,10 @@ fn cc(b: *Build, opts: Options) SysCmd {
     return .{ .cmd = cmd, .out = out };
 }
 
-fn ar(b: *Build, name: []const u8) SysCmd {
+fn ar(b: *Build) SysCmd {
     const cmd = Run.create(b, "ar");
     cmd.addArgs(&.{ "ar", "rcs" });
-    const out = cmd.addOutputFileArg(name);
+    const out = cmd.addOutputFileArg("a.out");
     return .{ .cmd = cmd, .out = out };
 }
 
