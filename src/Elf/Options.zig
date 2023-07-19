@@ -76,7 +76,7 @@ const cmd = "ld.zld";
 
 emit: Zld.Emit,
 output_mode: Zld.OutputMode,
-positionals: []const Positional,
+positionals: []const Elf.LinkObject,
 search_dirs: []const []const u8,
 rpath_list: []const []const u8,
 strip_debug: bool = false,
@@ -332,11 +332,63 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         }
     }
 
-    opts.positionals = positionals.items;
+    opts.positionals = try unpackPositionals(arena, .{
+        .static = opts.static,
+        .unprocessed = positionals.items,
+    }, ctx);
     opts.search_dirs = search_dirs.keys();
     opts.rpath_list = rpath_list.keys();
 
     return opts;
+}
+
+const Positional = struct {
+    tag: Tag,
+    path: []const u8 = "",
+
+    pub const Tag = enum {
+        path,
+        static,
+        dynamic,
+        as_needed,
+        no_as_needed,
+        push_state,
+        pop_state,
+    };
+};
+
+const UnpackArgs = struct {
+    static: bool,
+    unprocessed: []const Positional,
+};
+
+fn unpackPositionals(arena: Allocator, args: UnpackArgs, ctx: anytype) ![]const Elf.LinkObject {
+    const State = struct {
+        needed: bool,
+        static: bool,
+    };
+
+    var positionals = std.ArrayList(Elf.LinkObject).init(arena);
+    try positionals.ensureTotalCapacity(args.unprocessed.len);
+
+    var stack = std.ArrayList(State).init(arena);
+    var state = State{ .needed = true, .static = args.static };
+
+    for (args.unprocessed) |arg| switch (arg.tag) {
+        .path => positionals.appendAssumeCapacity(.{
+            .path = arg.path,
+            .needed = state.needed,
+            .static = state.static,
+        }),
+        .static => state.static = true,
+        .dynamic => state.static = false,
+        .as_needed => state.needed = false,
+        .no_as_needed => state.needed = true,
+        .push_state => try stack.append(state),
+        .pop_state => state = stack.popOrNull() orelse return ctx.fatal("no state pushed before pop", .{}),
+    };
+
+    return positionals.toOwnedSlice();
 }
 
 fn ArgParser(comptime Ctx: type) type {
@@ -457,21 +509,6 @@ fn ArgParser(comptime Ctx: type) type {
     };
 }
 
-pub const Positional = struct {
-    tag: Tag,
-    path: []const u8 = "",
-
-    pub const Tag = enum {
-        path,
-        static,
-        dynamic,
-        as_needed,
-        no_as_needed,
-        push_state,
-        pop_state,
-    };
-};
-
 pub const BuildId = enum {
     none,
     md5,
@@ -495,5 +532,6 @@ const mem = std.mem;
 const process = std.process;
 
 const Allocator = mem.Allocator;
+const Elf = @import("../Elf.zig");
 const Options = @This();
 const Zld = @import("../Zld.zig");

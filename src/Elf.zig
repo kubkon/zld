@@ -298,11 +298,7 @@ pub fn flush(self: *Elf) !void {
         log.debug("  -L{s}", .{dir});
     }
 
-    var positionals = std.ArrayList(LinkObject).init(arena);
-    try self.unpackPositionals(&positionals);
-    self.base.reportWarningsAndErrorsAndExit();
-
-    for (positionals.items) |obj| {
+    for (self.options.positionals) |obj| {
         try self.parsePositional(arena, obj, search_dirs.items);
     }
 
@@ -1449,34 +1445,6 @@ fn allocateSyntheticSymbols(self: *Elf) void {
             stop.shndx = shndx;
         }
     }
-}
-
-fn unpackPositionals(self: *Elf, positionals: *std.ArrayList(LinkObject)) !void {
-    const State = struct {
-        needed: bool,
-        static: bool,
-    };
-
-    try positionals.ensureTotalCapacity(self.options.positionals.len);
-
-    var stack = std.ArrayList(State).init(self.base.allocator);
-    defer stack.deinit();
-
-    var state = State{ .needed = true, .static = self.options.static };
-
-    for (self.options.positionals) |arg| switch (arg.tag) {
-        .path => positionals.appendAssumeCapacity(.{
-            .path = arg.path,
-            .needed = state.needed,
-            .static = state.static,
-        }),
-        .static => state.static = true,
-        .dynamic => state.static = false,
-        .as_needed => state.needed = false,
-        .no_as_needed => state.needed = true,
-        .push_state => try stack.append(state),
-        .pop_state => state = stack.popOrNull() orelse return self.base.fatal("no state pushed before pop", .{}),
-    };
 }
 
 fn parsePositional(self: *Elf, arena: Allocator, obj: LinkObject, search_dirs: []const []const u8) anyerror!void {
