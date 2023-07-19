@@ -116,36 +116,54 @@ fn testAsNeeded(b: *Build, opts: Options) *Step {
 
     const main_o = cc(b, null, opts);
     main_o.addSourceBytes(
-        \\void fn1();
+        \\#include <stdio.h>
+        \\int baz();
         \\int main() {
-        \\  fn1();
+        \\  printf("%d\n", baz());
+        \\  return 0;
         \\}
     , "main.c");
     main_o.addArg("-c");
     const main_o_out = main_o.saveOutputAs("main.o");
 
-    const a_so = cc(b, "a.so", opts);
-    a_so.addSourceBytes("int fn1() { return 42; }", "a.c");
-    a_so.addArgs(&.{ "-shared", "-fPIC", "-Wl,-soname,libfoo.so" });
-    const a_so_out = a_so.saveOutputAs("a.so");
+    const libfoo = cc(b, "libfoo.so", opts);
+    libfoo.addSourceBytes("int foo() { return 42; }", "a.c");
+    libfoo.addArgs(&.{ "-shared", "-fPIC", "-Wl,-soname,libfoo.so" });
+    const libfoo_out = libfoo.saveOutputAs("libfoo.so");
 
-    const b_so = cc(b, "b.so", opts);
-    b_so.addSourceBytes("int fn2() { return 42; }", "b.c");
-    b_so.addArgs(&.{ "-shared", "-fPIC", "-Wl,-soname,libbar.so" });
-    const b_so_out = b_so.saveOutputAs("b.so");
+    const libbar = cc(b, "libbar.so", opts);
+    libbar.addSourceBytes("int bar() { return 42; }", "b.c");
+    libbar.addArgs(&.{ "-shared", "-fPIC", "-Wl,-soname,libbar.so" });
+    const libbar_out = libbar.saveOutputAs("libbar.so");
+
+    const libbaz = cc(b, "libbaz.so", opts);
+    libbaz.addSourceBytes(
+        \\int foo();
+        \\int baz() { return foo(); }
+    , "c.c");
+    libbaz.addArgs(&.{ "-shared", "-fPIC", "-Wl,-soname,libbaz.so", "-lfoo" });
+    libbaz.addPrefixedDirectorySource("-L", libfoo_out.dir);
+    const libbaz_out = libbaz.saveOutputAs("libbaz.so");
 
     {
         const exe = cc(b, null, opts);
         exe.addFileSource(main_o_out.file);
         exe.addArg("-Wl,--no-as-needed");
-        exe.addFileSource(a_so_out.file);
-        exe.addFileSource(b_so_out.file);
-        exe.addPrefixedDirectorySource("-Wl,-rpath,", a_so_out.dir);
-        exe.addPrefixedDirectorySource("-Wl,-rpath,", b_so_out.dir);
+        exe.addFileSource(libfoo_out.file);
+        exe.addFileSource(libbar_out.file);
+        exe.addFileSource(libbaz_out.file);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", libfoo_out.dir);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", libbar_out.dir);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", libbaz_out.dir);
+
+        const run = exe.run();
+        run.expectStdOutEqual("42\n");
+        test_step.dependOn(run.step());
 
         const check = exe.check();
         check.checkStart("NEEDED libfoo.so");
         check.checkNext("NEEDED libbar.so");
+        check.checkNext("NEEDED libbaz.so");
         test_step.dependOn(&check.step);
     }
 
@@ -153,14 +171,21 @@ fn testAsNeeded(b: *Build, opts: Options) *Step {
         const exe = cc(b, null, opts);
         exe.addFileSource(main_o_out.file);
         exe.addArg("-Wl,--as-needed");
-        exe.addFileSource(a_so_out.file);
-        exe.addFileSource(b_so_out.file);
-        exe.addPrefixedDirectorySource("-Wl,-rpath,", a_so_out.dir);
-        exe.addPrefixedDirectorySource("-Wl,-rpath,", b_so_out.dir);
+        exe.addFileSource(libfoo_out.file);
+        exe.addFileSource(libbar_out.file);
+        exe.addFileSource(libbaz_out.file);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", libfoo_out.dir);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", libbar_out.dir);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", libbaz_out.dir);
+
+        const run = exe.run();
+        run.expectStdOutEqual("42\n");
+        test_step.dependOn(run.step());
 
         const check = exe.check();
         check.checkStart("NEEDED libfoo.so");
         check.checkNotPresent("NEEDED libbar.so");
+        check.checkStart("NEEDED libbaz.so");
         test_step.dependOn(&check.step);
     }
 
