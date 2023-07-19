@@ -2,6 +2,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
     const elf_step = b.step("test-elf", "Run ELF tests");
 
     if (builtin.target.ofmt == .elf) {
+        elf_step.dependOn(testAbsSymbols(b, opts));
         elf_step.dependOn(testCommon(b, opts));
         elf_step.dependOn(testCopyrel(b, opts));
         elf_step.dependOn(testCopyrelAlias(b, opts));
@@ -28,6 +29,49 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
     }
 
     return elf_step;
+}
+
+fn testAbsSymbols(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-abs-symbols", "");
+
+    const obj = cc(b, null, opts);
+    obj.addSourceBytes(
+        \\.globl foo
+        \\foo = 0x800008
+        \\
+    , "a.s");
+    obj.addArg("-c");
+    const obj_out = obj.saveOutputAs("a.o");
+
+    const exe = cc(b, null, opts);
+    exe.addSourceBytes(
+        \\#define _GNU_SOURCE 1
+        \\#include <signal.h>
+        \\#include <stdio.h>
+        \\#include <stdlib.h>
+        \\#include <ucontext.h>
+        \\#include <assert.h>
+        \\void handler(int signum, siginfo_t *info, void *ptr) {
+        \\  assert((size_t)info->si_addr == 0x800008);
+        \\  exit(0);
+        \\}
+        \\extern volatile int foo;
+        \\int main() {
+        \\  struct sigaction act;
+        \\  act.sa_flags = SA_SIGINFO | SA_RESETHAND;
+        \\  act.sa_sigaction = handler;
+        \\  sigemptyset(&act.sa_mask);
+        \\  sigaction(SIGSEGV, &act, 0);
+        \\  foo = 5;
+        \\}
+    , "main.c");
+    exe.addArg("-fno-PIC");
+    exe.addFileSource(obj_out.file);
+
+    const run = exe.run();
+    test_step.dependOn(run.step());
+
+    return test_step;
 }
 
 fn testCommon(b: *Build, opts: Options) *Step {
