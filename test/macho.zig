@@ -483,13 +483,15 @@ fn testNeededLibrary(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-needed-library", "");
 
     const dylib = cc(b, opts);
-    dylib.addArg("-shared");
     dylib.addCSource("int a = 42;");
+    dylib.addArgs(&.{ "-shared", "-Wl,-install_name,@rpath/liba.dylib" });
+    const dylib_out = dylib.saveOutputAs("liba.dylib");
 
     const exe = cc(b, opts);
     exe.addEmptyMain();
     exe.addArgs(&.{ "-Wl,-needed-la", "-Wl,-dead_strip_dylibs" });
-    exe.addPrefixedDirectorySource("-L", dylib.saveOutputAs("liba.dylib").dir);
+    exe.addPrefixedDirectorySource("-L", dylib_out.dir);
+    exe.addPrefixedDirectorySource("-Wl,-rpath,", dylib_out.dir);
 
     const check = exe.check();
     check.checkStart("cmd LOAD_DYLIB");
@@ -547,13 +549,16 @@ fn testSearchStrategy(b: *Build, opts: Options) *Step {
         \\  return "Hello";
         \\}
     );
+    const obj_out = obj.saveOutputAs("a.o");
 
     const lib = ar(b);
-    lib.addFileSource(obj.out);
+    lib.addFileSource(obj_out.file);
+    const lib_out = lib.saveOutputAs("liba.a");
 
     const dylib = ld(b, opts);
-    dylib.addArg("-dylib");
-    dylib.addFileSource(obj.out);
+    dylib.addFileSource(obj_out.file);
+    dylib.addArgs(&.{ "-dylib", "-install_name", "@rpath/liba.dylib" });
+    const dylib_out = dylib.saveOutputAs("liba.dylib");
 
     const main_c =
         \\#include<stdio.h>
@@ -569,8 +574,9 @@ fn testSearchStrategy(b: *Build, opts: Options) *Step {
         const exe = cc(b, opts);
         exe.addCSource(main_c);
         exe.addArgs(&.{ "-Wl,-search_dylibs_first", "-la" });
-        exe.addPrefixedDirectorySource("-L", lib.saveOutputAs("liba.a").dir);
-        exe.addPrefixedDirectorySource("-L", dylib.saveOutputAs("liba.dylib").dir);
+        exe.addPrefixedDirectorySource("-L", lib_out.dir);
+        exe.addPrefixedDirectorySource("-L", dylib_out.dir);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", dylib_out.dir);
 
         const run = exe.run();
         run.expectStdOutEqual("Hello world");
@@ -586,8 +592,9 @@ fn testSearchStrategy(b: *Build, opts: Options) *Step {
         const exe = cc(b, opts);
         exe.addCSource(main_c);
         exe.addArgs(&.{ "-Wl,-search_paths_first", "-la" });
-        exe.addPrefixedDirectorySource("-L", lib.saveOutputAs("liba.a").dir);
-        exe.addPrefixedDirectorySource("-L", dylib.saveOutputAs("liba.dylib").dir);
+        exe.addPrefixedDirectorySource("-L", lib_out.dir);
+        exe.addPrefixedDirectorySource("-L", dylib_out.dir);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", dylib_out.dir);
 
         const run = exe.run();
         run.expectStdOutEqual("Hello world");
@@ -841,7 +848,6 @@ fn testWeakLibrary(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-weak-library", "");
 
     const dylib = cc(b, opts);
-    dylib.addArg("-shared");
     dylib.addCSource(
         \\#include<stdio.h>
         \\int a = 42;
@@ -851,6 +857,8 @@ fn testWeakLibrary(b: *Build, opts: Options) *Step {
         \\  return str;
         \\}
     );
+    dylib.addArgs(&.{ "-shared", "-Wl,-install_name,@rpath/liba.dylib" });
+    const dylib_out = dylib.saveOutputAs("liba.dylib");
 
     const exe = cc(b, opts);
     exe.addCSource(
@@ -863,7 +871,8 @@ fn testWeakLibrary(b: *Build, opts: Options) *Step {
         \\}
     );
     exe.addArg("-weak-la");
-    exe.addPrefixedDirectorySource("-L", dylib.saveOutputAs("liba.dylib").dir);
+    exe.addPrefixedDirectorySource("-L", dylib_out.dir);
+    exe.addPrefixedDirectorySource("-Wl,-rpath,", dylib_out.dir);
 
     const check = exe.check();
     check.checkStart("cmd LOAD_WEAK_DYLIB");
