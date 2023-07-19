@@ -1465,8 +1465,7 @@ fn unpackPositionals(self: *Elf, positionals: *std.ArrayList(LinkObject)) !void 
     var state = State{ .needed = true, .static = self.options.static };
 
     for (self.options.positionals) |arg| switch (arg.tag) {
-        .path => positionals.appendAssumeCapacity(.{ .path = arg.path }),
-        .library => positionals.appendAssumeCapacity(.{
+        .path => positionals.appendAssumeCapacity(.{
             .path = arg.path,
             .needed = state.needed,
             .static = state.static,
@@ -1959,13 +1958,17 @@ fn scanRelocs(self: *Elf) !void {
 fn setDynamic(self: *Elf) !void {
     if (self.dynamic_sect_index == null) return;
 
-    try self.dynamic.setRpath(self.options.rpath_list, self);
-
     for (self.shared_objects.items) |index| {
         const shared = self.getFile(index).?.shared;
         if (!shared.alive) continue;
         try self.dynamic.addNeeded(shared, self);
     }
+
+    if (self.options.soname) |soname| {
+        try self.dynamic.setSoname(soname, self);
+    }
+
+    try self.dynamic.setRpath(self.options.rpath_list, self);
 }
 
 fn setDynsym(self: *Elf) void {

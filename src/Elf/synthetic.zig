@@ -1,4 +1,5 @@
 pub const DynamicSection = struct {
+    soname: ?u32 = null,
     needed: std.ArrayListUnmanaged(u32) = .{},
     rpath: u32 = 0,
 
@@ -22,6 +23,10 @@ pub const DynamicSection = struct {
             try rpath.appendSlice(path);
         }
         dt.rpath = try elf_file.dynstrtab.insert(gpa, rpath.items);
+    }
+
+    pub fn setSoname(dt: *DynamicSection, soname: []const u8, elf_file: *Elf) !void {
+        dt.soname = try elf_file.dynstrtab.insert(elf_file.base.allocator, soname);
     }
 
     fn getFlags(dt: DynamicSection, elf_file: *Elf) ?u64 {
@@ -59,6 +64,7 @@ pub const DynamicSection = struct {
         const is_shared = elf_file.options.output_mode == .lib;
         var nentries: usize = 0;
         nentries += dt.needed.items.len; // NEEDED
+        if (dt.soname != null) nentries += 1; // SONAME
         if (dt.rpath > 0) nentries += 1; // RUNPATH
         if (elf_file.getSectionByName(".init") != null) nentries += 1; // INIT
         if (elf_file.getSectionByName(".fini") != null) nentries += 1; // FINI
@@ -88,6 +94,10 @@ pub const DynamicSection = struct {
         // NEEDED
         for (dt.needed.items) |off| {
             try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_NEEDED, .d_val = off });
+        }
+
+        if (dt.soname) |off| {
+            try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_SONAME, .d_val = off });
         }
 
         // RUNPATH

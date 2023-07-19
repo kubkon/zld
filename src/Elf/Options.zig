@@ -27,7 +27,7 @@ const usage =
     \\  --no-gc-sections
     \\--hash-style=[none,sysv,gnu,both]
     \\                              Set hash style
-    \\--help, -h                    Print this help and exit
+    \\--help                        Print this help and exit
     \\--image-base=[value]          Set the base address
     \\-l[value]                     Specify library to link against
     \\-L[value]                     Specify library search dir
@@ -42,6 +42,7 @@ const usage =
     \\  --no-relax
     \\--rpath=[value], -R [value]   Specify runtime path
     \\--shared                      Create dynamic library
+    \\--soname=[value], -h [value]  Set shared library name
     \\--start-group                 Ignored for compatibility with GNU
     \\--strip-all, -s               Strip all symbols. Implies --strip-debug
     \\--strip-debug, -S             Strip .debug_ sections
@@ -98,6 +99,7 @@ warn_common: bool = false,
 build_id: ?BuildId = null,
 hash_style: ?HashStyle = null,
 apply_dynamic_relocs: bool = true,
+soname: ?[]const u8 = null,
 /// -z flags
 /// Overrides default stack size.
 z_stack_size: ?u64 = null,
@@ -140,12 +142,12 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
     var it = Zld.Options.ArgsIterator{ .args = args };
     var p = ArgParser(@TypeOf(ctx)){ .it = &it, .ctx = ctx };
     while (p.hasMore()) {
-        if (p.flag2("help") or p.flag1("h")) {
+        if (p.flag2("help")) {
             ctx.fatal(usage, .{cmd});
         } else if (p.arg2("debug-log")) |scope| {
             try ctx.log_scopes.append(scope);
         } else if (p.arg1("l")) |lib| {
-            try positionals.append(.{ .tag = .library, .path = try std.fmt.allocPrint(arena, "-l{s}", .{lib}) });
+            try positionals.append(.{ .tag = .path, .path = try std.fmt.allocPrint(arena, "-l{s}", .{lib}) });
         } else if (p.arg1("L")) |dir| {
             try search_dirs.put(dir, {});
         } else if (p.arg1("o")) |path| {
@@ -272,6 +274,10 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             opts.apply_dynamic_relocs = false;
         } else if (p.flag1("v")) {
             print_version = true;
+        } else if (p.argAny("soname")) |value| {
+            opts.soname = value;
+        } else if (p.arg1("h")) |value| {
+            opts.soname = value;
         } else if (p.argZ("stack-size")) |value| {
             opts.z_stack_size = std.fmt.parseInt(u64, value, 0) catch
                 ctx.fatal("Could not parse value '{s}' into integer", .{value});
@@ -457,7 +463,6 @@ pub const Positional = struct {
 
     pub const Tag = enum {
         path,
-        library,
         static,
         dynamic,
         as_needed,

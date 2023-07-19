@@ -4,6 +4,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
     if (builtin.target.ofmt == .elf) {
         elf_step.dependOn(testAbsSymbols(b, opts));
         elf_step.dependOn(testAllowMultipleDefinitions(b, opts));
+        elf_step.dependOn(testAsNeeded(b, opts));
         elf_step.dependOn(testCommon(b, opts));
         elf_step.dependOn(testCopyrel(b, opts));
         elf_step.dependOn(testCopyrelAlias(b, opts));
@@ -105,6 +106,62 @@ fn testAllowMultipleDefinitions(b: *Build, opts: Options) *Step {
 
         const run = exe.run();
         test_step.dependOn(run.step());
+    }
+
+    return test_step;
+}
+
+fn testAsNeeded(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-as-needed", "");
+
+    const main_o = cc(b, null, opts);
+    main_o.addSourceBytes(
+        \\void fn1();
+        \\int main() {
+        \\  fn1();
+        \\}
+    , "main.c");
+    main_o.addArg("-c");
+    const main_o_out = main_o.saveOutputAs("main.o");
+
+    const a_so = cc(b, "a.so", opts);
+    a_so.addSourceBytes("int fn1() { return 42; }", "a.c");
+    a_so.addArgs(&.{ "-shared", "-fPIC", "-Wl,-soname,libfoo.so" });
+    const a_so_out = a_so.saveOutputAs("a.so");
+
+    const b_so = cc(b, "b.so", opts);
+    b_so.addSourceBytes("int fn2() { return 42; }", "b.c");
+    b_so.addArgs(&.{ "-shared", "-fPIC", "-Wl,-soname,libbar.so" });
+    const b_so_out = b_so.saveOutputAs("b.so");
+
+    {
+        const exe = cc(b, null, opts);
+        exe.addFileSource(main_o_out.file);
+        exe.addArg("-Wl,--no-as-needed");
+        exe.addFileSource(a_so_out.file);
+        exe.addFileSource(b_so_out.file);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", a_so_out.dir);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", b_so_out.dir);
+
+        const check = exe.check();
+        check.checkStart("NEEDED libfoo.so");
+        check.checkNext("NEEDED libbar.so");
+        test_step.dependOn(&check.step);
+    }
+
+    {
+        const exe = cc(b, null, opts);
+        exe.addFileSource(main_o_out.file);
+        exe.addArg("-Wl,--as-needed");
+        exe.addFileSource(a_so_out.file);
+        exe.addFileSource(b_so_out.file);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", a_so_out.dir);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", b_so_out.dir);
+
+        const check = exe.check();
+        check.checkStart("NEEDED libfoo.so");
+        check.checkNotPresent("NEEDED libbar.so");
+        test_step.dependOn(&check.step);
     }
 
     return test_step;
