@@ -5,6 +5,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testAbsSymbols(b, opts));
         elf_step.dependOn(testAllowMultipleDefinitions(b, opts));
         elf_step.dependOn(testAsNeeded(b, opts));
+        elf_step.dependOn(testCanonicalPlt(b, opts));
         elf_step.dependOn(testCommon(b, opts));
         elf_step.dependOn(testCopyrel(b, opts));
         elf_step.dependOn(testCopyrelAlias(b, opts));
@@ -188,6 +189,59 @@ fn testAsNeeded(b: *Build, opts: Options) *Step {
         check.checkStart("NEEDED libbaz.so");
         test_step.dependOn(&check.step);
     }
+
+    return test_step;
+}
+
+fn testCanonicalPlt(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-canonical-plt", "");
+
+    const dso = cc(b, "a.so", opts);
+    dso.addSourceBytes(
+        \\void *foo() {
+        \\  return foo;
+        \\}
+        \\void *bar() {
+        \\  return bar;
+        \\}
+    , "a.c");
+    dso.addArgs(&.{ "-fPIC", "-shared" });
+    const dso_out = dso.saveOutputAs("a.so");
+
+    const b_o = cc(b, null, opts);
+    b_o.addSourceBytes(
+        \\void *bar();
+        \\void *baz() {
+        \\  return bar;
+        \\}
+    , "b.c");
+    b_o.addArgs(&.{ "-fPIC", "-c" });
+    const b_o_out = b_o.saveOutputAs("b.o");
+
+    const main_o = cc(b, null, opts);
+    main_o.addSourceBytes(
+        \\#include <assert.h>
+        \\void *foo();
+        \\void *bar();
+        \\void *baz();
+        \\int main() {
+        \\  assert(foo == foo());
+        \\  assert(bar == bar());
+        \\  assert(bar == baz());
+        \\}
+    , "main.c");
+    main_o.addArgs(&.{ "-fno-PIC", "-c" });
+    const main_o_out = main_o.saveOutputAs("main.o");
+
+    const exe = cc(b, null, opts);
+    exe.addFileSource(main_o_out.file);
+    exe.addFileSource(b_o_out.file);
+    exe.addFileSource(dso_out.file);
+    exe.addPrefixedDirectorySource("-Wl,-rpath,", dso_out.dir);
+    exe.addArg("-no-pie");
+
+    const run = exe.run();
+    test_step.dependOn(run.step());
 
     return test_step;
 }
