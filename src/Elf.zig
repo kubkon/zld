@@ -282,6 +282,7 @@ pub fn flush(self: *Elf) !void {
     defer self.arena = arena_allocator.state;
     const arena = arena_allocator.allocator();
 
+    log.debug("search dirs", .{});
     var search_dirs = std.ArrayList([]const u8).init(arena);
     for (self.options.search_dirs) |dir| {
         // Verify that search path actually exists
@@ -294,6 +295,7 @@ pub fn flush(self: *Elf) !void {
         };
         defer tmp.close();
         try search_dirs.append(dir);
+        log.debug("  -L{s}", .{dir});
     }
 
     var positionals = std.ArrayList(LinkObject).init(arena);
