@@ -51,6 +51,7 @@ const usage =
     \\    noexecstack               
     \\  execstack-if-needed         Make the stack executable if the input file explicitly requests it
     \\  lazy                        Enable lazy function resolution (default)
+    \\  muldefs                     Allow multiple definitions
     \\  nocopyreloc                 Do not create copy relocations
     \\  nodlopen                    Mark DSO not available to dlopen
     \\  now                         Disable lazy function resolution
@@ -296,6 +297,8 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             opts.z_relro = true;
         } else if (p.flagZ("norelro")) {
             opts.z_relro = false;
+        } else if (p.flagZ("muldefs")) {
+            opts.allow_multiple_definition = true;
         } else {
             try positionals.append(.{ .tag = .path, .path = p.arg });
         }

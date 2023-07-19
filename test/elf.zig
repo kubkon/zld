@@ -3,6 +3,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
 
     if (builtin.target.ofmt == .elf) {
         elf_step.dependOn(testAbsSymbols(b, opts));
+        elf_step.dependOn(testAllowMultipleDefinitions(b, opts));
         elf_step.dependOn(testCommon(b, opts));
         elf_step.dependOn(testCopyrel(b, opts));
         elf_step.dependOn(testCopyrelAlias(b, opts));
@@ -70,6 +71,41 @@ fn testAbsSymbols(b: *Build, opts: Options) *Step {
 
     const run = exe.run();
     test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+fn testAllowMultipleDefinitions(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-allow-multiple-definitions", "");
+
+    const a_o = cc(b, null, opts);
+    a_o.addSourceBytes("int main() { return 0; }", "a.c");
+    a_o.addArg("-c");
+    const a_o_out = a_o.saveOutputAs("a.o");
+
+    const b_o = cc(b, null, opts);
+    b_o.addSourceBytes("int main() { return 1; }", "b.c");
+    b_o.addArg("-c");
+    const b_o_out = b_o.saveOutputAs("b.o");
+
+    {
+        const exe = cc(b, null, opts);
+        exe.addFileSource(a_o_out.file);
+        exe.addFileSource(b_o_out.file);
+        exe.addArg("-Wl,--allow-multiple-definition");
+
+        const run = exe.run();
+        test_step.dependOn(run.step());
+    }
+    {
+        const exe = cc(b, null, opts);
+        exe.addFileSource(a_o_out.file);
+        exe.addFileSource(b_o_out.file);
+        exe.addArg("-Wl,-z,muldefs");
+
+        const run = exe.run();
+        test_step.dependOn(run.step());
+    }
 
     return test_step;
 }
