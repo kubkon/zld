@@ -30,6 +30,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testHelloDynamic(b, opts));
         elf_step.dependOn(testHelloPie(b, opts));
         elf_step.dependOn(testHelloStatic(b, opts));
+        elf_step.dependOn(testHiddenWeakUndef(b, opts));
         elf_step.dependOn(testTlsDesc(b, opts));
         elf_step.dependOn(testTlsDescImport(b, opts));
         elf_step.dependOn(testTlsDescStatic(b, opts));
@@ -1215,6 +1216,26 @@ fn testHelloPie(b: *Build, opts: Options) *Step {
     check.checkStart();
     check.checkExact("section headers");
     check.checkExact("name .dynamic");
+    test_step.dependOn(&check.step);
+
+    return test_step;
+}
+
+fn testHiddenWeakUndef(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-hidden-weak-undef", "");
+
+    const dso = cc(b, opts);
+    dso.addCSource(
+        \\__attribute__((weak, visibility("hidden"))) void foo();
+        \\void bar() { foo(); }
+    );
+    dso.addArgs(&.{ "-fPIC", "-shared" });
+
+    const check = dso.check();
+    check.checkInDynamicSymtab();
+    check.checkNotPresent("foo");
+    check.checkInDynamicSymtab();
+    check.checkContains("bar");
     test_step.dependOn(&check.step);
 
     return test_step;
