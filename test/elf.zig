@@ -10,6 +10,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testCommonArchive(b, opts));
         elf_step.dependOn(testCopyrel(b, opts));
         elf_step.dependOn(testCopyrelAlias(b, opts));
+        elf_step.dependOn(testCopyrelAlignment(b, opts));
         elf_step.dependOn(testDsoIfunc(b, opts));
         elf_step.dependOn(testDsoPlt(b, opts));
         elf_step.dependOn(testIfuncAlias(b, opts));
@@ -417,6 +418,92 @@ fn testCopyrelAlias(b: *Build, opts: Options) *Step {
     const run = exe.run();
     run.expectStdOutEqual("42 42 1\n");
     test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+fn testCopyrelAlignment(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-copyrel-alignment", "");
+
+    const a_so = cc(b, opts);
+    a_so.addCSource("__attribute__((aligned(32))) int foo = 5;");
+    a_so.addArgs(&.{ "-shared", "-fPIC" });
+    const a_so_out = a_so.saveOutputAs("a.so");
+
+    const b_so = cc(b, opts);
+    b_so.addCSource("__attribute__((aligned(8))) int foo = 5;");
+    b_so.addArgs(&.{ "-shared", "-fPIC" });
+    const b_so_out = b_so.saveOutputAs("b.so");
+
+    const c_so = cc(b, opts);
+    c_so.addCSource("__attribute__((aligned(256))) int foo = 5;");
+    c_so.addArgs(&.{ "-shared", "-fPIC" });
+    const c_so_out = c_so.saveOutputAs("c.so");
+
+    const obj = cc(b, opts);
+    obj.addCSource(
+        \\#include <stdio.h>
+        \\extern int foo;
+        \\int main() { printf("%d\n", foo); }
+    );
+    obj.addArgs(&.{ "-c", "-fno-PIE" });
+    const obj_out = obj.saveOutputAs("main.o");
+
+    const exp_stdout = "5\n";
+
+    {
+        const exe = cc(b, opts);
+        exe.addFileSource(obj_out.file);
+        exe.addFileSource(a_so_out.file);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", a_so_out.dir);
+        exe.addArg("-no-pie");
+
+        const run = exe.run();
+        run.expectStdOutEqual(exp_stdout);
+        test_step.dependOn(run.step());
+
+        const check = exe.check();
+        check.checkStart("shdr {*}");
+        check.checkNext("name .copyrel");
+        check.checkNext("addralign 20");
+        test_step.dependOn(&check.step);
+    }
+
+    {
+        const exe = cc(b, opts);
+        exe.addFileSource(obj_out.file);
+        exe.addFileSource(b_so_out.file);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", b_so_out.dir);
+        exe.addArg("-no-pie");
+
+        const run = exe.run();
+        run.expectStdOutEqual(exp_stdout);
+        test_step.dependOn(run.step());
+
+        const check = exe.check();
+        check.checkStart("shdr {*}");
+        check.checkNext("name .copyrel");
+        check.checkNext("addralign 8");
+        test_step.dependOn(&check.step);
+    }
+
+    {
+        const exe = cc(b, opts);
+        exe.addFileSource(obj_out.file);
+        exe.addFileSource(c_so_out.file);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", c_so_out.dir);
+        exe.addArg("-no-pie");
+
+        const run = exe.run();
+        run.expectStdOutEqual(exp_stdout);
+        test_step.dependOn(run.step());
+
+        const check = exe.check();
+        check.checkStart("shdr {*}");
+        check.checkNext("name .copyrel");
+        check.checkNext("addralign 100");
+        test_step.dependOn(&check.step);
+    }
 
     return test_step;
 }
