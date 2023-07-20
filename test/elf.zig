@@ -34,6 +34,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testIfuncStatic(b, opts));
         elf_step.dependOn(testIfuncStaticPie(b, opts));
         elf_step.dependOn(testImageBase(b, opts));
+        elf_step.dependOn(testInitArrayOrder(b, opts));
         elf_step.dependOn(testTlsDesc(b, opts));
         elf_step.dependOn(testTlsDescImport(b, opts));
         elf_step.dependOn(testTlsDescStatic(b, opts));
@@ -1349,6 +1350,83 @@ fn testImageBase(b: *Build, opts: Options) *Step {
         check.checkComputeCompare("addr", .{ .op = .gte, .value = .{ .literal = 0xffffffff8000000 } });
         test_step.dependOn(&check.step);
     }
+
+    return test_step;
+}
+
+fn testInitArrayOrder(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-init-array-order", "");
+
+    const a_o = cc(b, opts);
+    a_o.addCSource(
+        \\#include <stdio.h>
+        \\__attribute__((constructor(10000))) void init4() { printf("1"); }
+    );
+    a_o.addArg("-c");
+
+    const b_o = cc(b, opts);
+    b_o.addCSource(
+        \\#include <stdio.h>
+        \\__attribute__((constructor(1000))) void init3() { printf("2"); }
+    );
+    b_o.addArg("-c");
+
+    const c_o = cc(b, opts);
+    c_o.addCSource(
+        \\#include <stdio.h>
+        \\__attribute__((constructor)) void init1() { printf("3"); }
+    );
+    c_o.addArg("-c");
+
+    const d_o = cc(b, opts);
+    d_o.addCSource(
+        \\#include <stdio.h>
+        \\__attribute__((constructor)) void init2() { printf("4"); }
+    );
+    d_o.addArg("-c");
+
+    const e_o = cc(b, opts);
+    e_o.addCSource(
+        \\#include <stdio.h>
+        \\__attribute__((destructor(10000))) void fini4() { printf("5"); }
+    );
+    e_o.addArg("-c");
+
+    const f_o = cc(b, opts);
+    f_o.addCSource(
+        \\#include <stdio.h>
+        \\__attribute__((destructor(1000))) void fini3() { printf("6"); }
+    );
+    f_o.addArg("-c");
+
+    const g_o = cc(b, opts);
+    g_o.addCSource(
+        \\#include <stdio.h>
+        \\__attribute__((destructor)) void fini1() { printf("7"); }
+    );
+    g_o.addArg("-c");
+
+    const h_o = cc(b, opts);
+    h_o.addCSource(
+        \\#include <stdio.h>
+        \\__attribute__((destructor)) void fini2() { printf("8"); }
+    );
+    h_o.addArg("-c");
+
+    const exe = cc(b, opts);
+    exe.addEmptyMain();
+    exe.addFileSource(a_o.out);
+    exe.addFileSource(b_o.out);
+    exe.addFileSource(c_o.out);
+    exe.addFileSource(d_o.out);
+    exe.addFileSource(e_o.out);
+    exe.addFileSource(f_o.out);
+    exe.addFileSource(g_o.out);
+    exe.addFileSource(h_o.out);
+
+    const run = exe.run();
+    run.expectStdOutEqual("21348756");
+    test_step.dependOn(run.step());
 
     return test_step;
 }
