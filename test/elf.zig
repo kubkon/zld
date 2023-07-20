@@ -44,6 +44,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testPreinitArray(b, opts));
         elf_step.dependOn(testPushPopState(b, opts));
         elf_step.dependOn(testSharedAbsSymbol(b, opts));
+        elf_step.dependOn(testStrip(b, opts));
         elf_step.dependOn(testTlsDesc(b, opts));
         elf_step.dependOn(testTlsDescImport(b, opts));
         elf_step.dependOn(testTlsDescStatic(b, opts));
@@ -1781,6 +1782,43 @@ fn testSharedAbsSymbol(b: *Build, opts: Options) *Step {
         const check = exe.check();
         check.checkInSymtab();
         check.checkNotPresent("foo");
+        test_step.dependOn(&check.step);
+    }
+
+    return test_step;
+}
+
+fn testStrip(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-strip", "");
+
+    const obj = cc(b, opts);
+    obj.addAsmSource(
+        \\.globl _start, foo
+        \\_start:
+        \\foo:
+        \\bar:
+        \\.L.baz:
+    );
+    obj.addArgs(&.{ "-c", "-Wa,-L" });
+
+    {
+        const exe = ld(b, opts);
+        exe.addFileSource(obj.out);
+
+        const check = exe.check();
+        check.checkStart();
+        check.checkExact("symbol table");
+        test_step.dependOn(&check.step);
+    }
+
+    {
+        const exe = ld(b, opts);
+        exe.addFileSource(obj.out);
+        exe.addArg("--strip-all");
+
+        const check = exe.check();
+        check.checkStart();
+        check.checkNotPresent("symbol table");
         test_step.dependOn(&check.step);
     }
 
