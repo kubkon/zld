@@ -20,6 +20,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testExportDynamic(b, opts));
         elf_step.dependOn(testExportSymbolsFromExe(b, opts));
         elf_step.dependOn(testFuncAddress(b, opts));
+        elf_step.dependOn(testGcSections(b, opts));
         elf_step.dependOn(testIfuncAlias(b, opts));
         elf_step.dependOn(testIfuncDynamic(b, opts));
         elf_step.dependOn(testIfuncFuncPtr(b, opts));
@@ -856,6 +857,89 @@ fn testFuncAddress(b: *Build, opts: Options) *Step {
 
     const run = exe.run();
     test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+fn testGcSections(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-gc-sections", "");
+
+    const obj = cc(b, opts);
+    obj.addCppSource(
+        \\#include <stdio.h>
+        \\int two() { return 2; }
+        \\int live_var1 = 1;
+        \\int live_var2 = two();
+        \\int dead_var1 = 3;
+        \\int dead_var2 = 4;
+        \\void live_fn1() {}
+        \\void live_fn2() { live_fn1(); }
+        \\void dead_fn1() {}
+        \\void dead_fn2() { dead_fn1(); }
+        \\int main() {
+        \\  printf("%d %d\n", live_var1, live_var2);
+        \\  live_fn2();
+        \\}
+    );
+    obj.addArgs(&.{ "-c", "-ffunction-sections", "-fdata-sections" });
+    const obj_out = obj.saveOutputAs("a.o");
+
+    {
+        const exe = cc(b, opts);
+        exe.addFileSource(obj_out.file);
+
+        const run = exe.run();
+        run.expectStdOutEqual("1 2\n");
+        test_step.dependOn(run.step());
+
+        const check = exe.check();
+        check.checkInSymtab();
+        check.checkContains("live_var1");
+        check.checkInSymtab();
+        check.checkContains("live_var2");
+        check.checkInSymtab();
+        check.checkContains("dead_var1");
+        check.checkInSymtab();
+        check.checkContains("dead_var2");
+        check.checkInSymtab();
+        check.checkContains("live_fn1");
+        check.checkInSymtab();
+        check.checkContains("live_fn2");
+        check.checkInSymtab();
+        check.checkContains("dead_fn1");
+        check.checkInSymtab();
+        check.checkContains("dead_fn2");
+        test_step.dependOn(&check.step);
+    }
+
+    {
+        const exe = cc(b, opts);
+        exe.addFileSource(obj_out.file);
+        exe.addArg("-Wl,-gc-sections");
+
+        const run = exe.run();
+        run.expectStdOutEqual("1 2\n");
+        test_step.dependOn(run.step());
+
+        const check = exe.check();
+        check.checkInSymtab();
+        check.checkContains("live_var1");
+        check.checkInSymtab();
+        check.checkContains("live_var2");
+        check.checkInSymtab();
+        check.checkNotPresent("dead_var1");
+        check.checkInSymtab();
+        check.checkNotPresent("dead_var2");
+        check.checkInSymtab();
+        check.checkContains("live_fn1");
+        check.checkInSymtab();
+        check.checkContains("live_fn2");
+        check.checkInSymtab();
+        check.checkNotPresent("dead_fn1");
+        check.checkInSymtab();
+        check.checkNotPresent("dead_fn2");
+        test_step.dependOn(&check.step);
+    }
 
     return test_step;
 }
