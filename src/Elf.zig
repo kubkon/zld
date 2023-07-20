@@ -1324,8 +1324,7 @@ fn allocateGlobals(self: *Elf) void {
 
 fn allocateSyntheticSymbols(self: *Elf) void {
     // _DYNAMIC
-    {
-        const shndx = self.dynamic_sect_index orelse self.got_sect_index.?;
+    if (self.dynamic_sect_index) |shndx| {
         const shdr = self.sections.items(.shdr)[shndx];
         const symbol = self.getSymbol(self.dynamic_index.?);
         symbol.value = shdr.sh_addr;
@@ -1373,8 +1372,7 @@ fn allocateSyntheticSymbols(self: *Elf) void {
     }
 
     // _GLOBAL_OFFSET_TABLE_
-    {
-        const shndx = self.got_plt_sect_index orelse self.got_sect_index.?;
+    if (self.got_plt_sect_index) |shndx| {
         const shdr = self.sections.items(.shdr)[shndx];
         const symbol = self.getSymbol(self.got_index.?);
         symbol.value = shdr.sh_addr;

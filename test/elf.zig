@@ -17,6 +17,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testEmptyObject(b, opts));
         elf_step.dependOn(testEntryPoint(b, opts));
         elf_step.dependOn(testExecStack(b, opts));
+        elf_step.dependOn(testExportDynamic(b, opts));
         elf_step.dependOn(testIfuncAlias(b, opts));
         elf_step.dependOn(testIfuncDynamic(b, opts));
         elf_step.dependOn(testIfuncFuncPtr(b, opts));
@@ -744,6 +745,47 @@ fn testExecStack(b: *Build, opts: Options) *Step {
         check.checkExact("flags RW");
         test_step.dependOn(&check.step);
     }
+
+    return test_step;
+}
+
+fn testExportDynamic(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-export-dynamic", "");
+
+    const obj = cc(b, opts);
+    obj.addAsmSource(
+        \\.text
+        \\  .globl foo
+        \\  .hidden foo
+        \\foo:
+        \\  nop
+        \\  .globl bar
+        \\bar:
+        \\  nop
+        \\  .globl _start
+        \\_start:
+        \\  nop
+    );
+    obj.addArg("-c");
+    const obj_out = obj.saveOutputAs("a.o");
+
+    const dso = cc(b, opts);
+    dso.addCSource("");
+    dso.addArgs(&.{ "-fPIC", "-shared" });
+    const dso_out = dso.saveOutputAs("a.so");
+
+    const exe = ld(b, opts);
+    exe.addFileSource(obj_out.file);
+    exe.addFileSource(dso_out.file);
+    exe.addArg("-rpath");
+    exe.addDirectorySource(dso_out.dir);
+    exe.addArg("--export-dynamic");
+
+    const check = exe.check();
+    check.checkInDynamicSymtab();
+    check.checkContains("bar");
+    check.checkContains("_start");
+    test_step.dependOn(&check.step);
 
     return test_step;
 }
