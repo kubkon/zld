@@ -14,6 +14,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testDsoIfunc(b, opts));
         elf_step.dependOn(testDsoPlt(b, opts));
         elf_step.dependOn(testDsoUndef(b, opts));
+        elf_step.dependOn(testEmptyObject(b, opts));
         elf_step.dependOn(testIfuncAlias(b, opts));
         elf_step.dependOn(testIfuncDynamic(b, opts));
         elf_step.dependOn(testIfuncFuncPtr(b, opts));
@@ -630,6 +631,20 @@ fn testDsoUndef(b: *Build, opts: Options) *Step {
     check.checkInDynamicSymtab();
     check.checkContains("foo");
     test_step.dependOn(&check.step);
+
+    return test_step;
+}
+
+fn testEmptyObject(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-empty-object", "");
+
+    const exe = cc(b, opts);
+    exe.addHelloWorldMain();
+    exe.addCSource("");
+
+    const run = exe.run();
+    run.expectHelloWorld();
+    test_step.dependOn(run.step());
 
     return test_step;
 }
