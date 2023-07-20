@@ -43,6 +43,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testPltGot(b, opts));
         elf_step.dependOn(testPreinitArray(b, opts));
         elf_step.dependOn(testPushPopState(b, opts));
+        elf_step.dependOn(testSharedAbsSymbol(b, opts));
         elf_step.dependOn(testTlsDesc(b, opts));
         elf_step.dependOn(testTlsDescImport(b, opts));
         elf_step.dependOn(testTlsDescStatic(b, opts));
@@ -1726,6 +1727,62 @@ fn testPushPopState(b: *Build, opts: Options) *Step {
     check.checkInDynamicSection();
     check.checkNotPresent("b.so");
     test_step.dependOn(&check.step);
+
+    return test_step;
+}
+
+fn testSharedAbsSymbol(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-shared-abs-symbol", "");
+
+    const dso = cc(b, opts);
+    dso.addAsmSource(
+        \\.globl foo
+        \\foo = 3;
+    );
+    dso.addArgs(&.{ "-fPIC", "-shared" });
+    const dso_out = dso.saveOutputAs("a.so");
+
+    const obj = cc(b, opts);
+    obj.addCSource(
+        \\#include <stdio.h>
+        \\extern char foo;
+        \\int main() { printf("foo=%p\n", &foo); }
+    );
+    obj.addArgs(&.{ "-fPIC", "-c" });
+
+    {
+        const exe = cc(b, opts);
+        exe.addFileSource(obj.out);
+        exe.addFileSource(dso_out.file);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", dso_out.dir);
+        exe.addArg("-pie");
+
+        const run = exe.run();
+        run.expectStdOutEqual("foo=0x3\n");
+        test_step.dependOn(run.step());
+
+        const check = exe.check();
+        check.checkInSymtab();
+        check.checkNotPresent("foo");
+        test_step.dependOn(&check.step);
+    }
+
+    {
+        const exe = cc(b, opts);
+        exe.addFileSource(obj.out);
+        exe.addFileSource(dso_out.file);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", dso_out.dir);
+        exe.addArg("-no-pie");
+
+        const run = exe.run();
+        run.expectStdOutEqual("foo=0x3\n");
+        test_step.dependOn(run.step());
+
+        const check = exe.check();
+        check.checkInSymtab();
+        check.checkNotPresent("foo");
+        test_step.dependOn(&check.step);
+    }
 
     return test_step;
 }

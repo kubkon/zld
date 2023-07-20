@@ -160,6 +160,7 @@ pub inline fn asElfSym(symbol: Symbol, st_name: u32, elf_file: *Elf) elf.Elf64_S
     const st_shndx = blk: {
         if (symbol.flags.copy_rel) break :blk elf_file.copy_rel_sect_index.?;
         if (file == .shared or s_sym.st_shndx == elf.SHN_UNDEF) break :blk elf.SHN_UNDEF;
+        if (symbol.getAtom(elf_file) == null and file != .internal) break :blk elf.SHN_ABS;
         break :blk symbol.shndx;
     };
     const st_value = blk: {
@@ -168,6 +169,7 @@ pub inline fn asElfSym(symbol: Symbol, st_name: u32, elf_file: *Elf) elf.Elf64_S
             if (symbol.flags.is_canonical) break :blk symbol.getAddress(.{}, elf_file);
             break :blk 0;
         }
+        if (st_shndx == elf.SHN_ABS) break :blk symbol.value;
         const shdr = &elf_file.sections.items(.shdr)[st_shndx];
         if (Elf.shdrIsTls(shdr)) break :blk symbol.value - elf_file.getTlsAddress();
         break :blk symbol.value;
