@@ -13,6 +13,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testCopyrelAlignment(b, opts));
         elf_step.dependOn(testDsoIfunc(b, opts));
         elf_step.dependOn(testDsoPlt(b, opts));
+        elf_step.dependOn(testDsoUndef(b, opts));
         elf_step.dependOn(testIfuncAlias(b, opts));
         elf_step.dependOn(testIfuncDynamic(b, opts));
         elf_step.dependOn(testIfuncFuncPtr(b, opts));
@@ -164,9 +165,10 @@ fn testAsNeeded(b: *Build, opts: Options) *Step {
         test_step.dependOn(run.step());
 
         const check = exe.check();
-        check.checkStart("NEEDED libfoo.so");
-        check.checkNext("NEEDED libbar.so");
-        check.checkNext("NEEDED libbaz.so");
+        check.checkInDynamicSection();
+        check.checkExact("NEEDED libfoo.so");
+        check.checkExact("NEEDED libbar.so");
+        check.checkExact("NEEDED libbaz.so");
         test_step.dependOn(&check.step);
     }
 
@@ -186,9 +188,11 @@ fn testAsNeeded(b: *Build, opts: Options) *Step {
         test_step.dependOn(run.step());
 
         const check = exe.check();
-        check.checkStart("NEEDED libfoo.so");
+        check.checkInDynamicSection();
         check.checkNotPresent("NEEDED libbar.so");
-        check.checkStart("NEEDED libbaz.so");
+        check.checkInDynamicSection();
+        check.checkExact("NEEDED libfoo.so");
+        check.checkExact("NEEDED libbaz.so");
         test_step.dependOn(&check.step);
     }
 
@@ -463,9 +467,9 @@ fn testCopyrelAlignment(b: *Build, opts: Options) *Step {
         test_step.dependOn(run.step());
 
         const check = exe.check();
-        check.checkStart("shdr {*}");
-        check.checkNext("name .copyrel");
-        check.checkNext("addralign 20");
+        check.checkStart();
+        check.checkExact("name .copyrel");
+        check.checkExact("addralign 20");
         test_step.dependOn(&check.step);
     }
 
@@ -481,9 +485,9 @@ fn testCopyrelAlignment(b: *Build, opts: Options) *Step {
         test_step.dependOn(run.step());
 
         const check = exe.check();
-        check.checkStart("shdr {*}");
-        check.checkNext("name .copyrel");
-        check.checkNext("addralign 8");
+        check.checkStart();
+        check.checkExact("name .copyrel");
+        check.checkExact("addralign 8");
         test_step.dependOn(&check.step);
     }
 
@@ -499,9 +503,9 @@ fn testCopyrelAlignment(b: *Build, opts: Options) *Step {
         test_step.dependOn(run.step());
 
         const check = exe.check();
-        check.checkStart("shdr {*}");
-        check.checkNext("name .copyrel");
-        check.checkNext("addralign 100");
+        check.checkStart();
+        check.checkExact("name .copyrel");
+        check.checkExact("addralign 100");
         test_step.dependOn(&check.step);
     }
 
@@ -583,6 +587,49 @@ fn testDsoPlt(b: *Build, opts: Options) *Step {
     const run = exe.run();
     run.expectStdOutEqual("Hello WORLD\n");
     test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+fn testDsoUndef(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-dso-undef", "");
+
+    const dso = cc(b, opts);
+    dso.addCSource(
+        \\extern int foo;
+        \\int bar = 5;
+        \\int baz() { return foo; }
+    );
+    dso.addArgs(&.{ "-shared", "-fPIC" });
+    const dso_out = dso.saveOutputAs("a.so");
+
+    const obj = cc(b, opts);
+    obj.addCSource("int foo = 3;");
+    obj.addArg("-c");
+    const obj_out = obj.saveOutputAs("b.o");
+
+    const lib = ar(b);
+    lib.addFileSource(obj_out.file);
+    const lib_out = lib.saveOutputAs("c.a");
+
+    const exe = cc(b, opts);
+    exe.addFileSource(dso_out.file);
+    exe.addPrefixedDirectorySource("-Wl,-rpath,", dso_out.dir);
+    exe.addFileSource(lib_out.file);
+    exe.addCSource(
+        \\extern int bar;
+        \\int main() {
+        \\  return bar - 5;
+        \\}
+    );
+
+    const run = exe.run();
+    test_step.dependOn(run.step());
+
+    const check = exe.check();
+    check.checkInDynamicSymtab();
+    check.checkContains("foo");
+    test_step.dependOn(&check.step);
 
     return test_step;
 }
@@ -775,11 +822,12 @@ fn testIfuncStaticPie(b: *Build, opts: Options) *Step {
     test_step.dependOn(run.step());
 
     const check = exe.check();
-    check.checkStart("header");
-    check.checkNext("type DYN");
-    check.checkStart("shdr {*}");
-    check.checkNext("name .dynamic");
-    check.checkStart("shdr {*}");
+    check.checkStart();
+    check.checkExact("header");
+    check.checkExact("type DYN");
+    check.checkStart();
+    check.checkExact("name .dynamic");
+    check.checkStart();
     check.checkNotPresent("name .interp");
     test_step.dependOn(&check.step);
 
@@ -803,9 +851,10 @@ fn testHelloStatic(b: *Build, opts: Options) *Step {
     test_step.dependOn(run.step());
 
     const check = exe.check();
-    check.checkStart("header");
-    check.checkNext("type EXEC");
-    check.checkStart("shdr {*}");
+    check.checkStart();
+    check.checkExact("header");
+    check.checkExact("type EXEC");
+    check.checkStart();
     check.checkNotPresent("name .dynamic");
     test_step.dependOn(&check.step);
 
@@ -824,10 +873,11 @@ fn testHelloDynamic(b: *Build, opts: Options) *Step {
     test_step.dependOn(run.step());
 
     const check = exe.check();
-    check.checkStart("header");
-    check.checkNext("type EXEC");
-    check.checkStart("shdr {*}");
-    check.checkNext("name .dynamic");
+    check.checkStart();
+    check.checkExact("header");
+    check.checkExact("type EXEC");
+    check.checkStart();
+    check.checkExact("name .dynamic");
     test_step.dependOn(&check.step);
 
     return test_step;
@@ -845,10 +895,11 @@ fn testHelloPie(b: *Build, opts: Options) *Step {
     test_step.dependOn(run.step());
 
     const check = exe.check();
-    check.checkStart("header");
-    check.checkNext("type DYN");
-    check.checkStart("shdr {*}");
-    check.checkNext("name .dynamic");
+    check.checkStart();
+    check.checkExact("header");
+    check.checkExact("type DYN");
+    check.checkStart();
+    check.checkExact("name .dynamic");
     test_step.dependOn(&check.step);
 
     return test_step;

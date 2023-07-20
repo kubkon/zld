@@ -51,7 +51,7 @@ fn testDeadStrip(b: *Build, opts: Options) *Step {
 
     const check = exe.check();
     check.checkInSymtab();
-    check.checkNotPresent("{*} (__TEXT,__text) external _iAmUnused");
+    check.checkNotPresent("(__TEXT,__text) external _iAmUnused");
     test_step.dependOn(&check.step);
 
     return test_step;
@@ -78,10 +78,12 @@ fn testDeadStripDylibs(b: *Build, opts: Options) *Step {
         exe.addArgs(&.{ "-framework", "Cocoa" });
 
         const check = exe.check();
-        check.checkStart("cmd LOAD_DYLIB");
-        check.checkNext("name {*}Cocoa");
-        check.checkStart("cmd LOAD_DYLIB");
-        check.checkNext("name {*}libobjc{*}.dylib");
+        check.checkStart();
+        check.checkExact("cmd LOAD_DYLIB");
+        check.checkContains("Cocoa");
+        check.checkStart();
+        check.checkExact("cmd LOAD_DYLIB");
+        check.checkContains("libobjc");
         test_step.dependOn(&check.step);
 
         const run = exe.run();
@@ -166,12 +168,14 @@ fn testEntryPoint(b: *Build, opts: Options) *Step {
     test_step.dependOn(run.step());
 
     const check = exe.check();
-    check.checkStart("segname __TEXT");
-    check.checkNext("vmaddr {vmaddr}");
-    check.checkStart("cmd MAIN");
-    check.checkNext("entryoff {entryoff}");
+    check.checkStart();
+    check.checkExact("segname __TEXT");
+    check.checkExtract("vmaddr {vmaddr}");
+    check.checkStart();
+    check.checkExact("cmd MAIN");
+    check.checkExtract("entryoff {entryoff}");
     check.checkInSymtab();
-    check.checkNext("{n_value} (__TEXT,__text) external _non_main");
+    check.checkExtract("{n_value} (__TEXT,__text) external _non_main");
     check.checkComputeCompare("vmaddr entryoff +", .{ .op = .eq, .value = .{ .variable = "n_value" } });
     test_step.dependOn(&check.step);
 
@@ -222,12 +226,15 @@ fn testEntryPointDylib(b: *Build, opts: Options) *Step {
     exe.addPrefixedDirectorySource("-L", dylib.saveOutputAs("libbootstrap.dylib").dir);
 
     const check = exe.check();
-    check.checkStart("segname __TEXT");
-    check.checkNext("vmaddr {text_vmaddr}");
-    check.checkStart("sectname __stubs");
-    check.checkNext("addr {stubs_vmaddr}");
-    check.checkStart("cmd MAIN");
-    check.checkNext("entryoff {entryoff}");
+    check.checkStart();
+    check.checkExact("segname __TEXT");
+    check.checkExtract("vmaddr {text_vmaddr}");
+    check.checkStart();
+    check.checkExact("sectname __stubs");
+    check.checkExtract("addr {stubs_vmaddr}");
+    check.checkStart();
+    check.checkExact("cmd MAIN");
+    check.checkExtract("entryoff {entryoff}");
     check.checkComputeCompare("text_vmaddr entryoff +", .{
         .op = .eq,
         .value = .{ .variable = "stubs_vmaddr" }, // The entrypoint should be a synthetic stub
@@ -271,8 +278,9 @@ fn testHeaderpad(b: *Build, opts: Options) *Step {
         exe.addEmptyMain();
 
         const check = exe.check();
-        check.checkStart("sectname __text");
-        check.checkNext("offset {offset}");
+        check.checkStart();
+        check.checkExact("sectname __text");
+        check.checkExtract("offset {offset}");
         switch (builtin.cpu.arch) {
             .aarch64 => check.checkComputeCompare("offset", .{ .op = .gte, .value = .{ .literal = 0x4000 } }),
             .x86_64 => check.checkComputeCompare("offset", .{ .op = .gte, .value = .{ .literal = 0x1000 } }),
@@ -291,8 +299,9 @@ fn testHeaderpad(b: *Build, opts: Options) *Step {
         exe.addEmptyMain();
 
         const check = exe.check();
-        check.checkStart("sectname __text");
-        check.checkNext("offset {offset}");
+        check.checkStart();
+        check.checkExact("sectname __text");
+        check.checkExtract("offset {offset}");
         check.checkComputeCompare("offset", .{ .op = .gte, .value = .{ .literal = 0x10000 } });
         test_step.dependOn(&check.step);
 
@@ -308,8 +317,9 @@ fn testHeaderpad(b: *Build, opts: Options) *Step {
         exe.addEmptyMain();
 
         const check = exe.check();
-        check.checkStart("sectname __text");
-        check.checkNext("offset {offset}");
+        check.checkStart();
+        check.checkExact("sectname __text");
+        check.checkExtract("offset {offset}");
         check.checkComputeCompare("offset", .{ .op = .gte, .value = .{ .literal = 0x10000 } });
         test_step.dependOn(&check.step);
 
@@ -325,8 +335,9 @@ fn testHeaderpad(b: *Build, opts: Options) *Step {
         exe.addEmptyMain();
 
         const check = exe.check();
-        check.checkStart("sectname __text");
-        check.checkNext("offset {offset}");
+        check.checkStart();
+        check.checkExact("sectname __text");
+        check.checkExtract("offset {offset}");
         switch (builtin.cpu.arch) {
             .aarch64 => check.checkComputeCompare("offset", .{ .op = .gte, .value = .{ .literal = 0x4000 } }),
             .x86_64 => check.checkComputeCompare("offset", .{ .op = .gte, .value = .{ .literal = 0x1000 } }),
@@ -361,39 +372,46 @@ fn testLayout(b: *Build, opts: Options) *Step {
     exe.addHelloWorldMain();
 
     const check = exe.check();
-    check.checkStart("cmd SEGMENT_64");
-    check.checkNext("segname __LINKEDIT");
-    check.checkNext("fileoff {fileoff}");
-    check.checkNext("filesz {filesz}");
-    check.checkStart("cmd DYLD_INFO_ONLY");
-    check.checkNext("rebaseoff {rebaseoff}");
-    check.checkNext("rebasesize {rebasesize}");
-    check.checkNext("bindoff {bindoff}");
-    check.checkNext("bindsize {bindsize}");
-    check.checkNext("lazybindoff {lazybindoff}");
-    check.checkNext("lazybindsize {lazybindsize}");
-    check.checkNext("exportoff {exportoff}");
-    check.checkNext("exportsize {exportsize}");
-    check.checkStart("cmd FUNCTION_STARTS");
-    check.checkNext("dataoff {fstartoff}");
-    check.checkNext("datasize {fstartsize}");
-    check.checkStart("cmd DATA_IN_CODE");
-    check.checkNext("dataoff {diceoff}");
-    check.checkNext("datasize {dicesize}");
-    check.checkStart("cmd SYMTAB");
-    check.checkNext("symoff {symoff}");
-    check.checkNext("nsyms {symnsyms}");
-    check.checkNext("stroff {stroff}");
-    check.checkNext("strsize {strsize}");
-    check.checkStart("cmd DYSYMTAB");
-    check.checkNext("indirectsymoff {dysymoff}");
-    check.checkNext("nindirectsyms {dysymnsyms}");
+    check.checkStart();
+    check.checkExact("cmd SEGMENT_64");
+    check.checkExact("segname __LINKEDIT");
+    check.checkExtract("fileoff {fileoff}");
+    check.checkExtract("filesz {filesz}");
+    check.checkStart();
+    check.checkExact("cmd DYLD_INFO_ONLY");
+    check.checkExtract("rebaseoff {rebaseoff}");
+    check.checkExtract("rebasesize {rebasesize}");
+    check.checkExtract("bindoff {bindoff}");
+    check.checkExtract("bindsize {bindsize}");
+    check.checkExtract("lazybindoff {lazybindoff}");
+    check.checkExtract("lazybindsize {lazybindsize}");
+    check.checkExtract("exportoff {exportoff}");
+    check.checkExtract("exportsize {exportsize}");
+    check.checkStart();
+    check.checkExact("cmd FUNCTION_STARTS");
+    check.checkExtract("dataoff {fstartoff}");
+    check.checkExtract("datasize {fstartsize}");
+    check.checkStart();
+    check.checkExact("cmd DATA_IN_CODE");
+    check.checkExtract("dataoff {diceoff}");
+    check.checkExtract("datasize {dicesize}");
+    check.checkStart();
+    check.checkExact("cmd SYMTAB");
+    check.checkExtract("symoff {symoff}");
+    check.checkExtract("nsyms {symnsyms}");
+    check.checkExtract("stroff {stroff}");
+    check.checkExtract("strsize {strsize}");
+    check.checkStart();
+    check.checkExact("cmd DYSYMTAB");
+    check.checkExtract("indirectsymoff {dysymoff}");
+    check.checkExtract("nindirectsyms {dysymnsyms}");
 
     switch (builtin.cpu.arch) {
         .aarch64 => {
-            check.checkStart("cmd CODE_SIGNATURE");
-            check.checkNext("dataoff {codesigoff}");
-            check.checkNext("datasize {codesigsize}");
+            check.checkStart();
+            check.checkExact("cmd CODE_SIGNATURE");
+            check.checkExtract("dataoff {codesigoff}");
+            check.checkExtract("datasize {codesigsize}");
         },
         .x86_64 => {},
         else => unreachable,
@@ -469,8 +487,9 @@ fn testNeededFramework(b: *Build, opts: Options) *Step {
     exe.addEmptyMain();
 
     const check = exe.check();
-    check.checkStart("cmd LOAD_DYLIB");
-    check.checkNext("name {*}Cocoa");
+    check.checkStart();
+    check.checkExact("cmd LOAD_DYLIB");
+    check.checkContains("Cocoa");
     test_step.dependOn(&check.step);
 
     const run = exe.run();
@@ -494,8 +513,9 @@ fn testNeededLibrary(b: *Build, opts: Options) *Step {
     exe.addPrefixedDirectorySource("-Wl,-rpath,", dylib_out.dir);
 
     const check = exe.check();
-    check.checkStart("cmd LOAD_DYLIB");
-    check.checkNext("name {*}liba.dylib");
+    check.checkStart();
+    check.checkExact("cmd LOAD_DYLIB");
+    check.checkContains("liba.dylib");
     test_step.dependOn(&check.step);
 
     const run = exe.run();
@@ -513,12 +533,14 @@ fn testPagezeroSize(b: *Build, opts: Options) *Step {
         exe.addEmptyMain();
 
         const check = exe.check();
-        check.checkStart("LC 0");
-        check.checkNext("segname __PAGEZERO");
-        check.checkNext("vmaddr 0");
-        check.checkNext("vmsize 4000");
-        check.checkStart("segname __TEXT");
-        check.checkNext("vmaddr 4000");
+        check.checkStart();
+        check.checkExact("LC 0");
+        check.checkExact("segname __PAGEZERO");
+        check.checkExact("vmaddr 0");
+        check.checkExact("vmsize 4000");
+        check.checkStart();
+        check.checkExact("segname __TEXT");
+        check.checkExact("vmaddr 4000");
         test_step.dependOn(&check.step);
     }
 
@@ -528,9 +550,10 @@ fn testPagezeroSize(b: *Build, opts: Options) *Step {
         exe.addEmptyMain();
 
         const check = exe.check();
-        check.checkStart("LC 0");
-        check.checkNext("segname __TEXT");
-        check.checkNext("vmaddr 0");
+        check.checkStart();
+        check.checkExact("LC 0");
+        check.checkExact("segname __TEXT");
+        check.checkExact("vmaddr 0");
         test_step.dependOn(&check.step);
     }
 
@@ -583,8 +606,9 @@ fn testSearchStrategy(b: *Build, opts: Options) *Step {
         test_step.dependOn(run.step());
 
         const check = exe.check();
-        check.checkStart("cmd LOAD_DYLIB");
-        check.checkNext("name {*}liba.dylib");
+        check.checkStart();
+        check.checkExact("cmd LOAD_DYLIB");
+        check.checkContains("liba.dylib");
         test_step.dependOn(&check.step);
     }
 
@@ -601,8 +625,9 @@ fn testSearchStrategy(b: *Build, opts: Options) *Step {
         test_step.dependOn(run.step());
 
         const check = exe.check();
-        check.checkStart("cmd LOAD_DYLIB");
-        check.checkNotPresent("name {*}liba.dylib");
+        check.checkStart();
+        check.checkExact("cmd LOAD_DYLIB");
+        check.checkNotPresent("liba.dylib");
         test_step.dependOn(&check.step);
     }
 
@@ -620,8 +645,9 @@ fn testStackSize(b: *Build, opts: Options) *Step {
     test_step.dependOn(run.step());
 
     const check = exe.check();
-    check.checkStart("cmd MAIN");
-    check.checkNext("stacksize 100000000");
+    check.checkStart();
+    check.checkExact("cmd MAIN");
+    check.checkExact("stacksize 100000000");
     test_step.dependOn(&check.step);
 
     return test_step;
@@ -820,7 +846,7 @@ fn testUnwindInfo(b: *Build, opts: Options) *Step {
 
     const check = exe.check();
     check.checkInSymtab();
-    check.checkNext("{*} external ___gxx_personality_v0");
+    check.checkContains("external ___gxx_personality_v0");
     test_step.dependOn(&check.step);
 
     return test_step;
@@ -837,8 +863,9 @@ fn testWeakFramework(b: *Build, opts: Options) *Step {
     test_step.dependOn(run.step());
 
     const check = exe.check();
-    check.checkStart("cmd LOAD_WEAK_DYLIB");
-    check.checkNext("name {*}Cocoa");
+    check.checkStart();
+    check.checkExact("cmd LOAD_WEAK_DYLIB");
+    check.checkContains("Cocoa");
     test_step.dependOn(&check.step);
 
     return test_step;
@@ -875,12 +902,13 @@ fn testWeakLibrary(b: *Build, opts: Options) *Step {
     exe.addPrefixedDirectorySource("-Wl,-rpath,", dylib_out.dir);
 
     const check = exe.check();
-    check.checkStart("cmd LOAD_WEAK_DYLIB");
-    check.checkNext("name {*}liba.dylib");
+    check.checkStart();
+    check.checkExact("cmd LOAD_WEAK_DYLIB");
+    check.checkContains("liba.dylib");
     check.checkInSymtab();
-    check.checkNext("(undefined) weak external _a (from liba)");
+    check.checkExact("(undefined) weak external _a (from liba)");
     check.checkInSymtab();
-    check.checkNext("(undefined) weak external _asStr (from liba)");
+    check.checkExact("(undefined) weak external _asStr (from liba)");
     test_step.dependOn(&check.step);
 
     const run = exe.run();
