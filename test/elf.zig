@@ -16,6 +16,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testDsoUndef(b, opts));
         elf_step.dependOn(testEmptyObject(b, opts));
         elf_step.dependOn(testEntryPoint(b, opts));
+        elf_step.dependOn(testExecStack(b, opts));
         elf_step.dependOn(testIfuncAlias(b, opts));
         elf_step.dependOn(testIfuncDynamic(b, opts));
         elf_step.dependOn(testIfuncFuncPtr(b, opts));
@@ -469,6 +470,7 @@ fn testCopyrelAlignment(b: *Build, opts: Options) *Step {
 
         const check = exe.check();
         check.checkStart();
+        check.checkExact("section headers");
         check.checkExact("name .copyrel");
         check.checkExact("addralign 20");
         test_step.dependOn(&check.step);
@@ -487,6 +489,7 @@ fn testCopyrelAlignment(b: *Build, opts: Options) *Step {
 
         const check = exe.check();
         check.checkStart();
+        check.checkExact("section headers");
         check.checkExact("name .copyrel");
         check.checkExact("addralign 8");
         test_step.dependOn(&check.step);
@@ -505,6 +508,7 @@ fn testCopyrelAlignment(b: *Build, opts: Options) *Step {
 
         const check = exe.check();
         check.checkStart();
+        check.checkExact("section headers");
         check.checkExact("name .copyrel");
         check.checkExact("addralign 100");
         test_step.dependOn(&check.step);
@@ -689,6 +693,55 @@ fn testEntryPoint(b: *Build, opts: Options) *Step {
         check.checkStart();
         check.checkExact("header");
         check.checkExact("entry 2000");
+        test_step.dependOn(&check.step);
+    }
+
+    return test_step;
+}
+
+fn testExecStack(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-exec-stack", "");
+
+    const obj = cc(b, opts);
+    obj.addEmptyMain();
+    obj.addArg("-c");
+    const obj_out = obj.saveOutputAs("a.o");
+
+    {
+        const exe = cc(b, opts);
+        exe.addFileSource(obj_out.file);
+        exe.addArg("-Wl,-z,execstack");
+
+        const check = exe.check();
+        check.checkStart();
+        check.checkExact("program headers");
+        check.checkExact("type GNU_STACK");
+        check.checkExact("flags RWE");
+        test_step.dependOn(&check.step);
+    }
+
+    {
+        const exe = cc(b, opts);
+        exe.addFileSource(obj_out.file);
+        exe.addArgs(&.{ "-Wl,-z,execstack", "-Wl,-z,noexecstack" });
+
+        const check = exe.check();
+        check.checkStart();
+        check.checkExact("program headers");
+        check.checkExact("type GNU_STACK");
+        check.checkExact("flags RW");
+        test_step.dependOn(&check.step);
+    }
+
+    {
+        const exe = cc(b, opts);
+        exe.addFileSource(obj_out.file);
+
+        const check = exe.check();
+        check.checkStart();
+        check.checkExact("program headers");
+        check.checkExact("type GNU_STACK");
+        check.checkExact("flags RW");
         test_step.dependOn(&check.step);
     }
 
@@ -887,8 +940,10 @@ fn testIfuncStaticPie(b: *Build, opts: Options) *Step {
     check.checkExact("header");
     check.checkExact("type DYN");
     check.checkStart();
+    check.checkExact("section headers");
     check.checkExact("name .dynamic");
     check.checkStart();
+    check.checkExact("section headers");
     check.checkNotPresent("name .interp");
     test_step.dependOn(&check.step);
 
@@ -916,6 +971,7 @@ fn testHelloStatic(b: *Build, opts: Options) *Step {
     check.checkExact("header");
     check.checkExact("type EXEC");
     check.checkStart();
+    check.checkExact("section headers");
     check.checkNotPresent("name .dynamic");
     test_step.dependOn(&check.step);
 
@@ -938,6 +994,7 @@ fn testHelloDynamic(b: *Build, opts: Options) *Step {
     check.checkExact("header");
     check.checkExact("type EXEC");
     check.checkStart();
+    check.checkExact("section headers");
     check.checkExact("name .dynamic");
     test_step.dependOn(&check.step);
 
@@ -960,6 +1017,7 @@ fn testHelloPie(b: *Build, opts: Options) *Step {
     check.checkExact("header");
     check.checkExact("type DYN");
     check.checkStart();
+    check.checkExact("section headers");
     check.checkExact("name .dynamic");
     test_step.dependOn(&check.step);
 
