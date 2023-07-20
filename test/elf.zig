@@ -19,6 +19,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testExecStack(b, opts));
         elf_step.dependOn(testExportDynamic(b, opts));
         elf_step.dependOn(testExportSymbolsFromExe(b, opts));
+        elf_step.dependOn(testFuncAddress(b, opts));
         elf_step.dependOn(testIfuncAlias(b, opts));
         elf_step.dependOn(testIfuncDynamic(b, opts));
         elf_step.dependOn(testIfuncFuncPtr(b, opts));
@@ -827,6 +828,34 @@ fn testExportSymbolsFromExe(b: *Build, opts: Options) *Step {
     check.checkInDynamicSymtab();
     check.checkContains("expfn1");
     test_step.dependOn(&check.step);
+
+    return test_step;
+}
+
+fn testFuncAddress(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-func-address", "");
+
+    const dso = cc(b, opts);
+    dso.addCSource("void fn() {}");
+    dso.addArgs(&.{ "-fPIC", "-shared" });
+    const dso_out = dso.saveOutputAs("a.so");
+
+    const exe = cc(b, opts);
+    exe.addCSource(
+        \\#include <assert.h>
+        \\typedef void Func();
+        \\void fn();
+        \\Func *const ptr = fn;
+        \\int main() {
+        \\  assert(fn == ptr);
+        \\}
+    );
+    exe.addFileSource(dso_out.file);
+    exe.addPrefixedDirectorySource("-Wl,-rpath,", dso_out.dir);
+    exe.addArgs(&.{ "-fno-PIC", "-no-pie" });
+
+    const run = exe.run();
+    test_step.dependOn(run.step());
 
     return test_step;
 }
