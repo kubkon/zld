@@ -33,6 +33,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testIfuncNoPlt(b, opts));
         elf_step.dependOn(testIfuncStatic(b, opts));
         elf_step.dependOn(testIfuncStaticPie(b, opts));
+        elf_step.dependOn(testImageBase(b, opts));
         elf_step.dependOn(testTlsDesc(b, opts));
         elf_step.dependOn(testTlsDescImport(b, opts));
         elf_step.dependOn(testTlsDescStatic(b, opts));
@@ -1308,6 +1309,46 @@ fn testIfuncStaticPie(b: *Build, opts: Options) *Step {
     check.checkExact("section headers");
     check.checkNotPresent("name .interp");
     test_step.dependOn(&check.step);
+
+    return test_step;
+}
+
+fn testImageBase(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-image-base", "");
+
+    {
+        const exe = cc(b, opts);
+        exe.addHelloWorldMain();
+        exe.addArgs(&.{ "-no-pie", "-Wl,-image-base,0x8000000" });
+
+        const run = exe.run();
+        run.expectHelloWorld();
+        test_step.dependOn(run.step());
+
+        const check = exe.check();
+        check.checkStart();
+        check.checkExact("section headers");
+        check.checkExact("name .interp");
+        check.checkExact("type PROGBITS");
+        check.checkExtract("addr {addr}");
+        check.checkComputeCompare("addr", .{ .op = .gte, .value = .{ .literal = 0x8000000 } });
+        test_step.dependOn(&check.step);
+    }
+
+    {
+        const exe = cc(b, opts);
+        exe.addCSource("void _start() {}");
+        exe.addArgs(&.{ "-no-pie", "-nostdlib", "-Wl,-image-base,0xffffffff8000000" });
+
+        const check = exe.check();
+        check.checkStart();
+        check.checkExact("section headers");
+        check.checkExact("name .interp");
+        check.checkExact("type PROGBITS");
+        check.checkExtract("addr {addr}");
+        check.checkComputeCompare("addr", .{ .op = .gte, .value = .{ .literal = 0xffffffff8000000 } });
+        test_step.dependOn(&check.step);
+    }
 
     return test_step;
 }
