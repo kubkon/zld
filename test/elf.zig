@@ -41,6 +41,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testLinkerScript(b, opts));
         elf_step.dependOn(testNoEhFrameHdr(b, opts));
         elf_step.dependOn(testPltGot(b, opts));
+        elf_step.dependOn(testPreinitArray(b, opts));
         elf_step.dependOn(testTlsDesc(b, opts));
         elf_step.dependOn(testTlsDescImport(b, opts));
         elf_step.dependOn(testTlsDescStatic(b, opts));
@@ -1659,6 +1660,39 @@ fn testPltGot(b: *Build, opts: Options) *Step {
     const run = exe.run();
     run.expectStdOutEqual("Hello world\n");
     test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+fn testPreinitArray(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-preinit-array", "");
+
+    {
+        const obj = cc(b, opts);
+        obj.addCSource("void _start() {}");
+        obj.addArg("-c");
+
+        const exe = ld(b, opts);
+        exe.addFileSource(obj.out);
+
+        const check = exe.check();
+        check.checkInDynamicSection();
+        check.checkNotPresent("PREINIT_ARRAY");
+    }
+
+    {
+        const exe = cc(b, opts);
+        exe.addCSource(
+            \\void preinit_fn() {}
+            \\int main() {}
+            \\__attribute__((section(".preinit_array")))
+            \\void *preinit[] = { preinit_fn };
+        );
+
+        const check = exe.check();
+        check.checkInDynamicSection();
+        check.checkContains("PREINIT_ARRAY");
+    }
 
     return test_step;
 }
