@@ -42,6 +42,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testNoEhFrameHdr(b, opts));
         elf_step.dependOn(testPltGot(b, opts));
         elf_step.dependOn(testPreinitArray(b, opts));
+        elf_step.dependOn(testPushPopState(b, opts));
         elf_step.dependOn(testTlsDesc(b, opts));
         elf_step.dependOn(testTlsDescImport(b, opts));
         elf_step.dependOn(testTlsDescStatic(b, opts));
@@ -1693,6 +1694,38 @@ fn testPreinitArray(b: *Build, opts: Options) *Step {
         check.checkInDynamicSection();
         check.checkContains("PREINIT_ARRAY");
     }
+
+    return test_step;
+}
+
+fn testPushPopState(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-push-pop-state", "");
+
+    const a_so = cc(b, opts);
+    a_so.addCSource("int foo = 1;");
+    a_so.addArgs(&.{ "-fPIC", "-shared" });
+    const a_so_out = a_so.saveOutputAs("a.so");
+
+    const b_so = cc(b, opts);
+    b_so.addCSource("int bar = 1;");
+    b_so.addArgs(&.{ "-fPIC", "-shared" });
+    const b_so_out = b_so.saveOutputAs("b.so");
+
+    const exe = cc(b, opts);
+    exe.addEmptyMain();
+    exe.addArgs(&.{ "-Wl,--as-needed", "-Wl,--push-state", "-Wl,--no-as-needed" });
+    exe.addFileSource(a_so_out.file);
+    exe.addPrefixedDirectorySource("-Wl,-rpath,", a_so_out.dir);
+    exe.addArg("-Wl,--pop-state");
+    exe.addFileSource(b_so_out.file);
+    exe.addPrefixedDirectorySource("-Wl,-rpath,", b_so_out.dir);
+
+    const check = exe.check();
+    check.checkInDynamicSection();
+    check.checkContains("a.so");
+    check.checkInDynamicSection();
+    check.checkNotPresent("b.so");
+    test_step.dependOn(&check.step);
 
     return test_step;
 }
