@@ -1466,7 +1466,7 @@ fn parseObject(self: *Elf, arena: Allocator, obj: LinkObject) !bool {
     const file = try fs.cwd().openFile(obj.path, .{});
     defer file.close();
 
-    const header = try file.reader().readStruct(elf.Elf64_Ehdr);
+    const header = file.reader().readStruct(elf.Elf64_Ehdr) catch return false;
     try file.seekTo(0);
 
     if (!Object.isValidHeader(&header)) return false;
@@ -1492,7 +1492,7 @@ fn parseArchive(self: *Elf, arena: Allocator, obj: LinkObject) !bool {
     const file = try fs.cwd().openFile(obj.path, .{});
     defer file.close();
 
-    const magic = try file.reader().readBytesNoEof(Archive.SARMAG);
+    const magic = file.reader().readBytesNoEof(Archive.SARMAG) catch return false;
     try file.seekTo(0);
 
     if (!Archive.isValidMagic(&magic)) return false;
@@ -1519,7 +1519,7 @@ fn parseShared(self: *Elf, arena: Allocator, obj: LinkObject) !bool {
     const file = try fs.cwd().openFile(obj.path, .{});
     defer file.close();
 
-    const header = try file.reader().readStruct(elf.Elf64_Ehdr);
+    const header = file.reader().readStruct(elf.Elf64_Ehdr) catch return false;
     try file.seekTo(0);
 
     if (!SharedObject.isValidHeader(&header)) return false;

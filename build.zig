@@ -71,7 +71,21 @@ pub fn build(b: *std.Build.Builder) void {
     const has_static = b.option(bool, "has-static", "Whether the system compiler supports '-static' flag") orelse false;
     const has_static_pie = b.option(bool, "has-static-pie", "Whether the system compiler supports '-static -pie' flags") orelse false;
 
+    const tests = b.addTest(.{
+        .root_source_file = .{ .path = "src/Zld.zig" },
+        .target = target,
+        .optimize = mode,
+    });
+    const tests_opts = b.addOptions();
+    tests.addOptions("build_options", tests_opts);
+    tests_opts.addOption(bool, "enable_logging", enable_logging);
+    tests_opts.addOption(bool, "enable_tracy", enable_tracy != null);
+    tests.addModule("yaml", yaml.module("yaml"));
+    tests.addModule("dis_x86_64", dis_x86_64.module("dis_x86_64"));
+    tests.linkLibC();
+
     const test_step = b.step("test", "Run tests");
+    test_step.dependOn(&b.addRunArtifact(tests).step);
     test_step.dependOn(@import("test/test.zig").addTests(b, exe, .{
         .has_static = has_static,
         .has_static_pie = has_static_pie,

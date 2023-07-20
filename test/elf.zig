@@ -38,6 +38,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testLargeAlignmentDso(b, opts));
         elf_step.dependOn(testLargeAlignmentExe(b, opts));
         elf_step.dependOn(testLinkOrder(b, opts));
+        elf_step.dependOn(testLinkerScript(b, opts));
         elf_step.dependOn(testTlsDesc(b, opts));
         elf_step.dependOn(testTlsDescImport(b, opts));
         elf_step.dependOn(testTlsDescStatic(b, opts));
@@ -1581,6 +1582,36 @@ fn testLinkOrder(b: *Build, opts: Options) *Step {
     return test_step;
 }
 
+fn testLinkerScript(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-linker-script", "");
+
+    const dso = cc(b, opts);
+    dso.addCSource("int foo() { return 42; }");
+    dso.addArgs(&.{ "-fPIC", "-shared" });
+    const dso_out = dso.saveOutputAs("libfoo.so");
+
+    const scr = scr: {
+        const wf = WriteFile.create(b);
+        break :scr wf.add("script", "GROUP(AS_NEEDED(-lfoo))");
+    };
+
+    const exe = cc(b, opts);
+    exe.addCSource(
+        \\int foo();
+        \\int main() {
+        \\  return foo() - 42;
+        \\}
+    );
+    exe.addFileSource(scr);
+    exe.addPrefixedDirectorySource("-L", dso_out.dir);
+    exe.addPrefixedDirectorySource("-Wl,-rpath,", dso_out.dir);
+
+    const run = exe.run();
+    test_step.dependOn(run.step());
+
+    return test_step;
+}
+
 fn testTlsDesc(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-desc", "");
 
@@ -2126,3 +2157,4 @@ const Options = common.Options;
 const Run = Step.Run;
 const Step = Build.Step;
 const SysCmd = common.SysCmd;
+const WriteFile = Step.WriteFile;
