@@ -40,7 +40,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testLinkOrder(b, opts));
         elf_step.dependOn(testLinkerScript(b, opts));
         elf_step.dependOn(testNoEhFrameHdr(b, opts));
-        elf_step.dependOn(testZNow(b, opts));
+        elf_step.dependOn(testPltGot(b, opts));
         elf_step.dependOn(testTlsDesc(b, opts));
         elf_step.dependOn(testTlsDescImport(b, opts));
         elf_step.dependOn(testTlsDescStatic(b, opts));
@@ -50,6 +50,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testTlsLd(b, opts));
         elf_step.dependOn(testTlsLdDso(b, opts));
         elf_step.dependOn(testTlsStatic(b, opts));
+        elf_step.dependOn(testZNow(b, opts));
     }
 
     return elf_step;
@@ -1630,34 +1631,34 @@ fn testNoEhFrameHdr(b: *Build, opts: Options) *Step {
     return test_step;
 }
 
-fn testZNow(b: *Build, opts: Options) *Step {
-    const test_step = b.step("test-elf-z-now", "");
+fn testPltGot(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-plt-got", "");
 
-    const obj = cc(b, opts);
-    obj.addEmptyMain();
-    obj.addArgs(&.{ "-fPIC", "-c" });
+    const dso = cc(b, opts);
+    dso.addCSource(
+        \\#include <stdio.h>
+        \\void ignore(void *foo) {}
+        \\void hello() {
+        \\  printf("Hello world\n");
+        \\}
+    );
+    dso.addArgs(&.{ "-fPIC", "-shared" });
+    const dso_out = dso.saveOutputAs("a.so");
 
-    {
-        const dso = cc(b, opts);
-        dso.addFileSource(obj.out);
-        dso.addArgs(&.{ "-shared", "-Wl,-z,now" });
+    const exe = cc(b, opts);
+    exe.addCSource(
+        \\void ignore(void *);
+        \\int hello();
+        \\void foo() { ignore(hello); }
+        \\int main() { hello(); }
+    );
+    exe.addFileSource(dso_out.file);
+    exe.addPrefixedDirectorySource("-Wl,-rpath,", dso_out.dir);
+    exe.addArg("-fPIC");
 
-        const check = dso.check();
-        check.checkInDynamicSection();
-        check.checkContains("NOW");
-        test_step.dependOn(&check.step);
-    }
-
-    {
-        const dso = cc(b, opts);
-        dso.addFileSource(obj.out);
-        dso.addArgs(&.{ "-shared", "-Wl,-z,now", "-Wl,-z,lazy" });
-
-        const check = dso.check();
-        check.checkInDynamicSection();
-        check.checkNotPresent("NOW");
-        test_step.dependOn(&check.step);
-    }
+    const run = exe.run();
+    run.expectStdOutEqual("Hello world\n");
+    test_step.dependOn(run.step());
 
     return test_step;
 }
@@ -2167,6 +2168,38 @@ fn testTlsStatic(b: *Build, opts: Options) *Step {
         \\
     );
     test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+fn testZNow(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-z-now", "");
+
+    const obj = cc(b, opts);
+    obj.addEmptyMain();
+    obj.addArgs(&.{ "-fPIC", "-c" });
+
+    {
+        const dso = cc(b, opts);
+        dso.addFileSource(obj.out);
+        dso.addArgs(&.{ "-shared", "-Wl,-z,now" });
+
+        const check = dso.check();
+        check.checkInDynamicSection();
+        check.checkContains("NOW");
+        test_step.dependOn(&check.step);
+    }
+
+    {
+        const dso = cc(b, opts);
+        dso.addFileSource(obj.out);
+        dso.addArgs(&.{ "-shared", "-Wl,-z,now", "-Wl,-z,lazy" });
+
+        const check = dso.check();
+        check.checkInDynamicSection();
+        check.checkNotPresent("NOW");
+        test_step.dependOn(&check.step);
+    }
 
     return test_step;
 }
