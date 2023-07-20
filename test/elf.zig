@@ -39,6 +39,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testLargeAlignmentExe(b, opts));
         elf_step.dependOn(testLinkOrder(b, opts));
         elf_step.dependOn(testLinkerScript(b, opts));
+        elf_step.dependOn(testNoEhFrameHdr(b, opts));
         elf_step.dependOn(testTlsDesc(b, opts));
         elf_step.dependOn(testTlsDescImport(b, opts));
         elf_step.dependOn(testTlsDescStatic(b, opts));
@@ -1608,6 +1609,22 @@ fn testLinkerScript(b: *Build, opts: Options) *Step {
 
     const run = exe.run();
     test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+fn testNoEhFrameHdr(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-no-eh-frame-hdr", "");
+
+    const exe = cc(b, opts);
+    exe.addEmptyMain();
+    exe.addArgs(&.{"-Wl,--no-eh-frame-hdr"});
+
+    const check = exe.check();
+    check.checkStart();
+    check.checkExact("section headers");
+    check.checkNotPresent("name .eh_frame_hdr");
+    test_step.dependOn(&check.step);
 
     return test_step;
 }
