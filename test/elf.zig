@@ -18,6 +18,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testEntryPoint(b, opts));
         elf_step.dependOn(testExecStack(b, opts));
         elf_step.dependOn(testExportDynamic(b, opts));
+        elf_step.dependOn(testExportSymbolsFromExe(b, opts));
         elf_step.dependOn(testIfuncAlias(b, opts));
         elf_step.dependOn(testIfuncDynamic(b, opts));
         elf_step.dependOn(testIfuncFuncPtr(b, opts));
@@ -785,6 +786,46 @@ fn testExportDynamic(b: *Build, opts: Options) *Step {
     check.checkInDynamicSymtab();
     check.checkContains("bar");
     check.checkContains("_start");
+    test_step.dependOn(&check.step);
+
+    return test_step;
+}
+
+fn testExportSymbolsFromExe(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-export-symbols-from-exe", "");
+
+    const dso = cc(b, opts);
+    dso.addCSource(
+        \\void expfn1();
+        \\void expfn2() {}
+        \\
+        \\void foo() {
+        \\  expfn1();
+        \\}
+    );
+    dso.addArgs(&.{ "-fPIC", "-shared" });
+    const dso_out = dso.saveOutputAs("a.so");
+
+    const exe = cc(b, opts);
+    exe.addCSource(
+        \\void expfn1() {}
+        \\void expfn2() {}
+        \\void foo();
+        \\
+        \\int main() {
+        \\  expfn1();
+        \\  expfn2();
+        \\  foo();
+        \\}
+    );
+    exe.addFileSource(dso_out.file);
+    exe.addPrefixedDirectorySource("-Wl,-rpath,", dso_out.dir);
+
+    const check = exe.check();
+    check.checkInDynamicSymtab();
+    check.checkContains("expfn2");
+    check.checkInDynamicSymtab();
+    check.checkContains("expfn1");
     test_step.dependOn(&check.step);
 
     return test_step;
