@@ -37,6 +37,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testInitArrayOrder(b, opts));
         elf_step.dependOn(testLargeAlignmentDso(b, opts));
         elf_step.dependOn(testLargeAlignmentExe(b, opts));
+        elf_step.dependOn(testLinkOrder(b, opts));
         elf_step.dependOn(testTlsDesc(b, opts));
         elf_step.dependOn(testTlsDescImport(b, opts));
         elf_step.dependOn(testTlsDescStatic(b, opts));
@@ -1518,6 +1519,64 @@ fn testLargeAlignmentExe(b: *Build, opts: Options) *Step {
     check.checkComputeCompare("addr1 16 %", .{ .op = .eq, .value = .{ .literal = 0 } });
     check.checkComputeCompare("addr2 16 %", .{ .op = .eq, .value = .{ .literal = 0 } });
     test_step.dependOn(&check.step);
+
+    return test_step;
+}
+
+fn testLinkOrder(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-link-order", "");
+
+    const obj = cc(b, opts);
+    obj.addCSource("void foo() {}");
+    obj.addArgs(&.{ "-fPIC", "-c" });
+    const obj_out = obj.saveOutputAs("a.o");
+
+    const dso = cc(b, opts);
+    dso.addFileSource(obj_out.file);
+    dso.addArg("-shared");
+    const dso_out = dso.saveOutputAs("a.so");
+
+    const lib = ar(b);
+    lib.addFileSource(obj_out.file);
+    const lib_out = lib.saveOutputAs("a.a");
+
+    const main_o = cc(b, opts);
+    main_o.addCSource(
+        \\void foo();
+        \\int main() {
+        \\  foo();
+        \\}
+    );
+    main_o.addArg("-c");
+    const main_o_out = main_o.saveOutputAs("main.o");
+
+    {
+        const exe = cc(b, opts);
+        exe.addFileSource(main_o_out.file);
+        exe.addArg("-Wl,--as-needed");
+        exe.addFileSource(dso_out.file);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", dso_out.dir);
+        exe.addFileSource(lib_out.file);
+
+        const check = exe.check();
+        check.checkInDynamicSection();
+        check.checkContains("a.so");
+        test_step.dependOn(&check.step);
+    }
+
+    {
+        const exe = cc(b, opts);
+        exe.addFileSource(main_o_out.file);
+        exe.addArg("-Wl,--as-needed");
+        exe.addFileSource(lib_out.file);
+        exe.addFileSource(dso_out.file);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", dso_out.dir);
+
+        const check = exe.check();
+        check.checkInDynamicSection();
+        check.checkNotPresent("a.so");
+        test_step.dependOn(&check.step);
+    }
 
     return test_step;
 }
