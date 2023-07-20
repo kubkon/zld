@@ -15,6 +15,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testDsoPlt(b, opts));
         elf_step.dependOn(testDsoUndef(b, opts));
         elf_step.dependOn(testEmptyObject(b, opts));
+        elf_step.dependOn(testEntryPoint(b, opts));
         elf_step.dependOn(testIfuncAlias(b, opts));
         elf_step.dependOn(testIfuncDynamic(b, opts));
         elf_step.dependOn(testIfuncFuncPtr(b, opts));
@@ -45,7 +46,6 @@ fn testAbsSymbols(b: *Build, opts: Options) *Step {
     obj.addAsmSource(
         \\.globl foo
         \\foo = 0x800008
-        \\
     );
     obj.addArg("-c");
     const obj_out = obj.saveOutputAs("a.o");
@@ -645,6 +645,52 @@ fn testEmptyObject(b: *Build, opts: Options) *Step {
     const run = exe.run();
     run.expectHelloWorld();
     test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+fn testEntryPoint(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-entry-point", "");
+
+    const a_o = cc(b, opts);
+    a_o.addAsmSource(
+        \\.globl foo, bar
+        \\foo = 0x1000
+        \\bar = 0x2000
+    );
+    a_o.addArg("-c");
+    const a_o_out = a_o.saveOutputAs("a.o");
+
+    const b_o = cc(b, opts);
+    b_o.addEmptyMain();
+    b_o.addArg("-c");
+    const b_o_out = b_o.saveOutputAs("b.o");
+
+    {
+        const exe = cc(b, opts);
+        exe.addFileSource(a_o_out.file);
+        exe.addFileSource(b_o_out.file);
+        exe.addArg("-Wl,-e,foo");
+
+        const check = exe.check();
+        check.checkStart();
+        check.checkExact("header");
+        check.checkExact("entry 1000");
+        test_step.dependOn(&check.step);
+    }
+
+    {
+        const exe = cc(b, opts);
+        exe.addFileSource(a_o_out.file);
+        exe.addFileSource(b_o_out.file);
+        exe.addArg("-Wl,-e,bar");
+
+        const check = exe.check();
+        check.checkStart();
+        check.checkExact("header");
+        check.checkExact("entry 2000");
+        test_step.dependOn(&check.step);
+    }
 
     return test_step;
 }

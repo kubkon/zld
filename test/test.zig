@@ -70,7 +70,7 @@ pub const SysCmd = struct {
     }
 
     pub inline fn addAsmSource(sys_cmd: SysCmd, bytes: []const u8) void {
-        return sys_cmd.addSourceBytes(bytes, .@"asm");
+        return sys_cmd.addSourceBytes(bytes ++ "\n", .@"asm");
     }
 
     pub fn addSourceBytes(sys_cmd: SysCmd, bytes: []const u8, @"type": enum { c, cpp, @"asm" }) void {
