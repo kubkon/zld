@@ -35,6 +35,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testIfuncStaticPie(b, opts));
         elf_step.dependOn(testImageBase(b, opts));
         elf_step.dependOn(testInitArrayOrder(b, opts));
+        elf_step.dependOn(testLargeAlignmentDso(b, opts));
         elf_step.dependOn(testTlsDesc(b, opts));
         elf_step.dependOn(testTlsDescImport(b, opts));
         elf_step.dependOn(testTlsDescStatic(b, opts));
@@ -1426,6 +1427,53 @@ fn testInitArrayOrder(b: *Build, opts: Options) *Step {
 
     const run = exe.run();
     run.expectStdOutEqual("21348756");
+    test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+fn testLargeAlignmentDso(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-large-alignment-dso", "");
+
+    const dso = cc(b, opts);
+    dso.addCSource(
+        \\#include <stdio.h>
+        \\#include <stdint.h>
+        \\void hello() __attribute__((aligned(32768), section(".hello")));
+        \\void world() __attribute__((aligned(32768), section(".world")));
+        \\void hello() {
+        \\  printf("Hello");
+        \\}
+        \\void world() {
+        \\  printf(" world");
+        \\}
+        \\void greet() {
+        \\  hello();
+        \\  world();
+        \\}
+    );
+    dso.addArgs(&.{ "-fPIC", "-ffunction-sections", "-shared" });
+    const dso_out = dso.saveOutputAs("a.so");
+
+    const check = dso.check();
+    check.checkInSymtab();
+    check.checkExtract("{addr1} {size1} {shndx1} FUNC GLOBAL DEFAULT hello");
+    check.checkInSymtab();
+    check.checkExtract("{addr2} {size2} {shndx2} FUNC GLOBAL DEFAULT world");
+    check.checkComputeCompare("addr1 16 %", .{ .op = .eq, .value = .{ .literal = 0 } });
+    check.checkComputeCompare("addr2 16 %", .{ .op = .eq, .value = .{ .literal = 0 } });
+    test_step.dependOn(&check.step);
+
+    const exe = cc(b, opts);
+    exe.addCSource(
+        \\void greet();
+        \\int main() { greet(); }
+    );
+    exe.addFileSource(dso_out.file);
+    exe.addPrefixedDirectorySource("-Wl,-rpath,", dso_out.dir);
+
+    const run = exe.run();
+    run.expectStdOutEqual("Hello world");
     test_step.dependOn(run.step());
 
     return test_step;
