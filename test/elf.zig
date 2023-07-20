@@ -28,6 +28,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testIfuncAlias(b, opts));
         elf_step.dependOn(testIfuncDlopen(b, opts));
         elf_step.dependOn(testIfuncDynamic(b, opts));
+        elf_step.dependOn(testIfuncExport(b, opts));
         elf_step.dependOn(testIfuncFuncPtr(b, opts));
         elf_step.dependOn(testIfuncNoPlt(b, opts));
         elf_step.dependOn(testIfuncStatic(b, opts));
@@ -1142,6 +1143,32 @@ fn testIfuncDynamic(b: *Build, opts: Options) *Step {
         run.expectStdOutEqual("Hello world\n");
         test_step.dependOn(run.step());
     }
+
+    return test_step;
+}
+
+fn testIfuncExport(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-ifunc-export", "");
+
+    const dso = cc(b, opts);
+    dso.addCSource(
+        \\#include <stdio.h>
+        \\__attribute__((ifunc("resolve_foobar")))
+        \\void foobar(void);
+        \\void real_foobar(void) {
+        \\  printf("Hello world\n");
+        \\}
+        \\typedef void Func();
+        \\Func *resolve_foobar(void) {
+        \\  return real_foobar;
+        \\}
+    );
+    dso.addArgs(&.{ "-fPIC", "-shared" });
+
+    const check = dso.check();
+    check.checkInDynamicSymtab();
+    check.checkContains("IFUNC GLOBAL DEFAULT foobar");
+    test_step.dependOn(&check.step);
 
     return test_step;
 }
