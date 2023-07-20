@@ -21,16 +21,17 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testExportSymbolsFromExe(b, opts));
         elf_step.dependOn(testFuncAddress(b, opts));
         elf_step.dependOn(testGcSections(b, opts));
+        elf_step.dependOn(testHelloDynamic(b, opts));
+        elf_step.dependOn(testHelloPie(b, opts));
+        elf_step.dependOn(testHelloStatic(b, opts));
+        elf_step.dependOn(testHiddenWeakUndef(b, opts));
         elf_step.dependOn(testIfuncAlias(b, opts));
+        elf_step.dependOn(testIfuncDlopen(b, opts));
         elf_step.dependOn(testIfuncDynamic(b, opts));
         elf_step.dependOn(testIfuncFuncPtr(b, opts));
         elf_step.dependOn(testIfuncNoPlt(b, opts));
         elf_step.dependOn(testIfuncStatic(b, opts));
         elf_step.dependOn(testIfuncStaticPie(b, opts));
-        elf_step.dependOn(testHelloDynamic(b, opts));
-        elf_step.dependOn(testHelloPie(b, opts));
-        elf_step.dependOn(testHelloStatic(b, opts));
-        elf_step.dependOn(testHiddenWeakUndef(b, opts));
         elf_step.dependOn(testTlsDesc(b, opts));
         elf_step.dependOn(testTlsDescImport(b, opts));
         elf_step.dependOn(testTlsDescStatic(b, opts));
@@ -945,6 +946,100 @@ fn testGcSections(b: *Build, opts: Options) *Step {
     return test_step;
 }
 
+fn testHelloDynamic(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-hello-dynamic", "");
+
+    const exe = cc(b, opts);
+    exe.addHelloWorldMain();
+    exe.addArg("-no-pie");
+
+    const run = exe.run();
+    run.expectHelloWorld();
+    test_step.dependOn(run.step());
+
+    const check = exe.check();
+    check.checkStart();
+    check.checkExact("header");
+    check.checkExact("type EXEC");
+    check.checkStart();
+    check.checkExact("section headers");
+    check.checkExact("name .dynamic");
+    test_step.dependOn(&check.step);
+
+    return test_step;
+}
+
+fn testHelloPie(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-hello-pie", "");
+
+    const exe = cc(b, opts);
+    exe.addHelloWorldMain();
+    exe.addArgs(&.{ "-fPIC", "-pie" });
+
+    const run = exe.run();
+    run.expectHelloWorld();
+    test_step.dependOn(run.step());
+
+    const check = exe.check();
+    check.checkStart();
+    check.checkExact("header");
+    check.checkExact("type DYN");
+    check.checkStart();
+    check.checkExact("section headers");
+    check.checkExact("name .dynamic");
+    test_step.dependOn(&check.step);
+
+    return test_step;
+}
+
+fn testHelloStatic(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-hello-static", "");
+
+    if (!opts.has_static) {
+        skipTestStep(test_step);
+        return test_step;
+    }
+
+    const exe = cc(b, opts);
+    exe.addHelloWorldMain();
+    exe.addArg("-static");
+
+    const run = exe.run();
+    run.expectHelloWorld();
+    test_step.dependOn(run.step());
+
+    const check = exe.check();
+    check.checkStart();
+    check.checkExact("header");
+    check.checkExact("type EXEC");
+    check.checkStart();
+    check.checkExact("section headers");
+    check.checkNotPresent("name .dynamic");
+    test_step.dependOn(&check.step);
+
+    return test_step;
+}
+
+fn testHiddenWeakUndef(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-hidden-weak-undef", "");
+
+    const dso = cc(b, opts);
+    dso.addCSource(
+        \\__attribute__((weak, visibility("hidden"))) void foo();
+        \\void bar() { foo(); }
+    );
+    dso.addArgs(&.{ "-fPIC", "-shared" });
+
+    const check = dso.check();
+    check.checkInDynamicSymtab();
+    check.checkNotPresent("foo");
+    check.checkInDynamicSymtab();
+    check.checkContains("bar");
+    test_step.dependOn(&check.step);
+
+    return test_step;
+}
+
 fn testIfuncAlias(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-ifunc-alias", "");
 
@@ -960,6 +1055,49 @@ fn testIfuncAlias(b: *Build, opts: Options) *Step {
         \\}
     );
     exe.addArg("-fPIC");
+
+    const run = exe.run();
+    test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+fn testIfuncDlopen(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-ifunc-dlopen", "");
+
+    const dso = cc(b, opts);
+    dso.addCSource(
+        \\__attribute__((ifunc("resolve_foo")))
+        \\void foo(void);
+        \\static void real_foo(void) {
+        \\}
+        \\typedef void Func();
+        \\static Func *resolve_foo(void) {
+        \\  return real_foo;
+        \\}
+    );
+    dso.addArgs(&.{ "-fPIC", "-shared" });
+    const dso_out = dso.saveOutputAs("a.so");
+
+    const exe = cc(b, opts);
+    exe.addCSource(
+        \\#include <dlfcn.h>
+        \\#include <assert.h>
+        \\#include <stdlib.h>
+        \\typedef void Func();
+        \\void foo(void);
+        \\int main() {
+        \\  void *handle = dlopen(NULL, RTLD_NOW);
+        \\  Func *p = dlsym(handle, "foo");
+        \\
+        \\  foo();
+        \\  p();
+        \\  assert(foo == p);
+        \\}
+    );
+    exe.addFileSource(dso_out.file);
+    exe.addPrefixedDirectorySource("-Wl,-rpath,", dso_out.dir);
+    exe.addArgs(&.{ "-fno-PIE", "-no-pie", "-ldl" });
 
     const run = exe.run();
     test_step.dependOn(run.step());
@@ -1142,100 +1280,6 @@ fn testIfuncStaticPie(b: *Build, opts: Options) *Step {
     check.checkStart();
     check.checkExact("section headers");
     check.checkNotPresent("name .interp");
-    test_step.dependOn(&check.step);
-
-    return test_step;
-}
-
-fn testHelloStatic(b: *Build, opts: Options) *Step {
-    const test_step = b.step("test-elf-hello-static", "");
-
-    if (!opts.has_static) {
-        skipTestStep(test_step);
-        return test_step;
-    }
-
-    const exe = cc(b, opts);
-    exe.addHelloWorldMain();
-    exe.addArg("-static");
-
-    const run = exe.run();
-    run.expectHelloWorld();
-    test_step.dependOn(run.step());
-
-    const check = exe.check();
-    check.checkStart();
-    check.checkExact("header");
-    check.checkExact("type EXEC");
-    check.checkStart();
-    check.checkExact("section headers");
-    check.checkNotPresent("name .dynamic");
-    test_step.dependOn(&check.step);
-
-    return test_step;
-}
-
-fn testHelloDynamic(b: *Build, opts: Options) *Step {
-    const test_step = b.step("test-elf-hello-dynamic", "");
-
-    const exe = cc(b, opts);
-    exe.addHelloWorldMain();
-    exe.addArg("-no-pie");
-
-    const run = exe.run();
-    run.expectHelloWorld();
-    test_step.dependOn(run.step());
-
-    const check = exe.check();
-    check.checkStart();
-    check.checkExact("header");
-    check.checkExact("type EXEC");
-    check.checkStart();
-    check.checkExact("section headers");
-    check.checkExact("name .dynamic");
-    test_step.dependOn(&check.step);
-
-    return test_step;
-}
-
-fn testHelloPie(b: *Build, opts: Options) *Step {
-    const test_step = b.step("test-elf-hello-pie", "");
-
-    const exe = cc(b, opts);
-    exe.addHelloWorldMain();
-    exe.addArgs(&.{ "-fPIC", "-pie" });
-
-    const run = exe.run();
-    run.expectHelloWorld();
-    test_step.dependOn(run.step());
-
-    const check = exe.check();
-    check.checkStart();
-    check.checkExact("header");
-    check.checkExact("type DYN");
-    check.checkStart();
-    check.checkExact("section headers");
-    check.checkExact("name .dynamic");
-    test_step.dependOn(&check.step);
-
-    return test_step;
-}
-
-fn testHiddenWeakUndef(b: *Build, opts: Options) *Step {
-    const test_step = b.step("test-elf-hidden-weak-undef", "");
-
-    const dso = cc(b, opts);
-    dso.addCSource(
-        \\__attribute__((weak, visibility("hidden"))) void foo();
-        \\void bar() { foo(); }
-    );
-    dso.addArgs(&.{ "-fPIC", "-shared" });
-
-    const check = dso.check();
-    check.checkInDynamicSymtab();
-    check.checkNotPresent("foo");
-    check.checkInDynamicSymtab();
-    check.checkContains("bar");
     test_step.dependOn(&check.step);
 
     return test_step;
