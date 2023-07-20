@@ -972,18 +972,33 @@ fn setupLinkerSymbols(wasm: *Wasm) !void {
             const loc = try wasm.createSyntheticSymbol("__tls_base", .global);
             const symbol = loc.getSymbol(wasm);
             symbol.setFlag(.WASM_SYM_VISIBILITY_HIDDEN);
+            const global: std.wasm.Global = .{
+                .init = .{ .i32_const = 0 },
+                .global_type = .{ .valtype = .i32, .mutable = true },
+            };
+            symbol.index = try wasm.globals.append(wasm.base.allocator, 0, global);
         }
         // __tls_size
         {
             const loc = try wasm.createSyntheticSymbol("__tls_size", .global);
             const symbol = loc.getSymbol(wasm);
             symbol.setFlag(.WASM_SYM_VISIBILITY_HIDDEN);
+            const global: std.wasm.Global = .{
+                .init = .{ .i32_const = 0 },
+                .global_type = .{ .valtype = .i32, .mutable = false },
+            };
+            symbol.index = try wasm.globals.append(wasm.base.allocator, 0, global);
         }
         // __tls_align
         {
             const loc = try wasm.createSyntheticSymbol("__tls_align", .global);
             const symbol = loc.getSymbol(wasm);
             symbol.setFlag(.WASM_SYM_VISIBILITY_HIDDEN);
+            const global: std.wasm.Global = .{
+                .init = .{ .i32_const = 0 },
+                .global_type = .{ .valtype = .i32, .mutable = false },
+            };
+            symbol.index = try wasm.globals.append(wasm.base.allocator, 0, global);
         }
 
         // __tls_init
@@ -1487,27 +1502,17 @@ fn setupMemory(wasm: *Wasm) !void {
 
         // set TLS-related symbols
         if (mem.eql(u8, entry.key_ptr.*, ".tdata")) {
-            const global_count = wasm.imports.globalCount();
             if (wasm.findGlobalSymbol("__tls_size")) |loc| {
                 const sym = loc.getSymbol(wasm);
-                sym.index = try wasm.globals.append(wasm.base.allocator, global_count, .{
-                    .global_type = .{ .valtype = .i32, .mutable = false },
-                    .init = .{ .i32_const = @as(i32, @intCast(segment.size)) },
-                });
+                wasm.globals.items.items[sym.index - wasm.imports.globalCount()].init.i32_const = @intCast(segment.size);
             }
             if (wasm.findGlobalSymbol("__tls_align")) |loc| {
                 const sym = loc.getSymbol(wasm);
-                sym.index = try wasm.globals.append(wasm.base.allocator, global_count, .{
-                    .global_type = .{ .valtype = .i32, .mutable = false },
-                    .init = .{ .i32_const = @as(i32, @intCast(segment.alignment)) },
-                });
+                wasm.globals.items.items[sym.index - wasm.imports.globalCount()].init.i32_const = @intCast(segment.alignment);
             }
             if (wasm.findGlobalSymbol("__tls_base")) |loc| {
                 const sym = loc.getSymbol(wasm);
-                sym.index = try wasm.globals.append(wasm.base.allocator, wasm.imports.globalCount(), .{
-                    .global_type = .{ .valtype = .i32, .mutable = wasm.options.shared_memory },
-                    .init = .{ .i32_const = if (wasm.options.shared_memory) @as(i32, 0) else @as(i32, @intCast(memory_ptr)) },
-                });
+                wasm.globals.items.items[sym.index - wasm.imports.globalCount()].init.i32_const = @intCast(memory_ptr);
             }
         }
 
