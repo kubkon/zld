@@ -53,6 +53,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testTlsDso(b, opts));
         elf_step.dependOn(testTlsGd(b, opts));
         elf_step.dependOn(testTlsIe(b, opts));
+        elf_step.dependOn(testTlsLargeAlignment(b, opts));
         elf_step.dependOn(testTlsLd(b, opts));
         elf_step.dependOn(testTlsLdDso(b, opts));
         elf_step.dependOn(testTlsOffsetAlignment(b, opts));
@@ -2285,6 +2286,65 @@ fn testTlsIe(b: *Build, opts: Options) *Step {
 
         const run = exe.run();
         run.expectStdOutEqual(exp_stdout);
+        test_step.dependOn(run.step());
+    }
+
+    return test_step;
+}
+
+fn testTlsLargeAlignment(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-tls-large-alignment", "");
+
+    const a_o = cc(b, opts);
+    a_o.addCSource(
+        \\__attribute__((section(".tdata1")))
+        \\_Thread_local int x = 42;
+    );
+    a_o.addArgs(&.{ "-fPIC", "-std=c11", "-c" });
+
+    const b_o = cc(b, opts);
+    b_o.addCSource(
+        \\__attribute__((section(".tdata2")))
+        \\_Alignas(256) _Thread_local int y[] = { 1, 2, 3 };
+    );
+    b_o.addArgs(&.{ "-fPIC", "-std=c11", "-c" });
+
+    const c_o = cc(b, opts);
+    c_o.addCSource(
+        \\#include <stdio.h>
+        \\extern _Thread_local int x;
+        \\extern _Thread_local int y[];
+        \\int main() {
+        \\  printf("%d %d %d %d\n", x, y[0], y[1], y[2]);
+        \\}
+    );
+    c_o.addArgs(&.{ "-fPIC", "-c" });
+
+    {
+        const dso = cc(b, opts);
+        dso.addFileSource(a_o.out);
+        dso.addFileSource(b_o.out);
+        dso.addArg("-shared");
+        const dso_out = dso.saveOutputAs("a.so");
+
+        const exe = cc(b, opts);
+        exe.addFileSource(c_o.out);
+        exe.addFileSource(dso_out.file);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", dso_out.dir);
+
+        const run = exe.run();
+        run.expectStdOutEqual("42 1 2 3\n");
+        test_step.dependOn(run.step());
+    }
+
+    {
+        const exe = cc(b, opts);
+        exe.addFileSource(a_o.out);
+        exe.addFileSource(b_o.out);
+        exe.addFileSource(c_o.out);
+
+        const run = exe.run();
+        run.expectStdOutEqual("42 1 2 3\n");
         test_step.dependOn(run.step());
     }
 
