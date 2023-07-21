@@ -60,6 +60,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testTlsLdNoPlt(b, opts));
         elf_step.dependOn(testTlsNoPic(b, opts));
         elf_step.dependOn(testTlsOffsetAlignment(b, opts));
+        elf_step.dependOn(testTlsPic(b, opts));
         elf_step.dependOn(testTlsStatic(b, opts));
         elf_step.dependOn(testZNow(b, opts));
     }
@@ -2581,6 +2582,38 @@ fn testTlsOffsetAlignment(b: *Build, opts: Options) *Step {
     exe.addArgs(&.{ "-fPIC", "-ldl", "-lpthread" });
 
     const run = exe.run();
+    test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+fn testTlsPic(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-tls-pic", "");
+
+    const obj = cc(b, opts);
+    obj.addCSource(
+        \\#include <stdio.h>
+        \\__attribute__((tls_model("global-dynamic"))) extern _Thread_local int foo;
+        \\__attribute__((tls_model("global-dynamic"))) static _Thread_local int bar;
+        \\int *get_foo_addr() { return &foo; }
+        \\int *get_bar_addr() { return &bar; }
+        \\int main() {
+        \\  bar = 5;
+        \\
+        \\  printf("%d %d %d %d\n", *get_foo_addr(), *get_bar_addr(), foo, bar);
+        \\  return 0;
+        \\}
+    );
+    obj.addArgs(&.{ "-fPIC", "-c" });
+
+    const exe = cc(b, opts);
+    exe.addCSource(
+        \\__attribute__((tls_model("global-dynamic"))) _Thread_local int foo = 3;
+    );
+    exe.addFileSource(obj.out);
+
+    const run = exe.run();
+    run.expectStdOutEqual("3 5 3 5\n");
     test_step.dependOn(run.step());
 
     return test_step;
