@@ -66,6 +66,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testTlsSmallAlignment(b, opts));
         elf_step.dependOn(testTlsStatic(b, opts));
         elf_step.dependOn(testWeakExportDso(b, opts));
+        elf_step.dependOn(testWeakExportExe(b, opts));
         elf_step.dependOn(testZNow(b, opts));
     }
 
@@ -2896,6 +2897,34 @@ fn testWeakExportDso(b: *Build, opts: Options) *Step {
     check.checkInDynamicSymtab();
     check.checkContains("UND NOTYPE WEAK DEFAULT foo");
     test_step.dependOn(&check.step);
+
+    return test_step;
+}
+
+fn testWeakExportExe(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-weak-export-exe", "");
+
+    const obj = cc(b, opts);
+    obj.addCSource(
+        \\#include <stdio.h>
+        \\__attribute__((weak)) int foo();
+        \\int main() {
+        \\  printf("%d\n", foo ? foo() : 3);
+        \\}
+    );
+    obj.addArgs(&.{ "-fPIC", "-c" });
+
+    const exe = cc(b, opts);
+    exe.addFileSource(obj.out);
+
+    const check = exe.check();
+    check.checkInDynamicSymtab();
+    check.checkNotPresent("UND NOTYPE WEAK DEFAULT foo");
+    test_step.dependOn(&check.step);
+
+    const run = exe.run();
+    run.expectStdOutEqual("3\n");
+    test_step.dependOn(run.step());
 
     return test_step;
 }
