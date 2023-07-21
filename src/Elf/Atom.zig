@@ -349,11 +349,7 @@ inline fn checkTextReloc(self: Atom, symbol: *const Symbol, elf_file: *Elf) void
                 symbol.getName(elf_file),
             });
         } else {
-            // TODO
-            elf_file.base.fatal("{s}: {s}: TODO handle relocations in read-only section", .{
-                self.getObject(elf_file).fmtPath(),
-                self.getName(elf_file),
-            });
+            elf_file.has_text_reloc = true;
         }
     }
 }

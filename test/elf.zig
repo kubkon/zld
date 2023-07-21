@@ -69,6 +69,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testWeakExportExe(b, opts));
         elf_step.dependOn(testWeakUndefDso(b, opts));
         elf_step.dependOn(testZNow(b, opts));
+        elf_step.dependOn(testZText(b, opts));
     }
 
     return elf_step;
@@ -3003,6 +3004,53 @@ fn testZNow(b: *Build, opts: Options) *Step {
         check.checkNotPresent("NOW");
         test_step.dependOn(&check.step);
     }
+
+    return test_step;
+}
+
+fn testZText(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-z-text", "");
+
+    const a_o = cc(b, opts);
+    a_o.addAsmSource(
+        \\.globl fn1
+        \\fn1:
+        \\  sub $8, %rsp
+        \\  movabs ptr, %rax
+        \\  call *%rax
+        \\  add $8, %rsp
+        \\  ret
+    );
+    a_o.addArg("-c");
+
+    const b_o = cc(b, opts);
+    b_o.addCSource(
+        \\#include <stdio.h>
+        \\int fn1();
+        \\int fn2() {
+        \\  return 3;
+        \\}
+        \\void *ptr = fn2;
+        \\int main() {
+        \\  printf("%d\n", fn1());
+        \\}
+    );
+    b_o.addArgs(&.{ "-fPIC", "-c" });
+
+    const exe = cc(b, opts);
+    exe.addFileSource(a_o.out);
+    exe.addFileSource(b_o.out);
+    exe.addArg("-pie");
+
+    const run = exe.run();
+    run.expectStdOutEqual("3\n");
+    test_step.dependOn(run.step());
+
+    const check = exe.check();
+    check.checkInDynamicSection();
+    // check.checkExact("TEXTREL 0"); // TODO fix in CheckObject parser
+    check.checkExact("FLAGS TEXTREL");
+    test_step.dependOn(&check.step);
 
     return test_step;
 }

@@ -87,6 +87,7 @@ comdat_groups_owners: std.ArrayListUnmanaged(ComdatGroupOwner) = .{},
 comdat_groups_table: std.AutoHashMapUnmanaged(u32, ComdatGroupOwner.Index) = .{},
 
 needs_tlsld: bool = false,
+has_text_reloc: bool = false,
 num_ifunc_dynrelocs: usize = 0,
 default_sym_version: elf.Elf64_Versym,
 

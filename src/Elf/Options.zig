@@ -57,7 +57,7 @@ const usage =
     \\  nodlopen                    Mark DSO not available to dlopen
     \\  now                         Disable lazy function resolution
     \\  stack-size=[value]          Override default stack size
-    \\  text                        Do not allow relocations against read-only segments (default)
+    \\  text                        Do not allow relocations against read-only segments
     \\    notext                    
     \\  relro                       Make some sections read-only after dynamic relocations
     \\    norelro                   
@@ -115,7 +115,7 @@ z_nocopyreloc: bool = false,
 /// Mark DSO not available for dlopen.
 z_nodlopen: bool = false,
 /// Do not allow relocations against read-only segments.
-z_text: bool = true,
+z_text: bool = false,
 /// Make some sections read-only after dynamic relocations.
 /// TODO make this default to true.
 z_relro: bool = false,

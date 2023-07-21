@@ -42,6 +42,9 @@ pub const DynamicSection = struct {
             },
             else => {},
         };
+        if (elf_file.has_text_reloc) {
+            flags |= elf.DF_TEXTREL;
+        }
         return if (flags > 0) flags else null;
     }
 
@@ -75,6 +78,7 @@ pub const DynamicSection = struct {
         if (elf_file.got_plt_sect_index != null) nentries += 1; // PLTGOT
         nentries += 1; // HASH
         if (elf_file.gnu_hash_sect_index != null) nentries += 1; // GNU_HASH
+        if (elf_file.has_text_reloc) nentries += 1; // TEXTREL
         nentries += 1; // SYMTAB
         nentries += 1; // SYMENT
         nentries += 1; // STRTAB
@@ -163,6 +167,11 @@ pub const DynamicSection = struct {
         if (elf_file.gnu_hash_sect_index) |shndx| {
             const addr = elf_file.sections.items(.shdr)[shndx].sh_addr;
             try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_GNU_HASH, .d_val = addr });
+        }
+
+        // TEXTREL
+        if (elf_file.has_text_reloc) {
+            try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_TEXTREL, .d_val = 0 });
         }
 
         // SYMTAB + SYMENT
