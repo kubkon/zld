@@ -63,6 +63,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testTlsNoPic(b, opts));
         elf_step.dependOn(testTlsOffsetAlignment(b, opts));
         elf_step.dependOn(testTlsPic(b, opts));
+        elf_step.dependOn(testTlsSmallAlignment(b, opts));
         elf_step.dependOn(testTlsStatic(b, opts));
         elf_step.dependOn(testZNow(b, opts));
     }
@@ -2778,6 +2779,61 @@ fn testTlsPic(b: *Build, opts: Options) *Step {
     const run = exe.run();
     run.expectStdOutEqual("3 5 3 5\n");
     test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+fn testTlsSmallAlignment(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-tls-small-alignment", "");
+
+    const a_o = cc(b, opts);
+    a_o.addAsmSource(
+        \\.text
+        \\.byte 0
+    );
+    a_o.addArgs(&.{ "-c", "-fPIC" });
+
+    const b_o = cc(b, opts);
+    b_o.addCSource("_Thread_local char x = 42;");
+    b_o.addArgs(&.{ "-fPIC", "-std=c11", "-c" });
+
+    const c_o = cc(b, opts);
+    c_o.addCSource(
+        \\#include <stdio.h>
+        \\extern _Thread_local char x;
+        \\int main() {
+        \\  printf("%d\n", x);
+        \\}
+    );
+    c_o.addArgs(&.{ "-fPIC", "-c" });
+
+    {
+        const exe = cc(b, opts);
+        exe.addFileSource(a_o.out);
+        exe.addFileSource(b_o.out);
+        exe.addFileSource(c_o.out);
+
+        const run = exe.run();
+        run.expectStdOutEqual("42\n");
+        test_step.dependOn(run.step());
+    }
+
+    {
+        const dso = cc(b, opts);
+        dso.addFileSource(a_o.out);
+        dso.addFileSource(b_o.out);
+        dso.addArg("-shared");
+        const dso_out = dso.saveOutputAs("a.so");
+
+        const exe = cc(b, opts);
+        exe.addFileSource(c_o.out);
+        exe.addFileSource(dso_out.file);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", dso_out.dir);
+
+        const run = exe.run();
+        run.expectStdOutEqual("42\n");
+        test_step.dependOn(run.step());
+    }
 
     return test_step;
 }
