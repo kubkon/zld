@@ -1059,6 +1059,8 @@ pub inline fn shdrIsTls(shdr: *const elf.Elf64_Shdr) bool {
 }
 
 fn allocateSectionsInMemory(self: *Elf, base_offset: u64) !void {
+    const shdrs = self.sections.slice().items(.shdr);
+
     // We use this struct to track maximum alignment of all TLS sections.
     // According to https://github.com/rui314/mold/commit/bd46edf3f0fe9e1a787ea453c4657d535622e61f in mold,
     // in-file offsets have to be aligned against the start of TLS program header.
@@ -1080,17 +1082,19 @@ fn allocateSectionsInMemory(self: *Elf, base_offset: u64) !void {
     };
 
     var alignment = Align{};
-    for (self.sections.items(.shdr)[1..], 1..) |*shdr, shndx| {
+    for (shdrs[1..], 1..) |*shdr, shndx| {
         if (!shdrIsTls(shdr)) continue;
         if (alignment.first_tls_shndx == null) alignment.first_tls_shndx = @as(u16, @intCast(shndx));
         alignment.tls_start_align = @max(alignment.tls_start_align, shdr.sh_addralign);
     }
 
     var addr = self.options.image_base + base_offset;
-    outer: for (self.sections.items(.shdr)[1..], 1..) |*shdr, i| {
+    var i: u32 = 1;
+    while (i < shdrs.len) : (i += 1) {
+        const shdr = &shdrs[i];
         if (!shdrIsAlloc(shdr)) continue;
         if (i != 1) {
-            const prev_shdr = self.sections.items(.shdr)[i - 1];
+            const prev_shdr = shdrs[i - 1];
             if (shdrToPhdrFlags(shdr.sh_flags) != shdrToPhdrFlags(prev_shdr.sh_flags)) {
                 // We need advance by page size
                 addr += self.options.page_size.?;
@@ -1098,11 +1102,13 @@ fn allocateSectionsInMemory(self: *Elf, base_offset: u64) !void {
         }
         if (shdrIsTbss(shdr)) {
             var tbss_addr = addr;
-            for (self.sections.items(.shdr)[i..]) |*tbss_shdr| {
-                if (!shdrIsTbss(tbss_shdr)) continue :outer;
+            while (true) {
+                const tbss_shdr = &shdrs[i];
                 tbss_addr = alignment.@"align"(@as(u16, @intCast(i)), shdr.sh_addralign, tbss_addr);
                 tbss_shdr.sh_addr = tbss_addr;
                 tbss_addr += tbss_shdr.sh_size;
+                if (i + 1 >= shdrs.len or !shdrIsTbss(&shdrs[i + 1])) break;
+                i += 1;
             }
         }
 

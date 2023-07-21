@@ -57,6 +57,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testTlsGdToIe(b, opts));
         elf_step.dependOn(testTlsIe(b, opts));
         elf_step.dependOn(testTlsLargeAlignment(b, opts));
+        elf_step.dependOn(testTlsLargeTbss(b, opts));
         elf_step.dependOn(testTlsLargeStaticImage(b, opts));
         elf_step.dependOn(testTlsLd(b, opts));
         elf_step.dependOn(testTlsLdDso(b, opts));
@@ -2546,6 +2547,37 @@ fn testTlsLargeAlignment(b: *Build, opts: Options) *Step {
         run.expectStdOutEqual("42 1 2 3\n");
         test_step.dependOn(run.step());
     }
+
+    return test_step;
+}
+
+fn testTlsLargeTbss(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-tls-large-tbss", "");
+
+    const exe = cc(b, opts);
+    exe.addAsmSource(
+        \\.globl x, y
+        \\.section .tbss,"awT",@nobits
+        \\x:
+        \\.zero 1024
+        \\.section .tcommon,"awT",@nobits
+        \\y:
+        \\.zero 1024
+    );
+    exe.addCSource(
+        \\#include <stdio.h>
+        \\extern _Thread_local char x[1024000];
+        \\extern _Thread_local char y[1024000];
+        \\int main() {
+        \\  x[0] = 3;
+        \\  x[1023] = 5;
+        \\  printf("%d %d %d %d %d %d\n", x[0], x[1], x[1023], y[0], y[1], y[1023]);
+        \\}
+    );
+
+    const run = exe.run();
+    run.expectStdOutEqual("3 0 5 0 0 0\n");
+    test_step.dependOn(run.step());
 
     return test_step;
 }
