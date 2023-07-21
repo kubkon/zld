@@ -87,6 +87,7 @@ comdat_groups_owners: std.ArrayListUnmanaged(ComdatGroupOwner) = .{},
 comdat_groups_table: std.AutoHashMapUnmanaged(u32, ComdatGroupOwner.Index) = .{},
 
 needs_tlsld: bool = false,
+has_text_reloc: bool = false,
 num_ifunc_dynrelocs: usize = 0,
 default_sym_version: elf.Elf64_Versym,
 
@@ -282,6 +283,7 @@ pub fn flush(self: *Elf) !void {
     defer self.arena = arena_allocator.state;
     const arena = arena_allocator.allocator();
 
+    log.debug("search dirs", .{});
     var search_dirs = std.ArrayList([]const u8).init(arena);
     for (self.options.search_dirs) |dir| {
         // Verify that search path actually exists
@@ -294,13 +296,10 @@ pub fn flush(self: *Elf) !void {
         };
         defer tmp.close();
         try search_dirs.append(dir);
+        log.debug("  -L{s}", .{dir});
     }
 
-    var positionals = std.ArrayList(LinkObject).init(arena);
-    try self.unpackPositionals(&positionals);
-    self.base.reportWarningsAndErrorsAndExit();
-
-    for (positionals.items) |obj| {
+    for (self.options.positionals) |obj| {
         try self.parsePositional(arena, obj, search_dirs.items);
     }
 
@@ -1044,11 +1043,15 @@ inline fn shdrIsAlloc(shdr: *const elf.Elf64_Shdr) bool {
 }
 
 inline fn shdrIsBss(shdr: *const elf.Elf64_Shdr) bool {
-    return shdr.sh_type == elf.SHT_NOBITS and !shdrIsTls(shdr);
+    return shdrIsZerofill(shdr) and !shdrIsTls(shdr);
 }
 
 inline fn shdrIsTbss(shdr: *const elf.Elf64_Shdr) bool {
-    return shdr.sh_type == elf.SHT_NOBITS and shdrIsTls(shdr);
+    return shdrIsZerofill(shdr) and shdrIsTls(shdr);
+}
+
+inline fn shdrIsZerofill(shdr: *const elf.Elf64_Shdr) bool {
+    return shdr.sh_type == elf.SHT_NOBITS;
 }
 
 pub inline fn shdrIsTls(shdr: *const elf.Elf64_Shdr) bool {
@@ -1056,6 +1059,13 @@ pub inline fn shdrIsTls(shdr: *const elf.Elf64_Shdr) bool {
 }
 
 fn allocateSectionsInMemory(self: *Elf, base_offset: u64) !void {
+    const shdrs = self.sections.slice().items(.shdr);
+
+    // We use this struct to track maximum alignment of all TLS sections.
+    // According to https://github.com/rui314/mold/commit/bd46edf3f0fe9e1a787ea453c4657d535622e61f in mold,
+    // in-file offsets have to be aligned against the start of TLS program header.
+    // If that's not ensured, then in a multi-threaded context, TLS variables across a shared object
+    // boundary may not get correctly loaded at an aligned address.
     const Align = struct {
         tls_start_align: u64 = 1,
         first_tls_shndx: ?u16 = null,
@@ -1072,17 +1082,19 @@ fn allocateSectionsInMemory(self: *Elf, base_offset: u64) !void {
     };
 
     var alignment = Align{};
-    for (self.sections.items(.shdr)[1..], 1..) |*shdr, shndx| {
+    for (shdrs[1..], 1..) |*shdr, shndx| {
         if (!shdrIsTls(shdr)) continue;
         if (alignment.first_tls_shndx == null) alignment.first_tls_shndx = @as(u16, @intCast(shndx));
         alignment.tls_start_align = @max(alignment.tls_start_align, shdr.sh_addralign);
     }
 
     var addr = self.options.image_base + base_offset;
-    outer: for (self.sections.items(.shdr)[1..], 1..) |*shdr, i| {
+    var i: u32 = 1;
+    while (i < shdrs.len) : (i += 1) {
+        const shdr = &shdrs[i];
         if (!shdrIsAlloc(shdr)) continue;
         if (i != 1) {
-            const prev_shdr = self.sections.items(.shdr)[i - 1];
+            const prev_shdr = shdrs[i - 1];
             if (shdrToPhdrFlags(shdr.sh_flags) != shdrToPhdrFlags(prev_shdr.sh_flags)) {
                 // We need advance by page size
                 addr += self.options.page_size.?;
@@ -1090,11 +1102,13 @@ fn allocateSectionsInMemory(self: *Elf, base_offset: u64) !void {
         }
         if (shdrIsTbss(shdr)) {
             var tbss_addr = addr;
-            for (self.sections.items(.shdr)[i..]) |*tbss_shdr| {
-                if (!shdrIsTbss(tbss_shdr)) continue :outer;
+            while (true) {
+                const tbss_shdr = &shdrs[i];
                 tbss_addr = alignment.@"align"(@as(u16, @intCast(i)), shdr.sh_addralign, tbss_addr);
                 tbss_shdr.sh_addr = tbss_addr;
                 tbss_addr += tbss_shdr.sh_size;
+                if (i + 1 >= shdrs.len or !shdrIsTbss(&shdrs[i + 1])) break;
+                i += 1;
             }
         }
 
@@ -1104,12 +1118,54 @@ fn allocateSectionsInMemory(self: *Elf, base_offset: u64) !void {
     }
 }
 
-fn allocatesSectionsInFile(self: *Elf, base_offset: u64) void {
+fn allocateSectionsInFile(self: *Elf, base_offset: u64) void {
+    const page_size = self.options.page_size.?;
+    const shdrs = self.sections.slice().items(.shdr);
     var offset = base_offset;
-    for (self.sections.items(.shdr)[1..]) |*shdr| {
-        if (shdr.sh_type == elf.SHT_NOBITS) continue;
-        shdr.sh_offset = mem.alignForward(u64, offset, shdr.sh_addralign);
-        offset = shdr.sh_offset + shdr.sh_size;
+    var shndx: u32 = 1;
+
+    while (shndx < shdrs.len) {
+        const first = &shdrs[shndx];
+
+        if (!shdrIsAlloc(first)) {
+            first.sh_offset = mem.alignForward(u64, offset, first.sh_addralign);
+            offset = first.sh_offset + first.sh_size;
+            shndx += 1;
+            continue;
+        }
+        if (shdrIsZerofill(first)) {
+            shndx += 1;
+            continue;
+        }
+
+        if (first.sh_addralign > page_size) {
+            offset = mem.alignForward(u64, offset, first.sh_addralign);
+        } else {
+            const val = mem.alignBackward(u64, offset, page_size) + @rem(first.sh_addr, page_size);
+            offset = if (offset <= val) val else val + page_size;
+        }
+
+        while (true) {
+            const prev = &shdrs[shndx];
+            prev.sh_offset = offset + prev.sh_addr - first.sh_addr;
+            shndx += 1;
+
+            const next = &shdrs[shndx];
+            if (shndx >= shdrs.len or !shdrIsAlloc(next) or shdrIsZerofill(next)) break;
+            if (next.sh_addr < first.sh_addr) break;
+
+            const gap = next.sh_addr - prev.sh_addr - prev.sh_size;
+            if (gap >= page_size) break;
+        }
+
+        const prev = &shdrs[shndx - 1];
+        offset = prev.sh_offset + prev.sh_size;
+
+        var next = &shdrs[shndx];
+        while (shndx < shdrs.len and shdrIsAlloc(next) and shdrIsZerofill(next)) {
+            shndx += 1;
+            next = &shdrs[shndx];
+        }
     }
 }
 
@@ -1118,7 +1174,7 @@ fn allocateSections(self: *Elf) !void {
         const nphdrs = self.phdrs.items.len;
         const base_offset: u64 = @sizeOf(elf.Elf64_Ehdr) + nphdrs * @sizeOf(elf.Elf64_Phdr);
         try self.allocateSectionsInMemory(base_offset);
-        self.allocatesSectionsInFile(base_offset);
+        self.allocateSectionsInFile(base_offset);
         self.phdrs.clearRetainingCapacity();
         try self.initPhdrs();
         if (nphdrs == self.phdrs.items.len) break;
@@ -1326,8 +1382,7 @@ fn allocateGlobals(self: *Elf) void {
 
 fn allocateSyntheticSymbols(self: *Elf) void {
     // _DYNAMIC
-    {
-        const shndx = self.dynamic_sect_index orelse self.got_sect_index.?;
+    if (self.dynamic_sect_index) |shndx| {
         const shdr = self.sections.items(.shdr)[shndx];
         const symbol = self.getSymbol(self.dynamic_index.?);
         symbol.value = shdr.sh_addr;
@@ -1375,8 +1430,7 @@ fn allocateSyntheticSymbols(self: *Elf) void {
     }
 
     // _GLOBAL_OFFSET_TABLE_
-    {
-        const shndx = self.got_plt_sect_index orelse self.got_sect_index.?;
+    if (self.got_plt_sect_index) |shndx| {
         const shdr = self.sections.items(.shdr)[shndx];
         const symbol = self.getSymbol(self.got_index.?);
         symbol.value = shdr.sh_addr;
@@ -1449,35 +1503,6 @@ fn allocateSyntheticSymbols(self: *Elf) void {
     }
 }
 
-fn unpackPositionals(self: *Elf, positionals: *std.ArrayList(LinkObject)) !void {
-    const State = struct {
-        needed: bool,
-        static: bool,
-    };
-
-    try positionals.ensureTotalCapacity(self.options.positionals.len);
-
-    var stack = std.ArrayList(State).init(self.base.allocator);
-    defer stack.deinit();
-
-    var state = State{ .needed = true, .static = self.options.static };
-
-    for (self.options.positionals) |arg| switch (arg.tag) {
-        .path => positionals.appendAssumeCapacity(.{ .path = arg.path }),
-        .library => positionals.appendAssumeCapacity(.{
-            .path = arg.path,
-            .needed = state.needed,
-            .static = state.static,
-        }),
-        .static => state.static = true,
-        .dynamic => state.static = false,
-        .as_needed => state.needed = false,
-        .no_as_needed => state.needed = true,
-        .push_state => try stack.append(state),
-        .pop_state => state = stack.popOrNull() orelse return self.base.fatal("no state pushed before pop", .{}),
-    };
-}
-
 fn parsePositional(self: *Elf, arena: Allocator, obj: LinkObject, search_dirs: []const []const u8) anyerror!void {
     const resolved_obj = self.resolveFile(arena, obj, search_dirs) catch |err| switch (err) {
         error.ResolveFail => return,
@@ -1499,7 +1524,7 @@ fn parseObject(self: *Elf, arena: Allocator, obj: LinkObject) !bool {
     const file = try fs.cwd().openFile(obj.path, .{});
     defer file.close();
 
-    const header = try file.reader().readStruct(elf.Elf64_Ehdr);
+    const header = file.reader().readStruct(elf.Elf64_Ehdr) catch return false;
     try file.seekTo(0);
 
     if (!Object.isValidHeader(&header)) return false;
@@ -1525,7 +1550,7 @@ fn parseArchive(self: *Elf, arena: Allocator, obj: LinkObject) !bool {
     const file = try fs.cwd().openFile(obj.path, .{});
     defer file.close();
 
-    const magic = try file.reader().readBytesNoEof(Archive.SARMAG);
+    const magic = file.reader().readBytesNoEof(Archive.SARMAG) catch return false;
     try file.seekTo(0);
 
     if (!Archive.isValidMagic(&magic)) return false;
@@ -1552,7 +1577,7 @@ fn parseShared(self: *Elf, arena: Allocator, obj: LinkObject) !bool {
     const file = try fs.cwd().openFile(obj.path, .{});
     defer file.close();
 
-    const header = try file.reader().readStruct(elf.Elf64_Ehdr);
+    const header = file.reader().readStruct(elf.Elf64_Ehdr) catch return false;
     try file.seekTo(0);
 
     if (!SharedObject.isValidHeader(&header)) return false;
@@ -1957,13 +1982,17 @@ fn scanRelocs(self: *Elf) !void {
 fn setDynamic(self: *Elf) !void {
     if (self.dynamic_sect_index == null) return;
 
-    try self.dynamic.setRpath(self.options.rpath_list, self);
-
     for (self.shared_objects.items) |index| {
         const shared = self.getFile(index).?.shared;
         if (!shared.alive) continue;
         try self.dynamic.addNeeded(shared, self);
     }
+
+    if (self.options.soname) |soname| {
+        try self.dynamic.setSoname(soname, self);
+    }
+
+    try self.dynamic.setRpath(self.options.rpath_list, self);
 }
 
 fn setDynsym(self: *Elf) void {

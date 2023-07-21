@@ -1,4 +1,5 @@
 pub const DynamicSection = struct {
+    soname: ?u32 = null,
     needed: std.ArrayListUnmanaged(u32) = .{},
     rpath: u32 = 0,
 
@@ -24,6 +25,10 @@ pub const DynamicSection = struct {
         dt.rpath = try elf_file.dynstrtab.insert(gpa, rpath.items);
     }
 
+    pub fn setSoname(dt: *DynamicSection, soname: []const u8, elf_file: *Elf) !void {
+        dt.soname = try elf_file.dynstrtab.insert(elf_file.base.allocator, soname);
+    }
+
     fn getFlags(dt: DynamicSection, elf_file: *Elf) ?u64 {
         _ = dt;
         var flags: u64 = 0;
@@ -37,6 +42,9 @@ pub const DynamicSection = struct {
             },
             else => {},
         };
+        if (elf_file.has_text_reloc) {
+            flags |= elf.DF_TEXTREL;
+        }
         return if (flags > 0) flags else null;
     }
 
@@ -59,6 +67,7 @@ pub const DynamicSection = struct {
         const is_shared = elf_file.options.output_mode == .lib;
         var nentries: usize = 0;
         nentries += dt.needed.items.len; // NEEDED
+        if (dt.soname != null) nentries += 1; // SONAME
         if (dt.rpath > 0) nentries += 1; // RUNPATH
         if (elf_file.getSectionByName(".init") != null) nentries += 1; // INIT
         if (elf_file.getSectionByName(".fini") != null) nentries += 1; // FINI
@@ -69,6 +78,7 @@ pub const DynamicSection = struct {
         if (elf_file.got_plt_sect_index != null) nentries += 1; // PLTGOT
         nentries += 1; // HASH
         if (elf_file.gnu_hash_sect_index != null) nentries += 1; // GNU_HASH
+        if (elf_file.has_text_reloc) nentries += 1; // TEXTREL
         nentries += 1; // SYMTAB
         nentries += 1; // SYMENT
         nentries += 1; // STRTAB
@@ -88,6 +98,10 @@ pub const DynamicSection = struct {
         // NEEDED
         for (dt.needed.items) |off| {
             try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_NEEDED, .d_val = off });
+        }
+
+        if (dt.soname) |off| {
+            try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_SONAME, .d_val = off });
         }
 
         // RUNPATH
@@ -153,6 +167,11 @@ pub const DynamicSection = struct {
         if (elf_file.gnu_hash_sect_index) |shndx| {
             const addr = elf_file.sections.items(.shdr)[shndx].sh_addr;
             try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_GNU_HASH, .d_val = addr });
+        }
+
+        // TEXTREL
+        if (elf_file.has_text_reloc) {
+            try writer.writeStruct(elf.Elf64_Dyn{ .d_tag = elf.DT_TEXTREL, .d_val = 0 });
         }
 
         // SYMTAB + SYMENT

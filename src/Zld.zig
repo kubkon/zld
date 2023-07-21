@@ -281,6 +281,10 @@ pub fn linearSearch(comptime T: type, haystack: []align(1) const T, predicate: a
     return i;
 }
 
+test {
+    std.testing.refAllDeclsRecursive(Zld);
+}
+
 const std = @import("std");
 const assert = std.debug.assert;
 const fs = std.fs;

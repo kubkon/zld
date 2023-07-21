@@ -8,7 +8,7 @@ name: u32 = 0,
 file: u32 = 0,
 
 /// Size of this atom
-size: u32 = 0,
+size: u64 = 0,
 
 /// Alignment of this atom as a power of two.
 alignment: u8 = 0,
@@ -349,11 +349,7 @@ inline fn checkTextReloc(self: Atom, symbol: *const Symbol, elf_file: *Elf) void
                 symbol.getName(elf_file),
             });
         } else {
-            // TODO
-            elf_file.base.fatal("{s}: {s}: TODO handle relocations in read-only section", .{
-                self.getObject(elf_file).fmtPath(),
-                self.getName(elf_file),
-            });
+            elf_file.has_text_reloc = true;
         }
     }
 }
@@ -882,6 +878,8 @@ fn relaxTlsGdToLe(rels: []align(1) const elf.Elf64_Rela, value: i32, elf_file: *
     switch (rels[1].r_type()) {
         elf.R_X86_64_PC32,
         elf.R_X86_64_PLT32,
+        elf.R_X86_64_GOTPCREL,
+        elf.R_X86_64_GOTPCRELX,
         => {
             var insts = [_]u8{
                 0x64, 0x48, 0x8b, 0x04, 0x25, 0, 0, 0, 0, // movq %fs:0,%rax
@@ -910,6 +908,20 @@ fn relaxTlsLdToLe(rels: []align(1) const elf.Elf64_Rela, value: i32, elf_file: *
                 0x31, 0xc0, // xor %eax, %eax
                 0x64, 0x48, 0x8b, 0, // mov %fs:(%rax), %rax
                 0x48, 0x2d, 0, 0, 0, 0, // sub $tls_size, %rax
+            };
+            mem.writeIntLittle(i32, insts[8..][0..4], value);
+            try stream.seekBy(-3);
+            try writer.writeAll(&insts);
+        },
+
+        elf.R_X86_64_GOTPCREL,
+        elf.R_X86_64_GOTPCRELX,
+        => {
+            var insts = [_]u8{
+                0x31, 0xc0, // xor %eax, %eax
+                0x64, 0x48, 0x8b, 0, // mov %fs:(%rax), %rax
+                0x48, 0x2d, 0, 0, 0, 0, // sub $tls_size, %rax
+                0x90, // nop
             };
             mem.writeIntLittle(i32, insts[8..][0..4], value);
             try stream.seekBy(-3);

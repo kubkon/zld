@@ -4,15 +4,15 @@ data: []const u8,
 index: File.Index,
 
 header: ?elf.Elf64_Ehdr = null,
+shdrs: std.ArrayListUnmanaged(elf.Elf64_Shdr) = .{},
+shstrtab: StringTable(.object_shstrtab) = .{},
 symtab: []align(1) const elf.Elf64_Sym = &[0]elf.Elf64_Sym{},
 strtab: []const u8 = &[0]u8{},
-shstrtab: []const u8 = &[0]u8{},
 first_global: ?u32 = null,
 
 symbols: std.ArrayListUnmanaged(u32) = .{},
 atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
 comdat_groups: std.ArrayListUnmanaged(Elf.ComdatGroup.Index) = .{},
-dummy_shdrs: std.ArrayListUnmanaged(elf.Elf64_Shdr) = .{},
 
 fdes: std.ArrayListUnmanaged(Fde) = .{},
 cies: std.ArrayListUnmanaged(Cie) = .{},
@@ -44,10 +44,11 @@ pub fn isValidHeader(header: *const elf.Elf64_Ehdr) bool {
 }
 
 pub fn deinit(self: *Object, allocator: Allocator) void {
+    self.shdrs.deinit(allocator);
+    self.shstrtab.deinit(allocator);
     self.symbols.deinit(allocator);
     self.atoms.deinit(allocator);
     self.comdat_groups.deinit(allocator);
-    self.dummy_shdrs.deinit(allocator);
     self.fdes.deinit(allocator);
     self.cies.deinit(allocator);
 }
@@ -60,8 +61,14 @@ pub fn parse(self: *Object, elf_file: *Elf) !void {
 
     if (self.header.?.e_shnum == 0) return;
 
-    const shdrs = self.getShdrs();
-    self.shstrtab = self.getShdrContents(self.header.?.e_shstrndx);
+    const gpa = elf_file.base.allocator;
+
+    const shdrs = @as(
+        [*]align(1) const elf.Elf64_Shdr,
+        @ptrCast(self.data.ptr + self.header.?.e_shoff),
+    )[0..self.header.?.e_shnum];
+    try self.shdrs.appendUnalignedSlice(gpa, shdrs);
+    try self.shstrtab.buffer.appendSlice(gpa, self.getShdrContents(self.header.?.e_shstrndx));
 
     const symtab_index = for (self.getShdrs(), 0..) |shdr, i| switch (shdr.sh_type) {
         elf.SHT_SYMTAB => break @as(u16, @intCast(i)),
@@ -191,10 +198,10 @@ fn addAtom(self: *Object, shdr: elf.Elf64_Shdr, shndx: u16, name: [:0]const u8, 
     if (shdr.sh_flags & elf.SHF_COMPRESSED != 0) {
         const data = self.getShdrContents(shndx);
         const chdr = @as(*align(1) const elf.Elf64_Chdr, @ptrCast(data.ptr)).*;
-        atom.size = @as(u32, @intCast(chdr.ch_size));
+        atom.size = chdr.ch_size;
         atom.alignment = math.log2_int(u64, chdr.ch_addralign);
     } else {
-        atom.size = @as(u32, @intCast(shdr.sh_size));
+        atom.size = shdr.sh_size;
         atom.alignment = math.log2_int(u64, shdr.sh_addralign);
     }
 }
@@ -432,7 +439,9 @@ pub fn markLive(self: *Object, elf_file: *Elf) void {
 
         const global = elf_file.getSymbol(index);
         const file = global.getFile(elf_file) orelse continue;
-        if (sym.st_shndx == elf.SHN_UNDEF and !file.isAlive()) {
+        const should_keep = sym.st_shndx == elf.SHN_UNDEF or
+            (sym.st_shndx == elf.SHN_COMMON and global.getSourceSymbol(elf_file).st_shndx != elf.SHN_COMMON);
+        if (should_keep and !file.isAlive()) {
             file.setAlive();
             file.markLive(elf_file);
         }
@@ -492,21 +501,23 @@ pub fn convertCommonSymbols(self: *Object, elf_file: *Elf) !void {
         const atom_index = try elf_file.addAtom();
         try self.atoms.append(gpa, atom_index);
 
+        const is_tls = global.getType(elf_file) == elf.STT_TLS;
+        const name = if (is_tls) ".tls_common" else ".common";
+
         const atom = elf_file.getAtom(atom_index).?;
         atom.atom_index = atom_index;
-        atom.name = global.name;
+        atom.name = try elf_file.string_intern.insert(gpa, name);
         atom.file = self.index;
-        atom.size = @as(u32, @intCast(this_sym.st_size));
+        atom.size = this_sym.st_size;
         const alignment = this_sym.st_value;
         atom.alignment = math.log2_int(u64, alignment);
 
-        const is_tls = global.getType(elf_file) == elf.STT_TLS;
         var sh_flags: u32 = elf.SHF_ALLOC | elf.SHF_WRITE;
         if (is_tls) sh_flags |= elf.SHF_TLS;
-        const shndx = @as(u16, @intCast(self.getShdrs().len + self.dummy_shdrs.items.len));
-        const shdr = try self.dummy_shdrs.addOne(gpa);
+        const shndx = @as(u16, @intCast(self.shdrs.items.len));
+        const shdr = try self.shdrs.addOne(gpa);
         shdr.* = .{
-            .sh_name = 0,
+            .sh_name = try self.shstrtab.insert(gpa, name),
             .sh_type = elf.SHT_NOBITS,
             .sh_flags = sh_flags,
             .sh_addr = 0,
@@ -599,9 +610,8 @@ pub inline fn getSymbol(self: *Object, index: u32, elf_file: *Elf) *Symbol {
     return elf_file.getSymbol(self.symbols.items[index]);
 }
 
-pub inline fn getShdrs(self: *Object) []align(1) const elf.Elf64_Shdr {
-    const header = self.header orelse return &[0]elf.Elf64_Shdr{};
-    return @as([*]align(1) const elf.Elf64_Shdr, @ptrCast(self.data.ptr + header.e_shoff))[0..header.e_shnum];
+pub inline fn getShdrs(self: *Object) []const elf.Elf64_Shdr {
+    return self.shdrs.items;
 }
 
 pub inline fn getShdrContents(self: *Object, index: u32) []const u8 {
@@ -612,9 +622,8 @@ pub inline fn getShdrContents(self: *Object, index: u32) []const u8 {
 
 pub fn getShdr(self: *Object, index: u32) elf.Elf64_Shdr {
     const shdrs = self.getShdrs();
-    assert(index < shdrs.len + self.dummy_shdrs.items.len);
-    if (index < shdrs.len) return shdrs[index];
-    return self.dummy_shdrs.items[index - shdrs.len];
+    assert(index < shdrs.len);
+    return shdrs[index];
 }
 
 inline fn getString(self: *Object, off: u32) [:0]const u8 {
@@ -623,8 +632,7 @@ inline fn getString(self: *Object, off: u32) [:0]const u8 {
 }
 
 inline fn getShString(self: *Object, off: u32) [:0]const u8 {
-    assert(off < self.shstrtab.len);
-    return mem.sliceTo(@as([*:0]const u8, @ptrCast(self.shstrtab.ptr + off)), 0);
+    return self.shstrtab.getAssumeExists(off);
 }
 
 pub fn getComdatGroupMembers(self: *Object, index: u16) []align(1) const u32 {
@@ -824,5 +832,6 @@ const Cie = eh_frame.Cie;
 const Elf = @import("../Elf.zig");
 const Fde = eh_frame.Fde;
 const File = @import("file.zig").File;
+const StringTable = @import("../strtab.zig").StringTable;
 const Symbol = @import("Symbol.zig");
 const Zld = @import("../Zld.zig");

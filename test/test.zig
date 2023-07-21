@@ -61,31 +61,45 @@ pub const SysCmd = struct {
         sys_cmd.cmd.addPrefixedDirectorySourceArg(prefix, dir);
     }
 
-    pub fn addSourceBytes(sys_cmd: SysCmd, bytes: []const u8, basename: []const u8) void {
+    pub inline fn addCSource(sys_cmd: SysCmd, bytes: []const u8) void {
+        return sys_cmd.addSourceBytes(bytes, .c);
+    }
+
+    pub inline fn addCppSource(sys_cmd: SysCmd, bytes: []const u8) void {
+        return sys_cmd.addSourceBytes(bytes, .cpp);
+    }
+
+    pub inline fn addAsmSource(sys_cmd: SysCmd, bytes: []const u8) void {
+        return sys_cmd.addSourceBytes(bytes ++ "\n", .@"asm");
+    }
+
+    pub fn addSourceBytes(sys_cmd: SysCmd, bytes: []const u8, @"type": enum { c, cpp, @"asm" }) void {
         const b = sys_cmd.cmd.step.owner;
         const wf = WriteFile.create(b);
-        const file = wf.add(basename, bytes);
+        const file = wf.add(switch (@"type") {
+            .c => "a.c",
+            .cpp => "a.cpp",
+            .@"asm" => "a.s",
+        }, bytes);
         sys_cmd.cmd.addFileSourceArg(file);
     }
 
-    pub fn addEmptyMain(sys_cmd: SysCmd) void {
-        const main =
+    pub inline fn addEmptyMain(sys_cmd: SysCmd) void {
+        sys_cmd.addCSource(
             \\int main(int argc, char* argv[]) {
             \\  return 0;
             \\}
-        ;
-        sys_cmd.addSourceBytes(main, "main.c");
+        );
     }
 
-    pub fn addHelloWorldMain(sys_cmd: SysCmd) void {
-        const main =
+    pub inline fn addHelloWorldMain(sys_cmd: SysCmd) void {
+        sys_cmd.addCSource(
             \\#include <stdio.h>
             \\int main(int argc, char* argv[]) {
             \\  printf("Hello world!\n");
             \\  return 0;
             \\}
-        ;
-        sys_cmd.addSourceBytes(main, "main.c");
+        );
     }
 
     pub fn saveOutputAs(sys_cmd: SysCmd, basename: []const u8) FileSourceWithDir {

@@ -27,7 +27,7 @@ const usage =
     \\  --no-gc-sections
     \\--hash-style=[none,sysv,gnu,both]
     \\                              Set hash style
-    \\--help, -h                    Print this help and exit
+    \\--help                        Print this help and exit
     \\--image-base=[value]          Set the base address
     \\-l[value]                     Specify library to link against
     \\-L[value]                     Specify library search dir
@@ -42,6 +42,7 @@ const usage =
     \\  --no-relax
     \\--rpath=[value], -R [value]   Specify runtime path
     \\--shared                      Create dynamic library
+    \\--soname=[value], -h [value]  Set shared library name
     \\--start-group                 Ignored for compatibility with GNU
     \\--strip-all, -s               Strip all symbols. Implies --strip-debug
     \\--strip-debug, -S             Strip .debug_ sections
@@ -51,11 +52,12 @@ const usage =
     \\    noexecstack               
     \\  execstack-if-needed         Make the stack executable if the input file explicitly requests it
     \\  lazy                        Enable lazy function resolution (default)
+    \\  muldefs                     Allow multiple definitions
     \\  nocopyreloc                 Do not create copy relocations
     \\  nodlopen                    Mark DSO not available to dlopen
     \\  now                         Disable lazy function resolution
     \\  stack-size=[value]          Override default stack size
-    \\  text                        Do not allow relocations against read-only segments (default)
+    \\  text                        Do not allow relocations against read-only segments
     \\    notext                    
     \\  relro                       Make some sections read-only after dynamic relocations
     \\    norelro                   
@@ -74,7 +76,7 @@ const cmd = "ld.zld";
 
 emit: Zld.Emit,
 output_mode: Zld.OutputMode,
-positionals: []const Positional,
+positionals: []const Elf.LinkObject,
 search_dirs: []const []const u8,
 rpath_list: []const []const u8,
 strip_debug: bool = false,
@@ -97,6 +99,7 @@ warn_common: bool = false,
 build_id: ?BuildId = null,
 hash_style: ?HashStyle = null,
 apply_dynamic_relocs: bool = true,
+soname: ?[]const u8 = null,
 /// -z flags
 /// Overrides default stack size.
 z_stack_size: ?u64 = null,
@@ -112,7 +115,7 @@ z_nocopyreloc: bool = false,
 /// Mark DSO not available for dlopen.
 z_nodlopen: bool = false,
 /// Do not allow relocations against read-only segments.
-z_text: bool = true,
+z_text: bool = false,
 /// Make some sections read-only after dynamic relocations.
 /// TODO make this default to true.
 z_relro: bool = false,
@@ -139,12 +142,12 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
     var it = Zld.Options.ArgsIterator{ .args = args };
     var p = ArgParser(@TypeOf(ctx)){ .it = &it, .ctx = ctx };
     while (p.hasMore()) {
-        if (p.flag2("help") or p.flag1("h")) {
+        if (p.flag2("help")) {
             ctx.fatal(usage, .{cmd});
         } else if (p.arg2("debug-log")) |scope| {
             try ctx.log_scopes.append(scope);
         } else if (p.arg1("l")) |lib| {
-            try positionals.append(.{ .tag = .library, .path = try std.fmt.allocPrint(arena, "-l{s}", .{lib}) });
+            try positionals.append(.{ .tag = .path, .path = try std.fmt.allocPrint(arena, "-l{s}", .{lib}) });
         } else if (p.arg1("L")) |dir| {
             try search_dirs.put(dir, {});
         } else if (p.arg1("o")) |path| {
@@ -271,6 +274,10 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             opts.apply_dynamic_relocs = false;
         } else if (p.flag1("v")) {
             print_version = true;
+        } else if (p.argAny("soname")) |value| {
+            opts.soname = value;
+        } else if (p.arg1("h")) |value| {
+            opts.soname = value;
         } else if (p.argZ("stack-size")) |value| {
             opts.z_stack_size = std.fmt.parseInt(u64, value, 0) catch
                 ctx.fatal("Could not parse value '{s}' into integer", .{value});
@@ -296,6 +303,8 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             opts.z_relro = true;
         } else if (p.flagZ("norelro")) {
             opts.z_relro = false;
+        } else if (p.flagZ("muldefs")) {
+            opts.allow_multiple_definition = true;
         } else {
             try positionals.append(.{ .tag = .path, .path = p.arg });
         }
@@ -323,11 +332,63 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         }
     }
 
-    opts.positionals = positionals.items;
+    opts.positionals = try unpackPositionals(arena, .{
+        .static = opts.static,
+        .unprocessed = positionals.items,
+    }, ctx);
     opts.search_dirs = search_dirs.keys();
     opts.rpath_list = rpath_list.keys();
 
     return opts;
+}
+
+const Positional = struct {
+    tag: Tag,
+    path: []const u8 = "",
+
+    pub const Tag = enum {
+        path,
+        static,
+        dynamic,
+        as_needed,
+        no_as_needed,
+        push_state,
+        pop_state,
+    };
+};
+
+const UnpackArgs = struct {
+    static: bool,
+    unprocessed: []const Positional,
+};
+
+fn unpackPositionals(arena: Allocator, args: UnpackArgs, ctx: anytype) ![]const Elf.LinkObject {
+    const State = struct {
+        needed: bool,
+        static: bool,
+    };
+
+    var positionals = std.ArrayList(Elf.LinkObject).init(arena);
+    try positionals.ensureTotalCapacity(args.unprocessed.len);
+
+    var stack = std.ArrayList(State).init(arena);
+    var state = State{ .needed = true, .static = args.static };
+
+    for (args.unprocessed) |arg| switch (arg.tag) {
+        .path => positionals.appendAssumeCapacity(.{
+            .path = arg.path,
+            .needed = state.needed,
+            .static = state.static,
+        }),
+        .static => state.static = true,
+        .dynamic => state.static = false,
+        .as_needed => state.needed = false,
+        .no_as_needed => state.needed = true,
+        .push_state => try stack.append(state),
+        .pop_state => state = stack.popOrNull() orelse return ctx.fatal("no state pushed before pop", .{}),
+    };
+
+    return positionals.toOwnedSlice();
 }
 
 fn ArgParser(comptime Ctx: type) type {
@@ -448,22 +509,6 @@ fn ArgParser(comptime Ctx: type) type {
     };
 }
 
-pub const Positional = struct {
-    tag: Tag,
-    path: []const u8 = "",
-
-    pub const Tag = enum {
-        path,
-        library,
-        static,
-        dynamic,
-        as_needed,
-        no_as_needed,
-        push_state,
-        pop_state,
-    };
-};
-
 pub const BuildId = enum {
     none,
     md5,
@@ -487,5 +532,6 @@ const mem = std.mem;
 const process = std.process;
 
 const Allocator = mem.Allocator;
+const Elf = @import("../Elf.zig");
 const Options = @This();
 const Zld = @import("../Zld.zig");
