@@ -8,7 +8,7 @@ name: u32 = 0,
 file: u32 = 0,
 
 /// Size of this atom
-size: u32 = 0,
+size: u64 = 0,
 
 /// Alignment of this atom as a power of two.
 alignment: u8 = 0,

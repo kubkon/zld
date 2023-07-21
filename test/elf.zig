@@ -37,6 +37,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testInitArrayOrder(b, opts));
         elf_step.dependOn(testLargeAlignmentDso(b, opts));
         elf_step.dependOn(testLargeAlignmentExe(b, opts));
+        elf_step.dependOn(testLargeBss(b, opts));
         elf_step.dependOn(testLinkOrder(b, opts));
         elf_step.dependOn(testLinkerScript(b, opts));
         elf_step.dependOn(testNoEhFrameHdr(b, opts));
@@ -1542,6 +1543,31 @@ fn testLargeAlignmentExe(b: *Build, opts: Options) *Step {
     check.checkExtract("{addr2} {size2} {shndx2} FUNC LOCAL DEFAULT world");
     check.checkComputeCompare("addr1 16 %", .{ .op = .eq, .value = .{ .literal = 0 } });
     check.checkComputeCompare("addr2 16 %", .{ .op = .eq, .value = .{ .literal = 0 } });
+    test_step.dependOn(&check.step);
+
+    return test_step;
+}
+
+fn testLargeBss(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-large-bss", "");
+
+    const exe = cc(b, opts);
+    exe.addCSource(
+        \\volatile char arr[0x100000000];
+        \\int main() {
+        \\  return arr[2000];
+        \\}
+    );
+
+    const run = exe.run();
+    test_step.dependOn(run.step());
+
+    const check = exe.check();
+    check.checkStart();
+    check.checkExact("section headers");
+    check.checkExact("name .common");
+    check.checkExact("offset 0");
+    check.checkExact("size 100000000");
     test_step.dependOn(&check.step);
 
     return test_step;

@@ -198,10 +198,10 @@ fn addAtom(self: *Object, shdr: elf.Elf64_Shdr, shndx: u16, name: [:0]const u8, 
     if (shdr.sh_flags & elf.SHF_COMPRESSED != 0) {
         const data = self.getShdrContents(shndx);
         const chdr = @as(*align(1) const elf.Elf64_Chdr, @ptrCast(data.ptr)).*;
-        atom.size = @as(u32, @intCast(chdr.ch_size));
+        atom.size = chdr.ch_size;
         atom.alignment = math.log2_int(u64, chdr.ch_addralign);
     } else {
-        atom.size = @as(u32, @intCast(shdr.sh_size));
+        atom.size = shdr.sh_size;
         atom.alignment = math.log2_int(u64, shdr.sh_addralign);
     }
 }
@@ -508,7 +508,7 @@ pub fn convertCommonSymbols(self: *Object, elf_file: *Elf) !void {
         atom.atom_index = atom_index;
         atom.name = try elf_file.string_intern.insert(gpa, name);
         atom.file = self.index;
-        atom.size = @as(u32, @intCast(this_sym.st_size));
+        atom.size = this_sym.st_size;
         const alignment = this_sym.st_value;
         atom.alignment = math.log2_int(u64, alignment);
 
