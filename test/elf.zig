@@ -54,6 +54,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testTlsGd(b, opts));
         elf_step.dependOn(testTlsIe(b, opts));
         elf_step.dependOn(testTlsLargeAlignment(b, opts));
+        elf_step.dependOn(testTlsLargeStaticImage(b, opts));
         elf_step.dependOn(testTlsLd(b, opts));
         elf_step.dependOn(testTlsLdDso(b, opts));
         elf_step.dependOn(testTlsOffsetAlignment(b, opts));
@@ -2347,6 +2348,27 @@ fn testTlsLargeAlignment(b: *Build, opts: Options) *Step {
         run.expectStdOutEqual("42 1 2 3\n");
         test_step.dependOn(run.step());
     }
+
+    return test_step;
+}
+
+fn testTlsLargeStaticImage(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-tls-large-static-image", "");
+
+    const exe = cc(b, opts);
+    exe.addCSource("_Thread_local int x[] = { 1, 2, 3, [10000] = 5 };");
+    exe.addCSource(
+        \\#include <stdio.h>
+        \\extern _Thread_local int x[];
+        \\int main() {
+        \\  printf("%d %d %d %d %d\n", x[0], x[1], x[2], x[3], x[10000]);
+        \\}
+    );
+    exe.addArg("-fPIC");
+
+    const run = exe.run();
+    run.expectStdOutEqual("1 2 3 0 5\n");
+    test_step.dependOn(run.step());
 
     return test_step;
 }
