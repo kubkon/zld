@@ -69,6 +69,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testWeakExportExe(b, opts));
         elf_step.dependOn(testWeakUndefDso(b, opts));
         elf_step.dependOn(testZNow(b, opts));
+        elf_step.dependOn(testZStackSize(b, opts));
         elf_step.dependOn(testZText(b, opts));
     }
 
@@ -3004,6 +3005,23 @@ fn testZNow(b: *Build, opts: Options) *Step {
         check.checkNotPresent("NOW");
         test_step.dependOn(&check.step);
     }
+
+    return test_step;
+}
+
+fn testZStackSize(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-z-stack-size", "");
+
+    const exe = cc(b, opts);
+    exe.addEmptyMain();
+    exe.addArg("-Wl,-z,stack-size=0x800000");
+
+    const check = exe.check();
+    check.checkStart();
+    check.checkExact("program headers");
+    check.checkExact("type GNU_STACK");
+    check.checkExact("memsz 800000");
+    test_step.dependOn(&check.step);
 
     return test_step;
 }
