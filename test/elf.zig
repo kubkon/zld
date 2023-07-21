@@ -58,6 +58,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testTlsLd(b, opts));
         elf_step.dependOn(testTlsLdDso(b, opts));
         elf_step.dependOn(testTlsLdNoPlt(b, opts));
+        elf_step.dependOn(testTlsNoPic(b, opts));
         elf_step.dependOn(testTlsOffsetAlignment(b, opts));
         elf_step.dependOn(testTlsStatic(b, opts));
         elf_step.dependOn(testZNow(b, opts));
@@ -2500,6 +2501,35 @@ fn testTlsLdNoPlt(b: *Build, opts: Options) *Step {
         run.expectStdOutEqual("3 5 3 5\n");
         test_step.dependOn(run.step());
     }
+
+    return test_step;
+}
+
+fn testTlsNoPic(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-tls-no-pic", "");
+
+    const exe = cc(b, opts);
+    exe.addCSource(
+        \\#include <stdio.h>
+        \\__attribute__((tls_model("global-dynamic"))) extern _Thread_local int foo;
+        \\__attribute__((tls_model("global-dynamic"))) static _Thread_local int bar;
+        \\int *get_foo_addr() { return &foo; }
+        \\int *get_bar_addr() { return &bar; }
+        \\int main() {
+        \\  foo = 3;
+        \\  bar = 5;
+        \\
+        \\  printf("%d %d %d %d\n", *get_foo_addr(), *get_bar_addr(), foo, bar);
+        \\  return 0;
+        \\}
+    );
+    exe.addCSource(
+        \\__attribute__((tls_model("global-dynamic"))) _Thread_local int foo;
+    );
+
+    const run = exe.run();
+    run.expectStdOutEqual("3 5 3 5\n");
+    test_step.dependOn(run.step());
 
     return test_step;
 }
