@@ -53,6 +53,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testTlsDso(b, opts));
         elf_step.dependOn(testTlsGd(b, opts));
         elf_step.dependOn(testTlsGdNoPlt(b, opts));
+        elf_step.dependOn(testTlsGdToIe(b, opts));
         elf_step.dependOn(testTlsIe(b, opts));
         elf_step.dependOn(testTlsLargeAlignment(b, opts));
         elf_step.dependOn(testTlsLargeStaticImage(b, opts));
@@ -2296,6 +2297,98 @@ fn testTlsGdNoPlt(b: *Build, opts: Options) *Step {
 
         const run = exe.run();
         run.expectStdOutEqual("1 2 3 4 5 6\n");
+        test_step.dependOn(run.step());
+    }
+
+    return test_step;
+}
+
+fn testTlsGdToIe(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-tls-gd-to-ie", "");
+
+    const a_o = cc(b, opts);
+    a_o.addCSource(
+        \\#include <stdio.h>
+        \\__attribute__((tls_model("global-dynamic"))) static _Thread_local int x1 = 1;
+        \\__attribute__((tls_model("global-dynamic"))) _Thread_local int x2 = 2;
+        \\__attribute__((tls_model("global-dynamic"))) _Thread_local int x3;
+        \\int foo() {
+        \\  x3 = 3;
+        \\
+        \\  printf("%d %d %d\n", x1, x2, x3);
+        \\  return 0;
+        \\}
+    );
+    a_o.addArgs(&.{ "-c", "-fPIC" });
+
+    const b_o = cc(b, opts);
+    b_o.addCSource(
+        \\int foo();
+        \\int main() { foo(); }
+    );
+    b_o.addArgs(&.{ "-c", "-fPIC" });
+
+    {
+        const dso = cc(b, opts);
+        dso.addFileSource(a_o.out);
+        dso.addArg("-shared");
+        const dso_out = dso.saveOutputAs("a.so");
+
+        const exe = cc(b, opts);
+        exe.addFileSource(b_o.out);
+        exe.addFileSource(dso_out.file);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", dso_out.dir);
+
+        const run = exe.run();
+        run.expectStdOutEqual("1 2 3\n");
+        test_step.dependOn(run.step());
+    }
+
+    {
+        const dso = cc(b, opts);
+        dso.addFileSource(a_o.out);
+        dso.addArgs(&.{ "-shared", "-Wl,-no-relax" });
+        const dso_out = dso.saveOutputAs("a.so");
+
+        const exe = cc(b, opts);
+        exe.addFileSource(b_o.out);
+        exe.addFileSource(dso_out.file);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", dso_out.dir);
+
+        const run = exe.run();
+        run.expectStdOutEqual("1 2 3\n");
+        test_step.dependOn(run.step());
+    }
+
+    {
+        const dso = cc(b, opts);
+        dso.addFileSource(a_o.out);
+        dso.addArgs(&.{ "-shared", "-Wl,-z,nodlopen" });
+        const dso_out = dso.saveOutputAs("a.so");
+
+        const exe = cc(b, opts);
+        exe.addFileSource(b_o.out);
+        exe.addFileSource(dso_out.file);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", dso_out.dir);
+
+        const run = exe.run();
+        run.expectStdOutEqual("1 2 3\n");
+        test_step.dependOn(run.step());
+    }
+
+    {
+        const dso = cc(b, opts);
+        dso.addFileSource(a_o.out);
+        dso.addArgs(&.{ "-shared", "-Wl,-z,nodlopen", "-Wl,-no-relax" });
+        const dso_out = dso.saveOutputAs("a.so");
+
+        const exe = cc(b, opts);
+        exe.addFileSource(b_o.out);
+        exe.addFileSource(dso_out.file);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", dso_out.dir);
+
+        const run = exe.run();
+        run.expectStdOutEqual("1 2 3\n");
         test_step.dependOn(run.step());
     }
 
