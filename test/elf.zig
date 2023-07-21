@@ -45,6 +45,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testPushPopState(b, opts));
         elf_step.dependOn(testSharedAbsSymbol(b, opts));
         elf_step.dependOn(testStrip(b, opts));
+        elf_step.dependOn(testTlsCommon(b, opts));
         elf_step.dependOn(testTlsDesc(b, opts));
         elf_step.dependOn(testTlsDescImport(b, opts));
         elf_step.dependOn(testTlsDescStatic(b, opts));
@@ -1822,6 +1823,43 @@ fn testStrip(b: *Build, opts: Options) *Step {
         check.checkNotPresent("symbol table");
         test_step.dependOn(&check.step);
     }
+
+    return test_step;
+}
+
+fn testTlsCommon(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-tls-common", "");
+
+    const a_o = cc(b, opts);
+    a_o.addAsmSource(
+        \\.globl foo
+        \\.tls_common foo,4,4
+    );
+    a_o.addArg("-c");
+
+    const b_o = cc(b, opts);
+    b_o.addCSource(
+        \\#include <stdio.h>
+        \\extern _Thread_local int foo;
+        \\int main() {
+        \\  printf("foo=%d\n", foo);
+        \\}
+    );
+    b_o.addArgs(&.{ "-c", "-std=c11" });
+
+    const exe = cc(b, opts);
+    exe.addFileSource(a_o.out);
+    exe.addFileSource(b_o.out);
+
+    const run = exe.run();
+    run.expectStdOutEqual("foo=0\n");
+    test_step.dependOn(run.step());
+
+    const check = exe.check();
+    check.checkStart();
+    check.checkExact("section headers");
+    check.checkExact("name .tls_common");
+    test_step.dependOn(&check.step);
 
     return test_step;
 }
