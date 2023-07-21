@@ -882,6 +882,8 @@ fn relaxTlsGdToLe(rels: []align(1) const elf.Elf64_Rela, value: i32, elf_file: *
     switch (rels[1].r_type()) {
         elf.R_X86_64_PC32,
         elf.R_X86_64_PLT32,
+        elf.R_X86_64_GOTPCREL,
+        elf.R_X86_64_GOTPCRELX,
         => {
             var insts = [_]u8{
                 0x64, 0x48, 0x8b, 0x04, 0x25, 0, 0, 0, 0, // movq %fs:0,%rax

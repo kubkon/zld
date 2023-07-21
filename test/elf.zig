@@ -52,6 +52,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testTlsDfStaticTls(b, opts));
         elf_step.dependOn(testTlsDso(b, opts));
         elf_step.dependOn(testTlsGd(b, opts));
+        elf_step.dependOn(testTlsGdNoPlt(b, opts));
         elf_step.dependOn(testTlsIe(b, opts));
         elf_step.dependOn(testTlsLargeAlignment(b, opts));
         elf_step.dependOn(testTlsLargeStaticImage(b, opts));
@@ -2227,6 +2228,75 @@ fn testTlsGd(b: *Build, opts: Options) *Step {
             run.expectStdOutEqual(exp_stdout);
             test_step.dependOn(run.step());
         }
+    }
+
+    return test_step;
+}
+
+fn testTlsGdNoPlt(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-tls-gd-no-plt", "");
+
+    const obj = cc(b, opts);
+    obj.addCSource(
+        \\#include <stdio.h>
+        \\__attribute__((tls_model("global-dynamic"))) static _Thread_local int x1 = 1;
+        \\__attribute__((tls_model("global-dynamic"))) static _Thread_local int x2;
+        \\__attribute__((tls_model("global-dynamic"))) extern _Thread_local int x3;
+        \\__attribute__((tls_model("global-dynamic"))) extern _Thread_local int x4;
+        \\int get_x5();
+        \\int get_x6();
+        \\int main() {
+        \\  x2 = 2;
+        \\
+        \\  printf("%d %d %d %d %d %d\n", x1, x2, x3, x4, get_x5(), get_x6());
+        \\  return 0;
+        \\}
+    );
+    obj.addArgs(&.{ "-fPIC", "-fno-plt", "-c" });
+
+    const a_so = cc(b, opts);
+    a_so.addCSource(
+        \\__attribute__((tls_model("global-dynamic"))) _Thread_local int x3 = 3;
+        \\__attribute__((tls_model("global-dynamic"))) static _Thread_local int x5 = 5;
+        \\int get_x5() { return x5; }
+    );
+    a_so.addArgs(&.{ "-fPIC", "-shared", "-fno-plt" });
+    const a_so_out = a_so.saveOutputAs("a.so");
+
+    const b_so = cc(b, opts);
+    b_so.addCSource(
+        \\__attribute__((tls_model("global-dynamic"))) _Thread_local int x4 = 4;
+        \\__attribute__((tls_model("global-dynamic"))) static _Thread_local int x6 = 6;
+        \\int get_x6() { return x6; }
+    );
+    b_so.addArgs(&.{ "-fPIC", "-shared", "-fno-plt", "-Wl,-no-relax" });
+    const b_so_out = b_so.saveOutputAs("b.so");
+
+    {
+        const exe = cc(b, opts);
+        exe.addFileSource(obj.out);
+        exe.addFileSource(a_so_out.file);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", a_so_out.dir);
+        exe.addFileSource(b_so_out.file);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", b_so_out.dir);
+
+        const run = exe.run();
+        run.expectStdOutEqual("1 2 3 4 5 6\n");
+        test_step.dependOn(run.step());
+    }
+
+    {
+        const exe = cc(b, opts);
+        exe.addFileSource(obj.out);
+        exe.addFileSource(a_so_out.file);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", a_so_out.dir);
+        exe.addFileSource(b_so_out.file);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", b_so_out.dir);
+        exe.addArg("-Wl,-no-relax");
+
+        const run = exe.run();
+        run.expectStdOutEqual("1 2 3 4 5 6\n");
+        test_step.dependOn(run.step());
     }
 
     return test_step;
