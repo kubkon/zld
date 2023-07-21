@@ -67,6 +67,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testTlsStatic(b, opts));
         elf_step.dependOn(testWeakExportDso(b, opts));
         elf_step.dependOn(testWeakExportExe(b, opts));
+        elf_step.dependOn(testWeakUndefDso(b, opts));
         elf_step.dependOn(testZNow(b, opts));
     }
 
@@ -2925,6 +2926,51 @@ fn testWeakExportExe(b: *Build, opts: Options) *Step {
     const run = exe.run();
     run.expectStdOutEqual("3\n");
     test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+fn testWeakUndefDso(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-weak-undef-dso", "");
+
+    const dso = cc(b, opts);
+    dso.addCSource(
+        \\__attribute__((weak)) int foo();
+        \\int bar() { return foo ? foo() : -1; }
+    );
+    dso.addArgs(&.{ "-fPIC", "-shared" });
+    const dso_out = dso.saveOutputAs("a.so");
+
+    {
+        const exe = cc(b, opts);
+        exe.addCSource(
+            \\#include <stdio.h>
+            \\int bar();
+            \\int main() { printf("bar=%d\n", bar()); }
+        );
+        exe.addFileSource(dso_out.file);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", dso_out.dir);
+
+        const run = exe.run();
+        run.expectStdOutEqual("bar=-1\n");
+        test_step.dependOn(run.step());
+    }
+
+    {
+        const exe = cc(b, opts);
+        exe.addCSource(
+            \\#include <stdio.h>
+            \\int foo() { return 5; }
+            \\int bar();
+            \\int main() { printf("bar=%d\n", bar()); }
+        );
+        exe.addFileSource(dso_out.file);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", dso_out.dir);
+
+        const run = exe.run();
+        run.expectStdOutEqual("bar=5\n");
+        test_step.dependOn(run.step());
+    }
 
     return test_step;
 }
