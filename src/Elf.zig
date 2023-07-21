@@ -1042,11 +1042,15 @@ inline fn shdrIsAlloc(shdr: *const elf.Elf64_Shdr) bool {
 }
 
 inline fn shdrIsBss(shdr: *const elf.Elf64_Shdr) bool {
-    return shdr.sh_type == elf.SHT_NOBITS and !shdrIsTls(shdr);
+    return shdrIsZerofill(shdr) and !shdrIsTls(shdr);
 }
 
 inline fn shdrIsTbss(shdr: *const elf.Elf64_Shdr) bool {
-    return shdr.sh_type == elf.SHT_NOBITS and shdrIsTls(shdr);
+    return shdrIsZerofill(shdr) and shdrIsTls(shdr);
+}
+
+inline fn shdrIsZerofill(shdr: *const elf.Elf64_Shdr) bool {
+    return shdr.sh_type == elf.SHT_NOBITS;
 }
 
 pub inline fn shdrIsTls(shdr: *const elf.Elf64_Shdr) bool {
@@ -1054,6 +1058,11 @@ pub inline fn shdrIsTls(shdr: *const elf.Elf64_Shdr) bool {
 }
 
 fn allocateSectionsInMemory(self: *Elf, base_offset: u64) !void {
+    // We use this struct to track maximum alignment of all TLS sections.
+    // According to https://github.com/rui314/mold/commit/bd46edf3f0fe9e1a787ea453c4657d535622e61f in mold,
+    // in-file offsets have to be aligned against the start of TLS program header.
+    // If that's not ensured, then in a multi-threaded context, TLS variables across a shared object
+    // boundary may not get correctly loaded at an aligned address.
     const Align = struct {
         tls_start_align: u64 = 1,
         first_tls_shndx: ?u16 = null,
@@ -1102,12 +1111,54 @@ fn allocateSectionsInMemory(self: *Elf, base_offset: u64) !void {
     }
 }
 
-fn allocatesSectionsInFile(self: *Elf, base_offset: u64) void {
+fn allocateSectionsInFile(self: *Elf, base_offset: u64) void {
+    const page_size = self.options.page_size.?;
+    const shdrs = self.sections.slice().items(.shdr);
     var offset = base_offset;
-    for (self.sections.items(.shdr)[1..]) |*shdr| {
-        if (shdr.sh_type == elf.SHT_NOBITS) continue;
-        shdr.sh_offset = mem.alignForward(u64, offset, shdr.sh_addralign);
-        offset = shdr.sh_offset + shdr.sh_size;
+    var shndx: u32 = 1;
+
+    while (shndx < shdrs.len) {
+        const first = &shdrs[shndx];
+
+        if (!shdrIsAlloc(first)) {
+            first.sh_offset = mem.alignForward(u64, offset, first.sh_addralign);
+            offset = first.sh_offset + first.sh_size;
+            shndx += 1;
+            continue;
+        }
+        if (shdrIsZerofill(first)) {
+            shndx += 1;
+            continue;
+        }
+
+        if (first.sh_addralign > page_size) {
+            offset = mem.alignForward(u64, offset, first.sh_addralign);
+        } else {
+            const val = mem.alignBackward(u64, offset, page_size) + @rem(first.sh_addr, page_size);
+            offset = if (offset <= val) val else val + page_size;
+        }
+
+        while (true) {
+            const prev = &shdrs[shndx];
+            prev.sh_offset = offset + prev.sh_addr - first.sh_addr;
+            shndx += 1;
+
+            const next = &shdrs[shndx];
+            if (shndx >= shdrs.len or !shdrIsAlloc(next) or shdrIsZerofill(next)) break;
+            if (next.sh_addr < first.sh_addr) break;
+
+            const gap = next.sh_addr - prev.sh_addr - prev.sh_size;
+            if (gap >= page_size) break;
+        }
+
+        const prev = &shdrs[shndx - 1];
+        offset = prev.sh_offset + prev.sh_size;
+
+        var next = &shdrs[shndx];
+        while (shndx < shdrs.len and shdrIsAlloc(next) and shdrIsZerofill(next)) {
+            shndx += 1;
+            next = &shdrs[shndx];
+        }
     }
 }
 
@@ -1116,7 +1167,7 @@ fn allocateSections(self: *Elf) !void {
         const nphdrs = self.phdrs.items.len;
         const base_offset: u64 = @sizeOf(elf.Elf64_Ehdr) + nphdrs * @sizeOf(elf.Elf64_Phdr);
         try self.allocateSectionsInMemory(base_offset);
-        self.allocatesSectionsInFile(base_offset);
+        self.allocateSectionsInFile(base_offset);
         self.phdrs.clearRetainingCapacity();
         try self.initPhdrs();
         if (nphdrs == self.phdrs.items.len) break;

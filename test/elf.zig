@@ -53,6 +53,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testTlsIe(b, opts));
         elf_step.dependOn(testTlsLd(b, opts));
         elf_step.dependOn(testTlsLdDso(b, opts));
+        elf_step.dependOn(testTlsOffsetAlignment(b, opts));
         elf_step.dependOn(testTlsStatic(b, opts));
         elf_step.dependOn(testZNow(b, opts));
     }
@@ -2293,6 +2294,58 @@ fn testTlsLdDso(b: *Build, opts: Options) *Step {
 
     const run = exe.run();
     run.expectStdOutEqual("1 1\n");
+    test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+fn testTlsOffsetAlignment(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-tls-offset-alignment", "");
+
+    const dso = cc(b, opts);
+    dso.addCSource(
+        \\#include <assert.h>
+        \\#include <stdlib.h>
+        \\
+        \\// .tdata
+        \\_Thread_local int x = 42;
+        \\// .tbss
+        \\__attribute__ ((aligned(64)))
+        \\_Thread_local int y = 0;
+        \\
+        \\void *verify(void *unused) {
+        \\  assert((unsigned long)(&y) % 64 == 0);
+        \\  return NULL;
+        \\}
+    );
+    dso.addArgs(&.{ "-fPIC", "-shared" });
+    const dso_out = dso.saveOutputAs("a.so");
+
+    const exe = cc(b, opts);
+    exe.addCSource(
+        \\#include <pthread.h>
+        \\#include <dlfcn.h>
+        \\#include <assert.h>
+        \\void *(*verify)(void *);
+        \\
+        \\int main() {
+        \\  void *handle = dlopen("a.so", RTLD_NOW);
+        \\  assert(handle);
+        \\  *(void**)(&verify) = dlsym(handle, "verify");
+        \\  assert(verify);
+        \\
+        \\  pthread_t thread;
+        \\
+        \\  verify(NULL);
+        \\
+        \\  pthread_create(&thread, NULL, verify, NULL);
+        \\  pthread_join(thread, NULL);
+        \\}
+    );
+    exe.addPrefixedDirectorySource("-Wl,-rpath,", dso_out.dir);
+    exe.addArgs(&.{ "-fPIC", "-ldl", "-lpthread" });
+
+    const run = exe.run();
     test_step.dependOn(run.step());
 
     return test_step;
