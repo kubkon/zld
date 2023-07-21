@@ -57,6 +57,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testTlsLargeStaticImage(b, opts));
         elf_step.dependOn(testTlsLd(b, opts));
         elf_step.dependOn(testTlsLdDso(b, opts));
+        elf_step.dependOn(testTlsLdNoPlt(b, opts));
         elf_step.dependOn(testTlsOffsetAlignment(b, opts));
         elf_step.dependOn(testTlsStatic(b, opts));
         elf_step.dependOn(testZNow(b, opts));
@@ -2452,6 +2453,53 @@ fn testTlsLdDso(b: *Build, opts: Options) *Step {
     const run = exe.run();
     run.expectStdOutEqual("1 1\n");
     test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+fn testTlsLdNoPlt(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-tls-ld-no-plt", "");
+
+    const a_o = cc(b, opts);
+    a_o.addCSource(
+        \\#include <stdio.h>
+        \\extern _Thread_local int foo;
+        \\static _Thread_local int bar;
+        \\int *get_foo_addr() { return &foo; }
+        \\int *get_bar_addr() { return &bar; }
+        \\int main() {
+        \\  bar = 5;
+        \\
+        \\  printf("%d %d %d %d\n", *get_foo_addr(), *get_bar_addr(), foo, bar);
+        \\  return 0;
+        \\}
+    );
+    a_o.addArgs(&.{ "-fPIC", "-ftls-model=local-dynamic", "-fno-plt", "-c" });
+
+    const b_o = cc(b, opts);
+    b_o.addCSource("_Thread_local int foo = 3;");
+    b_o.addArgs(&.{ "-fPIC", "-ftls-model=local-dynamic", "-fno-plt", "-c" });
+
+    {
+        const exe = cc(b, opts);
+        exe.addFileSource(a_o.out);
+        exe.addFileSource(b_o.out);
+
+        const run = exe.run();
+        run.expectStdOutEqual("3 5 3 5\n");
+        test_step.dependOn(run.step());
+    }
+
+    {
+        const exe = cc(b, opts);
+        exe.addFileSource(a_o.out);
+        exe.addFileSource(b_o.out);
+        exe.addArg("-Wl,-no-relax");
+
+        const run = exe.run();
+        run.expectStdOutEqual("3 5 3 5\n");
+        test_step.dependOn(run.step());
+    }
 
     return test_step;
 }

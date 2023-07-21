@@ -916,6 +916,20 @@ fn relaxTlsLdToLe(rels: []align(1) const elf.Elf64_Rela, value: i32, elf_file: *
             try writer.writeAll(&insts);
         },
 
+        elf.R_X86_64_GOTPCREL,
+        elf.R_X86_64_GOTPCRELX,
+        => {
+            var insts = [_]u8{
+                0x31, 0xc0, // xor %eax, %eax
+                0x64, 0x48, 0x8b, 0, // mov %fs:(%rax), %rax
+                0x48, 0x2d, 0, 0, 0, 0, // sub $tls_size, %rax
+                0x90, // nop
+            };
+            mem.writeIntLittle(i32, insts[8..][0..4], value);
+            try stream.seekBy(-3);
+            try writer.writeAll(&insts);
+        },
+
         else => elf_file.base.fatal("TODO rewrite {} when followed by {}", .{
             fmtRelocType(rels[0].r_type()),
             fmtRelocType(rels[1].r_type()),
