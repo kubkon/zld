@@ -49,6 +49,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testTlsDesc(b, opts));
         elf_step.dependOn(testTlsDescImport(b, opts));
         elf_step.dependOn(testTlsDescStatic(b, opts));
+        elf_step.dependOn(testTlsDfStaticTls(b, opts));
         elf_step.dependOn(testTlsDso(b, opts));
         elf_step.dependOn(testTlsGd(b, opts));
         elf_step.dependOn(testTlsIe(b, opts));
@@ -2036,6 +2037,42 @@ fn testTlsDescStatic(b: *Build, opts: Options) *Step {
         const run = exe.run();
         run.expectStdOutEqual(exp_stdout);
         test_step.dependOn(run.step());
+    }
+
+    return test_step;
+}
+
+fn testTlsDfStaticTls(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-tls-df-static-tls", "");
+
+    const obj = cc(b, opts);
+    obj.addCSource(
+        \\#include <stdio.h>
+        \\static _Thread_local int foo = 5;
+        \\int bar() { return foo; }
+    );
+    obj.addArgs(&.{ "-fPIC", "-c", "-ftls-model=initial-exec" });
+
+    {
+        const dso = cc(b, opts);
+        dso.addFileSource(obj.out);
+        dso.addArgs(&.{ "-shared", "-Wl,-relax" });
+
+        const check = dso.check();
+        check.checkInDynamicSection();
+        check.checkContains("STATIC_TLS");
+        test_step.dependOn(&check.step);
+    }
+
+    {
+        const dso = cc(b, opts);
+        dso.addFileSource(obj.out);
+        dso.addArgs(&.{ "-shared", "-Wl,-no-relax" });
+
+        const check = dso.check();
+        check.checkInDynamicSection();
+        check.checkContains("STATIC_TLS");
+        test_step.dependOn(&check.step);
     }
 
     return test_step;
