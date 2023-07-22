@@ -1132,24 +1132,26 @@ fn allocateSectionsInMemory(self: *Elf, base_offset: u64) !void {
 
 fn allocateSectionsInFile(self: *Elf, base_offset: u64) void {
     const page_size = self.options.page_size.?;
-    const shdrs = self.sections.slice().items(.shdr);
+    const shdrs = self.sections.slice().items(.shdr)[1..];
+
     var offset = base_offset;
-    var shndx: u32 = 1;
+    var i: usize = 0;
+    while (i < shdrs.len) {
+        const first = &shdrs[i];
+        defer if (!shdrIsAlloc(first) or shdrIsZerofill(first)) {
+            i += 1;
+        };
 
-    while (shndx < shdrs.len) {
-        const first = &shdrs[shndx];
-
+        // Non-alloc sections don't need congruency with their allocated virtual memory addresses
         if (!shdrIsAlloc(first)) {
             first.sh_offset = mem.alignForward(u64, offset, first.sh_addralign);
             offset = first.sh_offset + first.sh_size;
-            shndx += 1;
             continue;
         }
-        if (shdrIsZerofill(first)) {
-            shndx += 1;
-            continue;
-        }
+        // Skip any zerofill section
+        if (shdrIsZerofill(first)) continue;
 
+        // Set the offset to a value that is congruent with the section's allocated virtual memory address
         if (first.sh_addralign > page_size) {
             offset = mem.alignForward(u64, offset, first.sh_addralign);
         } else {
@@ -1158,26 +1160,23 @@ fn allocateSectionsInFile(self: *Elf, base_offset: u64) void {
         }
 
         while (true) {
-            const prev = &shdrs[shndx];
+            const prev = &shdrs[i];
             prev.sh_offset = offset + prev.sh_addr - first.sh_addr;
-            shndx += 1;
+            i += 1;
 
-            const next = &shdrs[shndx];
-            if (shndx >= shdrs.len or !shdrIsAlloc(next) or shdrIsZerofill(next)) break;
+            const next = &shdrs[i];
+            if (i >= shdrs.len or !shdrIsAlloc(next) or shdrIsZerofill(next)) break;
             if (next.sh_addr < first.sh_addr) break;
 
             const gap = next.sh_addr - prev.sh_addr - prev.sh_size;
             if (gap >= page_size) break;
         }
 
-        const prev = &shdrs[shndx - 1];
+        const prev = &shdrs[i - 1];
         offset = prev.sh_offset + prev.sh_size;
 
-        var next = &shdrs[shndx];
-        while (shndx < shdrs.len and shdrIsAlloc(next) and shdrIsZerofill(next)) {
-            shndx += 1;
-            next = &shdrs[shndx];
-        }
+        // Skip any zerofill section
+        while (i < shdrs.len and shdrIsAlloc(&shdrs[i]) and shdrIsZerofill(&shdrs[i])) : (i += 1) {}
     }
 }
 
