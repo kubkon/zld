@@ -1059,7 +1059,7 @@ pub inline fn shdrIsTls(shdr: *const elf.Elf64_Shdr) bool {
 }
 
 fn allocateSectionsInMemory(self: *Elf, base_offset: u64) !void {
-    const shdrs = self.sections.slice().items(.shdr);
+    const shdrs = self.sections.slice().items(.shdr)[1..];
 
     // We use this struct to track maximum alignment of all TLS sections.
     // According to https://github.com/rui314/mold/commit/bd46edf3f0fe9e1a787ea453c4657d535622e61f in mold,
@@ -1068,51 +1068,63 @@ fn allocateSectionsInMemory(self: *Elf, base_offset: u64) !void {
     // boundary may not get correctly loaded at an aligned address.
     const Align = struct {
         tls_start_align: u64 = 1,
-        first_tls_shndx: ?u16 = null,
+        first_tls_index: ?usize = null,
 
-        inline fn isFirstTlsShdr(this: @This(), shndx: u16) bool {
-            if (this.first_tls_shndx) |tshndx| return tshndx == shndx;
+        inline fn isFirstTlsShdr(this: @This(), other: usize) bool {
+            if (this.first_tls_index) |index| return index == other;
             return false;
         }
 
-        inline fn @"align"(this: @This(), shndx: u16, sh_addralign: u64, addr: u64) u64 {
-            const alignment = if (this.isFirstTlsShdr(shndx)) this.tls_start_align else sh_addralign;
+        inline fn @"align"(this: @This(), index: usize, sh_addralign: u64, addr: u64) u64 {
+            const alignment = if (this.isFirstTlsShdr(index)) this.tls_start_align else sh_addralign;
             return mem.alignForward(u64, addr, alignment);
         }
     };
 
     var alignment = Align{};
-    for (shdrs[1..], 1..) |*shdr, shndx| {
+    for (shdrs, 0..) |*shdr, i| {
         if (!shdrIsTls(shdr)) continue;
-        if (alignment.first_tls_shndx == null) alignment.first_tls_shndx = @as(u16, @intCast(shndx));
+        if (alignment.first_tls_index == null) alignment.first_tls_index = i;
         alignment.tls_start_align = @max(alignment.tls_start_align, shdr.sh_addralign);
     }
 
     var addr = self.options.image_base + base_offset;
-    var i: u32 = 1;
+    var i: usize = 0;
     while (i < shdrs.len) : (i += 1) {
         const shdr = &shdrs[i];
         if (!shdrIsAlloc(shdr)) continue;
-        if (i != 1) {
+        if (i > 0) {
             const prev_shdr = shdrs[i - 1];
             if (shdrToPhdrFlags(shdr.sh_flags) != shdrToPhdrFlags(prev_shdr.sh_flags)) {
-                // We need advance by page size
+                // We need to advance by page size
                 addr += self.options.page_size.?;
             }
         }
         if (shdrIsTbss(shdr)) {
+            // .tbss is a little special as it's used only by the loader meaning it doesn't
+            // need to be actually mmap'ed at runtime. We still need to correctly increment
+            // the addresses of every TLS zerofill section tho. Thus, we hack it so that
+            // we increment the start address like normal, however, after we are done,
+            // the next ALLOC section will get its start address allocated within the same
+            // range as the .tbss sections. We will get something like this:
+            //
+            // ...
+            // .tbss 0x10
+            // .tcommon 0x20
+            // .data 0x10
+            // ...
             var tbss_addr = addr;
-            while (true) {
+            while (i < shdrs.len and shdrIsTbss(&shdrs[i])) : (i += 1) {
                 const tbss_shdr = &shdrs[i];
-                tbss_addr = alignment.@"align"(@as(u16, @intCast(i)), shdr.sh_addralign, tbss_addr);
+                tbss_addr = alignment.@"align"(i, tbss_shdr.sh_addralign, tbss_addr);
                 tbss_shdr.sh_addr = tbss_addr;
                 tbss_addr += tbss_shdr.sh_size;
-                if (i + 1 >= shdrs.len or !shdrIsTbss(&shdrs[i + 1])) break;
-                i += 1;
             }
+            i -= 1;
+            continue;
         }
 
-        addr = alignment.@"align"(@as(u16, @intCast(i)), shdr.sh_addralign, addr);
+        addr = alignment.@"align"(i, shdr.sh_addralign, addr);
         shdr.sh_addr = addr;
         addr += shdr.sh_size;
     }
