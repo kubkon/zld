@@ -2692,7 +2692,9 @@ fn testTlsLdDso(b: *Build, opts: Options) *Step {
         \\extern int f0();
         \\extern int f1();
         \\int main() {
-        \\  printf("%d %d\n", f0(), f1());
+        \\  int x = f0();
+        \\  int y = f1();
+        \\  printf("%d %d\n", x, y);
         \\  return 0;
         \\}
     );
@@ -2700,7 +2702,7 @@ fn testTlsLdDso(b: *Build, opts: Options) *Step {
     exe.addPrefixedDirectorySource("-Wl,-rpath,", dso_out.dir);
 
     const run = exe.run();
-    run.expectStdOutEqual("1 1\n");
+    run.expectStdOutEqual("1 2\n");
     test_step.dependOn(run.step());
 
     return test_step;
