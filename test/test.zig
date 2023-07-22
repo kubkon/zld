@@ -1,9 +1,18 @@
 pub fn addTests(b: *Build, comp: *Compile, build_opts: struct {
+    system_compiler: ?SystemCompiler,
     has_static: bool,
     has_static_pie: bool,
 }) *Step {
     const test_step = b.step("test-system-tools", "Run all system tools tests");
     test_step.dependOn(&comp.step);
+
+    const system_compiler: SystemCompiler = build_opts.system_compiler orelse blk: {
+        if (builtin.target.isDarwin()) break :blk .clang;
+        break :blk switch (builtin.target.os.tag) {
+            .linux => .gcc,
+            else => .gcc,
+        };
+    };
 
     const zld = FileSourceWithDir.fromFileSource(b, comp.getOutputSource(), "ld");
     const sdk_path = if (builtin.target.isDarwin())
@@ -14,6 +23,7 @@ pub fn addTests(b: *Build, comp: *Compile, build_opts: struct {
     const opts: Options = .{
         .zld = zld,
         .sdk_path = sdk_path,
+        .system_compiler = system_compiler,
         .has_static = build_opts.has_static,
         .has_static_pie = build_opts.has_static_pie,
     };
@@ -24,8 +34,14 @@ pub fn addTests(b: *Build, comp: *Compile, build_opts: struct {
     return test_step;
 }
 
+pub const SystemCompiler = enum {
+    gcc,
+    clang,
+};
+
 pub const Options = struct {
     zld: FileSourceWithDir,
+    system_compiler: SystemCompiler,
     sdk_path: ?std.zig.system.darwin.DarwinSDK = null,
     has_static: bool = false,
     has_static_pie: bool = false,

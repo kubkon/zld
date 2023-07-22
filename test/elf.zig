@@ -1871,6 +1871,11 @@ fn testStrip(b: *Build, opts: Options) *Step {
 fn testTlsCommon(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-common", "");
 
+    if (opts.system_compiler != .gcc) {
+        skipTestStep(test_step);
+        return test_step;
+    }
+
     const a_o = cc(b, opts);
     a_o.addAsmSource(
         \\.globl foo
@@ -1907,6 +1912,11 @@ fn testTlsCommon(b: *Build, opts: Options) *Step {
 
 fn testTlsDesc(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-desc", "");
+
+    if (opts.system_compiler != .gcc) {
+        skipTestStep(test_step);
+        return test_step;
+    }
 
     const main_o = cc(b, opts);
     main_o.addCSource(
@@ -1999,6 +2009,11 @@ fn testTlsDesc(b: *Build, opts: Options) *Step {
 fn testTlsDescImport(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-desc-import", "");
 
+    if (opts.system_compiler != .gcc) {
+        skipTestStep(test_step);
+        return test_step;
+    }
+
     const dso = cc(b, opts);
     dso.addCSource(
         \\_Thread_local int foo = 5;
@@ -2031,7 +2046,7 @@ fn testTlsDescImport(b: *Build, opts: Options) *Step {
 fn testTlsDescStatic(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-desc-static", "");
 
-    if (!opts.has_static) {
+    if (opts.system_compiler != .gcc or !opts.has_static) {
         skipTestStep(test_step);
         return test_step;
     }
