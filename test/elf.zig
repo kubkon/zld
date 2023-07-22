@@ -2107,7 +2107,8 @@ fn testTlsDfStaticTls(b: *Build, opts: Options) *Step {
 
     const obj = cc(b, opts);
     obj.addCSource(
-        \\volatile static _Thread_local int foo = 5;
+        \\static _Thread_local int foo = 5;
+        \\void mutate() { ++foo; }
         \\int bar() { return foo; }
     );
     obj.addArgs(&.{ "-fPIC", "-c", "-ftls-model=initial-exec" });
