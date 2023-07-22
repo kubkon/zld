@@ -101,7 +101,7 @@ fn testAbsSymbols(b: *Build, opts: Options) *Step {
         \\  assert((size_t)info->si_addr == 0x800008);
         \\  exit(0);
         \\}
-        \\extern volatile int foo;
+        \\extern int foo;
         \\int main() {
         \\  struct sigaction act;
         \\  act.sa_flags = SA_SIGINFO | SA_RESETHAND;
@@ -1554,7 +1554,7 @@ fn testLargeBss(b: *Build, opts: Options) *Step {
 
     const exe = cc(b, opts);
     exe.addCSource(
-        \\volatile char arr[0x100000000];
+        \\char arr[0x100000000];
         \\int main() {
         \\  return arr[2000];
         \\}
@@ -2107,8 +2107,7 @@ fn testTlsDfStaticTls(b: *Build, opts: Options) *Step {
 
     const obj = cc(b, opts);
     obj.addCSource(
-        \\#include <stdio.h>
-        \\static _Thread_local int foo = 5;
+        \\volatile static _Thread_local int foo = 5;
         \\int bar() { return foo; }
     );
     obj.addArgs(&.{ "-fPIC", "-c", "-ftls-model=initial-exec" });
