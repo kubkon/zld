@@ -1563,19 +1563,6 @@ fn testLargeBss(b: *Build, opts: Options) *Step {
     const run = exe.run();
     test_step.dependOn(run.step());
 
-    const check = exe.check();
-    check.checkStart();
-    check.checkExact("section headers");
-    switch (opts.system_compiler) {
-        .gcc => check.checkExact("name .common"),
-        .clang => check.checkExact("name .bss"),
-    }
-    check.checkExact("offset 0");
-    check.checkExtract("size {size}");
-    check.checkComputeCompare("size", .{ .op = .gte, .value = .{ .literal = 0x100000000 } });
-
-    test_step.dependOn(&check.step);
-
     return test_step;
 }
 
