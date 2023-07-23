@@ -782,7 +782,18 @@ fn mergeSections(wasm: *Wasm) !void {
 
     log.debug("Merging sections", .{});
     for (wasm.resolved_symbols.keys()) |sym_with_loc| {
-        const file_index = sym_with_loc.file orelse continue; // synthetic symbols do not need to be merged
+        const file_index = sym_with_loc.file orelse {
+            // for synthetic symbols we have to update the index on the symbol
+            // to also include any imported functions or globals.
+            const symbol = &wasm.synthetic_symbols.values()[sym_with_loc.sym_index];
+            if (symbol.isUndefined()) continue;
+            switch (symbol.tag) {
+                .function => symbol.index += wasm.imports.functionCount(),
+                .global => symbol.index += wasm.imports.globalCount(),
+                else => {},
+            }
+            continue;
+        };
         const object = wasm.objects.items[file_index];
         const symbol: *Symbol = &object.symtable[sym_with_loc.sym_index];
         if (symbol.isUndefined() or (symbol.tag != .function and symbol.tag != .global and symbol.tag != .table)) {
@@ -926,9 +937,6 @@ fn setupStartSection(wasm: *Wasm) !void {
 }
 
 /// Creates symbols that are made by the linker, rather than the compiler/object file
-/// TODO: We should support re-merging synthetic symbols so we can create the corresponding
-/// symbol objects initially here and later update them. It makes them safer to use, for
-/// insignificant performance degredation.
 fn setupLinkerSymbols(wasm: *Wasm) !void {
     // stack pointer symbol
     {
@@ -1487,11 +1495,16 @@ fn setupMemory(wasm: *Wasm) !void {
         break :blk base;
     } else 0;
 
+    const sp_index = blk: {
+        const loc = wasm.findGlobalSymbol("__stack_pointer").?;
+        break :blk loc.getSymbol(wasm).index;
+    };
+
     if (place_stack_first) {
         memory_ptr = std.mem.alignForward(u64, memory_ptr, stack_alignment);
         memory_ptr += stack_size;
         // We always put the stack pointer global at index 0
-        wasm.globals.items.items[0].init.i32_const = @as(i32, @bitCast(@as(u32, @intCast(memory_ptr))));
+        wasm.globals.items.items[sp_index].init.i32_const = @as(i32, @bitCast(@as(u32, @intCast(memory_ptr))));
     }
 
     var offset: u32 = @as(u32, @intCast(memory_ptr));
@@ -1504,15 +1517,15 @@ fn setupMemory(wasm: *Wasm) !void {
         if (mem.eql(u8, entry.key_ptr.*, ".tdata")) {
             if (wasm.findGlobalSymbol("__tls_size")) |loc| {
                 const sym = loc.getSymbol(wasm);
-                wasm.globals.items.items[sym.index - wasm.imports.globalCount()].init.i32_const = @intCast(segment.size);
+                wasm.globals.items.items[sym.index].init.i32_const = @intCast(segment.size);
             }
             if (wasm.findGlobalSymbol("__tls_align")) |loc| {
                 const sym = loc.getSymbol(wasm);
-                wasm.globals.items.items[sym.index - wasm.imports.globalCount()].init.i32_const = @intCast(segment.alignment);
+                wasm.globals.items.items[sym.index].init.i32_const = @intCast(segment.alignment);
             }
             if (wasm.findGlobalSymbol("__tls_base")) |loc| {
                 const sym = loc.getSymbol(wasm);
-                wasm.globals.items.items[sym.index - wasm.imports.globalCount()].init.i32_const = @intCast(memory_ptr);
+                wasm.globals.items.items[sym.index].init.i32_const = @intCast(memory_ptr);
             }
         }
 
@@ -1533,7 +1546,7 @@ fn setupMemory(wasm: *Wasm) !void {
     if (!place_stack_first) {
         memory_ptr = std.mem.alignForward(u64, memory_ptr, stack_alignment);
         memory_ptr += stack_size;
-        wasm.globals.items.items[0].init.i32_const = @as(i32, @bitCast(@as(u32, @intCast(memory_ptr))));
+        wasm.globals.items.items[sp_index].init.i32_const = @as(i32, @bitCast(@as(u32, @intCast(memory_ptr))));
     }
 
     if (wasm.findGlobalSymbol("__heap_base")) |loc| {
