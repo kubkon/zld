@@ -1302,7 +1302,7 @@ fn testIfuncStatic(b: *Build, opts: Options) *Step {
 fn testIfuncStaticPie(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-ifunc-static-pie", "");
 
-    if (!opts.has_static_pie) {
+    if (!opts.has_static) {
         skipTestStep(test_step);
         return test_step;
     }

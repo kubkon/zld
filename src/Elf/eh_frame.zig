@@ -17,8 +17,11 @@ pub const Fde = struct {
     }
 
     pub inline fn getAddress(fde: Fde, elf_file: *Elf) u64 {
-        const shdr = elf_file.sections.items(.shdr)[elf_file.eh_frame_sect_index.?];
-        return shdr.sh_addr + fde.out_offset;
+        const base: u64 = if (elf_file.eh_frame_sect_index) |shndx|
+            elf_file.sections.items(.shdr)[shndx].sh_addr
+        else
+            0;
+        return base + fde.out_offset;
     }
 
     pub fn getData(fde: Fde, elf_file: *Elf) []const u8 {
@@ -90,7 +93,7 @@ pub const Fde = struct {
         _ = options;
         const fde = ctx.fde;
         const elf_file = ctx.elf_file;
-        const base_addr = elf_file.sections.items(.shdr)[elf_file.eh_frame_sect_index.?].sh_addr;
+        const base_addr = fde.getAddress(elf_file);
         try writer.print("@{x} : size({x}) : cie({d}) : {s}", .{
             base_addr + fde.out_offset,
             fde.getSize(),
@@ -119,8 +122,11 @@ pub const Cie = struct {
     }
 
     pub inline fn getAddress(cie: Cie, elf_file: *Elf) u64 {
-        const shdr = elf_file.sections.items(.shdr)[elf_file.eh_frame_sect_index.?];
-        return shdr.sh_addr + cie.out_offset;
+        const base: u64 = if (elf_file.eh_frame_sect_index) |shndx|
+            elf_file.sections.items(.shdr)[shndx].sh_addr
+        else
+            0;
+        return base + cie.out_offset;
     }
 
     pub fn getData(cie: Cie, elf_file: *Elf) []const u8 {
@@ -192,7 +198,7 @@ pub const Cie = struct {
         _ = options;
         const cie = ctx.cie;
         const elf_file = ctx.elf_file;
-        const base_addr = elf_file.sections.items(.shdr)[elf_file.eh_frame_sect_index.?].sh_addr;
+        const base_addr = cie.getAddress(elf_file);
         try writer.print("@{x} : size({x})", .{
             base_addr + cie.out_offset,
             cie.getSize(),
