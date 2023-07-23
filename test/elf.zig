@@ -821,6 +821,7 @@ fn testExportDynamic(b: *Build, opts: Options) *Step {
     const check = exe.check();
     check.checkInDynamicSymtab();
     check.checkContains("bar");
+    check.checkInDynamicSymtab();
     check.checkContains("_start");
     test_step.dependOn(&check.step);
 
