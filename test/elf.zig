@@ -3132,6 +3132,13 @@ fn testZStackSize(b: *Build, opts: Options) *Step {
 fn testZText(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-z-text", "");
 
+    // Previously, following mold, this test tested text relocs present in a PIE executable.
+    // However, as we want to cover musl AND glibc, it is now modified to test presence of
+    // text relocs in a DSO which is then linked with an executable.
+    // According to Rich and this thread https://www.openwall.com/lists/musl/2020/09/25/4
+    // musl supports only a very limited number of text relocations and only in DSOs (and
+    // rightly so!).
+
     const a_o = cc(b, opts);
     a_o.addAsmSource(
         \\.globl fn1
@@ -3146,28 +3153,40 @@ fn testZText(b: *Build, opts: Options) *Step {
 
     const b_o = cc(b, opts);
     b_o.addCSource(
-        \\#include <stdio.h>
         \\int fn1();
         \\int fn2() {
         \\  return 3;
         \\}
         \\void *ptr = fn2;
-        \\int main() {
-        \\  printf("%d\n", fn1());
+        \\int fnn() {
+        \\  return fn1();
         \\}
     );
     b_o.addArgs(&.{ "-fPIC", "-c" });
 
+    const dso = cc(b, opts);
+    dso.addFileSource(a_o.out);
+    dso.addFileSource(b_o.out);
+    dso.addArg("-shared");
+    const dso_out = dso.saveOutputAs("a.so");
+
     const exe = cc(b, opts);
-    exe.addFileSource(a_o.out);
-    exe.addFileSource(b_o.out);
-    exe.addArg("-pie");
+    exe.addCSource(
+        \\#include <stdio.h>
+        \\int fnn();
+        \\int main() {
+        \\  printf("%d\n", fnn());
+        \\}
+    );
+    exe.addFileSource(dso_out.file);
+    exe.addPrefixedDirectorySource("-Wl,-rpath,", dso_out.dir);
 
     const run = exe.run();
     run.expectStdOutEqual("3\n");
     test_step.dependOn(run.step());
 
-    const check = exe.check();
+    // Check for DT_TEXTREL in a DSO
+    const check = dso.check();
     check.checkInDynamicSection();
     // check.checkExact("TEXTREL 0"); // TODO fix in CheckObject parser
     check.checkExact("FLAGS TEXTREL");
