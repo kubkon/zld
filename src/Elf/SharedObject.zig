@@ -172,7 +172,11 @@ pub fn markLive(self: *SharedObject, elf_file: *Elf) void {
 
         const global = elf_file.getSymbol(index);
         const file = global.getFile(elf_file) orelse continue;
-        if (!file.isAlive()) {
+        const should_drop = switch (file) {
+            .shared => |sh| !sh.needed and sym.st_bind() == elf.STB_WEAK,
+            else => false,
+        };
+        if (!should_drop and !file.isAlive()) {
             file.setAlive();
             file.markLive(elf_file);
         }

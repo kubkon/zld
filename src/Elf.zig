@@ -414,7 +414,7 @@ fn sortInitFini(self: *Elf) !void {
     const gpa = self.base.allocator;
 
     const Entry = struct {
-        priority: u16,
+        priority: i32,
         atom_index: Atom.Index,
 
         pub fn lessThan(ctx: void, lhs: @This(), rhs: @This()) bool {
@@ -423,32 +423,54 @@ fn sortInitFini(self: *Elf) !void {
         }
     };
 
-    for (self.sections.items(.shdr), 0..) |shdr, shndx| switch (shdr.sh_type) {
-        elf.SHT_INIT_ARRAY, elf.SHT_FINI_ARRAY, elf.SHT_PREINIT_ARRAY => {
-            const atoms = &self.sections.items(.atoms)[shndx];
-            if (atoms.items.len == 0) continue;
+    for (self.sections.items(.shdr), 0..) |*shdr, shndx| {
+        if (!shdrIsAlloc(shdr)) continue;
 
-            var entries = std.ArrayList(Entry).init(gpa);
-            try entries.ensureTotalCapacityPrecise(atoms.items.len);
-            defer entries.deinit();
+        var is_init_fini = false;
+        var is_ctor_dtor = false;
+        switch (shdr.sh_type) {
+            elf.SHT_PREINIT_ARRAY,
+            elf.SHT_INIT_ARRAY,
+            elf.SHT_FINI_ARRAY,
+            => is_init_fini = true,
+            else => {
+                const name = self.shstrtab.getAssumeExists(shdr.sh_name);
+                is_ctor_dtor = mem.indexOf(u8, name, ".ctors") != null or mem.indexOf(u8, name, ".dtors") != null;
+            },
+        }
 
-            for (atoms.items) |atom_index| {
-                const atom = self.getAtom(atom_index).?;
+        if (!is_init_fini and !is_ctor_dtor) continue;
+
+        const atoms = &self.sections.items(.atoms)[shndx];
+
+        var entries = std.ArrayList(Entry).init(gpa);
+        try entries.ensureTotalCapacityPrecise(atoms.items.len);
+        defer entries.deinit();
+
+        for (atoms.items) |atom_index| {
+            const atom = self.getAtom(atom_index).?;
+            const file = atom.getObject(self);
+            const priority = blk: {
+                if (is_ctor_dtor) {
+                    if (mem.indexOf(u8, file.path, "crtbegin") != null) break :blk std.math.minInt(i32);
+                    if (mem.indexOf(u8, file.path, "crtend") != null) break :blk std.math.maxInt(i32);
+                }
+                const default: i32 = if (is_ctor_dtor) -1 else std.math.maxInt(i32);
                 const name = atom.getName(self);
                 var it = mem.splitBackwards(u8, name, ".");
-                const priority = std.fmt.parseUnsigned(u16, it.first(), 10) catch std.math.maxInt(u16);
-                entries.appendAssumeCapacity(.{ .priority = priority, .atom_index = atom_index });
-            }
+                const priority = std.fmt.parseUnsigned(u16, it.first(), 10) catch default;
+                break :blk priority;
+            };
+            entries.appendAssumeCapacity(.{ .priority = priority, .atom_index = atom_index });
+        }
 
-            mem.sort(Entry, entries.items, {}, Entry.lessThan);
+        mem.sort(Entry, entries.items, {}, Entry.lessThan);
 
-            atoms.clearRetainingCapacity();
-            for (entries.items) |entry| {
-                atoms.appendAssumeCapacity(entry.atom_index);
-            }
-        },
-        else => {},
-    };
+        atoms.clearRetainingCapacity();
+        for (entries.items) |entry| {
+            atoms.appendAssumeCapacity(entry.atom_index);
+        }
+    }
 }
 
 fn initSections(self: *Elf) !void {
@@ -498,7 +520,7 @@ fn initSections(self: *Elf) !void {
     }
 
     const needs_rela_dyn = blk: {
-        if (self.got.needs_rela or self.copy_rel.symbols.items.len > 0) break :blk true;
+        if (self.got.needs_rela or self.got.emit_tlsld or self.copy_rel.symbols.items.len > 0) break :blk true;
         for (self.objects.items) |index| {
             if (self.getFile(index).?.object.num_dynrelocs > 0) break :blk true;
         }
@@ -1950,7 +1972,6 @@ fn scanRelocs(self: *Elf) !void {
         if (symbol.flags.got) {
             log.debug("'{s}' needs GOT", .{symbol.getName(self)});
             try self.got.addGotSymbol(index, self);
-            if (symbol.flags.import or symbol.isIFunc(self)) self.got.needs_rela = true;
         }
         if (symbol.flags.plt) {
             if (symbol.flags.is_canonical) {

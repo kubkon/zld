@@ -71,6 +71,7 @@ pub fn build(b: *std.Build.Builder) void {
 
     const system_compiler = b.option(tests.SystemCompiler, "system-compiler", "System compiler we are utilizing for tests: gcc, clang");
     const has_static = b.option(bool, "has-static", "Whether the system compiler supports '-static' flag") orelse false;
+    const is_musl = b.option(bool, "musl", "Whether the tests are linked against musl libc") orelse false;
 
     const unit_tests = b.addTest(.{
         .root_source_file = .{ .path = "src/Zld.zig" },
@@ -90,6 +91,7 @@ pub fn build(b: *std.Build.Builder) void {
     test_step.dependOn(tests.addTests(b, exe, .{
         .system_compiler = system_compiler,
         .has_static = has_static,
+        .is_musl = is_musl,
     }));
 }
 

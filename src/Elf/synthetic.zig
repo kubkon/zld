@@ -627,6 +627,8 @@ pub const GotSection = struct {
     pub fn addGotSymbol(got: *GotSection, sym_index: u32, elf_file: *Elf) !void {
         const index = got.next_index;
         const symbol = elf_file.getSymbol(sym_index);
+        if (symbol.flags.import or symbol.isIFunc(elf_file) or (elf_file.options.pic and !symbol.isAbs(elf_file)))
+            got.needs_rela = true;
         if (symbol.getExtra(elf_file)) |extra| {
             var new_extra = extra;
             new_extra.got = index;
@@ -639,6 +641,7 @@ pub const GotSection = struct {
     pub fn addTlsGdSymbol(got: *GotSection, sym_index: u32, elf_file: *Elf) !void {
         const index = got.next_index;
         const symbol = elf_file.getSymbol(sym_index);
+        if (symbol.flags.import or elf_file.options.output_mode == .lib) got.needs_rela = true;
         if (symbol.getExtra(elf_file)) |extra| {
             var new_extra = extra;
             new_extra.tlsgd = index;
@@ -651,6 +654,7 @@ pub const GotSection = struct {
     pub fn addGotTpSymbol(got: *GotSection, sym_index: u32, elf_file: *Elf) !void {
         const index = got.next_index;
         const symbol = elf_file.getSymbol(sym_index);
+        if (symbol.flags.import or elf_file.options.output_mode == .lib) got.needs_rela = true;
         if (symbol.getExtra(elf_file)) |extra| {
             var new_extra = extra;
             new_extra.gottp = index;
@@ -663,6 +667,7 @@ pub const GotSection = struct {
     pub fn addTlsDescSymbol(got: *GotSection, sym_index: u32, elf_file: *Elf) !void {
         const index = got.next_index;
         const symbol = elf_file.getSymbol(sym_index);
+        got.needs_rela = true;
         if (symbol.getExtra(elf_file)) |extra| {
             var new_extra = extra;
             new_extra.tlsdesc = index;
@@ -1248,3 +1253,4 @@ const mem = std.mem;
 const Allocator = mem.Allocator;
 const Elf = @import("../Elf.zig");
 const SharedObject = @import("SharedObject.zig");
+const Symbol = @import("Symbol.zig");

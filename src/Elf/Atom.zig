@@ -305,7 +305,7 @@ fn scanReloc(self: Atom, symbol: *Symbol, rel: elf.Elf64_Rela, action: RelocActi
 
         .dyn_copyrel => {
             if (is_writeable or elf_file.options.z_nocopyreloc) {
-                self.checkTextReloc(symbol, elf_file);
+                self.textReloc(symbol, elf_file);
                 object.num_dynrelocs += 1;
             } else {
                 symbol.flags.copy_rel = true;
@@ -331,7 +331,7 @@ fn scanReloc(self: Atom, symbol: *Symbol, rel: elf.Elf64_Rela, action: RelocActi
         },
 
         .dynrel, .baserel, .ifunc => {
-            self.checkTextReloc(symbol, elf_file);
+            self.textReloc(symbol, elf_file);
             object.num_dynrelocs += 1;
 
             if (action == .ifunc) elf_file.num_ifunc_dynrelocs += 1;
@@ -339,7 +339,7 @@ fn scanReloc(self: Atom, symbol: *Symbol, rel: elf.Elf64_Rela, action: RelocActi
     }
 }
 
-inline fn checkTextReloc(self: Atom, symbol: *const Symbol, elf_file: *Elf) void {
+inline fn textReloc(self: Atom, symbol: *const Symbol, elf_file: *Elf) void {
     const is_writeable = self.getInputShdr(elf_file).sh_flags & elf.SHF_WRITE != 0;
     if (!is_writeable) {
         if (elf_file.options.z_text) {

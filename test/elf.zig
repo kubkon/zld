@@ -11,7 +11,6 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testCopyrel(b, opts));
         elf_step.dependOn(testCopyrelAlias(b, opts));
         elf_step.dependOn(testCopyrelAlignment(b, opts));
-        elf_step.dependOn(testDsoIfunc(b, opts));
         elf_step.dependOn(testDsoPlt(b, opts));
         elf_step.dependOn(testDsoUndef(b, opts));
         elf_step.dependOn(testEmptyObject(b, opts));
@@ -27,6 +26,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testHiddenWeakUndef(b, opts));
         elf_step.dependOn(testIfuncAlias(b, opts));
         elf_step.dependOn(testIfuncDlopen(b, opts));
+        elf_step.dependOn(testIfuncDso(b, opts));
         elf_step.dependOn(testIfuncDynamic(b, opts));
         elf_step.dependOn(testIfuncExport(b, opts));
         elf_step.dependOn(testIfuncFuncPtr(b, opts));
@@ -111,7 +111,7 @@ fn testAbsSymbols(b: *Build, opts: Options) *Step {
         \\  foo = 5;
         \\}
     );
-    exe.addArg("-fno-PIC");
+    exe.addArgs(&.{ "-fno-PIC", "-no-pie" });
     exe.addFileSource(obj_out.file);
 
     const run = exe.run();
@@ -551,43 +551,6 @@ fn testCopyrelAlignment(b: *Build, opts: Options) *Step {
         check.checkExact("addralign 100");
         test_step.dependOn(&check.step);
     }
-
-    return test_step;
-}
-
-fn testDsoIfunc(b: *Build, opts: Options) *Step {
-    const test_step = b.step("test-elf-dso-ifunc", "");
-
-    const dso = cc(b, opts);
-    dso.addArgs(&.{ "-fPIC", "-shared" });
-    dso.addCSource(
-        \\#include<stdio.h>
-        \\__attribute__((ifunc("resolve_foobar")))
-        \\void foobar(void);
-        \\static void real_foobar(void) {
-        \\  printf("Hello world\n");
-        \\}
-        \\typedef void Func();
-        \\static Func *resolve_foobar(void) {
-        \\  return real_foobar;
-        \\}
-    );
-    const dso_out = dso.saveOutputAs("liba.so");
-
-    const exe = cc(b, opts);
-    exe.addCSource(
-        \\void foobar(void);
-        \\int main() {
-        \\  foobar();
-        \\}
-    );
-    exe.addArg("-la");
-    exe.addPrefixedDirectorySource("-L", dso_out.dir);
-    exe.addPrefixedDirectorySource("-Wl,-rpath,", dso_out.dir);
-
-    const run = exe.run();
-    run.expectStdOutEqual("Hello world\n");
-    test_step.dependOn(run.step());
 
     return test_step;
 }
@@ -1076,6 +1039,11 @@ fn testHiddenWeakUndef(b: *Build, opts: Options) *Step {
 fn testIfuncAlias(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-ifunc-alias", "");
 
+    if (opts.is_musl) {
+        skipTestStep(test_step);
+        return test_step;
+    }
+
     const exe = cc(b, opts);
     exe.addCSource(
         \\#include <assert.h>
@@ -1097,6 +1065,11 @@ fn testIfuncAlias(b: *Build, opts: Options) *Step {
 
 fn testIfuncDlopen(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-ifunc-dlopen", "");
+
+    if (opts.is_musl) {
+        skipTestStep(test_step);
+        return test_step;
+    }
 
     const dso = cc(b, opts);
     dso.addCSource(
@@ -1138,8 +1111,55 @@ fn testIfuncDlopen(b: *Build, opts: Options) *Step {
     return test_step;
 }
 
+fn testIfuncDso(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-ifunc-dso", "");
+
+    if (opts.is_musl) {
+        skipTestStep(test_step);
+        return test_step;
+    }
+
+    const dso = cc(b, opts);
+    dso.addArgs(&.{ "-fPIC", "-shared" });
+    dso.addCSource(
+        \\#include<stdio.h>
+        \\__attribute__((ifunc("resolve_foobar")))
+        \\void foobar(void);
+        \\static void real_foobar(void) {
+        \\  printf("Hello world\n");
+        \\}
+        \\typedef void Func();
+        \\static Func *resolve_foobar(void) {
+        \\  return real_foobar;
+        \\}
+    );
+    const dso_out = dso.saveOutputAs("liba.so");
+
+    const exe = cc(b, opts);
+    exe.addCSource(
+        \\void foobar(void);
+        \\int main() {
+        \\  foobar();
+        \\}
+    );
+    exe.addArg("-la");
+    exe.addPrefixedDirectorySource("-L", dso_out.dir);
+    exe.addPrefixedDirectorySource("-Wl,-rpath,", dso_out.dir);
+
+    const run = exe.run();
+    run.expectStdOutEqual("Hello world\n");
+    test_step.dependOn(run.step());
+
+    return test_step;
+}
+
 fn testIfuncDynamic(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-ifunc-dynamic", "");
+
+    if (opts.is_musl) {
+        skipTestStep(test_step);
+        return test_step;
+    }
 
     const main_c =
         \\#include <stdio.h>
@@ -1182,6 +1202,11 @@ fn testIfuncDynamic(b: *Build, opts: Options) *Step {
 fn testIfuncExport(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-ifunc-export", "");
 
+    if (opts.is_musl) {
+        skipTestStep(test_step);
+        return test_step;
+    }
+
     const dso = cc(b, opts);
     dso.addCSource(
         \\#include <stdio.h>
@@ -1207,6 +1232,11 @@ fn testIfuncExport(b: *Build, opts: Options) *Step {
 
 fn testIfuncFuncPtr(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-ifunc-func-ptr", "");
+
+    if (opts.is_musl) {
+        skipTestStep(test_step);
+        return test_step;
+    }
 
     const exe = cc(b, opts);
     exe.addCSource(
@@ -1243,6 +1273,11 @@ fn testIfuncFuncPtr(b: *Build, opts: Options) *Step {
 fn testIfuncNoPlt(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-ifunc-noplt", "");
 
+    if (opts.is_musl) {
+        skipTestStep(test_step);
+        return test_step;
+    }
+
     const exe = cc(b, opts);
     exe.addCSource(
         \\#include <stdio.h>
@@ -1271,7 +1306,7 @@ fn testIfuncNoPlt(b: *Build, opts: Options) *Step {
 fn testIfuncStatic(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-ifunc-static", "");
 
-    if (!opts.has_static) {
+    if (opts.is_musl or !opts.has_static) {
         skipTestStep(test_step);
         return test_step;
     }
@@ -1303,7 +1338,7 @@ fn testIfuncStatic(b: *Build, opts: Options) *Step {
 fn testIfuncStaticPie(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-ifunc-static-pie", "");
 
-    if (!opts.has_static) {
+    if (opts.is_musl or !opts.has_static) {
         skipTestStep(test_step);
         return test_step;
     }
@@ -1404,7 +1439,7 @@ fn testInitArrayOrder(b: *Build, opts: Options) *Step {
     const c_o = cc(b, opts);
     c_o.addCSource(
         \\#include <stdio.h>
-        \\__attribute__((constructor)) void init1() { printf("3"); }
+        \\__attribute__((constructor(101))) void init1() { printf("3"); }
     );
     c_o.addArg("-c");
 
@@ -1439,7 +1474,7 @@ fn testInitArrayOrder(b: *Build, opts: Options) *Step {
     const h_o = cc(b, opts);
     h_o.addCSource(
         \\#include <stdio.h>
-        \\__attribute__((destructor)) void fini2() { printf("8"); }
+        \\__attribute__((destructor(101))) void fini2() { printf("8"); }
     );
     h_o.addArg("-c");
 
@@ -1455,7 +1490,7 @@ fn testInitArrayOrder(b: *Build, opts: Options) *Step {
     exe.addFileSource(h_o.out);
 
     const run = exe.run();
-    run.expectStdOutEqual("21348756");
+    run.expectStdOutEqual("32147568");
     test_step.dependOn(run.step());
 
     return test_step;
@@ -3097,6 +3132,13 @@ fn testZStackSize(b: *Build, opts: Options) *Step {
 fn testZText(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-z-text", "");
 
+    // Previously, following mold, this test tested text relocs present in a PIE executable.
+    // However, as we want to cover musl AND glibc, it is now modified to test presence of
+    // text relocs in a DSO which is then linked with an executable.
+    // According to Rich and this thread https://www.openwall.com/lists/musl/2020/09/25/4
+    // musl supports only a very limited number of text relocations and only in DSOs (and
+    // rightly so!).
+
     const a_o = cc(b, opts);
     a_o.addAsmSource(
         \\.globl fn1
@@ -3111,28 +3153,40 @@ fn testZText(b: *Build, opts: Options) *Step {
 
     const b_o = cc(b, opts);
     b_o.addCSource(
-        \\#include <stdio.h>
         \\int fn1();
         \\int fn2() {
         \\  return 3;
         \\}
         \\void *ptr = fn2;
-        \\int main() {
-        \\  printf("%d\n", fn1());
+        \\int fnn() {
+        \\  return fn1();
         \\}
     );
     b_o.addArgs(&.{ "-fPIC", "-c" });
 
+    const dso = cc(b, opts);
+    dso.addFileSource(a_o.out);
+    dso.addFileSource(b_o.out);
+    dso.addArg("-shared");
+    const dso_out = dso.saveOutputAs("a.so");
+
     const exe = cc(b, opts);
-    exe.addFileSource(a_o.out);
-    exe.addFileSource(b_o.out);
-    exe.addArg("-pie");
+    exe.addCSource(
+        \\#include <stdio.h>
+        \\int fnn();
+        \\int main() {
+        \\  printf("%d\n", fnn());
+        \\}
+    );
+    exe.addFileSource(dso_out.file);
+    exe.addPrefixedDirectorySource("-Wl,-rpath,", dso_out.dir);
 
     const run = exe.run();
     run.expectStdOutEqual("3\n");
     test_step.dependOn(run.step());
 
-    const check = exe.check();
+    // Check for DT_TEXTREL in a DSO
+    const check = dso.check();
     check.checkInDynamicSection();
     // check.checkExact("TEXTREL 0"); // TODO fix in CheckObject parser
     check.checkExact("FLAGS TEXTREL");
