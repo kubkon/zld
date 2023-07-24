@@ -1439,7 +1439,7 @@ fn testInitArrayOrder(b: *Build, opts: Options) *Step {
     const c_o = cc(b, opts);
     c_o.addCSource(
         \\#include <stdio.h>
-        \\__attribute__((constructor)) void init1() { printf("3"); }
+        \\__attribute__((constructor(101))) void init1() { printf("3"); }
     );
     c_o.addArg("-c");
 
@@ -1474,7 +1474,7 @@ fn testInitArrayOrder(b: *Build, opts: Options) *Step {
     const h_o = cc(b, opts);
     h_o.addCSource(
         \\#include <stdio.h>
-        \\__attribute__((destructor)) void fini2() { printf("8"); }
+        \\__attribute__((destructor(101))) void fini2() { printf("8"); }
     );
     h_o.addArg("-c");
 
@@ -1490,7 +1490,7 @@ fn testInitArrayOrder(b: *Build, opts: Options) *Step {
     exe.addFileSource(h_o.out);
 
     const run = exe.run();
-    run.expectStdOutEqual("21348756");
+    run.expectStdOutEqual("32147568");
     test_step.dependOn(run.step());
 
     return test_step;
