@@ -520,7 +520,7 @@ fn initSections(self: *Elf) !void {
     }
 
     const needs_rela_dyn = blk: {
-        if (self.got.needs_rela or self.copy_rel.symbols.items.len > 0) break :blk true;
+        if (self.got.needs_rela or self.got.emit_tlsld or self.copy_rel.symbols.items.len > 0) break :blk true;
         for (self.objects.items) |index| {
             if (self.getFile(index).?.object.num_dynrelocs > 0) break :blk true;
         }
@@ -1972,7 +1972,6 @@ fn scanRelocs(self: *Elf) !void {
         if (symbol.flags.got) {
             log.debug("'{s}' needs GOT", .{symbol.getName(self)});
             try self.got.addGotSymbol(index, self);
-            if (symbol.flags.import or symbol.isIFunc(self)) self.got.needs_rela = true;
         }
         if (symbol.flags.plt) {
             if (symbol.flags.is_canonical) {
