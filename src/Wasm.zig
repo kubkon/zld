@@ -19,6 +19,7 @@ const assert = std.debug.assert;
 const mem = std.mem;
 
 const log = std.log.scoped(.wasm);
+const gc_loc = std.log.scoped(.@"wasm-garbage-man");
 
 base: Zld,
 /// Configuration of the linker provided by the user
@@ -925,6 +926,10 @@ fn setupExports(wasm: *Wasm) !void {
             name, name, symbol.index,
         });
         try wasm.exports.append(wasm.base.allocator, exported);
+
+        // Mark the symbol and any references it contains to other symbols as 'alive',
+        // so any other symbol left unmarked can be set outside in the trash.
+        wasm.mark(sym_loc);
     }
     log.debug("Completed building exports. Total count: ({d})", .{wasm.exports.count()});
 }
@@ -1977,4 +1982,26 @@ pub fn getULEB128Size(uint_value: anytype) u32 {
         value >>= 7;
     }
     return size;
+}
+
+/// Marks a symbol as 'alive' recursively so itself and any references it contains to
+/// other symbols will not be set outside in the trash.
+fn mark(wasm: *Wasm, loc: SymbolWithLoc) void {
+    const symbol = loc.getSymbol(wasm);
+    if (symbol.isAlive()) {
+        // Symbol is already marked alive, including its references.
+        // This means we can skip it so we don't end up marking the same symbols
+        // multiple times.
+        return;
+    }
+    symbol.mark();
+    gc_loc.debug("Marked symbol '{s}' => ({})", .{ loc.getName(wasm), symbol });
+
+    if (wasm.symbol_atom.get(loc)) |atom| {
+        const relocations: []const types.Relocation = atom.relocs.items;
+        for (relocations) |reloc| {
+            const target_loc: SymbolWithLoc = .{ .sym_index = reloc.index, .file = loc.file };
+            wasm.mark(target_loc);
+        }
+    }
 }

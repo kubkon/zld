@@ -8,8 +8,8 @@ const Symbol = @This();
 const std = @import("std");
 const types = @import("types.zig");
 
-/// Bitfield containings flags for a symbol
-/// Can contain any of the flags defined in `Flag`
+/// Bitfield containings flags for a symbol.
+/// Can contain any of the flags defined in `Flag`.
 flags: u32,
 /// Symbol name, when the symbol is undefined the name will be taken from the import.
 /// Note: This is an index into the string table.
@@ -73,7 +73,20 @@ pub const Flag = enum(u32) {
     WASM_SYM_NO_STRIP = 0x80,
     /// Indicates a symbol is TLS
     WASM_SYM_TLS = 0x100,
+
+    /// Zld specific flag. Uses the most significant bit of the flag to annotate whether a symbol is
+    /// alive or not. Dead symbols are allowed to be garbage collected.
+    alive = 0x80000000,
 };
+
+/// Marks a symbol as 'alive', ensuring the garbage collector will not collect the trash.
+pub fn mark(symbol: *Symbol) void {
+    symbol.flags |= @intFromEnum(Flag.alive);
+}
+
+pub fn isAlive(symbol: Symbol) bool {
+    return symbol.flags & @intFromEnum(Flag.alive) != 0;
+}
 
 /// Verifies if the given symbol should be imported from the
 /// host environment or not
