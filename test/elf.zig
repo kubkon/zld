@@ -111,7 +111,7 @@ fn testAbsSymbols(b: *Build, opts: Options) *Step {
         \\  foo = 5;
         \\}
     );
-    exe.addArg("-fno-PIC");
+    exe.addArgs(&.{ "-fno-PIC", "-no-pie" });
     exe.addFileSource(obj_out.file);
 
     const run = exe.run();
