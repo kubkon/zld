@@ -1,6 +1,7 @@
 pub fn addTests(b: *Build, comp: *Compile, build_opts: struct {
     system_compiler: ?SystemCompiler,
     has_static: bool,
+    is_musl: bool,
 }) *Step {
     const test_step = b.step("test-system-tools", "Run all system tools tests");
     test_step.dependOn(&comp.step);
@@ -24,6 +25,7 @@ pub fn addTests(b: *Build, comp: *Compile, build_opts: struct {
         .sdk_path = sdk_path,
         .system_compiler = system_compiler,
         .has_static = build_opts.has_static,
+        .is_musl = build_opts.is_musl,
     };
 
     test_step.dependOn(macho.addMachOTests(b, opts));
@@ -42,6 +44,7 @@ pub const Options = struct {
     system_compiler: SystemCompiler,
     sdk_path: ?std.zig.system.darwin.DarwinSDK = null,
     has_static: bool = false,
+    is_musl: bool = false,
 };
 
 /// A system command that tracks the command itself via `cmd` Step.Run and output file

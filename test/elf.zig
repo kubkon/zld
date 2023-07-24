@@ -11,7 +11,6 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testCopyrel(b, opts));
         elf_step.dependOn(testCopyrelAlias(b, opts));
         elf_step.dependOn(testCopyrelAlignment(b, opts));
-        elf_step.dependOn(testDsoIfunc(b, opts));
         elf_step.dependOn(testDsoPlt(b, opts));
         elf_step.dependOn(testDsoUndef(b, opts));
         elf_step.dependOn(testEmptyObject(b, opts));
@@ -27,6 +26,7 @@ pub fn addElfTests(b: *Build, opts: Options) *Step {
         elf_step.dependOn(testHiddenWeakUndef(b, opts));
         elf_step.dependOn(testIfuncAlias(b, opts));
         elf_step.dependOn(testIfuncDlopen(b, opts));
+        elf_step.dependOn(testIfuncDso(b, opts));
         elf_step.dependOn(testIfuncDynamic(b, opts));
         elf_step.dependOn(testIfuncExport(b, opts));
         elf_step.dependOn(testIfuncFuncPtr(b, opts));
@@ -555,43 +555,6 @@ fn testCopyrelAlignment(b: *Build, opts: Options) *Step {
     return test_step;
 }
 
-fn testDsoIfunc(b: *Build, opts: Options) *Step {
-    const test_step = b.step("test-elf-dso-ifunc", "");
-
-    const dso = cc(b, opts);
-    dso.addArgs(&.{ "-fPIC", "-shared" });
-    dso.addCSource(
-        \\#include<stdio.h>
-        \\__attribute__((ifunc("resolve_foobar")))
-        \\void foobar(void);
-        \\static void real_foobar(void) {
-        \\  printf("Hello world\n");
-        \\}
-        \\typedef void Func();
-        \\static Func *resolve_foobar(void) {
-        \\  return real_foobar;
-        \\}
-    );
-    const dso_out = dso.saveOutputAs("liba.so");
-
-    const exe = cc(b, opts);
-    exe.addCSource(
-        \\void foobar(void);
-        \\int main() {
-        \\  foobar();
-        \\}
-    );
-    exe.addArg("-la");
-    exe.addPrefixedDirectorySource("-L", dso_out.dir);
-    exe.addPrefixedDirectorySource("-Wl,-rpath,", dso_out.dir);
-
-    const run = exe.run();
-    run.expectStdOutEqual("Hello world\n");
-    test_step.dependOn(run.step());
-
-    return test_step;
-}
-
 fn testDsoPlt(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-dso-plt", "");
 
@@ -1076,6 +1039,11 @@ fn testHiddenWeakUndef(b: *Build, opts: Options) *Step {
 fn testIfuncAlias(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-ifunc-alias", "");
 
+    if (opts.is_musl) {
+        skipTestStep(test_step);
+        return test_step;
+    }
+
     const exe = cc(b, opts);
     exe.addCSource(
         \\#include <assert.h>
@@ -1097,6 +1065,11 @@ fn testIfuncAlias(b: *Build, opts: Options) *Step {
 
 fn testIfuncDlopen(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-ifunc-dlopen", "");
+
+    if (opts.is_musl) {
+        skipTestStep(test_step);
+        return test_step;
+    }
 
     const dso = cc(b, opts);
     dso.addCSource(
@@ -1138,8 +1111,55 @@ fn testIfuncDlopen(b: *Build, opts: Options) *Step {
     return test_step;
 }
 
+fn testIfuncDso(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-ifunc-dso", "");
+
+    if (opts.is_musl) {
+        skipTestStep(test_step);
+        return test_step;
+    }
+
+    const dso = cc(b, opts);
+    dso.addArgs(&.{ "-fPIC", "-shared" });
+    dso.addCSource(
+        \\#include<stdio.h>
+        \\__attribute__((ifunc("resolve_foobar")))
+        \\void foobar(void);
+        \\static void real_foobar(void) {
+        \\  printf("Hello world\n");
+        \\}
+        \\typedef void Func();
+        \\static Func *resolve_foobar(void) {
+        \\  return real_foobar;
+        \\}
+    );
+    const dso_out = dso.saveOutputAs("liba.so");
+
+    const exe = cc(b, opts);
+    exe.addCSource(
+        \\void foobar(void);
+        \\int main() {
+        \\  foobar();
+        \\}
+    );
+    exe.addArg("-la");
+    exe.addPrefixedDirectorySource("-L", dso_out.dir);
+    exe.addPrefixedDirectorySource("-Wl,-rpath,", dso_out.dir);
+
+    const run = exe.run();
+    run.expectStdOutEqual("Hello world\n");
+    test_step.dependOn(run.step());
+
+    return test_step;
+}
+
 fn testIfuncDynamic(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-ifunc-dynamic", "");
+
+    if (opts.is_musl) {
+        skipTestStep(test_step);
+        return test_step;
+    }
 
     const main_c =
         \\#include <stdio.h>
@@ -1182,6 +1202,11 @@ fn testIfuncDynamic(b: *Build, opts: Options) *Step {
 fn testIfuncExport(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-ifunc-export", "");
 
+    if (opts.is_musl) {
+        skipTestStep(test_step);
+        return test_step;
+    }
+
     const dso = cc(b, opts);
     dso.addCSource(
         \\#include <stdio.h>
@@ -1207,6 +1232,11 @@ fn testIfuncExport(b: *Build, opts: Options) *Step {
 
 fn testIfuncFuncPtr(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-ifunc-func-ptr", "");
+
+    if (opts.is_musl) {
+        skipTestStep(test_step);
+        return test_step;
+    }
 
     const exe = cc(b, opts);
     exe.addCSource(
@@ -1243,6 +1273,11 @@ fn testIfuncFuncPtr(b: *Build, opts: Options) *Step {
 fn testIfuncNoPlt(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-ifunc-noplt", "");
 
+    if (opts.is_musl) {
+        skipTestStep(test_step);
+        return test_step;
+    }
+
     const exe = cc(b, opts);
     exe.addCSource(
         \\#include <stdio.h>
@@ -1271,7 +1306,7 @@ fn testIfuncNoPlt(b: *Build, opts: Options) *Step {
 fn testIfuncStatic(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-ifunc-static", "");
 
-    if (!opts.has_static) {
+    if (opts.is_musl or !opts.has_static) {
         skipTestStep(test_step);
         return test_step;
     }
@@ -1303,7 +1338,7 @@ fn testIfuncStatic(b: *Build, opts: Options) *Step {
 fn testIfuncStaticPie(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-ifunc-static-pie", "");
 
-    if (!opts.has_static) {
+    if (opts.is_musl or !opts.has_static) {
         skipTestStep(test_step);
         return test_step;
     }
