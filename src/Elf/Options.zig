@@ -272,6 +272,8 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             opts.apply_dynamic_relocs = true;
         } else if (p.flagAny("no-apply-dynamic-relocs")) {
             opts.apply_dynamic_relocs = false;
+        } else if (p.flagAny("nostdlib")) {
+            // ignore
         } else if (p.flag1("v")) {
             print_version = true;
         } else if (p.argAny("soname")) |value| {
