@@ -24,7 +24,7 @@ jobs:
     - run: zig fmt --check src 
     - run: zig build test -Dhas-static
 
-  musl_gcc:
+  gcc_musl:
     name: Test gcc with musl
     runs-on: ubuntu-latest
     steps:
@@ -36,3 +36,14 @@ jobs:
     - run: zig version
     - run: CC=musl-gcc zig build test -Dhas-static -Dmusl
 
+  clang_glibc:
+    name: Test clang with glibc
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - uses: goto-bus-stop/setup-zig@v2
+      with:
+        version: master
+    - run: sudo apt-get install -y clang
+    - run: zig version
+    - run: CC=clang zig build test -Dhas-static -Dsystem-compiler=clang
