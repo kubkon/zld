@@ -920,7 +920,7 @@ fn testWeakLibrary(b: *Build, opts: Options) *Step {
 
 fn cc(b: *Build, opts: Options) SysCmd {
     const cmd = Run.create(b, "cc");
-    cmd.addArgs(&.{ "cc", "-fno-lto" });
+    cmd.addArgs(&.{ opts.cc_override orelse "cc", "-fno-lto" });
     cmd.addArg("-o");
     const out = cmd.addOutputFileArg("a.out");
     cmd.addPrefixedDirectorySourceArg("-B", opts.zld.dir);

@@ -3,8 +3,8 @@ name: CI
 on: [push, pull_request]
 
 jobs:
-  build:
-    name: Build and test
+  default_tools:
+    name: Test default system tools
     runs-on: ${{ matrix.os }}-latest
     strategy:
       fail-fast: false
@@ -17,12 +17,21 @@ jobs:
     - if: matrix.os == 'windows'
       run: git config --global core.autocrlf false
     - uses: actions/checkout@v3
-      with:
-        submodules: true
     - uses: goto-bus-stop/setup-zig@v2
       with:
         version: master
     - run: zig version
     - run: zig fmt --check src 
     - run: zig build test -Dhas-static
+
+  musl_gcc:
+    name: Test gcc with musl
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - uses: goto-bus-stop/setup-zig@v2
+      with:
+        version: master
+    - run: zig version
+    - run: CC=musl-gcc zig build test -Dhas-static -Dmusl
 

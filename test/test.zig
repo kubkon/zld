@@ -13,6 +13,11 @@ pub fn addTests(b: *Build, comp: *Compile, build_opts: struct {
             else => .gcc,
         };
     };
+    const cc_override: ?[]const u8 = std.process.getEnvVarOwned(b.allocator, "CC") catch |e| switch (e) {
+        error.EnvironmentVariableNotFound => null,
+        error.InvalidUtf8 => @panic("InvalidUtf8"),
+        error.OutOfMemory => @panic("OOM"),
+    };
 
     const zld = FileSourceWithDir.fromFileSource(b, comp.getOutputSource(), "ld");
     const sdk_path = if (builtin.target.isDarwin())
@@ -26,6 +31,7 @@ pub fn addTests(b: *Build, comp: *Compile, build_opts: struct {
         .system_compiler = system_compiler,
         .has_static = build_opts.has_static,
         .is_musl = build_opts.is_musl,
+        .cc_override = cc_override,
     };
 
     test_step.dependOn(macho.addMachOTests(b, opts));
@@ -45,6 +51,7 @@ pub const Options = struct {
     sdk_path: ?std.zig.system.darwin.DarwinSDK = null,
     has_static: bool = false,
     is_musl: bool = false,
+    cc_override: ?[]const u8 = null,
 };
 
 /// A system command that tracks the command itself via `cmd` Step.Run and output file
