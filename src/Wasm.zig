@@ -419,6 +419,7 @@ pub fn flush(wasm: *Wasm) !void {
     try wasm.resolveSymbolsInArchives();
     try wasm.resolveLazySymbols();
     try wasm.checkUndefinedSymbols();
+    wasm.markReferences();
 
     try wasm.setupInitFunctions();
     try wasm.setupStart();
@@ -926,10 +927,6 @@ fn setupExports(wasm: *Wasm) !void {
             name, name, symbol.index,
         });
         try wasm.exports.append(wasm.base.allocator, exported);
-
-        // Mark the symbol and any references it contains to other symbols as 'alive',
-        // so any other symbol left unmarked can be set outside in the trash.
-        wasm.mark(sym_loc);
     }
     log.debug("Completed building exports. Total count: ({d})", .{wasm.exports.count()});
 }
@@ -1984,8 +1981,27 @@ pub fn getULEB128Size(uint_value: anytype) u32 {
     return size;
 }
 
+/// Verifies all resolved symbols and checks whether itself needs to be marked alive,
+/// as well as any of its references.
+fn markReferences(wasm: *Wasm) void {
+    if (wasm.options.entry_name) |entry_name| {
+        const sym_loc = wasm.findGlobalSymbol(entry_name) orelse {
+            log.err("Entry symbol '{s}' does not exist, use '--no-entry' to suppress", .{entry_name});
+            return;
+        };
+        wasm.mark(sym_loc);
+    }
+
+    for (wasm.resolved_symbols.keys()) |sym_loc| {
+        const sym = sym_loc.getSymbol(wasm);
+        if (sym.isExported(wasm.options.export_dynamic) or sym.isNoStrip()) {
+            wasm.mark(sym_loc);
+        }
+    }
+}
+
 /// Marks a symbol as 'alive' recursively so itself and any references it contains to
-/// other symbols will not be set outside in the trash.
+/// other symbols will not be omit from the binary.
 fn mark(wasm: *Wasm, loc: SymbolWithLoc) void {
     const symbol = loc.getSymbol(wasm);
     if (symbol.isAlive()) {
