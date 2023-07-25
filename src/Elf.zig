@@ -591,7 +591,16 @@ fn initSections(self: *Elf) !void {
         });
     }
 
-    if (self.options.dynamic_linker != null) {
+    const needs_interp = blk: {
+        // On Ubuntu with musl-gcc, we get a weird combo of options looking like this:
+        // -dynamic-linker=<path> -static
+        // In this case, if we do generate .interp section and segment, we will get
+        // a segfault in the dynamic linker trying to load a binary that is static
+        // and doesn't contain .dynamic section.
+        if (self.options.static and !self.options.pie) break :blk false;
+        break :blk self.options.dynamic_linker != null;
+    };
+    if (needs_interp) {
         self.interp_sect_index = try self.addSection(.{
             .name = ".interp",
             .type = elf.SHT_PROGBITS,
