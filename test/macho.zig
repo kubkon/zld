@@ -14,6 +14,7 @@ pub fn addMachOTests(b: *Build, opts: Options) *Step {
         macho_step.dependOn(testLayout(b, opts));
         macho_step.dependOn(testNeededFramework(b, opts));
         macho_step.dependOn(testNeededLibrary(b, opts));
+        macho_step.dependOn(testNoExportsDylib(b, opts));
         macho_step.dependOn(testPagezeroSize(b, opts));
         macho_step.dependOn(testSearchStrategy(b, opts));
         macho_step.dependOn(testStackSize(b, opts));
@@ -521,6 +522,23 @@ fn testNeededLibrary(b: *Build, opts: Options) *Step {
 
     const run = exe.run();
     test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+fn testNoExportsDylib(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-no-exports-dylib", "");
+
+    const dylib = cc(b, opts);
+    dylib.addCSource("static void abc() {}");
+    dylib.addArg("-shared");
+
+    const check = dylib.check();
+    check.checkStart();
+    check.checkExact("cmd SYMTAB");
+    check.checkExtract("nsyms {nsyms}");
+    check.checkComputeCompare("nsyms", .{ .op = .eq, .value = .{ .literal = 0 } });
+    test_step.dependOn(&check.step);
 
     return test_step;
 }
