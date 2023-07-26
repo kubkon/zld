@@ -924,7 +924,7 @@ pub fn parseIntoAtoms(object: *Object, object_index: u16, wasm_bin: *Wasm) !void
 
     for (object.symtable, 0..) |symbol, symbol_index| {
         switch (symbol.tag) {
-            .function, .data, .section => if (!symbol.isUndefined()) {
+            .function, .data, .section => if (symbol.isDefined()) {
                 const gop = try symbol_for_segment.getOrPut(.{ .kind = symbol.tag, .index = symbol.index });
                 const sym_idx = @as(u32, @intCast(symbol_index));
                 if (!gop.found_existing) {

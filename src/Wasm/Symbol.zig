@@ -84,8 +84,12 @@ pub fn mark(symbol: *Symbol) void {
     symbol.flags |= @intFromEnum(Flag.alive);
 }
 
-pub fn isAlive(symbol: Symbol) bool {
+pub inline fn isAlive(symbol: Symbol) bool {
     return symbol.flags & @intFromEnum(Flag.alive) != 0;
+}
+
+pub inline fn isDead(symbol: Symbol) bool {
+    return symbol.flags & @intFromEnum(Flag.alive) == 0;
 }
 
 /// Verifies if the given symbol should be imported from the

@@ -118,7 +118,8 @@ pub fn emit(wasm: *Wasm) !void {
         defer sorted_atoms.deinit();
 
         while (true) {
-            if (wasm.resolved_symbols.contains(atom.symbolLoc())) {
+            const loc = atom.symbolLoc();
+            if (loc.getSymbol(wasm).isAlive() and wasm.resolved_symbols.contains(loc)) {
                 atom.resolveRelocs(wasm);
                 sorted_atoms.appendAssumeCapacity(atom);
             }
@@ -138,6 +139,7 @@ pub fn emit(wasm: *Wasm) !void {
             try leb.writeULEB128(writer, sorted_atom.size);
             try writer.writeAll(sorted_atom.code.items);
         }
+        std.debug.assert(sorted_atoms.items.len == wasm.functions.count()); // must have equal amount of bodies as functions
         try emitSectionHeader(file, offset, .code, wasm.functions.count());
     }
 
@@ -213,6 +215,9 @@ pub fn emit(wasm: *Wasm) !void {
             const symbol = sym_with_loc.getSymbol(wasm);
             switch (symbol.tag) {
                 .function => {
+                    if (symbol.isDead()) {
+                        continue;
+                    }
                     const gop = try funcs.getOrPut(symbol.index);
                     if (!gop.found_existing) {
                         gop.value_ptr.* = sym_with_loc;

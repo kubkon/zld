@@ -419,7 +419,6 @@ pub fn flush(wasm: *Wasm) !void {
     try wasm.resolveSymbolsInArchives();
     try wasm.resolveLazySymbols();
     try wasm.checkUndefinedSymbols();
-    wasm.markReferences();
 
     try wasm.setupInitFunctions();
     try wasm.setupStart();
@@ -428,6 +427,8 @@ pub fn flush(wasm: *Wasm) !void {
     for (wasm.objects.items, 0..) |*object, obj_idx| {
         try object.parseIntoAtoms(@as(u16, @intCast(obj_idx)), wasm);
     }
+
+    wasm.markReferences();
 
     try wasm.allocateAtoms();
     try wasm.setupMemory();
@@ -808,6 +809,9 @@ fn mergeSections(wasm: *Wasm) !void {
         const index = symbol.index - offset;
         switch (symbol.tag) {
             .function => {
+                if (symbol.isDead()) {
+                    continue;
+                }
                 const original_func = object.functions[index];
                 symbol.index = try wasm.functions.append(
                     wasm.base.allocator,
@@ -857,11 +861,16 @@ fn mergeTypes(wasm: *Wasm) !void {
         const symbol: Symbol = object.symtable[sym_with_loc.sym_index];
         if (symbol.tag == .function) {
             if (symbol.isUndefined()) {
+                // if (symbol.isDead()) {
+                //     continue;
+                // }
                 log.debug("Adding type from extern function '{s}'", .{object.string_table.get(symbol.name)});
                 const value = &wasm.imports.imported_functions.values()[symbol.index];
                 value.type = try wasm.func_types.append(wasm.base.allocator, object.func_types[value.type]);
-                continue;
             } else if (!dirty.contains(symbol.index)) {
+                if (symbol.isDead()) {
+                    continue;
+                }
                 log.debug("Adding type from function '{s}'", .{object.string_table.get(symbol.name)});
                 const func = &wasm.functions.items.values()[symbol.index - wasm.imports.functionCount()];
                 func.type_index = try wasm.func_types.append(wasm.base.allocator, object.func_types[func.type_index]);
@@ -1984,14 +1993,6 @@ pub fn getULEB128Size(uint_value: anytype) u32 {
 /// Verifies all resolved symbols and checks whether itself needs to be marked alive,
 /// as well as any of its references.
 fn markReferences(wasm: *Wasm) void {
-    if (wasm.options.entry_name) |entry_name| {
-        const sym_loc = wasm.findGlobalSymbol(entry_name) orelse {
-            log.err("Entry symbol '{s}' does not exist, use '--no-entry' to suppress", .{entry_name});
-            return;
-        };
-        wasm.mark(sym_loc);
-    }
-
     for (wasm.resolved_symbols.keys()) |sym_loc| {
         const sym = sym_loc.getSymbol(wasm);
         if (sym.isExported(wasm.options.export_dynamic) or sym.isNoStrip()) {
