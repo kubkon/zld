@@ -17,6 +17,7 @@ pub fn addMachOTests(b: *Build, opts: Options) *Step {
         macho_step.dependOn(testPagezeroSize(b, opts));
         macho_step.dependOn(testSearchStrategy(b, opts));
         macho_step.dependOn(testStackSize(b, opts));
+        macho_step.dependOn(testTbdv3(b, opts));
         macho_step.dependOn(testTls(b, opts));
         macho_step.dependOn(testUnwindInfo(b, opts));
         macho_step.dependOn(testWeakFramework(b, opts));
@@ -653,6 +654,46 @@ fn testStackSize(b: *Build, opts: Options) *Step {
     return test_step;
 }
 
+fn testTbdv3(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-tbdv3", "");
+
+    const dylib = cc(b, opts);
+    dylib.addArg("-shared");
+    dylib.addCSource("int getFoo() { return 42; }");
+    const dylib_out = dylib.saveOutputAs("liba.dylib");
+
+    const tbd = scr: {
+        const wf = WriteFile.create(b);
+        break :scr wf.add("liba.tbd",
+            \\--- !tapi-tbd-v3
+            \\archs:           [ arm64, x86_64 ]
+            \\uuids:           [ 'arm64: DEADBEEF', 'x86_64: BEEFDEAD' ]
+            \\platform:        macos
+            \\install-name:    @rpath/liba.dylib
+            \\current-version: 0
+            \\exports:         
+            \\  - archs:           [ arm64, x86_64 ]
+            \\    symbols:         [ _getFoo ]
+        );
+    };
+
+    const exe = cc(b, opts);
+    exe.addCSource(
+        \\#include <stdio.h>
+        \\int getFoo();
+        \\int main() {
+        \\  return getFoo() - 42;
+        \\}
+    );
+    exe.addFileSource(tbd);
+    exe.addPrefixedDirectorySource("-Wl,-rpath,", dylib_out.dir);
+
+    const run = exe.run();
+    test_step.dependOn(run.step());
+
+    return test_step;
+}
+
 fn testTls(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-tls", "");
 
@@ -958,3 +999,4 @@ const Options = common.Options;
 const Run = Step.Run;
 const Step = Build.Step;
 const SysCmd = common.SysCmd;
+const WriteFile = Step.WriteFile;
