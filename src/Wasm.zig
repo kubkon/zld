@@ -1103,6 +1103,7 @@ fn setupInitFunctions(wasm: *Wasm) !void {
                 .file = @as(u16, @intCast(file_index)),
                 .priority = init_func.priority,
             });
+            wasm.mark(.{ .sym_index = init_func.symbol_index, .file = @intCast(file_index) });
         }
     }
 
@@ -1113,6 +1114,11 @@ fn setupInitFunctions(wasm: *Wasm) !void {
             return lhs.priority < rhs.priority;
         }
     }.lessThan);
+
+    if (wasm.init_funcs.items.len > 0) {
+        const loc = wasm.findGlobalSymbol("__wasm_call_ctors").?;
+        wasm.mark(loc);
+    }
 }
 
 /// Writes an unsigned 32-bit integer as a LEB128-encoded 'i32.const' value.
@@ -1369,6 +1375,10 @@ fn createSyntheticFunction(
 
     // Update the symbol
     const symbol = loc.getSymbol(wasm);
+    if (symbol.isDead()) {
+        // do not create functions for dead symbols
+        return;
+    }
     // create type (() -> nil)
     const ty_index = try wasm.func_types.append(wasm.base.allocator, func_ty);
     // create function with above type
@@ -2018,7 +2028,7 @@ fn mark(wasm: *Wasm, loc: SymbolWithLoc) void {
         const relocations: []const types.Relocation = atom.relocs.items;
         for (relocations) |reloc| {
             const target_loc: SymbolWithLoc = .{ .sym_index = reloc.index, .file = loc.file };
-            wasm.mark(target_loc);
+            wasm.mark(target_loc.finalLoc(wasm));
         }
     }
 }
