@@ -252,11 +252,11 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             try rpath_list.append(it.nextOrFatal(ctx));
         } else if (mem.eql(u8, arg, "-compatibility_version")) {
             const raw = it.nextOrFatal(ctx);
-            compatibility_version = parseVersion(raw) orelse
+            compatibility_version = parseSdkVersion(raw) orelse
                 ctx.fatal("Unable to parse version from '{s}'", .{raw});
         } else if (mem.eql(u8, arg, "-current_version")) {
             const raw = it.nextOrFatal(ctx);
-            current_version = parseVersion(raw) orelse
+            current_version = parseSdkVersion(raw) orelse
                 ctx.fatal("Unable to parse version from '{s}'", .{raw});
         } else if (mem.eql(u8, arg, "-install_name")) {
             install_name = it.nextOrFatal(ctx);
@@ -382,9 +382,9 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
                 tt.abi = tmp_target.abi;
             }
 
-            platform_version = parseVersion(min_v) orelse
+            platform_version = parseSdkVersion(min_v) orelse
                 ctx.fatal("Unable to parse version from '{s}'", .{min_v});
-            sdk_version = parseVersion(sdk_v) orelse
+            sdk_version = parseSdkVersion(sdk_v) orelse
                 ctx.fatal("Unable to parse version from '{s}'", .{sdk_v});
         } else if (mem.eql(u8, arg, "-undefined")) {
             const treatment = it.nextOrFatal(ctx);
@@ -473,14 +473,39 @@ fn eatIntPrefix(arg: []const u8, radix: u8) []const u8 {
     return arg;
 }
 
-fn parseVersion(raw: []const u8) ?std.SemanticVersion {
+// Versions reported by Apple aren't exactly semantically valid as they usually omit
+// the patch component. Hence, we do a simple check for the number of components and
+// add the missing patch value if needed.
+fn parseSdkVersion(raw: []const u8) ?std.SemanticVersion {
     var buffer: [128]u8 = undefined;
     if (raw.len > buffer.len) return null;
     @memcpy(buffer[0..raw.len], raw);
-    const len = if (mem.count(u8, raw, ".") < 2) blk: {
+    const dots_count = mem.count(u8, raw, ".");
+    if (dots_count < 1) return null;
+    const len = if (dots_count < 2) blk: {
         const patch_suffix = ".0";
         buffer[raw.len..][0..patch_suffix.len].* = patch_suffix.*;
         break :blk raw.len + patch_suffix.len;
     } else raw.len;
     return std.SemanticVersion.parse(buffer[0..len]) catch null;
+}
+
+const expect = std.testing.expect;
+const expectEqual = std.testing.expectEqual;
+
+fn testParseSdkVersionSuccess(exp: std.SemanticVersion, raw: []const u8) !void {
+    const maybe_ver = parseSdkVersion(raw);
+    try expect(maybe_ver != null);
+    const ver = maybe_ver.?;
+    try expectEqual(exp.major, ver.major);
+    try expectEqual(exp.minor, ver.minor);
+    try expectEqual(exp.patch, ver.patch);
+}
+
+test "parseSdkVersion" {
+    try testParseSdkVersionSuccess(.{ .major = 13, .minor = 4, .patch = 0 }, "13.4");
+    try testParseSdkVersionSuccess(.{ .major = 13, .minor = 4, .patch = 1 }, "13.4.1");
+    try testParseSdkVersionSuccess(.{ .major = 11, .minor = 15, .patch = 0 }, "11.15");
+
+    try expect(parseSdkVersion("11") == null);
 }
