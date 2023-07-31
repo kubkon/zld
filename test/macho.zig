@@ -21,6 +21,7 @@ pub fn addMachOTests(b: *Build, opts: Options) *Step {
         macho_step.dependOn(testTbdv3(b, opts));
         macho_step.dependOn(testTls(b, opts));
         macho_step.dependOn(testUnwindInfo(b, opts));
+        macho_step.dependOn(testUnwindInfoNoSubsectionsAarch64(b, opts));
         macho_step.dependOn(testWeakFramework(b, opts));
         macho_step.dependOn(testWeakLibrary(b, opts));
     }
@@ -911,6 +912,75 @@ fn testUnwindInfo(b: *Build, opts: Options) *Step {
     return test_step;
 }
 
+fn testUnwindInfoNoSubsectionsAarch64(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-unwind-info-no-subsections-aarch64", "");
+
+    if (builtin.target.cpu.arch != .aarch64) {
+        skipTestStep(test_step);
+        return test_step;
+    }
+
+    const a_o = cc(b, opts);
+    a_o.addAsmSource(
+        \\.globl _foo
+        \\.align 4
+        \\_foo: 
+        \\  .cfi_startproc
+        \\  stp     x29, x30, [sp, #-32]!
+        \\  .cfi_def_cfa_offset 32
+        \\  .cfi_offset w30, -24
+        \\  .cfi_offset w29, -32
+        \\  mov x29, sp
+        \\  .cfi_def_cfa w29, 32
+        \\  bl      _bar
+        \\  ldp     x29, x30, [sp], #32
+        \\  .cfi_restore w29
+        \\  .cfi_restore w30
+        \\  .cfi_def_cfa_offset 0
+        \\  ret
+        \\  .cfi_endproc
+        \\
+        \\.globl _bar
+        \\.align 4
+        \\_bar:
+        \\  .cfi_startproc
+        \\  sub     sp, sp, #32
+        \\  .cfi_def_cfa_offset -32
+        \\  stp     x29, x30, [sp, #16]
+        \\  .cfi_offset w30, -24
+        \\  .cfi_offset w29, -32
+        \\  mov x29, sp
+        \\  .cfi_def_cfa w29, 32
+        \\  mov     w0, #4
+        \\  ldp     x29, x30, [sp, #16]
+        \\  .cfi_restore w29
+        \\  .cfi_restore w30
+        \\  add     sp, sp, #32
+        \\  .cfi_def_cfa_offset 0
+        \\  ret
+        \\  .cfi_endproc
+    );
+    a_o.addArg("-c");
+    const a_o_out = a_o.saveOutputAs("a.o");
+
+    const exe = cc(b, opts);
+    exe.addCSource(
+        \\#include <stdio.h>
+        \\int foo();
+        \\int main() {
+        \\  printf("%d\n", foo());
+        \\  return 0;
+        \\}
+    );
+    exe.addFileSource(a_o_out.file);
+
+    const run = exe.run();
+    run.expectStdOutEqual("4\n");
+    test_step.dependOn(run.step());
+
+    return test_step;
+}
+
 fn testWeakFramework(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-weak-framework", "");
 
@@ -1009,6 +1079,7 @@ fn ld(b: *Build, opts: Options) SysCmd {
 const std = @import("std");
 const builtin = @import("builtin");
 const common = @import("test.zig");
+const skipTestStep = common.skipTestStep;
 
 const Build = std.Build;
 const Compile = Step.Compile;
