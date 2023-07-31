@@ -48,10 +48,10 @@ pub fn build(b: *std.Build.Builder) void {
         else
             &[_][]const u8{ "-DTRACY_ENABLE=1", "-fno-sanitize=undefined" };
 
-        exe.addIncludePath(tracy_path);
+        exe.addIncludePath(.{ .cwd_relative = tracy_path });
         // TODO: upstream bug
-        exe.addSystemIncludePath("/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include");
-        exe.addCSourceFile(client_cpp, tracy_c_flags);
+        exe.addSystemIncludePath(.{ .path = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include" });
+        exe.addCSourceFile(.{ .file = .{ .cwd_relative = client_cpp }, .flags = tracy_c_flags });
         exe.linkSystemLibraryName("c++");
         exe.strip = false;
 
@@ -60,7 +60,7 @@ pub fn build(b: *std.Build.Builder) void {
             exe.linkSystemLibrary("ws2_32");
         }
     }
-    const install = b.addInstallArtifact(exe);
+    const install = b.addInstallArtifact(exe, .{});
     const symlinks = addSymlinks(b, install, &[_][]const u8{
         "ld",
         "ld.zld",
