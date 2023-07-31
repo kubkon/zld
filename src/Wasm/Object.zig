@@ -936,6 +936,9 @@ pub fn parseIntoAtoms(object: *Object, object_index: u16, wasm_bin: *Wasm) !void
         }
     }
 
+    var synthetic_symbols = std.ArrayList(Symbol).init(wasm_bin.base.allocator);
+    defer synthetic_symbols.deinit();
+
     for (object.relocatable_data, 0..) |relocatable_data, index| {
         const final_index = (try wasm_bin.getMatchingSegment(wasm_bin.base.allocator, object_index, @as(u32, @intCast(index)))) orelse {
             continue; // found unknown section, so skip parsing into atom as we do not know how to handle it.
@@ -1004,8 +1007,28 @@ pub fn parseIntoAtoms(object: *Object, object_index: u16, wasm_bin: *Wasm) !void
                 }
             }
         } else {
-            // ensure we do not try to read the symbol index of an atom that's not represented by a symbol.
-            atom.sym_index = undefined;
+            // segment is not represented by a symbol, so instead we create one ourselves.
+            if (relocatable_data.type == .data) {
+                atom.sym_index = @intCast(object.symtable.len + synthetic_symbols.items.len);
+                var sym: Symbol = .{
+                    .tag = .data,
+                    .index = relocatable_data.index,
+                    .name = try object.string_table.put(wasm_bin.base.allocator, object.segment_info[relocatable_data.index].name),
+                    .flags = 0x2, // local
+                    .virtual_address = undefined,
+                };
+                try synthetic_symbols.append(sym);
+            } else if (relocatable_data.type == .debug) {
+                atom.sym_index = @intCast(object.symtable.len + synthetic_symbols.items.len);
+                var sym: Symbol = .{
+                    .tag = .data,
+                    .index = relocatable_data.section_index,
+                    .name = relocatable_data.index,
+                    .flags = 0x2, // local
+                    .virtual_address = undefined,
+                };
+                try synthetic_symbols.append(sym);
+            } else unreachable;
         }
 
         const segment: *Wasm.Segment = &wasm_bin.segments.items[final_index];
@@ -1015,6 +1038,12 @@ pub fn parseIntoAtoms(object: *Object, object_index: u16, wasm_bin: *Wasm) !void
 
         try wasm_bin.appendAtomAtIndex(wasm_bin.base.allocator, final_index, atom);
     }
+
+    const new_syms = try wasm_bin.base.allocator.alloc(Symbol, object.symtable.len + synthetic_symbols.items.len);
+    @memcpy(new_syms[0..object.symtable.len], object.symtable);
+    @memcpy(new_syms[object.symtable.len..], synthetic_symbols.items);
+    wasm_bin.base.allocator.free(object.symtable);
+    object.symtable = new_syms;
 }
 
 /// Verifies if a given value is in between a minimum -and maximum value.

@@ -132,6 +132,7 @@ pub fn resolveRelocs(atom: *Atom, wasm_bin: *const Wasm) void {
 fn relocationValue(atom: *Atom, relocation: types.Relocation, wasm_bin: *const Wasm) u64 {
     const target_loc = (Wasm.SymbolWithLoc{ .file = atom.file, .sym_index = relocation.index }).finalLoc(wasm_bin);
     const symbol = target_loc.getSymbol(wasm_bin);
+    std.debug.assert(symbol.isAlive());
     switch (relocation.relocation_type) {
         .R_WASM_FUNCTION_INDEX_LEB => return symbol.index,
         .R_WASM_TABLE_NUMBER_LEB => return symbol.index,

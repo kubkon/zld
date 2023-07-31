@@ -1814,19 +1814,17 @@ fn allocateAtoms(wasm: *Wasm) !void {
         var offset: u32 = 0;
         while (true) {
             const symbol_loc = atom.symbolLoc();
-            if (wasm.code_section_index) |index| {
-                if (entry.key_ptr.* == index) {
-                    const sym = symbol_loc.getSymbol(wasm);
-                    if (sym.isDead()) {
-                        var next = atom.next;
-                        var prev = atom.prev.?;
-                        prev.next = next;
-
-                        atom = next orelse break;
-                        atom.prev = prev;
-                        continue;
-                    }
+            const sym = symbol_loc.getSymbol(wasm);
+            if (sym.isDead()) {
+                var next = atom.next;
+                var prev = atom.prev;
+                if (prev) |has_prev| {
+                    has_prev.next = next;
                 }
+
+                atom = next orelse break;
+                atom.prev = prev;
+                continue;
             }
             offset = std.mem.alignForward(u32, offset, atom.alignment);
             atom.offset = offset;
