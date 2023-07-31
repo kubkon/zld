@@ -119,10 +119,9 @@ pub fn emit(wasm: *Wasm) !void {
 
         while (true) {
             const loc = atom.symbolLoc();
-            if (loc.getSymbol(wasm).isAlive() and wasm.resolved_symbols.contains(loc)) {
-                atom.resolveRelocs(wasm);
-                sorted_atoms.appendAssumeCapacity(atom);
-            }
+            std.debug.assert(loc.getSymbol(wasm).isAlive());
+            atom.resolveRelocs(wasm);
+            sorted_atoms.appendAssumeCapacity(atom);
             atom = atom.next orelse break;
         }
 

@@ -1816,8 +1816,14 @@ fn allocateAtoms(wasm: *Wasm) !void {
             const symbol_loc = atom.symbolLoc();
             if (wasm.code_section_index) |index| {
                 if (entry.key_ptr.* == index) {
-                    if (!wasm.resolved_symbols.contains(symbol_loc)) {
-                        atom = atom.next orelse break;
+                    const sym = symbol_loc.getSymbol(wasm);
+                    if (sym.isDead()) {
+                        var next = atom.next;
+                        var prev = atom.prev.?;
+                        prev.next = next;
+
+                        atom = next orelse break;
+                        atom.prev = prev;
                         continue;
                     }
                 }
