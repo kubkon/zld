@@ -272,11 +272,11 @@ const SymbolAtIndex = struct {
         const sym = self.getSymbol(ctx);
         if (!sym.ext()) {
             const sym_name = self.getSymbolName(ctx);
-            if (mem.startsWith(u8, sym_name, "l") or mem.startsWith(u8, sym_name, "L")) return 0;
-            return 1;
+            if (mem.startsWith(u8, sym_name, "l") or mem.startsWith(u8, sym_name, "L")) return 3;
+            return 2;
         }
-        if (sym.weakDef() or sym.pext()) return 2;
-        return 3;
+        if (sym.weakDef() or sym.pext()) return 1;
+        return 0;
     }
 
     /// Performs lexicographic-like check.
