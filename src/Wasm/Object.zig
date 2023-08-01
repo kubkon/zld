@@ -1021,7 +1021,7 @@ pub fn parseIntoAtoms(object: *Object, object_index: u16, wasm_bin: *Wasm) !void
             } else if (relocatable_data.type == .debug) {
                 atom.sym_index = @intCast(object.symtable.len + synthetic_symbols.items.len);
                 var sym: Symbol = .{
-                    .tag = .data,
+                    .tag = .section,
                     .index = relocatable_data.section_index,
                     .name = relocatable_data.index,
                     .flags = 0x2, // local

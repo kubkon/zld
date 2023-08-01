@@ -422,13 +422,13 @@ pub fn flush(wasm: *Wasm) !void {
 
     try wasm.setupInitFunctions();
     try wasm.setupStart();
-    try wasm.mergeImports();
 
     for (wasm.objects.items, 0..) |*object, obj_idx| {
         try object.parseIntoAtoms(@as(u16, @intCast(obj_idx)), wasm);
     }
 
     wasm.markReferences();
+    try wasm.mergeImports();
 
     try wasm.allocateAtoms();
     try wasm.setupMemory();
@@ -859,18 +859,15 @@ fn mergeTypes(wasm: *Wasm) !void {
     for (wasm.resolved_symbols.keys()) |sym_with_loc| {
         const object = wasm.objects.items[sym_with_loc.file orelse continue]; // synthetic symbols do not need to be merged
         const symbol: Symbol = object.symtable[sym_with_loc.sym_index];
+        if (symbol.isDead()) {
+            continue;
+        }
         if (symbol.tag == .function) {
             if (symbol.isUndefined()) {
-                // if (symbol.isDead()) {
-                //     continue;
-                // }
                 log.debug("Adding type from extern function '{s}'", .{object.string_table.get(symbol.name)});
                 const value = &wasm.imports.imported_functions.values()[symbol.index];
                 value.type = try wasm.func_types.append(wasm.base.allocator, object.func_types[value.type]);
             } else if (!dirty.contains(symbol.index)) {
-                if (symbol.isDead()) {
-                    continue;
-                }
                 log.debug("Adding type from function '{s}'", .{object.string_table.get(symbol.name)});
                 const func = &wasm.functions.items.values()[symbol.index - wasm.imports.functionCount()];
                 func.type_index = try wasm.func_types.append(wasm.base.allocator, object.func_types[func.type_index]);
@@ -1487,6 +1484,9 @@ fn mergeImports(wasm: *Wasm) !void {
 
     for (wasm.resolved_symbols.keys()) |sym_with_loc| {
         const symbol = sym_with_loc.getSymbol(wasm);
+        if (symbol.isDead()) {
+            continue;
+        }
         if (symbol.tag != .data) {
             if (!symbol.requiresImport()) {
                 continue;
