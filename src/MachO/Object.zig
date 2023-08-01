@@ -1009,13 +1009,9 @@ pub fn getSymbolByAddress(self: Object, addr: u64, sect_hint: ?u8) u32 {
             );
             if (target_sym_index > 0) {
                 var start = target_sym_index - 1;
-                while (start > 0) : (start -= 1) {
-                    const prev_addr = self.source_address_lookup[lookup.start..][start];
-                    if (prev_addr != addr) {
-                        start += 1;
-                        break;
-                    }
-                }
+                while (start > 0 and
+                    self.source_address_lookup[lookup.start..][start - 1] == addr) : (start -= 1)
+                {}
                 return @as(u32, @intCast(lookup.start + start));
             }
         }
