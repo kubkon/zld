@@ -344,7 +344,7 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
                     defer inner_syms_it.pos -= 1;
                     const curr_addr = object.getSourceSymbol(symbol.sym_index).?.n_value;
                     const next_addr = object.getSourceSymbol(next_sym.sym_index).?.n_value;
-                    if (curr_addr < next_addr) break :blk curr_addr - next_addr;
+                    if (next_addr > curr_addr) break :blk next_addr - curr_addr;
                     break :blk macho_file.getSymbol(atom.getSymbolWithLoc()).n_value + atom.size - sym.n_value;
                 } else macho_file.getSymbol(atom.getSymbolWithLoc()).n_value + atom.size - sym.n_value;
                 record.rangeStart = sym.n_value;

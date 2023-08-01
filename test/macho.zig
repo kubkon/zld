@@ -21,7 +21,8 @@ pub fn addMachOTests(b: *Build, opts: Options) *Step {
         macho_step.dependOn(testTbdv3(b, opts));
         macho_step.dependOn(testTls(b, opts));
         macho_step.dependOn(testUnwindInfo(b, opts));
-        macho_step.dependOn(testUnwindInfoNoSubsectionsAarch64(b, opts));
+        macho_step.dependOn(testUnwindInfoNoSubsectionsArm64(b, opts));
+        macho_step.dependOn(testUnwindInfoNoSubsectionsX64(b, opts));
         macho_step.dependOn(testWeakFramework(b, opts));
         macho_step.dependOn(testWeakLibrary(b, opts));
     }
@@ -912,8 +913,8 @@ fn testUnwindInfo(b: *Build, opts: Options) *Step {
     return test_step;
 }
 
-fn testUnwindInfoNoSubsectionsAarch64(b: *Build, opts: Options) *Step {
-    const test_step = b.step("test-macho-unwind-info-no-subsections-aarch64", "");
+fn testUnwindInfoNoSubsectionsArm64(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-unwind-info-no-subsections-arm64", "");
 
     if (builtin.target.cpu.arch != .aarch64) {
         skipTestStep(test_step);
@@ -956,6 +957,67 @@ fn testUnwindInfoNoSubsectionsAarch64(b: *Build, opts: Options) *Step {
         \\  .cfi_restore w29
         \\  .cfi_restore w30
         \\  add     sp, sp, #32
+        \\  .cfi_def_cfa_offset 0
+        \\  ret
+        \\  .cfi_endproc
+    );
+    a_o.addArg("-c");
+    const a_o_out = a_o.saveOutputAs("a.o");
+
+    const exe = cc(b, opts);
+    exe.addCSource(
+        \\#include <stdio.h>
+        \\int foo();
+        \\int main() {
+        \\  printf("%d\n", foo());
+        \\  return 0;
+        \\}
+    );
+    exe.addFileSource(a_o_out.file);
+
+    const run = exe.run();
+    run.expectStdOutEqual("4\n");
+    test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+fn testUnwindInfoNoSubsectionsX64(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-unwind-info-no-subsections-x64", "");
+
+    if (builtin.target.cpu.arch != .x86_64) {
+        skipTestStep(test_step);
+        return test_step;
+    }
+
+    const a_o = cc(b, opts);
+    a_o.addAsmSource(
+        \\.globl _foo
+        \\_foo: 
+        \\  .cfi_startproc
+        \\  push    %rbp
+        \\  .cfi_def_cfa_offset 8
+        \\  .cfi_offset %rbp, -8
+        \\  mov     %rsp, %rbp
+        \\  .cfi_def_cfa_register %rbp
+        \\  call    _bar
+        \\  pop     %rbp
+        \\  .cfi_restore %rbp
+        \\  .cfi_def_cfa_offset 0
+        \\  ret
+        \\  .cfi_endproc
+        \\
+        \\.globl _bar
+        \\_bar:
+        \\  .cfi_startproc
+        \\  push     %rbp
+        \\  .cfi_def_cfa_offset 8
+        \\  .cfi_offset %rbp, -8
+        \\  mov     %rsp, %rbp
+        \\  .cfi_def_cfa_register %rbp
+        \\  mov     $4, %rax
+        \\  pop     %rbp
+        \\  .cfi_restore %rbp
         \\  .cfi_def_cfa_offset 0
         \\  ret
         \\  .cfi_endproc
