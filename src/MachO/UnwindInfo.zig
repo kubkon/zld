@@ -17,17 +17,18 @@ const AtomIndex = MachO.AtomIndex;
 const EhFrameRecord = eh_frame.EhFrameRecord;
 const MachO = @import("../MachO.zig");
 const Object = @import("Object.zig");
+const SymbolWithLoc = MachO.SymbolWithLoc;
 
 gpa: Allocator,
 
 /// List of all unwind records gathered from all objects and sorted
 /// by source function address.
 records: std.ArrayListUnmanaged(macho.compact_unwind_entry) = .{},
-records_lookup: std.AutoHashMapUnmanaged(AtomIndex, RecordIndex) = .{},
+records_lookup: std.AutoHashMapUnmanaged(SymbolWithLoc, RecordIndex) = .{},
 
 /// List of all personalities referenced by either unwind info entries
 /// or __eh_frame entries.
-personalities: [max_personalities]MachO.SymbolWithLoc = undefined,
+personalities: [max_personalities]SymbolWithLoc = undefined,
 personalities_count: u2 = 0,
 
 /// List of common encodings sorted in descending order with the most common first.
@@ -205,23 +206,26 @@ pub fn scanRelocs(macho_file: *MachO) !void {
     for (macho_file.objects.items, 0..) |*object, object_id| {
         const unwind_records = object.getUnwindRecords();
         for (object.exec_atoms.items) |atom_index| {
-            const record_id = object.unwind_records_lookup.get(atom_index) orelse continue;
-            if (object.unwind_relocs_lookup[record_id].dead) continue;
-            const record = unwind_records[record_id];
-            if (!UnwindEncoding.isDwarf(record.compactUnwindEncoding, cpu_arch)) {
-                if (getPersonalityFunctionReloc(
-                    macho_file,
-                    @as(u32, @intCast(object_id)),
-                    record_id,
-                )) |rel| {
-                    // Personality function; add GOT pointer.
-                    const target = Atom.parseRelocTarget(macho_file, .{
-                        .object_id = @as(u32, @intCast(object_id)),
-                        .rel = rel,
-                        .code = mem.asBytes(&record),
-                        .base_offset = @as(i32, @intCast(record_id * @sizeOf(macho.compact_unwind_entry))),
-                    });
-                    try Atom.addGotEntry(macho_file, target);
+            var inner_syms_it = Atom.getInnerSymbolsIterator(macho_file, atom_index);
+            while (inner_syms_it.next()) |sym| {
+                const record_id = object.unwind_records_lookup.get(sym) orelse continue;
+                if (object.unwind_relocs_lookup[record_id].dead) continue;
+                const record = unwind_records[record_id];
+                if (!UnwindEncoding.isDwarf(record.compactUnwindEncoding, cpu_arch)) {
+                    if (getPersonalityFunctionReloc(
+                        macho_file,
+                        @as(u32, @intCast(object_id)),
+                        record_id,
+                    )) |rel| {
+                        // Personality function; add GOT pointer.
+                        const target = Atom.parseRelocTarget(macho_file, .{
+                            .object_id = @as(u32, @intCast(object_id)),
+                            .rel = rel,
+                            .code = mem.asBytes(&record),
+                            .base_offset = @as(i32, @intCast(record_id * @sizeOf(macho.compact_unwind_entry))),
+                        });
+                        try Atom.addGotEntry(macho_file, target);
+                    }
                 }
             }
         }
@@ -236,8 +240,8 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
     var records = std.ArrayList(macho.compact_unwind_entry).init(info.gpa);
     defer records.deinit();
 
-    var atom_indexes = std.ArrayList(AtomIndex).init(info.gpa);
-    defer atom_indexes.deinit();
+    var sym_indexes = std.ArrayList(SymbolWithLoc).init(info.gpa);
+    defer sym_indexes.deinit();
 
     // TODO handle dead stripping
     for (macho_file.objects.items, 0..) |*object, object_id| {
@@ -247,86 +251,116 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
         // Contents of unwind records does not have to cover all symbol in executable section
         // so we need insert them ourselves.
         try records.ensureUnusedCapacity(object.exec_atoms.items.len);
-        try atom_indexes.ensureUnusedCapacity(object.exec_atoms.items.len);
+        try sym_indexes.ensureUnusedCapacity(object.exec_atoms.items.len);
 
         for (object.exec_atoms.items) |atom_index| {
-            var record = if (object.unwind_records_lookup.get(atom_index)) |record_id| blk: {
-                if (object.unwind_relocs_lookup[record_id].dead) continue;
-                var record = unwind_records[record_id];
+            var inner_syms_it = Atom.getInnerSymbolsIterator(macho_file, atom_index);
+            var prev_symbol: ?SymbolWithLoc = null;
+            while (inner_syms_it.next()) |symbol| {
+                var record = if (object.unwind_records_lookup.get(symbol)) |record_id| blk: {
+                    if (object.unwind_relocs_lookup[record_id].dead) continue;
+                    var record = unwind_records[record_id];
 
-                if (UnwindEncoding.isDwarf(record.compactUnwindEncoding, cpu_arch)) {
-                    try info.collectPersonalityFromDwarf(macho_file, @as(u32, @intCast(object_id)), atom_index, &record);
-                } else {
-                    if (getPersonalityFunctionReloc(
-                        macho_file,
-                        @as(u32, @intCast(object_id)),
-                        record_id,
-                    )) |rel| {
-                        const target = Atom.parseRelocTarget(macho_file, .{
-                            .object_id = @as(u32, @intCast(object_id)),
-                            .rel = rel,
-                            .code = mem.asBytes(&record),
-                            .base_offset = @as(i32, @intCast(record_id * @sizeOf(macho.compact_unwind_entry))),
-                        });
-                        const personality_index = info.getPersonalityFunction(target) orelse inner: {
-                            const personality_index = info.personalities_count;
-                            info.personalities[personality_index] = target;
-                            info.personalities_count += 1;
-                            break :inner personality_index;
-                        };
+                    if (UnwindEncoding.isDwarf(record.compactUnwindEncoding, cpu_arch)) {
+                        try info.collectPersonalityFromDwarf(
+                            macho_file,
+                            @as(u32, @intCast(object_id)),
+                            symbol,
+                            &record,
+                        );
+                    } else {
+                        if (getPersonalityFunctionReloc(
+                            macho_file,
+                            @as(u32, @intCast(object_id)),
+                            record_id,
+                        )) |rel| {
+                            const target = Atom.parseRelocTarget(macho_file, .{
+                                .object_id = @as(u32, @intCast(object_id)),
+                                .rel = rel,
+                                .code = mem.asBytes(&record),
+                                .base_offset = @as(i32, @intCast(record_id * @sizeOf(macho.compact_unwind_entry))),
+                            });
+                            const personality_index = info.getPersonalityFunction(target) orelse inner: {
+                                const personality_index = info.personalities_count;
+                                info.personalities[personality_index] = target;
+                                info.personalities_count += 1;
+                                break :inner personality_index;
+                            };
 
-                        record.personalityFunction = personality_index + 1;
-                        UnwindEncoding.setPersonalityIndex(&record.compactUnwindEncoding, personality_index + 1);
-                    }
-
-                    if (getLsdaReloc(macho_file, @as(u32, @intCast(object_id)), record_id)) |rel| {
-                        const target = Atom.parseRelocTarget(macho_file, .{
-                            .object_id = @as(u32, @intCast(object_id)),
-                            .rel = rel,
-                            .code = mem.asBytes(&record),
-                            .base_offset = @as(i32, @intCast(record_id * @sizeOf(macho.compact_unwind_entry))),
-                        });
-                        record.lsda = @as(u64, @bitCast(target));
-                    }
-                }
-                break :blk record;
-            } else blk: {
-                const atom = macho_file.getAtom(atom_index);
-                const sym = macho_file.getSymbol(atom.getSymbolWithLoc());
-                if (sym.n_desc == MachO.N_DEAD) continue;
-
-                if (!object.hasUnwindRecords()) {
-                    if (object.eh_frame_records_lookup.get(atom_index)) |fde_offset| {
-                        if (object.eh_frame_relocs_lookup.get(fde_offset).?.dead) continue;
-                        var record = nullRecord();
-                        try info.collectPersonalityFromDwarf(macho_file, @as(u32, @intCast(object_id)), atom_index, &record);
-                        switch (cpu_arch) {
-                            .aarch64 => UnwindEncoding.setMode(&record.compactUnwindEncoding, macho.UNWIND_ARM64_MODE.DWARF),
-                            .x86_64 => UnwindEncoding.setMode(&record.compactUnwindEncoding, macho.UNWIND_X86_64_MODE.DWARF),
-                            else => unreachable,
+                            record.personalityFunction = personality_index + 1;
+                            UnwindEncoding.setPersonalityIndex(&record.compactUnwindEncoding, personality_index + 1);
                         }
-                        break :blk record;
+
+                        if (getLsdaReloc(macho_file, @as(u32, @intCast(object_id)), record_id)) |rel| {
+                            const target = Atom.parseRelocTarget(macho_file, .{
+                                .object_id = @as(u32, @intCast(object_id)),
+                                .rel = rel,
+                                .code = mem.asBytes(&record),
+                                .base_offset = @as(i32, @intCast(record_id * @sizeOf(macho.compact_unwind_entry))),
+                            });
+                            record.lsda = @as(u64, @bitCast(target));
+                        }
                     }
-                }
+                    break :blk record;
+                } else blk: {
+                    const sym = macho_file.getSymbol(symbol);
+                    if (sym.n_desc == MachO.N_DEAD) continue;
+                    if (prev_symbol) |prev_sym| {
+                        const prev_addr = object.getSourceSymbol(prev_sym.sym_index).?.n_value;
+                        const curr_addr = object.getSourceSymbol(symbol.sym_index).?.n_value;
+                        if (prev_addr == curr_addr) continue;
+                    }
+                    if (!object.hasUnwindRecords()) {
+                        if (object.eh_frame_records_lookup.get(symbol)) |fde_offset| {
+                            if (object.eh_frame_relocs_lookup.get(fde_offset).?.dead) continue;
+                            var record = nullRecord();
+                            try info.collectPersonalityFromDwarf(
+                                macho_file,
+                                @as(u32, @intCast(object_id)),
+                                symbol,
+                                &record,
+                            );
+                            switch (cpu_arch) {
+                                .aarch64 => UnwindEncoding.setMode(&record.compactUnwindEncoding, macho.UNWIND_ARM64_MODE.DWARF),
+                                .x86_64 => UnwindEncoding.setMode(&record.compactUnwindEncoding, macho.UNWIND_X86_64_MODE.DWARF),
+                                else => unreachable,
+                            }
+                            break :blk record;
+                        }
+                    }
 
-                break :blk nullRecord();
-            };
+                    break :blk nullRecord();
+                };
 
-            const atom = macho_file.getAtom(atom_index);
-            const sym_loc = atom.getSymbolWithLoc();
-            const sym = macho_file.getSymbol(sym_loc);
-            assert(sym.n_desc != MachO.N_DEAD);
-            record.rangeStart = sym.n_value;
-            record.rangeLength = @as(u32, @intCast(atom.size));
+                const atom = macho_file.getAtom(atom_index);
+                const sym = macho_file.getSymbol(symbol);
+                assert(sym.n_desc != MachO.N_DEAD);
+                const size = if (inner_syms_it.next()) |next_sym| blk: {
+                    // All this trouble to account for symbol aliases.
+                    // TODO I think that remodelling the linker so that a Symbol references an Atom
+                    // is the way to go, kinda like we do for ELF. We might also want to perhaps tag
+                    // symbol aliases somehow so that they are excluded from everything except relocation
+                    // resolution.
+                    defer inner_syms_it.pos -= 1;
+                    const curr_addr = object.getSourceSymbol(symbol.sym_index).?.n_value;
+                    const next_addr = object.getSourceSymbol(next_sym.sym_index).?.n_value;
+                    if (curr_addr < next_addr) break :blk curr_addr - next_addr;
+                    break :blk macho_file.getSymbol(atom.getSymbolWithLoc()).n_value + atom.size - sym.n_value;
+                } else macho_file.getSymbol(atom.getSymbolWithLoc()).n_value + atom.size - sym.n_value;
+                record.rangeStart = sym.n_value;
+                record.rangeLength = @as(u32, @intCast(size));
 
-            records.appendAssumeCapacity(record);
-            atom_indexes.appendAssumeCapacity(atom_index);
+                try records.append(record);
+                try sym_indexes.append(symbol);
+
+                prev_symbol = symbol;
+            }
         }
     }
 
     // Fold records
     try info.records.ensureTotalCapacity(info.gpa, records.items.len);
-    try info.records_lookup.ensureTotalCapacity(info.gpa, @as(u32, @intCast(atom_indexes.items.len)));
+    try info.records_lookup.ensureTotalCapacity(info.gpa, @as(u32, @intCast(sym_indexes.items.len)));
 
     var maybe_prev: ?macho.compact_unwind_entry = null;
     for (records.items, 0..) |record, i| {
@@ -352,7 +386,7 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
                 break :blk record_id;
             }
         };
-        info.records_lookup.putAssumeCapacityNoClobber(atom_indexes.items[i], record_id);
+        info.records_lookup.putAssumeCapacityNoClobber(sym_indexes.items[i], record_id);
     }
 
     // Calculate common encodings
@@ -488,12 +522,12 @@ fn collectPersonalityFromDwarf(
     info: *UnwindInfo,
     macho_file: *MachO,
     object_id: u32,
-    atom_index: u32,
+    sym_loc: SymbolWithLoc,
     record: *macho.compact_unwind_entry,
 ) !void {
     const object = &macho_file.objects.items[object_id];
     var it = object.getEhFrameRecordsIterator();
-    const fde_offset = object.eh_frame_records_lookup.get(atom_index).?;
+    const fde_offset = object.eh_frame_records_lookup.get(sym_loc).?;
     it.seekTo(fde_offset);
     const fde = (try it.next()).?;
     const cie_ptr = fde.getCiePointerSource(object_id, macho_file, fde_offset);
