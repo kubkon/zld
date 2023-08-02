@@ -250,8 +250,8 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
 
         // Contents of unwind records does not have to cover all symbol in executable section
         // so we need insert them ourselves.
-        try records.ensureUnusedCapacity(unwind_records.len);
-        try sym_indexes.ensureUnusedCapacity(unwind_records.len);
+        try records.ensureUnusedCapacity(object.exec_atoms.items.len);
+        try sym_indexes.ensureUnusedCapacity(object.exec_atoms.items.len);
 
         for (object.exec_atoms.items) |atom_index| {
             var inner_syms_it = Atom.getInnerSymbolsIterator(macho_file, atom_index);
@@ -350,8 +350,8 @@ pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
                 record.rangeStart = sym.n_value;
                 record.rangeLength = @as(u32, @intCast(size));
 
-                records.appendAssumeCapacity(record);
-                sym_indexes.appendAssumeCapacity(symbol);
+                try records.append(record);
+                try sym_indexes.append(symbol);
 
                 prev_symbol = symbol;
             }
