@@ -799,9 +799,9 @@ fn parseUnwindInfo(self: *Object, macho_file: *MachO, object_id: u32) !void {
         _ = try macho_file.initSection("__TEXT", "__unwind_info", .{});
     }
 
-    try self.unwind_records_lookup.ensureUnusedCapacity(gpa, @as(u32, @intCast(self.exec_atoms.items.len)));
-
     const unwind_records = self.getUnwindRecords();
+
+    try self.unwind_records_lookup.ensureTotalCapacity(gpa, @as(u32, @intCast(unwind_records.len)));
 
     const needs_eh_frame = for (unwind_records) |record| {
         if (UnwindInfo.UnwindEncoding.isDwarf(record.compactUnwindEncoding, cpu_arch)) break true;
@@ -841,7 +841,7 @@ fn parseUnwindInfo(self: *Object, macho_file: *MachO, object_id: u32) !void {
         if (target.getFile() != object_id) {
             self.unwind_relocs_lookup[record_id].dead = true;
         } else {
-            try self.unwind_records_lookup.putNoClobber(gpa, target, @as(u32, @intCast(record_id)));
+            self.unwind_records_lookup.putAssumeCapacityNoClobber(target, @as(u32, @intCast(record_id)));
         }
     }
 }
