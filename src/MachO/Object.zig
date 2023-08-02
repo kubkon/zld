@@ -1008,6 +1008,8 @@ pub fn getSymbolByAddress(self: Object, addr: u64, sect_hint: ?u8) u32 {
                 Predicate{ .addr = @as(i64, @intCast(addr)) },
             );
             if (target_sym_index > 0) {
+                // Hone in on the most senior alias of the target symbol.
+                // See SymbolAtIndex.lessThan for more context.
                 var start = target_sym_index - 1;
                 while (start > 0 and
                     self.source_address_lookup[lookup.start..][start - 1] == addr) : (start -= 1)
