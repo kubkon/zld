@@ -386,7 +386,7 @@ fn markEhFrameRecords(macho_file: *MachO, object_id: u32, atom_index: AtomIndex,
     var inner_syms_it = Atom.getInnerSymbolsIterator(macho_file, atom_index);
 
     while (inner_syms_it.next()) |sym| {
-        const fde_offset = object.eh_frame_records_lookup.get(sym).?;
+        const fde_offset = object.eh_frame_records_lookup.get(sym) orelse continue; // Continue in case we hit a temp symbol alias
         it.seekTo(fde_offset);
         const fde = (try it.next()).?;
 
