@@ -79,14 +79,14 @@ pub inline fn getSymbolWithLoc(self: Atom) SymbolWithLoc {
 
 const InnerSymIterator = struct {
     sym_index: u32,
-    count: u32,
+    nsyms: u32,
     file: u32,
+    pos: u32 = 0,
 
     pub fn next(it: *@This()) ?SymbolWithLoc {
-        if (it.count == 0) return null;
-        const res = SymbolWithLoc{ .sym_index = it.sym_index, .file = it.file };
-        it.sym_index += 1;
-        it.count -= 1;
+        if (it.pos == it.nsyms) return null;
+        const res = SymbolWithLoc{ .sym_index = it.sym_index + it.pos, .file = it.file };
+        it.pos += 1;
         return res;
     }
 };
@@ -96,7 +96,7 @@ pub fn getInnerSymbolsIterator(macho_file: *MachO, atom_index: AtomIndex) InnerS
     assert(atom.getFile() != null);
     return .{
         .sym_index = atom.inner_sym_index,
-        .count = atom.inner_nsyms_trailing,
+        .nsyms = atom.inner_nsyms_trailing,
         .file = atom.file,
     };
 }
@@ -222,11 +222,7 @@ pub fn parseRelocTarget(macho_file: *MachO, ctx: struct {
 
         // Find containing atom
         log.debug("  | locating symbol by address @{x} in section {d}", .{ address_in_section, sect_id });
-        const candidate = object.getSymbolByAddress(address_in_section, sect_id);
-        // Make sure we are not dealing with a local alias.
-        const atom_index = object.getAtomIndexForSymbol(candidate) orelse break :sym_index candidate;
-        const atom = macho_file.getAtom(atom_index);
-        break :sym_index atom.sym_index;
+        break :sym_index object.getSymbolByAddress(address_in_section, sect_id);
     } else object.reverse_symtab_lookup[ctx.rel.r_symbolnum];
 
     const sym_loc = SymbolWithLoc{ .sym_index = sym_index, .file = ctx.object_id + 1 };

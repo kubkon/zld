@@ -21,7 +21,7 @@ pub fn addTests(b: *Build, comp: *Compile, build_opts: struct {
 
     const zld = FileSourceWithDir.fromFileSource(b, comp.getOutputSource(), "ld");
     const sdk_path = if (builtin.target.isDarwin())
-        std.zig.system.darwin.getDarwinSDK(b.allocator, builtin.target)
+        std.zig.system.darwin.getSdk(b.allocator, builtin.target)
     else
         null;
 
@@ -48,7 +48,7 @@ pub const SystemCompiler = enum {
 pub const Options = struct {
     zld: FileSourceWithDir,
     system_compiler: SystemCompiler,
-    sdk_path: ?std.zig.system.darwin.DarwinSDK = null,
+    sdk_path: ?std.zig.system.darwin.Sdk = null,
     has_static: bool = false,
     is_musl: bool = false,
     cc_override: ?[]const u8 = null,

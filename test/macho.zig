@@ -21,6 +21,8 @@ pub fn addMachOTests(b: *Build, opts: Options) *Step {
         macho_step.dependOn(testTbdv3(b, opts));
         macho_step.dependOn(testTls(b, opts));
         macho_step.dependOn(testUnwindInfo(b, opts));
+        macho_step.dependOn(testUnwindInfoNoSubsectionsArm64(b, opts));
+        macho_step.dependOn(testUnwindInfoNoSubsectionsX64(b, opts));
         macho_step.dependOn(testWeakFramework(b, opts));
         macho_step.dependOn(testWeakLibrary(b, opts));
     }
@@ -751,7 +753,6 @@ fn testTls(b: *Build, opts: Options) *Step {
 fn testUnwindInfo(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-unwind-info", "");
 
-    const flags: []const []const u8 = &.{ "-std=c++17", "-c" };
     const all_h = FileSourceWithDir.fromBytes(b,
         \\#ifndef ALL
         \\#define ALL
@@ -796,117 +797,247 @@ fn testUnwindInfo(b: *Build, opts: Options) *Step {
         \\#endif
     , "all.h");
 
-    const exe = ld(b, opts);
-    exe.addArg("-lc++");
-
-    {
-        const obj = cc(b, opts);
-        obj.addCppSource(
-            \\#include "all.h"
-            \\#include <cstdio>
-            \\
-            \\void fn_c() {
-            \\  SimpleStringOwner c{ "cccccccccc" };
-            \\}
-            \\
-            \\void fn_b() {
-            \\  SimpleStringOwner b{ "b" };
-            \\  fn_c();
-            \\}
-            \\
-            \\int main() {
-            \\  try {
-            \\    SimpleStringOwner a{ "a" };
-            \\    fn_b();
-            \\    SimpleStringOwner d{ "d" };
-            \\  } catch (const Error& e) {
-            \\    printf("Error: %s\n", e.what());
-            \\  } catch(const std::exception& e) {
-            \\    printf("Exception: %s\n", e.what());
-            \\  }
-            \\  return 0;
-            \\}
-        );
-        obj.addPrefixedDirectorySource("-I", all_h.dir);
-        obj.addArgs(flags);
-        exe.addFileSource(obj.saveOutputAs("main.o").file);
-    }
-
-    {
-        const obj = cc(b, opts);
-        obj.addCppSource(
-            \\#include "all.h"
-            \\#include <cstdio>
-            \\#include <cstring>
-            \\
-            \\SimpleString::SimpleString(size_t max_size)
-            \\: max_size{ max_size }, length{} {
-            \\  if (max_size == 0) {
-            \\    throw Error{ "Max size must be at least 1." };
-            \\  }
-            \\  buffer = new char[max_size];
-            \\  buffer[0] = 0;
-            \\}
-            \\
-            \\SimpleString::~SimpleString() {
-            \\  delete[] buffer;
-            \\}
-            \\
-            \\void SimpleString::print(const char* tag) const {
-            \\  printf("%s: %s", tag, buffer);
-            \\}
-            \\
-            \\bool SimpleString::append_line(const char* x) {
-            \\  const auto x_len = strlen(x);
-            \\  if (x_len + length + 2 > max_size) return false;
-            \\  std::strncpy(buffer + length, x, max_size - length);
-            \\  length += x_len;
-            \\  buffer[length++] = '\n';
-            \\  buffer[length] = 0;
-            \\  return true;
-            \\}
-        );
-        obj.addPrefixedDirectorySource("-I", all_h.dir);
-        obj.addArgs(flags);
-        exe.addFileSource(obj.saveOutputAs("simple_string.o").file);
-    }
-
-    {
-        const obj = cc(b, opts);
-        obj.addCppSource(
-            \\#include "all.h"
-            \\
-            \\SimpleStringOwner::SimpleStringOwner(const char* x) : string{ 10 } {
-            \\  if (!string.append_line(x)) {
-            \\    throw Error{ "Not enough memory!" };
-            \\  }
-            \\  string.print("Constructed");
-            \\}
-            \\
-            \\SimpleStringOwner::~SimpleStringOwner() {
-            \\  string.print("About to destroy");
-            \\}
-        );
-        obj.addPrefixedDirectorySource("-I", all_h.dir);
-        obj.addArgs(flags);
-        exe.addFileSource(obj.saveOutputAs("simple_string_owner.o").file);
-    }
-
-    const run = exe.run();
-    run.expectStdOutEqual(
+    const main_c =
+        \\#include "all.h"
+        \\#include <cstdio>
+        \\
+        \\void fn_c() {
+        \\  SimpleStringOwner c{ "cccccccccc" };
+        \\}
+        \\
+        \\void fn_b() {
+        \\  SimpleStringOwner b{ "b" };
+        \\  fn_c();
+        \\}
+        \\
+        \\int main() {
+        \\  try {
+        \\    SimpleStringOwner a{ "a" };
+        \\    fn_b();
+        \\    SimpleStringOwner d{ "d" };
+        \\  } catch (const Error& e) {
+        \\    printf("Error: %s\n", e.what());
+        \\  } catch(const std::exception& e) {
+        \\    printf("Exception: %s\n", e.what());
+        \\  }
+        \\  return 0;
+        \\}
+    ;
+    const simple_string_c =
+        \\#include "all.h"
+        \\#include <cstdio>
+        \\#include <cstring>
+        \\
+        \\SimpleString::SimpleString(size_t max_size)
+        \\: max_size{ max_size }, length{} {
+        \\  if (max_size == 0) {
+        \\    throw Error{ "Max size must be at least 1." };
+        \\  }
+        \\  buffer = new char[max_size];
+        \\  buffer[0] = 0;
+        \\}
+        \\
+        \\SimpleString::~SimpleString() {
+        \\  delete[] buffer;
+        \\}
+        \\
+        \\void SimpleString::print(const char* tag) const {
+        \\  printf("%s: %s", tag, buffer);
+        \\}
+        \\
+        \\bool SimpleString::append_line(const char* x) {
+        \\  const auto x_len = strlen(x);
+        \\  if (x_len + length + 2 > max_size) return false;
+        \\  std::strncpy(buffer + length, x, max_size - length);
+        \\  length += x_len;
+        \\  buffer[length++] = '\n';
+        \\  buffer[length] = 0;
+        \\  return true;
+        \\}
+    ;
+    const simple_string_owner_c =
+        \\#include "all.h"
+        \\
+        \\SimpleStringOwner::SimpleStringOwner(const char* x) : string{ 10 } {
+        \\  if (!string.append_line(x)) {
+        \\    throw Error{ "Not enough memory!" };
+        \\  }
+        \\  string.print("Constructed");
+        \\}
+        \\
+        \\SimpleStringOwner::~SimpleStringOwner() {
+        \\  string.print("About to destroy");
+        \\}
+    ;
+    const exp_stdout =
         \\Constructed: a
         \\Constructed: b
         \\About to destroy: b
         \\About to destroy: a
         \\Error: Not enough memory!
         \\
-    );
+    ;
+
+    const flags: []const []const u8 = &.{ "-std=c++17", "-c" };
+    const obj = cc(b, opts);
+    obj.addCppSource(main_c);
+    obj.addPrefixedDirectorySource("-I", all_h.dir);
+    obj.addArgs(flags);
+
+    const obj1 = cc(b, opts);
+    obj1.addCppSource(simple_string_c);
+    obj1.addPrefixedDirectorySource("-I", all_h.dir);
+    obj1.addArgs(flags);
+
+    const obj2 = cc(b, opts);
+    obj2.addCppSource(simple_string_owner_c);
+    obj2.addPrefixedDirectorySource("-I", all_h.dir);
+    obj2.addArgs(flags);
+
+    const exe = ld(b, opts);
+    exe.addArg("-lc++");
+    exe.addFileSource(obj.saveOutputAs("main.o").file);
+    exe.addFileSource(obj1.saveOutputAs("simple_string.o").file);
+    exe.addFileSource(obj2.saveOutputAs("simple_string_owner.o").file);
+
+    const run = exe.run();
+    run.expectStdOutEqual(exp_stdout);
     test_step.dependOn(run.step());
 
     const check = exe.check();
     check.checkInSymtab();
     check.checkContains("external ___gxx_personality_v0");
     test_step.dependOn(&check.step);
+
+    return test_step;
+}
+
+fn testUnwindInfoNoSubsectionsArm64(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-unwind-info-no-subsections-arm64", "");
+
+    if (builtin.target.cpu.arch != .aarch64) {
+        skipTestStep(test_step);
+        return test_step;
+    }
+
+    const a_o = cc(b, opts);
+    a_o.addAsmSource(
+        \\.globl _foo
+        \\.align 4
+        \\_foo: 
+        \\  .cfi_startproc
+        \\  stp     x29, x30, [sp, #-32]!
+        \\  .cfi_def_cfa_offset 32
+        \\  .cfi_offset w30, -24
+        \\  .cfi_offset w29, -32
+        \\  mov x29, sp
+        \\  .cfi_def_cfa w29, 32
+        \\  bl      _bar
+        \\  ldp     x29, x30, [sp], #32
+        \\  .cfi_restore w29
+        \\  .cfi_restore w30
+        \\  .cfi_def_cfa_offset 0
+        \\  ret
+        \\  .cfi_endproc
+        \\
+        \\.globl _bar
+        \\.align 4
+        \\_bar:
+        \\  .cfi_startproc
+        \\  sub     sp, sp, #32
+        \\  .cfi_def_cfa_offset -32
+        \\  stp     x29, x30, [sp, #16]
+        \\  .cfi_offset w30, -24
+        \\  .cfi_offset w29, -32
+        \\  mov x29, sp
+        \\  .cfi_def_cfa w29, 32
+        \\  mov     w0, #4
+        \\  ldp     x29, x30, [sp, #16]
+        \\  .cfi_restore w29
+        \\  .cfi_restore w30
+        \\  add     sp, sp, #32
+        \\  .cfi_def_cfa_offset 0
+        \\  ret
+        \\  .cfi_endproc
+    );
+    a_o.addArg("-c");
+    const a_o_out = a_o.saveOutputAs("a.o");
+
+    const exe = cc(b, opts);
+    exe.addCSource(
+        \\#include <stdio.h>
+        \\int foo();
+        \\int main() {
+        \\  printf("%d\n", foo());
+        \\  return 0;
+        \\}
+    );
+    exe.addFileSource(a_o_out.file);
+
+    const run = exe.run();
+    run.expectStdOutEqual("4\n");
+    test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+fn testUnwindInfoNoSubsectionsX64(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-unwind-info-no-subsections-x64", "");
+
+    if (builtin.target.cpu.arch != .x86_64) {
+        skipTestStep(test_step);
+        return test_step;
+    }
+
+    const a_o = cc(b, opts);
+    a_o.addAsmSource(
+        \\.globl _foo
+        \\_foo: 
+        \\  .cfi_startproc
+        \\  push    %rbp
+        \\  .cfi_def_cfa_offset 8
+        \\  .cfi_offset %rbp, -8
+        \\  mov     %rsp, %rbp
+        \\  .cfi_def_cfa_register %rbp
+        \\  call    _bar
+        \\  pop     %rbp
+        \\  .cfi_restore %rbp
+        \\  .cfi_def_cfa_offset 0
+        \\  ret
+        \\  .cfi_endproc
+        \\
+        \\.globl _bar
+        \\_bar:
+        \\  .cfi_startproc
+        \\  push     %rbp
+        \\  .cfi_def_cfa_offset 8
+        \\  .cfi_offset %rbp, -8
+        \\  mov     %rsp, %rbp
+        \\  .cfi_def_cfa_register %rbp
+        \\  mov     $4, %rax
+        \\  pop     %rbp
+        \\  .cfi_restore %rbp
+        \\  .cfi_def_cfa_offset 0
+        \\  ret
+        \\  .cfi_endproc
+    );
+    a_o.addArg("-c");
+    const a_o_out = a_o.saveOutputAs("a.o");
+
+    const exe = cc(b, opts);
+    exe.addCSource(
+        \\#include <stdio.h>
+        \\int foo();
+        \\int main() {
+        \\  printf("%d\n", foo());
+        \\  return 0;
+        \\}
+    );
+    exe.addFileSource(a_o_out.file);
+
+    const run = exe.run();
+    run.expectStdOutEqual("4\n");
+    test_step.dependOn(run.step());
 
     return test_step;
 }
@@ -1009,6 +1140,7 @@ fn ld(b: *Build, opts: Options) SysCmd {
 const std = @import("std");
 const builtin = @import("builtin");
 const common = @import("test.zig");
+const skipTestStep = common.skipTestStep;
 
 const Build = std.Build;
 const Compile = Step.Compile;
