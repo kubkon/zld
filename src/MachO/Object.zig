@@ -126,7 +126,7 @@ pub fn parse(
     var stream = std.io.fixedBufferStream(self.contents);
     const reader = stream.reader();
 
-    self.header = try reader.readStruct(macho.mach_header_64);
+    self.header = reader.readStruct(macho.mach_header_64) catch return error.NotObject;
 
     if (self.header.filetype != macho.MH_OBJECT) {
         log.debug("invalid filetype: expected 0x{x}, found 0x{x}", .{

@@ -30,7 +30,7 @@ fn readFatStruct(reader: anytype, comptime T: type) !T {
 }
 
 pub fn getLibraryOffset(reader: anytype, cpu_arch: std.Target.Cpu.Arch) !u64 {
-    const fat_header = try readFatStruct(reader, macho.fat_header);
+    const fat_header = readFatStruct(reader, macho.fat_header) catch return 0;
     if (fat_header.magic != macho.FAT_MAGIC) return 0;
 
     var fat_arch_index: u32 = 0;

@@ -140,7 +140,7 @@ pub fn parseFromBinary(
 
     log.debug("parsing shared library '{s}'", .{name});
 
-    const header = try reader.readStruct(macho.mach_header_64);
+    const header = reader.readStruct(macho.mach_header_64) catch return error.NotDylib;
 
     if (header.filetype != macho.MH_DYLIB) {
         log.debug("invalid filetype: expected 0x{x}, found 0x{x}", .{

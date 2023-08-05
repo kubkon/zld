@@ -100,7 +100,7 @@ pub fn deinit(self: *Archive, allocator: Allocator) void {
 }
 
 pub fn parse(self: *Archive, allocator: Allocator, reader: anytype) !void {
-    const magic = try reader.readBytesNoEof(SARMAG);
+    const magic = reader.readBytesNoEof(SARMAG) catch return error.NotArchive;
     if (!mem.eql(u8, &magic, ARMAG)) {
         log.debug("invalid magic: expected '{s}', found '{s}'", .{ ARMAG, magic });
         return error.NotArchive;

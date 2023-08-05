@@ -655,7 +655,7 @@ fn parseObject(self: *MachO, path: []const u8) !bool {
     };
 
     object.parse(gpa, cpu_arch, self) catch |err| switch (err) {
-        error.EndOfStream, error.NotObject => {
+        error.NotObject => {
             object.deinit(gpa);
             return false;
         },
@@ -767,7 +767,7 @@ pub fn parseDylib(
         path,
         contents,
     ) catch |err| switch (err) {
-        error.EndOfStream, error.NotDylib => {
+        error.NotDylib => {
             try file.seekTo(0);
 
             var lib_stub = LibStub.loadFromFile(gpa, file) catch {
@@ -838,7 +838,7 @@ fn parsePositionals(self: *MachO, files: []const []const u8, syslibroot: ?[]cons
             .syslibroot = syslibroot,
         })) continue;
 
-        log.warn("unknown filetype for positional input file: '{s}'", .{file_name});
+        self.base.fatal("unknown filetype for positional input file: '{s}'", .{file_name});
     }
 }
 
@@ -854,7 +854,8 @@ fn parseAndForceLoadStaticArchives(self: *MachO, files: []const []const u8) !voi
         log.debug("parsing and force loading static archive '{s}'", .{full_path});
 
         if (try self.parseArchive(full_path, true)) continue;
-        log.debug("unknown filetype: expected static archive: '{s}'", .{file_name});
+
+        self.base.fatal("unknown filetype: expected static archive: '{s}'", .{file_name});
     }
 }
 
@@ -878,7 +879,7 @@ fn parseLibs(
         })) continue;
         if (try self.parseArchive(lib, false)) continue;
 
-        log.warn("unknown filetype for a library: '{s}'", .{lib});
+        self.base.fatal("unknown filetype for a library: '{s}'", .{lib});
     }
 }
 
