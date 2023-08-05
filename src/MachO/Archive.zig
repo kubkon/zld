@@ -8,6 +8,7 @@ const macho = std.macho;
 const mem = std.mem;
 
 const Allocator = mem.Allocator;
+const MachO = @import("../MachO.zig");
 const Object = @import("Object.zig");
 
 file: fs.File,
@@ -186,6 +187,7 @@ pub fn parseObject(
     gpa: Allocator,
     cpu_arch: std.Target.Cpu.Arch,
     offset: u32,
+    macho_file: *MachO,
 ) !Object {
     const reader = self.file.reader();
     try reader.context.seekTo(self.fat_offset + offset);
@@ -216,9 +218,7 @@ pub fn parseObject(
     const object_size = (try object_header.size()) - object_name_len;
     const contents = try gpa.allocWithOptions(u8, object_size, @alignOf(u64), null);
     const amt = try reader.readAll(contents);
-    if (amt != object_size) {
-        return error.Io;
-    }
+    if (amt != object_size) return error.Io;
 
     var object = Object{
         .name = name,
@@ -226,7 +226,7 @@ pub fn parseObject(
         .contents = contents,
     };
 
-    try object.parse(gpa, cpu_arch);
+    try object.parse(gpa, cpu_arch, macho_file);
 
     return object;
 }

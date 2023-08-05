@@ -338,6 +338,8 @@ pub fn flush(self: *MachO) !void {
     try self.parseLibs(libs.keys(), libs.values(), syslibroot, &dependent_libs);
     try self.parseDependentLibs(syslibroot, &dependent_libs);
 
+    self.base.reportWarningsAndErrorsAndExit();
+
     var resolver = SymbolResolver{
         .arena = arena,
         .table = std.StringHashMap(u32).init(arena),
@@ -652,7 +654,7 @@ fn parseObject(self: *MachO, path: []const u8) !bool {
         .contents = contents,
     };
 
-    object.parse(gpa, cpu_arch) catch |err| switch (err) {
+    object.parse(gpa, cpu_arch, self) catch |err| switch (err) {
         error.EndOfStream, error.NotObject => {
             object.deinit(gpa);
             return false;
@@ -703,7 +705,7 @@ fn parseArchive(self: *MachO, path: []const u8, force_load: bool) !bool {
             }
         }
         for (offsets.keys()) |off| {
-            const object = try archive.parseObject(gpa, cpu_arch, off);
+            const object = try archive.parseObject(gpa, cpu_arch, off, self);
             try self.objects.append(gpa, object);
         }
     } else {
@@ -1650,7 +1652,7 @@ fn resolveSymbolsInArchives(self: *MachO, resolver: *SymbolResolver) !void {
             assert(offsets.items.len > 0);
 
             const object_id = @as(u16, @intCast(self.objects.items.len));
-            const object = try archive.parseObject(gpa, cpu_arch, offsets.items[0]);
+            const object = try archive.parseObject(gpa, cpu_arch, offsets.items[0], self);
             try self.objects.append(gpa, object);
             try self.resolveSymbolsInObject(object_id, resolver);
 

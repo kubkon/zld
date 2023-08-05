@@ -114,7 +114,12 @@ pub fn deinit(self: *Object, gpa: Allocator) void {
     self.data_in_code.deinit(gpa);
 }
 
-pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch) !void {
+pub fn parse(
+    self: *Object,
+    allocator: Allocator,
+    cpu_arch: std.Target.Cpu.Arch,
+    macho_file: *MachO,
+) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -135,16 +140,17 @@ pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch)
         macho.CPU_TYPE_ARM64 => .aarch64,
         macho.CPU_TYPE_X86_64 => .x86_64,
         else => |value| {
-            log.err("unsupported cpu architecture 0x{x}", .{value});
-            return error.UnsupportedCpuArchitecture;
+            macho_file.base.fatal("unsupported cpu architecture 0x{x}", .{value});
+            return;
         },
     };
     if (this_arch != cpu_arch) {
-        log.err("mismatched cpu architecture: expected {s}, found {s}", .{
+        macho_file.base.fatal("{s}: mismatched cpu architecture: expected {s}, found {s}", .{
+            self.name,
             @tagName(cpu_arch),
             @tagName(this_arch),
         });
-        return error.MismatchedCpuArchitecture;
+        return;
     }
 
     var it = LoadCommandIterator{
