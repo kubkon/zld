@@ -678,7 +678,16 @@ fn parseArchive(self: *MachO, path: []const u8, force_load: bool) !bool {
     const name = try gpa.dupe(u8, path);
     const cpu_arch = self.options.target.cpu_arch.?;
     const reader = file.reader();
-    const fat_offset = try fat.getLibraryOffset(reader, cpu_arch);
+    const fat_offset = fat.getLibraryOffset(reader, cpu_arch) catch |err| switch (err) {
+        error.MissingArch => {
+            self.base.fatal(
+                "{s}: could not find matching cpu architecture in fat library: expected {s}",
+                .{ name, @tagName(cpu_arch) },
+            );
+            return true;
+        },
+        else => |e| return e,
+    };
     try reader.context.seekTo(fat_offset);
 
     var archive = Archive{
@@ -749,7 +758,16 @@ pub fn parseDylib(
     var file_size = math.cast(usize, file_stat.size) orelse return error.Overflow;
 
     const reader = file.reader();
-    const lib_offset = try fat.getLibraryOffset(reader, cpu_arch);
+    const lib_offset = fat.getLibraryOffset(reader, cpu_arch) catch |err| switch (err) {
+        error.MissingArch => {
+            self.base.fatal(
+                "{s}: could not find matching cpu architecture in fat library: expected {s}",
+                .{ path, @tagName(cpu_arch) },
+            );
+            return true;
+        },
+        else => |e| return e,
+    };
     try file.seekTo(lib_offset);
     file_size -= lib_offset;
 
@@ -766,6 +784,7 @@ pub fn parseDylib(
         dependent_libs,
         path,
         contents,
+        self,
     ) catch |err| switch (err) {
         error.NotDylib => {
             try file.seekTo(0);

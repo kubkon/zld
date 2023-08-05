@@ -134,6 +134,7 @@ pub fn parseFromBinary(
     dependent_libs: anytype,
     name: []const u8,
     data: []align(@alignOf(u64)) const u8,
+    macho_file: *MachO,
 ) !void {
     var stream = std.io.fixedBufferStream(data);
     const reader = stream.reader();
@@ -150,7 +151,14 @@ pub fn parseFromBinary(
         return error.NotDylib;
     }
 
-    const this_arch: std.Target.Cpu.Arch = try fat.decodeArch(header.cputype, true);
+    const this_arch: std.Target.Cpu.Arch = switch (header.cputype) {
+        macho.CPU_TYPE_ARM64 => .aarch64,
+        macho.CPU_TYPE_X86_64 => .x86_64,
+        else => |value| {
+            macho_file.base.fatal("unsupported cpu architecture 0x{x}", .{value});
+            return;
+        },
+    };
 
     if (this_arch != cpu_arch) {
         log.err("mismatched cpu architecture: expected {s}, found {s}", .{
