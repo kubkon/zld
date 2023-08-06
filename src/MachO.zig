@@ -398,6 +398,8 @@ pub fn flush(self: *MachO) !void {
     try eh_frame.scanRelocs(self);
     try UnwindInfo.scanRelocs(self);
 
+    self.base.reportWarningsAndErrorsAndExit();
+
     try self.createDyldStubBinderGotAtom();
 
     try self.calcSectionSizes();

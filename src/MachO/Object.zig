@@ -813,11 +813,8 @@ fn parseUnwindInfo(self: *Object, macho_file: *MachO, object_id: u32) !void {
         if (UnwindInfo.UnwindEncoding.isDwarf(record.compactUnwindEncoding, cpu_arch)) break true;
     } else false;
 
-    if (needs_eh_frame and !self.hasEhFrameRecords()) {
-        log.err("missing __TEXT,__eh_frame section", .{});
-        log.err("  in object {s}", .{self.name});
-        return error.MissingEhFrameSection;
-    }
+    if (needs_eh_frame and !self.hasEhFrameRecords())
+        return macho_file.base.fatal("{s}: missing '__TEXT,__eh_frame' section", .{self.name});
 
     try self.parseRelocs(gpa, sect_id);
     const relocs = self.getRelocs(sect_id);
