@@ -9,6 +9,7 @@ pub fn addMachOTests(b: *Build, opts: Options) *Step {
         macho_step.dependOn(testEntryPoint(b, opts));
         macho_step.dependOn(testEntryPointArchive(b, opts));
         macho_step.dependOn(testEntryPointDylib(b, opts));
+        macho_step.dependOn(testFatArchive(b, opts));
         macho_step.dependOn(testHeaderpad(b, opts));
         macho_step.dependOn(testHello(b, opts));
         macho_step.dependOn(testLayout(b, opts));
@@ -247,6 +248,56 @@ fn testEntryPointDylib(b: *Build, opts: Options) *Step {
 
     const run = exe.run();
     run.expectStdOutEqual("Hello!\n");
+    test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+fn testFatArchive(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-fat-archive", "");
+
+    const a_c = "int foo = 42;";
+
+    const lib_arm64 = blk: {
+        const obj = cc(b, opts);
+        obj.addCSource(a_c);
+        obj.addArgs(&.{ "-c", "-arch", "arm64" });
+        const obj_out = obj.saveOutputAs("a.o");
+
+        const lib = ar(b);
+        lib.addFileSource(obj_out.file);
+        break :blk lib.saveOutputAs("liba.a").file;
+    };
+
+    const lib_x64 = blk: {
+        const obj = cc(b, opts);
+        obj.addCSource(a_c);
+        obj.addArgs(&.{ "-c", "-arch", "x86_64" });
+        const obj_out = obj.saveOutputAs("a.o");
+
+        const lib = ar(b);
+        lib.addFileSource(obj_out.file);
+        break :blk lib.saveOutputAs("liba.a").file;
+    };
+
+    const fat_lib = lipo(b);
+    fat_lib.addFileSource(lib_arm64);
+    fat_lib.addFileSource(lib_x64);
+    const fat_lib_out = fat_lib.saveOutputAs("liba.a");
+
+    const exe = cc(b, opts);
+    exe.addCSource(
+        \\#include<stdio.h>
+        \\extern int foo;
+        \\int main() {
+        \\  printf("%d\n", foo);
+        \\  return 0;
+        \\}
+    );
+    exe.addFileSource(fat_lib_out.file);
+
+    const run = exe.run();
+    run.expectStdOutEqual("42\n");
     test_step.dependOn(run.step());
 
     return test_step;
@@ -1120,6 +1171,13 @@ fn cc(b: *Build, opts: Options) SysCmd {
 fn ar(b: *Build) SysCmd {
     const cmd = Run.create(b, "ar");
     cmd.addArgs(&.{ "ar", "rcs" });
+    const out = cmd.addOutputFileArg("a.out");
+    return .{ .cmd = cmd, .out = out };
+}
+
+fn lipo(b: *Build) SysCmd {
+    const cmd = Run.create(b, "lipo");
+    cmd.addArgs(&.{ "lipo", "-create", "-output" });
     const out = cmd.addOutputFileArg("a.out");
     return .{ .cmd = cmd, .out = out };
 }
