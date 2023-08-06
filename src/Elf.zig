@@ -304,9 +304,10 @@ pub fn flush(self: *Elf) !void {
     }
 
     if (self.base.errors.items.len > 0) {
-        self.base.fatal("library search paths:", .{});
+        const err = try self.base.addErrorWithNotes(search_dirs.items.len);
+        try err.addMsg("library search paths", .{});
         for (search_dirs.items) |dir| {
-            self.base.fatal("  {s}", .{dir});
+            try err.addNote("  {s}", .{dir});
         }
     }
     self.base.reportWarningsAndErrorsAndExit();
@@ -1932,35 +1933,26 @@ fn reportUndefs(self: *Elf) !void {
 
     const max_notes = 4;
 
-    const gpa = self.base.allocator;
     var it = self.undefs.iterator();
     while (it.next()) |entry| {
         const undef_sym = self.getSymbol(entry.key_ptr.*);
         const notes = entry.value_ptr.*;
         const nnotes = @min(notes.items.len, max_notes) + @intFromBool(notes.items.len > max_notes);
 
-        var err = Zld.ErrorMsg{
-            .msg = try std.fmt.allocPrint(gpa, "undefined symbol: {s}", .{undef_sym.getName(self)}),
-        };
-        err.notes = try gpa.alloc(Zld.ErrorMsg, nnotes);
+        const err = try self.base.addErrorWithNotes(nnotes);
+        try err.addMsg("undefined symbol: {s}", .{undef_sym.getName(self)});
 
         var inote: usize = 0;
         while (inote < nnotes) : (inote += 1) {
             const atom = self.getAtom(notes.items[inote]).?;
             const object = atom.getObject(self);
-            err.notes.?[inote] = Zld.ErrorMsg{
-                .msg = try std.fmt.allocPrint(gpa, "referenced by {}:{s}", .{ object.fmtPath(), atom.getName(self) }),
-            };
+            try err.addNote("referenced by {}:{s}", .{ object.fmtPath(), atom.getName(self) });
         }
 
         if (notes.items.len > max_notes) {
             const remaining = notes.items.len - max_notes;
-            err.notes.?[max_notes] = Zld.ErrorMsg{
-                .msg = try std.fmt.allocPrint(gpa, "referenced {d} more times", .{remaining}),
-            };
+            try err.addNote("referenced {d} more times", .{remaining});
         }
-
-        try self.base.errors.append(gpa, err);
     }
 }
 

@@ -216,9 +216,6 @@ pub fn flush(self: *MachO) !void {
     try self.atoms.append(gpa, Atom.empty); // AtomIndex at 0 is reserved as null atom
     try self.strtab.buffer.append(gpa, 0);
 
-    var lib_not_found = false;
-    var framework_not_found = false;
-
     // Positional arguments to the linker such as object files and static archives.
     var positionals = std.ArrayList([]const u8).init(arena);
     try positionals.ensureUnusedCapacity(self.options.positionals.len);
@@ -241,7 +238,7 @@ pub fn flush(self: *MachO) !void {
         if (try resolveSearchDir(arena, dir, syslibroot)) |search_dir| {
             try lib_dirs.append(search_dir);
         } else {
-            log.warn("directory not found for '-L{s}'", .{dir});
+            self.base.warn("directory not found for '-L{s}'", .{dir});
         }
     }
 
@@ -261,8 +258,7 @@ pub fn flush(self: *MachO) !void {
                         }
                     }
                 } else {
-                    log.warn("library not found for '-l{s}'", .{lib_name});
-                    lib_not_found = true;
+                    self.base.fatal("library not found for '-l{s}'", .{lib_name});
                 }
             },
             .dylibs_first => {
@@ -278,20 +274,21 @@ pub fn flush(self: *MachO) !void {
                     if (try resolveLib(arena, dir, lib_name, ".a")) |full_path| {
                         try libs.put(full_path, self.options.libs.get(lib_name).?);
                     } else {
-                        log.warn("library not found for '-l{s}'", .{lib_name});
-                        lib_not_found = true;
+                        self.base.fatal("library not found for '-l{s}'", .{lib_name});
                     }
                 }
             },
         }
     }
 
-    if (lib_not_found) {
-        log.warn("Library search paths:", .{});
+    if (self.base.errors.items.len > 0) {
+        const err = try self.base.addErrorWithNotes(lib_dirs.items.len);
+        try err.addMsg("Library search paths", .{});
         for (lib_dirs.items) |dir| {
-            log.warn("  {s}", .{dir});
+            try err.addNote("{s}", .{dir});
         }
     }
+    const prev_error_count = self.base.errors.items.len;
 
     // frameworks
     var framework_dirs = std.ArrayList([]const u8).init(arena);
@@ -299,7 +296,7 @@ pub fn flush(self: *MachO) !void {
         if (try resolveSearchDir(arena, dir, syslibroot)) |search_dir| {
             try framework_dirs.append(search_dir);
         } else {
-            log.warn("directory not found for '-F{s}'", .{dir});
+            self.base.warn("directory not found for '-F{s}'", .{dir});
         }
     }
 
@@ -316,17 +313,19 @@ pub fn flush(self: *MachO) !void {
                 }
             }
         } else {
-            log.warn("framework not found for '-framework {s}'", .{f_name});
-            framework_not_found = true;
+            self.base.fatal("framework not found for '-framework {s}'", .{f_name});
         }
     }
 
-    if (framework_not_found) {
-        log.warn("Framework search paths:", .{});
+    if (self.base.errors.items.len > prev_error_count) {
+        const err = try self.base.addErrorWithNotes(framework_dirs.items.len);
+        try err.addMsg("Framework search paths", .{});
         for (framework_dirs.items) |dir| {
-            log.warn("  {s}", .{dir});
+            try err.addNote("{s}", .{dir});
         }
     }
+
+    self.base.reportWarningsAndErrorsAndExit();
 
     var dependent_libs = std.fifo.LinearFifo(struct {
         id: Dylib.Id,
@@ -338,24 +337,15 @@ pub fn flush(self: *MachO) !void {
     try self.parseLibs(libs.keys(), libs.values(), syslibroot, &dependent_libs);
     try self.parseDependentLibs(syslibroot, &dependent_libs);
 
-    self.base.reportWarningsAndErrorsAndExit();
-
     var resolver = SymbolResolver{
         .arena = arena,
         .table = std.StringHashMap(u32).init(arena),
         .unresolved = std.AutoArrayHashMap(u32, void).init(arena),
     };
     try self.resolveSymbols(&resolver);
+    try self.reportUndefs(&resolver);
 
-    if (resolver.unresolved.count() > 0) {
-        return error.UndefinedSymbolReference;
-    }
-    if (lib_not_found) {
-        return error.LibraryNotFound;
-    }
-    if (framework_not_found) {
-        return error.FrameworkNotFound;
-    }
+    self.base.reportWarningsAndErrorsAndExit();
 
     if (self.options.output_mode == .exe) {
         const entry_name = self.options.entry orelse default_entry_point;
@@ -1725,7 +1715,6 @@ fn resolveSymbolsAtLoading(self: *MachO, resolver: *SymbolResolver) !void {
         const global_index = resolver.unresolved.keys()[next_sym];
         const global = self.globals.items[global_index];
         const sym = self.getSymbolPtr(global);
-        const sym_name = self.getSymbolName(global);
 
         if (sym.discarded()) {
             sym.* = .{
@@ -1748,12 +1737,22 @@ fn resolveSymbolsAtLoading(self: *MachO, resolver: *SymbolResolver) !void {
             continue;
         }
 
-        log.err("undefined reference to symbol '{s}'", .{sym_name});
-        if (global.getFile()) |file| {
-            log.err("  first referenced in '{s}'", .{self.objects.items[file].name});
-        }
-
         next_sym += 1;
+    }
+}
+
+fn reportUndefs(self: *MachO, resolver: *const SymbolResolver) !void {
+    for (resolver.unresolved.keys()) |global_index| {
+        const global = self.globals.items[global_index];
+        const sym_name = self.getSymbolName(global);
+
+        const nnotes: usize = if (global.getFile() == null) @as(usize, 0) else 1;
+        const err = try self.base.addErrorWithNotes(nnotes);
+        try err.addMsg("undefined symbol: {s}", .{sym_name});
+
+        if (global.getFile()) |file| {
+            try err.addNote("referenced in {s}", .{self.objects.items[file].name});
+        }
     }
 }
 
@@ -1837,8 +1836,7 @@ fn resolveDyldStubBinder(self: *MachO, resolver: *SymbolResolver) !void {
     }
 
     if (self.dyld_stub_binder_index == null) {
-        log.err("undefined reference to symbol '{s}'", .{sym_name});
-        return error.UndefinedSymbolReference;
+        self.base.fatal("undefined reference to symbol '{s}'", .{sym_name});
     }
 }
 
