@@ -216,9 +216,6 @@ pub fn flush(self: *MachO) !void {
     try self.atoms.append(gpa, Atom.empty); // AtomIndex at 0 is reserved as null atom
     try self.strtab.buffer.append(gpa, 0);
 
-    var lib_not_found = false;
-    var framework_not_found = false;
-
     // Positional arguments to the linker such as object files and static archives.
     var positionals = std.ArrayList([]const u8).init(arena);
     try positionals.ensureUnusedCapacity(self.options.positionals.len);
@@ -241,7 +238,7 @@ pub fn flush(self: *MachO) !void {
         if (try resolveSearchDir(arena, dir, syslibroot)) |search_dir| {
             try lib_dirs.append(search_dir);
         } else {
-            log.warn("directory not found for '-L{s}'", .{dir});
+            self.base.warn("directory not found for '-L{s}'", .{dir});
         }
     }
 
@@ -261,8 +258,7 @@ pub fn flush(self: *MachO) !void {
                         }
                     }
                 } else {
-                    log.warn("library not found for '-l{s}'", .{lib_name});
-                    lib_not_found = true;
+                    self.base.fatal("library not found for '-l{s}'", .{lib_name});
                 }
             },
             .dylibs_first => {
@@ -278,20 +274,21 @@ pub fn flush(self: *MachO) !void {
                     if (try resolveLib(arena, dir, lib_name, ".a")) |full_path| {
                         try libs.put(full_path, self.options.libs.get(lib_name).?);
                     } else {
-                        log.warn("library not found for '-l{s}'", .{lib_name});
-                        lib_not_found = true;
+                        self.base.fatal("library not found for '-l{s}'", .{lib_name});
                     }
                 }
             },
         }
     }
 
-    if (lib_not_found) {
-        log.warn("Library search paths:", .{});
+    if (self.base.errors.items.len > 0) {
+        const err = try self.base.addErrorWithNotes(lib_dirs.items.len);
+        try err.addMsg("Library search paths", .{});
         for (lib_dirs.items) |dir| {
-            log.warn("  {s}", .{dir});
+            try err.addNote("{s}", .{dir});
         }
     }
+    const prev_error_count = self.base.errors.items.len;
 
     // frameworks
     var framework_dirs = std.ArrayList([]const u8).init(arena);
@@ -299,7 +296,7 @@ pub fn flush(self: *MachO) !void {
         if (try resolveSearchDir(arena, dir, syslibroot)) |search_dir| {
             try framework_dirs.append(search_dir);
         } else {
-            log.warn("directory not found for '-F{s}'", .{dir});
+            self.base.warn("directory not found for '-F{s}'", .{dir});
         }
     }
 
@@ -316,17 +313,19 @@ pub fn flush(self: *MachO) !void {
                 }
             }
         } else {
-            log.warn("framework not found for '-framework {s}'", .{f_name});
-            framework_not_found = true;
+            self.base.fatal("framework not found for '-framework {s}'", .{f_name});
         }
     }
 
-    if (framework_not_found) {
-        log.warn("Framework search paths:", .{});
+    if (self.base.errors.items.len > prev_error_count) {
+        const err = try self.base.addErrorWithNotes(framework_dirs.items.len);
+        try err.addMsg("Framework search paths", .{});
         for (framework_dirs.items) |dir| {
-            log.warn("  {s}", .{dir});
+            try err.addNote("{s}", .{dir});
         }
     }
+
+    self.base.reportWarningsAndErrorsAndExit();
 
     var dependent_libs = std.fifo.LinearFifo(struct {
         id: Dylib.Id,
@@ -344,16 +343,8 @@ pub fn flush(self: *MachO) !void {
         .unresolved = std.AutoArrayHashMap(u32, void).init(arena),
     };
     try self.resolveSymbols(&resolver);
-
-    if (resolver.unresolved.count() > 0) {
-        return error.UndefinedSymbolReference;
-    }
-    if (lib_not_found) {
-        return error.LibraryNotFound;
-    }
-    if (framework_not_found) {
-        return error.FrameworkNotFound;
-    }
+    try self.reportUndefs(&resolver);
+    self.base.reportWarningsAndErrorsAndExit();
 
     if (self.options.output_mode == .exe) {
         const entry_name = self.options.entry orelse default_entry_point;
@@ -395,6 +386,8 @@ pub fn flush(self: *MachO) !void {
 
     try eh_frame.scanRelocs(self);
     try UnwindInfo.scanRelocs(self);
+
+    self.base.reportWarningsAndErrorsAndExit();
 
     try self.createDyldStubBinderGotAtom();
 
@@ -535,6 +528,8 @@ pub fn flush(self: *MachO) !void {
             try dir.copyFile(path, dir, path, .{});
         }
     }
+
+    self.base.reportWarningsAndErrorsAndExit();
 }
 
 fn resolveSearchDir(
@@ -652,8 +647,8 @@ fn parseObject(self: *MachO, path: []const u8) !bool {
         .contents = contents,
     };
 
-    object.parse(gpa, cpu_arch) catch |err| switch (err) {
-        error.EndOfStream, error.NotObject => {
+    object.parse(gpa, cpu_arch, self) catch |err| switch (err) {
+        error.NotObject => {
             object.deinit(gpa);
             return false;
         },
@@ -676,7 +671,16 @@ fn parseArchive(self: *MachO, path: []const u8, force_load: bool) !bool {
     const name = try gpa.dupe(u8, path);
     const cpu_arch = self.options.target.cpu_arch.?;
     const reader = file.reader();
-    const fat_offset = try fat.getLibraryOffset(reader, cpu_arch);
+    const fat_offset = fat.getLibraryOffset(reader, cpu_arch) catch |err| switch (err) {
+        error.MissingArch => {
+            self.base.fatal(
+                "{s}: could not find matching cpu architecture in fat library: expected {s}",
+                .{ name, @tagName(cpu_arch) },
+            );
+            return true;
+        },
+        else => |e| return e,
+    };
     try reader.context.seekTo(fat_offset);
 
     var archive = Archive{
@@ -685,7 +689,7 @@ fn parseArchive(self: *MachO, path: []const u8, force_load: bool) !bool {
         .name = name,
     };
 
-    archive.parse(gpa, reader) catch |err| switch (err) {
+    archive.parse(gpa, reader, self) catch |err| switch (err) {
         error.EndOfStream, error.NotArchive => {
             archive.deinit(gpa);
             return false;
@@ -703,7 +707,7 @@ fn parseArchive(self: *MachO, path: []const u8, force_load: bool) !bool {
             }
         }
         for (offsets.keys()) |off| {
-            const object = try archive.parseObject(gpa, cpu_arch, off);
+            const object = try archive.parseObject(gpa, cpu_arch, off, self);
             try self.objects.append(gpa, object);
         }
     } else {
@@ -747,7 +751,16 @@ pub fn parseDylib(
     var file_size = math.cast(usize, file_stat.size) orelse return error.Overflow;
 
     const reader = file.reader();
-    const lib_offset = try fat.getLibraryOffset(reader, cpu_arch);
+    const lib_offset = fat.getLibraryOffset(reader, cpu_arch) catch |err| switch (err) {
+        error.MissingArch => {
+            self.base.fatal(
+                "{s}: could not find matching cpu architecture in fat library: expected {s}",
+                .{ path, @tagName(cpu_arch) },
+            );
+            return true;
+        },
+        else => |e| return e,
+    };
     try file.seekTo(lib_offset);
     file_size -= lib_offset;
 
@@ -764,8 +777,9 @@ pub fn parseDylib(
         dependent_libs,
         path,
         contents,
+        self,
     ) catch |err| switch (err) {
-        error.EndOfStream, error.NotDylib => {
+        error.NotDylib => {
             try file.seekTo(0);
 
             var lib_stub = LibStub.loadFromFile(gpa, file) catch {
@@ -836,7 +850,7 @@ fn parsePositionals(self: *MachO, files: []const []const u8, syslibroot: ?[]cons
             .syslibroot = syslibroot,
         })) continue;
 
-        log.warn("unknown filetype for positional input file: '{s}'", .{file_name});
+        self.base.fatal("unknown filetype for positional input file: '{s}'", .{file_name});
     }
 }
 
@@ -852,7 +866,8 @@ fn parseAndForceLoadStaticArchives(self: *MachO, files: []const []const u8) !voi
         log.debug("parsing and force loading static archive '{s}'", .{full_path});
 
         if (try self.parseArchive(full_path, true)) continue;
-        log.debug("unknown filetype: expected static archive: '{s}'", .{file_name});
+
+        self.base.fatal("unknown filetype: expected static archive: '{s}'", .{file_name});
     }
 }
 
@@ -876,7 +891,7 @@ fn parseLibs(
         })) continue;
         if (try self.parseArchive(lib, false)) continue;
 
-        log.warn("unknown filetype for a library: '{s}'", .{lib});
+        self.base.fatal("unknown filetype for a library: '{s}'", .{lib});
     }
 }
 
@@ -1512,6 +1527,7 @@ fn resolveSymbols(self: *MachO, resolver: *SymbolResolver) !void {
     }
 
     try self.resolveSymbolsInArchives(resolver);
+    self.base.reportWarningsAndErrorsAndExit();
     try self.resolveDyldStubBinder(resolver);
     try self.resolveSymbolsInDylibs(resolver);
     try self.createMhExecuteHeaderSymbol(resolver);
@@ -1531,24 +1547,15 @@ fn resolveSymbolsInObject(self: *MachO, object_id: u16, resolver: *SymbolResolve
         const sym_name = object.getSymbolName(sym_index);
 
         if (sym.stab()) {
-            log.err("unhandled symbol type: stab", .{});
-            log.err("  symbol '{s}'", .{sym_name});
-            log.err("  first definition in '{s}'", .{object.name});
-            return error.UnhandledSymbolType;
+            self.base.fatal("{s}: unhandled symbol type stab:{s}", .{ object.name, sym_name });
         }
 
         if (sym.indr()) {
-            log.err("unhandled symbol type: indirect", .{});
-            log.err("  symbol '{s}'", .{sym_name});
-            log.err("  first definition in '{s}'", .{object.name});
-            return error.UnhandledSymbolType;
+            self.base.fatal("{s}: unhandled symbol type indirect:{s}", .{ object.name, sym_name });
         }
 
         if (sym.abs()) {
-            log.err("unhandled symbol type: absolute", .{});
-            log.err("  symbol '{s}'", .{sym_name});
-            log.err("  first definition in '{s}'", .{object.name});
-            return error.UnhandledSymbolType;
+            self.base.fatal("{s}: unhandled symbol type absolute:{s}", .{ object.name, sym_name });
         }
 
         if (sym.sect() and !sym.ext()) {
@@ -1600,12 +1607,13 @@ fn resolveSymbolsInObject(self: *MachO, object_id: u16, resolver: *SymbolResolve
         const global_is_weak = global_sym.sect() and (global_sym.weakDef() or global_sym.pext());
 
         if (sym_is_strong and global_is_strong) {
-            log.err("symbol '{s}' defined multiple times", .{sym_name});
+            const nnotes = if (global.getFile() == null) @as(usize, 1) else 2;
+            const err = try self.base.addErrorWithNotes(nnotes);
+            try err.addMsg("symbol {s} defined multiple times", .{sym_name});
             if (global.getFile()) |file| {
-                log.err("  first definition in '{s}'", .{self.objects.items[file].name});
+                try err.addNote("first definition in {s}", .{self.objects.items[file].name});
             }
-            log.err("  next definition in '{s}'", .{self.objects.items[object_id].name});
-            return error.MultipleSymbolDefinitions;
+            try err.addNote("next definition in {s}", .{self.objects.items[object_id].name});
         }
 
         const update_global = blk: {
@@ -1650,7 +1658,7 @@ fn resolveSymbolsInArchives(self: *MachO, resolver: *SymbolResolver) !void {
             assert(offsets.items.len > 0);
 
             const object_id = @as(u16, @intCast(self.objects.items.len));
-            const object = try archive.parseObject(gpa, cpu_arch, offsets.items[0]);
+            const object = try archive.parseObject(gpa, cpu_arch, offsets.items[0], self);
             try self.objects.append(gpa, object);
             try self.resolveSymbolsInObject(object_id, resolver);
 
@@ -1701,7 +1709,6 @@ fn resolveSymbolsAtLoading(self: *MachO, resolver: *SymbolResolver) !void {
         const global_index = resolver.unresolved.keys()[next_sym];
         const global = self.globals.items[global_index];
         const sym = self.getSymbolPtr(global);
-        const sym_name = self.getSymbolName(global);
 
         if (sym.discarded()) {
             sym.* = .{
@@ -1724,12 +1731,22 @@ fn resolveSymbolsAtLoading(self: *MachO, resolver: *SymbolResolver) !void {
             continue;
         }
 
-        log.err("undefined reference to symbol '{s}'", .{sym_name});
-        if (global.getFile()) |file| {
-            log.err("  first referenced in '{s}'", .{self.objects.items[file].name});
-        }
-
         next_sym += 1;
+    }
+}
+
+fn reportUndefs(self: *MachO, resolver: *const SymbolResolver) !void {
+    for (resolver.unresolved.keys()) |global_index| {
+        const global = self.globals.items[global_index];
+        const sym_name = self.getSymbolName(global);
+
+        const nnotes: usize = if (global.getFile() == null) @as(usize, 0) else 1;
+        const err = try self.base.addErrorWithNotes(nnotes);
+        try err.addMsg("undefined symbol: {s}", .{sym_name});
+
+        if (global.getFile()) |file| {
+            try err.addNote("referenced in {s}", .{self.objects.items[file].name});
+        }
     }
 }
 
@@ -1813,8 +1830,7 @@ fn resolveDyldStubBinder(self: *MachO, resolver: *SymbolResolver) !void {
     }
 
     if (self.dyld_stub_binder_index == null) {
-        log.err("undefined reference to symbol '{s}'", .{sym_name});
-        return error.UndefinedSymbolReference;
+        self.base.fatal("undefined reference to symbol '{s}'", .{sym_name});
     }
 }
 
@@ -3568,7 +3584,7 @@ pub fn generateSymbolStabs(self: *MachO, object: Object, locals: *std.ArrayList(
     };
 
     var abbrev_it = compile_unit.getAbbrevEntryIterator(debug_info);
-    const cu_entry: DwarfInfo.AbbrevEntry = while (try abbrev_it.next(lookup)) |entry| switch (entry.tag) {
+    const cu_entry: DwarfInfo.AbbrevEntry = while (try abbrev_it.next(lookup, self)) |entry| switch (entry.tag) {
         dwarf.TAG.compile_unit => break entry,
         else => continue,
     } else {
@@ -3580,7 +3596,7 @@ pub fn generateSymbolStabs(self: *MachO, object: Object, locals: *std.ArrayList(
     var maybe_tu_comp_dir: ?[]const u8 = null;
     var attr_it = cu_entry.getAttributeIterator(debug_info, compile_unit.cuh);
 
-    while (try attr_it.next()) |attr| switch (attr.name) {
+    while (try attr_it.next(self)) |attr| switch (attr.name) {
         dwarf.AT.comp_dir => maybe_tu_comp_dir = attr.getString(debug_info, compile_unit.cuh) orelse continue,
         dwarf.AT.name => maybe_tu_name = attr.getString(debug_info, compile_unit.cuh) orelse continue,
         else => continue,
@@ -3624,7 +3640,7 @@ pub fn generateSymbolStabs(self: *MachO, object: Object, locals: *std.ArrayList(
         var name_lookup = DwarfInfo.SubprogramLookupByName.init(gpa);
         errdefer name_lookup.deinit();
         try name_lookup.ensureUnusedCapacity(@as(u32, @intCast(object.atoms.items.len)));
-        try debug_info.genSubprogramLookupByName(compile_unit, lookup, &name_lookup);
+        try debug_info.genSubprogramLookupByName(compile_unit, lookup, &name_lookup, self);
         break :blk name_lookup;
     } else null;
     defer if (name_lookup) |*nl| nl.deinit();

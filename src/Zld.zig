@@ -76,14 +76,12 @@ pub const Options = union {
 
 pub const ErrorMsg = struct {
     msg: []const u8,
-    notes: ?[]ErrorMsg = null,
+    notes: std.ArrayListUnmanaged(ErrorMsg) = .{},
 
     fn deinit(err: *ErrorMsg, allocator: Allocator) void {
         allocator.free(err.msg);
-        if (err.notes) |notes| {
-            for (notes) |*note| note.deinit(allocator);
-            allocator.free(notes);
-        }
+        for (err.notes.items) |*note| note.deinit(allocator);
+        err.notes.deinit(allocator);
     }
 };
 
@@ -147,15 +145,49 @@ pub fn fatal(base: *Zld, comptime format: []const u8, args: anytype) void {
     base.errors.appendAssumeCapacity(.{ .msg = msg });
 }
 
+pub const ErrorWithNotes = struct {
+    err_index: usize,
+    ctx: *Zld,
+
+    pub fn addMsg(err: ErrorWithNotes, comptime format: []const u8, args: anytype) !void {
+        const err_msg = err.getErrorMsg();
+        err_msg.msg = try std.fmt.allocPrint(err.ctx.allocator, format, args);
+    }
+
+    pub fn addNote(err: ErrorWithNotes, comptime format: []const u8, args: anytype) !void {
+        const err_msg = err.getErrorMsg();
+        err_msg.notes.appendAssumeCapacity(.{
+            .msg = try std.fmt.allocPrint(err.ctx.allocator, format, args),
+        });
+    }
+
+    fn getErrorMsg(err: ErrorWithNotes) *ErrorMsg {
+        assert(err.err_index < err.ctx.errors.items.len);
+        return &err.ctx.errors.items[err.err_index];
+    }
+};
+
+pub fn addErrorWithNotes(base: *Zld, note_count: usize) !ErrorWithNotes {
+    const err_index = base.errors.items.len;
+    const err_msg = try base.errors.addOne(base.allocator);
+    err_msg.* = .{ .msg = undefined };
+    try err_msg.notes.ensureTotalCapacityPrecise(base.allocator, note_count);
+    return .{ .err_index = err_index, .ctx = base };
+}
+
 pub fn getAllWarningsAlloc(base: *Zld) !ErrorBundle {
     var bundle: ErrorBundle.Wip = undefined;
     try bundle.init(base.allocator);
     defer bundle.deinit();
+    defer {
+        while (base.warnings.popOrNull()) |msg| {
+            var mut_msg = msg;
+            mut_msg.deinit(base.allocator);
+        }
+    }
 
-    while (base.warnings.popOrNull()) |msg| {
-        var mut_msg = msg;
-        defer mut_msg.deinit(base.allocator);
-        assert(msg.notes == null);
+    for (base.warnings.items) |msg| {
+        assert(msg.notes.items.len == 0);
         try bundle.addRootErrorMessage(.{ .msg = try bundle.addString(msg.msg) });
     }
 
@@ -166,11 +198,15 @@ pub fn getAllErrorsAlloc(base: *Zld) !ErrorBundle {
     var bundle: ErrorBundle.Wip = undefined;
     try bundle.init(base.allocator);
     defer bundle.deinit();
+    defer {
+        while (base.errors.popOrNull()) |msg| {
+            var mut_msg = msg;
+            mut_msg.deinit(base.allocator);
+        }
+    }
 
-    while (base.errors.popOrNull()) |msg| {
-        var mut_msg = msg;
-        defer mut_msg.deinit(base.allocator);
-        const notes = msg.notes orelse &[0]ErrorMsg{};
+    for (base.errors.items) |msg| {
+        const notes = msg.notes.items;
         try bundle.addRootErrorMessage(.{
             .msg = try bundle.addString(msg.msg),
             .notes_len = @as(u32, @intCast(notes.len)),

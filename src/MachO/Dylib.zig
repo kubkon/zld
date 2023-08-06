@@ -134,13 +134,14 @@ pub fn parseFromBinary(
     dependent_libs: anytype,
     name: []const u8,
     data: []align(@alignOf(u64)) const u8,
+    macho_file: *MachO,
 ) !void {
     var stream = std.io.fixedBufferStream(data);
     const reader = stream.reader();
 
     log.debug("parsing shared library '{s}'", .{name});
 
-    const header = try reader.readStruct(macho.mach_header_64);
+    const header = reader.readStruct(macho.mach_header_64) catch return error.NotDylib;
 
     if (header.filetype != macho.MH_DYLIB) {
         log.debug("invalid filetype: expected 0x{x}, found 0x{x}", .{
@@ -150,14 +151,20 @@ pub fn parseFromBinary(
         return error.NotDylib;
     }
 
-    const this_arch: std.Target.Cpu.Arch = try fat.decodeArch(header.cputype, true);
+    const this_arch: std.Target.Cpu.Arch = switch (header.cputype) {
+        macho.CPU_TYPE_ARM64 => .aarch64,
+        macho.CPU_TYPE_X86_64 => .x86_64,
+        else => |value| {
+            return macho_file.base.fatal("{s}: unsupported cpu architecture 0x{x}", .{ name, value });
+        },
+    };
 
     if (this_arch != cpu_arch) {
-        log.err("mismatched cpu architecture: expected {s}, found {s}", .{
+        return macho_file.base.fatal("{s}: mismatched cpu architecture: expected {s}, found {s}", .{
+            name,
             @tagName(cpu_arch),
             @tagName(this_arch),
         });
-        return error.MismatchedCpuArchitecture;
     }
 
     const should_lookup_reexports = header.flags & macho.MH_NO_REEXPORTED_DYLIBS == 0;

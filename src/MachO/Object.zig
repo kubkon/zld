@@ -114,14 +114,19 @@ pub fn deinit(self: *Object, gpa: Allocator) void {
     self.data_in_code.deinit(gpa);
 }
 
-pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch) !void {
+pub fn parse(
+    self: *Object,
+    allocator: Allocator,
+    cpu_arch: std.Target.Cpu.Arch,
+    macho_file: *MachO,
+) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
     var stream = std.io.fixedBufferStream(self.contents);
     const reader = stream.reader();
 
-    self.header = try reader.readStruct(macho.mach_header_64);
+    self.header = reader.readStruct(macho.mach_header_64) catch return error.NotObject;
 
     if (self.header.filetype != macho.MH_OBJECT) {
         log.debug("invalid filetype: expected 0x{x}, found 0x{x}", .{
@@ -135,16 +140,17 @@ pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch)
         macho.CPU_TYPE_ARM64 => .aarch64,
         macho.CPU_TYPE_X86_64 => .x86_64,
         else => |value| {
-            log.err("unsupported cpu architecture 0x{x}", .{value});
-            return error.UnsupportedCpuArchitecture;
+            macho_file.base.fatal("unsupported cpu architecture 0x{x}", .{value});
+            return;
         },
     };
     if (this_arch != cpu_arch) {
-        log.err("mismatched cpu architecture: expected {s}, found {s}", .{
+        macho_file.base.fatal("{s}: mismatched cpu architecture: expected {s}, found {s}", .{
+            self.name,
             @tagName(cpu_arch),
             @tagName(this_arch),
         });
-        return error.MismatchedCpuArchitecture;
+        return;
     }
 
     var it = LoadCommandIterator{
@@ -711,7 +717,7 @@ fn parseEhFrameSection(self: *Object, macho_file: *MachO, object_id: u32) !void 
 
     var it = self.getEhFrameRecordsIterator();
     var record_count: u32 = 0;
-    while (try it.next()) |_| {
+    while (try it.next(macho_file)) |_| {
         record_count += 1;
     }
 
@@ -720,7 +726,7 @@ fn parseEhFrameSection(self: *Object, macho_file: *MachO, object_id: u32) !void 
 
     it.reset();
 
-    while (try it.next()) |record| {
+    while (try it.next(macho_file)) |record| {
         const offset = it.pos - record.getSize();
         const rel_pos: Entry = switch (cpu_arch) {
             .aarch64 => filterRelocs(relocs, offset, offset + record.getSize()),
@@ -807,11 +813,8 @@ fn parseUnwindInfo(self: *Object, macho_file: *MachO, object_id: u32) !void {
         if (UnwindInfo.UnwindEncoding.isDwarf(record.compactUnwindEncoding, cpu_arch)) break true;
     } else false;
 
-    if (needs_eh_frame and !self.hasEhFrameRecords()) {
-        log.err("missing __TEXT,__eh_frame section", .{});
-        log.err("  in object {s}", .{self.name});
-        return error.MissingEhFrameSection;
-    }
+    if (needs_eh_frame and !self.hasEhFrameRecords())
+        return macho_file.base.fatal("{s}: missing '__TEXT,__eh_frame' section", .{self.name});
 
     try self.parseRelocs(gpa, sect_id);
     const relocs = self.getRelocs(sect_id);

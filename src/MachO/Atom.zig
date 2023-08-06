@@ -468,10 +468,11 @@ pub fn getRelocTargetAddress(
             } else if (macho_file.getSectionByName("__DATA", "__thread_bss")) |i| {
                 break :sect_id i;
             } else {
-                log.err("threadlocal variables present but no initializer sections found", .{});
-                log.err("  __thread_data not found", .{});
-                log.err("  __thread_bss not found", .{});
-                return error.FailedToResolveRelocationTarget;
+                macho_file.base.fatal(
+                    "{s}: TLS variables present but no initializer sections found",
+                    .{macho_file.objects.items[target_atom.getFile().?].name},
+                );
+                break :base_address 0;
             }
         };
         break :base_address macho_file.sections.items(.header)[sect_id].addr;

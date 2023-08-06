@@ -27,7 +27,7 @@ pub fn scanRelocs(macho_file: *MachO) !void {
                 const fde_offset = object.eh_frame_records_lookup.get(sym) orelse continue;
                 if (object.eh_frame_relocs_lookup.get(fde_offset).?.dead) continue;
                 it.seekTo(fde_offset);
-                const fde = (try it.next()).?;
+                const fde = (try it.next(macho_file)).?;
 
                 const cie_ptr = fde.getCiePointerSource(@as(u32, @intCast(object_id)), macho_file, fde_offset);
                 const cie_offset = fde_offset + 4 - cie_ptr;
@@ -35,7 +35,7 @@ pub fn scanRelocs(macho_file: *MachO) !void {
                 if (!cies.contains(cie_offset)) {
                     try cies.putNoClobber(cie_offset, {});
                     it.seekTo(cie_offset);
-                    const cie = (try it.next()).?;
+                    const cie = (try it.next(macho_file)).?;
                     try cie.scanRelocs(macho_file, @as(u32, @intCast(object_id)), cie_offset);
                 }
             }
@@ -73,7 +73,7 @@ pub fn calcSectionSize(macho_file: *MachO, unwind_info: *const UnwindInfo) !void
                 if (!is_dwarf) continue;
 
                 eh_it.seekTo(fde_record_offset);
-                const source_fde_record = (try eh_it.next()).?;
+                const source_fde_record = (try eh_it.next(macho_file)).?;
 
                 const cie_ptr = source_fde_record.getCiePointerSource(@as(u32, @intCast(object_id)), macho_file, fde_record_offset);
                 const cie_offset = fde_record_offset + 4 - cie_ptr;
@@ -81,7 +81,7 @@ pub fn calcSectionSize(macho_file: *MachO, unwind_info: *const UnwindInfo) !void
                 const gop = try cies.getOrPut(cie_offset);
                 if (!gop.found_existing) {
                     eh_it.seekTo(cie_offset);
-                    const source_cie_record = (try eh_it.next()).?;
+                    const source_cie_record = (try eh_it.next(macho_file)).?;
                     gop.value_ptr.* = size;
                     size += source_cie_record.getSize();
                 }
@@ -135,7 +135,7 @@ pub fn write(macho_file: *MachO, unwind_info: *UnwindInfo) !void {
                 if (!is_dwarf) continue;
 
                 eh_it.seekTo(fde_record_offset);
-                const source_fde_record = (try eh_it.next()).?;
+                const source_fde_record = (try eh_it.next(macho_file)).?;
 
                 const cie_ptr = source_fde_record.getCiePointerSource(@as(u32, @intCast(object_id)), macho_file, fde_record_offset);
                 const cie_offset = fde_record_offset + 4 - cie_ptr;
@@ -143,7 +143,7 @@ pub fn write(macho_file: *MachO, unwind_info: *UnwindInfo) !void {
                 const gop = try cies.getOrPut(cie_offset);
                 if (!gop.found_existing) {
                     eh_it.seekTo(cie_offset);
-                    const source_cie_record = (try eh_it.next()).?;
+                    const source_cie_record = (try eh_it.next(macho_file)).?;
                     var cie_record = try source_cie_record.toOwned(gpa);
                     try cie_record.relocate(macho_file, @as(u32, @intCast(object_id)), .{
                         .source_offset = cie_offset,
@@ -594,7 +594,7 @@ pub const Iterator = struct {
     data: []const u8,
     pos: u32 = 0,
 
-    pub fn next(it: *Iterator) !?EhFrameRecord(false) {
+    pub fn next(it: *Iterator, macho_file: *MachO) !?EhFrameRecord(false) {
         if (it.pos >= it.data.len) return null;
 
         var stream = std.io.fixedBufferStream(it.data[it.pos..]);
@@ -602,8 +602,8 @@ pub const Iterator = struct {
 
         var size = try reader.readIntLittle(u32);
         if (size == 0xFFFFFFFF) {
-            log.err("MachO doesn't support 64bit DWARF CFI __eh_frame records", .{});
-            return error.UnsupportedDwarfCfiFormat;
+            macho_file.base.fatal("MachO doesn't support 64bit DWARF CFI __eh_frame records", .{});
+            return null;
         }
 
         const id = try reader.readIntLittle(u32);
