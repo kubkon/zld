@@ -8,6 +8,8 @@ const log = std.log.scoped(.macho);
 const mem = std.mem;
 
 const Allocator = mem.Allocator;
+const MachO = @import("../MachO.zig");
+
 pub const AbbrevLookupTable = std.AutoHashMap(u64, struct { pos: usize, len: usize });
 pub const SubprogramLookupByName = std.StringHashMap(struct { addr: u64, size: u64 });
 
@@ -49,9 +51,10 @@ pub fn genSubprogramLookupByName(
     compile_unit: CompileUnit,
     abbrev_lookup: AbbrevLookupTable,
     lookup: *SubprogramLookupByName,
+    macho_file: *MachO,
 ) !void {
     var abbrev_it = compile_unit.getAbbrevEntryIterator(self);
-    while (try abbrev_it.next(abbrev_lookup)) |entry| switch (entry.tag) {
+    while (try abbrev_it.next(abbrev_lookup, macho_file)) |entry| switch (entry.tag) {
         dwarf.TAG.subprogram => {
             var attr_it = entry.getAttributeIterator(self, compile_unit.cuh);
 
@@ -59,7 +62,7 @@ pub fn genSubprogramLookupByName(
             var low_pc: ?u64 = null;
             var high_pc: ?u64 = null;
 
-            while (try attr_it.next()) |attr| switch (attr.name) {
+            while (try attr_it.next(macho_file)) |attr| switch (attr.name) {
                 dwarf.AT.name => if (attr.getString(self, compile_unit.cuh)) |str| {
                     name = str;
                 },
@@ -169,7 +172,7 @@ const AbbrevEntryIterator = struct {
     ctx: DwarfInfo,
     pos: usize = 0,
 
-    pub fn next(self: *AbbrevEntryIterator, lookup: AbbrevLookupTable) !?AbbrevEntry {
+    pub fn next(self: *AbbrevEntryIterator, lookup: AbbrevLookupTable, macho_file: *MachO) !?AbbrevEntry {
         if (self.pos + self.cu.debug_info_off >= self.ctx.debug_info.len) return null;
 
         const debug_info = self.ctx.debug_info[self.pos + self.cu.debug_info_off ..];
@@ -191,6 +194,7 @@ const AbbrevEntryIterator = struct {
             abbrev_pos.len,
             self.pos + self.cu.debug_info_off,
             self.cu.cuh,
+            macho_file,
         );
         const entry = try getAbbrevEntry(
             self.ctx,
@@ -306,7 +310,7 @@ const AttributeIterator = struct {
     debug_abbrev_pos: usize = 0,
     debug_info_pos: usize = 0,
 
-    pub fn next(self: *AttributeIterator) !?Attribute {
+    pub fn next(self: *AttributeIterator, macho_file: *MachO) !?Attribute {
         const debug_abbrev = self.entry.getDebugAbbrev(self.ctx);
         if (self.debug_abbrev_pos >= debug_abbrev.len) return null;
 
@@ -324,6 +328,7 @@ const AttributeIterator = struct {
             form,
             self.debug_info_pos + self.entry.debug_info_off,
             self.cuh,
+            macho_file,
         );
         const attr = Attribute{
             .name = name,
@@ -368,7 +373,13 @@ fn getAbbrevEntry(self: DwarfInfo, da_off: usize, da_len: usize, di_off: usize, 
     };
 }
 
-fn findFormSize(self: DwarfInfo, form: u64, di_off: usize, cuh: CompileUnit.Header) !usize {
+fn findFormSize(
+    self: DwarfInfo,
+    form: u64,
+    di_off: usize,
+    cuh: CompileUnit.Header,
+    macho_file: *MachO,
+) !usize {
     const debug_info = self.debug_info[di_off..];
     var stream = std.io.fixedBufferStream(debug_info);
     var creader = std.io.countingReader(stream.reader());
@@ -452,13 +463,20 @@ fn findFormSize(self: DwarfInfo, form: u64, di_off: usize, cuh: CompileUnit.Head
         },
 
         else => {
-            log.err("unhandled DW_FORM_* value with identifier {x}", .{form});
-            return error.UnhandledDwFormValue;
+            macho_file.base.fatal("unhandled DW_FORM_* value with identifier {x}", .{form});
+            return 0;
         },
     }
 }
 
-fn findAbbrevEntrySize(self: DwarfInfo, da_off: usize, da_len: usize, di_off: usize, cuh: CompileUnit.Header) !usize {
+fn findAbbrevEntrySize(
+    self: DwarfInfo,
+    da_off: usize,
+    da_len: usize,
+    di_off: usize,
+    cuh: CompileUnit.Header,
+    macho_file: *MachO,
+) !usize {
     const debug_abbrev = self.debug_abbrev[da_off..][0..da_len];
     var stream = std.io.fixedBufferStream(debug_abbrev);
     var creader = std.io.countingReader(stream.reader());
@@ -484,7 +502,7 @@ fn findAbbrevEntrySize(self: DwarfInfo, da_off: usize, da_len: usize, di_off: us
     while (creader.bytes_read < debug_abbrev.len) {
         _ = try leb.readULEB128(u64, reader);
         const form = try leb.readULEB128(u64, reader);
-        const form_len = try self.findFormSize(form, di_off + len, cuh);
+        const form_len = try self.findFormSize(form, di_off + len, cuh, macho_file);
         len += form_len;
     }
 

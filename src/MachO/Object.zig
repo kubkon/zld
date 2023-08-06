@@ -717,7 +717,7 @@ fn parseEhFrameSection(self: *Object, macho_file: *MachO, object_id: u32) !void 
 
     var it = self.getEhFrameRecordsIterator();
     var record_count: u32 = 0;
-    while (try it.next()) |_| {
+    while (try it.next(macho_file)) |_| {
         record_count += 1;
     }
 
@@ -726,7 +726,7 @@ fn parseEhFrameSection(self: *Object, macho_file: *MachO, object_id: u32) !void 
 
     it.reset();
 
-    while (try it.next()) |record| {
+    while (try it.next(macho_file)) |record| {
         const offset = it.pos - record.getSize();
         const rel_pos: Entry = switch (cpu_arch) {
             .aarch64 => filterRelocs(relocs, offset, offset + record.getSize()),

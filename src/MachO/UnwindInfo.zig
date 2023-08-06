@@ -529,11 +529,11 @@ fn collectPersonalityFromDwarf(
     var it = object.getEhFrameRecordsIterator();
     const fde_offset = object.eh_frame_records_lookup.get(sym_loc).?;
     it.seekTo(fde_offset);
-    const fde = (try it.next()).?;
+    const fde = (try it.next(macho_file)).?;
     const cie_ptr = fde.getCiePointerSource(object_id, macho_file, fde_offset);
     const cie_offset = fde_offset + 4 - cie_ptr;
     it.seekTo(cie_offset);
-    const cie = (try it.next()).?;
+    const cie = (try it.next(macho_file)).?;
 
     if (cie.getPersonalityPointerReloc(
         macho_file,

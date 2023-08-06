@@ -528,6 +528,8 @@ pub fn flush(self: *MachO) !void {
             try dir.copyFile(path, dir, path, .{});
         }
     }
+
+    self.base.reportWarningsAndErrorsAndExit();
 }
 
 fn resolveSearchDir(
@@ -3582,7 +3584,7 @@ pub fn generateSymbolStabs(self: *MachO, object: Object, locals: *std.ArrayList(
     };
 
     var abbrev_it = compile_unit.getAbbrevEntryIterator(debug_info);
-    const cu_entry: DwarfInfo.AbbrevEntry = while (try abbrev_it.next(lookup)) |entry| switch (entry.tag) {
+    const cu_entry: DwarfInfo.AbbrevEntry = while (try abbrev_it.next(lookup, self)) |entry| switch (entry.tag) {
         dwarf.TAG.compile_unit => break entry,
         else => continue,
     } else {
@@ -3594,7 +3596,7 @@ pub fn generateSymbolStabs(self: *MachO, object: Object, locals: *std.ArrayList(
     var maybe_tu_comp_dir: ?[]const u8 = null;
     var attr_it = cu_entry.getAttributeIterator(debug_info, compile_unit.cuh);
 
-    while (try attr_it.next()) |attr| switch (attr.name) {
+    while (try attr_it.next(self)) |attr| switch (attr.name) {
         dwarf.AT.comp_dir => maybe_tu_comp_dir = attr.getString(debug_info, compile_unit.cuh) orelse continue,
         dwarf.AT.name => maybe_tu_name = attr.getString(debug_info, compile_unit.cuh) orelse continue,
         else => continue,
@@ -3638,7 +3640,7 @@ pub fn generateSymbolStabs(self: *MachO, object: Object, locals: *std.ArrayList(
         var name_lookup = DwarfInfo.SubprogramLookupByName.init(gpa);
         errdefer name_lookup.deinit();
         try name_lookup.ensureUnusedCapacity(@as(u32, @intCast(object.atoms.items.len)));
-        try debug_info.genSubprogramLookupByName(compile_unit, lookup, &name_lookup);
+        try debug_info.genSubprogramLookupByName(compile_unit, lookup, &name_lookup, self);
         break :blk name_lookup;
     } else null;
     defer if (name_lookup) |*nl| nl.deinit();
