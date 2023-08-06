@@ -58,6 +58,7 @@ const ar_hdr = extern struct {
         Name: []const u8,
         Length: u32,
     };
+
     fn nameOrLength(self: ar_hdr) !NameOrLength {
         const value = getValue(&self.ar_name);
         const slash_index = mem.indexOf(u8, value, "/") orelse return error.MalformedArchive;
@@ -99,7 +100,7 @@ pub fn deinit(self: *Archive, allocator: Allocator) void {
     allocator.free(self.name);
 }
 
-pub fn parse(self: *Archive, allocator: Allocator, reader: anytype) !void {
+pub fn parse(self: *Archive, allocator: Allocator, reader: anytype, macho_file: *MachO) !void {
     const magic = reader.readBytesNoEof(SARMAG) catch return error.NotArchive;
     if (!mem.eql(u8, &magic, ARMAG)) {
         log.debug("invalid magic: expected '{s}', found '{s}'", .{ ARMAG, magic });
@@ -120,7 +121,7 @@ pub fn parse(self: *Archive, allocator: Allocator, reader: anytype) !void {
     log.debug("parsing archive '{s}' at '{s}'", .{ embedded_name, self.name });
     defer allocator.free(embedded_name);
 
-    try self.parseTableOfContents(allocator, reader);
+    try self.parseTableOfContents(allocator, reader, macho_file);
 }
 
 fn parseName(allocator: Allocator, name_or_length: ar_hdr.NameOrLength, reader: anytype) ![]u8 {
@@ -140,24 +141,24 @@ fn parseName(allocator: Allocator, name_or_length: ar_hdr.NameOrLength, reader: 
     return name;
 }
 
-fn parseTableOfContents(self: *Archive, allocator: Allocator, reader: anytype) !void {
+fn parseTableOfContents(self: *Archive, allocator: Allocator, reader: anytype, macho_file: *MachO) !void {
     const symtab_size = try reader.readIntLittle(u32);
     var symtab = try allocator.alloc(u8, symtab_size);
     defer allocator.free(symtab);
 
-    reader.readNoEof(symtab) catch {
-        log.err("incomplete symbol table: expected symbol table of length 0x{x}", .{symtab_size});
-        return error.MalformedArchive;
-    };
+    reader.readNoEof(symtab) catch return macho_file.base.fatal(
+        "{s}: incomplete symbol table: expected symbol table of length {d}",
+        .{ self.name, symtab_size },
+    );
 
     const strtab_size = try reader.readIntLittle(u32);
     var strtab = try allocator.alloc(u8, strtab_size);
     defer allocator.free(strtab);
 
-    reader.readNoEof(strtab) catch {
-        log.err("incomplete symbol table: expected string table of length 0x{x}", .{strtab_size});
-        return error.MalformedArchive;
-    };
+    reader.readNoEof(strtab) catch return macho_file.base.fatal(
+        "{s}: incomplete symbol table: expected string table of length {d}",
+        .{ self.name, strtab_size },
+    );
 
     var symtab_stream = std.io.fixedBufferStream(symtab);
     var symtab_reader = symtab_stream.reader();
@@ -174,9 +175,7 @@ fn parseTableOfContents(self: *Archive, allocator: Allocator, reader: anytype) !
         const res = try self.toc.getOrPut(allocator, owned_name);
         defer if (res.found_existing) allocator.free(owned_name);
 
-        if (!res.found_existing) {
-            res.value_ptr.* = .{};
-        }
+        if (!res.found_existing) res.value_ptr.* = .{};
 
         try res.value_ptr.append(allocator, object_offset);
     }
@@ -195,8 +194,11 @@ pub fn parseObject(
     const object_header = try reader.readStruct(ar_hdr);
 
     if (!mem.eql(u8, &object_header.ar_fmag, ARFMAG)) {
-        log.err("invalid header delimiter: expected '{s}', found '{s}'", .{ ARFMAG, object_header.ar_fmag });
-        return error.MalformedArchive;
+        macho_file.base.warn("{s}: invalid header delimiter: expected '{s}', found '{s}'", .{
+            self.name,
+            ARFMAG,
+            object_header.ar_fmag,
+        });
     }
 
     const name_or_length = try object_header.nameOrLength();

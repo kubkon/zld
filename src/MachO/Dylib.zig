@@ -155,17 +155,16 @@ pub fn parseFromBinary(
         macho.CPU_TYPE_ARM64 => .aarch64,
         macho.CPU_TYPE_X86_64 => .x86_64,
         else => |value| {
-            macho_file.base.fatal("unsupported cpu architecture 0x{x}", .{value});
-            return;
+            return macho_file.base.fatal("{s}: unsupported cpu architecture 0x{x}", .{ name, value });
         },
     };
 
     if (this_arch != cpu_arch) {
-        log.err("mismatched cpu architecture: expected {s}, found {s}", .{
+        return macho_file.base.fatal("{s}: mismatched cpu architecture: expected {s}, found {s}", .{
+            name,
             @tagName(cpu_arch),
             @tagName(this_arch),
         });
-        return error.MismatchedCpuArchitecture;
     }
 
     const should_lookup_reexports = header.flags & macho.MH_NO_REEXPORTED_DYLIBS == 0;

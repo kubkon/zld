@@ -696,7 +696,7 @@ fn parseArchive(self: *MachO, path: []const u8, force_load: bool) !bool {
         .name = name,
     };
 
-    archive.parse(gpa, reader) catch |err| switch (err) {
+    archive.parse(gpa, reader, self) catch |err| switch (err) {
         error.EndOfStream, error.NotArchive => {
             archive.deinit(gpa);
             return false;
