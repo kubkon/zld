@@ -10,6 +10,7 @@ pub fn addMachOTests(b: *Build, opts: Options) *Step {
         macho_step.dependOn(testEntryPointArchive(b, opts));
         macho_step.dependOn(testEntryPointDylib(b, opts));
         macho_step.dependOn(testFatArchive(b, opts));
+        macho_step.dependOn(testFatDylib(b, opts));
         macho_step.dependOn(testHeaderpad(b, opts));
         macho_step.dependOn(testHello(b, opts));
         macho_step.dependOn(testLayout(b, opts));
@@ -284,6 +285,44 @@ fn testFatArchive(b: *Build, opts: Options) *Step {
     fat_lib.addFileSource(lib_arm64);
     fat_lib.addFileSource(lib_x64);
     const fat_lib_out = fat_lib.saveOutputAs("liba.a");
+
+    const exe = cc(b, opts);
+    exe.addCSource(
+        \\#include<stdio.h>
+        \\extern int foo;
+        \\int main() {
+        \\  printf("%d\n", foo);
+        \\  return 0;
+        \\}
+    );
+    exe.addFileSource(fat_lib_out.file);
+
+    const run = exe.run();
+    run.expectStdOutEqual("42\n");
+    test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+fn testFatDylib(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-fat-dylib", "");
+
+    const a_c = "int foo = 42;";
+
+    const dylib_arm64 = cc(b, opts);
+    dylib_arm64.addCSource(a_c);
+    dylib_arm64.addArgs(&.{ "-shared", "-arch", "arm64" });
+    const dylib_arm64_out = dylib_arm64.saveOutputAs("liba.dylib");
+
+    const dylib_x64 = cc(b, opts);
+    dylib_x64.addCSource(a_c);
+    dylib_x64.addArgs(&.{ "-shared", "-arch", "x86_64" });
+    const dylib_x64_out = dylib_x64.saveOutputAs("liba.dylib");
+
+    const fat_lib = lipo(b);
+    fat_lib.addFileSource(dylib_arm64_out.file);
+    fat_lib.addFileSource(dylib_x64_out.file);
+    const fat_lib_out = fat_lib.saveOutputAs("liba.dylib");
 
     const exe = cc(b, opts);
     exe.addCSource(
