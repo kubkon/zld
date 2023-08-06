@@ -344,7 +344,6 @@ pub fn flush(self: *MachO) !void {
     };
     try self.resolveSymbols(&resolver);
     try self.reportUndefs(&resolver);
-
     self.base.reportWarningsAndErrorsAndExit();
 
     if (self.options.output_mode == .exe) {
@@ -1526,6 +1525,7 @@ fn resolveSymbols(self: *MachO, resolver: *SymbolResolver) !void {
     }
 
     try self.resolveSymbolsInArchives(resolver);
+    self.base.reportWarningsAndErrorsAndExit();
     try self.resolveDyldStubBinder(resolver);
     try self.resolveSymbolsInDylibs(resolver);
     try self.createMhExecuteHeaderSymbol(resolver);
@@ -1545,24 +1545,15 @@ fn resolveSymbolsInObject(self: *MachO, object_id: u16, resolver: *SymbolResolve
         const sym_name = object.getSymbolName(sym_index);
 
         if (sym.stab()) {
-            log.err("unhandled symbol type: stab", .{});
-            log.err("  symbol '{s}'", .{sym_name});
-            log.err("  first definition in '{s}'", .{object.name});
-            return error.UnhandledSymbolType;
+            self.base.fatal("{s}: unhandled symbol type stab:{s}", .{ object.name, sym_name });
         }
 
         if (sym.indr()) {
-            log.err("unhandled symbol type: indirect", .{});
-            log.err("  symbol '{s}'", .{sym_name});
-            log.err("  first definition in '{s}'", .{object.name});
-            return error.UnhandledSymbolType;
+            self.base.fatal("{s}: unhandled symbol type indirect:{s}", .{ object.name, sym_name });
         }
 
         if (sym.abs()) {
-            log.err("unhandled symbol type: absolute", .{});
-            log.err("  symbol '{s}'", .{sym_name});
-            log.err("  first definition in '{s}'", .{object.name});
-            return error.UnhandledSymbolType;
+            self.base.fatal("{s}: unhandled symbol type absolute:{s}", .{ object.name, sym_name });
         }
 
         if (sym.sect() and !sym.ext()) {
@@ -1614,12 +1605,13 @@ fn resolveSymbolsInObject(self: *MachO, object_id: u16, resolver: *SymbolResolve
         const global_is_weak = global_sym.sect() and (global_sym.weakDef() or global_sym.pext());
 
         if (sym_is_strong and global_is_strong) {
-            log.err("symbol '{s}' defined multiple times", .{sym_name});
+            const nnotes = if (global.getFile() == null) @as(usize, 1) else 2;
+            const err = try self.base.addErrorWithNotes(nnotes);
+            try err.addMsg("symbol {s} defined multiple times", .{sym_name});
             if (global.getFile()) |file| {
-                log.err("  first definition in '{s}'", .{self.objects.items[file].name});
+                try err.addNote("first definition in {s}", .{self.objects.items[file].name});
             }
-            log.err("  next definition in '{s}'", .{self.objects.items[object_id].name});
-            return error.MultipleSymbolDefinitions;
+            try err.addNote("next definition in {s}", .{self.objects.items[object_id].name});
         }
 
         const update_global = blk: {
