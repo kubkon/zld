@@ -147,7 +147,7 @@ pub fn scanAtomRelocs(
     const tracy = trace(@src());
     defer tracy.end();
 
-    const arch = macho_file.options.target.cpu_arch.?;
+    const arch = macho_file.options.cpu_arch.?;
     const atom = macho_file.getAtom(atom_index);
     assert(atom.getFile() != null); // synthetic atoms do not have relocs
 
@@ -207,7 +207,7 @@ pub fn parseRelocTarget(macho_file: *MachO, ctx: struct {
             else
                 mem.readIntLittle(u32, ctx.code[rel_offset..][0..4]);
         } else blk: {
-            assert(macho_file.options.target.cpu_arch.? == .x86_64);
+            assert(macho_file.options.cpu_arch.? == .x86_64);
             const correction: u3 = switch (@as(macho.reloc_type_x86_64, @enumFromInt(ctx.rel.r_type))) {
                 .X86_64_RELOC_SIGNED => 0,
                 .X86_64_RELOC_SIGNED_1 => 1,
@@ -407,7 +407,7 @@ pub fn resolveRelocs(
     const tracy = trace(@src());
     defer tracy.end();
 
-    const arch = macho_file.options.target.cpu_arch.?;
+    const arch = macho_file.options.cpu_arch.?;
     const atom = macho_file.getAtom(atom_index);
     assert(atom.getFile() != null); // synthetic atoms do not have relocs
 
@@ -1050,7 +1050,7 @@ pub fn calcPageOffset(target_addr: u64, kind: PageOffsetInstKind) !u12 {
 }
 
 pub fn relocRequiresGot(macho_file: *MachO, rel: macho.relocation_info) bool {
-    switch (macho_file.options.target.cpu_arch.?) {
+    switch (macho_file.options.cpu_arch.?) {
         .aarch64 => switch (@as(macho.reloc_type_arm64, @enumFromInt(rel.r_type))) {
             .ARM64_RELOC_GOT_LOAD_PAGE21,
             .ARM64_RELOC_GOT_LOAD_PAGEOFF12,

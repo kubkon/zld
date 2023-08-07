@@ -65,10 +65,6 @@ uuid_cmd: macho.uuid_command = .{
 },
 codesig_cmd: macho.linkedit_data_command = .{ .cmd = .CODE_SIGNATURE },
 
-/// Page size is dependent on the target cpu architecture.
-/// For x86_64 that's 4KB, whereas for aarch64, that's 16KB.
-page_size: u16,
-
 objects: std.ArrayListUnmanaged(Object) = .{},
 archives: std.ArrayListUnmanaged(Archive) = .{},
 dylibs: std.ArrayListUnmanaged(Dylib) = .{},
@@ -147,6 +143,14 @@ pub const SymbolResolver = struct {
     unresolved: std.AutoArrayHashMap(u32, void),
 };
 
+pub const LinkObject = struct {
+    path: []const u8 = "",
+    tag: enum { obj, lib, framework },
+    needed: bool = false,
+    weak: bool = false,
+    must_link: bool = false,
+};
+
 /// Default path to dyld
 const default_dyld_path: [*:0]const u8 = "/usr/lib/dyld";
 
@@ -182,9 +186,6 @@ pub fn openPath(allocator: Allocator, options: Options, thread_pool: *ThreadPool
 
 fn createEmpty(gpa: Allocator, options: Options, thread_pool: *ThreadPool) !*MachO {
     const self = try gpa.create(MachO);
-    const cpu_arch = options.target.cpu_arch.?;
-    const page_size: u16 = if (cpu_arch == .aarch64) 0x4000 else 0x1000;
-
     self.* = .{
         .base = .{
             .tag = .macho,
@@ -193,9 +194,7 @@ fn createEmpty(gpa: Allocator, options: Options, thread_pool: *ThreadPool) !*Mac
             .thread_pool = thread_pool,
         },
         .options = options,
-        .page_size = page_size,
     };
-
     return self;
 }
 
@@ -209,30 +208,11 @@ pub fn flush(self: *MachO) !void {
     const arena = arena_allocator.allocator();
 
     const syslibroot = self.options.syslibroot;
-    const cpu_arch = self.options.target.cpu_arch.?;
-    const os_tag = self.options.target.os_tag.?;
-    const abi = self.options.target.abi.?;
 
     try self.atoms.append(gpa, Atom.empty); // AtomIndex at 0 is reserved as null atom
     try self.strtab.buffer.append(gpa, 0);
 
-    // Positional arguments to the linker such as object files and static archives.
-    var positionals = std.ArrayList([]const u8).init(arena);
-    try positionals.ensureUnusedCapacity(self.options.positionals.len);
-
-    var must_link_archives = std.StringArrayHashMap(void).init(arena);
-    try must_link_archives.ensureUnusedCapacity(self.options.positionals.len);
-
-    for (self.options.positionals) |obj| {
-        if (must_link_archives.contains(obj.path)) continue;
-        if (obj.must_link) {
-            _ = must_link_archives.getOrPutAssumeCapacity(obj.path);
-        } else {
-            positionals.appendAssumeCapacity(obj.path);
-        }
-    }
-
-    // Shared and static libraries passed via `-l` flag.
+    // Resolve paths
     var lib_dirs = std.ArrayList([]const u8).init(arena);
     for (self.options.lib_dirs) |dir| {
         if (try resolveSearchDir(arena, dir, syslibroot)) |search_dir| {
@@ -242,55 +222,6 @@ pub fn flush(self: *MachO) !void {
         }
     }
 
-    var libs = std.StringArrayHashMap(Zld.SystemLib).init(arena);
-
-    // Assume ld64 default -search_paths_first if no strategy specified.
-    const search_strategy = self.options.search_strategy orelse .paths_first;
-    outer: for (self.options.libs.keys()) |lib_name| {
-        switch (search_strategy) {
-            .paths_first => {
-                // Look in each directory for a dylib (stub first), and then for archive
-                for (lib_dirs.items) |dir| {
-                    for (&[_][]const u8{ ".tbd", ".dylib", ".a" }) |ext| {
-                        if (try resolveLib(arena, dir, lib_name, ext)) |full_path| {
-                            try libs.put(full_path, self.options.libs.get(lib_name).?);
-                            continue :outer;
-                        }
-                    }
-                } else {
-                    self.base.fatal("library not found for '-l{s}'", .{lib_name});
-                }
-            },
-            .dylibs_first => {
-                // First, look for a dylib in each search dir
-                for (lib_dirs.items) |dir| {
-                    for (&[_][]const u8{ ".tbd", ".dylib" }) |ext| {
-                        if (try resolveLib(arena, dir, lib_name, ext)) |full_path| {
-                            try libs.put(full_path, self.options.libs.get(lib_name).?);
-                            continue :outer;
-                        }
-                    }
-                } else for (lib_dirs.items) |dir| {
-                    if (try resolveLib(arena, dir, lib_name, ".a")) |full_path| {
-                        try libs.put(full_path, self.options.libs.get(lib_name).?);
-                    } else {
-                        self.base.fatal("library not found for '-l{s}'", .{lib_name});
-                    }
-                }
-            },
-        }
-    }
-
-    if (self.base.errors.items.len > 0) {
-        const err = try self.base.addErrorWithNotes(lib_dirs.items.len);
-        try err.addMsg("Library search paths", .{});
-        for (lib_dirs.items) |dir| {
-            try err.addNote("{s}", .{dir});
-        }
-    }
-    const prev_error_count = self.base.errors.items.len;
-
-    // frameworks
     var framework_dirs = std.ArrayList([]const u8).init(arena);
     for (self.options.framework_dirs) |dir| {
         if (try resolveSearchDir(arena, dir, syslibroot)) |search_dir| {
@@ -300,41 +231,46 @@ pub fn flush(self: *MachO) !void {
         }
     }
 
-    outer: for (self.options.frameworks.keys()) |f_name| {
-        for (framework_dirs.items) |dir| {
-            for (&[_][]const u8{ ".tbd", ".dylib", "" }) |ext| {
-                if (try resolveFramework(arena, dir, f_name, ext)) |full_path| {
-                    const info = self.options.frameworks.get(f_name).?;
-                    try libs.put(full_path, .{
-                        .needed = info.needed,
-                        .weak = info.weak,
-                    });
-                    continue :outer;
-                }
-            }
-        } else {
-            self.base.fatal("framework not found for '-framework {s}'", .{f_name});
-        }
+    var objects = std.ArrayList(LinkObject).init(arena);
+    try objects.ensureTotalCapacityPrecise(self.options.objects.len);
+    for (self.options.objects) |obj| {
+        try self.resolveLinkObjectPath(arena, obj, lib_dirs.items, framework_dirs.items, &objects);
     }
 
-    if (self.base.errors.items.len > prev_error_count) {
-        const err = try self.base.addErrorWithNotes(framework_dirs.items.len);
-        try err.addMsg("Framework search paths", .{});
-        for (framework_dirs.items) |dir| {
-            try err.addNote("{s}", .{dir});
+    if (self.base.errors.items.len > 0) {
+        {
+            const err = try self.base.addErrorWithNotes(lib_dirs.items.len);
+            try err.addMsg("Library search paths", .{});
+            for (lib_dirs.items) |dir| {
+                try err.addNote("{s}", .{dir});
+            }
+        }
+
+        {
+            const err = try self.base.addErrorWithNotes(framework_dirs.items.len);
+            try err.addMsg("Framework search paths", .{});
+            for (framework_dirs.items) |dir| {
+                try err.addNote("{s}", .{dir});
+            }
         }
     }
 
     self.base.reportWarningsAndErrorsAndExit();
+
+    // Parse input objects
+    for (objects.items) |obj| {
+        try self.parseObject(obj);
+    }
 
     var dependent_libs = std.fifo.LinearFifo(struct {
         id: Dylib.Id,
         parent: u16,
     }, .Dynamic).init(arena);
 
-    try self.parsePositionals(positionals.items, syslibroot, &dependent_libs);
-    try self.parseAndForceLoadStaticArchives(must_link_archives.keys());
-    try self.parseLibs(libs.keys(), libs.values(), syslibroot, &dependent_libs);
+    for (objects.items) |obj| {
+        try self.parseLibrary(obj, &dependent_libs);
+    }
+
     try self.parseDependentLibs(syslibroot, &dependent_libs);
 
     var resolver = SymbolResolver{
@@ -441,18 +377,13 @@ pub fn flush(self: *MachO) !void {
         }
     }
 
-    const requires_codesig = blk: {
-        if (self.options.entitlements) |_| break :blk true;
-        if (cpu_arch == .aarch64 and (os_tag == .macos or abi == .simulator)) break :blk true;
-        break :blk false;
-    };
-    var codesig: ?CodeSignature = if (requires_codesig) blk: {
+    var codesig: ?CodeSignature = if (self.requiresCodeSig()) blk: {
         // Preallocate space for the code signature.
         // We need to do this at this stage so that we have the load commands with proper values
         // written out to the file.
         // The most important here is to have the correct vm and filesize of the __LINKEDIT segment
         // where the code signature goes into.
-        var codesig = CodeSignature.init(self.page_size);
+        var codesig = CodeSignature.init(self.getPageSize());
         codesig.code_directory.ident = fs.path.basename(self.options.emit.sub_path);
         if (self.options.entitlements) |path| {
             try codesig.addEntitlements(gpa, path);
@@ -509,7 +440,7 @@ pub fn flush(self: *MachO) !void {
 
     try load_commands.writeLoadDylibLCs(self.dylibs.items, self.referenced_dylibs.keys(), lc_writer);
 
-    if (requires_codesig) {
+    if (self.requiresCodeSig()) {
         try lc_writer.writeStruct(self.codesig_cmd);
     }
 
@@ -517,7 +448,7 @@ pub fn flush(self: *MachO) !void {
     try self.base.file.pwriteAll(lc_buffer.items, @sizeOf(macho.mach_header_64));
     try self.writeHeader(ncmds, @as(u32, @intCast(lc_buffer.items.len)));
 
-    try self.writeUuid(uuid_cmd_offset, requires_codesig);
+    try self.writeUuid(uuid_cmd_offset, self.requiresCodeSig());
 
     if (codesig) |*csig| {
         try self.writeCodeSignature(csig); // code signing always comes last
@@ -574,65 +505,126 @@ fn resolveSearchDir(
     return null;
 }
 
-fn resolveSearchDirs(arena: Allocator, dirs: []const []const u8, syslibroot: ?[]const u8, out_dirs: anytype) !void {
+fn resolvePathsFirst(arena: Allocator, dirs: []const []const u8, path: []const u8) !?[]const u8 {
     for (dirs) |dir| {
-        if (try resolveSearchDir(arena, dir, syslibroot)) |search_dir| {
-            try out_dirs.append(search_dir);
-        } else {
-            log.warn("directory not found for '-L{s}'", .{dir});
+        for (&[_][]const u8{ ".tbd", ".dylib", ".a" }) |ext| {
+            const with_ext = try std.fmt.allocPrint(arena, "{s}{s}", .{ path, ext });
+            const full_path = try std.fs.path.join(arena, &[_][]const u8{ dir, with_ext });
+            const file = std.fs.cwd().openFile(full_path, .{}) catch |err| switch (err) {
+                error.FileNotFound => continue,
+                else => |e| return e,
+            };
+            defer file.close();
+            return full_path;
         }
     }
+    return null;
+}
+
+fn resolveDylibsFirst(arena: Allocator, dirs: []const []const u8, path: []const u8) !?[]const u8 {
+    for (dirs) |dir| {
+        for (&[_][]const u8{ ".tbd", ".dylib" }) |ext| {
+            const with_ext = try std.fmt.allocPrint(arena, "{s}{s}", .{ path, ext });
+            const full_path = try std.fs.path.join(arena, &[_][]const u8{ dir, with_ext });
+            const file = std.fs.cwd().openFile(full_path, .{}) catch |err| switch (err) {
+                error.FileNotFound => continue,
+                else => |e| return e,
+            };
+            defer file.close();
+            return full_path;
+        }
+    }
+    for (dirs) |dir| {
+        const with_ext = try std.fmt.allocPrint(arena, "{s}.a", .{path});
+        const full_path = try std.fs.path.join(arena, &[_][]const u8{ dir, with_ext });
+        const file = std.fs.cwd().openFile(full_path, .{}) catch |err| switch (err) {
+            error.FileNotFound => continue,
+            else => |e| return e,
+        };
+        defer file.close();
+        return full_path;
+    }
+    return null;
 }
 
 fn resolveLib(
+    self: *MachO,
     arena: Allocator,
-    search_dir: []const u8,
+    search_dirs: []const []const u8,
     name: []const u8,
-    ext: []const u8,
 ) !?[]const u8 {
-    const search_name = try std.fmt.allocPrint(arena, "lib{s}{s}", .{ name, ext });
-    const full_path = try fs.path.join(arena, &[_][]const u8{ search_dir, search_name });
-
-    // Check if the file exists.
-    const tmp = fs.cwd().openFile(full_path, .{}) catch |err| switch (err) {
-        error.FileNotFound => return null,
-        else => |e| return e,
-    };
-    defer tmp.close();
-
-    return full_path;
+    const search_strategy = self.options.search_strategy orelse .paths_first;
+    switch (search_strategy) {
+        .paths_first => return try resolvePathsFirst(arena, search_dirs, name),
+        .dylibs_first => return try resolveDylibsFirst(arena, search_dirs, name),
+    }
 }
 
 fn resolveFramework(
+    self: *MachO,
     arena: Allocator,
-    search_dir: []const u8,
+    search_dirs: []const []const u8,
     name: []const u8,
-    ext: []const u8,
 ) !?[]const u8 {
-    const search_name = try std.fmt.allocPrint(arena, "{s}{s}", .{ name, ext });
-    const prefix_path = try std.fmt.allocPrint(arena, "{s}.framework", .{name});
-    const full_path = try fs.path.join(arena, &[_][]const u8{ search_dir, prefix_path, search_name });
-
-    // Check if the file exists.
-    const tmp = fs.cwd().openFile(full_path, .{}) catch |err| switch (err) {
-        error.FileNotFound => return null,
-        else => |e| return e,
-    };
-    defer tmp.close();
-
-    return full_path;
+    const prefix = try std.fmt.allocPrint(arena, "{s}.framework", .{name});
+    const path = try std.fs.path.join(arena, &[_][]const u8{ prefix, name });
+    const search_strategy = self.options.search_strategy orelse .paths_first;
+    switch (search_strategy) {
+        .paths_first => return try resolvePathsFirst(arena, search_dirs, path),
+        .dylibs_first => return try resolveDylibsFirst(arena, search_dirs, path),
+    }
 }
 
-fn parseObject(self: *MachO, path: []const u8) !bool {
-    const gpa = self.base.allocator;
-    const file = fs.cwd().openFile(path, .{}) catch |err| switch (err) {
-        error.FileNotFound => return false,
-        else => |e| return e,
+fn resolveLinkObjectPath(
+    self: *MachO,
+    arena: Allocator,
+    obj: LinkObject,
+    lib_dirs: []const []const u8,
+    framework_dirs: []const []const u8,
+    resolved: *std.ArrayList(LinkObject),
+) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    const full_path = blk: {
+        switch (obj.tag) {
+            .obj => {
+                var buffer: [fs.MAX_PATH_BYTES]u8 = undefined;
+                log.debug("resolving file path '{s}'", .{obj.path});
+                const full_path = try std.fs.realpath(obj.path, &buffer);
+                break :blk try arena.dupe(u8, full_path);
+            },
+            .lib => {
+                const full_path = (try self.resolveLib(arena, lib_dirs, obj.path)) orelse
+                    return self.base.fatal("library not found for -l{s}", .{obj.path});
+                break :blk full_path;
+            },
+            .framework => {
+                const full_path = (try self.resolveFramework(arena, framework_dirs, obj.path)) orelse
+                    return self.base.fatal("framework not found for -framework {s}", .{obj.path});
+                break :blk full_path;
+            },
+        }
     };
+    resolved.appendAssumeCapacity(.{
+        .path = full_path,
+        .tag = obj.tag,
+        .needed = obj.needed,
+        .weak = obj.weak,
+        .must_link = obj.must_link,
+    });
+}
+
+fn parseObject(self: *MachO, obj: LinkObject) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    const gpa = self.base.allocator;
+    const file = try std.fs.cwd().openFile(obj.path, .{});
     defer file.close();
 
-    const name = try gpa.dupe(u8, path);
-    const cpu_arch = self.options.target.cpu_arch.?;
+    if (!Object.isObject(file)) return;
+
     const mtime: u64 = mtime: {
         const stat = file.stat() catch break :mtime 0;
         break :mtime @as(u64, @intCast(@divFloor(stat.mtime, 1_000_000_000)));
@@ -642,90 +634,120 @@ fn parseObject(self: *MachO, path: []const u8) !bool {
     const contents = try file.readToEndAllocOptions(gpa, file_size, file_size, @alignOf(u64), null);
 
     var object = Object{
-        .name = name,
+        .name = try gpa.dupe(u8, obj.path),
         .mtime = mtime,
         .contents = contents,
     };
-
-    object.parse(gpa, cpu_arch, self) catch |err| switch (err) {
-        error.NotObject => {
-            object.deinit(gpa);
-            return false;
-        },
-        else => |e| return e,
-    };
-
+    errdefer object.deinit(gpa);
+    try object.parse(gpa);
     try self.objects.append(gpa, object);
 
-    return true;
-}
-
-fn parseArchive(self: *MachO, path: []const u8, force_load: bool) !bool {
-    const gpa = self.base.allocator;
-    const file = fs.cwd().openFile(path, .{}) catch |err| switch (err) {
-        error.FileNotFound => return false,
-        else => |e| return e,
+    const cpu_arch: std.Target.Cpu.Arch = switch (object.header.cputype) {
+        macho.CPU_TYPE_ARM64 => .aarch64,
+        macho.CPU_TYPE_X86_64 => .x86_64,
+        else => unreachable,
     };
-    errdefer file.close();
-
-    const name = try gpa.dupe(u8, path);
-    const cpu_arch = self.options.target.cpu_arch.?;
-    const reader = file.reader();
-    const fat_offset = fat.getLibraryOffset(reader, cpu_arch) catch |err| switch (err) {
-        error.MissingArch => {
-            self.base.fatal(
-                "{s}: could not find matching cpu architecture in fat library: expected {s}",
-                .{ name, @tagName(cpu_arch) },
-            );
-            return true;
-        },
-        else => |e| return e,
+    const self_cpu_arch = self.options.cpu_arch orelse blk: {
+        self.options.cpu_arch = cpu_arch;
+        break :blk self.options.cpu_arch.?;
     };
-    try reader.context.seekTo(fat_offset);
-
-    var archive = Archive{
-        .file = file,
-        .fat_offset = fat_offset,
-        .name = name,
-    };
-
-    archive.parse(gpa, reader, self) catch |err| switch (err) {
-        error.EndOfStream, error.NotArchive => {
-            archive.deinit(gpa);
-            return false;
-        },
-        else => |e| return e,
-    };
-
-    if (force_load) {
-        // Get all offsets from the ToC
-        var offsets = std.AutoArrayHashMap(u32, void).init(gpa);
-        defer offsets.deinit();
-        for (archive.toc.values()) |offs| {
-            for (offs.items) |off| {
-                _ = try offsets.getOrPut(off);
-            }
-        }
-        for (offsets.keys()) |off| {
-            const object = try archive.parseObject(gpa, cpu_arch, off, self);
-            try self.objects.append(gpa, object);
-        }
-    } else {
-        try self.archives.append(gpa, archive);
+    if (self_cpu_arch != cpu_arch) {
+        self.base.fatal("{s}: invalid architecture '{s}', expected '{s}'", .{
+            obj.path,
+            @tagName(cpu_arch),
+            @tagName(self_cpu_arch),
+        });
     }
-
-    return true;
 }
 
-const ParseDylibError = error{
-    OutOfMemory,
-    EmptyStubFile,
-    MismatchedCpuArchitecture,
-    UnsupportedCpuArchitecture,
-    EndOfStream,
-} || fs.File.OpenError || std.os.PReadError || Dylib.Id.ParseError;
+fn parseLibrary(self: *MachO, obj: LinkObject, dependent_libs: anytype) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
 
-const DylibCreateOpts = struct {
+    const gpa = self.base.allocator;
+    const file = try std.fs.cwd().openFile(obj.path, .{});
+    defer if (!Archive.isArchive(file)) file.close();
+
+    if (Object.isObject(file)) return;
+
+    if (Archive.isArchive(file)) {
+        const offset: ?u64 = if (fat.isFatLibrary(file)) blk: {
+            const offset = self.parseFatLibrary(obj.path, file) catch |err| switch (err) {
+                error.NoArchSpecified, error.MissingArch => return,
+                else => |e| return e,
+            };
+            try file.seekTo(offset);
+            break :blk offset;
+        } else null;
+
+        if (self.options.cpu_arch == null) {
+            return self.base.fatal("{s}: ignoring library as no architecture specified", .{obj.path});
+        }
+
+        var archive = Archive{
+            .file = file,
+            .fat_offset = offset orelse 0,
+            .name = try gpa.dupe(u8, obj.path),
+        };
+        errdefer archive.deinit(gpa);
+
+        try archive.parse(gpa, file.reader(), self);
+
+        if (obj.must_link) {
+            // Get all offsets from the ToC
+            var offsets = std.AutoArrayHashMap(u32, void).init(gpa);
+            defer offsets.deinit();
+            for (archive.toc.values()) |offs| {
+                for (offs.items) |off| {
+                    _ = try offsets.getOrPut(off);
+                }
+            }
+            for (offsets.keys()) |off| {
+                const object = try archive.parseObject(gpa, off);
+                try self.objects.append(gpa, object);
+            }
+        } else {
+            try self.archives.append(gpa, archive);
+        }
+    } else if (Dylib.isDylib(file)) {
+        try self.parseDylib(obj.path, file, dependent_libs, .{
+            .syslibroot = self.options.syslibroot,
+            .needed = obj.needed,
+            .weak = obj.weak,
+        });
+    } else {
+        self.parseLibStub(obj.path, file, dependent_libs, .{
+            .syslibroot = self.options.syslibroot,
+            .needed = obj.needed,
+            .weak = obj.weak,
+        }) catch |err| switch (err) {
+            error.NotLibStub => return self.base.fatal("{s}: unknown file type", .{obj.path}),
+            else => |e| return e,
+        };
+    }
+}
+
+fn parseFatLibrary(self: *MachO, path: []const u8, file: fs.File) !u64 {
+    var buffer: [2]fat.Arch = undefined;
+    const fat_archs = try fat.parseArchs(file, &buffer);
+    const cpu_arch = self.options.cpu_arch orelse {
+        const err = try self.base.addErrorWithNotes(1 + fat_archs.len);
+        try err.addMsg("{s}: ignoring universal file as no architecture specified", .{path});
+        for (fat_archs) |arch| {
+            try err.addNote("universal file built for {s}", .{@tagName(arch.tag)});
+        }
+        return error.NoArchSpecified;
+    };
+    const offset = for (fat_archs) |arch| {
+        if (arch.tag == cpu_arch) break arch.offset;
+    } else {
+        self.base.fatal("{s}: missing arch in universal file: expected {s}", .{ path, @tagName(cpu_arch) });
+        return error.MissingArch;
+    };
+    return offset;
+}
+
+const DylibOpts = struct {
     syslibroot: ?[]const u8,
     id: ?Dylib.Id = null,
     dependent: bool = false,
@@ -733,72 +755,108 @@ const DylibCreateOpts = struct {
     weak: bool = false,
 };
 
-pub fn parseDylib(
-    self: *MachO,
-    path: []const u8,
-    dependent_libs: anytype,
-    opts: DylibCreateOpts,
-) ParseDylibError!bool {
+fn parseDylib(self: *MachO, path: []const u8, file: std.fs.File, dependent_libs: anytype, opts: DylibOpts) !void {
     const gpa = self.base.allocator;
-    const file = fs.cwd().openFile(path, .{}) catch |err| switch (err) {
-        error.FileNotFound => return false,
-        else => |e| return e,
-    };
-    defer file.close();
+    const offset: ?u64 = if (fat.isFatLibrary(file)) blk: {
+        const offset = self.parseFatLibrary(path, file) catch |err| switch (err) {
+            error.NoArchSpecified, error.MissingArch => return,
+            else => |e| return e,
+        };
+        try file.seekTo(offset);
+        break :blk offset;
+    } else null;
 
-    const cpu_arch = self.options.target.cpu_arch.?;
+    const self_cpu_arch = self.options.cpu_arch orelse
+        return self.base.fatal("{s}: ignoring library as no architecture specified", .{path});
+
     const file_stat = try file.stat();
     var file_size = math.cast(usize, file_stat.size) orelse return error.Overflow;
 
-    const reader = file.reader();
-    const lib_offset = fat.getLibraryOffset(reader, cpu_arch) catch |err| switch (err) {
-        error.MissingArch => {
-            self.base.fatal(
-                "{s}: could not find matching cpu architecture in fat library: expected {s}",
-                .{ path, @tagName(cpu_arch) },
-            );
-            return true;
-        },
-        else => |e| return e,
-    };
-    try file.seekTo(lib_offset);
-    file_size -= lib_offset;
+    file_size -= (offset orelse 0);
 
     const contents = try file.readToEndAllocOptions(gpa, file_size, file_size, @alignOf(u64), null);
     defer gpa.free(contents);
 
-    const dylib_id = @as(u16, @intCast(self.dylibs.items.len));
     var dylib = Dylib{ .weak = opts.weak };
+    errdefer dylib.deinit(gpa);
 
-    dylib.parseFromBinary(
+    try dylib.parseFromBinary(
         gpa,
-        cpu_arch,
-        dylib_id,
+        @intCast(self.dylibs.items.len),
         dependent_libs,
         path,
         contents,
-        self,
-    ) catch |err| switch (err) {
-        error.NotDylib => {
-            try file.seekTo(0);
+    );
 
-            var lib_stub = LibStub.loadFromFile(gpa, file) catch {
-                dylib.deinit(gpa);
-                return false;
-            };
-            defer lib_stub.deinit();
+    const cpu_arch: std.Target.Cpu.Arch = switch (dylib.header.?.cputype) {
+        macho.CPU_TYPE_ARM64 => .aarch64,
+        macho.CPU_TYPE_X86_64 => .x86_64,
+        else => unreachable,
+    };
+    if (self_cpu_arch != cpu_arch) {
+        return self.base.fatal("{s}: invalid architecture '{s}', expected '{s}'", .{
+            path,
+            @tagName(cpu_arch),
+            @tagName(self_cpu_arch),
+        });
+    }
 
-            try dylib.parseFromStub(
-                gpa,
-                self.options.target,
-                lib_stub,
-                dylib_id,
-                dependent_libs,
-                path,
-            );
-        },
+    self.addDylib(dylib, .{
+        .syslibroot = self.options.syslibroot,
+        .needed = opts.needed,
+        .weak = opts.weak,
+    }) catch |err| switch (err) {
+        error.DylibAlreadyExists => dylib.deinit(gpa),
         else => |e| return e,
     };
+}
+
+fn parseLibStub(self: *MachO, path: []const u8, file: std.fs.File, dependent_libs: anytype, opts: DylibOpts) !void {
+    var lib_stub = try LibStub.loadFromFile(self.base.allocator, file);
+    defer lib_stub.deinit();
+
+    if (lib_stub.inner.len == 0) return error.NotLibStub;
+
+    const cpu_arch = self.options.cpu_arch orelse
+        return self.base.fatal("{s}: ignoring library as no architecture specified", .{path});
+    const platform = self.options.platform.?.platform;
+
+    var matcher = try Dylib.TargetMatcher.init(self.base.allocator, cpu_arch, platform);
+    defer matcher.deinit();
+
+    for (lib_stub.inner) |elem| {
+        if (try matcher.matchesTargetTbd(elem)) break;
+    } else {
+        const target = try Dylib.TargetMatcher.targetToAppleString(self.base.allocator, cpu_arch, platform);
+        defer self.base.allocator.free(target);
+        self.base.fatal("{s}: missing target in stub file: expected {s}", .{ path, target });
+    }
+
+    var dylib = Dylib{ .weak = opts.weak };
+    errdefer dylib.deinit(self.base.allocator);
+
+    try dylib.parseFromStub(
+        self.base.allocator,
+        cpu_arch,
+        self.options.platform.?.platform,
+        lib_stub,
+        @intCast(self.dylibs.items.len),
+        dependent_libs,
+        path,
+    );
+
+    self.addDylib(dylib, .{
+        .syslibroot = self.options.syslibroot,
+        .needed = opts.needed,
+        .weak = opts.weak,
+    }) catch |err| switch (err) {
+        error.DylibAlreadyExists => dylib.deinit(self.base.allocator),
+        else => |e| return e,
+    };
+}
+
+fn addDylib(self: *MachO, dylib: Dylib, opts: DylibOpts) !void {
+    const gpa = self.base.allocator;
 
     if (opts.id) |id| {
         if (dylib.id.?.current_version < id.compatibility_version) {
@@ -806,92 +864,23 @@ pub fn parseDylib(
             log.warn("  dylib: {s}", .{id.name});
             log.warn("  required minimum version: {}", .{id.compatibility_version});
             log.warn("  dylib version: {}", .{dylib.id.?.current_version});
-
-            // TODO maybe this should be an error and facilitate auto-cleanup?
-            dylib.deinit(gpa);
-            return false;
+            return error.IncompatibleDylibVersion;
         }
     }
 
     const gop = try self.dylibs_map.getOrPut(gpa, dylib.id.?.name);
-    if (gop.found_existing) {
-        dylib.deinit(gpa);
-        return true;
-    }
-    gop.value_ptr.* = dylib_id;
+    if (gop.found_existing) return error.DylibAlreadyExists;
+
+    gop.value_ptr.* = @as(u16, @intCast(self.dylibs.items.len));
     try self.dylibs.append(gpa, dylib);
 
     const should_link_dylib_even_if_unreachable = blk: {
         if (self.options.dead_strip_dylibs and !opts.needed) break :blk false;
-        break :blk !(opts.dependent or self.referenced_dylibs.contains(dylib_id));
+        break :blk !(opts.dependent or self.referenced_dylibs.contains(gop.value_ptr.*));
     };
 
     if (should_link_dylib_even_if_unreachable) {
-        try self.referenced_dylibs.putNoClobber(gpa, dylib_id, {});
-    }
-
-    return true;
-}
-
-fn parsePositionals(self: *MachO, files: []const []const u8, syslibroot: ?[]const u8, dependent_libs: anytype) !void {
-    const tracy = trace(@src());
-    defer tracy.end();
-
-    for (files) |file_name| {
-        const full_path = full_path: {
-            var buffer: [fs.MAX_PATH_BYTES]u8 = undefined;
-            break :full_path try std.fs.realpath(file_name, &buffer);
-        };
-        log.debug("parsing input file path '{s}'", .{full_path});
-
-        if (try self.parseObject(full_path)) continue;
-        if (try self.parseArchive(full_path, false)) continue;
-        if (try self.parseDylib(full_path, dependent_libs, .{
-            .syslibroot = syslibroot,
-        })) continue;
-
-        self.base.fatal("unknown filetype for positional input file: '{s}'", .{file_name});
-    }
-}
-
-fn parseAndForceLoadStaticArchives(self: *MachO, files: []const []const u8) !void {
-    const tracy = trace(@src());
-    defer tracy.end();
-
-    for (files) |file_name| {
-        const full_path = full_path: {
-            var buffer: [fs.MAX_PATH_BYTES]u8 = undefined;
-            break :full_path try fs.realpath(file_name, &buffer);
-        };
-        log.debug("parsing and force loading static archive '{s}'", .{full_path});
-
-        if (try self.parseArchive(full_path, true)) continue;
-
-        self.base.fatal("unknown filetype: expected static archive: '{s}'", .{file_name});
-    }
-}
-
-fn parseLibs(
-    self: *MachO,
-    lib_names: []const []const u8,
-    lib_infos: []const Zld.SystemLib,
-    syslibroot: ?[]const u8,
-    dependent_libs: anytype,
-) !void {
-    const tracy = trace(@src());
-    defer tracy.end();
-
-    for (lib_names, 0..) |lib, i| {
-        const lib_info = lib_infos[i];
-        log.debug("parsing lib path '{s}'", .{lib});
-        if (try self.parseDylib(lib, dependent_libs, .{
-            .syslibroot = syslibroot,
-            .needed = lib_info.needed,
-            .weak = lib_info.weak,
-        })) continue;
-        if (try self.parseArchive(lib, false)) continue;
-
-        self.base.fatal("unknown filetype for a library: '{s}'", .{lib});
+        try self.referenced_dylibs.putNoClobber(gpa, gop.value_ptr.*, {});
     }
 }
 
@@ -928,17 +917,30 @@ fn parseDependentLibs(self: *MachO, syslibroot: ?[]const u8, dependent_libs: any
             const with_ext = try std.fmt.allocPrint(arena, "{s}{s}", .{ without_ext, ext });
             const full_path = if (syslibroot) |root| try fs.path.join(arena, &.{ root, with_ext }) else with_ext;
 
+            const file = std.fs.cwd().openFile(full_path, .{}) catch |err| switch (err) {
+                error.FileNotFound => continue,
+                else => |e| return e,
+            };
+            defer file.close();
+
             log.debug("trying dependency at fully resolved path {s}", .{full_path});
 
-            const did_parse_successfully = try self.parseDylib(full_path, dependent_libs, .{
-                .id = dep_id.id,
-                .syslibroot = syslibroot,
-                .dependent = true,
-                .weak = weak,
-            });
-            if (did_parse_successfully) break;
-        } else {
-            log.warn("unable to resolve dependency {s}", .{dep_id.id.name});
+            if (Dylib.isDylib(file)) {
+                try self.parseDylib(full_path, file, dependent_libs, .{
+                    .syslibroot = self.options.syslibroot,
+                    .dependent = true,
+                    .weak = weak,
+                });
+            } else {
+                self.parseLibStub(full_path, file, dependent_libs, .{
+                    .syslibroot = self.options.syslibroot,
+                    .dependent = true,
+                    .weak = weak,
+                }) catch |err| switch (err) {
+                    error.NotLibStub => self.base.fatal("{s}: unable to resolve dependency", .{dep_id.id.name}),
+                    else => |e| return e,
+                };
+            }
         }
     }
 }
@@ -1183,7 +1185,7 @@ fn createDyldPrivateAtom(self: *MachO) !void {
 fn createStubHelperPreambleAtom(self: *MachO) !void {
     if (self.dyld_stub_binder_index == null) return;
 
-    const cpu_arch = self.options.target.cpu_arch.?;
+    const cpu_arch = self.options.cpu_arch.?;
     const size: u64 = switch (cpu_arch) {
         .x86_64 => 15,
         .aarch64 => 6 * @sizeOf(u32),
@@ -1213,7 +1215,7 @@ fn createStubHelperPreambleAtom(self: *MachO) !void {
 }
 
 fn writeStubHelperPreambleCode(self: *MachO, writer: anytype) !void {
-    const cpu_arch = self.options.target.cpu_arch.?;
+    const cpu_arch = self.options.cpu_arch.?;
     const source_addr = blk: {
         const sym = self.getSymbol(.{ .sym_index = self.stub_helper_preamble_sym_index.? });
         break :blk sym.n_value;
@@ -1274,7 +1276,7 @@ fn writeStubHelperPreambleCode(self: *MachO, writer: anytype) !void {
 }
 
 pub fn createStubHelperAtom(self: *MachO) !AtomIndex {
-    const cpu_arch = self.options.target.cpu_arch.?;
+    const cpu_arch = self.options.cpu_arch.?;
     const stub_size: u4 = switch (cpu_arch) {
         .x86_64 => 10,
         .aarch64 => 3 * @sizeOf(u32),
@@ -1300,7 +1302,7 @@ pub fn createStubHelperAtom(self: *MachO) !AtomIndex {
 }
 
 fn writeStubHelperCode(self: *MachO, atom_index: AtomIndex, writer: anytype) !void {
-    const cpu_arch = self.options.target.cpu_arch.?;
+    const cpu_arch = self.options.cpu_arch.?;
     const source_addr = blk: {
         const atom = self.getAtom(atom_index);
         const sym = self.getSymbol(atom.getSymbolWithLoc());
@@ -1374,7 +1376,7 @@ fn writeLazyPointer(self: *MachO, stub_helper_index: u32, writer: anytype) !void
 }
 
 pub fn createStubAtom(self: *MachO) !AtomIndex {
-    const cpu_arch = self.options.target.cpu_arch.?;
+    const cpu_arch = self.options.cpu_arch.?;
     const alignment: u2 = switch (cpu_arch) {
         .x86_64 => 0,
         .aarch64 => 2,
@@ -1405,7 +1407,7 @@ pub fn createStubAtom(self: *MachO) !AtomIndex {
 }
 
 fn writeStubCode(self: *MachO, atom_index: AtomIndex, stub_index: u32, writer: anytype) !void {
-    const cpu_arch = self.options.target.cpu_arch.?;
+    const cpu_arch = self.options.cpu_arch.?;
     const source_addr = blk: {
         const atom = self.getAtom(atom_index);
         const sym = self.getSymbol(atom.getSymbolWithLoc());
@@ -1643,7 +1645,6 @@ fn resolveSymbolsInArchives(self: *MachO, resolver: *SymbolResolver) !void {
     if (self.archives.items.len == 0) return;
 
     const gpa = self.base.allocator;
-    const cpu_arch = self.options.target.cpu_arch.?;
     var next_sym: usize = 0;
     loop: while (next_sym < resolver.unresolved.count()) {
         const global = self.globals.items[resolver.unresolved.keys()[next_sym]];
@@ -1658,7 +1659,7 @@ fn resolveSymbolsInArchives(self: *MachO, resolver: *SymbolResolver) !void {
             assert(offsets.items.len > 0);
 
             const object_id = @as(u16, @intCast(self.objects.items.len));
-            const object = try archive.parseObject(gpa, cpu_arch, offsets.items[0], self);
+            const object = try archive.parseObject(gpa, offsets.items[0]);
             try self.objects.append(gpa, object);
             try self.resolveSymbolsInObject(object_id, resolver);
 
@@ -1877,7 +1878,7 @@ pub fn deinit(self: *MachO) void {
 
 fn createSegments(self: *MachO) !void {
     const pagezero_vmsize = self.options.pagezero_size orelse default_pagezero_vmsize;
-    const aligned_pagezero_vmsize = mem.alignBackward(u64, pagezero_vmsize, self.page_size);
+    const aligned_pagezero_vmsize = mem.alignBackward(u64, pagezero_vmsize, self.getPageSize());
     if (self.options.output_mode != .lib and aligned_pagezero_vmsize > 0) {
         if (aligned_pagezero_vmsize != pagezero_vmsize) {
             log.warn("requested __PAGEZERO size (0x{x}) is not page aligned", .{pagezero_vmsize});
@@ -2223,11 +2224,7 @@ fn allocateSegments(self: *MachO) !void {
 
     for (self.segments.items, 0..) |*segment, segment_index| {
         const is_text_segment = mem.eql(u8, segment.segName(), "__TEXT");
-        const base_size = if (is_text_segment) try load_commands.calcMinHeaderPad(self.base.allocator, &self.options, .{
-            .segments = self.segments.items,
-            .dylibs = self.dylibs.items,
-            .referenced_dylibs = self.referenced_dylibs.keys(),
-        }) else 0;
+        const base_size = if (is_text_segment) try load_commands.calcMinHeaderPad(self) else 0;
         try self.allocateSegment(@as(u8, @intCast(segment_index)), base_size);
 
         // TODO
@@ -2353,8 +2350,8 @@ fn allocateSegment(self: *MachO, segment_index: u8, init_size: u64) !void {
         segment.vmsize = start;
     }
 
-    segment.filesize = mem.alignForward(u64, segment.filesize, self.page_size);
-    segment.vmsize = mem.alignForward(u64, segment.vmsize, self.page_size);
+    segment.filesize = mem.alignForward(u64, segment.filesize, self.getPageSize());
+    segment.vmsize = mem.alignForward(u64, segment.vmsize, self.getPageSize());
 }
 
 const InitSectionOpts = struct {
@@ -2467,7 +2464,7 @@ fn writeLinkeditSegmentData(self: *MachO) !void {
     try self.writeSymtabs();
 
     const seg = self.getLinkeditSegmentPtr();
-    seg.vmsize = mem.alignForward(u64, seg.filesize, self.page_size);
+    seg.vmsize = mem.alignForward(u64, seg.filesize, self.getPageSize());
 }
 
 fn collectRebaseDataFromContainer(
@@ -2553,7 +2550,7 @@ fn collectRebaseData(self: *MachO, rebase: *Rebase) !void {
 
         log.debug("{s},{s}", .{ header.segName(), header.sectName() });
 
-        const cpu_arch = self.options.target.cpu_arch.?;
+        const cpu_arch = self.options.cpu_arch.?;
         var atom_index = slice.items(.first_atom_index)[sect_id];
         if (atom_index == 0) continue;
 
@@ -2690,7 +2687,7 @@ fn collectBindData(self: *MachO, bind: *Bind) !void {
 
         log.debug("{s},{s}", .{ header.segName(), header.sectName() });
 
-        const cpu_arch = self.options.target.cpu_arch.?;
+        const cpu_arch = self.options.cpu_arch.?;
         var atom_index = slice.items(.first_atom_index)[sect_id];
         if (atom_index == 0) continue;
 
@@ -2939,7 +2936,7 @@ fn populateLazyBindOffsetsInStubHelper(self: *MachO, lazy_bind: LazyBind) !void 
     assert(self.stub_helper_preamble_sym_index != null);
 
     const section = self.sections.get(stub_helper_section_index);
-    const stub_offset: u4 = switch (self.options.target.cpu_arch.?) {
+    const stub_offset: u4 = switch (self.options.cpu_arch.?) {
         .x86_64 => 1,
         .aarch64 => 2 * @sizeOf(u32),
         else => unreachable,
@@ -3352,7 +3349,7 @@ fn writeCodeSignaturePadding(self: *MachO, code_sig: *CodeSignature) !void {
     const offset = mem.alignForward(u64, seg.fileoff + seg.filesize, 16);
     const needed_size = code_sig.estimateSize(offset);
     seg.filesize = offset + needed_size - seg.fileoff;
-    seg.vmsize = mem.alignForward(u64, seg.filesize, self.page_size);
+    seg.vmsize = mem.alignForward(u64, seg.filesize, self.getPageSize());
     log.debug("writing code signature padding from 0x{x} to 0x{x}", .{ offset, offset + needed_size });
     // Pad out the space. We need to do this to calculate valid hashes for everything in the file
     // except for code signature data.
@@ -3391,7 +3388,7 @@ fn writeHeader(self: *MachO, ncmds: u32, sizeofcmds: u32) !void {
     var header: macho.mach_header_64 = .{};
     header.flags = macho.MH_NOUNDEFS | macho.MH_DYLDLINK | macho.MH_PIE | macho.MH_TWOLEVEL;
 
-    switch (self.options.target.cpu_arch.?) {
+    switch (self.options.cpu_arch.?) {
         .aarch64 => {
             header.cputype = macho.CPU_TYPE_ARM64;
             header.cpusubtype = macho.CPU_SUBTYPE_ARM_ALL;
@@ -3557,8 +3554,25 @@ pub fn getEntryPoint(self: MachO) SymbolWithLoc {
     return self.globals.items[global_index];
 }
 
+pub inline fn getPageSize(self: MachO) u16 {
+    return switch (self.options.cpu_arch.?) {
+        .aarch64 => 0x4000,
+        .x86_64 => 0x1000,
+        else => unreachable,
+    };
+}
+
+pub fn requiresCodeSig(self: MachO) bool {
+    if (self.options.entitlements) |_| return true;
+    if (self.options.cpu_arch.? == .aarch64) switch (self.options.platform.?.platform) {
+        .MACOS, .IOSSIMULATOR, .WATCHOSSIMULATOR, .TVOSSIMULATOR => return true,
+        else => {},
+    };
+    return false;
+}
+
 inline fn requiresThunks(self: MachO) bool {
-    return self.options.target.cpu_arch.? == .aarch64;
+    return self.options.cpu_arch.? == .aarch64;
 }
 
 pub fn generateSymbolStabs(self: *MachO, object: Object, locals: *std.ArrayList(macho.nlist_64)) !void {

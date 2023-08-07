@@ -145,7 +145,7 @@ fn markLive(macho_file: *MachO, atom_index: AtomIndex, alive: *AtomTable) void {
 
     macho_file.logAtom(atom_index, log);
 
-    const cpu_arch = macho_file.options.target.cpu_arch.?;
+    const cpu_arch = macho_file.options.cpu_arch.?;
 
     const sym = macho_file.getSymbol(sym_loc);
     const header = macho_file.sections.items(.header)[sym.n_sect - 1];
@@ -212,7 +212,7 @@ fn refersLive(macho_file: *MachO, atom_index: AtomIndex, alive: AtomTable) bool 
         sym_loc.getFile(),
     });
 
-    const cpu_arch = macho_file.options.target.cpu_arch.?;
+    const cpu_arch = macho_file.options.cpu_arch.?;
 
     const sym = macho_file.getSymbol(sym_loc);
     const header = macho_file.sections.items(.header)[sym.n_sect - 1];
@@ -310,7 +310,7 @@ fn mark(macho_file: *MachO, roots: AtomTable, alive: *AtomTable) !void {
 
 fn markUnwindRecords(macho_file: *MachO, object_id: u32, alive: *AtomTable) !void {
     const object = &macho_file.objects.items[object_id];
-    const cpu_arch = macho_file.options.target.cpu_arch.?;
+    const cpu_arch = macho_file.options.cpu_arch.?;
 
     const unwind_records = object.getUnwindRecords();
 
@@ -380,7 +380,7 @@ fn markUnwindRecords(macho_file: *MachO, object_id: u32, alive: *AtomTable) !voi
 }
 
 fn markEhFrameRecords(macho_file: *MachO, object_id: u32, atom_index: AtomIndex, alive: *AtomTable) !void {
-    const cpu_arch = macho_file.options.target.cpu_arch.?;
+    const cpu_arch = macho_file.options.cpu_arch.?;
     const object = &macho_file.objects.items[object_id];
     var it = object.getEhFrameRecordsIterator();
     var inner_syms_it = Atom.getInnerSymbolsIterator(macho_file, atom_index);

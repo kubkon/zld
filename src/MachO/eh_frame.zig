@@ -49,7 +49,7 @@ pub fn calcSectionSize(macho_file: *MachO, unwind_info: *const UnwindInfo) !void
     sect.@"align" = 3;
     sect.size = 0;
 
-    const cpu_arch = macho_file.options.target.cpu_arch.?;
+    const cpu_arch = macho_file.options.cpu_arch.?;
     const gpa = macho_file.base.allocator;
     var size: u32 = 0;
 
@@ -100,7 +100,7 @@ pub fn write(macho_file: *MachO, unwind_info: *UnwindInfo) !void {
     const seg_id = macho_file.sections.items(.segment_index)[sect_id];
     const seg = macho_file.segments.items[seg_id];
 
-    const cpu_arch = macho_file.options.target.cpu_arch.?;
+    const cpu_arch = macho_file.options.cpu_arch.?;
 
     const gpa = macho_file.base.allocator;
     var eh_records = std.AutoArrayHashMap(u32, EhFrameRecord(true)).init(gpa);
@@ -292,7 +292,7 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
             object_id: u32,
             source_offset: u32,
         ) ?MachO.SymbolWithLoc {
-            const cpu_arch = macho_file.options.target.cpu_arch.?;
+            const cpu_arch = macho_file.options.cpu_arch.?;
             const relocs = getRelocs(macho_file, object_id, source_offset);
             for (relocs) |rel| {
                 switch (cpu_arch) {
@@ -333,7 +333,7 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
         }) !void {
             comptime assert(is_mutable);
 
-            const cpu_arch = macho_file.options.target.cpu_arch.?;
+            const cpu_arch = macho_file.options.cpu_arch.?;
             const relocs = getRelocs(macho_file, object_id, ctx.source_offset);
 
             for (relocs) |rel| {
@@ -388,7 +388,7 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
 
         pub fn getCiePointerSource(rec: Record, object_id: u32, macho_file: *MachO, offset: u32) u32 {
             assert(rec.tag == .fde);
-            const cpu_arch = macho_file.options.target.cpu_arch.?;
+            const cpu_arch = macho_file.options.cpu_arch.?;
             const addend = mem.readIntLittle(u32, rec.data[0..4]);
             switch (cpu_arch) {
                 .aarch64 => {

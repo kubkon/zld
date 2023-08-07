@@ -136,12 +136,9 @@ const usage =
 
 emit: Zld.Emit,
 output_mode: Zld.OutputMode,
-target: CrossTarget,
-platform_version: std.SemanticVersion,
-sdk_version: std.SemanticVersion,
-positionals: []const Zld.LinkObject,
-libs: std.StringArrayHashMap(Zld.SystemLib),
-frameworks: std.StringArrayHashMap(Zld.SystemLib),
+cpu_arch: ?std.Target.Cpu.Arch,
+platform: ?Platform,
+objects: []const MachO.LinkObject,
 lib_dirs: []const []const u8,
 framework_dirs: []const []const u8,
 rpath_list: []const []const u8,
@@ -169,10 +166,11 @@ const cmd = "ld64.zld";
 pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options {
     if (args.len == 0) ctx.fatal(usage, .{cmd});
 
-    var positionals = std.ArrayList(Zld.LinkObject).init(arena);
-    var libs = std.StringArrayHashMap(Zld.SystemLib).init(arena);
+    var objects = std.ArrayList(MachO.LinkObject).init(arena);
+    var libs = std.StringHashMap(usize).init(arena);
+    var frameworks = std.StringHashMap(usize).init(arena);
+
     var lib_dirs = std.ArrayList([]const u8).init(arena);
-    var frameworks = std.StringArrayHashMap(Zld.SystemLib).init(arena);
     var framework_dirs = std.ArrayList([]const u8).init(arena);
     var rpath_list = std.ArrayList([]const u8).init(arena);
     var out_path: ?[]const u8 = null;
@@ -194,19 +192,8 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
     var allow_undef: bool = false;
     var search_strategy: ?SearchStrategy = null;
     var no_deduplicate: bool = false;
-
-    var target: ?CrossTarget = if (comptime builtin.target.isDarwin())
-        CrossTarget.fromTarget(builtin.target)
-    else
-        null;
-    var platform_version: ?std.SemanticVersion = if (comptime builtin.target.isDarwin())
-        builtin.target.os.version_range.semver.min
-    else
-        null;
-    var sdk_version: ?std.SemanticVersion = if (comptime builtin.target.isDarwin())
-        builtin.target.os.version_range.semver.min
-    else
-        null;
+    var cpu_arch: ?std.Target.Cpu.Arch = null;
+    var platform: ?Platform = null;
 
     var it = Zld.Options.ArgsIterator{ .args = args };
     while (it.next()) |arg| {
@@ -221,21 +208,21 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         } else if (mem.eql(u8, arg, "-search_dylibs_first")) {
             search_strategy = .dylibs_first;
         } else if (mem.eql(u8, arg, "-framework")) {
-            try frameworks.put(it.nextOrFatal(ctx), .{ .needed = false });
+            try addFramework(it.nextOrFatal(ctx), &objects, &frameworks);
         } else if (mem.startsWith(u8, arg, "-F")) {
             try framework_dirs.append(arg[2..]);
         } else if (mem.startsWith(u8, arg, "-needed-l")) {
-            try libs.put(arg["-needed-l".len..], .{ .needed = true });
+            try addNeededLib(arg["-needed-l".len..], &objects, &libs);
         } else if (mem.eql(u8, arg, "-needed_library")) {
-            try libs.put(it.nextOrFatal(ctx), .{ .needed = true });
+            try addNeededLib(it.nextOrFatal(ctx), &objects, &libs);
         } else if (mem.eql(u8, arg, "-needed_framework")) {
-            try frameworks.put(it.nextOrFatal(ctx), .{ .needed = true });
+            try addNeededFramework(it.nextOrFatal(ctx), &objects, &frameworks);
         } else if (mem.startsWith(u8, arg, "-weak-l")) {
-            try libs.put(arg["-weak-l".len..], .{ .needed = false, .weak = true });
+            try addWeakLib(arg["-weak-l".len..], &objects, &libs);
         } else if (mem.eql(u8, arg, "-weak_library")) {
-            try libs.put(it.nextOrFatal(ctx), .{ .needed = false, .weak = true });
+            try addWeakLib(it.nextOrFatal(ctx), &objects, &libs);
         } else if (mem.eql(u8, arg, "-weak_framework")) {
-            try frameworks.put(it.nextOrFatal(ctx), .{ .needed = false, .weak = true });
+            try addWeakFramework(it.nextOrFatal(ctx), &objects, &frameworks);
         } else if (mem.eql(u8, arg, "-o")) {
             out_path = it.nextOrFatal(ctx);
         } else if (mem.eql(u8, arg, "-stack_size")) {
@@ -281,111 +268,62 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         } else if (mem.eql(u8, arg, "-S")) {
             strip = true;
         } else if (mem.eql(u8, arg, "-force_load")) {
-            try positionals.append(.{
+            try objects.append(.{
                 .path = it.nextOrFatal(ctx),
+                .tag = .obj,
                 .must_link = true,
             });
         } else if (mem.eql(u8, arg, "-arch")) {
             const arch_s = it.nextOrFatal(ctx);
             if (mem.eql(u8, arch_s, "arm64")) {
-                target.?.cpu_arch = .aarch64;
+                cpu_arch = .aarch64;
             } else if (mem.eql(u8, arch_s, "x86_64")) {
-                target.?.cpu_arch = .x86_64;
+                cpu_arch = .x86_64;
             } else {
                 ctx.fatal("Could not parse CPU architecture from '{s}'", .{arch_s});
             }
         } else if (mem.eql(u8, arg, "-platform_version")) {
-            const platform = it.next() orelse
+            const platform_s = it.next() orelse
                 ctx.fatal("Expected platform name after '{s}'", .{arg});
             const min_v = it.next() orelse
                 ctx.fatal("Expected minimum platform version after '{s}' '{s}'", .{ arg, platform });
             const sdk_v = it.next() orelse
                 ctx.fatal("Expected SDK version after '{s}' '{s}' '{s}'", .{ arg, platform, min_v });
-            var tmp_target = CrossTarget{};
+
+            var tmp_platform = Platform{
+                .platform = undefined,
+                .min_version = undefined,
+                .sdk_version = undefined,
+            };
 
             // First, try parsing platform as a numeric value.
-            if (std.fmt.parseUnsigned(u32, platform, 10)) |ord| {
-                switch (@as(macho.PLATFORM, @enumFromInt(ord))) {
-                    .MACOS => tmp_target = .{
-                        .os_tag = .macos,
-                        .abi = .none,
-                    },
-                    .IOS => tmp_target = .{
-                        .os_tag = .ios,
-                        .abi = .none,
-                    },
-                    .TVOS => tmp_target = .{
-                        .os_tag = .tvos,
-                        .abi = .none,
-                    },
-                    .WATCHOS => tmp_target = .{
-                        .os_tag = .watchos,
-                        .abi = .none,
-                    },
-                    .IOSSIMULATOR => tmp_target = .{
-                        .os_tag = .ios,
-                        .abi = .simulator,
-                    },
-                    .TVOSSIMULATOR => tmp_target = .{
-                        .os_tag = .tvos,
-                        .abi = .simulator,
-                    },
-                    .WATCHOSSIMULATOR => tmp_target = .{
-                        .os_tag = .watchos,
-                        .abi = .simulator,
-                    },
-                    else => |x| ctx.fatal("Unsupported Apple OS: {s}", .{@tagName(x)}),
-                }
+            if (std.fmt.parseUnsigned(u32, platform_s, 10)) |ord| {
+                tmp_platform.platform = @as(macho.PLATFORM, @enumFromInt(ord));
             } else |_| {
-                if (mem.eql(u8, platform, "macos")) {
-                    tmp_target = .{
-                        .os_tag = .macos,
-                        .abi = .none,
-                    };
-                } else if (mem.eql(u8, platform, "ios")) {
-                    tmp_target = .{
-                        .os_tag = .ios,
-                        .abi = .none,
-                    };
-                } else if (mem.eql(u8, platform, "tvos")) {
-                    tmp_target = .{
-                        .os_tag = .tvos,
-                        .abi = .none,
-                    };
-                } else if (mem.eql(u8, platform, "watchos")) {
-                    tmp_target = .{
-                        .os_tag = .watchos,
-                        .abi = .none,
-                    };
-                } else if (mem.eql(u8, platform, "ios-simulator")) {
-                    tmp_target = .{
-                        .os_tag = .ios,
-                        .abi = .simulator,
-                    };
-                } else if (mem.eql(u8, platform, "tvos-simulator")) {
-                    tmp_target = .{
-                        .os_tag = .tvos,
-                        .abi = .simulator,
-                    };
-                } else if (mem.eql(u8, platform, "watchos-simulator")) {
-                    tmp_target = .{
-                        .os_tag = .watchos,
-                        .abi = .simulator,
-                    };
+                if (mem.eql(u8, platform_s, "macos")) {
+                    tmp_platform.platform = .MACOS;
+                } else if (mem.eql(u8, platform_s, "ios")) {
+                    tmp_platform.platform = .IOS;
+                } else if (mem.eql(u8, platform_s, "tvos")) {
+                    tmp_platform.platform = .TVOS;
+                } else if (mem.eql(u8, platform_s, "watchos")) {
+                    tmp_platform.platform = .WATCHOS;
+                } else if (mem.eql(u8, platform_s, "ios-simulator")) {
+                    tmp_platform.platform = .IOSSIMULATOR;
+                } else if (mem.eql(u8, platform_s, "tvos-simulator")) {
+                    tmp_platform.platform = .TVOSSIMULATOR;
+                } else if (mem.eql(u8, platform_s, "watchos-simulator")) {
+                    tmp_platform.platform = .WATCHOSSIMULATOR;
                 } else {
-                    ctx.fatal("Unsupported Apple OS: {s}", .{platform});
+                    ctx.fatal("Unsupported Apple OS: {s}", .{platform_s});
                 }
             }
 
-            if (target) |*tt| {
-                tt.os_tag = tmp_target.os_tag;
-                tt.abi = tmp_target.abi;
-            }
-
-            platform_version = parseSdkVersion(min_v) orelse
+            tmp_platform.min_version = parseSdkVersion(min_v) orelse
                 ctx.fatal("Unable to parse version from '{s}'", .{min_v});
-            sdk_version = parseSdkVersion(sdk_v) orelse
+            tmp_platform.sdk_version = parseSdkVersion(sdk_v) orelse
                 ctx.fatal("Unable to parse version from '{s}'", .{sdk_v});
+            platform = tmp_platform;
         } else if (mem.eql(u8, arg, "-undefined")) {
             const treatment = it.nextOrFatal(ctx);
             if (mem.eql(u8, treatment, "error")) {
@@ -403,24 +341,18 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         } else if (mem.eql(u8, arg, "-demangle")) {
             std.log.debug("TODO unimplemented -demangle option", .{});
         } else if (mem.startsWith(u8, arg, "-l")) {
-            try libs.put(arg[2..], .{ .needed = false });
+            try addLib(arg[2..], &objects, &libs);
         } else if (mem.startsWith(u8, arg, "-L")) {
             try lib_dirs.append(arg[2..]);
         } else if (mem.eql(u8, arg, "-no_deduplicate")) {
             no_deduplicate = true;
         } else {
-            try positionals.append(.{
+            try objects.append(.{
                 .path = arg,
-                .must_link = false,
+                .tag = .obj,
             });
         }
     }
-
-    if (positionals.items.len == 0) ctx.fatal("Expected at least one input .o file", .{});
-    if (target == null or target.?.cpu_arch == null)
-        ctx.fatal("Missing -arch when cross-linking", .{});
-    if (target.?.os_tag == null)
-        ctx.fatal("Missing -platform_version when cross-linking", .{});
 
     // Add some defaults
     try lib_dirs.append("/usr/lib");
@@ -432,14 +364,11 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             .sub_path = out_path orelse "a.out",
         },
         .dynamic = dynamic,
-        .target = target.?,
-        .platform_version = platform_version.?,
-        .sdk_version = sdk_version.?,
+        .cpu_arch = cpu_arch,
+        .platform = platform,
         .output_mode = if (dylib) .lib else .exe,
         .syslibroot = syslibroot,
-        .positionals = positionals.items,
-        .libs = libs,
-        .frameworks = frameworks,
+        .objects = objects.items,
         .lib_dirs = lib_dirs.items,
         .framework_dirs = framework_dirs.items,
         .rpath_list = rpath_list.items,
@@ -473,6 +402,70 @@ fn eatIntPrefix(arg: []const u8, radix: u8) []const u8 {
     return arg;
 }
 
+const Objects = std.ArrayList(MachO.LinkObject);
+const LibLookup = std.StringHashMap(usize);
+
+fn newObjectWithLookup(name: []const u8, objects: *Objects, lookup: *LibLookup) !*MachO.LinkObject {
+    const gop = try lookup.getOrPut(name);
+    if (!gop.found_existing) {
+        gop.value_ptr.* = objects.items.len;
+        _ = try objects.addOne();
+    }
+    return &objects.items[gop.value_ptr.*];
+}
+
+fn addLib(name: []const u8, objects: *Objects, libs: *LibLookup) !void {
+    const obj = try newObjectWithLookup(name, objects, libs);
+    obj.* = .{
+        .path = name,
+        .tag = .lib,
+    };
+}
+
+fn addNeededLib(name: []const u8, objects: *Objects, libs: *LibLookup) !void {
+    const obj = try newObjectWithLookup(name, objects, libs);
+    obj.* = .{
+        .path = name,
+        .tag = .lib,
+        .needed = true,
+    };
+}
+
+fn addWeakLib(name: []const u8, objects: *Objects, libs: *LibLookup) !void {
+    const obj = try newObjectWithLookup(name, objects, libs);
+    obj.* = .{
+        .path = name,
+        .tag = .lib,
+        .weak = true,
+    };
+}
+
+fn addFramework(name: []const u8, objects: *Objects, frameworks: *LibLookup) !void {
+    const obj = try newObjectWithLookup(name, objects, frameworks);
+    obj.* = .{
+        .path = name,
+        .tag = .framework,
+    };
+}
+
+fn addNeededFramework(name: []const u8, objects: *Objects, frameworks: *LibLookup) !void {
+    const obj = try newObjectWithLookup(name, objects, frameworks);
+    obj.* = .{
+        .path = name,
+        .tag = .framework,
+        .needed = true,
+    };
+}
+
+fn addWeakFramework(name: []const u8, objects: *Objects, frameworks: *LibLookup) !void {
+    const obj = try newObjectWithLookup(name, objects, frameworks);
+    obj.* = .{
+        .path = name,
+        .tag = .framework,
+        .weak = true,
+    };
+}
+
 // Versions reported by Apple aren't exactly semantically valid as they usually omit
 // the patch component. Hence, we do a simple check for the number of components and
 // add the missing patch value if needed.
@@ -489,6 +482,12 @@ fn parseSdkVersion(raw: []const u8) ?std.SemanticVersion {
     } else raw.len;
     return std.SemanticVersion.parse(buffer[0..len]) catch null;
 }
+
+pub const Platform = struct {
+    platform: macho.PLATFORM,
+    min_version: std.SemanticVersion,
+    sdk_version: std.SemanticVersion,
+};
 
 const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
