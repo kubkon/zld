@@ -123,7 +123,7 @@ fn parseObject(self: *Coff, path: []const u8) !bool {
         .file = file,
     };
 
-    object.parse(self.base.allocator, self.options.target.cpu_arch.?) catch |err| switch (err) {
+    object.parse(self.base.allocator, self.options.target.cpu_arch.?, self) catch |err| switch (err) {
         error.EndOfStream => {
             object.deinit(self.base.allocator);
             return false;

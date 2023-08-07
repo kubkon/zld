@@ -9,6 +9,8 @@ const log = std.log.scoped(.coff);
 
 const Allocator = mem.Allocator;
 
+const Coff = @import("../Coff.zig");
+
 file: fs.File,
 name: []const u8,
 
@@ -69,7 +71,7 @@ pub fn deinit(self: *Object, allocator: Allocator) void {
     allocator.free(self.name);
 }
 
-pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch) !void {
+pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch, coff_file: *Coff) !void {
     const reader = self.file.reader();
     const header = try reader.readStruct(CoffHeader);
 
@@ -88,8 +90,8 @@ pub fn parse(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch)
     self.header = header;
 
     try self.parseShdrs(allocator);
-    try self.parseSymtab(allocator);
-    try self.parseStrtab(allocator);
+    try self.parseSymtab(allocator, coff_file);
+    try self.parseStrtab(allocator, coff_file);
 }
 
 fn parseShdrs(self: *Object, allocator: Allocator) !void {
@@ -102,9 +104,8 @@ fn parseShdrs(self: *Object, allocator: Allocator) !void {
     }
 }
 
-fn parseSymtab(self: *Object, allocator: Allocator) !void {
+fn parseSymtab(self: *Object, allocator: Allocator, coff_file: *Coff) !void {
     const offset = self.header.pointer_to_symbol_table;
-    if (offset == 0) return error.NoSymtab;
     try self.file.seekTo(offset);
 
     const size = self.header.number_of_symbols * coff.Symbol.sizeOf();
@@ -113,13 +114,12 @@ fn parseSymtab(self: *Object, allocator: Allocator) !void {
 
     const read = try self.file.reader().readAll(symtab_buffer);
     if (read < size) {
-        log.debug("Expected size: {}, got: {}", .{ size, read });
-        return error.SymtabTooSmall;
+        return coff_file.base.fatal("{s}: expected symtab size {d}, got {d}", .{ size, read });
     }
     self.symtab = .{ .buffer = symtab_buffer };
 }
 
-fn parseStrtab(self: *Object, allocator: Allocator) !void {
+fn parseStrtab(self: *Object, allocator: Allocator, coff_file: *Coff) !void {
     if (self.header.pointer_to_symbol_table == 0) return error.NoStringTable;
 
     const offset = self.header.pointer_to_symbol_table + coff.Symbol.sizeOf() * self.header.number_of_symbols;
@@ -131,8 +131,7 @@ fn parseStrtab(self: *Object, allocator: Allocator) !void {
 
     const read = try self.file.reader().readAll(strtab_buffer);
     if (read < size) {
-        log.debug("Expected size: {}, got: {}", .{ size, read });
-        return error.StrtabTooSmall;
+        return coff_file.base.fatal("{s}: expected strtab size {d}, got {d}", .{ size, read });
     }
     self.strtab = .{ .buffer = strtab_buffer };
 }
