@@ -33,7 +33,6 @@ const usage =
     \\--export-dynamic                   Dynamically export non-hidden symbols
     \\--export=<value>                   Force exporting a global symbol (fails when symbol does not exist)
     \\--shared-memory                    Use shared linear memory (requires atomics and bulk memory)
-    \\
 ;
 
 /// Result path of the binary
