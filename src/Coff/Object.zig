@@ -114,7 +114,7 @@ fn parseSymtab(self: *Object, allocator: Allocator, coff_file: *Coff) !void {
 
     const read = try self.file.reader().readAll(symtab_buffer);
     if (read < size) {
-        return coff_file.base.fatal("{s}: expected symtab size {d}, got {d}", .{ size, read });
+        return coff_file.base.fatal("{s}: expected symtab size {d}, got {d}", .{ self.name, size, read });
     }
     self.symtab = .{ .buffer = symtab_buffer };
 }
@@ -131,7 +131,7 @@ fn parseStrtab(self: *Object, allocator: Allocator, coff_file: *Coff) !void {
 
     const read = try self.file.reader().readAll(strtab_buffer);
     if (read < size) {
-        return coff_file.base.fatal("{s}: expected strtab size {d}, got {d}", .{ size, read });
+        return coff_file.base.fatal("{s}: expected strtab size {d}, got {d}", .{ self.name, size, read });
     }
     self.strtab = .{ .buffer = strtab_buffer };
 }

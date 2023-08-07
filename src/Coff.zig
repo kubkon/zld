@@ -73,23 +73,7 @@ pub fn flush(self: *Coff) !void {
     }
 
     try self.parsePositionals(positionals.items);
-    for (self.objects.items) |*obj| {
-        log.debug("Object name: '{s}'", .{obj.name});
-        log.debug("Symbols: {}", .{obj.symtab.len()});
-        var it = obj.symtab.slice(0, null);
-        while (it.next()) |sym| {
-            const name = sym.getName() orelse obj.getString(sym.getNameOffset().?);
-            log.debug("    Name: `{s}`", .{name});
-            log.debug("        Type:    {} {}", .{ sym.type.base_type, sym.type.complex_type });
-            log.debug("        Storage: {}", .{sym.storage_class});
-        }
-        log.debug("SectionHeaders: {}", .{obj.shdrtab.items.len});
-        for (obj.shdrtab.items) |sh| {
-            const name = sh.getName() orelse obj.getString(sh.getNameOffset().?);
-            log.debug("    Name: `{s}`", .{name});
-            log.debug("    Flags: {x}", .{@as(u32, @bitCast(sh.flags))});
-        }
-    }
+    log.debug("{}", .{self.dumpState()});
 }
 
 fn parsePositionals(self: *Coff, files: []const []const u8) !void {
@@ -134,4 +118,35 @@ fn parseObject(self: *Coff, path: []const u8) !bool {
     try self.objects.append(self.base.allocator, object);
 
     return true;
+}
+
+fn dumpState(self: *Coff) std.fmt.Formatter(fmtDumpState) {
+    return .{ .data = self };
+}
+
+fn fmtDumpState(
+    self: *Coff,
+    comptime unused_fmt_string: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = options;
+    _ = unused_fmt_string;
+    for (self.objects.items) |*obj| {
+        try writer.print("Object name: '{s}'", .{obj.name});
+        try writer.print("Symbols: {}", .{obj.symtab.len()});
+        var it = obj.symtab.slice(0, null);
+        while (it.next()) |sym| {
+            const name = sym.getName() orelse obj.getString(sym.getNameOffset().?);
+            try writer.print("    Name: `{s}`\n", .{name});
+            try writer.print("        Type:    {} {}\n", .{ sym.type.base_type, sym.type.complex_type });
+            try writer.print("        Storage: {}\n", .{sym.storage_class});
+        }
+        try writer.print("SectionHeaders: {}\n", .{obj.shdrtab.items.len});
+        for (obj.shdrtab.items) |sh| {
+            const name = sh.getName() orelse obj.getString(sh.getNameOffset().?);
+            try writer.print("    Name: `{s}`\n", .{name});
+            try writer.print("    Flags: {x}\n", .{@as(u32, @bitCast(sh.flags))});
+        }
+    }
 }
