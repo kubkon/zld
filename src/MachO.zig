@@ -647,11 +647,41 @@ fn parseObject(self: *MachO, obj: LinkObject) !void {
         break :blk self.options.cpu_arch.?;
     };
     if (self_cpu_arch != cpu_arch) {
-        self.base.fatal("{s}: invalid architecture '{s}', expected '{s}'", .{
+        return self.base.fatal("{s}: invalid architecture '{s}', expected '{s}'", .{
             obj.path,
             @tagName(cpu_arch),
             @tagName(self_cpu_arch),
         });
+    }
+
+    if (object.getPlatform()) |platform| {
+        const self_platform = self.options.platform orelse blk: {
+            self.options.platform = platform;
+            break :blk self.options.platform.?;
+        };
+        if (self_platform.platform != platform.platform) {
+            return self.base.fatal(
+                "{s}: object file was built for different platform: expected {s}, got {s}",
+                .{ obj.path, @tagName(self_platform.platform), @tagName(platform.platform) },
+            );
+        }
+        if (self_platform.min_version.major < platform.min_version.major or
+            self_platform.min_version.minor < platform.min_version.minor or
+            self_platform.min_version.patch < platform.min_version.patch)
+        {
+            return self.base.warn(
+                "{s}: object file was built for newer platform version: expected {d}.{d}.{d}, got {d}.{d}.{d}",
+                .{
+                    obj.path,
+                    self_platform.min_version.major,
+                    self_platform.min_version.minor,
+                    self_platform.min_version.patch,
+                    platform.min_version.major,
+                    platform.min_version.minor,
+                    platform.min_version.patch,
+                },
+            );
+        }
     }
 }
 

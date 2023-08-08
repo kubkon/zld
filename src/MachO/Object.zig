@@ -19,6 +19,7 @@ const AtomIndex = MachO.AtomIndex;
 const DwarfInfo = @import("DwarfInfo.zig");
 const LoadCommandIterator = macho.LoadCommandIterator;
 const MachO = @import("../MachO.zig");
+const Options = @import("Options.zig");
 const SymbolWithLoc = MachO.SymbolWithLoc;
 const UnwindInfo = @import("UnwindInfo.zig");
 const Zld = @import("../Zld.zig");
@@ -418,7 +419,7 @@ pub fn splitRegularSections(self: *Object, macho_file: *MachO, object_id: u32) !
     // Well, shit, sometimes compilers skip the dysymtab load command altogether, meaning we
     // have to infer the start of undef section in the symtab ourselves.
     const iundefsym = blk: {
-        const dysymtab = self.parseDysymtab() orelse {
+        const dysymtab = self.getDysymtab() orelse {
             var iundefsym: usize = self.in_symtab.?.len;
             while (iundefsym > 0) : (iundefsym -= 1) {
                 const sym = self.symtab[iundefsym - 1];
@@ -923,16 +924,14 @@ fn diceLessThan(ctx: void, lhs: macho.data_in_code_entry, rhs: macho.data_in_cod
     return lhs.offset < rhs.offset;
 }
 
-fn parseDysymtab(self: Object) ?macho.dysymtab_command {
+fn getDysymtab(self: Object) ?macho.dysymtab_command {
     var it = LoadCommandIterator{
         .ncmds = self.header.ncmds,
         .buffer = self.contents[@sizeOf(macho.mach_header_64)..][0..self.header.sizeofcmds],
     };
     while (it.next()) |cmd| {
         switch (cmd.cmd()) {
-            .DYSYMTAB => {
-                return cmd.cast(macho.dysymtab_command).?;
-            },
+            .DYSYMTAB => return cmd.cast(macho.dysymtab_command).?,
             else => {},
         }
     } else return null;
@@ -956,6 +955,60 @@ pub fn parseDwarfInfo(self: Object) DwarfInfo {
         }
     }
     return di;
+}
+
+pub fn getPlatform(self: Object) ?Options.Platform {
+    var it = LoadCommandIterator{
+        .ncmds = self.header.ncmds,
+        .buffer = self.contents[@sizeOf(macho.mach_header_64)..][0..self.header.sizeofcmds],
+    };
+    while (it.next()) |cmd| {
+        switch (cmd.cmd()) {
+            .BUILD_VERSION => {
+                const lc = cmd.cast(macho.build_version_command).?;
+                return .{
+                    .platform = lc.platform,
+                    .min_version = .{
+                        .major = @as(u16, @truncate(lc.minos >> 16)),
+                        .minor = @as(u8, @truncate(lc.minos >> 8)),
+                        .patch = @as(u8, @truncate(lc.minos)),
+                    },
+                    .sdk_version = .{
+                        .major = @as(u16, @truncate(lc.sdk >> 16)),
+                        .minor = @as(u8, @truncate(lc.sdk >> 8)),
+                        .patch = @as(u8, @truncate(lc.sdk)),
+                    },
+                };
+            },
+            .VERSION_MIN_MACOSX,
+            .VERSION_MIN_IPHONEOS,
+            .VERSION_MIN_TVOS,
+            .VERSION_MIN_WATCHOS,
+            => {
+                const lc = cmd.cast(macho.version_min_command).?;
+                return .{
+                    .platform = switch (cmd.cmd()) {
+                        .VERSION_MIN_MACOSX => .MACOS,
+                        .VERSION_MIN_IPHONEOS => .IOS,
+                        .VERSION_MIN_TVOS => .TVOS,
+                        .VERSION_MIN_WATCHOS => .WATCHOS,
+                        else => unreachable,
+                    },
+                    .min_version = .{
+                        .major = @as(u16, @truncate(lc.version >> 16)),
+                        .minor = @as(u8, @truncate(lc.version >> 8)),
+                        .patch = @as(u8, @truncate(lc.version)),
+                    },
+                    .sdk_version = .{
+                        .major = @as(u16, @truncate(lc.sdk >> 16)),
+                        .minor = @as(u8, @truncate(lc.sdk >> 8)),
+                        .patch = @as(u8, @truncate(lc.sdk)),
+                    },
+                };
+            },
+            else => {},
+        }
+    } else return null;
 }
 
 pub fn getSectionContents(self: Object, sect: macho.section_64) []const u8 {
