@@ -286,9 +286,9 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             const platform_s = it.next() orelse
                 ctx.fatal("Expected platform name after '{s}'", .{arg});
             const min_v = it.next() orelse
-                ctx.fatal("Expected minimum platform version after '{s}' '{s}'", .{ arg, platform });
+                ctx.fatal("Expected minimum platform version after '{s}' '{s}'", .{ arg, platform_s });
             const sdk_v = it.next() orelse
-                ctx.fatal("Expected SDK version after '{s}' '{s}' '{s}'", .{ arg, platform, min_v });
+                ctx.fatal("Expected SDK version after '{s}' '{s}' '{s}'", .{ arg, platform_s, min_v });
 
             var tmp_platform = Platform{
                 .platform = undefined,

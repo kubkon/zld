@@ -237,24 +237,6 @@ pub fn flush(self: *MachO) !void {
         try self.resolveLinkObjectPath(arena, obj, lib_dirs.items, framework_dirs.items, &objects);
     }
 
-    if (self.base.errors.items.len > 0) {
-        {
-            const err = try self.base.addErrorWithNotes(lib_dirs.items.len);
-            try err.addMsg("Library search paths", .{});
-            for (lib_dirs.items) |dir| {
-                try err.addNote("{s}", .{dir});
-            }
-        }
-
-        {
-            const err = try self.base.addErrorWithNotes(framework_dirs.items.len);
-            try err.addMsg("Framework search paths", .{});
-            for (framework_dirs.items) |dir| {
-                try err.addNote("{s}", .{dir});
-            }
-        }
-    }
-
     self.base.reportWarningsAndErrorsAndExit();
 
     // Parse input objects
@@ -553,10 +535,11 @@ fn resolveLib(
     search_dirs: []const []const u8,
     name: []const u8,
 ) !?[]const u8 {
+    const path = try std.fmt.allocPrint(arena, "lib{s}", .{name});
     const search_strategy = self.options.search_strategy orelse .paths_first;
     switch (search_strategy) {
-        .paths_first => return try resolvePathsFirst(arena, search_dirs, name),
-        .dylibs_first => return try resolveDylibsFirst(arena, search_dirs, name),
+        .paths_first => return try resolvePathsFirst(arena, search_dirs, path),
+        .dylibs_first => return try resolveDylibsFirst(arena, search_dirs, path),
     }
 }
 
@@ -590,18 +573,30 @@ fn resolveLinkObjectPath(
         switch (obj.tag) {
             .obj => {
                 var buffer: [fs.MAX_PATH_BYTES]u8 = undefined;
-                log.debug("resolving file path '{s}'", .{obj.path});
-                const full_path = try std.fs.realpath(obj.path, &buffer);
+                const full_path = std.fs.realpath(obj.path, &buffer) catch |err| switch (err) {
+                    error.FileNotFound => return self.base.fatal("{s}: no such file or directory", .{obj.path}),
+                    else => |e| return e,
+                };
                 break :blk try arena.dupe(u8, full_path);
             },
             .lib => {
-                const full_path = (try self.resolveLib(arena, lib_dirs, obj.path)) orelse
-                    return self.base.fatal("library not found for -l{s}", .{obj.path});
+                const full_path = (try self.resolveLib(arena, lib_dirs, obj.path)) orelse {
+                    const err = try self.base.addErrorWithNotes(2 + lib_dirs.len);
+                    try err.addMsg("library not found for -l{s}", .{obj.path});
+                    try err.addNote("searched in", .{});
+                    for (lib_dirs) |dir| try err.addNote("{s}", .{dir});
+                    return;
+                };
                 break :blk full_path;
             },
             .framework => {
-                const full_path = (try self.resolveFramework(arena, framework_dirs, obj.path)) orelse
-                    return self.base.fatal("framework not found for -framework {s}", .{obj.path});
+                const full_path = (try self.resolveFramework(arena, framework_dirs, obj.path)) orelse {
+                    const err = try self.base.addErrorWithNotes(2 + framework_dirs.len);
+                    try err.addMsg("framework not found for -framework {s}", .{obj.path});
+                    try err.addNote("searched in", .{});
+                    for (framework_dirs) |dir| try err.addNote("{s}", .{dir});
+                    return;
+                };
                 break :blk full_path;
             },
         }
@@ -664,53 +659,31 @@ fn parseLibrary(self: *MachO, obj: LinkObject, dependent_libs: anytype) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
-    const gpa = self.base.allocator;
     const file = try std.fs.cwd().openFile(obj.path, .{});
-    defer if (!Archive.isArchive(file)) file.close();
+    defer file.close();
 
     if (Object.isObject(file)) return;
 
-    if (Archive.isArchive(file)) {
-        const offset: ?u64 = if (fat.isFatLibrary(file)) blk: {
-            const offset = self.parseFatLibrary(obj.path, file) catch |err| switch (err) {
-                error.NoArchSpecified, error.MissingArch => return,
-                else => |e| return e,
-            };
-            try file.seekTo(offset);
-            break :blk offset;
-        } else null;
-
-        if (self.options.cpu_arch == null) {
-            return self.base.fatal("{s}: ignoring library as no architecture specified", .{obj.path});
-        }
-
-        var archive = Archive{
-            .file = file,
-            .fat_offset = offset orelse 0,
-            .name = try gpa.dupe(u8, obj.path),
+    if (fat.isFatLibrary(file)) {
+        const offset = self.parseFatLibrary(obj.path, file) catch |err| switch (err) {
+            error.NoArchSpecified, error.MissingArch => return,
+            else => |e| return e,
         };
-        errdefer archive.deinit(gpa);
+        try file.seekTo(offset);
 
-        try archive.parse(gpa, file.reader(), self);
-
-        if (obj.must_link) {
-            // Get all offsets from the ToC
-            var offsets = std.AutoArrayHashMap(u32, void).init(gpa);
-            defer offsets.deinit();
-            for (archive.toc.values()) |offs| {
-                for (offs.items) |off| {
-                    _ = try offsets.getOrPut(off);
-                }
-            }
-            for (offsets.keys()) |off| {
-                const object = try archive.parseObject(gpa, off);
-                try self.objects.append(gpa, object);
-            }
-        } else {
-            try self.archives.append(gpa, archive);
-        }
-    } else if (Dylib.isDylib(file)) {
-        try self.parseDylib(obj.path, file, dependent_libs, .{
+        if (Archive.isArchive(file, offset)) {
+            try self.parseArchive(obj.path, offset, obj.must_link);
+        } else if (Dylib.isDylib(file, offset)) {
+            try self.parseDylib(obj.path, file, offset, dependent_libs, .{
+                .syslibroot = self.options.syslibroot,
+                .needed = obj.needed,
+                .weak = obj.weak,
+            });
+        } else return self.base.fatal("{s}: unknown file type", .{obj.path});
+    } else if (Archive.isArchive(file, 0)) {
+        try self.parseArchive(obj.path, 0, obj.must_link);
+    } else if (Dylib.isDylib(file, 0)) {
+        try self.parseDylib(obj.path, file, 0, dependent_libs, .{
             .syslibroot = self.options.syslibroot,
             .needed = obj.needed,
             .weak = obj.weak,
@@ -721,7 +694,7 @@ fn parseLibrary(self: *MachO, obj: LinkObject, dependent_libs: anytype) !void {
             .needed = obj.needed,
             .weak = obj.weak,
         }) catch |err| switch (err) {
-            error.NotLibStub => return self.base.fatal("{s}: unknown file type", .{obj.path}),
+            error.NotLibStub, error.UnexpectedToken => return self.base.fatal("{s}: unknown file type", .{obj.path}),
             else => |e| return e,
         };
     }
@@ -747,6 +720,43 @@ fn parseFatLibrary(self: *MachO, path: []const u8, file: fs.File) !u64 {
     return offset;
 }
 
+fn parseArchive(self: *MachO, path: []const u8, fat_offset: u64, must_link: bool) !void {
+    if (self.options.cpu_arch == null) {
+        return self.base.fatal("{s}: ignoring library as no architecture specified", .{path});
+    }
+
+    const gpa = self.base.allocator;
+    const file = try std.fs.cwd().openFile(path, .{});
+    errdefer file.close();
+    try file.seekTo(fat_offset);
+
+    var archive = Archive{
+        .file = file,
+        .fat_offset = fat_offset,
+        .name = try gpa.dupe(u8, path),
+    };
+    errdefer archive.deinit(gpa);
+
+    try archive.parse(gpa, file.reader(), self);
+
+    if (must_link) {
+        // Get all offsets from the ToC
+        var offsets = std.AutoArrayHashMap(u32, void).init(gpa);
+        defer offsets.deinit();
+        for (archive.toc.values()) |offs| {
+            for (offs.items) |off| {
+                _ = try offsets.getOrPut(off);
+            }
+        }
+        for (offsets.keys()) |off| {
+            const object = try archive.parseObject(gpa, off);
+            try self.objects.append(gpa, object);
+        }
+    } else {
+        try self.archives.append(gpa, archive);
+    }
+}
+
 const DylibOpts = struct {
     syslibroot: ?[]const u8,
     id: ?Dylib.Id = null,
@@ -755,16 +765,8 @@ const DylibOpts = struct {
     weak: bool = false,
 };
 
-fn parseDylib(self: *MachO, path: []const u8, file: std.fs.File, dependent_libs: anytype, opts: DylibOpts) !void {
+fn parseDylib(self: *MachO, path: []const u8, file: std.fs.File, offset: u64, dependent_libs: anytype, opts: DylibOpts) !void {
     const gpa = self.base.allocator;
-    const offset: ?u64 = if (fat.isFatLibrary(file)) blk: {
-        const offset = self.parseFatLibrary(path, file) catch |err| switch (err) {
-            error.NoArchSpecified, error.MissingArch => return,
-            else => |e| return e,
-        };
-        try file.seekTo(offset);
-        break :blk offset;
-    } else null;
 
     const self_cpu_arch = self.options.cpu_arch orelse
         return self.base.fatal("{s}: ignoring library as no architecture specified", .{path});
@@ -772,7 +774,7 @@ fn parseDylib(self: *MachO, path: []const u8, file: std.fs.File, dependent_libs:
     const file_stat = try file.stat();
     var file_size = math.cast(usize, file_stat.size) orelse return error.Overflow;
 
-    file_size -= (offset orelse 0);
+    file_size -= offset;
 
     const contents = try file.readToEndAllocOptions(gpa, file_size, file_size, @alignOf(u64), null);
     defer gpa.free(contents);
@@ -897,7 +899,7 @@ fn parseDependentLibs(self: *MachO, syslibroot: ?[]const u8, dependent_libs: any
     const arena = arena_alloc.allocator();
     defer arena_alloc.deinit();
 
-    while (dependent_libs.readItem()) |dep_id| {
+    outer: while (dependent_libs.readItem()) |dep_id| {
         defer dep_id.id.deinit(self.base.allocator);
 
         if (self.dylibs_map.contains(dep_id.id.name)) continue;
@@ -925,8 +927,17 @@ fn parseDependentLibs(self: *MachO, syslibroot: ?[]const u8, dependent_libs: any
 
             log.debug("trying dependency at fully resolved path {s}", .{full_path});
 
-            if (Dylib.isDylib(file)) {
-                try self.parseDylib(full_path, file, dependent_libs, .{
+            const offset: u64 = if (fat.isFatLibrary(file)) blk: {
+                const offset = self.parseFatLibrary(full_path, file) catch |err| switch (err) {
+                    error.NoArchSpecified, error.MissingArch => break,
+                    else => |e| return e,
+                };
+                try file.seekTo(offset);
+                break :blk offset;
+            } else 0;
+
+            if (Dylib.isDylib(file, offset)) {
+                try self.parseDylib(full_path, file, offset, dependent_libs, .{
                     .syslibroot = self.options.syslibroot,
                     .dependent = true,
                     .weak = weak,
@@ -937,11 +948,14 @@ fn parseDependentLibs(self: *MachO, syslibroot: ?[]const u8, dependent_libs: any
                     .dependent = true,
                     .weak = weak,
                 }) catch |err| switch (err) {
-                    error.NotLibStub => self.base.fatal("{s}: unable to resolve dependency", .{dep_id.id.name}),
+                    error.NotLibStub, error.UnexpectedToken => continue,
                     else => |e| return e,
                 };
             }
+            continue :outer;
         }
+
+        self.base.fatal("{s}: unable to resolve dependency", .{dep_id.id.name});
     }
 }
 

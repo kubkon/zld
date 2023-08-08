@@ -41,8 +41,8 @@ pub fn parseArchs(file: std.fs.File, buffer: *[2]Arch) ![]const Arch {
         // If we come across an architecture that we do not know how to handle, that's
         // fine because we can keep looking for one that might match.
         const arch: std.Target.Cpu.Arch = switch (fat_arch.cputype) {
-            macho.CPU_TYPE_ARM64 => .aarch64,
-            macho.CPU_TYPE_X86_64 => .x86_64,
+            macho.CPU_TYPE_ARM64 => if (fat_arch.cpusubtype == macho.CPU_SUBTYPE_ARM_ALL) .aarch64 else continue,
+            macho.CPU_TYPE_X86_64 => if (fat_arch.cpusubtype == macho.CPU_SUBTYPE_X86_64_ALL) .x86_64 else continue,
             else => continue,
         };
         buffer[count] = .{ .tag = arch, .offset = fat_arch.offset };

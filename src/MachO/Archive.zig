@@ -89,10 +89,10 @@ const ar_hdr = extern struct {
     }
 };
 
-pub fn isArchive(file: fs.File) bool {
+pub fn isArchive(file: fs.File, fat_offset: u64) bool {
     const reader = file.reader();
     const magic = reader.readBytesNoEof(SARMAG) catch return false;
-    defer file.seekTo(0) catch {};
+    defer file.seekTo(fat_offset) catch {};
     return mem.eql(u8, &magic, ARMAG);
 }
 
@@ -108,20 +108,8 @@ pub fn deinit(self: *Archive, allocator: Allocator) void {
 }
 
 pub fn parse(self: *Archive, allocator: Allocator, reader: anytype, macho_file: *MachO) !void {
-    const magic = reader.readBytesNoEof(SARMAG) catch return error.NotArchive;
-    if (!mem.eql(u8, &magic, ARMAG)) {
-        log.debug("invalid magic: expected '{s}', found '{s}'", .{ ARMAG, magic });
-        return error.NotArchive;
-    }
-
+    _ = try reader.readBytesNoEof(SARMAG);
     self.header = try reader.readStruct(ar_hdr);
-    if (!mem.eql(u8, &self.header.ar_fmag, ARFMAG)) {
-        log.debug("invalid header delimiter: expected '{s}', found '{s}'", .{
-            ARFMAG,
-            self.header.ar_fmag,
-        });
-        return error.NotArchive;
-    }
 
     const name_or_length = try self.header.nameOrLength();
     var embedded_name = try parseName(allocator, name_or_length, reader);
