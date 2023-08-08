@@ -11,6 +11,7 @@ const sections = @import("Wasm/sections.zig");
 const types = @import("Wasm/types.zig");
 pub const Options = @import("Wasm/Options.zig");
 const ThreadPool = std.Thread.Pool;
+const trace = @import("tracy.zig").trace;
 
 const leb = std.leb;
 const fs = std.fs;
@@ -410,6 +411,8 @@ pub fn dataCount(wasm: Wasm) u32 {
 /// Flushes the `Wasm` construct into a final wasm binary by linking
 /// the objects, ensuring the final binary file has no collisions.
 pub fn flush(wasm: *Wasm) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
     try wasm.parsePositionals(wasm.options.positionals);
     try wasm.setupLinkerSymbols();
     for (wasm.objects.items, 0..) |_, obj_idx| {
@@ -2007,10 +2010,42 @@ pub fn getULEB128Size(uint_value: anytype) u32 {
 /// Verifies all resolved symbols and checks whether itself needs to be marked alive,
 /// as well as any of its references.
 fn markReferences(wasm: *Wasm) void {
+    const tracy = trace(@src());
+    defer tracy.end();
     for (wasm.resolved_symbols.keys()) |sym_loc| {
         const sym = sym_loc.getSymbol(wasm);
         if (sym.isExported(wasm.options.export_dynamic) or sym.isNoStrip()) {
             wasm.mark(sym_loc);
+        }
+    }
+
+    // Check for all debug atoms if it contains relocations for marked symbols.
+    // When found, we mark the debug atom itself so the atom will be emit.
+    const debug_sections: []const ?u32 = &.{
+        wasm.debug_info_index,
+        wasm.debug_pubtypes_index,
+        wasm.debug_abbrev_index,
+        wasm.debug_line_index,
+        wasm.debug_str_index,
+        wasm.debug_pubnames_index,
+        wasm.debug_loc_index,
+        wasm.debug_ranges_index,
+    };
+
+    for (debug_sections) |maybe_index| {
+        const index = maybe_index orelse continue;
+        var atom: *Atom = wasm.atoms.get(index).?.getFirst();
+        while (true) {
+            const atom_sym = atom.symbolLoc().getSymbol(wasm);
+            for (atom.relocs.items) |reloc| {
+                const target_loc: SymbolWithLoc = .{ .sym_index = reloc.index, .file = atom.file };
+                const target_sym = target_loc.getSymbol(wasm);
+                if (target_sym.isAlive()) {
+                    atom_sym.mark();
+                }
+            }
+
+            atom = atom.next orelse break;
         }
     }
 }

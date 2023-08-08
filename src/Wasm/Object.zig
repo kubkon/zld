@@ -8,6 +8,7 @@ const types = @import("types.zig");
 const std = @import("std");
 const Wasm = @import("../Wasm.zig");
 const Symbol = @import("Symbol.zig");
+const trace = @import("../tracy.zig").trace;
 
 const Allocator = std.mem.Allocator;
 const leb = std.leb;
@@ -913,6 +914,8 @@ fn assertEnd(reader: anytype) !void {
 
 /// Parses an object file into atoms, for code and data sections
 pub fn parseIntoAtoms(object: *Object, object_index: u16, wasm_bin: *Wasm) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
     const Key = struct {
         kind: Symbol.Tag,
         index: u32,

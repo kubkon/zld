@@ -103,7 +103,7 @@ pub fn resolveRelocs(atom: *Atom, wasm_bin: *const Wasm) void {
             .R_WASM_GLOBAL_INDEX_I32,
             .R_WASM_MEMORY_ADDR_I32,
             .R_WASM_SECTION_OFFSET_I32,
-            => std.mem.writeIntLittle(u32, atom.code.items[reloc.offset..][0..4], @as(u32, @intCast(value))),
+            => std.mem.writeIntLittle(u32, atom.code.items[reloc.offset..][0..4], @as(u32, @truncate(value))),
             .R_WASM_TABLE_INDEX_I64,
             .R_WASM_MEMORY_ADDR_I64,
             => std.mem.writeIntLittle(u64, atom.code.items[reloc.offset..][0..8], value),
@@ -116,7 +116,7 @@ pub fn resolveRelocs(atom: *Atom, wasm_bin: *const Wasm) void {
             .R_WASM_TABLE_NUMBER_LEB,
             .R_WASM_TYPE_INDEX_LEB,
             .R_WASM_MEMORY_ADDR_TLS_SLEB,
-            => leb.writeUnsignedFixed(5, atom.code.items[reloc.offset..][0..5], @as(u32, @intCast(value))),
+            => leb.writeUnsignedFixed(5, atom.code.items[reloc.offset..][0..5], @as(u32, @truncate(value))),
             .R_WASM_MEMORY_ADDR_LEB64,
             .R_WASM_MEMORY_ADDR_SLEB64,
             .R_WASM_TABLE_INDEX_SLEB64,
@@ -132,7 +132,6 @@ pub fn resolveRelocs(atom: *Atom, wasm_bin: *const Wasm) void {
 fn relocationValue(atom: *Atom, relocation: types.Relocation, wasm_bin: *const Wasm) u64 {
     const target_loc = (Wasm.SymbolWithLoc{ .file = atom.file, .sym_index = relocation.index }).finalLoc(wasm_bin);
     const symbol = target_loc.getSymbol(wasm_bin);
-    std.debug.assert(symbol.isAlive());
     switch (relocation.relocation_type) {
         .R_WASM_FUNCTION_INDEX_LEB => return symbol.index,
         .R_WASM_TABLE_NUMBER_LEB => return symbol.index,
@@ -169,6 +168,13 @@ fn relocationValue(atom: *Atom, relocation: types.Relocation, wasm_bin: *const W
             return @intCast(rel_value + relocation.addend);
         },
         .R_WASM_FUNCTION_OFFSET_I32 => {
+            if (symbol.isDead()) {
+                const atom_name = atom.symbolLoc().getName(wasm_bin);
+                if (std.mem.eql(u8, atom_name, ".debug_ranges") or std.mem.eql(u8, atom_name, ".debug_loc")) {
+                    return @bitCast(@as(i64, -2));
+                }
+                return @bitCast(@as(i64, -1));
+            }
             const target_atom = wasm_bin.symbol_atom.get(target_loc).?;
             const offset: u32 = 11 + Wasm.getULEB128Size(target_atom.size); // Header (11 bytes fixed-size) + body size (leb-encoded)
             const rel_value: i32 = @intCast(target_atom.offset + offset);
