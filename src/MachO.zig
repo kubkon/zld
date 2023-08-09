@@ -751,11 +751,10 @@ fn parseFatLibrary(self: *MachO, path: []const u8, file: fs.File) !u64 {
 }
 
 fn parseArchive(self: *MachO, path: []const u8, fat_offset: u64, must_link: bool) !void {
-    if (self.options.cpu_arch == null) {
-        return self.base.fatal("{s}: ignoring library as no architecture specified", .{path});
-    }
-
     const gpa = self.base.allocator;
+    const self_cpu_arch = self.options.cpu_arch orelse
+        return self.base.fatal("{s}: ignoring library as no architecture specified", .{path});
+
     const file = try std.fs.cwd().openFile(path, .{});
     errdefer file.close();
     try file.seekTo(fat_offset);
@@ -768,6 +767,28 @@ fn parseArchive(self: *MachO, path: []const u8, fat_offset: u64, must_link: bool
     errdefer archive.deinit(gpa);
 
     try archive.parse(gpa, file.reader(), self);
+
+    // Verify arch and platform
+    if (archive.toc.values().len > 0) {
+        const offsets = archive.toc.values()[0].items;
+        assert(offsets.len > 0);
+        const off = offsets[0];
+        var object = try archive.parseObject(gpa, off); // TODO we are doing all this work to pull the header only!
+        defer object.deinit(gpa);
+
+        const cpu_arch: std.Target.Cpu.Arch = switch (object.header.cputype) {
+            macho.CPU_TYPE_ARM64 => .aarch64,
+            macho.CPU_TYPE_X86_64 => .x86_64,
+            else => unreachable,
+        };
+        if (self_cpu_arch != cpu_arch) {
+            return self.base.fatal("{s}: invalid architecture in archive '{s}', expected '{s}'", .{
+                path,
+                @tagName(cpu_arch),
+                @tagName(self_cpu_arch),
+            });
+        }
+    }
 
     if (must_link) {
         // Get all offsets from the ToC
