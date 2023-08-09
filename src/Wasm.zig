@@ -1281,7 +1281,7 @@ fn setupInitMemoryFunction(wasm: *Wasm) !void {
     try wasm.createSyntheticFunction(
         "__wasm_init_memory",
         std.wasm.Type{ .params = &.{}, .returns = &.{} },
-        &function_body,
+        function_body.items,
     );
 }
 
@@ -1325,13 +1325,13 @@ fn setupTLSRelocationsFunction(wasm: *Wasm) !void {
     try wasm.createSyntheticFunction(
         "__wasm_apply_global_tls_relocs",
         std.wasm.Type{ .params = &.{}, .returns = &.{} },
-        &function_body,
+        function_body.items,
     );
 }
 
 fn initializeCallCtorsFunction(wasm: *Wasm) !void {
     var function_body = std.ArrayList(u8).init(wasm.base.allocator);
-    defer function_body.deinit();
+    // defer function_body.deinit();
     const writer = function_body.writer();
 
     // Write locals count (we have none)
@@ -1360,7 +1360,7 @@ fn initializeCallCtorsFunction(wasm: *Wasm) !void {
     try wasm.createSyntheticFunction(
         "__wasm_call_ctors",
         std.wasm.Type{ .params = &.{}, .returns = &.{} },
-        &function_body,
+        function_body.items,
     );
 }
 
@@ -1368,7 +1368,7 @@ fn createSyntheticFunction(
     wasm: *Wasm,
     symbol_name: []const u8,
     func_ty: std.wasm.Type,
-    function_body: *std.ArrayList(u8),
+    function_body: []u8,
 ) !void {
     const loc = wasm.findGlobalSymbol(symbol_name) orelse
         try wasm.createSyntheticSymbol(symbol_name, .function);
@@ -1393,14 +1393,14 @@ fn createSyntheticFunction(
     const atom = try wasm.base.allocator.create(Atom);
     errdefer wasm.base.allocator.destroy(atom);
     atom.* = .{
-        .size = @as(u32, @intCast(function_body.items.len)),
+        .size = @as(u32, @intCast(function_body.len)),
         .offset = 0,
         .sym_index = loc.sym_index,
         .file = null,
         .alignment = 1,
         .next = null,
         .prev = null,
-        .code = function_body.moveToUnmanaged(),
+        .data = function_body.ptr,
     };
     try wasm.managed_atoms.append(wasm.base.allocator, atom);
     try wasm.appendAtomAtIndex(wasm.base.allocator, wasm.code_section_index.?, atom);
@@ -1466,7 +1466,7 @@ fn initializeTLSFunction(wasm: *Wasm) !void {
     try wasm.createSyntheticFunction(
         "__wasm_init_tls",
         std.wasm.Type{ .params = &.{.i32}, .returns = &.{} },
-        &function_body,
+        function_body.items,
     );
 }
 

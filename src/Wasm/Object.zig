@@ -957,7 +957,7 @@ pub fn parseIntoAtoms(object: *Object, object_index: u16, wasm_bin: *Wasm) !void
         atom.file = object_index;
         atom.size = relocatable_data.size;
         atom.alignment = relocatable_data.getAlignment(object);
-        try atom.code.appendSlice(wasm_bin.base.allocator, relocatable_data.data[0..relocatable_data.size]);
+        atom.data = relocatable_data.data;
 
         const relocations: []types.Relocation = object.relocations.get(relocatable_data.section_index) orelse &.{};
         for (relocations) |relocation| {
