@@ -508,6 +508,19 @@ pub const Version = struct {
     }
 };
 
+const SupportedPlatforms = struct { macho.PLATFORM, u32, u32 };
+
+// Source: https://github.com/apple-oss-distributions/ld64/blob/59a99ab60399c5e6c49e6945a9e1049c42b71135/src/ld/PlatformSupport.cpp#L52
+pub const supported_platforms = [_]SupportedPlatforms{
+    .{ .MACOS, 0xA0E00, 0xA0800 },
+    .{ .IOS, 0xC0000, 0x70000 },
+    .{ .TVOS, 0xC0000, 0x70000 },
+    .{ .WATCHOS, 0x50000, 0x20000 },
+    .{ .IOSSIMULATOR, 0xD0000, 0x80000 },
+    .{ .TVOSSIMULATOR, 0xD0000, 0x80000 },
+    .{ .WATCHOSSIMULATOR, 0x60000, 0x20000 },
+};
+
 const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
 

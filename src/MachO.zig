@@ -417,7 +417,15 @@ pub fn flush(self: *MachO) !void {
     });
 
     if (self.options.platform) |platform| {
-        try load_commands.writeBuildVersionLC(platform, lc_writer);
+        inline for (Options.supported_platforms) |sup_plat| {
+            if (sup_plat[0] == platform.platform) {
+                if (sup_plat[1] <= platform.min_version.value) {
+                    try load_commands.writeBuildVersionLC(platform, lc_writer);
+                } else {
+                    try load_commands.writeVersionMinLC(platform, lc_writer);
+                }
+            }
+        }
     }
 
     const uuid_cmd_offset = @sizeOf(macho.mach_header_64) + @as(u32, @intCast(lc_buffer.items.len));

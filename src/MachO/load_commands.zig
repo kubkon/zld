@@ -77,9 +77,18 @@ fn calcLCsSize(macho_file: *MachO, assume_max_path_len: bool) !u32 {
     }
     // LC_SOURCE_VERSION
     sizeofcmds += @sizeOf(macho.source_version_command);
-    // LC_BUILD_VERSION
-    if (options.platform) |_| {
-        sizeofcmds += @sizeOf(macho.build_version_command) + @sizeOf(macho.build_tool_version);
+    if (options.platform) |platform| {
+        inline for (Options.supported_platforms) |sup_plat| {
+            if (sup_plat[0] == platform.platform) {
+                if (sup_plat[1] <= platform.min_version.value) {
+                    // LC_BUILD_VERSION
+                    sizeofcmds += @sizeOf(macho.build_version_command) + @sizeOf(macho.build_tool_version);
+                } else {
+                    // LC_VERSION_MIN_*
+                    sizeofcmds += @sizeOf(macho.version_min_command);
+                }
+            }
+        }
     }
     // LC_UUID
     sizeofcmds += @sizeOf(macho.uuid_command);
@@ -245,6 +254,21 @@ pub fn writeRpathLCs(gpa: Allocator, options: *const Options, lc_writer: anytype
             try lc_writer.writeByteNTimes(0, padding);
         }
     }
+}
+
+pub fn writeVersionMinLC(platform: Options.Platform, lc_writer: anytype) !void {
+    const cmd: macho.LC = switch (platform.platform) {
+        .MACOS => .VERSION_MIN_MACOSX,
+        .IOS, .IOSSIMULATOR => .VERSION_MIN_IPHONEOS,
+        .TVOS, .TVOSSIMULATOR => .VERSION_MIN_TVOS,
+        .WATCHOS, .WATCHOSSIMULATOR => .VERSION_MIN_WATCHOS,
+        else => unreachable,
+    };
+    try lc_writer.writeAll(mem.asBytes(&macho.version_min_command{
+        .cmd = cmd,
+        .version = platform.min_version.value,
+        .sdk = platform.sdk_version.value,
+    }));
 }
 
 pub fn writeBuildVersionLC(platform: Options.Platform, lc_writer: anytype) !void {
