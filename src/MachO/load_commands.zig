@@ -78,7 +78,9 @@ fn calcLCsSize(macho_file: *MachO, assume_max_path_len: bool) !u32 {
     // LC_SOURCE_VERSION
     sizeofcmds += @sizeOf(macho.source_version_command);
     // LC_BUILD_VERSION
-    sizeofcmds += @sizeOf(macho.build_version_command) + @sizeOf(macho.build_tool_version);
+    if (options.platform) |_| {
+        sizeofcmds += @sizeOf(macho.build_version_command) + @sizeOf(macho.build_tool_version);
+    }
     // LC_UUID
     sizeofcmds += @sizeOf(macho.uuid_command);
     // LC_LOAD_DYLIB
@@ -253,21 +255,21 @@ pub fn writeRpathLCs(gpa: Allocator, options: *const Options, lc_writer: anytype
     }
 }
 
-pub fn writeBuildVersionLC(options: *const Options, lc_writer: anytype) !void {
+pub fn writeBuildVersionLC(platform: Options.Platform, lc_writer: anytype) !void {
     const cmdsize = @sizeOf(macho.build_version_command) + @sizeOf(macho.build_tool_version);
     const platform_version = blk: {
-        const ver = options.platform.?.min_version; // TODO
+        const ver = platform.min_version;
         const platform_version = @as(u32, @intCast(ver.major << 16 | ver.minor << 8));
         break :blk platform_version;
     };
     const sdk_version = blk: {
-        const ver = options.platform.?.sdk_version; // TODO
+        const ver = platform.sdk_version;
         const sdk_version = @as(u32, @intCast(ver.major << 16 | ver.minor << 8));
         break :blk sdk_version;
     };
     try lc_writer.writeStruct(macho.build_version_command{
         .cmdsize = cmdsize,
-        .platform = options.platform.?.platform, // TODO
+        .platform = platform.platform,
         .minos = platform_version,
         .sdk = sdk_version,
         .ntools = 1,

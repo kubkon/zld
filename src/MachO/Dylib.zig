@@ -394,7 +394,7 @@ pub fn parseFromStub(
     self: *Dylib,
     allocator: Allocator,
     cpu_arch: std.Target.Cpu.Arch,
-    platform: macho.PLATFORM,
+    platform: ?Options.Platform,
     lib_stub: LibStub,
     dylib_id: u16,
     dependent_libs: anytype,
@@ -420,7 +420,7 @@ pub fn parseFromStub(
 
     log.debug("  (install_name '{s}')", .{umbrella_lib.installName()});
 
-    var matcher = try TargetMatcher.init(allocator, cpu_arch, platform);
+    var matcher = try TargetMatcher.init(allocator, cpu_arch, if (platform) |p| p.platform else .MACOS);
     defer matcher.deinit();
 
     for (lib_stub.inner, 0..) |elem, stub_index| {

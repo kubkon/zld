@@ -415,7 +415,10 @@ pub fn flush(self: *MachO) !void {
     try lc_writer.writeStruct(macho.source_version_command{
         .version = 0,
     });
-    try load_commands.writeBuildVersionLC(&self.options, lc_writer);
+
+    if (self.options.platform) |platform| {
+        try load_commands.writeBuildVersionLC(platform, lc_writer);
+    }
 
     const uuid_cmd_offset = @sizeOf(macho.mach_header_64) + @as(u32, @intCast(lc_buffer.items.len));
     try lc_writer.writeStruct(self.uuid_cmd);
@@ -854,13 +857,14 @@ fn parseDylib(self: *MachO, path: []const u8, file: std.fs.File, offset: u64, de
         });
     }
 
-    if (dylib.getPlatform(contents)) |platform| {
-        const self_platform = self.options.platform.?;
-        if (self_platform.platform != platform.platform) {
-            return self.base.fatal(
-                "{s}: dylib file was built for different platform: expected {s}, got {s}",
-                .{ path, @tagName(self_platform.platform), @tagName(platform.platform) },
-            );
+    if (self.options.platform) |self_platform| {
+        if (dylib.getPlatform(contents)) |platform| {
+            if (self_platform.platform != platform.platform) {
+                return self.base.fatal(
+                    "{s}: dylib file was built for different platform: expected {s}, got {s}",
+                    .{ path, @tagName(self_platform.platform), @tagName(platform.platform) },
+                );
+            }
         }
     }
 
@@ -882,17 +886,18 @@ fn parseLibStub(self: *MachO, path: []const u8, file: std.fs.File, dependent_lib
 
     const cpu_arch = self.options.cpu_arch orelse
         return self.base.fatal("{s}: ignoring library as no architecture specified", .{path});
-    const platform = self.options.platform.?.platform;
 
-    var matcher = try Dylib.TargetMatcher.init(self.base.allocator, cpu_arch, platform);
-    defer matcher.deinit();
+    if (self.options.platform) |platform| {
+        var matcher = try Dylib.TargetMatcher.init(self.base.allocator, cpu_arch, platform.platform);
+        defer matcher.deinit();
 
-    for (lib_stub.inner) |elem| {
-        if (try matcher.matchesTargetTbd(elem)) break;
-    } else {
-        const target = try Dylib.TargetMatcher.targetToAppleString(self.base.allocator, cpu_arch, platform);
-        defer self.base.allocator.free(target);
-        return self.base.fatal("{s}: missing target in stub file: expected {s}", .{ path, target });
+        for (lib_stub.inner) |elem| {
+            if (try matcher.matchesTargetTbd(elem)) break;
+        } else {
+            const target = try Dylib.TargetMatcher.targetToAppleString(self.base.allocator, cpu_arch, platform.platform);
+            defer self.base.allocator.free(target);
+            return self.base.fatal("{s}: missing target in stub file: expected {s}", .{ path, target });
+        }
     }
 
     var dylib = Dylib{ .weak = opts.weak };
@@ -901,7 +906,7 @@ fn parseLibStub(self: *MachO, path: []const u8, file: std.fs.File, dependent_lib
     try dylib.parseFromStub(
         self.base.allocator,
         cpu_arch,
-        self.options.platform.?.platform,
+        self.options.platform,
         lib_stub,
         @intCast(self.dylibs.items.len),
         dependent_libs,
@@ -3639,10 +3644,13 @@ pub inline fn getPageSize(self: MachO) u16 {
 
 pub fn requiresCodeSig(self: MachO) bool {
     if (self.options.entitlements) |_| return true;
-    if (self.options.cpu_arch.? == .aarch64) switch (self.options.platform.?.platform) {
-        .MACOS, .IOSSIMULATOR, .WATCHOSSIMULATOR, .TVOSSIMULATOR => return true,
-        else => {},
-    };
+    if (self.options.cpu_arch.? == .aarch64) {
+        const platform = if (self.options.platform) |platform| platform.platform else .MACOS;
+        switch (platform) {
+            .MACOS, .IOSSIMULATOR, .WATCHOSSIMULATOR, .TVOSSIMULATOR => return true,
+            else => {},
+        }
+    }
     return false;
 }
 
