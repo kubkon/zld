@@ -188,21 +188,13 @@ pub fn writeDylibIdLC(options: *const Options, lc_writer: anytype) !void {
     assert(options.output_mode == .lib);
     const emit = options.emit;
     const install_name = options.install_name orelse emit.sub_path;
-    const curr = options.current_version orelse std.SemanticVersion{
-        .major = 1,
-        .minor = 0,
-        .patch = 0,
-    };
-    const compat = options.compatibility_version orelse std.SemanticVersion{
-        .major = 1,
-        .minor = 0,
-        .patch = 0,
-    };
+    const curr = options.current_version orelse Options.Version.new(1, 0, 0);
+    const compat = options.compatibility_version orelse Options.Version.new(1, 0, 0);
     try writeDylibLC(.{
         .cmd = .ID_DYLIB,
         .name = install_name,
-        .current_version = @as(u32, @intCast(curr.major << 16 | curr.minor << 8 | curr.patch)),
-        .compatibility_version = @as(u32, @intCast(compat.major << 16 | compat.minor << 8 | compat.patch)),
+        .current_version = curr.value,
+        .compatibility_version = compat.value,
     }, lc_writer);
 }
 
@@ -257,16 +249,8 @@ pub fn writeRpathLCs(gpa: Allocator, options: *const Options, lc_writer: anytype
 
 pub fn writeBuildVersionLC(platform: Options.Platform, lc_writer: anytype) !void {
     const cmdsize = @sizeOf(macho.build_version_command) + @sizeOf(macho.build_tool_version);
-    const platform_version = blk: {
-        const ver = platform.min_version;
-        const platform_version = @as(u32, @intCast(ver.major << 16 | ver.minor << 8));
-        break :blk platform_version;
-    };
-    const sdk_version = blk: {
-        const ver = platform.sdk_version;
-        const sdk_version = @as(u32, @intCast(ver.major << 16 | ver.minor << 8));
-        break :blk sdk_version;
-    };
+    const platform_version = platform.min_version.value;
+    const sdk_version = platform.sdk_version.value;
     try lc_writer.writeStruct(macho.build_version_command{
         .cmdsize = cmdsize,
         .platform = platform.platform,

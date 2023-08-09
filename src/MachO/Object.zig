@@ -968,16 +968,8 @@ pub fn getPlatform(self: Object) ?Options.Platform {
                 const lc = cmd.cast(macho.build_version_command).?;
                 return .{
                     .platform = lc.platform,
-                    .min_version = .{
-                        .major = @as(u16, @truncate(lc.minos >> 16)),
-                        .minor = @as(u8, @truncate(lc.minos >> 8)),
-                        .patch = @as(u8, @truncate(lc.minos)),
-                    },
-                    .sdk_version = .{
-                        .major = @as(u16, @truncate(lc.sdk >> 16)),
-                        .minor = @as(u8, @truncate(lc.sdk >> 8)),
-                        .patch = @as(u8, @truncate(lc.sdk)),
-                    },
+                    .min_version = .{ .value = lc.minos },
+                    .sdk_version = .{ .value = lc.sdk },
                 };
             },
             .VERSION_MIN_MACOSX,
@@ -994,16 +986,8 @@ pub fn getPlatform(self: Object) ?Options.Platform {
                         .VERSION_MIN_WATCHOS => .WATCHOS,
                         else => unreachable,
                     },
-                    .min_version = .{
-                        .major = @as(u16, @truncate(lc.version >> 16)),
-                        .minor = @as(u8, @truncate(lc.version >> 8)),
-                        .patch = @as(u8, @truncate(lc.version)),
-                    },
-                    .sdk_version = .{
-                        .major = @as(u16, @truncate(lc.sdk >> 16)),
-                        .minor = @as(u8, @truncate(lc.sdk >> 8)),
-                        .patch = @as(u8, @truncate(lc.sdk)),
-                    },
+                    .min_version = .{ .value = lc.version },
+                    .sdk_version = .{ .value = lc.sdk },
                 };
             },
             else => {},

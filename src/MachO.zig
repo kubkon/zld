@@ -668,20 +668,17 @@ fn parseObject(self: *MachO, obj: LinkObject) !void {
                 .{ obj.path, @tagName(self_platform.platform), @tagName(platform.platform) },
             );
         }
-        if (self_platform.min_version.major < platform.min_version.major or
-            self_platform.min_version.minor < platform.min_version.minor or
-            self_platform.min_version.patch < platform.min_version.patch)
-        {
+        if (self_platform.min_version.value < platform.min_version.value) {
             return self.base.warn(
                 "{s}: object file was built for newer platform version: expected {d}.{d}.{d}, got {d}.{d}.{d}",
                 .{
                     obj.path,
-                    self_platform.min_version.major,
-                    self_platform.min_version.minor,
-                    self_platform.min_version.patch,
-                    platform.min_version.major,
-                    platform.min_version.minor,
-                    platform.min_version.patch,
+                    self_platform.min_version.major(),
+                    self_platform.min_version.minor(),
+                    self_platform.min_version.patch(),
+                    platform.min_version.major(),
+                    platform.min_version.minor(),
+                    platform.min_version.patch(),
                 },
             );
         }

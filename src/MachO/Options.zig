@@ -148,8 +148,8 @@ stack_size: ?u64 = null,
 strip: bool = false,
 entry: ?[]const u8 = null,
 force_undefined_symbols: std.StringArrayHashMap(void),
-current_version: ?std.SemanticVersion = null,
-compatibility_version: ?std.SemanticVersion = null,
+current_version: ?Version = null,
+compatibility_version: ?Version = null,
 install_name: ?[]const u8 = null,
 entitlements: ?[]const u8 = null,
 pagezero_size: ?u64 = null,
@@ -179,8 +179,8 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
     var dynamic: bool = false;
     var dylib: bool = false;
     var install_name: ?[]const u8 = null;
-    var current_version: ?std.SemanticVersion = null;
-    var compatibility_version: ?std.SemanticVersion = null;
+    var current_version: ?Version = null;
+    var compatibility_version: ?Version = null;
     var headerpad: ?u32 = null;
     var headerpad_max_install_names: bool = false;
     var pagezero_size: ?u64 = null;
@@ -239,11 +239,11 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             try rpath_list.append(it.nextOrFatal(ctx));
         } else if (mem.eql(u8, arg, "-compatibility_version")) {
             const raw = it.nextOrFatal(ctx);
-            compatibility_version = parseSdkVersion(raw) orelse
+            compatibility_version = Version.parse(raw) orelse
                 ctx.fatal("Unable to parse version from '{s}'", .{raw});
         } else if (mem.eql(u8, arg, "-current_version")) {
             const raw = it.nextOrFatal(ctx);
-            current_version = parseSdkVersion(raw) orelse
+            current_version = Version.parse(raw) orelse
                 ctx.fatal("Unable to parse version from '{s}'", .{raw});
         } else if (mem.eql(u8, arg, "-install_name")) {
             install_name = it.nextOrFatal(ctx);
@@ -319,9 +319,9 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
                 }
             }
 
-            tmp_platform.min_version = parseSdkVersion(min_v) orelse
+            tmp_platform.min_version = Version.parse(min_v) orelse
                 ctx.fatal("Unable to parse version from '{s}'", .{min_v});
-            tmp_platform.sdk_version = parseSdkVersion(sdk_v) orelse
+            tmp_platform.sdk_version = Version.parse(sdk_v) orelse
                 ctx.fatal("Unable to parse version from '{s}'", .{sdk_v});
             platform = tmp_platform;
         } else if (mem.eql(u8, arg, "-undefined")) {
@@ -466,45 +466,64 @@ fn addWeakFramework(name: []const u8, objects: *Objects, frameworks: *LibLookup)
     };
 }
 
-// Versions reported by Apple aren't exactly semantically valid as they usually omit
-// the patch component. Hence, we do a simple check for the number of components and
-// add the missing patch value if needed.
-fn parseSdkVersion(raw: []const u8) ?std.SemanticVersion {
-    var buffer: [128]u8 = undefined;
-    if (raw.len > buffer.len) return null;
-    @memcpy(buffer[0..raw.len], raw);
-    const dots_count = mem.count(u8, raw, ".");
-    if (dots_count < 1) return null;
-    const len = if (dots_count < 2) blk: {
-        const patch_suffix = ".0";
-        buffer[raw.len..][0..patch_suffix.len].* = patch_suffix.*;
-        break :blk raw.len + patch_suffix.len;
-    } else raw.len;
-    return std.SemanticVersion.parse(buffer[0..len]) catch null;
-}
-
 pub const Platform = struct {
     platform: macho.PLATFORM,
-    min_version: std.SemanticVersion,
-    sdk_version: std.SemanticVersion,
+    min_version: Version,
+    sdk_version: Version,
+};
+
+pub const Version = struct {
+    value: u32,
+
+    pub fn major(v: Version) u16 {
+        return @as(u16, @truncate(v.value >> 16));
+    }
+
+    pub fn minor(v: Version) u8 {
+        return @as(u8, @truncate(v.value >> 8));
+    }
+
+    pub fn patch(v: Version) u8 {
+        return @as(u8, @truncate(v.value));
+    }
+
+    pub fn parse(raw: []const u8) ?Version {
+        var parsed: [3]u16 = [_]u16{0} ** 3;
+        var count: usize = 0;
+        var it = std.mem.splitAny(u8, raw, ".");
+        while (it.next()) |comp| {
+            if (count >= 3) return null;
+            parsed[count] = std.fmt.parseInt(u16, comp, 10) catch return null;
+            count += 1;
+        }
+        if (count == 0) return null;
+        const maj = parsed[0];
+        const min = std.math.cast(u8, parsed[1]) orelse return null;
+        const pat = std.math.cast(u8, parsed[2]) orelse return null;
+        return Version.new(maj, min, pat);
+    }
+
+    pub fn new(maj: u16, min: u8, pat: u8) Version {
+        return .{ .value = (@as(u32, @intCast(maj)) << 16) | (@as(u32, @intCast(min)) << 8) | pat };
+    }
 };
 
 const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
 
-fn testParseSdkVersionSuccess(exp: std.SemanticVersion, raw: []const u8) !void {
-    const maybe_ver = parseSdkVersion(raw);
+fn testParseVersionSuccess(exp: u32, raw: []const u8) !void {
+    const maybe_ver = Version.parse(raw);
     try expect(maybe_ver != null);
-    const ver = maybe_ver.?;
-    try expectEqual(exp.major, ver.major);
-    try expectEqual(exp.minor, ver.minor);
-    try expectEqual(exp.patch, ver.patch);
+    const ver = maybe_ver.?.value;
+    try expectEqual(exp, ver);
 }
 
-test "parseSdkVersion" {
-    try testParseSdkVersionSuccess(.{ .major = 13, .minor = 4, .patch = 0 }, "13.4");
-    try testParseSdkVersionSuccess(.{ .major = 13, .minor = 4, .patch = 1 }, "13.4.1");
-    try testParseSdkVersionSuccess(.{ .major = 11, .minor = 15, .patch = 0 }, "11.15");
+test "parseVersionString" {
+    try testParseVersionSuccess(0xD0400, "13.4");
+    try testParseVersionSuccess(0xD0401, "13.4.1");
+    try testParseVersionSuccess(0xB0F00, "11.15");
 
-    try expect(parseSdkVersion("11") == null);
+    try expect(Version.parse("") == null);
+    try expect(Version.parse("11.xx") == null);
+    try expect(Version.parse("11.11.11.11") == null);
 }
