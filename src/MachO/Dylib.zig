@@ -203,6 +203,60 @@ pub fn parseFromBinary(
     }
 }
 
+pub fn getPlatform(self: Dylib, data: []align(@alignOf(u64)) const u8) ?Options.Platform {
+    var it = LoadCommandIterator{
+        .ncmds = self.header.?.ncmds,
+        .buffer = data[@sizeOf(macho.mach_header_64)..][0..self.header.?.sizeofcmds],
+    };
+    while (it.next()) |cmd| {
+        switch (cmd.cmd()) {
+            .BUILD_VERSION => {
+                const lc = cmd.cast(macho.build_version_command).?;
+                return .{
+                    .platform = lc.platform,
+                    .min_version = .{
+                        .major = @as(u16, @truncate(lc.minos >> 16)),
+                        .minor = @as(u8, @truncate(lc.minos >> 8)),
+                        .patch = @as(u8, @truncate(lc.minos)),
+                    },
+                    .sdk_version = .{
+                        .major = @as(u16, @truncate(lc.sdk >> 16)),
+                        .minor = @as(u8, @truncate(lc.sdk >> 8)),
+                        .patch = @as(u8, @truncate(lc.sdk)),
+                    },
+                };
+            },
+            .VERSION_MIN_MACOSX,
+            .VERSION_MIN_IPHONEOS,
+            .VERSION_MIN_TVOS,
+            .VERSION_MIN_WATCHOS,
+            => {
+                const lc = cmd.cast(macho.version_min_command).?;
+                return .{
+                    .platform = switch (cmd.cmd()) {
+                        .VERSION_MIN_MACOSX => .MACOS,
+                        .VERSION_MIN_IPHONEOS => .IOS,
+                        .VERSION_MIN_TVOS => .TVOS,
+                        .VERSION_MIN_WATCHOS => .WATCHOS,
+                        else => unreachable,
+                    },
+                    .min_version = .{
+                        .major = @as(u16, @truncate(lc.version >> 16)),
+                        .minor = @as(u8, @truncate(lc.version >> 8)),
+                        .patch = @as(u8, @truncate(lc.version)),
+                    },
+                    .sdk_version = .{
+                        .major = @as(u16, @truncate(lc.sdk >> 16)),
+                        .minor = @as(u8, @truncate(lc.sdk >> 8)),
+                        .patch = @as(u8, @truncate(lc.sdk)),
+                    },
+                };
+            },
+            else => {},
+        }
+    } else return null;
+}
+
 fn addObjCClassSymbol(self: *Dylib, allocator: Allocator, sym_name: []const u8) !void {
     const expanded = &[_][]const u8{
         try std.fmt.allocPrint(allocator, "_OBJC_CLASS_$_{s}", .{sym_name}),

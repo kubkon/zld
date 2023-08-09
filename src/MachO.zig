@@ -833,6 +833,16 @@ fn parseDylib(self: *MachO, path: []const u8, file: std.fs.File, offset: u64, de
         });
     }
 
+    if (dylib.getPlatform(contents)) |platform| {
+        const self_platform = self.options.platform.?;
+        if (self_platform.platform != platform.platform) {
+            return self.base.fatal(
+                "{s}: dylib file was built for different platform: expected {s}, got {s}",
+                .{ path, @tagName(self_platform.platform), @tagName(platform.platform) },
+            );
+        }
+    }
+
     self.addDylib(dylib, .{
         .syslibroot = self.options.syslibroot,
         .needed = opts.needed,
@@ -861,7 +871,7 @@ fn parseLibStub(self: *MachO, path: []const u8, file: std.fs.File, dependent_lib
     } else {
         const target = try Dylib.TargetMatcher.targetToAppleString(self.base.allocator, cpu_arch, platform);
         defer self.base.allocator.free(target);
-        self.base.fatal("{s}: missing target in stub file: expected {s}", .{ path, target });
+        return self.base.fatal("{s}: missing target in stub file: expected {s}", .{ path, target });
     }
 
     var dylib = Dylib{ .weak = opts.weak };
