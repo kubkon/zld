@@ -601,6 +601,11 @@ const supported_platforms = [_]SupportedPlatforms{
     .{ .WATCHOSSIMULATOR, 0x60000, 0x20000, null },
 };
 
+pub fn inferSdkVersionFromSdkPath(path: []const u8) ?Version {
+    _ = path;
+    return null;
+}
+
 const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
 

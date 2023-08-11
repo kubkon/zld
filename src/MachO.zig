@@ -255,13 +255,26 @@ pub fn flush(self: *MachO) !void {
     }
 
     if (self.options.sdk_version == null) {
-        // First, try inferring SDK version from the SDK path.
-        // TODO
+        // First, try inferring SDK version from the SDK path if we have one.
+        if (self.options.syslibroot) |path| {
+            self.options.sdk_version = Options.inferSdkVersionFromSdkPath(path);
+        }
         // Next, if platform has been worked out to be macOS but wasn't inferred from env vars,
         // do a syscall.
-        if (self.options.platform) |platform| {
-            if (platform.platform == .MACOS and self.options.inferred_platform_versions[0].version.value == 0) {
-                // TODO sysctl CTL_KERN KERN_OSRELEASE
+        if (self.options.sdk_version == null and self.options.platform != null) blk: {
+            if (self.options.platform.?.platform == .MACOS and
+                self.options.inferred_platform_versions[0].version.value == 0)
+            {
+                var ver_str: [100]u8 = undefined;
+                var size: usize = 100;
+                std.os.sysctlbynameZ("kern.osrelease", &ver_str, &size, null, 0) catch {
+                    std.log.warn("ERROR", .{});
+                    break :blk;
+                };
+                const kern_ver = Options.Version.parse(ver_str[0 .. size - 1]) orelse break :blk;
+                // According to Apple, kernel major version is 4 ahead of x in 10.
+                const minor = @as(u8, @truncate((kern_ver.value >> 16) - 4));
+                self.options.sdk_version = Options.Version.new(10, minor, 0);
             }
         }
     }
