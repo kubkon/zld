@@ -602,8 +602,15 @@ const supported_platforms = [_]SupportedPlatforms{
 };
 
 pub fn inferSdkVersionFromSdkPath(path: []const u8) ?Version {
-    _ = path;
-    return null;
+    const stem = std.fs.path.stem(path);
+    const start = for (stem, 0..) |c, i| {
+        if (std.ascii.isDigit(c)) break i;
+    } else stem.len;
+    const end = for (stem[start..], start..) |c, i| {
+        if (std.ascii.isDigit(c) or c == '.') continue;
+        break i;
+    } else stem.len;
+    return Version.parse(stem[start..end]);
 }
 
 const expect = std.testing.expect;

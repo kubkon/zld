@@ -262,7 +262,8 @@ pub fn flush(self: *MachO) !void {
         // Next, if platform has been worked out to be macOS but wasn't inferred from env vars,
         // do a syscall.
         if (self.options.sdk_version == null and self.options.platform != null) blk: {
-            if (self.options.platform.?.platform == .MACOS and
+            if ((comptime builtin.target.isDarwin()) and
+                self.options.platform.?.platform == .MACOS and
                 self.options.inferred_platform_versions[0].version.value == 0)
             {
                 var ver_str: [100]u8 = undefined;
