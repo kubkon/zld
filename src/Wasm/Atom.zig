@@ -19,7 +19,7 @@ size: u32,
 /// List of relocations belonging to this atom
 relocs: std.ArrayListUnmanaged(types.Relocation) = .{},
 /// Contains the binary data of an atom, which can be non-relocated
-code: std.ArrayListUnmanaged(u8) = .{},
+data: [*]u8,
 /// For code this is 1, for data this is set to the highest value of all segments
 alignment: u32,
 /// Offset into the section where the atom lives, this already accounts
@@ -55,6 +55,7 @@ pub fn create(gpa: Allocator) !*Atom {
         .offset = 0,
         .prev = null,
         .size = 0,
+        .data = undefined,
     };
     return atom;
 }
@@ -63,7 +64,6 @@ pub fn create(gpa: Allocator) !*Atom {
 /// Also destroys itatom, making any usage of this atom illegal.
 pub fn deinit(atom: *Atom, gpa: Allocator) void {
     atom.relocs.deinit(gpa);
-    atom.code.deinit(gpa);
     gpa.destroy(atom);
 }
 
@@ -103,10 +103,10 @@ pub fn resolveRelocs(atom: *Atom, wasm_bin: *const Wasm) void {
             .R_WASM_GLOBAL_INDEX_I32,
             .R_WASM_MEMORY_ADDR_I32,
             .R_WASM_SECTION_OFFSET_I32,
-            => std.mem.writeIntLittle(u32, atom.code.items[reloc.offset..][0..4], @as(u32, @intCast(value))),
+            => std.mem.writeIntLittle(u32, atom.data[reloc.offset..][0..4], @as(u32, @truncate(value))),
             .R_WASM_TABLE_INDEX_I64,
             .R_WASM_MEMORY_ADDR_I64,
-            => std.mem.writeIntLittle(u64, atom.code.items[reloc.offset..][0..8], value),
+            => std.mem.writeIntLittle(u64, atom.data[reloc.offset..][0..8], value),
             .R_WASM_GLOBAL_INDEX_LEB,
             .R_WASM_EVENT_INDEX_LEB,
             .R_WASM_FUNCTION_INDEX_LEB,
@@ -116,12 +116,12 @@ pub fn resolveRelocs(atom: *Atom, wasm_bin: *const Wasm) void {
             .R_WASM_TABLE_NUMBER_LEB,
             .R_WASM_TYPE_INDEX_LEB,
             .R_WASM_MEMORY_ADDR_TLS_SLEB,
-            => leb.writeUnsignedFixed(5, atom.code.items[reloc.offset..][0..5], @as(u32, @intCast(value))),
+            => leb.writeUnsignedFixed(5, atom.data[reloc.offset..][0..5], @as(u32, @truncate(value))),
             .R_WASM_MEMORY_ADDR_LEB64,
             .R_WASM_MEMORY_ADDR_SLEB64,
             .R_WASM_TABLE_INDEX_SLEB64,
             .R_WASM_MEMORY_ADDR_TLS_SLEB64,
-            => leb.writeUnsignedFixed(10, atom.code.items[reloc.offset..][0..10], value),
+            => leb.writeUnsignedFixed(10, atom.data[reloc.offset..][0..10], value),
         }
     }
 }
@@ -168,6 +168,13 @@ fn relocationValue(atom: *Atom, relocation: types.Relocation, wasm_bin: *const W
             return @intCast(rel_value + relocation.addend);
         },
         .R_WASM_FUNCTION_OFFSET_I32 => {
+            if (symbol.isDead()) {
+                const atom_name = atom.symbolLoc().getName(wasm_bin);
+                if (std.mem.eql(u8, atom_name, ".debug_ranges") or std.mem.eql(u8, atom_name, ".debug_loc")) {
+                    return @bitCast(@as(i64, -2));
+                }
+                return @bitCast(@as(i64, -1));
+            }
             const target_atom = wasm_bin.symbol_atom.get(target_loc).?;
             const offset: u32 = 11 + Wasm.getULEB128Size(target_atom.size); // Header (11 bytes fixed-size) + body size (leb-encoded)
             const rel_value: i32 = @intCast(target_atom.offset + offset);

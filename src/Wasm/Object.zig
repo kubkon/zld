@@ -8,6 +8,7 @@ const types = @import("types.zig");
 const std = @import("std");
 const Wasm = @import("../Wasm.zig");
 const Symbol = @import("Symbol.zig");
+const trace = @import("../tracy.zig").trace;
 
 const Allocator = std.mem.Allocator;
 const leb = std.leb;
@@ -913,19 +914,22 @@ fn assertEnd(reader: anytype) !void {
 
 /// Parses an object file into atoms, for code and data sections
 pub fn parseIntoAtoms(object: *Object, object_index: u16, wasm_bin: *Wasm) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
     const Key = struct {
         kind: Symbol.Tag,
         index: u32,
     };
     var symbol_for_segment = std.AutoArrayHashMap(Key, std.ArrayList(u32)).init(wasm_bin.base.allocator);
+    try symbol_for_segment.ensureUnusedCapacity(object.symtable.len);
     defer for (symbol_for_segment.values()) |*list| {
         list.deinit();
     } else symbol_for_segment.deinit();
 
     for (object.symtable, 0..) |symbol, symbol_index| {
         switch (symbol.tag) {
-            .function, .data, .section => if (!symbol.isUndefined()) {
-                const gop = try symbol_for_segment.getOrPut(.{ .kind = symbol.tag, .index = symbol.index });
+            .function, .data, .section => if (symbol.isDefined()) {
+                const gop = symbol_for_segment.getOrPutAssumeCapacity(.{ .kind = symbol.tag, .index = symbol.index });
                 const sym_idx = @as(u32, @intCast(symbol_index));
                 if (!gop.found_existing) {
                     gop.value_ptr.* = std.ArrayList(u32).init(wasm_bin.base.allocator);
@@ -936,6 +940,11 @@ pub fn parseIntoAtoms(object: *Object, object_index: u16, wasm_bin: *Wasm) !void
         }
     }
 
+    try wasm_bin.managed_atoms.ensureUnusedCapacity(wasm_bin.base.allocator, object.relocatable_data.len);
+
+    var synthetic_symbols = std.ArrayList(Symbol).init(wasm_bin.base.allocator);
+    defer synthetic_symbols.deinit();
+
     for (object.relocatable_data, 0..) |relocatable_data, index| {
         const final_index = (try wasm_bin.getMatchingSegment(wasm_bin.base.allocator, object_index, @as(u32, @intCast(index)))) orelse {
             continue; // found unknown section, so skip parsing into atom as we do not know how to handle it.
@@ -944,10 +953,11 @@ pub fn parseIntoAtoms(object: *Object, object_index: u16, wasm_bin: *Wasm) !void
         const atom = try Atom.create(wasm_bin.base.allocator);
         errdefer atom.deinit(wasm_bin.base.allocator);
 
-        try wasm_bin.managed_atoms.append(wasm_bin.base.allocator, atom);
+        wasm_bin.managed_atoms.appendAssumeCapacity(atom);
         atom.file = object_index;
         atom.size = relocatable_data.size;
         atom.alignment = relocatable_data.getAlignment(object);
+        atom.data = relocatable_data.data;
 
         const relocations: []types.Relocation = object.relocations.get(relocatable_data.section_index) orelse &.{};
         for (relocations) |relocation| {
@@ -957,35 +967,33 @@ pub fn parseIntoAtoms(object: *Object, object_index: u16, wasm_bin: *Wasm) !void
                 var reloc = relocation;
                 reloc.offset -= relocatable_data.offset;
                 try atom.relocs.append(wasm_bin.base.allocator, reloc);
-            }
 
-            switch (relocation.relocation_type) {
-                .R_WASM_TABLE_INDEX_I32,
-                .R_WASM_TABLE_INDEX_I64,
-                .R_WASM_TABLE_INDEX_SLEB,
-                .R_WASM_TABLE_INDEX_SLEB64,
-                => {
-                    try wasm_bin.elements.indirect_functions.put(wasm_bin.base.allocator, .{
-                        .file = object_index,
-                        .sym_index = relocation.index,
-                    }, 0);
-                },
-                .R_WASM_GLOBAL_INDEX_I32,
-                .R_WASM_GLOBAL_INDEX_LEB,
-                => {
-                    const sym = object.symtable[relocation.index];
-                    if (sym.tag != .global) {
-                        try wasm_bin.globals.addGOTEntry(
-                            wasm_bin.base.allocator,
-                            .{ .file = object_index, .sym_index = relocation.index },
-                        );
-                    }
-                },
-                else => {},
+                switch (relocation.relocation_type) {
+                    .R_WASM_TABLE_INDEX_I32,
+                    .R_WASM_TABLE_INDEX_I64,
+                    .R_WASM_TABLE_INDEX_SLEB,
+                    .R_WASM_TABLE_INDEX_SLEB64,
+                    => {
+                        try wasm_bin.elements.indirect_functions.put(wasm_bin.base.allocator, .{
+                            .file = object_index,
+                            .sym_index = relocation.index,
+                        }, 0);
+                    },
+                    .R_WASM_GLOBAL_INDEX_I32,
+                    .R_WASM_GLOBAL_INDEX_LEB,
+                    => {
+                        const sym = object.symtable[relocation.index];
+                        if (sym.tag != .global) {
+                            try wasm_bin.globals.addGOTEntry(
+                                wasm_bin.base.allocator,
+                                .{ .file = object_index, .sym_index = relocation.index },
+                            );
+                        }
+                    },
+                    else => {},
+                }
             }
         }
-
-        try atom.code.appendSlice(wasm_bin.base.allocator, relocatable_data.data[0..relocatable_data.size]);
 
         if (symbol_for_segment.getPtr(.{
             .kind = relocatable_data.getSymbolKind(),
@@ -1004,8 +1012,28 @@ pub fn parseIntoAtoms(object: *Object, object_index: u16, wasm_bin: *Wasm) !void
                 }
             }
         } else {
-            // ensure we do not try to read the symbol index of an atom that's not represented by a symbol.
-            atom.sym_index = undefined;
+            // segment is not represented by a symbol, so instead we create one ourselves.
+            if (relocatable_data.type == .data) {
+                atom.sym_index = @intCast(object.symtable.len + synthetic_symbols.items.len);
+                var sym: Symbol = .{
+                    .tag = .data,
+                    .index = relocatable_data.index,
+                    .name = try object.string_table.put(wasm_bin.base.allocator, object.segment_info[relocatable_data.index].name),
+                    .flags = 0x2, // local
+                    .virtual_address = undefined,
+                };
+                try synthetic_symbols.append(sym);
+            } else if (relocatable_data.type == .debug) {
+                atom.sym_index = @intCast(object.symtable.len + synthetic_symbols.items.len);
+                var sym: Symbol = .{
+                    .tag = .section,
+                    .index = relocatable_data.section_index,
+                    .name = relocatable_data.index,
+                    .flags = 0x2, // local
+                    .virtual_address = undefined,
+                };
+                try synthetic_symbols.append(sym);
+            } else unreachable;
         }
 
         const segment: *Wasm.Segment = &wasm_bin.segments.items[final_index];
@@ -1015,6 +1043,12 @@ pub fn parseIntoAtoms(object: *Object, object_index: u16, wasm_bin: *Wasm) !void
 
         try wasm_bin.appendAtomAtIndex(wasm_bin.base.allocator, final_index, atom);
     }
+
+    const new_syms = try wasm_bin.base.allocator.alloc(Symbol, object.symtable.len + synthetic_symbols.items.len);
+    @memcpy(new_syms[0..object.symtable.len], object.symtable);
+    @memcpy(new_syms[object.symtable.len..], synthetic_symbols.items);
+    wasm_bin.base.allocator.free(object.symtable);
+    object.symtable = new_syms;
 }
 
 /// Verifies if a given value is in between a minimum -and maximum value.

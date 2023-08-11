@@ -118,10 +118,10 @@ pub fn emit(wasm: *Wasm) !void {
         defer sorted_atoms.deinit();
 
         while (true) {
-            if (wasm.resolved_symbols.contains(atom.symbolLoc())) {
-                atom.resolveRelocs(wasm);
-                sorted_atoms.appendAssumeCapacity(atom);
-            }
+            const loc = atom.symbolLoc();
+            std.debug.assert(loc.getSymbol(wasm).isAlive());
+            atom.resolveRelocs(wasm);
+            sorted_atoms.appendAssumeCapacity(atom);
             atom = atom.next orelse break;
         }
 
@@ -136,8 +136,9 @@ pub fn emit(wasm: *Wasm) !void {
         std.mem.sort(*Atom, sorted_atoms.items, wasm, atom_sort_fn);
         for (sorted_atoms.items) |sorted_atom| {
             try leb.writeULEB128(writer, sorted_atom.size);
-            try writer.writeAll(sorted_atom.code.items);
+            try writer.writeAll(sorted_atom.data[0..sorted_atom.size]);
         }
+        std.debug.assert(sorted_atoms.items.len == wasm.functions.count()); // must have equal amount of bodies as functions
         try emitSectionHeader(file, offset, .code, wasm.functions.count());
     }
 
@@ -173,8 +174,7 @@ pub fn emit(wasm: *Wasm) !void {
                     current_offset += diff;
                 }
                 std.debug.assert(current_offset == atom.offset);
-                std.debug.assert(atom.code.items.len == atom.size);
-                try writer.writeAll(atom.code.items);
+                try writer.writeAll(atom.data[0..atom.size]);
 
                 current_offset += atom.size;
                 if (atom.next) |next| {
@@ -213,6 +213,9 @@ pub fn emit(wasm: *Wasm) !void {
             const symbol = sym_with_loc.getSymbol(wasm);
             switch (symbol.tag) {
                 .function => {
+                    if (symbol.isDead()) {
+                        continue;
+                    }
                     const gop = try funcs.getOrPut(symbol.index);
                     if (!gop.found_existing) {
                         gop.value_ptr.* = sym_with_loc;
@@ -651,7 +654,7 @@ fn emitDebugSections(file: fs.File, wasm: *const Wasm, gpa: std.mem.Allocator, w
             var atom = wasm.atoms.get(index).?.getFirst();
             while (true) {
                 atom.resolveRelocs(wasm);
-                debug_bytes.appendSliceAssumeCapacity(atom.code.items);
+                debug_bytes.appendSliceAssumeCapacity(atom.data[0..atom.size]);
                 atom = atom.next orelse break;
             }
             const header_offset = try reserveCustomSectionHeader(file);
