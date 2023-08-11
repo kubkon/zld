@@ -244,6 +244,28 @@ pub fn flush(self: *MachO) !void {
         try self.parseObject(obj);
     }
 
+    if (self.options.platform == null) {
+        // Check if we have already inferred a version from env vars.
+        inline for (self.options.inferred_platform_versions) |platform| {
+            if (platform.version.value > 0) {
+                self.options.platform = .{ .platform = platform.platform, .version = platform.version };
+                break;
+            }
+        }
+    }
+
+    if (self.options.sdk_version == null) {
+        // First, try inferring SDK version from the SDK path.
+        // TODO
+        // Next, if platform has been worked out to be macOS but wasn't inferred from env vars,
+        // do a syscall.
+        if (self.options.platform) |platform| {
+            if (platform.platform == .MACOS and self.options.inferred_platform_versions[0].version.value == 0) {
+                // TODO sysctl CTL_KERN KERN_OSRELEASE
+            }
+        }
+    }
+
     var dependent_libs = std.fifo.LinearFifo(struct {
         id: Dylib.Id,
         parent: u16,
@@ -418,9 +440,9 @@ pub fn flush(self: *MachO) !void {
 
     if (self.options.platform) |platform| {
         if (platform.isBuildVersionCompatible()) {
-            try load_commands.writeBuildVersionLC(platform, lc_writer);
+            try load_commands.writeBuildVersionLC(platform, self.options.sdk_version, lc_writer);
         } else {
-            try load_commands.writeVersionMinLC(platform, lc_writer);
+            try load_commands.writeVersionMinLC(platform, self.options.sdk_version, lc_writer);
         }
     }
 
@@ -672,17 +694,13 @@ fn parseObject(self: *MachO, obj: LinkObject) !void {
                 .{ obj.path, @tagName(self_platform.platform), @tagName(platform.platform) },
             );
         }
-        if (self_platform.min_version.value < platform.min_version.value) {
+        if (self_platform.version.value < platform.version.value) {
             return self.base.warn(
-                "{s}: object file was built for newer platform version: expected {d}.{d}.{d}, got {d}.{d}.{d}",
+                "{s}: object file was built for newer platform version: expected {}, got {}",
                 .{
                     obj.path,
-                    self_platform.min_version.major(),
-                    self_platform.min_version.minor(),
-                    self_platform.min_version.patch(),
-                    platform.min_version.major(),
-                    platform.min_version.minor(),
-                    platform.min_version.patch(),
+                    self_platform.version,
+                    platform.version,
                 },
             );
         }

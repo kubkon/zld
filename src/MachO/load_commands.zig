@@ -252,7 +252,7 @@ pub fn writeRpathLCs(gpa: Allocator, options: *const Options, lc_writer: anytype
     }
 }
 
-pub fn writeVersionMinLC(platform: Options.Platform, lc_writer: anytype) !void {
+pub fn writeVersionMinLC(platform: Options.Platform, sdk_version: ?Options.Version, lc_writer: anytype) !void {
     const cmd: macho.LC = switch (platform.platform) {
         .MACOS => .VERSION_MIN_MACOSX,
         .IOS, .IOSSIMULATOR => .VERSION_MIN_IPHONEOS,
@@ -262,20 +262,18 @@ pub fn writeVersionMinLC(platform: Options.Platform, lc_writer: anytype) !void {
     };
     try lc_writer.writeAll(mem.asBytes(&macho.version_min_command{
         .cmd = cmd,
-        .version = platform.min_version.value,
-        .sdk = platform.sdk_version.value,
+        .version = platform.version.value,
+        .sdk = if (sdk_version) |ver| ver.value else platform.version.value,
     }));
 }
 
-pub fn writeBuildVersionLC(platform: Options.Platform, lc_writer: anytype) !void {
+pub fn writeBuildVersionLC(platform: Options.Platform, sdk_version: ?Options.Version, lc_writer: anytype) !void {
     const cmdsize = @sizeOf(macho.build_version_command) + @sizeOf(macho.build_tool_version);
-    const platform_version = platform.min_version.value;
-    const sdk_version = platform.sdk_version.value;
     try lc_writer.writeStruct(macho.build_version_command{
         .cmdsize = cmdsize,
         .platform = platform.platform,
-        .minos = platform_version,
-        .sdk = sdk_version,
+        .minos = platform.version.value,
+        .sdk = if (sdk_version) |ver| ver.value else platform.version.value,
         .ntools = 1,
     });
     try lc_writer.writeAll(mem.asBytes(&macho.build_tool_version{

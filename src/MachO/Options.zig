@@ -138,6 +138,8 @@ emit: Zld.Emit,
 output_mode: Zld.OutputMode,
 cpu_arch: ?std.Target.Cpu.Arch,
 platform: ?Platform,
+sdk_version: ?Version,
+inferred_platform_versions: [supported_platforms.len]Platform,
 objects: []const MachO.LinkObject,
 lib_dirs: []const []const u8,
 framework_dirs: []const []const u8,
@@ -194,6 +196,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
     var no_deduplicate: bool = false;
     var cpu_arch: ?std.Target.Cpu.Arch = null;
     var platform: ?Platform = null;
+    var sdk_version: ?Version = null;
 
     var it = Zld.Options.ArgsIterator{ .args = args };
     while (it.next()) |arg| {
@@ -290,40 +293,36 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             const sdk_v = it.next() orelse
                 ctx.fatal("Expected SDK version after '{s}' '{s}' '{s}'", .{ arg, platform_s, min_v });
 
-            var tmp_platform = Platform{
-                .platform = undefined,
-                .min_version = undefined,
-                .sdk_version = undefined,
-            };
+            var tmp_platform: macho.PLATFORM = undefined;
 
             // First, try parsing platform as a numeric value.
             if (std.fmt.parseUnsigned(u32, platform_s, 10)) |ord| {
-                tmp_platform.platform = @as(macho.PLATFORM, @enumFromInt(ord));
+                tmp_platform = @as(macho.PLATFORM, @enumFromInt(ord));
             } else |_| {
                 if (mem.eql(u8, platform_s, "macos")) {
-                    tmp_platform.platform = .MACOS;
+                    tmp_platform = .MACOS;
                 } else if (mem.eql(u8, platform_s, "ios")) {
-                    tmp_platform.platform = .IOS;
+                    tmp_platform = .IOS;
                 } else if (mem.eql(u8, platform_s, "tvos")) {
-                    tmp_platform.platform = .TVOS;
+                    tmp_platform = .TVOS;
                 } else if (mem.eql(u8, platform_s, "watchos")) {
-                    tmp_platform.platform = .WATCHOS;
+                    tmp_platform = .WATCHOS;
                 } else if (mem.eql(u8, platform_s, "ios-simulator")) {
-                    tmp_platform.platform = .IOSSIMULATOR;
+                    tmp_platform = .IOSSIMULATOR;
                 } else if (mem.eql(u8, platform_s, "tvos-simulator")) {
-                    tmp_platform.platform = .TVOSSIMULATOR;
+                    tmp_platform = .TVOSSIMULATOR;
                 } else if (mem.eql(u8, platform_s, "watchos-simulator")) {
-                    tmp_platform.platform = .WATCHOSSIMULATOR;
+                    tmp_platform = .WATCHOSSIMULATOR;
                 } else {
                     ctx.fatal("Unsupported Apple OS: {s}", .{platform_s});
                 }
             }
 
-            tmp_platform.min_version = Version.parse(min_v) orelse
+            const min_ver = Version.parse(min_v) orelse
                 ctx.fatal("Unable to parse version from '{s}'", .{min_v});
-            tmp_platform.sdk_version = Version.parse(sdk_v) orelse
+            sdk_version = Version.parse(sdk_v) orelse
                 ctx.fatal("Unable to parse version from '{s}'", .{sdk_v});
-            platform = tmp_platform;
+            platform = .{ .platform = tmp_platform, .version = min_ver };
         } else if (mem.eql(u8, arg, "-undefined")) {
             const treatment = it.nextOrFatal(ctx);
             if (mem.eql(u8, treatment, "error")) {
@@ -358,7 +357,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
     try lib_dirs.append("/usr/lib");
     try framework_dirs.append("/System/Library/Frameworks");
 
-    return Options{
+    var opts = Options{
         .emit = .{
             .directory = std.fs.cwd(),
             .sub_path = out_path orelse "a.out",
@@ -366,6 +365,8 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         .dynamic = dynamic,
         .cpu_arch = cpu_arch,
         .platform = platform,
+        .sdk_version = sdk_version,
+        .inferred_platform_versions = undefined,
         .output_mode = if (dylib) .lib else .exe,
         .syslibroot = syslibroot,
         .objects = objects.items,
@@ -388,6 +389,25 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         .search_strategy = search_strategy,
         .no_deduplicate = no_deduplicate,
     };
+
+    try opts.inferPlatformVersions(arena);
+
+    return opts;
+}
+
+fn inferPlatformVersions(opts: *Options, arena: Allocator) !void {
+    inline for (&opts.inferred_platform_versions, 0..) |*platform, i| {
+        platform.* = .{ .platform = supported_platforms[i][0], .version = .{ .value = 0 } };
+    }
+
+    inline for (&opts.inferred_platform_versions, 0..) |*platform, i| {
+        if (supported_platforms[i][3]) |var_name| {
+            if (std.process.getEnvVarOwned(arena, var_name)) |env_var| {
+                const version = Version.parse(env_var) orelse Version{ .value = 0 };
+                platform.* = .{ .platform = supported_platforms[i][0], .version = version };
+            } else |_| {}
+        }
+    }
 }
 
 fn eatIntPrefix(arg: []const u8, radix: u8) []const u8 {
@@ -468,8 +488,7 @@ fn addWeakFramework(name: []const u8, objects: *Objects, frameworks: *LibLookup)
 
 pub const Platform = struct {
     platform: macho.PLATFORM,
-    min_version: Version,
-    sdk_version: Version,
+    version: Version,
 
     /// Using Apple's ld64 as our blueprint, `min_version` as well as `sdk_version` are set to
     /// the extracted minimum platform version.
@@ -479,8 +498,7 @@ pub const Platform = struct {
                 const cmd = lc.cast(macho.build_version_command).?;
                 return .{
                     .platform = cmd.platform,
-                    .min_version = .{ .value = cmd.minos },
-                    .sdk_version = .{ .value = cmd.minos },
+                    .version = .{ .value = cmd.minos },
                 };
             },
             .VERSION_MIN_MACOSX,
@@ -497,8 +515,7 @@ pub const Platform = struct {
                         .VERSION_MIN_WATCHOS => .WATCHOS,
                         else => unreachable,
                     },
-                    .min_version = .{ .value = cmd.version },
-                    .sdk_version = .{ .value = cmd.version },
+                    .version = .{ .value = cmd.version },
                 };
             },
             else => unreachable,
@@ -508,7 +525,7 @@ pub const Platform = struct {
     pub fn isBuildVersionCompatible(plat: Platform) bool {
         inline for (supported_platforms) |sup_plat| {
             if (sup_plat[0] == plat.platform) {
-                return sup_plat[1] <= plat.min_version.value;
+                return sup_plat[1] <= plat.version.value;
             }
         }
         return false;
@@ -549,23 +566,39 @@ pub const Version = struct {
     pub fn new(maj: u16, min: u8, pat: u8) Version {
         return .{ .value = (@as(u32, @intCast(maj)) << 16) | (@as(u32, @intCast(min)) << 8) | pat };
     }
+
+    pub fn format(
+        v: Version,
+        comptime unused_fmt_string: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = unused_fmt_string;
+        _ = options;
+        try writer.print("{d}.{d}.{d}", .{
+            v.major(),
+            v.minor(),
+            v.patch(),
+        });
+    }
 };
 
 const SupportedPlatforms = struct {
     macho.PLATFORM, // Platform identifier
     u32, // Min platform version for which to emit LC_BUILD_VERSION
     u32, // Min supported platform version
+    ?[]const u8, // Env var to look for
 };
 
 // Source: https://github.com/apple-oss-distributions/ld64/blob/59a99ab60399c5e6c49e6945a9e1049c42b71135/src/ld/PlatformSupport.cpp#L52
 const supported_platforms = [_]SupportedPlatforms{
-    .{ .MACOS, 0xA0E00, 0xA0800 },
-    .{ .IOS, 0xC0000, 0x70000 },
-    .{ .TVOS, 0xC0000, 0x70000 },
-    .{ .WATCHOS, 0x50000, 0x20000 },
-    .{ .IOSSIMULATOR, 0xD0000, 0x80000 },
-    .{ .TVOSSIMULATOR, 0xD0000, 0x80000 },
-    .{ .WATCHOSSIMULATOR, 0x60000, 0x20000 },
+    .{ .MACOS, 0xA0E00, 0xA0800, "MACOSX_DEPLOYMENT_TARGET" },
+    .{ .IOS, 0xC0000, 0x70000, "IPHONEOS_DEPLOYMENT_TARGET" },
+    .{ .TVOS, 0xC0000, 0x70000, "TVOS_DEPLOYMENT_TARGET" },
+    .{ .WATCHOS, 0x50000, 0x20000, "WATCHOS_DEPLOYMENT_TARGET" },
+    .{ .IOSSIMULATOR, 0xD0000, 0x80000, null },
+    .{ .TVOSSIMULATOR, 0xD0000, 0x80000, null },
+    .{ .WATCHOSSIMULATOR, 0x60000, 0x20000, null },
 };
 
 const expect = std.testing.expect;
