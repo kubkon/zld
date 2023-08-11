@@ -203,6 +203,10 @@ pub fn parseFromBinary(
     }
 }
 
+/// Returns Options.Platform composed from the first encountered build version type load command:
+/// either LC_BUILD_VERSION or LC_VERSION_MIN_*.
+/// Using Apple's ld64 as our blueprint, `min_version` as well as `sdk_version` are set to
+/// the extracted minimum platform version.
 pub fn getPlatform(self: Dylib, data: []align(@alignOf(u64)) const u8) ?Options.Platform {
     var it = LoadCommandIterator{
         .ncmds = self.header.?.ncmds,
@@ -210,32 +214,12 @@ pub fn getPlatform(self: Dylib, data: []align(@alignOf(u64)) const u8) ?Options.
     };
     while (it.next()) |cmd| {
         switch (cmd.cmd()) {
-            .BUILD_VERSION => {
-                const lc = cmd.cast(macho.build_version_command).?;
-                return .{
-                    .platform = lc.platform,
-                    .min_version = .{ .value = lc.minos },
-                    .sdk_version = .{ .value = lc.sdk },
-                };
-            },
+            .BUILD_VERSION,
             .VERSION_MIN_MACOSX,
             .VERSION_MIN_IPHONEOS,
             .VERSION_MIN_TVOS,
             .VERSION_MIN_WATCHOS,
-            => {
-                const lc = cmd.cast(macho.version_min_command).?;
-                return .{
-                    .platform = switch (cmd.cmd()) {
-                        .VERSION_MIN_MACOSX => .MACOS,
-                        .VERSION_MIN_IPHONEOS => .IOS,
-                        .VERSION_MIN_TVOS => .TVOS,
-                        .VERSION_MIN_WATCHOS => .WATCHOS,
-                        else => unreachable,
-                    },
-                    .min_version = .{ .value = lc.version },
-                    .sdk_version = .{ .value = lc.sdk },
-                };
-            },
+            => return Options.Platform.fromLoadCommand(cmd),
             else => {},
         }
     } else return null;

@@ -161,10 +161,10 @@ dead_strip_dylibs: bool = false,
 allow_undef: bool = false,
 no_deduplicate: bool = false,
 
-const cmd = "ld64.zld";
+const bin_name = "ld64.zld";
 
 pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options {
-    if (args.len == 0) ctx.fatal(usage, .{cmd});
+    if (args.len == 0) ctx.fatal(usage, .{bin_name});
 
     var objects = std.ArrayList(MachO.LinkObject).init(arena);
     var libs = std.StringHashMap(usize).init(arena);
@@ -198,7 +198,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
     var it = Zld.Options.ArgsIterator{ .args = args };
     while (it.next()) |arg| {
         if (mem.eql(u8, arg, "--help") or mem.eql(u8, arg, "-h")) {
-            ctx.fatal(usage, .{cmd});
+            ctx.fatal(usage, .{bin_name});
         } else if (mem.eql(u8, arg, "--debug-log")) {
             try ctx.log_scopes.append(it.nextOrFatal(ctx));
         } else if (mem.eql(u8, arg, "-syslibroot")) {
@@ -470,6 +470,38 @@ pub const Platform = struct {
     platform: macho.PLATFORM,
     min_version: Version,
     sdk_version: Version,
+
+    pub fn fromLoadCommand(lc: macho.LoadCommandIterator.LoadCommand) Platform {
+        switch (lc.cmd()) {
+            .BUILD_VERSION => {
+                const cmd = lc.cast(macho.build_version_command).?;
+                return .{
+                    .platform = cmd.platform,
+                    .min_version = .{ .value = cmd.minos },
+                    .sdk_version = .{ .value = cmd.minos },
+                };
+            },
+            .VERSION_MIN_MACOSX,
+            .VERSION_MIN_IPHONEOS,
+            .VERSION_MIN_TVOS,
+            .VERSION_MIN_WATCHOS,
+            => {
+                const cmd = lc.cast(macho.version_min_command).?;
+                return .{
+                    .platform = switch (lc.cmd()) {
+                        .VERSION_MIN_MACOSX => .MACOS,
+                        .VERSION_MIN_IPHONEOS => .IOS,
+                        .VERSION_MIN_TVOS => .TVOS,
+                        .VERSION_MIN_WATCHOS => .WATCHOS,
+                        else => unreachable,
+                    },
+                    .min_version = .{ .value = cmd.version },
+                    .sdk_version = .{ .value = cmd.version },
+                };
+            },
+            else => unreachable,
+        }
+    }
 };
 
 pub const Version = struct {
@@ -508,7 +540,11 @@ pub const Version = struct {
     }
 };
 
-const SupportedPlatforms = struct { macho.PLATFORM, u32, u32 };
+const SupportedPlatforms = struct {
+    macho.PLATFORM, // Platform identifier
+    u32, // Min platform version for which to emit LC_BUILD_VERSION
+    u32, // Min supported platform version
+};
 
 // Source: https://github.com/apple-oss-distributions/ld64/blob/59a99ab60399c5e6c49e6945a9e1049c42b71135/src/ld/PlatformSupport.cpp#L52
 pub const supported_platforms = [_]SupportedPlatforms{
