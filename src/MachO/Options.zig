@@ -471,6 +471,8 @@ pub const Platform = struct {
     min_version: Version,
     sdk_version: Version,
 
+    /// Using Apple's ld64 as our blueprint, `min_version` as well as `sdk_version` are set to
+    /// the extracted minimum platform version.
     pub fn fromLoadCommand(lc: macho.LoadCommandIterator.LoadCommand) Platform {
         switch (lc.cmd()) {
             .BUILD_VERSION => {
@@ -501,6 +503,15 @@ pub const Platform = struct {
             },
             else => unreachable,
         }
+    }
+
+    pub fn isBuildVersionCompatible(plat: Platform) bool {
+        inline for (supported_platforms) |sup_plat| {
+            if (sup_plat[0] == plat.platform) {
+                return sup_plat[1] <= plat.min_version.value;
+            }
+        }
+        return false;
     }
 };
 
@@ -547,7 +558,7 @@ const SupportedPlatforms = struct {
 };
 
 // Source: https://github.com/apple-oss-distributions/ld64/blob/59a99ab60399c5e6c49e6945a9e1049c42b71135/src/ld/PlatformSupport.cpp#L52
-pub const supported_platforms = [_]SupportedPlatforms{
+const supported_platforms = [_]SupportedPlatforms{
     .{ .MACOS, 0xA0E00, 0xA0800 },
     .{ .IOS, 0xC0000, 0x70000 },
     .{ .TVOS, 0xC0000, 0x70000 },

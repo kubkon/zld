@@ -78,16 +78,12 @@ fn calcLCsSize(macho_file: *MachO, assume_max_path_len: bool) !u32 {
     // LC_SOURCE_VERSION
     sizeofcmds += @sizeOf(macho.source_version_command);
     if (options.platform) |platform| {
-        inline for (Options.supported_platforms) |sup_plat| {
-            if (sup_plat[0] == platform.platform) {
-                if (sup_plat[1] <= platform.min_version.value) {
-                    // LC_BUILD_VERSION
-                    sizeofcmds += @sizeOf(macho.build_version_command) + @sizeOf(macho.build_tool_version);
-                } else {
-                    // LC_VERSION_MIN_*
-                    sizeofcmds += @sizeOf(macho.version_min_command);
-                }
-            }
+        if (platform.isBuildVersionCompatible()) {
+            // LC_BUILD_VERSION
+            sizeofcmds += @sizeOf(macho.build_version_command) + @sizeOf(macho.build_tool_version);
+        } else {
+            // LC_VERSION_MIN_*
+            sizeofcmds += @sizeOf(macho.version_min_command);
         }
     }
     // LC_UUID

@@ -417,14 +417,10 @@ pub fn flush(self: *MachO) !void {
     });
 
     if (self.options.platform) |platform| {
-        inline for (Options.supported_platforms) |sup_plat| {
-            if (sup_plat[0] == platform.platform) {
-                if (sup_plat[1] <= platform.min_version.value) {
-                    try load_commands.writeBuildVersionLC(platform, lc_writer);
-                } else {
-                    try load_commands.writeVersionMinLC(platform, lc_writer);
-                }
-            }
+        if (platform.isBuildVersionCompatible()) {
+            try load_commands.writeBuildVersionLC(platform, lc_writer);
+        } else {
+            try load_commands.writeVersionMinLC(platform, lc_writer);
         }
     }
 
