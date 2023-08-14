@@ -111,18 +111,20 @@ pub fn emit(wasm: *Wasm) !void {
     if (wasm.code_section_index) |index| {
         log.debug("Writing 'Code' section ({d})", .{wasm.functions.count()});
         const offset = try reserveSectionHeader(file);
-        var atom = wasm.atoms.get(index).?.getFirst();
+        var atom_index = wasm.atoms.get(index).?;
+        atom_index = Atom.firstAtom(atom_index, wasm);
 
         // The code section must be sorted in line with the function order.
         var sorted_atoms = try std.ArrayList(*Atom).initCapacity(wasm.base.allocator, wasm.functions.count());
         defer sorted_atoms.deinit();
 
-        while (true) {
+        while (atom_index != .none) {
+            const atom = Atom.ptrFromIndex(wasm, atom_index);
             const loc = atom.symbolLoc();
             std.debug.assert(loc.getSymbol(wasm).isAlive());
             atom.resolveRelocs(wasm);
             sorted_atoms.appendAssumeCapacity(atom);
-            atom = atom.next orelse break;
+            atom_index = atom.next;
         }
 
         const atom_sort_fn = struct {
@@ -150,9 +152,9 @@ pub fn emit(wasm: *Wasm) !void {
         while (it.next()) |entry| {
             // do not output the 'bss' section
             if (std.mem.eql(u8, entry.key_ptr.*, ".bss") and !wasm.options.import_memory) continue;
-            const atom_index = entry.value_ptr.*;
-            var atom = wasm.atoms.getPtr(atom_index).?.*.getFirst();
-            const segment: Wasm.Segment = wasm.segments.items[atom_index];
+            var atom_index = wasm.atoms.get(entry.value_ptr.*).?;
+            atom_index = Atom.firstAtom(atom_index, wasm);
+            const segment: Wasm.Segment = wasm.segments.items[entry.value_ptr.*];
 
             try leb.writeULEB128(writer, segment.flags);
             if (segment.flags & @intFromEnum(Wasm.Segment.Flag.WASM_DATA_SEGMENT_HAS_MEMINDEX) != 0) {
@@ -164,7 +166,8 @@ pub fn emit(wasm: *Wasm) !void {
             try leb.writeULEB128(writer, segment.size);
 
             var current_offset: u32 = 0;
-            while (true) {
+            while (atom_index != .none) {
+                const atom = Atom.ptrFromIndex(wasm, atom_index);
                 atom.resolveRelocs(wasm);
                 // TODO: Verify if this is faster than allocating segment's size
                 // Setting all zeroes, memcopy all segments and then writing.
@@ -177,8 +180,8 @@ pub fn emit(wasm: *Wasm) !void {
                 try writer.writeAll(atom.data[0..atom.size]);
 
                 current_offset += atom.size;
-                if (atom.next) |next| {
-                    atom = next;
+                if (atom.next != .none) {
+                    atom_index = atom.next;
                 } else {
                     // Also make sure that if the last atom has extra bytes, we write 0's.
                     if (current_offset != segment.size) {
@@ -651,11 +654,13 @@ fn emitDebugSections(file: fs.File, wasm: *const Wasm, gpa: std.mem.Allocator, w
             const segment = wasm.segments.items[index];
             if (segment.size == 0) continue;
             try debug_bytes.ensureUnusedCapacity(segment.size);
-            var atom = wasm.atoms.get(index).?.getFirst();
-            while (true) {
+            var atom_index = wasm.atoms.get(index).?;
+            atom_index = Atom.firstAtom(atom_index, wasm);
+            while (atom_index != .none) {
+                const atom = Atom.ptrFromIndex(wasm, atom_index);
                 atom.resolveRelocs(wasm);
                 debug_bytes.appendSliceAssumeCapacity(atom.data[0..atom.size]);
-                atom = atom.next orelse break;
+                atom_index = atom.next;
             }
             const header_offset = try reserveCustomSectionHeader(file);
             try leb.writeULEB128(writer, @as(u32, @intCast(item.name.len)));

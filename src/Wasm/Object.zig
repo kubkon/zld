@@ -950,10 +950,8 @@ pub fn parseIntoAtoms(object: *Object, object_index: u16, wasm_bin: *Wasm) !void
             continue; // found unknown section, so skip parsing into atom as we do not know how to handle it.
         };
 
-        const atom = try Atom.create(wasm_bin.base.allocator);
-        errdefer atom.deinit(wasm_bin.base.allocator);
-
-        wasm_bin.managed_atoms.appendAssumeCapacity(atom);
+        const atom_index = try wasm_bin.createAtom();
+        const atom = Atom.ptrFromIndex(wasm_bin, atom_index);
         atom.file = object_index;
         atom.size = relocatable_data.size;
         atom.alignment = relocatable_data.getAlignment(object);
@@ -1000,12 +998,12 @@ pub fn parseIntoAtoms(object: *Object, object_index: u16, wasm_bin: *Wasm) !void
             .index = relocatable_data.getIndex(),
         })) |symbols| {
             atom.sym_index = symbols.pop();
-            try wasm_bin.symbol_atom.putNoClobber(wasm_bin.base.allocator, atom.symbolLoc(), atom);
+            try wasm_bin.symbol_atom.putNoClobber(wasm_bin.base.allocator, atom.symbolLoc(), atom_index);
 
             // symbols referencing the same atom will be added as alias
             // or as 'parent' when they are global.
             while (symbols.popOrNull()) |idx| {
-                try wasm_bin.symbol_atom.putNoClobber(wasm_bin.base.allocator, .{ .file = atom.file, .sym_index = idx }, atom);
+                try wasm_bin.symbol_atom.putNoClobber(wasm_bin.base.allocator, .{ .file = atom.file, .sym_index = idx }, atom_index);
                 const alias_symbol = object.symtable[idx];
                 if (alias_symbol.isGlobal()) {
                     atom.sym_index = idx;
@@ -1041,7 +1039,7 @@ pub fn parseIntoAtoms(object: *Object, object_index: u16, wasm_bin: *Wasm) !void
             segment.alignment = @max(segment.alignment, atom.alignment);
         }
 
-        try wasm_bin.appendAtomAtIndex(wasm_bin.base.allocator, final_index, atom);
+        try wasm_bin.appendAtomAtIndex(wasm_bin.base.allocator, final_index, atom_index);
     }
 
     const new_syms = try wasm_bin.base.allocator.alloc(Symbol, object.symtable.len + synthetic_symbols.items.len);

@@ -34,13 +34,13 @@ archives: std.ArrayListUnmanaged(Archive) = .{},
 /// A map of global names to their symbol location in an object file
 global_symbols: std.AutoHashMapUnmanaged(u32, SymbolWithLoc) = .{},
 /// Contains all atoms that have been created, used to clean up
-managed_atoms: std.ArrayListUnmanaged(*Atom) = .{},
+managed_atoms: std.ArrayListUnmanaged(Atom) = .{},
 /// Maps atoms to their segment index
-atoms: std.AutoHashMapUnmanaged(u32, *Atom) = .{},
+atoms: std.AutoHashMapUnmanaged(u32, Atom.Index) = .{},
 /// Maps a symbol's location to an atom. This can be used to find meta
 /// data of a symbol, such as its size, or its offset to perform a relocation.
 /// Undefined (and synthetic) symbols do not have an Atom and therefore cannot be mapped.
-symbol_atom: std.AutoHashMapUnmanaged(SymbolWithLoc, *Atom) = .{},
+symbol_atom: std.AutoHashMapUnmanaged(SymbolWithLoc, Atom.Index) = .{},
 /// All symbols created by the linker, rather than through
 /// object files will be inserted in this list to manage them.
 synthetic_symbols: std.StringArrayHashMapUnmanaged(Symbol) = .{},
@@ -276,7 +276,7 @@ pub fn deinit(wasm: *Wasm) void {
     for (wasm.archives.items) |*archive| {
         archive.deinit(gpa);
     }
-    for (wasm.managed_atoms.items) |atom| {
+    for (wasm.managed_atoms.items) |*atom| {
         atom.deinit(gpa);
     }
     wasm.synthetic_symbols.deinit(gpa);
@@ -1390,22 +1390,30 @@ fn createSyntheticFunction(
     );
 
     // create the atom that will be output into the final binary
-    const atom = try wasm.base.allocator.create(Atom);
-    errdefer wasm.base.allocator.destroy(atom);
+    const atom_index = try wasm.createAtom();
+    const atom = Atom.ptrFromIndex(wasm, atom_index);
     atom.* = .{
         .size = @as(u32, @intCast(function_body.len)),
         .offset = 0,
         .sym_index = loc.sym_index,
         .file = null,
         .alignment = 1,
-        .next = null,
-        .prev = null,
+        .next = .none,
+        .prev = .none,
         .data = function_body.ptr,
     };
+    try wasm.appendAtomAtIndex(wasm.base.allocator, wasm.code_section_index.?, atom_index);
+    try wasm.symbol_atom.putNoClobber(wasm.base.allocator, loc, atom_index);
+    const prev = Atom.fromIndex(wasm, atom.prev);
+    atom.offset = prev.offset + prev.size;
+}
+
+/// Initializes a new `Atom` and returns its `Atom.Index`.
+pub fn createAtom(wasm: *Wasm) !Atom.Index {
+    const atom = Atom.empty;
+    const index: u32 = @intCast(wasm.managed_atoms.items.len);
     try wasm.managed_atoms.append(wasm.base.allocator, atom);
-    try wasm.appendAtomAtIndex(wasm.base.allocator, wasm.code_section_index.?, atom);
-    try wasm.symbol_atom.putNoClobber(wasm.base.allocator, loc, atom);
-    atom.offset = atom.prev.?.offset + atom.prev.?.size;
+    return @enumFromInt(index);
 }
 
 fn initializeTLSFunction(wasm: *Wasm) !void {
@@ -1638,11 +1646,12 @@ fn allocateVirtualAddresses(wasm: *Wasm) void {
         if (symbol.tag != .data) {
             continue; // only data symbols have virtual addresses
         }
-        const atom = wasm.symbol_atom.get(loc) orelse {
+        const atom_index = wasm.symbol_atom.get(loc) orelse {
             // synthetic symbol that does not contain an atom
             continue;
         };
 
+        const atom = Atom.fromIndex(wasm, atom_index);
         const file_index = atom.file.?;
         const merge_segment = wasm.options.merge_data_segments;
         const segment_info = wasm.objects.items[file_index].segment_info;
@@ -1761,13 +1770,15 @@ fn appendDummySegment(wasm: *Wasm, gpa: Allocator) !void {
 
 /// From a given index, append the given `Atom` at the back of the linked list.
 /// Simply inserts it into the map of atoms when it doesn't exist yet.
-pub fn appendAtomAtIndex(wasm: *Wasm, gpa: Allocator, index: u32, atom: *Atom) !void {
+pub fn appendAtomAtIndex(wasm: *Wasm, gpa: Allocator, index: u32, atom_index: Atom.Index) !void {
     if (wasm.atoms.getPtr(index)) |last| {
-        last.*.next = atom;
+        const last_atom = Atom.ptrFromIndex(wasm, last.*);
+        const atom = Atom.ptrFromIndex(wasm, atom_index);
         atom.prev = last.*;
-        last.* = atom;
+        last_atom.next = atom_index;
+        last.* = atom_index;
     } else {
-        try wasm.atoms.putNoClobber(gpa, index, atom);
+        try wasm.atoms.putNoClobber(gpa, index, atom_index);
     }
 }
 
@@ -1813,26 +1824,33 @@ fn allocateAtoms(wasm: *Wasm) !void {
     var it = wasm.atoms.iterator();
     while (it.next()) |entry| {
         const segment = &wasm.segments.items[entry.key_ptr.*];
-        var atom: *Atom = entry.value_ptr.*.getFirst();
+        var atom_index = Atom.firstAtom(entry.value_ptr.*, wasm);
         var offset: u32 = 0;
         while (true) {
+            const atom = Atom.ptrFromIndex(wasm, atom_index);
             const symbol_loc = atom.symbolLoc();
             const sym = symbol_loc.getSymbol(wasm);
             if (sym.isDead()) {
-                var next = atom.next;
-                var prev = atom.prev;
-                if (prev) |has_prev| {
-                    has_prev.next = next;
+                if (atom.prev != .none) {
+                    const prev = Atom.ptrFromIndex(wasm, atom.prev);
+                    prev.next = atom.next;
                 }
-
-                atom = next orelse break;
-                atom.prev = prev;
+                if (atom.next == .none) {
+                    atom.prev = .none;
+                    break;
+                }
+                atom_index = atom.next;
+                const next = Atom.ptrFromIndex(wasm, atom_index);
+                next.prev = atom.prev;
+                atom.prev = .none;
+                atom.next = .none;
                 continue;
             }
             offset = std.mem.alignForward(u32, offset, atom.alignment);
             atom.offset = offset;
             offset += atom.size;
-            atom = atom.next orelse break;
+            if (atom.next == .none) break;
+            atom_index = atom.next;
         }
         segment.size = std.mem.alignForward(u32, offset, segment.alignment);
     }
@@ -2033,9 +2051,10 @@ fn markReferences(wasm: *Wasm) void {
     };
 
     for (debug_sections) |maybe_index| {
-        const index = maybe_index orelse continue;
-        var atom: *Atom = wasm.atoms.get(index).?.getFirst();
-        while (true) {
+        var atom_index = wasm.atoms.get(maybe_index orelse continue).?;
+        atom_index = Atom.firstAtom(atom_index, wasm);
+        while (atom_index != .none) {
+            const atom = Atom.fromIndex(wasm, atom_index);
             const atom_sym = atom.symbolLoc().getSymbol(wasm);
             for (atom.relocs.items) |reloc| {
                 const target_loc: SymbolWithLoc = .{ .sym_index = reloc.index, .file = atom.file };
@@ -2044,8 +2063,7 @@ fn markReferences(wasm: *Wasm) void {
                     atom_sym.mark();
                 }
             }
-
-            atom = atom.next orelse break;
+            atom_index = atom.next;
         }
     }
 }
@@ -2063,7 +2081,8 @@ fn mark(wasm: *Wasm, loc: SymbolWithLoc) void {
     symbol.mark();
     gc_loc.debug("Marked symbol '{s}' => ({})", .{ loc.getName(wasm), symbol });
 
-    if (wasm.symbol_atom.get(loc)) |atom| {
+    if (wasm.symbol_atom.get(loc)) |atom_index| {
+        const atom = Atom.fromIndex(wasm, atom_index);
         const relocations: []const types.Relocation = atom.relocs.items;
         for (relocations) |reloc| {
             const target_loc: SymbolWithLoc = .{ .sym_index = reloc.index, .file = loc.file };
