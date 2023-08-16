@@ -276,9 +276,6 @@ pub fn deinit(wasm: *Wasm) void {
     for (wasm.archives.items) |*archive| {
         archive.deinit(gpa);
     }
-    for (wasm.managed_atoms.items) |*atom| {
-        atom.deinit(gpa);
-    }
     wasm.synthetic_symbols.deinit(gpa);
     wasm.symbol_atom.deinit(gpa);
     wasm.discarded.deinit(gpa);

@@ -76,12 +76,6 @@ pub fn firstAtom(index: Index, wasm: *const Wasm) Index {
     unreachable;
 }
 
-/// Frees all resources owned by this `Atom`.
-/// Also destroys itatom, making any usage of this atom illegal.
-pub fn deinit(atom: *Atom, gpa: Allocator) void {
-    atom.relocs.deinit(gpa);
-}
-
 pub fn format(atom: Atom, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
     _ = fmt;
     _ = options;
