@@ -18,6 +18,7 @@ pub fn addMachOTests(b: *Build, opts: Options) *Step {
         macho_step.dependOn(testNeededLibrary(b, opts));
         macho_step.dependOn(testNoExportsDylib(b, opts));
         macho_step.dependOn(testPagezeroSize(b, opts));
+        macho_step.dependOn(testReexportsZig(b, opts));
         macho_step.dependOn(testSearchStrategy(b, opts));
         macho_step.dependOn(testStackSize(b, opts));
         macho_step.dependOn(testTbdv3(b, opts));
@@ -671,6 +672,45 @@ fn testPagezeroSize(b: *Build, opts: Options) *Step {
     return test_step;
 }
 
+fn testReexportsZig(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-reexports-zig", "");
+
+    if (!opts.has_zig) {
+        skipTestStep(test_step);
+        return test_step;
+    }
+
+    const obj = zig(b);
+    obj.addZigSource(
+        \\const x: i32 = 42;
+        \\export fn foo() i32 {
+        \\    return x;
+        \\}
+        \\comptime {
+        \\    @export(foo, .{ .name = "bar", .linkage = .Strong });
+        \\}
+    );
+
+    const lib = ar(b);
+    lib.addFileSource(obj.out);
+    const lib_out = lib.saveOutputAs("liba.a");
+
+    const exe = cc(b, opts);
+    exe.addCSource(
+        \\extern int foo();
+        \\extern int bar();
+        \\int main() {
+        \\  return bar() - foo();
+        \\}
+    );
+    exe.addFileSource(lib_out.file);
+
+    const run = exe.run();
+    test_step.dependOn(run.step());
+
+    return test_step;
+}
+
 fn testSearchStrategy(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-search-strategy", "");
 
@@ -1207,10 +1247,17 @@ fn cc(b: *Build, opts: Options) SysCmd {
     return .{ .cmd = cmd, .out = out };
 }
 
+fn zig(b: *Build) SysCmd {
+    const cmd = Run.create(b, "zig");
+    cmd.addArgs(&.{ "zig", "build-obj" });
+    const out = cmd.addPrefixedOutputFileArg("-femit-bin=", "a.o");
+    return .{ .cmd = cmd, .out = out };
+}
+
 fn ar(b: *Build) SysCmd {
     const cmd = Run.create(b, "ar");
     cmd.addArgs(&.{ "ar", "rcs" });
-    const out = cmd.addOutputFileArg("a.out");
+    const out = cmd.addOutputFileArg("a.a");
     return .{ .cmd = cmd, .out = out };
 }
 

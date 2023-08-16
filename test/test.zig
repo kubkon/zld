@@ -1,6 +1,7 @@
 pub fn addTests(b: *Build, comp: *Compile, build_opts: struct {
     system_compiler: ?SystemCompiler,
     has_static: bool,
+    has_zig: bool,
     is_musl: bool,
 }) *Step {
     const test_step = b.step("test-system-tools", "Run all system tools tests");
@@ -30,6 +31,7 @@ pub fn addTests(b: *Build, comp: *Compile, build_opts: struct {
         .sdk_path = sdk_path,
         .system_compiler = system_compiler,
         .has_static = build_opts.has_static,
+        .has_zig = build_opts.has_zig,
         .is_musl = build_opts.is_musl,
         .cc_override = cc_override,
     };
@@ -50,6 +52,7 @@ pub const Options = struct {
     system_compiler: SystemCompiler,
     sdk_path: ?std.zig.system.darwin.Sdk = null,
     has_static: bool = false,
+    has_zig: bool = false,
     is_musl: bool = false,
     cc_override: ?[]const u8 = null,
 };
@@ -96,13 +99,25 @@ pub const SysCmd = struct {
         return sys_cmd.addSourceBytes(bytes ++ "\n", .@"asm");
     }
 
-    pub fn addSourceBytes(sys_cmd: SysCmd, bytes: []const u8, @"type": enum { c, cpp, @"asm" }) void {
+    pub inline fn addZigSource(sys_cmd: SysCmd, bytes: []const u8) void {
+        return sys_cmd.addSourceBytes(bytes, .zig);
+    }
+
+    pub const FileType = enum {
+        c,
+        cpp,
+        @"asm",
+        zig,
+    };
+
+    pub fn addSourceBytes(sys_cmd: SysCmd, bytes: []const u8, @"type": FileType) void {
         const b = sys_cmd.cmd.step.owner;
         const wf = WriteFile.create(b);
         const file = wf.add(switch (@"type") {
             .c => "a.c",
             .cpp => "a.cpp",
             .@"asm" => "a.s",
+            .zig => "a.zig",
         }, bytes);
         sys_cmd.cmd.addFileSourceArg(file);
     }
