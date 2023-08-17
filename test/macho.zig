@@ -5,6 +5,7 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
 
     var opts = Options{
         .zld = options.zld,
+        .has_zig = options.has_zig,
         .macos_sdk = undefined,
         .ios_sdk = undefined,
         .cc_override = options.cc_override,
@@ -779,10 +780,7 @@ fn testPagezeroSize(b: *Build, opts: Options) *Step {
 fn testReexportsZig(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-reexports-zig", "");
 
-    if (!opts.has_zig) {
-        skipTestStep(test_step);
-        return test_step;
-    }
+    if (!opts.has_zig) return skipTestStep(test_step);
 
     const obj = zig(b);
     obj.addZigSource(
@@ -1338,6 +1336,7 @@ fn testWeakLibrary(b: *Build, opts: Options) *Step {
 
 const Options = struct {
     zld: FileSourceWithDir,
+    has_zig: bool,
     macos_sdk: std.zig.system.darwin.Sdk,
     ios_sdk: std.zig.system.darwin.Sdk,
     cc_override: ?[]const u8,
