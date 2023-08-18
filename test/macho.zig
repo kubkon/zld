@@ -7,18 +7,16 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
         .zld = options.zld,
         .has_zig = options.has_zig,
         .macos_sdk = undefined,
-        .ios_sdk = undefined,
+        .ios_sdk = null,
         .cc_override = options.cc_override,
     };
-    opts.macos_sdk = std.zig.system.darwin.getSdk(b.allocator, builtin.target) orelse
-        return skipTestStep(macho_step);
+    opts.macos_sdk = std.zig.system.darwin.getSdk(b.allocator, builtin.target) orelse @panic("no macOS SDK found");
     opts.ios_sdk = blk: {
         const target_info = std.zig.system.NativeTargetInfo.detect(.{
             .cpu_arch = .aarch64,
             .os_tag = .ios,
-        }) catch return skipTestStep(macho_step);
-        break :blk std.zig.system.darwin.getSdk(b.allocator, target_info.target) orelse
-            return skipTestStep(macho_step);
+        }) catch break :blk null;
+        break :blk std.zig.system.darwin.getSdk(b.allocator, target_info.target);
     };
 
     macho_step.dependOn(testBuildVersionMacOS(b, opts));
@@ -68,6 +66,8 @@ fn testBuildVersionMacOS(b: *Build, opts: Options) *Step {
         const check = exe.check();
         check.checkStart();
         check.checkExact("cmd BUILD_VERSION");
+        check.checkExact("platform MACOS");
+        check.checkExact("tool 6");
         check.checkStart();
         check.checkNotPresent("cmd VERSION_MIN_MACOSX");
         test_step.dependOn(&check.step);
@@ -94,6 +94,7 @@ fn testBuildVersionMacOS(b: *Build, opts: Options) *Step {
         check.checkNotPresent("cmd BUILD_VERSION");
         check.checkStart();
         check.checkExact("cmd VERSION_MIN_MACOSX");
+        check.checkExact("version 10.13.0");
         test_step.dependOn(&check.step);
     }
 
@@ -103,18 +104,23 @@ fn testBuildVersionMacOS(b: *Build, opts: Options) *Step {
 fn testBuildVersionIOS(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-build-version-ios", "");
 
+    const ios_sdk = opts.ios_sdk orelse return skipTestStep(test_step);
+    const ios_sdk_path = ios_sdk.path;
+
     {
         const obj = cc(b, opts);
         obj.addEmptyMain();
-        obj.addArgs(&.{ "-c", "-isysroot", opts.ios_sdk.path, "--target=arm64-ios16.4" });
+        obj.addArgs(&.{ "-c", "-isysroot", ios_sdk_path, "--target=arm64-ios16.4" });
 
         const exe = ld(b, opts);
         exe.addFileSource(obj.out);
-        exe.addArgs(&.{ "-syslibroot", opts.ios_sdk.path });
+        exe.addArgs(&.{ "-syslibroot", ios_sdk_path });
 
         const check = exe.check();
         check.checkStart();
         check.checkExact("cmd BUILD_VERSION");
+        check.checkExact("platform IOS");
+        check.checkExact("tool 6");
         check.checkStart();
         check.checkNotPresent("cmd VERSION_MIN_IPHONEOS");
         test_step.dependOn(&check.step);
@@ -123,17 +129,18 @@ fn testBuildVersionIOS(b: *Build, opts: Options) *Step {
     {
         const obj = cc(b, opts);
         obj.addEmptyMain();
-        obj.addArgs(&.{ "-c", "-isysroot", opts.ios_sdk.path, "--target=arm64-ios11" });
+        obj.addArgs(&.{ "-c", "-isysroot", ios_sdk_path, "--target=arm64-ios11" });
 
         const exe = ld(b, opts);
         exe.addFileSource(obj.out);
-        exe.addArgs(&.{ "-syslibroot", opts.ios_sdk.path });
+        exe.addArgs(&.{ "-syslibroot", ios_sdk_path });
 
         const check = exe.check();
         check.checkStart();
         check.checkNotPresent("cmd BUILD_VERSION");
         check.checkStart();
         check.checkExact("cmd VERSION_MIN_IPHONEOS");
+        check.checkExact("version 11.0.0");
         test_step.dependOn(&check.step);
     }
 
@@ -1340,7 +1347,7 @@ const Options = struct {
     zld: FileSourceWithDir,
     has_zig: bool,
     macos_sdk: std.zig.system.darwin.Sdk,
-    ios_sdk: std.zig.system.darwin.Sdk,
+    ios_sdk: ?std.zig.system.darwin.Sdk,
     cc_override: ?[]const u8,
 };
 
