@@ -8,6 +8,7 @@ const Symbol = @import("Symbol.zig");
 const types = @import("types.zig");
 const Wasm = @import("../Wasm.zig");
 const Atom = @import("Atom.zig");
+const trace = @import("../tracy.zig").trace;
 
 const fs = std.fs;
 const leb = std.leb;
@@ -15,25 +16,37 @@ const log = std.log.scoped(.wasm);
 
 /// Writes the given `Wasm` object into a binary file as-is.
 pub fn emit(wasm: *Wasm) !void {
-    const file = wasm.base.file;
-    const writer = file.writer();
+    const tracy = trace(@src());
+    defer tracy.end();
+    const header_size = 5 + 1;
 
-    // magic bytes and wasm version
-    try emitWasmHeader(writer);
+    var binary_bytes = std.ArrayList(u8).init(wasm.base.allocator);
+    defer binary_bytes.deinit();
+    const writer = binary_bytes.writer();
+
+    // We write the magic bytes at the end so they will only be written
+    // if everything succeeded as expected. So populate with 0's for now.
+    try writer.writeAll(&[_]u8{0} ** 8);
 
     // emit sections
     if (wasm.func_types.count() != 0) {
         log.debug("Writing 'Types' section ({d})", .{wasm.func_types.count()});
-        const offset = try reserveSectionHeader(file);
+        const offset = try reserveSectionHeader(&binary_bytes);
         for (wasm.func_types.items.items) |type_entry| {
             try emitType(type_entry, writer);
         }
-        try emitSectionHeader(file, offset, .type, wasm.func_types.count());
+        try emitSectionHeader(
+            binary_bytes.items,
+            offset,
+            .type,
+            @intCast(binary_bytes.items.len - offset - header_size),
+            wasm.func_types.count(),
+        );
     }
     if (wasm.imports.symbolCount() != 0 or wasm.options.import_memory) {
         const count = wasm.imports.symbolCount() + @intFromBool(wasm.options.import_memory);
         log.debug("Writing 'Imports' section ({d})", .{count});
-        const offset = try reserveSectionHeader(file);
+        const offset = try reserveSectionHeader(&binary_bytes);
 
         if (wasm.options.import_memory) {
             const mem_import: std.wasm.Import = .{
@@ -49,80 +62,136 @@ pub fn emit(wasm: *Wasm) !void {
         }
 
         // TODO: Also emit GOT symbols
-        try emitSectionHeader(file, offset, .import, count);
+        try emitSectionHeader(
+            binary_bytes.items,
+            offset,
+            .import,
+            @intCast(binary_bytes.items.len - offset - header_size),
+            count,
+        );
     }
     if (wasm.functions.count() != 0) {
         log.debug("Writing 'Functions' section ({d})", .{wasm.functions.count()});
-        const offset = try reserveSectionHeader(file);
+        const offset = try reserveSectionHeader(&binary_bytes);
         for (wasm.functions.items.values()) |func| {
             try emitFunction(func, writer);
         }
-        try emitSectionHeader(file, offset, .function, wasm.functions.count());
+        try emitSectionHeader(
+            binary_bytes.items,
+            offset,
+            .function,
+            @intCast(binary_bytes.items.len - offset - header_size),
+            wasm.functions.count(),
+        );
     }
     if (wasm.tables.count() != 0) {
         log.debug("Writing 'Tables' section ({d})", .{wasm.tables.count()});
-        const offset = try reserveSectionHeader(file);
+        const offset = try reserveSectionHeader(&binary_bytes);
         for (wasm.tables.items.items) |table| {
             try emitTable(table, writer);
         }
-        try emitSectionHeader(file, offset, .table, wasm.tables.count());
+        try emitSectionHeader(
+            binary_bytes.items,
+            offset,
+            .table,
+            @intCast(binary_bytes.items.len - offset - header_size),
+            wasm.tables.count(),
+        );
     }
     if (!wasm.options.import_memory) {
         log.debug("Writing 'Memory' section", .{});
-        const offset = try reserveSectionHeader(file);
+        const offset = try reserveSectionHeader(&binary_bytes);
         try emitLimits(wasm.memories.limits, writer);
-        try emitSectionHeader(file, offset, .memory, 1);
+        try emitSectionHeader(
+            binary_bytes.items,
+            offset,
+            .memory,
+            @intCast(binary_bytes.items.len - offset - header_size),
+            1,
+        );
     }
     if (wasm.globals.count() != 0) {
         log.debug("Writing 'Globals' section ({d})", .{wasm.globals.count()});
-        const offset = try reserveSectionHeader(file);
+        const offset = try reserveSectionHeader(&binary_bytes);
         for (wasm.globals.items.items) |global| {
             try emitGlobal(global, writer);
         }
-        try emitSectionHeader(file, offset, .global, wasm.globals.count());
+        try emitSectionHeader(
+            binary_bytes.items,
+            offset,
+            .global,
+            @intCast(binary_bytes.items.len - offset - header_size),
+            wasm.globals.count(),
+        );
     }
     if (wasm.exports.count() != 0) {
         log.debug("Writing 'Exports' section ({d})", .{wasm.exports.count()});
-        const offset = try reserveSectionHeader(file);
+        const offset = try reserveSectionHeader(&binary_bytes);
         for (wasm.exports.items.items) |exported| {
             try emitExport(exported, writer);
         }
-        try emitSectionHeader(file, offset, .@"export", wasm.exports.count());
+        try emitSectionHeader(
+            binary_bytes.items,
+            offset,
+            .@"export",
+            @intCast(binary_bytes.items.len - offset - header_size),
+            wasm.exports.count(),
+        );
     }
 
     if (wasm.entry) |entry_index| {
-        const offset = try reserveSectionHeader(file);
-        try emitSectionHeader(file, offset, .start, entry_index);
+        const offset = try reserveSectionHeader(&binary_bytes);
+        try emitSectionHeader(
+            binary_bytes.items,
+            offset,
+            .start,
+            @intCast(binary_bytes.items.len - offset - header_size),
+            entry_index,
+        );
     }
 
     if (wasm.elements.functionCount() != 0) {
         log.debug("Writing 'Element' section (1)", .{});
-        const offset = try reserveSectionHeader(file);
+        const offset = try reserveSectionHeader(&binary_bytes);
         try emitElement(wasm, writer);
-        try emitSectionHeader(file, offset, .element, 1);
+        try emitSectionHeader(
+            binary_bytes.items,
+            offset,
+            .element,
+            @intCast(binary_bytes.items.len - offset - header_size),
+            1,
+        );
     }
 
     const data_count = wasm.dataCount();
     if (data_count > 0 and wasm.options.shared_memory) {
-        const offset = try reserveSectionHeader(file);
-        try emitSectionHeader(file, offset, .data_count, data_count);
+        const offset = try reserveSectionHeader(&binary_bytes);
+        try emitSectionHeader(
+            binary_bytes.items,
+            offset,
+            .data_count,
+            @intCast(binary_bytes.items.len - offset - header_size),
+            data_count,
+        );
     }
 
     if (wasm.code_section_index) |index| {
         log.debug("Writing 'Code' section ({d})", .{wasm.functions.count()});
-        const offset = try reserveSectionHeader(file);
-        var atom = wasm.atoms.get(index).?.getFirst();
+        const offset = try reserveSectionHeader(&binary_bytes);
+        var atom_index = wasm.atoms.get(index).?;
+        atom_index = Atom.firstAtom(atom_index, wasm);
 
         // The code section must be sorted in line with the function order.
         var sorted_atoms = try std.ArrayList(*Atom).initCapacity(wasm.base.allocator, wasm.functions.count());
         defer sorted_atoms.deinit();
 
-        while (true) {
+        while (atom_index != .none) {
+            const atom = Atom.ptrFromIndex(wasm, atom_index);
             const loc = atom.symbolLoc();
             std.debug.assert(loc.getSymbol(wasm).isAlive());
             atom.resolveRelocs(wasm);
             sorted_atoms.appendAssumeCapacity(atom);
-            atom = atom.next orelse break;
+            atom_index = atom.next;
         }
 
         const atom_sort_fn = struct {
@@ -139,20 +208,26 @@ pub fn emit(wasm: *Wasm) !void {
             try writer.writeAll(sorted_atom.data[0..sorted_atom.size]);
         }
         std.debug.assert(sorted_atoms.items.len == wasm.functions.count()); // must have equal amount of bodies as functions
-        try emitSectionHeader(file, offset, .code, wasm.functions.count());
+        try emitSectionHeader(
+            binary_bytes.items,
+            offset,
+            .code,
+            @intCast(binary_bytes.items.len - offset - header_size),
+            wasm.functions.count(),
+        );
     }
 
     if (data_count != 0) {
         log.debug("Writing 'Data' section ({d})", .{data_count});
-        const offset = try reserveSectionHeader(file);
+        const offset = try reserveSectionHeader(&binary_bytes);
 
         var it = wasm.data_segments.iterator();
         while (it.next()) |entry| {
             // do not output the 'bss' section
             if (std.mem.eql(u8, entry.key_ptr.*, ".bss") and !wasm.options.import_memory) continue;
-            const atom_index = entry.value_ptr.*;
-            var atom = wasm.atoms.getPtr(atom_index).?.*.getFirst();
-            const segment: Wasm.Segment = wasm.segments.items[atom_index];
+            var atom_index = wasm.atoms.get(entry.value_ptr.*).?;
+            atom_index = Atom.firstAtom(atom_index, wasm);
+            const segment: Wasm.Segment = wasm.segments.items[entry.value_ptr.*];
 
             try leb.writeULEB128(writer, segment.flags);
             if (segment.flags & @intFromEnum(Wasm.Segment.Flag.WASM_DATA_SEGMENT_HAS_MEMINDEX) != 0) {
@@ -164,7 +239,8 @@ pub fn emit(wasm: *Wasm) !void {
             try leb.writeULEB128(writer, segment.size);
 
             var current_offset: u32 = 0;
-            while (true) {
+            while (atom_index != .none) {
+                const atom = Atom.ptrFromIndex(wasm, atom_index);
                 atom.resolveRelocs(wasm);
                 // TODO: Verify if this is faster than allocating segment's size
                 // Setting all zeroes, memcopy all segments and then writing.
@@ -177,8 +253,8 @@ pub fn emit(wasm: *Wasm) !void {
                 try writer.writeAll(atom.data[0..atom.size]);
 
                 current_offset += atom.size;
-                if (atom.next) |next| {
-                    atom = next;
+                if (atom.next != .none) {
+                    atom_index = atom.next;
                 } else {
                     // Also make sure that if the last atom has extra bytes, we write 0's.
                     if (current_offset != segment.size) {
@@ -195,7 +271,13 @@ pub fn emit(wasm: *Wasm) !void {
             }
         }
 
-        try emitSectionHeader(file, offset, .data, data_count);
+        try emitSectionHeader(
+            binary_bytes.items,
+            offset,
+            .data,
+            @intCast(binary_bytes.items.len - offset - header_size),
+            data_count,
+        );
     }
 
     if (!wasm.options.strip) {
@@ -229,19 +311,34 @@ pub fn emit(wasm: *Wasm) !void {
         std.mem.sort(Wasm.SymbolWithLoc, funcs.values(), wasm, lessThan);
         std.mem.sort(Wasm.SymbolWithLoc, globals.items, wasm, lessThan);
 
-        const offset = try reserveCustomSectionHeader(file);
+        const offset = try reserveCustomSectionHeader(&binary_bytes);
         try leb.writeULEB128(writer, @as(u32, @intCast("name".len)));
         try writer.writeAll("name");
 
-        try emitNameSection(wasm, 0x01, wasm.base.allocator, funcs.values(), writer);
-        try emitNameSection(wasm, 0x07, wasm.base.allocator, globals.items, writer);
-        try emitDataNamesSection(wasm, wasm.base.allocator, writer);
-        try emitCustomHeader(file, offset);
+        try emitNameSection(wasm, .function, funcs.values(), writer);
+        try emitNameSection(wasm, .global, globals.items, writer);
+        try emitDataNamesSection(wasm, writer);
+        try emitCustomHeader(binary_bytes.items, offset, @intCast(binary_bytes.items.len - offset - 6));
 
-        try emitDebugSections(file, wasm, wasm.base.allocator, writer);
-        try emitProducerSection(file, wasm, wasm.base.allocator, writer);
+        try emitDebugSections(wasm, &binary_bytes);
+        try emitProducerSection(wasm, &binary_bytes);
     }
-    try emitFeaturesSection(file, wasm, writer);
+    try emitFeaturesSection(wasm, &binary_bytes);
+
+    // Only when writing all sections executed properly we write the magic
+    // bytes. This allows us to easily detect what went wrong while generating
+    // the final binary.
+    {
+        const src = std.wasm.magic ++ std.wasm.version;
+        binary_bytes.items[0..src.len].* = src;
+    }
+
+    // finally, write the entire binary into the file.
+    var iovec = [_]std.os.iovec_const{.{
+        .iov_base = binary_bytes.items.ptr,
+        .iov_len = binary_bytes.items.len,
+    }};
+    try wasm.base.file.writevAll(&iovec);
 }
 
 /// Sorts symbols based on the index of the object they target
@@ -259,20 +356,25 @@ fn emitSymbol(wasm: *const Wasm, loc: Wasm.SymbolWithLoc, writer: anytype) !void
     try writer.writeAll(name);
 }
 
-fn emitNameSection(wasm: *const Wasm, name_type: u8, gpa: std.mem.Allocator, items: []const Wasm.SymbolWithLoc, writer: anytype) !void {
-    var section_list = std.ArrayList(u8).init(gpa);
+fn emitNameSection(
+    wasm: *const Wasm,
+    name_type: std.wasm.NameSubsection,
+    items: []const Wasm.SymbolWithLoc,
+    writer: anytype,
+) !void {
+    var section_list = std.ArrayList(u8).init(wasm.base.allocator);
     defer section_list.deinit();
     const sec_writer = section_list.writer();
 
     try leb.writeULEB128(sec_writer, @as(u32, @intCast(items.len)));
     for (items) |sym_loc| try emitSymbol(wasm, sym_loc, sec_writer);
-    try leb.writeULEB128(writer, name_type);
+    try leb.writeULEB128(writer, @intFromEnum(name_type));
     try leb.writeULEB128(writer, @as(u32, @intCast(section_list.items.len)));
     try writer.writeAll(section_list.items);
 }
 
-fn emitDataNamesSection(wasm: *Wasm, gpa: std.mem.Allocator, writer: anytype) !void {
-    var section_list = std.ArrayList(u8).init(gpa);
+fn emitDataNamesSection(wasm: *Wasm, writer: anytype) !void {
+    var section_list = std.ArrayList(u8).init(wasm.base.allocator);
     defer section_list.deinit();
     const sec_writer = section_list.writer();
 
@@ -288,54 +390,47 @@ fn emitDataNamesSection(wasm: *Wasm, gpa: std.mem.Allocator, writer: anytype) !v
     try writer.writeAll(section_list.items);
 }
 
-fn emitWasmHeader(writer: anytype) !void {
-    try writer.writeAll(&std.wasm.magic);
-    try writer.writeIntLittle(u32, 1); // version
-}
-
 /// Reserves enough space within the file to write our section header.
 /// Returns the offset into the file where the header will be written.
-fn reserveSectionHeader(file: fs.File) !u64 {
+fn reserveSectionHeader(bytes: *std.ArrayList(u8)) !u32 {
     // section id, section byte size, section entry count
     const header_size = 1 + 5 + 5;
-    try file.seekBy(header_size);
-    return (try file.getPos());
+    const offset: u32 = @intCast(bytes.items.len);
+    try bytes.appendSlice(&[_]u8{0} ** header_size);
+    return offset;
 }
 
-fn reserveCustomSectionHeader(file: fs.File) !u64 {
+fn reserveCustomSectionHeader(bytes: *std.ArrayList(u8)) !u32 {
+    // unlike regular section, we don't emit the count
     const header_size = 1 + 5;
-    try file.seekBy(header_size);
-    return (try file.getPos());
+    const offset: u32 = @intCast(bytes.items.len);
+    try bytes.appendSlice(&[_]u8{0} ** header_size);
+    return offset;
 }
 
 /// Emits the actual section header at the given `offset`.
 /// Will write the section id, the section byte length, as well as the section entry count.
 /// The amount of bytes is calculated using the current position, minus the offset (and reserved header bytes).
-fn emitSectionHeader(file: fs.File, offset: u64, section_type: std.wasm.Section, entries: usize) !void {
+fn emitSectionHeader(buffer: []u8, offset: u32, section: std.wasm.Section, size: u32, items: u32) !void {
     // section id, section byte size, section entry count
     var buf: [1 + 5 + 5]u8 = undefined;
-    buf[0] = @intFromEnum(section_type);
-
-    const pos = try file.getPos();
-    const byte_size = pos + 5 - offset; // +5 due to 'entries' also being part of byte size
-    leb.writeUnsignedFixed(5, buf[1..6], @as(u32, @intCast(byte_size)));
-    leb.writeUnsignedFixed(5, buf[6..], @as(u32, @intCast(entries)));
-    try file.pwriteAll(&buf, offset - buf.len);
+    buf[0] = @intFromEnum(section);
+    leb.writeUnsignedFixed(5, buf[1..6], size);
+    leb.writeUnsignedFixed(5, buf[6..], items);
+    buffer[offset..][0..buf.len].* = buf;
     log.debug("Written section '{s}' offset=0x{x:0>8} size={d} count={d}", .{
-        @tagName(section_type),
-        offset - buf.len,
-        byte_size,
-        entries,
+        @tagName(section),
+        offset,
+        size,
+        items,
     });
 }
 
-fn emitCustomHeader(file: fs.File, offset: u64) !void {
+fn emitCustomHeader(buffer: []u8, offset: u32, size: u32) !void {
     var buf: [1 + 5]u8 = undefined;
     buf[0] = 0; // 0 = 'custom' section
-    const pos = try file.getPos();
-    const byte_size = pos - offset;
-    leb.writeUnsignedFixed(5, buf[1..6], @as(u32, @intCast(byte_size)));
-    try file.pwriteAll(&buf, offset - buf.len);
+    leb.writeUnsignedFixed(5, buf[1..6], size);
+    buffer[offset..][0..buf.len].* = buf;
 }
 
 fn emitType(type_entry: std.wasm.Type, writer: anytype) !void {
@@ -491,22 +586,26 @@ const ProducerField = struct {
     };
 };
 
-fn emitProducerSection(file: fs.File, wasm: *const Wasm, gpa: std.mem.Allocator, writer: anytype) !void {
-    const header_offset = try reserveCustomSectionHeader(file);
+fn emitProducerSection(wasm: *const Wasm, bytes: *std.ArrayList(u8)) !void {
+    const offset = try reserveCustomSectionHeader(bytes);
+    const writer = bytes.writer();
 
-    var languages_map = std.ArrayHashMap(ProducerField, void, ProducerField.Context, false).init(gpa);
+    var languages_map = std.ArrayHashMap(ProducerField, void, ProducerField.Context, false).init(wasm.base.allocator);
     defer for (languages_map.keys()) |key| {
-        gpa.free(key.value);
-        gpa.free(key.version);
+        wasm.base.allocator.free(key.value);
+        wasm.base.allocator.free(key.version);
     } else languages_map.deinit();
 
-    var processed_map = std.ArrayHashMap(ProducerField, void, ProducerField.Context, false).init(gpa);
+    var processed_map = std.ArrayHashMap(ProducerField, void, ProducerField.Context, false).init(wasm.base.allocator);
     defer for (processed_map.keys()) |key| {
-        gpa.free(key.value);
-        gpa.free(key.version);
+        wasm.base.allocator.free(key.value);
+        wasm.base.allocator.free(key.version);
     } else processed_map.deinit();
 
-    try processed_map.put(.{ .value = try gpa.dupe(u8, "Zld"), .version = try gpa.dupe(u8, "0.1") }, {});
+    try processed_map.put(.{
+        .value = try wasm.base.allocator.dupe(u8, "Zld"),
+        .version = try wasm.base.allocator.dupe(u8, "0.1"),
+    }, {});
 
     for (wasm.objects.items) |object| {
         if (object.producers.len != 0) {
@@ -517,21 +616,21 @@ fn emitProducerSection(file: fs.File, wasm: *const Wasm, gpa: std.mem.Allocator,
             var field_index: u32 = 0;
             while (field_index < field_count) : (field_index += 1) {
                 const field_name_len = try leb.readULEB128(u32, reader);
-                const field_name = try gpa.alloc(u8, field_name_len);
-                defer gpa.free(field_name);
+                const field_name = try wasm.base.allocator.alloc(u8, field_name_len);
+                defer wasm.base.allocator.free(field_name);
                 try reader.readNoEof(field_name);
 
                 const value_count = try leb.readULEB128(u32, reader);
                 var value_index: u32 = 0;
                 while (value_index < value_count) : (value_index += 1) {
                     const name_len = try leb.readULEB128(u32, reader);
-                    const name = try gpa.alloc(u8, name_len);
-                    errdefer gpa.free(name);
+                    const name = try wasm.base.allocator.alloc(u8, name_len);
+                    errdefer wasm.base.allocator.free(name);
                     try reader.readNoEof(name);
 
                     const version_len = try leb.readULEB128(u32, reader);
-                    const version = try gpa.alloc(u8, version_len);
-                    errdefer gpa.free(version);
+                    const version = try wasm.base.allocator.alloc(u8, version_len);
+                    errdefer wasm.base.allocator.free(version);
                     try reader.readNoEof(version);
 
                     log.debug("parsed producer field", .{});
@@ -598,13 +697,14 @@ fn emitProducerSection(file: fs.File, wasm: *const Wasm, gpa: std.mem.Allocator,
         }
     }
 
-    try emitCustomHeader(file, header_offset);
+    try emitCustomHeader(bytes.items, offset, @intCast(bytes.items.len - offset - 6));
 }
 
-fn emitFeaturesSection(file: fs.File, wasm: *const Wasm, writer: anytype) !void {
+fn emitFeaturesSection(wasm: *const Wasm, bytes: *std.ArrayList(u8)) !void {
     const used_count = wasm.used_features.count();
     if (used_count == 0) return; // when no features are used, we omit the entire section
-    const header_offset = try reserveCustomSectionHeader(file);
+    const offset = try reserveCustomSectionHeader(bytes);
+    const writer = bytes.writer();
 
     const target_features = "target_features";
     try leb.writeULEB128(writer, @as(u32, @intCast(target_features.len)));
@@ -623,13 +723,10 @@ fn emitFeaturesSection(file: fs.File, wasm: *const Wasm, writer: anytype) !void 
         }
     }
 
-    try emitCustomHeader(file, header_offset);
+    try emitCustomHeader(bytes.items, offset, @intCast(bytes.items.len - offset - 6));
 }
 
-fn emitDebugSections(file: fs.File, wasm: *const Wasm, gpa: std.mem.Allocator, writer: anytype) !void {
-    var debug_bytes = std.ArrayList(u8).init(gpa);
-    defer debug_bytes.deinit();
-
+fn emitDebugSections(wasm: *const Wasm, bytes: *std.ArrayList(u8)) !void {
     const DebugSection = struct {
         name: []const u8,
         index: ?u32,
@@ -650,21 +747,19 @@ fn emitDebugSections(file: fs.File, wasm: *const Wasm, gpa: std.mem.Allocator, w
         if (item.index) |index| {
             const segment = wasm.segments.items[index];
             if (segment.size == 0) continue;
-            try debug_bytes.ensureUnusedCapacity(segment.size);
-            var atom = wasm.atoms.get(index).?.getFirst();
-            while (true) {
+            try bytes.ensureUnusedCapacity(segment.size + 6 + item.name.len + 5);
+            const header_offset = try reserveCustomSectionHeader(bytes);
+            try leb.writeULEB128(bytes.writer(), @as(u32, @intCast(item.name.len)));
+            bytes.appendSliceAssumeCapacity(item.name);
+            var atom_index = wasm.atoms.get(index).?;
+            atom_index = Atom.firstAtom(atom_index, wasm);
+            while (atom_index != .none) {
+                const atom = Atom.ptrFromIndex(wasm, atom_index);
                 atom.resolveRelocs(wasm);
-                debug_bytes.appendSliceAssumeCapacity(atom.data[0..atom.size]);
-                atom = atom.next orelse break;
+                bytes.appendSliceAssumeCapacity(atom.data[0..atom.size]);
+                atom_index = atom.next;
             }
-            const header_offset = try reserveCustomSectionHeader(file);
-            try leb.writeULEB128(writer, @as(u32, @intCast(item.name.len)));
-            try writer.writeAll(item.name);
-
-            try writer.writeAll(debug_bytes.items);
-
-            try emitCustomHeader(file, header_offset);
-            debug_bytes.clearRetainingCapacity();
+            try emitCustomHeader(bytes.items, header_offset, @intCast(bytes.items.len - header_offset - 6));
         }
     }
 }

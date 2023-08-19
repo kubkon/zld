@@ -950,25 +950,20 @@ pub fn parseIntoAtoms(object: *Object, object_index: u16, wasm_bin: *Wasm) !void
             continue; // found unknown section, so skip parsing into atom as we do not know how to handle it.
         };
 
-        const atom = try Atom.create(wasm_bin.base.allocator);
-        errdefer atom.deinit(wasm_bin.base.allocator);
-
-        wasm_bin.managed_atoms.appendAssumeCapacity(atom);
+        const atom_index = try wasm_bin.createAtom();
+        const atom = Atom.ptrFromIndex(wasm_bin, atom_index);
         atom.file = object_index;
         atom.size = relocatable_data.size;
         atom.alignment = relocatable_data.getAlignment(object);
         atom.data = relocatable_data.data;
 
-        const relocations: []types.Relocation = object.relocations.get(relocatable_data.section_index) orelse &.{};
-        for (relocations) |relocation| {
-            if (isInbetween(relocatable_data.offset, atom.size, relocation.offset)) {
-                // set the offset relative to the offset of the segment itobject,
-                // rather than within the entire section.
-                var reloc = relocation;
+        if (object.relocations.get(relocatable_data.section_index)) |relocations| {
+            const start = searchRelocStart(relocations, relocatable_data.offset);
+            const len = searchRelocEnd(relocations[start..], relocatable_data.offset + atom.size);
+            atom.relocs = std.ArrayListUnmanaged(types.Relocation).fromOwnedSlice(relocations[start..][0..len]);
+            for (atom.relocs.items) |*reloc| {
                 reloc.offset -= relocatable_data.offset;
-                try atom.relocs.append(wasm_bin.base.allocator, reloc);
-
-                switch (relocation.relocation_type) {
+                switch (reloc.relocation_type) {
                     .R_WASM_TABLE_INDEX_I32,
                     .R_WASM_TABLE_INDEX_I64,
                     .R_WASM_TABLE_INDEX_SLEB,
@@ -976,17 +971,17 @@ pub fn parseIntoAtoms(object: *Object, object_index: u16, wasm_bin: *Wasm) !void
                     => {
                         try wasm_bin.elements.indirect_functions.put(wasm_bin.base.allocator, .{
                             .file = object_index,
-                            .sym_index = relocation.index,
+                            .sym_index = reloc.index,
                         }, 0);
                     },
                     .R_WASM_GLOBAL_INDEX_I32,
                     .R_WASM_GLOBAL_INDEX_LEB,
                     => {
-                        const sym = object.symtable[relocation.index];
+                        const sym = object.symtable[reloc.index];
                         if (sym.tag != .global) {
                             try wasm_bin.globals.addGOTEntry(
                                 wasm_bin.base.allocator,
-                                .{ .file = object_index, .sym_index = relocation.index },
+                                .{ .file = object_index, .sym_index = reloc.index },
                             );
                         }
                     },
@@ -1000,12 +995,12 @@ pub fn parseIntoAtoms(object: *Object, object_index: u16, wasm_bin: *Wasm) !void
             .index = relocatable_data.getIndex(),
         })) |symbols| {
             atom.sym_index = symbols.pop();
-            try wasm_bin.symbol_atom.putNoClobber(wasm_bin.base.allocator, atom.symbolLoc(), atom);
+            try wasm_bin.symbol_atom.putNoClobber(wasm_bin.base.allocator, atom.symbolLoc(), atom_index);
 
             // symbols referencing the same atom will be added as alias
             // or as 'parent' when they are global.
             while (symbols.popOrNull()) |idx| {
-                try wasm_bin.symbol_atom.putNoClobber(wasm_bin.base.allocator, .{ .file = atom.file, .sym_index = idx }, atom);
+                try wasm_bin.symbol_atom.putNoClobber(wasm_bin.base.allocator, .{ .file = atom.file, .sym_index = idx }, atom_index);
                 const alias_symbol = object.symtable[idx];
                 if (alias_symbol.isGlobal()) {
                     atom.sym_index = idx;
@@ -1041,7 +1036,7 @@ pub fn parseIntoAtoms(object: *Object, object_index: u16, wasm_bin: *Wasm) !void
             segment.alignment = @max(segment.alignment, atom.alignment);
         }
 
-        try wasm_bin.appendAtomAtIndex(wasm_bin.base.allocator, final_index, atom);
+        try wasm_bin.appendAtomAtIndex(wasm_bin.base.allocator, final_index, atom_index);
     }
 
     const new_syms = try wasm_bin.base.allocator.alloc(Symbol, object.symtable.len + synthetic_symbols.items.len);
@@ -1055,4 +1050,28 @@ pub fn parseIntoAtoms(object: *Object, object_index: u16, wasm_bin: *Wasm) !void
 /// The maxmimum value is calculated using the length, both start and end are inclusive.
 inline fn isInbetween(min: u32, length: u32, value: u32) bool {
     return value >= min and value <= min + length;
+}
+
+fn searchRelocStart(relocs: []const types.Relocation, address: u32) usize {
+    var min: usize = 0;
+    var max: usize = relocs.len;
+    while (min < max) {
+        const index = (min + max) / 2;
+        const curr = relocs[index];
+        if (curr.offset < address) {
+            min = index + 1;
+        } else {
+            max = index;
+        }
+    }
+    return min;
+}
+
+fn searchRelocEnd(relocs: []const types.Relocation, address: u32) usize {
+    for (relocs, 0..relocs.len) |reloc, index| {
+        if (reloc.offset > address) {
+            return index;
+        }
+    }
+    return relocs.len;
 }

@@ -10,6 +10,11 @@ const log = std.log.scoped(.wasm);
 const mem = std.mem;
 const Allocator = mem.Allocator;
 
+pub const Index = enum(u32) {
+    none = std.math.maxInt(u32),
+    _,
+};
+
 /// Local symbol index
 sym_index: u32,
 /// Index into a list of object files
@@ -28,43 +33,47 @@ offset: u32,
 
 /// Next atom in relation to this atom.
 /// When null, this atom is the last atom
-next: ?*Atom,
+next: Index,
 /// Previous atom in relation to this atom.
 /// is null when this atom is the first in its order
-prev: ?*Atom,
+prev: Index,
 
 /// Represents a default empty wasm `Atom`
 pub const empty: Atom = .{
     .alignment = 0,
     .file = null,
-    .next = null,
+    .next = .none,
     .offset = 0,
-    .prev = null,
+    .prev = .none,
     .size = 0,
     .sym_index = undefined,
+    .data = undefined,
 };
 
-/// Creates a new Atom with default fields
-pub fn create(gpa: Allocator) !*Atom {
-    const atom = try gpa.create(Atom);
-    atom.* = .{
-        .sym_index = undefined,
-        .alignment = 0,
-        .file = null,
-        .next = null,
-        .offset = 0,
-        .prev = null,
-        .size = 0,
-        .data = undefined,
-    };
-    return atom;
+/// Returns an `Atom` from a given index. Asserts index is not `none`.
+pub fn fromIndex(wasm: *const Wasm, index: Atom.Index) Atom {
+    std.debug.assert(index != .none);
+    return wasm.managed_atoms.items[@intFromEnum(index)];
 }
 
-/// Frees all resources owned by this `Atom`.
-/// Also destroys itatom, making any usage of this atom illegal.
-pub fn deinit(atom: *Atom, gpa: Allocator) void {
-    atom.relocs.deinit(gpa);
-    gpa.destroy(atom);
+/// Returns a pointer to an `Atom` in the managed atoms list from a given `Index`.
+/// Asserts index is not `none`.
+pub fn ptrFromIndex(wasm: *const Wasm, index: Atom.Index) *Atom {
+    std.debug.assert(index != .none);
+    return &wasm.managed_atoms.items[@intFromEnum(index)];
+}
+
+/// Returns the first atom's `Index` from a given `Index`.
+pub fn firstAtom(index: Index, wasm: *const Wasm) Index {
+    var current = index;
+    while (true) {
+        const atom = fromIndex(wasm, current);
+        if (atom.prev == .none) {
+            return current;
+        }
+        current = atom.prev;
+    }
+    unreachable;
 }
 
 pub fn format(atom: Atom, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
@@ -76,13 +85,6 @@ pub fn format(atom: Atom, comptime fmt: []const u8, options: std.fmt.FormatOptio
         atom.size,
         atom.offset,
     });
-}
-
-/// Returns the first `Atom` from a given atom
-pub fn getFirst(atom: *Atom) *Atom {
-    var tmp = atom;
-    while (tmp.prev) |prev| tmp = prev;
-    return tmp;
 }
 
 /// Returns the location of the symbol that represents this `Atom`
@@ -163,7 +165,8 @@ fn relocationValue(atom: *Atom, relocation: types.Relocation, wasm_bin: *const W
         },
         .R_WASM_EVENT_INDEX_LEB => return symbol.index,
         .R_WASM_SECTION_OFFSET_I32 => {
-            const target_atom = wasm_bin.symbol_atom.get(target_loc).?;
+            const target_atom_index = wasm_bin.symbol_atom.get(target_loc).?;
+            const target_atom = fromIndex(wasm_bin, target_atom_index);
             const rel_value: i32 = @intCast(target_atom.offset);
             return @intCast(rel_value + relocation.addend);
         },
@@ -175,7 +178,8 @@ fn relocationValue(atom: *Atom, relocation: types.Relocation, wasm_bin: *const W
                 }
                 return @bitCast(@as(i64, -1));
             }
-            const target_atom = wasm_bin.symbol_atom.get(target_loc).?;
+            const target_atom_index = wasm_bin.symbol_atom.get(target_loc).?;
+            const target_atom = fromIndex(wasm_bin, target_atom_index);
             const offset: u32 = 11 + Wasm.getULEB128Size(target_atom.size); // Header (11 bytes fixed-size) + body size (leb-encoded)
             const rel_value: i32 = @intCast(target_atom.offset + offset);
             return @intCast(rel_value + relocation.addend);
