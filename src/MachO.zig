@@ -297,7 +297,7 @@ pub fn flush(self: *MachO) !void {
         .unresolved = std.AutoArrayHashMap(u32, void).init(arena),
     };
     try self.resolveSymbols(&resolver);
-    try self.reportUndefs(&resolver);
+    try self.reportUndefined(&resolver);
     self.base.reportWarningsAndErrorsAndExit();
 
     if (self.options.output_mode == .exe) {
@@ -1849,7 +1849,7 @@ fn resolveSymbolsAtLoading(self: *MachO, resolver: *SymbolResolver) !void {
     }
 }
 
-fn reportUndefs(self: *MachO, resolver: *const SymbolResolver) !void {
+fn reportUndefined(self: *MachO, resolver: *const SymbolResolver) !void {
     for (resolver.unresolved.keys()) |global_index| {
         const global = self.globals.items[global_index];
         const sym_name = self.getSymbolName(global);
