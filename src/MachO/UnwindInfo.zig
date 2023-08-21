@@ -202,7 +202,7 @@ pub fn deinit(info: *UnwindInfo) void {
 pub fn scanRelocs(macho_file: *MachO) !void {
     if (macho_file.getSectionByName("__TEXT", "__unwind_info") == null) return;
 
-    const cpu_arch = macho_file.options.target.cpu_arch.?;
+    const cpu_arch = macho_file.options.cpu_arch.?;
     for (macho_file.objects.items, 0..) |*object, object_id| {
         const unwind_records = object.getUnwindRecords();
         for (object.exec_atoms.items) |atom_index| {
@@ -235,7 +235,7 @@ pub fn scanRelocs(macho_file: *MachO) !void {
 pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
     if (macho_file.getSectionByName("__TEXT", "__unwind_info") == null) return;
 
-    const cpu_arch = macho_file.options.target.cpu_arch.?;
+    const cpu_arch = macho_file.options.cpu_arch.?;
 
     var records = std.ArrayList(macho.compact_unwind_entry).init(info.gpa);
     defer records.deinit();
@@ -581,7 +581,7 @@ pub fn write(info: *UnwindInfo, macho_file: *MachO) !void {
     const text_sect = macho_file.sections.items(.header)[text_sect_id];
 
     var personalities: [max_personalities]u32 = undefined;
-    const cpu_arch = macho_file.options.target.cpu_arch.?;
+    const cpu_arch = macho_file.options.cpu_arch.?;
 
     log.debug("Personalities:", .{});
     for (info.personalities[0..info.personalities_count], 0..) |target, i| {

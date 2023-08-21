@@ -7,12 +7,11 @@ pub fn addTests(b: *Build, comp: *Compile, build_opts: struct {
     const test_step = b.step("test-system-tools", "Run all system tools tests");
     test_step.dependOn(&comp.step);
 
-    const system_compiler: SystemCompiler = build_opts.system_compiler orelse blk: {
-        if (builtin.target.isDarwin()) break :blk .clang;
-        break :blk switch (builtin.target.os.tag) {
-            .linux => .gcc,
-            else => .gcc,
-        };
+    const system_compiler: SystemCompiler = build_opts.system_compiler orelse
+        switch (builtin.target.os.tag) {
+        .macos => .clang,
+        .linux => .gcc,
+        else => .gcc,
     };
     const cc_override: ?[]const u8 = std.process.getEnvVarOwned(b.allocator, "CC") catch |e| switch (e) {
         error.EnvironmentVariableNotFound => null,
@@ -21,14 +20,9 @@ pub fn addTests(b: *Build, comp: *Compile, build_opts: struct {
     };
 
     const zld = FileSourceWithDir.fromFileSource(b, comp.getOutputSource(), "ld");
-    const sdk_path = if (builtin.target.isDarwin())
-        std.zig.system.darwin.getSdk(b.allocator, builtin.target)
-    else
-        null;
 
     const opts: Options = .{
         .zld = zld,
-        .sdk_path = sdk_path,
         .system_compiler = system_compiler,
         .has_static = build_opts.has_static,
         .has_zig = build_opts.has_zig,
@@ -50,7 +44,6 @@ pub const SystemCompiler = enum {
 pub const Options = struct {
     zld: FileSourceWithDir,
     system_compiler: SystemCompiler,
-    sdk_path: ?std.zig.system.darwin.Sdk = null,
     has_static: bool = false,
     has_zig: bool = false,
     is_musl: bool = false,
@@ -232,9 +225,10 @@ pub const SkipTestStep = struct {
     }
 };
 
-pub fn skipTestStep(test_step: *Step) void {
+pub fn skipTestStep(test_step: *Step) *Step {
     const skip = SkipTestStep.create(test_step.owner);
     test_step.dependOn(&skip.step);
+    return test_step;
 }
 
 const std = @import("std");

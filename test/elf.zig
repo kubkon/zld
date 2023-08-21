@@ -1,79 +1,87 @@
-pub fn addElfTests(b: *Build, opts: Options) *Step {
+pub fn addElfTests(b: *Build, options: common.Options) *Step {
     const elf_step = b.step("test-elf", "Run ELF tests");
 
-    if (builtin.target.ofmt == .elf) {
-        elf_step.dependOn(testAbsSymbols(b, opts));
-        elf_step.dependOn(testAllowMultipleDefinitions(b, opts));
-        elf_step.dependOn(testAsNeeded(b, opts));
-        elf_step.dependOn(testCanonicalPlt(b, opts));
-        elf_step.dependOn(testCommon(b, opts));
-        elf_step.dependOn(testCommonArchive(b, opts));
-        elf_step.dependOn(testCopyrel(b, opts));
-        elf_step.dependOn(testCopyrelAlias(b, opts));
-        elf_step.dependOn(testCopyrelAlignment(b, opts));
-        elf_step.dependOn(testDsoPlt(b, opts));
-        elf_step.dependOn(testDsoUndef(b, opts));
-        elf_step.dependOn(testEmptyObject(b, opts));
-        elf_step.dependOn(testEntryPoint(b, opts));
-        elf_step.dependOn(testExecStack(b, opts));
-        elf_step.dependOn(testExportDynamic(b, opts));
-        elf_step.dependOn(testExportSymbolsFromExe(b, opts));
-        elf_step.dependOn(testFuncAddress(b, opts));
-        elf_step.dependOn(testGcSections(b, opts));
-        elf_step.dependOn(testHelloDynamic(b, opts));
-        elf_step.dependOn(testHelloPie(b, opts));
-        elf_step.dependOn(testHelloStatic(b, opts));
-        elf_step.dependOn(testHiddenWeakUndef(b, opts));
-        elf_step.dependOn(testIfuncAlias(b, opts));
-        elf_step.dependOn(testIfuncDlopen(b, opts));
-        elf_step.dependOn(testIfuncDso(b, opts));
-        elf_step.dependOn(testIfuncDynamic(b, opts));
-        elf_step.dependOn(testIfuncExport(b, opts));
-        elf_step.dependOn(testIfuncFuncPtr(b, opts));
-        elf_step.dependOn(testIfuncNoPlt(b, opts));
-        elf_step.dependOn(testIfuncStatic(b, opts));
-        elf_step.dependOn(testIfuncStaticPie(b, opts));
-        elf_step.dependOn(testImageBase(b, opts));
-        elf_step.dependOn(testInitArrayOrder(b, opts));
-        elf_step.dependOn(testLargeAlignmentDso(b, opts));
-        elf_step.dependOn(testLargeAlignmentExe(b, opts));
-        elf_step.dependOn(testLargeBss(b, opts));
-        elf_step.dependOn(testLinkOrder(b, opts));
-        elf_step.dependOn(testLinkerScript(b, opts));
-        elf_step.dependOn(testNoEhFrameHdr(b, opts));
-        elf_step.dependOn(testPltGot(b, opts));
-        elf_step.dependOn(testPreinitArray(b, opts));
-        elf_step.dependOn(testPushPopState(b, opts));
-        elf_step.dependOn(testSharedAbsSymbol(b, opts));
-        elf_step.dependOn(testStrip(b, opts));
-        elf_step.dependOn(testTlsCommon(b, opts));
-        elf_step.dependOn(testTlsDesc(b, opts));
-        elf_step.dependOn(testTlsDescImport(b, opts));
-        elf_step.dependOn(testTlsDescStatic(b, opts));
-        elf_step.dependOn(testTlsDfStaticTls(b, opts));
-        elf_step.dependOn(testTlsDso(b, opts));
-        elf_step.dependOn(testTlsGd(b, opts));
-        elf_step.dependOn(testTlsGdNoPlt(b, opts));
-        elf_step.dependOn(testTlsGdToIe(b, opts));
-        elf_step.dependOn(testTlsIe(b, opts));
-        elf_step.dependOn(testTlsLargeAlignment(b, opts));
-        elf_step.dependOn(testTlsLargeTbss(b, opts));
-        elf_step.dependOn(testTlsLargeStaticImage(b, opts));
-        elf_step.dependOn(testTlsLd(b, opts));
-        elf_step.dependOn(testTlsLdDso(b, opts));
-        elf_step.dependOn(testTlsLdNoPlt(b, opts));
-        elf_step.dependOn(testTlsNoPic(b, opts));
-        elf_step.dependOn(testTlsOffsetAlignment(b, opts));
-        elf_step.dependOn(testTlsPic(b, opts));
-        elf_step.dependOn(testTlsSmallAlignment(b, opts));
-        elf_step.dependOn(testTlsStatic(b, opts));
-        elf_step.dependOn(testWeakExportDso(b, opts));
-        elf_step.dependOn(testWeakExportExe(b, opts));
-        elf_step.dependOn(testWeakUndefDso(b, opts));
-        elf_step.dependOn(testZNow(b, opts));
-        elf_step.dependOn(testZStackSize(b, opts));
-        elf_step.dependOn(testZText(b, opts));
-    }
+    if (builtin.target.ofmt != .elf) return skipTestStep(elf_step);
+
+    var opts = Options{
+        .zld = options.zld,
+        .is_musl = options.is_musl,
+        .has_static = options.has_static,
+        .cc_override = options.cc_override,
+        .system_compiler = options.system_compiler,
+    };
+
+    elf_step.dependOn(testAbsSymbols(b, opts));
+    elf_step.dependOn(testAllowMultipleDefinitions(b, opts));
+    elf_step.dependOn(testAsNeeded(b, opts));
+    elf_step.dependOn(testCanonicalPlt(b, opts));
+    elf_step.dependOn(testCommon(b, opts));
+    elf_step.dependOn(testCommonArchive(b, opts));
+    elf_step.dependOn(testCopyrel(b, opts));
+    elf_step.dependOn(testCopyrelAlias(b, opts));
+    elf_step.dependOn(testCopyrelAlignment(b, opts));
+    elf_step.dependOn(testDsoPlt(b, opts));
+    elf_step.dependOn(testDsoUndef(b, opts));
+    elf_step.dependOn(testEmptyObject(b, opts));
+    elf_step.dependOn(testEntryPoint(b, opts));
+    elf_step.dependOn(testExecStack(b, opts));
+    elf_step.dependOn(testExportDynamic(b, opts));
+    elf_step.dependOn(testExportSymbolsFromExe(b, opts));
+    elf_step.dependOn(testFuncAddress(b, opts));
+    elf_step.dependOn(testGcSections(b, opts));
+    elf_step.dependOn(testHelloDynamic(b, opts));
+    elf_step.dependOn(testHelloPie(b, opts));
+    elf_step.dependOn(testHelloStatic(b, opts));
+    elf_step.dependOn(testHiddenWeakUndef(b, opts));
+    elf_step.dependOn(testIfuncAlias(b, opts));
+    elf_step.dependOn(testIfuncDlopen(b, opts));
+    elf_step.dependOn(testIfuncDso(b, opts));
+    elf_step.dependOn(testIfuncDynamic(b, opts));
+    elf_step.dependOn(testIfuncExport(b, opts));
+    elf_step.dependOn(testIfuncFuncPtr(b, opts));
+    elf_step.dependOn(testIfuncNoPlt(b, opts));
+    elf_step.dependOn(testIfuncStatic(b, opts));
+    elf_step.dependOn(testIfuncStaticPie(b, opts));
+    elf_step.dependOn(testImageBase(b, opts));
+    elf_step.dependOn(testInitArrayOrder(b, opts));
+    elf_step.dependOn(testLargeAlignmentDso(b, opts));
+    elf_step.dependOn(testLargeAlignmentExe(b, opts));
+    elf_step.dependOn(testLargeBss(b, opts));
+    elf_step.dependOn(testLinkOrder(b, opts));
+    elf_step.dependOn(testLinkerScript(b, opts));
+    elf_step.dependOn(testNoEhFrameHdr(b, opts));
+    elf_step.dependOn(testPltGot(b, opts));
+    elf_step.dependOn(testPreinitArray(b, opts));
+    elf_step.dependOn(testPushPopState(b, opts));
+    elf_step.dependOn(testSharedAbsSymbol(b, opts));
+    elf_step.dependOn(testStrip(b, opts));
+    elf_step.dependOn(testTlsCommon(b, opts));
+    elf_step.dependOn(testTlsDesc(b, opts));
+    elf_step.dependOn(testTlsDescImport(b, opts));
+    elf_step.dependOn(testTlsDescStatic(b, opts));
+    elf_step.dependOn(testTlsDfStaticTls(b, opts));
+    elf_step.dependOn(testTlsDso(b, opts));
+    elf_step.dependOn(testTlsGd(b, opts));
+    elf_step.dependOn(testTlsGdNoPlt(b, opts));
+    elf_step.dependOn(testTlsGdToIe(b, opts));
+    elf_step.dependOn(testTlsIe(b, opts));
+    elf_step.dependOn(testTlsLargeAlignment(b, opts));
+    elf_step.dependOn(testTlsLargeTbss(b, opts));
+    elf_step.dependOn(testTlsLargeStaticImage(b, opts));
+    elf_step.dependOn(testTlsLd(b, opts));
+    elf_step.dependOn(testTlsLdDso(b, opts));
+    elf_step.dependOn(testTlsLdNoPlt(b, opts));
+    elf_step.dependOn(testTlsNoPic(b, opts));
+    elf_step.dependOn(testTlsOffsetAlignment(b, opts));
+    elf_step.dependOn(testTlsPic(b, opts));
+    elf_step.dependOn(testTlsSmallAlignment(b, opts));
+    elf_step.dependOn(testTlsStatic(b, opts));
+    elf_step.dependOn(testWeakExportDso(b, opts));
+    elf_step.dependOn(testWeakExportExe(b, opts));
+    elf_step.dependOn(testWeakUndefDso(b, opts));
+    elf_step.dependOn(testZNow(b, opts));
+    elf_step.dependOn(testZStackSize(b, opts));
+    elf_step.dependOn(testZText(b, opts));
 
     return elf_step;
 }
@@ -991,10 +999,7 @@ fn testHelloPie(b: *Build, opts: Options) *Step {
 fn testHelloStatic(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-hello-static", "");
 
-    if (!opts.has_static) {
-        skipTestStep(test_step);
-        return test_step;
-    }
+    if (!opts.has_static) return skipTestStep(test_step);
 
     const exe = cc(b, opts);
     exe.addHelloWorldMain();
@@ -1039,10 +1044,7 @@ fn testHiddenWeakUndef(b: *Build, opts: Options) *Step {
 fn testIfuncAlias(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-ifunc-alias", "");
 
-    if (opts.is_musl) {
-        skipTestStep(test_step);
-        return test_step;
-    }
+    if (opts.is_musl) return skipTestStep(test_step);
 
     const exe = cc(b, opts);
     exe.addCSource(
@@ -1066,10 +1068,7 @@ fn testIfuncAlias(b: *Build, opts: Options) *Step {
 fn testIfuncDlopen(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-ifunc-dlopen", "");
 
-    if (opts.is_musl) {
-        skipTestStep(test_step);
-        return test_step;
-    }
+    if (opts.is_musl) return skipTestStep(test_step);
 
     const dso = cc(b, opts);
     dso.addCSource(
@@ -1114,10 +1113,7 @@ fn testIfuncDlopen(b: *Build, opts: Options) *Step {
 fn testIfuncDso(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-ifunc-dso", "");
 
-    if (opts.is_musl) {
-        skipTestStep(test_step);
-        return test_step;
-    }
+    if (opts.is_musl) return skipTestStep(test_step);
 
     const dso = cc(b, opts);
     dso.addArgs(&.{ "-fPIC", "-shared" });
@@ -1156,10 +1152,7 @@ fn testIfuncDso(b: *Build, opts: Options) *Step {
 fn testIfuncDynamic(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-ifunc-dynamic", "");
 
-    if (opts.is_musl) {
-        skipTestStep(test_step);
-        return test_step;
-    }
+    if (opts.is_musl) return skipTestStep(test_step);
 
     const main_c =
         \\#include <stdio.h>
@@ -1202,10 +1195,7 @@ fn testIfuncDynamic(b: *Build, opts: Options) *Step {
 fn testIfuncExport(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-ifunc-export", "");
 
-    if (opts.is_musl) {
-        skipTestStep(test_step);
-        return test_step;
-    }
+    if (opts.is_musl) return skipTestStep(test_step);
 
     const dso = cc(b, opts);
     dso.addCSource(
@@ -1233,10 +1223,7 @@ fn testIfuncExport(b: *Build, opts: Options) *Step {
 fn testIfuncFuncPtr(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-ifunc-func-ptr", "");
 
-    if (opts.is_musl) {
-        skipTestStep(test_step);
-        return test_step;
-    }
+    if (opts.is_musl) return skipTestStep(test_step);
 
     const exe = cc(b, opts);
     exe.addCSource(
@@ -1273,10 +1260,7 @@ fn testIfuncFuncPtr(b: *Build, opts: Options) *Step {
 fn testIfuncNoPlt(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-ifunc-noplt", "");
 
-    if (opts.is_musl) {
-        skipTestStep(test_step);
-        return test_step;
-    }
+    if (opts.is_musl) return skipTestStep(test_step);
 
     const exe = cc(b, opts);
     exe.addCSource(
@@ -1306,10 +1290,7 @@ fn testIfuncNoPlt(b: *Build, opts: Options) *Step {
 fn testIfuncStatic(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-ifunc-static", "");
 
-    if (opts.is_musl or !opts.has_static) {
-        skipTestStep(test_step);
-        return test_step;
-    }
+    if (opts.is_musl or !opts.has_static) return skipTestStep(test_step);
 
     const exe = cc(b, opts);
     exe.addCSource(
@@ -1338,10 +1319,7 @@ fn testIfuncStatic(b: *Build, opts: Options) *Step {
 fn testIfuncStaticPie(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-ifunc-static-pie", "");
 
-    if (opts.is_musl or !opts.has_static) {
-        skipTestStep(test_step);
-        return test_step;
-    }
+    if (opts.is_musl or !opts.has_static) return skipTestStep(test_step);
 
     const exe = cc(b, opts);
     exe.addCSource(
@@ -1901,10 +1879,7 @@ fn testStrip(b: *Build, opts: Options) *Step {
 fn testTlsCommon(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-common", "");
 
-    if (opts.system_compiler != .gcc) {
-        skipTestStep(test_step);
-        return test_step;
-    }
+    if (opts.system_compiler != .gcc) return skipTestStep(test_step);
 
     const a_o = cc(b, opts);
     a_o.addAsmSource(
@@ -1943,10 +1918,7 @@ fn testTlsCommon(b: *Build, opts: Options) *Step {
 fn testTlsDesc(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-desc", "");
 
-    if (opts.system_compiler != .gcc) {
-        skipTestStep(test_step);
-        return test_step;
-    }
+    if (opts.system_compiler != .gcc) return skipTestStep(test_step);
 
     const main_o = cc(b, opts);
     main_o.addCSource(
@@ -2039,10 +2011,7 @@ fn testTlsDesc(b: *Build, opts: Options) *Step {
 fn testTlsDescImport(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-desc-import", "");
 
-    if (opts.system_compiler != .gcc) {
-        skipTestStep(test_step);
-        return test_step;
-    }
+    if (opts.system_compiler != .gcc) return skipTestStep(test_step);
 
     const dso = cc(b, opts);
     dso.addCSource(
@@ -2076,10 +2045,7 @@ fn testTlsDescImport(b: *Build, opts: Options) *Step {
 fn testTlsDescStatic(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-desc-static", "");
 
-    if (opts.system_compiler != .gcc or !opts.has_static) {
-        skipTestStep(test_step);
-        return test_step;
-    }
+    if (opts.system_compiler != .gcc or !opts.has_static) return skipTestStep(test_step);
 
     const main_o = cc(b, opts);
     main_o.addCSource(
@@ -2951,10 +2917,7 @@ fn testTlsSmallAlignment(b: *Build, opts: Options) *Step {
 fn testTlsStatic(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-static", "");
 
-    if (!opts.has_static) {
-        skipTestStep(test_step);
-        return test_step;
-    }
+    if (!opts.has_static) return skipTestStep(test_step);
 
     const exe = cc(b, opts);
     exe.addCSource(
@@ -3221,6 +3184,14 @@ fn ld(b: *Build, opts: Options) SysCmd {
     return .{ .cmd = cmd, .out = out };
 }
 
+const Options = struct {
+    zld: FileSourceWithDir,
+    system_compiler: common.SystemCompiler,
+    has_static: bool,
+    is_musl: bool,
+    cc_override: ?[]const u8,
+};
+
 const std = @import("std");
 const builtin = @import("builtin");
 const common = @import("test.zig");
@@ -3229,7 +3200,6 @@ const skipTestStep = common.skipTestStep;
 const Build = std.Build;
 const Compile = Step.Compile;
 const FileSourceWithDir = common.FileSourceWithDir;
-const Options = common.Options;
 const Run = Step.Run;
 const Step = Build.Step;
 const SysCmd = common.SysCmd;

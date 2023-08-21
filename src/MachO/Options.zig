@@ -136,12 +136,11 @@ const usage =
 
 emit: Zld.Emit,
 output_mode: Zld.OutputMode,
-target: CrossTarget,
-platform_version: std.SemanticVersion,
-sdk_version: std.SemanticVersion,
-positionals: []const Zld.LinkObject,
-libs: std.StringArrayHashMap(Zld.SystemLib),
-frameworks: std.StringArrayHashMap(Zld.SystemLib),
+cpu_arch: ?std.Target.Cpu.Arch,
+platform: ?Platform,
+sdk_version: ?Version,
+inferred_platform_versions: [supported_platforms.len]Platform,
+objects: []const MachO.LinkObject,
 lib_dirs: []const []const u8,
 framework_dirs: []const []const u8,
 rpath_list: []const []const u8,
@@ -151,8 +150,8 @@ stack_size: ?u64 = null,
 strip: bool = false,
 entry: ?[]const u8 = null,
 force_undefined_symbols: std.StringArrayHashMap(void),
-current_version: ?std.SemanticVersion = null,
-compatibility_version: ?std.SemanticVersion = null,
+current_version: ?Version = null,
+compatibility_version: ?Version = null,
 install_name: ?[]const u8 = null,
 entitlements: ?[]const u8 = null,
 pagezero_size: ?u64 = null,
@@ -164,15 +163,16 @@ dead_strip_dylibs: bool = false,
 allow_undef: bool = false,
 no_deduplicate: bool = false,
 
-const cmd = "ld64.zld";
+const bin_name = "ld64.zld";
 
 pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options {
-    if (args.len == 0) ctx.fatal(usage, .{cmd});
+    if (args.len == 0) ctx.fatal(usage, .{bin_name});
 
-    var positionals = std.ArrayList(Zld.LinkObject).init(arena);
-    var libs = std.StringArrayHashMap(Zld.SystemLib).init(arena);
+    var objects = std.ArrayList(MachO.LinkObject).init(arena);
+    var libs = std.StringHashMap(usize).init(arena);
+    var frameworks = std.StringHashMap(usize).init(arena);
+
     var lib_dirs = std.ArrayList([]const u8).init(arena);
-    var frameworks = std.StringArrayHashMap(Zld.SystemLib).init(arena);
     var framework_dirs = std.ArrayList([]const u8).init(arena);
     var rpath_list = std.ArrayList([]const u8).init(arena);
     var out_path: ?[]const u8 = null;
@@ -181,8 +181,8 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
     var dynamic: bool = false;
     var dylib: bool = false;
     var install_name: ?[]const u8 = null;
-    var current_version: ?std.SemanticVersion = null;
-    var compatibility_version: ?std.SemanticVersion = null;
+    var current_version: ?Version = null;
+    var compatibility_version: ?Version = null;
     var headerpad: ?u32 = null;
     var headerpad_max_install_names: bool = false;
     var pagezero_size: ?u64 = null;
@@ -194,24 +194,14 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
     var allow_undef: bool = false;
     var search_strategy: ?SearchStrategy = null;
     var no_deduplicate: bool = false;
-
-    var target: ?CrossTarget = if (comptime builtin.target.isDarwin())
-        CrossTarget.fromTarget(builtin.target)
-    else
-        null;
-    var platform_version: ?std.SemanticVersion = if (comptime builtin.target.isDarwin())
-        builtin.target.os.version_range.semver.min
-    else
-        null;
-    var sdk_version: ?std.SemanticVersion = if (comptime builtin.target.isDarwin())
-        builtin.target.os.version_range.semver.min
-    else
-        null;
+    var cpu_arch: ?std.Target.Cpu.Arch = null;
+    var platform: ?Platform = null;
+    var sdk_version: ?Version = null;
 
     var it = Zld.Options.ArgsIterator{ .args = args };
     while (it.next()) |arg| {
         if (mem.eql(u8, arg, "--help") or mem.eql(u8, arg, "-h")) {
-            ctx.fatal(usage, .{cmd});
+            ctx.fatal(usage, .{bin_name});
         } else if (mem.eql(u8, arg, "--debug-log")) {
             try ctx.log_scopes.append(it.nextOrFatal(ctx));
         } else if (mem.eql(u8, arg, "-syslibroot")) {
@@ -221,21 +211,21 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         } else if (mem.eql(u8, arg, "-search_dylibs_first")) {
             search_strategy = .dylibs_first;
         } else if (mem.eql(u8, arg, "-framework")) {
-            try frameworks.put(it.nextOrFatal(ctx), .{ .needed = false });
+            try addFramework(it.nextOrFatal(ctx), &objects, &frameworks);
         } else if (mem.startsWith(u8, arg, "-F")) {
             try framework_dirs.append(arg[2..]);
         } else if (mem.startsWith(u8, arg, "-needed-l")) {
-            try libs.put(arg["-needed-l".len..], .{ .needed = true });
+            try addNeededLib(arg["-needed-l".len..], &objects, &libs);
         } else if (mem.eql(u8, arg, "-needed_library")) {
-            try libs.put(it.nextOrFatal(ctx), .{ .needed = true });
+            try addNeededLib(it.nextOrFatal(ctx), &objects, &libs);
         } else if (mem.eql(u8, arg, "-needed_framework")) {
-            try frameworks.put(it.nextOrFatal(ctx), .{ .needed = true });
+            try addNeededFramework(it.nextOrFatal(ctx), &objects, &frameworks);
         } else if (mem.startsWith(u8, arg, "-weak-l")) {
-            try libs.put(arg["-weak-l".len..], .{ .needed = false, .weak = true });
+            try addWeakLib(arg["-weak-l".len..], &objects, &libs);
         } else if (mem.eql(u8, arg, "-weak_library")) {
-            try libs.put(it.nextOrFatal(ctx), .{ .needed = false, .weak = true });
+            try addWeakLib(it.nextOrFatal(ctx), &objects, &libs);
         } else if (mem.eql(u8, arg, "-weak_framework")) {
-            try frameworks.put(it.nextOrFatal(ctx), .{ .needed = false, .weak = true });
+            try addWeakFramework(it.nextOrFatal(ctx), &objects, &frameworks);
         } else if (mem.eql(u8, arg, "-o")) {
             out_path = it.nextOrFatal(ctx);
         } else if (mem.eql(u8, arg, "-stack_size")) {
@@ -252,11 +242,11 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             try rpath_list.append(it.nextOrFatal(ctx));
         } else if (mem.eql(u8, arg, "-compatibility_version")) {
             const raw = it.nextOrFatal(ctx);
-            compatibility_version = parseSdkVersion(raw) orelse
+            compatibility_version = Version.parse(raw) orelse
                 ctx.fatal("Unable to parse version from '{s}'", .{raw});
         } else if (mem.eql(u8, arg, "-current_version")) {
             const raw = it.nextOrFatal(ctx);
-            current_version = parseSdkVersion(raw) orelse
+            current_version = Version.parse(raw) orelse
                 ctx.fatal("Unable to parse version from '{s}'", .{raw});
         } else if (mem.eql(u8, arg, "-install_name")) {
             install_name = it.nextOrFatal(ctx);
@@ -281,111 +271,58 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         } else if (mem.eql(u8, arg, "-S")) {
             strip = true;
         } else if (mem.eql(u8, arg, "-force_load")) {
-            try positionals.append(.{
+            try objects.append(.{
                 .path = it.nextOrFatal(ctx),
+                .tag = .obj,
                 .must_link = true,
             });
         } else if (mem.eql(u8, arg, "-arch")) {
             const arch_s = it.nextOrFatal(ctx);
             if (mem.eql(u8, arch_s, "arm64")) {
-                target.?.cpu_arch = .aarch64;
+                cpu_arch = .aarch64;
             } else if (mem.eql(u8, arch_s, "x86_64")) {
-                target.?.cpu_arch = .x86_64;
+                cpu_arch = .x86_64;
             } else {
                 ctx.fatal("Could not parse CPU architecture from '{s}'", .{arch_s});
             }
         } else if (mem.eql(u8, arg, "-platform_version")) {
-            const platform = it.next() orelse
+            const platform_s = it.next() orelse
                 ctx.fatal("Expected platform name after '{s}'", .{arg});
             const min_v = it.next() orelse
-                ctx.fatal("Expected minimum platform version after '{s}' '{s}'", .{ arg, platform });
+                ctx.fatal("Expected minimum platform version after '{s}' '{s}'", .{ arg, platform_s });
             const sdk_v = it.next() orelse
-                ctx.fatal("Expected SDK version after '{s}' '{s}' '{s}'", .{ arg, platform, min_v });
-            var tmp_target = CrossTarget{};
+                ctx.fatal("Expected SDK version after '{s}' '{s}' '{s}'", .{ arg, platform_s, min_v });
+
+            var tmp_platform: macho.PLATFORM = undefined;
 
             // First, try parsing platform as a numeric value.
-            if (std.fmt.parseUnsigned(u32, platform, 10)) |ord| {
-                switch (@as(macho.PLATFORM, @enumFromInt(ord))) {
-                    .MACOS => tmp_target = .{
-                        .os_tag = .macos,
-                        .abi = .none,
-                    },
-                    .IOS => tmp_target = .{
-                        .os_tag = .ios,
-                        .abi = .none,
-                    },
-                    .TVOS => tmp_target = .{
-                        .os_tag = .tvos,
-                        .abi = .none,
-                    },
-                    .WATCHOS => tmp_target = .{
-                        .os_tag = .watchos,
-                        .abi = .none,
-                    },
-                    .IOSSIMULATOR => tmp_target = .{
-                        .os_tag = .ios,
-                        .abi = .simulator,
-                    },
-                    .TVOSSIMULATOR => tmp_target = .{
-                        .os_tag = .tvos,
-                        .abi = .simulator,
-                    },
-                    .WATCHOSSIMULATOR => tmp_target = .{
-                        .os_tag = .watchos,
-                        .abi = .simulator,
-                    },
-                    else => |x| ctx.fatal("Unsupported Apple OS: {s}", .{@tagName(x)}),
-                }
+            if (std.fmt.parseUnsigned(u32, platform_s, 10)) |ord| {
+                tmp_platform = @as(macho.PLATFORM, @enumFromInt(ord));
             } else |_| {
-                if (mem.eql(u8, platform, "macos")) {
-                    tmp_target = .{
-                        .os_tag = .macos,
-                        .abi = .none,
-                    };
-                } else if (mem.eql(u8, platform, "ios")) {
-                    tmp_target = .{
-                        .os_tag = .ios,
-                        .abi = .none,
-                    };
-                } else if (mem.eql(u8, platform, "tvos")) {
-                    tmp_target = .{
-                        .os_tag = .tvos,
-                        .abi = .none,
-                    };
-                } else if (mem.eql(u8, platform, "watchos")) {
-                    tmp_target = .{
-                        .os_tag = .watchos,
-                        .abi = .none,
-                    };
-                } else if (mem.eql(u8, platform, "ios-simulator")) {
-                    tmp_target = .{
-                        .os_tag = .ios,
-                        .abi = .simulator,
-                    };
-                } else if (mem.eql(u8, platform, "tvos-simulator")) {
-                    tmp_target = .{
-                        .os_tag = .tvos,
-                        .abi = .simulator,
-                    };
-                } else if (mem.eql(u8, platform, "watchos-simulator")) {
-                    tmp_target = .{
-                        .os_tag = .watchos,
-                        .abi = .simulator,
-                    };
+                if (mem.eql(u8, platform_s, "macos")) {
+                    tmp_platform = .MACOS;
+                } else if (mem.eql(u8, platform_s, "ios")) {
+                    tmp_platform = .IOS;
+                } else if (mem.eql(u8, platform_s, "tvos")) {
+                    tmp_platform = .TVOS;
+                } else if (mem.eql(u8, platform_s, "watchos")) {
+                    tmp_platform = .WATCHOS;
+                } else if (mem.eql(u8, platform_s, "ios-simulator")) {
+                    tmp_platform = .IOSSIMULATOR;
+                } else if (mem.eql(u8, platform_s, "tvos-simulator")) {
+                    tmp_platform = .TVOSSIMULATOR;
+                } else if (mem.eql(u8, platform_s, "watchos-simulator")) {
+                    tmp_platform = .WATCHOSSIMULATOR;
                 } else {
-                    ctx.fatal("Unsupported Apple OS: {s}", .{platform});
+                    ctx.fatal("Unsupported Apple OS: {s}", .{platform_s});
                 }
             }
 
-            if (target) |*tt| {
-                tt.os_tag = tmp_target.os_tag;
-                tt.abi = tmp_target.abi;
-            }
-
-            platform_version = parseSdkVersion(min_v) orelse
+            const min_ver = Version.parse(min_v) orelse
                 ctx.fatal("Unable to parse version from '{s}'", .{min_v});
-            sdk_version = parseSdkVersion(sdk_v) orelse
+            sdk_version = Version.parse(sdk_v) orelse
                 ctx.fatal("Unable to parse version from '{s}'", .{sdk_v});
+            platform = .{ .platform = tmp_platform, .version = min_ver };
         } else if (mem.eql(u8, arg, "-undefined")) {
             const treatment = it.nextOrFatal(ctx);
             if (mem.eql(u8, treatment, "error")) {
@@ -403,43 +340,36 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         } else if (mem.eql(u8, arg, "-demangle")) {
             std.log.debug("TODO unimplemented -demangle option", .{});
         } else if (mem.startsWith(u8, arg, "-l")) {
-            try libs.put(arg[2..], .{ .needed = false });
+            try addLib(arg[2..], &objects, &libs);
         } else if (mem.startsWith(u8, arg, "-L")) {
             try lib_dirs.append(arg[2..]);
         } else if (mem.eql(u8, arg, "-no_deduplicate")) {
             no_deduplicate = true;
         } else {
-            try positionals.append(.{
+            try objects.append(.{
                 .path = arg,
-                .must_link = false,
+                .tag = .obj,
             });
         }
     }
-
-    if (positionals.items.len == 0) ctx.fatal("Expected at least one input .o file", .{});
-    if (target == null or target.?.cpu_arch == null)
-        ctx.fatal("Missing -arch when cross-linking", .{});
-    if (target.?.os_tag == null)
-        ctx.fatal("Missing -platform_version when cross-linking", .{});
 
     // Add some defaults
     try lib_dirs.append("/usr/lib");
     try framework_dirs.append("/System/Library/Frameworks");
 
-    return Options{
+    var opts = Options{
         .emit = .{
             .directory = std.fs.cwd(),
             .sub_path = out_path orelse "a.out",
         },
         .dynamic = dynamic,
-        .target = target.?,
-        .platform_version = platform_version.?,
-        .sdk_version = sdk_version.?,
+        .cpu_arch = cpu_arch,
+        .platform = platform,
+        .sdk_version = sdk_version,
+        .inferred_platform_versions = undefined,
         .output_mode = if (dylib) .lib else .exe,
         .syslibroot = syslibroot,
-        .positionals = positionals.items,
-        .libs = libs,
-        .frameworks = frameworks,
+        .objects = objects.items,
         .lib_dirs = lib_dirs.items,
         .framework_dirs = framework_dirs.items,
         .rpath_list = rpath_list.items,
@@ -459,6 +389,25 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         .search_strategy = search_strategy,
         .no_deduplicate = no_deduplicate,
     };
+
+    try opts.inferPlatformVersions(arena);
+
+    return opts;
+}
+
+fn inferPlatformVersions(opts: *Options, arena: Allocator) !void {
+    inline for (&opts.inferred_platform_versions, 0..) |*platform, i| {
+        platform.* = .{ .platform = supported_platforms[i][0], .version = .{ .value = 0 } };
+    }
+
+    inline for (&opts.inferred_platform_versions, 0..) |*platform, i| {
+        if (supported_platforms[i][3]) |var_name| {
+            if (std.process.getEnvVarOwned(arena, var_name)) |env_var| {
+                const version = Version.parse(env_var) orelse Version{ .value = 0 };
+                platform.* = .{ .platform = supported_platforms[i][0], .version = version };
+            } else |_| {}
+        }
+    }
 }
 
 fn eatIntPrefix(arg: []const u8, radix: u8) []const u8 {
@@ -473,39 +422,213 @@ fn eatIntPrefix(arg: []const u8, radix: u8) []const u8 {
     return arg;
 }
 
-// Versions reported by Apple aren't exactly semantically valid as they usually omit
-// the patch component. Hence, we do a simple check for the number of components and
-// add the missing patch value if needed.
-fn parseSdkVersion(raw: []const u8) ?std.SemanticVersion {
-    var buffer: [128]u8 = undefined;
-    if (raw.len > buffer.len) return null;
-    @memcpy(buffer[0..raw.len], raw);
-    const dots_count = mem.count(u8, raw, ".");
-    if (dots_count < 1) return null;
-    const len = if (dots_count < 2) blk: {
-        const patch_suffix = ".0";
-        buffer[raw.len..][0..patch_suffix.len].* = patch_suffix.*;
-        break :blk raw.len + patch_suffix.len;
-    } else raw.len;
-    return std.SemanticVersion.parse(buffer[0..len]) catch null;
+const Objects = std.ArrayList(MachO.LinkObject);
+const LibLookup = std.StringHashMap(usize);
+
+fn newObjectWithLookup(name: []const u8, objects: *Objects, lookup: *LibLookup) !*MachO.LinkObject {
+    const gop = try lookup.getOrPut(name);
+    if (!gop.found_existing) {
+        gop.value_ptr.* = objects.items.len;
+        _ = try objects.addOne();
+    }
+    return &objects.items[gop.value_ptr.*];
+}
+
+fn addLib(name: []const u8, objects: *Objects, libs: *LibLookup) !void {
+    const obj = try newObjectWithLookup(name, objects, libs);
+    obj.* = .{
+        .path = name,
+        .tag = .lib,
+    };
+}
+
+fn addNeededLib(name: []const u8, objects: *Objects, libs: *LibLookup) !void {
+    const obj = try newObjectWithLookup(name, objects, libs);
+    obj.* = .{
+        .path = name,
+        .tag = .lib,
+        .needed = true,
+    };
+}
+
+fn addWeakLib(name: []const u8, objects: *Objects, libs: *LibLookup) !void {
+    const obj = try newObjectWithLookup(name, objects, libs);
+    obj.* = .{
+        .path = name,
+        .tag = .lib,
+        .weak = true,
+    };
+}
+
+fn addFramework(name: []const u8, objects: *Objects, frameworks: *LibLookup) !void {
+    const obj = try newObjectWithLookup(name, objects, frameworks);
+    obj.* = .{
+        .path = name,
+        .tag = .framework,
+    };
+}
+
+fn addNeededFramework(name: []const u8, objects: *Objects, frameworks: *LibLookup) !void {
+    const obj = try newObjectWithLookup(name, objects, frameworks);
+    obj.* = .{
+        .path = name,
+        .tag = .framework,
+        .needed = true,
+    };
+}
+
+fn addWeakFramework(name: []const u8, objects: *Objects, frameworks: *LibLookup) !void {
+    const obj = try newObjectWithLookup(name, objects, frameworks);
+    obj.* = .{
+        .path = name,
+        .tag = .framework,
+        .weak = true,
+    };
+}
+
+pub const Platform = struct {
+    platform: macho.PLATFORM,
+    version: Version,
+
+    /// Using Apple's ld64 as our blueprint, `min_version` as well as `sdk_version` are set to
+    /// the extracted minimum platform version.
+    pub fn fromLoadCommand(lc: macho.LoadCommandIterator.LoadCommand) Platform {
+        switch (lc.cmd()) {
+            .BUILD_VERSION => {
+                const cmd = lc.cast(macho.build_version_command).?;
+                return .{
+                    .platform = cmd.platform,
+                    .version = .{ .value = cmd.minos },
+                };
+            },
+            .VERSION_MIN_MACOSX,
+            .VERSION_MIN_IPHONEOS,
+            .VERSION_MIN_TVOS,
+            .VERSION_MIN_WATCHOS,
+            => {
+                const cmd = lc.cast(macho.version_min_command).?;
+                return .{
+                    .platform = switch (lc.cmd()) {
+                        .VERSION_MIN_MACOSX => .MACOS,
+                        .VERSION_MIN_IPHONEOS => .IOS,
+                        .VERSION_MIN_TVOS => .TVOS,
+                        .VERSION_MIN_WATCHOS => .WATCHOS,
+                        else => unreachable,
+                    },
+                    .version = .{ .value = cmd.version },
+                };
+            },
+            else => unreachable,
+        }
+    }
+
+    pub fn isBuildVersionCompatible(plat: Platform) bool {
+        inline for (supported_platforms) |sup_plat| {
+            if (sup_plat[0] == plat.platform) {
+                return sup_plat[1] <= plat.version.value;
+            }
+        }
+        return false;
+    }
+};
+
+pub const Version = struct {
+    value: u32,
+
+    pub fn major(v: Version) u16 {
+        return @as(u16, @truncate(v.value >> 16));
+    }
+
+    pub fn minor(v: Version) u8 {
+        return @as(u8, @truncate(v.value >> 8));
+    }
+
+    pub fn patch(v: Version) u8 {
+        return @as(u8, @truncate(v.value));
+    }
+
+    pub fn parse(raw: []const u8) ?Version {
+        var parsed: [3]u16 = [_]u16{0} ** 3;
+        var count: usize = 0;
+        var it = std.mem.splitAny(u8, raw, ".");
+        while (it.next()) |comp| {
+            if (count >= 3) return null;
+            parsed[count] = std.fmt.parseInt(u16, comp, 10) catch return null;
+            count += 1;
+        }
+        if (count == 0) return null;
+        const maj = parsed[0];
+        const min = std.math.cast(u8, parsed[1]) orelse return null;
+        const pat = std.math.cast(u8, parsed[2]) orelse return null;
+        return Version.new(maj, min, pat);
+    }
+
+    pub fn new(maj: u16, min: u8, pat: u8) Version {
+        return .{ .value = (@as(u32, @intCast(maj)) << 16) | (@as(u32, @intCast(min)) << 8) | pat };
+    }
+
+    pub fn format(
+        v: Version,
+        comptime unused_fmt_string: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = unused_fmt_string;
+        _ = options;
+        try writer.print("{d}.{d}.{d}", .{
+            v.major(),
+            v.minor(),
+            v.patch(),
+        });
+    }
+};
+
+const SupportedPlatforms = struct {
+    macho.PLATFORM, // Platform identifier
+    u32, // Min platform version for which to emit LC_BUILD_VERSION
+    u32, // Min supported platform version
+    ?[]const u8, // Env var to look for
+};
+
+// Source: https://github.com/apple-oss-distributions/ld64/blob/59a99ab60399c5e6c49e6945a9e1049c42b71135/src/ld/PlatformSupport.cpp#L52
+const supported_platforms = [_]SupportedPlatforms{
+    .{ .MACOS, 0xA0E00, 0xA0800, "MACOSX_DEPLOYMENT_TARGET" },
+    .{ .IOS, 0xC0000, 0x70000, "IPHONEOS_DEPLOYMENT_TARGET" },
+    .{ .TVOS, 0xC0000, 0x70000, "TVOS_DEPLOYMENT_TARGET" },
+    .{ .WATCHOS, 0x50000, 0x20000, "WATCHOS_DEPLOYMENT_TARGET" },
+    .{ .IOSSIMULATOR, 0xD0000, 0x80000, null },
+    .{ .TVOSSIMULATOR, 0xD0000, 0x80000, null },
+    .{ .WATCHOSSIMULATOR, 0x60000, 0x20000, null },
+};
+
+pub fn inferSdkVersionFromSdkPath(path: []const u8) ?Version {
+    const stem = std.fs.path.stem(path);
+    const start = for (stem, 0..) |c, i| {
+        if (std.ascii.isDigit(c)) break i;
+    } else stem.len;
+    const end = for (stem[start..], start..) |c, i| {
+        if (std.ascii.isDigit(c) or c == '.') continue;
+        break i;
+    } else stem.len;
+    return Version.parse(stem[start..end]);
 }
 
 const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
 
-fn testParseSdkVersionSuccess(exp: std.SemanticVersion, raw: []const u8) !void {
-    const maybe_ver = parseSdkVersion(raw);
+fn testParseVersionSuccess(exp: u32, raw: []const u8) !void {
+    const maybe_ver = Version.parse(raw);
     try expect(maybe_ver != null);
-    const ver = maybe_ver.?;
-    try expectEqual(exp.major, ver.major);
-    try expectEqual(exp.minor, ver.minor);
-    try expectEqual(exp.patch, ver.patch);
+    const ver = maybe_ver.?.value;
+    try expectEqual(exp, ver);
 }
 
-test "parseSdkVersion" {
-    try testParseSdkVersionSuccess(.{ .major = 13, .minor = 4, .patch = 0 }, "13.4");
-    try testParseSdkVersionSuccess(.{ .major = 13, .minor = 4, .patch = 1 }, "13.4.1");
-    try testParseSdkVersionSuccess(.{ .major = 11, .minor = 15, .patch = 0 }, "11.15");
+test "parseVersionString" {
+    try testParseVersionSuccess(0xD0400, "13.4");
+    try testParseVersionSuccess(0xD0401, "13.4.1");
+    try testParseVersionSuccess(0xB0F00, "11.15");
 
-    try expect(parseSdkVersion("11") == null);
+    try expect(Version.parse("") == null);
+    try expect(Version.parse("11.xx") == null);
+    try expect(Version.parse("11.11.11.11") == null);
 }

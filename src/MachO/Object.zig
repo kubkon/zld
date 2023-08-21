@@ -19,6 +19,7 @@ const AtomIndex = MachO.AtomIndex;
 const DwarfInfo = @import("DwarfInfo.zig");
 const LoadCommandIterator = macho.LoadCommandIterator;
 const MachO = @import("../MachO.zig");
+const Options = @import("Options.zig");
 const SymbolWithLoc = MachO.SymbolWithLoc;
 const UnwindInfo = @import("UnwindInfo.zig");
 const Zld = @import("../Zld.zig");
@@ -87,6 +88,13 @@ const Record = struct {
     reloc: Entry,
 };
 
+pub fn isObject(file: std.fs.File) bool {
+    const reader = file.reader();
+    const hdr = reader.readStruct(macho.mach_header_64) catch return false;
+    defer file.seekTo(0) catch {};
+    return hdr.filetype == macho.MH_OBJECT;
+}
+
 pub fn deinit(self: *Object, gpa: Allocator) void {
     self.atoms.deinit(gpa);
     self.exec_atoms.deinit(gpa);
@@ -114,44 +122,14 @@ pub fn deinit(self: *Object, gpa: Allocator) void {
     self.data_in_code.deinit(gpa);
 }
 
-pub fn parse(
-    self: *Object,
-    allocator: Allocator,
-    cpu_arch: std.Target.Cpu.Arch,
-    macho_file: *MachO,
-) !void {
+pub fn parse(self: *Object, allocator: Allocator) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
     var stream = std.io.fixedBufferStream(self.contents);
     const reader = stream.reader();
 
-    self.header = reader.readStruct(macho.mach_header_64) catch return error.NotObject;
-
-    if (self.header.filetype != macho.MH_OBJECT) {
-        log.debug("invalid filetype: expected 0x{x}, found 0x{x}", .{
-            macho.MH_OBJECT,
-            self.header.filetype,
-        });
-        return error.NotObject;
-    }
-
-    const this_arch: std.Target.Cpu.Arch = switch (self.header.cputype) {
-        macho.CPU_TYPE_ARM64 => .aarch64,
-        macho.CPU_TYPE_X86_64 => .x86_64,
-        else => |value| {
-            macho_file.base.fatal("unsupported cpu architecture 0x{x}", .{value});
-            return;
-        },
-    };
-    if (this_arch != cpu_arch) {
-        macho_file.base.fatal("{s}: mismatched cpu architecture: expected {s}, found {s}", .{
-            self.name,
-            @tagName(cpu_arch),
-            @tagName(this_arch),
-        });
-        return;
-    }
+    self.header = try reader.readStruct(macho.mach_header_64);
 
     var it = LoadCommandIterator{
         .ncmds = self.header.ncmds,
@@ -441,7 +419,7 @@ pub fn splitRegularSections(self: *Object, macho_file: *MachO, object_id: u32) !
     // Well, shit, sometimes compilers skip the dysymtab load command altogether, meaning we
     // have to infer the start of undef section in the symtab ourselves.
     const iundefsym = blk: {
-        const dysymtab = self.parseDysymtab() orelse {
+        const dysymtab = self.getDysymtab() orelse {
             var iundefsym: usize = self.in_symtab.?.len;
             while (iundefsym > 0) : (iundefsym -= 1) {
                 const sym = self.symtab[iundefsym - 1];
@@ -487,7 +465,7 @@ pub fn splitRegularSections(self: *Object, macho_file: *MachO, object_id: u32) !
 
         try self.parseRelocs(gpa, section.id);
 
-        const cpu_arch = macho_file.options.target.cpu_arch.?;
+        const cpu_arch = macho_file.options.cpu_arch.?;
         const sect_loc = filterSymbolsBySection(symtab[sect_sym_index..], sect_id + 1);
         const sect_start_index = sect_sym_index + sect_loc.index;
 
@@ -711,7 +689,7 @@ fn parseEhFrameSection(self: *Object, macho_file: *MachO, object_id: u32) !void 
     }
 
     const gpa = macho_file.base.allocator;
-    const cpu_arch = macho_file.options.target.cpu_arch.?;
+    const cpu_arch = macho_file.options.cpu_arch.?;
     try self.parseRelocs(gpa, sect_id);
     const relocs = self.getRelocs(sect_id);
 
@@ -816,7 +794,7 @@ fn parseUnwindInfo(self: *Object, macho_file: *MachO, object_id: u32) !void {
     log.debug("parsing unwind info in {s}", .{self.name});
 
     const gpa = macho_file.base.allocator;
-    const cpu_arch = macho_file.options.target.cpu_arch.?;
+    const cpu_arch = macho_file.options.cpu_arch.?;
 
     if (macho_file.getSectionByName("__TEXT", "__unwind_info") == null) {
         _ = try macho_file.initSection("__TEXT", "__unwind_info", .{});
@@ -946,16 +924,14 @@ fn diceLessThan(ctx: void, lhs: macho.data_in_code_entry, rhs: macho.data_in_cod
     return lhs.offset < rhs.offset;
 }
 
-fn parseDysymtab(self: Object) ?macho.dysymtab_command {
+fn getDysymtab(self: Object) ?macho.dysymtab_command {
     var it = LoadCommandIterator{
         .ncmds = self.header.ncmds,
         .buffer = self.contents[@sizeOf(macho.mach_header_64)..][0..self.header.sizeofcmds],
     };
     while (it.next()) |cmd| {
         switch (cmd.cmd()) {
-            .DYSYMTAB => {
-                return cmd.cast(macho.dysymtab_command).?;
-            },
+            .DYSYMTAB => return cmd.cast(macho.dysymtab_command).?,
             else => {},
         }
     } else return null;
@@ -979,6 +955,26 @@ pub fn parseDwarfInfo(self: Object) DwarfInfo {
         }
     }
     return di;
+}
+
+/// Returns Options.Platform composed from the first encountered build version type load command:
+/// either LC_BUILD_VERSION or LC_VERSION_MIN_*.
+pub fn getPlatform(self: Object) ?Options.Platform {
+    var it = LoadCommandIterator{
+        .ncmds = self.header.ncmds,
+        .buffer = self.contents[@sizeOf(macho.mach_header_64)..][0..self.header.sizeofcmds],
+    };
+    while (it.next()) |cmd| {
+        switch (cmd.cmd()) {
+            .BUILD_VERSION,
+            .VERSION_MIN_MACOSX,
+            .VERSION_MIN_IPHONEOS,
+            .VERSION_MIN_TVOS,
+            .VERSION_MIN_WATCHOS,
+            => return Options.Platform.fromLoadCommand(cmd),
+            else => {},
+        }
+    } else return null;
 }
 
 pub fn getSectionContents(self: Object, sect: macho.section_64) []const u8 {

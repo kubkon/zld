@@ -242,27 +242,6 @@ fn resolveFile(
     };
 }
 
-fn hasSharedLibraryExt(filename: []const u8) bool {
-    if (mem.endsWith(u8, filename, ".so")) return true;
-    // Look for .so.X, .so.X.Y, .so.X.Y.Z
-    var it = mem.split(u8, filename, ".");
-    _ = it.first();
-    var so_txt = it.next() orelse return false;
-    while (!mem.eql(u8, so_txt, "so")) {
-        so_txt = it.next() orelse return false;
-    }
-    const n1 = it.next() orelse return false;
-    const n2 = it.next();
-    const n3 = it.next();
-
-    _ = std.fmt.parseInt(u32, n1, 10) catch return false;
-    if (n2) |x| _ = std.fmt.parseInt(u32, x, 10) catch return false;
-    if (n3) |x| _ = std.fmt.parseInt(u32, x, 10) catch return false;
-    if (it.next() != null) return false;
-
-    return true;
-}
-
 pub fn flush(self: *Elf) !void {
     const gpa = self.base.allocator;
 

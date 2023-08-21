@@ -16,8 +16,10 @@ const CrossTarget = std.zig.CrossTarget;
 const LibStub = tapi.LibStub;
 const LoadCommandIterator = macho.LoadCommandIterator;
 const MachO = @import("../MachO.zig");
+const Options = MachO.Options;
 const Tbd = tapi.Tbd;
 
+header: ?macho.mach_header_64 = null,
 id: ?Id = null,
 weak: bool = false,
 
@@ -116,6 +118,13 @@ pub const Id = struct {
     }
 };
 
+pub fn isDylib(file: std.fs.File, fat_offset: u64) bool {
+    const reader = file.reader();
+    const hdr = reader.readStruct(macho.mach_header_64) catch return false;
+    defer file.seekTo(fat_offset) catch {};
+    return hdr.filetype == macho.MH_DYLIB;
+}
+
 pub fn deinit(self: *Dylib, allocator: Allocator) void {
     for (self.symbols.keys()) |key| {
         allocator.free(key);
@@ -129,48 +138,22 @@ pub fn deinit(self: *Dylib, allocator: Allocator) void {
 pub fn parseFromBinary(
     self: *Dylib,
     allocator: Allocator,
-    cpu_arch: std.Target.Cpu.Arch,
     dylib_id: u16,
     dependent_libs: anytype,
     name: []const u8,
     data: []align(@alignOf(u64)) const u8,
-    macho_file: *MachO,
 ) !void {
     var stream = std.io.fixedBufferStream(data);
     const reader = stream.reader();
 
     log.debug("parsing shared library '{s}'", .{name});
 
-    const header = reader.readStruct(macho.mach_header_64) catch return error.NotDylib;
+    self.header = try reader.readStruct(macho.mach_header_64);
 
-    if (header.filetype != macho.MH_DYLIB) {
-        log.debug("invalid filetype: expected 0x{x}, found 0x{x}", .{
-            macho.MH_DYLIB,
-            header.filetype,
-        });
-        return error.NotDylib;
-    }
-
-    const this_arch: std.Target.Cpu.Arch = switch (header.cputype) {
-        macho.CPU_TYPE_ARM64 => .aarch64,
-        macho.CPU_TYPE_X86_64 => .x86_64,
-        else => |value| {
-            return macho_file.base.fatal("{s}: unsupported cpu architecture 0x{x}", .{ name, value });
-        },
-    };
-
-    if (this_arch != cpu_arch) {
-        return macho_file.base.fatal("{s}: mismatched cpu architecture: expected {s}, found {s}", .{
-            name,
-            @tagName(cpu_arch),
-            @tagName(this_arch),
-        });
-    }
-
-    const should_lookup_reexports = header.flags & macho.MH_NO_REEXPORTED_DYLIBS == 0;
+    const should_lookup_reexports = self.header.?.flags & macho.MH_NO_REEXPORTED_DYLIBS == 0;
     var it = LoadCommandIterator{
-        .ncmds = header.ncmds,
-        .buffer = data[@sizeOf(macho.mach_header_64)..][0..header.sizeofcmds],
+        .ncmds = self.header.?.ncmds,
+        .buffer = data[@sizeOf(macho.mach_header_64)..][0..self.header.?.sizeofcmds],
     };
     while (it.next()) |cmd| {
         switch (cmd.cmd()) {
@@ -220,6 +203,26 @@ pub fn parseFromBinary(
     }
 }
 
+/// Returns Options.Platform composed from the first encountered build version type load command:
+/// either LC_BUILD_VERSION or LC_VERSION_MIN_*.
+pub fn getPlatform(self: Dylib, data: []align(@alignOf(u64)) const u8) ?Options.Platform {
+    var it = LoadCommandIterator{
+        .ncmds = self.header.?.ncmds,
+        .buffer = data[@sizeOf(macho.mach_header_64)..][0..self.header.?.sizeofcmds],
+    };
+    while (it.next()) |cmd| {
+        switch (cmd.cmd()) {
+            .BUILD_VERSION,
+            .VERSION_MIN_MACOSX,
+            .VERSION_MIN_IPHONEOS,
+            .VERSION_MIN_TVOS,
+            .VERSION_MIN_WATCHOS,
+            => return Options.Platform.fromLoadCommand(cmd),
+            else => {},
+        }
+    } else return null;
+}
+
 fn addObjCClassSymbol(self: *Dylib, allocator: Allocator, sym_name: []const u8) !void {
     const expanded = &[_][]const u8{
         try std.fmt.allocPrint(allocator, "_OBJC_CLASS_$_{s}", .{sym_name}),
@@ -254,34 +257,35 @@ fn addWeakSymbol(self: *Dylib, allocator: Allocator, sym_name: []const u8) !void
     try self.symbols.putNoClobber(allocator, try allocator.dupe(u8, sym_name), true);
 }
 
-const TargetMatcher = struct {
+pub const TargetMatcher = struct {
     allocator: Allocator,
-    target: CrossTarget,
+    cpu_arch: std.Target.Cpu.Arch,
+    platform: macho.PLATFORM,
     target_strings: std.ArrayListUnmanaged([]const u8) = .{},
 
-    fn init(allocator: Allocator, target: CrossTarget) !TargetMatcher {
+    pub fn init(allocator: Allocator, cpu_arch: std.Target.Cpu.Arch, platform: macho.PLATFORM) !TargetMatcher {
         var self = TargetMatcher{
             .allocator = allocator,
-            .target = target,
+            .cpu_arch = cpu_arch,
+            .platform = platform,
         };
-        const apple_string = try targetToAppleString(allocator, target);
+        const apple_string = try targetToAppleString(allocator, cpu_arch, platform);
         try self.target_strings.append(allocator, apple_string);
 
-        const abi = target.abi orelse .none;
-        if (abi == .simulator) {
-            // For Apple simulator targets, linking gets tricky as we need to link against the simulator
-            // hosts dylibs too.
-            const host_target = try targetToAppleString(allocator, .{
-                .cpu_arch = target.cpu_arch.?,
-                .os_tag = .macos,
-            });
-            try self.target_strings.append(allocator, host_target);
+        switch (platform) {
+            .IOSSIMULATOR, .TVOSSIMULATOR, .WATCHOSSIMULATOR => {
+                // For Apple simulator targets, linking gets tricky as we need to link against the simulator
+                // hosts dylibs too.
+                const host_target = try targetToAppleString(allocator, cpu_arch, .MACOS);
+                try self.target_strings.append(allocator, host_target);
+            },
+            else => {},
         }
 
         return self;
     }
 
-    fn deinit(self: *TargetMatcher) void {
+    pub fn deinit(self: *TargetMatcher) void {
         for (self.target_strings.items) |t| {
             self.allocator.free(t);
         }
@@ -296,23 +300,22 @@ const TargetMatcher = struct {
         };
     }
 
-    inline fn abiToAppleString(abi: std.Target.Abi) ?[]const u8 {
-        return switch (abi) {
-            .none => null,
-            .simulator => "simulator",
-            .macabi => "maccatalyst",
+    pub fn targetToAppleString(allocator: Allocator, cpu_arch: std.Target.Cpu.Arch, platform: macho.PLATFORM) ![]const u8 {
+        const arch = cpuArchToAppleString(cpu_arch);
+        const plat = switch (platform) {
+            .MACOS => "macos",
+            .IOS => "ios",
+            .TVOS => "tvos",
+            .WATCHOS => "watchos",
+            .IOSSIMULATOR => "ios-simulator",
+            .TVOSSIMULATOR => "tvos-simulator",
+            .WATCHOSSIMULATOR => "watchos-simulator",
+            .BRIDGEOS => "bridgeos",
+            .MACCATALYST => "maccatalyst",
+            .DRIVERKIT => "driverkit",
             else => unreachable,
         };
-    }
-
-    fn targetToAppleString(allocator: Allocator, target: CrossTarget) ![]const u8 {
-        const cpu_arch = cpuArchToAppleString(target.cpu_arch.?);
-        const os_tag = @tagName(target.os_tag.?);
-        const target_abi = abiToAppleString(target.abi orelse .none);
-        if (target_abi) |abi| {
-            return std.fmt.allocPrint(allocator, "{s}-{s}-{s}", .{ cpu_arch, os_tag, abi });
-        }
-        return std.fmt.allocPrint(allocator, "{s}-{s}", .{ cpu_arch, os_tag });
+        return std.fmt.allocPrint(allocator, "{s}-{s}", .{ arch, plat });
     }
 
     fn hasValue(stack: []const []const u8, needle: []const u8) bool {
@@ -323,7 +326,7 @@ const TargetMatcher = struct {
     }
 
     fn matchesArch(self: TargetMatcher, archs: []const []const u8) bool {
-        return hasValue(archs, cpuArchToAppleString(self.target.cpu_arch.?));
+        return hasValue(archs, cpuArchToAppleString(self.cpu_arch));
     }
 
     fn matchesTarget(self: TargetMatcher, targets: []const []const u8) bool {
@@ -333,7 +336,7 @@ const TargetMatcher = struct {
         return false;
     }
 
-    fn matchesTargetTbd(self: TargetMatcher, tbd: Tbd) !bool {
+    pub fn matchesTargetTbd(self: TargetMatcher, tbd: Tbd) !bool {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
 
@@ -356,14 +359,13 @@ const TargetMatcher = struct {
 pub fn parseFromStub(
     self: *Dylib,
     allocator: Allocator,
-    target: CrossTarget,
+    cpu_arch: std.Target.Cpu.Arch,
+    platform: ?Options.Platform,
     lib_stub: LibStub,
     dylib_id: u16,
     dependent_libs: anytype,
     name: []const u8,
 ) !void {
-    if (lib_stub.inner.len == 0) return error.EmptyStubFile;
-
     log.debug("parsing shared library from stub '{s}'", .{name});
 
     const umbrella_lib = lib_stub.inner[0];
@@ -384,7 +386,7 @@ pub fn parseFromStub(
 
     log.debug("  (install_name '{s}')", .{umbrella_lib.installName()});
 
-    var matcher = try TargetMatcher.init(allocator, target);
+    var matcher = try TargetMatcher.init(allocator, cpu_arch, if (platform) |p| p.platform else .MACOS);
     defer matcher.deinit();
 
     for (lib_stub.inner, 0..) |elem, stub_index| {

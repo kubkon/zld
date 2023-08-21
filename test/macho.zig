@@ -1,36 +1,150 @@
-pub fn addMachOTests(b: *Build, opts: Options) *Step {
+pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     const macho_step = b.step("test-macho", "Run MachO tests");
 
-    if (builtin.target.ofmt == .macho) {
-        macho_step.dependOn(testDeadStrip(b, opts));
-        macho_step.dependOn(testDeadStripDylibs(b, opts));
-        macho_step.dependOn(testDylib(b, opts));
-        macho_step.dependOn(testEmptyObject(b, opts));
-        macho_step.dependOn(testEntryPoint(b, opts));
-        macho_step.dependOn(testEntryPointArchive(b, opts));
-        macho_step.dependOn(testEntryPointDylib(b, opts));
-        macho_step.dependOn(testFatArchive(b, opts));
-        macho_step.dependOn(testFatDylib(b, opts));
-        macho_step.dependOn(testHeaderpad(b, opts));
-        macho_step.dependOn(testHello(b, opts));
-        macho_step.dependOn(testLayout(b, opts));
-        macho_step.dependOn(testNeededFramework(b, opts));
-        macho_step.dependOn(testNeededLibrary(b, opts));
-        macho_step.dependOn(testNoExportsDylib(b, opts));
-        macho_step.dependOn(testPagezeroSize(b, opts));
-        macho_step.dependOn(testReexportsZig(b, opts));
-        macho_step.dependOn(testSearchStrategy(b, opts));
-        macho_step.dependOn(testStackSize(b, opts));
-        macho_step.dependOn(testTbdv3(b, opts));
-        macho_step.dependOn(testTls(b, opts));
-        macho_step.dependOn(testUnwindInfo(b, opts));
-        macho_step.dependOn(testUnwindInfoNoSubsectionsArm64(b, opts));
-        macho_step.dependOn(testUnwindInfoNoSubsectionsX64(b, opts));
-        macho_step.dependOn(testWeakFramework(b, opts));
-        macho_step.dependOn(testWeakLibrary(b, opts));
-    }
+    if (builtin.target.os.tag != .macos) return skipTestStep(macho_step);
+
+    var opts = Options{
+        .zld = options.zld,
+        .has_zig = options.has_zig,
+        .macos_sdk = undefined,
+        .ios_sdk = null,
+        .cc_override = options.cc_override,
+    };
+    opts.macos_sdk = std.zig.system.darwin.getSdk(b.allocator, builtin.target) orelse @panic("no macOS SDK found");
+    opts.ios_sdk = blk: {
+        const target_info = std.zig.system.NativeTargetInfo.detect(.{
+            .cpu_arch = .aarch64,
+            .os_tag = .ios,
+        }) catch break :blk null;
+        break :blk std.zig.system.darwin.getSdk(b.allocator, target_info.target);
+    };
+
+    macho_step.dependOn(testBuildVersionMacOS(b, opts));
+    macho_step.dependOn(testBuildVersionIOS(b, opts));
+    macho_step.dependOn(testDeadStrip(b, opts));
+    macho_step.dependOn(testDeadStripDylibs(b, opts));
+    macho_step.dependOn(testDylib(b, opts));
+    macho_step.dependOn(testEmptyObject(b, opts));
+    macho_step.dependOn(testEntryPoint(b, opts));
+    macho_step.dependOn(testEntryPointArchive(b, opts));
+    macho_step.dependOn(testEntryPointDylib(b, opts));
+    macho_step.dependOn(testFatArchive(b, opts));
+    macho_step.dependOn(testFatDylib(b, opts));
+    macho_step.dependOn(testHeaderpad(b, opts));
+    macho_step.dependOn(testHello(b, opts));
+    macho_step.dependOn(testLayout(b, opts));
+    macho_step.dependOn(testNeededFramework(b, opts));
+    macho_step.dependOn(testNeededLibrary(b, opts));
+    macho_step.dependOn(testNoExportsDylib(b, opts));
+    macho_step.dependOn(testPagezeroSize(b, opts));
+    macho_step.dependOn(testReexportsZig(b, opts));
+    macho_step.dependOn(testSearchStrategy(b, opts));
+    macho_step.dependOn(testStackSize(b, opts));
+    macho_step.dependOn(testTbdv3(b, opts));
+    macho_step.dependOn(testTls(b, opts));
+    macho_step.dependOn(testUnwindInfo(b, opts));
+    macho_step.dependOn(testUnwindInfoNoSubsectionsArm64(b, opts));
+    macho_step.dependOn(testUnwindInfoNoSubsectionsX64(b, opts));
+    macho_step.dependOn(testWeakFramework(b, opts));
+    macho_step.dependOn(testWeakLibrary(b, opts));
 
     return macho_step;
+}
+
+fn testBuildVersionMacOS(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-build-version-macos", "");
+
+    {
+        const obj = cc(b, opts);
+        obj.addEmptyMain();
+        obj.addArg("-c");
+
+        const exe = ld(b, opts);
+        exe.addFileSource(obj.out);
+        exe.addArgs(&.{ "-syslibroot", opts.macos_sdk.path });
+
+        const check = exe.check();
+        check.checkStart();
+        check.checkExact("cmd BUILD_VERSION");
+        check.checkExact("platform MACOS");
+        check.checkExact("tool 6");
+        check.checkStart();
+        check.checkNotPresent("cmd VERSION_MIN_MACOSX");
+        test_step.dependOn(&check.step);
+    }
+
+    {
+        const obj = cc(b, opts);
+        obj.addEmptyMain();
+        obj.addArgs(&.{ "-c", "-mmacos-version-min=10.13" });
+
+        const exe = ld(b, opts);
+        exe.addFileSource(obj.out);
+        exe.addArgs(&.{
+            "-syslibroot",
+            opts.macos_sdk.path,
+            "-platform_version",
+            "macos",
+            "10.13",
+            "10.13",
+        });
+
+        const check = exe.check();
+        check.checkStart();
+        check.checkNotPresent("cmd BUILD_VERSION");
+        check.checkStart();
+        check.checkExact("cmd VERSION_MIN_MACOSX");
+        check.checkExact("version 10.13.0");
+        test_step.dependOn(&check.step);
+    }
+
+    return test_step;
+}
+
+fn testBuildVersionIOS(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-build-version-ios", "");
+
+    const ios_sdk = opts.ios_sdk orelse return skipTestStep(test_step);
+    const ios_sdk_path = ios_sdk.path;
+
+    {
+        const obj = cc(b, opts);
+        obj.addEmptyMain();
+        obj.addArgs(&.{ "-c", "-isysroot", ios_sdk_path, "--target=arm64-ios16.4" });
+
+        const exe = ld(b, opts);
+        exe.addFileSource(obj.out);
+        exe.addArgs(&.{ "-syslibroot", ios_sdk_path });
+
+        const check = exe.check();
+        check.checkStart();
+        check.checkExact("cmd BUILD_VERSION");
+        check.checkExact("platform IOS");
+        check.checkExact("tool 6");
+        check.checkStart();
+        check.checkNotPresent("cmd VERSION_MIN_IPHONEOS");
+        test_step.dependOn(&check.step);
+    }
+
+    {
+        const obj = cc(b, opts);
+        obj.addEmptyMain();
+        obj.addArgs(&.{ "-c", "-isysroot", ios_sdk_path, "--target=arm64-ios11" });
+
+        const exe = ld(b, opts);
+        exe.addFileSource(obj.out);
+        exe.addArgs(&.{ "-syslibroot", ios_sdk_path });
+
+        const check = exe.check();
+        check.checkStart();
+        check.checkNotPresent("cmd BUILD_VERSION");
+        check.checkStart();
+        check.checkExact("cmd VERSION_MIN_IPHONEOS");
+        check.checkExact("version 11.0.0");
+        test_step.dependOn(&check.step);
+    }
+
+    return test_step;
 }
 
 fn testDeadStrip(b: *Build, opts: Options) *Step {
@@ -675,10 +789,7 @@ fn testPagezeroSize(b: *Build, opts: Options) *Step {
 fn testReexportsZig(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-reexports-zig", "");
 
-    if (!opts.has_zig) {
-        skipTestStep(test_step);
-        return test_step;
-    }
+    if (!opts.has_zig) return skipTestStep(test_step);
 
     const obj = zig(b);
     obj.addZigSource(
@@ -731,7 +842,7 @@ fn testSearchStrategy(b: *Build, opts: Options) *Step {
 
     const dylib = ld(b, opts);
     dylib.addFileSource(obj_out.file);
-    dylib.addArgs(&.{ "-dylib", "-install_name", "@rpath/liba.dylib" });
+    dylib.addArgs(&.{ "-syslibroot", opts.macos_sdk.path, "-dylib", "-install_name", "@rpath/liba.dylib" });
     const dylib_out = dylib.saveOutputAs("liba.dylib");
 
     const main_c =
@@ -1025,7 +1136,7 @@ fn testUnwindInfo(b: *Build, opts: Options) *Step {
     obj2.addArgs(flags);
 
     const exe = ld(b, opts);
-    exe.addArg("-lc++");
+    exe.addArgs(&.{ "-syslibroot", opts.macos_sdk.path, "-lc++" });
     exe.addFileSource(obj.saveOutputAs("main.o").file);
     exe.addFileSource(obj1.saveOutputAs("simple_string.o").file);
     exe.addFileSource(obj2.saveOutputAs("simple_string_owner.o").file);
@@ -1045,10 +1156,7 @@ fn testUnwindInfo(b: *Build, opts: Options) *Step {
 fn testUnwindInfoNoSubsectionsArm64(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-unwind-info-no-subsections-arm64", "");
 
-    if (builtin.target.cpu.arch != .aarch64) {
-        skipTestStep(test_step);
-        return test_step;
-    }
+    if (builtin.target.cpu.arch != .aarch64) return skipTestStep(test_step);
 
     const a_o = cc(b, opts);
     a_o.addAsmSource(
@@ -1114,10 +1222,7 @@ fn testUnwindInfoNoSubsectionsArm64(b: *Build, opts: Options) *Step {
 fn testUnwindInfoNoSubsectionsX64(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-unwind-info-no-subsections-x64", "");
 
-    if (builtin.target.cpu.arch != .x86_64) {
-        skipTestStep(test_step);
-        return test_step;
-    }
+    if (builtin.target.cpu.arch != .x86_64) return skipTestStep(test_step);
 
     const a_o = cc(b, opts);
     a_o.addAsmSource(
@@ -1238,6 +1343,14 @@ fn testWeakLibrary(b: *Build, opts: Options) *Step {
     return test_step;
 }
 
+const Options = struct {
+    zld: FileSourceWithDir,
+    has_zig: bool,
+    macos_sdk: std.zig.system.darwin.Sdk,
+    ios_sdk: ?std.zig.system.darwin.Sdk,
+    cc_override: ?[]const u8,
+};
+
 fn cc(b: *Build, opts: Options) SysCmd {
     const cmd = Run.create(b, "cc");
     cmd.addArgs(&.{ opts.cc_override orelse "cc", "-fno-lto" });
@@ -1275,9 +1388,6 @@ fn ld(b: *Build, opts: Options) SysCmd {
     cmd.addArg("-o");
     const out = cmd.addOutputFileArg("a.out");
     cmd.addArgs(&.{ "-lSystem", "-lc" });
-    if (opts.sdk_path) |sdk| {
-        cmd.addArgs(&.{ "-syslibroot", sdk.path });
-    }
     return .{ .cmd = cmd, .out = out };
 }
 
@@ -1289,7 +1399,6 @@ const skipTestStep = common.skipTestStep;
 const Build = std.Build;
 const Compile = Step.Compile;
 const FileSourceWithDir = common.FileSourceWithDir;
-const Options = common.Options;
 const Run = Step.Run;
 const Step = Build.Step;
 const SysCmd = common.SysCmd;

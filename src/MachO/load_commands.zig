@@ -6,6 +6,7 @@ const mem = std.mem;
 
 const Allocator = mem.Allocator;
 const Dylib = @import("Dylib.zig");
+const MachO = @import("../MachO.zig");
 const Options = @import("../MachO.zig").Options;
 
 pub const default_dyld_path: [*:0]const u8 = "/usr/lib/dyld";
@@ -16,17 +17,12 @@ fn calcInstallNameLen(cmd_size: u64, name: []const u8, assume_max_path_len: bool
     return mem.alignForward(u64, cmd_size + name_len, @alignOf(u64));
 }
 
-const CalcLCsSizeCtx = struct {
-    segments: []const macho.segment_command_64,
-    dylibs: []const Dylib,
-    referenced_dylibs: []u16,
-    wants_function_starts: bool = true,
-};
-
-fn calcLCsSize(gpa: Allocator, options: *const Options, ctx: CalcLCsSizeCtx, assume_max_path_len: bool) !u32 {
+fn calcLCsSize(macho_file: *MachO, assume_max_path_len: bool) !u32 {
+    const gpa = macho_file.base.allocator;
+    const options = &macho_file.options;
     var has_text_segment: bool = false;
     var sizeofcmds: u64 = 0;
-    for (ctx.segments) |seg| {
+    for (macho_file.segments.items) |seg| {
         sizeofcmds += seg.nsects * @sizeOf(macho.section_64) + @sizeOf(macho.segment_command_64);
         if (mem.eql(u8, seg.segName(), "__TEXT")) {
             has_text_segment = true;
@@ -36,7 +32,7 @@ fn calcLCsSize(gpa: Allocator, options: *const Options, ctx: CalcLCsSizeCtx, ass
     // LC_DYLD_INFO_ONLY
     sizeofcmds += @sizeOf(macho.dyld_info_command);
     // LC_FUNCTION_STARTS
-    if (has_text_segment and ctx.wants_function_starts) {
+    if (has_text_segment) {
         sizeofcmds += @sizeOf(macho.linkedit_data_command);
     }
     // LC_DATA_IN_CODE
@@ -52,7 +48,7 @@ fn calcLCsSize(gpa: Allocator, options: *const Options, ctx: CalcLCsSizeCtx, ass
         false,
     );
     // LC_MAIN
-    if (options.output_mode == .exe) {
+    if (macho_file.options.output_mode == .exe) {
         sizeofcmds += @sizeOf(macho.entry_point_command);
     }
     // LC_ID_DYLIB
@@ -81,13 +77,20 @@ fn calcLCsSize(gpa: Allocator, options: *const Options, ctx: CalcLCsSizeCtx, ass
     }
     // LC_SOURCE_VERSION
     sizeofcmds += @sizeOf(macho.source_version_command);
-    // LC_BUILD_VERSION
-    sizeofcmds += @sizeOf(macho.build_version_command) + @sizeOf(macho.build_tool_version);
+    if (options.platform) |platform| {
+        if (platform.isBuildVersionCompatible()) {
+            // LC_BUILD_VERSION
+            sizeofcmds += @sizeOf(macho.build_version_command) + @sizeOf(macho.build_tool_version);
+        } else {
+            // LC_VERSION_MIN_*
+            sizeofcmds += @sizeOf(macho.version_min_command);
+        }
+    }
     // LC_UUID
     sizeofcmds += @sizeOf(macho.uuid_command);
     // LC_LOAD_DYLIB
-    for (ctx.referenced_dylibs) |id| {
-        const dylib = ctx.dylibs[id];
+    for (macho_file.referenced_dylibs.keys()) |id| {
+        const dylib = macho_file.dylibs.items[id];
         const dylib_id = dylib.id orelse unreachable;
         sizeofcmds += calcInstallNameLen(
             @sizeOf(macho.dylib_command),
@@ -96,28 +99,20 @@ fn calcLCsSize(gpa: Allocator, options: *const Options, ctx: CalcLCsSizeCtx, ass
         );
     }
     // LC_CODE_SIGNATURE
-    {
-        const target = options.target;
-        const requires_codesig = blk: {
-            if (options.entitlements) |_| break :blk true;
-            if (target.cpu_arch.? == .aarch64 and (target.os_tag.? == .macos or target.abi.? == .simulator))
-                break :blk true;
-            break :blk false;
-        };
-        if (requires_codesig) {
-            sizeofcmds += @sizeOf(macho.linkedit_data_command);
-        }
+    if (macho_file.requiresCodeSig()) {
+        sizeofcmds += @sizeOf(macho.linkedit_data_command);
     }
 
     return @as(u32, @intCast(sizeofcmds));
 }
 
-pub fn calcMinHeaderPad(gpa: Allocator, options: *const Options, ctx: CalcLCsSizeCtx) !u64 {
-    var padding: u32 = (try calcLCsSize(gpa, options, ctx, false)) + (options.headerpad orelse 0);
+pub fn calcMinHeaderPad(macho_file: *MachO) !u64 {
+    const options = &macho_file.options;
+    var padding: u32 = (try calcLCsSize(macho_file, false)) + (options.headerpad orelse 0);
     log.debug("minimum requested headerpad size 0x{x}", .{padding + @sizeOf(macho.mach_header_64)});
 
     if (options.headerpad_max_install_names) {
-        var min_headerpad_size: u32 = try calcLCsSize(gpa, options, ctx, true);
+        var min_headerpad_size: u32 = try calcLCsSize(macho_file, true);
         log.debug("headerpad_max_install_names minimum headerpad size 0x{x}", .{
             min_headerpad_size + @sizeOf(macho.mach_header_64),
         });
@@ -198,21 +193,13 @@ pub fn writeDylibIdLC(options: *const Options, lc_writer: anytype) !void {
     assert(options.output_mode == .lib);
     const emit = options.emit;
     const install_name = options.install_name orelse emit.sub_path;
-    const curr = options.current_version orelse std.SemanticVersion{
-        .major = 1,
-        .minor = 0,
-        .patch = 0,
-    };
-    const compat = options.compatibility_version orelse std.SemanticVersion{
-        .major = 1,
-        .minor = 0,
-        .patch = 0,
-    };
+    const curr = options.current_version orelse Options.Version.new(1, 0, 0);
+    const compat = options.compatibility_version orelse Options.Version.new(1, 0, 0);
     try writeDylibLC(.{
         .cmd = .ID_DYLIB,
         .name = install_name,
-        .current_version = @as(u32, @intCast(curr.major << 16 | curr.minor << 8 | curr.patch)),
-        .compatibility_version = @as(u32, @intCast(compat.major << 16 | compat.minor << 8 | compat.patch)),
+        .current_version = curr.value,
+        .compatibility_version = compat.value,
     }, lc_writer);
 }
 
@@ -265,30 +252,28 @@ pub fn writeRpathLCs(gpa: Allocator, options: *const Options, lc_writer: anytype
     }
 }
 
-pub fn writeBuildVersionLC(options: *const Options, lc_writer: anytype) !void {
+pub fn writeVersionMinLC(platform: Options.Platform, sdk_version: ?Options.Version, lc_writer: anytype) !void {
+    const cmd: macho.LC = switch (platform.platform) {
+        .MACOS => .VERSION_MIN_MACOSX,
+        .IOS, .IOSSIMULATOR => .VERSION_MIN_IPHONEOS,
+        .TVOS, .TVOSSIMULATOR => .VERSION_MIN_TVOS,
+        .WATCHOS, .WATCHOSSIMULATOR => .VERSION_MIN_WATCHOS,
+        else => unreachable,
+    };
+    try lc_writer.writeAll(mem.asBytes(&macho.version_min_command{
+        .cmd = cmd,
+        .version = platform.version.value,
+        .sdk = if (sdk_version) |ver| ver.value else platform.version.value,
+    }));
+}
+
+pub fn writeBuildVersionLC(platform: Options.Platform, sdk_version: ?Options.Version, lc_writer: anytype) !void {
     const cmdsize = @sizeOf(macho.build_version_command) + @sizeOf(macho.build_tool_version);
-    const platform_version = blk: {
-        const ver = options.platform_version;
-        const platform_version = @as(u32, @intCast(ver.major << 16 | ver.minor << 8));
-        break :blk platform_version;
-    };
-    const sdk_version = blk: {
-        const ver = options.sdk_version;
-        const sdk_version = @as(u32, @intCast(ver.major << 16 | ver.minor << 8));
-        break :blk sdk_version;
-    };
-    const is_simulator_abi = options.target.abi.? == .simulator;
     try lc_writer.writeStruct(macho.build_version_command{
         .cmdsize = cmdsize,
-        .platform = switch (options.target.os_tag.?) {
-            .macos => .MACOS,
-            .ios => if (is_simulator_abi) macho.PLATFORM.IOSSIMULATOR else macho.PLATFORM.IOS,
-            .watchos => if (is_simulator_abi) macho.PLATFORM.WATCHOSSIMULATOR else macho.PLATFORM.WATCHOS,
-            .tvos => if (is_simulator_abi) macho.PLATFORM.TVOSSIMULATOR else macho.PLATFORM.TVOS,
-            else => unreachable,
-        },
-        .minos = platform_version,
-        .sdk = sdk_version,
+        .platform = platform.platform,
+        .minos = platform.version.value,
+        .sdk = if (sdk_version) |ver| ver.value else platform.version.value,
         .ntools = 1,
     });
     try lc_writer.writeAll(mem.asBytes(&macho.build_tool_version{
