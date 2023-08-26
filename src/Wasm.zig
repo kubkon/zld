@@ -1394,6 +1394,7 @@ fn createSyntheticFunction(
         .next = .none,
         .prev = .none,
         .data = function_body.ptr,
+        .original_offset = 0,
     };
     try wasm.appendAtomAtIndex(wasm.base.allocator, wasm.code_section_index.?, atom_index);
     try wasm.symbol_atom.putNoClobber(wasm.base.allocator, loc, atom_index);
@@ -2049,7 +2050,7 @@ fn markReferences(wasm: *Wasm) !void {
         while (atom_index != .none) {
             const atom = Atom.fromIndex(wasm, atom_index);
             const atom_sym = atom.symbolLoc().getSymbol(wasm);
-            for (atom.relocs.items) |reloc| {
+            for (atom.relocs) |reloc| {
                 const target_loc: SymbolWithLoc = .{ .sym_index = reloc.index, .file = atom.file };
                 const target_sym = target_loc.getSymbol(wasm);
                 if (target_sym.isAlive()) {
@@ -2073,12 +2074,17 @@ fn mark(wasm: *Wasm, loc: SymbolWithLoc) !void {
     }
     symbol.mark();
     gc_loc.debug("Marked symbol '{s}' => ({})", .{ loc.getName(wasm), symbol });
+    if (symbol.isUndefined()) {
+        // undefined symbols do not have an associated `Atom` and therefore also
+        // do not contain relocations.
+        return;
+    }
 
     const object = &wasm.objects.items[loc.file orelse return];
     const atom_index = try Object.parseSymbolIntoAtom(object, loc.file.?, loc.sym_index, wasm);
 
     const atom = Atom.fromIndex(wasm, atom_index);
-    const relocations: []const types.Relocation = atom.relocs.items;
+    const relocations: []const types.Relocation = atom.relocs;
     for (relocations) |reloc| {
         const target_loc: SymbolWithLoc = .{ .sym_index = reloc.index, .file = loc.file };
         try wasm.mark(target_loc.finalLoc(wasm));

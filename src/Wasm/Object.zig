@@ -48,7 +48,7 @@ start: ?u32 = null,
 features: []const types.Feature = &.{},
 /// A table that maps the relocations we must perform where the key represents
 /// the section that the list of relocations applies to.
-relocations: std.AutoArrayHashMapUnmanaged(u32, []types.Relocation) = .{},
+relocations: std.AutoArrayHashMapUnmanaged(u32, []const types.Relocation) = .{},
 /// Table of symbols belonging to this Object file
 symtable: []Symbol = &.{},
 /// Extra metadata about the linking section, such as alignment of segments and their name
@@ -915,13 +915,23 @@ pub fn parseSymbolIntoAtom(object: *Object, object_index: u16, symbol_index: u32
     const tracy = trace(@src());
     defer tracy.end();
     const symbol = &object.symtable[symbol_index];
-    const relocatable_tag: RelocatableData.Tag = switch (symbol.tag) {
-        .function => .code,
-        .data => .data,
-        .section => .debug,
+    const relocatable_data: RelocatableData = switch (symbol.tag) {
+        .function => object.relocatable_data.get(.code).?[symbol.index - object.importedCountByKind(.function)],
+        .data => object.relocatable_data.get(.data).?[symbol.index],
+        .section => blk: {
+            // TODO: Come up with a better datastructure so we
+            // can easily retrieve debug sections. Though, this only
+            // occurs maximum 7 times per Object file, so may not be worth it.
+            const data = object.relocatable_data.get(.debug).?;
+            for (data) |dat| {
+                if (dat.section_index == symbol.index) {
+                    break :blk dat;
+                }
+            }
+            unreachable;
+        },
         else => unreachable,
     };
-    const relocatable_data: RelocatableData = object.relocatable_data.get(relocatable_tag).?[symbol.index];
     const final_index = try wasm_bin.getMatchingSegment(wasm_bin.base.allocator, object_index, symbol_index);
     const atom_index = try wasm_bin.createAtom();
     try wasm_bin.appendAtomAtIndex(wasm_bin.base.allocator, final_index, atom_index);
@@ -932,6 +942,7 @@ pub fn parseSymbolIntoAtom(object: *Object, object_index: u16, symbol_index: u32
     atom.size = relocatable_data.size;
     atom.alignment = relocatable_data.getAlignment(object);
     atom.data = relocatable_data.data;
+    atom.original_offset = relocatable_data.offset;
     try wasm_bin.symbol_atom.putNoClobber(wasm_bin.base.allocator, atom.symbolLoc(), atom_index);
     const segment: *Wasm.Segment = &wasm_bin.segments.items[final_index];
     if (relocatable_data.type == .data) { //code section and debug sections are 1-byte aligned
@@ -941,9 +952,8 @@ pub fn parseSymbolIntoAtom(object: *Object, object_index: u16, symbol_index: u32
     if (object.relocations.get(relocatable_data.section_index)) |relocations| {
         const start = searchRelocStart(relocations, relocatable_data.offset);
         const len = searchRelocEnd(relocations[start..], relocatable_data.offset + atom.size);
-        atom.relocs = std.ArrayListUnmanaged(types.Relocation).fromOwnedSlice(relocations[start..][0..len]);
-        for (atom.relocs.items) |*reloc| {
-            reloc.offset -= relocatable_data.offset;
+        atom.relocs = relocations[start..][0..len];
+        for (atom.relocs) |*reloc| {
             switch (reloc.relocation_type) {
                 .R_WASM_TABLE_INDEX_I32,
                 .R_WASM_TABLE_INDEX_I64,

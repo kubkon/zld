@@ -22,7 +22,7 @@ file: ?u16,
 /// Size of the atom, used to calculate section sizes in the final binary
 size: u32,
 /// List of relocations belonging to this atom
-relocs: std.ArrayListUnmanaged(types.Relocation) = .{},
+relocs: []const types.Relocation = &.{},
 /// Contains the binary data of an atom, which can be non-relocated
 data: [*]u8,
 /// For code this is 1, for data this is set to the highest value of all segments
@@ -30,6 +30,9 @@ alignment: u32,
 /// Offset into the section where the atom lives, this already accounts
 /// for alignment.
 offset: u32,
+/// The original offset within the object file. This value is substracted from
+/// relocation offsets to determine where in the `data` to rewrite the value
+original_offset: u32,
 
 /// Next atom in relation to this atom.
 /// When null, this atom is the last atom
@@ -48,6 +51,7 @@ pub const empty: Atom = .{
     .size = 0,
     .sym_index = undefined,
     .data = undefined,
+    .original_offset = 0,
 };
 
 /// Returns an `Atom` from a given index. Asserts index is not `none`.
@@ -95,9 +99,9 @@ pub fn symbolLoc(atom: *const Atom) Wasm.SymbolWithLoc {
 /// Resolves the relocations within the atom, writing the new value
 /// at the calculated offset.
 pub fn resolveRelocs(atom: *Atom, wasm_bin: *const Wasm) void {
-    if (atom.relocs.items.len == 0) return;
+    if (atom.relocs.len == 0) return;
 
-    for (atom.relocs.items) |reloc| {
+    for (atom.relocs) |reloc| {
         const value = atom.relocationValue(reloc, wasm_bin);
         switch (reloc.relocation_type) {
             .R_WASM_TABLE_INDEX_I32,
@@ -105,10 +109,10 @@ pub fn resolveRelocs(atom: *Atom, wasm_bin: *const Wasm) void {
             .R_WASM_GLOBAL_INDEX_I32,
             .R_WASM_MEMORY_ADDR_I32,
             .R_WASM_SECTION_OFFSET_I32,
-            => std.mem.writeIntLittle(u32, atom.data[reloc.offset..][0..4], @as(u32, @truncate(value))),
+            => std.mem.writeIntLittle(u32, atom.data[reloc.offset - atom.original_offset ..][0..4], @as(u32, @truncate(value))),
             .R_WASM_TABLE_INDEX_I64,
             .R_WASM_MEMORY_ADDR_I64,
-            => std.mem.writeIntLittle(u64, atom.data[reloc.offset..][0..8], value),
+            => std.mem.writeIntLittle(u64, atom.data[reloc.offset - atom.original_offset ..][0..8], value),
             .R_WASM_GLOBAL_INDEX_LEB,
             .R_WASM_EVENT_INDEX_LEB,
             .R_WASM_FUNCTION_INDEX_LEB,
@@ -118,12 +122,12 @@ pub fn resolveRelocs(atom: *Atom, wasm_bin: *const Wasm) void {
             .R_WASM_TABLE_NUMBER_LEB,
             .R_WASM_TYPE_INDEX_LEB,
             .R_WASM_MEMORY_ADDR_TLS_SLEB,
-            => leb.writeUnsignedFixed(5, atom.data[reloc.offset..][0..5], @as(u32, @truncate(value))),
+            => leb.writeUnsignedFixed(5, atom.data[reloc.offset - atom.original_offset ..][0..5], @as(u32, @truncate(value))),
             .R_WASM_MEMORY_ADDR_LEB64,
             .R_WASM_MEMORY_ADDR_SLEB64,
             .R_WASM_TABLE_INDEX_SLEB64,
             .R_WASM_MEMORY_ADDR_TLS_SLEB64,
-            => leb.writeUnsignedFixed(10, atom.data[reloc.offset..][0..10], value),
+            => leb.writeUnsignedFixed(10, atom.data[reloc.offset - atom.original_offset ..][0..10], value),
         }
     }
 }
