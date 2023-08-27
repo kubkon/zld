@@ -423,11 +423,7 @@ pub fn flush(wasm: *Wasm) !void {
     try wasm.setupInitFunctions();
     try wasm.setupStart();
 
-    for (wasm.objects.items, 0..) |*object, obj_idx| {
-        try object.parseIntoAtoms(@as(u16, @intCast(obj_idx)), wasm);
-    }
-
-    wasm.markReferences();
+    try wasm.markReferences();
     try wasm.mergeImports();
 
     try wasm.allocateAtoms();
@@ -1100,7 +1096,7 @@ fn setupInitFunctions(wasm: *Wasm) !void {
                 .file = @as(u16, @intCast(file_index)),
                 .priority = init_func.priority,
             });
-            wasm.mark(.{ .sym_index = init_func.symbol_index, .file = @intCast(file_index) });
+            try wasm.mark(.{ .sym_index = init_func.symbol_index, .file = @intCast(file_index) });
         }
     }
 
@@ -1114,7 +1110,7 @@ fn setupInitFunctions(wasm: *Wasm) !void {
 
     if (wasm.init_funcs.items.len > 0) {
         const loc = wasm.findGlobalSymbol("__wasm_call_ctors").?;
-        wasm.mark(loc);
+        try wasm.mark(loc);
     }
 }
 
@@ -1398,6 +1394,7 @@ fn createSyntheticFunction(
         .next = .none,
         .prev = .none,
         .data = function_body.ptr,
+        .original_offset = 0,
     };
     try wasm.appendAtomAtIndex(wasm.base.allocator, wasm.code_section_index.?, atom_index);
     try wasm.symbol_atom.putNoClobber(wasm.base.allocator, loc, atom_index);
@@ -1666,14 +1663,14 @@ fn allocateVirtualAddresses(wasm: *Wasm) void {
 /// From a given object's index and the index of the segment, returns the corresponding
 /// index of the segment within the final data section. When the segment does not yet
 /// exist, a new one will be initialized and appended. The new index will be returned in that case.
-pub fn getMatchingSegment(wasm: *Wasm, gpa: Allocator, object_index: u16, relocatable_index: u32) !?u32 {
+pub fn getMatchingSegment(wasm: *Wasm, gpa: Allocator, object_index: u16, symbol_index: u32) !u32 {
     const object: Object = wasm.objects.items[object_index];
-    const relocatable_data = object.relocatable_data[relocatable_index];
+    const symbol = object.symtable[symbol_index];
     const index = @as(u32, @intCast(wasm.segments.items.len));
 
-    switch (relocatable_data.type) {
+    switch (symbol.tag) {
         .data => {
-            const segment_info = object.segment_info[relocatable_data.index];
+            const segment_info = object.segment_info[symbol.index];
             const segment_name = segment_info.outputName(wasm.options.merge_data_segments);
             const result = try wasm.data_segments.getOrPut(gpa, segment_name);
             if (!result.found_existing) {
@@ -1691,67 +1688,67 @@ pub fn getMatchingSegment(wasm: *Wasm, gpa: Allocator, object_index: u16, reloca
                 return index;
             } else return result.value_ptr.*;
         },
-        .code => return wasm.code_section_index orelse blk: {
+        .function => return wasm.code_section_index orelse blk: {
             wasm.code_section_index = index;
             try wasm.appendDummySegment(gpa);
             break :blk index;
         },
-        .debug => {
-            const debug_name = object.getDebugName(relocatable_data);
-            if (mem.eql(u8, debug_name, ".debug_info")) {
+        .section => {
+            const section_name = object.string_table.get(symbol.name);
+            if (mem.eql(u8, section_name, ".debug_info")) {
                 return wasm.debug_info_index orelse blk: {
                     wasm.debug_info_index = index;
                     try wasm.appendDummySegment(gpa);
                     break :blk index;
                 };
-            } else if (mem.eql(u8, debug_name, ".debug_line")) {
+            } else if (mem.eql(u8, section_name, ".debug_line")) {
                 return wasm.debug_line_index orelse blk: {
                     wasm.debug_line_index = index;
                     try wasm.appendDummySegment(gpa);
                     break :blk index;
                 };
-            } else if (mem.eql(u8, debug_name, ".debug_loc")) {
+            } else if (mem.eql(u8, section_name, ".debug_loc")) {
                 return wasm.debug_loc_index orelse blk: {
                     wasm.debug_loc_index = index;
                     try wasm.appendDummySegment(gpa);
                     break :blk index;
                 };
-            } else if (mem.eql(u8, debug_name, ".debug_ranges")) {
+            } else if (mem.eql(u8, section_name, ".debug_ranges")) {
                 return wasm.debug_line_index orelse blk: {
                     wasm.debug_ranges_index = index;
                     try wasm.appendDummySegment(gpa);
                     break :blk index;
                 };
-            } else if (mem.eql(u8, debug_name, ".debug_pubnames")) {
+            } else if (mem.eql(u8, section_name, ".debug_pubnames")) {
                 return wasm.debug_pubnames_index orelse blk: {
                     wasm.debug_pubnames_index = index;
                     try wasm.appendDummySegment(gpa);
                     break :blk index;
                 };
-            } else if (mem.eql(u8, debug_name, ".debug_pubtypes")) {
+            } else if (mem.eql(u8, section_name, ".debug_pubtypes")) {
                 return wasm.debug_pubtypes_index orelse blk: {
                     wasm.debug_pubtypes_index = index;
                     try wasm.appendDummySegment(gpa);
                     break :blk index;
                 };
-            } else if (mem.eql(u8, debug_name, ".debug_abbrev")) {
+            } else if (mem.eql(u8, section_name, ".debug_abbrev")) {
                 return wasm.debug_abbrev_index orelse blk: {
                     wasm.debug_abbrev_index = index;
                     try wasm.appendDummySegment(gpa);
                     break :blk index;
                 };
-            } else if (mem.eql(u8, debug_name, ".debug_str")) {
+            } else if (mem.eql(u8, section_name, ".debug_str")) {
                 return wasm.debug_str_index orelse blk: {
                     wasm.debug_str_index = index;
                     try wasm.appendDummySegment(gpa);
                     break :blk index;
                 };
             } else {
-                log.warn("found unknown debug section '{s}'", .{debug_name});
-                log.warn("  debug section will be skipped", .{});
-                return null;
+                log.err("found unknown section '{s}'", .{section_name});
+                return error.UnknownSection;
             }
         },
+        else => unreachable,
     }
 }
 
@@ -2024,13 +2021,13 @@ pub fn getULEB128Size(uint_value: anytype) u32 {
 
 /// Verifies all resolved symbols and checks whether itself needs to be marked alive,
 /// as well as any of its references.
-fn markReferences(wasm: *Wasm) void {
+fn markReferences(wasm: *Wasm) !void {
     const tracy = trace(@src());
     defer tracy.end();
     for (wasm.resolved_symbols.keys()) |sym_loc| {
         const sym = sym_loc.getSymbol(wasm);
         if (sym.isExported(wasm.options.export_dynamic) or sym.isNoStrip()) {
-            wasm.mark(sym_loc);
+            try wasm.mark(sym_loc);
         }
     }
 
@@ -2053,7 +2050,7 @@ fn markReferences(wasm: *Wasm) void {
         while (atom_index != .none) {
             const atom = Atom.fromIndex(wasm, atom_index);
             const atom_sym = atom.symbolLoc().getSymbol(wasm);
-            for (atom.relocs.items) |reloc| {
+            for (atom.relocs) |reloc| {
                 const target_loc: SymbolWithLoc = .{ .sym_index = reloc.index, .file = atom.file };
                 const target_sym = target_loc.getSymbol(wasm);
                 if (target_sym.isAlive()) {
@@ -2067,7 +2064,7 @@ fn markReferences(wasm: *Wasm) void {
 
 /// Marks a symbol as 'alive' recursively so itself and any references it contains to
 /// other symbols will not be omit from the binary.
-fn mark(wasm: *Wasm, loc: SymbolWithLoc) void {
+fn mark(wasm: *Wasm, loc: SymbolWithLoc) !void {
     const symbol = loc.getSymbol(wasm);
     if (symbol.isAlive()) {
         // Symbol is already marked alive, including its references.
@@ -2077,13 +2074,19 @@ fn mark(wasm: *Wasm, loc: SymbolWithLoc) void {
     }
     symbol.mark();
     gc_loc.debug("Marked symbol '{s}' => ({})", .{ loc.getName(wasm), symbol });
+    if (symbol.isUndefined()) {
+        // undefined symbols do not have an associated `Atom` and therefore also
+        // do not contain relocations.
+        return;
+    }
 
-    if (wasm.symbol_atom.get(loc)) |atom_index| {
-        const atom = Atom.fromIndex(wasm, atom_index);
-        const relocations: []const types.Relocation = atom.relocs.items;
-        for (relocations) |reloc| {
-            const target_loc: SymbolWithLoc = .{ .sym_index = reloc.index, .file = loc.file };
-            wasm.mark(target_loc.finalLoc(wasm));
-        }
+    const object = &wasm.objects.items[loc.file orelse return];
+    const atom_index = try Object.parseSymbolIntoAtom(object, loc.file.?, loc.sym_index, wasm);
+
+    const atom = Atom.fromIndex(wasm, atom_index);
+    const relocations: []const types.Relocation = atom.relocs;
+    for (relocations) |reloc| {
+        const target_loc: SymbolWithLoc = .{ .sym_index = reloc.index, .file = loc.file };
+        try wasm.mark(target_loc.finalLoc(wasm));
     }
 }
