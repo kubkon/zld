@@ -223,7 +223,7 @@ pub fn write(macho_file: *MachO, unwind_info: *UnwindInfo) !void {
     const writer = buffer.writer();
 
     for (eh_records.values()) |record| {
-        try writer.writeIntLittle(u32, record.size);
+        try writer.writeInt(u32, record.size, .little);
         try buffer.appendSlice(record.data);
     }
 
@@ -273,7 +273,7 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
             base_offset: u64,
         }) u64 {
             assert(rec.tag == .fde);
-            const addend = mem.readIntLittle(i64, rec.data[4..][0..8]);
+            const addend = mem.readInt(i64, rec.data[4..][0..8], .little);
             return @as(u64, @intCast(@as(i64, @intCast(ctx.base_addr + ctx.base_offset + 8)) + addend));
         }
 
@@ -283,7 +283,7 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
         }) !void {
             assert(rec.tag == .fde);
             const addend = @as(i64, @intCast(value)) - @as(i64, @intCast(ctx.base_addr + ctx.base_offset + 8));
-            mem.writeIntLittle(i64, rec.data[4..][0..8], addend);
+            mem.writeInt(i64, rec.data[4..][0..8], addend, .little);
         }
 
         pub fn getPersonalityPointerReloc(
@@ -357,13 +357,13 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
                                 const target_addr = try Atom.getRelocTargetAddress(macho_file, target, true, false);
                                 const result = math.cast(i32, @as(i64, @intCast(target_addr)) - @as(i64, @intCast(source_addr))) orelse
                                     return error.Overflow;
-                                mem.writeIntLittle(i32, rec.data[rel_offset..][0..4], result);
+                                mem.writeInt(i32, rec.data[rel_offset..][0..4], result, .little);
                             },
                             .ARM64_RELOC_UNSIGNED => {
                                 assert(rel.r_extern == 1);
                                 const target_addr = try Atom.getRelocTargetAddress(macho_file, target, false, false);
                                 const result = @as(i64, @intCast(target_addr)) - @as(i64, @intCast(source_addr));
-                                mem.writeIntLittle(i64, rec.data[rel_offset..][0..8], @as(i64, @intCast(result)));
+                                mem.writeInt(i64, rec.data[rel_offset..][0..8], @as(i64, @intCast(result)), .little);
                             },
                             else => unreachable,
                         }
@@ -373,10 +373,10 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
                         switch (rel_type) {
                             .X86_64_RELOC_GOT => {
                                 const target_addr = try Atom.getRelocTargetAddress(macho_file, target, true, false);
-                                const addend = mem.readIntLittle(i32, rec.data[rel_offset..][0..4]);
+                                const addend = mem.readInt(i32, rec.data[rel_offset..][0..4], .little);
                                 const adjusted_target_addr = @as(u64, @intCast(@as(i64, @intCast(target_addr)) + addend));
                                 const disp = try Atom.calcPcRelativeDisplacementX86(source_addr, adjusted_target_addr, 0);
-                                mem.writeIntLittle(i32, rec.data[rel_offset..][0..4], disp);
+                                mem.writeInt(i32, rec.data[rel_offset..][0..4], disp, .little);
                             },
                             else => unreachable,
                         }
@@ -389,7 +389,7 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
         pub fn getCiePointerSource(rec: Record, object_id: u32, macho_file: *MachO, offset: u32) u32 {
             assert(rec.tag == .fde);
             const cpu_arch = macho_file.options.cpu_arch.?;
-            const addend = mem.readIntLittle(u32, rec.data[0..4]);
+            const addend = mem.readInt(u32, rec.data[0..4], .little);
             switch (cpu_arch) {
                 .aarch64 => {
                     const relocs = getRelocs(macho_file, object_id, offset);
@@ -411,12 +411,12 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
 
         pub fn getCiePointer(rec: Record) u32 {
             assert(rec.tag == .fde);
-            return mem.readIntLittle(u32, rec.data[0..4]);
+            return mem.readInt(u32, rec.data[0..4], .little);
         }
 
         pub fn setCiePointer(rec: *Record, ptr: u32) void {
             assert(rec.tag == .fde);
-            mem.writeIntLittle(u32, rec.data[0..4], ptr);
+            mem.writeInt(u32, rec.data[0..4], ptr, .little);
         }
 
         pub fn getAugmentationString(rec: Record) []const u8 {
@@ -523,14 +523,14 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
             if (enc == EH_PE.omit) return null;
 
             var ptr: i64 = switch (enc & 0x0F) {
-                EH_PE.absptr => @as(i64, @bitCast(try reader.readIntLittle(u64))),
-                EH_PE.udata2 => @as(i16, @bitCast(try reader.readIntLittle(u16))),
-                EH_PE.udata4 => @as(i32, @bitCast(try reader.readIntLittle(u32))),
-                EH_PE.udata8 => @as(i64, @bitCast(try reader.readIntLittle(u64))),
+                EH_PE.absptr => @as(i64, @bitCast(try reader.readInt(u64, .little))),
+                EH_PE.udata2 => @as(i16, @bitCast(try reader.readInt(u16, .little))),
+                EH_PE.udata4 => @as(i32, @bitCast(try reader.readInt(u32, .little))),
+                EH_PE.udata8 => @as(i64, @bitCast(try reader.readInt(u64, .little))),
                 EH_PE.uleb128 => @as(i64, @bitCast(try leb.readULEB128(u64, reader))),
-                EH_PE.sdata2 => try reader.readIntLittle(i16),
-                EH_PE.sdata4 => try reader.readIntLittle(i32),
-                EH_PE.sdata8 => try reader.readIntLittle(i64),
+                EH_PE.sdata2 => try reader.readInt(i16, .little),
+                EH_PE.sdata4 => try reader.readInt(i32, .little),
+                EH_PE.sdata8 => try reader.readInt(i64, .little),
                 EH_PE.sleb128 => try leb.readILEB128(i64, reader),
                 else => return null,
             };
@@ -566,14 +566,14 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
             }
 
             switch (enc & 0x0F) {
-                EH_PE.absptr => try writer.writeIntLittle(u64, @as(u64, @bitCast(actual))),
-                EH_PE.udata2 => try writer.writeIntLittle(u16, @as(u16, @bitCast(@as(i16, @intCast(actual))))),
-                EH_PE.udata4 => try writer.writeIntLittle(u32, @as(u32, @bitCast(@as(i32, @intCast(actual))))),
-                EH_PE.udata8 => try writer.writeIntLittle(u64, @as(u64, @bitCast(actual))),
+                EH_PE.absptr => try writer.writeInt(u64, @as(u64, @bitCast(actual)), .little),
+                EH_PE.udata2 => try writer.writeInt(u16, @as(u16, @bitCast(@as(i16, @intCast(actual)))), .little),
+                EH_PE.udata4 => try writer.writeInt(u32, @as(u32, @bitCast(@as(i32, @intCast(actual)))), .little),
+                EH_PE.udata8 => try writer.writeInt(u64, @as(u64, @bitCast(actual)), .little),
                 EH_PE.uleb128 => try leb.writeULEB128(writer, @as(u64, @bitCast(actual))),
-                EH_PE.sdata2 => try writer.writeIntLittle(i16, @as(i16, @intCast(actual))),
-                EH_PE.sdata4 => try writer.writeIntLittle(i32, @as(i32, @intCast(actual))),
-                EH_PE.sdata8 => try writer.writeIntLittle(i64, actual),
+                EH_PE.sdata2 => try writer.writeInt(i16, @as(i16, @intCast(actual)), .little),
+                EH_PE.sdata4 => try writer.writeInt(i32, @as(i32, @intCast(actual)), .little),
+                EH_PE.sdata8 => try writer.writeInt(i64, actual, .little),
                 EH_PE.sleb128 => try leb.writeILEB128(writer, actual),
                 else => unreachable,
             }
@@ -600,13 +600,13 @@ pub const Iterator = struct {
         var stream = std.io.fixedBufferStream(it.data[it.pos..]);
         const reader = stream.reader();
 
-        var size = try reader.readIntLittle(u32);
+        var size = try reader.readInt(u32, .little);
         if (size == 0xFFFFFFFF) {
             macho_file.base.fatal("MachO doesn't support 64bit DWARF CFI __eh_frame records", .{});
             return null;
         }
 
-        const id = try reader.readIntLittle(u32);
+        const id = try reader.readInt(u32, .little);
         const tag: EhFrameRecordTag = if (id == 0) .cie else .fde;
         const offset: u32 = 4;
         const record = EhFrameRecord(false){

@@ -557,52 +557,52 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
 
             elf.R_X86_64_PLT32,
             elf.R_X86_64_PC32,
-            => try cwriter.writeIntLittle(i32, @as(i32, @intCast(S + A - P))),
+            => try cwriter.writeInt(i32, @as(i32, @intCast(S + A - P)), .little),
 
-            elf.R_X86_64_GOTPCREL => try cwriter.writeIntLittle(i32, @as(i32, @intCast(G + GOT + A - P))),
-            elf.R_X86_64_GOTPC32 => try cwriter.writeIntLittle(i32, @as(i32, @intCast(GOT + A - P))),
-            elf.R_X86_64_GOTPC64 => try cwriter.writeIntLittle(i64, GOT + A - P),
+            elf.R_X86_64_GOTPCREL => try cwriter.writeInt(i32, @as(i32, @intCast(G + GOT + A - P)), .little),
+            elf.R_X86_64_GOTPC32 => try cwriter.writeInt(i32, @as(i32, @intCast(GOT + A - P)), .little),
+            elf.R_X86_64_GOTPC64 => try cwriter.writeInt(i64, GOT + A - P, .little),
 
             elf.R_X86_64_GOTPCRELX => {
                 if (!target.flags.import and !target.isIFunc(elf_file) and !target.isAbs(elf_file)) blk: {
                     relaxGotpcrelx(code[rel.r_offset - 2 ..]) catch break :blk;
-                    try cwriter.writeIntLittle(i32, @as(i32, @intCast(S + A - P)));
+                    try cwriter.writeInt(i32, @as(i32, @intCast(S + A - P)), .little);
                     continue;
                 }
-                try cwriter.writeIntLittle(i32, @as(i32, @intCast(G + GOT + A - P)));
+                try cwriter.writeInt(i32, @as(i32, @intCast(G + GOT + A - P)), .little);
             },
 
             elf.R_X86_64_REX_GOTPCRELX => {
                 if (!target.flags.import and !target.isIFunc(elf_file) and !target.isAbs(elf_file)) blk: {
                     relaxRexGotpcrelx(code[rel.r_offset - 3 ..]) catch break :blk;
-                    try cwriter.writeIntLittle(i32, @as(i32, @intCast(S + A - P)));
+                    try cwriter.writeInt(i32, @as(i32, @intCast(S + A - P)), .little);
                     continue;
                 }
-                try cwriter.writeIntLittle(i32, @as(i32, @intCast(G + GOT + A - P)));
+                try cwriter.writeInt(i32, @as(i32, @intCast(G + GOT + A - P)), .little);
             },
 
-            elf.R_X86_64_32 => try cwriter.writeIntLittle(u32, @as(u32, @truncate(@as(u64, @intCast(S + A))))),
-            elf.R_X86_64_32S => try cwriter.writeIntLittle(i32, @as(i32, @truncate(S + A))),
+            elf.R_X86_64_32 => try cwriter.writeInt(u32, @as(u32, @truncate(@as(u64, @intCast(S + A)))), .little),
+            elf.R_X86_64_32S => try cwriter.writeInt(i32, @as(i32, @truncate(S + A)), .little),
 
-            elf.R_X86_64_TPOFF32 => try cwriter.writeIntLittle(i32, @as(i32, @truncate(S + A - TP))),
-            elf.R_X86_64_TPOFF64 => try cwriter.writeIntLittle(i64, S + A - TP),
-            elf.R_X86_64_DTPOFF32 => try cwriter.writeIntLittle(i32, @as(i32, @truncate(S + A - DTP))),
-            elf.R_X86_64_DTPOFF64 => try cwriter.writeIntLittle(i64, S + A - DTP),
+            elf.R_X86_64_TPOFF32 => try cwriter.writeInt(i32, @as(i32, @truncate(S + A - TP)), .little),
+            elf.R_X86_64_TPOFF64 => try cwriter.writeInt(i64, S + A - TP, .little),
+            elf.R_X86_64_DTPOFF32 => try cwriter.writeInt(i32, @as(i32, @truncate(S + A - DTP)), .little),
+            elf.R_X86_64_DTPOFF64 => try cwriter.writeInt(i64, S + A - DTP, .little),
 
             elf.R_X86_64_GOTTPOFF => {
                 if (target.flags.gottp) {
                     const S_ = @as(i64, @intCast(target.getGotTpAddress(elf_file)));
-                    try cwriter.writeIntLittle(i32, @as(i32, @intCast(S_ + A - P)));
+                    try cwriter.writeInt(i32, @as(i32, @intCast(S_ + A - P)), .little);
                 } else {
                     try relaxGotTpOff(code[rel.r_offset - 3 ..]);
-                    try cwriter.writeIntLittle(i32, @as(i32, @intCast(S - TP)));
+                    try cwriter.writeInt(i32, @as(i32, @intCast(S - TP)), .little);
                 }
             },
 
             elf.R_X86_64_TLSGD => {
                 if (target.flags.tlsgd) {
                     const S_ = @as(i64, @intCast(target.getTlsGdAddress(elf_file)));
-                    try cwriter.writeIntLittle(i32, @as(i32, @intCast(S_ + A - P)));
+                    try cwriter.writeInt(i32, @as(i32, @intCast(S_ + A - P)), .little);
                 } else if (target.flags.gottp) {
                     const S_ = @as(i64, @intCast(target.getGotTpAddress(elf_file)));
                     try relaxTlsGdToIe(relocs[i .. i + 2], @intCast(S_ - P), elf_file, &stream);
@@ -616,7 +616,7 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
             elf.R_X86_64_TLSLD => {
                 if (elf_file.got.emit_tlsld) {
                     const S_ = @as(i64, @intCast(elf_file.getTlsLdAddress()));
-                    try cwriter.writeIntLittle(i32, @as(i32, @intCast(S_ + A - P)));
+                    try cwriter.writeInt(i32, @as(i32, @intCast(S_ + A - P)), .little);
                 } else {
                     try relaxTlsLdToLe(
                         relocs[i .. i + 2],
@@ -631,10 +631,10 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
             elf.R_X86_64_GOTPC32_TLSDESC => {
                 if (target.flags.tlsdesc) {
                     const S_ = @as(i64, @intCast(target.getTlsDescAddress(elf_file)));
-                    try cwriter.writeIntLittle(i32, @as(i32, @intCast(S_ + A - P)));
+                    try cwriter.writeInt(i32, @as(i32, @intCast(S_ + A - P)), .little);
                 } else {
                     try relaxGotPcTlsDesc(code[rel.r_offset - 3 ..]);
-                    try cwriter.writeIntLittle(i32, @as(i32, @intCast(S - TP)));
+                    try cwriter.writeInt(i32, @as(i32, @intCast(S - TP)), .little);
                 }
             },
 
@@ -674,7 +674,7 @@ fn resolveDynAbsReloc(
         .copyrel,
         .cplt,
         .none,
-        => try writer.writeIntLittle(i32, @as(i32, @truncate(S + A))),
+        => try writer.writeInt(i32, @as(i32, @truncate(S + A)), .little),
 
         .dyn_copyrel => {
             if (is_writeable or elf_file.options.z_nocopyreloc) {
@@ -686,7 +686,7 @@ fn resolveDynAbsReloc(
                 });
                 try applyDynamicReloc(A, elf_file, writer);
             } else {
-                try writer.writeIntLittle(i32, @as(i32, @truncate(S + A)));
+                try writer.writeInt(i32, @as(i32, @truncate(S + A)), .little);
             }
         },
 
@@ -700,7 +700,7 @@ fn resolveDynAbsReloc(
                 });
                 try applyDynamicReloc(A, elf_file, writer);
             } else {
-                try writer.writeIntLittle(i32, @as(i32, @truncate(S + A)));
+                try writer.writeInt(i32, @as(i32, @truncate(S + A)), .little);
             }
         },
 
@@ -737,7 +737,7 @@ fn resolveDynAbsReloc(
 
 inline fn applyDynamicReloc(value: i64, elf_file: *Elf, writer: anytype) !void {
     if (elf_file.options.apply_dynamic_relocs) {
-        try writer.writeIntLittle(i64, value);
+        try writer.writeInt(i64, value, .little);
     }
 }
 
@@ -792,22 +792,22 @@ pub fn resolveRelocsNonAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void 
 
         switch (r_type) {
             elf.R_X86_64_NONE => unreachable,
-            elf.R_X86_64_8 => try cwriter.writeIntLittle(u8, @as(u8, @bitCast(@as(i8, @intCast(S + A))))),
-            elf.R_X86_64_16 => try cwriter.writeIntLittle(u16, @as(u16, @bitCast(@as(i16, @intCast(S + A))))),
-            elf.R_X86_64_32 => try cwriter.writeIntLittle(u32, @as(u32, @bitCast(@as(i32, @intCast(S + A))))),
-            elf.R_X86_64_32S => try cwriter.writeIntLittle(i32, @as(i32, @intCast(S + A))),
-            elf.R_X86_64_64 => try cwriter.writeIntLittle(i64, S + A),
-            elf.R_X86_64_DTPOFF32 => try cwriter.writeIntLittle(i32, @as(i32, @intCast(S + A - DTP))),
-            elf.R_X86_64_DTPOFF64 => try cwriter.writeIntLittle(i64, S + A - DTP),
-            elf.R_X86_64_GOTOFF64 => try cwriter.writeIntLittle(i64, S + A - GOT),
-            elf.R_X86_64_GOTPC64 => try cwriter.writeIntLittle(i64, GOT + A),
+            elf.R_X86_64_8 => try cwriter.writeInt(u8, @as(u8, @bitCast(@as(i8, @intCast(S + A)))), .little),
+            elf.R_X86_64_16 => try cwriter.writeInt(u16, @as(u16, @bitCast(@as(i16, @intCast(S + A)))), .little),
+            elf.R_X86_64_32 => try cwriter.writeInt(u32, @as(u32, @bitCast(@as(i32, @intCast(S + A)))), .little),
+            elf.R_X86_64_32S => try cwriter.writeInt(i32, @as(i32, @intCast(S + A)), .little),
+            elf.R_X86_64_64 => try cwriter.writeInt(i64, S + A, .little),
+            elf.R_X86_64_DTPOFF32 => try cwriter.writeInt(i32, @as(i32, @intCast(S + A - DTP)), .little),
+            elf.R_X86_64_DTPOFF64 => try cwriter.writeInt(i64, S + A - DTP, .little),
+            elf.R_X86_64_GOTOFF64 => try cwriter.writeInt(i64, S + A - GOT, .little),
+            elf.R_X86_64_GOTPC64 => try cwriter.writeInt(i64, GOT + A, .little),
             elf.R_X86_64_SIZE32 => {
                 const size = @as(i64, @intCast(target.getSourceSymbol(elf_file).st_size));
-                try cwriter.writeIntLittle(u32, @as(u32, @bitCast(@as(i32, @intCast(size + A)))));
+                try cwriter.writeInt(u32, @as(u32, @bitCast(@as(i32, @intCast(size + A)))), .little);
             },
             elf.R_X86_64_SIZE64 => {
                 const size = @as(i64, @intCast(target.getSourceSymbol(elf_file).st_size));
-                try cwriter.writeIntLittle(i64, @as(i64, @intCast(size + A)));
+                try cwriter.writeInt(i64, @as(i64, @intCast(size + A)), .little);
             },
             else => elf_file.base.fatal("{s}: invalid relocation type for non-alloc section: {}", .{
                 self.getName(elf_file),
@@ -860,7 +860,7 @@ fn relaxTlsGdToIe(rels: []align(1) const elf.Elf64_Rela, value: i32, elf_file: *
                 0x64, 0x48, 0x8b, 0x04, 0x25, 0, 0, 0, 0, // movq %fs:0,%rax
                 0x48, 0x03, 0x05, 0, 0, 0, 0, // add foo@gottpoff(%rip), %rax
             };
-            mem.writeIntLittle(i32, insts[12..][0..4], value - 12);
+            mem.writeInt(i32, insts[12..][0..4], value - 12, .little);
             try stream.seekBy(-4);
             try writer.writeAll(&insts);
         },
@@ -885,7 +885,7 @@ fn relaxTlsGdToLe(rels: []align(1) const elf.Elf64_Rela, value: i32, elf_file: *
                 0x64, 0x48, 0x8b, 0x04, 0x25, 0, 0, 0, 0, // movq %fs:0,%rax
                 0x48, 0x81, 0xc0, 0, 0, 0, 0, // add $tp_offset, %rax
             };
-            mem.writeIntLittle(i32, insts[12..][0..4], value);
+            mem.writeInt(i32, insts[12..][0..4], value, .little);
             try stream.seekBy(-4);
             try writer.writeAll(&insts);
         },
@@ -909,7 +909,7 @@ fn relaxTlsLdToLe(rels: []align(1) const elf.Elf64_Rela, value: i32, elf_file: *
                 0x64, 0x48, 0x8b, 0, // mov %fs:(%rax), %rax
                 0x48, 0x2d, 0, 0, 0, 0, // sub $tls_size, %rax
             };
-            mem.writeIntLittle(i32, insts[8..][0..4], value);
+            mem.writeInt(i32, insts[8..][0..4], value, .little);
             try stream.seekBy(-3);
             try writer.writeAll(&insts);
         },
@@ -923,7 +923,7 @@ fn relaxTlsLdToLe(rels: []align(1) const elf.Elf64_Rela, value: i32, elf_file: *
                 0x48, 0x2d, 0, 0, 0, 0, // sub $tls_size, %rax
                 0x90, // nop
             };
-            mem.writeIntLittle(i32, insts[8..][0..4], value);
+            mem.writeInt(i32, insts[8..][0..4], value, .little);
             try stream.seekBy(-3);
             try writer.writeAll(&insts);
         },

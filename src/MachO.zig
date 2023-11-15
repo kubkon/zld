@@ -1245,7 +1245,7 @@ fn writeGotPointer(self: *MachO, got_index: u32, writer: anytype) !void {
         const sym = entry.getTargetSymbol(self);
         break :blk sym.n_value;
     };
-    try writer.writeIntLittle(u64, target_addr);
+    try writer.writeInt(u64, target_addr, .little);
 }
 
 pub fn createTlvPtrAtom(self: *MachO) !AtomIndex {
@@ -1347,42 +1347,42 @@ fn writeStubHelperPreambleCode(self: *MachO, writer: anytype) !void {
             try writer.writeAll(&.{ 0x4c, 0x8d, 0x1d });
             {
                 const disp = try Atom.calcPcRelativeDisplacementX86(source_addr + 3, dyld_private_addr, 0);
-                try writer.writeIntLittle(i32, disp);
+                try writer.writeInt(i32, disp, .little);
             }
             try writer.writeAll(&.{ 0x41, 0x53, 0xff, 0x25 });
             {
                 const disp = try Atom.calcPcRelativeDisplacementX86(source_addr + 11, dyld_stub_binder_got_addr, 0);
-                try writer.writeIntLittle(i32, disp);
+                try writer.writeInt(i32, disp, .little);
             }
         },
         .aarch64 => {
             {
                 const pages = Atom.calcNumberOfPages(source_addr, dyld_private_addr);
-                try writer.writeIntLittle(u32, aarch64.Instruction.adrp(.x17, pages).toU32());
+                try writer.writeInt(u32, aarch64.Instruction.adrp(.x17, pages).toU32(), .little);
             }
             {
                 const off = try Atom.calcPageOffset(dyld_private_addr, .arithmetic);
-                try writer.writeIntLittle(u32, aarch64.Instruction.add(.x17, .x17, off, false).toU32());
+                try writer.writeInt(u32, aarch64.Instruction.add(.x17, .x17, off, false).toU32(), .little);
             }
-            try writer.writeIntLittle(u32, aarch64.Instruction.stp(
+            try writer.writeInt(u32, aarch64.Instruction.stp(
                 .x16,
                 .x17,
                 aarch64.Register.sp,
                 aarch64.Instruction.LoadStorePairOffset.pre_index(-16),
-            ).toU32());
+            ).toU32(), .little);
             {
                 const pages = Atom.calcNumberOfPages(source_addr + 12, dyld_stub_binder_got_addr);
-                try writer.writeIntLittle(u32, aarch64.Instruction.adrp(.x16, pages).toU32());
+                try writer.writeInt(u32, aarch64.Instruction.adrp(.x16, pages).toU32(), .little);
             }
             {
                 const off = try Atom.calcPageOffset(dyld_stub_binder_got_addr, .load_store_64);
-                try writer.writeIntLittle(u32, aarch64.Instruction.ldr(
+                try writer.writeInt(u32, aarch64.Instruction.ldr(
                     .x16,
                     .x16,
                     aarch64.Instruction.LoadStoreOffset.imm(off),
-                ).toU32());
+                ).toU32(), .little);
             }
-            try writer.writeIntLittle(u32, aarch64.Instruction.br(.x16).toU32());
+            try writer.writeInt(u32, aarch64.Instruction.br(.x16).toU32(), .little);
         },
         else => unreachable,
     }
@@ -1430,7 +1430,7 @@ fn writeStubHelperCode(self: *MachO, atom_index: AtomIndex, writer: anytype) !vo
             try writer.writeAll(&.{ 0x68, 0x0, 0x0, 0x0, 0x0, 0xe9 });
             {
                 const disp = try Atom.calcPcRelativeDisplacementX86(source_addr + 6, target_addr, 0);
-                try writer.writeIntLittle(i32, disp);
+                try writer.writeInt(i32, disp, .little);
             }
         },
         .aarch64 => {
@@ -1439,13 +1439,13 @@ fn writeStubHelperCode(self: *MachO, atom_index: AtomIndex, writer: anytype) !vo
                 const div_res = try math.divExact(u64, stub_size - @sizeOf(u32), 4);
                 break :blk math.cast(u18, div_res) orelse return error.Overflow;
             };
-            try writer.writeIntLittle(u32, aarch64.Instruction.ldrLiteral(
+            try writer.writeInt(u32, aarch64.Instruction.ldrLiteral(
                 .w16,
                 literal,
-            ).toU32());
+            ).toU32(), .little);
             {
                 const disp = try Atom.calcPcRelativeDisplacementArm64(source_addr + 4, target_addr);
-                try writer.writeIntLittle(u32, aarch64.Instruction.b(disp).toU32());
+                try writer.writeInt(u32, aarch64.Instruction.b(disp).toU32(), .little);
             }
             try writer.writeAll(&.{ 0x0, 0x0, 0x0, 0x0 });
         },
@@ -1485,7 +1485,7 @@ fn writeLazyPointer(self: *MachO, stub_helper_index: u32, writer: anytype) !void
         const sym = self.getSymbol(atom.getSymbolWithLoc());
         break :blk sym.n_value;
     };
-    try writer.writeIntLittle(u64, target_addr);
+    try writer.writeInt(u64, target_addr, .little);
 }
 
 pub fn createStubAtom(self: *MachO) !AtomIndex {
@@ -1544,23 +1544,23 @@ fn writeStubCode(self: *MachO, atom_index: AtomIndex, stub_index: u32, writer: a
             try writer.writeAll(&.{ 0xff, 0x25 });
             {
                 const disp = try Atom.calcPcRelativeDisplacementX86(source_addr + 2, target_addr, 0);
-                try writer.writeIntLittle(i32, disp);
+                try writer.writeInt(i32, disp, .little);
             }
         },
         .aarch64 => {
             {
                 const pages = Atom.calcNumberOfPages(source_addr, target_addr);
-                try writer.writeIntLittle(u32, aarch64.Instruction.adrp(.x16, pages).toU32());
+                try writer.writeInt(u32, aarch64.Instruction.adrp(.x16, pages).toU32(), .little);
             }
             {
                 const off = try Atom.calcPageOffset(target_addr, .load_store_64);
-                try writer.writeIntLittle(u32, aarch64.Instruction.ldr(
+                try writer.writeInt(u32, aarch64.Instruction.ldr(
                     .x16,
                     .x16,
                     aarch64.Instruction.LoadStoreOffset.imm(off),
-                ).toU32());
+                ).toU32(), .little);
             }
-            try writer.writeIntLittle(u32, aarch64.Instruction.br(.x16).toU32());
+            try writer.writeInt(u32, aarch64.Instruction.br(.x16).toU32(), .little);
         },
         else => unreachable,
     }
@@ -2851,7 +2851,7 @@ fn collectBindData(self: *MachO, bind: *Bind) !void {
                     const base_offset = sym.n_value - segment.vmaddr;
                     const rel_offset = @as(u32, @intCast(rel.r_address - ctx.base_offset));
                     const offset = @as(u64, @intCast(base_offset + rel_offset));
-                    const addend = mem.readIntLittle(i64, code[rel_offset..][0..8]);
+                    const addend = mem.readInt(i64, code[rel_offset..][0..8], .little);
 
                     const dylib_ordinal = @divTrunc(@as(i16, @bitCast(bind_sym.n_desc)), macho.N_SYMBOL_RESOLVER);
                     log.debug("bind at {x}, import('{s}') in dylib({d})", .{
@@ -3400,7 +3400,7 @@ fn writeDysymtab(self: *MachO, ctx: SymtabCtx) !void {
         for (self.stubs.items) |entry| {
             const target_sym = entry.getTargetSymbol(self);
             assert(target_sym.undf());
-            try writer.writeIntLittle(u32, iundefsym + ctx.imports_table.get(entry.target).?);
+            try writer.writeInt(u32, iundefsym + ctx.imports_table.get(entry.target).?, .little);
         }
     }
 
@@ -3410,9 +3410,9 @@ fn writeDysymtab(self: *MachO, ctx: SymtabCtx) !void {
         for (self.got_entries.items) |entry| {
             const target_sym = entry.getTargetSymbol(self);
             if (target_sym.undf()) {
-                try writer.writeIntLittle(u32, iundefsym + ctx.imports_table.get(entry.target).?);
+                try writer.writeInt(u32, iundefsym + ctx.imports_table.get(entry.target).?, .little);
             } else {
-                try writer.writeIntLittle(u32, macho.INDIRECT_SYMBOL_LOCAL);
+                try writer.writeInt(u32, macho.INDIRECT_SYMBOL_LOCAL, .little);
             }
         }
     }
@@ -3423,7 +3423,7 @@ fn writeDysymtab(self: *MachO, ctx: SymtabCtx) !void {
         for (self.stubs.items) |entry| {
             const target_sym = entry.getTargetSymbol(self);
             assert(target_sym.undf());
-            try writer.writeIntLittle(u32, iundefsym + ctx.imports_table.get(entry.target).?);
+            try writer.writeInt(u32, iundefsym + ctx.imports_table.get(entry.target).?, .little);
         }
     }
 

@@ -252,8 +252,8 @@ pub const HashSection = struct {
         }
 
         try hs.buffer.ensureTotalCapacityPrecise(gpa, (2 + nsyms * 2) * 4);
-        hs.buffer.writer(gpa).writeIntLittle(u32, @as(u32, @intCast(nsyms))) catch unreachable;
-        hs.buffer.writer(gpa).writeIntLittle(u32, @as(u32, @intCast(nsyms))) catch unreachable;
+        hs.buffer.writer(gpa).writeInt(u32, @as(u32, @intCast(nsyms)), .little) catch unreachable;
+        hs.buffer.writer(gpa).writeInt(u32, @as(u32, @intCast(nsyms)), .little) catch unreachable;
         hs.buffer.writer(gpa).writeAll(mem.sliceAsBytes(buckets)) catch unreachable;
         hs.buffer.writer(gpa).writeAll(mem.sliceAsBytes(chains)) catch unreachable;
     }
@@ -316,10 +316,10 @@ pub const GnuHashSection = struct {
         var counting = std.io.countingWriter(writer);
         const cwriter = counting.writer();
 
-        try cwriter.writeIntLittle(u32, hash.num_buckets);
-        try cwriter.writeIntLittle(u32, export_off);
-        try cwriter.writeIntLittle(u32, hash.num_bloom);
-        try cwriter.writeIntLittle(u32, bloom_shift);
+        try cwriter.writeInt(u32, hash.num_buckets, .little);
+        try cwriter.writeInt(u32, export_off, .little);
+        try cwriter.writeInt(u32, hash.num_bloom, .little);
+        try cwriter.writeInt(u32, bloom_shift, .little);
 
         const gpa = elf_file.base.allocator;
         const hashes = try gpa.alloc(u32, exports.len);
@@ -708,46 +708,46 @@ pub const GotSection = struct {
                             break :blk if (apply_relocs) value else 0;
                         break :blk value;
                     };
-                    try writer.writeIntLittle(u64, value);
+                    try writer.writeInt(u64, value, .little);
                 },
 
                 .tlsgd => {
                     if (symbol.flags.import) {
-                        try writer.writeIntLittle(u64, 0);
-                        try writer.writeIntLittle(u64, 0);
+                        try writer.writeInt(u64, 0, .little);
+                        try writer.writeInt(u64, 0, .little);
                     } else {
-                        try writer.writeIntLittle(u64, if (is_shared) @as(u64, 0) else 1);
+                        try writer.writeInt(u64, if (is_shared) @as(u64, 0) else 1, .little);
                         const offset = symbol.getAddress(.{}, elf_file) - elf_file.getDtpAddress();
-                        try writer.writeIntLittle(u64, offset);
+                        try writer.writeInt(u64, offset, .little);
                     }
                 },
 
                 .gottp => {
                     if (symbol.flags.import) {
-                        try writer.writeIntLittle(u64, 0);
+                        try writer.writeInt(u64, 0, .little);
                     } else if (is_shared) {
                         const offset = if (apply_relocs)
                             symbol.getAddress(.{}, elf_file) - elf_file.getTlsAddress()
                         else
                             0;
-                        try writer.writeIntLittle(u64, offset);
+                        try writer.writeInt(u64, offset, .little);
                     } else {
                         const offset = @as(i64, @intCast(symbol.getAddress(.{}, elf_file))) -
                             @as(i64, @intCast(elf_file.getTpAddress()));
-                        try writer.writeIntLittle(u64, @as(u64, @bitCast(offset)));
+                        try writer.writeInt(u64, @as(u64, @bitCast(offset)), .little);
                     }
                 },
 
                 .tlsdesc => {
-                    try writer.writeIntLittle(u64, 0);
-                    try writer.writeIntLittle(u64, 0);
+                    try writer.writeInt(u64, 0, .little);
+                    try writer.writeInt(u64, 0, .little);
                 },
             }
         }
 
         if (got.emit_tlsld) {
-            try writer.writeIntLittle(u64, if (is_shared) @as(u64, 0) else 1);
-            try writer.writeIntLittle(u64, 0);
+            try writer.writeInt(u64, if (is_shared) @as(u64, 0) else 1, .little);
+            try writer.writeInt(u64, 0, .little);
         }
     }
 
@@ -988,9 +988,9 @@ pub const PltSection = struct {
             0xff, 0x25, 0x00, 0x00, 0x00, 0x00, // jmp qword ptr [rip] -> .got.plt[2]
         };
         var disp = @as(i64, @intCast(got_plt_addr + 8)) - @as(i64, @intCast(plt_addr + 8)) - 4;
-        mem.writeIntLittle(i32, preamble[8..][0..4], @as(i32, @intCast(disp)));
+        mem.writeInt(i32, preamble[8..][0..4], @as(i32, @intCast(disp)), .little);
         disp = @as(i64, @intCast(got_plt_addr + 16)) - @as(i64, @intCast(plt_addr + 14)) - 4;
-        mem.writeIntLittle(i32, preamble[14..][0..4], @as(i32, @intCast(disp)));
+        mem.writeInt(i32, preamble[14..][0..4], @as(i32, @intCast(disp)), .little);
         try writer.writeAll(&preamble);
         try writer.writeByteNTimes(0xcc, preamble_size - preamble.len);
 
@@ -1003,8 +1003,8 @@ pub const PltSection = struct {
                 0x41, 0xbb, 0x00, 0x00, 0x00, 0x00, // mov r11d, N
                 0xff, 0x25, 0x00, 0x00, 0x00, 0x00, // jmp qword ptr [rip] -> .got.plt[N]
             };
-            mem.writeIntLittle(i32, entry[6..][0..4], @as(i32, @intCast(i)));
-            mem.writeIntLittle(i32, entry[12..][0..4], @as(i32, @intCast(disp)));
+            mem.writeInt(i32, entry[6..][0..4], @as(i32, @intCast(i)), .little);
+            mem.writeInt(i32, entry[12..][0..4], @as(i32, @intCast(disp)), .little);
             try writer.writeAll(&entry);
         }
     }
@@ -1077,17 +1077,17 @@ pub const GotPltSection = struct {
         {
             // [0]: _DYNAMIC
             const symbol = elf_file.getSymbol(elf_file.dynamic_index.?);
-            try writer.writeIntLittle(u64, symbol.value);
+            try writer.writeInt(u64, symbol.value, .little);
         }
         // [1]: 0x0
         // [2]: 0x0
-        try writer.writeIntLittle(u64, 0x0);
-        try writer.writeIntLittle(u64, 0x0);
+        try writer.writeInt(u64, 0x0, .little);
+        try writer.writeInt(u64, 0x0, .little);
         if (elf_file.plt_sect_index) |shndx| {
             const plt_addr = elf_file.getSectionAddress(shndx);
             for (0..elf_file.plt.symbols.items.len) |_| {
                 // [N]: .plt
-                try writer.writeIntLittle(u64, plt_addr);
+                try writer.writeInt(u64, plt_addr, .little);
             }
         }
     }
@@ -1128,7 +1128,7 @@ pub const PltGotSection = struct {
                 0xff, 0x25, 0x00, 0x00, 0x00, 0x00, // jmp qword ptr [rip] -> .got[N]
                 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
             };
-            mem.writeIntLittle(i32, entry[6..][0..4], @as(i32, @intCast(disp)));
+            mem.writeInt(i32, entry[6..][0..4], @as(i32, @intCast(disp)), .little);
             try writer.writeAll(&entry);
         }
     }

@@ -59,8 +59,8 @@ const Symbol = extern struct {
     num_aux: u8,
 
     pub fn getName(self: Symbol, object: *Object) []const u8 {
-        if (mem.readIntNative(u32, self.name[0..4]) == 0x0) {
-            const offset = mem.readIntNative(u32, self.name[4..]);
+        if (mem.readInt(u32, self.name[0..4], .little) == 0x0) {
+            const offset = mem.readInt(u32, self.name[4..], .little);
             return object.getString(offset);
         } else {
             return mem.span(@as([*:0]const u8, @ptrCast(&self.name)));
@@ -175,7 +175,7 @@ fn parseSymtab(self: *Object, allocator: Allocator) !void {
 }
 
 fn parseStrtab(self: *Object, allocator: Allocator) !void {
-    const string_table_size = (try self.file.reader().readIntNative(u32)) - @sizeOf(u32);
+    const string_table_size = (try self.file.reader().readInt(u32, .little)) - @sizeOf(u32);
 
     self.strtab = try allocator.alloc(u8, string_table_size);
     _ = try self.file.reader().read(self.strtab);

@@ -357,8 +357,8 @@ pub fn writeThunkCode(macho_file: *MachO, atom_index: AtomIndex, writer: anytype
     } else unreachable;
 
     const pages = Atom.calcNumberOfPages(source_addr, target_addr);
-    try writer.writeIntLittle(u32, aarch64.Instruction.adrp(.x16, pages).toU32());
+    try writer.writeInt(u32, aarch64.Instruction.adrp(.x16, pages).toU32(), .little);
     const off = try Atom.calcPageOffset(target_addr, .arithmetic);
-    try writer.writeIntLittle(u32, aarch64.Instruction.add(.x16, .x16, off, false).toU32());
-    try writer.writeIntLittle(u32, aarch64.Instruction.br(.x16).toU32());
+    try writer.writeInt(u32, aarch64.Instruction.add(.x16, .x16, off, false).toU32(), .little);
+    try writer.writeInt(u32, aarch64.Instruction.br(.x16).toU32(), .little);
 }
