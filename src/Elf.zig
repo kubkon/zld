@@ -56,10 +56,10 @@ entry_index: ?u32 = null,
 
 symbols: std.ArrayListUnmanaged(Symbol) = .{},
 symbols_extra: std.ArrayListUnmanaged(u32) = .{},
-globals: std.AutoHashMapUnmanaged(u32, u32) = .{},
+globals: std.AutoHashMapUnmanaged(u32, Symbol.Index) = .{},
 /// This table will be populated after `scanRelocs` has run.
 /// Key is symbol index.
-undefs: std.AutoHashMapUnmanaged(u32, std.ArrayListUnmanaged(Atom.Index)) = .{},
+undefs: std.AutoHashMapUnmanaged(Symbol.Index, std.ArrayListUnmanaged(Atom.Index)) = .{},
 
 string_intern: StringTable(.string_intern) = .{},
 
@@ -473,7 +473,7 @@ fn initSections(self: *Elf) !void {
     for (self.objects.items) |index| {
         for (self.getFile(index).?.object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index) orelse continue;
-            if (!atom.alive) continue;
+            if (!atom.flags.alive) continue;
             try atom.initOutputSection(self);
         }
     }
@@ -667,7 +667,7 @@ fn addAtomsToSections(self: *Elf) !void {
     for (self.objects.items) |index| {
         for (self.getFile(index).?.object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index) orelse continue;
-            if (!atom.alive) continue;
+            if (!atom.flags.alive) continue;
             const atoms = &self.sections.items(.atoms)[atom.out_shndx];
             try atoms.append(self.base.allocator, atom_index);
         }
@@ -1302,7 +1302,7 @@ fn sortSections(self: *Elf) !void {
     for (self.objects.items) |index| {
         for (self.getFile(index).?.object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index) orelse continue;
-            if (!atom.alive) continue;
+            if (!atom.flags.alive) continue;
             atom.out_shndx = backlinks[atom.out_shndx];
         }
     }
@@ -1387,7 +1387,7 @@ fn allocateAtoms(self: *Elf) void {
         if (atoms.items.len == 0) continue;
         for (atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index).?;
-            assert(atom.alive);
+            assert(atom.flags.alive);
             atom.value += shdr.sh_addr;
         }
     }
@@ -1398,7 +1398,7 @@ fn allocateLocals(self: *Elf) void {
         for (self.getFile(index).?.object.getLocals()) |local_index| {
             const local = self.getSymbol(local_index);
             const atom = local.getAtom(self) orelse continue;
-            if (!atom.alive) continue;
+            if (!atom.flags.alive) continue;
             local.value += atom.value;
             local.shndx = atom.out_shndx;
         }
@@ -1410,7 +1410,7 @@ fn allocateGlobals(self: *Elf) void {
         for (self.getFile(index).?.object.getGlobals()) |global_index| {
             const global = self.getSymbol(global_index);
             const atom = global.getAtom(self) orelse continue;
-            if (!atom.alive) continue;
+            if (!atom.flags.alive) continue;
             if (global.getFile(self).?.object.index != index) continue;
             global.value += atom.value;
             global.shndx = atom.out_shndx;
@@ -1754,7 +1754,7 @@ fn resolveSymbols(self: *Elf) !void {
                 for (object.getComdatGroupMembers(cg.shndx)) |shndx| {
                     const atom_index = object.atoms.items[shndx];
                     if (self.getAtom(atom_index)) |atom| {
-                        atom.alive = false;
+                        atom.flags.alive = false;
                         atom.markFdesDead(self);
                     }
                 }
@@ -1791,7 +1791,7 @@ fn markEhFrameAtomsDead(self: *Elf) void {
             const atom = self.getAtom(atom_index) orelse continue;
             const is_eh_frame = atom.getInputShdr(self).sh_type == elf.SHT_X86_64_UNWIND or
                 mem.eql(u8, atom.getName(self), ".eh_frame");
-            if (atom.alive and is_eh_frame) atom.alive = false;
+            if (atom.flags.alive and is_eh_frame) atom.flags.alive = false;
         }
     }
 }
@@ -2074,7 +2074,7 @@ fn writeAtoms(self: *Elf) !void {
 
         for (atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index).?;
-            assert(atom.alive);
+            assert(atom.flags.alive);
             const off = if (shdr.sh_flags & elf.SHF_ALLOC == 0) atom.value else atom.value - shdr.sh_addr;
             log.debug("writing ATOM(%{d},'{s}') at offset 0x{x}", .{
                 atom_index,
@@ -2358,14 +2358,14 @@ pub fn getAtom(self: Elf, atom_index: Atom.Index) ?*Atom {
     return &self.atoms.items[atom_index];
 }
 
-pub fn addSymbol(self: *Elf) !u32 {
-    const index = @as(u32, @intCast(self.symbols.items.len));
+pub fn addSymbol(self: *Elf) !Symbol.Index {
+    const index = @as(Symbol.Index, @intCast(self.symbols.items.len));
     const symbol = try self.symbols.addOne(self.base.allocator);
     symbol.* = .{};
     return index;
 }
 
-pub fn getSymbol(self: *Elf, index: u32) *Symbol {
+pub fn getSymbol(self: *Elf, index: Symbol.Index) *Symbol {
     assert(index < self.symbols.items.len);
     return &self.symbols.items[index];
 }

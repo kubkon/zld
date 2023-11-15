@@ -13,7 +13,7 @@ dynamic_sect_index: ?u16 = null,
 versym_sect_index: ?u16 = null,
 verdef_sect_index: ?u16 = null,
 
-symbols: std.ArrayListUnmanaged(u32) = .{},
+symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
 aliases: ?std.ArrayListUnmanaged(u32) = null,
 
 needed: bool,
@@ -137,7 +137,7 @@ fn initSymtab(self: *SharedObject, elf_file: *Elf) !void {
 
 pub fn resolveSymbols(self: *SharedObject, elf_file: *Elf) void {
     for (self.symbols.items, 0..) |index, i| {
-        const sym_idx = @as(u32, @intCast(i));
+        const sym_idx = @as(Symbol.Index, @intCast(i));
         const this_sym = self.symtab[sym_idx];
 
         if (this_sym.st_shndx == elf.SHN_UNDEF) continue;
@@ -261,7 +261,7 @@ pub fn getSoname(self: *SharedObject) []const u8 {
     return std.fs.path.basename(self.path);
 }
 
-pub inline fn getGlobals(self: *SharedObject) []const u32 {
+pub inline fn getGlobals(self: *SharedObject) []const Symbol.Index {
     return self.symbols.items;
 }
 
@@ -269,7 +269,7 @@ pub fn initSymbolAliases(self: *SharedObject, elf_file: *Elf) !void {
     assert(self.aliases == null);
 
     const SortAlias = struct {
-        pub fn lessThan(ctx: *Elf, lhs: u32, rhs: u32) bool {
+        pub fn lessThan(ctx: *Elf, lhs: Symbol.Index, rhs: Symbol.Index) bool {
             const lhs_sym = ctx.getSymbol(lhs).getSourceSymbol(ctx);
             const rhs_sym = ctx.getSymbol(rhs).getSourceSymbol(ctx);
             return lhs_sym.st_value < rhs_sym.st_value;
@@ -277,7 +277,7 @@ pub fn initSymbolAliases(self: *SharedObject, elf_file: *Elf) !void {
     };
 
     const gpa = elf_file.base.allocator;
-    var aliases = std.ArrayList(u32).init(gpa);
+    var aliases = std.ArrayList(Symbol.Index).init(gpa);
     defer aliases.deinit();
     try aliases.ensureTotalCapacityPrecise(self.getGlobals().len);
 
@@ -288,7 +288,7 @@ pub fn initSymbolAliases(self: *SharedObject, elf_file: *Elf) !void {
         aliases.appendAssumeCapacity(index);
     }
 
-    std.mem.sort(u32, aliases.items, elf_file, SortAlias.lessThan);
+    std.mem.sort(Symbol.Index, aliases.items, elf_file, SortAlias.lessThan);
 
     self.aliases = aliases.moveToUnmanaged();
 }

@@ -1,6 +1,6 @@
 index: File.Index,
 symtab: std.ArrayListUnmanaged(elf.Elf64_Sym) = .{},
-symbols: std.ArrayListUnmanaged(u32) = .{},
+symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
 alive: bool = true,
 
 output_symtab_size: Elf.SymtabSize = .{},
@@ -30,7 +30,7 @@ pub fn addSyntheticGlobal(self: *InternalObject, name: [:0]const u8, elf_file: *
 
 pub fn resolveSymbols(self: *InternalObject, elf_file: *Elf) void {
     for (self.symbols.items, 0..) |index, i| {
-        const sym_idx = @as(u32, @intCast(i));
+        const sym_idx = @as(Symbol.Index, @intCast(i));
         const this_sym = self.symtab.items[sym_idx];
 
         if (this_sym.st_shndx == elf.SHN_UNDEF) continue;
@@ -90,7 +90,7 @@ pub fn asFile(self: *InternalObject) File {
     return .{ .internal = self };
 }
 
-pub inline fn getGlobals(self: *InternalObject) []const u32 {
+pub inline fn getGlobals(self: *InternalObject) []const Symbol.Index {
     return self.symbols.items;
 }
 
@@ -129,3 +129,4 @@ const Elf = @import("../Elf.zig");
 const File = @import("file.zig").File;
 const InternalObject = @This();
 const Object = @import("Object.zig");
+const Symbol = @import("Symbol.zig");

@@ -5,7 +5,7 @@ value: u64 = 0,
 name: u32 = 0,
 
 /// Index into linker's input file table.
-file: u32 = 0,
+file: File.Index = 0,
 
 /// Size of this atom
 size: u64 = 0,
@@ -14,30 +14,24 @@ size: u64 = 0,
 alignment: u8 = 0,
 
 /// Index of the input section.
-shndx: u16 = 0,
+shndx: u32 = 0,
 
 /// Index of the output section.
 out_shndx: u16 = 0,
 
 /// Index of the input section containing this atom's relocs.
-relocs_shndx: u16 = 0,
+relocs_shndx: u32 = 0,
 
 /// Index of this atom in the linker's atoms table.
 atom_index: Index = 0,
 
-/// Specifies whether this atom is alive or has been garbage collected.
-alive: bool = true,
-
-/// Specifies if the atom has been visited during garbage collection.
-visited: bool = false,
+flags: Flags = .{},
 
 /// Start index of FDEs referencing this atom.
 fde_start: u32 = 0,
 
 /// End index of FDEs referencing this atom.
 fde_end: u32 = 0,
-
-pub const Index = u32;
 
 pub fn getName(self: Atom, elf_file: *Elf) [:0]const u8 {
     return elf_file.string_intern.getAssumeExists(self.name);
@@ -1095,10 +1089,20 @@ fn format2(
         }
         try writer.writeAll(" }");
     }
-    if (elf_file.options.gc_sections and !atom.alive) {
+    if (elf_file.options.gc_sections and !atom.flags.alive) {
         try writer.writeAll(" : [*]");
     }
 }
+
+pub const Index = u32;
+
+pub const Flags = packed struct {
+    /// Specifies whether this atom is alive or has been garbage collected.
+    alive: bool = true,
+
+    /// Specifies if the atom has been visited during garbage collection.
+    visited: bool = false,
+};
 
 const Atom = @This();
 
@@ -1115,6 +1119,7 @@ const Allocator = mem.Allocator;
 const Disassembler = dis_x86_64.Disassembler;
 const Elf = @import("../Elf.zig");
 const Fde = @import("eh_frame.zig").Fde;
+const File = @import("file.zig").File;
 const Instruction = dis_x86_64.Instruction;
 const Immediate = dis_x86_64.Immediate;
 const Object = @import("Object.zig");

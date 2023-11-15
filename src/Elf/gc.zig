@@ -39,7 +39,7 @@ fn collectRoots(roots: *std.ArrayList(*Atom), elf_file: *Elf) !void {
 
         for (object.atoms.items) |atom_index| {
             const atom = elf_file.getAtom(atom_index) orelse continue;
-            if (!atom.alive) continue;
+            if (!atom.flags.alive) continue;
 
             const shdr = atom.getInputShdr(elf_file);
             const name = atom.getName(elf_file);
@@ -57,7 +57,7 @@ fn collectRoots(roots: *std.ArrayList(*Atom), elf_file: *Elf) !void {
                 break :blk false;
             };
             if (is_gc_root and markAtom(atom)) try roots.append(atom);
-            if (shdr.sh_flags & elf.SHF_ALLOC == 0) atom.visited = true;
+            if (shdr.sh_flags & elf.SHF_ALLOC == 0) atom.flags.visited = true;
         }
 
         // Mark every atom referenced by CIE as alive.
@@ -76,23 +76,23 @@ fn markSymbol(sym: *Symbol, roots: *std.ArrayList(*Atom), elf_file: *Elf) !void 
 }
 
 fn markAtom(atom: *Atom) bool {
-    const already_visited = atom.visited;
-    atom.visited = true;
-    return atom.alive and !already_visited;
+    const already_visited = atom.flags.visited;
+    atom.flags.visited = true;
+    return atom.flags.alive and !already_visited;
 }
 
 fn markLive(atom: *Atom, elf_file: *Elf) void {
     if (build_options.enable_logging)
         track_live_level.incr();
 
-    assert(atom.visited);
+    assert(atom.flags.visited);
     const object = atom.getObject(elf_file);
 
     for (atom.getFdes(elf_file)) |fde| {
         for (fde.getRelocs(elf_file)[1..]) |rel| {
             const target_sym = object.getSymbol(rel.r_sym(), elf_file);
             const target_atom = target_sym.getAtom(elf_file) orelse continue;
-            target_atom.alive = true;
+            target_atom.flags.alive = true;
             gc_track_live_log.debug("{}marking live atom({d})", .{ track_live_level, target_atom.atom_index });
             if (markAtom(target_atom)) markLive(target_atom, elf_file);
         }
@@ -101,7 +101,7 @@ fn markLive(atom: *Atom, elf_file: *Elf) void {
     for (atom.getRelocs(elf_file)) |rel| {
         const target_sym = object.getSymbol(rel.r_sym(), elf_file);
         const target_atom = target_sym.getAtom(elf_file) orelse continue;
-        target_atom.alive = true;
+        target_atom.flags.alive = true;
         gc_track_live_log.debug("{}marking live atom({d})", .{ track_live_level, target_atom.atom_index });
         if (markAtom(target_atom)) markLive(target_atom, elf_file);
     }
@@ -118,8 +118,8 @@ fn prune(elf_file: *Elf) void {
     for (elf_file.objects.items) |index| {
         for (elf_file.getFile(index).?.object.atoms.items) |atom_index| {
             const atom = elf_file.getAtom(atom_index) orelse continue;
-            if (atom.alive and !atom.visited) {
-                atom.alive = false;
+            if (atom.flags.alive and !atom.flags.visited) {
+                atom.flags.alive = false;
                 atom.markFdesDead(elf_file);
             }
         }
@@ -131,7 +131,7 @@ pub fn dumpPrunedAtoms(elf_file: *Elf) !void {
     for (elf_file.objects.items) |index| {
         for (elf_file.getFile(index).?.object.atoms.items) |atom_index| {
             const atom = elf_file.getAtom(atom_index) orelse continue;
-            if (!atom.alive)
+            if (!atom.flags.alive)
                 try stderr.print("ld.zld: removing unused section '{s}' in file '{}'\n", .{
                     atom.getName(elf_file),
                     atom.getObject(elf_file).fmtPath(),
