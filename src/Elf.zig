@@ -518,6 +518,13 @@ fn initSyntheticSections(self: *Elf) !void {
         });
     }
 
+    self.got_plt_sect_index = try self.addSection(.{
+        .name = ".got.plt",
+        .type = elf.SHT_PROGBITS,
+        .flags = elf.SHF_ALLOC | elf.SHF_WRITE,
+        .addralign = @alignOf(u64),
+    });
+
     const needs_rela_dyn = blk: {
         if (self.got.flags.needs_rela or self.got.flags.needs_tlsld or
             self.copy_rel.symbols.items.len > 0) break :blk true;
@@ -542,12 +549,6 @@ fn initSyntheticSections(self: *Elf) !void {
             .type = elf.SHT_PROGBITS,
             .flags = elf.SHF_ALLOC | elf.SHF_EXECINSTR,
             .addralign = 16,
-        });
-        self.got_plt_sect_index = try self.addSection(.{
-            .name = ".got.plt",
-            .type = elf.SHT_PROGBITS,
-            .flags = elf.SHF_ALLOC | elf.SHF_WRITE,
-            .addralign = @alignOf(u64),
         });
         self.rela_plt_sect_index = try self.addSection(.{
             .name = ".rela.plt",
