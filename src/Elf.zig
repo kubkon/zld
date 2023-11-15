@@ -999,6 +999,19 @@ fn initPhdrs(self: *Elf) !void {
                 try self.addShdrToPhdr(self.tls_phdr_index.?, next);
             }
         }
+
+        if (self.tls_phdr_index == null and self.options.static) {
+            // Even if we don't emit any TLS data, linking against musl-libc without
+            // empty TLS phdr leads to a bizarre segfault in `__copy_tls` function.
+            // So far I haven't been able to work out why that is, but adding an empty
+            // TLS phdr seems to fix it, so let's go with it for now.
+            // TODO try to investigate more
+            self.tls_phdr_index = try self.addPhdr(.{
+                .type = elf.PT_TLS,
+                .flags = elf.PF_R,
+                .@"align" = 1,
+            });
+        }
     }
 
     // Add DYNAMIC phdr
