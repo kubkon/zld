@@ -490,13 +490,6 @@ fn initSections(self: *Elf) !void {
             .flags = elf.SHF_ALLOC | elf.SHF_WRITE,
             .addralign = @alignOf(u64),
         });
-
-        self.got_plt_sect_index = try self.addSection(.{
-            .name = ".got.plt",
-            .type = elf.SHT_PROGBITS,
-            .flags = elf.SHF_ALLOC | elf.SHF_WRITE,
-            .addralign = @alignOf(u64),
-        });
     }
 
     const needs_rela_dyn = blk: {
@@ -522,6 +515,12 @@ fn initSections(self: *Elf) !void {
             .type = elf.SHT_PROGBITS,
             .flags = elf.SHF_ALLOC | elf.SHF_EXECINSTR,
             .addralign = 16,
+        });
+        self.got_plt_sect_index = try self.addSection(.{
+            .name = ".got.plt",
+            .type = elf.SHT_PROGBITS,
+            .flags = elf.SHF_ALLOC | elf.SHF_WRITE,
+            .addralign = @alignOf(u64),
         });
         self.rela_plt_sect_index = try self.addSection(.{
             .name = ".rela.plt",
