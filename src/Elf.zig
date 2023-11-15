@@ -1295,7 +1295,7 @@ fn getSectionRank(self: *Elf, shndx: u16) u8 {
     }
 }
 
-fn sortSections(self: *Elf) !void {
+pub fn sortSections(self: *Elf) !void {
     const Entry = struct {
         shndx: u16,
 
@@ -1414,6 +1414,14 @@ fn sortSections(self: *Elf) !void {
 
     for (self.comdat_group_sections.items) |*cg| {
         cg.shndx = backlinks[cg.shndx];
+    }
+
+    for (self.sections.items(.rela_shndx), 0..) |index, shndx| {
+        const shdr = &self.sections.items(.shdr)[index];
+        if (shdr.sh_type != elf.SHT_NULL) {
+            shdr.sh_link = self.symtab_sect_index.?;
+            shdr.sh_info = @intCast(shndx);
+        }
     }
 }
 
@@ -2299,17 +2307,6 @@ fn writeHeader(self: *Elf) !void {
     @memset(header.e_ident[7..][0..9], 0);
     log.debug("writing ELF header {} at 0x{x}", .{ header, 0 });
     try self.base.file.pwriteAll(mem.asBytes(&header), 0);
-}
-
-pub fn addRelaShdr(self: *Elf, name: [:0]const u8, shndx: u16) !u16 {
-    return self.addSection(.{
-        .name = name,
-        .type = elf.SHT_RELA,
-        .flags = elf.SHF_INFO_LINK,
-        .entsize = @sizeOf(elf.Elf64_Rela),
-        .info = shndx,
-        .addralign = @alignOf(elf.Elf64_Rela),
-    });
 }
 
 pub const AddSectionOpts = struct {
