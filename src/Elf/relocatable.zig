@@ -6,10 +6,8 @@ pub fn flush(elf_file: *Elf) !void {
     try calcSectionSizes(elf_file);
 
     allocateSections(elf_file, @sizeOf(elf.Elf64_Ehdr));
-    // self.allocateAtoms();
-    // self.allocateLocals();
-    // self.allocateGlobals();
-    // self.allocateSyntheticSymbols();
+    elf_file.allocateLocals();
+    elf_file.allocateGlobals();
 
     elf_file.shoff = blk: {
         const shdr = elf_file.sections.items(.shdr)[elf_file.sections.len - 1];
@@ -19,7 +17,7 @@ pub fn flush(elf_file: *Elf) !void {
 
     state_log.debug("{}", .{elf_file.dumpState()});
 
-    // try self.writeAtomsRelocatable();
+    try writeAtoms(elf_file);
     try writeSyntheticSections(elf_file);
     try elf_file.writeShdrs();
     try writeHeader(elf_file);
@@ -185,6 +183,46 @@ fn allocateSections(elf_file: *Elf, base_offset: u64) void {
     }
 }
 
+fn writeAtoms(elf_file: *Elf) !void {
+    const gpa = elf_file.base.allocator;
+    const slice = elf_file.sections.slice();
+    for (slice.items(.shdr), slice.items(.atoms)) |shdr, atoms| {
+        if (atoms.items.len == 0) continue;
+        if (shdr.sh_type == elf.SHT_NOBITS) continue;
+
+        log.debug("writing atoms in '{s}' section", .{elf_file.shstrtab.getAssumeExists(shdr.sh_name)});
+
+        var buffer = try gpa.alloc(u8, shdr.sh_size);
+        defer gpa.free(buffer);
+
+        const padding_byte: u8 = if (shdr.sh_type == elf.SHT_PROGBITS and
+            shdr.sh_flags & elf.SHF_EXECINSTR != 0)
+            0xcc // int3
+        else
+            0;
+        @memset(buffer, padding_byte);
+
+        for (atoms.items) |atom_index| {
+            const atom = elf_file.getAtom(atom_index).?;
+            assert(atom.flags.alive);
+            const off = atom.value;
+            log.debug("writing ATOM(%{d},'{s}') at offset 0x{x}", .{
+                atom_index,
+                atom.getName(elf_file),
+                shdr.sh_offset + off,
+            });
+
+            // TODO decompress directly into provided buffer
+            const out_code = buffer[off..][0..atom.size];
+            const in_code = try atom.getCodeUncompressAlloc(elf_file);
+            defer gpa.free(in_code);
+            @memcpy(out_code, in_code);
+        }
+
+        try elf_file.base.file.pwriteAll(buffer, shdr.sh_offset);
+    }
+}
+
 fn writeSyntheticSections(elf_file: *Elf) !void {
     try elf_file.writeSymtab();
 
@@ -227,6 +265,7 @@ fn writeHeader(elf_file: *Elf) !void {
     try elf_file.base.file.pwriteAll(mem.asBytes(&header), 0);
 }
 
+const assert = std.debug.assert;
 const eh_frame = @import("eh_frame.zig");
 const elf = std.elf;
 const log = std.log.scoped(.elf);

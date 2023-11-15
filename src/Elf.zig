@@ -1464,7 +1464,7 @@ fn allocateAtoms(self: *Elf) void {
     }
 }
 
-fn allocateLocals(self: *Elf) void {
+pub fn allocateLocals(self: *Elf) void {
     for (self.objects.items) |index| {
         for (self.getFile(index).?.object.getLocals()) |local_index| {
             const local = self.getSymbol(local_index);
@@ -1476,7 +1476,7 @@ fn allocateLocals(self: *Elf) void {
     }
 }
 
-fn allocateGlobals(self: *Elf) void {
+pub fn allocateGlobals(self: *Elf) void {
     for (self.objects.items) |index| {
         for (self.getFile(index).?.object.getGlobals()) |global_index| {
             const global = self.getSymbol(global_index);
