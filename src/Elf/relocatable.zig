@@ -224,11 +224,97 @@ fn writeAtoms(elf_file: *Elf) !void {
 }
 
 fn writeSyntheticSections(elf_file: *Elf) !void {
+    const gpa = elf_file.base.allocator;
+
+    for (elf_file.sections.items(.rela_shndx), elf_file.sections.items(.atoms)) |rela_shndx, atoms| {
+        if (atoms.items.len == 0) continue;
+
+        const shdr = elf_file.sections.items(.shdr)[rela_shndx];
+        if (shdr.sh_type == elf.SHT_NULL) continue;
+
+        const num_relocs = @divExact(shdr.sh_size, shdr.sh_entsize);
+        var relocs = try std.ArrayList(elf.Elf64_Rela).initCapacity(gpa, num_relocs);
+        defer relocs.deinit();
+
+        for (atoms.items) |atom_index| {
+            const atom = elf_file.getAtom(atom_index) orelse continue;
+            if (!atom.flags.alive) continue;
+            try atom.writeRelocs(elf_file, &relocs);
+        }
+        assert(relocs.items.len == num_relocs);
+
+        const SortRelocs = struct {
+            pub fn lessThan(ctx: void, lhs: elf.Elf64_Rela, rhs: elf.Elf64_Rela) bool {
+                _ = ctx;
+                return lhs.r_offset < rhs.r_offset;
+            }
+        };
+
+        mem.sort(elf.Elf64_Rela, relocs.items, {}, SortRelocs.lessThan);
+
+        log.debug("writing {s} from 0x{x} to 0x{x}", .{
+            elf_file.shstrtab.getAssumeExists(shdr.sh_name),
+            shdr.sh_offset,
+            shdr.sh_offset + shdr.sh_size,
+        });
+
+        try elf_file.base.file.pwriteAll(mem.sliceAsBytes(relocs.items), shdr.sh_offset);
+    }
+
+    if (elf_file.eh_frame_sect_index) |shndx| {
+        const shdr = elf_file.sections.items(.shdr)[shndx];
+        var buffer = try std.ArrayList(u8).initCapacity(gpa, shdr.sh_size);
+        defer buffer.deinit();
+        try eh_frame.writeEhFrameRelocatable(elf_file, buffer.writer());
+
+        log.debug("writing .eh_frame from 0x{x} to 0x{x}", .{
+            shdr.sh_offset,
+            shdr.sh_offset + shdr.sh_size,
+        });
+
+        assert(buffer.items.len == shdr.sh_size);
+        try elf_file.base.file.pwriteAll(buffer.items, shdr.sh_offset);
+
+        const rela_shndx = elf_file.sections.items(.rela_shndx)[shndx];
+        const rela_shdr = elf_file.sections.items(.shdr)[rela_shndx];
+        buffer.clearRetainingCapacity();
+        try buffer.ensureTotalCapacityPrecise(rela_shdr.sh_size);
+        try eh_frame.writeEhFrameRelocs(elf_file, buffer.writer());
+
+        log.debug("writing .rela.eh_frame from 0x{x} to 0x{x}", .{
+            rela_shdr.sh_offset,
+            rela_shdr.sh_offset + rela_shdr.sh_size,
+        });
+
+        assert(buffer.items.len == rela_shdr.sh_size);
+        try elf_file.base.file.pwriteAll(buffer.items, rela_shdr.sh_offset);
+    }
+
+    try writeComdatGroup(elf_file);
     try elf_file.writeSymtab();
 
     if (elf_file.shstrtab_sect_index) |shndx| {
         const shdr = elf_file.sections.items(.shdr)[shndx];
         try elf_file.base.file.pwriteAll(elf_file.shstrtab.buffer.items, shdr.sh_offset);
+    }
+}
+
+fn writeComdatGroup(elf_file: *Elf) !void {
+    const gpa = elf_file.base.allocator;
+
+    for (elf_file.comdat_group_sections.items) |cgs| {
+        const shdr = elf_file.sections.items(.shdr)[cgs.shndx];
+        var buffer = try std.ArrayList(u8).initCapacity(gpa, shdr.sh_size);
+        defer buffer.deinit();
+        try cgs.write(elf_file, buffer.writer());
+
+        log.debug("writing COMDAT group from 0x{x} to 0x{x}", .{
+            shdr.sh_offset,
+            shdr.sh_offset + shdr.sh_size,
+        });
+
+        assert(buffer.items.len == shdr.sh_size);
+        try elf_file.base.file.pwriteAll(buffer.items, shdr.sh_offset);
     }
 }
 

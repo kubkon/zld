@@ -87,6 +87,42 @@ pub fn getRelocs(self: Atom, elf_file: *Elf) []align(1) const elf.Elf64_Rela {
     return object.getRelocs(self.relocs_shndx);
 }
 
+pub fn writeRelocs(self: Atom, elf_file: *Elf, out_relocs: *std.ArrayList(elf.Elf64_Rela)) !void {
+    relocs_log.debug("0x{x}: {s}", .{ self.value, self.getName(elf_file) });
+
+    const object = self.getObject(elf_file);
+    for (self.getRelocs(elf_file)) |rel| {
+        const target = object.getSymbol(rel.r_sym(), elf_file);
+        const r_type = rel.r_type();
+        const r_offset = self.value + rel.r_offset;
+        var r_addend = rel.r_addend;
+        var r_sym: u32 = 0;
+        switch (target.getType(elf_file)) {
+            elf.STT_SECTION => {
+                r_addend += @intCast(target.value);
+                r_sym = elf_file.sections.items(.sym_index)[target.shndx];
+            },
+            else => {
+                r_sym = target.getOutputSymtabIndex(elf_file) orelse 0;
+            },
+        }
+
+        relocs_log.debug("  {s}: [{x} => {d}({s})] + {x}", .{
+            fmtRelocType(r_type),
+            r_offset,
+            r_sym,
+            target.getName(elf_file),
+            r_addend,
+        });
+
+        out_relocs.appendAssumeCapacity(.{
+            .r_offset = r_offset,
+            .r_addend = r_addend,
+            .r_info = (@as(u64, @intCast(r_sym)) << 32) | r_type,
+        });
+    }
+}
+
 pub fn getFdes(self: Atom, elf_file: *Elf) []Fde {
     if (self.fde_start == self.fde_end) return &[0]Fde{};
     const object = self.getObject(elf_file);

@@ -1325,18 +1325,18 @@ pub const ComdatGroupSection = struct {
         const members = object.getComdatGroupMembers(cg.shndx);
         try writer.writeInt(u32, elf.GRP_COMDAT, .little);
         for (members) |shndx| {
-            const shdr = object.shdrs.items[shndx];
+            const shdr = object.getShdrs()[shndx];
             switch (shdr.sh_type) {
                 elf.SHT_RELA => {
                     const atom_index = object.atoms.items[shdr.sh_info];
                     const atom = elf_file.getAtom(atom_index).?;
-                    const rela = elf_file.output_rela_sections.get(atom.outputShndx().?).?;
-                    try writer.writeInt(u32, rela.shndx, .little);
+                    const rela_shndx = elf_file.sections.items(.rela_shndx)[atom.out_shndx];
+                    try writer.writeInt(u32, rela_shndx, .little);
                 },
                 else => {
                     const atom_index = object.atoms.items[shndx];
                     const atom = elf_file.getAtom(atom_index).?;
-                    try writer.writeInt(u32, atom.outputShndx().?, .little);
+                    try writer.writeInt(u32, atom.out_shndx, .little);
                 },
             }
         }
