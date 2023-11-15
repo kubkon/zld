@@ -390,6 +390,21 @@ pub fn flush(self: *Elf) !void {
     self.base.reportWarningsAndErrorsAndExit();
 }
 
+/// We need to sort constructors/destuctors in the following sections:
+/// * .init_array
+/// * .fini_array
+/// * .preinit_array
+/// * .ctors
+/// * .dtors
+/// The prority of inclusion is defined as part of the input section's name. For example, .init_array.10000.
+/// If no priority value has been specified,
+/// * for .init_array, .fini_array and .preinit_array, we automatically assign that section max value of maxInt(i32)
+///   and push it to the back of the queue,
+/// * for .ctors and .dtors, we automatically assign that section min value of -1
+///   and push it to the front of the queue,
+/// crtbegin and ctrend are assigned minInt(i32) and maxInt(i32) respectively.
+/// Ties are broken by the file prority which corresponds to the inclusion of input sections in this output section
+/// we are about to sort.
 fn sortInitFini(self: *Elf) !void {
     const gpa = self.base.allocator;
 
@@ -397,8 +412,10 @@ fn sortInitFini(self: *Elf) !void {
         priority: i32,
         atom_index: Atom.Index,
 
-        pub fn lessThan(ctx: void, lhs: @This(), rhs: @This()) bool {
-            _ = ctx;
+        pub fn lessThan(ctx: *Elf, lhs: @This(), rhs: @This()) bool {
+            if (lhs.priority == rhs.priority) {
+                return ctx.getAtom(lhs.atom_index).?.getPriority(ctx) < ctx.getAtom(rhs.atom_index).?.getPriority(ctx);
+            }
             return lhs.priority < rhs.priority;
         }
     };
@@ -444,7 +461,7 @@ fn sortInitFini(self: *Elf) !void {
             entries.appendAssumeCapacity(.{ .priority = priority, .atom_index = atom_index });
         }
 
-        mem.sort(Entry, entries.items, {}, Entry.lessThan);
+        mem.sort(Entry, entries.items, self, Entry.lessThan);
 
         atoms.clearRetainingCapacity();
         for (entries.items) |entry| {
