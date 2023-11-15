@@ -27,6 +27,7 @@ pub fn addElfTests(b: *Build, options: common.Options) *Step {
     elf_step.dependOn(testExecStack(b, opts));
     elf_step.dependOn(testExportDynamic(b, opts));
     elf_step.dependOn(testExportSymbolsFromExe(b, opts));
+    elf_step.dependOn(testEmitRelocatable(b, opts));
     elf_step.dependOn(testFuncAddress(b, opts));
     elf_step.dependOn(testGcSections(b, opts));
     elf_step.dependOn(testHelloDynamic(b, opts));
@@ -835,6 +836,60 @@ fn testExportSymbolsFromExe(b: *Build, opts: Options) *Step {
     check.checkInDynamicSymtab();
     check.checkContains("expfn1");
     test_step.dependOn(&check.step);
+
+    return test_step;
+}
+
+fn testEmitRelocatable(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-emit-relocatable", "");
+
+    const obj1 = cc(b, opts);
+    obj1.addCSource(
+        \\#include <stdio.h>
+        \\extern int bar;
+        \\int foo() {
+        \\   return bar;
+        \\}
+        \\void printFoo() {
+        \\    printf("foo=%d\n", foo());
+        \\}
+    );
+    obj1.addArgs(&.{"-c"});
+
+    const obj2 = cc(b, opts);
+    obj2.addCSource(
+        \\#include <stdio.h>
+        \\int bar = 42;
+        \\void printBar() {
+        \\    printf("bar=%d\n", bar);
+        \\}
+    );
+    obj2.addArgs(&.{"-c"});
+
+    const obj3 = ld(b, opts);
+    obj3.addFileSource(obj1.out);
+    obj3.addFileSource(obj2.out);
+    obj3.addArg("-r");
+
+    const exe = cc(b, opts);
+    exe.addCSource(
+        \\#include <stdio.h>
+        \\void printFoo();
+        \\void printBar();
+        \\int main() {
+        \\  printFoo();
+        \\  printBar();
+        \\}
+    );
+    exe.addFileSource(obj3.out);
+
+    const run = exe.run();
+    run.expectStdOutEqual(
+        \\foo=42
+        \\bar=42
+        \\
+    );
+    test_step.dependOn(run.step());
 
     return test_step;
 }
