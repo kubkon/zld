@@ -81,6 +81,7 @@ plt_got: PltGotSection = .{},
 copy_rel: CopyRelSection = .{},
 rela_dyn: std.ArrayListUnmanaged(elf.Elf64_Rela) = .{},
 rela_plt: std.ArrayListUnmanaged(elf.Elf64_Rela) = .{},
+comdat_group_sections: std.ArrayListUnmanaged(ComdatGroupSection) = .{},
 
 atoms: std.ArrayListUnmanaged(Atom) = .{},
 
@@ -120,7 +121,7 @@ fn createEmpty(gpa: Allocator, options: Options, thread_pool: *ThreadPool) !*Elf
         },
         .arena = std.heap.ArenaAllocator.init(gpa).state,
         .options = options,
-        .default_sym_version = if (options.output_mode == .lib or options.export_dynamic)
+        .default_sym_version = if (self.options.shared or options.export_dynamic)
             elf.VER_NDX_GLOBAL
         else
             elf.VER_NDX_LOCAL,
@@ -169,6 +170,7 @@ pub fn deinit(self: *Elf) void {
     self.copy_rel.deinit(gpa);
     self.rela_dyn.deinit(gpa);
     self.rela_plt.deinit(gpa);
+    self.comdat_group_sections.deinit(gpa);
     {
         var it = self.undefs.valueIterator();
         while (it.next()) |notes| {
@@ -323,16 +325,19 @@ pub fn flush(self: *Elf) !void {
 
     try self.resolveSymbols();
     self.markEhFrameAtomsDead();
+
+    if (self.options.relocatable) return relocatable.flush(self);
+
     try self.convertCommonSymbols();
     try self.markImportsAndExports();
 
     // Set the entrypoint if found
     self.entry_index = blk: {
-        if (self.options.output_mode != .exe) break :blk null;
+        if (self.options.shared) break :blk null;
         const entry_name = self.options.entry orelse "_start";
         break :blk self.getGlobalByName(entry_name);
     };
-    if (self.options.output_mode == .exe and self.entry_index == null) {
+    if (!self.options.shared and self.entry_index == null) {
         self.base.fatal("no entrypoint found: '{s}'", .{self.options.entry orelse "_start"});
     }
 
@@ -479,10 +484,11 @@ fn sortInitFini(self: *Elf) !void {
 
 fn initOutputSections(self: *Elf) !void {
     for (self.objects.items) |index| {
-        for (self.getFile(index).?.object.atoms.items) |atom_index| {
+        const object = self.getFile(index).?.object;
+        for (object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index) orelse continue;
             if (!atom.flags.alive) continue;
-            try atom.initOutputSection(self);
+            atom.out_shndx = try object.initOutputSection(self, atom.getInputShdr(self));
         }
     }
 }
@@ -576,26 +582,10 @@ fn initSyntheticSections(self: *Elf) !void {
         });
     }
 
-    self.shstrtab_sect_index = try self.addSection(.{
-        .name = ".shstrtab",
-        .type = elf.SHT_STRTAB,
-        .entsize = 1,
-        .addralign = 1,
-    });
+    try self.initShStrtab();
 
     if (!self.options.strip_all) {
-        self.strtab_sect_index = try self.addSection(.{
-            .name = ".strtab",
-            .type = elf.SHT_STRTAB,
-            .entsize = 1,
-            .addralign = 1,
-        });
-        self.symtab_sect_index = try self.addSection(.{
-            .name = ".symtab",
-            .type = elf.SHT_SYMTAB,
-            .addralign = @alignOf(elf.Elf64_Sym),
-            .entsize = @sizeOf(elf.Elf64_Sym),
-        });
+        try self.initSymtab();
     }
 
     const needs_interp = blk: {
@@ -616,7 +606,7 @@ fn initSyntheticSections(self: *Elf) !void {
         });
     }
 
-    if (self.options.output_mode == .lib or self.shared_objects.items.len > 0 or self.options.pie) {
+    if (self.options.shared or self.shared_objects.items.len > 0 or self.options.pie) {
         self.dynstrtab_sect_index = try self.addSection(.{
             .name = ".dynstr",
             .flags = elf.SHF_ALLOC,
@@ -672,6 +662,30 @@ fn initSyntheticSections(self: *Elf) !void {
             });
         }
     }
+}
+
+pub fn initSymtab(self: *Elf) !void {
+    self.strtab_sect_index = try self.addSection(.{
+        .name = ".strtab",
+        .type = elf.SHT_STRTAB,
+        .entsize = 1,
+        .addralign = 1,
+    });
+    self.symtab_sect_index = try self.addSection(.{
+        .name = ".symtab",
+        .type = elf.SHT_SYMTAB,
+        .addralign = @alignOf(elf.Elf64_Sym),
+        .entsize = @sizeOf(elf.Elf64_Sym),
+    });
+}
+
+pub fn initShStrtab(self: *Elf) !void {
+    self.shstrtab_sect_index = try self.addSection(.{
+        .name = ".shstrtab",
+        .type = elf.SHT_STRTAB,
+        .entsize = 1,
+        .addralign = 1,
+    });
 }
 
 fn addAtomsToSections(self: *Elf) !void {
@@ -1254,7 +1268,7 @@ fn getSectionRank(self: *Elf, shndx: u16) u8 {
 
         elf.SHT_DYNAMIC => return 0xf3,
 
-        elf.SHT_RELA => return 0xf,
+        elf.SHT_RELA, elf.SHT_GROUP => return 0xf,
 
         elf.SHT_PROGBITS => if (flags & elf.SHF_ALLOC != 0) {
             if (flags & elf.SHF_EXECINSTR != 0) {
@@ -1311,7 +1325,9 @@ fn sortSections(self: *Elf) !void {
 
     try self.sections.ensureTotalCapacity(gpa, slice.len);
     for (entries.items) |sorted| {
-        self.sections.appendAssumeCapacity(slice.get(sorted.shndx));
+        var out_shdr = slice.get(sorted.shndx);
+        out_shdr.rela_shndx = backlinks[out_shdr.rela_shndx];
+        self.sections.appendAssumeCapacity(out_shdr);
     }
 
     for (self.objects.items) |index| {
@@ -1394,6 +1410,10 @@ fn sortSections(self: *Elf) !void {
         const shdr = &self.sections.items(.shdr)[index];
         shdr.sh_link = self.dynsymtab_sect_index.?;
         shdr.sh_info = self.plt_sect_index.?;
+    }
+
+    for (self.comdat_group_sections.items) |*cg| {
+        cg.shndx = backlinks[cg.shndx];
     }
 }
 
@@ -1818,9 +1838,7 @@ fn convertCommonSymbols(self: *Elf) !void {
 }
 
 fn markImportsAndExports(self: *Elf) !void {
-    const is_shared = self.options.output_mode == .lib;
-
-    if (!is_shared)
+    if (!self.options.shared)
         for (self.shared_objects.items) |index| {
             for (self.getFile(index).?.shared.getGlobals()) |global_index| {
                 const global = self.getSymbol(global_index);
@@ -1844,7 +1862,7 @@ fn markImportsAndExports(self: *Elf) !void {
             if (file.getIndex() == index) {
                 global.flags.@"export" = true;
 
-                if (is_shared and vis != .PROTECTED) {
+                if (self.options.shared and vis != .PROTECTED) {
                     global.flags.import = true;
                 }
             }
@@ -1916,20 +1934,17 @@ fn claimUnresolved(self: *Elf) void {
             }
 
             const is_import = blk: {
-                if (self.options.output_mode != .lib) break :blk false;
+                if (!self.options.shared) break :blk false;
                 const vis = @as(elf.STV, @enumFromInt(sym.st_other));
                 if (vis == .HIDDEN) break :blk false;
                 break :blk true;
             };
 
-            global.* = .{
-                .value = 0,
-                .name = global.name,
-                .atom = 0,
-                .sym_idx = sym_idx,
-                .file = object.index,
-                .ver_idx = if (is_import) elf.VER_NDX_LOCAL else self.default_sym_version,
-            };
+            global.value = 0;
+            global.atom = 0;
+            global.sym_idx = sym_idx;
+            global.file = object.index;
+            global.ver_idx = if (is_import) elf.VER_NDX_LOCAL else self.default_sym_version;
             global.flags.import = is_import;
         }
     }
@@ -2286,6 +2301,17 @@ fn writeHeader(self: *Elf) !void {
     try self.base.file.pwriteAll(mem.asBytes(&header), 0);
 }
 
+pub fn addRelaShdr(self: *Elf, name: [:0]const u8, shndx: u16) !u16 {
+    return self.addSection(.{
+        .name = name,
+        .type = elf.SHT_RELA,
+        .flags = elf.SHF_INFO_LINK,
+        .entsize = @sizeOf(elf.Elf64_Rela),
+        .info = shndx,
+        .addralign = @alignOf(elf.Elf64_Rela),
+    });
+}
+
 pub const AddSectionOpts = struct {
     name: [:0]const u8,
     type: u32 = elf.SHT_NULL,
@@ -2628,7 +2654,7 @@ fn formatPhdrs(
     }
 }
 
-fn dumpState(self: *Elf) std.fmt.Formatter(fmtDumpState) {
+pub fn dumpState(self: *Elf) std.fmt.Formatter(fmtDumpState) {
     return .{ .data = self };
 }
 
@@ -2704,6 +2730,7 @@ pub const LinkObject = struct {
 const Section = struct {
     shdr: elf.Elf64_Shdr,
     atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
+    rela_shndx: u32 = 0,
 };
 
 const ComdatGroupOwner = struct {
@@ -2747,7 +2774,8 @@ const elf = std.elf;
 const fs = std.fs;
 const gc = @import("Elf/gc.zig");
 const log = std.log.scoped(.elf);
-const state_log = std.log.scoped(.state);
+const relocatable = @import("Elf/relocatable.zig");
+pub const state_log = std.log.scoped(.state);
 const synthetic = @import("Elf/synthetic.zig");
 const math = std.math;
 const mem = std.mem;
@@ -2755,6 +2783,7 @@ const mem = std.mem;
 const Allocator = mem.Allocator;
 const Archive = @import("Elf/Archive.zig");
 const Atom = @import("Elf/Atom.zig");
+const ComdatGroupSection = synthetic.ComdatGroupSection;
 const CopyRelSection = synthetic.CopyRelSection;
 const DynamicSection = synthetic.DynamicSection;
 const DynsymSection = synthetic.DynsymSection;

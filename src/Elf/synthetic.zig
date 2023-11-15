@@ -64,7 +64,7 @@ pub const DynamicSection = struct {
     }
 
     pub fn size(dt: DynamicSection, elf_file: *Elf) usize {
-        const is_shared = elf_file.options.output_mode == .lib;
+        const is_shared = elf_file.options.shared;
         var nentries: usize = 0;
         nentries += dt.needed.items.len; // NEEDED
         if (dt.soname != null) nentries += 1; // SONAME
@@ -93,7 +93,7 @@ pub const DynamicSection = struct {
     }
 
     pub fn write(dt: DynamicSection, elf_file: *Elf, writer: anytype) !void {
-        const is_shared = elf_file.options.output_mode == .lib;
+        const is_shared = elf_file.options.shared;
 
         // NEEDED
         for (dt.needed.items) |off| {
@@ -692,7 +692,7 @@ pub const GotSection = struct {
         entry.tag = .tlsgd;
         entry.symbol_index = sym_index;
         const symbol = elf_file.getSymbol(sym_index);
-        if (symbol.flags.import or elf_file.options.output_mode == .lib) got.flags.needs_rela = true;
+        if (symbol.flags.import or elf_file.options.shared) got.flags.needs_rela = true;
         if (symbol.getExtra(elf_file)) |extra| {
             var new_extra = extra;
             new_extra.tlsgd = index;
@@ -706,7 +706,7 @@ pub const GotSection = struct {
         entry.tag = .gottp;
         entry.symbol_index = sym_index;
         const symbol = elf_file.getSymbol(sym_index);
-        if (symbol.flags.import or elf_file.options.output_mode == .lib) got.flags.needs_rela = true;
+        if (symbol.flags.import or elf_file.options.shared) got.flags.needs_rela = true;
         if (symbol.getExtra(elf_file)) |extra| {
             var new_extra = extra;
             new_extra.gottp = index;
@@ -737,7 +737,7 @@ pub const GotSection = struct {
     }
 
     pub fn write(got: GotSection, elf_file: *Elf, writer: anytype) !void {
-        const is_shared = elf_file.options.output_mode == .lib;
+        const is_shared = elf_file.options.shared;
         const apply_relocs = elf_file.options.apply_dynamic_relocs;
 
         for (got.entries.items) |entry| {
@@ -800,7 +800,7 @@ pub const GotSection = struct {
     }
 
     pub fn addRela(got: GotSection, elf_file: *Elf) !void {
-        const is_shared = elf_file.options.output_mode == .lib;
+        const is_shared = elf_file.options.shared;
         try elf_file.rela_dyn.ensureUnusedCapacity(elf_file.base.allocator, got.numRela(elf_file));
 
         for (got.entries.items) |entry| {
@@ -903,7 +903,7 @@ pub const GotSection = struct {
     }
 
     pub fn numRela(got: GotSection, elf_file: *Elf) usize {
-        const is_shared = elf_file.options.output_mode == .lib;
+        const is_shared = elf_file.options.shared;
         var num: usize = 0;
         for (got.entries.items) |entry| {
             const symbol = switch (entry.tag) {
@@ -1295,6 +1295,54 @@ pub const CopyRelSection = struct {
     }
 };
 
+pub const ComdatGroupSection = struct {
+    shndx: u32,
+    cg_index: u32,
+
+    fn getFile(cgs: ComdatGroupSection, elf_file: *Elf) ?File {
+        const cg = elf_file.getComdatGroup(cgs.cg_index);
+        const cg_owner = elf_file.getComdatGroupOwner(cg.owner);
+        return elf_file.getFile(cg_owner.file);
+    }
+
+    pub fn getSymbol(cgs: ComdatGroupSection, elf_file: *Elf) Symbol.Index {
+        const cg = elf_file.getComdatGroup(cgs.cg_index);
+        const object = cgs.getFile(elf_file).?.object;
+        const shdr = object.sections.items(.shdr)[cg.shndx];
+        return object.symbols.items[shdr.sh_info];
+    }
+
+    pub fn size(cgs: ComdatGroupSection, elf_file: *Elf) usize {
+        const cg = elf_file.getComdatGroup(cgs.cg_index);
+        const object = cgs.getFile(elf_file).?.object;
+        const members = object.getComdatGroupMembers(cg.shndx);
+        return (members.len + 1) * @sizeOf(u32);
+    }
+
+    pub fn write(cgs: ComdatGroupSection, elf_file: *Elf, writer: anytype) !void {
+        const cg = elf_file.getComdatGroup(cgs.cg_index);
+        const object = cgs.getFile(elf_file).?.object;
+        const members = object.getComdatGroupMembers(cg.shndx);
+        try writer.writeInt(u32, elf.GRP_COMDAT, .little);
+        for (members) |shndx| {
+            const shdr = object.shdrs.items[shndx];
+            switch (shdr.sh_type) {
+                elf.SHT_RELA => {
+                    const atom_index = object.atoms.items[shdr.sh_info];
+                    const atom = elf_file.getAtom(atom_index).?;
+                    const rela = elf_file.output_rela_sections.get(atom.outputShndx().?).?;
+                    try writer.writeInt(u32, rela.shndx, .little);
+                },
+                else => {
+                    const atom_index = object.atoms.items[shndx];
+                    const atom = elf_file.getAtom(atom_index).?;
+                    try writer.writeInt(u32, atom.outputShndx().?, .little);
+                },
+            }
+        }
+    }
+};
+
 const std = @import("std");
 const assert = std.debug.assert;
 const elf = std.elf;
@@ -1302,5 +1350,6 @@ const mem = std.mem;
 
 const Allocator = mem.Allocator;
 const Elf = @import("../Elf.zig");
+const File = @import("file.zig").File;
 const SharedObject = @import("SharedObject.zig");
 const Symbol = @import("Symbol.zig");

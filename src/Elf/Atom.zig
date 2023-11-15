@@ -99,53 +99,6 @@ pub fn markFdesDead(self: Atom, elf_file: *Elf) void {
     }
 }
 
-pub fn initOutputSection(self: *Atom, elf_file: *Elf) !void {
-    const shdr = self.getInputShdr(elf_file);
-    const name = blk: {
-        const name = self.getName(elf_file);
-        if (shdr.sh_flags & elf.SHF_MERGE != 0) break :blk name;
-        const sh_name_prefixes: []const [:0]const u8 = &.{
-            ".text",       ".data.rel.ro", ".data", ".rodata", ".bss.rel.ro",       ".bss",
-            ".init_array", ".fini_array",  ".tbss", ".tdata",  ".gcc_except_table", ".ctors",
-            ".dtors",      ".gnu.warning",
-        };
-        inline for (sh_name_prefixes) |prefix| {
-            if (std.mem.eql(u8, name, prefix) or std.mem.startsWith(u8, name, prefix ++ ".")) {
-                break :blk prefix;
-            }
-        }
-        break :blk name;
-    };
-    const @"type" = switch (shdr.sh_type) {
-        elf.SHT_NULL => unreachable,
-        elf.SHT_PROGBITS => blk: {
-            if (std.mem.eql(u8, name, ".init_array") or std.mem.startsWith(u8, name, ".init_array."))
-                break :blk elf.SHT_INIT_ARRAY;
-            if (std.mem.eql(u8, name, ".fini_array") or std.mem.startsWith(u8, name, ".fini_array."))
-                break :blk elf.SHT_FINI_ARRAY;
-            break :blk shdr.sh_type;
-        },
-        elf.SHT_X86_64_UNWIND => elf.SHT_PROGBITS,
-        else => shdr.sh_type,
-    };
-    const flags = blk: {
-        const flags = shdr.sh_flags & ~@as(u64, elf.SHF_COMPRESSED | elf.SHF_GROUP | elf.SHF_GNU_RETAIN);
-        break :blk switch (@"type") {
-            elf.SHT_INIT_ARRAY, elf.SHT_FINI_ARRAY => flags | elf.SHF_WRITE,
-            else => flags,
-        };
-    };
-    const out_shndx = elf_file.getSectionByName(name) orelse try elf_file.addSection(.{
-        .type = @"type",
-        .flags = flags,
-        .name = name,
-    });
-    if (mem.eql(u8, ".text", name)) {
-        elf_file.text_sect_index = out_shndx;
-    }
-    self.out_shndx = out_shndx;
-}
-
 pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
     const object = self.getObject(elf_file);
     const relocs = self.getRelocs(elf_file);
@@ -159,7 +112,7 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
         if (try self.reportUndefSymbol(rel, elf_file)) continue;
 
         const symbol = object.getSymbol(rel.r_sym(), elf_file);
-        const is_shared = elf_file.options.output_mode == .lib;
+        const is_shared = elf_file.options.shared;
 
         if (symbol.isIFunc(elf_file)) {
             symbol.flags.got = true;
@@ -431,10 +384,8 @@ fn getDynAbsRelocAction(symbol: *const Symbol, elf_file: *Elf) RelocAction {
 }
 
 inline fn getOutputType(elf_file: *Elf) u2 {
-    return switch (elf_file.options.output_mode) {
-        .lib => 0,
-        .exe => if (elf_file.options.pie) 1 else 2,
-    };
+    if (elf_file.options.shared) return 0;
+    return if (elf_file.options.pie) 1 else 2;
 }
 
 inline fn getDataType(symbol: *const Symbol, elf_file: *Elf) u2 {

@@ -256,6 +256,56 @@ fn initSymtab(self: *Object, elf_file: *Elf) !void {
     }
 }
 
+pub fn initOutputSection(self: Object, elf_file: *Elf, shdr: elf.Elf64_Shdr) !u16 {
+    const name = blk: {
+        const name = self.getShString(shdr.sh_name);
+        if (elf_file.options.relocatable) break :blk name;
+        if (shdr.sh_flags & elf.SHF_MERGE != 0) break :blk name;
+        const sh_name_prefixes: []const [:0]const u8 = &.{
+            ".text",       ".data.rel.ro", ".data", ".rodata", ".bss.rel.ro",       ".bss",
+            ".init_array", ".fini_array",  ".tbss", ".tdata",  ".gcc_except_table", ".ctors",
+            ".dtors",      ".gnu.warning",
+        };
+        inline for (sh_name_prefixes) |prefix| {
+            if (std.mem.eql(u8, name, prefix) or std.mem.startsWith(u8, name, prefix ++ ".")) {
+                break :blk prefix;
+            }
+        }
+        break :blk name;
+    };
+    const @"type" = switch (shdr.sh_type) {
+        elf.SHT_NULL => unreachable,
+        elf.SHT_PROGBITS => blk: {
+            if (std.mem.eql(u8, name, ".init_array") or std.mem.startsWith(u8, name, ".init_array."))
+                break :blk elf.SHT_INIT_ARRAY;
+            if (std.mem.eql(u8, name, ".fini_array") or std.mem.startsWith(u8, name, ".fini_array."))
+                break :blk elf.SHT_FINI_ARRAY;
+            break :blk shdr.sh_type;
+        },
+        elf.SHT_X86_64_UNWIND => elf.SHT_PROGBITS,
+        else => shdr.sh_type,
+    };
+    const flags = blk: {
+        var flags = shdr.sh_flags;
+        if (!elf_file.options.relocatable) {
+            flags &= ~@as(u64, elf.SHF_COMPRESSED | elf.SHF_GROUP | elf.SHF_GNU_RETAIN);
+        }
+        break :blk switch (@"type") {
+            elf.SHT_INIT_ARRAY, elf.SHT_FINI_ARRAY => flags | elf.SHF_WRITE,
+            else => flags,
+        };
+    };
+    const out_shndx = elf_file.getSectionByName(name) orelse try elf_file.addSection(.{
+        .type = @"type",
+        .flags = flags,
+        .name = name,
+    });
+    if (mem.eql(u8, ".text", name)) {
+        elf_file.text_sect_index = out_shndx;
+    }
+    return out_shndx;
+}
+
 fn parseEhFrame(self: *Object, shndx: u16, elf_file: *Elf) !void {
     const relocs_shndx = for (self.getShdrs(), 0..) |shdr, i| switch (shdr.sh_type) {
         elf.SHT_RELA => if (shdr.sh_info == shndx) break @as(u16, @intCast(i)),
@@ -595,36 +645,36 @@ pub fn getGlobals(self: Object) []const Symbol.Index {
     return self.symbols.items[start..];
 }
 
-pub inline fn getSymbol(self: *Object, index: Symbol.Index, elf_file: *Elf) *Symbol {
+pub inline fn getSymbol(self: Object, index: Symbol.Index, elf_file: *Elf) *Symbol {
     return elf_file.getSymbol(self.symbols.items[index]);
 }
 
-pub inline fn getShdrs(self: *Object) []const elf.Elf64_Shdr {
+pub inline fn getShdrs(self: Object) []const elf.Elf64_Shdr {
     return self.shdrs.items;
 }
 
-pub inline fn getShdrContents(self: *Object, index: u32) []const u8 {
+pub inline fn getShdrContents(self: Object, index: u32) []const u8 {
     assert(index < self.getShdrs().len);
     const shdr = self.getShdrs()[index];
     return self.data[shdr.sh_offset..][0..shdr.sh_size];
 }
 
-pub fn getShdr(self: *Object, index: u32) elf.Elf64_Shdr {
+pub fn getShdr(self: Object, index: u32) elf.Elf64_Shdr {
     const shdrs = self.getShdrs();
     assert(index < shdrs.len);
     return shdrs[index];
 }
 
-inline fn getString(self: *Object, off: u32) [:0]const u8 {
+inline fn getString(self: Object, off: u32) [:0]const u8 {
     assert(off < self.strtab.len);
     return mem.sliceTo(@as([*:0]const u8, @ptrCast(self.strtab.ptr + off)), 0);
 }
 
-inline fn getShString(self: *Object, off: u32) [:0]const u8 {
+inline fn getShString(self: Object, off: u32) [:0]const u8 {
     return self.shstrtab.getAssumeExists(off);
 }
 
-pub fn getComdatGroupMembers(self: *Object, index: u16) []align(1) const u32 {
+pub fn getComdatGroupMembers(self: Object, index: u16) []align(1) const u32 {
     const raw = self.getShdrContents(index);
     const nmembers = @divExact(raw.len, @sizeOf(u32));
     const members = @as([*]align(1) const u32, @ptrCast(raw.ptr))[1..nmembers];
@@ -635,7 +685,7 @@ pub fn asFile(self: *Object) File {
     return .{ .object = self };
 }
 
-pub fn getRelocs(self: *Object, shndx: u32) []align(1) const elf.Elf64_Rela {
+pub fn getRelocs(self: Object, shndx: u32) []align(1) const elf.Elf64_Rela {
     const raw = self.getShdrContents(shndx);
     const num = @divExact(raw.len, @sizeOf(elf.Elf64_Rela));
     return @as([*]align(1) const elf.Elf64_Rela, @ptrCast(raw.ptr))[0..num];
