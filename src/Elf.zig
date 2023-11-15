@@ -688,7 +688,7 @@ pub fn initShStrtab(self: *Elf) !void {
     });
 }
 
-fn addAtomsToSections(self: *Elf) !void {
+pub fn addAtomsToSections(self: *Elf) !void {
     for (self.objects.items) |index| {
         for (self.getFile(index).?.object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index) orelse continue;
@@ -820,7 +820,7 @@ fn calcSectionSizes(self: *Elf) !void {
     }
 }
 
-fn calcSymtabSize(self: *Elf) !void {
+pub fn calcSymtabSize(self: *Elf) !void {
     if (self.options.strip_all) return;
 
     var nlocals: u32 = 0;
@@ -834,6 +834,17 @@ fn calcSymtabSize(self: *Elf) !void {
     for (self.objects.items) |index| files.appendAssumeCapacity(index);
     for (self.shared_objects.items) |index| files.appendAssumeCapacity(index);
     if (self.internal_object_index) |index| files.appendAssumeCapacity(index);
+
+    // Section symbols
+    for (self.sections.items(.atoms), self.sections.items(.sym_index)) |atoms, *sym_index| {
+        if (atoms.items.len == 0) continue;
+        sym_index.* = nlocals + 1;
+        nlocals += 1;
+    }
+    if (self.eh_frame_sect_index) |shndx| {
+        self.sections.items(.sym_index)[shndx] = nlocals + 1;
+        nlocals += 1;
+    }
 
     for (files.items) |index| {
         const file = self.getFile(index).?;
@@ -889,7 +900,7 @@ fn calcSymtabSize(self: *Elf) !void {
     }
 }
 
-fn writeSymtab(self: *Elf) !void {
+pub fn writeSymtab(self: *Elf) !void {
     if (self.options.strip_all) return;
 
     const gpa = self.base.allocator;
@@ -901,6 +912,8 @@ fn writeSymtab(self: *Elf) !void {
 
     const needed_strtab_size = strtab_shdr.sh_size - 1;
     try self.strtab.ensureUnusedCapacity(gpa, needed_strtab_size);
+
+    self.writeSectionSymbols();
 
     for (self.objects.items) |index| {
         self.getFile(index).?.writeSymtab(self);
@@ -928,6 +941,21 @@ fn writeSymtab(self: *Elf) !void {
 
     try self.base.file.pwriteAll(mem.sliceAsBytes(self.symtab.items), symtab_shdr.sh_offset);
     try self.base.file.pwriteAll(self.strtab.items, strtab_shdr.sh_offset);
+}
+
+fn writeSectionSymbols(self: *Elf) void {
+    for (self.sections.items(.shdr), self.sections.items(.sym_index), 0..) |shdr, sym_index, shndx| {
+        if (sym_index == 0) continue;
+        const out_sym = &self.symtab.items[sym_index];
+        out_sym.* = .{
+            .st_name = 0,
+            .st_value = shdr.sh_addr,
+            .st_info = elf.STT_SECTION,
+            .st_shndx = @intCast(shndx),
+            .st_size = 0,
+            .st_other = 0,
+        };
+    }
 }
 
 fn initPhdrs(self: *Elf) !void {
@@ -1106,7 +1134,7 @@ inline fn shdrIsTbss(shdr: *const elf.Elf64_Shdr) bool {
     return shdrIsZerofill(shdr) and shdrIsTls(shdr);
 }
 
-inline fn shdrIsZerofill(shdr: *const elf.Elf64_Shdr) bool {
+pub inline fn shdrIsZerofill(shdr: *const elf.Elf64_Shdr) bool {
     return shdr.sh_type == elf.SHT_NOBITS;
 }
 
@@ -1996,7 +2024,7 @@ fn scanRelocs(self: *Elf) !void {
 
     for (self.symbols.items, 0..) |*symbol, i| {
         const index = @as(u32, @intCast(i));
-        if (!symbol.isLocal() and !symbol.flags.has_dynamic) {
+        if (!symbol.isLocal(self) and !symbol.flags.has_dynamic) {
             log.debug("'{s}' is non-local", .{symbol.getName(self)});
             try self.dynsym.addSymbol(index, self);
         }
@@ -2270,7 +2298,7 @@ fn writePhdrs(self: *Elf) !void {
     try self.base.file.pwriteAll(mem.sliceAsBytes(self.phdrs.items), phoff);
 }
 
-fn writeShdrs(self: *Elf) !void {
+pub fn writeShdrs(self: *Elf) !void {
     const size = self.sections.items(.shdr).len * @sizeOf(elf.Elf64_Shdr);
     log.debug("writing section headers from 0x{x} to 0x{x}", .{ self.shoff, self.shoff + size });
     try self.base.file.pwriteAll(mem.sliceAsBytes(self.sections.items(.shdr)), self.shoff);
@@ -2728,6 +2756,7 @@ const Section = struct {
     shdr: elf.Elf64_Shdr,
     atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
     rela_shndx: u32 = 0,
+    sym_index: u32 = 0,
 };
 
 const ComdatGroupOwner = struct {

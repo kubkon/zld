@@ -274,7 +274,11 @@ pub fn calcEhFrameSize(elf_file: *Elf) !usize {
         }
     }
 
-    return offset + 4; // NULL terminator
+    if (elf_file.options.relocatable) {
+        offset += 4; // NULL terminator
+    }
+
+    return offset;
 }
 
 pub fn calcEhFrameHdrSize(elf_file: *Elf) usize {
@@ -286,6 +290,22 @@ pub fn calcEhFrameHdrSize(elf_file: *Elf) usize {
         }
     }
     return eh_frame_hdr_header_size + count * 8;
+}
+
+pub fn calcEhFrameRelocs(elf_file: *Elf) usize {
+    var count: usize = 0;
+    for (elf_file.objects.items) |index| {
+        const object = elf_file.getFile(index).?.object;
+        for (object.cies.items) |cie| {
+            if (!cie.alive) continue;
+            count += cie.getRelocs(elf_file).len;
+        }
+        for (object.fdes.items) |fde| {
+            if (!fde.alive) continue;
+            count += fde.getRelocs(elf_file).len;
+        }
+    }
+    return count;
 }
 
 fn resolveReloc(rec: anytype, sym: *const Symbol, rel: elf.Elf64_Rela, elf_file: *Elf, data: []u8) !void {

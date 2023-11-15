@@ -1308,7 +1308,7 @@ pub const ComdatGroupSection = struct {
     pub fn getSymbol(cgs: ComdatGroupSection, elf_file: *Elf) Symbol.Index {
         const cg = elf_file.getComdatGroup(cgs.cg_index);
         const object = cgs.getFile(elf_file).?.object;
-        const shdr = object.sections.items(.shdr)[cg.shndx];
+        const shdr = object.getShdrs()[cg.shndx];
         return object.symbols.items[shdr.sh_info];
     }
 

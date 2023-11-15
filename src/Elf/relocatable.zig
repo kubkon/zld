@@ -2,27 +2,27 @@ pub fn flush(elf_file: *Elf) !void {
     claimUnresolved(elf_file);
     try initSections(elf_file);
     try elf_file.sortSections();
-    // try self.addAtomsToSections();
-    // try self.calcSectionSizesRelocatable();
+    try elf_file.addAtomsToSections();
+    try calcSectionSizes(elf_file);
 
-    // try self.allocateSectionsRelocatable();
+    allocateSections(elf_file, @sizeOf(elf.Elf64_Ehdr));
     // self.allocateAtoms();
     // self.allocateLocals();
     // self.allocateGlobals();
     // self.allocateSyntheticSymbols();
 
-    // self.shoff = blk: {
-    //     const shdr = self.sections.items(.shdr)[self.sections.len - 1];
-    //     const offset = shdr.sh_offset + shdr.sh_size;
-    //     break :blk mem.alignForward(u64, offset, @alignOf(elf.Elf64_Shdr));
-    // };
+    elf_file.shoff = blk: {
+        const shdr = elf_file.sections.items(.shdr)[elf_file.sections.len - 1];
+        const offset = shdr.sh_offset + shdr.sh_size;
+        break :blk mem.alignForward(u64, offset, @alignOf(elf.Elf64_Shdr));
+    };
 
-    Elf.state_log.debug("{}", .{elf_file.dumpState()});
+    state_log.debug("{}", .{elf_file.dumpState()});
 
     // try self.writeAtomsRelocatable();
-    // try self.writeSyntheticSectionsRelocatable();
-    // try self.writeShdrs();
-    // try self.writeHeader();
+    try writeSyntheticSections(elf_file);
+    try elf_file.writeShdrs();
+    try writeHeader(elf_file);
 
     elf_file.base.reportWarningsAndErrorsAndExit();
 }
@@ -61,7 +61,10 @@ fn initSections(elf_file: *Elf) !void {
             const rela_shdr = object.getShdrs()[atom.relocs_shndx];
             if (rela_shdr.sh_type != elf.SHT_NULL) {
                 const out_rela_shndx = try object.initOutputSection(elf_file, rela_shdr);
-                elf_file.sections.items(.shdr)[out_rela_shndx].sh_flags |= elf.SHF_INFO_LINK;
+                const out_rela_shdr = &elf_file.sections.items(.shdr)[out_rela_shndx];
+                out_rela_shdr.sh_flags |= elf.SHF_INFO_LINK;
+                out_rela_shdr.sh_addralign = @alignOf(elf.Elf64_Rela);
+                out_rela_shdr.sh_entsize = @sizeOf(elf.Elf64_Rela);
                 elf_file.sections.items(.rela_shndx)[atom.out_shndx] = out_rela_shndx;
             }
         }
@@ -116,51 +119,120 @@ fn initComdatGroups(elf_file: *Elf) !void {
     }
 }
 
-// fn calcSectionSizesRelocatable(self: *Elf) !void {
-//     for (self.sections.items(.shdr), self.sections.items(.atoms)) |*shdr, atoms| {
-//         if (atoms.items.len == 0) continue;
+fn calcSectionSizes(elf_file: *Elf) !void {
+    for (
+        elf_file.sections.items(.shdr),
+        elf_file.sections.items(.atoms),
+        elf_file.sections.items(.rela_shndx),
+    ) |*shdr, atoms, rela_shndx| {
+        if (atoms.items.len == 0) continue;
 
-//         for (atoms.items) |atom_index| {
-//             const atom = self.getAtom(atom_index).?;
-//             const alignment = try math.powi(u64, 2, atom.alignment);
-//             const offset = mem.alignForward(u64, shdr.sh_size, alignment);
-//             const padding = offset - shdr.sh_size;
-//             atom.value = offset;
-//             shdr.sh_size += padding + atom.size;
-//             shdr.sh_addralign = @max(shdr.sh_addralign, alignment);
-//         }
-//     }
+        const rela_shdr = if (rela_shndx != 0) &elf_file.sections.items(.shdr)[rela_shndx] else null;
 
-//     // TODO rela sections
+        for (atoms.items) |atom_index| {
+            const atom = elf_file.getAtom(atom_index).?;
+            const alignment = try math.powi(u64, 2, atom.alignment);
+            const offset = mem.alignForward(u64, shdr.sh_size, alignment);
+            const padding = offset - shdr.sh_size;
+            atom.value = offset;
+            shdr.sh_size += padding + atom.size;
+            shdr.sh_addralign = @max(shdr.sh_addralign, alignment);
 
-//     if (self.eh_frame_sect_index) |index| {
-//         const shdr = &self.sections.items(.shdr)[index];
-//         shdr.sh_size = try eh_frame.calcEhFrameSize(self);
-//         shdr.sh_addralign = @alignOf(u64);
-//     }
+            if (rela_shdr) |rshdr| {
+                rshdr.sh_size += rshdr.sh_entsize * atom.getRelocs(elf_file).len;
+            }
+        }
+    }
 
-//     try self.calcSymtabSize();
-//     self.calcComdatGroupsSizes();
+    if (elf_file.eh_frame_sect_index) |index| {
+        const shdr = &elf_file.sections.items(.shdr)[index];
+        shdr.sh_size = try eh_frame.calcEhFrameSize(elf_file);
+        shdr.sh_addralign = @alignOf(u64);
 
-//     if (self.shstrtab_sect_index) |index| {
-//         const shdr = &self.sections.items(.shdr)[index];
-//         shdr.sh_size = self.shstrtab.buffer.items.len;
-//     }
-// }
+        const rela_shndx = elf_file.sections.items(.rela_shndx)[index];
+        const rela_shdr = &elf_file.sections.items(.shdr)[rela_shndx];
+        rela_shdr.sh_size = eh_frame.calcEhFrameRelocs(elf_file) * rela_shdr.sh_entsize;
+    }
 
-// fn calcComdatGroupsSizes(self: *Elf) void {
-//     for (self.comdat_group_sections.items) |cg| {
-//         const shdr = &self.sections.items(.shdr)[cg.shndx];
-//         shdr.sh_size = cg.size(self);
-//         shdr.sh_link = self.symtab_sect_index.?;
+    try elf_file.calcSymtabSize();
+    calcComdatGroupsSizes(elf_file);
 
-//         const sym = self.getSymbol(cg.getSymbol(self));
-//         shdr.sh_info = sym.getOutputSymtabIndex(self) orelse
-//             self.getSectionSymbolOutputSymtabIndex(sym.shndx);
-//     }
-// }
+    if (elf_file.shstrtab_sect_index) |index| {
+        const shdr = &elf_file.sections.items(.shdr)[index];
+        shdr.sh_size = elf_file.shstrtab.buffer.items.len;
+    }
+}
 
+fn calcComdatGroupsSizes(elf_file: *Elf) void {
+    for (elf_file.comdat_group_sections.items) |cg| {
+        const shdr = &elf_file.sections.items(.shdr)[cg.shndx];
+        shdr.sh_size = cg.size(elf_file);
+        shdr.sh_link = elf_file.symtab_sect_index.?;
+
+        const sym = elf_file.getSymbol(cg.getSymbol(elf_file));
+        shdr.sh_info = sym.getOutputSymtabIndex(elf_file) orelse
+            elf_file.sections.items(.sym_index)[sym.shndx];
+    }
+}
+
+fn allocateSections(elf_file: *Elf, base_offset: u64) void {
+    const shdrs = elf_file.sections.slice().items(.shdr)[1..];
+    var offset = base_offset;
+    for (shdrs) |*shdr| {
+        if (Elf.shdrIsZerofill(shdr)) continue;
+        shdr.sh_offset = mem.alignForward(u64, offset, shdr.sh_addralign);
+        offset = shdr.sh_offset + shdr.sh_size;
+    }
+}
+
+fn writeSyntheticSections(elf_file: *Elf) !void {
+    try elf_file.writeSymtab();
+
+    if (elf_file.shstrtab_sect_index) |shndx| {
+        const shdr = elf_file.sections.items(.shdr)[shndx];
+        try elf_file.base.file.pwriteAll(elf_file.shstrtab.buffer.items, shdr.sh_offset);
+    }
+}
+
+fn writeHeader(elf_file: *Elf) !void {
+    var header = elf.Elf64_Ehdr{
+        .e_ident = undefined,
+        .e_type = .REL,
+        .e_machine = elf_file.options.cpu_arch.?.toElfMachine(),
+        .e_version = 1,
+        .e_entry = 0,
+        .e_phoff = 0,
+        .e_shoff = elf_file.shoff,
+        .e_flags = 0,
+        .e_ehsize = @sizeOf(elf.Elf64_Ehdr),
+        .e_phentsize = 0,
+        .e_phnum = 0,
+        .e_shentsize = @sizeOf(elf.Elf64_Shdr),
+        .e_shnum = @as(u16, @intCast(elf_file.sections.items(.shdr).len)),
+        .e_shstrndx = elf_file.shstrtab_sect_index.?,
+    };
+    // Magic
+    mem.copy(u8, header.e_ident[0..4], "\x7fELF");
+    // Class
+    header.e_ident[4] = elf.ELFCLASS64;
+    // Endianness
+    header.e_ident[5] = elf.ELFDATA2LSB;
+    // ELF version
+    header.e_ident[6] = 1;
+    // OS ABI, often set to 0 regardless of target platform
+    // ABI Version, possibly used by glibc but not by static executables
+    // padding
+    @memset(header.e_ident[7..][0..9], 0);
+    log.debug("writing ELF header {} at 0x{x}", .{ header, 0 });
+    try elf_file.base.file.pwriteAll(mem.asBytes(&header), 0);
+}
+
+const eh_frame = @import("eh_frame.zig");
 const elf = std.elf;
+const log = std.log.scoped(.elf);
+const math = std.math;
+const mem = std.mem;
+const state_log = std.log.scoped(.state);
 const std = @import("std");
 
 const Elf = @import("../Elf.zig");

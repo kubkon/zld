@@ -227,7 +227,7 @@ pub fn calcSymtabSize(self: *SharedObject, elf_file: *Elf) !void {
         const global = elf_file.getSymbol(global_index);
         const file_ptr = global.getFile(elf_file) orelse continue;
         if (file_ptr.getIndex() != self.index) continue;
-        if (global.isLocal()) continue;
+        if (global.isLocal(elf_file)) continue;
         global.flags.output_symtab = true;
         try global.setOutputSymtabIndex(self.output_symtab_ctx.nglobals, elf_file);
         self.output_symtab_ctx.nglobals += 1;

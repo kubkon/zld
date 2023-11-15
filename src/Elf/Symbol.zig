@@ -36,7 +36,8 @@ pub fn isAbs(symbol: Symbol, elf_file: *Elf) bool {
     return !symbol.flags.import and symbol.getAtom(elf_file) == null and symbol.shndx == 0 and file != .internal;
 }
 
-pub fn isLocal(symbol: Symbol) bool {
+pub fn isLocal(symbol: Symbol, elf_file: *Elf) bool {
+    if (elf_file.options.relocatable) return symbol.getSourceSymbol(elf_file).st_bind() == elf.STB_LOCAL;
     return !(symbol.flags.import or symbol.flags.@"export");
 }
 
@@ -105,7 +106,7 @@ pub fn getOutputSymtabIndex(symbol: Symbol, elf_file: *Elf) ?u32 {
         inline else => |x| x.output_symtab_ctx,
     };
     const idx = symbol.getExtra(elf_file).?.symtab;
-    return if (symbol.isLocal()) idx + symtab_ctx.ilocal else idx + symtab_ctx.iglobal;
+    return if (symbol.isLocal(elf_file)) idx + symtab_ctx.ilocal else idx + symtab_ctx.iglobal;
 }
 
 pub fn setOutputSymtabIndex(symbol: *Symbol, index: u32, elf_file: *Elf) !void {
@@ -200,7 +201,7 @@ pub fn setOutputSym(symbol: Symbol, elf_file: *Elf, out: *elf.Elf64_Sym) void {
     const s_sym = symbol.getSourceSymbol(elf_file);
     const st_type = symbol.getType(elf_file);
     const st_bind: u8 = blk: {
-        if (symbol.isLocal()) break :blk 0;
+        if (symbol.isLocal(elf_file)) break :blk 0;
         if (symbol.flags.weak) break :blk elf.STB_WEAK;
         if (file == .shared) break :blk elf.STB_GLOBAL;
         break :blk s_sym.st_bind();
@@ -208,6 +209,7 @@ pub fn setOutputSym(symbol: Symbol, elf_file: *Elf, out: *elf.Elf64_Sym) void {
     const st_shndx = blk: {
         if (symbol.flags.copy_rel) break :blk elf_file.copy_rel_sect_index.?;
         if (file == .shared or s_sym.st_shndx == elf.SHN_UNDEF) break :blk elf.SHN_UNDEF;
+        if (elf_file.options.relocatable and s_sym.st_shndx == elf.SHN_COMMON) break :blk elf.SHN_COMMON;
         if (symbol.getAtom(elf_file) == null and file != .internal) break :blk elf.SHN_ABS;
         break :blk symbol.shndx;
     };
@@ -217,7 +219,7 @@ pub fn setOutputSym(symbol: Symbol, elf_file: *Elf, out: *elf.Elf64_Sym) void {
             if (symbol.flags.is_canonical) break :blk symbol.getAddress(.{}, elf_file);
             break :blk 0;
         }
-        if (st_shndx == elf.SHN_ABS) break :blk symbol.value;
+        if (st_shndx == elf.SHN_ABS or st_shndx == elf.SHN_COMMON) break :blk symbol.value;
         const shdr = &elf_file.sections.items(.shdr)[st_shndx];
         if (Elf.shdrIsTls(shdr)) break :blk symbol.value - elf_file.getTlsAddress();
         break :blk symbol.value;

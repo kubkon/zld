@@ -597,7 +597,7 @@ pub fn calcSymtabSize(self: *Object, elf_file: *Elf) !void {
         if (file_ptr.getIndex() != self.index) continue;
         if (global.getAtom(elf_file)) |atom| if (!atom.flags.alive) continue;
         global.flags.output_symtab = true;
-        if (global.isLocal()) {
+        if (global.isLocal(elf_file)) {
             try global.setOutputSymtabIndex(self.output_symtab_ctx.nlocals, elf_file);
             self.output_symtab_ctx.nlocals += 1;
         } else {
