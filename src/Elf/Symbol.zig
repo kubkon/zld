@@ -98,6 +98,24 @@ pub fn getAddress(symbol: Symbol, opts: struct {
     return symbol.value;
 }
 
+pub fn getOutputSymtabIndex(symbol: Symbol, elf_file: *Elf) ?u32 {
+    if (!symbol.flags.output_symtab) return null;
+    const file = symbol.getFile(elf_file).?;
+    const symtab_ctx = switch (file) {
+        inline else => |x| x.output_symtab_ctx,
+    };
+    const idx = symbol.getExtra(elf_file).?.symtab;
+    return if (symbol.isLocal()) idx + symtab_ctx.ilocal else idx + symtab_ctx.iglobal;
+}
+
+pub fn setOutputSymtabIndex(symbol: *Symbol, index: u32, elf_file: *Elf) !void {
+    if (symbol.getExtra(elf_file)) |extra| {
+        var new_extra = extra;
+        new_extra.symtab = index;
+        symbol.setExtra(new_extra, elf_file);
+    } else try symbol.addExtra(.{ .symtab = index }, elf_file);
+}
+
 pub fn getGotAddress(symbol: Symbol, elf_file: *Elf) u64 {
     if (!symbol.flags.got) return 0;
     const extra = symbol.getExtra(elf_file).?;
@@ -177,7 +195,7 @@ pub inline fn setExtra(symbol: Symbol, extra: Extra, elf_file: *Elf) void {
     elf_file.setSymbolExtra(symbol.extra, extra);
 }
 
-pub inline fn asElfSym(symbol: Symbol, st_name: u32, elf_file: *Elf) elf.Elf64_Sym {
+pub fn setOutputSym(symbol: Symbol, elf_file: *Elf, out: *elf.Elf64_Sym) void {
     const file = symbol.getFile(elf_file).?;
     const s_sym = symbol.getSourceSymbol(elf_file);
     const st_type = symbol.getType(elf_file);
@@ -204,14 +222,11 @@ pub inline fn asElfSym(symbol: Symbol, st_name: u32, elf_file: *Elf) elf.Elf64_S
         if (Elf.shdrIsTls(shdr)) break :blk symbol.value - elf_file.getTlsAddress();
         break :blk symbol.value;
     };
-    return elf.Elf64_Sym{
-        .st_name = st_name,
-        .st_info = (st_bind << 4) | st_type,
-        .st_other = s_sym.st_other,
-        .st_shndx = st_shndx,
-        .st_value = st_value,
-        .st_size = s_sym.st_size,
-    };
+    out.st_info = (st_bind << 4) | st_type;
+    out.st_other = s_sym.st_other;
+    out.st_shndx = st_shndx;
+    out.st_value = st_value;
+    out.st_size = s_sym.st_size;
 }
 
 pub fn format(
@@ -343,6 +358,7 @@ pub const Extra = struct {
     plt: u32 = 0,
     plt_got: u32 = 0,
     dynamic: u32 = 0,
+    symtab: u32 = 0,
     copy_rel: u32 = 0,
     tlsgd: u32 = 0,
     gottp: u32 = 0,

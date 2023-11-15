@@ -64,6 +64,8 @@ undefs: std.AutoHashMapUnmanaged(Symbol.Index, std.ArrayListUnmanaged(Atom.Index
 string_intern: StringTable(.string_intern) = .{},
 
 shstrtab: StringTable(.shstrtab) = .{},
+symtab: std.ArrayListUnmanaged(elf.Elf64_Sym) = .{},
+strtab: std.ArrayListUnmanaged(u8) = .{},
 dynsym: DynsymSection = .{},
 dynstrtab: StringTable(.dynstrtab) = .{},
 versym: std.ArrayListUnmanaged(elf.Elf64_Versym) = .{},
@@ -131,6 +133,8 @@ pub fn deinit(self: *Elf) void {
     const gpa = self.base.allocator;
     self.string_intern.deinit(gpa);
     self.shstrtab.deinit(gpa);
+    self.symtab.deinit(gpa);
+    self.strtab.deinit(gpa);
     self.atoms.deinit(gpa);
     self.comdat_groups.deinit(gpa);
     self.comdat_groups_owners.deinit(gpa);
@@ -247,12 +251,15 @@ pub fn flush(self: *Elf) !void {
     // Append empty string to string tables.
     try self.string_intern.buffer.append(gpa, 0);
     try self.shstrtab.buffer.append(gpa, 0);
+    try self.strtab.append(gpa, 0);
     try self.dynstrtab.buffer.append(gpa, 0);
     // Append null section.
     _ = try self.addSection(.{ .name = "" });
     // Append null atom.
     try self.atoms.append(gpa, .{});
     // Append null symbols.
+    try self.symtab.append(gpa, null_sym);
+    try self.symbols.append(gpa, .{});
     try self.symbols_extra.append(gpa, 0);
     // Append null file.
     try self.files.append(gpa, .null);
@@ -641,7 +648,7 @@ fn initSections(self: *Elf) !void {
             .addralign = 8,
         });
 
-        const needs_versions = for (self.dynsym.symbols.items) |dynsym| {
+        const needs_versions = for (self.dynsym.entries.items) |dynsym| {
             const symbol = self.getSymbol(dynsym.index);
             if (symbol.flags.import and symbol.ver_idx & elf.VERSYM_VERSION > elf.VER_NDX_GLOBAL) break true;
         } else false;
@@ -798,56 +805,69 @@ fn calcSectionSizes(self: *Elf) !void {
 fn calcSymtabSize(self: *Elf) !void {
     if (self.options.strip_all) return;
 
-    var sizes = SymtabSize{};
+    var nlocals: u32 = 0;
+    var nglobals: u32 = 0;
+    var strsize: u32 = 0;
 
-    for (self.objects.items) |index| {
-        const object = self.getFile(index).?.object;
-        try object.calcSymtabSize(self);
-        sizes.nlocals += object.output_symtab_size.nlocals;
-        sizes.nglobals += object.output_symtab_size.nglobals;
-        sizes.strsize += object.output_symtab_size.strsize;
-    }
+    const gpa = self.base.allocator;
+    var files = std.ArrayList(File.Index).init(gpa);
+    defer files.deinit();
+    try files.ensureTotalCapacityPrecise(self.objects.items.len + self.shared_objects.items.len + 1);
+    for (self.objects.items) |index| files.appendAssumeCapacity(index);
+    for (self.shared_objects.items) |index| files.appendAssumeCapacity(index);
+    if (self.internal_object_index) |index| files.appendAssumeCapacity(index);
 
-    for (self.shared_objects.items) |index| {
-        const shared = self.getFile(index).?.shared;
-        try shared.calcSymtabSize(self);
-        sizes.nglobals += shared.output_symtab_size.nglobals;
-        sizes.strsize += shared.output_symtab_size.strsize;
-    }
-
-    if (self.internal_object_index) |index| {
-        const internal = self.getFile(index).?.internal;
-        try internal.calcSymtabSize(self);
-        sizes.nlocals += internal.output_symtab_size.nlocals;
-        sizes.strsize += internal.output_symtab_size.strsize;
+    for (files.items) |index| {
+        const file = self.getFile(index).?;
+        const ctx = switch (file) {
+            inline else => |x| &x.output_symtab_ctx,
+        };
+        ctx.ilocal = nlocals + 1;
+        ctx.iglobal = nglobals + 1;
+        try file.calcSymtabSize(self);
+        nlocals += ctx.nlocals;
+        nglobals += ctx.nglobals;
+        strsize += ctx.strsize;
     }
 
     if (self.got_sect_index) |_| {
-        try self.got.calcSymtabSize(self);
-        sizes.nlocals += self.got.output_symtab_size.nlocals;
-        sizes.strsize += self.got.output_symtab_size.strsize;
+        self.got.output_symtab_ctx.ilocal = nlocals + 1;
+        self.got.calcSymtabSize(self);
+        nlocals += self.got.output_symtab_ctx.nlocals;
+        strsize += self.got.output_symtab_ctx.strsize;
     }
 
     if (self.plt_sect_index) |_| {
-        try self.plt.calcSymtabSize(self);
-        sizes.nlocals += self.plt.output_symtab_size.nlocals;
-        sizes.strsize += self.plt.output_symtab_size.strsize;
+        self.plt.output_symtab_ctx.ilocal = nlocals + 1;
+        self.plt.calcSymtabSize(self);
+        nlocals += self.plt.output_symtab_ctx.nlocals;
+        strsize += self.plt.output_symtab_ctx.strsize;
     }
 
     if (self.plt_got_sect_index) |_| {
-        try self.plt_got.calcSymtabSize(self);
-        sizes.nlocals += self.plt_got.output_symtab_size.nlocals;
-        sizes.strsize += self.plt_got.output_symtab_size.strsize;
+        self.plt_got.output_symtab_ctx.ilocal = nlocals + 1;
+        self.plt_got.calcSymtabSize(self);
+        nlocals += self.plt_got.output_symtab_ctx.nlocals;
+        strsize += self.plt_got.output_symtab_ctx.strsize;
+    }
+
+    for (files.items) |index| {
+        const file = self.getFile(index).?;
+        const ctx = switch (file) {
+            inline else => |x| &x.output_symtab_ctx,
+        };
+        ctx.iglobal += nlocals;
     }
 
     {
         const shdr = &self.sections.items(.shdr)[self.symtab_sect_index.?];
-        shdr.sh_size = (sizes.nlocals + 1 + sizes.nglobals) * @sizeOf(elf.Elf64_Sym);
-        shdr.sh_info = sizes.nlocals + 1;
+        shdr.sh_info = nlocals + 1;
+        shdr.sh_link = self.strtab_sect_index.?;
+        shdr.sh_size = (nlocals + 1 + nglobals) * @sizeOf(elf.Elf64_Sym);
     }
     {
         const shdr = &self.sections.items(.shdr)[self.strtab_sect_index.?];
-        shdr.sh_size = sizes.strsize + 1;
+        shdr.sh_size = strsize + 1;
     }
 }
 
@@ -858,60 +878,38 @@ fn writeSymtab(self: *Elf) !void {
     const symtab_shdr = self.sections.items(.shdr)[self.symtab_sect_index.?];
     const strtab_shdr = self.sections.items(.shdr)[self.strtab_sect_index.?];
 
-    var symtab = try gpa.alloc(elf.Elf64_Sym, @divExact(symtab_shdr.sh_size, @sizeOf(elf.Elf64_Sym)));
-    defer gpa.free(symtab);
-    symtab[0] = null_sym;
+    const nsyms = @divExact(symtab_shdr.sh_size, @sizeOf(elf.Elf64_Sym));
+    try self.symtab.resize(gpa, nsyms);
 
-    var strtab = StringTable(.strtab){};
-    defer strtab.deinit(gpa);
-    try strtab.buffer.append(gpa, 0);
-
-    var ctx = WriteSymtabCtx{
-        .ilocal = 1,
-        .iglobal = symtab_shdr.sh_info,
-        .symtab = symtab,
-        .strtab = &strtab,
-    };
+    const needed_strtab_size = strtab_shdr.sh_size - 1;
+    try self.strtab.ensureUnusedCapacity(gpa, needed_strtab_size);
 
     for (self.objects.items) |index| {
-        const object = self.getFile(index).?.object;
-        try object.writeSymtab(self, ctx);
-        ctx.ilocal += object.output_symtab_size.nlocals;
-        ctx.iglobal += object.output_symtab_size.nglobals;
-    }
-
-    if (self.internal_object_index) |index| {
-        const internal = self.getFile(index).?.internal;
-        try internal.writeSymtab(self, ctx);
-        ctx.ilocal += internal.output_symtab_size.nlocals;
-    }
-
-    if (self.got_sect_index) |_| {
-        try self.got.writeSymtab(self, ctx);
-        ctx.ilocal += self.got.output_symtab_size.nlocals;
-    }
-
-    if (self.plt_sect_index) |_| {
-        try self.plt.writeSymtab(self, ctx);
-        ctx.ilocal += self.plt.output_symtab_size.nlocals;
-    }
-
-    if (self.plt_got_sect_index) |_| {
-        try self.plt_got.writeSymtab(self, ctx);
-        ctx.ilocal += self.plt_got.output_symtab_size.nlocals;
+        self.getFile(index).?.writeSymtab(self);
     }
 
     for (self.shared_objects.items) |index| {
-        const shared = self.getFile(index).?.shared;
-        try shared.writeSymtab(self, ctx);
-        ctx.iglobal += shared.output_symtab_size.nglobals;
+        self.getFile(index).?.writeSymtab(self);
     }
 
-    const strtab_padding = strtab_shdr.sh_size - strtab.buffer.items.len;
-    try strtab.buffer.writer(gpa).writeByteNTimes(0, strtab_padding);
+    if (self.internal_object_index) |index| {
+        self.getFile(index).?.writeSymtab(self);
+    }
 
-    try self.base.file.pwriteAll(mem.sliceAsBytes(symtab), symtab_shdr.sh_offset);
-    try self.base.file.pwriteAll(strtab.buffer.items, strtab_shdr.sh_offset);
+    if (self.got_sect_index) |_| {
+        self.got.writeSymtab(self);
+    }
+
+    if (self.plt_sect_index) |_| {
+        self.plt.writeSymtab(self);
+    }
+
+    if (self.plt_got_sect_index) |_| {
+        self.plt_got.writeSymtab(self);
+    }
+
+    try self.base.file.pwriteAll(mem.sliceAsBytes(self.symtab.items), symtab_shdr.sh_offset);
+    try self.base.file.pwriteAll(self.strtab.items, strtab_shdr.sh_offset);
 }
 
 fn initPhdrs(self: *Elf) !void {
@@ -2045,7 +2043,7 @@ fn setVerSymtab(self: *Elf) !void {
     if (self.versym_sect_index == null) return;
     try self.versym.resize(self.base.allocator, self.dynsym.count());
     self.versym.items[0] = elf.VER_NDX_LOCAL;
-    for (self.dynsym.symbols.items, 1..) |dynsym, i| {
+    for (self.dynsym.entries.items, 1..) |dynsym, i| {
         const sym = self.getSymbol(dynsym.index);
         self.versym.items[i] = sym.ver_idx;
     }
@@ -2721,17 +2719,12 @@ pub const ComdatGroup = struct {
     pub const Index = u32;
 };
 
-pub const SymtabSize = struct {
+pub const SymtabCtx = struct {
+    ilocal: u32 = 0,
+    iglobal: u32 = 0,
     nlocals: u32 = 0,
     nglobals: u32 = 0,
     strsize: u32 = 0,
-};
-
-pub const WriteSymtabCtx = struct {
-    ilocal: u32,
-    iglobal: u32,
-    symtab: []elf.Elf64_Sym,
-    strtab: *StringTable(.strtab),
 };
 
 pub const null_sym = elf.Elf64_Sym{
