@@ -1644,12 +1644,11 @@ fn testLinkerScript(b: *Build, opts: Options) *Step {
     const dso = cc(b, opts);
     dso.addCSource("int foo() { return 42; }");
     dso.addArgs(&.{ "-fPIC", "-shared" });
-    const dso_out = dso.saveOutputAs("libfoo.so");
+    const dso_out = dso.saveOutputAs("libbar.so");
 
-    const scr = scr: {
-        const wf = WriteFile.create(b);
-        break :scr wf.add("script", "GROUP(AS_NEEDED(-lfoo))");
-    };
+    const scripts = WriteFile.create(b);
+    _ = scripts.add("liba.so", "INPUT(libfoo.so)");
+    _ = scripts.add("libfoo.so", "GROUP(AS_NEEDED(-lbar))");
 
     const exe = cc(b, opts);
     exe.addCSource(
@@ -1658,7 +1657,8 @@ fn testLinkerScript(b: *Build, opts: Options) *Step {
         \\  return foo() - 42;
         \\}
     );
-    exe.addFileSource(scr);
+    exe.addArg("-la");
+    exe.addPrefixedDirectorySource("-L", scripts.getDirectory());
     exe.addPrefixedDirectorySource("-L", dso_out.dir);
     exe.addPrefixedDirectorySource("-Wl,-rpath,", dso_out.dir);
 
