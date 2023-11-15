@@ -236,7 +236,7 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
                     // We skip the next relocation.
                     i += 1;
                 } else {
-                    elf_file.needs_tlsld = true;
+                    elf_file.got.flags.needs_tlsld = true;
                 }
             },
 
@@ -523,7 +523,7 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
                 shndx
             else
                 null;
-            break :blk if (shndx) |index| @as(i64, @intCast(elf_file.getSectionAddress(index))) else 0;
+            break :blk if (shndx) |index| @as(i64, @intCast(elf_file.sections.items(.shdr)[index].sh_addr)) else 0;
         };
         // Relative offset to the start of the global offset table.
         const G = @as(i64, @intCast(target.getGotAddress(elf_file))) - GOT;
@@ -614,8 +614,9 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
             },
 
             elf.R_X86_64_TLSLD => {
-                if (elf_file.got.emit_tlsld) {
-                    const S_ = @as(i64, @intCast(elf_file.getTlsLdAddress()));
+                if (elf_file.got.tlsld_index) |entry_index| {
+                    const tlsld_entry = elf_file.got.entries.items[entry_index];
+                    const S_ = @as(i64, @intCast(tlsld_entry.getAddress(elf_file)));
                     try cwriter.writeInt(i32, @as(i32, @intCast(S_ + A - P)), .little);
                 } else {
                     try relaxTlsLdToLe(
@@ -773,10 +774,15 @@ pub fn resolveRelocsNonAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void 
         // Address of the target symbol - can be address of the symbol within an atom or address of PLT stub.
         const S = @as(i64, @intCast(target.getAddress(.{}, elf_file)));
         // Address of the global offset table.
-        const GOT = if (elf_file.got_sect_index) |shndx|
-            @as(i64, @intCast(elf_file.getSectionAddress(shndx)))
-        else
-            0;
+        const GOT = blk: {
+            const shndx = if (elf_file.got_plt_sect_index) |shndx|
+                shndx
+            else if (elf_file.got_sect_index) |shndx|
+                shndx
+            else
+                null;
+            break :blk if (shndx) |index| @as(i64, @intCast(elf_file.sections.items(.shdr)[index].sh_addr)) else 0;
+        };
         // Address of the dynamic thread pointer.
         const DTP = @as(i64, @intCast(elf_file.getDtpAddress()));
 

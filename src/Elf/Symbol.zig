@@ -85,16 +85,15 @@ pub fn getAddress(symbol: Symbol, opts: struct {
     plt: bool = true,
 }, elf_file: *Elf) u64 {
     if (symbol.flags.copy_rel) {
-        return elf_file.getSectionAddress(elf_file.copy_rel_sect_index.?) + symbol.value;
+        return symbol.getCopyRelAddress(elf_file);
     }
     if (symbol.flags.plt and opts.plt) {
-        const extra = symbol.getExtra(elf_file).?;
         if (!symbol.flags.is_canonical and symbol.flags.got) {
             // We have a non-lazy bound function pointer, use that!
-            return elf_file.getPltGotEntryAddress(extra.plt_got);
+            return symbol.getPltGotAddress(elf_file);
         }
         // Lazy-bound function it is!
-        return elf_file.getPltEntryAddress(extra.plt);
+        return symbol.getPltAddress(elf_file);
     }
     return symbol.value;
 }
@@ -102,25 +101,56 @@ pub fn getAddress(symbol: Symbol, opts: struct {
 pub fn getGotAddress(symbol: Symbol, elf_file: *Elf) u64 {
     if (!symbol.flags.got) return 0;
     const extra = symbol.getExtra(elf_file).?;
-    return elf_file.getGotEntryAddress(extra.got);
+    const entry = elf_file.got.entries.items[extra.got];
+    return entry.getAddress(elf_file);
+}
+
+pub fn getPltGotAddress(symbol: Symbol, elf_file: *Elf) u64 {
+    if (!(symbol.flags.plt and symbol.flags.got)) return 0;
+    const extra = symbol.getExtra(elf_file).?;
+    const shdr = elf_file.sections.items(.shdr)[elf_file.plt_got_sect_index.?];
+    return shdr.sh_addr + extra.plt_got * 16;
+}
+
+pub fn getPltAddress(symbol: Symbol, elf_file: *Elf) u64 {
+    if (!symbol.flags.plt) return 0;
+    const extra = symbol.getExtra(elf_file).?;
+    const shdr = elf_file.sections.items(.shdr)[elf_file.plt_sect_index.?];
+    return shdr.sh_addr + extra.plt * 16 + PltSection.preamble_size;
+}
+
+pub fn getGotPltAddress(symbol: Symbol, elf_file: *Elf) u64 {
+    if (!symbol.flags.plt) return 0;
+    const extra = symbol.getExtra(elf_file).?;
+    const shdr = elf_file.sections.items(.shdr)[elf_file.got_plt_sect_index.?];
+    return shdr.sh_addr + extra.plt * 8 + GotPltSection.preamble_size;
+}
+
+pub fn getCopyRelAddress(symbol: Symbol, elf_file: *Elf) u64 {
+    if (!symbol.flags.copy_rel) return 0;
+    const shdr = elf_file.sections.items(.shdr)[elf_file.copy_rel_sect_index.?];
+    return shdr.sh_addr + symbol.value;
 }
 
 pub fn getTlsGdAddress(symbol: Symbol, elf_file: *Elf) u64 {
     if (!symbol.flags.tlsgd) return 0;
     const extra = symbol.getExtra(elf_file).?;
-    return elf_file.getGotEntryAddress(extra.tlsgd);
+    const entry = elf_file.got.entries.items[extra.tlsgd];
+    return entry.getAddress(elf_file);
 }
 
 pub fn getGotTpAddress(symbol: Symbol, elf_file: *Elf) u64 {
     if (!symbol.flags.gottp) return 0;
     const extra = symbol.getExtra(elf_file).?;
-    return elf_file.getGotEntryAddress(extra.gottp);
+    const entry = elf_file.got.entries.items[extra.gottp];
+    return entry.getAddress(elf_file);
 }
 
 pub fn getTlsDescAddress(symbol: Symbol, elf_file: *Elf) u64 {
     if (!symbol.flags.tlsdesc) return 0;
     const extra = symbol.getExtra(elf_file).?;
-    return elf_file.getGotEntryAddress(extra.tlsdesc);
+    const entry = elf_file.got.entries.items[extra.tlsdesc];
+    return entry.getAddress(elf_file);
 }
 
 pub fn getAlignment(symbol: Symbol, elf_file: *Elf) !u64 {
@@ -319,14 +349,20 @@ pub const Extra = struct {
     tlsdesc: u32 = 0,
 };
 
+pub const Index = u32;
+
 const std = @import("std");
 const assert = std.debug.assert;
 const elf = std.elf;
+const synthetic = @import("synthetic.zig");
 
 const Atom = @import("Atom.zig");
 const Elf = @import("../Elf.zig");
 const File = @import("file.zig").File;
 const InternalObject = @import("InternalObject.zig");
+const GotSection = synthetic.GotSection;
+const GotPltSection = synthetic.GotPltSection;
 const Object = @import("Object.zig");
+const PltSection = synthetic.PltSection;
 const SharedObject = @import("SharedObject.zig");
 const Symbol = @This();

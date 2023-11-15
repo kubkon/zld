@@ -86,7 +86,6 @@ comdat_groups: std.ArrayListUnmanaged(ComdatGroup) = .{},
 comdat_groups_owners: std.ArrayListUnmanaged(ComdatGroupOwner) = .{},
 comdat_groups_table: std.AutoHashMapUnmanaged(u32, ComdatGroupOwner.Index) = .{},
 
-needs_tlsld: bool = false,
 has_text_reloc: bool = false,
 num_ifunc_dynrelocs: usize = 0,
 default_sym_version: elf.Elf64_Versym,
@@ -500,7 +499,7 @@ fn initSections(self: *Elf) !void {
         }
     }
 
-    if (self.got.symbols.items.len > 0) {
+    if (self.got.entries.items.len > 0) {
         self.got_sect_index = try self.addSection(.{
             .name = ".got",
             .type = elf.SHT_PROGBITS,
@@ -510,7 +509,8 @@ fn initSections(self: *Elf) !void {
     }
 
     const needs_rela_dyn = blk: {
-        if (self.got.needs_rela or self.got.emit_tlsld or self.copy_rel.symbols.items.len > 0) break :blk true;
+        if (self.got.flags.needs_rela or self.got.flags.needs_tlsld or
+            self.copy_rel.symbols.items.len > 0) break :blk true;
         for (self.objects.items) |index| {
             if (self.getFile(index).?.object.num_dynrelocs > 0) break :blk true;
         }
@@ -2001,9 +2001,9 @@ fn scanRelocs(self: *Elf) !void {
         }
     }
 
-    if (self.needs_tlsld) {
+    if (self.got.flags.needs_tlsld) {
         log.debug("needs TLSLD", .{});
-        self.got.emit_tlsld = true;
+        try self.got.addTlsLdSymbol(self);
     }
 }
 
@@ -2527,9 +2527,9 @@ fn sortRelaDyn(self: *Elf) void {
 fn getNumIRelativeRelocs(self: *Elf) usize {
     var count: usize = self.num_ifunc_dynrelocs;
 
-    for (self.got.symbols.items) |sym| {
-        if (sym != .got) continue;
-        const symbol = self.getSymbol(sym.getIndex());
+    for (self.got.entries.items) |entry| {
+        if (entry.tag != .got) continue;
+        const symbol = self.getSymbol(entry.symbol_index);
         if (symbol.isIFunc(self)) count += 1;
     }
 
@@ -2555,30 +2555,6 @@ fn getStartStopBasename(self: *Elf, atom_index: Atom.Index) ?[]const u8 {
     return null;
 }
 
-pub inline fn getSectionAddress(self: *Elf, shndx: u16) u64 {
-    return self.sections.items(.shdr)[shndx].sh_addr;
-}
-
-pub inline fn getGotEntryAddress(self: *Elf, index: u32) u64 {
-    return self.getSectionAddress(self.got_sect_index.?) + index * @sizeOf(u64);
-}
-
-pub inline fn getPltEntryAddress(self: *Elf, index: u32) u64 {
-    return self.getSectionAddress(self.plt_sect_index.?) + PltSection.preamble_size + index * 16;
-}
-
-pub inline fn getGotPltEntryAddress(self: *Elf, index: u32) u64 {
-    return self.getSectionAddress(self.got_plt_sect_index.?) + GotPltSection.preamble_size + index * @sizeOf(u64);
-}
-
-pub inline fn getPltGotEntryAddress(self: *Elf, index: u32) u64 {
-    return self.getSectionAddress(self.plt_got_sect_index.?) + index * 16;
-}
-
-pub inline fn getTlsLdAddress(self: *Elf) u64 {
-    return self.getGotEntryAddress(self.got.getTlsLdIndex());
-}
-
 pub fn getTpAddress(self: *Elf) u64 {
     const index = self.tls_phdr_index orelse return 0;
     const phdr = self.phdrs.items[index];
@@ -2589,7 +2565,7 @@ pub fn getDtpAddress(self: *Elf) u64 {
     return self.getTlsAddress();
 }
 
-pub inline fn getTlsAddress(self: *Elf) u64 {
+pub fn getTlsAddress(self: *Elf) u64 {
     const index = self.tls_phdr_index orelse return 0;
     const phdr = self.phdrs.items[index];
     return phdr.p_vaddr;
@@ -2680,15 +2656,7 @@ fn fmtDumpState(
         try writer.print("internal({d}) : internal\n", .{index});
         try writer.print("{}\n", .{internal.fmtSymtab(self)});
     }
-    try writer.writeAll("GOT\n");
-    for (self.got.symbols.items) |sym| {
-        try writer.print("  ({s}) {d} '{s}'\n", .{
-            @tagName(sym),
-            sym.getIndex(),
-            self.getSymbol(sym.getIndex()).getName(self),
-        });
-    }
-    try writer.writeByte('\n');
+    try writer.print("GOT\n{}\n", .{self.got.fmt(self)});
     try writer.writeAll("PLT\n");
     for (self.plt.symbols.items, 0..) |sym_index, i| {
         try writer.print("  {d} => {d} '{s}'\n", .{ i, sym_index, self.getSymbol(sym_index).getName(self) });
