@@ -349,6 +349,7 @@ pub fn flush(self: *Elf) !void {
         self.base.reportWarningsAndErrorsAndExit();
     }
 
+    try self.initOutputSections();
     try self.resolveSyntheticSymbols();
 
     if (self.options.z_execstack_if_needed) {
@@ -363,7 +364,7 @@ pub fn flush(self: *Elf) !void {
     self.claimUnresolved();
     try self.scanRelocs();
 
-    try self.initSections();
+    try self.initSyntheticSections();
     try self.sortSections();
     try self.addAtomsToSections();
     try self.sortInitFini();
@@ -476,7 +477,7 @@ fn sortInitFini(self: *Elf) !void {
     }
 }
 
-fn initSections(self: *Elf) !void {
+fn initOutputSections(self: *Elf) !void {
     for (self.objects.items) |index| {
         for (self.getFile(index).?.object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index) orelse continue;
@@ -484,7 +485,9 @@ fn initSections(self: *Elf) !void {
             try atom.initOutputSection(self);
         }
     }
+}
 
+fn initSyntheticSections(self: *Elf) !void {
     const needs_eh_frame = for (self.objects.items) |index| {
         if (self.getFile(index).?.object.cies.items.len > 0) break true;
     } else false;
@@ -1875,21 +1878,18 @@ fn resolveSyntheticSymbols(self: *Elf) !void {
     self.rela_iplt_start_index = try internal.addSyntheticGlobal("__rela_iplt_start", self);
     self.rela_iplt_end_index = try internal.addSyntheticGlobal("__rela_iplt_end", self);
 
-    for (self.objects.items) |index| {
-        const object = self.getFile(index).?.object;
-        for (object.atoms.items) |atom_index| {
-            if (self.getStartStopBasename(atom_index)) |name| {
-                const gpa = self.base.allocator;
-                try self.start_stop_indexes.ensureUnusedCapacity(gpa, 2);
+    for (self.sections.items(.shdr)) |shdr| {
+        if (self.getStartStopBasename(shdr)) |name| {
+            const gpa = self.base.allocator;
+            try self.start_stop_indexes.ensureUnusedCapacity(gpa, 2);
 
-                const start = try std.fmt.allocPrintZ(gpa, "__start_{s}", .{name});
-                defer gpa.free(start);
-                const stop = try std.fmt.allocPrintZ(gpa, "__stop_{s}", .{name});
-                defer gpa.free(stop);
+            const start = try std.fmt.allocPrintZ(gpa, "__start_{s}", .{name});
+            defer gpa.free(start);
+            const stop = try std.fmt.allocPrintZ(gpa, "__stop_{s}", .{name});
+            defer gpa.free(stop);
 
-                self.start_stop_indexes.appendAssumeCapacity(try internal.addSyntheticGlobal(start, self));
-                self.start_stop_indexes.appendAssumeCapacity(try internal.addSyntheticGlobal(stop, self));
-            }
+            self.start_stop_indexes.appendAssumeCapacity(try internal.addSyntheticGlobal(start, self));
+            self.start_stop_indexes.appendAssumeCapacity(try internal.addSyntheticGlobal(stop, self));
         }
     }
 
@@ -2557,10 +2557,9 @@ pub fn isCIdentifier(name: []const u8) bool {
     return true;
 }
 
-fn getStartStopBasename(self: *Elf, atom_index: Atom.Index) ?[]const u8 {
-    const atom = self.getAtom(atom_index) orelse return null;
-    const name = atom.getName(self);
-    if (atom.getInputShdr(self).sh_flags & elf.SHF_ALLOC != 0 and name.len > 0) {
+fn getStartStopBasename(self: *Elf, shdr: elf.Elf64_Shdr) ?[]const u8 {
+    const name = self.shstrtab.get(shdr.sh_name) orelse return null;
+    if (shdr.sh_flags & elf.SHF_ALLOC != 0 and name.len > 0) {
         if (isCIdentifier(name)) return name;
     }
     return null;

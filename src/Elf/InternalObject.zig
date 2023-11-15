@@ -58,8 +58,13 @@ pub fn calcSymtabSize(self: *InternalObject, elf_file: *Elf) !void {
         const file_ptr = global.getFile(elf_file) orelse continue;
         if (file_ptr.getIndex() != self.index) continue;
         global.flags.output_symtab = true;
-        try global.setOutputSymtabIndex(self.output_symtab_ctx.nlocals, elf_file);
-        self.output_symtab_ctx.nlocals += 1;
+        if (global.isLocal()) {
+            try global.setOutputSymtabIndex(self.output_symtab_ctx.nlocals, elf_file);
+            self.output_symtab_ctx.nlocals += 1;
+        } else {
+            try global.setOutputSymtabIndex(self.output_symtab_ctx.nglobals, elf_file);
+            self.output_symtab_ctx.nglobals += 1;
+        }
         self.output_symtab_ctx.strsize += @as(u32, @intCast(global.getName(elf_file).len + 1));
     }
 }
@@ -112,8 +117,9 @@ fn formatSymtab(
     }
 }
 
-const std = @import("std");
+const assert = std.debug.assert;
 const elf = std.elf;
+const std = @import("std");
 
 const Allocator = std.mem.Allocator;
 const Elf = @import("../Elf.zig");
