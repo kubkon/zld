@@ -1,58 +1,5 @@
-const MachO = @This();
-
-const std = @import("std");
-const build_options = @import("build_options");
-const builtin = @import("builtin");
-const assert = std.debug.assert;
-const dwarf = std.dwarf;
-const fmt = std.fmt;
-const fs = std.fs;
-const log = std.log.scoped(.macho);
-const macho = std.macho;
-const math = std.math;
-const mem = std.mem;
-const meta = std.meta;
-
-const aarch64 = @import("aarch64.zig");
-const calcUuid = @import("MachO/uuid.zig").calcUuid;
-const dead_strip = @import("MachO/dead_strip.zig");
-const eh_frame = @import("MachO/eh_frame.zig");
-const fat = @import("MachO/fat.zig");
-const load_commands = @import("MachO/load_commands.zig");
-const thunks = @import("MachO/thunks.zig");
-const trace = @import("tracy.zig").trace;
-
-const Allocator = mem.Allocator;
-const ArenaAllocator = std.heap.ArenaAllocator;
-const Archive = @import("MachO/Archive.zig");
-const Atom = @import("MachO/Atom.zig");
-const CodeSignature = @import("MachO/CodeSignature.zig");
-const Dylib = @import("MachO/Dylib.zig");
-const DwarfInfo = @import("MachO/DwarfInfo.zig");
-const Md5 = std.crypto.hash.Md5;
-const Object = @import("MachO/Object.zig");
-pub const Options = @import("MachO/Options.zig");
-const LibStub = @import("tapi.zig").LibStub;
-const StringTable = @import("strtab.zig").StringTable;
-const ThreadPool = std.Thread.Pool;
-const Trie = @import("MachO/Trie.zig");
-const UnwindInfo = @import("MachO/UnwindInfo.zig");
-const Zld = @import("Zld.zig");
-
-const Bind = @import("MachO/dyld_info/bind.zig").Bind(*const MachO, MachO.SymbolWithLoc);
-const LazyBind = @import("MachO/dyld_info/bind.zig").LazyBind(*const MachO, MachO.SymbolWithLoc);
-const Rebase = @import("MachO/dyld_info/Rebase.zig");
-
-pub const base_tag = Zld.Tag.macho;
-
-const Section = struct {
-    header: macho.section_64,
-    segment_index: u8,
-    first_atom_index: AtomIndex,
-    last_atom_index: AtomIndex,
-};
-
 base: Zld,
+arena: std.heap.ArenaAllocator.State,
 options: Options,
 
 dyld_info_cmd: macho.dyld_info_command = .{},
@@ -65,11 +12,9 @@ uuid_cmd: macho.uuid_command = .{
 },
 codesig_cmd: macho.linkedit_data_command = .{ .cmd = .CODE_SIGNATURE },
 
-objects: std.ArrayListUnmanaged(Object) = .{},
-archives: std.ArrayListUnmanaged(Archive) = .{},
-dylibs: std.ArrayListUnmanaged(Dylib) = .{},
-dylibs_map: std.StringHashMapUnmanaged(u16) = .{},
-referenced_dylibs: std.AutoArrayHashMapUnmanaged(u16, void) = .{},
+objects: std.ArrayListUnmanaged(File.Index) = .{},
+dylibs: std.ArrayListUnmanaged(File.Index) = .{},
+files: std.MultiArrayList(File.Entry) = .{},
 
 segments: std.ArrayListUnmanaged(macho.segment_command_64) = .{},
 sections: std.MultiArrayList(Section) = .{},
@@ -85,6 +30,7 @@ dyld_private_sym_index: ?u32 = null,
 stub_helper_preamble_sym_index: ?u32 = null,
 
 strtab: StringTable(.strtab) = .{},
+string_intern: StringTable(.string_intern) = .{},
 
 tlv_ptr_entries: std.ArrayListUnmanaged(IndirectPointer) = .{},
 tlv_ptr_table: std.AutoHashMapUnmanaged(SymbolWithLoc, u32) = .{},
@@ -213,6 +159,7 @@ fn createEmpty(gpa: Allocator, options: Options, thread_pool: *ThreadPool) !*Mac
             .file = undefined,
             .thread_pool = thread_pool,
         },
+        .arena = std.heap.ArenaAllocator.init(gpa).state,
         .options = options,
     };
     return self;
@@ -223,14 +170,19 @@ pub fn flush(self: *MachO) !void {
     defer tracy.end();
 
     const gpa = self.base.allocator;
-    var arena_allocator = ArenaAllocator.init(gpa);
-    defer arena_allocator.deinit();
+
+    // AtomIndex at 0 is reserved as null atom
+    try self.atoms.append(gpa, .{});
+    // Append empty string to string tables
+    try self.string_intern.buffer.append(gpa, 0);
+    // Append null file
+    try self.files.append(gpa, .null);
+
+    var arena_allocator = self.arena.promote(gpa);
+    defer self.arena = arena_allocator.state;
     const arena = arena_allocator.allocator();
 
     const syslibroot = self.options.syslibroot;
-
-    try self.atoms.append(gpa, Atom.empty); // AtomIndex at 0 is reserved as null atom
-    try self.strtab.buffer.append(gpa, 0);
 
     // Resolve paths
     log.debug("library search dirs", .{});
@@ -258,6 +210,8 @@ pub fn flush(self: *MachO) !void {
     for (self.options.positionals) |obj| {
         try self.parsePositional(arena, obj, lib_dirs.items, framework_dirs.items);
     }
+
+    state_log.debug("{}", .{self.dumpState()});
 
     self.base.reportWarningsAndErrorsAndExit();
 
@@ -698,8 +652,7 @@ fn parseObject(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
     const tracy = trace(@src());
     defer tracy.end();
 
-    // const gpa = self.base.allocator;
-    _ = arena;
+    const gpa = self.base.allocator;
     const file = try std.fs.cwd().openFile(obj.path, .{});
     defer file.close();
 
@@ -709,7 +662,22 @@ fn parseObject(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
     if (header.filetype != macho.MH_OBJECT) return false;
     self.validateOrSetCpuArch(obj.path, header.cputype);
 
-    return true;
+    const mtime: u64 = mtime: {
+        const stat = file.stat() catch break :mtime 0;
+        break :mtime @as(u64, @intCast(@divFloor(stat.mtime, 1_000_000_000)));
+    };
+    const data = try file.readToEndAlloc(arena, std.math.maxInt(u32));
+
+    const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
+    self.files.set(index, .{ .object = .{
+        .path = obj.path,
+        .data = data,
+        .index = index,
+        .mtime = mtime,
+    } });
+    const object = &self.files.items(.data)[index].object;
+    try object.parse(self);
+    try self.objects.append(gpa, index);
 
     // if (object.getPlatform()) |platform| {
     //     const self_platform = self.options.platform orelse blk: {
@@ -734,22 +702,7 @@ fn parseObject(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
     //     }
     // }
 
-    // const mtime: u64 = mtime: {
-    //     const stat = file.stat() catch break :mtime 0;
-    //     break :mtime @as(u64, @intCast(@divFloor(stat.mtime, 1_000_000_000)));
-    // };
-    // const file_stat = try file.stat();
-    // const file_size = math.cast(usize, file_stat.size) orelse return error.Overflow;
-    // const contents = try file.readToEndAlloc(gpa, file_size);
-
-    // var object = Object{
-    //     .name = try gpa.dupe(u8, obj.path),
-    //     .mtime = mtime,
-    //     .contents = contents,
-    // };
-    // errdefer object.deinit(gpa);
-    // try object.parse(gpa);
-    // try self.objects.append(gpa, object);
+    return true;
 }
 
 fn validateOrSetCpuArch(self: *MachO, path: []const u8, cputype: i32) void {
@@ -1670,169 +1623,6 @@ fn forceSymbolDefined(self: *MachO, name: []const u8, resolver: *SymbolResolver)
     try resolver.unresolved.putNoClobber(global_index, {});
 }
 
-fn resolveSymbols(self: *MachO, resolver: *SymbolResolver) !void {
-    const tracy = trace(@src());
-    defer tracy.end();
-
-    // We add the specified entrypoint as the first unresolved symbols so that
-    // we search for it in libraries should there be no object files specified
-    // on the linker line.
-    if (!self.options.dylib) {
-        const entry_name = self.options.entry orelse default_entry_point;
-        try self.forceSymbolDefined(entry_name, resolver);
-    }
-
-    // Force resolution of any symbols requested by the user.
-    for (self.options.force_undefined_symbols) |sym_name| {
-        try self.forceSymbolDefined(sym_name, resolver);
-    }
-
-    for (self.objects.items, 0..) |_, object_id| {
-        try self.resolveSymbolsInObject(@as(u16, @intCast(object_id)), resolver);
-    }
-
-    try self.resolveSymbolsInArchives(resolver);
-    self.base.reportWarningsAndErrorsAndExit();
-    try self.resolveDyldStubBinder(resolver);
-    try self.resolveSymbolsInDylibs(resolver);
-    try self.createMhExecuteHeaderSymbol(resolver);
-    try self.createDsoHandleSymbol(resolver);
-    try self.resolveSymbolsAtLoading(resolver);
-}
-
-fn resolveSymbolsInObject(self: *MachO, object_id: u16, resolver: *SymbolResolver) !void {
-    const object = &self.objects.items[object_id];
-    const in_symtab = object.in_symtab orelse return;
-
-    log.debug("resolving symbols in '{s}'", .{object.name});
-
-    var sym_index: u32 = 0;
-    while (sym_index < in_symtab.len) : (sym_index += 1) {
-        const sym = &object.symtab[sym_index];
-        const sym_name = object.getSymbolName(sym_index);
-
-        if (sym.stab()) {
-            self.base.fatal("{s}: unhandled symbol type stab:{s}", .{ object.name, sym_name });
-        }
-
-        if (sym.indr()) {
-            self.base.fatal("{s}: unhandled symbol type indirect:{s}", .{ object.name, sym_name });
-        }
-
-        if (sym.abs()) {
-            self.base.fatal("{s}: unhandled symbol type absolute:{s}", .{ object.name, sym_name });
-        }
-
-        if (sym.sect() and !sym.ext()) {
-            log.debug("symbol '{s}' local to object {s}; skipping...", .{
-                sym_name,
-                object.name,
-            });
-            continue;
-        }
-
-        const sym_loc = SymbolWithLoc{ .sym_index = sym_index, .file = object_id + 1 };
-
-        const global_index = resolver.table.get(sym_name) orelse {
-            const global_index = try self.addGlobal(sym_loc);
-            try resolver.table.putNoClobber(sym_name, global_index);
-            if (sym.undf() and !sym.tentative()) {
-                try resolver.unresolved.putNoClobber(global_index, {});
-            }
-            continue;
-        };
-        const global = &self.globals.items[global_index];
-        const global_sym = self.getSymbol(global.*);
-
-        // Cases to consider: sym vs global_sym
-        // 1.  strong(sym) and strong(global_sym) => error
-        // 2.  strong(sym) and weak(global_sym) => sym
-        // 3.  strong(sym) and tentative(global_sym) => sym
-        // 4.  strong(sym) and undf(global_sym) => sym
-        // 5.  weak(sym) and strong(global_sym) => global_sym
-        // 6.  weak(sym) and tentative(global_sym) => sym
-        // 7.  weak(sym) and undf(global_sym) => sym
-        // 8.  tentative(sym) and strong(global_sym) => global_sym
-        // 9.  tentative(sym) and weak(global_sym) => global_sym
-        // 10. tentative(sym) and tentative(global_sym) => pick larger
-        // 11. tentative(sym) and undf(global_sym) => sym
-        // 12. undf(sym) and * => global_sym
-        //
-        // Reduces to:
-        // 1. strong(sym) and strong(global_sym) => error
-        // 2. * and strong(global_sym) => global_sym
-        // 3. weak(sym) and weak(global_sym) => global_sym
-        // 4. tentative(sym) and tentative(global_sym) => pick larger
-        // 5. undf(sym) and * => global_sym
-        // 6. else => sym
-
-        const sym_is_strong = sym.sect() and !(sym.weakDef() or sym.pext());
-        const global_is_strong = global_sym.sect() and !(global_sym.weakDef() or global_sym.pext());
-        const sym_is_weak = sym.sect() and (sym.weakDef() or sym.pext());
-        const global_is_weak = global_sym.sect() and (global_sym.weakDef() or global_sym.pext());
-
-        if (sym_is_strong and global_is_strong) {
-            const nnotes = if (global.getFile() == null) @as(usize, 1) else 2;
-            const err = try self.base.addErrorWithNotes(nnotes);
-            try err.addMsg("symbol {s} defined multiple times", .{sym_name});
-            if (global.getFile()) |file| {
-                try err.addNote("first definition in {s}", .{self.objects.items[file].name});
-            }
-            try err.addNote("next definition in {s}", .{self.objects.items[object_id].name});
-        }
-
-        const update_global = blk: {
-            if (global_is_strong) break :blk false;
-            if (sym_is_weak and global_is_weak) break :blk false;
-            if (sym.tentative() and global_sym.tentative()) {
-                if (global_sym.n_value >= sym.n_value) break :blk false;
-            }
-            if (sym.undf() and !sym.tentative()) break :blk false;
-            break :blk true;
-        };
-
-        if (update_global) {
-            if (global.getFile()) |file| {
-                const global_object = &self.objects.items[file];
-                global_object.globals_lookup[global.sym_index] = global_index;
-            }
-            _ = resolver.unresolved.swapRemove(resolver.table.get(sym_name).?);
-            global.* = sym_loc;
-        } else {
-            object.globals_lookup[sym_index] = global_index;
-        }
-    }
-}
-
-fn resolveSymbolsInArchives(self: *MachO, resolver: *SymbolResolver) !void {
-    if (self.archives.items.len == 0) return;
-
-    const gpa = self.base.allocator;
-    var next_sym: usize = 0;
-    loop: while (next_sym < resolver.unresolved.count()) {
-        const global = self.globals.items[resolver.unresolved.keys()[next_sym]];
-        const sym_name = self.getSymbolName(global);
-
-        for (self.archives.items) |archive| {
-            // Check if the entry exists in a static archive.
-            const offsets = archive.toc.get(sym_name) orelse {
-                // No hit.
-                continue;
-            };
-            assert(offsets.items.len > 0);
-
-            const object_id = @as(u16, @intCast(self.objects.items.len));
-            const object = try archive.parseObject(gpa, offsets.items[0]);
-            try self.objects.append(gpa, object);
-            try self.resolveSymbolsInObject(object_id, resolver);
-
-            continue :loop;
-        }
-
-        next_sym += 1;
-    }
-}
-
 fn resolveSymbolsInDylibs(self: *MachO, resolver: *SymbolResolver) !void {
     if (self.dylibs.items.len == 0) return;
 
@@ -2014,29 +1804,25 @@ pub fn deinit(self: *MachO) void {
     }
     self.thunks.deinit(gpa);
 
+    self.string_intern.deinit(gpa);
     self.strtab.deinit(gpa);
     self.locals.deinit(gpa);
     self.globals.deinit(gpa);
 
-    for (self.objects.items) |*object| {
-        object.deinit(gpa);
-    }
     self.objects.deinit(gpa);
-    for (self.archives.items) |*archive| {
-        archive.file.close();
-        archive.deinit(gpa);
-    }
-    self.archives.deinit(gpa);
-    for (self.dylibs.items) |*dylib| {
-        dylib.deinit(gpa);
-    }
     self.dylibs.deinit(gpa);
-    self.dylibs_map.deinit(gpa);
-    self.referenced_dylibs.deinit(gpa);
+
+    for (self.files.items(.tags), self.files.items(.data)) |tag, *data| switch (tag) {
+        .null => {},
+        .object => data.object.deinit(gpa),
+    };
+    self.files.deinit(gpa);
 
     self.segments.deinit(gpa);
     self.sections.deinit(gpa);
     self.atoms.deinit(gpa);
+
+    self.arena.promote(gpa).deinit();
 }
 
 fn createSegments(self: *MachO) !void {
@@ -3592,16 +3378,6 @@ pub fn makeStaticString(bytes: []const u8) [16]u8 {
     return buf;
 }
 
-pub fn getAtomPtr(self: *MachO, atom_index: AtomIndex) *Atom {
-    assert(atom_index < self.atoms.items.len);
-    return &self.atoms.items[atom_index];
-}
-
-pub fn getAtom(self: MachO, atom_index: AtomIndex) Atom {
-    assert(atom_index < self.atoms.items.len);
-    return self.atoms.items[atom_index];
-}
-
 fn getSegmentByName(self: MachO, segname: []const u8) ?u8 {
     for (self.segments.items, 0..) |seg, i| {
         if (mem.eql(u8, segname, seg.segName())) return @as(u8, @intCast(i));
@@ -3945,244 +3721,99 @@ fn generateSymbolStabsForSymbol(
     return buf;
 }
 
-fn logSegments(self: *MachO) void {
-    log.debug("segments:", .{});
-    for (self.segments.items, 0..) |segment, i| {
-        log.debug("  segment({d}): {s} @{x} ({x}), sizeof({x})", .{
-            i,
-            segment.segName(),
-            segment.fileoff,
-            segment.vmaddr,
-            segment.vmsize,
+pub fn getFile(self: *MachO, index: File.Index) ?File {
+    const tag = self.files.items(.tags)[index];
+    return switch (tag) {
+        .null => null,
+        .object => .{ .object = &self.files.items(.data)[index].object },
+    };
+}
+
+pub fn addAtom(self: *MachO) !Atom.Index {
+    const index = @as(Atom.Index, @intCast(self.atoms.items.len));
+    const atom = try self.atoms.addOne(self.base.allocator);
+    atom.* = .{};
+    return index;
+}
+
+pub fn getAtom(self: MachO, atom_index: Atom.Index) ?*Atom {
+    if (atom_index == 0) return null;
+    assert(atom_index < self.atoms.items.len);
+    return &self.atoms.items[atom_index];
+}
+
+pub fn dumpState(self: *MachO) std.fmt.Formatter(fmtDumpState) {
+    return .{ .data = self };
+}
+
+fn fmtDumpState(
+    self: *MachO,
+    comptime unused_fmt_string: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = options;
+    _ = unused_fmt_string;
+    for (self.objects.items) |index| {
+        const object = self.getFile(index).?.object;
+        try writer.print("object({d}) : {}", .{ index, object.fmtPath() });
+        if (!object.alive) try writer.writeAll(" : [*]");
+        try writer.writeByte('\n');
+        try writer.print("{}\n", .{
+            object.fmtAtoms(self),
         });
     }
 }
 
-fn logSections(self: *MachO) void {
-    log.debug("sections:", .{});
-    for (self.sections.items(.header), 0..) |header, i| {
-        log.debug("  sect({d}): {s},{s} @{x} ({x}), sizeof({x})", .{
-            i + 1,
-            header.segName(),
-            header.sectName(),
-            header.offset,
-            header.addr,
-            header.size,
-        });
-    }
-}
+const Section = struct {
+    header: macho.section_64,
+    segment_index: u8,
+    first_atom_index: AtomIndex,
+    last_atom_index: AtomIndex,
+};
 
-fn logSymAttributes(sym: macho.nlist_64, buf: []u8) []const u8 {
-    if (sym.sect()) {
-        buf[0] = 's';
-    }
-    if (sym.ext()) {
-        if (sym.weakDef() or sym.pext()) {
-            buf[1] = 'w';
-        } else {
-            buf[1] = 'e';
-        }
-    }
-    if (sym.tentative()) {
-        buf[2] = 't';
-    }
-    if (sym.undf()) {
-        buf[3] = 'u';
-    }
-    return buf[0..];
-}
+pub const base_tag = Zld.Tag.macho;
 
-fn logSymtab(self: *MachO) void {
-    var buf: [4]u8 = undefined;
+const aarch64 = @import("aarch64.zig");
+const assert = std.debug.assert;
+const build_options = @import("build_options");
+const builtin = @import("builtin");
+const calcUuid = @import("MachO/uuid.zig").calcUuid;
+const dead_strip = @import("MachO/dead_strip.zig");
+const dwarf = std.dwarf;
+const eh_frame = @import("MachO/eh_frame.zig");
+const fat = @import("MachO/fat.zig");
+const fmt = std.fmt;
+const fs = std.fs;
+const load_commands = @import("MachO/load_commands.zig");
+const log = std.log.scoped(.link);
+const macho = std.macho;
+const math = std.math;
+const mem = std.mem;
+const meta = std.meta;
+const thunks = @import("MachO/thunks.zig");
+const trace = @import("tracy.zig").trace;
+const state_log = std.log.scoped(.state);
+const std = @import("std");
 
-    const scoped_log = std.log.scoped(.symtab);
-
-    scoped_log.debug("locals:", .{});
-    for (self.objects.items, 0..) |object, id| {
-        scoped_log.debug("  object({d}): {s}", .{ id, object.name });
-        if (object.in_symtab == null) continue;
-        for (object.symtab, 0..) |sym, sym_id| {
-            @memset(&buf, '_');
-            scoped_log.debug("    %{d}: {s} @{x} in sect({d}), {s}", .{
-                sym_id,
-                object.getSymbolName(@as(u32, @intCast(sym_id))),
-                sym.n_value,
-                sym.n_sect,
-                logSymAttributes(sym, &buf),
-            });
-        }
-    }
-
-    scoped_log.debug("  object(-1)", .{});
-    for (self.locals.items, 0..) |sym, sym_id| {
-        if (sym.undf()) continue;
-        scoped_log.debug("    %{d}: {s} @{x} in sect({d}), {s}", .{
-            sym_id,
-            self.strtab.get(sym.n_strx).?,
-            sym.n_value,
-            sym.n_sect,
-            logSymAttributes(sym, &buf),
-        });
-    }
-
-    scoped_log.debug("exports:", .{});
-    for (self.globals.items, 0..) |global, i| {
-        const sym = self.getSymbol(global);
-        if (sym.undf()) continue;
-        if (sym.n_desc == N_DEAD) continue;
-        scoped_log.debug("    %{d}: {s} @{x} in sect({d}), {s} (def in object({?}))", .{
-            i,
-            self.getSymbolName(global),
-            sym.n_value,
-            sym.n_sect,
-            logSymAttributes(sym, &buf),
-            global.getFile(),
-        });
-    }
-
-    scoped_log.debug("imports:", .{});
-    for (self.globals.items, 0..) |global, i| {
-        const sym = self.getSymbol(global);
-        if (!sym.undf()) continue;
-        if (sym.n_desc == N_DEAD) continue;
-        const ord = @divTrunc(sym.n_desc, macho.N_SYMBOL_RESOLVER);
-        scoped_log.debug("    %{d}: {s} @{x} in ord({d}), {s}", .{
-            i,
-            self.getSymbolName(global),
-            sym.n_value,
-            ord,
-            logSymAttributes(sym, &buf),
-        });
-    }
-
-    scoped_log.debug("GOT entries:", .{});
-    for (self.got_entries.items, 0..) |entry, i| {
-        const atom_sym = entry.getAtomSymbol(self);
-        const target_sym = entry.getTargetSymbol(self);
-        const target_sym_name = entry.getTargetSymbolName(self);
-        if (target_sym.undf()) {
-            scoped_log.debug("  {d}@{x} => import('{s}')", .{
-                i,
-                atom_sym.n_value,
-                target_sym_name,
-            });
-        } else {
-            scoped_log.debug("  {d}@{x} => local(%{d}) in object({?}) {s}", .{
-                i,
-                atom_sym.n_value,
-                entry.target.sym_index,
-                entry.target.getFile(),
-                logSymAttributes(target_sym, buf[0..4]),
-            });
-        }
-    }
-
-    scoped_log.debug("__thread_ptrs entries:", .{});
-    for (self.tlv_ptr_entries.items, 0..) |entry, i| {
-        const atom_sym = entry.getAtomSymbol(self);
-        const target_sym = entry.getTargetSymbol(self);
-        const target_sym_name = entry.getTargetSymbolName(self);
-        assert(target_sym.undf());
-        scoped_log.debug("  {d}@{x} => import('{s}')", .{
-            i,
-            atom_sym.n_value,
-            target_sym_name,
-        });
-    }
-
-    scoped_log.debug("stubs entries:", .{});
-    for (self.stubs.items, 0..) |entry, i| {
-        const atom_sym = entry.getAtomSymbol(self);
-        const target_sym = entry.getTargetSymbol(self);
-        const target_sym_name = entry.getTargetSymbolName(self);
-        assert(target_sym.undf());
-        scoped_log.debug("  {d}@{x} => import('{s}')", .{
-            i,
-            atom_sym.n_value,
-            target_sym_name,
-        });
-    }
-
-    scoped_log.debug("thunks:", .{});
-    for (self.thunks.items, 0..) |thunk, i| {
-        scoped_log.debug("  thunk({d})", .{i});
-        for (thunk.lookup.keys(), 0..) |target, j| {
-            const target_sym = self.getSymbol(target);
-            const atom = self.getAtom(thunk.lookup.get(target).?);
-            const atom_sym = self.getSymbol(atom.getSymbolWithLoc());
-            scoped_log.debug("    {d}@{x} => thunk('{s}'@{x})", .{
-                j,
-                atom_sym.n_value,
-                self.getSymbolName(target),
-                target_sym.n_value,
-            });
-        }
-    }
-}
-
-fn logAtoms(self: *MachO) void {
-    log.debug("atoms:", .{});
-    const slice = self.sections.slice();
-    for (slice.items(.first_atom_index), 0..) |first_atom_index, sect_id| {
-        var atom_index = first_atom_index;
-        if (atom_index == 0) continue;
-
-        const header = slice.items(.header)[sect_id];
-
-        log.debug("{s},{s}", .{ header.segName(), header.sectName() });
-
-        while (true) {
-            const atom = self.getAtom(atom_index);
-            self.logAtom(atom_index, log);
-
-            if (atom.next_index) |next_index| {
-                atom_index = next_index;
-            } else break;
-        }
-    }
-}
-
-pub fn logAtom(self: *MachO, atom_index: AtomIndex, logger: anytype) void {
-    if (!build_options.enable_logging) return;
-
-    const atom = self.getAtom(atom_index);
-    const sym = self.getSymbol(atom.getSymbolWithLoc());
-    const sym_name = self.getSymbolName(atom.getSymbolWithLoc());
-    logger.debug("  ATOM(%{d}, '{s}') @ {x} (sizeof({x}), alignof({x})) in object({?}) in sect({d})", .{
-        atom.sym_index,
-        sym_name,
-        sym.n_value,
-        atom.size,
-        atom.alignment,
-        atom.getFile(),
-        sym.n_sect,
-    });
-
-    if (atom.getFile() != null) {
-        var it = Atom.getInnerSymbolsIterator(self, atom_index);
-        while (it.next()) |sym_loc| {
-            const inner = self.getSymbol(sym_loc);
-            const inner_name = self.getSymbolName(sym_loc);
-            const offset = Atom.calcInnerSymbolOffset(self, atom_index, sym_loc.sym_index);
-
-            logger.debug("    (%{d}, '{s}') @ {x} ({x})", .{
-                sym_loc.sym_index,
-                inner_name,
-                inner.n_value,
-                offset,
-            });
-        }
-
-        if (Atom.getSectionAlias(self, atom_index)) |sym_loc| {
-            const alias = self.getSymbol(sym_loc);
-            const alias_name = self.getSymbolName(sym_loc);
-
-            logger.debug("    (%{d}, '{s}') @ {x} ({x})", .{
-                sym_loc.sym_index,
-                alias_name,
-                alias.n_value,
-                0,
-            });
-        }
-    }
-}
+const Allocator = mem.Allocator;
+const ArenaAllocator = std.heap.ArenaAllocator;
+const Archive = @import("MachO/Archive.zig");
+const Atom = @import("MachO/Atom.zig");
+const Bind = @import("MachO/dyld_info/bind.zig").Bind(*const MachO, MachO.SymbolWithLoc);
+const CodeSignature = @import("MachO/CodeSignature.zig");
+const Dylib = @import("MachO/Dylib.zig");
+const DwarfInfo = @import("MachO/DwarfInfo.zig");
+const File = @import("MachO/file.zig").File;
+const MachO = @This();
+const Md5 = std.crypto.hash.Md5;
+const Object = @import("MachO/Object.zig");
+pub const Options = @import("MachO/Options.zig");
+const LazyBind = @import("MachO/dyld_info/bind.zig").LazyBind(*const MachO, MachO.SymbolWithLoc);
+const LibStub = @import("tapi.zig").LibStub;
+const Rebase = @import("MachO/dyld_info/Rebase.zig");
+const StringTable = @import("strtab.zig").StringTable;
+const ThreadPool = std.Thread.Pool;
+const Trie = @import("MachO/Trie.zig");
+const UnwindInfo = @import("MachO/UnwindInfo.zig");
+const Zld = @import("Zld.zig");
