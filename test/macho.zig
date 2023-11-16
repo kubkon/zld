@@ -61,7 +61,7 @@ fn testBuildVersionMacOS(b: *Build, opts: Options) *Step {
 
         const exe = ld(b, opts);
         exe.addFileSource(obj.out);
-        exe.addArgs(&.{ "-syslibroot", opts.macos_sdk.path });
+        exe.addArgs(&.{ "-syslibroot", opts.macos_sdk });
 
         const check = exe.check();
         check.checkStart();
@@ -82,7 +82,7 @@ fn testBuildVersionMacOS(b: *Build, opts: Options) *Step {
         exe.addFileSource(obj.out);
         exe.addArgs(&.{
             "-syslibroot",
-            opts.macos_sdk.path,
+            opts.macos_sdk,
             "-platform_version",
             "macos",
             "10.13",
@@ -105,16 +105,15 @@ fn testBuildVersionIOS(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-build-version-ios", "");
 
     const ios_sdk = opts.ios_sdk orelse return skipTestStep(test_step);
-    const ios_sdk_path = ios_sdk.path;
 
     {
         const obj = cc(b, opts);
         obj.addEmptyMain();
-        obj.addArgs(&.{ "-c", "-isysroot", ios_sdk_path, "--target=arm64-ios16.4" });
+        obj.addArgs(&.{ "-c", "-isysroot", ios_sdk, "--target=arm64-ios16.4" });
 
         const exe = ld(b, opts);
         exe.addFileSource(obj.out);
-        exe.addArgs(&.{ "-syslibroot", ios_sdk_path });
+        exe.addArgs(&.{ "-syslibroot", ios_sdk });
 
         const check = exe.check();
         check.checkStart();
@@ -129,11 +128,11 @@ fn testBuildVersionIOS(b: *Build, opts: Options) *Step {
     {
         const obj = cc(b, opts);
         obj.addEmptyMain();
-        obj.addArgs(&.{ "-c", "-isysroot", ios_sdk_path, "--target=arm64-ios11" });
+        obj.addArgs(&.{ "-c", "-isysroot", ios_sdk, "--target=arm64-ios11" });
 
         const exe = ld(b, opts);
         exe.addFileSource(obj.out);
-        exe.addArgs(&.{ "-syslibroot", ios_sdk_path });
+        exe.addArgs(&.{ "-syslibroot", ios_sdk });
 
         const check = exe.check();
         check.checkStart();
@@ -842,7 +841,7 @@ fn testSearchStrategy(b: *Build, opts: Options) *Step {
 
     const dylib = ld(b, opts);
     dylib.addFileSource(obj_out.file);
-    dylib.addArgs(&.{ "-syslibroot", opts.macos_sdk.path, "-dylib", "-install_name", "@rpath/liba.dylib" });
+    dylib.addArgs(&.{ "-syslibroot", opts.macos_sdk, "-dylib", "-install_name", "@rpath/liba.dylib" });
     const dylib_out = dylib.saveOutputAs("liba.dylib");
 
     const main_c =
@@ -1136,7 +1135,7 @@ fn testUnwindInfo(b: *Build, opts: Options) *Step {
     obj2.addArgs(flags);
 
     const exe = ld(b, opts);
-    exe.addArgs(&.{ "-syslibroot", opts.macos_sdk.path, "-lc++" });
+    exe.addArgs(&.{ "-syslibroot", opts.macos_sdk, "-lc++" });
     exe.addFileSource(obj.saveOutputAs("main.o").file);
     exe.addFileSource(obj1.saveOutputAs("simple_string.o").file);
     exe.addFileSource(obj2.saveOutputAs("simple_string_owner.o").file);
@@ -1346,8 +1345,8 @@ fn testWeakLibrary(b: *Build, opts: Options) *Step {
 const Options = struct {
     zld: FileSourceWithDir,
     has_zig: bool,
-    macos_sdk: std.zig.system.darwin.Sdk,
-    ios_sdk: ?std.zig.system.darwin.Sdk,
+    macos_sdk: []const u8,
+    ios_sdk: ?[]const u8,
     cc_override: ?[]const u8,
 };
 
