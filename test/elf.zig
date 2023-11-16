@@ -856,7 +856,7 @@ fn testEmitRelocatable(b: *Build, opts: Options) *Step {
         \\    printf("foo=%d\n", foo());
         \\}
     );
-    obj1.addArgs(&.{"-c"});
+    obj1.addArgs(&.{ "-c", "-ffunction-sections" });
 
     const obj2 = cc(b, opts);
     obj2.addCSource(
