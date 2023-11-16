@@ -149,6 +149,26 @@ pub const LinkObject = struct {
     needed: bool = false,
     weak: bool = false,
     must_link: bool = false,
+
+    pub fn format(
+        self: LinkObject,
+        comptime unused_fmt_string: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = options;
+        _ = unused_fmt_string;
+        if (self.needed) {
+            try writer.print("-needed_{s}", .{@tagName(self.tag)});
+        }
+        if (self.weak) {
+            try writer.print("-weak_{s}", .{@tagName(self.tag)});
+        }
+        if (self.must_link and self.tag == .obj) {
+            try writer.writeAll("-force_load");
+        }
+        try writer.print(" {s}", .{self.path});
+    }
 };
 
 /// Default path to dyld
@@ -213,279 +233,276 @@ pub fn flush(self: *MachO) !void {
     try self.strtab.buffer.append(gpa, 0);
 
     // Resolve paths
+    log.debug("library search dirs", .{});
     var lib_dirs = std.ArrayList([]const u8).init(arena);
     for (self.options.lib_dirs) |dir| {
         if (try resolveSearchDir(arena, dir, syslibroot)) |search_dir| {
             try lib_dirs.append(search_dir);
+            log.debug("  {s}", .{dir});
         } else {
-            self.base.warn("directory not found for '-L{s}'", .{dir});
+            self.base.warn("{s}: library search directory not found", .{dir});
         }
     }
 
+    log.debug("framework search dirs", .{});
     var framework_dirs = std.ArrayList([]const u8).init(arena);
     for (self.options.framework_dirs) |dir| {
         if (try resolveSearchDir(arena, dir, syslibroot)) |search_dir| {
             try framework_dirs.append(search_dir);
+            log.debug("  {s}", .{dir});
         } else {
-            self.base.warn("directory not found for '-F{s}'", .{dir});
+            self.base.warn("{s}: framework search directory not found", .{dir});
         }
     }
 
-    var objects = std.ArrayList(LinkObject).init(arena);
-    try objects.ensureTotalCapacityPrecise(self.options.positionals.len);
     for (self.options.positionals) |obj| {
-        try self.resolveLinkObjectPath(arena, obj, lib_dirs.items, framework_dirs.items, &objects);
+        try self.parsePositional(arena, obj, lib_dirs.items, framework_dirs.items);
     }
 
     self.base.reportWarningsAndErrorsAndExit();
 
-    // Parse input objects
-    for (objects.items) |obj| {
-        try self.parseObject(obj);
-    }
+    // if (self.options.platform == null) {
+    //     // Check if we have already inferred a version from env vars.
+    //     inline for (self.options.inferred_platform_versions) |platform| {
+    //         if (platform.version.value > 0) {
+    //             self.options.platform = .{ .platform = platform.platform, .version = platform.version };
+    //             break;
+    //         }
+    //     }
+    // }
 
-    if (self.options.platform == null) {
-        // Check if we have already inferred a version from env vars.
-        inline for (self.options.inferred_platform_versions) |platform| {
-            if (platform.version.value > 0) {
-                self.options.platform = .{ .platform = platform.platform, .version = platform.version };
-                break;
-            }
-        }
-    }
+    // if (self.options.sdk_version == null) {
+    //     // First, try inferring SDK version from the SDK path if we have one.
+    //     if (self.options.syslibroot) |path| {
+    //         self.options.sdk_version = Options.inferSdkVersionFromSdkPath(path);
+    //     }
+    //     // Next, if platform has been worked out to be macOS but wasn't inferred from env vars,
+    //     // do a syscall.
+    //     if (self.options.sdk_version == null and self.options.platform != null) blk: {
+    //         if ((comptime builtin.target.isDarwin()) and
+    //             self.options.platform.?.platform == .MACOS and
+    //             self.options.inferred_platform_versions[0].version.value == 0)
+    //         {
+    //             var ver_str: [100]u8 = undefined;
+    //             var size: usize = 100;
+    //             std.os.sysctlbynameZ("kern.osrelease", &ver_str, &size, null, 0) catch {
+    //                 std.log.warn("ERROR", .{});
+    //                 break :blk;
+    //             };
+    //             const kern_ver = Options.Version.parse(ver_str[0 .. size - 1]) orelse break :blk;
+    //             // According to Apple, kernel major version is 4 ahead of x in 10.
+    //             const minor = @as(u8, @truncate((kern_ver.value >> 16) - 4));
+    //             self.options.sdk_version = Options.Version.new(10, minor, 0);
+    //         }
+    //     }
+    // }
 
-    if (self.options.sdk_version == null) {
-        // First, try inferring SDK version from the SDK path if we have one.
-        if (self.options.syslibroot) |path| {
-            self.options.sdk_version = Options.inferSdkVersionFromSdkPath(path);
-        }
-        // Next, if platform has been worked out to be macOS but wasn't inferred from env vars,
-        // do a syscall.
-        if (self.options.sdk_version == null and self.options.platform != null) blk: {
-            if ((comptime builtin.target.isDarwin()) and
-                self.options.platform.?.platform == .MACOS and
-                self.options.inferred_platform_versions[0].version.value == 0)
-            {
-                var ver_str: [100]u8 = undefined;
-                var size: usize = 100;
-                std.os.sysctlbynameZ("kern.osrelease", &ver_str, &size, null, 0) catch {
-                    std.log.warn("ERROR", .{});
-                    break :blk;
-                };
-                const kern_ver = Options.Version.parse(ver_str[0 .. size - 1]) orelse break :blk;
-                // According to Apple, kernel major version is 4 ahead of x in 10.
-                const minor = @as(u8, @truncate((kern_ver.value >> 16) - 4));
-                self.options.sdk_version = Options.Version.new(10, minor, 0);
-            }
-        }
-    }
+    // var dependent_libs = std.fifo.LinearFifo(struct {
+    //     id: Dylib.Id,
+    //     parent: u16,
+    // }, .Dynamic).init(arena);
 
-    var dependent_libs = std.fifo.LinearFifo(struct {
-        id: Dylib.Id,
-        parent: u16,
-    }, .Dynamic).init(arena);
+    // for (objects.items) |obj| {
+    //     try self.parseLibrary(obj, &dependent_libs);
+    // }
 
-    for (objects.items) |obj| {
-        try self.parseLibrary(obj, &dependent_libs);
-    }
+    // try self.parseDependentLibs(syslibroot, &dependent_libs);
 
-    try self.parseDependentLibs(syslibroot, &dependent_libs);
+    // var resolver = SymbolResolver{
+    //     .arena = arena,
+    //     .table = std.StringHashMap(u32).init(arena),
+    //     .unresolved = std.AutoArrayHashMap(u32, void).init(arena),
+    // };
+    // try self.resolveSymbols(&resolver);
+    // try self.reportUndefined(&resolver);
+    // self.base.reportWarningsAndErrorsAndExit();
 
-    var resolver = SymbolResolver{
-        .arena = arena,
-        .table = std.StringHashMap(u32).init(arena),
-        .unresolved = std.AutoArrayHashMap(u32, void).init(arena),
-    };
-    try self.resolveSymbols(&resolver);
-    try self.reportUndefined(&resolver);
-    self.base.reportWarningsAndErrorsAndExit();
+    // if (!self.options.dylib) {
+    //     const entry_name = self.options.entry orelse default_entry_point;
+    //     const global_index = resolver.table.get(entry_name).?; // Error was flagged earlier
+    //     self.entry_index = global_index;
+    // }
 
-    if (!self.options.dylib) {
-        const entry_name = self.options.entry orelse default_entry_point;
-        const global_index = resolver.table.get(entry_name).?; // Error was flagged earlier
-        self.entry_index = global_index;
-    }
+    // try self.splitIntoAtoms();
 
-    try self.splitIntoAtoms();
+    // if (self.options.dead_strip) {
+    //     try dead_strip.gcAtoms(self, &resolver);
+    // }
 
-    if (self.options.dead_strip) {
-        try dead_strip.gcAtoms(self, &resolver);
-    }
+    // try self.createDyldPrivateAtom();
+    // try self.createTentativeDefAtoms();
+    // try self.createStubHelperPreambleAtom();
 
-    try self.createDyldPrivateAtom();
-    try self.createTentativeDefAtoms();
-    try self.createStubHelperPreambleAtom();
+    // if (!self.options.dylib) {
+    //     const global = self.getEntryPoint();
+    //     if (self.getSymbol(global).undf()) {
+    //         // We do one additional check here in case the entry point was found in one of the dylibs.
+    //         // (I actually have no idea what this would imply but it is a possible outcome and so we
+    //         // support it.)
+    //         try Atom.addStub(self, global);
+    //     }
+    // }
 
-    if (!self.options.dylib) {
-        const global = self.getEntryPoint();
-        if (self.getSymbol(global).undf()) {
-            // We do one additional check here in case the entry point was found in one of the dylibs.
-            // (I actually have no idea what this would imply but it is a possible outcome and so we
-            // support it.)
-            try Atom.addStub(self, global);
-        }
-    }
+    // for (self.objects.items) |object| {
+    //     for (object.atoms.items) |atom_index| {
+    //         const atom = self.getAtom(atom_index);
+    //         const sym = self.getSymbol(atom.getSymbolWithLoc());
+    //         const header = self.sections.items(.header)[sym.n_sect - 1];
+    //         if (header.isZerofill()) continue;
 
-    for (self.objects.items) |object| {
-        for (object.atoms.items) |atom_index| {
-            const atom = self.getAtom(atom_index);
-            const sym = self.getSymbol(atom.getSymbolWithLoc());
-            const header = self.sections.items(.header)[sym.n_sect - 1];
-            if (header.isZerofill()) continue;
+    //         const relocs = Atom.getAtomRelocs(self, atom_index);
+    //         try Atom.scanAtomRelocs(self, atom_index, relocs);
+    //     }
+    // }
 
-            const relocs = Atom.getAtomRelocs(self, atom_index);
-            try Atom.scanAtomRelocs(self, atom_index, relocs);
-        }
-    }
+    // try eh_frame.scanRelocs(self);
+    // try UnwindInfo.scanRelocs(self);
 
-    try eh_frame.scanRelocs(self);
-    try UnwindInfo.scanRelocs(self);
+    // self.base.reportWarningsAndErrorsAndExit();
 
-    self.base.reportWarningsAndErrorsAndExit();
+    // try self.createDyldStubBinderGotAtom();
 
-    try self.createDyldStubBinderGotAtom();
+    // try self.calcSectionSizes();
 
-    try self.calcSectionSizes();
+    // var unwind_info = UnwindInfo{ .gpa = self.base.allocator };
+    // defer unwind_info.deinit();
+    // try unwind_info.collect(self);
 
-    var unwind_info = UnwindInfo{ .gpa = self.base.allocator };
-    defer unwind_info.deinit();
-    try unwind_info.collect(self);
+    // try eh_frame.calcSectionSize(self, &unwind_info);
+    // try unwind_info.calcSectionSize(self);
 
-    try eh_frame.calcSectionSize(self, &unwind_info);
-    try unwind_info.calcSectionSize(self);
+    // try self.pruneAndSortSections();
+    // try self.createSegments();
+    // try self.allocateSegments();
 
-    try self.pruneAndSortSections();
-    try self.createSegments();
-    try self.allocateSegments();
+    // try self.allocateSpecialSymbols();
 
-    try self.allocateSpecialSymbols();
+    // if (build_options.enable_logging) {
+    //     self.logSymtab();
+    //     self.logSegments();
+    //     self.logSections();
+    //     self.logAtoms();
+    // }
 
-    if (build_options.enable_logging) {
-        self.logSymtab();
-        self.logSegments();
-        self.logSections();
-        self.logAtoms();
-    }
+    // try self.writeAtoms();
+    // try eh_frame.write(self, &unwind_info);
+    // try unwind_info.write(self);
+    // try self.writeLinkeditSegmentData();
 
-    try self.writeAtoms();
-    try eh_frame.write(self, &unwind_info);
-    try unwind_info.write(self);
-    try self.writeLinkeditSegmentData();
+    // // If the last section of __DATA segment is zerofill section, we need to ensure
+    // // that the free space between the end of the last non-zerofill section of __DATA
+    // // segment and the beginning of __LINKEDIT segment is zerofilled as the loader will
+    // // copy-paste this space into memory for quicker zerofill operation.
+    // if (self.getSegmentByName("__DATA")) |data_seg_id| blk: {
+    //     var physical_zerofill_start: ?u64 = null;
+    //     const section_indexes = self.getSectionIndexes(data_seg_id);
+    //     for (self.sections.items(.header)[section_indexes.start..section_indexes.end]) |header| {
+    //         if (header.isZerofill() and header.size > 0) break;
+    //         physical_zerofill_start = header.offset + header.size;
+    //     } else break :blk;
+    //     const start = physical_zerofill_start orelse break :blk;
+    //     const linkedit = self.getLinkeditSegmentPtr();
+    //     const size = linkedit.fileoff - start;
+    //     if (size > 0) {
+    //         log.debug("zeroing out zerofill area of length {x} at {x}", .{ size, start });
+    //         var padding = try self.base.allocator.alloc(u8, size);
+    //         defer self.base.allocator.free(padding);
+    //         @memset(padding, 0);
+    //         try self.base.file.pwriteAll(padding, start);
+    //     }
+    // }
 
-    // If the last section of __DATA segment is zerofill section, we need to ensure
-    // that the free space between the end of the last non-zerofill section of __DATA
-    // segment and the beginning of __LINKEDIT segment is zerofilled as the loader will
-    // copy-paste this space into memory for quicker zerofill operation.
-    if (self.getSegmentByName("__DATA")) |data_seg_id| blk: {
-        var physical_zerofill_start: ?u64 = null;
-        const section_indexes = self.getSectionIndexes(data_seg_id);
-        for (self.sections.items(.header)[section_indexes.start..section_indexes.end]) |header| {
-            if (header.isZerofill() and header.size > 0) break;
-            physical_zerofill_start = header.offset + header.size;
-        } else break :blk;
-        const start = physical_zerofill_start orelse break :blk;
-        const linkedit = self.getLinkeditSegmentPtr();
-        const size = linkedit.fileoff - start;
-        if (size > 0) {
-            log.debug("zeroing out zerofill area of length {x} at {x}", .{ size, start });
-            const padding = try self.base.allocator.alloc(u8, size);
-            defer self.base.allocator.free(padding);
-            @memset(padding, 0);
-            try self.base.file.pwriteAll(padding, start);
-        }
-    }
+    // var codesig: ?CodeSignature = if (self.requiresCodeSig()) blk: {
+    //     // Preallocate space for the code signature.
+    //     // We need to do this at this stage so that we have the load commands with proper values
+    //     // written out to the file.
+    //     // The most important here is to have the correct vm and filesize of the __LINKEDIT segment
+    //     // where the code signature goes into.
+    //     var codesig = CodeSignature.init(self.getPageSize());
+    //     codesig.code_directory.ident = fs.path.basename(self.options.emit.sub_path);
+    //     if (self.options.entitlements) |path| {
+    //         try codesig.addEntitlements(gpa, path);
+    //     }
+    //     try self.writeCodeSignaturePadding(&codesig);
+    //     break :blk codesig;
+    // } else null;
+    // defer if (codesig) |*csig| csig.deinit(gpa);
 
-    var codesig: ?CodeSignature = if (self.requiresCodeSig()) blk: {
-        // Preallocate space for the code signature.
-        // We need to do this at this stage so that we have the load commands with proper values
-        // written out to the file.
-        // The most important here is to have the correct vm and filesize of the __LINKEDIT segment
-        // where the code signature goes into.
-        var codesig = CodeSignature.init(self.getPageSize());
-        codesig.code_directory.ident = fs.path.basename(self.options.emit.sub_path);
-        if (self.options.entitlements) |path| {
-            try codesig.addEntitlements(gpa, path);
-        }
-        try self.writeCodeSignaturePadding(&codesig);
-        break :blk codesig;
-    } else null;
-    defer if (codesig) |*csig| csig.deinit(gpa);
+    // // Write load commands
+    // var lc_buffer = std.ArrayList(u8).init(arena);
+    // const lc_writer = lc_buffer.writer();
 
-    // Write load commands
-    var lc_buffer = std.ArrayList(u8).init(arena);
-    const lc_writer = lc_buffer.writer();
+    // try self.writeSegmentHeaders(lc_writer);
+    // try lc_writer.writeStruct(self.dyld_info_cmd);
+    // try lc_writer.writeStruct(self.function_starts_cmd);
+    // try lc_writer.writeStruct(self.data_in_code_cmd);
+    // try lc_writer.writeStruct(self.symtab_cmd);
+    // try lc_writer.writeStruct(self.dysymtab_cmd);
+    // try load_commands.writeDylinkerLC(lc_writer);
 
-    try self.writeSegmentHeaders(lc_writer);
-    try lc_writer.writeStruct(self.dyld_info_cmd);
-    try lc_writer.writeStruct(self.function_starts_cmd);
-    try lc_writer.writeStruct(self.data_in_code_cmd);
-    try lc_writer.writeStruct(self.symtab_cmd);
-    try lc_writer.writeStruct(self.dysymtab_cmd);
-    try load_commands.writeDylinkerLC(lc_writer);
+    // if (!self.options.dylib) {
+    //     const seg_id = self.getSegmentByName("__TEXT").?;
+    //     const seg = self.segments.items[seg_id];
+    //     const global = self.getEntryPoint();
+    //     const sym = self.getSymbol(global);
 
-    if (!self.options.dylib) {
-        const seg_id = self.getSegmentByName("__TEXT").?;
-        const seg = self.segments.items[seg_id];
-        const global = self.getEntryPoint();
-        const sym = self.getSymbol(global);
+    //     const addr: u64 = if (sym.undf()) blk: {
+    //         // In this case, the symbol has been resolved in one of dylibs and so we point
+    //         // to the stub as its vmaddr value.
+    //         const stub_atom_index = self.getStubsAtomIndexForSymbol(global).?;
+    //         const stub_atom = self.getAtom(stub_atom_index);
+    //         const stub_sym = self.getSymbol(stub_atom.getSymbolWithLoc());
+    //         break :blk stub_sym.n_value;
+    //     } else sym.n_value;
 
-        const addr: u64 = if (sym.undf()) blk: {
-            // In this case, the symbol has been resolved in one of dylibs and so we point
-            // to the stub as its vmaddr value.
-            const stub_atom_index = self.getStubsAtomIndexForSymbol(global).?;
-            const stub_atom = self.getAtom(stub_atom_index);
-            const stub_sym = self.getSymbol(stub_atom.getSymbolWithLoc());
-            break :blk stub_sym.n_value;
-        } else sym.n_value;
+    //     try lc_writer.writeStruct(macho.entry_point_command{
+    //         .entryoff = @as(u32, @intCast(addr - seg.vmaddr)),
+    //         .stacksize = self.options.stack_size orelse 0,
+    //     });
+    // } else {
+    //     assert(self.options.dylib);
+    //     try load_commands.writeDylibIdLC(&self.options, lc_writer);
+    // }
 
-        try lc_writer.writeStruct(macho.entry_point_command{
-            .entryoff = @as(u32, @intCast(addr - seg.vmaddr)),
-            .stacksize = self.options.stack_size orelse 0,
-        });
-    } else {
-        assert(self.options.dylib);
-        try load_commands.writeDylibIdLC(&self.options, lc_writer);
-    }
+    // try load_commands.writeRpathLCs(self.base.allocator, &self.options, lc_writer);
+    // try lc_writer.writeStruct(macho.source_version_command{
+    //     .version = 0,
+    // });
 
-    try load_commands.writeRpathLCs(self.base.allocator, &self.options, lc_writer);
-    try lc_writer.writeStruct(macho.source_version_command{
-        .version = 0,
-    });
+    // if (self.options.platform) |platform| {
+    //     if (platform.isBuildVersionCompatible()) {
+    //         try load_commands.writeBuildVersionLC(platform, self.options.sdk_version, lc_writer);
+    //     } else {
+    //         try load_commands.writeVersionMinLC(platform, self.options.sdk_version, lc_writer);
+    //     }
+    // }
 
-    if (self.options.platform) |platform| {
-        if (platform.isBuildVersionCompatible()) {
-            try load_commands.writeBuildVersionLC(platform, self.options.sdk_version, lc_writer);
-        } else {
-            try load_commands.writeVersionMinLC(platform, self.options.sdk_version, lc_writer);
-        }
-    }
+    // const uuid_cmd_offset = @sizeOf(macho.mach_header_64) + @as(u32, @intCast(lc_buffer.items.len));
+    // try lc_writer.writeStruct(self.uuid_cmd);
 
-    const uuid_cmd_offset = @sizeOf(macho.mach_header_64) + @as(u32, @intCast(lc_buffer.items.len));
-    try lc_writer.writeStruct(self.uuid_cmd);
+    // try load_commands.writeLoadDylibLCs(self.dylibs.items, self.referenced_dylibs.keys(), lc_writer);
 
-    try load_commands.writeLoadDylibLCs(self.dylibs.items, self.referenced_dylibs.keys(), lc_writer);
+    // if (self.requiresCodeSig()) {
+    //     try lc_writer.writeStruct(self.codesig_cmd);
+    // }
 
-    if (self.requiresCodeSig()) {
-        try lc_writer.writeStruct(self.codesig_cmd);
-    }
+    // const ncmds = load_commands.calcNumOfLCs(lc_buffer.items);
+    // try self.base.file.pwriteAll(lc_buffer.items, @sizeOf(macho.mach_header_64));
+    // try self.writeHeader(ncmds, @as(u32, @intCast(lc_buffer.items.len)));
 
-    const ncmds = load_commands.calcNumOfLCs(lc_buffer.items);
-    try self.base.file.pwriteAll(lc_buffer.items, @sizeOf(macho.mach_header_64));
-    try self.writeHeader(ncmds, @as(u32, @intCast(lc_buffer.items.len)));
+    // try self.writeUuid(uuid_cmd_offset, self.requiresCodeSig());
 
-    try self.writeUuid(uuid_cmd_offset, self.requiresCodeSig());
+    // if (codesig) |*csig| {
+    //     try self.writeCodeSignature(csig); // code signing always comes last
 
-    if (codesig) |*csig| {
-        try self.writeCodeSignature(csig); // code signing always comes last
+    //     if (comptime builtin.target.isDarwin()) {
+    //         const dir = self.options.emit.directory;
+    //         const path = self.options.emit.sub_path;
+    //         try dir.copyFile(path, dir, path, .{});
+    //     }
+    // }
 
-        if (comptime builtin.target.isDarwin()) {
-            const dir = self.options.emit.directory;
-            const path = self.options.emit.sub_path;
-            try dir.copyFile(path, dir, path, .{});
-        }
-    }
-
-    self.base.reportWarningsAndErrorsAndExit();
+    // self.base.reportWarningsAndErrorsAndExit();
 }
 
 fn resolveSearchDir(
@@ -601,14 +618,13 @@ fn resolveFramework(
     }
 }
 
-fn resolveLinkObjectPath(
+fn resolveFile(
     self: *MachO,
     arena: Allocator,
     obj: LinkObject,
     lib_dirs: []const []const u8,
     framework_dirs: []const []const u8,
-    resolved: *std.ArrayList(LinkObject),
-) !void {
+) !LinkObject {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -617,7 +633,10 @@ fn resolveLinkObjectPath(
             .obj => {
                 var buffer: [fs.MAX_PATH_BYTES]u8 = undefined;
                 const full_path = std.fs.realpath(obj.path, &buffer) catch |err| switch (err) {
-                    error.FileNotFound => return self.base.fatal("{s}: no such file or directory", .{obj.path}),
+                    error.FileNotFound => {
+                        self.base.fatal("file not found '{s}'", .{obj.path});
+                        return error.ResolveFail;
+                    },
                     else => |e| return e,
                 };
                 break :blk try arena.dupe(u8, full_path);
@@ -628,7 +647,7 @@ fn resolveLinkObjectPath(
                     try err.addMsg("library not found for -l{s}", .{obj.path});
                     try err.addNote("searched in", .{});
                     for (lib_dirs) |dir| try err.addNote("{s}", .{dir});
-                    return;
+                    return error.ResolveFail;
                 };
                 break :blk full_path;
             },
@@ -638,49 +657,103 @@ fn resolveLinkObjectPath(
                     try err.addMsg("framework not found for -framework {s}", .{obj.path});
                     try err.addNote("searched in", .{});
                     for (framework_dirs) |dir| try err.addNote("{s}", .{dir});
-                    return;
+                    return error.ResolveFail;
                 };
                 break :blk full_path;
             },
         }
     };
-    resolved.appendAssumeCapacity(.{
+    return .{
         .path = full_path,
         .tag = obj.tag,
         .needed = obj.needed,
         .weak = obj.weak,
         .must_link = obj.must_link,
-    });
+    };
 }
 
-fn parseObject(self: *MachO, obj: LinkObject) !void {
+fn parsePositional(
+    self: *MachO,
+    arena: Allocator,
+    obj: LinkObject,
+    lib_dirs: []const []const u8,
+    framework_dirs: []const []const u8,
+) !void {
+    const resolved_obj = self.resolveFile(arena, obj, lib_dirs, framework_dirs) catch |err| switch (err) {
+        error.ResolveFail => return,
+        else => |e| return e,
+    };
+
+    log.debug("parsing positional {}", .{resolved_obj});
+
+    if (try self.parseObject(arena, resolved_obj)) return;
+    // if (try self.parseArchive(arena, resolved_obj)) return;
+    // if (try self.parseDylib(arena, resolved_obj)) return;
+    // if (try self.parseTbd(arena, resolved_obj)) return;
+
+    self.base.fatal("unknown filetype for positional argument: '{s}'", .{resolved_obj.path});
+}
+
+fn parseObject(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
     const tracy = trace(@src());
     defer tracy.end();
 
-    const gpa = self.base.allocator;
+    // const gpa = self.base.allocator;
+    _ = arena;
     const file = try std.fs.cwd().openFile(obj.path, .{});
     defer file.close();
 
-    if (!Object.isObject(file)) return;
+    const header = file.reader().readStruct(macho.mach_header_64) catch return false;
+    try file.seekTo(0);
 
-    const mtime: u64 = mtime: {
-        const stat = file.stat() catch break :mtime 0;
-        break :mtime @as(u64, @intCast(@divFloor(stat.mtime, 1_000_000_000)));
-    };
-    const file_stat = try file.stat();
-    const file_size = math.cast(usize, file_stat.size) orelse return error.Overflow;
-    const contents = try file.readToEndAllocOptions(gpa, file_size, file_size, @alignOf(u64), null);
+    if (header.filetype != macho.MH_OBJECT) return false;
+    self.validateOrSetCpuArch(obj.path, header.cputype);
 
-    var object = Object{
-        .name = try gpa.dupe(u8, obj.path),
-        .mtime = mtime,
-        .contents = contents,
-    };
-    errdefer object.deinit(gpa);
-    try object.parse(gpa);
-    try self.objects.append(gpa, object);
+    return true;
 
-    const cpu_arch: std.Target.Cpu.Arch = switch (object.header.cputype) {
+    // if (object.getPlatform()) |platform| {
+    //     const self_platform = self.options.platform orelse blk: {
+    //         self.options.platform = platform;
+    //         break :blk self.options.platform.?;
+    //     };
+    //     if (self_platform.platform != platform.platform) {
+    //         return self.base.fatal(
+    //             "{s}: object file was built for different platform: expected {s}, got {s}",
+    //             .{ obj.path, @tagName(self_platform.platform), @tagName(platform.platform) },
+    //         );
+    //     }
+    //     if (self_platform.version.value < platform.version.value) {
+    //         return self.base.warn(
+    //             "{s}: object file was built for newer platform version: expected {}, got {}",
+    //             .{
+    //                 obj.path,
+    //                 self_platform.version,
+    //                 platform.version,
+    //             },
+    //         );
+    //     }
+    // }
+
+    // const mtime: u64 = mtime: {
+    //     const stat = file.stat() catch break :mtime 0;
+    //     break :mtime @as(u64, @intCast(@divFloor(stat.mtime, 1_000_000_000)));
+    // };
+    // const file_stat = try file.stat();
+    // const file_size = math.cast(usize, file_stat.size) orelse return error.Overflow;
+    // const contents = try file.readToEndAlloc(gpa, file_size);
+
+    // var object = Object{
+    //     .name = try gpa.dupe(u8, obj.path),
+    //     .mtime = mtime,
+    //     .contents = contents,
+    // };
+    // errdefer object.deinit(gpa);
+    // try object.parse(gpa);
+    // try self.objects.append(gpa, object);
+}
+
+fn validateOrSetCpuArch(self: *MachO, path: []const u8, cputype: i32) void {
+    const cpu_arch: std.Target.Cpu.Arch = switch (cputype) {
         macho.CPU_TYPE_ARM64 => .aarch64,
         macho.CPU_TYPE_X86_64 => .x86_64,
         else => unreachable,
@@ -691,33 +764,10 @@ fn parseObject(self: *MachO, obj: LinkObject) !void {
     };
     if (self_cpu_arch != cpu_arch) {
         return self.base.fatal("{s}: invalid architecture '{s}', expected '{s}'", .{
-            obj.path,
+            path,
             @tagName(cpu_arch),
             @tagName(self_cpu_arch),
         });
-    }
-
-    if (object.getPlatform()) |platform| {
-        const self_platform = self.options.platform orelse blk: {
-            self.options.platform = platform;
-            break :blk self.options.platform.?;
-        };
-        if (self_platform.platform != platform.platform) {
-            return self.base.fatal(
-                "{s}: object file was built for different platform: expected {s}, got {s}",
-                .{ obj.path, @tagName(self_platform.platform), @tagName(platform.platform) },
-            );
-        }
-        if (self_platform.version.value < platform.version.value) {
-            return self.base.warn(
-                "{s}: object file was built for newer platform version: expected {}, got {}",
-                .{
-                    obj.path,
-                    self_platform.version,
-                    platform.version,
-                },
-            );
-        }
     }
 }
 

@@ -118,13 +118,6 @@ pub const Id = struct {
     }
 };
 
-pub fn isDylib(file: std.fs.File, fat_offset: u64) bool {
-    const reader = file.reader();
-    const hdr = reader.readStruct(macho.mach_header_64) catch return false;
-    defer file.seekTo(fat_offset) catch {};
-    return hdr.filetype == macho.MH_DYLIB;
-}
-
 pub fn deinit(self: *Dylib, allocator: Allocator) void {
     for (self.symbols.keys()) |key| {
         allocator.free(key);

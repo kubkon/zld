@@ -89,13 +89,6 @@ const ar_hdr = extern struct {
     }
 };
 
-pub fn isArchive(file: fs.File, fat_offset: u64) bool {
-    const reader = file.reader();
-    const magic = reader.readBytesNoEof(SARMAG) catch return false;
-    defer file.seekTo(fat_offset) catch {};
-    return mem.eql(u8, &magic, ARMAG);
-}
-
 pub fn deinit(self: *Archive, allocator: Allocator) void {
     for (self.toc.keys()) |*key| {
         allocator.free(key.*);

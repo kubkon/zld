@@ -88,13 +88,6 @@ const Record = struct {
     reloc: Entry,
 };
 
-pub fn isObject(file: std.fs.File) bool {
-    const reader = file.reader();
-    const hdr = reader.readStruct(macho.mach_header_64) catch return false;
-    defer file.seekTo(0) catch {};
-    return hdr.filetype == macho.MH_OBJECT;
-}
-
 pub fn deinit(self: *Object, gpa: Allocator) void {
     self.atoms.deinit(gpa);
     self.exec_atoms.deinit(gpa);
