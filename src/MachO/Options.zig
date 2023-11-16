@@ -21,135 +21,77 @@ const usage =
     \\Usage: {s} [files...]
     \\
     \\General Options:
-    \\
-    \\-arch [name]
-    \\    Specifies which architecture the output file should be
-    \\
-    \\-current_version [value]
-    \\    Specifies the current version number of the library
-    \\
-    \\-compatibility_version [value]
-    \\    Specifies the compatibility version number of the library
-    \\
-    \\-dead_strip
-    \\    Remove functions and data that are unreachable by the entry point or exported symbols
-    \\
-    \\-dead_strip_dylibs
-    \\    Remove dylibs that were unreachable by the entry point or exported symbols
-    \\
-    \\-dylib
-    \\    Create dynamic library
-    \\
-    \\-dynamic
-    \\    Perform dynamic linking
-    \\
-    \\-e [name]
-    \\    Specifies the entry point of main executable
-    \\
-    \\-u [name]
-    \\    Specifies symbol which has to be resolved at link time for the link to succeed.
-    \\
-    \\-force_load [path]
-    \\    Loads all members of the specified static archive library
-    \\
-    \\-framework [name]
-    \\    Link against framework
-    \\
-    \\-F[path]
-    \\    Add search path for frameworks
-    \\
-    \\-headerpad [value]
-    \\    Set minimum space for future expansion of the load commands in hexadecimal notation
-    \\
-    \\-headerpad_max_install_names
-    \\    Set enough space as if all paths were MAXPATHLEN
-    \\
-    \\-install_name
-    \\    Add dylib's install name
-    \\
-    \\-l[name]
-    \\    Link against library
-    \\    
-    \\-L[path]
-    \\    Add search path for libraries
-    \\
-    \\-needed_framework [name]
-    \\    Link against framework (even if unused)
-    \\
-    \\-needed-l[name]
-    \\    Alias of -needed_library
-    \\
-    \\-needed_library [name]
-    \\    Link against library (even if unused)
-    \\
-    \\-rpath [path]
-    \\    Specify runtime path
-    \\
-    \\-pagezero_size [value]
-    \\    Size of the __PAGEZERO segment in hexademical notation
-    \\
+    \\-arch [name]                       Specifies which architecture the output file should be
+    \\-current_version [value]           Specifies the current version number of the library
+    \\-compatibility_version [value]     Specifies the compatibility version number of the library
+    \\-dead_strip                        Remove functions and data that are unreachable by the entry point or 
+    \\                                   exported symbols
+    \\-dead_strip_dylibs                 Remove dylibs that were unreachable by the entry point or exported symbols
+    \\--debug-log [scope]                Turn on debugging logs for [scope] (requires zld compiled with -Dlog)
+    \\-dylib                             Create dynamic library
+    \\-dynamic                           Perform dynamic linking
+    \\-e [name]                          Specifies the entry point of main executable
+    \\--entitlements                     Add path to entitlements file for embedding in code signature
+    \\-force_load [path]                 Loads all members of the specified static archive library
+    \\-framework [name]                  Link against framework
+    \\-F[path]                           Add search path for frameworks
+    \\-headerpad [value]                 Set minimum space for future expansion of the load commands
+    \\                                   in hexadecimal notation
+    \\-headerpad_max_install_names       Set enough space as if all paths were MAXPATHLEN
+    \\--help                             Print this help and exit
+    \\-install_name                      Add dylib's install name
+    \\-l[name]                           Link against library
+    \\-L[path]                           Add search path for libraries
+    \\-needed_framework [name]           Link against framework (even if unused)
+    \\-needed-l[name]                    Link against library (even if unused)
+    \\  -needed_library [name]           
+    \\-no_deduplicate                    Do not run deduplication pass in linker
+    \\-o [path]                          Specify output path for the final artifact
+    \\-pagezero_size [value]             Size of the __PAGEZERO segment in hexademical notation
     \\-platform_version [platform] [min_version] [sdk_version]
-    \\    Sets the platform, oldest supported version of that platform and the SDK it was built against
+    \\                                   Sets the platform, oldest supported version of that platform and 
+    \\                                   the SDK it was built against
+    \\-rpath [path]                      Specify runtime path
+    \\-S                                 Do not put debug information (STABS or DWARF) in the output file
+    \\-search_paths_first                Search each dir in library search paths for `libx.dylib` then `libx.a`
+    \\-search_dylibs_first               Search `libx.dylib` in each dir in library search paths, then `libx.a`
+    \\-stack_size [value]                Size of the default stack in hexadecimal notation
+    \\-syslibroot [path]                 Specify the syslibroot
+    \\-u [name]                          Specifies symbol which has to be resolved at link time for the link to succeed
+    \\-undefined [value]                 Specify how undefined symbols are to be treated: 
+    \\                                   error (default), warning, suppress, or dynamic_lookup.
+    \\-weak_framework [name]             Link against framework and mark it and all referenced symbols as weak
+    \\-weak-l[name]                      Link against library and mark it and all referenced symbols as weak
+    \\  -weak_library [name]
+    \\-v                                 Print version
+    \\--verbose                          Print full linker invocation to stderr
     \\
-    \\-S
-    \\    Do not put debug information (STABS or DWARF) in the output file
-    \\
-    \\-no_deduplicate
-    \\    Do not run deduplication pass in linker
-    \\
-    \\-search_paths_first
-    \\    Search each dir in library search paths for `libx.dylib` then `libx.a`
-    \\
-    \\-search_dylibs_first
-    \\    Search `libx.dylib` in each dir in library search paths, then `libx.a`
-    \\
-    \\-stack_size [value]
-    \\    Size of the default stack in hexadecimal notation
-    \\
-    \\-syslibroot [path]
-    \\    Specify the syslibroot
-    \\
-    \\-undefined [value]
-    \\    Specifies how undefined symbols are to be treated: error (default), warning, suppress, or dynamic_lookup.
-    \\
-    \\-weak_framework [name]
-    \\    Link against framework and mark it and all referenced symbols as weak
-    \\
-    \\-weak-l[name]
-    \\    Alias of -weak_library
-    \\
-    \\-weak_library [name]
-    \\    Link against library and mark it and all referenced symbols as weak
-    \\
-    \\--entitlements
-    \\    (Linker extension) add path to entitlements file for embedding in code signature
-    \\
-    \\-o [path]
-    \\    Specify output path for the final artifact
-    \\
-    \\-h, --help
-    \\    Print this help and exit
-    \\
-    \\--debug-log [scope]
-    \\    Turn on debugging logs for [scope] (requires zld compiled with -Dlog)
+    \\ld64.zld: supported targets: macho-x86-64, macho-arm64
+    \\ld64.zld: supported emulations: macho_x86_64, macho_arm64
 ;
 
+const version =
+    \\ld64.zld 0.0.1 (compatible with Apple ld64)
+;
+
+const cmd = "ld64.zld";
+
 emit: Zld.Emit,
-output_mode: Zld.OutputMode,
-cpu_arch: ?std.Target.Cpu.Arch,
-platform: ?Platform,
-sdk_version: ?Version,
-inferred_platform_versions: [supported_platforms.len]Platform,
-objects: []const MachO.LinkObject,
+dylib: bool = false,
+dynamic: bool = false,
+cpu_arch: ?std.Target.Cpu.Arch = null,
+platform: ?Platform = null,
+sdk_version: ?Version = null,
+inferred_platform_versions: [supported_platforms.len]Platform = undefined,
+positionals: []const MachO.LinkObject,
 lib_dirs: []const []const u8,
 framework_dirs: []const []const u8,
 rpath_list: []const []const u8,
-dynamic: bool = false,
 syslibroot: ?[]const u8 = null,
 stack_size: ?u64 = null,
 strip: bool = false,
 entry: ?[]const u8 = null,
-force_undefined_symbols: std.StringArrayHashMap(void),
+force_undefined_symbols: []const []const u8 = &[0][]const u8{},
 current_version: ?Version = null,
 compatibility_version: ?Version = null,
 install_name: ?[]const u8 = null,
@@ -163,135 +105,125 @@ dead_strip_dylibs: bool = false,
 allow_undef: bool = false,
 no_deduplicate: bool = false,
 
-const bin_name = "ld64.zld";
-
 pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options {
-    if (args.len == 0) ctx.fatal(usage, .{bin_name});
+    if (args.len == 0) ctx.fatal(usage, .{cmd});
 
-    var objects = std.ArrayList(MachO.LinkObject).init(arena);
-    var libs = std.StringHashMap(usize).init(arena);
-    var frameworks = std.StringHashMap(usize).init(arena);
-
-    var lib_dirs = std.ArrayList([]const u8).init(arena);
-    var framework_dirs = std.ArrayList([]const u8).init(arena);
-    var rpath_list = std.ArrayList([]const u8).init(arena);
-    var out_path: ?[]const u8 = null;
-    var syslibroot: ?[]const u8 = null;
-    var stack_size: ?u64 = null;
-    var dynamic: bool = false;
-    var dylib: bool = false;
-    var install_name: ?[]const u8 = null;
-    var current_version: ?Version = null;
-    var compatibility_version: ?Version = null;
-    var headerpad: ?u32 = null;
-    var headerpad_max_install_names: bool = false;
-    var pagezero_size: ?u64 = null;
-    var dead_strip: bool = false;
-    var dead_strip_dylibs: bool = false;
-    var entry: ?[]const u8 = null;
+    var positionals = std.ArrayList(MachO.LinkObject).init(arena);
+    var lib_dirs = std.StringArrayHashMap(void).init(arena);
+    var framework_dirs = std.StringArrayHashMap(void).init(arena);
+    var rpath_list = std.StringArrayHashMap(void).init(arena);
     var force_undefined_symbols = std.StringArrayHashMap(void).init(arena);
-    var strip: bool = false;
-    var allow_undef: bool = false;
-    var search_strategy: ?SearchStrategy = null;
-    var no_deduplicate: bool = false;
-    var cpu_arch: ?std.Target.Cpu.Arch = null;
-    var platform: ?Platform = null;
-    var sdk_version: ?Version = null;
+    var print_version = false;
+    var verbose = false;
+    var opts: Options = .{
+        .emit = .{
+            .directory = std.fs.cwd(),
+            .sub_path = "a.out",
+        },
+        .positionals = undefined,
+        .lib_dirs = undefined,
+        .framework_dirs = undefined,
+        .rpath_list = undefined,
+    };
 
     var it = Zld.Options.ArgsIterator{ .args = args };
-    while (it.next()) |arg| {
-        if (mem.eql(u8, arg, "--help") or mem.eql(u8, arg, "-h")) {
-            ctx.fatal(usage, .{bin_name});
-        } else if (mem.eql(u8, arg, "--debug-log")) {
-            try ctx.log_scopes.append(it.nextOrFatal(ctx));
-        } else if (mem.eql(u8, arg, "-syslibroot")) {
-            syslibroot = it.nextOrFatal(ctx);
-        } else if (mem.eql(u8, arg, "-search_paths_first")) {
-            search_strategy = .paths_first;
-        } else if (mem.eql(u8, arg, "-search_dylibs_first")) {
-            search_strategy = .dylibs_first;
-        } else if (mem.eql(u8, arg, "-framework")) {
-            try addFramework(it.nextOrFatal(ctx), &objects, &frameworks);
-        } else if (mem.startsWith(u8, arg, "-F")) {
-            try framework_dirs.append(arg[2..]);
-        } else if (mem.startsWith(u8, arg, "-needed-l")) {
-            try addNeededLib(arg["-needed-l".len..], &objects, &libs);
-        } else if (mem.eql(u8, arg, "-needed_library")) {
-            try addNeededLib(it.nextOrFatal(ctx), &objects, &libs);
-        } else if (mem.eql(u8, arg, "-needed_framework")) {
-            try addNeededFramework(it.nextOrFatal(ctx), &objects, &frameworks);
-        } else if (mem.startsWith(u8, arg, "-weak-l")) {
-            try addWeakLib(arg["-weak-l".len..], &objects, &libs);
-        } else if (mem.eql(u8, arg, "-weak_library")) {
-            try addWeakLib(it.nextOrFatal(ctx), &objects, &libs);
-        } else if (mem.eql(u8, arg, "-weak_framework")) {
-            try addWeakFramework(it.nextOrFatal(ctx), &objects, &frameworks);
-        } else if (mem.eql(u8, arg, "-o")) {
-            out_path = it.nextOrFatal(ctx);
-        } else if (mem.eql(u8, arg, "-stack_size")) {
-            const stack_s = it.nextOrFatal(ctx);
-            stack_size = std.fmt.parseUnsigned(u64, eatIntPrefix(stack_s, 16), 16) catch
-                ctx.fatal("Could not parse value '{s}' into integer", .{stack_s});
-        } else if (mem.eql(u8, arg, "-dylib")) {
-            dylib = true;
-        } else if (mem.eql(u8, arg, "-dynamic")) {
-            dynamic = true;
-        } else if (mem.eql(u8, arg, "-static")) {
-            dynamic = false;
-        } else if (mem.eql(u8, arg, "-rpath")) {
-            try rpath_list.append(it.nextOrFatal(ctx));
-        } else if (mem.eql(u8, arg, "-compatibility_version")) {
-            const raw = it.nextOrFatal(ctx);
-            compatibility_version = Version.parse(raw) orelse
+    var p = Zld.ArgParser(@TypeOf(ctx)){ .it = &it, .ctx = ctx };
+    while (p.hasMore()) {
+        if (p.flag2("help")) {
+            ctx.fatal(usage, .{cmd});
+        } else if (p.arg2("debug-log")) |scope| {
+            try ctx.log_scopes.append(scope);
+        } else if (p.flag1("v")) {
+            print_version = true;
+        } else if (p.flag2("verbose")) {
+            verbose = true;
+        } else if (p.arg1("syslibroot")) |path| {
+            opts.syslibroot = path;
+        } else if (p.flag1("search_paths_first")) {
+            opts.search_strategy = .paths_first;
+        } else if (p.flag1("search_dylibs_first")) {
+            opts.search_strategy = .dylibs_first;
+        } else if (p.arg1("framework")) |path| {
+            try positionals.append(.{ .path = path, .tag = .framework });
+        } else if (p.arg1("F")) |path| {
+            try framework_dirs.put(path, {});
+        } else if (p.arg1("needed-l")) |path| {
+            try positionals.append(.{ .path = path, .tag = .lib, .needed = true });
+        } else if (p.arg1("needed_library")) |path| {
+            try positionals.append(.{ .path = path, .tag = .lib, .needed = true });
+        } else if (p.arg1("needed_framework")) |path| {
+            try positionals.append(.{ .path = path, .tag = .framework, .needed = true });
+        } else if (p.arg1("weak-l")) |path| {
+            try positionals.append(.{ .path = path, .tag = .lib, .weak = true });
+        } else if (p.arg1("weak_library")) |path| {
+            try positionals.append(.{ .path = path, .tag = .lib, .weak = true });
+        } else if (p.arg1("weak_framework")) |path| {
+            try positionals.append(.{ .path = path, .tag = .framework, .weak = true });
+        } else if (p.arg1("o")) |path| {
+            opts.emit.sub_path = path;
+        } else if (p.arg1("stack_size")) |value| {
+            opts.stack_size = std.fmt.parseUnsigned(u64, value, 0) catch
+                ctx.fatal("Could not parse value '{s}' into integer", .{value});
+        } else if (p.flag1("dylib")) {
+            opts.dylib = true;
+        } else if (p.flag1("dynamic")) {
+            opts.dynamic = true;
+        } else if (p.flag1("static")) {
+            opts.dynamic = false;
+        } else if (p.arg1("rpath")) |path| {
+            try rpath_list.put(path, {});
+        } else if (p.arg1("compatibility_version")) |raw| {
+            opts.compatibility_version = Version.parse(raw) orelse
                 ctx.fatal("Unable to parse version from '{s}'", .{raw});
-        } else if (mem.eql(u8, arg, "-current_version")) {
-            const raw = it.nextOrFatal(ctx);
-            current_version = Version.parse(raw) orelse
+        } else if (p.arg1("current_version")) |raw| {
+            opts.current_version = Version.parse(raw) orelse
                 ctx.fatal("Unable to parse version from '{s}'", .{raw});
-        } else if (mem.eql(u8, arg, "-install_name")) {
-            install_name = it.nextOrFatal(ctx);
-        } else if (mem.eql(u8, arg, "-headerpad")) {
-            const headerpad_s = it.nextOrFatal(ctx);
-            headerpad = std.fmt.parseUnsigned(u32, eatIntPrefix(headerpad_s, 16), 16) catch
-                ctx.fatal("Could not parse value '{s}' into integer", .{headerpad_s});
-        } else if (mem.eql(u8, arg, "-headerpad_max_install_names")) {
-            headerpad_max_install_names = true;
-        } else if (mem.eql(u8, arg, "-pagezero_size")) {
-            const pagezero_s = it.nextOrFatal(ctx);
-            pagezero_size = std.fmt.parseUnsigned(u64, eatIntPrefix(pagezero_s, 16), 16) catch
-                ctx.fatal("Could not parse value '{s}' into integer", .{pagezero_s});
-        } else if (mem.eql(u8, arg, "-dead_strip")) {
-            dead_strip = true;
-        } else if (mem.eql(u8, arg, "-dead_strip_dylibs")) {
-            dead_strip_dylibs = true;
-        } else if (mem.eql(u8, arg, "-e")) {
-            entry = it.nextOrFatal(ctx);
-        } else if (mem.eql(u8, arg, "-u")) {
-            try force_undefined_symbols.put(it.nextOrFatal(ctx), {});
-        } else if (mem.eql(u8, arg, "-S")) {
-            strip = true;
-        } else if (mem.eql(u8, arg, "-force_load")) {
-            try objects.append(.{
-                .path = it.nextOrFatal(ctx),
-                .tag = .obj,
-                .must_link = true,
-            });
-        } else if (mem.eql(u8, arg, "-arch")) {
-            const arch_s = it.nextOrFatal(ctx);
-            if (mem.eql(u8, arch_s, "arm64")) {
-                cpu_arch = .aarch64;
-            } else if (mem.eql(u8, arch_s, "x86_64")) {
-                cpu_arch = .x86_64;
+        } else if (p.arg1("install_name")) |name| {
+            opts.install_name = name;
+        } else if (p.arg1("headerpad")) |value| {
+            opts.headerpad = std.fmt.parseUnsigned(u32, value, 0) catch
+                ctx.fatal("Could not parse value '{s}' into integer", .{value});
+        } else if (p.flag1("headerpad_max_install_names")) {
+            opts.headerpad_max_install_names = true;
+        } else if (p.arg1("pagezero_size")) |value| {
+            opts.pagezero_size = std.fmt.parseUnsigned(u64, value, 0) catch
+                ctx.fatal("Could not parse value '{s}' into integer", .{value});
+        } else if (p.flag1("dead_strip")) {
+            opts.dead_strip = true;
+        } else if (p.flag1("dead_strip_dylibs")) {
+            opts.dead_strip_dylibs = true;
+        } else if (p.arg1("e")) |name| {
+            opts.entry = name;
+        } else if (p.arg1("undefined")) |treatment| {
+            if (mem.eql(u8, treatment, "error")) {
+                opts.allow_undef = false;
+            } else if (mem.eql(u8, treatment, "warning") or mem.eql(u8, treatment, "suppress")) {
+                ctx.fatal("TODO unimplemented -undefined {s} option", .{treatment});
+            } else if (mem.eql(u8, treatment, "dynamic_lookup")) {
+                opts.allow_undef = true;
             } else {
-                ctx.fatal("Could not parse CPU architecture from '{s}'", .{arch_s});
+                ctx.fatal("Unknown option -undefined {s}", .{treatment});
             }
-        } else if (mem.eql(u8, arg, "-platform_version")) {
-            const platform_s = it.next() orelse
-                ctx.fatal("Expected platform name after '{s}'", .{arg});
+        } else if (p.arg1("u")) |name| {
+            try force_undefined_symbols.put(name, {});
+        } else if (p.flag1("S")) {
+            opts.strip = true;
+        } else if (p.arg1("force_load")) |path| {
+            try positionals.append(.{ .path = path, .tag = .obj, .must_link = true });
+        } else if (p.arg1("arch")) |value| {
+            if (mem.eql(u8, value, "arm64")) {
+                opts.cpu_arch = .aarch64;
+            } else if (mem.eql(u8, value, "x86_64")) {
+                opts.cpu_arch = .x86_64;
+            } else {
+                ctx.fatal("Could not parse CPU architecture from '{s}'", .{value});
+            }
+        } else if (p.arg1("platform_version")) |platform_s| {
+            // TODO clunky!
             const min_v = it.next() orelse
-                ctx.fatal("Expected minimum platform version after '{s}' '{s}'", .{ arg, platform_s });
+                ctx.fatal("Expected minimum platform version after '{s}' '{s}'", .{ p.arg, platform_s });
             const sdk_v = it.next() orelse
-                ctx.fatal("Expected SDK version after '{s}' '{s}' '{s}'", .{ arg, platform_s, min_v });
+                ctx.fatal("Expected SDK version after '{s}' '{s}' '{s}'", .{ p.arg, platform_s, min_v });
 
             var tmp_platform: macho.PLATFORM = undefined;
 
@@ -320,75 +252,45 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
 
             const min_ver = Version.parse(min_v) orelse
                 ctx.fatal("Unable to parse version from '{s}'", .{min_v});
-            sdk_version = Version.parse(sdk_v) orelse
+            opts.sdk_version = Version.parse(sdk_v) orelse
                 ctx.fatal("Unable to parse version from '{s}'", .{sdk_v});
-            platform = .{ .platform = tmp_platform, .version = min_ver };
-        } else if (mem.eql(u8, arg, "-undefined")) {
-            const treatment = it.nextOrFatal(ctx);
-            if (mem.eql(u8, treatment, "error")) {
-                allow_undef = false;
-            } else if (mem.eql(u8, treatment, "warning") or mem.eql(u8, treatment, "suppress")) {
-                ctx.fatal("TODO unimplemented -undefined {s} option", .{treatment});
-            } else if (mem.eql(u8, treatment, "dynamic_lookup")) {
-                allow_undef = true;
-            } else {
-                ctx.fatal("Unknown option -undefined {s}", .{treatment});
-            }
-        } else if (mem.eql(u8, arg, "-lto_library")) {
-            const lto_lib = it.nextOrFatal(ctx);
-            std.log.debug("TODO unimplemented -lto_library {s} option", .{lto_lib});
-        } else if (mem.eql(u8, arg, "-demangle")) {
+            opts.platform = .{ .platform = tmp_platform, .version = min_ver };
+        } else if (p.arg1("lto_library")) |path| {
+            std.log.debug("TODO unimplemented -lto_library {s} option", .{path});
+        } else if (p.flag1("demangle")) {
             std.log.debug("TODO unimplemented -demangle option", .{});
-        } else if (mem.startsWith(u8, arg, "-l")) {
-            try addLib(arg[2..], &objects, &libs);
-        } else if (mem.startsWith(u8, arg, "-L")) {
-            try lib_dirs.append(arg[2..]);
-        } else if (mem.eql(u8, arg, "-no_deduplicate")) {
-            no_deduplicate = true;
+        } else if (p.arg1("l")) |path| {
+            try positionals.append(.{ .path = path, .tag = .lib });
+        } else if (p.arg1("L")) |path| {
+            try lib_dirs.put(path, {});
+        } else if (p.flag1("no_deduplicate")) {
+            opts.no_deduplicate = true;
         } else {
-            try objects.append(.{
-                .path = arg,
-                .tag = .obj,
-            });
+            try positionals.append(.{ .path = p.arg, .tag = .obj });
         }
     }
 
-    // Add some defaults
-    try lib_dirs.append("/usr/lib");
-    try framework_dirs.append("/System/Library/Frameworks");
+    if (verbose) {
+        std.debug.print("{s} ", .{cmd});
+        for (args[0 .. args.len - 1]) |arg| {
+            std.debug.print("{s} ", .{arg});
+        }
+        std.debug.print("{s}\n", .{args[args.len - 1]});
+    }
 
-    var opts = Options{
-        .emit = .{
-            .directory = std.fs.cwd(),
-            .sub_path = out_path orelse "a.out",
-        },
-        .dynamic = dynamic,
-        .cpu_arch = cpu_arch,
-        .platform = platform,
-        .sdk_version = sdk_version,
-        .inferred_platform_versions = undefined,
-        .output_mode = if (dylib) .lib else .exe,
-        .syslibroot = syslibroot,
-        .objects = objects.items,
-        .lib_dirs = lib_dirs.items,
-        .framework_dirs = framework_dirs.items,
-        .rpath_list = rpath_list.items,
-        .stack_size = stack_size,
-        .install_name = install_name,
-        .current_version = current_version,
-        .compatibility_version = compatibility_version,
-        .dead_strip = dead_strip,
-        .dead_strip_dylibs = dead_strip_dylibs,
-        .headerpad = headerpad,
-        .headerpad_max_install_names = headerpad_max_install_names,
-        .pagezero_size = pagezero_size,
-        .entry = entry,
-        .force_undefined_symbols = force_undefined_symbols,
-        .strip = strip,
-        .allow_undef = allow_undef,
-        .search_strategy = search_strategy,
-        .no_deduplicate = no_deduplicate,
-    };
+    if (print_version) ctx.warn("{s}", .{version});
+
+    if (positionals.items.len == 0) ctx.fatal("Expected at least one positional argument", .{});
+
+    // Add some defaults
+    try lib_dirs.put("/usr/lib", {});
+    try framework_dirs.put("/System/Library/Frameworks", {});
+
+    opts.positionals = positionals.items;
+    opts.lib_dirs = lib_dirs.keys();
+    opts.framework_dirs = framework_dirs.keys();
+    opts.rpath_list = rpath_list.keys();
+    opts.force_undefined_symbols = force_undefined_symbols.keys();
 
     try opts.inferPlatformVersions(arena);
 
@@ -403,87 +305,11 @@ fn inferPlatformVersions(opts: *Options, arena: Allocator) !void {
     inline for (&opts.inferred_platform_versions, 0..) |*platform, i| {
         if (supported_platforms[i][3]) |var_name| {
             if (std.process.getEnvVarOwned(arena, var_name)) |env_var| {
-                const version = Version.parse(env_var) orelse Version{ .value = 0 };
-                platform.* = .{ .platform = supported_platforms[i][0], .version = version };
+                const v = Version.parse(env_var) orelse Version{ .value = 0 };
+                platform.* = .{ .platform = supported_platforms[i][0], .version = v };
             } else |_| {}
         }
     }
-}
-
-fn eatIntPrefix(arg: []const u8, radix: u8) []const u8 {
-    if (arg.len > 2 and arg[0] == '0') {
-        switch (std.ascii.toLower(arg[1])) {
-            'b' => if (radix == 2) return arg[2..],
-            'o' => if (radix == 8) return arg[2..],
-            'x' => if (radix == 16) return arg[2..],
-            else => {},
-        }
-    }
-    return arg;
-}
-
-const Objects = std.ArrayList(MachO.LinkObject);
-const LibLookup = std.StringHashMap(usize);
-
-fn newObjectWithLookup(name: []const u8, objects: *Objects, lookup: *LibLookup) !*MachO.LinkObject {
-    const gop = try lookup.getOrPut(name);
-    if (!gop.found_existing) {
-        gop.value_ptr.* = objects.items.len;
-        _ = try objects.addOne();
-    }
-    return &objects.items[gop.value_ptr.*];
-}
-
-fn addLib(name: []const u8, objects: *Objects, libs: *LibLookup) !void {
-    const obj = try newObjectWithLookup(name, objects, libs);
-    obj.* = .{
-        .path = name,
-        .tag = .lib,
-    };
-}
-
-fn addNeededLib(name: []const u8, objects: *Objects, libs: *LibLookup) !void {
-    const obj = try newObjectWithLookup(name, objects, libs);
-    obj.* = .{
-        .path = name,
-        .tag = .lib,
-        .needed = true,
-    };
-}
-
-fn addWeakLib(name: []const u8, objects: *Objects, libs: *LibLookup) !void {
-    const obj = try newObjectWithLookup(name, objects, libs);
-    obj.* = .{
-        .path = name,
-        .tag = .lib,
-        .weak = true,
-    };
-}
-
-fn addFramework(name: []const u8, objects: *Objects, frameworks: *LibLookup) !void {
-    const obj = try newObjectWithLookup(name, objects, frameworks);
-    obj.* = .{
-        .path = name,
-        .tag = .framework,
-    };
-}
-
-fn addNeededFramework(name: []const u8, objects: *Objects, frameworks: *LibLookup) !void {
-    const obj = try newObjectWithLookup(name, objects, frameworks);
-    obj.* = .{
-        .path = name,
-        .tag = .framework,
-        .needed = true,
-    };
-}
-
-fn addWeakFramework(name: []const u8, objects: *Objects, frameworks: *LibLookup) !void {
-    const obj = try newObjectWithLookup(name, objects, frameworks);
-    obj.* = .{
-        .path = name,
-        .tag = .framework,
-        .weak = true,
-    };
 }
 
 pub const Platform = struct {
@@ -495,10 +321,10 @@ pub const Platform = struct {
     pub fn fromLoadCommand(lc: macho.LoadCommandIterator.LoadCommand) Platform {
         switch (lc.cmd()) {
             .BUILD_VERSION => {
-                const cmd = lc.cast(macho.build_version_command).?;
+                const lc_cmd = lc.cast(macho.build_version_command).?;
                 return .{
-                    .platform = cmd.platform,
-                    .version = .{ .value = cmd.minos },
+                    .platform = lc_cmd.platform,
+                    .version = .{ .value = lc_cmd.minos },
                 };
             },
             .VERSION_MIN_MACOSX,
@@ -506,7 +332,7 @@ pub const Platform = struct {
             .VERSION_MIN_TVOS,
             .VERSION_MIN_WATCHOS,
             => {
-                const cmd = lc.cast(macho.version_min_command).?;
+                const lc_cmd = lc.cast(macho.version_min_command).?;
                 return .{
                     .platform = switch (lc.cmd()) {
                         .VERSION_MIN_MACOSX => .MACOS,
@@ -515,7 +341,7 @@ pub const Platform = struct {
                         .VERSION_MIN_WATCHOS => .WATCHOS,
                         else => unreachable,
                     },
-                    .version = .{ .value = cmd.version },
+                    .version = .{ .value = lc_cmd.version },
                 };
             },
             else => unreachable,

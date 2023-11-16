@@ -54,36 +54,31 @@ fn collectRoots(macho_file: *MachO, roots: *AtomTable, resolver: *const SymbolRe
     const tracy = trace(@src());
     defer tracy.end();
 
-    const output_mode = macho_file.options.output_mode;
-
     log.debug("collecting roots", .{});
 
-    switch (output_mode) {
-        .exe => {
-            // Add entrypoint as GC root
-            const global: SymbolWithLoc = macho_file.getEntryPoint();
+    if (macho_file.options.dylib) {
+
+        // Add exports as GC roots
+        for (macho_file.globals.items) |global| {
+            const sym = macho_file.getSymbol(global);
+            if (sym.undf()) continue;
+
             if (global.getFile()) |file| {
                 try addRoot(macho_file, roots, file, global);
-            } else {
-                assert(macho_file.getSymbol(global).undf()); // Stub as our entrypoint is in a dylib.
             }
-        },
-        else => |other| {
-            assert(other == .lib);
-            // Add exports as GC roots
-            for (macho_file.globals.items) |global| {
-                const sym = macho_file.getSymbol(global);
-                if (sym.undf()) continue;
-
-                if (global.getFile()) |file| {
-                    try addRoot(macho_file, roots, file, global);
-                }
-            }
-        },
+        }
+    } else {
+        // Add entrypoint as GC root
+        const global: SymbolWithLoc = macho_file.getEntryPoint();
+        if (global.getFile()) |file| {
+            try addRoot(macho_file, roots, file, global);
+        } else {
+            assert(macho_file.getSymbol(global).undf()); // Stub as our entrypoint is in a dylib.
+        }
     }
 
     // Add all symbols force-defined by the user.
-    for (macho_file.options.force_undefined_symbols.keys()) |sym_name| {
+    for (macho_file.options.force_undefined_symbols) |sym_name| {
         const global_index = resolver.table.get(sym_name).?;
         const global = macho_file.globals.items[global_index];
         const sym = macho_file.getSymbol(global);

@@ -256,7 +256,7 @@ pub const WriteOpts = struct {
     exec_seg_base: u64,
     exec_seg_limit: u64,
     file_size: u32,
-    output_mode: Zld.OutputMode,
+    dylib: bool,
 };
 
 pub fn writeAdhocSignature(
@@ -278,7 +278,7 @@ pub fn writeAdhocSignature(
 
     self.code_directory.inner.execSegBase = opts.exec_seg_base;
     self.code_directory.inner.execSegLimit = opts.exec_seg_limit;
-    self.code_directory.inner.execSegFlags = if (opts.output_mode == .exe) macho.CS_EXECSEG_MAIN_BINARY else 0;
+    self.code_directory.inner.execSegFlags = if (!opts.dylib) macho.CS_EXECSEG_MAIN_BINARY else 0;
     self.code_directory.inner.codeLimit = opts.file_size;
 
     const total_pages = @as(u32, @intCast(mem.alignForward(usize, opts.file_size, self.page_size) / self.page_size));
