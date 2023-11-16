@@ -39,6 +39,7 @@ const usage =
     \\--print-gc-sections           List removed unused sections to stderr
     \\--push-state                  Save the current state of --as-needed, -static and --whole-archive
     \\-r                            Create a relocatable object file
+    \\  --relocatable
     \\--relax                       Optimize instructions (default)
     \\  --no-relax
     \\--rpath=[value], -R [value]   Specify runtime path
@@ -153,7 +154,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             try search_dirs.put(dir, {});
         } else if (p.arg1("o")) |path| {
             opts.emit.sub_path = path;
-        } else if (p.flag1("r")) {
+        } else if (p.flag1("r") or p.flagAny("relocatable")) {
             opts.relocatable = true;
         } else if (p.arg1("image-base")) |value| {
             opts.image_base = std.fmt.parseInt(u64, value, 0) catch
