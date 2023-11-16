@@ -232,8 +232,8 @@ pub fn flush(self: *MachO) !void {
     }
 
     var objects = std.ArrayList(LinkObject).init(arena);
-    try objects.ensureTotalCapacityPrecise(self.options.objects.len);
-    for (self.options.objects) |obj| {
+    try objects.ensureTotalCapacityPrecise(self.options.positionals.len);
+    for (self.options.positionals) |obj| {
         try self.resolveLinkObjectPath(arena, obj, lib_dirs.items, framework_dirs.items, &objects);
     }
 
@@ -300,7 +300,7 @@ pub fn flush(self: *MachO) !void {
     try self.reportUndefined(&resolver);
     self.base.reportWarningsAndErrorsAndExit();
 
-    if (self.options.output_mode == .exe) {
+    if (!self.options.dylib) {
         const entry_name = self.options.entry orelse default_entry_point;
         const global_index = resolver.table.get(entry_name).?; // Error was flagged earlier
         self.entry_index = global_index;
@@ -316,7 +316,7 @@ pub fn flush(self: *MachO) !void {
     try self.createTentativeDefAtoms();
     try self.createStubHelperPreambleAtom();
 
-    if (self.options.output_mode == .exe) {
+    if (!self.options.dylib) {
         const global = self.getEntryPoint();
         if (self.getSymbol(global).undf()) {
             // We do one additional check here in case the entry point was found in one of the dylibs.
@@ -423,7 +423,7 @@ pub fn flush(self: *MachO) !void {
     try lc_writer.writeStruct(self.dysymtab_cmd);
     try load_commands.writeDylinkerLC(lc_writer);
 
-    if (self.options.output_mode == .exe) {
+    if (!self.options.dylib) {
         const seg_id = self.getSegmentByName("__TEXT").?;
         const seg = self.segments.items[seg_id];
         const global = self.getEntryPoint();
@@ -443,7 +443,7 @@ pub fn flush(self: *MachO) !void {
             .stacksize = self.options.stack_size orelse 0,
         });
     } else {
-        assert(self.options.output_mode == .lib);
+        assert(self.options.dylib);
         try load_commands.writeDylibIdLC(&self.options, lc_writer);
     }
 
@@ -1627,13 +1627,13 @@ fn resolveSymbols(self: *MachO, resolver: *SymbolResolver) !void {
     // We add the specified entrypoint as the first unresolved symbols so that
     // we search for it in libraries should there be no object files specified
     // on the linker line.
-    if (self.options.output_mode == .exe) {
+    if (!self.options.dylib) {
         const entry_name = self.options.entry orelse default_entry_point;
         try self.forceSymbolDefined(entry_name, resolver);
     }
 
     // Force resolution of any symbols requested by the user.
-    for (self.options.force_undefined_symbols.keys()) |sym_name| {
+    for (self.options.force_undefined_symbols) |sym_name| {
         try self.forceSymbolDefined(sym_name, resolver);
     }
 
@@ -1865,7 +1865,7 @@ fn reportUndefined(self: *MachO, resolver: *const SymbolResolver) !void {
 }
 
 fn createMhExecuteHeaderSymbol(self: *MachO, resolver: *SymbolResolver) !void {
-    if (self.options.output_mode != .exe) return;
+    if (self.options.dylib) return;
     if (resolver.table.get("__mh_execute_header")) |global_index| {
         const global = self.globals.items[global_index];
         const sym = self.getSymbol(global);
@@ -1992,7 +1992,7 @@ pub fn deinit(self: *MachO) void {
 fn createSegments(self: *MachO) !void {
     const pagezero_vmsize = self.options.pagezero_size orelse default_pagezero_vmsize;
     const aligned_pagezero_vmsize = mem.alignBackward(u64, pagezero_vmsize, self.getPageSize());
-    if (self.options.output_mode != .lib and aligned_pagezero_vmsize > 0) {
+    if (!self.options.dylib and aligned_pagezero_vmsize > 0) {
         if (aligned_pagezero_vmsize != pagezero_vmsize) {
             log.warn("requested __PAGEZERO size (0x{x}) is not page aligned", .{pagezero_vmsize});
             log.warn("  rounding down to 0x{x}", .{aligned_pagezero_vmsize});
@@ -3484,7 +3484,7 @@ fn writeCodeSignature(self: *MachO, code_sig: *CodeSignature) !void {
         .exec_seg_base = seg.fileoff,
         .exec_seg_limit = seg.filesize,
         .file_size = self.codesig_cmd.dataoff,
-        .output_mode = self.options.output_mode,
+        .dylib = self.options.dylib,
     }, buffer.writer());
     assert(buffer.items.len == code_sig.size());
 
@@ -3513,15 +3513,11 @@ fn writeHeader(self: *MachO, ncmds: u32, sizeofcmds: u32) !void {
         else => return error.UnsupportedCpuArchitecture,
     }
 
-    switch (self.options.output_mode) {
-        .exe => {
-            header.filetype = macho.MH_EXECUTE;
-        },
-        .lib => {
-            // By this point, it can only be a dylib.
-            header.filetype = macho.MH_DYLIB;
-            header.flags |= macho.MH_NO_REEXPORTED_DYLIBS;
-        },
+    if (self.options.dylib) {
+        header.filetype = macho.MH_DYLIB;
+        header.flags |= macho.MH_NO_REEXPORTED_DYLIBS;
+    } else {
+        header.filetype = macho.MH_EXECUTE;
     }
 
     if (self.getSectionByName("__DATA", "__thread_vars")) |sect_id| {
@@ -3662,7 +3658,7 @@ pub fn getTlvPtrAtomIndexForSymbol(self: *MachO, sym_with_loc: SymbolWithLoc) ?A
 /// Returns symbol location corresponding to the set entrypoint.
 /// Asserts output mode is executable.
 pub fn getEntryPoint(self: MachO) SymbolWithLoc {
-    assert(self.options.output_mode == .exe);
+    assert(!self.options.dylib);
     const global_index = self.entry_index.?;
     return self.globals.items[global_index];
 }

@@ -48,11 +48,11 @@ fn calcLCsSize(macho_file: *MachO, assume_max_path_len: bool) !u32 {
         false,
     );
     // LC_MAIN
-    if (macho_file.options.output_mode == .exe) {
+    if (!options.dylib) {
         sizeofcmds += @sizeOf(macho.entry_point_command);
     }
     // LC_ID_DYLIB
-    if (options.output_mode == .lib) {
+    if (options.dylib) {
         sizeofcmds += blk: {
             const emit = options.emit;
             const install_name = options.install_name orelse emit.sub_path;
@@ -190,7 +190,7 @@ fn writeDylibLC(ctx: WriteDylibLCCtx, lc_writer: anytype) !void {
 }
 
 pub fn writeDylibIdLC(options: *const Options, lc_writer: anytype) !void {
-    assert(options.output_mode == .lib);
+    assert(options.dylib);
     const emit = options.emit;
     const install_name = options.install_name orelse emit.sub_path;
     const curr = options.current_version orelse Options.Version.new(1, 0, 0);

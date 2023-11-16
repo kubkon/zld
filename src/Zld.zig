@@ -74,6 +74,130 @@ pub const Options = union {
     }
 };
 
+pub fn ArgParser(comptime Ctx: type) type {
+    return struct {
+        arg: []const u8 = undefined,
+        it: *Options.ArgsIterator,
+        ctx: Ctx,
+
+        pub fn hasMore(p: *Self) bool {
+            p.arg = p.it.next() orelse return false;
+            return true;
+        }
+
+        pub fn flagAny(p: *Self, comptime pat: []const u8) bool {
+            return p.flag2(pat) or p.flag1(pat);
+        }
+
+        pub fn flag2(p: *Self, comptime pat: []const u8) bool {
+            return p.flagPrefix(pat, "--");
+        }
+
+        pub fn flag1(p: *Self, comptime pat: []const u8) bool {
+            return p.flagPrefix(pat, "-");
+        }
+
+        pub fn flagZ(p: *Self, comptime pat: []const u8) bool {
+            const prefix = "-z";
+            const i = p.it.i;
+            const actual_flag = blk: {
+                if (mem.eql(u8, p.arg, prefix)) {
+                    break :blk p.it.nextOrFatal(p.ctx);
+                }
+                if (mem.startsWith(u8, p.arg, prefix)) {
+                    break :blk p.arg[prefix.len..];
+                }
+                return false;
+            };
+            if (mem.eql(u8, actual_flag, pat)) return true;
+            p.it.i = i;
+            return false;
+        }
+
+        fn flagPrefix(p: *Self, comptime pat: []const u8, comptime prefix: []const u8) bool {
+            if (mem.startsWith(u8, p.arg, prefix)) {
+                const actual_arg = p.arg[prefix.len..];
+                if (mem.eql(u8, actual_arg, pat)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        pub fn argAny(p: *Self, comptime pat: []const u8) ?[]const u8 {
+            if (p.arg2(pat)) |value| return value;
+            return p.arg1(pat);
+        }
+
+        pub fn arg2(p: *Self, comptime pat: []const u8) ?[]const u8 {
+            return p.argPrefix(pat, "--");
+        }
+
+        pub fn arg1(p: *Self, comptime pat: []const u8) ?[]const u8 {
+            return p.argPrefix(pat, "-");
+        }
+
+        pub fn argZ(p: *Self, comptime pat: []const u8) ?[]const u8 {
+            const prefix = "-z";
+            const i = p.it.i;
+            const actual_arg = blk: {
+                if (mem.eql(u8, p.arg, prefix)) {
+                    if (p.it.peek()) |next| {
+                        if (mem.startsWith(u8, next, "-")) return null;
+                    }
+                    break :blk p.it.nextOrFatal(p.ctx);
+                }
+                if (mem.startsWith(u8, p.arg, prefix)) {
+                    break :blk p.arg[prefix.len..];
+                }
+                return null;
+            };
+            if (mem.startsWith(u8, actual_arg, pat)) {
+                if (mem.indexOf(u8, actual_arg, "=")) |index| {
+                    if (index == pat.len) {
+                        const value = actual_arg[index + 1 ..];
+                        return value;
+                    }
+                }
+            }
+            p.it.i = i;
+            return null;
+        }
+
+        fn argPrefix(p: *Self, comptime pat: []const u8, comptime prefix: []const u8) ?[]const u8 {
+            if (mem.startsWith(u8, p.arg, prefix)) {
+                const actual_arg = p.arg[prefix.len..];
+                if (mem.eql(u8, actual_arg, pat)) {
+                    if (p.it.peek()) |next| {
+                        if (mem.startsWith(u8, next, "-")) return null;
+                    }
+                    return p.it.nextOrFatal(p.ctx);
+                }
+                if (pat.len == 1 and mem.eql(u8, actual_arg[0..pat.len], pat)) {
+                    return actual_arg[pat.len..];
+                }
+                // MachO specific
+                if (mem.eql(u8, pat, "needed-l") or mem.eql(u8, pat, "weak-l")) {
+                    if (mem.startsWith(u8, actual_arg, pat)) {
+                        return actual_arg[pat.len..];
+                    }
+                }
+                if (mem.startsWith(u8, actual_arg, pat)) {
+                    if (mem.indexOf(u8, actual_arg, "=")) |index| {
+                        if (index == pat.len) {
+                            const value = actual_arg[index + 1 ..];
+                            return value;
+                        }
+                    }
+                }
+            }
+            return null;
+        }
+
+        const Self = @This();
+    };
+}
+
 pub const ErrorMsg = struct {
     msg: []const u8,
     notes: std.ArrayListUnmanaged(ErrorMsg) = .{},
