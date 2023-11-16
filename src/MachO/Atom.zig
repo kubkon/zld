@@ -14,10 +14,10 @@ size: u64 = 0,
 alignment: u8 = 0,
 
 /// Index of the input section.
-shndx: u32 = 0,
+n_sect: u32 = 0,
 
 /// Index of the output section.
-out_shndx: u16 = 0,
+out_n_sect: u16 = 0,
 
 relocs: Loc = .{},
 
@@ -36,12 +36,12 @@ pub fn getObject(self: Atom, macho_file: *MachO) *Object {
 
 pub fn getInputSection(self: Atom, macho_file: *MachO) macho.section_64 {
     const object = self.getObject(macho_file);
-    return object.sections[self.shndx];
+    return object.sections[self.n_sect];
 }
 
 pub fn getPriority(self: Atom, macho_file: *MachO) u64 {
     const object = self.getObject(macho_file);
-    return (@as(u64, @intCast(object.index)) << 32) | @as(u64, @intCast(self.shndx));
+    return (@as(u64, @intCast(object.index)) << 32) | @as(u64, @intCast(self.n_sect));
 }
 
 pub fn getRelocs(self: Atom, macho_file: *MachO) []const macho.relocation_info {
@@ -86,7 +86,7 @@ fn format2(
     const macho_file = ctx.macho_file;
     try writer.print("atom({d}) : {s} : @{x} : sect({d}) : align({x}) : size({x})", .{
         atom.atom_index, atom.getName(macho_file), atom.value,
-        atom.out_shndx,  atom.alignment,           atom.size,
+        atom.out_n_sect, atom.alignment,           atom.size,
     });
     if (macho_file.options.dead_strip and !atom.flags.alive) {
         try writer.writeAll(" : [*]");

@@ -56,8 +56,95 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
 }
 
 fn initAtoms(self: *Object, macho_file: *MachO) !void {
-    _ = self;
-    _ = macho_file;
+    if (self.header.?.flags & macho.MH_SUBSECTIONS_VIA_SYMBOLS == 0) {
+        @panic("TODO no subsections!");
+    }
+
+    const gpa = macho_file.base.allocator;
+    var symbols = std.ArrayList(macho.nlist_64).init(gpa);
+    defer symbols.deinit();
+
+    if (self.getLoadCommand(.DYSYMTAB)) |lc| {
+        const cmd = lc.cast(macho.dysymtab_command).?;
+        try symbols.appendSlice(self.symtab.items[0..cmd.iundefsym]);
+    } else {
+        try symbols.ensureUnusedCapacity(self.symtab.items.len);
+        for (self.symtab.items) |nlist| {
+            if (nlist.sect()) symbols.appendAssumeCapacity(nlist);
+        }
+    }
+
+    const nlistLessThan = struct {
+        fn nlistLessThan(ctx: void, lhs: macho.nlist_64, rhs: macho.nlist_64) bool {
+            _ = ctx;
+            assert(lhs.sect() and rhs.sect());
+            if (lhs.n_sect == rhs.n_sect) {
+                if (lhs.n_value == rhs.n_value) {
+                    return lhs.n_strx < rhs.n_strx;
+                } else return lhs.n_value < rhs.n_value;
+            } else return lhs.n_sect < rhs.n_sect;
+        }
+    }.nlistLessThan;
+
+    mem.sort(macho.nlist_64, symbols.items, {}, nlistLessThan);
+
+    var sym_start: usize = 0;
+    for (self.sections, 1..) |sect, n_sect| {
+        const sym_end = for (symbols.items[sym_start..], sym_start..) |sym, sym_i| {
+            if (sym.n_sect != n_sect) break sym_i;
+        } else symbols.items.len;
+
+        if (sym_start == sym_end) break;
+
+        var sym_next: usize = sym_start;
+        while (sym_next < sym_end) {
+            const first_nlist = symbols.items[sym_next];
+
+            while (sym_next < sym_end and
+                symbols.items[sym_next].n_value == first_nlist.n_value) : (sym_next += 1)
+            {}
+
+            const size = if (sym_next < sym_end)
+                symbols.items[sym_next].n_value - first_nlist.n_value
+            else
+                sect.size;
+
+            const alignment = if (first_nlist.n_value > 0)
+                @min(@ctz(first_nlist.n_value), sect.@"align")
+            else
+                sect.@"align";
+
+            _ = try self.addAtom(
+                self.getString(first_nlist.n_strx),
+                size,
+                @intCast(alignment),
+                @intCast(n_sect - 1),
+                macho_file,
+            );
+        }
+
+        sym_start = sym_end;
+    }
+}
+
+fn addAtom(
+    self: *Object,
+    name: [:0]const u8,
+    size: u64,
+    alignment: u8,
+    n_sect: u32,
+    macho_file: *MachO,
+) !Atom.Index {
+    const gpa = macho_file.base.allocator;
+    const atom_index = try macho_file.addAtom();
+    const atom = macho_file.getAtom(atom_index).?;
+    atom.atom_index = atom_index;
+    atom.name = try macho_file.string_intern.insert(gpa, name);
+    atom.n_sect = n_sect;
+    atom.size = size;
+    atom.alignment = alignment;
+    try self.atoms.append(gpa, atom_index);
+    return atom_index;
 }
 
 fn getLoadCommand(self: Object, lc: macho.LC) ?LoadCommandIterator.LoadCommand {
@@ -68,6 +155,11 @@ fn getLoadCommand(self: Object, lc: macho.LC) ?LoadCommandIterator.LoadCommand {
     while (it.next()) |cmd| {
         if (cmd.cmd() == lc) return cmd;
     } else return null;
+}
+
+fn getString(self: Object, off: u32) [:0]const u8 {
+    assert(off < self.strtab.len);
+    return mem.sliceTo(@as([*:0]const u8, @ptrCast(self.strtab.ptr + off)), 0);
 }
 
 pub fn format(
