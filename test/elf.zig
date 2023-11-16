@@ -55,6 +55,7 @@ pub fn addElfTests(b: *Build, options: common.Options) *Step {
     elf_step.dependOn(testPltGot(b, opts));
     elf_step.dependOn(testPreinitArray(b, opts));
     elf_step.dependOn(testPushPopState(b, opts));
+    elf_step.dependOn(testRelocatableArchive(b, opts));
     elf_step.dependOn(testRelocatableEhFrame(b, opts));
     elf_step.dependOn(testSharedAbsSymbol(b, opts));
     elf_step.dependOn(testStrip(b, opts));
@@ -1833,6 +1834,61 @@ fn testPushPopState(b: *Build, opts: Options) *Step {
     check.checkContains("a.so");
     check.checkInDynamicSection();
     check.checkNotPresent("b.so");
+    test_step.dependOn(&check.step);
+
+    return test_step;
+}
+
+fn testRelocatableArchive(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-relocatable-archive", "");
+
+    const obj1 = cc(b, opts);
+    obj1.addCSource(
+        \\void bar();
+        \\void foo() {
+        \\  bar();
+        \\}
+    );
+    obj1.addArg("-c");
+
+    const obj2 = cc(b, opts);
+    obj2.addCSource(
+        \\void bar() {}
+    );
+    obj2.addArg("-c");
+
+    const obj3 = cc(b, opts);
+    obj3.addCSource(
+        \\void baz();
+    );
+    obj3.addArg("-c");
+
+    const obj4 = cc(b, opts);
+    obj4.addCSource(
+        \\void foo();
+        \\int main() {
+        \\  foo();
+        \\}
+    );
+    obj4.addArg("-c");
+
+    const lib = ar(b);
+    lib.addFileSource(obj1.out);
+    lib.addFileSource(obj2.out);
+    lib.addFileSource(obj3.out);
+
+    const obj5 = ld(b, opts);
+    obj5.addFileSource(obj4.out);
+    obj5.addFileSource(lib.out);
+    obj5.addArg("-r");
+
+    const check = obj5.check();
+    check.checkInSymtab();
+    check.checkContains("foo");
+    check.checkInSymtab();
+    check.checkContains("bar");
+    check.checkInSymtab();
+    check.checkNotPresent("baz");
     test_step.dependOn(&check.step);
 
     return test_step;
