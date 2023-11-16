@@ -6,6 +6,7 @@ pub fn addElfTests(b: *Build, options: common.Options) *Step {
     var opts = Options{
         .zld = options.zld,
         .is_musl = options.is_musl,
+        .has_zig = options.has_zig,
         .has_static = options.has_static,
         .cc_override = options.cc_override,
         .system_compiler = options.system_compiler,
@@ -54,6 +55,7 @@ pub fn addElfTests(b: *Build, options: common.Options) *Step {
     elf_step.dependOn(testPltGot(b, opts));
     elf_step.dependOn(testPreinitArray(b, opts));
     elf_step.dependOn(testPushPopState(b, opts));
+    elf_step.dependOn(testRelocatableEhFrame(b, opts));
     elf_step.dependOn(testSharedAbsSymbol(b, opts));
     elf_step.dependOn(testStrip(b, opts));
     elf_step.dependOn(testTlsCommon(b, opts));
@@ -1836,6 +1838,95 @@ fn testPushPopState(b: *Build, opts: Options) *Step {
     return test_step;
 }
 
+fn testRelocatableEhFrame(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-relocatable-eh-frame", "");
+
+    if (!opts.has_zig) return skipTestStep(test_step);
+
+    const obj1 = zig(b, .obj);
+    obj1.addCppSource(
+        \\#include <stdexcept>
+        \\int try_me() {
+        \\  throw std::runtime_error("Oh no!");
+        \\}
+    );
+    obj1.addArg("-lc++");
+
+    const obj2 = zig(b, .obj);
+    obj2.addCppSource(
+        \\extern int try_me();
+        \\int try_again() {
+        \\  return try_me();
+        \\}
+    );
+    obj2.addArg("-lc++");
+
+    {
+        const obj3 = ld(b, opts);
+        obj3.addFileSource(obj1.out);
+        obj3.addFileSource(obj2.out);
+        obj3.addArg("-r");
+        const obj3_out = obj3.saveOutputAs("c.o");
+
+        const exe = zig(b, .exe);
+        exe.addCppSource(
+            \\#include <iostream>
+            \\#include <stdexcept>
+            \\extern int try_again();
+            \\int main() {
+            \\  try {
+            \\    try_again();
+            \\  } catch (const std::exception &e) {
+            \\    std::cout << "exception=" << e.what();
+            \\  }
+            \\  return 0;
+            \\}
+        );
+        exe.addFileSource(obj3_out.file);
+        exe.addArg("-lc++");
+
+        const run = exe.run();
+        run.expectStdOutEqual("exception=Oh no!");
+        test_step.dependOn(run.step());
+    }
+
+    {
+        // Let's make the object file COMDAT group heavy!
+        const obj3 = zig(b, .obj);
+        obj3.addCppSource(
+            \\#include <iostream>
+            \\#include <stdexcept>
+            \\extern int try_again();
+            \\int main() {
+            \\  try {
+            \\    try_again();
+            \\  } catch (const std::exception &e) {
+            \\    std::cout << "exception=" << e.what();
+            \\  }
+            \\  return 0;
+            \\}
+        );
+        obj3.addArg("-lc++");
+
+        const obj4 = ld(b, opts);
+        obj4.addFileSource(obj1.out);
+        obj4.addFileSource(obj2.out);
+        obj4.addFileSource(obj3.out);
+        obj4.addArg("-r");
+        const obj4_out = obj4.saveOutputAs("c.o");
+
+        const exe = zig(b, .exe);
+        exe.addFileSource(obj4_out.file);
+        exe.addArg("-lc++");
+
+        const run = exe.run();
+        run.expectStdOutEqual("exception=Oh no!");
+        test_step.dependOn(run.step());
+    }
+
+    return test_step;
+}
+
 fn testSharedAbsSymbol(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-shared-abs-symbol", "");
 
@@ -3239,10 +3330,18 @@ fn ld(b: *Build, opts: Options) SysCmd {
     return .{ .cmd = cmd, .out = out };
 }
 
+fn zig(b: *Build, comptime mode: enum { obj, exe, lib }) SysCmd {
+    const cmd = Run.create(b, "zig");
+    cmd.addArgs(&.{ "zig", "build-" ++ @tagName(mode) });
+    const out = cmd.addPrefixedOutputFileArg("-femit-bin=", "a.o");
+    return .{ .cmd = cmd, .out = out };
+}
+
 const Options = struct {
     zld: FileSourceWithDir,
     system_compiler: common.SystemCompiler,
     has_static: bool,
+    has_zig: bool,
     is_musl: bool,
     cc_override: ?[]const u8,
 };

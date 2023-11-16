@@ -2645,10 +2645,10 @@ fn formatSections(
 ) !void {
     _ = options;
     _ = unused_fmt_string;
-    for (self.sections.items(.shdr), 0..) |shdr, i| {
-        try writer.print("sect({d}) : {s} : @{x} ({x}) : align({x}) : size({x})\n", .{
+    for (self.sections.items(.shdr), self.sections.items(.rela_shndx), 0..) |shdr, rela_shndx, i| {
+        try writer.print("sect({d}) : {s} : @{x} ({x}) : align({x}) : size({x}) : rela({d})\n", .{
             i,                 self.shstrtab.getAssumeExists(shdr.sh_name), shdr.sh_offset, shdr.sh_addr,
-            shdr.sh_addralign, shdr.sh_size,
+            shdr.sh_addralign, shdr.sh_size,                                rela_shndx,
         });
     }
 }

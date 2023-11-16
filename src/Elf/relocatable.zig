@@ -78,13 +78,14 @@ fn initSections(elf_file: *Elf) !void {
             .type = elf.SHT_PROGBITS,
             .addralign = @alignOf(u64),
         });
-        elf_file.sections.items(.rela_shndx)[elf_file.eh_frame_sect_index.?] = try elf_file.addSection(.{
+        const rela_shndx = try elf_file.addSection(.{
             .name = ".rela.eh_frame",
             .type = elf.SHT_RELA,
             .flags = elf.SHF_INFO_LINK,
             .entsize = @sizeOf(elf.Elf64_Rela),
             .addralign = @alignOf(elf.Elf64_Rela),
         });
+        elf_file.sections.items(.rela_shndx)[elf_file.eh_frame_sect_index.?] = rela_shndx;
     }
 
     try initComdatGroups(elf_file);
