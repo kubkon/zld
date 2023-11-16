@@ -57,6 +57,7 @@ pub fn addElfTests(b: *Build, options: common.Options) *Step {
     elf_step.dependOn(testPushPopState(b, opts));
     elf_step.dependOn(testRelocatableArchive(b, opts));
     elf_step.dependOn(testRelocatableEhFrame(b, opts));
+    elf_step.dependOn(testRelocatableNoEhFrame(b, opts));
     elf_step.dependOn(testSharedAbsSymbol(b, opts));
     elf_step.dependOn(testStrip(b, opts));
     elf_step.dependOn(testTlsCommon(b, opts));
@@ -1979,6 +1980,32 @@ fn testRelocatableEhFrame(b: *Build, opts: Options) *Step {
         run.expectStdOutEqual("exception=Oh no!");
         test_step.dependOn(run.step());
     }
+
+    return test_step;
+}
+
+fn testRelocatableNoEhFrame(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-relocatable-no-eh-frame", "");
+
+    const obj1 = cc(b, opts);
+    obj1.addCSource("int bar() { return 42; }");
+    obj1.addArgs(&.{ "-c", "-fno-unwind-tables", "-fno-asynchronous-unwind-tables" });
+
+    const obj2 = ld(b, opts);
+    obj2.addFileSource(obj1.out);
+    obj2.addArg("-r");
+
+    const check1 = obj1.check();
+    check1.checkStart();
+    check1.checkExact("section headers");
+    check1.checkNotPresent(".eh_frame");
+    test_step.dependOn(&check1.step);
+
+    const check2 = obj2.check();
+    check2.checkStart();
+    check2.checkExact("section headers");
+    check2.checkNotPresent(".eh_frame");
+    test_step.dependOn(&check2.step);
 
     return test_step;
 }
