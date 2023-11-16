@@ -13,13 +13,13 @@ dynamic_sect_index: ?u16 = null,
 versym_sect_index: ?u16 = null,
 verdef_sect_index: ?u16 = null,
 
-symbols: std.ArrayListUnmanaged(u32) = .{},
+symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
 aliases: ?std.ArrayListUnmanaged(u32) = null,
 
 needed: bool,
 alive: bool,
 
-output_symtab_size: Elf.SymtabSize = .{},
+output_symtab_ctx: Elf.SymtabCtx = .{},
 
 pub fn isValidHeader(header: *const elf.Elf64_Ehdr) bool {
     if (!mem.eql(u8, header.e_ident[0..4], "\x7fELF")) {
@@ -136,32 +136,20 @@ fn initSymtab(self: *SharedObject, elf_file: *Elf) !void {
 }
 
 pub fn resolveSymbols(self: *SharedObject, elf_file: *Elf) void {
-    for (self.symbols.items, 0..) |index, i| {
-        const sym_idx = @as(u32, @intCast(i));
+    for (self.getGlobals(), 0..) |index, i| {
+        const sym_idx = @as(Symbol.Index, @intCast(i));
         const this_sym = self.symtab[sym_idx];
 
         if (this_sym.st_shndx == elf.SHN_UNDEF) continue;
 
         const global = elf_file.getSymbol(index);
         if (self.asFile().getSymbolRank(this_sym, false) < global.getSymbolRank(elf_file)) {
-            global.* = .{
-                .value = this_sym.st_value,
-                .name = global.name,
-                .atom = 0,
-                .sym_idx = sym_idx,
-                .ver_idx = self.versyms.items[sym_idx],
-                .file = self.index,
-            };
+            global.value = this_sym.st_value;
+            global.atom = 0;
+            global.sym_idx = sym_idx;
+            global.ver_idx = self.versyms.items[sym_idx];
+            global.file = self.index;
         }
-    }
-}
-
-pub fn resetGlobals(self: *SharedObject, elf_file: *Elf) void {
-    for (self.symbols.items) |index| {
-        const global = elf_file.getSymbol(index);
-        const name = global.name;
-        global.* = .{};
-        global.name = name;
     }
 }
 
@@ -180,35 +168,6 @@ pub fn markLive(self: *SharedObject, elf_file: *Elf) void {
             file.setAlive();
             file.markLive(elf_file);
         }
-    }
-}
-
-pub fn calcSymtabSize(self: *SharedObject, elf_file: *Elf) !void {
-    if (elf_file.options.strip_all) return;
-
-    for (self.getGlobals()) |global_index| {
-        const global = elf_file.getSymbol(global_index);
-        if (global.getFile(elf_file)) |file| if (file.getIndex() != self.index) continue;
-        if (global.isLocal()) continue;
-        global.flags.output_symtab = true;
-        self.output_symtab_size.nglobals += 1;
-        self.output_symtab_size.strsize += @as(u32, @intCast(global.getName(elf_file).len + 1));
-    }
-}
-
-pub fn writeSymtab(self: *SharedObject, elf_file: *Elf, ctx: Elf.WriteSymtabCtx) !void {
-    if (elf_file.options.strip_all) return;
-
-    const gpa = elf_file.base.allocator;
-
-    var iglobal = ctx.iglobal;
-    for (self.getGlobals()) |global_index| {
-        const global = elf_file.getSymbol(global_index);
-        if (global.getFile(elf_file)) |file| if (file.getIndex() != self.index) continue;
-        if (!global.flags.output_symtab) continue;
-        const st_name = try ctx.strtab.insert(gpa, global.getName(elf_file));
-        ctx.symtab[iglobal] = global.asElfSym(st_name, elf_file);
-        iglobal += 1;
     }
 }
 
@@ -261,7 +220,39 @@ pub fn getSoname(self: *SharedObject) []const u8 {
     return std.fs.path.basename(self.path);
 }
 
-pub inline fn getGlobals(self: *SharedObject) []const u32 {
+pub fn calcSymtabSize(self: *SharedObject, elf_file: *Elf) !void {
+    if (elf_file.options.strip_all) return;
+
+    for (self.getGlobals()) |global_index| {
+        const global = elf_file.getSymbol(global_index);
+        const file_ptr = global.getFile(elf_file) orelse continue;
+        if (file_ptr.getIndex() != self.index) continue;
+        if (global.isLocal(elf_file)) continue;
+        global.flags.output_symtab = true;
+        try global.setOutputSymtabIndex(self.output_symtab_ctx.nglobals, elf_file);
+        self.output_symtab_ctx.nglobals += 1;
+        self.output_symtab_ctx.strsize += @as(u32, @intCast(global.getName(elf_file).len + 1));
+    }
+}
+
+pub fn writeSymtab(self: SharedObject, elf_file: *Elf) void {
+    if (elf_file.options.strip_all) return;
+
+    for (self.getGlobals()) |global_index| {
+        const global = elf_file.getSymbol(global_index);
+        const file_ptr = global.getFile(elf_file) orelse continue;
+        if (file_ptr.getIndex() != self.index) continue;
+        const idx = global.getOutputSymtabIndex(elf_file) orelse continue;
+        const st_name = @as(u32, @intCast(elf_file.strtab.items.len));
+        elf_file.strtab.appendSliceAssumeCapacity(global.getName(elf_file));
+        elf_file.strtab.appendAssumeCapacity(0);
+        const out_sym = &elf_file.symtab.items[idx];
+        out_sym.st_name = st_name;
+        global.setOutputSym(elf_file, out_sym);
+    }
+}
+
+pub inline fn getGlobals(self: SharedObject) []const Symbol.Index {
     return self.symbols.items;
 }
 
@@ -269,7 +260,7 @@ pub fn initSymbolAliases(self: *SharedObject, elf_file: *Elf) !void {
     assert(self.aliases == null);
 
     const SortAlias = struct {
-        pub fn lessThan(ctx: *Elf, lhs: u32, rhs: u32) bool {
+        pub fn lessThan(ctx: *Elf, lhs: Symbol.Index, rhs: Symbol.Index) bool {
             const lhs_sym = ctx.getSymbol(lhs).getSourceSymbol(ctx);
             const rhs_sym = ctx.getSymbol(rhs).getSourceSymbol(ctx);
             return lhs_sym.st_value < rhs_sym.st_value;
@@ -277,7 +268,7 @@ pub fn initSymbolAliases(self: *SharedObject, elf_file: *Elf) !void {
     };
 
     const gpa = elf_file.base.allocator;
-    var aliases = std.ArrayList(u32).init(gpa);
+    var aliases = std.ArrayList(Symbol.Index).init(gpa);
     defer aliases.deinit();
     try aliases.ensureTotalCapacityPrecise(self.getGlobals().len);
 
@@ -288,7 +279,7 @@ pub fn initSymbolAliases(self: *SharedObject, elf_file: *Elf) !void {
         aliases.appendAssumeCapacity(index);
     }
 
-    std.mem.sort(u32, aliases.items, elf_file, SortAlias.lessThan);
+    std.mem.sort(Symbol.Index, aliases.items, elf_file, SortAlias.lessThan);
 
     self.aliases = aliases.moveToUnmanaged();
 }

@@ -35,8 +35,11 @@ pub const File = union(enum) {
     }
 
     pub fn resetGlobals(file: File, elf_file: *Elf) void {
-        switch (file) {
-            inline else => |x| x.resetGlobals(elf_file),
+        for (file.getGlobals()) |global_index| {
+            const global = elf_file.getSymbol(global_index);
+            const name = global.name;
+            global.* = .{};
+            global.name = name;
         }
     }
 
@@ -82,6 +85,31 @@ pub const File = union(enum) {
         }
     }
 
+    pub fn getLocals(file: File) []const Symbol.Index {
+        return switch (file) {
+            .object => |x| x.getLocals(),
+            inline else => &[0]Symbol.Index{},
+        };
+    }
+
+    pub fn getGlobals(file: File) []const Symbol.Index {
+        return switch (file) {
+            inline else => |x| x.getGlobals(),
+        };
+    }
+
+    pub fn calcSymtabSize(file: File, elf_file: *Elf) !void {
+        return switch (file) {
+            inline else => |x| x.calcSymtabSize(elf_file),
+        };
+    }
+
+    pub fn writeSymtab(file: File, elf_file: *Elf) void {
+        return switch (file) {
+            inline else => |x| x.writeSymtab(elf_file),
+        };
+    }
+
     pub const Index = u32;
 
     pub const Entry = union(enum) {
@@ -100,3 +128,4 @@ const Elf = @import("../Elf.zig");
 const InternalObject = @import("InternalObject.zig");
 const Object = @import("Object.zig");
 const SharedObject = @import("SharedObject.zig");
+const Symbol = @import("Symbol.zig");

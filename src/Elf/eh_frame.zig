@@ -274,7 +274,11 @@ pub fn calcEhFrameSize(elf_file: *Elf) !usize {
         }
     }
 
-    return offset + 4; // NULL terminator
+    if (!elf_file.options.relocatable) {
+        offset += 4; // NULL terminator
+    }
+
+    return offset;
 }
 
 pub fn calcEhFrameHdrSize(elf_file: *Elf) usize {
@@ -286,6 +290,22 @@ pub fn calcEhFrameHdrSize(elf_file: *Elf) usize {
         }
     }
     return eh_frame_hdr_header_size + count * 8;
+}
+
+pub fn calcEhFrameRelocs(elf_file: *Elf) usize {
+    var count: usize = 0;
+    for (elf_file.objects.items) |index| {
+        const object = elf_file.getFile(index).?.object;
+        for (object.cies.items) |cie| {
+            if (!cie.alive) continue;
+            count += cie.getRelocs(elf_file).len;
+        }
+        for (object.fdes.items) |fde| {
+            if (!fde.alive) continue;
+            count += fde.getRelocs(elf_file).len;
+        }
+    }
+    return count;
 }
 
 fn resolveReloc(rec: anytype, sym: *const Symbol, rel: elf.Elf64_Rela, elf_file: *Elf, data: []u8) !void {
@@ -363,6 +383,95 @@ pub fn writeEhFrame(elf_file: *Elf, writer: anytype) !void {
     }
 
     try writer.writeInt(u32, 0, .little);
+}
+
+pub fn writeEhFrameRelocatable(elf_file: *Elf, writer: anytype) !void {
+    const gpa = elf_file.base.allocator;
+
+    for (elf_file.objects.items) |index| {
+        const object = elf_file.getFile(index).?.object;
+
+        for (object.cies.items) |cie| {
+            if (!cie.alive) continue;
+            try writer.writeAll(cie.getData(elf_file));
+        }
+    }
+
+    for (elf_file.objects.items) |index| {
+        const object = elf_file.getFile(index).?.object;
+
+        for (object.fdes.items) |fde| {
+            if (!fde.alive) continue;
+
+            const data = try gpa.dupe(u8, fde.getData(elf_file));
+            defer gpa.free(data);
+
+            std.mem.writeInt(
+                i32,
+                data[4..8],
+                @as(i32, @truncate(@as(i64, @intCast(fde.out_offset + 4)) - @as(i64, @intCast(fde.getCie(elf_file).out_offset)))),
+                .little,
+            );
+
+            try writer.writeAll(data);
+        }
+    }
+}
+
+fn emitReloc(elf_file: *Elf, rec: anytype, sym: *const Symbol, rel: elf.Elf64_Rela) elf.Elf64_Rela {
+    const r_offset = rec.getAddress(elf_file) + rel.r_offset - rec.offset;
+    const r_type = rel.r_type();
+    var r_addend = rel.r_addend;
+    var r_sym: u32 = 0;
+    switch (sym.getType(elf_file)) {
+        elf.STT_SECTION => {
+            r_addend += @intCast(sym.value);
+            r_sym = elf_file.sections.items(.sym_index)[sym.shndx];
+        },
+        else => {
+            r_sym = sym.getOutputSymtabIndex(elf_file) orelse 0;
+        },
+    }
+
+    relocs_log.debug("  {s}: [{x} => {d}({s})] + {x}", .{
+        Atom.fmtRelocType(r_type),
+        r_offset,
+        r_sym,
+        sym.getName(elf_file),
+        r_addend,
+    });
+
+    return .{
+        .r_offset = r_offset,
+        .r_addend = r_addend,
+        .r_info = (@as(u64, @intCast(r_sym)) << 32) | r_type,
+    };
+}
+
+pub fn writeEhFrameRelocs(elf_file: *Elf, writer: anytype) !void {
+    relocs_log.debug("{x}: .eh_frame", .{elf_file.sections.items(.shdr)[elf_file.eh_frame_sect_index.?].sh_addr});
+
+    for (elf_file.objects.items) |index| {
+        const object = elf_file.getFile(index).?.object;
+
+        for (object.cies.items) |cie| {
+            if (!cie.alive) continue;
+            for (cie.getRelocs(elf_file)) |rel| {
+                const sym = object.getSymbol(rel.r_sym(), elf_file);
+                const out_rel = emitReloc(elf_file, cie, sym, rel);
+                try writer.writeStruct(out_rel);
+            }
+        }
+
+        for (object.fdes.items) |fde| {
+            if (!fde.alive) continue;
+            for (fde.getRelocs(elf_file)) |rel| {
+                const sym = object.getSymbol(rel.r_sym(), elf_file);
+                const out_rel = emitReloc(elf_file, fde, sym, rel);
+                try writer.writeStruct(out_rel);
+            }
+        }
+    }
 }
 
 pub fn writeEhFrameHdr(elf_file: *Elf, writer: anytype) !void {

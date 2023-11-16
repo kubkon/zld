@@ -6,6 +6,7 @@ pub fn addElfTests(b: *Build, options: common.Options) *Step {
     var opts = Options{
         .zld = options.zld,
         .is_musl = options.is_musl,
+        .has_zig = options.has_zig,
         .has_static = options.has_static,
         .cc_override = options.cc_override,
         .system_compiler = options.system_compiler,
@@ -27,6 +28,7 @@ pub fn addElfTests(b: *Build, options: common.Options) *Step {
     elf_step.dependOn(testExecStack(b, opts));
     elf_step.dependOn(testExportDynamic(b, opts));
     elf_step.dependOn(testExportSymbolsFromExe(b, opts));
+    elf_step.dependOn(testEmitRelocatable(b, opts));
     elf_step.dependOn(testFuncAddress(b, opts));
     elf_step.dependOn(testGcSections(b, opts));
     elf_step.dependOn(testHelloDynamic(b, opts));
@@ -53,6 +55,7 @@ pub fn addElfTests(b: *Build, options: common.Options) *Step {
     elf_step.dependOn(testPltGot(b, opts));
     elf_step.dependOn(testPreinitArray(b, opts));
     elf_step.dependOn(testPushPopState(b, opts));
+    elf_step.dependOn(testRelocatableEhFrame(b, opts));
     elf_step.dependOn(testSharedAbsSymbol(b, opts));
     elf_step.dependOn(testStrip(b, opts));
     elf_step.dependOn(testTlsCommon(b, opts));
@@ -839,6 +842,60 @@ fn testExportSymbolsFromExe(b: *Build, opts: Options) *Step {
     return test_step;
 }
 
+fn testEmitRelocatable(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-emit-relocatable", "");
+
+    const obj1 = cc(b, opts);
+    obj1.addCSource(
+        \\#include <stdio.h>
+        \\extern int bar;
+        \\int foo() {
+        \\   return bar;
+        \\}
+        \\void printFoo() {
+        \\    printf("foo=%d\n", foo());
+        \\}
+    );
+    obj1.addArgs(&.{ "-c", "-ffunction-sections" });
+
+    const obj2 = cc(b, opts);
+    obj2.addCSource(
+        \\#include <stdio.h>
+        \\int bar = 42;
+        \\void printBar() {
+        \\    printf("bar=%d\n", bar);
+        \\}
+    );
+    obj2.addArgs(&.{"-c"});
+
+    const obj3 = ld(b, opts);
+    obj3.addFileSource(obj1.out);
+    obj3.addFileSource(obj2.out);
+    obj3.addArg("-r");
+
+    const exe = cc(b, opts);
+    exe.addCSource(
+        \\#include <stdio.h>
+        \\void printFoo();
+        \\void printBar();
+        \\int main() {
+        \\  printFoo();
+        \\  printBar();
+        \\}
+    );
+    exe.addFileSource(obj3.out);
+
+    const run = exe.run();
+    run.expectStdOutEqual(
+        \\foo=42
+        \\bar=42
+        \\
+    );
+    test_step.dependOn(run.step());
+
+    return test_step;
+}
+
 fn testFuncAddress(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-func-address", "");
 
@@ -1417,7 +1474,7 @@ fn testInitArrayOrder(b: *Build, opts: Options) *Step {
     const c_o = cc(b, opts);
     c_o.addCSource(
         \\#include <stdio.h>
-        \\__attribute__((constructor(101))) void init1() { printf("3"); }
+        \\__attribute__((constructor)) void init1() { printf("3"); }
     );
     c_o.addArg("-c");
 
@@ -1452,7 +1509,7 @@ fn testInitArrayOrder(b: *Build, opts: Options) *Step {
     const h_o = cc(b, opts);
     h_o.addCSource(
         \\#include <stdio.h>
-        \\__attribute__((destructor(101))) void fini2() { printf("8"); }
+        \\__attribute__((destructor)) void fini2() { printf("8"); }
     );
     h_o.addArg("-c");
 
@@ -1468,7 +1525,7 @@ fn testInitArrayOrder(b: *Build, opts: Options) *Step {
     exe.addFileSource(h_o.out);
 
     const run = exe.run();
-    run.expectStdOutEqual("32147568");
+    run.expectStdOutEqual("21348756");
     test_step.dependOn(run.step());
 
     return test_step;
@@ -1644,12 +1701,11 @@ fn testLinkerScript(b: *Build, opts: Options) *Step {
     const dso = cc(b, opts);
     dso.addCSource("int foo() { return 42; }");
     dso.addArgs(&.{ "-fPIC", "-shared" });
-    const dso_out = dso.saveOutputAs("libfoo.so");
+    const dso_out = dso.saveOutputAs("libbar.so");
 
-    const scr = scr: {
-        const wf = WriteFile.create(b);
-        break :scr wf.add("script", "GROUP(AS_NEEDED(-lfoo))");
-    };
+    const scripts = WriteFile.create(b);
+    _ = scripts.add("liba.so", "INPUT(libfoo.so)");
+    _ = scripts.add("libfoo.so", "GROUP(AS_NEEDED(-lbar))");
 
     const exe = cc(b, opts);
     exe.addCSource(
@@ -1658,7 +1714,8 @@ fn testLinkerScript(b: *Build, opts: Options) *Step {
         \\  return foo() - 42;
         \\}
     );
-    exe.addFileSource(scr);
+    exe.addArg("-la");
+    exe.addPrefixedDirectorySource("-L", scripts.getDirectory());
     exe.addPrefixedDirectorySource("-L", dso_out.dir);
     exe.addPrefixedDirectorySource("-Wl,-rpath,", dso_out.dir);
 
@@ -1777,6 +1834,95 @@ fn testPushPopState(b: *Build, opts: Options) *Step {
     check.checkInDynamicSection();
     check.checkNotPresent("b.so");
     test_step.dependOn(&check.step);
+
+    return test_step;
+}
+
+fn testRelocatableEhFrame(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-relocatable-eh-frame", "");
+
+    if (!opts.has_zig) return skipTestStep(test_step);
+
+    const obj1 = zig(b, .obj);
+    obj1.addCppSource(
+        \\#include <stdexcept>
+        \\int try_me() {
+        \\  throw std::runtime_error("Oh no!");
+        \\}
+    );
+    obj1.addArg("-lc++");
+
+    const obj2 = zig(b, .obj);
+    obj2.addCppSource(
+        \\extern int try_me();
+        \\int try_again() {
+        \\  return try_me();
+        \\}
+    );
+    obj2.addArg("-lc++");
+
+    {
+        const obj3 = ld(b, opts);
+        obj3.addFileSource(obj1.out);
+        obj3.addFileSource(obj2.out);
+        obj3.addArg("-r");
+        const obj3_out = obj3.saveOutputAs("c.o");
+
+        const exe = zig(b, .exe);
+        exe.addCppSource(
+            \\#include <iostream>
+            \\#include <stdexcept>
+            \\extern int try_again();
+            \\int main() {
+            \\  try {
+            \\    try_again();
+            \\  } catch (const std::exception &e) {
+            \\    std::cout << "exception=" << e.what();
+            \\  }
+            \\  return 0;
+            \\}
+        );
+        exe.addFileSource(obj3_out.file);
+        exe.addArg("-lc++");
+
+        const run = exe.run();
+        run.expectStdOutEqual("exception=Oh no!");
+        test_step.dependOn(run.step());
+    }
+
+    {
+        // Let's make the object file COMDAT group heavy!
+        const obj3 = zig(b, .obj);
+        obj3.addCppSource(
+            \\#include <iostream>
+            \\#include <stdexcept>
+            \\extern int try_again();
+            \\int main() {
+            \\  try {
+            \\    try_again();
+            \\  } catch (const std::exception &e) {
+            \\    std::cout << "exception=" << e.what();
+            \\  }
+            \\  return 0;
+            \\}
+        );
+        obj3.addArg("-lc++");
+
+        const obj4 = ld(b, opts);
+        obj4.addFileSource(obj1.out);
+        obj4.addFileSource(obj2.out);
+        obj4.addFileSource(obj3.out);
+        obj4.addArg("-r");
+        const obj4_out = obj4.saveOutputAs("c.o");
+
+        const exe = zig(b, .exe);
+        exe.addFileSource(obj4_out.file);
+        exe.addArg("-lc++");
+
+        const run = exe.run();
+        run.expectStdOutEqual("exception=Oh no!");
+        test_step.dependOn(run.step());
+    }
 
     return test_step;
 }
@@ -3184,10 +3330,18 @@ fn ld(b: *Build, opts: Options) SysCmd {
     return .{ .cmd = cmd, .out = out };
 }
 
+fn zig(b: *Build, comptime mode: enum { obj, exe, lib }) SysCmd {
+    const cmd = Run.create(b, "zig");
+    cmd.addArgs(&.{ "zig", "build-" ++ @tagName(mode) });
+    const out = cmd.addPrefixedOutputFileArg("-femit-bin=", "a.o");
+    return .{ .cmd = cmd, .out = out };
+}
+
 const Options = struct {
     zld: FileSourceWithDir,
     system_compiler: common.SystemCompiler,
     has_static: bool,
+    has_zig: bool,
     is_musl: bool,
     cc_override: ?[]const u8,
 };

@@ -38,6 +38,7 @@ const usage =
     \\--pop-state                   Restore the states saved by --push-state
     \\--print-gc-sections           List removed unused sections to stderr
     \\--push-state                  Save the current state of --as-needed, -static and --whole-archive
+    \\-r                            Create a relocatable object file
     \\--relax                       Optimize instructions (default)
     \\  --no-relax
     \\--rpath=[value], -R [value]   Specify runtime path
@@ -75,7 +76,8 @@ const version =
 const cmd = "ld.zld";
 
 emit: Zld.Emit,
-output_mode: Zld.OutputMode,
+shared: bool = false,
+relocatable: bool = false,
 positionals: []const Elf.LinkObject,
 search_dirs: []const []const u8,
 rpath_list: []const []const u8,
@@ -133,7 +135,6 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             .directory = std.fs.cwd(),
             .sub_path = "a.out",
         },
-        .output_mode = .exe,
         .positionals = undefined,
         .search_dirs = undefined,
         .rpath_list = undefined,
@@ -152,6 +153,8 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             try search_dirs.put(dir, {});
         } else if (p.arg1("o")) |path| {
             opts.emit.sub_path = path;
+        } else if (p.flag1("r")) {
+            opts.relocatable = true;
         } else if (p.arg1("image-base")) |value| {
             opts.image_base = std.fmt.parseInt(u64, value, 0) catch
                 ctx.fatal("Could not parse value '{s}' into integer", .{value});
@@ -162,7 +165,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         } else if (p.flagAny("print-gc-sections")) {
             opts.print_gc_sections = true;
         } else if (p.flagAny("shared")) {
-            opts.output_mode = .lib;
+            opts.shared = true;
         } else if (p.argAny("rpath")) |path| {
             try rpath_list.put(path, {});
         } else if (p.arg1("R")) |path| {
@@ -323,7 +326,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
     if (print_version) ctx.warn("{s}", .{version});
 
     if (positionals.items.len == 0) ctx.fatal("Expected at least one positional argument", .{});
-    if (opts.output_mode == .lib) opts.pic = true;
+    if (opts.shared) opts.pic = true;
     if (opts.pic) opts.image_base = 0;
     if (opts.page_size) |page_size| {
         if (opts.image_base % page_size != 0) {

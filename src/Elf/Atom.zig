@@ -5,7 +5,7 @@ value: u64 = 0,
 name: u32 = 0,
 
 /// Index into linker's input file table.
-file: u32 = 0,
+file: File.Index = 0,
 
 /// Size of this atom
 size: u64 = 0,
@@ -14,30 +14,24 @@ size: u64 = 0,
 alignment: u8 = 0,
 
 /// Index of the input section.
-shndx: u16 = 0,
+shndx: u32 = 0,
 
 /// Index of the output section.
 out_shndx: u16 = 0,
 
 /// Index of the input section containing this atom's relocs.
-relocs_shndx: u16 = 0,
+relocs_shndx: u32 = 0,
 
 /// Index of this atom in the linker's atoms table.
 atom_index: Index = 0,
 
-/// Specifies whether this atom is alive or has been garbage collected.
-alive: bool = true,
-
-/// Specifies if the atom has been visited during garbage collection.
-visited: bool = false,
+flags: Flags = .{},
 
 /// Start index of FDEs referencing this atom.
 fde_start: u32 = 0,
 
 /// End index of FDEs referencing this atom.
 fde_end: u32 = 0,
-
-pub const Index = u32;
 
 pub fn getName(self: Atom, elf_file: *Elf) [:0]const u8 {
     return elf_file.string_intern.getAssumeExists(self.name);
@@ -93,6 +87,42 @@ pub fn getRelocs(self: Atom, elf_file: *Elf) []align(1) const elf.Elf64_Rela {
     return object.getRelocs(self.relocs_shndx);
 }
 
+pub fn writeRelocs(self: Atom, elf_file: *Elf, out_relocs: *std.ArrayList(elf.Elf64_Rela)) !void {
+    relocs_log.debug("0x{x}: {s}", .{ self.value, self.getName(elf_file) });
+
+    const object = self.getObject(elf_file);
+    for (self.getRelocs(elf_file)) |rel| {
+        const target = object.getSymbol(rel.r_sym(), elf_file);
+        const r_type = rel.r_type();
+        const r_offset = self.value + rel.r_offset;
+        var r_addend = rel.r_addend;
+        var r_sym: u32 = 0;
+        switch (target.getType(elf_file)) {
+            elf.STT_SECTION => {
+                r_addend += @intCast(target.value);
+                r_sym = elf_file.sections.items(.sym_index)[target.shndx];
+            },
+            else => {
+                r_sym = target.getOutputSymtabIndex(elf_file) orelse 0;
+            },
+        }
+
+        relocs_log.debug("  {s}: [{x} => {d}({s})] + {x}", .{
+            fmtRelocType(r_type),
+            r_offset,
+            r_sym,
+            target.getName(elf_file),
+            r_addend,
+        });
+
+        out_relocs.appendAssumeCapacity(.{
+            .r_offset = r_offset,
+            .r_addend = r_addend,
+            .r_info = (@as(u64, @intCast(r_sym)) << 32) | r_type,
+        });
+    }
+}
+
 pub fn getFdes(self: Atom, elf_file: *Elf) []Fde {
     if (self.fde_start == self.fde_end) return &[0]Fde{};
     const object = self.getObject(elf_file);
@@ -103,53 +133,6 @@ pub fn markFdesDead(self: Atom, elf_file: *Elf) void {
     for (self.getFdes(elf_file)) |*fde| {
         fde.alive = false;
     }
-}
-
-pub fn initOutputSection(self: *Atom, elf_file: *Elf) !void {
-    const shdr = self.getInputShdr(elf_file);
-    const name = blk: {
-        const name = self.getName(elf_file);
-        if (shdr.sh_flags & elf.SHF_MERGE != 0) break :blk name;
-        const sh_name_prefixes: []const [:0]const u8 = &.{
-            ".text",       ".data.rel.ro", ".data", ".rodata", ".bss.rel.ro",       ".bss",
-            ".init_array", ".fini_array",  ".tbss", ".tdata",  ".gcc_except_table", ".ctors",
-            ".dtors",      ".gnu.warning",
-        };
-        inline for (sh_name_prefixes) |prefix| {
-            if (std.mem.eql(u8, name, prefix) or std.mem.startsWith(u8, name, prefix ++ ".")) {
-                break :blk prefix;
-            }
-        }
-        break :blk name;
-    };
-    const @"type" = switch (shdr.sh_type) {
-        elf.SHT_NULL => unreachable,
-        elf.SHT_PROGBITS => blk: {
-            if (std.mem.eql(u8, name, ".init_array") or std.mem.startsWith(u8, name, ".init_array."))
-                break :blk elf.SHT_INIT_ARRAY;
-            if (std.mem.eql(u8, name, ".fini_array") or std.mem.startsWith(u8, name, ".fini_array."))
-                break :blk elf.SHT_FINI_ARRAY;
-            break :blk shdr.sh_type;
-        },
-        elf.SHT_X86_64_UNWIND => elf.SHT_PROGBITS,
-        else => shdr.sh_type,
-    };
-    const flags = blk: {
-        const flags = shdr.sh_flags & ~@as(u64, elf.SHF_COMPRESSED | elf.SHF_GROUP | elf.SHF_GNU_RETAIN);
-        break :blk switch (@"type") {
-            elf.SHT_INIT_ARRAY, elf.SHT_FINI_ARRAY => flags | elf.SHF_WRITE,
-            else => flags,
-        };
-    };
-    const out_shndx = elf_file.getSectionByName(name) orelse try elf_file.addSection(.{
-        .type = @"type",
-        .flags = flags,
-        .name = name,
-    });
-    if (mem.eql(u8, ".text", name)) {
-        elf_file.text_sect_index = out_shndx;
-    }
-    self.out_shndx = out_shndx;
 }
 
 pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
@@ -165,7 +148,7 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
         if (try self.reportUndefSymbol(rel, elf_file)) continue;
 
         const symbol = object.getSymbol(rel.r_sym(), elf_file);
-        const is_shared = elf_file.options.output_mode == .lib;
+        const is_shared = elf_file.options.shared;
 
         if (symbol.isIFunc(elf_file)) {
             symbol.flags.got = true;
@@ -236,7 +219,7 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
                     // We skip the next relocation.
                     i += 1;
                 } else {
-                    elf_file.needs_tlsld = true;
+                    elf_file.got.flags.needs_tlsld = true;
                 }
             },
 
@@ -437,10 +420,8 @@ fn getDynAbsRelocAction(symbol: *const Symbol, elf_file: *Elf) RelocAction {
 }
 
 inline fn getOutputType(elf_file: *Elf) u2 {
-    return switch (elf_file.options.output_mode) {
-        .lib => 0,
-        .exe => if (elf_file.options.pie) 1 else 2,
-    };
+    if (elf_file.options.shared) return 0;
+    return if (elf_file.options.pie) 1 else 2;
 }
 
 inline fn getDataType(symbol: *const Symbol, elf_file: *Elf) u2 {
@@ -523,7 +504,7 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
                 shndx
             else
                 null;
-            break :blk if (shndx) |index| @as(i64, @intCast(elf_file.getSectionAddress(index))) else 0;
+            break :blk if (shndx) |index| @as(i64, @intCast(elf_file.sections.items(.shdr)[index].sh_addr)) else 0;
         };
         // Relative offset to the start of the global offset table.
         const G = @as(i64, @intCast(target.getGotAddress(elf_file))) - GOT;
@@ -614,8 +595,9 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
             },
 
             elf.R_X86_64_TLSLD => {
-                if (elf_file.got.emit_tlsld) {
-                    const S_ = @as(i64, @intCast(elf_file.getTlsLdAddress()));
+                if (elf_file.got.tlsld_index) |entry_index| {
+                    const tlsld_entry = elf_file.got.entries.items[entry_index];
+                    const S_ = @as(i64, @intCast(tlsld_entry.getAddress(elf_file)));
                     try cwriter.writeInt(i32, @as(i32, @intCast(S_ + A - P)), .little);
                 } else {
                     try relaxTlsLdToLe(
@@ -773,10 +755,15 @@ pub fn resolveRelocsNonAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void 
         // Address of the target symbol - can be address of the symbol within an atom or address of PLT stub.
         const S = @as(i64, @intCast(target.getAddress(.{}, elf_file)));
         // Address of the global offset table.
-        const GOT = if (elf_file.got_sect_index) |shndx|
-            @as(i64, @intCast(elf_file.getSectionAddress(shndx)))
-        else
-            0;
+        const GOT = blk: {
+            const shndx = if (elf_file.got_plt_sect_index) |shndx|
+                shndx
+            else if (elf_file.got_sect_index) |shndx|
+                shndx
+            else
+                null;
+            break :blk if (shndx) |index| @as(i64, @intCast(elf_file.sections.items(.shdr)[index].sh_addr)) else 0;
+        };
         // Address of the dynamic thread pointer.
         const DTP = @as(i64, @intCast(elf_file.getDtpAddress()));
 
@@ -1089,10 +1076,20 @@ fn format2(
         }
         try writer.writeAll(" }");
     }
-    if (elf_file.options.gc_sections and !atom.alive) {
+    if (elf_file.options.gc_sections and !atom.flags.alive) {
         try writer.writeAll(" : [*]");
     }
 }
+
+pub const Index = u32;
+
+pub const Flags = packed struct {
+    /// Specifies whether this atom is alive or has been garbage collected.
+    alive: bool = true,
+
+    /// Specifies if the atom has been visited during garbage collection.
+    visited: bool = false,
+};
 
 const Atom = @This();
 
@@ -1109,6 +1106,7 @@ const Allocator = mem.Allocator;
 const Disassembler = dis_x86_64.Disassembler;
 const Elf = @import("../Elf.zig");
 const Fde = @import("eh_frame.zig").Fde;
+const File = @import("file.zig").File;
 const Instruction = dis_x86_64.Instruction;
 const Immediate = dis_x86_64.Immediate;
 const Object = @import("Object.zig");

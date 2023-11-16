@@ -74,7 +74,8 @@ fn doParse(scr: *LdScript, ctx: struct {
             const cmd = ctx.parser.getCommand(cmd_id);
             switch (cmd) {
                 .output_format => scr.cpu_arch = try ctx.parser.outputFormat(),
-                .group => try ctx.parser.group(ctx.args),
+                // TODO we should verify that group only contains libraries
+                .input, .group => try ctx.parser.group(ctx.args),
                 else => return error.UnexpectedToken,
             }
         } else break;
@@ -93,6 +94,7 @@ const LineColumn = struct {
 
 const Command = enum {
     output_format,
+    input,
     group,
     as_needed,
 
