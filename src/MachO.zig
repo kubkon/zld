@@ -19,8 +19,12 @@ files: std.MultiArrayList(File.Entry) = .{},
 segments: std.ArrayListUnmanaged(macho.segment_command_64) = .{},
 sections: std.MultiArrayList(Section) = .{},
 
-locals: std.ArrayListUnmanaged(macho.nlist_64) = .{},
-globals: std.ArrayListUnmanaged(SymbolWithLoc) = .{},
+symbols: std.ArrayListUnmanaged(Symbol) = .{},
+symbols_extra: std.ArrayListUnmanaged(u32) = .{},
+globals: std.AutoHashMapUnmanaged(u32, Symbol.Index) = .{},
+/// This table will be populated after `scanRelocs` has run.
+/// Key is symbol index.
+undefs: std.AutoHashMapUnmanaged(Symbol.Index, std.ArrayListUnmanaged(Atom.Index)) = .{},
 
 entry_index: ?u32 = null,
 mh_execute_header_index: ?u32 = null,
@@ -29,7 +33,6 @@ dyld_stub_binder_index: ?u32 = null,
 dyld_private_sym_index: ?u32 = null,
 stub_helper_preamble_sym_index: ?u32 = null,
 
-strtab: StringTable(.strtab) = .{},
 string_intern: StringTable(.string_intern) = .{},
 
 tlv_ptr_entries: std.ArrayListUnmanaged(IndirectPointer) = .{},
@@ -1804,10 +1807,11 @@ pub fn deinit(self: *MachO) void {
     }
     self.thunks.deinit(gpa);
 
-    self.string_intern.deinit(gpa);
-    self.strtab.deinit(gpa);
-    self.locals.deinit(gpa);
+    self.symbols.deinit(gpa);
+    self.symbols_extra.deinit(gpa);
     self.globals.deinit(gpa);
+    self.undefs.deinit(gpa);
+    self.string_intern.deinit(gpa);
 
     self.objects.deinit(gpa);
     self.dylibs.deinit(gpa);
@@ -3426,37 +3430,6 @@ pub fn symbolIsTemp(self: *MachO, sym_with_loc: SymbolWithLoc) bool {
     return mem.startsWith(u8, sym_name, "l") or mem.startsWith(u8, sym_name, "L");
 }
 
-/// Returns pointer-to-symbol described by `sym_with_loc` descriptor.
-pub fn getSymbolPtr(self: *MachO, sym_with_loc: SymbolWithLoc) *macho.nlist_64 {
-    if (sym_with_loc.getFile()) |file| {
-        const object = &self.objects.items[file];
-        return &object.symtab[sym_with_loc.sym_index];
-    } else {
-        return &self.locals.items[sym_with_loc.sym_index];
-    }
-}
-
-/// Returns symbol described by `sym_with_loc` descriptor.
-pub fn getSymbol(self: *const MachO, sym_with_loc: SymbolWithLoc) macho.nlist_64 {
-    if (sym_with_loc.getFile()) |file| {
-        const object = &self.objects.items[file];
-        return object.symtab[sym_with_loc.sym_index];
-    } else {
-        return self.locals.items[sym_with_loc.sym_index];
-    }
-}
-
-/// Returns name of the symbol described by `sym_with_loc` descriptor.
-pub fn getSymbolName(self: *const MachO, sym_with_loc: SymbolWithLoc) []const u8 {
-    if (sym_with_loc.getFile()) |file| {
-        const object = self.objects.items[file];
-        return object.getSymbolName(sym_with_loc.sym_index);
-    } else {
-        const sym = self.locals.items[sym_with_loc.sym_index];
-        return self.strtab.get(sym.n_strx).?;
-    }
-}
-
 /// Returns GOT atom that references `sym_with_loc` if one exists.
 /// Returns null otherwise.
 pub fn getGotAtomIndexForSymbol(self: *MachO, sym_with_loc: SymbolWithLoc) ?AtomIndex {
@@ -3736,10 +3709,86 @@ pub fn addAtom(self: *MachO) !Atom.Index {
     return index;
 }
 
-pub fn getAtom(self: MachO, atom_index: Atom.Index) ?*Atom {
+pub fn getAtom(self: *MachO, atom_index: Atom.Index) ?*Atom {
     if (atom_index == 0) return null;
     assert(atom_index < self.atoms.items.len);
     return &self.atoms.items[atom_index];
+}
+
+pub fn addSymbol(self: *MachO) !Symbol.Index {
+    const index = @as(Symbol.Index, @intCast(self.symbols.items.len));
+    const symbol = try self.symbols.addOne(self.base.allocator);
+    symbol.* = .{};
+    return index;
+}
+
+pub fn getSymbol(self: *MachO, index: Symbol.Index) *Symbol {
+    assert(index < self.symbols.items.len);
+    return &self.symbols.items[index];
+}
+
+pub fn addSymbolExtra(self: *MachO, extra: Symbol.Extra) !u32 {
+    const fields = @typeInfo(Symbol.Extra).Struct.fields;
+    try self.symbols_extra.ensureUnusedCapacity(self.base.allocator, fields.len);
+    return self.addSymbolExtraAssumeCapacity(extra);
+}
+
+pub fn addSymbolExtraAssumeCapacity(self: *MachO, extra: Symbol.Extra) u32 {
+    const index = @as(u32, @intCast(self.symbols_extra.items.len));
+    const fields = @typeInfo(Symbol.Extra).Struct.fields;
+    inline for (fields) |field| {
+        self.symbols_extra.appendAssumeCapacity(switch (field.type) {
+            u32 => @field(extra, field.name),
+            else => @compileError("bad field type"),
+        });
+    }
+    return index;
+}
+
+pub fn getSymbolExtra(self: MachO, index: u32) ?Symbol.Extra {
+    if (index == 0) return null;
+    const fields = @typeInfo(Symbol.Extra).Struct.fields;
+    var i: usize = index;
+    var result: Symbol.Extra = undefined;
+    inline for (fields) |field| {
+        @field(result, field.name) = switch (field.type) {
+            u32 => self.symbols_extra.items[i],
+            else => @compileError("bad field type"),
+        };
+        i += 1;
+    }
+    return result;
+}
+
+pub fn setSymbolExtra(self: *MachO, index: u32, extra: Symbol.Extra) void {
+    assert(index > 0);
+    const fields = @typeInfo(Symbol.Extra).Struct.fields;
+    inline for (fields, 0..) |field, i| {
+        self.symbols_extra.items[index + i] = switch (field.type) {
+            u32 => @field(extra, field.name),
+            else => @compileError("bad field type"),
+        };
+    }
+}
+
+const GetOrCreateGlobalResult = struct {
+    found_existing: bool,
+    index: u32,
+};
+
+pub fn getOrCreateGlobal(self: *MachO, off: u32) !GetOrCreateGlobalResult {
+    const gpa = self.base.allocator;
+    const gop = try self.globals.getOrPut(gpa, off);
+    if (!gop.found_existing) {
+        const index = try self.addSymbol();
+        const global = self.getSymbol(index);
+        global.name = off;
+        gop.value_ptr.* = index;
+    }
+    return .{
+        .found_existing = gop.found_existing,
+        .index = gop.value_ptr.*,
+    };
 }
 
 pub fn dumpState(self: *MachO) std.fmt.Formatter(fmtDumpState) {
@@ -3759,8 +3808,9 @@ fn fmtDumpState(
         try writer.print("object({d}) : {}", .{ index, object.fmtPath() });
         if (!object.alive) try writer.writeAll(" : [*]");
         try writer.writeByte('\n');
-        try writer.print("{}\n", .{
+        try writer.print("{}{}\n", .{
             object.fmtAtoms(self),
+            object.fmtSymtab(self),
         });
     }
 }
@@ -3852,6 +3902,7 @@ pub const Options = @import("MachO/Options.zig");
 const LazyBind = @import("MachO/dyld_info/bind.zig").LazyBind(*const MachO, MachO.SymbolWithLoc);
 const LibStub = @import("tapi.zig").LibStub;
 const Rebase = @import("MachO/dyld_info/Rebase.zig");
+const Symbol = @import("MachO/Symbol.zig");
 const StringTable = @import("strtab.zig").StringTable;
 const ThreadPool = std.Thread.Pool;
 const Trie = @import("MachO/Trie.zig");

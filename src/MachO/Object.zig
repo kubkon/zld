@@ -8,12 +8,12 @@ header: ?macho.mach_header_64 = null,
 sections: []align(1) const macho.section_64 = &[0]macho.section_64{},
 symtab: std.ArrayListUnmanaged(macho.nlist_64) = .{},
 strtab: []const u8 = &[0]u8{},
-first_global: ?Symbol.Index = null,
+first_global: Symbol.Index = undefined,
 
 symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
 atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
 
-/// All relocations sorted and flatened, sorted by address descending
+/// All relocations sorted and flatened, sorted by address ascending
 /// per section.
 relocations: std.ArrayListUnmanaged(macho.relocation_info) = .{},
 
@@ -49,6 +49,7 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
     self.symtab.appendUnalignedSliceAssumeCapacity(symtab);
 
     try self.initSectionAtoms(macho_file);
+    try self.initSymbols(macho_file);
 }
 
 fn initSectionAtoms(self: *Object, macho_file: *MachO) !void {
@@ -155,19 +156,101 @@ fn addAtom(
     return atom_index;
 }
 
-fn sortSymbols(symbols: []macho.nlist_64) void {
-    const nlistLessThan = struct {
-        fn nlistLessThan(ctx: void, lhs: macho.nlist_64, rhs: macho.nlist_64) bool {
-            _ = ctx;
-            assert(lhs.sect() and rhs.sect());
-            if (lhs.n_sect == rhs.n_sect) {
-                if (lhs.n_value == rhs.n_value) {
+/// When initializing the symbol table, we need to ensure the symbols are actually
+/// sorted so that all locals come before all globals (defined and undefined).
+/// If DYSYMTAB load command is present, the symtab is already sorted.
+/// Otherwise, we sort the symbols and redo the relocation links.
+fn initSymbols(self: *Object, macho_file: *MachO) !void {
+    const gpa = macho_file.base.allocator;
+
+    self.first_global = if (self.getLoadCommand(.DYSYMTAB)) |lc| blk: {
+        const cmd = lc.cast(macho.dysymtab_command).?;
+        break :blk cmd.nlocalsym;
+    } else try self.sortSymbols(gpa);
+
+    try self.symbols.ensureUnusedCapacity(gpa, self.symtab.items.len);
+
+    for (self.symtab.items[0..self.first_global], 0..) |local, i| {
+        const index = try macho_file.addSymbol();
+        self.symbols.appendAssumeCapacity(index);
+        const symbol = macho_file.getSymbol(index);
+        const name = self.getString(local.n_strx);
+        symbol.* = .{
+            .value = local.n_value,
+            .name = try macho_file.string_intern.insert(gpa, name),
+            .sym_idx = @intCast(i),
+            .atom = if (local.abs()) 0 else self.atoms.items[local.n_sect - 1],
+            .file = self.index,
+        };
+    }
+
+    for (self.symtab.items[self.first_global..]) |global| {
+        const name = self.getString(global.n_strx);
+        const off = try macho_file.string_intern.insert(gpa, name);
+        const gop = try macho_file.getOrCreateGlobal(off);
+        self.symbols.addOneAssumeCapacity().* = gop.index;
+    }
+}
+
+const SymbolAtIndex = struct {
+    index: u32,
+
+    /// Performs lexicographic-like check.
+    /// * lhs and rhs defined
+    ///   * if lhs == rhs
+    ///     * if lhs.n_sect == rhs.n_sect
+    ///       * ext < weak < local
+    ///     * lhs.n_sect < rhs.n_sect
+    ///   * lhs < rhs
+    /// * !rhs is undefined
+    fn lessThan(ctx: *const Object, lhs_index: SymbolAtIndex, rhs_index: SymbolAtIndex) bool {
+        const lhs = ctx.symtab.items[lhs_index.index];
+        const rhs = ctx.symtab.items[rhs_index.index];
+        if (lhs.sect() and rhs.sect()) {
+            if (lhs.n_value == rhs.n_value) {
+                if (lhs.n_sect == rhs.n_sect) {
                     return lhs.n_strx < rhs.n_strx;
-                } else return lhs.n_value < rhs.n_value;
-            } else return lhs.n_sect < rhs.n_sect;
-        }
-    }.nlistLessThan;
-    mem.sort(macho.nlist_64, symbols, {}, nlistLessThan);
+                } else return lhs.n_sect < rhs.n_sect;
+            } else return lhs.n_value < rhs.n_value;
+        } else if (lhs.undf() and rhs.undf()) {
+            return lhs.n_strx < rhs.n_strx;
+        } else return rhs.undf();
+    }
+};
+
+fn sortSymbols(self: *Object, allocator: Allocator) !Symbol.Index {
+    const sym_indexes = try allocator.alloc(SymbolAtIndex, self.symtab.items.len);
+    defer allocator.free(sym_indexes);
+    const backlinks = try allocator.alloc(u32, self.symtab.items.len);
+    defer allocator.free(backlinks);
+
+    for (0..self.symtab.items.len) |i| {
+        sym_indexes[i] = .{ .index = @intCast(i) };
+    }
+
+    mem.sort(SymbolAtIndex, sym_indexes, self, SymbolAtIndex.lessThan);
+
+    for (sym_indexes, 0..) |index, i| {
+        backlinks[index.index] = @intCast(i);
+    }
+
+    for (self.relocations.items) |*rel| {
+        if (rel.r_extern == 0) continue;
+        rel.r_symbolnum = @intCast(backlinks[rel.r_symbolnum]);
+    }
+
+    var symtab = try self.symtab.clone(allocator);
+    defer symtab.deinit(allocator);
+    self.symtab.clearRetainingCapacity();
+
+    for (sym_indexes) |index| {
+        self.symtab.appendAssumeCapacity(symtab.items[index.index]);
+    }
+
+    const first_global = for (self.symtab.items, 0..) |sym, i| {
+        if (sym.ext()) break i;
+    } else self.symtab.items.len;
+    return @intCast(first_global);
 }
 
 /// Parse all relocs for the input section, and sort in ascending order.
@@ -208,6 +291,14 @@ fn getString(self: Object, off: u32) [:0]const u8 {
     return mem.sliceTo(@as([*:0]const u8, @ptrCast(self.strtab.ptr + off)), 0);
 }
 
+pub fn getLocals(self: Object) []const Symbol.Index {
+    return self.symbols.items[0..self.first_global];
+}
+
+pub fn getGlobals(self: Object) []const Symbol.Index {
+    return self.symbols.items[self.first_global..];
+}
+
 pub fn format(
     self: *Object,
     comptime unused_fmt_string: []const u8,
@@ -246,6 +337,34 @@ fn formatAtoms(
     for (object.atoms.items) |atom_index| {
         const atom = ctx.macho_file.getAtom(atom_index) orelse continue;
         try writer.print("    {}\n", .{atom.fmt(ctx.macho_file)});
+    }
+}
+
+pub fn fmtSymtab(self: *Object, macho_file: *MachO) std.fmt.Formatter(formatSymtab) {
+    return .{ .data = .{
+        .object = self,
+        .macho_file = macho_file,
+    } };
+}
+
+fn formatSymtab(
+    ctx: FormatContext,
+    comptime unused_fmt_string: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = unused_fmt_string;
+    _ = options;
+    const object = ctx.object;
+    try writer.writeAll("  locals\n");
+    for (object.getLocals()) |index| {
+        const local = ctx.macho_file.getSymbol(index);
+        try writer.print("    {}\n", .{local.fmt(ctx.macho_file)});
+    }
+    try writer.writeAll("  globals\n");
+    for (object.getGlobals()) |index| {
+        const global = ctx.macho_file.getSymbol(index);
+        try writer.print("    {}\n", .{global.fmt(ctx.macho_file)});
     }
 }
 
