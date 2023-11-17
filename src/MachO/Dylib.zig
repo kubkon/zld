@@ -283,6 +283,41 @@ fn initSymbols(self: *Dylib, macho_file: *MachO) !void {
     }
 }
 
+pub fn resolveSymbols(self: *Dylib, macho_file: *MachO) void {
+    for (self.getGlobals(), 0..) |index, i| {
+        const sym_idx = @as(Symbol.Index, @intCast(i));
+        const this_sym = self.symtab.items[sym_idx];
+
+        if (this_sym.undf()) continue;
+
+        const global = macho_file.getSymbol(index);
+        if (self.asFile().getSymbolRank(this_sym, false) < global.getSymbolRank(macho_file)) {
+            global.value = this_sym.n_value;
+            global.atom = 0;
+            global.sym_idx = sym_idx;
+            global.file = self.index;
+        }
+    }
+}
+
+pub fn markLive(self: *Dylib, macho_file: *MachO) void {
+    for (self.symbols.items, 0..) |index, i| {
+        const sym = self.symtab.items[i];
+        if (!sym.undf()) continue;
+
+        const global = macho_file.getSymbol(index);
+        const file = global.getFile(macho_file) orelse continue;
+        const should_drop = switch (file) {
+            .dylib => |sh| !sh.needed and (sym.weakDef() or sym.pext()),
+            else => false,
+        };
+        if (!should_drop and !file.isAlive()) {
+            file.setAlive();
+            file.markLive(macho_file);
+        }
+    }
+}
+
 fn insertString(self: *Dylib, allocator: Allocator, name: []const u8) !u32 {
     const off = @as(u32, @intCast(self.strtab.items.len));
     try self.strtab.writer(allocator).print("{s}\x00", .{name});
@@ -294,8 +329,12 @@ inline fn getString(self: Dylib, off: u32) [:0]const u8 {
     return mem.sliceTo(@as([*:0]const u8, @ptrCast(self.strtab.items.ptr + off)), 0);
 }
 
-pub fn getGlobals(self: Dylib) []const Symbol.Index {
+pub inline fn getGlobals(self: Dylib) []const Symbol.Index {
     return self.symbols.items;
+}
+
+pub fn asFile(self: *Dylib) File {
+    return .{ .dylib = self };
 }
 
 pub fn format(

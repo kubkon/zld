@@ -12,6 +12,7 @@ uuid_cmd: macho.uuid_command = .{
 },
 codesig_cmd: macho.linkedit_data_command = .{ .cmd = .CODE_SIGNATURE },
 
+internal_object_index: ?File.Index = null,
 objects: std.ArrayListUnmanaged(File.Index) = .{},
 dylibs: std.ArrayListUnmanaged(File.Index) = .{},
 files: std.MultiArrayList(File.Entry) = .{},
@@ -251,28 +252,20 @@ pub fn flush(self: *MachO) !void {
     }
 
     // TODO parse dependent dylibs
-    // TODO dedup dylibs
-
-    state_log.debug("{}", .{self.dumpState()});
 
     self.base.reportWarningsAndErrorsAndExit();
 
-    // var resolver = SymbolResolver{
-    //     .arena = arena,
-    //     .table = std.StringHashMap(u32).init(arena),
-    //     .unresolved = std.AutoArrayHashMap(u32, void).init(arena),
-    // };
-    // try self.resolveSymbols(&resolver);
-    // try self.reportUndefined(&resolver);
-    // self.base.reportWarningsAndErrorsAndExit();
+    // TODO dedup dylibs
 
-    // if (!self.options.dylib) {
-    //     const entry_name = self.options.entry orelse default_entry_point;
-    //     const global_index = resolver.table.get(entry_name).?; // Error was flagged earlier
-    //     self.entry_index = global_index;
-    // }
+    {
+        const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
+        self.files.set(index, .{ .internal = .{ .index = index } });
+        self.internal_object_index = index;
+    }
 
-    // try self.splitIntoAtoms();
+    try self.resolveSymbols();
+
+    state_log.debug("{}", .{self.dumpState()});
 
     // if (self.options.dead_strip) {
     //     try dead_strip.gcAtoms(self, &resolver);
@@ -1057,6 +1050,62 @@ fn parseDependentLibs(self: *MachO, syslibroot: ?[]const u8, dependent_libs: any
     }
 }
 
+/// When resolving symbols, we approach the problem similarly to `mold`.
+/// 1. Resolve symbols across all objects (including those preemptively extracted archives).
+/// 2. Resolve symbols across all shared objects.
+/// 3. Mark live objects (see `MachO.markLive`)
+/// 4. Reset state of all resolved globals since we will redo this bit on the pruned set.
+/// 5. Remove references to dead objects/shared objects
+/// 6. Re-run symbol resolution on pruned objects and shared objects sets.
+pub fn resolveSymbols(self: *MachO) !void {
+    // Resolve symbols on the set of all objects and shared objects (even if some are unneeded).
+    for (self.objects.items) |index| self.getFile(index).?.resolveSymbols(self);
+    for (self.dylibs.items) |index| self.getFile(index).?.resolveSymbols(self);
+
+    // Mark live objects.
+    self.markLive();
+
+    // Reset state of all globals after marking live objects.
+    for (self.objects.items) |index| self.getFile(index).?.resetGlobals(self);
+    for (self.dylibs.items) |index| self.getFile(index).?.resetGlobals(self);
+
+    // Prune dead objects and dylibs.
+    var i: usize = 0;
+    while (i < self.objects.items.len) {
+        const index = self.objects.items[i];
+        if (!self.getFile(index).?.isAlive()) {
+            _ = self.objects.orderedRemove(i);
+        } else i += 1;
+    }
+
+    i = 0;
+    while (i < self.dylibs.items.len) {
+        const index = self.dylibs.items[i];
+        if (!self.getFile(index).?.isAlive()) {
+            _ = self.dylibs.orderedRemove(i);
+        } else i += 1;
+    }
+
+    // Re-resolve the symbols.
+    for (self.objects.items) |index| self.getFile(index).?.resolveSymbols(self);
+    for (self.dylibs.items) |index| self.getFile(index).?.resolveSymbols(self);
+}
+
+/// Traverses all objects and dylibs marking any object referenced by
+/// a live object/dylib as alive itself.
+/// This routine will prune unneeded objects extracted from archives and
+/// unneeded dylibs.
+fn markLive(self: *MachO) void {
+    for (self.objects.items) |index| {
+        const file = self.getFile(index).?;
+        if (file.isAlive()) file.markLive(self);
+    }
+    for (self.dylibs.items) |index| {
+        const file = self.getFile(index).?;
+        if (file.isAlive()) file.markLive(self);
+    }
+}
+
 pub fn getOutputSection(self: *MachO, sect: macho.section_64) !?u8 {
     const segname = sect.segName();
     const sectname = sect.sectName();
@@ -1811,6 +1860,7 @@ pub fn deinit(self: *MachO) void {
 
     for (self.files.items(.tags), self.files.items(.data)) |tag, *data| switch (tag) {
         .null => {},
+        .internal => data.internal.deinit(gpa),
         .object => data.object.deinit(gpa),
         .dylib => data.dylib.deinit(gpa),
     };
@@ -3692,6 +3742,7 @@ pub fn getFile(self: *MachO, index: File.Index) ?File {
     const tag = self.files.items(.tags)[index];
     return switch (tag) {
         .null => null,
+        .internal => .{ .internal = &self.files.items(.data)[index].internal },
         .object => .{ .object = &self.files.items(.data)[index].object },
         .dylib => .{ .dylib = &self.files.items(.data)[index].dylib },
     };

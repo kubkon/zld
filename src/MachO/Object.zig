@@ -100,7 +100,7 @@ fn addAtom(
     atom.n_sect = n_sect;
     atom.size = size;
     atom.alignment = alignment;
-    try self.atoms.append(gpa, atom_index);
+    self.atoms.items[n_sect] = atom_index;
     return atom_index;
 }
 
@@ -224,6 +224,49 @@ fn parseRelocs(self: *Object, allocator: Allocator, sect: macho.section_64) !Ato
     return .{ .pos = pos, .len = sect.nreloc };
 }
 
+pub fn resolveSymbols(self: *Object, macho_file: *MachO) void {
+    for (self.getGlobals(), 0..) |index, i| {
+        const sym_idx = @as(Symbol.Index, @intCast(self.first_global + i));
+        const this_sym = self.symtab.items[sym_idx];
+
+        if (this_sym.undf()) continue;
+        if (!this_sym.tentative() and !this_sym.abs()) {
+            const atom_index = self.atoms.items[this_sym.n_sect - 1];
+            const atom = macho_file.getAtom(atom_index) orelse continue;
+            if (!atom.flags.alive) continue;
+        }
+
+        const global = macho_file.getSymbol(index);
+        if (self.asFile().getSymbolRank(this_sym, !self.alive) < global.getSymbolRank(macho_file)) {
+            const atom = if (this_sym.tentative() or this_sym.abs())
+                0
+            else
+                self.atoms.items[this_sym.n_sect - 1];
+            global.value = this_sym.n_value;
+            global.atom = atom;
+            global.sym_idx = sym_idx;
+            global.file = self.index;
+            if (this_sym.weakDef() or this_sym.pext()) global.flags.weak = true;
+        }
+    }
+}
+
+pub fn markLive(self: *Object, macho_file: *MachO) void {
+    for (self.getGlobals(), 0..) |index, i| {
+        const sym_idx = self.first_global + i;
+        const sym = self.symtab.items[sym_idx];
+        if (sym.weakDef() or sym.pext()) continue;
+
+        const global = macho_file.getSymbol(index);
+        const file = global.getFile(macho_file) orelse continue;
+        const should_keep = sym.undf() or (sym.tentative() and global.getSourceSymbol(macho_file).tentative());
+        if (should_keep and !file.isAlive()) {
+            file.setAlive();
+            file.markLive(macho_file);
+        }
+    }
+}
+
 fn getLoadCommand(self: Object, lc: macho.LC) ?LoadCommandIterator.LoadCommand {
     var it = LoadCommandIterator{
         .ncmds = self.header.?.ncmds,
@@ -245,6 +288,10 @@ pub fn getLocals(self: Object) []const Symbol.Index {
 
 pub fn getGlobals(self: Object) []const Symbol.Index {
     return self.symbols.items[self.first_global..];
+}
+
+pub fn asFile(self: *Object) File {
+    return .{ .object = self };
 }
 
 pub fn format(
