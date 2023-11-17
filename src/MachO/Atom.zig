@@ -11,14 +11,19 @@ file: File.Index = 0,
 size: u64 = 0,
 
 /// Alignment of this atom as a power of two.
-alignment: u8 = 0,
+alignment: u32 = 0,
 
 /// Index of the input section.
-n_sect: u32 = 0,
+n_sect: u8 = 0,
 
 /// Index of the output section.
 out_n_sect: u16 = 0,
 
+/// Offset within the parent section pointed to by n_sect.
+/// off + size <= parent section size.
+off: u64 = 0,
+
+/// Relocations of this atom.
 relocs: Loc = .{},
 
 /// Index of this atom in the linker's atoms table.
@@ -103,7 +108,7 @@ pub const Flags = packed struct {
     visited: bool = false,
 };
 
-const Loc = struct {
+pub const Loc = struct {
     pos: usize = 0,
     len: usize = 0,
 };

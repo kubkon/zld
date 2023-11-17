@@ -36,103 +36,111 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
 
     self.header = try reader.readStruct(macho.mach_header_64);
 
-    if (self.getLoadCommand(.SEGMENT_64)) |lc| {
-        self.sections = lc.getSections();
-    }
-    if (self.sections.len == 0) return;
+    const lc_seg = self.getLoadCommand(.SEGMENT_64) orelse return;
+    self.sections = lc_seg.getSections();
 
-    if (self.getLoadCommand(.SYMTAB)) |lc| {
-        const cmd = lc.cast(macho.symtab_command).?;
+    const lc_symtab = self.getLoadCommand(.SYMTAB) orelse return;
+    const cmd = lc_symtab.cast(macho.symtab_command).?;
 
-        self.strtab = self.data[cmd.stroff..][0..cmd.strsize];
+    self.strtab = self.data[cmd.stroff..][0..cmd.strsize];
 
-        const symtab = @as([*]align(1) const macho.nlist_64, @ptrCast(self.data.ptr + cmd.symoff))[0..cmd.nsyms];
-        try self.symtab.ensureUnusedCapacity(gpa, symtab.len);
-        self.symtab.appendUnalignedSliceAssumeCapacity(symtab);
-    }
-    if (self.symtab.items.len == 0) return;
+    const symtab = @as([*]align(1) const macho.nlist_64, @ptrCast(self.data.ptr + cmd.symoff))[0..cmd.nsyms];
+    try self.symtab.ensureUnusedCapacity(gpa, symtab.len);
+    self.symtab.appendUnalignedSliceAssumeCapacity(symtab);
 
-    try self.initAtoms(macho_file);
+    try self.initSectionAtoms(macho_file);
 }
 
-fn initAtoms(self: *Object, macho_file: *MachO) !void {
-    if (self.header.?.flags & macho.MH_SUBSECTIONS_VIA_SYMBOLS == 0) {
-        @panic("TODO no subsections!");
-    }
-
+fn initSectionAtoms(self: *Object, macho_file: *MachO) !void {
     const gpa = macho_file.base.allocator;
-    var symbols = std.ArrayList(macho.nlist_64).init(gpa);
-    defer symbols.deinit();
+    try self.atoms.resize(gpa, self.sections.len);
+    @memset(self.atoms.items, 0);
 
-    if (self.getLoadCommand(.DYSYMTAB)) |lc| {
-        const cmd = lc.cast(macho.dysymtab_command).?;
-        try symbols.appendSlice(self.symtab.items[0..cmd.iundefsym]);
-    } else {
-        try symbols.ensureUnusedCapacity(self.symtab.items.len);
-        for (self.symtab.items) |nlist| {
-            if (nlist.sect()) symbols.appendAssumeCapacity(nlist);
+    for (self.sections, 0..) |sect, n_sect| {
+        switch (sect.type()) {
+            macho.S_REGULAR => {
+                const attrs = sect.attrs();
+                if (attrs & macho.S_ATTR_DEBUG != 0 and macho_file.options.strip) continue;
+            },
+
+            else => {},
         }
+
+        const name = try std.fmt.allocPrintZ(gpa, "{s},{s}", .{ sect.segName(), sect.sectName() });
+        defer gpa.free(name);
+        const atom_index = try self.addAtom(name, sect.size, sect.@"align", @intCast(n_sect), macho_file);
+        const atom = macho_file.getAtom(atom_index).?;
+        atom.relocs = try self.parseRelocs(gpa, sect);
+        atom.off = 0;
     }
 
-    const nlistLessThan = struct {
-        fn nlistLessThan(ctx: void, lhs: macho.nlist_64, rhs: macho.nlist_64) bool {
-            _ = ctx;
-            assert(lhs.sect() and rhs.sect());
-            if (lhs.n_sect == rhs.n_sect) {
-                if (lhs.n_value == rhs.n_value) {
-                    return lhs.n_strx < rhs.n_strx;
-                } else return lhs.n_value < rhs.n_value;
-            } else return lhs.n_sect < rhs.n_sect;
-        }
-    }.nlistLessThan;
+    // const gpa = macho_file.base.allocator;
+    // var symbols = std.ArrayList(macho.nlist_64).init(gpa);
+    // defer symbols.deinit();
 
-    mem.sort(macho.nlist_64, symbols.items, {}, nlistLessThan);
+    // if (self.getLoadCommand(.DYSYMTAB)) |lc| {
+    //     const cmd = lc.cast(macho.dysymtab_command).?;
+    //     try symbols.appendSlice(self.symtab.items[0..cmd.iundefsym]);
+    // } else {
+    //     try symbols.ensureUnusedCapacity(self.symtab.items.len);
+    //     for (self.symtab.items) |nlist| {
+    //         if (nlist.sect()) symbols.appendAssumeCapacity(nlist);
+    //     }
+    // }
 
-    var sym_start: usize = 0;
-    for (self.sections, 1..) |sect, n_sect| {
-        const sym_end = for (symbols.items[sym_start..], sym_start..) |sym, sym_i| {
-            if (sym.n_sect != n_sect) break sym_i;
-        } else symbols.items.len;
+    // sortSymbols(symbols.items);
 
-        if (sym_start == sym_end) break;
+    // var sym_start: usize = 0;
+    // for (self.sections, 1..) |sect, n_sect| {
+    //     const sym_end = for (symbols.items[sym_start..], sym_start..) |sym, sym_i| {
+    //         if (sym.n_sect != n_sect) break sym_i;
+    //     } else symbols.items.len;
 
-        var sym_next: usize = sym_start;
-        while (sym_next < sym_end) {
-            const first_nlist = symbols.items[sym_next];
+    //     if (sym_start == sym_end) break;
 
-            while (sym_next < sym_end and
-                symbols.items[sym_next].n_value == first_nlist.n_value) : (sym_next += 1)
-            {}
+    //     // const relocs_loc = try self.parseRelocs(gpa, sect);
+    //     // const relocs_end = relocs_loc.pos + relocs_loc.len;
 
-            const size = if (sym_next < sym_end)
-                symbols.items[sym_next].n_value - first_nlist.n_value
-            else
-                sect.size;
+    //     assert(symbols.items[sym_start].n_value == sect.addr);
 
-            const alignment = if (first_nlist.n_value > 0)
-                @min(@ctz(first_nlist.n_value), sect.@"align")
-            else
-                sect.@"align";
+    //     var sym_next: usize = sym_start;
+    //     // var relocs_next: usize = relocs_loc.pos;
+    //     while (sym_next < sym_end) {
+    //         const first_nlist = symbols.items[sym_next];
 
-            _ = try self.addAtom(
-                self.getString(first_nlist.n_strx),
-                size,
-                @intCast(alignment),
-                @intCast(n_sect - 1),
-                macho_file,
-            );
-        }
+    //         while (sym_next < sym_end and
+    //             symbols.items[sym_next].n_value == first_nlist.n_value) : (sym_next += 1)
+    //         {}
 
-        sym_start = sym_end;
-    }
+    //         const size = if (sym_next < sym_end)
+    //             symbols.items[sym_next].n_value - first_nlist.n_value
+    //         else
+    //             sect.size;
+
+    //         const alignment = if (first_nlist.n_value > 0)
+    //             @min(@ctz(first_nlist.n_value), sect.@"align")
+    //         else
+    //             sect.@"align";
+
+    //         _ = try self.addAtom(
+    //             self.getString(first_nlist.n_strx),
+    //             size,
+    //             @intCast(alignment),
+    //             @intCast(n_sect - 1),
+    //             macho_file,
+    //         );
+    //     }
+
+    //     sym_start = sym_end;
+    // }
 }
 
 fn addAtom(
     self: *Object,
     name: [:0]const u8,
     size: u64,
-    alignment: u8,
-    n_sect: u32,
+    alignment: u32,
+    n_sect: u8,
     macho_file: *MachO,
 ) !Atom.Index {
     const gpa = macho_file.base.allocator;
@@ -145,6 +153,44 @@ fn addAtom(
     atom.alignment = alignment;
     try self.atoms.append(gpa, atom_index);
     return atom_index;
+}
+
+fn sortSymbols(symbols: []macho.nlist_64) void {
+    const nlistLessThan = struct {
+        fn nlistLessThan(ctx: void, lhs: macho.nlist_64, rhs: macho.nlist_64) bool {
+            _ = ctx;
+            assert(lhs.sect() and rhs.sect());
+            if (lhs.n_sect == rhs.n_sect) {
+                if (lhs.n_value == rhs.n_value) {
+                    return lhs.n_strx < rhs.n_strx;
+                } else return lhs.n_value < rhs.n_value;
+            } else return lhs.n_sect < rhs.n_sect;
+        }
+    }.nlistLessThan;
+    mem.sort(macho.nlist_64, symbols, {}, nlistLessThan);
+}
+
+/// Parse all relocs for the input section, and sort in ascending order.
+/// Previously, I have wrongly assumed the compilers output relocations for each
+/// section in a sorted manner which is simply not true.
+fn parseRelocs(self: *Object, allocator: Allocator, sect: macho.section_64) !Atom.Loc {
+    const relocLessThan = struct {
+        fn relocLessThan(ctx: void, lhs: macho.relocation_info, rhs: macho.relocation_info) bool {
+            _ = ctx;
+            return lhs.r_address < rhs.r_address;
+        }
+    }.relocLessThan;
+
+    if (sect.nreloc == 0) return .{};
+    const pos: u32 = @intCast(self.relocations.items.len);
+    const relocs = @as(
+        [*]align(1) const macho.relocation_info,
+        @ptrCast(self.data.ptr + sect.reloff),
+    )[0..sect.nreloc];
+    try self.relocations.ensureUnusedCapacity(allocator, relocs.len);
+    self.relocations.appendUnalignedSliceAssumeCapacity(relocs);
+    mem.sort(macho.relocation_info, self.relocations.items[pos..], {}, relocLessThan);
+    return .{ .pos = pos, .len = sect.nreloc };
 }
 
 fn getLoadCommand(self: Object, lc: macho.LC) ?LoadCommandIterator.LoadCommand {

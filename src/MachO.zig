@@ -3765,6 +3765,46 @@ fn fmtDumpState(
     }
 }
 
+pub fn fmtSectType(tt: u8) std.fmt.Formatter(formatSectType) {
+    return .{ .data = tt };
+}
+
+fn formatSectType(
+    tt: u8,
+    comptime unused_fmt_string: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = options;
+    _ = unused_fmt_string;
+    const name = switch (tt) {
+        macho.S_REGULAR => "REGULAR",
+        macho.S_ZEROFILL => "ZEROFILL",
+        macho.S_CSTRING_LITERALS => "CSTRING_LITERALS",
+        macho.S_4BYTE_LITERALS => "4BYTE_LITERALS",
+        macho.S_8BYTE_LITERALS => "8BYTE_LITERALS",
+        macho.S_16BYTE_LITERALS => "16BYTE_LITERALS",
+        macho.S_LITERAL_POINTERS => "LITERAL_POINTERS",
+        macho.S_NON_LAZY_SYMBOL_POINTERS => "NON_LAZY_SYMBOL_POINTERS",
+        macho.S_LAZY_SYMBOL_POINTERS => "LAZY_SYMBOL_POINTERS",
+        macho.S_SYMBOL_STUBS => "SYMBOL_STUBS",
+        macho.S_MOD_INIT_FUNC_POINTERS => "MOD_INIT_FUNC_POINTERS",
+        macho.S_MOD_TERM_FUNC_POINTERS => "MOD_TERM_FUNC_POINTERS",
+        macho.S_COALESCED => "COALESCED",
+        macho.S_GB_ZEROFILL => "GB_ZEROFILL",
+        macho.S_INTERPOSING => "INTERPOSING",
+        macho.S_DTRACE_DOF => "DTRACE_DOF",
+        macho.S_THREAD_LOCAL_REGULAR => "THREAD_LOCAL_REGULAR",
+        macho.S_THREAD_LOCAL_ZEROFILL => "THREAD_LOCAL_ZEROFILL",
+        macho.S_THREAD_LOCAL_VARIABLES => "THREAD_LOCAL_VARIABLES",
+        macho.S_THREAD_LOCAL_VARIABLE_POINTERS => "THREAD_LOCAL_VARIABLE_POINTERS",
+        macho.S_THREAD_LOCAL_INIT_FUNCTION_POINTERS => "THREAD_LOCAL_INIT_FUNCTION_POINTERS",
+        macho.S_INIT_FUNC_OFFSETS => "INIT_FUNC_OFFSETS",
+        else => |x| return writer.print("UNKNOWN({x})", .{x}),
+    };
+    try writer.print("{s}", .{name});
+}
+
 const Section = struct {
     header: macho.section_64,
     segment_index: u8,
