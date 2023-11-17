@@ -646,7 +646,7 @@ fn parsePositional(
     if (try self.parseObject(arena, resolved_obj)) return;
     // if (try self.parseArchive(arena, resolved_obj)) return;
     // if (try self.parseDylib(arena, resolved_obj)) return;
-    // if (try self.parseTbd(arena, resolved_obj)) return;
+    if (try self.parseTbd(resolved_obj)) return;
 
     self.base.fatal("unknown filetype for positional argument: '{s}'", .{resolved_obj.path});
 }
@@ -917,49 +917,50 @@ fn parseDylib(self: *MachO, path: []const u8, file: std.fs.File, offset: u64, de
     };
 }
 
-fn parseLibStub(self: *MachO, path: []const u8, file: std.fs.File, dependent_libs: anytype, opts: DylibOpts) !void {
-    var lib_stub = try LibStub.loadFromFile(self.base.allocator, file);
+fn parseTbd(self: *MachO, obj: LinkObject) !bool {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    const gpa = self.base.allocator;
+    const file = try std.fs.cwd().openFile(obj.path, .{});
+    defer file.close();
+
+    var lib_stub = LibStub.loadFromFile(gpa, file) catch return false; // TODO actually handle different errors
     defer lib_stub.deinit();
 
-    if (lib_stub.inner.len == 0) return error.NotLibStub;
+    if (lib_stub.inner.len == 0) return false;
 
-    const cpu_arch = self.options.cpu_arch orelse
-        return self.base.fatal("{s}: ignoring library as no architecture specified", .{path});
-
-    if (self.options.platform) |platform| {
-        var matcher = try Dylib.TargetMatcher.init(self.base.allocator, cpu_arch, platform.platform);
-        defer matcher.deinit();
-
-        for (lib_stub.inner) |elem| {
-            if (try matcher.matchesTargetTbd(elem)) break;
-        } else {
-            const target = try Dylib.TargetMatcher.targetToAppleString(self.base.allocator, cpu_arch, platform.platform);
-            defer self.base.allocator.free(target);
-            return self.base.fatal("{s}: missing target in stub file: expected {s}", .{ path, target });
-        }
-    }
-
-    var dylib = Dylib{ .weak = opts.weak };
-    errdefer dylib.deinit(self.base.allocator);
-
-    try dylib.parseFromStub(
-        self.base.allocator,
-        cpu_arch,
-        self.options.platform,
-        lib_stub,
-        @intCast(self.dylibs.items.len),
-        dependent_libs,
-        path,
-    );
-
-    self.addDylib(dylib, .{
-        .syslibroot = self.options.syslibroot,
-        .needed = opts.needed,
-        .weak = opts.weak,
-    }) catch |err| switch (err) {
-        error.DylibAlreadyExists => dylib.deinit(self.base.allocator),
-        else => |e| return e,
+    const cpu_arch = self.options.cpu_arch orelse {
+        self.base.fatal("{s}: ignoring library as no architecture specified", .{obj.path});
+        return false;
     };
+
+    // if (self.options.platform) |platform| {
+    //     var matcher = try Dylib.TargetMatcher.init(self.base.allocator, cpu_arch, platform.platform);
+    //     defer matcher.deinit();
+
+    //     for (lib_stub.inner) |elem| {
+    //         if (try matcher.matchesTargetTbd(elem)) break;
+    //     } else {
+    //         const target = try Dylib.TargetMatcher.targetToAppleString(self.base.allocator, cpu_arch, platform.platform);
+    //         defer self.base.allocator.free(target);
+    //         return self.base.fatal("{s}: missing target in stub file: expected {s}", .{ path, target });
+    //     }
+    // }
+
+    const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
+    self.files.set(index, .{ .dylib = .{
+        .path = obj.path,
+        .data = &[0]u8{},
+        .index = index,
+        .needed = obj.needed,
+        .weak = obj.weak,
+    } });
+    const dylib = &self.files.items(.data)[index].dylib;
+    try dylib.parseTbd(cpu_arch, self.options.platform, lib_stub, self);
+    try self.dylibs.append(gpa, index);
+
+    return true;
 }
 
 fn addDylib(self: *MachO, dylib: Dylib, opts: DylibOpts) !void {
@@ -1819,6 +1820,7 @@ pub fn deinit(self: *MachO) void {
     for (self.files.items(.tags), self.files.items(.data)) |tag, *data| switch (tag) {
         .null => {},
         .object => data.object.deinit(gpa),
+        .dylib => data.dylib.deinit(gpa),
     };
     self.files.deinit(gpa);
 
@@ -3699,6 +3701,7 @@ pub fn getFile(self: *MachO, index: File.Index) ?File {
     return switch (tag) {
         .null => null,
         .object => .{ .object = &self.files.items(.data)[index].object },
+        .dylib => .{ .dylib = &self.files.items(.data)[index].dylib },
     };
 }
 
@@ -3813,6 +3816,13 @@ fn fmtDumpState(
             object.fmtSymtab(self),
         });
     }
+    for (self.dylibs.items) |index| {
+        const dylib = self.getFile(index).?.dylib;
+        try writer.print("dylib({d}) : {s} : needed({}) : weak({})", .{ index, dylib.path, dylib.needed, dylib.weak });
+        if (!dylib.alive) try writer.writeAll(" : [*]");
+        try writer.writeByte('\n');
+        try writer.print("{}\n", .{dylib.fmtSymtab(self)});
+    }
 }
 
 pub fn fmtSectType(tt: u8) std.fmt.Formatter(formatSectType) {
@@ -3860,6 +3870,14 @@ const Section = struct {
     segment_index: u8,
     first_atom_index: AtomIndex,
     last_atom_index: AtomIndex,
+};
+
+pub const null_sym = macho.nlist_64{
+    .n_strx = 0,
+    .n_type = 0,
+    .n_sect = 0,
+    .n_desc = 0,
+    .n_value = 0,
 };
 
 pub const base_tag = Zld.Tag.macho;
