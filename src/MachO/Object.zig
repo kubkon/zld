@@ -126,7 +126,7 @@ fn initSymbols(self: *Object, macho_file: *MachO) !void {
         symbol.* = .{
             .value = local.n_value,
             .name = try macho_file.string_intern.insert(gpa, name),
-            .sym_idx = @intCast(i),
+            .nlist_idx = @intCast(i),
             .atom = if (local.abs()) 0 else self.atoms.items[local.n_sect - 1],
             .file = self.index,
         };
@@ -195,8 +195,8 @@ fn sortSymbols(self: *Object, allocator: Allocator) !Symbol.Index {
         self.symtab.appendAssumeCapacity(symtab.items[index.index]);
     }
 
-    const first_global = for (self.symtab.items, 0..) |sym, i| {
-        if (sym.ext()) break i;
+    const first_global = for (self.symtab.items, 0..) |nlist, i| {
+        if (nlist.ext()) break i;
     } else self.symtab.items.len;
     return @intCast(first_global);
 }
@@ -226,40 +226,40 @@ fn parseRelocs(self: *Object, allocator: Allocator, sect: macho.section_64) !Ato
 
 pub fn resolveSymbols(self: *Object, macho_file: *MachO) void {
     for (self.getGlobals(), 0..) |index, i| {
-        const sym_idx = @as(Symbol.Index, @intCast(self.first_global + i));
-        const this_sym = self.symtab.items[sym_idx];
+        const nlist_idx = @as(Symbol.Index, @intCast(self.first_global + i));
+        const nlist = self.symtab.items[nlist_idx];
 
-        if (this_sym.undf()) continue;
-        if (!this_sym.tentative() and !this_sym.abs()) {
-            const atom_index = self.atoms.items[this_sym.n_sect - 1];
+        if (nlist.undf()) continue;
+        if (!nlist.tentative() and !nlist.abs()) {
+            const atom_index = self.atoms.items[nlist.n_sect - 1];
             const atom = macho_file.getAtom(atom_index) orelse continue;
             if (!atom.flags.alive) continue;
         }
 
         const global = macho_file.getSymbol(index);
-        if (self.asFile().getSymbolRank(this_sym, !self.alive) < global.getSymbolRank(macho_file)) {
-            const atom = if (this_sym.tentative() or this_sym.abs())
+        if (self.asFile().getSymbolRank(nlist, !self.alive) < global.getSymbolRank(macho_file)) {
+            const atom = if (nlist.tentative() or nlist.abs())
                 0
             else
-                self.atoms.items[this_sym.n_sect - 1];
-            global.value = this_sym.n_value;
+                self.atoms.items[nlist.n_sect - 1];
+            global.value = nlist.n_value;
             global.atom = atom;
-            global.sym_idx = sym_idx;
+            global.nlist_idx = nlist_idx;
             global.file = self.index;
-            if (this_sym.weakDef() or this_sym.pext()) global.flags.weak = true;
+            if (nlist.weakDef() or nlist.pext()) global.flags.weak = true;
         }
     }
 }
 
 pub fn markLive(self: *Object, macho_file: *MachO) void {
     for (self.getGlobals(), 0..) |index, i| {
-        const sym_idx = self.first_global + i;
-        const sym = self.symtab.items[sym_idx];
-        if (sym.weakDef() or sym.pext()) continue;
+        const nlist_idx = self.first_global + i;
+        const nlist = self.symtab.items[nlist_idx];
+        if (nlist.weakDef() or nlist.pext()) continue;
 
         const global = macho_file.getSymbol(index);
         const file = global.getFile(macho_file) orelse continue;
-        const should_keep = sym.undf() or (sym.tentative() and global.getSourceSymbol(macho_file).tentative());
+        const should_keep = nlist.undf() or (nlist.tentative() and global.getNlist(macho_file).tentative());
         if (should_keep and !file.isAlive()) {
             file.setAlive();
             file.markLive(macho_file);

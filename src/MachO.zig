@@ -265,6 +265,11 @@ pub fn flush(self: *MachO) !void {
 
     try self.resolveSymbols();
 
+    // TODO kill __eh_frame atoms
+    // TODO convert tentative definitions
+
+    try self.markImportsAndExports();
+
     state_log.debug("{}", .{self.dumpState()});
 
     // if (self.options.dead_strip) {
@@ -1103,6 +1108,36 @@ fn markLive(self: *MachO) void {
     for (self.dylibs.items) |index| {
         const file = self.getFile(index).?;
         if (file.isAlive()) file.markLive(self);
+    }
+}
+
+fn markImportsAndExports(self: *MachO) !void {
+    if (!self.options.dylib)
+        for (self.dylibs.items) |index| {
+            for (self.getFile(index).?.getGlobals()) |global_index| {
+                const global = self.getSymbol(global_index);
+                const file = global.getFile(self) orelse continue;
+                if (file != .dylib and !global.getNlist(self).pext()) global.flags.@"export" = true;
+            }
+        };
+
+    for (self.objects.items) |index| {
+        for (self.getFile(index).?.getGlobals()) |global_index| {
+            const global = self.getSymbol(global_index);
+            const file = global.getFile(self) orelse continue;
+            if (global.getNlist(self).pext()) continue;
+            if (file == .dylib and !global.isAbs(self)) {
+                global.flags.import = true;
+                continue;
+            }
+            if (file.getIndex() == index) {
+                global.flags.@"export" = true;
+
+                if (self.options.dylib) {
+                    global.flags.import = true;
+                }
+            }
+        }
     }
 }
 

@@ -258,10 +258,10 @@ fn addObjCGlobal(self: *Dylib, comptime prefix: []const u8, name: []const u8, ma
 fn addGlobal(self: *Dylib, name: []const u8, macho_file: *MachO) !Symbol.Index {
     const gpa = macho_file.base.allocator;
     const index = @as(Symbol.Index, @intCast(self.symtab.items.len));
-    const sym = try self.symtab.addOne(gpa);
-    sym.* = MachO.null_sym;
-    sym.n_strx = try self.insertString(gpa, name);
-    sym.n_type = macho.N_EXT | macho.N_SECT;
+    const nlist = try self.symtab.addOne(gpa);
+    nlist.* = MachO.null_sym;
+    nlist.n_strx = try self.insertString(gpa, name);
+    nlist.n_type = macho.N_EXT | macho.N_SECT;
     return index;
 }
 
@@ -285,16 +285,16 @@ fn initSymbols(self: *Dylib, macho_file: *MachO) !void {
 
 pub fn resolveSymbols(self: *Dylib, macho_file: *MachO) void {
     for (self.getGlobals(), 0..) |index, i| {
-        const sym_idx = @as(Symbol.Index, @intCast(i));
-        const this_sym = self.symtab.items[sym_idx];
+        const nlist_idx = @as(Symbol.Index, @intCast(i));
+        const nlist = self.symtab.items[nlist_idx];
 
-        if (this_sym.undf()) continue;
+        if (nlist.undf()) continue;
 
         const global = macho_file.getSymbol(index);
-        if (self.asFile().getSymbolRank(this_sym, false) < global.getSymbolRank(macho_file)) {
-            global.value = this_sym.n_value;
+        if (self.asFile().getSymbolRank(nlist, false) < global.getSymbolRank(macho_file)) {
+            global.value = nlist.n_value;
             global.atom = 0;
-            global.sym_idx = sym_idx;
+            global.nlist_idx = nlist_idx;
             global.file = self.index;
         }
     }
@@ -302,13 +302,13 @@ pub fn resolveSymbols(self: *Dylib, macho_file: *MachO) void {
 
 pub fn markLive(self: *Dylib, macho_file: *MachO) void {
     for (self.symbols.items, 0..) |index, i| {
-        const sym = self.symtab.items[i];
-        if (!sym.undf()) continue;
+        const nlist = self.symtab.items[i];
+        if (!nlist.undf()) continue;
 
         const global = macho_file.getSymbol(index);
         const file = global.getFile(macho_file) orelse continue;
         const should_drop = switch (file) {
-            .dylib => |sh| !sh.needed and (sym.weakDef() or sym.pext()),
+            .dylib => |sh| !sh.needed and (nlist.weakDef() or nlist.pext()),
             else => false,
         };
         if (!should_drop and !file.isAlive()) {
