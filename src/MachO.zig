@@ -214,56 +214,48 @@ pub fn flush(self: *MachO) !void {
         try self.parsePositional(arena, obj, lib_dirs.items, framework_dirs.items);
     }
 
+    if (self.options.platform == null) {
+        // Check if we have already inferred a version from env vars.
+        inline for (self.options.inferred_platform_versions) |platform| {
+            if (platform.version.value > 0) {
+                self.options.platform = .{ .platform = platform.platform, .version = platform.version };
+                break;
+            }
+        }
+    }
+
+    if (self.options.sdk_version == null) {
+        // First, try inferring SDK version from the SDK path if we have one.
+        if (self.options.syslibroot) |path| {
+            self.options.sdk_version = Options.inferSdkVersionFromSdkPath(path);
+        }
+        // Next, if platform has been worked out to be macOS but wasn't inferred from env vars,
+        // do a syscall.
+        if (self.options.sdk_version == null and self.options.platform != null) blk: {
+            if ((comptime builtin.target.isDarwin()) and
+                self.options.platform.?.platform == .MACOS and
+                self.options.inferred_platform_versions[0].version.value == 0)
+            {
+                var ver_str: [100]u8 = undefined;
+                var size: usize = 100;
+                std.os.sysctlbynameZ("kern.osrelease", &ver_str, &size, null, 0) catch {
+                    std.log.warn("ERROR", .{});
+                    break :blk;
+                };
+                const kern_ver = Options.Version.parse(ver_str[0 .. size - 1]) orelse break :blk;
+                // According to Apple, kernel major version is 4 ahead of x in 10.
+                const minor = @as(u8, @truncate((kern_ver.value >> 16) - 4));
+                self.options.sdk_version = Options.Version.new(10, minor, 0);
+            }
+        }
+    }
+
+    // TODO parse dependent dylibs
+    // TODO dedup dylibs
+
     state_log.debug("{}", .{self.dumpState()});
 
     self.base.reportWarningsAndErrorsAndExit();
-
-    // if (self.options.platform == null) {
-    //     // Check if we have already inferred a version from env vars.
-    //     inline for (self.options.inferred_platform_versions) |platform| {
-    //         if (platform.version.value > 0) {
-    //             self.options.platform = .{ .platform = platform.platform, .version = platform.version };
-    //             break;
-    //         }
-    //     }
-    // }
-
-    // if (self.options.sdk_version == null) {
-    //     // First, try inferring SDK version from the SDK path if we have one.
-    //     if (self.options.syslibroot) |path| {
-    //         self.options.sdk_version = Options.inferSdkVersionFromSdkPath(path);
-    //     }
-    //     // Next, if platform has been worked out to be macOS but wasn't inferred from env vars,
-    //     // do a syscall.
-    //     if (self.options.sdk_version == null and self.options.platform != null) blk: {
-    //         if ((comptime builtin.target.isDarwin()) and
-    //             self.options.platform.?.platform == .MACOS and
-    //             self.options.inferred_platform_versions[0].version.value == 0)
-    //         {
-    //             var ver_str: [100]u8 = undefined;
-    //             var size: usize = 100;
-    //             std.os.sysctlbynameZ("kern.osrelease", &ver_str, &size, null, 0) catch {
-    //                 std.log.warn("ERROR", .{});
-    //                 break :blk;
-    //             };
-    //             const kern_ver = Options.Version.parse(ver_str[0 .. size - 1]) orelse break :blk;
-    //             // According to Apple, kernel major version is 4 ahead of x in 10.
-    //             const minor = @as(u8, @truncate((kern_ver.value >> 16) - 4));
-    //             self.options.sdk_version = Options.Version.new(10, minor, 0);
-    //         }
-    //     }
-    // }
-
-    // var dependent_libs = std.fifo.LinearFifo(struct {
-    //     id: Dylib.Id,
-    //     parent: u16,
-    // }, .Dynamic).init(arena);
-
-    // for (objects.items) |obj| {
-    //     try self.parseLibrary(obj, &dependent_libs);
-    // }
-
-    // try self.parseDependentLibs(syslibroot, &dependent_libs);
 
     // var resolver = SymbolResolver{
     //     .arena = arena,
