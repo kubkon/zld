@@ -50,6 +50,10 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
 
     try self.initSectionAtoms(macho_file);
     try self.initSymbols(macho_file);
+
+    // TODO split subsections if possible
+    // TODO ICF
+    // TODO __eh_frame records
 }
 
 fn initSectionAtoms(self: *Object, macho_file: *MachO) !void {
@@ -78,66 +82,6 @@ fn initSectionAtoms(self: *Object, macho_file: *MachO) !void {
         atom.relocs = try self.parseRelocs(gpa, sect);
         atom.off = 0;
     }
-
-    // const gpa = macho_file.base.allocator;
-    // var symbols = std.ArrayList(macho.nlist_64).init(gpa);
-    // defer symbols.deinit();
-
-    // if (self.getLoadCommand(.DYSYMTAB)) |lc| {
-    //     const cmd = lc.cast(macho.dysymtab_command).?;
-    //     try symbols.appendSlice(self.symtab.items[0..cmd.iundefsym]);
-    // } else {
-    //     try symbols.ensureUnusedCapacity(self.symtab.items.len);
-    //     for (self.symtab.items) |nlist| {
-    //         if (nlist.sect()) symbols.appendAssumeCapacity(nlist);
-    //     }
-    // }
-
-    // sortSymbols(symbols.items);
-
-    // var sym_start: usize = 0;
-    // for (self.sections, 1..) |sect, n_sect| {
-    //     const sym_end = for (symbols.items[sym_start..], sym_start..) |sym, sym_i| {
-    //         if (sym.n_sect != n_sect) break sym_i;
-    //     } else symbols.items.len;
-
-    //     if (sym_start == sym_end) break;
-
-    //     // const relocs_loc = try self.parseRelocs(gpa, sect);
-    //     // const relocs_end = relocs_loc.pos + relocs_loc.len;
-
-    //     assert(symbols.items[sym_start].n_value == sect.addr);
-
-    //     var sym_next: usize = sym_start;
-    //     // var relocs_next: usize = relocs_loc.pos;
-    //     while (sym_next < sym_end) {
-    //         const first_nlist = symbols.items[sym_next];
-
-    //         while (sym_next < sym_end and
-    //             symbols.items[sym_next].n_value == first_nlist.n_value) : (sym_next += 1)
-    //         {}
-
-    //         const size = if (sym_next < sym_end)
-    //             symbols.items[sym_next].n_value - first_nlist.n_value
-    //         else
-    //             sect.size;
-
-    //         const alignment = if (first_nlist.n_value > 0)
-    //             @min(@ctz(first_nlist.n_value), sect.@"align")
-    //         else
-    //             sect.@"align";
-
-    //         _ = try self.addAtom(
-    //             self.getString(first_nlist.n_strx),
-    //             size,
-    //             @intCast(alignment),
-    //             @intCast(n_sect - 1),
-    //             macho_file,
-    //         );
-    //     }
-
-    //     sym_start = sym_end;
-    // }
 }
 
 fn addAtom(
