@@ -201,13 +201,13 @@ pub fn flush(self: *MachO) !void {
         self.base.fatal("no entrypoint found: '{s}'", .{self.options.entry orelse "_main"});
     }
 
+    // TODO dead strip atoms
+
+    try self.initOutputSections();
+
     self.base.reportWarningsAndErrorsAndExit();
 
     state_log.debug("{}", .{self.dumpState()});
-
-    // if (self.options.dead_strip) {
-    //     try dead_strip.gcAtoms(self, &resolver);
-    // }
 
     // try self.createDyldPrivateAtom();
     // try self.createTentativeDefAtoms();
@@ -1074,6 +1074,17 @@ fn markImportsAndExports(self: *MachO) !void {
     }
 }
 
+fn initOutputSections(self: *MachO) !void {
+    for (self.objects.items) |index| {
+        const object = self.getFile(index).?.object;
+        for (object.atoms.items) |atom_index| {
+            const atom = self.getAtom(atom_index) orelse continue;
+            if (!atom.flags.alive) continue;
+            atom.out_n_sect = try object.initOutputSection(atom.getInputSection(self), self);
+        }
+    }
+}
+
 pub inline fn getPageSize(self: MachO) u16 {
     return switch (self.options.cpu_arch.?) {
         .aarch64 => 0x4000,
@@ -1096,6 +1107,47 @@ pub fn requiresCodeSig(self: MachO) bool {
 
 inline fn requiresThunks(self: MachO) bool {
     return self.options.cpu_arch.? == .aarch64;
+}
+
+const AddSectionOpts = struct {
+    flags: u32 = macho.S_REGULAR,
+    reserved1: u32 = 0,
+    reserved2: u32 = 0,
+};
+
+pub fn addSection(
+    self: *MachO,
+    segname: []const u8,
+    sectname: []const u8,
+    opts: AddSectionOpts,
+) !u8 {
+    const gpa = self.base.allocator;
+    const index = @as(u8, @intCast(try self.sections.addOne(gpa)));
+    self.sections.set(index, .{
+        .segment_index = undefined, // Segments will be created automatically later down the pipeline.
+        .header = .{
+            .sectname = makeStaticString(sectname),
+            .segname = makeStaticString(segname),
+            .flags = opts.flags,
+            .reserved1 = opts.reserved1,
+            .reserved2 = opts.reserved2,
+        },
+    });
+    return index;
+}
+
+fn makeStaticString(bytes: []const u8) [16]u8 {
+    var buf = [_]u8{0} ** 16;
+    assert(bytes.len <= buf.len);
+    mem.copy(u8, &buf, bytes);
+    return buf;
+}
+
+pub fn getSectionByName(self: MachO, segname: []const u8, sectname: []const u8) ?u8 {
+    for (self.sections.items(.header), 0..) |header, i| {
+        if (mem.eql(u8, header.segName(), segname) and mem.eql(u8, header.sectName(), sectname))
+            return @as(u8, @intCast(i));
+    } else return null;
 }
 
 pub fn getFile(self: *MachO, index: File.Index) ?File {
@@ -1230,6 +1282,29 @@ fn fmtDumpState(
         if (!dylib.alive) try writer.writeAll(" : [*]");
         try writer.writeByte('\n');
         try writer.print("{}\n", .{dylib.fmtSymtab(self)});
+    }
+    try writer.writeByte('\n');
+    try writer.writeAll("Output sections\n");
+    try writer.print("{}\n", .{self.fmtSections()});
+}
+
+fn fmtSections(self: *MachO) std.fmt.Formatter(formatSections) {
+    return .{ .data = self };
+}
+
+fn formatSections(
+    self: *MachO,
+    comptime unused_fmt_string: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = options;
+    _ = unused_fmt_string;
+    for (self.sections.items(.header), 0..) |header, i| {
+        try writer.print("sect({d}) : {s},{s} : @{x} ({x}) : align({x}) : size({x})\n", .{
+            i,               header.segName(), header.sectName(), header.offset, header.addr,
+            header.@"align", header.size,
+        });
     }
 }
 

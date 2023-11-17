@@ -62,18 +62,8 @@ fn initSectionAtoms(self: *Object, macho_file: *MachO) !void {
     @memset(self.atoms.items, 0);
 
     for (self.sections, 0..) |sect, n_sect| {
-        switch (sect.type()) {
-            macho.S_REGULAR => {
-                const attrs = sect.attrs();
-                if (attrs & macho.S_ATTR_DEBUG != 0 and macho_file.options.strip) continue;
-            },
-
-            macho.S_COALESCED => {
-                if (mem.eql(u8, sect.sectName(), "__eh_frame")) continue; // TODO
-            },
-
-            else => {},
-        }
+        if (sect.attrs() & macho.S_ATTR_DEBUG != 0) continue;
+        if (sect.type() == macho.S_COALESCED and mem.eql(u8, "__eh_frame", sect.sectName())) continue;
 
         const name = try std.fmt.allocPrintZ(gpa, "{s},{s}", .{ sect.segName(), sect.sectName() });
         defer gpa.free(name);
@@ -95,6 +85,7 @@ fn addAtom(
     const gpa = macho_file.base.allocator;
     const atom_index = try macho_file.addAtom();
     const atom = macho_file.getAtom(atom_index).?;
+    atom.file = self.index;
     atom.atom_index = atom_index;
     atom.name = try macho_file.string_intern.insert(gpa, name);
     atom.n_sect = n_sect;
@@ -265,6 +256,72 @@ pub fn markLive(self: *Object, macho_file: *MachO) void {
             file.markLive(macho_file);
         }
     }
+}
+
+pub fn initOutputSection(self: Object, sect: macho.section_64, macho_file: *MachO) !u8 {
+    _ = self;
+    const segname, const sectname, const flags = blk: {
+        if (sect.isCode()) break :blk .{
+            "__TEXT",
+            "__text",
+            macho.S_REGULAR | macho.S_ATTR_PURE_INSTRUCTIONS | macho.S_ATTR_SOME_INSTRUCTIONS,
+        };
+
+        switch (sect.type()) {
+            macho.S_4BYTE_LITERALS,
+            macho.S_8BYTE_LITERALS,
+            macho.S_16BYTE_LITERALS,
+            => break :blk .{ "__TEXT", "__const", macho.S_REGULAR },
+
+            macho.S_CSTRING_LITERALS => {
+                if (mem.startsWith(u8, sect.sectName(), "__objc")) break :blk .{
+                    sect.segName(), sect.sectName(), macho.S_REGULAR,
+                };
+                break :blk .{ "__TEXT", "__cstring", macho.S_CSTRING_LITERALS };
+            },
+
+            macho.S_MOD_INIT_FUNC_POINTERS,
+            macho.S_MOD_TERM_FUNC_POINTERS,
+            => break :blk .{ "__DATA_CONST", sect.sectName(), sect.flags },
+
+            macho.S_LITERAL_POINTERS,
+            macho.S_ZEROFILL,
+            macho.S_THREAD_LOCAL_VARIABLES,
+            macho.S_THREAD_LOCAL_VARIABLE_POINTERS,
+            macho.S_THREAD_LOCAL_REGULAR,
+            macho.S_THREAD_LOCAL_ZEROFILL,
+            => break :blk .{ sect.segName(), sect.sectName(), sect.flags },
+
+            macho.S_COALESCED => break :blk .{
+                sect.segName(),
+                sect.sectName(),
+                macho.S_REGULAR,
+            },
+
+            macho.S_REGULAR => {
+                const segname = sect.segName();
+                const sectname = sect.sectName();
+                if (mem.eql(u8, segname, "__DATA")) {
+                    if (mem.eql(u8, sectname, "__const") or
+                        mem.eql(u8, sectname, "__cfstring") or
+                        mem.eql(u8, sectname, "__objc_classlist") or
+                        mem.eql(u8, sectname, "__objc_imageinfo")) break :blk .{
+                        "__DATA_CONST",
+                        sectname,
+                        macho.S_REGULAR,
+                    };
+                }
+                break :blk .{ segname, sectname, macho.S_REGULAR };
+            },
+
+            else => break :blk .{ sect.segName(), sect.sectName(), sect.flags },
+        }
+    };
+    return macho_file.getSectionByName(segname, sectname) orelse try macho_file.addSection(
+        segname,
+        sectname,
+        .{ .flags = flags },
+    );
 }
 
 fn getLoadCommand(self: Object, lc: macho.LC) ?LoadCommandIterator.LoadCommand {
