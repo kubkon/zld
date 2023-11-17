@@ -286,6 +286,7 @@ pub fn initOutputSection(self: Object, sect: macho.section_64, macho_file: *Mach
 
             macho.S_LITERAL_POINTERS,
             macho.S_ZEROFILL,
+            macho.S_GB_ZEROFILL,
             macho.S_THREAD_LOCAL_VARIABLES,
             macho.S_THREAD_LOCAL_VARIABLE_POINTERS,
             macho.S_THREAD_LOCAL_REGULAR,
@@ -322,6 +323,24 @@ pub fn initOutputSection(self: Object, sect: macho.section_64, macho_file: *Mach
         sectname,
         .{ .flags = flags },
     );
+}
+
+pub fn scanRelocs(self: Object, macho_file: *MachO) !void {
+    for (self.atoms.items) |atom_index| {
+        const atom = macho_file.getAtom(atom_index) orelse continue;
+        if (!atom.flags.alive) continue;
+        const sect = atom.getInputSection(macho_file);
+        switch (sect.type()) {
+            macho.S_ZEROFILL,
+            macho.S_GB_ZEROFILL,
+            macho.S_THREAD_LOCAL_ZEROFILL,
+            => continue,
+            else => {},
+        }
+        try atom.scanRelocs(macho_file);
+    }
+
+    // TODO scan __eh_frame relocs
 }
 
 fn getLoadCommand(self: Object, lc: macho.LC) ?LoadCommandIterator.LoadCommand {

@@ -209,7 +209,9 @@ pub fn flush(self: *MachO) !void {
     try self.initOutputSections();
     try self.resolveSyntheticSymbols();
 
-    self.base.reportWarningsAndErrorsAndExit();
+    // TODO do we claim unresolved symbols here like we do for ELF?
+
+    try self.scanRelocs();
 
     state_log.debug("{}", .{self.dumpState()});
 
@@ -1100,6 +1102,54 @@ fn resolveSyntheticSymbols(self: *MachO) !void {
     }
 
     internal.resolveSymbols(self);
+}
+
+fn scanRelocs(self: *MachO) !void {
+    for (self.objects.items) |index| {
+        try self.getFile(index).?.object.scanRelocs(self);
+    }
+
+    try self.reportUndefs();
+    self.base.reportWarningsAndErrorsAndExit();
+
+    for (self.symbols.items, 0..) |*symbol, i| {
+        const index = @as(Symbol.Index, @intCast(i));
+        _ = index;
+        if (symbol.flags.got) {
+            log.debug("'{s}' needs GOT", .{symbol.getName(self)});
+        }
+        if (symbol.flags.stubs) {
+            log.debug("'{s}' needs STUBS", .{symbol.getName(self)});
+        }
+    }
+}
+
+fn reportUndefs(self: *MachO) !void {
+    if (self.undefs.count() == 0) return;
+
+    const max_notes = 4;
+
+    var it = self.undefs.iterator();
+    while (it.next()) |entry| {
+        const undef_sym = self.getSymbol(entry.key_ptr.*);
+        const notes = entry.value_ptr.*;
+        const nnotes = @min(notes.items.len, max_notes) + @intFromBool(notes.items.len > max_notes);
+
+        const err = try self.base.addErrorWithNotes(nnotes);
+        try err.addMsg("undefined symbol: {s}", .{undef_sym.getName(self)});
+
+        var inote: usize = 0;
+        while (inote < nnotes) : (inote += 1) {
+            const atom = self.getAtom(notes.items[inote]).?;
+            const object = atom.getObject(self);
+            try err.addNote("referenced by {}:{s}", .{ object.fmtPath(), atom.getName(self) });
+        }
+
+        if (notes.items.len > max_notes) {
+            const remaining = notes.items.len - max_notes;
+            try err.addNote("referenced {d} more times", .{remaining});
+        }
+    }
 }
 
 pub inline fn getPageSize(self: MachO) u16 {

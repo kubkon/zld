@@ -54,6 +54,58 @@ pub fn getRelocs(self: Atom, macho_file: *MachO) []const macho.relocation_info {
     return object.relocations.items[self.relocs.pos..][0..self.relocs.len];
 }
 
+pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
+    const object = self.getObject(macho_file);
+    const relocs = self.getRelocs(macho_file);
+
+    for (relocs) |rel| {
+        if (rel.r_extern == 0) continue;
+        if (try self.reportUndefSymbol(rel, macho_file)) continue;
+
+        const sym_index = object.symbols.items[rel.r_symbolnum];
+        const symbol = macho_file.getSymbol(sym_index);
+
+        switch (@as(macho.reloc_type_x86_64, @enumFromInt(rel.r_type))) {
+            .X86_64_RELOC_BRANCH => {
+                if (symbol.flags.import) {
+                    symbol.flags.stubs = true;
+                }
+            },
+
+            .X86_64_RELOC_GOT_LOAD,
+            .X86_64_RELOC_GOT,
+            => {
+                symbol.flags.got = true;
+            },
+
+            .X86_64_RELOC_TLV => {
+                symbol.flags.tlv = true;
+            },
+
+            else => {},
+        }
+    }
+}
+
+fn reportUndefSymbol(self: Atom, rel: macho.relocation_info, macho_file: *MachO) !bool {
+    const object = self.getObject(macho_file);
+    const sym_index = object.symbols.items[rel.r_symbolnum];
+    const sym = macho_file.getSymbol(sym_index);
+    const s_rel_sym = object.symtab.items[rel.r_symbolnum];
+
+    const nlist = sym.getNlist(macho_file);
+    if (s_rel_sym.undf() and s_rel_sym.ext() and sym.nlist_idx > 0 and !sym.flags.import and nlist.undf()) {
+        const gpa = macho_file.base.allocator;
+        const gop = try macho_file.undefs.getOrPut(gpa, sym_index);
+        if (!gop.found_existing) {
+            gop.value_ptr.* = .{};
+        }
+        try gop.value_ptr.append(gpa, self.atom_index);
+    }
+
+    return false;
+}
+
 pub fn format(
     atom: Atom,
     comptime unused_fmt_string: []const u8,
