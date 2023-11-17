@@ -64,6 +64,10 @@ fn initSectionAtoms(self: *Object, macho_file: *MachO) !void {
                 if (attrs & macho.S_ATTR_DEBUG != 0 and macho_file.options.strip) continue;
             },
 
+            macho.S_COALESCED => {
+                if (mem.eql(u8, sect.sectName(), "__eh_frame")) continue; // TODO
+            },
+
             else => {},
         }
 
@@ -165,7 +169,7 @@ fn initSymbols(self: *Object, macho_file: *MachO) !void {
 
     self.first_global = if (self.getLoadCommand(.DYSYMTAB)) |lc| blk: {
         const cmd = lc.cast(macho.dysymtab_command).?;
-        break :blk cmd.nlocalsym;
+        break :blk cmd.ilocalsym + cmd.nlocalsym;
     } else try self.sortSymbols(gpa);
 
     try self.symbols.ensureUnusedCapacity(gpa, self.symtab.items.len);
