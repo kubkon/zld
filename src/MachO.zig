@@ -27,6 +27,9 @@ globals: std.AutoHashMapUnmanaged(u32, Symbol.Index) = .{},
 /// Key is symbol index.
 undefs: std.AutoHashMapUnmanaged(Symbol.Index, std.ArrayListUnmanaged(Atom.Index)) = .{},
 
+mh_execute_header_index: ?Symbol.Index = null,
+dso_handle_index: ?Symbol.Index = null,
+
 entry_index: ?Symbol.Index = null,
 
 string_intern: StringTable(.string_intern) = .{},
@@ -204,6 +207,7 @@ pub fn flush(self: *MachO) !void {
     // TODO dead strip atoms
 
     try self.initOutputSections();
+    try self.resolveSyntheticSymbols();
 
     self.base.reportWarningsAndErrorsAndExit();
 
@@ -1085,6 +1089,19 @@ fn initOutputSections(self: *MachO) !void {
     }
 }
 
+fn resolveSyntheticSymbols(self: *MachO) !void {
+    const internal_index = self.internal_object_index orelse return;
+    const internal = self.getFile(internal_index).?.internal;
+    self.mh_execute_header_index = try internal.addGlobal("__mh_execute_header", self);
+
+    if (self.getGlobalByName("__dso_handle")) |index| {
+        if (self.getSymbol(index).getFile(self) == null)
+            self.dso_handle_index = try internal.addGlobal("__dso_handle", self);
+    }
+
+    internal.resolveSymbols(self);
+}
+
 pub inline fn getPageSize(self: MachO) u16 {
     return switch (self.options.cpu_arch.?) {
         .aarch64 => 0x4000,
@@ -1231,7 +1248,7 @@ pub fn setSymbolExtra(self: *MachO, index: u32, extra: Symbol.Extra) void {
 
 const GetOrCreateGlobalResult = struct {
     found_existing: bool,
-    index: u32,
+    index: Symbol.Index,
 };
 
 pub fn getOrCreateGlobal(self: *MachO, off: u32) !GetOrCreateGlobalResult {
@@ -1249,7 +1266,7 @@ pub fn getOrCreateGlobal(self: *MachO, off: u32) !GetOrCreateGlobalResult {
     };
 }
 
-pub fn getGlobalByName(self: *MachO, name: []const u8) ?u32 {
+pub fn getGlobalByName(self: *MachO, name: []const u8) ?Symbol.Index {
     const off = self.string_intern.getOffset(name) orelse return null;
     return self.globals.get(off);
 }
@@ -1282,6 +1299,11 @@ fn fmtDumpState(
         if (!dylib.alive) try writer.writeAll(" : [*]");
         try writer.writeByte('\n');
         try writer.print("{}\n", .{dylib.fmtSymtab(self)});
+    }
+    if (self.internal_object_index) |index| {
+        const internal = self.getFile(index).?.internal;
+        try writer.print("internal({d}) : internal\n", .{index});
+        try writer.print("{}\n", .{internal.fmtSymtab(self)});
     }
     try writer.writeByte('\n');
     try writer.writeAll("Output sections\n");

@@ -296,6 +296,7 @@ pub fn resolveSymbols(self: *Dylib, macho_file: *MachO) void {
             global.atom = 0;
             global.nlist_idx = nlist_idx;
             global.file = self.index;
+            global.flags.weak = nlist.weakDef() or nlist.pext();
         }
     }
 }

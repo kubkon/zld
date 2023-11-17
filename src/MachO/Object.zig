@@ -237,7 +237,7 @@ pub fn resolveSymbols(self: *Object, macho_file: *MachO) void {
             global.atom = atom;
             global.nlist_idx = nlist_idx;
             global.file = self.index;
-            if (nlist.weakDef() or nlist.pext()) global.flags.weak = true;
+            global.flags.weak = nlist.weakDef() or nlist.pext();
         }
     }
 }
