@@ -343,6 +343,30 @@ pub fn scanRelocs(self: Object, macho_file: *MachO) !void {
     // TODO scan __eh_frame relocs
 }
 
+pub fn claimUnresolved(self: Object, macho_file: *MachO) void {
+    for (self.getGlobals(), 0..) |global_index, i| {
+        const nlist_idx = @as(Symbol.Index, @intCast(self.first_global + i));
+        const nlist = self.symtab.items[nlist_idx];
+        if (!nlist.undf()) continue;
+
+        const global = macho_file.getSymbol(global_index);
+        if (global.getFile(macho_file)) |_| {
+            if (!global.getNlist(macho_file).undf()) continue;
+        }
+
+        const is_import = switch (macho_file.options.undefined_treatment) {
+            .@"error", .warn, .suppress => false,
+            .dynamic_lookup => true,
+        };
+
+        global.value = 0;
+        global.atom = 0;
+        global.nlist_idx = nlist_idx;
+        global.file = self.index;
+        global.flags.import = is_import;
+    }
+}
+
 fn getLoadCommand(self: Object, lc: macho.LC) ?LoadCommandIterator.LoadCommand {
     var it = LoadCommandIterator{
         .ncmds = self.header.?.ncmds,

@@ -209,186 +209,12 @@ pub fn flush(self: *MachO) !void {
     try self.initOutputSections();
     try self.resolveSyntheticSymbols();
 
-    // TODO do we claim unresolved symbols here like we do for ELF?
-
+    self.claimUnresolved();
     try self.scanRelocs();
 
     state_log.debug("{}", .{self.dumpState()});
 
-    // try self.createDyldPrivateAtom();
-    // try self.createTentativeDefAtoms();
-    // try self.createStubHelperPreambleAtom();
-
-    // if (!self.options.dylib) {
-    //     const global = self.getEntryPoint();
-    //     if (self.getSymbol(global).undf()) {
-    //         // We do one additional check here in case the entry point was found in one of the dylibs.
-    //         // (I actually have no idea what this would imply but it is a possible outcome and so we
-    //         // support it.)
-    //         try Atom.addStub(self, global);
-    //     }
-    // }
-
-    // for (self.objects.items) |object| {
-    //     for (object.atoms.items) |atom_index| {
-    //         const atom = self.getAtom(atom_index);
-    //         const sym = self.getSymbol(atom.getSymbolWithLoc());
-    //         const header = self.sections.items(.header)[sym.n_sect - 1];
-    //         if (header.isZerofill()) continue;
-
-    //         const relocs = Atom.getAtomRelocs(self, atom_index);
-    //         try Atom.scanAtomRelocs(self, atom_index, relocs);
-    //     }
-    // }
-
-    // try eh_frame.scanRelocs(self);
-    // try UnwindInfo.scanRelocs(self);
-
-    // self.base.reportWarningsAndErrorsAndExit();
-
-    // try self.createDyldStubBinderGotAtom();
-
-    // try self.calcSectionSizes();
-
-    // var unwind_info = UnwindInfo{ .gpa = self.base.allocator };
-    // defer unwind_info.deinit();
-    // try unwind_info.collect(self);
-
-    // try eh_frame.calcSectionSize(self, &unwind_info);
-    // try unwind_info.calcSectionSize(self);
-
-    // try self.pruneAndSortSections();
-    // try self.createSegments();
-    // try self.allocateSegments();
-
-    // try self.allocateSpecialSymbols();
-
-    // if (build_options.enable_logging) {
-    //     self.logSymtab();
-    //     self.logSegments();
-    //     self.logSections();
-    //     self.logAtoms();
-    // }
-
-    // try self.writeAtoms();
-    // try eh_frame.write(self, &unwind_info);
-    // try unwind_info.write(self);
-    // try self.writeLinkeditSegmentData();
-
-    // // If the last section of __DATA segment is zerofill section, we need to ensure
-    // // that the free space between the end of the last non-zerofill section of __DATA
-    // // segment and the beginning of __LINKEDIT segment is zerofilled as the loader will
-    // // copy-paste this space into memory for quicker zerofill operation.
-    // if (self.getSegmentByName("__DATA")) |data_seg_id| blk: {
-    //     var physical_zerofill_start: ?u64 = null;
-    //     const section_indexes = self.getSectionIndexes(data_seg_id);
-    //     for (self.sections.items(.header)[section_indexes.start..section_indexes.end]) |header| {
-    //         if (header.isZerofill() and header.size > 0) break;
-    //         physical_zerofill_start = header.offset + header.size;
-    //     } else break :blk;
-    //     const start = physical_zerofill_start orelse break :blk;
-    //     const linkedit = self.getLinkeditSegmentPtr();
-    //     const size = linkedit.fileoff - start;
-    //     if (size > 0) {
-    //         log.debug("zeroing out zerofill area of length {x} at {x}", .{ size, start });
-    //         var padding = try self.base.allocator.alloc(u8, size);
-    //         defer self.base.allocator.free(padding);
-    //         @memset(padding, 0);
-    //         try self.base.file.pwriteAll(padding, start);
-    //     }
-    // }
-
-    // var codesig: ?CodeSignature = if (self.requiresCodeSig()) blk: {
-    //     // Preallocate space for the code signature.
-    //     // We need to do this at this stage so that we have the load commands with proper values
-    //     // written out to the file.
-    //     // The most important here is to have the correct vm and filesize of the __LINKEDIT segment
-    //     // where the code signature goes into.
-    //     var codesig = CodeSignature.init(self.getPageSize());
-    //     codesig.code_directory.ident = fs.path.basename(self.options.emit.sub_path);
-    //     if (self.options.entitlements) |path| {
-    //         try codesig.addEntitlements(gpa, path);
-    //     }
-    //     try self.writeCodeSignaturePadding(&codesig);
-    //     break :blk codesig;
-    // } else null;
-    // defer if (codesig) |*csig| csig.deinit(gpa);
-
-    // // Write load commands
-    // var lc_buffer = std.ArrayList(u8).init(arena);
-    // const lc_writer = lc_buffer.writer();
-
-    // try self.writeSegmentHeaders(lc_writer);
-    // try lc_writer.writeStruct(self.dyld_info_cmd);
-    // try lc_writer.writeStruct(self.function_starts_cmd);
-    // try lc_writer.writeStruct(self.data_in_code_cmd);
-    // try lc_writer.writeStruct(self.symtab_cmd);
-    // try lc_writer.writeStruct(self.dysymtab_cmd);
-    // try load_commands.writeDylinkerLC(lc_writer);
-
-    // if (!self.options.dylib) {
-    //     const seg_id = self.getSegmentByName("__TEXT").?;
-    //     const seg = self.segments.items[seg_id];
-    //     const global = self.getEntryPoint();
-    //     const sym = self.getSymbol(global);
-
-    //     const addr: u64 = if (sym.undf()) blk: {
-    //         // In this case, the symbol has been resolved in one of dylibs and so we point
-    //         // to the stub as its vmaddr value.
-    //         const stub_atom_index = self.getStubsAtomIndexForSymbol(global).?;
-    //         const stub_atom = self.getAtom(stub_atom_index);
-    //         const stub_sym = self.getSymbol(stub_atom.getSymbolWithLoc());
-    //         break :blk stub_sym.n_value;
-    //     } else sym.n_value;
-
-    //     try lc_writer.writeStruct(macho.entry_point_command{
-    //         .entryoff = @as(u32, @intCast(addr - seg.vmaddr)),
-    //         .stacksize = self.options.stack_size orelse 0,
-    //     });
-    // } else {
-    //     assert(self.options.dylib);
-    //     try load_commands.writeDylibIdLC(&self.options, lc_writer);
-    // }
-
-    // try load_commands.writeRpathLCs(self.base.allocator, &self.options, lc_writer);
-    // try lc_writer.writeStruct(macho.source_version_command{
-    //     .version = 0,
-    // });
-
-    // if (self.options.platform) |platform| {
-    //     if (platform.isBuildVersionCompatible()) {
-    //         try load_commands.writeBuildVersionLC(platform, self.options.sdk_version, lc_writer);
-    //     } else {
-    //         try load_commands.writeVersionMinLC(platform, self.options.sdk_version, lc_writer);
-    //     }
-    // }
-
-    // const uuid_cmd_offset = @sizeOf(macho.mach_header_64) + @as(u32, @intCast(lc_buffer.items.len));
-    // try lc_writer.writeStruct(self.uuid_cmd);
-
-    // try load_commands.writeLoadDylibLCs(self.dylibs.items, self.referenced_dylibs.keys(), lc_writer);
-
-    // if (self.requiresCodeSig()) {
-    //     try lc_writer.writeStruct(self.codesig_cmd);
-    // }
-
-    // const ncmds = load_commands.calcNumOfLCs(lc_buffer.items);
-    // try self.base.file.pwriteAll(lc_buffer.items, @sizeOf(macho.mach_header_64));
-    // try self.writeHeader(ncmds, @as(u32, @intCast(lc_buffer.items.len)));
-
-    // try self.writeUuid(uuid_cmd_offset, self.requiresCodeSig());
-
-    // if (codesig) |*csig| {
-    //     try self.writeCodeSignature(csig); // code signing always comes last
-
-    //     if (comptime builtin.target.isDarwin()) {
-    //         const dir = self.options.emit.directory;
-    //         const path = self.options.emit.sub_path;
-    //         try dir.copyFile(path, dir, path, .{});
-    //     }
-    // }
-
-    // self.base.reportWarningsAndErrorsAndExit();
+    self.base.reportWarningsAndErrorsAndExit();
 }
 
 fn resolveSearchDir(
@@ -1104,6 +930,12 @@ fn resolveSyntheticSymbols(self: *MachO) !void {
     internal.resolveSymbols(self);
 }
 
+fn claimUnresolved(self: *MachO) void {
+    for (self.objects.items) |index| {
+        self.getFile(index).?.object.claimUnresolved(self);
+    }
+}
+
 fn scanRelocs(self: *MachO) !void {
     for (self.objects.items) |index| {
         try self.getFile(index).?.object.scanRelocs(self);
@@ -1126,6 +958,14 @@ fn scanRelocs(self: *MachO) !void {
 
 fn reportUndefs(self: *MachO) !void {
     if (self.undefs.count() == 0) return;
+    if (self.options.undefined_treatment == .suppress) return;
+
+    const addFn = switch (self.options.undefined_treatment) {
+        .dynamic_lookup => unreachable, // all undefs are treated as load-time bound symbols
+        .suppress => unreachable, // handled above
+        .@"error" => &Zld.addErrorWithNotes,
+        .warn => &Zld.addWarningWithNotes,
+    };
 
     const max_notes = 4;
 
@@ -1135,11 +975,11 @@ fn reportUndefs(self: *MachO) !void {
         const notes = entry.value_ptr.*;
         const nnotes = @min(notes.items.len, max_notes) + @intFromBool(notes.items.len > max_notes);
 
-        const err = try self.base.addErrorWithNotes(nnotes);
+        const err = try addFn(&self.base, nnotes);
         try err.addMsg("undefined symbol: {s}", .{undef_sym.getName(self)});
 
         var inote: usize = 0;
-        while (inote < nnotes) : (inote += 1) {
+        while (inote < @min(notes.items.len, max_notes)) : (inote += 1) {
             const atom = self.getAtom(notes.items[inote]).?;
             const object = atom.getObject(self);
             try err.addNote("referenced by {}:{s}", .{ object.fmtPath(), atom.getName(self) });

@@ -2001,7 +2001,7 @@ fn reportUndefs(self: *Elf) !void {
         try err.addMsg("undefined symbol: {s}", .{undef_sym.getName(self)});
 
         var inote: usize = 0;
-        while (inote < nnotes) : (inote += 1) {
+        while (inote < @min(notes.items.len, max_notes)) : (inote += 1) {
             const atom = self.getAtom(notes.items[inote]).?;
             const object = atom.getObject(self);
             try err.addNote("referenced by {}:{s}", .{ object.fmtPath(), atom.getName(self) });

@@ -102,7 +102,7 @@ headerpad: ?u32 = null,
 headerpad_max_install_names: bool = false,
 dead_strip: bool = false,
 dead_strip_dylibs: bool = false,
-allow_undef: bool = false,
+undefined_treatment: UndefinedTreatment = .@"error",
 no_deduplicate: bool = false,
 
 pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options {
@@ -196,11 +196,13 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             opts.entry = name;
         } else if (p.arg1("undefined")) |treatment| {
             if (mem.eql(u8, treatment, "error")) {
-                opts.allow_undef = false;
-            } else if (mem.eql(u8, treatment, "warning") or mem.eql(u8, treatment, "suppress")) {
-                ctx.fatal("TODO unimplemented -undefined {s} option", .{treatment});
+                opts.undefined_treatment = .@"error";
+            } else if (mem.eql(u8, treatment, "warning")) {
+                opts.undefined_treatment = .warn;
+            } else if (mem.eql(u8, treatment, "suppress")) {
+                opts.undefined_treatment = .suppress;
             } else if (mem.eql(u8, treatment, "dynamic_lookup")) {
-                opts.allow_undef = true;
+                opts.undefined_treatment = .dynamic_lookup;
             } else {
                 ctx.fatal("Unknown option -undefined {s}", .{treatment});
             }
@@ -356,6 +358,13 @@ pub const Platform = struct {
         }
         return false;
     }
+};
+
+const UndefinedTreatment = enum {
+    @"error",
+    warn,
+    suppress,
+    dynamic_lookup,
 };
 
 pub const Version = struct {
