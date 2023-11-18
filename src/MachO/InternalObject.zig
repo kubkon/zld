@@ -10,17 +10,35 @@ pub fn deinit(self: *InternalObject, allocator: Allocator) void {
     self.symbols.deinit(allocator);
 }
 
-pub fn addGlobal(self: *InternalObject, name: [:0]const u8, macho_file: *MachO) !Symbol.Index {
+fn addNlist(self: *InternalObject, name: [:0]const u8, macho_file: *MachO) !Symbol.Index {
     const gpa = macho_file.base.allocator;
+    const index = @as(Symbol.Index, @intCast(self.symtab.items.len));
     try self.symtab.ensureUnusedCapacity(gpa, 1);
-    try self.symbols.ensureUnusedCapacity(gpa, 1);
     self.symtab.appendAssumeCapacity(.{
         .n_strx = try self.insertString(gpa, name),
-        .n_type = macho.N_EXT | macho.N_SECT,
+        .n_type = macho.N_EXT,
         .n_sect = 0,
         .n_desc = 0,
         .n_value = 0,
     });
+    return index;
+}
+
+pub fn addDefined(self: *InternalObject, name: [:0]const u8, macho_file: *MachO) !Symbol.Index {
+    const gpa = macho_file.base.allocator;
+    const nlist_idx = try self.addNlist(name, macho_file);
+    self.symtab.items[nlist_idx].n_type |= macho.N_SECT;
+    try self.symbols.ensureUnusedCapacity(gpa, 1);
+    const off = try macho_file.string_intern.insert(gpa, name);
+    const gop = try macho_file.getOrCreateGlobal(off);
+    self.symbols.addOneAssumeCapacity().* = gop.index;
+    return gop.index;
+}
+
+pub fn addUndefined(self: *InternalObject, name: [:0]const u8, macho_file: *MachO) !Symbol.Index {
+    const gpa = macho_file.base.allocator;
+    _ = try self.addNlist(name, macho_file);
+    try self.symbols.ensureUnusedCapacity(gpa, 1);
     const off = try macho_file.string_intern.insert(gpa, name);
     const gop = try macho_file.getOrCreateGlobal(off);
     self.symbols.addOneAssumeCapacity().* = gop.index;

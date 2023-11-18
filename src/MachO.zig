@@ -30,6 +30,7 @@ undefs: std.AutoHashMapUnmanaged(Symbol.Index, std.ArrayListUnmanaged(Atom.Index
 got_sect_index: ?u8 = null,
 
 mh_execute_header_index: ?Symbol.Index = null,
+dyld_stub_binder_index: ?Symbol.Index = null,
 dso_handle_index: ?Symbol.Index = null,
 
 entry_index: ?Symbol.Index = null,
@@ -202,7 +203,7 @@ pub fn flush(self: *MachO) !void {
     // TODO kill __eh_frame atoms
     // TODO convert tentative definitions
 
-    try self.markImportsAndExports();
+    self.markImportsAndExports();
 
     self.entry_index = blk: {
         if (self.options.dylib) break :blk null;
@@ -887,7 +888,7 @@ fn markLive(self: *MachO) void {
     }
 }
 
-fn markImportsAndExports(self: *MachO) !void {
+fn markImportsAndExports(self: *MachO) void {
     if (!self.options.dylib)
         for (self.dylibs.items) |index| {
             for (self.getFile(index).?.getGlobals()) |global_index| {
@@ -898,20 +899,24 @@ fn markImportsAndExports(self: *MachO) !void {
         };
 
     for (self.objects.items) |index| {
-        for (self.getFile(index).?.getGlobals()) |global_index| {
-            const global = self.getSymbol(global_index);
-            const file = global.getFile(self) orelse continue;
-            if (global.getNlist(self).pext()) continue;
-            if (file == .dylib and !global.isAbs(self)) {
-                global.flags.import = true;
-                continue;
-            }
-            if (file.getIndex() == index) {
-                global.flags.@"export" = true;
+        self.markImportsAndExportsInFile(index);
+    }
+}
 
-                if (self.options.dylib) {
-                    global.flags.import = true;
-                }
+fn markImportsAndExportsInFile(self: *MachO, index: File.Index) void {
+    for (self.getFile(index).?.getGlobals()) |global_index| {
+        const global = self.getSymbol(global_index);
+        const file = global.getFile(self) orelse continue;
+        if (global.getNlist(self).pext()) continue;
+        if (file == .dylib and !global.isAbs(self)) {
+            global.flags.import = true;
+            continue;
+        }
+        if (file.getIndex() == index) {
+            global.flags.@"export" = true;
+
+            if (self.options.dylib) {
+                global.flags.import = true;
             }
         }
     }
@@ -931,14 +936,16 @@ fn initOutputSections(self: *MachO) !void {
 fn resolveSyntheticSymbols(self: *MachO) !void {
     const internal_index = self.internal_object_index orelse return;
     const internal = self.getFile(internal_index).?.internal;
-    self.mh_execute_header_index = try internal.addGlobal("__mh_execute_header", self);
+    self.mh_execute_header_index = try internal.addDefined("__mh_execute_header", self);
+    self.dyld_stub_binder_index = try internal.addUndefined("dyld_stub_binder", self);
 
     if (self.getGlobalByName("__dso_handle")) |index| {
         if (self.getSymbol(index).getFile(self) == null)
-            self.dso_handle_index = try internal.addGlobal("__dso_handle", self);
+            self.dso_handle_index = try internal.addDefined("__dso_handle", self);
     }
 
     internal.resolveSymbols(self);
+    self.markImportsAndExportsInFile(internal_index);
 }
 
 fn claimUnresolved(self: *MachO) void {
