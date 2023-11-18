@@ -223,6 +223,7 @@ pub fn flush(self: *MachO) !void {
     try self.scanRelocs();
 
     try self.initSyntheticSections();
+    try self.sortSections();
 
     state_log.debug("{}", .{self.dumpState()});
 
@@ -1015,6 +1016,95 @@ fn initSyntheticSections(self: *MachO) !void {
         self.got_sect_index = try self.addSection("__DATA_CONST", "__got", .{
             .flags = macho.S_NON_LAZY_SYMBOL_POINTERS,
         });
+    }
+}
+
+fn getSegmentRank(segname: []const u8) u4 {
+    if (mem.eql(u8, segname, "__PAGEZERO")) return 0x0;
+    if (mem.eql(u8, segname, "__TEXT")) return 0x1;
+    if (mem.eql(u8, segname, "__DATA_CONST")) return 0x2;
+    if (mem.eql(u8, segname, "__DATA")) return 0x3;
+    if (mem.eql(u8, segname, "__LINKEDIT")) return 0x5;
+    return 0x4;
+}
+
+fn getSectionRank(self: *MachO, sect_index: u8) u8 {
+    const header = self.sections.items(.header)[sect_index];
+    const segment_rank = getSegmentRank(header.segName());
+    const section_rank: u4 = blk: {
+        if (header.isCode()) {
+            if (mem.eql(u8, "__text", header.sectName())) break :blk 0x0;
+            if (header.type() == macho.S_SYMBOL_STUBS) break :blk 0x1;
+            break :blk 0x2;
+        }
+        switch (header.type()) {
+            macho.S_NON_LAZY_SYMBOL_POINTERS,
+            macho.S_LAZY_SYMBOL_POINTERS,
+            => break :blk 0x0,
+
+            macho.S_MOD_INIT_FUNC_POINTERS => break :blk 0x1,
+            macho.S_MOD_TERM_FUNC_POINTERS => break :blk 0x2,
+            macho.S_ZEROFILL => break :blk 0xf,
+            macho.S_THREAD_LOCAL_REGULAR => break :blk 0xd,
+            macho.S_THREAD_LOCAL_ZEROFILL => break :blk 0xe,
+
+            else => {
+                if (mem.eql(u8, "__unwind_info", header.sectName())) break :blk 0xe;
+                if (mem.eql(u8, "__eh_frame", header.sectName())) break :blk 0xf;
+                break :blk 0x3;
+            },
+        }
+    };
+    return (@as(u8, @intCast(segment_rank)) << 4) + section_rank;
+}
+
+fn sortSections(self: *MachO) !void {
+    const Entry = struct {
+        index: u8,
+
+        pub fn lessThan(macho_file: *MachO, lhs: @This(), rhs: @This()) bool {
+            return macho_file.getSectionRank(lhs.index) < macho_file.getSectionRank(rhs.index);
+        }
+    };
+
+    const gpa = self.base.allocator;
+
+    var entries = try std.ArrayList(Entry).initCapacity(gpa, self.sections.slice().len);
+    defer entries.deinit();
+    for (0..self.sections.slice().len) |index| {
+        entries.appendAssumeCapacity(.{ .index = @intCast(index) });
+    }
+
+    mem.sort(Entry, entries.items, self, Entry.lessThan);
+
+    const backlinks = try gpa.alloc(u8, entries.items.len);
+    defer gpa.free(backlinks);
+    for (entries.items, 0..) |entry, i| {
+        backlinks[entry.index] = @intCast(i);
+    }
+
+    var slice = self.sections.toOwnedSlice();
+    defer slice.deinit(gpa);
+
+    try self.sections.ensureTotalCapacity(gpa, slice.len);
+    for (entries.items) |sorted| {
+        self.sections.appendAssumeCapacity(slice.get(sorted.index));
+    }
+
+    for (self.objects.items) |index| {
+        for (self.getFile(index).?.object.atoms.items) |atom_index| {
+            const atom = self.getAtom(atom_index) orelse continue;
+            if (!atom.flags.alive) continue;
+            atom.out_n_sect = backlinks[atom.out_n_sect];
+        }
+    }
+
+    for (&[_]*?u8{
+        &self.got_sect_index,
+    }) |maybe_index| {
+        if (maybe_index.*) |*index| {
+            index.* = backlinks[index.*];
+        }
     }
 }
 
