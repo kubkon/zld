@@ -27,12 +27,16 @@ globals: std.AutoHashMapUnmanaged(u32, Symbol.Index) = .{},
 /// Key is symbol index.
 undefs: std.AutoHashMapUnmanaged(Symbol.Index, std.ArrayListUnmanaged(Atom.Index)) = .{},
 
+got_sect_index: ?u8 = null,
+
 mh_execute_header_index: ?Symbol.Index = null,
 dso_handle_index: ?Symbol.Index = null,
 
 entry_index: ?Symbol.Index = null,
 
 string_intern: StringTable(.string_intern) = .{},
+
+got: GotSection = .{},
 
 atoms: std.ArrayListUnmanaged(Atom) = .{},
 
@@ -91,6 +95,8 @@ pub fn deinit(self: *MachO) void {
     self.sections.deinit(gpa);
     self.atoms.deinit(gpa);
 
+    self.got.deinit(gpa);
+
     self.arena.promote(gpa).deinit();
 }
 
@@ -106,6 +112,9 @@ pub fn flush(self: *MachO) !void {
     try self.string_intern.buffer.append(gpa, 0);
     // Append null file
     try self.files.append(gpa, .null);
+    // Append null symbols
+    try self.symbols.append(gpa, .{});
+    try self.symbols_extra.append(gpa, 0);
 
     var arena_allocator = self.arena.promote(gpa);
     defer self.arena = arena_allocator.state;
@@ -211,6 +220,8 @@ pub fn flush(self: *MachO) !void {
 
     self.claimUnresolved();
     try self.scanRelocs();
+
+    try self.initSyntheticSections();
 
     state_log.debug("{}", .{self.dumpState()});
 
@@ -946,9 +957,9 @@ fn scanRelocs(self: *MachO) !void {
 
     for (self.symbols.items, 0..) |*symbol, i| {
         const index = @as(Symbol.Index, @intCast(i));
-        _ = index;
         if (symbol.flags.got) {
             log.debug("'{s}' needs GOT", .{symbol.getName(self)});
+            try self.got.addSymbol(index, self);
         }
         if (symbol.flags.stubs) {
             log.debug("'{s}' needs STUBS", .{symbol.getName(self)});
@@ -989,6 +1000,14 @@ fn reportUndefs(self: *MachO) !void {
             const remaining = notes.items.len - max_notes;
             try err.addNote("referenced {d} more times", .{remaining});
         }
+    }
+}
+
+fn initSyntheticSections(self: *MachO) !void {
+    if (self.got.symbols.items.len > 0) {
+        self.got_sect_index = try self.addSection("__DATA_CONST", "__got", .{
+            .flags = macho.S_NON_LAZY_SYMBOL_POINTERS,
+        });
     }
 }
 
@@ -1195,6 +1214,7 @@ fn fmtDumpState(
         try writer.print("internal({d}) : internal\n", .{index});
         try writer.print("{}\n", .{internal.fmtSymtab(self)});
     }
+    try writer.print("__got\n{}\n", .{self.got.fmt(self)});
     try writer.writeByte('\n');
     try writer.writeAll("Output sections\n");
     try writer.print("{}\n", .{self.fmtSections()});
@@ -1338,6 +1358,7 @@ const mem = std.mem;
 const meta = std.meta;
 const thunks = @import("MachO/thunks.zig");
 const trace = @import("tracy.zig").trace;
+const synthetic = @import("MachO/synthetic.zig");
 const state_log = std.log.scoped(.state);
 const std = @import("std");
 
@@ -1350,6 +1371,7 @@ const CodeSignature = @import("MachO/CodeSignature.zig");
 const Dylib = @import("MachO/Dylib.zig");
 const DwarfInfo = @import("MachO/DwarfInfo.zig");
 const File = @import("MachO/file.zig").File;
+const GotSection = synthetic.GotSection;
 const MachO = @This();
 const Md5 = std.crypto.hash.Md5;
 const Object = @import("MachO/Object.zig");

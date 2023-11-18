@@ -17,7 +17,7 @@ alignment: u32 = 0,
 n_sect: u8 = 0,
 
 /// Index of the output section.
-out_n_sect: u16 = 0,
+out_n_sect: u8 = 0,
 
 /// Offset within the parent section pointed to by n_sect.
 /// off + size <= parent section size.
