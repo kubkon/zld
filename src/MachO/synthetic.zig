@@ -25,6 +25,10 @@ pub const GotSection = struct {
         return header.addr + index * @sizeOf(u64);
     }
 
+    pub fn size(got: GotSection) usize {
+        return got.symbols.items.len * @sizeOf(u64);
+    }
+
     const FormatCtx = struct {
         got: GotSection,
         macho_file: *MachO,
@@ -79,6 +83,11 @@ pub const StubsSection = struct {
         return header.addr + index * header.reserved2;
     }
 
+    pub fn size(stubs: StubsSection, macho_file: *MachO) usize {
+        const header = macho_file.sections.items(.header)[macho_file.stubs_sect_index.?];
+        return stubs.symbols.items.len * header.reserved2;
+    }
+
     const FormatCtx = struct {
         stubs: StubsSection,
         macho_file: *MachO,
@@ -109,7 +118,33 @@ pub const StubsSection = struct {
     }
 };
 
-pub const StubsHelperSection = struct {};
+pub const StubsHelperSection = struct {
+    inline fn preambleSize(cpu_arch: std.Target.Cpu.Arch) usize {
+        return switch (cpu_arch) {
+            .x86_64 => 15,
+            .aarch64 => 6 * @sizeOf(u32),
+            else => 0,
+        };
+    }
+
+    inline fn entrySize(cpu_arch: std.Target.Cpu.Arch) usize {
+        return switch (cpu_arch) {
+            .x86_64 => 10,
+            .aarch64 => 3 * @sizeOf(u32),
+            else => 0,
+        };
+    }
+
+    pub fn size(stubs_helper: StubsHelperSection, macho_file: *MachO) usize {
+        _ = stubs_helper;
+        const cpu_arch = macho_file.options.cpu_arch.?;
+        var s: usize = preambleSize(cpu_arch);
+        for (macho_file.stubs.symbols.items) |_| {
+            s += entrySize(cpu_arch);
+        }
+        return s;
+    }
+};
 
 pub const LaSymbolPtrSection = struct {};
 

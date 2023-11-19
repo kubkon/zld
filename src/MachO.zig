@@ -1190,6 +1190,8 @@ fn calcSectionSizes(self: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
+    const cpu_arch = self.options.cpu_arch.?;
+
     const slice = self.sections.slice();
     for (slice.items(.header), slice.items(.atoms)) |*header, atoms| {
         if (atoms.items.len == 0) continue;
@@ -1220,6 +1222,32 @@ fn calcSectionSizes(self: *MachO) !void {
     //         try thunks.createThunks(self, @as(u8, @intCast(sect_id)));
     //     }
     // }
+
+    if (self.got_sect_index) |idx| {
+        const header = &self.sections.items(.header)[idx];
+        header.size = self.got.size();
+        header.@"align" = @alignOf(u64);
+    }
+
+    if (self.stubs_sect_index) |idx| {
+        const header = &self.sections.items(.header)[idx];
+        header.size = self.stubs.size(self);
+        header.@"align" = switch (cpu_arch) {
+            .x86_64 => 0,
+            .aarch64 => 2,
+            else => 0,
+        };
+    }
+
+    if (self.stubs_helper_sect_index) |idx| {
+        const header = &self.sections.items(.header)[idx];
+        header.size = self.stubs_helper.size(self);
+        header.@"align" = switch (cpu_arch) {
+            .x86_64 => 0,
+            .aarch64 => 2,
+            else => 0,
+        };
+    }
 }
 
 fn initSegments(self: *MachO) !void {
