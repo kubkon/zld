@@ -22,7 +22,7 @@ pub const File = union(enum) {
         _ = unused_fmt_string;
         _ = options;
         switch (file) {
-            .internal => unreachable,
+            .internal => try writer.writeAll(""),
             .object => |x| try writer.print("{}", .{x.fmtPath()}),
             .dylib => |x| try writer.writeAll(x.path),
         }
@@ -81,7 +81,7 @@ pub const File = union(enum) {
 
     pub fn getLocals(file: File) []const Symbol.Index {
         return switch (file) {
-            .object => |x| x.getLocals(),
+            .internal, .object => |x| x.getLocals(),
             inline else => &[0]Symbol.Index{},
         };
     }

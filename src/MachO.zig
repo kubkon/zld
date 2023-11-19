@@ -234,6 +234,7 @@ pub fn flush(self: *MachO) !void {
 
     try self.initSyntheticSections();
     try self.sortSections();
+    try self.addAtomsToSections();
 
     state_log.debug("{}", .{self.dumpState()});
 
@@ -939,35 +940,40 @@ fn initOutputSections(self: *MachO) !void {
         for (object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index) orelse continue;
             if (!atom.flags.alive) continue;
-            atom.out_n_sect = try object.initOutputSection(atom.getInputSection(self), self);
+            atom.out_n_sect = try Atom.initOutputSection(atom.getInputSection(self), self);
+        }
+    }
+    if (self.getInternalObject()) |internal| {
+        for (internal.atoms.items) |atom_index| {
+            const atom = self.getAtom(atom_index) orelse continue;
+            if (!atom.flags.alive) continue;
+            atom.out_n_sect = try Atom.initOutputSection(atom.getInputSection(self), self);
         }
     }
 }
 
 fn resolveSyntheticSymbols(self: *MachO) !void {
-    const internal_index = self.internal_object_index orelse return;
-    const internal = self.getFile(internal_index).?.internal;
-    self.mh_execute_header_index = try internal.addDefined("__mh_execute_header", self);
-    self.dyld_stub_binder_index = try internal.addUndefined("dyld_stub_binder", self);
-
-    if (self.getGlobalByName("__dso_handle")) |index| {
-        if (self.getSymbol(index).getFile(self) == null)
-            self.dso_handle_index = try internal.addDefined("__dso_handle", self);
-    }
-
+    const internal = self.getInternalObject() orelse return;
+    try internal.init(self);
     internal.resolveSymbols(self);
-    self.markImportsAndExportsInFile(internal_index);
+    self.markImportsAndExportsInFile(internal.index);
 }
 
 fn claimUnresolved(self: *MachO) void {
     for (self.objects.items) |index| {
         self.getFile(index).?.object.claimUnresolved(self);
     }
+    if (self.getInternalObject()) |internal| {
+        internal.claimUnresolved(self);
+    }
 }
 
 fn scanRelocs(self: *MachO) !void {
     for (self.objects.items) |index| {
         try self.getFile(index).?.object.scanRelocs(self);
+    }
+    if (self.getInternalObject()) |internal| {
+        try internal.scanRelocs(self);
     }
 
     try self.reportUndefs();
@@ -1016,8 +1022,8 @@ fn reportUndefs(self: *MachO) !void {
         var inote: usize = 0;
         while (inote < @min(notes.items.len, max_notes)) : (inote += 1) {
             const atom = self.getAtom(notes.items[inote]).?;
-            const object = atom.getObject(self);
-            try err.addNote("referenced by {}:{s}", .{ object.fmtPath(), atom.getName(self) });
+            const file = atom.getFile(self);
+            try err.addNote("referenced by {}:{s}", .{ file.fmtPath(), atom.getName(self) });
         }
 
         if (notes.items.len > max_notes) {
@@ -1152,6 +1158,25 @@ fn sortSections(self: *MachO) !void {
     }
 }
 
+pub fn addAtomsToSections(self: *MachO) !void {
+    for (self.objects.items) |index| {
+        for (self.getFile(index).?.object.atoms.items) |atom_index| {
+            const atom = self.getAtom(atom_index) orelse continue;
+            if (!atom.flags.alive) continue;
+            const atoms = &self.sections.items(.atoms)[atom.out_n_sect];
+            try atoms.append(self.base.allocator, atom_index);
+        }
+    }
+    if (self.getInternalObject()) |internal| {
+        for (internal.atoms.items) |atom_index| {
+            const atom = self.getAtom(atom_index) orelse continue;
+            if (!atom.flags.alive) continue;
+            const atoms = &self.sections.items(.atoms)[atom.out_n_sect];
+            try atoms.append(self.base.allocator, atom_index);
+        }
+    }
+}
+
 pub inline fn getPageSize(self: MachO) u16 {
     return switch (self.options.cpu_arch.?) {
         .aarch64 => 0x4000,
@@ -1203,7 +1228,7 @@ pub fn addSection(
     return index;
 }
 
-fn makeStaticString(bytes: []const u8) [16]u8 {
+pub fn makeStaticString(bytes: []const u8) [16]u8 {
     var buf = [_]u8{0} ** 16;
     assert(bytes.len <= buf.len);
     mem.copy(u8, &buf, bytes);
@@ -1225,6 +1250,11 @@ pub fn getFile(self: *MachO, index: File.Index) ?File {
         .object => .{ .object = &self.files.items(.data)[index].object },
         .dylib => .{ .dylib = &self.files.items(.data)[index].dylib },
     };
+}
+
+pub fn getInternalObject(self: *MachO) ?*InternalObject {
+    const index = self.internal_object_index orelse return null;
+    return self.getFile(index).?.internal;
 }
 
 pub fn addAtom(self: *MachO) !Atom.Index {
@@ -1350,9 +1380,8 @@ fn fmtDumpState(
         try writer.writeByte('\n');
         try writer.print("{}\n", .{dylib.fmtSymtab(self)});
     }
-    if (self.internal_object_index) |index| {
-        const internal = self.getFile(index).?.internal;
-        try writer.print("internal({d}) : internal\n", .{index});
+    if (self.getInternalObject()) |internal| {
+        try writer.print("internal({d}) : internal\n", .{internal.index});
         try writer.print("{}\n", .{internal.fmtSymtab(self)});
     }
     try writer.print("stubs\n{}\n", .{self.stubs.fmt(self)});
@@ -1515,6 +1544,7 @@ const Dylib = @import("MachO/Dylib.zig");
 const DwarfInfo = @import("MachO/DwarfInfo.zig");
 const File = @import("MachO/file.zig").File;
 const GotSection = synthetic.GotSection;
+const InternalObject = @import("MachO/InternalObject.zig");
 const MachO = @This();
 const Md5 = std.crypto.hash.Md5;
 const Object = @import("MachO/Object.zig");
