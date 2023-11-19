@@ -28,6 +28,9 @@ globals: std.AutoHashMapUnmanaged(u32, Symbol.Index) = .{},
 undefs: std.AutoHashMapUnmanaged(Symbol.Index, std.ArrayListUnmanaged(Atom.Index)) = .{},
 
 got_sect_index: ?u8 = null,
+stubs_sect_index: ?u8 = null,
+stubs_helper_sect_index: ?u8 = null,
+tlv_sect_index: ?u8 = null,
 
 mh_execute_header_index: ?Symbol.Index = null,
 dyld_stub_binder_index: ?Symbol.Index = null,
@@ -38,6 +41,8 @@ entry_index: ?Symbol.Index = null,
 string_intern: StringTable(.string_intern) = .{},
 
 got: GotSection = .{},
+stubs: StubsSection = .{},
+tlv: TlvSection = .{},
 
 atoms: std.ArrayListUnmanaged(Atom) = .{},
 
@@ -97,6 +102,8 @@ pub fn deinit(self: *MachO) void {
     self.atoms.deinit(gpa);
 
     self.got.deinit(gpa);
+    self.stubs.deinit(gpa);
+    self.tlv.deinit(gpa);
 
     self.arena.promote(gpa).deinit();
 }
@@ -971,6 +978,12 @@ fn scanRelocs(self: *MachO) !void {
         }
         if (symbol.flags.stubs) {
             log.debug("'{s}' needs STUBS", .{symbol.getName(self)});
+            try self.stubs.addSymbol(index, self);
+        }
+        if (symbol.flags.tlv) {
+            assert(!symbol.flags.import); // TODO
+            log.debug("'{s}' needs TLV", .{symbol.getName(self)});
+            try self.tlv.addSymbol(index, self);
         }
     }
 }
@@ -1012,9 +1025,30 @@ fn reportUndefs(self: *MachO) !void {
 }
 
 fn initSyntheticSections(self: *MachO) !void {
+    const cpu_arch = self.options.cpu_arch.?;
+
     if (self.got.symbols.items.len > 0) {
         self.got_sect_index = try self.addSection("__DATA_CONST", "__got", .{
             .flags = macho.S_NON_LAZY_SYMBOL_POINTERS,
+        });
+    }
+    if (self.stubs.symbols.items.len > 0) {
+        self.stubs_sect_index = try self.addSection("__TEXT", "__stubs", .{
+            .flags = macho.S_SYMBOL_STUBS |
+                macho.S_ATTR_PURE_INSTRUCTIONS | macho.S_ATTR_SOME_INSTRUCTIONS,
+            .reserved2 = switch (cpu_arch) {
+                .x86_64 => 6,
+                .aarch64 => 3 * @sizeOf(u32),
+                else => 0,
+            },
+        });
+        self.stubs_helper_sect_index = try self.addSection("__TEXT", "__stub_helper", .{
+            .flags = macho.S_ATTR_PURE_INSTRUCTIONS | macho.S_ATTR_SOME_INSTRUCTIONS,
+        });
+    }
+    if (self.tlv.symbols.items.len > 0) {
+        self.tlv_sect_index = try self.addSection("__DATA", "__thread_vars", .{
+            .flags = macho.S_THREAD_LOCAL_VARIABLES,
         });
     }
 }
@@ -1311,7 +1345,9 @@ fn fmtDumpState(
         try writer.print("internal({d}) : internal\n", .{index});
         try writer.print("{}\n", .{internal.fmtSymtab(self)});
     }
-    try writer.print("__got\n{}\n", .{self.got.fmt(self)});
+    try writer.print("stubs\n{}\n", .{self.stubs.fmt(self)});
+    try writer.print("got\n{}\n", .{self.got.fmt(self)});
+    try writer.print("tlv\n{}\n", .{self.tlv.fmt(self)});
     try writer.writeByte('\n');
     try writer.writeAll("Output sections\n");
     try writer.print("{}\n", .{self.fmtSections()});
@@ -1478,7 +1514,9 @@ const LibStub = @import("tapi.zig").LibStub;
 const Rebase = @import("MachO/dyld_info/Rebase.zig");
 const Symbol = @import("MachO/Symbol.zig");
 const StringTable = @import("strtab.zig").StringTable;
+const StubsSection = synthetic.StubsSection;
 const ThreadPool = std.Thread.Pool;
+const TlvSection = synthetic.TlvSection;
 const Trie = @import("MachO/Trie.zig");
 const UnwindInfo = @import("MachO/UnwindInfo.zig");
 const Zld = @import("Zld.zig");

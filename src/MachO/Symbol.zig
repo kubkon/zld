@@ -76,6 +76,18 @@ pub fn getGotAddress(symbol: Symbol, macho_file: *MachO) u64 {
     return macho_file.got.getAddress(extra.got, macho_file);
 }
 
+pub fn getStubsAddress(symbol: Symbol, macho_file: *MachO) u64 {
+    if (!symbol.flags.stubs) return 0;
+    const extra = symbol.getExtra(macho_file).?;
+    return macho_file.stubs.getAddress(extra.stubs, macho_file);
+}
+
+pub fn getTlvAddress(symbol: Symbol, macho_file: *MachO) u64 {
+    if (!symbol.flags.tlv) return 0;
+    const extra = symbol.getExtra(macho_file).?;
+    return macho_file.tlv.getAddress(extra.tlv, macho_file);
+}
+
 // pub fn getOutputSymtabIndex(symbol: Symbol, elf_file: *Elf) ?u32 {
 //     if (!symbol.flags.output_symtab) return null;
 //     const file = symbol.getFile(elf_file).?;
@@ -94,8 +106,24 @@ pub fn getGotAddress(symbol: Symbol, macho_file: *MachO) u64 {
 //     } else try symbol.addExtra(.{ .symtab = index }, elf_file);
 // }
 
-pub fn addExtra(symbol: *Symbol, extra: Extra, macho_file: *MachO) !void {
-    symbol.extra = try macho_file.addSymbolExtra(extra);
+const AddExtraOpts = struct {
+    got: ?u32 = null,
+    stubs: ?u32 = null,
+    tlv: ?u32 = null,
+    symtab: ?u32 = null,
+};
+
+pub fn addExtra(symbol: *Symbol, opts: AddExtraOpts, macho_file: *MachO) !void {
+    if (symbol.getExtra(macho_file) == null) {
+        symbol.extra = try macho_file.addSymbolExtra(.{});
+    }
+    var extra = symbol.getExtra(macho_file).?;
+    inline for (@typeInfo(@TypeOf(opts)).Struct.fields) |field| {
+        if (@field(opts, field.name)) |x| {
+            @field(extra, field.name) = x;
+        }
+    }
+    symbol.setExtra(extra, macho_file);
 }
 
 pub inline fn getExtra(symbol: Symbol, macho_file: *MachO) ?Extra {
