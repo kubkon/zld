@@ -1254,6 +1254,16 @@ fn calcSectionSizes(self: *MachO) !void {
         header.size = self.la_symbol_ptr.size(self);
         header.@"align" = 3;
     }
+
+    if (self.tlv_sect_index) |idx| {
+        const header = &self.sections.items(.header)[idx];
+        header.size = self.tlv.size();
+        header.@"align" = switch (cpu_arch) {
+            .x86_64 => 0,
+            .aarch64 => 2,
+            else => 0,
+        };
+    }
 }
 
 fn initSegments(self: *MachO) !void {

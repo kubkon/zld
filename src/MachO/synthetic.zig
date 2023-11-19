@@ -177,6 +177,10 @@ pub const TlvSection = struct {
         return header.addr + index * @sizeOf(u64) * 3;
     }
 
+    pub fn size(tlv: TlvSection) usize {
+        return tlv.symbols.items.len * @sizeOf(u64) * 3;
+    }
+
     const FormatCtx = struct {
         tlv: TlvSection,
         macho_file: *MachO,
