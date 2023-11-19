@@ -1144,6 +1144,13 @@ fn sortSections(self: *MachO) !void {
             atom.out_n_sect = backlinks[atom.out_n_sect];
         }
     }
+    if (self.getInternalObject()) |internal| {
+        for (internal.atoms.items) |atom_index| {
+            const atom = self.getAtom(atom_index) orelse continue;
+            if (!atom.flags.alive) continue;
+            atom.out_n_sect = backlinks[atom.out_n_sect];
+        }
+    }
 
     for (&[_]*?u8{
         &self.got_sect_index,
