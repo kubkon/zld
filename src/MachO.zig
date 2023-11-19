@@ -235,6 +235,8 @@ pub fn flush(self: *MachO) !void {
     try self.initSyntheticSections();
     try self.sortSections();
     try self.addAtomsToSections();
+    try self.calcSectionSizes();
+    try self.initSegments();
 
     state_log.debug("{}", .{self.dumpState()});
 
@@ -1184,6 +1186,111 @@ pub fn addAtomsToSections(self: *MachO) !void {
     }
 }
 
+fn calcSectionSizes(self: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    const slice = self.sections.slice();
+    for (slice.items(.header), slice.items(.atoms)) |*header, atoms| {
+        if (atoms.items.len == 0) continue;
+
+        // TODO
+        // if (self.requiresThunks()) {
+        //     if (header.isCode()) continue;
+        // }
+
+        for (atoms.items) |atom_index| {
+            const atom = self.getAtom(atom_index).?;
+            const atom_alignment = try math.powi(u32, 2, atom.alignment);
+            const offset = mem.alignForward(u64, header.size, atom_alignment);
+            const padding = offset - header.size;
+            atom.value = offset;
+            header.size += padding + atom.size;
+            header.@"align" = @max(header.@"align", atom.alignment);
+        }
+    }
+
+    // TODO
+    // if (self.requiresThunks()) {
+    //     for (slice.items(.header), slice.items(.atoms)) |header,atoms| {
+    //         if (!header.isCode()) continue;
+    //         if (atoms.items.len == 0) continue;
+
+    //         // Create jump/branch range extenders if needed.
+    //         try thunks.createThunks(self, @as(u8, @intCast(sect_id)));
+    //     }
+    // }
+}
+
+fn initSegments(self: *MachO) !void {
+    const gpa = self.base.allocator;
+    const pagezero_vmsize = self.options.pagezero_size orelse default_pagezero_vmsize;
+    const aligned_pagezero_vmsize = mem.alignBackward(u64, pagezero_vmsize, self.getPageSize());
+    if (!self.options.dylib and aligned_pagezero_vmsize > 0) {
+        if (aligned_pagezero_vmsize != pagezero_vmsize) {
+            // TODO convert into a warning
+            log.warn("requested __PAGEZERO size (0x{x}) is not page aligned", .{pagezero_vmsize});
+            log.warn("  rounding down to 0x{x}", .{aligned_pagezero_vmsize});
+        }
+        try self.segments.append(gpa, .{
+            .cmdsize = @sizeOf(macho.segment_command_64),
+            .segname = makeStaticString("__PAGEZERO"),
+            .vmsize = aligned_pagezero_vmsize,
+        });
+    }
+
+    const getSegmentProt = struct {
+        fn getSegmentProt(segname: []const u8) macho.vm_prot_t {
+            if (mem.eql(u8, segname, "__PAGEZERO")) return macho.PROT.NONE;
+            if (mem.eql(u8, segname, "__TEXT")) return macho.PROT.READ | macho.PROT.EXEC;
+            if (mem.eql(u8, segname, "__LINKEDIT")) return macho.PROT.READ;
+            return macho.PROT.READ | macho.PROT.WRITE;
+        }
+    }.getSegmentProt;
+
+    // __TEXT segment is non-optional
+    {
+        const protection = getSegmentProt("__TEXT");
+        try self.segments.append(gpa, .{
+            .cmdsize = @sizeOf(macho.segment_command_64),
+            .segname = makeStaticString("__TEXT"),
+            .maxprot = protection,
+            .initprot = protection,
+        });
+    }
+
+    const slice = self.sections.slice();
+    for (slice.items(.header), slice.items(.segment_id)) |header, *seg_id| {
+        const segname = header.segName();
+        const segment_id = self.getSegmentByName(segname) orelse blk: {
+            const segment_id = @as(u8, @intCast(self.segments.items.len));
+            const protection = getSegmentProt(segname);
+            try self.segments.append(gpa, .{
+                .cmdsize = @sizeOf(macho.segment_command_64),
+                .segname = makeStaticString(segname),
+                .maxprot = protection,
+                .initprot = protection,
+            });
+            break :blk segment_id;
+        };
+        const segment = &self.segments.items[segment_id];
+        segment.cmdsize += @sizeOf(macho.section_64);
+        segment.nsects += 1;
+        seg_id.* = segment_id;
+    }
+
+    // __LINKEDIT always comes last
+    {
+        const protection = getSegmentProt("__LINKEDIT");
+        try self.segments.append(gpa, .{
+            .cmdsize = @sizeOf(macho.segment_command_64),
+            .segname = makeStaticString("__LINKEDIT"),
+            .maxprot = protection,
+            .initprot = protection,
+        });
+    }
+}
+
 pub inline fn getPageSize(self: MachO) u16 {
     return switch (self.options.cpu_arch.?) {
         .aarch64 => 0x4000,
@@ -1223,7 +1330,7 @@ pub fn addSection(
     const gpa = self.base.allocator;
     const index = @as(u8, @intCast(try self.sections.addOne(gpa)));
     self.sections.set(index, .{
-        .segment_index = undefined, // Segments will be created automatically later down the pipeline.
+        .segment_id = undefined, // Segments will be created automatically later down the pipeline.
         .header = .{
             .sectname = makeStaticString(sectname),
             .segname = makeStaticString(segname),
@@ -1240,6 +1347,12 @@ pub fn makeStaticString(bytes: []const u8) [16]u8 {
     assert(bytes.len <= buf.len);
     mem.copy(u8, &buf, bytes);
     return buf;
+}
+
+pub fn getSegmentByName(self: MachO, segname: []const u8) ?u8 {
+    for (self.segments.items, 0..) |seg, i| {
+        if (mem.eql(u8, segname, seg.segName())) return @as(u8, @intCast(i));
+    } else return null;
 }
 
 pub fn getSectionByName(self: MachO, segname: []const u8, sectname: []const u8) ?u8 {
@@ -1395,8 +1508,8 @@ fn fmtDumpState(
     try writer.print("got\n{}\n", .{self.got.fmt(self)});
     try writer.print("tlv\n{}\n", .{self.tlv.fmt(self)});
     try writer.writeByte('\n');
-    try writer.writeAll("Output sections\n");
-    try writer.print("{}\n", .{self.fmtSections()});
+    try writer.print("sections\n{}\n", .{self.fmtSections()});
+    try writer.print("segments\n{}\n", .{self.fmtSegments()});
 }
 
 fn fmtSections(self: *MachO) std.fmt.Formatter(formatSections) {
@@ -1411,10 +1524,30 @@ fn formatSections(
 ) !void {
     _ = options;
     _ = unused_fmt_string;
-    for (self.sections.items(.header), 0..) |header, i| {
-        try writer.print("sect({d}) : {s},{s} : @{x} ({x}) : align({x}) : size({x})\n", .{
-            i,               header.segName(), header.sectName(), header.offset, header.addr,
+    const slice = self.sections.slice();
+    for (slice.items(.header), slice.items(.segment_id), 0..) |header, seg_id, i| {
+        try writer.print("sect({d}) : seg({d}) : {s},{s} : @{x} ({x}) : align({x}) : size({x})\n", .{
+            i,               seg_id,      header.segName(), header.sectName(), header.offset, header.addr,
             header.@"align", header.size,
+        });
+    }
+}
+
+fn fmtSegments(self: *MachO) std.fmt.Formatter(formatSegments) {
+    return .{ .data = self };
+}
+
+fn formatSegments(
+    self: *MachO,
+    comptime unused_fmt_string: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = options;
+    _ = unused_fmt_string;
+    for (self.segments.items, 0..) |seg, i| {
+        try writer.print("seg({d}) : {s} : @{x}-{x} ({x}-{x})\n", .{
+            i, seg.segName(), seg.vmaddr, seg.vmsize, seg.fileoff, seg.filesize,
         });
     }
 }
@@ -1504,7 +1637,7 @@ const default_headerpad_size: u32 = 0x1000;
 
 const Section = struct {
     header: macho.section_64,
-    segment_index: u8,
+    segment_id: u8,
     atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
 };
 
