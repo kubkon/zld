@@ -146,7 +146,12 @@ pub const StubsHelperSection = struct {
     }
 };
 
-pub const LaSymbolPtrSection = struct {};
+pub const LaSymbolPtrSection = struct {
+    pub fn size(laptr: LaSymbolPtrSection, macho_file: *MachO) usize {
+        _ = laptr;
+        return macho_file.stubs.symbols.items.len * @sizeOf(u64);
+    }
+};
 
 pub const TlvSection = struct {
     symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},

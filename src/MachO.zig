@@ -1248,6 +1248,12 @@ fn calcSectionSizes(self: *MachO) !void {
             else => 0,
         };
     }
+
+    if (self.la_symbol_ptr_sect_index) |idx| {
+        const header = &self.sections.items(.header)[idx];
+        header.size = self.la_symbol_ptr.size(self);
+        header.@"align" = 3;
+    }
 }
 
 fn initSegments(self: *MachO) !void {
