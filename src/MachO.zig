@@ -30,6 +30,7 @@ undefs: std.AutoHashMapUnmanaged(Symbol.Index, std.ArrayListUnmanaged(Atom.Index
 got_sect_index: ?u8 = null,
 stubs_sect_index: ?u8 = null,
 stubs_helper_sect_index: ?u8 = null,
+la_symbol_ptr_sect_index: ?u8 = null,
 tlv_sect_index: ?u8 = null,
 
 mh_execute_header_index: ?Symbol.Index = null,
@@ -1045,6 +1046,9 @@ fn initSyntheticSections(self: *MachO) !void {
         self.stubs_helper_sect_index = try self.addSection("__TEXT", "__stub_helper", .{
             .flags = macho.S_ATTR_PURE_INSTRUCTIONS | macho.S_ATTR_SOME_INSTRUCTIONS,
         });
+        self.la_symbol_ptr_sect_index = try self.addSection("__DATA", "__la_symbol_ptr", .{
+            .flags = macho.S_LAZY_SYMBOL_POINTERS,
+        });
     }
     if (self.tlv.symbols.items.len > 0) {
         self.tlv_sect_index = try self.addSection("__DATA", "__thread_vars", .{
@@ -1135,6 +1139,10 @@ fn sortSections(self: *MachO) !void {
 
     for (&[_]*?u8{
         &self.got_sect_index,
+        &self.stubs_sect_index,
+        &self.stubs_helper_sect_index,
+        &self.la_symbol_ptr_sect_index,
+        &self.tlv_sect_index,
     }) |maybe_index| {
         if (maybe_index.*) |*index| {
             index.* = backlinks[index.*];
