@@ -109,6 +109,10 @@ pub const StubsSection = struct {
     }
 };
 
+pub const StubsHelperSection = struct {};
+
+pub const LaSymbolPtrSection = struct {};
+
 pub const TlvSection = struct {
     symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
 

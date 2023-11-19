@@ -43,6 +43,8 @@ string_intern: StringTable(.string_intern) = .{},
 
 got: GotSection = .{},
 stubs: StubsSection = .{},
+stubs_helper: StubsHelperSection = .{},
+la_symbol_ptr: LaSymbolPtrSection = .{},
 tlv: TlvSection = .{},
 
 atoms: std.ArrayListUnmanaged(Atom) = .{},
@@ -1518,11 +1520,13 @@ const Md5 = std.crypto.hash.Md5;
 const Object = @import("MachO/Object.zig");
 pub const Options = @import("MachO/Options.zig");
 const LazyBind = @import("MachO/dyld_info/bind.zig").LazyBind(*const MachO, MachO.SymbolWithLoc);
+const LaSymbolPtrSection = synthetic.LaSymbolPtrSection;
 const LibStub = @import("tapi.zig").LibStub;
 const Rebase = @import("MachO/dyld_info/Rebase.zig");
 const Symbol = @import("MachO/Symbol.zig");
 const StringTable = @import("strtab.zig").StringTable;
 const StubsSection = synthetic.StubsSection;
+const StubsHelperSection = synthetic.StubsHelperSection;
 const ThreadPool = std.Thread.Pool;
 const TlvSection = synthetic.TlvSection;
 const Trie = @import("MachO/Trie.zig");
