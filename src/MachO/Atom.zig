@@ -230,7 +230,7 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
     var stream = std.io.fixedBufferStream(code);
     const cwriter = stream.writer();
 
-    var subtractor: i64 = 0;
+    var SUB: i64 = 0;
     var i: usize = 0;
     while (i < relocs.len) : (i += 1) {
         const rel = relocs[i];
@@ -267,7 +267,7 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
                 fmtRelocType(rel.r_type, macho_file),
                 rel_address,
                 P,
-                S + A - subtractor,
+                S + A - SUB,
                 rel.r_symbolnum,
             });
         } else {
@@ -275,7 +275,7 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
                 fmtRelocType(rel.r_type, macho_file),
                 rel_address,
                 P,
-                S + A - subtractor,
+                S + A - SUB,
                 G + A,
                 sym.?.getName(macho_file),
             });
@@ -284,17 +284,18 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
         try stream.seekTo(rel_address);
 
         switch (rel_type) {
-            .X86_64_RELOC_SUBTRACTOR => subtractor = S,
+            .X86_64_RELOC_SUBTRACTOR => SUB = S,
 
             .X86_64_RELOC_UNSIGNED => {
+                assert(rel.r_length == 3);
                 if (sym) |s| {
                     if (!s.flags.import and s.isTlvInit(macho_file)) {
-                        try writeIntReloc(rel, S - TLS, cwriter);
+                        try cwriter.writeInt(u64, @intCast(S - TLS), .little);
                         continue;
                     }
                 }
-                try writeIntReloc(rel, S + A - subtractor, cwriter);
-                subtractor = 0;
+                try cwriter.writeInt(u64, @intCast(S + A - SUB), .little);
+                SUB = 0;
             },
 
             .X86_64_RELOC_GOT_LOAD => {
@@ -302,16 +303,17 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
                 if (!sym.?.flags.import) {
                     // TODO relax!
                 }
-                try writeIntReloc(rel, G + A - P + 4, cwriter);
+                try cwriter.writeInt(i32, @intCast(G + A - P + 4), .little);
             },
 
             .X86_64_RELOC_GOT => {
-                try writeIntReloc(rel, G + A, cwriter);
+                assert(rel.r_length == 2);
+                try cwriter.writeInt(i32, @intCast(G + A - P + 4), .little);
             },
 
             .X86_64_RELOC_BRANCH => {
                 assert(rel.r_length == 2);
-                try writeIntReloc(rel, S + A - P + 4, cwriter);
+                try cwriter.writeInt(i32, @intCast(S + A - P + 4), .little);
             },
 
             .X86_64_RELOC_TLV => {
@@ -319,44 +321,35 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
                 if (sym.?.flags.tlv_ptr) {
                     assert(sym.?.flags.import);
                     const S_: i64 = @intCast(sym.?.getTlvPtrAddress(macho_file));
-                    try writeIntReloc(rel, S_ - P + 4, cwriter);
+                    try cwriter.writeInt(i32, @intCast(S_ + A - P + 4), .little);
                     continue;
                 }
-                try writeIntReloc(rel, S + A - P + 4, cwriter);
+                try cwriter.writeInt(i32, @intCast(S + A - P + 4), .little);
             },
 
             .X86_64_RELOC_SIGNED => {
                 assert(rel.r_length == 2);
-                try writeIntReloc(rel, S + A - P + 4, cwriter);
+                try cwriter.writeInt(i32, @intCast(S + A - P + 4), .little);
             },
 
             .X86_64_RELOC_SIGNED_1 => {
                 assert(rel.r_length == 2);
-                try writeIntReloc(rel, S + A - P + 4 - 1, cwriter);
+                try cwriter.writeInt(i32, @intCast(S + A - P + 4 - 1), .little);
             },
 
             .X86_64_RELOC_SIGNED_2 => {
                 assert(rel.r_length == 2);
-                try writeIntReloc(rel, S + A - P + 4 - 2, cwriter);
+                try cwriter.writeInt(i32, @intCast(S + A - P + 4 - 2), .little);
             },
 
             .X86_64_RELOC_SIGNED_4 => {
                 assert(rel.r_length == 2);
-                try writeIntReloc(rel, S + A - P + 4 - 4, cwriter);
+                try cwriter.writeInt(i32, @intCast(S + A - P + 4 - 4), .little);
             },
         }
     }
 
     try writer.writeAll(code);
-}
-
-fn writeIntReloc(rel: macho.relocation_info, x: anytype, writer: anytype) !void {
-    switch (rel.r_length) {
-        0 => try writer.writeByte(@intCast(x)),
-        1 => try writer.writeInt(i16, @intCast(x), .little),
-        2 => try writer.writeInt(i32, @intCast(x), .little),
-        3 => try writer.writeInt(i64, @intCast(x), .little),
-    }
 }
 
 pub fn format(
