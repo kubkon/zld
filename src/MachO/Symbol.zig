@@ -36,6 +36,11 @@ pub fn isLocal(symbol: Symbol) bool {
     return !(symbol.flags.import or symbol.flags.@"export");
 }
 
+pub fn isTlvInit(self: Symbol, macho_file: *MachO) bool {
+    const name = self.getName(macho_file);
+    return std.mem.indexOf(u8, name, "$tlv$init") != null;
+}
+
 pub fn getName(symbol: Symbol, macho_file: *MachO) [:0]const u8 {
     return macho_file.string_intern.getAssumeExists(symbol.name);
 }

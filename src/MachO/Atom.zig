@@ -177,7 +177,6 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
             .X86_64_RELOC_TLV => {
                 // TODO TLV and import
                 assert(!symbol.flags.import);
-                symbol.flags.tlv = true;
             },
 
             .X86_64_RELOC_UNSIGNED => {
@@ -259,6 +258,7 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
         };
 
         const G = if (sym) |s| @as(i64, @intCast(s.getGotAddress(macho_file))) else 0;
+        const TLS = @as(i64, @intCast(macho_file.getTlsAddress()));
 
         if (rel.r_extern == 0) {
             relocs_log.debug("  {s}: {x}: [{x} => {x}] sect({d})", .{
@@ -285,6 +285,12 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
             .X86_64_RELOC_SUBTRACTOR => subtractor = S,
 
             .X86_64_RELOC_UNSIGNED => {
+                if (sym) |s| {
+                    if (s.isTlvInit(macho_file)) {
+                        try cwriter.writeInt(u64, @intCast(S - TLS), .little);
+                        continue;
+                    }
+                }
                 try cwriter.writeInt(u64, @as(u64, @intCast(S + A - subtractor)), .little);
                 subtractor = 0;
             },
@@ -305,8 +311,8 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
             },
 
             .X86_64_RELOC_TLV => {
-                const S_: i64 = @intCast(sym.?.getTlvAddress(macho_file));
-                try cwriter.writeInt(i32, @as(i32, @intCast(S_ + A - P + 4)), .little);
+                assert(!sym.?.flags.import);
+                try cwriter.writeInt(i32, @as(i32, @intCast(S + A - P + 4)), .little);
             },
 
             .X86_64_RELOC_SIGNED => {

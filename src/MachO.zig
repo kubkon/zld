@@ -1730,6 +1730,16 @@ pub fn getSectionByName(self: MachO, segname: []const u8, sectname: []const u8) 
     } else return null;
 }
 
+pub fn getTlsAddress(self: MachO) u64 {
+    for (self.sections.items(.header)) |header| switch (header.type()) {
+        macho.S_THREAD_LOCAL_REGULAR,
+        macho.S_THREAD_LOCAL_ZEROFILL,
+        => return header.addr,
+        else => {},
+    };
+    return 0;
+}
+
 pub fn getFile(self: *MachO, index: File.Index) ?File {
     const tag = self.files.items(.tags)[index];
     return switch (tag) {

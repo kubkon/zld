@@ -123,7 +123,7 @@ fn initSymbols(self: *Object, macho_file: *MachO) !void {
         const symbol = macho_file.getSymbol(index);
         const name = self.getString(local.n_strx);
         symbol.* = .{
-            .value = local.n_value,
+            .value = local.n_value - self.sections[local.n_sect - 1].addr,
             .name = try macho_file.string_intern.insert(gpa, name),
             .nlist_idx = @intCast(i),
             .atom = if (local.abs()) 0 else self.atoms.items[local.n_sect - 1],
