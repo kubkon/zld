@@ -239,6 +239,9 @@ pub fn flush(self: *MachO) !void {
     try self.initSegments();
 
     try self.allocateSections();
+    self.allocateAtoms();
+    self.allocateLocals();
+    self.allocateGlobals();
 
     state_log.debug("{}", .{self.dumpState()});
 
@@ -1369,6 +1372,62 @@ fn allocateSections(self: *MachO) !void {
         }
 
         next_seg_id = seg_id;
+    }
+}
+
+fn allocateAtoms(self: *MachO) void {
+    const slice = self.sections.slice();
+    for (slice.items(.header), slice.items(.atoms)) |header, atoms| {
+        if (atoms.items.len == 0) continue;
+        for (atoms.items) |atom_index| {
+            const atom = self.getAtom(atom_index).?;
+            assert(atom.flags.alive);
+            atom.value += header.addr;
+        }
+    }
+}
+
+fn allocateLocals(self: *MachO) void {
+    for (self.objects.items) |index| {
+        for (self.getFile(index).?.object.getLocals()) |local_index| {
+            const local = self.getSymbol(local_index);
+            const atom = local.getAtom(self) orelse continue;
+            if (!atom.flags.alive) continue;
+            local.value += atom.value;
+            local.out_n_sect = atom.out_n_sect;
+        }
+    }
+    if (self.getInternalObject()) |internal| {
+        for (internal.getLocals()) |local_index| {
+            const local = self.getSymbol(local_index);
+            const atom = local.getAtom(self) orelse continue;
+            if (!atom.flags.alive) continue;
+            local.value += atom.value;
+            local.out_n_sect = atom.out_n_sect;
+        }
+    }
+}
+
+pub fn allocateGlobals(self: *MachO) void {
+    for (self.objects.items) |index| {
+        for (self.getFile(index).?.getGlobals()) |global_index| {
+            const global = self.getSymbol(global_index);
+            const atom = global.getAtom(self) orelse continue;
+            if (!atom.flags.alive) continue;
+            if (global.getFile(self).?.getIndex() != index) continue;
+            global.value += atom.value;
+            global.out_n_sect = atom.out_n_sect;
+        }
+    }
+    if (self.getInternalObject()) |internal| {
+        for (internal.getGlobals()) |global_index| {
+            const global = self.getSymbol(global_index);
+            const atom = global.getAtom(self) orelse continue;
+            if (!atom.flags.alive) continue;
+            if (global.getFile(self).?.getIndex() != internal.index) continue;
+            global.value += atom.value;
+            global.out_n_sect = atom.out_n_sect;
+        }
     }
 }
 
