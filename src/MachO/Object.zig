@@ -17,6 +17,8 @@ atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
 /// per section.
 relocations: std.ArrayListUnmanaged(macho.relocation_info) = .{},
 
+data_in_code: std.ArrayListUnmanaged(macho.data_in_code_entry) = .{},
+
 alive: bool = true,
 
 pub fn deinit(self: *Object, gpa: Allocator) void {
@@ -24,6 +26,7 @@ pub fn deinit(self: *Object, gpa: Allocator) void {
     self.symbols.deinit(gpa);
     self.atoms.deinit(gpa);
     self.relocations.deinit(gpa);
+    self.data_in_code.deinit(gpa);
 }
 
 pub fn parse(self: *Object, macho_file: *MachO) !void {
@@ -52,6 +55,9 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
     try self.initSymbols(macho_file);
 
     // TODO split subsections if possible
+
+    try self.initDataInCode(macho_file);
+
     // TODO ICF
     // TODO __eh_frame records
 }
@@ -192,6 +198,30 @@ fn sortSymbols(self: *Object, allocator: Allocator) !Symbol.Index {
     return @intCast(first_global);
 }
 
+fn initDataInCode(self: *Object, macho_file: *MachO) !void {
+    const gpa = macho_file.base.allocator;
+    try self.parseDataInCode(gpa);
+
+    if (self.data_in_code.items.len == 0) return;
+
+    var next_dice: usize = 0;
+
+    for (self.atoms.items) |atom_index| {
+        const atom = macho_file.getAtom(atom_index) orelse continue;
+        if (!atom.flags.alive) continue;
+        if (next_dice >= self.data_in_code.items.len) break;
+        const off = atom.getInputSection(macho_file).addr + atom.off;
+
+        atom.dice = .{ .pos = next_dice };
+
+        while (next_dice < self.data_in_code.items.len and
+            self.data_in_code.items[next_dice].offset >= off) : (next_dice += 1)
+        {}
+
+        atom.dice.len = next_dice - atom.dice.pos;
+    }
+}
+
 /// Parse all relocs for the input section, and sort in ascending order.
 /// Previously, I have wrongly assumed the compilers output relocations for each
 /// section in a sorted manner which is simply not true.
@@ -213,6 +243,26 @@ fn parseRelocs(self: *Object, allocator: Allocator, sect: macho.section_64) !Ato
     self.relocations.appendUnalignedSliceAssumeCapacity(relocs);
     mem.sort(macho.relocation_info, self.relocations.items[pos..], {}, relocLessThan);
     return .{ .pos = pos, .len = sect.nreloc };
+}
+
+fn parseDataInCode(self: *Object, allocator: Allocator) !void {
+    const diceLessThan = struct {
+        fn diceLessThan(ctx: void, lhs: macho.data_in_code_entry, rhs: macho.data_in_code_entry) bool {
+            _ = ctx;
+            return lhs.offset < rhs.offset;
+        }
+    }.diceLessThan;
+
+    const lc = self.getLoadCommand(.DATA_IN_CODE) orelse return;
+    const cmd = lc.cast(macho.linkedit_data_command).?;
+    const ndice = @divExact(cmd.datasize, @sizeOf(macho.data_in_code_entry));
+    const dice = @as(
+        [*]align(1) const macho.data_in_code_entry,
+        @ptrCast(self.data.ptr + cmd.dataoff),
+    )[0..ndice];
+    try self.data_in_code.ensureTotalCapacityPrecise(allocator, dice.len);
+    self.data_in_code.appendUnalignedSliceAssumeCapacity(dice);
+    mem.sort(macho.data_in_code_entry, self.data_in_code.items, {}, diceLessThan);
 }
 
 pub fn resolveSymbols(self: *Object, macho_file: *MachO) void {
