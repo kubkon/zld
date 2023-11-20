@@ -258,6 +258,7 @@ pub fn flush(self: *MachO) !void {
 
     state_log.debug("{}", .{self.dumpState()});
 
+    try self.initDyldInfoSections();
     try self.writeAtoms();
     const ncmds, const sizeofcmds, const uuid_cmd_offset = try self.writeLoadCommands();
     _ = uuid_cmd_offset;
@@ -1056,7 +1057,6 @@ fn reportUndefs(self: *MachO) !void {
 }
 
 fn initSyntheticSections(self: *MachO) !void {
-    const gpa = self.base.allocator;
     const cpu_arch = self.options.cpu_arch.?;
 
     if (self.got.symbols.items.len > 0) {
@@ -1085,18 +1085,6 @@ fn initSyntheticSections(self: *MachO) !void {
         self.tlv_ptr_sect_index = try self.addSection("__DATA", "__thread_ptr", .{
             .flags = macho.S_THREAD_LOCAL_VARIABLE_POINTERS,
         });
-    }
-
-    {
-        var nrebases: usize = 0;
-        var nbinds: usize = 0;
-        for (self.objects.items) |index| {
-            const object = self.getFile(index).?.object;
-            nrebases += object.num_rebase_relocs;
-            nbinds += object.num_bind_relocs;
-        }
-        try self.rebase.entries.ensureUnusedCapacity(gpa, nrebases);
-        try self.bind.entries.ensureUnusedCapacity(gpa, nbinds);
     }
 }
 
@@ -1497,6 +1485,28 @@ fn allocateSyntheticSymbols(self: *MachO) void {
         const global = self.getSymbol(index);
         global.value = text_seg.vmaddr;
     }
+}
+
+fn initDyldInfoSections(self: *MachO) !void {
+    const gpa = self.base.allocator;
+
+    if (self.got.needs_rebase) {
+        try self.got.addRebase(self);
+    }
+    if (self.got.needs_bind) {
+        try self.got.addBind(self);
+    }
+    // TODO TlvPtr needs bind
+
+    var nrebases: usize = 0;
+    var nbinds: usize = 0;
+    for (self.objects.items) |index| {
+        const object = self.getFile(index).?.object;
+        nrebases += object.num_rebase_relocs;
+        nbinds += object.num_bind_relocs;
+    }
+    try self.rebase.entries.ensureUnusedCapacity(gpa, nrebases);
+    try self.bind.entries.ensureUnusedCapacity(gpa, nbinds);
 }
 
 fn writeAtoms(self: *MachO) !void {
