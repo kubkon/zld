@@ -249,6 +249,7 @@ pub fn flush(self: *MachO) !void {
 
     state_log.debug("{}", .{self.dumpState()});
 
+    try self.writeAtoms();
     const ncmds, const sizeofcmds, const uuid_cmd_offset = try self.writeLoadCommands();
     _ = uuid_cmd_offset;
     try self.writeHeader(ncmds, sizeofcmds);
@@ -1489,6 +1490,36 @@ fn allocateSyntheticSymbols(self: *MachO) void {
     if (self.dso_handle_index) |index| {
         const global = self.getSymbol(index);
         global.value = text_seg.vmaddr;
+    }
+}
+
+fn writeAtoms(self: *MachO) !void {
+    const gpa = self.base.allocator;
+    const cpu_arch = self.options.cpu_arch.?;
+    const slice = self.sections.slice();
+    for (slice.items(.header), slice.items(.atoms)) |header, atoms| {
+        if (atoms.items.len == 0) continue;
+        if (header.isZerofill()) continue;
+
+        log.debug("writing atoms in {s},{s} section", .{ header.segName(), header.sectName() });
+
+        var buffer = try gpa.alloc(u8, header.size);
+        defer gpa.free(buffer);
+        const padding_byte: u8 = if (header.isCode() and cpu_arch == .x86_64) 0xcc else 0;
+        @memset(buffer, padding_byte);
+
+        var stream = std.io.fixedBufferStream(buffer);
+
+        for (atoms.items) |atom_index| {
+            const atom = self.getAtom(atom_index).?;
+            assert(atom.flags.alive);
+            const off = atom.value - header.addr;
+            log.debug("writing atom({d}) at offset 0x{x}", .{ atom_index, header.offset + off });
+            try stream.seekTo(off);
+            try atom.resolveRelocs(self, stream.writer());
+        }
+
+        try self.base.file.pwriteAll(buffer, header.offset);
     }
 }
 

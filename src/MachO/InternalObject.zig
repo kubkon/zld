@@ -8,6 +8,7 @@ first_global: Symbol.Index = 0,
 symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
 atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
 
+code: std.ArrayListUnmanaged(u8) = .{},
 relocations: std.ArrayListUnmanaged(macho.relocation_info) = .{},
 
 alive: bool = true,
@@ -41,6 +42,10 @@ pub fn init(self: *InternalObject, macho_file: *MachO) !void {
             .r_extern = 1,
             .r_type = @intFromEnum(macho.reloc_type_x86_64.X86_64_RELOC_GOT),
         }});
+
+        try self.code.ensureUnusedCapacity(gpa, atom.size);
+        atom.off = self.code.items.len;
+        self.code.appendNTimesAssumeCapacity(0, atom.size);
     }
 
     {
@@ -63,6 +68,7 @@ pub fn deinit(self: *InternalObject, allocator: Allocator) void {
     self.strtab.deinit(allocator);
     self.symbols.deinit(allocator);
     self.relocations.deinit(allocator);
+    self.code.deinit(allocator);
 }
 
 fn addSection(self: *InternalObject, allocator: Allocator, segname: []const u8, sectname: []const u8) !u8 {

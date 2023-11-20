@@ -55,6 +55,17 @@ pub fn getPriority(self: Atom, macho_file: *MachO) u64 {
     return (@as(u64, @intCast(file.getIndex())) << 32) | @as(u64, @intCast(self.n_sect));
 }
 
+pub fn getCode(self: Atom, macho_file: *MachO) []const u8 {
+    switch (self.getFile(macho_file)) {
+        .internal => |x| return x.code.items[self.off..][0..self.size],
+        .object => |x| {
+            const in_sect = self.getInputSection(macho_file);
+            return x.data[in_sect.offset + self.off ..][0..self.size];
+        },
+        else => unreachable,
+    }
+}
+
 pub fn getRelocs(self: Atom, macho_file: *MachO) []const macho.relocation_info {
     return switch (self.getFile(macho_file)) {
         .internal => |x| x.relocations.items[self.relocs.pos..][0..self.relocs.len],
@@ -205,6 +216,70 @@ fn reportUndefSymbol(self: Atom, rel: macho.relocation_info, macho_file: *MachO)
     return false;
 }
 
+pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
+    assert(!self.getInputSection(macho_file).isZerofill());
+    const gpa = macho_file.base.allocator;
+    const code = try gpa.dupe(u8, self.getCode(macho_file));
+    defer gpa.free(code);
+    const relocs = self.getRelocs(macho_file);
+    const file = self.getFile(macho_file);
+
+    relocs_log.debug("{x}: {s}", .{ self.value, self.getName(macho_file) });
+
+    var stream = std.io.fixedBufferStream(code);
+    const cwriter = stream.writer();
+    _ = writer;
+    _ = cwriter;
+
+    var i: usize = 0;
+    while (i < relocs.len) : (i += 1) {
+        const rel = relocs[i];
+        const rel_address = @as(usize, @intCast(rel.r_address));
+        const rel_type: macho.reloc_type_x86_64 = @enumFromInt(rel.r_type);
+        _ = rel_type;
+
+        const sym_index: ?Symbol.Index = if (rel.r_extern != 0) switch (file) {
+            inline else => |x| x.symbols.items[rel.r_symbolnum],
+        } else null;
+        const sym = if (sym_index) |index| macho_file.getSymbol(index) else null;
+
+        const P = @as(i64, @intCast(self.value)) + rel.r_address;
+
+        const S: i64 = if (rel.r_extern == 0) blk: {
+            assert(file == .object);
+            const atom_index = file.object.atoms.items[rel.r_symbolnum - 1];
+            const atom = macho_file.getAtom(atom_index).?;
+            assert(atom.flags.alive);
+            break :blk @intCast(atom.value);
+        } else @intCast(sym.?.getAddress(.{}, macho_file));
+
+        const A = switch (rel.r_length) {
+            0 => code[rel_address],
+            1 => mem.readInt(i16, code[rel_address..][0..2], .little),
+            2 => mem.readInt(i32, code[rel_address..][0..4], .little),
+            3 => mem.readInt(i64, code[rel_address..][0..8], .little),
+        };
+
+        if (rel.r_extern == 0) {
+            relocs_log.debug("  {s}: {x}: [{x} => {x}] sect({d})", .{
+                fmtRelocType(rel.r_type, macho_file),
+                rel_address,
+                P,
+                S + A,
+                rel.r_symbolnum,
+            });
+        } else {
+            relocs_log.debug("  {s}: {x}: [{x} => {x}] ({s})", .{
+                fmtRelocType(rel.r_type, macho_file),
+                rel_address,
+                P,
+                S + A,
+                sym.?.getName(macho_file),
+            });
+        }
+    }
+}
+
 pub fn format(
     atom: Atom,
     comptime unused_fmt_string: []const u8,
@@ -247,6 +322,42 @@ fn format2(
     if (macho_file.options.dead_strip and !atom.flags.alive) {
         try writer.writeAll(" : [*]");
     }
+}
+
+const FormatRelocTypeContext = struct {
+    r_type: u4,
+    macho_file: *MachO,
+};
+
+pub fn fmtRelocType(r_type: u4, macho_file: *MachO) std.fmt.Formatter(formatRelocType) {
+    return .{
+        .data = .{
+            .r_type = r_type,
+            .macho_file = macho_file,
+        },
+    };
+}
+
+fn formatRelocType(
+    ctx: FormatRelocTypeContext,
+    comptime unused_fmt_string: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = unused_fmt_string;
+    _ = options;
+    const str = switch (ctx.macho_file.options.cpu_arch.?) {
+        .x86_64 => blk: {
+            const rel_type: macho.reloc_type_x86_64 = @enumFromInt(ctx.r_type);
+            break :blk @tagName(rel_type);
+        },
+        .aarch64 => blk: {
+            const rel_type: macho.reloc_type_arm64 = @enumFromInt(ctx.r_type);
+            break :blk @tagName(rel_type);
+        },
+        else => unreachable,
+    };
+    try writer.print("{s}", .{str});
 }
 
 pub const Index = u32;
