@@ -211,9 +211,12 @@ pub const TlvPtrSection = struct {
     }
 };
 
+pub const RebaseSection = Rebase;
+
 const assert = std.debug.assert;
 const std = @import("std");
 
 const Allocator = std.mem.Allocator;
 const MachO = @import("../MachO.zig");
+const Rebase = @import("dyld_info/Rebase.zig");
 const Symbol = @import("Symbol.zig");

@@ -153,40 +153,42 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
     const relocs = self.getRelocs(macho_file);
 
     for (relocs) |rel| {
-        if (rel.r_extern == 0) continue;
         if (try self.reportUndefSymbol(rel, macho_file)) continue;
 
-        const sym_index = switch (file) {
+        const sym_index: ?Symbol.Index = if (rel.r_extern != 0) switch (file) {
             inline else => |x| x.symbols.items[rel.r_symbolnum],
-        };
-        const symbol = macho_file.getSymbol(sym_index);
+        } else null;
+        const symbol = if (sym_index) |index| macho_file.getSymbol(index) else null;
 
         switch (@as(macho.reloc_type_x86_64, @enumFromInt(rel.r_type))) {
             .X86_64_RELOC_BRANCH => {
-                if (symbol.flags.import) {
-                    symbol.flags.stubs = true;
+                if (symbol.?.flags.import) {
+                    symbol.?.flags.stubs = true;
                 }
             },
 
             .X86_64_RELOC_GOT_LOAD,
             .X86_64_RELOC_GOT,
             => {
-                symbol.flags.got = true;
+                symbol.?.flags.got = true;
             },
 
             .X86_64_RELOC_TLV => {
                 // TODO TLV and import
-                assert(!symbol.flags.import);
+                assert(!symbol.?.flags.import);
             },
 
             .X86_64_RELOC_UNSIGNED => {
-                if (symbol.flags.import) {
-                    file.object.num_bind_relocs += 1;
-                } else if (symbol.isTlvInit(macho_file)) {
-                    macho_file.has_tlv = true;
-                } else {
-                    file.object.num_rebase_relocs += 1;
+                if (symbol) |sym| {
+                    if (sym.flags.import) {
+                        file.object.num_bind_relocs += 1;
+                        continue;
+                    } else if (sym.isTlvInit(macho_file)) {
+                        macho_file.has_tlv = true;
+                        continue;
+                    }
                 }
+                file.object.num_rebase_relocs += 1;
             },
 
             else => {},
@@ -195,6 +197,8 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
 }
 
 fn reportUndefSymbol(self: Atom, rel: macho.relocation_info, macho_file: *MachO) !bool {
+    if (rel.r_extern == 0) return false;
+
     const file = self.getFile(macho_file);
     const sym_index = switch (file) {
         inline else => |x| x.symbols.items[rel.r_symbolnum],
@@ -288,18 +292,29 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
 
             .X86_64_RELOC_UNSIGNED => {
                 assert(rel.r_length == 3);
+                assert(rel.r_pcrel == 0);
                 if (sym) |s| {
-                    if (!s.flags.import and s.isTlvInit(macho_file)) {
+                    if (s.flags.import) {
+                        // TODO bind
+                        continue;
+                    } else if (s.isTlvInit(macho_file)) {
                         try cwriter.writeInt(u64, @intCast(S - TLS), .little);
                         continue;
                     }
                 }
+                const seg_id = macho_file.sections.items(.segment_id)[self.out_n_sect];
+                const seg = macho_file.segments.items[seg_id];
+                macho_file.rebase.entries.appendAssumeCapacity(.{
+                    .offset = @as(u64, @intCast(P)) - seg.vmaddr,
+                    .segment_id = seg_id,
+                });
                 try cwriter.writeInt(u64, @intCast(S + A - SUB), .little);
                 SUB = 0;
             },
 
             .X86_64_RELOC_GOT_LOAD => {
                 assert(rel.r_length == 2);
+                assert(rel.r_pcrel == 1);
                 if (!sym.?.flags.import) {
                     // TODO relax!
                 }
@@ -308,16 +323,19 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
 
             .X86_64_RELOC_GOT => {
                 assert(rel.r_length == 2);
+                assert(rel.r_pcrel == 1);
                 try cwriter.writeInt(i32, @intCast(G + A - P + 4), .little);
             },
 
             .X86_64_RELOC_BRANCH => {
                 assert(rel.r_length == 2);
+                assert(rel.r_pcrel == 1);
                 try cwriter.writeInt(i32, @intCast(S + A - P + 4), .little);
             },
 
             .X86_64_RELOC_TLV => {
                 assert(rel.r_length == 2);
+                assert(rel.r_pcrel == 1);
                 if (sym.?.flags.tlv_ptr) {
                     assert(sym.?.flags.import);
                     const S_: i64 = @intCast(sym.?.getTlvPtrAddress(macho_file));
@@ -329,21 +347,25 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
 
             .X86_64_RELOC_SIGNED => {
                 assert(rel.r_length == 2);
+                assert(rel.r_pcrel == 1);
                 try cwriter.writeInt(i32, @intCast(S + A - P + 4), .little);
             },
 
             .X86_64_RELOC_SIGNED_1 => {
                 assert(rel.r_length == 2);
+                assert(rel.r_pcrel == 1);
                 try cwriter.writeInt(i32, @intCast(S + A - P + 4 - 1), .little);
             },
 
             .X86_64_RELOC_SIGNED_2 => {
                 assert(rel.r_length == 2);
+                assert(rel.r_pcrel == 1);
                 try cwriter.writeInt(i32, @intCast(S + A - P + 4 - 2), .little);
             },
 
             .X86_64_RELOC_SIGNED_4 => {
                 assert(rel.r_length == 2);
+                assert(rel.r_pcrel == 1);
                 try cwriter.writeInt(i32, @intCast(S + A - P + 4 - 4), .little);
             },
         }

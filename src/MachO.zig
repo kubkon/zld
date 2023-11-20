@@ -49,6 +49,7 @@ stubs: StubsSection = .{},
 stubs_helper: StubsHelperSection = .{},
 la_symbol_ptr: LaSymbolPtrSection = .{},
 tlv_ptr: TlvPtrSection = .{},
+rebase: RebaseSection = .{},
 
 atoms: std.ArrayListUnmanaged(Atom) = .{},
 
@@ -1050,6 +1051,7 @@ fn reportUndefs(self: *MachO) !void {
 }
 
 fn initSyntheticSections(self: *MachO) !void {
+    const gpa = self.base.allocator;
     const cpu_arch = self.options.cpu_arch.?;
 
     if (self.got.symbols.items.len > 0) {
@@ -1078,6 +1080,14 @@ fn initSyntheticSections(self: *MachO) !void {
         self.tlv_ptr_sect_index = try self.addSection("__DATA", "__thread_ptr", .{
             .flags = macho.S_THREAD_LOCAL_VARIABLE_POINTERS,
         });
+    }
+
+    {
+        var nrebases: usize = 0;
+        for (self.objects.items) |index| {
+            nrebases += self.getFile(index).?.object.num_rebase_relocs;
+        }
+        try self.rebase.entries.ensureTotalCapacityPrecise(gpa, nrebases);
     }
 }
 
@@ -2051,7 +2061,7 @@ pub const Options = @import("MachO/Options.zig");
 const LazyBind = @import("MachO/dyld_info/bind.zig").LazyBind(*const MachO, MachO.SymbolWithLoc);
 const LaSymbolPtrSection = synthetic.LaSymbolPtrSection;
 const LibStub = @import("tapi.zig").LibStub;
-const Rebase = @import("MachO/dyld_info/Rebase.zig");
+const RebaseSection = synthetic.RebaseSection;
 const Symbol = @import("MachO/Symbol.zig");
 const StringTable = @import("strtab.zig").StringTable;
 const StubsSection = synthetic.StubsSection;
