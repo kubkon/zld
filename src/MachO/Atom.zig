@@ -387,13 +387,11 @@ fn format2(
     _ = unused_fmt_string;
     const atom = ctx.atom;
     const macho_file = ctx.macho_file;
-    try writer.print("atom({d}) : {s} : @{x} : sect({d}) : align({x}) : size({x})", .{
-        atom.atom_index, atom.getName(macho_file), atom.value,
-        atom.out_n_sect, atom.alignment,           atom.size,
+    try writer.print("atom({d}) : {s} : @{x} : sect({d}) : align({x}) : size({x}) : alive({})", .{
+        atom.atom_index,  atom.getName(macho_file), atom.value,
+        atom.out_n_sect,  atom.alignment,           atom.size,
+        atom.flags.alive,
     });
-    if (macho_file.options.dead_strip and !atom.flags.alive) {
-        try writer.writeAll(" : [*]");
-    }
 }
 
 const FormatRelocTypeContext = struct {
