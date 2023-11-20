@@ -228,15 +228,13 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
 
     var stream = std.io.fixedBufferStream(code);
     const cwriter = stream.writer();
-    _ = writer;
-    _ = cwriter;
 
+    var subtractor: i64 = 0;
     var i: usize = 0;
     while (i < relocs.len) : (i += 1) {
         const rel = relocs[i];
         const rel_address = @as(usize, @intCast(rel.r_address));
         const rel_type: macho.reloc_type_x86_64 = @enumFromInt(rel.r_type);
-        _ = rel_type;
 
         const sym_index: ?Symbol.Index = if (rel.r_extern != 0) switch (file) {
             inline else => |x| x.symbols.items[rel.r_symbolnum],
@@ -260,24 +258,76 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
             3 => mem.readInt(i64, code[rel_address..][0..8], .little),
         };
 
+        const G = if (sym) |s| @as(i64, @intCast(s.getGotAddress(macho_file))) else 0;
+
         if (rel.r_extern == 0) {
             relocs_log.debug("  {s}: {x}: [{x} => {x}] sect({d})", .{
                 fmtRelocType(rel.r_type, macho_file),
                 rel_address,
                 P,
-                S + A,
+                S + A - subtractor,
                 rel.r_symbolnum,
             });
         } else {
-            relocs_log.debug("  {s}: {x}: [{x} => {x}] ({s})", .{
+            relocs_log.debug("  {s}: {x}: [{x} => {x}] G({x}) ({s})", .{
                 fmtRelocType(rel.r_type, macho_file),
                 rel_address,
                 P,
-                S + A,
+                S + A - subtractor,
+                G + A,
                 sym.?.getName(macho_file),
             });
         }
+
+        try stream.seekTo(rel_address);
+
+        switch (rel_type) {
+            .X86_64_RELOC_SUBTRACTOR => subtractor = S,
+
+            .X86_64_RELOC_UNSIGNED => {
+                try cwriter.writeInt(u64, @as(u64, @intCast(S + A - subtractor)), .little);
+                subtractor = 0;
+            },
+
+            .X86_64_RELOC_GOT_LOAD => {
+                if (!sym.?.flags.import) {
+                    // TODO relax!
+                }
+                try cwriter.writeInt(i32, @as(i32, @intCast(G + A - P + 4)), .little);
+            },
+
+            .X86_64_RELOC_GOT => {
+                try cwriter.writeInt(u64, @as(u64, @intCast(G + A)), .little);
+            },
+
+            .X86_64_RELOC_BRANCH => {
+                try cwriter.writeInt(i32, @as(i32, @intCast(S + A - P + 4)), .little);
+            },
+
+            .X86_64_RELOC_TLV => {
+                const S_: i64 = @intCast(sym.?.getTlvAddress(macho_file));
+                try cwriter.writeInt(i32, @as(i32, @intCast(S_ + A - P + 4)), .little);
+            },
+
+            .X86_64_RELOC_SIGNED => {
+                try cwriter.writeInt(i32, @as(i32, @intCast(S + A - P + 4)), .little);
+            },
+
+            .X86_64_RELOC_SIGNED_1 => {
+                try cwriter.writeInt(i32, @as(i32, @intCast(S + A + 4 - 1 - P)), .little);
+            },
+
+            .X86_64_RELOC_SIGNED_2 => {
+                try cwriter.writeInt(i32, @as(i32, @intCast(S + A + 4 - 2 - P)), .little);
+            },
+
+            .X86_64_RELOC_SIGNED_4 => {
+                try cwriter.writeInt(i32, @as(i32, @intCast(S + A + 4 - 4 - P)), .little);
+            },
+        }
     }
+
+    try writer.writeAll(code);
 }
 
 pub fn format(
