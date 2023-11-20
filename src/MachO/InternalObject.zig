@@ -45,6 +45,7 @@ pub fn init(self: *InternalObject, macho_file: *MachO) !void {
 
     {
         const target_idx = try self.addDefined("__mh_execute_header", macho_file);
+        self.symtab.items[target_idx].n_desc = macho.REFERENCED_DYNAMICALLY;
         macho_file.mh_execute_header_index = self.symbols.items[target_idx];
     }
 
@@ -118,7 +119,7 @@ fn addDefined(self: *InternalObject, name: [:0]const u8, macho_file: *MachO) !Sy
     const nlist_idx = try self.addNlist(gpa);
     const nlist = &self.symtab.items[nlist_idx];
     nlist.n_strx = try self.insertString(gpa, name);
-    nlist.n_type |= macho.N_SECT;
+    nlist.n_type = macho.N_EXT | macho.N_SECT;
     const index = @as(Symbol.Index, @intCast(self.symbols.items.len));
     try self.symbols.ensureUnusedCapacity(gpa, 1);
     const off = try macho_file.string_intern.insert(gpa, name);
@@ -132,6 +133,7 @@ fn addUndefined(self: *InternalObject, name: [:0]const u8, macho_file: *MachO) !
     const nlist_idx = try self.addNlist(gpa);
     const nlist = &self.symtab.items[nlist_idx];
     nlist.n_strx = try self.insertString(gpa, name);
+    nlist.n_type = macho.N_EXT;
     const index = @as(Symbol.Index, @intCast(self.symbols.items.len));
     try self.symbols.ensureUnusedCapacity(gpa, 1);
     const off = try macho_file.string_intern.insert(gpa, name);
@@ -142,7 +144,7 @@ fn addUndefined(self: *InternalObject, name: [:0]const u8, macho_file: *MachO) !
 
 pub fn resolveSymbols(self: *InternalObject, macho_file: *MachO) void {
     for (self.getGlobals(), 0..) |index, i| {
-        const nlist_idx = @as(Symbol.Index, @intCast(i));
+        const nlist_idx = @as(Symbol.Index, @intCast(self.first_global + i));
         const nlist = self.symtab.items[nlist_idx];
 
         if (nlist.undf()) continue;

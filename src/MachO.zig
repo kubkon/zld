@@ -27,6 +27,7 @@ globals: std.AutoHashMapUnmanaged(u32, Symbol.Index) = .{},
 /// Key is symbol index.
 undefs: std.AutoHashMapUnmanaged(Symbol.Index, std.ArrayListUnmanaged(Atom.Index)) = .{},
 
+pagezero_seg_index: ?u8 = null,
 got_sect_index: ?u8 = null,
 stubs_sect_index: ?u8 = null,
 stubs_helper_sect_index: ?u8 = null,
@@ -239,9 +240,11 @@ pub fn flush(self: *MachO) !void {
     try self.initSegments();
 
     try self.allocateSections();
+    self.allocateSegments();
     self.allocateAtoms();
     self.allocateLocals();
     self.allocateGlobals();
+    self.allocateSyntheticSymbols();
 
     state_log.debug("{}", .{self.dumpState()});
 
@@ -1281,6 +1284,7 @@ fn initSegments(self: *MachO) !void {
             log.warn("requested __PAGEZERO size (0x{x}) is not page aligned", .{pagezero_vmsize});
             log.warn("  rounding down to 0x{x}", .{aligned_pagezero_vmsize});
         }
+        self.pagezero_seg_index = @intCast(self.segments.items.len);
         try self.segments.append(gpa, .{
             .cmdsize = @sizeOf(macho.segment_command_64),
             .segname = makeStaticString("__PAGEZERO"),
@@ -1342,8 +1346,8 @@ fn initSegments(self: *MachO) !void {
 
 fn allocateSections(self: *MachO) !void {
     const headerpad = try load_commands.calcMinHeaderPadSize(self);
-    var vmaddr: u64 = if (!self.options.dylib)
-        self.segments.items[0].vmaddr + self.segments.items[0].vmsize
+    var vmaddr: u64 = if (self.pagezero_seg_index) |index|
+        self.segments.items[index].vmaddr + self.segments.items[index].vmsize
     else
         0;
     vmaddr += headerpad;
@@ -1372,6 +1376,43 @@ fn allocateSections(self: *MachO) !void {
         }
 
         next_seg_id = seg_id;
+    }
+}
+
+fn allocateSegments(self: *MachO) void {
+    const page_size = self.getPageSize();
+    var vmaddr = if (self.pagezero_seg_index) |index|
+        self.segments.items[index].vmaddr + self.segments.items[index].vmsize
+    else
+        0;
+    var fileoff: u64 = 0;
+    const index = if (self.pagezero_seg_index) |index| index + 1 else 0;
+
+    const slice = self.sections.slice();
+    var next_sect_id: u8 = 0;
+    for (self.segments.items[index..], index..) |*seg, seg_id| {
+        seg.vmaddr = vmaddr;
+        seg.fileoff = fileoff;
+
+        for (
+            slice.items(.header)[next_sect_id..],
+            slice.items(.segment_id)[next_sect_id..],
+        ) |header, sid| {
+            if (seg_id != sid) break;
+
+            vmaddr = header.addr + header.size;
+            if (!header.isZerofill()) {
+                fileoff = header.offset + header.size;
+            }
+
+            next_sect_id += 1;
+        }
+
+        vmaddr = mem.alignForward(u64, vmaddr, page_size);
+        fileoff = mem.alignForward(u64, fileoff, page_size);
+
+        seg.vmsize = vmaddr - seg.vmaddr;
+        seg.filesize = fileoff - seg.fileoff;
     }
 }
 
@@ -1408,7 +1449,7 @@ fn allocateLocals(self: *MachO) void {
     }
 }
 
-pub fn allocateGlobals(self: *MachO) void {
+fn allocateGlobals(self: *MachO) void {
     for (self.objects.items) |index| {
         for (self.getFile(index).?.getGlobals()) |global_index| {
             const global = self.getSymbol(global_index);
@@ -1428,6 +1469,20 @@ pub fn allocateGlobals(self: *MachO) void {
             global.value += atom.value;
             global.out_n_sect = atom.out_n_sect;
         }
+    }
+}
+
+fn allocateSyntheticSymbols(self: *MachO) void {
+    const text_seg = self.segments.items[self.getSegmentByName("__TEXT").?];
+
+    if (self.mh_execute_header_index) |index| {
+        const global = self.getSymbol(index);
+        global.value = text_seg.vmaddr;
+    }
+
+    if (self.dso_handle_index) |index| {
+        const global = self.getSymbol(index);
+        global.value = text_seg.vmaddr;
     }
 }
 
@@ -1687,7 +1742,8 @@ fn formatSegments(
     _ = unused_fmt_string;
     for (self.segments.items, 0..) |seg, i| {
         try writer.print("seg({d}) : {s} : @{x}-{x} ({x}-{x})\n", .{
-            i, seg.segName(), seg.vmaddr, seg.vmsize, seg.fileoff, seg.filesize,
+            i,           seg.segName(),              seg.vmaddr, seg.vmaddr + seg.vmsize,
+            seg.fileoff, seg.fileoff + seg.filesize,
         });
     }
 }
