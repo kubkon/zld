@@ -17,10 +17,15 @@ fn calcInstallNameLen(cmd_size: u64, name: []const u8, assume_max_path_len: bool
     return mem.alignForward(u64, cmd_size + name_len, @alignOf(u64));
 }
 
-fn calcLoadCommandsSize(macho_file: *MachO, assume_max_path_len: bool) !u32 {
-    const gpa = macho_file.base.allocator;
+pub fn calcLoadCommandsSize(macho_file: *MachO, assume_max_path_len: bool) u32 {
     const options = &macho_file.options;
     var sizeofcmds: u64 = 0;
+
+    // LC_SEGMENT_64
+    sizeofcmds += @sizeOf(macho.segment_command_64) * macho_file.segments.items.len;
+    for (macho_file.segments.items) |seg| {
+        sizeofcmds += seg.nsects * @sizeOf(macho.section_64);
+    }
 
     // LC_DYLD_INFO_ONLY
     sizeofcmds += @sizeOf(macho.dyld_info_command);
@@ -56,9 +61,7 @@ fn calcLoadCommandsSize(macho_file: *MachO, assume_max_path_len: bool) !u32 {
     }
     // LC_RPATH
     {
-        var it = RpathIterator.init(gpa, options.rpath_list);
-        defer it.deinit();
-        while (try it.next()) |rpath| {
+        for (options.rpath_list) |rpath| {
             sizeofcmds += calcInstallNameLen(
                 @sizeOf(macho.rpath_command),
                 rpath,
@@ -98,13 +101,13 @@ fn calcLoadCommandsSize(macho_file: *MachO, assume_max_path_len: bool) !u32 {
     return @as(u32, @intCast(sizeofcmds));
 }
 
-pub fn calcMinHeaderPadSize(macho_file: *MachO) !u32 {
+pub fn calcMinHeaderPadSize(macho_file: *MachO) u32 {
     const options = &macho_file.options;
-    var padding: u32 = (try calcLoadCommandsSize(macho_file, false)) + (options.headerpad orelse 0);
+    var padding: u32 = calcLoadCommandsSize(macho_file, false) + (options.headerpad orelse 0);
     log.debug("minimum requested headerpad size 0x{x}", .{padding + @sizeOf(macho.mach_header_64)});
 
     if (options.headerpad_max_install_names) {
-        const min_headerpad_size: u32 = try calcLoadCommandsSize(macho_file, true);
+        const min_headerpad_size: u32 = calcLoadCommandsSize(macho_file, true);
         log.debug("headerpad_max_install_names minimum headerpad size 0x{x}", .{
             min_headerpad_size + @sizeOf(macho.mach_header_64),
         });
@@ -117,34 +120,22 @@ pub fn calcMinHeaderPadSize(macho_file: *MachO) !u32 {
     return offset;
 }
 
-pub fn calcNumOfLCs(lc_buffer: []const u8) u32 {
-    var ncmds: u32 = 0;
-    var pos: usize = 0;
-    while (true) {
-        if (pos >= lc_buffer.len) break;
-        const cmd = @as(*align(1) const macho.load_command, @ptrCast(lc_buffer.ptr + pos)).*;
-        ncmds += 1;
-        pos += cmd.cmdsize;
-    }
-    return ncmds;
-}
-
-pub fn writeDylinkerLC(lc_writer: anytype) !void {
+pub fn writeDylinkerLC(writer: anytype) !void {
     const name_len = mem.sliceTo(default_dyld_path, 0).len;
     const cmdsize = @as(u32, @intCast(mem.alignForward(
         u64,
         @sizeOf(macho.dylinker_command) + name_len,
         @sizeOf(u64),
     )));
-    try lc_writer.writeStruct(macho.dylinker_command{
+    try writer.writeStruct(macho.dylinker_command{
         .cmd = .LOAD_DYLINKER,
         .cmdsize = cmdsize,
         .name = @sizeOf(macho.dylinker_command),
     });
-    try lc_writer.writeAll(mem.sliceTo(default_dyld_path, 0));
+    try writer.writeAll(mem.sliceTo(default_dyld_path, 0));
     const padding = cmdsize - @sizeOf(macho.dylinker_command) - name_len;
     if (padding > 0) {
-        try lc_writer.writeByteNTimes(0, padding);
+        try writer.writeByteNTimes(0, padding);
     }
 }
 
@@ -156,14 +147,14 @@ const WriteDylibLCCtx = struct {
     compatibility_version: u32 = 0x10000,
 };
 
-fn writeDylibLC(ctx: WriteDylibLCCtx, lc_writer: anytype) !void {
+pub fn writeDylibLC(ctx: WriteDylibLCCtx, writer: anytype) !void {
     const name_len = ctx.name.len + 1;
     const cmdsize = @as(u32, @intCast(mem.alignForward(
         u64,
         @sizeOf(macho.dylib_command) + name_len,
         @sizeOf(u64),
     )));
-    try lc_writer.writeStruct(macho.dylib_command{
+    try writer.writeStruct(macho.dylib_command{
         .cmd = ctx.cmd,
         .cmdsize = cmdsize,
         .dylib = .{
@@ -173,15 +164,15 @@ fn writeDylibLC(ctx: WriteDylibLCCtx, lc_writer: anytype) !void {
             .compatibility_version = ctx.compatibility_version,
         },
     });
-    try lc_writer.writeAll(ctx.name);
-    try lc_writer.writeByte(0);
+    try writer.writeAll(ctx.name);
+    try writer.writeByte(0);
     const padding = cmdsize - @sizeOf(macho.dylib_command) - name_len;
     if (padding > 0) {
-        try lc_writer.writeByteNTimes(0, padding);
+        try writer.writeByteNTimes(0, padding);
     }
 }
 
-pub fn writeDylibIdLC(options: *const Options, lc_writer: anytype) !void {
+pub fn writeDylibIdLC(options: *const Options, writer: anytype) !void {
     assert(options.dylib);
     const emit = options.emit;
     const install_name = options.install_name orelse emit.sub_path;
@@ -192,59 +183,31 @@ pub fn writeDylibIdLC(options: *const Options, lc_writer: anytype) !void {
         .name = install_name,
         .current_version = curr.value,
         .compatibility_version = compat.value,
-    }, lc_writer);
+    }, writer);
 }
 
-const RpathIterator = struct {
-    buffer: []const []const u8,
-    table: std.StringHashMap(void),
-    count: usize = 0,
-
-    fn init(gpa: Allocator, rpaths: []const []const u8) RpathIterator {
-        return .{ .buffer = rpaths, .table = std.StringHashMap(void).init(gpa) };
-    }
-
-    fn deinit(it: *RpathIterator) void {
-        it.table.deinit();
-    }
-
-    fn next(it: *RpathIterator) !?[]const u8 {
-        while (true) {
-            if (it.count >= it.buffer.len) return null;
-            const rpath = it.buffer[it.count];
-            it.count += 1;
-            const gop = try it.table.getOrPut(rpath);
-            if (gop.found_existing) continue;
-            return rpath;
-        }
-    }
-};
-
-pub fn writeRpathLCs(gpa: Allocator, options: *const Options, lc_writer: anytype) !void {
-    var it = RpathIterator.init(gpa, options.rpath_list);
-    defer it.deinit();
-
-    while (try it.next()) |rpath| {
+pub fn writeRpathLCs(rpaths: []const []const u8, writer: anytype) !void {
+    for (rpaths) |rpath| {
         const rpath_len = rpath.len + 1;
         const cmdsize = @as(u32, @intCast(mem.alignForward(
             u64,
             @sizeOf(macho.rpath_command) + rpath_len,
             @sizeOf(u64),
         )));
-        try lc_writer.writeStruct(macho.rpath_command{
+        try writer.writeStruct(macho.rpath_command{
             .cmdsize = cmdsize,
             .path = @sizeOf(macho.rpath_command),
         });
-        try lc_writer.writeAll(rpath);
-        try lc_writer.writeByte(0);
+        try writer.writeAll(rpath);
+        try writer.writeByte(0);
         const padding = cmdsize - @sizeOf(macho.rpath_command) - rpath_len;
         if (padding > 0) {
-            try lc_writer.writeByteNTimes(0, padding);
+            try writer.writeByteNTimes(0, padding);
         }
     }
 }
 
-pub fn writeVersionMinLC(platform: Options.Platform, sdk_version: ?Options.Version, lc_writer: anytype) !void {
+pub fn writeVersionMinLC(platform: Options.Platform, sdk_version: ?Options.Version, writer: anytype) !void {
     const cmd: macho.LC = switch (platform.platform) {
         .MACOS => .VERSION_MIN_MACOSX,
         .IOS, .IOSSIMULATOR => .VERSION_MIN_IPHONEOS,
@@ -252,38 +215,24 @@ pub fn writeVersionMinLC(platform: Options.Platform, sdk_version: ?Options.Versi
         .WATCHOS, .WATCHOSSIMULATOR => .VERSION_MIN_WATCHOS,
         else => unreachable,
     };
-    try lc_writer.writeAll(mem.asBytes(&macho.version_min_command{
+    try writer.writeAll(mem.asBytes(&macho.version_min_command{
         .cmd = cmd,
         .version = platform.version.value,
         .sdk = if (sdk_version) |ver| ver.value else platform.version.value,
     }));
 }
 
-pub fn writeBuildVersionLC(platform: Options.Platform, sdk_version: ?Options.Version, lc_writer: anytype) !void {
+pub fn writeBuildVersionLC(platform: Options.Platform, sdk_version: ?Options.Version, writer: anytype) !void {
     const cmdsize = @sizeOf(macho.build_version_command) + @sizeOf(macho.build_tool_version);
-    try lc_writer.writeStruct(macho.build_version_command{
+    try writer.writeStruct(macho.build_version_command{
         .cmdsize = cmdsize,
         .platform = platform.platform,
         .minos = platform.version.value,
         .sdk = if (sdk_version) |ver| ver.value else platform.version.value,
         .ntools = 1,
     });
-    try lc_writer.writeAll(mem.asBytes(&macho.build_tool_version{
+    try writer.writeAll(mem.asBytes(&macho.build_tool_version{
         .tool = @as(macho.TOOL, @enumFromInt(0x6)),
         .version = 0x0,
     }));
-}
-
-pub fn writeLoadDylibLCs(dylibs: []const Dylib, referenced: []u16, lc_writer: anytype) !void {
-    for (referenced) |index| {
-        const dylib = dylibs[index];
-        const dylib_id = dylib.id orelse unreachable;
-        try writeDylibLC(.{
-            .cmd = if (dylib.weak) .LOAD_WEAK_DYLIB else .LOAD_DYLIB,
-            .name = dylib_id.name,
-            .timestamp = dylib_id.timestamp,
-            .current_version = dylib_id.current_version,
-            .compatibility_version = dylib_id.compatibility_version,
-        }, lc_writer);
-    }
 }

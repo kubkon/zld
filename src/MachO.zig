@@ -28,6 +28,7 @@ globals: std.AutoHashMapUnmanaged(u32, Symbol.Index) = .{},
 undefs: std.AutoHashMapUnmanaged(Symbol.Index, std.ArrayListUnmanaged(Atom.Index)) = .{},
 
 pagezero_seg_index: ?u8 = null,
+linkedit_seg_index: ?u8 = null,
 got_sect_index: ?u8 = null,
 stubs_sect_index: ?u8 = null,
 stubs_helper_sect_index: ?u8 = null,
@@ -247,6 +248,10 @@ pub fn flush(self: *MachO) !void {
     self.allocateSyntheticSymbols();
 
     state_log.debug("{}", .{self.dumpState()});
+
+    const ncmds, const sizeofcmds, const uuid_cmd_offset = try self.writeLoadCommands();
+    _ = uuid_cmd_offset;
+    try self.writeHeader(ncmds, sizeofcmds);
 
     self.base.reportWarningsAndErrorsAndExit();
 }
@@ -1335,6 +1340,7 @@ fn initSegments(self: *MachO) !void {
     // __LINKEDIT always comes last
     {
         const protection = getSegmentProt("__LINKEDIT");
+        self.linkedit_seg_index = @intCast(self.segments.items.len);
         try self.segments.append(gpa, .{
             .cmdsize = @sizeOf(macho.segment_command_64),
             .segname = makeStaticString("__LINKEDIT"),
@@ -1345,7 +1351,7 @@ fn initSegments(self: *MachO) !void {
 }
 
 fn allocateSections(self: *MachO) !void {
-    const headerpad = try load_commands.calcMinHeaderPadSize(self);
+    const headerpad = load_commands.calcMinHeaderPadSize(self);
     var vmaddr: u64 = if (self.pagezero_seg_index) |index|
         self.segments.items[index].vmaddr + self.segments.items[index].vmsize
     else
@@ -1484,6 +1490,142 @@ fn allocateSyntheticSymbols(self: *MachO) void {
         const global = self.getSymbol(index);
         global.value = text_seg.vmaddr;
     }
+}
+
+fn writeLoadCommands(self: *MachO) !struct { usize, usize, usize } {
+    const gpa = self.base.allocator;
+    const needed_size = load_commands.calcLoadCommandsSize(self, false);
+    const buffer = try gpa.alloc(u8, needed_size);
+    defer gpa.free(buffer);
+
+    var stream = std.io.fixedBufferStream(buffer);
+    var cwriter = std.io.countingWriter(stream.writer());
+    const writer = cwriter.writer();
+
+    var ncmds: usize = 0;
+
+    // Segment and section load commands
+    {
+        const slice = self.sections.slice();
+        var sect_id: usize = 0;
+        for (self.segments.items) |seg| {
+            try writer.writeStruct(seg);
+            for (slice.items(.header)[sect_id..][0..seg.nsects]) |header| {
+                try writer.writeStruct(header);
+            }
+            sect_id += seg.nsects;
+        }
+        ncmds += self.segments.items.len;
+    }
+
+    try writer.writeStruct(self.dyld_info_cmd);
+    ncmds += 1;
+    try writer.writeStruct(self.function_starts_cmd);
+    ncmds += 1;
+    try writer.writeStruct(self.data_in_code_cmd);
+    ncmds += 1;
+    try writer.writeStruct(self.symtab_cmd);
+    ncmds += 1;
+    try writer.writeStruct(self.dysymtab_cmd);
+    ncmds += 1;
+    try load_commands.writeDylinkerLC(writer);
+    ncmds += 1;
+
+    if (self.entry_index) |global_index| {
+        const seg_id = self.getSegmentByName("__TEXT").?;
+        const seg = self.segments.items[seg_id];
+        const sym = self.getSymbol(global_index);
+        try writer.writeStruct(macho.entry_point_command{
+            .entryoff = @as(u32, @intCast(sym.getAddress(.{}, self) - seg.vmaddr)),
+            .stacksize = self.options.stack_size orelse 0,
+        });
+        ncmds += 1;
+    }
+
+    if (self.options.dylib) {
+        try load_commands.writeDylibIdLC(&self.options, writer);
+        ncmds += 1;
+    }
+
+    try load_commands.writeRpathLCs(self.options.rpath_list, writer);
+    ncmds += self.options.rpath_list.len;
+
+    try writer.writeStruct(macho.source_version_command{ .version = 0 });
+    ncmds += 1;
+
+    if (self.options.platform) |platform| {
+        if (platform.isBuildVersionCompatible()) {
+            try load_commands.writeBuildVersionLC(platform, self.options.sdk_version, writer);
+            ncmds += 1;
+        } else {
+            try load_commands.writeVersionMinLC(platform, self.options.sdk_version, writer);
+            ncmds += 1;
+        }
+    }
+
+    const uuid_cmd_offset = @sizeOf(macho.mach_header_64) + buffer.len;
+    try writer.writeStruct(self.uuid_cmd);
+    ncmds += 1;
+
+    for (self.dylibs.items) |index| {
+        const dylib = self.getFile(index).?.dylib;
+        if (!dylib.alive) continue;
+        const dylib_id = dylib.id.?;
+        try load_commands.writeDylibLC(.{
+            .cmd = if (dylib.weak) .LOAD_WEAK_DYLIB else .LOAD_DYLIB,
+            .name = dylib_id.name,
+            .timestamp = dylib_id.timestamp,
+            .current_version = dylib_id.current_version,
+            .compatibility_version = dylib_id.compatibility_version,
+        }, writer);
+        ncmds += 1;
+    }
+
+    if (self.requiresCodeSig()) {
+        try writer.writeStruct(self.codesig_cmd);
+        ncmds += 1;
+    }
+
+    assert(cwriter.bytes_written == needed_size);
+
+    try self.base.file.pwriteAll(buffer, @sizeOf(macho.mach_header_64));
+
+    return .{ ncmds, buffer.len, uuid_cmd_offset };
+}
+
+fn writeHeader(self: *MachO, ncmds: usize, sizeofcmds: usize) !void {
+    var header: macho.mach_header_64 = .{};
+    header.flags = macho.MH_NOUNDEFS | macho.MH_DYLDLINK | macho.MH_PIE | macho.MH_TWOLEVEL;
+
+    switch (self.options.cpu_arch.?) {
+        .aarch64 => {
+            header.cputype = macho.CPU_TYPE_ARM64;
+            header.cpusubtype = macho.CPU_SUBTYPE_ARM_ALL;
+        },
+        .x86_64 => {
+            header.cputype = macho.CPU_TYPE_X86_64;
+            header.cpusubtype = macho.CPU_SUBTYPE_X86_64_ALL;
+        },
+        else => {},
+    }
+
+    if (self.options.dylib) {
+        header.filetype = macho.MH_DYLIB;
+        header.flags |= macho.MH_NO_REEXPORTED_DYLIBS;
+    } else {
+        header.filetype = macho.MH_EXECUTE;
+    }
+
+    if (self.tlv_sect_index) |_| {
+        header.flags |= macho.MH_HAS_TLV_DESCRIPTORS;
+    }
+
+    header.ncmds = @intCast(ncmds);
+    header.sizeofcmds = @intCast(sizeofcmds);
+
+    log.debug("writing Mach-O header {}", .{header});
+
+    try self.base.file.pwriteAll(mem.asBytes(&header), 0);
 }
 
 pub inline fn getPageSize(self: MachO) u16 {
@@ -1680,8 +1822,7 @@ fn fmtDumpState(
     _ = unused_fmt_string;
     for (self.objects.items) |index| {
         const object = self.getFile(index).?.object;
-        try writer.print("object({d}) : {}", .{ index, object.fmtPath() });
-        if (!object.alive) try writer.writeAll(" : [*]");
+        try writer.print("object({d}) : {} : alive({})", .{ index, object.fmtPath(), object.alive });
         try writer.writeByte('\n');
         try writer.print("{}{}\n", .{
             object.fmtAtoms(self),
@@ -1690,8 +1831,13 @@ fn fmtDumpState(
     }
     for (self.dylibs.items) |index| {
         const dylib = self.getFile(index).?.dylib;
-        try writer.print("dylib({d}) : {s} : needed({}) : weak({})", .{ index, dylib.path, dylib.needed, dylib.weak });
-        if (!dylib.alive) try writer.writeAll(" : [*]");
+        try writer.print("dylib({d}) : {s} : alive({}) : needed({}) : weak({})", .{
+            index,
+            dylib.path,
+            dylib.alive,
+            dylib.needed,
+            dylib.weak,
+        });
         try writer.writeByte('\n');
         try writer.print("{}\n", .{dylib.fmtSymtab(self)});
     }

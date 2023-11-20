@@ -65,8 +65,12 @@ pub fn getSymbolRank(symbol: Symbol, macho_file: *MachO) u32 {
     return file.getSymbolRank(nlist, in_archive);
 }
 
-pub fn getAddress(symbol: Symbol, macho_file: *MachO) u64 {
-    _ = macho_file;
+pub fn getAddress(symbol: Symbol, opts: struct {
+    stubs: bool = true,
+}, macho_file: *MachO) u64 {
+    if (symbol.flags.stubs and opts.stubs) {
+        return symbol.getStubsAddress(macho_file);
+    }
     return symbol.value;
 }
 

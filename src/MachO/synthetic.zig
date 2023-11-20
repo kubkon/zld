@@ -52,7 +52,7 @@ pub const GotSection = struct {
                 i,
                 symbol.getGotAddress(ctx.macho_file),
                 entry,
-                symbol.getAddress(ctx.macho_file),
+                symbol.getAddress(.{}, ctx.macho_file),
                 symbol.getName(ctx.macho_file),
             });
         }
@@ -111,7 +111,7 @@ pub const StubsSection = struct {
                 i,
                 symbol.getStubsAddress(ctx.macho_file),
                 entry,
-                symbol.getAddress(ctx.macho_file),
+                symbol.getAddress(.{}, ctx.macho_file),
                 symbol.getName(ctx.macho_file),
             });
         }
@@ -204,7 +204,7 @@ pub const TlvSection = struct {
                 i,
                 symbol.getTlvAddress(ctx.macho_file),
                 entry,
-                symbol.getAddress(ctx.macho_file),
+                symbol.getAddress(.{}, ctx.macho_file),
                 symbol.getName(ctx.macho_file),
             });
         }
