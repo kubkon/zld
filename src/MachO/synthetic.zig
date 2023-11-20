@@ -212,8 +212,11 @@ pub const TlvPtrSection = struct {
 };
 
 pub const RebaseSection = Rebase;
+pub const BindSection = bind.Bind;
+pub const LazyBindSection = bind.LazyBind;
 
 const assert = std.debug.assert;
+const bind = @import("dyld_info/bind.zig");
 const std = @import("std");
 
 const Allocator = std.mem.Allocator;

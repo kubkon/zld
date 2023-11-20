@@ -246,6 +246,9 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
         } else null;
         const sym = if (sym_index) |index| macho_file.getSymbol(index) else null;
 
+        const seg_id = macho_file.sections.items(.segment_id)[self.out_n_sect];
+        const seg = macho_file.segments.items[seg_id];
+
         const P = @as(i64, @intCast(self.value)) + rel.r_address;
 
         const S: i64 = if (rel.r_extern == 0) blk: {
@@ -295,15 +298,18 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
                 assert(rel.r_pcrel == 0);
                 if (sym) |s| {
                     if (s.flags.import) {
-                        // TODO bind
+                        macho_file.bind.entries.appendAssumeCapacity(.{
+                            .target = sym_index.?,
+                            .offset = @as(u64, @intCast(P)) - seg.vmaddr,
+                            .segment_id = seg_id,
+                            .addend = A,
+                        });
                         continue;
                     } else if (s.isTlvInit(macho_file)) {
                         try cwriter.writeInt(u64, @intCast(S - TLS), .little);
                         continue;
                     }
                 }
-                const seg_id = macho_file.sections.items(.segment_id)[self.out_n_sect];
-                const seg = macho_file.segments.items[seg_id];
                 macho_file.rebase.entries.appendAssumeCapacity(.{
                     .offset = @as(u64, @intCast(P)) - seg.vmaddr,
                     .segment_id = seg_id,

@@ -50,6 +50,8 @@ stubs_helper: StubsHelperSection = .{},
 la_symbol_ptr: LaSymbolPtrSection = .{},
 tlv_ptr: TlvPtrSection = .{},
 rebase: RebaseSection = .{},
+bind: BindSection = .{},
+lazy_bind: LazyBindSection = .{},
 
 atoms: std.ArrayListUnmanaged(Atom) = .{},
 
@@ -113,6 +115,9 @@ pub fn deinit(self: *MachO) void {
     self.got.deinit(gpa);
     self.stubs.deinit(gpa);
     self.tlv_ptr.deinit(gpa);
+    self.rebase.deinit(gpa);
+    self.bind.deinit(gpa);
+    self.lazy_bind.deinit(gpa);
 
     self.arena.promote(gpa).deinit();
 }
@@ -1084,10 +1089,14 @@ fn initSyntheticSections(self: *MachO) !void {
 
     {
         var nrebases: usize = 0;
+        var nbinds: usize = 0;
         for (self.objects.items) |index| {
-            nrebases += self.getFile(index).?.object.num_rebase_relocs;
+            const object = self.getFile(index).?.object;
+            nrebases += object.num_rebase_relocs;
+            nbinds += object.num_bind_relocs;
         }
-        try self.rebase.entries.ensureTotalCapacityPrecise(gpa, nrebases);
+        try self.rebase.entries.ensureUnusedCapacity(gpa, nrebases);
+        try self.bind.entries.ensureUnusedCapacity(gpa, nbinds);
     }
 }
 
@@ -2047,7 +2056,7 @@ const Allocator = mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const Archive = @import("MachO/Archive.zig");
 const Atom = @import("MachO/Atom.zig");
-const Bind = @import("MachO/dyld_info/bind.zig").Bind(*const MachO, MachO.SymbolWithLoc);
+const BindSection = synthetic.BindSection;
 const CodeSignature = @import("MachO/CodeSignature.zig");
 const Dylib = @import("MachO/Dylib.zig");
 const DwarfInfo = @import("MachO/DwarfInfo.zig");
@@ -2058,7 +2067,7 @@ const MachO = @This();
 const Md5 = std.crypto.hash.Md5;
 const Object = @import("MachO/Object.zig");
 pub const Options = @import("MachO/Options.zig");
-const LazyBind = @import("MachO/dyld_info/bind.zig").LazyBind(*const MachO, MachO.SymbolWithLoc);
+const LazyBindSection = synthetic.LazyBindSection;
 const LaSymbolPtrSection = synthetic.LaSymbolPtrSection;
 const LibStub = @import("tapi.zig").LibStub;
 const RebaseSection = synthetic.RebaseSection;
