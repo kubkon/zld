@@ -193,6 +193,26 @@ pub const LaSymbolPtrSection = struct {
         _ = laptr;
         return macho_file.stubs.symbols.items.len * @sizeOf(u64);
     }
+
+    pub fn addLazyBind(laptr: LaSymbolPtrSection, macho_file: *MachO) !void {
+        _ = laptr;
+        const gpa = macho_file.base.allocator;
+        try macho_file.lazy_bind.entries.ensureUnusedCapacity(gpa, macho_file.stubs.symbols.items.len);
+
+        const sect = macho_file.sections.items(.header)[macho_file.la_symbol_ptr_sect_index.?];
+        const seg_id = macho_file.sections.items(.segment_id)[macho_file.la_symbol_ptr_sect_index.?];
+        const seg = macho_file.segments.items[seg_id];
+
+        for (macho_file.stubs.symbols.items, 0..) |sym_index, idx| {
+            const addr = sect.addr + idx * @sizeOf(u64);
+            macho_file.lazy_bind.entries.appendAssumeCapacity(.{
+                .target = sym_index,
+                .offset = addr - seg.vmaddr,
+                .segment_id = seg_id,
+                .addend = 0,
+            });
+        }
+    }
 };
 
 pub const TlvPtrSection = struct {
