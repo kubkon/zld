@@ -182,6 +182,8 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
             .X86_64_RELOC_UNSIGNED => {
                 if (symbol.flags.import) {
                     file.object.num_bind_relocs += 1;
+                } else if (symbol.isTlvInit(macho_file)) {
+                    macho_file.has_tlv = true;
                 } else {
                     file.object.num_rebase_relocs += 1;
                 }
@@ -286,7 +288,7 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
 
             .X86_64_RELOC_UNSIGNED => {
                 if (sym) |s| {
-                    if (s.isTlvInit(macho_file)) {
+                    if (!s.flags.import and s.isTlvInit(macho_file)) {
                         try cwriter.writeInt(u64, @intCast(S - TLS), .little);
                         continue;
                     }

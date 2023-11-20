@@ -33,7 +33,7 @@ got_sect_index: ?u8 = null,
 stubs_sect_index: ?u8 = null,
 stubs_helper_sect_index: ?u8 = null,
 la_symbol_ptr_sect_index: ?u8 = null,
-tlv_sect_index: ?u8 = null,
+tlv_ptr_sect_index: ?u8 = null,
 
 mh_execute_header_index: ?Symbol.Index = null,
 dyld_stub_binder_index: ?Symbol.Index = null,
@@ -47,9 +47,11 @@ got: GotSection = .{},
 stubs: StubsSection = .{},
 stubs_helper: StubsHelperSection = .{},
 la_symbol_ptr: LaSymbolPtrSection = .{},
-tlv: TlvSection = .{},
+tlv_ptr: TlvPtrSection = .{},
 
 atoms: std.ArrayListUnmanaged(Atom) = .{},
+
+has_tlv: bool = false,
 
 pub fn openPath(allocator: Allocator, options: Options, thread_pool: *ThreadPool) !*MachO {
     const file = try options.emit.directory.createFile(options.emit.sub_path, .{
@@ -108,7 +110,7 @@ pub fn deinit(self: *MachO) void {
 
     self.got.deinit(gpa);
     self.stubs.deinit(gpa);
-    self.tlv.deinit(gpa);
+    self.tlv_ptr.deinit(gpa);
 
     self.arena.promote(gpa).deinit();
 }
@@ -1005,10 +1007,10 @@ fn scanRelocs(self: *MachO) !void {
             log.debug("'{s}' needs STUBS", .{symbol.getName(self)});
             try self.stubs.addSymbol(index, self);
         }
-        if (symbol.flags.tlv) {
-            assert(!symbol.flags.import); // TODO
-            log.debug("'{s}' needs TLV", .{symbol.getName(self)});
-            try self.tlv.addSymbol(index, self);
+        if (symbol.flags.tlv_ptr) {
+            assert(symbol.flags.import); // TODO
+            log.debug("'{s}' needs TLV pointer", .{symbol.getName(self)});
+            try self.tlv_ptr.addSymbol(index, self);
         }
     }
 }
@@ -1074,9 +1076,9 @@ fn initSyntheticSections(self: *MachO) !void {
             .flags = macho.S_LAZY_SYMBOL_POINTERS,
         });
     }
-    if (self.tlv.symbols.items.len > 0) {
-        self.tlv_sect_index = try self.addSection("__DATA", "__thread_vars", .{
-            .flags = macho.S_THREAD_LOCAL_VARIABLES,
+    if (self.tlv_ptr.symbols.items.len > 0) {
+        self.tlv_ptr_sect_index = try self.addSection("__DATA", "__thread_ptr", .{
+            .flags = macho.S_THREAD_LOCAL_VARIABLE_POINTERS,
         });
     }
 }
@@ -1173,7 +1175,7 @@ fn sortSections(self: *MachO) !void {
         &self.stubs_sect_index,
         &self.stubs_helper_sect_index,
         &self.la_symbol_ptr_sect_index,
-        &self.tlv_sect_index,
+        &self.tlv_ptr_sect_index,
     }) |maybe_index| {
         if (maybe_index.*) |*index| {
             index.* = backlinks[index.*];
@@ -1269,14 +1271,10 @@ fn calcSectionSizes(self: *MachO) !void {
         header.@"align" = 3;
     }
 
-    if (self.tlv_sect_index) |idx| {
+    if (self.tlv_ptr_sect_index) |idx| {
         const header = &self.sections.items(.header)[idx];
-        header.size = self.tlv.size();
-        header.@"align" = switch (cpu_arch) {
-            .x86_64 => 0,
-            .aarch64 => 2,
-            else => 0,
-        };
+        header.size = self.tlv_ptr.size();
+        header.@"align" = 3;
     }
 }
 
@@ -1647,7 +1645,7 @@ fn writeHeader(self: *MachO, ncmds: usize, sizeofcmds: usize) !void {
         header.filetype = macho.MH_EXECUTE;
     }
 
-    if (self.tlv_sect_index) |_| {
+    if (self.has_tlv) {
         header.flags |= macho.MH_HAS_TLV_DESCRIPTORS;
     }
 
@@ -1888,7 +1886,7 @@ fn fmtDumpState(
     }
     try writer.print("stubs\n{}\n", .{self.stubs.fmt(self)});
     try writer.print("got\n{}\n", .{self.got.fmt(self)});
-    try writer.print("tlv\n{}\n", .{self.tlv.fmt(self)});
+    try writer.print("tlv_ptr\n{}\n", .{self.tlv_ptr.fmt(self)});
     try writer.writeByte('\n');
     try writer.print("sections\n{}\n", .{self.fmtSections()});
     try writer.print("segments\n{}\n", .{self.fmtSegments()});
@@ -2070,7 +2068,7 @@ const StringTable = @import("strtab.zig").StringTable;
 const StubsSection = synthetic.StubsSection;
 const StubsHelperSection = synthetic.StubsHelperSection;
 const ThreadPool = std.Thread.Pool;
-const TlvSection = synthetic.TlvSection;
+const TlvPtrSection = synthetic.TlvPtrSection;
 const Trie = @import("MachO/Trie.zig");
 const UnwindInfo = @import("MachO/UnwindInfo.zig");
 const Zld = @import("Zld.zig");

@@ -153,40 +153,40 @@ pub const LaSymbolPtrSection = struct {
     }
 };
 
-pub const TlvSection = struct {
+pub const TlvPtrSection = struct {
     symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
 
     pub const Index = u32;
 
-    pub fn deinit(tlv: *TlvSection, allocator: Allocator) void {
+    pub fn deinit(tlv: *TlvPtrSection, allocator: Allocator) void {
         tlv.symbols.deinit(allocator);
     }
 
-    pub fn addSymbol(tlv: *TlvSection, sym_index: Symbol.Index, macho_file: *MachO) !void {
+    pub fn addSymbol(tlv: *TlvPtrSection, sym_index: Symbol.Index, macho_file: *MachO) !void {
         const gpa = macho_file.base.allocator;
         const index = @as(Index, @intCast(tlv.symbols.items.len));
         const entry = try tlv.symbols.addOne(gpa);
         entry.* = sym_index;
         const symbol = macho_file.getSymbol(sym_index);
-        try symbol.addExtra(.{ .tlv = index }, macho_file);
+        try symbol.addExtra(.{ .tlv_ptr = index }, macho_file);
     }
 
-    pub fn getAddress(tlv: TlvSection, index: Index, macho_file: *MachO) u64 {
+    pub fn getAddress(tlv: TlvPtrSection, index: Index, macho_file: *MachO) u64 {
         assert(index < tlv.symbols.items.len);
-        const header = macho_file.sections.items(.header)[macho_file.tlv_sect_index.?];
+        const header = macho_file.sections.items(.header)[macho_file.tlv_ptr_sect_index.?];
         return header.addr + index * @sizeOf(u64) * 3;
     }
 
-    pub fn size(tlv: TlvSection) usize {
+    pub fn size(tlv: TlvPtrSection) usize {
         return tlv.symbols.items.len * @sizeOf(u64) * 3;
     }
 
     const FormatCtx = struct {
-        tlv: TlvSection,
+        tlv: TlvPtrSection,
         macho_file: *MachO,
     };
 
-    pub fn fmt(tlv: TlvSection, macho_file: *MachO) std.fmt.Formatter(format2) {
+    pub fn fmt(tlv: TlvPtrSection, macho_file: *MachO) std.fmt.Formatter(format2) {
         return .{ .data = .{ .tlv = tlv, .macho_file = macho_file } };
     }
 
@@ -202,7 +202,7 @@ pub const TlvSection = struct {
             const symbol = ctx.macho_file.getSymbol(entry);
             try writer.print("  {d}@0x{x} => {d}@0x{x} ({s})\n", .{
                 i,
-                symbol.getTlvAddress(ctx.macho_file),
+                symbol.getTlvPtrAddress(ctx.macho_file),
                 entry,
                 symbol.getAddress(.{}, ctx.macho_file),
                 symbol.getName(ctx.macho_file),

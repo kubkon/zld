@@ -91,10 +91,10 @@ pub fn getStubsAddress(symbol: Symbol, macho_file: *MachO) u64 {
     return macho_file.stubs.getAddress(extra.stubs, macho_file);
 }
 
-pub fn getTlvAddress(symbol: Symbol, macho_file: *MachO) u64 {
-    if (!symbol.flags.tlv) return 0;
+pub fn getTlvPtrAddress(symbol: Symbol, macho_file: *MachO) u64 {
+    if (!symbol.flags.tlv_ptr) return 0;
     const extra = symbol.getExtra(macho_file).?;
-    return macho_file.tlv.getAddress(extra.tlv, macho_file);
+    return macho_file.tlv_ptr.getAddress(extra.tlv_ptr, macho_file);
 }
 
 // pub fn getOutputSymtabIndex(symbol: Symbol, elf_file: *Elf) ?u32 {
@@ -118,7 +118,7 @@ pub fn getTlvAddress(symbol: Symbol, macho_file: *MachO) u64 {
 const AddExtraOpts = struct {
     got: ?u32 = null,
     stubs: ?u32 = null,
-    tlv: ?u32 = null,
+    tlv_ptr: ?u32 = null,
     symtab: ?u32 = null,
 };
 
@@ -252,14 +252,14 @@ pub const Flags = packed struct {
     /// Whether the symbols contains __stubs indirection.
     stubs: bool = false,
 
-    /// Whether the symbol has a TLV descriptor.
-    tlv: bool = false,
+    /// Whether the symbol has a TLV pointer.
+    tlv_ptr: bool = false,
 };
 
 pub const Extra = struct {
     got: u32 = 0,
     stubs: u32 = 0,
-    tlv: u32 = 0,
+    tlv_ptr: u32 = 0,
     symtab: u32 = 0,
 };
 
