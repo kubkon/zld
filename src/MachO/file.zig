@@ -81,7 +81,7 @@ pub const File = union(enum) {
 
     pub fn getLocals(file: File) []const Symbol.Index {
         return switch (file) {
-            .internal, .object => |x| x.getLocals(),
+            .object => |x| x.getLocals(),
             inline else => &[0]Symbol.Index{},
         };
     }

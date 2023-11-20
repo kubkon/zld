@@ -36,6 +36,7 @@ la_symbol_ptr_sect_index: ?u8 = null,
 tlv_ptr_sect_index: ?u8 = null,
 
 mh_execute_header_index: ?Symbol.Index = null,
+dyld_private_index: ?Symbol.Index = null,
 dyld_stub_binder_index: ?Symbol.Index = null,
 dso_handle_index: ?Symbol.Index = null,
 
@@ -230,8 +231,8 @@ pub fn flush(self: *MachO) !void {
 
     // TODO dead strip atoms
 
-    try self.initOutputSections();
     try self.resolveSyntheticSymbols();
+    try self.initOutputSections();
 
     self.claimUnresolved();
     try self.scanRelocs();
@@ -990,9 +991,6 @@ fn scanRelocs(self: *MachO) !void {
     for (self.objects.items) |index| {
         try self.getFile(index).?.object.scanRelocs(self);
     }
-    if (self.getInternalObject()) |internal| {
-        try internal.scanRelocs(self);
-    }
 
     try self.reportUndefs();
     self.base.reportWarningsAndErrorsAndExit();
@@ -1443,15 +1441,6 @@ fn allocateLocals(self: *MachO) void {
             local.out_n_sect = atom.out_n_sect;
         }
     }
-    if (self.getInternalObject()) |internal| {
-        for (internal.getLocals()) |local_index| {
-            const local = self.getSymbol(local_index);
-            const atom = local.getAtom(self) orelse continue;
-            if (!atom.flags.alive) continue;
-            local.value += atom.value;
-            local.out_n_sect = atom.out_n_sect;
-        }
-    }
 }
 
 fn allocateGlobals(self: *MachO) void {
@@ -1882,7 +1871,7 @@ fn fmtDumpState(
     }
     if (self.getInternalObject()) |internal| {
         try writer.print("internal({d}) : internal\n", .{internal.index});
-        try writer.print("{}\n", .{internal.fmtSymtab(self)});
+        try writer.print("{}{}\n", .{ internal.fmtAtoms(self), internal.fmtSymtab(self) });
     }
     try writer.print("stubs\n{}\n", .{self.stubs.fmt(self)});
     try writer.print("got\n{}\n", .{self.got.fmt(self)});

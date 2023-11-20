@@ -68,7 +68,7 @@ pub fn getCode(self: Atom, macho_file: *MachO) []const u8 {
 
 pub fn getRelocs(self: Atom, macho_file: *MachO) []const macho.relocation_info {
     return switch (self.getFile(macho_file)) {
-        .internal => |x| x.relocations.items[self.relocs.pos..][0..self.relocs.len],
+        .internal => &[0]macho.relocation_info{},
         .object => |x| x.relocations.items[self.relocs.pos..][0..self.relocs.len],
         else => unreachable,
     };
