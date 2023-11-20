@@ -52,6 +52,7 @@ tlv_ptr: TlvPtrSection = .{},
 rebase: RebaseSection = .{},
 bind: BindSection = .{},
 lazy_bind: LazyBindSection = .{},
+export_trie: ExportTrieSection = .{},
 
 atoms: std.ArrayListUnmanaged(Atom) = .{},
 
@@ -118,6 +119,7 @@ pub fn deinit(self: *MachO) void {
     self.rebase.deinit(gpa);
     self.bind.deinit(gpa);
     self.lazy_bind.deinit(gpa);
+    self.export_trie.deinit(gpa);
 
     self.arena.promote(gpa).deinit();
 }
@@ -1509,6 +1511,47 @@ fn initDyldInfoSections(self: *MachO) !void {
     try self.bind.entries.ensureUnusedCapacity(gpa, nbinds);
 
     try self.la_symbol_ptr.addLazyBind(self);
+
+    try self.initExportTrie();
+}
+
+fn initExportTrie(self: *MachO) !void {
+    const gpa = self.base.allocator;
+    try self.export_trie.init(gpa);
+
+    // TODO handle macho.EXPORT_SYMBOL_FLAGS_REEXPORT and macho.EXPORT_SYMBOL_FLAGS_STUB_AND_RESOLVER.
+
+    const seg_id = self.getSegmentByName("__TEXT").?;
+    const seg = self.segments.items[seg_id];
+
+    for (self.objects.items) |index| {
+        for (self.getFile(index).?.getGlobals()) |global_index| {
+            const global = self.getSymbol(global_index);
+            const atom = global.getAtom(self) orelse continue;
+            if (!atom.flags.alive) continue;
+            if (global.getFile(self).?.getIndex() != index) continue;
+            if (!global.flags.@"export") continue;
+            try self.export_trie.put(gpa, .{
+                .name = global.getName(self),
+                .vmaddr_offset = global.getAddress(.{}, self) - seg.vmaddr,
+                .export_flags = macho.EXPORT_SYMBOL_FLAGS_KIND_REGULAR,
+            });
+        }
+    }
+    if (self.getInternalObject()) |internal| {
+        for (internal.getGlobals()) |global_index| {
+            const global = self.getSymbol(global_index);
+            const atom = global.getAtom(self) orelse continue;
+            if (!atom.flags.alive) continue;
+            if (global.getFile(self).?.getIndex() != internal.index) continue;
+            if (!global.flags.@"export") continue;
+            try self.export_trie.put(gpa, .{
+                .name = global.getName(self),
+                .vmaddr_offset = global.getAddress(.{}, self) - seg.vmaddr,
+                .export_flags = macho.EXPORT_SYMBOL_FLAGS_KIND_REGULAR,
+            });
+        }
+    }
 }
 
 fn writeAtoms(self: *MachO) !void {
@@ -2072,6 +2115,7 @@ const BindSection = synthetic.BindSection;
 const CodeSignature = @import("MachO/CodeSignature.zig");
 const Dylib = @import("MachO/Dylib.zig");
 const DwarfInfo = @import("MachO/DwarfInfo.zig");
+const ExportTrieSection = synthetic.ExportTrieSection;
 const File = @import("MachO/file.zig").File;
 const GotSection = synthetic.GotSection;
 const InternalObject = @import("MachO/InternalObject.zig");
@@ -2089,6 +2133,5 @@ const StubsSection = synthetic.StubsSection;
 const StubsHelperSection = synthetic.StubsHelperSection;
 const ThreadPool = std.Thread.Pool;
 const TlvPtrSection = synthetic.TlvPtrSection;
-const Trie = @import("MachO/Trie.zig");
 const UnwindInfo = @import("MachO/UnwindInfo.zig");
 const Zld = @import("Zld.zig");

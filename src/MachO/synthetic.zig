@@ -276,6 +276,7 @@ pub const TlvPtrSection = struct {
 pub const RebaseSection = Rebase;
 pub const BindSection = bind.Bind;
 pub const LazyBindSection = bind.LazyBind;
+pub const ExportTrieSection = Trie;
 
 const assert = std.debug.assert;
 const bind = @import("dyld_info/bind.zig");
@@ -285,3 +286,4 @@ const Allocator = std.mem.Allocator;
 const MachO = @import("../MachO.zig");
 const Rebase = @import("dyld_info/Rebase.zig");
 const Symbol = @import("Symbol.zig");
+const Trie = @import("dyld_info/Trie.zig");
