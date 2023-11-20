@@ -20,6 +20,8 @@ relocations: std.ArrayListUnmanaged(macho.relocation_info) = .{},
 data_in_code: std.ArrayListUnmanaged(macho.data_in_code_entry) = .{},
 
 alive: bool = true,
+num_rebase_relocs: u32 = 0,
+num_bind_relocs: u32 = 0,
 
 pub fn deinit(self: *Object, gpa: Allocator) void {
     self.symtab.deinit(gpa);

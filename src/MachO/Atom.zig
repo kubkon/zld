@@ -164,7 +164,17 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
             },
 
             .X86_64_RELOC_TLV => {
+                // TODO TLV and import
+                assert(!symbol.flags.import);
                 symbol.flags.tlv = true;
+            },
+
+            .X86_64_RELOC_UNSIGNED => {
+                if (symbol.flags.import) {
+                    file.object.num_bind_relocs += 1;
+                } else {
+                    file.object.num_rebase_relocs += 1;
+                }
             },
 
             else => {},
