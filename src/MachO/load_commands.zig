@@ -17,24 +17,15 @@ fn calcInstallNameLen(cmd_size: u64, name: []const u8, assume_max_path_len: bool
     return mem.alignForward(u64, cmd_size + name_len, @alignOf(u64));
 }
 
-fn calcLCsSize(macho_file: *MachO, assume_max_path_len: bool) !u32 {
+fn calcLoadCommandsSize(macho_file: *MachO, assume_max_path_len: bool) !u32 {
     const gpa = macho_file.base.allocator;
     const options = &macho_file.options;
-    var has_text_segment: bool = false;
     var sizeofcmds: u64 = 0;
-    for (macho_file.segments.items) |seg| {
-        sizeofcmds += seg.nsects * @sizeOf(macho.section_64) + @sizeOf(macho.segment_command_64);
-        if (mem.eql(u8, seg.segName(), "__TEXT")) {
-            has_text_segment = true;
-        }
-    }
 
     // LC_DYLD_INFO_ONLY
     sizeofcmds += @sizeOf(macho.dyld_info_command);
     // LC_FUNCTION_STARTS
-    if (has_text_segment) {
-        sizeofcmds += @sizeOf(macho.linkedit_data_command);
-    }
+    sizeofcmds += @sizeOf(macho.linkedit_data_command);
     // LC_DATA_IN_CODE
     sizeofcmds += @sizeOf(macho.linkedit_data_command);
     // LC_SYMTAB
@@ -89,9 +80,10 @@ fn calcLCsSize(macho_file: *MachO, assume_max_path_len: bool) !u32 {
     // LC_UUID
     sizeofcmds += @sizeOf(macho.uuid_command);
     // LC_LOAD_DYLIB
-    for (macho_file.referenced_dylibs.keys()) |id| {
-        const dylib = macho_file.dylibs.items[id];
-        const dylib_id = dylib.id orelse unreachable;
+    for (macho_file.dylibs.items) |index| {
+        const dylib = macho_file.getFile(index).?.dylib;
+        if (!dylib.alive) continue;
+        const dylib_id = dylib.id.?;
         sizeofcmds += calcInstallNameLen(
             @sizeOf(macho.dylib_command),
             dylib_id.name,
@@ -106,13 +98,13 @@ fn calcLCsSize(macho_file: *MachO, assume_max_path_len: bool) !u32 {
     return @as(u32, @intCast(sizeofcmds));
 }
 
-pub fn calcMinHeaderPad(macho_file: *MachO) !u64 {
+pub fn calcMinHeaderPadSize(macho_file: *MachO) !u32 {
     const options = &macho_file.options;
-    var padding: u32 = (try calcLCsSize(macho_file, false)) + (options.headerpad orelse 0);
+    var padding: u32 = (try calcLoadCommandsSize(macho_file, false)) + (options.headerpad orelse 0);
     log.debug("minimum requested headerpad size 0x{x}", .{padding + @sizeOf(macho.mach_header_64)});
 
     if (options.headerpad_max_install_names) {
-        const min_headerpad_size: u32 = try calcLCsSize(macho_file, true);
+        const min_headerpad_size: u32 = try calcLoadCommandsSize(macho_file, true);
         log.debug("headerpad_max_install_names minimum headerpad size 0x{x}", .{
             min_headerpad_size + @sizeOf(macho.mach_header_64),
         });

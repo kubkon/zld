@@ -238,6 +238,8 @@ pub fn flush(self: *MachO) !void {
     try self.calcSectionSizes();
     try self.initSegments();
 
+    try self.allocateSections();
+
     state_log.debug("{}", .{self.dumpState()});
 
     self.base.reportWarningsAndErrorsAndExit();
@@ -1335,6 +1337,41 @@ fn initSegments(self: *MachO) !void {
     }
 }
 
+fn allocateSections(self: *MachO) !void {
+    const headerpad = try load_commands.calcMinHeaderPadSize(self);
+    var vmaddr: u64 = if (!self.options.dylib)
+        self.segments.items[0].vmaddr + self.segments.items[0].vmsize
+    else
+        0;
+    vmaddr += headerpad;
+    var fileoff = headerpad;
+
+    const page_size = self.getPageSize();
+    const slice = self.sections.slice();
+
+    var next_seg_id: u8 = 0;
+    for (slice.items(.header), slice.items(.segment_id)) |*header, seg_id| {
+        if (seg_id != next_seg_id) {
+            vmaddr = mem.alignForward(u64, vmaddr, page_size);
+            fileoff = mem.alignForward(u32, fileoff, page_size);
+        }
+
+        const alignment = try math.powi(u32, 2, header.@"align");
+
+        vmaddr = mem.alignForward(u64, vmaddr, alignment);
+        header.addr = vmaddr;
+        vmaddr += header.size;
+
+        if (!header.isZerofill()) {
+            fileoff = mem.alignForward(u32, fileoff, alignment);
+            header.offset = fileoff;
+            fileoff += @intCast(header.size);
+        }
+
+        next_seg_id = seg_id;
+    }
+}
+
 pub inline fn getPageSize(self: MachO) u16 {
     return switch (self.options.cpu_arch.?) {
         .aarch64 => 0x4000,
@@ -1664,20 +1701,9 @@ pub const LinkObject = struct {
     }
 };
 
-/// Default path to dyld
-const default_dyld_path: [*:0]const u8 = "/usr/lib/dyld";
-
-/// Default implicit entrypoint symbol name.
-const default_entry_point: []const u8 = "_main";
-
 /// Default virtual memory offset corresponds to the size of __PAGEZERO segment and
 /// start of __TEXT segment.
 const default_pagezero_vmsize: u64 = 0x100000000;
-
-/// We commit 0x1000 = 4096 bytes of space to the header and
-/// the table of load commands. This should be plenty for any
-/// potential future extensions.
-const default_headerpad_size: u32 = 0x1000;
 
 const Section = struct {
     header: macho.section_64,
