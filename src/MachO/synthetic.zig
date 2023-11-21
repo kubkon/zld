@@ -363,6 +363,36 @@ pub const TlvPtrSection = struct {
     }
 };
 
+pub const Indsymtab = struct {
+    pub inline fn nsyms(ind: Indsymtab, macho_file: *MachO) u32 {
+        _ = ind;
+        return @intCast(macho_file.stubs.symbols.items.len * 2 + macho_file.got.symbols.items.len);
+    }
+
+    pub fn write(ind: Indsymtab, macho_file: *MachO, writer: anytype) !void {
+        _ = ind;
+
+        for (macho_file.stubs.symbols.items) |sym_index| {
+            const sym = macho_file.getSymbol(sym_index);
+            try writer.writeInt(u32, sym.getOutputSymtabIndex(macho_file).?, .little);
+        }
+
+        for (macho_file.got.symbols.items) |sym_index| {
+            const sym = macho_file.getSymbol(sym_index);
+            if (sym.flags.import) {
+                try writer.writeInt(u32, sym.getOutputSymtabIndex(macho_file).?, .little);
+            } else {
+                try writer.writeInt(u32, std.macho.INDIRECT_SYMBOL_LOCAL, .little);
+            }
+        }
+
+        for (macho_file.stubs.symbols.items) |sym_index| {
+            const sym = macho_file.getSymbol(sym_index);
+            try writer.writeInt(u32, sym.getOutputSymtabIndex(macho_file).?, .little);
+        }
+    }
+};
+
 pub const RebaseSection = Rebase;
 pub const BindSection = bind.Bind;
 pub const LazyBindSection = bind.LazyBind;

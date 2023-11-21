@@ -46,6 +46,7 @@ string_intern: StringTable(.string_intern) = .{},
 
 symtab: std.ArrayListUnmanaged(macho.nlist_64) = .{},
 strtab: std.ArrayListUnmanaged(u8) = .{},
+indsymtab: Indsymtab = .{},
 got: GotSection = .{},
 stubs: StubsSection = .{},
 stubs_helper: StubsHelperSection = .{},
@@ -1084,12 +1085,14 @@ fn initSyntheticSections(self: *MachO) !void {
     if (self.got.symbols.items.len > 0) {
         self.got_sect_index = try self.addSection("__DATA_CONST", "__got", .{
             .flags = macho.S_NON_LAZY_SYMBOL_POINTERS,
+            .reserved1 = @intCast(self.stubs.symbols.items.len),
         });
     }
     if (self.stubs.symbols.items.len > 0) {
         self.stubs_sect_index = try self.addSection("__TEXT", "__stubs", .{
             .flags = macho.S_SYMBOL_STUBS |
                 macho.S_ATTR_PURE_INSTRUCTIONS | macho.S_ATTR_SOME_INSTRUCTIONS,
+            .reserved1 = 0,
             .reserved2 = switch (cpu_arch) {
                 .x86_64 => 6,
                 .aarch64 => 3 * @sizeOf(u32),
@@ -1101,6 +1104,7 @@ fn initSyntheticSections(self: *MachO) !void {
         });
         self.la_symbol_ptr_sect_index = try self.addSection("__DATA", "__la_symbol_ptr", .{
             .flags = macho.S_LAZY_SYMBOL_POINTERS,
+            .reserved1 = @intCast(self.stubs.symbols.items.len + self.got.symbols.items.len),
         });
     }
     if (self.tlv_ptr.symbols.items.len > 0) {
@@ -1853,10 +1857,21 @@ fn writeSymtab(self: *MachO) !void {
 }
 
 fn writeIndsymtab(self: *MachO) !void {
-    _ = self;
-    // const cmd = &self.dysymtab_cmd;
-    // cmd.ilocalsym = 0;
-    // cmd.nlocalsym =
+    const gpa = self.base.allocator;
+    const cmd = &self.dysymtab_cmd;
+    const off = try self.getNextLinkeditOffset(@alignOf(u32));
+    cmd.indirectsymoff = @intCast(off);
+    cmd.nindirectsyms = self.indsymtab.nsyms(self);
+
+    const needed_size = cmd.nindirectsyms * @sizeOf(u32);
+    var buffer = try std.ArrayList(u8).initCapacity(gpa, needed_size);
+    defer buffer.deinit();
+    try self.indsymtab.write(self, buffer.writer());
+
+    try self.base.file.pwriteAll(buffer.items, cmd.indirectsymoff);
+    assert(buffer.items.len == needed_size);
+
+    self.getLinkeditSegment().filesize += needed_size;
 }
 
 fn writeStrtab(self: *MachO) !void {
@@ -2419,6 +2434,7 @@ const DwarfInfo = @import("MachO/DwarfInfo.zig");
 const ExportTrieSection = synthetic.ExportTrieSection;
 const File = @import("MachO/file.zig").File;
 const GotSection = synthetic.GotSection;
+const Indsymtab = synthetic.Indsymtab;
 const InternalObject = @import("MachO/InternalObject.zig");
 const MachO = @This();
 const Md5 = std.crypto.hash.Md5;
