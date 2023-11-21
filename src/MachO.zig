@@ -267,6 +267,7 @@ pub fn flush(self: *MachO) !void {
 
     try self.initDyldInfoSections();
     try self.writeAtoms();
+    try self.finalizeDyldInfoSections();
     try self.writeSyntheticSections();
     try self.writeDyldInfoSections();
     try self.writeFunctionStarts();
@@ -1594,6 +1595,14 @@ fn writeAtoms(self: *MachO) !void {
     }
 }
 
+fn finalizeDyldInfoSections(self: *MachO) !void {
+    const gpa = self.base.allocator;
+    try self.rebase.finalize(gpa);
+    try self.bind.finalize(gpa, self);
+    try self.lazy_bind.finalize(gpa, self);
+    try self.export_trie.finalize(gpa);
+}
+
 fn writeSyntheticSections(self: *MachO) !void {
     const gpa = self.base.allocator;
 
@@ -1611,6 +1620,15 @@ fn writeSyntheticSections(self: *MachO) !void {
         var buffer = try std.ArrayList(u8).initCapacity(gpa, header.size);
         defer buffer.deinit();
         try self.stubs.write(self, buffer.writer());
+        assert(buffer.items.len == header.size);
+        try self.base.file.pwriteAll(buffer.items, header.offset);
+    }
+
+    if (self.stubs_helper_sect_index) |sect_id| {
+        const header = self.sections.items(.header)[sect_id];
+        var buffer = try std.ArrayList(u8).initCapacity(gpa, header.size);
+        defer buffer.deinit();
+        try self.stubs_helper.write(self, buffer.writer());
         assert(buffer.items.len == header.size);
         try self.base.file.pwriteAll(buffer.items, header.offset);
     }
@@ -1632,11 +1650,6 @@ fn getNextLinkeditOffset(self: *MachO, alignment: u64) !u64 {
 
 fn writeDyldInfoSections(self: *MachO) !void {
     const gpa = self.base.allocator;
-    try self.rebase.finalize(gpa);
-    try self.bind.finalize(gpa, self);
-    try self.lazy_bind.finalize(gpa, self);
-    try self.export_trie.finalize(gpa);
-
     const cmd = &self.dyld_info_cmd;
     var needed_size: u32 = 0;
 

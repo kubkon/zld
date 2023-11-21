@@ -149,8 +149,7 @@ pub const StubsSection = struct {
                     try writer.writeAll(&.{ 0xff, 0x25 });
                     const source = sym.getAddress(.{ .stubs = true }, macho_file);
                     const target = laptr_sect.addr + idx * @sizeOf(u64);
-                    const disp = target - source - 2 - 4;
-                    try writer.writeInt(i32, @intCast(disp), .little);
+                    try writer.writeInt(i32, @intCast(target - source - 2 - 4), .little);
                 },
                 .aarch64 => @panic("TODO"),
                 else => unreachable,
@@ -213,6 +212,56 @@ pub const StubsHelperSection = struct {
             s += entrySize(cpu_arch);
         }
         return s;
+    }
+
+    pub fn write(stubs_helper: StubsHelperSection, macho_file: *MachO, writer: anytype) !void {
+        try stubs_helper.writePreamble(macho_file, writer);
+
+        const cpu_arch = macho_file.options.cpu_arch.?;
+        const sect = macho_file.sections.items(.header)[macho_file.stubs_helper_sect_index.?];
+        const preamble_size = preambleSize(cpu_arch);
+        const entry_size = entrySize(cpu_arch);
+
+        for (0..macho_file.stubs.symbols.items.len) |idx| {
+            switch (cpu_arch) {
+                .x86_64 => {
+                    try writer.writeAll(&.{ 0x68, 0x0, 0x0, 0x0, 0x0, 0xe9 });
+                    const source: i64 = @intCast(sect.addr + preamble_size + entry_size * idx);
+                    const target: i64 = @intCast(sect.addr);
+                    try writer.writeInt(i32, @intCast(target - source - 6 - 4), .little);
+                },
+                .aarch64 => @panic("TODO"),
+                else => {},
+            }
+        }
+    }
+
+    fn writePreamble(stubs_helper: StubsHelperSection, macho_file: *MachO, writer: anytype) !void {
+        _ = stubs_helper;
+        const cpu_arch = macho_file.options.cpu_arch.?;
+        const sect = macho_file.sections.items(.header)[macho_file.stubs_helper_sect_index.?];
+        switch (cpu_arch) {
+            .x86_64 => {
+                try writer.writeAll(&.{ 0x4c, 0x8d, 0x1d });
+                {
+                    const target = target: {
+                        const sym = macho_file.getSymbol(macho_file.dyld_private_index.?);
+                        break :target sym.getAddress(.{}, macho_file);
+                    };
+                    try writer.writeInt(i32, @intCast(target - sect.addr - 3 - 4), .little);
+                }
+                try writer.writeAll(&.{ 0x41, 0x53, 0xff, 0x25 });
+                {
+                    const target = target: {
+                        const sym = macho_file.getSymbol(macho_file.dyld_stub_binder_index.?);
+                        break :target sym.getGotAddress(macho_file);
+                    };
+                    try writer.writeInt(i32, @intCast(target - sect.addr - 11 - 4), .little);
+                }
+            },
+            .aarch64 => @panic("TODO"),
+            else => {},
+        }
     }
 };
 
