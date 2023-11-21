@@ -71,6 +71,14 @@ pub const GotSection = struct {
         }
     }
 
+    pub fn write(got: GotSection, macho_file: *MachO, writer: anytype) !void {
+        for (got.symbols.items) |sym_index| {
+            const sym = macho_file.getSymbol(sym_index);
+            const value = if (sym.flags.import) @as(u64, 0) else sym.getAddress(.{}, macho_file);
+            try writer.writeInt(u64, value, .little);
+        }
+    }
+
     const FormatCtx = struct {
         got: GotSection,
         macho_file: *MachO,

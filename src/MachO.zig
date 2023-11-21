@@ -267,6 +267,7 @@ pub fn flush(self: *MachO) !void {
 
     try self.initDyldInfoSections();
     try self.writeAtoms();
+    try self.writeSyntheticSections();
     try self.writeDyldInfoSections();
     try self.writeFunctionStarts();
     try self.writeDataInCode();
@@ -1590,6 +1591,19 @@ fn writeAtoms(self: *MachO) !void {
         }
 
         try self.base.file.pwriteAll(buffer, header.offset);
+    }
+}
+
+fn writeSyntheticSections(self: *MachO) !void {
+    const gpa = self.base.allocator;
+
+    if (self.got_sect_index) |sect_id| {
+        const header = self.sections.items(.header)[sect_id];
+        var buffer = try std.ArrayList(u8).initCapacity(gpa, header.size);
+        defer buffer.deinit();
+        try self.got.write(self, buffer.writer());
+        assert(buffer.items.len == header.size);
+        try self.base.file.pwriteAll(buffer.items, header.offset);
     }
 }
 
