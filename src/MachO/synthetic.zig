@@ -138,6 +138,26 @@ pub const StubsSection = struct {
         return stubs.symbols.items.len * header.reserved2;
     }
 
+    pub fn write(stubs: StubsSection, macho_file: *MachO, writer: anytype) !void {
+        const cpu_arch = macho_file.options.cpu_arch.?;
+        const laptr_sect = macho_file.sections.items(.header)[macho_file.la_symbol_ptr_sect_index.?];
+
+        for (stubs.symbols.items, 0..) |sym_index, idx| {
+            const sym = macho_file.getSymbol(sym_index);
+            switch (cpu_arch) {
+                .x86_64 => {
+                    try writer.writeAll(&.{ 0xff, 0x25 });
+                    const source = sym.getAddress(.{ .stubs = true }, macho_file);
+                    const target = laptr_sect.addr + idx * @sizeOf(u64);
+                    const disp = target - source - 2 - 4;
+                    try writer.writeInt(i32, @intCast(disp), .little);
+                },
+                .aarch64 => @panic("TODO"),
+                else => unreachable,
+            }
+        }
+    }
+
     const FormatCtx = struct {
         stubs: StubsSection,
         macho_file: *MachO,

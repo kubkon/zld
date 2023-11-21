@@ -323,19 +323,19 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
                 if (!sym.?.flags.import) {
                     // TODO relax!
                 }
-                try cwriter.writeInt(i32, @intCast(G + A - P + 4), .little);
+                try cwriter.writeInt(i32, @intCast(G + A - P - 4), .little);
             },
 
             .X86_64_RELOC_GOT => {
                 assert(rel.r_length == 2);
                 assert(rel.r_pcrel == 1);
-                try cwriter.writeInt(i32, @intCast(G + A - P + 4), .little);
+                try cwriter.writeInt(i32, @intCast(G + A - P - 4), .little);
             },
 
             .X86_64_RELOC_BRANCH => {
                 assert(rel.r_length == 2);
                 assert(rel.r_pcrel == 1);
-                try cwriter.writeInt(i32, @intCast(S + A - P + 4), .little);
+                try cwriter.writeInt(i32, @intCast(S + A - P - 4), .little);
             },
 
             .X86_64_RELOC_TLV => {
@@ -344,34 +344,34 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
                 if (sym.?.flags.tlv_ptr) {
                     assert(sym.?.flags.import);
                     const S_: i64 = @intCast(sym.?.getTlvPtrAddress(macho_file));
-                    try cwriter.writeInt(i32, @intCast(S_ + A - P + 4), .little);
+                    try cwriter.writeInt(i32, @intCast(S_ + A - P - 4), .little);
                     continue;
                 }
-                try cwriter.writeInt(i32, @intCast(S + A - P + 4), .little);
+                try cwriter.writeInt(i32, @intCast(S + A - P - 4), .little);
             },
 
             .X86_64_RELOC_SIGNED => {
                 assert(rel.r_length == 2);
                 assert(rel.r_pcrel == 1);
-                try cwriter.writeInt(i32, @intCast(S + A - P + 4), .little);
+                try cwriter.writeInt(i32, @intCast(S + A - P - 4), .little);
             },
 
             .X86_64_RELOC_SIGNED_1 => {
                 assert(rel.r_length == 2);
                 assert(rel.r_pcrel == 1);
-                try cwriter.writeInt(i32, @intCast(S + A - P + 4 - 1), .little);
+                try cwriter.writeInt(i32, @intCast(S + A - P - 4 + 1), .little);
             },
 
             .X86_64_RELOC_SIGNED_2 => {
                 assert(rel.r_length == 2);
                 assert(rel.r_pcrel == 1);
-                try cwriter.writeInt(i32, @intCast(S + A - P + 4 - 2), .little);
+                try cwriter.writeInt(i32, @intCast(S + A - P - 4 + 2), .little);
             },
 
             .X86_64_RELOC_SIGNED_4 => {
                 assert(rel.r_length == 2);
                 assert(rel.r_pcrel == 1);
-                try cwriter.writeInt(i32, @intCast(S + A - P + 4 - 4), .little);
+                try cwriter.writeInt(i32, @intCast(S + A - P - 4 + 4), .little);
             },
         }
     }
