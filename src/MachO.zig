@@ -1632,6 +1632,17 @@ fn writeSyntheticSections(self: *MachO) !void {
         assert(buffer.items.len == header.size);
         try self.base.file.pwriteAll(buffer.items, header.offset);
     }
+
+    if (self.la_symbol_ptr_sect_index) |sect_id| {
+        const header = self.sections.items(.header)[sect_id];
+        var buffer = try std.ArrayList(u8).initCapacity(gpa, header.size);
+        defer buffer.deinit();
+        try self.la_symbol_ptr.write(self, buffer.writer());
+        assert(buffer.items.len == header.size);
+        try self.base.file.pwriteAll(buffer.items, header.offset);
+    }
+
+    // TODO tlv_ptr
 }
 
 fn getNextLinkeditOffset(self: *MachO, alignment: u64) !u64 {

@@ -188,7 +188,7 @@ pub const StubsSection = struct {
 };
 
 pub const StubsHelperSection = struct {
-    inline fn preambleSize(cpu_arch: std.Target.Cpu.Arch) usize {
+    pub inline fn preambleSize(cpu_arch: std.Target.Cpu.Arch) usize {
         return switch (cpu_arch) {
             .x86_64 => 15,
             .aarch64 => 6 * @sizeOf(u32),
@@ -196,7 +196,7 @@ pub const StubsHelperSection = struct {
         };
     }
 
-    inline fn entrySize(cpu_arch: std.Target.Cpu.Arch) usize {
+    pub inline fn entrySize(cpu_arch: std.Target.Cpu.Arch) usize {
         return switch (cpu_arch) {
             .x86_64 => 10,
             .aarch64 => 3 * @sizeOf(u32),
@@ -288,6 +288,17 @@ pub const LaSymbolPtrSection = struct {
                 .segment_id = seg_id,
                 .addend = 0,
             });
+        }
+    }
+
+    pub fn write(laptr: LaSymbolPtrSection, macho_file: *MachO, writer: anytype) !void {
+        _ = laptr;
+        const cpu_arch = macho_file.options.cpu_arch.?;
+        const sect = macho_file.sections.items(.header)[macho_file.stubs_helper_sect_index.?];
+        for (0..macho_file.stubs.symbols.items.len) |idx| {
+            const value = sect.addr + StubsHelperSection.preambleSize(cpu_arch) +
+                StubsHelperSection.entrySize(cpu_arch) * idx;
+            try writer.writeInt(u64, @intCast(value), .little);
         }
     }
 };
