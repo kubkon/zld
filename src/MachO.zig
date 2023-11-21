@@ -279,7 +279,7 @@ pub fn flush(self: *MachO) !void {
     try self.writeDataInCode();
     try self.calcSymtabSize();
     try self.writeSymtab();
-    // try self.writeDysymtab();
+    try self.writeIndsymtab();
     try self.writeStrtab();
 
     const ncmds, const sizeofcmds, const uuid_cmd_offset = try self.writeLoadCommands();
@@ -1811,9 +1811,21 @@ fn calcSymtabSize(self: *MachO) !void {
         ctx.iimport += nlocals + nexports;
     }
 
-    const cmd = &self.symtab_cmd;
-    cmd.nsyms = nlocals + nexports + nimports;
-    cmd.strsize = strsize + 1;
+    {
+        const cmd = &self.symtab_cmd;
+        cmd.nsyms = nlocals + nexports + nimports;
+        cmd.strsize = strsize + 1;
+    }
+
+    {
+        const cmd = &self.dysymtab_cmd;
+        cmd.ilocalsym = 0;
+        cmd.nlocalsym = nlocals;
+        cmd.iextdefsym = nlocals;
+        cmd.nextdefsym = nexports;
+        cmd.iundefsym = nlocals + nexports;
+        cmd.nundefsym = nimports;
+    }
 }
 
 fn writeSymtab(self: *MachO) !void {
@@ -1838,6 +1850,13 @@ fn writeSymtab(self: *MachO) !void {
     try self.base.file.pwriteAll(mem.sliceAsBytes(self.symtab.items), cmd.symoff);
 
     self.getLinkeditSegment().filesize += cmd.nsyms * @sizeOf(macho.nlist_64);
+}
+
+fn writeIndsymtab(self: *MachO) !void {
+    _ = self;
+    // const cmd = &self.dysymtab_cmd;
+    // cmd.ilocalsym = 0;
+    // cmd.nlocalsym =
 }
 
 fn writeStrtab(self: *MachO) !void {
