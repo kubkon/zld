@@ -250,20 +250,24 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
 
         const P = @as(i64, @intCast(self.value)) + rel.r_address;
 
-        const S: i64 = if (rel.r_extern == 0) blk: {
-            assert(file == .object);
-            const atom_index = file.object.atoms.items[rel.r_symbolnum - 1];
-            const atom = macho_file.getAtom(atom_index).?;
-            assert(atom.flags.alive);
-            break :blk @intCast(atom.value);
-        } else @intCast(sym.?.getAddress(.{}, macho_file));
-
         const A = switch (rel.r_length) {
             0 => code[rel_address],
             1 => mem.readInt(i16, code[rel_address..][0..2], .little),
             2 => mem.readInt(i32, code[rel_address..][0..4], .little),
             3 => mem.readInt(i64, code[rel_address..][0..8], .little),
         };
+
+        const S: i64 = if (rel.r_extern == 0) blk: {
+            assert(file == .object);
+            const atom_index = file.object.atoms.items[rel.r_symbolnum - 1];
+            const atom = macho_file.getAtom(atom_index).?;
+            assert(atom.flags.alive);
+            const source: i64 = @intCast(self.getInputSection(macho_file).addr + rel_address);
+            const target: i64 = @intCast(atom.getInputSection(macho_file).addr);
+            var off = target - source - A;
+            if (rel.r_pcrel == 1) off -= 4;
+            break :blk @as(i64, @intCast(atom.value)) + off - A;
+        } else @intCast(sym.?.getAddress(.{}, macho_file));
 
         const G = if (sym) |s| @as(i64, @intCast(s.getGotAddress(macho_file))) else 0;
         const TLS = @as(i64, @intCast(macho_file.getTlsAddress()));
