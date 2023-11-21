@@ -23,6 +23,8 @@ alive: bool = true,
 num_rebase_relocs: u32 = 0,
 num_bind_relocs: u32 = 0,
 
+output_symtab_ctx: MachO.SymtabCtx = .{},
+
 pub fn deinit(self: *Object, gpa: Allocator) void {
     self.symtab.deinit(gpa);
     self.symbols.deinit(gpa);
@@ -322,6 +324,42 @@ pub fn scanRelocs(self: Object, macho_file: *MachO) !void {
     }
 
     // TODO scan __eh_frame relocs
+}
+
+pub fn calcSymtabSize(self: *Object, macho_file: *MachO) !void {
+    for (self.getLocals()) |local_index| {
+        const local = macho_file.getSymbol(local_index);
+        if (local.getAtom(macho_file)) |atom| if (!atom.flags.alive) continue;
+        const nlist = local.getNlist(macho_file);
+        switch (nlist.type()) {
+            macho.N_STAB => continue,
+            else => {},
+        }
+        local.flags.output_symtab = true;
+        try local.addExtra(.{ .symtab = self.output_symtab_ctx.nlocals }, macho_file);
+        self.output_symtab_ctx.nlocals += 1;
+        self.output_symtab_ctx.strsize += @as(u32, @intCast(local.getName(macho_file).len + 1));
+    }
+
+    for (self.getGlobals()) |global_index| {
+        const global = macho_file.getSymbol(global_index);
+        const file_ptr = global.getFile(macho_file) orelse continue;
+        if (file_ptr.getIndex() != self.index) continue;
+        if (global.getAtom(macho_file)) |atom| if (!atom.flags.alive) continue;
+        global.flags.output_symtab = true;
+        if (global.isLocal(macho_file)) {
+            try global.addExtra(.{ .symtab = self.output_symtab_ctx.nlocals }, macho_file);
+            self.output_symtab_ctx.nlocals += 1;
+        } else if (global.flags.@"export") {
+            try global.addExtra(.{ .symtab = self.output_symtab_ctx.nexports }, macho_file);
+            self.output_symtab_ctx.nexports += 1;
+        } else {
+            assert(global.flags.import);
+            try global.addExtra(.{ .symtab = self.output_symtab_ctx.nimports }, macho_file);
+            self.output_symtab_ctx.nimports += 1;
+        }
+        self.output_symtab_ctx.strsize += @as(u32, @intCast(global.getName(macho_file).len + 1));
+    }
 }
 
 pub fn claimUnresolved(self: Object, macho_file: *MachO) void {

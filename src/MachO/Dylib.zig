@@ -15,6 +15,8 @@ needed: bool,
 weak: bool,
 alive: bool = true,
 
+output_symtab_ctx: MachO.SymtabCtx = .{},
+
 pub fn deinit(self: *Dylib, allocator: Allocator) void {
     self.symtab.deinit(allocator);
     self.strtab.deinit(allocator);
@@ -317,6 +319,20 @@ pub fn markLive(self: *Dylib, macho_file: *MachO) void {
             file.setAlive();
             file.markLive(macho_file);
         }
+    }
+}
+
+pub fn calcSymtabSize(self: *Dylib, macho_file: *MachO) !void {
+    for (self.getGlobals()) |global_index| {
+        const global = macho_file.getSymbol(global_index);
+        const file_ptr = global.getFile(macho_file) orelse continue;
+        if (file_ptr.getIndex() != self.index) continue;
+        if (global.isLocal(macho_file)) continue;
+        assert(global.flags.import);
+        global.flags.output_symtab = true;
+        try global.addExtra(.{ .symtab = self.output_symtab_ctx.nimports }, macho_file);
+        self.output_symtab_ctx.nimports += 1;
+        self.output_symtab_ctx.strsize += @as(u32, @intCast(global.getName(macho_file).len + 1));
     }
 }
 

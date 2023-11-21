@@ -2212,6 +2212,16 @@ const Section = struct {
     atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
 };
 
+pub const SymtabCtx = struct {
+    ilocal: u32 = 0,
+    iexport: u32 = 0,
+    iimport: u32 = 0,
+    nlocals: u32 = 0,
+    nexports: u32 = 0,
+    nimports: u32 = 0,
+    strsize: u32 = 0,
+};
+
 pub const null_sym = macho.nlist_64{
     .n_strx = 0,
     .n_type = 0,

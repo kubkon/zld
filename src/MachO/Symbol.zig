@@ -107,23 +107,23 @@ pub fn getTlvPtrAddress(symbol: Symbol, macho_file: *MachO) u64 {
     return macho_file.tlv_ptr.getAddress(extra.tlv_ptr, macho_file);
 }
 
-// pub fn getOutputSymtabIndex(symbol: Symbol, elf_file: *Elf) ?u32 {
-//     if (!symbol.flags.output_symtab) return null;
-//     const file = symbol.getFile(elf_file).?;
-//     const symtab_ctx = switch (file) {
-//         inline else => |x| x.output_symtab_ctx,
-//     };
-//     const idx = symbol.getExtra(elf_file).?.symtab;
-//     return if (symbol.isLocal(elf_file)) idx + symtab_ctx.ilocal else idx + symtab_ctx.iglobal;
-// }
-
-// pub fn setOutputSymtabIndex(symbol: *Symbol, index: u32, elf_file: *Elf) !void {
-//     if (symbol.getExtra(elf_file)) |extra| {
-//         var new_extra = extra;
-//         new_extra.symtab = index;
-//         symbol.setExtra(new_extra, elf_file);
-//     } else try symbol.addExtra(.{ .symtab = index }, elf_file);
-// }
+pub fn getOutputSymtabIndex(symbol: Symbol, macho_file: *MachO) ?u32 {
+    if (!symbol.flags.output_symtab) return null;
+    const file = symbol.getFile(macho_file).?;
+    const symtab_ctx = switch (file) {
+        inline else => |x| x.output_symtab_ctx,
+    };
+    var idx = symbol.getExtra(macho_file).?.symtab;
+    if (symbol.isLocal(macho_file)) {
+        idx += symtab_ctx.ilocal;
+    } else if (symbol.flags.@"export") {
+        idx += symtab_ctx.iexport;
+    } else {
+        assert(symbol.flags.import);
+        idx += symtab_ctx.iimport;
+    }
+    return idx;
+}
 
 const AddExtraOpts = struct {
     got: ?u32 = null,

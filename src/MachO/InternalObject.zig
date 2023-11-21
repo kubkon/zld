@@ -11,6 +11,8 @@ code: std.ArrayListUnmanaged(u8) = .{},
 
 alive: bool = true,
 
+output_symtab_ctx: MachO.SymtabCtx = .{},
+
 pub fn init(self: *InternalObject, macho_file: *MachO) !void {
     const gpa = macho_file.base.allocator;
     {
@@ -150,6 +152,26 @@ pub fn claimUnresolved(self: InternalObject, macho_file: *MachO) void {
         global.nlist_idx = nlist_idx;
         global.file = self.index;
         global.flags.import = is_import;
+    }
+}
+
+pub fn calcSymtabSize(self: *InternalObject, macho_file: *MachO) !void {
+    for (self.getGlobals()) |global_index| {
+        const global = macho_file.getSymbol(global_index);
+        const file = global.getFile(macho_file) orelse continue;
+        if (file.getIndex() != self.index) continue;
+        global.flags.output_symtab = true;
+        if (global.isLocal(macho_file)) {
+            try global.addExtra(.{ .symtab = self.output_symtab_ctx.nlocals }, macho_file);
+            self.output_symtab_ctx.nlocals += 1;
+        } else if (global.flags.@"export") {
+            try global.addExtra(.{ .symtab = self.output_symtab_ctx.nexports }, macho_file);
+            self.output_symtab_ctx.nexports += 1;
+        } else {
+            try global.addExtra(.{ .symtab = self.output_symtab_ctx.nimports }, macho_file);
+            self.output_symtab_ctx.nimports += 1;
+        }
+        self.output_symtab_ctx.strsize += @as(u32, @intCast(global.getName(macho_file).len + 1));
     }
 }
 
