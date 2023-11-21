@@ -222,10 +222,12 @@ pub const StubsHelperSection = struct {
         const preamble_size = preambleSize(cpu_arch);
         const entry_size = entrySize(cpu_arch);
 
-        for (0..macho_file.stubs.symbols.items.len) |idx| {
+        for (0..macho_file.stubs.symbols.items.len, macho_file.lazy_bind.offsets.items) |idx, boff| {
             switch (cpu_arch) {
                 .x86_64 => {
-                    try writer.writeAll(&.{ 0x68, 0x0, 0x0, 0x0, 0x0, 0xe9 });
+                    try writer.writeByte(0x68);
+                    try writer.writeInt(u32, boff, .little);
+                    try writer.writeByte(0xe9);
                     const source: i64 = @intCast(sect.addr + preamble_size + entry_size * idx);
                     const target: i64 = @intCast(sect.addr);
                     try writer.writeInt(i32, @intCast(target - source - 6 - 4), .little);
