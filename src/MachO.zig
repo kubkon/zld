@@ -262,6 +262,8 @@ pub fn flush(self: *MachO) !void {
 
     try self.initDyldInfoSections();
     try self.writeAtoms();
+    try self.writeDyldInfoSections();
+
     const ncmds, const sizeofcmds, const uuid_cmd_offset = try self.writeLoadCommands();
     _ = uuid_cmd_offset;
     try self.writeHeader(ncmds, sizeofcmds);
@@ -1584,6 +1586,62 @@ fn writeAtoms(self: *MachO) !void {
     }
 }
 
+fn writeDyldInfoSections(self: *MachO) !void {
+    const gpa = self.base.allocator;
+    try self.rebase.finalize(gpa);
+    try self.bind.finalize(gpa, self);
+    try self.lazy_bind.finalize(gpa, self);
+    try self.export_trie.finalize(gpa);
+
+    const cmd = &self.dyld_info_cmd;
+    var needed_size: u32 = 0;
+
+    cmd.rebase_off = needed_size;
+    cmd.rebase_size = @intCast(self.rebase.size());
+    needed_size += cmd.rebase_size;
+    needed_size = mem.alignForward(u32, needed_size, @alignOf(u64));
+
+    cmd.bind_off = needed_size;
+    cmd.bind_size = @intCast(self.bind.size());
+    needed_size += cmd.bind_size;
+    needed_size = mem.alignForward(u32, needed_size, @alignOf(u64));
+
+    cmd.lazy_bind_off = needed_size;
+    cmd.lazy_bind_size = @intCast(self.lazy_bind.size());
+    needed_size += cmd.lazy_bind_size;
+    needed_size = mem.alignForward(u32, needed_size, @alignOf(u64));
+
+    cmd.export_off = needed_size;
+    cmd.export_size = @intCast(self.export_trie.size);
+    needed_size += cmd.export_size;
+
+    const buffer = try gpa.alloc(u8, needed_size);
+    defer gpa.free(buffer);
+    @memset(buffer, 0);
+
+    var stream = std.io.fixedBufferStream(buffer);
+    const writer = stream.writer();
+
+    try self.rebase.write(writer);
+    try stream.seekTo(cmd.bind_off);
+    try self.bind.write(writer);
+    try stream.seekTo(cmd.lazy_bind_off);
+    try self.lazy_bind.write(writer);
+    try stream.seekTo(cmd.export_off);
+    try self.export_trie.write(writer);
+
+    const seg = self.getLinkeditSegment();
+    const off = mem.alignForward(u64, seg.fileoff + seg.filesize, @alignOf(u64));
+    cmd.rebase_off += @intCast(off);
+    cmd.bind_off += @intCast(off);
+    cmd.lazy_bind_off += @intCast(off);
+    cmd.export_off += @intCast(off);
+
+    try self.base.file.pwriteAll(buffer, off);
+
+    seg.filesize += needed_size;
+}
+
 fn writeLoadCommands(self: *MachO) !struct { usize, usize, usize } {
     const gpa = self.base.allocator;
     const needed_size = load_commands.calcLoadCommandsSize(self, false);
@@ -1799,6 +1857,10 @@ pub fn getTlsAddress(self: MachO) u64 {
         else => {},
     };
     return 0;
+}
+
+pub inline fn getLinkeditSegment(self: *MachO) *macho.segment_command_64 {
+    return &self.segments.items[self.linkedit_seg_index.?];
 }
 
 pub fn getFile(self: *MachO, index: File.Index) ?File {
