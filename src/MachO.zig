@@ -1392,7 +1392,7 @@ fn allocateSections(self: *MachO) !void {
     const page_size = self.getPageSize();
     const slice = self.sections.slice();
 
-    var next_seg_id: u8 = 0;
+    var next_seg_id: u8 = if (self.pagezero_seg_index) |index| index + 1 else 0;
     for (slice.items(.header), slice.items(.segment_id)) |*header, seg_id| {
         if (seg_id != next_seg_id) {
             vmaddr = mem.alignForward(u64, vmaddr, page_size);
