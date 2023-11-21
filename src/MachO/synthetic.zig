@@ -273,6 +273,24 @@ pub const LaSymbolPtrSection = struct {
         return macho_file.stubs.symbols.items.len * @sizeOf(u64);
     }
 
+    pub fn addRebase(laptr: LaSymbolPtrSection, macho_file: *MachO) !void {
+        _ = laptr;
+        const gpa = macho_file.base.allocator;
+        try macho_file.rebase.entries.ensureUnusedCapacity(gpa, macho_file.stubs.symbols.items.len);
+
+        const sect = macho_file.sections.items(.header)[macho_file.la_symbol_ptr_sect_index.?];
+        const seg_id = macho_file.sections.items(.segment_id)[macho_file.la_symbol_ptr_sect_index.?];
+        const seg = macho_file.segments.items[seg_id];
+
+        for (0..macho_file.stubs.symbols.items.len) |idx| {
+            const addr = sect.addr + idx * @sizeOf(u64);
+            macho_file.rebase.entries.appendAssumeCapacity(.{
+                .offset = addr - seg.vmaddr,
+                .segment_id = seg_id,
+            });
+        }
+    }
+
     pub fn addLazyBind(laptr: LaSymbolPtrSection, macho_file: *MachO) !void {
         _ = laptr;
         const gpa = macho_file.base.allocator;

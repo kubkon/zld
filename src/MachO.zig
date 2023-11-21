@@ -1534,6 +1534,7 @@ fn initDyldInfoSections(self: *MachO) !void {
     try self.rebase.entries.ensureUnusedCapacity(gpa, nrebases);
     try self.bind.entries.ensureUnusedCapacity(gpa, nbinds);
 
+    try self.la_symbol_ptr.addRebase(self);
     try self.la_symbol_ptr.addLazyBind(self);
 
     try self.initExportTrie();
