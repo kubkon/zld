@@ -44,6 +44,8 @@ entry_index: ?Symbol.Index = null,
 
 string_intern: StringTable(.string_intern) = .{},
 
+symtab: std.ArrayListUnmanaged(macho.nlist_64) = .{},
+strtab: std.ArrayListUnmanaged(u8) = .{},
 got: GotSection = .{},
 stubs: StubsSection = .{},
 stubs_helper: StubsHelperSection = .{},
@@ -114,6 +116,8 @@ pub fn deinit(self: *MachO) void {
     self.sections.deinit(gpa);
     self.atoms.deinit(gpa);
 
+    self.symtab.deinit(gpa);
+    self.strtab.deinit(gpa);
     self.got.deinit(gpa);
     self.stubs.deinit(gpa);
     self.tlv_ptr.deinit(gpa);
@@ -135,6 +139,7 @@ pub fn flush(self: *MachO) !void {
     try self.atoms.append(gpa, .{});
     // Append empty string to string tables
     try self.string_intern.buffer.append(gpa, 0);
+    try self.strtab.append(gpa, 0);
     // Append null file
     try self.files.append(gpa, .null);
     // Append null symbols
@@ -272,6 +277,10 @@ pub fn flush(self: *MachO) !void {
     try self.writeDyldInfoSections();
     try self.writeFunctionStarts();
     try self.writeDataInCode();
+    try self.calcSymtabSize();
+    try self.writeSymtab();
+    // try self.writeDysymtab();
+    try self.writeStrtab();
 
     const ncmds, const sizeofcmds, const uuid_cmd_offset = try self.writeLoadCommands();
     _ = uuid_cmd_offset;
@@ -1759,6 +1768,84 @@ fn writeDataInCode(self: *MachO) !void {
     try self.base.file.pwriteAll(mem.sliceAsBytes(dices.items), cmd.dataoff);
 
     self.getLinkeditSegment().filesize += needed_size;
+}
+
+fn calcSymtabSize(self: *MachO) !void {
+    const gpa = self.base.allocator;
+
+    var nlocals: u32 = 0;
+    var nexports: u32 = 0;
+    var nimports: u32 = 0;
+    var strsize: u32 = 0;
+
+    var files = std.ArrayList(File.Index).init(gpa);
+    defer files.deinit();
+    try files.ensureTotalCapacityPrecise(self.objects.items.len + self.dylibs.items.len + 1);
+    for (self.objects.items) |index| files.appendAssumeCapacity(index);
+    for (self.dylibs.items) |index| files.appendAssumeCapacity(index);
+    if (self.internal_object_index) |index| files.appendAssumeCapacity(index);
+
+    for (files.items) |index| {
+        const file = self.getFile(index).?;
+        const ctx = switch (file) {
+            inline else => |x| &x.output_symtab_ctx,
+        };
+        ctx.ilocal = nlocals;
+        ctx.iexport = nexports;
+        ctx.iimport = nimports;
+        try file.calcSymtabSize(self);
+        nlocals += ctx.nlocals;
+        nexports += ctx.nexports;
+        nimports += ctx.nimports;
+        strsize += ctx.strsize;
+    }
+
+    // TODO symbol stabs
+
+    for (files.items) |index| {
+        const file = self.getFile(index).?;
+        const ctx = switch (file) {
+            inline else => |x| &x.output_symtab_ctx,
+        };
+        ctx.iexport += nlocals;
+        ctx.iimport += nlocals + nexports;
+    }
+
+    const cmd = &self.symtab_cmd;
+    cmd.nsyms = nlocals + nexports + nimports;
+    cmd.strsize = strsize + 1;
+}
+
+fn writeSymtab(self: *MachO) !void {
+    const gpa = self.base.allocator;
+    const cmd = &self.symtab_cmd;
+    const off = try self.getNextLinkeditOffset(@alignOf(u64));
+    cmd.symoff = @intCast(off);
+
+    try self.symtab.resize(gpa, cmd.nsyms);
+    try self.strtab.ensureUnusedCapacity(gpa, cmd.strsize - 1);
+
+    for (self.objects.items) |index| {
+        self.getFile(index).?.writeSymtab(self);
+    }
+    for (self.dylibs.items) |index| {
+        self.getFile(index).?.writeSymtab(self);
+    }
+    if (self.getInternalObject()) |internal| {
+        internal.writeSymtab(self);
+    }
+
+    try self.base.file.pwriteAll(mem.sliceAsBytes(self.symtab.items), cmd.symoff);
+
+    self.getLinkeditSegment().filesize += cmd.nsyms * @sizeOf(macho.nlist_64);
+}
+
+fn writeStrtab(self: *MachO) !void {
+    const cmd = &self.symtab_cmd;
+    const off = try self.getNextLinkeditOffset(@alignOf(u64));
+    cmd.stroff = @intCast(off);
+    try self.base.file.pwriteAll(self.strtab.items, cmd.stroff);
+    self.getLinkeditSegment().filesize += cmd.strsize;
 }
 
 fn writeLoadCommands(self: *MachO) !struct { usize, usize, usize } {

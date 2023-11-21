@@ -161,7 +161,7 @@ pub fn calcSymtabSize(self: *InternalObject, macho_file: *MachO) !void {
         const file = global.getFile(macho_file) orelse continue;
         if (file.getIndex() != self.index) continue;
         global.flags.output_symtab = true;
-        if (global.isLocal(macho_file)) {
+        if (global.isLocal()) {
             try global.addExtra(.{ .symtab = self.output_symtab_ctx.nlocals }, macho_file);
             self.output_symtab_ctx.nlocals += 1;
         } else if (global.flags.@"export") {
@@ -172,6 +172,21 @@ pub fn calcSymtabSize(self: *InternalObject, macho_file: *MachO) !void {
             self.output_symtab_ctx.nimports += 1;
         }
         self.output_symtab_ctx.strsize += @as(u32, @intCast(global.getName(macho_file).len + 1));
+    }
+}
+
+pub fn writeSymtab(self: InternalObject, macho_file: *MachO) void {
+    for (self.getGlobals()) |global_index| {
+        const global = macho_file.getSymbol(global_index);
+        const file = global.getFile(macho_file) orelse continue;
+        if (file.getIndex() != self.index) continue;
+        const idx = global.getOutputSymtabIndex(macho_file) orelse continue;
+        const n_strx = @as(u32, @intCast(macho_file.strtab.items.len));
+        macho_file.strtab.appendSliceAssumeCapacity(global.getName(macho_file));
+        macho_file.strtab.appendAssumeCapacity(0);
+        const out_sym = &macho_file.symtab.items[idx];
+        out_sym.n_strx = n_strx;
+        global.setOutputSym(macho_file, out_sym);
     }
 }
 

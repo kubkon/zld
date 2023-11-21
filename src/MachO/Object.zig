@@ -331,10 +331,7 @@ pub fn calcSymtabSize(self: *Object, macho_file: *MachO) !void {
         const local = macho_file.getSymbol(local_index);
         if (local.getAtom(macho_file)) |atom| if (!atom.flags.alive) continue;
         const nlist = local.getNlist(macho_file);
-        switch (nlist.type()) {
-            macho.N_STAB => continue,
-            else => {},
-        }
+        if (nlist.stab()) continue;
         local.flags.output_symtab = true;
         try local.addExtra(.{ .symtab = self.output_symtab_ctx.nlocals }, macho_file);
         self.output_symtab_ctx.nlocals += 1;
@@ -347,7 +344,7 @@ pub fn calcSymtabSize(self: *Object, macho_file: *MachO) !void {
         if (file_ptr.getIndex() != self.index) continue;
         if (global.getAtom(macho_file)) |atom| if (!atom.flags.alive) continue;
         global.flags.output_symtab = true;
-        if (global.isLocal(macho_file)) {
+        if (global.isLocal()) {
             try global.addExtra(.{ .symtab = self.output_symtab_ctx.nlocals }, macho_file);
             self.output_symtab_ctx.nlocals += 1;
         } else if (global.flags.@"export") {
@@ -359,6 +356,31 @@ pub fn calcSymtabSize(self: *Object, macho_file: *MachO) !void {
             self.output_symtab_ctx.nimports += 1;
         }
         self.output_symtab_ctx.strsize += @as(u32, @intCast(global.getName(macho_file).len + 1));
+    }
+}
+
+pub fn writeSymtab(self: Object, macho_file: *MachO) void {
+    for (self.getLocals()) |local_index| {
+        const local = macho_file.getSymbol(local_index);
+        const idx = local.getOutputSymtabIndex(macho_file) orelse continue;
+        const out_sym = &macho_file.symtab.items[idx];
+        out_sym.n_strx = @intCast(macho_file.strtab.items.len);
+        macho_file.strtab.appendSliceAssumeCapacity(local.getName(macho_file));
+        macho_file.strtab.appendAssumeCapacity(0);
+        local.setOutputSym(macho_file, out_sym);
+    }
+
+    for (self.getGlobals()) |global_index| {
+        const global = macho_file.getSymbol(global_index);
+        const file = global.getFile(macho_file) orelse continue;
+        if (file.getIndex() != self.index) continue;
+        const idx = global.getOutputSymtabIndex(macho_file) orelse continue;
+        const n_strx = @as(u32, @intCast(macho_file.strtab.items.len));
+        macho_file.strtab.appendSliceAssumeCapacity(global.getName(macho_file));
+        macho_file.strtab.appendAssumeCapacity(0);
+        const out_sym = &macho_file.symtab.items[idx];
+        out_sym.n_strx = n_strx;
+        global.setOutputSym(macho_file, out_sym);
     }
 }
 

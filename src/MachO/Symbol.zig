@@ -114,7 +114,7 @@ pub fn getOutputSymtabIndex(symbol: Symbol, macho_file: *MachO) ?u32 {
         inline else => |x| x.output_symtab_ctx,
     };
     var idx = symbol.getExtra(macho_file).?.symtab;
-    if (symbol.isLocal(macho_file)) {
+    if (symbol.isLocal()) {
         idx += symtab_ctx.ilocal;
     } else if (symbol.flags.@"export") {
         idx += symtab_ctx.iexport;
@@ -153,40 +153,29 @@ pub inline fn setExtra(symbol: Symbol, extra: Extra, macho_file: *MachO) void {
     macho_file.setSymbolExtra(symbol.extra, extra);
 }
 
-// pub fn setOutputSym(symbol: Symbol, elf_file: *Elf, out: *elf.Elf64_Sym) void {
-//     const file = symbol.getFile(elf_file).?;
-//     const s_sym = symbol.getSourceSymbol(elf_file);
-//     const st_type = symbol.getType(elf_file);
-//     const st_bind: u8 = blk: {
-//         if (symbol.isLocal(elf_file)) break :blk 0;
-//         if (symbol.flags.weak) break :blk elf.STB_WEAK;
-//         if (file == .shared) break :blk elf.STB_GLOBAL;
-//         break :blk s_sym.st_bind();
-//     };
-//     const st_shndx = blk: {
-//         if (symbol.flags.copy_rel) break :blk elf_file.copy_rel_sect_index.?;
-//         if (file == .shared or s_sym.st_shndx == elf.SHN_UNDEF) break :blk elf.SHN_UNDEF;
-//         if (elf_file.options.relocatable and s_sym.st_shndx == elf.SHN_COMMON) break :blk elf.SHN_COMMON;
-//         if (symbol.getAtom(elf_file) == null and file != .internal) break :blk elf.SHN_ABS;
-//         break :blk symbol.shndx;
-//     };
-//     const st_value = blk: {
-//         if (symbol.flags.copy_rel) break :blk symbol.getAddress(.{}, elf_file);
-//         if (file == .shared or s_sym.st_shndx == elf.SHN_UNDEF) {
-//             if (symbol.flags.is_canonical) break :blk symbol.getAddress(.{}, elf_file);
-//             break :blk 0;
-//         }
-//         if (st_shndx == elf.SHN_ABS or st_shndx == elf.SHN_COMMON) break :blk symbol.value;
-//         const shdr = &elf_file.sections.items(.shdr)[st_shndx];
-//         if (Elf.shdrIsTls(shdr)) break :blk symbol.value - elf_file.getTlsAddress();
-//         break :blk symbol.value;
-//     };
-//     out.st_info = (st_bind << 4) | st_type;
-//     out.st_other = s_sym.st_other;
-//     out.st_shndx = st_shndx;
-//     out.st_value = st_value;
-//     out.st_size = s_sym.st_size;
-// }
+pub fn setOutputSym(symbol: Symbol, macho_file: *MachO, out: *macho.nlist_64) void {
+    const nlist = symbol.getNlist(macho_file);
+    if (symbol.isLocal()) {
+        out.n_type = if (nlist.abs()) macho.N_ABS else macho.N_SECT;
+        out.n_sect = if (nlist.abs()) 0 else @intCast(symbol.out_n_sect + 1);
+        out.n_desc = 0;
+        out.n_value = symbol.getAddress(.{}, macho_file);
+    } else if (symbol.flags.@"export") {
+        out.n_type = macho.N_EXT;
+        out.n_type |= if (nlist.abs()) macho.N_ABS else macho.N_SECT;
+        out.n_sect = if (nlist.abs()) 0 else @intCast(symbol.out_n_sect + 1);
+        out.n_value = symbol.getAddress(.{}, macho_file);
+        out.n_desc = 0;
+
+        if (symbol.flags.weak) out.n_desc |= macho.N_WEAK_DEF;
+        if (nlist.n_desc & macho.REFERENCED_DYNAMICALLY != 0) out.n_desc |= macho.REFERENCED_DYNAMICALLY;
+    } else {
+        out.n_type = macho.N_EXT;
+        out.n_sect = 0;
+        out.n_value = 0;
+        out.n_desc = @as(u16, @bitCast(symbol.getDylibOrdinal(macho_file))) * macho.N_SYMBOL_RESOLVER;
+    }
+}
 
 pub fn format(
     symbol: Symbol,
