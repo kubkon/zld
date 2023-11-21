@@ -1551,8 +1551,7 @@ fn initExportTrie(self: *MachO) !void {
     for (self.objects.items) |index| {
         for (self.getFile(index).?.getGlobals()) |global_index| {
             const global = self.getSymbol(global_index);
-            const atom = global.getAtom(self) orelse continue;
-            if (!atom.flags.alive) continue;
+            if (global.getAtom(self)) |atom| if (!atom.flags.alive) continue;
             if (global.getFile(self).?.getIndex() != index) continue;
             if (!global.flags.@"export") continue;
             try self.export_trie.put(gpa, .{
@@ -1565,8 +1564,7 @@ fn initExportTrie(self: *MachO) !void {
     if (self.getInternalObject()) |internal| {
         for (internal.getGlobals()) |global_index| {
             const global = self.getSymbol(global_index);
-            const atom = global.getAtom(self) orelse continue;
-            if (!atom.flags.alive) continue;
+            if (global.getAtom(self)) |atom| if (!atom.flags.alive) continue;
             if (global.getFile(self).?.getIndex() != internal.index) continue;
             if (!global.flags.@"export") continue;
             try self.export_trie.put(gpa, .{
