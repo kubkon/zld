@@ -283,6 +283,12 @@ pub fn flush(self: *MachO) !void {
     try self.writeIndsymtab();
     try self.writeStrtab();
 
+    self.getLinkeditSegment().vmsize = mem.alignForward(
+        u64,
+        self.getLinkeditSegment().filesize,
+        self.getPageSize(),
+    );
+
     const ncmds, const sizeofcmds, const uuid_cmd_offset = try self.writeLoadCommands();
     _ = uuid_cmd_offset;
     try self.writeHeader(ncmds, sizeofcmds);
@@ -1273,7 +1279,7 @@ fn calcSectionSizes(self: *MachO) !void {
     if (self.got_sect_index) |idx| {
         const header = &self.sections.items(.header)[idx];
         header.size = self.got.size();
-        header.@"align" = @alignOf(u64);
+        header.@"align" = 3;
     }
 
     if (self.stubs_sect_index) |idx| {
@@ -1587,7 +1593,7 @@ fn writeAtoms(self: *MachO) !void {
 
         log.debug("writing atoms in {s},{s} section", .{ header.segName(), header.sectName() });
 
-        var buffer = try gpa.alloc(u8, header.size);
+        const buffer = try gpa.alloc(u8, header.size);
         defer gpa.free(buffer);
         const padding_byte: u8 = if (header.isCode() and cpu_arch == .x86_64) 0xcc else 0;
         @memset(buffer, padding_byte);
