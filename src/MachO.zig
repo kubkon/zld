@@ -56,6 +56,7 @@ export_trie: ExportTrieSection = .{},
 
 atoms: std.ArrayListUnmanaged(Atom) = .{},
 
+has_data_in_code: bool = false,
 has_tlv: bool = false,
 
 pub fn openPath(allocator: Allocator, options: Options, thread_pool: *ThreadPool) !*MachO {
@@ -267,6 +268,7 @@ pub fn flush(self: *MachO) !void {
     try self.initDyldInfoSections();
     try self.writeAtoms();
     try self.writeDyldInfoSections();
+    try self.writeDataInCode();
 
     const ncmds, const sizeofcmds, const uuid_cmd_offset = try self.writeLoadCommands();
     _ = uuid_cmd_offset;
@@ -1642,6 +1644,62 @@ fn writeDyldInfoSections(self: *MachO) !void {
     cmd.export_off += @intCast(off);
 
     try self.base.file.pwriteAll(buffer, off);
+
+    seg.filesize += needed_size;
+}
+
+fn writeDataInCode(self: *MachO) !void {
+    const cmd = &self.data_in_code_cmd;
+    const seg = self.getLinkeditSegment();
+
+    const off = seg.fileoff + seg.filesize;
+    const aligned = mem.alignForward(u64, off, @alignOf(u64));
+    const padding = aligned - off;
+
+    if (padding > 0) {
+        try self.base.file.pwriteAll(&[1]u8{0}, aligned);
+        seg.filesize += padding;
+    }
+
+    cmd.dataoff = @intCast(seg.fileoff + seg.filesize);
+
+    if (!self.has_data_in_code) return;
+
+    const gpa = self.base.allocator;
+    var dices = std.ArrayList(macho.data_in_code_entry).init(gpa);
+    defer dices.deinit();
+
+    const base = base: {
+        const sect_id = self.getSectionByName("__TEXT", "__text").?;
+        const sect = self.sections.items(.header)[sect_id];
+        break :base sect.addr - sect.offset;
+    };
+
+    for (self.objects.items) |index| {
+        const object = self.getFile(index).?.object;
+        if (object.data_in_code.items.len == 0) continue;
+
+        try dices.ensureUnusedCapacity(object.data_in_code.items.len);
+
+        for (object.atoms.items) |atom_index| {
+            const atom = self.getAtom(atom_index) orelse continue;
+            if (!atom.flags.alive) continue;
+
+            for (atom.getDataInCode(self)) |dice| {
+                const offset = dice.offset - atom.getInputSection(self).addr;
+                dices.appendAssumeCapacity(.{
+                    .offset = @intCast(offset + atom.value - base),
+                    .length = dice.length,
+                    .kind = dice.kind,
+                });
+            }
+        }
+    }
+
+    const needed_size = dices.items.len * @sizeOf(macho.data_in_code_entry);
+    cmd.datasize = @intCast(needed_size);
+
+    try self.base.file.pwriteAll(mem.sliceAsBytes(dices.items), cmd.dataoff);
 
     seg.filesize += needed_size;
 }

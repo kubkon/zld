@@ -74,9 +74,8 @@ pub fn getRelocs(self: Atom, macho_file: *MachO) []const macho.relocation_info {
     };
 }
 
-pub fn getDataInCode(self: Atom, macho_file: *MachO) []const macho.data_in_code {
+pub fn getDataInCode(self: Atom, macho_file: *MachO) []const macho.data_in_code_entry {
     return switch (self.getFile(macho_file)) {
-        .internal => &[0]macho.data_in_code{},
         .object => |x| x.data_in_code.items[self.dice.pos..][0..self.dice.len],
         else => unreachable,
     };
