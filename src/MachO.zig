@@ -268,6 +268,7 @@ pub fn flush(self: *MachO) !void {
     try self.initDyldInfoSections();
     try self.writeAtoms();
     try self.writeDyldInfoSections();
+    try self.writeFunctionStarts();
     try self.writeDataInCode();
 
     const ncmds, const sizeofcmds, const uuid_cmd_offset = try self.writeLoadCommands();
@@ -1592,6 +1593,20 @@ fn writeAtoms(self: *MachO) !void {
     }
 }
 
+fn getNextLinkeditOffset(self: *MachO, alignment: u64) !u64 {
+    const seg = self.getLinkeditSegment();
+    const off = seg.fileoff + seg.filesize;
+    const aligned = mem.alignForward(u64, off, alignment);
+    const padding = aligned - off;
+
+    if (padding > 0) {
+        try self.base.file.pwriteAll(&[1]u8{0}, aligned);
+        seg.filesize += padding;
+    }
+
+    return aligned;
+}
+
 fn writeDyldInfoSections(self: *MachO) !void {
     const gpa = self.base.allocator;
     try self.rebase.finalize(gpa);
@@ -1636,8 +1651,7 @@ fn writeDyldInfoSections(self: *MachO) !void {
     try stream.seekTo(cmd.export_off);
     try self.export_trie.write(writer);
 
-    const seg = self.getLinkeditSegment();
-    const off = mem.alignForward(u64, seg.fileoff + seg.filesize, @alignOf(u64));
+    const off = try self.getNextLinkeditOffset(@alignOf(u64));
     cmd.rebase_off += @intCast(off);
     cmd.bind_off += @intCast(off);
     cmd.lazy_bind_off += @intCast(off);
@@ -1645,23 +1659,19 @@ fn writeDyldInfoSections(self: *MachO) !void {
 
     try self.base.file.pwriteAll(buffer, off);
 
-    seg.filesize += needed_size;
+    self.getLinkeditSegment().filesize += needed_size;
+}
+
+fn writeFunctionStarts(self: *MachO) !void {
+    const off = try self.getNextLinkeditOffset(@alignOf(u64));
+    const cmd = &self.function_starts_cmd;
+    cmd.dataoff = @intCast(off);
 }
 
 fn writeDataInCode(self: *MachO) !void {
     const cmd = &self.data_in_code_cmd;
-    const seg = self.getLinkeditSegment();
-
-    const off = seg.fileoff + seg.filesize;
-    const aligned = mem.alignForward(u64, off, @alignOf(u64));
-    const padding = aligned - off;
-
-    if (padding > 0) {
-        try self.base.file.pwriteAll(&[1]u8{0}, aligned);
-        seg.filesize += padding;
-    }
-
-    cmd.dataoff = @intCast(seg.fileoff + seg.filesize);
+    const off = try self.getNextLinkeditOffset(@alignOf(u64));
+    cmd.dataoff = @intCast(off);
 
     if (!self.has_data_in_code) return;
 
@@ -1701,7 +1711,7 @@ fn writeDataInCode(self: *MachO) !void {
 
     try self.base.file.pwriteAll(mem.sliceAsBytes(dices.items), cmd.dataoff);
 
-    seg.filesize += needed_size;
+    self.getLinkeditSegment().filesize += needed_size;
 }
 
 fn writeLoadCommands(self: *MachO) !struct { usize, usize, usize } {
