@@ -97,7 +97,7 @@ pub const Bind = struct {
                 const name = sym.getName(ctx);
                 const nlist = sym.getNlist(ctx);
                 const flags: u8 = if (nlist.weakRef()) macho.BIND_SYMBOL_FLAGS_WEAK_IMPORT else 0;
-                const ordinal = @divTrunc(@as(i16, @bitCast(nlist.n_desc)), macho.N_SYMBOL_RESOLVER);
+                const ordinal = sym.getDylibOrdinal(ctx);
 
                 try setSymbol(name, flags, writer);
                 try setTypePointer(writer);
@@ -214,7 +214,7 @@ pub const LazyBind = struct {
             const name = sym.getName(ctx);
             const nlist = sym.getNlist(ctx);
             const flags: u8 = if (nlist.weakRef()) macho.BIND_SYMBOL_FLAGS_WEAK_IMPORT else 0;
-            const ordinal = @divTrunc(@as(i16, @bitCast(nlist.n_desc)), macho.N_SYMBOL_RESOLVER);
+            const ordinal = sym.getDylibOrdinal(ctx);
 
             try setSegmentOffset(entry.segment_id, entry.offset, writer);
             try setSymbol(name, flags, writer);

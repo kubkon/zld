@@ -215,6 +215,10 @@ pub fn flush(self: *MachO) !void {
 
     // TODO dedup dylibs
 
+    for (self.dylibs.items, 1..) |index, ord| {
+        self.getFile(index).?.dylib.ordinal = @intCast(ord);
+    }
+
     {
         const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
         self.files.set(index, .{ .internal = .{ .index = index } });
@@ -1745,7 +1749,11 @@ fn writeLoadCommands(self: *MachO) !struct { usize, usize, usize } {
 
 fn writeHeader(self: *MachO, ncmds: usize, sizeofcmds: usize) !void {
     var header: macho.mach_header_64 = .{};
-    header.flags = macho.MH_NOUNDEFS | macho.MH_DYLDLINK | macho.MH_PIE | macho.MH_TWOLEVEL;
+    header.flags = macho.MH_NOUNDEFS | macho.MH_DYLDLINK | macho.MH_PIE;
+
+    if (self.options.namespace == .two_level) {
+        header.flags |= macho.MH_TWOLEVEL;
+    }
 
     switch (self.options.cpu_arch.?) {
         .aarch64 => {

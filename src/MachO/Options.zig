@@ -32,6 +32,7 @@ const usage =
     \\-dynamic                           Perform dynamic linking
     \\-e [name]                          Specifies the entry point of main executable
     \\--entitlements                     Add path to entitlements file for embedding in code signature
+    \\-flat_namespace                    Use flat namespace dylib resolution strategy
     \\-force_load [path]                 Loads all members of the specified static archive library
     \\-framework [name]                  Link against framework
     \\-F[path]                           Add search path for frameworks
@@ -57,6 +58,7 @@ const usage =
     \\-search_dylibs_first               Search `libx.dylib` in each dir in library search paths, then `libx.a`
     \\-stack_size [value]                Size of the default stack in hexadecimal notation
     \\-syslibroot [path]                 Specify the syslibroot
+    \\-two_levelnamespace                Use two-level namespace dylib resolution strategy (default)
     \\-u [name]                          Specifies symbol which has to be resolved at link time for the link to succeed
     \\-undefined [value]                 Specify how undefined symbols are to be treated: 
     \\                                   error (default), warning, suppress, or dynamic_lookup.
@@ -104,6 +106,7 @@ dead_strip: bool = false,
 dead_strip_dylibs: bool = false,
 undefined_treatment: UndefinedTreatment = .@"error",
 no_deduplicate: bool = false,
+namespace: Namespace = .two_level,
 
 pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options {
     if (args.len == 0) ctx.fatal(usage, .{cmd});
@@ -267,6 +270,10 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             try lib_dirs.put(path, {});
         } else if (p.flag1("no_deduplicate")) {
             opts.no_deduplicate = true;
+        } else if (p.flag1("two_levelnamespace")) {
+            opts.namespace = .two_level;
+        } else if (p.flag1("flat_namespace")) {
+            opts.namespace = .flat;
         } else {
             try positionals.append(.{ .path = p.arg, .tag = .obj });
         }
@@ -365,6 +372,11 @@ const UndefinedTreatment = enum {
     warn,
     suppress,
     dynamic_lookup,
+};
+
+const Namespace = enum {
+    two_level,
+    flat,
 };
 
 pub const Version = struct {

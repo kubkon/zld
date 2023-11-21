@@ -60,6 +60,16 @@ pub fn getNlist(symbol: Symbol, macho_file: *MachO) macho.nlist_64 {
     };
 }
 
+pub fn getDylibOrdinal(symbol: Symbol, macho_file: *MachO) i16 {
+    assert(symbol.flags.import);
+    // TODO handle BIND_SPECIAL_DYLIB_MAIN_EXECUTABLE
+    const file = symbol.getFile(macho_file) orelse return macho.BIND_SPECIAL_DYLIB_SELF;
+    if (macho_file.options.namespace == .flat) return macho.BIND_SPECIAL_DYLIB_FLAT_LOOKUP;
+    if (file != .dylib and macho_file.options.undefined_treatment == .dynamic_lookup)
+        return macho.BIND_SPECIAL_DYLIB_FLAT_LOOKUP;
+    return @bitCast(file.dylib.ordinal);
+}
+
 pub fn getSymbolRank(symbol: Symbol, macho_file: *MachO) u32 {
     const file = symbol.getFile(macho_file) orelse return std.math.maxInt(u32);
     const nlist = symbol.getNlist(macho_file);

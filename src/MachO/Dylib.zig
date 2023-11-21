@@ -6,6 +6,7 @@ header: ?macho.mach_header_64 = null,
 symtab: std.ArrayListUnmanaged(macho.nlist_64) = .{},
 strtab: std.ArrayListUnmanaged(u8) = .{},
 id: ?Id = null,
+ordinal: u16 = 0,
 
 symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
 dependents: std.ArrayListUnmanaged(Id) = .{},

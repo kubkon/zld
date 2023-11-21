@@ -315,13 +315,7 @@ pub fn scanRelocs(self: Object, macho_file: *MachO) !void {
         const atom = macho_file.getAtom(atom_index) orelse continue;
         if (!atom.flags.alive) continue;
         const sect = atom.getInputSection(macho_file);
-        switch (sect.type()) {
-            macho.S_ZEROFILL,
-            macho.S_GB_ZEROFILL,
-            macho.S_THREAD_LOCAL_ZEROFILL,
-            => continue,
-            else => {},
-        }
+        if (sect.isZerofill()) continue;
         try atom.scanRelocs(macho_file);
     }
 
