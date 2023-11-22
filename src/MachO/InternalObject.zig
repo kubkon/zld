@@ -16,6 +16,30 @@ output_symtab_ctx: MachO.SymtabCtx = .{},
 pub fn init(self: *InternalObject, macho_file: *MachO) !void {
     const gpa = macho_file.base.allocator;
     {
+        const n_sect = self.getSectionByName("__TEXT", "__text") orelse
+            try self.addSection(gpa, "__TEXT", "__text");
+        const target_idx = try self.addGlobal("__mh_execute_header", macho_file);
+        const nlist = &self.symtab.items[target_idx];
+        nlist.n_type = macho.N_EXT | macho.N_SECT;
+        nlist.n_desc = macho.REFERENCED_DYNAMICALLY;
+        nlist.n_sect = n_sect + 1;
+        const atom_index = try self.addAtom(macho_file);
+        const atom = macho_file.getAtom(atom_index).?;
+        atom.name = try macho_file.string_intern.insert(gpa, self.getString(nlist.n_strx));
+        atom.n_sect = n_sect;
+        macho_file.mh_execute_header_index = self.symbols.items[target_idx];
+    }
+
+    if (macho_file.getGlobalByName("__dso_handle")) |index| {
+        if (macho_file.getSymbol(index).getFile(macho_file) == null) {
+            const target_idx = try self.addGlobal("__dso_handle", macho_file);
+            const nlist = &self.symtab.items[target_idx];
+            nlist.n_type = macho.N_EXT | macho.N_ABS;
+            macho_file.dso_handle_index = self.symbols.items[target_idx];
+        }
+    }
+
+    {
         const target_idx = try self.addGlobal("dyld_private", macho_file);
         macho_file.dyld_private_index = self.symbols.items[target_idx];
 
@@ -45,23 +69,6 @@ pub fn init(self: *InternalObject, macho_file: *MachO) !void {
         const target = macho_file.getSymbol(self.symbols.items[target_idx]);
         target.flags.got = true;
         macho_file.dyld_stub_binder_index = self.symbols.items[target_idx];
-    }
-
-    {
-        const target_idx = try self.addGlobal("__mh_execute_header", macho_file);
-        const nlist = &self.symtab.items[target_idx];
-        nlist.n_type = macho.N_EXT | macho.N_ABS;
-        nlist.n_desc = macho.REFERENCED_DYNAMICALLY;
-        macho_file.mh_execute_header_index = self.symbols.items[target_idx];
-    }
-
-    if (macho_file.getGlobalByName("__dso_handle")) |index| {
-        if (macho_file.getSymbol(index).getFile(macho_file) == null) {
-            const target_idx = try self.addGlobal("__dso_handle", macho_file);
-            const nlist = &self.symtab.items[target_idx];
-            nlist.n_type = macho.N_EXT | macho.N_ABS;
-            macho_file.dso_handle_index = self.symbols.items[target_idx];
-        }
     }
 }
 
