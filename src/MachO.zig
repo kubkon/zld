@@ -480,7 +480,7 @@ fn parsePositional(
 
     if (try self.parseObject(arena, resolved_obj)) return;
     if (try self.parseArchive(arena, resolved_obj)) return;
-    // if (try self.parseDylib(arena, resolved_obj)) return;
+    if (try self.parseDylib(arena, resolved_obj)) return;
     if (try self.parseTbd(resolved_obj)) return;
 
     self.base.fatal("unknown filetype for positional argument: '{s}'", .{resolved_obj.path});
@@ -567,6 +567,7 @@ fn parseArchive(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
     const data = try arena.alloc(u8, size - Archive.SARMAG);
     const nread = try file.readAll(data);
     if (nread != size - Archive.SARMAG) return error.InputOutput;
+
     var archive = Archive{ .path = obj.path, .data = data };
     defer archive.deinit(gpa);
     try archive.parse(arena, self);
@@ -652,63 +653,67 @@ const DylibOpts = struct {
     weak: bool = false,
 };
 
-fn parseDylib(self: *MachO, path: []const u8, file: std.fs.File, offset: u64, dependent_libs: anytype, opts: DylibOpts) !void {
+fn parseDylib(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const gpa = self.base.allocator;
 
-    const self_cpu_arch = self.options.cpu_arch orelse
-        return self.base.fatal("{s}: ignoring library as no architecture specified", .{path});
-
-    const file_stat = try file.stat();
-    var file_size = math.cast(usize, file_stat.size) orelse return error.Overflow;
-
-    file_size -= offset;
-
-    const contents = try file.readToEndAllocOptions(gpa, file_size, file_size, @alignOf(u64), null);
-    defer gpa.free(contents);
-
-    var dylib = Dylib{ .weak = opts.weak };
-    errdefer dylib.deinit(gpa);
-
-    try dylib.parseFromBinary(
-        gpa,
-        @intCast(self.dylibs.items.len),
-        dependent_libs,
-        path,
-        contents,
-    );
-
-    const cpu_arch: std.Target.Cpu.Arch = switch (dylib.header.?.cputype) {
-        macho.CPU_TYPE_ARM64 => .aarch64,
-        macho.CPU_TYPE_X86_64 => .x86_64,
-        else => unreachable,
-    };
-    if (self_cpu_arch != cpu_arch) {
-        return self.base.fatal("{s}: invalid architecture '{s}', expected '{s}'", .{
-            path,
-            @tagName(cpu_arch),
-            @tagName(self_cpu_arch),
-        });
+    if (self.options.cpu_arch == null) {
+        self.base.fatal("{s}: ignoring library as no architecture specified", .{obj.path});
+        return true;
     }
 
-    if (self.options.platform) |self_platform| {
-        if (dylib.getPlatform(contents)) |platform| {
-            if (self_platform.platform != platform.platform) {
-                return self.base.fatal(
-                    "{s}: dylib file was built for different platform: expected {s}, got {s}",
-                    .{ path, @tagName(self_platform.platform), @tagName(platform.platform) },
-                );
-            }
-        }
+    const file = try std.fs.cwd().openFile(obj.path, .{});
+    defer file.close();
+
+    var offset: u64 = 0;
+    var size: u64 = (try file.stat()).size;
+    if (fat.isFatLibrary(file)) {
+        const fat_arch = self.parseFatLibrary(obj.path, file) catch |err| switch (err) {
+            error.NoArchSpecified, error.MissingArch => return false,
+            else => |e| return e,
+        };
+        offset = fat_arch.offset;
+        size = fat_arch.size;
+        try file.seekTo(offset);
     }
 
-    self.addDylib(dylib, .{
-        .syslibroot = self.options.syslibroot,
-        .needed = opts.needed,
-        .weak = opts.weak,
-    }) catch |err| switch (err) {
-        error.DylibAlreadyExists => dylib.deinit(gpa),
-        else => |e| return e,
-    };
+    const header = file.reader().readStruct(macho.mach_header_64) catch return false;
+    try file.seekTo(0);
+
+    if (header.filetype != macho.MH_DYLIB) return false;
+    self.validateOrSetCpuArch(obj.path, header.cputype);
+
+    const data = try arena.alloc(u8, size);
+    const nread = try file.readAll(data);
+    if (nread != size) return error.InputOutput;
+
+    const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
+    self.files.set(index, .{ .dylib = .{
+        .path = obj.path,
+        .data = data,
+        .index = index,
+        .needed = obj.needed,
+        .weak = obj.weak,
+        .alive = !obj.dependent and !self.options.dead_strip_dylibs,
+    } });
+    const dylib = &self.files.items(.data)[index].dylib;
+    try dylib.parse(self);
+    try self.dylibs.append(gpa, index);
+
+    // if (self.options.platform) |self_platform| {
+    //     if (dylib.getPlatform(contents)) |platform| {
+    //         if (self_platform.platform != platform.platform) {
+    //             return self.base.fatal(
+    //                 "{s}: dylib file was built for different platform: expected {s}, got {s}",
+    //                 .{ path, @tagName(self_platform.platform), @tagName(platform.platform) },
+    //             );
+    //         }
+    //     }
+    // }
+
+    return true;
 }
 
 fn parseTbd(self: *MachO, obj: LinkObject) !bool {
@@ -726,7 +731,7 @@ fn parseTbd(self: *MachO, obj: LinkObject) !bool {
 
     const cpu_arch = self.options.cpu_arch orelse {
         self.base.fatal("{s}: ignoring library as no architecture specified", .{obj.path});
-        return false;
+        return true;
     };
 
     // if (self.options.platform) |platform| {
@@ -831,7 +836,7 @@ fn parseDependentDylibs(self: *MachO, arena: Allocator) !void {
                     .weak = dylib.weak,
                     .dependent = true,
                 };
-                // if (try self.parseDylib(arena, link_obj)) break;
+                if (try self.parseDylib(arena, link_obj)) break;
                 if (try self.parseTbd(link_obj)) break;
             } else {
                 self.base.fatal("{s}: unable to resolve dependency", .{id.name});

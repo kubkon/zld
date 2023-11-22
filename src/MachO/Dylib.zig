@@ -28,6 +28,46 @@ pub fn deinit(self: *Dylib, allocator: Allocator) void {
     self.dependents.deinit(allocator);
 }
 
+pub fn parse(self: *Dylib, macho_file: *MachO) !void {
+    const gpa = macho_file.base.allocator;
+    var stream = std.io.fixedBufferStream(self.data);
+    const reader = stream.reader();
+
+    log.debug("parsing dylib from binary", .{});
+
+    self.header = try reader.readStruct(macho.mach_header_64);
+
+    const lc_id = self.getLoadCommand(.ID_DYLIB) orelse return;
+    self.id = try Id.fromLoadCommand(gpa, lc_id.cast(macho.dylib_command).?, lc_id.getDylibPathName());
+
+    if (self.header.?.flags & macho.MH_NO_REEXPORTED_DYLIBS == 0) {
+        var it = LoadCommandIterator{
+            .ncmds = self.header.?.ncmds,
+            .buffer = self.data[@sizeOf(macho.mach_header_64)..][0..self.header.?.sizeofcmds],
+        };
+        while (it.next()) |cmd| switch (cmd.cmd()) {
+            .REEXPORT_DYLIB => {
+                const id = try Id.fromLoadCommand(gpa, cmd.cast(macho.dylib_command).?, cmd.getDylibPathName());
+                try self.dependents.append(gpa, id);
+            },
+            else => {},
+        };
+    }
+
+    const lc_symtab = self.getLoadCommand(.SYMTAB) orelse return;
+    const cmd = lc_symtab.cast(macho.symtab_command).?;
+
+    const symtab = @as([*]align(1) const macho.nlist_64, @ptrCast(self.data.ptr + cmd.symoff))[0..cmd.nsyms];
+    try self.symtab.ensureUnusedCapacity(gpa, symtab.len);
+    self.symtab.appendUnalignedSliceAssumeCapacity(symtab);
+
+    const strtab = self.data[cmd.stroff..][0..cmd.strsize];
+    try self.strtab.ensureUnusedCapacity(gpa, strtab.len);
+    self.strtab.appendSliceAssumeCapacity(strtab);
+
+    try self.initSymbols(macho_file);
+}
+
 pub fn parseTbd(
     self: *Dylib,
     cpu_arch: std.Target.Cpu.Arch,
@@ -349,6 +389,16 @@ pub fn writeSymtab(self: Dylib, macho_file: *MachO) void {
         out_sym.n_strx = n_strx;
         global.setOutputSym(macho_file, out_sym);
     }
+}
+
+fn getLoadCommand(self: Dylib, lc: macho.LC) ?LoadCommandIterator.LoadCommand {
+    var it = LoadCommandIterator{
+        .ncmds = self.header.?.ncmds,
+        .buffer = self.data[@sizeOf(macho.mach_header_64)..][0..self.header.?.sizeofcmds],
+    };
+    while (it.next()) |cmd| {
+        if (cmd.cmd() == lc) return cmd;
+    } else return null;
 }
 
 fn insertString(self: *Dylib, allocator: Allocator, name: []const u8) !u32 {
