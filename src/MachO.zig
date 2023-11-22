@@ -696,7 +696,7 @@ fn parseDylib(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
         .index = index,
         .needed = obj.needed,
         .weak = obj.weak,
-        .alive = !obj.dependent and !self.options.dead_strip_dylibs,
+        .alive = obj.needed or !obj.dependent and !self.options.dead_strip_dylibs,
     } });
     const dylib = &self.files.items(.data)[index].dylib;
     try dylib.parse(self);
@@ -754,7 +754,7 @@ fn parseTbd(self: *MachO, obj: LinkObject) !bool {
         .index = index,
         .needed = obj.needed,
         .weak = obj.weak,
-        .alive = !obj.dependent and !self.options.dead_strip_dylibs,
+        .alive = obj.needed or !obj.dependent and !self.options.dead_strip_dylibs,
     } });
     const dylib = &self.files.items(.data)[index].dylib;
     try dylib.parseTbd(cpu_arch, self.options.platform, lib_stub, self);
