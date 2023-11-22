@@ -174,6 +174,13 @@ pub fn setOutputSym(symbol: Symbol, macho_file: *MachO, out: *macho.nlist_64) vo
         out.n_sect = 0;
         out.n_value = 0;
         out.n_desc = @as(u16, @bitCast(symbol.getDylibOrdinal(macho_file))) * macho.N_SYMBOL_RESOLVER;
+
+        if (symbol.getFile(macho_file)) |file| switch (file) {
+            .dylib => |x| if (x.weak) {
+                out.n_desc |= macho.N_WEAK_REF;
+            },
+            else => {},
+        };
     }
 }
 
