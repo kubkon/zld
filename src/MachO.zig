@@ -176,8 +176,26 @@ pub fn flush(self: *MachO) !void {
         }
     }
 
+    // Resolve link objects
+    var resolved_objects = std.ArrayList(LinkObject).init(arena);
+    try resolved_objects.ensureTotalCapacityPrecise(self.options.positionals.len);
     for (self.options.positionals) |obj| {
-        try self.parsePositional(arena, obj, lib_dirs.items, framework_dirs.items);
+        const resolved_obj = self.resolveFile(
+            arena,
+            obj,
+            lib_dirs.items,
+            framework_dirs.items,
+        ) catch |err| switch (err) {
+            error.ResolveFail => continue, // Already flagged up to the user
+            else => |e| return e,
+        };
+        resolved_objects.appendAssumeCapacity(resolved_obj);
+    }
+
+    if (self.options.cpu_arch == null) {
+        for (resolved_objects.items) |obj| {
+            if (try self.inferCpuArchAndPlatform(obj)) break;
+        }
     }
 
     if (self.options.platform == null) {
@@ -214,6 +232,10 @@ pub fn flush(self: *MachO) !void {
                 self.options.sdk_version = Options.Version.new(10, minor, 0);
             }
         }
+    }
+
+    for (resolved_objects.items) |obj| {
+        try self.parsePositional(arena, obj);
     }
 
     // Parse dependent dylibs
@@ -464,26 +486,50 @@ fn resolveFile(
     };
 }
 
-fn parsePositional(
-    self: *MachO,
-    arena: Allocator,
-    obj: LinkObject,
-    lib_dirs: []const []const u8,
-    framework_dirs: []const []const u8,
-) !void {
-    const resolved_obj = self.resolveFile(arena, obj, lib_dirs, framework_dirs) catch |err| switch (err) {
-        error.ResolveFail => return,
-        else => |e| return e,
+fn inferCpuArchAndPlatform(self: *MachO, obj: LinkObject) !bool {
+    const file = try std.fs.cwd().openFile(obj.path, .{});
+    defer file.close();
+
+    const header = file.reader().readStruct(macho.mach_header_64) catch return false;
+    if (header.filetype != macho.MH_OBJECT) return false;
+
+    // TODO infer platform
+
+    self.options.cpu_arch = switch (header.cputype) {
+        macho.CPU_TYPE_ARM64 => .aarch64,
+        macho.CPU_TYPE_X86_64 => .x86_64,
+        else => unreachable,
     };
 
-    log.debug("parsing positional {}", .{resolved_obj});
+    return true;
+}
 
-    if (try self.parseObject(arena, resolved_obj)) return;
-    if (try self.parseArchive(arena, resolved_obj)) return;
-    if (try self.parseDylib(arena, resolved_obj)) return;
-    if (try self.parseTbd(resolved_obj)) return;
+fn validateCpuArch(self: *MachO, path: []const u8, cputype: i32) void {
+    const cpu_arch: std.Target.Cpu.Arch = switch (cputype) {
+        macho.CPU_TYPE_ARM64 => .aarch64,
+        macho.CPU_TYPE_X86_64 => .x86_64,
+        else => unreachable,
+    };
+    if (self.options.cpu_arch) |self_cpu_arch| {
+        if (self_cpu_arch != cpu_arch) {
+            return self.base.fatal("{s}: invalid architecture '{s}', expected '{s}'", .{
+                path,
+                @tagName(cpu_arch),
+                @tagName(self_cpu_arch),
+            });
+        }
+    }
+}
 
-    self.base.fatal("unknown filetype for positional argument: '{s}'", .{resolved_obj.path});
+fn parsePositional(self: *MachO, arena: Allocator, obj: LinkObject) !void {
+    log.debug("parsing positional {}", .{obj});
+
+    if (try self.parseObject(arena, obj)) return;
+    if (try self.parseArchive(arena, obj)) return;
+    if (try self.parseDylib(arena, obj)) return;
+    if (try self.parseTbd(obj)) return;
+
+    self.base.fatal("unknown filetype for positional argument: '{s}'", .{obj.path});
 }
 
 fn parseObject(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
@@ -498,7 +544,7 @@ fn parseObject(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
     try file.seekTo(0);
 
     if (header.filetype != macho.MH_OBJECT) return false;
-    self.validateOrSetCpuArch(obj.path, header.cputype);
+    self.validateCpuArch(obj.path, header.cputype);
 
     const mtime: u64 = mtime: {
         const stat = file.stat() catch break :mtime 0;
@@ -608,25 +654,6 @@ fn parseArchive(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
     return true;
 }
 
-fn validateOrSetCpuArch(self: *MachO, path: []const u8, cputype: i32) void {
-    const cpu_arch: std.Target.Cpu.Arch = switch (cputype) {
-        macho.CPU_TYPE_ARM64 => .aarch64,
-        macho.CPU_TYPE_X86_64 => .x86_64,
-        else => unreachable,
-    };
-    const self_cpu_arch = self.options.cpu_arch orelse blk: {
-        self.options.cpu_arch = cpu_arch;
-        break :blk self.options.cpu_arch.?;
-    };
-    if (self_cpu_arch != cpu_arch) {
-        return self.base.fatal("{s}: invalid architecture '{s}', expected '{s}'", .{
-            path,
-            @tagName(cpu_arch),
-            @tagName(self_cpu_arch),
-        });
-    }
-}
-
 fn parseFatLibrary(self: *MachO, path: []const u8, file: fs.File) !fat.Arch {
     var buffer: [2]fat.Arch = undefined;
     const fat_archs = try fat.parseArchs(file, &buffer);
@@ -683,7 +710,7 @@ fn parseDylib(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
     try file.seekTo(0);
 
     if (header.filetype != macho.MH_DYLIB) return false;
-    self.validateOrSetCpuArch(obj.path, header.cputype);
+    self.validateCpuArch(obj.path, header.cputype);
 
     const data = try arena.alloc(u8, size);
     const nread = try file.readAll(data);
