@@ -1954,7 +1954,7 @@ fn writeLoadCommands(self: *MachO) !struct { usize, usize, usize } {
 
 fn writeHeader(self: *MachO, ncmds: usize, sizeofcmds: usize) !void {
     var header: macho.mach_header_64 = .{};
-    header.flags = macho.MH_NOUNDEFS | macho.MH_DYLDLINK | macho.MH_PIE;
+    header.flags = macho.MH_NOUNDEFS | macho.MH_DYLDLINK;
 
     if (self.options.namespace == .two_level) {
         header.flags |= macho.MH_TWOLEVEL;
@@ -1977,6 +1977,7 @@ fn writeHeader(self: *MachO, ncmds: usize, sizeofcmds: usize) !void {
         header.flags |= macho.MH_NO_REEXPORTED_DYLIBS;
     } else {
         header.filetype = macho.MH_EXECUTE;
+        header.flags |= macho.MH_PIE;
     }
 
     if (self.has_tlv) {

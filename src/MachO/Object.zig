@@ -285,11 +285,13 @@ pub fn resolveSymbols(self: *Object, macho_file: *MachO) void {
 
         const global = macho_file.getSymbol(index);
         if (self.asFile().getSymbolRank(nlist, !self.alive) < global.getSymbolRank(macho_file)) {
-            const atom = if (nlist.tentative() or nlist.abs())
-                0
-            else
-                self.atoms.items[nlist.n_sect - 1];
-            global.value = nlist.n_value;
+            var atom: Atom.Index = 0;
+            var value = nlist.n_value;
+            if (!nlist.tentative() and !nlist.abs()) {
+                atom = self.atoms.items[nlist.n_sect - 1];
+                value -= self.sections[nlist.n_sect - 1].addr;
+            }
+            global.value = value;
             global.atom = atom;
             global.nlist_idx = nlist_idx;
             global.file = self.index;
