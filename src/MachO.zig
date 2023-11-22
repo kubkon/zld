@@ -478,7 +478,7 @@ fn parsePositional(
     log.debug("parsing positional {}", .{resolved_obj});
 
     if (try self.parseObject(arena, resolved_obj)) return;
-    // if (try self.parseArchive(arena, resolved_obj)) return;
+    if (try self.parseArchive(arena, resolved_obj)) return;
     // if (try self.parseDylib(arena, resolved_obj)) return;
     if (try self.parseTbd(resolved_obj)) return;
 
@@ -542,6 +542,68 @@ fn parseObject(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
     return true;
 }
 
+fn parseArchive(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
+    const gpa = self.base.allocator;
+
+    const file = try std.fs.cwd().openFile(obj.path, .{});
+    defer file.close();
+
+    var offset: u32 = 0;
+    var size: u32 = std.math.maxInt(u32);
+    if (fat.isFatLibrary(file)) {
+        const fat_arch = self.parseFatLibrary(obj.path, file) catch |err| switch (err) {
+            error.NoArchSpecified, error.MissingArch => return false,
+            else => |e| return e,
+        };
+        offset = fat_arch.offset;
+        size = fat_arch.size;
+        try file.seekTo(offset);
+    }
+
+    const magic = file.reader().readBytesNoEof(Archive.SARMAG) catch return false;
+    if (!mem.eql(u8, &magic, Archive.ARMAG)) return false;
+
+    const data = try file.readToEndAlloc(arena, size - Archive.SARMAG);
+    var archive = Archive{ .path = obj.path, .data = data };
+    defer archive.deinit(gpa);
+    try archive.parse(arena, self);
+
+    for (archive.objects.items) |extracted| {
+        const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
+        self.files.set(index, .{ .object = extracted });
+        const object = &self.files.items(.data)[index].object;
+        object.index = index;
+        object.alive = obj.must_link or obj.needed;
+        try object.parse(self);
+        try self.objects.append(gpa, index);
+    }
+
+    // if (object.getPlatform()) |platform| {
+    //     const self_platform = self.options.platform orelse blk: {
+    //         self.options.platform = platform;
+    //         break :blk self.options.platform.?;
+    //     };
+    //     if (self_platform.platform != platform.platform) {
+    //         return self.base.fatal(
+    //             "{s}: object file was built for different platform: expected {s}, got {s}",
+    //             .{ obj.path, @tagName(self_platform.platform), @tagName(platform.platform) },
+    //         );
+    //     }
+    //     if (self_platform.version.value < platform.version.value) {
+    //         return self.base.warn(
+    //             "{s}: object file was built for newer platform version: expected {}, got {}",
+    //             .{
+    //                 obj.path,
+    //                 self_platform.version,
+    //                 platform.version,
+    //             },
+    //         );
+    //     }
+    // }
+
+    return true;
+}
+
 fn validateOrSetCpuArch(self: *MachO, path: []const u8, cputype: i32) void {
     const cpu_arch: std.Target.Cpu.Arch = switch (cputype) {
         macho.CPU_TYPE_ARM64 => .aarch64,
@@ -561,52 +623,7 @@ fn validateOrSetCpuArch(self: *MachO, path: []const u8, cputype: i32) void {
     }
 }
 
-fn parseLibrary(self: *MachO, obj: LinkObject, dependent_libs: anytype) !void {
-    const tracy = trace(@src());
-    defer tracy.end();
-
-    const file = try std.fs.cwd().openFile(obj.path, .{});
-    defer file.close();
-
-    if (Object.isObject(file)) return;
-
-    if (fat.isFatLibrary(file)) {
-        const offset = self.parseFatLibrary(obj.path, file) catch |err| switch (err) {
-            error.NoArchSpecified, error.MissingArch => return,
-            else => |e| return e,
-        };
-        try file.seekTo(offset);
-
-        if (Archive.isArchive(file, offset)) {
-            try self.parseArchive(obj.path, offset, obj.must_link);
-        } else if (Dylib.isDylib(file, offset)) {
-            try self.parseDylib(obj.path, file, offset, dependent_libs, .{
-                .syslibroot = self.options.syslibroot,
-                .needed = obj.needed,
-                .weak = obj.weak,
-            });
-        } else return self.base.fatal("{s}: unknown file type", .{obj.path});
-    } else if (Archive.isArchive(file, 0)) {
-        try self.parseArchive(obj.path, 0, obj.must_link);
-    } else if (Dylib.isDylib(file, 0)) {
-        try self.parseDylib(obj.path, file, 0, dependent_libs, .{
-            .syslibroot = self.options.syslibroot,
-            .needed = obj.needed,
-            .weak = obj.weak,
-        });
-    } else {
-        self.parseLibStub(obj.path, file, dependent_libs, .{
-            .syslibroot = self.options.syslibroot,
-            .needed = obj.needed,
-            .weak = obj.weak,
-        }) catch |err| switch (err) {
-            error.NotLibStub, error.UnexpectedToken => return self.base.fatal("{s}: unknown file type", .{obj.path}),
-            else => |e| return e,
-        };
-    }
-}
-
-fn parseFatLibrary(self: *MachO, path: []const u8, file: fs.File) !u64 {
+fn parseFatLibrary(self: *MachO, path: []const u8, file: fs.File) !fat.Arch {
     var buffer: [2]fat.Arch = undefined;
     const fat_archs = try fat.parseArchs(file, &buffer);
     const cpu_arch = self.options.cpu_arch orelse {
@@ -617,71 +634,11 @@ fn parseFatLibrary(self: *MachO, path: []const u8, file: fs.File) !u64 {
         }
         return error.NoArchSpecified;
     };
-    const offset = for (fat_archs) |arch| {
-        if (arch.tag == cpu_arch) break arch.offset;
-    } else {
-        self.base.fatal("{s}: missing arch in universal file: expected {s}", .{ path, @tagName(cpu_arch) });
-        return error.MissingArch;
-    };
-    return offset;
-}
-
-fn parseArchive(self: *MachO, path: []const u8, fat_offset: u64, must_link: bool) !void {
-    const gpa = self.base.allocator;
-    const self_cpu_arch = self.options.cpu_arch orelse
-        return self.base.fatal("{s}: ignoring library as no architecture specified", .{path});
-
-    const file = try std.fs.cwd().openFile(path, .{});
-    errdefer file.close();
-    try file.seekTo(fat_offset);
-
-    var archive = Archive{
-        .file = file,
-        .fat_offset = fat_offset,
-        .name = try gpa.dupe(u8, path),
-    };
-    errdefer archive.deinit(gpa);
-
-    try archive.parse(gpa, file.reader(), self);
-
-    // Verify arch and platform
-    if (archive.toc.values().len > 0) {
-        const offsets = archive.toc.values()[0].items;
-        assert(offsets.len > 0);
-        const off = offsets[0];
-        var object = try archive.parseObject(gpa, off); // TODO we are doing all this work to pull the header only!
-        defer object.deinit(gpa);
-
-        const cpu_arch: std.Target.Cpu.Arch = switch (object.header.cputype) {
-            macho.CPU_TYPE_ARM64 => .aarch64,
-            macho.CPU_TYPE_X86_64 => .x86_64,
-            else => unreachable,
-        };
-        if (self_cpu_arch != cpu_arch) {
-            return self.base.fatal("{s}: invalid architecture in archive '{s}', expected '{s}'", .{
-                path,
-                @tagName(cpu_arch),
-                @tagName(self_cpu_arch),
-            });
-        }
+    for (fat_archs) |arch| {
+        if (arch.tag == cpu_arch) return arch;
     }
-
-    if (must_link) {
-        // Get all offsets from the ToC
-        var offsets = std.AutoArrayHashMap(u32, void).init(gpa);
-        defer offsets.deinit();
-        for (archive.toc.values()) |offs| {
-            for (offs.items) |off| {
-                _ = try offsets.getOrPut(off);
-            }
-        }
-        for (offsets.keys()) |off| {
-            const object = try archive.parseObject(gpa, off);
-            try self.objects.append(gpa, object);
-        }
-    } else {
-        try self.archives.append(gpa, archive);
-    }
+    self.base.fatal("{s}: missing arch in universal file: expected {s}", .{ path, @tagName(cpu_arch) });
+    return error.MissingArch;
 }
 
 const DylibOpts = struct {

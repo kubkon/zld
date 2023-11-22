@@ -17,7 +17,8 @@ pub fn isFatLibrary(file: std.fs.File) bool {
 
 pub const Arch = struct {
     tag: std.Target.Cpu.Arch,
-    offset: u64,
+    offset: u32,
+    size: u32,
 };
 
 pub fn parseArchs(file: std.fs.File, buffer: *[2]Arch) ![]const Arch {
@@ -36,7 +37,7 @@ pub fn parseArchs(file: std.fs.File, buffer: *[2]Arch) ![]const Arch {
             macho.CPU_TYPE_X86_64 => if (fat_arch.cpusubtype == macho.CPU_SUBTYPE_X86_64_ALL) .x86_64 else continue,
             else => continue,
         };
-        buffer[count] = .{ .tag = arch, .offset = fat_arch.offset };
+        buffer[count] = .{ .tag = arch, .offset = fat_arch.offset, .size = fat_arch.size };
         count += 1;
     }
 
