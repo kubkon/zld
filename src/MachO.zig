@@ -749,7 +749,7 @@ fn parseTbd(self: *MachO, obj: LinkObject) !bool {
         .index = index,
         .needed = obj.needed,
         .weak = obj.weak,
-        .alive = !obj.dependent,
+        .alive = !obj.dependent and !self.options.dead_strip_dylibs,
     } });
     const dylib = &self.files.items(.data)[index].dylib;
     try dylib.parseTbd(cpu_arch, self.options.platform, lib_stub, self);
