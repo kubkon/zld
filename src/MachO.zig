@@ -548,8 +548,8 @@ fn parseArchive(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
     const file = try std.fs.cwd().openFile(obj.path, .{});
     defer file.close();
 
-    var offset: u32 = 0;
-    var size: u32 = std.math.maxInt(u32);
+    var offset: u64 = 0;
+    var size: u64 = (try file.stat()).size;
     if (fat.isFatLibrary(file)) {
         const fat_arch = self.parseFatLibrary(obj.path, file) catch |err| switch (err) {
             error.NoArchSpecified, error.MissingArch => return false,
@@ -563,7 +563,9 @@ fn parseArchive(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
     const magic = file.reader().readBytesNoEof(Archive.SARMAG) catch return false;
     if (!mem.eql(u8, &magic, Archive.ARMAG)) return false;
 
-    const data = try file.readToEndAlloc(arena, size - Archive.SARMAG);
+    const data = try arena.alloc(u8, size - Archive.SARMAG);
+    const nread = try file.readAll(data);
+    if (nread != size - Archive.SARMAG) return error.InputOutput;
     var archive = Archive{ .path = obj.path, .data = data };
     defer archive.deinit(gpa);
     try archive.parse(arena, self);
