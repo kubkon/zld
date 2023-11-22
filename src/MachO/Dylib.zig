@@ -13,7 +13,7 @@ dependents: std.ArrayListUnmanaged(Id) = .{},
 
 needed: bool,
 weak: bool,
-alive: bool = true,
+alive: bool,
 
 output_symtab_ctx: MachO.SymtabCtx = .{},
 

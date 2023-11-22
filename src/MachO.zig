@@ -216,15 +216,12 @@ pub fn flush(self: *MachO) !void {
         }
     }
 
-    // TODO parse dependent dylibs
+    // Parse dependent dylibs
+    try self.parseDependentDylibs(arena);
 
     self.base.reportWarningsAndErrorsAndExit();
 
     // TODO dedup dylibs
-
-    for (self.dylibs.items, 1..) |index, ord| {
-        self.getFile(index).?.dylib.ordinal = @intCast(ord);
-    }
 
     {
         const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
@@ -233,6 +230,10 @@ pub fn flush(self: *MachO) !void {
     }
 
     try self.resolveSymbols();
+
+    for (self.dylibs.items, 1..) |index, ord| {
+        self.getFile(index).?.dylib.ordinal = @intCast(ord);
+    }
 
     // TODO kill __eh_frame atoms
     // TODO convert tentative definitions
@@ -748,6 +749,7 @@ fn parseTbd(self: *MachO, obj: LinkObject) !bool {
         .index = index,
         .needed = obj.needed,
         .weak = obj.weak,
+        .alive = !obj.dependent,
     } });
     const dylib = &self.files.items(.data)[index].dylib;
     try dylib.parseTbd(cpu_arch, self.options.platform, lib_stub, self);
@@ -785,76 +787,57 @@ fn addDylib(self: *MachO, dylib: Dylib, opts: DylibOpts) !void {
     }
 }
 
-fn parseDependentLibs(self: *MachO, syslibroot: ?[]const u8, dependent_libs: anytype) !void {
+/// Parse dependents of dylibs preserving the inclusion order of:
+/// 1) anything on the linker line is parsed first
+/// 2) afterwards, we parse dependents of the included dylibs
+fn parseDependentDylibs(self: *MachO, arena: Allocator) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
-    // At this point, we can now parse dependents of dylibs preserving the inclusion order of:
-    // 1) anything on the linker line is parsed first
-    // 2) afterwards, we parse dependents of the included dylibs
-    // TODO this should not be performed if the user specifies `-flat_namespace` flag.
-    // See ld64 manpages.
-    var arena_alloc = std.heap.ArenaAllocator.init(self.base.allocator);
-    const arena = arena_alloc.allocator();
-    defer arena_alloc.deinit();
+    if (self.options.namespace == .flat) return;
 
-    outer: while (dependent_libs.readItem()) |dep_id| {
-        defer dep_id.id.deinit(self.base.allocator);
-
-        if (self.dylibs_map.contains(dep_id.id.name)) continue;
-
-        const weak = self.dylibs.items[dep_id.parent].weak;
-        const has_ext = blk: {
-            const basename = fs.path.basename(dep_id.id.name);
-            break :blk mem.lastIndexOfScalar(u8, basename, '.') != null;
-        };
-        const extension = if (has_ext) fs.path.extension(dep_id.id.name) else "";
-        const without_ext = if (has_ext) blk: {
-            const index = mem.lastIndexOfScalar(u8, dep_id.id.name, '.') orelse unreachable;
-            break :blk dep_id.id.name[0..index];
-        } else dep_id.id.name;
-
-        for (&[_][]const u8{ extension, ".tbd" }) |ext| {
-            const with_ext = try std.fmt.allocPrint(arena, "{s}{s}", .{ without_ext, ext });
-            const full_path = if (syslibroot) |root| try fs.path.join(arena, &.{ root, with_ext }) else with_ext;
-
-            const file = std.fs.cwd().openFile(full_path, .{}) catch |err| switch (err) {
-                error.FileNotFound => continue,
-                else => |e| return e,
+    var index: usize = 0;
+    while (index < self.dylibs.items.len) : (index += 1) {
+        const dylib = self.getFile(self.dylibs.items[index]).?.dylib;
+        for (dylib.dependents.items) |id| {
+            const has_ext = blk: {
+                const basename = fs.path.basename(id.name);
+                break :blk mem.lastIndexOfScalar(u8, basename, '.') != null;
             };
-            defer file.close();
+            const extension = if (has_ext) fs.path.extension(id.name) else "";
+            const without_ext = if (has_ext) blk: {
+                const sentinel = mem.lastIndexOfScalar(u8, id.name, '.') orelse unreachable;
+                break :blk id.name[0..sentinel];
+            } else id.name;
 
-            log.debug("trying dependency at fully resolved path {s}", .{full_path});
+            for (&[_][]const u8{ extension, ".tbd" }) |ext| {
+                const with_ext = try std.fmt.allocPrint(arena, "{s}{s}", .{ without_ext, ext });
+                const full_path = if (self.options.syslibroot) |root|
+                    try fs.path.join(arena, &.{ root, with_ext })
+                else
+                    with_ext;
 
-            const offset: u64 = if (fat.isFatLibrary(file)) blk: {
-                const offset = self.parseFatLibrary(full_path, file) catch |err| switch (err) {
-                    error.NoArchSpecified, error.MissingArch => break,
+                const file = std.fs.cwd().openFile(full_path, .{}) catch |err| switch (err) {
+                    error.FileNotFound => continue,
                     else => |e| return e,
                 };
-                try file.seekTo(offset);
-                break :blk offset;
-            } else 0;
+                defer file.close();
 
-            if (Dylib.isDylib(file, offset)) {
-                try self.parseDylib(full_path, file, offset, dependent_libs, .{
-                    .syslibroot = self.options.syslibroot,
+                log.debug("trying dependency at fully resolved path {s}", .{full_path});
+
+                const link_obj = LinkObject{
+                    .path = full_path,
+                    .tag = .lib,
+                    .weak = dylib.weak,
                     .dependent = true,
-                    .weak = weak,
-                });
+                };
+                // if (try self.parseDylib(arena, link_obj)) break;
+                if (try self.parseTbd(link_obj)) break;
             } else {
-                self.parseLibStub(full_path, file, dependent_libs, .{
-                    .syslibroot = self.options.syslibroot,
-                    .dependent = true,
-                    .weak = weak,
-                }) catch |err| switch (err) {
-                    error.NotLibStub, error.UnexpectedToken => continue,
-                    else => |e| return e,
-                };
+                self.base.fatal("{s}: unable to resolve dependency", .{id.name});
+                continue;
             }
-            continue :outer;
         }
-
-        self.base.fatal("{s}: unable to resolve dependency", .{dep_id.id.name});
     }
 }
 
@@ -2329,6 +2312,7 @@ pub const LinkObject = struct {
     needed: bool = false,
     weak: bool = false,
     must_link: bool = false,
+    dependent: bool = false,
 
     pub fn format(
         self: LinkObject,
@@ -2338,14 +2322,16 @@ pub const LinkObject = struct {
     ) !void {
         _ = options;
         _ = unused_fmt_string;
-        if (self.needed) {
-            try writer.print("-needed_{s}", .{@tagName(self.tag)});
-        }
-        if (self.weak) {
-            try writer.print("-weak_{s}", .{@tagName(self.tag)});
-        }
-        if (self.must_link and self.tag == .obj) {
-            try writer.writeAll("-force_load");
+        if (!self.dependent) {
+            if (self.needed) {
+                try writer.print("-needed_{s}", .{@tagName(self.tag)});
+            }
+            if (self.weak) {
+                try writer.print("-weak_{s}", .{@tagName(self.tag)});
+            }
+            if (self.must_link and self.tag == .obj) {
+                try writer.writeAll("-force_load");
+            }
         }
         try writer.print(" {s}", .{self.path});
     }
