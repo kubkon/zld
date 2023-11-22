@@ -8,7 +8,7 @@ header: ?macho.mach_header_64 = null,
 sections: []align(1) const macho.section_64 = &[0]macho.section_64{},
 symtab: std.ArrayListUnmanaged(macho.nlist_64) = .{},
 strtab: []const u8 = &[0]u8{},
-first_global: Symbol.Index = undefined,
+first_global: Symbol.Index = 0,
 
 symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
 atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
@@ -504,12 +504,12 @@ fn formatSymtab(
     }
 }
 
-pub fn fmtPath(self: *Object) std.fmt.Formatter(formatPath) {
+pub fn fmtPath(self: Object) std.fmt.Formatter(formatPath) {
     return .{ .data = self };
 }
 
 fn formatPath(
-    object: *Object,
+    object: Object,
     comptime unused_fmt_string: []const u8,
     options: std.fmt.FormatOptions,
     writer: anytype,
