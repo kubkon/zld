@@ -971,6 +971,20 @@ fn resolveSyntheticSymbols(self: *MachO) !void {
     try internal.init(self);
     internal.resolveSymbols(self);
     self.markImportsAndExportsInFile(internal.index);
+
+    for (internal.getGlobals()) |global_index| {
+        const global = self.getSymbol(global_index);
+        const name = global.getName(self);
+        if (mem.eql(u8, name, "__mh_execute_header")) {
+            self.mh_execute_header_index = global_index;
+        } else if (mem.eql(u8, name, "__dso_handle")) {
+            self.dso_handle_index = global_index;
+        } else if (mem.eql(u8, name, "dyld_private")) {
+            self.dyld_private_index = global_index;
+        } else if (mem.eql(u8, name, "dyld_stub_binder")) {
+            self.dyld_stub_binder_index = global_index;
+        }
+    }
 }
 
 fn claimUnresolved(self: *MachO) void {
@@ -985,6 +999,10 @@ fn claimUnresolved(self: *MachO) void {
 fn scanRelocs(self: *MachO) !void {
     for (self.objects.items) |index| {
         try self.getFile(index).?.object.scanRelocs(self);
+    }
+
+    if (self.dyld_stub_binder_index) |index| {
+        self.getSymbol(index).flags.got = true;
     }
 
     try self.reportUndefs();

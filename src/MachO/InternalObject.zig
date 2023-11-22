@@ -18,58 +18,49 @@ pub fn init(self: *InternalObject, macho_file: *MachO) !void {
     {
         const n_sect = self.getSectionByName("__TEXT", "__text") orelse
             try self.addSection(gpa, "__TEXT", "__text");
-        const target_idx = try self.addGlobal("__mh_execute_header", macho_file);
-        const nlist = &self.symtab.items[target_idx];
-        nlist.n_type = macho.N_EXT | macho.N_SECT;
-        nlist.n_desc = macho.REFERENCED_DYNAMICALLY;
-        nlist.n_sect = n_sect + 1;
-        const atom_index = try self.addAtom(macho_file);
-        const atom = macho_file.getAtom(atom_index).?;
-        atom.name = try macho_file.string_intern.insert(gpa, self.getString(nlist.n_strx));
-        atom.n_sect = n_sect;
-        macho_file.mh_execute_header_index = self.symbols.items[target_idx];
-    }
 
-    if (macho_file.getGlobalByName("__dso_handle")) |index| {
-        if (macho_file.getSymbol(index).getFile(macho_file) == null) {
-            const target_idx = try self.addGlobal("__dso_handle", macho_file);
-            const nlist = &self.symtab.items[target_idx];
-            nlist.n_type = macho.N_EXT | macho.N_ABS;
-            macho_file.dso_handle_index = self.symbols.items[target_idx];
+        if (!macho_file.options.dylib) {
+            const nlist_idx = try self.addNlist(gpa);
+            const nlist = &self.symtab.items[nlist_idx];
+            nlist.n_strx = try self.insertString(gpa, "__mh_execute_header");
+            nlist.n_type = macho.N_EXT | macho.N_SECT;
+            nlist.n_desc = macho.REFERENCED_DYNAMICALLY;
+            nlist.n_sect = n_sect + 1;
+        } else {
+            const nlist_idx = try self.addNlist(gpa);
+            const nlist = &self.symtab.items[nlist_idx];
+            nlist.n_strx = try self.insertString(gpa, "__dso_handle");
+            nlist.n_type = macho.N_EXT | macho.N_SECT;
+            nlist.n_desc = macho.REFERENCED_DYNAMICALLY;
+            nlist.n_sect = n_sect + 1;
         }
     }
 
     {
-        const target_idx = try self.addGlobal("dyld_private", macho_file);
-        macho_file.dyld_private_index = self.symbols.items[target_idx];
-
         const n_sect = self.getSectionByName("__DATA", "__data") orelse
             try self.addSection(gpa, "__DATA", "__data");
-
-        const nlist = &self.symtab.items[target_idx];
-        nlist.n_sect = n_sect + 1;
-        nlist.n_type = macho.N_PEXT | macho.N_EXT | macho.N_SECT;
-
         const sect = &self.sections.items[n_sect];
-        const atom_index = try self.addAtom(macho_file);
-        const atom = macho_file.getAtom(atom_index).?;
-        atom.name = try macho_file.string_intern.insert(gpa, self.getString(nlist.n_strx));
-        atom.size = @sizeOf(u64);
-        atom.alignment = 3;
-        atom.n_sect = n_sect;
-        sect.size += atom.size;
+        sect.size = 8;
+        sect.@"align" = 3;
+        try self.code.ensureUnusedCapacity(gpa, sect.size);
+        self.code.appendNTimesAssumeCapacity(0, sect.size);
 
-        try self.code.ensureUnusedCapacity(gpa, atom.size);
-        atom.off = self.code.items.len;
-        self.code.appendNTimesAssumeCapacity(0, atom.size);
+        const nlist_idx = try self.addNlist(gpa);
+        const nlist = &self.symtab.items[nlist_idx];
+        nlist.n_strx = try self.insertString(gpa, "dyld_private");
+        nlist.n_type = macho.N_PEXT | macho.N_EXT | macho.N_SECT;
+        nlist.n_sect = n_sect + 1;
     }
 
     {
-        const target_idx = try self.addGlobal("dyld_stub_binder", macho_file);
-        const target = macho_file.getSymbol(self.symbols.items[target_idx]);
-        target.flags.got = true;
-        macho_file.dyld_stub_binder_index = self.symbols.items[target_idx];
+        const nlist_idx = try self.addNlist(gpa);
+        const nlist = &self.symtab.items[nlist_idx];
+        nlist.n_strx = try self.insertString(gpa, "dyld_stub_binder");
+        nlist.n_type = macho.N_EXT;
     }
+
+    try self.initAtoms(macho_file);
+    try self.initSymbols(macho_file);
 }
 
 pub fn deinit(self: *InternalObject, allocator: Allocator) void {
@@ -78,6 +69,39 @@ pub fn deinit(self: *InternalObject, allocator: Allocator) void {
     self.strtab.deinit(allocator);
     self.symbols.deinit(allocator);
     self.code.deinit(allocator);
+}
+
+fn initAtoms(self: *InternalObject, macho_file: *MachO) !void {
+    const gpa = macho_file.base.allocator;
+    try self.atoms.resize(gpa, self.sections.items.len);
+    @memset(self.atoms.items, 0);
+
+    for (self.sections.items, 0..) |sect, n_sect| {
+        const name = try std.fmt.allocPrintZ(gpa, "{s},{s}", .{ sect.segName(), sect.sectName() });
+        defer gpa.free(name);
+        const atom_index = try macho_file.addAtom();
+        const atom = macho_file.getAtom(atom_index).?;
+        atom.file = self.index;
+        atom.atom_index = atom_index;
+        atom.name = try macho_file.string_intern.insert(gpa, name);
+        atom.n_sect = @intCast(n_sect);
+        atom.size = sect.size;
+        atom.alignment = sect.@"align";
+        atom.off = sect.addr;
+        self.atoms.items[n_sect] = atom_index;
+    }
+}
+
+fn initSymbols(self: *InternalObject, macho_file: *MachO) !void {
+    const gpa = macho_file.base.allocator;
+    try self.symbols.ensureUnusedCapacity(gpa, self.symtab.items.len);
+
+    for (self.symtab.items) |global| {
+        const name = self.getString(global.n_strx);
+        const off = try macho_file.string_intern.insert(gpa, name);
+        const gop = try macho_file.getOrCreateGlobal(off);
+        self.symbols.addOneAssumeCapacity().* = gop.index;
+    }
 }
 
 fn addSection(self: *InternalObject, allocator: Allocator, segname: []const u8, sectname: []const u8) !u8 {
@@ -92,30 +116,6 @@ fn addSection(self: *InternalObject, allocator: Allocator, segname: []const u8, 
 fn addNlist(self: *InternalObject, allocator: Allocator) !Symbol.Index {
     const index = @as(Symbol.Index, @intCast(self.symtab.items.len));
     try self.symtab.append(allocator, MachO.null_sym);
-    return index;
-}
-
-fn addAtom(self: *InternalObject, macho_file: *MachO) !Atom.Index {
-    const gpa = macho_file.base.allocator;
-    const atom_index = try macho_file.addAtom();
-    try self.atoms.append(gpa, atom_index);
-    const atom = macho_file.getAtom(atom_index).?;
-    atom.file = self.index;
-    atom.atom_index = atom_index;
-    return atom_index;
-}
-
-fn addGlobal(self: *InternalObject, name: [:0]const u8, macho_file: *MachO) !Symbol.Index {
-    const gpa = macho_file.base.allocator;
-    const nlist_idx = try self.addNlist(gpa);
-    const nlist = &self.symtab.items[nlist_idx];
-    nlist.n_strx = try self.insertString(gpa, name);
-    nlist.n_type = macho.N_EXT;
-    const index = @as(Symbol.Index, @intCast(self.symbols.items.len));
-    try self.symbols.ensureUnusedCapacity(gpa, 1);
-    const off = try macho_file.string_intern.insert(gpa, name);
-    const gop = try macho_file.getOrCreateGlobal(off);
-    self.symbols.addOneAssumeCapacity().* = gop.index;
     return index;
 }
 
