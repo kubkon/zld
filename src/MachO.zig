@@ -1660,22 +1660,19 @@ fn writeDyldInfoSections(self: *MachO) !void {
     var needed_size: u32 = 0;
 
     cmd.rebase_off = needed_size;
-    cmd.rebase_size = @intCast(self.rebase.size());
+    cmd.rebase_size = mem.alignForward(u32, @intCast(self.rebase.size()), @alignOf(u64));
     needed_size += cmd.rebase_size;
-    needed_size = mem.alignForward(u32, needed_size, @alignOf(u64));
 
     cmd.bind_off = needed_size;
-    cmd.bind_size = @intCast(self.bind.size());
+    cmd.bind_size = mem.alignForward(u32, @intCast(self.bind.size()), @alignOf(u64));
     needed_size += cmd.bind_size;
-    needed_size = mem.alignForward(u32, needed_size, @alignOf(u64));
 
     cmd.lazy_bind_off = needed_size;
-    cmd.lazy_bind_size = @intCast(self.lazy_bind.size());
+    cmd.lazy_bind_size = mem.alignForward(u32, @intCast(self.lazy_bind.size()), @alignOf(u64));
     needed_size += cmd.lazy_bind_size;
-    needed_size = mem.alignForward(u32, needed_size, @alignOf(u64));
 
     cmd.export_off = needed_size;
-    cmd.export_size = @intCast(self.export_trie.size);
+    cmd.export_size = mem.alignForward(u32, @intCast(self.export_trie.size), @alignOf(u64));
     needed_size += cmd.export_size;
 
     const buffer = try gpa.alloc(u8, needed_size);
