@@ -36,9 +36,18 @@ pub fn isLocal(symbol: Symbol) bool {
     return !(symbol.flags.import or symbol.flags.@"export");
 }
 
-pub fn isTlvInit(self: Symbol, macho_file: *MachO) bool {
-    const name = self.getName(macho_file);
+pub fn isTlvInit(symbol: Symbol, macho_file: *MachO) bool {
+    const name = symbol.getName(macho_file);
     return std.mem.indexOf(u8, name, "$tlv$init") != null;
+}
+
+pub fn isWeakRef(symbol: Symbol, macho_file: *MachO) bool {
+    if (!symbol.flags.import) return false;
+    switch (symbol.getFile(macho_file).?) {
+        .dylib => |x| if (x.weak) return true,
+        else => {},
+    }
+    return symbol.getNlist(macho_file).weakRef();
 }
 
 pub fn getName(symbol: Symbol, macho_file: *MachO) [:0]const u8 {
@@ -60,14 +69,14 @@ pub fn getNlist(symbol: Symbol, macho_file: *MachO) macho.nlist_64 {
     };
 }
 
-pub fn getDylibOrdinal(symbol: Symbol, macho_file: *MachO) i16 {
+pub fn getDylibOrdinal(symbol: Symbol, macho_file: *MachO) ?u16 {
     assert(symbol.flags.import);
-    // TODO handle BIND_SPECIAL_DYLIB_MAIN_EXECUTABLE
-    const file = symbol.getFile(macho_file) orelse return macho.BIND_SPECIAL_DYLIB_SELF;
-    if (macho_file.options.namespace == .flat) return macho.BIND_SPECIAL_DYLIB_FLAT_LOOKUP;
-    if (file != .dylib and macho_file.options.undefined_treatment == .dynamic_lookup)
-        return macho.BIND_SPECIAL_DYLIB_FLAT_LOOKUP;
-    return @bitCast(file.dylib.ordinal);
+    if (macho_file.options.namespace == .flat) return null;
+    const file = symbol.getFile(macho_file) orelse return null;
+    return switch (file) {
+        .dylib => |x| x.ordinal,
+        else => null,
+    };
 }
 
 pub fn getSymbolRank(symbol: Symbol, macho_file: *MachO) u32 {
@@ -174,20 +183,14 @@ pub fn setOutputSym(symbol: Symbol, macho_file: *MachO, out: *macho.nlist_64) vo
         out.n_sect = 0;
         out.n_value = 0;
 
-        out.n_desc = switch (symbol.getDylibOrdinal(macho_file)) {
-            macho.BIND_SPECIAL_DYLIB_SELF,
-            macho.BIND_SPECIAL_DYLIB_MAIN_EXECUTABLE,
-            macho.BIND_SPECIAL_DYLIB_FLAT_LOOKUP,
-            => |x| @bitCast(x),
-            else => |x| @as(u16, @bitCast(x)) * macho.N_SYMBOL_RESOLVER,
-        };
+        out.n_desc = if (symbol.getDylibOrdinal(macho_file)) |ord|
+            ord * macho.N_SYMBOL_RESOLVER
+        else
+            0;
 
-        if (symbol.getFile(macho_file)) |file| switch (file) {
-            .dylib => |x| if (x.weak) {
-                out.n_desc |= macho.N_WEAK_REF;
-            },
-            else => {},
-        };
+        if (symbol.isWeakRef(macho_file)) {
+            out.n_desc |= macho.N_WEAK_REF;
+        }
     }
 }
 

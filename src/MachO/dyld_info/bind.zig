@@ -95,9 +95,14 @@ pub const Bind = struct {
 
                 const sym = ctx.getSymbol(current.target);
                 const name = sym.getName(ctx);
-                const nlist = sym.getNlist(ctx);
-                const flags: u8 = if (nlist.weakRef()) macho.BIND_SYMBOL_FLAGS_WEAK_IMPORT else 0;
-                const ordinal = sym.getDylibOrdinal(ctx);
+                const flags: u8 = if (sym.isWeakRef(ctx)) macho.BIND_SYMBOL_FLAGS_WEAK_IMPORT else 0;
+                const ordinal: i16 = ord: {
+                    if (ctx.options.namespace == .flat) break :ord macho.BIND_SPECIAL_DYLIB_FLAT_LOOKUP;
+                    if (sym.getDylibOrdinal(ctx)) |ord| break :ord @bitCast(ord);
+                    if (ctx.options.undefined_treatment == .dynamic_lookup)
+                        break :ord macho.BIND_SPECIAL_DYLIB_FLAT_LOOKUP;
+                    break :ord macho.BIND_SPECIAL_DYLIB_SELF;
+                };
 
                 try setSymbol(name, flags, writer);
                 try setTypePointer(writer);
@@ -212,9 +217,14 @@ pub const LazyBind = struct {
 
             const sym = ctx.getSymbol(entry.target);
             const name = sym.getName(ctx);
-            const nlist = sym.getNlist(ctx);
-            const flags: u8 = if (nlist.weakRef()) macho.BIND_SYMBOL_FLAGS_WEAK_IMPORT else 0;
-            const ordinal = sym.getDylibOrdinal(ctx);
+            const flags: u8 = if (sym.isWeakRef(ctx)) macho.BIND_SYMBOL_FLAGS_WEAK_IMPORT else 0;
+            const ordinal: i16 = ord: {
+                if (ctx.options.namespace == .flat) break :ord macho.BIND_SPECIAL_DYLIB_FLAT_LOOKUP;
+                if (sym.getDylibOrdinal(ctx)) |ord| break :ord @bitCast(ord);
+                if (ctx.options.undefined_treatment == .dynamic_lookup)
+                    break :ord macho.BIND_SPECIAL_DYLIB_FLAT_LOOKUP;
+                break :ord macho.BIND_SPECIAL_DYLIB_SELF;
+            };
 
             try setSegmentOffset(entry.segment_id, entry.offset, writer);
             try setSymbol(name, flags, writer);

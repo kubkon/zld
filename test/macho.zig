@@ -48,6 +48,7 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testUnwindInfoNoSubsectionsX64(b, opts));
     macho_step.dependOn(testWeakFramework(b, opts));
     macho_step.dependOn(testWeakLibrary(b, opts));
+    macho_step.dependOn(testWeakRef(b, opts));
 
     return macho_step;
 }
@@ -1370,6 +1371,32 @@ fn testWeakLibrary(b: *Build, opts: Options) *Step {
 
     const run = exe.run();
     run.expectStdOutEqual("42 42");
+    test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+fn testWeakRef(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-weak-ref", "");
+
+    const exe = cc(b, opts);
+    exe.addCSource(
+        \\#include<stdio.h>
+        \\__attribute__((weak)) int foo();
+        \\int main() {
+        \\  printf("%d", foo ? foo() : -1);
+        \\  return 0;
+        \\}
+    );
+    exe.addArgs(&.{ "-Wl,-flat_namespace", "-Wl,-undefined,suppress" });
+
+    const check = exe.check();
+    check.checkInSymtab();
+    check.checkExact("(undefined) weak external _foo (from self import)");
+    test_step.dependOn(&check.step);
+
+    const run = exe.run();
+    run.expectStdOutEqual("-1");
     test_step.dependOn(run.step());
 
     return test_step;
