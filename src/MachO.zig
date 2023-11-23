@@ -959,6 +959,13 @@ fn markImportsAndExports(self: *MachO) void {
     for (self.objects.items) |index| {
         self.markImportsAndExportsInFile(index);
     }
+
+    for (self.undefined_symbols.items) |index| {
+        const sym = self.getSymbol(index);
+        if (sym.getFile(self)) |file| {
+            if (file == .dylib and !sym.isAbs(self)) sym.flags.import = true;
+        }
+    }
 }
 
 fn markImportsAndExportsInFile(self: *MachO, index: File.Index) void {
@@ -1064,10 +1071,11 @@ fn scanRelocs(self: *MachO) !void {
 }
 
 fn reportUndefs(self: *MachO) !void {
-    if (self.options.undefined_treatment == .suppress) return;
+    if (self.options.undefined_treatment == .suppress or
+        self.options.undefined_treatment == .dynamic_lookup) return;
 
     const addFn = switch (self.options.undefined_treatment) {
-        .dynamic_lookup => unreachable, // all undefs are treated as load-time bound symbols
+        .dynamic_lookup => unreachable, // handled above
         .suppress => unreachable, // handled above
         .@"error" => &Zld.addErrorWithNotes,
         .warn => &Zld.addWarningWithNotes,
