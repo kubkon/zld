@@ -266,10 +266,6 @@ pub fn flush(self: *MachO) !void {
 
     self.markImportsAndExports();
 
-    if (!self.options.dylib and self.entry_index == null) {
-        self.base.fatal("no entrypoint found: '{s}'", .{self.options.entry orelse "_main"});
-    }
-
     // TODO dead strip atoms
 
     try self.resolveSyntheticSymbols();
@@ -1068,7 +1064,6 @@ fn scanRelocs(self: *MachO) !void {
 }
 
 fn reportUndefs(self: *MachO) !void {
-    if (self.undefs.count() == 0) return;
     if (self.options.undefined_treatment == .suppress) return;
 
     const addFn = switch (self.options.undefined_treatment) {
@@ -1100,6 +1095,22 @@ fn reportUndefs(self: *MachO) !void {
             const remaining = notes.items.len - max_notes;
             try err.addNote("referenced {d} more times", .{remaining});
         }
+    }
+
+    for (self.undefined_symbols.items) |index| {
+        const sym = self.getSymbol(index);
+        if (sym.getFile(self)) |_| continue; // If undefined in an object file, will be reported above
+
+        const err = try addFn(&self.base, 1);
+        try err.addMsg("undefined symbol: {s}", .{sym.getName(self)});
+
+        if (self.entry_index) |idx| {
+            if (index == idx) {
+                try err.addNote("implicit entry/start for main executable", .{});
+                continue;
+            }
+        }
+        try err.addNote("-u command line option", .{});
     }
 }
 
@@ -1944,11 +1955,15 @@ fn writeLoadCommands(self: *MachO) !struct { usize, usize, usize } {
     ncmds += 1;
 
     if (self.entry_index) |global_index| {
+        const sym = self.getSymbol(global_index);
         const seg_id = self.getSegmentByName("__TEXT").?;
         const seg = self.segments.items[seg_id];
-        const sym = self.getSymbol(global_index);
+        const entryoff: u32 = if (sym.getFile(self) == null)
+            0
+        else
+            @as(u32, @intCast(sym.getAddress(.{ .stubs = true }, self) - seg.vmaddr));
         try writer.writeStruct(macho.entry_point_command{
-            .entryoff = @as(u32, @intCast(sym.getAddress(.{}, self) - seg.vmaddr)),
+            .entryoff = entryoff,
             .stacksize = self.options.stack_size orelse 0,
         });
         ncmds += 1;
