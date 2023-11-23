@@ -238,8 +238,6 @@ pub fn flush(self: *MachO) !void {
     // Parse dependent dylibs
     try self.parseDependentDylibs(arena);
 
-    self.base.reportWarningsAndErrorsAndExit();
-
     // TODO dedup dylibs
 
     {
@@ -1032,7 +1030,6 @@ fn scanRelocs(self: *MachO) !void {
     }
 
     try self.reportUndefs();
-    self.base.reportWarningsAndErrorsAndExit();
 
     for (self.symbols.items, 0..) |*symbol, i| {
         const index = @as(Symbol.Index, @intCast(i));
