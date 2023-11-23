@@ -61,7 +61,6 @@ export_trie: ExportTrieSection = .{},
 
 atoms: std.ArrayListUnmanaged(Atom) = .{},
 
-has_data_in_code: bool = false,
 has_tlv: bool = false,
 
 pub fn openPath(allocator: Allocator, options: Options, thread_pool: *ThreadPool) !*MachO {
@@ -1769,7 +1768,10 @@ fn writeDataInCode(self: *MachO) !void {
     const off = try self.getNextLinkeditOffset(@alignOf(u64));
     cmd.dataoff = @intCast(off);
 
-    if (!self.has_data_in_code) return;
+    const has_data_in_code = for (self.objects.items) |index| {
+        if (self.getFile(index).?.object.data_in_code.items.len > 0) break true;
+    } else false;
+    if (!has_data_in_code) return;
 
     const gpa = self.base.allocator;
     var dices = std.ArrayList(macho.data_in_code_entry).init(gpa);

@@ -211,8 +211,6 @@ fn initDataInCode(self: *Object, macho_file: *MachO) !void {
 
     if (self.data_in_code.items.len == 0) return;
 
-    macho_file.has_data_in_code = true;
-
     var next_dice: usize = 0;
 
     for (self.atoms.items) |atom_index| {
