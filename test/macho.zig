@@ -353,11 +353,18 @@ fn testEntryPointDylib(b: *Build, opts: Options) *Step {
     check.checkExact("sectname __stubs");
     check.checkExtract("addr {stubs_vmaddr}");
     check.checkStart();
+    check.checkExact("sectname __stubs");
+    check.checkExtract("size {stubs_vmsize}");
+    check.checkStart();
     check.checkExact("cmd MAIN");
     check.checkExtract("entryoff {entryoff}");
     check.checkComputeCompare("text_vmaddr entryoff +", .{
-        .op = .eq,
+        .op = .gte,
         .value = .{ .variable = "stubs_vmaddr" }, // The entrypoint should be a synthetic stub
+    });
+    check.checkComputeCompare("text_vmaddr entryoff + stubs_vmaddr -", .{
+        .op = .lt,
+        .value = .{ .variable = "stubs_vmsize" }, // The entrypoint should be a synthetic stub
     });
     test_step.dependOn(&check.step);
 

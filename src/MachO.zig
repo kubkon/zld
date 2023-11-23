@@ -963,6 +963,7 @@ fn markImportsAndExports(self: *MachO) void {
     for (self.undefined_symbols.items) |index| {
         const sym = self.getSymbol(index);
         if (sym.getFile(self)) |file| {
+            if (sym.getNlist(self).pext()) continue;
             if (file == .dylib and !sym.isAbs(self)) sym.flags.import = true;
         }
     }
