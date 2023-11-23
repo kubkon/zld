@@ -65,8 +65,11 @@ pub fn getDylibOrdinal(symbol: Symbol, macho_file: *MachO) i16 {
     // TODO handle BIND_SPECIAL_DYLIB_MAIN_EXECUTABLE
     const file = symbol.getFile(macho_file) orelse return macho.BIND_SPECIAL_DYLIB_SELF;
     if (macho_file.options.namespace == .flat) return macho.BIND_SPECIAL_DYLIB_FLAT_LOOKUP;
-    if (file != .dylib and macho_file.options.undefined_treatment == .dynamic_lookup)
-        return macho.BIND_SPECIAL_DYLIB_FLAT_LOOKUP;
+    if (file != .dylib) {
+        if (macho_file.options.undefined_treatment == .dynamic_lookup)
+            return macho.BIND_SPECIAL_DYLIB_FLAT_LOOKUP;
+        return macho.BIND_SPECIAL_DYLIB_SELF;
+    }
     return @bitCast(file.dylib.ordinal);
 }
 
