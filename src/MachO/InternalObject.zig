@@ -52,13 +52,6 @@ pub fn init(self: *InternalObject, macho_file: *MachO) !void {
         nlist.n_sect = n_sect + 1;
     }
 
-    {
-        const nlist_idx = try self.addNlist(gpa);
-        const nlist = &self.symtab.items[nlist_idx];
-        nlist.n_strx = try self.insertString(gpa, "dyld_stub_binder");
-        nlist.n_type = macho.N_EXT;
-    }
-
     try self.initAtoms(macho_file);
     try self.initSymbols(macho_file);
 }
@@ -135,30 +128,6 @@ pub fn resolveSymbols(self: *InternalObject, macho_file: *MachO) void {
             global.nlist_idx = nlist_idx;
             global.flags.weak = nlist.weakDef() or nlist.pext();
         }
-    }
-}
-
-pub fn claimUnresolved(self: InternalObject, macho_file: *MachO) void {
-    for (self.getGlobals(), 0..) |global_index, i| {
-        const nlist_idx = @as(Symbol.Index, @intCast(i));
-        const nlist = self.symtab.items[nlist_idx];
-        if (!nlist.undf()) continue;
-
-        const global = macho_file.getSymbol(global_index);
-        if (global.getFile(macho_file)) |_| {
-            if (!global.getNlist(macho_file).undf()) continue;
-        }
-
-        const is_import = switch (macho_file.options.undefined_treatment) {
-            .@"error", .warn, .suppress => false,
-            .dynamic_lookup => true,
-        };
-
-        global.value = 0;
-        global.atom = 0;
-        global.nlist_idx = nlist_idx;
-        global.file = self.index;
-        global.flags.import = is_import;
     }
 }
 

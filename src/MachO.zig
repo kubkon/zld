@@ -533,6 +533,13 @@ fn addUndefinedGlobals(self: *MachO) !void {
         const gop = try self.getOrCreateGlobal(off);
         self.undefined_symbols.appendAssumeCapacity(gop.index);
     }
+
+    {
+        const off = try self.string_intern.insert(gpa, "dyld_stub_binder");
+        const gop = try self.getOrCreateGlobal(off);
+        self.dyld_stub_binder_index = gop.index;
+        try self.undefined_symbols.append(gpa, gop.index);
+    }
 }
 
 fn parsePositional(self: *MachO, arena: Allocator, obj: LinkObject) !void {
@@ -1021,8 +1028,6 @@ fn resolveSyntheticSymbols(self: *MachO) !void {
             self.dso_handle_index = global_index;
         } else if (mem.eql(u8, name, "dyld_private")) {
             self.dyld_private_index = global_index;
-        } else if (mem.eql(u8, name, "dyld_stub_binder")) {
-            self.dyld_stub_binder_index = global_index;
         }
     }
 }
@@ -1030,9 +1035,6 @@ fn resolveSyntheticSymbols(self: *MachO) !void {
 fn claimUnresolved(self: *MachO) void {
     for (self.objects.items) |index| {
         self.getFile(index).?.object.claimUnresolved(self);
-    }
-    if (self.getInternalObject()) |internal| {
-        internal.claimUnresolved(self);
     }
 }
 
