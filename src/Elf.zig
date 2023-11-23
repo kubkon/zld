@@ -2124,7 +2124,7 @@ fn writeAtoms(self: *Elf) !void {
 
         log.debug("writing atoms in '{s}' section", .{self.shstrtab.getAssumeExists(shdr.sh_name)});
 
-        var buffer = try self.base.allocator.alloc(u8, shdr.sh_size);
+        const buffer = try self.base.allocator.alloc(u8, shdr.sh_size);
         defer self.base.allocator.free(buffer);
         const padding_byte: u8 = if (shdr.sh_type == elf.SHT_PROGBITS and
             shdr.sh_flags & elf.SHF_EXECINSTR != 0)

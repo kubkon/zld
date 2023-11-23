@@ -3,7 +3,7 @@ pub fn addElfTests(b: *Build, options: common.Options) *Step {
 
     if (builtin.target.ofmt != .elf) return skipTestStep(elf_step);
 
-    var opts = Options{
+    const opts = Options{
         .zld = options.zld,
         .is_musl = options.is_musl,
         .has_zig = options.has_zig,

@@ -95,7 +95,7 @@ pub const Node = struct {
             // To: A -> C -> B
             const mid = try allocator.create(Node);
             mid.* = .{ .base = self.base };
-            var to_label = try allocator.dupe(u8, edge.label[match..]);
+            const to_label = try allocator.dupe(u8, edge.label[match..]);
             allocator.free(edge.label);
             const to_node = edge.to;
             edge.to = mid;
@@ -242,7 +242,7 @@ pub const Node = struct {
     /// Updates offset of this node in the output byte stream.
     fn finalize(self: *Node, offset_in_trie: u64) !FinalizeResult {
         var stream = std.io.countingWriter(std.io.null_writer);
-        var writer = stream.writer();
+        const writer = stream.writer();
 
         var node_size: u64 = 0;
         if (self.terminal_info) |info| {
@@ -392,7 +392,7 @@ pub fn deinit(self: *Trie, allocator: Allocator) void {
 }
 
 test "Trie node count" {
-    var gpa = testing.allocator;
+    const gpa = testing.allocator;
     var trie: Trie = .{};
     defer trie.deinit(gpa);
     try trie.init(gpa);
@@ -438,7 +438,7 @@ test "Trie node count" {
 }
 
 test "Trie basic" {
-    var gpa = testing.allocator;
+    const gpa = testing.allocator;
     var trie: Trie = .{};
     defer trie.deinit(gpa);
     try trie.init(gpa);
@@ -496,7 +496,7 @@ fn expectEqualHexStrings(expected: []const u8, given: []const u8) !void {
     const given_fmt = try std.fmt.allocPrint(testing.allocator, "{x}", .{std.fmt.fmtSliceHexLower(given)});
     defer testing.allocator.free(given_fmt);
     const idx = mem.indexOfDiff(u8, expected_fmt, given_fmt).?;
-    var padding = try testing.allocator.alloc(u8, idx + 5);
+    const padding = try testing.allocator.alloc(u8, idx + 5);
     defer testing.allocator.free(padding);
     @memset(padding, ' ');
     std.debug.print("\nEXP: {s}\nGIV: {s}\n{s}^ -- first differing byte\n", .{ expected_fmt, given_fmt, padding });
@@ -534,7 +534,7 @@ test "write Trie to a byte stream" {
         0x3, 0x0, 0x80, 0x20, 0x0, // terminal node
     };
 
-    var buffer = try gpa.alloc(u8, trie.size);
+    const buffer = try gpa.alloc(u8, trie.size);
     defer gpa.free(buffer);
     var stream = std.io.fixedBufferStream(buffer);
     {
@@ -550,7 +550,7 @@ test "write Trie to a byte stream" {
 }
 
 test "parse Trie from byte stream" {
-    var gpa = testing.allocator;
+    const gpa = testing.allocator;
 
     const in_buffer = [_]u8{
         0x0, 0x1, // node root
@@ -573,7 +573,7 @@ test "parse Trie from byte stream" {
 
     try trie.finalize(gpa);
 
-    var out_buffer = try gpa.alloc(u8, trie.size);
+    const out_buffer = try gpa.alloc(u8, trie.size);
     defer gpa.free(out_buffer);
     var out_stream = std.io.fixedBufferStream(out_buffer);
     _ = try trie.write(out_stream.writer());
@@ -581,7 +581,7 @@ test "parse Trie from byte stream" {
 }
 
 test "ordering bug" {
-    var gpa = testing.allocator;
+    const gpa = testing.allocator;
     var trie: Trie = .{};
     defer trie.deinit(gpa);
     try trie.init(gpa);
@@ -605,7 +605,7 @@ test "ordering bug" {
         0x00, 0x12, 0x03, 0x00, 0xD8, 0x0A, 0x00,
     };
 
-    var buffer = try gpa.alloc(u8, trie.size);
+    const buffer = try gpa.alloc(u8, trie.size);
     defer gpa.free(buffer);
     var stream = std.io.fixedBufferStream(buffer);
     // Writing finalized trie again should yield the same result.

@@ -112,7 +112,7 @@ pub fn calcMinHeaderPad(macho_file: *MachO) !u64 {
     log.debug("minimum requested headerpad size 0x{x}", .{padding + @sizeOf(macho.mach_header_64)});
 
     if (options.headerpad_max_install_names) {
-        var min_headerpad_size: u32 = try calcLCsSize(macho_file, true);
+        const min_headerpad_size: u32 = try calcLCsSize(macho_file, true);
         log.debug("headerpad_max_install_names minimum headerpad size 0x{x}", .{
             min_headerpad_size + @sizeOf(macho.mach_header_64),
         });

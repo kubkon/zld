@@ -600,7 +600,7 @@ pub const Iterator = struct {
         var stream = std.io.fixedBufferStream(it.data[it.pos..]);
         const reader = stream.reader();
 
-        var size = try reader.readInt(u32, .little);
+        const size = try reader.readInt(u32, .little);
         if (size == 0xFFFFFFFF) {
             macho_file.base.fatal("MachO doesn't support 64bit DWARF CFI __eh_frame records", .{});
             return null;
