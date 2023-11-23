@@ -291,6 +291,13 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
 
     if (positionals.items.len == 0) ctx.fatal("Expected at least one positional argument", .{});
 
+    if (opts.namespace == .two_level) switch (opts.undefined_treatment) {
+        .warn, .suppress => |x| ctx.fatal("illegal flags: '-undefined {s}' with '-two_levelnamespace'", .{
+            @tagName(x),
+        }),
+        else => {},
+    };
+
     // Add some defaults
     try lib_dirs.put("/usr/lib", {});
     try framework_dirs.put("/System/Library/Frameworks", {});
