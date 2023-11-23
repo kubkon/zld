@@ -173,8 +173,9 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
             },
 
             .X86_64_RELOC_TLV => {
-                // TODO TLV and import
-                assert(!symbol.?.flags.import);
+                if (symbol.?.flags.import) {
+                    symbol.?.flags.tlv_ptr = true;
+                }
             },
 
             .X86_64_RELOC_UNSIGNED => {
@@ -350,7 +351,6 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
                     assert(sym.?.flags.import);
                     const S_: i64 = @intCast(sym.?.getTlvPtrAddress(macho_file));
                     try cwriter.writeInt(i32, @intCast(S_ + A - P - 4), .little);
-                    continue;
                 } else {
                     try relaxTlv(code[rel_address - 3 ..]);
                     try cwriter.writeInt(i32, @intCast(S + A - P - 4), .little);

@@ -348,7 +348,33 @@ pub const TlvPtrSection = struct {
     }
 
     pub fn size(tlv: TlvPtrSection) usize {
-        return tlv.symbols.items.len * @sizeOf(u64) * 3;
+        return tlv.symbols.items.len * @sizeOf(u64);
+    }
+
+    pub fn addBind(tlv: TlvPtrSection, macho_file: *MachO) !void {
+        const gpa = macho_file.base.allocator;
+        try macho_file.bind.entries.ensureUnusedCapacity(gpa, tlv.symbols.items.len);
+
+        const seg_id = macho_file.sections.items(.segment_id)[macho_file.tlv_ptr_sect_index.?];
+        const seg = macho_file.segments.items[seg_id];
+
+        for (tlv.symbols.items, 0..) |sym_index, idx| {
+            const addr = tlv.getAddress(@intCast(idx), macho_file);
+            macho_file.bind.entries.appendAssumeCapacity(.{
+                .target = sym_index,
+                .offset = addr - seg.vmaddr,
+                .segment_id = seg_id,
+                .addend = 0,
+            });
+        }
+    }
+
+    pub fn write(tlv: TlvPtrSection, macho_file: *MachO, writer: anytype) !void {
+        for (tlv.symbols.items) |sym_index| {
+            const sym = macho_file.getSymbol(sym_index);
+            assert(sym.flags.import);
+            try writer.writeInt(u64, 0, .little);
+        }
     }
 
     const FormatCtx = struct {

@@ -1040,7 +1040,7 @@ fn scanRelocs(self: *MachO) !void {
             try self.stubs.addSymbol(index, self);
         }
         if (symbol.flags.tlv_ptr) {
-            assert(symbol.flags.import); // TODO
+            assert(symbol.flags.import);
             log.debug("'{s}' needs TLV pointer", .{symbol.getName(self)});
             try self.tlv_ptr.addSymbol(index, self);
         }
@@ -1128,7 +1128,7 @@ fn initSyntheticSections(self: *MachO) !void {
         });
     }
     if (self.tlv_ptr.symbols.items.len > 0) {
-        self.tlv_ptr_sect_index = try self.addSection("__DATA", "__thread_ptr", .{
+        self.tlv_ptr_sect_index = try self.addSection("__DATA", "__thread_ptrs", .{
             .flags = macho.S_THREAD_LOCAL_VARIABLE_POINTERS,
         });
     }
@@ -1542,7 +1542,9 @@ fn initDyldInfoSections(self: *MachO) !void {
     if (self.got.needs_bind) {
         try self.got.addBind(self);
     }
-    // TODO TlvPtr needs bind
+    if (self.tlv_ptr_sect_index != null) {
+        try self.tlv_ptr.addBind(self);
+    }
 
     var nrebases: usize = 0;
     var nbinds: usize = 0;
@@ -1685,7 +1687,14 @@ fn writeSyntheticSections(self: *MachO) !void {
         try self.base.file.pwriteAll(buffer.items, header.offset);
     }
 
-    // TODO tlv_ptr
+    if (self.tlv_ptr_sect_index) |sect_id| {
+        const header = self.sections.items(.header)[sect_id];
+        var buffer = try std.ArrayList(u8).initCapacity(gpa, header.size);
+        defer buffer.deinit();
+        try self.tlv_ptr.write(self, buffer.writer());
+        assert(buffer.items.len == header.size);
+        try self.base.file.pwriteAll(buffer.items, header.offset);
+    }
 }
 
 fn getNextLinkeditOffset(self: *MachO, alignment: u64) !u64 {
