@@ -351,8 +351,10 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
                     const S_: i64 = @intCast(sym.?.getTlvPtrAddress(macho_file));
                     try cwriter.writeInt(i32, @intCast(S_ + A - P - 4), .little);
                     continue;
+                } else {
+                    try relaxTlv(code[rel_address - 3 ..]);
+                    try cwriter.writeInt(i32, @intCast(S + A - P - 4), .little);
                 }
-                try cwriter.writeInt(i32, @intCast(S + A - P - 4), .little);
             },
 
             .X86_64_RELOC_SIGNED => {
@@ -382,6 +384,32 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
     }
 
     try writer.writeAll(code);
+}
+
+fn relaxTlv(code: []u8) !void {
+    const old_inst = disassemble(code) orelse return error.RelaxFail;
+    switch (old_inst.encoding.mnemonic) {
+        .mov => {
+            const inst = try Instruction.new(old_inst.prefix, .lea, &old_inst.ops);
+            relocs_log.debug("    relaxing {} => {}", .{ old_inst.encoding, inst.encoding });
+            encode(&.{inst}, code) catch return error.RelaxFail;
+        },
+        else => return error.RelaxFail,
+    }
+}
+
+fn disassemble(code: []const u8) ?Instruction {
+    var disas = Disassembler.init(code);
+    const inst = disas.next() catch return null;
+    return inst;
+}
+
+fn encode(insts: []const Instruction, code: []u8) !void {
+    var stream = std.io.fixedBufferStream(code);
+    const writer = stream.writer();
+    for (insts) |inst| {
+        try inst.encode(writer, .{});
+    }
 }
 
 pub fn format(
@@ -481,6 +509,7 @@ const Atom = @This();
 
 const std = @import("std");
 const assert = std.debug.assert;
+const dis_x86_64 = @import("dis_x86_64");
 const macho = std.macho;
 const log = std.log.scoped(.link);
 const relocs_log = std.log.scoped(.relocs);
@@ -488,7 +517,10 @@ const math = std.math;
 const mem = std.mem;
 
 const Allocator = mem.Allocator;
+const Disassembler = dis_x86_64.Disassembler;
 const File = @import("file.zig").File;
+const Instruction = dis_x86_64.Instruction;
+const Immediate = dis_x86_64.Immediate;
 const MachO = @import("../MachO.zig");
 const Object = @import("Object.zig");
 const Symbol = @import("Symbol.zig");
