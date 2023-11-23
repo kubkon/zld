@@ -26,6 +26,8 @@ globals: std.AutoHashMapUnmanaged(u32, Symbol.Index) = .{},
 /// This table will be populated after `scanRelocs` has run.
 /// Key is symbol index.
 undefs: std.AutoHashMapUnmanaged(Symbol.Index, std.ArrayListUnmanaged(Atom.Index)) = .{},
+/// Global symbols we need to resolve for the link to succeed.
+undefined_symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
 
 pagezero_seg_index: ?u8 = null,
 linkedit_seg_index: ?u8 = null,
@@ -100,6 +102,7 @@ pub fn deinit(self: *MachO) void {
     self.symbols_extra.deinit(gpa);
     self.globals.deinit(gpa);
     self.undefs.deinit(gpa);
+    self.undefined_symbols.deinit(gpa);
     self.string_intern.deinit(gpa);
 
     self.objects.deinit(gpa);
@@ -251,6 +254,7 @@ pub fn flush(self: *MachO) !void {
         self.internal_object_index = index;
     }
 
+    try self.addUndefinedGlobals();
     try self.resolveSymbols();
 
     for (self.dylibs.items, 1..) |index, ord| {
@@ -262,11 +266,6 @@ pub fn flush(self: *MachO) !void {
 
     self.markImportsAndExports();
 
-    self.entry_index = blk: {
-        if (self.options.dylib) break :blk null;
-        const entry_name = self.options.entry orelse "_main";
-        break :blk self.getGlobalByName(entry_name);
-    };
     if (!self.options.dylib and self.entry_index == null) {
         self.base.fatal("no entrypoint found: '{s}'", .{self.options.entry orelse "_main"});
     }
@@ -518,6 +517,25 @@ fn validateCpuArch(self: *MachO, path: []const u8, cputype: i32) void {
                 @tagName(self_cpu_arch),
             });
         }
+    }
+}
+
+fn addUndefinedGlobals(self: *MachO) !void {
+    const gpa = self.base.allocator;
+
+    if (!self.options.dylib) {
+        const name = self.options.entry orelse "_main";
+        const off = try self.string_intern.insert(gpa, name);
+        const gop = try self.getOrCreateGlobal(off);
+        self.entry_index = gop.index;
+        try self.undefined_symbols.append(gpa, gop.index);
+    }
+
+    try self.undefined_symbols.ensureUnusedCapacity(gpa, self.options.force_undefined_symbols.len);
+    for (self.options.force_undefined_symbols) |name| {
+        const off = try self.string_intern.insert(gpa, name);
+        const gop = try self.getOrCreateGlobal(off);
+        self.undefined_symbols.appendAssumeCapacity(gop.index);
     }
 }
 
@@ -919,6 +937,9 @@ pub fn resolveSymbols(self: *MachO) !void {
 /// This routine will prune unneeded objects extracted from archives and
 /// unneeded dylibs.
 fn markLive(self: *MachO) void {
+    for (self.undefined_symbols.items) |index| {
+        if (self.getSymbol(index).getFile(self)) |file| file.setAlive();
+    }
     for (self.objects.items) |index| {
         const file = self.getFile(index).?;
         if (file.isAlive()) file.markLive(self);
@@ -1014,6 +1035,11 @@ fn claimUnresolved(self: *MachO) void {
 fn scanRelocs(self: *MachO) !void {
     for (self.objects.items) |index| {
         try self.getFile(index).?.object.scanRelocs(self);
+    }
+
+    if (self.entry_index) |index| {
+        const sym = self.getSymbol(index);
+        if (sym.flags.import) sym.flags.stubs = true;
     }
 
     if (self.dyld_stub_binder_index) |index| {
