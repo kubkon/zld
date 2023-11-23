@@ -10,6 +10,7 @@ ordinal: u16 = 0,
 
 symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
 dependents: std.ArrayListUnmanaged(Id) = .{},
+platform: ?MachO.Options.Platform = null,
 
 needed: bool,
 weak: bool,
@@ -66,6 +67,7 @@ pub fn parse(self: *Dylib, macho_file: *MachO) !void {
     self.strtab.appendSliceAssumeCapacity(strtab);
 
     try self.initSymbols(macho_file);
+    self.initPlatform();
 }
 
 pub fn parseTbd(
@@ -97,7 +99,12 @@ pub fn parseTbd(
 
     log.debug("  (install_name '{s}')", .{umbrella_lib.installName()});
 
-    var matcher = try TargetMatcher.init(gpa, cpu_arch, if (platform) |p| p.platform else .MACOS);
+    self.platform = platform orelse .{
+        .platform = .MACOS,
+        .version = .{ .value = 0 },
+    };
+
+    var matcher = try TargetMatcher.init(gpa, cpu_arch, self.platform.?.platform);
     defer matcher.deinit();
 
     for (lib_stub.inner, 0..) |elem, stub_index| {
@@ -324,6 +331,24 @@ fn initSymbols(self: *Dylib, macho_file: *MachO) !void {
         const gop = try macho_file.getOrCreateGlobal(off);
         self.symbols.addOneAssumeCapacity().* = gop.index;
     }
+}
+
+fn initPlatform(self: *Dylib) void {
+    var it = LoadCommandIterator{
+        .ncmds = self.header.?.ncmds,
+        .buffer = self.data[@sizeOf(macho.mach_header_64)..][0..self.header.?.sizeofcmds],
+    };
+    self.platform = while (it.next()) |cmd| {
+        switch (cmd.cmd()) {
+            .BUILD_VERSION,
+            .VERSION_MIN_MACOSX,
+            .VERSION_MIN_IPHONEOS,
+            .VERSION_MIN_TVOS,
+            .VERSION_MIN_WATCHOS,
+            => break MachO.Options.Platform.fromLoadCommand(cmd),
+            else => {},
+        }
+    } else null;
 }
 
 pub fn resolveSymbols(self: *Dylib, macho_file: *MachO) void {

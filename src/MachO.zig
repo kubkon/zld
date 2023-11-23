@@ -516,7 +516,13 @@ fn inferCpuArchAndPlatform(self: *MachO, objs: []const LinkObject) !void {
     }
 }
 
-fn validateCpuArch(self: *MachO, path: []const u8, cputype: i32) void {
+fn validateCpuArch(self: *MachO, index: File.Index) void {
+    const file = self.getFile(index).?;
+    const cputype = switch (file) {
+        .object => |x| x.header.?.cputype,
+        .dylib => |x| x.header.?.cputype,
+        else => unreachable,
+    };
     const cpu_arch: std.Target.Cpu.Arch = switch (cputype) {
         macho.CPU_TYPE_ARM64 => .aarch64,
         macho.CPU_TYPE_X86_64 => .x86_64,
@@ -524,11 +530,39 @@ fn validateCpuArch(self: *MachO, path: []const u8, cputype: i32) void {
     };
     if (self.options.cpu_arch) |self_cpu_arch| {
         if (self_cpu_arch != cpu_arch) {
-            return self.base.fatal("{s}: invalid architecture '{s}', expected '{s}'", .{
-                path,
+            return self.base.fatal("{}: invalid architecture '{s}', expected '{s}'", .{
+                file.fmtPath(),
                 @tagName(cpu_arch),
                 @tagName(self_cpu_arch),
             });
+        }
+    }
+}
+
+fn validatePlatform(self: *MachO, index: File.Index) void {
+    const self_platform = self.options.platform orelse return;
+    const file = self.getFile(index).?;
+    const other_platform: ?Options.Platform = switch (file) {
+        .object => |x| x.platform,
+        .dylib => |x| x.platform,
+        else => null,
+    };
+    if (other_platform) |platform| {
+        if (self_platform.platform != platform.platform) {
+            return self.base.fatal(
+                "{}: object file was built for different platform: expected {s}, got {s}",
+                .{ file.fmtPath(), @tagName(self_platform.platform), @tagName(platform.platform) },
+            );
+        }
+        if (self_platform.version.value < platform.version.value) {
+            return self.base.warn(
+                "{}: object file was built for newer platform version: expected {}, got {}",
+                .{
+                    file.fmtPath(),
+                    self_platform.version,
+                    platform.version,
+                },
+            );
         }
     }
 }
@@ -582,7 +616,6 @@ fn parseObject(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
     try file.seekTo(0);
 
     if (header.filetype != macho.MH_OBJECT) return false;
-    self.validateCpuArch(obj.path, header.cputype);
 
     const mtime: u64 = mtime: {
         const stat = file.stat() catch break :mtime 0;
@@ -600,29 +633,8 @@ fn parseObject(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
     const object = &self.files.items(.data)[index].object;
     try object.parse(self);
     try self.objects.append(gpa, index);
-
-    // if (object.getPlatform()) |platform| {
-    //     const self_platform = self.options.platform orelse blk: {
-    //         self.options.platform = platform;
-    //         break :blk self.options.platform.?;
-    //     };
-    //     if (self_platform.platform != platform.platform) {
-    //         return self.base.fatal(
-    //             "{s}: object file was built for different platform: expected {s}, got {s}",
-    //             .{ obj.path, @tagName(self_platform.platform), @tagName(platform.platform) },
-    //         );
-    //     }
-    //     if (self_platform.version.value < platform.version.value) {
-    //         return self.base.warn(
-    //             "{s}: object file was built for newer platform version: expected {}, got {}",
-    //             .{
-    //                 obj.path,
-    //                 self_platform.version,
-    //                 platform.version,
-    //             },
-    //         );
-    //     }
-    // }
+    self.validateCpuArch(index);
+    self.validatePlatform(index);
 
     return true;
 }
@@ -664,30 +676,9 @@ fn parseArchive(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
         object.alive = obj.must_link or obj.needed;
         try object.parse(self);
         try self.objects.append(gpa, index);
+        self.validateCpuArch(index);
+        self.validatePlatform(index);
     }
-
-    // if (object.getPlatform()) |platform| {
-    //     const self_platform = self.options.platform orelse blk: {
-    //         self.options.platform = platform;
-    //         break :blk self.options.platform.?;
-    //     };
-    //     if (self_platform.platform != platform.platform) {
-    //         return self.base.fatal(
-    //             "{s}: object file was built for different platform: expected {s}, got {s}",
-    //             .{ obj.path, @tagName(self_platform.platform), @tagName(platform.platform) },
-    //         );
-    //     }
-    //     if (self_platform.version.value < platform.version.value) {
-    //         return self.base.warn(
-    //             "{s}: object file was built for newer platform version: expected {}, got {}",
-    //             .{
-    //                 obj.path,
-    //                 self_platform.version,
-    //                 platform.version,
-    //             },
-    //         );
-    //     }
-    // }
 
     return true;
 }
@@ -748,7 +739,6 @@ fn parseDylib(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
     try file.seekTo(0);
 
     if (header.filetype != macho.MH_DYLIB) return false;
-    self.validateCpuArch(obj.path, header.cputype);
 
     const data = try arena.alloc(u8, size);
     const nread = try file.readAll(data);
@@ -766,17 +756,8 @@ fn parseDylib(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
     const dylib = &self.files.items(.data)[index].dylib;
     try dylib.parse(self);
     try self.dylibs.append(gpa, index);
-
-    // if (self.options.platform) |self_platform| {
-    //     if (dylib.getPlatform(contents)) |platform| {
-    //         if (self_platform.platform != platform.platform) {
-    //             return self.base.fatal(
-    //                 "{s}: dylib file was built for different platform: expected {s}, got {s}",
-    //                 .{ path, @tagName(self_platform.platform), @tagName(platform.platform) },
-    //             );
-    //         }
-    //     }
-    // }
+    self.validateCpuArch(index);
+    self.validatePlatform(index);
 
     return true;
 }
@@ -799,19 +780,6 @@ fn parseTbd(self: *MachO, obj: LinkObject) !bool {
         return true;
     };
 
-    // if (self.options.platform) |platform| {
-    //     var matcher = try Dylib.TargetMatcher.init(self.base.allocator, cpu_arch, platform.platform);
-    //     defer matcher.deinit();
-
-    //     for (lib_stub.inner) |elem| {
-    //         if (try matcher.matchesTargetTbd(elem)) break;
-    //     } else {
-    //         const target = try Dylib.TargetMatcher.targetToAppleString(self.base.allocator, cpu_arch, platform.platform);
-    //         defer self.base.allocator.free(target);
-    //         return self.base.fatal("{s}: missing target in stub file: expected {s}", .{ path, target });
-    //     }
-    // }
-
     const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
     self.files.set(index, .{ .dylib = .{
         .path = obj.path,
@@ -824,6 +792,7 @@ fn parseTbd(self: *MachO, obj: LinkObject) !bool {
     const dylib = &self.files.items(.data)[index].dylib;
     try dylib.parseTbd(cpu_arch, self.options.platform, lib_stub, self);
     try self.dylibs.append(gpa, index);
+    self.validatePlatform(index);
 
     return true;
 }

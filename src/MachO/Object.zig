@@ -18,6 +18,7 @@ atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
 relocations: std.ArrayListUnmanaged(macho.relocation_info) = .{},
 
 data_in_code: std.ArrayListUnmanaged(macho.data_in_code_entry) = .{},
+platform: ?MachO.Options.Platform = null,
 
 alive: bool = true,
 num_rebase_relocs: u32 = 0,
@@ -64,6 +65,8 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
 
     // TODO ICF
     // TODO __eh_frame records
+
+    self.initPlatform();
 }
 
 fn initSectionAtoms(self: *Object, macho_file: *MachO) !void {
@@ -269,6 +272,24 @@ fn parseDataInCode(self: *Object, allocator: Allocator) !void {
     try self.data_in_code.ensureTotalCapacityPrecise(allocator, dice.len);
     self.data_in_code.appendUnalignedSliceAssumeCapacity(dice);
     mem.sort(macho.data_in_code_entry, self.data_in_code.items, {}, diceLessThan);
+}
+
+fn initPlatform(self: *Object) void {
+    var it = LoadCommandIterator{
+        .ncmds = self.header.?.ncmds,
+        .buffer = self.data[@sizeOf(macho.mach_header_64)..][0..self.header.?.sizeofcmds],
+    };
+    self.platform = while (it.next()) |cmd| {
+        switch (cmd.cmd()) {
+            .BUILD_VERSION,
+            .VERSION_MIN_MACOSX,
+            .VERSION_MIN_IPHONEOS,
+            .VERSION_MIN_TVOS,
+            .VERSION_MIN_WATCHOS,
+            => break MachO.Options.Platform.fromLoadCommand(cmd),
+            else => {},
+        }
+    } else null;
 }
 
 pub fn resolveSymbols(self: *Object, macho_file: *MachO) void {
