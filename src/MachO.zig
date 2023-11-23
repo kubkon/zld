@@ -388,7 +388,7 @@ pub fn flush(self: *MachO) !void {
         const size = linkedit.fileoff - start;
         if (size > 0) {
             log.debug("zeroing out zerofill area of length {x} at {x}", .{ size, start });
-            var padding = try self.base.allocator.alloc(u8, size);
+            const padding = try self.base.allocator.alloc(u8, size);
             defer self.base.allocator.free(padding);
             @memset(padding, 0);
             try self.base.file.pwriteAll(padding, start);
@@ -3006,7 +3006,7 @@ fn writeDyldInfoData(self: *MachO) !void {
     link_seg.filesize = needed_size;
     assert(mem.isAlignedGeneric(u64, link_seg.fileoff + link_seg.filesize, @alignOf(u64)));
 
-    var buffer = try gpa.alloc(u8, needed_size);
+    const buffer = try gpa.alloc(u8, needed_size);
     defer gpa.free(buffer);
     @memset(buffer, 0);
 

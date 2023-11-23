@@ -554,7 +554,7 @@ fn emitExport(exported: std.wasm.Export, writer: anytype) !void {
 
 fn emitElement(wasm: *Wasm, writer: anytype) !void {
     // passive, with implicit 0-index table
-    var flags: u32 = 0;
+    const flags: u32 = 0;
     try leb.writeULEB128(writer, flags);
     // Start the function table at index 1
     try emitInitExpression(.{ .i32_const = 1 }, writer);

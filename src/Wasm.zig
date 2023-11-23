@@ -674,7 +674,7 @@ fn resolveSymbolsInArchives(wasm: *Wasm) !void {
             // Parse object and and resolve symbols again before we check remaining
             // undefined symbols.
             const object_file_index = @as(u16, @intCast(wasm.objects.items.len));
-            var object = try archive.parseObject(wasm.base.allocator, offset.items[0]);
+            const object = try archive.parseObject(wasm.base.allocator, offset.items[0]);
             try wasm.objects.append(wasm.base.allocator, object);
             try wasm.resolveSymbolsInObject(object_file_index);
 
