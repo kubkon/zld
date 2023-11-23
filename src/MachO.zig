@@ -1005,17 +1005,9 @@ fn resolveSyntheticSymbols(self: *MachO) !void {
     internal.resolveSymbols(self);
     self.markImportsAndExportsInFile(internal.index);
 
-    for (internal.getGlobals()) |global_index| {
-        const global = self.getSymbol(global_index);
-        const name = global.getName(self);
-        if (mem.eql(u8, name, "__mh_execute_header")) {
-            self.mh_execute_header_index = global_index;
-        } else if (mem.eql(u8, name, "__dso_handle")) {
-            self.dso_handle_index = global_index;
-        } else if (mem.eql(u8, name, "dyld_private")) {
-            self.dyld_private_index = global_index;
-        }
-    }
+    self.mh_execute_header_index = self.getGlobalByName("__mh_execute_header");
+    self.dso_handle_index = self.getGlobalByName("__dso_handle");
+    self.dyld_private_index = self.getGlobalByName("dyld_private");
 }
 
 fn claimUnresolved(self: *MachO) void {

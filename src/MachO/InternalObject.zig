@@ -15,30 +15,29 @@ output_symtab_ctx: MachO.SymtabCtx = .{},
 
 pub fn init(self: *InternalObject, macho_file: *MachO) !void {
     const gpa = macho_file.base.allocator;
-    {
-        const n_sect = self.getSectionByName("__TEXT", "__text") orelse
-            try self.addSection(gpa, "__TEXT", "__text");
 
-        if (!macho_file.options.dylib) {
-            const nlist_idx = try self.addNlist(gpa);
-            const nlist = &self.symtab.items[nlist_idx];
-            nlist.n_strx = try self.insertString(gpa, "__mh_execute_header");
-            nlist.n_type = macho.N_EXT | macho.N_SECT;
-            nlist.n_desc = macho.REFERENCED_DYNAMICALLY;
-            nlist.n_sect = n_sect + 1;
-        } else {
-            const nlist_idx = try self.addNlist(gpa);
-            const nlist = &self.symtab.items[nlist_idx];
-            nlist.n_strx = try self.insertString(gpa, "__dso_handle");
-            nlist.n_type = macho.N_EXT | macho.N_SECT;
-            nlist.n_desc = macho.REFERENCED_DYNAMICALLY;
-            nlist.n_sect = n_sect + 1;
-        }
+    if (!macho_file.options.dylib) {
+        const n_sect = self.getSectionByName("__TEXT", "__text") orelse try self.addSection(gpa, "__TEXT", "__text");
+        const nlist_idx = try self.addNlist(gpa);
+        const nlist = &self.symtab.items[nlist_idx];
+        nlist.n_strx = try self.insertString(gpa, "__mh_execute_header");
+        nlist.n_type = macho.N_EXT | macho.N_SECT;
+        nlist.n_desc = macho.REFERENCED_DYNAMICALLY;
+        nlist.n_sect = n_sect + 1;
+    }
+
+    if (macho_file.getGlobalByName("__dso_handle")) |_| {
+        const n_sect = self.getSectionByName("__TEXT", "__text") orelse try self.addSection(gpa, "__TEXT", "__text");
+        const nlist_idx = try self.addNlist(gpa);
+        const nlist = &self.symtab.items[nlist_idx];
+        nlist.n_strx = try self.insertString(gpa, "__dso_handle");
+        nlist.n_type = macho.N_EXT | macho.N_SECT;
+        nlist.n_desc = macho.REFERENCED_DYNAMICALLY;
+        nlist.n_sect = n_sect + 1;
     }
 
     {
-        const n_sect = self.getSectionByName("__DATA", "__data") orelse
-            try self.addSection(gpa, "__DATA", "__data");
+        const n_sect = self.getSectionByName("__DATA", "__data") orelse try self.addSection(gpa, "__DATA", "__data");
         const sect = &self.sections.items[n_sect];
         sect.size = 8;
         sect.@"align" = 3;
