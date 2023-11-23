@@ -973,10 +973,6 @@ fn markImportsAndExportsInFile(self: *MachO, index: File.Index) void {
         }
         if (file.getIndex() == index) {
             global.flags.@"export" = true;
-
-            if (self.options.dylib) {
-                global.flags.import = true;
-            }
         }
     }
 }
@@ -1581,10 +1577,19 @@ fn initExportTrie(self: *MachO) !void {
             if (global.getAtom(self)) |atom| if (!atom.flags.alive) continue;
             if (global.getFile(self).?.getIndex() != index) continue;
             if (!global.flags.@"export") continue;
+            var flags: u64 = macho.EXPORT_SYMBOL_FLAGS_KIND_REGULAR;
+            if (global.isAbs(self)) {
+                flags |= macho.EXPORT_SYMBOL_FLAGS_KIND_ABSOLUTE;
+            } else {
+                const out_sect = self.sections.items(.header)[global.out_n_sect];
+                if (out_sect.type() == macho.S_THREAD_LOCAL_VARIABLES) {
+                    flags |= macho.EXPORT_SYMBOL_FLAGS_KIND_THREAD_LOCAL;
+                }
+            }
             try self.export_trie.put(gpa, .{
                 .name = global.getName(self),
                 .vmaddr_offset = global.getAddress(.{}, self) - seg.vmaddr,
-                .export_flags = macho.EXPORT_SYMBOL_FLAGS_KIND_REGULAR,
+                .export_flags = flags,
             });
         }
     }
