@@ -19,6 +19,7 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
         break :blk std.zig.system.darwin.getSdk(b.allocator, target_info.target);
     };
 
+    macho_step.dependOn(testBoundarySymbols(b, opts));
     macho_step.dependOn(testBuildVersionMacOS(b, opts));
     macho_step.dependOn(testBuildVersionIOS(b, opts));
     macho_step.dependOn(testDeadStrip(b, opts));
@@ -51,6 +52,52 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testWeakRef(b, opts));
 
     return macho_step;
+}
+
+fn testBoundarySymbols(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-boundary-symbols", "");
+
+    const obj1 = cc(b, opts);
+    obj1.addCppSource(
+        \\constexpr const char* MESSAGE __attribute__((used, section("__DATA_CONST,__message_ptr"))) = "codebase";
+    );
+    obj1.addArgs(&.{ "-std=c++17", "-c" });
+
+    const main_o = cc(b, opts);
+    main_o.addCSource(
+        \\#include <stdio.h>
+        \\const char* interop();
+        \\int main() {
+        \\  printf("All your %s are belong to us.\n", interop());
+        \\  return 0;
+        \\}
+    );
+    main_o.addArg("-c");
+
+    const obj2 = cc(b, opts);
+    obj2.addCppSource(
+        \\extern const char* message_pointer __asm("section$start$__DATA_CONST$__message_ptr");
+        \\extern "C" const char* interop() {
+        \\  return message_pointer;
+        \\}
+    );
+    obj2.addArgs(&.{ "-std=c++17", "-c" });
+
+    const exe = cc(b, opts);
+    exe.addFileSource(obj1.out);
+    exe.addFileSource(obj2.out);
+    exe.addFileSource(main_o.out);
+
+    const run = exe.run();
+    run.expectStdOutEqual("All your codebase are belong to us.\n");
+    test_step.dependOn(run.step());
+
+    const check = exe.check();
+    check.checkInSymtab();
+    check.checkNotPresent("section$start$__DATA_CONST$__message_ptr");
+    test_step.dependOn(&check.step);
+
+    return test_step;
 }
 
 fn testBuildVersionMacOS(b: *Build, opts: Options) *Step {
