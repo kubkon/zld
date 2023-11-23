@@ -41,6 +41,7 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testSearchStrategy(b, opts));
     macho_step.dependOn(testStackSize(b, opts));
     macho_step.dependOn(testTbdv3(b, opts));
+    macho_step.dependOn(testTentative(b, opts));
     macho_step.dependOn(testTls(b, opts));
     macho_step.dependOn(testUnwindInfo(b, opts));
     macho_step.dependOn(testUnwindInfoNoSubsectionsArm64(b, opts));
@@ -954,6 +955,33 @@ fn testTbdv3(b: *Build, opts: Options) *Step {
     exe.addPrefixedDirectorySource("-Wl,-rpath,", dylib_out.dir);
 
     const run = exe.run();
+    test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+fn testTentative(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-tentative", "");
+
+    const exe = cc(b, opts);
+    exe.addCSource(
+        \\int foo;
+        \\int bar;
+        \\int baz = 42;
+    );
+    exe.addCSource(
+        \\#include<stdio.h>
+        \\int foo;
+        \\int bar = 5;
+        \\int baz;
+        \\int main() {
+        \\  printf("%d %d %d\n", foo, bar, baz);
+        \\}
+    );
+    exe.addArg("-fcommon");
+
+    const run = exe.run();
+    run.expectStdOutEqual("0 5 42\n");
     test_step.dependOn(run.step());
 
     return test_step;

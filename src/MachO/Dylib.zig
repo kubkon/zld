@@ -356,7 +356,7 @@ pub fn resolveSymbols(self: *Dylib, macho_file: *MachO) void {
         const nlist_idx = @as(Symbol.Index, @intCast(i));
         const nlist = self.symtab.items[nlist_idx];
 
-        if (nlist.undf()) continue;
+        if (nlist.undf() and !nlist.tentative()) continue;
 
         const global = macho_file.getSymbol(index);
         if (self.asFile().getSymbolRank(nlist, false) < global.getSymbolRank(macho_file)) {
@@ -372,7 +372,7 @@ pub fn resolveSymbols(self: *Dylib, macho_file: *MachO) void {
 pub fn markLive(self: *Dylib, macho_file: *MachO) void {
     for (self.symbols.items, 0..) |index, i| {
         const nlist = self.symtab.items[i];
-        if (!nlist.undf()) continue;
+        if (!nlist.undf() or nlist.tentative()) continue;
 
         const global = macho_file.getSymbol(index);
         const file = global.getFile(macho_file) orelse continue;

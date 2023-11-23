@@ -256,8 +256,8 @@ pub fn flush(self: *MachO) !void {
     }
 
     // TODO kill __eh_frame atoms
-    // TODO convert tentative definitions
 
+    try self.convertTentativeDefinitions();
     self.markImportsAndExports();
 
     // TODO dead strip atoms
@@ -935,6 +935,12 @@ fn markLive(self: *MachO) void {
     for (self.dylibs.items) |index| {
         const file = self.getFile(index).?;
         if (file.isAlive()) file.markLive(self);
+    }
+}
+
+fn convertTentativeDefinitions(self: *MachO) !void {
+    for (self.objects.items) |index| {
+        try self.getFile(index).?.object.convertTentativeDefinitions(self);
     }
 }
 

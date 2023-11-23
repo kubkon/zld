@@ -116,7 +116,7 @@ pub fn resolveSymbols(self: *InternalObject, macho_file: *MachO) void {
         const nlist_idx = @as(Symbol.Index, @intCast(i));
         const nlist = self.symtab.items[nlist_idx];
 
-        if (nlist.undf()) continue;
+        if (nlist.undf() and !nlist.tentative()) continue;
 
         const global = macho_file.getSymbol(index);
         if (self.asFile().getSymbolRank(nlist, false) < global.getSymbolRank(macho_file)) {

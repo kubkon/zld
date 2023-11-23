@@ -5,7 +5,7 @@ data: []const u8,
 index: File.Index,
 
 header: ?macho.mach_header_64 = null,
-sections: []align(1) const macho.section_64 = &[0]macho.section_64{},
+sections: std.ArrayListUnmanaged(macho.section_64) = .{},
 symtab: std.ArrayListUnmanaged(macho.nlist_64) = .{},
 strtab: []const u8 = &[0]u8{},
 first_global: Symbol.Index = 0,
@@ -45,7 +45,9 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
     self.header = try reader.readStruct(macho.mach_header_64);
 
     const lc_seg = self.getLoadCommand(.SEGMENT_64) orelse return;
-    self.sections = lc_seg.getSections();
+    const sections = lc_seg.getSections();
+    try self.sections.ensureUnusedCapacity(gpa, sections.len);
+    self.sections.appendUnalignedSliceAssumeCapacity(sections);
 
     const lc_symtab = self.getLoadCommand(.SYMTAB) orelse return;
     const cmd = lc_symtab.cast(macho.symtab_command).?;
@@ -71,14 +73,14 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
 
 fn initSectionAtoms(self: *Object, macho_file: *MachO) !void {
     const gpa = macho_file.base.allocator;
-    try self.atoms.resize(gpa, self.sections.len);
+    try self.atoms.resize(gpa, self.sections.items.len);
     @memset(self.atoms.items, 0);
 
-    for (self.sections, 0..) |sect, n_sect| {
+    for (self.sections.items, 0..) |sect, n_sect| {
         if (sect.attrs() & macho.S_ATTR_DEBUG != 0) continue;
         if (sect.type() == macho.S_COALESCED and mem.eql(u8, "__eh_frame", sect.sectName())) continue;
 
-        const name = try std.fmt.allocPrintZ(gpa, "{s},{s}", .{ sect.segName(), sect.sectName() });
+        const name = try std.fmt.allocPrintZ(gpa, "{s}${s}", .{ sect.segName(), sect.sectName() });
         defer gpa.free(name);
         const atom_index = try self.addAtom(name, sect.size, sect.@"align", @intCast(n_sect), macho_file);
         const atom = macho_file.getAtom(atom_index).?;
@@ -128,7 +130,7 @@ fn initSymbols(self: *Object, macho_file: *MachO) !void {
         const symbol = macho_file.getSymbol(index);
         const name = self.getString(local.n_strx);
         symbol.* = .{
-            .value = local.n_value - self.sections[local.n_sect - 1].addr,
+            .value = local.n_value - self.sections.items[local.n_sect - 1].addr,
             .name = try macho_file.string_intern.insert(gpa, name),
             .nlist_idx = @intCast(i),
             .atom = if (local.abs()) 0 else self.atoms.items[local.n_sect - 1],
@@ -295,7 +297,7 @@ pub fn resolveSymbols(self: *Object, macho_file: *MachO) void {
         const nlist_idx = @as(Symbol.Index, @intCast(self.first_global + i));
         const nlist = self.symtab.items[nlist_idx];
 
-        if (nlist.undf()) continue;
+        if (nlist.undf() and !nlist.tentative()) continue;
         if (!nlist.tentative() and !nlist.abs()) {
             const atom_index = self.atoms.items[nlist.n_sect - 1];
             const atom = macho_file.getAtom(atom_index) orelse continue;
@@ -308,7 +310,7 @@ pub fn resolveSymbols(self: *Object, macho_file: *MachO) void {
             var value = nlist.n_value;
             if (!nlist.tentative() and !nlist.abs()) {
                 atom = self.atoms.items[nlist.n_sect - 1];
-                value -= self.sections[nlist.n_sect - 1].addr;
+                value -= self.sections.items[nlist.n_sect - 1].addr;
             }
             global.value = value;
             global.atom = atom;
@@ -345,6 +347,59 @@ pub fn scanRelocs(self: Object, macho_file: *MachO) !void {
     }
 
     // TODO scan __eh_frame relocs
+}
+
+pub fn convertTentativeDefinitions(self: *Object, macho_file: *MachO) !void {
+    const gpa = macho_file.base.allocator;
+    for (self.getGlobals(), 0..) |index, i| {
+        const nlist_idx = @as(Symbol.Index, @intCast(self.first_global + i));
+        const nlist = &self.symtab.items[nlist_idx];
+        if (!nlist.tentative()) continue;
+
+        const global = macho_file.getSymbol(index);
+        const global_file = global.getFile(macho_file).?;
+        if (global_file.getIndex() != self.index) {
+            //     if (elf_file.options.warn_common) {
+            //         elf_file.base.warn("{}: multiple common symbols: {s}", .{
+            //             self.fmtPath(),
+            //             global.getName(elf_file),
+            //         });
+            //     }
+            continue;
+        }
+
+        const atom_index = try macho_file.addAtom();
+        try self.atoms.append(gpa, atom_index);
+
+        const name = try std.fmt.allocPrintZ(gpa, "__DATA$__common${s}", .{global.getName(macho_file)});
+        defer gpa.free(name);
+        const atom = macho_file.getAtom(atom_index).?;
+        atom.atom_index = atom_index;
+        atom.name = try macho_file.string_intern.insert(gpa, name);
+        atom.file = self.index;
+        atom.size = nlist.n_value;
+        atom.alignment = (nlist.n_desc >> 8) & 0x0f;
+
+        const n_sect = @as(u8, @intCast(self.sections.items.len));
+        const sect = try self.sections.addOne(gpa);
+        sect.* = .{
+            .sectname = MachO.makeStaticString("__common"),
+            .segname = MachO.makeStaticString("__DATA"),
+            .flags = macho.S_ZEROFILL,
+            .size = atom.size,
+            .@"align" = atom.alignment,
+        };
+        atom.n_sect = n_sect;
+
+        global.value = 0;
+        global.atom = atom_index;
+        global.flags.weak = false;
+
+        nlist.n_value = 0;
+        nlist.n_type = macho.N_EXT | macho.N_SECT;
+        nlist.n_sect = n_sect + 1;
+        nlist.n_desc = 0;
+    }
 }
 
 pub fn calcSymtabSize(self: *Object, macho_file: *MachO) !void {
