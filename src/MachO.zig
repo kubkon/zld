@@ -196,9 +196,7 @@ pub fn flush(self: *MachO) !void {
     }
 
     if (self.options.cpu_arch == null) {
-        for (resolved_objects.items) |obj| {
-            if (try self.inferCpuArchAndPlatform(obj)) break;
-        }
+        try self.inferCpuArchAndPlatform(resolved_objects.items);
     }
 
     if (self.options.platform == null) {
@@ -225,10 +223,7 @@ pub fn flush(self: *MachO) !void {
             {
                 var ver_str: [100]u8 = undefined;
                 var size: usize = 100;
-                std.os.sysctlbynameZ("kern.osrelease", &ver_str, &size, null, 0) catch {
-                    std.log.warn("ERROR", .{});
-                    break :blk;
-                };
+                std.os.sysctlbynameZ("kern.osrelease", &ver_str, &size, null, 0) catch break :blk;
                 const kern_ver = Options.Version.parse(ver_str[0 .. size - 1]) orelse break :blk;
                 // According to Apple, kernel major version is 4 ahead of x in 10.
                 const minor = @as(u8, @truncate((kern_ver.value >> 16) - 4));
@@ -481,22 +476,44 @@ fn resolveFile(
     };
 }
 
-fn inferCpuArchAndPlatform(self: *MachO, obj: LinkObject) !bool {
-    const file = try std.fs.cwd().openFile(obj.path, .{});
-    defer file.close();
+fn inferCpuArchAndPlatform(self: *MachO, objs: []const LinkObject) !void {
+    const gpa = self.base.allocator;
+    for (objs) |obj| {
+        const file = try std.fs.cwd().openFile(obj.path, .{});
+        defer file.close();
 
-    const header = file.reader().readStruct(macho.mach_header_64) catch return false;
-    if (header.filetype != macho.MH_OBJECT) return false;
+        const header = file.reader().readStruct(macho.mach_header_64) catch continue;
+        if (header.filetype != macho.MH_OBJECT) continue;
 
-    // TODO infer platform
+        const cpu_arch: std.Target.Cpu.Arch = switch (header.cputype) {
+            macho.CPU_TYPE_ARM64 => .aarch64,
+            macho.CPU_TYPE_X86_64 => .x86_64,
+            else => @panic("unhandled CPU arch"),
+        };
 
-    self.options.cpu_arch = switch (header.cputype) {
-        macho.CPU_TYPE_ARM64 => .aarch64,
-        macho.CPU_TYPE_X86_64 => .x86_64,
-        else => unreachable,
-    };
+        const cmds_buffer = try gpa.alloc(u8, header.sizeofcmds);
+        defer gpa.free(cmds_buffer);
+        const amt = file.reader().readAll(cmds_buffer) catch continue;
+        if (amt != header.sizeofcmds) continue;
 
-    return true;
+        var it = macho.LoadCommandIterator{
+            .ncmds = header.ncmds,
+            .buffer = cmds_buffer,
+        };
+        const platform: Options.Platform = while (it.next()) |cmd| switch (cmd.cmd()) {
+            .BUILD_VERSION,
+            .VERSION_MIN_MACOSX,
+            .VERSION_MIN_IPHONEOS,
+            .VERSION_MIN_TVOS,
+            .VERSION_MIN_WATCHOS,
+            => break Options.Platform.fromLoadCommand(cmd),
+            else => {},
+        } else continue;
+
+        self.options.cpu_arch = cpu_arch;
+        self.options.platform = platform;
+        break;
+    }
 }
 
 fn validateCpuArch(self: *MachO, path: []const u8, cputype: i32) void {
