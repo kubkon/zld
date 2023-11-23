@@ -325,8 +325,7 @@ pub fn markLive(self: *Object, macho_file: *MachO) void {
     for (self.getGlobals(), 0..) |index, i| {
         const nlist_idx = self.first_global + i;
         const nlist = self.symtab.items[nlist_idx];
-        // TODO weakRef() is correct here, but not sure about weakDef() and pext()
-        if (nlist.weakDef() or nlist.pext() or nlist.weakRef()) continue;
+        if (nlist.weakDef() or nlist.pext()) continue;
 
         const global = macho_file.getSymbol(index);
         const file = global.getFile(macho_file) orelse continue;
@@ -473,7 +472,7 @@ pub fn claimUnresolved(self: Object, macho_file: *MachO) void {
         }
 
         const is_import = switch (macho_file.options.undefined_treatment) {
-            .@"error", .warn, .suppress => nlist.weakRef(),
+            .@"error", .warn, .suppress => false,
             .dynamic_lookup => true,
         };
 

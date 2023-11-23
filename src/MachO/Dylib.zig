@@ -377,7 +377,7 @@ pub fn markLive(self: *Dylib, macho_file: *MachO) void {
         const global = macho_file.getSymbol(index);
         const file = global.getFile(macho_file) orelse continue;
         const should_drop = switch (file) {
-            .dylib => |sh| !sh.needed and nlist.weakRef(),
+            .dylib => |sh| !sh.needed and (nlist.weakDef() or nlist.pext()),
             else => false,
         };
         if (!should_drop and !file.isAlive()) {
