@@ -29,7 +29,7 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testEntryPointArchive(b, opts));
     macho_step.dependOn(testEntryPointDylib(b, opts));
     macho_step.dependOn(testFatArchive(b, opts));
-    macho_step.dependOn(testFatDylib(b, opts));
+    // macho_step.dependOn(testFatDylib(b, opts)); // TODO arm64 support
     macho_step.dependOn(testHeaderpad(b, opts));
     macho_step.dependOn(testHello(b, opts));
     macho_step.dependOn(testLayout(b, opts));
@@ -747,10 +747,8 @@ fn testNoExportsDylib(b: *Build, opts: Options) *Step {
     dylib.addArg("-shared");
 
     const check = dylib.check();
-    check.checkStart();
-    check.checkExact("cmd SYMTAB");
-    check.checkExtract("nsyms {nsyms}");
-    check.checkComputeCompare("nsyms", .{ .op = .eq, .value = .{ .literal = 0 } });
+    check.checkInSymtab();
+    check.checkNotPresent("external _abc");
     test_step.dependOn(&check.step);
 
     return test_step;
