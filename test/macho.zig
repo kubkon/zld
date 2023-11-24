@@ -19,7 +19,6 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
         break :blk std.zig.system.darwin.getSdk(b.allocator, target_info.target);
     };
 
-    macho_step.dependOn(testBoundarySymbols(b, opts));
     macho_step.dependOn(testBuildVersionMacOS(b, opts));
     macho_step.dependOn(testBuildVersionIOS(b, opts));
     macho_step.dependOn(testDeadStrip(b, opts));
@@ -40,6 +39,8 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testPagezeroSize(b, opts));
     macho_step.dependOn(testReexportsZig(b, opts));
     macho_step.dependOn(testSearchStrategy(b, opts));
+    macho_step.dependOn(testSectionBoundarySymbols(b, opts));
+    macho_step.dependOn(testSegmentBoundarySymbols(b, opts));
     macho_step.dependOn(testStackSize(b, opts));
     macho_step.dependOn(testTbdv3(b, opts));
     macho_step.dependOn(testTentative(b, opts));
@@ -52,52 +53,6 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testWeakRef(b, opts));
 
     return macho_step;
-}
-
-fn testBoundarySymbols(b: *Build, opts: Options) *Step {
-    const test_step = b.step("test-macho-boundary-symbols", "");
-
-    const obj1 = cc(b, opts);
-    obj1.addCppSource(
-        \\constexpr const char* MESSAGE __attribute__((used, section("__DATA_CONST,__message_ptr"))) = "codebase";
-    );
-    obj1.addArgs(&.{ "-std=c++17", "-c" });
-
-    const main_o = cc(b, opts);
-    main_o.addCSource(
-        \\#include <stdio.h>
-        \\const char* interop();
-        \\int main() {
-        \\  printf("All your %s are belong to us.\n", interop());
-        \\  return 0;
-        \\}
-    );
-    main_o.addArg("-c");
-
-    const obj2 = cc(b, opts);
-    obj2.addCppSource(
-        \\extern const char* message_pointer __asm("section$start$__DATA_CONST$__message_ptr");
-        \\extern "C" const char* interop() {
-        \\  return message_pointer;
-        \\}
-    );
-    obj2.addArgs(&.{ "-std=c++17", "-c" });
-
-    const exe = cc(b, opts);
-    exe.addFileSource(obj1.out);
-    exe.addFileSource(obj2.out);
-    exe.addFileSource(main_o.out);
-
-    const run = exe.run();
-    run.expectStdOutEqual("All your codebase are belong to us.\n");
-    test_step.dependOn(run.step());
-
-    const check = exe.check();
-    check.checkInSymtab();
-    check.checkNotPresent("external section$start$__DATA_CONST$__message_ptr");
-    test_step.dependOn(&check.step);
-
-    return test_step;
 }
 
 fn testBuildVersionMacOS(b: *Build, opts: Options) *Step {
@@ -943,6 +898,155 @@ fn testSearchStrategy(b: *Build, opts: Options) *Step {
         check.checkStart();
         check.checkExact("cmd LOAD_DYLIB");
         check.checkNotPresent("liba.dylib");
+        test_step.dependOn(&check.step);
+    }
+
+    return test_step;
+}
+
+fn testSectionBoundarySymbols(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-section-boundary-symbols", "");
+
+    const obj1 = cc(b, opts);
+    obj1.addCppSource(
+        \\constexpr const char* MESSAGE __attribute__((used, section("__DATA_CONST,__message_ptr"))) = "codebase";
+    );
+    obj1.addArgs(&.{ "-std=c++17", "-c" });
+
+    const main_o = cc(b, opts);
+    main_o.addCSource(
+        \\#include <stdio.h>
+        \\const char* interop();
+        \\int main() {
+        \\  printf("All your %s are belong to us.\n", interop());
+        \\  return 0;
+        \\}
+    );
+    main_o.addArg("-c");
+
+    {
+        const obj2 = cc(b, opts);
+        obj2.addCppSource(
+            \\extern const char* message_pointer __asm("section$start$__DATA_CONST$__message_ptr");
+            \\extern "C" const char* interop() {
+            \\  return message_pointer;
+            \\}
+        );
+        obj2.addArgs(&.{ "-std=c++17", "-c" });
+
+        const exe = cc(b, opts);
+        exe.addFileSource(obj1.out);
+        exe.addFileSource(obj2.out);
+        exe.addFileSource(main_o.out);
+
+        const run = exe.run();
+        run.expectStdOutEqual("All your codebase are belong to us.\n");
+        test_step.dependOn(run.step());
+
+        const check = exe.check();
+        check.checkInSymtab();
+        check.checkNotPresent("external section$start$__DATA_CONST$__message_ptr");
+        test_step.dependOn(&check.step);
+    }
+
+    {
+        const obj2 = cc(b, opts);
+        obj2.addCppSource(
+            \\extern const char* message_pointer __asm("section$start$__DATA_CONST$__not_present");
+            \\extern "C" const char* interop() {
+            \\  return message_pointer;
+            \\}
+        );
+        obj2.addArgs(&.{ "-std=c++17", "-c" });
+
+        const exe = cc(b, opts);
+        exe.addFileSource(obj1.out);
+        exe.addFileSource(obj2.out);
+        exe.addFileSource(main_o.out);
+
+        const run = exe.run();
+        run.expectStdOutEqual("All your (null) are belong to us.\n");
+        test_step.dependOn(run.step());
+
+        const check = exe.check();
+        check.checkInSymtab();
+        check.checkNotPresent("external section$start$__DATA_CONST$__not_present");
+        test_step.dependOn(&check.step);
+    }
+
+    return test_step;
+}
+
+fn testSegmentBoundarySymbols(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-segment-boundary-symbols", "");
+
+    const obj1 = cc(b, opts);
+    obj1.addCppSource(
+        \\constexpr const char* MESSAGE __attribute__((used, section("__DATA_CONST_1,__message_ptr"))) = "codebase";
+    );
+    obj1.addArgs(&.{ "-std=c++17", "-c" });
+
+    const main_o = cc(b, opts);
+    main_o.addCSource(
+        \\#include <stdio.h>
+        \\const char* interop();
+        \\int main() {
+        \\  printf("All your %s are belong to us.\n", interop());
+        \\  return 0;
+        \\}
+    );
+    main_o.addArg("-c");
+
+    {
+        const obj2 = cc(b, opts);
+        obj2.addCppSource(
+            \\extern const char* message_pointer __asm("segment$start$__DATA_CONST_1");
+            \\extern "C" const char* interop() {
+            \\  return message_pointer;
+            \\}
+        );
+        obj2.addArgs(&.{ "-std=c++17", "-c" });
+
+        const exe = cc(b, opts);
+        exe.addFileSource(obj1.out);
+        exe.addFileSource(obj2.out);
+        exe.addFileSource(main_o.out);
+
+        const run = exe.run();
+        run.expectStdOutEqual("All your codebase are belong to us.\n");
+        test_step.dependOn(run.step());
+
+        const check = exe.check();
+        check.checkInSymtab();
+        check.checkNotPresent("external segment$start$__DATA_CONST_1");
+        test_step.dependOn(&check.step);
+    }
+
+    {
+        const obj2 = cc(b, opts);
+        obj2.addCppSource(
+            \\extern const char* message_pointer __asm("segment$start$__DATA_1");
+            \\extern "C" const char* interop() {
+            \\  return message_pointer;
+            \\}
+        );
+        obj2.addArgs(&.{ "-std=c++17", "-c" });
+
+        const exe = cc(b, opts);
+        exe.addFileSource(obj1.out);
+        exe.addFileSource(obj2.out);
+        exe.addFileSource(main_o.out);
+
+        const check = exe.check();
+        check.checkStart();
+        check.checkExact("cmd SEGMENT_64");
+        check.checkExact("segname __DATA_1");
+        check.checkExtract("vmsize {vmsize}");
+        check.checkExtract("filesz {filesz}");
+        check.checkComputeCompare("vmsize", .{ .op = .eq, .value = .{ .literal = 0 } });
+        check.checkComputeCompare("filesz", .{ .op = .eq, .value = .{ .literal = 0 } });
+        check.checkInSymtab();
+        check.checkNotPresent("external segment$start$__DATA_1");
         test_step.dependOn(&check.step);
     }
 
