@@ -94,7 +94,7 @@ fn testBoundarySymbols(b: *Build, opts: Options) *Step {
 
     const check = exe.check();
     check.checkInSymtab();
-    check.checkNotPresent("section$start$__DATA_CONST$__message_ptr");
+    check.checkNotPresent("external section$start$__DATA_CONST$__message_ptr");
     test_step.dependOn(&check.step);
 
     return test_step;

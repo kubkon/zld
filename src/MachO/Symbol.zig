@@ -139,6 +139,7 @@ const AddExtraOpts = struct {
     stubs: ?u32 = null,
     tlv_ptr: ?u32 = null,
     symtab: ?u32 = null,
+    boundary: ?u32 = null,
 };
 
 pub fn addExtra(symbol: *Symbol, opts: AddExtraOpts, macho_file: *MachO) !void {
@@ -270,6 +271,9 @@ pub const Flags = packed struct {
 
     /// Whether the symbol has a TLV pointer.
     tlv_ptr: bool = false,
+
+    /// Whether the symbol is a "magic" boundary symbol.
+    boundary: bool = false,
 };
 
 pub const Extra = struct {
@@ -277,6 +281,16 @@ pub const Extra = struct {
     stubs: u32 = 0,
     tlv_ptr: u32 = 0,
     symtab: u32 = 0,
+    boundary: u32 = 0,
+};
+
+pub const BoundaryInfo = packed struct(u32) {
+    /// segment$ if true, section$ otherwise
+    segment: bool,
+    /// start$ if true, stop$ otherwise
+    start: bool,
+    /// unused
+    unused: u30 = 0,
 };
 
 pub const Index = u32;

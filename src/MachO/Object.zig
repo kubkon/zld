@@ -349,6 +349,102 @@ pub fn scanRelocs(self: Object, macho_file: *MachO) !void {
     // TODO scan __eh_frame relocs
 }
 
+pub fn convertBoundarySymbols(self: *Object, macho_file: *MachO) !void {
+    const parseBoundarySymbol = struct {
+        fn parseBoundarySymbol(name: []const u8) ?struct {
+            segment: bool,
+            start: bool,
+            segname: []const u8,
+            sectname: []const u8,
+        } {
+            invalid: {
+                var segment: ?bool = null;
+                var start: ?bool = null;
+                var segname: []const u8 = "";
+                var sectname: []const u8 = "";
+
+                var it = std.mem.splitScalar(u8, name, '$');
+                var next = it.next() orelse break :invalid;
+
+                if (std.mem.eql(u8, next, "segment")) {
+                    segment = true;
+                } else if (std.mem.eql(u8, next, "section")) {
+                    segment = false;
+                }
+
+                if (segment == null) break :invalid;
+
+                next = it.next() orelse break :invalid;
+
+                if (std.mem.eql(u8, next, "start")) {
+                    start = true;
+                } else if (std.mem.eql(u8, next, "stop")) {
+                    start = false;
+                }
+
+                if (start == null) break :invalid;
+
+                segname = it.next() orelse break :invalid;
+                if (!segment.?) sectname = it.next() orelse break :invalid;
+
+                return .{
+                    .segment = segment.?,
+                    .start = start.?,
+                    .segname = segname,
+                    .sectname = sectname,
+                };
+            }
+            return null;
+        }
+    }.parseBoundarySymbol;
+
+    const gpa = macho_file.base.allocator;
+
+    for (self.getGlobals(), 0..) |index, i| {
+        const nlist_idx = @as(Symbol.Index, @intCast(self.first_global + i));
+        const nlist = &self.symtab.items[nlist_idx];
+        if (!nlist.undf()) continue;
+
+        const global = macho_file.getSymbol(index);
+        if (global.getFile(macho_file)) |file| {
+            if (file.getIndex() != self.index) continue;
+        }
+
+        const name = global.getName(macho_file);
+        const parsed = parseBoundarySymbol(name) orelse continue;
+
+        const info: Symbol.BoundaryInfo = .{
+            .segment = parsed.segment,
+            .start = parsed.start,
+        };
+        global.flags.boundary = true;
+        try global.addExtra(.{ .boundary = @bitCast(info) }, macho_file);
+
+        const atom_index = try macho_file.addAtom();
+        try self.atoms.append(gpa, atom_index);
+
+        const atom = macho_file.getAtom(atom_index).?;
+        atom.atom_index = atom_index;
+        atom.name = try macho_file.string_intern.insert(gpa, name);
+        atom.file = self.index;
+
+        const n_sect = try self.addSection(gpa, parsed.segname, parsed.sectname);
+        const sect = &self.sections.items[n_sect];
+        sect.flags = macho.S_REGULAR;
+        atom.n_sect = n_sect;
+
+        global.value = 0;
+        global.atom = atom_index;
+        global.file = self.index;
+        global.flags.weak = false;
+        global.nlist_idx = nlist_idx;
+
+        nlist.n_value = 0;
+        nlist.n_type = macho.N_PEXT | macho.N_EXT | macho.N_SECT;
+        nlist.n_sect = n_sect + 1;
+    }
+}
+
 pub fn convertTentativeDefinitions(self: *Object, macho_file: *MachO) !void {
     const gpa = macho_file.base.allocator;
     for (self.getGlobals(), 0..) |index, i| {
@@ -380,15 +476,11 @@ pub fn convertTentativeDefinitions(self: *Object, macho_file: *MachO) !void {
         atom.size = nlist.n_value;
         atom.alignment = (nlist.n_desc >> 8) & 0x0f;
 
-        const n_sect = @as(u8, @intCast(self.sections.items.len));
-        const sect = try self.sections.addOne(gpa);
-        sect.* = .{
-            .sectname = MachO.makeStaticString("__common"),
-            .segname = MachO.makeStaticString("__DATA"),
-            .flags = macho.S_ZEROFILL,
-            .size = atom.size,
-            .@"align" = atom.alignment,
-        };
+        const n_sect = try self.addSection(gpa, "__DATA", "__common");
+        const sect = &self.sections.items[n_sect];
+        sect.flags = macho.S_ZEROFILL;
+        sect.size = atom.size;
+        sect.@"align" = atom.alignment;
         atom.n_sect = n_sect;
 
         global.value = 0;
@@ -400,6 +492,16 @@ pub fn convertTentativeDefinitions(self: *Object, macho_file: *MachO) !void {
         nlist.n_sect = n_sect + 1;
         nlist.n_desc = 0;
     }
+}
+
+fn addSection(self: *Object, allocator: Allocator, segname: []const u8, sectname: []const u8) !u8 {
+    const n_sect = @as(u8, @intCast(self.sections.items.len));
+    const sect = try self.sections.addOne(allocator);
+    sect.* = .{
+        .sectname = MachO.makeStaticString(sectname),
+        .segname = MachO.makeStaticString(segname),
+    };
+    return n_sect;
 }
 
 pub fn calcSymtabSize(self: *Object, macho_file: *MachO) !void {

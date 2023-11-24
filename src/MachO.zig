@@ -256,6 +256,7 @@ pub fn flush(self: *MachO) !void {
     // TODO kill __eh_frame atoms
 
     try self.convertTentativeDefinitions();
+    try self.convertBoundarySymbols();
     self.markImportsAndExports();
 
     // TODO dead strip atoms
@@ -942,6 +943,12 @@ fn convertTentativeDefinitions(self: *MachO) !void {
     }
 }
 
+fn convertBoundarySymbols(self: *MachO) !void {
+    for (self.objects.items) |index| {
+        try self.getFile(index).?.object.convertBoundarySymbols(self);
+    }
+}
+
 fn markImportsAndExports(self: *MachO) void {
     if (!self.options.dylib)
         for (self.dylibs.items) |index| {
@@ -1505,8 +1512,22 @@ fn allocateGlobals(self: *MachO) void {
             const atom = global.getAtom(self) orelse continue;
             if (!atom.flags.alive) continue;
             if (global.getFile(self).?.getIndex() != index) continue;
-            global.value += atom.value;
+
             global.out_n_sect = atom.out_n_sect;
+
+            if (global.flags.boundary) {
+                const info: Symbol.BoundaryInfo = @bitCast(global.getExtra(self).?.boundary);
+                if (info.segment) {
+                    const seg_id = self.sections.items(.segment_id)[global.out_n_sect];
+                    const seg = self.segments.items[seg_id];
+                    global.value = if (info.start) seg.vmaddr else seg.vmaddr + seg.vmsize;
+                } else {
+                    const sect = self.sections.items(.header)[global.out_n_sect];
+                    global.value = if (info.start) sect.addr else sect.addr + sect.size;
+                }
+            } else {
+                global.value += atom.value;
+            }
         }
     }
     if (self.getInternalObject()) |internal| {

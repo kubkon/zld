@@ -263,11 +263,15 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
             const atom_index = file.object.atoms.items[rel.r_symbolnum - 1];
             const atom = macho_file.getAtom(atom_index).?;
             assert(atom.flags.alive);
-            const saddr: i64 = @intCast(self.getInputSection(macho_file).addr + rel_address);
             const taddr: i64 = @intCast(atom.getInputSection(macho_file).addr);
-            // off + taddr  == saddr + 4 + A
-            var off = saddr + A - taddr;
-            if (rel.r_pcrel == 1) off += 4;
+            if (rel.r_pcrel == 1) {
+                // off + taddr  == saddr + 4 + A
+                const saddr: i64 = @intCast(self.getInputSection(macho_file).addr + rel_address);
+                const off = saddr + A + 4 - taddr;
+                break :blk @as(i64, @intCast(atom.value)) + off - A;
+            }
+            // off + taddr == A
+            const off = A - taddr;
             break :blk @as(i64, @intCast(atom.value)) + off - A;
         } else @intCast(sym.?.getAddress(.{}, macho_file));
 
