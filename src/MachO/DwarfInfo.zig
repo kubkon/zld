@@ -42,7 +42,10 @@ fn parseAbbrevTables(dw: *DwarfInfo, allocator: Allocator) !void {
             const code = try leb.readULEB128(u64, reader);
             if (code == 0) break;
 
-            const decl = try table.decls.addOne(allocator);
+            try table.decls.ensureUnusedCapacity(allocator, 1);
+            const decl_gop = table.decls.getOrPutAssumeCapacity(code);
+            assert(!decl_gop.found_existing);
+            const decl = decl_gop.value_ptr;
             decl.* = .{
                 .code = code,
                 .tag = undefined,
@@ -134,7 +137,7 @@ fn parseDebugInfoEntry(
             return; // Close scope
         }
 
-        const decl = table.getDecl(code) orelse return error.MalformedDwarf; // TODO better errors
+        const decl = table.decls.get(code) orelse return error.MalformedDwarf; // TODO better errors
         const data = dw.debug_info;
         try cu.diePtr(die).values.ensureTotalCapacityPrecise(allocator, decl.attrs.items.len);
 
@@ -242,21 +245,14 @@ fn readOffset(format: Format, reader: anytype) !u64 {
 }
 
 pub const AbbrevTable = struct {
-    decls: std.ArrayListUnmanaged(Decl) = .{},
+    decls: std.AutoArrayHashMapUnmanaged(u64, Decl) = .{},
     loc: Loc,
 
     pub fn deinit(table: *AbbrevTable, gpa: Allocator) void {
-        for (table.decls.items) |*decl| {
+        for (table.decls.values()) |*decl| {
             decl.deinit(gpa);
         }
         table.decls.deinit(gpa);
-    }
-
-    pub fn getDecl(table: AbbrevTable, code: u64) ?Decl {
-        for (table.decls.items) |decl| {
-            if (decl.code == code) return decl;
-        }
-        return null;
     }
 
     pub const Decl = struct {
@@ -392,7 +388,7 @@ pub const CompileUnit = struct {
     pub fn find(cu: CompileUnit, at: u64, dw: DwarfInfo) ?struct { AbbrevTable.Attr, []const u8 } {
         const table = dw.abbrev_tables.get(cu.header.debug_abbrev_offset) orelse return null;
         for (cu.dies.items) |die| {
-            const decl = table.getDecl(die.code).?;
+            const decl = table.decls.get(die.code).?;
             for (die.values.items, decl.attrs.items) |value, attr| {
                 if (attr.at == at) return .{ attr, value };
             }
