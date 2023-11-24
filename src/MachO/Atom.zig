@@ -331,9 +331,11 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
                 assert(rel.r_length == 2);
                 assert(rel.r_pcrel == 1);
                 if (!sym.?.flags.import) {
-                    // TODO relax!
+                    try relaxGotLoad(code[rel_address - 3 ..]);
+                    try cwriter.writeInt(i32, @intCast(S + A - P - 4), .little);
+                } else {
+                    try cwriter.writeInt(i32, @intCast(G + A - P - 4), .little);
                 }
-                try cwriter.writeInt(i32, @intCast(G + A - P - 4), .little);
             },
 
             .X86_64_RELOC_GOT => {
@@ -388,6 +390,18 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
     }
 
     try writer.writeAll(code);
+}
+
+fn relaxGotLoad(code: []u8) !void {
+    const old_inst = disassemble(code) orelse return error.RelaxFail;
+    switch (old_inst.encoding.mnemonic) {
+        .mov => {
+            const inst = try Instruction.new(old_inst.prefix, .lea, &old_inst.ops);
+            relocs_log.debug("    relaxing {} => {}", .{ old_inst.encoding, inst.encoding });
+            encode(&.{inst}, code) catch return error.RelaxFail;
+        },
+        else => return error.RelaxFail,
+    }
 }
 
 fn relaxTlv(code: []u8) !void {
