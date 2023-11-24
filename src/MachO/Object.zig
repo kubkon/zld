@@ -71,6 +71,10 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
 
     self.initPlatform();
     try self.initDwarfInfo(gpa);
+
+    if (try self.getSourceFilename(gpa)) |sf| {
+        std.debug.print("{s}\n", .{sf});
+    }
 }
 
 fn initSectionAtoms(self: *Object, macho_file: *MachO) !void {
@@ -566,6 +570,43 @@ pub fn calcSymtabSize(self: *Object, macho_file: *MachO) !void {
     }
 }
 
+// pub fn calcStabsSize(self: *Object, macho_file: *MachO) !void {
+//     if (!self.hasDebugInfo()) return;
+
+//     self.output_symtab_ctx.nlocals += 4;
+//     self.output_symtab_ctx.strsize += @as(u32, @intCast())
+
+//     for (self.getLocals()) |local_index| {
+//         const local = macho_file.getSymbol(local_index);
+//         if (!local.flags.output_symtab) continue;
+
+//         try local.addExtra(.{ .symtab = self.output_symtab_ctx.nlocals }, macho_file);
+//         self.output_symtab_ctx.nlocals += 1;
+//         self.output_symtab_ctx.strsize += @as(u32, @intCast(local.getName(macho_file).len + 1));
+//     }
+
+//     for (self.getGlobals()) |global_index| {
+//         const global = macho_file.getSymbol(global_index);
+//         const file_ptr = global.getFile(macho_file) orelse continue;
+//         if (file_ptr.getIndex() != self.index) continue;
+//         if (global.getAtom(macho_file)) |atom| if (!atom.flags.alive) continue;
+//         global.flags.output_symtab = true;
+//         if (global.isLocal()) {
+//             try global.addExtra(.{ .symtab = self.output_symtab_ctx.nlocals }, macho_file);
+//             self.output_symtab_ctx.nlocals += 1;
+//         } else if (global.flags.@"export") {
+//             try global.addExtra(.{ .symtab = self.output_symtab_ctx.nexports }, macho_file);
+//             self.output_symtab_ctx.nexports += 1;
+//         } else {
+//             assert(global.flags.import);
+//             try global.addExtra(.{ .symtab = self.output_symtab_ctx.nimports }, macho_file);
+//             self.output_symtab_ctx.nimports += 1;
+//         }
+//         self.output_symtab_ctx.strsize += @as(u32, @intCast(global.getName(macho_file).len + 1));
+//     }
+
+// }
+
 pub fn writeSymtab(self: Object, macho_file: *MachO) void {
     for (self.getLocals()) |local_index| {
         const local = macho_file.getSymbol(local_index);
@@ -641,6 +682,19 @@ fn getString(self: Object, off: u32) [:0]const u8 {
 pub fn hasDebugInfo(self: Object) bool {
     const dw = self.dwarf_info orelse return false;
     return dw.compile_units.items.len > 0;
+}
+
+pub fn getSourceFilename(self: Object, allocator: Allocator) !?[]const u8 {
+    const dw = self.dwarf_info orelse return null;
+    const cu = dw.compile_units.items[0];
+    const comp_dir_attr = cu.find(std.dwarf.AT.comp_dir, dw) orelse return null;
+    const comp_dir = comp_dir_attr[0].getString(comp_dir_attr[1], cu.header.dw_format, &dw) orelse
+        return null;
+    const file_name_attr = cu.find(std.dwarf.AT.name, dw) orelse return null;
+    const file_name = file_name_attr[0].getString(file_name_attr[1], cu.header.dw_format, &dw) orelse
+        return null;
+    const out = try std.fs.path.join(allocator, &.{ comp_dir, file_name });
+    return out;
 }
 
 pub fn getLocals(self: Object) []const Symbol.Index {
