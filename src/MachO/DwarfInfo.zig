@@ -2,7 +2,7 @@ debug_info: []const u8,
 debug_abbrev: []const u8,
 debug_str: []const u8,
 
-abbrev_tables: std.ArrayListUnmanaged(AbbrevTable) = .{},
+abbrev_tables: std.AutoArrayHashMapUnmanaged(u64, AbbrevTable) = .{},
 compile_units: std.ArrayListUnmanaged(CompileUnit) = .{},
 
 pub fn init(dw: *DwarfInfo, allocator: Allocator) !void {
@@ -23,13 +23,6 @@ fn getString(dw: DwarfInfo, off: u64) [:0]const u8 {
     return mem.sliceTo(@as([*:0]const u8, @ptrCast(dw.debug_str.ptr + off)), 0);
 }
 
-pub fn getAbbrevTable(dw: DwarfInfo, off: u64) ?AbbrevTable {
-    for (dw.abbrev_tables.items) |table| {
-        if (table.loc.pos == off) return table;
-    }
-    return null;
-}
-
 fn parseAbbrevTables(dw: *DwarfInfo, allocator: Allocator) !void {
     const debug_abbrev = dw.debug_abbrev;
     var stream = std.io.fixedBufferStream(debug_abbrev);
@@ -39,7 +32,10 @@ fn parseAbbrevTables(dw: *DwarfInfo, allocator: Allocator) !void {
     while (true) {
         if (creader.bytes_read >= debug_abbrev.len) break;
 
-        const table = try dw.abbrev_tables.addOne(allocator);
+        try dw.abbrev_tables.ensureUnusedCapacity(allocator, 1);
+        const table_gop = dw.abbrev_tables.getOrPutAssumeCapacity(@intCast(creader.bytes_read));
+        assert(!table_gop.found_existing);
+        const table = table_gop.value_ptr;
         table.* = .{ .loc = .{ .pos = creader.bytes_read, .len = 0 } };
 
         while (true) {
@@ -103,7 +99,7 @@ fn parseCompileUnits(dw: *DwarfInfo, allocator: Allocator) !void {
         cu.header.debug_abbrev_offset = try readOffset(cu.header.dw_format, reader);
         cu.header.address_size = try reader.readInt(u8, .little);
 
-        const table = dw.getAbbrevTable(cu.header.debug_abbrev_offset).?;
+        const table = dw.abbrev_tables.get(cu.header.debug_abbrev_offset).?;
         try dw.parseDebugInfoEntry(allocator, cu, table, null, &creader);
 
         cu.loc.len = creader.bytes_read - cu.loc.pos;
@@ -394,7 +390,7 @@ pub const CompileUnit = struct {
     }
 
     pub fn find(cu: CompileUnit, at: u64, dw: DwarfInfo) ?struct { AbbrevTable.Attr, []const u8 } {
-        const table = dw.getAbbrevTable(cu.header.debug_abbrev_offset) orelse return null;
+        const table = dw.abbrev_tables.get(cu.header.debug_abbrev_offset) orelse return null;
         for (cu.dies.items) |die| {
             const decl = table.getDecl(die.code).?;
             for (die.values.items, decl.attrs.items) |value, attr| {
