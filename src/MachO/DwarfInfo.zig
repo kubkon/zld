@@ -60,7 +60,10 @@ fn parseAbbrevTables(dw: *DwarfInfo, allocator: Allocator) !void {
                 const form = try leb.readULEB128(u64, reader);
                 if (at == 0 and form == 0) break;
 
-                const attr = try decl.attrs.addOne(allocator);
+                try decl.attrs.ensureUnusedCapacity(allocator, 1);
+                const attr_gop = decl.attrs.getOrPutAssumeCapacity(at);
+                assert(!attr_gop.found_existing);
+                const attr = attr_gop.value_ptr;
                 attr.* = .{
                     .at = at,
                     .form = form,
@@ -139,9 +142,9 @@ fn parseDebugInfoEntry(
 
         const decl = table.decls.get(code) orelse return error.MalformedDwarf; // TODO better errors
         const data = dw.debug_info;
-        try cu.diePtr(die).values.ensureTotalCapacityPrecise(allocator, decl.attrs.items.len);
+        try cu.diePtr(die).values.ensureTotalCapacityPrecise(allocator, decl.attrs.values().len);
 
-        for (decl.attrs.items) |attr| {
+        for (decl.attrs.values()) |attr| {
             const start = creader.bytes_read;
             try advanceByFormSize(cu, attr.form, creader);
             const end = creader.bytes_read;
@@ -259,7 +262,7 @@ pub const AbbrevTable = struct {
         code: u64,
         tag: u64,
         children: bool,
-        attrs: std.ArrayListUnmanaged(Attr) = .{},
+        attrs: std.AutoArrayHashMapUnmanaged(u64, Attr) = .{},
         loc: Loc,
 
         pub fn deinit(decl: *Decl, gpa: Allocator) void {
@@ -389,9 +392,10 @@ pub const CompileUnit = struct {
         const table = dw.abbrev_tables.get(cu.header.debug_abbrev_offset) orelse return null;
         for (cu.dies.items) |die| {
             const decl = table.decls.get(die.code).?;
-            for (die.values.items, decl.attrs.items) |value, attr| {
-                if (attr.at == at) return .{ attr, value };
-            }
+            const index = decl.attrs.getIndex(at) orelse return null;
+            const attr = decl.attrs.values()[index];
+            const value = die.values.items[index];
+            return .{ attr, value };
         }
         return null;
     }
