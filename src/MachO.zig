@@ -280,6 +280,8 @@ pub fn flush(self: *MachO) !void {
     self.allocateGlobals();
     self.allocateSyntheticSymbols();
 
+    try self.parseSymbolStabs();
+
     state_log.debug("{}", .{self.dumpState()});
 
     try self.initDyldInfoSections();
@@ -1834,6 +1836,14 @@ fn writeDataInCode(self: *MachO) !void {
     try self.base.file.pwriteAll(mem.sliceAsBytes(dices.items), cmd.dataoff);
 
     self.getLinkeditSegment().filesize += needed_size;
+}
+
+fn parseSymbolStabs(self: *MachO) !void {
+    if (self.options.strip) return;
+
+    for (self.objects.items) |index| {
+        try self.getFile(index).?.object.parseSymbolStabs(self);
+    }
 }
 
 fn calcSymtabSize(self: *MachO) !void {

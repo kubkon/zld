@@ -16,8 +16,8 @@ atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
 /// All relocations sorted and flatened, sorted by address ascending
 /// per section.
 relocations: std.ArrayListUnmanaged(macho.relocation_info) = .{},
-
 data_in_code: std.ArrayListUnmanaged(macho.data_in_code_entry) = .{},
+stabs: std.ArrayListUnmanaged(Stab) = .{},
 platform: ?MachO.Options.Platform = null,
 
 alive: bool = true,
@@ -32,6 +32,7 @@ pub fn deinit(self: *Object, gpa: Allocator) void {
     self.atoms.deinit(gpa);
     self.relocations.deinit(gpa);
     self.data_in_code.deinit(gpa);
+    self.stabs.deinit(gpa);
 }
 
 pub fn parse(self: *Object, macho_file: *MachO) !void {
@@ -504,6 +505,25 @@ fn addSection(self: *Object, allocator: Allocator, segname: []const u8, sectname
     return n_sect;
 }
 
+fn addStab(self: *Object, allocator: Allocator) !Symbol.Index {
+    const index = @as(Symbol.Index, @intCast(self.stabs.items.len));
+    const nlist = try self.stabs.addOne(allocator);
+    nlist.* = MachO.null_sym;
+    return index;
+}
+
+pub fn parseSymbolStabs(self: *Object, macho_file: *MachO) !void {
+    const gpa = macho_file.base.allocator;
+    try self.stabs.ensureTotalCapacityPrecise(gpa, self.symbols.items.len);
+
+    for (self.getLocals()) |local_index| {
+        const local = macho_file.getSymbol(local_index);
+        if (local.getAtom(macho_file)) |atom| if (!atom.flags.alive) continue;
+    }
+
+    @panic("TODO parse symbol stabs");
+}
+
 pub fn calcSymtabSize(self: *Object, macho_file: *MachO) !void {
     for (self.getLocals()) |local_index| {
         const local = macho_file.getSymbol(local_index);
@@ -676,6 +696,10 @@ fn formatSymtab(
         const local = ctx.macho_file.getSymbol(index);
         try writer.print("    {}\n", .{local.fmt(ctx.macho_file)});
     }
+    try writer.writeAll("  stabs\n");
+    for (object.stabs.items, 0..) |stab, index| {
+        try writer.print("    {d} : {}\n", .{ index, stab });
+    }
     try writer.writeAll("  globals\n");
     for (object.getGlobals()) |index| {
         const global = ctx.macho_file.getSymbol(index);
@@ -702,6 +726,29 @@ fn formatPath(
         try writer.writeByte(')');
     } else try writer.writeAll(object.path);
 }
+
+pub const Stab = struct {
+    type: Type,
+    value: u32,
+    size: u32,
+
+    const Type = enum {
+        func,
+        global,
+        static,
+    };
+
+    fn format(
+        stab: Stab,
+        comptime unused_fmt_string: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = unused_fmt_string;
+        _ = options;
+        try writer.print("{s}({x}, {x})", .{ @tagName(stab.type), stab.value, stab.size });
+    }
+};
 
 const assert = std.debug.assert;
 const log = std.log.scoped(.link);
