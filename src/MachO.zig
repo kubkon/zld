@@ -280,8 +280,6 @@ pub fn flush(self: *MachO) !void {
     self.allocateGlobals();
     self.allocateSyntheticSymbols();
 
-    try self.parseSymbolStabs();
-
     state_log.debug("{}", .{self.dumpState()});
 
     try self.initDyldInfoSections();
@@ -1838,14 +1836,6 @@ fn writeDataInCode(self: *MachO) !void {
     self.getLinkeditSegment().filesize += needed_size;
 }
 
-fn parseSymbolStabs(self: *MachO) !void {
-    if (self.options.strip) return;
-
-    for (self.objects.items) |index| {
-        try self.getFile(index).?.object.parseSymbolStabs(self);
-    }
-}
-
 fn calcSymtabSize(self: *MachO) !void {
     const gpa = self.base.allocator;
 
@@ -2307,7 +2297,12 @@ fn fmtDumpState(
     _ = unused_fmt_string;
     for (self.objects.items) |index| {
         const object = self.getFile(index).?.object;
-        try writer.print("object({d}) : {} : alive({})", .{ index, object.fmtPath(), object.alive });
+        try writer.print("object({d}) : {} : alive({}) : has_debug({})", .{
+            index,
+            object.fmtPath(),
+            object.alive,
+            object.hasDebugInfo(),
+        });
         try writer.writeByte('\n');
         try writer.print("{}{}\n", .{
             object.fmtAtoms(self),

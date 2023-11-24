@@ -3,6 +3,9 @@
 /// Allocated address value of this symbol.
 value: u64 = 0,
 
+/// Size of the symbol.
+size: u64 = 0,
+
 /// Offset into the linker's intern table.
 name: u32 = 0,
 
@@ -67,14 +70,6 @@ pub fn getNlist(symbol: Symbol, macho_file: *MachO) macho.nlist_64 {
     return switch (file) {
         inline else => |x| x.symtab.items[symbol.nlist_idx],
     };
-}
-
-pub fn getStab(symbol: Symbol, macho_file: *MachO) ?Object.Stab {
-    if (!symbol.flags.stab) return null;
-    const file = symbol.getFile(macho_file).?;
-    assert(file == .object);
-    const extra = symbol.getExtra(macho_file).?.stab;
-    return file.stabs.items[extra];
 }
 
 pub fn getDylibOrdinal(symbol: Symbol, macho_file: *MachO) ?u16 {
@@ -148,7 +143,6 @@ const AddExtraOpts = struct {
     tlv_ptr: ?u32 = null,
     symtab: ?u32 = null,
     boundary: ?u32 = null,
-    stab: ?u32 = null,
 };
 
 pub fn addExtra(symbol: *Symbol, opts: AddExtraOpts, macho_file: *MachO) !void {
@@ -246,9 +240,6 @@ fn format2(
         if (symbol.getAtom(ctx.macho_file)) |atom| {
             try writer.print(" : atom({d})", .{atom.atom_index});
         }
-        if (symbol.flags.stab) {
-            try writer.print(" : stab({d})", .{symbol.getExtra(ctx.macho_file).?.stab});
-        }
         var buf: [2]u8 = .{'_'} ** 2;
         if (symbol.flags.@"export") buf[0] = 'E';
         if (symbol.flags.import) buf[1] = 'I';
@@ -286,9 +277,6 @@ pub const Flags = packed struct {
 
     /// Whether the symbol is a "magic" boundary symbol.
     boundary: bool = false,
-
-    /// Whether the symbol has an associated symbol stab.
-    stab: bool = false,
 };
 
 pub const Extra = struct {
@@ -297,7 +285,6 @@ pub const Extra = struct {
     tlv_ptr: u32 = 0,
     symtab: u32 = 0,
     boundary: u32 = 0,
-    stab: u32 = 0,
 };
 
 pub const BoundaryInfo = packed struct(u32) {
