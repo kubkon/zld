@@ -1840,6 +1840,7 @@ fn calcSymtabSize(self: *MachO) !void {
     const gpa = self.base.allocator;
 
     var nlocals: u32 = 0;
+    var nstabs: u32 = 0;
     var nexports: u32 = 0;
     var nimports: u32 = 0;
     var strsize: u32 = 0;
@@ -1866,30 +1867,38 @@ fn calcSymtabSize(self: *MachO) !void {
         strsize += ctx.strsize;
     }
 
-    // TODO symbol stabs
+    for (self.objects.items) |index| {
+        const object = self.getFile(index).?.object;
+        const ctx = &object.output_symtab_ctx;
+        ctx.istab = nstabs;
+        object.calcStabsSize(self);
+        nstabs += ctx.nstabs;
+        strsize += ctx.strsize;
+    }
 
     for (files.items) |index| {
         const file = self.getFile(index).?;
         const ctx = switch (file) {
             inline else => |x| &x.output_symtab_ctx,
         };
-        ctx.iexport += nlocals;
-        ctx.iimport += nlocals + nexports;
+        ctx.istab += nlocals;
+        ctx.iexport += nlocals + nstabs;
+        ctx.iimport += nlocals + nstabs + nexports;
     }
 
     {
         const cmd = &self.symtab_cmd;
-        cmd.nsyms = nlocals + nexports + nimports;
+        cmd.nsyms = nlocals + nstabs + nexports + nimports;
         cmd.strsize = strsize + 1;
     }
 
     {
         const cmd = &self.dysymtab_cmd;
         cmd.ilocalsym = 0;
-        cmd.nlocalsym = nlocals;
-        cmd.iextdefsym = nlocals;
+        cmd.nlocalsym = nlocals + nstabs;
+        cmd.iextdefsym = nlocals + nstabs;
         cmd.nextdefsym = nexports;
-        cmd.iundefsym = nlocals + nexports;
+        cmd.iundefsym = nlocals + nstabs + nexports;
         cmd.nundefsym = nimports;
     }
 }
@@ -1905,6 +1914,9 @@ fn writeSymtab(self: *MachO) !void {
 
     for (self.objects.items) |index| {
         self.getFile(index).?.writeSymtab(self);
+    }
+    for (self.objects.items) |index| {
+        self.getFile(index).?.object.writeStabs(self);
     }
     for (self.dylibs.items) |index| {
         self.getFile(index).?.writeSymtab(self);
@@ -2457,9 +2469,11 @@ const Section = struct {
 
 pub const SymtabCtx = struct {
     ilocal: u32 = 0,
+    istab: u32 = 0,
     iexport: u32 = 0,
     iimport: u32 = 0,
     nlocals: u32 = 0,
+    nstabs: u32 = 0,
     nexports: u32 = 0,
     nimports: u32 = 0,
     strsize: u32 = 0,

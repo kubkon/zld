@@ -71,10 +71,6 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
 
     self.initPlatform();
     try self.initDwarfInfo(gpa);
-
-    if (try self.getSourceFile(gpa)) |sf| {
-        std.debug.print("{s}\n", .{sf});
-    }
 }
 
 fn initSectionAtoms(self: *Object, macho_file: *MachO) !void {
@@ -570,42 +566,50 @@ pub fn calcSymtabSize(self: *Object, macho_file: *MachO) !void {
     }
 }
 
-// pub fn calcStabsSize(self: *Object, macho_file: *MachO) !void {
-//     if (!self.hasDebugInfo()) return;
+pub fn calcStabsSize(self: *Object, macho_file: *MachO) void {
+    if (macho_file.options.strip) return;
+    if (!self.hasDebugInfo()) return;
 
-//     self.output_symtab_ctx.nlocals += 4;
-//     self.output_symtab_ctx.strsize += @as(u32, @intCast())
+    // TODO handle multiple CUs
+    const dw = self.dwarf_info.?;
+    const cu = dw.compile_units.items[0];
+    const comp_dir = cu.getCompileDir(dw) orelse return;
+    const tu_name = cu.getSourceFile(dw) orelse return;
 
-//     for (self.getLocals()) |local_index| {
-//         const local = macho_file.getSymbol(local_index);
-//         if (!local.flags.output_symtab) continue;
+    self.output_symtab_ctx.nstabs += 4; // N_SO, N_SO, N_OSO, N_SO
+    self.output_symtab_ctx.strsize += @as(u32, @intCast(comp_dir.len + 1)); // comp_dir
+    self.output_symtab_ctx.strsize += @as(u32, @intCast(tu_name.len + 1)); // tu_name
 
-//         try local.addExtra(.{ .symtab = self.output_symtab_ctx.nlocals }, macho_file);
-//         self.output_symtab_ctx.nlocals += 1;
-//         self.output_symtab_ctx.strsize += @as(u32, @intCast(local.getName(macho_file).len + 1));
-//     }
+    if (self.archive) |path| {
+        self.output_symtab_ctx.strsize += @as(u32, @intCast(path.len + 1 + 1 + self.path.len + 1 + 1));
+    } else {
+        self.output_symtab_ctx.strsize += @as(u32, @intCast(self.path.len + 1));
+    }
 
-//     for (self.getGlobals()) |global_index| {
-//         const global = macho_file.getSymbol(global_index);
-//         const file_ptr = global.getFile(macho_file) orelse continue;
-//         if (file_ptr.getIndex() != self.index) continue;
-//         if (global.getAtom(macho_file)) |atom| if (!atom.flags.alive) continue;
-//         global.flags.output_symtab = true;
-//         if (global.isLocal()) {
-//             try global.addExtra(.{ .symtab = self.output_symtab_ctx.nlocals }, macho_file);
-//             self.output_symtab_ctx.nlocals += 1;
-//         } else if (global.flags.@"export") {
-//             try global.addExtra(.{ .symtab = self.output_symtab_ctx.nexports }, macho_file);
-//             self.output_symtab_ctx.nexports += 1;
-//         } else {
-//             assert(global.flags.import);
-//             try global.addExtra(.{ .symtab = self.output_symtab_ctx.nimports }, macho_file);
-//             self.output_symtab_ctx.nimports += 1;
-//         }
-//         self.output_symtab_ctx.strsize += @as(u32, @intCast(global.getName(macho_file).len + 1));
-//     }
+    for (self.getLocals()) |local_index| {
+        const local = macho_file.getSymbol(local_index);
+        if (!local.flags.output_symtab) continue;
+        const sect = macho_file.sections.items(.header)[local.out_n_sect];
+        if (sect.isCode()) {
+            self.output_symtab_ctx.nstabs += 4; // N_BNSYM, N_FUN, N_FUN, N_ENSYM
+        } else {
+            self.output_symtab_ctx.nstabs += 1; // N_STSYM
+        }
+    }
 
-// }
+    for (self.getGlobals()) |global_index| {
+        const global = macho_file.getSymbol(global_index);
+        const file = global.getFile(macho_file) orelse continue;
+        if (file.getIndex() != self.index) continue;
+        if (!global.flags.output_symtab) continue;
+        const sect = macho_file.sections.items(.header)[global.out_n_sect];
+        if (sect.isCode()) {
+            self.output_symtab_ctx.nstabs += 4; // N_BNSYM, N_FUN, N_FUN, N_ENSYM
+        } else {
+            self.output_symtab_ctx.nstabs += 1; // N_GSYM
+        }
+    }
+}
 
 pub fn writeSymtab(self: Object, macho_file: *MachO) void {
     for (self.getLocals()) |local_index| {
@@ -630,6 +634,170 @@ pub fn writeSymtab(self: Object, macho_file: *MachO) void {
         out_sym.n_strx = n_strx;
         global.setOutputSym(macho_file, out_sym);
     }
+}
+
+pub fn writeStabs(self: Object, macho_file: *MachO) void {
+    if (macho_file.options.strip) return;
+    if (!self.hasDebugInfo()) return;
+    const writeFuncStab = struct {
+        inline fn writeFuncStab(
+            n_strx: u32,
+            n_sect: u8,
+            n_value: u64,
+            size: u64,
+            index: u32,
+            ctx: *MachO,
+        ) void {
+            ctx.symtab.items[index] = .{
+                .n_strx = 0,
+                .n_type = macho.N_BNSYM,
+                .n_sect = n_sect,
+                .n_desc = 0,
+                .n_value = n_value,
+            };
+            ctx.symtab.items[index + 1] = .{
+                .n_strx = n_strx,
+                .n_type = macho.N_FUN,
+                .n_sect = n_sect,
+                .n_desc = 0,
+                .n_value = n_value,
+            };
+            ctx.symtab.items[index + 2] = .{
+                .n_strx = 0,
+                .n_type = macho.N_FUN,
+                .n_sect = 0,
+                .n_desc = 0,
+                .n_value = size,
+            };
+            ctx.symtab.items[index + 3] = .{
+                .n_strx = 0,
+                .n_type = macho.N_ENSYM,
+                .n_sect = n_sect,
+                .n_desc = 0,
+                .n_value = size,
+            };
+        }
+    }.writeFuncStab;
+
+    // TODO handle multiple CUs
+    const dw = self.dwarf_info.?;
+    const cu = dw.compile_units.items[0];
+    const comp_dir = cu.getCompileDir(dw) orelse return;
+    const tu_name = cu.getSourceFile(dw) orelse return;
+
+    var index = self.output_symtab_ctx.istab;
+
+    // Open scope
+    // N_SO comp_dir
+    var n_strx = @as(u32, @intCast(macho_file.strtab.items.len));
+    macho_file.strtab.appendSliceAssumeCapacity(comp_dir);
+    macho_file.strtab.appendAssumeCapacity(0);
+    macho_file.symtab.items[index] = .{
+        .n_strx = n_strx,
+        .n_type = macho.N_SO,
+        .n_sect = 0,
+        .n_desc = 0,
+        .n_value = 0,
+    };
+    index += 1;
+    // N_SO tu_name
+    n_strx = @as(u32, @intCast(macho_file.strtab.items.len));
+    macho_file.strtab.appendSliceAssumeCapacity(tu_name);
+    macho_file.strtab.appendAssumeCapacity(0);
+    macho_file.symtab.items[index] = .{
+        .n_strx = n_strx,
+        .n_type = macho.N_SO,
+        .n_sect = 0,
+        .n_desc = 0,
+        .n_value = 0,
+    };
+    index += 1;
+    // N_OSO path
+    n_strx = @as(u32, @intCast(macho_file.strtab.items.len));
+    if (self.archive) |path| {
+        macho_file.strtab.appendSliceAssumeCapacity(path);
+        macho_file.strtab.appendAssumeCapacity('(');
+        macho_file.strtab.appendSliceAssumeCapacity(self.path);
+        macho_file.strtab.appendAssumeCapacity(')');
+        macho_file.strtab.appendAssumeCapacity(0);
+    } else {
+        macho_file.strtab.appendSliceAssumeCapacity(self.path);
+        macho_file.strtab.appendAssumeCapacity(0);
+    }
+    macho_file.symtab.items[index] = .{
+        .n_strx = n_strx,
+        .n_type = macho.N_OSO,
+        .n_sect = 0,
+        .n_desc = 1,
+        .n_value = self.mtime,
+    };
+    index += 1;
+
+    for (self.getLocals()) |local_index| {
+        const local = macho_file.getSymbol(local_index);
+        if (!local.flags.output_symtab) continue;
+        const sect = macho_file.sections.items(.header)[local.out_n_sect];
+        const sym_n_strx = n_strx: {
+            const symtab_index = local.getOutputSymtabIndex(macho_file).?;
+            const sym = macho_file.symtab.items[symtab_index];
+            break :n_strx sym.n_strx;
+        };
+        const sym_n_sect: u8 = if (!local.isAbs(macho_file)) @intCast(local.out_n_sect + 1) else 0;
+        const sym_n_value = local.getAddress(.{}, macho_file);
+        const sym_size = local.size;
+        if (sect.isCode()) {
+            writeFuncStab(sym_n_strx, sym_n_sect, sym_n_value, sym_size, index, macho_file);
+            index += 4;
+        } else {
+            macho_file.symtab.items[index] = .{
+                .n_strx = sym_n_strx,
+                .n_type = macho.N_STSYM,
+                .n_sect = sym_n_sect,
+                .n_desc = 0,
+                .n_value = sym_n_value,
+            };
+            index += 1;
+        }
+    }
+
+    for (self.getGlobals()) |global_index| {
+        const global = macho_file.getSymbol(global_index);
+        const file = global.getFile(macho_file) orelse continue;
+        if (file.getIndex() != self.index) continue;
+        if (!global.flags.output_symtab) continue;
+        const sect = macho_file.sections.items(.header)[global.out_n_sect];
+        const sym_n_strx = n_strx: {
+            const symtab_index = global.getOutputSymtabIndex(macho_file).?;
+            const sym = macho_file.symtab.items[symtab_index];
+            break :n_strx sym.n_strx;
+        };
+        const sym_n_sect: u8 = if (!global.isAbs(macho_file)) @intCast(global.out_n_sect + 1) else 0;
+        const sym_n_value = global.getAddress(.{}, macho_file);
+        const sym_size = global.size;
+        if (sect.isCode()) {
+            writeFuncStab(sym_n_strx, sym_n_sect, sym_n_value, sym_size, index, macho_file);
+            index += 4;
+        } else {
+            macho_file.symtab.items[index] = .{
+                .n_strx = sym_n_strx,
+                .n_type = macho.N_GSYM,
+                .n_sect = sym_n_sect,
+                .n_desc = 0,
+                .n_value = 0,
+            };
+            index += 1;
+        }
+    }
+
+    // Close scope
+    // N_SO
+    macho_file.symtab.items[index] = .{
+        .n_strx = 0,
+        .n_type = macho.N_SO,
+        .n_sect = 0,
+        .n_desc = 0,
+        .n_value = 0,
+    };
 }
 
 pub fn claimUnresolved(self: Object, macho_file: *MachO) void {
@@ -682,17 +850,6 @@ fn getString(self: Object, off: u32) [:0]const u8 {
 pub fn hasDebugInfo(self: Object) bool {
     const dw = self.dwarf_info orelse return false;
     return dw.compile_units.items.len > 0;
-}
-
-/// Caller owns the memory.
-pub fn getSourceFile(self: Object, allocator: Allocator) !?[]const u8 {
-    const dw = self.dwarf_info orelse return null;
-    // TODO handle multiple CUs
-    const cu = dw.compile_units.items[0];
-    const comp_dir = cu.getCompileDir(dw) orelse return null;
-    const file_name = cu.getSourceFile(dw) orelse return null;
-    const out = try std.fs.path.join(allocator, &.{ comp_dir, file_name });
-    return out;
 }
 
 pub fn getLocals(self: Object) []const Symbol.Index {
