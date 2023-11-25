@@ -564,12 +564,11 @@ pub fn calcSymtabSize(self: *Object, macho_file: *MachO) !void {
         }
         self.output_symtab_ctx.strsize += @as(u32, @intCast(global.getName(macho_file).len + 1));
     }
+
+    if (!macho_file.options.strip and self.hasDebugInfo()) self.calcStabsSize(macho_file);
 }
 
 pub fn calcStabsSize(self: *Object, macho_file: *MachO) void {
-    assert(!macho_file.options.strip);
-    if (!self.hasDebugInfo()) return;
-
     // TODO handle multiple CUs
     const dw = self.dwarf_info.?;
     const cu = dw.compile_units.items[0];
@@ -634,11 +633,11 @@ pub fn writeSymtab(self: Object, macho_file: *MachO) void {
         out_sym.n_strx = n_strx;
         global.setOutputSym(macho_file, out_sym);
     }
+
+    if (!macho_file.options.strip and self.hasDebugInfo()) self.writeStabs(macho_file);
 }
 
 pub fn writeStabs(self: Object, macho_file: *MachO) void {
-    assert(!macho_file.options.strip);
-    if (!self.hasDebugInfo()) return;
     const writeFuncStab = struct {
         inline fn writeFuncStab(
             n_strx: u32,

@@ -1858,25 +1858,15 @@ fn calcSymtabSize(self: *MachO) !void {
             inline else => |x| &x.output_symtab_ctx,
         };
         ctx.ilocal = nlocals;
+        ctx.istab = nstabs;
         ctx.iexport = nexports;
         ctx.iimport = nimports;
         try file.calcSymtabSize(self);
         nlocals += ctx.nlocals;
+        nstabs += ctx.nstabs;
         nexports += ctx.nexports;
         nimports += ctx.nimports;
         strsize += ctx.strsize;
-    }
-
-    if (!self.options.strip) {
-        for (self.objects.items) |index| {
-            const object = self.getFile(index).?.object;
-            const ctx = &object.output_symtab_ctx;
-            const no_stabs_strsize = ctx.strsize;
-            ctx.istab = nstabs;
-            object.calcStabsSize(self);
-            nstabs += ctx.nstabs;
-            strsize += ctx.strsize - no_stabs_strsize;
-        }
     }
 
     for (files.items) |index| {
@@ -1917,11 +1907,6 @@ fn writeSymtab(self: *MachO) !void {
 
     for (self.objects.items) |index| {
         self.getFile(index).?.writeSymtab(self);
-    }
-    if (!self.options.strip) {
-        for (self.objects.items) |index| {
-            self.getFile(index).?.object.writeStabs(self);
-        }
     }
     for (self.dylibs.items) |index| {
         self.getFile(index).?.writeSymtab(self);
