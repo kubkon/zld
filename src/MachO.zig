@@ -1867,13 +1867,16 @@ fn calcSymtabSize(self: *MachO) !void {
         strsize += ctx.strsize;
     }
 
-    for (self.objects.items) |index| {
-        const object = self.getFile(index).?.object;
-        const ctx = &object.output_symtab_ctx;
-        ctx.istab = nstabs;
-        object.calcStabsSize(self);
-        nstabs += ctx.nstabs;
-        strsize += ctx.strsize;
+    if (!self.options.strip) {
+        for (self.objects.items) |index| {
+            const object = self.getFile(index).?.object;
+            const ctx = &object.output_symtab_ctx;
+            const no_stabs_strsize = ctx.strsize;
+            ctx.istab = nstabs;
+            object.calcStabsSize(self);
+            nstabs += ctx.nstabs;
+            strsize += ctx.strsize - no_stabs_strsize;
+        }
     }
 
     for (files.items) |index| {
@@ -1915,8 +1918,10 @@ fn writeSymtab(self: *MachO) !void {
     for (self.objects.items) |index| {
         self.getFile(index).?.writeSymtab(self);
     }
-    for (self.objects.items) |index| {
-        self.getFile(index).?.object.writeStabs(self);
+    if (!self.options.strip) {
+        for (self.objects.items) |index| {
+            self.getFile(index).?.object.writeStabs(self);
+        }
     }
     for (self.dylibs.items) |index| {
         self.getFile(index).?.writeSymtab(self);
@@ -1924,6 +1929,8 @@ fn writeSymtab(self: *MachO) !void {
     if (self.getInternalObject()) |internal| {
         internal.writeSymtab(self);
     }
+
+    assert(self.strtab.items.len == cmd.strsize);
 
     try self.base.file.pwriteAll(mem.sliceAsBytes(self.symtab.items), cmd.symoff);
 

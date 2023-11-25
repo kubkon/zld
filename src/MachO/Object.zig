@@ -567,7 +567,7 @@ pub fn calcSymtabSize(self: *Object, macho_file: *MachO) !void {
 }
 
 pub fn calcStabsSize(self: *Object, macho_file: *MachO) void {
-    if (macho_file.options.strip) return;
+    assert(!macho_file.options.strip);
     if (!self.hasDebugInfo()) return;
 
     // TODO handle multiple CUs
@@ -581,7 +581,7 @@ pub fn calcStabsSize(self: *Object, macho_file: *MachO) void {
     self.output_symtab_ctx.strsize += @as(u32, @intCast(tu_name.len + 1)); // tu_name
 
     if (self.archive) |path| {
-        self.output_symtab_ctx.strsize += @as(u32, @intCast(path.len + 1 + 1 + self.path.len + 1 + 1));
+        self.output_symtab_ctx.strsize += @as(u32, @intCast(path.len + 1 + self.path.len + 1 + 1));
     } else {
         self.output_symtab_ctx.strsize += @as(u32, @intCast(self.path.len + 1));
     }
@@ -637,7 +637,7 @@ pub fn writeSymtab(self: Object, macho_file: *MachO) void {
 }
 
 pub fn writeStabs(self: Object, macho_file: *MachO) void {
-    if (macho_file.options.strip) return;
+    assert(!macho_file.options.strip);
     if (!self.hasDebugInfo()) return;
     const writeFuncStab = struct {
         inline fn writeFuncStab(
