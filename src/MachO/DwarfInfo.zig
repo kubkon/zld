@@ -263,93 +263,6 @@ pub const Decl = struct {
 pub const Attr = struct {
     at: At,
     form: Form,
-
-    pub fn getFlag(attr: Attr, value: []const u8) ?bool {
-        return switch (attr.form) {
-            dwarf.FORM.flag => value[0] == 1,
-            dwarf.FORM.flag_present => true,
-            else => null,
-        };
-    }
-
-    pub fn getString(attr: Attr, value: []const u8, dwf: Format, ctx: DwarfInfo) ?[:0]const u8 {
-        switch (attr.form) {
-            dwarf.FORM.string => {
-                return mem.sliceTo(@as([*:0]const u8, @ptrCast(value.ptr)), 0);
-            },
-            dwarf.FORM.strp => {
-                const off = switch (dwf) {
-                    .dwarf64 => mem.readInt(u64, value[0..8], .little),
-                    .dwarf32 => mem.readInt(u32, value[0..4], .little),
-                };
-                return ctx.getString(off);
-            },
-            else => return null,
-        }
-    }
-
-    pub fn getSecOffset(attr: Attr, value: []const u8, dwf: Format) ?u64 {
-        return switch (attr.form) {
-            dwarf.FORM.sec_offset => switch (dwf) {
-                .dwarf32 => mem.readInt(u32, value[0..4], .little),
-                .dwarf64 => mem.readInt(u64, value[0..8], .little),
-            },
-            else => null,
-        };
-    }
-
-    pub fn getConstant(attr: Attr, value: []const u8) !?i128 {
-        var stream = std.io.fixedBufferStream(value);
-        const reader = stream.reader();
-        return switch (attr.form) {
-            dwarf.FORM.data1 => value[0],
-            dwarf.FORM.data2 => mem.readInt(u16, value[0..2], .little),
-            dwarf.FORM.data4 => mem.readInt(u32, value[0..4], .little),
-            dwarf.FORM.data8 => mem.readInt(u64, value[0..8], .little),
-            dwarf.FORM.udata => try leb.readULEB128(u64, reader),
-            dwarf.FORM.sdata => try leb.readILEB128(i64, reader),
-            else => null,
-        };
-    }
-
-    pub fn getReference(attr: Attr, value: []const u8, dwf: Format) !?u64 {
-        var stream = std.io.fixedBufferStream(value);
-        const reader = stream.reader();
-        return switch (attr.form) {
-            dwarf.FORM.ref1 => value[0],
-            dwarf.FORM.ref2 => mem.readInt(u16, value[0..2], .little),
-            dwarf.FORM.ref4 => mem.readInt(u32, value[0..4], .little),
-            dwarf.FORM.ref8 => mem.readInt(u64, value[0..8], .little),
-            dwarf.FORM.ref_udata => try leb.readULEB128(u64, reader),
-            dwarf.FORM.ref_addr => switch (dwf) {
-                .dwarf32 => mem.readInt(u32, value[0..4], .little),
-                .dwarf64 => mem.readInt(u64, value[0..8], .little),
-            },
-            else => null,
-        };
-    }
-
-    pub fn getAddr(attr: Attr, value: []const u8, cuh: CompileUnitHeader) ?u64 {
-        return switch (attr.form) {
-            dwarf.FORM.addr => switch (cuh.address_size) {
-                1 => value[0],
-                2 => mem.readInt(u16, value[0..2], .little),
-                4 => mem.readInt(u32, value[0..4], .little),
-                8 => mem.readInt(u64, value[0..8], .little),
-                else => null,
-            },
-            else => null,
-        };
-    }
-
-    pub fn getExprloc(attr: Attr, value: []const u8) !?[]const u8 {
-        if (attr.form != dwarf.FORM.exprloc) return null;
-        var stream = std.io.fixedBufferStream(value);
-        var creader = std.io.countingReader(stream.reader());
-        const reader = creader.reader();
-        const expr_len = try leb.readULEB128(u64, reader);
-        return value[creader.bytes_read..][0..expr_len];
-    }
 };
 
 pub const At = u64;
@@ -393,14 +306,14 @@ pub const CompileUnit = struct {
         assert(cu.dies.items.len > 0);
         const die = cu.dies.items[0];
         const res = die.find(dwarf.AT.comp_dir, cu, ctx) orelse return null;
-        return res.attr.getString(res.value, cu.header.format, ctx);
+        return res.getString(cu.header.format, ctx);
     }
 
     pub fn getSourceFile(cu: CompileUnit, ctx: DwarfInfo) ?[:0]const u8 {
         assert(cu.dies.items.len > 0);
         const die = cu.dies.items[0];
         const res = die.find(dwarf.AT.name, cu, ctx) orelse return null;
-        return res.attr.getString(res.value, cu.header.format, ctx);
+        return res.getString(cu.header.format, ctx);
     }
 
     pub fn nextCompileUnitOffset(cu: CompileUnit) u64 {
@@ -427,7 +340,7 @@ pub const Die = struct {
         const index = decl.attrs.getIndex(at) orelse return null;
         const attr = decl.attrs.values()[index];
         const value = die.values.items[index];
-        return .{ .attr = attr, .value = value };
+        return .{ .attr = attr, .bytes = value };
     }
 
     pub const Index = u32;
@@ -435,7 +348,94 @@ pub const Die = struct {
 
 pub const DieValue = struct {
     attr: Attr,
-    value: []const u8,
+    bytes: []const u8,
+
+    pub fn getFlag(value: DieValue) ?bool {
+        return switch (value.attr.form) {
+            dwarf.FORM.flag => value.bytes[0] == 1,
+            dwarf.FORM.flag_present => true,
+            else => null,
+        };
+    }
+
+    pub fn getString(value: DieValue, format: Format, ctx: DwarfInfo) ?[:0]const u8 {
+        switch (value.attr.form) {
+            dwarf.FORM.string => {
+                return mem.sliceTo(@as([*:0]const u8, @ptrCast(value.bytes.ptr)), 0);
+            },
+            dwarf.FORM.strp => {
+                const off = switch (format) {
+                    .dwarf64 => mem.readInt(u64, value.bytes[0..8], .little),
+                    .dwarf32 => mem.readInt(u32, value.bytes[0..4], .little),
+                };
+                return ctx.getString(off);
+            },
+            else => return null,
+        }
+    }
+
+    pub fn getSecOffset(value: DieValue, format: Format) ?u64 {
+        return switch (value.attr.form) {
+            dwarf.FORM.sec_offset => switch (format) {
+                .dwarf32 => mem.readInt(u32, value.bytes[0..4], .little),
+                .dwarf64 => mem.readInt(u64, value.bytes[0..8], .little),
+            },
+            else => null,
+        };
+    }
+
+    pub fn getConstant(value: DieValue) !?i128 {
+        var stream = std.io.fixedBufferStream(value.bytes);
+        const reader = stream.reader();
+        return switch (value.attr.form) {
+            dwarf.FORM.data1 => value.bytes[0],
+            dwarf.FORM.data2 => mem.readInt(u16, value.bytes[0..2], .little),
+            dwarf.FORM.data4 => mem.readInt(u32, value.bytes[0..4], .little),
+            dwarf.FORM.data8 => mem.readInt(u64, value.bytes[0..8], .little),
+            dwarf.FORM.udata => try leb.readULEB128(u64, reader),
+            dwarf.FORM.sdata => try leb.readILEB128(i64, reader),
+            else => null,
+        };
+    }
+
+    pub fn getReference(value: DieValue, format: Format) !?u64 {
+        var stream = std.io.fixedBufferStream(value.bytes);
+        const reader = stream.reader();
+        return switch (value.attr.form) {
+            dwarf.FORM.ref1 => value.bytes[0],
+            dwarf.FORM.ref2 => mem.readInt(u16, value.bytes[0..2], .little),
+            dwarf.FORM.ref4 => mem.readInt(u32, value.bytes[0..4], .little),
+            dwarf.FORM.ref8 => mem.readInt(u64, value.bytes[0..8], .little),
+            dwarf.FORM.ref_udata => try leb.readULEB128(u64, reader),
+            dwarf.FORM.ref_addr => switch (format) {
+                .dwarf32 => mem.readInt(u32, value.bytes[0..4], .little),
+                .dwarf64 => mem.readInt(u64, value.bytes[0..8], .little),
+            },
+            else => null,
+        };
+    }
+
+    pub fn getAddr(value: DieValue, header: CompileUnitHeader) ?u64 {
+        return switch (value.attr.form) {
+            dwarf.FORM.addr => switch (header.address_size) {
+                1 => value.bytes[0],
+                2 => mem.readInt(u16, value.bytes[0..2], .little),
+                4 => mem.readInt(u32, value.bytes[0..4], .little),
+                8 => mem.readInt(u64, value.bytes[0..8], .little),
+                else => null,
+            },
+            else => null,
+        };
+    }
+
+    pub fn getExprloc(value: DieValue) !?[]const u8 {
+        if (value.attr.form != dwarf.FORM.exprloc) return null;
+        var stream = std.io.fixedBufferStream(value.bytes);
+        var creader = std.io.countingReader(stream.reader());
+        const reader = creader.reader();
+        const expr_len = try leb.readULEB128(u64, reader);
+        return value.bytes[creader.bytes_read..][0..expr_len];
+    }
 };
 
 pub const Format = enum {
