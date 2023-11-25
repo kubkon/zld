@@ -272,7 +272,7 @@ pub const Attr = struct {
         };
     }
 
-    pub fn getString(attr: Attr, value: []const u8, dwf: Format, ctx: *const DwarfInfo) ?[]const u8 {
+    pub fn getString(attr: Attr, value: []const u8, dwf: Format, ctx: DwarfInfo) ?[:0]const u8 {
         switch (attr.form) {
             dwarf.FORM.string => {
                 return mem.sliceTo(@as([*:0]const u8, @ptrCast(value.ptr)), 0);
@@ -329,7 +329,7 @@ pub const Attr = struct {
         };
     }
 
-    pub fn getAddr(attr: Attr, value: []const u8, cuh: CompileUnit.Header) ?u64 {
+    pub fn getAddr(attr: Attr, value: []const u8, cuh: CompileUnitHeader) ?u64 {
         return switch (attr.form) {
             dwarf.FORM.addr => switch (cuh.address_size) {
                 1 => value[0],
@@ -357,8 +357,16 @@ pub const Code = u64;
 pub const Form = u64;
 pub const Tag = u64;
 
+pub const CompileUnitHeader = struct {
+    format: Format,
+    length: u64,
+    version: u16,
+    debug_abbrev_offset: u64,
+    address_size: u8,
+};
+
 pub const CompileUnit = struct {
-    header: Header,
+    header: CompileUnitHeader,
     pos: usize,
     dies: std.ArrayListUnmanaged(Die) = .{},
     children: std.ArrayListUnmanaged(Die.Index) = .{},
@@ -381,16 +389,18 @@ pub const CompileUnit = struct {
         return &cu.dies.items[index];
     }
 
-    pub fn find(cu: CompileUnit, at: At, dw: DwarfInfo) ?struct { Attr, []const u8 } {
-        const table = dw.abbrev_tables.get(cu.header.debug_abbrev_offset) orelse return null;
-        for (cu.dies.items) |die| {
-            const decl = table.decls.get(die.code).?;
-            const index = decl.attrs.getIndex(at) orelse return null;
-            const attr = decl.attrs.values()[index];
-            const value = die.values.items[index];
-            return .{ attr, value };
-        }
-        return null;
+    pub fn getCompileDir(cu: CompileUnit, ctx: DwarfInfo) ?[:0]const u8 {
+        assert(cu.dies.items.len > 0);
+        const die = cu.dies.items[0];
+        const res = die.find(dwarf.AT.comp_dir, cu, ctx) orelse return null;
+        return res.attr.getString(res.value, cu.header.format, ctx);
+    }
+
+    pub fn getSourceFile(cu: CompileUnit, ctx: DwarfInfo) ?[:0]const u8 {
+        assert(cu.dies.items.len > 0);
+        const die = cu.dies.items[0];
+        const res = die.find(dwarf.AT.name, cu, ctx) orelse return null;
+        return res.attr.getString(res.value, cu.header.format, ctx);
     }
 
     pub fn nextCompileUnitOffset(cu: CompileUnit) u64 {
@@ -399,27 +409,33 @@ pub const CompileUnit = struct {
             .dwarf64 => 12,
         } + cu.header.length;
     }
+};
 
-    pub const Header = struct {
-        format: Format,
-        length: u64,
-        version: u16,
-        debug_abbrev_offset: u64,
-        address_size: u8,
-    };
+pub const Die = struct {
+    code: Code,
+    values: std.ArrayListUnmanaged([]const u8) = .{},
+    children: std.ArrayListUnmanaged(Die.Index) = .{},
 
-    pub const Die = struct {
-        code: Code,
-        values: std.ArrayListUnmanaged([]const u8) = .{},
-        children: std.ArrayListUnmanaged(Die.Index) = .{},
+    pub fn deinit(die: *Die, gpa: Allocator) void {
+        die.values.deinit(gpa);
+        die.children.deinit(gpa);
+    }
 
-        pub fn deinit(die: *Die, gpa: Allocator) void {
-            die.values.deinit(gpa);
-            die.children.deinit(gpa);
-        }
+    pub fn find(die: Die, at: At, cu: CompileUnit, ctx: DwarfInfo) ?DieValue {
+        const table = ctx.abbrev_tables.get(cu.header.debug_abbrev_offset) orelse return null;
+        const decl = table.decls.get(die.code).?;
+        const index = decl.attrs.getIndex(at) orelse return null;
+        const attr = decl.attrs.values()[index];
+        const value = die.values.items[index];
+        return .{ .attr = attr, .value = value };
+    }
 
-        pub const Index = u32;
-    };
+    pub const Index = u32;
+};
+
+pub const DieValue = struct {
+    attr: Attr,
+    value: []const u8,
 };
 
 pub const Format = enum {

@@ -72,7 +72,7 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
     self.initPlatform();
     try self.initDwarfInfo(gpa);
 
-    if (try self.getSourceFilename(gpa)) |sf| {
+    if (try self.getSourceFile(gpa)) |sf| {
         std.debug.print("{s}\n", .{sf});
     }
 }
@@ -684,15 +684,13 @@ pub fn hasDebugInfo(self: Object) bool {
     return dw.compile_units.items.len > 0;
 }
 
-pub fn getSourceFilename(self: Object, allocator: Allocator) !?[]const u8 {
+/// Caller owns the memory.
+pub fn getSourceFile(self: Object, allocator: Allocator) !?[]const u8 {
     const dw = self.dwarf_info orelse return null;
+    // TODO handle multiple CUs
     const cu = dw.compile_units.items[0];
-    const comp_dir_attr = cu.find(std.dwarf.AT.comp_dir, dw) orelse return null;
-    const comp_dir = comp_dir_attr[0].getString(comp_dir_attr[1], cu.header.format, &dw) orelse
-        return null;
-    const file_name_attr = cu.find(std.dwarf.AT.name, dw) orelse return null;
-    const file_name = file_name_attr[0].getString(file_name_attr[1], cu.header.format, &dw) orelse
-        return null;
+    const comp_dir = cu.getCompileDir(dw) orelse return null;
+    const file_name = cu.getSourceFile(dw) orelse return null;
     const out = try std.fs.path.join(allocator, &.{ comp_dir, file_name });
     return out;
 }
