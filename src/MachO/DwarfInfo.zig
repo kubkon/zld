@@ -2,7 +2,9 @@ debug_info: []const u8,
 debug_abbrev: []const u8,
 debug_str: []const u8,
 
+/// Abbreviation table indexed by offset in the .debug_abbrev bytestream
 abbrev_tables: std.AutoArrayHashMapUnmanaged(u64, AbbrevTable) = .{},
+/// List of compile units as they appear in the .debug_info bytestream
 compile_units: std.ArrayListUnmanaged(CompileUnit) = .{},
 
 pub fn init(dw: *DwarfInfo, allocator: Allocator) !void {
@@ -39,7 +41,7 @@ fn parseAbbrevTables(dw: *DwarfInfo, allocator: Allocator) !void {
         table.* = .{};
 
         while (true) {
-            const code = try leb.readULEB128(u64, reader);
+            const code = try leb.readULEB128(Code, reader);
             if (code == 0) break;
 
             try table.decls.ensureUnusedCapacity(allocator, 1);
@@ -51,12 +53,12 @@ fn parseAbbrevTables(dw: *DwarfInfo, allocator: Allocator) !void {
                 .tag = undefined,
                 .children = false,
             };
-            decl.tag = try leb.readULEB128(u64, reader);
+            decl.tag = try leb.readULEB128(Tag, reader);
             decl.children = (try reader.readByte()) > 0;
 
             while (true) {
-                const at = try leb.readULEB128(u64, reader);
-                const form = try leb.readULEB128(u64, reader);
+                const at = try leb.readULEB128(At, reader);
+                const form = try leb.readULEB128(Form, reader);
                 if (at == 0 and form == 0) break;
 
                 try decl.attrs.ensureUnusedCapacity(allocator, 1);
@@ -92,23 +94,23 @@ fn parseCompileUnits(dw: *DwarfInfo, allocator: Allocator) !void {
         if (is_64bit) {
             length = try reader.readInt(u64, .little);
         }
-        cu.header.dw_format = if (is_64bit) .dwarf64 else .dwarf32;
+        cu.header.format = if (is_64bit) .dwarf64 else .dwarf32;
         cu.header.length = length;
         cu.header.version = try reader.readInt(u16, .little);
-        cu.header.debug_abbrev_offset = try readOffset(cu.header.dw_format, reader);
+        cu.header.debug_abbrev_offset = try readOffset(cu.header.format, reader);
         cu.header.address_size = try reader.readInt(u8, .little);
 
         const table = dw.abbrev_tables.get(cu.header.debug_abbrev_offset).?;
-        try dw.parseDebugInfoEntry(allocator, cu, table, null, &creader);
+        try dw.parseDie(allocator, cu, table, null, &creader);
     }
 }
 
-fn parseDebugInfoEntry(
+fn parseDie(
     dw: *DwarfInfo,
     allocator: Allocator,
     cu: *CompileUnit,
     table: AbbrevTable,
-    parent: ?usize,
+    parent: ?u32,
     creader: anytype,
 ) anyerror!void {
     while (creader.bytes_read < cu.nextCompileUnitOffset()) {
@@ -120,7 +122,7 @@ fn parseDebugInfoEntry(
             try cu.children.append(allocator, die);
         }
 
-        const code = try leb.readULEB128(u64, creader.reader());
+        const code = try leb.readULEB128(Code, creader.reader());
         cu.diePtr(die).code = code;
 
         if (code == 0) {
@@ -141,19 +143,19 @@ fn parseDebugInfoEntry(
 
         if (decl.children) {
             // Open scope
-            try dw.parseDebugInfoEntry(allocator, cu, table, die, creader);
+            try dw.parseDie(allocator, cu, table, die, creader);
         }
     }
 }
 
-fn advanceByFormSize(cu: *CompileUnit, form: u64, creader: anytype) !void {
+fn advanceByFormSize(cu: *CompileUnit, form: Form, creader: anytype) !void {
     const reader = creader.reader();
     switch (form) {
         dwarf.FORM.strp,
         dwarf.FORM.sec_offset,
         dwarf.FORM.ref_addr,
         => {
-            _ = try readOffset(cu.header.dw_format, reader);
+            _ = try readOffset(cu.header.format, reader);
         },
 
         dwarf.FORM.addr => try reader.skipBytes(cu.header.address_size, .{}),
@@ -234,7 +236,8 @@ fn readOffset(format: Format, reader: anytype) !u64 {
 }
 
 pub const AbbrevTable = struct {
-    decls: std.AutoArrayHashMapUnmanaged(u64, Decl) = .{},
+    /// Table of abbreviation declarations indexed by their assigned code value
+    decls: std.AutoArrayHashMapUnmanaged(Code, Decl) = .{},
 
     pub fn deinit(table: *AbbrevTable, gpa: Allocator) void {
         for (table.decls.values()) |*decl| {
@@ -242,116 +245,123 @@ pub const AbbrevTable = struct {
         }
         table.decls.deinit(gpa);
     }
-
-    pub const Decl = struct {
-        code: u64,
-        tag: u64,
-        children: bool,
-        attrs: std.AutoArrayHashMapUnmanaged(u64, Attr) = .{},
-
-        pub fn deinit(decl: *Decl, gpa: Allocator) void {
-            decl.attrs.deinit(gpa);
-        }
-    };
-
-    pub const Attr = struct {
-        at: u64,
-        form: u64,
-
-        pub fn getFlag(attr: Attr, value: []const u8) ?bool {
-            return switch (attr.form) {
-                dwarf.FORM.flag => value[0] == 1,
-                dwarf.FORM.flag_present => true,
-                else => null,
-            };
-        }
-
-        pub fn getString(attr: Attr, value: []const u8, dwf: Format, ctx: *const DwarfInfo) ?[]const u8 {
-            switch (attr.form) {
-                dwarf.FORM.string => {
-                    return mem.sliceTo(@as([*:0]const u8, @ptrCast(value.ptr)), 0);
-                },
-                dwarf.FORM.strp => {
-                    const off = switch (dwf) {
-                        .dwarf64 => mem.readInt(u64, value[0..8], .little),
-                        .dwarf32 => mem.readInt(u32, value[0..4], .little),
-                    };
-                    return ctx.getString(off);
-                },
-                else => return null,
-            }
-        }
-
-        pub fn getSecOffset(attr: Attr, value: []const u8, dwf: Format) ?u64 {
-            return switch (attr.form) {
-                dwarf.FORM.sec_offset => switch (dwf) {
-                    .dwarf32 => mem.readInt(u32, value[0..4], .little),
-                    .dwarf64 => mem.readInt(u64, value[0..8], .little),
-                },
-                else => null,
-            };
-        }
-
-        pub fn getConstant(attr: Attr, value: []const u8) !?i128 {
-            var stream = std.io.fixedBufferStream(value);
-            const reader = stream.reader();
-            return switch (attr.form) {
-                dwarf.FORM.data1 => value[0],
-                dwarf.FORM.data2 => mem.readInt(u16, value[0..2], .little),
-                dwarf.FORM.data4 => mem.readInt(u32, value[0..4], .little),
-                dwarf.FORM.data8 => mem.readInt(u64, value[0..8], .little),
-                dwarf.FORM.udata => try leb.readULEB128(u64, reader),
-                dwarf.FORM.sdata => try leb.readILEB128(i64, reader),
-                else => null,
-            };
-        }
-
-        pub fn getReference(attr: Attr, value: []const u8, dwf: Format) !?u64 {
-            var stream = std.io.fixedBufferStream(value);
-            const reader = stream.reader();
-            return switch (attr.form) {
-                dwarf.FORM.ref1 => value[0],
-                dwarf.FORM.ref2 => mem.readInt(u16, value[0..2], .little),
-                dwarf.FORM.ref4 => mem.readInt(u32, value[0..4], .little),
-                dwarf.FORM.ref8 => mem.readInt(u64, value[0..8], .little),
-                dwarf.FORM.ref_udata => try leb.readULEB128(u64, reader),
-                dwarf.FORM.ref_addr => switch (dwf) {
-                    .dwarf32 => mem.readInt(u32, value[0..4], .little),
-                    .dwarf64 => mem.readInt(u64, value[0..8], .little),
-                },
-                else => null,
-            };
-        }
-
-        pub fn getAddr(attr: Attr, value: []const u8, cuh: CompileUnit.Header) ?u64 {
-            return switch (attr.form) {
-                dwarf.FORM.addr => switch (cuh.address_size) {
-                    1 => value[0],
-                    2 => mem.readInt(u16, value[0..2], .little),
-                    4 => mem.readInt(u32, value[0..4], .little),
-                    8 => mem.readInt(u64, value[0..8], .little),
-                    else => null,
-                },
-                else => null,
-            };
-        }
-
-        pub fn getExprloc(attr: Attr, value: []const u8) !?[]const u8 {
-            if (attr.form != dwarf.FORM.exprloc) return null;
-            var stream = std.io.fixedBufferStream(value);
-            var creader = std.io.countingReader(stream.reader());
-            const reader = creader.reader();
-            const expr_len = try leb.readULEB128(u64, reader);
-            return value[creader.bytes_read..][0..expr_len];
-        }
-    };
 };
+
+pub const Decl = struct {
+    code: Code,
+    tag: Tag,
+    children: bool,
+
+    /// Table of attributes indexed by their AT value
+    attrs: std.AutoArrayHashMapUnmanaged(At, Attr) = .{},
+
+    pub fn deinit(decl: *Decl, gpa: Allocator) void {
+        decl.attrs.deinit(gpa);
+    }
+};
+
+pub const Attr = struct {
+    at: At,
+    form: Form,
+
+    pub fn getFlag(attr: Attr, value: []const u8) ?bool {
+        return switch (attr.form) {
+            dwarf.FORM.flag => value[0] == 1,
+            dwarf.FORM.flag_present => true,
+            else => null,
+        };
+    }
+
+    pub fn getString(attr: Attr, value: []const u8, dwf: Format, ctx: *const DwarfInfo) ?[]const u8 {
+        switch (attr.form) {
+            dwarf.FORM.string => {
+                return mem.sliceTo(@as([*:0]const u8, @ptrCast(value.ptr)), 0);
+            },
+            dwarf.FORM.strp => {
+                const off = switch (dwf) {
+                    .dwarf64 => mem.readInt(u64, value[0..8], .little),
+                    .dwarf32 => mem.readInt(u32, value[0..4], .little),
+                };
+                return ctx.getString(off);
+            },
+            else => return null,
+        }
+    }
+
+    pub fn getSecOffset(attr: Attr, value: []const u8, dwf: Format) ?u64 {
+        return switch (attr.form) {
+            dwarf.FORM.sec_offset => switch (dwf) {
+                .dwarf32 => mem.readInt(u32, value[0..4], .little),
+                .dwarf64 => mem.readInt(u64, value[0..8], .little),
+            },
+            else => null,
+        };
+    }
+
+    pub fn getConstant(attr: Attr, value: []const u8) !?i128 {
+        var stream = std.io.fixedBufferStream(value);
+        const reader = stream.reader();
+        return switch (attr.form) {
+            dwarf.FORM.data1 => value[0],
+            dwarf.FORM.data2 => mem.readInt(u16, value[0..2], .little),
+            dwarf.FORM.data4 => mem.readInt(u32, value[0..4], .little),
+            dwarf.FORM.data8 => mem.readInt(u64, value[0..8], .little),
+            dwarf.FORM.udata => try leb.readULEB128(u64, reader),
+            dwarf.FORM.sdata => try leb.readILEB128(i64, reader),
+            else => null,
+        };
+    }
+
+    pub fn getReference(attr: Attr, value: []const u8, dwf: Format) !?u64 {
+        var stream = std.io.fixedBufferStream(value);
+        const reader = stream.reader();
+        return switch (attr.form) {
+            dwarf.FORM.ref1 => value[0],
+            dwarf.FORM.ref2 => mem.readInt(u16, value[0..2], .little),
+            dwarf.FORM.ref4 => mem.readInt(u32, value[0..4], .little),
+            dwarf.FORM.ref8 => mem.readInt(u64, value[0..8], .little),
+            dwarf.FORM.ref_udata => try leb.readULEB128(u64, reader),
+            dwarf.FORM.ref_addr => switch (dwf) {
+                .dwarf32 => mem.readInt(u32, value[0..4], .little),
+                .dwarf64 => mem.readInt(u64, value[0..8], .little),
+            },
+            else => null,
+        };
+    }
+
+    pub fn getAddr(attr: Attr, value: []const u8, cuh: CompileUnit.Header) ?u64 {
+        return switch (attr.form) {
+            dwarf.FORM.addr => switch (cuh.address_size) {
+                1 => value[0],
+                2 => mem.readInt(u16, value[0..2], .little),
+                4 => mem.readInt(u32, value[0..4], .little),
+                8 => mem.readInt(u64, value[0..8], .little),
+                else => null,
+            },
+            else => null,
+        };
+    }
+
+    pub fn getExprloc(attr: Attr, value: []const u8) !?[]const u8 {
+        if (attr.form != dwarf.FORM.exprloc) return null;
+        var stream = std.io.fixedBufferStream(value);
+        var creader = std.io.countingReader(stream.reader());
+        const reader = creader.reader();
+        const expr_len = try leb.readULEB128(u64, reader);
+        return value[creader.bytes_read..][0..expr_len];
+    }
+};
+
+pub const At = u64;
+pub const Code = u64;
+pub const Form = u64;
+pub const Tag = u64;
 
 pub const CompileUnit = struct {
     header: Header,
     pos: usize,
-    dies: std.ArrayListUnmanaged(DebugInfoEntry) = .{},
-    children: std.ArrayListUnmanaged(usize) = .{},
+    dies: std.ArrayListUnmanaged(Die) = .{},
+    children: std.ArrayListUnmanaged(Die.Index) = .{},
 
     pub fn deinit(cu: *CompileUnit, gpa: Allocator) void {
         for (cu.dies.items) |*die| {
@@ -361,17 +371,17 @@ pub const CompileUnit = struct {
         cu.children.deinit(gpa);
     }
 
-    pub fn addDie(cu: *CompileUnit, gpa: Allocator) !usize {
-        const index = cu.dies.items.len;
+    pub fn addDie(cu: *CompileUnit, gpa: Allocator) !Die.Index {
+        const index = @as(Die.Index, @intCast(cu.dies.items.len));
         _ = try cu.dies.addOne(gpa);
         return index;
     }
 
-    pub fn diePtr(cu: *CompileUnit, index: usize) *DebugInfoEntry {
+    pub fn diePtr(cu: *CompileUnit, index: Die.Index) *Die {
         return &cu.dies.items[index];
     }
 
-    pub fn find(cu: CompileUnit, at: u64, dw: DwarfInfo) ?struct { AbbrevTable.Attr, []const u8 } {
+    pub fn find(cu: CompileUnit, at: At, dw: DwarfInfo) ?struct { Attr, []const u8 } {
         const table = dw.abbrev_tables.get(cu.header.debug_abbrev_offset) orelse return null;
         for (cu.dies.items) |die| {
             const decl = table.decls.get(die.code).?;
@@ -384,29 +394,31 @@ pub const CompileUnit = struct {
     }
 
     pub fn nextCompileUnitOffset(cu: CompileUnit) u64 {
-        return cu.pos + switch (cu.header.dw_format) {
+        return cu.pos + switch (cu.header.format) {
             .dwarf32 => @as(u64, 4),
             .dwarf64 => 12,
         } + cu.header.length;
     }
 
     pub const Header = struct {
-        dw_format: Format,
+        format: Format,
         length: u64,
         version: u16,
         debug_abbrev_offset: u64,
         address_size: u8,
     };
 
-    pub const DebugInfoEntry = struct {
-        code: u64,
+    pub const Die = struct {
+        code: Code,
         values: std.ArrayListUnmanaged([]const u8) = .{},
-        children: std.ArrayListUnmanaged(usize) = .{},
+        children: std.ArrayListUnmanaged(Die.Index) = .{},
 
-        pub fn deinit(die: *DebugInfoEntry, gpa: Allocator) void {
+        pub fn deinit(die: *Die, gpa: Allocator) void {
             die.values.deinit(gpa);
             die.children.deinit(gpa);
         }
+
+        pub const Index = u32;
     };
 };
 

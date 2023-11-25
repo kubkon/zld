@@ -688,10 +688,10 @@ pub fn getSourceFilename(self: Object, allocator: Allocator) !?[]const u8 {
     const dw = self.dwarf_info orelse return null;
     const cu = dw.compile_units.items[0];
     const comp_dir_attr = cu.find(std.dwarf.AT.comp_dir, dw) orelse return null;
-    const comp_dir = comp_dir_attr[0].getString(comp_dir_attr[1], cu.header.dw_format, &dw) orelse
+    const comp_dir = comp_dir_attr[0].getString(comp_dir_attr[1], cu.header.format, &dw) orelse
         return null;
     const file_name_attr = cu.find(std.dwarf.AT.name, dw) orelse return null;
-    const file_name = file_name_attr[0].getString(file_name_attr[1], cu.header.dw_format, &dw) orelse
+    const file_name = file_name_attr[0].getString(file_name_attr[1], cu.header.format, &dw) orelse
         return null;
     const out = try std.fs.path.join(allocator, &.{ comp_dir, file_name });
     return out;
