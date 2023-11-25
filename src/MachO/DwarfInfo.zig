@@ -36,7 +36,7 @@ fn parseAbbrevTables(dw: *DwarfInfo, allocator: Allocator) !void {
         const table_gop = dw.abbrev_tables.getOrPutAssumeCapacity(@intCast(creader.bytes_read));
         assert(!table_gop.found_existing);
         const table = table_gop.value_ptr;
-        table.* = .{ .loc = .{ .pos = creader.bytes_read, .len = 0 } };
+        table.* = .{};
 
         while (true) {
             const code = try leb.readULEB128(u64, reader);
@@ -50,7 +50,6 @@ fn parseAbbrevTables(dw: *DwarfInfo, allocator: Allocator) !void {
                 .code = code,
                 .tag = undefined,
                 .children = false,
-                .loc = .{ .pos = creader.bytes_read, .len = 1 },
             };
             decl.tag = try leb.readULEB128(u64, reader);
             decl.children = (try reader.readByte()) > 0;
@@ -67,15 +66,9 @@ fn parseAbbrevTables(dw: *DwarfInfo, allocator: Allocator) !void {
                 attr.* = .{
                     .at = at,
                     .form = form,
-                    .loc = .{ .pos = creader.bytes_read, .len = 0 },
                 };
-                attr.loc.len = creader.bytes_read - attr.loc.pos;
             }
-
-            decl.loc.len = creader.bytes_read - decl.loc.pos;
         }
-
-        table.loc.len = creader.bytes_read - table.loc.pos;
     }
 }
 
@@ -91,7 +84,7 @@ fn parseCompileUnits(dw: *DwarfInfo, allocator: Allocator) !void {
         const cu = try dw.compile_units.addOne(allocator);
         cu.* = .{
             .header = undefined,
-            .loc = .{ .pos = creader.bytes_read, .len = 0 },
+            .pos = creader.bytes_read,
         };
 
         var length: u64 = try reader.readInt(u32, .little);
@@ -107,8 +100,6 @@ fn parseCompileUnits(dw: *DwarfInfo, allocator: Allocator) !void {
 
         const table = dw.abbrev_tables.get(cu.header.debug_abbrev_offset).?;
         try dw.parseDebugInfoEntry(allocator, cu, table, null, &creader);
-
-        cu.loc.len = creader.bytes_read - cu.loc.pos;
     }
 }
 
@@ -122,10 +113,7 @@ fn parseDebugInfoEntry(
 ) anyerror!void {
     while (creader.bytes_read < cu.nextCompileUnitOffset()) {
         const die = try cu.addDie(allocator);
-        cu.diePtr(die).* = .{
-            .code = undefined,
-            .loc = .{ .pos = creader.bytes_read, .len = 0 },
-        };
+        cu.diePtr(die).* = .{ .code = undefined };
         if (parent) |p| {
             try cu.diePtr(p).children.append(allocator, die);
         } else {
@@ -155,8 +143,6 @@ fn parseDebugInfoEntry(
             // Open scope
             try dw.parseDebugInfoEntry(allocator, cu, table, die, creader);
         }
-
-        cu.diePtr(die).loc.len = creader.bytes_read - cu.diePtr(die).loc.pos;
     }
 }
 
@@ -249,7 +235,6 @@ fn readOffset(format: Format, reader: anytype) !u64 {
 
 pub const AbbrevTable = struct {
     decls: std.AutoArrayHashMapUnmanaged(u64, Decl) = .{},
-    loc: Loc,
 
     pub fn deinit(table: *AbbrevTable, gpa: Allocator) void {
         for (table.decls.values()) |*decl| {
@@ -263,7 +248,6 @@ pub const AbbrevTable = struct {
         tag: u64,
         children: bool,
         attrs: std.AutoArrayHashMapUnmanaged(u64, Attr) = .{},
-        loc: Loc,
 
         pub fn deinit(decl: *Decl, gpa: Allocator) void {
             decl.attrs.deinit(gpa);
@@ -273,7 +257,6 @@ pub const AbbrevTable = struct {
     pub const Attr = struct {
         at: u64,
         form: u64,
-        loc: Loc,
 
         pub fn getFlag(attr: Attr, value: []const u8) ?bool {
             return switch (attr.form) {
@@ -366,7 +349,7 @@ pub const AbbrevTable = struct {
 
 pub const CompileUnit = struct {
     header: Header,
-    loc: Loc,
+    pos: usize,
     dies: std.ArrayListUnmanaged(DebugInfoEntry) = .{},
     children: std.ArrayListUnmanaged(usize) = .{},
 
@@ -401,7 +384,7 @@ pub const CompileUnit = struct {
     }
 
     pub fn nextCompileUnitOffset(cu: CompileUnit) u64 {
-        return cu.loc.pos + switch (cu.header.dw_format) {
+        return cu.pos + switch (cu.header.dw_format) {
             .dwarf32 => @as(u64, 4),
             .dwarf64 => 12,
         } + cu.header.length;
@@ -417,7 +400,6 @@ pub const CompileUnit = struct {
 
     pub const DebugInfoEntry = struct {
         code: u64,
-        loc: Loc,
         values: std.ArrayListUnmanaged([]const u8) = .{},
         children: std.ArrayListUnmanaged(usize) = .{},
 
@@ -426,11 +408,6 @@ pub const CompileUnit = struct {
             die.children.deinit(gpa);
         }
     };
-};
-
-pub const Loc = struct {
-    pos: usize,
-    len: usize,
 };
 
 pub const Format = enum {
