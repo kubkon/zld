@@ -45,7 +45,7 @@ pub fn getFile(self: Atom, macho_file: *MachO) File {
 pub fn getInputSection(self: Atom, macho_file: *MachO) macho.section_64 {
     return switch (self.getFile(macho_file)) {
         .internal => |x| x.sections.items[self.n_sect],
-        .object => |x| x.sections.items[self.n_sect],
+        .object => |x| x.sections.items(.header)[self.n_sect],
         else => unreachable,
     };
 }
