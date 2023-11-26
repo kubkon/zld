@@ -8,7 +8,8 @@ header: ?macho.mach_header_64 = null,
 sections: std.ArrayListUnmanaged(macho.section_64) = .{},
 symtab: std.ArrayListUnmanaged(macho.nlist_64) = .{},
 strtab: []const u8 = &[0]u8{},
-first_global: Symbol.Index = 0,
+iextdefsym: Symbol.Index = 0,
+iundefsym: Symbol.Index = 0,
 
 symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
 atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
@@ -59,6 +60,14 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
     try self.symtab.ensureUnusedCapacity(gpa, symtab.len);
     self.symtab.appendUnalignedSliceAssumeCapacity(symtab);
 
+    if (self.getLoadCommand(.DYSYMTAB)) |lc| {
+        const dysym_cmd = lc.cast(macho.dysymtab_command).?;
+        self.iextdefsym = dysym_cmd.iextdefsym;
+        self.iundefsym = dysym_cmd.iundefsym;
+    } else @panic("TODO no DYSYMTAB, work out iextdefsym and iundefsym");
+
+    try self.calcSymbolSizes(gpa);
+
     try self.initSectionAtoms(macho_file);
     try self.initSymbols(macho_file);
 
@@ -71,6 +80,25 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
 
     self.initPlatform();
     try self.initDwarfInfo(gpa);
+}
+
+fn calcSymbolSizes(self: *Object, allocator: Allocator) !void {
+    const SortedSymbol = struct {
+        index: u32,
+
+        fn lessThan(ctx: Object, lhs: @This(), rhs: @This()) bool {
+            const lhss = ctx.symtab.items[lhs.index];
+            const rhss = ctx.symtab.items[rhs.index];
+            if (lhss.n_value == rhss.n_value) {
+                if (lhss.n_sect == rhss.n_sect) {
+                    return lhss.n_strx < rhss.n_strx;
+                } else return lhss.n_sect < rhss.n_sect;
+            } else return lhss.n_value < rhss.n_value;
+        }
+    };
+
+    const symbols = try allocator.alloc(SortedSymbol, self.iundefsym);
+    defer allocator.free(symbols);
 }
 
 fn initSectionAtoms(self: *Object, macho_file: *MachO) !void {
@@ -118,15 +146,9 @@ fn addAtom(
 /// Otherwise, we sort the symbols and redo the relocation links.
 fn initSymbols(self: *Object, macho_file: *MachO) !void {
     const gpa = macho_file.base.allocator;
-
-    self.first_global = if (self.getLoadCommand(.DYSYMTAB)) |lc| blk: {
-        const cmd = lc.cast(macho.dysymtab_command).?;
-        break :blk cmd.ilocalsym + cmd.nlocalsym;
-    } else try self.sortSymbols(gpa);
-
     try self.symbols.ensureUnusedCapacity(gpa, self.symtab.items.len);
 
-    for (self.symtab.items[0..self.first_global], 0..) |local, i| {
+    for (self.symtab.items[0..self.iextdefsym], 0..) |local, i| {
         const index = try macho_file.addSymbol();
         self.symbols.appendAssumeCapacity(index);
         const symbol = macho_file.getSymbol(index);
@@ -140,7 +162,7 @@ fn initSymbols(self: *Object, macho_file: *MachO) !void {
         };
     }
 
-    for (self.symtab.items[self.first_global..]) |global| {
+    for (self.symtab.items[self.iextdefsym..]) |global| {
         const name = self.getString(global.n_strx);
         const off = try macho_file.string_intern.insert(gpa, name);
         const gop = try macho_file.getOrCreateGlobal(off);
@@ -323,7 +345,7 @@ fn initDwarfInfo(self: *Object, allocator: Allocator) !void {
 
 pub fn resolveSymbols(self: *Object, macho_file: *MachO) void {
     for (self.getGlobals(), 0..) |index, i| {
-        const nlist_idx = @as(Symbol.Index, @intCast(self.first_global + i));
+        const nlist_idx = @as(Symbol.Index, @intCast(self.iextdefsym + i));
         const nlist = self.symtab.items[nlist_idx];
 
         if (nlist.undf() and !nlist.tentative()) continue;
@@ -352,7 +374,7 @@ pub fn resolveSymbols(self: *Object, macho_file: *MachO) void {
 
 pub fn markLive(self: *Object, macho_file: *MachO) void {
     for (self.getGlobals(), 0..) |index, i| {
-        const nlist_idx = self.first_global + i;
+        const nlist_idx = self.iextdefsym + i;
         const nlist = self.symtab.items[nlist_idx];
         if (nlist.weakRef()) continue;
 
@@ -430,7 +452,7 @@ pub fn convertBoundarySymbols(self: *Object, macho_file: *MachO) !void {
     const gpa = macho_file.base.allocator;
 
     for (self.getGlobals(), 0..) |index, i| {
-        const nlist_idx = @as(Symbol.Index, @intCast(self.first_global + i));
+        const nlist_idx = @as(Symbol.Index, @intCast(self.iextdefsym + i));
         const nlist = &self.symtab.items[nlist_idx];
         if (!nlist.undf()) continue;
 
@@ -477,7 +499,7 @@ pub fn convertBoundarySymbols(self: *Object, macho_file: *MachO) !void {
 pub fn convertTentativeDefinitions(self: *Object, macho_file: *MachO) !void {
     const gpa = macho_file.base.allocator;
     for (self.getGlobals(), 0..) |index, i| {
-        const nlist_idx = @as(Symbol.Index, @intCast(self.first_global + i));
+        const nlist_idx = @as(Symbol.Index, @intCast(self.iextdefsym + i));
         const nlist = &self.symtab.items[nlist_idx];
         if (!nlist.tentative()) continue;
 
@@ -801,7 +823,7 @@ pub fn writeStabs(self: Object, macho_file: *MachO) void {
 
 pub fn claimUnresolved(self: Object, macho_file: *MachO) void {
     for (self.getGlobals(), 0..) |global_index, i| {
-        const nlist_idx = @as(Symbol.Index, @intCast(self.first_global + i));
+        const nlist_idx = @as(Symbol.Index, @intCast(self.iextdefsym + i));
         const nlist = self.symtab.items[nlist_idx];
         if (!nlist.undf()) continue;
 
@@ -852,11 +874,11 @@ pub fn hasDebugInfo(self: Object) bool {
 }
 
 pub fn getLocals(self: Object) []const Symbol.Index {
-    return self.symbols.items[0..self.first_global];
+    return self.symbols.items[0..self.iextdefsym];
 }
 
 pub fn getGlobals(self: Object) []const Symbol.Index {
-    return self.symbols.items[self.first_global..];
+    return self.symbols.items[self.iextdefsym..];
 }
 
 pub fn asFile(self: *Object) File {
