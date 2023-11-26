@@ -205,7 +205,9 @@ fn reportUndefSymbol(self: Atom, rel: macho.relocation_info, macho_file: *MachO)
     };
     const sym = macho_file.getSymbol(sym_index);
     const s_rel_sym = switch (file) {
-        inline else => |x| x.symtab.items[rel.r_symbolnum],
+        .internal => |x| x.symtab.items[rel.r_symbolnum],
+        .object => |x| x.symtab.items(.nlist)[rel.r_symbolnum],
+        else => unreachable,
     };
 
     const nlist = sym.getNlist(macho_file);

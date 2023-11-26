@@ -3,9 +3,6 @@
 /// Allocated address value of this symbol.
 value: u64 = 0,
 
-/// Size of the symbol.
-size: u64 = 0,
-
 /// Offset into the linker's intern table.
 name: u32 = 0,
 
@@ -68,8 +65,15 @@ pub fn getFile(symbol: Symbol, macho_file: *MachO) ?File {
 pub fn getNlist(symbol: Symbol, macho_file: *MachO) macho.nlist_64 {
     const file = symbol.getFile(macho_file).?;
     return switch (file) {
+        .object => |x| x.symtab.items(.nlist)[symbol.nlist_idx],
         inline else => |x| x.symtab.items[symbol.nlist_idx],
     };
+}
+
+pub fn getSize(symbol: Symbol, macho_file: *MachO) u64 {
+    const file = symbol.getFile(macho_file).?;
+    assert(file == .object);
+    return file.object.symtab.items(.size)[symbol.nlist_idx];
 }
 
 pub fn getDylibOrdinal(symbol: Symbol, macho_file: *MachO) ?u16 {
