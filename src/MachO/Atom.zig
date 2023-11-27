@@ -224,6 +224,10 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
         const seg = macho_file.segments.items[seg_id];
         const sym = if (rel.tag == .@"extern") rel.getTargetSymbol(macho_file) else null;
 
+        if (sym) |s| {
+            if (s.getNlist(macho_file).undf() and !s.flags.import) continue;
+        }
+
         const P = @as(i64, @intCast(self.value)) + rel.offset;
         const A = switch (rel.meta.length) {
             0 => code[rel.offset],

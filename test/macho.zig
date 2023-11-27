@@ -31,7 +31,8 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testFatArchive(b, opts));
     // macho_step.dependOn(testFatDylib(b, opts)); // TODO arm64 support
     macho_step.dependOn(testHeaderpad(b, opts));
-    macho_step.dependOn(testHello(b, opts));
+    macho_step.dependOn(testHelloC(b, opts));
+    macho_step.dependOn(testHelloZig(b, opts));
     macho_step.dependOn(testLayout(b, opts));
     macho_step.dependOn(testNeededFramework(b, opts));
     macho_step.dependOn(testNeededLibrary(b, opts));
@@ -571,11 +572,35 @@ fn testHeaderpad(b: *Build, opts: Options) *Step {
     return test_step;
 }
 
-fn testHello(b: *Build, opts: Options) *Step {
-    const test_step = b.step("test-macho-hello", "");
+fn testHelloC(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-hello-c", "");
 
     const exe = cc(b, opts);
     exe.addHelloWorldMain();
+
+    const run = exe.run();
+    run.expectHelloWorld();
+    test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+fn testHelloZig(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-hello-zig", "");
+
+    if (!opts.has_zig) return skipTestStep(test_step);
+
+    const obj = zig(b);
+    obj.addZigSource(
+        \\const std = @import("std");
+        \\pub fn main() void {
+        \\    std.io.getStdOut().writer().print("Hello world!\n", .{}) catch unreachable;
+        \\}
+    );
+    obj.addArg("-fno-stack-check"); // TODO find a way to include Zig's crt
+
+    const exe = cc(b, opts);
+    exe.addFileSource(obj.out);
 
     const run = exe.run();
     run.expectHelloWorld();
