@@ -276,8 +276,7 @@ pub fn flush(self: *MachO) !void {
     try self.allocateSections();
     self.allocateSegments();
     self.allocateAtoms();
-    self.allocateLocals();
-    self.allocateGlobals();
+    self.allocateSymbols();
     self.allocateSyntheticSymbols();
 
     state_log.debug("{}", .{self.dumpState()});
@@ -952,10 +951,11 @@ fn convertBoundarySymbols(self: *MachO) !void {
 fn markImportsAndExports(self: *MachO) void {
     if (!self.options.dylib)
         for (self.dylibs.items) |index| {
-            for (self.getFile(index).?.getGlobals()) |global_index| {
-                const global = self.getSymbol(global_index);
-                const file = global.getFile(self) orelse continue;
-                if (file != .dylib and !global.getNlist(self).pext()) global.flags.@"export" = true;
+            for (self.getFile(index).?.getSymbols()) |sym_index| {
+                const sym = self.getSymbol(sym_index);
+                const file = sym.getFile(self) orelse continue;
+                if (!sym.getNlist(self).ext()) continue;
+                if (file != .dylib and !sym.getNlist(self).pext()) sym.flags.@"export" = true;
             }
         };
 
@@ -973,16 +973,17 @@ fn markImportsAndExports(self: *MachO) void {
 }
 
 fn markImportsAndExportsInFile(self: *MachO, index: File.Index) void {
-    for (self.getFile(index).?.getGlobals()) |global_index| {
-        const global = self.getSymbol(global_index);
-        const file = global.getFile(self) orelse continue;
-        if (global.getNlist(self).pext()) continue;
-        if (file == .dylib and !global.isAbs(self)) {
-            global.flags.import = true;
+    for (self.getFile(index).?.getSymbols()) |sym_index| {
+        const sym = self.getSymbol(sym_index);
+        const file = sym.getFile(self) orelse continue;
+        if (!sym.getNlist(self).ext()) continue;
+        if (sym.getNlist(self).pext()) continue;
+        if (file == .dylib and !sym.isAbs(self)) {
+            sym.flags.import = true;
             continue;
         }
         if (file.getIndex() == index) {
-            global.flags.@"export" = true;
+            sym.flags.@"export" = true;
         }
     }
 }
@@ -1493,51 +1494,40 @@ fn allocateAtoms(self: *MachO) void {
     }
 }
 
-fn allocateLocals(self: *MachO) void {
+fn allocateSymbols(self: *MachO) void {
     for (self.objects.items) |index| {
-        for (self.getFile(index).?.object.getLocals()) |local_index| {
-            const local = self.getSymbol(local_index);
-            const atom = local.getAtom(self) orelse continue;
+        for (self.getFile(index).?.getSymbols()) |sym_index| {
+            const sym = self.getSymbol(sym_index);
+            const atom = sym.getAtom(self) orelse continue;
             if (!atom.flags.alive) continue;
-            local.value += atom.value;
-            local.out_n_sect = atom.out_n_sect;
-        }
-    }
-}
+            if (sym.getFile(self).?.getIndex() != index) continue;
 
-fn allocateGlobals(self: *MachO) void {
-    for (self.objects.items) |index| {
-        for (self.getFile(index).?.getGlobals()) |global_index| {
-            const global = self.getSymbol(global_index);
-            const atom = global.getAtom(self) orelse continue;
-            if (!atom.flags.alive) continue;
-            if (global.getFile(self).?.getIndex() != index) continue;
+            sym.out_n_sect = atom.out_n_sect;
 
-            global.out_n_sect = atom.out_n_sect;
-
-            if (global.flags.boundary) {
-                const info: Symbol.BoundaryInfo = @bitCast(global.getExtra(self).?.boundary);
+            if (sym.flags.boundary) {
+                const info: Symbol.BoundaryInfo = @bitCast(sym.getExtra(self).?.boundary);
                 if (info.segment) {
-                    const seg_id = self.sections.items(.segment_id)[global.out_n_sect];
+                    const seg_id = self.sections.items(.segment_id)[sym.out_n_sect];
                     const seg = self.segments.items[seg_id];
-                    global.value = if (info.start) seg.vmaddr else seg.vmaddr + seg.vmsize;
+                    sym.value = if (info.start) seg.vmaddr else seg.vmaddr + seg.vmsize;
                 } else {
-                    const sect = self.sections.items(.header)[global.out_n_sect];
-                    global.value = if (info.start) sect.addr else sect.addr + sect.size;
+                    const sect = self.sections.items(.header)[sym.out_n_sect];
+                    sym.value = if (info.start) sect.addr else sect.addr + sect.size;
                 }
             } else {
-                global.value += atom.value;
+                sym.value += atom.value;
             }
         }
     }
+
     if (self.getInternalObject()) |internal| {
-        for (internal.getGlobals()) |global_index| {
-            const global = self.getSymbol(global_index);
-            const atom = global.getAtom(self) orelse continue;
+        for (internal.asFile().getSymbols()) |sym_index| {
+            const sym = self.getSymbol(sym_index);
+            const atom = sym.getAtom(self) orelse continue;
             if (!atom.flags.alive) continue;
-            if (global.getFile(self).?.getIndex() != internal.index) continue;
-            global.value += atom.value;
-            global.out_n_sect = atom.out_n_sect;
+            if (sym.getFile(self).?.getIndex() != internal.index) continue;
+            sym.value += atom.value;
+            sym.out_n_sect = atom.out_n_sect;
         }
     }
 }
@@ -1597,36 +1587,36 @@ fn initExportTrie(self: *MachO) !void {
     const seg = self.segments.items[seg_id];
 
     for (self.objects.items) |index| {
-        for (self.getFile(index).?.getGlobals()) |global_index| {
-            const global = self.getSymbol(global_index);
-            if (global.getAtom(self)) |atom| if (!atom.flags.alive) continue;
-            if (global.getFile(self).?.getIndex() != index) continue;
-            if (!global.flags.@"export") continue;
+        for (self.getFile(index).?.getSymbols()) |sym_index| {
+            const sym = self.getSymbol(sym_index);
+            if (!sym.flags.@"export") continue;
+            if (sym.getAtom(self)) |atom| if (!atom.flags.alive) continue;
+            if (sym.getFile(self).?.getIndex() != index) continue;
             var flags: u64 = macho.EXPORT_SYMBOL_FLAGS_KIND_REGULAR;
-            if (global.isAbs(self)) {
+            if (sym.isAbs(self)) {
                 flags |= macho.EXPORT_SYMBOL_FLAGS_KIND_ABSOLUTE;
             } else {
-                const out_sect = self.sections.items(.header)[global.out_n_sect];
+                const out_sect = self.sections.items(.header)[sym.out_n_sect];
                 if (out_sect.type() == macho.S_THREAD_LOCAL_VARIABLES) {
                     flags |= macho.EXPORT_SYMBOL_FLAGS_KIND_THREAD_LOCAL;
                 }
             }
             try self.export_trie.put(gpa, .{
-                .name = global.getName(self),
-                .vmaddr_offset = global.getAddress(.{}, self) - seg.vmaddr,
+                .name = sym.getName(self),
+                .vmaddr_offset = sym.getAddress(.{}, self) - seg.vmaddr,
                 .export_flags = flags,
             });
         }
     }
     if (self.getInternalObject()) |internal| {
-        for (internal.getGlobals()) |global_index| {
-            const global = self.getSymbol(global_index);
-            if (global.getAtom(self)) |atom| if (!atom.flags.alive) continue;
-            if (global.getFile(self).?.getIndex() != internal.index) continue;
-            if (!global.flags.@"export") continue;
+        for (internal.asFile().getSymbols()) |sym_index| {
+            const sym = self.getSymbol(sym_index);
+            if (!sym.flags.@"export") continue;
+            if (sym.getAtom(self)) |atom| if (!atom.flags.alive) continue;
+            if (sym.getFile(self).?.getIndex() != internal.index) continue;
             try self.export_trie.put(gpa, .{
-                .name = global.getName(self),
-                .vmaddr_offset = global.getAddress(.{}, self) - seg.vmaddr,
+                .name = sym.getName(self),
+                .vmaddr_offset = sym.getAddress(.{}, self) - seg.vmaddr,
                 .export_flags = macho.EXPORT_SYMBOL_FLAGS_KIND_REGULAR,
             });
         }

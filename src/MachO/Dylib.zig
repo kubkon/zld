@@ -352,7 +352,7 @@ fn initPlatform(self: *Dylib) void {
 }
 
 pub fn resolveSymbols(self: *Dylib, macho_file: *MachO) void {
-    for (self.getGlobals(), 0..) |index, i| {
+    for (self.symbols.items, 0..) |index, i| {
         const nlist_idx = @as(Symbol.Index, @intCast(i));
         const nlist = self.symtab.items[nlist_idx];
 
@@ -366,6 +366,16 @@ pub fn resolveSymbols(self: *Dylib, macho_file: *MachO) void {
             global.file = self.index;
             global.flags.weak = nlist.weakDef() or nlist.pext();
         }
+    }
+}
+
+pub fn resetGlobals(self: *Dylib, macho_file: *MachO) void {
+    for (self.symbols.items, 0..) |sym_index, nlist_idx| {
+        if (!self.symtab.items[nlist_idx].ext()) continue;
+        const sym = macho_file.getSymbol(sym_index);
+        const name = sym.name;
+        sym.* = .{};
+        sym.name = name;
     }
 }
 
@@ -388,7 +398,7 @@ pub fn markLive(self: *Dylib, macho_file: *MachO) void {
 }
 
 pub fn calcSymtabSize(self: *Dylib, macho_file: *MachO) !void {
-    for (self.getGlobals()) |global_index| {
+    for (self.symbols.items) |global_index| {
         const global = macho_file.getSymbol(global_index);
         const file_ptr = global.getFile(macho_file) orelse continue;
         if (file_ptr.getIndex() != self.index) continue;
@@ -402,7 +412,7 @@ pub fn calcSymtabSize(self: *Dylib, macho_file: *MachO) !void {
 }
 
 pub fn writeSymtab(self: Dylib, macho_file: *MachO) void {
-    for (self.getGlobals()) |global_index| {
+    for (self.symbols.items) |global_index| {
         const global = macho_file.getSymbol(global_index);
         const file = global.getFile(macho_file) orelse continue;
         if (file.getIndex() != self.index) continue;
@@ -435,10 +445,6 @@ fn insertString(self: *Dylib, allocator: Allocator, name: []const u8) !u32 {
 inline fn getString(self: Dylib, off: u32) [:0]const u8 {
     assert(off < self.strtab.items.len);
     return mem.sliceTo(@as([*:0]const u8, @ptrCast(self.strtab.items.ptr + off)), 0);
-}
-
-pub inline fn getGlobals(self: Dylib) []const Symbol.Index {
-    return self.symbols.items;
 }
 
 pub fn asFile(self: *Dylib) File {
@@ -480,7 +486,7 @@ fn formatSymtab(
     _ = options;
     const dylib = ctx.dylib;
     try writer.writeAll("  globals\n");
-    for (dylib.getGlobals()) |index| {
+    for (dylib.symbols.items) |index| {
         const global = ctx.macho_file.getSymbol(index);
         try writer.print("    {}\n", .{global.fmt(ctx.macho_file)});
     }

@@ -112,7 +112,7 @@ fn addNlist(self: *InternalObject, allocator: Allocator) !Symbol.Index {
 }
 
 pub fn resolveSymbols(self: *InternalObject, macho_file: *MachO) void {
-    for (self.getGlobals(), 0..) |index, i| {
+    for (self.symbols.items, 0..) |index, i| {
         const nlist_idx = @as(Symbol.Index, @intCast(i));
         const nlist = self.symtab.items[nlist_idx];
 
@@ -130,8 +130,18 @@ pub fn resolveSymbols(self: *InternalObject, macho_file: *MachO) void {
     }
 }
 
+pub fn resetGlobals(self: *InternalObject, macho_file: *MachO) void {
+    for (self.symbols.items, 0..) |sym_index, nlist_idx| {
+        if (!self.symtab.items[nlist_idx].ext()) continue;
+        const sym = macho_file.getSymbol(sym_index);
+        const name = sym.name;
+        sym.* = .{};
+        sym.name = name;
+    }
+}
+
 pub fn calcSymtabSize(self: *InternalObject, macho_file: *MachO) !void {
-    for (self.getGlobals()) |global_index| {
+    for (self.symbols.items) |global_index| {
         const global = macho_file.getSymbol(global_index);
         const file = global.getFile(macho_file) orelse continue;
         if (file.getIndex() != self.index) continue;
@@ -151,7 +161,7 @@ pub fn calcSymtabSize(self: *InternalObject, macho_file: *MachO) !void {
 }
 
 pub fn writeSymtab(self: InternalObject, macho_file: *MachO) void {
-    for (self.getGlobals()) |global_index| {
+    for (self.symbols.items) |global_index| {
         const global = macho_file.getSymbol(global_index);
         const file = global.getFile(macho_file) orelse continue;
         if (file.getIndex() != self.index) continue;
@@ -167,10 +177,6 @@ pub fn writeSymtab(self: InternalObject, macho_file: *MachO) void {
 
 pub fn asFile(self: *InternalObject) File {
     return .{ .internal = self };
-}
-
-pub inline fn getGlobals(self: InternalObject) []const Symbol.Index {
-    return self.symbols.items;
 }
 
 fn insertString(self: *InternalObject, allocator: Allocator, name: []const u8) !u32 {
@@ -234,7 +240,7 @@ fn formatSymtab(
     _ = unused_fmt_string;
     _ = options;
     try writer.writeAll("  globals\n");
-    for (ctx.self.getGlobals()) |index| {
+    for (ctx.self.symbols.items) |index| {
         const global = ctx.macho_file.getSymbol(index);
         try writer.print("    {}\n", .{global.fmt(ctx.macho_file)});
     }

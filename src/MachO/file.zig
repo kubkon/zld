@@ -35,11 +35,8 @@ pub const File = union(enum) {
     }
 
     pub fn resetGlobals(file: File, macho_file: *MachO) void {
-        for (file.getGlobals()) |global_index| {
-            const global = macho_file.getSymbol(global_index);
-            const name = global.name;
-            global.* = .{};
-            global.name = name;
+        switch (file) {
+            inline else => |x| x.resetGlobals(macho_file),
         }
     }
 
@@ -79,16 +76,9 @@ pub const File = union(enum) {
         }
     }
 
-    pub fn getLocals(file: File) []const Symbol.Index {
+    pub fn getSymbols(file: File) []const Symbol.Index {
         return switch (file) {
-            .object => |x| x.getLocals(),
-            inline else => &[0]Symbol.Index{},
-        };
-    }
-
-    pub fn getGlobals(file: File) []const Symbol.Index {
-        return switch (file) {
-            inline else => |x| x.getGlobals(),
+            inline else => |x| x.symbols.items,
         };
     }
 
