@@ -30,12 +30,14 @@ pub const File = union(enum) {
 
     pub fn resolveSymbols(file: File, macho_file: *MachO) void {
         switch (file) {
+            .internal => unreachable,
             inline else => |x| x.resolveSymbols(macho_file),
         }
     }
 
     pub fn resetGlobals(file: File, macho_file: *MachO) void {
         switch (file) {
+            .internal => unreachable,
             inline else => |x| x.resetGlobals(macho_file),
         }
     }

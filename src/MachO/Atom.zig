@@ -35,43 +35,30 @@ pub fn getName(self: Atom, macho_file: *MachO) [:0]const u8 {
     return macho_file.string_intern.getAssumeExists(self.name);
 }
 
-pub fn getFile(self: Atom, macho_file: *MachO) File {
-    return macho_file.getFile(self.file).?;
+pub fn getObject(self: Atom, macho_file: *MachO) *Object {
+    return macho_file.getFile(self.file).?.object;
 }
 
 pub fn getInputSection(self: Atom, macho_file: *MachO) macho.section_64 {
-    return switch (self.getFile(macho_file)) {
-        .internal => |x| x.sections.items[self.n_sect],
-        .object => |x| x.sections.items(.header)[self.n_sect],
-        else => unreachable,
-    };
+    const object = self.getObject(macho_file);
+    return object.sections.items(.header)[self.n_sect];
 }
 
 pub fn getPriority(self: Atom, macho_file: *MachO) u64 {
-    const file = self.getFile(macho_file);
-    return (@as(u64, @intCast(file.getIndex())) << 32) | @as(u64, @intCast(self.n_sect));
+    const object = self.getObject(macho_file);
+    return (@as(u64, @intCast(object.index)) << 32) | @as(u64, @intCast(self.n_sect));
 }
 
 pub fn getCode(self: Atom, macho_file: *MachO) []const u8 {
-    switch (self.getFile(macho_file)) {
-        .internal => |x| return x.code.items[self.off..][0..self.size],
-        .object => |x| {
-            const in_sect = self.getInputSection(macho_file);
-            return x.data[in_sect.offset + self.off ..][0..self.size];
-        },
-        else => unreachable,
-    }
+    const object = self.getObject(macho_file);
+    const in_sect = self.getInputSection(macho_file);
+    return object.data[in_sect.offset + self.off ..][0..self.size];
 }
 
 pub fn getRelocs(self: Atom, macho_file: *MachO) []const Object.Relocation {
-    return switch (self.getFile(macho_file)) {
-        .internal => &[0]Object.Relocation{},
-        .object => |x| {
-            const relocs = x.sections.items(.relocs)[self.n_sect];
-            return relocs.items[self.relocs.pos..][0..self.relocs.len];
-        },
-        else => unreachable,
-    };
+    const object = self.getObject(macho_file);
+    const relocs = object.sections.items(.relocs)[self.n_sect];
+    return relocs.items[self.relocs.pos..][0..self.relocs.len];
 }
 
 pub fn initOutputSection(sect: macho.section_64, macho_file: *MachO) !u8 {
@@ -133,15 +120,19 @@ pub fn initOutputSection(sect: macho.section_64, macho_file: *MachO) !u8 {
             else => break :blk .{ sect.segName(), sect.sectName(), sect.flags },
         }
     };
-    return macho_file.getSectionByName(segname, sectname) orelse try macho_file.addSection(
+    const osec = macho_file.getSectionByName(segname, sectname) orelse try macho_file.addSection(
         segname,
         sectname,
         .{ .flags = flags },
     );
+    if (mem.eql(u8, segname, "__DATA") and mem.eql(u8, sectname, "__data")) {
+        macho_file.data_sect_index = osec;
+    }
+    return osec;
 }
 
 pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
-    const file = self.getFile(macho_file);
+    const object = self.getObject(macho_file);
     const relocs = self.getRelocs(macho_file);
 
     for (relocs) |rel| {
@@ -172,14 +163,14 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
                 if (rel.tag == .@"extern") {
                     const symbol = rel.getTargetSymbol(macho_file);
                     if (symbol.flags.import) {
-                        file.object.num_bind_relocs += 1;
+                        object.num_bind_relocs += 1;
                         continue;
                     } else if (symbol.isTlvInit(macho_file)) {
                         macho_file.has_tlv = true;
                         continue;
                     }
                 }
-                file.object.num_rebase_relocs += 1;
+                object.num_rebase_relocs += 1;
             },
 
             else => {},

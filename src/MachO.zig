@@ -31,6 +31,7 @@ undefined_symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
 
 pagezero_seg_index: ?u8 = null,
 linkedit_seg_index: ?u8 = null,
+data_sect_index: ?u8 = null,
 got_sect_index: ?u8 = null,
 stubs_sect_index: ?u8 = null,
 stubs_helper_sect_index: ?u8 = null,
@@ -38,6 +39,7 @@ la_symbol_ptr_sect_index: ?u8 = null,
 tlv_ptr_sect_index: ?u8 = null,
 
 mh_execute_header_index: ?Symbol.Index = null,
+mh_dylib_header_index: ?Symbol.Index = null,
 dyld_private_index: ?Symbol.Index = null,
 dyld_stub_binder_index: ?Symbol.Index = null,
 dso_handle_index: ?Symbol.Index = null,
@@ -253,6 +255,8 @@ pub fn flush(self: *MachO) !void {
         self.getFile(index).?.dylib.ordinal = @intCast(ord);
     }
 
+    try self.resolveSyntheticSymbols();
+
     // TODO kill __eh_frame atoms
 
     try self.convertTentativeDefinitions();
@@ -261,7 +265,6 @@ pub fn flush(self: *MachO) !void {
 
     // TODO dead strip atoms
 
-    try self.resolveSyntheticSymbols();
     try self.initOutputSections();
 
     self.claimUnresolved();
@@ -960,7 +963,19 @@ fn markImportsAndExports(self: *MachO) void {
         };
 
     for (self.objects.items) |index| {
-        self.markImportsAndExportsInFile(index);
+        for (self.getFile(index).?.getSymbols()) |sym_index| {
+            const sym = self.getSymbol(sym_index);
+            const file = sym.getFile(self) orelse continue;
+            if (!sym.getNlist(self).ext()) continue;
+            if (sym.getNlist(self).pext()) continue;
+            if (file == .dylib and !sym.isAbs(self)) {
+                sym.flags.import = true;
+                continue;
+            }
+            if (file.getIndex() == index) {
+                sym.flags.@"export" = true;
+            }
+        }
     }
 
     for (self.undefined_symbols.items) |index| {
@@ -968,22 +983,6 @@ fn markImportsAndExports(self: *MachO) void {
         if (sym.getFile(self)) |file| {
             if (sym.getNlist(self).pext()) continue;
             if (file == .dylib and !sym.isAbs(self)) sym.flags.import = true;
-        }
-    }
-}
-
-fn markImportsAndExportsInFile(self: *MachO, index: File.Index) void {
-    for (self.getFile(index).?.getSymbols()) |sym_index| {
-        const sym = self.getSymbol(sym_index);
-        const file = sym.getFile(self) orelse continue;
-        if (!sym.getNlist(self).ext()) continue;
-        if (sym.getNlist(self).pext()) continue;
-        if (file == .dylib and !sym.isAbs(self)) {
-            sym.flags.import = true;
-            continue;
-        }
-        if (file.getIndex() == index) {
-            sym.flags.@"export" = true;
         }
     }
 }
@@ -997,24 +996,26 @@ fn initOutputSections(self: *MachO) !void {
             atom.out_n_sect = try Atom.initOutputSection(atom.getInputSection(self), self);
         }
     }
-    if (self.getInternalObject()) |internal| {
-        for (internal.atoms.items) |atom_index| {
-            const atom = self.getAtom(atom_index) orelse continue;
-            if (!atom.flags.alive) continue;
-            atom.out_n_sect = try Atom.initOutputSection(atom.getInputSection(self), self);
-        }
+    if (self.data_sect_index == null) {
+        self.data_sect_index = try self.addSection("__DATA", "__data", .{});
     }
 }
 
 fn resolveSyntheticSymbols(self: *MachO) !void {
     const internal = self.getInternalObject() orelse return;
-    try internal.init(self);
-    internal.resolveSymbols(self);
-    self.markImportsAndExportsInFile(internal.index);
 
-    self.mh_execute_header_index = self.getGlobalByName("__mh_execute_header");
-    self.dso_handle_index = self.getGlobalByName("__dso_handle");
-    self.dyld_private_index = self.getGlobalByName("dyld_private");
+    if (!self.options.dylib) {
+        self.mh_execute_header_index = try internal.addSymbol("__mh_execute_header", self);
+        const sym = self.getSymbol(self.mh_execute_header_index.?);
+        sym.flags.@"export" = true;
+        const nlist = &internal.symtab.items[sym.nlist_idx];
+        nlist.n_desc = macho.REFERENCED_DYNAMICALLY;
+    } else if (self.options.dylib) {
+        self.mh_dylib_header_index = try internal.addSymbol("__mh_dylib_header", self);
+    }
+
+    self.dso_handle_index = try internal.addSymbol("___dso_handle", self);
+    self.dyld_private_index = try internal.addSymbol("dyld_private", self);
 }
 
 fn claimUnresolved(self: *MachO) void {
@@ -1082,8 +1083,8 @@ fn reportUndefs(self: *MachO) !void {
         var inote: usize = 0;
         while (inote < @min(notes.items.len, max_notes)) : (inote += 1) {
             const atom = self.getAtom(notes.items[inote]).?;
-            const file = atom.getFile(self);
-            try err.addNote("referenced by {}:{s}", .{ file.fmtPath(), atom.getName(self) });
+            const object = atom.getObject(self);
+            try err.addNote("referenced by {}:{s}", .{ object.fmtPath(), atom.getName(self) });
         }
 
         if (notes.items.len > max_notes) {
@@ -1223,15 +1224,9 @@ fn sortSections(self: *MachO) !void {
             atom.out_n_sect = backlinks[atom.out_n_sect];
         }
     }
-    if (self.getInternalObject()) |internal| {
-        for (internal.atoms.items) |atom_index| {
-            const atom = self.getAtom(atom_index) orelse continue;
-            if (!atom.flags.alive) continue;
-            atom.out_n_sect = backlinks[atom.out_n_sect];
-        }
-    }
 
     for (&[_]*?u8{
+        &self.data_sect_index,
         &self.got_sect_index,
         &self.stubs_sect_index,
         &self.stubs_helper_sect_index,
@@ -1253,14 +1248,6 @@ pub fn addAtomsToSections(self: *MachO) !void {
             try atoms.append(self.base.allocator, atom_index);
         }
     }
-    if (self.getInternalObject()) |internal| {
-        for (internal.atoms.items) |atom_index| {
-            const atom = self.getAtom(atom_index) orelse continue;
-            if (!atom.flags.alive) continue;
-            const atoms = &self.sections.items(.atoms)[atom.out_n_sect];
-            try atoms.append(self.base.allocator, atom_index);
-        }
-    }
 }
 
 fn calcSectionSizes(self: *MachO) !void {
@@ -1270,13 +1257,20 @@ fn calcSectionSizes(self: *MachO) !void {
     const cpu_arch = self.options.cpu_arch.?;
 
     const slice = self.sections.slice();
-    for (slice.items(.header), slice.items(.atoms)) |*header, atoms| {
+    for (slice.items(.header), slice.items(.atoms), 0..) |*header, atoms, idx| {
         if (atoms.items.len == 0) continue;
 
         // TODO
         // if (self.requiresThunks()) {
         //     if (header.isCode()) continue;
         // }
+
+        if (self.data_sect_index) |didx| {
+            if (didx == idx) {
+                header.size += @sizeOf(u64);
+                header.@"align" = 3;
+            }
+        }
 
         for (atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index).?;
@@ -1519,30 +1513,28 @@ fn allocateSymbols(self: *MachO) void {
             }
         }
     }
-
-    if (self.getInternalObject()) |internal| {
-        for (internal.asFile().getSymbols()) |sym_index| {
-            const sym = self.getSymbol(sym_index);
-            const atom = sym.getAtom(self) orelse continue;
-            if (!atom.flags.alive) continue;
-            if (sym.getFile(self).?.getIndex() != internal.index) continue;
-            sym.value += atom.value;
-            sym.out_n_sect = atom.out_n_sect;
-        }
-    }
 }
 
 fn allocateSyntheticSymbols(self: *MachO) void {
-    const text_seg = self.segments.items[self.getSegmentByName("__TEXT").?];
-
     if (self.mh_execute_header_index) |index| {
+        const text_seg = self.segments.items[self.getSegmentByName("__TEXT").?];
         const global = self.getSymbol(index);
         global.value = text_seg.vmaddr;
     }
 
-    if (self.dso_handle_index) |index| {
-        const global = self.getSymbol(index);
-        global.value = text_seg.vmaddr;
+    if (self.data_sect_index) |idx| {
+        const sect = self.sections.items(.header)[idx];
+        for (&[_]?Symbol.Index{
+            self.dso_handle_index,
+            self.mh_dylib_header_index,
+            self.dyld_private_index,
+        }) |maybe_index| {
+            if (maybe_index) |index| {
+                const global = self.getSymbol(index);
+                global.value = sect.addr;
+                global.out_n_sect = idx;
+            }
+        }
     }
 }
 
@@ -1608,18 +1600,14 @@ fn initExportTrie(self: *MachO) !void {
             });
         }
     }
-    if (self.getInternalObject()) |internal| {
-        for (internal.asFile().getSymbols()) |sym_index| {
-            const sym = self.getSymbol(sym_index);
-            if (!sym.flags.@"export") continue;
-            if (sym.getAtom(self)) |atom| if (!atom.flags.alive) continue;
-            if (sym.getFile(self).?.getIndex() != internal.index) continue;
-            try self.export_trie.put(gpa, .{
-                .name = sym.getName(self),
-                .vmaddr_offset = sym.getAddress(.{}, self) - seg.vmaddr,
-                .export_flags = macho.EXPORT_SYMBOL_FLAGS_KIND_REGULAR,
-            });
-        }
+
+    if (self.mh_execute_header_index) |index| {
+        const sym = self.getSymbol(index);
+        try self.export_trie.put(gpa, .{
+            .name = sym.getName(self),
+            .vmaddr_offset = sym.getAddress(.{}, self) - seg.vmaddr,
+            .export_flags = macho.EXPORT_SYMBOL_FLAGS_KIND_REGULAR,
+        });
     }
 }
 
@@ -2320,7 +2308,7 @@ fn fmtDumpState(
     }
     if (self.getInternalObject()) |internal| {
         try writer.print("internal({d}) : internal\n", .{internal.index});
-        try writer.print("{}{}\n", .{ internal.fmtAtoms(self), internal.fmtSymtab(self) });
+        try writer.print("{}\n", .{internal.fmtSymtab(self)});
     }
     try writer.print("stubs\n{}\n", .{self.stubs.fmt(self)});
     try writer.print("got\n{}\n", .{self.got.fmt(self)});
