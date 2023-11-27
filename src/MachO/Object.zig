@@ -11,12 +11,10 @@ strtab: []const u8 = &[0]u8{},
 iextdefsym: Symbol.Index = 0,
 iundefsym: Symbol.Index = 0,
 
+sorted_symtab: std.ArrayListUnmanaged(Symbol.Index) = .{},
 symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
 atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
 
-/// All relocations sorted and flatened, sorted by address ascending
-/// per section.
-relocations: std.ArrayListUnmanaged(macho.relocation_info) = .{},
 data_in_code: std.ArrayListUnmanaged(macho.data_in_code_entry) = .{},
 platform: ?MachO.Options.Platform = null,
 dwarf_info: ?DwarfInfo = null,
@@ -30,8 +28,8 @@ output_symtab_ctx: MachO.SymtabCtx = .{},
 pub fn deinit(self: *Object, gpa: Allocator) void {
     self.symtab.deinit(gpa);
     self.symbols.deinit(gpa);
+    self.sorted_symtab.deinit(gpa);
     self.atoms.deinit(gpa);
-    self.relocations.deinit(gpa);
     self.data_in_code.deinit(gpa);
     if (self.dwarf_info) |*dw| dw.deinit(gpa);
 }
@@ -46,179 +44,80 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
 
     self.header = try reader.readStruct(macho.mach_header_64);
 
-    const lc_seg = self.getLoadCommand(.SEGMENT_64) orelse return;
-    const sections = lc_seg.getSections();
-    try self.sections.ensureUnusedCapacity(gpa, sections.len);
-    for (sections) |sect| {
-        self.sections.appendAssumeCapacity(.{
-            .header = sect,
-        });
+    if (self.getLoadCommand(.SEGMENT_64)) |lc| {
+        const sections = lc.getSections();
+        try self.sections.ensureUnusedCapacity(gpa, sections.len);
+        for (sections) |sect| {
+            const index = try self.sections.addOne(gpa);
+            self.sections.set(index, .{ .header = sect });
+        }
     }
-    try self.initRelocs(gpa);
+    if (self.getLoadCommand(.SYMTAB)) |lc| {
+        const cmd = lc.cast(macho.symtab_command).?;
+        self.strtab = self.data[cmd.stroff..][0..cmd.strsize];
 
-    const lc_symtab = self.getLoadCommand(.SYMTAB) orelse return;
-    const cmd = lc_symtab.cast(macho.symtab_command).?;
-
-    self.strtab = self.data[cmd.stroff..][0..cmd.strsize];
-
-    const symtab = @as([*]align(1) const macho.nlist_64, @ptrCast(self.data.ptr + cmd.symoff))[0..cmd.nsyms];
-    try self.symtab.ensureUnusedCapacity(gpa, symtab.len);
-    for (symtab) |nlist| {
-        self.symtab.appendAssumeCapacity(.{
-            .nlist = nlist,
-            .size = 0,
-        });
+        const symtab = @as([*]align(1) const macho.nlist_64, @ptrCast(self.data.ptr + cmd.symoff))[0..cmd.nsyms];
+        try self.symtab.ensureUnusedCapacity(gpa, symtab.len);
+        for (symtab) |nlist| {
+            self.symtab.appendAssumeCapacity(.{
+                .nlist = nlist,
+                .atom = 0,
+                .size = 0,
+            });
+        }
     }
 
-    if (self.getLoadCommand(.DYSYMTAB)) |lc| {
-        const dysym_cmd = lc.cast(macho.dysymtab_command).?;
-        self.iextdefsym = dysym_cmd.iextdefsym;
-        self.iundefsym = dysym_cmd.iundefsym;
-    } else @panic("TODO no DYSYMTAB, work out iextdefsym and iundefsym");
+    // TODO
+    // if (self.header.?.flags & macho.MH_SUBSECTIONS_VIA_SYMBOLS != 0) {
+    //     try self.initSubsections(macho_file);
+    // } else {
+    try self.initSections(macho_file);
+    // }
 
-    try self.calcSymbolSizes(gpa);
-
-    try self.initSectionAtoms(macho_file);
     try self.initSymbols(macho_file);
-    // try self.initSubsectionAtoms(macho_file);
-    try self.initDataInCode(macho_file);
 
-    // TODO ICF
-    // TODO __eh_frame records
+    try self.sortAtoms(macho_file);
+    try self.initRelocs(macho_file);
+
+    // // TODO ICF
+    // // TODO __eh_frame records
 
     self.initPlatform();
     try self.initDwarfInfo(gpa);
 }
 
-const SortedSymbolIndex = struct {
-    index: u32,
-
-    fn lessThan(ctx: *const Object, lhs: @This(), rhs: @This()) bool {
-        const lhss = lhs.getSymbol(ctx);
-        const rhss = rhs.getSymbol(ctx);
-        if (lhss.n_value == rhss.n_value) {
-            if (lhss.n_sect == rhss.n_sect) {
-                return lhss.n_strx < rhss.n_strx;
-            } else return lhss.n_sect < rhss.n_sect;
-        } else return lhss.n_value < rhss.n_value;
-    }
-
-    fn getSymbol(this: @This(), ctx: *const Object) macho.nlist_64 {
-        return ctx.symtab.items(.nlist)[this.index];
-    }
-
-    fn getSize(this: @This(), ctx: *const Object) u64 {
-        return ctx.symtab.items(.size)[this.index];
-    }
-};
-
-fn calcSymbolSizes(self: *Object, allocator: Allocator) !void {
-    const symbols = try allocator.alloc(SortedSymbolIndex, self.iundefsym);
-    defer allocator.free(symbols);
-    for (0..self.iundefsym, symbols) |idx, *out| {
-        out.index = @intCast(idx);
-    }
-
-    // TODO absolute symbols
-    mem.sort(SortedSymbolIndex, symbols, self, SortedSymbolIndex.lessThan);
-
-    var idx: usize = 0;
-    while (idx < symbols.len) {
-        var curr = idx;
-        const sym = symbols[curr].getSymbol(self);
-        const sect = self.sections.items(.header)[sym.n_sect - 1];
-
-        while (idx < symbols.len) : (idx += 1) {
-            const next = symbols[idx].getSymbol(self);
-            if (next.n_value != sym.n_value or next.n_sect != sym.n_sect) break;
-        }
-
-        const next = if (idx < symbols.len) symbols[idx].getSymbol(self) else null;
-        const size = size: {
-            if (next) |nn| {
-                if (nn.n_sect == sym.n_sect) break :size nn.n_value - sym.n_value;
-            }
-            break :size sect.addr + sect.size - sym.n_value;
-        };
-
-        while (curr < idx) : (curr += 1) {
-            self.symtab.items(.size)[symbols[curr].index] = size;
-        }
-    }
-}
-
-fn initSectionAtoms(self: *Object, macho_file: *MachO) !void {
+fn initSections(self: *Object, macho_file: *MachO) !void {
     const gpa = macho_file.base.allocator;
-    try self.atoms.resize(gpa, self.sections.items(.header).len);
-    @memset(self.atoms.items, 0);
+    const slice = self.sections.slice();
 
-    for (self.sections.items(.header), 0..) |sect, n_sect| {
+    try self.atoms.ensureUnusedCapacity(gpa, self.sections.items(.header).len);
+
+    for (slice.items(.header), 0..) |sect, n_sect| {
         if (sect.attrs() & macho.S_ATTR_DEBUG != 0) continue;
         if (sect.type() == macho.S_COALESCED and mem.eql(u8, "__eh_frame", sect.sectName())) continue;
 
         const name = try std.fmt.allocPrintZ(gpa, "{s}${s}", .{ sect.segName(), sect.sectName() });
         defer gpa.free(name);
-        const atom_index = try self.addAtom(name, sect.size, sect.@"align", @intCast(n_sect), macho_file);
+        const atom_index = try macho_file.addAtom();
         const atom = macho_file.getAtom(atom_index).?;
-        atom.relocs = self.sections.items(.relocs)[n_sect];
-        atom.off = 0;
+        atom.file = self.index;
+        atom.atom_index = atom_index;
+        atom.name = try macho_file.string_intern.insert(gpa, name);
+        atom.n_sect = @intCast(n_sect);
+        atom.size = sect.size;
+        atom.alignment = sect.@"align";
+        self.atoms.appendAssumeCapacity(atom_index);
+        try slice.items(.subsections)[n_sect].putNoClobber(gpa, 0, atom_index);
+    }
+
+    for (self.symtab.items(.nlist), self.symtab.items(.atom)) |nlist, *atom| {
+        if (!nlist.stab() and nlist.sect()) {
+            atom.* = slice.items(.subsections)[nlist.n_sect - 1].get(0).?;
+        }
     }
 }
 
-fn addAtom(
-    self: *Object,
-    name: [:0]const u8,
-    size: u64,
-    alignment: u32,
-    n_sect: u8,
-    macho_file: *MachO,
-) !Atom.Index {
-    const gpa = macho_file.base.allocator;
-    const atom_index = try macho_file.addAtom();
-    const atom = macho_file.getAtom(atom_index).?;
-    atom.file = self.index;
-    atom.atom_index = atom_index;
-    atom.name = try macho_file.string_intern.insert(gpa, name);
-    atom.n_sect = n_sect;
-    atom.size = size;
-    atom.alignment = alignment;
-    self.atoms.items[n_sect] = atom_index;
-    return atom_index;
-}
-
-/// When initializing the symbol table, we need to ensure the symbols are actually
-/// sorted so that all locals come before all globals (defined and undefined).
-/// If DYSYMTAB load command is present, the symtab is already sorted.
-/// Otherwise, we sort the symbols and redo the relocation links.
-fn initSymbols(self: *Object, macho_file: *MachO) !void {
-    const gpa = macho_file.base.allocator;
-    try self.symbols.ensureUnusedCapacity(gpa, self.symtab.items(.nlist).len);
-
-    for (self.symtab.items(.nlist)[0..self.iextdefsym], 0..) |local, i| {
-        const index = try macho_file.addSymbol();
-        self.symbols.appendAssumeCapacity(index);
-        const symbol = macho_file.getSymbol(index);
-        const name = self.getString(local.n_strx);
-        symbol.* = .{
-            .value = local.n_value - self.sections.items(.header)[local.n_sect - 1].addr,
-            .name = try macho_file.string_intern.insert(gpa, name),
-            .nlist_idx = @intCast(i),
-            .atom = if (local.abs()) 0 else self.atoms.items[local.n_sect - 1],
-            .file = self.index,
-        };
-    }
-
-    for (self.symtab.items(.nlist)[self.iextdefsym..]) |global| {
-        const name = self.getString(global.n_strx);
-        const off = try macho_file.string_intern.insert(gpa, name);
-        const gop = try macho_file.getOrCreateGlobal(off);
-        self.symbols.addOneAssumeCapacity().* = gop.index;
-    }
-}
-
-// fn initSubsectionAtoms(self: *Object, macho_file: *MachO) !void {
-//     if (self.header.?.flags & macho.MH_SUBSECTIONS_VIA_SYMBOLS == 0) return;
-
+// fn initSubsections(self: *Object, macho_file: *MachO) !void {
 //     const gpa = macho_file.base.allocator;
 //     const symbols = try gpa.alloc(SortedSymbolIndex, self.iundefsym);
 //     defer gpa.free(symbols);
@@ -228,7 +127,7 @@ fn initSymbols(self: *Object, macho_file: *MachO) !void {
 
 //     mem.sort(SortedSymbolIndex, symbols, self, SortedSymbolIndex.lessThan);
 
-//     const subsections = try gpa.alloc(struct { usize, usize }, self.sections(.header).items.len);
+//     const subsections = try gpa.alloc(struct { usize, usize }, self.sections.items(.header).len);
 //     defer gpa.free(subsections);
 
 //     var idx: usize = 0;
@@ -241,10 +140,10 @@ fn initSymbols(self: *Object, macho_file: *MachO) !void {
 //             if (next.n_sect != sym.n_sect) break;
 //         }
 
-//         subsections[sym.n_sect - 1].* = .{ curr, idx };
+//         subsections[sym.n_sect - 1] = .{ curr, idx };
 //     }
 
-//     for (self.sections(.header).items, 0..) |sect, n_sect| {
+//     for (self.sections.items(.header), 0..) |sect, n_sect| {
 //         if (sect.attrs() & macho.S_ATTR_DEBUG != 0) continue;
 
 //         switch (sect.type()) {
@@ -275,35 +174,208 @@ fn initSymbols(self: *Object, macho_file: *MachO) !void {
 //                 @min(@ctz(sym.n_value), sect.@"align")
 //             else
 //                 sect.@"align";
-//             const atom_index = try self.addAtom(
-//                 self.getString(sym.n_strx),
-//                 size,
-//                 alignment,
-//                 n_sect,
-//                 macho_file,
-//             );
+//             const atom_index = try macho_file.addAtom();
 //             const atom = macho_file.getAtom(atom_index).?;
+//             atom.file = self.index;
+//             atom.atom_index = atom_index;
+//             atom.name = try macho_file.string_intern.insert(gpa, self.getString(sym.n_strx));
+//             atom.n_sect = @intCast(n_sect);
+//             atom.size = size;
+//             atom.alignment = alignment;
 //             atom.off = sym.n_value - sect.addr;
+//             try self.atoms.append(gpa, atom_index);
 
-//             const sect_atom = macho_file.getAtom(n_sect).?;
-//             const sect_relocs = sect_atom.getRelocs(macho_file);
-//             const atom_relocs = filterRelocs(sect_relocs, atom.off, atom.size);
-//             atom.relocs = .{ .pos = sect_atom.relocs.pos + atom_relocs.pos, .len = atom_relocs.len };
-//             sect_atom.alive = false;
+//             macho_file.getAtom(self.atoms.items[n_sect]).?.flags.alive = false;
 
 //             while (curr < i) : (curr += 1) {
-//                 const osym = &self.symbols.items[sect_symbols[curr].index];
-//                 osym.value = 0;
-//                 osym.atom = atom_index;
+//                 const osym_index = self.symbols.items[sect_symbols[curr].index];
+//                 const osym = macho_file.getSymbol(osym_index);
+//                 if (osym.getFile(macho_file)) |file| {
+//                     if (file.getIndex() == self.index) {
+//                         osym.value = 0;
+//                         osym.atom = atom_index;
+//                     }
+//                 }
 //             }
 //         }
 //     }
 // }
 
-fn initRelocs(self: *Object, allocator: Allocator) !void {
+fn defSymLessThan(ctx: *const Object, lhs: u32, rhs: u32) bool {
+    const lhss = ctx.symtab.items(.nlist)[lhs];
+    const rhss = ctx.symtab.items(.nlist)[rhs];
+    if (lhss.n_value == rhss.n_value) {
+        if (lhss.n_sect == rhss.n_sect) {
+            return lhss.n_strx < rhss.n_strx;
+        } else return lhss.n_sect < rhss.n_sect;
+    } else return lhss.n_value < rhss.n_value;
+}
+
+fn initSymtab(self: *Object, cmd: macho.symtab_command, macho_file: *MachO) !void {
+    const gpa = macho_file.base.allocator;
+
+    self.strtab = self.data[cmd.stroff..][0..cmd.strsize];
+
+    const symtab = @as([*]align(1) const macho.nlist_64, @ptrCast(self.data.ptr + cmd.symoff))[0..cmd.nsyms];
+    try self.symtab.ensureUnusedCapacity(gpa, symtab.len);
+    for (symtab) |nlist| {
+        self.symtab.appendAssumeCapacity(.{
+            .nlist = nlist,
+            .atom = 0,
+            .size = 0,
+        });
+    }
+
+    if (self.getLoadCommand(.DYSYMTAB)) |lc| {
+        const dysym_cmd = lc.cast(macho.dysymtab_command).?;
+        self.iextdefsym = dysym_cmd.iextdefsym;
+        self.iundefsym = dysym_cmd.iundefsym;
+    } else @panic("TODO no DYSYMTAB, work out iextdefsym and iundefsym");
+
+    // TODO handle absolute symbols
+    try self.sorted_symtab.resize(gpa, self.iundefsym);
+    for (0..self.iundefsym, self.sorted_symtab.items) |idx, *out| {
+        out.* = @intCast(idx);
+    }
+
+    mem.sort(Symbol.Index, self.sorted_symtab.items, self, defSymLessThan);
+
+    var idx: usize = 0;
+    while (idx < self.sorted_symtab.items.len) {
+        var curr = idx;
+        const sym = self.symtab.items(.nlist)[self.sorted_symtab.items[curr]];
+        const sect = self.sections.items(.header)[sym.n_sect - 1];
+
+        while (idx < self.sorted_symtab.items.len) : (idx += 1) {
+            const next = self.symtab.items(.nlist)[self.sorted_symtab.items[idx]];
+            if (next.n_value != sym.n_value or next.n_sect != sym.n_sect) break;
+        }
+
+        self.sections.items(.nlists)[sym.n_sect - 1] = .{
+            .pos = curr,
+            .len = idx - curr,
+        };
+
+        const next = if (idx < self.sorted_symtab.items.len)
+            self.symtab.items(.nlist)[self.sorted_symtab.items[idx]]
+        else
+            null;
+        const size = size: {
+            if (next) |nn| {
+                if (nn.n_sect == sym.n_sect) break :size nn.n_value - sym.n_value;
+            }
+            break :size sect.addr + sect.size - sym.n_value;
+        };
+
+        while (curr < idx) : (curr += 1) {
+            self.symtab.items(.size)[self.sorted_symtab.items[curr]] = size;
+        }
+    }
+}
+
+fn initSymbols(self: *Object, macho_file: *MachO) !void {
+    const gpa = macho_file.base.allocator;
+    const slice = self.symtab.slice();
+
+    try self.symbols.ensureUnusedCapacity(gpa, slice.items(.nlist).len);
+
+    for (slice.items(.nlist), slice.items(.atom), 0..) |nlist, atom_index, i| {
+        if (nlist.ext()) {
+            const name = self.getString(nlist.n_strx);
+            const off = try macho_file.string_intern.insert(gpa, name);
+            const gop = try macho_file.getOrCreateGlobal(off);
+            self.symbols.addOneAssumeCapacity().* = gop.index;
+            continue;
+        }
+
+        const atom = macho_file.getAtom(atom_index).?;
+        const index = try macho_file.addSymbol();
+        self.symbols.appendAssumeCapacity(index);
+        const symbol = macho_file.getSymbol(index);
+        const name = self.getString(nlist.n_strx);
+        const value = if (nlist.abs())
+            nlist.n_value
+        else
+            nlist.n_value - atom.off - atom.getInputSection(macho_file).addr;
+        symbol.* = .{
+            .value = value,
+            .name = try macho_file.string_intern.insert(gpa, name),
+            .nlist_idx = @intCast(i),
+            .atom = if (nlist.abs()) 0 else atom_index,
+            .file = self.index,
+        };
+    }
+}
+
+fn sortAtoms(self: *Object, macho_file: *MachO) !void {
+    const lessThanAtom = struct {
+        fn lessThanAtom(ctx: *MachO, lhs: Atom.Index, rhs: Atom.Index) bool {
+            const lhsa = ctx.getAtom(lhs).?;
+            const rhsa = ctx.getAtom(rhs).?;
+            return lhsa.getInputSection(ctx).addr < rhsa.getInputSection(ctx).addr;
+        }
+    }.lessThanAtom;
+    mem.sort(Atom.Index, self.atoms.items, macho_file, lessThanAtom);
+}
+
+fn initRelocs(self: *Object, macho_file: *MachO) !void {
+    // std.debug.print("{}\n", .{self.fmtPath()});
+
+    const gpa = macho_file.base.allocator;
     const slice = self.sections.slice();
-    for (slice.items(.header), slice.items(.relocs)) |sect, *relocs| {
-        relocs.* = try self.parseRelocs(allocator, sect);
+
+    for (slice.items(.header), slice.items(.relocs)) |sect, *out| {
+        if (sect.nreloc == 0) continue;
+
+        const relocs = @as([*]align(1) const macho.relocation_info, @ptrCast(self.data.ptr + sect.reloff))[0..sect.nreloc];
+
+        try out.ensureTotalCapacityPrecise(gpa, relocs.len);
+
+        for (relocs) |rel| {
+            out.appendAssumeCapacity(.{
+                .tag = if (rel.r_extern == 1) .@"extern" else .local,
+                .offset = @intCast(rel.r_address),
+                .target = if (rel.r_extern == 0) blk: {
+                    const nsect = rel.r_symbolnum - 1;
+                    const subsections = slice.items(.subsections)[nsect];
+                    // TODO find by offset
+                    break :blk subsections.get(0).?;
+                } else rel.r_symbolnum,
+                .meta = .{
+                    .pcrel = rel.r_pcrel == 1,
+                    .length = rel.r_length,
+                    .type = rel.r_type,
+                },
+            });
+            // const last = out.items[out.items.len - 1];
+            // std.debug.print("  {x}: {s}({d})\n", .{
+            //     last.offset,
+            //     switch (last.tag) {
+            //         .@"extern" => "sym",
+            //         .local => "atom",
+            //     },
+            //     last.target,
+            // });
+        }
+
+        mem.sort(Relocation, out.items, {}, Relocation.lessThan);
+    }
+
+    for (slice.items(.header), slice.items(.relocs), slice.items(.subsections)) |sect, relocs, subsections| {
+        if (sect.isZerofill()) continue;
+
+        var next_reloc: usize = 0;
+        for (subsections.values()) |atom_index| {
+            const atom = macho_file.getAtom(atom_index).?;
+            if (!atom.flags.alive) continue;
+            if (next_reloc >= relocs.items.len) break;
+            const end_addr = atom.off + atom.size;
+            atom.relocs.pos = next_reloc;
+
+            while (next_reloc < relocs.items.len and relocs.items[next_reloc].offset <= end_addr) : (next_reloc += 1) {}
+
+            atom.relocs.len = next_reloc - atom.relocs.pos;
+        }
     }
 }
 
@@ -314,44 +386,19 @@ fn initDataInCode(self: *Object, macho_file: *MachO) !void {
     if (self.data_in_code.items.len == 0) return;
 
     var next_dice: usize = 0;
-
     for (self.atoms.items) |atom_index| {
-        const atom = macho_file.getAtom(atom_index) orelse continue;
+        const atom = macho_file.getAtom(atom_index).?;
         if (!atom.flags.alive) continue;
         if (next_dice >= self.data_in_code.items.len) break;
-        const off = atom.getInputSection(macho_file).addr + atom.off;
-
-        atom.dice = .{ .pos = next_dice };
+        const end_off = atom.getInputSection(macho_file).addr + atom.off + atom.size;
+        atom.dice.pos = next_dice;
 
         while (next_dice < self.data_in_code.items.len and
-            self.data_in_code.items[next_dice].offset >= off) : (next_dice += 1)
+            self.data_in_code.items[next_dice].offset < end_off) : (next_dice += 1)
         {}
 
         atom.dice.len = next_dice - atom.dice.pos;
     }
-}
-
-/// Parse all relocs for the input section, and sort in ascending order.
-/// Previously, I have wrongly assumed the compilers output relocations for each
-/// section in a sorted manner which is simply not true.
-fn parseRelocs(self: *Object, allocator: Allocator, sect: macho.section_64) !Atom.Loc {
-    const relocLessThan = struct {
-        fn relocLessThan(ctx: void, lhs: macho.relocation_info, rhs: macho.relocation_info) bool {
-            _ = ctx;
-            return lhs.r_address < rhs.r_address;
-        }
-    }.relocLessThan;
-
-    if (sect.nreloc == 0) return .{};
-    const pos: u32 = @intCast(self.relocations.items.len);
-    const relocs = @as(
-        [*]align(1) const macho.relocation_info,
-        @ptrCast(self.data.ptr + sect.reloff),
-    )[0..sect.nreloc];
-    try self.relocations.ensureUnusedCapacity(allocator, relocs.len);
-    self.relocations.appendUnalignedSliceAssumeCapacity(relocs);
-    mem.sort(macho.relocation_info, self.relocations.items[pos..], {}, relocLessThan);
-    return .{ .pos = pos, .len = sect.nreloc };
 }
 
 fn parseDataInCode(self: *Object, allocator: Allocator) !void {
@@ -423,24 +470,22 @@ pub fn resolveSymbols(self: *Object, macho_file: *MachO) void {
     for (self.getGlobals(), 0..) |index, i| {
         const nlist_idx = @as(Symbol.Index, @intCast(self.iextdefsym + i));
         const nlist = self.symtab.items(.nlist)[nlist_idx];
+        const atom_index = self.symtab.items(.atom)[nlist_idx];
 
         if (nlist.undf() and !nlist.tentative()) continue;
         if (!nlist.tentative() and !nlist.abs()) {
-            const atom_index = self.atoms.items[nlist.n_sect - 1];
-            const atom = macho_file.getAtom(atom_index) orelse continue;
+            const atom = macho_file.getAtom(atom_index).?;
             if (!atom.flags.alive) continue;
         }
 
         const global = macho_file.getSymbol(index);
         if (self.asFile().getSymbolRank(nlist, !self.alive) < global.getSymbolRank(macho_file)) {
-            var atom: Atom.Index = 0;
-            var value = nlist.n_value;
-            if (!nlist.tentative() and !nlist.abs()) {
-                atom = self.atoms.items[nlist.n_sect - 1];
-                value -= self.sections.items(.header)[nlist.n_sect - 1].addr;
-            }
+            const value = if (!nlist.tentative() and !nlist.abs()) blk: {
+                const atom = macho_file.getAtom(atom_index).?;
+                break :blk nlist.n_value - atom.off - atom.getInputSection(macho_file).addr;
+            } else nlist.n_value;
             global.value = value;
-            global.atom = atom;
+            global.atom = atom_index;
             global.nlist_idx = nlist_idx;
             global.file = self.index;
             global.flags.weak = nlist.weakDef() or nlist.pext();
@@ -466,7 +511,7 @@ pub fn markLive(self: *Object, macho_file: *MachO) void {
 
 pub fn scanRelocs(self: Object, macho_file: *MachO) !void {
     for (self.atoms.items) |atom_index| {
-        const atom = macho_file.getAtom(atom_index) orelse continue;
+        const atom = macho_file.getAtom(atom_index).?;
         if (!atom.flags.alive) continue;
         const sect = atom.getInputSection(macho_file);
         if (sect.isZerofill()) continue;
@@ -530,6 +575,7 @@ pub fn convertBoundarySymbols(self: *Object, macho_file: *MachO) !void {
     for (self.getGlobals(), 0..) |index, i| {
         const nlist_idx = @as(Symbol.Index, @intCast(self.iextdefsym + i));
         const nlist = &self.symtab.items(.nlist)[nlist_idx];
+        const nlist_atom = &self.symtab.items(.atom)[nlist_idx];
         if (!nlist.undf()) continue;
 
         const global = macho_file.getSymbol(index);
@@ -569,6 +615,7 @@ pub fn convertBoundarySymbols(self: *Object, macho_file: *MachO) !void {
         nlist.n_value = 0;
         nlist.n_type = macho.N_PEXT | macho.N_EXT | macho.N_SECT;
         nlist.n_sect = n_sect + 1;
+        nlist_atom.* = atom_index;
     }
 }
 
@@ -577,6 +624,7 @@ pub fn convertTentativeDefinitions(self: *Object, macho_file: *MachO) !void {
     for (self.getGlobals(), 0..) |index, i| {
         const nlist_idx = @as(Symbol.Index, @intCast(self.iextdefsym + i));
         const nlist = &self.symtab.items(.nlist)[nlist_idx];
+        const nlist_atom = &self.symtab.items(.atom)[nlist_idx];
         if (!nlist.tentative()) continue;
 
         const global = macho_file.getSymbol(index);
@@ -618,6 +666,7 @@ pub fn convertTentativeDefinitions(self: *Object, macho_file: *MachO) !void {
         nlist.n_type = macho.N_EXT | macho.N_SECT;
         nlist.n_sect = n_sect + 1;
         nlist.n_desc = 0;
+        nlist_atom.* = atom_index;
     }
 }
 
@@ -998,7 +1047,7 @@ fn formatAtoms(
     const object = ctx.object;
     try writer.writeAll("  atoms\n");
     for (object.atoms.items) |atom_index| {
-        const atom = ctx.macho_file.getAtom(atom_index) orelse continue;
+        const atom = ctx.macho_file.getAtom(atom_index).?;
         try writer.print("    {}\n", .{atom.fmt(ctx.macho_file)});
     }
 }
@@ -1053,12 +1102,40 @@ fn formatPath(
 
 const Section = struct {
     header: macho.section_64,
-    relocs: Atom.Loc = .{},
+    subsections: std.AutoArrayHashMapUnmanaged(u64, Atom.Index) = .{},
+    relocs: std.ArrayListUnmanaged(Relocation) = .{},
+};
+
+pub const Relocation = struct {
+    tag: enum { @"extern", local },
+    offset: u32,
+    target: u32,
+    meta: packed struct {
+        pcrel: bool,
+        length: u2,
+        type: u4,
+    },
+
+    pub fn getTargetSymbol(rel: Relocation, macho_file: *MachO) *Symbol {
+        assert(rel.tag == .@"extern");
+        return macho_file.getSymbol(rel.target);
+    }
+
+    pub fn getTargetAtom(rel: Relocation, macho_file: *MachO) *Atom {
+        assert(rel.tag == .local);
+        return macho_file.getAtom(rel.target).?;
+    }
+
+    pub fn lessThan(ctx: void, lhs: Relocation, rhs: Relocation) bool {
+        _ = ctx;
+        return lhs.offset < rhs.offset;
+    }
 };
 
 const Nlist = struct {
     nlist: macho.nlist_64,
     size: u64,
+    atom: Atom.Index,
 };
 
 const assert = std.debug.assert;
