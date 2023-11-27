@@ -157,36 +157,34 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
     for (relocs) |rel| {
         if (try self.reportUndefSymbol(rel, macho_file)) continue;
 
-        const symbol = switch (rel.tag) {
-            .local => null,
-            .@"extern" => rel.getTargetSymbol(macho_file),
-        };
-
         switch (@as(macho.reloc_type_x86_64, @enumFromInt(rel.meta.type))) {
             .X86_64_RELOC_BRANCH => {
-                if (symbol.?.flags.import) {
-                    symbol.?.flags.stubs = true;
+                const symbol = rel.getTargetSymbol(macho_file);
+                if (symbol.flags.import) {
+                    symbol.flags.stubs = true;
                 }
             },
 
             .X86_64_RELOC_GOT_LOAD,
             .X86_64_RELOC_GOT,
             => {
-                symbol.?.flags.got = true;
+                rel.getTargetSymbol(macho_file).flags.got = true;
             },
 
             .X86_64_RELOC_TLV => {
-                if (symbol.?.flags.import) {
-                    symbol.?.flags.tlv_ptr = true;
+                const symbol = rel.getTargetSymbol(macho_file);
+                if (symbol.flags.import) {
+                    symbol.flags.tlv_ptr = true;
                 }
             },
 
             .X86_64_RELOC_UNSIGNED => {
-                if (symbol) |sym| {
-                    if (sym.flags.import) {
+                if (rel.tag == .@"extern") {
+                    const symbol = rel.getTargetSymbol(macho_file);
+                    if (symbol.flags.import) {
                         file.object.num_bind_relocs += 1;
                         continue;
-                    } else if (sym.isTlvInit(macho_file)) {
+                    } else if (symbol.isTlvInit(macho_file)) {
                         macho_file.has_tlv = true;
                         continue;
                     }
@@ -202,16 +200,8 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
 fn reportUndefSymbol(self: Atom, rel: Object.Relocation, macho_file: *MachO) !bool {
     if (rel.tag == .local) return false;
 
-    const file = self.getFile(macho_file);
     const sym = rel.getTargetSymbol(macho_file);
-    const s_rel_sym = switch (file) {
-        .internal => |x| x.symtab.items[rel.s_target],
-        .object => |x| x.symtab.items(.nlist)[rel.s_target],
-        else => unreachable,
-    };
-
-    const nlist = sym.getNlist(macho_file);
-    if (s_rel_sym.undf() and s_rel_sym.ext() and sym.nlist_idx > 0 and !sym.flags.import and nlist.undf()) {
+    if (sym.getNlist(macho_file).undf() and !sym.flags.import) {
         const gpa = macho_file.base.allocator;
         const gop = try macho_file.undefs.getOrPut(gpa, rel.target);
         if (!gop.found_existing) {
@@ -239,27 +229,22 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
     var i: usize = 0;
     while (i < relocs.len) : (i += 1) {
         const rel = relocs[i];
-        const rel_address = rel.offset;
         const rel_type: macho.reloc_type_x86_64 = @enumFromInt(rel.meta.type);
-
         const seg_id = macho_file.sections.items(.segment_id)[self.out_n_sect];
         const seg = macho_file.segments.items[seg_id];
+        const sym = if (rel.tag == .@"extern") rel.getTargetSymbol(macho_file) else null;
 
         const P = @as(i64, @intCast(self.value)) + rel.offset;
-
         const A = switch (rel.meta.length) {
-            0 => code[rel_address],
-            1 => mem.readInt(i16, code[rel_address..][0..2], .little),
-            2 => mem.readInt(i32, code[rel_address..][0..4], .little),
-            3 => mem.readInt(i64, code[rel_address..][0..8], .little),
+            0 => code[rel.offset],
+            1 => mem.readInt(i16, code[rel.offset..][0..2], .little),
+            2 => mem.readInt(i32, code[rel.offset..][0..4], .little),
+            3 => mem.readInt(i64, code[rel.offset..][0..8], .little),
         };
-
-        const sym = if (rel.tag == .@"extern") rel.getTargetSymbol(macho_file) else null;
         const S: i64 = switch (rel.tag) {
             .local => @as(i64, @intCast(rel.getTargetAtom(macho_file).value)) + rel.addend,
             .@"extern" => @intCast(rel.getTargetSymbol(macho_file).getAddress(.{}, macho_file)),
         };
-
         const G: i64 = if (rel.tag == .@"extern")
             @intCast(rel.getTargetSymbol(macho_file).getGotAddress(macho_file))
         else
@@ -284,7 +269,7 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
             }),
         }
 
-        try stream.seekTo(rel_address);
+        try stream.seekTo(rel.offset);
 
         switch (rel_type) {
             .X86_64_RELOC_SUBTRACTOR => SUB = S,
@@ -318,7 +303,7 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
                 assert(rel.meta.length == 2);
                 assert(rel.meta.pcrel);
                 if (!sym.?.flags.import) {
-                    try relaxGotLoad(code[rel_address - 3 ..]);
+                    try relaxGotLoad(code[rel.offset - 3 ..]);
                     try cwriter.writeInt(i32, @intCast(S + A - P - 4), .little);
                 } else {
                     try cwriter.writeInt(i32, @intCast(G + A - P - 4), .little);
@@ -345,7 +330,7 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
                     const S_: i64 = @intCast(sym.?.getTlvPtrAddress(macho_file));
                     try cwriter.writeInt(i32, @intCast(S_ + A - P - 4), .little);
                 } else {
-                    try relaxTlv(code[rel_address - 3 ..]);
+                    try relaxTlv(code[rel.offset - 3 ..]);
                     try cwriter.writeInt(i32, @intCast(S + A - P - 4), .little);
                 }
             },

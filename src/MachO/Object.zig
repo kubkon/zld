@@ -317,8 +317,6 @@ fn sortAtoms(self: *Object, macho_file: *MachO) !void {
 }
 
 fn initRelocs(self: *Object, macho_file: *MachO) !void {
-    // std.debug.print("{}\n", .{self.fmtPath()});
-
     const gpa = macho_file.base.allocator;
     const slice = self.sections.slice();
 
@@ -353,7 +351,6 @@ fn initRelocs(self: *Object, macho_file: *MachO) !void {
                 .tag = if (rel.r_extern == 1) .@"extern" else .local,
                 .offset = @intCast(rel.r_address),
                 .target = target,
-                .s_target = rel.r_symbolnum,
                 .addend = addend,
                 .meta = .{
                     .pcrel = rel.r_pcrel == 1,
@@ -361,15 +358,6 @@ fn initRelocs(self: *Object, macho_file: *MachO) !void {
                     .type = rel.r_type,
                 },
             });
-            // const last = out.items[out.items.len - 1];
-            // std.debug.print("  {x}: {s}({d})\n", .{
-            //     last.offset,
-            //     switch (last.tag) {
-            //         .@"extern" => "sym",
-            //         .local => "atom",
-            //     },
-            //     last.target,
-            // });
         }
 
         mem.sort(Relocation, out.items, {}, Relocation.lessThan);
@@ -1077,7 +1065,6 @@ pub const Relocation = struct {
     tag: enum { @"extern", local },
     offset: u32,
     target: u32,
-    s_target: u32,
     addend: i64,
     meta: packed struct {
         pcrel: bool,
