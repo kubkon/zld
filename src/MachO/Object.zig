@@ -13,7 +13,6 @@ sorted_symtab: std.ArrayListUnmanaged(Symbol.Index) = .{},
 symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
 atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
 
-data_in_code: std.ArrayListUnmanaged(macho.data_in_code_entry) = .{},
 platform: ?MachO.Options.Platform = null,
 dwarf_info: ?DwarfInfo = null,
 
@@ -28,7 +27,6 @@ pub fn deinit(self: *Object, gpa: Allocator) void {
     self.symbols.deinit(gpa);
     self.sorted_symtab.deinit(gpa);
     self.atoms.deinit(gpa);
-    self.data_in_code.deinit(gpa);
     if (self.dwarf_info) |*dw| dw.deinit(gpa);
 }
 
@@ -379,48 +377,6 @@ fn initRelocs(self: *Object, macho_file: *MachO) !void {
             atom.relocs.len = next_reloc - atom.relocs.pos;
         }
     }
-}
-
-fn initDataInCode(self: *Object, macho_file: *MachO) !void {
-    const gpa = macho_file.base.allocator;
-    try self.parseDataInCode(gpa);
-
-    if (self.data_in_code.items.len == 0) return;
-
-    var next_dice: usize = 0;
-    for (self.atoms.items) |atom_index| {
-        const atom = macho_file.getAtom(atom_index).?;
-        if (!atom.flags.alive) continue;
-        if (next_dice >= self.data_in_code.items.len) break;
-        const end_off = atom.getInputSection(macho_file).addr + atom.off + atom.size;
-        atom.dice.pos = next_dice;
-
-        while (next_dice < self.data_in_code.items.len and
-            self.data_in_code.items[next_dice].offset < end_off) : (next_dice += 1)
-        {}
-
-        atom.dice.len = next_dice - atom.dice.pos;
-    }
-}
-
-fn parseDataInCode(self: *Object, allocator: Allocator) !void {
-    const diceLessThan = struct {
-        fn diceLessThan(ctx: void, lhs: macho.data_in_code_entry, rhs: macho.data_in_code_entry) bool {
-            _ = ctx;
-            return lhs.offset < rhs.offset;
-        }
-    }.diceLessThan;
-
-    const lc = self.getLoadCommand(.DATA_IN_CODE) orelse return;
-    const cmd = lc.cast(macho.linkedit_data_command).?;
-    const ndice = @divExact(cmd.datasize, @sizeOf(macho.data_in_code_entry));
-    const dice = @as(
-        [*]align(1) const macho.data_in_code_entry,
-        @ptrCast(self.data.ptr + cmd.dataoff),
-    )[0..ndice];
-    try self.data_in_code.ensureTotalCapacityPrecise(allocator, dice.len);
-    self.data_in_code.appendUnalignedSliceAssumeCapacity(dice);
-    mem.sort(macho.data_in_code_entry, self.data_in_code.items, {}, diceLessThan);
 }
 
 fn initPlatform(self: *Object) void {
@@ -965,6 +921,17 @@ fn getString(self: Object, off: u32) [:0]const u8 {
 pub fn hasDebugInfo(self: Object) bool {
     const dw = self.dwarf_info orelse return false;
     return dw.compile_units.items.len > 0;
+}
+
+pub fn getDataInCode(self: Object) []align(1) const macho.data_in_code_entry {
+    const lc = self.getLoadCommand(.DATA_IN_CODE) orelse return &[0]macho.data_in_code_entry{};
+    const cmd = lc.cast(macho.linkedit_data_command).?;
+    const ndice = @divExact(cmd.datasize, @sizeOf(macho.data_in_code_entry));
+    const dice = @as(
+        [*]align(1) const macho.data_in_code_entry,
+        @ptrCast(self.data.ptr + cmd.dataoff),
+    )[0..ndice];
+    return dice;
 }
 
 pub fn asFile(self: *Object) File {

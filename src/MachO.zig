@@ -1782,39 +1782,42 @@ fn writeDataInCode(self: *MachO) !void {
     const off = try self.getNextLinkeditOffset(@alignOf(u64));
     cmd.dataoff = @intCast(off);
 
-    const has_data_in_code = for (self.objects.items) |index| {
-        if (self.getFile(index).?.object.data_in_code.items.len > 0) break true;
-    } else false;
-    if (!has_data_in_code) return;
+    const base = base: {
+        const seg_id = self.getSegmentByName("__TEXT").?;
+        break :base self.segments.items[seg_id].vmaddr;
+    };
 
     const gpa = self.base.allocator;
     var dices = std.ArrayList(macho.data_in_code_entry).init(gpa);
     defer dices.deinit();
 
-    const base = base: {
-        const sect_id = self.getSectionByName("__TEXT", "__text").?;
-        const sect = self.sections.items(.header)[sect_id];
-        break :base sect.addr - sect.offset;
-    };
-
     for (self.objects.items) |index| {
         const object = self.getFile(index).?.object;
-        if (object.data_in_code.items.len == 0) continue;
+        const in_dices = object.getDataInCode();
 
-        try dices.ensureUnusedCapacity(object.data_in_code.items.len);
+        try dices.ensureUnusedCapacity(in_dices.len);
 
+        var next_dice: usize = 0;
         for (object.atoms.items) |atom_index| {
+            if (next_dice >= in_dices.len) break;
             const atom = self.getAtom(atom_index) orelse continue;
-            if (!atom.flags.alive) continue;
+            const start_off = atom.getInputSection(self).addr + atom.off;
+            const end_off = start_off + atom.size;
+            const start_dice = next_dice;
 
-            for (atom.getDataInCode(self)) |dice| {
-                const offset = dice.offset - atom.getInputSection(self).addr;
+            if (end_off < in_dices[next_dice].offset) continue;
+
+            while (next_dice < in_dices.len and
+                in_dices[next_dice].offset < end_off) : (next_dice += 1)
+            {}
+
+            if (atom.flags.alive) for (in_dices[start_dice..next_dice]) |dice| {
                 dices.appendAssumeCapacity(.{
-                    .offset = @intCast(offset + atom.value - base),
+                    .offset = @intCast(atom.value + dice.offset - start_off - base),
                     .length = dice.length,
                     .kind = dice.kind,
                 });
-            }
+            };
         }
     }
 

@@ -26,9 +26,6 @@ off: u64 = 0,
 /// Relocations of this atom.
 relocs: Loc = .{},
 
-/// Data-in-code associated with this atom.
-dice: Loc = .{},
-
 /// Index of this atom in the linker's atoms table.
 atom_index: Index = 0,
 
@@ -73,13 +70,6 @@ pub fn getRelocs(self: Atom, macho_file: *MachO) []const Object.Relocation {
             const relocs = x.sections.items(.relocs)[self.n_sect];
             return relocs.items[self.relocs.pos..][0..self.relocs.len];
         },
-        else => unreachable,
-    };
-}
-
-pub fn getDataInCode(self: Atom, macho_file: *MachO) []const macho.data_in_code_entry {
-    return switch (self.getFile(macho_file)) {
-        .object => |x| x.data_in_code.items[self.dice.pos..][0..self.dice.len],
         else => unreachable,
     };
 }
