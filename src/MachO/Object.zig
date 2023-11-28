@@ -61,11 +61,12 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
         }
     }
 
-    // if (self.header.?.flags & macho.MH_SUBSECTIONS_VIA_SYMBOLS != 0) {
-    //     try self.initSubsections(macho_file);
-    // } else {
+    if (self.header.?.flags & macho.MH_SUBSECTIONS_VIA_SYMBOLS != 0) {
+        try self.initSubsections(macho_file);
+    } else {
+        // try self.initSections(macho_file);
+    }
     try self.initSections(macho_file);
-    // }
 
     try self.initLiteralSections(macho_file);
     self.linkNlistToAtom();
@@ -91,6 +92,33 @@ inline fn isLiteral(sect: macho.section_64) bool {
         => true,
         else => false,
     };
+}
+
+fn initSubsections(self: *Object, macho_file: *MachO) !void {
+    const gpa = macho_file.base.allocator;
+
+    var nlists = try std.ArrayList(macho.nlist_64).initCapacity(gpa, self.symtab.items(.nlist).len);
+    defer nlists.deinit();
+    for (self.symtab.items(.nlist)) |nlist| {
+        if (nlist.stab() or !nlist.sect()) continue;
+        nlists.appendAssumeCapacity(nlist);
+    }
+
+    const sortFn = struct {
+        fn sortFn(ctx: void, lhs: macho.nlist_64, rhs: macho.nlist_64) bool {
+            _ = ctx;
+            if (lhs.n_sect == rhs.n_sect) {
+                return lhs.n_value < rhs.n_value;
+            }
+            return lhs.n_sect < rhs.n_sect;
+        }
+    }.sortFn;
+
+    mem.sort(macho.nlist_64, nlists.items, {}, sortFn);
+
+    for (nlists.items) |nlist| {
+        std.debug.print("{s}@{x} in {d}\n", .{ self.getString(nlist.n_strx), nlist.n_value, nlist.n_sect });
+    }
 }
 
 fn initSections(self: *Object, macho_file: *MachO) !void {
