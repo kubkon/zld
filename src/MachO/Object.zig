@@ -9,7 +9,6 @@ sections: std.MultiArrayList(Section) = .{},
 symtab: std.MultiArrayList(Nlist) = .{},
 strtab: []const u8 = &[0]u8{},
 
-sorted_symtab: std.ArrayListUnmanaged(Symbol.Index) = .{},
 symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
 atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
 
@@ -25,7 +24,6 @@ output_symtab_ctx: MachO.SymtabCtx = .{},
 pub fn deinit(self: *Object, gpa: Allocator) void {
     self.symtab.deinit(gpa);
     self.symbols.deinit(gpa);
-    self.sorted_symtab.deinit(gpa);
     self.atoms.deinit(gpa);
     if (self.dwarf_info) |*dw| dw.deinit(gpa);
 }
@@ -63,23 +61,36 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
         }
     }
 
-    // TODO
     // if (self.header.?.flags & macho.MH_SUBSECTIONS_VIA_SYMBOLS != 0) {
     //     try self.initSubsections(macho_file);
     // } else {
     try self.initSections(macho_file);
     // }
 
-    try self.initSymbols(macho_file);
+    try self.initLiteralSections(macho_file);
+    self.linkNlistToAtom();
 
     try self.sortAtoms(macho_file);
+    try self.initSymbols(macho_file);
     try self.initRelocs(macho_file);
 
-    // // TODO ICF
-    // // TODO __eh_frame records
+    // TODO __eh_frame records
+    // TODO __compact_unwind records
 
     self.initPlatform();
     try self.initDwarfInfo(gpa);
+}
+
+inline fn isLiteral(sect: macho.section_64) bool {
+    return switch (sect.type()) {
+        macho.S_CSTRING_LITERALS,
+        macho.S_4BYTE_LITERALS,
+        macho.S_8BYTE_LITERALS,
+        macho.S_16BYTE_LITERALS,
+        macho.S_LITERAL_POINTERS,
+        => true,
+        else => false,
+    };
 }
 
 fn initSections(self: *Object, macho_file: *MachO) !void {
@@ -91,24 +102,85 @@ fn initSections(self: *Object, macho_file: *MachO) !void {
     for (slice.items(.header), 0..) |sect, n_sect| {
         if (sect.attrs() & macho.S_ATTR_DEBUG != 0) continue;
         if (sect.type() == macho.S_COALESCED and mem.eql(u8, "__eh_frame", sect.sectName())) continue;
+        if (isLiteral(sect)) continue;
 
         const name = try std.fmt.allocPrintZ(gpa, "{s}${s}", .{ sect.segName(), sect.sectName() });
         defer gpa.free(name);
-        const atom_index = try macho_file.addAtom();
-        const atom = macho_file.getAtom(atom_index).?;
-        atom.file = self.index;
-        atom.atom_index = atom_index;
-        atom.name = try macho_file.string_intern.insert(gpa, name);
-        atom.n_sect = @intCast(n_sect);
-        atom.size = sect.size;
-        atom.alignment = sect.@"align";
-        self.atoms.appendAssumeCapacity(atom_index);
-        try slice.items(.subsections)[n_sect].putNoClobber(gpa, 0, atom_index);
-    }
 
+        try self.addAtom(.{
+            .name = name,
+            .n_sect = @intCast(n_sect),
+            .off = 0,
+            .size = sect.size,
+            .alignment = sect.@"align",
+        }, macho_file);
+    }
+}
+
+const AddAtomArgs = struct {
+    name: [:0]const u8,
+    n_sect: u8,
+    off: u64,
+    size: u64,
+    alignment: u32,
+};
+
+fn addAtom(self: *Object, args: AddAtomArgs, macho_file: *MachO) !void {
+    const gpa = macho_file.base.allocator;
+    const atom_index = try macho_file.addAtom();
+    const atom = macho_file.getAtom(atom_index).?;
+    atom.file = self.index;
+    atom.atom_index = atom_index;
+    atom.name = try macho_file.string_intern.insert(gpa, args.name);
+    atom.n_sect = args.n_sect;
+    atom.size = args.size;
+    atom.alignment = args.alignment;
+    try self.atoms.append(gpa, atom_index);
+    try self.sections.items(.subsections)[args.n_sect].putNoClobber(gpa, 0, atom_index);
+}
+
+fn initLiteralSections(self: *Object, macho_file: *MachO) !void {
+    // TODO here we should split into equal-sized records, hash the contents, and then
+    // deduplicate - ICF.
+    // For now, we simply cover each literal section with one large atom.
+    const gpa = macho_file.base.allocator;
+    const slice = self.sections.slice();
+
+    try self.atoms.ensureUnusedCapacity(gpa, self.sections.items(.header).len);
+
+    for (slice.items(.header), 0..) |sect, n_sect| {
+        if (sect.attrs() & macho.S_ATTR_DEBUG != 0) continue;
+        if (sect.type() == macho.S_COALESCED and mem.eql(u8, "__eh_frame", sect.sectName())) continue;
+        if (!isLiteral(sect)) continue;
+
+        const name = try std.fmt.allocPrintZ(gpa, "{s}${s}", .{ sect.segName(), sect.sectName() });
+        defer gpa.free(name);
+
+        try self.addAtom(.{
+            .name = name,
+            .n_sect = @intCast(n_sect),
+            .off = 0,
+            .size = sect.size,
+            .alignment = sect.@"align",
+        }, macho_file);
+    }
+}
+
+fn findAtomByOffset(self: Object, off: u64, n_sect: u8) Atom.Index {
+    const base = self.sections.items(.header)[n_sect].addr;
+    const subsections = self.sections.items(.subsections)[n_sect];
+    const offsets = subsections.keys();
+    const indexes = subsections.values();
+    for (offsets, indexes) |offset, index| {
+        if (off >= offset + base) return index;
+    }
+    return indexes[indexes.len - 1];
+}
+
+fn linkNlistToAtom(self: *Object) void {
     for (self.symtab.items(.nlist), self.symtab.items(.atom)) |nlist, *atom| {
         if (!nlist.stab() and nlist.sect()) {
-            atom.* = slice.items(.subsections)[nlist.n_sect - 1].get(0).?;
+            atom.* = self.findAtomByOffset(nlist.n_value, nlist.n_sect - 1);
         }
     }
 }
