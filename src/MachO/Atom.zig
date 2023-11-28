@@ -51,8 +51,8 @@ pub fn getPriority(self: Atom, macho_file: *MachO) u64 {
 
 pub fn getCode(self: Atom, macho_file: *MachO) []const u8 {
     const object = self.getObject(macho_file);
-    const in_sect = self.getInputSection(macho_file);
-    return object.data[in_sect.offset + self.off ..][0..self.size];
+    const code = object.getSectionData(self.n_sect);
+    return code[self.off..][0..self.size];
 }
 
 pub fn getRelocs(self: Atom, macho_file: *MachO) []const Object.Relocation {
@@ -213,6 +213,7 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
     while (i < relocs.len) : (i += 1) {
         const rel = relocs[i];
         const rel_type: macho.reloc_type_x86_64 = @enumFromInt(rel.meta.type);
+        const rel_offset = rel.offset - self.off;
         const seg_id = macho_file.sections.items(.segment_id)[self.out_n_sect];
         const seg = macho_file.segments.items[seg_id];
         const sym = if (rel.tag == .@"extern") rel.getTargetSymbol(macho_file) else null;
@@ -224,10 +225,10 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
 
         const P = @as(i64, @intCast(self.value)) + rel.offset;
         const A = switch (rel.meta.length) {
-            0 => code[rel.offset],
-            1 => mem.readInt(i16, code[rel.offset..][0..2], .little),
-            2 => mem.readInt(i32, code[rel.offset..][0..4], .little),
-            3 => mem.readInt(i64, code[rel.offset..][0..8], .little),
+            0 => code[rel_offset],
+            1 => mem.readInt(i16, code[rel_offset..][0..2], .little),
+            2 => mem.readInt(i32, code[rel_offset..][0..4], .little),
+            3 => mem.readInt(i64, code[rel_offset..][0..8], .little),
         };
         const S: i64 = switch (rel.tag) {
             .local => @as(i64, @intCast(rel.getTargetAtom(macho_file).value)) + rel.addend,
@@ -242,14 +243,14 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
         switch (rel.tag) {
             .local => relocs_log.debug("  {s}: {x}: [{x} => {x}] atom({d})", .{
                 fmtRelocType(rel.meta.type, macho_file),
-                rel.offset,
+                rel_offset,
                 P,
                 S + A - SUB,
                 rel.getTargetAtom(macho_file).atom_index,
             }),
             .@"extern" => relocs_log.debug("  {s}: {x}: [{x} => {x}] G({x}) ({s})", .{
                 fmtRelocType(rel.meta.type, macho_file),
-                rel.offset,
+                rel_offset,
                 P,
                 S + A - SUB,
                 G + A,
@@ -257,7 +258,7 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
             }),
         }
 
-        try stream.seekTo(rel.offset);
+        try stream.seekTo(rel_offset);
 
         switch (rel_type) {
             .X86_64_RELOC_SUBTRACTOR => SUB = S,
@@ -291,7 +292,7 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
                 assert(rel.meta.length == 2);
                 assert(rel.meta.pcrel);
                 if (!sym.?.flags.import) {
-                    try relaxGotLoad(code[rel.offset - 3 ..]);
+                    try relaxGotLoad(code[rel_offset - 3 ..]);
                     try cwriter.writeInt(i32, @intCast(S + A - P - 4), .little);
                 } else {
                     try cwriter.writeInt(i32, @intCast(G + A - P - 4), .little);
@@ -318,7 +319,7 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
                     const S_: i64 = @intCast(sym.?.getTlvPtrAddress(macho_file));
                     try cwriter.writeInt(i32, @intCast(S_ + A - P - 4), .little);
                 } else {
-                    try relaxTlv(code[rel.offset - 3 ..]);
+                    try relaxTlv(code[rel_offset - 3 ..]);
                     try cwriter.writeInt(i32, @intCast(S + A - P - 4), .little);
                 }
             },
