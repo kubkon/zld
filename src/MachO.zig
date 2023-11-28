@@ -31,6 +31,7 @@ undefined_symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
 boundary_symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
 
 pagezero_seg_index: ?u8 = null,
+text_seg_index: ?u8 = null,
 linkedit_seg_index: ?u8 = null,
 data_sect_index: ?u8 = null,
 got_sect_index: ?u8 = null,
@@ -1167,6 +1168,59 @@ fn initSyntheticSections(self: *MachO) !void {
             .flags = macho.S_THREAD_LOCAL_VARIABLE_POINTERS,
         });
     }
+
+    for (self.boundary_symbols.items) |sym_index| {
+        const gpa = self.base.allocator;
+        const sym = self.getSymbol(sym_index);
+        const name = sym.getName(self);
+
+        if (mem.startsWith(u8, name, "segment$start$")) {
+            const segname = name["segment$start$".len..]; // TODO check segname is valid
+            if (self.getSegmentByName(segname) == null) {
+                const prot = getSegmentProt(segname);
+                _ = try self.segments.append(gpa, .{
+                    .cmdsize = @sizeOf(macho.segment_command_64),
+                    .segname = makeStaticString(segname),
+                    .initprot = prot,
+                    .maxprot = prot,
+                });
+            }
+        } else if (mem.startsWith(u8, name, "segment$stop$")) {
+            const segname = name["segment$stop$".len..]; // TODO check segname is valid
+            if (self.getSegmentByName(segname) == null) {
+                const prot = getSegmentProt(segname);
+                _ = try self.segments.append(gpa, .{
+                    .cmdsize = @sizeOf(macho.segment_command_64),
+                    .segname = makeStaticString(segname),
+                    .initprot = prot,
+                    .maxprot = prot,
+                });
+            }
+        } else if (mem.startsWith(u8, name, "section$start$")) {
+            const actual_name = name["section$start$".len..];
+            const sep = mem.indexOfScalar(u8, actual_name, '$').?; // TODO error rather than a panic
+            const segname = actual_name[0..sep]; // TODO check segname is valid
+            const sectname = actual_name[sep + 1 ..]; // TODO check sectname is valid
+            if (self.getSectionByName(segname, sectname) == null) {
+                _ = try self.addSection(segname, sectname, .{});
+            }
+        } else if (mem.startsWith(u8, name, "section$stop$")) {
+            const actual_name = name["section$stop$".len..];
+            const sep = mem.indexOfScalar(u8, actual_name, '$').?; // TODO error rather than a panic
+            const segname = actual_name[0..sep]; // TODO check segname is valid
+            const sectname = actual_name[sep + 1 ..]; // TODO check sectname is valid
+            if (self.getSectionByName(segname, sectname) == null) {
+                _ = try self.addSection(segname, sectname, .{});
+            }
+        } else unreachable;
+    }
+}
+
+fn getSegmentProt(segname: []const u8) macho.vm_prot_t {
+    if (mem.eql(u8, segname, "__PAGEZERO")) return macho.PROT.NONE;
+    if (mem.eql(u8, segname, "__TEXT")) return macho.PROT.READ | macho.PROT.EXEC;
+    if (mem.eql(u8, segname, "__LINKEDIT")) return macho.PROT.READ;
+    return macho.PROT.READ | macho.PROT.WRITE;
 }
 
 fn getSegmentRank(segname: []const u8) u4 {
@@ -1359,6 +1413,23 @@ fn calcSectionSizes(self: *MachO) !void {
 
 fn initSegments(self: *MachO) !void {
     const gpa = self.base.allocator;
+    const slice = self.sections.slice();
+
+    // First, create segments required by sections
+    for (slice.items(.header)) |header| {
+        const segname = header.segName();
+        if (self.getSegmentByName(segname) == null) {
+            const prot = getSegmentProt(segname);
+            try self.segments.append(gpa, .{
+                .cmdsize = @sizeOf(macho.segment_command_64),
+                .segname = makeStaticString(segname),
+                .maxprot = prot,
+                .initprot = prot,
+            });
+        }
+    }
+
+    // Add __PAGEZERO if required
     const pagezero_vmsize = self.options.pagezero_size orelse default_pagezero_vmsize;
     const aligned_pagezero_vmsize = mem.alignBackward(u64, pagezero_vmsize, self.getPageSize());
     if (!self.options.dylib and aligned_pagezero_vmsize > 0) {
@@ -1367,7 +1438,6 @@ fn initSegments(self: *MachO) !void {
             log.warn("requested __PAGEZERO size (0x{x}) is not page aligned", .{pagezero_vmsize});
             log.warn("  rounding down to 0x{x}", .{aligned_pagezero_vmsize});
         }
-        self.pagezero_seg_index = @intCast(self.segments.items.len);
         try self.segments.append(gpa, .{
             .cmdsize = @sizeOf(macho.segment_command_64),
             .segname = makeStaticString("__PAGEZERO"),
@@ -1375,17 +1445,20 @@ fn initSegments(self: *MachO) !void {
         });
     }
 
-    const getSegmentProt = struct {
-        fn getSegmentProt(segname: []const u8) macho.vm_prot_t {
-            if (mem.eql(u8, segname, "__PAGEZERO")) return macho.PROT.NONE;
-            if (mem.eql(u8, segname, "__TEXT")) return macho.PROT.READ | macho.PROT.EXEC;
-            if (mem.eql(u8, segname, "__LINKEDIT")) return macho.PROT.READ;
-            return macho.PROT.READ | macho.PROT.WRITE;
-        }
-    }.getSegmentProt;
+    // Add __LINKEDIT
+    {
+        const protection = getSegmentProt("__LINKEDIT");
+        self.linkedit_seg_index = @intCast(self.segments.items.len);
+        try self.segments.append(gpa, .{
+            .cmdsize = @sizeOf(macho.segment_command_64),
+            .segname = makeStaticString("__LINKEDIT"),
+            .maxprot = protection,
+            .initprot = protection,
+        });
+    }
 
     // __TEXT segment is non-optional
-    {
+    if (self.getSegmentByName("__TEXT") == null) {
         const protection = getSegmentProt("__TEXT");
         try self.segments.append(gpa, .{
             .cmdsize = @sizeOf(macho.segment_command_64),
@@ -1395,7 +1468,17 @@ fn initSegments(self: *MachO) !void {
         });
     }
 
-    const slice = self.sections.slice();
+    const sortFn = struct {
+        fn sortFn(ctx: void, lhs: macho.segment_command_64, rhs: macho.segment_command_64) bool {
+            _ = ctx;
+            return getSegmentRank(lhs.segName()) < getSegmentRank(rhs.segName());
+        }
+    }.sortFn;
+
+    // Sort segments
+    mem.sort(macho.segment_command_64, self.segments.items, {}, sortFn);
+
+    // Attach sections to segments
     for (slice.items(.header), slice.items(.segment_id)) |header, *seg_id| {
         const segname = header.segName();
         const segment_id = self.getSegmentByName(segname) orelse blk: {
@@ -1415,17 +1498,9 @@ fn initSegments(self: *MachO) !void {
         seg_id.* = segment_id;
     }
 
-    // __LINKEDIT always comes last
-    {
-        const protection = getSegmentProt("__LINKEDIT");
-        self.linkedit_seg_index = @intCast(self.segments.items.len);
-        try self.segments.append(gpa, .{
-            .cmdsize = @sizeOf(macho.segment_command_64),
-            .segname = makeStaticString("__LINKEDIT"),
-            .maxprot = protection,
-            .initprot = protection,
-        });
-    }
+    self.pagezero_seg_index = self.getSegmentByName("__PAGEZERO");
+    self.text_seg_index = self.getSegmentByName("__TEXT").?;
+    self.linkedit_seg_index = self.getSegmentByName("__LINKEDIT").?;
 }
 
 fn allocateSections(self: *MachO) !void {
@@ -1527,7 +1602,7 @@ fn allocateSymbols(self: *MachO) void {
 }
 
 fn allocateSyntheticSymbols(self: *MachO) void {
-    const text_seg = self.segments.items[self.getSegmentByName("__TEXT").?];
+    const text_seg = self.getTextSegment();
 
     if (self.mh_execute_header_index) |index| {
         const global = self.getSymbol(index);
@@ -1629,8 +1704,7 @@ fn initExportTrie(self: *MachO) !void {
 
     // TODO handle macho.EXPORT_SYMBOL_FLAGS_REEXPORT and macho.EXPORT_SYMBOL_FLAGS_STUB_AND_RESOLVER.
 
-    const seg_id = self.getSegmentByName("__TEXT").?;
-    const seg = self.segments.items[seg_id];
+    const seg = self.getTextSegment();
 
     for (self.objects.items) |index| {
         for (self.getFile(index).?.getSymbols()) |sym_index| {
@@ -1824,10 +1898,7 @@ fn writeDataInCode(self: *MachO) !void {
     const off = try self.getNextLinkeditOffset(@alignOf(u64));
     cmd.dataoff = @intCast(off);
 
-    const base = base: {
-        const seg_id = self.getSegmentByName("__TEXT").?;
-        break :base self.segments.items[seg_id].vmaddr;
-    };
+    const base = self.getTextSegment().vmaddr;
 
     const gpa = self.base.allocator;
     var dices = std.ArrayList(macho.data_in_code_entry).init(gpa);
@@ -2024,8 +2095,7 @@ fn writeLoadCommands(self: *MachO) !struct { usize, usize, usize } {
 
     if (self.entry_index) |global_index| {
         const sym = self.getSymbol(global_index);
-        const seg_id = self.getSegmentByName("__TEXT").?;
-        const seg = self.segments.items[seg_id];
+        const seg = self.getTextSegment();
         const entryoff: u32 = if (sym.getFile(self) == null)
             0
         else
@@ -2207,6 +2277,10 @@ pub fn getTlsAddress(self: MachO) u64 {
         else => {},
     };
     return 0;
+}
+
+pub inline fn getTextSegment(self: *MachO) *macho.segment_command_64 {
+    return &self.segments.items[self.text_seg_index.?];
 }
 
 pub inline fn getLinkeditSegment(self: *MachO) *macho.segment_command_64 {
