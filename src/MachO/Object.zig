@@ -66,7 +66,6 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
     } else {
         try self.initSections(macho_file);
     }
-    // try self.initSections(macho_file);
 
     try self.initLiteralSections(macho_file);
     self.linkNlistToAtom();
@@ -195,6 +194,7 @@ fn addAtom(self: *Object, args: AddAtomArgs, macho_file: *MachO) !Atom.Index {
     atom.n_sect = args.n_sect;
     atom.size = args.size;
     atom.alignment = args.alignment;
+    atom.off = args.off;
     try self.atoms.append(gpa, atom_index);
     return atom_index;
 }
@@ -327,12 +327,12 @@ fn initRelocs(self: *Object, macho_file: *MachO) !void {
                         else => 0,
                     };
                     const saddr: i64 = @as(i64, @intCast(sect.addr)) + rel.r_address;
-                    const off = @as(u64, @intCast(saddr + 4 + corr + disp - taddr));
+                    const off = @as(u64, @intCast(saddr + 4 + corr + disp));
                     target = self.findAtomByOffset(off, @intCast(nsect));
                     addend = saddr + 4 - taddr;
                 } else {
                     // off + taddr == A
-                    const off = @as(u64, @intCast(disp - taddr));
+                    const off = @as(u64, @intCast(disp));
                     target = self.findAtomByOffset(off, @intCast(nsect));
                     addend = (-1) * taddr;
                 }

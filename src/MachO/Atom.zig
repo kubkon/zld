@@ -223,7 +223,7 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
                 s.getFile(macho_file).?.getIndex() != macho_file.internal_object_index.?) continue;
         }
 
-        const P = @as(i64, @intCast(self.value)) + rel.offset;
+        const P = @as(i64, @intCast(self.value)) + @as(i64, @intCast(rel_offset));
         const A = switch (rel.meta.length) {
             0 => code[rel_offset],
             1 => mem.readInt(i16, code[rel_offset..][0..2], .little),
