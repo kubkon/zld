@@ -61,10 +61,31 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
         }
     }
 
+    const NlistIdx = struct {
+        nlist: macho.nlist_64,
+        idx: usize,
+
+        fn lessThan(ctx: void, lhs: @This(), rhs: @This()) bool {
+            _ = ctx;
+            if (lhs.nlist.n_sect == rhs.nlist.n_sect) {
+                return lhs.nlist.n_value < rhs.nlist.n_value;
+            }
+            return lhs.nlist.n_sect < rhs.nlist.n_sect;
+        }
+    };
+
+    var nlists = try std.ArrayList(NlistIdx).initCapacity(gpa, self.symtab.items(.nlist).len);
+    defer nlists.deinit();
+    for (self.symtab.items(.nlist), 0..) |nlist, i| {
+        if (nlist.stab() or !nlist.sect()) continue;
+        nlists.appendAssumeCapacity(.{ .nlist = nlist, .idx = i });
+    }
+    mem.sort(NlistIdx, nlists.items, {}, NlistIdx.lessThan);
+
     if (self.header.?.flags & macho.MH_SUBSECTIONS_VIA_SYMBOLS != 0) {
-        try self.initSubsections(macho_file);
+        try self.initSubsections(nlists.items, macho_file);
     } else {
-        try self.initSections(macho_file);
+        try self.initSections(nlists.items, macho_file);
     }
 
     try self.initLiteralSections(macho_file);
@@ -93,65 +114,54 @@ inline fn isLiteral(sect: macho.section_64) bool {
     };
 }
 
-fn initSubsections(self: *Object, macho_file: *MachO) !void {
+fn initSubsections(self: *Object, nlists: anytype, macho_file: *MachO) !void {
     const gpa = macho_file.base.allocator;
-
-    var nlists = try std.ArrayList(macho.nlist_64).initCapacity(gpa, self.symtab.items(.nlist).len);
-    defer nlists.deinit();
-    for (self.symtab.items(.nlist)) |nlist| {
-        if (nlist.stab() or !nlist.sect()) continue;
-        nlists.appendAssumeCapacity(nlist);
-    }
-
-    const sortFn = struct {
-        fn sortFn(ctx: void, lhs: macho.nlist_64, rhs: macho.nlist_64) bool {
-            _ = ctx;
-            if (lhs.n_sect == rhs.n_sect) {
-                return lhs.n_value < rhs.n_value;
-            }
-            return lhs.n_sect < rhs.n_sect;
-        }
-    }.sortFn;
-
-    mem.sort(macho.nlist_64, nlists.items, {}, sortFn);
-
     const slice = self.sections.slice();
     for (slice.items(.header), slice.items(.subsections), 0..) |sect, *subsections, n_sect| {
         if (sect.attrs() & macho.S_ATTR_DEBUG != 0) continue;
         if (sect.type() == macho.S_COALESCED and mem.eql(u8, "__eh_frame", sect.sectName())) continue;
         if (isLiteral(sect)) continue;
 
-        const nlist_start = for (nlists.items, 0..) |nlist, i| {
-            if (nlist.n_sect - 1 == n_sect) break i;
-        } else nlists.items.len;
-        const nlist_end = for (nlists.items[nlist_start..], nlist_start..) |nlist, i| {
-            if (nlist.n_sect - 1 != n_sect) break i;
-        } else nlists.items.len;
+        const nlist_start = for (nlists, 0..) |nlist, i| {
+            if (nlist.nlist.n_sect - 1 == n_sect) break i;
+        } else nlists.len;
+        const nlist_end = for (nlists[nlist_start..], nlist_start..) |nlist, i| {
+            if (nlist.nlist.n_sect - 1 != n_sect) break i;
+        } else nlists.len;
 
         var idx: usize = nlist_start;
         while (idx < nlist_end) {
-            const nlist = nlists.items[idx];
+            const nlist = nlists[idx];
 
-            while (idx < nlist_end and nlists.items[idx].n_value == nlist.n_value) : (idx += 1) {}
+            while (idx < nlist_end and
+                nlists[idx].nlist.n_value == nlist.nlist.n_value) : (idx += 1)
+            {}
 
             const size = if (idx < nlist_end)
-                nlists.items[idx].n_value - nlist.n_value
+                nlists[idx].nlist.n_value - nlist.nlist.n_value
             else
-                sect.addr + sect.size - nlist.n_value;
-            const alignment = if (nlist.n_value > 0) @min(@ctz(nlist.n_value), sect.@"align") else sect.@"align";
+                sect.addr + sect.size - nlist.nlist.n_value;
+            const alignment = if (nlist.nlist.n_value > 0)
+                @min(@ctz(nlist.nlist.n_value), sect.@"align")
+            else
+                sect.@"align";
             const atom_index = try self.addAtom(.{
-                .name = self.getString(nlist.n_strx),
+                .name = self.getString(nlist.nlist.n_strx),
                 .n_sect = @intCast(n_sect),
-                .off = nlist.n_value - sect.addr,
+                .off = nlist.nlist.n_value - sect.addr,
                 .size = size,
                 .alignment = alignment,
             }, macho_file);
-            try subsections.append(gpa, .{ .atom = atom_index, .off = nlist.n_value - sect.addr });
+            try subsections.append(gpa, .{
+                .atom = atom_index,
+                .off = nlist.nlist.n_value - sect.addr,
+            });
+            self.symtab.items(.size)[nlist.idx] = size;
         }
     }
 }
 
-fn initSections(self: *Object, macho_file: *MachO) !void {
+fn initSections(self: *Object, nlists: anytype, macho_file: *MachO) !void {
     const gpa = macho_file.base.allocator;
     const slice = self.sections.slice();
 
@@ -173,6 +183,28 @@ fn initSections(self: *Object, macho_file: *MachO) !void {
             .alignment = sect.@"align",
         }, macho_file);
         try slice.items(.subsections)[n_sect].append(gpa, .{ .atom = atom_index, .off = 0 });
+
+        const nlist_start = for (nlists, 0..) |nlist, i| {
+            if (nlist.nlist.n_sect - 1 == n_sect) break i;
+        } else nlists.len;
+        const nlist_end = for (nlists[nlist_start..], nlist_start..) |nlist, i| {
+            if (nlist.nlist.n_sect - 1 != n_sect) break i;
+        } else nlists.len;
+
+        var idx: usize = nlist_start;
+        while (idx < nlist_end) {
+            const nlist = nlists[idx];
+
+            while (idx < nlist_end and
+                nlists[idx].nlist.n_value == nlist.nlist.n_value) : (idx += 1)
+            {}
+
+            const size = if (idx < nlist_end)
+                nlists[idx].nlist.n_value - nlist.nlist.n_value
+            else
+                sect.addr + sect.size - nlist.nlist.n_value;
+            self.symtab.items(.size)[nlist.idx] = size;
+        }
     }
 }
 
