@@ -28,6 +28,7 @@ globals: std.AutoHashMapUnmanaged(u32, Symbol.Index) = .{},
 undefs: std.AutoHashMapUnmanaged(Symbol.Index, std.ArrayListUnmanaged(Atom.Index)) = .{},
 /// Global symbols we need to resolve for the link to succeed.
 undefined_symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
+boundary_symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
 
 pagezero_seg_index: ?u8 = null,
 linkedit_seg_index: ?u8 = null,
@@ -260,7 +261,6 @@ pub fn flush(self: *MachO) !void {
     // TODO kill __eh_frame atoms
 
     try self.convertTentativeDefinitions();
-    try self.convertBoundarySymbols();
     self.markImportsAndExports();
 
     // TODO dead strip atoms
@@ -945,12 +945,6 @@ fn convertTentativeDefinitions(self: *MachO) !void {
     }
 }
 
-fn convertBoundarySymbols(self: *MachO) !void {
-    for (self.objects.items) |index| {
-        try self.getFile(index).?.object.convertBoundarySymbols(self);
-    }
-}
-
 fn markImportsAndExports(self: *MachO) void {
     if (!self.options.dylib)
         for (self.dylibs.items) |index| {
@@ -1016,6 +1010,36 @@ fn resolveSyntheticSymbols(self: *MachO) !void {
 
     self.dso_handle_index = try internal.addSymbol("___dso_handle", self);
     self.dyld_private_index = try internal.addSymbol("dyld_private", self);
+
+    {
+        const gpa = self.base.allocator;
+        var boundary_symbols = std.AutoHashMap(Symbol.Index, void).init(gpa);
+        defer boundary_symbols.deinit();
+
+        for (self.objects.items) |index| {
+            const object = self.getFile(index).?.object;
+            for (object.symbols.items, 0..) |sym_index, i| {
+                const nlist = object.symtab.items(.nlist)[i];
+                const name = self.getSymbol(sym_index).getName(self);
+                if (!nlist.undf() or !nlist.ext()) continue;
+                if (mem.startsWith(u8, name, "segment$start$") or
+                    mem.startsWith(u8, name, "segment$stop$") or
+                    mem.startsWith(u8, name, "section$start$") or
+                    mem.startsWith(u8, name, "section$stop$"))
+                {
+                    _ = try boundary_symbols.put(sym_index, {});
+                }
+            }
+        }
+
+        try self.boundary_symbols.ensureTotalCapacityPrecise(gpa, boundary_symbols.count());
+
+        var it = boundary_symbols.iterator();
+        while (it.next()) |entry| {
+            _ = try internal.addSymbol(self.getSymbol(entry.key_ptr.*).getName(self), self);
+            self.boundary_symbols.appendAssumeCapacity(entry.key_ptr.*);
+        }
+    }
 }
 
 fn claimUnresolved(self: *MachO) void {
@@ -1496,28 +1520,16 @@ fn allocateSymbols(self: *MachO) void {
             if (!atom.flags.alive) continue;
             if (sym.getFile(self).?.getIndex() != index) continue;
 
+            sym.value += atom.value;
             sym.out_n_sect = atom.out_n_sect;
-
-            if (sym.flags.boundary) {
-                const info: Symbol.BoundaryInfo = @bitCast(sym.getExtra(self).?.boundary);
-                if (info.segment) {
-                    const seg_id = self.sections.items(.segment_id)[sym.out_n_sect];
-                    const seg = self.segments.items[seg_id];
-                    sym.value = if (info.start) seg.vmaddr else seg.vmaddr + seg.vmsize;
-                } else {
-                    const sect = self.sections.items(.header)[sym.out_n_sect];
-                    sym.value = if (info.start) sect.addr else sect.addr + sect.size;
-                }
-            } else {
-                sym.value += atom.value;
-            }
         }
     }
 }
 
 fn allocateSyntheticSymbols(self: *MachO) void {
+    const text_seg = self.segments.items[self.getSegmentByName("__TEXT").?];
+
     if (self.mh_execute_header_index) |index| {
-        const text_seg = self.segments.items[self.getSegmentByName("__TEXT").?];
         const global = self.getSymbol(index);
         global.value = text_seg.vmaddr;
     }
@@ -1535,6 +1547,48 @@ fn allocateSyntheticSymbols(self: *MachO) void {
                 global.out_n_sect = idx;
             }
         }
+    }
+
+    for (self.boundary_symbols.items) |sym_index| {
+        const sym = self.getSymbol(sym_index);
+        const name = sym.getName(self);
+
+        sym.flags.@"export" = false;
+        sym.value = text_seg.vmaddr;
+
+        if (mem.startsWith(u8, name, "segment$start$")) {
+            const segname = name["segment$start$".len..];
+            if (self.getSegmentByName(segname)) |seg_id| {
+                const seg = self.segments.items[seg_id];
+                sym.value = seg.vmaddr;
+            }
+        } else if (mem.startsWith(u8, name, "segment$stop$")) {
+            const segname = name["segment$stop$".len..];
+            if (self.getSegmentByName(segname)) |seg_id| {
+                const seg = self.segments.items[seg_id];
+                sym.value = seg.vmaddr + seg.vmsize;
+            }
+        } else if (mem.startsWith(u8, name, "section$start$")) {
+            const actual_name = name["section$start$".len..];
+            const sep = mem.indexOfScalar(u8, actual_name, '$').?; // TODO error rather than a panic
+            const segname = actual_name[0..sep];
+            const sectname = actual_name[sep + 1 ..];
+            if (self.getSectionByName(segname, sectname)) |sect_id| {
+                const sect = self.sections.items(.header)[sect_id];
+                sym.value = sect.addr;
+                sym.out_n_sect = sect_id;
+            }
+        } else if (mem.startsWith(u8, name, "section$stop$")) {
+            const actual_name = name["section$stop$".len..];
+            const sep = mem.indexOfScalar(u8, actual_name, '$').?; // TODO error rather than a panic
+            const segname = actual_name[0..sep];
+            const sectname = actual_name[sep + 1 ..];
+            if (self.getSectionByName(segname, sectname)) |sect_id| {
+                const sect = self.sections.items(.header)[sect_id];
+                sym.value = sect.addr + sect.size;
+                sym.out_n_sect = sect_id;
+            }
+        } else unreachable;
     }
 }
 

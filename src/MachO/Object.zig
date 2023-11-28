@@ -490,105 +490,6 @@ pub fn scanRelocs(self: Object, macho_file: *MachO) !void {
     // TODO scan __eh_frame relocs
 }
 
-pub fn convertBoundarySymbols(self: *Object, macho_file: *MachO) !void {
-    const parseBoundarySymbol = struct {
-        fn parseBoundarySymbol(name: []const u8) ?struct {
-            segment: bool,
-            start: bool,
-            segname: []const u8,
-            sectname: []const u8,
-        } {
-            invalid: {
-                var segment: ?bool = null;
-                var start: ?bool = null;
-                var segname: []const u8 = "";
-                var sectname: []const u8 = "";
-
-                var it = std.mem.splitScalar(u8, name, '$');
-                var next = it.next() orelse break :invalid;
-
-                if (std.mem.eql(u8, next, "segment")) {
-                    segment = true;
-                } else if (std.mem.eql(u8, next, "section")) {
-                    segment = false;
-                }
-
-                if (segment == null) break :invalid;
-
-                next = it.next() orelse break :invalid;
-
-                if (std.mem.eql(u8, next, "start")) {
-                    start = true;
-                } else if (std.mem.eql(u8, next, "stop")) {
-                    start = false;
-                }
-
-                if (start == null) break :invalid;
-
-                segname = it.next() orelse break :invalid;
-                if (!segment.?) sectname = it.next() orelse break :invalid;
-
-                return .{
-                    .segment = segment.?,
-                    .start = start.?,
-                    .segname = segname,
-                    .sectname = sectname,
-                };
-            }
-            return null;
-        }
-    }.parseBoundarySymbol;
-
-    const gpa = macho_file.base.allocator;
-
-    for (self.symbols.items, 0..) |index, i| {
-        const nlist_idx = @as(Symbol.Index, @intCast(i));
-        const nlist = &self.symtab.items(.nlist)[nlist_idx];
-        const nlist_atom = &self.symtab.items(.atom)[nlist_idx];
-        if (!nlist.ext()) continue;
-        if (!nlist.undf()) continue;
-
-        const sym = macho_file.getSymbol(index);
-        if (sym.getFile(macho_file)) |file| {
-            if (file.getIndex() != self.index) continue;
-        }
-
-        const name = sym.getName(macho_file);
-        const parsed = parseBoundarySymbol(name) orelse continue;
-
-        const info: Symbol.BoundaryInfo = .{
-            .segment = parsed.segment,
-            .start = parsed.start,
-        };
-        sym.flags.boundary = true;
-        try sym.addExtra(.{ .boundary = @bitCast(info) }, macho_file);
-
-        const atom_index = try macho_file.addAtom();
-        try self.atoms.append(gpa, atom_index);
-
-        const atom = macho_file.getAtom(atom_index).?;
-        atom.atom_index = atom_index;
-        atom.name = try macho_file.string_intern.insert(gpa, name);
-        atom.file = self.index;
-
-        const n_sect = try self.addSection(gpa, parsed.segname, parsed.sectname);
-        const sect = &self.sections.items(.header)[n_sect];
-        sect.flags = macho.S_REGULAR;
-        atom.n_sect = n_sect;
-
-        sym.value = 0;
-        sym.atom = atom_index;
-        sym.file = self.index;
-        sym.flags.weak = false;
-        sym.nlist_idx = nlist_idx;
-
-        nlist.n_value = 0;
-        nlist.n_type = macho.N_PEXT | macho.N_EXT | macho.N_SECT;
-        nlist.n_sect = n_sect + 1;
-        nlist_atom.* = atom_index;
-    }
-}
-
 pub fn convertTentativeDefinitions(self: *Object, macho_file: *MachO) !void {
     const gpa = macho_file.base.allocator;
     for (self.symbols.items, 0..) |index, i| {
@@ -878,7 +779,8 @@ pub fn claimUnresolved(self: Object, macho_file: *MachO) void {
         if (!nlist.undf()) continue;
 
         const sym = macho_file.getSymbol(sym_index);
-        if (sym.getFile(macho_file)) |_| {
+        if (sym.getFile(macho_file)) |file| {
+            if (file.getIndex() == macho_file.internal_object_index.?) continue;
             if (!sym.getNlist(macho_file).undf()) continue;
         }
 
