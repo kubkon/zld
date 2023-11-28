@@ -304,8 +304,8 @@ pub fn flush(self: *MachO) !void {
     );
 
     const ncmds, const sizeofcmds, const uuid_cmd_offset = try self.writeLoadCommands();
-    _ = uuid_cmd_offset;
     try self.writeHeader(ncmds, sizeofcmds);
+    try self.writeUuid(uuid_cmd_offset, self.requiresCodeSig());
 
     self.base.reportWarningsAndErrorsAndExit();
 }
@@ -2128,7 +2128,7 @@ fn writeLoadCommands(self: *MachO) !struct { usize, usize, usize } {
         }
     }
 
-    const uuid_cmd_offset = @sizeOf(macho.mach_header_64) + buffer.len;
+    const uuid_cmd_offset = @sizeOf(macho.mach_header_64) + cwriter.bytes_written;
     try writer.writeStruct(self.uuid_cmd);
     ncmds += 1;
 
@@ -2196,6 +2196,16 @@ fn writeHeader(self: *MachO, ncmds: usize, sizeofcmds: usize) !void {
     log.debug("writing Mach-O header {}", .{header});
 
     try self.base.file.pwriteAll(mem.asBytes(&header), 0);
+}
+
+fn writeUuid(self: *MachO, uuid_cmd_offset: usize, has_codesig: bool) !void {
+    const file_size = if (!has_codesig) blk: {
+        const seg = self.getLinkeditSegment();
+        break :blk seg.fileoff + seg.filesize;
+    } else self.codesig_cmd.dataoff;
+    try calcUuid(self.base.allocator, self.base.thread_pool, self.base.file, file_size, &self.uuid_cmd.uuid);
+    const offset = uuid_cmd_offset + @sizeOf(macho.load_command);
+    try self.base.file.pwriteAll(&self.uuid_cmd.uuid, offset);
 }
 
 pub inline fn getPageSize(self: MachO) u16 {
