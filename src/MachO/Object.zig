@@ -259,31 +259,13 @@ fn initLiteralSections(self: *Object, macho_file: *MachO) !void {
     }
 }
 
-fn findAtomByOffset(self: Object, offset: u64, n_sect: u8) Atom.Index {
-    const off = offset - self.sections.items(.header)[n_sect].addr;
+fn findAtomByOffset(self: Object, off: u64, n_sect: u8) Atom.Index {
+    const base = self.sections.items(.header)[n_sect].addr;
     const subsections = self.sections.items(.subsections)[n_sect];
-
-    var min: usize = 0;
-    var max: usize = subsections.items.len;
-    while (min < max) {
-        const index = (min + max) / 2;
-        const curr = subsections.items[index];
-        if (curr.off == off) {
-            min = index;
-            break;
-        }
-        if (curr.off < off) {
-            min = index + 1;
-        } else {
-            max = index;
-        }
+    for (subsections.items) |subsection| {
+        if (off >= subsection.off + base) return subsection.atom;
     }
-
-    if (min == subsections.items.len) {
-        min -= 1;
-    }
-
-    return subsections.items[min].atom;
+    return subsections.items[subsections.items.len - 1].atom;
 }
 
 fn linkNlistToAtom(self: *Object) void {
