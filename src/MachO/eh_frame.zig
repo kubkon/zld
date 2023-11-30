@@ -34,7 +34,7 @@ pub const Cie = struct {
                 if (enc != EH_PE.pcrel | EH_PE.indirect | EH_PE.sdata4) {
                     @panic("unexpected personality pointer encoding"); // TODO error
                 }
-                _ = try reader.readInt(u32, .little);
+                _ = try reader.readInt(u32, .little); // personality pointer
             },
             'L' => {
                 const enc = try reader.readByte();
