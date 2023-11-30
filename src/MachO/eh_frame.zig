@@ -84,7 +84,7 @@ pub const Fde = struct {
         const pc_begin = std.mem.readInt(i64, data[8..][0..8], .little);
         const taddr: u64 = @intCast(@as(i64, @intCast(sect.addr + fde.offset + 8)) + pc_begin);
         fde.atom = object.findAtom(taddr);
-        assert(fde.getAtom(macho_file) != null); // TODO convert into an error
+        assert(fde.atom != 0); // TODO convert into an error
 
         // Associate with a CIE
         const cie_ptr = std.mem.readInt(u32, data[4..8], .little);
@@ -141,8 +141,8 @@ pub const Fde = struct {
         return &object.cies.items[fde.cie];
     }
 
-    pub fn getAtom(fde: Fde, macho_file: *MachO) ?*Atom {
-        return macho_file.getAtom(fde.atom);
+    pub fn getAtom(fde: Fde, macho_file: *MachO) *Atom {
+        return macho_file.getAtom(fde.atom).?;
     }
 
     pub fn getLsdaAtom(fde: Fde, macho_file: *MachO) ?*Atom {

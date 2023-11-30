@@ -352,7 +352,7 @@ fn sortAtoms(self: *Object, macho_file: *MachO) !void {
         fn lessThanAtom(ctx: *MachO, lhs: Atom.Index, rhs: Atom.Index) bool {
             const lhsa = ctx.getAtom(lhs).?;
             const rhsa = ctx.getAtom(rhs).?;
-            return lhsa.getInputSection(ctx).addr < rhsa.getInputSection(ctx).addr;
+            return lhsa.getInputSection(ctx).addr + lhsa.off < rhsa.getInputSection(ctx).addr + rhsa.off;
         }
     }.lessThanAtom;
     mem.sort(Atom.Index, self.atoms.items, macho_file, lessThanAtom);
@@ -475,6 +475,16 @@ fn initEhFrameRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
     for (self.fdes.items) |*fde| {
         try fde.parse(macho_file);
     }
+
+    const sortFn = struct {
+        fn sortFn(ctx: *MachO, lhs: Fde, rhs: Fde) bool {
+            const lhsa = lhs.getAtom(ctx);
+            const rhsa = rhs.getAtom(ctx);
+            return lhsa.getInputSection(ctx).addr + lhsa.off < rhsa.getInputSection(ctx).addr + rhsa.off;
+        }
+    }.sortFn;
+
+    mem.sort(Fde, self.fdes.items, macho_file, sortFn);
 }
 
 fn initPlatform(self: *Object) void {

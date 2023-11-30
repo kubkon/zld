@@ -29,8 +29,6 @@ relocs: Loc = .{},
 /// Index of this atom in the linker's atoms table.
 atom_index: Index = 0,
 
-fdes: Loc = .{},
-
 flags: Flags = .{},
 
 pub fn getName(self: Atom, macho_file: *MachO) [:0]const u8 {
@@ -61,18 +59,6 @@ pub fn getRelocs(self: Atom, macho_file: *MachO) []const Object.Relocation {
     const object = self.getObject(macho_file);
     const relocs = object.sections.items(.relocs)[self.n_sect];
     return relocs.items[self.relocs.pos..][0..self.relocs.len];
-}
-
-pub fn getFdes(self: Atom, macho_file: *MachO) []Fde {
-    if (self.fdes.len == 0) return &[0]Fde{};
-    const object = self.getObject(macho_file);
-    return object.fdes.items[self.fdes.pos..][0..self.fdes.len];
-}
-
-pub fn markFdesDead(self: Atom, macho_file: *MachO) void {
-    for (self.getFdes(macho_file)) |*fde| {
-        fde.alive = false;
-    }
 }
 
 pub fn initOutputSection(sect: macho.section_64, macho_file: *MachO) !u8 {
