@@ -18,6 +18,9 @@ dwarf_info: ?DwarfInfo = null,
 eh_frame_sect_index: ?u8 = null,
 compact_unwind_sect_index: ?u8 = null,
 
+cies: std.ArrayListUnmanaged(Cie) = .{},
+fdes: std.ArrayListUnmanaged(Fde) = .{},
+
 alive: bool = true,
 num_rebase_relocs: u32 = 0,
 num_bind_relocs: u32 = 0,
@@ -28,6 +31,8 @@ pub fn deinit(self: *Object, gpa: Allocator) void {
     self.symtab.deinit(gpa);
     self.symbols.deinit(gpa);
     self.atoms.deinit(gpa);
+    self.cies.deinit(gpa);
+    self.fdes.deinit(gpa);
     if (self.dwarf_info) |*dw| dw.deinit(gpa);
 }
 
@@ -274,11 +279,20 @@ fn initLiteralSections(self: *Object, macho_file: *MachO) !void {
     }
 }
 
-fn findAtomByOffset(self: Object, off: u64, n_sect: u8) Atom.Index {
+fn findAtom(self: Object, addr: u64) Atom.Index {
+    for (self.sections.items(.header), 0..) |sect, n_sect| {
+        if (sect.addr <= addr and addr < sect.addr + sect.size) {
+            return self.findAtomInSection(addr, @intCast(n_sect));
+        }
+    }
+    unreachable;
+}
+
+fn findAtomInSection(self: Object, addr: u64, n_sect: u8) Atom.Index {
     const base = self.sections.items(.header)[n_sect].addr;
     const subsections = self.sections.items(.subsections)[n_sect];
     for (subsections.items) |subsection| {
-        if (off >= subsection.off + base) return subsection.atom;
+        if (addr >= subsection.off + base) return subsection.atom;
     }
     return subsections.items[subsections.items.len - 1].atom;
 }
@@ -286,7 +300,7 @@ fn findAtomByOffset(self: Object, off: u64, n_sect: u8) Atom.Index {
 fn linkNlistToAtom(self: *Object) void {
     for (self.symtab.items(.nlist), self.symtab.items(.atom)) |nlist, *atom| {
         if (!nlist.stab() and nlist.sect()) {
-            atom.* = self.findAtomByOffset(nlist.n_value, nlist.n_sect - 1);
+            atom.* = self.findAtomInSection(nlist.n_value, nlist.n_sect - 1);
         }
     }
 }
@@ -375,12 +389,12 @@ fn initRelocs(self: *Object, macho_file: *MachO) !void {
                     };
                     const saddr: i64 = @as(i64, @intCast(sect.addr)) + rel.r_address;
                     const off = @as(u64, @intCast(saddr + 4 + corr + disp));
-                    target = self.findAtomByOffset(off, @intCast(nsect));
+                    target = self.findAtomInSection(off, @intCast(nsect));
                     addend = saddr + 4 - taddr;
                 } else {
                     // off + taddr == A
                     const off = @as(u64, @intCast(disp));
-                    target = self.findAtomByOffset(off, @intCast(nsect));
+                    target = self.findAtomInSection(off, @intCast(nsect));
                     addend = (-1) * taddr;
                 }
             } else {
@@ -422,13 +436,43 @@ fn initRelocs(self: *Object, macho_file: *MachO) !void {
 }
 
 fn initEhFrameRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
+    const gpa = macho_file.base.allocator;
     const slice = self.sections.slice();
     const sect = slice.items(.header)[sect_id];
     const relocs = slice.items(.relocs)[sect_id];
+    _ = relocs;
 
-    if (relocs.items.len > 0) @panic("TODO handle non-empty __eh_frame relocs");
-    _ = sect;
-    _ = macho_file;
+    // TODO check for relocs in FDEs and apply them
+
+    const data = self.getSectionData(sect_id);
+    var it = eh_frame.Iterator{ .data = data };
+    while (try it.next()) |rec| {
+        switch (rec.tag) {
+            .cie => try self.cies.append(gpa, .{
+                .offset = rec.offset,
+                .size = rec.size,
+                .file = self.index,
+            }),
+            .fde => {
+                var fde = Fde{
+                    .offset = rec.offset,
+                    .size = rec.size,
+                    .cie = undefined,
+                    .file = self.index,
+                };
+                const taddr = fde.getTargetAddress(macho_file);
+                fde.atom = self.findAtom(taddr);
+                assert(fde.getAtom(macho_file) != null);
+                try self.fdes.append(gpa, fde);
+            },
+        }
+
+        std.debug.print("  {s}: {x} - {x}\n", .{
+            @tagName(rec.tag),
+            sect.addr + rec.offset,
+            sect.addr + rec.offset + rec.size + 4,
+        });
+    }
 }
 
 fn initPlatform(self: *Object) void {
@@ -1021,6 +1065,7 @@ const Nlist = struct {
 };
 
 const assert = std.debug.assert;
+const eh_frame = @import("eh_frame.zig");
 const log = std.log.scoped(.link);
 const macho = std.macho;
 const math = std.math;
@@ -1030,7 +1075,9 @@ const std = @import("std");
 
 const Allocator = mem.Allocator;
 const Atom = @import("Atom.zig");
+const Cie = eh_frame.Cie;
 const DwarfInfo = @import("DwarfInfo.zig");
+const Fde = eh_frame.Fde;
 const File = @import("file.zig").File;
 const LoadCommandIterator = macho.LoadCommandIterator;
 const MachO = @import("../MachO.zig");
