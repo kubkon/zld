@@ -3,6 +3,7 @@ pub const Cie = struct {
     offset: u32,
     size: u32,
     lsda_size: ?enum { p32, p64 } = null,
+    personality: ?Personality = null,
     file: File.Index = 0,
     alive: bool = true,
 
@@ -62,7 +63,22 @@ pub const Cie = struct {
         return data[cie.offset..][0..cie.getSize()];
     }
 
+    pub fn getPersonalityTarget(cie: Cie, macho_file: *MachO) ?*Symbol {
+        const personality = cie.personality orelse return null;
+        return macho_file.getSymbol(personality.index);
+    }
+
+    pub fn getPersonalityOffset(cie: Cie) ?u32 {
+        const personality = cie.personality orelse return null;
+        return personality.offset;
+    }
+
     pub const Index = u32;
+
+    pub const Personality = struct {
+        index: Symbol.Index = 0,
+        offset: u32 = 0,
+    };
 };
 
 pub const Fde = struct {
@@ -788,3 +804,4 @@ const Atom = @import("Atom.zig");
 const File = @import("file.zig").File;
 const MachO = @import("../MachO.zig");
 const Object = @import("Object.zig");
+const Symbol = @import("Symbol.zig");

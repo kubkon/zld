@@ -446,7 +446,6 @@ fn initRelocs(self: *Object, macho_file: *MachO) !void {
 fn initEhFrameRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
     const gpa = macho_file.base.allocator;
     const relocs = self.sections.items(.relocs)[sect_id];
-    _ = relocs;
 
     // TODO check for relocs in FDEs and apply them
 
@@ -485,6 +484,21 @@ fn initEhFrameRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
     }.sortFn;
 
     mem.sort(Fde, self.fdes.items, macho_file, sortFn);
+
+    // Parse and attach personality pointers to CIEs if any
+    for (relocs.items) |rel| {
+        const rel_type: macho.reloc_type_x86_64 = @enumFromInt(rel.meta.type);
+        switch (rel_type) {
+            .X86_64_RELOC_GOT => {
+                assert(rel.meta.length == 2 and rel.tag == .@"extern"); // TODO error
+                const cie = for (self.cies.items) |*cie| {
+                    if (cie.offset <= rel.offset and rel.offset < cie.offset + cie.getSize()) break cie;
+                } else unreachable; // TODO error
+                cie.personality = .{ .index = @intCast(rel.target), .offset = rel.offset - cie.offset };
+            },
+            else => {},
+        }
+    }
 }
 
 fn initPlatform(self: *Object) void {
