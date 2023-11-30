@@ -20,6 +20,7 @@ compact_unwind_sect_index: ?u8 = null,
 
 cies: std.ArrayListUnmanaged(Cie) = .{},
 fdes: std.ArrayListUnmanaged(Fde) = .{},
+unwind_records: std.ArrayListUnmanaged(UnwindInfo.Record) = .{},
 
 alive: bool = true,
 num_rebase_relocs: u32 = 0,
@@ -33,6 +34,7 @@ pub fn deinit(self: *Object, gpa: Allocator) void {
     self.atoms.deinit(gpa);
     self.cies.deinit(gpa);
     self.fdes.deinit(gpa);
+    self.unwind_records.deinit(gpa);
     if (self.dwarf_info) |*dw| dw.deinit(gpa);
 }
 
@@ -113,7 +115,9 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
         try self.initEhFrameRecords(index, macho_file);
     }
 
-    // TODO __compact_unwind records
+    if (self.compact_unwind_sect_index) |index| {
+        try self.initUnwindRecords(index, macho_file);
+    }
 
     self.initPlatform();
     try self.initDwarfInfo(gpa);
@@ -418,6 +422,7 @@ fn initRelocs(self: *Object, macho_file: *MachO) !void {
                     .pcrel = rel.r_pcrel == 1,
                     .length = rel.r_length,
                     .type = rel.r_type,
+                    .symbolnum = rel.r_symbolnum,
                 },
             });
         }
@@ -447,7 +452,7 @@ fn initEhFrameRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
     const gpa = macho_file.base.allocator;
     const relocs = self.sections.items(.relocs)[sect_id];
 
-    // TODO check for relocs in FDEs and apply them
+    // TODO check for non-personality relocs in FDEs and apply them
 
     const data = self.getSectionData(sect_id);
     var it = eh_frame.Iterator{ .data = data };
@@ -498,6 +503,107 @@ fn initEhFrameRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
             },
             else => {},
         }
+    }
+}
+
+fn initUnwindRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
+    const gpa = macho_file.base.allocator;
+    const cpu_arch = macho_file.options.cpu_arch.?;
+    const data = self.getSectionData(sect_id);
+    const nrecs = @divExact(data.len, @sizeOf(macho.compact_unwind_entry));
+
+    var recs = try std.ArrayList(macho.compact_unwind_entry).initCapacity(gpa, nrecs);
+    defer recs.deinit();
+    recs.appendUnalignedSliceAssumeCapacity(
+        @as([*]align(1) const macho.compact_unwind_entry, @ptrCast(data.ptr))[0..nrecs],
+    );
+
+    const cuSortFn = struct {
+        fn cuSortFn(ctx: void, lhs: macho.compact_unwind_entry, rhs: macho.compact_unwind_entry) bool {
+            _ = ctx;
+            return lhs.rangeStart < rhs.rangeStart;
+        }
+    }.cuSortFn;
+    mem.sort(macho.compact_unwind_entry, recs.items, {}, cuSortFn);
+
+    try self.unwind_records.resize(gpa, nrecs);
+
+    const relocs = self.sections.items(.relocs)[sect_id].items;
+    var reloc_idx: usize = 0;
+    var fde_idx: Fde.Index = 0;
+    for (recs.items, self.unwind_records.items, 0..) |rec, *out, rec_idx| {
+        const rec_start = rec_idx * @sizeOf(macho.compact_unwind_entry);
+        const rec_end = rec_start + @sizeOf(macho.compact_unwind_entry);
+        const reloc_start = reloc_idx;
+        while (reloc_idx < relocs.len and
+            relocs[reloc_idx].offset < rec_end) : (reloc_idx += 1)
+        {}
+
+        out.* = .{
+            .length = rec.rangeLength,
+            .enc = .{ .enc = rec.compactUnwindEncoding },
+        };
+
+        for (relocs[reloc_start..reloc_idx]) |rel| {
+            const rel_type: macho.reloc_type_x86_64 = @enumFromInt(rel.meta.type);
+            assert(rel_type == .X86_64_RELOC_UNSIGNED and rel.meta.length == 3); // TODO error
+            const offset = rel.offset - rec_start;
+            switch (offset) {
+                0 => switch (rel.tag) { // target symbol
+                    .@"extern" => {
+                        out.atom = self.symtab.items(.atom)[rel.meta.symbolnum];
+                        out.atom_offset = @intCast(rec.rangeStart);
+                    },
+                    .local => {
+                        out.atom = self.findAtom(rec.rangeStart);
+                        const atom = out.getAtom(macho_file);
+                        out.atom_offset = @intCast(rec.rangeStart - atom.getInputSection(macho_file).addr - atom.off);
+                    },
+                },
+                16 => { // personality function
+                    assert(rel.tag == .@"extern"); // TODO error
+                    out.personality = rel.target;
+                },
+                24 => switch (rel.tag) { // lsda
+                    .@"extern" => {
+                        out.lsda = self.symtab.items(.atom)[rel.meta.symbolnum];
+                        out.lsda_offset = @intCast(rec.lsda);
+                    },
+                    .local => {
+                        out.lsda = self.findAtom(rec.lsda);
+                        const atom = out.getLsdaAtom(macho_file).?;
+                        out.lsda_offset = @intCast(rec.lsda - atom.getInputSection(macho_file).addr - atom.off);
+                    },
+                },
+                else => {},
+            }
+        }
+
+        if (out.enc.isDwarf(cpu_arch)) {
+            // Associate FDE with this unwind record
+            // Since we have sorted unwind records and eh_frame records by address,
+            // we just grab the next available FDE as they have to match.
+            if (fde_idx < self.fdes.items.len) {
+                out.fde = fde_idx;
+                const fde = self.fdes.items[fde_idx];
+                assert(out.atom == fde.atom); // TODO error
+                fde_idx += 1;
+            }
+        }
+    }
+
+    for (self.unwind_records.items, 0..) |rec, i| {
+        std.debug.print("{d}: atom({d},{x}) {s}, lsda atom({d},{x}) {s}, personality %{?d} {s}\n", .{
+            i,
+            rec.atom,
+            rec.atom_offset,
+            rec.getAtom(macho_file).getName(macho_file),
+            rec.lsda,
+            rec.lsda_offset,
+            if (rec.getLsdaAtom(macho_file)) |lsda| lsda.getName(macho_file) else "",
+            rec.personality,
+            if (rec.getPersonalityTarget(macho_file)) |target| target.getName(macho_file) else "",
+        });
     }
 }
 
@@ -1066,6 +1172,7 @@ pub const Relocation = struct {
         pcrel: bool,
         length: u2,
         type: u4,
+        symbolnum: u24,
     },
 
     pub fn getTargetSymbol(rel: Relocation, macho_file: *MachO) *Symbol {
@@ -1110,3 +1217,4 @@ const MachO = @import("../MachO.zig");
 const Object = @This();
 const StringTable = @import("../strtab.zig").StringTable;
 const Symbol = @import("Symbol.zig");
+const UnwindInfo = @import("UnwindInfo.zig");

@@ -87,7 +87,9 @@ pub const Fde = struct {
     size: u32,
     cie: Cie.Index,
     atom: Atom.Index = 0,
+    atom_offset: u32 = 0,
     lsda: Atom.Index = 0,
+    lsda_offset: u32 = 0,
     file: File.Index = 0,
     alive: bool = true,
 
@@ -100,7 +102,8 @@ pub const Fde = struct {
         const pc_begin = std.mem.readInt(i64, data[8..][0..8], .little);
         const taddr: u64 = @intCast(@as(i64, @intCast(sect.addr + fde.offset + 8)) + pc_begin);
         fde.atom = object.findAtom(taddr);
-        assert(fde.atom != 0); // TODO convert into an error
+        const atom = fde.getAtom(macho_file);
+        fde.atom_offset = @intCast(taddr - atom.getInputSection(macho_file).addr - atom.off);
 
         // Associate with a CIE
         const cie_ptr = std.mem.readInt(u32, data[4..8], .little);
@@ -133,7 +136,8 @@ pub const Fde = struct {
             };
             const lsda_addr: u64 = @intCast(@as(i64, @intCast(sect.addr + 24 + offset + fde.offset)) + lsda_ptr);
             fde.lsda = object.findAtom(lsda_addr);
-            assert(fde.getLsdaAtom(macho_file) != null); // TODO convert into an error
+            const lsda_atom = fde.getLsdaAtom(macho_file).?;
+            fde.lsda_offset = @intCast(lsda_addr - lsda_atom.getInputSection(macho_file).addr - lsda_atom.off);
         }
     }
 
@@ -164,6 +168,8 @@ pub const Fde = struct {
     pub fn getLsdaAtom(fde: Fde, macho_file: *MachO) ?*Atom {
         return macho_file.getAtom(fde.lsda);
     }
+
+    pub const Index = u32;
 };
 
 // pub fn scanRelocs(macho_file: *MachO) !void {
