@@ -2420,27 +2420,30 @@ fn fmtDumpState(
     _ = unused_fmt_string;
     for (self.objects.items) |index| {
         const object = self.getFile(index).?.object;
-        try writer.print("object({d}) : {} : alive({}) : has_debug({})", .{
+        try writer.print("object({d}) : {} : has_debug({})", .{
             index,
             object.fmtPath(),
-            object.alive,
             object.hasDebugInfo(),
         });
+        if (!object.alive) try writer.writeAll(" : ([*])");
         try writer.writeByte('\n');
-        try writer.print("{}{}\n", .{
+        try writer.print("{}{}{}{}{}\n", .{
             object.fmtAtoms(self),
+            object.fmtCies(self),
+            object.fmtFdes(self),
+            object.fmtUnwindRecords(self),
             object.fmtSymtab(self),
         });
     }
     for (self.dylibs.items) |index| {
         const dylib = self.getFile(index).?.dylib;
-        try writer.print("dylib({d}) : {s} : alive({}) : needed({}) : weak({})", .{
+        try writer.print("dylib({d}) : {s} : needed({}) : weak({})", .{
             index,
             dylib.path,
-            dylib.alive,
             dylib.needed,
             dylib.weak,
         });
+        if (!dylib.alive) try writer.writeAll(" : ([*])");
         try writer.writeByte('\n');
         try writer.print("{}\n", .{dylib.fmtSymtab(self)});
     }

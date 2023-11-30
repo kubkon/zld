@@ -821,6 +821,7 @@ pub const Record = struct {
     personality: ?Symbol.Index = null, // TODO make this zero-is-null
     fde: Fde.Index = 0, // TODO actually make FDE at 0 an invalid FDE
     file: File.Index = 0,
+    alive: bool = true,
 
     pub fn getObject(rec: Record, macho_file: *MachO) *Object {
         return macho_file.getFile(rec.file).?.object;
@@ -854,6 +855,37 @@ pub const Record = struct {
         _ = unused_fmt_string;
         _ = options;
         _ = writer;
+        @compileError("do not format UnwindInfo.Records directly");
+    }
+
+    pub fn fmt(rec: Record, macho_file: *MachO) std.fmt.Formatter(format2) {
+        return .{ .data = .{
+            .rec = rec,
+            .macho_file = macho_file,
+        } };
+    }
+
+    const FormatContext = struct {
+        rec: Record,
+        macho_file: *MachO,
+    };
+
+    fn format2(
+        ctx: FormatContext,
+        comptime unused_fmt_string: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = unused_fmt_string;
+        _ = options;
+        const rec = ctx.rec;
+        const macho_file = ctx.macho_file;
+        try writer.print("{x} : len({x})", .{
+            rec.enc.enc, rec.length,
+        });
+        if (rec.enc.isDwarf(macho_file.options.cpu_arch.?)) try writer.print(" : fde({d})", .{rec.fde});
+        try writer.print(" : {s}", .{rec.getAtom(macho_file).getName(macho_file)});
+        if (!rec.alive) try writer.writeAll(" : [*]");
     }
 };
 

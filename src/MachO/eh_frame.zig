@@ -73,6 +73,47 @@ pub const Cie = struct {
         return personality.offset;
     }
 
+    pub fn format(
+        cie: Cie,
+        comptime unused_fmt_string: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = cie;
+        _ = unused_fmt_string;
+        _ = options;
+        _ = writer;
+        @compileError("do not format CIEs directly");
+    }
+
+    pub fn fmt(cie: Cie, macho_file: *MachO) std.fmt.Formatter(format2) {
+        return .{ .data = .{
+            .cie = cie,
+            .macho_file = macho_file,
+        } };
+    }
+
+    const FormatContext = struct {
+        cie: Cie,
+        macho_file: *MachO,
+    };
+
+    fn format2(
+        ctx: FormatContext,
+        comptime unused_fmt_string: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = unused_fmt_string;
+        _ = options;
+        const cie = ctx.cie;
+        try writer.print("@{x} : size({x})", .{
+            cie.offset,
+            cie.getSize(),
+        });
+        if (!cie.alive) try writer.writeAll(" : [*]");
+    }
+
     pub const Index = u32;
 
     pub const Personality = struct {
@@ -167,6 +208,50 @@ pub const Fde = struct {
 
     pub fn getLsdaAtom(fde: Fde, macho_file: *MachO) ?*Atom {
         return macho_file.getAtom(fde.lsda);
+    }
+
+    pub fn format(
+        fde: Fde,
+        comptime unused_fmt_string: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = fde;
+        _ = unused_fmt_string;
+        _ = options;
+        _ = writer;
+        @compileError("do not format FDEs directly");
+    }
+
+    pub fn fmt(fde: Fde, macho_file: *MachO) std.fmt.Formatter(format2) {
+        return .{ .data = .{
+            .fde = fde,
+            .macho_file = macho_file,
+        } };
+    }
+
+    const FormatContext = struct {
+        fde: Fde,
+        macho_file: *MachO,
+    };
+
+    fn format2(
+        ctx: FormatContext,
+        comptime unused_fmt_string: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = unused_fmt_string;
+        _ = options;
+        const fde = ctx.fde;
+        const macho_file = ctx.macho_file;
+        try writer.print("@{x} : size({x}) : cie({d}) : {s}", .{
+            fde.offset,
+            fde.getSize(),
+            fde.cie,
+            fde.getAtom(macho_file).getName(macho_file),
+        });
+        if (!fde.alive) try writer.writeAll(" : [*]");
     }
 
     pub const Index = u32;

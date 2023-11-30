@@ -448,6 +448,89 @@ fn initRelocs(self: *Object, macho_file: *MachO) !void {
     }
 }
 
+fn initUnwindRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
+    const gpa = macho_file.base.allocator;
+    const data = self.getSectionData(sect_id);
+    const nrecs = @divExact(data.len, @sizeOf(macho.compact_unwind_entry));
+    const recs = @as([*]align(1) const macho.compact_unwind_entry, @ptrCast(data.ptr))[0..nrecs];
+
+    try self.unwind_records.resize(gpa, nrecs);
+
+    const relocs = self.sections.items(.relocs)[sect_id].items;
+    var reloc_idx: usize = 0;
+    for (recs, self.unwind_records.items, 0..) |rec, *out, rec_idx| {
+        const rec_start = rec_idx * @sizeOf(macho.compact_unwind_entry);
+        const rec_end = rec_start + @sizeOf(macho.compact_unwind_entry);
+        const reloc_start = reloc_idx;
+        while (reloc_idx < relocs.len and
+            relocs[reloc_idx].offset < rec_end) : (reloc_idx += 1)
+        {}
+
+        out.* = .{
+            .length = rec.rangeLength,
+            .enc = .{ .enc = rec.compactUnwindEncoding },
+        };
+
+        for (relocs[reloc_start..reloc_idx]) |rel| {
+            const rel_type: macho.reloc_type_x86_64 = @enumFromInt(rel.meta.type);
+            assert(rel_type == .X86_64_RELOC_UNSIGNED and rel.meta.length == 3); // TODO error
+            const offset = rel.offset - rec_start;
+            switch (offset) {
+                0 => switch (rel.tag) { // target symbol
+                    .@"extern" => {
+                        out.atom = self.symtab.items(.atom)[rel.meta.symbolnum];
+                        out.atom_offset = @intCast(rec.rangeStart);
+                    },
+                    .local => {
+                        out.atom = self.findAtom(rec.rangeStart);
+                        const atom = out.getAtom(macho_file);
+                        out.atom_offset = @intCast(rec.rangeStart - atom.getInputSection(macho_file).addr - atom.off);
+                    },
+                },
+                16 => { // personality function
+                    assert(rel.tag == .@"extern"); // TODO error
+                    out.personality = rel.target;
+                },
+                24 => switch (rel.tag) { // lsda
+                    .@"extern" => {
+                        out.lsda = self.symtab.items(.atom)[rel.meta.symbolnum];
+                        out.lsda_offset = @intCast(rec.lsda);
+                    },
+                    .local => {
+                        out.lsda = self.findAtom(rec.lsda);
+                        const atom = out.getLsdaAtom(macho_file).?;
+                        out.lsda_offset = @intCast(rec.lsda - atom.getInputSection(macho_file).addr - atom.off);
+                    },
+                },
+                else => {},
+            }
+        }
+    }
+
+    const sortFn = struct {
+        fn sortFn(ctx: *MachO, lhs: UnwindInfo.Record, rhs: UnwindInfo.Record) bool {
+            const lhsa = lhs.getAtom(ctx);
+            const rhsa = rhs.getAtom(ctx);
+            return lhsa.getInputSection(ctx).addr + lhsa.off + lhs.atom_offset <
+                rhsa.getInputSection(ctx).addr + rhsa.off + rhs.atom_offset;
+        }
+    }.sortFn;
+    mem.sort(UnwindInfo.Record, self.unwind_records.items, macho_file, sortFn);
+
+    // Associate unwind records to atoms
+    var next_cu: u32 = 0;
+    while (next_cu < self.unwind_records.items.len) {
+        const start = next_cu;
+        const rec = self.unwind_records.items[start];
+        while (next_cu < self.unwind_records.items.len and
+            self.unwind_records.items[next_cu].atom == rec.atom) : (next_cu += 1)
+        {}
+
+        const atom = rec.getAtom(macho_file);
+        atom.unwind_records = .{ .pos = start, .len = next_cu - start };
+    }
+}
+
 fn initEhFrameRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
     const gpa = macho_file.base.allocator;
     const relocs = self.sections.items(.relocs)[sect_id];
@@ -504,106 +587,16 @@ fn initEhFrameRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
             else => {},
         }
     }
-}
 
-fn initUnwindRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
-    const gpa = macho_file.base.allocator;
-    const cpu_arch = macho_file.options.cpu_arch.?;
-    const data = self.getSectionData(sect_id);
-    const nrecs = @divExact(data.len, @sizeOf(macho.compact_unwind_entry));
+    // Associate unwind records to atoms
+    var next_fde: u32 = 0;
+    while (next_fde < self.fdes.items.len) {
+        const start = next_fde;
+        const fde = self.fdes.items[start];
+        while (next_fde < self.fdes.items.len and self.fdes.items[next_fde].atom == fde.atom) : (next_fde += 1) {}
 
-    var recs = try std.ArrayList(macho.compact_unwind_entry).initCapacity(gpa, nrecs);
-    defer recs.deinit();
-    recs.appendUnalignedSliceAssumeCapacity(
-        @as([*]align(1) const macho.compact_unwind_entry, @ptrCast(data.ptr))[0..nrecs],
-    );
-
-    const cuSortFn = struct {
-        fn cuSortFn(ctx: void, lhs: macho.compact_unwind_entry, rhs: macho.compact_unwind_entry) bool {
-            _ = ctx;
-            return lhs.rangeStart < rhs.rangeStart;
-        }
-    }.cuSortFn;
-    mem.sort(macho.compact_unwind_entry, recs.items, {}, cuSortFn);
-
-    try self.unwind_records.resize(gpa, nrecs);
-
-    const relocs = self.sections.items(.relocs)[sect_id].items;
-    var reloc_idx: usize = 0;
-    var fde_idx: Fde.Index = 0;
-    for (recs.items, self.unwind_records.items, 0..) |rec, *out, rec_idx| {
-        const rec_start = rec_idx * @sizeOf(macho.compact_unwind_entry);
-        const rec_end = rec_start + @sizeOf(macho.compact_unwind_entry);
-        const reloc_start = reloc_idx;
-        while (reloc_idx < relocs.len and
-            relocs[reloc_idx].offset < rec_end) : (reloc_idx += 1)
-        {}
-
-        out.* = .{
-            .length = rec.rangeLength,
-            .enc = .{ .enc = rec.compactUnwindEncoding },
-        };
-
-        for (relocs[reloc_start..reloc_idx]) |rel| {
-            const rel_type: macho.reloc_type_x86_64 = @enumFromInt(rel.meta.type);
-            assert(rel_type == .X86_64_RELOC_UNSIGNED and rel.meta.length == 3); // TODO error
-            const offset = rel.offset - rec_start;
-            switch (offset) {
-                0 => switch (rel.tag) { // target symbol
-                    .@"extern" => {
-                        out.atom = self.symtab.items(.atom)[rel.meta.symbolnum];
-                        out.atom_offset = @intCast(rec.rangeStart);
-                    },
-                    .local => {
-                        out.atom = self.findAtom(rec.rangeStart);
-                        const atom = out.getAtom(macho_file);
-                        out.atom_offset = @intCast(rec.rangeStart - atom.getInputSection(macho_file).addr - atom.off);
-                    },
-                },
-                16 => { // personality function
-                    assert(rel.tag == .@"extern"); // TODO error
-                    out.personality = rel.target;
-                },
-                24 => switch (rel.tag) { // lsda
-                    .@"extern" => {
-                        out.lsda = self.symtab.items(.atom)[rel.meta.symbolnum];
-                        out.lsda_offset = @intCast(rec.lsda);
-                    },
-                    .local => {
-                        out.lsda = self.findAtom(rec.lsda);
-                        const atom = out.getLsdaAtom(macho_file).?;
-                        out.lsda_offset = @intCast(rec.lsda - atom.getInputSection(macho_file).addr - atom.off);
-                    },
-                },
-                else => {},
-            }
-        }
-
-        if (out.enc.isDwarf(cpu_arch)) {
-            // Associate FDE with this unwind record
-            // Since we have sorted unwind records and eh_frame records by address,
-            // we just grab the next available FDE as they have to match.
-            if (fde_idx < self.fdes.items.len) {
-                out.fde = fde_idx;
-                const fde = self.fdes.items[fde_idx];
-                assert(out.atom == fde.atom); // TODO error
-                fde_idx += 1;
-            }
-        }
-    }
-
-    for (self.unwind_records.items, 0..) |rec, i| {
-        std.debug.print("{d}: atom({d},{x}) {s}, lsda atom({d},{x}) {s}, personality %{?d} {s}\n", .{
-            i,
-            rec.atom,
-            rec.atom_offset,
-            rec.getAtom(macho_file).getName(macho_file),
-            rec.lsda,
-            rec.lsda_offset,
-            if (rec.getLsdaAtom(macho_file)) |lsda| lsda.getName(macho_file) else "",
-            rec.personality,
-            if (rec.getPersonalityTarget(macho_file)) |target| target.getName(macho_file) else "",
-        });
+        const atom = fde.getAtom(macho_file);
+        atom.fdes = .{ .pos = start, .len = next_fde - start };
     }
 }
 
@@ -1106,6 +1099,72 @@ fn formatAtoms(
     for (object.atoms.items) |atom_index| {
         const atom = ctx.macho_file.getAtom(atom_index).?;
         try writer.print("    {}\n", .{atom.fmt(ctx.macho_file)});
+    }
+}
+
+pub fn fmtCies(self: *Object, macho_file: *MachO) std.fmt.Formatter(formatCies) {
+    return .{ .data = .{
+        .object = self,
+        .macho_file = macho_file,
+    } };
+}
+
+fn formatCies(
+    ctx: FormatContext,
+    comptime unused_fmt_string: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = unused_fmt_string;
+    _ = options;
+    const object = ctx.object;
+    try writer.writeAll("  cies\n");
+    for (object.cies.items, 0..) |cie, i| {
+        try writer.print("    cie({d}) : {}\n", .{ i, cie.fmt(ctx.macho_file) });
+    }
+}
+
+pub fn fmtFdes(self: *Object, macho_file: *MachO) std.fmt.Formatter(formatFdes) {
+    return .{ .data = .{
+        .object = self,
+        .macho_file = macho_file,
+    } };
+}
+
+fn formatFdes(
+    ctx: FormatContext,
+    comptime unused_fmt_string: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = unused_fmt_string;
+    _ = options;
+    const object = ctx.object;
+    try writer.writeAll("  fdes\n");
+    for (object.fdes.items, 0..) |fde, i| {
+        try writer.print("    fde({d}) : {}\n", .{ i, fde.fmt(ctx.macho_file) });
+    }
+}
+
+pub fn fmtUnwindRecords(self: *Object, macho_file: *MachO) std.fmt.Formatter(formatUnwindRecords) {
+    return .{ .data = .{
+        .object = self,
+        .macho_file = macho_file,
+    } };
+}
+
+fn formatUnwindRecords(
+    ctx: FormatContext,
+    comptime unused_fmt_string: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = unused_fmt_string;
+    _ = options;
+    const object = ctx.object;
+    try writer.writeAll("  unwind records\n");
+    for (object.unwind_records.items, 0..) |rec, i| {
+        try writer.print("    rec({d}) : {}\n", .{ i, rec.fmt(ctx.macho_file) });
     }
 }
 

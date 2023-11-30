@@ -29,6 +29,12 @@ relocs: Loc = .{},
 /// Index of this atom in the linker's atoms table.
 atom_index: Index = 0,
 
+/// Unwind records associated with this atom.
+unwind_records: Loc = .{},
+
+/// FDEs associated with this atom.
+fdes: Loc = .{},
+
 flags: Flags = .{},
 
 pub fn getName(self: Atom, macho_file: *MachO) [:0]const u8 {
@@ -59,6 +65,16 @@ pub fn getRelocs(self: Atom, macho_file: *MachO) []const Object.Relocation {
     const object = self.getObject(macho_file);
     const relocs = object.sections.items(.relocs)[self.n_sect];
     return relocs.items[self.relocs.pos..][0..self.relocs.len];
+}
+
+pub fn getUnwindRecords(self: Atom, macho_file: *MachO) []const UnwindInfo.Record {
+    const object = self.getObject(macho_file);
+    return object.unwind_records.items[self.unwind_records.pos..][0..self.unwind_records.len];
+}
+
+pub fn getFdes(self: Atom, macho_file: *MachO) []const Fde {
+    const object = self.getObject(macho_file);
+    return object.fdes.items[self.fdes.pos..][0..self.fdes.len];
 }
 
 pub fn initOutputSection(sect: macho.section_64, macho_file: *MachO) !u8 {
@@ -426,11 +442,29 @@ fn format2(
     _ = unused_fmt_string;
     const atom = ctx.atom;
     const macho_file = ctx.macho_file;
-    try writer.print("atom({d}) : {s} : @{x} : sect({d}) : align({x}) : size({x}) : alive({})", .{
-        atom.atom_index,  atom.getName(macho_file), atom.value,
-        atom.out_n_sect,  atom.alignment,           atom.size,
-        atom.flags.alive,
+    try writer.print("atom({d}) : {s} : @{x} : sect({d}) : align({x}) : size({x})", .{
+        atom.atom_index, atom.getName(macho_file), atom.value,
+        atom.out_n_sect, atom.alignment,           atom.size,
     });
+    if (!atom.flags.alive) try writer.writeAll(" : [*]");
+    if (atom.fdes.len > 0) {
+        try writer.writeAll(" : fdes{ ");
+        for (atom.getFdes(macho_file), atom.fdes.pos..) |fde, i| {
+            try writer.print("{d}", .{i});
+            if (!fde.alive) try writer.writeAll("([*])");
+            if (i < atom.fdes.pos + atom.fdes.len - 1) try writer.writeAll(", ");
+        }
+        try writer.writeAll(" }");
+    }
+    if (atom.unwind_records.len > 0) {
+        try writer.writeAll(" : unwind{ ");
+        for (atom.getUnwindRecords(macho_file), atom.unwind_records.pos..) |rec, i| {
+            try writer.print("{d}", .{i});
+            if (!rec.alive) try writer.writeAll("([*])");
+            if (i < atom.unwind_records.pos + atom.unwind_records.len - 1) try writer.writeAll(", ");
+        }
+        try writer.writeAll(" }");
+    }
 }
 
 const FormatRelocTypeContext = struct {
@@ -505,3 +539,4 @@ const Immediate = dis_x86_64.Immediate;
 const MachO = @import("../MachO.zig");
 const Object = @import("Object.zig");
 const Symbol = @import("Symbol.zig");
+const UnwindInfo = @import("UnwindInfo.zig");
