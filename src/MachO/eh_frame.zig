@@ -2,8 +2,65 @@ pub const Cie = struct {
     /// Includes 4byte size cell.
     offset: u32,
     size: u32,
+    lsda_size: ?enum { p32, p64 } = null,
     file: File.Index = 0,
-    alive: bool = false,
+    alive: bool = true,
+
+    pub fn parse(cie: *Cie, macho_file: *MachO) !void {
+        const data = cie.getData(macho_file);
+        const aug = std.mem.sliceTo(@as([*:0]const u8, @ptrCast(data.ptr + 9)), 0);
+
+        if (aug[0] != 'z') return; // TODO should we error out?
+
+        var stream = std.io.fixedBufferStream(data[9 + aug.len + 1 ..]);
+        var creader = std.io.countingReader(stream.reader());
+        const reader = creader.reader();
+
+        _ = try leb.readULEB128(u64, reader); // code alignment factor
+        _ = try leb.readULEB128(u64, reader); // data alignment factor
+        _ = try leb.readULEB128(u64, reader); // return address register
+        _ = try leb.readULEB128(u64, reader); // augmentation data length
+
+        for (aug[1..]) |ch| switch (ch) {
+            'R' => {
+                const enc = try reader.readByte();
+                if (enc & 0xf != EH_PE.absptr or enc & EH_PE.pcrel == 0) {
+                    @panic("unexpected pointer encoding"); // TODO error
+                }
+            },
+            'P' => {
+                const enc = try reader.readByte();
+                if (enc != EH_PE.pcrel | EH_PE.indirect | EH_PE.sdata4) {
+                    @panic("unexpected personality pointer encoding"); // TODO error
+                }
+                _ = try reader.readInt(u32, .little);
+            },
+            'L' => {
+                const enc = try reader.readByte();
+                switch (enc & 0xf) {
+                    EH_PE.sdata4 => cie.lsda_size = .p32,
+                    EH_PE.absptr => cie.lsda_size = .p64,
+                    else => unreachable, // TODO error
+                }
+            },
+            else => @panic("unexpected augmentation string"), // TODO error
+        };
+    }
+
+    pub inline fn getSize(cie: Cie) u32 {
+        return cie.size + 4;
+    }
+
+    pub fn getObject(cie: Cie, macho_file: *MachO) *Object {
+        const file = macho_file.getFile(cie.file).?;
+        return file.object;
+    }
+
+    pub fn getData(cie: Cie, macho_file: *MachO) []const u8 {
+        const object = cie.getObject(macho_file);
+        const data = object.getSectionData(object.eh_frame_sect_index.?);
+        return data[cie.offset..][0..cie.getSize()];
+    }
 
     pub const Index = u32;
 };
@@ -14,8 +71,55 @@ pub const Fde = struct {
     size: u32,
     cie: Cie.Index,
     atom: Atom.Index = 0,
+    lsda: Atom.Index = 0,
     file: File.Index = 0,
-    alive: bool = false,
+    alive: bool = true,
+
+    pub fn parse(fde: *Fde, macho_file: *MachO) !void {
+        const data = fde.getData(macho_file);
+        const object = fde.getObject(macho_file);
+        const sect = object.sections.items(.header)[object.eh_frame_sect_index.?];
+
+        // Parse target atom index
+        const pc_begin = std.mem.readInt(i64, data[8..][0..8], .little);
+        const taddr: u64 = @intCast(@as(i64, @intCast(sect.addr + fde.offset + 8)) + pc_begin);
+        fde.atom = object.findAtom(taddr);
+        assert(fde.getAtom(macho_file) != null); // TODO convert into an error
+
+        // Associate with a CIE
+        const cie_ptr = std.mem.readInt(u32, data[4..8], .little);
+        const cie_offset = fde.offset + 4 - cie_ptr;
+        const cie_index = for (object.cies.items, 0..) |cie, cie_index| {
+            if (cie.offset == cie_offset) break @as(Cie.Index, @intCast(cie_index));
+        } else null;
+        if (cie_index) |cie| {
+            fde.cie = cie;
+        } else {
+            macho_file.base.fatal("{}: no matching CIE found for FDE at offset {x}", .{
+                object.fmtPath(),
+                fde.offset,
+            });
+            return;
+        }
+
+        const cie = fde.getCie(macho_file);
+
+        // Parse LSDA atom index if any
+        if (cie.lsda_size) |lsda_size| {
+            var stream = std.io.fixedBufferStream(data[24..]);
+            var creader = std.io.countingReader(stream.reader());
+            const reader = creader.reader();
+            _ = try leb.readULEB128(u64, reader); // augmentation length
+            const offset = creader.bytes_read;
+            const lsda_ptr = switch (lsda_size) {
+                .p32 => try reader.readInt(i32, .little),
+                .p64 => try reader.readInt(i64, .little),
+            };
+            const lsda_addr: u64 = @intCast(@as(i64, @intCast(sect.addr + 24 + offset + fde.offset)) + lsda_ptr);
+            fde.lsda = object.findAtom(lsda_addr);
+            assert(fde.getLsdaAtom(macho_file) != null); // TODO convert into an error
+        }
+    }
 
     pub inline fn getSize(fde: Fde) u32 {
         return fde.size + 4;
@@ -32,16 +136,17 @@ pub const Fde = struct {
         return data[fde.offset..][0..fde.getSize()];
     }
 
-    pub fn getTargetAddress(fde: Fde, macho_file: *MachO) u64 {
+    pub fn getCie(fde: Fde, macho_file: *MachO) *const Cie {
         const object = fde.getObject(macho_file);
-        const sect = object.sections.items(.header)[object.eh_frame_sect_index.?];
-        const data = fde.getData(macho_file);
-        const off = std.mem.readInt(i64, data[8..][0..8], .little);
-        return @intCast(@as(i64, @intCast(sect.addr + fde.offset + 8)) + off);
+        return &object.cies.items[fde.cie];
     }
 
     pub fn getAtom(fde: Fde, macho_file: *MachO) ?*Atom {
         return macho_file.getAtom(fde.atom);
+    }
+
+    pub fn getLsdaAtom(fde: Fde, macho_file: *MachO) ?*Atom {
+        return macho_file.getAtom(fde.lsda);
     }
 };
 
@@ -675,6 +780,7 @@ pub const EH_PE = struct {
 
 const std = @import("std");
 const assert = std.debug.assert;
+const leb = std.leb;
 const macho = std.macho;
 
 const Allocator = std.mem.Allocator;

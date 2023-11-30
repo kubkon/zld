@@ -279,7 +279,7 @@ fn initLiteralSections(self: *Object, macho_file: *MachO) !void {
     }
 }
 
-fn findAtom(self: Object, addr: u64) Atom.Index {
+pub fn findAtom(self: Object, addr: u64) Atom.Index {
     for (self.sections.items(.header), 0..) |sect, n_sect| {
         if (sect.addr <= addr and addr < sect.addr + sect.size) {
             return self.findAtomInSection(addr, @intCast(n_sect));
@@ -289,10 +289,18 @@ fn findAtom(self: Object, addr: u64) Atom.Index {
 }
 
 fn findAtomInSection(self: Object, addr: u64, n_sect: u8) Atom.Index {
-    const base = self.sections.items(.header)[n_sect].addr;
-    const subsections = self.sections.items(.subsections)[n_sect];
-    for (subsections.items) |subsection| {
-        if (addr >= subsection.off + base) return subsection.atom;
+    const slice = self.sections.slice();
+    const sect = slice.items(.header)[n_sect];
+    const subsections = slice.items(.subsections)[n_sect];
+    var idx: usize = 0;
+    while (idx < subsections.items.len) : (idx += 1) {
+        const sub = subsections.items[idx];
+        const sub_addr = sect.addr + sub.off;
+        const sub_size = if (idx + 1 < subsections.items.len)
+            subsections.items[idx + 1].off - sub.off
+        else
+            sect.size - sub.off;
+        if (sub_addr <= addr and addr < sub_addr + sub_size) return sub.atom;
     }
     return subsections.items[subsections.items.len - 1].atom;
 }
@@ -437,9 +445,7 @@ fn initRelocs(self: *Object, macho_file: *MachO) !void {
 
 fn initEhFrameRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
     const gpa = macho_file.base.allocator;
-    const slice = self.sections.slice();
-    const sect = slice.items(.header)[sect_id];
-    const relocs = slice.items(.relocs)[sect_id];
+    const relocs = self.sections.items(.relocs)[sect_id];
     _ = relocs;
 
     // TODO check for relocs in FDEs and apply them
@@ -453,25 +459,21 @@ fn initEhFrameRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
                 .size = rec.size,
                 .file = self.index,
             }),
-            .fde => {
-                var fde = Fde{
-                    .offset = rec.offset,
-                    .size = rec.size,
-                    .cie = undefined,
-                    .file = self.index,
-                };
-                const taddr = fde.getTargetAddress(macho_file);
-                fde.atom = self.findAtom(taddr);
-                assert(fde.getAtom(macho_file) != null);
-                try self.fdes.append(gpa, fde);
-            },
+            .fde => try self.fdes.append(gpa, .{
+                .offset = rec.offset,
+                .size = rec.size,
+                .cie = undefined,
+                .file = self.index,
+            }),
         }
+    }
 
-        std.debug.print("  {s}: {x} - {x}\n", .{
-            @tagName(rec.tag),
-            sect.addr + rec.offset,
-            sect.addr + rec.offset + rec.size + 4,
-        });
+    for (self.cies.items) |*cie| {
+        try cie.parse(macho_file);
+    }
+
+    for (self.fdes.items) |*fde| {
+        try fde.parse(macho_file);
     }
 }
 
