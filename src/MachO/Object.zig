@@ -15,6 +15,9 @@ atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
 platform: ?MachO.Options.Platform = null,
 dwarf_info: ?DwarfInfo = null,
 
+eh_frame_sect_index: ?u8 = null,
+compact_unwind_sect_index: ?u8 = null,
+
 alive: bool = true,
 num_rebase_relocs: u32 = 0,
 num_bind_relocs: u32 = 0,
@@ -44,6 +47,12 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
         for (sections) |sect| {
             const index = try self.sections.addOne(gpa);
             self.sections.set(index, .{ .header = sect });
+
+            if (mem.eql(u8, sect.sectName(), "__eh_frame")) {
+                self.eh_frame_sect_index = @intCast(index);
+            } else if (mem.eql(u8, sect.sectName(), "__compact_unwind")) {
+                self.compact_unwind_sect_index = @intCast(index);
+            }
         }
     }
     if (self.getLoadCommand(.SYMTAB)) |lc| {
@@ -95,7 +104,10 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
     try self.initSymbols(macho_file);
     try self.initRelocs(macho_file);
 
-    // TODO __eh_frame records
+    if (self.eh_frame_sect_index) |index| {
+        try self.initEhFrameRecords(index, macho_file);
+    }
+
     // TODO __compact_unwind records
 
     self.initPlatform();
@@ -119,7 +131,8 @@ fn initSubsections(self: *Object, nlists: anytype, macho_file: *MachO) !void {
     const slice = self.sections.slice();
     for (slice.items(.header), slice.items(.subsections), 0..) |sect, *subsections, n_sect| {
         if (sect.attrs() & macho.S_ATTR_DEBUG != 0) continue;
-        if (sect.type() == macho.S_COALESCED and mem.eql(u8, "__eh_frame", sect.sectName())) continue;
+        if (self.eh_frame_sect_index) |index| if (index == n_sect) continue;
+        if (self.compact_unwind_sect_index) |index| if (index == n_sect) continue;
         if (isLiteral(sect)) continue;
 
         const nlist_start = for (nlists, 0..) |nlist, i| {
@@ -169,7 +182,8 @@ fn initSections(self: *Object, nlists: anytype, macho_file: *MachO) !void {
 
     for (slice.items(.header), 0..) |sect, n_sect| {
         if (sect.attrs() & macho.S_ATTR_DEBUG != 0) continue;
-        if (sect.type() == macho.S_COALESCED and mem.eql(u8, "__eh_frame", sect.sectName())) continue;
+        if (self.eh_frame_sect_index) |index| if (index == n_sect) continue;
+        if (self.compact_unwind_sect_index) |index| if (index == n_sect) continue;
         if (isLiteral(sect)) continue;
 
         const name = try std.fmt.allocPrintZ(gpa, "{s}${s}", .{ sect.segName(), sect.sectName() });
@@ -242,7 +256,8 @@ fn initLiteralSections(self: *Object, macho_file: *MachO) !void {
 
     for (slice.items(.header), 0..) |sect, n_sect| {
         if (sect.attrs() & macho.S_ATTR_DEBUG != 0) continue;
-        if (sect.type() == macho.S_COALESCED and mem.eql(u8, "__eh_frame", sect.sectName())) continue;
+        if (self.eh_frame_sect_index) |index| if (index == n_sect) continue;
+        if (self.compact_unwind_sect_index) |index| if (index == n_sect) continue;
         if (!isLiteral(sect)) continue;
 
         const name = try std.fmt.allocPrintZ(gpa, "{s}${s}", .{ sect.segName(), sect.sectName() });
@@ -404,6 +419,16 @@ fn initRelocs(self: *Object, macho_file: *MachO) !void {
             atom.relocs.len = next_reloc - atom.relocs.pos;
         }
     }
+}
+
+fn initEhFrameRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
+    const slice = self.sections.slice();
+    const sect = slice.items(.header)[sect_id];
+    const relocs = slice.items(.relocs)[sect_id];
+
+    if (relocs.items.len > 0) @panic("TODO handle non-empty __eh_frame relocs");
+    _ = sect;
+    _ = macho_file;
 }
 
 fn initPlatform(self: *Object) void {
