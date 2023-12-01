@@ -448,6 +448,64 @@ fn initRelocs(self: *Object, macho_file: *MachO) !void {
     }
 }
 
+fn initEhFrameRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
+    const gpa = macho_file.base.allocator;
+    const relocs = self.sections.items(.relocs)[sect_id];
+
+    // TODO check for non-personality relocs in FDEs and apply them
+
+    const data = self.getSectionData(sect_id);
+    var it = eh_frame.Iterator{ .data = data };
+    while (try it.next()) |rec| {
+        switch (rec.tag) {
+            .cie => try self.cies.append(gpa, .{
+                .offset = rec.offset,
+                .size = rec.size,
+                .file = self.index,
+            }),
+            .fde => try self.fdes.append(gpa, .{
+                .offset = rec.offset,
+                .size = rec.size,
+                .cie = undefined,
+                .file = self.index,
+            }),
+        }
+    }
+
+    for (self.cies.items) |*cie| {
+        try cie.parse(macho_file);
+    }
+
+    for (self.fdes.items) |*fde| {
+        try fde.parse(macho_file);
+    }
+
+    const sortFn = struct {
+        fn sortFn(ctx: *MachO, lhs: Fde, rhs: Fde) bool {
+            const lhsa = lhs.getAtom(ctx);
+            const rhsa = rhs.getAtom(ctx);
+            return lhsa.getInputSection(ctx).addr + lhsa.off < rhsa.getInputSection(ctx).addr + rhsa.off;
+        }
+    }.sortFn;
+
+    mem.sort(Fde, self.fdes.items, macho_file, sortFn);
+
+    // Parse and attach personality pointers to CIEs if any
+    for (relocs.items) |rel| {
+        const rel_type: macho.reloc_type_x86_64 = @enumFromInt(rel.meta.type);
+        switch (rel_type) {
+            .X86_64_RELOC_GOT => {
+                assert(rel.meta.length == 2 and rel.tag == .@"extern"); // TODO error
+                const cie = for (self.cies.items) |*cie| {
+                    if (cie.offset <= rel.offset and rel.offset < cie.offset + cie.getSize()) break cie;
+                } else unreachable; // TODO error
+                cie.personality = .{ .index = @intCast(rel.target), .offset = rel.offset - cie.offset };
+            },
+            else => {},
+        }
+    }
+}
+
 fn initUnwindRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
     const gpa = macho_file.base.allocator;
     const data = self.getSectionData(sect_id);
@@ -507,6 +565,67 @@ fn initUnwindRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
         }
     }
 
+    // Synthesise missing unwind records for which we have FDEs available.
+    // The logic here is as follows:
+    // 1. if an atom has unwind info record that is not DWARF, FDE is marked dead
+    // 2. if an atom has unwind info record that is DWARF, FDE is tied to this unwind record
+    // 3. if an atom doesn't have unwind info record but FDE is available, synthesise and tie
+    var superposition = std.AutoArrayHashMap(u64, struct { ?UnwindInfo.Record.Index, ?Fde.Index }).init(gpa);
+    defer superposition.deinit();
+    try superposition.ensureUnusedCapacity(self.unwind_records.items.len + self.fdes.items.len);
+
+    for (self.unwind_records.items) |rec_index| {
+        const rec = macho_file.getUnwindRecord(rec_index);
+        const atom = rec.getAtom(macho_file);
+        const addr = atom.getInputSection(macho_file).addr + atom.off + rec.atom_offset;
+        superposition.putAssumeCapacityNoClobber(addr, .{ rec_index, null });
+    }
+
+    for (self.fdes.items, 0..) |fde, fde_index| {
+        const atom = fde.getAtom(macho_file);
+        const addr = atom.getInputSection(macho_file).addr + atom.off + fde.atom_offset;
+        const gop = superposition.getOrPutAssumeCapacity(addr);
+        if (!gop.found_existing) {
+            gop.value_ptr.* = .{ null, null };
+        }
+        gop.value_ptr[1] = @intCast(fde_index);
+    }
+
+    const cpu_arch = macho_file.options.cpu_arch.?;
+
+    for (superposition.values()) |meta| {
+        if (meta[1]) |fde_index| {
+            const fde = &self.fdes.items[fde_index];
+
+            if (meta[0]) |rec_index| {
+                const rec = macho_file.getUnwindRecord(rec_index);
+                if (!rec.enc.isDwarf(cpu_arch)) {
+                    // Mark FDE dead
+                    fde.alive = false;
+                } else {
+                    // Tie FDE to unwind record
+                    rec.fde = fde_index;
+                }
+            } else {
+                // Synthesise new unwind info record
+                const fde_data = fde.getData(macho_file);
+                const atom_size = mem.readInt(u64, fde_data[16..][0..8], .little);
+                const rec_index = try macho_file.addUnwindRecord();
+                const rec = macho_file.getUnwindRecord(rec_index);
+                try self.unwind_records.append(gpa, rec_index);
+                rec.length = @intCast(atom_size);
+                rec.atom = fde.atom;
+                rec.atom_offset = fde.atom_offset;
+                rec.lsda = fde.lsda;
+                rec.lsda_offset = fde.lsda_offset;
+                rec.personality = if (fde.getCie(macho_file).personality) |p| p.index else null;
+                rec.fde = fde_index;
+                rec.file = fde.file;
+                rec.enc.setMode(macho.UNWIND_X86_64_MODE.DWARF);
+            }
+        }
+    }
+
     const sortFn = struct {
         fn sortFn(ctx: *MachO, lhs_index: UnwindInfo.Record.Index, rhs_index: UnwindInfo.Record.Index) bool {
             const lhs = ctx.getUnwindRecord(lhs_index);
@@ -531,75 +650,6 @@ fn initUnwindRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
 
         const atom = rec.getAtom(macho_file);
         atom.unwind_records = .{ .pos = start, .len = next_cu - start };
-    }
-}
-
-fn initEhFrameRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
-    const gpa = macho_file.base.allocator;
-    const relocs = self.sections.items(.relocs)[sect_id];
-
-    // TODO check for non-personality relocs in FDEs and apply them
-
-    const data = self.getSectionData(sect_id);
-    var it = eh_frame.Iterator{ .data = data };
-    while (try it.next()) |rec| {
-        switch (rec.tag) {
-            .cie => try self.cies.append(gpa, .{
-                .offset = rec.offset,
-                .size = rec.size,
-                .file = self.index,
-            }),
-            .fde => try self.fdes.append(gpa, .{
-                .offset = rec.offset,
-                .size = rec.size,
-                .cie = undefined,
-                .file = self.index,
-            }),
-        }
-    }
-
-    for (self.cies.items) |*cie| {
-        try cie.parse(macho_file);
-    }
-
-    for (self.fdes.items) |*fde| {
-        try fde.parse(macho_file);
-    }
-
-    const sortFn = struct {
-        fn sortFn(ctx: *MachO, lhs: Fde, rhs: Fde) bool {
-            const lhsa = lhs.getAtom(ctx);
-            const rhsa = rhs.getAtom(ctx);
-            return lhsa.getInputSection(ctx).addr + lhsa.off < rhsa.getInputSection(ctx).addr + rhsa.off;
-        }
-    }.sortFn;
-
-    mem.sort(Fde, self.fdes.items, macho_file, sortFn);
-
-    // Parse and attach personality pointers to CIEs if any
-    for (relocs.items) |rel| {
-        const rel_type: macho.reloc_type_x86_64 = @enumFromInt(rel.meta.type);
-        switch (rel_type) {
-            .X86_64_RELOC_GOT => {
-                assert(rel.meta.length == 2 and rel.tag == .@"extern"); // TODO error
-                const cie = for (self.cies.items) |*cie| {
-                    if (cie.offset <= rel.offset and rel.offset < cie.offset + cie.getSize()) break cie;
-                } else unreachable; // TODO error
-                cie.personality = .{ .index = @intCast(rel.target), .offset = rel.offset - cie.offset };
-            },
-            else => {},
-        }
-    }
-
-    // Associate unwind records to atoms
-    var next_fde: u32 = 0;
-    while (next_fde < self.fdes.items.len) {
-        const start = next_fde;
-        const fde = self.fdes.items[start];
-        while (next_fde < self.fdes.items.len and self.fdes.items[next_fde].atom == fde.atom) : (next_fde += 1) {}
-
-        const atom = fde.getAtom(macho_file);
-        atom.fdes = .{ .pos = start, .len = next_fde - start };
     }
 }
 
@@ -1167,8 +1217,8 @@ fn formatUnwindRecords(
     const object = ctx.object;
     const macho_file = ctx.macho_file;
     try writer.writeAll("  unwind records\n");
-    for (object.unwind_records.items, 0..) |rec, i| {
-        try writer.print("    rec({d}) : {}\n", .{ i, macho_file.getUnwindRecord(rec).fmt(macho_file) });
+    for (object.unwind_records.items) |rec| {
+        try writer.print("    rec({d}) : {}\n", .{ rec, macho_file.getUnwindRecord(rec).fmt(macho_file) });
     }
 }
 

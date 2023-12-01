@@ -32,9 +32,6 @@ atom_index: Index = 0,
 /// Unwind records associated with this atom.
 unwind_records: Loc = .{},
 
-/// FDEs associated with this atom.
-fdes: Loc = .{},
-
 flags: Flags = .{},
 
 pub fn getName(self: Atom, macho_file: *MachO) [:0]const u8 {
@@ -70,11 +67,6 @@ pub fn getRelocs(self: Atom, macho_file: *MachO) []const Object.Relocation {
 pub fn getUnwindRecords(self: Atom, macho_file: *MachO) []const UnwindInfo.Record.Index {
     const object = self.getObject(macho_file);
     return object.unwind_records.items[self.unwind_records.pos..][0..self.unwind_records.len];
-}
-
-pub fn getFdes(self: Atom, macho_file: *MachO) []const Fde {
-    const object = self.getObject(macho_file);
-    return object.fdes.items[self.fdes.pos..][0..self.fdes.len];
 }
 
 pub fn initOutputSection(sect: macho.section_64, macho_file: *MachO) !u8 {
@@ -447,20 +439,11 @@ fn format2(
         atom.out_n_sect, atom.alignment,           atom.size,
     });
     if (!atom.flags.alive) try writer.writeAll(" : [*]");
-    if (atom.fdes.len > 0) {
-        try writer.writeAll(" : fdes{ ");
-        for (atom.getFdes(macho_file), atom.fdes.pos..) |fde, i| {
-            try writer.print("{d}", .{i});
-            if (!fde.alive) try writer.writeAll("([*])");
-            if (i < atom.fdes.pos + atom.fdes.len - 1) try writer.writeAll(", ");
-        }
-        try writer.writeAll(" }");
-    }
     if (atom.unwind_records.len > 0) {
         try writer.writeAll(" : unwind{ ");
         for (atom.getUnwindRecords(macho_file), atom.unwind_records.pos..) |index, i| {
             const rec = macho_file.getUnwindRecord(index);
-            try writer.print("{d}", .{i});
+            try writer.print("{d}", .{index});
             if (!rec.alive) try writer.writeAll("([*])");
             if (i < atom.unwind_records.pos + atom.unwind_records.len - 1) try writer.writeAll(", ");
         }
@@ -524,7 +507,6 @@ const Atom = @This();
 const std = @import("std");
 const assert = std.debug.assert;
 const dis_x86_64 = @import("dis_x86_64");
-const eh_frame = @import("eh_frame.zig");
 const macho = std.macho;
 const log = std.log.scoped(.link);
 const relocs_log = std.log.scoped(.relocs);
@@ -533,7 +515,6 @@ const mem = std.mem;
 
 const Allocator = mem.Allocator;
 const Disassembler = dis_x86_64.Disassembler;
-const Fde = eh_frame.Fde;
 const File = @import("file.zig").File;
 const Instruction = dis_x86_64.Instruction;
 const Immediate = dis_x86_64.Immediate;
