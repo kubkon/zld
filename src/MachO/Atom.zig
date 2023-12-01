@@ -67,7 +67,7 @@ pub fn getRelocs(self: Atom, macho_file: *MachO) []const Object.Relocation {
     return relocs.items[self.relocs.pos..][0..self.relocs.len];
 }
 
-pub fn getUnwindRecords(self: Atom, macho_file: *MachO) []const UnwindInfo.Record {
+pub fn getUnwindRecords(self: Atom, macho_file: *MachO) []const UnwindInfo.Record.Index {
     const object = self.getObject(macho_file);
     return object.unwind_records.items[self.unwind_records.pos..][0..self.unwind_records.len];
 }
@@ -458,7 +458,8 @@ fn format2(
     }
     if (atom.unwind_records.len > 0) {
         try writer.writeAll(" : unwind{ ");
-        for (atom.getUnwindRecords(macho_file), atom.unwind_records.pos..) |rec, i| {
+        for (atom.getUnwindRecords(macho_file), atom.unwind_records.pos..) |index, i| {
+            const rec = macho_file.getUnwindRecord(index);
             try writer.print("{d}", .{i});
             if (!rec.alive) try writer.writeAll("([*])");
             if (i < atom.unwind_records.pos + atom.unwind_records.len - 1) try writer.writeAll(", ");

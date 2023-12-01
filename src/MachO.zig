@@ -64,8 +64,10 @@ rebase: RebaseSection = .{},
 bind: BindSection = .{},
 lazy_bind: LazyBindSection = .{},
 export_trie: ExportTrieSection = .{},
+unwind_info: UnwindInfo = .{},
 
 atoms: std.ArrayListUnmanaged(Atom) = .{},
+unwind_records: std.ArrayListUnmanaged(UnwindInfo.Record) = .{},
 
 has_tlv: bool = false,
 
@@ -134,6 +136,8 @@ pub fn deinit(self: *MachO) void {
     self.bind.deinit(gpa);
     self.lazy_bind.deinit(gpa);
     self.export_trie.deinit(gpa);
+    self.unwind_info.deinit(gpa);
+    self.unwind_records.deinit(gpa);
 
     self.arena.promote(gpa).deinit();
 }
@@ -276,6 +280,7 @@ pub fn flush(self: *MachO) !void {
     try self.initSyntheticSections();
     try self.sortSections();
     try self.addAtomsToSections();
+    try self.generateUnwindInfo();
     try self.calcSectionSizes();
     try self.initSegments();
 
@@ -1337,7 +1342,7 @@ fn sortSections(self: *MachO) !void {
     }
 }
 
-pub fn addAtomsToSections(self: *MachO) !void {
+fn addAtomsToSections(self: *MachO) !void {
     for (self.objects.items) |index| {
         for (self.getFile(index).?.object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index) orelse continue;
@@ -1346,6 +1351,10 @@ pub fn addAtomsToSections(self: *MachO) !void {
             try atoms.append(self.base.allocator, atom_index);
         }
     }
+}
+
+fn generateUnwindInfo(self: *MachO) !void {
+    _ = self;
 }
 
 fn calcSectionSizes(self: *MachO) !void {
@@ -2424,6 +2433,18 @@ pub fn getOrCreateGlobal(self: *MachO, off: u32) !GetOrCreateGlobalResult {
 pub fn getGlobalByName(self: *MachO, name: []const u8) ?Symbol.Index {
     const off = self.string_intern.getOffset(name) orelse return null;
     return self.globals.get(off);
+}
+
+pub fn addUnwindRecord(self: *MachO) !UnwindInfo.Record.Index {
+    const index = @as(UnwindInfo.Record.Index, @intCast(self.unwind_records.items.len));
+    const rec = try self.unwind_records.addOne(self.base.allocator);
+    rec.* = .{};
+    return index;
+}
+
+pub fn getUnwindRecord(self: *MachO, index: UnwindInfo.Record.Index) *UnwindInfo.Record {
+    assert(index < self.unwind_records.items.len);
+    return &self.unwind_records.items[index];
 }
 
 pub fn dumpState(self: *MachO) std.fmt.Formatter(fmtDumpState) {

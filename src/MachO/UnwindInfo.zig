@@ -1,8 +1,6 @@
-gpa: Allocator,
-
 // /// List of all unwind records gathered from all objects and sorted
 // /// by source function address.
-// records: std.ArrayListUnmanaged(macho.compact_unwind_entry) = .{},
+// records: std.ArrayListUnmanaged(*Record) = .{},
 // records_lookup: std.AutoHashMapUnmanaged(SymbolWithLoc, RecordIndex) = .{},
 
 // /// List of all personalities referenced by either unwind info entries
@@ -21,162 +19,15 @@ gpa: Allocator,
 // /// List of second level pages.
 // pages: std.ArrayListUnmanaged(Page) = .{},
 
-// const RecordIndex = u32;
-
-// const max_personalities = 3;
-// const max_common_encodings = 127;
-// const max_compact_encodings = 256;
-
-// const second_level_page_bytes = 0x1000;
-// const second_level_page_words = second_level_page_bytes / @sizeOf(u32);
-
-// const max_regular_second_level_entries =
-//     (second_level_page_bytes - @sizeOf(macho.unwind_info_regular_second_level_page_header)) /
-//     @sizeOf(macho.unwind_info_regular_second_level_entry);
-
-// const max_compressed_second_level_entries =
-//     (second_level_page_bytes - @sizeOf(macho.unwind_info_compressed_second_level_page_header)) /
-//     @sizeOf(u32);
-
-// const compressed_entry_func_offset_mask = ~@as(u24, 0);
-
-// const Page = struct {
-//     kind: enum { regular, compressed },
-//     start: RecordIndex,
-//     count: u16,
-//     page_encodings: [max_compact_encodings]RecordIndex = undefined,
-//     page_encodings_count: u9 = 0,
-
-//     fn appendPageEncoding(page: *Page, record_id: RecordIndex) void {
-//         assert(page.page_encodings_count <= max_compact_encodings);
-//         page.page_encodings[page.page_encodings_count] = record_id;
-//         page.page_encodings_count += 1;
-//     }
-
-//     fn getPageEncoding(
-//         page: *const Page,
-//         info: *const UnwindInfo,
-//         enc: macho.compact_unwind_encoding_t,
-//     ) ?u8 {
-//         comptime var index: u9 = 0;
-//         inline while (index < max_compact_encodings) : (index += 1) {
-//             if (index >= page.page_encodings_count) return null;
-//             const record_id = page.page_encodings[index];
-//             const record = info.records.items[record_id];
-//             if (record.compactUnwindEncoding == enc) {
-//                 return @as(u8, @intCast(index));
-//             }
-//         }
-//         return null;
-//     }
-
-//     fn format(
-//         page: *const Page,
-//         comptime unused_format_string: []const u8,
-//         options: std.fmt.FormatOptions,
-//         writer: anytype,
-//     ) !void {
-//         _ = page;
-//         _ = unused_format_string;
-//         _ = options;
-//         _ = writer;
-//         @compileError("do not format Page directly; use page.fmtDebug()");
-//     }
-
-//     const DumpCtx = struct {
-//         page: *const Page,
-//         info: *const UnwindInfo,
-//     };
-
-//     fn dump(
-//         ctx: DumpCtx,
-//         comptime unused_format_string: []const u8,
-//         options: std.fmt.FormatOptions,
-//         writer: anytype,
-//     ) @TypeOf(writer).Error!void {
-//         _ = options;
-//         comptime assert(unused_format_string.len == 0);
-//         try writer.writeAll("Page:\n");
-//         try writer.print("  kind: {s}\n", .{@tagName(ctx.page.kind)});
-//         try writer.print("  entries: {d} - {d}\n", .{
-//             ctx.page.start,
-//             ctx.page.start + ctx.page.count,
-//         });
-//         try writer.print("  encodings (count = {d})\n", .{ctx.page.page_encodings_count});
-//         for (ctx.page.page_encodings[0..ctx.page.page_encodings_count], 0..) |record_id, i| {
-//             const record = ctx.info.records.items[record_id];
-//             const enc = record.compactUnwindEncoding;
-//             try writer.print("    {d}: 0x{x:0>8}\n", .{ ctx.info.common_encodings_count + i, enc });
-//         }
-//     }
-
-//     fn fmtDebug(page: *const Page, info: *const UnwindInfo) std.fmt.Formatter(dump) {
-//         return .{ .data = .{
-//             .page = page,
-//             .info = info,
-//         } };
-//     }
-
-//     fn write(page: *const Page, info: *const UnwindInfo, writer: anytype) !void {
-//         switch (page.kind) {
-//             .regular => {
-//                 try writer.writeStruct(macho.unwind_info_regular_second_level_page_header{
-//                     .entryPageOffset = @sizeOf(macho.unwind_info_regular_second_level_page_header),
-//                     .entryCount = page.count,
-//                 });
-
-//                 for (info.records.items[page.start..][0..page.count]) |record| {
-//                     try writer.writeStruct(macho.unwind_info_regular_second_level_entry{
-//                         .functionOffset = @as(u32, @intCast(record.rangeStart)),
-//                         .encoding = record.compactUnwindEncoding,
-//                     });
-//                 }
-//             },
-//             .compressed => {
-//                 const entry_offset = @sizeOf(macho.unwind_info_compressed_second_level_page_header) +
-//                     @as(u16, @intCast(page.page_encodings_count)) * @sizeOf(u32);
-//                 try writer.writeStruct(macho.unwind_info_compressed_second_level_page_header{
-//                     .entryPageOffset = entry_offset,
-//                     .entryCount = page.count,
-//                     .encodingsPageOffset = @sizeOf(
-//                         macho.unwind_info_compressed_second_level_page_header,
-//                     ),
-//                     .encodingsCount = page.page_encodings_count,
-//                 });
-
-//                 for (page.page_encodings[0..page.page_encodings_count]) |record_id| {
-//                     const enc = info.records.items[record_id].compactUnwindEncoding;
-//                     try writer.writeInt(u32, enc, .little);
-//                 }
-
-//                 assert(page.count > 0);
-//                 const first_entry = info.records.items[page.start];
-//                 for (info.records.items[page.start..][0..page.count]) |record| {
-//                     const enc_index = blk: {
-//                         if (info.getCommonEncoding(record.compactUnwindEncoding)) |id| {
-//                             break :blk id;
-//                         }
-//                         const ncommon = info.common_encodings_count;
-//                         break :blk ncommon + page.getPageEncoding(info, record.compactUnwindEncoding).?;
-//                     };
-//                     const compressed = macho.UnwindInfoCompressedEntry{
-//                         .funcOffset = @as(u24, @intCast(record.rangeStart - first_entry.rangeStart)),
-//                         .encodingIndex = @as(u8, @intCast(enc_index)),
-//                     };
-//                     try writer.writeStruct(compressed);
-//                 }
-//             },
-//         }
-//     }
-// };
-
-// pub fn deinit(info: *UnwindInfo) void {
-//     info.records.deinit(info.gpa);
-//     info.records_lookup.deinit(info.gpa);
-//     info.pages.deinit(info.gpa);
-//     info.lsdas.deinit(info.gpa);
-//     info.lsdas_lookup.deinit(info.gpa);
-// }
+pub fn deinit(info: *UnwindInfo, allocator: Allocator) void {
+    _ = info;
+    _ = allocator;
+    // info.records.deinit(info.gpa);
+    // info.records_lookup.deinit(info.gpa);
+    // info.pages.deinit(info.gpa);
+    // info.lsdas.deinit(info.gpa);
+    // info.lsdas_lookup.deinit(info.gpa);
+}
 
 // pub fn scanRelocs(macho_file: *MachO) !void {
 //     if (macho_file.getSectionByName("__TEXT", "__unwind_info") == null) return;
@@ -812,8 +663,8 @@ pub const Encoding = extern struct {
 };
 
 pub const Record = struct {
-    length: u32,
-    enc: Encoding,
+    length: u32 = 0,
+    enc: Encoding = .{ .enc = 0 },
     atom: Atom.Index = 0,
     atom_offset: u32 = 0,
     lsda: Atom.Index = 0,
@@ -887,7 +738,156 @@ pub const Record = struct {
         try writer.print(" : {s}", .{rec.getAtom(macho_file).getName(macho_file)});
         if (!rec.alive) try writer.writeAll(" : [*]");
     }
+
+    pub const Index = u32;
 };
+
+// const max_personalities = 3;
+// const max_common_encodings = 127;
+// const max_compact_encodings = 256;
+
+// const second_level_page_bytes = 0x1000;
+// const second_level_page_words = second_level_page_bytes / @sizeOf(u32);
+
+// const max_regular_second_level_entries =
+//     (second_level_page_bytes - @sizeOf(macho.unwind_info_regular_second_level_page_header)) /
+//     @sizeOf(macho.unwind_info_regular_second_level_entry);
+
+// const max_compressed_second_level_entries =
+//     (second_level_page_bytes - @sizeOf(macho.unwind_info_compressed_second_level_page_header)) /
+//     @sizeOf(u32);
+
+// const compressed_entry_func_offset_mask = ~@as(u24, 0);
+
+// const Page = struct {
+//     kind: enum { regular, compressed },
+//     start: RecordIndex,
+//     count: u16,
+//     page_encodings: [max_compact_encodings]RecordIndex = undefined,
+//     page_encodings_count: u9 = 0,
+
+//     fn appendPageEncoding(page: *Page, record_id: RecordIndex) void {
+//         assert(page.page_encodings_count <= max_compact_encodings);
+//         page.page_encodings[page.page_encodings_count] = record_id;
+//         page.page_encodings_count += 1;
+//     }
+
+//     fn getPageEncoding(
+//         page: *const Page,
+//         info: *const UnwindInfo,
+//         enc: macho.compact_unwind_encoding_t,
+//     ) ?u8 {
+//         comptime var index: u9 = 0;
+//         inline while (index < max_compact_encodings) : (index += 1) {
+//             if (index >= page.page_encodings_count) return null;
+//             const record_id = page.page_encodings[index];
+//             const record = info.records.items[record_id];
+//             if (record.compactUnwindEncoding == enc) {
+//                 return @as(u8, @intCast(index));
+//             }
+//         }
+//         return null;
+//     }
+
+//     fn format(
+//         page: *const Page,
+//         comptime unused_format_string: []const u8,
+//         options: std.fmt.FormatOptions,
+//         writer: anytype,
+//     ) !void {
+//         _ = page;
+//         _ = unused_format_string;
+//         _ = options;
+//         _ = writer;
+//         @compileError("do not format Page directly; use page.fmtDebug()");
+//     }
+
+//     const DumpCtx = struct {
+//         page: *const Page,
+//         info: *const UnwindInfo,
+//     };
+
+//     fn dump(
+//         ctx: DumpCtx,
+//         comptime unused_format_string: []const u8,
+//         options: std.fmt.FormatOptions,
+//         writer: anytype,
+//     ) @TypeOf(writer).Error!void {
+//         _ = options;
+//         comptime assert(unused_format_string.len == 0);
+//         try writer.writeAll("Page:\n");
+//         try writer.print("  kind: {s}\n", .{@tagName(ctx.page.kind)});
+//         try writer.print("  entries: {d} - {d}\n", .{
+//             ctx.page.start,
+//             ctx.page.start + ctx.page.count,
+//         });
+//         try writer.print("  encodings (count = {d})\n", .{ctx.page.page_encodings_count});
+//         for (ctx.page.page_encodings[0..ctx.page.page_encodings_count], 0..) |record_id, i| {
+//             const record = ctx.info.records.items[record_id];
+//             const enc = record.compactUnwindEncoding;
+//             try writer.print("    {d}: 0x{x:0>8}\n", .{ ctx.info.common_encodings_count + i, enc });
+//         }
+//     }
+
+//     fn fmtDebug(page: *const Page, info: *const UnwindInfo) std.fmt.Formatter(dump) {
+//         return .{ .data = .{
+//             .page = page,
+//             .info = info,
+//         } };
+//     }
+
+//     fn write(page: *const Page, info: *const UnwindInfo, writer: anytype) !void {
+//         switch (page.kind) {
+//             .regular => {
+//                 try writer.writeStruct(macho.unwind_info_regular_second_level_page_header{
+//                     .entryPageOffset = @sizeOf(macho.unwind_info_regular_second_level_page_header),
+//                     .entryCount = page.count,
+//                 });
+
+//                 for (info.records.items[page.start..][0..page.count]) |record| {
+//                     try writer.writeStruct(macho.unwind_info_regular_second_level_entry{
+//                         .functionOffset = @as(u32, @intCast(record.rangeStart)),
+//                         .encoding = record.compactUnwindEncoding,
+//                     });
+//                 }
+//             },
+//             .compressed => {
+//                 const entry_offset = @sizeOf(macho.unwind_info_compressed_second_level_page_header) +
+//                     @as(u16, @intCast(page.page_encodings_count)) * @sizeOf(u32);
+//                 try writer.writeStruct(macho.unwind_info_compressed_second_level_page_header{
+//                     .entryPageOffset = entry_offset,
+//                     .entryCount = page.count,
+//                     .encodingsPageOffset = @sizeOf(
+//                         macho.unwind_info_compressed_second_level_page_header,
+//                     ),
+//                     .encodingsCount = page.page_encodings_count,
+//                 });
+
+//                 for (page.page_encodings[0..page.page_encodings_count]) |record_id| {
+//                     const enc = info.records.items[record_id].compactUnwindEncoding;
+//                     try writer.writeInt(u32, enc, .little);
+//                 }
+
+//                 assert(page.count > 0);
+//                 const first_entry = info.records.items[page.start];
+//                 for (info.records.items[page.start..][0..page.count]) |record| {
+//                     const enc_index = blk: {
+//                         if (info.getCommonEncoding(record.compactUnwindEncoding)) |id| {
+//                             break :blk id;
+//                         }
+//                         const ncommon = info.common_encodings_count;
+//                         break :blk ncommon + page.getPageEncoding(info, record.compactUnwindEncoding).?;
+//                     };
+//                     const compressed = macho.UnwindInfoCompressedEntry{
+//                         .funcOffset = @as(u24, @intCast(record.rangeStart - first_entry.rangeStart)),
+//                         .encodingIndex = @as(u8, @intCast(enc_index)),
+//                     };
+//                     try writer.writeStruct(compressed);
+//                 }
+//             },
+//         }
+//     }
+// };
 
 const std = @import("std");
 const assert = std.debug.assert;

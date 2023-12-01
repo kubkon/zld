@@ -20,7 +20,7 @@ compact_unwind_sect_index: ?u8 = null,
 
 cies: std.ArrayListUnmanaged(Cie) = .{},
 fdes: std.ArrayListUnmanaged(Fde) = .{},
-unwind_records: std.ArrayListUnmanaged(UnwindInfo.Record) = .{},
+unwind_records: std.ArrayListUnmanaged(UnwindInfo.Record.Index) = .{},
 
 alive: bool = true,
 num_rebase_relocs: u32 = 0,
@@ -458,7 +458,7 @@ fn initUnwindRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
 
     const relocs = self.sections.items(.relocs)[sect_id].items;
     var reloc_idx: usize = 0;
-    for (recs, self.unwind_records.items, 0..) |rec, *out, rec_idx| {
+    for (recs, self.unwind_records.items, 0..) |rec, *out_index, rec_idx| {
         const rec_start = rec_idx * @sizeOf(macho.compact_unwind_entry);
         const rec_end = rec_start + @sizeOf(macho.compact_unwind_entry);
         const reloc_start = reloc_idx;
@@ -466,10 +466,10 @@ fn initUnwindRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
             relocs[reloc_idx].offset < rec_end) : (reloc_idx += 1)
         {}
 
-        out.* = .{
-            .length = rec.rangeLength,
-            .enc = .{ .enc = rec.compactUnwindEncoding },
-        };
+        out_index.* = try macho_file.addUnwindRecord();
+        const out = macho_file.getUnwindRecord(out_index.*);
+        out.length = rec.rangeLength;
+        out.enc = .{ .enc = rec.compactUnwindEncoding };
 
         for (relocs[reloc_start..reloc_idx]) |rel| {
             const rel_type: macho.reloc_type_x86_64 = @enumFromInt(rel.meta.type);
@@ -508,22 +508,25 @@ fn initUnwindRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
     }
 
     const sortFn = struct {
-        fn sortFn(ctx: *MachO, lhs: UnwindInfo.Record, rhs: UnwindInfo.Record) bool {
+        fn sortFn(ctx: *MachO, lhs_index: UnwindInfo.Record.Index, rhs_index: UnwindInfo.Record.Index) bool {
+            const lhs = ctx.getUnwindRecord(lhs_index);
+            const rhs = ctx.getUnwindRecord(rhs_index);
             const lhsa = lhs.getAtom(ctx);
             const rhsa = rhs.getAtom(ctx);
             return lhsa.getInputSection(ctx).addr + lhsa.off + lhs.atom_offset <
                 rhsa.getInputSection(ctx).addr + rhsa.off + rhs.atom_offset;
         }
     }.sortFn;
-    mem.sort(UnwindInfo.Record, self.unwind_records.items, macho_file, sortFn);
+    mem.sort(UnwindInfo.Record.Index, self.unwind_records.items, macho_file, sortFn);
 
     // Associate unwind records to atoms
     var next_cu: u32 = 0;
     while (next_cu < self.unwind_records.items.len) {
         const start = next_cu;
-        const rec = self.unwind_records.items[start];
+        const rec_index = self.unwind_records.items[start];
+        const rec = macho_file.getUnwindRecord(rec_index);
         while (next_cu < self.unwind_records.items.len and
-            self.unwind_records.items[next_cu].atom == rec.atom) : (next_cu += 1)
+            macho_file.getUnwindRecord(self.unwind_records.items[next_cu]).atom == rec.atom) : (next_cu += 1)
         {}
 
         const atom = rec.getAtom(macho_file);
@@ -1162,9 +1165,10 @@ fn formatUnwindRecords(
     _ = unused_fmt_string;
     _ = options;
     const object = ctx.object;
+    const macho_file = ctx.macho_file;
     try writer.writeAll("  unwind records\n");
     for (object.unwind_records.items, 0..) |rec, i| {
-        try writer.print("    rec({d}) : {}\n", .{ i, rec.fmt(ctx.macho_file) });
+        try writer.print("    rec({d}) : {}\n", .{ i, macho_file.getUnwindRecord(rec).fmt(macho_file) });
     }
 }
 
