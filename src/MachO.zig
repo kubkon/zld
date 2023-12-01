@@ -1776,8 +1776,6 @@ fn writeAtoms(self: *MachO) !void {
         if (atoms.items.len == 0) continue;
         if (header.isZerofill()) continue;
 
-        log.debug("writing atoms in {s},{s} section", .{ header.segName(), header.sectName() });
-
         const buffer = try gpa.alloc(u8, header.size);
         defer gpa.free(buffer);
         const padding_byte: u8 = if (header.isCode() and cpu_arch == .x86_64) 0xcc else 0;
@@ -1789,7 +1787,6 @@ fn writeAtoms(self: *MachO) !void {
             const atom = self.getAtom(atom_index).?;
             assert(atom.flags.alive);
             const off = atom.value - header.addr;
-            log.debug("writing atom({d}) at offset 0x{x}", .{ atom_index, header.offset + off });
             try stream.seekTo(off);
             try atom.resolveRelocs(self, stream.writer());
         }

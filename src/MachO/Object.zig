@@ -604,6 +604,9 @@ fn initUnwindRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
                     fde.alive = false;
                 } else {
                     // Tie FDE to unwind record
+                    rec.lsda = fde.lsda;
+                    rec.lsda_offset = fde.lsda_offset;
+                    rec.personality = if (fde.getCie(macho_file).personality) |p| p.index else null;
                     rec.fde = fde_index;
                 }
             } else {
@@ -761,7 +764,13 @@ pub fn scanRelocs(self: Object, macho_file: *MachO) !void {
         try atom.scanRelocs(macho_file);
     }
 
-    // TODO scan __eh_frame relocs
+    for (self.unwind_records.items) |rec_index| {
+        const rec = macho_file.getUnwindRecord(rec_index);
+        if (!rec.alive) continue;
+        if (rec.getPersonalityTarget(macho_file)) |sym| {
+            sym.flags.got = true;
+        }
+    }
 }
 
 pub fn convertTentativeDefinitions(self: *Object, macho_file: *MachO) !void {
