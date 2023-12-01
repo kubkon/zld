@@ -608,9 +608,6 @@ fn initUnwindRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
                     fde.alive = false;
                 } else {
                     // Tie FDE to unwind record
-                    rec.lsda = fde.lsda;
-                    rec.lsda_offset = fde.lsda_offset;
-                    rec.personality = if (fde.getCie(macho_file).personality) |p| p.index else null;
                     rec.fde = fde_index;
                     self.has_eh_frame = true;
                 }
@@ -624,9 +621,6 @@ fn initUnwindRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
                 rec.length = @intCast(atom_size);
                 rec.atom = fde.atom;
                 rec.atom_offset = fde.atom_offset;
-                rec.lsda = fde.lsda;
-                rec.lsda_offset = fde.lsda_offset;
-                rec.personality = if (fde.getCie(macho_file).personality) |p| p.index else null;
                 rec.fde = fde_index;
                 rec.file = fde.file;
                 rec.enc.setMode(macho.UNWIND_X86_64_MODE.DWARF);
@@ -773,7 +767,11 @@ pub fn scanRelocs(self: Object, macho_file: *MachO) !void {
     for (self.unwind_records.items) |rec_index| {
         const rec = macho_file.getUnwindRecord(rec_index);
         if (!rec.alive) continue;
-        if (rec.getPersonalityTarget(macho_file)) |sym| {
+        if (rec.getFde(macho_file)) |fde| {
+            if (fde.getCie(macho_file).getPersonalityTarget(macho_file)) |sym| {
+                sym.flags.got = true;
+            }
+        } else if (rec.getPersonalityTarget(macho_file)) |sym| {
             sym.flags.got = true;
         }
     }

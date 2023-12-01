@@ -280,8 +280,8 @@ pub fn flush(self: *MachO) !void {
     try self.initSyntheticSections();
     try self.sortSections();
     try self.addAtomsToSections();
-    try self.generateUnwindInfo();
     try self.calcSectionSizes();
+    try self.generateUnwindInfo();
     try self.initSegments();
 
     try self.allocateSections();
@@ -998,6 +998,7 @@ fn initOutputSections(self: *MachO) !void {
             atom.out_n_sect = try Atom.initOutputSection(atom.getInputSection(self), self);
         }
     }
+
     if (self.data_sect_index == null) {
         self.data_sect_index = try self.addSection("__DATA", "__data", .{});
     }
@@ -1355,7 +1356,9 @@ fn addAtomsToSections(self: *MachO) !void {
 }
 
 fn generateUnwindInfo(self: *MachO) !void {
-    _ = self;
+    if (self.unwind_info_sect_index) |_| {
+        try self.unwind_info.generate(self);
+    }
 }
 
 fn calcSectionSizes(self: *MachO) !void {

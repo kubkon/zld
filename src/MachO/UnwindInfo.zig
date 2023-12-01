@@ -1,5 +1,5 @@
 /// List of all unwind records gathered from all objects and sorted
-/// by source function address.
+/// by allocated relative function address within the section.
 records: std.ArrayListUnmanaged(Record.Index) = .{},
 // records_lookup: std.AutoHashMapUnmanaged(SymbolWithLoc, RecordIndex) = .{},
 
@@ -27,12 +27,41 @@ pub fn deinit(info: *UnwindInfo, allocator: Allocator) void {
     info.lsdas_lookup.deinit(allocator);
 }
 
-pub fn collect(info: *UnwindInfo, macho_file: *MachO) !void {
+pub fn generate(info: *UnwindInfo, macho_file: *MachO) !void {
     const gpa = macho_file.base.allocator;
-    const cpu_arch = macho_file.options.cpu_arch.?;
-    _ = gpa;
-    _ = cpu_arch;
-    _ = info;
+
+    // Collect all unwind records
+    for (macho_file.sections.items(.atoms)) |atoms| {
+        for (atoms.items) |atom_index| {
+            const atom = macho_file.getAtom(atom_index) orelse continue;
+            if (!atom.flags.alive) continue;
+            const recs = atom.getUnwindRecords(macho_file);
+            try info.records.ensureUnusedCapacity(gpa, recs.len);
+            for (recs) |rec| {
+                if (!macho_file.getUnwindRecord(rec).alive) continue;
+                info.records.appendAssumeCapacity(rec);
+            }
+        }
+    }
+
+    // Sort by assigned relative address within each output section
+    const sortFn = struct {
+        fn sortFn(ctx: *MachO, lhs_index: Record.Index, rhs_index: Record.Index) bool {
+            const lhs = ctx.getUnwindRecord(lhs_index).getAtom(ctx);
+            const rhs = ctx.getUnwindRecord(rhs_index).getAtom(ctx);
+            const lhs_addr = lhs.value + lhs.off;
+            const rhs_addr = rhs.value + rhs.off;
+            if (lhs.out_n_sect == rhs.out_n_sect) return lhs_addr < rhs_addr;
+            return lhs.out_n_sect < rhs.out_n_sect;
+        }
+    }.sortFn;
+    mem.sort(Record.Index, info.records.items, macho_file, sortFn);
+
+    for (info.records.items) |rec_index| {
+        const rec = macho_file.getUnwindRecord(rec_index);
+        const atom = rec.getAtom(macho_file);
+        std.debug.print("@{x} : {s} : rec({d})\n", .{ atom.value + atom.off, atom.getName(macho_file), rec_index });
+    }
 
     // var records = std.ArrayList(macho.compact_unwind_entry).init(info.gpa);
     // defer records.deinit();
@@ -692,7 +721,7 @@ pub const Record = struct {
     }
 
     pub fn getFde(rec: Record, macho_file: *MachO) ?Fde {
-        if (!rec.isDwarf(macho_file.options.cpu_arch)) return null;
+        if (!rec.enc.isDwarf(macho_file.options.cpu_arch.?)) return null;
         return rec.getObject(macho_file).fdes.items[rec.fde];
     }
 
