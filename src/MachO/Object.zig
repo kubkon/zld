@@ -22,6 +22,8 @@ cies: std.ArrayListUnmanaged(Cie) = .{},
 fdes: std.ArrayListUnmanaged(Fde) = .{},
 unwind_records: std.ArrayListUnmanaged(UnwindInfo.Record.Index) = .{},
 
+has_unwind: bool = false,
+has_eh_frame: bool = false,
 alive: bool = true,
 num_rebase_relocs: u32 = 0,
 num_bind_relocs: u32 = 0,
@@ -594,6 +596,8 @@ fn initUnwindRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
     const cpu_arch = macho_file.options.cpu_arch.?;
 
     for (superposition.values()) |meta| {
+        self.has_unwind = true;
+
         if (meta[1]) |fde_index| {
             const fde = &self.fdes.items[fde_index];
 
@@ -608,6 +612,7 @@ fn initUnwindRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
                     rec.lsda_offset = fde.lsda_offset;
                     rec.personality = if (fde.getCie(macho_file).personality) |p| p.index else null;
                     rec.fde = fde_index;
+                    self.has_eh_frame = true;
                 }
             } else {
                 // Synthesise new unwind info record
@@ -625,6 +630,7 @@ fn initUnwindRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
                 rec.fde = fde_index;
                 rec.file = fde.file;
                 rec.enc.setMode(macho.UNWIND_X86_64_MODE.DWARF);
+                self.has_eh_frame = true;
             }
         }
     }
