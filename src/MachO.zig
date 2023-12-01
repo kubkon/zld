@@ -39,6 +39,8 @@ stubs_sect_index: ?u8 = null,
 stubs_helper_sect_index: ?u8 = null,
 la_symbol_ptr_sect_index: ?u8 = null,
 tlv_ptr_sect_index: ?u8 = null,
+eh_frame_sect_index: ?u8 = null,
+unwind_info_sect_index: ?u8 = null,
 
 mh_execute_header_index: ?Symbol.Index = null,
 mh_dylib_header_index: ?Symbol.Index = null,
@@ -1144,6 +1146,7 @@ fn initSyntheticSections(self: *MachO) !void {
             .reserved1 = @intCast(self.stubs.symbols.items.len),
         });
     }
+
     if (self.stubs.symbols.items.len > 0) {
         self.stubs_sect_index = try self.addSection("__TEXT", "__stubs", .{
             .flags = macho.S_SYMBOL_STUBS |
@@ -1163,10 +1166,25 @@ fn initSyntheticSections(self: *MachO) !void {
             .reserved1 = @intCast(self.stubs.symbols.items.len + self.got.symbols.items.len),
         });
     }
+
     if (self.tlv_ptr.symbols.items.len > 0) {
         self.tlv_ptr_sect_index = try self.addSection("__DATA", "__thread_ptrs", .{
             .flags = macho.S_THREAD_LOCAL_VARIABLE_POINTERS,
         });
+    }
+
+    const needs_eh_frame = for (self.objects.items) |index| {
+        if (self.getFile(index).?.object.fdes.items.len > 0) break true;
+    } else false;
+    if (needs_eh_frame) {
+        self.eh_frame_sect_index = try self.addSection("__TEXT", "__eh_frame", .{});
+    }
+
+    const needs_unwind_info = for (self.objects.items) |index| {
+        if (self.getFile(index).?.object.unwind_records.items.len > 0) break true;
+    } else needs_eh_frame;
+    if (needs_unwind_info) {
+        self.unwind_info_sect_index = try self.addSection("__TEXT", "__unwind_info", .{});
     }
 
     for (self.boundary_symbols.items) |sym_index| {
@@ -1310,6 +1328,8 @@ fn sortSections(self: *MachO) !void {
         &self.stubs_helper_sect_index,
         &self.la_symbol_ptr_sect_index,
         &self.tlv_ptr_sect_index,
+        &self.eh_frame_sect_index,
+        &self.unwind_info_sect_index,
     }) |maybe_index| {
         if (maybe_index.*) |*index| {
             index.* = backlinks[index.*];
