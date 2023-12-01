@@ -63,6 +63,127 @@ pub fn generate(info: *UnwindInfo, macho_file: *MachO) !void {
         std.debug.print("@{x} : {s} : rec({d})\n", .{ atom.value + atom.off, atom.getName(macho_file), rec_index });
     }
 
+    // var records = std.ArrayList(macho.compact_unwind_entry).init(info.gpa);
+    // defer records.deinit();
+
+    // var sym_indexes = std.ArrayList(SymbolWithLoc).init(info.gpa);
+    // defer sym_indexes.deinit();
+
+    // // TODO handle dead stripping
+    // for (macho_file.objects.items, 0..) |*object, object_id| {
+    //     log.debug("collecting unwind records in {s} ({d})", .{ object.name, object_id });
+    //     const unwind_records = object.getUnwindRecords();
+
+    //     // Contents of unwind records does not have to cover all symbol in executable section
+    //     // so we need insert them ourselves.
+    //     try records.ensureUnusedCapacity(object.exec_atoms.items.len);
+    //     try sym_indexes.ensureUnusedCapacity(object.exec_atoms.items.len);
+
+    //     for (object.exec_atoms.items) |atom_index| {
+    //         var inner_syms_it = Atom.getInnerSymbolsIterator(macho_file, atom_index);
+    //         var prev_symbol: ?SymbolWithLoc = null;
+    //         while (inner_syms_it.next()) |symbol| {
+    //             var record = if (object.unwind_records_lookup.get(symbol)) |record_id| blk: {
+    //                 if (object.unwind_relocs_lookup[record_id].dead) continue;
+    //                 var record = unwind_records[record_id];
+
+    //                 if (UnwindEncoding.isDwarf(record.compactUnwindEncoding, cpu_arch)) {
+    //                     try info.collectPersonalityFromDwarf(
+    //                         macho_file,
+    //                         @as(u32, @intCast(object_id)),
+    //                         symbol,
+    //                         &record,
+    //                     );
+    //                 } else {
+    //                     if (getPersonalityFunctionReloc(
+    //                         macho_file,
+    //                         @as(u32, @intCast(object_id)),
+    //                         record_id,
+    //                     )) |rel| {
+    //                         const target = Atom.parseRelocTarget(macho_file, .{
+    //                             .object_id = @as(u32, @intCast(object_id)),
+    //                             .rel = rel,
+    //                             .code = mem.asBytes(&record),
+    //                             .base_offset = @as(i32, @intCast(record_id * @sizeOf(macho.compact_unwind_entry))),
+    //                         });
+    //                         const personality_index = info.getPersonalityFunction(target) orelse inner: {
+    //                             const personality_index = info.personalities_count;
+    //                             info.personalities[personality_index] = target;
+    //                             info.personalities_count += 1;
+    //                             break :inner personality_index;
+    //                         };
+
+    //                         record.personalityFunction = personality_index + 1;
+    //                         UnwindEncoding.setPersonalityIndex(&record.compactUnwindEncoding, personality_index + 1);
+    //                     }
+
+    //                     if (getLsdaReloc(macho_file, @as(u32, @intCast(object_id)), record_id)) |rel| {
+    //                         const target = Atom.parseRelocTarget(macho_file, .{
+    //                             .object_id = @as(u32, @intCast(object_id)),
+    //                             .rel = rel,
+    //                             .code = mem.asBytes(&record),
+    //                             .base_offset = @as(i32, @intCast(record_id * @sizeOf(macho.compact_unwind_entry))),
+    //                         });
+    //                         record.lsda = @as(u64, @bitCast(target));
+    //                     }
+    //                 }
+    //                 break :blk record;
+    //             } else blk: {
+    //                 const sym = macho_file.getSymbol(symbol);
+    //                 if (sym.n_desc == MachO.N_DEAD) continue;
+    //                 if (prev_symbol) |prev_sym| {
+    //                     const prev_addr = object.getSourceSymbol(prev_sym.sym_index).?.n_value;
+    //                     const curr_addr = object.getSourceSymbol(symbol.sym_index).?.n_value;
+    //                     if (prev_addr == curr_addr) continue;
+    //                 }
+    //                 if (!object.hasUnwindRecords()) {
+    //                     if (object.eh_frame_records_lookup.get(symbol)) |fde_offset| {
+    //                         if (object.eh_frame_relocs_lookup.get(fde_offset).?.dead) continue;
+    //                         var record = nullRecord();
+    //                         try info.collectPersonalityFromDwarf(
+    //                             macho_file,
+    //                             @as(u32, @intCast(object_id)),
+    //                             symbol,
+    //                             &record,
+    //                         );
+    //                         switch (cpu_arch) {
+    //                             .aarch64 => UnwindEncoding.setMode(&record.compactUnwindEncoding, macho.UNWIND_ARM64_MODE.DWARF),
+    //                             .x86_64 => UnwindEncoding.setMode(&record.compactUnwindEncoding, macho.UNWIND_X86_64_MODE.DWARF),
+    //                             else => unreachable,
+    //                         }
+    //                         break :blk record;
+    //                     }
+    //                 }
+
+    //                 break :blk nullRecord();
+    //             };
+
+    //             const atom = macho_file.getAtom(atom_index);
+    //             const sym = macho_file.getSymbol(symbol);
+    //             assert(sym.n_desc != MachO.N_DEAD);
+    //             const size = if (inner_syms_it.next()) |next_sym| blk: {
+    //                 // All this trouble to account for symbol aliases.
+    //                 // TODO I think that remodelling the linker so that a Symbol references an Atom
+    //                 // is the way to go, kinda like we do for ELF. We might also want to perhaps tag
+    //                 // symbol aliases somehow so that they are excluded from everything except relocation
+    //                 // resolution.
+    //                 defer inner_syms_it.pos -= 1;
+    //                 const curr_addr = object.getSourceSymbol(symbol.sym_index).?.n_value;
+    //                 const next_addr = object.getSourceSymbol(next_sym.sym_index).?.n_value;
+    //                 if (next_addr > curr_addr) break :blk next_addr - curr_addr;
+    //                 break :blk macho_file.getSymbol(atom.getSymbolWithLoc()).n_value + atom.size - sym.n_value;
+    //             } else macho_file.getSymbol(atom.getSymbolWithLoc()).n_value + atom.size - sym.n_value;
+    //             record.rangeStart = sym.n_value;
+    //             record.rangeLength = @as(u32, @intCast(size));
+
+    //             try records.append(record);
+    //             try sym_indexes.append(symbol);
+
+    //             prev_symbol = symbol;
+    //         }
+    //     }
+    // }
+
     // // Fold records
     // try info.records.ensureTotalCapacity(info.gpa, records.items.len);
     // try info.records_lookup.ensureTotalCapacity(info.gpa, @as(u32, @intCast(sym_indexes.items.len)));
