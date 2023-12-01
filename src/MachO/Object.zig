@@ -564,44 +564,61 @@ fn initUnwindRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
                 },
                 else => {},
             }
+
+            const atom = out.getAtom(macho_file);
+            self.sections.items(.has_unwind)[atom.n_sect] = true;
         }
     }
 
-    // Synthesise missing unwind records for which we have FDEs available.
+    // Synthesise missing unwind records.
     // The logic here is as follows:
     // 1. if an atom has unwind info record that is not DWARF, FDE is marked dead
     // 2. if an atom has unwind info record that is DWARF, FDE is tied to this unwind record
     // 3. if an atom doesn't have unwind info record but FDE is available, synthesise and tie
-    var superposition = std.AutoArrayHashMap(u64, struct { ?UnwindInfo.Record.Index, ?Fde.Index }).init(gpa);
+    // 4. if an atom doesn't have either, synthesise a null unwind info record
+    const Superposition = struct {
+        atom: Atom.Index,
+        size: u64,
+        cu: ?UnwindInfo.Record.Index = null,
+        fde: ?Fde.Index = null,
+    };
+    var superposition = std.AutoArrayHashMap(u64, Superposition).init(gpa);
     defer superposition.deinit();
-    try superposition.ensureUnusedCapacity(self.unwind_records.items.len + self.fdes.items.len);
+
+    const slice = self.symtab.slice();
+    for (slice.items(.nlist), slice.items(.atom), slice.items(.size)) |nlist, atom, size| {
+        if (!nlist.sect()) continue;
+        const has_unwind = self.sections.items(.has_unwind)[nlist.n_sect - 1];
+        if (has_unwind) {
+            try superposition.ensureUnusedCapacity(1);
+            superposition.putAssumeCapacityNoClobber(nlist.n_value, .{ .atom = atom, .size = size });
+        }
+    }
 
     for (self.unwind_records.items) |rec_index| {
         const rec = macho_file.getUnwindRecord(rec_index);
         const atom = rec.getAtom(macho_file);
         const addr = atom.getInputSection(macho_file).addr + atom.off + rec.atom_offset;
-        superposition.putAssumeCapacityNoClobber(addr, .{ rec_index, null });
+        const meta = superposition.getPtr(addr).?;
+        meta.cu = rec_index;
     }
 
     for (self.fdes.items, 0..) |fde, fde_index| {
         const atom = fde.getAtom(macho_file);
         const addr = atom.getInputSection(macho_file).addr + atom.off + fde.atom_offset;
-        const gop = superposition.getOrPutAssumeCapacity(addr);
-        if (!gop.found_existing) {
-            gop.value_ptr.* = .{ null, null };
-        }
-        gop.value_ptr[1] = @intCast(fde_index);
+        const meta = superposition.getPtr(addr).?;
+        meta.fde = @intCast(fde_index);
     }
 
     const cpu_arch = macho_file.options.cpu_arch.?;
 
-    for (superposition.values()) |meta| {
+    for (superposition.keys(), superposition.values()) |addr, meta| {
         self.has_unwind = true;
 
-        if (meta[1]) |fde_index| {
+        if (meta.fde) |fde_index| {
             const fde = &self.fdes.items[fde_index];
 
-            if (meta[0]) |rec_index| {
+            if (meta.cu) |rec_index| {
                 const rec = macho_file.getUnwindRecord(rec_index);
                 if (!rec.enc.isDwarf(cpu_arch)) {
                     // Mark FDE dead
@@ -613,12 +630,10 @@ fn initUnwindRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
                 }
             } else {
                 // Synthesise new unwind info record
-                const fde_data = fde.getData(macho_file);
-                const atom_size = mem.readInt(u64, fde_data[16..][0..8], .little);
                 const rec_index = try macho_file.addUnwindRecord();
                 const rec = macho_file.getUnwindRecord(rec_index);
                 try self.unwind_records.append(gpa, rec_index);
-                rec.length = @intCast(atom_size);
+                rec.length = @intCast(meta.size);
                 rec.atom = fde.atom;
                 rec.atom_offset = fde.atom_offset;
                 rec.fde = fde_index;
@@ -626,6 +641,16 @@ fn initUnwindRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
                 rec.enc.setMode(macho.UNWIND_X86_64_MODE.DWARF);
                 self.has_eh_frame = true;
             }
+        } else if (meta.cu == null and meta.fde == null) {
+            // Create a null record
+            const rec_index = try macho_file.addUnwindRecord();
+            const rec = macho_file.getUnwindRecord(rec_index);
+            const atom = macho_file.getAtom(meta.atom).?;
+            try self.unwind_records.append(gpa, rec_index);
+            rec.length = @intCast(meta.size);
+            rec.atom = meta.atom;
+            rec.atom_offset = @intCast(addr - atom.getInputSection(macho_file).addr - atom.off);
+            rec.file = self.index;
         }
     }
 
@@ -1282,6 +1307,7 @@ const Section = struct {
     header: macho.section_64,
     subsections: std.ArrayListUnmanaged(Subsection) = .{},
     relocs: std.ArrayListUnmanaged(Relocation) = .{},
+    has_unwind: bool = false,
 };
 
 const Subsection = struct {
