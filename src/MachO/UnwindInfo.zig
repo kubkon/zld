@@ -9,7 +9,7 @@ personalities: [max_personalities]Symbol.Index = undefined,
 personalities_count: u2 = 0,
 
 /// List of common encodings sorted in descending order with the most common first.
-common_encodings: [max_common_encodings]macho.compact_unwind_encoding_t = undefined,
+common_encodings: [max_common_encodings]Encoding = undefined,
 common_encodings_count: u7 = 0,
 
 /// List of record indexes containing an LSDA pointer.
@@ -38,7 +38,7 @@ fn canFold(macho_file: *MachO, lhs_index: Record.Index, rhs_index: Record.Index)
     const lhs_per = lhs.personality orelse 0;
     const rhs_per = rhs.personality orelse 0;
     return lhs.getAtomAddress(macho_file) + lhs.length == rhs.getAtomAddress(macho_file) and
-        lhs.enc.enc == rhs.enc.enc and
+        lhs.enc.eql(rhs.enc) and
         lhs_per == rhs_per and
         lhs.fde == rhs.fde and
         lhs.getLsdaAtom(macho_file) == null and rhs.getLsdaAtom(macho_file) == null;
@@ -101,7 +101,7 @@ pub fn generate(info: *UnwindInfo, macho_file: *MachO) !void {
     // Calculate common encodings
     {
         const CommonEncWithCount = struct {
-            enc: macho.compact_unwind_encoding_t,
+            enc: Encoding,
             count: u32,
 
             fn greaterThan(ctx: void, lhs: @This(), rhs: @This()) bool {
@@ -111,25 +111,25 @@ pub fn generate(info: *UnwindInfo, macho_file: *MachO) !void {
         };
 
         const Context = struct {
-            pub fn hash(ctx: @This(), key: macho.compact_unwind_encoding_t) u32 {
+            pub fn hash(ctx: @This(), key: Encoding) u32 {
                 _ = ctx;
-                return key;
+                return key.enc;
             }
 
             pub fn eql(
                 ctx: @This(),
-                key1: macho.compact_unwind_encoding_t,
-                key2: macho.compact_unwind_encoding_t,
+                key1: Encoding,
+                key2: Encoding,
                 b_index: usize,
             ) bool {
                 _ = ctx;
                 _ = b_index;
-                return key1 == key2;
+                return key1.eql(key2);
             }
         };
 
         var common_encodings_counts = std.ArrayHashMap(
-            macho.compact_unwind_encoding_t,
+            Encoding,
             CommonEncWithCount,
             Context,
             false,
@@ -139,10 +139,10 @@ pub fn generate(info: *UnwindInfo, macho_file: *MachO) !void {
         for (info.records.items) |rec_index| {
             const rec = macho_file.getUnwindRecord(rec_index);
             if (rec.enc.isDwarf(cpu_arch)) continue;
-            const gop = try common_encodings_counts.getOrPut(rec.enc.enc);
+            const gop = try common_encodings_counts.getOrPut(rec.enc);
             if (!gop.found_existing) {
                 gop.value_ptr.* = .{
-                    .enc = rec.enc.enc,
+                    .enc = rec.enc,
                     .count = 0,
                 };
             }
@@ -157,7 +157,7 @@ pub fn generate(info: *UnwindInfo, macho_file: *MachO) !void {
             if (i >= max_common_encodings) break;
             if (slice[i].count < 2) continue;
             info.appendCommonEncoding(slice[i].enc);
-            log.debug("adding common encoding: {d} => 0x{x:0>8}", .{ i, slice[i].enc });
+            std.debug.print("adding common encoding: {d} => {}\n", .{ i, slice[i].enc });
         }
     }
 
@@ -485,17 +485,17 @@ pub fn generate(info: *UnwindInfo, macho_file: *MachO) !void {
 //     return null;
 // }
 
-fn appendCommonEncoding(info: *UnwindInfo, enc: macho.compact_unwind_encoding_t) void {
+fn appendCommonEncoding(info: *UnwindInfo, enc: Encoding) void {
     assert(info.common_encodings_count <= max_common_encodings);
     info.common_encodings[info.common_encodings_count] = enc;
     info.common_encodings_count += 1;
 }
 
-fn getCommonEncoding(info: UnwindInfo, enc: macho.compact_unwind_encoding_t) ?u7 {
+fn getCommonEncoding(info: UnwindInfo, enc: Encoding) ?u7 {
     comptime var index: u7 = 0;
     inline while (index < max_common_encodings) : (index += 1) {
         if (index >= info.common_encodings_count) return null;
-        if (info.common_encodings[index] == enc) {
+        if (info.common_encodings[index].eql(enc)) {
             return index;
         }
     }
@@ -552,6 +552,21 @@ pub const Encoding = extern struct {
     pub fn setDwarfSectionOffset(enc: *Encoding, cpu_arch: std.Target.Cpu.Arch, offset: u24) void {
         assert(enc.isDwarf(cpu_arch));
         enc.enc |= offset;
+    }
+
+    pub fn eql(enc: Encoding, other: Encoding) bool {
+        return enc.enc == other.enc;
+    }
+
+    pub fn format(
+        enc: Encoding,
+        comptime unused_fmt_string: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = unused_fmt_string;
+        _ = options;
+        try writer.print("0x{x:0>8}", .{enc.enc});
     }
 };
 
