@@ -1356,6 +1356,11 @@ fn addAtomsToSections(self: *MachO) !void {
 }
 
 fn generateUnwindInfo(self: *MachO) !void {
+    if (self.eh_frame_sect_index) |index| {
+        const sect = &self.sections.items(.header)[index];
+        sect.size = try eh_frame.calcEhFrameSize(self);
+        sect.@"align" = 3;
+    }
     if (self.unwind_info_sect_index) |_| {
         try self.unwind_info.generate(self);
     }
