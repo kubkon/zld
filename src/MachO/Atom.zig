@@ -47,6 +47,10 @@ pub fn getInputSection(self: Atom, macho_file: *MachO) macho.section_64 {
     return object.sections.items(.header)[self.n_sect];
 }
 
+pub fn getInputAddress(self: Atom, macho_file: *MachO) u64 {
+    return self.getInputSection(macho_file).addr + self.off;
+}
+
 pub fn getPriority(self: Atom, macho_file: *MachO) u64 {
     const object = self.getObject(macho_file);
     return (@as(u64, @intCast(object.index)) << 32) | @as(u64, @intCast(self.n_sect));

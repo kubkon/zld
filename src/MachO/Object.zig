@@ -342,7 +342,7 @@ fn initSymbols(self: *Object, macho_file: *MachO) !void {
         const value = if (nlist.abs())
             nlist.n_value
         else
-            nlist.n_value - atom.off - atom.getInputSection(macho_file).addr;
+            nlist.n_value - atom.getInputAddress(macho_file);
         symbol.* = .{
             .value = value,
             .name = try macho_file.string_intern.insert(gpa, name),
@@ -356,9 +356,7 @@ fn initSymbols(self: *Object, macho_file: *MachO) !void {
 fn sortAtoms(self: *Object, macho_file: *MachO) !void {
     const lessThanAtom = struct {
         fn lessThanAtom(ctx: *MachO, lhs: Atom.Index, rhs: Atom.Index) bool {
-            const lhsa = ctx.getAtom(lhs).?;
-            const rhsa = ctx.getAtom(rhs).?;
-            return lhsa.getInputSection(ctx).addr + lhsa.off < rhsa.getInputSection(ctx).addr + rhsa.off;
+            return ctx.getAtom(lhs).?.getInputAddress(ctx) < ctx.getAtom(rhs).?.getInputAddress(ctx);
         }
     }.lessThanAtom;
     mem.sort(Atom.Index, self.atoms.items, macho_file, lessThanAtom);
@@ -484,9 +482,7 @@ fn initEhFrameRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
 
     const sortFn = struct {
         fn sortFn(ctx: *MachO, lhs: Fde, rhs: Fde) bool {
-            const lhsa = lhs.getAtom(ctx);
-            const rhsa = rhs.getAtom(ctx);
-            return lhsa.getInputSection(ctx).addr + lhsa.off < rhsa.getInputSection(ctx).addr + rhsa.off;
+            return lhs.getAtom(ctx).getInputAddress(ctx) < rhs.getAtom(ctx).getInputAddress(ctx);
         }
     }.sortFn;
 
@@ -544,7 +540,7 @@ fn initUnwindRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
                     .local => {
                         out.atom = self.findAtom(rec.rangeStart);
                         const atom = out.getAtom(macho_file);
-                        out.atom_offset = @intCast(rec.rangeStart - atom.getInputSection(macho_file).addr - atom.off);
+                        out.atom_offset = @intCast(atom.getInputAddress(macho_file) - rec.rangeStart);
                     },
                 },
                 16 => { // personality function
@@ -559,7 +555,7 @@ fn initUnwindRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
                     .local => {
                         out.lsda = self.findAtom(rec.lsda);
                         const atom = out.getLsdaAtom(macho_file).?;
-                        out.lsda_offset = @intCast(rec.lsda - atom.getInputSection(macho_file).addr - atom.off);
+                        out.lsda_offset = @intCast(atom.getInputAddress(macho_file) - rec.lsda);
                     },
                 },
                 else => {},
@@ -579,13 +575,13 @@ fn initUnwindRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
     for (self.unwind_records.items) |rec_index| {
         const rec = macho_file.getUnwindRecord(rec_index);
         const atom = rec.getAtom(macho_file);
-        const addr = atom.getInputSection(macho_file).addr + atom.off + rec.atom_offset;
+        const addr = atom.getInputAddress(macho_file) + rec.atom_offset;
         superposition.putAssumeCapacityNoClobber(addr, .{ rec_index, null });
     }
 
     for (self.fdes.items, 0..) |fde, fde_index| {
         const atom = fde.getAtom(macho_file);
-        const addr = atom.getInputSection(macho_file).addr + atom.off + fde.atom_offset;
+        const addr = atom.getInputAddress(macho_file) + fde.atom_offset;
         const gop = superposition.getOrPutAssumeCapacity(addr);
         if (!gop.found_existing) {
             gop.value_ptr.* = .{ null, null };
@@ -633,8 +629,7 @@ fn initUnwindRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
             const rhs = ctx.getUnwindRecord(rhs_index);
             const lhsa = lhs.getAtom(ctx);
             const rhsa = rhs.getAtom(ctx);
-            return lhsa.getInputSection(ctx).addr + lhsa.off + lhs.atom_offset <
-                rhsa.getInputSection(ctx).addr + rhsa.off + rhs.atom_offset;
+            return lhsa.getInputAddress(ctx) + lhs.atom_offset < rhsa.getInputAddress(ctx) + rhs.atom_offset;
         }
     }.sortFn;
     mem.sort(UnwindInfo.Record.Index, self.unwind_records.items, macho_file, sortFn);
@@ -716,7 +711,7 @@ pub fn resolveSymbols(self: *Object, macho_file: *MachO) void {
         if (self.asFile().getSymbolRank(nlist, !self.alive) < symbol.getSymbolRank(macho_file)) {
             const value = if (!nlist.tentative() and !nlist.abs()) blk: {
                 const atom = macho_file.getAtom(atom_index).?;
-                break :blk nlist.n_value - atom.off - atom.getInputSection(macho_file).addr;
+                break :blk nlist.n_value - atom.getInputAddress(macho_file);
             } else nlist.n_value;
             symbol.value = value;
             symbol.atom = atom_index;

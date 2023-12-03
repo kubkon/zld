@@ -1949,7 +1949,7 @@ fn writeDataInCode(self: *MachO) !void {
         for (object.atoms.items) |atom_index| {
             if (next_dice >= in_dices.len) break;
             const atom = self.getAtom(atom_index) orelse continue;
-            const start_off = atom.getInputSection(self).addr + atom.off;
+            const start_off = atom.getInputAddress(self);
             const end_off = start_off + atom.size;
             const start_dice = next_dice;
 
