@@ -64,7 +64,7 @@ pub const Cie = struct {
         return data[cie.offset..][0..cie.getSize()];
     }
 
-    pub fn getPersonalityTarget(cie: Cie, macho_file: *MachO) ?*Symbol {
+    pub fn getPersonality(cie: Cie, macho_file: *MachO) ?*Symbol {
         const personality = cie.personality orelse return null;
         return macho_file.getSymbol(personality.index);
     }

@@ -593,8 +593,6 @@ fn initUnwindRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
         gop.value_ptr[1] = @intCast(fde_index);
     }
 
-    const cpu_arch = macho_file.options.cpu_arch.?;
-
     for (superposition.values()) |meta| {
         self.has_unwind = true;
 
@@ -603,7 +601,7 @@ fn initUnwindRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
 
             if (meta[0]) |rec_index| {
                 const rec = macho_file.getUnwindRecord(rec_index);
-                if (!rec.enc.isDwarf(cpu_arch)) {
+                if (!rec.enc.isDwarf(macho_file)) {
                     // Mark FDE dead
                     fde.alive = false;
                 } else {
@@ -768,10 +766,10 @@ pub fn scanRelocs(self: Object, macho_file: *MachO) !void {
         const rec = macho_file.getUnwindRecord(rec_index);
         if (!rec.alive) continue;
         if (rec.getFde(macho_file)) |fde| {
-            if (fde.getCie(macho_file).getPersonalityTarget(macho_file)) |sym| {
+            if (fde.getCie(macho_file).getPersonality(macho_file)) |sym| {
                 sym.flags.got = true;
             }
-        } else if (rec.getPersonalityTarget(macho_file)) |sym| {
+        } else if (rec.getPersonality(macho_file)) |sym| {
             sym.flags.got = true;
         }
     }

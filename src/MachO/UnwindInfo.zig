@@ -46,7 +46,6 @@ fn canFold(macho_file: *MachO, lhs_index: Record.Index, rhs_index: Record.Index)
 
 pub fn generate(info: *UnwindInfo, macho_file: *MachO) !void {
     const gpa = macho_file.base.allocator;
-    const cpu_arch = macho_file.options.cpu_arch.?;
 
     // Collect all unwind records
     for (macho_file.sections.items(.atoms)) |atoms| {
@@ -59,6 +58,17 @@ pub fn generate(info: *UnwindInfo, macho_file: *MachO) !void {
                 if (!macho_file.getUnwindRecord(rec).alive) continue;
                 info.records.appendAssumeCapacity(rec);
             }
+        }
+    }
+
+    // Encode records
+    for (info.records.items) |index| {
+        const rec = macho_file.getUnwindRecord(index);
+        if (rec.getFde(macho_file)) |fde| {
+            rec.enc.setDwarfSectionOffset(@intCast(fde.out_offset));
+        } else if (rec.getPersonality(macho_file)) |_| {
+            const personality_index = try info.getOrPutPersonalityFunction(rec.personality.?); // TODO handle error
+            rec.enc.setPersonalityIndex(personality_index + 1);
         }
     }
 
@@ -138,7 +148,7 @@ pub fn generate(info: *UnwindInfo, macho_file: *MachO) !void {
 
         for (info.records.items) |rec_index| {
             const rec = macho_file.getUnwindRecord(rec_index);
-            if (rec.enc.isDwarf(cpu_arch)) continue;
+            if (rec.enc.isDwarf(macho_file)) continue;
             const gop = try common_encodings_counts.getOrPut(rec.enc);
             if (!gop.found_existing) {
                 gop.value_ptr.* = .{
@@ -460,16 +470,19 @@ pub fn generate(info: *UnwindInfo, macho_file: *MachO) !void {
 //     return null;
 // }
 
-// fn getPersonalityFunction(info: UnwindInfo, global_index: MachO.SymbolWithLoc) ?u2 {
-//     comptime var index: u2 = 0;
-//     inline while (index < max_personalities) : (index += 1) {
-//         if (index >= info.personalities_count) return null;
-//         if (info.personalities[index].eql(global_index)) {
-//             return index;
-//         }
-//     }
-//     return null;
-// }
+fn getOrPutPersonalityFunction(info: *UnwindInfo, sym_index: Symbol.Index) error{TooManyPersonalities}!u2 {
+    comptime var index: u2 = 0;
+    inline while (index < max_personalities) : (index += 1) {
+        if (info.personalities[index] == sym_index) {
+            return index;
+        } else if (index == info.personalities_count) {
+            info.personalities[index] = sym_index;
+            info.personalities_count += 1;
+            return index;
+        }
+    }
+    return error.TooManyPersonalities;
+}
 
 // fn isLsda(record_id: usize, rel: macho.relocation_info) bool {
 //     const base_offset = @as(i32, @intCast(record_id * @sizeOf(macho.compact_unwind_entry)));
@@ -510,9 +523,9 @@ pub const Encoding = extern struct {
         return @as(u4, @truncate((enc.enc & macho.UNWIND_ARM64_MODE_MASK) >> 24));
     }
 
-    pub fn isDwarf(enc: Encoding, cpu_arch: std.Target.Cpu.Arch) bool {
+    pub fn isDwarf(enc: Encoding, macho_file: *MachO) bool {
         const mode = enc.getMode();
-        return switch (cpu_arch) {
+        return switch (macho_file.options.cpu_arch.?) {
             .aarch64 => @as(macho.UNWIND_ARM64_MODE, @enumFromInt(mode)) == .DWARF,
             .x86_64 => @as(macho.UNWIND_X86_64_MODE, @enumFromInt(mode)) == .DWARF,
             else => unreachable,
@@ -543,14 +556,12 @@ pub const Encoding = extern struct {
         enc.enc |= mask;
     }
 
-    pub fn getDwarfSectionOffset(enc: Encoding, cpu_arch: std.Target.Cpu.Arch) u24 {
-        assert(enc.isDwarf(cpu_arch));
+    pub fn getDwarfSectionOffset(enc: Encoding) u24 {
         const offset = @as(u24, @truncate(enc.enc));
         return offset;
     }
 
-    pub fn setDwarfSectionOffset(enc: *Encoding, cpu_arch: std.Target.Cpu.Arch, offset: u24) void {
-        assert(enc.isDwarf(cpu_arch));
+    pub fn setDwarfSectionOffset(enc: *Encoding, offset: u24) void {
         enc.enc |= offset;
     }
 
@@ -594,13 +605,13 @@ pub const Record = struct {
         return macho_file.getAtom(rec.lsda);
     }
 
-    pub fn getPersonalityTarget(rec: Record, macho_file: *MachO) ?*Symbol {
+    pub fn getPersonality(rec: Record, macho_file: *MachO) ?*Symbol {
         const personality = rec.personality orelse return null;
         return macho_file.getSymbol(personality);
     }
 
     pub fn getFde(rec: Record, macho_file: *MachO) ?Fde {
-        if (!rec.enc.isDwarf(macho_file.options.cpu_arch.?)) return null;
+        if (!rec.enc.isDwarf(macho_file)) return null;
         return rec.getObject(macho_file).fdes.items[rec.fde];
     }
 
@@ -647,7 +658,7 @@ pub const Record = struct {
         try writer.print("{x} : len({x})", .{
             rec.enc.enc, rec.length,
         });
-        if (rec.enc.isDwarf(macho_file.options.cpu_arch.?)) try writer.print(" : fde({d})", .{rec.fde});
+        if (rec.enc.isDwarf(macho_file)) try writer.print(" : fde({d})", .{rec.fde});
         try writer.print(" : {s}", .{rec.getAtom(macho_file).getName(macho_file)});
         if (!rec.alive) try writer.writeAll(" : [*]");
     }
