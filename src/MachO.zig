@@ -1361,8 +1361,11 @@ fn generateUnwindInfo(self: *MachO) !void {
         sect.size = try eh_frame.calcEhFrameSize(self);
         sect.@"align" = 3;
     }
-    if (self.unwind_info_sect_index) |_| {
+    if (self.unwind_info_sect_index) |index| {
+        const sect = &self.sections.items(.header)[index];
         try self.unwind_info.generate(self);
+        sect.size = self.unwind_info.calcSize();
+        sect.@"align" = 2;
     }
 }
 

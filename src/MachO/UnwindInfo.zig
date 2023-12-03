@@ -231,24 +231,17 @@ pub fn generate(info: *UnwindInfo, macho_file: *MachO) !void {
     }
 }
 
-// pub fn calcSectionSize(info: UnwindInfo, macho_file: *MachO) !void {
-//     const sect_id = macho_file.getSectionByName("__TEXT", "__unwind_info") orelse return;
-//     const sect = &macho_file.sections.items(.header)[sect_id];
-//     sect.@"align" = 2;
-//     sect.size = info.calcRequiredSize();
-// }
-
-// fn calcRequiredSize(info: UnwindInfo) usize {
-//     var total_size: usize = 0;
-//     total_size += @sizeOf(macho.unwind_info_section_header);
-//     total_size +=
-//         @as(usize, @intCast(info.common_encodings_count)) * @sizeOf(macho.compact_unwind_encoding_t);
-//     total_size += @as(usize, @intCast(info.personalities_count)) * @sizeOf(u32);
-//     total_size += (info.pages.items.len + 1) * @sizeOf(macho.unwind_info_section_header_index_entry);
-//     total_size += info.lsdas.items.len * @sizeOf(macho.unwind_info_section_header_lsda_index_entry);
-//     total_size += info.pages.items.len * second_level_page_bytes;
-//     return total_size;
-// }
+pub fn calcSize(info: UnwindInfo) usize {
+    var total_size: usize = 0;
+    total_size += @sizeOf(macho.unwind_info_section_header);
+    total_size +=
+        @as(usize, @intCast(info.common_encodings_count)) * @sizeOf(macho.compact_unwind_encoding_t);
+    total_size += @as(usize, @intCast(info.personalities_count)) * @sizeOf(u32);
+    total_size += (info.pages.items.len + 1) * @sizeOf(macho.unwind_info_section_header_index_entry);
+    total_size += info.lsdas_count * @sizeOf(macho.unwind_info_section_header_lsda_index_entry);
+    total_size += info.pages.items.len * second_level_page_bytes;
+    return total_size;
+}
 
 // pub fn write(info: *UnwindInfo, macho_file: *MachO) !void {
 //     const sect_id = macho_file.getSectionByName("__TEXT", "__unwind_info") orelse return;
@@ -370,32 +363,6 @@ pub fn generate(info: *UnwindInfo, macho_file: *MachO) !void {
 //     }
 
 //     try macho_file.base.file.pwriteAll(buffer.items, sect.offset);
-// }
-
-// fn getRelocs(macho_file: *MachO, object_id: u32, record_id: usize) []const macho.relocation_info {
-//     const object = &macho_file.objects.items[object_id];
-//     assert(object.hasUnwindRecords());
-//     const rel_pos = object.unwind_relocs_lookup[record_id].reloc;
-//     const relocs = object.getRelocs(object.unwind_info_sect_id.?);
-//     return relocs[rel_pos.start..][0..rel_pos.len];
-// }
-
-// fn isPersonalityFunction(record_id: usize, rel: macho.relocation_info) bool {
-//     const base_offset = @as(i32, @intCast(record_id * @sizeOf(macho.compact_unwind_entry)));
-//     const rel_offset = rel.r_address - base_offset;
-//     return rel_offset == 16;
-// }
-
-// pub fn getPersonalityFunctionReloc(
-//     macho_file: *MachO,
-//     object_id: u32,
-//     record_id: usize,
-// ) ?macho.relocation_info {
-//     const relocs = getRelocs(macho_file, object_id, record_id);
-//     for (relocs) |rel| {
-//         if (isPersonalityFunction(record_id, rel)) return rel;
-//     }
-//     return null;
 // }
 
 fn getOrPutPersonalityFunction(info: *UnwindInfo, sym_index: Symbol.Index) error{TooManyPersonalities}!u2 {
