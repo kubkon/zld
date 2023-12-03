@@ -175,60 +175,60 @@ pub fn generate(info: *UnwindInfo, macho_file: *MachO) !void {
         }
     }
 
-    // // Compute page allocations
-    // {
-    //     var i: u32 = 0;
-    //     while (i < info.records.items.len) {
-    //         const rec = macho_file.getUnwindRecord(info.records.items[i]);
-    //         const range_start_max: u64 = rec.getAtomAddress(macho_file) + compressed_entry_func_offset_mask;
-    //         var encoding_count: u9 = info.common_encodings_count;
-    //         var space_left: u32 = second_level_page_words -
-    //             @sizeOf(macho.unwind_info_compressed_second_level_page_header) / @sizeOf(u32);
-    //         var page = Page{
-    //             .kind = undefined,
-    //             .start = i,
-    //             .count = 0,
-    //         };
+    // Compute page allocations
+    {
+        var i: u32 = 0;
+        while (i < info.records.items.len) {
+            const rec = macho_file.getUnwindRecord(info.records.items[i]);
+            const range_start_max: u64 = rec.getAtomAddress(macho_file) + compressed_entry_func_offset_mask;
+            var encoding_count: u9 = info.common_encodings_count;
+            var space_left: u32 = second_level_page_words -
+                @sizeOf(macho.unwind_info_compressed_second_level_page_header) / @sizeOf(u32);
+            var page = Page{
+                .kind = undefined,
+                .start = i,
+                .count = 0,
+            };
 
-    //         while (space_left >= 1 and i < info.records.items.len) {
-    //             const next = macho_file.getUnwindRecord(info.records.items[i]);
-    //             const is_dwarf = next.enc.isDwarf(macho_file);
+            while (space_left >= 1 and i < info.records.items.len) {
+                const next = macho_file.getUnwindRecord(info.records.items[i]);
+                const is_dwarf = next.enc.isDwarf(macho_file);
 
-    //             if (next.getAtomAddress(macho_file) >= range_start_max) {
-    //                 break;
-    //             } else if (info.getCommonEncoding(next.enc) != null or
-    //                 page.getPageEncoding(next.enc) != null and !is_dwarf)
-    //             {
-    //                 i += 1;
-    //                 space_left -= 1;
-    //             } else if (space_left >= 2 and encoding_count < max_compact_encodings) {
-    //                 page.appendPageEncoding(next.enc);
-    //                 i += 1;
-    //                 space_left -= 2;
-    //                 encoding_count += 1;
-    //             } else {
-    //                 break;
-    //             }
-    //         }
+                if (next.getAtomAddress(macho_file) >= range_start_max) {
+                    break;
+                } else if (info.getCommonEncoding(next.enc) != null or
+                    page.getPageEncoding(next.enc) != null and !is_dwarf)
+                {
+                    i += 1;
+                    space_left -= 1;
+                } else if (space_left >= 2 and encoding_count < max_compact_encodings) {
+                    page.appendPageEncoding(next.enc);
+                    i += 1;
+                    space_left -= 2;
+                    encoding_count += 1;
+                } else {
+                    break;
+                }
+            }
 
-    //         page.count = @as(u16, @intCast(i - page.start));
+            page.count = @as(u16, @intCast(i - page.start));
 
-    //         if (i < info.records.items.len and page.count < max_regular_second_level_entries) {
-    //             page.kind = .regular;
-    //             page.count = @as(u16, @intCast(@min(
-    //                 max_regular_second_level_entries,
-    //                 info.records.items.len - page.start,
-    //             )));
-    //             i = page.start + page.count;
-    //         } else {
-    //             page.kind = .compressed;
-    //         }
+            if (i < info.records.items.len and page.count < max_regular_second_level_entries) {
+                page.kind = .regular;
+                page.count = @as(u16, @intCast(@min(
+                    max_regular_second_level_entries,
+                    info.records.items.len - page.start,
+                )));
+                i = page.start + page.count;
+            } else {
+                page.kind = .compressed;
+            }
 
-    //         std.debug.print("{}", .{page.fmt(info)});
+            std.debug.print("{}", .{page.fmt(info)});
 
-    //         try info.pages.append(info.gpa, page);
-    //     }
-    // }
+            try info.pages.append(gpa, page);
+        }
+    }
 }
 
 // pub fn calcSectionSize(info: UnwindInfo, macho_file: *MachO) !void {
@@ -599,10 +599,7 @@ const compressed_entry_func_offset_mask = ~@as(u24, 0);
 
 const Page = struct {
     kind: enum { regular, compressed },
-    records: Atom.Loc,
-    /// Total count of records that are allocated in this page.
-    /// This value can be larger than actual records count since it
-    /// will include any gaps in the unwind info records.
+    start: u32,
     count: u16,
     page_encodings: [max_compact_encodings]Encoding = undefined,
     page_encodings_count: u9 = 0,
