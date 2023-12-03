@@ -540,7 +540,7 @@ fn initUnwindRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
                     .local => {
                         out.atom = self.findAtom(rec.rangeStart);
                         const atom = out.getAtom(macho_file);
-                        out.atom_offset = @intCast(atom.getInputAddress(macho_file) - rec.rangeStart);
+                        out.atom_offset = @intCast(rec.rangeStart - atom.getInputAddress(macho_file));
                     },
                 },
                 16 => { // personality function
@@ -555,7 +555,7 @@ fn initUnwindRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
                     .local => {
                         out.lsda = self.findAtom(rec.lsda);
                         const atom = out.getLsdaAtom(macho_file).?;
-                        out.lsda_offset = @intCast(atom.getInputAddress(macho_file) - rec.lsda);
+                        out.lsda_offset = @intCast(rec.lsda - atom.getInputAddress(macho_file));
                     },
                 },
                 else => {},
