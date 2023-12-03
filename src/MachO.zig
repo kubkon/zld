@@ -294,6 +294,7 @@ pub fn flush(self: *MachO) !void {
 
     try self.initDyldInfoSections();
     try self.writeAtoms();
+    try self.writeUnwindInfo();
     try self.finalizeDyldInfoSections();
     try self.writeSyntheticSections();
     try self.writeDyldInfoSections();
@@ -1358,7 +1359,7 @@ fn addAtomsToSections(self: *MachO) !void {
 fn generateUnwindInfo(self: *MachO) !void {
     if (self.eh_frame_sect_index) |index| {
         const sect = &self.sections.items(.header)[index];
-        sect.size = try eh_frame.calcEhFrameSize(self);
+        sect.size = try eh_frame.calcSize(self);
         sect.@"align" = 3;
     }
     if (self.unwind_info_sect_index) |index| {
@@ -1804,6 +1805,19 @@ fn writeAtoms(self: *MachO) !void {
         }
 
         try self.base.file.pwriteAll(buffer, header.offset);
+    }
+}
+
+fn writeUnwindInfo(self: *MachO) !void {
+    const gpa = self.base.allocator;
+
+    if (self.eh_frame_sect_index) |index| {
+        const header = self.sections.items(.header)[index];
+        var buffer = try std.ArrayList(u8).initCapacity(gpa, header.size);
+        defer buffer.deinit();
+        try eh_frame.write(self, buffer.writer());
+        assert(buffer.items.len == header.size);
+        try self.base.file.pwriteAll(buffer.items, header.offset);
     }
 }
 
