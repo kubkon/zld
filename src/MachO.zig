@@ -2317,7 +2317,7 @@ pub fn addSection(
 pub fn makeStaticString(bytes: []const u8) [16]u8 {
     var buf = [_]u8{0} ** 16;
     assert(bytes.len <= buf.len);
-    mem.copy(u8, &buf, bytes);
+    @memcpy(buf[0..bytes.len], bytes);
     return buf;
 }
 

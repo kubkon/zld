@@ -2322,7 +2322,7 @@ fn writeHeader(self: *Elf) !void {
         .e_shstrndx = self.shstrtab_sect_index.?,
     };
     // Magic
-    mem.copy(u8, header.e_ident[0..4], "\x7fELF");
+    @memcpy(header.e_ident[0..4], "\x7fELF");
     // Class
     header.e_ident[4] = elf.ELFCLASS64;
     // Endianness
