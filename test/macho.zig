@@ -372,12 +372,23 @@ fn testEntryPointArchive(b: *Build, opts: Options) *Step {
     const lib = ar(b);
     lib.addFileSource(obj.out);
 
-    const exe = cc(b, opts);
-    exe.addArg("-lmain");
-    exe.addPrefixedDirectorySource("-L", lib.saveOutputAs("libmain.a").dir);
+    {
+        const exe = cc(b, opts);
+        exe.addArg("-lmain");
+        exe.addPrefixedDirectorySource("-L", lib.saveOutputAs("libmain.a").dir);
 
-    const run = exe.run();
-    test_step.dependOn(run.step());
+        const run = exe.run();
+        test_step.dependOn(run.step());
+    }
+
+    {
+        const exe = cc(b, opts);
+        exe.addArgs(&.{ "-lmain", "-Wl,-dead_strip" });
+        exe.addPrefixedDirectorySource("-L", lib.saveOutputAs("libmain.a").dir);
+
+        const run = exe.run();
+        test_step.dependOn(run.step());
+    }
 
     return test_step;
 }
