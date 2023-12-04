@@ -49,6 +49,7 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testTentative(b, opts));
     macho_step.dependOn(testTls(b, opts));
     macho_step.dependOn(testTlsLargeTbss(b, opts));
+    macho_step.dependOn(testUndefinedFlag(b, opts));
     macho_step.dependOn(testUnwindInfo(b, opts));
     macho_step.dependOn(testUnwindInfoNoSubsectionsArm64(b, opts));
     macho_step.dependOn(testUnwindInfoNoSubsectionsX64(b, opts));
@@ -1369,6 +1370,78 @@ fn testTlsLargeTbss(b: *Build, opts: Options) *Step {
     const run = exe.run();
     run.expectStdOutEqual("3 0 5 0 0 0\n");
     test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+fn testUndefinedFlag(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-undefined-flag", "");
+
+    const obj = cc(b, opts);
+    obj.addCSource("int foo = 42;");
+    obj.addArg("-c");
+
+    const lib = ar(b);
+    lib.addFileSource(obj.out);
+
+    {
+        const exe = cc(b, opts);
+        exe.addEmptyMain();
+        exe.addArgs(&.{ "-Wl,-u,_foo", "-la" });
+        exe.addPrefixedDirectorySource("-L", lib.saveOutputAs("liba.a").dir);
+
+        const run = exe.run();
+        test_step.dependOn(run.step());
+
+        const check = exe.check();
+        check.checkInSymtab();
+        check.checkContains("_foo");
+        test_step.dependOn(&check.step);
+    }
+
+    {
+        const exe = cc(b, opts);
+        exe.addEmptyMain();
+        exe.addArgs(&.{ "-Wl,-u,_foo", "-la", "-Wl,-dead_strip" });
+        exe.addPrefixedDirectorySource("-L", lib.saveOutputAs("liba.a").dir);
+
+        const run = exe.run();
+        test_step.dependOn(run.step());
+
+        const check = exe.check();
+        check.checkInSymtab();
+        check.checkContains("_foo");
+        test_step.dependOn(&check.step);
+    }
+
+    {
+        const exe = cc(b, opts);
+        exe.addEmptyMain();
+        exe.addFileSource(obj.out);
+
+        const run = exe.run();
+        test_step.dependOn(run.step());
+
+        const check = exe.check();
+        check.checkInSymtab();
+        check.checkContains("_foo");
+        test_step.dependOn(&check.step);
+    }
+
+    {
+        const exe = cc(b, opts);
+        exe.addEmptyMain();
+        exe.addFileSource(obj.out);
+        exe.addArg("-Wl,-dead_strip");
+
+        const run = exe.run();
+        test_step.dependOn(run.step());
+
+        const check = exe.check();
+        check.checkInSymtab();
+        check.checkNotPresent("_foo");
+        test_step.dependOn(&check.step);
+    }
 
     return test_step;
 }
