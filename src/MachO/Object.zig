@@ -180,7 +180,10 @@ fn initSubsections(self: *Object, nlists: anytype, macho_file: *MachO) !void {
                 .atom = atom_index,
                 .off = nlist.nlist.n_value - sect.addr,
             });
-            self.symtab.items(.size)[nlist.idx] = size;
+
+            for (nlist_start..idx) |i| {
+                self.symtab.items(.size)[nlists[i].idx] = size;
+            }
         }
     }
 }
@@ -228,7 +231,10 @@ fn initSections(self: *Object, nlists: anytype, macho_file: *MachO) !void {
                 nlists[idx].nlist.n_value - nlist.nlist.n_value
             else
                 sect.addr + sect.size - nlist.nlist.n_value;
-            self.symtab.items(.size)[nlist.idx] = size;
+
+            for (nlist_start..idx) |i| {
+                self.symtab.items(.size)[nlists[i].idx] = size;
+            }
         }
     }
 }
@@ -581,7 +587,11 @@ fn initUnwindRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
         const sect = self.sections.items(.header)[nlist.n_sect - 1];
         if (sect.isCode()) {
             try superposition.ensureUnusedCapacity(1);
-            superposition.putAssumeCapacityNoClobber(nlist.n_value, .{ .atom = atom, .size = size });
+            const gop = superposition.getOrPutAssumeCapacity(nlist.n_value);
+            if (gop.found_existing) {
+                assert(gop.value_ptr.atom == atom and gop.value_ptr.size == size);
+            }
+            gop.value_ptr.* = .{ .atom = atom, .size = size };
         }
     }
 
