@@ -44,6 +44,7 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testSectionBoundarySymbols(b, opts));
     macho_step.dependOn(testSegmentBoundarySymbols(b, opts));
     macho_step.dependOn(testStackSize(b, opts));
+    macho_step.dependOn(testSymbolStabs(b, opts));
     macho_step.dependOn(testTbdv3(b, opts));
     macho_step.dependOn(testTentative(b, opts));
     macho_step.dependOn(testTls(b, opts));
@@ -1164,6 +1165,74 @@ fn testStackSize(b: *Build, opts: Options) *Step {
     check.checkExact("cmd MAIN");
     check.checkExact("stacksize 100000000");
     test_step.dependOn(&check.step);
+
+    return test_step;
+}
+
+fn testSymbolStabs(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-symbol-stabs", "");
+
+    const a_o = cc(b, opts);
+    a_o.addCSource(
+        \\int x;
+        \\int get_x() {
+        \\  return x;
+        \\}
+        \\void incr_x() {
+        \\  x += 1;
+        \\}
+    );
+    a_o.addArgs(&.{ "-c", "-g" });
+
+    const b_o = cc(b, opts);
+    b_o.addAsmSource(
+        \\.globl _foo
+        \\_foo:
+        \\  mov $42, %rax
+        \\  ret
+        \\.globl _bar
+        \\_bar:
+        \\  sub $8, %rsp
+        \\  call _foo
+        \\  add $8, %rsp
+        \\  ret
+    );
+    b_o.addArgs(&.{ "-c", "-g" });
+
+    const exe = cc(b, opts);
+    exe.addCSource(
+        \\#include <stdio.h>
+        \\int get_x();
+        \\void incr_x();
+        \\int bar();
+        \\void print_x() {
+        \\  printf("x=%d\n", get_x());
+        \\}
+        \\void print_bar() {
+        \\  printf("bar=%d\n", bar());
+        \\}
+        \\int main() {
+        \\  print_x();
+        \\  incr_x();
+        \\  print_x();
+        \\  print_bar();
+        \\  return 0;
+        \\}
+    );
+    exe.addFileSource(a_o.out);
+    exe.addFileSource(b_o.out);
+    exe.addArg("-g");
+
+    const run = exe.run();
+    run.expectStdOutEqual(
+        \\x=0
+        \\x=1
+        \\bar=42
+        \\
+    );
+    test_step.dependOn(run.step());
+
+    // TODO check for _foo and _bar having set sizes in stabs
 
     return test_step;
 }
