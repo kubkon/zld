@@ -34,6 +34,7 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testHelloC(b, opts));
     macho_step.dependOn(testHelloZig(b, opts));
     macho_step.dependOn(testLayout(b, opts));
+    macho_step.dependOn(testLargeBss(b, opts));
     macho_step.dependOn(testNeededFramework(b, opts));
     macho_step.dependOn(testNeededLibrary(b, opts));
     macho_step.dependOn(testNoExportsDylib(b, opts));
@@ -771,6 +772,23 @@ fn testLayout(b: *Build, opts: Options) *Step {
 
     const run = exe.run();
     run.expectHelloWorld();
+    test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+fn testLargeBss(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-large-bss", "");
+
+    const exe = cc(b, opts);
+    exe.addCSource(
+        \\char arr[0x100000000];
+        \\int main() {
+        \\  return arr[2000];
+        \\}
+    );
+
+    const run = exe.run();
     test_step.dependOn(run.step());
 
     return test_step;
