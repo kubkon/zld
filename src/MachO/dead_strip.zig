@@ -6,11 +6,6 @@ pub fn gcAtoms(macho_file: *MachO) !void {
 }
 
 fn collectRoots(roots: *std.ArrayList(*Atom), macho_file: *MachO) !void {
-    if (macho_file.entry_index) |index| {
-        const global = macho_file.getSymbol(index);
-        try markSymbol(global, roots, macho_file);
-    }
-
     for (macho_file.objects.items) |index| {
         const object = macho_file.getFile(index).?.object;
         for (object.symbols.items) |sym_index| {
