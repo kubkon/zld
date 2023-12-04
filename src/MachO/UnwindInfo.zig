@@ -462,6 +462,11 @@ pub const Record = struct {
         return rec.getObject(macho_file).fdes.items[rec.fde];
     }
 
+    pub fn getFdePtr(rec: Record, macho_file: *MachO) ?*Fde {
+        if (!rec.enc.isDwarf(macho_file)) return null;
+        return &rec.getObject(macho_file).fdes.items[rec.fde];
+    }
+
     pub fn getAtomAddress(rec: Record, macho_file: *MachO) u64 {
         const atom = rec.getAtom(macho_file);
         return atom.value + rec.atom_offset;

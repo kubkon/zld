@@ -73,6 +73,17 @@ pub fn getUnwindRecords(self: Atom, macho_file: *MachO) []const UnwindInfo.Recor
     return object.unwind_records.items[self.unwind_records.pos..][0..self.unwind_records.len];
 }
 
+pub fn markUnwindRecordsDead(self: Atom, macho_file: *MachO) void {
+    for (self.getUnwindRecords(macho_file)) |cu_index| {
+        const cu = macho_file.getUnwindRecord(cu_index);
+        cu.alive = false;
+
+        if (cu.getFdePtr(macho_file)) |fde| {
+            fde.alive = false;
+        }
+    }
+}
+
 pub fn initOutputSection(sect: macho.section_64, macho_file: *MachO) !u8 {
     const segname, const sectname, const flags = blk: {
         if (sect.isCode()) break :blk .{
