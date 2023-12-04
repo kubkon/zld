@@ -265,12 +265,12 @@ pub fn flush(self: *MachO) !void {
 
     try self.resolveSyntheticSymbols();
 
-    // TODO kill __eh_frame atoms
-
     try self.convertTentativeDefinitions();
     self.markImportsAndExports();
 
-    // TODO dead strip atoms
+    if (self.options.dead_strip) {
+        try dead_strip.gcAtoms(self);
+    }
 
     try self.initOutputSections();
 
