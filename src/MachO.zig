@@ -1813,11 +1813,10 @@ fn writeUnwindInfo(self: *MachO) !void {
 
     if (self.eh_frame_sect_index) |index| {
         const header = self.sections.items(.header)[index];
-        var buffer = try std.ArrayList(u8).initCapacity(gpa, header.size);
-        defer buffer.deinit();
-        try eh_frame.write(self, buffer.writer());
-        assert(buffer.items.len == header.size);
-        try self.base.file.pwriteAll(buffer.items, header.offset);
+        const buffer = try gpa.alloc(u8, header.size);
+        defer gpa.free(buffer);
+        eh_frame.write(self, buffer);
+        try self.base.file.pwriteAll(buffer, header.offset);
     }
 }
 

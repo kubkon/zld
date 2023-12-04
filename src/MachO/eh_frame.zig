@@ -335,8 +335,7 @@ pub fn calcSize(macho_file: *MachO) !u32 {
     return offset;
 }
 
-pub fn write(macho_file: *MachO, writer: anytype) !void {
-    const gpa = macho_file.base.allocator;
+pub fn write(macho_file: *MachO, buffer: []u8) void {
     const sect = macho_file.sections.items(.header)[macho_file.eh_frame_sect_index.?];
 
     for (macho_file.objects.items) |index| {
@@ -344,22 +343,19 @@ pub fn write(macho_file: *MachO, writer: anytype) !void {
         for (object.cies.items) |cie| {
             if (!cie.alive) continue;
 
-            const data = try gpa.dupe(u8, cie.getData(macho_file));
-            defer gpa.free(data);
+            @memcpy(buffer[cie.out_offset..][0..cie.getSize()], cie.getData(macho_file));
 
             if (cie.getPersonality(macho_file)) |sym| {
-                const offset = cie.personality.?.offset;
-                const saddr = sect.addr + cie.out_offset + offset;
+                const offset = cie.out_offset + cie.personality.?.offset;
+                const saddr = sect.addr + offset;
                 const taddr = sym.getGotAddress(macho_file);
                 std.mem.writeInt(
                     i32,
-                    data[offset..][0..4],
+                    buffer[offset..][0..4],
                     @intCast(@as(i64, @intCast(taddr)) - @as(i64, @intCast(saddr)) + 4),
                     .little,
                 );
             }
-
-            try writer.writeAll(data);
         }
     }
 
@@ -368,45 +364,45 @@ pub fn write(macho_file: *MachO, writer: anytype) !void {
         for (object.fdes.items) |fde| {
             if (!fde.alive) continue;
 
-            const data = try gpa.dupe(u8, fde.getData(macho_file));
-            defer gpa.free(data);
+            @memcpy(buffer[fde.out_offset..][0..fde.getSize()], fde.getData(macho_file));
 
             {
-                const offset = fde.out_offset + 4 - fde.getCie(macho_file).out_offset;
-                std.mem.writeInt(u32, data[4..][0..4], offset, .little);
+                const offset = fde.out_offset + 4;
+                const value = offset - fde.getCie(macho_file).out_offset;
+                std.mem.writeInt(u32, buffer[offset..][0..4], value, .little);
             }
 
             {
-                const saddr = sect.addr + fde.out_offset + 8;
+                const offset = fde.out_offset + 8;
+                const saddr = sect.addr + offset;
                 const taddr = fde.getAtom(macho_file).value;
                 std.mem.writeInt(
                     i64,
-                    data[8..][0..8],
+                    buffer[offset..][0..8],
                     @as(i64, @intCast(taddr)) - @as(i64, @intCast(saddr)),
                     .little,
                 );
             }
 
             if (fde.getLsdaAtom(macho_file)) |atom| {
-                const saddr = sect.addr + fde.out_offset + fde.lsda_offset;
+                const offset = fde.out_offset + fde.lsda_offset;
+                const saddr = sect.addr + offset;
                 const taddr = atom.value;
                 switch (fde.getCie(macho_file).lsda_size.?) {
                     .p32 => std.mem.writeInt(
                         i32,
-                        data[fde.lsda_offset..][0..4],
+                        buffer[offset..][0..4],
                         @intCast(@as(i64, @intCast(taddr)) - @as(i64, @intCast(saddr)) + 4),
                         .little,
                     ),
                     .p64 => std.mem.writeInt(
                         i64,
-                        data[fde.lsda_offset..][0..8],
+                        buffer[offset..][0..8],
                         @as(i64, @intCast(taddr)) - @as(i64, @intCast(saddr)),
                         .little,
                     ),
                 }
             }
-
-            try writer.writeAll(data);
         }
     }
 }
