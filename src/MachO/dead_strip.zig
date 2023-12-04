@@ -60,7 +60,44 @@ fn markAtom(atom: *Atom) bool {
 fn mark(roots: []*Atom, macho_file: *MachO) void {
     for (roots) |root| {
         track_live_log.debug("root atom({d},{s})", .{ root.atom_index, root.getName(macho_file) });
-        // markLive(root, elf_file);
+        markLive(root, macho_file);
+    }
+}
+
+fn markLive(atom: *Atom, macho_file: *MachO) void {
+    if (build_options.enable_logging)
+        track_live_level.incr();
+
+    assert(atom.flags.visited);
+
+    for (atom.getRelocs(macho_file)) |rel| {
+        const target_atom = switch (rel.tag) {
+            .local => rel.getTargetAtom(macho_file),
+            .@"extern" => rel.getTargetSymbol(macho_file).getAtom(macho_file),
+        };
+        if (target_atom) |ta| {
+            ta.flags.alive = true;
+            track_live_log.debug("{}marking live atom({d},{s})", .{
+                track_live_level,
+                ta.atom_index,
+                ta.getName(macho_file),
+            });
+            if (markAtom(ta)) markLive(ta, macho_file);
+        }
+    }
+
+    for (atom.getUnwindRecords(macho_file)) |cu_index| {
+        const cu = macho_file.getUnwindRecord(cu_index);
+        if (markAtom(cu.getAtom(macho_file))) markLive(cu.getAtom(macho_file), macho_file);
+        if (cu.getLsdaAtom(macho_file)) |lsda| {
+            if (markAtom(lsda)) markLive(lsda, macho_file);
+        }
+        if (cu.getFde(macho_file)) |fde| {
+            if (markAtom(fde.getAtom(macho_file))) markLive(fde.getAtom(macho_file), macho_file);
+            if (fde.getLsdaAtom(macho_file)) |lsda| {
+                if (markAtom(lsda)) markLive(lsda, macho_file);
+            }
+        }
     }
 }
 
@@ -579,18 +616,17 @@ const N_NO_DEAD_STRIP: u16 = macho.N_DESC_DISCARDED;
 //     }
 // }
 
-const std = @import("std");
 const assert = std.debug.assert;
-const eh_frame = @import("eh_frame.zig");
+const build_options = @import("build_options");
 const log = std.log.scoped(.dead_strip);
 const macho = std.macho;
 const math = std.math;
 const mem = std.mem;
 const trace = @import("../tracy.zig").trace;
 const track_live_log = std.log.scoped(.dead_strip_track_live);
+const std = @import("std");
 
 const Allocator = mem.Allocator;
 const Atom = @import("Atom.zig");
 const MachO = @import("../MachO.zig");
 const Symbol = @import("Symbol.zig");
-const UnwindInfo = @import("UnwindInfo.zig");
