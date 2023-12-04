@@ -46,6 +46,7 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testTbdv3(b, opts));
     macho_step.dependOn(testTentative(b, opts));
     macho_step.dependOn(testTls(b, opts));
+    macho_step.dependOn(testTlsLargeTbss(b, opts));
     macho_step.dependOn(testUnwindInfo(b, opts));
     macho_step.dependOn(testUnwindInfoNoSubsectionsArm64(b, opts));
     macho_step.dependOn(testUnwindInfoNoSubsectionsX64(b, opts));
@@ -1247,6 +1248,28 @@ fn testTls(b: *Build, opts: Options) *Step {
 
     const run = exe.run();
     run.expectStdOutEqual("2 2 2");
+    test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+fn testTlsLargeTbss(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-tls-large-tbss", "");
+
+    const exe = cc(b, opts);
+    exe.addCSource(
+        \\#include <stdio.h>
+        \\_Thread_local int x[0x8000];
+        \\_Thread_local int y[0x8000];
+        \\int main() {
+        \\  x[0] = 3;
+        \\  x[0x7fff] = 5;
+        \\  printf("%d %d %d %d %d %d\n", x[0], x[1], x[0x7fff], y[0], y[1], y[0x7fff]);
+        \\}
+    );
+
+    const run = exe.run();
+    run.expectStdOutEqual("3 0 5 0 0 0\n");
     test_step.dependOn(run.step());
 
     return test_step;
