@@ -59,7 +59,6 @@ fn markAtom(atom: *Atom) bool {
 
 fn mark(roots: []*Atom, macho_file: *MachO) void {
     for (roots) |root| {
-        track_live_log.debug("root atom({d},{s})", .{ root.atom_index, root.getName(macho_file) });
         markLive(root, macho_file);
     }
 
@@ -82,10 +81,16 @@ fn mark(roots: []*Atom, macho_file: *MachO) void {
 }
 
 fn markLive(atom: *Atom, macho_file: *MachO) void {
+    assert(atom.flags.visited);
+    atom.flags.alive = true;
+    track_live_log.debug("{}marking live atom({d},{s})", .{
+        track_live_level,
+        atom.atom_index,
+        atom.getName(macho_file),
+    });
+
     if (build_options.enable_logging)
         track_live_level.incr();
-
-    assert(atom.flags.visited);
 
     for (atom.getRelocs(macho_file)) |rel| {
         const target_atom = switch (rel.tag) {
@@ -93,12 +98,6 @@ fn markLive(atom: *Atom, macho_file: *MachO) void {
             .@"extern" => rel.getTargetSymbol(macho_file).getAtom(macho_file),
         };
         if (target_atom) |ta| {
-            ta.flags.alive = true;
-            track_live_log.debug("{}marking live atom({d},{s})", .{
-                track_live_level,
-                ta.atom_index,
-                ta.getName(macho_file),
-            });
             if (markAtom(ta)) markLive(ta, macho_file);
         }
     }
@@ -106,40 +105,16 @@ fn markLive(atom: *Atom, macho_file: *MachO) void {
     for (atom.getUnwindRecords(macho_file)) |cu_index| {
         const cu = macho_file.getUnwindRecord(cu_index);
         const cu_atom = cu.getAtom(macho_file);
-        cu_atom.flags.alive = true;
-        track_live_log.debug("{}marking live atom({d},{s})", .{
-            track_live_level,
-            cu_atom.atom_index,
-            cu_atom.getName(macho_file),
-        });
         if (markAtom(cu_atom)) markLive(cu_atom, macho_file);
 
         if (cu.getLsdaAtom(macho_file)) |lsda| {
-            lsda.flags.alive = true;
-            track_live_log.debug("{}marking live atom({d},{s})", .{
-                track_live_level,
-                lsda.atom_index,
-                lsda.getName(macho_file),
-            });
             if (markAtom(lsda)) markLive(lsda, macho_file);
         }
         if (cu.getFde(macho_file)) |fde| {
             const fde_atom = fde.getAtom(macho_file);
-            fde_atom.flags.alive = true;
-            track_live_log.debug("{}marking live atom({d},{s})", .{
-                track_live_level,
-                fde_atom.atom_index,
-                fde_atom.getName(macho_file),
-            });
             if (markAtom(fde_atom)) markLive(fde_atom, macho_file);
 
             if (fde.getLsdaAtom(macho_file)) |lsda| {
-                lsda.flags.alive = true;
-                track_live_log.debug("{}marking live atom({d},{s})", .{
-                    track_live_level,
-                    lsda.atom_index,
-                    lsda.getName(macho_file),
-                });
                 if (markAtom(lsda)) markLive(lsda, macho_file);
             }
         }
