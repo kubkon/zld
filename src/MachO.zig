@@ -248,8 +248,6 @@ pub fn flush(self: *MachO) !void {
     // Parse dependent dylibs
     try self.parseDependentDylibs(arena);
 
-    // TODO dedup dylibs
-
     {
         const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
         self.files.set(index, .{ .internal = .{ .index = index } });
