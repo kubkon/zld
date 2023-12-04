@@ -153,6 +153,23 @@ fn initSubsections(self: *Object, nlists: anytype, macho_file: *MachO) !void {
             if (nlist.nlist.n_sect - 1 != n_sect) break i;
         } else nlists.len;
 
+        if (nlist_start == nlist_end or nlists[nlist_start].nlist.n_value > sect.addr) {
+            const name = try std.fmt.allocPrintZ(gpa, "{s}${s}", .{ sect.segName(), sect.sectName() });
+            defer gpa.free(name);
+            const size = if (nlist_start == nlist_end) sect.size else nlists[nlist_start].nlist.n_value - sect.addr;
+            const atom_index = try self.addAtom(.{
+                .name = name,
+                .n_sect = @intCast(n_sect),
+                .off = 0,
+                .size = size,
+                .alignment = sect.@"align",
+            }, macho_file);
+            try subsections.append(gpa, .{
+                .atom = atom_index,
+                .off = 0,
+            });
+        }
+
         var idx: usize = nlist_start;
         while (idx < nlist_end) {
             const nlist = nlists[idx];

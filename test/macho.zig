@@ -154,30 +154,82 @@ fn testBuildVersionIOS(b: *Build, opts: Options) *Step {
 fn testDeadStrip(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-dead-strip", "");
 
-    const exe = cc(b, opts);
-    exe.addCSource(
+    const obj = cc(b, opts);
+    obj.addCppSource(
         \\#include <stdio.h>
-        \\void printMe() {
-        \\  printf("Hello!\n");
-        \\}
+        \\int two() { return 2; }
+        \\int live_var1 = 1;
+        \\int live_var2 = two();
+        \\int dead_var1 = 3;
+        \\int dead_var2 = 4;
+        \\void live_fn1() {}
+        \\void live_fn2() { live_fn1(); }
+        \\void dead_fn1() {}
+        \\void dead_fn2() { dead_fn1(); }
         \\int main() {
-        \\  printMe();
-        \\  return 0;
-        \\}
-        \\void iAmUnused() {
-        \\  printf("YOU SHALL NOT PASS!\n");
+        \\  printf("%d %d\n", live_var1, live_var2);
+        \\  live_fn2();
         \\}
     );
-    exe.addArg("-dead_strip");
+    obj.addArg("-c");
+    const obj_out = obj.saveOutputAs("a.o");
 
-    const run = exe.run();
-    run.expectStdOutEqual("Hello!\n");
-    test_step.dependOn(run.step());
+    {
+        const exe = cc(b, opts);
+        exe.addFileSource(obj_out.file);
 
-    const check = exe.check();
-    check.checkInSymtab();
-    check.checkNotPresent("(__TEXT,__text) external _iAmUnused");
-    test_step.dependOn(&check.step);
+        const run = exe.run();
+        run.expectStdOutEqual("1 2\n");
+        test_step.dependOn(run.step());
+
+        const check = exe.check();
+        check.checkInSymtab();
+        check.checkContains("live_var1");
+        check.checkInSymtab();
+        check.checkContains("live_var2");
+        check.checkInSymtab();
+        check.checkContains("dead_var1");
+        check.checkInSymtab();
+        check.checkContains("dead_var2");
+        check.checkInSymtab();
+        check.checkContains("live_fn1");
+        check.checkInSymtab();
+        check.checkContains("live_fn2");
+        check.checkInSymtab();
+        check.checkContains("dead_fn1");
+        check.checkInSymtab();
+        check.checkContains("dead_fn2");
+        test_step.dependOn(&check.step);
+    }
+
+    {
+        const exe = cc(b, opts);
+        exe.addFileSource(obj_out.file);
+        exe.addArg("-Wl,-dead_strip");
+
+        const run = exe.run();
+        run.expectStdOutEqual("1 2\n");
+        test_step.dependOn(run.step());
+
+        const check = exe.check();
+        check.checkInSymtab();
+        check.checkContains("live_var1");
+        check.checkInSymtab();
+        check.checkContains("live_var2");
+        check.checkInSymtab();
+        check.checkNotPresent("dead_var1");
+        check.checkInSymtab();
+        check.checkNotPresent("dead_var2");
+        check.checkInSymtab();
+        check.checkContains("live_fn1");
+        check.checkInSymtab();
+        check.checkContains("live_fn2");
+        check.checkInSymtab();
+        check.checkNotPresent("dead_fn1");
+        check.checkInSymtab();
+        check.checkNotPresent("dead_fn2");
+        test_step.dependOn(&check.step);
+    }
 
     return test_step;
 }
