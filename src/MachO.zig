@@ -1818,6 +1818,14 @@ fn writeUnwindInfo(self: *MachO) !void {
         eh_frame.write(self, buffer);
         try self.base.file.pwriteAll(buffer, header.offset);
     }
+
+    if (self.unwind_info_sect_index) |index| {
+        const header = self.sections.items(.header)[index];
+        const buffer = try gpa.alloc(u8, header.size);
+        defer gpa.free(buffer);
+        try self.unwind_info.write(self, buffer);
+        try self.base.file.pwriteAll(buffer, header.offset);
+    }
 }
 
 fn finalizeDyldInfoSections(self: *MachO) !void {
