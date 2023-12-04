@@ -2001,7 +2001,7 @@ fn reportUndefs(self: *Elf) !void {
         try err.addMsg("undefined symbol: {s}", .{undef_sym.getName(self)});
 
         var inote: usize = 0;
-        while (inote < nnotes) : (inote += 1) {
+        while (inote < @min(notes.items.len, max_notes)) : (inote += 1) {
             const atom = self.getAtom(notes.items[inote]).?;
             const object = atom.getObject(self);
             try err.addNote("referenced by {}:{s}", .{ object.fmtPath(), atom.getName(self) });
@@ -2322,7 +2322,7 @@ fn writeHeader(self: *Elf) !void {
         .e_shstrndx = self.shstrtab_sect_index.?,
     };
     // Magic
-    mem.copy(u8, header.e_ident[0..4], "\x7fELF");
+    @memcpy(header.e_ident[0..4], "\x7fELF");
     // Class
     header.e_ident[4] = elf.ELFCLASS64;
     // Endianness
@@ -2801,7 +2801,7 @@ const fs = std.fs;
 const gc = @import("Elf/gc.zig");
 const log = std.log.scoped(.elf);
 const relocatable = @import("Elf/relocatable.zig");
-pub const state_log = std.log.scoped(.state);
+const state_log = std.log.scoped(.state);
 const synthetic = @import("Elf/synthetic.zig");
 const math = std.math;
 const mem = std.mem;

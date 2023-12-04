@@ -32,6 +32,7 @@ const usage =
     \\-dynamic                           Perform dynamic linking
     \\-e [name]                          Specifies the entry point of main executable
     \\--entitlements                     Add path to entitlements file for embedding in code signature
+    \\-flat_namespace                    Use flat namespace dylib resolution strategy
     \\-force_load [path]                 Loads all members of the specified static archive library
     \\-framework [name]                  Link against framework
     \\-F[path]                           Add search path for frameworks
@@ -57,6 +58,7 @@ const usage =
     \\-search_dylibs_first               Search `libx.dylib` in each dir in library search paths, then `libx.a`
     \\-stack_size [value]                Size of the default stack in hexadecimal notation
     \\-syslibroot [path]                 Specify the syslibroot
+    \\-two_levelnamespace                Use two-level namespace dylib resolution strategy (default)
     \\-u [name]                          Specifies symbol which has to be resolved at link time for the link to succeed
     \\-undefined [value]                 Specify how undefined symbols are to be treated: 
     \\                                   error (default), warning, suppress, or dynamic_lookup.
@@ -102,8 +104,9 @@ headerpad: ?u32 = null,
 headerpad_max_install_names: bool = false,
 dead_strip: bool = false,
 dead_strip_dylibs: bool = false,
-allow_undef: bool = false,
+undefined_treatment: UndefinedTreatment = .@"error",
 no_deduplicate: bool = false,
+namespace: Namespace = .two_level,
 
 pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options {
     if (args.len == 0) ctx.fatal(usage, .{cmd});
@@ -196,11 +199,13 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             opts.entry = name;
         } else if (p.arg1("undefined")) |treatment| {
             if (mem.eql(u8, treatment, "error")) {
-                opts.allow_undef = false;
-            } else if (mem.eql(u8, treatment, "warning") or mem.eql(u8, treatment, "suppress")) {
-                ctx.fatal("TODO unimplemented -undefined {s} option", .{treatment});
+                opts.undefined_treatment = .@"error";
+            } else if (mem.eql(u8, treatment, "warning")) {
+                opts.undefined_treatment = .warn;
+            } else if (mem.eql(u8, treatment, "suppress")) {
+                opts.undefined_treatment = .suppress;
             } else if (mem.eql(u8, treatment, "dynamic_lookup")) {
-                opts.allow_undef = true;
+                opts.undefined_treatment = .dynamic_lookup;
             } else {
                 ctx.fatal("Unknown option -undefined {s}", .{treatment});
             }
@@ -265,6 +270,10 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             try lib_dirs.put(path, {});
         } else if (p.flag1("no_deduplicate")) {
             opts.no_deduplicate = true;
+        } else if (p.flag1("two_levelnamespace")) {
+            opts.namespace = .two_level;
+        } else if (p.flag1("flat_namespace")) {
+            opts.namespace = .flat;
         } else {
             try positionals.append(.{ .path = p.arg, .tag = .obj });
         }
@@ -281,6 +290,13 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
     if (print_version) ctx.warn("{s}", .{version});
 
     if (positionals.items.len == 0) ctx.fatal("Expected at least one positional argument", .{});
+
+    if (opts.namespace == .two_level) switch (opts.undefined_treatment) {
+        .warn, .suppress => |x| ctx.fatal("illegal flags: '-undefined {s}' with '-two_levelnamespace'", .{
+            @tagName(x),
+        }),
+        else => {},
+    };
 
     // Add some defaults
     try lib_dirs.put("/usr/lib", {});
@@ -356,6 +372,18 @@ pub const Platform = struct {
         }
         return false;
     }
+};
+
+const UndefinedTreatment = enum {
+    @"error",
+    warn,
+    suppress,
+    dynamic_lookup,
+};
+
+const Namespace = enum {
+    two_level,
+    flat,
 };
 
 pub const Version = struct {

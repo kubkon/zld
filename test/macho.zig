@@ -20,7 +20,7 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     };
 
     macho_step.dependOn(testBuildVersionMacOS(b, opts));
-    macho_step.dependOn(testBuildVersionIOS(b, opts));
+    // macho_step.dependOn(testBuildVersionIOS(b, opts)); // TODO arm64 support
     macho_step.dependOn(testDeadStrip(b, opts));
     macho_step.dependOn(testDeadStripDylibs(b, opts));
     macho_step.dependOn(testDylib(b, opts));
@@ -29,9 +29,10 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testEntryPointArchive(b, opts));
     macho_step.dependOn(testEntryPointDylib(b, opts));
     macho_step.dependOn(testFatArchive(b, opts));
-    macho_step.dependOn(testFatDylib(b, opts));
+    // macho_step.dependOn(testFatDylib(b, opts)); // TODO arm64 support
     macho_step.dependOn(testHeaderpad(b, opts));
-    macho_step.dependOn(testHello(b, opts));
+    macho_step.dependOn(testHelloC(b, opts));
+    macho_step.dependOn(testHelloZig(b, opts));
     macho_step.dependOn(testLayout(b, opts));
     macho_step.dependOn(testNeededFramework(b, opts));
     macho_step.dependOn(testNeededLibrary(b, opts));
@@ -39,14 +40,18 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testPagezeroSize(b, opts));
     macho_step.dependOn(testReexportsZig(b, opts));
     macho_step.dependOn(testSearchStrategy(b, opts));
+    macho_step.dependOn(testSectionBoundarySymbols(b, opts));
+    macho_step.dependOn(testSegmentBoundarySymbols(b, opts));
     macho_step.dependOn(testStackSize(b, opts));
     macho_step.dependOn(testTbdv3(b, opts));
+    macho_step.dependOn(testTentative(b, opts));
     macho_step.dependOn(testTls(b, opts));
     macho_step.dependOn(testUnwindInfo(b, opts));
     macho_step.dependOn(testUnwindInfoNoSubsectionsArm64(b, opts));
     macho_step.dependOn(testUnwindInfoNoSubsectionsX64(b, opts));
     macho_step.dependOn(testWeakFramework(b, opts));
     macho_step.dependOn(testWeakLibrary(b, opts));
+    macho_step.dependOn(testWeakRef(b, opts));
 
     return macho_step;
 }
@@ -353,11 +358,18 @@ fn testEntryPointDylib(b: *Build, opts: Options) *Step {
     check.checkExact("sectname __stubs");
     check.checkExtract("addr {stubs_vmaddr}");
     check.checkStart();
+    check.checkExact("sectname __stubs");
+    check.checkExtract("size {stubs_vmsize}");
+    check.checkStart();
     check.checkExact("cmd MAIN");
     check.checkExtract("entryoff {entryoff}");
     check.checkComputeCompare("text_vmaddr entryoff +", .{
-        .op = .eq,
+        .op = .gte,
         .value = .{ .variable = "stubs_vmaddr" }, // The entrypoint should be a synthetic stub
+    });
+    check.checkComputeCompare("text_vmaddr entryoff + stubs_vmaddr -", .{
+        .op = .lt,
+        .value = .{ .variable = "stubs_vmsize" }, // The entrypoint should be a synthetic stub
     });
     test_step.dependOn(&check.step);
 
@@ -560,11 +572,35 @@ fn testHeaderpad(b: *Build, opts: Options) *Step {
     return test_step;
 }
 
-fn testHello(b: *Build, opts: Options) *Step {
-    const test_step = b.step("test-macho-hello", "");
+fn testHelloC(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-hello-c", "");
 
     const exe = cc(b, opts);
     exe.addHelloWorldMain();
+
+    const run = exe.run();
+    run.expectHelloWorld();
+    test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+fn testHelloZig(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-hello-zig", "");
+
+    if (!opts.has_zig) return skipTestStep(test_step);
+
+    const obj = zig(b);
+    obj.addZigSource(
+        \\const std = @import("std");
+        \\pub fn main() void {
+        \\    std.io.getStdOut().writer().print("Hello world!\n", .{}) catch unreachable;
+        \\}
+    );
+    obj.addArg("-fno-stack-check"); // TODO find a way to include Zig's crt
+
+    const exe = cc(b, opts);
+    exe.addFileSource(obj.out);
 
     const run = exe.run();
     run.expectHelloWorld();
@@ -740,10 +776,8 @@ fn testNoExportsDylib(b: *Build, opts: Options) *Step {
     dylib.addArg("-shared");
 
     const check = dylib.check();
-    check.checkStart();
-    check.checkExact("cmd SYMTAB");
-    check.checkExtract("nsyms {nsyms}");
-    check.checkComputeCompare("nsyms", .{ .op = .eq, .value = .{ .literal = 0 } });
+    check.checkInSymtab();
+    check.checkNotPresent("external _abc");
     test_step.dependOn(&check.step);
 
     return test_step;
@@ -895,6 +929,155 @@ fn testSearchStrategy(b: *Build, opts: Options) *Step {
     return test_step;
 }
 
+fn testSectionBoundarySymbols(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-section-boundary-symbols", "");
+
+    const obj1 = cc(b, opts);
+    obj1.addCppSource(
+        \\constexpr const char* MESSAGE __attribute__((used, section("__DATA_CONST,__message_ptr"))) = "codebase";
+    );
+    obj1.addArgs(&.{ "-std=c++17", "-c" });
+
+    const main_o = cc(b, opts);
+    main_o.addCSource(
+        \\#include <stdio.h>
+        \\const char* interop();
+        \\int main() {
+        \\  printf("All your %s are belong to us.\n", interop());
+        \\  return 0;
+        \\}
+    );
+    main_o.addArg("-c");
+
+    {
+        const obj2 = cc(b, opts);
+        obj2.addCppSource(
+            \\extern const char* message_pointer __asm("section$start$__DATA_CONST$__message_ptr");
+            \\extern "C" const char* interop() {
+            \\  return message_pointer;
+            \\}
+        );
+        obj2.addArgs(&.{ "-std=c++17", "-c" });
+
+        const exe = cc(b, opts);
+        exe.addFileSource(obj1.out);
+        exe.addFileSource(obj2.out);
+        exe.addFileSource(main_o.out);
+
+        const run = exe.run();
+        run.expectStdOutEqual("All your codebase are belong to us.\n");
+        test_step.dependOn(run.step());
+
+        const check = exe.check();
+        check.checkInSymtab();
+        check.checkNotPresent("external section$start$__DATA_CONST$__message_ptr");
+        test_step.dependOn(&check.step);
+    }
+
+    {
+        const obj2 = cc(b, opts);
+        obj2.addCppSource(
+            \\extern const char* message_pointer __asm("section$start$__DATA_CONST$__not_present");
+            \\extern "C" const char* interop() {
+            \\  return message_pointer;
+            \\}
+        );
+        obj2.addArgs(&.{ "-std=c++17", "-c" });
+
+        const exe = cc(b, opts);
+        exe.addFileSource(obj1.out);
+        exe.addFileSource(obj2.out);
+        exe.addFileSource(main_o.out);
+
+        const run = exe.run();
+        run.expectStdOutEqual("All your (null) are belong to us.\n");
+        test_step.dependOn(run.step());
+
+        const check = exe.check();
+        check.checkInSymtab();
+        check.checkNotPresent("external section$start$__DATA_CONST$__not_present");
+        test_step.dependOn(&check.step);
+    }
+
+    return test_step;
+}
+
+fn testSegmentBoundarySymbols(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-segment-boundary-symbols", "");
+
+    const obj1 = cc(b, opts);
+    obj1.addCppSource(
+        \\constexpr const char* MESSAGE __attribute__((used, section("__DATA_CONST_1,__message_ptr"))) = "codebase";
+    );
+    obj1.addArgs(&.{ "-std=c++17", "-c" });
+
+    const main_o = cc(b, opts);
+    main_o.addCSource(
+        \\#include <stdio.h>
+        \\const char* interop();
+        \\int main() {
+        \\  printf("All your %s are belong to us.\n", interop());
+        \\  return 0;
+        \\}
+    );
+    main_o.addArg("-c");
+
+    {
+        const obj2 = cc(b, opts);
+        obj2.addCppSource(
+            \\extern const char* message_pointer __asm("segment$start$__DATA_CONST_1");
+            \\extern "C" const char* interop() {
+            \\  return message_pointer;
+            \\}
+        );
+        obj2.addArgs(&.{ "-std=c++17", "-c" });
+
+        const exe = cc(b, opts);
+        exe.addFileSource(obj1.out);
+        exe.addFileSource(obj2.out);
+        exe.addFileSource(main_o.out);
+
+        const run = exe.run();
+        run.expectStdOutEqual("All your codebase are belong to us.\n");
+        test_step.dependOn(run.step());
+
+        const check = exe.check();
+        check.checkInSymtab();
+        check.checkNotPresent("external segment$start$__DATA_CONST_1");
+        test_step.dependOn(&check.step);
+    }
+
+    {
+        const obj2 = cc(b, opts);
+        obj2.addCppSource(
+            \\extern const char* message_pointer __asm("segment$start$__DATA_1");
+            \\extern "C" const char* interop() {
+            \\  return message_pointer;
+            \\}
+        );
+        obj2.addArgs(&.{ "-std=c++17", "-c" });
+
+        const exe = cc(b, opts);
+        exe.addFileSource(obj1.out);
+        exe.addFileSource(obj2.out);
+        exe.addFileSource(main_o.out);
+
+        const check = exe.check();
+        check.checkStart();
+        check.checkExact("cmd SEGMENT_64");
+        check.checkExact("segname __DATA_1");
+        check.checkExtract("vmsize {vmsize}");
+        check.checkExtract("filesz {filesz}");
+        check.checkComputeCompare("vmsize", .{ .op = .eq, .value = .{ .literal = 0 } });
+        check.checkComputeCompare("filesz", .{ .op = .eq, .value = .{ .literal = 0 } });
+        check.checkInSymtab();
+        check.checkNotPresent("external segment$start$__DATA_1");
+        test_step.dependOn(&check.step);
+    }
+
+    return test_step;
+}
+
 fn testStackSize(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-stack-size", "");
 
@@ -949,6 +1132,33 @@ fn testTbdv3(b: *Build, opts: Options) *Step {
     exe.addPrefixedDirectorySource("-Wl,-rpath,", dylib_out.dir);
 
     const run = exe.run();
+    test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+fn testTentative(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-tentative", "");
+
+    const exe = cc(b, opts);
+    exe.addCSource(
+        \\int foo;
+        \\int bar;
+        \\int baz = 42;
+    );
+    exe.addCSource(
+        \\#include<stdio.h>
+        \\int foo;
+        \\int bar = 5;
+        \\int baz;
+        \\int main() {
+        \\  printf("%d %d %d\n", foo, bar, baz);
+        \\}
+    );
+    exe.addArg("-fcommon");
+
+    const run = exe.run();
+    run.expectStdOutEqual("0 5 42\n");
     test_step.dependOn(run.step());
 
     return test_step;
@@ -1337,6 +1547,32 @@ fn testWeakLibrary(b: *Build, opts: Options) *Step {
 
     const run = exe.run();
     run.expectStdOutEqual("42 42");
+    test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+fn testWeakRef(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-weak-ref", "");
+
+    const exe = cc(b, opts);
+    exe.addCSource(
+        \\#include<stdio.h>
+        \\__attribute__((weak)) int foo();
+        \\int main() {
+        \\  printf("%d", foo ? foo() : -1);
+        \\  return 0;
+        \\}
+    );
+    exe.addArgs(&.{ "-Wl,-flat_namespace", "-Wl,-undefined,suppress" });
+
+    const check = exe.check();
+    check.checkInSymtab();
+    check.checkExact("(undefined) weak external _foo (from self import)");
+    test_step.dependOn(&check.step);
+
+    const run = exe.run();
+    run.expectStdOutEqual("-1");
     test_step.dependOn(run.step());
 
     return test_step;

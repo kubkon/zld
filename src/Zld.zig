@@ -271,23 +271,24 @@ pub fn fatal(base: *Zld, comptime format: []const u8, args: anytype) void {
 
 pub const ErrorWithNotes = struct {
     err_index: usize,
-    ctx: *Zld,
+    allocator: Allocator,
+    errors: []ErrorMsg,
 
     pub fn addMsg(err: ErrorWithNotes, comptime format: []const u8, args: anytype) !void {
         const err_msg = err.getErrorMsg();
-        err_msg.msg = try std.fmt.allocPrint(err.ctx.allocator, format, args);
+        err_msg.msg = try std.fmt.allocPrint(err.allocator, format, args);
     }
 
     pub fn addNote(err: ErrorWithNotes, comptime format: []const u8, args: anytype) !void {
         const err_msg = err.getErrorMsg();
         err_msg.notes.appendAssumeCapacity(.{
-            .msg = try std.fmt.allocPrint(err.ctx.allocator, format, args),
+            .msg = try std.fmt.allocPrint(err.allocator, format, args),
         });
     }
 
     fn getErrorMsg(err: ErrorWithNotes) *ErrorMsg {
-        assert(err.err_index < err.ctx.errors.items.len);
-        return &err.ctx.errors.items[err.err_index];
+        assert(err.err_index < err.errors.len);
+        return &err.errors[err.err_index];
     }
 };
 
@@ -296,7 +297,15 @@ pub fn addErrorWithNotes(base: *Zld, note_count: usize) !ErrorWithNotes {
     const err_msg = try base.errors.addOne(base.allocator);
     err_msg.* = .{ .msg = undefined };
     try err_msg.notes.ensureTotalCapacityPrecise(base.allocator, note_count);
-    return .{ .err_index = err_index, .ctx = base };
+    return .{ .err_index = err_index, .allocator = base.allocator, .errors = base.errors.items };
+}
+
+pub fn addWarningWithNotes(base: *Zld, note_count: usize) !ErrorWithNotes {
+    const err_index = base.warnings.items.len;
+    const err_msg = try base.warnings.addOne(base.allocator);
+    err_msg.* = .{ .msg = undefined };
+    try err_msg.notes.ensureTotalCapacityPrecise(base.allocator, note_count);
+    return .{ .err_index = err_index, .allocator = base.allocator, .errors = base.warnings.items };
 }
 
 pub fn getAllWarningsAlloc(base: *Zld) !ErrorBundle {
@@ -311,8 +320,17 @@ pub fn getAllWarningsAlloc(base: *Zld) !ErrorBundle {
     }
 
     for (base.warnings.items) |msg| {
-        assert(msg.notes.items.len == 0);
-        try bundle.addRootErrorMessage(.{ .msg = try bundle.addString(msg.msg) });
+        const notes = msg.notes.items;
+        try bundle.addRootErrorMessage(.{
+            .msg = try bundle.addString(msg.msg),
+            .notes_len = @as(u32, @intCast(notes.len)),
+        });
+        const notes_start = try bundle.reserveNotes(@as(u32, @intCast(notes.len)));
+        for (notes_start.., notes) |index, note| {
+            bundle.extra.items[index] = @intFromEnum(bundle.addErrorMessageAssumeCapacity(.{
+                .msg = try bundle.addString(note.msg),
+            }));
+        }
     }
 
     return bundle.toOwnedBundle("");

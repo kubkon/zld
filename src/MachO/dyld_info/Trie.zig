@@ -366,13 +366,11 @@ pub fn read(self: *Trie, allocator: Allocator, reader: anytype) ReadError!usize 
 
 /// Write the trie to a byte stream.
 /// Panics if the trie was not finalized using `finalize` before calling this method.
-pub fn write(self: Trie, writer: anytype) !u64 {
+pub fn write(self: Trie, writer: anytype) !void {
     assert(!self.trie_dirty);
-    var counting_writer = std.io.countingWriter(writer);
     for (self.ordered_nodes.items) |node| {
-        try node.write(counting_writer.writer());
+        try node.write(writer);
     }
-    return counting_writer.bytes_written;
 }
 
 pub fn init(self: *Trie, allocator: Allocator) !void {
