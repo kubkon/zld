@@ -456,20 +456,18 @@ fn resolveFile(
             },
             .lib => {
                 const full_path = (try self.resolveLib(arena, lib_dirs, obj.path)) orelse {
-                    const err = try self.base.addErrorWithNotes(2 + lib_dirs.len);
+                    const err = try self.base.addErrorWithNotes(lib_dirs.len);
                     try err.addMsg("library not found for -l{s}", .{obj.path});
-                    try err.addNote("searched in", .{});
-                    for (lib_dirs) |dir| try err.addNote("{s}", .{dir});
+                    for (lib_dirs) |dir| try err.addNote("tried {s}", .{dir});
                     return error.ResolveFail;
                 };
                 break :blk full_path;
             },
             .framework => {
                 const full_path = (try self.resolveFramework(arena, framework_dirs, obj.path)) orelse {
-                    const err = try self.base.addErrorWithNotes(2 + framework_dirs.len);
+                    const err = try self.base.addErrorWithNotes(framework_dirs.len);
                     try err.addMsg("framework not found for -framework {s}", .{obj.path});
-                    try err.addNote("searched in", .{});
-                    for (framework_dirs) |dir| try err.addNote("{s}", .{dir});
+                    for (framework_dirs) |dir| try err.addNote("tried {s}", .{dir});
                     return error.ResolveFail;
                 };
                 break :blk full_path;
@@ -1721,6 +1719,11 @@ fn initDyldInfoSections(self: *MachO) !void {
     if (self.tlv_ptr_sect_index != null) {
         try self.tlv_ptr.addBind(self);
     }
+    if (self.la_symbol_ptr_sect_index != null) {
+        try self.la_symbol_ptr.addRebase(self);
+        try self.la_symbol_ptr.addLazyBind(self);
+    }
+    try self.initExportTrie();
 
     var nrebases: usize = 0;
     var nbinds: usize = 0;
@@ -1731,13 +1734,6 @@ fn initDyldInfoSections(self: *MachO) !void {
     }
     try self.rebase.entries.ensureUnusedCapacity(gpa, nrebases);
     try self.bind.entries.ensureUnusedCapacity(gpa, nbinds);
-
-    if (self.la_symbol_ptr_sect_index != null) {
-        try self.la_symbol_ptr.addRebase(self);
-        try self.la_symbol_ptr.addLazyBind(self);
-    }
-
-    try self.initExportTrie();
 }
 
 fn initExportTrie(self: *MachO) !void {
