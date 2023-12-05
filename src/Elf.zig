@@ -1659,7 +1659,7 @@ fn parseArchive(self: *Elf, arena: Allocator, obj: LinkObject) !bool {
     const file = try fs.cwd().openFile(obj.path, .{});
     defer file.close();
 
-    const magic = file.reader().readBytesNoEof(Archive.SARMAG) catch return false;
+    const magic = file.reader().readBytesNoEof(elf.ARMAG.len) catch return false;
     try file.seekTo(0);
 
     if (!Archive.isValidMagic(&magic)) return false;

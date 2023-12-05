@@ -4,67 +4,9 @@ data: []const u8,
 objects: std.ArrayListUnmanaged(Object) = .{},
 strtab: []const u8 = &[0]u8{},
 
-// Archive files start with the ARMAG identifying string.  Then follows a
-// `struct ar_hdr', and as many bytes of member file data as its `ar_size'
-// member indicates, for each member file.
-/// String that begins an archive file.
-pub const ARMAG: *const [SARMAG:0]u8 = "!<arch>\n";
-/// Size of that string.
-pub const SARMAG: u4 = 8;
-
-/// String in ar_fmag at the end of each header.
-const ARFMAG: *const [2:0]u8 = "`\n";
-
-const SYM64NAME: *const [7:0]u8 = "/SYM64/";
-
-const ar_hdr = extern struct {
-    /// Member file name, sometimes / terminated.
-    ar_name: [16]u8,
-
-    /// File date, decimal seconds since Epoch.
-    ar_date: [12]u8,
-
-    /// User ID, in ASCII format.
-    ar_uid: [6]u8,
-
-    /// Group ID, in ASCII format.
-    ar_gid: [6]u8,
-
-    /// File mode, in ASCII octal.
-    ar_mode: [8]u8,
-
-    /// File size, in ASCII decimal.
-    ar_size: [10]u8,
-
-    /// Always contains ARFMAG.
-    ar_fmag: [2]u8,
-
-    fn date(self: ar_hdr) !u64 {
-        const value = getValue(&self.ar_date);
-        return std.fmt.parseInt(u64, value, 10);
-    }
-
-    fn size(self: ar_hdr) !u32 {
-        const value = getValue(&self.ar_size);
-        return std.fmt.parseInt(u32, value, 10);
-    }
-
-    fn getValue(raw: []const u8) []const u8 {
-        return mem.trimRight(u8, raw, &[_]u8{@as(u8, 0x20)});
-    }
-
-    fn isStrtab(self: ar_hdr) bool {
-        return mem.eql(u8, getValue(&self.ar_name), "//");
-    }
-
-    fn isSymtab(self: ar_hdr) bool {
-        return mem.eql(u8, getValue(&self.ar_name), "/");
-    }
-};
-
 pub fn isValidMagic(magic: []const u8) bool {
-    if (!mem.eql(u8, magic, ARMAG)) {
-        log.debug("invalid archive magic: expected '{s}', found '{s}'", .{ ARMAG, magic });
+    if (!mem.eql(u8, magic, elf.ARMAG)) {
+        log.debug("invalid archive magic: expected '{s}', found '{s}'", .{ elf.ARMAG, magic });
         return false;
     }
     return true;
@@ -79,19 +21,19 @@ pub fn parse(self: *Archive, arena: Allocator, elf_file: *Elf) !void {
 
     var stream = std.io.fixedBufferStream(self.data);
     const reader = stream.reader();
-    _ = try reader.readBytesNoEof(SARMAG);
+    _ = try reader.readBytesNoEof(elf.ARMAG.len);
 
     while (true) {
         if (stream.pos % 2 != 0) {
             stream.pos += 1;
         }
 
-        const hdr = reader.readStruct(ar_hdr) catch break;
+        const hdr = reader.readStruct(elf.ar_hdr) catch break;
 
-        if (!mem.eql(u8, &hdr.ar_fmag, ARFMAG)) {
+        if (!mem.eql(u8, &hdr.ar_fmag, elf.ARFMAG)) {
             return elf_file.base.fatal(
                 "{s}: invalid header delimiter: expected '{s}', found '{s}'",
-                .{ self.path, std.fmt.fmtSliceEscapeLower(ARFMAG), std.fmt.fmtSliceEscapeLower(&hdr.ar_fmag) },
+                .{ self.path, std.fmt.fmtSliceEscapeLower(elf.ARFMAG), std.fmt.fmtSliceEscapeLower(&hdr.ar_fmag) },
             );
         }
 
@@ -105,22 +47,18 @@ pub fn parse(self: *Archive, arena: Allocator, elf_file: *Elf) !void {
             self.strtab = self.data[stream.pos..][0..size];
             continue;
         }
+        if (hdr.isSymdef() or hdr.isSymdefSorted()) continue;
 
-        const name = ar_hdr.getValue(&hdr.ar_name);
-
-        if (mem.eql(u8, name, "__.SYMDEF") or mem.eql(u8, name, "__.SYMDEF SORTED")) continue;
-
-        const object_name = blk: {
-            if (name[0] == '/') {
-                const off = try std.fmt.parseInt(u32, name[1..], 10);
-                break :blk self.getString(off);
-            }
-            break :blk name;
-        };
+        const name = if (hdr.name()) |name|
+            try arena.dupe(u8, name)
+        else if (try hdr.nameOffset()) |off|
+            try arena.dupe(u8, self.getString(off))
+        else
+            unreachable;
 
         const object = Object{
             .archive = self.path,
-            .path = try arena.dupe(u8, object_name[0 .. object_name.len - 1]), // To account for trailing '/'
+            .path = name,
             .data = self.data[stream.pos..][0..size],
             .index = undefined,
             .alive = false,
