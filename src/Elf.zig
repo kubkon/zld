@@ -93,6 +93,8 @@ has_text_reloc: bool = false,
 num_ifunc_dynrelocs: usize = 0,
 default_sym_version: elf.Elf64_Versym,
 
+file_resolution_error: bool = false,
+
 pub fn openPath(allocator: Allocator, options: Options, thread_pool: *ThreadPool) !*Elf {
     const file = try options.emit.directory.createFile(options.emit.sub_path, .{
         .truncate = true,
@@ -290,7 +292,7 @@ pub fn flush(self: *Elf) !void {
         try self.parsePositional(arena, obj, search_dirs.items);
     }
 
-    if (self.base.errors.items.len > 0) {
+    if (self.file_resolution_error) {
         const err = try self.base.addErrorWithNotes(search_dirs.items.len);
         try err.addMsg("library search paths", .{});
         for (search_dirs.items) |dir| {
@@ -1614,7 +1616,10 @@ fn allocateSyntheticSymbols(self: *Elf) void {
 
 fn parsePositional(self: *Elf, arena: Allocator, obj: LinkObject, search_dirs: []const []const u8) anyerror!void {
     const resolved_obj = self.resolveFile(arena, obj, search_dirs) catch |err| switch (err) {
-        error.ResolveFail => return,
+        error.ResolveFail => {
+            self.file_resolution_error = true;
+            return;
+        },
         else => |e| return e,
     };
 
@@ -1659,7 +1664,7 @@ fn parseArchive(self: *Elf, arena: Allocator, obj: LinkObject) !bool {
     const file = try fs.cwd().openFile(obj.path, .{});
     defer file.close();
 
-    const magic = file.reader().readBytesNoEof(Archive.SARMAG) catch return false;
+    const magic = file.reader().readBytesNoEof(elf.ARMAG.len) catch return false;
     try file.seekTo(0);
 
     if (!Archive.isValidMagic(&magic)) return false;

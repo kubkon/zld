@@ -19,7 +19,7 @@ shndx: u16 = 0,
 
 /// Index of the source symbol this symbol references.
 /// Use `getSourceSymbol` to pull the source symbol from the relevant file.
-sym_idx: u32 = 0,
+sym_idx: Index = 0,
 
 /// Index of the source version symbol this symbol references if any.
 /// If the symbol is unversioned it will have either VER_NDX_LOCAL or VER_NDX_GLOBAL.
