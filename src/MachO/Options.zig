@@ -41,6 +41,7 @@ const usage =
     \\-headerpad_max_install_names       Set enough space as if all paths were MAXPATHLEN
     \\--help                             Print this help and exit
     \\-install_name                      Add dylib's install name
+    \\  -dylib_install_name
     \\-l[name]                           Link against library
     \\-L[path]                           Add search path for libraries
     \\-needed_framework [name]           Link against framework (even if unused)
@@ -182,6 +183,8 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             opts.current_version = Version.parse(raw) orelse
                 ctx.fatal("Unable to parse version from '{s}'", .{raw});
         } else if (p.arg1("install_name")) |name| {
+            opts.install_name = name;
+        } else if (p.arg1("dylib_install_name")) |name| {
             opts.install_name = name;
         } else if (p.arg1("headerpad")) |value| {
             opts.headerpad = std.fmt.parseUnsigned(u32, value, 0) catch
