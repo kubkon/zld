@@ -397,44 +397,32 @@ fn initRelocs(self: *Object, macho_file: *MachO) !void {
 
         try out.ensureTotalCapacityPrecise(gpa, relocs.len);
 
-        // TODO parse addend here for every relocation
-
         for (relocs) |rel| {
-            var addend: i64 = 0;
-            var target: u32 = 0;
-            const rel_offset = @as(u32, @intCast(rel.r_address));
             const rel_type: macho.reloc_type_x86_64 = @enumFromInt(rel.r_type);
+            const rel_offset = @as(u32, @intCast(rel.r_address));
+            var addend: i64 = switch (rel.r_length) {
+                0 => code[rel_offset],
+                1 => mem.readInt(i16, code[rel_offset..][0..2], .little),
+                2 => mem.readInt(i32, code[rel_offset..][0..4], .little),
+                3 => mem.readInt(i64, code[rel_offset..][0..8], .little),
+            };
+            addend += switch (rel_type) {
+                .X86_64_RELOC_SIGNED_1 => 1,
+                .X86_64_RELOC_SIGNED_2 => 2,
+                .X86_64_RELOC_SIGNED_4 => 4,
+                else => 0,
+            };
 
-            if (rel.r_extern == 0) {
+            const target = if (rel.r_extern == 0) blk: {
                 const nsect = rel.r_symbolnum - 1;
-                const disp = switch (rel.r_length) {
-                    0 => code[rel_offset],
-                    1 => mem.readInt(i16, code[rel_offset..][0..2], .little),
-                    2 => mem.readInt(i32, code[rel_offset..][0..4], .little),
-                    3 => mem.readInt(i64, code[rel_offset..][0..8], .little),
-                };
-                const taddr: i64 = @intCast(slice.items(.header)[nsect].addr);
-                if (rel.r_pcrel == 1) {
-                    // off + taddr  == saddr + 4 + A + corr
-                    const corr: u3 = switch (rel_type) {
-                        .X86_64_RELOC_SIGNED_1 => 1,
-                        .X86_64_RELOC_SIGNED_2 => 2,
-                        .X86_64_RELOC_SIGNED_4 => 4,
-                        else => 0,
-                    };
-                    const saddr: i64 = @as(i64, @intCast(sect.addr)) + rel.r_address;
-                    const off = @as(u64, @intCast(saddr + 4 + corr + disp));
-                    target = self.findAtomInSection(off, @intCast(nsect));
-                    addend = saddr + 4 - taddr;
-                } else {
-                    // off + taddr == A
-                    const off = @as(u64, @intCast(disp));
-                    target = self.findAtomInSection(off, @intCast(nsect));
-                    addend = (-1) * taddr;
-                }
-            } else {
-                target = self.symbols.items[rel.r_symbolnum];
-            }
+                const taddr: i64 = if (rel.r_pcrel == 1)
+                    @as(i64, @intCast(sect.addr)) + rel.r_address + addend + 4
+                else
+                    addend;
+                const target = self.findAtomInSection(@intCast(taddr), @intCast(nsect));
+                addend = taddr - @as(i64, @intCast(macho_file.getAtom(target).?.getInputSection(macho_file).addr));
+                break :blk target;
+            } else self.symbols.items[rel.r_symbolnum];
 
             out.appendAssumeCapacity(.{
                 .tag = if (rel.r_extern == 1) .@"extern" else .local,

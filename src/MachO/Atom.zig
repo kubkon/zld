@@ -247,14 +247,9 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
         }
 
         const P = @as(i64, @intCast(self.value)) + @as(i64, @intCast(rel_offset));
-        const A = switch (rel.meta.length) {
-            0 => code[rel_offset],
-            1 => mem.readInt(i16, code[rel_offset..][0..2], .little),
-            2 => mem.readInt(i32, code[rel_offset..][0..4], .little),
-            3 => mem.readInt(i64, code[rel_offset..][0..8], .little),
-        };
+        const A = rel.addend;
         const S: i64 = switch (rel.tag) {
-            .local => @as(i64, @intCast(rel.getTargetAtom(macho_file).value)) + rel.addend,
+            .local => @as(i64, @intCast(rel.getTargetAtom(macho_file).value)),
             .@"extern" => @intCast(rel.getTargetSymbol(macho_file).getAddress(.{}, macho_file)),
         };
         const G: i64 = if (rel.tag == .@"extern")
@@ -356,19 +351,19 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
             .X86_64_RELOC_SIGNED_1 => {
                 assert(rel.meta.length == 2);
                 assert(rel.meta.pcrel);
-                try cwriter.writeInt(i32, @intCast(S + A - P - 4 + 1), .little);
+                try cwriter.writeInt(i32, @intCast(S + A - P - 4 - 1), .little);
             },
 
             .X86_64_RELOC_SIGNED_2 => {
                 assert(rel.meta.length == 2);
                 assert(rel.meta.pcrel);
-                try cwriter.writeInt(i32, @intCast(S + A - P - 4 + 2), .little);
+                try cwriter.writeInt(i32, @intCast(S + A - P - 4 - 2), .little);
             },
 
             .X86_64_RELOC_SIGNED_4 => {
                 assert(rel.meta.length == 2);
                 assert(rel.meta.pcrel);
-                try cwriter.writeInt(i32, @intCast(S + A - P - 4 + 4), .little);
+                try cwriter.writeInt(i32, @intCast(S + A - P - 4 - 4), .little);
             },
         }
     }
