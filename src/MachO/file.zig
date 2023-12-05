@@ -51,15 +51,18 @@ pub const File = union(enum) {
     /// Encodes symbol rank so that the following ordering applies:
     /// * strong defined
     /// * weak defined
-    /// * strong in lib (dso/archive)
-    /// * weak in lib (dso/archive)
+    /// * strong in lib (archive)
+    /// * weak in lib (archive)
+    /// * strong in lib (dso)
+    /// * weak in lib (dso)
     /// * tentative
     /// * tentative in lib (archive)
     /// * unclaimed
     pub fn getSymbolRank(file: File, sym: macho.nlist_64, in_archive: bool) u32 {
-        const base: u3 = blk: {
-            if (sym.tentative()) break :blk if (in_archive) 6 else 5;
-            if (file == .dylib or in_archive) break :blk if (sym.pext() or sym.weakDef()) 4 else 3;
+        const base: u4 = blk: {
+            if (sym.tentative()) break :blk if (in_archive) 8 else 7;
+            if (file == .dylib) break :blk if (sym.pext() or sym.weakDef()) 6 else 5;
+            if (in_archive) break :blk if (sym.pext() or sym.weakDef()) 4 else 3;
             break :blk if (sym.pext() or sym.weakDef()) 2 else 1;
         };
         return (@as(u32, base) << 24) + file.getIndex();
