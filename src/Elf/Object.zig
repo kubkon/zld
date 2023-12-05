@@ -24,22 +24,10 @@ num_dynrelocs: u32 = 0,
 output_symtab_ctx: Elf.SymtabCtx = .{},
 
 pub fn isValidHeader(header: *const elf.Elf64_Ehdr) bool {
-    if (!mem.eql(u8, header.e_ident[0..4], "\x7fELF")) {
-        log.debug("invalid ELF magic '{s}', expected \x7fELF", .{header.e_ident[0..4]});
-        return false;
-    }
-    if (header.e_ident[elf.EI_VERSION] != 1) {
-        log.debug("unknown ELF version '{d}', expected 1", .{header.e_ident[elf.EI_VERSION]});
-        return false;
-    }
-    if (header.e_type != elf.ET.REL) {
-        log.debug("invalid file type '{s}', expected ET.REL", .{@tagName(header.e_type)});
-        return false;
-    }
-    if (header.e_version != 1) {
-        log.debug("invalid ELF version '{d}', expected 1", .{header.e_version});
-        return false;
-    }
+    if (!mem.eql(u8, header.e_ident[0..4], "\x7fELF")) return false;
+    if (header.e_ident[elf.EI_VERSION] != 1) return false;
+    if (header.e_type != elf.ET.REL) return false;
+    if (header.e_version != 1) return false;
     return true;
 }
 
