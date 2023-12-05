@@ -1,15 +1,3 @@
-const std = @import("std");
-const build_options = @import("build_options");
-const assert = std.debug.assert;
-const elf = std.elf;
-const gc_track_live_log = std.log.scoped(.gc_track_live);
-const mem = std.mem;
-
-const Allocator = mem.Allocator;
-const Atom = @import("Atom.zig");
-const Elf = @import("../Elf.zig");
-const Symbol = @import("Symbol.zig");
-
 pub fn gcAtoms(elf_file: *Elf) !void {
     var roots = std.ArrayList(*Atom).init(elf_file.base.allocator);
     defer roots.deinit();
@@ -82,18 +70,19 @@ fn markAtom(atom: *Atom) bool {
 }
 
 fn markLive(atom: *Atom, elf_file: *Elf) void {
+    assert(atom.flags.visited);
+    atom.flags.alive = true;
+    track_live_log.debug("{}marking live atom({d})", .{ track_live_level, atom.atom_index });
+
     if (build_options.enable_logging)
         track_live_level.incr();
 
-    assert(atom.flags.visited);
     const object = atom.getObject(elf_file);
 
     for (atom.getFdes(elf_file)) |fde| {
         for (fde.getRelocs(elf_file)[1..]) |rel| {
             const target_sym = object.getSymbol(rel.r_sym(), elf_file);
             const target_atom = target_sym.getAtom(elf_file) orelse continue;
-            target_atom.flags.alive = true;
-            gc_track_live_log.debug("{}marking live atom({d})", .{ track_live_level, target_atom.atom_index });
             if (markAtom(target_atom)) markLive(target_atom, elf_file);
         }
     }
@@ -101,15 +90,12 @@ fn markLive(atom: *Atom, elf_file: *Elf) void {
     for (atom.getRelocs(elf_file)) |rel| {
         const target_sym = object.getSymbol(rel.r_sym(), elf_file);
         const target_atom = target_sym.getAtom(elf_file) orelse continue;
-        target_atom.flags.alive = true;
-        gc_track_live_log.debug("{}marking live atom({d})", .{ track_live_level, target_atom.atom_index });
         if (markAtom(target_atom)) markLive(target_atom, elf_file);
     }
 }
 
 fn mark(roots: std.ArrayList(*Atom), elf_file: *Elf) void {
     for (roots.items) |root| {
-        gc_track_live_log.debug("root atom({d})", .{root.atom_index});
         markLive(root, elf_file);
     }
 }
@@ -160,3 +146,15 @@ const Level = struct {
 };
 
 var track_live_level: Level = .{};
+
+const build_options = @import("build_options");
+const assert = std.debug.assert;
+const elf = std.elf;
+const track_live_log = std.log.scoped(.gc_track_live);
+const mem = std.mem;
+const std = @import("std");
+
+const Allocator = mem.Allocator;
+const Atom = @import("Atom.zig");
+const Elf = @import("../Elf.zig");
+const Symbol = @import("Symbol.zig");
