@@ -49,6 +49,15 @@ pub fn parse(self: *SharedObject, elf_file: *Elf) !void {
     const reader = stream.reader();
 
     self.header = try reader.readStruct(elf.Elf64_Ehdr);
+
+    if (self.data.len < self.header.?.e_shoff or
+        self.data.len < self.header.?.e_shoff + @as(u64, @intCast(self.header.?.e_shnum)) * @sizeOf(elf.Elf64_Shdr))
+    {
+        return elf_file.base.fatal("{s}: corrupt header: section header table extends past the end of file", .{
+            self.path,
+        });
+    }
+
     const shdrs = self.getShdrs();
 
     var dynsym_index: ?u16 = null;

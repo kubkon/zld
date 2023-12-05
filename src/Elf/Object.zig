@@ -51,6 +51,14 @@ pub fn parse(self: *Object, elf_file: *Elf) !void {
 
     const gpa = elf_file.base.allocator;
 
+    if (self.data.len < self.header.?.e_shoff or
+        self.data.len < self.header.?.e_shoff + @as(u64, @intCast(self.header.?.e_shnum)) * @sizeOf(elf.Elf64_Shdr))
+    {
+        return elf_file.base.fatal("{}: corrupt header: section header table extends past the end of file", .{
+            self.fmtPath(),
+        });
+    }
+
     const shdrs = @as(
         [*]align(1) const elf.Elf64_Shdr,
         @ptrCast(self.data.ptr + self.header.?.e_shoff),
@@ -68,7 +76,9 @@ pub fn parse(self: *Object, elf_file: *Elf) !void {
         self.first_global = shdr.sh_info;
 
         const symtab = self.getShdrContents(index);
-        const nsyms = @divExact(symtab.len, @sizeOf(elf.Elf64_Sym));
+        const nsyms = math.divExact(usize, symtab.len, @sizeOf(elf.Elf64_Sym)) catch {
+            return elf_file.base.fatal("{}: symbol table not evenly divisible", .{self.fmtPath()});
+        };
         self.symtab = @as([*]align(1) const elf.Elf64_Sym, @ptrCast(symtab.ptr))[0..nsyms];
         self.strtab = self.getShdrContents(@as(u16, @intCast(shdr.sh_link)));
     }
