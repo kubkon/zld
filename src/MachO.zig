@@ -1752,7 +1752,7 @@ fn initExportTrie(self: *MachO) !void {
                 macho.EXPORT_SYMBOL_FLAGS_KIND_THREAD_LOCAL
             else
                 macho.EXPORT_SYMBOL_FLAGS_KIND_REGULAR;
-            if (sym.flags.weak) flags |= macho.EXPORT_SYMBOL_FLAGS_KIND_WEAK_DEFINITION;
+            if (sym.flags.weak) flags |= macho.EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION;
             try self.export_trie.put(gpa, .{
                 .name = sym.getName(self),
                 .vmaddr_offset = sym.getAddress(.{}, self) - seg.vmaddr,
