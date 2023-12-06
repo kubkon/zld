@@ -1738,25 +1738,21 @@ fn initExportTrie(self: *MachO) !void {
     const gpa = self.base.allocator;
     try self.export_trie.init(gpa);
 
-    // TODO handle macho.EXPORT_SYMBOL_FLAGS_REEXPORT and macho.EXPORT_SYMBOL_FLAGS_STUB_AND_RESOLVER.
-
     const seg = self.getTextSegment();
-
     for (self.objects.items) |index| {
         for (self.getFile(index).?.getSymbols()) |sym_index| {
             const sym = self.getSymbol(sym_index);
             if (!sym.flags.@"export") continue;
             if (sym.getAtom(self)) |atom| if (!atom.flags.alive) continue;
             if (sym.getFile(self).?.getIndex() != index) continue;
-            var flags: u64 = macho.EXPORT_SYMBOL_FLAGS_KIND_REGULAR;
-            if (sym.isAbs(self)) {
-                flags |= macho.EXPORT_SYMBOL_FLAGS_KIND_ABSOLUTE;
-            } else {
-                const out_sect = self.sections.items(.header)[sym.out_n_sect];
-                if (out_sect.type() == macho.S_THREAD_LOCAL_VARIABLES) {
-                    flags |= macho.EXPORT_SYMBOL_FLAGS_KIND_THREAD_LOCAL;
-                }
-            }
+            const out_sect = self.sections.items(.header)[sym.out_n_sect];
+            var flags: u64 = if (sym.isAbs(self))
+                macho.EXPORT_SYMBOL_FLAGS_KIND_ABSOLUTE
+            else if (out_sect.type() == macho.S_THREAD_LOCAL_VARIABLES)
+                macho.EXPORT_SYMBOL_FLAGS_KIND_THREAD_LOCAL
+            else
+                macho.EXPORT_SYMBOL_FLAGS_KIND_REGULAR;
+            if (sym.flags.weak) flags |= macho.EXPORT_SYMBOL_FLAGS_KIND_WEAK_DEFINITION;
             try self.export_trie.put(gpa, .{
                 .name = sym.getName(self),
                 .vmaddr_offset = sym.getAddress(.{}, self) - seg.vmaddr,
