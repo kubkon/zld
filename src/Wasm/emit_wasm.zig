@@ -74,7 +74,7 @@ pub fn emit(wasm: *Wasm) !void {
         log.debug("Writing 'Functions' section ({d})", .{wasm.functions.count()});
         const offset = try reserveSectionHeader(&binary_bytes);
         for (wasm.functions.items.values()) |func| {
-            try emitFunction(func, writer);
+            try emitFunction(func.func, writer);
         }
         try emitSectionHeader(
             binary_bytes.items,
@@ -187,8 +187,7 @@ pub fn emit(wasm: *Wasm) !void {
 
         while (atom_index != .none) {
             const atom = Atom.ptrFromIndex(wasm, atom_index);
-            const loc = atom.symbolLoc();
-            std.debug.assert(loc.getSymbol(wasm).isAlive());
+            std.debug.assert(atom.symbolLoc().getSymbol(wasm).isAlive());
             atom.resolveRelocs(wasm);
             sorted_atoms.appendAssumeCapacity(atom);
             atom_index = atom.next;
@@ -293,11 +292,11 @@ pub fn emit(wasm: *Wasm) !void {
 
         for (wasm.resolved_symbols.keys()) |sym_with_loc| {
             const symbol = sym_with_loc.getSymbol(wasm);
+            if (symbol.isDead()) {
+                continue;
+            }
             switch (symbol.tag) {
                 .function => {
-                    if (symbol.isDead()) {
-                        continue;
-                    }
                     const gop = try funcs.getOrPut(symbol.index);
                     if (!gop.found_existing) {
                         gop.value_ptr.* = sym_with_loc;

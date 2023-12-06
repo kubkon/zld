@@ -84,6 +84,10 @@ pub fn mark(symbol: *Symbol) void {
     symbol.flags |= @intFromEnum(Flag.alive);
 }
 
+pub fn unmark(symbol: *Symbol) void {
+    symbol.flags &= ~@intFromEnum(Flag.alive);
+}
+
 pub inline fn isAlive(symbol: Symbol) bool {
     return symbol.flags & @intFromEnum(Flag.alive) != 0;
 }
@@ -187,7 +191,7 @@ pub fn format(symbol: Symbol, comptime fmt: []const u8, options: std.fmt.FormatO
     const undef: []const u8 = if (symbol.isUndefined()) "undefined" else "";
 
     try writer.print(
-        "{c} binding={s} visible={s} id={d} name_offset={d} {s}",
-        .{ kind_fmt, binding, visible, symbol.index, symbol.name, undef },
+        "{c} binding={s} visible={s} id={d} name_offset={d} alive={} {s}",
+        .{ kind_fmt, binding, visible, symbol.index, symbol.name, symbol.isAlive(), undef },
     );
 }

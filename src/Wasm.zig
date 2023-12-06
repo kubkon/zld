@@ -425,13 +425,13 @@ pub fn flush(wasm: *Wasm) !void {
 
     try wasm.markReferences();
     try wasm.mergeImports();
+    try wasm.mergeSections();
+    try wasm.mergeTypes();
 
     try wasm.allocateAtoms();
     try wasm.setupMemory();
     wasm.allocateVirtualAddresses();
     wasm.mapFunctionTable();
-    try wasm.mergeSections();
-    try wasm.mergeTypes();
     try wasm.initializeCallCtorsFunction();
     try wasm.setupInitMemoryFunction();
     try wasm.setupTLSRelocationsFunction();
@@ -746,7 +746,7 @@ fn getFunctionSignature(wasm: *const Wasm, loc: SymbolWithLoc) std.wasm.Type {
         return obj.func_types[type_index];
     }
     assert(!is_undefined);
-    return wasm.func_types.get(wasm.functions.items.values()[symbol.index].type_index).*;
+    return wasm.func_types.get(wasm.functions.items.values()[symbol.index].func.type_index).*;
 }
 
 /// Assigns indexes to all indirect functions.
@@ -779,6 +779,9 @@ fn mergeSections(wasm: *Wasm) !void {
         );
     }
 
+    var removed_duplicates = std.ArrayList(SymbolWithLoc).init(wasm.base.allocator);
+    defer removed_duplicates.deinit();
+
     log.debug("Merging sections", .{});
     for (wasm.resolved_symbols.keys()) |sym_with_loc| {
         const file_index = sym_with_loc.file orelse {
@@ -809,12 +812,15 @@ fn mergeSections(wasm: *Wasm) !void {
                     continue;
                 }
                 const original_func = object.functions[index];
-                symbol.index = try wasm.functions.append(
-                    wasm.base.allocator,
-                    .{ .file = file_index, .index = symbol.index },
+                if (!try wasm.functions.append(
+                    wasm,
+                    sym_with_loc,
                     wasm.imports.functionCount(),
                     original_func,
-                );
+                )) {
+                    // function was not appended, so discard it.
+                    try removed_duplicates.append(sym_with_loc);
+                }
             },
             .global => {
                 const original_global = object.globals[index];
@@ -835,6 +841,11 @@ fn mergeSections(wasm: *Wasm) !void {
             else => unreachable,
         }
     }
+
+    for (removed_duplicates.items) |sym_with_loc| {
+        assert(wasm.resolved_symbols.swapRemove(sym_with_loc));
+    }
+
     log.debug("Merged ({d}) functions", .{wasm.functions.count()});
     log.debug("Merged ({d}) globals", .{wasm.globals.count()});
     log.debug("Merged ({d}) tables", .{wasm.tables.count()});
@@ -865,7 +876,7 @@ fn mergeTypes(wasm: *Wasm) !void {
                 value.type = try wasm.func_types.append(wasm.base.allocator, object.func_types[value.type]);
             } else if (!dirty.contains(symbol.index)) {
                 log.debug("Adding type from function '{s}'", .{object.string_table.get(symbol.name)});
-                const func = &wasm.functions.items.values()[symbol.index - wasm.imports.functionCount()];
+                const func = &wasm.functions.items.values()[symbol.index - wasm.imports.functionCount()].func;
                 func.type_index = try wasm.func_types.append(wasm.base.allocator, object.func_types[func.type_index]);
                 dirty.putAssumeCapacity(symbol.index, {});
             }
@@ -1334,7 +1345,7 @@ fn initializeCallCtorsFunction(wasm: *Wasm) !void {
     const import_count = wasm.imports.functionCount();
     for (wasm.init_funcs.items) |init_func_loc| {
         const symbol = init_func_loc.getSymbol(wasm);
-        const func = wasm.functions.items.values()[symbol.index - import_count];
+        const func = wasm.functions.items.values()[symbol.index - import_count].func;
         const ty = wasm.func_types.items.items[func.type_index];
 
         // Call function by its function index
@@ -1375,12 +1386,12 @@ fn createSyntheticFunction(
     // create type (() -> nil)
     const ty_index = try wasm.func_types.append(wasm.base.allocator, func_ty);
     // create function with above type
-    symbol.index = try wasm.functions.append(
-        wasm.base.allocator,
-        .{ .file = null, .index = loc.sym_index },
+    std.debug.assert(try wasm.functions.append(
+        wasm,
+        loc,
         wasm.imports.functionCount(),
         .{ .type_index = ty_index },
-    );
+    ));
 
     // create the atom that will be output into the final binary
     const atom_index = try wasm.createAtom();
@@ -1823,7 +1834,14 @@ fn allocateAtoms(wasm: *Wasm) !void {
         while (true) {
             const atom = Atom.ptrFromIndex(wasm, atom_index);
             const symbol_loc = atom.symbolLoc();
-            const sym = symbol_loc.getSymbol(wasm);
+            // Ensure we get the original symbol, so we verify the correct symbol on whether
+            // it is dead or not and ensure an atom is removed when dead.
+            // This is required as we may have parsed aliases into atoms.
+            const sym = if (symbol_loc.file) |object_index| sym: {
+                const object = wasm.objects.items[object_index];
+                break :sym object.symtable[symbol_loc.sym_index];
+            } else wasm.synthetic_symbols.values()[symbol_loc.sym_index];
+
             if (sym.isDead()) {
                 if (atom.prev != .none) {
                     const prev = Atom.ptrFromIndex(wasm, atom.prev);
@@ -1832,6 +1850,8 @@ fn allocateAtoms(wasm: *Wasm) !void {
                 if (atom.next == .none) {
                     atom.prev = .none;
                     break;
+                } else if (entry.value_ptr.* == atom_index) {
+                    entry.value_ptr.* = atom.next;
                 }
                 atom_index = atom.next;
                 const next = Atom.ptrFromIndex(wasm, atom_index);
