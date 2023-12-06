@@ -3,7 +3,7 @@ data: []const u8,
 index: File.Index,
 
 header: ?macho.mach_header_64 = null,
-symtab: std.ArrayListUnmanaged(macho.nlist_64) = .{},
+symtab: std.MultiArrayList(Nlist) = .{},
 strtab: std.ArrayListUnmanaged(u8) = .{},
 id: ?Id = null,
 ordinal: u16 = 0,
@@ -173,10 +173,10 @@ fn parseTrie(self: *Dylib, data: []const u8, macho_file: *MachO) !void {
         switch (exp.flags & macho.EXPORT_SYMBOL_FLAGS_KIND_MASK) {
             macho.EXPORT_SYMBOL_FLAGS_KIND_REGULAR => {},
             macho.EXPORT_SYMBOL_FLAGS_KIND_ABSOLUTE => {
-                self.symtab.items[sym_index].n_type = macho.N_EXT | macho.N_ABS;
+                self.symtab.items(.nlist)[sym_index].n_type = macho.N_EXT | macho.N_ABS;
             },
             macho.EXPORT_SYMBOL_FLAGS_KIND_THREAD_LOCAL => {
-                // TODO
+                self.symtab.items(.tlv)[sym_index] = true;
             },
             else => unreachable, // TODO error
         }
@@ -420,26 +420,30 @@ fn addObjCGlobal(self: *Dylib, comptime prefix: []const u8, name: []const u8, ma
 
 fn addGlobal(self: *Dylib, name: []const u8, macho_file: *MachO) !Symbol.Index {
     const gpa = macho_file.base.allocator;
-    const index = @as(Symbol.Index, @intCast(self.symtab.items.len));
-    const nlist = try self.symtab.addOne(gpa);
-    nlist.* = MachO.null_sym;
-    nlist.n_strx = try self.insertString(gpa, name);
-    nlist.n_type = macho.N_EXT | macho.N_SECT;
+    const index = @as(Symbol.Index, @intCast(try self.symtab.addOne(gpa)));
+    self.symtab.set(index, .{ .nlist = .{
+        .n_strx = try self.insertString(gpa, name),
+        .n_type = macho.N_EXT | macho.N_SECT,
+        .n_value = 0,
+        .n_desc = 0,
+        .n_sect = 0,
+    } });
     return index;
 }
 
 fn addWeak(self: *Dylib, name: []const u8, macho_file: *MachO) !Symbol.Index {
     const index = try self.addGlobal(name, macho_file);
-    self.symtab.items[index].n_desc |= macho.N_WEAK_DEF;
+    self.symtab.items(.nlist)[index].n_desc |= macho.N_WEAK_DEF;
     return index;
 }
 
 fn initSymbols(self: *Dylib, macho_file: *MachO) !void {
     const gpa = macho_file.base.allocator;
+    const slice = self.symtab.slice();
 
-    try self.symbols.ensureTotalCapacityPrecise(gpa, self.symtab.items.len);
+    try self.symbols.ensureTotalCapacityPrecise(gpa, slice.items(.nlist).len);
 
-    for (self.symtab.items) |sym| {
+    for (slice.items(.nlist)) |sym| {
         const name = self.getString(sym.n_strx);
         const off = try macho_file.string_intern.insert(gpa, name);
         const gop = try macho_file.getOrCreateGlobal(off);
@@ -466,9 +470,11 @@ fn initPlatform(self: *Dylib) void {
 }
 
 pub fn resolveSymbols(self: *Dylib, macho_file: *MachO) void {
+    const slice = self.symtab.slice();
+
     for (self.symbols.items, 0..) |index, i| {
         const nlist_idx = @as(Symbol.Index, @intCast(i));
-        const nlist = self.symtab.items[nlist_idx];
+        const nlist = slice.items(.nlist)[nlist_idx];
 
         if (nlist.undf() and !nlist.tentative()) continue;
 
@@ -478,14 +484,14 @@ pub fn resolveSymbols(self: *Dylib, macho_file: *MachO) void {
             global.atom = 0;
             global.nlist_idx = nlist_idx;
             global.file = self.index;
-            global.flags.weak = nlist.weakDef() or nlist.pext();
+            global.flags.weak = nlist.weakDef();
+            global.flags.tlv = slice.items(.tlv)[nlist_idx];
         }
     }
 }
 
 pub fn resetGlobals(self: *Dylib, macho_file: *MachO) void {
-    for (self.symbols.items, 0..) |sym_index, nlist_idx| {
-        if (!self.symtab.items[nlist_idx].ext()) continue;
+    for (self.symbols.items) |sym_index| {
         const sym = macho_file.getSymbol(sym_index);
         const name = sym.name;
         sym.* = .{};
@@ -495,7 +501,7 @@ pub fn resetGlobals(self: *Dylib, macho_file: *MachO) void {
 
 pub fn markLive(self: *Dylib, macho_file: *MachO) void {
     for (self.symbols.items, 0..) |index, i| {
-        const nlist = self.symtab.items[i];
+        const nlist = self.symtab.items(.nlist)[i];
         if (!nlist.undf() or nlist.tentative()) continue;
 
         const global = macho_file.getSymbol(index);
@@ -786,6 +792,11 @@ pub const Id = struct {
 
         return out;
     }
+};
+
+const Nlist = struct {
+    nlist: macho.nlist_64,
+    tlv: bool = false,
 };
 
 const assert = std.debug.assert;

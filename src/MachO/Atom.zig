@@ -177,6 +177,12 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
 
             .X86_64_RELOC_TLV => {
                 const symbol = rel.getTargetSymbol(macho_file);
+                if (!symbol.flags.tlv) {
+                    macho_file.base.fatal(
+                        "{}: {s}: illegal thread-local variable reference to regular symbol {s}",
+                        .{ object.fmtPath(), self.getName(macho_file), symbol.getName(macho_file) },
+                    );
+                }
                 if (symbol.flags.import) {
                     symbol.flags.tlv_ptr = true;
                 }

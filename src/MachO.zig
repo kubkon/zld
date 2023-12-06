@@ -1745,10 +1745,9 @@ fn initExportTrie(self: *MachO) !void {
             if (!sym.flags.@"export") continue;
             if (sym.getAtom(self)) |atom| if (!atom.flags.alive) continue;
             if (sym.getFile(self).?.getIndex() != index) continue;
-            const out_sect = self.sections.items(.header)[sym.out_n_sect];
             var flags: u64 = if (sym.isAbs(self))
                 macho.EXPORT_SYMBOL_FLAGS_KIND_ABSOLUTE
-            else if (out_sect.type() == macho.S_THREAD_LOCAL_VARIABLES)
+            else if (sym.flags.tlv)
                 macho.EXPORT_SYMBOL_FLAGS_KIND_THREAD_LOCAL
             else
                 macho.EXPORT_SYMBOL_FLAGS_KIND_REGULAR;

@@ -66,7 +66,8 @@ pub fn getNlist(symbol: Symbol, macho_file: *MachO) macho.nlist_64 {
     const file = symbol.getFile(macho_file).?;
     return switch (file) {
         .object => |x| x.symtab.items(.nlist)[symbol.nlist_idx],
-        inline else => |x| x.symtab.items[symbol.nlist_idx],
+        .dylib => |x| x.symtab.items(.nlist)[symbol.nlist_idx],
+        .internal => |x| x.symtab.items[symbol.nlist_idx],
     };
 }
 
@@ -265,6 +266,9 @@ pub const Flags = packed struct {
 
     /// Whether this symbol is weak.
     weak: bool = false,
+
+    /// Whether this symbol is a thread-local variable.
+    tlv: bool = false,
 
     /// Whether the symbol makes into the output symtab or not.
     output_symtab: bool = false,

@@ -373,6 +373,11 @@ fn initSymbols(self: *Object, macho_file: *MachO) !void {
             .atom = if (nlist.abs()) 0 else atom_index,
             .file = self.index,
         };
+        if (nlist.sect() and
+            self.sections.items(.header)[nlist.n_sect - 1].type() == macho.S_THREAD_LOCAL_VARIABLES)
+        {
+            symbol.flags.tlv = true;
+        }
     }
 }
 
@@ -752,6 +757,12 @@ pub fn resolveSymbols(self: *Object, macho_file: *MachO) void {
             symbol.nlist_idx = nlist_idx;
             symbol.file = self.index;
             symbol.flags.weak = nlist.weakDef() or nlist.pext();
+
+            if (nlist.sect() and
+                self.sections.items(.header)[nlist.n_sect - 1].type() == macho.S_THREAD_LOCAL_VARIABLES)
+            {
+                symbol.flags.tlv = true;
+            }
         }
     }
 }
