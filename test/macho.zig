@@ -35,6 +35,7 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testHelloZig(b, opts));
     macho_step.dependOn(testLayout(b, opts));
     macho_step.dependOn(testLargeBss(b, opts));
+    macho_step.dependOn(testLinkOrder(b, opts));
     macho_step.dependOn(testNeededFramework(b, opts));
     macho_step.dependOn(testNeededLibrary(b, opts));
     macho_step.dependOn(testNoExportsDylib(b, opts));
@@ -803,6 +804,82 @@ fn testLargeBss(b: *Build, opts: Options) *Step {
 
     const run = exe.run();
     test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+fn testLinkOrder(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-link-order", "");
+
+    const a_o = cc(b, opts);
+    a_o.addCSource(
+        \\int foo = 42;
+        \\int bar;
+        \\int foobar = -2;
+        \\int get_foo() {
+        \\  return foo;
+        \\}
+        \\int get_bar() {
+        \\  return bar;
+        \\}
+    );
+    a_o.addArg("-c");
+
+    const c_o = cc(b, opts);
+    c_o.addCSource(
+        \\int foo = -1;
+        \\int bar = 42;
+        \\int foobar = -1;
+        \\int get_foo() {
+        \\  return foo;
+        \\}
+        \\int get_bar() {
+        \\  return bar;
+        \\}
+    );
+    c_o.addArg("-c");
+
+    const main_o = cc(b, opts);
+    main_o.addCSource(
+        \\#include <stdio.h>
+        \\__attribute__((weak)) int foobar = 42;
+        \\extern int get_foo();
+        \\extern int get_bar();
+        \\int main() {
+        \\  printf("%d %d %d", get_foo(), get_bar(), foobar);
+        \\  return 0;
+        \\}
+    );
+    main_o.addArg("-c");
+
+    const liba = ar(b);
+    liba.addFileSource(a_o.out);
+
+    const libc = cc(b, opts);
+    libc.addFileSource(c_o.out);
+    libc.addArg("-shared");
+
+    {
+        const exe = cc(b, opts);
+        exe.addFileSource(libc.out);
+        exe.addFileSource(liba.out);
+        exe.addFileSource(main_o.out);
+
+        const run = exe.run();
+        run.expectStdOutEqual("-1 42 42");
+        test_step.dependOn(run.step());
+    }
+
+    {
+        const exe = cc(b, opts);
+        exe.addFileSource(liba.out);
+        exe.addFileSource(libc.out);
+        exe.addFileSource(main_o.out);
+
+        const run = exe.run();
+        run.expectStdOutEqual("42 0 -2");
+        test_step.dependOn(run.step());
+    }
 
     return test_step;
 }
