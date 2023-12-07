@@ -373,6 +373,9 @@ fn initSymbols(self: *Object, macho_file: *MachO) !void {
             .atom = if (nlist.abs()) 0 else atom_index,
             .file = self.index,
         };
+
+        symbol.flags.no_dead_strip = symbol.flags.no_dead_strip or nlist.noDeadStrip();
+
         if (nlist.sect() and
             self.sections.items(.header)[nlist.n_sect - 1].type() == macho.S_THREAD_LOCAL_VARIABLES)
         {
@@ -764,6 +767,7 @@ pub fn resolveSymbols(self: *Object, macho_file: *MachO) void {
             symbol.flags.tentative = nlist.tentative();
             symbol.flags.weak_ref = false;
             symbol.flags.dyn_ref = nlist.n_desc & macho.REFERENCED_DYNAMICALLY != 0;
+            symbol.flags.no_dead_strip = symbol.flags.no_dead_strip or nlist.noDeadStrip();
 
             if (nlist.pext() or nlist.weakDef() and nlist.weakRef()) {
                 if (symbol.visibility != .global) {

@@ -13,8 +13,7 @@ fn collectRoots(roots: *std.ArrayList(*Atom), macho_file: *MachO) !void {
             const sym = macho_file.getSymbol(sym_index);
             const file = sym.getFile(macho_file) orelse continue;
             if (file.getIndex() != index) continue;
-            const nlist = sym.getNlist(macho_file);
-            if (nlist.n_desc & N_NO_DEAD_STRIP != 0 or macho_file.options.dylib and sym.flags.@"export")
+            if (sym.flags.no_dead_strip or macho_file.options.dylib and sym.flags.@"export")
                 try markSymbol(sym, roots, macho_file);
         }
 

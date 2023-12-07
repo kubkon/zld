@@ -39,6 +39,7 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testMhExecuteHeader(b, opts));
     macho_step.dependOn(testNeededFramework(b, opts));
     macho_step.dependOn(testNeededLibrary(b, opts));
+    macho_step.dependOn(testNoDeadStrip(b, opts));
     macho_step.dependOn(testNoExportsDylib(b, opts));
     macho_step.dependOn(testPagezeroSize(b, opts));
     macho_step.dependOn(testReexportsZig(b, opts));
@@ -938,6 +939,33 @@ fn testNeededLibrary(b: *Build, opts: Options) *Step {
     check.checkStart();
     check.checkExact("cmd LOAD_DYLIB");
     check.checkContains("liba.dylib");
+    test_step.dependOn(&check.step);
+
+    const run = exe.run();
+    test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+fn testNoDeadStrip(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-no-dead-strip", "");
+
+    const exe = cc(b, opts);
+    exe.addCSource(
+        \\__attribute__((used)) int bogus1 = 0;
+        \\int bogus2 = 0;
+        \\int foo = 42;
+        \\int main() {
+        \\  return foo - 42;
+        \\}
+    );
+    exe.addArg("-Wl,-dead_strip");
+
+    const check = exe.check();
+    check.checkInSymtab();
+    check.checkContains("external _bogus1");
+    check.checkInSymtab();
+    check.checkNotPresent("external _bogus2");
     test_step.dependOn(&check.step);
 
     const run = exe.run();

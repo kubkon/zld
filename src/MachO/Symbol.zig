@@ -296,6 +296,9 @@ pub const Flags = packed struct {
     /// Whether this symbol is dynamically referenced.
     dyn_ref: bool = false,
 
+    /// Whether this symbol was marked as N_NO_DEAD_STRIP.
+    no_dead_strip: bool = false,
+
     /// Whether this symbol is a tentative definition.
     tentative: bool = false,
 
