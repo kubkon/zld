@@ -3,7 +3,7 @@ data: []const u8,
 index: File.Index,
 
 header: ?macho.mach_header_64 = null,
-symtab: std.MultiArrayList(Nlist) = .{},
+exports: std.MultiArrayList(Export) = .{},
 strtab: std.ArrayListUnmanaged(u8) = .{},
 id: ?Id = null,
 ordinal: u16 = 0,
@@ -19,7 +19,7 @@ alive: bool,
 output_symtab_ctx: MachO.SymtabCtx = .{},
 
 pub fn deinit(self: *Dylib, allocator: Allocator) void {
-    self.symtab.deinit(allocator);
+    self.exports.deinit(allocator);
     self.strtab.deinit(allocator);
     if (self.id) |*id| id.deinit(allocator);
     self.symbols.deinit(allocator);
@@ -108,35 +108,50 @@ const TrieIterator = struct {
     }
 };
 
-const Export = struct {
-    name: []const u8,
-    flags: u64,
-};
+fn addExport(self: *Dylib, allocator: Allocator, name: []const u8, flags: struct {
+    abs: bool = false,
+    tlv: bool = false,
+    weak: bool = false,
+}) !void {
+    try self.exports.append(allocator, .{
+        .name = try self.insertString(allocator, name),
+        .flags = .{
+            .abs = flags.abs,
+            .tlv = flags.tlv,
+            .weak = flags.weak,
+        },
+    });
+}
 
-fn parseTrieNode(it: *TrieIterator, arena: Allocator, prefix: []const u8, exports: *std.ArrayList(Export)) !void {
+fn parseTrieNode(
+    self: *Dylib,
+    it: *TrieIterator,
+    allocator: Allocator,
+    arena: Allocator,
+    prefix: []const u8,
+) !void {
     const size = try it.readULEB128();
     if (size > 0) {
         const flags = try it.readULEB128();
+        const kind = flags & macho.EXPORT_SYMBOL_FLAGS_KIND_MASK;
+        const abs = kind == macho.EXPORT_SYMBOL_FLAGS_KIND_ABSOLUTE;
+        const tlv = kind == macho.EXPORT_SYMBOL_FLAGS_KIND_THREAD_LOCAL;
+        const weak = flags & macho.EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION != 0;
         if (flags & macho.EXPORT_SYMBOL_FLAGS_REEXPORT != 0) {
             _ = try it.readULEB128(); // dylib ordinal
-            const name = try arena.dupe(u8, try it.readString());
-            try exports.append(.{
-                .name = if (name.len > 0) name else prefix,
-                .flags = flags,
+            const name = try it.readString();
+            try self.addExport(allocator, if (name.len > 0) name else prefix, .{
+                .abs = abs,
+                .tlv = tlv,
+                .weak = weak,
             });
         } else if (flags & macho.EXPORT_SYMBOL_FLAGS_STUB_AND_RESOLVER != 0) {
             _ = try it.readULEB128(); // stub offset
             _ = try it.readULEB128(); // resolver offset
-            try exports.append(.{
-                .name = prefix,
-                .flags = flags,
-            });
+            try self.addExport(allocator, prefix, .{ .abs = abs, .tlv = tlv, .weak = weak });
         } else {
             _ = try it.readULEB128(); // VM offset
-            try exports.append(.{
-                .name = prefix,
-                .flags = flags,
-            });
+            try self.addExport(allocator, prefix, .{ .abs = abs, .tlv = tlv, .weak = weak });
         }
     }
 
@@ -148,7 +163,7 @@ fn parseTrieNode(it: *TrieIterator, arena: Allocator, prefix: []const u8, export
         const prefix_label = try std.fmt.allocPrint(arena, "{s}{s}", .{ prefix, label });
         const curr = it.pos;
         it.pos = off;
-        try parseTrieNode(it, arena, prefix_label, exports);
+        try self.parseTrieNode(it, allocator, arena, prefix_label);
         it.pos = curr;
     }
 }
@@ -158,29 +173,8 @@ fn parseTrie(self: *Dylib, data: []const u8, macho_file: *MachO) !void {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
 
-    var exports = std.ArrayList(Export).init(gpa);
-    defer exports.deinit();
-
     var it: TrieIterator = .{ .data = data };
-    try parseTrieNode(&it, arena.allocator(), "", &exports);
-
-    for (exports.items) |exp| {
-        const sym_index = if (exp.flags & macho.EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION != 0)
-            try self.addWeak(exp.name, macho_file)
-        else
-            try self.addGlobal(exp.name, macho_file);
-
-        switch (exp.flags & macho.EXPORT_SYMBOL_FLAGS_KIND_MASK) {
-            macho.EXPORT_SYMBOL_FLAGS_KIND_REGULAR => {},
-            macho.EXPORT_SYMBOL_FLAGS_KIND_ABSOLUTE => {
-                self.symtab.items(.nlist)[sym_index].n_type = macho.N_EXT | macho.N_ABS;
-            },
-            macho.EXPORT_SYMBOL_FLAGS_KIND_THREAD_LOCAL => {
-                self.symtab.items(.tlv)[sym_index] = true;
-            },
-            else => unreachable, // TODO error
-        }
-    }
+    try self.parseTrieNode(&it, gpa, arena.allocator(), "");
 }
 
 pub fn parseTbd(
@@ -238,31 +232,31 @@ pub fn parseTbd(
 
                         if (exp.symbols) |symbols| {
                             for (symbols) |sym_name| {
-                                _ = try self.addGlobal(sym_name, macho_file);
+                                try self.addExport(gpa, sym_name, .{});
                             }
                         }
 
                         if (exp.weak_symbols) |symbols| {
                             for (symbols) |sym_name| {
-                                _ = try self.addWeak(sym_name, macho_file);
+                                try self.addExport(gpa, sym_name, .{ .weak = true });
                             }
                         }
 
                         if (exp.objc_classes) |objc_classes| {
                             for (objc_classes) |class_name| {
-                                try self.addObjCClass(class_name, macho_file);
+                                try self.addObjCClass(gpa, class_name);
                             }
                         }
 
                         if (exp.objc_ivars) |objc_ivars| {
                             for (objc_ivars) |ivar| {
-                                try self.addObjCIVar(ivar, macho_file);
+                                try self.addObjCIVar(gpa, ivar);
                             }
                         }
 
                         if (exp.objc_eh_types) |objc_eh_types| {
                             for (objc_eh_types) |eht| {
-                                try self.addObjCEhType(eht, macho_file);
+                                try self.addObjCEhType(gpa, eht);
                             }
                         }
 
@@ -286,31 +280,31 @@ pub fn parseTbd(
 
                         if (exp.symbols) |symbols| {
                             for (symbols) |sym_name| {
-                                _ = try self.addGlobal(sym_name, macho_file);
+                                try self.addExport(gpa, sym_name, .{});
                             }
                         }
 
                         if (exp.weak_symbols) |symbols| {
                             for (symbols) |sym_name| {
-                                _ = try self.addWeak(sym_name, macho_file);
+                                try self.addExport(gpa, sym_name, .{ .weak = true });
                             }
                         }
 
                         if (exp.objc_classes) |classes| {
                             for (classes) |sym_name| {
-                                try self.addObjCClass(sym_name, macho_file);
+                                try self.addObjCClass(gpa, sym_name);
                             }
                         }
 
                         if (exp.objc_ivars) |objc_ivars| {
                             for (objc_ivars) |ivar| {
-                                try self.addObjCIVar(ivar, macho_file);
+                                try self.addObjCIVar(gpa, ivar);
                             }
                         }
 
                         if (exp.objc_eh_types) |objc_eh_types| {
                             for (objc_eh_types) |eht| {
-                                try self.addObjCEhType(eht, macho_file);
+                                try self.addObjCEhType(gpa, eht);
                             }
                         }
                     }
@@ -322,31 +316,31 @@ pub fn parseTbd(
 
                         if (reexp.symbols) |symbols| {
                             for (symbols) |sym_name| {
-                                _ = try self.addGlobal(sym_name, macho_file);
+                                try self.addExport(gpa, sym_name, .{});
                             }
                         }
 
                         if (reexp.weak_symbols) |symbols| {
                             for (symbols) |sym_name| {
-                                _ = try self.addWeak(sym_name, macho_file);
+                                try self.addExport(gpa, sym_name, .{ .weak = true });
                             }
                         }
 
                         if (reexp.objc_classes) |classes| {
                             for (classes) |sym_name| {
-                                try self.addObjCClass(sym_name, macho_file);
+                                try self.addObjCClass(gpa, sym_name);
                             }
                         }
 
                         if (reexp.objc_ivars) |objc_ivars| {
                             for (objc_ivars) |ivar| {
-                                try self.addObjCIVar(ivar, macho_file);
+                                try self.addObjCIVar(gpa, ivar);
                             }
                         }
 
                         if (reexp.objc_eh_types) |objc_eh_types| {
                             for (objc_eh_types) |eht| {
-                                try self.addObjCEhType(eht, macho_file);
+                                try self.addObjCEhType(gpa, eht);
                             }
                         }
                     }
@@ -354,19 +348,19 @@ pub fn parseTbd(
 
                 if (stub.objc_classes) |classes| {
                     for (classes) |sym_name| {
-                        try self.addObjCClass(sym_name, macho_file);
+                        try self.addObjCClass(gpa, sym_name);
                     }
                 }
 
                 if (stub.objc_ivars) |objc_ivars| {
                     for (objc_ivars) |ivar| {
-                        try self.addObjCIVar(ivar, macho_file);
+                        try self.addObjCIVar(gpa, ivar);
                     }
                 }
 
                 if (stub.objc_eh_types) |objc_eh_types| {
                     for (objc_eh_types) |eht| {
-                        try self.addObjCEhType(eht, macho_file);
+                        try self.addObjCEhType(gpa, eht);
                     }
                 }
             },
@@ -398,53 +392,37 @@ pub fn parseTbd(
     try self.initSymbols(macho_file);
 }
 
-fn addObjCClass(self: *Dylib, name: []const u8, macho_file: *MachO) !void {
-    try self.addObjCGlobal("_OBJC_CLASS", name, macho_file);
-    try self.addObjCGlobal("_OBJC_METACLASS_", name, macho_file);
+fn addObjCClass(self: *Dylib, allocator: Allocator, name: []const u8) !void {
+    try self.addObjCExport(allocator, "_OBJC_CLASS", name);
+    try self.addObjCExport(allocator, "_OBJC_METACLASS_", name);
 }
 
-fn addObjCIVar(self: *Dylib, name: []const u8, macho_file: *MachO) !void {
-    try self.addObjCGlobal("_OBJC_IVAR_", name, macho_file);
+fn addObjCIVar(self: *Dylib, allocator: Allocator, name: []const u8) !void {
+    try self.addObjCExport(allocator, "_OBJC_IVAR_", name);
 }
 
-fn addObjCEhType(self: *Dylib, name: []const u8, macho_file: *MachO) !void {
-    try self.addObjCGlobal("_OBJC_EHTYPE_", name, macho_file);
+fn addObjCEhType(self: *Dylib, allocator: Allocator, name: []const u8) !void {
+    try self.addObjCExport(allocator, "_OBJC_EHTYPE_", name);
 }
 
-fn addObjCGlobal(self: *Dylib, comptime prefix: []const u8, name: []const u8, macho_file: *MachO) !void {
-    const gpa = macho_file.base.allocator;
-    const full_name = try std.fmt.allocPrint(gpa, prefix ++ "$_{s}", .{name});
-    defer gpa.free(full_name);
-    _ = try self.addGlobal(full_name, macho_file);
-}
-
-fn addGlobal(self: *Dylib, name: []const u8, macho_file: *MachO) !Symbol.Index {
-    const gpa = macho_file.base.allocator;
-    const index = @as(Symbol.Index, @intCast(try self.symtab.addOne(gpa)));
-    self.symtab.set(index, .{ .nlist = .{
-        .n_strx = try self.insertString(gpa, name),
-        .n_type = macho.N_EXT | macho.N_SECT,
-        .n_value = 0,
-        .n_desc = 0,
-        .n_sect = 0,
-    } });
-    return index;
-}
-
-fn addWeak(self: *Dylib, name: []const u8, macho_file: *MachO) !Symbol.Index {
-    const index = try self.addGlobal(name, macho_file);
-    self.symtab.items(.nlist)[index].n_desc |= macho.N_WEAK_DEF;
-    return index;
+fn addObjCExport(
+    self: *Dylib,
+    allocator: Allocator,
+    comptime prefix: []const u8,
+    name: []const u8,
+) !void {
+    const full_name = try std.fmt.allocPrint(allocator, prefix ++ "$_{s}", .{name});
+    defer allocator.free(full_name);
+    try self.addExport(allocator, full_name, .{});
 }
 
 fn initSymbols(self: *Dylib, macho_file: *MachO) !void {
     const gpa = macho_file.base.allocator;
-    const slice = self.symtab.slice();
 
-    try self.symbols.ensureTotalCapacityPrecise(gpa, slice.items(.nlist).len);
+    try self.symbols.ensureTotalCapacityPrecise(gpa, self.exports.items(.name).len);
 
-    for (slice.items(.nlist)) |sym| {
-        const name = self.getString(sym.n_strx);
+    for (self.exports.items(.name)) |noff| {
+        const name = self.getString(noff);
         const off = try macho_file.string_intern.insert(gpa, name);
         const gop = try macho_file.getOrCreateGlobal(off);
         self.symbols.addOneAssumeCapacity().* = gop.index;
@@ -470,22 +448,18 @@ fn initPlatform(self: *Dylib) void {
 }
 
 pub fn resolveSymbols(self: *Dylib, macho_file: *MachO) void {
-    const slice = self.symtab.slice();
-    for (self.symbols.items, 0..) |index, i| {
-        const nlist_idx = @as(Symbol.Index, @intCast(i));
-        const nlist = slice.items(.nlist)[nlist_idx];
-
+    for (self.symbols.items, self.exports.items(.flags)) |index, flags| {
         const global = macho_file.getSymbol(index);
         if (self.asFile().getSymbolRank(.{
-            .weak = nlist.weakDef(),
+            .weak = flags.weak,
         }) < global.getSymbolRank(macho_file)) {
-            global.value = nlist.n_value;
+            global.value = 0;
             global.atom = 0;
-            global.nlist_idx = nlist_idx;
+            global.nlist_idx = 0;
             global.file = self.index;
-            global.flags.weak = nlist.weakDef();
+            global.flags.weak = flags.weak;
             global.flags.weak_ref = false;
-            global.flags.tlv = slice.items(.tlv)[nlist_idx];
+            global.flags.tlv = flags.tlv;
             global.flags.dyn_ref = false;
             global.flags.tentative = false;
             global.visibility = .global;
@@ -794,9 +768,13 @@ pub const Id = struct {
     }
 };
 
-const Nlist = struct {
-    nlist: macho.nlist_64,
-    tlv: bool = false,
+const Export = struct {
+    name: u32,
+    flags: packed struct {
+        abs: bool = false,
+        weak: bool = false,
+        tlv: bool = false,
+    },
 };
 
 const assert = std.debug.assert;
