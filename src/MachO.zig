@@ -70,6 +70,8 @@ atoms: std.ArrayListUnmanaged(Atom) = .{},
 unwind_records: std.ArrayListUnmanaged(UnwindInfo.Record) = .{},
 
 has_tlv: bool = false,
+binds_to_weak: bool = false,
+weak_defines: bool = false,
 
 pub fn openPath(allocator: Allocator, options: Options, thread_pool: *ThreadPool) !*MachO {
     const file = try options.emit.directory.createFile(options.emit.sub_path, .{
@@ -2232,6 +2234,12 @@ fn writeHeader(self: *MachO, ncmds: usize, sizeofcmds: usize) !void {
 
     if (self.has_tlv) {
         header.flags |= macho.MH_HAS_TLV_DESCRIPTORS;
+    }
+    if (self.binds_to_weak) {
+        header.flags |= macho.MH_BINDS_TO_WEAK;
+    }
+    if (self.weak_defines) {
+        header.flags |= macho.MH_WEAK_DEFINES;
     }
 
     header.ncmds = @intCast(ncmds);

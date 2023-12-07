@@ -165,7 +165,7 @@ fn parseTrie(self: *Dylib, data: []const u8, macho_file: *MachO) !void {
     try parseTrieNode(&it, arena.allocator(), "", &exports);
 
     for (exports.items) |exp| {
-        const sym_index = if (exp.flags & macho.EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION != 0 or self.weak)
+        const sym_index = if (exp.flags & macho.EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION != 0)
             try self.addWeak(exp.name, macho_file)
         else
             try self.addGlobal(exp.name, macho_file);
@@ -433,7 +433,7 @@ fn addGlobal(self: *Dylib, name: []const u8, macho_file: *MachO) !Symbol.Index {
 
 fn addWeak(self: *Dylib, name: []const u8, macho_file: *MachO) !Symbol.Index {
     const index = try self.addGlobal(name, macho_file);
-    self.symtab.items(.nlist)[index].n_desc |= macho.N_WEAK_DEF | macho.N_WEAK_REF;
+    self.symtab.items(.nlist)[index].n_desc |= macho.N_WEAK_DEF;
     return index;
 }
 
@@ -487,7 +487,7 @@ pub fn resolveSymbols(self: *Dylib, macho_file: *MachO) void {
             global.atom = 0;
             global.nlist_idx = nlist_idx;
             global.file = self.index;
-            global.flags.weak = nlist.weakDef() or nlist.weakRef();
+            global.flags.weak = nlist.weakDef();
             global.flags.tlv = slice.items(.tlv)[nlist_idx];
         }
     }
@@ -498,7 +498,7 @@ pub fn markLive(self: *Dylib, macho_file: *MachO) void {
         const global = macho_file.getSymbol(index);
         const file = global.getFile(macho_file) orelse continue;
         const should_drop = switch (file) {
-            .dylib => |sh| !sh.needed and global.flags.weak,
+            .dylib => |sh| !sh.needed and global.flags.weak_ref,
             else => false,
         };
         if (!should_drop and !file.isAlive()) {

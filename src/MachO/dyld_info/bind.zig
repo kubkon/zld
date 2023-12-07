@@ -95,7 +95,7 @@ pub const Bind = struct {
 
                 const sym = ctx.getSymbol(current.target);
                 const name = sym.getName(ctx);
-                const flags: u8 = if (sym.flags.weak) macho.BIND_SYMBOL_FLAGS_WEAK_IMPORT else 0;
+                const flags: u8 = if (sym.weakRef(ctx)) macho.BIND_SYMBOL_FLAGS_WEAK_IMPORT else 0;
                 const ordinal: i16 = ord: {
                     if (ctx.options.namespace == .flat) break :ord macho.BIND_SPECIAL_DYLIB_FLAT_LOOKUP;
                     if (sym.getDylibOrdinal(ctx)) |ord| break :ord @bitCast(ord);
@@ -217,7 +217,7 @@ pub const LazyBind = struct {
 
             const sym = ctx.getSymbol(entry.target);
             const name = sym.getName(ctx);
-            const flags: u8 = if (sym.flags.weak) macho.BIND_SYMBOL_FLAGS_WEAK_IMPORT else 0;
+            const flags: u8 = if (sym.weakRef(ctx)) macho.BIND_SYMBOL_FLAGS_WEAK_IMPORT else 0;
             const ordinal: i16 = ord: {
                 if (ctx.options.namespace == .flat) break :ord macho.BIND_SPECIAL_DYLIB_FLAT_LOOKUP;
                 if (sym.getDylibOrdinal(ctx)) |ord| break :ord @bitCast(ord);

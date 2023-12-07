@@ -41,6 +41,15 @@ pub fn isTlvInit(symbol: Symbol, macho_file: *MachO) bool {
     return std.mem.indexOf(u8, name, "$tlv$init") != null;
 }
 
+pub fn weakRef(symbol: Symbol, macho_file: *MachO) bool {
+    const file = symbol.getFile(macho_file).?;
+    const is_dylib_weak = switch (file) {
+        .dylib => |x| x.weak,
+        else => false,
+    };
+    return is_dylib_weak or symbol.flags.weak_ref;
+}
+
 pub fn getName(symbol: Symbol, macho_file: *MachO) [:0]const u8 {
     return macho_file.string_intern.getAssumeExists(symbol.name);
 }
@@ -175,7 +184,10 @@ pub fn setOutputSym(symbol: Symbol, macho_file: *MachO, out: *macho.nlist_64) vo
         out.n_value = symbol.getAddress(.{}, macho_file);
         out.n_desc = 0;
 
-        if (symbol.flags.weak) out.n_desc |= macho.N_WEAK_DEF;
+        if (symbol.flags.weak) {
+            out.n_desc |= macho.N_WEAK_DEF;
+            macho_file.weak_defines = true;
+        }
         if (nlist.n_desc & macho.REFERENCED_DYNAMICALLY != 0) out.n_desc |= macho.REFERENCED_DYNAMICALLY;
     } else {
         out.n_type = macho.N_EXT;
@@ -188,6 +200,11 @@ pub fn setOutputSym(symbol: Symbol, macho_file: *MachO, out: *macho.nlist_64) vo
             0;
 
         if (symbol.flags.weak) {
+            out.n_desc |= macho.N_WEAK_DEF;
+            macho_file.binds_to_weak = true;
+        }
+
+        if (symbol.weakRef(macho_file)) {
             out.n_desc |= macho.N_WEAK_REF;
         }
     }
@@ -257,6 +274,9 @@ pub const Flags = packed struct {
 
     /// Whether this symbol is weak.
     weak: bool = false,
+
+    /// Whether this symbol is weakly referenced.
+    weak_ref: bool = false,
 
     /// Whether this symbol is a thread-local variable.
     tlv: bool = false,

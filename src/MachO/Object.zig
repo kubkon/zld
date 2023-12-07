@@ -762,6 +762,7 @@ pub fn resolveSymbols(self: *Object, macho_file: *MachO) void {
             symbol.nlist_idx = nlist_idx;
             symbol.file = self.index;
             symbol.flags.weak = nlist.weakDef();
+            symbol.flags.weak_ref = false;
 
             if (nlist.sect() and
                 self.sections.items(.header)[nlist.n_sect - 1].type() == macho.S_THREAD_LOCAL_VARIABLES)
@@ -861,6 +862,7 @@ pub fn convertTentativeDefinitions(self: *Object, macho_file: *MachO) !void {
         sym.value = 0;
         sym.atom = atom_index;
         sym.flags.weak = false;
+        sym.flags.weak_ref = false;
 
         nlist.n_value = 0;
         nlist.n_type = macho.N_EXT | macho.N_SECT;
@@ -1123,7 +1125,8 @@ pub fn claimUnresolved(self: Object, macho_file: *MachO) void {
         sym.atom = 0;
         sym.nlist_idx = nlist_idx;
         sym.file = self.index;
-        sym.flags.weak = nlist.weakRef();
+        sym.flags.weak = false;
+        sym.flags.weak_ref = nlist.weakRef();
         sym.flags.import = is_import;
     }
 }
