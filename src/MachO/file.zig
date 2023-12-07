@@ -49,20 +49,26 @@ pub const File = union(enum) {
     }
 
     /// Encodes symbol rank so that the following ordering applies:
-    /// * strong defined
-    /// * weak defined
-    /// * strong in lib (archive/dylib)
-    /// * weak in lib (archive/dylib)
-    /// * tentative
-    /// * tentative in lib (archive)
+    /// * strong in object
+    /// * weak in object
+    /// * tentative in object
+    /// * strong in archive/dylib
+    /// * weak in archive/dylib
+    /// * tentative in archive
     /// * unclaimed
     pub fn getSymbolRank(file: File, sym: macho.nlist_64, in_archive: bool) u32 {
+        if (file == .object and !in_archive) {
+            const base: u32 = blk: {
+                if (sym.tentative()) break :blk 3;
+                break :blk if (sym.weakDef()) 2 else 1;
+            };
+            return (base << 16) + file.getIndex();
+        }
         const base: u32 = blk: {
-            if (sym.tentative()) break :blk if (in_archive) 6 else 5;
-            if (file == .dylib or in_archive) break :blk if (sym.weakDef()) 4 else 3;
+            if (sym.tentative()) break :blk 3;
             break :blk if (sym.weakDef()) 2 else 1;
         };
-        return (base << 24) + file.getIndex();
+        return base + (file.getIndex() << 16);
     }
 
     pub fn setAlive(file: File) void {
@@ -73,8 +79,8 @@ pub const File = union(enum) {
 
     pub fn markLive(file: File, macho_file: *MachO) void {
         switch (file) {
-            .internal => {},
-            inline else => |x| x.markLive(macho_file),
+            .object => |x| x.markLive(macho_file),
+            else => unreachable,
         }
     }
 

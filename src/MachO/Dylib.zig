@@ -472,13 +472,16 @@ fn initPlatform(self: *Dylib) void {
 pub fn resolveSymbols(self: *Dylib, macho_file: *MachO) void {
     const slice = self.symtab.slice();
 
+    // std.debug.print("\n({d}){s}\n", .{ self.index, self.path });
     for (self.symbols.items, 0..) |index, i| {
         const nlist_idx = @as(Symbol.Index, @intCast(i));
         const nlist = slice.items(.nlist)[nlist_idx];
 
-        if (nlist.undf() and !nlist.tentative()) continue;
-
         const global = macho_file.getSymbol(index);
+        // std.debug.print("{s}: this {d}, other {d}\n", .{
+        //     self.getString(nlist.n_strx),     self.asFile().getSymbolRank(nlist, false),
+        //     global.getSymbolRank(macho_file),
+        // });
         if (self.asFile().getSymbolRank(nlist, false) < global.getSymbolRank(macho_file)) {
             global.value = nlist.n_value;
             global.atom = 0;
@@ -496,24 +499,6 @@ pub fn resetGlobals(self: *Dylib, macho_file: *MachO) void {
         const name = sym.name;
         sym.* = .{};
         sym.name = name;
-    }
-}
-
-pub fn markLive(self: *Dylib, macho_file: *MachO) void {
-    for (self.symbols.items, 0..) |index, i| {
-        const nlist = self.symtab.items(.nlist)[i];
-        if (!nlist.undf() or nlist.tentative()) continue;
-
-        const global = macho_file.getSymbol(index);
-        const file = global.getFile(macho_file) orelse continue;
-        const should_drop = switch (file) {
-            .dylib => |sh| !sh.needed and global.flags.weak,
-            else => false,
-        };
-        if (!should_drop and !file.isAlive()) {
-            file.setAlive();
-            file.markLive(macho_file);
-        }
     }
 }
 

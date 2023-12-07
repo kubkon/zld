@@ -734,6 +734,7 @@ fn initDwarfInfo(self: *Object, allocator: Allocator) !void {
 }
 
 pub fn resolveSymbols(self: *Object, macho_file: *MachO) void {
+    // std.debug.print("\n({d}){}\n", .{ self.index, self.fmtPath() });
     for (self.symbols.items, 0..) |index, i| {
         const nlist_idx = @as(Symbol.Index, @intCast(i));
         const nlist = self.symtab.items(.nlist)[nlist_idx];
@@ -741,12 +742,16 @@ pub fn resolveSymbols(self: *Object, macho_file: *MachO) void {
 
         if (!nlist.ext()) continue;
         if (nlist.undf() and !nlist.tentative()) continue;
-        if (!nlist.tentative() and !nlist.abs()) {
+        if (nlist.sect()) {
             const atom = macho_file.getAtom(atom_index).?;
             if (!atom.flags.alive) continue;
         }
 
         const symbol = macho_file.getSymbol(index);
+        // std.debug.print("{s}: this {d}, other {d}\n", .{
+        //     self.getString(nlist.n_strx),     self.asFile().getSymbolRank(nlist, !self.alive),
+        //     symbol.getSymbolRank(macho_file),
+        // });
         if (self.asFile().getSymbolRank(nlist, !self.alive) < symbol.getSymbolRank(macho_file)) {
             const value = if (!nlist.tentative() and !nlist.abs()) blk: {
                 const atom = macho_file.getAtom(atom_index).?;
@@ -784,8 +789,8 @@ pub fn markLive(self: *Object, macho_file: *MachO) void {
 
         const sym = macho_file.getSymbol(index);
         const file = sym.getFile(macho_file) orelse continue;
-        const should_keep = nlist.undf() or (nlist.tentative() and sym.getNlist(macho_file).tentative());
-        if (should_keep and !file.isAlive()) {
+        const should_keep = nlist.undf() or (nlist.tentative() and !sym.getNlist(macho_file).tentative());
+        if (should_keep and !file.isAlive() and file != .dylib) {
             file.setAlive();
             file.markLive(macho_file);
         }
