@@ -756,7 +756,7 @@ pub fn resolveSymbols(self: *Object, macho_file: *MachO) void {
             symbol.atom = atom_index;
             symbol.nlist_idx = nlist_idx;
             symbol.file = self.index;
-            symbol.flags.weak = nlist.weakDef() or nlist.pext();
+            symbol.flags.weak = nlist.weakDef();
 
             if (nlist.sect() and
                 self.sections.items(.header)[nlist.n_sect - 1].type() == macho.S_THREAD_LOCAL_VARIABLES)
@@ -781,7 +781,6 @@ pub fn markLive(self: *Object, macho_file: *MachO) void {
     for (self.symbols.items, 0..) |index, nlist_idx| {
         const nlist = self.symtab.items(.nlist)[nlist_idx];
         if (!nlist.ext()) continue;
-        if (nlist.weakRef()) continue;
 
         const sym = macho_file.getSymbol(index);
         const file = sym.getFile(macho_file) orelse continue;
@@ -1119,6 +1118,7 @@ pub fn claimUnresolved(self: Object, macho_file: *MachO) void {
         sym.atom = 0;
         sym.nlist_idx = nlist_idx;
         sym.file = self.index;
+        sym.flags.weak = nlist.weakRef();
         sym.flags.import = is_import;
     }
 }

@@ -41,15 +41,6 @@ pub fn isTlvInit(symbol: Symbol, macho_file: *MachO) bool {
     return std.mem.indexOf(u8, name, "$tlv$init") != null;
 }
 
-pub fn isWeakRef(symbol: Symbol, macho_file: *MachO) bool {
-    if (!symbol.flags.import) return false;
-    switch (symbol.getFile(macho_file).?) {
-        .dylib => |x| if (x.weak) return true,
-        else => {},
-    }
-    return symbol.getNlist(macho_file).weakRef();
-}
-
 pub fn getName(symbol: Symbol, macho_file: *MachO) [:0]const u8 {
     return macho_file.string_intern.getAssumeExists(symbol.name);
 }
@@ -196,7 +187,7 @@ pub fn setOutputSym(symbol: Symbol, macho_file: *MachO, out: *macho.nlist_64) vo
         else
             0;
 
-        if (symbol.isWeakRef(macho_file)) {
+        if (symbol.flags.weak) {
             out.n_desc |= macho.N_WEAK_REF;
         }
     }
