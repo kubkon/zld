@@ -734,7 +734,6 @@ fn initDwarfInfo(self: *Object, allocator: Allocator) !void {
 }
 
 pub fn resolveSymbols(self: *Object, macho_file: *MachO) void {
-    // std.debug.print("\n({d}){}\n", .{ self.index, self.fmtPath() });
     for (self.symbols.items, 0..) |index, i| {
         const nlist_idx = @as(Symbol.Index, @intCast(i));
         const nlist = self.symtab.items(.nlist)[nlist_idx];
@@ -748,11 +747,11 @@ pub fn resolveSymbols(self: *Object, macho_file: *MachO) void {
         }
 
         const symbol = macho_file.getSymbol(index);
-        // std.debug.print("{s}: this {d}, other {d}\n", .{
-        //     self.getString(nlist.n_strx),     self.asFile().getSymbolRank(nlist, !self.alive),
-        //     symbol.getSymbolRank(macho_file),
-        // });
-        if (self.asFile().getSymbolRank(nlist, !self.alive) < symbol.getSymbolRank(macho_file)) {
+        if (self.asFile().getSymbolRank(.{
+            .archive = !self.alive,
+            .weak = nlist.weakDef(),
+            .tentative = nlist.tentative(),
+        }) < symbol.getSymbolRank(macho_file)) {
             const value = if (nlist.sect()) blk: {
                 const atom = macho_file.getAtom(atom_index).?;
                 break :blk nlist.n_value - atom.getInputAddress(macho_file);
@@ -762,6 +761,7 @@ pub fn resolveSymbols(self: *Object, macho_file: *MachO) void {
             symbol.nlist_idx = nlist_idx;
             symbol.file = self.index;
             symbol.flags.weak = nlist.weakDef();
+            symbol.flags.tentative = nlist.tentative();
             symbol.flags.weak_ref = false;
             symbol.flags.dyn_ref = nlist.n_desc & macho.REFERENCED_DYNAMICALLY != 0;
 
@@ -832,22 +832,14 @@ pub fn scanRelocs(self: Object, macho_file: *MachO) !void {
 pub fn convertTentativeDefinitions(self: *Object, macho_file: *MachO) !void {
     const gpa = macho_file.base.allocator;
     for (self.symbols.items, 0..) |index, i| {
+        const sym = macho_file.getSymbol(index);
+        if (!sym.flags.tentative) continue;
+        const sym_file = sym.getFile(macho_file).?;
+        if (sym_file.getIndex() != self.index) continue;
+
         const nlist_idx = @as(Symbol.Index, @intCast(i));
         const nlist = &self.symtab.items(.nlist)[nlist_idx];
         const nlist_atom = &self.symtab.items(.atom)[nlist_idx];
-        if (!nlist.tentative()) continue;
-
-        const sym = macho_file.getSymbol(index);
-        const sym_file = sym.getFile(macho_file).?;
-        if (sym_file.getIndex() != self.index) {
-            //     if (elf_file.options.warn_common) {
-            //         elf_file.base.warn("{}: multiple common symbols: {s}", .{
-            //             self.fmtPath(),
-            //             global.getName(elf_file),
-            //         });
-            //     }
-            continue;
-        }
 
         const atom_index = try macho_file.addAtom();
         try self.atoms.append(gpa, atom_index);
@@ -872,6 +864,7 @@ pub fn convertTentativeDefinitions(self: *Object, macho_file: *MachO) !void {
         sym.atom = atom_index;
         sym.flags.weak = false;
         sym.flags.weak_ref = false;
+        sym.flags.tentative = false;
         sym.visibility = .global;
 
         nlist.n_value = 0;

@@ -56,17 +56,21 @@ pub const File = union(enum) {
     /// * weak in archive/dylib
     /// * tentative in archive
     /// * unclaimed
-    pub fn getSymbolRank(file: File, sym: macho.nlist_64, in_archive: bool) u32 {
-        if (file == .object and !in_archive) {
+    pub fn getSymbolRank(file: File, args: struct {
+        archive: bool = false,
+        weak: bool = false,
+        tentative: bool = false,
+    }) u32 {
+        if (file == .object and !args.archive) {
             const base: u32 = blk: {
-                if (sym.tentative()) break :blk 3;
-                break :blk if (sym.weakDef()) 2 else 1;
+                if (args.tentative) break :blk 3;
+                break :blk if (args.weak) 2 else 1;
             };
             return (base << 16) + file.getIndex();
         }
         const base: u32 = blk: {
-            if (sym.tentative()) break :blk 3;
-            break :blk if (sym.weakDef()) 2 else 1;
+            if (args.tentative) break :blk 3;
+            break :blk if (args.weak) 2 else 1;
         };
         return base + (file.getIndex() << 24);
     }

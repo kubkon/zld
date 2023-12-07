@@ -91,12 +91,15 @@ pub fn getDylibOrdinal(symbol: Symbol, macho_file: *MachO) ?u16 {
 
 pub fn getSymbolRank(symbol: Symbol, macho_file: *MachO) u32 {
     const file = symbol.getFile(macho_file) orelse return std.math.maxInt(u32);
-    const nlist = symbol.getNlist(macho_file);
     const in_archive = switch (file) {
         .object => |x| !x.alive,
         else => false,
     };
-    return file.getSymbolRank(nlist, in_archive);
+    return file.getSymbolRank(.{
+        .archive = in_archive,
+        .weak = symbol.flags.weak,
+        .tentative = symbol.flags.tentative,
+    });
 }
 
 pub fn getAddress(symbol: Symbol, opts: struct {
@@ -292,6 +295,9 @@ pub const Flags = packed struct {
 
     /// Whether this symbol is dynamically referenced.
     dyn_ref: bool = false,
+
+    /// Whether this symbol is a tentative definition.
+    tentative: bool = false,
 
     /// Whether this symbol is a thread-local variable.
     tlv: bool = false,

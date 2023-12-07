@@ -471,18 +471,14 @@ fn initPlatform(self: *Dylib) void {
 
 pub fn resolveSymbols(self: *Dylib, macho_file: *MachO) void {
     const slice = self.symtab.slice();
-
-    // std.debug.print("\n({d}){s}\n", .{ self.index, self.path });
     for (self.symbols.items, 0..) |index, i| {
         const nlist_idx = @as(Symbol.Index, @intCast(i));
         const nlist = slice.items(.nlist)[nlist_idx];
 
         const global = macho_file.getSymbol(index);
-        // std.debug.print("{s}: this {d}, other {d}\n", .{
-        //     self.getString(nlist.n_strx),     self.asFile().getSymbolRank(nlist, false),
-        //     global.getSymbolRank(macho_file),
-        // });
-        if (self.asFile().getSymbolRank(nlist, false) < global.getSymbolRank(macho_file)) {
+        if (self.asFile().getSymbolRank(.{
+            .weak = nlist.weakDef(),
+        }) < global.getSymbolRank(macho_file)) {
             global.value = nlist.n_value;
             global.atom = 0;
             global.nlist_idx = nlist_idx;
@@ -490,6 +486,8 @@ pub fn resolveSymbols(self: *Dylib, macho_file: *MachO) void {
             global.flags.weak = nlist.weakDef();
             global.flags.weak_ref = false;
             global.flags.tlv = slice.items(.tlv)[nlist_idx];
+            global.flags.dyn_ref = false;
+            global.flags.tentative = false;
             global.visibility = .global;
         }
     }
