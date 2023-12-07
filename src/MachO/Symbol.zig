@@ -197,7 +197,9 @@ pub fn setOutputSym(symbol: Symbol, macho_file: *MachO, out: *macho.nlist_64) vo
             out.n_desc |= macho.N_WEAK_DEF;
             macho_file.weak_defines = true;
         }
-        if (nlist.n_desc & macho.REFERENCED_DYNAMICALLY != 0) out.n_desc |= macho.REFERENCED_DYNAMICALLY;
+        if (symbol.flags.dyn_ref) {
+            out.n_desc |= macho.REFERENCED_DYNAMICALLY;
+        }
     } else {
         assert(symbol.visibility == .global);
         out.n_type = macho.N_EXT;
@@ -287,6 +289,9 @@ pub const Flags = packed struct {
 
     /// Whether this symbol is weakly referenced.
     weak_ref: bool = false,
+
+    /// Whether this symbol is dynamically referenced.
+    dyn_ref: bool = false,
 
     /// Whether this symbol is a thread-local variable.
     tlv: bool = false,

@@ -763,6 +763,7 @@ pub fn resolveSymbols(self: *Object, macho_file: *MachO) void {
             symbol.file = self.index;
             symbol.flags.weak = nlist.weakDef();
             symbol.flags.weak_ref = false;
+            symbol.flags.dyn_ref = nlist.n_desc & macho.REFERENCED_DYNAMICALLY != 0;
 
             if (nlist.pext() or nlist.weakDef() and nlist.weakRef()) {
                 if (symbol.visibility != .global) {

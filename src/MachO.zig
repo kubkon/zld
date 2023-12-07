@@ -1005,9 +1005,8 @@ fn resolveSyntheticSymbols(self: *MachO) !void {
         self.mh_execute_header_index = try internal.addSymbol("__mh_execute_header", self);
         const sym = self.getSymbol(self.mh_execute_header_index.?);
         sym.flags.@"export" = true;
+        sym.flags.dyn_ref = true;
         sym.visibility = .global;
-        const nlist = &internal.symtab.items[sym.nlist_idx];
-        nlist.n_desc = macho.REFERENCED_DYNAMICALLY;
     } else if (self.options.dylib) {
         self.mh_dylib_header_index = try internal.addSymbol("__mh_dylib_header", self);
     }

@@ -36,6 +36,7 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testLayout(b, opts));
     macho_step.dependOn(testLargeBss(b, opts));
     macho_step.dependOn(testLinkOrder(b, opts));
+    macho_step.dependOn(testMhExecuteHeader(b, opts));
     macho_step.dependOn(testNeededFramework(b, opts));
     macho_step.dependOn(testNeededLibrary(b, opts));
     macho_step.dependOn(testNoExportsDylib(b, opts));
@@ -880,6 +881,22 @@ fn testLinkOrder(b: *Build, opts: Options) *Step {
         run.expectStdOutEqual("42 0 -2");
         test_step.dependOn(run.step());
     }
+
+    return test_step;
+}
+
+fn testMhExecuteHeader(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-mh-execute-header", "");
+
+    const exe = cc(b, opts);
+    exe.addEmptyMain();
+
+    const check = exe.check();
+    check.checkInSymtab();
+    // TODO enhance Mach-O parser
+    // check.checkContains("[referenced dynamically] external __mh_execute_header");
+    check.checkContains("external __mh_execute_header");
+    test_step.dependOn(&check.step);
 
     return test_step;
 }
