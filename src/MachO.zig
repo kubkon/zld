@@ -964,7 +964,7 @@ fn markImportsAndExports(self: *MachO) void {
             const sym = self.getSymbol(sym_index);
             const file = sym.getFile(self) orelse continue;
             if (sym.visibility != .global) continue;
-            if (file == .dylib and !sym.isAbs(self)) {
+            if (file == .dylib and !sym.flags.abs) {
                 sym.flags.import = true;
                 continue;
             }
@@ -978,7 +978,7 @@ fn markImportsAndExports(self: *MachO) void {
         const sym = self.getSymbol(index);
         if (sym.getFile(self)) |file| {
             if (sym.visibility != .global) continue;
-            if (file == .dylib and !sym.isAbs(self)) sym.flags.import = true;
+            if (file == .dylib and !sym.flags.abs) sym.flags.import = true;
         }
     }
 }
@@ -1742,7 +1742,7 @@ fn initExportTrie(self: *MachO) !void {
             if (!sym.flags.@"export") continue;
             if (sym.getAtom(self)) |atom| if (!atom.flags.alive) continue;
             if (sym.getFile(self).?.getIndex() != index) continue;
-            var flags: u64 = if (sym.isAbs(self))
+            var flags: u64 = if (sym.flags.abs)
                 macho.EXPORT_SYMBOL_FLAGS_KIND_ABSOLUTE
             else if (sym.flags.tlv)
                 macho.EXPORT_SYMBOL_FLAGS_KIND_THREAD_LOCAL

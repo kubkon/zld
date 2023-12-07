@@ -28,12 +28,6 @@ visibility: Visibility = .local,
 
 extra: u32 = 0,
 
-pub fn isAbs(symbol: Symbol, macho_file: *MachO) bool {
-    const file = symbol.getFile(macho_file).?;
-    if (file == .dylib) return symbol.getNlist(macho_file).abs();
-    return !symbol.flags.import and symbol.getAtom(macho_file) == null and symbol.out_n_sect == 0 and file != .internal;
-}
-
 pub fn isLocal(symbol: Symbol) bool {
     return !(symbol.flags.import or symbol.flags.@"export");
 }
@@ -176,10 +170,9 @@ pub inline fn setExtra(symbol: Symbol, extra: Extra, macho_file: *MachO) void {
 }
 
 pub fn setOutputSym(symbol: Symbol, macho_file: *MachO, out: *macho.nlist_64) void {
-    const nlist = symbol.getNlist(macho_file);
     if (symbol.isLocal()) {
-        out.n_type = if (nlist.abs()) macho.N_ABS else macho.N_SECT;
-        out.n_sect = if (nlist.abs()) 0 else @intCast(symbol.out_n_sect + 1);
+        out.n_type = if (symbol.flags.abs) macho.N_ABS else macho.N_SECT;
+        out.n_sect = if (symbol.flags.abs) 0 else @intCast(symbol.out_n_sect + 1);
         out.n_desc = 0;
         out.n_value = symbol.getAddress(.{}, macho_file);
 
@@ -191,8 +184,8 @@ pub fn setOutputSym(symbol: Symbol, macho_file: *MachO, out: *macho.nlist_64) vo
     } else if (symbol.flags.@"export") {
         assert(symbol.visibility == .global);
         out.n_type = macho.N_EXT;
-        out.n_type |= if (nlist.abs()) macho.N_ABS else macho.N_SECT;
-        out.n_sect = if (nlist.abs()) 0 else @intCast(symbol.out_n_sect + 1);
+        out.n_type |= if (symbol.flags.abs) macho.N_ABS else macho.N_SECT;
+        out.n_sect = if (symbol.flags.abs) 0 else @intCast(symbol.out_n_sect + 1);
         out.n_value = symbol.getAddress(.{}, macho_file);
         out.n_desc = 0;
 
@@ -298,6 +291,9 @@ pub const Flags = packed struct {
 
     /// Whether this symbol was marked as N_NO_DEAD_STRIP.
     no_dead_strip: bool = false,
+
+    /// Whether this symbol is absolute.
+    abs: bool = false,
 
     /// Whether this symbol is a tentative definition.
     tentative: bool = false,

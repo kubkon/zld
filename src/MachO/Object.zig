@@ -362,7 +362,8 @@ fn initSymbols(self: *Object, macho_file: *MachO) !void {
         self.symbols.appendAssumeCapacity(index);
         const symbol = macho_file.getSymbol(index);
         const name = self.getString(nlist.n_strx);
-        const value = if (nlist.abs())
+        const abs = nlist.abs();
+        const value = if (abs)
             nlist.n_value
         else
             nlist.n_value - atom.getInputAddress(macho_file);
@@ -370,10 +371,11 @@ fn initSymbols(self: *Object, macho_file: *MachO) !void {
             .value = value,
             .name = try macho_file.string_intern.insert(gpa, name),
             .nlist_idx = @intCast(i),
-            .atom = if (nlist.abs()) 0 else atom_index,
+            .atom = if (abs) 0 else atom_index,
             .file = self.index,
         };
 
+        symbol.flags.abs = abs;
         symbol.flags.no_dead_strip = symbol.flags.no_dead_strip or nlist.noDeadStrip();
 
         if (nlist.sect() and
@@ -764,6 +766,7 @@ pub fn resolveSymbols(self: *Object, macho_file: *MachO) void {
             symbol.nlist_idx = nlist_idx;
             symbol.file = self.index;
             symbol.flags.weak = nlist.weakDef();
+            symbol.flags.abs = nlist.abs();
             symbol.flags.tentative = nlist.tentative();
             symbol.flags.weak_ref = false;
             symbol.flags.dyn_ref = nlist.n_desc & macho.REFERENCED_DYNAMICALLY != 0;
@@ -1071,7 +1074,7 @@ pub fn writeStabs(self: Object, macho_file: *MachO) void {
             const osym = macho_file.symtab.items[symtab_index];
             break :n_strx osym.n_strx;
         };
-        const sym_n_sect: u8 = if (!sym.isAbs(macho_file)) @intCast(sym.out_n_sect + 1) else 0;
+        const sym_n_sect: u8 = if (!sym.flags.abs) @intCast(sym.out_n_sect + 1) else 0;
         const sym_n_value = sym.getAddress(.{}, macho_file);
         const sym_size = sym.getSize(macho_file);
         if (sect.isCode()) {
