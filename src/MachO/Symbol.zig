@@ -58,12 +58,13 @@ pub fn getFile(symbol: Symbol, macho_file: *MachO) ?File {
     return macho_file.getFile(symbol.file);
 }
 
+/// Asserts file is object or dylib.
 pub fn getNlist(symbol: Symbol, macho_file: *MachO) macho.nlist_64 {
     const file = symbol.getFile(macho_file).?;
     return switch (file) {
         .object => |x| x.symtab.items(.nlist)[symbol.nlist_idx],
         .dylib => |x| x.symtab.items(.nlist)[symbol.nlist_idx],
-        .internal => |x| x.symtab.items[symbol.nlist_idx],
+        .internal => unreachable,
     };
 }
 

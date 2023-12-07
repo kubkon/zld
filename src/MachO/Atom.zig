@@ -211,9 +211,7 @@ fn reportUndefSymbol(self: Atom, rel: Object.Relocation, macho_file: *MachO) !bo
     if (rel.tag == .local) return false;
 
     const sym = rel.getTargetSymbol(macho_file);
-    if (sym.getNlist(macho_file).undf() and !sym.flags.import and
-        sym.getFile(macho_file).?.getIndex() != macho_file.internal_object_index.?)
-    {
+    if (!sym.flags.import and sym.getFile(macho_file).? == .object and sym.getNlist(macho_file).undf()) {
         const gpa = macho_file.base.allocator;
         const gop = try macho_file.undefs.getOrPut(gpa, rel.target);
         if (!gop.found_existing) {
@@ -248,8 +246,8 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
         const sym = if (rel.tag == .@"extern") rel.getTargetSymbol(macho_file) else null;
 
         if (sym) |s| {
-            if (s.getNlist(macho_file).undf() and !s.flags.import and
-                s.getFile(macho_file).?.getIndex() != macho_file.internal_object_index.?) continue;
+            if (!s.flags.import and s.getFile(macho_file).? == .object and s.getNlist(macho_file).undf())
+                continue;
         }
 
         const P = @as(i64, @intCast(self.value)) + @as(i64, @intCast(rel_offset));
