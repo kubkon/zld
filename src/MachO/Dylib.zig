@@ -488,7 +488,9 @@ pub fn resolveSymbols(self: *Dylib, macho_file: *MachO) void {
             global.nlist_idx = nlist_idx;
             global.file = self.index;
             global.flags.weak = nlist.weakDef();
+            global.flags.weak_ref = false;
             global.flags.tlv = slice.items(.tlv)[nlist_idx];
+            global.visibility = .global;
         }
     }
 }

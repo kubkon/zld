@@ -954,8 +954,8 @@ fn markImportsAndExports(self: *MachO) void {
             for (self.getFile(index).?.getSymbols()) |sym_index| {
                 const sym = self.getSymbol(sym_index);
                 const file = sym.getFile(self) orelse continue;
-                if (!sym.getNlist(self).ext()) continue;
-                if (file != .dylib and !sym.getNlist(self).pext()) sym.flags.@"export" = true;
+                if (sym.visibility != .global) continue;
+                if (file != .dylib) sym.flags.@"export" = true;
             }
         };
 
@@ -963,8 +963,7 @@ fn markImportsAndExports(self: *MachO) void {
         for (self.getFile(index).?.getSymbols()) |sym_index| {
             const sym = self.getSymbol(sym_index);
             const file = sym.getFile(self) orelse continue;
-            if (!sym.getNlist(self).ext()) continue;
-            if (sym.getNlist(self).pext()) continue;
+            if (sym.visibility != .global) continue;
             if (file == .dylib and !sym.isAbs(self)) {
                 sym.flags.import = true;
                 continue;
@@ -978,7 +977,7 @@ fn markImportsAndExports(self: *MachO) void {
     for (self.undefined_symbols.items) |index| {
         const sym = self.getSymbol(index);
         if (sym.getFile(self)) |file| {
-            if (sym.getNlist(self).pext()) continue;
+            if (sym.visibility != .global) continue;
             if (file == .dylib and !sym.isAbs(self)) sym.flags.import = true;
         }
     }
@@ -1006,6 +1005,7 @@ fn resolveSyntheticSymbols(self: *MachO) !void {
         self.mh_execute_header_index = try internal.addSymbol("__mh_execute_header", self);
         const sym = self.getSymbol(self.mh_execute_header_index.?);
         sym.flags.@"export" = true;
+        sym.visibility = .global;
         const nlist = &internal.symtab.items[sym.nlist_idx];
         nlist.n_desc = macho.REFERENCED_DYNAMICALLY;
     } else if (self.options.dylib) {

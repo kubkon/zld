@@ -753,7 +753,7 @@ pub fn resolveSymbols(self: *Object, macho_file: *MachO) void {
         //     symbol.getSymbolRank(macho_file),
         // });
         if (self.asFile().getSymbolRank(nlist, !self.alive) < symbol.getSymbolRank(macho_file)) {
-            const value = if (!nlist.tentative() and !nlist.abs()) blk: {
+            const value = if (nlist.sect()) blk: {
                 const atom = macho_file.getAtom(atom_index).?;
                 break :blk nlist.n_value - atom.getInputAddress(macho_file);
             } else nlist.n_value;
@@ -763,6 +763,14 @@ pub fn resolveSymbols(self: *Object, macho_file: *MachO) void {
             symbol.file = self.index;
             symbol.flags.weak = nlist.weakDef();
             symbol.flags.weak_ref = false;
+
+            if (nlist.pext() or nlist.weakDef() and nlist.weakRef()) {
+                if (symbol.visibility != .global) {
+                    symbol.visibility = .linkage;
+                }
+            } else {
+                symbol.visibility = .global;
+            }
 
             if (nlist.sect() and
                 self.sections.items(.header)[nlist.n_sect - 1].type() == macho.S_THREAD_LOCAL_VARIABLES)
@@ -863,6 +871,7 @@ pub fn convertTentativeDefinitions(self: *Object, macho_file: *MachO) !void {
         sym.atom = atom_index;
         sym.flags.weak = false;
         sym.flags.weak_ref = false;
+        sym.visibility = .global;
 
         nlist.n_value = 0;
         nlist.n_type = macho.N_EXT | macho.N_SECT;
@@ -933,7 +942,7 @@ pub fn calcStabsSize(self: *Object, macho_file: *MachO) void {
         const sect = macho_file.sections.items(.header)[sym.out_n_sect];
         if (sect.isCode()) {
             self.output_symtab_ctx.nstabs += 4; // N_BNSYM, N_FUN, N_FUN, N_ENSYM
-        } else if (sym.getNlist(macho_file).ext()) {
+        } else if (sym.visibility == .global) {
             self.output_symtab_ctx.nstabs += 1; // N_GSYM
         } else {
             self.output_symtab_ctx.nstabs += 1; // N_STSYM
@@ -1070,7 +1079,7 @@ pub fn writeStabs(self: Object, macho_file: *MachO) void {
         if (sect.isCode()) {
             writeFuncStab(sym_n_strx, sym_n_sect, sym_n_value, sym_size, index, macho_file);
             index += 4;
-        } else if (sym.getNlist(macho_file).ext()) {
+        } else if (sym.visibility == .global) {
             macho_file.symtab.items[index] = .{
                 .n_strx = sym_n_strx,
                 .n_type = macho.N_GSYM,
@@ -1110,10 +1119,7 @@ pub fn claimUnresolved(self: Object, macho_file: *MachO) void {
         if (!nlist.undf()) continue;
 
         const sym = macho_file.getSymbol(sym_index);
-        if (sym.getFile(macho_file)) |file| {
-            if (file.getIndex() == macho_file.internal_object_index.?) continue;
-            if (!sym.getNlist(macho_file).undf()) continue;
-        }
+        if (sym.getFile(macho_file) != null) continue;
 
         const is_import = switch (macho_file.options.undefined_treatment) {
             .@"error" => false,
@@ -1128,6 +1134,7 @@ pub fn claimUnresolved(self: Object, macho_file: *MachO) void {
         sym.flags.weak = false;
         sym.flags.weak_ref = nlist.weakRef();
         sym.flags.import = is_import;
+        sym.visibility = .global;
     }
 }
 

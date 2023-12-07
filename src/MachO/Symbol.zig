@@ -24,6 +24,8 @@ nlist_idx: u32 = 0,
 /// Misc flags for the symbol packaged as packed struct for compression.
 flags: Flags = .{},
 
+visibility: Visibility = .local,
+
 extra: u32 = 0,
 
 pub fn isAbs(symbol: Symbol, macho_file: *MachO) bool {
@@ -177,7 +179,14 @@ pub fn setOutputSym(symbol: Symbol, macho_file: *MachO, out: *macho.nlist_64) vo
         out.n_sect = if (nlist.abs()) 0 else @intCast(symbol.out_n_sect + 1);
         out.n_desc = 0;
         out.n_value = symbol.getAddress(.{}, macho_file);
+
+        switch (symbol.visibility) {
+            .local => {},
+            .linkage => out.n_type |= macho.N_PEXT,
+            .global => unreachable,
+        }
     } else if (symbol.flags.@"export") {
+        assert(symbol.visibility == .global);
         out.n_type = macho.N_EXT;
         out.n_type |= if (nlist.abs()) macho.N_ABS else macho.N_SECT;
         out.n_sect = if (nlist.abs()) 0 else @intCast(symbol.out_n_sect + 1);
@@ -190,6 +199,7 @@ pub fn setOutputSym(symbol: Symbol, macho_file: *MachO, out: *macho.nlist_64) vo
         }
         if (nlist.n_desc & macho.REFERENCED_DYNAMICALLY != 0) out.n_desc |= macho.REFERENCED_DYNAMICALLY;
     } else {
+        assert(symbol.visibility == .global);
         out.n_type = macho.N_EXT;
         out.n_sect = 0;
         out.n_value = 0;
@@ -292,6 +302,12 @@ pub const Flags = packed struct {
 
     /// Whether the symbol has a TLV pointer.
     tlv_ptr: bool = false,
+};
+
+pub const Visibility = enum {
+    global,
+    linkage,
+    local,
 };
 
 pub const Extra = struct {
