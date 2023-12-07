@@ -68,7 +68,7 @@ pub const File = union(enum) {
             if (sym.tentative()) break :blk 3;
             break :blk if (sym.weakDef()) 2 else 1;
         };
-        return base + (file.getIndex() << 16);
+        return base + (file.getIndex() << 24);
     }
 
     pub fn setAlive(file: File) void {
@@ -79,8 +79,8 @@ pub const File = union(enum) {
 
     pub fn markLive(file: File, macho_file: *MachO) void {
         switch (file) {
-            .object => |x| x.markLive(macho_file),
-            else => unreachable,
+            .internal => unreachable,
+            inline else => |x| x.markLive(macho_file),
         }
     }
 

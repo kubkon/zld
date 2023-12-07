@@ -493,6 +493,21 @@ pub fn resolveSymbols(self: *Dylib, macho_file: *MachO) void {
     }
 }
 
+pub fn markLive(self: *Dylib, macho_file: *MachO) void {
+    for (self.symbols.items) |index| {
+        const global = macho_file.getSymbol(index);
+        const file = global.getFile(macho_file) orelse continue;
+        const should_drop = switch (file) {
+            .dylib => |sh| !sh.needed and global.flags.weak,
+            else => false,
+        };
+        if (!should_drop and !file.isAlive()) {
+            file.setAlive();
+            file.markLive(macho_file);
+        }
+    }
+}
+
 pub fn resetGlobals(self: *Dylib, macho_file: *MachO) void {
     for (self.symbols.items) |sym_index| {
         const sym = macho_file.getSymbol(sym_index);

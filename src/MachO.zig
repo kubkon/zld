@@ -898,13 +898,7 @@ pub fn resolveSymbols(self: *MachO) !void {
     for (self.dylibs.items) |index| self.getFile(index).?.resolveSymbols(self);
 
     // Mark live objects.
-    for (self.undefined_symbols.items) |index| {
-        if (self.getSymbol(index).getFile(self)) |file| file.setAlive();
-    }
-    for (self.objects.items) |index| {
-        const file = self.getFile(index).?;
-        if (file.isAlive()) file.markLive(self);
-    }
+    self.markLive();
 
     // Reset state of all globals after marking live objects.
     for (self.objects.items) |index| self.getFile(index).?.resetGlobals(self);
@@ -930,6 +924,20 @@ pub fn resolveSymbols(self: *MachO) !void {
     // Re-resolve the symbols.
     for (self.objects.items) |index| self.getFile(index).?.resolveSymbols(self);
     for (self.dylibs.items) |index| self.getFile(index).?.resolveSymbols(self);
+}
+
+fn markLive(self: *MachO) void {
+    for (self.undefined_symbols.items) |index| {
+        if (self.getSymbol(index).getFile(self)) |file| file.setAlive();
+    }
+    for (self.objects.items) |index| {
+        const file = self.getFile(index).?;
+        if (file.isAlive()) file.markLive(self);
+    }
+    for (self.dylibs.items) |index| {
+        const file = self.getFile(index).?;
+        if (file.isAlive()) file.markLive(self);
+    }
 }
 
 fn convertTentativeDefinitions(self: *MachO) !void {
