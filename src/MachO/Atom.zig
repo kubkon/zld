@@ -169,9 +169,14 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
                 }
             },
 
-            .X86_64_RELOC_GOT_LOAD,
-            .X86_64_RELOC_GOT,
-            => {
+            .X86_64_RELOC_GOT_LOAD => {
+                const symbol = rel.getTargetSymbol(macho_file);
+                if (symbol.flags.import or (symbol.flags.@"export" and symbol.flags.weak)) {
+                    symbol.flags.got = true;
+                }
+            },
+
+            .X86_64_RELOC_GOT => {
                 rel.getTargetSymbol(macho_file).flags.got = true;
             },
 
@@ -183,7 +188,9 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
                         .{ object.fmtPath(), self.getName(macho_file), symbol.getName(macho_file) },
                     );
                 }
-                symbol.flags.tlv_ptr = true;
+                if (symbol.flags.import or (symbol.flags.@"export" and symbol.flags.weak)) {
+                    symbol.flags.tlv_ptr = true;
+                }
             },
 
             .X86_64_RELOC_UNSIGNED => {
@@ -337,11 +344,11 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
             .X86_64_RELOC_GOT_LOAD => {
                 assert(rel.meta.length == 2);
                 assert(rel.meta.pcrel);
-                if (!sym.?.flags.import) {
+                if (sym.?.flags.got) {
+                    try cwriter.writeInt(i32, @intCast(G + A - P - 4), .little);
+                } else {
                     try relaxGotLoad(code[rel_offset - 3 ..]);
                     try cwriter.writeInt(i32, @intCast(S + A - P - 4), .little);
-                } else {
-                    try cwriter.writeInt(i32, @intCast(G + A - P - 4), .little);
                 }
             },
 
