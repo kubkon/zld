@@ -728,6 +728,12 @@ fn testHelloC(b: *Build, opts: Options) *Step {
     run.expectHelloWorld();
     test_step.dependOn(run.step());
 
+    const check = exe.check();
+    check.checkStart();
+    check.checkExact("header");
+    check.checkContains("PIE");
+    test_step.dependOn(&check.step);
+
     return test_step;
 }
 
