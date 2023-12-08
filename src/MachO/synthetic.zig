@@ -289,7 +289,9 @@ pub const LaSymbolPtrSection = struct {
         const seg_id = macho_file.sections.items(.segment_id)[macho_file.la_symbol_ptr_sect_index.?];
         const seg = macho_file.segments.items[seg_id];
 
-        for (0..macho_file.stubs.symbols.items.len) |idx| {
+        for (macho_file.stubs.symbols.items, 0..) |sym_index, idx| {
+            const sym = macho_file.getSymbol(sym_index);
+            if (sym.flags.import and sym.flags.weak) continue;
             const addr = sect.addr + idx * @sizeOf(u64);
             macho_file.rebase.entries.appendAssumeCapacity(.{
                 .offset = addr - seg.vmaddr,
