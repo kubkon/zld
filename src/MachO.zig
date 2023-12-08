@@ -1757,7 +1757,7 @@ fn initExportTrie(self: *MachO) !void {
             if (sym.flags.weak) flags |= macho.EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION;
             try self.export_trie.put(gpa, .{
                 .name = sym.getName(self),
-                .vmaddr_offset = sym.getAddress(.{}, self) - seg.vmaddr,
+                .vmaddr_offset = sym.getAddress(.{ .stubs = false }, self) - seg.vmaddr,
                 .export_flags = flags,
             });
         }
