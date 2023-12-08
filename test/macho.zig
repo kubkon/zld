@@ -57,6 +57,7 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testUnwindInfo(b, opts));
     macho_step.dependOn(testUnwindInfoNoSubsectionsArm64(b, opts));
     macho_step.dependOn(testUnwindInfoNoSubsectionsX64(b, opts));
+    macho_step.dependOn(testWeakBind(b, opts));
     macho_step.dependOn(testWeakFramework(b, opts));
     macho_step.dependOn(testWeakLibrary(b, opts));
     macho_step.dependOn(testWeakRef(b, opts));
@@ -1935,6 +1936,104 @@ fn testUnwindInfoNoSubsectionsX64(b: *Build, opts: Options) *Step {
 
     const run = exe.run();
     run.expectStdOutEqual("4\n");
+    test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+// Adapted from https://github.com/llvm/llvm-project/blob/main/lld/test/MachO/weak-binding.s
+fn testWeakBind(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-weak-bind", "");
+
+    const lib = cc(b, opts);
+    lib.addAsmSource(
+        \\.globl _weak_dysym
+        \\.weak_definition _weak_dysym
+        \\_weak_dysym:
+        \\  .quad 0x1234
+        \\
+        \\.globl _weak_dysym_for_gotpcrel
+        \\.weak_definition _weak_dysym_for_gotpcrel
+        \\_weak_dysym_for_gotpcrel:
+        \\  .quad 0x1234
+        \\
+        \\.globl _weak_dysym_fn
+        \\.weak_definition _weak_dysym_fn
+        \\_weak_dysym_fn:
+        \\  ret
+        \\
+        \\.section __DATA,__thread_vars,thread_local_variables
+        \\
+        \\.globl _weak_dysym_tlv
+        \\.weak_definition _weak_dysym_tlv
+        \\_weak_dysym_tlv:
+        \\  .quad 0x1234
+    );
+    lib.addArg("-shared");
+
+    const exe = cc(b, opts);
+    exe.addAsmSource(
+        \\.globl _main, _weak_external, _weak_external_for_gotpcrel, _weak_external_fn
+        \\.weak_definition _weak_external, _weak_external_for_gotpcrel, _weak_external_fn, _weak_internal, _weak_internal_for_gotpcrel, _weak_internal_fn
+        \\
+        \\_main:
+        \\  mov _weak_dysym_for_gotpcrel@GOTPCREL(%rip), %rax
+        \\  mov _weak_external_for_gotpcrel@GOTPCREL(%rip), %rax
+        \\  mov _weak_internal_for_gotpcrel@GOTPCREL(%rip), %rax
+        \\  mov _weak_tlv@TLVP(%rip), %rax
+        \\  mov _weak_dysym_tlv@TLVP(%rip), %rax
+        \\  mov _weak_internal_tlv@TLVP(%rip), %rax
+        \\  callq _weak_dysym_fn
+        \\  callq _weak_external_fn
+        \\  callq _weak_internal_fn
+        \\  mov $0, %rax
+        \\  ret
+        \\
+        \\_weak_external:
+        \\  .quad 0x1234
+        \\
+        \\_weak_external_for_gotpcrel:
+        \\  .quad 0x1234
+        \\
+        \\_weak_external_fn:
+        \\  ret
+        \\
+        \\_weak_internal:
+        \\  .quad 0x1234
+        \\
+        \\_weak_internal_for_gotpcrel:
+        \\  .quad 0x1234
+        \\
+        \\_weak_internal_fn:
+        \\  ret
+        \\
+        \\.data
+        \\  .quad _weak_dysym
+        \\  .quad _weak_external + 2
+        \\  .quad _weak_internal
+        \\
+        \\.tbss _weak_tlv$tlv$init, 4, 2
+        \\.tbss _weak_internal_tlv$tlv$init, 4, 2
+        \\
+        \\.section __DATA,__thread_vars,thread_local_variables
+        \\.globl _weak_tlv
+        \\.weak_definition  _weak_tlv, _weak_internal_tlv
+        \\
+        \\_weak_tlv:
+        \\  .quad __tlv_bootstrap
+        \\  .quad 0
+        \\  .quad _weak_tlv$tlv$init
+        \\
+        \\_weak_internal_tlv:
+        \\  .quad __tlv_bootstrap
+        \\  .quad 0
+        \\  .quad _weak_internal_tlv$tlv$init
+    );
+    exe.addFileSource(lib.out);
+
+    // TODO add rebase, bind, weak-bind, export checks
+
+    const run = exe.run();
     test_step.dependOn(run.step());
 
     return test_step;
