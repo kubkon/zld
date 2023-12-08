@@ -650,6 +650,7 @@ fn testHeaderpad(b: *Build, opts: Options) *Step {
     return test_step;
 }
 
+// Adapted from https://github.com/llvm/llvm-project/blob/main/lld/test/MachO/weak-header-flags.s
 fn testHeaderWeakFlags(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-header-weak-flags", "");
 
