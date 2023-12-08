@@ -178,6 +178,167 @@ pub const Bind = struct {
     }
 };
 
+pub const WeakBind = struct {
+    entries: std.ArrayListUnmanaged(Entry) = .{},
+    buffer: std.ArrayListUnmanaged(u8) = .{},
+
+    const Self = @This();
+
+    const Entry = struct {
+        target: Symbol.Index,
+        offset: u64,
+        segment_id: u8,
+        addend: i64,
+
+        pub fn lessThan(ctx: *MachO, entry: Entry, other: Entry) bool {
+            if (entry.segment_id == other.segment_id) {
+                if (entry.target == other.target) {
+                    return entry.offset < other.offset;
+                }
+                const entry_name = ctx.getSymbol(entry.target).getName(ctx);
+                const other_name = ctx.getSymbol(other.target).getName(ctx);
+                return std.mem.lessThan(u8, entry_name, other_name);
+            }
+            return entry.segment_id < other.segment_id;
+        }
+    };
+
+    pub fn deinit(self: *Self, gpa: Allocator) void {
+        self.entries.deinit(gpa);
+        self.buffer.deinit(gpa);
+    }
+
+    pub fn size(self: Self) u64 {
+        return @as(u64, @intCast(self.buffer.items.len));
+    }
+
+    pub fn finalize(self: *Self, gpa: Allocator, ctx: *MachO) !void {
+        if (self.entries.items.len == 0) return;
+
+        const writer = self.buffer.writer(gpa);
+
+        std.mem.sort(Entry, self.entries.items, ctx, Entry.lessThan);
+
+        var start: usize = 0;
+        var seg_id: ?u8 = null;
+        for (self.entries.items, 0..) |entry, i| {
+            if (seg_id != null and seg_id.? == entry.segment_id) continue;
+            try finalizeSegment(self.entries.items[start..i], ctx, writer);
+            seg_id = entry.segment_id;
+            start = i;
+        }
+
+        try finalizeSegment(self.entries.items[start..], ctx, writer);
+        try done(writer);
+    }
+
+    fn finalizeSegment(entries: []const Entry, ctx: *MachO, writer: anytype) !void {
+        if (entries.len == 0) return;
+
+        const seg_id = entries[0].segment_id;
+        try setSegmentOffset(seg_id, 0, writer);
+
+        var offset: u64 = 0;
+        var addend: i64 = 0;
+        var count: usize = 0;
+        var skip: u64 = 0;
+        var target: ?Symbol.Index = null;
+
+        var state: enum {
+            start,
+            bind_single,
+            bind_times_skip,
+        } = .start;
+
+        var i: usize = 0;
+        while (i < entries.len) : (i += 1) {
+            const current = entries[i];
+            if (target == null or target.? != current.target) {
+                switch (state) {
+                    .start => {},
+                    .bind_single => try doBind(writer),
+                    .bind_times_skip => try doBindTimesSkip(count, skip, writer),
+                }
+                state = .start;
+                target = current.target;
+
+                const sym = ctx.getSymbol(current.target);
+                const name = sym.getName(ctx);
+                const flags: u8 = 0; // TODO NON_WEAK_DEFINITION
+
+                try setSymbol(name, flags, writer);
+                try setTypePointer(writer);
+
+                if (current.addend != addend) {
+                    addend = current.addend;
+                    try setAddend(addend, writer);
+                }
+            }
+
+            log.debug("{x}, {d}, {x}, {?x}, {s}", .{ offset, count, skip, addend, @tagName(state) });
+            log.debug("  => {x}", .{current.offset});
+            switch (state) {
+                .start => {
+                    if (current.offset < offset) {
+                        try addAddr(@as(u64, @bitCast(@as(i64, @intCast(current.offset)) - @as(i64, @intCast(offset)))), writer);
+                        offset = offset - (offset - current.offset);
+                    } else if (current.offset > offset) {
+                        const delta = current.offset - offset;
+                        try addAddr(delta, writer);
+                        offset += delta;
+                    }
+                    state = .bind_single;
+                    offset += @sizeOf(u64);
+                    count = 1;
+                },
+                .bind_single => {
+                    if (current.offset == offset) {
+                        try doBind(writer);
+                        state = .start;
+                    } else if (current.offset > offset) {
+                        const delta = current.offset - offset;
+                        state = .bind_times_skip;
+                        skip = @as(u64, @intCast(delta));
+                        offset += skip;
+                    } else unreachable;
+                    i -= 1;
+                },
+                .bind_times_skip => {
+                    if (current.offset < offset) {
+                        count -= 1;
+                        if (count == 1) {
+                            try doBindAddAddr(skip, writer);
+                        } else {
+                            try doBindTimesSkip(count, skip, writer);
+                        }
+                        state = .start;
+                        offset = offset - (@sizeOf(u64) + skip);
+                        i -= 2;
+                    } else if (current.offset == offset) {
+                        count += 1;
+                        offset += @sizeOf(u64) + skip;
+                    } else {
+                        try doBindTimesSkip(count, skip, writer);
+                        state = .start;
+                        i -= 1;
+                    }
+                },
+            }
+        }
+
+        switch (state) {
+            .start => unreachable,
+            .bind_single => try doBind(writer),
+            .bind_times_skip => try doBindTimesSkip(count, skip, writer),
+        }
+    }
+
+    pub fn write(self: Self, writer: anytype) !void {
+        if (self.size() == 0) return;
+        try writer.writeAll(self.buffer.items);
+    }
+};
+
 pub const LazyBind = struct {
     entries: std.ArrayListUnmanaged(Entry) = .{},
     buffer: std.ArrayListUnmanaged(u8) = .{},
@@ -331,51 +492,3 @@ fn done(writer: anytype) !void {
     log.debug(">>> done", .{});
     try writer.writeByte(macho.BIND_OPCODE_DONE);
 }
-
-const TestContext = struct {
-    symbols: std.ArrayListUnmanaged(macho.nlist_64) = .{},
-    strtab: std.ArrayListUnmanaged(u8) = .{},
-
-    const Target = struct {
-        index: u32,
-
-        fn eql(this: Target, other: Target) bool {
-            return this.index == other.index;
-        }
-    };
-
-    fn deinit(ctx: *TestContext, gpa: Allocator) void {
-        ctx.symbols.deinit(gpa);
-        ctx.strtab.deinit(gpa);
-    }
-
-    fn addSymbol(ctx: *TestContext, gpa: Allocator, name: []const u8, ordinal: i16, flags: u16) !void {
-        const n_strx = try ctx.addString(gpa, name);
-        var n_desc = @as(u16, @bitCast(ordinal * macho.N_SYMBOL_RESOLVER));
-        n_desc |= flags;
-        try ctx.symbols.append(gpa, .{
-            .n_value = 0,
-            .n_strx = n_strx,
-            .n_desc = n_desc,
-            .n_type = macho.N_EXT,
-            .n_sect = 0,
-        });
-    }
-
-    fn addString(ctx: *TestContext, gpa: Allocator, name: []const u8) !u32 {
-        const n_strx = @as(u32, @intCast(ctx.strtab.items.len));
-        try ctx.strtab.appendSlice(gpa, name);
-        try ctx.strtab.append(gpa, 0);
-        return n_strx;
-    }
-
-    fn getSymbol(ctx: TestContext, target: Target) macho.nlist_64 {
-        return ctx.symbols.items[target.index];
-    }
-
-    fn getSymbolName(ctx: TestContext, target: Target) []const u8 {
-        const sym = ctx.getSymbol(target);
-        assert(sym.n_strx < ctx.strtab.items.len);
-        return std.mem.sliceTo(@as([*:0]const u8, @ptrCast(ctx.strtab.items.ptr + sym.n_strx)), 0);
-    }
-};

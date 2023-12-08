@@ -62,6 +62,7 @@ la_symbol_ptr: LaSymbolPtrSection = .{},
 tlv_ptr: TlvPtrSection = .{},
 rebase: RebaseSection = .{},
 bind: BindSection = .{},
+weak_bind: WeakBindSection = .{},
 lazy_bind: LazyBindSection = .{},
 export_trie: ExportTrieSection = .{},
 unwind_info: UnwindInfo = .{},
@@ -136,6 +137,7 @@ pub fn deinit(self: *MachO) void {
     self.tlv_ptr.deinit(gpa);
     self.rebase.deinit(gpa);
     self.bind.deinit(gpa);
+    self.weak_bind.deinit(gpa);
     self.lazy_bind.deinit(gpa);
     self.export_trie.deinit(gpa);
     self.unwind_info.deinit(gpa);
@@ -1716,19 +1718,24 @@ fn initDyldInfoSections(self: *MachO) !void {
     }
     if (self.la_symbol_ptr_sect_index != null) {
         try self.la_symbol_ptr.addRebase(self);
+        try self.la_symbol_ptr.addBind(self);
+        try self.la_symbol_ptr.addWeakBind(self);
         try self.la_symbol_ptr.addLazyBind(self);
     }
     try self.initExportTrie();
 
     var nrebases: usize = 0;
     var nbinds: usize = 0;
+    var nweak_binds: usize = 0;
     for (self.objects.items) |index| {
         const object = self.getFile(index).?.object;
         nrebases += object.num_rebase_relocs;
         nbinds += object.num_bind_relocs;
+        nweak_binds += object.num_weak_bind_relocs;
     }
     try self.rebase.entries.ensureUnusedCapacity(gpa, nrebases);
     try self.bind.entries.ensureUnusedCapacity(gpa, nbinds);
+    try self.weak_bind.entries.ensureUnusedCapacity(gpa, nweak_binds);
 }
 
 fn initExportTrie(self: *MachO) !void {
@@ -1818,6 +1825,7 @@ fn finalizeDyldInfoSections(self: *MachO) !void {
     const gpa = self.base.allocator;
     try self.rebase.finalize(gpa);
     try self.bind.finalize(gpa, self);
+    try self.weak_bind.finalize(gpa, self);
     try self.lazy_bind.finalize(gpa, self);
     try self.export_trie.finalize(gpa);
 }
@@ -1898,6 +1906,10 @@ fn writeDyldInfoSections(self: *MachO) !void {
     cmd.bind_size = mem.alignForward(u32, @intCast(self.bind.size()), @alignOf(u64));
     needed_size += cmd.bind_size;
 
+    cmd.weak_bind_off = needed_size;
+    cmd.weak_bind_size = mem.alignForward(u32, @intCast(self.weak_bind.size()), @alignOf(u64));
+    needed_size += cmd.weak_bind_size;
+
     cmd.lazy_bind_off = needed_size;
     cmd.lazy_bind_size = mem.alignForward(u32, @intCast(self.lazy_bind.size()), @alignOf(u64));
     needed_size += cmd.lazy_bind_size;
@@ -1916,6 +1928,8 @@ fn writeDyldInfoSections(self: *MachO) !void {
     try self.rebase.write(writer);
     try stream.seekTo(cmd.bind_off);
     try self.bind.write(writer);
+    try stream.seekTo(cmd.weak_bind_off);
+    try self.weak_bind.write(writer);
     try stream.seekTo(cmd.lazy_bind_off);
     try self.lazy_bind.write(writer);
     try stream.seekTo(cmd.export_off);
@@ -1924,6 +1938,7 @@ fn writeDyldInfoSections(self: *MachO) !void {
     const off = try self.getNextLinkeditOffset(@alignOf(u64));
     cmd.rebase_off += @intCast(off);
     cmd.bind_off += @intCast(off);
+    cmd.weak_bind_off += @intCast(off);
     cmd.lazy_bind_off += @intCast(off);
     cmd.export_off += @intCast(off);
 
@@ -2717,4 +2732,5 @@ const StubsHelperSection = synthetic.StubsHelperSection;
 const ThreadPool = std.Thread.Pool;
 const TlvPtrSection = synthetic.TlvPtrSection;
 const UnwindInfo = @import("MachO/UnwindInfo.zig");
+const WeakBindSection = synthetic.WeakBindSection;
 const Zld = @import("Zld.zig");

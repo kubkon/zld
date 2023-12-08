@@ -27,6 +27,7 @@ has_eh_frame: bool = false,
 alive: bool = true,
 num_rebase_relocs: u32 = 0,
 num_bind_relocs: u32 = 0,
+num_weak_bind_relocs: u32 = 0,
 
 output_symtab_ctx: MachO.SymtabCtx = .{},
 
@@ -772,19 +773,20 @@ pub fn resolveSymbols(self: *Object, macho_file: *MachO) void {
             symbol.flags.dyn_ref = nlist.n_desc & macho.REFERENCED_DYNAMICALLY != 0;
             symbol.flags.no_dead_strip = symbol.flags.no_dead_strip or nlist.noDeadStrip();
 
-            if (nlist.pext() or nlist.weakDef() and nlist.weakRef()) {
-                if (symbol.visibility != .global) {
-                    symbol.visibility = .linkage;
-                }
-            } else {
-                symbol.visibility = .global;
-            }
-
             if (nlist.sect() and
                 self.sections.items(.header)[nlist.n_sect - 1].type() == macho.S_THREAD_LOCAL_VARIABLES)
             {
                 symbol.flags.tlv = true;
             }
+        }
+
+        // Regardless of who the winner is, we still merge symbol visibility here.
+        if (nlist.pext() or nlist.weakDef() and nlist.weakRef()) {
+            if (symbol.visibility != .global) {
+                symbol.visibility = .linkage;
+            }
+        } else {
+            symbol.visibility = .global;
         }
     }
 }

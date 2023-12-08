@@ -164,7 +164,7 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
         switch (@as(macho.reloc_type_x86_64, @enumFromInt(rel.meta.type))) {
             .X86_64_RELOC_BRANCH => {
                 const symbol = rel.getTargetSymbol(macho_file);
-                if (symbol.flags.import) {
+                if (symbol.flags.import or (symbol.flags.@"export" and symbol.flags.weak)) {
                     symbol.flags.stubs = true;
                 }
             },
@@ -193,10 +193,20 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
                     const symbol = rel.getTargetSymbol(macho_file);
                     if (symbol.flags.import) {
                         object.num_bind_relocs += 1;
+                        if (symbol.flags.weak) {
+                            object.num_weak_bind_relocs += 1;
+                            macho_file.binds_to_weak = true;
+                        }
                         continue;
-                    } else if (symbol.isTlvInit(macho_file)) {
+                    }
+                    if (symbol.isTlvInit(macho_file)) {
                         macho_file.has_tlv = true;
                         continue;
+                    }
+                    if (symbol.flags.@"export" and symbol.flags.weak) {
+                        object.num_weak_bind_relocs += 1;
+                        macho_file.binds_to_weak = true;
+                        macho_file.weak_defines = true;
                     }
                 }
                 object.num_rebase_relocs += 1;
@@ -296,10 +306,27 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
                             .segment_id = seg_id,
                             .addend = A,
                         });
+                        if (s.flags.weak) {
+                            macho_file.weak_bind.entries.appendAssumeCapacity(.{
+                                .target = rel.target,
+                                .offset = @as(u64, @intCast(P)) - seg.vmaddr,
+                                .segment_id = seg_id,
+                                .addend = A,
+                            });
+                        }
                         continue;
-                    } else if (s.isTlvInit(macho_file)) {
+                    }
+                    if (s.isTlvInit(macho_file)) {
                         try cwriter.writeInt(u64, @intCast(S - TLS), .little);
                         continue;
+                    }
+                    if (s.flags.@"export" and s.flags.weak) {
+                        macho_file.weak_bind.entries.appendAssumeCapacity(.{
+                            .target = rel.target,
+                            .offset = @as(u64, @intCast(P)) - seg.vmaddr,
+                            .segment_id = seg_id,
+                            .addend = A,
+                        });
                     }
                 }
                 macho_file.rebase.entries.appendAssumeCapacity(.{

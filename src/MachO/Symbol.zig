@@ -191,7 +191,6 @@ pub fn setOutputSym(symbol: Symbol, macho_file: *MachO, out: *macho.nlist_64) vo
 
         if (symbol.flags.weak) {
             out.n_desc |= macho.N_WEAK_DEF;
-            macho_file.weak_defines = true;
         }
         if (symbol.flags.dyn_ref) {
             out.n_desc |= macho.REFERENCED_DYNAMICALLY;
@@ -209,7 +208,6 @@ pub fn setOutputSym(symbol: Symbol, macho_file: *MachO, out: *macho.nlist_64) vo
 
         if (symbol.flags.weak) {
             out.n_desc |= macho.N_WEAK_DEF;
-            macho_file.binds_to_weak = true;
         }
 
         if (symbol.weakRef(macho_file)) {
