@@ -900,6 +900,8 @@ pub fn calcSymtabSize(self: *Object, macho_file: *MachO) !void {
         if (file.getIndex() != self.index) continue;
         if (sym.getAtom(macho_file)) |atom| if (!atom.flags.alive) continue;
         if (sym.getNlist(macho_file).stab()) continue;
+        const name = sym.getName(macho_file);
+        if (name.len > 0 and (name[0] == 'L' or name[0] == 'l')) continue;
         sym.flags.output_symtab = true;
         if (sym.isLocal()) {
             try sym.addExtra(.{ .symtab = self.output_symtab_ctx.nlocals }, macho_file);
