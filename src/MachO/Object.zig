@@ -173,7 +173,8 @@ fn initSubsections(self: *Object, nlists: anytype, macho_file: *MachO) !void {
 
         var idx: usize = nlist_start;
         while (idx < nlist_end) {
-            const nlist = nlists[idx];
+            const alias_start = idx;
+            const nlist = nlists[alias_start];
 
             while (idx < nlist_end and
                 nlists[idx].nlist.n_value == nlist.nlist.n_value) : (idx += 1)
@@ -199,7 +200,7 @@ fn initSubsections(self: *Object, nlists: anytype, macho_file: *MachO) !void {
                 .off = nlist.nlist.n_value - sect.addr,
             });
 
-            for (nlist_start..idx) |i| {
+            for (alias_start..idx) |i| {
                 self.symtab.items(.size)[nlists[i].idx] = size;
             }
         }
