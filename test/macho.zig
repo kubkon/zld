@@ -982,9 +982,7 @@ fn testMhExecuteHeader(b: *Build, opts: Options) *Step {
 
     const check = exe.check();
     check.checkInSymtab();
-    // TODO enhance Mach-O parser
-    // check.checkContains("[referenced dynamically] external __mh_execute_header");
-    check.checkContains("external __mh_execute_header");
+    check.checkContains("[referenced dynamically] external __mh_execute_header");
     test_step.dependOn(&check.step);
 
     return test_step;
@@ -1996,9 +1994,9 @@ fn testWeakLibrary(b: *Build, opts: Options) *Step {
     check.checkExact("cmd LOAD_WEAK_DYLIB");
     check.checkContains("liba.dylib");
     check.checkInSymtab();
-    check.checkExact("(undefined) weak external _a (from liba)");
+    check.checkExact("(undefined) weak-ref external _a (from liba)");
     check.checkInSymtab();
-    check.checkExact("(undefined) weak external _asStr (from liba)");
+    check.checkExact("(undefined) weak-ref external _asStr (from liba)");
     test_step.dependOn(&check.step);
 
     const run = exe.run();
@@ -2024,7 +2022,7 @@ fn testWeakRef(b: *Build, opts: Options) *Step {
 
     const check = exe.check();
     check.checkInSymtab();
-    check.checkExact("(undefined) weak external _foo (from self import)");
+    check.checkExact("(undefined) weak-ref external _foo (from self import)");
     test_step.dependOn(&check.step);
 
     const run = exe.run();
