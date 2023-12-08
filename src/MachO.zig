@@ -1371,21 +1371,20 @@ fn calcSectionSizes(self: *MachO) !void {
 
     const cpu_arch = self.options.cpu_arch.?;
 
+    if (self.data_sect_index) |idx| {
+        const header = &self.sections.items(.header)[idx];
+        header.size += @sizeOf(u64);
+        header.@"align" = 3;
+    }
+
     const slice = self.sections.slice();
-    for (slice.items(.header), slice.items(.atoms), 0..) |*header, atoms, idx| {
+    for (slice.items(.header), slice.items(.atoms)) |*header, atoms| {
         if (atoms.items.len == 0) continue;
 
         // TODO
         // if (self.requiresThunks()) {
         //     if (header.isCode()) continue;
         // }
-
-        if (self.data_sect_index) |didx| {
-            if (didx == idx) {
-                header.size += @sizeOf(u64);
-                header.@"align" = 3;
-            }
-        }
 
         for (atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index).?;
