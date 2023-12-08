@@ -341,6 +341,7 @@ pub const LaSymbolPtrSection = struct {
                 .segment_id = seg_id,
                 .addend = 0,
             });
+            macho_file.binds_to_weak = true;
         }
     }
 

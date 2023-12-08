@@ -206,7 +206,6 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
                     if (symbol.flags.@"export" and symbol.flags.weak) {
                         object.num_weak_bind_relocs += 1;
                         macho_file.binds_to_weak = true;
-                        macho_file.weak_defines = true;
                     }
                 }
                 object.num_rebase_relocs += 1;
