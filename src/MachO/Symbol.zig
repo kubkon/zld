@@ -177,9 +177,8 @@ pub fn setOutputSym(symbol: Symbol, macho_file: *MachO, out: *macho.nlist_64) vo
         out.n_value = symbol.getAddress(.{}, macho_file);
 
         switch (symbol.visibility) {
-            .local => {},
             .linkage => out.n_type |= macho.N_PEXT,
-            .global => unreachable,
+            else => {},
         }
     } else if (symbol.flags.@"export") {
         assert(symbol.visibility == .global);
