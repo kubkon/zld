@@ -1080,7 +1080,6 @@ fn scanRelocs(self: *MachO) !void {
             try self.stubs.addSymbol(index, self);
         }
         if (symbol.flags.tlv_ptr) {
-            assert(symbol.flags.import);
             log.debug("'{s}' needs TLV pointer", .{symbol.getName(self)});
             try self.tlv_ptr.addSymbol(index, self);
         }
@@ -1712,6 +1711,7 @@ fn initDyldInfoSections(self: *MachO) !void {
         try self.got.addWeakBind(self);
     }
     if (self.tlv_ptr_sect_index != null) {
+        try self.tlv_ptr.addRebase(self);
         try self.tlv_ptr.addBind(self);
         try self.tlv_ptr.addWeakBind(self);
     }

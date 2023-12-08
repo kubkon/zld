@@ -183,9 +183,7 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
                         .{ object.fmtPath(), self.getName(macho_file), symbol.getName(macho_file) },
                     );
                 }
-                if (symbol.flags.import) {
-                    symbol.flags.tlv_ptr = true;
-                }
+                symbol.flags.tlv_ptr = true;
             },
 
             .X86_64_RELOC_UNSIGNED => {
@@ -363,7 +361,6 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
                 assert(rel.meta.length == 2);
                 assert(rel.meta.pcrel);
                 if (sym.?.flags.tlv_ptr) {
-                    assert(sym.?.flags.import);
                     const S_: i64 = @intCast(sym.?.getTlvPtrAddress(macho_file));
                     try cwriter.writeInt(i32, @intCast(S_ + A - P - 4), .little);
                 } else {

@@ -426,6 +426,24 @@ pub const TlvPtrSection = struct {
         return tlv.symbols.items.len * @sizeOf(u64);
     }
 
+    pub fn addRebase(tlv: TlvPtrSection, macho_file: *MachO) !void {
+        const gpa = macho_file.base.allocator;
+        try macho_file.rebase.entries.ensureUnusedCapacity(gpa, tlv.symbols.items.len);
+
+        const seg_id = macho_file.sections.items(.segment_id)[macho_file.tlv_ptr_sect_index.?];
+        const seg = macho_file.segments.items[seg_id];
+
+        for (tlv.symbols.items, 0..) |sym_index, idx| {
+            const sym = macho_file.getSymbol(sym_index);
+            if (sym.flags.import) continue;
+            const addr = tlv.getAddress(@intCast(idx), macho_file);
+            macho_file.rebase.entries.appendAssumeCapacity(.{
+                .offset = addr - seg.vmaddr,
+                .segment_id = seg_id,
+            });
+        }
+    }
+
     pub fn addBind(tlv: TlvPtrSection, macho_file: *MachO) !void {
         const gpa = macho_file.base.allocator;
         try macho_file.bind.entries.ensureUnusedCapacity(gpa, tlv.symbols.items.len);
@@ -434,6 +452,8 @@ pub const TlvPtrSection = struct {
         const seg = macho_file.segments.items[seg_id];
 
         for (tlv.symbols.items, 0..) |sym_index, idx| {
+            const sym = macho_file.getSymbol(sym_index);
+            if (!sym.flags.import) continue;
             const addr = tlv.getAddress(@intCast(idx), macho_file);
             macho_file.bind.entries.appendAssumeCapacity(.{
                 .target = sym_index,
@@ -467,8 +487,11 @@ pub const TlvPtrSection = struct {
     pub fn write(tlv: TlvPtrSection, macho_file: *MachO, writer: anytype) !void {
         for (tlv.symbols.items) |sym_index| {
             const sym = macho_file.getSymbol(sym_index);
-            assert(sym.flags.import);
-            try writer.writeInt(u64, 0, .little);
+            if (sym.flags.import) {
+                try writer.writeInt(u64, 0, .little);
+            } else {
+                try writer.writeInt(u64, sym.getAddress(.{}, macho_file), .little);
+            }
         }
     }
 
