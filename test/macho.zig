@@ -301,6 +301,12 @@ fn testDylib(b: *Build, opts: Options) *Step {
         \\}
     );
 
+    const check = dylib.check();
+    check.checkStart();
+    check.checkExact("header");
+    check.checkNotPresent("PIE");
+    test_step.dependOn(&check.step);
+
     const exe = cc(b, opts);
     exe.addCSource(
         \\#include<stdio.h>
