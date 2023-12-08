@@ -1706,14 +1706,14 @@ fn allocateSyntheticSymbols(self: *MachO) void {
 fn initDyldInfoSections(self: *MachO) !void {
     const gpa = self.base.allocator;
 
-    if (self.got.needs_rebase) {
+    if (self.got_sect_index != null) {
         try self.got.addRebase(self);
-    }
-    if (self.got.needs_bind) {
         try self.got.addBind(self);
+        try self.got.addWeakBind(self);
     }
     if (self.tlv_ptr_sect_index != null) {
         try self.tlv_ptr.addBind(self);
+        try self.tlv_ptr.addWeakBind(self);
     }
     if (self.la_symbol_ptr_sect_index != null) {
         try self.la_symbol_ptr.addRebase(self);

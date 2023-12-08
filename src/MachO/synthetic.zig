@@ -1,7 +1,5 @@
 pub const GotSection = struct {
     symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
-    needs_rebase: bool = false,
-    needs_bind: bool = false,
 
     pub const Index = u32;
 
@@ -15,11 +13,6 @@ pub const GotSection = struct {
         const entry = try got.symbols.addOne(gpa);
         entry.* = sym_index;
         const symbol = macho_file.getSymbol(sym_index);
-        if (symbol.flags.import) {
-            got.needs_bind = true;
-        } else {
-            got.needs_rebase = true;
-        }
         try symbol.addExtra(.{ .got = index }, macho_file);
     }
 
@@ -63,6 +56,26 @@ pub const GotSection = struct {
             if (!sym.flags.import) continue;
             const addr = got.getAddress(@intCast(idx), macho_file);
             macho_file.bind.entries.appendAssumeCapacity(.{
+                .target = sym_index,
+                .offset = addr - seg.vmaddr,
+                .segment_id = seg_id,
+                .addend = 0,
+            });
+        }
+    }
+
+    pub fn addWeakBind(got: GotSection, macho_file: *MachO) !void {
+        const gpa = macho_file.base.allocator;
+        try macho_file.weak_bind.entries.ensureUnusedCapacity(gpa, got.symbols.items.len);
+
+        const seg_id = macho_file.sections.items(.segment_id)[macho_file.got_sect_index.?];
+        const seg = macho_file.segments.items[seg_id];
+
+        for (got.symbols.items, 0..) |sym_index, idx| {
+            const sym = macho_file.getSymbol(sym_index);
+            if (!sym.flags.weak) continue;
+            const addr = got.getAddress(@intCast(idx), macho_file);
+            macho_file.weak_bind.entries.appendAssumeCapacity(.{
                 .target = sym_index,
                 .offset = addr - seg.vmaddr,
                 .segment_id = seg_id,
@@ -423,6 +436,26 @@ pub const TlvPtrSection = struct {
         for (tlv.symbols.items, 0..) |sym_index, idx| {
             const addr = tlv.getAddress(@intCast(idx), macho_file);
             macho_file.bind.entries.appendAssumeCapacity(.{
+                .target = sym_index,
+                .offset = addr - seg.vmaddr,
+                .segment_id = seg_id,
+                .addend = 0,
+            });
+        }
+    }
+
+    pub fn addWeakBind(tlv: TlvPtrSection, macho_file: *MachO) !void {
+        const gpa = macho_file.base.allocator;
+        try macho_file.weak_bind.entries.ensureUnusedCapacity(gpa, tlv.symbols.items.len);
+
+        const seg_id = macho_file.sections.items(.segment_id)[macho_file.tlv_ptr_sect_index.?];
+        const seg = macho_file.segments.items[seg_id];
+
+        for (tlv.symbols.items, 0..) |sym_index, idx| {
+            const sym = macho_file.getSymbol(sym_index);
+            if (!sym.flags.weak) continue;
+            const addr = tlv.getAddress(@intCast(idx), macho_file);
+            macho_file.weak_bind.entries.appendAssumeCapacity(.{
                 .target = sym_index,
                 .offset = addr - seg.vmaddr,
                 .segment_id = seg_id,
