@@ -108,18 +108,10 @@ const TrieIterator = struct {
     }
 };
 
-fn addExport(self: *Dylib, allocator: Allocator, name: []const u8, flags: struct {
-    abs: bool = false,
-    tlv: bool = false,
-    weak: bool = false,
-}) !void {
+fn addExport(self: *Dylib, allocator: Allocator, name: []const u8, flags: Export.Flags) !void {
     try self.exports.append(allocator, .{
         .name = try self.insertString(allocator, name),
-        .flags = .{
-            .abs = flags.abs,
-            .tlv = flags.tlv,
-            .weak = flags.weak,
-        },
+        .flags = flags,
     });
 }
 
@@ -134,24 +126,22 @@ fn parseTrieNode(
     if (size > 0) {
         const flags = try it.readULEB128();
         const kind = flags & macho.EXPORT_SYMBOL_FLAGS_KIND_MASK;
-        const abs = kind == macho.EXPORT_SYMBOL_FLAGS_KIND_ABSOLUTE;
-        const tlv = kind == macho.EXPORT_SYMBOL_FLAGS_KIND_THREAD_LOCAL;
-        const weak = flags & macho.EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION != 0;
+        const out_flags = Export.Flags{
+            .abs = kind == macho.EXPORT_SYMBOL_FLAGS_KIND_ABSOLUTE,
+            .tlv = kind == macho.EXPORT_SYMBOL_FLAGS_KIND_THREAD_LOCAL,
+            .weak = flags & macho.EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION != 0,
+        };
         if (flags & macho.EXPORT_SYMBOL_FLAGS_REEXPORT != 0) {
             _ = try it.readULEB128(); // dylib ordinal
             const name = try it.readString();
-            try self.addExport(allocator, if (name.len > 0) name else prefix, .{
-                .abs = abs,
-                .tlv = tlv,
-                .weak = weak,
-            });
+            try self.addExport(allocator, if (name.len > 0) name else prefix, out_flags);
         } else if (flags & macho.EXPORT_SYMBOL_FLAGS_STUB_AND_RESOLVER != 0) {
             _ = try it.readULEB128(); // stub offset
             _ = try it.readULEB128(); // resolver offset
-            try self.addExport(allocator, prefix, .{ .abs = abs, .tlv = tlv, .weak = weak });
+            try self.addExport(allocator, prefix, out_flags);
         } else {
             _ = try it.readULEB128(); // VM offset
-            try self.addExport(allocator, prefix, .{ .abs = abs, .tlv = tlv, .weak = weak });
+            try self.addExport(allocator, prefix, out_flags);
         }
     }
 
@@ -770,11 +760,13 @@ pub const Id = struct {
 
 const Export = struct {
     name: u32,
-    flags: packed struct {
+    flags: Flags,
+
+    const Flags = packed struct {
         abs: bool = false,
         weak: bool = false,
         tlv: bool = false,
-    },
+    };
 };
 
 const assert = std.debug.assert;
