@@ -31,6 +31,7 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testFatArchive(b, opts));
     // macho_step.dependOn(testFatDylib(b, opts)); // TODO arm64 support
     macho_step.dependOn(testHeaderpad(b, opts));
+    macho_step.dependOn(testHeaderWeakFlags(b, opts));
     macho_step.dependOn(testHelloC(b, opts));
     macho_step.dependOn(testHelloZig(b, opts));
     macho_step.dependOn(testLayout(b, opts));
@@ -637,6 +638,81 @@ fn testHeaderpad(b: *Build, opts: Options) *Step {
 
         const run = exe.run();
         test_step.dependOn(run.step());
+    }
+
+    return test_step;
+}
+
+fn testHeaderWeakFlags(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-header-weak-flags", "");
+
+    const obj1 = cc(b, opts);
+    obj1.addAsmSource(
+        \\.globl _x
+        \\.weak_definition _x
+        \\_x:
+        \\ ret
+    );
+    obj1.addArg("-c");
+
+    const lib = cc(b, opts);
+    lib.addFileSource(obj1.out);
+    lib.addArg("-shared");
+
+    {
+        const exe = cc(b, opts);
+        exe.addFileSource(obj1.out);
+        exe.addEmptyMain();
+
+        const check = exe.check();
+        check.checkStart();
+        check.checkExact("header");
+        check.checkContains("WEAK_DEFINES");
+        check.checkStart();
+        check.checkExact("header");
+        check.checkContains("BINDS_TO_WEAK");
+        test_step.dependOn(&check.step);
+    }
+
+    {
+        const exe = cc(b, opts);
+        exe.addFileSource(lib.out);
+        exe.addAsmSource(
+            \\.globl _main
+            \\_main:
+            \\  callq _x
+            \\  ret
+        );
+
+        const check = exe.check();
+        check.checkStart();
+        check.checkExact("header");
+        check.checkNotPresent("WEAK_DEFINES");
+        check.checkStart();
+        check.checkExact("header");
+        check.checkContains("BINDS_TO_WEAK");
+        test_step.dependOn(&check.step);
+    }
+
+    {
+        const exe = cc(b, opts);
+        exe.addFileSource(lib.out);
+        exe.addAsmSource(
+            \\.globl _main, _x
+            \\_x:
+            \\
+            \\_main:
+            \\  ret
+        );
+
+        const check = exe.check();
+        check.checkStart();
+        check.checkExact("header");
+        check.checkNotPresent("WEAK_DEFINES");
+        check.checkStart();
+        check.checkExact("header");
+        check.checkNotPresent("BINDS_TO_WEAK");
+        test_step.dependOn(&check.step);
     }
 
     return test_step;
