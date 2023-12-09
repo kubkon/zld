@@ -1972,6 +1972,17 @@ fn testWeakBind(b: *Build, opts: Options) *Step {
     );
     lib.addArg("-shared");
 
+    {
+        const check = lib.check();
+        check.checkInDyldInfo();
+        check.checkExact("exports");
+        check.checkExtract("[WEAK] {vmaddr1} _weak_dysym");
+        check.checkExtract("[WEAK] {vmaddr2} _weak_dysym_for_gotpcrel");
+        check.checkExtract("[WEAK] {vmaddr3} _weak_dysym_fn");
+        check.checkExtract("[THREAD_LOCAL, WEAK] {vmaddr4} _weak_dysym_tlv");
+        test_step.dependOn(&check.step);
+    }
+
     const exe = cc(b, opts);
     exe.addAsmSource(
         \\.globl _main, _weak_external, _weak_external_for_gotpcrel, _weak_external_fn
@@ -2033,6 +2044,16 @@ fn testWeakBind(b: *Build, opts: Options) *Step {
     exe.addFileSource(lib.out);
 
     // TODO add rebase, bind, weak-bind, export checks
+    {
+        const check = exe.check();
+        check.checkInDyldInfo();
+        check.checkExact("exports");
+        check.checkExtract("[WEAK] {vmaddr1} _weak_external");
+        check.checkExtract("[WEAK] {vmaddr2} _weak_external_for_gotpcrel");
+        check.checkExtract("[WEAK] {vmaddr3} _weak_external_fn");
+        check.checkExtract("[THREAD_LOCAL, WEAK] {vmaddr4} _weak_tlv");
+        test_step.dependOn(&check.step);
+    }
 
     const run = exe.run();
     test_step.dependOn(run.step());
@@ -2094,9 +2115,9 @@ fn testWeakLibrary(b: *Build, opts: Options) *Step {
     check.checkExact("cmd LOAD_WEAK_DYLIB");
     check.checkContains("liba.dylib");
     check.checkInSymtab();
-    check.checkExact("(undefined) weak-ref external _a (from liba)");
+    check.checkExact("(undefined) weakref external _a (from liba)");
     check.checkInSymtab();
-    check.checkExact("(undefined) weak-ref external _asStr (from liba)");
+    check.checkExact("(undefined) weakref external _asStr (from liba)");
     test_step.dependOn(&check.step);
 
     const run = exe.run();
@@ -2122,7 +2143,7 @@ fn testWeakRef(b: *Build, opts: Options) *Step {
 
     const check = exe.check();
     check.checkInSymtab();
-    check.checkExact("(undefined) weak-ref external _foo (from self import)");
+    check.checkExact("(undefined) weakref external _foo (from self import)");
     test_step.dependOn(&check.step);
 
     const run = exe.run();
