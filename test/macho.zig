@@ -1970,7 +1970,8 @@ fn testWeakBind(b: *Build, opts: Options) *Step {
         \\_weak_dysym_tlv:
         \\  .quad 0x1234
     );
-    lib.addArg("-shared");
+    lib.addArgs(&.{ "-shared", "-Wl,-install_name,@rpath/libfoo.dylib" });
+    const lib_out = lib.saveOutputAs("libfoo.dylib");
 
     {
         const check = lib.check();
@@ -2041,17 +2042,37 @@ fn testWeakBind(b: *Build, opts: Options) *Step {
         \\  .quad 0
         \\  .quad _weak_internal_tlv$tlv$init
     );
-    exe.addFileSource(lib.out);
+    exe.addFileSource(lib_out.file);
+    exe.addPrefixedDirectorySource("-Wl,-rpath,", lib_out.dir);
 
-    // TODO add rebase, bind, weak-bind, export checks
     {
         const check = exe.check();
+
         check.checkInDyldInfo();
         check.checkExact("exports");
         check.checkExtract("[WEAK] {vmaddr1} _weak_external");
         check.checkExtract("[WEAK] {vmaddr2} _weak_external_for_gotpcrel");
         check.checkExtract("[WEAK] {vmaddr3} _weak_external_fn");
         check.checkExtract("[THREAD_LOCAL, WEAK] {vmaddr4} _weak_tlv");
+
+        check.checkInDyldInfo();
+        check.checkExact("bind info");
+        check.checkContains("(libfoo.dylib) _weak_dysym_for_gotpcrel");
+        check.checkContains("(libfoo.dylib) _weak_dysym_fn");
+        check.checkContains("(libfoo.dylib) _weak_dysym");
+        check.checkContains("(libfoo.dylib) _weak_dysym_tlv");
+
+        check.checkInDyldInfo();
+        check.checkExact("weak bind info");
+        check.checkContains("_weak_external_for_gotpcrel");
+        check.checkContains("_weak_dysym_for_gotpcrel");
+        check.checkContains("_weak_external_fn");
+        check.checkContains("_weak_dysym_fn");
+        check.checkContains("_weak_dysym");
+        check.checkContains("_weak_external");
+        check.checkContains("_weak_tlv");
+        check.checkContains("_weak_dysym_tlv");
+
         test_step.dependOn(&check.step);
     }
 
