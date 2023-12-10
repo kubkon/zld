@@ -27,6 +27,7 @@ has_eh_frame: bool = false,
 alive: bool = true,
 num_rebase_relocs: u32 = 0,
 num_bind_relocs: u32 = 0,
+num_weak_bind_relocs: u32 = 0,
 
 output_symtab_ctx: MachO.SymtabCtx = .{},
 
@@ -172,7 +173,8 @@ fn initSubsections(self: *Object, nlists: anytype, macho_file: *MachO) !void {
 
         var idx: usize = nlist_start;
         while (idx < nlist_end) {
-            const nlist = nlists[idx];
+            const alias_start = idx;
+            const nlist = nlists[alias_start];
 
             while (idx < nlist_end and
                 nlists[idx].nlist.n_value == nlist.nlist.n_value) : (idx += 1)
@@ -198,7 +200,7 @@ fn initSubsections(self: *Object, nlists: anytype, macho_file: *MachO) !void {
                 .off = nlist.nlist.n_value - sect.addr,
             });
 
-            for (nlist_start..idx) |i| {
+            for (alias_start..idx) |i| {
                 self.symtab.items(.size)[nlists[i].idx] = size;
             }
         }
@@ -362,7 +364,8 @@ fn initSymbols(self: *Object, macho_file: *MachO) !void {
         self.symbols.appendAssumeCapacity(index);
         const symbol = macho_file.getSymbol(index);
         const name = self.getString(nlist.n_strx);
-        const value = if (nlist.abs())
+        const abs = nlist.abs();
+        const value = if (abs)
             nlist.n_value
         else
             nlist.n_value - atom.getInputAddress(macho_file);
@@ -370,9 +373,18 @@ fn initSymbols(self: *Object, macho_file: *MachO) !void {
             .value = value,
             .name = try macho_file.string_intern.insert(gpa, name),
             .nlist_idx = @intCast(i),
-            .atom = if (nlist.abs()) 0 else atom_index,
+            .atom = if (abs) 0 else atom_index,
             .file = self.index,
         };
+
+        symbol.flags.abs = abs;
+        symbol.flags.no_dead_strip = symbol.flags.no_dead_strip or nlist.noDeadStrip();
+
+        if (nlist.sect() and
+            self.sections.items(.header)[nlist.n_sect - 1].type() == macho.S_THREAD_LOCAL_VARIABLES)
+        {
+            symbol.flags.tlv = true;
+        }
     }
 }
 
@@ -397,44 +409,32 @@ fn initRelocs(self: *Object, macho_file: *MachO) !void {
 
         try out.ensureTotalCapacityPrecise(gpa, relocs.len);
 
-        // TODO parse addend here for every relocation
-
         for (relocs) |rel| {
-            var addend: i64 = 0;
-            var target: u32 = 0;
-            const rel_offset = @as(u32, @intCast(rel.r_address));
             const rel_type: macho.reloc_type_x86_64 = @enumFromInt(rel.r_type);
+            const rel_offset = @as(u32, @intCast(rel.r_address));
+            var addend: i64 = switch (rel.r_length) {
+                0 => code[rel_offset],
+                1 => mem.readInt(i16, code[rel_offset..][0..2], .little),
+                2 => mem.readInt(i32, code[rel_offset..][0..4], .little),
+                3 => mem.readInt(i64, code[rel_offset..][0..8], .little),
+            };
+            addend += switch (rel_type) {
+                .X86_64_RELOC_SIGNED_1 => 1,
+                .X86_64_RELOC_SIGNED_2 => 2,
+                .X86_64_RELOC_SIGNED_4 => 4,
+                else => 0,
+            };
 
-            if (rel.r_extern == 0) {
+            const target = if (rel.r_extern == 0) blk: {
                 const nsect = rel.r_symbolnum - 1;
-                const disp = switch (rel.r_length) {
-                    0 => code[rel_offset],
-                    1 => mem.readInt(i16, code[rel_offset..][0..2], .little),
-                    2 => mem.readInt(i32, code[rel_offset..][0..4], .little),
-                    3 => mem.readInt(i64, code[rel_offset..][0..8], .little),
-                };
-                const taddr: i64 = @intCast(slice.items(.header)[nsect].addr);
-                if (rel.r_pcrel == 1) {
-                    // off + taddr  == saddr + 4 + A + corr
-                    const corr: u3 = switch (rel_type) {
-                        .X86_64_RELOC_SIGNED_1 => 1,
-                        .X86_64_RELOC_SIGNED_2 => 2,
-                        .X86_64_RELOC_SIGNED_4 => 4,
-                        else => 0,
-                    };
-                    const saddr: i64 = @as(i64, @intCast(sect.addr)) + rel.r_address;
-                    const off = @as(u64, @intCast(saddr + 4 + corr + disp));
-                    target = self.findAtomInSection(off, @intCast(nsect));
-                    addend = saddr + 4 - taddr;
-                } else {
-                    // off + taddr == A
-                    const off = @as(u64, @intCast(disp));
-                    target = self.findAtomInSection(off, @intCast(nsect));
-                    addend = (-1) * taddr;
-                }
-            } else {
-                target = self.symbols.items[rel.r_symbolnum];
-            }
+                const taddr: i64 = if (rel.r_pcrel == 1)
+                    @as(i64, @intCast(sect.addr)) + rel.r_address + addend + 4
+                else
+                    addend;
+                const target = self.findAtomInSection(@intCast(taddr), @intCast(nsect));
+                addend = taddr - @as(i64, @intCast(macho_file.getAtom(target).?.getInputSection(macho_file).addr));
+                break :blk target;
+            } else self.symbols.items[rel.r_symbolnum];
 
             out.appendAssumeCapacity(.{
                 .tag = if (rel.r_extern == 1) .@"extern" else .local,
@@ -748,14 +748,18 @@ pub fn resolveSymbols(self: *Object, macho_file: *MachO) void {
 
         if (!nlist.ext()) continue;
         if (nlist.undf() and !nlist.tentative()) continue;
-        if (!nlist.tentative() and !nlist.abs()) {
+        if (nlist.sect()) {
             const atom = macho_file.getAtom(atom_index).?;
             if (!atom.flags.alive) continue;
         }
 
         const symbol = macho_file.getSymbol(index);
-        if (self.asFile().getSymbolRank(nlist, !self.alive) < symbol.getSymbolRank(macho_file)) {
-            const value = if (!nlist.tentative() and !nlist.abs()) blk: {
+        if (self.asFile().getSymbolRank(.{
+            .archive = !self.alive,
+            .weak = nlist.weakDef(),
+            .tentative = nlist.tentative(),
+        }) < symbol.getSymbolRank(macho_file)) {
+            const value = if (nlist.sect()) blk: {
                 const atom = macho_file.getAtom(atom_index).?;
                 break :blk nlist.n_value - atom.getInputAddress(macho_file);
             } else nlist.n_value;
@@ -763,7 +767,27 @@ pub fn resolveSymbols(self: *Object, macho_file: *MachO) void {
             symbol.atom = atom_index;
             symbol.nlist_idx = nlist_idx;
             symbol.file = self.index;
-            symbol.flags.weak = nlist.weakDef() or nlist.pext();
+            symbol.flags.weak = nlist.weakDef();
+            symbol.flags.abs = nlist.abs();
+            symbol.flags.tentative = nlist.tentative();
+            symbol.flags.weak_ref = false;
+            symbol.flags.dyn_ref = nlist.n_desc & macho.REFERENCED_DYNAMICALLY != 0;
+            symbol.flags.no_dead_strip = symbol.flags.no_dead_strip or nlist.noDeadStrip();
+
+            if (nlist.sect() and
+                self.sections.items(.header)[nlist.n_sect - 1].type() == macho.S_THREAD_LOCAL_VARIABLES)
+            {
+                symbol.flags.tlv = true;
+            }
+        }
+
+        // Regardless of who the winner is, we still merge symbol visibility here.
+        if (nlist.pext() or nlist.weakDef() and nlist.weakRef()) {
+            if (symbol.visibility != .global) {
+                symbol.visibility = .linkage;
+            }
+        } else {
+            symbol.visibility = .global;
         }
     }
 }
@@ -782,11 +806,10 @@ pub fn markLive(self: *Object, macho_file: *MachO) void {
     for (self.symbols.items, 0..) |index, nlist_idx| {
         const nlist = self.symtab.items(.nlist)[nlist_idx];
         if (!nlist.ext()) continue;
-        if (nlist.weakRef()) continue;
 
         const sym = macho_file.getSymbol(index);
         const file = sym.getFile(macho_file) orelse continue;
-        const should_keep = nlist.undf() or (nlist.tentative() and sym.getNlist(macho_file).tentative());
+        const should_keep = nlist.undf() or (nlist.tentative() and !sym.flags.tentative);
         if (should_keep and !file.isAlive()) {
             file.setAlive();
             file.markLive(macho_file);
@@ -819,22 +842,14 @@ pub fn scanRelocs(self: Object, macho_file: *MachO) !void {
 pub fn convertTentativeDefinitions(self: *Object, macho_file: *MachO) !void {
     const gpa = macho_file.base.allocator;
     for (self.symbols.items, 0..) |index, i| {
+        const sym = macho_file.getSymbol(index);
+        if (!sym.flags.tentative) continue;
+        const sym_file = sym.getFile(macho_file).?;
+        if (sym_file.getIndex() != self.index) continue;
+
         const nlist_idx = @as(Symbol.Index, @intCast(i));
         const nlist = &self.symtab.items(.nlist)[nlist_idx];
         const nlist_atom = &self.symtab.items(.atom)[nlist_idx];
-        if (!nlist.tentative()) continue;
-
-        const sym = macho_file.getSymbol(index);
-        const sym_file = sym.getFile(macho_file).?;
-        if (sym_file.getIndex() != self.index) {
-            //     if (elf_file.options.warn_common) {
-            //         elf_file.base.warn("{}: multiple common symbols: {s}", .{
-            //             self.fmtPath(),
-            //             global.getName(elf_file),
-            //         });
-            //     }
-            continue;
-        }
 
         const atom_index = try macho_file.addAtom();
         try self.atoms.append(gpa, atom_index);
@@ -858,6 +873,9 @@ pub fn convertTentativeDefinitions(self: *Object, macho_file: *MachO) !void {
         sym.value = 0;
         sym.atom = atom_index;
         sym.flags.weak = false;
+        sym.flags.weak_ref = false;
+        sym.flags.tentative = false;
+        sym.visibility = .global;
 
         nlist.n_value = 0;
         nlist.n_type = macho.N_EXT | macho.N_SECT;
@@ -885,6 +903,8 @@ pub fn calcSymtabSize(self: *Object, macho_file: *MachO) !void {
         if (file.getIndex() != self.index) continue;
         if (sym.getAtom(macho_file)) |atom| if (!atom.flags.alive) continue;
         if (sym.getNlist(macho_file).stab()) continue;
+        const name = sym.getName(macho_file);
+        if (name.len > 0 and (name[0] == 'L' or name[0] == 'l')) continue;
         sym.flags.output_symtab = true;
         if (sym.isLocal()) {
             try sym.addExtra(.{ .symtab = self.output_symtab_ctx.nlocals }, macho_file);
@@ -928,7 +948,7 @@ pub fn calcStabsSize(self: *Object, macho_file: *MachO) void {
         const sect = macho_file.sections.items(.header)[sym.out_n_sect];
         if (sect.isCode()) {
             self.output_symtab_ctx.nstabs += 4; // N_BNSYM, N_FUN, N_FUN, N_ENSYM
-        } else if (sym.getNlist(macho_file).ext()) {
+        } else if (sym.visibility == .global) {
             self.output_symtab_ctx.nstabs += 1; // N_GSYM
         } else {
             self.output_symtab_ctx.nstabs += 1; // N_STSYM
@@ -1059,13 +1079,13 @@ pub fn writeStabs(self: Object, macho_file: *MachO) void {
             const osym = macho_file.symtab.items[symtab_index];
             break :n_strx osym.n_strx;
         };
-        const sym_n_sect: u8 = if (!sym.isAbs(macho_file)) @intCast(sym.out_n_sect + 1) else 0;
+        const sym_n_sect: u8 = if (!sym.flags.abs) @intCast(sym.out_n_sect + 1) else 0;
         const sym_n_value = sym.getAddress(.{}, macho_file);
         const sym_size = sym.getSize(macho_file);
         if (sect.isCode()) {
             writeFuncStab(sym_n_strx, sym_n_sect, sym_n_value, sym_size, index, macho_file);
             index += 4;
-        } else if (sym.getNlist(macho_file).ext()) {
+        } else if (sym.visibility == .global) {
             macho_file.symtab.items[index] = .{
                 .n_strx = sym_n_strx,
                 .n_type = macho.N_GSYM,
@@ -1105,10 +1125,7 @@ pub fn claimUnresolved(self: Object, macho_file: *MachO) void {
         if (!nlist.undf()) continue;
 
         const sym = macho_file.getSymbol(sym_index);
-        if (sym.getFile(macho_file)) |file| {
-            if (file.getIndex() == macho_file.internal_object_index.?) continue;
-            if (!sym.getNlist(macho_file).undf()) continue;
-        }
+        if (sym.getFile(macho_file) != null) continue;
 
         const is_import = switch (macho_file.options.undefined_treatment) {
             .@"error" => false,
@@ -1120,7 +1137,10 @@ pub fn claimUnresolved(self: Object, macho_file: *MachO) void {
         sym.atom = 0;
         sym.nlist_idx = nlist_idx;
         sym.file = self.index;
+        sym.flags.weak = false;
+        sym.flags.weak_ref = nlist.weakRef();
         sym.flags.import = is_import;
+        sym.visibility = .global;
     }
 }
 

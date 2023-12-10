@@ -3,7 +3,7 @@ data: []const u8,
 index: File.Index,
 
 header: ?macho.mach_header_64 = null,
-symtab: std.ArrayListUnmanaged(macho.nlist_64) = .{},
+exports: std.MultiArrayList(Export) = .{},
 strtab: std.ArrayListUnmanaged(u8) = .{},
 id: ?Id = null,
 ordinal: u16 = 0,
@@ -19,7 +19,7 @@ alive: bool,
 output_symtab_ctx: MachO.SymtabCtx = .{},
 
 pub fn deinit(self: *Dylib, allocator: Allocator) void {
-    self.symtab.deinit(allocator);
+    self.exports.deinit(allocator);
     self.strtab.deinit(allocator);
     if (self.id) |*id| id.deinit(allocator);
     self.symbols.deinit(allocator);
@@ -38,36 +38,133 @@ pub fn parse(self: *Dylib, macho_file: *MachO) !void {
 
     self.header = try reader.readStruct(macho.mach_header_64);
 
-    const lc_id = self.getLoadCommand(.ID_DYLIB) orelse return;
+    const lc_id = self.getLoadCommand(.ID_DYLIB) orelse
+        return macho_file.base.fatal("{s}: missing LC_ID_DYLIB load command", .{self.path});
     self.id = try Id.fromLoadCommand(gpa, lc_id.cast(macho.dylib_command).?, lc_id.getDylibPathName());
 
-    if (self.header.?.flags & macho.MH_NO_REEXPORTED_DYLIBS == 0) {
-        var it = LoadCommandIterator{
-            .ncmds = self.header.?.ncmds,
-            .buffer = self.data[@sizeOf(macho.mach_header_64)..][0..self.header.?.sizeofcmds],
-        };
-        while (it.next()) |cmd| switch (cmd.cmd()) {
-            .REEXPORT_DYLIB => {
-                const id = try Id.fromLoadCommand(gpa, cmd.cast(macho.dylib_command).?, cmd.getDylibPathName());
-                try self.dependents.append(gpa, id);
-            },
-            else => {},
-        };
-    }
-
-    const lc_symtab = self.getLoadCommand(.SYMTAB) orelse return;
-    const cmd = lc_symtab.cast(macho.symtab_command).?;
-
-    const symtab = @as([*]align(1) const macho.nlist_64, @ptrCast(self.data.ptr + cmd.symoff))[0..cmd.nsyms];
-    try self.symtab.ensureUnusedCapacity(gpa, symtab.len);
-    self.symtab.appendUnalignedSliceAssumeCapacity(symtab);
-
-    const strtab = self.data[cmd.stroff..][0..cmd.strsize];
-    try self.strtab.ensureUnusedCapacity(gpa, strtab.len);
-    self.strtab.appendSliceAssumeCapacity(strtab);
+    var it = LoadCommandIterator{
+        .ncmds = self.header.?.ncmds,
+        .buffer = self.data[@sizeOf(macho.mach_header_64)..][0..self.header.?.sizeofcmds],
+    };
+    while (it.next()) |cmd| switch (cmd.cmd()) {
+        .REEXPORT_DYLIB => if (self.header.?.flags & macho.MH_NO_REEXPORTED_DYLIBS == 0) {
+            const id = try Id.fromLoadCommand(gpa, cmd.cast(macho.dylib_command).?, cmd.getDylibPathName());
+            try self.dependents.append(gpa, id);
+        },
+        .DYLD_INFO_ONLY => {
+            const dyld_cmd = cmd.cast(macho.dyld_info_command).?;
+            const data = self.data[dyld_cmd.export_off..][0..dyld_cmd.export_size];
+            try self.parseTrie(data, macho_file);
+        },
+        .DYLD_EXPORTS_TRIE => {
+            const ld_cmd = cmd.cast(macho.linkedit_data_command).?;
+            const data = self.data[ld_cmd.dataoff..][0..ld_cmd.datasize];
+            try self.parseTrie(data, macho_file);
+        },
+        else => {},
+    };
 
     try self.initSymbols(macho_file);
     self.initPlatform();
+}
+
+const TrieIterator = struct {
+    data: []const u8,
+    pos: usize = 0,
+
+    fn getStream(it: *TrieIterator) std.io.FixedBufferStream([]const u8) {
+        return std.io.fixedBufferStream(it.data[it.pos..]);
+    }
+
+    fn readULEB128(it: *TrieIterator) !u64 {
+        var stream = it.getStream();
+        var creader = std.io.countingReader(stream.reader());
+        const reader = creader.reader();
+        const value = try std.leb.readULEB128(u64, reader);
+        it.pos += creader.bytes_read;
+        return value;
+    }
+
+    fn readString(it: *TrieIterator) ![:0]const u8 {
+        var stream = it.getStream();
+        const reader = stream.reader();
+
+        var count: usize = 0;
+        while (true) : (count += 1) {
+            const byte = try reader.readByte();
+            if (byte == 0) break;
+        }
+
+        const str = @as([*:0]const u8, @ptrCast(it.data.ptr + it.pos))[0..count :0];
+        it.pos += count + 1;
+        return str;
+    }
+
+    fn readByte(it: *TrieIterator) !u8 {
+        var stream = it.getStream();
+        const value = try stream.reader().readByte();
+        it.pos += 1;
+        return value;
+    }
+};
+
+fn addExport(self: *Dylib, allocator: Allocator, name: []const u8, flags: Export.Flags) !void {
+    try self.exports.append(allocator, .{
+        .name = try self.insertString(allocator, name),
+        .flags = flags,
+    });
+}
+
+fn parseTrieNode(
+    self: *Dylib,
+    it: *TrieIterator,
+    allocator: Allocator,
+    arena: Allocator,
+    prefix: []const u8,
+) !void {
+    const size = try it.readULEB128();
+    if (size > 0) {
+        const flags = try it.readULEB128();
+        const kind = flags & macho.EXPORT_SYMBOL_FLAGS_KIND_MASK;
+        const out_flags = Export.Flags{
+            .abs = kind == macho.EXPORT_SYMBOL_FLAGS_KIND_ABSOLUTE,
+            .tlv = kind == macho.EXPORT_SYMBOL_FLAGS_KIND_THREAD_LOCAL,
+            .weak = flags & macho.EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION != 0,
+        };
+        if (flags & macho.EXPORT_SYMBOL_FLAGS_REEXPORT != 0) {
+            _ = try it.readULEB128(); // dylib ordinal
+            const name = try it.readString();
+            try self.addExport(allocator, if (name.len > 0) name else prefix, out_flags);
+        } else if (flags & macho.EXPORT_SYMBOL_FLAGS_STUB_AND_RESOLVER != 0) {
+            _ = try it.readULEB128(); // stub offset
+            _ = try it.readULEB128(); // resolver offset
+            try self.addExport(allocator, prefix, out_flags);
+        } else {
+            _ = try it.readULEB128(); // VM offset
+            try self.addExport(allocator, prefix, out_flags);
+        }
+    }
+
+    const nedges = try it.readByte();
+
+    for (0..nedges) |_| {
+        const label = try it.readString();
+        const off = try it.readULEB128();
+        const prefix_label = try std.fmt.allocPrint(arena, "{s}{s}", .{ prefix, label });
+        const curr = it.pos;
+        it.pos = off;
+        try self.parseTrieNode(it, allocator, arena, prefix_label);
+        it.pos = curr;
+    }
+}
+
+fn parseTrie(self: *Dylib, data: []const u8, macho_file: *MachO) !void {
+    const gpa = macho_file.base.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+
+    var it: TrieIterator = .{ .data = data };
+    try self.parseTrieNode(&it, gpa, arena.allocator(), "");
 }
 
 pub fn parseTbd(
@@ -125,31 +222,31 @@ pub fn parseTbd(
 
                         if (exp.symbols) |symbols| {
                             for (symbols) |sym_name| {
-                                _ = try self.addGlobal(sym_name, macho_file);
+                                try self.addExport(gpa, sym_name, .{});
                             }
                         }
 
                         if (exp.weak_symbols) |symbols| {
                             for (symbols) |sym_name| {
-                                try self.addWeak(sym_name, macho_file);
+                                try self.addExport(gpa, sym_name, .{ .weak = true });
                             }
                         }
 
                         if (exp.objc_classes) |objc_classes| {
                             for (objc_classes) |class_name| {
-                                try self.addObjCClass(class_name, macho_file);
+                                try self.addObjCClass(gpa, class_name);
                             }
                         }
 
                         if (exp.objc_ivars) |objc_ivars| {
                             for (objc_ivars) |ivar| {
-                                try self.addObjCIVar(ivar, macho_file);
+                                try self.addObjCIVar(gpa, ivar);
                             }
                         }
 
                         if (exp.objc_eh_types) |objc_eh_types| {
                             for (objc_eh_types) |eht| {
-                                try self.addObjCEhType(eht, macho_file);
+                                try self.addObjCEhType(gpa, eht);
                             }
                         }
 
@@ -173,31 +270,31 @@ pub fn parseTbd(
 
                         if (exp.symbols) |symbols| {
                             for (symbols) |sym_name| {
-                                _ = try self.addGlobal(sym_name, macho_file);
+                                try self.addExport(gpa, sym_name, .{});
                             }
                         }
 
                         if (exp.weak_symbols) |symbols| {
                             for (symbols) |sym_name| {
-                                try self.addWeak(sym_name, macho_file);
+                                try self.addExport(gpa, sym_name, .{ .weak = true });
                             }
                         }
 
                         if (exp.objc_classes) |classes| {
                             for (classes) |sym_name| {
-                                try self.addObjCClass(sym_name, macho_file);
+                                try self.addObjCClass(gpa, sym_name);
                             }
                         }
 
                         if (exp.objc_ivars) |objc_ivars| {
                             for (objc_ivars) |ivar| {
-                                try self.addObjCIVar(ivar, macho_file);
+                                try self.addObjCIVar(gpa, ivar);
                             }
                         }
 
                         if (exp.objc_eh_types) |objc_eh_types| {
                             for (objc_eh_types) |eht| {
-                                try self.addObjCEhType(eht, macho_file);
+                                try self.addObjCEhType(gpa, eht);
                             }
                         }
                     }
@@ -209,31 +306,31 @@ pub fn parseTbd(
 
                         if (reexp.symbols) |symbols| {
                             for (symbols) |sym_name| {
-                                _ = try self.addGlobal(sym_name, macho_file);
+                                try self.addExport(gpa, sym_name, .{});
                             }
                         }
 
                         if (reexp.weak_symbols) |symbols| {
                             for (symbols) |sym_name| {
-                                try self.addWeak(sym_name, macho_file);
+                                try self.addExport(gpa, sym_name, .{ .weak = true });
                             }
                         }
 
                         if (reexp.objc_classes) |classes| {
                             for (classes) |sym_name| {
-                                try self.addObjCClass(sym_name, macho_file);
+                                try self.addObjCClass(gpa, sym_name);
                             }
                         }
 
                         if (reexp.objc_ivars) |objc_ivars| {
                             for (objc_ivars) |ivar| {
-                                try self.addObjCIVar(ivar, macho_file);
+                                try self.addObjCIVar(gpa, ivar);
                             }
                         }
 
                         if (reexp.objc_eh_types) |objc_eh_types| {
                             for (objc_eh_types) |eht| {
-                                try self.addObjCEhType(eht, macho_file);
+                                try self.addObjCEhType(gpa, eht);
                             }
                         }
                     }
@@ -241,19 +338,19 @@ pub fn parseTbd(
 
                 if (stub.objc_classes) |classes| {
                     for (classes) |sym_name| {
-                        try self.addObjCClass(sym_name, macho_file);
+                        try self.addObjCClass(gpa, sym_name);
                     }
                 }
 
                 if (stub.objc_ivars) |objc_ivars| {
                     for (objc_ivars) |ivar| {
-                        try self.addObjCIVar(ivar, macho_file);
+                        try self.addObjCIVar(gpa, ivar);
                     }
                 }
 
                 if (stub.objc_eh_types) |objc_eh_types| {
                     for (objc_eh_types) |eht| {
-                        try self.addObjCEhType(eht, macho_file);
+                        try self.addObjCEhType(gpa, eht);
                     }
                 }
             },
@@ -285,48 +382,37 @@ pub fn parseTbd(
     try self.initSymbols(macho_file);
 }
 
-fn addObjCClass(self: *Dylib, name: []const u8, macho_file: *MachO) !void {
-    try self.addObjCGlobal("_OBJC_CLASS", name, macho_file);
-    try self.addObjCGlobal("_OBJC_METACLASS_", name, macho_file);
+fn addObjCClass(self: *Dylib, allocator: Allocator, name: []const u8) !void {
+    try self.addObjCExport(allocator, "_OBJC_CLASS", name);
+    try self.addObjCExport(allocator, "_OBJC_METACLASS_", name);
 }
 
-fn addObjCIVar(self: *Dylib, name: []const u8, macho_file: *MachO) !void {
-    try self.addObjCGlobal("_OBJC_IVAR_", name, macho_file);
+fn addObjCIVar(self: *Dylib, allocator: Allocator, name: []const u8) !void {
+    try self.addObjCExport(allocator, "_OBJC_IVAR_", name);
 }
 
-fn addObjCEhType(self: *Dylib, name: []const u8, macho_file: *MachO) !void {
-    try self.addObjCGlobal("_OBJC_EHTYPE_", name, macho_file);
+fn addObjCEhType(self: *Dylib, allocator: Allocator, name: []const u8) !void {
+    try self.addObjCExport(allocator, "_OBJC_EHTYPE_", name);
 }
 
-fn addObjCGlobal(self: *Dylib, comptime prefix: []const u8, name: []const u8, macho_file: *MachO) !void {
-    const gpa = macho_file.base.allocator;
-    const full_name = try std.fmt.allocPrint(gpa, prefix ++ "$_{s}", .{name});
-    defer gpa.free(full_name);
-    _ = try self.addGlobal(full_name, macho_file);
-}
-
-fn addGlobal(self: *Dylib, name: []const u8, macho_file: *MachO) !Symbol.Index {
-    const gpa = macho_file.base.allocator;
-    const index = @as(Symbol.Index, @intCast(self.symtab.items.len));
-    const nlist = try self.symtab.addOne(gpa);
-    nlist.* = MachO.null_sym;
-    nlist.n_strx = try self.insertString(gpa, name);
-    nlist.n_type = macho.N_EXT | macho.N_SECT;
-    return index;
-}
-
-fn addWeak(self: *Dylib, name: []const u8, macho_file: *MachO) !void {
-    const index = try self.addGlobal(name, macho_file);
-    self.symtab.items[index].n_desc |= macho.N_WEAK_REF;
+fn addObjCExport(
+    self: *Dylib,
+    allocator: Allocator,
+    comptime prefix: []const u8,
+    name: []const u8,
+) !void {
+    const full_name = try std.fmt.allocPrint(allocator, prefix ++ "$_{s}", .{name});
+    defer allocator.free(full_name);
+    try self.addExport(allocator, full_name, .{});
 }
 
 fn initSymbols(self: *Dylib, macho_file: *MachO) !void {
     const gpa = macho_file.base.allocator;
 
-    try self.symbols.ensureTotalCapacityPrecise(gpa, self.symtab.items.len);
+    try self.symbols.ensureTotalCapacityPrecise(gpa, self.exports.items(.name).len);
 
-    for (self.symtab.items) |sym| {
-        const name = self.getString(sym.n_strx);
+    for (self.exports.items(.name)) |noff| {
+        const name = self.getString(noff);
         const off = try macho_file.string_intern.insert(gpa, name);
         const gop = try macho_file.getOrCreateGlobal(off);
         self.symbols.addOneAssumeCapacity().* = gop.index;
@@ -352,48 +438,46 @@ fn initPlatform(self: *Dylib) void {
 }
 
 pub fn resolveSymbols(self: *Dylib, macho_file: *MachO) void {
-    for (self.symbols.items, 0..) |index, i| {
-        const nlist_idx = @as(Symbol.Index, @intCast(i));
-        const nlist = self.symtab.items[nlist_idx];
-
-        if (nlist.undf() and !nlist.tentative()) continue;
-
+    for (self.symbols.items, self.exports.items(.flags)) |index, flags| {
         const global = macho_file.getSymbol(index);
-        if (self.asFile().getSymbolRank(nlist, false) < global.getSymbolRank(macho_file)) {
-            global.value = nlist.n_value;
+        if (self.asFile().getSymbolRank(.{
+            .weak = flags.weak,
+        }) < global.getSymbolRank(macho_file)) {
+            global.value = 0;
             global.atom = 0;
-            global.nlist_idx = nlist_idx;
+            global.nlist_idx = 0;
             global.file = self.index;
-            global.flags.weak = nlist.weakDef() or nlist.pext();
+            global.flags.weak = flags.weak;
+            global.flags.weak_ref = false;
+            global.flags.tlv = flags.tlv;
+            global.flags.dyn_ref = false;
+            global.flags.tentative = false;
+            global.visibility = .global;
         }
     }
 }
 
-pub fn resetGlobals(self: *Dylib, macho_file: *MachO) void {
-    for (self.symbols.items, 0..) |sym_index, nlist_idx| {
-        if (!self.symtab.items[nlist_idx].ext()) continue;
-        const sym = macho_file.getSymbol(sym_index);
-        const name = sym.name;
-        sym.* = .{};
-        sym.name = name;
-    }
-}
-
 pub fn markLive(self: *Dylib, macho_file: *MachO) void {
-    for (self.symbols.items, 0..) |index, i| {
-        const nlist = self.symtab.items[i];
-        if (!nlist.undf() or nlist.tentative()) continue;
-
+    for (self.symbols.items) |index| {
         const global = macho_file.getSymbol(index);
         const file = global.getFile(macho_file) orelse continue;
         const should_drop = switch (file) {
-            .dylib => |sh| !sh.needed and nlist.weakRef(),
+            .dylib => |sh| !sh.needed and global.flags.weak_ref,
             else => false,
         };
         if (!should_drop and !file.isAlive()) {
             file.setAlive();
             file.markLive(macho_file);
         }
+    }
+}
+
+pub fn resetGlobals(self: *Dylib, macho_file: *MachO) void {
+    for (self.symbols.items) |sym_index| {
+        const sym = macho_file.getSymbol(sym_index);
+        const name = sym.name;
+        sym.* = .{};
+        sym.name = name;
     }
 }
 
@@ -672,6 +756,17 @@ pub const Id = struct {
 
         return out;
     }
+};
+
+const Export = struct {
+    name: u32,
+    flags: Flags,
+
+    const Flags = packed struct {
+        abs: bool = false,
+        weak: bool = false,
+        tlv: bool = false,
+    };
 };
 
 const assert = std.debug.assert;

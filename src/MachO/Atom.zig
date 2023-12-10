@@ -164,20 +164,31 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
         switch (@as(macho.reloc_type_x86_64, @enumFromInt(rel.meta.type))) {
             .X86_64_RELOC_BRANCH => {
                 const symbol = rel.getTargetSymbol(macho_file);
-                if (symbol.flags.import) {
+                if (symbol.flags.import or (symbol.flags.@"export" and symbol.flags.weak)) {
                     symbol.flags.stubs = true;
                 }
             },
 
-            .X86_64_RELOC_GOT_LOAD,
-            .X86_64_RELOC_GOT,
-            => {
+            .X86_64_RELOC_GOT_LOAD => {
+                const symbol = rel.getTargetSymbol(macho_file);
+                if (symbol.flags.import or (symbol.flags.@"export" and symbol.flags.weak)) {
+                    symbol.flags.got = true;
+                }
+            },
+
+            .X86_64_RELOC_GOT => {
                 rel.getTargetSymbol(macho_file).flags.got = true;
             },
 
             .X86_64_RELOC_TLV => {
                 const symbol = rel.getTargetSymbol(macho_file);
-                if (symbol.flags.import) {
+                if (!symbol.flags.tlv) {
+                    macho_file.base.fatal(
+                        "{}: {s}: illegal thread-local variable reference to regular symbol {s}",
+                        .{ object.fmtPath(), self.getName(macho_file), symbol.getName(macho_file) },
+                    );
+                }
+                if (symbol.flags.import or (symbol.flags.@"export" and symbol.flags.weak)) {
                     symbol.flags.tlv_ptr = true;
                 }
             },
@@ -187,10 +198,19 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
                     const symbol = rel.getTargetSymbol(macho_file);
                     if (symbol.flags.import) {
                         object.num_bind_relocs += 1;
+                        if (symbol.flags.weak) {
+                            object.num_weak_bind_relocs += 1;
+                            macho_file.binds_to_weak = true;
+                        }
                         continue;
-                    } else if (symbol.isTlvInit(macho_file)) {
+                    }
+                    if (symbol.isTlvInit(macho_file)) {
                         macho_file.has_tlv = true;
                         continue;
+                    }
+                    if (symbol.flags.@"export" and symbol.flags.weak) {
+                        object.num_weak_bind_relocs += 1;
+                        macho_file.binds_to_weak = true;
                     }
                 }
                 object.num_rebase_relocs += 1;
@@ -205,9 +225,7 @@ fn reportUndefSymbol(self: Atom, rel: Object.Relocation, macho_file: *MachO) !bo
     if (rel.tag == .local) return false;
 
     const sym = rel.getTargetSymbol(macho_file);
-    if (sym.getNlist(macho_file).undf() and !sym.flags.import and
-        sym.getFile(macho_file).?.getIndex() != macho_file.internal_object_index.?)
-    {
+    if (!sym.flags.import and sym.getFile(macho_file).? == .object and sym.getNlist(macho_file).undf()) {
         const gpa = macho_file.base.allocator;
         const gop = try macho_file.undefs.getOrPut(gpa, rel.target);
         if (!gop.found_existing) {
@@ -242,19 +260,14 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
         const sym = if (rel.tag == .@"extern") rel.getTargetSymbol(macho_file) else null;
 
         if (sym) |s| {
-            if (s.getNlist(macho_file).undf() and !s.flags.import and
-                s.getFile(macho_file).?.getIndex() != macho_file.internal_object_index.?) continue;
+            if (!s.flags.import and s.getFile(macho_file).? == .object and s.getNlist(macho_file).undf())
+                continue;
         }
 
         const P = @as(i64, @intCast(self.value)) + @as(i64, @intCast(rel_offset));
-        const A = switch (rel.meta.length) {
-            0 => code[rel_offset],
-            1 => mem.readInt(i16, code[rel_offset..][0..2], .little),
-            2 => mem.readInt(i32, code[rel_offset..][0..4], .little),
-            3 => mem.readInt(i64, code[rel_offset..][0..8], .little),
-        };
+        const A = rel.addend;
         const S: i64 = switch (rel.tag) {
-            .local => @as(i64, @intCast(rel.getTargetAtom(macho_file).value)) + rel.addend,
+            .local => @as(i64, @intCast(rel.getTargetAtom(macho_file).value)),
             .@"extern" => @intCast(rel.getTargetSymbol(macho_file).getAddress(.{}, macho_file)),
         };
         const G: i64 = if (rel.tag == .@"extern")
@@ -297,10 +310,27 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
                             .segment_id = seg_id,
                             .addend = A,
                         });
+                        if (s.flags.weak) {
+                            macho_file.weak_bind.entries.appendAssumeCapacity(.{
+                                .target = rel.target,
+                                .offset = @as(u64, @intCast(P)) - seg.vmaddr,
+                                .segment_id = seg_id,
+                                .addend = A,
+                            });
+                        }
                         continue;
-                    } else if (s.isTlvInit(macho_file)) {
+                    }
+                    if (s.isTlvInit(macho_file)) {
                         try cwriter.writeInt(u64, @intCast(S - TLS), .little);
                         continue;
+                    }
+                    if (s.flags.@"export" and s.flags.weak) {
+                        macho_file.weak_bind.entries.appendAssumeCapacity(.{
+                            .target = rel.target,
+                            .offset = @as(u64, @intCast(P)) - seg.vmaddr,
+                            .segment_id = seg_id,
+                            .addend = A,
+                        });
                     }
                 }
                 macho_file.rebase.entries.appendAssumeCapacity(.{
@@ -314,11 +344,11 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
             .X86_64_RELOC_GOT_LOAD => {
                 assert(rel.meta.length == 2);
                 assert(rel.meta.pcrel);
-                if (!sym.?.flags.import) {
+                if (sym.?.flags.got) {
+                    try cwriter.writeInt(i32, @intCast(G + A - P - 4), .little);
+                } else {
                     try relaxGotLoad(code[rel_offset - 3 ..]);
                     try cwriter.writeInt(i32, @intCast(S + A - P - 4), .little);
-                } else {
-                    try cwriter.writeInt(i32, @intCast(G + A - P - 4), .little);
                 }
             },
 
@@ -338,7 +368,6 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
                 assert(rel.meta.length == 2);
                 assert(rel.meta.pcrel);
                 if (sym.?.flags.tlv_ptr) {
-                    assert(sym.?.flags.import);
                     const S_: i64 = @intCast(sym.?.getTlvPtrAddress(macho_file));
                     try cwriter.writeInt(i32, @intCast(S_ + A - P - 4), .little);
                 } else {
@@ -356,19 +385,19 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
             .X86_64_RELOC_SIGNED_1 => {
                 assert(rel.meta.length == 2);
                 assert(rel.meta.pcrel);
-                try cwriter.writeInt(i32, @intCast(S + A - P - 4 + 1), .little);
+                try cwriter.writeInt(i32, @intCast(S + A - P - 4 - 1), .little);
             },
 
             .X86_64_RELOC_SIGNED_2 => {
                 assert(rel.meta.length == 2);
                 assert(rel.meta.pcrel);
-                try cwriter.writeInt(i32, @intCast(S + A - P - 4 + 2), .little);
+                try cwriter.writeInt(i32, @intCast(S + A - P - 4 - 2), .little);
             },
 
             .X86_64_RELOC_SIGNED_4 => {
                 assert(rel.meta.length == 2);
                 assert(rel.meta.pcrel);
-                try cwriter.writeInt(i32, @intCast(S + A - P - 4 + 4), .little);
+                try cwriter.writeInt(i32, @intCast(S + A - P - 4 - 4), .little);
             },
         }
     }

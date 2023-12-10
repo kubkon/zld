@@ -31,12 +31,16 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testFatArchive(b, opts));
     // macho_step.dependOn(testFatDylib(b, opts)); // TODO arm64 support
     macho_step.dependOn(testHeaderpad(b, opts));
+    macho_step.dependOn(testHeaderWeakFlags(b, opts));
     macho_step.dependOn(testHelloC(b, opts));
     macho_step.dependOn(testHelloZig(b, opts));
     macho_step.dependOn(testLayout(b, opts));
     macho_step.dependOn(testLargeBss(b, opts));
+    macho_step.dependOn(testLinkOrder(b, opts));
+    macho_step.dependOn(testMhExecuteHeader(b, opts));
     macho_step.dependOn(testNeededFramework(b, opts));
     macho_step.dependOn(testNeededLibrary(b, opts));
+    macho_step.dependOn(testNoDeadStrip(b, opts));
     macho_step.dependOn(testNoExportsDylib(b, opts));
     macho_step.dependOn(testPagezeroSize(b, opts));
     macho_step.dependOn(testReexportsZig(b, opts));
@@ -53,6 +57,7 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testUnwindInfo(b, opts));
     macho_step.dependOn(testUnwindInfoNoSubsectionsArm64(b, opts));
     macho_step.dependOn(testUnwindInfoNoSubsectionsX64(b, opts));
+    macho_step.dependOn(testWeakBind(b, opts));
     macho_step.dependOn(testWeakFramework(b, opts));
     macho_step.dependOn(testWeakLibrary(b, opts));
     macho_step.dependOn(testWeakRef(b, opts));
@@ -296,6 +301,12 @@ fn testDylib(b: *Build, opts: Options) *Step {
         \\  return "Hello";
         \\}
     );
+
+    const check = dylib.check();
+    check.checkStart();
+    check.checkExact("header");
+    check.checkNotPresent("PIE");
+    test_step.dependOn(&check.step);
 
     const exe = cc(b, opts);
     exe.addCSource(
@@ -639,6 +650,82 @@ fn testHeaderpad(b: *Build, opts: Options) *Step {
     return test_step;
 }
 
+// Adapted from https://github.com/llvm/llvm-project/blob/main/lld/test/MachO/weak-header-flags.s
+fn testHeaderWeakFlags(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-header-weak-flags", "");
+
+    const obj1 = cc(b, opts);
+    obj1.addAsmSource(
+        \\.globl _x
+        \\.weak_definition _x
+        \\_x:
+        \\ ret
+    );
+    obj1.addArg("-c");
+
+    const lib = cc(b, opts);
+    lib.addFileSource(obj1.out);
+    lib.addArg("-shared");
+
+    {
+        const exe = cc(b, opts);
+        exe.addFileSource(obj1.out);
+        exe.addEmptyMain();
+
+        const check = exe.check();
+        check.checkStart();
+        check.checkExact("header");
+        check.checkContains("WEAK_DEFINES");
+        check.checkStart();
+        check.checkExact("header");
+        check.checkContains("BINDS_TO_WEAK");
+        test_step.dependOn(&check.step);
+    }
+
+    {
+        const exe = cc(b, opts);
+        exe.addFileSource(lib.out);
+        exe.addAsmSource(
+            \\.globl _main
+            \\_main:
+            \\  callq _x
+            \\  ret
+        );
+
+        const check = exe.check();
+        check.checkStart();
+        check.checkExact("header");
+        check.checkNotPresent("WEAK_DEFINES");
+        check.checkStart();
+        check.checkExact("header");
+        check.checkContains("BINDS_TO_WEAK");
+        test_step.dependOn(&check.step);
+    }
+
+    {
+        const exe = cc(b, opts);
+        exe.addFileSource(lib.out);
+        exe.addAsmSource(
+            \\.globl _main, _x
+            \\_x:
+            \\
+            \\_main:
+            \\  ret
+        );
+
+        const check = exe.check();
+        check.checkStart();
+        check.checkExact("header");
+        check.checkNotPresent("WEAK_DEFINES");
+        check.checkStart();
+        check.checkExact("header");
+        check.checkNotPresent("BINDS_TO_WEAK");
+        test_step.dependOn(&check.step);
+    }
+
+    return test_step;
+}
+
 fn testHelloC(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-hello-c", "");
 
@@ -648,6 +735,12 @@ fn testHelloC(b: *Build, opts: Options) *Step {
     const run = exe.run();
     run.expectHelloWorld();
     test_step.dependOn(run.step());
+
+    const check = exe.check();
+    check.checkStart();
+    check.checkExact("header");
+    check.checkContains("PIE");
+    test_step.dependOn(&check.step);
 
     return test_step;
 }
@@ -807,6 +900,96 @@ fn testLargeBss(b: *Build, opts: Options) *Step {
     return test_step;
 }
 
+fn testLinkOrder(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-link-order", "");
+
+    const a_o = cc(b, opts);
+    a_o.addCSource(
+        \\int foo = 42;
+        \\int bar;
+        \\int foobar = -2;
+        \\int get_foo() {
+        \\  return foo;
+        \\}
+        \\int get_bar() {
+        \\  return bar;
+        \\}
+    );
+    a_o.addArg("-c");
+
+    const c_o = cc(b, opts);
+    c_o.addCSource(
+        \\int foo = -1;
+        \\int bar = 42;
+        \\int foobar = -1;
+        \\int get_foo() {
+        \\  return foo;
+        \\}
+        \\int get_bar() {
+        \\  return bar;
+        \\}
+    );
+    c_o.addArg("-c");
+
+    const main_o = cc(b, opts);
+    main_o.addCSource(
+        \\#include <stdio.h>
+        \\__attribute__((weak)) int foobar = 42;
+        \\extern int get_foo();
+        \\extern int get_bar();
+        \\int main() {
+        \\  printf("%d %d %d", get_foo(), get_bar(), foobar);
+        \\  return 0;
+        \\}
+    );
+    main_o.addArg("-c");
+
+    const liba = ar(b);
+    liba.addFileSource(a_o.out);
+
+    const libc = cc(b, opts);
+    libc.addFileSource(c_o.out);
+    libc.addArg("-shared");
+
+    {
+        const exe = cc(b, opts);
+        exe.addFileSource(libc.out);
+        exe.addFileSource(liba.out);
+        exe.addFileSource(main_o.out);
+
+        const run = exe.run();
+        run.expectStdOutEqual("-1 42 42");
+        test_step.dependOn(run.step());
+    }
+
+    {
+        const exe = cc(b, opts);
+        exe.addFileSource(liba.out);
+        exe.addFileSource(libc.out);
+        exe.addFileSource(main_o.out);
+
+        const run = exe.run();
+        run.expectStdOutEqual("42 0 -2");
+        test_step.dependOn(run.step());
+    }
+
+    return test_step;
+}
+
+fn testMhExecuteHeader(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-mh-execute-header", "");
+
+    const exe = cc(b, opts);
+    exe.addEmptyMain();
+
+    const check = exe.check();
+    check.checkInSymtab();
+    check.checkContains("[referenced dynamically] external __mh_execute_header");
+    test_step.dependOn(&check.step);
+
+    return test_step;
+}
+
 fn testNeededFramework(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-needed-framework", "");
 
@@ -844,6 +1027,33 @@ fn testNeededLibrary(b: *Build, opts: Options) *Step {
     check.checkStart();
     check.checkExact("cmd LOAD_DYLIB");
     check.checkContains("liba.dylib");
+    test_step.dependOn(&check.step);
+
+    const run = exe.run();
+    test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+fn testNoDeadStrip(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-no-dead-strip", "");
+
+    const exe = cc(b, opts);
+    exe.addCSource(
+        \\__attribute__((used)) int bogus1 = 0;
+        \\int bogus2 = 0;
+        \\int foo = 42;
+        \\int main() {
+        \\  return foo - 42;
+        \\}
+    );
+    exe.addArg("-Wl,-dead_strip");
+
+    const check = exe.check();
+    check.checkInSymtab();
+    check.checkContains("external _bogus1");
+    check.checkInSymtab();
+    check.checkNotPresent("external _bogus2");
     test_step.dependOn(&check.step);
 
     const run = exe.run();
@@ -1732,6 +1942,146 @@ fn testUnwindInfoNoSubsectionsX64(b: *Build, opts: Options) *Step {
     return test_step;
 }
 
+// Adapted from https://github.com/llvm/llvm-project/blob/main/lld/test/MachO/weak-binding.s
+fn testWeakBind(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-weak-bind", "");
+
+    const lib = cc(b, opts);
+    lib.addAsmSource(
+        \\.globl _weak_dysym
+        \\.weak_definition _weak_dysym
+        \\_weak_dysym:
+        \\  .quad 0x1234
+        \\
+        \\.globl _weak_dysym_for_gotpcrel
+        \\.weak_definition _weak_dysym_for_gotpcrel
+        \\_weak_dysym_for_gotpcrel:
+        \\  .quad 0x1234
+        \\
+        \\.globl _weak_dysym_fn
+        \\.weak_definition _weak_dysym_fn
+        \\_weak_dysym_fn:
+        \\  ret
+        \\
+        \\.section __DATA,__thread_vars,thread_local_variables
+        \\
+        \\.globl _weak_dysym_tlv
+        \\.weak_definition _weak_dysym_tlv
+        \\_weak_dysym_tlv:
+        \\  .quad 0x1234
+    );
+    lib.addArgs(&.{ "-shared", "-Wl,-install_name,@rpath/libfoo.dylib" });
+    const lib_out = lib.saveOutputAs("libfoo.dylib");
+
+    {
+        const check = lib.check();
+        check.checkInDyldInfo();
+        check.checkExact("exports");
+        check.checkExtract("[WEAK] {vmaddr1} _weak_dysym");
+        check.checkExtract("[WEAK] {vmaddr2} _weak_dysym_for_gotpcrel");
+        check.checkExtract("[WEAK] {vmaddr3} _weak_dysym_fn");
+        check.checkExtract("[THREAD_LOCAL, WEAK] {vmaddr4} _weak_dysym_tlv");
+        test_step.dependOn(&check.step);
+    }
+
+    const exe = cc(b, opts);
+    exe.addAsmSource(
+        \\.globl _main, _weak_external, _weak_external_for_gotpcrel, _weak_external_fn
+        \\.weak_definition _weak_external, _weak_external_for_gotpcrel, _weak_external_fn, _weak_internal, _weak_internal_for_gotpcrel, _weak_internal_fn
+        \\
+        \\_main:
+        \\  mov _weak_dysym_for_gotpcrel@GOTPCREL(%rip), %rax
+        \\  mov _weak_external_for_gotpcrel@GOTPCREL(%rip), %rax
+        \\  mov _weak_internal_for_gotpcrel@GOTPCREL(%rip), %rax
+        \\  mov _weak_tlv@TLVP(%rip), %rax
+        \\  mov _weak_dysym_tlv@TLVP(%rip), %rax
+        \\  mov _weak_internal_tlv@TLVP(%rip), %rax
+        \\  callq _weak_dysym_fn
+        \\  callq _weak_external_fn
+        \\  callq _weak_internal_fn
+        \\  mov $0, %rax
+        \\  ret
+        \\
+        \\_weak_external:
+        \\  .quad 0x1234
+        \\
+        \\_weak_external_for_gotpcrel:
+        \\  .quad 0x1234
+        \\
+        \\_weak_external_fn:
+        \\  ret
+        \\
+        \\_weak_internal:
+        \\  .quad 0x1234
+        \\
+        \\_weak_internal_for_gotpcrel:
+        \\  .quad 0x1234
+        \\
+        \\_weak_internal_fn:
+        \\  ret
+        \\
+        \\.data
+        \\  .quad _weak_dysym
+        \\  .quad _weak_external + 2
+        \\  .quad _weak_internal
+        \\
+        \\.tbss _weak_tlv$tlv$init, 4, 2
+        \\.tbss _weak_internal_tlv$tlv$init, 4, 2
+        \\
+        \\.section __DATA,__thread_vars,thread_local_variables
+        \\.globl _weak_tlv
+        \\.weak_definition  _weak_tlv, _weak_internal_tlv
+        \\
+        \\_weak_tlv:
+        \\  .quad __tlv_bootstrap
+        \\  .quad 0
+        \\  .quad _weak_tlv$tlv$init
+        \\
+        \\_weak_internal_tlv:
+        \\  .quad __tlv_bootstrap
+        \\  .quad 0
+        \\  .quad _weak_internal_tlv$tlv$init
+    );
+    exe.addFileSource(lib_out.file);
+    exe.addPrefixedDirectorySource("-Wl,-rpath,", lib_out.dir);
+
+    {
+        const check = exe.check();
+
+        check.checkInDyldInfo();
+        check.checkExact("exports");
+        check.checkExtract("[WEAK] {vmaddr1} _weak_external");
+        check.checkExtract("[WEAK] {vmaddr2} _weak_external_for_gotpcrel");
+        check.checkExtract("[WEAK] {vmaddr3} _weak_external_fn");
+        check.checkExtract("[THREAD_LOCAL, WEAK] {vmaddr4} _weak_tlv");
+
+        check.checkInDyldInfo();
+        check.checkExact("bind info");
+        check.checkContains("(libfoo.dylib) _weak_dysym_for_gotpcrel");
+        check.checkContains("(libfoo.dylib) _weak_dysym_fn");
+        check.checkContains("(libfoo.dylib) _weak_dysym");
+        check.checkContains("(libfoo.dylib) _weak_dysym_tlv");
+
+        check.checkInDyldInfo();
+        check.checkExact("weak bind info");
+        check.checkContains("_weak_external_for_gotpcrel");
+        check.checkContains("_weak_dysym_for_gotpcrel");
+        check.checkContains("_weak_external_fn");
+        check.checkContains("_weak_dysym_fn");
+        check.checkContains("_weak_dysym");
+        check.checkContains("_weak_external");
+        check.checkContains("_weak_tlv");
+        check.checkContains("_weak_dysym_tlv");
+
+        test_step.dependOn(&check.step);
+    }
+
+    const run = exe.run();
+    test_step.dependOn(run.step());
+
+    return test_step;
+}
+
 fn testWeakFramework(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-weak-framework", "");
 
@@ -1786,9 +2136,9 @@ fn testWeakLibrary(b: *Build, opts: Options) *Step {
     check.checkExact("cmd LOAD_WEAK_DYLIB");
     check.checkContains("liba.dylib");
     check.checkInSymtab();
-    check.checkExact("(undefined) weak external _a (from liba)");
+    check.checkExact("(undefined) weakref external _a (from liba)");
     check.checkInSymtab();
-    check.checkExact("(undefined) weak external _asStr (from liba)");
+    check.checkExact("(undefined) weakref external _asStr (from liba)");
     test_step.dependOn(&check.step);
 
     const run = exe.run();
@@ -1814,7 +2164,7 @@ fn testWeakRef(b: *Build, opts: Options) *Step {
 
     const check = exe.check();
     check.checkInSymtab();
-    check.checkExact("(undefined) weak external _foo (from self import)");
+    check.checkExact("(undefined) weakref external _foo (from self import)");
     test_step.dependOn(&check.step);
 
     const run = exe.run();

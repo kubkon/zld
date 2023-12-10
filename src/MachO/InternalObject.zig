@@ -1,8 +1,5 @@
 index: File.Index,
 
-symtab: std.ArrayListUnmanaged(macho.nlist_64) = .{},
-strtab: std.ArrayListUnmanaged(u8) = .{},
-
 symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
 
 alive: bool = true,
@@ -10,32 +7,17 @@ alive: bool = true,
 output_symtab_ctx: MachO.SymtabCtx = .{},
 
 pub fn deinit(self: *InternalObject, allocator: Allocator) void {
-    self.symtab.deinit(allocator);
-    self.strtab.deinit(allocator);
     self.symbols.deinit(allocator);
 }
 
 pub fn addSymbol(self: *InternalObject, name: [:0]const u8, macho_file: *MachO) !Symbol.Index {
     const gpa = macho_file.base.allocator;
-    const nlist_idx = try self.addNlist(gpa);
-    const nlist = &self.symtab.items[nlist_idx];
-    nlist.n_strx = try self.insertString(gpa, name);
-
     try self.symbols.ensureUnusedCapacity(gpa, 1);
     const off = try macho_file.string_intern.insert(gpa, name);
     const gop = try macho_file.getOrCreateGlobal(off);
     self.symbols.addOneAssumeCapacity().* = gop.index;
-    const sym = macho_file.getSymbol(gop.index);
-    sym.file = self.index;
-    sym.nlist_idx = nlist_idx;
-
+    macho_file.getSymbol(gop.index).file = self.index;
     return gop.index;
-}
-
-fn addNlist(self: *InternalObject, allocator: Allocator) !Symbol.Index {
-    const index = @as(Symbol.Index, @intCast(self.symtab.items.len));
-    try self.symtab.append(allocator, MachO.null_sym);
-    return index;
 }
 
 pub fn calcSymtabSize(self: *InternalObject, macho_file: *MachO) !void {
@@ -70,17 +52,6 @@ pub fn writeSymtab(self: InternalObject, macho_file: *MachO) void {
 
 pub fn asFile(self: *InternalObject) File {
     return .{ .internal = self };
-}
-
-fn insertString(self: *InternalObject, allocator: Allocator, name: []const u8) !u32 {
-    const off = @as(u32, @intCast(self.strtab.items.len));
-    try self.strtab.writer(allocator).print("{s}\x00", .{name});
-    return off;
-}
-
-inline fn getString(self: InternalObject, off: u32) [:0]const u8 {
-    assert(off < self.strtab.items.len);
-    return mem.sliceTo(@as([*:0]const u8, @ptrCast(self.strtab.items.ptr + off)), 0);
 }
 
 const FormatContext = struct {

@@ -62,6 +62,7 @@ la_symbol_ptr: LaSymbolPtrSection = .{},
 tlv_ptr: TlvPtrSection = .{},
 rebase: RebaseSection = .{},
 bind: BindSection = .{},
+weak_bind: WeakBindSection = .{},
 lazy_bind: LazyBindSection = .{},
 export_trie: ExportTrieSection = .{},
 unwind_info: UnwindInfo = .{},
@@ -70,6 +71,8 @@ atoms: std.ArrayListUnmanaged(Atom) = .{},
 unwind_records: std.ArrayListUnmanaged(UnwindInfo.Record) = .{},
 
 has_tlv: bool = false,
+binds_to_weak: bool = false,
+weak_defines: bool = false,
 
 pub fn openPath(allocator: Allocator, options: Options, thread_pool: *ThreadPool) !*MachO {
     const file = try options.emit.directory.createFile(options.emit.sub_path, .{
@@ -134,6 +137,7 @@ pub fn deinit(self: *MachO) void {
     self.tlv_ptr.deinit(gpa);
     self.rebase.deinit(gpa);
     self.bind.deinit(gpa);
+    self.weak_bind.deinit(gpa);
     self.lazy_bind.deinit(gpa);
     self.export_trie.deinit(gpa);
     self.unwind_info.deinit(gpa);
@@ -926,10 +930,6 @@ pub fn resolveSymbols(self: *MachO) !void {
     for (self.dylibs.items) |index| self.getFile(index).?.resolveSymbols(self);
 }
 
-/// Traverses all objects and dylibs marking any object referenced by
-/// a live object/dylib as alive itself.
-/// This routine will prune unneeded objects extracted from archives and
-/// unneeded dylibs.
 fn markLive(self: *MachO) void {
     for (self.undefined_symbols.items) |index| {
         if (self.getSymbol(index).getFile(self)) |file| file.setAlive();
@@ -956,8 +956,8 @@ fn markImportsAndExports(self: *MachO) void {
             for (self.getFile(index).?.getSymbols()) |sym_index| {
                 const sym = self.getSymbol(sym_index);
                 const file = sym.getFile(self) orelse continue;
-                if (!sym.getNlist(self).ext()) continue;
-                if (file != .dylib and !sym.getNlist(self).pext()) sym.flags.@"export" = true;
+                if (sym.visibility != .global) continue;
+                if (file != .dylib) sym.flags.@"export" = true;
             }
         };
 
@@ -965,9 +965,8 @@ fn markImportsAndExports(self: *MachO) void {
         for (self.getFile(index).?.getSymbols()) |sym_index| {
             const sym = self.getSymbol(sym_index);
             const file = sym.getFile(self) orelse continue;
-            if (!sym.getNlist(self).ext()) continue;
-            if (sym.getNlist(self).pext()) continue;
-            if (file == .dylib and !sym.isAbs(self)) {
+            if (sym.visibility != .global) continue;
+            if (file == .dylib and !sym.flags.abs) {
                 sym.flags.import = true;
                 continue;
             }
@@ -980,8 +979,8 @@ fn markImportsAndExports(self: *MachO) void {
     for (self.undefined_symbols.items) |index| {
         const sym = self.getSymbol(index);
         if (sym.getFile(self)) |file| {
-            if (sym.getNlist(self).pext()) continue;
-            if (file == .dylib and !sym.isAbs(self)) sym.flags.import = true;
+            if (sym.visibility != .global) continue;
+            if (file == .dylib and !sym.flags.abs) sym.flags.import = true;
         }
     }
 }
@@ -1008,8 +1007,8 @@ fn resolveSyntheticSymbols(self: *MachO) !void {
         self.mh_execute_header_index = try internal.addSymbol("__mh_execute_header", self);
         const sym = self.getSymbol(self.mh_execute_header_index.?);
         sym.flags.@"export" = true;
-        const nlist = &internal.symtab.items[sym.nlist_idx];
-        nlist.n_desc = macho.REFERENCED_DYNAMICALLY;
+        sym.flags.dyn_ref = true;
+        sym.visibility = .global;
     } else if (self.options.dylib) {
         self.mh_dylib_header_index = try internal.addSymbol("__mh_dylib_header", self);
     }
@@ -1081,7 +1080,6 @@ fn scanRelocs(self: *MachO) !void {
             try self.stubs.addSymbol(index, self);
         }
         if (symbol.flags.tlv_ptr) {
-            assert(symbol.flags.import);
             log.debug("'{s}' needs TLV pointer", .{symbol.getName(self)});
             try self.tlv_ptr.addSymbol(index, self);
         }
@@ -1372,21 +1370,20 @@ fn calcSectionSizes(self: *MachO) !void {
 
     const cpu_arch = self.options.cpu_arch.?;
 
+    if (self.data_sect_index) |idx| {
+        const header = &self.sections.items(.header)[idx];
+        header.size += @sizeOf(u64);
+        header.@"align" = 3;
+    }
+
     const slice = self.sections.slice();
-    for (slice.items(.header), slice.items(.atoms), 0..) |*header, atoms, idx| {
+    for (slice.items(.header), slice.items(.atoms)) |*header, atoms| {
         if (atoms.items.len == 0) continue;
 
         // TODO
         // if (self.requiresThunks()) {
         //     if (header.isCode()) continue;
         // }
-
-        if (self.data_sect_index) |didx| {
-            if (didx == idx) {
-                header.size += @sizeOf(u64);
-                header.@"align" = 3;
-            }
-        }
 
         for (atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index).?;
@@ -1708,58 +1705,63 @@ fn allocateSyntheticSymbols(self: *MachO) void {
 fn initDyldInfoSections(self: *MachO) !void {
     const gpa = self.base.allocator;
 
-    if (self.got.needs_rebase) {
+    if (self.got_sect_index != null) {
         try self.got.addRebase(self);
-    }
-    if (self.got.needs_bind) {
         try self.got.addBind(self);
+        try self.got.addWeakBind(self);
     }
     if (self.tlv_ptr_sect_index != null) {
+        try self.tlv_ptr.addRebase(self);
         try self.tlv_ptr.addBind(self);
+        try self.tlv_ptr.addWeakBind(self);
     }
     if (self.la_symbol_ptr_sect_index != null) {
         try self.la_symbol_ptr.addRebase(self);
+        try self.la_symbol_ptr.addBind(self);
+        try self.la_symbol_ptr.addWeakBind(self);
         try self.la_symbol_ptr.addLazyBind(self);
     }
     try self.initExportTrie();
 
     var nrebases: usize = 0;
     var nbinds: usize = 0;
+    var nweak_binds: usize = 0;
     for (self.objects.items) |index| {
         const object = self.getFile(index).?.object;
         nrebases += object.num_rebase_relocs;
         nbinds += object.num_bind_relocs;
+        nweak_binds += object.num_weak_bind_relocs;
     }
     try self.rebase.entries.ensureUnusedCapacity(gpa, nrebases);
     try self.bind.entries.ensureUnusedCapacity(gpa, nbinds);
+    try self.weak_bind.entries.ensureUnusedCapacity(gpa, nweak_binds);
 }
 
 fn initExportTrie(self: *MachO) !void {
     const gpa = self.base.allocator;
     try self.export_trie.init(gpa);
 
-    // TODO handle macho.EXPORT_SYMBOL_FLAGS_REEXPORT and macho.EXPORT_SYMBOL_FLAGS_STUB_AND_RESOLVER.
-
     const seg = self.getTextSegment();
-
     for (self.objects.items) |index| {
         for (self.getFile(index).?.getSymbols()) |sym_index| {
             const sym = self.getSymbol(sym_index);
             if (!sym.flags.@"export") continue;
             if (sym.getAtom(self)) |atom| if (!atom.flags.alive) continue;
             if (sym.getFile(self).?.getIndex() != index) continue;
-            var flags: u64 = macho.EXPORT_SYMBOL_FLAGS_KIND_REGULAR;
-            if (sym.isAbs(self)) {
-                flags |= macho.EXPORT_SYMBOL_FLAGS_KIND_ABSOLUTE;
-            } else {
-                const out_sect = self.sections.items(.header)[sym.out_n_sect];
-                if (out_sect.type() == macho.S_THREAD_LOCAL_VARIABLES) {
-                    flags |= macho.EXPORT_SYMBOL_FLAGS_KIND_THREAD_LOCAL;
-                }
+            var flags: u64 = if (sym.flags.abs)
+                macho.EXPORT_SYMBOL_FLAGS_KIND_ABSOLUTE
+            else if (sym.flags.tlv)
+                macho.EXPORT_SYMBOL_FLAGS_KIND_THREAD_LOCAL
+            else
+                macho.EXPORT_SYMBOL_FLAGS_KIND_REGULAR;
+            if (sym.flags.weak) {
+                flags |= macho.EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION;
+                self.weak_defines = true;
+                self.binds_to_weak = true;
             }
             try self.export_trie.put(gpa, .{
                 .name = sym.getName(self),
-                .vmaddr_offset = sym.getAddress(.{}, self) - seg.vmaddr,
+                .vmaddr_offset = sym.getAddress(.{ .stubs = false }, self) - seg.vmaddr,
                 .export_flags = flags,
             });
         }
@@ -1826,6 +1828,7 @@ fn finalizeDyldInfoSections(self: *MachO) !void {
     const gpa = self.base.allocator;
     try self.rebase.finalize(gpa);
     try self.bind.finalize(gpa, self);
+    try self.weak_bind.finalize(gpa, self);
     try self.lazy_bind.finalize(gpa, self);
     try self.export_trie.finalize(gpa);
 }
@@ -1906,6 +1909,10 @@ fn writeDyldInfoSections(self: *MachO) !void {
     cmd.bind_size = mem.alignForward(u32, @intCast(self.bind.size()), @alignOf(u64));
     needed_size += cmd.bind_size;
 
+    cmd.weak_bind_off = needed_size;
+    cmd.weak_bind_size = mem.alignForward(u32, @intCast(self.weak_bind.size()), @alignOf(u64));
+    needed_size += cmd.weak_bind_size;
+
     cmd.lazy_bind_off = needed_size;
     cmd.lazy_bind_size = mem.alignForward(u32, @intCast(self.lazy_bind.size()), @alignOf(u64));
     needed_size += cmd.lazy_bind_size;
@@ -1924,6 +1931,8 @@ fn writeDyldInfoSections(self: *MachO) !void {
     try self.rebase.write(writer);
     try stream.seekTo(cmd.bind_off);
     try self.bind.write(writer);
+    try stream.seekTo(cmd.weak_bind_off);
+    try self.weak_bind.write(writer);
     try stream.seekTo(cmd.lazy_bind_off);
     try self.lazy_bind.write(writer);
     try stream.seekTo(cmd.export_off);
@@ -1932,6 +1941,7 @@ fn writeDyldInfoSections(self: *MachO) !void {
     const off = try self.getNextLinkeditOffset(@alignOf(u64));
     cmd.rebase_off += @intCast(off);
     cmd.bind_off += @intCast(off);
+    cmd.weak_bind_off += @intCast(off);
     cmd.lazy_bind_off += @intCast(off);
     cmd.export_off += @intCast(off);
 
@@ -2241,6 +2251,12 @@ fn writeHeader(self: *MachO, ncmds: usize, sizeofcmds: usize) !void {
 
     if (self.has_tlv) {
         header.flags |= macho.MH_HAS_TLV_DESCRIPTORS;
+    }
+    if (self.binds_to_weak) {
+        header.flags |= macho.MH_BINDS_TO_WEAK;
+    }
+    if (self.weak_defines) {
+        header.flags |= macho.MH_WEAK_DEFINES;
     }
 
     header.ncmds = @intCast(ncmds);
@@ -2719,4 +2735,5 @@ const StubsHelperSection = synthetic.StubsHelperSection;
 const ThreadPool = std.Thread.Pool;
 const TlvPtrSection = synthetic.TlvPtrSection;
 const UnwindInfo = @import("MachO/UnwindInfo.zig");
+const WeakBindSection = synthetic.WeakBindSection;
 const Zld = @import("Zld.zig");

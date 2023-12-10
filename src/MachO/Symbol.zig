@@ -24,13 +24,9 @@ nlist_idx: u32 = 0,
 /// Misc flags for the symbol packaged as packed struct for compression.
 flags: Flags = .{},
 
-extra: u32 = 0,
+visibility: Visibility = .local,
 
-pub fn isAbs(symbol: Symbol, macho_file: *MachO) bool {
-    const file = symbol.getFile(macho_file).?;
-    if (file == .dylib) return symbol.getNlist(macho_file).abs();
-    return !symbol.flags.import and symbol.getAtom(macho_file) == null and symbol.out_n_sect == 0 and file != .internal;
-}
+extra: u32 = 0,
 
 pub fn isLocal(symbol: Symbol) bool {
     return !(symbol.flags.import or symbol.flags.@"export");
@@ -41,13 +37,13 @@ pub fn isTlvInit(symbol: Symbol, macho_file: *MachO) bool {
     return std.mem.indexOf(u8, name, "$tlv$init") != null;
 }
 
-pub fn isWeakRef(symbol: Symbol, macho_file: *MachO) bool {
-    if (!symbol.flags.import) return false;
-    switch (symbol.getFile(macho_file).?) {
-        .dylib => |x| if (x.weak) return true,
-        else => {},
-    }
-    return symbol.getNlist(macho_file).weakRef();
+pub fn weakRef(symbol: Symbol, macho_file: *MachO) bool {
+    const file = symbol.getFile(macho_file).?;
+    const is_dylib_weak = switch (file) {
+        .dylib => |x| x.weak,
+        else => false,
+    };
+    return is_dylib_weak or symbol.flags.weak_ref;
 }
 
 pub fn getName(symbol: Symbol, macho_file: *MachO) [:0]const u8 {
@@ -62,11 +58,12 @@ pub fn getFile(symbol: Symbol, macho_file: *MachO) ?File {
     return macho_file.getFile(symbol.file);
 }
 
+/// Asserts file is an object.
 pub fn getNlist(symbol: Symbol, macho_file: *MachO) macho.nlist_64 {
     const file = symbol.getFile(macho_file).?;
     return switch (file) {
         .object => |x| x.symtab.items(.nlist)[symbol.nlist_idx],
-        inline else => |x| x.symtab.items[symbol.nlist_idx],
+        else => unreachable,
     };
 }
 
@@ -88,12 +85,15 @@ pub fn getDylibOrdinal(symbol: Symbol, macho_file: *MachO) ?u16 {
 
 pub fn getSymbolRank(symbol: Symbol, macho_file: *MachO) u32 {
     const file = symbol.getFile(macho_file) orelse return std.math.maxInt(u32);
-    const nlist = symbol.getNlist(macho_file);
     const in_archive = switch (file) {
         .object => |x| !x.alive,
         else => false,
     };
-    return file.getSymbolRank(nlist, in_archive);
+    return file.getSymbolRank(.{
+        .archive = in_archive,
+        .weak = symbol.flags.weak,
+        .tentative = symbol.flags.tentative,
+    });
 }
 
 pub fn getAddress(symbol: Symbol, opts: struct {
@@ -170,22 +170,32 @@ pub inline fn setExtra(symbol: Symbol, extra: Extra, macho_file: *MachO) void {
 }
 
 pub fn setOutputSym(symbol: Symbol, macho_file: *MachO, out: *macho.nlist_64) void {
-    const nlist = symbol.getNlist(macho_file);
     if (symbol.isLocal()) {
-        out.n_type = if (nlist.abs()) macho.N_ABS else macho.N_SECT;
-        out.n_sect = if (nlist.abs()) 0 else @intCast(symbol.out_n_sect + 1);
+        out.n_type = if (symbol.flags.abs) macho.N_ABS else macho.N_SECT;
+        out.n_sect = if (symbol.flags.abs) 0 else @intCast(symbol.out_n_sect + 1);
         out.n_desc = 0;
         out.n_value = symbol.getAddress(.{}, macho_file);
+
+        switch (symbol.visibility) {
+            .linkage => out.n_type |= macho.N_PEXT,
+            else => {},
+        }
     } else if (symbol.flags.@"export") {
+        assert(symbol.visibility == .global);
         out.n_type = macho.N_EXT;
-        out.n_type |= if (nlist.abs()) macho.N_ABS else macho.N_SECT;
-        out.n_sect = if (nlist.abs()) 0 else @intCast(symbol.out_n_sect + 1);
+        out.n_type |= if (symbol.flags.abs) macho.N_ABS else macho.N_SECT;
+        out.n_sect = if (symbol.flags.abs) 0 else @intCast(symbol.out_n_sect + 1);
         out.n_value = symbol.getAddress(.{}, macho_file);
         out.n_desc = 0;
 
-        if (symbol.flags.weak) out.n_desc |= macho.N_WEAK_DEF;
-        if (nlist.n_desc & macho.REFERENCED_DYNAMICALLY != 0) out.n_desc |= macho.REFERENCED_DYNAMICALLY;
+        if (symbol.flags.weak) {
+            out.n_desc |= macho.N_WEAK_DEF;
+        }
+        if (symbol.flags.dyn_ref) {
+            out.n_desc |= macho.REFERENCED_DYNAMICALLY;
+        }
     } else {
+        assert(symbol.visibility == .global);
         out.n_type = macho.N_EXT;
         out.n_sect = 0;
         out.n_value = 0;
@@ -195,7 +205,11 @@ pub fn setOutputSym(symbol: Symbol, macho_file: *MachO, out: *macho.nlist_64) vo
         else
             0;
 
-        if (symbol.isWeakRef(macho_file)) {
+        if (symbol.flags.weak) {
+            out.n_desc |= macho.N_WEAK_DEF;
+        }
+
+        if (symbol.weakRef(macho_file)) {
             out.n_desc |= macho.N_WEAK_REF;
         }
     }
@@ -266,6 +280,24 @@ pub const Flags = packed struct {
     /// Whether this symbol is weak.
     weak: bool = false,
 
+    /// Whether this symbol is weakly referenced.
+    weak_ref: bool = false,
+
+    /// Whether this symbol is dynamically referenced.
+    dyn_ref: bool = false,
+
+    /// Whether this symbol was marked as N_NO_DEAD_STRIP.
+    no_dead_strip: bool = false,
+
+    /// Whether this symbol is absolute.
+    abs: bool = false,
+
+    /// Whether this symbol is a tentative definition.
+    tentative: bool = false,
+
+    /// Whether this symbol is a thread-local variable.
+    tlv: bool = false,
+
     /// Whether the symbol makes into the output symtab or not.
     output_symtab: bool = false,
 
@@ -277,6 +309,12 @@ pub const Flags = packed struct {
 
     /// Whether the symbol has a TLV pointer.
     tlv_ptr: bool = false,
+};
+
+pub const Visibility = enum {
+    global,
+    linkage,
+    local,
 };
 
 pub const Extra = struct {
