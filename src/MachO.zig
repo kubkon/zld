@@ -696,6 +696,7 @@ const DylibOpts = struct {
     dependent: bool = false,
     needed: bool = false,
     weak: bool = false,
+    reexport: bool = false,
 };
 
 fn parseDylib(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
@@ -740,6 +741,7 @@ fn parseDylib(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
         .index = index,
         .needed = obj.needed,
         .weak = obj.weak,
+        .reexport = obj.reexport,
         .alive = obj.needed or !obj.dependent and !self.options.dead_strip_dylibs,
     } });
     const dylib = &self.files.items(.data)[index].dylib;
@@ -776,6 +778,7 @@ fn parseTbd(self: *MachO, obj: LinkObject) !bool {
         .index = index,
         .needed = obj.needed,
         .weak = obj.weak,
+        .reexport = obj.reexport,
         .alive = obj.needed or !obj.dependent and !self.options.dead_strip_dylibs,
     } });
     const dylib = &self.files.items(.data)[index].dylib;
@@ -2623,6 +2626,7 @@ pub const LinkObject = struct {
     needed: bool = false,
     weak: bool = false,
     hidden: bool = false,
+    reexport: bool = false,
     must_link: bool = false,
     dependent: bool = false,
 
@@ -2643,6 +2647,9 @@ pub const LinkObject = struct {
             }
             if (self.hidden) {
                 try writer.writeAll("-hidden_lib");
+            }
+            if (self.reexport) {
+                try writer.writeAll("-reexport_lib");
             }
             if (self.must_link and self.tag == .obj) {
                 try writer.writeAll("-force_load");

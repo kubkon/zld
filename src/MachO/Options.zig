@@ -56,6 +56,8 @@ const usage =
     \\-platform_version [platform] [min_version] [sdk_version]
     \\                                   Sets the platform, oldest supported version of that platform and 
     \\                                   the SDK it was built against
+    \\-reexport-l[name]                  Link against library and re-export it for the clients
+    \\  -reexport_library [name]
     \\-rpath [path]                      Specify runtime path
     \\-S                                 Do not put debug information (STABS or DWARF) in the output file
     \\-search_paths_first                Search each dir in library search paths for `libx.dylib` then `libx.a`
@@ -163,6 +165,10 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             try positionals.append(.{ .path = path, .tag = .lib, .needed = true });
         } else if (p.arg1("needed_framework")) |path| {
             try positionals.append(.{ .path = path, .tag = .framework, .needed = true });
+        } else if (p.arg1("reexport-l")) |path| {
+            try positionals.append(.{ .path = path, .tag = .lib, .reexport = true });
+        } else if (p.arg1("reexport_library")) |path| {
+            try positionals.append(.{ .path = path, .tag = .lib, .reexport = true });
         } else if (p.arg1("weak-l")) |path| {
             try positionals.append(.{ .path = path, .tag = .lib, .weak = true });
         } else if (p.arg1("weak_library")) |path| {

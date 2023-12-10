@@ -178,7 +178,7 @@ pub fn ArgParser(comptime Ctx: type) type {
                 }
                 // MachO specific
                 if (mem.eql(u8, pat, "needed-l") or mem.eql(u8, pat, "weak-l") or
-                    mem.eql(u8, pat, "hidden-l"))
+                    mem.eql(u8, pat, "hidden-l") or mem.eql(u8, pat, "reexport-l"))
                 {
                     if (mem.startsWith(u8, actual_arg, pat)) {
                         return actual_arg[pat.len..];

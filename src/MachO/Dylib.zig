@@ -14,6 +14,7 @@ platform: ?MachO.Options.Platform = null,
 
 needed: bool,
 weak: bool,
+reexport: bool,
 alive: bool,
 
 output_symtab_ctx: MachO.SymtabCtx = .{},
