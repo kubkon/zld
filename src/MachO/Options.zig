@@ -21,6 +21,7 @@ const usage =
     \\Usage: {s} [files...]
     \\
     \\General Options:
+    \\-all_load                          Loads all members of all static archive libraries
     \\-arch [name]                       Specifies which architecture the output file should be
     \\-current_version [value]           Specifies the current version number of the library
     \\-compatibility_version [value]     Specifies the compatibility version number of the library
@@ -108,6 +109,7 @@ dead_strip_dylibs: bool = false,
 undefined_treatment: UndefinedTreatment = .@"error",
 no_deduplicate: bool = false,
 namespace: Namespace = .two_level,
+all_load: bool = false,
 
 pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options {
     if (args.len == 0) ctx.fatal(usage, .{cmd});
@@ -216,6 +218,8 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             try force_undefined_symbols.put(name, {});
         } else if (p.flag1("S")) {
             opts.strip = true;
+        } else if (p.flag1("all_load")) {
+            opts.all_load = true;
         } else if (p.arg1("force_load")) |path| {
             try positionals.append(.{ .path = path, .tag = .obj, .must_link = true });
         } else if (p.arg1("arch")) |value| {

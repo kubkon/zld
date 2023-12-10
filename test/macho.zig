@@ -19,6 +19,7 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
         break :blk std.zig.system.darwin.getSdk(b.allocator, target_info.target);
     };
 
+    macho_step.dependOn(testAllLoad(b, opts));
     macho_step.dependOn(testBuildVersionMacOS(b, opts));
     // macho_step.dependOn(testBuildVersionIOS(b, opts)); // TODO arm64 support
     macho_step.dependOn(testDeadStrip(b, opts));
@@ -63,6 +64,69 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testWeakRef(b, opts));
 
     return macho_step;
+}
+
+fn testAllLoad(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-all-load", "");
+
+    const obj1 = cc(b, opts);
+    obj1.addCSource("int foo = 1;");
+    obj1.addArg("-c");
+
+    const obj2 = cc(b, opts);
+    obj2.addCSource("int bar = 42;");
+    obj2.addArg("-c");
+
+    const lib = ar(b);
+    lib.addFileSource(obj1.out);
+    lib.addFileSource(obj2.out);
+    const lib_out = lib.saveOutputAs("liba.a");
+
+    const main_o = cc(b, opts);
+    main_o.addCSource(
+        \\extern int foo;
+        \\int main() {
+        \\  return foo;
+        \\}
+    );
+    main_o.addArg("-c");
+
+    {
+        const exe = cc(b, opts);
+        exe.addFileSource(lib_out.file);
+        exe.addFileSource(main_o.out);
+
+        const check = exe.check();
+        check.checkInSymtab();
+        check.checkNotPresent("external _bar");
+        check.checkInSymtab();
+        check.checkContains("external _foo");
+        test_step.dependOn(&check.step);
+
+        const run = exe.run();
+        run.expectExitCode(1);
+        test_step.dependOn(run.step());
+    }
+
+    {
+        const exe = cc(b, opts);
+        exe.addFileSource(lib_out.file);
+        exe.addFileSource(main_o.out);
+        exe.addArg("-Wl,-all_load");
+
+        const check = exe.check();
+        check.checkInSymtab();
+        check.checkContains("external _bar");
+        check.checkInSymtab();
+        check.checkContains("external _foo");
+        test_step.dependOn(&check.step);
+
+        const run = exe.run();
+        run.expectExitCode(1);
+        test_step.dependOn(run.step());
+    }
+
+    return test_step;
 }
 
 fn testBuildVersionMacOS(b: *Build, opts: Options) *Step {

@@ -682,7 +682,7 @@ fn parseArchive(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
         self.files.set(index, .{ .object = extracted });
         const object = &self.files.items(.data)[index].object;
         object.index = index;
-        object.alive = obj.must_link or obj.needed;
+        object.alive = obj.must_link or obj.needed or self.options.all_load;
         try object.parse(self);
         try self.objects.append(gpa, index);
         self.validateCpuArch(index);
