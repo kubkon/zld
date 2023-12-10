@@ -785,7 +785,7 @@ pub fn resolveSymbols(self: *Object, macho_file: *MachO) void {
         // Regardless of who the winner is, we still merge symbol visibility here.
         if (nlist.pext() or (nlist.weakDef() and nlist.weakRef()) or self.hidden) {
             if (symbol.visibility != .global) {
-                symbol.visibility = .linkage;
+                symbol.visibility = .hidden;
             }
         } else {
             symbol.visibility = .global;
