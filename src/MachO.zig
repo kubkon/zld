@@ -235,6 +235,7 @@ pub fn flush(self: *MachO) !void {
             .needed = obj.needed,
             .weak = obj.weak,
             .hidden = obj.hidden,
+            .reexport = obj.reexport,
             .must_link = obj.must_link,
         });
     }
@@ -2199,7 +2200,12 @@ fn writeLoadCommands(self: *MachO) !struct { usize, usize, usize } {
         if (!dylib.alive) continue;
         const dylib_id = dylib.id.?;
         try load_commands.writeDylibLC(.{
-            .cmd = if (dylib.weak) .LOAD_WEAK_DYLIB else .LOAD_DYLIB,
+            .cmd = if (dylib.weak)
+                .LOAD_WEAK_DYLIB
+            else if (dylib.reexport)
+                .REEXPORT_DYLIB
+            else
+                .LOAD_DYLIB,
             .name = dylib_id.name,
             .timestamp = dylib_id.timestamp,
             .current_version = dylib_id.current_version,
@@ -2242,10 +2248,16 @@ fn writeHeader(self: *MachO, ncmds: usize, sizeofcmds: usize) !void {
 
     if (self.options.dylib) {
         header.filetype = macho.MH_DYLIB;
-        header.flags |= macho.MH_NO_REEXPORTED_DYLIBS;
     } else {
         header.filetype = macho.MH_EXECUTE;
         header.flags |= macho.MH_PIE;
+    }
+
+    const has_reexports = for (self.dylibs.items) |index| {
+        if (self.getFile(index).?.dylib.reexport) break true;
+    } else false;
+    if (!has_reexports) {
+        header.flags |= macho.MH_NO_REEXPORTED_DYLIBS;
     }
 
     if (self.has_tlv) {
