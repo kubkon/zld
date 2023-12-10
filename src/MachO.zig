@@ -481,6 +481,7 @@ fn resolveFile(
         .tag = obj.tag,
         .needed = obj.needed,
         .weak = obj.weak,
+        .hidden = obj.hidden,
         .must_link = obj.must_link,
     };
 }
@@ -683,6 +684,7 @@ fn parseArchive(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
         const object = &self.files.items(.data)[index].object;
         object.index = index;
         object.alive = obj.must_link or obj.needed or self.options.all_load;
+        object.hidden = obj.hidden;
         try object.parse(self);
         try self.objects.append(gpa, index);
         self.validateCpuArch(index);
@@ -2626,6 +2628,7 @@ pub const LinkObject = struct {
     tag: enum { obj, lib, framework },
     needed: bool = false,
     weak: bool = false,
+    hidden: bool = false,
     must_link: bool = false,
     dependent: bool = false,
 
@@ -2643,6 +2646,9 @@ pub const LinkObject = struct {
             }
             if (self.weak) {
                 try writer.print("-weak_{s}", .{@tagName(self.tag)});
+            }
+            if (self.hidden) {
+                try writer.writeAll("-hidden_lib");
             }
             if (self.must_link and self.tag == .obj) {
                 try writer.writeAll("-force_load");

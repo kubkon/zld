@@ -38,6 +38,7 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testLayout(b, opts));
     macho_step.dependOn(testLargeBss(b, opts));
     macho_step.dependOn(testLinkOrder(b, opts));
+    macho_step.dependOn(testLoadHidden(b, opts));
     macho_step.dependOn(testMhExecuteHeader(b, opts));
     macho_step.dependOn(testNeededFramework(b, opts));
     macho_step.dependOn(testNeededLibrary(b, opts));
@@ -1034,6 +1035,116 @@ fn testLinkOrder(b: *Build, opts: Options) *Step {
 
         const run = exe.run();
         run.expectStdOutEqual("42 0 -2");
+        test_step.dependOn(run.step());
+    }
+
+    return test_step;
+}
+
+fn testLoadHidden(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-load-hidden", "");
+
+    const obj = cc(b, opts);
+    obj.addCSource(
+        \\int foo = 42;
+        \\int getFoo() { return foo; }
+    );
+    obj.addArg("-c");
+
+    const lib = ar(b);
+    lib.addFileSource(obj.out);
+    const lib_out = lib.saveOutputAs("liba.a");
+
+    const main_o = cc(b, opts);
+    main_o.addCSource(
+        \\int actuallyGetFoo();
+        \\int main() {
+        \\  return actuallyGetFoo();
+        \\}
+    );
+    main_o.addArg("-c");
+
+    const dylib_o = cc(b, opts);
+    dylib_o.addCSource(
+        \\extern int foo;
+        \\int getFoo();
+        \\int actuallyGetFoo() { return foo; };
+    );
+    dylib_o.addArg("-c");
+
+    {
+        const dylib = cc(b, opts);
+        dylib.addFileSource(dylib_o.out);
+        dylib.addPrefixedDirectorySource("-L", lib_out.dir);
+        dylib.addArgs(&.{ "-shared", "-Wl,-hidden-la", "-Wl,-install_name,@rpath/libb.dylib" });
+        const dylib_out = dylib.saveOutputAs("libb.dylib");
+
+        const check = dylib.check();
+        check.checkInSymtab();
+        check.checkContains("external _actuallyGetFoo");
+        check.checkNotPresent("external _foo");
+        check.checkNotPresent("external _getFoo");
+        test_step.dependOn(&check.step);
+
+        const exe = cc(b, opts);
+        exe.addFileSource(main_o.out);
+        exe.addPrefixedDirectorySource("-L", dylib_out.dir);
+        exe.addArg("-lb");
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", dylib_out.dir);
+
+        const run = exe.run();
+        run.expectExitCode(42);
+        test_step.dependOn(run.step());
+    }
+
+    {
+        const dylib = cc(b, opts);
+        dylib.addFileSource(dylib_o.out);
+        dylib.addArg("-load_hidden");
+        dylib.addFileSource(lib.out);
+        dylib.addArgs(&.{ "-shared", "-Wl,-install_name,@rpath/libb.dylib" });
+        const dylib_out = dylib.saveOutputAs("libb.dylib");
+
+        const check = dylib.check();
+        check.checkInSymtab();
+        check.checkContains("external _actuallyGetFoo");
+        check.checkNotPresent("external _foo");
+        check.checkNotPresent("external _getFoo");
+        test_step.dependOn(&check.step);
+
+        const exe = cc(b, opts);
+        exe.addFileSource(main_o.out);
+        exe.addPrefixedDirectorySource("-L", dylib_out.dir);
+        exe.addArg("-lb");
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", dylib_out.dir);
+
+        const run = exe.run();
+        run.expectExitCode(42);
+        test_step.dependOn(run.step());
+    }
+
+    {
+        const dylib = cc(b, opts);
+        dylib.addFileSource(dylib_o.out);
+        dylib.addFileSource(lib.out);
+        dylib.addArgs(&.{ "-shared", "-Wl,-install_name,@rpath/libb.dylib" });
+        const dylib_out = dylib.saveOutputAs("libb.dylib");
+
+        const check = dylib.check();
+        check.checkInSymtab();
+        check.checkContains("external _actuallyGetFoo");
+        check.checkContains("external _foo");
+        check.checkContains("external _getFoo");
+        test_step.dependOn(&check.step);
+
+        const exe = cc(b, opts);
+        exe.addFileSource(main_o.out);
+        exe.addPrefixedDirectorySource("-L", dylib_out.dir);
+        exe.addArg("-lb");
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", dylib_out.dir);
+
+        const run = exe.run();
+        run.expectExitCode(42);
         test_step.dependOn(run.step());
     }
 

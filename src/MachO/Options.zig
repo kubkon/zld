@@ -41,6 +41,8 @@ const usage =
     \\                                   in hexadecimal notation
     \\-headerpad_max_install_names       Set enough space as if all paths were MAXPATHLEN
     \\--help                             Print this help and exit
+    \\-hidden-l[name]                    Link against a static library but treat symbols as visibility hidden.
+    \\  -load_hidden [name]
     \\-install_name                      Add dylib's install name
     \\  -dylib_install_name
     \\-l[name]                           Link against library
@@ -153,6 +155,8 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             try positionals.append(.{ .path = path, .tag = .framework });
         } else if (p.arg1("F")) |path| {
             try framework_dirs.put(path, {});
+        } else if (p.arg1("hidden-l")) |path| {
+            try positionals.append(.{ .path = path, .tag = .lib, .hidden = true });
         } else if (p.arg1("needed-l")) |path| {
             try positionals.append(.{ .path = path, .tag = .lib, .needed = true });
         } else if (p.arg1("needed_library")) |path| {
@@ -222,6 +226,8 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             opts.all_load = true;
         } else if (p.arg1("force_load")) |path| {
             try positionals.append(.{ .path = path, .tag = .obj, .must_link = true });
+        } else if (p.arg1("load_hidden")) |path| {
+            try positionals.append(.{ .path = path, .tag = .obj, .hidden = true });
         } else if (p.arg1("arch")) |value| {
             if (mem.eql(u8, value, "arm64")) {
                 opts.cpu_arch = .aarch64;

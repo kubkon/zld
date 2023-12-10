@@ -25,6 +25,7 @@ unwind_records: std.ArrayListUnmanaged(UnwindInfo.Record.Index) = .{},
 has_unwind: bool = false,
 has_eh_frame: bool = false,
 alive: bool = true,
+hidden: bool = false,
 num_rebase_relocs: u32 = 0,
 num_bind_relocs: u32 = 0,
 num_weak_bind_relocs: u32 = 0,
@@ -782,7 +783,7 @@ pub fn resolveSymbols(self: *Object, macho_file: *MachO) void {
         }
 
         // Regardless of who the winner is, we still merge symbol visibility here.
-        if (nlist.pext() or nlist.weakDef() and nlist.weakRef()) {
+        if (nlist.pext() or (nlist.weakDef() and nlist.weakRef()) or self.hidden) {
             if (symbol.visibility != .global) {
                 symbol.visibility = .linkage;
             }
