@@ -196,16 +196,47 @@ pub fn flush(self: *MachO) !void {
     var resolved_objects = std.ArrayList(LinkObject).init(arena);
     try resolved_objects.ensureTotalCapacityPrecise(self.options.positionals.len);
     for (self.options.positionals) |obj| {
-        const resolved_obj = self.resolveFile(
-            arena,
-            obj,
-            lib_dirs.items,
-            framework_dirs.items,
-        ) catch |err| switch (err) {
-            error.ResolveFail => continue, // Already flagged up to the user
-            else => |e| return e,
+        const full_path = blk: {
+            switch (obj.tag) {
+                .obj => {
+                    var buffer: [fs.MAX_PATH_BYTES]u8 = undefined;
+                    const full_path = std.fs.realpath(obj.path, &buffer) catch |err| switch (err) {
+                        error.FileNotFound => {
+                            self.base.fatal("file not found '{s}'", .{obj.path});
+                            return error.ResolveFail;
+                        },
+                        else => |e| return e,
+                    };
+                    break :blk try arena.dupe(u8, full_path);
+                },
+                .lib => {
+                    const full_path = (try self.resolveLib(arena, lib_dirs.items, obj.path)) orelse {
+                        const err = try self.base.addErrorWithNotes(lib_dirs.items.len);
+                        try err.addMsg("library not found for -l{s}", .{obj.path});
+                        for (lib_dirs.items) |dir| try err.addNote("tried {s}", .{dir});
+                        return error.ResolveFail;
+                    };
+                    break :blk full_path;
+                },
+                .framework => {
+                    const full_path = (try self.resolveFramework(arena, framework_dirs.items, obj.path)) orelse {
+                        const err = try self.base.addErrorWithNotes(framework_dirs.items.len);
+                        try err.addMsg("framework not found for -framework {s}", .{obj.path});
+                        for (framework_dirs.items) |dir| try err.addNote("tried {s}", .{dir});
+                        return error.ResolveFail;
+                    };
+                    break :blk full_path;
+                },
+            }
         };
-        resolved_objects.appendAssumeCapacity(resolved_obj);
+        resolved_objects.appendAssumeCapacity(.{
+            .path = full_path,
+            .tag = obj.tag,
+            .needed = obj.needed,
+            .weak = obj.weak,
+            .hidden = obj.hidden,
+            .must_link = obj.must_link,
+        });
     }
 
     if (self.options.cpu_arch == null) {
@@ -250,7 +281,7 @@ pub fn flush(self: *MachO) !void {
     }
 
     // Parse dependent dylibs
-    try self.parseDependentDylibs(arena);
+    try self.parseDependentDylibs(arena, lib_dirs.items, framework_dirs.items);
 
     {
         const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
@@ -431,59 +462,6 @@ fn resolveFramework(
         .paths_first => return try resolvePathsFirst(arena, search_dirs, path),
         .dylibs_first => return try resolveDylibsFirst(arena, search_dirs, path),
     }
-}
-
-fn resolveFile(
-    self: *MachO,
-    arena: Allocator,
-    obj: LinkObject,
-    lib_dirs: []const []const u8,
-    framework_dirs: []const []const u8,
-) !LinkObject {
-    const tracy = trace(@src());
-    defer tracy.end();
-
-    const full_path = blk: {
-        switch (obj.tag) {
-            .obj => {
-                var buffer: [fs.MAX_PATH_BYTES]u8 = undefined;
-                const full_path = std.fs.realpath(obj.path, &buffer) catch |err| switch (err) {
-                    error.FileNotFound => {
-                        self.base.fatal("file not found '{s}'", .{obj.path});
-                        return error.ResolveFail;
-                    },
-                    else => |e| return e,
-                };
-                break :blk try arena.dupe(u8, full_path);
-            },
-            .lib => {
-                const full_path = (try self.resolveLib(arena, lib_dirs, obj.path)) orelse {
-                    const err = try self.base.addErrorWithNotes(lib_dirs.len);
-                    try err.addMsg("library not found for -l{s}", .{obj.path});
-                    for (lib_dirs) |dir| try err.addNote("tried {s}", .{dir});
-                    return error.ResolveFail;
-                };
-                break :blk full_path;
-            },
-            .framework => {
-                const full_path = (try self.resolveFramework(arena, framework_dirs, obj.path)) orelse {
-                    const err = try self.base.addErrorWithNotes(framework_dirs.len);
-                    try err.addMsg("framework not found for -framework {s}", .{obj.path});
-                    for (framework_dirs) |dir| try err.addNote("tried {s}", .{dir});
-                    return error.ResolveFail;
-                };
-                break :blk full_path;
-            },
-        }
-    };
-    return .{
-        .path = full_path,
-        .tag = obj.tag,
-        .needed = obj.needed,
-        .weak = obj.weak,
-        .hidden = obj.hidden,
-        .must_link = obj.must_link,
-    };
 }
 
 fn inferCpuArchAndPlatform(self: *MachO, objs: []const LinkObject) !void {
@@ -840,7 +818,12 @@ fn addDylib(self: *MachO, dylib: Dylib, opts: DylibOpts) !void {
 /// Parse dependents of dylibs preserving the inclusion order of:
 /// 1) anything on the linker line is parsed first
 /// 2) afterwards, we parse dependents of the included dylibs
-fn parseDependentDylibs(self: *MachO, arena: Allocator) !void {
+fn parseDependentDylibs(
+    self: *MachO,
+    arena: Allocator,
+    lib_dirs: []const []const u8,
+    framework_dirs: []const []const u8,
+) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -862,22 +845,33 @@ fn parseDependentDylibs(self: *MachO, arena: Allocator) !void {
 
             for (&[_][]const u8{ extension, ".tbd" }) |ext| {
                 const with_ext = try std.fmt.allocPrint(arena, "{s}{s}", .{ without_ext, ext });
-                const full_path = if (self.options.syslibroot) |root|
-                    try fs.path.join(arena, &.{ root, with_ext })
-                else
-                    with_ext;
-
-                const file = std.fs.cwd().openFile(full_path, .{}) catch |err| switch (err) {
-                    error.FileNotFound => continue,
-                    else => |e| return e,
+                const full_path = full_path: {
+                    fail: {
+                        var buffer: [fs.MAX_PATH_BYTES]u8 = undefined;
+                        const resolved_path = std.fs.realpath(with_ext, &buffer) catch break :fail;
+                        break :full_path try arena.dupe(u8, resolved_path);
+                    }
+                    if (self.options.syslibroot) |root| fail: {
+                        var buffer: [fs.MAX_PATH_BYTES]u8 = undefined;
+                        const full_path = try fs.path.join(arena, &.{ root, with_ext });
+                        const resolved_path = std.fs.realpath(full_path, &buffer) catch break :fail;
+                        break :full_path try arena.dupe(u8, resolved_path);
+                    }
+                    fail: {
+                        const full_path = (try self.resolveLib(arena, lib_dirs, with_ext)) orelse
+                            break :fail;
+                        break :full_path full_path;
+                    }
+                    fail: {
+                        const full_path = (try self.resolveFramework(arena, framework_dirs, with_ext)) orelse
+                            break :fail;
+                        break :full_path full_path;
+                    }
+                    continue;
                 };
-                defer file.close();
-
-                log.debug("trying dependency at fully resolved path {s}", .{full_path});
-
                 const link_obj = LinkObject{
                     .path = full_path,
-                    .tag = .lib,
+                    .tag = .obj,
                     .weak = dylib.weak,
                     .dependent = true,
                 };
