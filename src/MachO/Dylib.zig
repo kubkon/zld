@@ -16,7 +16,7 @@ platform: ?MachO.Options.Platform = null,
 needed: bool,
 weak: bool,
 reexport: bool,
-alive: bool, // TODO rename to hoisted
+alive: bool = true,
 
 output_symtab_ctx: MachO.SymtabCtx = .{},
 
@@ -72,12 +72,29 @@ pub fn parse(
         else => {},
     };
 
-    try self.initSymbols(macho_file);
-    self.initPlatform();
-
     for (self.dependents.items) |*dep| {
         try self.parseDependent(arena, dep, lib_dirs, framework_dirs, macho_file);
     }
+
+    try self.initSymbols(macho_file);
+    self.initPlatform();
+}
+
+/// According to ld64's manual, public (i.e., system) dylibs/frameworks are hoisted into the final
+/// image unless overriden by -no_implicit_dylibs.
+fn isHoisted(install_name: []const u8, macho_file: *MachO) bool {
+    if (macho_file.options.no_implicit_dylibs) return true;
+    if (std.fs.path.dirname(install_name)) |dirname| {
+        if (mem.startsWith(u8, dirname, "/usr/lib")) return true;
+        if (mem.startsWith(u8, dirname, "/System/Library/Frameworks/")) {
+            const path = dirname["/System/Library/Frameworks/".len..];
+            const basename = std.fs.path.basename(install_name);
+            if (mem.indexOfScalar(u8, path, '.')) |index| {
+                if (mem.eql(u8, basename, path[0..index])) return true;
+            }
+        }
+    }
+    return false;
 }
 
 fn parseDependent(
@@ -130,13 +147,23 @@ fn parseDependent(
             .path = full_path,
             .tag = .obj,
             .weak = self.weak,
-            .dependent = true,
         };
         if (try macho_file.parseDylib(arena, link_obj, lib_dirs, framework_dirs)) break file;
         if (try macho_file.parseTbd(arena, link_obj, lib_dirs, framework_dirs)) break file;
     } else return macho_file.base.fatal("{s}: unable to resolve dependency", .{id.name});
 
-    macho_file.getFile(dependent.file).?.dylib.dependee = self.index;
+    const dep_dylib = macho_file.getFile(dependent.file).?.dylib;
+    dep_dylib.dependee = self.index;
+
+    const hoisted = isHoisted(id.name, macho_file);
+    if (!hoisted) {
+        const slice = dep_dylib.exports.slice();
+        for (slice.items(.name), slice.items(.flags)) |off, flags| {
+            try self.addExport(macho_file.base.allocator, dep_dylib.getString(off), flags);
+        }
+    }
+
+    dep_dylib.alive = hoisted;
 }
 
 const TrieIterator = struct {
@@ -453,11 +480,11 @@ pub fn parseTbd(
         }
     }
 
-    try self.initSymbols(macho_file);
-
     for (self.dependents.items) |*dep| {
         try self.parseDependent(arena, dep, lib_dirs, framework_dirs, macho_file);
     }
+
+    try self.initSymbols(macho_file);
 }
 
 fn addObjCClass(self: *Dylib, allocator: Allocator, name: []const u8) !void {
@@ -531,21 +558,6 @@ pub fn resolveSymbols(self: *Dylib, macho_file: *MachO) void {
             global.flags.dyn_ref = false;
             global.flags.tentative = false;
             global.visibility = .global;
-        }
-    }
-}
-
-pub fn markLive(self: *Dylib, macho_file: *MachO) void {
-    for (self.symbols.items) |index| {
-        const global = macho_file.getSymbol(index);
-        const file = global.getFile(macho_file) orelse continue;
-        const should_drop = switch (file) {
-            .dylib => |sh| !sh.needed and global.flags.weak_ref,
-            else => false,
-        };
-        if (!should_drop and !file.isAlive()) {
-            file.setAlive();
-            file.markLive(macho_file);
         }
     }
 }

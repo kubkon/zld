@@ -42,12 +42,6 @@ pub const File = union(enum) {
         }
     }
 
-    pub fn isAlive(file: File) bool {
-        return switch (file) {
-            inline else => |x| x.alive,
-        };
-    }
-
     /// Encodes symbol rank so that the following ordering applies:
     /// * strong in object
     /// * weak in object
@@ -73,19 +67,6 @@ pub const File = union(enum) {
             break :blk if (args.weak) 2 else 1;
         };
         return base + (file.getIndex() << 24);
-    }
-
-    pub fn setAlive(file: File) void {
-        switch (file) {
-            inline else => |x| x.alive = true,
-        }
-    }
-
-    pub fn markLive(file: File, macho_file: *MachO) void {
-        switch (file) {
-            .internal => unreachable,
-            inline else => |x| x.markLive(macho_file),
-        }
     }
 
     pub fn getSymbols(file: File) []const Symbol.Index {

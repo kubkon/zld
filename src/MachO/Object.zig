@@ -811,9 +811,9 @@ pub fn markLive(self: *Object, macho_file: *MachO) void {
         const sym = macho_file.getSymbol(index);
         const file = sym.getFile(macho_file) orelse continue;
         const should_keep = nlist.undf() or (nlist.tentative() and !sym.flags.tentative);
-        if (should_keep and !file.isAlive()) {
-            file.setAlive();
-            file.markLive(macho_file);
+        if (should_keep and file == .object and !file.object.alive) {
+            file.object.alive = true;
+            file.object.markLive(macho_file);
         }
     }
 }

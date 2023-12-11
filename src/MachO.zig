@@ -290,8 +290,18 @@ pub fn flush(self: *MachO) !void {
     try self.addUndefinedGlobals();
     try self.resolveSymbols();
 
-    for (self.dylibs.items, 1..) |index, ord| {
-        self.getFile(index).?.dylib.ordinal = @intCast(ord);
+    {
+        var i: usize = 0;
+        while (i < self.dylibs.items.len) {
+            const index = self.dylibs.items[i];
+            if (!self.getFile(index).?.dylib.alive) {
+                _ = self.dylibs.orderedRemove(i);
+            } else i += 1;
+        }
+        for (self.dylibs.items, 1..) |index, ord| {
+            const dylib = self.getFile(index).?.dylib;
+            dylib.ordinal = @intCast(ord);
+        }
     }
 
     try self.resolveSyntheticSymbols();
@@ -696,7 +706,6 @@ fn parseFatLibrary(self: *MachO, path: []const u8, file: fs.File) !fat.Arch {
 const DylibOpts = struct {
     syslibroot: ?[]const u8,
     id: ?Dylib.Id = null,
-    dependent: bool = false,
     needed: bool = false,
     weak: bool = false,
     reexport: bool = false,
@@ -751,7 +760,6 @@ pub fn parseDylib(
         .needed = obj.needed,
         .weak = obj.weak,
         .reexport = obj.reexport,
-        .alive = obj.needed or !obj.dependent and !self.options.dead_strip_dylibs,
     } });
     const dylib = &self.files.items(.data)[index].dylib;
     try dylib.parse(arena, lib_dirs, framework_dirs, self);
@@ -794,7 +802,6 @@ pub fn parseTbd(
         .needed = obj.needed,
         .weak = obj.weak,
         .reexport = obj.reexport,
-        .alive = obj.needed or !obj.dependent and !self.options.dead_strip_dylibs,
     } });
     const dylib = &self.files.items(.data)[index].dylib;
     try dylib.parseTbd(arena, cpu_arch, self.options.platform, lib_stub, lib_dirs, framework_dirs, self);
@@ -823,20 +830,12 @@ pub fn resolveSymbols(self: *MachO) !void {
     for (self.objects.items) |index| self.getFile(index).?.resetGlobals(self);
     for (self.dylibs.items) |index| self.getFile(index).?.resetGlobals(self);
 
-    // Prune dead objects and dylibs.
+    // Prune dead objects.
     var i: usize = 0;
     while (i < self.objects.items.len) {
         const index = self.objects.items[i];
-        if (!self.getFile(index).?.isAlive()) {
+        if (!self.getFile(index).?.object.alive) {
             _ = self.objects.orderedRemove(i);
-        } else i += 1;
-    }
-
-    i = 0;
-    while (i < self.dylibs.items.len) {
-        const index = self.dylibs.items[i];
-        if (!self.getFile(index).?.isAlive()) {
-            _ = self.dylibs.orderedRemove(i);
         } else i += 1;
     }
 
@@ -847,15 +846,15 @@ pub fn resolveSymbols(self: *MachO) !void {
 
 fn markLive(self: *MachO) void {
     for (self.undefined_symbols.items) |index| {
-        if (self.getSymbol(index).getFile(self)) |file| file.setAlive();
+        if (self.getSymbol(index).getFile(self)) |file| {
+            if (file == .object) {
+                file.object.alive = true;
+            }
+        }
     }
     for (self.objects.items) |index| {
-        const file = self.getFile(index).?;
-        if (file.isAlive()) file.markLive(self);
-    }
-    for (self.dylibs.items) |index| {
-        const file = self.getFile(index).?;
-        if (file.isAlive()) file.markLive(self);
+        const object = self.getFile(index).?.object;
+        if (object.alive) object.markLive(self);
     }
 }
 
@@ -2112,7 +2111,7 @@ fn writeLoadCommands(self: *MachO) !struct { usize, usize, usize } {
 
     for (self.dylibs.items) |index| {
         const dylib = self.getFile(index).?.dylib;
-        if (!dylib.alive) continue;
+        assert(dylib.alive);
         const dylib_id = dylib.id.?;
         try load_commands.writeDylibLC(.{
             .cmd = if (dylib.weak)
@@ -2555,7 +2554,6 @@ pub const LinkObject = struct {
     hidden: bool = false,
     reexport: bool = false,
     must_link: bool = false,
-    dependent: bool = false,
 
     pub fn format(
         self: LinkObject,
@@ -2565,22 +2563,20 @@ pub const LinkObject = struct {
     ) !void {
         _ = options;
         _ = unused_fmt_string;
-        if (!self.dependent) {
-            if (self.needed) {
-                try writer.print("-needed_{s}", .{@tagName(self.tag)});
-            }
-            if (self.weak) {
-                try writer.print("-weak_{s}", .{@tagName(self.tag)});
-            }
-            if (self.hidden) {
-                try writer.writeAll("-hidden_lib");
-            }
-            if (self.reexport) {
-                try writer.writeAll("-reexport_lib");
-            }
-            if (self.must_link and self.tag == .obj) {
-                try writer.writeAll("-force_load");
-            }
+        if (self.needed) {
+            try writer.print("-needed_{s}", .{@tagName(self.tag)});
+        }
+        if (self.weak) {
+            try writer.print("-weak_{s}", .{@tagName(self.tag)});
+        }
+        if (self.hidden) {
+            try writer.writeAll("-hidden_lib");
+        }
+        if (self.reexport) {
+            try writer.writeAll("-reexport_lib");
+        }
+        if (self.must_link and self.tag == .obj) {
+            try writer.writeAll("-force_load");
         }
         try writer.print(" {s}", .{self.path});
     }

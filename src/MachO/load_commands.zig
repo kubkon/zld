@@ -85,7 +85,7 @@ pub fn calcLoadCommandsSize(macho_file: *MachO, assume_max_path_len: bool) u32 {
     // LC_LOAD_DYLIB
     for (macho_file.dylibs.items) |index| {
         const dylib = macho_file.getFile(index).?.dylib;
-        if (!dylib.alive) continue;
+        assert(dylib.alive);
         const dylib_id = dylib.id.?;
         sizeofcmds += calcInstallNameLen(
             @sizeOf(macho.dylib_command),

@@ -51,6 +51,7 @@ const usage =
     \\-needed-l[name]                    Link against library (even if unused)
     \\  -needed_library [name]           
     \\-no_deduplicate                    Do not run deduplication pass in linker
+    \\-no_implicit_dylibs                Do not hoist public dylibs/frameworks into the final image.
     \\-o [path]                          Specify output path for the final artifact
     \\-pagezero_size [value]             Size of the __PAGEZERO segment in hexademical notation
     \\-platform_version [platform] [min_version] [sdk_version]
@@ -112,6 +113,7 @@ dead_strip: bool = false,
 dead_strip_dylibs: bool = false,
 undefined_treatment: UndefinedTreatment = .@"error",
 no_deduplicate: bool = false,
+no_implicit_dylibs: bool = false,
 namespace: Namespace = .two_level,
 all_load: bool = false,
 
@@ -289,6 +291,8 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             try lib_dirs.put(path, {});
         } else if (p.flag1("no_deduplicate")) {
             opts.no_deduplicate = true;
+        } else if (p.flag1("no_implicit_dylibs")) {
+            opts.no_implicit_dylibs = true;
         } else if (p.flag1("two_levelnamespace")) {
             opts.namespace = .two_level;
         } else if (p.flag1("flat_namespace")) {
