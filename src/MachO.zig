@@ -856,13 +856,12 @@ fn parseDependentDylibs(
                         break :full_path try arena.dupe(u8, resolved_path);
                     }
                     fail: {
-                        const full_path = (try self.resolveLib(arena, lib_dirs, with_ext)) orelse
-                            break :fail;
+                        const path = if (mem.startsWith(u8, without_ext, "lib")) without_ext["lib".len..] else without_ext;
+                        const full_path = (try self.resolveLib(arena, lib_dirs, path)) orelse break :fail;
                         break :full_path full_path;
                     }
                     fail: {
-                        const full_path = (try self.resolveFramework(arena, framework_dirs, with_ext)) orelse
-                            break :fail;
+                        const full_path = (try self.resolveFramework(arena, framework_dirs, with_ext)) orelse break :fail;
                         break :full_path full_path;
                     }
                     continue;
@@ -888,7 +887,7 @@ fn parseDependentDylibs(
                         try dylib.addExport(gpa, dep_dylib.getString(exp.name), exp.flags);
                     }
                 }
-            } else self.base.fatal("{s}: unable to resolve dependency", .{id.name});
+            } else self.base.fatal("{s}: unable to resolve dependency {s}", .{ dylib.path, id.name });
         }
     }
 }

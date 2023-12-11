@@ -25,6 +25,7 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testDeadStrip(b, opts));
     macho_step.dependOn(testDeadStripDylibs(b, opts));
     macho_step.dependOn(testDylib(b, opts));
+    macho_step.dependOn(testDylibReexport(b, opts));
     macho_step.dependOn(testEmptyObject(b, opts));
     macho_step.dependOn(testEntryPoint(b, opts));
     macho_step.dependOn(testEntryPointArchive(b, opts));
@@ -389,6 +390,85 @@ fn testDylib(b: *Build, opts: Options) *Step {
     const run = exe.run();
     run.expectStdOutEqual("Hello world");
     test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+fn testDylibReexport(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-dylib-reexport", "");
+
+    const a_o = cc(b, opts);
+    a_o.addCSource(
+        \\int foo = 42;
+        \\int getFoo() {
+        \\  return foo;
+        \\}
+    );
+    a_o.addArg("-c");
+
+    const b_o = cc(b, opts);
+    b_o.addCSource(
+        \\int getFoo();
+        \\int getBar() {
+        \\  return getFoo();
+        \\}
+    );
+    b_o.addArg("-c");
+
+    const main_o = cc(b, opts);
+    main_o.addCSource(
+        \\int getFoo();
+        \\int getBar();
+        \\int main() {
+        \\  return getBar() - getFoo();
+        \\}
+    );
+    main_o.addArg("-c");
+
+    const liba = cc(b, opts);
+    liba.addFileSource(a_o.out);
+    liba.addArgs(&.{ "-shared", "-Wl,-install_name,liba.dylib" });
+    const liba_out = liba.saveOutputAs("liba.dylib");
+
+    const libb = cc(b, opts);
+    libb.addFileSource(b_o.out);
+    libb.addPrefixedDirectorySource("-L", liba_out.dir);
+    libb.addArgs(&.{ "-shared", "-Wl,-install_name,libb.dylib", "-Wl,-reexport-la" });
+
+    {
+        const check = libb.check();
+        check.checkStart();
+        check.checkExact("cmd REEXPORT_DYLIB");
+        check.checkExact("name liba.dylib");
+        check.checkInSymtab();
+        check.checkExact("(undefined) external _getFoo (from liba)");
+        test_step.dependOn(&check.step);
+    }
+
+    // const libc = cc(b, opts);
+    // libc.addFileSource(a_o.out);
+    // libc.addArgs(&.{ "-shared", "-Wl,-install_name,libc.dylib" });
+    // const libc_out = libc.saveOutputAs("libc.dylib");
+    // _ = libc_out;
+
+    // {
+    //     const exe = cc(b, opts);
+    //     exe.addFileSource(main_o.out);
+    //     exe.addPrefixedDirectorySource("-L", liba_out.dir);
+    //     exe.addPrefixedDirectorySource("-L", libb_out.dir);
+    //     exe.addArg("-lb");
+
+    //     const check = exe.check();
+    //     check.checkStart();
+    //     check.checkExact("LC");
+    //     check.checkNotPresent("name liba.dylib");
+    //     check.checkInSymtab();
+    //     check.checkContains("external _getFoo (liba)");
+    //     test_step.dependOn(&check.step);
+
+    //     const run = exe.run();
+    //     test_step.dependOn(run.step());
+    // }
 
     return test_step;
 }
