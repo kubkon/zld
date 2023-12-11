@@ -278,7 +278,15 @@ pub fn flush(self: *MachO) !void {
     }
 
     for (resolved_objects.items) |obj| {
-        try self.parsePositional(arena, obj, lib_dirs.items, framework_dirs.items);
+        try self.parsePositional(arena, obj);
+    }
+
+    try self.parseDependentDylibs(arena, lib_dirs.items, framework_dirs.items);
+
+    for (self.dylibs.items) |index| {
+        const dylib = self.getFile(index).?.dylib;
+        if (!dylib.hoisted) continue;
+        try dylib.initSymbols(self);
     }
 
     {
@@ -434,7 +442,7 @@ fn resolveDylibsFirst(arena: Allocator, dirs: []const []const u8, path: []const 
     return null;
 }
 
-pub fn resolveLib(
+fn resolveLib(
     self: *MachO,
     arena: Allocator,
     search_dirs: []const []const u8,
@@ -448,7 +456,7 @@ pub fn resolveLib(
     }
 }
 
-pub fn resolveFramework(
+fn resolveFramework(
     self: *MachO,
     arena: Allocator,
     search_dirs: []const []const u8,
@@ -580,19 +588,13 @@ fn addUndefinedGlobals(self: *MachO) !void {
     }
 }
 
-fn parsePositional(
-    self: *MachO,
-    arena: Allocator,
-    obj: LinkObject,
-    lib_dirs: []const []const u8,
-    framework_dirs: []const []const u8,
-) !void {
+fn parsePositional(self: *MachO, arena: Allocator, obj: LinkObject) !void {
     log.debug("parsing positional {}", .{obj});
 
     if (try self.parseObject(arena, obj)) return;
     if (try self.parseArchive(arena, obj)) return;
-    if (try self.parseDylib(arena, obj, lib_dirs, framework_dirs)) return;
-    if (try self.parseTbd(arena, obj, lib_dirs, framework_dirs)) return;
+    if (try self.parseDylib(arena, obj)) |_| return;
+    if (try self.parseTbd(obj)) |_| return;
 
     self.base.fatal("unknown filetype for positional argument: '{s}'", .{obj.path});
 }
@@ -703,13 +705,7 @@ const DylibOpts = struct {
     reexport: bool = false,
 };
 
-pub fn parseDylib(
-    self: *MachO,
-    arena: Allocator,
-    obj: LinkObject,
-    lib_dirs: []const []const u8,
-    framework_dirs: []const []const u8,
-) anyerror!bool {
+fn parseDylib(self: *MachO, arena: Allocator, obj: LinkObject) anyerror!?File.Index {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -717,7 +713,7 @@ pub fn parseDylib(
 
     if (self.options.cpu_arch == null) {
         self.base.fatal("{s}: ignoring library as no architecture specified", .{obj.path});
-        return true;
+        return null;
     }
 
     const file = try std.fs.cwd().openFile(obj.path, .{});
@@ -727,7 +723,7 @@ pub fn parseDylib(
     var size: u64 = (try file.stat()).size;
     if (fat.isFatLibrary(file)) {
         const fat_arch = self.parseFatLibrary(obj.path, file) catch |err| switch (err) {
-            error.NoArchSpecified, error.MissingArch => return false,
+            error.NoArchSpecified, error.MissingArch => return null,
             else => |e| return e,
         };
         offset = fat_arch.offset;
@@ -735,10 +731,10 @@ pub fn parseDylib(
         try file.seekTo(offset);
     }
 
-    const header = file.reader().readStruct(macho.mach_header_64) catch return false;
+    const header = file.reader().readStruct(macho.mach_header_64) catch return null;
     try file.seekTo(0);
 
-    if (header.filetype != macho.MH_DYLIB) return false;
+    if (header.filetype != macho.MH_DYLIB) return null;
 
     const data = try arena.alloc(u8, size);
     const nread = try file.readAll(data);
@@ -754,21 +750,16 @@ pub fn parseDylib(
         .reexport = obj.reexport,
     } });
     const dylib = &self.files.items(.data)[index].dylib;
-    try dylib.parse(arena, lib_dirs, framework_dirs, self);
+    try dylib.parse(self);
+
     try self.dylibs.append(gpa, index);
     self.validateCpuArch(index);
     self.validatePlatform(index);
 
-    return true;
+    return index;
 }
 
-pub fn parseTbd(
-    self: *MachO,
-    arena: Allocator,
-    obj: LinkObject,
-    lib_dirs: []const []const u8,
-    framework_dirs: []const []const u8,
-) anyerror!bool {
+fn parseTbd(self: *MachO, obj: LinkObject) anyerror!?File.Index {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -776,14 +767,14 @@ pub fn parseTbd(
     const file = try std.fs.cwd().openFile(obj.path, .{});
     defer file.close();
 
-    var lib_stub = LibStub.loadFromFile(gpa, file) catch return false; // TODO actually handle different errors
+    var lib_stub = LibStub.loadFromFile(gpa, file) catch return null; // TODO actually handle different errors
     defer lib_stub.deinit();
 
-    if (lib_stub.inner.len == 0) return false;
+    if (lib_stub.inner.len == 0) return null;
 
     const cpu_arch = self.options.cpu_arch orelse {
         self.base.fatal("{s}: ignoring library as no architecture specified", .{obj.path});
-        return true;
+        return null;
     };
 
     const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
@@ -796,11 +787,111 @@ pub fn parseTbd(
         .reexport = obj.reexport,
     } });
     const dylib = &self.files.items(.data)[index].dylib;
-    try dylib.parseTbd(arena, cpu_arch, self.options.platform, lib_stub, lib_dirs, framework_dirs, self);
+    try dylib.parseTbd(cpu_arch, self.options.platform, lib_stub, self);
     try self.dylibs.append(gpa, index);
     self.validatePlatform(index);
 
-    return true;
+    return index;
+}
+
+/// According to ld64's manual, public (i.e., system) dylibs/frameworks are hoisted into the final
+/// image unless overriden by -no_implicit_dylibs.
+fn isHoisted(self: *MachO, install_name: []const u8) bool {
+    if (self.options.no_implicit_dylibs) return true;
+    if (std.fs.path.dirname(install_name)) |dirname| {
+        if (mem.startsWith(u8, dirname, "/usr/lib")) return true;
+        if (mem.startsWith(u8, dirname, "/System/Library/Frameworks/")) {
+            const path = dirname["/System/Library/Frameworks/".len..];
+            const basename = std.fs.path.basename(install_name);
+            if (mem.indexOfScalar(u8, path, '.')) |index| {
+                if (mem.eql(u8, basename, path[0..index])) return true;
+            }
+        }
+    }
+    return false;
+}
+
+fn parseDependentDylibs(
+    self: *MachO,
+    arena: Allocator,
+    lib_dirs: []const []const u8,
+    framework_dirs: []const []const u8,
+) !void {
+    const gpa = self.base.allocator;
+
+    if (self.dylibs.items.len == 0) return;
+
+    var index: usize = 0;
+    while (index < self.dylibs.items.len) : (index += 1) {
+        const dylib_index = self.dylibs.items[index];
+
+        var dependents = std.ArrayList(File.Index).init(gpa);
+        defer dependents.deinit();
+        try dependents.ensureTotalCapacityPrecise(self.getFile(dylib_index).?.dylib.dependents.items.len);
+
+        const is_weak = self.getFile(dylib_index).?.dylib.weak;
+        for (self.getFile(dylib_index).?.dylib.dependents.items) |id| {
+            const has_ext = blk: {
+                const basename = fs.path.basename(id.name);
+                break :blk mem.lastIndexOfScalar(u8, basename, '.') != null;
+            };
+            const extension = if (has_ext) fs.path.extension(id.name) else "";
+            const without_ext = if (has_ext) blk: {
+                const sentinel = mem.lastIndexOfScalar(u8, id.name, '.') orelse unreachable;
+                break :blk id.name[0..sentinel];
+            } else id.name;
+
+            const file_index = for (&[_][]const u8{ extension, ".tbd" }) |ext| {
+                const with_ext = try std.fmt.allocPrint(arena, "{s}{s}", .{ without_ext, ext });
+                const full_path = full_path: {
+                    fail: {
+                        var buffer: [fs.MAX_PATH_BYTES]u8 = undefined;
+                        const resolved_path = std.fs.realpath(with_ext, &buffer) catch break :fail;
+                        break :full_path try arena.dupe(u8, resolved_path);
+                    }
+                    if (self.options.syslibroot) |root| fail: {
+                        var buffer: [fs.MAX_PATH_BYTES]u8 = undefined;
+                        const full_path = try fs.path.join(arena, &.{ root, with_ext });
+                        const resolved_path = std.fs.realpath(full_path, &buffer) catch break :fail;
+                        break :full_path try arena.dupe(u8, resolved_path);
+                    }
+                    fail: {
+                        const full_path = (try self.resolveLib(arena, lib_dirs, with_ext)) orelse
+                            break :fail;
+                        break :full_path full_path;
+                    }
+                    fail: {
+                        const full_path = (try self.resolveFramework(arena, framework_dirs, with_ext)) orelse
+                            break :fail;
+                        break :full_path full_path;
+                    }
+                    continue;
+                };
+                const link_obj = LinkObject{
+                    .path = full_path,
+                    .tag = .obj,
+                    .weak = is_weak,
+                };
+                if (try self.parseDylib(arena, link_obj)) |file| break file;
+                if (try self.parseTbd(link_obj)) |file| break file;
+            } else @as(File.Index, 0);
+            dependents.appendAssumeCapacity(file_index);
+        }
+
+        const dylib = self.getFile(dylib_index).?.dylib;
+        for (dylib.dependents.items, dependents.items) |id, file_index| {
+            if (self.getFile(file_index)) |file| {
+                const dep_dylib = file.dylib;
+                dep_dylib.hoisted = self.isHoisted(id.name);
+                if (!dep_dylib.hoisted) {
+                    const slice = dep_dylib.exports.slice();
+                    for (slice.items(.name), slice.items(.flags)) |off, flags| {
+                        try dylib.addExport(gpa, dep_dylib.getString(off), flags);
+                    }
+                }
+            } else self.base.fatal("{s}: unable to resolve dependency", .{id.name});
+        }
+    }
 }
 
 /// When resolving symbols, we approach the problem similarly to `mold`.
