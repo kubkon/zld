@@ -16,7 +16,8 @@ platform: ?MachO.Options.Platform = null,
 needed: bool,
 weak: bool,
 reexport: bool,
-alive: bool = true,
+hoisted: bool = true,
+referenced: bool = false,
 
 output_symtab_ctx: MachO.SymtabCtx = .{},
 
@@ -163,7 +164,7 @@ fn parseDependent(
         }
     }
 
-    dep_dylib.alive = hoisted;
+    dep_dylib.hoisted = hoisted;
 }
 
 const TrieIterator = struct {
@@ -568,6 +569,22 @@ pub fn resetGlobals(self: *Dylib, macho_file: *MachO) void {
         const name = sym.name;
         sym.* = .{};
         sym.name = name;
+    }
+}
+
+pub fn isAlive(self: Dylib, macho_file: *MachO) bool {
+    if (!macho_file.options.dead_strip_dylibs) return self.hoisted;
+    return self.referenced or self.needed;
+}
+
+pub fn markReferenced(self: *Dylib, macho_file: *MachO) void {
+    for (self.symbols.items) |global_index| {
+        const global = macho_file.getSymbol(global_index);
+        const file_ptr = global.getFile(macho_file) orelse continue;
+        if (file_ptr.getIndex() != self.index) continue;
+        if (global.isLocal()) continue;
+        self.referenced = true;
+        break;
     }
 }
 

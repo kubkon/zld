@@ -289,21 +289,6 @@ pub fn flush(self: *MachO) !void {
 
     try self.addUndefinedGlobals();
     try self.resolveSymbols();
-
-    {
-        var i: usize = 0;
-        while (i < self.dylibs.items.len) {
-            const index = self.dylibs.items[i];
-            if (!self.getFile(index).?.dylib.alive) {
-                _ = self.dylibs.orderedRemove(i);
-            } else i += 1;
-        }
-        for (self.dylibs.items, 1..) |index, ord| {
-            const dylib = self.getFile(index).?.dylib;
-            dylib.ordinal = @intCast(ord);
-        }
-    }
-
     try self.resolveSyntheticSymbols();
 
     try self.convertTentativeDefinitions();
@@ -311,6 +296,13 @@ pub fn flush(self: *MachO) !void {
 
     if (self.options.dead_strip) {
         try dead_strip.gcAtoms(self);
+    }
+
+    self.deadStripDylibs();
+
+    for (self.dylibs.items, 1..) |index, ord| {
+        const dylib = self.getFile(index).?.dylib;
+        dylib.ordinal = @intCast(ord);
     }
 
     try self.initOutputSections();
@@ -858,6 +850,20 @@ fn markLive(self: *MachO) void {
     }
 }
 
+fn deadStripDylibs(self: *MachO) void {
+    for (self.dylibs.items) |index| {
+        self.getFile(index).?.dylib.markReferenced(self);
+    }
+
+    var i: usize = 0;
+    while (i < self.dylibs.items.len) {
+        const index = self.dylibs.items[i];
+        if (!self.getFile(index).?.dylib.isAlive(self)) {
+            _ = self.dylibs.orderedRemove(i);
+        } else i += 1;
+    }
+}
+
 fn convertTentativeDefinitions(self: *MachO) !void {
     for (self.objects.items) |index| {
         try self.getFile(index).?.object.convertTentativeDefinitions(self);
@@ -865,15 +871,15 @@ fn convertTentativeDefinitions(self: *MachO) !void {
 }
 
 fn markImportsAndExports(self: *MachO) void {
-    if (!self.options.dylib)
-        for (self.dylibs.items) |index| {
-            for (self.getFile(index).?.getSymbols()) |sym_index| {
-                const sym = self.getSymbol(sym_index);
-                const file = sym.getFile(self) orelse continue;
-                if (sym.visibility != .global) continue;
-                if (file != .dylib) sym.flags.@"export" = true;
-            }
-        };
+    // if (!self.options.dylib)
+    //     for (self.dylibs.items) |index| {
+    //         for (self.getFile(index).?.getSymbols()) |sym_index| {
+    //             const sym = self.getSymbol(sym_index);
+    //             const file = sym.getFile(self) orelse continue;
+    //             if (sym.visibility != .global) continue;
+    //             if (file != .dylib) sym.flags.@"export" = true;
+    //         }
+    //     };
 
     for (self.objects.items) |index| {
         for (self.getFile(index).?.getSymbols()) |sym_index| {
@@ -2111,7 +2117,7 @@ fn writeLoadCommands(self: *MachO) !struct { usize, usize, usize } {
 
     for (self.dylibs.items) |index| {
         const dylib = self.getFile(index).?.dylib;
-        assert(dylib.alive);
+        assert(dylib.isAlive(self));
         const dylib_id = dylib.id.?;
         try load_commands.writeDylibLC(.{
             .cmd = if (dylib.weak)
@@ -2449,7 +2455,7 @@ fn fmtDumpState(
             dylib.needed,
             dylib.weak,
         });
-        if (!dylib.alive) try writer.writeAll(" : ([*])");
+        if (!dylib.isAlive(self)) try writer.writeAll(" : ([*])");
         try writer.writeByte('\n');
         try writer.print("{}\n", .{dylib.fmtSymtab(self)});
     }
