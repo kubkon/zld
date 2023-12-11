@@ -280,6 +280,9 @@ pub fn flush(self: *MachO) !void {
     for (resolved_objects.items) |obj| {
         try self.parsePositional(arena, obj);
     }
+    for (self.dylibs.items) |index| {
+        self.getFile(index).?.dylib.umbrella = index;
+    }
 
     try self.parseDependentDylibs(arena, lib_dirs.items, framework_dirs.items);
 
@@ -893,12 +896,16 @@ fn parseDependentDylibs(
             if (self.getFile(file_index)) |file| {
                 const dep_dylib = file.dylib;
                 dep_dylib.hoisted = self.isHoisted(id.name);
+                if (self.getFile(dep_dylib.umbrella) == null) {
+                    dep_dylib.umbrella = dylib.umbrella;
+                }
                 if (!dep_dylib.hoisted) {
+                    const umbrella = dep_dylib.getUmbrella(self);
                     while (dep_dylib.exports.popOrNull()) |exp| {
-                        try dylib.addExport(gpa, dep_dylib.getString(exp.name), exp.flags);
+                        try umbrella.addExport(gpa, dep_dylib.getString(exp.name), exp.flags);
                     }
                 }
-            } else self.base.fatal("{s}: unable to resolve dependency {s}", .{ dylib.path, id.name });
+            } else self.base.fatal("{s}: unable to resolve dependency {s}", .{ dylib.getUmbrella(self).path, id.name });
         }
     }
 }

@@ -10,6 +10,8 @@ ordinal: u16 = 0,
 
 symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
 dependents: std.ArrayListUnmanaged(Id) = .{},
+rpaths: std.ArrayListUnmanaged([]const u8) = .{},
+umbrella: File.Index = 0,
 platform: ?MachO.Options.Platform = null,
 
 needed: bool,
@@ -29,6 +31,7 @@ pub fn deinit(self: *Dylib, allocator: Allocator) void {
         id.deinit(allocator);
     }
     self.dependents.deinit(allocator);
+    self.rpaths.deinit(allocator);
 }
 
 pub fn parse(self: *Dylib, macho_file: *MachO) !void {
@@ -62,6 +65,10 @@ pub fn parse(self: *Dylib, macho_file: *MachO) !void {
             const ld_cmd = cmd.cast(macho.linkedit_data_command).?;
             const data = self.data[ld_cmd.dataoff..][0..ld_cmd.datasize];
             try self.parseTrie(data, macho_file);
+        },
+        .RPATH => {
+            const path = cmd.getRpathPathName();
+            try self.rpaths.append(gpa, path);
         },
         else => {},
     };
@@ -508,6 +515,10 @@ pub fn writeSymtab(self: Dylib, macho_file: *MachO) void {
         out_sym.n_strx = n_strx;
         global.setOutputSym(macho_file, out_sym);
     }
+}
+
+pub inline fn getUmbrella(self: Dylib, macho_file: *MachO) *Dylib {
+    return macho_file.getFile(self.umbrella).?.dylib;
 }
 
 fn getLoadCommand(self: Dylib, lc: macho.LC) ?LoadCommandIterator.LoadCommand {
