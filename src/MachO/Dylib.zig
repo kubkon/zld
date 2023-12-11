@@ -9,13 +9,14 @@ id: ?Id = null,
 ordinal: u16 = 0,
 
 symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
-dependents: std.ArrayListUnmanaged(Id) = .{},
+dependents: std.ArrayListUnmanaged(Dependent) = .{},
+dependee: File.Index = 0,
 platform: ?MachO.Options.Platform = null,
 
 needed: bool,
 weak: bool,
 reexport: bool,
-alive: bool,
+alive: bool, // TODO rename to hoisted
 
 output_symtab_ctx: MachO.SymtabCtx = .{},
 
@@ -24,13 +25,19 @@ pub fn deinit(self: *Dylib, allocator: Allocator) void {
     self.strtab.deinit(allocator);
     if (self.id) |*id| id.deinit(allocator);
     self.symbols.deinit(allocator);
-    for (self.dependents.items) |*id| {
-        id.deinit(allocator);
+    for (self.dependents.items) |*dep| {
+        dep.deinit(allocator);
     }
     self.dependents.deinit(allocator);
 }
 
-pub fn parse(self: *Dylib, macho_file: *MachO) !void {
+pub fn parse(
+    self: *Dylib,
+    arena: Allocator,
+    lib_dirs: []const []const u8,
+    framework_dirs: []const []const u8,
+    macho_file: *MachO,
+) !void {
     const gpa = macho_file.base.allocator;
     var stream = std.io.fixedBufferStream(self.data);
     const reader = stream.reader();
@@ -50,7 +57,7 @@ pub fn parse(self: *Dylib, macho_file: *MachO) !void {
     while (it.next()) |cmd| switch (cmd.cmd()) {
         .REEXPORT_DYLIB => if (self.header.?.flags & macho.MH_NO_REEXPORTED_DYLIBS == 0) {
             const id = try Id.fromLoadCommand(gpa, cmd.cast(macho.dylib_command).?, cmd.getDylibPathName());
-            try self.dependents.append(gpa, id);
+            try self.dependents.append(gpa, .{ .id = id, .file = 0 });
         },
         .DYLD_INFO_ONLY => {
             const dyld_cmd = cmd.cast(macho.dyld_info_command).?;
@@ -67,6 +74,69 @@ pub fn parse(self: *Dylib, macho_file: *MachO) !void {
 
     try self.initSymbols(macho_file);
     self.initPlatform();
+
+    for (self.dependents.items) |*dep| {
+        try self.parseDependent(arena, dep, lib_dirs, framework_dirs, macho_file);
+    }
+}
+
+fn parseDependent(
+    self: *Dylib,
+    arena: Allocator,
+    dependent: *Dependent,
+    lib_dirs: []const []const u8,
+    framework_dirs: []const []const u8,
+    macho_file: *MachO,
+) !void {
+    const id = dependent.id;
+    const has_ext = blk: {
+        const basename = fs.path.basename(id.name);
+        break :blk mem.lastIndexOfScalar(u8, basename, '.') != null;
+    };
+    const extension = if (has_ext) fs.path.extension(id.name) else "";
+    const without_ext = if (has_ext) blk: {
+        const sentinel = mem.lastIndexOfScalar(u8, id.name, '.') orelse unreachable;
+        break :blk id.name[0..sentinel];
+    } else id.name;
+
+    dependent.file = for (&[_][]const u8{ extension, ".tbd" }) |ext| {
+        const with_ext = try std.fmt.allocPrint(arena, "{s}{s}", .{ without_ext, ext });
+        const full_path = full_path: {
+            fail: {
+                var buffer: [fs.MAX_PATH_BYTES]u8 = undefined;
+                const resolved_path = std.fs.realpath(with_ext, &buffer) catch break :fail;
+                break :full_path try arena.dupe(u8, resolved_path);
+            }
+            if (macho_file.options.syslibroot) |root| fail: {
+                var buffer: [fs.MAX_PATH_BYTES]u8 = undefined;
+                const full_path = try fs.path.join(arena, &.{ root, with_ext });
+                const resolved_path = std.fs.realpath(full_path, &buffer) catch break :fail;
+                break :full_path try arena.dupe(u8, resolved_path);
+            }
+            fail: {
+                const full_path = (try macho_file.resolveLib(arena, lib_dirs, with_ext)) orelse
+                    break :fail;
+                break :full_path full_path;
+            }
+            fail: {
+                const full_path = (try macho_file.resolveFramework(arena, framework_dirs, with_ext)) orelse
+                    break :fail;
+                break :full_path full_path;
+            }
+            continue;
+        };
+        const file = @as(File.Index, @intCast(macho_file.files.slice().len)); // TODO ugly
+        const link_obj = MachO.LinkObject{
+            .path = full_path,
+            .tag = .obj,
+            .weak = self.weak,
+            .dependent = true,
+        };
+        if (try macho_file.parseDylib(arena, link_obj, lib_dirs, framework_dirs)) break file;
+        if (try macho_file.parseTbd(arena, link_obj, lib_dirs, framework_dirs)) break file;
+    } else return macho_file.base.fatal("{s}: unable to resolve dependency", .{id.name});
+
+    macho_file.getFile(dependent.file).?.dylib.dependee = self.index;
 }
 
 const TrieIterator = struct {
@@ -170,9 +240,12 @@ fn parseTrie(self: *Dylib, data: []const u8, macho_file: *MachO) !void {
 
 pub fn parseTbd(
     self: *Dylib,
+    arena: Allocator,
     cpu_arch: std.Target.Cpu.Arch,
     platform: ?MachO.Options.Platform,
     lib_stub: LibStub,
+    lib_dirs: []const []const u8,
+    framework_dirs: []const []const u8,
     macho_file: *MachO,
 ) !void {
     const gpa = macho_file.base.allocator;
@@ -258,7 +331,7 @@ pub fn parseTbd(
                                 log.debug("  (found re-export '{s}')", .{lib});
 
                                 const dep_id = try Id.default(gpa, lib);
-                                try self.dependents.append(gpa, dep_id);
+                                try self.dependents.append(gpa, .{ .id = dep_id, .file = 0 });
                             }
                         }
                     }
@@ -374,13 +447,17 @@ pub fn parseTbd(
                     log.debug("  (found re-export '{s}')", .{lib});
 
                     const dep_id = try Id.default(gpa, lib);
-                    try self.dependents.append(gpa, dep_id);
+                    try self.dependents.append(gpa, .{ .id = dep_id, .file = 0 });
                 }
             }
         }
     }
 
     try self.initSymbols(macho_file);
+
+    for (self.dependents.items) |*dep| {
+        try self.parseDependent(arena, dep, lib_dirs, framework_dirs, macho_file);
+    }
 }
 
 fn addObjCClass(self: *Dylib, allocator: Allocator, name: []const u8) !void {
@@ -756,6 +833,15 @@ pub const Id = struct {
         out += @as(u32, @intCast(try fmt.parseInt(u16, values[0], 10))) << 16;
 
         return out;
+    }
+};
+
+const Dependent = struct {
+    id: Id,
+    file: File.Index,
+
+    fn deinit(dep: *Dependent, allocator: Allocator) void {
+        dep.id.deinit(allocator);
     }
 };
 

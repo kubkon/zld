@@ -278,11 +278,8 @@ pub fn flush(self: *MachO) !void {
     }
 
     for (resolved_objects.items) |obj| {
-        try self.parsePositional(arena, obj);
+        try self.parsePositional(arena, obj, lib_dirs.items, framework_dirs.items);
     }
-
-    // Parse dependent dylibs
-    try self.parseDependentDylibs(arena, lib_dirs.items, framework_dirs.items);
 
     {
         const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
@@ -364,7 +361,6 @@ fn resolveSearchDir(
             const common_dir = if (builtin.os.tag == .windows) blk: {
                 // We need to check for disk designator and strip it out from dir path so
                 // that we can concat dir with syslibroot.
-                // TODO we should backport this mechanism to 'MachO.Dylib.parseDependentLibs()'
                 const disk_designator = fs.path.diskDesignatorWindows(dir);
 
                 if (mem.indexOf(u8, dir, disk_designator)) |where| {
@@ -436,7 +432,7 @@ fn resolveDylibsFirst(arena: Allocator, dirs: []const []const u8, path: []const 
     return null;
 }
 
-fn resolveLib(
+pub fn resolveLib(
     self: *MachO,
     arena: Allocator,
     search_dirs: []const []const u8,
@@ -450,7 +446,7 @@ fn resolveLib(
     }
 }
 
-fn resolveFramework(
+pub fn resolveFramework(
     self: *MachO,
     arena: Allocator,
     search_dirs: []const []const u8,
@@ -582,13 +578,19 @@ fn addUndefinedGlobals(self: *MachO) !void {
     }
 }
 
-fn parsePositional(self: *MachO, arena: Allocator, obj: LinkObject) !void {
+fn parsePositional(
+    self: *MachO,
+    arena: Allocator,
+    obj: LinkObject,
+    lib_dirs: []const []const u8,
+    framework_dirs: []const []const u8,
+) !void {
     log.debug("parsing positional {}", .{obj});
 
     if (try self.parseObject(arena, obj)) return;
     if (try self.parseArchive(arena, obj)) return;
-    if (try self.parseDylib(arena, obj)) return;
-    if (try self.parseTbd(obj)) return;
+    if (try self.parseDylib(arena, obj, lib_dirs, framework_dirs)) return;
+    if (try self.parseTbd(arena, obj, lib_dirs, framework_dirs)) return;
 
     self.base.fatal("unknown filetype for positional argument: '{s}'", .{obj.path});
 }
@@ -700,7 +702,13 @@ const DylibOpts = struct {
     reexport: bool = false,
 };
 
-fn parseDylib(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
+pub fn parseDylib(
+    self: *MachO,
+    arena: Allocator,
+    obj: LinkObject,
+    lib_dirs: []const []const u8,
+    framework_dirs: []const []const u8,
+) anyerror!bool {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -746,7 +754,7 @@ fn parseDylib(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
         .alive = obj.needed or !obj.dependent and !self.options.dead_strip_dylibs,
     } });
     const dylib = &self.files.items(.data)[index].dylib;
-    try dylib.parse(self);
+    try dylib.parse(arena, lib_dirs, framework_dirs, self);
     try self.dylibs.append(gpa, index);
     self.validateCpuArch(index);
     self.validatePlatform(index);
@@ -754,7 +762,13 @@ fn parseDylib(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
     return true;
 }
 
-fn parseTbd(self: *MachO, obj: LinkObject) !bool {
+pub fn parseTbd(
+    self: *MachO,
+    arena: Allocator,
+    obj: LinkObject,
+    lib_dirs: []const []const u8,
+    framework_dirs: []const []const u8,
+) anyerror!bool {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -783,110 +797,11 @@ fn parseTbd(self: *MachO, obj: LinkObject) !bool {
         .alive = obj.needed or !obj.dependent and !self.options.dead_strip_dylibs,
     } });
     const dylib = &self.files.items(.data)[index].dylib;
-    try dylib.parseTbd(cpu_arch, self.options.platform, lib_stub, self);
+    try dylib.parseTbd(arena, cpu_arch, self.options.platform, lib_stub, lib_dirs, framework_dirs, self);
     try self.dylibs.append(gpa, index);
     self.validatePlatform(index);
 
     return true;
-}
-
-fn addDylib(self: *MachO, dylib: Dylib, opts: DylibOpts) !void {
-    const gpa = self.base.allocator;
-
-    if (opts.id) |id| {
-        if (dylib.id.?.current_version < id.compatibility_version) {
-            log.warn("found dylib is incompatible with the required minimum version", .{});
-            log.warn("  dylib: {s}", .{id.name});
-            log.warn("  required minimum version: {}", .{id.compatibility_version});
-            log.warn("  dylib version: {}", .{dylib.id.?.current_version});
-            return error.IncompatibleDylibVersion;
-        }
-    }
-
-    const gop = try self.dylibs_map.getOrPut(gpa, dylib.id.?.name);
-    if (gop.found_existing) return error.DylibAlreadyExists;
-
-    gop.value_ptr.* = @as(u16, @intCast(self.dylibs.items.len));
-    try self.dylibs.append(gpa, dylib);
-
-    const should_link_dylib_even_if_unreachable = blk: {
-        if (self.options.dead_strip_dylibs and !opts.needed) break :blk false;
-        break :blk !(opts.dependent or self.referenced_dylibs.contains(gop.value_ptr.*));
-    };
-
-    if (should_link_dylib_even_if_unreachable) {
-        try self.referenced_dylibs.putNoClobber(gpa, gop.value_ptr.*, {});
-    }
-}
-
-/// Parse dependents of dylibs preserving the inclusion order of:
-/// 1) anything on the linker line is parsed first
-/// 2) afterwards, we parse dependents of the included dylibs
-fn parseDependentDylibs(
-    self: *MachO,
-    arena: Allocator,
-    lib_dirs: []const []const u8,
-    framework_dirs: []const []const u8,
-) !void {
-    const tracy = trace(@src());
-    defer tracy.end();
-
-    if (self.options.namespace == .flat) return;
-
-    var index: usize = 0;
-    while (index < self.dylibs.items.len) : (index += 1) {
-        const dylib = self.getFile(self.dylibs.items[index]).?.dylib;
-        for (dylib.dependents.items) |id| {
-            const has_ext = blk: {
-                const basename = fs.path.basename(id.name);
-                break :blk mem.lastIndexOfScalar(u8, basename, '.') != null;
-            };
-            const extension = if (has_ext) fs.path.extension(id.name) else "";
-            const without_ext = if (has_ext) blk: {
-                const sentinel = mem.lastIndexOfScalar(u8, id.name, '.') orelse unreachable;
-                break :blk id.name[0..sentinel];
-            } else id.name;
-
-            for (&[_][]const u8{ extension, ".tbd" }) |ext| {
-                const with_ext = try std.fmt.allocPrint(arena, "{s}{s}", .{ without_ext, ext });
-                const full_path = full_path: {
-                    fail: {
-                        var buffer: [fs.MAX_PATH_BYTES]u8 = undefined;
-                        const resolved_path = std.fs.realpath(with_ext, &buffer) catch break :fail;
-                        break :full_path try arena.dupe(u8, resolved_path);
-                    }
-                    if (self.options.syslibroot) |root| fail: {
-                        var buffer: [fs.MAX_PATH_BYTES]u8 = undefined;
-                        const full_path = try fs.path.join(arena, &.{ root, with_ext });
-                        const resolved_path = std.fs.realpath(full_path, &buffer) catch break :fail;
-                        break :full_path try arena.dupe(u8, resolved_path);
-                    }
-                    fail: {
-                        const full_path = (try self.resolveLib(arena, lib_dirs, with_ext)) orelse
-                            break :fail;
-                        break :full_path full_path;
-                    }
-                    fail: {
-                        const full_path = (try self.resolveFramework(arena, framework_dirs, with_ext)) orelse
-                            break :fail;
-                        break :full_path full_path;
-                    }
-                    continue;
-                };
-                const link_obj = LinkObject{
-                    .path = full_path,
-                    .tag = .obj,
-                    .weak = dylib.weak,
-                    .dependent = true,
-                };
-                if (try self.parseDylib(arena, link_obj)) break;
-                if (try self.parseTbd(link_obj)) break;
-            } else {
-                self.base.fatal("{s}: unable to resolve dependency", .{id.name});
-                continue;
-            }
-        }
-    }
 }
 
 /// When resolving symbols, we approach the problem similarly to `mold`.
