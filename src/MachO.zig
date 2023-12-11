@@ -884,9 +884,8 @@ fn parseDependentDylibs(
                 const dep_dylib = file.dylib;
                 dep_dylib.hoisted = self.isHoisted(id.name);
                 if (!dep_dylib.hoisted) {
-                    const slice = dep_dylib.exports.slice();
-                    for (slice.items(.name), slice.items(.flags)) |off, flags| {
-                        try dylib.addExport(gpa, dep_dylib.getString(off), flags);
+                    while (dep_dylib.exports.popOrNull()) |exp| {
+                        try dylib.addExport(gpa, dep_dylib.getString(exp.name), exp.flags);
                     }
                 }
             } else self.base.fatal("{s}: unable to resolve dependency", .{id.name});
