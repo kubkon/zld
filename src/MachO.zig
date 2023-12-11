@@ -388,13 +388,7 @@ fn resolveSearchDir(
 
     for (candidates.items) |candidate| {
         // Verify that search path actually exists
-        var tmp = fs.cwd().openDir(candidate, .{}) catch |err| switch (err) {
-            error.FileNotFound => continue,
-            else => |e| return e,
-        };
-        defer tmp.close();
-
-        return candidate;
+        if (try accessPath(candidate)) return candidate;
     }
 
     return null;
@@ -405,12 +399,7 @@ fn resolvePathsFirst(arena: Allocator, dirs: []const []const u8, path: []const u
         for (&[_][]const u8{ ".tbd", ".dylib", ".a" }) |ext| {
             const with_ext = try std.fmt.allocPrint(arena, "{s}{s}", .{ path, ext });
             const full_path = try std.fs.path.join(arena, &[_][]const u8{ dir, with_ext });
-            const file = std.fs.cwd().openFile(full_path, .{}) catch |err| switch (err) {
-                error.FileNotFound => continue,
-                else => |e| return e,
-            };
-            defer file.close();
-            return full_path;
+            if (try accessPath(full_path)) return full_path;
         }
     }
     return null;
@@ -421,25 +410,23 @@ fn resolveDylibsFirst(arena: Allocator, dirs: []const []const u8, path: []const 
         for (&[_][]const u8{ ".tbd", ".dylib" }) |ext| {
             const with_ext = try std.fmt.allocPrint(arena, "{s}{s}", .{ path, ext });
             const full_path = try std.fs.path.join(arena, &[_][]const u8{ dir, with_ext });
-            const file = std.fs.cwd().openFile(full_path, .{}) catch |err| switch (err) {
-                error.FileNotFound => continue,
-                else => |e| return e,
-            };
-            defer file.close();
-            return full_path;
+            if (try accessPath(full_path)) return full_path;
         }
     }
     for (dirs) |dir| {
         const with_ext = try std.fmt.allocPrint(arena, "{s}.a", .{path});
         const full_path = try std.fs.path.join(arena, &[_][]const u8{ dir, with_ext });
-        const file = std.fs.cwd().openFile(full_path, .{}) catch |err| switch (err) {
-            error.FileNotFound => continue,
-            else => |e| return e,
-        };
-        defer file.close();
-        return full_path;
+        if (try accessPath(full_path)) return full_path;
     }
     return null;
+}
+
+fn accessPath(path: []const u8) !bool {
+    std.fs.cwd().access(path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => |e| return e,
+    };
+    return true;
 }
 
 fn resolveLib(
@@ -831,49 +818,70 @@ fn parseDependentDylibs(
 
         const is_weak = self.getFile(dylib_index).?.dylib.weak;
         for (self.getFile(dylib_index).?.dylib.dependents.items) |id| {
-            const has_ext = blk: {
-                const basename = fs.path.basename(id.name);
-                break :blk mem.lastIndexOfScalar(u8, basename, '.') != null;
-            };
-            const extension = if (has_ext) fs.path.extension(id.name) else "";
-            const without_ext = if (has_ext) blk: {
-                const sentinel = mem.lastIndexOfScalar(u8, id.name, '.') orelse unreachable;
-                break :blk id.name[0..sentinel];
-            } else id.name;
+            // We will search for the dependent dylibs in the following order:
+            // 1. Basename is in search lib directories or framework directories
+            // 2. If name is an absolute path, search as-is optionally prepending a syslibroot
+            //    if specified.
+            // 3. If name is a relative path, substitute @rpath, @loader_path, @executable_path with
+            //    dependees list of rpaths, and search there.
+            // 4. Finally, just search the provided relative path directly in CWD.
+            const full_path = full_path: {
+                fail: {
+                    const stem = std.fs.path.stem(id.name);
+                    const framework_name = try std.fmt.allocPrint(gpa, "{s}.framework" ++ std.fs.path.sep_str ++ "{s}", .{
+                        stem,
+                        stem,
+                    });
+                    defer gpa.free(framework_name);
 
-            const file_index = for (&[_][]const u8{ extension, ".tbd" }) |ext| {
-                const with_ext = try std.fmt.allocPrint(arena, "{s}{s}", .{ without_ext, ext });
-                const full_path = full_path: {
-                    fail: {
-                        var buffer: [fs.MAX_PATH_BYTES]u8 = undefined;
-                        const resolved_path = std.fs.realpath(with_ext, &buffer) catch break :fail;
-                        break :full_path try arena.dupe(u8, resolved_path);
-                    }
-                    if (self.options.syslibroot) |root| fail: {
-                        var buffer: [fs.MAX_PATH_BYTES]u8 = undefined;
-                        const full_path = try fs.path.join(arena, &.{ root, with_ext });
-                        const resolved_path = std.fs.realpath(full_path, &buffer) catch break :fail;
-                        break :full_path try arena.dupe(u8, resolved_path);
-                    }
-                    fail: {
-                        const path = if (mem.startsWith(u8, without_ext, "lib")) without_ext["lib".len..] else without_ext;
-                        const full_path = (try self.resolveLib(arena, lib_dirs, path)) orelse break :fail;
+                    if (mem.endsWith(u8, id.name, framework_name)) {
+                        // Framework
+                        const full_path = (try self.resolveFramework(arena, framework_dirs, stem)) orelse break :fail;
                         break :full_path full_path;
                     }
-                    fail: {
-                        const full_path = (try self.resolveFramework(arena, framework_dirs, with_ext)) orelse break :fail;
-                        break :full_path full_path;
-                    }
-                    continue;
-                };
-                const link_obj = LinkObject{
-                    .path = full_path,
-                    .tag = .obj,
-                    .weak = is_weak,
-                };
-                if (try self.parseDylib(arena, link_obj)) |file| break file;
-                if (try self.parseTbd(link_obj)) |file| break file;
-            } else @as(File.Index, 0);
+
+                    // Library
+                    const lib_name = mem.trimLeft(u8, stem, "lib");
+                    const full_path = (try self.resolveLib(arena, lib_dirs, lib_name)) orelse break :fail;
+                    break :full_path full_path;
+                }
+
+                if (std.fs.path.isAbsolute(id.name)) fail: {
+                    const full_path = if (self.options.syslibroot) |root|
+                        try std.fs.path.join(arena, &.{ root, id.name })
+                    else
+                        id.name;
+                    var buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+                    const resolved_path = std.fs.realpath(full_path, &buffer) catch break :fail;
+                    break :full_path try arena.dupe(u8, resolved_path);
+                }
+
+                if (mem.startsWith(u8, id.name, "@rpath/")) {
+                    // TODO
+                    self.base.fatal("fatal linker error: {s}: TODO handle @rpath/ in install_name '{s}'", .{
+                        self.getFile(dylib_index).?.dylib.path, id.name,
+                    });
+                } else if (mem.startsWith(u8, id.name, "@loader_path/") or mem.startsWith(u8, id.name, "@executable_path/")) {
+                    self.base.fatal("fatal linker error: {s}: TODO handle install_name '{s}'", .{
+                        self.getFile(dylib_index).?.dylib.path, id.name,
+                    });
+                }
+
+                if (try accessPath(id.name)) break :full_path id.name;
+
+                dependents.appendAssumeCapacity(0);
+                continue;
+            };
+            const link_obj = LinkObject{
+                .path = full_path,
+                .tag = .obj,
+                .weak = is_weak,
+            };
+            const file_index = file_index: {
+                if (try self.parseDylib(arena, link_obj)) |file| break :file_index file;
+                if (try self.parseTbd(link_obj)) |file| break :file_index file;
+                break :file_index @as(File.Index, 0);
+            };
             dependents.appendAssumeCapacity(file_index);
         }
 
