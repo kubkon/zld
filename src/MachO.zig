@@ -846,14 +846,15 @@ fn parseDependentDylibs(
                     break :full_path full_path;
                 }
 
-                if (std.fs.path.isAbsolute(id.name)) fail: {
-                    const full_path = if (self.options.syslibroot) |root|
+                if (std.fs.path.isAbsolute(id.name)) {
+                    const path = if (self.options.syslibroot) |root|
                         try std.fs.path.join(arena, &.{ root, id.name })
                     else
                         id.name;
-                    var buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
-                    const resolved_path = std.fs.realpath(full_path, &buffer) catch break :fail;
-                    break :full_path try arena.dupe(u8, resolved_path);
+                    for (&[_][]const u8{ "", ".tbd", ".dylib" }) |ext| {
+                        const full_path = try std.fmt.allocPrint(arena, "{s}{s}", .{ path, ext });
+                        if (try accessPath(full_path)) break :full_path full_path;
+                    }
                 }
 
                 if (mem.startsWith(u8, id.name, "@rpath/")) {
@@ -867,10 +868,12 @@ fn parseDependentDylibs(
                     });
                 }
 
-                if (try accessPath(id.name)) break :full_path id.name;
-
-                dependents.appendAssumeCapacity(0);
-                continue;
+                var buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+                const full_path = std.fs.realpath(id.name, &buffer) catch {
+                    dependents.appendAssumeCapacity(0);
+                    continue;
+                };
+                break :full_path full_path;
             };
             const link_obj = LinkObject{
                 .path = full_path,
