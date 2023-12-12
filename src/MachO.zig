@@ -790,8 +790,7 @@ fn isHoisted(self: *MachO, install_name: []const u8) bool {
     if (self.options.no_implicit_dylibs) return true;
     if (std.fs.path.dirname(install_name)) |dirname| {
         if (mem.startsWith(u8, dirname, "/usr/lib")) return true;
-        if (mem.startsWith(u8, dirname, "/System/Library/Frameworks/")) {
-            const path = dirname["/System/Library/Frameworks/".len..];
+        if (eatPrefix(dirname, "/System/Library/Frameworks/")) |path| {
             const basename = std.fs.path.basename(install_name);
             if (mem.indexOfScalar(u8, path, '.')) |index| {
                 if (mem.eql(u8, basename, path[0..index])) return true;
@@ -799,6 +798,11 @@ fn isHoisted(self: *MachO, install_name: []const u8) bool {
         }
     }
     return false;
+}
+
+fn eatPrefix(path: []const u8, prefix: []const u8) ?[]const u8 {
+    if (mem.startsWith(u8, path, prefix)) return path[prefix.len..];
+    return null;
 }
 
 fn parseDependentDylibs(
@@ -844,7 +848,7 @@ fn parseDependentDylibs(
                     }
 
                     // Library
-                    const lib_name = mem.trimLeft(u8, stem, "lib");
+                    const lib_name = eatPrefix(stem, "lib") orelse stem;
                     const full_path = (try self.resolveLib(arena, lib_dirs, lib_name)) orelse break :fail;
                     break :full_path full_path;
                 }
@@ -860,11 +864,15 @@ fn parseDependentDylibs(
                     }
                 }
 
-                if (mem.startsWith(u8, id.name, "@rpath/")) {
-                    // TODO
-                    self.base.fatal("fatal linker error: {s}: TODO handle @rpath/ in install_name '{s}'", .{
-                        self.getFile(dylib_index).?.dylib.path, id.name,
-                    });
+                if (eatPrefix(id.name, "@rpath/")) |path| {
+                    const dylib = self.getFile(dylib_index).?.dylib;
+                    for (self.getFile(dylib.umbrella).?.dylib.rpaths.keys()) |rpath| {
+                        const prefix = eatPrefix(rpath, "@loader_path/") orelse rpath;
+                        const rel_path = try std.fs.path.join(arena, &.{ prefix, path });
+                        var buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+                        const full_path = std.fs.realpath(rel_path, &buffer) catch continue;
+                        break :full_path full_path;
+                    }
                 } else if (mem.startsWith(u8, id.name, "@loader_path/") or mem.startsWith(u8, id.name, "@executable_path/")) {
                     self.base.fatal("fatal linker error: {s}: TODO handle install_name '{s}'", .{
                         self.getFile(dylib_index).?.dylib.path, id.name,
@@ -903,6 +911,11 @@ fn parseDependentDylibs(
                     const umbrella = dep_dylib.getUmbrella(self);
                     while (dep_dylib.exports.popOrNull()) |exp| {
                         try umbrella.addExport(gpa, dep_dylib.getString(exp.name), exp.flags);
+                    }
+
+                    try umbrella.rpaths.ensureUnusedCapacity(gpa, dep_dylib.rpaths.keys().len);
+                    for (dep_dylib.rpaths.keys()) |rpath| {
+                        umbrella.rpaths.putAssumeCapacity(rpath, {});
                     }
                 }
             } else self.base.fatal("{s}: unable to resolve dependency {s}", .{ dylib.getUmbrella(self).path, id.name });

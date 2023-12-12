@@ -10,7 +10,7 @@ ordinal: u16 = 0,
 
 symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
 dependents: std.ArrayListUnmanaged(Id) = .{},
-rpaths: std.ArrayListUnmanaged([]const u8) = .{},
+rpaths: std.StringArrayHashMapUnmanaged(void) = .{},
 umbrella: File.Index = 0,
 platform: ?MachO.Options.Platform = null,
 
@@ -68,7 +68,7 @@ pub fn parse(self: *Dylib, macho_file: *MachO) !void {
         },
         .RPATH => {
             const path = cmd.getRpathPathName();
-            try self.rpaths.append(gpa, path);
+            try self.rpaths.put(gpa, path, {});
         },
         else => {},
     };
