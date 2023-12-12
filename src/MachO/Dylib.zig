@@ -10,11 +10,16 @@ ordinal: u16 = 0,
 
 symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
 dependents: std.ArrayListUnmanaged(Id) = .{},
+rpaths: std.StringArrayHashMapUnmanaged(void) = .{},
+umbrella: File.Index = 0,
 platform: ?MachO.Options.Platform = null,
 
 needed: bool,
 weak: bool,
-alive: bool,
+reexport: bool,
+explicit: bool,
+hoisted: bool = true,
+referenced: bool = false,
 
 output_symtab_ctx: MachO.SymtabCtx = .{},
 
@@ -27,6 +32,7 @@ pub fn deinit(self: *Dylib, allocator: Allocator) void {
         id.deinit(allocator);
     }
     self.dependents.deinit(allocator);
+    self.rpaths.deinit(allocator);
 }
 
 pub fn parse(self: *Dylib, macho_file: *MachO) !void {
@@ -61,10 +67,13 @@ pub fn parse(self: *Dylib, macho_file: *MachO) !void {
             const data = self.data[ld_cmd.dataoff..][0..ld_cmd.datasize];
             try self.parseTrie(data, macho_file);
         },
+        .RPATH => {
+            const path = cmd.getRpathPathName();
+            try self.rpaths.put(gpa, path, {});
+        },
         else => {},
     };
 
-    try self.initSymbols(macho_file);
     self.initPlatform();
 }
 
@@ -108,7 +117,7 @@ const TrieIterator = struct {
     }
 };
 
-fn addExport(self: *Dylib, allocator: Allocator, name: []const u8, flags: Export.Flags) !void {
+pub fn addExport(self: *Dylib, allocator: Allocator, name: []const u8, flags: Export.Flags) !void {
     try self.exports.append(allocator, .{
         .name = try self.insertString(allocator, name),
         .flags = flags,
@@ -378,8 +387,6 @@ pub fn parseTbd(
             }
         }
     }
-
-    try self.initSymbols(macho_file);
 }
 
 fn addObjCClass(self: *Dylib, allocator: Allocator, name: []const u8) !void {
@@ -406,7 +413,7 @@ fn addObjCExport(
     try self.addExport(allocator, full_name, .{});
 }
 
-fn initSymbols(self: *Dylib, macho_file: *MachO) !void {
+pub fn initSymbols(self: *Dylib, macho_file: *MachO) !void {
     const gpa = macho_file.base.allocator;
 
     try self.symbols.ensureTotalCapacityPrecise(gpa, self.exports.items(.name).len);
@@ -438,6 +445,8 @@ fn initPlatform(self: *Dylib) void {
 }
 
 pub fn resolveSymbols(self: *Dylib, macho_file: *MachO) void {
+    if (!self.explicit and !self.hoisted) return;
+
     for (self.symbols.items, self.exports.items(.flags)) |index, flags| {
         const global = macho_file.getSymbol(index);
         if (self.asFile().getSymbolRank(.{
@@ -457,27 +466,28 @@ pub fn resolveSymbols(self: *Dylib, macho_file: *MachO) void {
     }
 }
 
-pub fn markLive(self: *Dylib, macho_file: *MachO) void {
-    for (self.symbols.items) |index| {
-        const global = macho_file.getSymbol(index);
-        const file = global.getFile(macho_file) orelse continue;
-        const should_drop = switch (file) {
-            .dylib => |sh| !sh.needed and global.flags.weak_ref,
-            else => false,
-        };
-        if (!should_drop and !file.isAlive()) {
-            file.setAlive();
-            file.markLive(macho_file);
-        }
-    }
-}
-
 pub fn resetGlobals(self: *Dylib, macho_file: *MachO) void {
     for (self.symbols.items) |sym_index| {
         const sym = macho_file.getSymbol(sym_index);
         const name = sym.name;
         sym.* = .{};
         sym.name = name;
+    }
+}
+
+pub fn isAlive(self: Dylib, macho_file: *MachO) bool {
+    if (!macho_file.options.dead_strip_dylibs) return self.explicit or self.referenced or self.needed;
+    return self.referenced or self.needed;
+}
+
+pub fn markReferenced(self: *Dylib, macho_file: *MachO) void {
+    for (self.symbols.items) |global_index| {
+        const global = macho_file.getSymbol(global_index);
+        const file_ptr = global.getFile(macho_file) orelse continue;
+        if (file_ptr.getIndex() != self.index) continue;
+        if (global.isLocal()) continue;
+        self.referenced = true;
+        break;
     }
 }
 
@@ -510,6 +520,10 @@ pub fn writeSymtab(self: Dylib, macho_file: *MachO) void {
     }
 }
 
+pub inline fn getUmbrella(self: Dylib, macho_file: *MachO) *Dylib {
+    return macho_file.getFile(self.umbrella).?.dylib;
+}
+
 fn getLoadCommand(self: Dylib, lc: macho.LC) ?LoadCommandIterator.LoadCommand {
     var it = LoadCommandIterator{
         .ncmds = self.header.?.ncmds,
@@ -526,7 +540,7 @@ fn insertString(self: *Dylib, allocator: Allocator, name: []const u8) !u32 {
     return off;
 }
 
-inline fn getString(self: Dylib, off: u32) [:0]const u8 {
+pub inline fn getString(self: Dylib, off: u32) [:0]const u8 {
     assert(off < self.strtab.items.len);
     return mem.sliceTo(@as([*:0]const u8, @ptrCast(self.strtab.items.ptr + off)), 0);
 }

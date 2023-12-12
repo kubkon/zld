@@ -25,6 +25,7 @@ unwind_records: std.ArrayListUnmanaged(UnwindInfo.Record.Index) = .{},
 has_unwind: bool = false,
 has_eh_frame: bool = false,
 alive: bool = true,
+hidden: bool = false,
 num_rebase_relocs: u32 = 0,
 num_bind_relocs: u32 = 0,
 num_weak_bind_relocs: u32 = 0,
@@ -782,9 +783,9 @@ pub fn resolveSymbols(self: *Object, macho_file: *MachO) void {
         }
 
         // Regardless of who the winner is, we still merge symbol visibility here.
-        if (nlist.pext() or nlist.weakDef() and nlist.weakRef()) {
+        if (nlist.pext() or (nlist.weakDef() and nlist.weakRef()) or self.hidden) {
             if (symbol.visibility != .global) {
-                symbol.visibility = .linkage;
+                symbol.visibility = .hidden;
             }
         } else {
             symbol.visibility = .global;
@@ -810,9 +811,9 @@ pub fn markLive(self: *Object, macho_file: *MachO) void {
         const sym = macho_file.getSymbol(index);
         const file = sym.getFile(macho_file) orelse continue;
         const should_keep = nlist.undf() or (nlist.tentative() and !sym.flags.tentative);
-        if (should_keep and !file.isAlive()) {
-            file.setAlive();
-            file.markLive(macho_file);
+        if (should_keep and file == .object and !file.object.alive) {
+            file.object.alive = true;
+            file.object.markLive(macho_file);
         }
     }
 }

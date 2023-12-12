@@ -21,6 +21,7 @@ const usage =
     \\Usage: {s} [files...]
     \\
     \\General Options:
+    \\-all_load                          Loads all members of all static archive libraries
     \\-arch [name]                       Specifies which architecture the output file should be
     \\-current_version [value]           Specifies the current version number of the library
     \\-compatibility_version [value]     Specifies the compatibility version number of the library
@@ -40,6 +41,8 @@ const usage =
     \\                                   in hexadecimal notation
     \\-headerpad_max_install_names       Set enough space as if all paths were MAXPATHLEN
     \\--help                             Print this help and exit
+    \\-hidden-l[name]                    Link against a static library but treat symbols as visibility hidden.
+    \\  -load_hidden [name]
     \\-install_name                      Add dylib's install name
     \\  -dylib_install_name
     \\-l[name]                           Link against library
@@ -48,11 +51,14 @@ const usage =
     \\-needed-l[name]                    Link against library (even if unused)
     \\  -needed_library [name]           
     \\-no_deduplicate                    Do not run deduplication pass in linker
+    \\-no_implicit_dylibs                Do not hoist public dylibs/frameworks into the final image.
     \\-o [path]                          Specify output path for the final artifact
     \\-pagezero_size [value]             Size of the __PAGEZERO segment in hexademical notation
     \\-platform_version [platform] [min_version] [sdk_version]
     \\                                   Sets the platform, oldest supported version of that platform and 
     \\                                   the SDK it was built against
+    \\-reexport-l[name]                  Link against library and re-export it for the clients
+    \\  -reexport_library [name]
     \\-rpath [path]                      Specify runtime path
     \\-S                                 Do not put debug information (STABS or DWARF) in the output file
     \\-search_paths_first                Search each dir in library search paths for `libx.dylib` then `libx.a`
@@ -107,7 +113,9 @@ dead_strip: bool = false,
 dead_strip_dylibs: bool = false,
 undefined_treatment: UndefinedTreatment = .@"error",
 no_deduplicate: bool = false,
+no_implicit_dylibs: bool = false,
 namespace: Namespace = .two_level,
+all_load: bool = false,
 
 pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options {
     if (args.len == 0) ctx.fatal(usage, .{cmd});
@@ -151,12 +159,18 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             try positionals.append(.{ .path = path, .tag = .framework });
         } else if (p.arg1("F")) |path| {
             try framework_dirs.put(path, {});
+        } else if (p.arg1("hidden-l")) |path| {
+            try positionals.append(.{ .path = path, .tag = .lib, .hidden = true });
         } else if (p.arg1("needed-l")) |path| {
             try positionals.append(.{ .path = path, .tag = .lib, .needed = true });
         } else if (p.arg1("needed_library")) |path| {
             try positionals.append(.{ .path = path, .tag = .lib, .needed = true });
         } else if (p.arg1("needed_framework")) |path| {
             try positionals.append(.{ .path = path, .tag = .framework, .needed = true });
+        } else if (p.arg1("reexport-l")) |path| {
+            try positionals.append(.{ .path = path, .tag = .lib, .reexport = true });
+        } else if (p.arg1("reexport_library")) |path| {
+            try positionals.append(.{ .path = path, .tag = .lib, .reexport = true });
         } else if (p.arg1("weak-l")) |path| {
             try positionals.append(.{ .path = path, .tag = .lib, .weak = true });
         } else if (p.arg1("weak_library")) |path| {
@@ -216,8 +230,12 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             try force_undefined_symbols.put(name, {});
         } else if (p.flag1("S")) {
             opts.strip = true;
+        } else if (p.flag1("all_load")) {
+            opts.all_load = true;
         } else if (p.arg1("force_load")) |path| {
             try positionals.append(.{ .path = path, .tag = .obj, .must_link = true });
+        } else if (p.arg1("load_hidden")) |path| {
+            try positionals.append(.{ .path = path, .tag = .obj, .hidden = true });
         } else if (p.arg1("arch")) |value| {
             if (mem.eql(u8, value, "arm64")) {
                 opts.cpu_arch = .aarch64;
@@ -273,6 +291,8 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             try lib_dirs.put(path, {});
         } else if (p.flag1("no_deduplicate")) {
             opts.no_deduplicate = true;
+        } else if (p.flag1("no_implicit_dylibs")) {
+            opts.no_implicit_dylibs = true;
         } else if (p.flag1("two_levelnamespace")) {
             opts.namespace = .two_level;
         } else if (p.flag1("flat_namespace")) {

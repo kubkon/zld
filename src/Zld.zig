@@ -177,7 +177,9 @@ pub fn ArgParser(comptime Ctx: type) type {
                     return actual_arg[pat.len..];
                 }
                 // MachO specific
-                if (mem.eql(u8, pat, "needed-l") or mem.eql(u8, pat, "weak-l")) {
+                if (mem.eql(u8, pat, "needed-l") or mem.eql(u8, pat, "weak-l") or
+                    mem.eql(u8, pat, "hidden-l") or mem.eql(u8, pat, "reexport-l"))
+                {
                     if (mem.startsWith(u8, actual_arg, pat)) {
                         return actual_arg[pat.len..];
                     }
@@ -220,9 +222,7 @@ pub fn openPath(allocator: Allocator, tag: Tag, options: Options, thread_pool: *
 
 pub fn deinit(base: *Zld) void {
     base.file.close();
-    assert(base.warnings.items.len == 0);
     base.warnings.deinit(base.allocator);
-    assert(base.errors.items.len == 0);
     base.errors.deinit(base.allocator);
     switch (base.tag) {
         .elf => {

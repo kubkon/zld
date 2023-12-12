@@ -1,9 +1,5 @@
 index: File.Index,
-
 symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
-
-alive: bool = true,
-
 output_symtab_ctx: MachO.SymtabCtx = .{},
 
 pub fn deinit(self: *InternalObject, allocator: Allocator) void {

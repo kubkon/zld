@@ -196,16 +196,48 @@ pub fn flush(self: *MachO) !void {
     var resolved_objects = std.ArrayList(LinkObject).init(arena);
     try resolved_objects.ensureTotalCapacityPrecise(self.options.positionals.len);
     for (self.options.positionals) |obj| {
-        const resolved_obj = self.resolveFile(
-            arena,
-            obj,
-            lib_dirs.items,
-            framework_dirs.items,
-        ) catch |err| switch (err) {
-            error.ResolveFail => continue, // Already flagged up to the user
-            else => |e| return e,
+        const full_path = blk: {
+            switch (obj.tag) {
+                .obj => {
+                    var buffer: [fs.MAX_PATH_BYTES]u8 = undefined;
+                    const full_path = std.fs.realpath(obj.path, &buffer) catch |err| switch (err) {
+                        error.FileNotFound => {
+                            self.base.fatal("file not found {}", .{obj});
+                            continue;
+                        },
+                        else => |e| return e,
+                    };
+                    break :blk try arena.dupe(u8, full_path);
+                },
+                .lib => {
+                    const full_path = (try self.resolveLib(arena, lib_dirs.items, obj.path)) orelse {
+                        const err = try self.base.addErrorWithNotes(lib_dirs.items.len);
+                        try err.addMsg("library not found for {}", .{obj});
+                        for (lib_dirs.items) |dir| try err.addNote("tried {s}", .{dir});
+                        continue;
+                    };
+                    break :blk full_path;
+                },
+                .framework => {
+                    const full_path = (try self.resolveFramework(arena, framework_dirs.items, obj.path)) orelse {
+                        const err = try self.base.addErrorWithNotes(framework_dirs.items.len);
+                        try err.addMsg("framework not found for {}", .{obj});
+                        for (framework_dirs.items) |dir| try err.addNote("tried {s}", .{dir});
+                        continue;
+                    };
+                    break :blk full_path;
+                },
+            }
         };
-        resolved_objects.appendAssumeCapacity(resolved_obj);
+        resolved_objects.appendAssumeCapacity(.{
+            .path = full_path,
+            .tag = obj.tag,
+            .needed = obj.needed,
+            .weak = obj.weak,
+            .hidden = obj.hidden,
+            .reexport = obj.reexport,
+            .must_link = obj.must_link,
+        });
     }
 
     if (self.options.cpu_arch == null) {
@@ -248,9 +280,17 @@ pub fn flush(self: *MachO) !void {
     for (resolved_objects.items) |obj| {
         try self.parsePositional(arena, obj);
     }
+    for (self.dylibs.items) |index| {
+        self.getFile(index).?.dylib.umbrella = index;
+    }
 
-    // Parse dependent dylibs
-    try self.parseDependentDylibs(arena);
+    try self.parseDependentDylibs(arena, lib_dirs.items, framework_dirs.items);
+
+    for (self.dylibs.items) |index| {
+        const dylib = self.getFile(index).?.dylib;
+        if (!dylib.explicit and !dylib.hoisted) continue;
+        try dylib.initSymbols(self);
+    }
 
     {
         const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
@@ -260,11 +300,6 @@ pub fn flush(self: *MachO) !void {
 
     try self.addUndefinedGlobals();
     try self.resolveSymbols();
-
-    for (self.dylibs.items, 1..) |index, ord| {
-        self.getFile(index).?.dylib.ordinal = @intCast(ord);
-    }
-
     try self.resolveSyntheticSymbols();
 
     try self.convertTentativeDefinitions();
@@ -272,6 +307,13 @@ pub fn flush(self: *MachO) !void {
 
     if (self.options.dead_strip) {
         try dead_strip.gcAtoms(self);
+    }
+
+    self.deadStripDylibs();
+
+    for (self.dylibs.items, 1..) |index, ord| {
+        const dylib = self.getFile(index).?.dylib;
+        dylib.ordinal = @intCast(ord);
     }
 
     try self.initOutputSections();
@@ -332,7 +374,6 @@ fn resolveSearchDir(
             const common_dir = if (builtin.os.tag == .windows) blk: {
                 // We need to check for disk designator and strip it out from dir path so
                 // that we can concat dir with syslibroot.
-                // TODO we should backport this mechanism to 'MachO.Dylib.parseDependentLibs()'
                 const disk_designator = fs.path.diskDesignatorWindows(dir);
 
                 if (mem.indexOf(u8, dir, disk_designator)) |where| {
@@ -350,13 +391,7 @@ fn resolveSearchDir(
 
     for (candidates.items) |candidate| {
         // Verify that search path actually exists
-        var tmp = fs.cwd().openDir(candidate, .{}) catch |err| switch (err) {
-            error.FileNotFound => continue,
-            else => |e| return e,
-        };
-        defer tmp.close();
-
-        return candidate;
+        if (try accessPath(candidate)) return candidate;
     }
 
     return null;
@@ -367,12 +402,7 @@ fn resolvePathsFirst(arena: Allocator, dirs: []const []const u8, path: []const u
         for (&[_][]const u8{ ".tbd", ".dylib", ".a" }) |ext| {
             const with_ext = try std.fmt.allocPrint(arena, "{s}{s}", .{ path, ext });
             const full_path = try std.fs.path.join(arena, &[_][]const u8{ dir, with_ext });
-            const file = std.fs.cwd().openFile(full_path, .{}) catch |err| switch (err) {
-                error.FileNotFound => continue,
-                else => |e| return e,
-            };
-            defer file.close();
-            return full_path;
+            if (try accessPath(full_path)) return full_path;
         }
     }
     return null;
@@ -383,25 +413,23 @@ fn resolveDylibsFirst(arena: Allocator, dirs: []const []const u8, path: []const 
         for (&[_][]const u8{ ".tbd", ".dylib" }) |ext| {
             const with_ext = try std.fmt.allocPrint(arena, "{s}{s}", .{ path, ext });
             const full_path = try std.fs.path.join(arena, &[_][]const u8{ dir, with_ext });
-            const file = std.fs.cwd().openFile(full_path, .{}) catch |err| switch (err) {
-                error.FileNotFound => continue,
-                else => |e| return e,
-            };
-            defer file.close();
-            return full_path;
+            if (try accessPath(full_path)) return full_path;
         }
     }
     for (dirs) |dir| {
         const with_ext = try std.fmt.allocPrint(arena, "{s}.a", .{path});
         const full_path = try std.fs.path.join(arena, &[_][]const u8{ dir, with_ext });
-        const file = std.fs.cwd().openFile(full_path, .{}) catch |err| switch (err) {
-            error.FileNotFound => continue,
-            else => |e| return e,
-        };
-        defer file.close();
-        return full_path;
+        if (try accessPath(full_path)) return full_path;
     }
     return null;
+}
+
+fn accessPath(path: []const u8) !bool {
+    std.fs.cwd().access(path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => |e| return e,
+    };
+    return true;
 }
 
 fn resolveLib(
@@ -431,58 +459,6 @@ fn resolveFramework(
         .paths_first => return try resolvePathsFirst(arena, search_dirs, path),
         .dylibs_first => return try resolveDylibsFirst(arena, search_dirs, path),
     }
-}
-
-fn resolveFile(
-    self: *MachO,
-    arena: Allocator,
-    obj: LinkObject,
-    lib_dirs: []const []const u8,
-    framework_dirs: []const []const u8,
-) !LinkObject {
-    const tracy = trace(@src());
-    defer tracy.end();
-
-    const full_path = blk: {
-        switch (obj.tag) {
-            .obj => {
-                var buffer: [fs.MAX_PATH_BYTES]u8 = undefined;
-                const full_path = std.fs.realpath(obj.path, &buffer) catch |err| switch (err) {
-                    error.FileNotFound => {
-                        self.base.fatal("file not found '{s}'", .{obj.path});
-                        return error.ResolveFail;
-                    },
-                    else => |e| return e,
-                };
-                break :blk try arena.dupe(u8, full_path);
-            },
-            .lib => {
-                const full_path = (try self.resolveLib(arena, lib_dirs, obj.path)) orelse {
-                    const err = try self.base.addErrorWithNotes(lib_dirs.len);
-                    try err.addMsg("library not found for -l{s}", .{obj.path});
-                    for (lib_dirs) |dir| try err.addNote("tried {s}", .{dir});
-                    return error.ResolveFail;
-                };
-                break :blk full_path;
-            },
-            .framework => {
-                const full_path = (try self.resolveFramework(arena, framework_dirs, obj.path)) orelse {
-                    const err = try self.base.addErrorWithNotes(framework_dirs.len);
-                    try err.addMsg("framework not found for -framework {s}", .{obj.path});
-                    for (framework_dirs) |dir| try err.addNote("tried {s}", .{dir});
-                    return error.ResolveFail;
-                };
-                break :blk full_path;
-            },
-        }
-    };
-    return .{
-        .path = full_path,
-        .tag = obj.tag,
-        .needed = obj.needed,
-        .weak = obj.weak,
-        .must_link = obj.must_link,
-    };
 }
 
 fn inferCpuArchAndPlatform(self: *MachO, objs: []const LinkObject) !void {
@@ -607,8 +583,8 @@ fn parsePositional(self: *MachO, arena: Allocator, obj: LinkObject) !void {
 
     if (try self.parseObject(arena, obj)) return;
     if (try self.parseArchive(arena, obj)) return;
-    if (try self.parseDylib(arena, obj)) return;
-    if (try self.parseTbd(obj)) return;
+    if (try self.parseDylib(arena, obj, true)) |_| return;
+    if (try self.parseTbd(obj, true)) |_| return;
 
     self.base.fatal("unknown filetype for positional argument: '{s}'", .{obj.path});
 }
@@ -682,7 +658,8 @@ fn parseArchive(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
         self.files.set(index, .{ .object = extracted });
         const object = &self.files.items(.data)[index].object;
         object.index = index;
-        object.alive = obj.must_link or obj.needed;
+        object.alive = obj.must_link or obj.needed or self.options.all_load;
+        object.hidden = obj.hidden;
         try object.parse(self);
         try self.objects.append(gpa, index);
         self.validateCpuArch(index);
@@ -713,12 +690,12 @@ fn parseFatLibrary(self: *MachO, path: []const u8, file: fs.File) !fat.Arch {
 const DylibOpts = struct {
     syslibroot: ?[]const u8,
     id: ?Dylib.Id = null,
-    dependent: bool = false,
     needed: bool = false,
     weak: bool = false,
+    reexport: bool = false,
 };
 
-fn parseDylib(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
+fn parseDylib(self: *MachO, arena: Allocator, obj: LinkObject, explicit: bool) anyerror!?File.Index {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -726,7 +703,7 @@ fn parseDylib(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
 
     if (self.options.cpu_arch == null) {
         self.base.fatal("{s}: ignoring library as no architecture specified", .{obj.path});
-        return true;
+        return null;
     }
 
     const file = try std.fs.cwd().openFile(obj.path, .{});
@@ -736,7 +713,7 @@ fn parseDylib(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
     var size: u64 = (try file.stat()).size;
     if (fat.isFatLibrary(file)) {
         const fat_arch = self.parseFatLibrary(obj.path, file) catch |err| switch (err) {
-            error.NoArchSpecified, error.MissingArch => return false,
+            error.NoArchSpecified, error.MissingArch => return null,
             else => |e| return e,
         };
         offset = fat_arch.offset;
@@ -744,10 +721,10 @@ fn parseDylib(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
         try file.seekTo(offset);
     }
 
-    const header = file.reader().readStruct(macho.mach_header_64) catch return false;
+    const header = file.reader().readStruct(macho.mach_header_64) catch return null;
     try file.seekTo(0);
 
-    if (header.filetype != macho.MH_DYLIB) return false;
+    if (header.filetype != macho.MH_DYLIB) return null;
 
     const data = try arena.alloc(u8, size);
     const nread = try file.readAll(data);
@@ -760,18 +737,20 @@ fn parseDylib(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
         .index = index,
         .needed = obj.needed,
         .weak = obj.weak,
-        .alive = obj.needed or !obj.dependent and !self.options.dead_strip_dylibs,
+        .reexport = obj.reexport,
+        .explicit = explicit,
     } });
     const dylib = &self.files.items(.data)[index].dylib;
     try dylib.parse(self);
+
     try self.dylibs.append(gpa, index);
     self.validateCpuArch(index);
     self.validatePlatform(index);
 
-    return true;
+    return index;
 }
 
-fn parseTbd(self: *MachO, obj: LinkObject) !bool {
+fn parseTbd(self: *MachO, obj: LinkObject, explicit: bool) anyerror!?File.Index {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -779,14 +758,14 @@ fn parseTbd(self: *MachO, obj: LinkObject) !bool {
     const file = try std.fs.cwd().openFile(obj.path, .{});
     defer file.close();
 
-    var lib_stub = LibStub.loadFromFile(gpa, file) catch return false; // TODO actually handle different errors
+    var lib_stub = LibStub.loadFromFile(gpa, file) catch return null; // TODO actually handle different errors
     defer lib_stub.deinit();
 
-    if (lib_stub.inner.len == 0) return false;
+    if (lib_stub.inner.len == 0) return null;
 
     const cpu_arch = self.options.cpu_arch orelse {
         self.base.fatal("{s}: ignoring library as no architecture specified", .{obj.path});
-        return true;
+        return null;
     };
 
     const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
@@ -796,95 +775,158 @@ fn parseTbd(self: *MachO, obj: LinkObject) !bool {
         .index = index,
         .needed = obj.needed,
         .weak = obj.weak,
-        .alive = obj.needed or !obj.dependent and !self.options.dead_strip_dylibs,
+        .reexport = obj.reexport,
+        .explicit = explicit,
     } });
     const dylib = &self.files.items(.data)[index].dylib;
     try dylib.parseTbd(cpu_arch, self.options.platform, lib_stub, self);
     try self.dylibs.append(gpa, index);
     self.validatePlatform(index);
 
-    return true;
+    return index;
 }
 
-fn addDylib(self: *MachO, dylib: Dylib, opts: DylibOpts) !void {
-    const gpa = self.base.allocator;
-
-    if (opts.id) |id| {
-        if (dylib.id.?.current_version < id.compatibility_version) {
-            log.warn("found dylib is incompatible with the required minimum version", .{});
-            log.warn("  dylib: {s}", .{id.name});
-            log.warn("  required minimum version: {}", .{id.compatibility_version});
-            log.warn("  dylib version: {}", .{dylib.id.?.current_version});
-            return error.IncompatibleDylibVersion;
+/// According to ld64's manual, public (i.e., system) dylibs/frameworks are hoisted into the final
+/// image unless overriden by -no_implicit_dylibs.
+fn isHoisted(self: *MachO, install_name: []const u8) bool {
+    if (self.options.no_implicit_dylibs) return true;
+    if (std.fs.path.dirname(install_name)) |dirname| {
+        if (mem.startsWith(u8, dirname, "/usr/lib")) return true;
+        if (eatPrefix(dirname, "/System/Library/Frameworks/")) |path| {
+            const basename = std.fs.path.basename(install_name);
+            if (mem.indexOfScalar(u8, path, '.')) |index| {
+                if (mem.eql(u8, basename, path[0..index])) return true;
+            }
         }
     }
-
-    const gop = try self.dylibs_map.getOrPut(gpa, dylib.id.?.name);
-    if (gop.found_existing) return error.DylibAlreadyExists;
-
-    gop.value_ptr.* = @as(u16, @intCast(self.dylibs.items.len));
-    try self.dylibs.append(gpa, dylib);
-
-    const should_link_dylib_even_if_unreachable = blk: {
-        if (self.options.dead_strip_dylibs and !opts.needed) break :blk false;
-        break :blk !(opts.dependent or self.referenced_dylibs.contains(gop.value_ptr.*));
-    };
-
-    if (should_link_dylib_even_if_unreachable) {
-        try self.referenced_dylibs.putNoClobber(gpa, gop.value_ptr.*, {});
-    }
+    return false;
 }
 
-/// Parse dependents of dylibs preserving the inclusion order of:
-/// 1) anything on the linker line is parsed first
-/// 2) afterwards, we parse dependents of the included dylibs
-fn parseDependentDylibs(self: *MachO, arena: Allocator) !void {
-    const tracy = trace(@src());
-    defer tracy.end();
+fn eatPrefix(path: []const u8, prefix: []const u8) ?[]const u8 {
+    if (mem.startsWith(u8, path, prefix)) return path[prefix.len..];
+    return null;
+}
 
-    if (self.options.namespace == .flat) return;
+fn parseDependentDylibs(
+    self: *MachO,
+    arena: Allocator,
+    lib_dirs: []const []const u8,
+    framework_dirs: []const []const u8,
+) !void {
+    const gpa = self.base.allocator;
+
+    if (self.dylibs.items.len == 0) return;
+
+    // TODO handle duplicate dylibs - it is not uncommon to have the same dylib loaded multiple times
+    // in which case we should track that and return File.Index immediately instead re-parsing paths.
 
     var index: usize = 0;
     while (index < self.dylibs.items.len) : (index += 1) {
-        const dylib = self.getFile(self.dylibs.items[index]).?.dylib;
-        for (dylib.dependents.items) |id| {
-            const has_ext = blk: {
-                const basename = fs.path.basename(id.name);
-                break :blk mem.lastIndexOfScalar(u8, basename, '.') != null;
+        const dylib_index = self.dylibs.items[index];
+
+        var dependents = std.ArrayList(File.Index).init(gpa);
+        defer dependents.deinit();
+        try dependents.ensureTotalCapacityPrecise(self.getFile(dylib_index).?.dylib.dependents.items.len);
+
+        const is_weak = self.getFile(dylib_index).?.dylib.weak;
+        for (self.getFile(dylib_index).?.dylib.dependents.items) |id| {
+            // We will search for the dependent dylibs in the following order:
+            // 1. Basename is in search lib directories or framework directories
+            // 2. If name is an absolute path, search as-is optionally prepending a syslibroot
+            //    if specified.
+            // 3. If name is a relative path, substitute @rpath, @loader_path, @executable_path with
+            //    dependees list of rpaths, and search there.
+            // 4. Finally, just search the provided relative path directly in CWD.
+            const full_path = full_path: {
+                fail: {
+                    const stem = std.fs.path.stem(id.name);
+                    const framework_name = try std.fmt.allocPrint(gpa, "{s}.framework" ++ std.fs.path.sep_str ++ "{s}", .{
+                        stem,
+                        stem,
+                    });
+                    defer gpa.free(framework_name);
+
+                    if (mem.endsWith(u8, id.name, framework_name)) {
+                        // Framework
+                        const full_path = (try self.resolveFramework(arena, framework_dirs, stem)) orelse break :fail;
+                        break :full_path full_path;
+                    }
+
+                    // Library
+                    const lib_name = eatPrefix(stem, "lib") orelse stem;
+                    const full_path = (try self.resolveLib(arena, lib_dirs, lib_name)) orelse break :fail;
+                    break :full_path full_path;
+                }
+
+                if (std.fs.path.isAbsolute(id.name)) {
+                    const path = if (self.options.syslibroot) |root|
+                        try std.fs.path.join(arena, &.{ root, id.name })
+                    else
+                        id.name;
+                    for (&[_][]const u8{ "", ".tbd", ".dylib" }) |ext| {
+                        const full_path = try std.fmt.allocPrint(arena, "{s}{s}", .{ path, ext });
+                        if (try accessPath(full_path)) break :full_path full_path;
+                    }
+                }
+
+                if (eatPrefix(id.name, "@rpath/")) |path| {
+                    const dylib = self.getFile(dylib_index).?.dylib;
+                    for (self.getFile(dylib.umbrella).?.dylib.rpaths.keys()) |rpath| {
+                        const prefix = eatPrefix(rpath, "@loader_path/") orelse rpath;
+                        const rel_path = try std.fs.path.join(arena, &.{ prefix, path });
+                        var buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+                        const full_path = std.fs.realpath(rel_path, &buffer) catch continue;
+                        break :full_path full_path;
+                    }
+                } else if (eatPrefix(id.name, "@loader_path/")) |_| {
+                    self.base.fatal("fatal linker error: {s}: TODO handle install_name '{s}'", .{
+                        self.getFile(dylib_index).?.dylib.path, id.name,
+                    });
+                } else if (eatPrefix(id.name, "@executable_path/")) |_| {
+                    self.base.fatal("fatal linker error: {s}: TODO handle install_name '{s}'", .{
+                        self.getFile(dylib_index).?.dylib.path, id.name,
+                    });
+                }
+
+                var buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+                const full_path = std.fs.realpath(id.name, &buffer) catch {
+                    dependents.appendAssumeCapacity(0);
+                    continue;
+                };
+                break :full_path full_path;
             };
-            const extension = if (has_ext) fs.path.extension(id.name) else "";
-            const without_ext = if (has_ext) blk: {
-                const sentinel = mem.lastIndexOfScalar(u8, id.name, '.') orelse unreachable;
-                break :blk id.name[0..sentinel];
-            } else id.name;
+            const link_obj = LinkObject{
+                .path = full_path,
+                .tag = .obj,
+                .weak = is_weak,
+            };
+            const file_index = file_index: {
+                if (try self.parseDylib(arena, link_obj, false)) |file| break :file_index file;
+                if (try self.parseTbd(link_obj, false)) |file| break :file_index file;
+                break :file_index @as(File.Index, 0);
+            };
+            dependents.appendAssumeCapacity(file_index);
+        }
 
-            for (&[_][]const u8{ extension, ".tbd" }) |ext| {
-                const with_ext = try std.fmt.allocPrint(arena, "{s}{s}", .{ without_ext, ext });
-                const full_path = if (self.options.syslibroot) |root|
-                    try fs.path.join(arena, &.{ root, with_ext })
-                else
-                    with_ext;
-
-                const file = std.fs.cwd().openFile(full_path, .{}) catch |err| switch (err) {
-                    error.FileNotFound => continue,
-                    else => |e| return e,
-                };
-                defer file.close();
-
-                log.debug("trying dependency at fully resolved path {s}", .{full_path});
-
-                const link_obj = LinkObject{
-                    .path = full_path,
-                    .tag = .lib,
-                    .weak = dylib.weak,
-                    .dependent = true,
-                };
-                if (try self.parseDylib(arena, link_obj)) break;
-                if (try self.parseTbd(link_obj)) break;
-            } else {
-                self.base.fatal("{s}: unable to resolve dependency", .{id.name});
-                continue;
-            }
+        const dylib = self.getFile(dylib_index).?.dylib;
+        for (dylib.dependents.items, dependents.items) |id, file_index| {
+            if (self.getFile(file_index)) |file| {
+                const dep_dylib = file.dylib;
+                dep_dylib.hoisted = self.isHoisted(id.name);
+                if (self.getFile(dep_dylib.umbrella) == null) {
+                    dep_dylib.umbrella = dylib.umbrella;
+                }
+                if (!dep_dylib.hoisted) {
+                    const umbrella = dep_dylib.getUmbrella(self);
+                    for (dep_dylib.exports.items(.name), dep_dylib.exports.items(.flags)) |off, flags| {
+                        try umbrella.addExport(gpa, dep_dylib.getString(off), flags);
+                    }
+                    try umbrella.rpaths.ensureUnusedCapacity(gpa, dep_dylib.rpaths.keys().len);
+                    for (dep_dylib.rpaths.keys()) |rpath| {
+                        umbrella.rpaths.putAssumeCapacity(rpath, {});
+                    }
+                }
+            } else self.base.fatal("{s}: unable to resolve dependency {s}", .{ dylib.getUmbrella(self).path, id.name });
         }
     }
 }
@@ -908,20 +950,12 @@ pub fn resolveSymbols(self: *MachO) !void {
     for (self.objects.items) |index| self.getFile(index).?.resetGlobals(self);
     for (self.dylibs.items) |index| self.getFile(index).?.resetGlobals(self);
 
-    // Prune dead objects and dylibs.
+    // Prune dead objects.
     var i: usize = 0;
     while (i < self.objects.items.len) {
         const index = self.objects.items[i];
-        if (!self.getFile(index).?.isAlive()) {
+        if (!self.getFile(index).?.object.alive) {
             _ = self.objects.orderedRemove(i);
-        } else i += 1;
-    }
-
-    i = 0;
-    while (i < self.dylibs.items.len) {
-        const index = self.dylibs.items[i];
-        if (!self.getFile(index).?.isAlive()) {
-            _ = self.dylibs.orderedRemove(i);
         } else i += 1;
     }
 
@@ -932,15 +966,29 @@ pub fn resolveSymbols(self: *MachO) !void {
 
 fn markLive(self: *MachO) void {
     for (self.undefined_symbols.items) |index| {
-        if (self.getSymbol(index).getFile(self)) |file| file.setAlive();
+        if (self.getSymbol(index).getFile(self)) |file| {
+            if (file == .object) {
+                file.object.alive = true;
+            }
+        }
     }
     for (self.objects.items) |index| {
-        const file = self.getFile(index).?;
-        if (file.isAlive()) file.markLive(self);
+        const object = self.getFile(index).?.object;
+        if (object.alive) object.markLive(self);
     }
+}
+
+fn deadStripDylibs(self: *MachO) void {
     for (self.dylibs.items) |index| {
-        const file = self.getFile(index).?;
-        if (file.isAlive()) file.markLive(self);
+        self.getFile(index).?.dylib.markReferenced(self);
+    }
+
+    var i: usize = 0;
+    while (i < self.dylibs.items.len) {
+        const index = self.dylibs.items[i];
+        if (!self.getFile(index).?.dylib.isAlive(self)) {
+            _ = self.dylibs.orderedRemove(i);
+        } else i += 1;
     }
 }
 
@@ -951,16 +999,6 @@ fn convertTentativeDefinitions(self: *MachO) !void {
 }
 
 fn markImportsAndExports(self: *MachO) void {
-    if (!self.options.dylib)
-        for (self.dylibs.items) |index| {
-            for (self.getFile(index).?.getSymbols()) |sym_index| {
-                const sym = self.getSymbol(sym_index);
-                const file = sym.getFile(self) orelse continue;
-                if (sym.visibility != .global) continue;
-                if (file != .dylib) sym.flags.@"export" = true;
-            }
-        };
-
     for (self.objects.items) |index| {
         for (self.getFile(index).?.getSymbols()) |sym_index| {
             const sym = self.getSymbol(sym_index);
@@ -2197,10 +2235,15 @@ fn writeLoadCommands(self: *MachO) !struct { usize, usize, usize } {
 
     for (self.dylibs.items) |index| {
         const dylib = self.getFile(index).?.dylib;
-        if (!dylib.alive) continue;
+        assert(dylib.isAlive(self));
         const dylib_id = dylib.id.?;
         try load_commands.writeDylibLC(.{
-            .cmd = if (dylib.weak) .LOAD_WEAK_DYLIB else .LOAD_DYLIB,
+            .cmd = if (dylib.weak)
+                .LOAD_WEAK_DYLIB
+            else if (dylib.reexport)
+                .REEXPORT_DYLIB
+            else
+                .LOAD_DYLIB,
             .name = dylib_id.name,
             .timestamp = dylib_id.timestamp,
             .current_version = dylib_id.current_version,
@@ -2243,10 +2286,16 @@ fn writeHeader(self: *MachO, ncmds: usize, sizeofcmds: usize) !void {
 
     if (self.options.dylib) {
         header.filetype = macho.MH_DYLIB;
-        header.flags |= macho.MH_NO_REEXPORTED_DYLIBS;
     } else {
         header.filetype = macho.MH_EXECUTE;
         header.flags |= macho.MH_PIE;
+    }
+
+    const has_reexports = for (self.dylibs.items) |index| {
+        if (self.getFile(index).?.dylib.reexport) break true;
+    } else false;
+    if (!has_reexports) {
+        header.flags |= macho.MH_NO_REEXPORTED_DYLIBS;
     }
 
     if (self.has_tlv) {
@@ -2524,7 +2573,7 @@ fn fmtDumpState(
             dylib.needed,
             dylib.weak,
         });
-        if (!dylib.alive) try writer.writeAll(" : ([*])");
+        if (!dylib.isAlive(self)) try writer.writeAll(" : ([*])");
         try writer.writeByte('\n');
         try writer.print("{}\n", .{dylib.fmtSymtab(self)});
     }
@@ -2626,8 +2675,9 @@ pub const LinkObject = struct {
     tag: enum { obj, lib, framework },
     needed: bool = false,
     weak: bool = false,
+    hidden: bool = false,
+    reexport: bool = false,
     must_link: bool = false,
-    dependent: bool = false,
 
     pub fn format(
         self: LinkObject,
@@ -2637,18 +2687,30 @@ pub const LinkObject = struct {
     ) !void {
         _ = options;
         _ = unused_fmt_string;
-        if (!self.dependent) {
-            if (self.needed) {
-                try writer.print("-needed_{s}", .{@tagName(self.tag)});
-            }
-            if (self.weak) {
-                try writer.print("-weak_{s}", .{@tagName(self.tag)});
-            }
-            if (self.must_link and self.tag == .obj) {
-                try writer.writeAll("-force_load");
-            }
+        switch (self.tag) {
+            .lib => if (self.needed) {
+                try writer.writeAll("-needed-l");
+            } else if (self.weak) {
+                try writer.writeAll("-weak-l");
+            } else if (self.hidden) {
+                try writer.writeAll("-hidden-l");
+            } else if (self.reexport) {
+                try writer.writeAll("-reexport-l");
+            } else try writer.writeAll("-l"),
+
+            .framework => if (self.needed) {
+                try writer.writeAll("-needed_framework ");
+            } else if (self.weak) {
+                try writer.writeAll("-weak_framework ");
+            } else try writer.writeAll("-framework "),
+
+            .obj => if (self.must_link) {
+                try writer.writeAll("-force_load ");
+            } else if (self.hidden) {
+                try writer.writeAll("-load_hidden ");
+            },
         }
-        try writer.print(" {s}", .{self.path});
+        try writer.writeAll(self.path);
     }
 };
 

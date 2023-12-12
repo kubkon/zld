@@ -177,7 +177,7 @@ pub fn setOutputSym(symbol: Symbol, macho_file: *MachO, out: *macho.nlist_64) vo
         out.n_value = symbol.getAddress(.{}, macho_file);
 
         switch (symbol.visibility) {
-            .linkage => out.n_type |= macho.N_PEXT,
+            .hidden => out.n_type |= macho.N_PEXT,
             else => {},
         }
     } else if (symbol.flags.@"export") {
@@ -313,7 +313,7 @@ pub const Flags = packed struct {
 
 pub const Visibility = enum {
     global,
-    linkage,
+    hidden,
     local,
 };
 
