@@ -26,6 +26,7 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testDeadStripDylibs(b, opts));
     macho_step.dependOn(testDylib(b, opts));
     macho_step.dependOn(testDylibReexport(b, opts));
+    macho_step.dependOn(testDylibReexportDeep(b, opts));
     macho_step.dependOn(testEmptyObject(b, opts));
     macho_step.dependOn(testEntryPoint(b, opts));
     macho_step.dependOn(testEntryPointArchive(b, opts));
@@ -507,6 +508,77 @@ fn testDylibReexport(b: *Build, opts: Options) *Step {
         const run = exe.run();
         test_step.dependOn(run.step());
     }
+
+    return test_step;
+}
+
+fn testDylibReexportDeep(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-dylib-reexport-deep", "");
+
+    const liba = cc(b, opts);
+    liba.addCSource(
+        \\int foo = 42;
+        \\int getFoo() {
+        \\  return foo;
+        \\}
+    );
+    liba.addArgs(&.{ "-shared", "-Wl,-install_name,@rpath/liba.dylib" });
+    const liba_out = liba.saveOutputAs("liba.dylib");
+
+    const libb = cc(b, opts);
+    libb.addCSource(
+        \\int bar = 21;
+        \\int getFoo();
+        \\int getBar() {
+        \\  return getFoo() - bar;
+        \\}
+    );
+    libb.addPrefixedDirectorySource("-L", liba_out.dir);
+    libb.addPrefixedDirectorySource("-Wl,-rpath,", liba_out.dir);
+    libb.addArgs(&.{ "-shared", "-Wl,-install_name,@rpath/libb.dylib", "-Wl,-reexport-la" });
+    const libb_out = libb.saveOutputAs("libb.dylib");
+
+    const libc = cc(b, opts);
+    libc.addCSource(
+        \\int foobar = 21;
+        \\int getFoo();
+        \\int getBar();
+        \\int getFoobar() {
+        \\  return getFoo() - getBar() - foobar;
+        \\}
+    );
+    libc.addPrefixedDirectorySource("-L", libb_out.dir);
+    libc.addPrefixedDirectorySource("-Wl,-rpath,", libb_out.dir);
+    libc.addArgs(&.{ "-shared", "-Wl,-install_name,@rpath/libc.dylib", "-Wl,-reexport-lb" });
+    const libc_out = libc.saveOutputAs("libc.dylib");
+
+    const exe = cc(b, opts);
+    exe.addCSource(
+        \\int getFoobar();
+        \\int main() {
+        \\  return getFoobar();
+        \\}
+    );
+    exe.addPrefixedDirectorySource("-L", libc_out.dir);
+    exe.addPrefixedDirectorySource("-Wl,-rpath,", libc_out.dir);
+    exe.addArg("-lc");
+
+    const check = exe.check();
+    check.checkStart();
+    check.checkExact("cmd LOAD_DYLIB");
+    check.checkExact("name @rpath/libc.dylib");
+    check.checkStart();
+    check.checkExact("cmd LOAD_DYLIB");
+    check.checkNotPresent("liba.dylib");
+    check.checkStart();
+    check.checkExact("cmd LOAD_DYLIB");
+    check.checkNotPresent("libb.dylib");
+    check.checkInSymtab();
+    check.checkExact("(undefined) external _getFoobar (from libc)");
+    test_step.dependOn(&check.step);
+
+    const run = exe.run();
+    test_step.dependOn(run.step());
 
     return test_step;
 }
