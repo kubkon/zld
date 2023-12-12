@@ -819,7 +819,13 @@ fn testFlatNamespace(b: *Build, opts: Options) *Step {
     liba.addArgs(&.{ "-shared", "-Wl,-install_name,@rpath/liba.dylib", "-Wl,-flat_namespace" });
     const liba_out = liba.saveOutputAs("liba.dylib");
 
-    // TODO add dyld_info opcodes check after improving CheckObject
+    {
+        const check = liba.check();
+        check.checkInDyldInfo();
+        check.checkExact("lazy bind info");
+        check.checkContains("(flat lookup) _getFoo");
+        test_step.dependOn(&check.step);
+    }
 
     const libb = cc(b, opts);
     libb.addCSource(
@@ -835,7 +841,13 @@ fn testFlatNamespace(b: *Build, opts: Options) *Step {
     libb.addArgs(&.{ "-shared", "-Wl,-install_name,@rpath/libb.dylib", "-Wl,-flat_namespace" });
     const libb_out = libb.saveOutputAs("libb.dylib");
 
-    // TODO add dyld_info opcodes check after improving CheckObject
+    {
+        const check = liba.check();
+        check.checkInDyldInfo();
+        check.checkExact("lazy bind info");
+        check.checkContains("(flat lookup) _getFoo");
+        test_step.dependOn(&check.step);
+    }
 
     const main_o = cc(b, opts);
     main_o.addCSource(
@@ -2637,11 +2649,10 @@ fn testWeakRef(b: *Build, opts: Options) *Step {
     );
     exe.addArgs(&.{ "-Wl,-flat_namespace", "-Wl,-undefined,suppress" });
 
-    // TODO fix in upstream CheckObject
-    // const check = exe.check();
-    // check.checkInSymtab();
-    // check.checkExact("(undefined) weakref external _foo (from flat lookup)");
-    // test_step.dependOn(&check.step);
+    const check = exe.check();
+    check.checkInSymtab();
+    check.checkExact("(undefined) weakref external _foo (from flat lookup)");
+    test_step.dependOn(&check.step);
 
     const run = exe.run();
     run.expectStdOutEqual("-1");
