@@ -17,6 +17,7 @@ platform: ?MachO.Options.Platform = null,
 needed: bool,
 weak: bool,
 reexport: bool,
+explicit: bool,
 hoisted: bool = true,
 referenced: bool = false,
 
@@ -473,7 +474,7 @@ pub fn resetGlobals(self: *Dylib, macho_file: *MachO) void {
 }
 
 pub fn isAlive(self: Dylib, macho_file: *MachO) bool {
-    if (!macho_file.options.dead_strip_dylibs) return self.hoisted;
+    if (!macho_file.options.dead_strip_dylibs) return self.explicit or self.referenced or self.needed;
     return self.referenced or self.needed;
 }
 

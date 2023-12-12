@@ -288,7 +288,7 @@ pub fn flush(self: *MachO) !void {
 
     for (self.dylibs.items) |index| {
         const dylib = self.getFile(index).?.dylib;
-        if (!dylib.hoisted) continue;
+        if (!dylib.explicit and !dylib.hoisted) continue;
         try dylib.initSymbols(self);
     }
 
@@ -583,8 +583,8 @@ fn parsePositional(self: *MachO, arena: Allocator, obj: LinkObject) !void {
 
     if (try self.parseObject(arena, obj)) return;
     if (try self.parseArchive(arena, obj)) return;
-    if (try self.parseDylib(arena, obj)) |_| return;
-    if (try self.parseTbd(obj)) |_| return;
+    if (try self.parseDylib(arena, obj, true)) |_| return;
+    if (try self.parseTbd(obj, true)) |_| return;
 
     self.base.fatal("unknown filetype for positional argument: '{s}'", .{obj.path});
 }
@@ -695,7 +695,7 @@ const DylibOpts = struct {
     reexport: bool = false,
 };
 
-fn parseDylib(self: *MachO, arena: Allocator, obj: LinkObject) anyerror!?File.Index {
+fn parseDylib(self: *MachO, arena: Allocator, obj: LinkObject, explicit: bool) anyerror!?File.Index {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -738,6 +738,7 @@ fn parseDylib(self: *MachO, arena: Allocator, obj: LinkObject) anyerror!?File.In
         .needed = obj.needed,
         .weak = obj.weak,
         .reexport = obj.reexport,
+        .explicit = explicit,
     } });
     const dylib = &self.files.items(.data)[index].dylib;
     try dylib.parse(self);
@@ -749,7 +750,7 @@ fn parseDylib(self: *MachO, arena: Allocator, obj: LinkObject) anyerror!?File.In
     return index;
 }
 
-fn parseTbd(self: *MachO, obj: LinkObject) anyerror!?File.Index {
+fn parseTbd(self: *MachO, obj: LinkObject, explicit: bool) anyerror!?File.Index {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -775,6 +776,7 @@ fn parseTbd(self: *MachO, obj: LinkObject) anyerror!?File.Index {
         .needed = obj.needed,
         .weak = obj.weak,
         .reexport = obj.reexport,
+        .explicit = explicit,
     } });
     const dylib = &self.files.items(.data)[index].dylib;
     try dylib.parseTbd(cpu_arch, self.options.platform, lib_stub, self);
@@ -896,8 +898,8 @@ fn parseDependentDylibs(
                 .weak = is_weak,
             };
             const file_index = file_index: {
-                if (try self.parseDylib(arena, link_obj)) |file| break :file_index file;
-                if (try self.parseTbd(link_obj)) |file| break :file_index file;
+                if (try self.parseDylib(arena, link_obj, false)) |file| break :file_index file;
+                if (try self.parseTbd(link_obj, false)) |file| break :file_index file;
                 break :file_index @as(File.Index, 0);
             };
             dependents.appendAssumeCapacity(file_index);
@@ -995,16 +997,6 @@ fn convertTentativeDefinitions(self: *MachO) !void {
 }
 
 fn markImportsAndExports(self: *MachO) void {
-    // if (!self.options.dylib)
-    //     for (self.dylibs.items) |index| {
-    //         for (self.getFile(index).?.getSymbols()) |sym_index| {
-    //             const sym = self.getSymbol(sym_index);
-    //             const file = sym.getFile(self) orelse continue;
-    //             if (sym.visibility != .global) continue;
-    //             if (file != .dylib) sym.flags.@"export" = true;
-    //         }
-    //     };
-
     for (self.objects.items) |index| {
         for (self.getFile(index).?.getSymbols()) |sym_index| {
             const sym = self.getSymbol(sym_index);
