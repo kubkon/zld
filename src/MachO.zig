@@ -817,6 +817,9 @@ fn parseDependentDylibs(
 
     if (self.dylibs.items.len == 0) return;
 
+    // TODO handle duplicate dylibs - it is not uncommon to have the same dylib loaded multiple times
+    // in which case we should track that and return File.Index immediately instead re-parsing paths.
+
     var index: usize = 0;
     while (index < self.dylibs.items.len) : (index += 1) {
         const dylib_index = self.dylibs.items[index];
@@ -915,10 +918,9 @@ fn parseDependentDylibs(
                 }
                 if (!dep_dylib.hoisted) {
                     const umbrella = dep_dylib.getUmbrella(self);
-                    while (dep_dylib.exports.popOrNull()) |exp| {
-                        try umbrella.addExport(gpa, dep_dylib.getString(exp.name), exp.flags);
+                    for (dep_dylib.exports.items(.name), dep_dylib.exports.items(.flags)) |off, flags| {
+                        try umbrella.addExport(gpa, dep_dylib.getString(off), flags);
                     }
-
                     try umbrella.rpaths.ensureUnusedCapacity(gpa, dep_dylib.rpaths.keys().len);
                     for (dep_dylib.rpaths.keys()) |rpath| {
                         umbrella.rpaths.putAssumeCapacity(rpath, {});

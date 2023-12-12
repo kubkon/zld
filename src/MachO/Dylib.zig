@@ -445,6 +445,8 @@ fn initPlatform(self: *Dylib) void {
 }
 
 pub fn resolveSymbols(self: *Dylib, macho_file: *MachO) void {
+    if (!self.explicit and !self.hoisted) return;
+
     for (self.symbols.items, self.exports.items(.flags)) |index, flags| {
         const global = macho_file.getSymbol(index);
         if (self.asFile().getSymbolRank(.{
