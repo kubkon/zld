@@ -202,8 +202,8 @@ pub fn flush(self: *MachO) !void {
                     var buffer: [fs.MAX_PATH_BYTES]u8 = undefined;
                     const full_path = std.fs.realpath(obj.path, &buffer) catch |err| switch (err) {
                         error.FileNotFound => {
-                            self.base.fatal("file not found '{s}'", .{obj.path});
-                            return error.ResolveFail;
+                            self.base.fatal("file not found {}", .{obj});
+                            continue;
                         },
                         else => |e| return e,
                     };
@@ -212,18 +212,18 @@ pub fn flush(self: *MachO) !void {
                 .lib => {
                     const full_path = (try self.resolveLib(arena, lib_dirs.items, obj.path)) orelse {
                         const err = try self.base.addErrorWithNotes(lib_dirs.items.len);
-                        try err.addMsg("library not found for -l{s}", .{obj.path});
+                        try err.addMsg("library not found for {}", .{obj});
                         for (lib_dirs.items) |dir| try err.addNote("tried {s}", .{dir});
-                        return error.ResolveFail;
+                        continue;
                     };
                     break :blk full_path;
                 },
                 .framework => {
                     const full_path = (try self.resolveFramework(arena, framework_dirs.items, obj.path)) orelse {
                         const err = try self.base.addErrorWithNotes(framework_dirs.items.len);
-                        try err.addMsg("framework not found for -framework {s}", .{obj.path});
+                        try err.addMsg("framework not found for {}", .{obj});
                         for (framework_dirs.items) |dir| try err.addNote("tried {s}", .{dir});
-                        return error.ResolveFail;
+                        continue;
                     };
                     break :blk full_path;
                 },
@@ -2676,22 +2676,30 @@ pub const LinkObject = struct {
     ) !void {
         _ = options;
         _ = unused_fmt_string;
-        if (self.needed) {
-            try writer.print("-needed_{s}", .{@tagName(self.tag)});
+        switch (self.tag) {
+            .lib => if (self.needed) {
+                try writer.writeAll("-needed-l");
+            } else if (self.weak) {
+                try writer.writeAll("-weak-l");
+            } else if (self.hidden) {
+                try writer.writeAll("-hidden-l");
+            } else if (self.reexport) {
+                try writer.writeAll("-reexport-l");
+            } else try writer.writeAll("-l"),
+
+            .framework => if (self.needed) {
+                try writer.writeAll("-needed_framework ");
+            } else if (self.weak) {
+                try writer.writeAll("-weak_framework ");
+            } else try writer.writeAll("-framework "),
+
+            .obj => if (self.must_link) {
+                try writer.writeAll("-force_load ");
+            } else if (self.hidden) {
+                try writer.writeAll("-load_hidden ");
+            },
         }
-        if (self.weak) {
-            try writer.print("-weak_{s}", .{@tagName(self.tag)});
-        }
-        if (self.hidden) {
-            try writer.writeAll("-hidden_lib");
-        }
-        if (self.reexport) {
-            try writer.writeAll("-reexport_lib");
-        }
-        if (self.must_link and self.tag == .obj) {
-            try writer.writeAll("-force_load");
-        }
-        try writer.print(" {s}", .{self.path});
+        try writer.writeAll(self.path);
     }
 };
 

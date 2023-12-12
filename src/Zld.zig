@@ -222,9 +222,7 @@ pub fn openPath(allocator: Allocator, tag: Tag, options: Options, thread_pool: *
 
 pub fn deinit(base: *Zld) void {
     base.file.close();
-    assert(base.warnings.items.len == 0);
     base.warnings.deinit(base.allocator);
-    assert(base.errors.items.len == 0);
     base.errors.deinit(base.allocator);
     switch (base.tag) {
         .elf => {
