@@ -427,48 +427,86 @@ fn testDylibReexport(b: *Build, opts: Options) *Step {
 
     const liba = cc(b, opts);
     liba.addFileSource(a_o.out);
-    liba.addArgs(&.{ "-shared", "-Wl,-install_name,liba.dylib" });
+    liba.addArgs(&.{ "-shared", "-Wl,-install_name,@rpath/liba.dylib" });
     const liba_out = liba.saveOutputAs("liba.dylib");
 
     const libb = cc(b, opts);
     libb.addFileSource(b_o.out);
     libb.addPrefixedDirectorySource("-L", liba_out.dir);
-    libb.addArgs(&.{ "-shared", "-Wl,-install_name,libb.dylib", "-Wl,-reexport-la" });
+    libb.addPrefixedDirectorySource("-Wl,-rpath,", liba_out.dir);
+    libb.addArgs(&.{ "-shared", "-Wl,-install_name,@rpath/libb.dylib", "-Wl,-reexport-la" });
+    const libb_out = libb.saveOutputAs("libb.dylib");
 
     {
         const check = libb.check();
         check.checkStart();
         check.checkExact("cmd REEXPORT_DYLIB");
-        check.checkExact("name liba.dylib");
+        check.checkExact("name @rpath/liba.dylib");
         check.checkInSymtab();
         check.checkExact("(undefined) external _getFoo (from liba)");
         test_step.dependOn(&check.step);
     }
 
-    // const libc = cc(b, opts);
-    // libc.addFileSource(a_o.out);
-    // libc.addArgs(&.{ "-shared", "-Wl,-install_name,libc.dylib" });
-    // const libc_out = libc.saveOutputAs("libc.dylib");
-    // _ = libc_out;
+    const libc = cc(b, opts);
+    libc.addFileSource(a_o.out);
+    libc.addArgs(&.{ "-shared", "-Wl,-install_name,@rpath/libc.dylib" });
+    const libc_out = libc.saveOutputAs("libc.dylib");
 
-    // {
-    //     const exe = cc(b, opts);
-    //     exe.addFileSource(main_o.out);
-    //     exe.addPrefixedDirectorySource("-L", liba_out.dir);
-    //     exe.addPrefixedDirectorySource("-L", libb_out.dir);
-    //     exe.addArg("-lb");
+    {
+        const exe = cc(b, opts);
+        exe.addFileSource(main_o.out);
+        exe.addPrefixedDirectorySource("-L", libb_out.dir);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", libb_out.dir);
+        exe.addPrefixedDirectorySource("-L", libc_out.dir);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", libc_out.dir);
+        exe.addArgs(&.{ "-lb", "-lc" });
 
-    //     const check = exe.check();
-    //     check.checkStart();
-    //     check.checkExact("LC");
-    //     check.checkNotPresent("name liba.dylib");
-    //     check.checkInSymtab();
-    //     check.checkContains("external _getFoo (liba)");
-    //     test_step.dependOn(&check.step);
+        const check = exe.check();
+        check.checkStart();
+        check.checkExact("cmd LOAD_DYLIB");
+        check.checkExact("name @rpath/libb.dylib");
+        check.checkExact("cmd LOAD_DYLIB");
+        check.checkExact("name @rpath/libc.dylib");
+        check.checkStart();
+        check.checkExact("cmd LOAD_DYLIB");
+        check.checkNotPresent("liba.dylib");
+        check.checkInSymtab();
+        check.checkExact("(undefined) external _getFoo (from libb)");
+        check.checkInSymtab();
+        check.checkExact("(undefined) external _getBar (from libb)");
+        test_step.dependOn(&check.step);
 
-    //     const run = exe.run();
-    //     test_step.dependOn(run.step());
-    // }
+        const run = exe.run();
+        test_step.dependOn(run.step());
+    }
+
+    {
+        const exe = cc(b, opts);
+        exe.addFileSource(main_o.out);
+        exe.addPrefixedDirectorySource("-L", libb_out.dir);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", libb_out.dir);
+        exe.addPrefixedDirectorySource("-L", libc_out.dir);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", libc_out.dir);
+        exe.addArgs(&.{ "-lc", "-lb" });
+
+        const check = exe.check();
+        check.checkStart();
+        check.checkExact("cmd LOAD_DYLIB");
+        check.checkExact("name @rpath/libc.dylib");
+        check.checkExact("cmd LOAD_DYLIB");
+        check.checkExact("name @rpath/libb.dylib");
+        check.checkStart();
+        check.checkExact("cmd LOAD_DYLIB");
+        check.checkNotPresent("liba.dylib");
+        check.checkInSymtab();
+        check.checkExact("(undefined) external _getFoo (from libc)");
+        check.checkInSymtab();
+        check.checkExact("(undefined) external _getBar (from libb)");
+        test_step.dependOn(&check.step);
+
+        const run = exe.run();
+        test_step.dependOn(run.step());
+    }
 
     return test_step;
 }

@@ -873,7 +873,11 @@ fn parseDependentDylibs(
                         const full_path = std.fs.realpath(rel_path, &buffer) catch continue;
                         break :full_path full_path;
                     }
-                } else if (mem.startsWith(u8, id.name, "@loader_path/") or mem.startsWith(u8, id.name, "@executable_path/")) {
+                } else if (eatPrefix(id.name, "@loader_path/")) |_| {
+                    self.base.fatal("fatal linker error: {s}: TODO handle install_name '{s}'", .{
+                        self.getFile(dylib_index).?.dylib.path, id.name,
+                    });
+                } else if (eatPrefix(id.name, "@executable_path/")) |_| {
                     self.base.fatal("fatal linker error: {s}: TODO handle install_name '{s}'", .{
                         self.getFile(dylib_index).?.dylib.path, id.name,
                     });
