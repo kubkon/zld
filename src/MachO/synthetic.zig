@@ -53,7 +53,7 @@ pub const GotSection = struct {
 
         for (got.symbols.items, 0..) |sym_index, idx| {
             const sym = macho_file.getSymbol(sym_index);
-            if (!sym.flags.import) continue;
+            if (!sym.flags.import and !sym.flags.interposable) continue;
             const addr = got.getAddress(@intCast(idx), macho_file);
             macho_file.bind.entries.appendAssumeCapacity(.{
                 .target = sym_index,
@@ -369,7 +369,7 @@ pub const LaSymbolPtrSection = struct {
 
         for (macho_file.stubs.symbols.items, 0..) |sym_index, idx| {
             const sym = macho_file.getSymbol(sym_index);
-            if (sym.flags.@"export" or sym.flags.weak) continue;
+            if (!sym.flags.import and !sym.flags.interposable) continue;
             const addr = sect.addr + idx * @sizeOf(u64);
             macho_file.lazy_bind.entries.appendAssumeCapacity(.{
                 .target = sym_index,
@@ -453,7 +453,7 @@ pub const TlvPtrSection = struct {
 
         for (tlv.symbols.items, 0..) |sym_index, idx| {
             const sym = macho_file.getSymbol(sym_index);
-            if (!sym.flags.import) continue;
+            if (!sym.flags.import and !sym.flags.interposable) continue;
             const addr = tlv.getAddress(@intCast(idx), macho_file);
             macho_file.bind.entries.appendAssumeCapacity(.{
                 .target = sym_index,

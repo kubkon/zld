@@ -75,7 +75,6 @@ pub fn getSize(symbol: Symbol, macho_file: *MachO) u64 {
 
 pub fn getDylibOrdinal(symbol: Symbol, macho_file: *MachO) ?u16 {
     assert(symbol.flags.import);
-    if (macho_file.options.namespace == .flat) return null;
     const file = symbol.getFile(macho_file) orelse return null;
     return switch (file) {
         .dylib => |x| x.ordinal,
@@ -199,11 +198,15 @@ pub fn setOutputSym(symbol: Symbol, macho_file: *MachO, out: *macho.nlist_64) vo
         out.n_type = macho.N_EXT;
         out.n_sect = 0;
         out.n_value = 0;
+        out.n_desc = 0;
 
-        out.n_desc = if (symbol.getDylibOrdinal(macho_file)) |ord|
-            ord * macho.N_SYMBOL_RESOLVER
+        const ord: u16 = if (macho_file.options.namespace == .flat)
+            @as(u8, @bitCast(macho.BIND_SPECIAL_DYLIB_FLAT_LOOKUP))
+        else if (symbol.getDylibOrdinal(macho_file)) |ord|
+            ord
         else
-            0;
+            macho.BIND_SPECIAL_DYLIB_SELF;
+        out.n_desc = macho.N_SYMBOL_RESOLVER * ord;
 
         if (symbol.flags.weak) {
             out.n_desc |= macho.N_WEAK_DEF;
@@ -288,6 +291,9 @@ pub const Flags = packed struct {
 
     /// Whether this symbol was marked as N_NO_DEAD_STRIP.
     no_dead_strip: bool = false,
+
+    /// Whether this symbol can be interposed at runtime.
+    interposable: bool = false,
 
     /// Whether this symbol is absolute.
     abs: bool = false,
