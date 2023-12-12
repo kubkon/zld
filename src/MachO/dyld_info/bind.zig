@@ -97,8 +97,11 @@ pub const Bind = struct {
                 const name = sym.getName(ctx);
                 const flags: u8 = if (sym.weakRef(ctx)) macho.BIND_SYMBOL_FLAGS_WEAK_IMPORT else 0;
                 const ordinal: i16 = ord: {
-                    if (ctx.options.namespace == .flat) break :ord macho.BIND_SPECIAL_DYLIB_FLAT_LOOKUP;
-                    if (sym.getDylibOrdinal(ctx)) |ord| break :ord @bitCast(ord);
+                    if (sym.flags.interposable) break :ord macho.BIND_SPECIAL_DYLIB_FLAT_LOOKUP;
+                    if (sym.flags.import) {
+                        if (ctx.options.namespace == .flat) break :ord macho.BIND_SPECIAL_DYLIB_FLAT_LOOKUP;
+                        if (sym.getDylibOrdinal(ctx)) |ord| break :ord @bitCast(ord);
+                    }
                     if (ctx.options.undefined_treatment == .dynamic_lookup)
                         break :ord macho.BIND_SPECIAL_DYLIB_FLAT_LOOKUP;
                     break :ord macho.BIND_SPECIAL_DYLIB_SELF;
@@ -380,8 +383,11 @@ pub const LazyBind = struct {
             const name = sym.getName(ctx);
             const flags: u8 = if (sym.weakRef(ctx)) macho.BIND_SYMBOL_FLAGS_WEAK_IMPORT else 0;
             const ordinal: i16 = ord: {
-                if (ctx.options.namespace == .flat) break :ord macho.BIND_SPECIAL_DYLIB_FLAT_LOOKUP;
-                if (sym.getDylibOrdinal(ctx)) |ord| break :ord @bitCast(ord);
+                if (sym.flags.interposable) break :ord macho.BIND_SPECIAL_DYLIB_FLAT_LOOKUP;
+                if (sym.flags.import) {
+                    if (ctx.options.namespace == .flat) break :ord macho.BIND_SPECIAL_DYLIB_FLAT_LOOKUP;
+                    if (sym.getDylibOrdinal(ctx)) |ord| break :ord @bitCast(ord);
+                }
                 if (ctx.options.undefined_treatment == .dynamic_lookup)
                     break :ord macho.BIND_SPECIAL_DYLIB_FLAT_LOOKUP;
                 break :ord macho.BIND_SPECIAL_DYLIB_SELF;

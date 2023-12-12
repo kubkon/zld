@@ -164,14 +164,14 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
         switch (@as(macho.reloc_type_x86_64, @enumFromInt(rel.meta.type))) {
             .X86_64_RELOC_BRANCH => {
                 const symbol = rel.getTargetSymbol(macho_file);
-                if (symbol.flags.import or (symbol.flags.@"export" and symbol.flags.weak)) {
+                if (symbol.flags.import or (symbol.flags.@"export" and symbol.flags.weak) or symbol.flags.interposable) {
                     symbol.flags.stubs = true;
                 }
             },
 
             .X86_64_RELOC_GOT_LOAD => {
                 const symbol = rel.getTargetSymbol(macho_file);
-                if (symbol.flags.import or (symbol.flags.@"export" and symbol.flags.weak)) {
+                if (symbol.flags.import or (symbol.flags.@"export" and symbol.flags.weak) or symbol.flags.interposable) {
                     symbol.flags.got = true;
                 }
             },
@@ -188,7 +188,7 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
                         .{ object.fmtPath(), self.getName(macho_file), symbol.getName(macho_file) },
                     );
                 }
-                if (symbol.flags.import or (symbol.flags.@"export" and symbol.flags.weak)) {
+                if (symbol.flags.import or (symbol.flags.@"export" and symbol.flags.weak) or symbol.flags.interposable) {
                     symbol.flags.tlv_ptr = true;
                 }
             },
@@ -211,6 +211,8 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
                     if (symbol.flags.@"export" and symbol.flags.weak) {
                         object.num_weak_bind_relocs += 1;
                         macho_file.binds_to_weak = true;
+                    } else if (symbol.flags.interposable) {
+                        object.num_bind_relocs += 1;
                     }
                 }
                 object.num_rebase_relocs += 1;
@@ -326,6 +328,13 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
                     }
                     if (s.flags.@"export" and s.flags.weak) {
                         macho_file.weak_bind.entries.appendAssumeCapacity(.{
+                            .target = rel.target,
+                            .offset = @as(u64, @intCast(P)) - seg.vmaddr,
+                            .segment_id = seg_id,
+                            .addend = A,
+                        });
+                    } else if (s.flags.interposable) {
+                        macho_file.bind.entries.appendAssumeCapacity(.{
                             .target = rel.target,
                             .offset = @as(u64, @intCast(P)) - seg.vmaddr,
                             .segment_id = seg_id,

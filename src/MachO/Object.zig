@@ -774,6 +774,7 @@ pub fn resolveSymbols(self: *Object, macho_file: *MachO) void {
             symbol.flags.weak_ref = false;
             symbol.flags.dyn_ref = nlist.n_desc & macho.REFERENCED_DYNAMICALLY != 0;
             symbol.flags.no_dead_strip = symbol.flags.no_dead_strip or nlist.noDeadStrip();
+            symbol.flags.interposable = macho_file.options.dylib and macho_file.options.namespace == .flat and !nlist.pext();
 
             if (nlist.sect() and
                 self.sections.items(.header)[nlist.n_sect - 1].type() == macho.S_THREAD_LOCAL_VARIABLES)
