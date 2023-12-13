@@ -1201,6 +1201,8 @@ fn testHeaderWeakFlags(b: *Build, opts: Options) *Step {
         check.checkInHeaders();
         check.checkExact("header");
         check.checkContains("BINDS_TO_WEAK");
+        check.checkInExports();
+        check.checkExtract("[WEAK] {vmaddr} _x");
         test_step.dependOn(&check.step);
     }
 
@@ -1221,6 +1223,8 @@ fn testHeaderWeakFlags(b: *Build, opts: Options) *Step {
         check.checkInHeaders();
         check.checkExact("header");
         check.checkContains("BINDS_TO_WEAK");
+        check.checkInExports();
+        check.checkNotPresent("[WEAK] {vmaddr} _x");
         test_step.dependOn(&check.step);
     }
 
