@@ -26,61 +26,36 @@ pub const GotSection = struct {
         return got.symbols.items.len * @sizeOf(u64);
     }
 
-    pub fn addRebase(got: GotSection, macho_file: *MachO) !void {
+    pub fn addDyldRelocs(got: GotSection, macho_file: *MachO) !void {
         const gpa = macho_file.base.allocator;
-        try macho_file.rebase.entries.ensureUnusedCapacity(gpa, got.symbols.items.len);
-
         const seg_id = macho_file.sections.items(.segment_id)[macho_file.got_sect_index.?];
         const seg = macho_file.segments.items[seg_id];
 
         for (got.symbols.items, 0..) |sym_index, idx| {
             const sym = macho_file.getSymbol(sym_index);
-            if (sym.flags.import) continue;
             const addr = got.getAddress(@intCast(idx), macho_file);
-            macho_file.rebase.entries.appendAssumeCapacity(.{
-                .offset = addr - seg.vmaddr,
-                .segment_id = seg_id,
-            });
-        }
-    }
-
-    pub fn addBind(got: GotSection, macho_file: *MachO) !void {
-        const gpa = macho_file.base.allocator;
-        try macho_file.bind.entries.ensureUnusedCapacity(gpa, got.symbols.items.len);
-
-        const seg_id = macho_file.sections.items(.segment_id)[macho_file.got_sect_index.?];
-        const seg = macho_file.segments.items[seg_id];
-
-        for (got.symbols.items, 0..) |sym_index, idx| {
-            const sym = macho_file.getSymbol(sym_index);
-            if (!sym.flags.import and !sym.flags.interposable) continue;
-            const addr = got.getAddress(@intCast(idx), macho_file);
-            macho_file.bind.entries.appendAssumeCapacity(.{
+            const entry = bind.Entry{
                 .target = sym_index,
                 .offset = addr - seg.vmaddr,
                 .segment_id = seg_id,
                 .addend = 0,
-            });
-        }
-    }
-
-    pub fn addWeakBind(got: GotSection, macho_file: *MachO) !void {
-        const gpa = macho_file.base.allocator;
-        try macho_file.weak_bind.entries.ensureUnusedCapacity(gpa, got.symbols.items.len);
-
-        const seg_id = macho_file.sections.items(.segment_id)[macho_file.got_sect_index.?];
-        const seg = macho_file.segments.items[seg_id];
-
-        for (got.symbols.items, 0..) |sym_index, idx| {
-            const sym = macho_file.getSymbol(sym_index);
-            if (!sym.flags.weak) continue;
-            const addr = got.getAddress(@intCast(idx), macho_file);
-            macho_file.weak_bind.entries.appendAssumeCapacity(.{
-                .target = sym_index,
-                .offset = addr - seg.vmaddr,
-                .segment_id = seg_id,
-                .addend = 0,
-            });
+            };
+            if (sym.flags.import) {
+                try macho_file.bind.entries.append(gpa, entry);
+                if (sym.flags.weak) {
+                    try macho_file.weak_bind.entries.append(gpa, entry);
+                }
+            } else {
+                try macho_file.rebase.entries.append(gpa, .{
+                    .offset = addr - seg.vmaddr,
+                    .segment_id = seg_id,
+                });
+                if (sym.flags.weak) {
+                    try macho_file.weak_bind.entries.append(gpa, entry);
+                } else if (sym.flags.interposable) {
+                    try macho_file.bind.entries.append(gpa, entry);
+                }
+            }
         }
     }
 
@@ -223,8 +198,9 @@ pub const StubsHelperSection = struct {
         var s: usize = preambleSize(cpu_arch);
         for (macho_file.stubs.symbols.items) |sym_index| {
             const sym = macho_file.getSymbol(sym_index);
-            if (sym.flags.@"export" or (sym.flags.import and sym.flags.weak)) continue;
-            s += entrySize(cpu_arch);
+            if ((sym.flags.import and !sym.flags.weak) or (!sym.flags.weak and sym.flags.interposable)) {
+                s += entrySize(cpu_arch);
+            }
         }
         return s;
     }
@@ -240,21 +216,22 @@ pub const StubsHelperSection = struct {
         var idx: usize = 0;
         for (macho_file.stubs.symbols.items) |sym_index| {
             const sym = macho_file.getSymbol(sym_index);
-            if (sym.flags.@"export" or (sym.flags.import and sym.flags.weak)) continue;
-            const offset = macho_file.lazy_bind.offsets.items[idx];
-            switch (cpu_arch) {
-                .x86_64 => {
-                    try writer.writeByte(0x68);
-                    try writer.writeInt(u32, offset, .little);
-                    try writer.writeByte(0xe9);
-                    const source: i64 = @intCast(sect.addr + preamble_size + entry_size * idx);
-                    const target: i64 = @intCast(sect.addr);
-                    try writer.writeInt(i32, @intCast(target - source - 6 - 4), .little);
-                },
-                .aarch64 => @panic("TODO"),
-                else => {},
+            if ((sym.flags.import and !sym.flags.weak) or (!sym.flags.weak and sym.flags.interposable)) {
+                const offset = macho_file.lazy_bind.offsets.items[idx];
+                switch (cpu_arch) {
+                    .x86_64 => {
+                        try writer.writeByte(0x68);
+                        try writer.writeInt(u32, offset, .little);
+                        try writer.writeByte(0xe9);
+                        const source: i64 = @intCast(sect.addr + preamble_size + entry_size * idx);
+                        const target: i64 = @intCast(sect.addr);
+                        try writer.writeInt(i32, @intCast(target - source - 6 - 4), .little);
+                    },
+                    .aarch64 => @panic("TODO"),
+                    else => {},
+                }
+                idx += 1;
             }
-            idx += 1;
         }
     }
 
@@ -293,10 +270,9 @@ pub const LaSymbolPtrSection = struct {
         return macho_file.stubs.symbols.items.len * @sizeOf(u64);
     }
 
-    pub fn addRebase(laptr: LaSymbolPtrSection, macho_file: *MachO) !void {
+    pub fn addDyldRelocs(laptr: LaSymbolPtrSection, macho_file: *MachO) !void {
         _ = laptr;
         const gpa = macho_file.base.allocator;
-        try macho_file.rebase.entries.ensureUnusedCapacity(gpa, macho_file.stubs.symbols.items.len);
 
         const sect = macho_file.sections.items(.header)[macho_file.la_symbol_ptr_sect_index.?];
         const seg_id = macho_file.sections.items(.segment_id)[macho_file.la_symbol_ptr_sect_index.?];
@@ -304,79 +280,31 @@ pub const LaSymbolPtrSection = struct {
 
         for (macho_file.stubs.symbols.items, 0..) |sym_index, idx| {
             const sym = macho_file.getSymbol(sym_index);
-            if (sym.flags.import and sym.flags.weak) continue;
             const addr = sect.addr + idx * @sizeOf(u64);
-            macho_file.rebase.entries.appendAssumeCapacity(.{
-                .offset = addr - seg.vmaddr,
-                .segment_id = seg_id,
-            });
-        }
-    }
-
-    pub fn addBind(laptr: LaSymbolPtrSection, macho_file: *MachO) !void {
-        _ = laptr;
-        const gpa = macho_file.base.allocator;
-        try macho_file.bind.entries.ensureUnusedCapacity(gpa, macho_file.stubs.symbols.items.len);
-
-        const sect = macho_file.sections.items(.header)[macho_file.la_symbol_ptr_sect_index.?];
-        const seg_id = macho_file.sections.items(.segment_id)[macho_file.la_symbol_ptr_sect_index.?];
-        const seg = macho_file.segments.items[seg_id];
-
-        for (macho_file.stubs.symbols.items, 0..) |sym_index, idx| {
-            const sym = macho_file.getSymbol(sym_index);
-            if (!sym.flags.import or !sym.flags.weak) continue;
-            const addr = sect.addr + idx * @sizeOf(u64);
-            macho_file.bind.entries.appendAssumeCapacity(.{
+            const entry = bind.Entry{
                 .target = sym_index,
                 .offset = addr - seg.vmaddr,
                 .segment_id = seg_id,
                 .addend = 0,
-            });
-        }
-    }
-
-    pub fn addWeakBind(laptr: LaSymbolPtrSection, macho_file: *MachO) !void {
-        _ = laptr;
-        const gpa = macho_file.base.allocator;
-        try macho_file.weak_bind.entries.ensureUnusedCapacity(gpa, macho_file.stubs.symbols.items.len);
-
-        const sect = macho_file.sections.items(.header)[macho_file.la_symbol_ptr_sect_index.?];
-        const seg_id = macho_file.sections.items(.segment_id)[macho_file.la_symbol_ptr_sect_index.?];
-        const seg = macho_file.segments.items[seg_id];
-
-        for (macho_file.stubs.symbols.items, 0..) |sym_index, idx| {
-            const sym = macho_file.getSymbol(sym_index);
-            if (!sym.flags.weak) continue;
-            const addr = sect.addr + idx * @sizeOf(u64);
-            macho_file.weak_bind.entries.appendAssumeCapacity(.{
-                .target = sym_index,
-                .offset = addr - seg.vmaddr,
-                .segment_id = seg_id,
-                .addend = 0,
-            });
-            macho_file.binds_to_weak = true;
-        }
-    }
-
-    pub fn addLazyBind(laptr: LaSymbolPtrSection, macho_file: *MachO) !void {
-        _ = laptr;
-        const gpa = macho_file.base.allocator;
-        try macho_file.lazy_bind.entries.ensureUnusedCapacity(gpa, macho_file.stubs.symbols.items.len);
-
-        const sect = macho_file.sections.items(.header)[macho_file.la_symbol_ptr_sect_index.?];
-        const seg_id = macho_file.sections.items(.segment_id)[macho_file.la_symbol_ptr_sect_index.?];
-        const seg = macho_file.segments.items[seg_id];
-
-        for (macho_file.stubs.symbols.items, 0..) |sym_index, idx| {
-            const sym = macho_file.getSymbol(sym_index);
-            if (!sym.flags.import and !sym.flags.interposable) continue;
-            const addr = sect.addr + idx * @sizeOf(u64);
-            macho_file.lazy_bind.entries.appendAssumeCapacity(.{
-                .target = sym_index,
-                .offset = addr - seg.vmaddr,
-                .segment_id = seg_id,
-                .addend = 0,
-            });
+            };
+            if (sym.flags.import) {
+                if (sym.flags.weak) {
+                    try macho_file.bind.entries.append(gpa, entry);
+                    try macho_file.weak_bind.entries.append(gpa, entry);
+                } else {
+                    try macho_file.lazy_bind.entries.append(gpa, entry);
+                }
+            } else {
+                if (sym.flags.weak) {
+                    try macho_file.rebase.entries.append(gpa, .{
+                        .offset = addr - seg.vmaddr,
+                        .segment_id = seg_id,
+                    });
+                    try macho_file.weak_bind.entries.append(gpa, entry);
+                } else if (sym.flags.interposable) {
+                    try macho_file.lazy_bind.entries.append(gpa, entry);
+                }
+            }
         }
     }
 
@@ -426,61 +354,36 @@ pub const TlvPtrSection = struct {
         return tlv.symbols.items.len * @sizeOf(u64);
     }
 
-    pub fn addRebase(tlv: TlvPtrSection, macho_file: *MachO) !void {
+    pub fn addDyldRelocs(tlv: TlvPtrSection, macho_file: *MachO) !void {
         const gpa = macho_file.base.allocator;
-        try macho_file.rebase.entries.ensureUnusedCapacity(gpa, tlv.symbols.items.len);
-
         const seg_id = macho_file.sections.items(.segment_id)[macho_file.tlv_ptr_sect_index.?];
         const seg = macho_file.segments.items[seg_id];
 
         for (tlv.symbols.items, 0..) |sym_index, idx| {
             const sym = macho_file.getSymbol(sym_index);
-            if (sym.flags.import) continue;
             const addr = tlv.getAddress(@intCast(idx), macho_file);
-            macho_file.rebase.entries.appendAssumeCapacity(.{
-                .offset = addr - seg.vmaddr,
-                .segment_id = seg_id,
-            });
-        }
-    }
-
-    pub fn addBind(tlv: TlvPtrSection, macho_file: *MachO) !void {
-        const gpa = macho_file.base.allocator;
-        try macho_file.bind.entries.ensureUnusedCapacity(gpa, tlv.symbols.items.len);
-
-        const seg_id = macho_file.sections.items(.segment_id)[macho_file.tlv_ptr_sect_index.?];
-        const seg = macho_file.segments.items[seg_id];
-
-        for (tlv.symbols.items, 0..) |sym_index, idx| {
-            const sym = macho_file.getSymbol(sym_index);
-            if (!sym.flags.import and !sym.flags.interposable) continue;
-            const addr = tlv.getAddress(@intCast(idx), macho_file);
-            macho_file.bind.entries.appendAssumeCapacity(.{
+            const entry = bind.Entry{
                 .target = sym_index,
                 .offset = addr - seg.vmaddr,
                 .segment_id = seg_id,
                 .addend = 0,
-            });
-        }
-    }
-
-    pub fn addWeakBind(tlv: TlvPtrSection, macho_file: *MachO) !void {
-        const gpa = macho_file.base.allocator;
-        try macho_file.weak_bind.entries.ensureUnusedCapacity(gpa, tlv.symbols.items.len);
-
-        const seg_id = macho_file.sections.items(.segment_id)[macho_file.tlv_ptr_sect_index.?];
-        const seg = macho_file.segments.items[seg_id];
-
-        for (tlv.symbols.items, 0..) |sym_index, idx| {
-            const sym = macho_file.getSymbol(sym_index);
-            if (!sym.flags.weak) continue;
-            const addr = tlv.getAddress(@intCast(idx), macho_file);
-            macho_file.weak_bind.entries.appendAssumeCapacity(.{
-                .target = sym_index,
-                .offset = addr - seg.vmaddr,
-                .segment_id = seg_id,
-                .addend = 0,
-            });
+            };
+            if (sym.flags.import) {
+                try macho_file.bind.entries.append(gpa, entry);
+                if (sym.flags.weak) {
+                    try macho_file.weak_bind.entries.append(gpa, entry);
+                }
+            } else {
+                try macho_file.rebase.entries.append(gpa, .{
+                    .offset = addr - seg.vmaddr,
+                    .segment_id = seg_id,
+                });
+                if (sym.flags.weak) {
+                    try macho_file.weak_bind.entries.append(gpa, entry);
+                } else if (sym.flags.interposable) {
+                    try macho_file.bind.entries.append(gpa, entry);
+                }
+            }
         }
     }
 

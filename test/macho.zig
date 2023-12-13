@@ -35,6 +35,7 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     // macho_step.dependOn(testFatDylib(b, opts)); // TODO arm64 support
     macho_step.dependOn(testFlatNamespace(b, opts));
     macho_step.dependOn(testFlatNamespaceExe(b, opts));
+    macho_step.dependOn(testFlatNamespaceWeak(b, opts));
     macho_step.dependOn(testHeaderpad(b, opts));
     macho_step.dependOn(testHeaderWeakFlags(b, opts));
     macho_step.dependOn(testHelloC(b, opts));
@@ -822,8 +823,7 @@ fn testFlatNamespace(b: *Build, opts: Options) *Step {
 
     {
         const check = liba.check();
-        check.checkInDyldInfo();
-        check.checkExact("lazy bind info");
+        check.checkInDyldLazyBind();
         check.checkContains("(flat lookup) _getFoo");
         test_step.dependOn(&check.step);
     }
@@ -844,8 +844,7 @@ fn testFlatNamespace(b: *Build, opts: Options) *Step {
 
     {
         const check = liba.check();
-        check.checkInDyldInfo();
-        check.checkExact("lazy bind info");
+        check.checkInDyldLazyBind();
         check.checkContains("(flat lookup) _getFoo");
         test_step.dependOn(&check.step);
     }
@@ -944,6 +943,127 @@ fn testFlatNamespaceExe(b: *Build, opts: Options) *Step {
 
     const run = exe.run();
     test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+fn testFlatNamespaceWeak(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-flat-namespace-weak", "");
+
+    const liba = cc(b, opts);
+    liba.addCSource(
+        \\#include <stdio.h>
+        \\int foo = 1;
+        \\int getFoo() {
+        \\  return foo;
+        \\}
+        \\void printInA() {
+        \\  printf("liba=%d\n", getFoo());
+        \\}
+    );
+    liba.addArgs(&.{ "-shared", "-Wl,-install_name,@rpath/liba.dylib", "-Wl,-flat_namespace" });
+    const liba_out = liba.saveOutputAs("liba.dylib");
+
+    {
+        const check = liba.check();
+        check.checkInDyldLazyBind();
+        check.checkContains("(flat lookup) _getFoo");
+        test_step.dependOn(&check.step);
+    }
+
+    const libb = cc(b, opts);
+    libb.addCSource(
+        \\#include <stdio.h>
+        \\int foo = 2;
+        \\__attribute__((weak)) int getFoo() {
+        \\  return foo;
+        \\}
+        \\void printInB() {
+        \\  printf("libb=%d\n", getFoo());
+        \\}
+    );
+    libb.addArgs(&.{ "-shared", "-Wl,-install_name,@rpath/libb.dylib", "-Wl,-flat_namespace" });
+    const libb_out = libb.saveOutputAs("libb.dylib");
+
+    {
+        const check = libb.check();
+        check.checkInDyldWeakBind();
+        check.checkContains("(self) _getFoo");
+        check.checkInDyldLazyBind();
+        check.checkNotPresent("_getFoo");
+        test_step.dependOn(&check.step);
+    }
+
+    const main_o = cc(b, opts);
+    main_o.addCSource(
+        \\#include <stdio.h>
+        \\int getFoo();
+        \\void printInA();
+        \\void printInB();
+        \\int main() {
+        \\  printf("main=%d\n", getFoo());
+        \\  printInA();
+        \\  printInB();
+        \\  return 0;
+        \\}
+    );
+    main_o.addArg("-c");
+
+    {
+        const exe = cc(b, opts);
+        exe.addFileSource(main_o.out);
+        exe.addPrefixedDirectorySource("-L", liba_out.dir);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", liba_out.dir);
+        exe.addPrefixedDirectorySource("-L", libb_out.dir);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", libb_out.dir);
+        exe.addArgs(&.{ "-la", "-lb", "-Wl,-flat_namespace" });
+
+        const check = exe.check();
+        check.checkInSymtab();
+        check.checkExact("(undefined) external _getFoo (from flat lookup)");
+        check.checkInSymtab();
+        check.checkExact("(undefined) external _printInA (from flat lookup)");
+        check.checkInSymtab();
+        check.checkExact("(undefined) external _printInB (from flat lookup)");
+        test_step.dependOn(&check.step);
+
+        const run = exe.run();
+        run.expectStdOutEqual(
+            \\main=1
+            \\liba=1
+            \\libb=2
+            \\
+        );
+        test_step.dependOn(run.step());
+    }
+
+    {
+        const exe = cc(b, opts);
+        exe.addFileSource(main_o.out);
+        exe.addPrefixedDirectorySource("-L", liba_out.dir);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", liba_out.dir);
+        exe.addPrefixedDirectorySource("-L", libb_out.dir);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", libb_out.dir);
+        exe.addArgs(&.{ "-lb", "-la", "-Wl,-flat_namespace" });
+
+        const check = exe.check();
+        check.checkInSymtab();
+        check.checkExact("(undefined) external _getFoo (from flat lookup)");
+        check.checkInSymtab();
+        check.checkExact("(undefined) external _printInA (from flat lookup)");
+        check.checkInSymtab();
+        check.checkExact("(undefined) external _printInB (from flat lookup)");
+        test_step.dependOn(&check.step);
+
+        const run = exe.run();
+        run.expectStdOutEqual(
+            \\main=2
+            \\liba=2
+            \\libb=2
+            \\
+        );
+        test_step.dependOn(run.step());
+    }
 
     return test_step;
 }
@@ -2487,8 +2607,7 @@ fn testWeakBind(b: *Build, opts: Options) *Step {
 
     {
         const check = lib.check();
-        check.checkInDyldInfo();
-        check.checkExact("exports");
+        check.checkInExports();
         check.checkExtract("[WEAK] {vmaddr1} _weak_dysym");
         check.checkExtract("[WEAK] {vmaddr2} _weak_dysym_for_gotpcrel");
         check.checkExtract("[WEAK] {vmaddr3} _weak_dysym_fn");
@@ -2560,22 +2679,19 @@ fn testWeakBind(b: *Build, opts: Options) *Step {
     {
         const check = exe.check();
 
-        check.checkInDyldInfo();
-        check.checkExact("exports");
+        check.checkInExports();
         check.checkExtract("[WEAK] {vmaddr1} _weak_external");
         check.checkExtract("[WEAK] {vmaddr2} _weak_external_for_gotpcrel");
         check.checkExtract("[WEAK] {vmaddr3} _weak_external_fn");
         check.checkExtract("[THREAD_LOCAL, WEAK] {vmaddr4} _weak_tlv");
 
-        check.checkInDyldInfo();
-        check.checkExact("bind info");
+        check.checkInDyldBind();
         check.checkContains("(libfoo.dylib) _weak_dysym_for_gotpcrel");
         check.checkContains("(libfoo.dylib) _weak_dysym_fn");
         check.checkContains("(libfoo.dylib) _weak_dysym");
         check.checkContains("(libfoo.dylib) _weak_dysym_tlv");
 
-        check.checkInDyldInfo();
-        check.checkExact("weak bind info");
+        check.checkInDyldWeakBind();
         check.checkContains("_weak_external_for_gotpcrel");
         check.checkContains("_weak_dysym_for_gotpcrel");
         check.checkContains("_weak_external_fn");

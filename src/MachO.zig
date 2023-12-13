@@ -1743,22 +1743,9 @@ fn allocateSyntheticSymbols(self: *MachO) void {
 fn initDyldInfoSections(self: *MachO) !void {
     const gpa = self.base.allocator;
 
-    if (self.got_sect_index != null) {
-        try self.got.addRebase(self);
-        try self.got.addBind(self);
-        try self.got.addWeakBind(self);
-    }
-    if (self.tlv_ptr_sect_index != null) {
-        try self.tlv_ptr.addRebase(self);
-        try self.tlv_ptr.addBind(self);
-        try self.tlv_ptr.addWeakBind(self);
-    }
-    if (self.la_symbol_ptr_sect_index != null) {
-        try self.la_symbol_ptr.addRebase(self);
-        try self.la_symbol_ptr.addBind(self);
-        try self.la_symbol_ptr.addWeakBind(self);
-        try self.la_symbol_ptr.addLazyBind(self);
-    }
+    if (self.got_sect_index != null) try self.got.addDyldRelocs(self);
+    if (self.tlv_ptr_sect_index != null) try self.tlv_ptr.addDyldRelocs(self);
+    if (self.la_symbol_ptr_sect_index != null) try self.la_symbol_ptr.addDyldRelocs(self);
     try self.initExportTrie();
 
     var nrebases: usize = 0;
