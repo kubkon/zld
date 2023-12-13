@@ -60,6 +60,7 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testTentative(b, opts));
     macho_step.dependOn(testTls(b, opts));
     macho_step.dependOn(testTlsLargeTbss(b, opts));
+    macho_step.dependOn(testTwoLevelNamespace(b, opts));
     macho_step.dependOn(testUndefinedFlag(b, opts));
     macho_step.dependOn(testUnwindInfo(b, opts));
     macho_step.dependOn(testUnwindInfoNoSubsectionsArm64(b, opts));
@@ -811,11 +812,12 @@ fn testFlatNamespace(b: *Build, opts: Options) *Step {
     liba.addCSource(
         \\#include <stdio.h>
         \\int foo = 1;
+        \\int* ptr_to_foo = &foo;
         \\int getFoo() {
         \\  return foo;
         \\}
         \\void printInA() {
-        \\  printf("liba=%d\n", getFoo());
+        \\  printf("liba: getFoo()=%d, ptr_to_foo=%d\n", getFoo(), *ptr_to_foo);
         \\}
     );
     liba.addArgs(&.{ "-shared", "-Wl,-install_name,@rpath/liba.dylib", "-Wl,-flat_namespace" });
@@ -825,6 +827,8 @@ fn testFlatNamespace(b: *Build, opts: Options) *Step {
         const check = liba.check();
         check.checkInDyldLazyBind();
         check.checkContains("(flat lookup) _getFoo");
+        check.checkInIndirectSymtab();
+        check.checkContains("_getFoo");
         test_step.dependOn(&check.step);
     }
 
@@ -832,11 +836,12 @@ fn testFlatNamespace(b: *Build, opts: Options) *Step {
     libb.addCSource(
         \\#include <stdio.h>
         \\int foo = 2;
+        \\int* ptr_to_foo = &foo;
         \\int getFoo() {
         \\  return foo;
         \\}
         \\void printInB() {
-        \\  printf("libb=%d\n", getFoo());
+        \\  printf("libb: getFoo()=%d, ptr_to_foo=%d\n", getFoo(), *ptr_to_foo);
         \\}
     );
     libb.addArgs(&.{ "-shared", "-Wl,-install_name,@rpath/libb.dylib", "-Wl,-flat_namespace" });
@@ -846,6 +851,8 @@ fn testFlatNamespace(b: *Build, opts: Options) *Step {
         const check = liba.check();
         check.checkInDyldLazyBind();
         check.checkContains("(flat lookup) _getFoo");
+        check.checkInIndirectSymtab();
+        check.checkContains("_getFoo");
         test_step.dependOn(&check.step);
     }
 
@@ -853,10 +860,11 @@ fn testFlatNamespace(b: *Build, opts: Options) *Step {
     main_o.addCSource(
         \\#include <stdio.h>
         \\int getFoo();
+        \\extern int* ptr_to_foo;
         \\void printInA();
         \\void printInB();
         \\int main() {
-        \\  printf("main=%d\n", getFoo());
+        \\  printf("main: getFoo()=%d, ptr_to_foo=%d\n", getFoo(), *ptr_to_foo);
         \\  printInA();
         \\  printInB();
         \\  return 0;
@@ -884,9 +892,9 @@ fn testFlatNamespace(b: *Build, opts: Options) *Step {
 
         const run = exe.run();
         run.expectStdOutEqual(
-            \\main=1
-            \\liba=1
-            \\libb=1
+            \\main: getFoo()=1, ptr_to_foo=1
+            \\liba: getFoo()=1, ptr_to_foo=1
+            \\libb: getFoo()=1, ptr_to_foo=1
             \\
         );
         test_step.dependOn(run.step());
@@ -912,9 +920,9 @@ fn testFlatNamespace(b: *Build, opts: Options) *Step {
 
         const run = exe.run();
         run.expectStdOutEqual(
-            \\main=2
-            \\liba=2
-            \\libb=2
+            \\main: getFoo()=2, ptr_to_foo=2
+            \\liba: getFoo()=2, ptr_to_foo=2
+            \\libb: getFoo()=2, ptr_to_foo=2
             \\
         );
         test_step.dependOn(run.step());
@@ -2194,6 +2202,132 @@ fn testTls(b: *Build, opts: Options) *Step {
     const run = exe.run();
     run.expectStdOutEqual("2 2 2");
     test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+fn testTwoLevelNamespace(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-two-level-namespace", "");
+
+    const liba = cc(b, opts);
+    liba.addCSource(
+        \\#include <stdio.h>
+        \\int foo = 1;
+        \\int* ptr_to_foo = &foo;
+        \\int getFoo() {
+        \\  return foo;
+        \\}
+        \\void printInA() {
+        \\  printf("liba: getFoo()=%d, ptr_to_foo=%d\n", getFoo(), *ptr_to_foo);
+        \\}
+    );
+    liba.addArgs(&.{ "-shared", "-Wl,-install_name,@rpath/liba.dylib", "-Wl,-two_levelnamespace" });
+    const liba_out = liba.saveOutputAs("liba.dylib");
+
+    {
+        const check = liba.check();
+        check.checkInDyldLazyBind();
+        check.checkNotPresent("(flat lookup) _getFoo");
+        check.checkInIndirectSymtab();
+        check.checkNotPresent("_getFoo");
+        test_step.dependOn(&check.step);
+    }
+
+    const libb = cc(b, opts);
+    libb.addCSource(
+        \\#include <stdio.h>
+        \\int foo = 2;
+        \\int* ptr_to_foo = &foo;
+        \\int getFoo() {
+        \\  return foo;
+        \\}
+        \\void printInB() {
+        \\  printf("libb: getFoo()=%d, ptr_to_foo=%d\n", getFoo(), *ptr_to_foo);
+        \\}
+    );
+    libb.addArgs(&.{ "-shared", "-Wl,-install_name,@rpath/libb.dylib", "-Wl,-two_levelnamespace" });
+    const libb_out = libb.saveOutputAs("libb.dylib");
+
+    {
+        const check = liba.check();
+        check.checkInDyldLazyBind();
+        check.checkNotPresent("(flat lookup) _getFoo");
+        check.checkInIndirectSymtab();
+        check.checkNotPresent("_getFoo");
+        test_step.dependOn(&check.step);
+    }
+
+    const main_o = cc(b, opts);
+    main_o.addCSource(
+        \\#include <stdio.h>
+        \\int getFoo();
+        \\extern int* ptr_to_foo;
+        \\void printInA();
+        \\void printInB();
+        \\int main() {
+        \\  printf("main: getFoo()=%d, ptr_to_foo=%d\n", getFoo(), *ptr_to_foo);
+        \\  printInA();
+        \\  printInB();
+        \\  return 0;
+        \\}
+    );
+    main_o.addArg("-c");
+
+    {
+        const exe = cc(b, opts);
+        exe.addFileSource(main_o.out);
+        exe.addPrefixedDirectorySource("-L", liba_out.dir);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", liba_out.dir);
+        exe.addPrefixedDirectorySource("-L", libb_out.dir);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", libb_out.dir);
+        exe.addArgs(&.{ "-la", "-lb", "-Wl,-two_levelnamespace" });
+
+        const check = exe.check();
+        check.checkInSymtab();
+        check.checkExact("(undefined) external _getFoo (from liba)");
+        check.checkInSymtab();
+        check.checkExact("(undefined) external _printInA (from liba)");
+        check.checkInSymtab();
+        check.checkExact("(undefined) external _printInB (from libb)");
+        test_step.dependOn(&check.step);
+
+        const run = exe.run();
+        run.expectStdOutEqual(
+            \\main: getFoo()=1, ptr_to_foo=1
+            \\liba: getFoo()=1, ptr_to_foo=1
+            \\libb: getFoo()=2, ptr_to_foo=2
+            \\
+        );
+        test_step.dependOn(run.step());
+    }
+
+    {
+        const exe = cc(b, opts);
+        exe.addFileSource(main_o.out);
+        exe.addPrefixedDirectorySource("-L", liba_out.dir);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", liba_out.dir);
+        exe.addPrefixedDirectorySource("-L", libb_out.dir);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", libb_out.dir);
+        exe.addArgs(&.{ "-lb", "-la", "-Wl,-two_levelnamespace" });
+
+        const check = exe.check();
+        check.checkInSymtab();
+        check.checkExact("(undefined) external _getFoo (from libb)");
+        check.checkInSymtab();
+        check.checkExact("(undefined) external _printInA (from liba)");
+        check.checkInSymtab();
+        check.checkExact("(undefined) external _printInB (from libb)");
+        test_step.dependOn(&check.step);
+
+        const run = exe.run();
+        run.expectStdOutEqual(
+            \\main: getFoo()=2, ptr_to_foo=2
+            \\liba: getFoo()=1, ptr_to_foo=1
+            \\libb: getFoo()=2, ptr_to_foo=2
+            \\
+        );
+        test_step.dependOn(run.step());
+    }
 
     return test_step;
 }
