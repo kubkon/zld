@@ -67,19 +67,6 @@ pub fn ptrFromIndex(wasm: *const Wasm, index: Atom.Index) *Atom {
     return &wasm.managed_atoms.items[@intFromEnum(index)];
 }
 
-/// Returns the first atom's `Index` from a given `Index`.
-pub fn firstAtom(index: Index, wasm: *const Wasm) Index {
-    var current = index;
-    while (true) {
-        const atom = fromIndex(wasm, current);
-        if (atom.prev == .none) {
-            return current;
-        }
-        current = atom.prev;
-    }
-    unreachable;
-}
-
 pub fn format(atom: Atom, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
     _ = fmt;
     _ = options;

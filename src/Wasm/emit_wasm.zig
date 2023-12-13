@@ -179,7 +179,6 @@ pub fn emit(wasm: *Wasm) !void {
         log.debug("Writing 'Code' section ({d})", .{wasm.functions.count()});
         const offset = try reserveSectionHeader(&binary_bytes);
         var atom_index = wasm.atoms.get(index).?;
-        atom_index = Atom.firstAtom(atom_index, wasm);
 
         // The code section must be sorted in line with the function order.
         var sorted_atoms = try std.ArrayList(*Atom).initCapacity(wasm.base.allocator, wasm.functions.count());
@@ -190,7 +189,7 @@ pub fn emit(wasm: *Wasm) !void {
             std.debug.assert(atom.symbolLoc().getSymbol(wasm).isAlive());
             atom.resolveRelocs(wasm);
             sorted_atoms.appendAssumeCapacity(atom);
-            atom_index = atom.next;
+            atom_index = atom.prev;
         }
 
         const atom_sort_fn = struct {
@@ -225,7 +224,6 @@ pub fn emit(wasm: *Wasm) !void {
             // do not output the 'bss' section
             if (std.mem.eql(u8, entry.key_ptr.*, ".bss") and !wasm.options.import_memory) continue;
             var atom_index = wasm.atoms.get(entry.value_ptr.*).?;
-            atom_index = Atom.firstAtom(atom_index, wasm);
             const segment: Wasm.Segment = wasm.segments.items[entry.value_ptr.*];
 
             try leb.writeULEB128(writer, segment.flags);
@@ -252,8 +250,8 @@ pub fn emit(wasm: *Wasm) !void {
                 try writer.writeAll(atom.data[0..atom.size]);
 
                 current_offset += atom.size;
-                if (atom.next != .none) {
-                    atom_index = atom.next;
+                if (atom.prev != .none) {
+                    atom_index = atom.prev;
                 } else {
                     // Also make sure that if the last atom has extra bytes, we write 0's.
                     if (current_offset != segment.size) {
@@ -751,12 +749,11 @@ fn emitDebugSections(wasm: *const Wasm, bytes: *std.ArrayList(u8)) !void {
             try leb.writeULEB128(bytes.writer(), @as(u32, @intCast(item.name.len)));
             bytes.appendSliceAssumeCapacity(item.name);
             var atom_index = wasm.atoms.get(index).?;
-            atom_index = Atom.firstAtom(atom_index, wasm);
             while (atom_index != .none) {
                 const atom = Atom.ptrFromIndex(wasm, atom_index);
                 atom.resolveRelocs(wasm);
                 bytes.appendSliceAssumeCapacity(atom.data[0..atom.size]);
-                atom_index = atom.next;
+                atom_index = atom.prev;
             }
             try emitCustomHeader(bytes.items, header_offset, @intCast(bytes.items.len - header_offset - 6));
         }

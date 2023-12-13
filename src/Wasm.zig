@@ -798,7 +798,10 @@ fn mergeSections(wasm: *Wasm) !void {
         };
         const object = wasm.objects.items[file_index];
         const symbol: *Symbol = &object.symtable[sym_with_loc.sym_index];
-        if (symbol.isUndefined() or (symbol.tag != .function and symbol.tag != .global and symbol.tag != .table)) {
+        if (symbol.isDead() or
+            symbol.isUndefined() or
+            (symbol.tag != .function and symbol.tag != .global and symbol.tag != .table))
+        {
             // Skip undefined symbols as they go in the `import` section
             // Also skip symbols that do not need to have a section merged.
             continue;
@@ -808,9 +811,6 @@ fn mergeSections(wasm: *Wasm) !void {
         const index = symbol.index - offset;
         switch (symbol.tag) {
             .function => {
-                if (symbol.isDead()) {
-                    continue;
-                }
                 const original_func = object.functions[index];
                 if (!try wasm.functions.append(
                     wasm,
@@ -1829,7 +1829,7 @@ fn allocateAtoms(wasm: *Wasm) !void {
     var it = wasm.atoms.iterator();
     while (it.next()) |entry| {
         const segment = &wasm.segments.items[entry.key_ptr.*];
-        var atom_index = Atom.firstAtom(entry.value_ptr.*, wasm);
+        var atom_index = entry.value_ptr.*;
         var offset: u32 = 0;
         while (true) {
             const atom = Atom.ptrFromIndex(wasm, atom_index);
@@ -1843,19 +1843,21 @@ fn allocateAtoms(wasm: *Wasm) !void {
             } else wasm.synthetic_symbols.values()[symbol_loc.sym_index];
 
             if (sym.isDead()) {
-                if (atom.prev != .none) {
-                    const prev = Atom.ptrFromIndex(wasm, atom.prev);
-                    prev.next = atom.next;
-                }
-                if (atom.next == .none) {
-                    atom.prev = .none;
-                    break;
+                if (atom.next != .none) {
+                    const next = Atom.ptrFromIndex(wasm, atom.next);
+                    next.prev = atom.prev;
                 } else if (entry.value_ptr.* == atom_index) {
-                    entry.value_ptr.* = atom.next;
+                    if (atom.prev != .none) {
+                        entry.value_ptr.* = atom.prev;
+                    }
                 }
-                atom_index = atom.next;
-                const next = Atom.ptrFromIndex(wasm, atom_index);
-                next.prev = atom.prev;
+                if (atom.prev == .none) {
+                    atom.next = .none;
+                    break;
+                }
+                atom_index = atom.prev;
+                const prev = Atom.ptrFromIndex(wasm, atom_index);
+                prev.next = atom.next;
                 atom.prev = .none;
                 atom.next = .none;
                 continue;
@@ -1863,8 +1865,8 @@ fn allocateAtoms(wasm: *Wasm) !void {
             offset = std.mem.alignForward(u32, offset, atom.alignment);
             atom.offset = offset;
             offset += atom.size;
-            if (atom.next == .none) break;
-            atom_index = atom.next;
+            if (atom.prev == .none) break;
+            atom_index = atom.prev;
         }
         segment.size = std.mem.alignForward(u32, offset, segment.alignment);
     }
@@ -2066,7 +2068,6 @@ fn markReferences(wasm: *Wasm) !void {
 
     for (debug_sections) |maybe_index| {
         var atom_index = wasm.atoms.get(maybe_index orelse continue).?;
-        atom_index = Atom.firstAtom(atom_index, wasm);
         while (atom_index != .none) {
             const atom = Atom.fromIndex(wasm, atom_index);
             const atom_sym = atom.symbolLoc().getSymbol(wasm);
@@ -2077,7 +2078,7 @@ fn markReferences(wasm: *Wasm) !void {
                     atom_sym.mark();
                 }
             }
-            atom_index = atom.next;
+            atom_index = atom.prev;
         }
     }
 }
