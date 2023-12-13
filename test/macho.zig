@@ -34,6 +34,7 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testFatArchive(b, opts));
     // macho_step.dependOn(testFatDylib(b, opts)); // TODO arm64 support
     macho_step.dependOn(testFlatNamespace(b, opts));
+    macho_step.dependOn(testFlatNamespaceExe(b, opts));
     macho_step.dependOn(testHeaderpad(b, opts));
     macho_step.dependOn(testHeaderWeakFlags(b, opts));
     macho_step.dependOn(testHelloC(b, opts));
@@ -146,11 +147,11 @@ fn testBuildVersionMacOS(b: *Build, opts: Options) *Step {
         exe.addArgs(&.{ "-syslibroot", opts.macos_sdk });
 
         const check = exe.check();
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("cmd BUILD_VERSION");
         check.checkExact("platform MACOS");
         check.checkExact("tool 6");
-        check.checkStart();
+        check.checkInHeaders();
         check.checkNotPresent("cmd VERSION_MIN_MACOSX");
         test_step.dependOn(&check.step);
     }
@@ -172,9 +173,9 @@ fn testBuildVersionMacOS(b: *Build, opts: Options) *Step {
         });
 
         const check = exe.check();
-        check.checkStart();
+        check.checkInHeaders();
         check.checkNotPresent("cmd BUILD_VERSION");
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("cmd VERSION_MIN_MACOSX");
         check.checkExact("version 10.13.0");
         test_step.dependOn(&check.step);
@@ -198,11 +199,11 @@ fn testBuildVersionIOS(b: *Build, opts: Options) *Step {
         exe.addArgs(&.{ "-syslibroot", ios_sdk });
 
         const check = exe.check();
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("cmd BUILD_VERSION");
         check.checkExact("platform IOS");
         check.checkExact("tool 6");
-        check.checkStart();
+        check.checkInHeaders();
         check.checkNotPresent("cmd VERSION_MIN_IPHONEOS");
         test_step.dependOn(&check.step);
     }
@@ -217,9 +218,9 @@ fn testBuildVersionIOS(b: *Build, opts: Options) *Step {
         exe.addArgs(&.{ "-syslibroot", ios_sdk });
 
         const check = exe.check();
-        check.checkStart();
+        check.checkInHeaders();
         check.checkNotPresent("cmd BUILD_VERSION");
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("cmd VERSION_MIN_IPHONEOS");
         check.checkExact("version 11.0.0");
         test_step.dependOn(&check.step);
@@ -332,10 +333,10 @@ fn testDeadStripDylibs(b: *Build, opts: Options) *Step {
         exe.addArgs(&.{ "-framework", "Cocoa" });
 
         const check = exe.check();
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("cmd LOAD_DYLIB");
         check.checkContains("Cocoa");
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("cmd LOAD_DYLIB");
         check.checkContains("libobjc");
         test_step.dependOn(&check.step);
@@ -371,7 +372,7 @@ fn testDylib(b: *Build, opts: Options) *Step {
     );
 
     const check = dylib.check();
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("header");
     check.checkNotPresent("PIE");
     test_step.dependOn(&check.step);
@@ -441,7 +442,7 @@ fn testDylibReexport(b: *Build, opts: Options) *Step {
 
     {
         const check = libb.check();
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("cmd REEXPORT_DYLIB");
         check.checkExact("name @rpath/liba.dylib");
         check.checkInSymtab();
@@ -464,12 +465,12 @@ fn testDylibReexport(b: *Build, opts: Options) *Step {
         exe.addArgs(&.{ "-lb", "-lc" });
 
         const check = exe.check();
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("cmd LOAD_DYLIB");
         check.checkExact("name @rpath/libb.dylib");
         check.checkExact("cmd LOAD_DYLIB");
         check.checkExact("name @rpath/libc.dylib");
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("cmd LOAD_DYLIB");
         check.checkNotPresent("liba.dylib");
         check.checkInSymtab();
@@ -492,12 +493,12 @@ fn testDylibReexport(b: *Build, opts: Options) *Step {
         exe.addArgs(&.{ "-lc", "-lb" });
 
         const check = exe.check();
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("cmd LOAD_DYLIB");
         check.checkExact("name @rpath/libc.dylib");
         check.checkExact("cmd LOAD_DYLIB");
         check.checkExact("name @rpath/libb.dylib");
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("cmd LOAD_DYLIB");
         check.checkNotPresent("liba.dylib");
         check.checkInSymtab();
@@ -565,13 +566,13 @@ fn testDylibReexportDeep(b: *Build, opts: Options) *Step {
     exe.addArg("-lc");
 
     const check = exe.check();
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("cmd LOAD_DYLIB");
     check.checkExact("name @rpath/libc.dylib");
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("cmd LOAD_DYLIB");
     check.checkNotPresent("liba.dylib");
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("cmd LOAD_DYLIB");
     check.checkNotPresent("libb.dylib");
     check.checkInSymtab();
@@ -616,10 +617,10 @@ fn testEntryPoint(b: *Build, opts: Options) *Step {
     test_step.dependOn(run.step());
 
     const check = exe.check();
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("segname __TEXT");
     check.checkExtract("vmaddr {vmaddr}");
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("cmd MAIN");
     check.checkExtract("entryoff {entryoff}");
     check.checkInSymtab();
@@ -685,16 +686,16 @@ fn testEntryPointDylib(b: *Build, opts: Options) *Step {
     exe.addPrefixedDirectorySource("-L", dylib.saveOutputAs("libbootstrap.dylib").dir);
 
     const check = exe.check();
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("segname __TEXT");
     check.checkExtract("vmaddr {text_vmaddr}");
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("sectname __stubs");
     check.checkExtract("addr {stubs_vmaddr}");
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("sectname __stubs");
     check.checkExtract("size {stubs_vmsize}");
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("cmd MAIN");
     check.checkExtract("entryoff {entryoff}");
     check.checkComputeCompare("text_vmaddr entryoff +", .{
@@ -923,6 +924,30 @@ fn testFlatNamespace(b: *Build, opts: Options) *Step {
     return test_step;
 }
 
+fn testFlatNamespaceExe(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-flat-namespace-exe", "");
+
+    const exe = cc(b, opts);
+    exe.addCSource(
+        \\void bar() {}
+        \\int main() {
+        \\  bar();
+        \\  return 0;
+        \\}
+    );
+    exe.addArg("-Wl,-flat_namespace");
+
+    const check = exe.check();
+    check.checkInIndirectSymtab();
+    check.checkNotPresent("_bar");
+    test_step.dependOn(&check.step);
+
+    const run = exe.run();
+    test_step.dependOn(run.step());
+
+    return test_step;
+}
+
 fn testHeaderpad(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-headerpad", "");
 
@@ -953,7 +978,7 @@ fn testHeaderpad(b: *Build, opts: Options) *Step {
         exe.addEmptyMain();
 
         const check = exe.check();
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("sectname __text");
         check.checkExtract("offset {offset}");
         switch (builtin.cpu.arch) {
@@ -974,7 +999,7 @@ fn testHeaderpad(b: *Build, opts: Options) *Step {
         exe.addEmptyMain();
 
         const check = exe.check();
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("sectname __text");
         check.checkExtract("offset {offset}");
         check.checkComputeCompare("offset", .{ .op = .gte, .value = .{ .literal = 0x10000 } });
@@ -992,7 +1017,7 @@ fn testHeaderpad(b: *Build, opts: Options) *Step {
         exe.addEmptyMain();
 
         const check = exe.check();
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("sectname __text");
         check.checkExtract("offset {offset}");
         check.checkComputeCompare("offset", .{ .op = .gte, .value = .{ .literal = 0x10000 } });
@@ -1010,7 +1035,7 @@ fn testHeaderpad(b: *Build, opts: Options) *Step {
         exe.addEmptyMain();
 
         const check = exe.check();
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("sectname __text");
         check.checkExtract("offset {offset}");
         switch (builtin.cpu.arch) {
@@ -1050,10 +1075,10 @@ fn testHeaderWeakFlags(b: *Build, opts: Options) *Step {
         exe.addEmptyMain();
 
         const check = exe.check();
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("header");
         check.checkContains("WEAK_DEFINES");
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("header");
         check.checkContains("BINDS_TO_WEAK");
         test_step.dependOn(&check.step);
@@ -1070,10 +1095,10 @@ fn testHeaderWeakFlags(b: *Build, opts: Options) *Step {
         );
 
         const check = exe.check();
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("header");
         check.checkNotPresent("WEAK_DEFINES");
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("header");
         check.checkContains("BINDS_TO_WEAK");
         test_step.dependOn(&check.step);
@@ -1091,10 +1116,10 @@ fn testHeaderWeakFlags(b: *Build, opts: Options) *Step {
         );
 
         const check = exe.check();
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("header");
         check.checkNotPresent("WEAK_DEFINES");
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("header");
         check.checkNotPresent("BINDS_TO_WEAK");
         test_step.dependOn(&check.step);
@@ -1114,7 +1139,7 @@ fn testHelloC(b: *Build, opts: Options) *Step {
     test_step.dependOn(run.step());
 
     const check = exe.check();
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("header");
     check.checkContains("PIE");
     test_step.dependOn(&check.step);
@@ -1153,12 +1178,12 @@ fn testLayout(b: *Build, opts: Options) *Step {
     exe.addHelloWorldMain();
 
     const check = exe.check();
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("cmd SEGMENT_64");
     check.checkExact("segname __LINKEDIT");
     check.checkExtract("fileoff {fileoff}");
     check.checkExtract("filesz {filesz}");
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("cmd DYLD_INFO_ONLY");
     check.checkExtract("rebaseoff {rebaseoff}");
     check.checkExtract("rebasesize {rebasesize}");
@@ -1168,28 +1193,28 @@ fn testLayout(b: *Build, opts: Options) *Step {
     check.checkExtract("lazybindsize {lazybindsize}");
     check.checkExtract("exportoff {exportoff}");
     check.checkExtract("exportsize {exportsize}");
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("cmd FUNCTION_STARTS");
     check.checkExtract("dataoff {fstartoff}");
     check.checkExtract("datasize {fstartsize}");
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("cmd DATA_IN_CODE");
     check.checkExtract("dataoff {diceoff}");
     check.checkExtract("datasize {dicesize}");
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("cmd SYMTAB");
     check.checkExtract("symoff {symoff}");
     check.checkExtract("nsyms {symnsyms}");
     check.checkExtract("stroff {stroff}");
     check.checkExtract("strsize {strsize}");
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("cmd DYSYMTAB");
     check.checkExtract("indirectsymoff {dysymoff}");
     check.checkExtract("nindirectsyms {dysymnsyms}");
 
     switch (builtin.cpu.arch) {
         .aarch64 => {
-            check.checkStart();
+            check.checkInHeaders();
             check.checkExact("cmd CODE_SIGNATURE");
             check.checkExtract("dataoff {codesigoff}");
             check.checkExtract("datasize {codesigsize}");
@@ -1485,7 +1510,7 @@ fn testNeededFramework(b: *Build, opts: Options) *Step {
     exe.addEmptyMain();
 
     const check = exe.check();
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("cmd LOAD_DYLIB");
     check.checkContains("Cocoa");
     test_step.dependOn(&check.step);
@@ -1511,7 +1536,7 @@ fn testNeededLibrary(b: *Build, opts: Options) *Step {
     exe.addPrefixedDirectorySource("-Wl,-rpath,", dylib_out.dir);
 
     const check = exe.check();
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("cmd LOAD_DYLIB");
     check.checkContains("liba.dylib");
     test_step.dependOn(&check.step);
@@ -1573,12 +1598,12 @@ fn testPagezeroSize(b: *Build, opts: Options) *Step {
         exe.addEmptyMain();
 
         const check = exe.check();
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("LC 0");
         check.checkExact("segname __PAGEZERO");
         check.checkExact("vmaddr 0");
         check.checkExact("vmsize 4000");
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("segname __TEXT");
         check.checkExact("vmaddr 4000");
         test_step.dependOn(&check.step);
@@ -1590,7 +1615,7 @@ fn testPagezeroSize(b: *Build, opts: Options) *Step {
         exe.addEmptyMain();
 
         const check = exe.check();
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("LC 0");
         check.checkExact("segname __TEXT");
         check.checkExact("vmaddr 0");
@@ -1682,7 +1707,7 @@ fn testSearchStrategy(b: *Build, opts: Options) *Step {
         test_step.dependOn(run.step());
 
         const check = exe.check();
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("cmd LOAD_DYLIB");
         check.checkContains("liba.dylib");
         test_step.dependOn(&check.step);
@@ -1701,7 +1726,7 @@ fn testSearchStrategy(b: *Build, opts: Options) *Step {
         test_step.dependOn(run.step());
 
         const check = exe.check();
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("cmd LOAD_DYLIB");
         check.checkNotPresent("liba.dylib");
         test_step.dependOn(&check.step);
@@ -1844,7 +1869,7 @@ fn testSegmentBoundarySymbols(b: *Build, opts: Options) *Step {
         exe.addFileSource(main_o.out);
 
         const check = exe.check();
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("cmd SEGMENT_64");
         check.checkExact("segname __DATA_1");
         check.checkExtract("vmsize {vmsize}");
@@ -1870,7 +1895,7 @@ fn testStackSize(b: *Build, opts: Options) *Step {
     test_step.dependOn(run.step());
 
     const check = exe.check();
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("cmd MAIN");
     check.checkExact("stacksize 100000000");
     test_step.dependOn(&check.step);
@@ -2580,7 +2605,7 @@ fn testWeakFramework(b: *Build, opts: Options) *Step {
     test_step.dependOn(run.step());
 
     const check = exe.check();
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("cmd LOAD_WEAK_DYLIB");
     check.checkContains("Cocoa");
     test_step.dependOn(&check.step);
@@ -2619,7 +2644,7 @@ fn testWeakLibrary(b: *Build, opts: Options) *Step {
     exe.addPrefixedDirectorySource("-Wl,-rpath,", dylib_out.dir);
 
     const check = exe.check();
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("cmd LOAD_WEAK_DYLIB");
     check.checkContains("liba.dylib");
     check.checkInSymtab();
