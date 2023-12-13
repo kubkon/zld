@@ -164,15 +164,21 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
         switch (@as(macho.reloc_type_x86_64, @enumFromInt(rel.meta.type))) {
             .X86_64_RELOC_BRANCH => {
                 const symbol = rel.getTargetSymbol(macho_file);
-                if (symbol.flags.import or (symbol.flags.@"export" and symbol.flags.weak) or symbol.flags.interposable) {
+                if (symbol.flags.import or (symbol.flags.@"export" and (symbol.flags.weak or symbol.flags.interposable))) {
                     symbol.flags.stubs = true;
+                    if (symbol.flags.weak) {
+                        macho_file.binds_to_weak = true;
+                    }
                 }
             },
 
             .X86_64_RELOC_GOT_LOAD => {
                 const symbol = rel.getTargetSymbol(macho_file);
-                if (symbol.flags.import or (symbol.flags.@"export" and symbol.flags.weak) or symbol.flags.interposable) {
+                if (symbol.flags.import or (symbol.flags.@"export" and (symbol.flags.weak or symbol.flags.interposable))) {
                     symbol.flags.got = true;
+                    if (symbol.flags.weak) {
+                        macho_file.binds_to_weak = true;
+                    }
                 }
             },
 
@@ -188,14 +194,21 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
                         .{ object.fmtPath(), self.getName(macho_file), symbol.getName(macho_file) },
                     );
                 }
-                if (symbol.flags.import or (symbol.flags.@"export" and symbol.flags.weak) or symbol.flags.interposable) {
+                if (symbol.flags.import or (symbol.flags.@"export" and (symbol.flags.weak or symbol.flags.interposable))) {
                     symbol.flags.tlv_ptr = true;
+                    if (symbol.flags.weak) {
+                        macho_file.binds_to_weak = true;
+                    }
                 }
             },
 
             .X86_64_RELOC_UNSIGNED => {
                 if (rel.tag == .@"extern") {
                     const symbol = rel.getTargetSymbol(macho_file);
+                    if (symbol.isTlvInit(macho_file)) {
+                        macho_file.has_tlv = true;
+                        continue;
+                    }
                     if (symbol.flags.import) {
                         object.num_bind_relocs += 1;
                         if (symbol.flags.weak) {
@@ -204,15 +217,13 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
                         }
                         continue;
                     }
-                    if (symbol.isTlvInit(macho_file)) {
-                        macho_file.has_tlv = true;
-                        continue;
-                    }
-                    if (symbol.flags.@"export" and symbol.flags.weak) {
-                        object.num_weak_bind_relocs += 1;
-                        macho_file.binds_to_weak = true;
-                    } else if (symbol.flags.interposable) {
-                        object.num_bind_relocs += 1;
+                    if (symbol.flags.@"export") {
+                        if (symbol.flags.weak) {
+                            object.num_weak_bind_relocs += 1;
+                            macho_file.binds_to_weak = true;
+                        } else if (symbol.flags.interposable) {
+                            object.num_bind_relocs += 1;
+                        }
                     }
                 }
                 object.num_rebase_relocs += 1;
@@ -305,41 +316,29 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
                 assert(rel.meta.length == 3);
                 assert(!rel.meta.pcrel);
                 if (sym) |s| {
-                    if (s.flags.import) {
-                        macho_file.bind.entries.appendAssumeCapacity(.{
-                            .target = rel.target,
-                            .offset = @as(u64, @intCast(P)) - seg.vmaddr,
-                            .segment_id = seg_id,
-                            .addend = A,
-                        });
-                        if (s.flags.weak) {
-                            macho_file.weak_bind.entries.appendAssumeCapacity(.{
-                                .target = rel.target,
-                                .offset = @as(u64, @intCast(P)) - seg.vmaddr,
-                                .segment_id = seg_id,
-                                .addend = A,
-                            });
-                        }
-                        continue;
-                    }
                     if (s.isTlvInit(macho_file)) {
                         try cwriter.writeInt(u64, @intCast(S - TLS), .little);
                         continue;
                     }
-                    if (s.flags.@"export" and s.flags.weak) {
-                        macho_file.weak_bind.entries.appendAssumeCapacity(.{
-                            .target = rel.target,
-                            .offset = @as(u64, @intCast(P)) - seg.vmaddr,
-                            .segment_id = seg_id,
-                            .addend = A,
-                        });
-                    } else if (s.flags.interposable) {
-                        macho_file.bind.entries.appendAssumeCapacity(.{
-                            .target = rel.target,
-                            .offset = @as(u64, @intCast(P)) - seg.vmaddr,
-                            .segment_id = seg_id,
-                            .addend = A,
-                        });
+                    const entry = bind.Entry{
+                        .target = rel.target,
+                        .offset = @as(u64, @intCast(P)) - seg.vmaddr,
+                        .segment_id = seg_id,
+                        .addend = A,
+                    };
+                    if (s.flags.import) {
+                        macho_file.bind.entries.appendAssumeCapacity(entry);
+                        if (s.flags.weak) {
+                            macho_file.weak_bind.entries.appendAssumeCapacity(entry);
+                        }
+                        continue;
+                    }
+                    if (s.flags.@"export") {
+                        if (s.flags.weak) {
+                            macho_file.weak_bind.entries.appendAssumeCapacity(entry);
+                        } else if (s.flags.interposable) {
+                            macho_file.bind.entries.appendAssumeCapacity(entry);
+                        }
                     }
                 }
                 macho_file.rebase.entries.appendAssumeCapacity(.{
@@ -559,6 +558,7 @@ const Atom = @This();
 
 const std = @import("std");
 const assert = std.debug.assert;
+const bind = @import("dyld_info/bind.zig");
 const dis_x86_64 = @import("dis_x86_64");
 const macho = std.macho;
 const log = std.log.scoped(.link);

@@ -9,30 +9,30 @@ const Allocator = std.mem.Allocator;
 const MachO = @import("../../MachO.zig");
 const Symbol = @import("../Symbol.zig");
 
+pub const Entry = struct {
+    target: Symbol.Index,
+    offset: u64,
+    segment_id: u8,
+    addend: i64,
+
+    pub fn lessThan(ctx: *MachO, entry: Entry, other: Entry) bool {
+        if (entry.segment_id == other.segment_id) {
+            if (entry.target == other.target) {
+                return entry.offset < other.offset;
+            }
+            const entry_name = ctx.getSymbol(entry.target).getName(ctx);
+            const other_name = ctx.getSymbol(other.target).getName(ctx);
+            return std.mem.lessThan(u8, entry_name, other_name);
+        }
+        return entry.segment_id < other.segment_id;
+    }
+};
+
 pub const Bind = struct {
     entries: std.ArrayListUnmanaged(Entry) = .{},
     buffer: std.ArrayListUnmanaged(u8) = .{},
 
     const Self = @This();
-
-    const Entry = struct {
-        target: Symbol.Index,
-        offset: u64,
-        segment_id: u8,
-        addend: i64,
-
-        pub fn lessThan(ctx: *MachO, entry: Entry, other: Entry) bool {
-            if (entry.segment_id == other.segment_id) {
-                if (entry.target == other.target) {
-                    return entry.offset < other.offset;
-                }
-                const entry_name = ctx.getSymbol(entry.target).getName(ctx);
-                const other_name = ctx.getSymbol(other.target).getName(ctx);
-                return std.mem.lessThan(u8, entry_name, other_name);
-            }
-            return entry.segment_id < other.segment_id;
-        }
-    };
 
     pub fn deinit(self: *Self, gpa: Allocator) void {
         self.entries.deinit(gpa);
@@ -187,25 +187,6 @@ pub const WeakBind = struct {
 
     const Self = @This();
 
-    const Entry = struct {
-        target: Symbol.Index,
-        offset: u64,
-        segment_id: u8,
-        addend: i64,
-
-        pub fn lessThan(ctx: *MachO, entry: Entry, other: Entry) bool {
-            if (entry.segment_id == other.segment_id) {
-                if (entry.target == other.target) {
-                    return entry.offset < other.offset;
-                }
-                const entry_name = ctx.getSymbol(entry.target).getName(ctx);
-                const other_name = ctx.getSymbol(other.target).getName(ctx);
-                return std.mem.lessThan(u8, entry_name, other_name);
-            }
-            return entry.segment_id < other.segment_id;
-        }
-    };
-
     pub fn deinit(self: *Self, gpa: Allocator) void {
         self.entries.deinit(gpa);
         self.buffer.deinit(gpa);
@@ -348,13 +329,6 @@ pub const LazyBind = struct {
     offsets: std.ArrayListUnmanaged(u32) = .{},
 
     const Self = @This();
-
-    const Entry = struct {
-        target: Symbol.Index,
-        offset: u64,
-        segment_id: u8,
-        addend: i64,
-    };
 
     pub fn deinit(self: *Self, gpa: Allocator) void {
         self.entries.deinit(gpa);

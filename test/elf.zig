@@ -520,7 +520,7 @@ fn testCopyrelAlignment(b: *Build, opts: Options) *Step {
         test_step.dependOn(run.step());
 
         const check = exe.check();
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("section headers");
         check.checkExact("name .copyrel");
         check.checkExact("addralign 20");
@@ -539,7 +539,7 @@ fn testCopyrelAlignment(b: *Build, opts: Options) *Step {
         test_step.dependOn(run.step());
 
         const check = exe.check();
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("section headers");
         check.checkExact("name .copyrel");
         check.checkExact("addralign 8");
@@ -558,7 +558,7 @@ fn testCopyrelAlignment(b: *Build, opts: Options) *Step {
         test_step.dependOn(run.step());
 
         const check = exe.check();
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("section headers");
         check.checkExact("name .copyrel");
         check.checkExact("addralign 100");
@@ -691,7 +691,7 @@ fn testEntryPoint(b: *Build, opts: Options) *Step {
         exe.addArg("-Wl,-e,foo");
 
         const check = exe.check();
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("header");
         check.checkExact("entry 1000");
         test_step.dependOn(&check.step);
@@ -704,7 +704,7 @@ fn testEntryPoint(b: *Build, opts: Options) *Step {
         exe.addArg("-Wl,-e,bar");
 
         const check = exe.check();
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("header");
         check.checkExact("entry 2000");
         test_step.dependOn(&check.step);
@@ -727,7 +727,7 @@ fn testExecStack(b: *Build, opts: Options) *Step {
         exe.addArg("-Wl,-z,execstack");
 
         const check = exe.check();
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("program headers");
         check.checkExact("type GNU_STACK");
         check.checkExact("flags RWE");
@@ -740,7 +740,7 @@ fn testExecStack(b: *Build, opts: Options) *Step {
         exe.addArgs(&.{ "-Wl,-z,execstack", "-Wl,-z,noexecstack" });
 
         const check = exe.check();
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("program headers");
         check.checkExact("type GNU_STACK");
         check.checkExact("flags RW");
@@ -752,7 +752,7 @@ fn testExecStack(b: *Build, opts: Options) *Step {
         exe.addFileSource(obj_out.file);
 
         const check = exe.check();
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("program headers");
         check.checkExact("type GNU_STACK");
         check.checkExact("flags RW");
@@ -1021,10 +1021,10 @@ fn testHelloDynamic(b: *Build, opts: Options) *Step {
     test_step.dependOn(run.step());
 
     const check = exe.check();
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("header");
     check.checkExact("type EXEC");
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("section headers");
     check.checkExact("name .dynamic");
     test_step.dependOn(&check.step);
@@ -1044,10 +1044,10 @@ fn testHelloPie(b: *Build, opts: Options) *Step {
     test_step.dependOn(run.step());
 
     const check = exe.check();
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("header");
     check.checkExact("type DYN");
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("section headers");
     check.checkExact("name .dynamic");
     test_step.dependOn(&check.step);
@@ -1069,10 +1069,10 @@ fn testHelloStatic(b: *Build, opts: Options) *Step {
     test_step.dependOn(run.step());
 
     const check = exe.check();
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("header");
     check.checkExact("type EXEC");
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("section headers");
     check.checkNotPresent("name .dynamic");
     test_step.dependOn(&check.step);
@@ -1402,13 +1402,13 @@ fn testIfuncStaticPie(b: *Build, opts: Options) *Step {
     test_step.dependOn(run.step());
 
     const check = exe.check();
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("header");
     check.checkExact("type DYN");
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("section headers");
     check.checkExact("name .dynamic");
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("section headers");
     check.checkNotPresent("name .interp");
     test_step.dependOn(&check.step);
@@ -1429,7 +1429,7 @@ fn testImageBase(b: *Build, opts: Options) *Step {
         test_step.dependOn(run.step());
 
         const check = exe.check();
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("section headers");
         check.checkExact("name .interp");
         check.checkExact("type PROGBITS");
@@ -1444,7 +1444,7 @@ fn testImageBase(b: *Build, opts: Options) *Step {
         exe.addArgs(&.{ "-no-pie", "-nostdlib", "-Wl,-image-base,0xffffffff8000000" });
 
         const check = exe.check();
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("section headers");
         check.checkExact("name .interp");
         check.checkExact("type PROGBITS");
@@ -1735,7 +1735,7 @@ fn testNoEhFrameHdr(b: *Build, opts: Options) *Step {
     exe.addArgs(&.{"-Wl,--no-eh-frame-hdr"});
 
     const check = exe.check();
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("section headers");
     check.checkNotPresent("name .eh_frame_hdr");
     test_step.dependOn(&check.step);
@@ -1996,13 +1996,13 @@ fn testRelocatableNoEhFrame(b: *Build, opts: Options) *Step {
     obj2.addArg("-r");
 
     const check1 = obj1.check();
-    check1.checkStart();
+    check1.checkInHeaders();
     check1.checkExact("section headers");
     check1.checkNotPresent(".eh_frame");
     test_step.dependOn(&check1.step);
 
     const check2 = obj2.check();
-    check2.checkStart();
+    check2.checkInHeaders();
     check2.checkExact("section headers");
     check2.checkNotPresent(".eh_frame");
     test_step.dependOn(&check2.step);
@@ -2086,7 +2086,7 @@ fn testStrip(b: *Build, opts: Options) *Step {
         exe.addFileSource(obj.out);
 
         const check = exe.check();
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("symbol table");
         test_step.dependOn(&check.step);
     }
@@ -2097,7 +2097,7 @@ fn testStrip(b: *Build, opts: Options) *Step {
         exe.addArg("--strip-all");
 
         const check = exe.check();
-        check.checkStart();
+        check.checkInHeaders();
         check.checkNotPresent("symbol table");
         test_step.dependOn(&check.step);
     }
@@ -2136,7 +2136,7 @@ fn testTlsCommon(b: *Build, opts: Options) *Step {
     test_step.dependOn(run.step());
 
     const check = exe.check();
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("section headers");
     check.checkExact("name .tls_common");
     test_step.dependOn(&check.step);
@@ -3314,7 +3314,7 @@ fn testZStackSize(b: *Build, opts: Options) *Step {
     exe.addArg("-Wl,-z,stack-size=0x800000");
 
     const check = exe.check();
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("program headers");
     check.checkExact("type GNU_STACK");
     check.checkExact("memsz 800000");
