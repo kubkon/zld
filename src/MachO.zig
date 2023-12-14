@@ -814,11 +814,6 @@ fn isHoisted(self: *MachO, install_name: []const u8) bool {
     return false;
 }
 
-fn eatPrefix(path: []const u8, prefix: []const u8) ?[]const u8 {
-    if (mem.startsWith(u8, path, prefix)) return path[prefix.len..];
-    return null;
-}
-
 fn parseDependentDylibs(
     self: *MachO,
     arena: Allocator,
@@ -1306,9 +1301,8 @@ fn initSyntheticSections(self: *MachO) !void {
         const sym = self.getSymbol(sym_index);
         const name = sym.getName(self);
 
-        if (mem.startsWith(u8, name, "segment$start$")) {
-            const segname = name["segment$start$".len..]; // TODO check segname is valid
-            if (self.getSegmentByName(segname) == null) {
+        if (eatPrefix(name, "segment$start$")) |segname| {
+            if (self.getSegmentByName(segname) == null) { // TODO check segname is valid
                 const prot = getSegmentProt(segname);
                 _ = try self.segments.append(gpa, .{
                     .cmdsize = @sizeOf(macho.segment_command_64),
@@ -1317,9 +1311,8 @@ fn initSyntheticSections(self: *MachO) !void {
                     .maxprot = prot,
                 });
             }
-        } else if (mem.startsWith(u8, name, "segment$stop$")) {
-            const segname = name["segment$stop$".len..]; // TODO check segname is valid
-            if (self.getSegmentByName(segname) == null) {
+        } else if (eatPrefix(name, "segment$stop$")) |segname| {
+            if (self.getSegmentByName(segname) == null) { // TODO check segname is valid
                 const prot = getSegmentProt(segname);
                 _ = try self.segments.append(gpa, .{
                     .cmdsize = @sizeOf(macho.segment_command_64),
@@ -1328,16 +1321,14 @@ fn initSyntheticSections(self: *MachO) !void {
                     .maxprot = prot,
                 });
             }
-        } else if (mem.startsWith(u8, name, "section$start$")) {
-            const actual_name = name["section$start$".len..];
+        } else if (eatPrefix(name, "section$start$")) |actual_name| {
             const sep = mem.indexOfScalar(u8, actual_name, '$').?; // TODO error rather than a panic
             const segname = actual_name[0..sep]; // TODO check segname is valid
             const sectname = actual_name[sep + 1 ..]; // TODO check sectname is valid
             if (self.getSectionByName(segname, sectname) == null) {
                 _ = try self.addSection(segname, sectname, .{});
             }
-        } else if (mem.startsWith(u8, name, "section$stop$")) {
-            const actual_name = name["section$stop$".len..];
+        } else if (eatPrefix(name, "section$stop$")) |actual_name| {
             const sep = mem.indexOfScalar(u8, actual_name, '$').?; // TODO error rather than a panic
             const segname = actual_name[0..sep]; // TODO check segname is valid
             const sectname = actual_name[sep + 1 ..]; // TODO check sectname is valid
@@ -2595,6 +2586,11 @@ pub fn addUnwindRecord(self: *MachO) !UnwindInfo.Record.Index {
 pub fn getUnwindRecord(self: *MachO, index: UnwindInfo.Record.Index) *UnwindInfo.Record {
     assert(index < self.unwind_records.items.len);
     return &self.unwind_records.items[index];
+}
+
+fn eatPrefix(path: []const u8, prefix: []const u8) ?[]const u8 {
+    if (mem.startsWith(u8, path, prefix)) return path[prefix.len..];
+    return null;
 }
 
 pub fn dumpState(self: *MachO) std.fmt.Formatter(fmtDumpState) {
