@@ -50,6 +50,7 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testNoDeadStrip(b, opts));
     macho_step.dependOn(testNoExportsDylib(b, opts));
     macho_step.dependOn(testObjC(b, opts));
+    macho_step.dependOn(testObjCStubs(b, opts));
     macho_step.dependOn(testPagezeroSize(b, opts));
     macho_step.dependOn(testReexportsZig(b, opts));
     macho_step.dependOn(testSearchStrategy(b, opts));
@@ -1768,6 +1769,36 @@ fn testObjC(b: *Build, opts: Options) *Step {
         const run = exe.run();
         test_step.dependOn(run.step());
     }
+
+    return test_step;
+}
+
+fn testObjCStubs(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-objc-stubs", "");
+
+    const exe = cc(b, opts);
+    exe.addObjCSource(
+        \\@import Foundation;
+        \\@interface Foo : NSObject
+        \\@property (nonatomic, assign) NSString* name;
+        \\@end
+        \\@implementation Foo
+        \\- (void)bar {
+        \\    NSLog(@"%@", self.name);
+        \\}
+        \\@end
+        \\int main() {
+        \\    Foo *foo = [[Foo alloc] init];
+        \\    foo.name = @"Foo";
+        \\    [foo bar];
+        \\    return 0;
+        \\}
+    );
+    exe.addArgs(&.{ "-fmodules", "-fobjc-msgsend-selector-stubs", "-framework", "Foundation" });
+
+    const run = exe.run();
+    run.expectStdOutEqual("Foo");
+    test_step.dependOn(run.step());
 
     return test_step;
 }
