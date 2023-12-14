@@ -317,7 +317,7 @@ pub fn findAtom(self: Object, addr: u64) Atom.Index {
             return self.findAtomInSection(addr, @intCast(n_sect));
         }
     }
-    unreachable;
+    unreachable; // TODO convert into an error
 }
 
 fn findAtomInSection(self: Object, addr: u64, n_sect: u8) Atom.Index {
