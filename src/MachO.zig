@@ -559,14 +559,6 @@ fn validatePlatform(self: *MachO, index: File.Index) void {
 fn addUndefinedGlobals(self: *MachO) !void {
     const gpa = self.base.allocator;
 
-    if (!self.options.dylib) {
-        const name = self.options.entry orelse "_main";
-        const off = try self.string_intern.insert(gpa, name);
-        const gop = try self.getOrCreateGlobal(off);
-        self.entry_index = gop.index;
-        try self.undefined_symbols.append(gpa, gop.index);
-    }
-
     try self.undefined_symbols.ensureUnusedCapacity(gpa, self.options.force_undefined_symbols.len);
     for (self.options.force_undefined_symbols) |name| {
         const off = try self.string_intern.insert(gpa, name);
@@ -574,11 +566,17 @@ fn addUndefinedGlobals(self: *MachO) !void {
         self.undefined_symbols.appendAssumeCapacity(gop.index);
     }
 
+    if (!self.options.dylib) {
+        const name = self.options.entry orelse "_main";
+        const off = try self.string_intern.insert(gpa, name);
+        const gop = try self.getOrCreateGlobal(off);
+        self.entry_index = gop.index;
+    }
+
     {
         const off = try self.string_intern.insert(gpa, "dyld_stub_binder");
         const gop = try self.getOrCreateGlobal(off);
         self.dyld_stub_binder_index = gop.index;
-        try self.undefined_symbols.append(gpa, gop.index);
     }
 
     {
@@ -981,9 +979,13 @@ pub fn resolveSymbols(self: *MachO) !void {
 fn markLive(self: *MachO) void {
     for (self.undefined_symbols.items) |index| {
         if (self.getSymbol(index).getFile(self)) |file| {
-            if (file == .object) {
-                file.object.alive = true;
-            }
+            if (file == .object) file.object.alive = true;
+        }
+    }
+    if (self.entry_index) |index| {
+        const sym = self.getSymbol(index);
+        if (sym.getFile(self)) |file| {
+            if (file == .object) file.object.alive = true;
         }
     }
     for (self.objects.items) |index| {
@@ -993,15 +995,21 @@ fn markLive(self: *MachO) void {
 }
 
 fn deadStripDylibs(self: *MachO) void {
-    for (self.dylibs.items) |index| {
-        self.getFile(index).?.dylib.markReferenced(self);
+    for (&[_]?Symbol.Index{
+        self.entry_index,
+        self.dyld_stub_binder_index,
+        self.objc_msg_send_index,
+    }) |index| {
+        if (index) |idx| {
+            const sym = self.getSymbol(idx);
+            if (sym.getFile(self)) |file| {
+                if (file == .dylib) file.dylib.referenced = true;
+            }
+        }
     }
 
-    if (self.objc_msg_send_index) |index| {
-        const sym = self.getSymbol(index);
-        if (sym.getFile(self)) |file| {
-            if (file == .dylib) file.dylib.referenced = true;
-        }
+    for (self.dylibs.items) |index| {
+        self.getFile(index).?.dylib.markReferenced(self);
     }
 
     var i: usize = 0;
@@ -1040,6 +1048,19 @@ fn markImportsAndExports(self: *MachO) void {
         if (sym.getFile(self)) |file| {
             if (sym.visibility != .global) continue;
             if (file == .dylib and !sym.flags.abs) sym.flags.import = true;
+        }
+    }
+
+    for (&[_]?Symbol.Index{
+        self.entry_index,
+        self.dyld_stub_binder_index,
+        self.objc_msg_send_index,
+    }) |index| {
+        if (index) |idx| {
+            const sym = self.getSymbol(idx);
+            if (sym.getFile(self)) |file| {
+                if (file == .dylib) sym.flags.import = true;
+            }
         }
     }
 }
@@ -1117,16 +1138,25 @@ fn scanRelocs(self: *MachO) !void {
         try self.getFile(index).?.object.scanRelocs(self);
     }
 
+    try self.reportUndefs();
+
     if (self.entry_index) |index| {
         const sym = self.getSymbol(index);
-        if (sym.flags.import) sym.flags.stubs = true;
+        if (sym.getFile(self) != null) {
+            if (sym.flags.import) sym.flags.stubs = true;
+        }
     }
 
     if (self.dyld_stub_binder_index) |index| {
-        self.getSymbol(index).flags.got = true;
+        const sym = self.getSymbol(index);
+        if (sym.getFile(self) != null) sym.flags.got = true;
     }
 
-    try self.reportUndefs();
+    if (self.objc_msg_send_index) |index| {
+        const sym = self.getSymbol(index);
+        if (sym.getFile(self) != null)
+            sym.flags.got = true; // TODO is it always needed, or only if we are synthesising fast stubs?
+    }
 
     for (self.symbols.items, 0..) |*symbol, i| {
         const index = @as(Symbol.Index, @intCast(i));
@@ -1186,18 +1216,37 @@ fn reportUndefs(self: *MachO) !void {
 
     for (self.undefined_symbols.items) |index| {
         const sym = self.getSymbol(index);
-        if (sym.getFile(self)) |_| continue; // If undefined in an object file, will be reported above
-
+        if (sym.getFile(self) != null) continue; // If undefined in an object file, will be reported above
         const err = try addFn(&self.base, 1);
         try err.addMsg("undefined symbol: {s}", .{sym.getName(self)});
-
-        if (self.entry_index) |idx| {
-            if (index == idx) {
-                try err.addNote("implicit entry/start for main executable", .{});
-                continue;
-            }
-        }
         try err.addNote("-u command line option", .{});
+    }
+
+    if (self.entry_index) |index| {
+        const sym = self.getSymbol(index);
+        if (sym.getFile(self) == null) {
+            const err = try addFn(&self.base, 1);
+            try err.addMsg("undefined symbol: {s}", .{sym.getName(self)});
+            try err.addNote("implicit entry/start for main executable", .{});
+        }
+    }
+
+    if (self.dyld_stub_binder_index) |index| {
+        const sym = self.getSymbol(index);
+        if (sym.getFile(self) == null and self.stubs_sect_index != null) {
+            const err = try addFn(&self.base, 1);
+            try err.addMsg("undefined symbol: {s}", .{sym.getName(self)});
+            try err.addNote("implicit -u command line option", .{});
+        }
+    }
+
+    if (self.objc_msg_send_index) |index| {
+        const sym = self.getSymbol(index);
+        if (sym.getFile(self) == null and self.objc_stubs_sect_index != null) {
+            const err = try addFn(&self.base, 1);
+            try err.addMsg("undefined symbol: {s}", .{sym.getName(self)});
+            try err.addNote("implicit -u command line option", .{});
+        }
     }
 }
 

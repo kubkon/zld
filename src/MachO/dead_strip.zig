@@ -44,6 +44,17 @@ fn collectRoots(roots: *std.ArrayList(*Atom), macho_file: *MachO) !void {
         const sym = macho_file.getSymbol(sym_index);
         try markSymbol(sym, roots, macho_file);
     }
+
+    for (&[_]?Symbol.Index{
+        macho_file.entry_index,
+        macho_file.dyld_stub_binder_index,
+        macho_file.objc_msg_send_index,
+    }) |index| {
+        if (index) |idx| {
+            const sym = macho_file.getSymbol(idx);
+            try markSymbol(sym, roots, macho_file);
+        }
+    }
 }
 
 fn markSymbol(sym: *Symbol, roots: *std.ArrayList(*Atom), macho_file: *MachO) !void {
