@@ -410,9 +410,12 @@ fn initRelocs(self: *Object, macho_file: *MachO) !void {
 
         try out.ensureTotalCapacityPrecise(gpa, relocs.len);
 
-        for (relocs) |rel| {
+        var i: usize = 0;
+        while (i < relocs.len) : (i += 1) {
+            const rel = relocs[i];
             const rel_type: macho.reloc_type_x86_64 = @enumFromInt(rel.r_type);
             const rel_offset = @as(u32, @intCast(rel.r_address));
+
             var addend: i64 = switch (rel.r_length) {
                 0 => code[rel_offset],
                 1 => mem.readInt(i16, code[rel_offset..][0..2], .little),
@@ -437,6 +440,11 @@ fn initRelocs(self: *Object, macho_file: *MachO) !void {
                 break :blk target;
             } else self.symbols.items[rel.r_symbolnum];
 
+            const has_subtractor = if (i > 0)
+                @as(macho.reloc_type_x86_64, @enumFromInt(relocs[i - 1].r_type)) == .X86_64_RELOC_SUBTRACTOR
+            else
+                false;
+
             out.appendAssumeCapacity(.{
                 .tag = if (rel.r_extern == 1) .@"extern" else .local,
                 .offset = rel_offset,
@@ -447,6 +455,7 @@ fn initRelocs(self: *Object, macho_file: *MachO) !void {
                     .length = rel.r_length,
                     .type = rel.r_type,
                     .symbolnum = rel.r_symbolnum,
+                    .has_subtractor = has_subtractor,
                 },
             });
         }
@@ -1372,6 +1381,7 @@ pub const Relocation = struct {
         length: u2,
         type: u4,
         symbolnum: u24,
+        has_subtractor: bool,
     },
 
     pub fn getTargetSymbol(rel: Relocation, macho_file: *MachO) *Symbol {
@@ -1382,6 +1392,20 @@ pub const Relocation = struct {
     pub fn getTargetAtom(rel: Relocation, macho_file: *MachO) *Atom {
         assert(rel.tag == .local);
         return macho_file.getAtom(rel.target).?;
+    }
+
+    pub fn getTargetAddress(rel: Relocation, macho_file: *MachO) u64 {
+        return switch (rel.tag) {
+            .local => rel.getTargetAtom(macho_file).value,
+            .@"extern" => rel.getTargetSymbol(macho_file).getAddress(.{}, macho_file),
+        };
+    }
+
+    pub fn getGotTargetAddress(rel: Relocation, macho_file: *MachO) u64 {
+        return switch (rel.tag) {
+            .local => 0,
+            .@"extern" => rel.getTargetSymbol(macho_file).getGotAddress(macho_file),
+        };
     }
 
     pub fn lessThan(ctx: void, lhs: Relocation, rhs: Relocation) bool {

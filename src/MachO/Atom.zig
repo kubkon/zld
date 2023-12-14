@@ -263,12 +263,12 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
 
     var stream = std.io.fixedBufferStream(code);
 
-    var SUB: i64 = 0;
     var i: usize = 0;
     while (i < relocs.len) : (i += 1) {
         const rel = relocs[i];
         const rel_type: macho.reloc_type_x86_64 = @enumFromInt(rel.meta.type);
         const rel_offset = rel.offset - self.off;
+        const subtractor = if (rel.meta.has_subtractor) relocs[i - 1] else null;
 
         if (rel.tag == .@"extern") {
             const sym = rel.getTargetSymbol(macho_file);
@@ -277,7 +277,7 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
         }
 
         try stream.seekTo(rel_offset);
-        self.resolveRelocInner(rel, code, &SUB, macho_file, stream.writer()) catch |err| {
+        self.resolveRelocInner(rel, subtractor, code, macho_file, stream.writer()) catch |err| {
             const object = self.getObject(macho_file);
             const name = self.getName(macho_file);
             switch (err) {
@@ -322,8 +322,8 @@ const ResolveError = error{
 fn resolveRelocInner(
     self: Atom,
     rel: Object.Relocation,
+    subtractor: ?Object.Relocation,
     code: []u8,
-    SUB: *i64,
     macho_file: *MachO,
     writer: anytype,
 ) ResolveError!void {
@@ -333,36 +333,31 @@ fn resolveRelocInner(
     const seg = macho_file.segments.items[seg_id];
     const P = @as(i64, @intCast(self.value)) + @as(i64, @intCast(rel_offset));
     const A = rel.addend;
-    const S: i64 = switch (rel.tag) {
-        .local => @as(i64, @intCast(rel.getTargetAtom(macho_file).value)),
-        .@"extern" => @intCast(rel.getTargetSymbol(macho_file).getAddress(.{}, macho_file)),
-    };
-    const G: i64 = if (rel.tag == .@"extern")
-        @intCast(rel.getTargetSymbol(macho_file).getGotAddress(macho_file))
-    else
-        0;
+    const S: i64 = @intCast(rel.getTargetAddress(macho_file));
+    const G: i64 = @intCast(rel.getGotTargetAddress(macho_file));
     const TLS = @as(i64, @intCast(macho_file.getTlsAddress()));
+    const SUB = if (subtractor) |sub| @as(i64, @intCast(sub.getTargetAddress(macho_file))) else 0;
 
     switch (rel.tag) {
         .local => relocs_log.debug("  {s}: {x}: [{x} => {x}] atom({d})", .{
             fmtRelocType(rel.meta.type, macho_file),
             rel_offset,
             P,
-            S + A - SUB.*,
+            S + A - SUB,
             rel.getTargetAtom(macho_file).atom_index,
         }),
         .@"extern" => relocs_log.debug("  {s}: {x}: [{x} => {x}] G({x}) ({s})", .{
             fmtRelocType(rel.meta.type, macho_file),
             rel_offset,
             P,
-            S + A - SUB.*,
+            S + A - SUB,
             G + A,
             rel.getTargetSymbol(macho_file).getName(macho_file),
         }),
     }
 
     switch (rel_type) {
-        .X86_64_RELOC_SUBTRACTOR => SUB.* = S,
+        .X86_64_RELOC_SUBTRACTOR => {},
 
         .X86_64_RELOC_UNSIGNED => {
             if (rel.meta.pcrel) return error.UnexpectedPcrel;
@@ -398,12 +393,10 @@ fn resolveRelocInner(
                     .offset = @as(u64, @intCast(P)) - seg.vmaddr,
                     .segment_id = seg_id,
                 });
-                try writer.writeInt(u64, @intCast(S + A - SUB.*), .little);
+                try writer.writeInt(u64, @intCast(S + A - SUB), .little);
             } else if (rel.meta.length == 2) {
-                try writer.writeInt(u32, @bitCast(@as(i32, @intCast(S + A - SUB.*))), .little);
+                try writer.writeInt(u32, @bitCast(@as(i32, @intCast(S + A - SUB))), .little);
             } else return error.UnexpectedSize;
-
-            SUB.* = 0;
         },
 
         .X86_64_RELOC_GOT_LOAD => {
