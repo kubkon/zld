@@ -1137,6 +1137,16 @@ pub fn claimUnresolved(self: Object, macho_file: *MachO) void {
 
         const sym = macho_file.getSymbol(sym_index);
         if (sym.getFile(macho_file) != null) continue;
+        if (mem.startsWith(u8, sym.getName(macho_file), "_objc_msgSend$")) {
+            self.symtab.items(.nlist)[nlist_idx].n_type = macho.N_SECT;
+            sym.value = 0;
+            sym.atom = 0;
+            sym.nlist_idx = nlist_idx;
+            sym.file = self.index;
+            sym.flags = .{};
+            sym.visibility = .local;
+            continue;
+        }
 
         const is_import = switch (macho_file.options.undefined_treatment) {
             .@"error" => false,

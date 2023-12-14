@@ -1169,7 +1169,7 @@ fn scanRelocs(self: *MachO) !void {
         }
         if (symbol.flags.objc_stubs) {
             log.debug("'{s}' needs OBJC STUBS", .{symbol.getName(self)});
-            // try self.objc_stubs.addSymbol(index, self);
+            try self.objc_stubs.addSymbol(index, self);
         }
     }
 }
@@ -1272,6 +1272,12 @@ fn initSyntheticSections(self: *MachO) !void {
         self.la_symbol_ptr_sect_index = try self.addSection("__DATA", "__la_symbol_ptr", .{
             .flags = macho.S_LAZY_SYMBOL_POINTERS,
             .reserved1 = @intCast(self.stubs.symbols.items.len + self.got.symbols.items.len),
+        });
+    }
+
+    if (self.objc_stubs.symbols.items.len > 0) {
+        self.objc_stubs_sect_index = try self.addSection("__TEXT", "__objc_stubs", .{
+            .flags = macho.S_ATTR_PURE_INSTRUCTIONS | macho.S_ATTR_SOME_INSTRUCTIONS,
         });
     }
 
@@ -1435,6 +1441,7 @@ fn sortSections(self: *MachO) !void {
         &self.tlv_ptr_sect_index,
         &self.eh_frame_sect_index,
         &self.unwind_info_sect_index,
+        &self.objc_stubs_sect_index,
     }) |maybe_index| {
         if (maybe_index.*) |*index| {
             index.* = backlinks[index.*];
@@ -1546,6 +1553,12 @@ fn calcSectionSizes(self: *MachO) !void {
         const header = &self.sections.items(.header)[idx];
         header.size = self.tlv_ptr.size();
         header.@"align" = 3;
+    }
+
+    if (self.objc_stubs_sect_index) |idx| {
+        const header = &self.sections.items(.header)[idx];
+        header.size = self.objc_stubs.size(self);
+        header.@"align" = 1;
     }
 }
 
@@ -1803,6 +1816,16 @@ fn allocateSyntheticSymbols(self: *MachO) void {
             }
         } else unreachable;
     }
+
+    if (self.objc_stubs.symbols.items.len > 0) {
+        const addr = self.sections.items(.header)[self.objc_stubs_sect_index.?].addr;
+
+        for (self.objc_stubs.symbols.items, 0..) |sym_index, idx| {
+            const sym = self.getSymbol(sym_index);
+            sym.value = addr + idx * ObjCStubsSection.entry_size;
+            sym.out_n_sect = self.objc_stubs_sect_index.?;
+        }
+    }
 }
 
 fn initDyldInfoSections(self: *MachO) !void {
@@ -1967,6 +1990,15 @@ fn writeSyntheticSections(self: *MachO) !void {
         var buffer = try std.ArrayList(u8).initCapacity(gpa, header.size);
         defer buffer.deinit();
         try self.tlv_ptr.write(self, buffer.writer());
+        assert(buffer.items.len == header.size);
+        try self.base.file.pwriteAll(buffer.items, header.offset);
+    }
+
+    if (self.objc_stubs_sect_index) |sect_id| {
+        const header = self.sections.items(.header)[sect_id];
+        var buffer = try std.ArrayList(u8).initCapacity(gpa, header.size);
+        defer buffer.deinit();
+        try self.objc_stubs.write(self, buffer.writer());
         assert(buffer.items.len == header.size);
         try self.base.file.pwriteAll(buffer.items, header.offset);
     }
@@ -2639,6 +2671,7 @@ fn fmtDumpState(
         try writer.print("{}\n", .{internal.fmtSymtab(self)});
     }
     try writer.print("stubs\n{}\n", .{self.stubs.fmt(self)});
+    try writer.print("objc_stubs\n{}\n", .{self.objc_stubs.fmt(self)});
     try writer.print("got\n{}\n", .{self.got.fmt(self)});
     try writer.print("tlv_ptr\n{}\n", .{self.tlv_ptr.fmt(self)});
     try writer.writeByte('\n');

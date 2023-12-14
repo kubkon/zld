@@ -249,6 +249,7 @@ fn reportUndefSymbol(self: Atom, rel: Object.Relocation, macho_file: *MachO) !bo
             gop.value_ptr.* = .{};
         }
         try gop.value_ptr.append(gpa, self.atom_index);
+        return true;
     }
 
     return false;
