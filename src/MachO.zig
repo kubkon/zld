@@ -41,12 +41,14 @@ la_symbol_ptr_sect_index: ?u8 = null,
 tlv_ptr_sect_index: ?u8 = null,
 eh_frame_sect_index: ?u8 = null,
 unwind_info_sect_index: ?u8 = null,
+objc_stubs_sect_index: ?u8 = null,
 
 mh_execute_header_index: ?Symbol.Index = null,
 mh_dylib_header_index: ?Symbol.Index = null,
 dyld_private_index: ?Symbol.Index = null,
 dyld_stub_binder_index: ?Symbol.Index = null,
 dso_handle_index: ?Symbol.Index = null,
+objc_msg_send_index: ?Symbol.Index = null,
 
 entry_index: ?Symbol.Index = null,
 
@@ -578,6 +580,12 @@ fn addUndefinedGlobals(self: *MachO) !void {
         self.dyld_stub_binder_index = gop.index;
         try self.undefined_symbols.append(gpa, gop.index);
     }
+
+    {
+        const off = try self.string_intern.insert(gpa, "_objc_msgSend");
+        const gop = try self.getOrCreateGlobal(off);
+        self.objc_msg_send_index = gop.index;
+    }
 }
 
 fn parsePositional(self: *MachO, arena: Allocator, obj: LinkObject) !void {
@@ -987,6 +995,13 @@ fn markLive(self: *MachO) void {
 fn deadStripDylibs(self: *MachO) void {
     for (self.dylibs.items) |index| {
         self.getFile(index).?.dylib.markReferenced(self);
+    }
+
+    if (self.objc_msg_send_index) |index| {
+        const sym = self.getSymbol(index);
+        if (sym.getFile(self)) |file| {
+            if (file == .dylib) file.dylib.referenced = true;
+        }
     }
 
     var i: usize = 0;
