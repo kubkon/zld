@@ -1173,6 +1173,18 @@ pub fn hasDebugInfo(self: Object) bool {
     return dw.compile_units.items.len > 0;
 }
 
+pub fn hasObjC(self: Object) bool {
+    for (self.symtab.items(.nlist)) |nlist| {
+        const name = self.getString(nlist.n_strx);
+        if (mem.startsWith(u8, name, "_OBJC_CLASS_$_")) return true;
+    }
+    for (self.sections.items(.header)) |sect| {
+        if (mem.eql(u8, sect.segName(), "__DATA") and mem.eql(u8, sect.sectName(), "__objc_catlist")) return true;
+        if (mem.eql(u8, sect.segName(), "__TEXT") and mem.eql(u8, sect.sectName(), "__swift")) return true;
+    }
+    return false;
+}
+
 pub fn getDataInCode(self: Object) []align(1) const macho.data_in_code_entry {
     const lc = self.getLoadCommand(.DATA_IN_CODE) orelse return &[0]macho.data_in_code_entry{};
     const cmd = lc.cast(macho.linkedit_data_command).?;

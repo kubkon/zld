@@ -1727,7 +1727,7 @@ fn testObjC(b: *Build, opts: Options) *Step {
 
     const a_o = cc(b, opts);
     a_o.addObjCSource(
-        \\#import <Foundation/NSObject.h>
+        \\#import <Foundation/Foundation.h>
         \\@interface Foo : NSObject
         \\@end
         \\@implementation Foo

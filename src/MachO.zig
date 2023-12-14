@@ -664,6 +664,10 @@ fn parseArchive(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
         try self.objects.append(gpa, index);
         self.validateCpuArch(index);
         self.validatePlatform(index);
+
+        // Finally, we do a post-parse check for -ObjC to see if we need to force load this member
+        // anyhow.
+        object.alive = object.alive or (self.options.force_load_objc and object.hasObjC());
     }
 
     return true;
