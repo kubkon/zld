@@ -169,6 +169,8 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
                     if (symbol.flags.weak) {
                         macho_file.binds_to_weak = true;
                     }
+                } else if (mem.startsWith(u8, symbol.getName(macho_file), "_objc_msgSend$")) {
+                    symbol.flags.objc_stubs = true;
                 }
             },
 

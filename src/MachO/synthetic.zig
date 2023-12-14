@@ -428,6 +428,25 @@ pub const TlvPtrSection = struct {
     }
 };
 
+pub const ObjCStubsSection = struct {
+    pub fn deinit(objc: *ObjCStubsSection, allocator: Allocator) void {
+        _ = objc;
+        _ = allocator;
+    }
+
+    pub fn getAddress(objc: ObjCStubsSection, index: Index, macho_file: *MachO) u64 {
+        _ = objc;
+        _ = index;
+        _ = macho_file;
+        // assert(index < got.symbols.items.len);
+        // const header = macho_file.sections.items(.header)[macho_file.got_sect_index.?];
+        // return header.addr + index * @sizeOf(u64);
+        return 0;
+    }
+
+    pub const Index = u32;
+};
+
 pub const Indsymtab = struct {
     pub inline fn nsyms(ind: Indsymtab, macho_file: *MachO) u32 {
         _ = ind;

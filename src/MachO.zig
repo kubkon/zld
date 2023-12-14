@@ -58,6 +58,7 @@ indsymtab: Indsymtab = .{},
 got: GotSection = .{},
 stubs: StubsSection = .{},
 stubs_helper: StubsHelperSection = .{},
+objc_stubs: ObjCStubsSection = .{},
 la_symbol_ptr: LaSymbolPtrSection = .{},
 tlv_ptr: TlvPtrSection = .{},
 rebase: RebaseSection = .{},
@@ -134,6 +135,7 @@ pub fn deinit(self: *MachO) void {
     self.strtab.deinit(gpa);
     self.got.deinit(gpa);
     self.stubs.deinit(gpa);
+    self.objc_stubs.deinit(gpa);
     self.tlv_ptr.deinit(gpa);
     self.rebase.deinit(gpa);
     self.bind.deinit(gpa);
@@ -1124,6 +1126,10 @@ fn scanRelocs(self: *MachO) !void {
         if (symbol.flags.tlv_ptr) {
             log.debug("'{s}' needs TLV pointer", .{symbol.getName(self)});
             try self.tlv_ptr.addSymbol(index, self);
+        }
+        if (symbol.flags.objc_stubs) {
+            log.debug("'{s}' needs OBJC STUBS", .{symbol.getName(self)});
+            // try self.objc_stubs.addSymbol(index, self);
         }
     }
 }
@@ -2776,6 +2782,7 @@ const InternalObject = @import("MachO/InternalObject.zig");
 const MachO = @This();
 const Md5 = std.crypto.hash.Md5;
 const Object = @import("MachO/Object.zig");
+const ObjCStubsSection = synthetic.ObjCStubsSection;
 pub const Options = @import("MachO/Options.zig");
 const LazyBindSection = synthetic.LazyBindSection;
 const LaSymbolPtrSection = synthetic.LaSymbolPtrSection;
