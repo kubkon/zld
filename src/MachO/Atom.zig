@@ -203,30 +203,32 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
             },
 
             .X86_64_RELOC_UNSIGNED => {
-                if (rel.tag == .@"extern") {
-                    const symbol = rel.getTargetSymbol(macho_file);
-                    if (symbol.isTlvInit(macho_file)) {
-                        macho_file.has_tlv = true;
-                        continue;
-                    }
-                    if (symbol.flags.import) {
-                        object.num_bind_relocs += 1;
-                        if (symbol.flags.weak) {
-                            object.num_weak_bind_relocs += 1;
-                            macho_file.binds_to_weak = true;
+                if (rel.meta.length == 3) { // TODO this really should check if this is pointer width
+                    if (rel.tag == .@"extern") {
+                        const symbol = rel.getTargetSymbol(macho_file);
+                        if (symbol.isTlvInit(macho_file)) {
+                            macho_file.has_tlv = true;
+                            continue;
                         }
-                        continue;
-                    }
-                    if (symbol.flags.@"export") {
-                        if (symbol.flags.weak) {
-                            object.num_weak_bind_relocs += 1;
-                            macho_file.binds_to_weak = true;
-                        } else if (symbol.flags.interposable) {
+                        if (symbol.flags.import) {
                             object.num_bind_relocs += 1;
+                            if (symbol.flags.weak) {
+                                object.num_weak_bind_relocs += 1;
+                                macho_file.binds_to_weak = true;
+                            }
+                            continue;
+                        }
+                        if (symbol.flags.@"export") {
+                            if (symbol.flags.weak) {
+                                object.num_weak_bind_relocs += 1;
+                                macho_file.binds_to_weak = true;
+                            } else if (symbol.flags.interposable) {
+                                object.num_bind_relocs += 1;
+                            }
                         }
                     }
+                    object.num_rebase_relocs += 1;
                 }
-                object.num_rebase_relocs += 1;
             },
 
             else => {},
@@ -260,7 +262,6 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
     relocs_log.debug("{x}: {s}", .{ self.value, self.getName(macho_file) });
 
     var stream = std.io.fixedBufferStream(code);
-    const cwriter = stream.writer();
 
     var SUB: i64 = 0;
     var i: usize = 0;
@@ -268,57 +269,109 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
         const rel = relocs[i];
         const rel_type: macho.reloc_type_x86_64 = @enumFromInt(rel.meta.type);
         const rel_offset = rel.offset - self.off;
-        const seg_id = macho_file.sections.items(.segment_id)[self.out_n_sect];
-        const seg = macho_file.segments.items[seg_id];
-        const sym = if (rel.tag == .@"extern") rel.getTargetSymbol(macho_file) else null;
 
-        if (sym) |s| {
-            if (!s.flags.import and s.getFile(macho_file).? == .object and s.getNlist(macho_file).undf())
+        if (rel.tag == .@"extern") {
+            const sym = rel.getTargetSymbol(macho_file);
+            if (!sym.flags.import and sym.getFile(macho_file).? == .object and sym.getNlist(macho_file).undf())
                 continue;
         }
 
-        const P = @as(i64, @intCast(self.value)) + @as(i64, @intCast(rel_offset));
-        const A = rel.addend;
-        const S: i64 = switch (rel.tag) {
-            .local => @as(i64, @intCast(rel.getTargetAtom(macho_file).value)),
-            .@"extern" => @intCast(rel.getTargetSymbol(macho_file).getAddress(.{}, macho_file)),
-        };
-        const G: i64 = if (rel.tag == .@"extern")
-            @intCast(rel.getTargetSymbol(macho_file).getGotAddress(macho_file))
-        else
-            0;
-        const TLS = @as(i64, @intCast(macho_file.getTlsAddress()));
-
-        switch (rel.tag) {
-            .local => relocs_log.debug("  {s}: {x}: [{x} => {x}] atom({d})", .{
-                fmtRelocType(rel.meta.type, macho_file),
-                rel_offset,
-                P,
-                S + A - SUB,
-                rel.getTargetAtom(macho_file).atom_index,
-            }),
-            .@"extern" => relocs_log.debug("  {s}: {x}: [{x} => {x}] G({x}) ({s})", .{
-                fmtRelocType(rel.meta.type, macho_file),
-                rel_offset,
-                P,
-                S + A - SUB,
-                G + A,
-                rel.getTargetSymbol(macho_file).getName(macho_file),
-            }),
-        }
-
         try stream.seekTo(rel_offset);
+        self.resolveRelocInner(rel, code, &SUB, macho_file, stream.writer()) catch |err| {
+            const object = self.getObject(macho_file);
+            const name = self.getName(macho_file);
+            switch (err) {
+                error.UnexpectedPcrel => macho_file.base.fatal(
+                    "{s}: {s}: 0x{x}: invalid relocation: invalid PCrel option in {s}",
+                    .{ object.fmtPath(), name, rel.offset, @tagName(rel_type) },
+                ),
+                error.UnexpectedSize => macho_file.base.fatal(
+                    "{s}: {s}: 0x{x}: invalid relocation: invalid size {d} in {s}",
+                    .{
+                        object.fmtPath(),
+                        name,
+                        rel.offset,
+                        @as(u8, 1) << rel.meta.length,
+                        @tagName(rel_type),
+                    },
+                ),
+                error.NonExternTarget => macho_file.base.fatal(
+                    "{s}: {s}: 0x{x}: invalid relocation: non-extern target in {s}",
+                    .{ object.fmtPath(), name, rel.offset, @tagName(rel_type) },
+                ),
+                error.RelaxFail => macho_file.base.fatal(
+                    "{s}: {s}: 0x{x}: failed to relax relocation: in {s}",
+                    .{ object.fmtPath(), name, rel.offset, @tagName(rel_type) },
+                ),
+                else => |e| return e,
+            }
+        };
+    }
 
-        switch (rel_type) {
-            .X86_64_RELOC_SUBTRACTOR => SUB = S,
+    try writer.writeAll(code);
+}
 
-            .X86_64_RELOC_UNSIGNED => {
-                assert(rel.meta.length == 3);
-                assert(!rel.meta.pcrel);
-                if (sym) |s| {
-                    if (s.isTlvInit(macho_file)) {
-                        try cwriter.writeInt(u64, @intCast(S - TLS), .little);
-                        continue;
+const ResolveError = error{
+    UnexpectedPcrel,
+    UnexpectedSize,
+    NonExternTarget,
+    RelaxFail,
+    NoSpaceLeft,
+};
+
+fn resolveRelocInner(
+    self: Atom,
+    rel: Object.Relocation,
+    code: []u8,
+    SUB: *i64,
+    macho_file: *MachO,
+    writer: anytype,
+) ResolveError!void {
+    const rel_type: macho.reloc_type_x86_64 = @enumFromInt(rel.meta.type);
+    const rel_offset = rel.offset - self.off;
+    const seg_id = macho_file.sections.items(.segment_id)[self.out_n_sect];
+    const seg = macho_file.segments.items[seg_id];
+    const P = @as(i64, @intCast(self.value)) + @as(i64, @intCast(rel_offset));
+    const A = rel.addend;
+    const S: i64 = switch (rel.tag) {
+        .local => @as(i64, @intCast(rel.getTargetAtom(macho_file).value)),
+        .@"extern" => @intCast(rel.getTargetSymbol(macho_file).getAddress(.{}, macho_file)),
+    };
+    const G: i64 = if (rel.tag == .@"extern")
+        @intCast(rel.getTargetSymbol(macho_file).getGotAddress(macho_file))
+    else
+        0;
+    const TLS = @as(i64, @intCast(macho_file.getTlsAddress()));
+
+    switch (rel.tag) {
+        .local => relocs_log.debug("  {s}: {x}: [{x} => {x}] atom({d})", .{
+            fmtRelocType(rel.meta.type, macho_file),
+            rel_offset,
+            P,
+            S + A - SUB.*,
+            rel.getTargetAtom(macho_file).atom_index,
+        }),
+        .@"extern" => relocs_log.debug("  {s}: {x}: [{x} => {x}] G({x}) ({s})", .{
+            fmtRelocType(rel.meta.type, macho_file),
+            rel_offset,
+            P,
+            S + A - SUB.*,
+            G + A,
+            rel.getTargetSymbol(macho_file).getName(macho_file),
+        }),
+    }
+
+    switch (rel_type) {
+        .X86_64_RELOC_SUBTRACTOR => SUB.* = S,
+
+        .X86_64_RELOC_UNSIGNED => {
+            if (rel.meta.pcrel) return error.UnexpectedPcrel;
+            if (rel.meta.length == 3) {
+                if (rel.tag == .@"extern") {
+                    const sym = rel.getTargetSymbol(macho_file);
+                    if (sym.isTlvInit(macho_file)) {
+                        try writer.writeInt(u64, @intCast(S - TLS), .little);
+                        return;
                     }
                     const entry = bind.Entry{
                         .target = rel.target,
@@ -326,17 +379,17 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
                         .segment_id = seg_id,
                         .addend = A,
                     };
-                    if (s.flags.import) {
+                    if (sym.flags.import) {
                         macho_file.bind.entries.appendAssumeCapacity(entry);
-                        if (s.flags.weak) {
+                        if (sym.flags.weak) {
                             macho_file.weak_bind.entries.appendAssumeCapacity(entry);
                         }
-                        continue;
+                        return;
                     }
-                    if (s.flags.@"export") {
-                        if (s.flags.weak) {
+                    if (sym.flags.@"export") {
+                        if (sym.flags.weak) {
                             macho_file.weak_bind.entries.appendAssumeCapacity(entry);
-                        } else if (s.flags.interposable) {
+                        } else if (sym.flags.interposable) {
                             macho_file.bind.entries.appendAssumeCapacity(entry);
                         }
                     }
@@ -345,79 +398,77 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
                     .offset = @as(u64, @intCast(P)) - seg.vmaddr,
                     .segment_id = seg_id,
                 });
-                try cwriter.writeInt(u64, @intCast(S + A - SUB), .little);
-                SUB = 0;
-            },
+                try writer.writeInt(u64, @intCast(S + A - SUB.*), .little);
+            } else if (rel.meta.length == 2) {
+                try writer.writeInt(u32, @bitCast(@as(i32, @intCast(S + A - SUB.*))), .little);
+            } else return error.UnexpectedSize;
 
-            .X86_64_RELOC_GOT_LOAD => {
-                assert(rel.meta.length == 2);
-                assert(rel.meta.pcrel);
-                if (sym.?.flags.got) {
-                    try cwriter.writeInt(i32, @intCast(G + A - P - 4), .little);
-                } else {
-                    try relaxGotLoad(code[rel_offset - 3 ..]);
-                    try cwriter.writeInt(i32, @intCast(S + A - P - 4), .little);
-                }
-            },
+            SUB.* = 0;
+        },
 
-            .X86_64_RELOC_GOT => {
-                assert(rel.meta.length == 2);
-                assert(rel.meta.pcrel);
-                try cwriter.writeInt(i32, @intCast(G + A - P - 4), .little);
-            },
+        .X86_64_RELOC_GOT_LOAD => {
+            if (rel.tag == .local) return error.NonExternTarget;
+            if (rel.meta.length != 2) return error.UnexpectedSize;
+            if (!rel.meta.pcrel) return error.UnexpectedPcrel;
+            if (rel.getTargetSymbol(macho_file).flags.got) {
+                try writer.writeInt(i32, @intCast(G + A - P - 4), .little);
+            } else {
+                try relaxGotLoad(code[rel_offset - 3 ..]);
+                try writer.writeInt(i32, @intCast(S + A - P - 4), .little);
+            }
+        },
 
-            .X86_64_RELOC_BRANCH => {
-                assert(rel.meta.length == 2);
-                assert(rel.meta.pcrel);
-                try cwriter.writeInt(i32, @intCast(S + A - P - 4), .little);
-            },
+        .X86_64_RELOC_GOT => {
+            if (rel.tag == .local) return error.NonExternTarget;
+            if (rel.meta.length != 2) return error.UnexpectedSize;
+            if (!rel.meta.pcrel) return error.UnexpectedPcrel;
+            try writer.writeInt(i32, @intCast(G + A - P - 4), .little);
+        },
 
-            .X86_64_RELOC_TLV => {
-                assert(rel.meta.length == 2);
-                assert(rel.meta.pcrel);
-                if (sym.?.flags.tlv_ptr) {
-                    const S_: i64 = @intCast(sym.?.getTlvPtrAddress(macho_file));
-                    try cwriter.writeInt(i32, @intCast(S_ + A - P - 4), .little);
-                } else {
-                    try relaxTlv(code[rel_offset - 3 ..]);
-                    try cwriter.writeInt(i32, @intCast(S + A - P - 4), .little);
-                }
-            },
+        .X86_64_RELOC_BRANCH => {
+            if (rel.meta.length != 2) return error.UnexpectedSize;
+            if (!rel.meta.pcrel) return error.UnexpectedPcrel;
+            try writer.writeInt(i32, @intCast(S + A - P - 4), .little);
+        },
 
-            .X86_64_RELOC_SIGNED => {
-                assert(rel.meta.length == 2);
-                assert(rel.meta.pcrel);
-                try cwriter.writeInt(i32, @intCast(S + A - P - 4), .little);
-            },
+        .X86_64_RELOC_TLV => {
+            if (rel.tag == .local) return error.NonExternTarget;
+            if (rel.meta.length != 2) return error.UnexpectedSize;
+            if (!rel.meta.pcrel) return error.UnexpectedPcrel;
+            const sym = rel.getTargetSymbol(macho_file);
+            if (sym.flags.tlv_ptr) {
+                const S_: i64 = @intCast(sym.getTlvPtrAddress(macho_file));
+                try writer.writeInt(i32, @intCast(S_ + A - P - 4), .little);
+            } else {
+                try relaxTlv(code[rel_offset - 3 ..]);
+                try writer.writeInt(i32, @intCast(S + A - P - 4), .little);
+            }
+        },
 
-            .X86_64_RELOC_SIGNED_1 => {
-                assert(rel.meta.length == 2);
-                assert(rel.meta.pcrel);
-                try cwriter.writeInt(i32, @intCast(S + A - P - 4 - 1), .little);
-            },
-
-            .X86_64_RELOC_SIGNED_2 => {
-                assert(rel.meta.length == 2);
-                assert(rel.meta.pcrel);
-                try cwriter.writeInt(i32, @intCast(S + A - P - 4 - 2), .little);
-            },
-
-            .X86_64_RELOC_SIGNED_4 => {
-                assert(rel.meta.length == 2);
-                assert(rel.meta.pcrel);
-                try cwriter.writeInt(i32, @intCast(S + A - P - 4 - 4), .little);
-            },
-        }
+        .X86_64_RELOC_SIGNED,
+        .X86_64_RELOC_SIGNED_1,
+        .X86_64_RELOC_SIGNED_2,
+        .X86_64_RELOC_SIGNED_4,
+        => {
+            if (rel.meta.length != 2) return error.UnexpectedSize;
+            if (!rel.meta.pcrel) return error.UnexpectedPcrel;
+            const correction: i64 = switch (rel_type) {
+                .X86_64_RELOC_SIGNED => 0,
+                .X86_64_RELOC_SIGNED_1 => 1,
+                .X86_64_RELOC_SIGNED_2 => 2,
+                .X86_64_RELOC_SIGNED_4 => 4,
+                else => unreachable,
+            };
+            try writer.writeInt(i32, @intCast(S + A - P - 4 - correction), .little);
+        },
     }
-
-    try writer.writeAll(code);
 }
 
-fn relaxGotLoad(code: []u8) !void {
+fn relaxGotLoad(code: []u8) error{RelaxFail}!void {
     const old_inst = disassemble(code) orelse return error.RelaxFail;
     switch (old_inst.encoding.mnemonic) {
         .mov => {
-            const inst = try Instruction.new(old_inst.prefix, .lea, &old_inst.ops);
+            const inst = Instruction.new(old_inst.prefix, .lea, &old_inst.ops) catch return error.RelaxFail;
             relocs_log.debug("    relaxing {} => {}", .{ old_inst.encoding, inst.encoding });
             encode(&.{inst}, code) catch return error.RelaxFail;
         },
@@ -425,11 +476,11 @@ fn relaxGotLoad(code: []u8) !void {
     }
 }
 
-fn relaxTlv(code: []u8) !void {
+fn relaxTlv(code: []u8) error{RelaxFail}!void {
     const old_inst = disassemble(code) orelse return error.RelaxFail;
     switch (old_inst.encoding.mnemonic) {
         .mov => {
-            const inst = try Instruction.new(old_inst.prefix, .lea, &old_inst.ops);
+            const inst = Instruction.new(old_inst.prefix, .lea, &old_inst.ops) catch return error.RelaxFail;
             relocs_log.debug("    relaxing {} => {}", .{ old_inst.encoding, inst.encoding });
             encode(&.{inst}, code) catch return error.RelaxFail;
         },
