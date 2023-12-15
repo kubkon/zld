@@ -49,8 +49,8 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testNeededLibrary(b, opts));
     macho_step.dependOn(testNoDeadStrip(b, opts));
     macho_step.dependOn(testNoExportsDylib(b, opts));
-    macho_step.dependOn(testObjC(b, opts));
-    macho_step.dependOn(testObjCStubs(b, opts));
+    macho_step.dependOn(testObjc(b, opts));
+    macho_step.dependOn(testObjcStubs(b, opts));
     macho_step.dependOn(testPagezeroSize(b, opts));
     macho_step.dependOn(testReexportsZig(b, opts));
     macho_step.dependOn(testSearchStrategy(b, opts));
@@ -1723,7 +1723,7 @@ fn testNoExportsDylib(b: *Build, opts: Options) *Step {
     return test_step;
 }
 
-fn testObjC(b: *Build, opts: Options) *Step {
+fn testObjc(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-objc", "");
 
     const a_o = cc(b, opts);
@@ -1773,7 +1773,7 @@ fn testObjC(b: *Build, opts: Options) *Step {
     return test_step;
 }
 
-fn testObjCStubs(b: *Build, opts: Options) *Step {
+fn testObjcStubs(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-objc-stubs", "");
 
     const exe = cc(b, opts);
@@ -1784,7 +1784,7 @@ fn testObjCStubs(b: *Build, opts: Options) *Step {
         \\@end
         \\@implementation Foo
         \\- (void)bar {
-        \\    NSLog(@"%@", self.name);
+        \\    printf("%s", [self.name UTF8String]);
         \\}
         \\@end
         \\int main() {
@@ -1799,6 +1799,21 @@ fn testObjCStubs(b: *Build, opts: Options) *Step {
     const run = exe.run();
     run.expectStdOutEqual("Foo");
     test_step.dependOn(run.step());
+
+    const check = exe.check();
+    check.checkInHeaders();
+    check.checkExact("sectname __objc_stubs");
+    check.checkInHeaders();
+    check.checkExact("sectname __objc_methname");
+    check.checkInHeaders();
+    check.checkExact("sectname __objc_selrefs");
+    check.checkInSymtab();
+    check.checkContains("(__TEXT,__objc_stubs) (was private external) _objc_msgSend$bar");
+    check.checkInSymtab();
+    check.checkContains("(__TEXT,__objc_stubs) (was private external) _objc_msgSend$name");
+    check.checkInSymtab();
+    check.checkContains("(__TEXT,__objc_stubs) (was private external) _objc_msgSend$setName");
+    test_step.dependOn(&check.step);
 
     return test_step;
 }

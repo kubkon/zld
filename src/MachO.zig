@@ -60,7 +60,7 @@ indsymtab: Indsymtab = .{},
 got: GotSection = .{},
 stubs: StubsSection = .{},
 stubs_helper: StubsHelperSection = .{},
-objc_stubs: ObjCStubsSection = .{},
+objc_stubs: ObjcStubsSection = .{},
 la_symbol_ptr: LaSymbolPtrSection = .{},
 tlv_ptr: TlvPtrSection = .{},
 rebase: RebaseSection = .{},
@@ -320,11 +320,10 @@ pub fn flush(self: *MachO) !void {
         dylib.ordinal = @intCast(ord);
     }
 
-    try self.initOutputSections();
-
     self.claimUnresolved();
     try self.scanRelocs();
 
+    try self.initOutputSections();
     try self.initSyntheticSections();
     try self.sortSections();
     try self.addAtomsToSections();
@@ -675,7 +674,7 @@ fn parseArchive(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
 
         // Finally, we do a post-parse check for -ObjC to see if we need to force load this member
         // anyhow.
-        object.alive = object.alive or (self.options.force_load_objc and object.hasObjC());
+        object.alive = object.alive or (self.options.force_load_objc and object.hasObjc());
     }
 
     return true;
@@ -1822,7 +1821,7 @@ fn allocateSyntheticSymbols(self: *MachO) void {
 
         for (self.objc_stubs.symbols.items, 0..) |sym_index, idx| {
             const sym = self.getSymbol(sym_index);
-            sym.value = addr + idx * ObjCStubsSection.entry_size;
+            sym.value = addr + idx * ObjcStubsSection.entry_size;
             sym.out_n_sect = self.objc_stubs_sect_index.?;
         }
     }
@@ -2620,7 +2619,7 @@ pub fn getUnwindRecord(self: *MachO, index: UnwindInfo.Record.Index) *UnwindInfo
     return &self.unwind_records.items[index];
 }
 
-fn eatPrefix(path: []const u8, prefix: []const u8) ?[]const u8 {
+pub fn eatPrefix(path: []const u8, prefix: []const u8) ?[]const u8 {
     if (mem.startsWith(u8, path, prefix)) return path[prefix.len..];
     return null;
 }
@@ -2875,7 +2874,7 @@ const InternalObject = @import("MachO/InternalObject.zig");
 const MachO = @This();
 const Md5 = std.crypto.hash.Md5;
 const Object = @import("MachO/Object.zig");
-const ObjCStubsSection = synthetic.ObjCStubsSection;
+const ObjcStubsSection = synthetic.ObjcStubsSection;
 pub const Options = @import("MachO/Options.zig");
 const LazyBindSection = synthetic.LazyBindSection;
 const LaSymbolPtrSection = synthetic.LaSymbolPtrSection;

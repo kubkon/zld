@@ -14,7 +14,7 @@ size: u64 = 0,
 alignment: u32 = 0,
 
 /// Index of the input section.
-n_sect: u8 = 0,
+n_sect: u32 = 0,
 
 /// Index of the output section.
 out_n_sect: u8 = 0,
