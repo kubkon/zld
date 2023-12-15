@@ -62,7 +62,7 @@ pub fn getCode(self: Atom, macho_file: *MachO) []const u8 {
     return code[self.off..][0..self.size];
 }
 
-pub fn getRelocs(self: Atom, macho_file: *MachO) []const Object.Relocation {
+pub fn getRelocs(self: Atom, macho_file: *MachO) []const Relocation {
     const object = self.getObject(macho_file);
     const relocs = object.sections.items(.relocs)[self.n_sect];
     return relocs.items[self.relocs.pos..][0..self.relocs.len];
@@ -238,7 +238,7 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
     }
 }
 
-fn reportUndefSymbol(self: Atom, rel: Object.Relocation, macho_file: *MachO) !bool {
+fn reportUndefSymbol(self: Atom, rel: Relocation, macho_file: *MachO) !bool {
     if (rel.tag == .local) return false;
 
     const sym = rel.getTargetSymbol(macho_file);
@@ -342,8 +342,8 @@ const ResolveError = error{
 
 fn resolveRelocInner(
     self: Atom,
-    rel: Object.Relocation,
-    subtractor: ?Object.Relocation,
+    rel: Relocation,
+    subtractor: ?Relocation,
     code: []u8,
     macho_file: *MachO,
     writer: anytype,
@@ -638,5 +638,6 @@ const Instruction = dis_x86_64.Instruction;
 const Immediate = dis_x86_64.Immediate;
 const MachO = @import("../MachO.zig");
 const Object = @import("Object.zig");
+const Relocation = @import("Relocation.zig");
 const Symbol = @import("Symbol.zig");
 const UnwindInfo = @import("UnwindInfo.zig");
