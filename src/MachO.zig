@@ -307,12 +307,13 @@ pub fn flush(self: *MachO) !void {
     try self.resolveSyntheticSymbols();
 
     try self.convertTentativeDefinitions();
-    self.markImportsAndExports();
+    try self.createObjcSections();
 
     if (self.options.dead_strip) {
         try dead_strip.gcAtoms(self);
     }
 
+    self.markImportsAndExports();
     self.deadStripDylibs();
 
     for (self.dylibs.items, 1..) |index, ord| {
@@ -1121,9 +1122,75 @@ fn resolveSyntheticSymbols(self: *MachO) !void {
     }
 }
 
+/// TODO given that we create only one global selector per method name, we can tie the data to
+/// the internal object instead of the first encountered input object file.
+fn createObjcSections(self: *MachO) !void {
+    const gpa = self.base.allocator;
+    var objc_msgsend_syms = std.AutoArrayHashMap(Symbol.Index, void).init(gpa);
+    defer objc_msgsend_syms.deinit();
+
+    for (self.objects.items) |index| {
+        const object = self.getFile(index).?.object;
+
+        for (object.symbols.items, 0..) |sym_index, i| {
+            const nlist_idx = @as(Symbol.Index, @intCast(i));
+            const nlist = object.symtab.items(.nlist)[nlist_idx];
+            if (!nlist.ext()) continue;
+            if (!nlist.undf()) continue;
+
+            const sym = self.getSymbol(sym_index);
+            if (sym.getFile(self) != null) continue;
+            if (mem.startsWith(u8, sym.getName(self), "_objc_msgSend$")) {
+                const gop = try objc_msgsend_syms.getOrPut(sym_index);
+                if (!gop.found_existing) {
+                    object.symtab.items(.nlist)[nlist_idx].n_type = macho.N_SECT; // TODO so that we don't report an undef
+                    sym.value = 0;
+                    sym.atom = 0;
+                    sym.nlist_idx = nlist_idx;
+                    sym.file = object.index;
+                    sym.flags = .{};
+                    sym.visibility = .hidden;
+                }
+            }
+        }
+    }
+
+    for (objc_msgsend_syms.keys()) |sym_index| {
+        const sym = self.getSymbol(sym_index);
+        const name = eatPrefix(sym.getName(self), "_objc_msgSend$").?;
+        const selrefs_index = try sym.getFile(self).?.object.addObjcMsgsendSections(name, self);
+        try sym.addExtra(.{ .objc_selrefs = selrefs_index }, self);
+    }
+}
+
 fn claimUnresolved(self: *MachO) void {
     for (self.objects.items) |index| {
-        self.getFile(index).?.object.claimUnresolved(self);
+        const object = self.getFile(index).?.object;
+
+        for (object.symbols.items, 0..) |sym_index, i| {
+            const nlist_idx = @as(Symbol.Index, @intCast(i));
+            const nlist = object.symtab.items(.nlist)[nlist_idx];
+            if (!nlist.ext()) continue;
+            if (!nlist.undf()) continue;
+
+            const sym = self.getSymbol(sym_index);
+            if (sym.getFile(self) != null) continue;
+
+            const is_import = switch (self.options.undefined_treatment) {
+                .@"error" => false,
+                .warn, .suppress => nlist.weakRef(),
+                .dynamic_lookup => true,
+            };
+
+            sym.value = 0;
+            sym.atom = 0;
+            sym.nlist_idx = nlist_idx;
+            sym.file = object.index;
+            sym.flags.weak = false;
+            sym.flags.weak_ref = nlist.weakRef();
+            sym.flags.import = is_import;
+            sym.visibility = .global;
+        }
     }
 }
 

@@ -441,12 +441,7 @@ pub const ObjcStubsSection = struct {
         const entry = try objc.symbols.addOne(gpa);
         entry.* = sym_index;
         const symbol = macho_file.getSymbol(sym_index);
-        const object = symbol.getFile(macho_file).?.object;
-        const selrefs_index = try object.addObjcMsgsendSections(
-            MachO.eatPrefix(symbol.getName(macho_file), "_objc_msgSend$").?,
-            macho_file,
-        );
-        try symbol.addExtra(.{ .objc_stubs = index, .objc_selrefs = selrefs_index }, macho_file);
+        try symbol.addExtra(.{ .objc_stubs = index }, macho_file);
     }
 
     pub fn getAddress(objc: ObjcStubsSection, index: Index, macho_file: *MachO) u64 {

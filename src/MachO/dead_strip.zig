@@ -179,9 +179,6 @@ const Level = struct {
 
 var track_live_level: Level = .{};
 
-// TODO upstream
-const N_NO_DEAD_STRIP: u16 = macho.N_DESC_DISCARDED;
-
 const assert = std.debug.assert;
 const build_options = @import("build_options");
 const log = std.log.scoped(.dead_strip);

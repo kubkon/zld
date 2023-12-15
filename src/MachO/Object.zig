@@ -955,7 +955,7 @@ fn addObjcSelrefsSection(
 
     const n_sect = try self.addSection(gpa, "__DATA", "__objc_selrefs");
     const sect = &self.sections.items(.header)[n_sect];
-    sect.flags = macho.S_LITERAL_POINTERS;
+    sect.flags = macho.S_LITERAL_POINTERS | macho.S_ATTR_NO_DEAD_STRIP;
     sect.offset = 0;
     sect.size = atom.size;
     sect.@"align" = 3;
@@ -1212,43 +1212,6 @@ pub fn writeStabs(self: Object, macho_file: *MachO) void {
         .n_desc = 0,
         .n_value = 0,
     };
-}
-
-pub fn claimUnresolved(self: Object, macho_file: *MachO) void {
-    for (self.symbols.items, 0..) |sym_index, i| {
-        const nlist_idx = @as(Symbol.Index, @intCast(i));
-        const nlist = self.symtab.items(.nlist)[nlist_idx];
-        if (!nlist.ext()) continue;
-        if (!nlist.undf()) continue;
-
-        const sym = macho_file.getSymbol(sym_index);
-        if (sym.getFile(macho_file) != null) continue;
-        if (mem.startsWith(u8, sym.getName(macho_file), "_objc_msgSend$")) {
-            self.symtab.items(.nlist)[nlist_idx].n_type = macho.N_SECT;
-            sym.value = 0;
-            sym.atom = 0;
-            sym.nlist_idx = nlist_idx;
-            sym.file = self.index;
-            sym.flags = .{};
-            sym.visibility = .hidden;
-            continue;
-        }
-
-        const is_import = switch (macho_file.options.undefined_treatment) {
-            .@"error" => false,
-            .warn, .suppress => nlist.weakRef(),
-            .dynamic_lookup => true,
-        };
-
-        sym.value = 0;
-        sym.atom = 0;
-        sym.nlist_idx = nlist_idx;
-        sym.file = self.index;
-        sym.flags.weak = false;
-        sym.flags.weak_ref = nlist.weakRef();
-        sym.flags.import = is_import;
-        sym.visibility = .global;
-    }
 }
 
 fn getLoadCommand(self: Object, lc: macho.LC) ?LoadCommandIterator.LoadCommand {
