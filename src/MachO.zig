@@ -313,7 +313,7 @@ pub fn flush(self: *MachO) !void {
         try dead_strip.gcAtoms(self);
     }
 
-    self.markImportsAndExports();
+    self.markImportsAndExports(); // TODO move it up
     self.deadStripDylibs();
 
     for (self.dylibs.items, 1..) |index, ord| {
@@ -1069,7 +1069,13 @@ fn initOutputSections(self: *MachO) !void {
             atom.out_n_sect = try Atom.initOutputSection(atom.getInputSection(self), self);
         }
     }
-
+    if (self.getInternalObject()) |object| {
+        for (object.atoms.items) |atom_index| {
+            const atom = self.getAtom(atom_index) orelse continue;
+            if (!atom.flags.alive) continue;
+            atom.out_n_sect = try Atom.initOutputSection(atom.getInputSection(self), self);
+        }
+    }
     if (self.data_sect_index == null) {
         self.data_sect_index = try self.addSection("__DATA", "__data", .{});
     }
@@ -1122,8 +1128,6 @@ fn resolveSyntheticSymbols(self: *MachO) !void {
     }
 }
 
-/// TODO given that we create only one global selector per method name, we can tie the data to
-/// the internal object instead of the first encountered input object file.
 fn createObjcSections(self: *MachO) !void {
     const gpa = self.base.allocator;
     var objc_msgsend_syms = std.AutoArrayHashMap(Symbol.Index, void).init(gpa);
@@ -1141,25 +1145,24 @@ fn createObjcSections(self: *MachO) !void {
             const sym = self.getSymbol(sym_index);
             if (sym.getFile(self) != null) continue;
             if (mem.startsWith(u8, sym.getName(self), "_objc_msgSend$")) {
-                const gop = try objc_msgsend_syms.getOrPut(sym_index);
-                if (!gop.found_existing) {
-                    object.symtab.items(.nlist)[nlist_idx].n_type = macho.N_SECT; // TODO so that we don't report an undef
-                    sym.value = 0;
-                    sym.atom = 0;
-                    sym.nlist_idx = nlist_idx;
-                    sym.file = object.index;
-                    sym.flags = .{};
-                    sym.visibility = .hidden;
-                }
+                _ = try objc_msgsend_syms.put(sym_index, {});
             }
         }
     }
 
     for (objc_msgsend_syms.keys()) |sym_index| {
         const sym = self.getSymbol(sym_index);
+        sym.value = 0;
+        sym.atom = 0;
+        sym.nlist_idx = 0;
+        sym.file = self.internal_object_index.?;
+        sym.flags = .{};
+        sym.visibility = .hidden;
+        const object = self.getInternalObject().?;
         const name = eatPrefix(sym.getName(self), "_objc_msgSend$").?;
-        const selrefs_index = try sym.getFile(self).?.object.addObjcMsgsendSections(name, self);
+        const selrefs_index = try object.addObjcMsgsendSections(name, self);
         try sym.addExtra(.{ .objc_selrefs = selrefs_index }, self);
+        try object.symbols.append(gpa, sym_index);
     }
 }
 
@@ -1265,8 +1268,8 @@ fn reportUndefs(self: *MachO) !void {
         var inote: usize = 0;
         while (inote < @min(notes.items.len, max_notes)) : (inote += 1) {
             const atom = self.getAtom(notes.items[inote]).?;
-            const object = atom.getObject(self);
-            try err.addNote("referenced by {}:{s}", .{ object.fmtPath(), atom.getName(self) });
+            const file = atom.getFile(self);
+            try err.addNote("referenced by {}:{s}", .{ file.fmtPath(), atom.getName(self) });
         }
 
         if (notes.items.len > max_notes) {
@@ -1497,6 +1500,13 @@ fn sortSections(self: *MachO) !void {
             atom.out_n_sect = backlinks[atom.out_n_sect];
         }
     }
+    if (self.getInternalObject()) |object| {
+        for (object.atoms.items) |atom_index| {
+            const atom = self.getAtom(atom_index) orelse continue;
+            if (!atom.flags.alive) continue;
+            atom.out_n_sect = backlinks[atom.out_n_sect];
+        }
+    }
 
     for (&[_]*?u8{
         &self.data_sect_index,
@@ -1518,6 +1528,14 @@ fn sortSections(self: *MachO) !void {
 fn addAtomsToSections(self: *MachO) !void {
     for (self.objects.items) |index| {
         for (self.getFile(index).?.object.atoms.items) |atom_index| {
+            const atom = self.getAtom(atom_index) orelse continue;
+            if (!atom.flags.alive) continue;
+            const atoms = &self.sections.items(.atoms)[atom.out_n_sect];
+            try atoms.append(self.base.allocator, atom_index);
+        }
+    }
+    if (self.getInternalObject()) |object| {
+        for (object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index) orelse continue;
             if (!atom.flags.alive) continue;
             const atoms = &self.sections.items(.atoms)[atom.out_n_sect];
@@ -2734,7 +2752,7 @@ fn fmtDumpState(
     }
     if (self.getInternalObject()) |internal| {
         try writer.print("internal({d}) : internal\n", .{internal.index});
-        try writer.print("{}\n", .{internal.fmtSymtab(self)});
+        try writer.print("{}{}\n", .{ internal.fmtAtoms(self), internal.fmtSymtab(self) });
     }
     try writer.print("stubs\n{}\n", .{self.stubs.fmt(self)});
     try writer.print("objc_stubs\n{}\n", .{self.objc_stubs.fmt(self)});

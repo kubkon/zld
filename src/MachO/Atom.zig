@@ -38,13 +38,15 @@ pub fn getName(self: Atom, macho_file: *MachO) [:0]const u8 {
     return macho_file.string_intern.getAssumeExists(self.name);
 }
 
-pub fn getObject(self: Atom, macho_file: *MachO) *Object {
-    return macho_file.getFile(self.file).?.object;
+pub fn getFile(self: Atom, macho_file: *MachO) File {
+    return macho_file.getFile(self.file).?;
 }
 
 pub fn getInputSection(self: Atom, macho_file: *MachO) macho.section_64 {
-    const object = self.getObject(macho_file);
-    return object.sections.items(.header)[self.n_sect];
+    return switch (self.getFile(macho_file)) {
+        .dylib => unreachable,
+        inline else => |x| x.sections.items(.header)[self.n_sect],
+    };
 }
 
 pub fn getInputAddress(self: Atom, macho_file: *MachO) u64 {
@@ -52,25 +54,32 @@ pub fn getInputAddress(self: Atom, macho_file: *MachO) u64 {
 }
 
 pub fn getPriority(self: Atom, macho_file: *MachO) u64 {
-    const object = self.getObject(macho_file);
-    return (@as(u64, @intCast(object.index)) << 32) | @as(u64, @intCast(self.n_sect));
+    const file = self.getFile(macho_file);
+    return (@as(u64, @intCast(file.getIndex())) << 32) | @as(u64, @intCast(self.n_sect));
 }
 
 pub fn getCode(self: Atom, macho_file: *MachO) []const u8 {
-    const object = self.getObject(macho_file);
-    const code = object.getSectionData(self.n_sect);
+    const code = switch (self.getFile(macho_file)) {
+        .dylib => unreachable,
+        inline else => |x| x.getSectionData(self.n_sect),
+    };
     return code[self.off..][0..self.size];
 }
 
 pub fn getRelocs(self: Atom, macho_file: *MachO) []const Relocation {
-    const object = self.getObject(macho_file);
-    const relocs = object.sections.items(.relocs)[self.n_sect];
+    const relocs = switch (self.getFile(macho_file)) {
+        .dylib => unreachable,
+        inline else => |x| x.sections.items(.relocs)[self.n_sect],
+    };
     return relocs.items[self.relocs.pos..][0..self.relocs.len];
 }
 
 pub fn getUnwindRecords(self: Atom, macho_file: *MachO) []const UnwindInfo.Record.Index {
-    const object = self.getObject(macho_file);
-    return object.unwind_records.items[self.unwind_records.pos..][0..self.unwind_records.len];
+    return switch (self.getFile(macho_file)) {
+        .dylib => unreachable,
+        .internal => &[0]UnwindInfo.Record.Index{},
+        .object => |x| x.unwind_records.items[self.unwind_records.pos..][0..self.unwind_records.len],
+    };
 }
 
 pub fn markUnwindRecordsDead(self: Atom, macho_file: *MachO) void {
@@ -155,7 +164,7 @@ pub fn initOutputSection(sect: macho.section_64, macho_file: *MachO) !u8 {
 }
 
 pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
-    const object = self.getObject(macho_file);
+    const object = self.getFile(macho_file).object;
     const relocs = self.getRelocs(macho_file);
 
     for (relocs) |rel| {
@@ -261,7 +270,7 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
     const code = try gpa.dupe(u8, self.getCode(macho_file));
     defer gpa.free(code);
     const relocs = self.getRelocs(macho_file);
-    const object = self.getObject(macho_file);
+    const file = self.getFile(macho_file);
     const name = self.getName(macho_file);
 
     relocs_log.debug("{x}: {s}", .{ self.value, name });
@@ -286,7 +295,7 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
                 macho_file.base.fatal(
                     "{}: {s}: 0x{x}: invalid relocation: unterminated X86_64_RELOC_SUBTRACTOR",
                     .{
-                        object.fmtPath(), name, rel.offset,
+                        file.fmtPath(), name, rel.offset,
                     },
                 );
                 continue;
@@ -295,7 +304,7 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
             if (next_rel_type != .X86_64_RELOC_UNSIGNED) {
                 macho_file.base.fatal(
                     "{}: {s}: 0x{x}: invalid relocation: invalid target relocation for X86_64_RELOC_SUBTRACTOR: {s}",
-                    .{ object.fmtPath(), name, rel.offset, @tagName(next_rel_type) },
+                    .{ file.fmtPath(), name, rel.offset, @tagName(next_rel_type) },
                 );
                 continue;
             }
@@ -305,12 +314,12 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
         self.resolveRelocInner(rel, subtractor, code, macho_file, stream.writer()) catch |err| switch (err) {
             error.UnexpectedPcrel => macho_file.base.fatal(
                 "{}: {s}: 0x{x}: invalid relocation: invalid PCrel option in {s}",
-                .{ object.fmtPath(), name, rel.offset, @tagName(rel_type) },
+                .{ file.fmtPath(), name, rel.offset, @tagName(rel_type) },
             ),
             error.UnexpectedSize => macho_file.base.fatal(
                 "{}: {s}: 0x{x}: invalid relocation: invalid size {d} in {s}",
                 .{
-                    object.fmtPath(),
+                    file.fmtPath(),
                     name,
                     rel.offset,
                     @as(u8, 1) << rel.meta.length,
@@ -319,11 +328,11 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
             ),
             error.NonExternTarget => macho_file.base.fatal(
                 "{}: {s}: 0x{x}: invalid relocation: non-extern target in {s}",
-                .{ object.fmtPath(), name, rel.offset, @tagName(rel_type) },
+                .{ file.fmtPath(), name, rel.offset, @tagName(rel_type) },
             ),
             error.RelaxFail => macho_file.base.fatal(
                 "{}: {s}: 0x{x}: failed to relax relocation: in {s}",
-                .{ object.fmtPath(), name, rel.offset, @tagName(rel_type) },
+                .{ file.fmtPath(), name, rel.offset, @tagName(rel_type) },
             ),
             else => |e| return e,
         };
