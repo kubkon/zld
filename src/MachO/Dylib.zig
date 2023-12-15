@@ -390,7 +390,7 @@ pub fn parseTbd(
 }
 
 fn addObjCClass(self: *Dylib, allocator: Allocator, name: []const u8) !void {
-    try self.addObjCExport(allocator, "_OBJC_CLASS", name);
+    try self.addObjCExport(allocator, "_OBJC_CLASS_", name);
     try self.addObjCExport(allocator, "_OBJC_METACLASS_", name);
 }
 

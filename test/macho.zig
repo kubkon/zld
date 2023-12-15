@@ -49,6 +49,9 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testNeededLibrary(b, opts));
     macho_step.dependOn(testNoDeadStrip(b, opts));
     macho_step.dependOn(testNoExportsDylib(b, opts));
+    macho_step.dependOn(testObjc(b, opts));
+    macho_step.dependOn(testObjcStubs(b, opts));
+    macho_step.dependOn(testObjcStubs2(b, opts));
     macho_step.dependOn(testPagezeroSize(b, opts));
     macho_step.dependOn(testReexportsZig(b, opts));
     macho_step.dependOn(testSearchStrategy(b, opts));
@@ -1716,6 +1719,193 @@ fn testNoExportsDylib(b: *Build, opts: Options) *Step {
     const check = dylib.check();
     check.checkInSymtab();
     check.checkNotPresent("external _abc");
+    test_step.dependOn(&check.step);
+
+    return test_step;
+}
+
+fn testObjc(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-objc", "");
+
+    const a_o = cc(b, opts);
+    a_o.addObjCSource(
+        \\#import <Foundation/Foundation.h>
+        \\@interface Foo : NSObject
+        \\@end
+        \\@implementation Foo
+        \\@end
+    );
+    a_o.addArg("-c");
+
+    const liba = ar(b);
+    liba.addFileSource(a_o.out);
+    const liba_out = liba.saveOutputAs("liba.a");
+
+    {
+        const exe = cc(b, opts);
+        exe.addEmptyMain();
+        exe.addPrefixedDirectorySource("-L", liba_out.dir);
+        exe.addArg("-la");
+
+        const check = exe.check();
+        check.checkInSymtab();
+        check.checkNotPresent("_OBJC_");
+        test_step.dependOn(&check.step);
+
+        const run = exe.run();
+        test_step.dependOn(run.step());
+    }
+
+    {
+        const exe = cc(b, opts);
+        exe.addEmptyMain();
+        exe.addPrefixedDirectorySource("-L", liba_out.dir);
+        exe.addArgs(&.{ "-la", "-ObjC", "-framework", "Foundation" });
+
+        const check = exe.check();
+        check.checkInSymtab();
+        check.checkContains("_OBJC_");
+        test_step.dependOn(&check.step);
+
+        const run = exe.run();
+        test_step.dependOn(run.step());
+    }
+
+    return test_step;
+}
+
+fn testObjcStubs(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-objc-stubs", "");
+
+    const exe = cc(b, opts);
+    exe.addObjCSource(
+        \\@import Foundation;
+        \\@interface Foo : NSObject
+        \\@property (nonatomic, assign) NSString* name;
+        \\@end
+        \\@implementation Foo
+        \\- (void)bar {
+        \\    printf("%s", [self.name UTF8String]);
+        \\}
+        \\@end
+        \\int main() {
+        \\    Foo *foo = [[Foo alloc] init];
+        \\    foo.name = @"Foo";
+        \\    [foo bar];
+        \\    return 0;
+        \\}
+    );
+    exe.addArgs(&.{ "-fmodules", "-fobjc-msgsend-selector-stubs", "-framework", "Foundation" });
+
+    const run = exe.run();
+    run.expectStdOutEqual("Foo");
+    test_step.dependOn(run.step());
+
+    const check = exe.check();
+    check.checkInHeaders();
+    check.checkExact("sectname __objc_stubs");
+    check.checkInHeaders();
+    check.checkExact("sectname __objc_methname");
+    check.checkInHeaders();
+    check.checkExact("sectname __objc_selrefs");
+    check.checkInSymtab();
+    check.checkContains("(__TEXT,__objc_stubs) (was private external) _objc_msgSend$bar");
+    check.checkInSymtab();
+    check.checkContains("(__TEXT,__objc_stubs) (was private external) _objc_msgSend$name");
+    check.checkInSymtab();
+    check.checkContains("(__TEXT,__objc_stubs) (was private external) _objc_msgSend$setName");
+    test_step.dependOn(&check.step);
+
+    return test_step;
+}
+
+fn testObjcStubs2(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-objc-stubs-2", "");
+
+    const all_h = FileSourceWithDir.fromBytes(b,
+        \\#import <Foundation/Foundation.h>
+        \\
+        \\@interface Foo : NSObject
+        \\@property (nonatomic, assign) NSString* name;
+        \\- (void) foo;
+        \\@end
+        \\@interface Bar : NSObject
+        \\@property (nonatomic, assign) NSString* name;
+        \\- (void) bar;
+        \\- (void) foobar: (Foo*) foo;
+        \\@end
+    , "all.h");
+
+    const foo_o = cc(b, opts);
+    foo_o.addObjCSource(
+        \\#import <Foundation/Foundation.h>
+        \\#import "all.h"
+        \\@implementation Foo
+        \\- (void)foo {
+        \\    printf("%s", [self.name UTF8String]);
+        \\}
+        \\@end
+    );
+    foo_o.addArgs(&.{ "-c", "-fobjc-msgsend-selector-stubs" });
+    foo_o.addPrefixedDirectorySource("-I", all_h.dir);
+
+    const bar_o = cc(b, opts);
+    bar_o.addObjCSource(
+        \\#import <Foundation/Foundation.h>
+        \\#import "all.h"
+        \\@implementation Bar
+        \\- (void)bar {
+        \\    printf("%s", [self.name UTF8String]);
+        \\}
+        \\- (void)foobar: (Foo*) foo {
+        \\    printf("%s%s", [foo.name UTF8String], [self.name UTF8String]);
+        \\}
+        \\@end
+    );
+    bar_o.addArgs(&.{ "-c", "-fobjc-msgsend-selector-stubs" });
+    bar_o.addPrefixedDirectorySource("-I", all_h.dir);
+
+    const main_o = cc(b, opts);
+    main_o.addObjCSource(
+        \\#import <Foundation/Foundation.h>
+        \\#import "all.h"
+        \\int main() {
+        \\    Foo *foo = [[Foo alloc] init];
+        \\    foo.name = @"Foo";
+        \\    Bar *bar = [[Bar alloc] init];
+        \\    bar.name = @"Bar";
+        \\    [foo foo];
+        \\    [bar bar];
+        \\    [bar foobar:foo];
+        \\    return 0;
+        \\}
+    );
+    main_o.addArgs(&.{ "-c", "-fobjc-msgsend-selector-stubs" });
+    main_o.addPrefixedDirectorySource("-I", all_h.dir);
+
+    const exe = cc(b, opts);
+    exe.addFileSource(main_o.out);
+    exe.addFileSource(foo_o.out);
+    exe.addFileSource(bar_o.out);
+    exe.addArgs(&.{ "-framework", "Foundation" });
+
+    const run = exe.run();
+    run.expectStdOutEqual("FooBarFooBar");
+    test_step.dependOn(run.step());
+
+    const check = exe.check();
+    check.checkInHeaders();
+    check.checkExact("sectname __objc_stubs");
+    check.checkInHeaders();
+    check.checkExact("sectname __objc_methname");
+    check.checkInHeaders();
+    check.checkExact("sectname __objc_selrefs");
+    check.checkInSymtab();
+    check.checkContains("(__TEXT,__objc_stubs) (was private external) _objc_msgSend$foo");
+    check.checkInSymtab();
+    check.checkContains("(__TEXT,__objc_stubs) (was private external) _objc_msgSend$bar");
+    check.checkInSymtab();
+    check.checkContains("(__TEXT,__objc_stubs) (was private external) _objc_msgSend$foobar");
     test_step.dependOn(&check.step);
 
     return test_step;

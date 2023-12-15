@@ -98,8 +98,12 @@ pub fn getSymbolRank(symbol: Symbol, macho_file: *MachO) u32 {
 pub fn getAddress(symbol: Symbol, opts: struct {
     stubs: bool = true,
 }, macho_file: *MachO) u64 {
-    if (symbol.flags.stubs and opts.stubs) {
-        return symbol.getStubsAddress(macho_file);
+    if (opts.stubs) {
+        if (symbol.flags.stubs) {
+            return symbol.getStubsAddress(macho_file);
+        } else if (symbol.flags.objc_stubs) {
+            return symbol.getObjcStubsAddress(macho_file);
+        }
     }
     return symbol.value;
 }
@@ -114,6 +118,20 @@ pub fn getStubsAddress(symbol: Symbol, macho_file: *MachO) u64 {
     if (!symbol.flags.stubs) return 0;
     const extra = symbol.getExtra(macho_file).?;
     return macho_file.stubs.getAddress(extra.stubs, macho_file);
+}
+
+pub fn getObjcStubsAddress(symbol: Symbol, macho_file: *MachO) u64 {
+    if (!symbol.flags.objc_stubs) return 0;
+    const extra = symbol.getExtra(macho_file).?;
+    return macho_file.objc_stubs.getAddress(extra.objc_stubs, macho_file);
+}
+
+pub fn getObjcSelrefsAddress(symbol: Symbol, macho_file: *MachO) u64 {
+    if (!symbol.flags.objc_stubs) return 0;
+    const extra = symbol.getExtra(macho_file).?;
+    const atom = macho_file.getAtom(extra.objc_selrefs).?;
+    assert(atom.flags.alive);
+    return atom.value;
 }
 
 pub fn getTlvPtrAddress(symbol: Symbol, macho_file: *MachO) u64 {
@@ -143,6 +161,8 @@ pub fn getOutputSymtabIndex(symbol: Symbol, macho_file: *MachO) ?u32 {
 const AddExtraOpts = struct {
     got: ?u32 = null,
     stubs: ?u32 = null,
+    objc_stubs: ?u32 = null,
+    objc_selrefs: ?u32 = null,
     tlv_ptr: ?u32 = null,
     symtab: ?u32 = null,
 };
@@ -315,6 +335,9 @@ pub const Flags = packed struct {
 
     /// Whether the symbol has a TLV pointer.
     tlv_ptr: bool = false,
+
+    /// Whether the symbol contains __objc_stubs indirection.
+    objc_stubs: bool = false,
 };
 
 pub const Visibility = enum {
@@ -326,6 +349,8 @@ pub const Visibility = enum {
 pub const Extra = struct {
     got: u32 = 0,
     stubs: u32 = 0,
+    objc_stubs: u32 = 0,
+    objc_selrefs: u32 = 0,
     tlv_ptr: u32 = 0,
     symtab: u32 = 0,
 };

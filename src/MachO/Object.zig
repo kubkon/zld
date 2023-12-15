@@ -32,14 +32,19 @@ num_weak_bind_relocs: u32 = 0,
 
 output_symtab_ctx: MachO.SymtabCtx = .{},
 
-pub fn deinit(self: *Object, gpa: Allocator) void {
-    self.symtab.deinit(gpa);
-    self.symbols.deinit(gpa);
-    self.atoms.deinit(gpa);
-    self.cies.deinit(gpa);
-    self.fdes.deinit(gpa);
-    self.unwind_records.deinit(gpa);
-    if (self.dwarf_info) |*dw| dw.deinit(gpa);
+pub fn deinit(self: *Object, allocator: Allocator) void {
+    for (self.sections.items(.relocs), self.sections.items(.subsections)) |*relocs, *sub| {
+        relocs.deinit(allocator);
+        sub.deinit(allocator);
+    }
+    self.sections.deinit(allocator);
+    self.symtab.deinit(allocator);
+    self.symbols.deinit(allocator);
+    self.atoms.deinit(allocator);
+    self.cies.deinit(allocator);
+    self.fdes.deinit(allocator);
+    self.unwind_records.deinit(allocator);
+    if (self.dwarf_info) |*dw| dw.deinit(allocator);
 }
 
 pub fn parse(self: *Object, macho_file: *MachO) !void {
@@ -317,7 +322,7 @@ pub fn findAtom(self: Object, addr: u64) Atom.Index {
             return self.findAtomInSection(addr, @intCast(n_sect));
         }
     }
-    unreachable;
+    unreachable; // TODO convert into an error
 }
 
 fn findAtomInSection(self: Object, addr: u64, n_sect: u8) Atom.Index {
@@ -410,9 +415,12 @@ fn initRelocs(self: *Object, macho_file: *MachO) !void {
 
         try out.ensureTotalCapacityPrecise(gpa, relocs.len);
 
-        for (relocs) |rel| {
+        var i: usize = 0;
+        while (i < relocs.len) : (i += 1) {
+            const rel = relocs[i];
             const rel_type: macho.reloc_type_x86_64 = @enumFromInt(rel.r_type);
             const rel_offset = @as(u32, @intCast(rel.r_address));
+
             var addend: i64 = switch (rel.r_length) {
                 0 => code[rel_offset],
                 1 => mem.readInt(i16, code[rel_offset..][0..2], .little),
@@ -437,6 +445,11 @@ fn initRelocs(self: *Object, macho_file: *MachO) !void {
                 break :blk target;
             } else self.symbols.items[rel.r_symbolnum];
 
+            const has_subtractor = if (i > 0)
+                @as(macho.reloc_type_x86_64, @enumFromInt(relocs[i - 1].r_type)) == .X86_64_RELOC_SUBTRACTOR
+            else
+                false;
+
             out.appendAssumeCapacity(.{
                 .tag = if (rel.r_extern == 1) .@"extern" else .local,
                 .offset = rel_offset,
@@ -447,6 +460,7 @@ fn initRelocs(self: *Object, macho_file: *MachO) !void {
                     .length = rel.r_length,
                     .type = rel.r_type,
                     .symbolnum = rel.r_symbolnum,
+                    .has_subtractor = has_subtractor,
                 },
             });
         }
@@ -881,14 +895,14 @@ pub fn convertTentativeDefinitions(self: *Object, macho_file: *MachO) !void {
 
         nlist.n_value = 0;
         nlist.n_type = macho.N_EXT | macho.N_SECT;
-        nlist.n_sect = n_sect + 1;
+        nlist.n_sect = 0;
         nlist.n_desc = 0;
         nlist_atom.* = atom_index;
     }
 }
 
-fn addSection(self: *Object, allocator: Allocator, segname: []const u8, sectname: []const u8) !u8 {
-    const n_sect = @as(u8, @intCast(try self.sections.addOne(allocator)));
+fn addSection(self: *Object, allocator: Allocator, segname: []const u8, sectname: []const u8) !u32 {
+    const n_sect = @as(u32, @intCast(try self.sections.addOne(allocator)));
     self.sections.set(n_sect, .{
         .header = .{
             .sectname = MachO.makeStaticString(sectname),
@@ -1119,33 +1133,6 @@ pub fn writeStabs(self: Object, macho_file: *MachO) void {
     };
 }
 
-pub fn claimUnresolved(self: Object, macho_file: *MachO) void {
-    for (self.symbols.items, 0..) |sym_index, i| {
-        const nlist_idx = @as(Symbol.Index, @intCast(i));
-        const nlist = self.symtab.items(.nlist)[nlist_idx];
-        if (!nlist.ext()) continue;
-        if (!nlist.undf()) continue;
-
-        const sym = macho_file.getSymbol(sym_index);
-        if (sym.getFile(macho_file) != null) continue;
-
-        const is_import = switch (macho_file.options.undefined_treatment) {
-            .@"error" => false,
-            .warn, .suppress => nlist.weakRef(),
-            .dynamic_lookup => true,
-        };
-
-        sym.value = 0;
-        sym.atom = 0;
-        sym.nlist_idx = nlist_idx;
-        sym.file = self.index;
-        sym.flags.weak = false;
-        sym.flags.weak_ref = nlist.weakRef();
-        sym.flags.import = is_import;
-        sym.visibility = .global;
-    }
-}
-
 fn getLoadCommand(self: Object, lc: macho.LC) ?LoadCommandIterator.LoadCommand {
     var it = LoadCommandIterator{
         .ncmds = self.header.?.ncmds,
@@ -1156,9 +1143,10 @@ fn getLoadCommand(self: Object, lc: macho.LC) ?LoadCommandIterator.LoadCommand {
     } else return null;
 }
 
-pub fn getSectionData(self: Object, index: u8) []const u8 {
-    assert(index < self.sections.items(.header).len);
-    const sect = self.sections.items(.header)[index];
+pub fn getSectionData(self: *const Object, index: u32) []const u8 {
+    const slice = self.sections.slice();
+    assert(index < slice.items(.header).len);
+    const sect = slice.items(.header)[index];
     return self.data[sect.offset..][0..sect.size];
 }
 
@@ -1171,6 +1159,18 @@ fn getString(self: Object, off: u32) [:0]const u8 {
 pub fn hasDebugInfo(self: Object) bool {
     const dw = self.dwarf_info orelse return false;
     return dw.compile_units.items.len > 0;
+}
+
+pub fn hasObjc(self: Object) bool {
+    for (self.symtab.items(.nlist)) |nlist| {
+        const name = self.getString(nlist.n_strx);
+        if (mem.startsWith(u8, name, "_OBJC_CLASS_$_")) return true;
+    }
+    for (self.sections.items(.header)) |sect| {
+        if (mem.eql(u8, sect.segName(), "__DATA") and mem.eql(u8, sect.sectName(), "__objc_catlist")) return true;
+        if (mem.eql(u8, sect.segName(), "__TEXT") and mem.eql(u8, sect.sectName(), "__swift")) return true;
+    }
+    return false;
 }
 
 pub fn getDataInCode(self: Object) []align(1) const macho.data_in_code_entry {
@@ -1350,34 +1350,6 @@ const Subsection = struct {
     off: u64,
 };
 
-pub const Relocation = struct {
-    tag: enum { @"extern", local },
-    offset: u32,
-    target: u32,
-    addend: i64,
-    meta: packed struct {
-        pcrel: bool,
-        length: u2,
-        type: u4,
-        symbolnum: u24,
-    },
-
-    pub fn getTargetSymbol(rel: Relocation, macho_file: *MachO) *Symbol {
-        assert(rel.tag == .@"extern");
-        return macho_file.getSymbol(rel.target);
-    }
-
-    pub fn getTargetAtom(rel: Relocation, macho_file: *MachO) *Atom {
-        assert(rel.tag == .local);
-        return macho_file.getAtom(rel.target).?;
-    }
-
-    pub fn lessThan(ctx: void, lhs: Relocation, rhs: Relocation) bool {
-        _ = ctx;
-        return lhs.offset < rhs.offset;
-    }
-};
-
 const Nlist = struct {
     nlist: macho.nlist_64,
     size: u64,
@@ -1402,6 +1374,7 @@ const File = @import("file.zig").File;
 const LoadCommandIterator = macho.LoadCommandIterator;
 const MachO = @import("../MachO.zig");
 const Object = @This();
+const Relocation = @import("Relocation.zig");
 const StringTable = @import("../strtab.zig").StringTable;
 const Symbol = @import("Symbol.zig");
 const UnwindInfo = @import("UnwindInfo.zig");

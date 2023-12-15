@@ -96,11 +96,16 @@ pub const SysCmd = struct {
         return sys_cmd.addSourceBytes(bytes, .zig);
     }
 
+    pub inline fn addObjCSource(sys_cmd: SysCmd, bytes: []const u8) void {
+        return sys_cmd.addSourceBytes(bytes, .objc);
+    }
+
     pub const FileType = enum {
         c,
         cpp,
         @"asm",
         zig,
+        objc,
     };
 
     pub fn addSourceBytes(sys_cmd: SysCmd, bytes: []const u8, @"type": FileType) void {
@@ -111,6 +116,7 @@ pub const SysCmd = struct {
             .cpp => "a.cpp",
             .@"asm" => "a.s",
             .zig => "a.zig",
+            .objc => "a.m",
         }, bytes);
         sys_cmd.cmd.addFileSourceArg(file);
     }

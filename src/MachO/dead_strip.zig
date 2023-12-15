@@ -1,23 +1,31 @@
 pub fn gcAtoms(macho_file: *MachO) !void {
-    var roots = std.ArrayList(*Atom).init(macho_file.base.allocator);
+    const gpa = macho_file.base.allocator;
+
+    var objects = try std.ArrayList(File.Index).initCapacity(gpa, macho_file.objects.items.len + 1);
+    defer objects.deinit();
+    for (macho_file.objects.items) |index| objects.appendAssumeCapacity(index);
+    if (macho_file.internal_object_index) |index| objects.appendAssumeCapacity(index);
+
+    var roots = std.ArrayList(*Atom).init(gpa);
     defer roots.deinit();
-    try collectRoots(&roots, macho_file);
-    mark(roots.items, macho_file);
-    prune(macho_file);
+
+    try collectRoots(&roots, objects.items, macho_file);
+    mark(roots.items, objects.items, macho_file);
+    prune(objects.items, macho_file);
 }
 
-fn collectRoots(roots: *std.ArrayList(*Atom), macho_file: *MachO) !void {
-    for (macho_file.objects.items) |index| {
-        const object = macho_file.getFile(index).?.object;
-        for (object.symbols.items) |sym_index| {
+fn collectRoots(roots: *std.ArrayList(*Atom), objects: []const File.Index, macho_file: *MachO) !void {
+    for (objects) |index| {
+        const object = macho_file.getFile(index).?;
+        for (object.getSymbols()) |sym_index| {
             const sym = macho_file.getSymbol(sym_index);
             const file = sym.getFile(macho_file) orelse continue;
             if (file.getIndex() != index) continue;
-            if (sym.flags.no_dead_strip or macho_file.options.dylib and sym.flags.@"export")
+            if (sym.flags.no_dead_strip or (macho_file.options.dylib and sym.visibility == .global))
                 try markSymbol(sym, roots, macho_file);
         }
 
-        for (object.atoms.items) |atom_index| {
+        for (object.getAtoms()) |atom_index| {
             const atom = macho_file.getAtom(atom_index).?;
             const isec = atom.getInputSection(macho_file);
             switch (isec.type()) {
@@ -30,8 +38,10 @@ fn collectRoots(roots: *std.ArrayList(*Atom), macho_file: *MachO) !void {
                 },
             }
         }
+    }
 
-        for (object.unwind_records.items) |cu_index| {
+    for (macho_file.objects.items) |index| {
+        for (macho_file.getFile(index).?.object.unwind_records.items) |cu_index| {
             const cu = macho_file.getUnwindRecord(cu_index);
             if (!cu.alive) continue;
             if (cu.getFde(macho_file)) |fde| {
@@ -43,6 +53,17 @@ fn collectRoots(roots: *std.ArrayList(*Atom), macho_file: *MachO) !void {
     for (macho_file.undefined_symbols.items) |sym_index| {
         const sym = macho_file.getSymbol(sym_index);
         try markSymbol(sym, roots, macho_file);
+    }
+
+    for (&[_]?Symbol.Index{
+        macho_file.entry_index,
+        macho_file.dyld_stub_binder_index,
+        macho_file.objc_msg_send_index,
+    }) |index| {
+        if (index) |idx| {
+            const sym = macho_file.getSymbol(idx);
+            try markSymbol(sym, roots, macho_file);
+        }
     }
 }
 
@@ -57,7 +78,7 @@ fn markAtom(atom: *Atom) bool {
     return atom.flags.alive and !already_visited;
 }
 
-fn mark(roots: []*Atom, macho_file: *MachO) void {
+fn mark(roots: []*Atom, objects: []const File.Index, macho_file: *MachO) void {
     for (roots) |root| {
         markLive(root, macho_file);
     }
@@ -66,9 +87,8 @@ fn mark(roots: []*Atom, macho_file: *MachO) void {
     while (loop) {
         loop = false;
 
-        for (macho_file.objects.items) |index| {
-            const object = macho_file.getFile(index).?.object;
-            for (object.atoms.items) |atom_index| {
+        for (objects) |index| {
+            for (macho_file.getFile(index).?.getAtoms()) |atom_index| {
                 const atom = macho_file.getAtom(atom_index).?;
                 const isec = atom.getInputSection(macho_file);
                 if (isec.isDontDeadStripIfReferencesLive() and !atom.flags.alive and refersLive(atom, macho_file)) {
@@ -134,10 +154,9 @@ fn refersLive(atom: *Atom, macho_file: *MachO) bool {
     return false;
 }
 
-fn prune(macho_file: *MachO) void {
-    for (macho_file.objects.items) |index| {
-        const object = macho_file.getFile(index).?.object;
-        for (object.atoms.items) |atom_index| {
+fn prune(objects: []const File.Index, macho_file: *MachO) void {
+    for (objects) |index| {
+        for (macho_file.getFile(index).?.getAtoms()) |atom_index| {
             const atom = macho_file.getAtom(atom_index).?;
             if (atom.flags.alive and !atom.flags.visited) {
                 atom.flags.alive = false;
@@ -168,9 +187,6 @@ const Level = struct {
 
 var track_live_level: Level = .{};
 
-// TODO upstream
-const N_NO_DEAD_STRIP: u16 = macho.N_DESC_DISCARDED;
-
 const assert = std.debug.assert;
 const build_options = @import("build_options");
 const log = std.log.scoped(.dead_strip);
@@ -183,5 +199,6 @@ const std = @import("std");
 
 const Allocator = mem.Allocator;
 const Atom = @import("Atom.zig");
+const File = @import("file.zig").File;
 const MachO = @import("../MachO.zig");
 const Symbol = @import("Symbol.zig");

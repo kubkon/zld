@@ -428,6 +428,86 @@ pub const TlvPtrSection = struct {
     }
 };
 
+pub const ObjcStubsSection = struct {
+    symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
+
+    pub fn deinit(objc: *ObjcStubsSection, allocator: Allocator) void {
+        objc.symbols.deinit(allocator);
+    }
+
+    pub fn addSymbol(objc: *ObjcStubsSection, sym_index: Symbol.Index, macho_file: *MachO) !void {
+        const gpa = macho_file.base.allocator;
+        const index = @as(Index, @intCast(objc.symbols.items.len));
+        const entry = try objc.symbols.addOne(gpa);
+        entry.* = sym_index;
+        const symbol = macho_file.getSymbol(sym_index);
+        try symbol.addExtra(.{ .objc_stubs = index }, macho_file);
+    }
+
+    pub fn getAddress(objc: ObjcStubsSection, index: Index, macho_file: *MachO) u64 {
+        assert(index < objc.symbols.items.len);
+        const header = macho_file.sections.items(.header)[macho_file.objc_stubs_sect_index.?];
+        return header.addr + index * entry_size;
+    }
+
+    pub fn size(objc: ObjcStubsSection, macho_file: *MachO) usize {
+        _ = macho_file;
+        return objc.symbols.items.len * entry_size;
+    }
+
+    pub fn write(objc: ObjcStubsSection, macho_file: *MachO, writer: anytype) !void {
+        for (objc.symbols.items, 0..) |sym_index, idx| {
+            const sym = macho_file.getSymbol(sym_index);
+            const addr = objc.getAddress(@intCast(idx), macho_file);
+            try writer.writeAll(&.{ 0x48, 0x8b, 0x35 });
+            {
+                const target = sym.getObjcSelrefsAddress(macho_file);
+                const source = addr;
+                try writer.writeInt(i32, @intCast(target - source - 3 - 4), .little);
+            }
+            try writer.writeAll(&.{ 0xff, 0x25 });
+            {
+                const target_sym = macho_file.getSymbol(macho_file.objc_msg_send_index.?);
+                const target = target_sym.getGotAddress(macho_file);
+                const source = addr + 7;
+                try writer.writeInt(i32, @intCast(target - source - 2 - 4), .little);
+            }
+        }
+    }
+
+    const FormatCtx = struct {
+        objc: ObjcStubsSection,
+        macho_file: *MachO,
+    };
+
+    pub fn fmt(objc: ObjcStubsSection, macho_file: *MachO) std.fmt.Formatter(format2) {
+        return .{ .data = .{ .objc = objc, .macho_file = macho_file } };
+    }
+
+    pub fn format2(
+        ctx: FormatCtx,
+        comptime unused_fmt_string: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = options;
+        _ = unused_fmt_string;
+        for (ctx.objc.symbols.items, 0..) |entry, i| {
+            const symbol = ctx.macho_file.getSymbol(entry);
+            try writer.print("  {d}@0x{x} => {d}@0x{x} ({s})\n", .{
+                i,
+                symbol.getObjcStubsAddress(ctx.macho_file),
+                entry,
+                symbol.getAddress(.{}, ctx.macho_file),
+                symbol.getName(ctx.macho_file),
+            });
+        }
+    }
+
+    pub const entry_size = 13;
+    pub const Index = u32;
+};
+
 pub const Indsymtab = struct {
     pub inline fn nsyms(ind: Indsymtab, macho_file: *MachO) u32 {
         _ = ind;

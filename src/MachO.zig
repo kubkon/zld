@@ -41,12 +41,14 @@ la_symbol_ptr_sect_index: ?u8 = null,
 tlv_ptr_sect_index: ?u8 = null,
 eh_frame_sect_index: ?u8 = null,
 unwind_info_sect_index: ?u8 = null,
+objc_stubs_sect_index: ?u8 = null,
 
 mh_execute_header_index: ?Symbol.Index = null,
 mh_dylib_header_index: ?Symbol.Index = null,
 dyld_private_index: ?Symbol.Index = null,
 dyld_stub_binder_index: ?Symbol.Index = null,
 dso_handle_index: ?Symbol.Index = null,
+objc_msg_send_index: ?Symbol.Index = null,
 
 entry_index: ?Symbol.Index = null,
 
@@ -58,6 +60,7 @@ indsymtab: Indsymtab = .{},
 got: GotSection = .{},
 stubs: StubsSection = .{},
 stubs_helper: StubsHelperSection = .{},
+objc_stubs: ObjcStubsSection = .{},
 la_symbol_ptr: LaSymbolPtrSection = .{},
 tlv_ptr: TlvPtrSection = .{},
 rebase: RebaseSection = .{},
@@ -134,6 +137,7 @@ pub fn deinit(self: *MachO) void {
     self.strtab.deinit(gpa);
     self.got.deinit(gpa);
     self.stubs.deinit(gpa);
+    self.objc_stubs.deinit(gpa);
     self.tlv_ptr.deinit(gpa);
     self.rebase.deinit(gpa);
     self.bind.deinit(gpa);
@@ -303,12 +307,14 @@ pub fn flush(self: *MachO) !void {
     try self.resolveSyntheticSymbols();
 
     try self.convertTentativeDefinitions();
-    self.markImportsAndExports();
+    try self.createObjcSections();
+    try self.claimUnresolved();
 
     if (self.options.dead_strip) {
         try dead_strip.gcAtoms(self);
     }
 
+    self.markImportsAndExports();
     self.deadStripDylibs();
 
     for (self.dylibs.items, 1..) |index, ord| {
@@ -316,11 +322,9 @@ pub fn flush(self: *MachO) !void {
         dylib.ordinal = @intCast(ord);
     }
 
-    try self.initOutputSections();
-
-    self.claimUnresolved();
     try self.scanRelocs();
 
+    try self.initOutputSections();
     try self.initSyntheticSections();
     try self.sortSections();
     try self.addAtomsToSections();
@@ -555,14 +559,6 @@ fn validatePlatform(self: *MachO, index: File.Index) void {
 fn addUndefinedGlobals(self: *MachO) !void {
     const gpa = self.base.allocator;
 
-    if (!self.options.dylib) {
-        const name = self.options.entry orelse "_main";
-        const off = try self.string_intern.insert(gpa, name);
-        const gop = try self.getOrCreateGlobal(off);
-        self.entry_index = gop.index;
-        try self.undefined_symbols.append(gpa, gop.index);
-    }
-
     try self.undefined_symbols.ensureUnusedCapacity(gpa, self.options.force_undefined_symbols.len);
     for (self.options.force_undefined_symbols) |name| {
         const off = try self.string_intern.insert(gpa, name);
@@ -570,11 +566,23 @@ fn addUndefinedGlobals(self: *MachO) !void {
         self.undefined_symbols.appendAssumeCapacity(gop.index);
     }
 
+    if (!self.options.dylib) {
+        const name = self.options.entry orelse "_main";
+        const off = try self.string_intern.insert(gpa, name);
+        const gop = try self.getOrCreateGlobal(off);
+        self.entry_index = gop.index;
+    }
+
     {
         const off = try self.string_intern.insert(gpa, "dyld_stub_binder");
         const gop = try self.getOrCreateGlobal(off);
         self.dyld_stub_binder_index = gop.index;
-        try self.undefined_symbols.append(gpa, gop.index);
+    }
+
+    {
+        const off = try self.string_intern.insert(gpa, "_objc_msgSend");
+        const gop = try self.getOrCreateGlobal(off);
+        self.objc_msg_send_index = gop.index;
     }
 }
 
@@ -664,6 +672,10 @@ fn parseArchive(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
         try self.objects.append(gpa, index);
         self.validateCpuArch(index);
         self.validatePlatform(index);
+
+        // Finally, we do a post-parse check for -ObjC to see if we need to force load this member
+        // anyhow.
+        object.alive = object.alive or (self.options.force_load_objc and object.hasObjc());
     }
 
     return true;
@@ -800,11 +812,6 @@ fn isHoisted(self: *MachO, install_name: []const u8) bool {
         }
     }
     return false;
-}
-
-fn eatPrefix(path: []const u8, prefix: []const u8) ?[]const u8 {
-    if (mem.startsWith(u8, path, prefix)) return path[prefix.len..];
-    return null;
 }
 
 fn parseDependentDylibs(
@@ -967,9 +974,13 @@ pub fn resolveSymbols(self: *MachO) !void {
 fn markLive(self: *MachO) void {
     for (self.undefined_symbols.items) |index| {
         if (self.getSymbol(index).getFile(self)) |file| {
-            if (file == .object) {
-                file.object.alive = true;
-            }
+            if (file == .object) file.object.alive = true;
+        }
+    }
+    if (self.entry_index) |index| {
+        const sym = self.getSymbol(index);
+        if (sym.getFile(self)) |file| {
+            if (file == .object) file.object.alive = true;
         }
     }
     for (self.objects.items) |index| {
@@ -979,6 +990,19 @@ fn markLive(self: *MachO) void {
 }
 
 fn deadStripDylibs(self: *MachO) void {
+    for (&[_]?Symbol.Index{
+        self.entry_index,
+        self.dyld_stub_binder_index,
+        self.objc_msg_send_index,
+    }) |index| {
+        if (index) |idx| {
+            const sym = self.getSymbol(idx);
+            if (sym.getFile(self)) |file| {
+                if (file == .dylib) file.dylib.referenced = true;
+            }
+        }
+    }
+
     for (self.dylibs.items) |index| {
         self.getFile(index).?.dylib.markReferenced(self);
     }
@@ -1021,6 +1045,19 @@ fn markImportsAndExports(self: *MachO) void {
             if (file == .dylib and !sym.flags.abs) sym.flags.import = true;
         }
     }
+
+    for (&[_]?Symbol.Index{
+        self.entry_index,
+        self.dyld_stub_binder_index,
+        self.objc_msg_send_index,
+    }) |index| {
+        if (index) |idx| {
+            const sym = self.getSymbol(idx);
+            if (sym.getFile(self)) |file| {
+                if (file == .dylib) sym.flags.import = true;
+            }
+        }
+    }
 }
 
 fn initOutputSections(self: *MachO) !void {
@@ -1032,7 +1069,13 @@ fn initOutputSections(self: *MachO) !void {
             atom.out_n_sect = try Atom.initOutputSection(atom.getInputSection(self), self);
         }
     }
-
+    if (self.getInternalObject()) |object| {
+        for (object.atoms.items) |atom_index| {
+            const atom = self.getAtom(atom_index) orelse continue;
+            if (!atom.flags.alive) continue;
+            atom.out_n_sect = try Atom.initOutputSection(atom.getInputSection(self), self);
+        }
+    }
     if (self.data_sect_index == null) {
         self.data_sect_index = try self.addSection("__DATA", "__data", .{});
     }
@@ -1085,9 +1128,74 @@ fn resolveSyntheticSymbols(self: *MachO) !void {
     }
 }
 
-fn claimUnresolved(self: *MachO) void {
+fn createObjcSections(self: *MachO) !void {
+    const gpa = self.base.allocator;
+    var objc_msgsend_syms = std.AutoArrayHashMap(Symbol.Index, void).init(gpa);
+    defer objc_msgsend_syms.deinit();
+
     for (self.objects.items) |index| {
-        self.getFile(index).?.object.claimUnresolved(self);
+        const object = self.getFile(index).?.object;
+
+        for (object.symbols.items, 0..) |sym_index, i| {
+            const nlist_idx = @as(Symbol.Index, @intCast(i));
+            const nlist = object.symtab.items(.nlist)[nlist_idx];
+            if (!nlist.ext()) continue;
+            if (!nlist.undf()) continue;
+
+            const sym = self.getSymbol(sym_index);
+            if (sym.getFile(self) != null) continue;
+            if (mem.startsWith(u8, sym.getName(self), "_objc_msgSend$")) {
+                _ = try objc_msgsend_syms.put(sym_index, {});
+            }
+        }
+    }
+
+    for (objc_msgsend_syms.keys()) |sym_index| {
+        const sym = self.getSymbol(sym_index);
+        sym.value = 0;
+        sym.atom = 0;
+        sym.nlist_idx = 0;
+        sym.file = self.internal_object_index.?;
+        sym.flags = .{};
+        sym.visibility = .hidden;
+        const object = self.getInternalObject().?;
+        const name = eatPrefix(sym.getName(self), "_objc_msgSend$").?;
+        const selrefs_index = try object.addObjcMsgsendSections(name, self);
+        try sym.addExtra(.{ .objc_selrefs = selrefs_index }, self);
+        try object.symbols.append(gpa, sym_index);
+    }
+}
+
+fn claimUnresolved(self: *MachO) error{OutOfMemory}!void {
+    for (self.objects.items) |index| {
+        const object = self.getFile(index).?.object;
+
+        for (object.symbols.items, 0..) |sym_index, i| {
+            const nlist_idx = @as(Symbol.Index, @intCast(i));
+            const nlist = object.symtab.items(.nlist)[nlist_idx];
+            if (!nlist.ext()) continue;
+            if (!nlist.undf()) continue;
+
+            const sym = self.getSymbol(sym_index);
+            if (sym.getFile(self) != null) continue;
+
+            const is_import = switch (self.options.undefined_treatment) {
+                .@"error" => false,
+                .warn, .suppress => nlist.weakRef(),
+                .dynamic_lookup => true,
+            };
+            if (is_import) {
+                sym.value = 0;
+                sym.atom = 0;
+                sym.nlist_idx = 0;
+                sym.file = self.internal_object_index.?;
+                sym.flags.weak = false;
+                sym.flags.weak_ref = nlist.weakRef();
+                sym.flags.import = is_import;
+                sym.visibility = .global;
+                try self.getInternalObject().?.symbols.append(self.base.allocator, sym_index);
+            }
+        }
     }
 }
 
@@ -1096,16 +1204,25 @@ fn scanRelocs(self: *MachO) !void {
         try self.getFile(index).?.object.scanRelocs(self);
     }
 
+    try self.reportUndefs();
+
     if (self.entry_index) |index| {
         const sym = self.getSymbol(index);
-        if (sym.flags.import) sym.flags.stubs = true;
+        if (sym.getFile(self) != null) {
+            if (sym.flags.import) sym.flags.stubs = true;
+        }
     }
 
     if (self.dyld_stub_binder_index) |index| {
-        self.getSymbol(index).flags.got = true;
+        const sym = self.getSymbol(index);
+        if (sym.getFile(self) != null) sym.flags.got = true;
     }
 
-    try self.reportUndefs();
+    if (self.objc_msg_send_index) |index| {
+        const sym = self.getSymbol(index);
+        if (sym.getFile(self) != null)
+            sym.flags.got = true; // TODO is it always needed, or only if we are synthesising fast stubs?
+    }
 
     for (self.symbols.items, 0..) |*symbol, i| {
         const index = @as(Symbol.Index, @intCast(i));
@@ -1120,6 +1237,10 @@ fn scanRelocs(self: *MachO) !void {
         if (symbol.flags.tlv_ptr) {
             log.debug("'{s}' needs TLV pointer", .{symbol.getName(self)});
             try self.tlv_ptr.addSymbol(index, self);
+        }
+        if (symbol.flags.objc_stubs) {
+            log.debug("'{s}' needs OBJC STUBS", .{symbol.getName(self)});
+            try self.objc_stubs.addSymbol(index, self);
         }
     }
 }
@@ -1149,8 +1270,8 @@ fn reportUndefs(self: *MachO) !void {
         var inote: usize = 0;
         while (inote < @min(notes.items.len, max_notes)) : (inote += 1) {
             const atom = self.getAtom(notes.items[inote]).?;
-            const object = atom.getObject(self);
-            try err.addNote("referenced by {}:{s}", .{ object.fmtPath(), atom.getName(self) });
+            const file = atom.getFile(self);
+            try err.addNote("referenced by {}:{s}", .{ file.fmtPath(), atom.getName(self) });
         }
 
         if (notes.items.len > max_notes) {
@@ -1161,18 +1282,37 @@ fn reportUndefs(self: *MachO) !void {
 
     for (self.undefined_symbols.items) |index| {
         const sym = self.getSymbol(index);
-        if (sym.getFile(self)) |_| continue; // If undefined in an object file, will be reported above
-
+        if (sym.getFile(self) != null) continue; // If undefined in an object file, will be reported above
         const err = try addFn(&self.base, 1);
         try err.addMsg("undefined symbol: {s}", .{sym.getName(self)});
-
-        if (self.entry_index) |idx| {
-            if (index == idx) {
-                try err.addNote("implicit entry/start for main executable", .{});
-                continue;
-            }
-        }
         try err.addNote("-u command line option", .{});
+    }
+
+    if (self.entry_index) |index| {
+        const sym = self.getSymbol(index);
+        if (sym.getFile(self) == null) {
+            const err = try addFn(&self.base, 1);
+            try err.addMsg("undefined symbol: {s}", .{sym.getName(self)});
+            try err.addNote("implicit entry/start for main executable", .{});
+        }
+    }
+
+    if (self.dyld_stub_binder_index) |index| {
+        const sym = self.getSymbol(index);
+        if (sym.getFile(self) == null and self.stubs_sect_index != null) {
+            const err = try addFn(&self.base, 1);
+            try err.addMsg("undefined symbol: {s}", .{sym.getName(self)});
+            try err.addNote("implicit -u command line option", .{});
+        }
+    }
+
+    if (self.objc_msg_send_index) |index| {
+        const sym = self.getSymbol(index);
+        if (sym.getFile(self) == null and self.objc_stubs_sect_index != null) {
+            const err = try addFn(&self.base, 1);
+            try err.addMsg("undefined symbol: {s}", .{sym.getName(self)});
+            try err.addNote("implicit -u command line option", .{});
+        }
     }
 }
 
@@ -1206,6 +1346,12 @@ fn initSyntheticSections(self: *MachO) !void {
         });
     }
 
+    if (self.objc_stubs.symbols.items.len > 0) {
+        self.objc_stubs_sect_index = try self.addSection("__TEXT", "__objc_stubs", .{
+            .flags = macho.S_ATTR_PURE_INSTRUCTIONS | macho.S_ATTR_SOME_INSTRUCTIONS,
+        });
+    }
+
     if (self.tlv_ptr.symbols.items.len > 0) {
         self.tlv_ptr_sect_index = try self.addSection("__DATA", "__thread_ptrs", .{
             .flags = macho.S_THREAD_LOCAL_VARIABLE_POINTERS,
@@ -1232,9 +1378,8 @@ fn initSyntheticSections(self: *MachO) !void {
         const sym = self.getSymbol(sym_index);
         const name = sym.getName(self);
 
-        if (mem.startsWith(u8, name, "segment$start$")) {
-            const segname = name["segment$start$".len..]; // TODO check segname is valid
-            if (self.getSegmentByName(segname) == null) {
+        if (eatPrefix(name, "segment$start$")) |segname| {
+            if (self.getSegmentByName(segname) == null) { // TODO check segname is valid
                 const prot = getSegmentProt(segname);
                 _ = try self.segments.append(gpa, .{
                     .cmdsize = @sizeOf(macho.segment_command_64),
@@ -1243,9 +1388,8 @@ fn initSyntheticSections(self: *MachO) !void {
                     .maxprot = prot,
                 });
             }
-        } else if (mem.startsWith(u8, name, "segment$stop$")) {
-            const segname = name["segment$stop$".len..]; // TODO check segname is valid
-            if (self.getSegmentByName(segname) == null) {
+        } else if (eatPrefix(name, "segment$stop$")) |segname| {
+            if (self.getSegmentByName(segname) == null) { // TODO check segname is valid
                 const prot = getSegmentProt(segname);
                 _ = try self.segments.append(gpa, .{
                     .cmdsize = @sizeOf(macho.segment_command_64),
@@ -1254,16 +1398,14 @@ fn initSyntheticSections(self: *MachO) !void {
                     .maxprot = prot,
                 });
             }
-        } else if (mem.startsWith(u8, name, "section$start$")) {
-            const actual_name = name["section$start$".len..];
+        } else if (eatPrefix(name, "section$start$")) |actual_name| {
             const sep = mem.indexOfScalar(u8, actual_name, '$').?; // TODO error rather than a panic
             const segname = actual_name[0..sep]; // TODO check segname is valid
             const sectname = actual_name[sep + 1 ..]; // TODO check sectname is valid
             if (self.getSectionByName(segname, sectname) == null) {
                 _ = try self.addSection(segname, sectname, .{});
             }
-        } else if (mem.startsWith(u8, name, "section$stop$")) {
-            const actual_name = name["section$stop$".len..];
+        } else if (eatPrefix(name, "section$stop$")) |actual_name| {
             const sep = mem.indexOfScalar(u8, actual_name, '$').?; // TODO error rather than a panic
             const segname = actual_name[0..sep]; // TODO check segname is valid
             const sectname = actual_name[sep + 1 ..]; // TODO check sectname is valid
@@ -1360,6 +1502,13 @@ fn sortSections(self: *MachO) !void {
             atom.out_n_sect = backlinks[atom.out_n_sect];
         }
     }
+    if (self.getInternalObject()) |object| {
+        for (object.atoms.items) |atom_index| {
+            const atom = self.getAtom(atom_index) orelse continue;
+            if (!atom.flags.alive) continue;
+            atom.out_n_sect = backlinks[atom.out_n_sect];
+        }
+    }
 
     for (&[_]*?u8{
         &self.data_sect_index,
@@ -1370,6 +1519,7 @@ fn sortSections(self: *MachO) !void {
         &self.tlv_ptr_sect_index,
         &self.eh_frame_sect_index,
         &self.unwind_info_sect_index,
+        &self.objc_stubs_sect_index,
     }) |maybe_index| {
         if (maybe_index.*) |*index| {
             index.* = backlinks[index.*];
@@ -1380,6 +1530,14 @@ fn sortSections(self: *MachO) !void {
 fn addAtomsToSections(self: *MachO) !void {
     for (self.objects.items) |index| {
         for (self.getFile(index).?.object.atoms.items) |atom_index| {
+            const atom = self.getAtom(atom_index) orelse continue;
+            if (!atom.flags.alive) continue;
+            const atoms = &self.sections.items(.atoms)[atom.out_n_sect];
+            try atoms.append(self.base.allocator, atom_index);
+        }
+    }
+    if (self.getInternalObject()) |object| {
+        for (object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index) orelse continue;
             if (!atom.flags.alive) continue;
             const atoms = &self.sections.items(.atoms)[atom.out_n_sect];
@@ -1481,6 +1639,12 @@ fn calcSectionSizes(self: *MachO) !void {
         const header = &self.sections.items(.header)[idx];
         header.size = self.tlv_ptr.size();
         header.@"align" = 3;
+    }
+
+    if (self.objc_stubs_sect_index) |idx| {
+        const header = &self.sections.items(.header)[idx];
+        header.size = self.objc_stubs.size(self);
+        header.@"align" = 1;
     }
 }
 
@@ -1738,6 +1902,16 @@ fn allocateSyntheticSymbols(self: *MachO) void {
             }
         } else unreachable;
     }
+
+    if (self.objc_stubs.symbols.items.len > 0) {
+        const addr = self.sections.items(.header)[self.objc_stubs_sect_index.?].addr;
+
+        for (self.objc_stubs.symbols.items, 0..) |sym_index, idx| {
+            const sym = self.getSymbol(sym_index);
+            sym.value = addr + idx * ObjcStubsSection.entry_size;
+            sym.out_n_sect = self.objc_stubs_sect_index.?;
+        }
+    }
 }
 
 fn initDyldInfoSections(self: *MachO) !void {
@@ -1902,6 +2076,15 @@ fn writeSyntheticSections(self: *MachO) !void {
         var buffer = try std.ArrayList(u8).initCapacity(gpa, header.size);
         defer buffer.deinit();
         try self.tlv_ptr.write(self, buffer.writer());
+        assert(buffer.items.len == header.size);
+        try self.base.file.pwriteAll(buffer.items, header.offset);
+    }
+
+    if (self.objc_stubs_sect_index) |sect_id| {
+        const header = self.sections.items(.header)[sect_id];
+        var buffer = try std.ArrayList(u8).initCapacity(gpa, header.size);
+        defer buffer.deinit();
+        try self.objc_stubs.write(self, buffer.writer());
         assert(buffer.items.len == header.size);
         try self.base.file.pwriteAll(buffer.items, header.offset);
     }
@@ -2523,6 +2706,11 @@ pub fn getUnwindRecord(self: *MachO, index: UnwindInfo.Record.Index) *UnwindInfo
     return &self.unwind_records.items[index];
 }
 
+pub fn eatPrefix(path: []const u8, prefix: []const u8) ?[]const u8 {
+    if (mem.startsWith(u8, path, prefix)) return path[prefix.len..];
+    return null;
+}
+
 pub fn dumpState(self: *MachO) std.fmt.Formatter(fmtDumpState) {
     return .{ .data = self };
 }
@@ -2566,9 +2754,10 @@ fn fmtDumpState(
     }
     if (self.getInternalObject()) |internal| {
         try writer.print("internal({d}) : internal\n", .{internal.index});
-        try writer.print("{}\n", .{internal.fmtSymtab(self)});
+        try writer.print("{}{}\n", .{ internal.fmtAtoms(self), internal.fmtSymtab(self) });
     }
     try writer.print("stubs\n{}\n", .{self.stubs.fmt(self)});
+    try writer.print("objc_stubs\n{}\n", .{self.objc_stubs.fmt(self)});
     try writer.print("got\n{}\n", .{self.got.fmt(self)});
     try writer.print("tlv_ptr\n{}\n", .{self.tlv_ptr.fmt(self)});
     try writer.writeByte('\n');
@@ -2772,6 +2961,7 @@ const InternalObject = @import("MachO/InternalObject.zig");
 const MachO = @This();
 const Md5 = std.crypto.hash.Md5;
 const Object = @import("MachO/Object.zig");
+const ObjcStubsSection = synthetic.ObjcStubsSection;
 pub const Options = @import("MachO/Options.zig");
 const LazyBindSection = synthetic.LazyBindSection;
 const LaSymbolPtrSection = synthetic.LaSymbolPtrSection;

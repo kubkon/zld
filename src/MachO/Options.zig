@@ -53,6 +53,8 @@ const usage =
     \\-no_deduplicate                    Do not run deduplication pass in linker
     \\-no_implicit_dylibs                Do not hoist public dylibs/frameworks into the final image.
     \\-o [path]                          Specify output path for the final artifact
+    \\-ObjC                              Force load all members of static archives that implement an
+    \\                                   Objective-C class or category
     \\-pagezero_size [value]             Size of the __PAGEZERO segment in hexademical notation
     \\-platform_version [platform] [min_version] [sdk_version]
     \\                                   Sets the platform, oldest supported version of that platform and 
@@ -116,6 +118,7 @@ no_deduplicate: bool = false,
 no_implicit_dylibs: bool = false,
 namespace: Namespace = .two_level,
 all_load: bool = false,
+force_load_objc: bool = false,
 
 pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options {
     if (args.len == 0) ctx.fatal(usage, .{cmd});
@@ -297,6 +300,8 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             opts.namespace = .two_level;
         } else if (p.flag1("flat_namespace")) {
             opts.namespace = .flat;
+        } else if (p.flag1("ObjC")) {
+            opts.force_load_objc = true;
         } else {
             try positionals.append(.{ .path = p.arg, .tag = .obj });
         }

@@ -2087,7 +2087,7 @@ fn testStrip(b: *Build, opts: Options) *Step {
 
         const check = exe.check();
         check.checkInHeaders();
-        check.checkExact("symbol table");
+        check.checkExact("name .symtab");
         test_step.dependOn(&check.step);
     }
 
@@ -2098,7 +2098,7 @@ fn testStrip(b: *Build, opts: Options) *Step {
 
         const check = exe.check();
         check.checkInHeaders();
-        check.checkNotPresent("symbol table");
+        check.checkNotPresent("name .symtab");
         test_step.dependOn(&check.step);
     }
 

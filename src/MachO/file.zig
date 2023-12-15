@@ -75,6 +75,13 @@ pub const File = union(enum) {
         };
     }
 
+    pub fn getAtoms(file: File) []const Atom.Index {
+        return switch (file) {
+            .dylib => unreachable,
+            inline else => |x| x.atoms.items,
+        };
+    }
+
     pub fn calcSymtabSize(file: File, macho_file: *MachO) !void {
         return switch (file) {
             inline else => |x| x.calcSymtabSize(macho_file),
@@ -101,6 +108,7 @@ const macho = std.macho;
 const std = @import("std");
 
 const Allocator = std.mem.Allocator;
+const Atom = @import("Atom.zig");
 const InternalObject = @import("InternalObject.zig");
 const MachO = @import("../MachO.zig");
 const Object = @import("Object.zig");
