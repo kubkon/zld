@@ -1144,7 +1144,7 @@ pub fn claimUnresolved(self: Object, macho_file: *MachO) void {
             sym.nlist_idx = nlist_idx;
             sym.file = self.index;
             sym.flags = .{};
-            sym.visibility = .local;
+            sym.visibility = .hidden;
             continue;
         }
 
