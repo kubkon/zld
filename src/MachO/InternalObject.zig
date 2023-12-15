@@ -123,6 +123,10 @@ pub fn calcSymtabSize(self: *InternalObject, macho_file: *MachO) !void {
         } else if (sym.flags.@"export") {
             try sym.addExtra(.{ .symtab = self.output_symtab_ctx.nexports }, macho_file);
             self.output_symtab_ctx.nexports += 1;
+        } else {
+            assert(sym.flags.import);
+            try sym.addExtra(.{ .symtab = self.output_symtab_ctx.nimports }, macho_file);
+            self.output_symtab_ctx.nimports += 1;
         }
         self.output_symtab_ctx.strsize += @as(u32, @intCast(sym.getName(macho_file).len + 1));
     }

@@ -308,6 +308,7 @@ pub fn flush(self: *MachO) !void {
 
     try self.convertTentativeDefinitions();
     try self.createObjcSections();
+    try self.claimUnresolved();
 
     if (self.options.dead_strip) {
         try dead_strip.gcAtoms(self);
@@ -321,7 +322,6 @@ pub fn flush(self: *MachO) !void {
         dylib.ordinal = @intCast(ord);
     }
 
-    self.claimUnresolved();
     try self.scanRelocs();
 
     try self.initOutputSections();
@@ -1166,7 +1166,7 @@ fn createObjcSections(self: *MachO) !void {
     }
 }
 
-fn claimUnresolved(self: *MachO) void {
+fn claimUnresolved(self: *MachO) error{OutOfMemory}!void {
     for (self.objects.items) |index| {
         const object = self.getFile(index).?.object;
 
@@ -1184,15 +1184,17 @@ fn claimUnresolved(self: *MachO) void {
                 .warn, .suppress => nlist.weakRef(),
                 .dynamic_lookup => true,
             };
-
-            sym.value = 0;
-            sym.atom = 0;
-            sym.nlist_idx = nlist_idx;
-            sym.file = object.index;
-            sym.flags.weak = false;
-            sym.flags.weak_ref = nlist.weakRef();
-            sym.flags.import = is_import;
-            sym.visibility = .global;
+            if (is_import) {
+                sym.value = 0;
+                sym.atom = 0;
+                sym.nlist_idx = 0;
+                sym.file = self.internal_object_index.?;
+                sym.flags.weak = false;
+                sym.flags.weak_ref = nlist.weakRef();
+                sym.flags.import = is_import;
+                sym.visibility = .global;
+                try self.getInternalObject().?.symbols.append(self.base.allocator, sym_index);
+            }
         }
     }
 }
