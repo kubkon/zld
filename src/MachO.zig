@@ -313,7 +313,7 @@ pub fn flush(self: *MachO) !void {
         try dead_strip.gcAtoms(self);
     }
 
-    self.markImportsAndExports(); // TODO move it up
+    self.markImportsAndExports();
     self.deadStripDylibs();
 
     for (self.dylibs.items, 1..) |index, ord| {

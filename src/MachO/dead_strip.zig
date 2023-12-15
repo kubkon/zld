@@ -21,7 +21,7 @@ fn collectRoots(roots: *std.ArrayList(*Atom), objects: []const File.Index, macho
             const sym = macho_file.getSymbol(sym_index);
             const file = sym.getFile(macho_file) orelse continue;
             if (file.getIndex() != index) continue;
-            if (sym.flags.no_dead_strip or macho_file.options.dylib and sym.flags.@"export") // TODO
+            if (sym.flags.no_dead_strip or (macho_file.options.dylib and sym.visibility == .global))
                 try markSymbol(sym, roots, macho_file);
         }
 
