@@ -409,13 +409,17 @@ fn renderWarningMessageToWriter(
 pub fn reportErrors(base: *Zld) void {
     var errors = base.getAllErrorsAlloc() catch @panic("OOM");
     defer errors.deinit(base.allocator);
-    errors.renderToStdErr(.{ .ttyconf = std.io.tty.detectConfig(std.io.getStdErr()) });
+    if (errors.errorMessageCount() > 0) {
+        errors.renderToStdErr(.{ .ttyconf = std.io.tty.detectConfig(std.io.getStdErr()) });
+    }
 }
 
 pub fn reportWarnings(base: *Zld) void {
     var warnings = base.getAllWarningsAlloc() catch @panic("OOM");
     defer warnings.deinit(base.allocator);
-    renderWarningToStdErr(warnings);
+    if (warnings.errorMessageCount() > 0) {
+        renderWarningToStdErr(warnings);
+    }
 }
 
 /// Binary search
