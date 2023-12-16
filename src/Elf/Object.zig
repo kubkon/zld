@@ -54,9 +54,10 @@ pub fn parse(self: *Object, elf_file: *Elf) !void {
     if (self.data.len < self.header.?.e_shoff or
         self.data.len < self.header.?.e_shoff + @as(u64, @intCast(self.header.?.e_shnum)) * @sizeOf(elf.Elf64_Shdr))
     {
-        return elf_file.base.fatal("{}: corrupt header: section header table extends past the end of file", .{
+        elf_file.base.fatal("{}: corrupt header: section header table extends past the end of file", .{
             self.fmtPath(),
         });
+        return error.ParseFailed;
     }
 
     const shdrs = @as(
@@ -77,7 +78,8 @@ pub fn parse(self: *Object, elf_file: *Elf) !void {
 
         const symtab = self.getShdrContents(index);
         const nsyms = math.divExact(usize, symtab.len, @sizeOf(elf.Elf64_Sym)) catch {
-            return elf_file.base.fatal("{}: symbol table not evenly divisible", .{self.fmtPath()});
+            elf_file.base.fatal("{}: symbol table not evenly divisible", .{self.fmtPath()});
+            return error.ParseFailed;
         };
         self.symtab = @as([*]align(1) const elf.Elf64_Sym, @ptrCast(symtab.ptr))[0..nsyms];
         self.strtab = self.getShdrContents(@as(u16, @intCast(shdr.sh_link)));
@@ -108,7 +110,7 @@ fn initAtoms(self: *Object, elf_file: *Elf) !void {
             elf.SHT_GROUP => {
                 if (shdr.sh_info >= self.symtab.len) {
                     elf_file.base.fatal("{}: invalid symbol index in sh_info", .{self.fmtPath()});
-                    continue;
+                    return error.ParseFailed;
                 }
                 const group_info_sym = self.symtab[shdr.sh_info];
                 const group_signature = blk: {
@@ -126,7 +128,7 @@ fn initAtoms(self: *Object, elf_file: *Elf) !void {
 
                 if (group_members[0] != 0x1) { // GRP_COMDAT
                     elf_file.base.fatal("{}: unknown SHT_GROUP format", .{self.fmtPath()});
-                    continue;
+                    return error.ParseFailed;
                 }
 
                 const group_signature_off = try elf_file.internString("{s}", .{group_signature});
@@ -355,7 +357,7 @@ fn parseEhFrame(self: *Object, shndx: u16, elf_file: *Elf) !void {
                 self.fmtPath(),
                 fde.offset,
             });
-            continue;
+            return error.ParseFailed;
         };
         fde.cie_index = cie_index;
     }
@@ -425,11 +427,12 @@ pub fn scanRelocs(self: *Object, elf_file: *Elf) !void {
         for (cie.getRelocs(elf_file)) |rel| {
             const sym = self.getSymbol(rel.r_sym(), elf_file);
             if (sym.flags.import) {
-                if (sym.getType(elf_file) != elf.STT_FUNC)
+                if (sym.getType(elf_file) != elf.STT_FUNC) {
                     elf_file.base.fatal("{s}: {s}: CIE referencing external data reference", .{
                         self.fmtPath(),
                         sym.getName(elf_file),
                     });
+                }
                 sym.flags.plt = true;
             }
         }
@@ -484,8 +487,9 @@ pub fn markLive(self: *Object, elf_file: *Elf) void {
     }
 }
 
-pub fn checkDuplicates(self: *Object, elf_file: *Elf) void {
-    const first_global = self.first_global orelse return;
+pub fn checkDuplicates(self: *Object, elf_file: *Elf) bool {
+    const first_global = self.first_global orelse return false;
+    var has_dupes = false;
     for (self.getGlobals(), 0..) |index, i| {
         const sym_idx = @as(Symbol.Index, @intCast(first_global + i));
         const this_sym = self.symtab[sym_idx];
@@ -508,7 +512,9 @@ pub fn checkDuplicates(self: *Object, elf_file: *Elf) void {
             global_file.fmtPath(),
             global.getName(elf_file),
         });
+        has_dupes = true;
     }
+    return has_dupes;
 }
 
 /// We will create dummy shdrs per each resolved common symbols to make it

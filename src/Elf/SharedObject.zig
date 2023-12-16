@@ -53,9 +53,10 @@ pub fn parse(self: *SharedObject, elf_file: *Elf) !void {
     if (self.data.len < self.header.?.e_shoff or
         self.data.len < self.header.?.e_shoff + @as(u64, @intCast(self.header.?.e_shnum)) * @sizeOf(elf.Elf64_Shdr))
     {
-        return elf_file.base.fatal("{s}: corrupt header: section header table extends past the end of file", .{
+        elf_file.base.fatal("{s}: corrupt header: section header table extends past the end of file", .{
             self.path,
         });
+        return error.ParseFailed;
     }
 
     const shdrs = self.getShdrs();

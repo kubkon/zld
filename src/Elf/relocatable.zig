@@ -21,8 +21,6 @@ pub fn flush(elf_file: *Elf) !void {
     try writeSyntheticSections(elf_file);
     try elf_file.writeShdrs();
     try writeHeader(elf_file);
-
-    elf_file.base.reportWarningsAndErrorsAndExit();
 }
 
 fn claimUnresolved(elf_file: *Elf) void {

@@ -93,8 +93,6 @@ has_text_reloc: bool = false,
 num_ifunc_dynrelocs: usize = 0,
 default_sym_version: elf.Elf64_Versym,
 
-file_resolution_error: bool = false,
-
 pub fn openPath(allocator: Allocator, options: Options, thread_pool: *ThreadPool) !*Elf {
     const file = try options.emit.directory.createFile(options.emit.sub_path, .{
         .truncate = true,
@@ -223,7 +221,7 @@ fn resolveFile(
                 if (try getFullPath(arena, search_dir, path, .ar)) |full_path| break :full_path full_path;
             }
             self.base.fatal("library not found '{s}'", .{path});
-            return error.ResolveFail;
+            return error.FileNotFound;
         }
 
         const path = path: {
@@ -234,7 +232,7 @@ fn resolveFile(
                         if (try getFullPath(arena, search_dir, obj.path, .none)) |path| break :path path;
                     }
                     self.base.fatal("file not found '{s}'", .{obj.path});
-                    return error.ResolveFail;
+                    return error.FileNotFound;
                 },
                 else => |e| return e,
             };
@@ -288,18 +286,30 @@ pub fn flush(self: *Elf) !void {
         log.debug("  -L{s}", .{dir});
     }
 
+    var has_parse_error = false;
     for (self.options.positionals) |obj| {
-        try self.parsePositional(arena, obj, search_dirs.items);
+        self.parsePositional(arena, obj, search_dirs.items) catch |err| {
+            has_parse_error = true;
+            switch (err) {
+                error.FileNotFound, error.ParseFailed => {}, // already reported
+                else => |e| {
+                    self.base.fatal("{s}: unexpected error occurred while parsing input file: {s}", .{
+                        obj.path, @errorName(e),
+                    });
+                    return e;
+                },
+            }
+        };
     }
 
-    if (self.file_resolution_error) {
+    if (has_parse_error) {
         const err = try self.base.addErrorWithNotes(search_dirs.items.len);
         try err.addMsg("library search paths", .{});
         for (search_dirs.items) |dir| {
             try err.addNote("  {s}", .{dir});
         }
+        return error.ParseFailed;
     }
-    self.base.reportWarningsAndErrorsAndExit();
 
     // Dedup DSOs
     {
@@ -352,8 +362,7 @@ pub fn flush(self: *Elf) !void {
     }
 
     if (!self.options.allow_multiple_definition) {
-        self.checkDuplicates();
-        self.base.reportWarningsAndErrorsAndExit();
+        try self.checkDuplicates();
     }
 
     try self.initOutputSections();
@@ -400,8 +409,6 @@ pub fn flush(self: *Elf) !void {
     try self.writePhdrs();
     try self.writeShdrs();
     try self.writeHeader();
-
-    self.base.reportWarningsAndErrorsAndExit();
 }
 
 /// We need to sort constructors/destuctors in the following sections:
@@ -1615,13 +1622,7 @@ fn allocateSyntheticSymbols(self: *Elf) void {
 }
 
 fn parsePositional(self: *Elf, arena: Allocator, obj: LinkObject, search_dirs: []const []const u8) anyerror!void {
-    const resolved_obj = self.resolveFile(arena, obj, search_dirs) catch |err| switch (err) {
-        error.ResolveFail => {
-            self.file_resolution_error = true;
-            return;
-        },
-        else => |e| return e,
-    };
+    const resolved_obj = try self.resolveFile(arena, obj, search_dirs);
 
     log.debug("parsing positional argument '{s}'", .{resolved_obj.path});
 
@@ -1674,14 +1675,22 @@ fn parseArchive(self: *Elf, arena: Allocator, obj: LinkObject) !bool {
     defer archive.deinit(gpa);
     try archive.parse(arena, self);
 
+    var has_parse_error = false;
     for (archive.objects.items) |extracted| {
         const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
         self.files.set(index, .{ .object = extracted });
         const object = &self.files.items(.data)[index].object;
         object.index = index;
-        try object.parse(self);
+        object.parse(self) catch |err| switch (err) {
+            error.ParseFailed => {
+                has_parse_error = true;
+                continue;
+            },
+            else => |e| return e,
+        };
         try self.objects.append(gpa, index);
     }
+    if (has_parse_error) return error.ParseFailed;
 
     return true;
 }
@@ -1956,8 +1965,14 @@ fn resolveSyntheticSymbols(self: *Elf) !void {
     internal.resolveSymbols(self);
 }
 
-fn checkDuplicates(self: *Elf) void {
-    for (self.objects.items) |index| self.getFile(index).?.object.checkDuplicates(self);
+fn checkDuplicates(self: *Elf) !void {
+    var has_dupes = false;
+    for (self.objects.items) |index| {
+        if (self.getFile(index).?.object.checkDuplicates(self)) {
+            has_dupes = true;
+        }
+    }
+    if (has_dupes) return error.MultipleSymbolDefinition;
 }
 
 fn claimUnresolved(self: *Elf) void {
@@ -2017,15 +2032,19 @@ fn reportUndefs(self: *Elf) !void {
             try err.addNote("referenced {d} more times", .{remaining});
         }
     }
+    return error.UndefinedSymbols;
 }
 
 fn scanRelocs(self: *Elf) !void {
+    var has_reloc_error = false;
     for (self.objects.items) |index| {
-        try self.getFile(index).?.object.scanRelocs(self);
+        self.getFile(index).?.object.scanRelocs(self) catch |err| switch (err) {
+            error.RelocError => has_reloc_error = true,
+            else => |e| return e,
+        };
     }
-
     try self.reportUndefs();
-    self.base.reportWarningsAndErrorsAndExit();
+    if (has_reloc_error) return error.RelocError;
 
     for (self.symbols.items, 0..) |*symbol, i| {
         const index = @as(u32, @intCast(i));
@@ -2161,7 +2180,6 @@ fn writeAtoms(self: *Elf) !void {
     }
 
     try self.reportUndefs();
-    self.base.reportWarningsAndErrorsAndExit();
 }
 
 fn writeSyntheticSections(self: *Elf) !void {

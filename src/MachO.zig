@@ -287,13 +287,16 @@ pub fn flush(self: *MachO) !void {
             has_parse_error = true;
             switch (err) {
                 error.ParseFailed => {}, // already reported
-                else => |e| self.base.fatal("{s}: unexpected error occurred while parsing input file: {s}", .{
-                    obj.path, @errorName(e),
-                }),
+                else => |e| {
+                    self.base.fatal("{s}: unexpected error occurred while parsing input file: {s}", .{
+                        obj.path, @errorName(e),
+                    });
+                    return e;
+                },
             }
         };
     }
-    if (has_parse_error) return error.LinkFailed;
+    if (has_parse_error) return error.ParseFailed;
 
     for (self.dylibs.items) |index| {
         self.getFile(index).?.dylib.umbrella = index;
@@ -693,7 +696,7 @@ fn parseArchive(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
         // anyhow.
         object.alive = object.alive or (self.options.force_load_objc and object.hasObjc());
     }
-    if (has_parse_error) return error.ParselFailed;
+    if (has_parse_error) return error.ParseFailed;
 
     return true;
 }
@@ -1338,7 +1341,7 @@ fn reportUndefs(self: *MachO) !void {
         }
     }
 
-    if (has_undefs) return error.LinkFailed;
+    if (has_undefs) return error.UndefinedSymbols;
 }
 
 fn initSyntheticSections(self: *MachO) !void {
@@ -2032,7 +2035,7 @@ fn writeAtoms(self: *MachO) !void {
         try self.base.file.pwriteAll(buffer, header.offset);
     }
 
-    if (has_resolve_error) return error.LinkFailed;
+    if (has_resolve_error) return error.ResolveFailed;
 }
 
 fn writeUnwindInfo(self: *MachO) !void {
