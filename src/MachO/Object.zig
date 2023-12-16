@@ -149,8 +149,8 @@ fn initSubsections(self: *Object, nlists: anytype, macho_file: *MachO) !void {
     const slice = self.sections.slice();
     for (slice.items(.header), slice.items(.subsections), 0..) |sect, *subsections, n_sect| {
         if (sect.attrs() & macho.S_ATTR_DEBUG != 0) continue;
-        if (self.eh_frame_sect_index) |index| if (index == n_sect) continue;
-        if (self.compact_unwind_sect_index) |index| if (index == n_sect) continue;
+        if (mem.eql(u8, sect.sectName(), "__eh_frame")) continue;
+        if (mem.eql(u8, sect.sectName(), "__compact_unwind")) continue;
         if (isLiteral(sect)) continue;
 
         const nlist_start = for (nlists, 0..) |nlist, i| {
@@ -221,8 +221,8 @@ fn initSections(self: *Object, nlists: anytype, macho_file: *MachO) !void {
 
     for (slice.items(.header), 0..) |sect, n_sect| {
         if (sect.attrs() & macho.S_ATTR_DEBUG != 0) continue;
-        if (self.eh_frame_sect_index) |index| if (index == n_sect) continue;
-        if (self.compact_unwind_sect_index) |index| if (index == n_sect) continue;
+        if (mem.eql(u8, sect.sectName(), "__eh_frame")) continue;
+        if (mem.eql(u8, sect.sectName(), "__compact_unwind")) continue;
         if (isLiteral(sect)) continue;
 
         const name = try std.fmt.allocPrintZ(gpa, "{s}${s}", .{ sect.segName(), sect.sectName() });
@@ -298,8 +298,8 @@ fn initLiteralSections(self: *Object, macho_file: *MachO) !void {
 
     for (slice.items(.header), 0..) |sect, n_sect| {
         if (sect.attrs() & macho.S_ATTR_DEBUG != 0) continue;
-        if (self.eh_frame_sect_index) |index| if (index == n_sect) continue;
-        if (self.compact_unwind_sect_index) |index| if (index == n_sect) continue;
+        if (mem.eql(u8, sect.sectName(), "__eh_frame")) continue;
+        if (mem.eql(u8, sect.sectName(), "__compact_unwind")) continue;
         if (!isLiteral(sect)) continue;
 
         const name = try std.fmt.allocPrintZ(gpa, "{s}${s}", .{ sect.segName(), sect.sectName() });
@@ -345,7 +345,10 @@ fn findAtomInSection(self: Object, addr: u64, n_sect: u8) ?Atom.Index {
 fn linkNlistToAtom(self: *Object, macho_file: *MachO) !void {
     for (self.symtab.items(.nlist), self.symtab.items(.atom)) |nlist, *atom| {
         if (!nlist.stab() and nlist.sect()) {
-            // if (sect.attrs() & macho.S_ATTR_DEBUG != 0) continue;
+            const sect = self.sections.items(.header)[nlist.n_sect - 1];
+            if (sect.attrs() & macho.S_ATTR_DEBUG != 0) continue;
+            if (mem.eql(u8, sect.sectName(), "__eh_frame")) continue;
+            if (mem.eql(u8, sect.sectName(), "__compact_unwind")) continue;
             if (self.findAtomInSection(nlist.n_value, nlist.n_sect - 1)) |atom_index| {
                 atom.* = atom_index;
             } else {
@@ -417,6 +420,8 @@ fn initRelocs(self: *Object, macho_file: *MachO) !void {
 
     for (slice.items(.header), slice.items(.relocs), 0..) |sect, *out, n_sect| {
         if (sect.nreloc == 0) continue;
+        if (sect.attrs() & macho.S_ATTR_DEBUG != 0 and
+            !mem.eql(u8, sect.sectName(), "__compact_unwind")) continue;
 
         const relocs = @as([*]align(1) const macho.relocation_info, @ptrCast(self.data.ptr + sect.reloff))[0..sect.nreloc];
         const code = self.getSectionData(@intCast(n_sect));
