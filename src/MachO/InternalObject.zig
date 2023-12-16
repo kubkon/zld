@@ -99,10 +99,10 @@ fn addObjcSelrefsSection(
         .offset = 0,
         .target = methname_atom_index,
         .addend = 0,
+        .type = .unsigned,
         .meta = .{
             .pcrel = false,
             .length = 3,
-            .type = @intFromEnum(macho.reloc_type_x86_64.X86_64_RELOC_UNSIGNED),
             .symbolnum = 0, // Only used when synthesising unwind records so can be anything
             .has_subtractor = false,
         },

@@ -416,6 +416,7 @@ fn sortAtoms(self: *Object, macho_file: *MachO) !void {
 
 fn initRelocs(self: *Object, macho_file: *MachO) !void {
     const gpa = macho_file.base.allocator;
+    const cpu_arch = macho_file.options.cpu_arch.?;
     const slice = self.sections.slice();
 
     for (slice.items(.header), slice.items(.relocs), 0..) |sect, *out, n_sect| {
@@ -430,23 +431,35 @@ fn initRelocs(self: *Object, macho_file: *MachO) !void {
 
         var i: usize = 0;
         while (i < relocs.len) : (i += 1) {
-            const rel = relocs[i];
-            const rel_type: macho.reloc_type_x86_64 = @enumFromInt(rel.r_type);
-            const rel_offset = @as(u32, @intCast(rel.r_address));
+            var rel = relocs[i];
+            var addend: i64 = 0;
 
-            var addend: i64 = switch (rel.r_length) {
-                0 => code[rel_offset],
-                1 => mem.readInt(i16, code[rel_offset..][0..2], .little),
-                2 => mem.readInt(i32, code[rel_offset..][0..4], .little),
-                3 => mem.readInt(i64, code[rel_offset..][0..8], .little),
-            };
-            addend += switch (rel_type) {
-                .X86_64_RELOC_SIGNED_1 => 1,
-                .X86_64_RELOC_SIGNED_2 => 2,
-                .X86_64_RELOC_SIGNED_4 => 4,
-                else => 0,
-            };
+            switch (cpu_arch) {
+                .aarch64 => if (@as(macho.reloc_type_arm64, @enumFromInt(rel.r_type)) == .ARM64_RELOC_ADDEND) {
+                    // TODO validate it is followed by either page or pageoff variety
+                    addend = rel.r_address;
+                    i += 1;
+                    rel = relocs[i];
+                },
+                .x86_64 => {
+                    const rel_offset = @as(u32, @intCast(rel.r_address));
+                    addend = switch (rel.r_length) {
+                        0 => code[rel_offset],
+                        1 => mem.readInt(i16, code[rel_offset..][0..2], .little),
+                        2 => mem.readInt(i32, code[rel_offset..][0..4], .little),
+                        3 => mem.readInt(i64, code[rel_offset..][0..8], .little),
+                    };
+                    addend += switch (@as(macho.reloc_type_x86_64, @enumFromInt(rel.r_type))) {
+                        .X86_64_RELOC_SIGNED_1 => 1,
+                        .X86_64_RELOC_SIGNED_2 => 2,
+                        .X86_64_RELOC_SIGNED_4 => 4,
+                        else => 0,
+                    };
+                },
+                else => unreachable,
+            }
 
+            const rel_type = Relocation.Type.fromInt(rel.r_type, cpu_arch);
             const target = if (rel.r_extern == 0) blk: {
                 const nsect = rel.r_symbolnum - 1;
                 const taddr: i64 = if (rel.r_pcrel == 1)
@@ -463,22 +476,23 @@ fn initRelocs(self: *Object, macho_file: *MachO) !void {
                 break :blk target;
             } else self.symbols.items[rel.r_symbolnum];
 
-            const has_subtractor = if (i > 0)
-                @as(macho.reloc_type_x86_64, @enumFromInt(relocs[i - 1].r_type)) == .X86_64_RELOC_SUBTRACTOR
-            else
-                false;
+            const has_subtractor = if (i > 0) switch (cpu_arch) {
+                .x86_64 => @as(macho.reloc_type_x86_64, @enumFromInt(relocs[i - 1].r_type)) == .X86_64_RELOC_SUBTRACTOR,
+                .aarch64 => @as(macho.reloc_type_arm64, @enumFromInt(relocs[i - 1].r_type)) == .ARM64_RELOC_SUBTRACTOR,
+                else => unreachable,
+            } else false;
 
             out.appendAssumeCapacity(.{
                 .tag = if (rel.r_extern == 1) .@"extern" else .local,
-                .offset = rel_offset,
+                .offset = @as(u32, @intCast(rel.r_address)),
                 .target = target,
                 .addend = addend,
+                .type = rel_type,
                 .meta = .{
                     .pcrel = rel.r_pcrel == 1,
-                    .length = rel.r_length,
-                    .type = rel.r_type,
-                    .symbolnum = rel.r_symbolnum,
                     .has_subtractor = has_subtractor,
+                    .length = rel.r_length,
+                    .symbolnum = rel.r_symbolnum,
                 },
             });
         }
@@ -546,9 +560,8 @@ fn initEhFrameRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
 
     // Parse and attach personality pointers to CIEs if any
     for (relocs.items) |rel| {
-        const rel_type: macho.reloc_type_x86_64 = @enumFromInt(rel.meta.type);
-        switch (rel_type) {
-            .X86_64_RELOC_GOT => {
+        switch (rel.type) {
+            .got => {
                 assert(rel.meta.length == 2 and rel.tag == .@"extern"); // TODO error
                 const cie = for (self.cies.items) |*cie| {
                     if (cie.offset <= rel.offset and rel.offset < cie.offset + cie.getSize()) break cie;
@@ -585,8 +598,7 @@ fn initUnwindRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
         out.enc = .{ .enc = rec.compactUnwindEncoding };
 
         for (relocs[reloc_start..reloc_idx]) |rel| {
-            const rel_type: macho.reloc_type_x86_64 = @enumFromInt(rel.meta.type);
-            assert(rel_type == .X86_64_RELOC_UNSIGNED and rel.meta.length == 3); // TODO error
+            assert(rel.type == .unsigned and rel.meta.length == 3); // TODO error
             const offset = rel.offset - rec_start;
             switch (offset) {
                 0 => switch (rel.tag) { // target symbol
