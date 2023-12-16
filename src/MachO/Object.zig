@@ -348,9 +348,12 @@ fn linkNlistToAtom(self: *Object, macho_file: *MachO) !void {
             // if (sect.attrs() & macho.S_ATTR_DEBUG != 0) continue;
             if (self.findAtomInSection(nlist.n_value, nlist.n_sect - 1)) |atom_index| {
                 atom.* = atom_index;
-            } else return macho_file.base.fatalFatal("{}: symbol {s} not attached to any (sub)section", .{
-                self.fmtPath(), self.getString(nlist.n_strx),
-            });
+            } else {
+                macho_file.base.fatal("{}: symbol {s} not attached to any (sub)section", .{
+                    self.fmtPath(), self.getString(nlist.n_strx),
+                });
+                return error.ParseFailed;
+            }
         }
     }
 }
@@ -445,10 +448,12 @@ fn initRelocs(self: *Object, macho_file: *MachO) !void {
                     @as(i64, @intCast(sect.addr)) + rel.r_address + addend + 4
                 else
                     addend;
-                const target = self.findAtomInSection(@intCast(taddr), @intCast(nsect)) orelse
-                    return macho_file.base.fatalFatal("{}: {s},{s}: 0x{x}: bad relocation", .{
-                    self.fmtPath(), sect.segName(), sect.sectName(), rel.r_address,
-                });
+                const target = self.findAtomInSection(@intCast(taddr), @intCast(nsect)) orelse {
+                    macho_file.base.fatal("{}: {s},{s}: 0x{x}: bad relocation", .{
+                        self.fmtPath(), sect.segName(), sect.sectName(), rel.r_address,
+                    });
+                    return error.ParseFailed;
+                };
                 addend = taddr - @as(i64, @intCast(macho_file.getAtom(target).?.getInputSection(macho_file).addr));
                 break :blk target;
             } else self.symbols.items[rel.r_symbolnum];
@@ -588,9 +593,12 @@ fn initUnwindRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
                         out.atom = atom_index;
                         const atom = out.getAtom(macho_file);
                         out.atom_offset = @intCast(rec.rangeStart - atom.getInputAddress(macho_file));
-                    } else return macho_file.base.fatalFatal("{}: {s},{s}: 0x{x}: bad relocation", .{
-                        self.fmtPath(), header.segName(), header.sectName(), rel.offset,
-                    }),
+                    } else {
+                        macho_file.base.fatal("{}: {s},{s}: 0x{x}: bad relocation", .{
+                            self.fmtPath(), header.segName(), header.sectName(), rel.offset,
+                        });
+                        return error.ParseFailed;
+                    },
                 },
                 16 => { // personality function
                     assert(rel.tag == .@"extern"); // TODO error
@@ -605,9 +613,12 @@ fn initUnwindRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
                         out.lsda = atom_index;
                         const atom = out.getLsdaAtom(macho_file).?;
                         out.lsda_offset = @intCast(rec.lsda - atom.getInputAddress(macho_file));
-                    } else return macho_file.base.fatalFatal("{}: {s},{s}: 0x{x}: bad relocation", .{
-                        self.fmtPath(), header.segName(), header.sectName(), rel.offset,
-                    }),
+                    } else {
+                        macho_file.base.fatal("{}: {s},{s}: 0x{x}: bad relocation", .{
+                            self.fmtPath(), header.segName(), header.sectName(), rel.offset,
+                        });
+                        return error.ParseFailed;
+                    },
                 },
                 else => {},
             }

@@ -105,6 +105,16 @@ pub fn main() !void {
     defer thread_pool.deinit();
 
     const zld = try Zld.openPath(gpa, tag, opts, &thread_pool);
-    defer zld.deinit();
-    try zld.flush();
+    zld.flush() catch |err| switch (err) {
+        error.LinkFailed => {
+            zld.reportWarnings();
+            zld.reportErrors();
+            std.process.exit(1);
+        },
+        else => |e| {
+            fatal("unexpected linker error: {s}", .{@errorName(e)});
+            return e;
+        },
+    };
+    zld.reportWarnings();
 }

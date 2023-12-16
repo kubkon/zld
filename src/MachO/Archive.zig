@@ -78,11 +78,10 @@ pub fn parse(self: *Archive, arena: Allocator, macho_file: *MachO) !void {
         const hdr = try reader.readStruct(ar_hdr);
 
         if (!mem.eql(u8, &hdr.ar_fmag, ARFMAG)) {
-            // TODO convert into a proper error
-            log.debug("{s}: invalid header delimiter: expected '{s}', found '{s}'", .{
+            macho_file.base.fatal("{s}: invalid header delimiter: expected '{s}', found '{s}'", .{
                 self.path, std.fmt.fmtSliceEscapeLower(ARFMAG), std.fmt.fmtSliceEscapeLower(&hdr.ar_fmag),
             });
-            return;
+            return error.ParseFailed;
         }
 
         var size = try hdr.size();

@@ -249,20 +249,12 @@ pub fn deinit(base: *Zld) void {
 }
 
 pub fn flush(base: *Zld) !void {
-    const res = switch (base.tag) {
-        .elf => @fieldParentPtr(Elf, "base", base).flush(),
-        .macho => @fieldParentPtr(MachO, "base", base).flush(),
-        .coff => @fieldParentPtr(Coff, "base", base).flush(),
-        .wasm => @fieldParentPtr(Wasm, "base", base).flush(),
-    };
-    _ = res catch |err| switch (err) {
-        error.Fatal => {
-            base.reportErrors();
-            base.deinit();
-            process.exit(1);
-        },
-        else => |e| return e,
-    };
+    switch (base.tag) {
+        .elf => try @fieldParentPtr(Elf, "base", base).flush(),
+        .macho => try @fieldParentPtr(MachO, "base", base).flush(),
+        .coff => try @fieldParentPtr(Coff, "base", base).flush(),
+        .wasm => try @fieldParentPtr(Wasm, "base", base).flush(),
+    }
 }
 
 pub fn warn(base: *Zld, comptime format: []const u8, args: anytype) void {
@@ -275,11 +267,6 @@ pub fn fatal(base: *Zld, comptime format: []const u8, args: anytype) void {
     base.errors.ensureUnusedCapacity(base.allocator, 1) catch return;
     const msg = std.fmt.allocPrint(base.allocator, format, args) catch return;
     base.errors.appendAssumeCapacity(.{ .msg = msg });
-}
-
-pub fn fatalFatal(base: *Zld, comptime format: []const u8, args: anytype) error{Fatal} {
-    base.fatal("fatal linker error: " ++ format, args);
-    return error.Fatal;
 }
 
 pub const ErrorWithNotes = struct {
@@ -434,7 +421,7 @@ pub fn reportWarningsAndErrors(base: *Zld) !void {
     }
 }
 
-fn reportErrors(base: *Zld) void {
+pub fn reportErrors(base: *Zld) void {
     var errors = base.getAllErrorsAlloc() catch @panic("OOM");
     defer errors.deinit(base.allocator);
     if (errors.errorMessageCount() > 0) {
@@ -442,7 +429,7 @@ fn reportErrors(base: *Zld) void {
     }
 }
 
-fn reportWarnings(base: *Zld) void {
+pub fn reportWarnings(base: *Zld) void {
     var warnings = base.getAllWarningsAlloc() catch @panic("OOM");
     defer warnings.deinit(base.allocator);
     if (warnings.errorMessageCount() > 0) {

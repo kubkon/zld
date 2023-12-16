@@ -281,9 +281,20 @@ pub fn flush(self: *MachO) !void {
         }
     }
 
+    var has_parse_error = false;
     for (resolved_objects.items) |obj| {
-        try self.parsePositional(arena, obj);
+        self.parsePositional(arena, obj) catch |err| {
+            has_parse_error = true;
+            switch (err) {
+                error.ParseFailed => {}, // already reported
+                else => |e| self.base.fatal("{s}: unexpected error occurred while parsing input file: {s}", .{
+                    obj.path, @errorName(e),
+                }),
+            }
+        };
     }
+    if (has_parse_error) return error.LinkFailed;
+
     for (self.dylibs.items) |index| {
         self.getFile(index).?.dylib.umbrella = index;
     }
@@ -661,6 +672,7 @@ fn parseArchive(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
     defer archive.deinit(gpa);
     try archive.parse(arena, self);
 
+    var has_parse_error = false;
     for (archive.objects.items) |extracted| {
         const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
         self.files.set(index, .{ .object = extracted });
@@ -668,7 +680,13 @@ fn parseArchive(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
         object.index = index;
         object.alive = obj.must_link or obj.needed or self.options.all_load;
         object.hidden = obj.hidden;
-        try object.parse(self);
+        object.parse(self) catch |err| switch (err) {
+            error.ParseFailed => {
+                has_parse_error = true;
+                continue;
+            },
+            else => |e| return e,
+        };
         try self.objects.append(gpa, index);
         self.validateCpuArch(index);
         self.validatePlatform(index);
@@ -677,6 +695,7 @@ fn parseArchive(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
         // anyhow.
         object.alive = object.alive or (self.options.force_load_objc and object.hasObjc());
     }
+    if (has_parse_error) return error.ParselFailed;
 
     return true;
 }
@@ -886,11 +905,11 @@ fn parseDependentDylibs(
                         break :full_path full_path;
                     }
                 } else if (eatPrefix(id.name, "@loader_path/")) |_| {
-                    self.base.fatal("fatal linker error: {s}: TODO handle install_name '{s}'", .{
+                    return self.base.fatal("{s}: TODO handle install_name '{s}'", .{
                         self.getFile(dylib_index).?.dylib.path, id.name,
                     });
                 } else if (eatPrefix(id.name, "@executable_path/")) |_| {
-                    self.base.fatal("fatal linker error: {s}: TODO handle install_name '{s}'", .{
+                    return self.base.fatal("{s}: TODO handle install_name '{s}'", .{
                         self.getFile(dylib_index).?.dylib.path, id.name,
                     });
                 }
@@ -1258,6 +1277,7 @@ fn reportUndefs(self: *MachO) !void {
 
     const max_notes = 4;
 
+    var has_undefs = false;
     var it = self.undefs.iterator();
     while (it.next()) |entry| {
         const undef_sym = self.getSymbol(entry.key_ptr.*);
@@ -1266,6 +1286,7 @@ fn reportUndefs(self: *MachO) !void {
 
         const err = try addFn(&self.base, nnotes);
         try err.addMsg("undefined symbol: {s}", .{undef_sym.getName(self)});
+        has_undefs = true;
 
         var inote: usize = 0;
         while (inote < @min(notes.items.len, max_notes)) : (inote += 1) {
@@ -1283,6 +1304,7 @@ fn reportUndefs(self: *MachO) !void {
     for (self.undefined_symbols.items) |index| {
         const sym = self.getSymbol(index);
         if (sym.getFile(self) != null) continue; // If undefined in an object file, will be reported above
+        has_undefs = true;
         const err = try addFn(&self.base, 1);
         try err.addMsg("undefined symbol: {s}", .{sym.getName(self)});
         try err.addNote("-u command line option", .{});
@@ -1291,6 +1313,7 @@ fn reportUndefs(self: *MachO) !void {
     if (self.entry_index) |index| {
         const sym = self.getSymbol(index);
         if (sym.getFile(self) == null) {
+            has_undefs = true;
             const err = try addFn(&self.base, 1);
             try err.addMsg("undefined symbol: {s}", .{sym.getName(self)});
             try err.addNote("implicit entry/start for main executable", .{});
@@ -1300,6 +1323,7 @@ fn reportUndefs(self: *MachO) !void {
     if (self.dyld_stub_binder_index) |index| {
         const sym = self.getSymbol(index);
         if (sym.getFile(self) == null and self.stubs_sect_index != null) {
+            has_undefs = true;
             const err = try addFn(&self.base, 1);
             try err.addMsg("undefined symbol: {s}", .{sym.getName(self)});
             try err.addNote("implicit -u command line option", .{});
@@ -1309,11 +1333,14 @@ fn reportUndefs(self: *MachO) !void {
     if (self.objc_msg_send_index) |index| {
         const sym = self.getSymbol(index);
         if (sym.getFile(self) == null and self.objc_stubs_sect_index != null) {
+            has_undefs = true;
             const err = try addFn(&self.base, 1);
             try err.addMsg("undefined symbol: {s}", .{sym.getName(self)});
             try err.addNote("implicit -u command line option", .{});
         }
     }
+
+    if (has_undefs) return error.LinkFailed;
 }
 
 fn initSyntheticSections(self: *MachO) !void {
