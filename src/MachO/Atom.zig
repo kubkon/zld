@@ -296,7 +296,7 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
                         file.fmtPath(), name, rel.offset,
                     },
                 );
-                continue;
+                return error.ResolveFailed;
             }
             const next_rel_type: macho.reloc_type_x86_64 = @enumFromInt(relocs[i + 1].meta.type);
             if (next_rel_type != .X86_64_RELOC_UNSIGNED) {
@@ -304,35 +304,38 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
                     "{}: {s}: 0x{x}: invalid relocation: invalid target relocation for X86_64_RELOC_SUBTRACTOR: {s}",
                     .{ file.fmtPath(), name, rel.offset, @tagName(next_rel_type) },
                 );
-                continue;
+                return error.ResolveFailed;
             }
         }
 
         try stream.seekTo(rel_offset);
-        self.resolveRelocInner(rel, subtractor, code, macho_file, stream.writer()) catch |err| switch (err) {
-            error.UnexpectedPcrel => macho_file.base.fatal(
-                "{}: {s}: 0x{x}: invalid relocation: invalid PCrel option in {s}",
-                .{ file.fmtPath(), name, rel.offset, @tagName(rel_type) },
-            ),
-            error.UnexpectedSize => macho_file.base.fatal(
-                "{}: {s}: 0x{x}: invalid relocation: invalid size {d} in {s}",
-                .{
-                    file.fmtPath(),
-                    name,
-                    rel.offset,
-                    @as(u8, 1) << rel.meta.length,
-                    @tagName(rel_type),
-                },
-            ),
-            error.NonExternTarget => macho_file.base.fatal(
-                "{}: {s}: 0x{x}: invalid relocation: non-extern target in {s}",
-                .{ file.fmtPath(), name, rel.offset, @tagName(rel_type) },
-            ),
-            error.RelaxFail => macho_file.base.fatal(
-                "{}: {s}: 0x{x}: failed to relax relocation: in {s}",
-                .{ file.fmtPath(), name, rel.offset, @tagName(rel_type) },
-            ),
-            else => |e| return e,
+        self.resolveRelocInner(rel, subtractor, code, macho_file, stream.writer()) catch |err| {
+            switch (err) {
+                error.UnexpectedPcrel => macho_file.base.fatal(
+                    "{}: {s}: 0x{x}: invalid relocation: invalid PCrel option in {s}",
+                    .{ file.fmtPath(), name, rel.offset, @tagName(rel_type) },
+                ),
+                error.UnexpectedSize => macho_file.base.fatal(
+                    "{}: {s}: 0x{x}: invalid relocation: invalid size {d} in {s}",
+                    .{
+                        file.fmtPath(),
+                        name,
+                        rel.offset,
+                        @as(u8, 1) << rel.meta.length,
+                        @tagName(rel_type),
+                    },
+                ),
+                error.NonExternTarget => macho_file.base.fatal(
+                    "{}: {s}: 0x{x}: invalid relocation: non-extern target in {s}",
+                    .{ file.fmtPath(), name, rel.offset, @tagName(rel_type) },
+                ),
+                error.RelaxFail => macho_file.base.fatal(
+                    "{}: {s}: 0x{x}: failed to relax relocation: in {s}",
+                    .{ file.fmtPath(), name, rel.offset, @tagName(rel_type) },
+                ),
+                else => |e| return e,
+            }
+            return error.ResolveFailed;
         };
     }
 

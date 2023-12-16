@@ -56,13 +56,13 @@ pub const std_options = struct {
     }
 };
 
-fn warn(comptime format: []const u8, args: anytype) void {
+fn print(comptime format: []const u8, args: anytype) void {
     const msg = std.fmt.allocPrint(gpa, format ++ "\n", args) catch return;
     std.io.getStdErr().writeAll(msg) catch {};
 }
 
 fn fatal(comptime format: []const u8, args: anytype) noreturn {
-    warn(format, args);
+    print(format, args);
     std.process.exit(1);
 }
 
@@ -95,7 +95,7 @@ pub fn main() !void {
     };
 
     const opts = try Zld.Options.parse(arena, tag, all_args[1..], .{
-        .warn = warn,
+        .print = print,
         .fatal = fatal,
         .log_scopes = &log_scopes,
     });
@@ -105,6 +105,21 @@ pub fn main() !void {
     defer thread_pool.deinit();
 
     const zld = try Zld.openPath(gpa, tag, opts, &thread_pool);
-    defer zld.deinit();
-    try zld.flush();
+    zld.flush() catch |err| switch (err) {
+        error.ParseFailed,
+        error.MultipleSymbolDefinition,
+        error.UndefinedSymbols,
+        error.RelocError,
+        error.ResolveFailed,
+        => {
+            zld.reportWarnings();
+            zld.reportErrors();
+            std.process.exit(1);
+        },
+        else => |e| {
+            print("unexpected linker error: {s}", .{@errorName(e)});
+            return e;
+        },
+    };
+    zld.reportWarnings();
 }

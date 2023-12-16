@@ -31,10 +31,12 @@ pub fn parse(self: *Archive, arena: Allocator, elf_file: *Elf) !void {
         const hdr = reader.readStruct(elf.ar_hdr) catch break;
 
         if (!mem.eql(u8, &hdr.ar_fmag, elf.ARFMAG)) {
-            return elf_file.base.fatal(
-                "{s}: invalid header delimiter: expected '{s}', found '{s}'",
-                .{ self.path, std.fmt.fmtSliceEscapeLower(elf.ARFMAG), std.fmt.fmtSliceEscapeLower(&hdr.ar_fmag) },
-            );
+            elf_file.base.fatal("{s}: invalid header delimiter: expected '{s}', found '{s}'", .{
+                self.path,
+                std.fmt.fmtSliceEscapeLower(elf.ARFMAG),
+                std.fmt.fmtSliceEscapeLower(&hdr.ar_fmag),
+            });
+            return error.ParseFailed;
         }
 
         const size = try hdr.size();

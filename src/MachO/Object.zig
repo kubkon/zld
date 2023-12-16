@@ -114,7 +114,7 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
     }
 
     try self.initLiteralSections(macho_file);
-    self.linkNlistToAtom();
+    try self.linkNlistToAtom(macho_file);
 
     try self.sortAtoms(macho_file);
     try self.initSymbols(macho_file);
@@ -149,8 +149,8 @@ fn initSubsections(self: *Object, nlists: anytype, macho_file: *MachO) !void {
     const slice = self.sections.slice();
     for (slice.items(.header), slice.items(.subsections), 0..) |sect, *subsections, n_sect| {
         if (sect.attrs() & macho.S_ATTR_DEBUG != 0) continue;
-        if (self.eh_frame_sect_index) |index| if (index == n_sect) continue;
-        if (self.compact_unwind_sect_index) |index| if (index == n_sect) continue;
+        if (mem.eql(u8, sect.sectName(), "__eh_frame")) continue;
+        if (mem.eql(u8, sect.sectName(), "__compact_unwind")) continue;
         if (isLiteral(sect)) continue;
 
         const nlist_start = for (nlists, 0..) |nlist, i| {
@@ -221,8 +221,8 @@ fn initSections(self: *Object, nlists: anytype, macho_file: *MachO) !void {
 
     for (slice.items(.header), 0..) |sect, n_sect| {
         if (sect.attrs() & macho.S_ATTR_DEBUG != 0) continue;
-        if (self.eh_frame_sect_index) |index| if (index == n_sect) continue;
-        if (self.compact_unwind_sect_index) |index| if (index == n_sect) continue;
+        if (mem.eql(u8, sect.sectName(), "__eh_frame")) continue;
+        if (mem.eql(u8, sect.sectName(), "__compact_unwind")) continue;
         if (isLiteral(sect)) continue;
 
         const name = try std.fmt.allocPrintZ(gpa, "{s}${s}", .{ sect.segName(), sect.sectName() });
@@ -298,8 +298,8 @@ fn initLiteralSections(self: *Object, macho_file: *MachO) !void {
 
     for (slice.items(.header), 0..) |sect, n_sect| {
         if (sect.attrs() & macho.S_ATTR_DEBUG != 0) continue;
-        if (self.eh_frame_sect_index) |index| if (index == n_sect) continue;
-        if (self.compact_unwind_sect_index) |index| if (index == n_sect) continue;
+        if (mem.eql(u8, sect.sectName(), "__eh_frame")) continue;
+        if (mem.eql(u8, sect.sectName(), "__compact_unwind")) continue;
         if (!isLiteral(sect)) continue;
 
         const name = try std.fmt.allocPrintZ(gpa, "{s}${s}", .{ sect.segName(), sect.sectName() });
@@ -316,16 +316,16 @@ fn initLiteralSections(self: *Object, macho_file: *MachO) !void {
     }
 }
 
-pub fn findAtom(self: Object, addr: u64) Atom.Index {
+pub fn findAtom(self: Object, addr: u64) ?Atom.Index {
     for (self.sections.items(.header), 0..) |sect, n_sect| {
         if (sect.addr <= addr and addr < sect.addr + sect.size) {
             return self.findAtomInSection(addr, @intCast(n_sect));
         }
     }
-    unreachable; // TODO convert into an error
+    return null;
 }
 
-fn findAtomInSection(self: Object, addr: u64, n_sect: u8) Atom.Index {
+fn findAtomInSection(self: Object, addr: u64, n_sect: u8) ?Atom.Index {
     const slice = self.sections.slice();
     const sect = slice.items(.header)[n_sect];
     const subsections = slice.items(.subsections)[n_sect];
@@ -339,13 +339,24 @@ fn findAtomInSection(self: Object, addr: u64, n_sect: u8) Atom.Index {
             sect.size - sub.off;
         if (sub_addr <= addr and addr < sub_addr + sub_size) return sub.atom;
     }
-    return subsections.items[subsections.items.len - 1].atom;
+    return null;
 }
 
-fn linkNlistToAtom(self: *Object) void {
+fn linkNlistToAtom(self: *Object, macho_file: *MachO) !void {
     for (self.symtab.items(.nlist), self.symtab.items(.atom)) |nlist, *atom| {
         if (!nlist.stab() and nlist.sect()) {
-            atom.* = self.findAtomInSection(nlist.n_value, nlist.n_sect - 1);
+            const sect = self.sections.items(.header)[nlist.n_sect - 1];
+            if (sect.attrs() & macho.S_ATTR_DEBUG != 0) continue;
+            if (mem.eql(u8, sect.sectName(), "__eh_frame")) continue;
+            if (mem.eql(u8, sect.sectName(), "__compact_unwind")) continue;
+            if (self.findAtomInSection(nlist.n_value, nlist.n_sect - 1)) |atom_index| {
+                atom.* = atom_index;
+            } else {
+                macho_file.base.fatal("{}: symbol {s} not attached to any (sub)section", .{
+                    self.fmtPath(), self.getString(nlist.n_strx),
+                });
+                return error.ParseFailed;
+            }
         }
     }
 }
@@ -365,25 +376,25 @@ fn initSymbols(self: *Object, macho_file: *MachO) !void {
             continue;
         }
 
-        const atom = macho_file.getAtom(atom_index).?;
         const index = try macho_file.addSymbol();
         self.symbols.appendAssumeCapacity(index);
         const symbol = macho_file.getSymbol(index);
         const name = self.getString(nlist.n_strx);
-        const abs = nlist.abs();
-        const value = if (abs)
-            nlist.n_value
-        else
-            nlist.n_value - atom.getInputAddress(macho_file);
         symbol.* = .{
-            .value = value,
+            .value = nlist.n_value,
             .name = try macho_file.string_intern.insert(gpa, name),
             .nlist_idx = @intCast(i),
-            .atom = if (abs) 0 else atom_index,
+            .atom = 0,
             .file = self.index,
         };
 
-        symbol.flags.abs = abs;
+        if (macho_file.getAtom(atom_index)) |atom| {
+            assert(!nlist.abs());
+            symbol.value -= atom.getInputAddress(macho_file);
+            symbol.atom = atom_index;
+        }
+
+        symbol.flags.abs = nlist.abs();
         symbol.flags.no_dead_strip = symbol.flags.no_dead_strip or nlist.noDeadStrip();
 
         if (nlist.sect() and
@@ -409,6 +420,8 @@ fn initRelocs(self: *Object, macho_file: *MachO) !void {
 
     for (slice.items(.header), slice.items(.relocs), 0..) |sect, *out, n_sect| {
         if (sect.nreloc == 0) continue;
+        if (sect.attrs() & macho.S_ATTR_DEBUG != 0 and
+            !mem.eql(u8, sect.sectName(), "__compact_unwind")) continue;
 
         const relocs = @as([*]align(1) const macho.relocation_info, @ptrCast(self.data.ptr + sect.reloff))[0..sect.nreloc];
         const code = self.getSectionData(@intCast(n_sect));
@@ -440,7 +453,12 @@ fn initRelocs(self: *Object, macho_file: *MachO) !void {
                     @as(i64, @intCast(sect.addr)) + rel.r_address + addend + 4
                 else
                     addend;
-                const target = self.findAtomInSection(@intCast(taddr), @intCast(nsect));
+                const target = self.findAtomInSection(@intCast(taddr), @intCast(nsect)) orelse {
+                    macho_file.base.fatal("{}: {s},{s}: 0x{x}: bad relocation", .{
+                        self.fmtPath(), sect.segName(), sect.sectName(), rel.r_address,
+                    });
+                    return error.ParseFailed;
+                };
                 addend = taddr - @as(i64, @intCast(macho_file.getAtom(target).?.getInputSection(macho_file).addr));
                 break :blk target;
             } else self.symbols.items[rel.r_symbolnum];
@@ -550,6 +568,7 @@ fn initUnwindRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
 
     try self.unwind_records.resize(gpa, nrecs);
 
+    const header = self.sections.items(.header)[sect_id];
     const relocs = self.sections.items(.relocs)[sect_id].items;
     var reloc_idx: usize = 0;
     for (recs, self.unwind_records.items, 0..) |rec, *out_index, rec_idx| {
@@ -575,10 +594,15 @@ fn initUnwindRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
                         out.atom = self.symtab.items(.atom)[rel.meta.symbolnum];
                         out.atom_offset = @intCast(rec.rangeStart);
                     },
-                    .local => {
-                        out.atom = self.findAtom(rec.rangeStart);
+                    .local => if (self.findAtom(rec.rangeStart)) |atom_index| {
+                        out.atom = atom_index;
                         const atom = out.getAtom(macho_file);
                         out.atom_offset = @intCast(rec.rangeStart - atom.getInputAddress(macho_file));
+                    } else {
+                        macho_file.base.fatal("{}: {s},{s}: 0x{x}: bad relocation", .{
+                            self.fmtPath(), header.segName(), header.sectName(), rel.offset,
+                        });
+                        return error.ParseFailed;
                     },
                 },
                 16 => { // personality function
@@ -590,10 +614,15 @@ fn initUnwindRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
                         out.lsda = self.symtab.items(.atom)[rel.meta.symbolnum];
                         out.lsda_offset = @intCast(rec.lsda);
                     },
-                    .local => {
-                        out.lsda = self.findAtom(rec.lsda);
+                    .local => if (self.findAtom(rec.lsda)) |atom_index| {
+                        out.lsda = atom_index;
                         const atom = out.getLsdaAtom(macho_file).?;
                         out.lsda_offset = @intCast(rec.lsda - atom.getInputAddress(macho_file));
+                    } else {
+                        macho_file.base.fatal("{}: {s},{s}: 0x{x}: bad relocation", .{
+                            self.fmtPath(), header.segName(), header.sectName(), rel.offset,
+                        });
+                        return error.ParseFailed;
                     },
                 },
                 else => {},

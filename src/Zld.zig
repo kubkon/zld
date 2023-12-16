@@ -406,26 +406,20 @@ fn renderWarningMessageToWriter(
     }
 }
 
-pub fn reportWarningsAndErrors(base: *Zld) !void {
-    var warnings = try base.getAllWarningsAlloc();
+pub fn reportErrors(base: *Zld) void {
+    var errors = base.getAllErrorsAlloc() catch @panic("OOM");
+    defer errors.deinit(base.allocator);
+    if (errors.errorMessageCount() > 0) {
+        errors.renderToStdErr(.{ .ttyconf = std.io.tty.detectConfig(std.io.getStdErr()) });
+    }
+}
+
+pub fn reportWarnings(base: *Zld) void {
+    var warnings = base.getAllWarningsAlloc() catch @panic("OOM");
     defer warnings.deinit(base.allocator);
     if (warnings.errorMessageCount() > 0) {
         renderWarningToStdErr(warnings);
     }
-
-    var errors = try base.getAllErrorsAlloc();
-    defer errors.deinit(base.allocator);
-    if (errors.errorMessageCount() > 0) {
-        errors.renderToStdErr(.{ .ttyconf = std.io.tty.detectConfig(std.io.getStdErr()) });
-        return error.LinkFail;
-    }
-}
-
-pub fn reportWarningsAndErrorsAndExit(base: *Zld) void {
-    base.reportWarningsAndErrors() catch {
-        base.deinit();
-        process.exit(1);
-    };
 }
 
 /// Binary search

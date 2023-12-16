@@ -44,8 +44,10 @@ pub fn parse(self: *Dylib, macho_file: *MachO) !void {
 
     self.header = try reader.readStruct(macho.mach_header_64);
 
-    const lc_id = self.getLoadCommand(.ID_DYLIB) orelse
-        return macho_file.base.fatal("{s}: missing LC_ID_DYLIB load command", .{self.path});
+    const lc_id = self.getLoadCommand(.ID_DYLIB) orelse {
+        macho_file.base.fatal("{s}: missing LC_ID_DYLIB load command", .{self.path});
+        return error.ParseFailed;
+    };
     self.id = try Id.fromLoadCommand(gpa, lc_id.cast(macho.dylib_command).?, lc_id.getDylibPathName());
 
     var it = LoadCommandIterator{

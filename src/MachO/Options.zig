@@ -315,7 +315,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         std.debug.print("{s}\n", .{args[args.len - 1]});
     }
 
-    if (print_version) ctx.warn("{s}", .{version});
+    if (print_version) ctx.print("{s}", .{version});
 
     if (positionals.items.len == 0) ctx.fatal("Expected at least one positional argument", .{});
 

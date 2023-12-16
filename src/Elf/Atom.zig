@@ -140,6 +140,8 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
     const relocs = self.getRelocs(elf_file);
     const code = try self.getCodeUncompressAlloc(elf_file);
     defer elf_file.base.allocator.free(code);
+
+    var has_errors = false;
     var i: usize = 0;
     while (i < relocs.len) : (i += 1) {
         const rel = relocs[i];
@@ -159,13 +161,17 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
         // pointer indirection via GOT, or a stub trampoline via PLT.
         switch (rel.r_type()) {
             elf.R_X86_64_64 => {
-                self.scanReloc(symbol, rel, getDynAbsRelocAction(symbol, elf_file), elf_file);
+                self.scanReloc(symbol, rel, getDynAbsRelocAction(symbol, elf_file), elf_file) catch {
+                    has_errors = true;
+                };
             },
 
             elf.R_X86_64_32,
             elf.R_X86_64_32S,
             => {
-                self.scanReloc(symbol, rel, getAbsRelocAction(symbol, elf_file), elf_file);
+                self.scanReloc(symbol, rel, getAbsRelocAction(symbol, elf_file), elf_file) catch {
+                    has_errors = true;
+                };
             },
 
             elf.R_X86_64_GOT32,
@@ -189,7 +195,9 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
             },
 
             elf.R_X86_64_PC32 => {
-                self.scanReloc(symbol, rel, getPcRelocAction(symbol, elf_file), elf_file);
+                self.scanReloc(symbol, rel, getPcRelocAction(symbol, elf_file), elf_file) catch {
+                    has_errors = true;
+                };
             },
 
             elf.R_X86_64_TLSGD => {
@@ -245,7 +253,9 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
             elf.R_X86_64_TPOFF32,
             elf.R_X86_64_TPOFF64,
             => {
-                if (is_shared) self.picError(symbol, rel, elf_file);
+                if (is_shared) self.picError(symbol, rel, elf_file) catch {
+                    has_errors = true;
+                };
             },
 
             elf.R_X86_64_GOTOFF64,
@@ -256,15 +266,20 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
             elf.R_X86_64_TLSDESC_CALL,
             => {},
 
-            else => elf_file.base.fatal("{s}: unknown relocation type: {}", .{
-                self.getName(elf_file),
-                fmtRelocType(rel.r_type()),
-            }),
+            else => {
+                elf_file.base.fatal("{s}: unknown relocation type: {}", .{
+                    self.getName(elf_file),
+                    fmtRelocType(rel.r_type()),
+                });
+                has_errors = true;
+            },
         }
     }
+
+    if (has_errors) return error.RelocError;
 }
 
-fn scanReloc(self: Atom, symbol: *Symbol, rel: elf.Elf64_Rela, action: RelocAction, elf_file: *Elf) void {
+fn scanReloc(self: Atom, symbol: *Symbol, rel: elf.Elf64_Rela, action: RelocAction, elf_file: *Elf) !void {
     const is_writeable = self.getInputShdr(elf_file).sh_flags & elf.SHF_WRITE != 0;
     const object = self.getObject(elf_file);
 
@@ -272,23 +287,23 @@ fn scanReloc(self: Atom, symbol: *Symbol, rel: elf.Elf64_Rela, action: RelocActi
         .none => {},
 
         .@"error" => if (symbol.isAbs(elf_file))
-            self.noPicError(symbol, rel, elf_file)
+            try self.noPicError(symbol, rel, elf_file)
         else
-            self.picError(symbol, rel, elf_file),
+            try self.picError(symbol, rel, elf_file),
 
         .copyrel => {
             if (elf_file.options.z_nocopyreloc) {
                 if (symbol.isAbs(elf_file))
-                    self.noPicError(symbol, rel, elf_file)
+                    try self.noPicError(symbol, rel, elf_file)
                 else
-                    self.picError(symbol, rel, elf_file);
+                    try self.picError(symbol, rel, elf_file);
             }
             symbol.flags.copy_rel = true;
         },
 
         .dyn_copyrel => {
             if (is_writeable or elf_file.options.z_nocopyreloc) {
-                self.textReloc(symbol, elf_file);
+                try self.textReloc(symbol, elf_file);
                 object.num_dynrelocs += 1;
             } else {
                 symbol.flags.copy_rel = true;
@@ -314,7 +329,7 @@ fn scanReloc(self: Atom, symbol: *Symbol, rel: elf.Elf64_Rela, action: RelocActi
         },
 
         .dynrel, .baserel, .ifunc => {
-            self.textReloc(symbol, elf_file);
+            try self.textReloc(symbol, elf_file);
             object.num_dynrelocs += 1;
 
             if (action == .ifunc) elf_file.num_ifunc_dynrelocs += 1;
@@ -322,7 +337,7 @@ fn scanReloc(self: Atom, symbol: *Symbol, rel: elf.Elf64_Rela, action: RelocActi
     }
 }
 
-inline fn textReloc(self: Atom, symbol: *const Symbol, elf_file: *Elf) void {
+inline fn textReloc(self: Atom, symbol: *const Symbol, elf_file: *Elf) !void {
     const is_writeable = self.getInputShdr(elf_file).sh_flags & elf.SHF_WRITE != 0;
     if (!is_writeable) {
         if (elf_file.options.z_text) {
@@ -331,13 +346,14 @@ inline fn textReloc(self: Atom, symbol: *const Symbol, elf_file: *Elf) void {
                 self.getName(elf_file),
                 symbol.getName(elf_file),
             });
+            return error.RelocError;
         } else {
             elf_file.has_text_reloc = true;
         }
     }
 }
 
-inline fn noPicError(self: Atom, symbol: *const Symbol, rel: elf.Elf64_Rela, elf_file: *Elf) void {
+inline fn noPicError(self: Atom, symbol: *const Symbol, rel: elf.Elf64_Rela, elf_file: *Elf) !void {
     elf_file.base.fatal(
         "{s}: {s}: {} relocation at offset 0x{x} against symbol '{s}' cannot be used; recompile with -fno-PIC",
         .{
@@ -348,9 +364,10 @@ inline fn noPicError(self: Atom, symbol: *const Symbol, rel: elf.Elf64_Rela, elf
             symbol.getName(elf_file),
         },
     );
+    return error.RelocError;
 }
 
-inline fn picError(self: Atom, symbol: *const Symbol, rel: elf.Elf64_Rela, elf_file: *Elf) void {
+inline fn picError(self: Atom, symbol: *const Symbol, rel: elf.Elf64_Rela, elf_file: *Elf) !void {
     elf_file.base.fatal(
         "{s}: {s}: {} relocation at offset 0x{x} against symbol '{s}' cannot be used; recompile with -fPIC",
         .{
@@ -361,6 +378,7 @@ inline fn picError(self: Atom, symbol: *const Symbol, rel: elf.Elf64_Rela, elf_f
             symbol.getName(elf_file),
         },
     );
+    return error.RelocError;
 }
 
 const RelocAction = enum {
@@ -460,6 +478,7 @@ fn reportUndefSymbol(self: Atom, rel: elf.Elf64_Rela, elf_file: *Elf) !bool {
             gop.value_ptr.* = .{};
         }
         try gop.value_ptr.append(gpa, self.atom_index);
+        return true;
     }
 
     return false;
