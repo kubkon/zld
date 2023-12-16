@@ -373,8 +373,6 @@ pub fn flush(self: *MachO) !void {
     const ncmds, const sizeofcmds, const uuid_cmd_offset = try self.writeLoadCommands();
     try self.writeHeader(ncmds, sizeofcmds);
     try self.writeUuid(uuid_cmd_offset, self.requiresCodeSig());
-
-    self.base.reportWarningsAndErrorsAndExit();
 }
 
 fn resolveSearchDir(
@@ -2007,6 +2005,8 @@ fn writeAtoms(self: *MachO) !void {
     const gpa = self.base.allocator;
     const cpu_arch = self.options.cpu_arch.?;
     const slice = self.sections.slice();
+
+    var has_resolve_error = false;
     for (slice.items(.header), slice.items(.atoms)) |header, atoms| {
         if (atoms.items.len == 0) continue;
         if (header.isZerofill()) continue;
@@ -2023,11 +2023,16 @@ fn writeAtoms(self: *MachO) !void {
             assert(atom.flags.alive);
             const off = atom.value - header.addr;
             try stream.seekTo(off);
-            try atom.resolveRelocs(self, stream.writer());
+            atom.resolveRelocs(self, stream.writer()) catch |err| switch (err) {
+                error.ResolveFailed => has_resolve_error = true,
+                else => |e| return e,
+            };
         }
 
         try self.base.file.pwriteAll(buffer, header.offset);
     }
+
+    if (has_resolve_error) return error.LinkFailed;
 }
 
 fn writeUnwindInfo(self: *MachO) !void {
