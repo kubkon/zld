@@ -318,7 +318,9 @@ fn initLiteralSections(self: *Object, macho_file: *MachO) !void {
 
 pub fn findAtom(self: Object, addr: u64) ?Atom.Index {
     for (self.sections.items(.header), 0..) |sect, n_sect| {
-        if (sect.addr <= addr and addr < sect.addr + sect.size) {
+        if ((sect.addr <= addr and addr < sect.addr + sect.size) or
+            (sect.addr == addr and sect.size == 0))
+        {
             return self.findAtomInSection(addr, @intCast(n_sect));
         }
     }
@@ -337,7 +339,9 @@ fn findAtomInSection(self: Object, addr: u64, n_sect: u8) ?Atom.Index {
             subsections.items[idx + 1].off - sub.off
         else
             sect.size - sub.off;
-        if (sub_addr <= addr and addr < sub_addr + sub_size) return sub.atom;
+        if ((sub_addr <= addr and addr < sub_addr + sub_size) or
+            (sub_addr == addr and sub_size == 0))
+            return sub.atom;
     }
     return null;
 }
