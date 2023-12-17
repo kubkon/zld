@@ -50,38 +50,43 @@ pub fn lessThan(ctx: void, lhs: Relocation, rhs: Relocation) bool {
 }
 
 pub const Type = enum {
-    /// Represents either .X86_64_RELOC_SUBTRACTOR or .ARM64_RELOC_SUBTRACTOR
-    subtractor,
-    /// Represents either .X86_64_RELOC_UNSIGNED or .ARM64_RELOC_UNSIGNED
-    unsigned,
-    /// Represents either .X86_64_RELOC_BRANCH or .ARM64_RELOC_BRANCH26
-    branch,
-    /// Represents either .X86_64_RELOC_GOT or .ARM64_RELOC_POINTER_TO_GOT
-    got,
-    /// Represents .X86_64_RELOC_GOT_LOAD
-    got_load,
-    /// Represents .ARM64_RELOC_GOT_LOAD_PAGE21
-    got_load_page,
-    /// Represents .ARM64_RELOC_GOT_LOAD_PAGEOFF12
-    got_load_pageoff,
-    /// Represents .X86_64_RELOC_SIGNED
+    // x86_64
+    /// RIP-relative displacement (X86_64_RELOC_SIGNED)
     signed,
-    /// Represents .X86_64_RELOC_SIGNED_1
+    /// RIP-relative displacement (X86_64_RELOC_SIGNED_1)
     signed1,
-    /// Represents .X86_64_RELOC_SIGNED_2
+    /// RIP-relative displacement (X86_64_RELOC_SIGNED_2)
     signed2,
-    /// Represents .X86_64_RELOC_SIGNED_4
+    /// RIP-relative displacement (X86_64_RELOC_SIGNED_4)
     signed4,
-    /// Represents .ARM64_RELOC_PAGE21
-    page,
-    /// Represents .ARM64_RELOC_PAGEOFF12
-    pageoff,
-    /// Represents .X86_64_RELOC_TLV
+    /// RIP-relative GOT load (X86_64_RELOC_GOT_LOAD)
+    got_load,
+    /// RIP-relative TLV load (X86_64_RELOC_TLV)
     tlv,
-    /// Represents .ARM64_RELOC_TLVP_PAGE21
+
+    // arm64
+    /// PC-relative load (distance to page, ARM64_RELOC_PAGE21)
+    page,
+    /// Non-PC-relative offset to GOT slot (ARM64_RELOC_PAGEOFF12)
+    pageoff,
+    /// PC-relative GOT load (distance to page, ARM64_RELOC_GOT_LOAD_PAGE21)
+    got_load_page,
+    /// Non-PC-relative offset to GOT slot (ARM64_RELOC_GOT_LOAD_PAGEOFF12)
+    got_load_pageoff,
+    /// PC-relative TLV load (distance to page, ARM64_RELOC_TLVP_LOAD_PAGE21)
     tlvp_page,
-    /// Represents .ARM64_RELOC_TLVP_PAGEOFF12
+    /// Non-PC-relative offset to GOT slot (ARM64_RELOC_TLVP_LOAD_PAGEOFF12)
     tlvp_pageoff,
+
+    // common
+    /// PC-relative call/bl/b (X86_64_RELOC_BRANCH or ARM64_RELOC_BRANCH26)
+    branch,
+    /// PC-relative displacement to GOT pointer (X86_64_RELOC_GOT or ARM64_RELOC_POINTER_TO_GOT)
+    got,
+    /// Absolute subtractor value (X86_64_RELOC_SUBTRACTOR or ARM64_RELOC_SUBTRACTOR)
+    subtractor,
+    /// Absolute relocation (X86_64_RELOC_UNSIGNED or ARM64_RELOC_UNSIGNED)
+    unsigned,
 };
 
 const assert = std.debug.assert;
