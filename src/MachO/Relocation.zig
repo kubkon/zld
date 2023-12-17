@@ -82,37 +82,6 @@ pub const Type = enum {
     tlvp_page,
     /// Represents .ARM64_RELOC_TLVP_PAGEOFF12
     tlvp_pageoff,
-
-    pub fn fromInt(raw: u4, arch: std.Target.Cpu.Arch) Type {
-        return switch (arch) {
-            .x86_64 => switch (@as(macho.reloc_type_x86_64, @enumFromInt(raw))) {
-                .X86_64_RELOC_UNSIGNED => .unsigned,
-                .X86_64_RELOC_SIGNED => .signed,
-                .X86_64_RELOC_SIGNED_1 => .signed1,
-                .X86_64_RELOC_SIGNED_2 => .signed2,
-                .X86_64_RELOC_SIGNED_4 => .signed4,
-                .X86_64_RELOC_BRANCH => .branch,
-                .X86_64_RELOC_GOT_LOAD => .got_load,
-                .X86_64_RELOC_GOT => .got,
-                .X86_64_RELOC_SUBTRACTOR => .subtractor,
-                .X86_64_RELOC_TLV => .tlv,
-            },
-            .aarch64 => switch (@as(macho.reloc_type_arm64, @enumFromInt(raw))) {
-                .ARM64_RELOC_UNSIGNED => .unsigned,
-                .ARM64_RELOC_SUBTRACTOR => .subtractor,
-                .ARM64_RELOC_BRANCH26 => .branch,
-                .ARM64_RELOC_PAGE21 => .page,
-                .ARM64_RELOC_PAGEOFF12 => .pageoff,
-                .ARM64_RELOC_GOT_LOAD_PAGE21 => .got_load_page,
-                .ARM64_RELOC_GOT_LOAD_PAGEOFF12 => .got_load_pageoff,
-                .ARM64_RELOC_TLVP_LOAD_PAGE21 => .tlvp_page,
-                .ARM64_RELOC_TLVP_LOAD_PAGEOFF12 => .tlvp_pageoff,
-                .ARM64_RELOC_POINTER_TO_GOT => .got,
-                .ARM64_RELOC_ADDEND => unreachable, // We make it part of addend field
-            },
-            else => unreachable,
-        };
-    }
 };
 
 const assert = std.debug.assert;

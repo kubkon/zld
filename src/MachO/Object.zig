@@ -419,7 +419,6 @@ fn sortAtoms(self: *Object, macho_file: *MachO) !void {
 }
 
 fn initRelocs(self: *Object, macho_file: *MachO) !void {
-    const gpa = macho_file.base.allocator;
     const cpu_arch = macho_file.options.cpu_arch.?;
     const slice = self.sections.slice();
 
@@ -428,77 +427,10 @@ fn initRelocs(self: *Object, macho_file: *MachO) !void {
         if (sect.attrs() & macho.S_ATTR_DEBUG != 0 and
             !mem.eql(u8, sect.sectName(), "__compact_unwind")) continue;
 
-        const relocs = @as([*]align(1) const macho.relocation_info, @ptrCast(self.data.ptr + sect.reloff))[0..sect.nreloc];
-        const code = self.getSectionData(@intCast(n_sect));
-
-        try out.ensureTotalCapacityPrecise(gpa, relocs.len);
-
-        var i: usize = 0;
-        while (i < relocs.len) : (i += 1) {
-            var rel = relocs[i];
-            var addend: i64 = 0;
-
-            switch (cpu_arch) {
-                .aarch64 => if (@as(macho.reloc_type_arm64, @enumFromInt(rel.r_type)) == .ARM64_RELOC_ADDEND) {
-                    // TODO validate it is followed by either page or pageoff variety
-                    addend = rel.r_address;
-                    i += 1;
-                    rel = relocs[i];
-                },
-                .x86_64 => {
-                    const rel_offset = @as(u32, @intCast(rel.r_address));
-                    addend = switch (rel.r_length) {
-                        0 => code[rel_offset],
-                        1 => mem.readInt(i16, code[rel_offset..][0..2], .little),
-                        2 => mem.readInt(i32, code[rel_offset..][0..4], .little),
-                        3 => mem.readInt(i64, code[rel_offset..][0..8], .little),
-                    };
-                    addend += switch (@as(macho.reloc_type_x86_64, @enumFromInt(rel.r_type))) {
-                        .X86_64_RELOC_SIGNED_1 => 1,
-                        .X86_64_RELOC_SIGNED_2 => 2,
-                        .X86_64_RELOC_SIGNED_4 => 4,
-                        else => 0,
-                    };
-                },
-                else => unreachable,
-            }
-
-            const rel_type = Relocation.Type.fromInt(rel.r_type, cpu_arch);
-            const target = if (rel.r_extern == 0) blk: {
-                const nsect = rel.r_symbolnum - 1;
-                const taddr: i64 = if (rel.r_pcrel == 1)
-                    @as(i64, @intCast(sect.addr)) + rel.r_address + addend + 4
-                else
-                    addend;
-                const target = self.findAtomInSection(@intCast(taddr), @intCast(nsect)) orelse {
-                    macho_file.base.fatal("{}: {s},{s}: 0x{x}: bad relocation", .{
-                        self.fmtPath(), sect.segName(), sect.sectName(), rel.r_address,
-                    });
-                    return error.ParseFailed;
-                };
-                addend = taddr - @as(i64, @intCast(macho_file.getAtom(target).?.getInputSection(macho_file).addr));
-                break :blk target;
-            } else self.symbols.items[rel.r_symbolnum];
-
-            const has_subtractor = if (i > 0) switch (cpu_arch) {
-                .x86_64 => @as(macho.reloc_type_x86_64, @enumFromInt(relocs[i - 1].r_type)) == .X86_64_RELOC_SUBTRACTOR,
-                .aarch64 => @as(macho.reloc_type_arm64, @enumFromInt(relocs[i - 1].r_type)) == .ARM64_RELOC_SUBTRACTOR,
-                else => unreachable,
-            } else false;
-
-            out.appendAssumeCapacity(.{
-                .tag = if (rel.r_extern == 1) .@"extern" else .local,
-                .offset = @as(u32, @intCast(rel.r_address)),
-                .target = target,
-                .addend = addend,
-                .type = rel_type,
-                .meta = .{
-                    .pcrel = rel.r_pcrel == 1,
-                    .has_subtractor = has_subtractor,
-                    .length = rel.r_length,
-                    .symbolnum = rel.r_symbolnum,
-                },
-            });
+        switch (cpu_arch) {
+            .x86_64 => try x86_64.parseRelocs(self, @intCast(n_sect), sect, out, macho_file),
+            .aarch64 => try aarch64.parseRelocs(self, @intCast(n_sect), sect, out, macho_file),
+            else => unreachable,
         }
 
         mem.sort(Relocation, out.items, {}, Relocation.lessThan);
@@ -521,6 +453,187 @@ fn initRelocs(self: *Object, macho_file: *MachO) !void {
         }
     }
 }
+
+const x86_64 = struct {
+    fn parseRelocs(
+        self: *const Object,
+        n_sect: u8,
+        sect: macho.section_64,
+        out: *std.ArrayListUnmanaged(Relocation),
+        macho_file: *MachO,
+    ) !void {
+        const gpa = macho_file.base.allocator;
+
+        const relocs = @as(
+            [*]align(1) const macho.relocation_info,
+            @ptrCast(self.data.ptr + sect.reloff),
+        )[0..sect.nreloc];
+        const code = self.getSectionData(@intCast(n_sect));
+
+        try out.ensureTotalCapacityPrecise(gpa, relocs.len);
+
+        var i: usize = 0;
+        while (i < relocs.len) : (i += 1) {
+            const rel = relocs[i];
+            const rel_type: macho.reloc_type_x86_64 = @enumFromInt(rel.r_type);
+            const rel_offset = @as(u32, @intCast(rel.r_address));
+
+            var addend = switch (rel.r_length) {
+                0 => code[rel_offset],
+                1 => mem.readInt(i16, code[rel_offset..][0..2], .little),
+                2 => mem.readInt(i32, code[rel_offset..][0..4], .little),
+                3 => mem.readInt(i64, code[rel_offset..][0..8], .little),
+            };
+            addend += switch (@as(macho.reloc_type_x86_64, @enumFromInt(rel.r_type))) {
+                .X86_64_RELOC_SIGNED_1 => 1,
+                .X86_64_RELOC_SIGNED_2 => 2,
+                .X86_64_RELOC_SIGNED_4 => 4,
+                else => 0,
+            };
+
+            const target = if (rel.r_extern == 0) blk: {
+                const nsect = rel.r_symbolnum - 1;
+                const taddr: i64 = if (rel.r_pcrel == 1)
+                    @as(i64, @intCast(sect.addr)) + rel.r_address + addend + 4
+                else
+                    addend;
+                const target = self.findAtomInSection(@intCast(taddr), @intCast(nsect)) orelse {
+                    macho_file.base.fatal("{}: {s},{s}: 0x{x}: bad relocation", .{
+                        self.fmtPath(), sect.segName(), sect.sectName(), rel.r_address,
+                    });
+                    return error.ParseFailed;
+                };
+                addend = taddr - @as(i64, @intCast(macho_file.getAtom(target).?.getInputSection(macho_file).addr));
+                break :blk target;
+            } else self.symbols.items[rel.r_symbolnum];
+
+            const has_subtractor = if (i > 0)
+                @as(macho.reloc_type_x86_64, @enumFromInt(relocs[i - 1].r_type)) == .X86_64_RELOC_SUBTRACTOR
+            else
+                false;
+
+            out.appendAssumeCapacity(.{
+                .tag = if (rel.r_extern == 1) .@"extern" else .local,
+                .offset = @as(u32, @intCast(rel.r_address)),
+                .target = target,
+                .addend = addend,
+                .type = switch (rel_type) {
+                    .X86_64_RELOC_UNSIGNED => .unsigned,
+                    .X86_64_RELOC_SIGNED => .signed,
+                    .X86_64_RELOC_SIGNED_1 => .signed1,
+                    .X86_64_RELOC_SIGNED_2 => .signed2,
+                    .X86_64_RELOC_SIGNED_4 => .signed4,
+                    .X86_64_RELOC_BRANCH => .branch,
+                    .X86_64_RELOC_GOT_LOAD => .got_load,
+                    .X86_64_RELOC_GOT => .got,
+                    .X86_64_RELOC_SUBTRACTOR => .subtractor,
+                    .X86_64_RELOC_TLV => .tlv,
+                },
+                .meta = .{
+                    .pcrel = rel.r_pcrel == 1,
+                    .has_subtractor = has_subtractor,
+                    .length = rel.r_length,
+                    .symbolnum = rel.r_symbolnum,
+                },
+            });
+        }
+    }
+};
+
+const aarch64 = struct {
+    fn parseRelocs(
+        self: *const Object,
+        n_sect: u8,
+        sect: macho.section_64,
+        out: *std.ArrayListUnmanaged(Relocation),
+        macho_file: *MachO,
+    ) !void {
+        const gpa = macho_file.base.allocator;
+
+        const relocs = @as(
+            [*]align(1) const macho.relocation_info,
+            @ptrCast(self.data.ptr + sect.reloff),
+        )[0..sect.nreloc];
+        const code = self.getSectionData(@intCast(n_sect));
+
+        try out.ensureTotalCapacityPrecise(gpa, relocs.len);
+
+        var i: usize = 0;
+        while (i < relocs.len) : (i += 1) {
+            var rel = relocs[i];
+            const rel_offset = @as(u32, @intCast(rel.r_address));
+
+            var addend: i64 = 0;
+
+            switch (@as(macho.reloc_type_arm64, @enumFromInt(rel.r_type))) {
+                .ARM64_RELOC_ADDEND => {
+                    // TODO validate it is followed by either page or pageoff variety
+                    addend = rel.r_address;
+                    i += 1;
+                    rel = relocs[i];
+                },
+                .ARM64_RELOC_UNSIGNED => {
+                    addend = switch (rel.r_length) {
+                        0 => code[rel_offset],
+                        1 => mem.readInt(i16, code[rel_offset..][0..2], .little),
+                        2 => mem.readInt(i32, code[rel_offset..][0..4], .little),
+                        3 => mem.readInt(i64, code[rel_offset..][0..8], .little),
+                    };
+                },
+                else => {},
+            }
+
+            const rel_type: macho.reloc_type_arm64 = @enumFromInt(rel.r_type);
+
+            const target = if (rel.r_extern == 0) blk: {
+                const nsect = rel.r_symbolnum - 1;
+                const taddr: i64 = if (rel.r_pcrel == 1)
+                    @as(i64, @intCast(sect.addr)) + rel.r_address + addend + 4
+                else
+                    addend;
+                const target = self.findAtomInSection(@intCast(taddr), @intCast(nsect)) orelse {
+                    macho_file.base.fatal("{}: {s},{s}: 0x{x}: bad relocation", .{
+                        self.fmtPath(), sect.segName(), sect.sectName(), rel.r_address,
+                    });
+                    return error.ParseFailed;
+                };
+                addend = taddr - @as(i64, @intCast(macho_file.getAtom(target).?.getInputSection(macho_file).addr));
+                break :blk target;
+            } else self.symbols.items[rel.r_symbolnum];
+
+            const has_subtractor = if (i > 0)
+                @as(macho.reloc_type_arm64, @enumFromInt(relocs[i - 1].r_type)) == .ARM64_RELOC_SUBTRACTOR
+            else
+                false;
+
+            out.appendAssumeCapacity(.{
+                .tag = if (rel.r_extern == 1) .@"extern" else .local,
+                .offset = @as(u32, @intCast(rel.r_address)),
+                .target = target,
+                .addend = addend,
+                .type = switch (rel_type) {
+                    .ARM64_RELOC_UNSIGNED => .unsigned,
+                    .ARM64_RELOC_SUBTRACTOR => .subtractor,
+                    .ARM64_RELOC_BRANCH26 => .branch,
+                    .ARM64_RELOC_PAGE21 => .page,
+                    .ARM64_RELOC_PAGEOFF12 => .pageoff,
+                    .ARM64_RELOC_GOT_LOAD_PAGE21 => .got_load_page,
+                    .ARM64_RELOC_GOT_LOAD_PAGEOFF12 => .got_load_pageoff,
+                    .ARM64_RELOC_TLVP_LOAD_PAGE21 => .tlvp_page,
+                    .ARM64_RELOC_TLVP_LOAD_PAGEOFF12 => .tlvp_pageoff,
+                    .ARM64_RELOC_POINTER_TO_GOT => .got,
+                    .ARM64_RELOC_ADDEND => unreachable, // We make it part of the addend field
+                },
+                .meta = .{
+                    .pcrel = rel.r_pcrel == 1,
+                    .has_subtractor = has_subtractor,
+                    .length = rel.r_length,
+                    .symbolnum = rel.r_symbolnum,
+                },
+            });
+        }
+    }
+};
 
 fn initEhFrameRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
     const gpa = macho_file.base.allocator;
