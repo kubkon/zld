@@ -507,28 +507,46 @@ const x86_64 = struct {
                 break :blk target;
             } else self.symbols.items[rel.r_symbolnum];
 
-            const has_subtractor = if (i > 0)
-                @as(macho.reloc_type_x86_64, @enumFromInt(relocs[i - 1].r_type)) == .X86_64_RELOC_SUBTRACTOR
-            else
-                false;
+            const has_subtractor = if (i > 0 and
+                @as(macho.reloc_type_x86_64, @enumFromInt(relocs[i - 1].r_type)) == .X86_64_RELOC_SUBTRACTOR)
+            blk: {
+                if (rel_type != .X86_64_RELOC_UNSIGNED) {
+                    macho_file.base.fatal("{}: {s},{s}: 0x{x}: X86_64_RELOC_SUBTRACTOR followed by {s}", .{
+                        self.fmtPath(), sect.segName(), sect.sectName(), rel_offset, @tagName(rel_type),
+                    });
+                    return error.ParseFailed;
+                }
+                break :blk true;
+            } else false;
+
+            const @"type": Relocation.Type = validateRelocType(rel, rel_type) catch |err| {
+                switch (err) {
+                    error.Pcrel => macho_file.base.fatal(
+                        "{}: {s},{s}: 0x{x}: PC-relative {s} relocation",
+                        .{ self.fmtPath(), sect.segName(), sect.sectName(), rel_offset, @tagName(rel_type) },
+                    ),
+                    error.NonPcrel => macho_file.base.fatal(
+                        "{}: {s},{s}: 0x{x}: non-PC-relative {s} relocation",
+                        .{ self.fmtPath(), sect.segName(), sect.sectName(), rel_offset, @tagName(rel_type) },
+                    ),
+                    error.InvalidLength => macho_file.base.fatal(
+                        "{}: {s},{s}: 0x{x}: invalid length of {d} in {s} relocation",
+                        .{ self.fmtPath(), sect.segName(), sect.sectName(), rel_offset, @as(u8, 1) << rel.r_length, @tagName(rel_type) },
+                    ),
+                    error.NonExtern => macho_file.base.fatal(
+                        "{}: {s},{s}: 0x{x}: non-extern target in {s} relocation",
+                        .{ self.fmtPath(), sect.segName(), sect.sectName(), rel_offset, @tagName(rel_type) },
+                    ),
+                }
+                return error.ParseFailed;
+            };
 
             out.appendAssumeCapacity(.{
                 .tag = if (rel.r_extern == 1) .@"extern" else .local,
                 .offset = @as(u32, @intCast(rel.r_address)),
                 .target = target,
                 .addend = addend,
-                .type = switch (rel_type) {
-                    .X86_64_RELOC_UNSIGNED => .unsigned,
-                    .X86_64_RELOC_SIGNED => .signed,
-                    .X86_64_RELOC_SIGNED_1 => .signed1,
-                    .X86_64_RELOC_SIGNED_2 => .signed2,
-                    .X86_64_RELOC_SIGNED_4 => .signed4,
-                    .X86_64_RELOC_BRANCH => .branch,
-                    .X86_64_RELOC_GOT_LOAD => .got_load,
-                    .X86_64_RELOC_GOT => .got,
-                    .X86_64_RELOC_SUBTRACTOR => .subtractor,
-                    .X86_64_RELOC_TLV => .tlv,
-                },
+                .type = @"type",
                 .meta = .{
                     .pcrel = rel.r_pcrel == 1,
                     .has_subtractor = has_subtractor,
@@ -536,6 +554,54 @@ const x86_64 = struct {
                     .symbolnum = rel.r_symbolnum,
                 },
             });
+        }
+    }
+
+    fn validateRelocType(rel: macho.relocation_info, rel_type: macho.reloc_type_x86_64) !Relocation.Type {
+        switch (rel_type) {
+            .X86_64_RELOC_UNSIGNED => {
+                if (rel.r_pcrel == 1) return error.Pcrel;
+                if (rel.r_length != 2 and rel.r_length != 3) return error.InvalidLength;
+                return .unsigned;
+            },
+
+            .X86_64_RELOC_SUBTRACTOR => {
+                if (rel.r_pcrel == 1) return error.Pcrel;
+                return .subtractor;
+            },
+
+            .X86_64_RELOC_BRANCH,
+            .X86_64_RELOC_GOT_LOAD,
+            .X86_64_RELOC_GOT,
+            .X86_64_RELOC_TLV,
+            => {
+                if (rel.r_pcrel == 0) return error.NonPcrel;
+                if (rel.r_length != 2) return error.InvalidLength;
+                if (rel.r_extern == 0) return error.NonExtern;
+                return switch (rel_type) {
+                    .X86_64_RELOC_BRANCH => .branch,
+                    .X86_64_RELOC_GOT_LOAD => .got_load,
+                    .X86_64_RELOC_GOT => .got,
+                    .X86_64_RELOC_TLV => .tlv,
+                    else => unreachable,
+                };
+            },
+
+            .X86_64_RELOC_SIGNED,
+            .X86_64_RELOC_SIGNED_1,
+            .X86_64_RELOC_SIGNED_2,
+            .X86_64_RELOC_SIGNED_4,
+            => {
+                if (rel.r_pcrel == 0) return error.NonPcrel;
+                if (rel.r_length != 2) return error.InvalidLength;
+                return switch (rel_type) {
+                    .X86_64_RELOC_SIGNED => .signed,
+                    .X86_64_RELOC_SIGNED_1 => .signed1,
+                    .X86_64_RELOC_SIGNED_2 => .signed2,
+                    .X86_64_RELOC_SIGNED_4 => .signed4,
+                    else => unreachable,
+                };
+            },
         }
     }
 };
@@ -567,10 +633,25 @@ const aarch64 = struct {
 
             switch (@as(macho.reloc_type_arm64, @enumFromInt(rel.r_type))) {
                 .ARM64_RELOC_ADDEND => {
-                    // TODO validate it is followed by either page or pageoff variety
                     addend = rel.r_address;
                     i += 1;
+                    if (i >= relocs.len) {
+                        macho_file.base.fatal("{}: {s},{s}: 0x{x}: unterminated ARM64_RELOC_ADDEND", .{
+                            self.fmtPath(), sect.segName(), sect.sectName(), rel_offset,
+                        });
+                        return error.ParseFailed;
+                    }
                     rel = relocs[i];
+                    switch (@as(macho.reloc_type_arm64, @enumFromInt(rel.r_type))) {
+                        .ARM64_RELOC_PAGE21, .ARM64_RELOC_PAGEOFF12 => {},
+                        else => |x| {
+                            macho_file.base.fatal(
+                                "{}: {s},{s}: 0x{x}: ARM64_RELOC_ADDEND followed by {s}",
+                                .{ self.fmtPath(), sect.segName(), sect.sectName(), rel_offset, @tagName(x) },
+                            );
+                            return error.ParseFailed;
+                        },
+                    }
                 },
                 .ARM64_RELOC_UNSIGNED => {
                     addend = switch (rel.r_length) {
@@ -601,29 +682,46 @@ const aarch64 = struct {
                 break :blk target;
             } else self.symbols.items[rel.r_symbolnum];
 
-            const has_subtractor = if (i > 0)
-                @as(macho.reloc_type_arm64, @enumFromInt(relocs[i - 1].r_type)) == .ARM64_RELOC_SUBTRACTOR
-            else
-                false;
+            const has_subtractor = if (i > 0 and
+                @as(macho.reloc_type_arm64, @enumFromInt(relocs[i - 1].r_type)) == .ARM64_RELOC_SUBTRACTOR)
+            blk: {
+                if (rel_type != .ARM64_RELOC_UNSIGNED) {
+                    macho_file.base.fatal("{}: {s},{s}: 0x{x}: ARM64_RELOC_SUBTRACTOR followed by {s}", .{
+                        self.fmtPath(), sect.segName(), sect.sectName(), rel_offset, @tagName(rel_type),
+                    });
+                    return error.ParseFailed;
+                }
+                break :blk true;
+            } else false;
+
+            const @"type": Relocation.Type = validateRelocType(rel, rel_type) catch |err| {
+                switch (err) {
+                    error.Pcrel => macho_file.base.fatal(
+                        "{}: {s},{s}: 0x{x}: PC-relative {s} relocation",
+                        .{ self.fmtPath(), sect.segName(), sect.sectName(), rel_offset, @tagName(rel_type) },
+                    ),
+                    error.NonPcrel => macho_file.base.fatal(
+                        "{}: {s},{s}: 0x{x}: non-PC-relative {s} relocation",
+                        .{ self.fmtPath(), sect.segName(), sect.sectName(), rel_offset, @tagName(rel_type) },
+                    ),
+                    error.InvalidLength => macho_file.base.fatal(
+                        "{}: {s},{s}: 0x{x}: invalid length of {d} in {s} relocation",
+                        .{ self.fmtPath(), sect.segName(), sect.sectName(), rel_offset, @as(u8, 1) << rel.r_length, @tagName(rel_type) },
+                    ),
+                    error.NonExtern => macho_file.base.fatal(
+                        "{}: {s},{s}: 0x{x}: non-extern target in {s} relocation",
+                        .{ self.fmtPath(), sect.segName(), sect.sectName(), rel_offset, @tagName(rel_type) },
+                    ),
+                }
+                return error.ParseFailed;
+            };
 
             out.appendAssumeCapacity(.{
                 .tag = if (rel.r_extern == 1) .@"extern" else .local,
                 .offset = @as(u32, @intCast(rel.r_address)),
                 .target = target,
                 .addend = addend,
-                .type = switch (rel_type) {
-                    .ARM64_RELOC_UNSIGNED => .unsigned,
-                    .ARM64_RELOC_SUBTRACTOR => .subtractor,
-                    .ARM64_RELOC_BRANCH26 => .branch,
-                    .ARM64_RELOC_PAGE21 => .page,
-                    .ARM64_RELOC_PAGEOFF12 => .pageoff,
-                    .ARM64_RELOC_GOT_LOAD_PAGE21 => .got_load_page,
-                    .ARM64_RELOC_GOT_LOAD_PAGEOFF12 => .got_load_pageoff,
-                    .ARM64_RELOC_TLVP_LOAD_PAGE21 => .tlvp_page,
-                    .ARM64_RELOC_TLVP_LOAD_PAGEOFF12 => .tlvp_pageoff,
-                    .ARM64_RELOC_POINTER_TO_GOT => .got,
-                    .ARM64_RELOC_ADDEND => unreachable, // We make it part of the addend field
-                },
+                .type = @"type",
                 .meta = .{
                     .pcrel = rel.r_pcrel == 1,
                     .has_subtractor = has_subtractor,
@@ -631,6 +729,57 @@ const aarch64 = struct {
                     .symbolnum = rel.r_symbolnum,
                 },
             });
+        }
+    }
+
+    fn validateRelocType(rel: macho.relocation_info, rel_type: macho.reloc_type_arm64) !Relocation.Type {
+        switch (rel_type) {
+            .ARM64_RELOC_UNSIGNED => {
+                if (rel.r_pcrel == 1) return error.Pcrel;
+                if (rel.r_length != 2 and rel.r_length != 3) return error.InvalidLength;
+                return .unsigned;
+            },
+
+            .ARM64_RELOC_SUBTRACTOR => {
+                if (rel.r_pcrel == 1) return error.Pcrel;
+                return .subtractor;
+            },
+
+            .ARM64_RELOC_BRANCH26,
+            .ARM64_RELOC_PAGE21,
+            .ARM64_RELOC_GOT_LOAD_PAGE21,
+            .ARM64_RELOC_TLVP_LOAD_PAGE21,
+            .ARM64_RELOC_POINTER_TO_GOT,
+            => {
+                if (rel.r_pcrel == 0) return error.NonPcrel;
+                if (rel.r_length != 2) return error.InvalidLength;
+                if (rel.r_extern == 0) return error.NonExtern;
+                return switch (rel_type) {
+                    .ARM64_RELOC_BRANCH26 => .branch,
+                    .ARM64_RELOC_PAGE21 => .page,
+                    .ARM64_RELOC_GOT_LOAD_PAGE21 => .got_load_page,
+                    .ARM64_RELOC_TLVP_LOAD_PAGE21 => .tlvp_page,
+                    .ARM64_RELOC_POINTER_TO_GOT => .got,
+                    else => unreachable,
+                };
+            },
+
+            .ARM64_RELOC_PAGEOFF12,
+            .ARM64_RELOC_GOT_LOAD_PAGEOFF12,
+            .ARM64_RELOC_TLVP_LOAD_PAGEOFF12,
+            => {
+                if (rel.r_pcrel == 1) return error.Pcrel;
+                if (rel.r_length != 2) return error.InvalidLength;
+                if (rel.r_extern == 0) return error.NonExtern;
+                return switch (rel_type) {
+                    .ARM64_RELOC_PAGEOFF12 => .pageoff,
+                    .ARM64_RELOC_GOT_LOAD_PAGEOFF12 => .got_load_pageoff,
+                    .ARM64_RELOC_TLVP_LOAD_PAGEOFF12 => .tlvp_pageoff,
+                    else => unreachable,
+                };
+            },
+
+            .ARM64_RELOC_ADDEND => unreachable, // We make it part of the addend field
         }
     }
 };

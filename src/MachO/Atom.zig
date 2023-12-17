@@ -287,46 +287,9 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
             if (rel.getTargetSymbol(macho_file).getFile(macho_file) == null) continue;
         }
 
-        if (rel.type == .subtractor) {
-            if (i + 1 >= relocs.len) {
-                macho_file.base.fatal(
-                    "{}: {s}: 0x{x}: invalid relocation: unterminated X86_64_RELOC_SUBTRACTOR",
-                    .{
-                        file.fmtPath(), name, rel.offset,
-                    },
-                );
-                return error.ResolveFailed;
-            }
-            if (relocs[i + 1].type != .unsigned) {
-                macho_file.base.fatal(
-                    "{}: {s}: 0x{x}: invalid relocation: invalid target relocation for X86_64_RELOC_SUBTRACTOR: {s}",
-                    .{ file.fmtPath(), name, rel.offset, @tagName(relocs[i + 1].type) }, // TODO format!
-                );
-                return error.ResolveFailed;
-            }
-        }
-
         try stream.seekTo(rel_offset);
         self.resolveRelocInner(rel, subtractor, code, macho_file, stream.writer()) catch |err| {
             switch (err) {
-                error.UnexpectedPcrel => macho_file.base.fatal(
-                    "{}: {s}: 0x{x}: invalid relocation: invalid PCrel option in {s}",
-                    .{ file.fmtPath(), name, rel.offset, @tagName(rel.type) }, // TODO format!
-                ),
-                error.UnexpectedSize => macho_file.base.fatal(
-                    "{}: {s}: 0x{x}: invalid relocation: invalid size {d} in {s}",
-                    .{
-                        file.fmtPath(),
-                        name,
-                        rel.offset,
-                        @as(u8, 1) << rel.meta.length,
-                        @tagName(rel.type), // TODO format!
-                    },
-                ),
-                error.NonExternTarget => macho_file.base.fatal(
-                    "{}: {s}: 0x{x}: invalid relocation: non-extern target in {s}",
-                    .{ file.fmtPath(), name, rel.offset, @tagName(rel.type) }, // TODO format!
-                ),
                 error.RelaxFail => macho_file.base.fatal(
                     "{}: {s}: 0x{x}: failed to relax relocation: in {s}",
                     .{ file.fmtPath(), name, rel.offset, @tagName(rel.type) }, // TODO format!
@@ -341,9 +304,6 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
 }
 
 const ResolveError = error{
-    UnexpectedPcrel,
-    UnexpectedSize,
-    NonExternTarget,
     RelaxFail,
     NoSpaceLeft,
 };
@@ -388,7 +348,7 @@ fn resolveRelocInner(
         .subtractor => {},
 
         .unsigned => {
-            if (rel.meta.pcrel) return error.UnexpectedPcrel;
+            assert(!rel.meta.pcrel);
             if (rel.meta.length == 3) {
                 if (rel.tag == .@"extern") {
                     const sym = rel.getTargetSymbol(macho_file);
@@ -424,13 +384,13 @@ fn resolveRelocInner(
                 try writer.writeInt(u64, @intCast(S + A - SUB), .little);
             } else if (rel.meta.length == 2) {
                 try writer.writeInt(u32, @bitCast(@as(i32, @intCast(S + A - SUB))), .little);
-            } else return error.UnexpectedSize;
+            } else unreachable;
         },
 
         .got_load => {
-            if (rel.tag == .local) return error.NonExternTarget;
-            if (rel.meta.length != 2) return error.UnexpectedSize;
-            if (!rel.meta.pcrel) return error.UnexpectedPcrel;
+            assert(rel.tag == .@"extern");
+            assert(rel.meta.length == 2);
+            assert(rel.meta.pcrel);
             if (rel.getTargetSymbol(macho_file).flags.got) {
                 try writer.writeInt(i32, @intCast(G + A - P - 4), .little);
             } else {
@@ -440,22 +400,22 @@ fn resolveRelocInner(
         },
 
         .got => {
-            if (rel.tag == .local) return error.NonExternTarget;
-            if (rel.meta.length != 2) return error.UnexpectedSize;
-            if (!rel.meta.pcrel) return error.UnexpectedPcrel;
+            assert(rel.tag == .@"extern");
+            assert(rel.meta.length == 2);
+            assert(rel.meta.pcrel);
             try writer.writeInt(i32, @intCast(G + A - P - 4), .little);
         },
 
         .branch => {
-            if (rel.meta.length != 2) return error.UnexpectedSize;
-            if (!rel.meta.pcrel) return error.UnexpectedPcrel;
+            assert(rel.meta.length == 2);
+            assert(rel.meta.pcrel);
             try writer.writeInt(i32, @intCast(S + A - P - 4), .little);
         },
 
         .tlv => {
-            if (rel.tag == .local) return error.NonExternTarget;
-            if (rel.meta.length != 2) return error.UnexpectedSize;
-            if (!rel.meta.pcrel) return error.UnexpectedPcrel;
+            assert(rel.tag == .@"extern");
+            assert(rel.meta.length == 2);
+            assert(rel.meta.pcrel);
             const sym = rel.getTargetSymbol(macho_file);
             if (sym.flags.tlv_ptr) {
                 const S_: i64 = @intCast(sym.getTlvPtrAddress(macho_file));
@@ -467,8 +427,8 @@ fn resolveRelocInner(
         },
 
         .signed, .signed1, .signed2, .signed4 => {
-            if (rel.meta.length != 2) return error.UnexpectedSize;
-            if (!rel.meta.pcrel) return error.UnexpectedPcrel;
+            assert(rel.meta.length == 2);
+            assert(rel.meta.pcrel);
             try writer.writeInt(i32, @intCast(S + A - P - 4 - rel.getRelocAddend()), .little);
         },
 
