@@ -60,8 +60,7 @@ pub const Cie = struct {
 
     pub fn getData(cie: Cie, macho_file: *MachO) []const u8 {
         const object = cie.getObject(macho_file);
-        const data = object.getSectionData(object.eh_frame_sect_index.?);
-        return data[cie.offset..][0..cie.getSize()];
+        return object.eh_frame_data.items[cie.offset..][0..cie.getSize()];
     }
 
     pub fn getPersonality(cie: Cie, macho_file: *MachO) ?*Symbol {
@@ -209,8 +208,7 @@ pub const Fde = struct {
 
     pub fn getData(fde: Fde, macho_file: *MachO) []const u8 {
         const object = fde.getObject(macho_file);
-        const data = object.getSectionData(object.eh_frame_sect_index.?);
-        return data[fde.offset..][0..fde.getSize()];
+        return object.eh_frame_data.items[fde.offset..][0..fde.getSize()];
     }
 
     pub fn getCie(fde: Fde, macho_file: *MachO) *const Cie {
