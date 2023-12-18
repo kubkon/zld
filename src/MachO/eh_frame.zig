@@ -60,8 +60,7 @@ pub const Cie = struct {
 
     pub fn getData(cie: Cie, macho_file: *MachO) []const u8 {
         const object = cie.getObject(macho_file);
-        const data = object.getSectionData(object.eh_frame_sect_index.?);
-        return data[cie.offset..][0..cie.getSize()];
+        return object.eh_frame_data.items[cie.offset..][0..cie.getSize()];
     }
 
     pub fn getPersonality(cie: Cie, macho_file: *MachO) ?*Symbol {
@@ -209,8 +208,7 @@ pub const Fde = struct {
 
     pub fn getData(fde: Fde, macho_file: *MachO) []const u8 {
         const object = fde.getObject(macho_file);
-        const data = object.getSectionData(object.eh_frame_sect_index.?);
-        return data[fde.offset..][0..fde.getSize()];
+        return object.eh_frame_data.items[fde.offset..][0..fde.getSize()];
     }
 
     pub fn getCie(fde: Fde, macho_file: *MachO) *const Cie {
@@ -347,6 +345,10 @@ pub fn calcSize(macho_file: *MachO) !u32 {
 
 pub fn write(macho_file: *MachO, buffer: []u8) void {
     const sect = macho_file.sections.items(.header)[macho_file.eh_frame_sect_index.?];
+    const addend: i64 = switch (macho_file.options.cpu_arch.?) {
+        .x86_64 => 4,
+        else => 0,
+    };
 
     for (macho_file.objects.items) |index| {
         const object = macho_file.getFile(index).?.object;
@@ -362,7 +364,7 @@ pub fn write(macho_file: *MachO, buffer: []u8) void {
                 std.mem.writeInt(
                     i32,
                     buffer[offset..][0..4],
-                    @intCast(@as(i64, @intCast(taddr)) - @as(i64, @intCast(saddr)) + 4),
+                    @intCast(@as(i64, @intCast(taddr)) - @as(i64, @intCast(saddr)) + addend),
                     .little,
                 );
             }
@@ -402,7 +404,7 @@ pub fn write(macho_file: *MachO, buffer: []u8) void {
                     .p32 => std.mem.writeInt(
                         i32,
                         buffer[offset..][0..4],
-                        @intCast(@as(i64, @intCast(taddr)) - @as(i64, @intCast(saddr)) + 4),
+                        @intCast(@as(i64, @intCast(taddr)) - @as(i64, @intCast(saddr)) + addend),
                         .little,
                     ),
                     .p64 => std.mem.writeInt(

@@ -170,8 +170,8 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
     for (relocs) |rel| {
         if (try self.reportUndefSymbol(rel, macho_file)) continue;
 
-        switch (@as(macho.reloc_type_x86_64, @enumFromInt(rel.meta.type))) {
-            .X86_64_RELOC_BRANCH => {
+        switch (rel.type) {
+            .branch => {
                 const symbol = rel.getTargetSymbol(macho_file);
                 if (symbol.flags.import or (symbol.flags.@"export" and (symbol.flags.weak or symbol.flags.interposable))) {
                     symbol.flags.stubs = true;
@@ -183,9 +183,15 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
                 }
             },
 
-            .X86_64_RELOC_GOT_LOAD => {
+            .got_load,
+            .got_load_page,
+            .got_load_pageoff,
+            => {
                 const symbol = rel.getTargetSymbol(macho_file);
-                if (symbol.flags.import or (symbol.flags.@"export" and (symbol.flags.weak or symbol.flags.interposable))) {
+                if (symbol.flags.import or
+                    (symbol.flags.@"export" and (symbol.flags.weak or symbol.flags.interposable)) or
+                    macho_file.options.cpu_arch.? == .aarch64) // TODO relax on arm64
+                {
                     symbol.flags.got = true;
                     if (symbol.flags.weak) {
                         macho_file.binds_to_weak = true;
@@ -193,11 +199,14 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
                 }
             },
 
-            .X86_64_RELOC_GOT => {
+            .got => {
                 rel.getTargetSymbol(macho_file).flags.got = true;
             },
 
-            .X86_64_RELOC_TLV => {
+            .tlv,
+            .tlvp_page,
+            .tlvp_pageoff,
+            => {
                 const symbol = rel.getTargetSymbol(macho_file);
                 if (!symbol.flags.tlv) {
                     macho_file.base.fatal(
@@ -213,7 +222,7 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
                 }
             },
 
-            .X86_64_RELOC_UNSIGNED => {
+            .unsigned => {
                 if (rel.meta.length == 3) { // TODO this really should check if this is pointer width
                     if (rel.tag == .@"extern") {
                         const symbol = rel.getTargetSymbol(macho_file);
@@ -280,7 +289,6 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
     var i: usize = 0;
     while (i < relocs.len) : (i += 1) {
         const rel = relocs[i];
-        const rel_type: macho.reloc_type_x86_64 = @enumFromInt(rel.meta.type);
         const rel_offset = rel.offset - self.off;
         const subtractor = if (rel.meta.has_subtractor) relocs[i - 1] else null;
 
@@ -288,50 +296,12 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
             if (rel.getTargetSymbol(macho_file).getFile(macho_file) == null) continue;
         }
 
-        if (rel_type == .X86_64_RELOC_SUBTRACTOR) {
-            if (i + 1 >= relocs.len) {
-                macho_file.base.fatal(
-                    "{}: {s}: 0x{x}: invalid relocation: unterminated X86_64_RELOC_SUBTRACTOR",
-                    .{
-                        file.fmtPath(), name, rel.offset,
-                    },
-                );
-                return error.ResolveFailed;
-            }
-            const next_rel_type: macho.reloc_type_x86_64 = @enumFromInt(relocs[i + 1].meta.type);
-            if (next_rel_type != .X86_64_RELOC_UNSIGNED) {
-                macho_file.base.fatal(
-                    "{}: {s}: 0x{x}: invalid relocation: invalid target relocation for X86_64_RELOC_SUBTRACTOR: {s}",
-                    .{ file.fmtPath(), name, rel.offset, @tagName(next_rel_type) },
-                );
-                return error.ResolveFailed;
-            }
-        }
-
         try stream.seekTo(rel_offset);
         self.resolveRelocInner(rel, subtractor, code, macho_file, stream.writer()) catch |err| {
             switch (err) {
-                error.UnexpectedPcrel => macho_file.base.fatal(
-                    "{}: {s}: 0x{x}: invalid relocation: invalid PCrel option in {s}",
-                    .{ file.fmtPath(), name, rel.offset, @tagName(rel_type) },
-                ),
-                error.UnexpectedSize => macho_file.base.fatal(
-                    "{}: {s}: 0x{x}: invalid relocation: invalid size {d} in {s}",
-                    .{
-                        file.fmtPath(),
-                        name,
-                        rel.offset,
-                        @as(u8, 1) << rel.meta.length,
-                        @tagName(rel_type),
-                    },
-                ),
-                error.NonExternTarget => macho_file.base.fatal(
-                    "{}: {s}: 0x{x}: invalid relocation: non-extern target in {s}",
-                    .{ file.fmtPath(), name, rel.offset, @tagName(rel_type) },
-                ),
                 error.RelaxFail => macho_file.base.fatal(
                     "{}: {s}: 0x{x}: failed to relax relocation: in {s}",
-                    .{ file.fmtPath(), name, rel.offset, @tagName(rel_type) },
+                    .{ file.fmtPath(), name, rel.offset, @tagName(rel.type) },
                 ),
                 else => |e| return e,
             }
@@ -343,11 +313,11 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
 }
 
 const ResolveError = error{
-    UnexpectedPcrel,
-    UnexpectedSize,
-    NonExternTarget,
     RelaxFail,
     NoSpaceLeft,
+    DivisionByZero,
+    UnexpectedRemainder,
+    Overflow,
 };
 
 fn resolveRelocInner(
@@ -358,40 +328,40 @@ fn resolveRelocInner(
     macho_file: *MachO,
     writer: anytype,
 ) ResolveError!void {
-    const rel_type: macho.reloc_type_x86_64 = @enumFromInt(rel.meta.type);
+    const cpu_arch = macho_file.options.cpu_arch.?;
     const rel_offset = rel.offset - self.off;
     const seg_id = macho_file.sections.items(.segment_id)[self.out_n_sect];
     const seg = macho_file.segments.items[seg_id];
     const P = @as(i64, @intCast(self.value)) + @as(i64, @intCast(rel_offset));
-    const A = rel.addend;
+    const A = rel.addend + rel.getRelocAddend(cpu_arch);
     const S: i64 = @intCast(rel.getTargetAddress(macho_file));
     const G: i64 = @intCast(rel.getGotTargetAddress(macho_file));
     const TLS = @as(i64, @intCast(macho_file.getTlsAddress()));
     const SUB = if (subtractor) |sub| @as(i64, @intCast(sub.getTargetAddress(macho_file))) else 0;
 
     switch (rel.tag) {
-        .local => relocs_log.debug("  {s}: {x}: [{x} => {x}] atom({d})", .{
-            fmtRelocType(rel.meta.type, macho_file),
-            rel_offset,
+        .local => relocs_log.debug("  {x}<+{d}>: {s}: [=> {x}] atom({d})", .{
             P,
+            rel_offset,
+            @tagName(rel.type),
             S + A - SUB,
             rel.getTargetAtom(macho_file).atom_index,
         }),
-        .@"extern" => relocs_log.debug("  {s}: {x}: [{x} => {x}] G({x}) ({s})", .{
-            fmtRelocType(rel.meta.type, macho_file),
-            rel_offset,
+        .@"extern" => relocs_log.debug("  {x}<+{d}>: {s}: [=> {x}] G({x}) ({s})", .{
             P,
+            rel_offset,
+            @tagName(rel.type),
             S + A - SUB,
             G + A,
             rel.getTargetSymbol(macho_file).getName(macho_file),
         }),
     }
 
-    switch (rel_type) {
-        .X86_64_RELOC_SUBTRACTOR => {},
+    switch (rel.type) {
+        .subtractor => {},
 
-        .X86_64_RELOC_UNSIGNED => {
-            if (rel.meta.pcrel) return error.UnexpectedPcrel;
+        .unsigned => {
+            assert(!rel.meta.pcrel);
             if (rel.meta.length == 3) {
                 if (rel.tag == .@"extern") {
                     const sym = rel.getTargetSymbol(macho_file);
@@ -424,66 +394,226 @@ fn resolveRelocInner(
                     .offset = @as(u64, @intCast(P)) - seg.vmaddr,
                     .segment_id = seg_id,
                 });
-                try writer.writeInt(u64, @intCast(S + A - SUB), .little);
+                try writer.writeInt(u64, @bitCast(S + A - SUB), .little);
             } else if (rel.meta.length == 2) {
-                try writer.writeInt(u32, @bitCast(@as(i32, @intCast(S + A - SUB))), .little);
-            } else return error.UnexpectedSize;
+                try writer.writeInt(u32, @bitCast(@as(i32, @truncate(S + A - SUB))), .little);
+            } else unreachable;
         },
 
-        .X86_64_RELOC_GOT_LOAD => {
-            if (rel.tag == .local) return error.NonExternTarget;
-            if (rel.meta.length != 2) return error.UnexpectedSize;
-            if (!rel.meta.pcrel) return error.UnexpectedPcrel;
-            if (rel.getTargetSymbol(macho_file).flags.got) {
-                try writer.writeInt(i32, @intCast(G + A - P - 4), .little);
-            } else {
-                try relaxGotLoad(code[rel_offset - 3 ..]);
-                try writer.writeInt(i32, @intCast(S + A - P - 4), .little);
+        .got => {
+            assert(rel.tag == .@"extern");
+            assert(rel.meta.length == 2);
+            assert(rel.meta.pcrel);
+            try writer.writeInt(i32, @intCast(G + A - P), .little);
+        },
+
+        .branch => {
+            assert(rel.meta.length == 2);
+            assert(rel.meta.pcrel);
+
+            switch (cpu_arch) {
+                .x86_64 => try writer.writeInt(i32, @intCast(S + A - P), .little),
+                .aarch64 => {
+                    // TODO thunk indirection
+                    const disp = math.cast(i28, S + A - P) orelse return error.Overflow;
+                    var inst = aarch64.Instruction{
+                        .unconditional_branch_immediate = mem.bytesToValue(std.meta.TagPayload(
+                            aarch64.Instruction,
+                            aarch64.Instruction.unconditional_branch_immediate,
+                        ), code[rel_offset..][0..4]),
+                    };
+                    inst.unconditional_branch_immediate.imm26 = @as(u26, @truncate(@as(u28, @bitCast(disp >> 2))));
+                    try writer.writeInt(u32, inst.toU32(), .little);
+                },
+                else => unreachable,
             }
         },
 
-        .X86_64_RELOC_GOT => {
-            if (rel.tag == .local) return error.NonExternTarget;
-            if (rel.meta.length != 2) return error.UnexpectedSize;
-            if (!rel.meta.pcrel) return error.UnexpectedPcrel;
-            try writer.writeInt(i32, @intCast(G + A - P - 4), .little);
+        .got_load => {
+            assert(rel.tag == .@"extern");
+            assert(rel.meta.length == 2);
+            assert(rel.meta.pcrel);
+            if (rel.getTargetSymbol(macho_file).flags.got) {
+                try writer.writeInt(i32, @intCast(G + A - P), .little);
+            } else {
+                try relaxGotLoad(code[rel_offset - 3 ..]);
+                try writer.writeInt(i32, @intCast(S + A - P), .little);
+            }
         },
 
-        .X86_64_RELOC_BRANCH => {
-            if (rel.meta.length != 2) return error.UnexpectedSize;
-            if (!rel.meta.pcrel) return error.UnexpectedPcrel;
-            try writer.writeInt(i32, @intCast(S + A - P - 4), .little);
-        },
-
-        .X86_64_RELOC_TLV => {
-            if (rel.tag == .local) return error.NonExternTarget;
-            if (rel.meta.length != 2) return error.UnexpectedSize;
-            if (!rel.meta.pcrel) return error.UnexpectedPcrel;
+        .tlv => {
+            assert(rel.tag == .@"extern");
+            assert(rel.meta.length == 2);
+            assert(rel.meta.pcrel);
             const sym = rel.getTargetSymbol(macho_file);
             if (sym.flags.tlv_ptr) {
                 const S_: i64 = @intCast(sym.getTlvPtrAddress(macho_file));
-                try writer.writeInt(i32, @intCast(S_ + A - P - 4), .little);
+                try writer.writeInt(i32, @intCast(S_ + A - P), .little);
             } else {
                 try relaxTlv(code[rel_offset - 3 ..]);
-                try writer.writeInt(i32, @intCast(S + A - P - 4), .little);
+                try writer.writeInt(i32, @intCast(S + A - P), .little);
             }
         },
 
-        .X86_64_RELOC_SIGNED,
-        .X86_64_RELOC_SIGNED_1,
-        .X86_64_RELOC_SIGNED_2,
-        .X86_64_RELOC_SIGNED_4,
+        .signed, .signed1, .signed2, .signed4 => {
+            assert(rel.meta.length == 2);
+            assert(rel.meta.pcrel);
+            try writer.writeInt(i32, @intCast(S + A - P), .little);
+        },
+
+        .page,
+        .got_load_page,
+        .tlvp_page,
         => {
-            if (rel.meta.length != 2) return error.UnexpectedSize;
-            if (!rel.meta.pcrel) return error.UnexpectedPcrel;
-            const correction: i64 = switch (rel_type) {
-                .X86_64_RELOC_SIGNED => 0,
-                .X86_64_RELOC_SIGNED_1 => 1,
-                .X86_64_RELOC_SIGNED_2 => 2,
-                .X86_64_RELOC_SIGNED_4 => 4,
-                else => unreachable,
+            assert(rel.tag == .@"extern");
+            assert(rel.meta.length == 2);
+            assert(rel.meta.pcrel);
+            const sym = rel.getTargetSymbol(macho_file);
+            const source = math.cast(u64, P) orelse return error.Overflow;
+            const target = target: {
+                const target = switch (rel.type) {
+                    .page => S + A,
+                    .got_load_page => G + A,
+                    .tlvp_page => if (sym.flags.tlv_ptr) blk: {
+                        const S_: i64 = @intCast(sym.getTlvPtrAddress(macho_file));
+                        break :blk S_ + A;
+                    } else S + A,
+                    else => unreachable,
+                };
+                break :target math.cast(u64, target) orelse return error.Overflow;
             };
-            try writer.writeInt(i32, @intCast(S + A - P - 4 - correction), .little);
+            const pages = @as(u21, @bitCast(try Relocation.calcNumberOfPages(source, target)));
+            var inst = aarch64.Instruction{
+                .pc_relative_address = mem.bytesToValue(std.meta.TagPayload(
+                    aarch64.Instruction,
+                    aarch64.Instruction.pc_relative_address,
+                ), code[rel_offset..][0..4]),
+            };
+            inst.pc_relative_address.immhi = @as(u19, @truncate(pages >> 2));
+            inst.pc_relative_address.immlo = @as(u2, @truncate(pages));
+            try writer.writeInt(u32, inst.toU32(), .little);
+        },
+
+        .pageoff => {
+            assert(rel.tag == .@"extern");
+            assert(rel.meta.length == 2);
+            assert(!rel.meta.pcrel);
+            const target = math.cast(u64, S + A) orelse return error.Overflow;
+            const inst_code = code[rel_offset..][0..4];
+            if (Relocation.isArithmeticOp(inst_code)) {
+                const off = try Relocation.calcPageOffset(target, .arithmetic);
+                var inst = aarch64.Instruction{
+                    .add_subtract_immediate = mem.bytesToValue(std.meta.TagPayload(
+                        aarch64.Instruction,
+                        aarch64.Instruction.add_subtract_immediate,
+                    ), inst_code),
+                };
+                inst.add_subtract_immediate.imm12 = off;
+                try writer.writeInt(u32, inst.toU32(), .little);
+            } else {
+                var inst = aarch64.Instruction{
+                    .load_store_register = mem.bytesToValue(std.meta.TagPayload(
+                        aarch64.Instruction,
+                        aarch64.Instruction.load_store_register,
+                    ), inst_code),
+                };
+                const off = try Relocation.calcPageOffset(target, switch (inst.load_store_register.size) {
+                    0 => if (inst.load_store_register.v == 1)
+                        Relocation.PageOffsetInstKind.load_store_128
+                    else
+                        Relocation.PageOffsetInstKind.load_store_8,
+                    1 => .load_store_16,
+                    2 => .load_store_32,
+                    3 => .load_store_64,
+                });
+                inst.load_store_register.offset = off;
+                try writer.writeInt(u32, inst.toU32(), .little);
+            }
+        },
+
+        .got_load_pageoff => {
+            assert(rel.tag == .@"extern");
+            assert(rel.meta.length == 2);
+            assert(!rel.meta.pcrel);
+            const target = math.cast(u64, G + A) orelse return error.Overflow;
+            const off = try Relocation.calcPageOffset(target, .load_store_64);
+            var inst: aarch64.Instruction = .{
+                .load_store_register = mem.bytesToValue(std.meta.TagPayload(
+                    aarch64.Instruction,
+                    aarch64.Instruction.load_store_register,
+                ), code[rel_offset..][0..4]),
+            };
+            inst.load_store_register.offset = off;
+            try writer.writeInt(u32, inst.toU32(), .little);
+        },
+
+        .tlvp_pageoff => {
+            assert(rel.tag == .@"extern");
+            assert(rel.meta.length == 2);
+            assert(!rel.meta.pcrel);
+
+            const sym = rel.getTargetSymbol(macho_file);
+            const target = target: {
+                const target = if (sym.flags.tlv_ptr) blk: {
+                    const S_: i64 = @intCast(sym.getTlvPtrAddress(macho_file));
+                    break :blk S_ + A;
+                } else S + A;
+                break :target math.cast(u64, target) orelse return error.Overflow;
+            };
+
+            const RegInfo = struct {
+                rd: u5,
+                rn: u5,
+                size: u2,
+            };
+
+            const inst_code = code[rel_offset..][0..4];
+            const reg_info: RegInfo = blk: {
+                if (Relocation.isArithmeticOp(inst_code)) {
+                    const inst = mem.bytesToValue(std.meta.TagPayload(
+                        aarch64.Instruction,
+                        aarch64.Instruction.add_subtract_immediate,
+                    ), inst_code);
+                    break :blk .{
+                        .rd = inst.rd,
+                        .rn = inst.rn,
+                        .size = inst.sf,
+                    };
+                } else {
+                    const inst = mem.bytesToValue(std.meta.TagPayload(
+                        aarch64.Instruction,
+                        aarch64.Instruction.load_store_register,
+                    ), inst_code);
+                    break :blk .{
+                        .rd = inst.rt,
+                        .rn = inst.rn,
+                        .size = inst.size,
+                    };
+                }
+            };
+
+            var inst = if (sym.flags.tlv_ptr) aarch64.Instruction{
+                .load_store_register = .{
+                    .rt = reg_info.rd,
+                    .rn = reg_info.rn,
+                    .offset = try Relocation.calcPageOffset(target, .load_store_64),
+                    .opc = 0b01,
+                    .op1 = 0b01,
+                    .v = 0,
+                    .size = reg_info.size,
+                },
+            } else aarch64.Instruction{
+                .add_subtract_immediate = .{
+                    .rd = reg_info.rd,
+                    .rn = reg_info.rn,
+                    .imm12 = try Relocation.calcPageOffset(target, .arithmetic),
+                    .sh = 0,
+                    .s = 0,
+                    .op = 0,
+                    .sf = @as(u1, @truncate(reg_info.size)),
+                },
+            };
+            try writer.writeInt(u32, inst.toU32(), .little);
         },
     }
 }
@@ -578,42 +708,6 @@ fn format2(
     }
 }
 
-const FormatRelocTypeContext = struct {
-    r_type: u4,
-    macho_file: *MachO,
-};
-
-pub fn fmtRelocType(r_type: u4, macho_file: *MachO) std.fmt.Formatter(formatRelocType) {
-    return .{
-        .data = .{
-            .r_type = r_type,
-            .macho_file = macho_file,
-        },
-    };
-}
-
-fn formatRelocType(
-    ctx: FormatRelocTypeContext,
-    comptime unused_fmt_string: []const u8,
-    options: std.fmt.FormatOptions,
-    writer: anytype,
-) !void {
-    _ = unused_fmt_string;
-    _ = options;
-    const str = switch (ctx.macho_file.options.cpu_arch.?) {
-        .x86_64 => blk: {
-            const rel_type: macho.reloc_type_x86_64 = @enumFromInt(ctx.r_type);
-            break :blk @tagName(rel_type);
-        },
-        .aarch64 => blk: {
-            const rel_type: macho.reloc_type_arm64 = @enumFromInt(ctx.r_type);
-            break :blk @tagName(rel_type);
-        },
-        else => unreachable,
-    };
-    try writer.print("{s}", .{str});
-}
-
 pub const Index = u32;
 
 pub const Flags = packed struct {
@@ -629,19 +723,19 @@ pub const Loc = struct {
     len: usize = 0,
 };
 
-const Atom = @This();
-
-const std = @import("std");
+const aarch64 = @import("../aarch64.zig");
 const assert = std.debug.assert;
 const bind = @import("dyld_info/bind.zig");
 const dis_x86_64 = @import("dis_x86_64");
 const macho = std.macho;
-const log = std.log.scoped(.link);
-const relocs_log = std.log.scoped(.relocs);
 const math = std.math;
 const mem = std.mem;
+const log = std.log.scoped(.link);
+const relocs_log = std.log.scoped(.relocs);
+const std = @import("std");
 
 const Allocator = mem.Allocator;
+const Atom = @This();
 const Disassembler = dis_x86_64.Disassembler;
 const File = @import("file.zig").File;
 const Instruction = dis_x86_64.Instruction;

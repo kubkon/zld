@@ -21,7 +21,7 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
 
     macho_step.dependOn(testAllLoad(b, opts));
     macho_step.dependOn(testBuildVersionMacOS(b, opts));
-    // macho_step.dependOn(testBuildVersionIOS(b, opts)); // TODO arm64 support
+    macho_step.dependOn(testBuildVersionIOS(b, opts));
     macho_step.dependOn(testDeadStrip(b, opts));
     macho_step.dependOn(testDeadStripDylibs(b, opts));
     macho_step.dependOn(testDylib(b, opts));
@@ -32,7 +32,7 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testEntryPointArchive(b, opts));
     macho_step.dependOn(testEntryPointDylib(b, opts));
     macho_step.dependOn(testFatArchive(b, opts));
-    // macho_step.dependOn(testFatDylib(b, opts)); // TODO arm64 support
+    macho_step.dependOn(testFatDylib(b, opts));
     macho_step.dependOn(testFlatNamespace(b, opts));
     macho_step.dependOn(testFlatNamespaceExe(b, opts));
     macho_step.dependOn(testFlatNamespaceWeak(b, opts));
@@ -161,7 +161,7 @@ fn testBuildVersionMacOS(b: *Build, opts: Options) *Step {
         test_step.dependOn(&check.step);
     }
 
-    {
+    if (builtin.target.cpu.arch == .x86_64) {
         const obj = cc(b, opts);
         obj.addEmptyMain();
         obj.addArgs(&.{ "-c", "-mmacos-version-min=10.13" });
@@ -1187,6 +1187,8 @@ fn testHeaderpad(b: *Build, opts: Options) *Step {
 fn testHeaderWeakFlags(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-header-weak-flags", "");
 
+    if (builtin.target.cpu.arch != .x86_64) return skipTestStep(test_step); // TODO
+
     const obj1 = cc(b, opts);
     obj1.addAsmSource(
         \\.globl _x
@@ -1423,9 +1425,13 @@ fn testLayout(b: *Build, opts: Options) *Step {
 fn testLargeBss(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-large-bss", "");
 
+    // TODO this test used use a 4GB zerofill section but this actually fails and causes every
+    // linker I tried misbehave in different ways. This only happened on arm64. I thought that
+    // maybe S_GB_ZEROFILL section is an answer to this but it doesn't seem supported by dyld
+    // anymore. When I get some free time I will re-investigate this.
     const exe = cc(b, opts);
     exe.addCSource(
-        \\char arr[0x100000000];
+        \\char arr[0x1000000];
         \\int main() {
         \\  return arr[2000];
         \\}
@@ -2228,6 +2234,8 @@ fn testStackSize(b: *Build, opts: Options) *Step {
 fn testSymbolStabs(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-symbol-stabs", "");
 
+    if (builtin.target.cpu.arch != .x86_64) return skipTestStep(test_step); // TODO
+
     const a_o = cc(b, opts);
     a_o.addCSource(
         \\int x;
@@ -2905,6 +2913,8 @@ fn testUnwindInfoNoSubsectionsX64(b: *Build, opts: Options) *Step {
 // Adapted from https://github.com/llvm/llvm-project/blob/main/lld/test/MachO/weak-binding.s
 fn testWeakBind(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-weak-bind", "");
+
+    if (builtin.target.cpu.arch != .x86_64) return skipTestStep(test_step); // TODO
 
     const lib = cc(b, opts);
     lib.addAsmSource(

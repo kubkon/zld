@@ -21,6 +21,8 @@ const usage =
     \\Usage: {s} [files...]
     \\
     \\General Options:
+    \\-adhoc_codesign                    Generates adhoc code signature (default for Apple Silicon)
+    \\-no_adhoc_codesign                 Does not generate adhoc code signature
     \\-all_load                          Loads all members of all static archive libraries
     \\-arch [name]                       Specifies which architecture the output file should be
     \\-current_version [value]           Specifies the current version number of the library
@@ -119,6 +121,7 @@ no_implicit_dylibs: bool = false,
 namespace: Namespace = .two_level,
 all_load: bool = false,
 force_load_objc: bool = false,
+adhoc_codesign: ?bool = null,
 
 pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options {
     if (args.len == 0) ctx.fatal(usage, .{cmd});
@@ -148,6 +151,8 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             ctx.fatal(usage, .{cmd});
         } else if (p.arg2("debug-log")) |scope| {
             try ctx.log_scopes.append(scope);
+        } else if (p.arg2("entitlements")) |path| {
+            opts.entitlements = path;
         } else if (p.flag1("v")) {
             print_version = true;
         } else if (p.flag2("verbose")) {
@@ -302,6 +307,10 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             opts.namespace = .flat;
         } else if (p.flag1("ObjC")) {
             opts.force_load_objc = true;
+        } else if (p.flag1("adhoc_codesign")) {
+            opts.adhoc_codesign = true;
+        } else if (p.flag1("no_adhoc_codesign")) {
+            opts.adhoc_codesign = false;
         } else {
             try positionals.append(.{ .path = p.arg, .tag = .obj });
         }
@@ -325,6 +334,12 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         }),
         else => {},
     };
+
+    if (opts.adhoc_codesign) |cs| {
+        if (!cs and opts.entitlements != null) {
+            ctx.fatal("illegal flags: '--entitlements {s}' with -no_adhoc_codesign", .{opts.entitlements.?});
+        }
+    }
 
     // Add some defaults
     try lib_dirs.put("/usr/lib", {});

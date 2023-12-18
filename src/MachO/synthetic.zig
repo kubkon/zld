@@ -132,14 +132,25 @@ pub const StubsSection = struct {
 
         for (stubs.symbols.items, 0..) |sym_index, idx| {
             const sym = macho_file.getSymbol(sym_index);
+            const source = sym.getAddress(.{ .stubs = true }, macho_file);
+            const target = laptr_sect.addr + idx * @sizeOf(u64);
             switch (cpu_arch) {
                 .x86_64 => {
                     try writer.writeAll(&.{ 0xff, 0x25 });
-                    const source = sym.getAddress(.{ .stubs = true }, macho_file);
-                    const target = laptr_sect.addr + idx * @sizeOf(u64);
                     try writer.writeInt(i32, @intCast(target - source - 2 - 4), .little);
                 },
-                .aarch64 => @panic("TODO"),
+                .aarch64 => {
+                    // TODO relax if possible
+                    const pages = try Relocation.calcNumberOfPages(source, target);
+                    try writer.writeInt(u32, aarch64.Instruction.adrp(.x16, pages).toU32(), .little);
+                    const off = try Relocation.calcPageOffset(target, .load_store_64);
+                    try writer.writeInt(
+                        u32,
+                        aarch64.Instruction.ldr(.x16, .x16, aarch64.Instruction.LoadStoreOffset.imm(off)).toU32(),
+                        .little,
+                    );
+                    try writer.writeInt(u32, aarch64.Instruction.br(.x16).toU32(), .little);
+                },
                 else => unreachable,
             }
         }
@@ -218,17 +229,30 @@ pub const StubsHelperSection = struct {
             const sym = macho_file.getSymbol(sym_index);
             if ((sym.flags.import and !sym.flags.weak) or (!sym.flags.weak and sym.flags.interposable)) {
                 const offset = macho_file.lazy_bind.offsets.items[idx];
+                const source: i64 = @intCast(sect.addr + preamble_size + entry_size * idx);
+                const target: i64 = @intCast(sect.addr);
                 switch (cpu_arch) {
                     .x86_64 => {
                         try writer.writeByte(0x68);
                         try writer.writeInt(u32, offset, .little);
                         try writer.writeByte(0xe9);
-                        const source: i64 = @intCast(sect.addr + preamble_size + entry_size * idx);
-                        const target: i64 = @intCast(sect.addr);
                         try writer.writeInt(i32, @intCast(target - source - 6 - 4), .little);
                     },
-                    .aarch64 => @panic("TODO"),
-                    else => {},
+                    .aarch64 => {
+                        const literal = blk: {
+                            const div_res = try std.math.divExact(u64, entry_size - @sizeOf(u32), 4);
+                            break :blk std.math.cast(u18, div_res) orelse return error.Overflow;
+                        };
+                        try writer.writeInt(u32, aarch64.Instruction.ldrLiteral(
+                            .w16,
+                            literal,
+                        ).toU32(), .little);
+                        const disp = math.cast(i28, @as(i64, @intCast(target)) - @as(i64, @intCast(source + 4))) orelse
+                            return error.Overflow;
+                        try writer.writeInt(u32, aarch64.Instruction.b(disp).toU32(), .little);
+                        try writer.writeAll(&.{ 0x0, 0x0, 0x0, 0x0 });
+                    },
+                    else => unreachable,
                 }
                 idx += 1;
             }
@@ -239,27 +263,49 @@ pub const StubsHelperSection = struct {
         _ = stubs_helper;
         const cpu_arch = macho_file.options.cpu_arch.?;
         const sect = macho_file.sections.items(.header)[macho_file.stubs_helper_sect_index.?];
+        const dyld_private_addr = target: {
+            const sym = macho_file.getSymbol(macho_file.dyld_private_index.?);
+            break :target sym.getAddress(.{}, macho_file);
+        };
+        const dyld_stub_binder_addr = target: {
+            const sym = macho_file.getSymbol(macho_file.dyld_stub_binder_index.?);
+            break :target sym.getGotAddress(macho_file);
+        };
         switch (cpu_arch) {
             .x86_64 => {
                 try writer.writeAll(&.{ 0x4c, 0x8d, 0x1d });
-                {
-                    const target = target: {
-                        const sym = macho_file.getSymbol(macho_file.dyld_private_index.?);
-                        break :target sym.getAddress(.{}, macho_file);
-                    };
-                    try writer.writeInt(i32, @intCast(target - sect.addr - 3 - 4), .little);
-                }
+                try writer.writeInt(i32, @intCast(dyld_private_addr - sect.addr - 3 - 4), .little);
                 try writer.writeAll(&.{ 0x41, 0x53, 0xff, 0x25 });
-                {
-                    const target = target: {
-                        const sym = macho_file.getSymbol(macho_file.dyld_stub_binder_index.?);
-                        break :target sym.getGotAddress(macho_file);
-                    };
-                    try writer.writeInt(i32, @intCast(target - sect.addr - 11 - 4), .little);
-                }
+                try writer.writeInt(i32, @intCast(dyld_stub_binder_addr - sect.addr - 11 - 4), .little);
             },
-            .aarch64 => @panic("TODO"),
-            else => {},
+            .aarch64 => {
+                {
+                    // TODO relax if possible
+                    const pages = try Relocation.calcNumberOfPages(sect.addr, dyld_private_addr);
+                    try writer.writeInt(u32, aarch64.Instruction.adrp(.x17, pages).toU32(), .little);
+                    const off = try Relocation.calcPageOffset(dyld_private_addr, .arithmetic);
+                    try writer.writeInt(u32, aarch64.Instruction.add(.x17, .x17, off, false).toU32(), .little);
+                }
+                try writer.writeInt(u32, aarch64.Instruction.stp(
+                    .x16,
+                    .x17,
+                    aarch64.Register.sp,
+                    aarch64.Instruction.LoadStorePairOffset.pre_index(-16),
+                ).toU32(), .little);
+                {
+                    // TODO relax if possible
+                    const pages = try Relocation.calcNumberOfPages(sect.addr + 12, dyld_stub_binder_addr);
+                    try writer.writeInt(u32, aarch64.Instruction.adrp(.x16, pages).toU32(), .little);
+                    const off = try Relocation.calcPageOffset(dyld_stub_binder_addr, .load_store_64);
+                    try writer.writeInt(u32, aarch64.Instruction.ldr(
+                        .x16,
+                        .x16,
+                        aarch64.Instruction.LoadStoreOffset.imm(off),
+                    ).toU32(), .little);
+                }
+                try writer.writeInt(u32, aarch64.Instruction.br(.x16).toU32(), .little);
+            },
+            else => unreachable,
         }
     }
 };
@@ -435,6 +481,14 @@ pub const ObjcStubsSection = struct {
         objc.symbols.deinit(allocator);
     }
 
+    pub fn entrySize(cpu_arch: std.Target.Cpu.Arch) u8 {
+        return switch (cpu_arch) {
+            .x86_64 => 13,
+            .aarch64 => 8 * @sizeOf(u32),
+            else => unreachable,
+        };
+    }
+
     pub fn addSymbol(objc: *ObjcStubsSection, sym_index: Symbol.Index, macho_file: *MachO) !void {
         const gpa = macho_file.base.allocator;
         const index = @as(Index, @intCast(objc.symbols.items.len));
@@ -447,30 +501,65 @@ pub const ObjcStubsSection = struct {
     pub fn getAddress(objc: ObjcStubsSection, index: Index, macho_file: *MachO) u64 {
         assert(index < objc.symbols.items.len);
         const header = macho_file.sections.items(.header)[macho_file.objc_stubs_sect_index.?];
-        return header.addr + index * entry_size;
+        return header.addr + index * entrySize(macho_file.options.cpu_arch.?);
     }
 
     pub fn size(objc: ObjcStubsSection, macho_file: *MachO) usize {
-        _ = macho_file;
-        return objc.symbols.items.len * entry_size;
+        return objc.symbols.items.len * entrySize(macho_file.options.cpu_arch.?);
     }
 
     pub fn write(objc: ObjcStubsSection, macho_file: *MachO, writer: anytype) !void {
         for (objc.symbols.items, 0..) |sym_index, idx| {
             const sym = macho_file.getSymbol(sym_index);
             const addr = objc.getAddress(@intCast(idx), macho_file);
-            try writer.writeAll(&.{ 0x48, 0x8b, 0x35 });
-            {
-                const target = sym.getObjcSelrefsAddress(macho_file);
-                const source = addr;
-                try writer.writeInt(i32, @intCast(target - source - 3 - 4), .little);
-            }
-            try writer.writeAll(&.{ 0xff, 0x25 });
-            {
-                const target_sym = macho_file.getSymbol(macho_file.objc_msg_send_index.?);
-                const target = target_sym.getGotAddress(macho_file);
-                const source = addr + 7;
-                try writer.writeInt(i32, @intCast(target - source - 2 - 4), .little);
+            switch (macho_file.options.cpu_arch.?) {
+                .x86_64 => {
+                    try writer.writeAll(&.{ 0x48, 0x8b, 0x35 });
+                    {
+                        const target = sym.getObjcSelrefsAddress(macho_file);
+                        const source = addr;
+                        try writer.writeInt(i32, @intCast(target - source - 3 - 4), .little);
+                    }
+                    try writer.writeAll(&.{ 0xff, 0x25 });
+                    {
+                        const target_sym = macho_file.getSymbol(macho_file.objc_msg_send_index.?);
+                        const target = target_sym.getGotAddress(macho_file);
+                        const source = addr + 7;
+                        try writer.writeInt(i32, @intCast(target - source - 2 - 4), .little);
+                    }
+                },
+                .aarch64 => {
+                    {
+                        const target = sym.getObjcSelrefsAddress(macho_file);
+                        const source = addr;
+                        const pages = try Relocation.calcNumberOfPages(source, target);
+                        try writer.writeInt(u32, aarch64.Instruction.adrp(.x1, pages).toU32(), .little);
+                        const off = try Relocation.calcPageOffset(target, .load_store_64);
+                        try writer.writeInt(
+                            u32,
+                            aarch64.Instruction.ldr(.x1, .x1, aarch64.Instruction.LoadStoreOffset.imm(off)).toU32(),
+                            .little,
+                        );
+                    }
+                    {
+                        const target_sym = macho_file.getSymbol(macho_file.objc_msg_send_index.?);
+                        const target = target_sym.getGotAddress(macho_file);
+                        const source = addr + 2 * @sizeOf(u32);
+                        const pages = try Relocation.calcNumberOfPages(source, target);
+                        try writer.writeInt(u32, aarch64.Instruction.adrp(.x16, pages).toU32(), .little);
+                        const off = try Relocation.calcPageOffset(target, .load_store_64);
+                        try writer.writeInt(
+                            u32,
+                            aarch64.Instruction.ldr(.x16, .x16, aarch64.Instruction.LoadStoreOffset.imm(off)).toU32(),
+                            .little,
+                        );
+                    }
+                    try writer.writeInt(u32, aarch64.Instruction.br(.x16).toU32(), .little);
+                    try writer.writeInt(u32, aarch64.Instruction.brk(1).toU32(), .little);
+                    try writer.writeInt(u32, aarch64.Instruction.brk(1).toU32(), .little);
+                    try writer.writeInt(u32, aarch64.Instruction.brk(1).toU32(), .little);
+                },
+                else => unreachable,
             }
         }
     }
@@ -504,7 +593,6 @@ pub const ObjcStubsSection = struct {
         }
     }
 
-    pub const entry_size = 13;
     pub const Index = u32;
 };
 
@@ -540,12 +628,15 @@ pub const WeakBindSection = bind.WeakBind;
 pub const LazyBindSection = bind.LazyBind;
 pub const ExportTrieSection = Trie;
 
+const aarch64 = @import("../aarch64.zig");
 const assert = std.debug.assert;
 const bind = @import("dyld_info/bind.zig");
+const math = std.math;
 const std = @import("std");
 
 const Allocator = std.mem.Allocator;
 const MachO = @import("../MachO.zig");
 const Rebase = @import("dyld_info/Rebase.zig");
+const Relocation = @import("Relocation.zig");
 const Symbol = @import("Symbol.zig");
 const Trie = @import("dyld_info/Trie.zig");
