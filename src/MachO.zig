@@ -367,6 +367,20 @@ pub fn flush(self: *MachO) !void {
     try self.writeIndsymtab();
     try self.writeStrtab();
 
+    var codesig: ?CodeSignature = if (self.requiresCodeSig()) blk: {
+        // Preallocate space for the code signature.
+        // We need to do this at this stage so that we have the load commands with proper values
+        // written out to the file.
+        // The most important here is to have the correct vm and filesize of the __LINKEDIT segment
+        // where the code signature goes into.
+        var codesig = CodeSignature.init(self.getPageSize());
+        codesig.code_directory.ident = self.options.emit.sub_path;
+        if (self.options.entitlements) |path| try codesig.addEntitlements(gpa, path);
+        try self.writeCodeSignaturePadding(&codesig);
+        break :blk codesig;
+    } else null;
+    defer if (codesig) |*csig| csig.deinit(gpa);
+
     self.getLinkeditSegment().vmsize = mem.alignForward(
         u64,
         self.getLinkeditSegment().filesize,
@@ -376,6 +390,12 @@ pub fn flush(self: *MachO) !void {
     const ncmds, const sizeofcmds, const uuid_cmd_offset = try self.writeLoadCommands();
     try self.writeHeader(ncmds, sizeofcmds);
     try self.writeUuid(uuid_cmd_offset, self.requiresCodeSig());
+
+    if (codesig) |*csig| {
+        try self.writeCodeSignature(csig); // code signing always comes last
+        const emit = self.options.emit;
+        try invalidateKernelCache(emit.directory, emit.sub_path);
+    }
 }
 
 fn resolveSearchDir(
@@ -2531,6 +2551,61 @@ fn writeUuid(self: *MachO, uuid_cmd_offset: usize, has_codesig: bool) !void {
     try self.base.file.pwriteAll(&self.uuid_cmd.uuid, offset);
 }
 
+pub fn writeCodeSignaturePadding(self: *MachO, code_sig: *CodeSignature) !void {
+    const seg = self.getLinkeditSegment();
+    // Code signature data has to be 16-bytes aligned for Apple tools to recognize the file
+    // https://github.com/opensource-apple/cctools/blob/fdb4825f303fd5c0751be524babd32958181b3ed/libstuff/checkout.c#L271
+    const offset = mem.alignForward(u64, seg.fileoff + seg.filesize, 16);
+    const needed_size = code_sig.estimateSize(offset);
+    seg.filesize = offset + needed_size - seg.fileoff;
+    seg.vmsize = mem.alignForward(u64, seg.filesize, self.getPageSize());
+    log.debug("writing code signature padding from 0x{x} to 0x{x}", .{ offset, offset + needed_size });
+    // Pad out the space. We need to do this to calculate valid hashes for everything in the file
+    // except for code signature data.
+    try self.base.file.pwriteAll(&[_]u8{0}, offset + needed_size - 1);
+
+    self.codesig_cmd.dataoff = @as(u32, @intCast(offset));
+    self.codesig_cmd.datasize = @as(u32, @intCast(needed_size));
+}
+
+pub fn writeCodeSignature(self: *MachO, code_sig: *CodeSignature) !void {
+    const seg = self.getTextSegment();
+    const offset = self.codesig_cmd.dataoff;
+
+    var buffer = std.ArrayList(u8).init(self.base.allocator);
+    defer buffer.deinit();
+    try buffer.ensureTotalCapacityPrecise(code_sig.size());
+    try code_sig.writeAdhocSignature(self, .{
+        .file = self.base.file,
+        .exec_seg_base = seg.fileoff,
+        .exec_seg_limit = seg.filesize,
+        .file_size = offset,
+        .dylib = self.options.dylib,
+    }, buffer.writer());
+    assert(buffer.items.len == code_sig.size());
+
+    log.debug("writing code signature from 0x{x} to 0x{x}", .{
+        offset,
+        offset + buffer.items.len,
+    });
+
+    try self.base.file.pwriteAll(buffer.items, offset);
+}
+
+/// XNU starting with Big Sur running on arm64 is caching inodes of running binaries.
+/// Any change to the binary will effectively invalidate the kernel's cache
+/// resulting in a SIGKILL on each subsequent run. Since when doing incremental
+/// linking we're modifying a binary in-place, this will end up with the kernel
+/// killing it on every subsequent run. To circumvent it, we will copy the file
+/// into a new inode, remove the original file, and rename the copy to match
+/// the original file. This is super messy, but there doesn't seem any other
+/// way to please the XNU.
+pub fn invalidateKernelCache(dir: std.fs.Dir, sub_path: []const u8) !void {
+    if (comptime builtin.target.isDarwin() and builtin.target.cpu.arch == .aarch64) {
+        try dir.copyFile(sub_path, dir, sub_path, .{});
+    }
+}
+
 pub inline fn getPageSize(self: MachO) u16 {
     return switch (self.options.cpu_arch.?) {
         .aarch64 => 0x4000,
@@ -2541,14 +2616,11 @@ pub inline fn getPageSize(self: MachO) u16 {
 
 pub fn requiresCodeSig(self: MachO) bool {
     if (self.options.entitlements) |_| return true;
-    if (self.options.cpu_arch.? == .aarch64) {
-        const platform = if (self.options.platform) |platform| platform.platform else .MACOS;
-        switch (platform) {
-            .MACOS, .IOSSIMULATOR, .WATCHOSSIMULATOR, .TVOSSIMULATOR => return true,
-            else => {},
-        }
-    }
-    return false;
+    if (self.options.adhoc_codesign) |cs| return cs;
+    return switch (self.options.cpu_arch.?) {
+        .aarch64 => true,
+        else => false,
+    };
 }
 
 inline fn requiresThunks(self: MachO) bool {
