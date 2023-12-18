@@ -1648,7 +1648,7 @@ fn setupMemory(wasm: *Wasm) !void {
 fn allocateVirtualAddresses(wasm: *Wasm) void {
     for (wasm.resolved_symbols.keys()) |loc| {
         const symbol: *Symbol = loc.getSymbol(wasm);
-        if (symbol.tag != .data) {
+        if (symbol.tag != .data or symbol.isDead()) {
             continue; // only data symbols have virtual addresses
         }
         const atom_index = wasm.symbol_atom.get(loc) orelse {
@@ -1725,7 +1725,7 @@ pub fn getMatchingSegment(wasm: *Wasm, gpa: Allocator, object_index: u16, symbol
                     break :blk index;
                 };
             } else if (mem.eql(u8, section_name, ".debug_ranges")) {
-                return wasm.debug_line_index orelse blk: {
+                return wasm.debug_ranges_index orelse blk: {
                     wasm.debug_ranges_index = index;
                     try wasm.appendDummySegment(gpa);
                     break :blk index;
@@ -2050,35 +2050,13 @@ fn markReferences(wasm: *Wasm) !void {
         const sym = sym_loc.getSymbol(wasm);
         if (sym.isExported(wasm.options.export_dynamic) or sym.isNoStrip()) {
             try wasm.mark(sym_loc);
-        }
-    }
-
-    // Check for all debug atoms if it contains relocations for marked symbols.
-    // When found, we mark the debug atom itself so the atom will be emit.
-    const debug_sections: []const ?u32 = &.{
-        wasm.debug_info_index,
-        wasm.debug_pubtypes_index,
-        wasm.debug_abbrev_index,
-        wasm.debug_line_index,
-        wasm.debug_str_index,
-        wasm.debug_pubnames_index,
-        wasm.debug_loc_index,
-        wasm.debug_ranges_index,
-    };
-
-    for (debug_sections) |maybe_index| {
-        var atom_index = wasm.atoms.get(maybe_index orelse continue).?;
-        while (atom_index != .none) {
+        } else if (sym.tag == .section) {
+            const file_index = sym_loc.file orelse continue;
+            const object = &wasm.objects.items[file_index];
+            const atom_index = try Object.parseSymbolIntoAtom(object, file_index, sym_loc.sym_index, wasm);
             const atom = Atom.fromIndex(wasm, atom_index);
             const atom_sym = atom.symbolLoc().getSymbol(wasm);
-            for (atom.relocs) |reloc| {
-                const target_loc: SymbolWithLoc = .{ .sym_index = reloc.index, .file = atom.file };
-                const target_sym = target_loc.getSymbol(wasm);
-                if (target_sym.isAlive()) {
-                    atom_sym.mark();
-                }
-            }
-            atom_index = atom.prev;
+            atom_sym.mark();
         }
     }
 }

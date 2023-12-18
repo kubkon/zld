@@ -125,6 +125,10 @@ pub fn resolveRelocs(atom: *Atom, wasm_bin: *const Wasm) void {
 fn relocationValue(atom: *Atom, relocation: types.Relocation, wasm_bin: *const Wasm) u64 {
     const target_loc = (Wasm.SymbolWithLoc{ .file = atom.file, .sym_index = relocation.index }).finalLoc(wasm_bin);
     const symbol = target_loc.getSymbol(wasm_bin);
+    if (symbol.tag != .section and symbol.isDead()) {
+        const val: i64 = atom.thombstone(wasm_bin) orelse relocation.addend;
+        return @bitCast(val);
+    }
     switch (relocation.relocation_type) {
         .R_WASM_FUNCTION_INDEX_LEB => return symbol.index,
         .R_WASM_TABLE_NUMBER_LEB => return symbol.index,
@@ -162,13 +166,6 @@ fn relocationValue(atom: *Atom, relocation: types.Relocation, wasm_bin: *const W
             return @intCast(rel_value + relocation.addend);
         },
         .R_WASM_FUNCTION_OFFSET_I32 => {
-            if (symbol.isDead()) {
-                const atom_name = atom.symbolLoc().getName(wasm_bin);
-                if (std.mem.eql(u8, atom_name, ".debug_ranges") or std.mem.eql(u8, atom_name, ".debug_loc")) {
-                    return @bitCast(@as(i64, -2));
-                }
-                return @bitCast(@as(i64, -1));
-            }
             const target_atom_index = wasm_bin.symbol_atom.get(target_loc).?;
             const target_atom = fromIndex(wasm_bin, target_atom_index);
             const offset: u32 = 11 + Wasm.getULEB128Size(target_atom.size); // Header (11 bytes fixed-size) + body size (leb-encoded)
@@ -182,4 +179,16 @@ fn relocationValue(atom: *Atom, relocation: types.Relocation, wasm_bin: *const W
             return @intCast(va + relocation.addend);
         },
     }
+}
+
+/// For a given `Atom` returns whether it has a thombstone value or not.
+/// This defines whether we want a specific value when a section is dead.
+fn thombstone(atom: Atom, wasm: *const Wasm) ?i64 {
+    const atom_name = atom.symbolLoc().getName(wasm);
+    if (std.mem.eql(u8, atom_name, ".debug_ranges") or std.mem.eql(u8, atom_name, ".debug_loc")) {
+        return -2;
+    } else if (std.mem.startsWith(u8, atom_name, ".debug_")) {
+        return -1;
+    }
+    return null;
 }
