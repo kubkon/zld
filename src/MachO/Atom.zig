@@ -292,7 +292,7 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
             switch (err) {
                 error.RelaxFail => macho_file.base.fatal(
                     "{}: {s}: 0x{x}: failed to relax relocation: in {s}",
-                    .{ file.fmtPath(), name, rel.offset, @tagName(rel.type) }, // TODO format!
+                    .{ file.fmtPath(), name, rel.offset, @tagName(rel.type) },
                 ),
                 else => |e| return e,
             }
@@ -329,14 +329,14 @@ fn resolveRelocInner(
 
     switch (rel.tag) {
         .local => relocs_log.debug("  {s}: {x}: [{x} => {x}] atom({d})", .{
-            @tagName(rel.type), // TODO format!
+            @tagName(rel.type),
             rel_offset,
             P,
             S + A - SUB,
             rel.getTargetAtom(macho_file).atom_index,
         }),
         .@"extern" => relocs_log.debug("  {s}: {x}: [{x} => {x}] G({x}) ({s})", .{
-            @tagName(rel.type), // TODO format!
+            @tagName(rel.type),
             rel_offset,
             P,
             S + A - SUB,
@@ -525,42 +525,6 @@ fn format2(
         }
         try writer.writeAll(" }");
     }
-}
-
-const FormatRelocTypeContext = struct {
-    r_type: u4,
-    macho_file: *MachO,
-};
-
-pub fn fmtRelocType(r_type: u4, macho_file: *MachO) std.fmt.Formatter(formatRelocType) {
-    return .{
-        .data = .{
-            .r_type = r_type,
-            .macho_file = macho_file,
-        },
-    };
-}
-
-fn formatRelocType(
-    ctx: FormatRelocTypeContext,
-    comptime unused_fmt_string: []const u8,
-    options: std.fmt.FormatOptions,
-    writer: anytype,
-) !void {
-    _ = unused_fmt_string;
-    _ = options;
-    const str = switch (ctx.macho_file.options.cpu_arch.?) {
-        .x86_64 => blk: {
-            const rel_type: macho.reloc_type_x86_64 = @enumFromInt(ctx.r_type);
-            break :blk @tagName(rel_type);
-        },
-        .aarch64 => blk: {
-            const rel_type: macho.reloc_type_arm64 = @enumFromInt(ctx.r_type);
-            break :blk @tagName(rel_type);
-        },
-        else => unreachable,
-    };
-    try writer.print("{s}", .{str});
 }
 
 pub const Index = u32;
