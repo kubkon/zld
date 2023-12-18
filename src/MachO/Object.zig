@@ -1562,7 +1562,7 @@ const aarch64 = struct {
 
             switch (@as(macho.reloc_type_arm64, @enumFromInt(rel.r_type))) {
                 .ARM64_RELOC_ADDEND => {
-                    addend = rel.r_address;
+                    addend = rel.r_symbolnum;
                     i += 1;
                     if (i >= relocs.len) {
                         macho_file.base.fatal("{}: {s},{s}: 0x{x}: unterminated ARM64_RELOC_ADDEND", .{
