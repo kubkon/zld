@@ -509,7 +509,7 @@ fn inferCpuArchAndPlatform(self: *MachO, objs: []const LinkObject) !void {
         const cpu_arch: std.Target.Cpu.Arch = switch (header.cputype) {
             macho.CPU_TYPE_ARM64 => .aarch64,
             macho.CPU_TYPE_X86_64 => .x86_64,
-            else => @panic("unhandled CPU arch"),
+            else => @panic("unhandled CPU arch"), // TODO error
         };
 
         const cmds_buffer = try gpa.alloc(u8, header.sizeofcmds);

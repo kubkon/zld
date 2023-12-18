@@ -34,13 +34,17 @@ pub fn getGotTargetAddress(rel: Relocation, macho_file: *MachO) u64 {
     };
 }
 
-pub inline fn getRelocAddend(rel: Relocation) u3 {
-    return switch (rel.type) {
+pub fn getRelocAddend(rel: Relocation, cpu_arch: std.Target.Cpu.Arch) i64 {
+    const addend: i64 = switch (rel.type) {
         .signed => 0,
-        .signed1 => 1,
-        .signed2 => 2,
-        .signed4 => 4,
+        .signed1 => -1,
+        .signed2 => -2,
+        .signed4 => -4,
         else => 0,
+    };
+    return switch (cpu_arch) {
+        .x86_64 => if (rel.meta.pcrel) addend - 4 else addend,
+        else => addend,
     };
 }
 

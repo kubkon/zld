@@ -316,11 +316,12 @@ fn resolveRelocInner(
     macho_file: *MachO,
     writer: anytype,
 ) ResolveError!void {
+    const cpu_arch = macho_file.options.cpu_arch.?;
     const rel_offset = rel.offset - self.off;
     const seg_id = macho_file.sections.items(.segment_id)[self.out_n_sect];
     const seg = macho_file.segments.items[seg_id];
     const P = @as(i64, @intCast(self.value)) + @as(i64, @intCast(rel_offset));
-    const A = rel.addend;
+    const A = rel.addend + rel.getRelocAddend(cpu_arch);
     const S: i64 = @intCast(rel.getTargetAddress(macho_file));
     const G: i64 = @intCast(rel.getGotTargetAddress(macho_file));
     const TLS = @as(i64, @intCast(macho_file.getTlsAddress()));
@@ -392,10 +393,10 @@ fn resolveRelocInner(
             assert(rel.meta.length == 2);
             assert(rel.meta.pcrel);
             if (rel.getTargetSymbol(macho_file).flags.got) {
-                try writer.writeInt(i32, @intCast(G + A - P - 4), .little);
+                try writer.writeInt(i32, @intCast(G + A - P), .little);
             } else {
                 try relaxGotLoad(code[rel_offset - 3 ..]);
-                try writer.writeInt(i32, @intCast(S + A - P - 4), .little);
+                try writer.writeInt(i32, @intCast(S + A - P), .little);
             }
         },
 
@@ -403,13 +404,13 @@ fn resolveRelocInner(
             assert(rel.tag == .@"extern");
             assert(rel.meta.length == 2);
             assert(rel.meta.pcrel);
-            try writer.writeInt(i32, @intCast(G + A - P - 4), .little);
+            try writer.writeInt(i32, @intCast(G + A - P), .little);
         },
 
         .branch => {
             assert(rel.meta.length == 2);
             assert(rel.meta.pcrel);
-            try writer.writeInt(i32, @intCast(S + A - P - 4), .little);
+            try writer.writeInt(i32, @intCast(S + A - P), .little);
         },
 
         .tlv => {
@@ -419,17 +420,17 @@ fn resolveRelocInner(
             const sym = rel.getTargetSymbol(macho_file);
             if (sym.flags.tlv_ptr) {
                 const S_: i64 = @intCast(sym.getTlvPtrAddress(macho_file));
-                try writer.writeInt(i32, @intCast(S_ + A - P - 4), .little);
+                try writer.writeInt(i32, @intCast(S_ + A - P), .little);
             } else {
                 try relaxTlv(code[rel_offset - 3 ..]);
-                try writer.writeInt(i32, @intCast(S + A - P - 4), .little);
+                try writer.writeInt(i32, @intCast(S + A - P), .little);
             }
         },
 
         .signed, .signed1, .signed2, .signed4 => {
             assert(rel.meta.length == 2);
             assert(rel.meta.pcrel);
-            try writer.writeInt(i32, @intCast(S + A - P - 4 - rel.getRelocAddend()), .little);
+            try writer.writeInt(i32, @intCast(S + A - P), .little);
         },
 
         else => @panic("TODO"),
