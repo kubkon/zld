@@ -565,6 +565,7 @@ fn initUnwindRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
         const out = macho_file.getUnwindRecord(out_index.*);
         out.length = rec.rangeLength;
         out.enc = .{ .enc = rec.compactUnwindEncoding };
+        out.file = self.index;
 
         for (relocs[reloc_start..reloc_idx]) |rel| {
             assert(rel.type == .unsigned and rel.meta.length == 3); // TODO error
