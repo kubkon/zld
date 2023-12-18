@@ -53,10 +53,10 @@ pub fn lessThan(ctx: void, lhs: Relocation, rhs: Relocation) bool {
     return lhs.offset < rhs.offset;
 }
 
-pub fn calcNumberOfPages(saddr: u64, taddr: u64) i21 {
-    const spage = @as(i32, @intCast(saddr >> 12));
-    const tpage = @as(i32, @intCast(taddr >> 12));
-    const pages = @as(i21, @intCast(tpage - spage));
+pub fn calcNumberOfPages(saddr: u64, taddr: u64) error{Overflow}!i21 {
+    const spage = math.cast(i32, saddr >> 12) orelse return error.Overflow;
+    const tpage = math.cast(i32, taddr >> 12) orelse return error.Overflow;
+    const pages = math.cast(i21, tpage - spage) orelse return error.Overflow;
     return pages;
 }
 

@@ -141,7 +141,7 @@ pub const StubsSection = struct {
                 },
                 .aarch64 => {
                     // TODO relax if possible
-                    const pages = Relocation.calcNumberOfPages(source, target);
+                    const pages = try Relocation.calcNumberOfPages(source, target);
                     try writer.writeInt(u32, aarch64.Instruction.adrp(.x16, pages).toU32(), .little);
                     const off = try Relocation.calcPageOffset(target, .load_store_64);
                     try writer.writeInt(
@@ -281,7 +281,7 @@ pub const StubsHelperSection = struct {
             .aarch64 => {
                 {
                     // TODO relax if possible
-                    const pages = Relocation.calcNumberOfPages(sect.addr, dyld_private_addr);
+                    const pages = try Relocation.calcNumberOfPages(sect.addr, dyld_private_addr);
                     try writer.writeInt(u32, aarch64.Instruction.adrp(.x17, pages).toU32(), .little);
                     const off = try Relocation.calcPageOffset(dyld_private_addr, .arithmetic);
                     try writer.writeInt(u32, aarch64.Instruction.add(.x17, .x17, off, false).toU32(), .little);
@@ -294,7 +294,7 @@ pub const StubsHelperSection = struct {
                 ).toU32(), .little);
                 {
                     // TODO relax if possible
-                    const pages = Relocation.calcNumberOfPages(sect.addr + 12, dyld_stub_binder_addr);
+                    const pages = try Relocation.calcNumberOfPages(sect.addr + 12, dyld_stub_binder_addr);
                     try writer.writeInt(u32, aarch64.Instruction.adrp(.x16, pages).toU32(), .little);
                     const off = try Relocation.calcPageOffset(dyld_stub_binder_addr, .load_store_64);
                     try writer.writeInt(u32, aarch64.Instruction.ldr(

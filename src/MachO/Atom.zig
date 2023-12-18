@@ -468,7 +468,7 @@ fn resolveRelocInner(
                 .got_load_page => math.cast(u64, G + A),
                 else => unreachable,
             } orelse return error.Overflow;
-            const pages = @as(u21, @bitCast(Relocation.calcNumberOfPages(source, target)));
+            const pages = @as(u21, @bitCast(try Relocation.calcNumberOfPages(source, target)));
             var inst = aarch64.Instruction{
                 .pc_relative_address = mem.bytesToValue(std.meta.TagPayload(
                     aarch64.Instruction,
