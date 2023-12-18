@@ -98,7 +98,7 @@ pub const Type = enum {
     // arm64
     /// PC-relative load (distance to page, ARM64_RELOC_PAGE21)
     page,
-    /// Non-PC-relative offset to GOT slot (ARM64_RELOC_PAGEOFF12)
+    /// Non-PC-relative offset to symbol (ARM64_RELOC_PAGEOFF12)
     pageoff,
     /// PC-relative GOT load (distance to page, ARM64_RELOC_GOT_LOAD_PAGE21)
     got_load_page,
@@ -106,7 +106,7 @@ pub const Type = enum {
     got_load_pageoff,
     /// PC-relative TLV load (distance to page, ARM64_RELOC_TLVP_LOAD_PAGE21)
     tlvp_page,
-    /// Non-PC-relative offset to GOT slot (ARM64_RELOC_TLVP_LOAD_PAGEOFF12)
+    /// Non-PC-relative offset to TLV slot (ARM64_RELOC_TLVP_LOAD_PAGEOFF12)
     tlvp_pageoff,
 
     // common

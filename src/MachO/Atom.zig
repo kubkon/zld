@@ -183,7 +183,10 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
                 }
             },
 
-            .got_load => {
+            .got_load,
+            .got_load_page,
+            .got_load_pageoff,
+            => {
                 const symbol = rel.getTargetSymbol(macho_file);
                 if (symbol.flags.import or (symbol.flags.@"export" and (symbol.flags.weak or symbol.flags.interposable))) {
                     symbol.flags.got = true;
@@ -197,7 +200,10 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
                 rel.getTargetSymbol(macho_file).flags.got = true;
             },
 
-            .tlv => {
+            .tlv,
+            .tlvp_page,
+            .tlvp_pageoff,
+            => {
                 const symbol = rel.getTargetSymbol(macho_file);
                 if (!symbol.flags.tlv) {
                     macho_file.base.fatal(
