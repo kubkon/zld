@@ -939,7 +939,7 @@ pub fn parseSymbolIntoAtom(object: *Object, object_index: u16, symbol_index: u32
     };
     const final_index = try wasm_bin.getMatchingSegment(wasm_bin.base.allocator, object_index, symbol_index);
     const atom_index = try wasm_bin.createAtom();
-    try wasm_bin.appendAtomAtIndex(wasm_bin.base.allocator, final_index, atom_index);
+    try wasm_bin.appendAtomAtIndex(final_index, atom_index);
 
     const atom = Atom.ptrFromIndex(wasm_bin, atom_index);
     atom.sym_index = symbol_index;

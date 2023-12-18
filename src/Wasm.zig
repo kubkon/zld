@@ -113,6 +113,10 @@ debug_abbrev_index: ?u32 = null,
 /// by the synthetic __wasm_call_ctors function.
 init_funcs: std.ArrayListUnmanaged(InitFuncLoc) = .{},
 
+/// The last atom to be emit into the code section, this is used to append new
+/// synthetic functions after code has already been allocated.
+last_code_atom: Atom.Index = .none,
+
 pub const Segment = struct {
     alignment: u32,
     size: u32,
@@ -419,15 +423,12 @@ pub fn flush(wasm: *Wasm) !void {
     try wasm.resolveSymbolsInArchives();
     try wasm.resolveLazySymbols();
     try wasm.checkUndefinedSymbols();
-
     try wasm.setupInitFunctions();
     try wasm.setupStart();
-
     try wasm.markReferences();
     try wasm.mergeImports();
     try wasm.mergeSections();
     try wasm.mergeTypes();
-
     try wasm.allocateAtoms();
     try wasm.setupMemory();
     wasm.allocateVirtualAddresses();
@@ -1407,10 +1408,13 @@ fn createSyntheticFunction(
         .data = function_body.ptr,
         .original_offset = 0,
     };
-    try wasm.appendAtomAtIndex(wasm.base.allocator, wasm.code_section_index.?, atom_index);
+    assert(wasm.last_code_atom != .none);
+    const last_atom = Atom.ptrFromIndex(wasm, wasm.last_code_atom);
+    last_atom.prev = atom_index;
+    atom.next = wasm.last_code_atom;
+    atom.offset = last_atom.offset + last_atom.size;
+    wasm.last_code_atom = atom_index;
     try wasm.symbol_atom.putNoClobber(wasm.base.allocator, loc, atom_index);
-    const prev = Atom.fromIndex(wasm, atom.prev);
-    atom.offset = prev.offset + prev.size;
 }
 
 /// Initializes a new `Atom` and returns its `Atom.Index`.
@@ -1775,7 +1779,7 @@ fn appendDummySegment(wasm: *Wasm, gpa: Allocator) !void {
 
 /// From a given index, append the given `Atom` at the back of the linked list.
 /// Simply inserts it into the map of atoms when it doesn't exist yet.
-pub fn appendAtomAtIndex(wasm: *Wasm, gpa: Allocator, index: u32, atom_index: Atom.Index) !void {
+pub fn appendAtomAtIndex(wasm: *Wasm, index: u32, atom_index: Atom.Index) !void {
     if (wasm.atoms.getPtr(index)) |last| {
         const last_atom = Atom.ptrFromIndex(wasm, last.*);
         const atom = Atom.ptrFromIndex(wasm, atom_index);
@@ -1783,7 +1787,7 @@ pub fn appendAtomAtIndex(wasm: *Wasm, gpa: Allocator, index: u32, atom_index: At
         last_atom.next = atom_index;
         last.* = atom_index;
     } else {
-        try wasm.atoms.putNoClobber(gpa, index, atom_index);
+        try wasm.atoms.putNoClobber(wasm.base.allocator, index, atom_index);
     }
 }
 
@@ -1792,7 +1796,8 @@ pub fn appendAtomAtIndex(wasm: *Wasm, gpa: Allocator, index: u32, atom_index: At
 /// - .data
 /// - .text
 /// - <others> (.bss)
-fn sortDataSegments(wasm: *Wasm, gpa: Allocator) !void {
+fn sortDataSegments(wasm: *Wasm) !void {
+    const gpa = wasm.base.allocator;
     var new_mapping: std.StringArrayHashMapUnmanaged(u32) = .{};
     try new_mapping.ensureUnusedCapacity(gpa, wasm.data_segments.count());
     errdefer new_mapping.deinit(gpa);
@@ -1822,9 +1827,40 @@ fn sortDataSegments(wasm: *Wasm, gpa: Allocator) !void {
     wasm.data_segments = new_mapping;
 }
 
+/// Sort the code atoms in the same order as their definitions in the function section.
+/// This is required so debug relocations can correctly retrieve the offset of a code atom.
+/// The order of the code section and function section must *always* match.
+fn sortCodeSection(wasm: *Wasm) !void {
+    const code_index = wasm.code_section_index orelse return;
+    var sorted_atoms = try std.ArrayList(Atom.Index).initCapacity(wasm.base.allocator, wasm.functions.count());
+    defer sorted_atoms.deinit();
+
+    var it = wasm.functions.items.iterator();
+    while (it.next()) |entry| {
+        const loc: SymbolWithLoc = .{
+            .file = entry.key_ptr.file,
+            .sym_index = entry.value_ptr.symbol_index,
+        };
+        const atom_index = wasm.symbol_atom.get(loc.finalLoc(wasm)).?;
+        const atom = Atom.ptrFromIndex(wasm, atom_index);
+        atom.prev = .none;
+        atom.next = .none;
+        sorted_atoms.appendAssumeCapacity(atom_index);
+    }
+
+    assert(wasm.atoms.remove(code_index));
+    var i = sorted_atoms.items.len;
+    while (i > 0) {
+        i -= 1;
+        try wasm.appendAtomAtIndex(code_index, sorted_atoms.items[i]);
+    }
+    wasm.last_code_atom = sorted_atoms.items[sorted_atoms.items.len - 1];
+}
+
 fn allocateAtoms(wasm: *Wasm) !void {
     // first sort the data segments
-    try wasm.sortDataSegments(wasm.base.allocator);
+    try wasm.sortDataSegments();
+    try wasm.sortCodeSection();
 
     var it = wasm.atoms.iterator();
     while (it.next()) |entry| {

@@ -180,32 +180,15 @@ pub fn emit(wasm: *Wasm) !void {
         const offset = try reserveSectionHeader(&binary_bytes);
         var atom_index = wasm.atoms.get(index).?;
 
-        // The code section must be sorted in line with the function order.
-        var sorted_atoms = try std.ArrayList(*Atom).initCapacity(wasm.base.allocator, wasm.functions.count());
-        defer sorted_atoms.deinit();
-
         while (atom_index != .none) {
             const atom = Atom.ptrFromIndex(wasm, atom_index);
             std.debug.assert(atom.symbolLoc().getSymbol(wasm).isAlive());
             atom.resolveRelocs(wasm);
-            sorted_atoms.appendAssumeCapacity(atom);
+            try leb.writeULEB128(writer, atom.size);
+            try writer.writeAll(atom.data[0..atom.size]);
             atom_index = atom.prev;
         }
 
-        const atom_sort_fn = struct {
-            fn sort(ctx: *const Wasm, lhs: *const Atom, rhs: *const Atom) bool {
-                const lhs_sym = lhs.symbolLoc().getSymbol(ctx);
-                const rhs_sym = rhs.symbolLoc().getSymbol(ctx);
-                return lhs_sym.index < rhs_sym.index;
-            }
-        }.sort;
-
-        std.mem.sort(*Atom, sorted_atoms.items, wasm, atom_sort_fn);
-        for (sorted_atoms.items) |sorted_atom| {
-            try leb.writeULEB128(writer, sorted_atom.size);
-            try writer.writeAll(sorted_atom.data[0..sorted_atom.size]);
-        }
-        std.debug.assert(sorted_atoms.items.len == wasm.functions.count()); // must have equal amount of bodies as functions
         try emitSectionHeader(
             binary_bytes.items,
             offset,
