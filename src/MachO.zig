@@ -774,7 +774,7 @@ fn parseDylib(self: *MachO, arena: Allocator, obj: LinkObject, explicit: bool) a
     }
 
     const header = file.reader().readStruct(macho.mach_header_64) catch return null;
-    try file.seekTo(0);
+    try file.seekTo(offset);
 
     if (header.filetype != macho.MH_DYLIB) return null;
 

@@ -21,7 +21,7 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
 
     macho_step.dependOn(testAllLoad(b, opts));
     macho_step.dependOn(testBuildVersionMacOS(b, opts));
-    // macho_step.dependOn(testBuildVersionIOS(b, opts)); // TODO arm64 support
+    macho_step.dependOn(testBuildVersionIOS(b, opts));
     macho_step.dependOn(testDeadStrip(b, opts));
     macho_step.dependOn(testDeadStripDylibs(b, opts));
     macho_step.dependOn(testDylib(b, opts));
@@ -32,7 +32,7 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testEntryPointArchive(b, opts));
     macho_step.dependOn(testEntryPointDylib(b, opts));
     macho_step.dependOn(testFatArchive(b, opts));
-    // macho_step.dependOn(testFatDylib(b, opts)); // TODO arm64 support
+    macho_step.dependOn(testFatDylib(b, opts));
     macho_step.dependOn(testFlatNamespace(b, opts));
     macho_step.dependOn(testFlatNamespaceExe(b, opts));
     macho_step.dependOn(testFlatNamespaceWeak(b, opts));
