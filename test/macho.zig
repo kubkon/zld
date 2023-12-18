@@ -161,7 +161,7 @@ fn testBuildVersionMacOS(b: *Build, opts: Options) *Step {
         test_step.dependOn(&check.step);
     }
 
-    {
+    if (builtin.target.cpu.arch == .x86_64) {
         const obj = cc(b, opts);
         obj.addEmptyMain();
         obj.addArgs(&.{ "-c", "-mmacos-version-min=10.13" });
