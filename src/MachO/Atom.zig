@@ -394,9 +394,9 @@ fn resolveRelocInner(
                     .offset = @as(u64, @intCast(P)) - seg.vmaddr,
                     .segment_id = seg_id,
                 });
-                try writer.writeInt(u64, @intCast(S + A - SUB), .little);
+                try writer.writeInt(u64, @bitCast(S + A - SUB), .little);
             } else if (rel.meta.length == 2) {
-                try writer.writeInt(u32, @bitCast(@as(i32, @intCast(S + A - SUB))), .little);
+                try writer.writeInt(u32, @bitCast(@as(i32, @truncate(S + A - SUB))), .little);
             } else unreachable;
         },
 
