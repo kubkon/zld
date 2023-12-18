@@ -1692,7 +1692,11 @@ fn calcSectionSizes(self: *MachO) !void {
     if (self.objc_stubs_sect_index) |idx| {
         const header = &self.sections.items(.header)[idx];
         header.size = self.objc_stubs.size(self);
-        header.@"align" = 1;
+        header.@"align" = switch (cpu_arch) {
+            .x86_64 => 0,
+            .aarch64 => 2,
+            else => 0,
+        };
     }
 }
 
