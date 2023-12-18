@@ -91,9 +91,21 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
         nlist: macho.nlist_64,
         idx: usize,
 
-        fn lessThan(ctx: void, lhs: @This(), rhs: @This()) bool {
-            _ = ctx;
+        fn rank(ctx: *const Object, nl: macho.nlist_64) u8 {
+            if (!nl.ext()) {
+                const name = ctx.getString(nl.n_strx);
+                if (name.len == 0) return 5;
+                if (name[0] == 'l' or name[0] == 'L') return 4;
+                return 3;
+            }
+            return if (nl.weakDef()) 2 else 1;
+        }
+
+        fn lessThan(ctx: *const Object, lhs: @This(), rhs: @This()) bool {
             if (lhs.nlist.n_sect == rhs.nlist.n_sect) {
+                if (lhs.nlist.n_value == rhs.nlist.n_value) {
+                    return rank(ctx, lhs.nlist) < rank(ctx, rhs.nlist);
+                }
                 return lhs.nlist.n_value < rhs.nlist.n_value;
             }
             return lhs.nlist.n_sect < rhs.nlist.n_sect;
@@ -106,7 +118,7 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
         if (nlist.stab() or !nlist.sect()) continue;
         nlists.appendAssumeCapacity(.{ .nlist = nlist, .idx = i });
     }
-    mem.sort(NlistIdx, nlists.items, {}, NlistIdx.lessThan);
+    mem.sort(NlistIdx, nlists.items, self, NlistIdx.lessThan);
 
     if (self.header.?.flags & macho.MH_SUBSECTIONS_VIA_SYMBOLS != 0) {
         try self.initSubsections(nlists.items, macho_file);

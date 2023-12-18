@@ -337,17 +337,17 @@ fn resolveRelocInner(
     const SUB = if (subtractor) |sub| @as(i64, @intCast(sub.getTargetAddress(macho_file))) else 0;
 
     switch (rel.tag) {
-        .local => relocs_log.debug("  {s}: {x}: [{x} => {x}] atom({d})", .{
-            @tagName(rel.type),
-            rel_offset,
+        .local => relocs_log.debug("  {x}<+{d}>: {s}: [=> {x}] atom({d})", .{
             P,
+            rel_offset,
+            @tagName(rel.type),
             S + A - SUB,
             rel.getTargetAtom(macho_file).atom_index,
         }),
-        .@"extern" => relocs_log.debug("  {s}: {x}: [{x} => {x}] G({x}) ({s})", .{
-            @tagName(rel.type),
-            rel_offset,
+        .@"extern" => relocs_log.debug("  {x}<+{d}>: {s}: [=> {x}] G({x}) ({s})", .{
             P,
+            rel_offset,
+            @tagName(rel.type),
             S + A - SUB,
             G + A,
             rel.getTargetSymbol(macho_file).getName(macho_file),
