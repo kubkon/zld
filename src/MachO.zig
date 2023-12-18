@@ -1960,7 +1960,7 @@ fn allocateSyntheticSymbols(self: *MachO) void {
 
         for (self.objc_stubs.symbols.items, 0..) |sym_index, idx| {
             const sym = self.getSymbol(sym_index);
-            sym.value = addr + idx * ObjcStubsSection.entry_size;
+            sym.value = addr + idx * ObjcStubsSection.entrySize(self.options.cpu_arch.?);
             sym.out_n_sect = self.objc_stubs_sect_index.?;
         }
     }

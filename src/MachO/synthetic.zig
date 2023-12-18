@@ -481,6 +481,14 @@ pub const ObjcStubsSection = struct {
         objc.symbols.deinit(allocator);
     }
 
+    pub fn entrySize(cpu_arch: std.Target.Cpu.Arch) u8 {
+        return switch (cpu_arch) {
+            .x86_64 => 13,
+            .aarch64 => 8 * @sizeOf(u32),
+            else => unreachable,
+        };
+    }
+
     pub fn addSymbol(objc: *ObjcStubsSection, sym_index: Symbol.Index, macho_file: *MachO) !void {
         const gpa = macho_file.base.allocator;
         const index = @as(Index, @intCast(objc.symbols.items.len));
@@ -493,12 +501,11 @@ pub const ObjcStubsSection = struct {
     pub fn getAddress(objc: ObjcStubsSection, index: Index, macho_file: *MachO) u64 {
         assert(index < objc.symbols.items.len);
         const header = macho_file.sections.items(.header)[macho_file.objc_stubs_sect_index.?];
-        return header.addr + index * entry_size;
+        return header.addr + index * entrySize(macho_file.options.cpu_arch.?);
     }
 
     pub fn size(objc: ObjcStubsSection, macho_file: *MachO) usize {
-        _ = macho_file;
-        return objc.symbols.items.len * entry_size;
+        return objc.symbols.items.len * entrySize(macho_file.options.cpu_arch.?);
     }
 
     pub fn write(objc: ObjcStubsSection, macho_file: *MachO, writer: anytype) !void {
@@ -521,7 +528,37 @@ pub const ObjcStubsSection = struct {
                         try writer.writeInt(i32, @intCast(target - source - 2 - 4), .little);
                     }
                 },
-                .aarch64 => @panic("TODO"),
+                .aarch64 => {
+                    {
+                        const target = sym.getObjcSelrefsAddress(macho_file);
+                        const source = addr;
+                        const pages = try Relocation.calcNumberOfPages(source, target);
+                        try writer.writeInt(u32, aarch64.Instruction.adrp(.x1, pages).toU32(), .little);
+                        const off = try Relocation.calcPageOffset(target, .load_store_64);
+                        try writer.writeInt(
+                            u32,
+                            aarch64.Instruction.ldr(.x1, .x1, aarch64.Instruction.LoadStoreOffset.imm(off)).toU32(),
+                            .little,
+                        );
+                    }
+                    {
+                        const target_sym = macho_file.getSymbol(macho_file.objc_msg_send_index.?);
+                        const target = target_sym.getGotAddress(macho_file);
+                        const source = addr + 2 * @sizeOf(u32);
+                        const pages = try Relocation.calcNumberOfPages(source, target);
+                        try writer.writeInt(u32, aarch64.Instruction.adrp(.x16, pages).toU32(), .little);
+                        const off = try Relocation.calcPageOffset(target, .load_store_64);
+                        try writer.writeInt(
+                            u32,
+                            aarch64.Instruction.ldr(.x16, .x16, aarch64.Instruction.LoadStoreOffset.imm(off)).toU32(),
+                            .little,
+                        );
+                    }
+                    try writer.writeInt(u32, aarch64.Instruction.br(.x16).toU32(), .little);
+                    try writer.writeInt(u32, aarch64.Instruction.brk(1).toU32(), .little);
+                    try writer.writeInt(u32, aarch64.Instruction.brk(1).toU32(), .little);
+                    try writer.writeInt(u32, aarch64.Instruction.brk(1).toU32(), .little);
+                },
                 else => unreachable,
             }
         }
@@ -556,7 +593,6 @@ pub const ObjcStubsSection = struct {
         }
     }
 
-    pub const entry_size = 13;
     pub const Index = u32;
 };
 
