@@ -49,6 +49,33 @@ pub fn lessThan(ctx: void, lhs: Relocation, rhs: Relocation) bool {
     return lhs.offset < rhs.offset;
 }
 
+pub fn calcNumberOfPages(saddr: u64, taddr: u64) i21 {
+    const spage = @as(i32, @intCast(saddr >> 12));
+    const tpage = @as(i32, @intCast(taddr >> 12));
+    const pages = @as(i21, @intCast(tpage - spage));
+    return pages;
+}
+
+pub const PageOffsetInstKind = enum {
+    arithmetic,
+    load_store_8,
+    load_store_16,
+    load_store_32,
+    load_store_64,
+    load_store_128,
+};
+
+pub fn calcPageOffset(taddr: u64, kind: PageOffsetInstKind) !u12 {
+    const narrowed = @as(u12, @truncate(taddr));
+    return switch (kind) {
+        .arithmetic, .load_store_8 => narrowed,
+        .load_store_16 => try math.divExact(u12, narrowed, 2),
+        .load_store_32 => try math.divExact(u12, narrowed, 4),
+        .load_store_64 => try math.divExact(u12, narrowed, 8),
+        .load_store_128 => try math.divExact(u12, narrowed, 16),
+    };
+}
+
 pub const Type = enum {
     // x86_64
     /// RIP-relative displacement (X86_64_RELOC_SIGNED)
@@ -91,6 +118,7 @@ pub const Type = enum {
 
 const assert = std.debug.assert;
 const macho = std.macho;
+const math = std.math;
 const std = @import("std");
 
 const Atom = @import("Atom.zig");

@@ -132,14 +132,25 @@ pub const StubsSection = struct {
 
         for (stubs.symbols.items, 0..) |sym_index, idx| {
             const sym = macho_file.getSymbol(sym_index);
+            const source = sym.getAddress(.{ .stubs = true }, macho_file);
+            const target = laptr_sect.addr + idx * @sizeOf(u64);
             switch (cpu_arch) {
                 .x86_64 => {
                     try writer.writeAll(&.{ 0xff, 0x25 });
-                    const source = sym.getAddress(.{ .stubs = true }, macho_file);
-                    const target = laptr_sect.addr + idx * @sizeOf(u64);
                     try writer.writeInt(i32, @intCast(target - source - 2 - 4), .little);
                 },
-                .aarch64 => @panic("TODO"),
+                .aarch64 => {
+                    // TODO relax if possible
+                    const pages = Relocation.calcNumberOfPages(source, target);
+                    try writer.writeInt(u32, aarch64.Instruction.adrp(.x16, pages).toU32(), .little);
+                    const off = try Relocation.calcPageOffset(target, .load_store_64);
+                    try writer.writeInt(
+                        u32,
+                        aarch64.Instruction.ldr(.x16, .x16, aarch64.Instruction.LoadStoreOffset.imm(off)).toU32(),
+                        .little,
+                    );
+                    try writer.writeInt(u32, aarch64.Instruction.br(.x16).toU32(), .little);
+                },
                 else => unreachable,
             }
         }
@@ -540,6 +551,7 @@ pub const WeakBindSection = bind.WeakBind;
 pub const LazyBindSection = bind.LazyBind;
 pub const ExportTrieSection = Trie;
 
+const aarch64 = @import("../aarch64.zig");
 const assert = std.debug.assert;
 const bind = @import("dyld_info/bind.zig");
 const std = @import("std");
@@ -547,5 +559,6 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const MachO = @import("../MachO.zig");
 const Rebase = @import("dyld_info/Rebase.zig");
+const Relocation = @import("Relocation.zig");
 const Symbol = @import("Symbol.zig");
 const Trie = @import("dyld_info/Trie.zig");
