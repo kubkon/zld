@@ -312,6 +312,9 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
 const ResolveError = error{
     RelaxFail,
     NoSpaceLeft,
+    DivisionByZero,
+    UnexpectedRemainder,
+    Overflow,
 };
 
 fn resolveRelocInner(
@@ -394,18 +397,6 @@ fn resolveRelocInner(
             } else unreachable;
         },
 
-        .got_load => {
-            assert(rel.tag == .@"extern");
-            assert(rel.meta.length == 2);
-            assert(rel.meta.pcrel);
-            if (rel.getTargetSymbol(macho_file).flags.got) {
-                try writer.writeInt(i32, @intCast(G + A - P), .little);
-            } else {
-                try relaxGotLoad(code[rel_offset - 3 ..]);
-                try writer.writeInt(i32, @intCast(S + A - P), .little);
-            }
-        },
-
         .got => {
             assert(rel.tag == .@"extern");
             assert(rel.meta.length == 2);
@@ -416,7 +407,35 @@ fn resolveRelocInner(
         .branch => {
             assert(rel.meta.length == 2);
             assert(rel.meta.pcrel);
-            try writer.writeInt(i32, @intCast(S + A - P), .little);
+
+            switch (cpu_arch) {
+                .x86_64 => try writer.writeInt(i32, @intCast(S + A - P), .little),
+                .aarch64 => {
+                    // TODO thunk indirection
+                    const disp = math.cast(i28, S + A - P) orelse return error.Overflow;
+                    var inst = aarch64.Instruction{
+                        .unconditional_branch_immediate = mem.bytesToValue(std.meta.TagPayload(
+                            aarch64.Instruction,
+                            aarch64.Instruction.unconditional_branch_immediate,
+                        ), code[rel_offset..][0..4]),
+                    };
+                    inst.unconditional_branch_immediate.imm26 = @as(u26, @truncate(@as(u28, @bitCast(disp >> 2))));
+                    try writer.writeInt(u32, inst.toU32(), .little);
+                },
+                else => unreachable,
+            }
+        },
+
+        .got_load => {
+            assert(rel.tag == .@"extern");
+            assert(rel.meta.length == 2);
+            assert(rel.meta.pcrel);
+            if (rel.getTargetSymbol(macho_file).flags.got) {
+                try writer.writeInt(i32, @intCast(G + A - P), .little);
+            } else {
+                try relaxGotLoad(code[rel_offset - 3 ..]);
+                try writer.writeInt(i32, @intCast(S + A - P), .little);
+            }
         },
 
         .tlv => {
@@ -439,7 +458,132 @@ fn resolveRelocInner(
             try writer.writeInt(i32, @intCast(S + A - P), .little);
         },
 
-        else => @panic("TODO"),
+        .page,
+        .got_load_page,
+        .tlvp_page,
+        => {
+            const source = math.cast(u64, P) orelse return error.Overflow;
+            const target = switch (rel.type) {
+                .page, .tlvp_page => math.cast(u64, S + A),
+                .got_load_page => math.cast(u64, G + A),
+                else => unreachable,
+            } orelse return error.Overflow;
+            const pages = @as(u21, @bitCast(Relocation.calcNumberOfPages(source, target)));
+            var inst = aarch64.Instruction{
+                .pc_relative_address = mem.bytesToValue(std.meta.TagPayload(
+                    aarch64.Instruction,
+                    aarch64.Instruction.pc_relative_address,
+                ), code[rel_offset..][0..4]),
+            };
+            inst.pc_relative_address.immhi = @as(u19, @truncate(pages >> 2));
+            inst.pc_relative_address.immlo = @as(u2, @truncate(pages));
+            try writer.writeInt(u32, inst.toU32(), .little);
+        },
+
+        .pageoff => {
+            const target = math.cast(u64, S + A) orelse return error.Overflow;
+            const inst_code = code[rel_offset..][0..4];
+            if (Relocation.isArithmeticOp(inst_code)) {
+                const off = try Relocation.calcPageOffset(target, .arithmetic);
+                var inst = aarch64.Instruction{
+                    .add_subtract_immediate = mem.bytesToValue(std.meta.TagPayload(
+                        aarch64.Instruction,
+                        aarch64.Instruction.add_subtract_immediate,
+                    ), inst_code),
+                };
+                inst.add_subtract_immediate.imm12 = off;
+                try writer.writeInt(u32, inst.toU32(), .little);
+            } else {
+                var inst = aarch64.Instruction{
+                    .load_store_register = mem.bytesToValue(std.meta.TagPayload(
+                        aarch64.Instruction,
+                        aarch64.Instruction.load_store_register,
+                    ), inst_code),
+                };
+                const off = try Relocation.calcPageOffset(target, switch (inst.load_store_register.size) {
+                    0 => if (inst.load_store_register.v == 1)
+                        Relocation.PageOffsetInstKind.load_store_128
+                    else
+                        Relocation.PageOffsetInstKind.load_store_8,
+                    1 => .load_store_16,
+                    2 => .load_store_32,
+                    3 => .load_store_64,
+                });
+                inst.load_store_register.offset = off;
+                try writer.writeInt(u32, inst.toU32(), .little);
+            }
+        },
+
+        .got_load_pageoff => {
+            const target = math.cast(u64, G + A) orelse return error.Overflow;
+            const off = try Relocation.calcPageOffset(target, .load_store_64);
+            var inst: aarch64.Instruction = .{
+                .load_store_register = mem.bytesToValue(std.meta.TagPayload(
+                    aarch64.Instruction,
+                    aarch64.Instruction.load_store_register,
+                ), code[rel_offset..][0..4]),
+            };
+            inst.load_store_register.offset = off;
+            try writer.writeInt(u32, inst.toU32(), .little);
+        },
+
+        .tlvp_pageoff => {
+            const RegInfo = struct {
+                rd: u5,
+                rn: u5,
+                size: u2,
+            };
+
+            const inst_code = code[rel_offset..][0..4];
+            const reg_info: RegInfo = blk: {
+                if (Relocation.isArithmeticOp(inst_code)) {
+                    const inst = mem.bytesToValue(std.meta.TagPayload(
+                        aarch64.Instruction,
+                        aarch64.Instruction.add_subtract_immediate,
+                    ), inst_code);
+                    break :blk .{
+                        .rd = inst.rd,
+                        .rn = inst.rn,
+                        .size = inst.sf,
+                    };
+                } else {
+                    const inst = mem.bytesToValue(std.meta.TagPayload(
+                        aarch64.Instruction,
+                        aarch64.Instruction.load_store_register,
+                    ), inst_code);
+                    break :blk .{
+                        .rd = inst.rt,
+                        .rn = inst.rn,
+                        .size = inst.size,
+                    };
+                }
+            };
+
+            const target = math.cast(u64, S + A) orelse return error.Overflow;
+            const sym = rel.getTargetSymbol(macho_file);
+            var inst = if (sym.flags.tlv_ptr) aarch64.Instruction{
+                .load_store_register = .{
+                    .rt = reg_info.rd,
+                    .rn = reg_info.rn,
+                    .offset = try Relocation.calcPageOffset(target, .load_store_64),
+                    .opc = 0b01,
+                    .op1 = 0b01,
+                    .v = 0,
+                    .size = reg_info.size,
+                },
+            } else aarch64.Instruction{
+                .add_subtract_immediate = .{
+                    .rd = reg_info.rd,
+                    .rn = reg_info.rn,
+                    .imm12 = try Relocation.calcPageOffset(target, .arithmetic),
+                    .sh = 0,
+                    .s = 0,
+                    .op = 0,
+                    .sf = @as(u1, @truncate(reg_info.size)),
+                },
+            };
+            try writer.writeInt(u32, inst.toU32(), .little);
+        },
     }
 }
 
@@ -548,19 +692,19 @@ pub const Loc = struct {
     len: usize = 0,
 };
 
-const Atom = @This();
-
-const std = @import("std");
+const aarch64 = @import("../aarch64.zig");
 const assert = std.debug.assert;
 const bind = @import("dyld_info/bind.zig");
 const dis_x86_64 = @import("dis_x86_64");
 const macho = std.macho;
-const log = std.log.scoped(.link);
-const relocs_log = std.log.scoped(.relocs);
 const math = std.math;
 const mem = std.mem;
+const log = std.log.scoped(.link);
+const relocs_log = std.log.scoped(.relocs);
+const std = @import("std");
 
 const Allocator = mem.Allocator;
+const Atom = @This();
 const Disassembler = dis_x86_64.Disassembler;
 const File = @import("file.zig").File;
 const Instruction = dis_x86_64.Instruction;

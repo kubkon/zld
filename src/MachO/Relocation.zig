@@ -80,6 +80,11 @@ pub fn calcPageOffset(taddr: u64, kind: PageOffsetInstKind) !u12 {
     };
 }
 
+pub inline fn isArithmeticOp(inst: *const [4]u8) bool {
+    const group_decode = @as(u5, @truncate(inst[3]));
+    return ((group_decode >> 2) == 4);
+}
+
 pub const Type = enum {
     // x86_64
     /// RIP-relative displacement (X86_64_RELOC_SIGNED)
