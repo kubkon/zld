@@ -465,12 +465,23 @@ fn resolveRelocInner(
         .got_load_page,
         .tlvp_page,
         => {
+            assert(rel.tag == .@"extern");
+            assert(rel.meta.length == 2);
+            assert(rel.meta.pcrel);
+            const sym = rel.getTargetSymbol(macho_file);
             const source = math.cast(u64, P) orelse return error.Overflow;
-            const target = switch (rel.type) {
-                .page, .tlvp_page => math.cast(u64, S + A),
-                .got_load_page => math.cast(u64, G + A),
-                else => unreachable,
-            } orelse return error.Overflow;
+            const target = target: {
+                const target = switch (rel.type) {
+                    .page => S + A,
+                    .got_load_page => G + A,
+                    .tlvp_page => if (sym.flags.tlv_ptr) blk: {
+                        const S_: i64 = @intCast(sym.getTlvPtrAddress(macho_file));
+                        break :blk S_ + A;
+                    } else S + A,
+                    else => unreachable,
+                };
+                break :target math.cast(u64, target) orelse return error.Overflow;
+            };
             const pages = @as(u21, @bitCast(try Relocation.calcNumberOfPages(source, target)));
             var inst = aarch64.Instruction{
                 .pc_relative_address = mem.bytesToValue(std.meta.TagPayload(
@@ -484,6 +495,9 @@ fn resolveRelocInner(
         },
 
         .pageoff => {
+            assert(rel.tag == .@"extern");
+            assert(rel.meta.length == 2);
+            assert(!rel.meta.pcrel);
             const target = math.cast(u64, S + A) orelse return error.Overflow;
             const inst_code = code[rel_offset..][0..4];
             if (Relocation.isArithmeticOp(inst_code)) {
@@ -518,6 +532,9 @@ fn resolveRelocInner(
         },
 
         .got_load_pageoff => {
+            assert(rel.tag == .@"extern");
+            assert(rel.meta.length == 2);
+            assert(!rel.meta.pcrel);
             const target = math.cast(u64, G + A) orelse return error.Overflow;
             const off = try Relocation.calcPageOffset(target, .load_store_64);
             var inst: aarch64.Instruction = .{
@@ -531,6 +548,19 @@ fn resolveRelocInner(
         },
 
         .tlvp_pageoff => {
+            assert(rel.tag == .@"extern");
+            assert(rel.meta.length == 2);
+            assert(!rel.meta.pcrel);
+
+            const sym = rel.getTargetSymbol(macho_file);
+            const target = target: {
+                const target = if (sym.flags.tlv_ptr) blk: {
+                    const S_: i64 = @intCast(sym.getTlvPtrAddress(macho_file));
+                    break :blk S_ + A;
+                } else S + A;
+                break :target math.cast(u64, target) orelse return error.Overflow;
+            };
+
             const RegInfo = struct {
                 rd: u5,
                 rn: u5,
@@ -562,8 +592,6 @@ fn resolveRelocInner(
                 }
             };
 
-            const target = math.cast(u64, S + A) orelse return error.Overflow;
-            const sym = rel.getTargetSymbol(macho_file);
             var inst = if (sym.flags.tlv_ptr) aarch64.Instruction{
                 .load_store_register = .{
                     .rt = reg_info.rd,
