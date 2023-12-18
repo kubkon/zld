@@ -2228,6 +2228,8 @@ fn testStackSize(b: *Build, opts: Options) *Step {
 fn testSymbolStabs(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-symbol-stabs", "");
 
+    if (builtin.target.cpu.arch != .x86_64) return skipTestStep(test_step); // TODO
+
     const a_o = cc(b, opts);
     a_o.addCSource(
         \\int x;
@@ -2905,6 +2907,8 @@ fn testUnwindInfoNoSubsectionsX64(b: *Build, opts: Options) *Step {
 // Adapted from https://github.com/llvm/llvm-project/blob/main/lld/test/MachO/weak-binding.s
 fn testWeakBind(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-weak-bind", "");
+
+    if (builtin.target.cpu.arch != .x86_64) return skipTestStep(test_step); // TODO
 
     const lib = cc(b, opts);
     lib.addAsmSource(
