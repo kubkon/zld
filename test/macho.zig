@@ -1187,8 +1187,6 @@ fn testHeaderpad(b: *Build, opts: Options) *Step {
 fn testHeaderWeakFlags(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-header-weak-flags", "");
 
-    if (builtin.target.cpu.arch != .x86_64) return skipTestStep(test_step); // TODO
-
     const obj1 = cc(b, opts);
     obj1.addAsmSource(
         \\.globl _x
@@ -1220,14 +1218,28 @@ fn testHeaderWeakFlags(b: *Build, opts: Options) *Step {
     }
 
     {
+        const obj = cc(b, opts);
+        obj.addArg("-c");
+
+        switch (builtin.target.cpu.arch) {
+            .aarch64 => obj.addAsmSource(
+                \\.globl _main
+                \\_main:
+                \\  bl _x
+                \\  ret
+            ),
+            .x86_64 => obj.addAsmSource(
+                \\.globl _main
+                \\_main:
+                \\  callq _x
+                \\  ret
+            ),
+            else => unreachable,
+        }
+
         const exe = cc(b, opts);
         exe.addFileSource(lib.out);
-        exe.addAsmSource(
-            \\.globl _main
-            \\_main:
-            \\  callq _x
-            \\  ret
-        );
+        exe.addFileSource(obj.out);
 
         const check = exe.check();
         check.checkInHeaders();
@@ -2234,8 +2246,6 @@ fn testStackSize(b: *Build, opts: Options) *Step {
 fn testSymbolStabs(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-symbol-stabs", "");
 
-    if (builtin.target.cpu.arch != .x86_64) return skipTestStep(test_step); // TODO
-
     const a_o = cc(b, opts);
     a_o.addCSource(
         \\int x;
@@ -2249,19 +2259,35 @@ fn testSymbolStabs(b: *Build, opts: Options) *Step {
     a_o.addArgs(&.{ "-c", "-g" });
 
     const b_o = cc(b, opts);
-    b_o.addAsmSource(
-        \\.globl _foo
-        \\_foo:
-        \\  mov $42, %rax
-        \\  ret
-        \\.globl _bar
-        \\_bar:
-        \\  sub $8, %rsp
-        \\  call _foo
-        \\  add $8, %rsp
-        \\  ret
-    );
     b_o.addArgs(&.{ "-c", "-g" });
+
+    switch (builtin.target.cpu.arch) {
+        .aarch64 => b_o.addAsmSource(
+            \\.globl _foo
+            \\_foo:
+            \\  mov x0, #42
+            \\  ret
+            \\.globl _bar
+            \\_bar:
+            \\  stp fp, lr, [sp, #-0x10]!
+            \\  bl _foo
+            \\  ldp fp, lr, [sp], #0x10
+            \\  ret
+        ),
+        .x86_64 => b_o.addAsmSource(
+            \\.globl _foo
+            \\_foo:
+            \\  mov $42, %rax
+            \\  ret
+            \\.globl _bar
+            \\_bar:
+            \\  sub $8, %rsp
+            \\  call _foo
+            \\  add $8, %rsp
+            \\  ret
+        ),
+        else => unreachable,
+    }
 
     const exe = cc(b, opts);
     exe.addCSource(
