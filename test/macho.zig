@@ -1187,8 +1187,6 @@ fn testHeaderpad(b: *Build, opts: Options) *Step {
 fn testHeaderWeakFlags(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-header-weak-flags", "");
 
-    if (builtin.target.cpu.arch != .x86_64) return skipTestStep(test_step); // TODO
-
     const obj1 = cc(b, opts);
     obj1.addAsmSource(
         \\.globl _x
@@ -1220,14 +1218,28 @@ fn testHeaderWeakFlags(b: *Build, opts: Options) *Step {
     }
 
     {
+        const obj = cc(b, opts);
+        obj.addArg("-c");
+
+        switch (builtin.target.cpu.arch) {
+            .aarch64 => obj.addAsmSource(
+                \\.globl _main
+                \\_main:
+                \\  bl _x
+                \\  ret
+            ),
+            .x86_64 => obj.addAsmSource(
+                \\.globl _main
+                \\_main:
+                \\  callq _x
+                \\  ret
+            ),
+            else => unreachable,
+        }
+
         const exe = cc(b, opts);
         exe.addFileSource(lib.out);
-        exe.addAsmSource(
-            \\.globl _main
-            \\_main:
-            \\  callq _x
-            \\  ret
-        );
+        exe.addFileSource(obj.out);
 
         const check = exe.check();
         check.checkInHeaders();
