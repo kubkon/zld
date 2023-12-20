@@ -2061,6 +2061,16 @@ fn writeAtoms(self: *MachO) !void {
         try self.base.file.pwriteAll(buffer, header.offset);
     }
 
+    for (self.thunks.items) |thunk| {
+        const header = slice.items(.header)[thunk.out_n_sect];
+        const offset = thunk.value - header.addr + header.offset;
+        const buffer = try gpa.alloc(u8, thunk.size());
+        defer gpa.free(buffer);
+        var stream = std.io.fixedBufferStream(buffer);
+        try thunk.write(self, stream.writer());
+        try self.base.file.pwriteAll(buffer, offset);
+    }
+
     if (has_resolve_error) return error.ResolveFailed;
 }
 

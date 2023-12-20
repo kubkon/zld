@@ -74,23 +74,6 @@ fn isReachable(atom: *const Atom, rel: Relocation, macho_file: *MachO) bool {
     return true;
 }
 
-// pub fn writeThunkCode(macho_file: *MachO, atom_index: AtomIndex, writer: anytype) !void {
-//     const atom = macho_file.getAtom(atom_index);
-//     const sym = macho_file.getSymbol(atom.getSymbolWithLoc());
-//     const source_addr = sym.n_value;
-//     const thunk = macho_file.thunks.items[getThunkIndex(macho_file, atom_index).?];
-//     const target_addr = for (thunk.lookup.keys()) |target| {
-//         const target_atom_index = thunk.lookup.get(target).?;
-//         if (atom_index == target_atom_index) break macho_file.getSymbol(target).n_value;
-//     } else unreachable;
-
-//     const pages = Atom.calcNumberOfPages(source_addr, target_addr);
-//     try writer.writeInt(u32, aarch64.Instruction.adrp(.x16, pages).toU32(), .little);
-//     const off = try Atom.calcPageOffset(target_addr, .arithmetic);
-//     try writer.writeInt(u32, aarch64.Instruction.add(.x16, .x16, off, false).toU32(), .little);
-//     try writer.writeInt(u32, aarch64.Instruction.br(.x16).toU32(), .little);
-// }
-
 pub const Thunk = struct {
     value: u64 = 0,
     out_n_sect: u8 = 0,
@@ -106,6 +89,19 @@ pub const Thunk = struct {
 
     pub fn getAddress(thunk: Thunk, sym_index: Symbol.Index) u64 {
         return thunk.value + thunk.symbols.getIndex(sym_index).? * trampoline_size;
+    }
+
+    pub fn write(thunk: Thunk, macho_file: *MachO, writer: anytype) !void {
+        for (thunk.symbols.keys(), 0..) |sym_index, i| {
+            const sym = macho_file.getSymbol(sym_index);
+            const saddr = thunk.value + i * trampoline_size;
+            const taddr = sym.getAddress(.{}, macho_file);
+            const pages = try Relocation.calcNumberOfPages(saddr, taddr);
+            try writer.writeInt(u32, aarch64.Instruction.adrp(.x16, pages).toU32(), .little);
+            const off = try Relocation.calcPageOffset(taddr, .arithmetic);
+            try writer.writeInt(u32, aarch64.Instruction.add(.x16, .x16, off, false).toU32(), .little);
+            try writer.writeInt(u32, aarch64.Instruction.br(.x16).toU32(), .little);
+        }
     }
 
     pub fn format(
@@ -165,6 +161,7 @@ const max_distance = (1 << (jump_bits - 1));
 /// and assume margin to be 5MiB.
 const max_allowed_distance = max_distance - 0x500_000;
 
+const aarch64 = @import("../aarch64.zig");
 const assert = std.debug.assert;
 const log = std.log.scoped(.link);
 const math = std.math;
