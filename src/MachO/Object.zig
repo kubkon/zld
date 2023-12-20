@@ -554,6 +554,14 @@ fn initEhFrameRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
     }
 }
 
+fn findSymbol(self: Object, addr: u64) ?Symbol.Index {
+    for (self.symbols.items, 0..) |sym_index, i| {
+        const nlist = self.symtab.items(.nlist)[i];
+        if (nlist.ext() and nlist.n_value == addr) return sym_index;
+    }
+    return null;
+}
+
 fn initUnwindRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
     const gpa = macho_file.base.allocator;
     const data = self.getSectionData(sect_id);
@@ -580,6 +588,12 @@ fn initUnwindRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
         out.file = self.index;
 
         for (relocs[reloc_start..reloc_idx]) |rel| {
+            if (rel.type != .unsigned or rel.meta.length != 3) {
+                macho_file.base.fatal("{}: {s},{s}: 0x{x}: bad relocation", .{
+                    self.fmtPath(), header.segName(), header.sectName(), rel.offset,
+                });
+                return error.ParseFailed;
+            }
             assert(rel.type == .unsigned and rel.meta.length == 3); // TODO error
             const offset = rel.offset - rec_start;
             switch (offset) {
@@ -599,9 +613,18 @@ fn initUnwindRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
                         return error.ParseFailed;
                     },
                 },
-                16 => { // personality function
-                    assert(rel.tag == .@"extern"); // TODO error
-                    out.personality = rel.target;
+                16 => switch (rel.tag) { // personality function
+                    .@"extern" => {
+                        out.personality = rel.target;
+                    },
+                    .local => if (self.findSymbol(rec.personalityFunction)) |sym_index| {
+                        out.personality = sym_index;
+                    } else {
+                        macho_file.base.fatal("{}: {s},{s}: 0x{x}: bad relocation", .{
+                            self.fmtPath(), header.segName(), header.sectName(), rel.offset,
+                        });
+                        return error.ParseFailed;
+                    },
                 },
                 24 => switch (rel.tag) { // lsda
                     .@"extern" => {
