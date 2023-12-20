@@ -31,6 +31,7 @@ pub fn createThunks(sect_id: u8, macho_file: *MachO) !void {
         // Insert a thunk at the group end
         const thunk_index = try macho_file.addThunk();
         const thunk = macho_file.getThunk(thunk_index);
+        thunk.out_n_sect = sect_id;
 
         // Scan relocs in the group and create trampolines for any unreachable callsite
         for (atoms[start..i]) |atom_index| {
@@ -92,6 +93,7 @@ fn isReachable(atom: *const Atom, rel: Relocation, macho_file: *MachO) bool {
 
 pub const Thunk = struct {
     value: u64 = 0,
+    out_n_sect: u8 = 0,
     symbols: std.AutoArrayHashMapUnmanaged(Symbol.Index, void) = .{},
 
     pub fn deinit(thunk: *Thunk, allocator: Allocator) void {

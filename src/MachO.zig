@@ -1885,6 +1885,11 @@ fn allocateAtoms(self: *MachO) void {
             atom.value += header.addr;
         }
     }
+
+    for (self.thunks.items) |*thunk| {
+        const header = self.sections.items(.header)[thunk.out_n_sect];
+        thunk.value += header.addr;
+    }
 }
 
 fn allocateSyntheticSymbols(self: *MachO) void {
