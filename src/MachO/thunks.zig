@@ -8,24 +8,22 @@ pub fn createThunks(sect_id: u8, macho_file: *MachO) !void {
     for (atoms) |atom_index| {
         macho_file.getAtom(atom_index).?.value = @bitCast(@as(i64, -1));
     }
-    macho_file.getAtom(atoms[0]).?.value = 0;
 
     var i: usize = 0;
     while (i < atoms.len) {
         const start = i;
+        const start_atom = macho_file.getAtom(atoms[start]).?;
+        assert(start_atom.flags.alive);
+        start_atom.value = try advance(header, start_atom.size, start_atom.alignment);
+        i += 1;
 
         while (i < atoms.len and
-            header.size - macho_file.getAtom(atoms[start]).?.value < max_allowed_distance) : (i += 1)
+            header.size - start_atom.value < max_allowed_distance) : (i += 1)
         {
             const atom_index = atoms[i];
             const atom = macho_file.getAtom(atom_index).?;
             assert(atom.flags.alive);
-            const atom_alignment = try math.powi(u32, 2, atom.alignment);
-            const offset = mem.alignForward(u64, header.size, atom_alignment);
-            const padding = offset - header.size;
-            atom.value = offset;
-            header.size += padding + atom.size;
-            header.@"align" = @max(header.@"align", atom.alignment);
+            atom.value = try advance(header, atom.size, atom.alignment);
         }
 
         // Insert a thunk at the group end
@@ -36,30 +34,28 @@ pub fn createThunks(sect_id: u8, macho_file: *MachO) !void {
         // Scan relocs in the group and create trampolines for any unreachable callsite
         for (atoms[start..i]) |atom_index| {
             const atom = macho_file.getAtom(atom_index).?;
+            log.debug("atom({d}) {s}", .{ atom_index, atom.getName(macho_file) });
             for (atom.getRelocs(macho_file)) |rel| {
                 if (rel.type != .branch) continue;
                 if (isReachable(atom, rel, macho_file)) continue;
-
-                log.debug("atom({d}) -> %{d} unreachable", .{ atom_index, rel.target });
-                log.debug("  {x} => {x}", .{ atom.value, rel.getTargetAddress(macho_file) });
-                log.debug("  is stubs ?? {}", .{rel.getTargetSymbol(macho_file).flags.stubs});
-                log.debug("  is objc_stubs ?? {}", .{rel.getTargetSymbol(macho_file).flags.objc_stubs});
-                log.debug("  sect({d}) => sect({d})", .{
-                    atom.out_n_sect,
-                    rel.getTargetSymbol(macho_file).out_n_sect,
-                });
-
                 try thunk.symbols.put(gpa, rel.target, {});
             }
             atom.thunk_index = thunk_index;
         }
 
-        const offset = mem.alignForward(u64, header.size, @alignOf(u32));
-        const padding = offset - header.size;
-        thunk.value = offset;
-        header.size += padding + thunk.size();
-        header.@"align" = @max(header.@"align", 2);
+        thunk.value = try advance(header, thunk.size(), 2);
+
+        log.debug("thunk({d}) : {}", .{ thunk_index, thunk.fmt(macho_file) });
     }
+}
+
+fn advance(sect: *macho.section_64, size: u64, pow2_align: u32) !u64 {
+    const alignment = try math.powi(u32, 2, pow2_align);
+    const offset = mem.alignForward(u64, sect.size, alignment);
+    const padding = offset - sect.size;
+    sect.size += padding + size;
+    sect.@"align" = @max(sect.@"align", pow2_align);
+    return offset;
 }
 
 fn isReachable(atom: *const Atom, rel: Relocation, macho_file: *MachO) bool {
@@ -164,6 +160,7 @@ const max_allowed_distance = max_distance - 0x500_000;
 const aarch64 = @import("../aarch64.zig");
 const assert = std.debug.assert;
 const log = std.log.scoped(.link);
+const macho = std.macho;
 const math = std.math;
 const mem = std.mem;
 const std = @import("std");

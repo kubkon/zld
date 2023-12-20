@@ -61,6 +61,7 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testSymbolStabs(b, opts));
     macho_step.dependOn(testTbdv3(b, opts));
     macho_step.dependOn(testTentative(b, opts));
+    macho_step.dependOn(testThunks(b, opts));
     macho_step.dependOn(testTls(b, opts));
     macho_step.dependOn(testTlsLargeTbss(b, opts));
     macho_step.dependOn(testTwoLevelNamespace(b, opts));
@@ -2389,6 +2390,38 @@ fn testTentative(b: *Build, opts: Options) *Step {
 
     const run = exe.run();
     run.expectStdOutEqual("0 5 42\n");
+    test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+fn testThunks(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-thunks", "");
+
+    if (builtin.target.cpu.arch != .aarch64) return skipTestStep(test_step);
+
+    const exe = cc(b, opts);
+    exe.addCSource(
+        \\#include <stdio.h>
+        \\__attribute__((aligned(0x8000000))) int bar() {
+        \\  return 42;
+        \\}
+        \\int foobar();
+        \\int foo() {
+        \\  return bar() - foobar();
+        \\}
+        \\__attribute__((aligned(0x8000000))) int foobar() {
+        \\  return 42;
+        \\}
+        \\int main() {
+        \\  printf("bar=%d, foo=%d, foobar=%d", bar(), foo(), foobar());
+        \\  return foo();
+        \\}
+    );
+
+    const run = exe.run();
+    run.expectStdOutEqual("bar=42, foo=0, foobar=42");
+    run.expectExitCode(0);
     test_step.dependOn(run.step());
 
     return test_step;
