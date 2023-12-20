@@ -71,6 +71,7 @@ export_trie: ExportTrieSection = .{},
 unwind_info: UnwindInfo = .{},
 
 atoms: std.ArrayListUnmanaged(Atom) = .{},
+thunks: std.ArrayListUnmanaged(Thunk) = .{},
 unwind_records: std.ArrayListUnmanaged(UnwindInfo.Record) = .{},
 
 has_tlv: bool = false,
@@ -132,6 +133,7 @@ pub fn deinit(self: *MachO) void {
     self.segments.deinit(gpa);
     self.sections.deinit(gpa);
     self.atoms.deinit(gpa);
+    self.thunks.deinit(gpa);
 
     self.symtab.deinit(gpa);
     self.strtab.deinit(gpa);
@@ -1637,11 +1639,7 @@ fn calcSectionSizes(self: *MachO) !void {
     const slice = self.sections.slice();
     for (slice.items(.header), slice.items(.atoms)) |*header, atoms| {
         if (atoms.items.len == 0) continue;
-
-        // TODO
-        // if (self.requiresThunks()) {
-        //     if (header.isCode()) continue;
-        // }
+        if (self.requiresThunks() and header.isCode()) continue;
 
         for (atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index).?;
@@ -1654,16 +1652,15 @@ fn calcSectionSizes(self: *MachO) !void {
         }
     }
 
-    // TODO
-    // if (self.requiresThunks()) {
-    //     for (slice.items(.header), slice.items(.atoms)) |header,atoms| {
-    //         if (!header.isCode()) continue;
-    //         if (atoms.items.len == 0) continue;
+    if (self.requiresThunks()) {
+        for (slice.items(.header), slice.items(.atoms), 0..) |header, atoms, i| {
+            if (!header.isCode()) continue;
+            if (atoms.items.len == 0) continue;
 
-    //         // Create jump/branch range extenders if needed.
-    //         try thunks.createThunks(self, @as(u8, @intCast(sect_id)));
-    //     }
-    // }
+            // Create jump/branch range extenders if needed.
+            try thunks.createThunks(@intCast(i), self);
+        }
+    }
 
     if (self.got_sect_index) |idx| {
         const header = &self.sections.items(.header)[idx];
@@ -2817,6 +2814,18 @@ pub fn getUnwindRecord(self: *MachO, index: UnwindInfo.Record.Index) *UnwindInfo
     return &self.unwind_records.items[index];
 }
 
+pub fn addThunk(self: *MachO) !Thunk.Index {
+    const index = @as(Thunk.Index, @intCast(self.thunks.items.len));
+    const thunk = try self.thunks.addOne(self.base.allocator);
+    thunk.* = .{};
+    return index;
+}
+
+pub fn getThunk(self: *MachO, index: Thunk.Index) *Thunk {
+    assert(index < self.thunks.items.len);
+    return &self.thunks.items[index];
+}
+
 pub fn eatPrefix(path: []const u8, prefix: []const u8) ?[]const u8 {
     if (mem.startsWith(u8, path, prefix)) return path[prefix.len..];
     return null;
@@ -2866,6 +2875,10 @@ fn fmtDumpState(
     if (self.getInternalObject()) |internal| {
         try writer.print("internal({d}) : internal\n", .{internal.index});
         try writer.print("{}{}\n", .{ internal.fmtAtoms(self), internal.fmtSymtab(self) });
+    }
+    try writer.writeAll("thunks\n");
+    for (self.thunks.items, 0..) |thunk, index| {
+        try writer.print("thunk({d}) : {}\n", .{ index, thunk.fmt(self) });
     }
     try writer.print("stubs\n{}\n", .{self.stubs.fmt(self)});
     try writer.print("objc_stubs\n{}\n", .{self.objc_stubs.fmt(self)});
@@ -3082,6 +3095,7 @@ const Symbol = @import("MachO/Symbol.zig");
 const StringTable = @import("strtab.zig").StringTable;
 const StubsSection = synthetic.StubsSection;
 const StubsHelperSection = synthetic.StubsHelperSection;
+const Thunk = thunks.Thunk;
 const ThreadPool = std.Thread.Pool;
 const TlvPtrSection = synthetic.TlvPtrSection;
 const UnwindInfo = @import("MachO/UnwindInfo.zig");

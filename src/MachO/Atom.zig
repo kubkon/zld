@@ -29,6 +29,9 @@ relocs: Loc = .{},
 /// Index of this atom in the linker's atoms table.
 atom_index: Index = 0,
 
+/// Index of the thunk for this atom.
+thunk_index: Thunk.Index = 0,
+
 /// Unwind records associated with this atom.
 unwind_records: Loc = .{},
 
@@ -91,6 +94,10 @@ pub fn markUnwindRecordsDead(self: Atom, macho_file: *MachO) void {
             fde.alive = false;
         }
     }
+}
+
+pub fn getThunk(self: Atom, macho_file: *MachO) *Thunk {
+    return macho_file.getThunk(self.thunk_index);
 }
 
 pub fn initOutputSection(sect: macho.section_64, macho_file: *MachO) !u8 {
@@ -410,12 +417,16 @@ fn resolveRelocInner(
         .branch => {
             assert(rel.meta.length == 2);
             assert(rel.meta.pcrel);
+            assert(rel.tag == .@"extern");
 
             switch (cpu_arch) {
                 .x86_64 => try writer.writeInt(i32, @intCast(S + A - P), .little),
                 .aarch64 => {
-                    // TODO thunk indirection
-                    const disp = math.cast(i28, S + A - P) orelse return error.Overflow;
+                    const disp: i28 = math.cast(i28, S + A - P) orelse blk: {
+                        const thunk = self.getThunk(macho_file);
+                        const S_: i64 = @intCast(thunk.getAddress(rel.target));
+                        break :blk @intCast(S_ + A - P);
+                    };
                     var inst = aarch64.Instruction{
                         .unconditional_branch_immediate = mem.bytesToValue(std.meta.TagPayload(
                             aarch64.Instruction,
@@ -666,7 +677,7 @@ pub fn format(
     _ = unused_fmt_string;
     _ = options;
     _ = writer;
-    @compileError("do not format symbols directly");
+    @compileError("do not format Atom directly");
 }
 
 pub fn fmt(atom: Atom, macho_file: *MachO) std.fmt.Formatter(format2) {
@@ -691,9 +702,10 @@ fn format2(
     _ = unused_fmt_string;
     const atom = ctx.atom;
     const macho_file = ctx.macho_file;
-    try writer.print("atom({d}) : {s} : @{x} : sect({d}) : align({x}) : size({x})", .{
-        atom.atom_index, atom.getName(macho_file), atom.value,
-        atom.out_n_sect, atom.alignment,           atom.size,
+    try writer.print("atom({d}) : {s} : @{x} : sect({d}) : align({x}) : size({x}) : thunk({d})", .{
+        atom.atom_index,  atom.getName(macho_file), atom.value,
+        atom.out_n_sect,  atom.alignment,           atom.size,
+        atom.thunk_index,
     });
     if (!atom.flags.alive) try writer.writeAll(" : [*]");
     if (atom.unwind_records.len > 0) {
@@ -744,4 +756,5 @@ const MachO = @import("../MachO.zig");
 const Object = @import("Object.zig");
 const Relocation = @import("Relocation.zig");
 const Symbol = @import("Symbol.zig");
+const Thunk = @import("thunks.zig").Thunk;
 const UnwindInfo = @import("UnwindInfo.zig");

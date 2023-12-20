@@ -1,23 +1,160 @@
-const std = @import("std");
-const assert = std.debug.assert;
-const log = std.log.scoped(.thunks);
-const macho = std.macho;
-const math = std.math;
-const mem = std.mem;
+pub fn createThunks(sect_id: u8, macho_file: *MachO) !void {
+    const gpa = macho_file.base.allocator;
+    const slice = macho_file.sections.slice();
+    const header = &slice.items(.header)[sect_id];
+    const atoms = slice.items(.atoms)[sect_id].items;
+    assert(atoms.len > 0);
 
-const aarch64 = @import("../aarch64.zig");
+    for (atoms) |atom_index| {
+        macho_file.getAtom(atom_index).?.value = @bitCast(@as(i64, -1));
+    }
+    macho_file.getAtom(atoms[0]).?.value = 0;
 
-const Allocator = mem.Allocator;
-const Atom = @import("Atom.zig");
-const AtomIndex = MachO.AtomIndex;
-const MachO = @import("../MachO.zig");
-const SymbolWithLoc = MachO.SymbolWithLoc;
+    var i: usize = 0;
+    while (i < atoms.len) {
+        const start = i;
 
-pub const ThunkIndex = u32;
+        while (i < atoms.len and
+            header.size - macho_file.getAtom(atoms[start]).?.value < max_allowed_distance) : (i += 1)
+        {
+            const atom_index = atoms[i];
+            const atom = macho_file.getAtom(atom_index).?;
+            assert(atom.flags.alive);
+            const atom_alignment = try math.powi(u32, 2, atom.alignment);
+            const offset = mem.alignForward(u64, header.size, atom_alignment);
+            const padding = offset - header.size;
+            atom.value = offset;
+            header.size += padding + atom.size;
+            header.@"align" = @max(header.@"align", atom.alignment);
+        }
 
-/// Branch instruction has 26 bits immediate but 4 byte aligned.
+        // Insert a thunk at the group end
+        const thunk_index = try macho_file.addThunk();
+        const thunk = macho_file.getThunk(thunk_index);
+
+        // Scan relocs in the group and create trampolines for any unreachable callsite
+        for (atoms[start..i]) |atom_index| {
+            const atom = macho_file.getAtom(atom_index).?;
+            for (atom.getRelocs(macho_file)) |rel| {
+                if (rel.type != .branch) continue;
+                if (isReachable(atom, rel, macho_file)) continue;
+
+                log.debug("atom({d}) -> %{d} unreachable", .{ atom_index, rel.target });
+                log.debug("  {x} => {x}", .{ atom.value, rel.getTargetAddress(macho_file) });
+                log.debug("  is stubs ?? {}", .{rel.getTargetSymbol(macho_file).flags.stubs});
+                log.debug("  is objc_stubs ?? {}", .{rel.getTargetSymbol(macho_file).flags.objc_stubs});
+                log.debug("  sect({d}) => sect({d})", .{
+                    atom.out_n_sect,
+                    rel.getTargetSymbol(macho_file).out_n_sect,
+                });
+
+                try thunk.symbols.put(gpa, rel.target, {});
+            }
+            atom.thunk_index = thunk_index;
+        }
+
+        const offset = mem.alignForward(u64, header.size, @alignOf(u32));
+        const padding = offset - header.size;
+        thunk.value = offset;
+        header.size += padding + thunk.size();
+        header.@"align" = @max(header.@"align", 2);
+    }
+}
+
+fn isReachable(atom: *const Atom, rel: Relocation, macho_file: *MachO) bool {
+    const target = rel.getTargetSymbol(macho_file);
+    if (target.flags.stubs or target.flags.objc_stubs) return false;
+    if (atom.out_n_sect != target.out_n_sect) return false;
+    const target_atom = target.getAtom(macho_file).?;
+    if (target_atom.value == @as(u64, @bitCast(@as(i64, -1)))) return false;
+    const saddr = @as(i64, @intCast(atom.value)) + @as(i64, @intCast(rel.offset - atom.off));
+    const taddr: i64 = @intCast(rel.getTargetAddress(macho_file));
+    _ = math.cast(i28, taddr + rel.addend - saddr) orelse return false;
+    return true;
+}
+
+// pub fn writeThunkCode(macho_file: *MachO, atom_index: AtomIndex, writer: anytype) !void {
+//     const atom = macho_file.getAtom(atom_index);
+//     const sym = macho_file.getSymbol(atom.getSymbolWithLoc());
+//     const source_addr = sym.n_value;
+//     const thunk = macho_file.thunks.items[getThunkIndex(macho_file, atom_index).?];
+//     const target_addr = for (thunk.lookup.keys()) |target| {
+//         const target_atom_index = thunk.lookup.get(target).?;
+//         if (atom_index == target_atom_index) break macho_file.getSymbol(target).n_value;
+//     } else unreachable;
+
+//     const pages = Atom.calcNumberOfPages(source_addr, target_addr);
+//     try writer.writeInt(u32, aarch64.Instruction.adrp(.x16, pages).toU32(), .little);
+//     const off = try Atom.calcPageOffset(target_addr, .arithmetic);
+//     try writer.writeInt(u32, aarch64.Instruction.add(.x16, .x16, off, false).toU32(), .little);
+//     try writer.writeInt(u32, aarch64.Instruction.br(.x16).toU32(), .little);
+// }
+
+pub const Thunk = struct {
+    value: u64 = 0,
+    symbols: std.AutoArrayHashMapUnmanaged(Symbol.Index, void) = .{},
+
+    pub fn deinit(thunk: *Thunk, allocator: Allocator) void {
+        thunk.symbols.deinit(allocator);
+    }
+
+    pub fn size(thunk: Thunk) usize {
+        return thunk.symbols.keys().len * trampoline_size;
+    }
+
+    pub fn getAddress(thunk: Thunk, sym_index: Symbol.Index) u64 {
+        return thunk.value + thunk.symbols.getIndex(sym_index).? * trampoline_size;
+    }
+
+    pub fn format(
+        thunk: Thunk,
+        comptime unused_fmt_string: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = thunk;
+        _ = unused_fmt_string;
+        _ = options;
+        _ = writer;
+        @compileError("do not format Thunk directly");
+    }
+
+    pub fn fmt(thunk: Thunk, macho_file: *MachO) std.fmt.Formatter(format2) {
+        return .{ .data = .{
+            .thunk = thunk,
+            .macho_file = macho_file,
+        } };
+    }
+
+    const FormatContext = struct {
+        thunk: Thunk,
+        macho_file: *MachO,
+    };
+
+    fn format2(
+        ctx: FormatContext,
+        comptime unused_fmt_string: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = options;
+        _ = unused_fmt_string;
+        const thunk = ctx.thunk;
+        const macho_file = ctx.macho_file;
+        try writer.print("@{x} : size({x})\n", .{ thunk.value, thunk.size() });
+        for (thunk.symbols.keys()) |index| {
+            const sym = macho_file.getSymbol(index);
+            try writer.print("  %{d} : {s} : @{x}\n", .{ index, sym.getName(macho_file), sym.value });
+        }
+    }
+
+    const trampoline_size = 3 * @sizeOf(u32);
+
+    pub const Index = u32;
+};
+
+/// Branch instruction has 26 bits immediate but is 4 byte aligned.
 const jump_bits = @bitSizeOf(i28);
-
 const max_distance = (1 << (jump_bits - 1));
 
 /// A branch will need an extender if its target is larger than
@@ -26,339 +163,14 @@ const max_distance = (1 << (jump_bits - 1));
 /// and assume margin to be 5MiB.
 const max_allowed_distance = max_distance - 0x500_000;
 
-pub const Thunk = struct {
-    start_index: AtomIndex,
-    len: u32,
-
-    lookup: std.AutoArrayHashMapUnmanaged(SymbolWithLoc, AtomIndex) = .{},
-
-    pub fn deinit(self: *Thunk, gpa: Allocator) void {
-        self.lookup.deinit(gpa);
-    }
-
-    pub fn getStartAtomIndex(self: Thunk) AtomIndex {
-        assert(self.len != 0);
-        return self.start_index;
-    }
-
-    pub fn getEndAtomIndex(self: Thunk) AtomIndex {
-        assert(self.len != 0);
-        return self.start_index + self.len - 1;
-    }
-
-    pub fn getSize(self: Thunk) u64 {
-        return 12 * self.len;
-    }
-
-    pub fn getAlignment() u32 {
-        return @alignOf(u32);
-    }
-
-    pub fn getTrampolineForSymbol(self: Thunk, macho_file: *MachO, target: SymbolWithLoc) ?SymbolWithLoc {
-        const atom_index = self.lookup.get(target) orelse return null;
-        const atom = macho_file.getAtom(atom_index);
-        return atom.getSymbolWithLoc();
-    }
-};
-
-pub fn createThunks(macho_file: *MachO, sect_id: u8) !void {
-    const header = &macho_file.sections.items(.header)[sect_id];
-    if (header.size == 0) return;
-
-    const gpa = macho_file.base.allocator;
-    const first_atom_index = macho_file.sections.items(.first_atom_index)[sect_id];
-    assert(first_atom_index != 0);
-
-    header.size = 0;
-    header.@"align" = 0;
-
-    var atom_count: u32 = 0;
-
-    {
-        var atom_index = first_atom_index;
-        while (true) {
-            const atom = macho_file.getAtom(atom_index);
-            const sym = macho_file.getSymbolPtr(atom.getSymbolWithLoc());
-            sym.n_value = 0;
-            atom_count += 1;
-
-            if (atom.next_index) |next_index| {
-                atom_index = next_index;
-            } else break;
-        }
-    }
-
-    var allocated = std.AutoHashMap(AtomIndex, void).init(gpa);
-    defer allocated.deinit();
-    try allocated.ensureTotalCapacity(atom_count);
-
-    var group_start = first_atom_index;
-    var group_end = first_atom_index;
-    var offset: u64 = 0;
-
-    while (true) {
-        const group_start_atom = macho_file.getAtom(group_start);
-
-        while (true) {
-            const atom = macho_file.getAtom(group_end);
-            offset = mem.alignForward(u64, offset, try math.powi(u32, 2, atom.alignment));
-
-            const sym = macho_file.getSymbolPtr(atom.getSymbolWithLoc());
-            sym.n_value = offset;
-            offset += atom.size;
-
-            macho_file.logAtom(group_end, log);
-
-            header.@"align" = @max(header.@"align", atom.alignment);
-
-            allocated.putAssumeCapacityNoClobber(group_end, {});
-
-            const group_start_sym = macho_file.getSymbol(group_start_atom.getSymbolWithLoc());
-            if (offset - group_start_sym.n_value >= max_allowed_distance) break;
-
-            if (atom.next_index) |next_index| {
-                group_end = next_index;
-            } else break;
-        }
-
-        // Insert thunk at group_end
-        const thunk_index = @as(u32, @intCast(macho_file.thunks.items.len));
-        try macho_file.thunks.append(gpa, .{ .start_index = undefined, .len = 0 });
-
-        // Scan relocs in the group and create trampolines for any unreachable callsite.
-        var atom_index = group_start;
-        while (true) {
-            const atom = macho_file.getAtom(atom_index);
-            try scanRelocs(
-                macho_file,
-                atom_index,
-                allocated,
-                thunk_index,
-                group_end,
-            );
-
-            if (atom_index == group_end) break;
-
-            if (atom.next_index) |next_index| {
-                atom_index = next_index;
-            } else break;
-        }
-
-        offset = mem.alignForward(u64, offset, Thunk.getAlignment());
-        allocateThunk(macho_file, thunk_index, offset, header);
-        offset += macho_file.thunks.items[thunk_index].getSize();
-
-        const thunk = macho_file.thunks.items[thunk_index];
-        if (thunk.len == 0) {
-            const group_end_atom = macho_file.getAtom(group_end);
-            if (group_end_atom.next_index) |next_index| {
-                group_start = next_index;
-                group_end = next_index;
-            } else break;
-        } else {
-            const thunk_end_atom_index = thunk.getEndAtomIndex();
-            const thunk_end_atom = macho_file.getAtom(thunk_end_atom_index);
-            if (thunk_end_atom.next_index) |next_index| {
-                group_start = next_index;
-                group_end = next_index;
-            } else break;
-        }
-    }
-
-    header.size = @as(u32, @intCast(offset));
-}
-
-fn allocateThunk(
-    macho_file: *MachO,
-    thunk_index: ThunkIndex,
-    base_offset: u64,
-    header: *macho.section_64,
-) void {
-    const thunk = macho_file.thunks.items[thunk_index];
-    if (thunk.len == 0) return;
-
-    const first_atom_index = thunk.getStartAtomIndex();
-    const end_atom_index = thunk.getEndAtomIndex();
-
-    var atom_index = first_atom_index;
-    var offset = base_offset;
-    while (true) {
-        const atom = macho_file.getAtom(atom_index);
-        offset = mem.alignForward(u64, offset, Thunk.getAlignment());
-
-        const sym = macho_file.getSymbolPtr(atom.getSymbolWithLoc());
-        sym.n_value = offset;
-        offset += atom.size;
-
-        macho_file.logAtom(atom_index, log);
-
-        header.@"align" = @max(header.@"align", atom.alignment);
-
-        if (end_atom_index == atom_index) break;
-
-        if (atom.next_index) |next_index| {
-            atom_index = next_index;
-        } else break;
-    }
-}
-
-fn scanRelocs(
-    macho_file: *MachO,
-    atom_index: AtomIndex,
-    allocated: std.AutoHashMap(AtomIndex, void),
-    thunk_index: ThunkIndex,
-    group_end: AtomIndex,
-) !void {
-    const atom = macho_file.getAtom(atom_index);
-    const object = macho_file.objects.items[atom.getFile().?];
-
-    const base_offset = if (object.getSourceSymbol(atom.sym_index)) |source_sym| blk: {
-        const source_sect = object.getSourceSection(source_sym.n_sect - 1);
-        break :blk @as(i32, @intCast(source_sym.n_value - source_sect.addr));
-    } else 0;
-
-    const code = Atom.getAtomCode(macho_file, atom_index);
-    const relocs = Atom.getAtomRelocs(macho_file, atom_index);
-    const ctx = Atom.getRelocContext(macho_file, atom_index);
-
-    for (relocs) |rel| {
-        if (!relocNeedsThunk(rel)) continue;
-
-        const target = Atom.parseRelocTarget(macho_file, .{
-            .object_id = atom.getFile().?,
-            .rel = rel,
-            .code = code,
-            .base_offset = ctx.base_offset,
-            .base_addr = ctx.base_addr,
-        });
-        if (isReachable(macho_file, atom_index, rel, base_offset, target, allocated)) continue;
-
-        log.debug("{x}: source = {s}@{x}, target = {s}@{x} unreachable", .{
-            rel.r_address - base_offset,
-            macho_file.getSymbolName(atom.getSymbolWithLoc()),
-            macho_file.getSymbol(atom.getSymbolWithLoc()).n_value,
-            macho_file.getSymbolName(target),
-            macho_file.getSymbol(target).n_value,
-        });
-
-        const gpa = macho_file.base.allocator;
-        const target_sym = macho_file.getSymbol(target);
-
-        const actual_target: SymbolWithLoc = if (target_sym.undf()) blk: {
-            const stub_atom_index = macho_file.getStubsAtomIndexForSymbol(target).?;
-            break :blk .{ .sym_index = macho_file.getAtom(stub_atom_index).sym_index };
-        } else target;
-
-        const thunk = &macho_file.thunks.items[thunk_index];
-        const gop = try thunk.lookup.getOrPut(gpa, actual_target);
-        if (!gop.found_existing) {
-            const thunk_atom_index = try createThunkAtom(macho_file);
-            gop.value_ptr.* = thunk_atom_index;
-
-            const thunk_atom = macho_file.getAtomPtr(thunk_atom_index);
-            const end_atom_index = if (thunk.len == 0) group_end else thunk.getEndAtomIndex();
-            const end_atom = macho_file.getAtomPtr(end_atom_index);
-
-            if (end_atom.next_index) |first_after_index| {
-                const first_after_atom = macho_file.getAtomPtr(first_after_index);
-                first_after_atom.prev_index = thunk_atom_index;
-                thunk_atom.next_index = first_after_index;
-            }
-
-            end_atom.next_index = thunk_atom_index;
-            thunk_atom.prev_index = end_atom_index;
-
-            if (thunk.len == 0) {
-                thunk.start_index = thunk_atom_index;
-            }
-
-            thunk.len += 1;
-        }
-
-        try macho_file.thunk_table.put(gpa, atom_index, thunk_index);
-    }
-}
-
-inline fn relocNeedsThunk(rel: macho.relocation_info) bool {
-    const rel_type = @as(macho.reloc_type_arm64, @enumFromInt(rel.r_type));
-    return rel_type == .ARM64_RELOC_BRANCH26;
-}
-
-fn isReachable(
-    macho_file: *MachO,
-    atom_index: AtomIndex,
-    rel: macho.relocation_info,
-    base_offset: i32,
-    target: SymbolWithLoc,
-    allocated: std.AutoHashMap(AtomIndex, void),
-) bool {
-    if (macho_file.getStubsAtomIndexForSymbol(target)) |_| return false;
-
-    const source_atom = macho_file.getAtom(atom_index);
-    const source_sym = macho_file.getSymbol(source_atom.getSymbolWithLoc());
-
-    const target_object = macho_file.objects.items[target.getFile().?];
-    const target_atom_index = target_object.getAtomIndexForSymbol(target.sym_index).?;
-    const target_atom = macho_file.getAtom(target_atom_index);
-    const target_sym = macho_file.getSymbol(target_atom.getSymbolWithLoc());
-
-    if (source_sym.n_sect != target_sym.n_sect) return false;
-
-    if (!allocated.contains(target_atom_index)) return false;
-
-    const source_addr = source_sym.n_value + @as(u32, @intCast(rel.r_address - base_offset));
-    const is_via_got = Atom.relocRequiresGot(macho_file, rel);
-    const target_addr = Atom.getRelocTargetAddress(macho_file, target, is_via_got, false) catch unreachable;
-    _ = Atom.calcPcRelativeDisplacementArm64(source_addr, target_addr) catch
-        return false;
-
-    return true;
-}
-
-fn createThunkAtom(macho_file: *MachO) !AtomIndex {
-    const sym_index = try macho_file.allocateSymbol();
-    const atom_index = try macho_file.createEmptyAtom(sym_index, @sizeOf(u32) * 3, 2);
-    const sym = macho_file.getSymbolPtr(.{ .sym_index = sym_index });
-    sym.n_type = macho.N_SECT;
-
-    const sect_id = macho_file.getSectionByName("__TEXT", "__text") orelse unreachable;
-    sym.n_sect = sect_id + 1;
-
-    return atom_index;
-}
-
-fn getThunkIndex(macho_file: *MachO, atom_index: AtomIndex) ?ThunkIndex {
-    const atom = macho_file.getAtom(atom_index);
-    const sym = macho_file.getSymbol(atom.getSymbolWithLoc());
-    for (macho_file.thunks.items, 0..) |thunk, i| {
-        if (thunk.len == 0) continue;
-
-        const thunk_atom_index = thunk.getStartAtomIndex();
-        const thunk_atom = macho_file.getAtom(thunk_atom_index);
-        const thunk_sym = macho_file.getSymbol(thunk_atom.getSymbolWithLoc());
-        const start_addr = thunk_sym.n_value;
-        const end_addr = start_addr + thunk.getSize();
-
-        if (start_addr <= sym.n_value and sym.n_value < end_addr) {
-            return @as(u32, @intCast(i));
-        }
-    }
-    return null;
-}
-
-pub fn writeThunkCode(macho_file: *MachO, atom_index: AtomIndex, writer: anytype) !void {
-    const atom = macho_file.getAtom(atom_index);
-    const sym = macho_file.getSymbol(atom.getSymbolWithLoc());
-    const source_addr = sym.n_value;
-    const thunk = macho_file.thunks.items[getThunkIndex(macho_file, atom_index).?];
-    const target_addr = for (thunk.lookup.keys()) |target| {
-        const target_atom_index = thunk.lookup.get(target).?;
-        if (atom_index == target_atom_index) break macho_file.getSymbol(target).n_value;
-    } else unreachable;
-
-    const pages = Atom.calcNumberOfPages(source_addr, target_addr);
-    try writer.writeInt(u32, aarch64.Instruction.adrp(.x16, pages).toU32(), .little);
-    const off = try Atom.calcPageOffset(target_addr, .arithmetic);
-    try writer.writeInt(u32, aarch64.Instruction.add(.x16, .x16, off, false).toU32(), .little);
-    try writer.writeInt(u32, aarch64.Instruction.br(.x16).toU32(), .little);
-}
+const assert = std.debug.assert;
+const log = std.log.scoped(.link);
+const math = std.math;
+const mem = std.mem;
+const std = @import("std");
+
+const Allocator = mem.Allocator;
+const Atom = @import("Atom.zig");
+const MachO = @import("../MachO.zig");
+const Relocation = @import("Relocation.zig");
+const Symbol = @import("Symbol.zig");
