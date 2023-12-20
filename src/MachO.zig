@@ -71,6 +71,7 @@ export_trie: ExportTrieSection = .{},
 unwind_info: UnwindInfo = .{},
 
 atoms: std.ArrayListUnmanaged(Atom) = .{},
+thunks: std.ArrayListUnmanaged(Thunk) = .{},
 unwind_records: std.ArrayListUnmanaged(UnwindInfo.Record) = .{},
 
 has_tlv: bool = false,
@@ -132,6 +133,7 @@ pub fn deinit(self: *MachO) void {
     self.segments.deinit(gpa);
     self.sections.deinit(gpa);
     self.atoms.deinit(gpa);
+    self.thunks.deinit(gpa);
 
     self.symtab.deinit(gpa);
     self.strtab.deinit(gpa);
@@ -349,7 +351,6 @@ pub fn flush(self: *MachO) !void {
     try self.allocateSections();
     self.allocateSegments();
     self.allocateAtoms();
-    self.allocateSymbols();
     self.allocateSyntheticSymbols();
 
     state_log.debug("{}", .{self.dumpState()});
@@ -1577,11 +1578,19 @@ fn sortSections(self: *MachO) !void {
 
 fn addAtomsToSections(self: *MachO) !void {
     for (self.objects.items) |index| {
-        for (self.getFile(index).?.object.atoms.items) |atom_index| {
+        const object = self.getFile(index).?.object;
+        for (object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index) orelse continue;
             if (!atom.flags.alive) continue;
             const atoms = &self.sections.items(.atoms)[atom.out_n_sect];
             try atoms.append(self.base.allocator, atom_index);
+        }
+        for (object.symbols.items) |sym_index| {
+            const sym = self.getSymbol(sym_index);
+            const atom = sym.getAtom(self) orelse continue;
+            if (!atom.flags.alive) continue;
+            if (sym.getFile(self).?.getIndex() != index) continue;
+            sym.out_n_sect = atom.out_n_sect;
         }
     }
     if (self.getInternalObject()) |object| {
@@ -1590,6 +1599,13 @@ fn addAtomsToSections(self: *MachO) !void {
             if (!atom.flags.alive) continue;
             const atoms = &self.sections.items(.atoms)[atom.out_n_sect];
             try atoms.append(self.base.allocator, atom_index);
+        }
+        for (object.symbols.items) |sym_index| {
+            const sym = self.getSymbol(sym_index);
+            const atom = sym.getAtom(self) orelse continue;
+            if (!atom.flags.alive) continue;
+            if (sym.getFile(self).?.getIndex() != object.index) continue;
+            sym.out_n_sect = atom.out_n_sect;
         }
     }
 }
@@ -1623,11 +1639,7 @@ fn calcSectionSizes(self: *MachO) !void {
     const slice = self.sections.slice();
     for (slice.items(.header), slice.items(.atoms)) |*header, atoms| {
         if (atoms.items.len == 0) continue;
-
-        // TODO
-        // if (self.requiresThunks()) {
-        //     if (header.isCode()) continue;
-        // }
+        if (self.requiresThunks() and header.isCode()) continue;
 
         for (atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index).?;
@@ -1640,16 +1652,15 @@ fn calcSectionSizes(self: *MachO) !void {
         }
     }
 
-    // TODO
-    // if (self.requiresThunks()) {
-    //     for (slice.items(.header), slice.items(.atoms)) |header,atoms| {
-    //         if (!header.isCode()) continue;
-    //         if (atoms.items.len == 0) continue;
+    if (self.requiresThunks()) {
+        for (slice.items(.header), slice.items(.atoms), 0..) |header, atoms, i| {
+            if (!header.isCode()) continue;
+            if (atoms.items.len == 0) continue;
 
-    //         // Create jump/branch range extenders if needed.
-    //         try thunks.createThunks(self, @as(u8, @intCast(sect_id)));
-    //     }
-    // }
+            // Create jump/branch range extenders if needed.
+            try thunks.createThunks(@intCast(i), self);
+        }
+    }
 
     if (self.got_sect_index) |idx| {
         const header = &self.sections.items(.header)[idx];
@@ -1874,19 +1885,10 @@ fn allocateAtoms(self: *MachO) void {
             atom.value += header.addr;
         }
     }
-}
 
-fn allocateSymbols(self: *MachO) void {
-    for (self.objects.items) |index| {
-        for (self.getFile(index).?.getSymbols()) |sym_index| {
-            const sym = self.getSymbol(sym_index);
-            const atom = sym.getAtom(self) orelse continue;
-            if (!atom.flags.alive) continue;
-            if (sym.getFile(self).?.getIndex() != index) continue;
-
-            sym.value += atom.value;
-            sym.out_n_sect = atom.out_n_sect;
-        }
+    for (self.thunks.items) |*thunk| {
+        const header = self.sections.items(.header)[thunk.out_n_sect];
+        thunk.value += header.addr;
     }
 }
 
@@ -2057,6 +2059,16 @@ fn writeAtoms(self: *MachO) !void {
         }
 
         try self.base.file.pwriteAll(buffer, header.offset);
+    }
+
+    for (self.thunks.items) |thunk| {
+        const header = slice.items(.header)[thunk.out_n_sect];
+        const offset = thunk.value - header.addr + header.offset;
+        const buffer = try gpa.alloc(u8, thunk.size());
+        defer gpa.free(buffer);
+        var stream = std.io.fixedBufferStream(buffer);
+        try thunk.write(self, stream.writer());
+        try self.base.file.pwriteAll(buffer, offset);
     }
 
     if (has_resolve_error) return error.ResolveFailed;
@@ -2817,6 +2829,18 @@ pub fn getUnwindRecord(self: *MachO, index: UnwindInfo.Record.Index) *UnwindInfo
     return &self.unwind_records.items[index];
 }
 
+pub fn addThunk(self: *MachO) !Thunk.Index {
+    const index = @as(Thunk.Index, @intCast(self.thunks.items.len));
+    const thunk = try self.thunks.addOne(self.base.allocator);
+    thunk.* = .{};
+    return index;
+}
+
+pub fn getThunk(self: *MachO, index: Thunk.Index) *Thunk {
+    assert(index < self.thunks.items.len);
+    return &self.thunks.items[index];
+}
+
 pub fn eatPrefix(path: []const u8, prefix: []const u8) ?[]const u8 {
     if (mem.startsWith(u8, path, prefix)) return path[prefix.len..];
     return null;
@@ -2866,6 +2890,10 @@ fn fmtDumpState(
     if (self.getInternalObject()) |internal| {
         try writer.print("internal({d}) : internal\n", .{internal.index});
         try writer.print("{}{}\n", .{ internal.fmtAtoms(self), internal.fmtSymtab(self) });
+    }
+    try writer.writeAll("thunks\n");
+    for (self.thunks.items, 0..) |thunk, index| {
+        try writer.print("thunk({d}) : {}\n", .{ index, thunk.fmt(self) });
     }
     try writer.print("stubs\n{}\n", .{self.stubs.fmt(self)});
     try writer.print("objc_stubs\n{}\n", .{self.objc_stubs.fmt(self)});
@@ -3082,6 +3110,7 @@ const Symbol = @import("MachO/Symbol.zig");
 const StringTable = @import("strtab.zig").StringTable;
 const StubsSection = synthetic.StubsSection;
 const StubsHelperSection = synthetic.StubsHelperSection;
+const Thunk = thunks.Thunk;
 const ThreadPool = std.Thread.Pool;
 const TlvPtrSection = synthetic.TlvPtrSection;
 const UnwindInfo = @import("MachO/UnwindInfo.zig");
