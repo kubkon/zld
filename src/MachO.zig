@@ -349,7 +349,6 @@ pub fn flush(self: *MachO) !void {
     try self.allocateSections();
     self.allocateSegments();
     self.allocateAtoms();
-    self.allocateSymbols();
     self.allocateSyntheticSymbols();
 
     state_log.debug("{}", .{self.dumpState()});
@@ -1577,11 +1576,19 @@ fn sortSections(self: *MachO) !void {
 
 fn addAtomsToSections(self: *MachO) !void {
     for (self.objects.items) |index| {
-        for (self.getFile(index).?.object.atoms.items) |atom_index| {
+        const object = self.getFile(index).?.object;
+        for (object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index) orelse continue;
             if (!atom.flags.alive) continue;
             const atoms = &self.sections.items(.atoms)[atom.out_n_sect];
             try atoms.append(self.base.allocator, atom_index);
+        }
+        for (object.symbols.items) |sym_index| {
+            const sym = self.getSymbol(sym_index);
+            const atom = sym.getAtom(self) orelse continue;
+            if (!atom.flags.alive) continue;
+            if (sym.getFile(self).?.getIndex() != index) continue;
+            sym.out_n_sect = atom.out_n_sect;
         }
     }
     if (self.getInternalObject()) |object| {
@@ -1590,6 +1597,13 @@ fn addAtomsToSections(self: *MachO) !void {
             if (!atom.flags.alive) continue;
             const atoms = &self.sections.items(.atoms)[atom.out_n_sect];
             try atoms.append(self.base.allocator, atom_index);
+        }
+        for (object.symbols.items) |sym_index| {
+            const sym = self.getSymbol(sym_index);
+            const atom = sym.getAtom(self) orelse continue;
+            if (!atom.flags.alive) continue;
+            if (sym.getFile(self).?.getIndex() != object.index) continue;
+            sym.out_n_sect = atom.out_n_sect;
         }
     }
 }
@@ -1872,20 +1886,6 @@ fn allocateAtoms(self: *MachO) void {
             const atom = self.getAtom(atom_index).?;
             assert(atom.flags.alive);
             atom.value += header.addr;
-        }
-    }
-}
-
-fn allocateSymbols(self: *MachO) void {
-    for (self.objects.items) |index| {
-        for (self.getFile(index).?.getSymbols()) |sym_index| {
-            const sym = self.getSymbol(sym_index);
-            const atom = sym.getAtom(self) orelse continue;
-            if (!atom.flags.alive) continue;
-            if (sym.getFile(self).?.getIndex() != index) continue;
-
-            sym.value += atom.value;
-            sym.out_n_sect = atom.out_n_sect;
         }
     }
 }

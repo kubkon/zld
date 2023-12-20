@@ -105,6 +105,7 @@ pub fn getAddress(symbol: Symbol, opts: struct {
             return symbol.getObjcStubsAddress(macho_file);
         }
     }
+    if (symbol.getAtom(macho_file)) |atom| return atom.value + symbol.value;
     return symbol.value;
 }
 
@@ -272,7 +273,11 @@ fn format2(
     _ = options;
     _ = unused_fmt_string;
     const symbol = ctx.symbol;
-    try writer.print("%{d} : {s} : @{x}", .{ symbol.nlist_idx, symbol.getName(ctx.macho_file), symbol.value });
+    try writer.print("%{d} : {s} : @{x}", .{
+        symbol.nlist_idx,
+        symbol.getName(ctx.macho_file),
+        symbol.getAddress(.{}, ctx.macho_file),
+    });
     if (symbol.getFile(ctx.macho_file)) |file| {
         if (symbol.out_n_sect != 0) {
             try writer.print(" : sect({d})", .{symbol.out_n_sect});
