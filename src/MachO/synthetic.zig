@@ -27,6 +27,8 @@ pub const GotSection = struct {
     }
 
     pub fn addDyldRelocs(got: GotSection, macho_file: *MachO) !void {
+        const tracy = trace(@src());
+        defer tracy.end();
         const gpa = macho_file.base.allocator;
         const seg_id = macho_file.sections.items(.segment_id)[macho_file.got_sect_index.?];
         const seg = macho_file.segments.items[seg_id];
@@ -60,6 +62,8 @@ pub const GotSection = struct {
     }
 
     pub fn write(got: GotSection, macho_file: *MachO, writer: anytype) !void {
+        const tracy = trace(@src());
+        defer tracy.end();
         for (got.symbols.items) |sym_index| {
             const sym = macho_file.getSymbol(sym_index);
             const value = if (sym.flags.import) @as(u64, 0) else sym.getAddress(.{}, macho_file);
@@ -127,6 +131,8 @@ pub const StubsSection = struct {
     }
 
     pub fn write(stubs: StubsSection, macho_file: *MachO, writer: anytype) !void {
+        const tracy = trace(@src());
+        defer tracy.end();
         const cpu_arch = macho_file.options.cpu_arch.?;
         const laptr_sect = macho_file.sections.items(.header)[macho_file.la_symbol_ptr_sect_index.?];
 
@@ -204,6 +210,8 @@ pub const StubsHelperSection = struct {
     }
 
     pub fn size(stubs_helper: StubsHelperSection, macho_file: *MachO) usize {
+        const tracy = trace(@src());
+        defer tracy.end();
         _ = stubs_helper;
         const cpu_arch = macho_file.options.cpu_arch.?;
         var s: usize = preambleSize(cpu_arch);
@@ -217,6 +225,9 @@ pub const StubsHelperSection = struct {
     }
 
     pub fn write(stubs_helper: StubsHelperSection, macho_file: *MachO, writer: anytype) !void {
+        const tracy = trace(@src());
+        defer tracy.end();
+
         try stubs_helper.writePreamble(macho_file, writer);
 
         const cpu_arch = macho_file.options.cpu_arch.?;
@@ -317,6 +328,8 @@ pub const LaSymbolPtrSection = struct {
     }
 
     pub fn addDyldRelocs(laptr: LaSymbolPtrSection, macho_file: *MachO) !void {
+        const tracy = trace(@src());
+        defer tracy.end();
         _ = laptr;
         const gpa = macho_file.base.allocator;
 
@@ -355,6 +368,8 @@ pub const LaSymbolPtrSection = struct {
     }
 
     pub fn write(laptr: LaSymbolPtrSection, macho_file: *MachO, writer: anytype) !void {
+        const tracy = trace(@src());
+        defer tracy.end();
         _ = laptr;
         const cpu_arch = macho_file.options.cpu_arch.?;
         const sect = macho_file.sections.items(.header)[macho_file.stubs_helper_sect_index.?];
@@ -401,6 +416,8 @@ pub const TlvPtrSection = struct {
     }
 
     pub fn addDyldRelocs(tlv: TlvPtrSection, macho_file: *MachO) !void {
+        const tracy = trace(@src());
+        defer tracy.end();
         const gpa = macho_file.base.allocator;
         const seg_id = macho_file.sections.items(.segment_id)[macho_file.tlv_ptr_sect_index.?];
         const seg = macho_file.segments.items[seg_id];
@@ -434,6 +451,9 @@ pub const TlvPtrSection = struct {
     }
 
     pub fn write(tlv: TlvPtrSection, macho_file: *MachO, writer: anytype) !void {
+        const tracy = trace(@src());
+        defer tracy.end();
+
         for (tlv.symbols.items) |sym_index| {
             const sym = macho_file.getSymbol(sym_index);
             if (sym.flags.import) {
@@ -509,6 +529,9 @@ pub const ObjcStubsSection = struct {
     }
 
     pub fn write(objc: ObjcStubsSection, macho_file: *MachO, writer: anytype) !void {
+        const tracy = trace(@src());
+        defer tracy.end();
+
         for (objc.symbols.items, 0..) |sym_index, idx| {
             const sym = macho_file.getSymbol(sym_index);
             const addr = objc.getAddress(@intCast(idx), macho_file);
@@ -603,6 +626,9 @@ pub const Indsymtab = struct {
     }
 
     pub fn write(ind: Indsymtab, macho_file: *MachO, writer: anytype) !void {
+        const tracy = trace(@src());
+        defer tracy.end();
+
         _ = ind;
 
         for (macho_file.stubs.symbols.items) |sym_index| {
@@ -633,6 +659,7 @@ const assert = std.debug.assert;
 const bind = @import("dyld_info/bind.zig");
 const math = std.math;
 const std = @import("std");
+const trace = @import("../tracy.zig").trace;
 
 const Allocator = std.mem.Allocator;
 const MachO = @import("../MachO.zig");

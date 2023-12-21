@@ -1,12 +1,3 @@
-const std = @import("std");
-const assert = std.debug.assert;
-const fs = std.fs;
-const mem = std.mem;
-
-const Allocator = mem.Allocator;
-const ThreadPool = std.Thread.Pool;
-const WaitGroup = std.Thread.WaitGroup;
-
 pub fn ParallelHasher(comptime Hasher: type) type {
     const hash_size = Hasher.digest_length;
 
@@ -18,6 +9,9 @@ pub fn ParallelHasher(comptime Hasher: type) type {
             chunk_size: u64 = 0x4000,
             max_file_size: ?u64 = null,
         }) !void {
+            const tracy = trace(@src());
+            defer tracy.end();
+
             var wg: WaitGroup = .{};
 
             const file_size = opts.max_file_size orelse try file.getEndPos();
@@ -68,3 +62,13 @@ pub fn ParallelHasher(comptime Hasher: type) type {
         const Self = @This();
     };
 }
+
+const assert = std.debug.assert;
+const fs = std.fs;
+const mem = std.mem;
+const std = @import("std");
+const trace = @import("../tracy.zig").trace;
+
+const Allocator = mem.Allocator;
+const ThreadPool = std.Thread.Pool;
+const WaitGroup = std.Thread.WaitGroup;

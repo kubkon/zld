@@ -9,6 +9,9 @@ pub const Cie = struct {
     alive: bool = false,
 
     pub fn parse(cie: *Cie, macho_file: *MachO) !void {
+        const tracy = trace(@src());
+        defer tracy.end();
+
         const data = cie.getData(macho_file);
         const aug = std.mem.sliceTo(@as([*:0]const u8, @ptrCast(data.ptr + 9)), 0);
 
@@ -140,6 +143,9 @@ pub const Fde = struct {
     alive: bool = true,
 
     pub fn parse(fde: *Fde, macho_file: *MachO) !void {
+        const tracy = trace(@src());
+        defer tracy.end();
+
         const data = fde.getData(macho_file);
         const object = fde.getObject(macho_file);
         const sect = object.sections.items(.header)[object.eh_frame_sect_index.?];
@@ -303,6 +309,9 @@ pub const Iterator = struct {
 };
 
 pub fn calcSize(macho_file: *MachO) !u32 {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     var offset: u32 = 0;
 
     var cies = std.ArrayList(Cie).init(macho_file.base.allocator);
@@ -344,6 +353,9 @@ pub fn calcSize(macho_file: *MachO) !u32 {
 }
 
 pub fn write(macho_file: *MachO, buffer: []u8) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const sect = macho_file.sections.items(.header)[macho_file.eh_frame_sect_index.?];
     const addend: i64 = switch (macho_file.options.cpu_arch.?) {
         .x86_64 => 4,
@@ -438,10 +450,11 @@ pub const EH_PE = struct {
     pub const omit = 0xFF;
 };
 
-const std = @import("std");
 const assert = std.debug.assert;
 const leb = std.leb;
 const macho = std.macho;
+const std = @import("std");
+const trace = @import("../tracy.zig").trace;
 
 const Allocator = std.mem.Allocator;
 const Atom = @import("Atom.zig");

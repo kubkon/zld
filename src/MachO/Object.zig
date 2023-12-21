@@ -158,6 +158,8 @@ inline fn isLiteral(sect: macho.section_64) bool {
 }
 
 fn initSubsections(self: *Object, nlists: anytype, macho_file: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
     const gpa = macho_file.base.allocator;
     const slice = self.sections.slice();
     for (slice.items(.header), slice.items(.subsections), 0..) |sect, *subsections, n_sect| {
@@ -227,6 +229,8 @@ fn initSubsections(self: *Object, nlists: anytype, macho_file: *MachO) !void {
 }
 
 fn initSections(self: *Object, nlists: anytype, macho_file: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
     const gpa = macho_file.base.allocator;
     const slice = self.sections.slice();
 
@@ -301,6 +305,8 @@ fn addAtom(self: *Object, args: AddAtomArgs, macho_file: *MachO) !Atom.Index {
 }
 
 fn initLiteralSections(self: *Object, macho_file: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
     // TODO here we should split into equal-sized records, hash the contents, and then
     // deduplicate - ICF.
     // For now, we simply cover each literal section with one large atom.
@@ -341,6 +347,8 @@ pub fn findAtom(self: Object, addr: u64) ?Atom.Index {
 }
 
 fn findAtomInSection(self: Object, addr: u64, n_sect: u8) ?Atom.Index {
+    const tracy = trace(@src());
+    defer tracy.end();
     const slice = self.sections.slice();
     const sect = slice.items(.header)[n_sect];
     const subsections = slice.items(.subsections)[n_sect];
@@ -360,6 +368,8 @@ fn findAtomInSection(self: Object, addr: u64, n_sect: u8) ?Atom.Index {
 }
 
 fn linkNlistToAtom(self: *Object, macho_file: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
     for (self.symtab.items(.nlist), self.symtab.items(.atom)) |nlist, *atom| {
         if (!nlist.stab() and nlist.sect()) {
             const sect = self.sections.items(.header)[nlist.n_sect - 1];
@@ -379,6 +389,8 @@ fn linkNlistToAtom(self: *Object, macho_file: *MachO) !void {
 }
 
 fn initSymbols(self: *Object, macho_file: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
     const gpa = macho_file.base.allocator;
     const slice = self.symtab.slice();
 
@@ -432,6 +444,8 @@ fn sortAtoms(self: *Object, macho_file: *MachO) !void {
 }
 
 fn initRelocs(self: *Object, macho_file: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
     const cpu_arch = macho_file.options.cpu_arch.?;
     const slice = self.sections.slice();
 
@@ -468,6 +482,8 @@ fn initRelocs(self: *Object, macho_file: *MachO) !void {
 }
 
 fn initEhFrameRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
     const gpa = macho_file.base.allocator;
     const nlists = self.symtab.items(.nlist);
     const slice = self.sections.slice();
@@ -563,6 +579,8 @@ fn findSymbol(self: Object, addr: u64) ?Symbol.Index {
 }
 
 fn initUnwindRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
     const gpa = macho_file.base.allocator;
     const data = self.getSectionData(sect_id);
     const nrecs = @divExact(data.len, @sizeOf(macho.compact_unwind_entry));
@@ -783,6 +801,9 @@ fn initPlatform(self: *Object) void {
 /// TODO in the future, we want parse debug info and debug line sections so that
 /// we can provide nice error locations to the user.
 fn initDwarfInfo(self: *Object, allocator: Allocator) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     var debug_info_index: ?usize = null;
     var debug_abbrev_index: ?usize = null;
     var debug_str_index: ?usize = null;
@@ -806,6 +827,9 @@ fn initDwarfInfo(self: *Object, allocator: Allocator) !void {
 }
 
 pub fn resolveSymbols(self: *Object, macho_file: *MachO) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     for (self.symbols.items, 0..) |index, i| {
         const nlist_idx = @as(Symbol.Index, @intCast(i));
         const nlist = self.symtab.items(.nlist)[nlist_idx];
@@ -869,6 +893,9 @@ pub fn resetGlobals(self: *Object, macho_file: *MachO) void {
 }
 
 pub fn markLive(self: *Object, macho_file: *MachO) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     for (self.symbols.items, 0..) |index, nlist_idx| {
         const nlist = self.symtab.items(.nlist)[nlist_idx];
         if (!nlist.ext()) continue;
@@ -884,6 +911,9 @@ pub fn markLive(self: *Object, macho_file: *MachO) void {
 }
 
 pub fn scanRelocs(self: Object, macho_file: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     for (self.atoms.items) |atom_index| {
         const atom = macho_file.getAtom(atom_index).?;
         if (!atom.flags.alive) continue;
@@ -906,7 +936,10 @@ pub fn scanRelocs(self: Object, macho_file: *MachO) !void {
 }
 
 pub fn convertTentativeDefinitions(self: *Object, macho_file: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
     const gpa = macho_file.base.allocator;
+
     for (self.symbols.items, 0..) |index, i| {
         const sym = macho_file.getSymbol(index);
         if (!sym.flags.tentative) continue;
@@ -963,6 +996,9 @@ fn addSection(self: *Object, allocator: Allocator, segname: []const u8, sectname
 }
 
 pub fn calcSymtabSize(self: *Object, macho_file: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     for (self.symbols.items) |sym_index| {
         const sym = macho_file.getSymbol(sym_index);
         const file = sym.getFile(macho_file) orelse continue;
@@ -1023,6 +1059,9 @@ pub fn calcStabsSize(self: *Object, macho_file: *MachO) void {
 }
 
 pub fn writeSymtab(self: Object, macho_file: *MachO) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     for (self.symbols.items) |sym_index| {
         const sym = macho_file.getSymbol(sym_index);
         const file = sym.getFile(macho_file) orelse continue;
