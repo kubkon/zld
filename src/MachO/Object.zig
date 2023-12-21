@@ -338,10 +338,11 @@ fn initLiteralSections(self: *Object, macho_file: *MachO) !void {
 pub fn findAtom(self: Object, addr: u64) ?Atom.Index {
     const tracy = trace(@src());
     defer tracy.end();
-    for (self.sections.items(.header), 0..) |sect, n_sect| {
-        if ((sect.addr <= addr and addr < sect.addr + sect.size) or
-            (sect.addr == addr and sect.size == 0))
-        {
+    const slice = self.sections.slice();
+    for (slice.items(.header), slice.items(.subsections), 0..) |sect, subs, n_sect| {
+        if (subs.items.len == 0) continue;
+        if (sect.addr == addr) return subs.items[0].atom;
+        if (sect.addr < addr and addr < sect.addr + sect.size) {
             return self.findAtomInSection(addr, @intCast(n_sect));
         }
     }
@@ -365,8 +366,7 @@ fn findAtomInSection(self: Object, addr: u64, n_sect: u8) ?Atom.Index {
             subsections.items[idx + 1].off - sub.off
         else
             sect.size - sub.off;
-        if (sub_addr == addr) return sub.atom;
-        if (sub_addr < addr and addr < sub_addr + sub_size) return sub.atom;
+        if (sub_addr == addr or (sub_addr < addr and addr < sub_addr + sub_size)) return sub.atom;
         if (sub_addr < addr) {
             min = idx + 1;
         } else {
@@ -374,7 +374,15 @@ fn findAtomInSection(self: Object, addr: u64, n_sect: u8) ?Atom.Index {
         }
     }
 
-    return subsections.items[min].atom;
+    const sub = subsections.items[min];
+    const sub_addr = sect.addr + sub.off;
+    const sub_size = if (min + 1 < subsections.items.len)
+        subsections.items[min + 1].off - sub.off
+    else
+        sect.size - sub.off;
+    if (sub_addr == addr or (sub_addr < addr and addr < sub_addr + sub_size)) return sub.atom;
+
+    return null;
 }
 
 fn linkNlistToAtom(self: *Object, macho_file: *MachO) !void {
