@@ -49,8 +49,6 @@ pub fn build(b: *std.Build.Builder) void {
             &[_][]const u8{ "-DTRACY_ENABLE=1", "-fno-sanitize=undefined" };
 
         exe.addIncludePath(.{ .cwd_relative = tracy_path });
-        // TODO: upstream bug
-        exe.addSystemIncludePath(.{ .path = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include" });
         exe.addCSourceFile(.{ .file = .{ .cwd_relative = client_cpp }, .flags = tracy_c_flags });
         exe.linkSystemLibraryName("c++");
         exe.strip = false;
