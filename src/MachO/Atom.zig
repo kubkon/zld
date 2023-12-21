@@ -280,18 +280,16 @@ fn reportUndefSymbol(self: Atom, rel: Relocation, macho_file: *MachO) !bool {
     return false;
 }
 
-pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
+pub fn resolveRelocs(self: Atom, macho_file: *MachO, buffer: []u8) !void {
     assert(!self.getInputSection(macho_file).isZerofill());
-    const gpa = macho_file.base.allocator;
-    const code = try gpa.dupe(u8, self.getCode(macho_file));
-    defer gpa.free(code);
     const relocs = self.getRelocs(macho_file);
     const file = self.getFile(macho_file);
     const name = self.getName(macho_file);
+    @memcpy(buffer, self.getCode(macho_file));
 
     relocs_log.debug("{x}: {s}", .{ self.value, name });
 
-    var stream = std.io.fixedBufferStream(code);
+    var stream = std.io.fixedBufferStream(buffer);
 
     var i: usize = 0;
     while (i < relocs.len) : (i += 1) {
@@ -304,7 +302,7 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
         }
 
         try stream.seekTo(rel_offset);
-        self.resolveRelocInner(rel, subtractor, code, macho_file, stream.writer()) catch |err| {
+        self.resolveRelocInner(rel, subtractor, buffer, macho_file, stream.writer()) catch |err| {
             switch (err) {
                 error.RelaxFail => macho_file.base.fatal(
                     "{}: {s}: 0x{x}: failed to relax relocation: in {s}",
@@ -315,8 +313,6 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, writer: anytype) !void {
             return error.ResolveFailed;
         };
     }
-
-    try writer.writeAll(code);
 }
 
 const ResolveError = error{

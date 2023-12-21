@@ -2045,14 +2045,11 @@ fn writeAtoms(self: *MachO) !void {
         const padding_byte: u8 = if (header.isCode() and cpu_arch == .x86_64) 0xcc else 0;
         @memset(buffer, padding_byte);
 
-        var stream = std.io.fixedBufferStream(buffer);
-
         for (atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index).?;
             assert(atom.flags.alive);
             const off = atom.value - header.addr;
-            try stream.seekTo(off);
-            atom.resolveRelocs(self, stream.writer()) catch |err| switch (err) {
+            atom.resolveRelocs(self, buffer[off..][0..atom.size]) catch |err| switch (err) {
                 error.ResolveFailed => has_resolve_error = true,
                 else => |e| return e,
             };
