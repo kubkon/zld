@@ -26,6 +26,9 @@ fn getString(dw: DwarfInfo, off: u64) [:0]const u8 {
 }
 
 fn parseAbbrevTables(dw: *DwarfInfo, allocator: Allocator) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const debug_abbrev = dw.debug_abbrev;
     var stream = std.io.fixedBufferStream(debug_abbrev);
     var creader = std.io.countingReader(stream.reader());
@@ -75,6 +78,9 @@ fn parseAbbrevTables(dw: *DwarfInfo, allocator: Allocator) !void {
 }
 
 fn parseCompileUnits(dw: *DwarfInfo, allocator: Allocator) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const debug_info = dw.debug_info;
     var stream = std.io.fixedBufferStream(debug_info);
     var creader = std.io.countingReader(stream.reader());
@@ -113,6 +119,9 @@ fn parseDie(
     parent: ?u32,
     creader: anytype,
 ) anyerror!void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     while (creader.bytes_read < cu.nextCompileUnitOffset()) {
         const die = try cu.addDie(allocator);
         cu.diePtr(die).* = .{ .code = undefined };
@@ -149,6 +158,9 @@ fn parseDie(
 }
 
 fn advanceByFormSize(cu: *CompileUnit, form: Form, creader: anytype) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const reader = creader.reader();
     switch (form) {
         dwarf.FORM.strp,
@@ -449,6 +461,7 @@ const leb = std.leb;
 const log = std.log.scoped(.link);
 const mem = std.mem;
 const std = @import("std");
+const trace = @import("../tracy.zig").trace;
 
 const Allocator = mem.Allocator;
 const DwarfInfo = @This();

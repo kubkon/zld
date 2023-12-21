@@ -1,4 +1,7 @@
 pub fn createThunks(sect_id: u8, macho_file: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const gpa = macho_file.base.allocator;
     const slice = macho_file.sections.slice();
     const header = &slice.items(.header)[sect_id];
@@ -164,6 +167,7 @@ const macho = std.macho;
 const math = std.math;
 const mem = std.mem;
 const std = @import("std");
+const trace = @import("../tracy.zig").trace;
 
 const Allocator = mem.Allocator;
 const Atom = @import("Atom.zig");

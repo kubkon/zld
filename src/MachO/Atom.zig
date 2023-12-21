@@ -171,6 +171,9 @@ pub fn initOutputSection(sect: macho.section_64, macho_file: *MachO) !u8 {
 }
 
 pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const object = self.getFile(macho_file).object;
     const relocs = self.getRelocs(macho_file);
 
@@ -281,6 +284,9 @@ fn reportUndefSymbol(self: Atom, rel: Relocation, macho_file: *MachO) !bool {
 }
 
 pub fn resolveRelocs(self: Atom, macho_file: *MachO, buffer: []u8) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     assert(!self.getInputSection(macho_file).isZerofill());
     const relocs = self.getRelocs(macho_file);
     const file = self.getFile(macho_file);
@@ -741,6 +747,7 @@ const mem = std.mem;
 const log = std.log.scoped(.link);
 const relocs_log = std.log.scoped(.relocs);
 const std = @import("std");
+const trace = @import("../tracy.zig").trace;
 
 const Allocator = mem.Allocator;
 const Atom = @This();

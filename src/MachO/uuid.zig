@@ -1,12 +1,3 @@
-const std = @import("std");
-const fs = std.fs;
-const mem = std.mem;
-
-const Allocator = mem.Allocator;
-const Md5 = std.crypto.hash.Md5;
-const Hasher = @import("hasher.zig").ParallelHasher;
-const ThreadPool = std.Thread.Pool;
-
 /// Calculates Md5 hash of each chunk in parallel and then hashes all Md5 hashes to produce
 /// the final digest.
 /// While this is NOT a correct MD5 hash of the contents, this methodology is used by LLVM/LLD
@@ -20,6 +11,9 @@ pub fn calcUuid(
     file_size: u64,
     out: *[Md5.digest_length]u8,
 ) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const num_chunks = thread_pool.threads.len * 0x10;
     const chunk_size = @divTrunc(file_size, num_chunks);
     const actual_num_chunks = if (@rem(file_size, num_chunks) > 0) num_chunks + 1 else num_chunks;
@@ -49,3 +43,13 @@ inline fn conform(out: *[Md5.digest_length]u8) void {
     out[6] = (out[6] & 0x0F) | (3 << 4);
     out[8] = (out[8] & 0x3F) | 0x80;
 }
+
+const fs = std.fs;
+const mem = std.mem;
+const std = @import("std");
+const trace = @import("../tracy.zig").trace;
+
+const Allocator = mem.Allocator;
+const Md5 = std.crypto.hash.Md5;
+const Hasher = @import("hasher.zig").ParallelHasher;
+const ThreadPool = std.Thread.Pool;

@@ -666,6 +666,9 @@ fn parseObject(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
 }
 
 fn parseArchive(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const gpa = self.base.allocator;
 
     const file = try std.fs.cwd().openFile(obj.path, .{});
@@ -861,6 +864,9 @@ fn parseDependentDylibs(
     lib_dirs: []const []const u8,
     framework_dirs: []const []const u8,
 ) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const gpa = self.base.allocator;
 
     if (self.dylibs.items.len == 0) return;
@@ -987,6 +993,9 @@ fn parseDependentDylibs(
 /// 5. Remove references to dead objects/shared objects
 /// 6. Re-run symbol resolution on pruned objects and shared objects sets.
 pub fn resolveSymbols(self: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     // Resolve symbols on the set of all objects and shared objects (even if some are unneeded).
     for (self.objects.items) |index| self.getFile(index).?.resolveSymbols(self);
     for (self.dylibs.items) |index| self.getFile(index).?.resolveSymbols(self);
@@ -1013,6 +1022,9 @@ pub fn resolveSymbols(self: *MachO) !void {
 }
 
 fn markLive(self: *MachO) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     for (self.undefined_symbols.items) |index| {
         if (self.getSymbol(index).getFile(self)) |file| {
             if (file == .object) file.object.alive = true;
@@ -1241,6 +1253,9 @@ fn claimUnresolved(self: *MachO) error{OutOfMemory}!void {
 }
 
 fn scanRelocs(self: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     for (self.objects.items) |index| {
         try self.getFile(index).?.object.scanRelocs(self);
     }
@@ -1287,6 +1302,9 @@ fn scanRelocs(self: *MachO) !void {
 }
 
 fn reportUndefs(self: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     if (self.options.undefined_treatment == .suppress or
         self.options.undefined_treatment == .dynamic_lookup) return;
 
@@ -1577,6 +1595,9 @@ fn sortSections(self: *MachO) !void {
 }
 
 fn addAtomsToSections(self: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     for (self.objects.items) |index| {
         const object = self.getFile(index).?.object;
         for (object.atoms.items) |atom_index| {
@@ -1611,6 +1632,9 @@ fn addAtomsToSections(self: *MachO) !void {
 }
 
 fn generateUnwindInfo(self: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     if (self.eh_frame_sect_index) |index| {
         const sect = &self.sections.items(.header)[index];
         sect.size = try eh_frame.calcSize(self);
@@ -1969,6 +1993,9 @@ fn allocateSyntheticSymbols(self: *MachO) void {
 }
 
 fn initDyldInfoSections(self: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const gpa = self.base.allocator;
 
     if (self.got_sect_index != null) try self.got.addDyldRelocs(self);
@@ -1991,6 +2018,9 @@ fn initDyldInfoSections(self: *MachO) !void {
 }
 
 fn initExportTrie(self: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const gpa = self.base.allocator;
     try self.export_trie.init(gpa);
 
@@ -2031,6 +2061,9 @@ fn initExportTrie(self: *MachO) !void {
 }
 
 fn writeAtoms(self: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const gpa = self.base.allocator;
     const cpu_arch = self.options.cpu_arch.?;
     const slice = self.sections.slice();
@@ -2072,6 +2105,9 @@ fn writeAtoms(self: *MachO) !void {
 }
 
 fn writeUnwindInfo(self: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const gpa = self.base.allocator;
 
     if (self.eh_frame_sect_index) |index| {
@@ -2092,7 +2128,10 @@ fn writeUnwindInfo(self: *MachO) !void {
 }
 
 fn finalizeDyldInfoSections(self: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
     const gpa = self.base.allocator;
+
     try self.rebase.finalize(gpa);
     try self.bind.finalize(gpa, self);
     try self.weak_bind.finalize(gpa, self);
@@ -2101,6 +2140,9 @@ fn finalizeDyldInfoSections(self: *MachO) !void {
 }
 
 fn writeSyntheticSections(self: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const gpa = self.base.allocator;
 
     if (self.got_sect_index) |sect_id| {
@@ -2173,6 +2215,9 @@ fn getNextLinkeditOffset(self: *MachO, alignment: u64) !u64 {
 }
 
 fn writeDyldInfoSections(self: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const gpa = self.base.allocator;
     const cmd = &self.dyld_info_cmd;
     var needed_size: u32 = 0;
@@ -2282,6 +2327,8 @@ fn writeDataInCode(self: *MachO) !void {
 }
 
 fn calcSymtabSize(self: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
     const gpa = self.base.allocator;
 
     var nlocals: u32 = 0;
@@ -2342,6 +2389,8 @@ fn calcSymtabSize(self: *MachO) !void {
 }
 
 fn writeSymtab(self: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
     const gpa = self.base.allocator;
     const cmd = &self.symtab_cmd;
     const off = try self.getNextLinkeditOffset(@alignOf(u64));

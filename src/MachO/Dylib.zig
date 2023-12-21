@@ -36,6 +36,9 @@ pub fn deinit(self: *Dylib, allocator: Allocator) void {
 }
 
 pub fn parse(self: *Dylib, macho_file: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const gpa = macho_file.base.allocator;
     var stream = std.io.fixedBufferStream(self.data);
     const reader = stream.reader();
@@ -133,6 +136,8 @@ fn parseTrieNode(
     arena: Allocator,
     prefix: []const u8,
 ) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
     const size = try it.readULEB128();
     if (size > 0) {
         const flags = try it.readULEB128();
@@ -170,6 +175,8 @@ fn parseTrieNode(
 }
 
 fn parseTrie(self: *Dylib, data: []const u8, macho_file: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
     const gpa = macho_file.base.allocator;
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -185,6 +192,8 @@ pub fn parseTbd(
     lib_stub: LibStub,
     macho_file: *MachO,
 ) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
     const gpa = macho_file.base.allocator;
 
     log.debug("parsing dylib from stub", .{});
@@ -447,6 +456,9 @@ fn initPlatform(self: *Dylib) void {
 }
 
 pub fn resolveSymbols(self: *Dylib, macho_file: *MachO) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     if (!self.explicit and !self.hoisted) return;
 
     for (self.symbols.items, self.exports.items(.flags)) |index, flags| {
@@ -483,6 +495,9 @@ pub fn isAlive(self: Dylib, macho_file: *MachO) bool {
 }
 
 pub fn markReferenced(self: *Dylib, macho_file: *MachO) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     for (self.symbols.items) |global_index| {
         const global = macho_file.getSymbol(global_index);
         const file_ptr = global.getFile(macho_file) orelse continue;
@@ -494,6 +509,9 @@ pub fn markReferenced(self: *Dylib, macho_file: *MachO) void {
 }
 
 pub fn calcSymtabSize(self: *Dylib, macho_file: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     for (self.symbols.items) |global_index| {
         const global = macho_file.getSymbol(global_index);
         const file_ptr = global.getFile(macho_file) orelse continue;
@@ -508,6 +526,9 @@ pub fn calcSymtabSize(self: *Dylib, macho_file: *MachO) !void {
 }
 
 pub fn writeSymtab(self: Dylib, macho_file: *MachO) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     for (self.symbols.items) |global_index| {
         const global = macho_file.getSymbol(global_index);
         const file = global.getFile(macho_file) orelse continue;
@@ -794,6 +815,7 @@ const macho = std.macho;
 const math = std.math;
 const mem = std.mem;
 const tapi = @import("../tapi.zig");
+const trace = @import("../tracy.zig").trace;
 const std = @import("std");
 
 const Allocator = mem.Allocator;
