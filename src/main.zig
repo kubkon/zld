@@ -106,6 +106,7 @@ pub fn main() !void {
 
     const zld = try Zld.openPath(gpa, tag, opts, &thread_pool);
     zld.flush() catch |err| switch (err) {
+        error.InferCpuFailed,
         error.ParseFailed,
         error.MultipleSymbolDefinition,
         error.UndefinedSymbols,

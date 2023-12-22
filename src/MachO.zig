@@ -247,7 +247,35 @@ pub fn flush(self: *MachO) !void {
     }
 
     if (self.options.cpu_arch == null) {
-        try self.inferCpuArchAndPlatform(resolved_objects.items);
+        var has_parse_error = false;
+        var platforms = std.ArrayList(struct { std.Target.Cpu.Arch, ?Options.Platform }).init(self.base.allocator);
+        defer platforms.deinit();
+        try platforms.ensureUnusedCapacity(resolved_objects.items.len);
+
+        for (resolved_objects.items) |obj| {
+            self.inferCpuArchAndPlatform(obj, &platforms) catch |err| {
+                has_parse_error = true;
+                switch (err) {
+                    error.UnhandledCpuArch => {}, // already reported
+                    else => |e| {
+                        self.base.fatal("{s}: unexpected error occurred while parsing input file: {s}", .{
+                            obj.path, @errorName(e),
+                        });
+                        return e;
+                    },
+                }
+            };
+        }
+        if (has_parse_error) return error.ParseFailed;
+        if (platforms.items.len == 0) {
+            self.base.fatal("could not infer CPU architecture", .{});
+            return error.InferCpuFailed;
+        }
+
+        self.options.cpu_arch = platforms.items[0][0];
+        self.options.platform = for (platforms.items) |platform| {
+            if (platform[1]) |p| break p;
+        } else null;
     }
 
     if (self.options.platform == null) {
@@ -498,44 +526,48 @@ fn resolveFramework(
     }
 }
 
-fn inferCpuArchAndPlatform(self: *MachO, objs: []const LinkObject) !void {
+fn inferCpuArchAndPlatform(self: *MachO, obj: LinkObject, platforms: anytype) !void {
     const gpa = self.base.allocator;
-    for (objs) |obj| {
-        const file = try std.fs.cwd().openFile(obj.path, .{});
-        defer file.close();
 
-        const header = file.reader().readStruct(macho.mach_header_64) catch continue;
-        if (header.filetype != macho.MH_OBJECT) continue;
+    const file = try std.fs.cwd().openFile(obj.path, .{});
+    defer file.close();
 
-        const cpu_arch: std.Target.Cpu.Arch = switch (header.cputype) {
-            macho.CPU_TYPE_ARM64 => .aarch64,
-            macho.CPU_TYPE_X86_64 => .x86_64,
-            else => @panic("unhandled CPU arch"), // TODO error
-        };
+    const header = file.reader().readStruct(macho.mach_header_64) catch return;
+    if (header.filetype != macho.MH_OBJECT) return;
 
-        const cmds_buffer = try gpa.alloc(u8, header.sizeofcmds);
-        defer gpa.free(cmds_buffer);
-        const amt = file.reader().readAll(cmds_buffer) catch continue;
-        if (amt != header.sizeofcmds) continue;
+    const cpu_arch: std.Target.Cpu.Arch = switch (header.cputype) {
+        macho.CPU_TYPE_ARM64 => .aarch64,
+        macho.CPU_TYPE_X86_64 => .x86_64,
+        else => {
+            self.base.fatal("{s}: unhandled CPU architecture: {d}", .{
+                obj.path,
+                header.cputype,
+            });
+            return error.UnhandledCpuArch;
+        },
+    };
 
-        var it = macho.LoadCommandIterator{
-            .ncmds = header.ncmds,
-            .buffer = cmds_buffer,
-        };
-        const platform: Options.Platform = while (it.next()) |cmd| switch (cmd.cmd()) {
-            .BUILD_VERSION,
-            .VERSION_MIN_MACOSX,
-            .VERSION_MIN_IPHONEOS,
-            .VERSION_MIN_TVOS,
-            .VERSION_MIN_WATCHOS,
-            => break Options.Platform.fromLoadCommand(cmd),
-            else => {},
-        } else continue;
+    const out = platforms.addOneAssumeCapacity();
+    out.* = .{ cpu_arch, null };
 
-        self.options.cpu_arch = cpu_arch;
-        self.options.platform = platform;
-        break;
-    }
+    const cmds_buffer = try gpa.alloc(u8, header.sizeofcmds);
+    defer gpa.free(cmds_buffer);
+    const amt = file.reader().readAll(cmds_buffer) catch return;
+    if (amt != header.sizeofcmds) return;
+
+    var it = macho.LoadCommandIterator{
+        .ncmds = header.ncmds,
+        .buffer = cmds_buffer,
+    };
+    out[1] = while (it.next()) |cmd| switch (cmd.cmd()) {
+        .BUILD_VERSION,
+        .VERSION_MIN_MACOSX,
+        .VERSION_MIN_IPHONEOS,
+        .VERSION_MIN_TVOS,
+        .VERSION_MIN_WATCHOS,
+        => break Options.Platform.fromLoadCommand(cmd),
+        else => {},
+    } else null;
 }
 
 fn validateCpuArch(self: *MachO, index: File.Index) void {
