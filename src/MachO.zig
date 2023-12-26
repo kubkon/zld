@@ -348,6 +348,9 @@ pub fn flush(self: *MachO) !void {
 
     try self.addUndefinedGlobals();
     try self.resolveSymbols();
+
+    if (self.options.relocatable) return relocatable.flush(self);
+
     try self.resolveSyntheticSymbols();
 
     try self.convertTentativeDefinitions();
@@ -3156,11 +3159,12 @@ const macho = std.macho;
 const math = std.math;
 const mem = std.mem;
 const meta = std.meta;
-const thunks = @import("MachO/thunks.zig");
-const trace = @import("tracy.zig").trace;
+const relocatable = @import("MachO/relocatable.zig");
 const synthetic = @import("MachO/synthetic.zig");
 const state_log = std.log.scoped(.state);
 const std = @import("std");
+const thunks = @import("MachO/thunks.zig");
+const trace = @import("tracy.zig").trace;
 
 const Allocator = mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;

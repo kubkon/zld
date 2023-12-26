@@ -112,6 +112,7 @@ pub fn main() !void {
         error.UndefinedSymbols,
         error.RelocError,
         error.ResolveFailed,
+        error.Unimplemented,
         => {
             zld.reportWarnings();
             zld.reportErrors();
