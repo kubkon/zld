@@ -1564,7 +1564,7 @@ fn getSectionRank(self: *MachO, sect_index: u8) u8 {
     return (@as(u8, @intCast(segment_rank)) << 4) + section_rank;
 }
 
-fn sortSections(self: *MachO) !void {
+pub fn sortSections(self: *MachO) !void {
     const Entry = struct {
         index: u8,
 
@@ -1629,7 +1629,7 @@ fn sortSections(self: *MachO) !void {
     }
 }
 
-fn addAtomsToSections(self: *MachO) !void {
+pub fn addAtomsToSections(self: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
