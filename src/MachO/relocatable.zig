@@ -63,10 +63,24 @@ fn initOutputSections(macho_file: *MachO) !void {
 }
 
 fn calcSectionSizes(macho_file: *MachO) !void {
-    _ = macho_file;
+    const slice = macho_file.sections.slice();
+    for (slice.items(.header), slice.items(.atoms)) |*header, atoms| {
+        if (atoms.items.len == 0) continue;
+        for (atoms.items) |atom_index| {
+            const atom = macho_file.getAtom(atom_index).?;
+            const atom_alignment = try math.powi(u32, 2, atom.alignment);
+            const offset = mem.alignForward(u64, header.size, atom_alignment);
+            const padding = offset - header.size;
+            atom.value = offset;
+            header.size += padding + atom.size;
+            header.@"align" = @max(header.@"align", atom.alignment);
+        }
+    }
 }
 
 const assert = std.debug.assert;
+const math = std.math;
+const mem = std.mem;
 const state_log = std.log.scoped(.state);
 const std = @import("std");
 
