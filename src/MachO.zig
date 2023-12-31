@@ -2740,7 +2740,7 @@ pub fn addSection(
     const gpa = self.base.allocator;
     const index = @as(u8, @intCast(try self.sections.addOne(gpa)));
     self.sections.set(index, .{
-        .segment_id = undefined, // Segments will be created automatically later down the pipeline.
+        .segment_id = 0, // Segments will be created automatically later down the pipeline.
         .header = .{
             .sectname = makeStaticString(sectname),
             .segname = makeStaticString(segname),

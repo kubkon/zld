@@ -5,6 +5,19 @@ pub fn flush(macho_file: *MachO) !void {
     try macho_file.addAtomsToSections();
     try calcSectionSizes(macho_file);
 
+    {
+        // For relocatable, we only ever need a single segment so create it now.
+        const prot: macho.vm_prot_t = macho.PROT.READ | macho.PROT.WRITE | macho.PROT.EXEC;
+        try macho_file.segments.append(macho_file.base.allocator, .{
+            .cmdsize = @sizeOf(macho.segment_command_64),
+            .segname = MachO.makeStaticString(""),
+            .maxprot = prot,
+            .initprot = prot,
+        });
+    }
+
+    try allocateSections(macho_file);
+
     state_log.debug("{}", .{macho_file.dumpState()});
 
     macho_file.base.fatal("-r mode unimplemented", .{});
@@ -92,6 +105,11 @@ fn calcSectionSizes(macho_file: *MachO) !void {
     }
 
     // TODO __DWARF sections
+
+    // TODO relocations
+    // they should follow contiguously *after* we lay out contents of each section
+    // *but* they should be before __LINKEDIT sections (symtab, data-in-code)
+
 }
 
 fn calcCompactUnwindSize(macho_file: *MachO) usize {
@@ -108,8 +126,29 @@ fn calcCompactUnwindSize(macho_file: *MachO) usize {
     return size * @sizeOf(u32);
 }
 
+fn allocateSections(macho_file: *MachO) !void {
+    const headerpad = load_commands.calcLoadCommandsSizeObject(macho_file);
+    var vmaddr: u64 = 0;
+    var fileoff = headerpad;
+    const slice = macho_file.sections.slice();
+
+    for (slice.items(.header)) |*header| {
+        const alignment = try math.powi(u32, 2, header.@"align");
+        vmaddr = mem.alignForward(u64, vmaddr, alignment);
+        header.addr = vmaddr;
+        vmaddr += header.size;
+
+        if (!header.isZerofill()) {
+            fileoff = mem.alignForward(u32, fileoff, alignment);
+            header.offset = fileoff;
+            fileoff += @intCast(header.size);
+        }
+    }
+}
+
 const assert = std.debug.assert;
 const eh_frame = @import("eh_frame.zig");
+const load_commands = @import("load_commands.zig");
 const macho = std.macho;
 const math = std.math;
 const mem = std.mem;

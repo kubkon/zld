@@ -101,6 +101,38 @@ pub fn calcLoadCommandsSize(macho_file: *MachO, assume_max_path_len: bool) u32 {
     return @as(u32, @intCast(sizeofcmds));
 }
 
+pub fn calcLoadCommandsSizeObject(macho_file: *MachO) u32 {
+    const options = &macho_file.options;
+    var sizeofcmds: u64 = 0;
+
+    // LC_SEGMENT_64
+    {
+        assert(macho_file.segments.items.len == 1);
+        sizeofcmds += @sizeOf(macho.segment_command_64);
+        const seg = macho_file.segments.items[0];
+        sizeofcmds += seg.nsects * @sizeOf(macho.section_64);
+    }
+
+    // LC_DATA_IN_CODE
+    sizeofcmds += @sizeOf(macho.linkedit_data_command);
+    // LC_SYMTAB
+    sizeofcmds += @sizeOf(macho.symtab_command);
+    // LC_DYSYMTAB
+    sizeofcmds += @sizeOf(macho.dysymtab_command);
+
+    if (options.platform) |platform| {
+        if (platform.isBuildVersionCompatible()) {
+            // LC_BUILD_VERSION
+            sizeofcmds += @sizeOf(macho.build_version_command) + @sizeOf(macho.build_tool_version);
+        } else {
+            // LC_VERSION_MIN_*
+            sizeofcmds += @sizeOf(macho.version_min_command);
+        }
+    }
+
+    return @as(u32, @intCast(sizeofcmds));
+}
+
 pub fn calcMinHeaderPadSize(macho_file: *MachO) u32 {
     const options = &macho_file.options;
     var padding: u32 = calcLoadCommandsSize(macho_file, false) + (options.headerpad orelse 0);
