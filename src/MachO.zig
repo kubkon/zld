@@ -1556,6 +1556,7 @@ fn getSectionRank(self: *MachO, sect_index: u8) u8 {
 
             else => {
                 if (mem.eql(u8, "__unwind_info", header.sectName())) break :blk 0xe;
+                if (mem.eql(u8, "__compact_unwind", header.sectName())) break :blk 0xe;
                 if (mem.eql(u8, "__eh_frame", header.sectName())) break :blk 0xf;
                 break :blk 0x3;
             },

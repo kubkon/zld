@@ -48,7 +48,9 @@ fn initOutputSections(macho_file: *MachO) !void {
         if (macho_file.getFile(index).?.object.has_unwind) break true;
     } else false;
     if (needs_unwind_info) {
-        macho_file.unwind_info_sect_index = try macho_file.addSection("__TEXT", "__unwind_info", .{});
+        macho_file.unwind_info_sect_index = try macho_file.addSection("__TEXT", "__compact_unwind", .{
+            .flags = macho.S_ATTR_DEBUG,
+        });
     }
 
     const needs_eh_frame = for (macho_file.objects.items) |index| {
@@ -76,9 +78,39 @@ fn calcSectionSizes(macho_file: *MachO) !void {
             header.@"align" = @max(header.@"align", atom.alignment);
         }
     }
+
+    if (macho_file.unwind_info_sect_index) |index| {
+        const sect = &macho_file.sections.items(.header)[index];
+        sect.size = calcCompactUnwindSize(macho_file);
+        sect.@"align" = 2;
+    }
+
+    if (macho_file.eh_frame_sect_index) |index| {
+        const sect = &macho_file.sections.items(.header)[index];
+        sect.size = try eh_frame.calcSize(macho_file);
+        sect.@"align" = 3;
+    }
+
+    // TODO __DWARF sections
+}
+
+fn calcCompactUnwindSize(macho_file: *MachO) usize {
+    var size: usize = 0;
+    for (macho_file.objects.items) |index| {
+        const object = macho_file.getFile(index).?.object;
+        for (object.unwind_records.items) |irec| {
+            const rec = macho_file.getUnwindRecord(irec);
+            if (rec.alive) {
+                size += 1;
+            }
+        }
+    }
+    return size * @sizeOf(u32);
 }
 
 const assert = std.debug.assert;
+const eh_frame = @import("eh_frame.zig");
+const macho = std.macho;
 const math = std.math;
 const mem = std.mem;
 const state_log = std.log.scoped(.state);
