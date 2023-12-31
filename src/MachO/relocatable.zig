@@ -18,6 +18,26 @@ pub fn flush(macho_file: *MachO) !void {
 
     try allocateSections(macho_file);
 
+    {
+        // Allocate the single segment.
+        assert(macho_file.segments.items.len == 1);
+        const seg = &macho_file.segments.items[0];
+        var vmaddr: u64 = 0;
+        var fileoff: u64 = load_commands.calcLoadCommandsSizeObject(macho_file);
+        seg.vmaddr = vmaddr;
+        seg.fileoff = fileoff;
+
+        for (macho_file.sections.items(.header)) |header| {
+            vmaddr = header.addr + header.size;
+            if (!header.isZerofill()) {
+                fileoff = header.offset + header.size;
+            }
+        }
+
+        seg.vmsize = vmaddr - seg.vmaddr;
+        seg.filesize = fileoff - seg.fileoff;
+    }
+
     state_log.debug("{}", .{macho_file.dumpState()});
 
     macho_file.base.fatal("-r mode unimplemented", .{});
@@ -127,9 +147,8 @@ fn calcCompactUnwindSize(macho_file: *MachO) usize {
 }
 
 fn allocateSections(macho_file: *MachO) !void {
-    const headerpad = load_commands.calcLoadCommandsSizeObject(macho_file);
+    var fileoff = load_commands.calcLoadCommandsSizeObject(macho_file);
     var vmaddr: u64 = 0;
-    var fileoff = headerpad;
     const slice = macho_file.sections.slice();
 
     for (slice.items(.header)) |*header| {
