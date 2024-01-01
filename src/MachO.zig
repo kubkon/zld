@@ -2355,7 +2355,7 @@ fn writeDataInCode(self: *MachO, off: u64) !u64 {
     return off + needed_size;
 }
 
-fn calcSymtabSize(self: *MachO) !void {
+pub fn calcSymtabSize(self: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
     const gpa = self.base.allocator;
@@ -2417,7 +2417,7 @@ fn calcSymtabSize(self: *MachO) !void {
     }
 }
 
-fn writeSymtab(self: *MachO, off: u64) !u64 {
+pub fn writeSymtab(self: *MachO, off: u64) !u64 {
     const tracy = trace(@src());
     defer tracy.end();
     const gpa = self.base.allocator;
@@ -2461,7 +2461,7 @@ fn writeIndsymtab(self: *MachO, off: u64) !u64 {
     return off + needed_size;
 }
 
-fn writeStrtab(self: *MachO, off: u64) !u64 {
+pub fn writeStrtab(self: *MachO, off: u64) !u64 {
     const cmd = &self.symtab_cmd;
     cmd.stroff = @intCast(off);
     try self.base.file.pwriteAll(self.strtab.items, cmd.stroff);

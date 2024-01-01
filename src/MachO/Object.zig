@@ -120,7 +120,7 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
     }
     mem.sort(NlistIdx, nlists.items, self, NlistIdx.lessThan);
 
-    if (self.header.?.flags & macho.MH_SUBSECTIONS_VIA_SYMBOLS != 0) {
+    if (self.hasSubsections()) {
         try self.initSubsections(nlists.items, macho_file);
     } else {
         try self.initSections(nlists.items, macho_file);
@@ -1289,6 +1289,10 @@ pub fn getDataInCode(self: Object) []align(1) const macho.data_in_code_entry {
         @ptrCast(self.data.ptr + cmd.dataoff),
     )[0..ndice];
     return dice;
+}
+
+pub inline fn hasSubsections(self: Object) bool {
+    return self.header.?.flags & macho.MH_SUBSECTIONS_VIA_SYMBOLS != 0;
 }
 
 pub fn asFile(self: *Object) File {

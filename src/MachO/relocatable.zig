@@ -14,6 +14,9 @@ pub fn flush(macho_file: *MachO) !void {
             .maxprot = prot,
             .initprot = prot,
         });
+        const seg = &macho_file.segments.items[0];
+        seg.nsects = @intCast(macho_file.sections.items(.header).len);
+        seg.cmdsize += seg.nsects * @sizeOf(macho.section_64);
     }
 
     try allocateSections(macho_file);
@@ -23,7 +26,7 @@ pub fn flush(macho_file: *MachO) !void {
         assert(macho_file.segments.items.len == 1);
         const seg = &macho_file.segments.items[0];
         var vmaddr: u64 = 0;
-        var fileoff: u64 = load_commands.calcLoadCommandsSizeObject(macho_file);
+        var fileoff: u64 = load_commands.calcLoadCommandsSizeObject(macho_file) + @sizeOf(macho.mach_header_64);
         seg.vmaddr = vmaddr;
         seg.fileoff = fileoff;
 
@@ -45,12 +48,18 @@ pub fn flush(macho_file: *MachO) !void {
     try writeAtoms(macho_file);
     try writeCompactUnwind(macho_file);
     try writeEhFrame(macho_file);
-    // try macho_file.calcSymtabSize();
-    // try macho_file.writeSymtab();
+
+    var off = off: {
+        const seg = macho_file.segments.items[0];
+        break :off mem.alignForward(u64, seg.fileoff + seg.filesize, @alignOf(u64));
+    };
+    try macho_file.calcSymtabSize();
+    off = try macho_file.writeSymtab(off);
+    off = try macho_file.writeStrtab(off);
     // TODO write data-in-code
 
-    macho_file.base.fatal("-r mode unimplemented", .{});
-    return error.Unimplemented;
+    const ncmds, const sizeofcmds = try writeLoadCommands(macho_file);
+    try writeHeader(macho_file, ncmds, sizeofcmds);
 }
 
 fn claimUnresolved(macho_file: *MachO) void {
@@ -72,6 +81,7 @@ fn claimUnresolved(macho_file: *MachO) void {
             sym.file = index;
             sym.flags.weak_ref = nlist.weakRef();
             sym.flags.import = true;
+            sym.visibility = .global;
         }
     }
 }
@@ -156,7 +166,7 @@ fn calcCompactUnwindSize(macho_file: *MachO) usize {
 }
 
 fn allocateSections(macho_file: *MachO) !void {
-    var fileoff = load_commands.calcLoadCommandsSizeObject(macho_file);
+    var fileoff = load_commands.calcLoadCommandsSizeObject(macho_file) + @sizeOf(macho.mach_header_64);
     var vmaddr: u64 = 0;
     const slice = macho_file.sections.slice();
 
@@ -235,6 +245,93 @@ fn writeEhFrame(macho_file: *MachO) !void {
     eh_frame.write(macho_file, buffer);
     try macho_file.base.file.pwriteAll(buffer, header.offset);
     // TODO write relocs
+}
+
+fn writeLoadCommands(macho_file: *MachO) !struct { usize, usize } {
+    const gpa = macho_file.base.allocator;
+    const needed_size = load_commands.calcLoadCommandsSizeObject(macho_file);
+    const buffer = try gpa.alloc(u8, needed_size);
+    defer gpa.free(buffer);
+
+    var stream = std.io.fixedBufferStream(buffer);
+    var cwriter = std.io.countingWriter(stream.writer());
+    const writer = cwriter.writer();
+
+    var ncmds: usize = 0;
+
+    // Segment and section load commands
+    {
+        assert(macho_file.segments.items.len == 1);
+        const seg = macho_file.segments.items[0];
+        try writer.writeStruct(seg);
+        for (macho_file.sections.items(.header)) |header| {
+            try writer.writeStruct(header);
+        }
+        ncmds += 1;
+    }
+
+    try writer.writeStruct(macho_file.data_in_code_cmd);
+    ncmds += 1;
+    try writer.writeStruct(macho_file.symtab_cmd);
+    ncmds += 1;
+    try writer.writeStruct(macho_file.dysymtab_cmd);
+    ncmds += 1;
+
+    if (macho_file.options.platform) |platform| {
+        if (platform.isBuildVersionCompatible()) {
+            try load_commands.writeBuildVersionLC(platform, macho_file.options.sdk_version, writer);
+            ncmds += 1;
+        } else {
+            try load_commands.writeVersionMinLC(platform, macho_file.options.sdk_version, writer);
+            ncmds += 1;
+        }
+    }
+
+    assert(cwriter.bytes_written == needed_size);
+
+    try macho_file.base.file.pwriteAll(buffer, @sizeOf(macho.mach_header_64));
+
+    return .{ ncmds, buffer.len };
+}
+
+fn writeHeader(macho_file: *MachO, ncmds: usize, sizeofcmds: usize) !void {
+    var header: macho.mach_header_64 = .{};
+    header.filetype = macho.MH_OBJECT;
+
+    const subsections_via_symbols = for (macho_file.objects.items) |index| {
+        const object = macho_file.getFile(index).?.object;
+        if (object.hasSubsections()) break true;
+    } else false;
+    if (subsections_via_symbols) {
+        header.flags |= macho.MH_SUBSECTIONS_VIA_SYMBOLS;
+    }
+
+    switch (macho_file.options.cpu_arch.?) {
+        .aarch64 => {
+            header.cputype = macho.CPU_TYPE_ARM64;
+            header.cpusubtype = macho.CPU_SUBTYPE_ARM_ALL;
+        },
+        .x86_64 => {
+            header.cputype = macho.CPU_TYPE_X86_64;
+            header.cpusubtype = macho.CPU_SUBTYPE_X86_64_ALL;
+        },
+        else => {},
+    }
+
+    if (macho_file.has_tlv) {
+        header.flags |= macho.MH_HAS_TLV_DESCRIPTORS;
+    }
+    if (macho_file.binds_to_weak) {
+        header.flags |= macho.MH_BINDS_TO_WEAK;
+    }
+    if (macho_file.weak_defines) {
+        header.flags |= macho.MH_WEAK_DEFINES;
+    }
+
+    header.ncmds = @intCast(ncmds);
+    header.sizeofcmds = @intCast(sizeofcmds);
+
+    try macho_file.base.file.pwriteAll(mem.asBytes(&header), 0);
 }
 
 const assert = std.debug.assert;
