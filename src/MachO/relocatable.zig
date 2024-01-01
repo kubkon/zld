@@ -47,7 +47,6 @@ pub fn flush(macho_file: *MachO) !void {
     try writeEhFrame(macho_file);
     // try macho_file.calcSymtabSize();
     // try macho_file.writeSymtab();
-
     // TODO write data-in-code
 
     macho_file.base.fatal("-r mode unimplemented", .{});

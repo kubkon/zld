@@ -391,13 +391,22 @@ pub fn flush(self: *MachO) !void {
     try self.writeUnwindInfo();
     try self.finalizeDyldInfoSections();
     try self.writeSyntheticSections();
-    try self.writeDyldInfoSections();
-    try self.writeFunctionStarts();
-    try self.writeDataInCode();
+
+    var off = self.getLinkeditSegment().fileoff;
+    off = try self.writeDyldInfoSections(off);
+    off = mem.alignForward(u64, off, @alignOf(u64));
+    off = try self.writeFunctionStarts(off);
+    off = mem.alignForward(u64, off, @alignOf(u64));
+    off = try self.writeDataInCode(off);
     try self.calcSymtabSize();
-    try self.writeSymtab();
-    try self.writeIndsymtab();
-    try self.writeStrtab();
+    off = mem.alignForward(u64, off, @alignOf(u64));
+    off = try self.writeSymtab(off);
+    off = mem.alignForward(u64, off, @alignOf(u32));
+    off = try self.writeIndsymtab(off);
+    off = mem.alignForward(u64, off, @alignOf(u64));
+    off = try self.writeStrtab(off);
+
+    self.getLinkeditSegment().filesize = off - self.getLinkeditSegment().fileoff;
 
     var codesig: ?CodeSignature = if (self.requiresCodeSig()) blk: {
         // Preallocate space for the code signature.
@@ -2236,21 +2245,7 @@ fn writeSyntheticSections(self: *MachO) !void {
     }
 }
 
-fn getNextLinkeditOffset(self: *MachO, alignment: u64) !u64 {
-    const seg = self.getLinkeditSegment();
-    const off = seg.fileoff + seg.filesize;
-    const aligned = mem.alignForward(u64, off, alignment);
-    const padding = aligned - off;
-
-    if (padding > 0) {
-        try self.base.file.pwriteAll(&[1]u8{0}, aligned);
-        seg.filesize += padding;
-    }
-
-    return aligned;
-}
-
-fn writeDyldInfoSections(self: *MachO) !void {
+fn writeDyldInfoSections(self: *MachO, off: u64) !u64 {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -2295,7 +2290,6 @@ fn writeDyldInfoSections(self: *MachO) !void {
     try stream.seekTo(cmd.export_off);
     try self.export_trie.write(writer);
 
-    const off = try self.getNextLinkeditOffset(@alignOf(u64));
     cmd.rebase_off += @intCast(off);
     cmd.bind_off += @intCast(off);
     cmd.weak_bind_off += @intCast(off);
@@ -2304,18 +2298,17 @@ fn writeDyldInfoSections(self: *MachO) !void {
 
     try self.base.file.pwriteAll(buffer, off);
 
-    self.getLinkeditSegment().filesize += needed_size;
+    return off + needed_size;
 }
 
-fn writeFunctionStarts(self: *MachO) !void {
-    const off = try self.getNextLinkeditOffset(@alignOf(u64));
+fn writeFunctionStarts(self: *MachO, off: u64) !u64 {
     const cmd = &self.function_starts_cmd;
     cmd.dataoff = @intCast(off);
+    return off;
 }
 
-fn writeDataInCode(self: *MachO) !void {
+fn writeDataInCode(self: *MachO, off: u64) !u64 {
     const cmd = &self.data_in_code_cmd;
-    const off = try self.getNextLinkeditOffset(@alignOf(u64));
     cmd.dataoff = @intCast(off);
 
     const base = self.getTextSegment().vmaddr;
@@ -2359,7 +2352,7 @@ fn writeDataInCode(self: *MachO) !void {
 
     try self.base.file.pwriteAll(mem.sliceAsBytes(dices.items), cmd.dataoff);
 
-    self.getLinkeditSegment().filesize += needed_size;
+    return off + needed_size;
 }
 
 fn calcSymtabSize(self: *MachO) !void {
@@ -2424,12 +2417,11 @@ fn calcSymtabSize(self: *MachO) !void {
     }
 }
 
-fn writeSymtab(self: *MachO) !void {
+fn writeSymtab(self: *MachO, off: u64) !u64 {
     const tracy = trace(@src());
     defer tracy.end();
     const gpa = self.base.allocator;
     const cmd = &self.symtab_cmd;
-    const off = try self.getNextLinkeditOffset(@alignOf(u64));
     cmd.symoff = @intCast(off);
 
     try self.symtab.resize(gpa, cmd.nsyms);
@@ -2449,13 +2441,12 @@ fn writeSymtab(self: *MachO) !void {
 
     try self.base.file.pwriteAll(mem.sliceAsBytes(self.symtab.items), cmd.symoff);
 
-    self.getLinkeditSegment().filesize += cmd.nsyms * @sizeOf(macho.nlist_64);
+    return off + cmd.nsyms * @sizeOf(macho.nlist_64);
 }
 
-fn writeIndsymtab(self: *MachO) !void {
+fn writeIndsymtab(self: *MachO, off: u64) !u64 {
     const gpa = self.base.allocator;
     const cmd = &self.dysymtab_cmd;
-    const off = try self.getNextLinkeditOffset(@alignOf(u32));
     cmd.indirectsymoff = @intCast(off);
     cmd.nindirectsyms = self.indsymtab.nsyms(self);
 
@@ -2467,15 +2458,14 @@ fn writeIndsymtab(self: *MachO) !void {
     try self.base.file.pwriteAll(buffer.items, cmd.indirectsymoff);
     assert(buffer.items.len == needed_size);
 
-    self.getLinkeditSegment().filesize += needed_size;
+    return off + needed_size;
 }
 
-fn writeStrtab(self: *MachO) !void {
+fn writeStrtab(self: *MachO, off: u64) !u64 {
     const cmd = &self.symtab_cmd;
-    const off = try self.getNextLinkeditOffset(@alignOf(u64));
     cmd.stroff = @intCast(off);
     try self.base.file.pwriteAll(self.strtab.items, cmd.stroff);
-    self.getLinkeditSegment().filesize += cmd.strsize;
+    return off + cmd.strsize;
 }
 
 fn writeLoadCommands(self: *MachO) !struct { usize, usize, usize } {
