@@ -42,6 +42,14 @@ pub fn flush(macho_file: *MachO) !void {
 
     state_log.debug("{}", .{macho_file.dumpState()});
 
+    try writeAtoms(macho_file);
+    try writeCompactUnwind(macho_file);
+    try writeEhFrame(macho_file);
+    // try macho_file.calcSymtabSize();
+    // try macho_file.writeSymtab();
+
+    // TODO write data-in-code
+
     macho_file.base.fatal("-r mode unimplemented", .{});
     return error.Unimplemented;
 }
@@ -117,7 +125,7 @@ fn calcSectionSizes(macho_file: *MachO) !void {
     if (macho_file.unwind_info_sect_index) |index| {
         const sect = &macho_file.sections.items(.header)[index];
         sect.size = calcCompactUnwindSize(macho_file);
-        sect.@"align" = 2;
+        sect.@"align" = 3;
     }
 
     if (macho_file.eh_frame_sect_index) |index| {
@@ -145,7 +153,7 @@ fn calcCompactUnwindSize(macho_file: *MachO) usize {
             }
         }
     }
-    return size * @sizeOf(u32);
+    return size * @sizeOf(macho.compact_unwind_entry);
 }
 
 fn allocateSections(macho_file: *MachO) !void {
@@ -167,6 +175,69 @@ fn allocateSections(macho_file: *MachO) !void {
     }
 }
 
+fn writeAtoms(macho_file: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    const gpa = macho_file.base.allocator;
+    const cpu_arch = macho_file.options.cpu_arch.?;
+    const slice = macho_file.sections.slice();
+
+    for (slice.items(.header), slice.items(.atoms)) |header, atoms| {
+        if (atoms.items.len == 0) continue;
+        if (header.isZerofill()) continue;
+
+        const buffer = try gpa.alloc(u8, header.size);
+        defer gpa.free(buffer);
+        const padding_byte: u8 = if (header.isCode() and cpu_arch == .x86_64) 0xcc else 0;
+        @memset(buffer, padding_byte);
+
+        for (atoms.items) |atom_index| {
+            const atom = macho_file.getAtom(atom_index).?;
+            assert(atom.flags.alive);
+            const off = atom.value - header.addr;
+            @memcpy(buffer[off..][0..atom.size], atom.getCode(macho_file));
+            // TODO write relocs
+        }
+
+        try macho_file.base.file.pwriteAll(buffer, header.offset);
+    }
+}
+
+fn writeCompactUnwind(macho_file: *MachO) !void {
+    const sect_index = macho_file.unwind_info_sect_index orelse return;
+    const gpa = macho_file.base.allocator;
+    const header = macho_file.sections.items(.header)[sect_index];
+
+    const nrecs = @divExact(header.size, @sizeOf(macho.compact_unwind_entry));
+    var buffer = try std.ArrayList(macho.compact_unwind_entry).initCapacity(gpa, nrecs);
+    defer buffer.deinit();
+
+    for (macho_file.objects.items) |index| {
+        const object = macho_file.getFile(index).?.object;
+        for (object.unwind_records.items) |irec| {
+            const rec = macho_file.getUnwindRecord(irec);
+            if (!rec.alive) continue;
+            buffer.appendAssumeCapacity(rec.encodeCompact(macho_file));
+            // TODO write relocs
+        }
+    }
+
+    assert(buffer.items.len == nrecs);
+    try macho_file.base.file.pwriteAll(mem.sliceAsBytes(buffer.items), header.offset);
+}
+
+fn writeEhFrame(macho_file: *MachO) !void {
+    const sect_index = macho_file.eh_frame_sect_index orelse return;
+    const gpa = macho_file.base.allocator;
+    const header = macho_file.sections.items(.header)[sect_index];
+    const buffer = try gpa.alloc(u8, header.size);
+    defer gpa.free(buffer);
+    eh_frame.write(macho_file, buffer);
+    try macho_file.base.file.pwriteAll(buffer, header.offset);
+    // TODO write relocs
+}
+
 const assert = std.debug.assert;
 const eh_frame = @import("eh_frame.zig");
 const load_commands = @import("load_commands.zig");
@@ -175,6 +246,7 @@ const math = std.math;
 const mem = std.mem;
 const state_log = std.log.scoped(.state);
 const std = @import("std");
+const trace = @import("../tracy.zig").trace;
 
 const Atom = @import("Atom.zig");
 const MachO = @import("../MachO.zig");

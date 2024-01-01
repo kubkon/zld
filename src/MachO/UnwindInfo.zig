@@ -477,6 +477,19 @@ pub const Record = struct {
         return lsda.value + rec.lsda_offset;
     }
 
+    pub fn encodeCompact(rec: Record, macho_file: *MachO) macho.compact_unwind_entry {
+        return .{
+            .rangeStart = rec.getAtomAddress(macho_file),
+            .rangeLength = rec.length,
+            .compactUnwindEncoding = rec.enc.enc,
+            .personalityFunction = if (rec.getPersonality(macho_file)) |sym|
+                sym.getAddress(.{}, macho_file)
+            else
+                0,
+            .lsda = rec.getLsdaAddress(macho_file),
+        };
+    }
+
     pub fn format(
         rec: Record,
         comptime unused_fmt_string: []const u8,
