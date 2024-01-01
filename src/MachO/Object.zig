@@ -1024,7 +1024,9 @@ pub fn calcSymtabSize(self: *Object, macho_file: *MachO) !void {
         if (sym.getAtom(macho_file)) |atom| if (!atom.flags.alive) continue;
         if (sym.getNlist(macho_file).stab()) continue;
         const name = sym.getName(macho_file);
-        if (name.len > 0 and (name[0] == 'L' or name[0] == 'l')) continue;
+        // TODO in -r mode, we actually want to merge symbol names and emit only one
+        // work it out when emitting relocs
+        if (name.len > 0 and (name[0] == 'L' or name[0] == 'l') and !macho_file.options.relocatable) continue;
         sym.flags.output_symtab = true;
         if (sym.isLocal()) {
             try sym.addExtra(.{ .symtab = self.output_symtab_ctx.nlocals }, macho_file);
