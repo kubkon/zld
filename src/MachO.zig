@@ -1935,7 +1935,7 @@ fn allocateSegments(self: *MachO) void {
     }
 }
 
-fn allocateAtoms(self: *MachO) void {
+pub fn allocateAtoms(self: *MachO) void {
     const slice = self.sections.slice();
     for (slice.items(.header), slice.items(.atoms)) |header, atoms| {
         if (atoms.items.len == 0) continue;

@@ -38,6 +38,8 @@ pub fn flush(macho_file: *MachO) !void {
         seg.filesize = fileoff - seg.fileoff;
     }
 
+    macho_file.allocateAtoms();
+
     state_log.debug("{}", .{macho_file.dumpState()});
 
     macho_file.base.fatal("-r mode unimplemented", .{});
