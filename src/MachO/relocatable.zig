@@ -1,4 +1,5 @@
 pub fn flush(macho_file: *MachO) !void {
+    markExports(macho_file);
     claimUnresolved(macho_file);
     try initOutputSections(macho_file);
     try macho_file.sortSections();
@@ -60,6 +61,19 @@ pub fn flush(macho_file: *MachO) !void {
 
     const ncmds, const sizeofcmds = try writeLoadCommands(macho_file);
     try writeHeader(macho_file, ncmds, sizeofcmds);
+}
+
+fn markExports(macho_file: *MachO) void {
+    for (macho_file.objects.items) |index| {
+        for (macho_file.getFile(index).?.getSymbols()) |sym_index| {
+            const sym = macho_file.getSymbol(sym_index);
+            const file = sym.getFile(macho_file) orelse continue;
+            if (sym.visibility != .global) continue;
+            if (file.getIndex() == index) {
+                sym.flags.@"export" = true;
+            }
+        }
+    }
 }
 
 fn claimUnresolved(macho_file: *MachO) void {
