@@ -114,7 +114,7 @@ fn initOutputSections(macho_file: *MachO) !void {
         if (macho_file.getFile(index).?.object.has_unwind) break true;
     } else false;
     if (needs_unwind_info) {
-        macho_file.unwind_info_sect_index = try macho_file.addSection("__TEXT", "__compact_unwind", .{
+        macho_file.unwind_info_sect_index = try macho_file.addSection("__LD", "__compact_unwind", .{
             .flags = macho.S_ATTR_DEBUG,
         });
     }
