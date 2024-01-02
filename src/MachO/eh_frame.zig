@@ -352,6 +352,34 @@ pub fn calcSize(macho_file: *MachO) !u32 {
     return offset;
 }
 
+pub fn calcNumRelocs(macho_file: *MachO) u32 {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    var nreloc: u32 = 0;
+
+    for (macho_file.objects.items) |index| {
+        const object = macho_file.getFile(index).?.object;
+        for (object.cies.items) |cie| {
+            if (!cie.alive) continue;
+            if (cie.getPersonality(macho_file)) |_| {
+                nreloc += 1; // personality
+            }
+        }
+
+        for (object.fdes.items) |fde| {
+            if (!fde.alive) continue;
+            nreloc += 1; // CIE ptr
+            nreloc += 1; // function
+            if (fde.getLsdaAtom(macho_file)) |_| {
+                nreloc += 1; // LSDA
+            }
+        }
+    }
+
+    return nreloc;
+}
+
 pub fn write(macho_file: *MachO, buffer: []u8) void {
     const tracy = trace(@src());
     defer tracy.end();

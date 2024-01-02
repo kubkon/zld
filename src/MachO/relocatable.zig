@@ -142,41 +142,48 @@ fn calcSectionSizes(macho_file: *MachO) !void {
             atom.value = offset;
             header.size += padding + atom.size;
             header.@"align" = @max(header.@"align", atom.alignment);
+            header.nreloc += @intCast(atom.relocs.len);
         }
     }
 
     if (macho_file.unwind_info_sect_index) |index| {
-        const sect = &macho_file.sections.items(.header)[index];
-        sect.size = calcCompactUnwindSize(macho_file);
-        sect.@"align" = 3;
+        calcCompactUnwindSize(macho_file, index);
     }
 
     if (macho_file.eh_frame_sect_index) |index| {
         const sect = &macho_file.sections.items(.header)[index];
         sect.size = try eh_frame.calcSize(macho_file);
         sect.@"align" = 3;
+        sect.nreloc = eh_frame.calcNumRelocs(macho_file);
     }
 
     // TODO __DWARF sections
-
-    // TODO relocations
-    // they should follow contiguously *after* we lay out contents of each section
-    // *but* they should be before __LINKEDIT sections (symtab, data-in-code)
-
 }
 
-fn calcCompactUnwindSize(macho_file: *MachO) usize {
-    var size: usize = 0;
+fn calcCompactUnwindSize(macho_file: *MachO, sect_index: u8) void {
+    var size: u32 = 0;
+    var nreloc: u32 = 0;
+
     for (macho_file.objects.items) |index| {
         const object = macho_file.getFile(index).?.object;
         for (object.unwind_records.items) |irec| {
             const rec = macho_file.getUnwindRecord(irec);
-            if (rec.alive) {
-                size += 1;
+            if (!rec.alive) continue;
+            size += @sizeOf(macho.compact_unwind_entry);
+            nreloc += 1;
+            if (rec.getPersonality(macho_file)) |_| {
+                nreloc += 1;
+            }
+            if (rec.getLsdaAtom(macho_file)) |_| {
+                nreloc += 1;
             }
         }
     }
-    return size * @sizeOf(macho.compact_unwind_entry);
+
+    const sect = &macho_file.sections.items(.header)[sect_index];
+    sect.size = size;
+    sect.nreloc = nreloc;
+    sect.@"align" = 3;
 }
 
 fn allocateSections(macho_file: *MachO) !void {
