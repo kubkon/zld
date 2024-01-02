@@ -54,10 +54,10 @@ pub fn flush(macho_file: *MachO) !void {
         const seg = macho_file.segments.items[0];
         break :off mem.alignForward(u64, seg.fileoff + seg.filesize, @alignOf(u64));
     };
+    off = try writeDataInCode(macho_file, off);
     try macho_file.calcSymtabSize();
     off = try macho_file.writeSymtab(off);
     off = try macho_file.writeStrtab(off);
-    // TODO write data-in-code
 
     const ncmds, const sizeofcmds = try writeLoadCommands(macho_file);
     try writeHeader(macho_file, ncmds, sizeofcmds);
@@ -259,6 +259,13 @@ fn writeEhFrame(macho_file: *MachO) !void {
     eh_frame.write(macho_file, buffer);
     try macho_file.base.file.pwriteAll(buffer, header.offset);
     // TODO write relocs
+}
+
+fn writeDataInCode(macho_file: *MachO, off: u64) !u64 {
+    // TODO actually write it out
+    const cmd = &macho_file.data_in_code_cmd;
+    cmd.dataoff = @intCast(off);
+    return off;
 }
 
 fn writeLoadCommands(macho_file: *MachO) !struct { usize, usize } {

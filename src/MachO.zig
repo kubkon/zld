@@ -2302,6 +2302,7 @@ fn writeDyldInfoSections(self: *MachO, off: u64) !u64 {
 }
 
 fn writeFunctionStarts(self: *MachO, off: u64) !u64 {
+    // TODO actually write it out
     const cmd = &self.function_starts_cmd;
     cmd.dataoff = @intCast(off);
     return off;
