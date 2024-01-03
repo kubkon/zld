@@ -754,7 +754,42 @@ pub fn writeRelocs(self: Atom, macho_file: *MachO, code: []u8, buffer: *std.Arra
                     .r_type = @intFromEnum(r_type),
                 });
             },
-            .x86_64 => @panic("TODO"),
+            .x86_64 => {
+                switch (rel.meta.length) {
+                    0, 1 => unreachable,
+                    2 => try stream.writer().writeInt(i32, @truncate(addend), .little),
+                    3 => try stream.writer().writeInt(i64, addend, .little),
+                }
+
+                const r_type: macho.reloc_type_x86_64 = switch (rel.type) {
+                    .signed => .X86_64_RELOC_SIGNED,
+                    .signed1 => .X86_64_RELOC_SIGNED_1,
+                    .signed2 => .X86_64_RELOC_SIGNED_2,
+                    .signed4 => .X86_64_RELOC_SIGNED_4,
+                    .got_load => .X86_64_RELOC_GOT_LOAD,
+                    .tlv => .X86_64_RELOC_TLV,
+                    .branch => .X86_64_RELOC_BRANCH,
+                    .got => .X86_64_RELOC_GOT,
+                    .subtractor => .X86_64_RELOC_SUBTRACTOR,
+                    .unsigned => .X86_64_RELOC_UNSIGNED,
+
+                    .page,
+                    .pageoff,
+                    .got_load_page,
+                    .got_load_pageoff,
+                    .tlvp_page,
+                    .tlvp_pageoff,
+                    => unreachable,
+                };
+                buffer.appendAssumeCapacity(.{
+                    .r_address = r_address,
+                    .r_symbolnum = r_symbolnum,
+                    .r_pcrel = @intFromBool(rel.meta.pcrel),
+                    .r_extern = @intFromBool(r_extern),
+                    .r_length = rel.meta.length,
+                    .r_type = @intFromEnum(r_type),
+                });
+            },
             else => unreachable,
         }
     }
