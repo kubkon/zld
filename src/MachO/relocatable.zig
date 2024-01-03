@@ -252,21 +252,83 @@ fn writeCompactUnwind(macho_file: *MachO) !void {
     const header = macho_file.sections.items(.header)[sect_index];
 
     const nrecs = @divExact(header.size, @sizeOf(macho.compact_unwind_entry));
-    var buffer = try std.ArrayList(macho.compact_unwind_entry).initCapacity(gpa, nrecs);
-    defer buffer.deinit();
+    var entries = try std.ArrayList(macho.compact_unwind_entry).initCapacity(gpa, nrecs);
+    defer entries.deinit();
 
+    var relocs = try std.ArrayList(macho.relocation_info).initCapacity(gpa, header.nreloc);
+    defer relocs.deinit();
+
+    const addReloc = struct {
+        fn addReloc(offset: i32, cpu_arch: std.Target.Cpu.Arch) macho.relocation_info {
+            return .{
+                .r_address = offset,
+                .r_symbolnum = 0,
+                .r_pcrel = 0,
+                .r_length = 3,
+                .r_extern = 0,
+                .r_type = switch (cpu_arch) {
+                    .aarch64 => @intFromEnum(macho.reloc_type_arm64.ARM64_RELOC_UNSIGNED),
+                    .x86_64 => @intFromEnum(macho.reloc_type_x86_64.X86_64_RELOC_UNSIGNED),
+                    else => unreachable,
+                },
+            };
+        }
+    }.addReloc;
+
+    var offset: i32 = 0;
     for (macho_file.objects.items) |index| {
         const object = macho_file.getFile(index).?.object;
         for (object.unwind_records.items) |irec| {
             const rec = macho_file.getUnwindRecord(irec);
             if (!rec.alive) continue;
-            buffer.appendAssumeCapacity(rec.encodeCompact(macho_file));
-            // TODO write relocs
+
+            var out: macho.compact_unwind_entry = .{
+                .rangeStart = 0,
+                .rangeLength = rec.length,
+                .compactUnwindEncoding = rec.enc.enc,
+                .personalityFunction = 0,
+                .lsda = 0,
+            };
+
+            {
+                // Function address
+                const atom = rec.getAtom(macho_file);
+                const addr = rec.getAtomAddress(macho_file);
+                out.rangeStart = addr;
+                var reloc = addReloc(offset, macho_file.options.cpu_arch.?);
+                reloc.r_symbolnum = atom.out_n_sect + 1;
+                relocs.appendAssumeCapacity(reloc);
+            }
+
+            // Personality function
+            if (rec.getPersonality(macho_file)) |sym| {
+                const r_symbolnum = math.cast(u24, sym.getOutputSymtabIndex(macho_file).?) orelse return error.Overflow;
+                var reloc = addReloc(offset + 16, macho_file.options.cpu_arch.?);
+                reloc.r_symbolnum = r_symbolnum;
+                reloc.r_extern = 1;
+                relocs.appendAssumeCapacity(reloc);
+            }
+
+            // LSDA address
+            if (rec.getLsdaAtom(macho_file)) |atom| {
+                const addr = rec.getLsdaAddress(macho_file);
+                out.lsda = addr;
+                var reloc = addReloc(offset + 24, macho_file.options.cpu_arch.?);
+                reloc.r_symbolnum = atom.out_n_sect + 1;
+                relocs.appendAssumeCapacity(reloc);
+            }
+
+            entries.appendAssumeCapacity(out);
+            offset += @sizeOf(macho.compact_unwind_entry);
         }
     }
 
-    assert(buffer.items.len == nrecs);
-    try macho_file.base.file.pwriteAll(mem.sliceAsBytes(buffer.items), header.offset);
+    assert(entries.items.len == nrecs);
+    assert(relocs.items.len == header.nreloc);
+
+    // TODO scattered writes?
+    try macho_file.base.file.pwriteAll(mem.sliceAsBytes(entries.items), header.offset);
+    try macho_file.base.file.pwriteAll(mem.sliceAsBytes(relocs.items), header.reloff);
 }
 
 fn writeEhFrame(macho_file: *MachO) !void {
