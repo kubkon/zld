@@ -143,6 +143,17 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
 
     self.initPlatform();
     try self.initDwarfInfo(gpa);
+
+    for (self.atoms.items) |atom_index| {
+        const atom = macho_file.getAtom(atom_index).?;
+        const isec = atom.getInputSection(macho_file);
+        if (isec.attrs() & macho.S_ATTR_DEBUG != 0 or
+            mem.eql(u8, isec.sectName(), "__eh_frame") or
+            mem.eql(u8, isec.segName(), "__compact_unwind"))
+        {
+            atom.flags.alive = false;
+        }
+    }
 }
 
 inline fn isLiteral(sect: macho.section_64) bool {
@@ -163,9 +174,6 @@ fn initSubsections(self: *Object, nlists: anytype, macho_file: *MachO) !void {
     const gpa = macho_file.base.allocator;
     const slice = self.sections.slice();
     for (slice.items(.header), slice.items(.subsections), 0..) |sect, *subsections, n_sect| {
-        if (sect.attrs() & macho.S_ATTR_DEBUG != 0) continue;
-        if (mem.eql(u8, sect.sectName(), "__eh_frame")) continue;
-        if (mem.eql(u8, sect.sectName(), "__compact_unwind")) continue;
         if (isLiteral(sect)) continue;
 
         const nlist_start = for (nlists, 0..) |nlist, i| {
@@ -237,9 +245,6 @@ fn initSections(self: *Object, nlists: anytype, macho_file: *MachO) !void {
     try self.atoms.ensureUnusedCapacity(gpa, self.sections.items(.header).len);
 
     for (slice.items(.header), 0..) |sect, n_sect| {
-        if (sect.attrs() & macho.S_ATTR_DEBUG != 0) continue;
-        if (mem.eql(u8, sect.sectName(), "__eh_frame")) continue;
-        if (mem.eql(u8, sect.sectName(), "__compact_unwind")) continue;
         if (isLiteral(sect)) continue;
 
         const name = try std.fmt.allocPrintZ(gpa, "{s}${s}", .{ sect.segName(), sect.sectName() });
@@ -316,9 +321,6 @@ fn initLiteralSections(self: *Object, macho_file: *MachO) !void {
     try self.atoms.ensureUnusedCapacity(gpa, self.sections.items(.header).len);
 
     for (slice.items(.header), 0..) |sect, n_sect| {
-        if (sect.attrs() & macho.S_ATTR_DEBUG != 0) continue;
-        if (mem.eql(u8, sect.sectName(), "__eh_frame")) continue;
-        if (mem.eql(u8, sect.sectName(), "__compact_unwind")) continue;
         if (!isLiteral(sect)) continue;
 
         const name = try std.fmt.allocPrintZ(gpa, "{s}${s}", .{ sect.segName(), sect.sectName() });
@@ -390,10 +392,6 @@ fn linkNlistToAtom(self: *Object, macho_file: *MachO) !void {
     defer tracy.end();
     for (self.symtab.items(.nlist), self.symtab.items(.atom)) |nlist, *atom| {
         if (!nlist.stab() and nlist.sect()) {
-            const sect = self.sections.items(.header)[nlist.n_sect - 1];
-            if (sect.attrs() & macho.S_ATTR_DEBUG != 0) continue;
-            if (mem.eql(u8, sect.sectName(), "__eh_frame")) continue;
-            if (mem.eql(u8, sect.sectName(), "__compact_unwind")) continue;
             if (self.findAtomInSection(nlist.n_value, nlist.n_sect - 1)) |atom_index| {
                 atom.* = atom_index;
             } else {
