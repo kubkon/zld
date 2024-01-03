@@ -46,13 +46,13 @@ pub fn flush(macho_file: *MachO) !void {
 
     state_log.debug("{}", .{macho_file.dumpState()});
 
+    try macho_file.calcSymtabSize();
     try writeAtoms(macho_file);
     try writeCompactUnwind(macho_file);
     try writeEhFrame(macho_file);
 
     off = mem.alignForward(u32, off, @alignOf(u64));
     off = try writeDataInCode(macho_file, off);
-    try macho_file.calcSymtabSize();
     off = mem.alignForward(u32, off, @alignOf(u64));
     off = try macho_file.writeSymtab(off);
     off = mem.alignForward(u32, off, @alignOf(u64));
@@ -141,7 +141,7 @@ fn calcSectionSizes(macho_file: *MachO) !void {
             atom.value = offset;
             header.size += padding + atom.size;
             header.@"align" = @max(header.@"align", atom.alignment);
-            header.nreloc += @intCast(atom.relocs.len);
+            header.nreloc += atom.calcNumRelocs(macho_file);
         }
     }
 
@@ -224,20 +224,26 @@ fn writeAtoms(macho_file: *MachO) !void {
         if (atoms.items.len == 0) continue;
         if (header.isZerofill()) continue;
 
-        const buffer = try gpa.alloc(u8, header.size);
-        defer gpa.free(buffer);
+        const code = try gpa.alloc(u8, header.size);
+        defer gpa.free(code);
         const padding_byte: u8 = if (header.isCode() and cpu_arch == .x86_64) 0xcc else 0;
-        @memset(buffer, padding_byte);
+        @memset(code, padding_byte);
+
+        var relocs = try std.ArrayList(macho.relocation_info).initCapacity(gpa, header.nreloc);
+        defer relocs.deinit();
 
         for (atoms.items) |atom_index| {
             const atom = macho_file.getAtom(atom_index).?;
             assert(atom.flags.alive);
             const off = atom.value - header.addr;
-            @memcpy(buffer[off..][0..atom.size], atom.getCode(macho_file));
-            // TODO write relocs
+            @memcpy(code[off..][0..atom.size], atom.getCode(macho_file));
+
+            try atom.writeRelocs(macho_file, &relocs);
         }
 
-        try macho_file.base.file.pwriteAll(buffer, header.offset);
+        // TODO scattered writes?
+        try macho_file.base.file.pwriteAll(code, header.offset);
+        try macho_file.base.file.pwriteAll(mem.sliceAsBytes(relocs.items), header.reloff);
     }
 }
 
