@@ -704,7 +704,11 @@ pub fn writeRelocs(self: Atom, macho_file: *MachO, code: []u8, buffer: *std.Arra
             break :r_symbolnum math.cast(u24, r_symbolnum) orelse return error.Overflow;
         };
         const r_extern = rel.tag == .@"extern";
-        const addend = rel.addend + rel.getRelocAddend(cpu_arch);
+        var addend = rel.addend + rel.getRelocAddend(cpu_arch);
+        if (rel.tag == .local) {
+            const target: i64 = @intCast(rel.getTargetAddress(macho_file));
+            addend += target;
+        }
 
         try stream.seekTo(rel_offset);
 
@@ -755,6 +759,13 @@ pub fn writeRelocs(self: Atom, macho_file: *MachO, code: []u8, buffer: *std.Arra
                 });
             },
             .x86_64 => {
+                if (rel.meta.pcrel) {
+                    if (rel.tag == .local) {
+                        addend -= @as(i64, @intCast(self.value + rel_offset));
+                    } else {
+                        addend += 4;
+                    }
+                }
                 switch (rel.meta.length) {
                     0, 1 => unreachable,
                     2 => try stream.writer().writeInt(i32, @truncate(addend), .little),
