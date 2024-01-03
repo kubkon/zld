@@ -54,6 +54,7 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testObjcStubs2(b, opts));
     macho_step.dependOn(testPagezeroSize(b, opts));
     macho_step.dependOn(testReexportsZig(b, opts));
+    macho_step.dependOn(testRelocatable(b, opts));
     macho_step.dependOn(testSearchStrategy(b, opts));
     macho_step.dependOn(testSectionBoundarySymbols(b, opts));
     macho_step.dependOn(testSegmentBoundarySymbols(b, opts));
@@ -1998,6 +1999,91 @@ fn testReexportsZig(b: *Build, opts: Options) *Step {
 
     const run = exe.run();
     test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+fn testRelocatable(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-relocatable", "");
+
+    const a_c =
+        \\#include <stdexcept>
+        \\int try_me() {
+        \\  throw std::runtime_error("Oh no!");
+        \\}
+    ;
+    const b_c =
+        \\extern int try_me();
+        \\int try_again() {
+        \\  return try_me();
+        \\}
+    ;
+    const main_c =
+        \\#include <iostream>
+        \\#include <stdexcept>
+        \\extern int try_again();
+        \\int main() {
+        \\  try {
+        \\    try_again();
+        \\  } catch (const std::exception &e) {
+        \\    std::cout << "exception=" << e.what();
+        \\  }
+        \\  return 0;
+        \\}
+    ;
+    const exp_stdout = "exception=Oh no!";
+
+    {
+        const a_o = cc(b, opts);
+        a_o.addCppSource(a_c);
+        a_o.addArg("-c");
+
+        const b_o = cc(b, opts);
+        b_o.addCppSource(b_c);
+        b_o.addArg("-c");
+
+        const c_o = ld(b, opts);
+        c_o.addFileSource(a_o.out);
+        c_o.addFileSource(b_o.out);
+        c_o.addArg("-r");
+
+        const exe = cc(b, opts);
+        exe.addCppSource(main_c);
+        exe.addFileSource(c_o.out);
+        exe.addArg("-lc++");
+
+        const run = exe.run();
+        run.expectStdOutEqual(exp_stdout);
+        test_step.dependOn(run.step());
+    }
+
+    {
+        const a_o = cc(b, opts);
+        a_o.addCppSource(a_c);
+        a_o.addArg("-c");
+
+        const b_o = cc(b, opts);
+        b_o.addCppSource(b_c);
+        b_o.addArg("-c");
+
+        const main_o = cc(b, opts);
+        main_o.addCppSource(main_c);
+        main_o.addArg("-c");
+
+        const c_o = ld(b, opts);
+        c_o.addFileSource(a_o.out);
+        c_o.addFileSource(b_o.out);
+        c_o.addFileSource(main_o.out);
+        c_o.addArg("-r");
+
+        const exe = cc(b, opts);
+        exe.addFileSource(c_o.out);
+        exe.addArg("-lc++");
+
+        const run = exe.run();
+        run.expectStdOutEqual(exp_stdout);
+        test_step.dependOn(run.step());
+    }
 
     return test_step;
 }

@@ -319,7 +319,6 @@ pub fn calcSize(macho_file: *MachO) !u32 {
 
     for (macho_file.objects.items) |index| {
         const object = macho_file.getFile(index).?.object;
-        if (!object.has_eh_frame) continue;
 
         outer: for (object.cies.items) |*cie| {
             for (cies.items) |other| {
@@ -341,7 +340,6 @@ pub fn calcSize(macho_file: *MachO) !u32 {
 
     for (macho_file.objects.items) |index| {
         const object = macho_file.getFile(index).?.object;
-        if (!object.has_eh_frame) continue;
         for (object.fdes.items) |*fde| {
             if (!fde.alive) continue;
             fde.out_offset = offset;

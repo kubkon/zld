@@ -110,7 +110,7 @@ fn initOutputSections(macho_file: *MachO) !void {
     }
 
     const needs_unwind_info = for (macho_file.objects.items) |index| {
-        if (macho_file.getFile(index).?.object.has_unwind) break true;
+        if (macho_file.getFile(index).?.object.compact_unwind_sect_index != null) break true;
     } else false;
     if (needs_unwind_info) {
         macho_file.unwind_info_sect_index = try macho_file.addSection("__LD", "__compact_unwind", .{
@@ -119,7 +119,7 @@ fn initOutputSections(macho_file: *MachO) !void {
     }
 
     const needs_eh_frame = for (macho_file.objects.items) |index| {
-        if (macho_file.getFile(index).?.object.has_eh_frame) break true;
+        if (macho_file.getFile(index).?.object.eh_frame_sect_index != null) break true;
     } else false;
     if (needs_eh_frame) {
         assert(needs_unwind_info);

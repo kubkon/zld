@@ -690,11 +690,12 @@ pub fn writeRelocs(self: Atom, macho_file: *MachO, code: []u8, buffer: *std.Arra
 
     const cpu_arch = macho_file.options.cpu_arch.?;
     const relocs = self.getRelocs(macho_file);
+    const sect = macho_file.sections.items(.header)[self.out_n_sect];
     var stream = std.io.fixedBufferStream(code);
 
     for (relocs) |rel| {
         const rel_offset = rel.offset - self.off;
-        const r_address: i32 = math.cast(i32, self.value + rel_offset) orelse return error.Overflow;
+        const r_address: i32 = math.cast(i32, self.value + rel_offset - sect.addr) orelse return error.Overflow;
         const r_symbolnum = r_symbolnum: {
             const r_symbolnum: u32 = switch (rel.tag) {
                 .local => rel.getTargetAtom(macho_file).out_n_sect + 1,
