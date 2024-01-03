@@ -684,12 +684,13 @@ pub fn calcNumRelocs(self: Atom, macho_file: *MachO) u32 {
     }
 }
 
-pub fn writeRelocs(self: Atom, macho_file: *MachO, buffer: *std.ArrayList(macho.relocation_info)) !void {
+pub fn writeRelocs(self: Atom, macho_file: *MachO, code: []u8, buffer: *std.ArrayList(macho.relocation_info)) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
     const cpu_arch = macho_file.options.cpu_arch.?;
     const relocs = self.getRelocs(macho_file);
+    var stream = std.io.fixedBufferStream(code);
 
     for (relocs) |rel| {
         const rel_offset = rel.offset - self.off;
@@ -704,9 +705,15 @@ pub fn writeRelocs(self: Atom, macho_file: *MachO, buffer: *std.ArrayList(macho.
         const r_extern = rel.tag == .@"extern";
         const addend = rel.addend + rel.getRelocAddend(cpu_arch);
 
+        try stream.seekTo(rel_offset);
+
         switch (cpu_arch) {
             .aarch64 => {
-                if (addend > 0 and rel.type != .unsigned) {
+                if (rel.type == .unsigned) switch (rel.meta.length) {
+                    0, 1 => unreachable,
+                    2 => try stream.writer().writeInt(i32, @truncate(addend), .little),
+                    3 => try stream.writer().writeInt(i64, addend, .little),
+                } else if (addend > 0) {
                     buffer.appendAssumeCapacity(.{
                         .r_address = r_address,
                         .r_symbolnum = @bitCast(math.cast(i24, addend) orelse return error.Overflow),

@@ -459,6 +459,12 @@ pub fn write(macho_file: *MachO, buffer: []u8) void {
     }
 }
 
+pub fn writeRelocs(macho_file: *MachO, relocs: *std.ArrayList(macho.relocation_info)) void {
+    _ = macho_file;
+    _ = relocs;
+    @panic("TODO eh_frame.writeRelocs");
+}
+
 pub const EH_PE = struct {
     pub const absptr = 0x00;
     pub const uleb128 = 0x01;
