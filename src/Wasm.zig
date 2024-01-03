@@ -113,10 +113,6 @@ debug_abbrev_index: ?u32 = null,
 /// by the synthetic __wasm_call_ctors function.
 init_funcs: std.ArrayListUnmanaged(InitFuncLoc) = .{},
 
-/// The last atom to be emit into the code section, this is used to append new
-/// synthetic functions after code has already been allocated.
-last_code_atom: Atom.Index = .none,
-
 pub const Segment = struct {
     alignment: u32,
     size: u32,
@@ -1403,17 +1399,10 @@ fn createSyntheticFunction(
         .sym_index = loc.sym_index,
         .file = null,
         .alignment = 1,
-        .next = .none,
         .prev = .none,
         .data = function_body.ptr,
         .original_offset = 0,
     };
-    assert(wasm.last_code_atom != .none);
-    const last_atom = Atom.ptrFromIndex(wasm, wasm.last_code_atom);
-    last_atom.prev = atom_index;
-    atom.next = wasm.last_code_atom;
-    atom.offset = last_atom.offset + last_atom.size;
-    wasm.last_code_atom = atom_index;
     try wasm.symbol_atom.putNoClobber(wasm.base.allocator, loc, atom_index);
 }
 
@@ -1781,10 +1770,8 @@ fn appendDummySegment(wasm: *Wasm, gpa: Allocator) !void {
 /// Simply inserts it into the map of atoms when it doesn't exist yet.
 pub fn appendAtomAtIndex(wasm: *Wasm, index: u32, atom_index: Atom.Index) !void {
     if (wasm.atoms.getPtr(index)) |last| {
-        const last_atom = Atom.ptrFromIndex(wasm, last.*);
         const atom = Atom.ptrFromIndex(wasm, atom_index);
         atom.prev = last.*;
-        last_atom.next = atom_index;
         last.* = atom_index;
     } else {
         try wasm.atoms.putNoClobber(wasm.base.allocator, index, atom_index);
@@ -1827,45 +1814,19 @@ fn sortDataSegments(wasm: *Wasm) !void {
     wasm.data_segments = new_mapping;
 }
 
-/// Sort the code atoms in the same order as their definitions in the function section.
-/// This is required so debug relocations can correctly retrieve the offset of a code atom.
-/// The order of the code section and function section must *always* match.
-fn sortCodeSection(wasm: *Wasm) !void {
-    const code_index = wasm.code_section_index orelse return;
-    var sorted_atoms = try std.ArrayList(Atom.Index).initCapacity(wasm.base.allocator, wasm.functions.count());
-    defer sorted_atoms.deinit();
-
-    var it = wasm.functions.items.iterator();
-    while (it.next()) |entry| {
-        const loc: SymbolWithLoc = .{
-            .file = entry.key_ptr.file,
-            .sym_index = entry.value_ptr.symbol_index,
-        };
-        const atom_index = wasm.symbol_atom.get(loc.finalLoc(wasm)).?;
-        const atom = Atom.ptrFromIndex(wasm, atom_index);
-        atom.prev = .none;
-        atom.next = .none;
-        sorted_atoms.appendAssumeCapacity(atom_index);
-    }
-
-    assert(wasm.atoms.remove(code_index));
-    var i = sorted_atoms.items.len;
-    while (i > 0) {
-        i -= 1;
-        try wasm.appendAtomAtIndex(code_index, sorted_atoms.items[i]);
-    }
-    wasm.last_code_atom = sorted_atoms.items[sorted_atoms.items.len - 1];
-}
-
 fn allocateAtoms(wasm: *Wasm) !void {
     // first sort the data segments
     try wasm.sortDataSegments();
-    try wasm.sortCodeSection();
 
     var it = wasm.atoms.iterator();
     while (it.next()) |entry| {
         const segment = &wasm.segments.items[entry.key_ptr.*];
         var atom_index = entry.value_ptr.*;
+        if (wasm.code_section_index != null and wasm.code_section_index.? == entry.key_ptr.*) {
+            // We do not need to allocate the code section here as we do it upon writing
+            // as we emit the atoms based on the order of the function section.
+            continue;
+        }
         var offset: u32 = 0;
         while (true) {
             const atom = Atom.ptrFromIndex(wasm, atom_index);
@@ -1879,23 +1840,14 @@ fn allocateAtoms(wasm: *Wasm) !void {
             } else wasm.synthetic_symbols.values()[symbol_loc.sym_index];
 
             if (sym.isDead()) {
-                if (atom.next != .none) {
-                    const next = Atom.ptrFromIndex(wasm, atom.next);
-                    next.prev = atom.prev;
-                } else if (entry.value_ptr.* == atom_index) {
-                    if (atom.prev != .none) {
-                        entry.value_ptr.* = atom.prev;
-                    }
+                if (entry.value_ptr.* == atom_index and atom.prev != .none) {
+                    entry.value_ptr.* = atom.prev;
                 }
                 if (atom.prev == .none) {
-                    atom.next = .none;
                     break;
                 }
                 atom_index = atom.prev;
-                const prev = Atom.ptrFromIndex(wasm, atom_index);
-                prev.next = atom.next;
                 atom.prev = .none;
-                atom.next = .none;
                 continue;
             }
             offset = std.mem.alignForward(u32, offset, atom.alignment);

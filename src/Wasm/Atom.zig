@@ -33,10 +33,6 @@ offset: u32,
 /// The original offset within the object file. This value is substracted from
 /// relocation offsets to determine where in the `data` to rewrite the value
 original_offset: u32,
-
-/// Next atom in relation to this atom.
-/// When null, this atom is the last atom
-next: Index,
 /// Previous atom in relation to this atom.
 /// is null when this atom is the first in its order
 prev: Index,
@@ -45,7 +41,6 @@ prev: Index,
 pub const empty: Atom = .{
     .alignment = 0,
     .file = null,
-    .next = .none,
     .offset = 0,
     .prev = .none,
     .size = 0,
@@ -125,6 +120,7 @@ pub fn resolveRelocs(atom: *Atom, wasm_bin: *const Wasm) void {
 fn relocationValue(atom: *Atom, relocation: types.Relocation, wasm_bin: *const Wasm) u64 {
     const target_loc = (Wasm.SymbolWithLoc{ .file = atom.file, .sym_index = relocation.index }).finalLoc(wasm_bin);
     const symbol = target_loc.getSymbol(wasm_bin);
+
     if (relocation.relocation_type != .R_WASM_TYPE_INDEX_LEB and
         symbol.tag != .section and
         symbol.isDead())

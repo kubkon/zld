@@ -175,20 +175,24 @@ pub fn emit(wasm: *Wasm) !void {
         );
     }
 
-    if (wasm.code_section_index) |index| {
+    if (wasm.functions.count() != 0) {
         log.debug("Writing 'Code' section ({d})", .{wasm.functions.count()});
         const offset = try reserveSectionHeader(&binary_bytes);
-        var atom_index = wasm.atoms.get(index).?;
 
         const start = binary_bytes.items.len - 5; // minus 5 so start offset is 5 to include entry count
-        while (atom_index != .none) {
+        var it = wasm.functions.items.iterator();
+        while (it.next()) |entry| {
+            const loc: Wasm.SymbolWithLoc = .{
+                .file = entry.key_ptr.file,
+                .sym_index = entry.value_ptr.symbol_index,
+            };
+            const atom_index = wasm.symbol_atom.get(loc.finalLoc(wasm)).?;
             const atom = Atom.ptrFromIndex(wasm, atom_index);
             std.debug.assert(atom.symbolLoc().getSymbol(wasm).isAlive());
             atom.resolveRelocs(wasm);
             atom.offset = @intCast(binary_bytes.items.len - start);
             try leb.writeULEB128(writer, atom.size);
             try writer.writeAll(atom.data[0..atom.size]);
-            atom_index = atom.prev;
         }
 
         try emitSectionHeader(
