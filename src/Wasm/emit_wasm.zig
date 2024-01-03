@@ -74,7 +74,7 @@ pub fn emit(wasm: *Wasm) !void {
         log.debug("Writing 'Functions' section ({d})", .{wasm.functions.count()});
         const offset = try reserveSectionHeader(&binary_bytes);
         for (wasm.functions.items.values()) |func| {
-            try emitFunction(func, writer);
+            try emitFunction(func.func, writer);
         }
         try emitSectionHeader(
             binary_bytes.items,
@@ -175,39 +175,26 @@ pub fn emit(wasm: *Wasm) !void {
         );
     }
 
-    if (wasm.code_section_index) |index| {
+    if (wasm.functions.count() != 0) {
         log.debug("Writing 'Code' section ({d})", .{wasm.functions.count()});
         const offset = try reserveSectionHeader(&binary_bytes);
-        var atom_index = wasm.atoms.get(index).?;
-        atom_index = Atom.firstAtom(atom_index, wasm);
 
-        // The code section must be sorted in line with the function order.
-        var sorted_atoms = try std.ArrayList(*Atom).initCapacity(wasm.base.allocator, wasm.functions.count());
-        defer sorted_atoms.deinit();
-
-        while (atom_index != .none) {
+        const start = binary_bytes.items.len - 5; // minus 5 so start offset is 5 to include entry count
+        var it = wasm.functions.items.iterator();
+        while (it.next()) |entry| {
+            const loc: Wasm.SymbolWithLoc = .{
+                .file = entry.key_ptr.file,
+                .sym_index = entry.value_ptr.symbol_index,
+            };
+            const atom_index = wasm.symbol_atom.get(loc.finalLoc(wasm)).?;
             const atom = Atom.ptrFromIndex(wasm, atom_index);
-            const loc = atom.symbolLoc();
-            std.debug.assert(loc.getSymbol(wasm).isAlive());
+            std.debug.assert(atom.symbolLoc().getSymbol(wasm).isAlive());
             atom.resolveRelocs(wasm);
-            sorted_atoms.appendAssumeCapacity(atom);
-            atom_index = atom.next;
+            atom.offset = @intCast(binary_bytes.items.len - start);
+            try leb.writeULEB128(writer, atom.size);
+            try writer.writeAll(atom.data[0..atom.size]);
         }
 
-        const atom_sort_fn = struct {
-            fn sort(ctx: *const Wasm, lhs: *const Atom, rhs: *const Atom) bool {
-                const lhs_sym = lhs.symbolLoc().getSymbol(ctx);
-                const rhs_sym = rhs.symbolLoc().getSymbol(ctx);
-                return lhs_sym.index < rhs_sym.index;
-            }
-        }.sort;
-
-        std.mem.sort(*Atom, sorted_atoms.items, wasm, atom_sort_fn);
-        for (sorted_atoms.items) |sorted_atom| {
-            try leb.writeULEB128(writer, sorted_atom.size);
-            try writer.writeAll(sorted_atom.data[0..sorted_atom.size]);
-        }
-        std.debug.assert(sorted_atoms.items.len == wasm.functions.count()); // must have equal amount of bodies as functions
         try emitSectionHeader(
             binary_bytes.items,
             offset,
@@ -226,7 +213,6 @@ pub fn emit(wasm: *Wasm) !void {
             // do not output the 'bss' section
             if (std.mem.eql(u8, entry.key_ptr.*, ".bss") and !wasm.options.import_memory) continue;
             var atom_index = wasm.atoms.get(entry.value_ptr.*).?;
-            atom_index = Atom.firstAtom(atom_index, wasm);
             const segment: Wasm.Segment = wasm.segments.items[entry.value_ptr.*];
 
             try leb.writeULEB128(writer, segment.flags);
@@ -253,8 +239,8 @@ pub fn emit(wasm: *Wasm) !void {
                 try writer.writeAll(atom.data[0..atom.size]);
 
                 current_offset += atom.size;
-                if (atom.next != .none) {
-                    atom_index = atom.next;
+                if (atom.prev != .none) {
+                    atom_index = atom.prev;
                 } else {
                     // Also make sure that if the last atom has extra bytes, we write 0's.
                     if (current_offset != segment.size) {
@@ -293,11 +279,11 @@ pub fn emit(wasm: *Wasm) !void {
 
         for (wasm.resolved_symbols.keys()) |sym_with_loc| {
             const symbol = sym_with_loc.getSymbol(wasm);
+            if (symbol.isDead()) {
+                continue;
+            }
             switch (symbol.tag) {
                 .function => {
-                    if (symbol.isDead()) {
-                        continue;
-                    }
                     const gop = try funcs.getOrPut(symbol.index);
                     if (!gop.found_existing) {
                         gop.value_ptr.* = sym_with_loc;
@@ -752,12 +738,11 @@ fn emitDebugSections(wasm: *const Wasm, bytes: *std.ArrayList(u8)) !void {
             try leb.writeULEB128(bytes.writer(), @as(u32, @intCast(item.name.len)));
             bytes.appendSliceAssumeCapacity(item.name);
             var atom_index = wasm.atoms.get(index).?;
-            atom_index = Atom.firstAtom(atom_index, wasm);
             while (atom_index != .none) {
                 const atom = Atom.ptrFromIndex(wasm, atom_index);
                 atom.resolveRelocs(wasm);
                 bytes.appendSliceAssumeCapacity(atom.data[0..atom.size]);
-                atom_index = atom.next;
+                atom_index = atom.prev;
             }
             try emitCustomHeader(bytes.items, header_offset, @intCast(bytes.items.len - header_offset - 6));
         }

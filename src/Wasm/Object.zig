@@ -64,10 +64,6 @@ relocatable_data: std.AutoHashMapUnmanaged(RelocatableData.Tag, []RelocatableDat
 /// import name, module name and export names. Each string will be deduplicated
 /// and returns an offset into the table.
 string_table: Wasm.StringTable = .{},
-/// All the names of each debug section found in the current object file.
-/// Each name is terminated by a null-terminator. The name can be found,
-/// from the `index` offset within the `RelocatableData`.
-debug_names: [:0]const u8,
 /// Contains the entire `producers` section as a single slice of bytes.
 /// Must be parsed to extract its data. This is done so we only parse it
 /// when its data is actually needed.
@@ -88,8 +84,11 @@ const RelocatableData = struct {
     offset: u32,
     /// Represents the index of the section it belongs to
     section_index: u32,
+    /// Whether the relocatable section is represented by a symbol or not.
+    /// Can only be `true` for custom sections.
+    represented: bool = false,
 
-    const Tag = enum { data, code, debug };
+    const Tag = enum { data, code, custom };
 
     /// Returns the alignment of the segment, by retrieving it from the segment
     /// meta data of the given object file.
@@ -108,15 +107,8 @@ const RelocatableData = struct {
         return switch (relocatable_data.type) {
             .data => .data,
             .code => .function,
-            .debug => .section,
+            .custom => .section,
         };
-    }
-
-    /// Returns the index within a section, or in case of a debug section,
-    /// returns the section index within the object file.
-    pub fn getIndex(relocatable_data: RelocatableData) u32 {
-        if (relocatable_data.type == .debug) return relocatable_data.section_index;
-        return relocatable_data.index;
     }
 };
 
@@ -130,7 +122,6 @@ pub fn create(gpa: Allocator, file: std.fs.File, name: []const u8, maybe_max_siz
     var object: Object = .{
         .file = file,
         .name = try gpa.dupe(u8, name),
-        .debug_names = &.{},
     };
 
     var is_object_file: bool = false;
@@ -384,7 +375,7 @@ fn Parser(comptime ReaderType: type) type {
                             try reader.readNoEof(content);
                             parser.object.producers = content;
                         } else if (std.mem.startsWith(u8, name, ".debug")) {
-                            const gop = try parser.object.relocatable_data.getOrPut(gpa, .debug);
+                            const gop = try parser.object.relocatable_data.getOrPut(gpa, .custom);
                             var relocatable_data: std.ArrayListUnmanaged(RelocatableData) = .{};
                             defer relocatable_data.deinit(gpa);
                             if (!gop.found_existing) {
@@ -398,7 +389,7 @@ fn Parser(comptime ReaderType: type) type {
                             try reader.readNoEof(debug_content);
 
                             try relocatable_data.append(gpa, .{
-                                .type = .debug,
+                                .type = .custom,
                                 .data = debug_content.ptr,
                                 .size = debug_size,
                                 .index = try parser.object.string_table.put(gpa, name),
@@ -763,8 +754,7 @@ fn Parser(comptime ReaderType: type) type {
                 .WASM_SYMBOL_TABLE => {
                     var symbols = try std.ArrayList(Symbol).initCapacity(gpa, count);
 
-                    var i: usize = 0;
-                    while (i < count) : (i += 1) {
+                    for (0..count) |_| {
                         const symbol = symbols.addOneAssumeCapacity();
                         symbol.* = try parser.parseSymbol(gpa, reader);
                         log.debug("Found symbol: type({s}) name({s}) flags(0b{b:0>8})", .{
@@ -779,6 +769,21 @@ fn Parser(comptime ReaderType: type) type {
                     if (try parser.object.checkLegacyIndirectFunctionTable()) |symbol| {
                         try symbols.append(symbol);
                         log.debug("Found legacy indirect function table. Created symbol", .{});
+                    }
+
+                    // Not all debug sections may be represented by a symbol, for those sections
+                    // we manually create a symbol.
+                    for (parser.object.relocatable_data.get(.custom).?) |data| {
+                        if (!data.represented) {
+                            try symbols.append(.{
+                                .name = data.index,
+                                .flags = @intFromEnum(Symbol.Flag.WASM_SYM_BINDING_LOCAL),
+                                .tag = .section,
+                                .virtual_address = 0,
+                                .index = data.section_index,
+                            });
+                            log.debug("Created synthetic custom section symbol for '{s}'", .{parser.object.string_table.get(data.index)});
+                        }
                     }
 
                     parser.object.symtable = try symbols.toOwnedSlice();
@@ -816,15 +821,16 @@ fn Parser(comptime ReaderType: type) type {
                         _ = try leb.readULEB128(u32, reader);
                     }
                 },
-                .section => {
+                .section => blk: {
                     symbol.index = try leb.readULEB128(u32, reader);
-                    const section_data = parser.object.relocatable_data.get(.debug).?;
+                    const section_data = parser.object.relocatable_data.get(.custom).?;
                     for (section_data) |data| {
                         if (data.section_index == symbol.index) {
                             symbol.name = data.index;
-                            break;
+                            break :blk;
                         }
                     }
+                    unreachable; // programmer error: symbol index not matching custom section index
                 },
                 else => {
                     symbol.index = try leb.readULEB128(u32, reader);
@@ -921,7 +927,7 @@ pub fn parseSymbolIntoAtom(object: *Object, object_index: u16, symbol_index: u32
             // TODO: Come up with a better datastructure so we
             // can easily retrieve debug sections. Though, this only
             // occurs maximum 7 times per Object file, so may not be worth it.
-            const data = object.relocatable_data.get(.debug).?;
+            const data = object.relocatable_data.get(.custom).?;
             for (data) |dat| {
                 if (dat.section_index == symbol.index) {
                     break :blk dat;
@@ -933,7 +939,7 @@ pub fn parseSymbolIntoAtom(object: *Object, object_index: u16, symbol_index: u32
     };
     const final_index = try wasm_bin.getMatchingSegment(wasm_bin.base.allocator, object_index, symbol_index);
     const atom_index = try wasm_bin.createAtom();
-    try wasm_bin.appendAtomAtIndex(wasm_bin.base.allocator, final_index, atom_index);
+    try wasm_bin.appendAtomAtIndex(final_index, atom_index);
 
     const atom = Atom.ptrFromIndex(wasm_bin, atom_index);
     atom.sym_index = symbol_index;

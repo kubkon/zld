@@ -15,24 +15,39 @@ pub const Functions = struct {
     /// Holds the list of function type indexes.
     /// The list is built from merging all defined functions into this single list.
     /// Once appended, it becomes immutable and should not be mutated outside this list.
-    items: std.AutoArrayHashMapUnmanaged(struct { file: ?u16, index: u32 }, std.wasm.Func) = .{},
+    items: std.AutoArrayHashMapUnmanaged(
+        struct { file: ?u16, index: u32 },
+        struct { func: std.wasm.Func, symbol_index: u32 },
+    ) = .{},
 
     /// Adds a new function to the section while also setting the function index
     /// of the `Func` itself.
-    pub fn append(self: *Functions, gpa: Allocator, ref: struct { file: ?u16, index: u32 }, offset: u32, func: std.wasm.Func) !u32 {
+    /// Returns false when function was not appended due to it being an alias to another symbol pointing to the
+    /// same function.
+    pub fn append(self: *Functions, wasm: *Wasm, sym_loc: Wasm.SymbolWithLoc, offset: u32, func: std.wasm.Func) !bool {
+        const symbol = sym_loc.getSymbol(wasm);
         const gop = try self.items.getOrPut(
-            gpa,
-            .{ .file = ref.file, .index = ref.index },
+            wasm.base.allocator,
+            .{ .file = sym_loc.file, .index = symbol.index },
         );
         if (!gop.found_existing) {
-            gop.value_ptr.* = func;
+            gop.value_ptr.* = .{ .func = func, .symbol_index = sym_loc.sym_index };
+        } else {
+            symbol.unmark();
+            try wasm.discarded.put(
+                wasm.base.allocator,
+                sym_loc,
+                .{ .file = gop.key_ptr.file, .sym_index = gop.value_ptr.symbol_index },
+            );
+            return false;
         }
-        return @as(u32, @intCast(gop.index)) + offset;
+        symbol.index = @intCast(gop.index + offset);
+        return true;
     }
 
     /// Returns the count of entires within the function section
     pub fn count(self: *Functions) u32 {
-        return @as(u32, @intCast(self.items.count()));
+        return @intCast(self.items.count());
     }
 
     pub fn deinit(self: *Functions, gpa: Allocator) void {

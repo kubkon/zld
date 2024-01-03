@@ -419,19 +419,16 @@ pub fn flush(wasm: *Wasm) !void {
     try wasm.resolveSymbolsInArchives();
     try wasm.resolveLazySymbols();
     try wasm.checkUndefinedSymbols();
-
     try wasm.setupInitFunctions();
     try wasm.setupStart();
-
     try wasm.markReferences();
     try wasm.mergeImports();
-
+    try wasm.mergeSections();
+    try wasm.mergeTypes();
     try wasm.allocateAtoms();
     try wasm.setupMemory();
     wasm.allocateVirtualAddresses();
     wasm.mapFunctionTable();
-    try wasm.mergeSections();
-    try wasm.mergeTypes();
     try wasm.initializeCallCtorsFunction();
     try wasm.setupInitMemoryFunction();
     try wasm.setupTLSRelocationsFunction();
@@ -746,7 +743,7 @@ fn getFunctionSignature(wasm: *const Wasm, loc: SymbolWithLoc) std.wasm.Type {
         return obj.func_types[type_index];
     }
     assert(!is_undefined);
-    return wasm.func_types.get(wasm.functions.items.values()[symbol.index].type_index).*;
+    return wasm.func_types.get(wasm.functions.items.values()[symbol.index].func.type_index).*;
 }
 
 /// Assigns indexes to all indirect functions.
@@ -779,6 +776,9 @@ fn mergeSections(wasm: *Wasm) !void {
         );
     }
 
+    var removed_duplicates = std.ArrayList(SymbolWithLoc).init(wasm.base.allocator);
+    defer removed_duplicates.deinit();
+
     log.debug("Merging sections", .{});
     for (wasm.resolved_symbols.keys()) |sym_with_loc| {
         const file_index = sym_with_loc.file orelse {
@@ -795,7 +795,10 @@ fn mergeSections(wasm: *Wasm) !void {
         };
         const object = wasm.objects.items[file_index];
         const symbol: *Symbol = &object.symtable[sym_with_loc.sym_index];
-        if (symbol.isUndefined() or (symbol.tag != .function and symbol.tag != .global and symbol.tag != .table)) {
+        if (symbol.isDead() or
+            symbol.isUndefined() or
+            (symbol.tag != .function and symbol.tag != .global and symbol.tag != .table))
+        {
             // Skip undefined symbols as they go in the `import` section
             // Also skip symbols that do not need to have a section merged.
             continue;
@@ -805,16 +808,16 @@ fn mergeSections(wasm: *Wasm) !void {
         const index = symbol.index - offset;
         switch (symbol.tag) {
             .function => {
-                if (symbol.isDead()) {
-                    continue;
-                }
                 const original_func = object.functions[index];
-                symbol.index = try wasm.functions.append(
-                    wasm.base.allocator,
-                    .{ .file = file_index, .index = symbol.index },
+                if (!try wasm.functions.append(
+                    wasm,
+                    sym_with_loc,
                     wasm.imports.functionCount(),
                     original_func,
-                );
+                )) {
+                    // function was not appended, so discard it.
+                    try removed_duplicates.append(sym_with_loc);
+                }
             },
             .global => {
                 const original_global = object.globals[index];
@@ -835,6 +838,11 @@ fn mergeSections(wasm: *Wasm) !void {
             else => unreachable,
         }
     }
+
+    for (removed_duplicates.items) |sym_with_loc| {
+        assert(wasm.resolved_symbols.swapRemove(sym_with_loc));
+    }
+
     log.debug("Merged ({d}) functions", .{wasm.functions.count()});
     log.debug("Merged ({d}) globals", .{wasm.globals.count()});
     log.debug("Merged ({d}) tables", .{wasm.tables.count()});
@@ -865,7 +873,7 @@ fn mergeTypes(wasm: *Wasm) !void {
                 value.type = try wasm.func_types.append(wasm.base.allocator, object.func_types[value.type]);
             } else if (!dirty.contains(symbol.index)) {
                 log.debug("Adding type from function '{s}'", .{object.string_table.get(symbol.name)});
-                const func = &wasm.functions.items.values()[symbol.index - wasm.imports.functionCount()];
+                const func = &wasm.functions.items.values()[symbol.index - wasm.imports.functionCount()].func;
                 func.type_index = try wasm.func_types.append(wasm.base.allocator, object.func_types[func.type_index]);
                 dirty.putAssumeCapacity(symbol.index, {});
             }
@@ -1334,7 +1342,7 @@ fn initializeCallCtorsFunction(wasm: *Wasm) !void {
     const import_count = wasm.imports.functionCount();
     for (wasm.init_funcs.items) |init_func_loc| {
         const symbol = init_func_loc.getSymbol(wasm);
-        const func = wasm.functions.items.values()[symbol.index - import_count];
+        const func = wasm.functions.items.values()[symbol.index - import_count].func;
         const ty = wasm.func_types.items.items[func.type_index];
 
         // Call function by its function index
@@ -1375,12 +1383,12 @@ fn createSyntheticFunction(
     // create type (() -> nil)
     const ty_index = try wasm.func_types.append(wasm.base.allocator, func_ty);
     // create function with above type
-    symbol.index = try wasm.functions.append(
-        wasm.base.allocator,
-        .{ .file = null, .index = loc.sym_index },
+    std.debug.assert(try wasm.functions.append(
+        wasm,
+        loc,
         wasm.imports.functionCount(),
         .{ .type_index = ty_index },
-    );
+    ));
 
     // create the atom that will be output into the final binary
     const atom_index = try wasm.createAtom();
@@ -1391,15 +1399,11 @@ fn createSyntheticFunction(
         .sym_index = loc.sym_index,
         .file = null,
         .alignment = 1,
-        .next = .none,
         .prev = .none,
         .data = function_body.ptr,
         .original_offset = 0,
     };
-    try wasm.appendAtomAtIndex(wasm.base.allocator, wasm.code_section_index.?, atom_index);
     try wasm.symbol_atom.putNoClobber(wasm.base.allocator, loc, atom_index);
-    const prev = Atom.fromIndex(wasm, atom.prev);
-    atom.offset = prev.offset + prev.size;
 }
 
 /// Initializes a new `Atom` and returns its `Atom.Index`.
@@ -1637,7 +1641,7 @@ fn setupMemory(wasm: *Wasm) !void {
 fn allocateVirtualAddresses(wasm: *Wasm) void {
     for (wasm.resolved_symbols.keys()) |loc| {
         const symbol: *Symbol = loc.getSymbol(wasm);
-        if (symbol.tag != .data) {
+        if (symbol.tag != .data or symbol.isDead()) {
             continue; // only data symbols have virtual addresses
         }
         const atom_index = wasm.symbol_atom.get(loc) orelse {
@@ -1714,7 +1718,7 @@ pub fn getMatchingSegment(wasm: *Wasm, gpa: Allocator, object_index: u16, symbol
                     break :blk index;
                 };
             } else if (mem.eql(u8, section_name, ".debug_ranges")) {
-                return wasm.debug_line_index orelse blk: {
+                return wasm.debug_ranges_index orelse blk: {
                     wasm.debug_ranges_index = index;
                     try wasm.appendDummySegment(gpa);
                     break :blk index;
@@ -1764,15 +1768,13 @@ fn appendDummySegment(wasm: *Wasm, gpa: Allocator) !void {
 
 /// From a given index, append the given `Atom` at the back of the linked list.
 /// Simply inserts it into the map of atoms when it doesn't exist yet.
-pub fn appendAtomAtIndex(wasm: *Wasm, gpa: Allocator, index: u32, atom_index: Atom.Index) !void {
+pub fn appendAtomAtIndex(wasm: *Wasm, index: u32, atom_index: Atom.Index) !void {
     if (wasm.atoms.getPtr(index)) |last| {
-        const last_atom = Atom.ptrFromIndex(wasm, last.*);
         const atom = Atom.ptrFromIndex(wasm, atom_index);
         atom.prev = last.*;
-        last_atom.next = atom_index;
         last.* = atom_index;
     } else {
-        try wasm.atoms.putNoClobber(gpa, index, atom_index);
+        try wasm.atoms.putNoClobber(wasm.base.allocator, index, atom_index);
     }
 }
 
@@ -1781,7 +1783,8 @@ pub fn appendAtomAtIndex(wasm: *Wasm, gpa: Allocator, index: u32, atom_index: At
 /// - .data
 /// - .text
 /// - <others> (.bss)
-fn sortDataSegments(wasm: *Wasm, gpa: Allocator) !void {
+fn sortDataSegments(wasm: *Wasm) !void {
+    const gpa = wasm.base.allocator;
     var new_mapping: std.StringArrayHashMapUnmanaged(u32) = .{};
     try new_mapping.ensureUnusedCapacity(gpa, wasm.data_segments.count());
     errdefer new_mapping.deinit(gpa);
@@ -1813,38 +1816,45 @@ fn sortDataSegments(wasm: *Wasm, gpa: Allocator) !void {
 
 fn allocateAtoms(wasm: *Wasm) !void {
     // first sort the data segments
-    try wasm.sortDataSegments(wasm.base.allocator);
+    try wasm.sortDataSegments();
 
     var it = wasm.atoms.iterator();
     while (it.next()) |entry| {
         const segment = &wasm.segments.items[entry.key_ptr.*];
-        var atom_index = Atom.firstAtom(entry.value_ptr.*, wasm);
+        var atom_index = entry.value_ptr.*;
+        if (wasm.code_section_index != null and wasm.code_section_index.? == entry.key_ptr.*) {
+            // We do not need to allocate the code section here as we do it upon writing
+            // as we emit the atoms based on the order of the function section.
+            continue;
+        }
         var offset: u32 = 0;
         while (true) {
             const atom = Atom.ptrFromIndex(wasm, atom_index);
             const symbol_loc = atom.symbolLoc();
-            const sym = symbol_loc.getSymbol(wasm);
+            // Ensure we get the original symbol, so we verify the correct symbol on whether
+            // it is dead or not and ensure an atom is removed when dead.
+            // This is required as we may have parsed aliases into atoms.
+            const sym = if (symbol_loc.file) |object_index| sym: {
+                const object = wasm.objects.items[object_index];
+                break :sym object.symtable[symbol_loc.sym_index];
+            } else wasm.synthetic_symbols.values()[symbol_loc.sym_index];
+
             if (sym.isDead()) {
-                if (atom.prev != .none) {
-                    const prev = Atom.ptrFromIndex(wasm, atom.prev);
-                    prev.next = atom.next;
+                if (entry.value_ptr.* == atom_index and atom.prev != .none) {
+                    entry.value_ptr.* = atom.prev;
                 }
-                if (atom.next == .none) {
-                    atom.prev = .none;
+                if (atom.prev == .none) {
                     break;
                 }
-                atom_index = atom.next;
-                const next = Atom.ptrFromIndex(wasm, atom_index);
-                next.prev = atom.prev;
+                atom_index = atom.prev;
                 atom.prev = .none;
-                atom.next = .none;
                 continue;
             }
             offset = std.mem.alignForward(u32, offset, atom.alignment);
             atom.offset = offset;
             offset += atom.size;
-            if (atom.next == .none) break;
-            atom_index = atom.next;
+            if (atom.prev == .none) break;
+            atom_index = atom.prev;
         }
         segment.size = std.mem.alignForward(u32, offset, segment.alignment);
     }
@@ -2028,36 +2038,13 @@ fn markReferences(wasm: *Wasm) !void {
         const sym = sym_loc.getSymbol(wasm);
         if (sym.isExported(wasm.options.export_dynamic) or sym.isNoStrip()) {
             try wasm.mark(sym_loc);
-        }
-    }
-
-    // Check for all debug atoms if it contains relocations for marked symbols.
-    // When found, we mark the debug atom itself so the atom will be emit.
-    const debug_sections: []const ?u32 = &.{
-        wasm.debug_info_index,
-        wasm.debug_pubtypes_index,
-        wasm.debug_abbrev_index,
-        wasm.debug_line_index,
-        wasm.debug_str_index,
-        wasm.debug_pubnames_index,
-        wasm.debug_loc_index,
-        wasm.debug_ranges_index,
-    };
-
-    for (debug_sections) |maybe_index| {
-        var atom_index = wasm.atoms.get(maybe_index orelse continue).?;
-        atom_index = Atom.firstAtom(atom_index, wasm);
-        while (atom_index != .none) {
+        } else if (sym.tag == .section) {
+            const file_index = sym_loc.file orelse continue;
+            const object = &wasm.objects.items[file_index];
+            const atom_index = try Object.parseSymbolIntoAtom(object, file_index, sym_loc.sym_index, wasm);
             const atom = Atom.fromIndex(wasm, atom_index);
             const atom_sym = atom.symbolLoc().getSymbol(wasm);
-            for (atom.relocs) |reloc| {
-                const target_loc: SymbolWithLoc = .{ .sym_index = reloc.index, .file = atom.file };
-                const target_sym = target_loc.getSymbol(wasm);
-                if (target_sym.isAlive()) {
-                    atom_sym.mark();
-                }
-            }
-            atom_index = atom.next;
+            atom_sym.mark();
         }
     }
 }
