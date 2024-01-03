@@ -20,7 +20,7 @@ pub fn flush(macho_file: *MachO) !void {
         seg.cmdsize += seg.nsects * @sizeOf(macho.section_64);
     }
 
-    try allocateSections(macho_file);
+    var off = try allocateSections(macho_file);
 
     {
         // Allocate the single segment.
@@ -50,13 +50,12 @@ pub fn flush(macho_file: *MachO) !void {
     try writeCompactUnwind(macho_file);
     try writeEhFrame(macho_file);
 
-    var off = off: {
-        const seg = macho_file.segments.items[0];
-        break :off mem.alignForward(u64, seg.fileoff + seg.filesize, @alignOf(u64));
-    };
+    off = mem.alignForward(u32, off, @alignOf(u64));
     off = try writeDataInCode(macho_file, off);
     try macho_file.calcSymtabSize();
+    off = mem.alignForward(u32, off, @alignOf(u64));
     off = try macho_file.writeSymtab(off);
+    off = mem.alignForward(u32, off, @alignOf(u64));
     off = try macho_file.writeStrtab(off);
 
     const ncmds, const sizeofcmds = try writeLoadCommands(macho_file);
@@ -186,7 +185,7 @@ fn calcCompactUnwindSize(macho_file: *MachO, sect_index: u8) void {
     sect.@"align" = 3;
 }
 
-fn allocateSections(macho_file: *MachO) !void {
+fn allocateSections(macho_file: *MachO) !u32 {
     var fileoff = load_commands.calcLoadCommandsSizeObject(macho_file) + @sizeOf(macho.mach_header_64);
     var vmaddr: u64 = 0;
     const slice = macho_file.sections.slice();
@@ -203,6 +202,14 @@ fn allocateSections(macho_file: *MachO) !void {
             fileoff += @intCast(header.size);
         }
     }
+
+    for (slice.items(.header)) |*header| {
+        if (header.nreloc == 0) continue;
+        header.reloff = mem.alignForward(u32, fileoff, @alignOf(macho.relocation_info));
+        fileoff = header.reloff + header.nreloc * @sizeOf(macho.relocation_info);
+    }
+
+    return fileoff;
 }
 
 fn writeAtoms(macho_file: *MachO) !void {
@@ -268,10 +275,10 @@ fn writeEhFrame(macho_file: *MachO) !void {
     // TODO write relocs
 }
 
-fn writeDataInCode(macho_file: *MachO, off: u64) !u64 {
+fn writeDataInCode(macho_file: *MachO, off: u32) !u32 {
     // TODO actually write it out
     const cmd = &macho_file.data_in_code_cmd;
-    cmd.dataoff = @intCast(off);
+    cmd.dataoff = off;
     return off;
 }
 

@@ -392,18 +392,18 @@ pub fn flush(self: *MachO) !void {
     try self.finalizeDyldInfoSections();
     try self.writeSyntheticSections();
 
-    var off = self.getLinkeditSegment().fileoff;
+    var off = math.cast(u32, self.getLinkeditSegment().fileoff) orelse return error.Overflow;
     off = try self.writeDyldInfoSections(off);
-    off = mem.alignForward(u64, off, @alignOf(u64));
+    off = mem.alignForward(u32, off, @alignOf(u64));
     off = try self.writeFunctionStarts(off);
-    off = mem.alignForward(u64, off, @alignOf(u64));
+    off = mem.alignForward(u32, off, @alignOf(u64));
     off = try self.writeDataInCode(off);
     try self.calcSymtabSize();
-    off = mem.alignForward(u64, off, @alignOf(u64));
+    off = mem.alignForward(u32, off, @alignOf(u64));
     off = try self.writeSymtab(off);
-    off = mem.alignForward(u64, off, @alignOf(u32));
+    off = mem.alignForward(u32, off, @alignOf(u32));
     off = try self.writeIndsymtab(off);
-    off = mem.alignForward(u64, off, @alignOf(u64));
+    off = mem.alignForward(u32, off, @alignOf(u64));
     off = try self.writeStrtab(off);
 
     self.getLinkeditSegment().filesize = off - self.getLinkeditSegment().fileoff;
@@ -2245,7 +2245,7 @@ fn writeSyntheticSections(self: *MachO) !void {
     }
 }
 
-fn writeDyldInfoSections(self: *MachO, off: u64) !u64 {
+fn writeDyldInfoSections(self: *MachO, off: u32) !u32 {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -2290,27 +2290,27 @@ fn writeDyldInfoSections(self: *MachO, off: u64) !u64 {
     try stream.seekTo(cmd.export_off);
     try self.export_trie.write(writer);
 
-    cmd.rebase_off += @intCast(off);
-    cmd.bind_off += @intCast(off);
-    cmd.weak_bind_off += @intCast(off);
-    cmd.lazy_bind_off += @intCast(off);
-    cmd.export_off += @intCast(off);
+    cmd.rebase_off += off;
+    cmd.bind_off += off;
+    cmd.weak_bind_off += off;
+    cmd.lazy_bind_off += off;
+    cmd.export_off += off;
 
     try self.base.file.pwriteAll(buffer, off);
 
     return off + needed_size;
 }
 
-fn writeFunctionStarts(self: *MachO, off: u64) !u64 {
+fn writeFunctionStarts(self: *MachO, off: u32) !u32 {
     // TODO actually write it out
     const cmd = &self.function_starts_cmd;
-    cmd.dataoff = @intCast(off);
+    cmd.dataoff = off;
     return off;
 }
 
-fn writeDataInCode(self: *MachO, off: u64) !u64 {
+fn writeDataInCode(self: *MachO, off: u32) !u32 {
     const cmd = &self.data_in_code_cmd;
-    cmd.dataoff = @intCast(off);
+    cmd.dataoff = off;
 
     const base = self.getTextSegment().vmaddr;
 
@@ -2348,8 +2348,8 @@ fn writeDataInCode(self: *MachO, off: u64) !u64 {
         }
     }
 
-    const needed_size = dices.items.len * @sizeOf(macho.data_in_code_entry);
-    cmd.datasize = @intCast(needed_size);
+    const needed_size = math.cast(u32, dices.items.len * @sizeOf(macho.data_in_code_entry)) orelse return error.Overflow;
+    cmd.datasize = needed_size;
 
     try self.base.file.pwriteAll(mem.sliceAsBytes(dices.items), cmd.dataoff);
 
@@ -2418,12 +2418,12 @@ pub fn calcSymtabSize(self: *MachO) !void {
     }
 }
 
-pub fn writeSymtab(self: *MachO, off: u64) !u64 {
+pub fn writeSymtab(self: *MachO, off: u32) !u32 {
     const tracy = trace(@src());
     defer tracy.end();
     const gpa = self.base.allocator;
     const cmd = &self.symtab_cmd;
-    cmd.symoff = @intCast(off);
+    cmd.symoff = off;
 
     try self.symtab.resize(gpa, cmd.nsyms);
     try self.strtab.ensureUnusedCapacity(gpa, cmd.strsize - 1);
@@ -2445,10 +2445,10 @@ pub fn writeSymtab(self: *MachO, off: u64) !u64 {
     return off + cmd.nsyms * @sizeOf(macho.nlist_64);
 }
 
-fn writeIndsymtab(self: *MachO, off: u64) !u64 {
+fn writeIndsymtab(self: *MachO, off: u32) !u32 {
     const gpa = self.base.allocator;
     const cmd = &self.dysymtab_cmd;
-    cmd.indirectsymoff = @intCast(off);
+    cmd.indirectsymoff = off;
     cmd.nindirectsyms = self.indsymtab.nsyms(self);
 
     const needed_size = cmd.nindirectsyms * @sizeOf(u32);
@@ -2462,9 +2462,9 @@ fn writeIndsymtab(self: *MachO, off: u64) !u64 {
     return off + needed_size;
 }
 
-pub fn writeStrtab(self: *MachO, off: u64) !u64 {
+pub fn writeStrtab(self: *MachO, off: u32) !u32 {
     const cmd = &self.symtab_cmd;
-    cmd.stroff = @intCast(off);
+    cmd.stroff = off;
     try self.base.file.pwriteAll(self.strtab.items, cmd.stroff);
     return off + cmd.strsize;
 }
