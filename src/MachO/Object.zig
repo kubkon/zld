@@ -512,6 +512,7 @@ fn initEhFrameRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
     for (relocs.items, 0..) |rel, i| {
         switch (rel.type) {
             .unsigned => {
+                // TODO this is actually incorrect
                 assert(rel.meta.length == 3 and rel.meta.has_subtractor); // TODO error
                 const S: i64 = switch (rel.tag) {
                     .local => rel.meta.symbolnum,

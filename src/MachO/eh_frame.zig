@@ -139,6 +139,7 @@ pub const Fde = struct {
     atom_offset: u32 = 0,
     lsda: Atom.Index = 0,
     lsda_offset: u32 = 0,
+    lsda_ptr_offset: u32 = 0,
     file: File.Index = 0,
     alive: bool = true,
 
@@ -186,15 +187,15 @@ pub const Fde = struct {
             var creader = std.io.countingReader(stream.reader());
             const reader = creader.reader();
             _ = try leb.readULEB128(u64, reader); // augmentation length
-            const offset = creader.bytes_read;
+            fde.lsda_ptr_offset = @intCast(creader.bytes_read + 24);
             const lsda_ptr = switch (lsda_size) {
                 .p32 => try reader.readInt(i32, .little),
                 .p64 => try reader.readInt(i64, .little),
             };
-            const lsda_addr: u64 = @intCast(@as(i64, @intCast(sect.addr + 24 + offset + fde.offset)) + lsda_ptr);
+            const lsda_addr: u64 = @intCast(@as(i64, @intCast(sect.addr + fde.offset + fde.lsda_ptr_offset)) + lsda_ptr);
             fde.lsda = object.findAtom(lsda_addr) orelse {
                 macho_file.base.fatal("{}: {s},{s}: 0x{x}: invalid LSDA reference in FDE", .{
-                    object.fmtPath(), sect.segName(), sect.sectName(), fde.offset + offset + 24,
+                    object.fmtPath(), sect.segName(), sect.sectName(), fde.offset + fde.lsda_ptr_offset,
                 });
                 return error.ParseFailed;
             };
@@ -364,15 +365,6 @@ pub fn calcNumRelocs(macho_file: *MachO) u32 {
                 nreloc += 1; // personality
             }
         }
-
-        for (object.fdes.items) |fde| {
-            if (!fde.alive) continue;
-            nreloc += 1; // CIE ptr
-            nreloc += 1; // function
-            if (fde.getLsdaAtom(macho_file)) |_| {
-                nreloc += 1; // LSDA
-            }
-        }
     }
 
     return nreloc;
@@ -457,10 +449,89 @@ pub fn write(macho_file: *MachO, buffer: []u8) void {
     }
 }
 
-pub fn writeRelocs(macho_file: *MachO, relocs: *std.ArrayList(macho.relocation_info)) void {
-    _ = macho_file;
-    _ = relocs;
-    @panic("TODO eh_frame.writeRelocs");
+pub fn writeRelocs(macho_file: *MachO, code: []u8, relocs: *std.ArrayList(macho.relocation_info)) error{Overflow}!void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    const cpu_arch = macho_file.options.cpu_arch.?;
+    const sect = macho_file.sections.items(.header)[macho_file.eh_frame_sect_index.?];
+    const addend: i64 = switch (cpu_arch) {
+        .x86_64 => 4,
+        else => 0,
+    };
+
+    for (macho_file.objects.items) |index| {
+        const object = macho_file.getFile(index).?.object;
+        for (object.cies.items) |cie| {
+            if (!cie.alive) continue;
+
+            @memcpy(code[cie.out_offset..][0..cie.getSize()], cie.getData(macho_file));
+
+            if (cie.getPersonality(macho_file)) |sym| {
+                const r_address = math.cast(i32, cie.out_offset + cie.personality.?.offset) orelse return error.Overflow;
+                const r_symbolnum = math.cast(u24, sym.getOutputSymtabIndex(macho_file).?) orelse return error.Overflow;
+                relocs.appendAssumeCapacity(.{
+                    .r_address = r_address,
+                    .r_symbolnum = r_symbolnum,
+                    .r_length = 2,
+                    .r_extern = 1,
+                    .r_pcrel = 1,
+                    .r_type = switch (cpu_arch) {
+                        .aarch64 => @intFromEnum(macho.reloc_type_arm64.ARM64_RELOC_POINTER_TO_GOT),
+                        .x86_64 => @intFromEnum(macho.reloc_type_x86_64.X86_64_RELOC_GOT),
+                        else => unreachable,
+                    },
+                });
+            }
+        }
+    }
+
+    for (macho_file.objects.items) |index| {
+        const object = macho_file.getFile(index).?.object;
+        for (object.fdes.items) |fde| {
+            if (!fde.alive) continue;
+
+            @memcpy(code[fde.out_offset..][0..fde.getSize()], fde.getData(macho_file));
+
+            {
+                const offset = fde.out_offset + 4;
+                const value = offset - fde.getCie(macho_file).out_offset;
+                std.mem.writeInt(u32, code[offset..][0..4], value, .little);
+            }
+
+            {
+                const offset = fde.out_offset + 8;
+                const saddr = sect.addr + offset;
+                const taddr = fde.getAtom(macho_file).value;
+                std.mem.writeInt(
+                    i64,
+                    code[offset..][0..8],
+                    @as(i64, @intCast(taddr)) - @as(i64, @intCast(saddr)),
+                    .little,
+                );
+            }
+
+            if (fde.getLsdaAtom(macho_file)) |atom| {
+                const offset = fde.out_offset + fde.lsda_ptr_offset;
+                const saddr = sect.addr + offset;
+                const taddr = atom.value + fde.lsda_offset;
+                switch (fde.getCie(macho_file).lsda_size.?) {
+                    .p32 => std.mem.writeInt(
+                        i32,
+                        code[offset..][0..4],
+                        @intCast(@as(i64, @intCast(taddr)) - @as(i64, @intCast(saddr)) + addend),
+                        .little,
+                    ),
+                    .p64 => std.mem.writeInt(
+                        i64,
+                        code[offset..][0..8],
+                        @as(i64, @intCast(taddr)) - @as(i64, @intCast(saddr)),
+                        .little,
+                    ),
+                }
+            }
+        }
+    }
 }
 
 pub const EH_PE = struct {
@@ -485,6 +556,8 @@ pub const EH_PE = struct {
 const assert = std.debug.assert;
 const leb = std.leb;
 const macho = std.macho;
+const math = std.math;
+const mem = std.mem;
 const std = @import("std");
 const trace = @import("../tracy.zig").trace;
 

@@ -237,8 +237,10 @@ fn writeAtoms(macho_file: *MachO) !void {
             assert(atom.flags.alive);
             const off = atom.value - header.addr;
             @memcpy(code[off..][0..atom.size], atom.getCode(macho_file));
-            try atom.writeRelocs(macho_file, code, &relocs);
+            try atom.writeRelocs(macho_file, code[off..][0..atom.size], &relocs);
         }
+
+        assert(relocs.items.len == header.nreloc);
 
         // TODO scattered writes?
         try macho_file.base.file.pwriteAll(code, header.offset);
@@ -338,11 +340,12 @@ fn writeEhFrame(macho_file: *MachO) !void {
 
     const code = try gpa.alloc(u8, header.size);
     defer gpa.free(code);
-    eh_frame.write(macho_file, code);
 
     var relocs = try std.ArrayList(macho.relocation_info).initCapacity(gpa, header.nreloc);
     defer relocs.deinit();
-    eh_frame.writeRelocs(macho_file, &relocs);
+
+    try eh_frame.writeRelocs(macho_file, code, &relocs);
+    assert(relocs.items.len == header.nreloc);
 
     // TODO scattered writes?
     try macho_file.base.file.pwriteAll(code, header.offset);
