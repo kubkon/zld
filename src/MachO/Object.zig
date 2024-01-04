@@ -1040,7 +1040,9 @@ pub fn calcSymtabSize(self: *Object, macho_file: *MachO) !void {
         self.output_symtab_ctx.strsize += @as(u32, @intCast(sym.getName(macho_file).len + 1));
     }
 
-    if (!macho_file.options.strip and self.hasDebugInfo()) self.calcStabsSize(macho_file);
+    if (!macho_file.options.strip and self.hasDebugInfo() and !macho_file.options.relocatable) {
+        self.calcStabsSize(macho_file);
+    }
 }
 
 pub fn calcStabsSize(self: *Object, macho_file: *MachO) void {
@@ -1093,7 +1095,9 @@ pub fn writeSymtab(self: Object, macho_file: *MachO) void {
         sym.setOutputSym(macho_file, out_sym);
     }
 
-    if (!macho_file.options.strip and self.hasDebugInfo()) self.writeStabs(macho_file);
+    if (!macho_file.options.strip and self.hasDebugInfo() and !macho_file.options.relocatable) {
+        self.writeStabs(macho_file);
+    }
 }
 
 pub fn writeStabs(self: Object, macho_file: *MachO) void {
