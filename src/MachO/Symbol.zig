@@ -290,6 +290,7 @@ fn format2(
         if (symbol.flags.import) buf[1] = 'I';
         try writer.print(" : {s}", .{&buf});
         if (symbol.flags.weak) try writer.writeAll(" : weak");
+        if (symbol.flags.stab) try writer.writeAll(" : stab");
         switch (file) {
             .internal => |x| try writer.print(" : internal({d})", .{x.index}),
             .object => |x| try writer.print(" : object({d})", .{x.index}),
@@ -322,6 +323,9 @@ pub const Flags = packed struct {
 
     /// Whether this symbol is absolute.
     abs: bool = false,
+
+    /// Whether this symbol is a debug stab.
+    stab: bool = false,
 
     /// Whether this symbol is a tentative definition.
     tentative: bool = false,

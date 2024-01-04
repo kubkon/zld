@@ -413,10 +413,6 @@ fn initSymbols(self: *Object, macho_file: *MachO) !void {
     try self.symbols.ensureUnusedCapacity(gpa, slice.items(.nlist).len);
 
     for (slice.items(.nlist), slice.items(.atom), 0..) |nlist, atom_index, i| {
-        if (nlist.stab()) {
-            macho_file.base.fatal("{}: TODO handle input stab symbols", .{self.fmtPath()});
-            return error.ParseFailed;
-        }
         if (nlist.ext()) {
             const name = self.getString(nlist.n_strx);
             const off = try macho_file.string_intern.insert(gpa, name);
@@ -444,6 +440,7 @@ fn initSymbols(self: *Object, macho_file: *MachO) !void {
         }
 
         symbol.flags.abs = nlist.abs();
+        symbol.flags.stab = nlist.stab();
         symbol.flags.no_dead_strip = symbol.flags.no_dead_strip or nlist.noDeadStrip();
 
         if (nlist.sect() and
@@ -733,6 +730,7 @@ fn synthesiseNullUnwindRecords(self: *Object, macho_file: *MachO) !void {
 
     const slice = self.symtab.slice();
     for (slice.items(.nlist), slice.items(.atom), slice.items(.size)) |nlist, atom, size| {
+        if (nlist.stab()) continue;
         if (!nlist.sect()) continue;
         const sect = self.sections.items(.header)[nlist.n_sect - 1];
         if (sect.isCode()) {
@@ -1029,7 +1027,7 @@ pub fn calcSymtabSize(self: *Object, macho_file: *MachO) !void {
         const file = sym.getFile(macho_file) orelse continue;
         if (file.getIndex() != self.index) continue;
         if (sym.getAtom(macho_file)) |atom| if (!atom.flags.alive) continue;
-        if (sym.getNlist(macho_file).stab()) continue;
+        if (sym.flags.stab) continue;
         const name = sym.getName(macho_file);
         // TODO in -r mode, we actually want to merge symbol names and emit only one
         // work it out when emitting relocs
@@ -1049,9 +1047,7 @@ pub fn calcSymtabSize(self: *Object, macho_file: *MachO) !void {
         self.output_symtab_ctx.strsize += @as(u32, @intCast(sym.getName(macho_file).len + 1));
     }
 
-    if (!macho_file.options.strip and self.hasDebugInfo() and !macho_file.options.relocatable) {
-        self.calcStabsSize(macho_file);
-    }
+    if (!macho_file.options.strip and self.hasDebugInfo()) self.calcStabsSize(macho_file);
 }
 
 pub fn calcStabsSize(self: *Object, macho_file: *MachO) void {
@@ -1104,9 +1100,7 @@ pub fn writeSymtab(self: Object, macho_file: *MachO) void {
         sym.setOutputSym(macho_file, out_sym);
     }
 
-    if (!macho_file.options.strip and self.hasDebugInfo() and !macho_file.options.relocatable) {
-        self.writeStabs(macho_file);
-    }
+    if (!macho_file.options.strip and self.hasDebugInfo()) self.writeStabs(macho_file);
 }
 
 pub fn writeStabs(self: Object, macho_file: *MachO) void {
