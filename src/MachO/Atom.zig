@@ -153,7 +153,7 @@ pub fn initOutputSection(sect: macho.section_64, macho_file: *MachO) !u8 {
                         macho.S_REGULAR,
                     };
                 }
-                break :blk .{ segname, sectname, macho.S_REGULAR };
+                break :blk .{ segname, sectname, sect.flags };
             },
 
             else => break :blk .{ sect.segName(), sect.sectName(), sect.flags },
@@ -675,7 +675,12 @@ pub fn calcNumRelocs(self: Atom, macho_file: *MachO) u32 {
             var nreloc: u32 = 0;
             for (self.getRelocs(macho_file)) |rel| {
                 nreloc += 1;
-                if (rel.addend > 0) nreloc += 1;
+                switch (rel.type) {
+                    .page, .pageoff => if (rel.addend > 0) {
+                        nreloc += 1;
+                    },
+                    else => {},
+                }
             }
             return nreloc;
         },

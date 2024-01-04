@@ -145,9 +145,9 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
     for (self.atoms.items) |atom_index| {
         const atom = macho_file.getAtom(atom_index).?;
         const isec = atom.getInputSection(macho_file);
-        if (isec.attrs() & macho.S_ATTR_DEBUG != 0 or
-            mem.eql(u8, isec.sectName(), "__eh_frame") or
-            mem.eql(u8, isec.segName(), "__compact_unwind"))
+        if (mem.eql(u8, isec.sectName(), "__eh_frame") or
+            mem.eql(u8, isec.sectName(), "__compact_unwind") or
+            (isec.attrs() & macho.S_ATTR_DEBUG != 0 and !macho_file.options.relocatable))
         {
             atom.flags.alive = false;
         }
@@ -374,13 +374,15 @@ fn findAtomInSection(self: Object, addr: u64, n_sect: u8) ?Atom.Index {
         }
     }
 
-    const sub = subsections.items[min];
-    const sub_addr = sect.addr + sub.off;
-    const sub_size = if (min + 1 < subsections.items.len)
-        subsections.items[min + 1].off - sub.off
-    else
-        sect.size - sub.off;
-    if (sub_addr == addr or (sub_addr < addr and addr < sub_addr + sub_size)) return sub.atom;
+    if (min < subsections.items.len) {
+        const sub = subsections.items[min];
+        const sub_addr = sect.addr + sub.off;
+        const sub_size = if (min + 1 < subsections.items.len)
+            subsections.items[min + 1].off - sub.off
+        else
+            sect.size - sub.off;
+        if (sub_addr == addr or (sub_addr < addr and addr < sub_addr + sub_size)) return sub.atom;
+    }
 
     return null;
 }
@@ -469,8 +471,6 @@ fn initRelocs(self: *Object, macho_file: *MachO) !void {
 
     for (slice.items(.header), slice.items(.relocs), 0..) |sect, *out, n_sect| {
         if (sect.nreloc == 0) continue;
-        if (sect.attrs() & macho.S_ATTR_DEBUG != 0 and
-            !mem.eql(u8, sect.sectName(), "__compact_unwind")) continue;
 
         switch (cpu_arch) {
             .x86_64 => try x86_64.parseRelocs(self, @intCast(n_sect), sect, out, macho_file),
@@ -792,7 +792,7 @@ fn synthesiseNullUnwindRecords(self: *Object, macho_file: *MachO) !void {
             try self.unwind_records.append(gpa, rec_index);
             rec.length = @intCast(meta.size);
             rec.atom = meta.atom;
-            rec.atom_offset = @intCast(addr - atom.getInputSection(macho_file).addr - atom.off);
+            rec.atom_offset = @intCast(addr - atom.getInputAddress(macho_file));
             rec.file = self.index;
         }
     }
@@ -1518,13 +1518,18 @@ const x86_64 = struct {
                     @as(i64, @intCast(sect.addr)) + rel.r_address + addend + 4
                 else
                     addend;
-                const target = self.findAtomInSection(@intCast(taddr), @intCast(nsect)) orelse {
+                const target = self.findAtomInSection(@intCast(taddr), @intCast(nsect)) orelse target: {
+                    const tsect = self.sections.items(.header)[nsect];
+                    if (sect.attrs() & macho.S_ATTR_DEBUG != 0 and taddr == tsect.addr + tsect.size) {
+                        const subs = self.sections.items(.subsections)[nsect];
+                        break :target subs.items[subs.items.len - 1].atom;
+                    }
                     macho_file.base.fatal("{}: {s},{s}: 0x{x}: bad relocation", .{
                         self.fmtPath(), sect.segName(), sect.sectName(), rel.r_address,
                     });
                     return error.ParseFailed;
                 };
-                addend = taddr - @as(i64, @intCast(macho_file.getAtom(target).?.getInputSection(macho_file).addr));
+                addend = taddr - @as(i64, @intCast(macho_file.getAtom(target).?.getInputAddress(macho_file)));
                 break :blk target;
             } else self.symbols.items[rel.r_symbolnum];
 
@@ -1690,16 +1695,21 @@ const aarch64 = struct {
             const target = if (rel.r_extern == 0) blk: {
                 const nsect = rel.r_symbolnum - 1;
                 const taddr: i64 = if (rel.r_pcrel == 1)
-                    @as(i64, @intCast(sect.addr)) + rel.r_address + addend + 4
+                    @as(i64, @intCast(sect.addr)) + rel.r_address + addend
                 else
                     addend;
-                const target = self.findAtomInSection(@intCast(taddr), @intCast(nsect)) orelse {
+                const target = self.findAtomInSection(@intCast(taddr), @intCast(nsect)) orelse target: {
+                    const tsect = self.sections.items(.header)[nsect];
+                    if (sect.attrs() & macho.S_ATTR_DEBUG != 0 and taddr == tsect.addr + tsect.size) {
+                        const subs = self.sections.items(.subsections)[nsect];
+                        break :target subs.items[subs.items.len - 1].atom;
+                    }
                     macho_file.base.fatal("{}: {s},{s}: 0x{x}: bad relocation", .{
                         self.fmtPath(), sect.segName(), sect.sectName(), rel.r_address,
                     });
                     return error.ParseFailed;
                 };
-                addend = taddr - @as(i64, @intCast(macho_file.getAtom(target).?.getInputSection(macho_file).addr));
+                addend = taddr - @as(i64, @intCast(macho_file.getAtom(target).?.getInputAddress(macho_file)));
                 break :blk target;
             } else self.symbols.items[rel.r_symbolnum];
 

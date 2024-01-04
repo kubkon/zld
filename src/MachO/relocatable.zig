@@ -125,8 +125,6 @@ fn initOutputSections(macho_file: *MachO) !void {
         assert(needs_unwind_info);
         macho_file.eh_frame_sect_index = try macho_file.addSection("__TEXT", "__eh_frame", .{});
     }
-
-    // TODO __DWARF sections
 }
 
 fn calcSectionSizes(macho_file: *MachO) !void {
@@ -155,8 +153,6 @@ fn calcSectionSizes(macho_file: *MachO) !void {
         sect.@"align" = 3;
         sect.nreloc = eh_frame.calcNumRelocs(macho_file);
     }
-
-    // TODO __DWARF sections
 }
 
 fn calcCompactUnwindSize(macho_file: *MachO, sect_index: u8) void {

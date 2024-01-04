@@ -263,10 +263,6 @@ fn testDeadStrip(b: *Build, opts: Options) *Step {
         const exe = cc(b, opts);
         exe.addFileSource(obj_out.file);
 
-        const run = exe.run();
-        run.expectStdOutEqual("1 2\n");
-        test_step.dependOn(run.step());
-
         const check = exe.check();
         check.checkInSymtab();
         check.checkContains("live_var1");
@@ -285,16 +281,16 @@ fn testDeadStrip(b: *Build, opts: Options) *Step {
         check.checkInSymtab();
         check.checkContains("dead_fn2");
         test_step.dependOn(&check.step);
+
+        const run = exe.run();
+        run.expectStdOutEqual("1 2\n");
+        test_step.dependOn(run.step());
     }
 
     {
         const exe = cc(b, opts);
         exe.addFileSource(obj_out.file);
         exe.addArg("-Wl,-dead_strip");
-
-        const run = exe.run();
-        run.expectStdOutEqual("1 2\n");
-        test_step.dependOn(run.step());
 
         const check = exe.check();
         check.checkInSymtab();
@@ -314,6 +310,10 @@ fn testDeadStrip(b: *Build, opts: Options) *Step {
         check.checkInSymtab();
         check.checkNotPresent("dead_fn2");
         test_step.dependOn(&check.step);
+
+        const run = exe.run();
+        run.expectStdOutEqual("1 2\n");
+        test_step.dependOn(run.step());
     }
 
     return test_step;
