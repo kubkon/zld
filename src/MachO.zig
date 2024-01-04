@@ -82,7 +82,7 @@ pub fn openPath(allocator: Allocator, options: Options, thread_pool: *ThreadPool
     const file = try options.emit.directory.createFile(options.emit.sub_path, .{
         .truncate = true,
         .read = true,
-        .mode = if (builtin.os.tag == .windows) 0 else 0o777,
+        .mode = if (builtin.os.tag == .windows) 0 else if (options.relocatable) 0o666 else 0o777,
     });
     errdefer file.close();
 
