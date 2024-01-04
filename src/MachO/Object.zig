@@ -411,6 +411,10 @@ fn initSymbols(self: *Object, macho_file: *MachO) !void {
     try self.symbols.ensureUnusedCapacity(gpa, slice.items(.nlist).len);
 
     for (slice.items(.nlist), slice.items(.atom), 0..) |nlist, atom_index, i| {
+        if (nlist.stab()) {
+            macho_file.base.fatal("{}: TODO handle input stab symbols", .{self.fmtPath()});
+            return error.ParseFailed;
+        }
         if (nlist.ext()) {
             const name = self.getString(nlist.n_strx);
             const off = try macho_file.string_intern.insert(gpa, name);
