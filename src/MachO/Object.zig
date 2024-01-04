@@ -147,7 +147,7 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
         const isec = atom.getInputSection(macho_file);
         if (mem.eql(u8, isec.sectName(), "__eh_frame") or
             mem.eql(u8, isec.sectName(), "__compact_unwind") or
-            (isec.attrs() & macho.S_ATTR_DEBUG != 0 and !macho_file.options.relocatable))
+            isec.attrs() & macho.S_ATTR_DEBUG != 0)
         {
             atom.flags.alive = false;
         }
@@ -471,6 +471,11 @@ fn initRelocs(self: *Object, macho_file: *MachO) !void {
 
     for (slice.items(.header), slice.items(.relocs), 0..) |sect, *out, n_sect| {
         if (sect.nreloc == 0) continue;
+        // We skip relocs for __DWARF since even in -r mode, the linker is expected to emit
+        // debug symbol stabs in the relocatable. This made me curious why that is. For now,
+        // I shall comply, but I wanna compare with dsymutil.
+        if (sect.attrs() & macho.S_ATTR_DEBUG != 0 and
+            !mem.eql(u8, sect.sectName(), "__compact_unwind")) continue;
 
         switch (cpu_arch) {
             .x86_64 => try x86_64.parseRelocs(self, @intCast(n_sect), sect, out, macho_file),
@@ -1518,12 +1523,7 @@ const x86_64 = struct {
                     @as(i64, @intCast(sect.addr)) + rel.r_address + addend + 4
                 else
                     addend;
-                const target = self.findAtomInSection(@intCast(taddr), @intCast(nsect)) orelse target: {
-                    const tsect = self.sections.items(.header)[nsect];
-                    if (sect.attrs() & macho.S_ATTR_DEBUG != 0 and taddr == tsect.addr + tsect.size) {
-                        const subs = self.sections.items(.subsections)[nsect];
-                        break :target subs.items[subs.items.len - 1].atom;
-                    }
+                const target = self.findAtomInSection(@intCast(taddr), @intCast(nsect)) orelse {
                     macho_file.base.fatal("{}: {s},{s}: 0x{x}: bad relocation", .{
                         self.fmtPath(), sect.segName(), sect.sectName(), rel.r_address,
                     });
@@ -1698,12 +1698,7 @@ const aarch64 = struct {
                     @as(i64, @intCast(sect.addr)) + rel.r_address + addend
                 else
                     addend;
-                const target = self.findAtomInSection(@intCast(taddr), @intCast(nsect)) orelse target: {
-                    const tsect = self.sections.items(.header)[nsect];
-                    if (sect.attrs() & macho.S_ATTR_DEBUG != 0 and taddr == tsect.addr + tsect.size) {
-                        const subs = self.sections.items(.subsections)[nsect];
-                        break :target subs.items[subs.items.len - 1].atom;
-                    }
+                const target = self.findAtomInSection(@intCast(taddr), @intCast(nsect)) orelse {
                     macho_file.base.fatal("{}: {s},{s}: 0x{x}: bad relocation", .{
                         self.fmtPath(), sect.segName(), sect.sectName(), rel.r_address,
                     });
