@@ -32,6 +32,14 @@ pub fn isLocal(symbol: Symbol) bool {
     return !(symbol.flags.import or symbol.flags.@"export");
 }
 
+pub fn isSymbolStab(symbol: Symbol, macho_file: *MachO) bool {
+    const file = symbol.getFile(macho_file) orelse return false;
+    return switch (file) {
+        .object => symbol.getNlist(macho_file).stab(),
+        else => false,
+    };
+}
+
 pub fn isTlvInit(symbol: Symbol, macho_file: *MachO) bool {
     const name = symbol.getName(macho_file);
     return std.mem.indexOf(u8, name, "$tlv$init") != null;
@@ -143,6 +151,7 @@ pub fn getTlvPtrAddress(symbol: Symbol, macho_file: *MachO) u64 {
 
 pub fn getOutputSymtabIndex(symbol: Symbol, macho_file: *MachO) ?u32 {
     if (!symbol.flags.output_symtab) return null;
+    assert(!symbol.isSymbolStab(macho_file));
     const file = symbol.getFile(macho_file).?;
     const symtab_ctx = switch (file) {
         inline else => |x| x.output_symtab_ctx,
@@ -290,7 +299,7 @@ fn format2(
         if (symbol.flags.import) buf[1] = 'I';
         try writer.print(" : {s}", .{&buf});
         if (symbol.flags.weak) try writer.writeAll(" : weak");
-        if (symbol.flags.stab) try writer.writeAll(" : stab");
+        if (symbol.isSymbolStab(ctx.macho_file)) try writer.writeAll(" : stab");
         switch (file) {
             .internal => |x| try writer.print(" : internal({d})", .{x.index}),
             .object => |x| try writer.print(" : object({d})", .{x.index}),
@@ -323,9 +332,6 @@ pub const Flags = packed struct {
 
     /// Whether this symbol is absolute.
     abs: bool = false,
-
-    /// Whether this symbol is a debug stab.
-    stab: bool = false,
 
     /// Whether this symbol is a tentative definition.
     tentative: bool = false,
