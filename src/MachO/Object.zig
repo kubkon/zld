@@ -589,8 +589,7 @@ fn initEhFrameRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
     for (relocs.items, 0..) |rel, i| {
         switch (rel.type) {
             .unsigned => {
-                // TODO this is actually incorrect
-                assert(rel.meta.length == 3 and rel.meta.has_subtractor); // TODO error
+                assert((rel.meta.length == 2 or rel.meta.length == 3) and rel.meta.has_subtractor); // TODO error
                 const S: i64 = switch (rel.tag) {
                     .local => rel.meta.symbolnum,
                     .@"extern" => @intCast(nlists[rel.meta.symbolnum].n_value),
@@ -603,7 +602,11 @@ fn initEhFrameRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
                         .@"extern" => @intCast(nlists[sub_rel.meta.symbolnum].n_value),
                     };
                 };
-                mem.writeInt(u64, self.eh_frame_data.items[rel.offset..][0..8], @bitCast(S + A - SUB), .little);
+                switch (rel.meta.length) {
+                    0, 1 => unreachable,
+                    2 => mem.writeInt(u32, self.eh_frame_data.items[rel.offset..][0..4], @bitCast(@as(i32, @truncate(S + A - SUB))), .little),
+                    3 => mem.writeInt(u64, self.eh_frame_data.items[rel.offset..][0..8], @bitCast(S + A - SUB), .little),
+                }
             },
             else => {},
         }
