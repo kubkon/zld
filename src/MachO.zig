@@ -594,14 +594,12 @@ fn validateCpuArch(self: *MachO, index: File.Index) void {
         macho.CPU_TYPE_X86_64 => .x86_64,
         else => unreachable,
     };
-    if (self.options.cpu_arch) |self_cpu_arch| {
-        if (self_cpu_arch != cpu_arch) {
-            return self.base.fatal("{}: invalid architecture '{s}', expected '{s}'", .{
-                file.fmtPath(),
-                @tagName(cpu_arch),
-                @tagName(self_cpu_arch),
-            });
-        }
+    if (self.options.cpu_arch.? != cpu_arch) {
+        return self.base.fatal("{}: invalid architecture '{s}', expected '{s}'", .{
+            file.fmtPath(),
+            @tagName(cpu_arch),
+            @tagName(self.options.cpu_arch.?),
+        });
     }
 }
 
@@ -752,11 +750,13 @@ fn parseArchive(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
         object.parse(self) catch |err| switch (err) {
             error.ParseFailed => {
                 has_parse_error = true;
-                continue;
+                // TODO see below
+                // continue;
             },
             else => |e| return e,
         };
         try self.objects.append(gpa, index);
+        // TODO this should come before reporting any parse errors
         self.validateCpuArch(index);
         self.validatePlatform(index);
 

@@ -134,7 +134,7 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
 
     try self.sortAtoms(macho_file);
     try self.initSymbols(macho_file);
-    try self.initSymbolStabs(macho_file);
+    try self.initSymbolStabs(nlists.items, macho_file);
     try self.initRelocs(macho_file);
 
     if (self.eh_frame_sect_index) |index| {
@@ -456,9 +456,22 @@ fn initSymbols(self: *Object, macho_file: *MachO) !void {
     }
 }
 
-fn initSymbolStabs(self: *Object, macho_file: *MachO) !void {
+fn initSymbolStabs(self: *Object, nlists: anytype, macho_file: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
+
+    const SymbolLookup = struct {
+        ctx: *const Object,
+        entries: @TypeOf(nlists),
+
+        fn find(fs: @This(), addr: u64) ?Symbol.Index {
+            // TODO binary search since we have the list sorted
+            for (fs.entries) |nlist| {
+                if (nlist.nlist.n_value == addr) return fs.ctx.symbols.items[nlist.idx];
+            }
+            return null;
+        }
+    };
 
     const start: u32 = for (self.symtab.items(.nlist), 0..) |nlist, i| {
         if (nlist.stab()) break @intCast(i);
@@ -470,11 +483,12 @@ fn initSymbolStabs(self: *Object, macho_file: *MachO) !void {
     if (start == end) return;
 
     const gpa = macho_file.base.allocator;
-    const nlists = self.symtab.items(.nlist);
+    const syms = self.symtab.items(.nlist);
+    const sym_lookup = SymbolLookup{ .ctx = self, .entries = nlists };
 
     var i: u32 = start;
     while (i < end) : (i += 1) {
-        const open = nlists[i];
+        const open = syms[i];
         if (open.n_type != macho.N_SO) {
             macho_file.base.fatal("{}: unexpected symbol stab type 0x{x} as the first entry", .{
                 self.fmtPath(),
@@ -483,19 +497,19 @@ fn initSymbolStabs(self: *Object, macho_file: *MachO) !void {
             return error.ParseFailed;
         }
 
-        while (i < end and nlists[i].n_type == macho.N_SO and nlists[i].n_sect != 0) : (i += 1) {}
+        while (i < end and syms[i].n_type == macho.N_SO and syms[i].n_sect != 0) : (i += 1) {}
 
         var sf: StabFile = .{ .comp_dir = i };
         // TODO validate
         i += 3;
 
-        while (i < end and nlists[i].n_type != macho.N_SO) : (i += 1) {
-            const nlist = nlists[i];
+        while (i < end and syms[i].n_type != macho.N_SO) : (i += 1) {
+            const nlist = syms[i];
             var stab: StabFile.Stab = .{};
             switch (nlist.n_type) {
                 macho.N_BNSYM => {
                     stab.tag = .func;
-                    stab.symbol = self.findSymbolByAddress(nlist.n_value);
+                    stab.symbol = sym_lookup.find(nlist.n_value);
                     // TODO validate
                     i += 3;
                 },
@@ -505,7 +519,7 @@ fn initSymbolStabs(self: *Object, macho_file: *MachO) !void {
                 },
                 macho.N_STSYM => {
                     stab.tag = .static;
-                    stab.symbol = self.findSymbolByAddress(nlist.n_value);
+                    stab.symbol = sym_lookup.find(nlist.n_value);
                 },
                 else => {
                     macho_file.base.fatal("{}: unhandled symbol stab type 0x{x}", .{
@@ -665,30 +679,27 @@ fn initEhFrameRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
     }
 }
 
-fn findSymbolByAddress(self: Object, addr: u64) ?Symbol.Index {
-    for (self.symbols.items, 0..) |sym_index, i| {
-        const nlist = self.symtab.items(.nlist)[i];
-        if (nlist.stab() or !nlist.sect()) continue;
-        if (nlist.n_value == addr) return sym_index;
-    }
-    return null;
-}
-
-fn findSymbol(self: Object, addr: u64) ?Symbol.Index {
-    for (self.symbols.items, 0..) |sym_index, i| {
-        const nlist = self.symtab.items(.nlist)[i];
-        if (nlist.ext() and nlist.n_value == addr) return sym_index;
-    }
-    return null;
-}
-
 fn initUnwindRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
+
+    const SymbolLookup = struct {
+        ctx: *const Object,
+
+        fn find(fs: @This(), addr: u64) ?Symbol.Index {
+            for (fs.ctx.symbols.items, 0..) |sym_index, i| {
+                const nlist = fs.ctx.symtab.items(.nlist)[i];
+                if (nlist.ext() and nlist.n_value == addr) return sym_index;
+            }
+            return null;
+        }
+    };
+
     const gpa = macho_file.base.allocator;
     const data = self.getSectionData(sect_id);
     const nrecs = @divExact(data.len, @sizeOf(macho.compact_unwind_entry));
     const recs = @as([*]align(1) const macho.compact_unwind_entry, @ptrCast(data.ptr))[0..nrecs];
+    const sym_lookup = SymbolLookup{ .ctx = self };
 
     try self.unwind_records.resize(gpa, nrecs);
 
@@ -739,7 +750,7 @@ fn initUnwindRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
                     .@"extern" => {
                         out.personality = rel.target;
                     },
-                    .local => if (self.findSymbol(rec.personalityFunction)) |sym_index| {
+                    .local => if (sym_lookup.find(rec.personalityFunction)) |sym_index| {
                         out.personality = sym_index;
                     } else {
                         macho_file.base.fatal("{}: {s},{s}: 0x{x}: bad relocation", .{
@@ -1155,6 +1166,10 @@ pub fn calcStabsSize(self: *Object, macho_file: *MachO) void {
             const file = sym.getFile(macho_file) orelse continue;
             if (file.getIndex() != self.index) continue;
             if (!sym.flags.output_symtab) continue;
+            if (macho_file.options.relocatable) {
+                const name = sym.getName(macho_file);
+                if (name.len > 0 and (name[0] == 'L' or name[0] == 'l')) continue;
+            }
             const sect = macho_file.sections.items(.header)[sym.out_n_sect];
             if (sect.isCode()) {
                 self.output_symtab_ctx.nstabs += 4; // N_BNSYM, N_FUN, N_FUN, N_ENSYM
@@ -1309,6 +1324,10 @@ pub fn writeStabs(self: *const Object, macho_file: *MachO) void {
             const file = sym.getFile(macho_file) orelse continue;
             if (file.getIndex() != self.index) continue;
             if (!sym.flags.output_symtab) continue;
+            if (macho_file.options.relocatable) {
+                const name = sym.getName(macho_file);
+                if (name.len > 0 and (name[0] == 'L' or name[0] == 'l')) continue;
+            }
             const sect = macho_file.sections.items(.header)[sym.out_n_sect];
             const sym_n_strx = n_strx: {
                 const symtab_index = sym.getOutputSymtabIndex(macho_file).?;
