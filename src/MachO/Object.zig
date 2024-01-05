@@ -146,7 +146,7 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
     }
 
     self.initPlatform();
-    try self.initDwarfInfo(gpa);
+    try self.initDwarfInfo(macho_file);
 
     for (self.atoms.items) |atom_index| {
         const atom = macho_file.getAtom(atom_index).?;
@@ -917,9 +917,11 @@ fn initPlatform(self: *Object) void {
 /// and record that so that we can emit symbol stabs.
 /// TODO in the future, we want parse debug info and debug line sections so that
 /// we can provide nice error locations to the user.
-fn initDwarfInfo(self: *Object, allocator: Allocator) !void {
+fn initDwarfInfo(self: *Object, macho_file: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
+
+    const gpa = macho_file.base.allocator;
 
     var debug_info_index: ?usize = null;
     var debug_abbrev_index: ?usize = null;
@@ -939,7 +941,10 @@ fn initDwarfInfo(self: *Object, allocator: Allocator) !void {
         .debug_abbrev = self.getSectionData(@intCast(debug_abbrev_index.?)),
         .debug_str = if (debug_str_index) |index| self.getSectionData(@intCast(index)) else "",
     };
-    dwarf_info.init(allocator) catch return; // TODO flag an error
+    dwarf_info.init(gpa) catch {
+        macho_file.base.fatal("{}: invalid __DWARF info found", .{self.fmtPath()});
+        return error.ParseFailed;
+    };
     self.dwarf_info = dwarf_info;
 }
 
