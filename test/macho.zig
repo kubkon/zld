@@ -1511,13 +1511,15 @@ fn testLinkOrder(b: *Build, opts: Options) *Step {
 
     const libc = cc(b, opts);
     libc.addFileSource(c_o.out);
-    libc.addArg("-shared");
+    libc.addArgs(&.{ "-shared", "-Wl,-install_name,@rpath/libc.dylib" });
+    const libc_out = libc.saveOutputAs("libc.dylib");
 
     {
         const exe = cc(b, opts);
-        exe.addFileSource(libc.out);
+        exe.addFileSource(libc_out.file);
         exe.addFileSource(liba.out);
         exe.addFileSource(main_o.out);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", libc_out.dir);
 
         const run = exe.run();
         run.expectStdOutEqual("-1 42 42");
@@ -1527,8 +1529,9 @@ fn testLinkOrder(b: *Build, opts: Options) *Step {
     {
         const exe = cc(b, opts);
         exe.addFileSource(liba.out);
-        exe.addFileSource(libc.out);
+        exe.addFileSource(libc_out.file);
         exe.addFileSource(main_o.out);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", libc_out.dir);
 
         const run = exe.run();
         run.expectStdOutEqual("42 0 -2");
