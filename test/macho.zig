@@ -2525,13 +2525,14 @@ fn testTls(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-tls", "");
 
     const dylib = cc(b, opts);
-    dylib.addArg("-shared");
     dylib.addCSource(
         \\_Thread_local int a;
         \\int getA() {
         \\  return a;
         \\}
     );
+    dylib.addArgs(&.{ "-shared", "-Wl,-install_name,@rpath/liba.dylib" });
+    const dylib_out = dylib.saveOutputAs("liba.dylib");
 
     const exe = cc(b, opts);
     exe.addCSource(
@@ -2548,7 +2549,8 @@ fn testTls(b: *Build, opts: Options) *Step {
         \\}
     );
     exe.addArg("-la");
-    exe.addPrefixedDirectorySource("-L", dylib.saveOutputAs("liba.dylib").dir);
+    exe.addPrefixedDirectorySource("-L", dylib_out.dir);
+    exe.addPrefixedDirectorySource("-Wl,-rpath,", dylib_out.dir);
 
     const run = exe.run();
     run.expectStdOutEqual("2 2 2");
