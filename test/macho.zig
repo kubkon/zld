@@ -12,11 +12,11 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     };
     opts.macos_sdk = std.zig.system.darwin.getSdk(b.allocator, builtin.target) orelse @panic("no macOS SDK found");
     opts.ios_sdk = blk: {
-        const target_info = std.zig.system.NativeTargetInfo.detect(.{
+        const target = std.zig.system.resolveTargetQuery(.{
             .cpu_arch = .aarch64,
             .os_tag = .ios,
         }) catch break :blk null;
-        break :blk std.zig.system.darwin.getSdk(b.allocator, target_info.target);
+        break :blk std.zig.system.darwin.getSdk(b.allocator, target);
     };
 
     macho_step.dependOn(testAllLoad(b, opts));
@@ -3325,7 +3325,7 @@ fn lipo(b: *Build) SysCmd {
 
 fn ld(b: *Build, opts: Options) SysCmd {
     const cmd = Run.create(b, "ld");
-    cmd.addFileSourceArg(opts.zld.file);
+    cmd.addFileArg(opts.zld.file);
     cmd.addArg("-dynamic");
     cmd.addArg("-o");
     const out = cmd.addOutputFileArg("a.out");
