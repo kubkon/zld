@@ -675,13 +675,14 @@ fn testEntryPointDylib(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-entry-point-dylib", "");
 
     const dylib = cc(b, opts);
-    dylib.addArgs(&.{ "-shared", "-Wl,-undefined,dynamic_lookup" });
     dylib.addCSource(
         \\extern int my_main();
         \\int bootstrap() {
         \\  return my_main();
         \\}
     );
+    dylib.addArgs(&.{ "-shared", "-Wl,-undefined,dynamic_lookup", "-Wl,-install_name,@rpath/liba.dylib" });
+    const dylib_out = dylib.saveOutputAs("liba.dylib");
 
     const exe = cc(b, opts);
     exe.addCSource(
@@ -691,8 +692,9 @@ fn testEntryPointDylib(b: *Build, opts: Options) *Step {
         \\  return 0;
         \\}
     );
-    exe.addArgs(&.{ "-Wl,-e,_bootstrap", "-Wl,-u,_my_main", "-lbootstrap" });
-    exe.addPrefixedDirectorySource("-L", dylib.saveOutputAs("libbootstrap.dylib").dir);
+    exe.addArgs(&.{ "-Wl,-e,_bootstrap", "-Wl,-u,_my_main", "-la" });
+    exe.addPrefixedDirectorySource("-L", dylib_out.dir);
+    exe.addPrefixedDirectorySource("-Wl,-rpath,", dylib_out.dir);
 
     const check = exe.check();
     check.checkInHeaders();
