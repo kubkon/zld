@@ -783,12 +783,12 @@ fn testFatDylib(b: *Build, opts: Options) *Step {
 
     const dylib_arm64 = cc(b, opts);
     dylib_arm64.addCSource(a_c);
-    dylib_arm64.addArgs(&.{ "-shared", "-arch", "arm64" });
+    dylib_arm64.addArgs(&.{ "-shared", "-arch", "arm64", "-Wl,-install_name,@rpath/liba.dylib" });
     const dylib_arm64_out = dylib_arm64.saveOutputAs("liba.dylib");
 
     const dylib_x64 = cc(b, opts);
     dylib_x64.addCSource(a_c);
-    dylib_x64.addArgs(&.{ "-shared", "-arch", "x86_64" });
+    dylib_x64.addArgs(&.{ "-shared", "-arch", "x86_64", "-Wl,-install_name,@rpath/liba.dylib" });
     const dylib_x64_out = dylib_x64.saveOutputAs("liba.dylib");
 
     const fat_lib = lipo(b);
@@ -806,6 +806,7 @@ fn testFatDylib(b: *Build, opts: Options) *Step {
         \\}
     );
     exe.addFileSource(fat_lib_out.file);
+    exe.addPrefixedDirectorySource("-Wl,-rpath,", fat_lib_out.dir);
 
     const run = exe.run();
     run.expectStdOutEqual("42\n");
