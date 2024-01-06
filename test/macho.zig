@@ -369,7 +369,6 @@ fn testDylib(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-dylib", "");
 
     const dylib = cc(b, opts);
-    dylib.addArg("-shared");
     dylib.addCSource(
         \\#include<stdio.h>
         \\char world[] = "world";
@@ -377,6 +376,8 @@ fn testDylib(b: *Build, opts: Options) *Step {
         \\  return "Hello";
         \\}
     );
+    dylib.addArgs(&.{ "-shared", "-Wl,-install_name,@rpath/liba.dylib" });
+    const dylib_out = dylib.saveOutputAs("liba.dylib");
 
     const check = dylib.check();
     check.checkInHeaders();
@@ -395,7 +396,8 @@ fn testDylib(b: *Build, opts: Options) *Step {
         \\}
     );
     exe.addArg("-la");
-    exe.addPrefixedDirectorySource("-L", dylib.saveOutputAs("liba.dylib").dir);
+    exe.addPrefixedDirectorySource("-L", dylib_out.dir);
+    exe.addPrefixedDirectorySource("-Wl,-rpath,", dylib_out.dir);
 
     const run = exe.run();
     run.expectStdOutEqual("Hello world");
