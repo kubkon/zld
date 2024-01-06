@@ -61,6 +61,7 @@ const usage =
     \\-platform_version [platform] [min_version] [sdk_version]
     \\                                   Sets the platform, oldest supported version of that platform and 
     \\                                   the SDK it was built against
+    \\-r                                 Create a relocatable object file
     \\-reexport-l[name]                  Link against library and re-export it for the clients
     \\  -reexport_library [name]
     \\-rpath [path]                      Specify runtime path
@@ -91,6 +92,7 @@ const cmd = "ld64.zld";
 
 emit: Zld.Emit,
 dylib: bool = false,
+relocatable: bool = false,
 dynamic: bool = false,
 cpu_arch: ?std.Target.Cpu.Arch = null,
 platform: ?Platform = null,
@@ -238,6 +240,8 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             try force_undefined_symbols.put(name, {});
         } else if (p.flag1("S")) {
             opts.strip = true;
+        } else if (p.flag1("r")) {
+            opts.relocatable = true;
         } else if (p.flag1("all_load")) {
             opts.all_load = true;
         } else if (p.arg1("force_load")) |path| {

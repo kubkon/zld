@@ -3407,7 +3407,7 @@ fn ar(b: *Build) SysCmd {
 
 fn ld(b: *Build, opts: Options) SysCmd {
     const cmd = Run.create(b, "ld");
-    cmd.addFileSourceArg(opts.zld.file);
+    cmd.addFileArg(opts.zld.file);
     cmd.addArg("-o");
     const out = cmd.addOutputFileArg("a.out");
     return .{ .cmd = cmd, .out = out };

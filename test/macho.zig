@@ -12,11 +12,11 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     };
     opts.macos_sdk = std.zig.system.darwin.getSdk(b.allocator, builtin.target) orelse @panic("no macOS SDK found");
     opts.ios_sdk = blk: {
-        const target_info = std.zig.system.NativeTargetInfo.detect(.{
+        const target = std.zig.system.resolveTargetQuery(.{
             .cpu_arch = .aarch64,
             .os_tag = .ios,
         }) catch break :blk null;
-        break :blk std.zig.system.darwin.getSdk(b.allocator, target_info.target);
+        break :blk std.zig.system.darwin.getSdk(b.allocator, target);
     };
 
     macho_step.dependOn(testAllLoad(b, opts));
@@ -54,6 +54,7 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testObjcStubs2(b, opts));
     macho_step.dependOn(testPagezeroSize(b, opts));
     macho_step.dependOn(testReexportsZig(b, opts));
+    macho_step.dependOn(testRelocatable(b, opts));
     macho_step.dependOn(testSearchStrategy(b, opts));
     macho_step.dependOn(testSectionBoundarySymbols(b, opts));
     macho_step.dependOn(testSegmentBoundarySymbols(b, opts));
@@ -262,10 +263,6 @@ fn testDeadStrip(b: *Build, opts: Options) *Step {
         const exe = cc(b, opts);
         exe.addFileSource(obj_out.file);
 
-        const run = exe.run();
-        run.expectStdOutEqual("1 2\n");
-        test_step.dependOn(run.step());
-
         const check = exe.check();
         check.checkInSymtab();
         check.checkContains("live_var1");
@@ -284,16 +281,16 @@ fn testDeadStrip(b: *Build, opts: Options) *Step {
         check.checkInSymtab();
         check.checkContains("dead_fn2");
         test_step.dependOn(&check.step);
+
+        const run = exe.run();
+        run.expectStdOutEqual("1 2\n");
+        test_step.dependOn(run.step());
     }
 
     {
         const exe = cc(b, opts);
         exe.addFileSource(obj_out.file);
         exe.addArg("-Wl,-dead_strip");
-
-        const run = exe.run();
-        run.expectStdOutEqual("1 2\n");
-        test_step.dependOn(run.step());
 
         const check = exe.check();
         check.checkInSymtab();
@@ -313,6 +310,10 @@ fn testDeadStrip(b: *Build, opts: Options) *Step {
         check.checkInSymtab();
         check.checkNotPresent("dead_fn2");
         test_step.dependOn(&check.step);
+
+        const run = exe.run();
+        run.expectStdOutEqual("1 2\n");
+        test_step.dependOn(run.step());
     }
 
     return test_step;
@@ -368,7 +369,6 @@ fn testDylib(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-dylib", "");
 
     const dylib = cc(b, opts);
-    dylib.addArg("-shared");
     dylib.addCSource(
         \\#include<stdio.h>
         \\char world[] = "world";
@@ -376,6 +376,8 @@ fn testDylib(b: *Build, opts: Options) *Step {
         \\  return "Hello";
         \\}
     );
+    dylib.addArgs(&.{ "-shared", "-Wl,-install_name,@rpath/liba.dylib" });
+    const dylib_out = dylib.saveOutputAs("liba.dylib");
 
     const check = dylib.check();
     check.checkInHeaders();
@@ -394,7 +396,8 @@ fn testDylib(b: *Build, opts: Options) *Step {
         \\}
     );
     exe.addArg("-la");
-    exe.addPrefixedDirectorySource("-L", dylib.saveOutputAs("liba.dylib").dir);
+    exe.addPrefixedDirectorySource("-L", dylib_out.dir);
+    exe.addPrefixedDirectorySource("-Wl,-rpath,", dylib_out.dir);
 
     const run = exe.run();
     run.expectStdOutEqual("Hello world");
@@ -672,13 +675,14 @@ fn testEntryPointDylib(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-entry-point-dylib", "");
 
     const dylib = cc(b, opts);
-    dylib.addArgs(&.{ "-shared", "-Wl,-undefined,dynamic_lookup" });
     dylib.addCSource(
         \\extern int my_main();
         \\int bootstrap() {
         \\  return my_main();
         \\}
     );
+    dylib.addArgs(&.{ "-shared", "-Wl,-undefined,dynamic_lookup", "-Wl,-install_name,@rpath/liba.dylib" });
+    const dylib_out = dylib.saveOutputAs("liba.dylib");
 
     const exe = cc(b, opts);
     exe.addCSource(
@@ -688,8 +692,9 @@ fn testEntryPointDylib(b: *Build, opts: Options) *Step {
         \\  return 0;
         \\}
     );
-    exe.addArgs(&.{ "-Wl,-e,_bootstrap", "-Wl,-u,_my_main", "-lbootstrap" });
-    exe.addPrefixedDirectorySource("-L", dylib.saveOutputAs("libbootstrap.dylib").dir);
+    exe.addArgs(&.{ "-Wl,-e,_bootstrap", "-Wl,-u,_my_main", "-la" });
+    exe.addPrefixedDirectorySource("-L", dylib_out.dir);
+    exe.addPrefixedDirectorySource("-Wl,-rpath,", dylib_out.dir);
 
     const check = exe.check();
     check.checkInHeaders();
@@ -778,12 +783,12 @@ fn testFatDylib(b: *Build, opts: Options) *Step {
 
     const dylib_arm64 = cc(b, opts);
     dylib_arm64.addCSource(a_c);
-    dylib_arm64.addArgs(&.{ "-shared", "-arch", "arm64" });
+    dylib_arm64.addArgs(&.{ "-shared", "-arch", "arm64", "-Wl,-install_name,@rpath/liba.dylib" });
     const dylib_arm64_out = dylib_arm64.saveOutputAs("liba.dylib");
 
     const dylib_x64 = cc(b, opts);
     dylib_x64.addCSource(a_c);
-    dylib_x64.addArgs(&.{ "-shared", "-arch", "x86_64" });
+    dylib_x64.addArgs(&.{ "-shared", "-arch", "x86_64", "-Wl,-install_name,@rpath/liba.dylib" });
     const dylib_x64_out = dylib_x64.saveOutputAs("liba.dylib");
 
     const fat_lib = lipo(b);
@@ -801,6 +806,7 @@ fn testFatDylib(b: *Build, opts: Options) *Step {
         \\}
     );
     exe.addFileSource(fat_lib_out.file);
+    exe.addPrefixedDirectorySource("-Wl,-rpath,", fat_lib_out.dir);
 
     const run = exe.run();
     run.expectStdOutEqual("42\n");
@@ -1505,13 +1511,15 @@ fn testLinkOrder(b: *Build, opts: Options) *Step {
 
     const libc = cc(b, opts);
     libc.addFileSource(c_o.out);
-    libc.addArg("-shared");
+    libc.addArgs(&.{ "-shared", "-Wl,-install_name,@rpath/libc.dylib" });
+    const libc_out = libc.saveOutputAs("libc.dylib");
 
     {
         const exe = cc(b, opts);
-        exe.addFileSource(libc.out);
+        exe.addFileSource(libc_out.file);
         exe.addFileSource(liba.out);
         exe.addFileSource(main_o.out);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", libc_out.dir);
 
         const run = exe.run();
         run.expectStdOutEqual("-1 42 42");
@@ -1521,8 +1529,9 @@ fn testLinkOrder(b: *Build, opts: Options) *Step {
     {
         const exe = cc(b, opts);
         exe.addFileSource(liba.out);
-        exe.addFileSource(libc.out);
+        exe.addFileSource(libc_out.file);
         exe.addFileSource(main_o.out);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", libc_out.dir);
 
         const run = exe.run();
         run.expectStdOutEqual("42 0 -2");
@@ -2002,6 +2011,91 @@ fn testReexportsZig(b: *Build, opts: Options) *Step {
     return test_step;
 }
 
+fn testRelocatable(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-relocatable", "");
+
+    const a_c =
+        \\#include <stdexcept>
+        \\int try_me() {
+        \\  throw std::runtime_error("Oh no!");
+        \\}
+    ;
+    const b_c =
+        \\extern int try_me();
+        \\int try_again() {
+        \\  return try_me();
+        \\}
+    ;
+    const main_c =
+        \\#include <iostream>
+        \\#include <stdexcept>
+        \\extern int try_again();
+        \\int main() {
+        \\  try {
+        \\    try_again();
+        \\  } catch (const std::exception &e) {
+        \\    std::cout << "exception=" << e.what();
+        \\  }
+        \\  return 0;
+        \\}
+    ;
+    const exp_stdout = "exception=Oh no!";
+
+    {
+        const a_o = cc(b, opts);
+        a_o.addCppSource(a_c);
+        a_o.addArg("-c");
+
+        const b_o = cc(b, opts);
+        b_o.addCppSource(b_c);
+        b_o.addArg("-c");
+
+        const c_o = ld(b, opts);
+        c_o.addFileSource(a_o.out);
+        c_o.addFileSource(b_o.out);
+        c_o.addArg("-r");
+
+        const exe = cc(b, opts);
+        exe.addCppSource(main_c);
+        exe.addFileSource(c_o.out);
+        exe.addArg("-lc++");
+
+        const run = exe.run();
+        run.expectStdOutEqual(exp_stdout);
+        test_step.dependOn(run.step());
+    }
+
+    {
+        const a_o = cc(b, opts);
+        a_o.addCppSource(a_c);
+        a_o.addArg("-c");
+
+        const b_o = cc(b, opts);
+        b_o.addCppSource(b_c);
+        b_o.addArg("-c");
+
+        const main_o = cc(b, opts);
+        main_o.addCppSource(main_c);
+        main_o.addArg("-c");
+
+        const c_o = ld(b, opts);
+        c_o.addFileSource(a_o.out);
+        c_o.addFileSource(b_o.out);
+        c_o.addFileSource(main_o.out);
+        c_o.addArg("-r");
+
+        const exe = cc(b, opts);
+        exe.addFileSource(c_o.out);
+        exe.addArg("-lc++");
+
+        const run = exe.run();
+        run.expectStdOutEqual(exp_stdout);
+        test_step.dependOn(run.step());
+    }
+
+    return test_step;
+}
+
 fn testSearchStrategy(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-search-strategy", "");
 
@@ -2431,13 +2525,14 @@ fn testTls(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-tls", "");
 
     const dylib = cc(b, opts);
-    dylib.addArg("-shared");
     dylib.addCSource(
         \\_Thread_local int a;
         \\int getA() {
         \\  return a;
         \\}
     );
+    dylib.addArgs(&.{ "-shared", "-Wl,-install_name,@rpath/liba.dylib" });
+    const dylib_out = dylib.saveOutputAs("liba.dylib");
 
     const exe = cc(b, opts);
     exe.addCSource(
@@ -2454,7 +2549,8 @@ fn testTls(b: *Build, opts: Options) *Step {
         \\}
     );
     exe.addArg("-la");
-    exe.addPrefixedDirectorySource("-L", dylib.saveOutputAs("liba.dylib").dir);
+    exe.addPrefixedDirectorySource("-L", dylib_out.dir);
+    exe.addPrefixedDirectorySource("-Wl,-rpath,", dylib_out.dir);
 
     const run = exe.run();
     run.expectStdOutEqual("2 2 2");
@@ -3239,7 +3335,7 @@ fn lipo(b: *Build) SysCmd {
 
 fn ld(b: *Build, opts: Options) SysCmd {
     const cmd = Run.create(b, "ld");
-    cmd.addFileSourceArg(opts.zld.file);
+    cmd.addFileArg(opts.zld.file);
     cmd.addArg("-dynamic");
     cmd.addArg("-o");
     const out = cmd.addOutputFileArg("a.out");

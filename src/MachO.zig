@@ -82,7 +82,7 @@ pub fn openPath(allocator: Allocator, options: Options, thread_pool: *ThreadPool
     const file = try options.emit.directory.createFile(options.emit.sub_path, .{
         .truncate = true,
         .read = true,
-        .mode = if (builtin.os.tag == .windows) 0 else 0o777,
+        .mode = if (builtin.os.tag == .windows) 0 else if (options.relocatable) 0o666 else 0o777,
     });
     errdefer file.close();
 
@@ -348,6 +348,9 @@ pub fn flush(self: *MachO) !void {
 
     try self.addUndefinedGlobals();
     try self.resolveSymbols();
+
+    if (self.options.relocatable) return relocatable.flush(self);
+
     try self.resolveSyntheticSymbols();
 
     try self.convertTentativeDefinitions();
@@ -388,13 +391,22 @@ pub fn flush(self: *MachO) !void {
     try self.writeUnwindInfo();
     try self.finalizeDyldInfoSections();
     try self.writeSyntheticSections();
-    try self.writeDyldInfoSections();
-    try self.writeFunctionStarts();
-    try self.writeDataInCode();
+
+    var off = math.cast(u32, self.getLinkeditSegment().fileoff) orelse return error.Overflow;
+    off = try self.writeDyldInfoSections(off);
+    off = mem.alignForward(u32, off, @alignOf(u64));
+    off = try self.writeFunctionStarts(off);
+    off = mem.alignForward(u32, off, @alignOf(u64));
+    off = try self.writeDataInCode(off);
     try self.calcSymtabSize();
-    try self.writeSymtab();
-    try self.writeIndsymtab();
-    try self.writeStrtab();
+    off = mem.alignForward(u32, off, @alignOf(u64));
+    off = try self.writeSymtab(off);
+    off = mem.alignForward(u32, off, @alignOf(u32));
+    off = try self.writeIndsymtab(off);
+    off = mem.alignForward(u32, off, @alignOf(u64));
+    off = try self.writeStrtab(off);
+
+    self.getLinkeditSegment().filesize = off - self.getLinkeditSegment().fileoff;
 
     var codesig: ?CodeSignature = if (self.requiresCodeSig()) blk: {
         // Preallocate space for the code signature.
@@ -582,14 +594,12 @@ fn validateCpuArch(self: *MachO, index: File.Index) void {
         macho.CPU_TYPE_X86_64 => .x86_64,
         else => unreachable,
     };
-    if (self.options.cpu_arch) |self_cpu_arch| {
-        if (self_cpu_arch != cpu_arch) {
-            return self.base.fatal("{}: invalid architecture '{s}', expected '{s}'", .{
-                file.fmtPath(),
-                @tagName(cpu_arch),
-                @tagName(self_cpu_arch),
-            });
-        }
+    if (self.options.cpu_arch.? != cpu_arch) {
+        return self.base.fatal("{}: invalid architecture '{s}', expected '{s}'", .{
+            file.fmtPath(),
+            @tagName(cpu_arch),
+            @tagName(self.options.cpu_arch.?),
+        });
     }
 }
 
@@ -740,11 +750,13 @@ fn parseArchive(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
         object.parse(self) catch |err| switch (err) {
             error.ParseFailed => {
                 has_parse_error = true;
-                continue;
+                // TODO see below
+                // continue;
             },
             else => |e| return e,
         };
         try self.objects.append(gpa, index);
+        // TODO this should come before reporting any parse errors
         self.validateCpuArch(index);
         self.validatePlatform(index);
 
@@ -1458,14 +1470,14 @@ fn initSyntheticSections(self: *MachO) !void {
     }
 
     const needs_unwind_info = for (self.objects.items) |index| {
-        if (self.getFile(index).?.object.has_unwind) break true;
+        if (self.getFile(index).?.object.compact_unwind_sect_index != null) break true;
     } else false;
     if (needs_unwind_info) {
         self.unwind_info_sect_index = try self.addSection("__TEXT", "__unwind_info", .{});
     }
 
     const needs_eh_frame = for (self.objects.items) |index| {
-        if (self.getFile(index).?.object.has_eh_frame) break true;
+        if (self.getFile(index).?.object.eh_frame_sect_index != null) break true;
     } else false;
     if (needs_eh_frame) {
         assert(needs_unwind_info);
@@ -1553,6 +1565,7 @@ fn getSectionRank(self: *MachO, sect_index: u8) u8 {
 
             else => {
                 if (mem.eql(u8, "__unwind_info", header.sectName())) break :blk 0xe;
+                if (mem.eql(u8, "__compact_unwind", header.sectName())) break :blk 0xe;
                 if (mem.eql(u8, "__eh_frame", header.sectName())) break :blk 0xf;
                 break :blk 0x3;
             },
@@ -1561,7 +1574,7 @@ fn getSectionRank(self: *MachO, sect_index: u8) u8 {
     return (@as(u8, @intCast(segment_rank)) << 4) + section_rank;
 }
 
-fn sortSections(self: *MachO) !void {
+pub fn sortSections(self: *MachO) !void {
     const Entry = struct {
         index: u8,
 
@@ -1626,7 +1639,7 @@ fn sortSections(self: *MachO) !void {
     }
 }
 
-fn addAtomsToSections(self: *MachO) !void {
+pub fn addAtomsToSections(self: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -1931,7 +1944,7 @@ fn allocateSegments(self: *MachO) void {
     }
 }
 
-fn allocateAtoms(self: *MachO) void {
+pub fn allocateAtoms(self: *MachO) void {
     const slice = self.sections.slice();
     for (slice.items(.header), slice.items(.atoms)) |header, atoms| {
         if (atoms.items.len == 0) continue;
@@ -2232,21 +2245,7 @@ fn writeSyntheticSections(self: *MachO) !void {
     }
 }
 
-fn getNextLinkeditOffset(self: *MachO, alignment: u64) !u64 {
-    const seg = self.getLinkeditSegment();
-    const off = seg.fileoff + seg.filesize;
-    const aligned = mem.alignForward(u64, off, alignment);
-    const padding = aligned - off;
-
-    if (padding > 0) {
-        try self.base.file.pwriteAll(&[1]u8{0}, aligned);
-        seg.filesize += padding;
-    }
-
-    return aligned;
-}
-
-fn writeDyldInfoSections(self: *MachO) !void {
+fn writeDyldInfoSections(self: *MachO, off: u32) !u32 {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -2291,28 +2290,27 @@ fn writeDyldInfoSections(self: *MachO) !void {
     try stream.seekTo(cmd.export_off);
     try self.export_trie.write(writer);
 
-    const off = try self.getNextLinkeditOffset(@alignOf(u64));
-    cmd.rebase_off += @intCast(off);
-    cmd.bind_off += @intCast(off);
-    cmd.weak_bind_off += @intCast(off);
-    cmd.lazy_bind_off += @intCast(off);
-    cmd.export_off += @intCast(off);
+    cmd.rebase_off += off;
+    cmd.bind_off += off;
+    cmd.weak_bind_off += off;
+    cmd.lazy_bind_off += off;
+    cmd.export_off += off;
 
     try self.base.file.pwriteAll(buffer, off);
 
-    self.getLinkeditSegment().filesize += needed_size;
+    return off + needed_size;
 }
 
-fn writeFunctionStarts(self: *MachO) !void {
-    const off = try self.getNextLinkeditOffset(@alignOf(u64));
+fn writeFunctionStarts(self: *MachO, off: u32) !u32 {
+    // TODO actually write it out
     const cmd = &self.function_starts_cmd;
-    cmd.dataoff = @intCast(off);
+    cmd.dataoff = off;
+    return off;
 }
 
-fn writeDataInCode(self: *MachO) !void {
+fn writeDataInCode(self: *MachO, off: u32) !u32 {
     const cmd = &self.data_in_code_cmd;
-    const off = try self.getNextLinkeditOffset(@alignOf(u64));
-    cmd.dataoff = @intCast(off);
+    cmd.dataoff = off;
 
     const base = self.getTextSegment().vmaddr;
 
@@ -2350,15 +2348,15 @@ fn writeDataInCode(self: *MachO) !void {
         }
     }
 
-    const needed_size = dices.items.len * @sizeOf(macho.data_in_code_entry);
-    cmd.datasize = @intCast(needed_size);
+    const needed_size = math.cast(u32, dices.items.len * @sizeOf(macho.data_in_code_entry)) orelse return error.Overflow;
+    cmd.datasize = needed_size;
 
     try self.base.file.pwriteAll(mem.sliceAsBytes(dices.items), cmd.dataoff);
 
-    self.getLinkeditSegment().filesize += needed_size;
+    return off + needed_size;
 }
 
-fn calcSymtabSize(self: *MachO) !void {
+pub fn calcSymtabSize(self: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
     const gpa = self.base.allocator;
@@ -2420,13 +2418,12 @@ fn calcSymtabSize(self: *MachO) !void {
     }
 }
 
-fn writeSymtab(self: *MachO) !void {
+pub fn writeSymtab(self: *MachO, off: u32) !u32 {
     const tracy = trace(@src());
     defer tracy.end();
     const gpa = self.base.allocator;
     const cmd = &self.symtab_cmd;
-    const off = try self.getNextLinkeditOffset(@alignOf(u64));
-    cmd.symoff = @intCast(off);
+    cmd.symoff = off;
 
     try self.symtab.resize(gpa, cmd.nsyms);
     try self.strtab.ensureUnusedCapacity(gpa, cmd.strsize - 1);
@@ -2445,14 +2442,13 @@ fn writeSymtab(self: *MachO) !void {
 
     try self.base.file.pwriteAll(mem.sliceAsBytes(self.symtab.items), cmd.symoff);
 
-    self.getLinkeditSegment().filesize += cmd.nsyms * @sizeOf(macho.nlist_64);
+    return off + cmd.nsyms * @sizeOf(macho.nlist_64);
 }
 
-fn writeIndsymtab(self: *MachO) !void {
+fn writeIndsymtab(self: *MachO, off: u32) !u32 {
     const gpa = self.base.allocator;
     const cmd = &self.dysymtab_cmd;
-    const off = try self.getNextLinkeditOffset(@alignOf(u32));
-    cmd.indirectsymoff = @intCast(off);
+    cmd.indirectsymoff = off;
     cmd.nindirectsyms = self.indsymtab.nsyms(self);
 
     const needed_size = cmd.nindirectsyms * @sizeOf(u32);
@@ -2463,15 +2459,14 @@ fn writeIndsymtab(self: *MachO) !void {
     try self.base.file.pwriteAll(buffer.items, cmd.indirectsymoff);
     assert(buffer.items.len == needed_size);
 
-    self.getLinkeditSegment().filesize += needed_size;
+    return off + needed_size;
 }
 
-fn writeStrtab(self: *MachO) !void {
+pub fn writeStrtab(self: *MachO, off: u32) !u32 {
     const cmd = &self.symtab_cmd;
-    const off = try self.getNextLinkeditOffset(@alignOf(u64));
-    cmd.stroff = @intCast(off);
+    cmd.stroff = off;
     try self.base.file.pwriteAll(self.strtab.items, cmd.stroff);
-    self.getLinkeditSegment().filesize += cmd.strsize;
+    return off + cmd.strsize;
 }
 
 fn writeLoadCommands(self: *MachO) !struct { usize, usize, usize } {
@@ -2736,7 +2731,7 @@ pub fn addSection(
     const gpa = self.base.allocator;
     const index = @as(u8, @intCast(try self.sections.addOne(gpa)));
     self.sections.set(index, .{
-        .segment_id = undefined, // Segments will be created automatically later down the pipeline.
+        .segment_id = 0, // Segments will be created automatically later down the pipeline.
         .header = .{
             .sectname = makeStaticString(sectname),
             .segname = makeStaticString(segname),
@@ -3156,11 +3151,12 @@ const macho = std.macho;
 const math = std.math;
 const mem = std.mem;
 const meta = std.meta;
-const thunks = @import("MachO/thunks.zig");
-const trace = @import("tracy.zig").trace;
+const relocatable = @import("MachO/relocatable.zig");
 const synthetic = @import("MachO/synthetic.zig");
 const state_log = std.log.scoped(.state);
 const std = @import("std");
+const thunks = @import("MachO/thunks.zig");
+const trace = @import("tracy.zig").trace;
 
 const Allocator = mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;

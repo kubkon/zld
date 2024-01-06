@@ -153,7 +153,7 @@ pub fn initOutputSection(sect: macho.section_64, macho_file: *MachO) !u8 {
                         macho.S_REGULAR,
                     };
                 }
-                break :blk .{ segname, sectname, macho.S_REGULAR };
+                break :blk .{ segname, sectname, sect.flags };
             },
 
             else => break :blk .{ sect.segName(), sect.sectName(), sect.flags },
@@ -666,6 +666,148 @@ fn encode(insts: []const Instruction, code: []u8) !void {
     const writer = stream.writer();
     for (insts) |inst| {
         try inst.encode(writer, .{});
+    }
+}
+
+pub fn calcNumRelocs(self: Atom, macho_file: *MachO) u32 {
+    switch (macho_file.options.cpu_arch.?) {
+        .aarch64 => {
+            var nreloc: u32 = 0;
+            for (self.getRelocs(macho_file)) |rel| {
+                nreloc += 1;
+                switch (rel.type) {
+                    .page, .pageoff => if (rel.addend > 0) {
+                        nreloc += 1;
+                    },
+                    else => {},
+                }
+            }
+            return nreloc;
+        },
+        .x86_64 => return @intCast(self.getRelocs(macho_file).len),
+        else => unreachable,
+    }
+}
+
+pub fn writeRelocs(self: Atom, macho_file: *MachO, code: []u8, buffer: *std.ArrayList(macho.relocation_info)) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    const cpu_arch = macho_file.options.cpu_arch.?;
+    const relocs = self.getRelocs(macho_file);
+    const sect = macho_file.sections.items(.header)[self.out_n_sect];
+    var stream = std.io.fixedBufferStream(code);
+
+    for (relocs) |rel| {
+        const rel_offset = rel.offset - self.off;
+        const r_address: i32 = math.cast(i32, self.value + rel_offset - sect.addr) orelse return error.Overflow;
+        const r_symbolnum = r_symbolnum: {
+            const r_symbolnum: u32 = switch (rel.tag) {
+                .local => rel.getTargetAtom(macho_file).out_n_sect + 1,
+                .@"extern" => rel.getTargetSymbol(macho_file).getOutputSymtabIndex(macho_file).?,
+            };
+            break :r_symbolnum math.cast(u24, r_symbolnum) orelse return error.Overflow;
+        };
+        const r_extern = rel.tag == .@"extern";
+        var addend = rel.addend + rel.getRelocAddend(cpu_arch);
+        if (rel.tag == .local) {
+            const target: i64 = @intCast(rel.getTargetAddress(macho_file));
+            addend += target;
+        }
+
+        try stream.seekTo(rel_offset);
+
+        switch (cpu_arch) {
+            .aarch64 => {
+                if (rel.type == .unsigned) switch (rel.meta.length) {
+                    0, 1 => unreachable,
+                    2 => try stream.writer().writeInt(i32, @truncate(addend), .little),
+                    3 => try stream.writer().writeInt(i64, addend, .little),
+                } else if (addend > 0) {
+                    buffer.appendAssumeCapacity(.{
+                        .r_address = r_address,
+                        .r_symbolnum = @bitCast(math.cast(i24, addend) orelse return error.Overflow),
+                        .r_pcrel = 0,
+                        .r_length = 2,
+                        .r_extern = 0,
+                        .r_type = @intFromEnum(macho.reloc_type_arm64.ARM64_RELOC_ADDEND),
+                    });
+                }
+
+                const r_type: macho.reloc_type_arm64 = switch (rel.type) {
+                    .page => .ARM64_RELOC_PAGE21,
+                    .pageoff => .ARM64_RELOC_PAGEOFF12,
+                    .got_load_page => .ARM64_RELOC_GOT_LOAD_PAGE21,
+                    .got_load_pageoff => .ARM64_RELOC_GOT_LOAD_PAGEOFF12,
+                    .tlvp_page => .ARM64_RELOC_TLVP_LOAD_PAGE21,
+                    .tlvp_pageoff => .ARM64_RELOC_TLVP_LOAD_PAGEOFF12,
+                    .branch => .ARM64_RELOC_BRANCH26,
+                    .got => .ARM64_RELOC_POINTER_TO_GOT,
+                    .subtractor => .ARM64_RELOC_SUBTRACTOR,
+                    .unsigned => .ARM64_RELOC_UNSIGNED,
+
+                    .signed,
+                    .signed1,
+                    .signed2,
+                    .signed4,
+                    .got_load,
+                    .tlv,
+                    => unreachable,
+                };
+                buffer.appendAssumeCapacity(.{
+                    .r_address = r_address,
+                    .r_symbolnum = r_symbolnum,
+                    .r_pcrel = @intFromBool(rel.meta.pcrel),
+                    .r_extern = @intFromBool(r_extern),
+                    .r_length = rel.meta.length,
+                    .r_type = @intFromEnum(r_type),
+                });
+            },
+            .x86_64 => {
+                if (rel.meta.pcrel) {
+                    if (rel.tag == .local) {
+                        addend -= @as(i64, @intCast(self.value + rel_offset));
+                    } else {
+                        addend += 4;
+                    }
+                }
+                switch (rel.meta.length) {
+                    0, 1 => unreachable,
+                    2 => try stream.writer().writeInt(i32, @truncate(addend), .little),
+                    3 => try stream.writer().writeInt(i64, addend, .little),
+                }
+
+                const r_type: macho.reloc_type_x86_64 = switch (rel.type) {
+                    .signed => .X86_64_RELOC_SIGNED,
+                    .signed1 => .X86_64_RELOC_SIGNED_1,
+                    .signed2 => .X86_64_RELOC_SIGNED_2,
+                    .signed4 => .X86_64_RELOC_SIGNED_4,
+                    .got_load => .X86_64_RELOC_GOT_LOAD,
+                    .tlv => .X86_64_RELOC_TLV,
+                    .branch => .X86_64_RELOC_BRANCH,
+                    .got => .X86_64_RELOC_GOT,
+                    .subtractor => .X86_64_RELOC_SUBTRACTOR,
+                    .unsigned => .X86_64_RELOC_UNSIGNED,
+
+                    .page,
+                    .pageoff,
+                    .got_load_page,
+                    .got_load_pageoff,
+                    .tlvp_page,
+                    .tlvp_pageoff,
+                    => unreachable,
+                };
+                buffer.appendAssumeCapacity(.{
+                    .r_address = r_address,
+                    .r_symbolnum = r_symbolnum,
+                    .r_pcrel = @intFromBool(rel.meta.pcrel),
+                    .r_extern = @intFromBool(r_extern),
+                    .r_length = rel.meta.length,
+                    .r_type = @intFromEnum(r_type),
+                });
+            },
+            else => unreachable,
+        }
     }
 }
 

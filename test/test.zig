@@ -19,7 +19,7 @@ pub fn addTests(b: *Build, comp: *Compile, build_opts: struct {
         error.OutOfMemory => @panic("OOM"),
     };
 
-    const zld = FileSourceWithDir.fromFileSource(b, comp.getOutputSource(), "ld");
+    const zld = FileSourceWithDir.fromFileSource(b, comp.getEmittedBin(), "ld");
 
     const opts: Options = .{
         .zld = zld,
@@ -51,10 +51,10 @@ pub const Options = struct {
 };
 
 /// A system command that tracks the command itself via `cmd` Step.Run and output file
-/// via `out` FileSource.
+/// via `out` LazyPath.
 pub const SysCmd = struct {
     cmd: *Run,
-    out: FileSource,
+    out: LazyPath,
 
     pub fn addArg(sys_cmd: SysCmd, arg: []const u8) void {
         sys_cmd.cmd.addArg(arg);
@@ -64,19 +64,19 @@ pub const SysCmd = struct {
         sys_cmd.cmd.addArgs(args);
     }
 
-    pub fn addFileSource(sys_cmd: SysCmd, file: FileSource) void {
-        sys_cmd.cmd.addFileSourceArg(file);
+    pub fn addFileSource(sys_cmd: SysCmd, file: LazyPath) void {
+        sys_cmd.cmd.addFileArg(file);
     }
 
-    pub fn addPrefixedFileSource(sys_cmd: SysCmd, prefix: []const u8, file: FileSource) void {
+    pub fn addPrefixedFileSource(sys_cmd: SysCmd, prefix: []const u8, file: LazyPath) void {
         sys_cmd.cmd.addPrefixedFileSourceArg(prefix, file);
     }
 
-    pub fn addDirectorySource(sys_cmd: SysCmd, dir: FileSource) void {
+    pub fn addDirectorySource(sys_cmd: SysCmd, dir: LazyPath) void {
         sys_cmd.cmd.addDirectorySourceArg(dir);
     }
 
-    pub fn addPrefixedDirectorySource(sys_cmd: SysCmd, prefix: []const u8, dir: FileSource) void {
+    pub fn addPrefixedDirectorySource(sys_cmd: SysCmd, prefix: []const u8, dir: LazyPath) void {
         sys_cmd.cmd.addPrefixedDirectorySourceArg(prefix, dir);
     }
 
@@ -118,7 +118,7 @@ pub const SysCmd = struct {
             .zig => "a.zig",
             .objc => "a.m",
         }, bytes);
-        sys_cmd.cmd.addFileSourceArg(file);
+        sys_cmd.cmd.addFileArg(file);
     }
 
     pub inline fn addEmptyMain(sys_cmd: SysCmd) void {
@@ -153,7 +153,7 @@ pub const SysCmd = struct {
     pub fn run(sys_cmd: SysCmd) RunSysCmd {
         const b = sys_cmd.cmd.step.owner;
         const r = Run.create(b, "exec");
-        r.addFileSourceArg(sys_cmd.out);
+        r.addFileArg(sys_cmd.out);
         r.step.dependOn(&sys_cmd.cmd.step);
         return .{ .run = r };
     }
@@ -186,19 +186,19 @@ pub const RunSysCmd = struct {
 /// This abstraction tie the full path of a file with its immediate directory to make
 /// the above scenario possible.
 pub const FileSourceWithDir = struct {
-    dir: FileSource,
-    file: FileSource,
+    dir: LazyPath,
+    file: LazyPath,
 
-    pub fn fromFileSource(b: *Build, in_file: FileSource, basename: []const u8) FileSourceWithDir {
+    pub fn fromFileSource(b: *Build, in_file: LazyPath, basename: []const u8) FileSourceWithDir {
         const wf = WriteFile.create(b);
-        const dir = wf.getDirectorySource();
+        const dir = wf.getDirectory();
         const file = wf.addCopyFile(in_file, basename);
         return .{ .dir = dir, .file = file };
     }
 
     pub fn fromBytes(b: *Build, bytes: []const u8, basename: []const u8) FileSourceWithDir {
         const wf = WriteFile.create(b);
-        const dir = wf.getDirectorySource();
+        const dir = wf.getDirectory();
         const file = wf.add(basename, bytes);
         return .{ .dir = dir, .file = file };
     }
@@ -245,7 +245,7 @@ const macho = @import("macho.zig");
 const Build = std.Build;
 const CheckObject = Step.CheckObject;
 const Compile = Step.Compile;
-const FileSource = Build.FileSource;
+const LazyPath = Build.LazyPath;
 const Run = Step.Run;
 const Step = Build.Step;
 const WriteFile = Step.WriteFile;
