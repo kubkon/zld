@@ -52,7 +52,7 @@ pub fn flush(macho_file: *MachO) !void {
     try writeEhFrame(macho_file);
 
     off = mem.alignForward(u32, off, @alignOf(u64));
-    off = try writeDataInCode(macho_file, off);
+    off = try macho_file.writeDataInCode(0, off);
     off = mem.alignForward(u32, off, @alignOf(u64));
     off = try macho_file.writeSymtab(off);
     off = mem.alignForward(u32, off, @alignOf(u64));
@@ -348,13 +348,6 @@ fn writeEhFrame(macho_file: *MachO) !void {
     try macho_file.base.file.pwriteAll(mem.sliceAsBytes(relocs.items), header.reloff);
 }
 
-fn writeDataInCode(macho_file: *MachO, off: u32) !u32 {
-    // TODO actually write it out
-    const cmd = &macho_file.data_in_code_cmd;
-    cmd.dataoff = off;
-    return off;
-}
-
 fn writeLoadCommands(macho_file: *MachO) !struct { usize, usize } {
     const gpa = macho_file.base.allocator;
     const needed_size = load_commands.calcLoadCommandsSizeObject(macho_file);
@@ -424,16 +417,6 @@ fn writeHeader(macho_file: *MachO, ncmds: usize, sizeofcmds: usize) !void {
             header.cpusubtype = macho.CPU_SUBTYPE_X86_64_ALL;
         },
         else => {},
-    }
-
-    if (macho_file.has_tlv) {
-        header.flags |= macho.MH_HAS_TLV_DESCRIPTORS;
-    }
-    if (macho_file.binds_to_weak) {
-        header.flags |= macho.MH_BINDS_TO_WEAK;
-    }
-    if (macho_file.weak_defines) {
-        header.flags |= macho.MH_WEAK_DEFINES;
     }
 
     header.ncmds = @intCast(ncmds);
