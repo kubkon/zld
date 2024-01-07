@@ -397,7 +397,7 @@ pub fn flush(self: *MachO) !void {
     off = mem.alignForward(u32, off, @alignOf(u64));
     off = try self.writeFunctionStarts(off);
     off = mem.alignForward(u32, off, @alignOf(u64));
-    off = try self.writeDataInCode(off);
+    off = try self.writeDataInCode(self.getTextSegment().vmaddr, off);
     try self.calcSymtabSize();
     off = mem.alignForward(u32, off, @alignOf(u64));
     off = try self.writeSymtab(off);
@@ -2308,11 +2308,9 @@ fn writeFunctionStarts(self: *MachO, off: u32) !u32 {
     return off;
 }
 
-fn writeDataInCode(self: *MachO, off: u32) !u32 {
+pub fn writeDataInCode(self: *MachO, base_address: u64, off: u32) !u32 {
     const cmd = &self.data_in_code_cmd;
     cmd.dataoff = off;
-
-    const base = self.getTextSegment().vmaddr;
 
     const gpa = self.base.allocator;
     var dices = std.ArrayList(macho.data_in_code_entry).init(gpa);
@@ -2340,7 +2338,7 @@ fn writeDataInCode(self: *MachO, off: u32) !u32 {
 
             if (atom.flags.alive) for (in_dices[start_dice..next_dice]) |dice| {
                 dices.appendAssumeCapacity(.{
-                    .offset = @intCast(atom.value + dice.offset - start_off - base),
+                    .offset = @intCast(atom.value + dice.offset - start_off - base_address),
                     .length = dice.length,
                     .kind = dice.kind,
                 });
