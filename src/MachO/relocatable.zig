@@ -208,6 +208,12 @@ fn allocateSections(macho_file: *MachO) !u32 {
     return fileoff;
 }
 
+// We need to sort relocations in descending order to be compatible with Apple's linker.
+fn sortReloc(ctx: void, lhs: macho.relocation_info, rhs: macho.relocation_info) bool {
+    _ = ctx;
+    return lhs.r_address > rhs.r_address;
+}
+
 fn writeAtoms(macho_file: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
@@ -237,6 +243,8 @@ fn writeAtoms(macho_file: *MachO) !void {
         }
 
         assert(relocs.items.len == header.nreloc);
+
+        mem.sort(macho.relocation_info, relocs.items, {}, sortReloc);
 
         // TODO scattered writes?
         try macho_file.base.file.pwriteAll(code, header.offset);
@@ -324,6 +332,8 @@ fn writeCompactUnwind(macho_file: *MachO) !void {
     assert(entries.items.len == nrecs);
     assert(relocs.items.len == header.nreloc);
 
+    mem.sort(macho.relocation_info, relocs.items, {}, sortReloc);
+
     // TODO scattered writes?
     try macho_file.base.file.pwriteAll(mem.sliceAsBytes(entries.items), header.offset);
     try macho_file.base.file.pwriteAll(mem.sliceAsBytes(relocs.items), header.reloff);
@@ -342,6 +352,8 @@ fn writeEhFrame(macho_file: *MachO) !void {
 
     try eh_frame.writeRelocs(macho_file, code, &relocs);
     assert(relocs.items.len == header.nreloc);
+
+    mem.sort(macho.relocation_info, relocs.items, {}, sortReloc);
 
     // TODO scattered writes?
     try macho_file.base.file.pwriteAll(code, header.offset);
