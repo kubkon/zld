@@ -18,9 +18,7 @@ pub fn addTests(b: *Build, comp: *Compile, build_opts: struct {
         error.InvalidUtf8 => @panic("InvalidUtf8"),
         error.OutOfMemory => @panic("OOM"),
     };
-
-    const zld = FileSourceWithDir.fromFileSource(b, comp.getEmittedBin(), "ld");
-
+    const zld = WriteFile.create(b).addCopyFile(comp.getEmittedBin(), "ld");
     const opts: Options = .{
         .zld = zld,
         .system_compiler = system_compiler,
@@ -42,7 +40,7 @@ pub const SystemCompiler = enum {
 };
 
 pub const Options = struct {
-    zld: FileSourceWithDir,
+    zld: LazyPath,
     system_compiler: SystemCompiler,
     has_static: bool = false,
     has_zig: bool = false,
@@ -202,6 +200,11 @@ pub const RunSysCmd = struct {
         return &rsc.run.step;
     }
 };
+
+pub fn saveBytesToFile(b: *Build, name: []const u8, bytes: []const u8) LazyPath {
+    const wf = WriteFile.create(b);
+    return wf.add(name, bytes);
+}
 
 /// When going over different linking scenarios, we usually want to save a file
 /// at a particular location however we do not specify the path to file explicitly

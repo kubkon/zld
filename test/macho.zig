@@ -1826,7 +1826,7 @@ fn testObjcStubs(b: *Build, opts: Options) *Step {
 fn testObjcStubs2(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-objc-stubs-2", "");
 
-    const all_h = FileSourceWithDir.fromBytes(b,
+    const all_h = saveBytesToFile(b, "all.h",
         \\#import <Foundation/Foundation.h>
         \\
         \\@interface Foo : NSObject
@@ -1838,7 +1838,7 @@ fn testObjcStubs2(b: *Build, opts: Options) *Step {
         \\- (void) bar;
         \\- (void) foobar: (Foo*) foo;
         \\@end
-    , "all.h");
+    );
 
     const foo_o = cc(b, "foo.o", opts);
     foo_o.addObjCSource(
@@ -1851,7 +1851,7 @@ fn testObjcStubs2(b: *Build, opts: Options) *Step {
         \\@end
     );
     foo_o.addArgs(&.{ "-c", "-fobjc-msgsend-selector-stubs" });
-    foo_o.addPrefixedDirectorySource("-I", all_h.dir);
+    foo_o.addPrefixedDirectorySource("-I", all_h.dirname());
 
     const bar_o = cc(b, "bar.o", opts);
     bar_o.addObjCSource(
@@ -1867,7 +1867,7 @@ fn testObjcStubs2(b: *Build, opts: Options) *Step {
         \\@end
     );
     bar_o.addArgs(&.{ "-c", "-fobjc-msgsend-selector-stubs" });
-    bar_o.addPrefixedDirectorySource("-I", all_h.dir);
+    bar_o.addPrefixedDirectorySource("-I", all_h.dirname());
 
     const main_o = cc(b, "main.o", opts);
     main_o.addObjCSource(
@@ -1885,7 +1885,7 @@ fn testObjcStubs2(b: *Build, opts: Options) *Step {
         \\}
     );
     main_o.addArgs(&.{ "-c", "-fobjc-msgsend-selector-stubs" });
-    main_o.addPrefixedDirectorySource("-I", all_h.dir);
+    main_o.addPrefixedDirectorySource("-I", all_h.dirname());
 
     const exe = cc(b, "main", opts);
     exe.addFileSource(main_o.getFile());
@@ -2461,20 +2461,17 @@ fn testTbdv3(b: *Build, opts: Options) *Step {
     dylib.addArg("-shared");
     dylib.addCSource("int getFoo() { return 42; }");
 
-    const tbd = scr: {
-        const wf = WriteFile.create(b);
-        break :scr wf.add("liba.tbd",
-            \\--- !tapi-tbd-v3
-            \\archs:           [ arm64, x86_64 ]
-            \\uuids:           [ 'arm64: DEADBEEF', 'x86_64: BEEFDEAD' ]
-            \\platform:        macos
-            \\install-name:    @rpath/liba.dylib
-            \\current-version: 0
-            \\exports:         
-            \\  - archs:           [ arm64, x86_64 ]
-            \\    symbols:         [ _getFoo ]
-        );
-    };
+    const tbd = saveBytesToFile(b, "liba.tbd",
+        \\--- !tapi-tbd-v3
+        \\archs:           [ arm64, x86_64 ]
+        \\uuids:           [ 'arm64: DEADBEEF', 'x86_64: BEEFDEAD' ]
+        \\platform:        macos
+        \\install-name:    @rpath/liba.dylib
+        \\current-version: 0
+        \\exports:         
+        \\  - archs:           [ arm64, x86_64 ]
+        \\    symbols:         [ _getFoo ]
+    );
 
     const exe = cc(b, "a.out", opts);
     exe.addCSource(
@@ -2810,7 +2807,7 @@ fn testUndefinedFlag(b: *Build, opts: Options) *Step {
 fn testUnwindInfo(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-unwind-info", "");
 
-    const all_h = FileSourceWithDir.fromBytes(b,
+    const all_h = saveBytesToFile(b, "all.h",
         \\#ifndef ALL
         \\#define ALL
         \\
@@ -2852,7 +2849,7 @@ fn testUnwindInfo(b: *Build, opts: Options) *Step {
         \\};
         \\
         \\#endif
-    , "all.h");
+    );
 
     const main_c =
         \\#include "all.h"
@@ -2938,17 +2935,17 @@ fn testUnwindInfo(b: *Build, opts: Options) *Step {
     const flags: []const []const u8 = &.{ "-std=c++17", "-c" };
     const obj = cc(b, "main.o", opts);
     obj.addCppSource(main_c);
-    obj.addPrefixedDirectorySource("-I", all_h.dir);
+    obj.addPrefixedDirectorySource("-I", all_h.dirname());
     obj.addArgs(flags);
 
     const obj1 = cc(b, "simple_string.o", opts);
     obj1.addCppSource(simple_string_c);
-    obj1.addPrefixedDirectorySource("-I", all_h.dir);
+    obj1.addPrefixedDirectorySource("-I", all_h.dirname());
     obj1.addArgs(flags);
 
     const obj2 = cc(b, "simple_string_owner.o", opts);
     obj2.addCppSource(simple_string_owner_c);
-    obj2.addPrefixedDirectorySource("-I", all_h.dir);
+    obj2.addPrefixedDirectorySource("-I", all_h.dirname());
     obj2.addArgs(flags);
 
     const exe = ld(b, "main", opts);
@@ -3320,7 +3317,7 @@ fn testWeakRef(b: *Build, opts: Options) *Step {
 }
 
 const Options = struct {
-    zld: FileSourceWithDir,
+    zld: LazyPath,
     has_zig: bool,
     macos_sdk: []const u8,
     ios_sdk: ?[]const u8,
@@ -3332,7 +3329,7 @@ fn cc(b: *Build, name: []const u8, opts: Options) SysCmd {
     cmd.addArgs(&.{ opts.cc_override orelse "cc", "-fno-lto" });
     cmd.addArg("-o");
     const out = cmd.addOutputFileArg(name);
-    cmd.addPrefixedDirectorySourceArg("-B", opts.zld.dir);
+    cmd.addPrefixedDirectorySourceArg("-B", opts.zld.dirname());
     return .{ .cmd = cmd, .out = out };
 }
 
@@ -3359,7 +3356,7 @@ fn lipo(b: *Build, name: []const u8) SysCmd {
 
 fn ld(b: *Build, name: []const u8, opts: Options) SysCmd {
     const cmd = Run.create(b, "ld");
-    cmd.addFileArg(opts.zld.file);
+    cmd.addFileArg(opts.zld);
     cmd.addArg("-dynamic");
     cmd.addArg("-o");
     const out = cmd.addOutputFileArg(name);
@@ -3370,12 +3367,12 @@ fn ld(b: *Build, name: []const u8, opts: Options) SysCmd {
 const std = @import("std");
 const builtin = @import("builtin");
 const common = @import("test.zig");
+const saveBytesToFile = common.saveBytesToFile;
 const skipTestStep = common.skipTestStep;
 
 const Build = std.Build;
 const Compile = Step.Compile;
-const FileSourceWithDir = common.FileSourceWithDir;
+const LazyPath = Build.LazyPath;
 const Run = Step.Run;
 const Step = Build.Step;
 const SysCmd = common.SysCmd;
-const WriteFile = Step.WriteFile;
