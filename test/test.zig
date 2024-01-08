@@ -162,11 +162,11 @@ pub const SysCmd = struct {
 pub const RunSysCmd = struct {
     run: *Run,
 
-    pub fn expectHelloWorld(rsc: RunSysCmd) void {
+    pub inline fn expectHelloWorld(rsc: RunSysCmd) void {
         rsc.run.expectStdOutEqual("Hello world!\n");
     }
 
-    pub fn expectStdOutEqual(rsc: RunSysCmd, exp: []const u8) void {
+    pub inline fn expectStdOutEqual(rsc: RunSysCmd, exp: []const u8) void {
         rsc.run.expectStdOutEqual(exp);
     }
 
@@ -176,7 +176,7 @@ pub const RunSysCmd = struct {
         });
     }
 
-    pub fn expectStdErrEqual(rsc: RunSysCmd, exp: []const u8) void {
+    pub inline fn expectStdErrEqual(rsc: RunSysCmd, exp: []const u8) void {
         rsc.run.expectStdErrEqual(exp);
     }
 
