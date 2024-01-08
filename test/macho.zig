@@ -82,20 +82,19 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
 fn testAllLoad(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-all-load", "");
 
-    const obj1 = cc(b, opts);
+    const obj1 = cc(b, "a.o", opts);
     obj1.addCSource("int foo = 1;");
     obj1.addArg("-c");
 
-    const obj2 = cc(b, opts);
+    const obj2 = cc(b, "b.o", opts);
     obj2.addCSource("int bar = 42;");
     obj2.addArg("-c");
 
-    const lib = ar(b);
-    lib.addFileSource(obj1.out);
-    lib.addFileSource(obj2.out);
-    const lib_out = lib.saveOutputAs("liba.a");
+    const lib = ar(b, "liba.a");
+    lib.addFileSource(obj1.getFile());
+    lib.addFileSource(obj2.getFile());
 
-    const main_o = cc(b, opts);
+    const main_o = cc(b, "main.o", opts);
     main_o.addCSource(
         \\extern int foo;
         \\int main() {
@@ -105,9 +104,9 @@ fn testAllLoad(b: *Build, opts: Options) *Step {
     main_o.addArg("-c");
 
     {
-        const exe = cc(b, opts);
-        exe.addFileSource(lib_out.file);
-        exe.addFileSource(main_o.out);
+        const exe = cc(b, "main", opts);
+        exe.addFileSource(lib.getFile());
+        exe.addFileSource(main_o.getFile());
 
         const check = exe.check();
         check.checkInSymtab();
@@ -122,9 +121,9 @@ fn testAllLoad(b: *Build, opts: Options) *Step {
     }
 
     {
-        const exe = cc(b, opts);
-        exe.addFileSource(lib_out.file);
-        exe.addFileSource(main_o.out);
+        const exe = cc(b, "main", opts);
+        exe.addFileSource(lib.getFile());
+        exe.addFileSource(main_o.getFile());
         exe.addArg("-Wl,-all_load");
 
         const check = exe.check();
@@ -146,12 +145,12 @@ fn testBuildVersionMacOS(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-build-version-macos", "");
 
     {
-        const obj = cc(b, opts);
+        const obj = cc(b, "a.o", opts);
         obj.addEmptyMain();
         obj.addArg("-c");
 
-        const exe = ld(b, opts);
-        exe.addFileSource(obj.out);
+        const exe = ld(b, "a.out", opts);
+        exe.addFileSource(obj.getFile());
         exe.addArgs(&.{ "-syslibroot", opts.macos_sdk });
 
         const check = exe.check();
@@ -165,12 +164,12 @@ fn testBuildVersionMacOS(b: *Build, opts: Options) *Step {
     }
 
     if (builtin.target.cpu.arch == .x86_64) {
-        const obj = cc(b, opts);
+        const obj = cc(b, "a.o", opts);
         obj.addEmptyMain();
         obj.addArgs(&.{ "-c", "-mmacos-version-min=10.13" });
 
-        const exe = ld(b, opts);
-        exe.addFileSource(obj.out);
+        const exe = ld(b, "a.out", opts);
+        exe.addFileSource(obj.getFile());
         exe.addArgs(&.{
             "-syslibroot",
             opts.macos_sdk,
@@ -198,12 +197,12 @@ fn testBuildVersionIOS(b: *Build, opts: Options) *Step {
     const ios_sdk = opts.ios_sdk orelse return skipTestStep(test_step);
 
     {
-        const obj = cc(b, opts);
+        const obj = cc(b, "a.o", opts);
         obj.addEmptyMain();
         obj.addArgs(&.{ "-c", "-isysroot", ios_sdk, "--target=arm64-ios16.4" });
 
-        const exe = ld(b, opts);
-        exe.addFileSource(obj.out);
+        const exe = ld(b, "a.out", opts);
+        exe.addFileSource(obj.getFile());
         exe.addArgs(&.{ "-syslibroot", ios_sdk });
 
         const check = exe.check();
@@ -217,12 +216,12 @@ fn testBuildVersionIOS(b: *Build, opts: Options) *Step {
     }
 
     {
-        const obj = cc(b, opts);
+        const obj = cc(b, "a.o", opts);
         obj.addEmptyMain();
         obj.addArgs(&.{ "-c", "-isysroot", ios_sdk, "--target=arm64-ios11" });
 
-        const exe = ld(b, opts);
-        exe.addFileSource(obj.out);
+        const exe = ld(b, "a.out", opts);
+        exe.addFileSource(obj.getFile());
         exe.addArgs(&.{ "-syslibroot", ios_sdk });
 
         const check = exe.check();
@@ -240,7 +239,7 @@ fn testBuildVersionIOS(b: *Build, opts: Options) *Step {
 fn testDeadStrip(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-dead-strip", "");
 
-    const obj = cc(b, opts);
+    const obj = cc(b, "a.o", opts);
     obj.addCppSource(
         \\#include <stdio.h>
         \\int two() { return 2; }
@@ -258,11 +257,10 @@ fn testDeadStrip(b: *Build, opts: Options) *Step {
         \\}
     );
     obj.addArg("-c");
-    const obj_out = obj.saveOutputAs("a.o");
 
     {
-        const exe = cc(b, opts);
-        exe.addFileSource(obj_out.file);
+        const exe = cc(b, "main", opts);
+        exe.addFileSource(obj.getFile());
 
         const check = exe.check();
         check.checkInSymtab();
@@ -289,8 +287,8 @@ fn testDeadStrip(b: *Build, opts: Options) *Step {
     }
 
     {
-        const exe = cc(b, opts);
-        exe.addFileSource(obj_out.file);
+        const exe = cc(b, "main", opts);
+        exe.addFileSource(obj.getFile());
         exe.addArg("-Wl,-dead_strip");
 
         const check = exe.check();
@@ -336,7 +334,7 @@ fn testDeadStripDylibs(b: *Build, opts: Options) *Step {
     ;
 
     {
-        const exe = cc(b, opts);
+        const exe = cc(b, "main", opts);
         exe.addCSource(main_c);
         exe.addArgs(&.{ "-framework", "Cocoa" });
 
@@ -354,7 +352,7 @@ fn testDeadStripDylibs(b: *Build, opts: Options) *Step {
     }
 
     {
-        const exe = cc(b, opts);
+        const exe = cc(b, "main", opts);
         exe.addCSource(main_c);
         exe.addArgs(&.{ "-framework", "Cocoa", "-Wl,-dead_strip_dylibs" });
 
@@ -369,7 +367,7 @@ fn testDeadStripDylibs(b: *Build, opts: Options) *Step {
 fn testDylib(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-dylib", "");
 
-    const dylib = cc(b, opts);
+    const dylib = cc(b, "liba.dylib", opts);
     dylib.addCSource(
         \\#include<stdio.h>
         \\char world[] = "world";
@@ -378,7 +376,6 @@ fn testDylib(b: *Build, opts: Options) *Step {
         \\}
     );
     dylib.addArgs(&.{ "-shared", "-Wl,-install_name,@rpath/liba.dylib" });
-    const dylib_out = dylib.saveOutputAs("liba.dylib");
 
     const check = dylib.check();
     check.checkInHeaders();
@@ -386,7 +383,7 @@ fn testDylib(b: *Build, opts: Options) *Step {
     check.checkNotPresent("PIE");
     test_step.dependOn(&check.step);
 
-    const exe = cc(b, opts);
+    const exe = cc(b, "main", opts);
     exe.addCSource(
         \\#include<stdio.h>
         \\char* hello();
@@ -397,8 +394,8 @@ fn testDylib(b: *Build, opts: Options) *Step {
         \\}
     );
     exe.addArg("-la");
-    exe.addPrefixedDirectorySource("-L", dylib_out.dir);
-    exe.addPrefixedDirectorySource("-Wl,-rpath,", dylib_out.dir);
+    exe.addPrefixedDirectorySource("-L", dylib.getDir());
+    exe.addPrefixedDirectorySource("-Wl,-rpath,", dylib.getDir());
 
     const run = exe.run();
     run.expectStdOutEqual("Hello world");
@@ -410,7 +407,7 @@ fn testDylib(b: *Build, opts: Options) *Step {
 fn testDylibReexport(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-dylib-reexport", "");
 
-    const a_o = cc(b, opts);
+    const a_o = cc(b, "a.o", opts);
     a_o.addCSource(
         \\int foo = 42;
         \\int getFoo() {
@@ -419,7 +416,7 @@ fn testDylibReexport(b: *Build, opts: Options) *Step {
     );
     a_o.addArg("-c");
 
-    const b_o = cc(b, opts);
+    const b_o = cc(b, "b.o", opts);
     b_o.addCSource(
         \\int getFoo();
         \\int getBar() {
@@ -428,7 +425,7 @@ fn testDylibReexport(b: *Build, opts: Options) *Step {
     );
     b_o.addArg("-c");
 
-    const main_o = cc(b, opts);
+    const main_o = cc(b, "main.o", opts);
     main_o.addCSource(
         \\int getFoo();
         \\int getBar();
@@ -438,17 +435,15 @@ fn testDylibReexport(b: *Build, opts: Options) *Step {
     );
     main_o.addArg("-c");
 
-    const liba = cc(b, opts);
-    liba.addFileSource(a_o.out);
+    const liba = cc(b, "liba.dylib", opts);
+    liba.addFileSource(a_o.getFile());
     liba.addArgs(&.{ "-shared", "-Wl,-install_name,@rpath/liba.dylib" });
-    const liba_out = liba.saveOutputAs("liba.dylib");
 
-    const libb = cc(b, opts);
-    libb.addFileSource(b_o.out);
-    libb.addPrefixedDirectorySource("-L", liba_out.dir);
-    libb.addPrefixedDirectorySource("-Wl,-rpath,", liba_out.dir);
+    const libb = cc(b, "libb.dylib", opts);
+    libb.addFileSource(b_o.getFile());
+    libb.addPrefixedDirectorySource("-L", liba.getDir());
+    libb.addPrefixedDirectorySource("-Wl,-rpath,", liba.getDir());
     libb.addArgs(&.{ "-shared", "-Wl,-install_name,@rpath/libb.dylib", "-Wl,-reexport-la" });
-    const libb_out = libb.saveOutputAs("libb.dylib");
 
     {
         const check = libb.check();
@@ -460,18 +455,17 @@ fn testDylibReexport(b: *Build, opts: Options) *Step {
         test_step.dependOn(&check.step);
     }
 
-    const libc = cc(b, opts);
-    libc.addFileSource(a_o.out);
+    const libc = cc(b, "libc.dylib", opts);
+    libc.addFileSource(a_o.getFile());
     libc.addArgs(&.{ "-shared", "-Wl,-install_name,@rpath/libc.dylib" });
-    const libc_out = libc.saveOutputAs("libc.dylib");
 
     {
-        const exe = cc(b, opts);
-        exe.addFileSource(main_o.out);
-        exe.addPrefixedDirectorySource("-L", libb_out.dir);
-        exe.addPrefixedDirectorySource("-Wl,-rpath,", libb_out.dir);
-        exe.addPrefixedDirectorySource("-L", libc_out.dir);
-        exe.addPrefixedDirectorySource("-Wl,-rpath,", libc_out.dir);
+        const exe = cc(b, "main", opts);
+        exe.addFileSource(main_o.getFile());
+        exe.addPrefixedDirectorySource("-L", libb.getDir());
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", libb.getDir());
+        exe.addPrefixedDirectorySource("-L", libc.getDir());
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", libc.getDir());
         exe.addArgs(&.{ "-lb", "-lc" });
 
         const check = exe.check();
@@ -494,12 +488,12 @@ fn testDylibReexport(b: *Build, opts: Options) *Step {
     }
 
     {
-        const exe = cc(b, opts);
-        exe.addFileSource(main_o.out);
-        exe.addPrefixedDirectorySource("-L", libb_out.dir);
-        exe.addPrefixedDirectorySource("-Wl,-rpath,", libb_out.dir);
-        exe.addPrefixedDirectorySource("-L", libc_out.dir);
-        exe.addPrefixedDirectorySource("-Wl,-rpath,", libc_out.dir);
+        const exe = cc(b, "main", opts);
+        exe.addFileSource(main_o.getFile());
+        exe.addPrefixedDirectorySource("-L", libb.getDir());
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", libb.getDir());
+        exe.addPrefixedDirectorySource("-L", libc.getDir());
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", libc.getDir());
         exe.addArgs(&.{ "-lc", "-lb" });
 
         const check = exe.check();
@@ -527,7 +521,7 @@ fn testDylibReexport(b: *Build, opts: Options) *Step {
 fn testDylibReexportDeep(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-dylib-reexport-deep", "");
 
-    const liba = cc(b, opts);
+    const liba = cc(b, "liba.dylib", opts);
     liba.addCSource(
         \\int foo = 42;
         \\int getFoo() {
@@ -535,9 +529,8 @@ fn testDylibReexportDeep(b: *Build, opts: Options) *Step {
         \\}
     );
     liba.addArgs(&.{ "-shared", "-Wl,-install_name,@rpath/liba.dylib" });
-    const liba_out = liba.saveOutputAs("liba.dylib");
 
-    const libb = cc(b, opts);
+    const libb = cc(b, "libb.dylib", opts);
     libb.addCSource(
         \\int bar = 21;
         \\int getFoo();
@@ -545,12 +538,11 @@ fn testDylibReexportDeep(b: *Build, opts: Options) *Step {
         \\  return getFoo() - bar;
         \\}
     );
-    libb.addPrefixedDirectorySource("-L", liba_out.dir);
-    libb.addPrefixedDirectorySource("-Wl,-rpath,", liba_out.dir);
+    libb.addPrefixedDirectorySource("-L", liba.getDir());
+    libb.addPrefixedDirectorySource("-Wl,-rpath,", liba.getDir());
     libb.addArgs(&.{ "-shared", "-Wl,-install_name,@rpath/libb.dylib", "-Wl,-reexport-la" });
-    const libb_out = libb.saveOutputAs("libb.dylib");
 
-    const libc = cc(b, opts);
+    const libc = cc(b, "libc.dylib", opts);
     libc.addCSource(
         \\int foobar = 21;
         \\int getFoo();
@@ -559,20 +551,19 @@ fn testDylibReexportDeep(b: *Build, opts: Options) *Step {
         \\  return getFoo() - getBar() - foobar;
         \\}
     );
-    libc.addPrefixedDirectorySource("-L", libb_out.dir);
-    libc.addPrefixedDirectorySource("-Wl,-rpath,", libb_out.dir);
+    libc.addPrefixedDirectorySource("-L", libb.getDir());
+    libc.addPrefixedDirectorySource("-Wl,-rpath,", libb.getDir());
     libc.addArgs(&.{ "-shared", "-Wl,-install_name,@rpath/libc.dylib", "-Wl,-reexport-lb" });
-    const libc_out = libc.saveOutputAs("libc.dylib");
 
-    const exe = cc(b, opts);
+    const exe = cc(b, "main", opts);
     exe.addCSource(
         \\int getFoobar();
         \\int main() {
         \\  return getFoobar();
         \\}
     );
-    exe.addPrefixedDirectorySource("-L", libc_out.dir);
-    exe.addPrefixedDirectorySource("-Wl,-rpath,", libc_out.dir);
+    exe.addPrefixedDirectorySource("-L", libc.getDir());
+    exe.addPrefixedDirectorySource("-Wl,-rpath,", libc.getDir());
     exe.addArg("-lc");
 
     const check = exe.check();
@@ -598,7 +589,7 @@ fn testDylibReexportDeep(b: *Build, opts: Options) *Step {
 fn testEmptyObject(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-empty-object", "");
 
-    const exe = cc(b, opts);
+    const exe = cc(b, "main", opts);
     exe.addHelloWorldMain();
     exe.addCSource("");
 
@@ -612,7 +603,7 @@ fn testEmptyObject(b: *Build, opts: Options) *Step {
 fn testEntryPoint(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-entry-point", "");
 
-    const exe = cc(b, opts);
+    const exe = cc(b, "main", opts);
     exe.addCSource(
         \\#include<stdio.h>
         \\int non_main() {
@@ -644,26 +635,26 @@ fn testEntryPoint(b: *Build, opts: Options) *Step {
 fn testEntryPointArchive(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-entry-point-archive", "");
 
-    const obj = cc(b, opts);
+    const obj = cc(b, "main.o", opts);
     obj.addArg("-c");
     obj.addEmptyMain();
 
-    const lib = ar(b);
-    lib.addFileSource(obj.out);
+    const lib = ar(b, "libmain.a");
+    lib.addFileSource(obj.getFile());
 
     {
-        const exe = cc(b, opts);
+        const exe = cc(b, "a.out", opts);
         exe.addArg("-lmain");
-        exe.addPrefixedDirectorySource("-L", lib.saveOutputAs("libmain.a").dir);
+        exe.addPrefixedDirectorySource("-L", lib.getDir());
 
         const run = exe.run();
         test_step.dependOn(run.step());
     }
 
     {
-        const exe = cc(b, opts);
+        const exe = cc(b, "a.out", opts);
         exe.addArgs(&.{ "-lmain", "-Wl,-dead_strip" });
-        exe.addPrefixedDirectorySource("-L", lib.saveOutputAs("libmain.a").dir);
+        exe.addPrefixedDirectorySource("-L", lib.getDir());
 
         const run = exe.run();
         test_step.dependOn(run.step());
@@ -675,7 +666,7 @@ fn testEntryPointArchive(b: *Build, opts: Options) *Step {
 fn testEntryPointDylib(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-entry-point-dylib", "");
 
-    const dylib = cc(b, opts);
+    const dylib = cc(b, "liba.dylib", opts);
     dylib.addCSource(
         \\extern int my_main();
         \\int bootstrap() {
@@ -683,9 +674,8 @@ fn testEntryPointDylib(b: *Build, opts: Options) *Step {
         \\}
     );
     dylib.addArgs(&.{ "-shared", "-Wl,-undefined,dynamic_lookup", "-Wl,-install_name,@rpath/liba.dylib" });
-    const dylib_out = dylib.saveOutputAs("liba.dylib");
 
-    const exe = cc(b, opts);
+    const exe = cc(b, "main", opts);
     exe.addCSource(
         \\#include<stdio.h>
         \\int my_main() {
@@ -694,8 +684,8 @@ fn testEntryPointDylib(b: *Build, opts: Options) *Step {
         \\}
     );
     exe.addArgs(&.{ "-Wl,-e,_bootstrap", "-Wl,-u,_my_main", "-la" });
-    exe.addPrefixedDirectorySource("-L", dylib_out.dir);
-    exe.addPrefixedDirectorySource("-Wl,-rpath,", dylib_out.dir);
+    exe.addPrefixedDirectorySource("-L", dylib.getDir());
+    exe.addPrefixedDirectorySource("-Wl,-rpath,", dylib.getDir());
 
     const check = exe.check();
     check.checkInHeaders();
@@ -733,33 +723,32 @@ fn testFatArchive(b: *Build, opts: Options) *Step {
     const a_c = "int foo = 42;";
 
     const lib_arm64 = blk: {
-        const obj = cc(b, opts);
+        const obj = cc(b, "a.o", opts);
         obj.addCSource(a_c);
         obj.addArgs(&.{ "-c", "-arch", "arm64" });
-        const obj_out = obj.saveOutputAs("a.o");
 
-        const lib = ar(b);
-        lib.addFileSource(obj_out.file);
-        break :blk lib.saveOutputAs("liba.a").file;
+        const lib = ar(b, "liba.a");
+        lib.addFileSource(obj.getFile());
+
+        break :blk lib;
     };
 
     const lib_x64 = blk: {
-        const obj = cc(b, opts);
+        const obj = cc(b, "a.o", opts);
         obj.addCSource(a_c);
         obj.addArgs(&.{ "-c", "-arch", "x86_64" });
-        const obj_out = obj.saveOutputAs("a.o");
 
-        const lib = ar(b);
-        lib.addFileSource(obj_out.file);
-        break :blk lib.saveOutputAs("liba.a").file;
+        const lib = ar(b, "liba.a");
+        lib.addFileSource(obj.getFile());
+
+        break :blk lib;
     };
 
-    const fat_lib = lipo(b);
-    fat_lib.addFileSource(lib_arm64);
-    fat_lib.addFileSource(lib_x64);
-    const fat_lib_out = fat_lib.saveOutputAs("liba.a");
+    const fat_lib = lipo(b, "liba.a");
+    fat_lib.addFileSource(lib_arm64.getFile());
+    fat_lib.addFileSource(lib_x64.getFile());
 
-    const exe = cc(b, opts);
+    const exe = cc(b, "a.out", opts);
     exe.addCSource(
         \\#include<stdio.h>
         \\extern int foo;
@@ -768,7 +757,7 @@ fn testFatArchive(b: *Build, opts: Options) *Step {
         \\  return 0;
         \\}
     );
-    exe.addFileSource(fat_lib_out.file);
+    exe.addFileSource(fat_lib.getFile());
 
     const run = exe.run();
     run.expectStdOutEqual("42\n");
@@ -782,22 +771,19 @@ fn testFatDylib(b: *Build, opts: Options) *Step {
 
     const a_c = "int foo = 42;";
 
-    const dylib_arm64 = cc(b, opts);
+    const dylib_arm64 = cc(b, "liba.dylib", opts);
     dylib_arm64.addCSource(a_c);
     dylib_arm64.addArgs(&.{ "-shared", "-arch", "arm64", "-Wl,-install_name,@rpath/liba.dylib" });
-    const dylib_arm64_out = dylib_arm64.saveOutputAs("liba.dylib");
 
-    const dylib_x64 = cc(b, opts);
+    const dylib_x64 = cc(b, "liba.dylib", opts);
     dylib_x64.addCSource(a_c);
     dylib_x64.addArgs(&.{ "-shared", "-arch", "x86_64", "-Wl,-install_name,@rpath/liba.dylib" });
-    const dylib_x64_out = dylib_x64.saveOutputAs("liba.dylib");
 
-    const fat_lib = lipo(b);
-    fat_lib.addFileSource(dylib_arm64_out.file);
-    fat_lib.addFileSource(dylib_x64_out.file);
-    const fat_lib_out = fat_lib.saveOutputAs("liba.dylib");
+    const fat_lib = lipo(b, "liba.dylib");
+    fat_lib.addFileSource(dylib_arm64.getFile());
+    fat_lib.addFileSource(dylib_x64.getFile());
 
-    const exe = cc(b, opts);
+    const exe = cc(b, "main", opts);
     exe.addCSource(
         \\#include<stdio.h>
         \\extern int foo;
@@ -806,8 +792,8 @@ fn testFatDylib(b: *Build, opts: Options) *Step {
         \\  return 0;
         \\}
     );
-    exe.addFileSource(fat_lib_out.file);
-    exe.addPrefixedDirectorySource("-Wl,-rpath,", fat_lib_out.dir);
+    exe.addFileSource(fat_lib.getFile());
+    exe.addPrefixedDirectorySource("-Wl,-rpath,", fat_lib.getDir());
 
     const run = exe.run();
     run.expectStdOutEqual("42\n");
@@ -819,7 +805,7 @@ fn testFatDylib(b: *Build, opts: Options) *Step {
 fn testFlatNamespace(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-flat-namespace", "");
 
-    const liba = cc(b, opts);
+    const liba = cc(b, "liba.dylib", opts);
     liba.addCSource(
         \\#include <stdio.h>
         \\int foo = 1;
@@ -832,7 +818,6 @@ fn testFlatNamespace(b: *Build, opts: Options) *Step {
         \\}
     );
     liba.addArgs(&.{ "-shared", "-Wl,-install_name,@rpath/liba.dylib", "-Wl,-flat_namespace" });
-    const liba_out = liba.saveOutputAs("liba.dylib");
 
     {
         const check = liba.check();
@@ -843,7 +828,7 @@ fn testFlatNamespace(b: *Build, opts: Options) *Step {
         test_step.dependOn(&check.step);
     }
 
-    const libb = cc(b, opts);
+    const libb = cc(b, "libb.dylib", opts);
     libb.addCSource(
         \\#include <stdio.h>
         \\int foo = 2;
@@ -856,7 +841,6 @@ fn testFlatNamespace(b: *Build, opts: Options) *Step {
         \\}
     );
     libb.addArgs(&.{ "-shared", "-Wl,-install_name,@rpath/libb.dylib", "-Wl,-flat_namespace" });
-    const libb_out = libb.saveOutputAs("libb.dylib");
 
     {
         const check = liba.check();
@@ -867,7 +851,7 @@ fn testFlatNamespace(b: *Build, opts: Options) *Step {
         test_step.dependOn(&check.step);
     }
 
-    const main_o = cc(b, opts);
+    const main_o = cc(b, "main.o", opts);
     main_o.addCSource(
         \\#include <stdio.h>
         \\int getFoo();
@@ -884,12 +868,12 @@ fn testFlatNamespace(b: *Build, opts: Options) *Step {
     main_o.addArg("-c");
 
     {
-        const exe = cc(b, opts);
-        exe.addFileSource(main_o.out);
-        exe.addPrefixedDirectorySource("-L", liba_out.dir);
-        exe.addPrefixedDirectorySource("-Wl,-rpath,", liba_out.dir);
-        exe.addPrefixedDirectorySource("-L", libb_out.dir);
-        exe.addPrefixedDirectorySource("-Wl,-rpath,", libb_out.dir);
+        const exe = cc(b, "main", opts);
+        exe.addFileSource(main_o.getFile());
+        exe.addPrefixedDirectorySource("-L", liba.getDir());
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", liba.getDir());
+        exe.addPrefixedDirectorySource("-L", libb.getDir());
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", libb.getDir());
         exe.addArgs(&.{ "-la", "-lb", "-Wl,-flat_namespace" });
 
         const check = exe.check();
@@ -912,12 +896,12 @@ fn testFlatNamespace(b: *Build, opts: Options) *Step {
     }
 
     {
-        const exe = cc(b, opts);
-        exe.addFileSource(main_o.out);
-        exe.addPrefixedDirectorySource("-L", liba_out.dir);
-        exe.addPrefixedDirectorySource("-Wl,-rpath,", liba_out.dir);
-        exe.addPrefixedDirectorySource("-L", libb_out.dir);
-        exe.addPrefixedDirectorySource("-Wl,-rpath,", libb_out.dir);
+        const exe = cc(b, "main", opts);
+        exe.addFileSource(main_o.getFile());
+        exe.addPrefixedDirectorySource("-L", liba.getDir());
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", liba.getDir());
+        exe.addPrefixedDirectorySource("-L", libb.getDir());
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", libb.getDir());
         exe.addArgs(&.{ "-lb", "-la", "-Wl,-flat_namespace" });
 
         const check = exe.check();
@@ -945,7 +929,7 @@ fn testFlatNamespace(b: *Build, opts: Options) *Step {
 fn testFlatNamespaceExe(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-flat-namespace-exe", "");
 
-    const exe = cc(b, opts);
+    const exe = cc(b, "a.out", opts);
     exe.addCSource(
         \\void bar() {}
         \\int main() {
@@ -969,7 +953,7 @@ fn testFlatNamespaceExe(b: *Build, opts: Options) *Step {
 fn testFlatNamespaceWeak(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-flat-namespace-weak", "");
 
-    const liba = cc(b, opts);
+    const liba = cc(b, "liba.dylib", opts);
     liba.addCSource(
         \\#include <stdio.h>
         \\int foo = 1;
@@ -981,7 +965,6 @@ fn testFlatNamespaceWeak(b: *Build, opts: Options) *Step {
         \\}
     );
     liba.addArgs(&.{ "-shared", "-Wl,-install_name,@rpath/liba.dylib", "-Wl,-flat_namespace" });
-    const liba_out = liba.saveOutputAs("liba.dylib");
 
     {
         const check = liba.check();
@@ -990,7 +973,7 @@ fn testFlatNamespaceWeak(b: *Build, opts: Options) *Step {
         test_step.dependOn(&check.step);
     }
 
-    const libb = cc(b, opts);
+    const libb = cc(b, "libb.dylib", opts);
     libb.addCSource(
         \\#include <stdio.h>
         \\int foo = 2;
@@ -1002,7 +985,6 @@ fn testFlatNamespaceWeak(b: *Build, opts: Options) *Step {
         \\}
     );
     libb.addArgs(&.{ "-shared", "-Wl,-install_name,@rpath/libb.dylib", "-Wl,-flat_namespace" });
-    const libb_out = libb.saveOutputAs("libb.dylib");
 
     {
         const check = libb.check();
@@ -1013,7 +995,7 @@ fn testFlatNamespaceWeak(b: *Build, opts: Options) *Step {
         test_step.dependOn(&check.step);
     }
 
-    const main_o = cc(b, opts);
+    const main_o = cc(b, "main.o", opts);
     main_o.addCSource(
         \\#include <stdio.h>
         \\int getFoo();
@@ -1029,12 +1011,12 @@ fn testFlatNamespaceWeak(b: *Build, opts: Options) *Step {
     main_o.addArg("-c");
 
     {
-        const exe = cc(b, opts);
-        exe.addFileSource(main_o.out);
-        exe.addPrefixedDirectorySource("-L", liba_out.dir);
-        exe.addPrefixedDirectorySource("-Wl,-rpath,", liba_out.dir);
-        exe.addPrefixedDirectorySource("-L", libb_out.dir);
-        exe.addPrefixedDirectorySource("-Wl,-rpath,", libb_out.dir);
+        const exe = cc(b, "main", opts);
+        exe.addFileSource(main_o.getFile());
+        exe.addPrefixedDirectorySource("-L", liba.getDir());
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", liba.getDir());
+        exe.addPrefixedDirectorySource("-L", libb.getDir());
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", libb.getDir());
         exe.addArgs(&.{ "-la", "-lb", "-Wl,-flat_namespace" });
 
         const check = exe.check();
@@ -1057,12 +1039,12 @@ fn testFlatNamespaceWeak(b: *Build, opts: Options) *Step {
     }
 
     {
-        const exe = cc(b, opts);
-        exe.addFileSource(main_o.out);
-        exe.addPrefixedDirectorySource("-L", liba_out.dir);
-        exe.addPrefixedDirectorySource("-Wl,-rpath,", liba_out.dir);
-        exe.addPrefixedDirectorySource("-L", libb_out.dir);
-        exe.addPrefixedDirectorySource("-Wl,-rpath,", libb_out.dir);
+        const exe = cc(b, "main", opts);
+        exe.addFileSource(main_o.getFile());
+        exe.addPrefixedDirectorySource("-L", liba.getDir());
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", liba.getDir());
+        exe.addPrefixedDirectorySource("-L", libb.getDir());
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", libb.getDir());
         exe.addArgs(&.{ "-lb", "-la", "-Wl,-flat_namespace" });
 
         const check = exe.check();
@@ -1111,7 +1093,7 @@ fn testHeaderpad(b: *Build, opts: Options) *Step {
     };
 
     {
-        const exe = cc(b, opts);
+        const exe = cc(b, "a.out", opts);
         exe.addArgs(flags);
         exe.addArg("-Wl,-headerpad_max_install_names");
         exe.addEmptyMain();
@@ -1132,7 +1114,7 @@ fn testHeaderpad(b: *Build, opts: Options) *Step {
     }
 
     {
-        const exe = cc(b, opts);
+        const exe = cc(b, "a.out", opts);
         exe.addArgs(flags);
         exe.addArg("-Wl,-headerpad,0x10000");
         exe.addEmptyMain();
@@ -1149,7 +1131,7 @@ fn testHeaderpad(b: *Build, opts: Options) *Step {
     }
 
     {
-        const exe = cc(b, opts);
+        const exe = cc(b, "a.out", opts);
         exe.addArgs(flags);
         exe.addArg("-Wl,-headerpad,0x10000");
         exe.addArg("-Wl,-headerpad_max_install_names");
@@ -1167,7 +1149,7 @@ fn testHeaderpad(b: *Build, opts: Options) *Step {
     }
 
     {
-        const exe = cc(b, opts);
+        const exe = cc(b, "a.out", opts);
         exe.addArgs(flags);
         exe.addArg("-Wl,-headerpad,0x1000");
         exe.addArg("-Wl,-headerpad_max_install_names");
@@ -1195,7 +1177,7 @@ fn testHeaderpad(b: *Build, opts: Options) *Step {
 fn testHeaderWeakFlags(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-header-weak-flags", "");
 
-    const obj1 = cc(b, opts);
+    const obj1 = cc(b, "a.o", opts);
     obj1.addAsmSource(
         \\.globl _x
         \\.weak_definition _x
@@ -1204,13 +1186,13 @@ fn testHeaderWeakFlags(b: *Build, opts: Options) *Step {
     );
     obj1.addArg("-c");
 
-    const lib = cc(b, opts);
-    lib.addFileSource(obj1.out);
+    const lib = cc(b, "liba.dylib", opts);
+    lib.addFileSource(obj1.getFile());
     lib.addArg("-shared");
 
     {
-        const exe = cc(b, opts);
-        exe.addFileSource(obj1.out);
+        const exe = cc(b, "a.out", opts);
+        exe.addFileSource(obj1.getFile());
         exe.addEmptyMain();
 
         const check = exe.check();
@@ -1226,7 +1208,7 @@ fn testHeaderWeakFlags(b: *Build, opts: Options) *Step {
     }
 
     {
-        const obj = cc(b, opts);
+        const obj = cc(b, "b.o", opts);
         obj.addArg("-c");
 
         switch (builtin.target.cpu.arch) {
@@ -1245,9 +1227,9 @@ fn testHeaderWeakFlags(b: *Build, opts: Options) *Step {
             else => unreachable,
         }
 
-        const exe = cc(b, opts);
-        exe.addFileSource(lib.out);
-        exe.addFileSource(obj.out);
+        const exe = cc(b, "a.out", opts);
+        exe.addFileSource(lib.getFile());
+        exe.addFileSource(obj.getFile());
 
         const check = exe.check();
         check.checkInHeaders();
@@ -1262,8 +1244,8 @@ fn testHeaderWeakFlags(b: *Build, opts: Options) *Step {
     }
 
     {
-        const exe = cc(b, opts);
-        exe.addFileSource(lib.out);
+        const exe = cc(b, "a.out", opts);
+        exe.addFileSource(lib.getFile());
         exe.addAsmSource(
             \\.globl _main, _x
             \\_x:
@@ -1288,7 +1270,7 @@ fn testHeaderWeakFlags(b: *Build, opts: Options) *Step {
 fn testHelloC(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-hello-c", "");
 
-    const exe = cc(b, opts);
+    const exe = cc(b, "a.out", opts);
     exe.addHelloWorldMain();
 
     const run = exe.run();
@@ -1309,7 +1291,7 @@ fn testHelloZig(b: *Build, opts: Options) *Step {
 
     if (!opts.has_zig) return skipTestStep(test_step);
 
-    const obj = zig(b);
+    const obj = zig(b, "main.o");
     obj.addZigSource(
         \\const std = @import("std");
         \\pub fn main() void {
@@ -1318,8 +1300,8 @@ fn testHelloZig(b: *Build, opts: Options) *Step {
     );
     obj.addArg("-fno-stack-check"); // TODO find a way to include Zig's crt
 
-    const exe = cc(b, opts);
-    exe.addFileSource(obj.out);
+    const exe = cc(b, "main", opts);
+    exe.addFileSource(obj.getFile());
 
     const run = exe.run();
     run.expectHelloWorld();
@@ -1331,7 +1313,7 @@ fn testHelloZig(b: *Build, opts: Options) *Step {
 fn testLayout(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-layout", "");
 
-    const exe = cc(b, opts);
+    const exe = cc(b, "a.out", opts);
     exe.addHelloWorldMain();
 
     const check = exe.check();
@@ -1449,7 +1431,7 @@ fn testLargeBss(b: *Build, opts: Options) *Step {
     // linker I tried misbehave in different ways. This only happened on arm64. I thought that
     // maybe S_GB_ZEROFILL section is an answer to this but it doesn't seem supported by dyld
     // anymore. When I get some free time I will re-investigate this.
-    const exe = cc(b, opts);
+    const exe = cc(b, "a.out", opts);
     exe.addCSource(
         \\char arr[0x1000000];
         \\int main() {
@@ -1466,7 +1448,7 @@ fn testLargeBss(b: *Build, opts: Options) *Step {
 fn testLinkOrder(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-link-order", "");
 
-    const a_o = cc(b, opts);
+    const a_o = cc(b, "a.o", opts);
     a_o.addCSource(
         \\int foo = 42;
         \\int bar;
@@ -1480,7 +1462,7 @@ fn testLinkOrder(b: *Build, opts: Options) *Step {
     );
     a_o.addArg("-c");
 
-    const c_o = cc(b, opts);
+    const c_o = cc(b, "c.o", opts);
     c_o.addCSource(
         \\int foo = -1;
         \\int bar = 42;
@@ -1494,7 +1476,7 @@ fn testLinkOrder(b: *Build, opts: Options) *Step {
     );
     c_o.addArg("-c");
 
-    const main_o = cc(b, opts);
+    const main_o = cc(b, "main.o", opts);
     main_o.addCSource(
         \\#include <stdio.h>
         \\__attribute__((weak)) int foobar = 42;
@@ -1507,20 +1489,19 @@ fn testLinkOrder(b: *Build, opts: Options) *Step {
     );
     main_o.addArg("-c");
 
-    const liba = ar(b);
-    liba.addFileSource(a_o.out);
+    const liba = ar(b, "libb.a");
+    liba.addFileSource(a_o.getFile());
 
-    const libc = cc(b, opts);
-    libc.addFileSource(c_o.out);
+    const libc = cc(b, "libc.dylib", opts);
+    libc.addFileSource(c_o.getFile());
     libc.addArgs(&.{ "-shared", "-Wl,-install_name,@rpath/libc.dylib" });
-    const libc_out = libc.saveOutputAs("libc.dylib");
 
     {
-        const exe = cc(b, opts);
-        exe.addFileSource(libc_out.file);
-        exe.addFileSource(liba.out);
-        exe.addFileSource(main_o.out);
-        exe.addPrefixedDirectorySource("-Wl,-rpath,", libc_out.dir);
+        const exe = cc(b, "main", opts);
+        exe.addFileSource(libc.getFile());
+        exe.addFileSource(liba.getFile());
+        exe.addFileSource(main_o.getFile());
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", libc.getDir());
 
         const run = exe.run();
         run.expectStdOutEqual("-1 42 42");
@@ -1528,11 +1509,11 @@ fn testLinkOrder(b: *Build, opts: Options) *Step {
     }
 
     {
-        const exe = cc(b, opts);
-        exe.addFileSource(liba.out);
-        exe.addFileSource(libc_out.file);
-        exe.addFileSource(main_o.out);
-        exe.addPrefixedDirectorySource("-Wl,-rpath,", libc_out.dir);
+        const exe = cc(b, "main", opts);
+        exe.addFileSource(liba.getFile());
+        exe.addFileSource(libc.getFile());
+        exe.addFileSource(main_o.getFile());
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", libc.getDir());
 
         const run = exe.run();
         run.expectStdOutEqual("42 0 -2");
@@ -1545,18 +1526,17 @@ fn testLinkOrder(b: *Build, opts: Options) *Step {
 fn testLoadHidden(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-load-hidden", "");
 
-    const obj = cc(b, opts);
+    const obj = cc(b, "a.o", opts);
     obj.addCSource(
         \\int foo = 42;
         \\int getFoo() { return foo; }
     );
     obj.addArg("-c");
 
-    const lib = ar(b);
+    const lib = ar(b, "liba.a");
     lib.addFileSource(obj.out);
-    const lib_out = lib.saveOutputAs("liba.a");
 
-    const main_o = cc(b, opts);
+    const main_o = cc(b, "main.o", opts);
     main_o.addCSource(
         \\int actuallyGetFoo();
         \\int main() {
@@ -1565,7 +1545,7 @@ fn testLoadHidden(b: *Build, opts: Options) *Step {
     );
     main_o.addArg("-c");
 
-    const dylib_o = cc(b, opts);
+    const dylib_o = cc(b, "b.o", opts);
     dylib_o.addCSource(
         \\extern int foo;
         \\int getFoo();
@@ -1574,11 +1554,10 @@ fn testLoadHidden(b: *Build, opts: Options) *Step {
     dylib_o.addArg("-c");
 
     {
-        const dylib = cc(b, opts);
-        dylib.addFileSource(dylib_o.out);
-        dylib.addPrefixedDirectorySource("-L", lib_out.dir);
+        const dylib = cc(b, "libb.dylib", opts);
+        dylib.addFileSource(dylib_o.getFile());
+        dylib.addPrefixedDirectorySource("-L", lib.getDir());
         dylib.addArgs(&.{ "-shared", "-Wl,-hidden-la", "-Wl,-install_name,@rpath/libb.dylib" });
-        const dylib_out = dylib.saveOutputAs("libb.dylib");
 
         const check = dylib.check();
         check.checkInSymtab();
@@ -1587,11 +1566,11 @@ fn testLoadHidden(b: *Build, opts: Options) *Step {
         check.checkNotPresent("external _getFoo");
         test_step.dependOn(&check.step);
 
-        const exe = cc(b, opts);
-        exe.addFileSource(main_o.out);
-        exe.addPrefixedDirectorySource("-L", dylib_out.dir);
+        const exe = cc(b, "main", opts);
+        exe.addFileSource(main_o.getFile());
+        exe.addPrefixedDirectorySource("-L", dylib.getDir());
         exe.addArg("-lb");
-        exe.addPrefixedDirectorySource("-Wl,-rpath,", dylib_out.dir);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", dylib.getDir());
 
         const run = exe.run();
         run.expectExitCode(42);
@@ -1599,12 +1578,11 @@ fn testLoadHidden(b: *Build, opts: Options) *Step {
     }
 
     {
-        const dylib = cc(b, opts);
-        dylib.addFileSource(dylib_o.out);
+        const dylib = cc(b, "libb.dylib", opts);
+        dylib.addFileSource(dylib_o.getFile());
         dylib.addArg("-load_hidden");
-        dylib.addFileSource(lib.out);
+        dylib.addFileSource(lib.getFile());
         dylib.addArgs(&.{ "-shared", "-Wl,-install_name,@rpath/libb.dylib" });
-        const dylib_out = dylib.saveOutputAs("libb.dylib");
 
         const check = dylib.check();
         check.checkInSymtab();
@@ -1613,11 +1591,11 @@ fn testLoadHidden(b: *Build, opts: Options) *Step {
         check.checkNotPresent("external _getFoo");
         test_step.dependOn(&check.step);
 
-        const exe = cc(b, opts);
-        exe.addFileSource(main_o.out);
-        exe.addPrefixedDirectorySource("-L", dylib_out.dir);
+        const exe = cc(b, "main", opts);
+        exe.addFileSource(main_o.getFile());
+        exe.addPrefixedDirectorySource("-L", dylib.getDir());
         exe.addArg("-lb");
-        exe.addPrefixedDirectorySource("-Wl,-rpath,", dylib_out.dir);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", dylib.getDir());
 
         const run = exe.run();
         run.expectExitCode(42);
@@ -1625,11 +1603,10 @@ fn testLoadHidden(b: *Build, opts: Options) *Step {
     }
 
     {
-        const dylib = cc(b, opts);
-        dylib.addFileSource(dylib_o.out);
-        dylib.addFileSource(lib.out);
+        const dylib = cc(b, "libb.dylib", opts);
+        dylib.addFileSource(dylib_o.getFile());
+        dylib.addFileSource(lib.getFile());
         dylib.addArgs(&.{ "-shared", "-Wl,-install_name,@rpath/libb.dylib" });
-        const dylib_out = dylib.saveOutputAs("libb.dylib");
 
         const check = dylib.check();
         check.checkInSymtab();
@@ -1638,11 +1615,11 @@ fn testLoadHidden(b: *Build, opts: Options) *Step {
         check.checkContains("external _getFoo");
         test_step.dependOn(&check.step);
 
-        const exe = cc(b, opts);
-        exe.addFileSource(main_o.out);
-        exe.addPrefixedDirectorySource("-L", dylib_out.dir);
+        const exe = cc(b, "main", opts);
+        exe.addFileSource(main_o.getFile());
+        exe.addPrefixedDirectorySource("-L", dylib.getDir());
         exe.addArg("-lb");
-        exe.addPrefixedDirectorySource("-Wl,-rpath,", dylib_out.dir);
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", dylib.getDir());
 
         const run = exe.run();
         run.expectExitCode(42);
@@ -1655,7 +1632,7 @@ fn testLoadHidden(b: *Build, opts: Options) *Step {
 fn testMhExecuteHeader(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-mh-execute-header", "");
 
-    const exe = cc(b, opts);
+    const exe = cc(b, "a.out", opts);
     exe.addEmptyMain();
 
     const check = exe.check();
@@ -1669,7 +1646,7 @@ fn testMhExecuteHeader(b: *Build, opts: Options) *Step {
 fn testNeededFramework(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-needed-framework", "");
 
-    const exe = cc(b, opts);
+    const exe = cc(b, "a.out", opts);
     exe.addArgs(&.{ "-Wl,-needed_framework,Cocoa", "-Wl,-dead_strip_dylibs" });
     exe.addEmptyMain();
 
@@ -1688,16 +1665,15 @@ fn testNeededFramework(b: *Build, opts: Options) *Step {
 fn testNeededLibrary(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-needed-library", "");
 
-    const dylib = cc(b, opts);
+    const dylib = cc(b, "liba.dylib", opts);
     dylib.addCSource("int a = 42;");
     dylib.addArgs(&.{ "-shared", "-Wl,-install_name,@rpath/liba.dylib" });
-    const dylib_out = dylib.saveOutputAs("liba.dylib");
 
-    const exe = cc(b, opts);
+    const exe = cc(b, "a.out", opts);
     exe.addEmptyMain();
     exe.addArgs(&.{ "-Wl,-needed-la", "-Wl,-dead_strip_dylibs" });
-    exe.addPrefixedDirectorySource("-L", dylib_out.dir);
-    exe.addPrefixedDirectorySource("-Wl,-rpath,", dylib_out.dir);
+    exe.addPrefixedDirectorySource("-L", dylib.getDir());
+    exe.addPrefixedDirectorySource("-Wl,-rpath,", dylib.getDir());
 
     const check = exe.check();
     check.checkInHeaders();
@@ -1714,7 +1690,7 @@ fn testNeededLibrary(b: *Build, opts: Options) *Step {
 fn testNoDeadStrip(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-no-dead-strip", "");
 
-    const exe = cc(b, opts);
+    const exe = cc(b, "a.out", opts);
     exe.addCSource(
         \\__attribute__((used)) int bogus1 = 0;
         \\int bogus2 = 0;
@@ -1741,7 +1717,7 @@ fn testNoDeadStrip(b: *Build, opts: Options) *Step {
 fn testNoExportsDylib(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-no-exports-dylib", "");
 
-    const dylib = cc(b, opts);
+    const dylib = cc(b, "liba.dylib", opts);
     dylib.addCSource("static void abc() {}");
     dylib.addArg("-shared");
 
@@ -1756,7 +1732,7 @@ fn testNoExportsDylib(b: *Build, opts: Options) *Step {
 fn testObjc(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-objc", "");
 
-    const a_o = cc(b, opts);
+    const a_o = cc(b, "a.o", opts);
     a_o.addObjCSource(
         \\#import <Foundation/Foundation.h>
         \\@interface Foo : NSObject
@@ -1766,14 +1742,13 @@ fn testObjc(b: *Build, opts: Options) *Step {
     );
     a_o.addArg("-c");
 
-    const liba = ar(b);
+    const liba = ar(b, "liba.a");
     liba.addFileSource(a_o.out);
-    const liba_out = liba.saveOutputAs("liba.a");
 
     {
-        const exe = cc(b, opts);
+        const exe = cc(b, "a.out", opts);
         exe.addEmptyMain();
-        exe.addPrefixedDirectorySource("-L", liba_out.dir);
+        exe.addPrefixedDirectorySource("-L", liba.getDir());
         exe.addArg("-la");
 
         const check = exe.check();
@@ -1786,9 +1761,9 @@ fn testObjc(b: *Build, opts: Options) *Step {
     }
 
     {
-        const exe = cc(b, opts);
+        const exe = cc(b, "a.out", opts);
         exe.addEmptyMain();
-        exe.addPrefixedDirectorySource("-L", liba_out.dir);
+        exe.addPrefixedDirectorySource("-L", liba.getDir());
         exe.addArgs(&.{ "-la", "-ObjC", "-framework", "Foundation" });
 
         const check = exe.check();
@@ -1806,7 +1781,7 @@ fn testObjc(b: *Build, opts: Options) *Step {
 fn testObjcStubs(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-objc-stubs", "");
 
-    const exe = cc(b, opts);
+    const exe = cc(b, "a.out", opts);
     exe.addObjCSource(
         \\@import Foundation;
         \\@interface Foo : NSObject
@@ -1865,7 +1840,7 @@ fn testObjcStubs2(b: *Build, opts: Options) *Step {
         \\@end
     , "all.h");
 
-    const foo_o = cc(b, opts);
+    const foo_o = cc(b, "foo.o", opts);
     foo_o.addObjCSource(
         \\#import <Foundation/Foundation.h>
         \\#import "all.h"
@@ -1878,7 +1853,7 @@ fn testObjcStubs2(b: *Build, opts: Options) *Step {
     foo_o.addArgs(&.{ "-c", "-fobjc-msgsend-selector-stubs" });
     foo_o.addPrefixedDirectorySource("-I", all_h.dir);
 
-    const bar_o = cc(b, opts);
+    const bar_o = cc(b, "bar.o", opts);
     bar_o.addObjCSource(
         \\#import <Foundation/Foundation.h>
         \\#import "all.h"
@@ -1894,7 +1869,7 @@ fn testObjcStubs2(b: *Build, opts: Options) *Step {
     bar_o.addArgs(&.{ "-c", "-fobjc-msgsend-selector-stubs" });
     bar_o.addPrefixedDirectorySource("-I", all_h.dir);
 
-    const main_o = cc(b, opts);
+    const main_o = cc(b, "main.o", opts);
     main_o.addObjCSource(
         \\#import <Foundation/Foundation.h>
         \\#import "all.h"
@@ -1912,10 +1887,10 @@ fn testObjcStubs2(b: *Build, opts: Options) *Step {
     main_o.addArgs(&.{ "-c", "-fobjc-msgsend-selector-stubs" });
     main_o.addPrefixedDirectorySource("-I", all_h.dir);
 
-    const exe = cc(b, opts);
-    exe.addFileSource(main_o.out);
-    exe.addFileSource(foo_o.out);
-    exe.addFileSource(bar_o.out);
+    const exe = cc(b, "main", opts);
+    exe.addFileSource(main_o.getFile());
+    exe.addFileSource(foo_o.getFile());
+    exe.addFileSource(bar_o.getFile());
     exe.addArgs(&.{ "-framework", "Foundation" });
 
     const run = exe.run();
@@ -1944,7 +1919,7 @@ fn testPagezeroSize(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-pagezero-size", "");
 
     {
-        const exe = cc(b, opts);
+        const exe = cc(b, "a.out", opts);
         exe.addArg("-Wl,-pagezero_size,0x4000");
         exe.addEmptyMain();
 
@@ -1961,7 +1936,7 @@ fn testPagezeroSize(b: *Build, opts: Options) *Step {
     }
 
     {
-        const exe = cc(b, opts);
+        const exe = cc(b, "a.out", opts);
         exe.addArg("-Wl,-pagezero_size,0");
         exe.addEmptyMain();
 
@@ -1981,7 +1956,7 @@ fn testReexportsZig(b: *Build, opts: Options) *Step {
 
     if (!opts.has_zig) return skipTestStep(test_step);
 
-    const obj = zig(b);
+    const obj = zig(b, "a.o");
     obj.addZigSource(
         \\const x: i32 = 42;
         \\export fn foo() i32 {
@@ -1992,11 +1967,10 @@ fn testReexportsZig(b: *Build, opts: Options) *Step {
         \\}
     );
 
-    const lib = ar(b);
-    lib.addFileSource(obj.out);
-    const lib_out = lib.saveOutputAs("liba.a");
+    const lib = ar(b, "liba.a");
+    lib.addFileSource(obj.getFile());
 
-    const exe = cc(b, opts);
+    const exe = cc(b, "a.out", opts);
     exe.addCSource(
         \\extern int foo();
         \\extern int bar();
@@ -2004,7 +1978,7 @@ fn testReexportsZig(b: *Build, opts: Options) *Step {
         \\  return bar() - foo();
         \\}
     );
-    exe.addFileSource(lib_out.file);
+    exe.addFileSource(lib.getFile());
 
     const run = exe.run();
     test_step.dependOn(run.step());
@@ -2043,22 +2017,22 @@ fn testRelocatable(b: *Build, opts: Options) *Step {
     const exp_stdout = "exception=Oh no!";
 
     {
-        const a_o = cc(b, opts);
+        const a_o = cc(b, "a.o", opts);
         a_o.addCppSource(a_c);
         a_o.addArg("-c");
 
-        const b_o = cc(b, opts);
+        const b_o = cc(b, "b.o", opts);
         b_o.addCppSource(b_c);
         b_o.addArg("-c");
 
-        const c_o = ld(b, opts);
-        c_o.addFileSource(a_o.out);
-        c_o.addFileSource(b_o.out);
+        const c_o = ld(b, "c.o", opts);
+        c_o.addFileSource(a_o.getFile());
+        c_o.addFileSource(b_o.getFile());
         c_o.addArg("-r");
 
-        const exe = cc(b, opts);
+        const exe = cc(b, "a.out", opts);
         exe.addCppSource(main_c);
-        exe.addFileSource(c_o.out);
+        exe.addFileSource(c_o.getFile());
         exe.addArg("-lc++");
 
         const run = exe.run();
@@ -2067,26 +2041,26 @@ fn testRelocatable(b: *Build, opts: Options) *Step {
     }
 
     {
-        const a_o = cc(b, opts);
+        const a_o = cc(b, "a.o", opts);
         a_o.addCppSource(a_c);
         a_o.addArg("-c");
 
-        const b_o = cc(b, opts);
+        const b_o = cc(b, "b.o", opts);
         b_o.addCppSource(b_c);
         b_o.addArg("-c");
 
-        const main_o = cc(b, opts);
+        const main_o = cc(b, "main.o", opts);
         main_o.addCppSource(main_c);
         main_o.addArg("-c");
 
-        const c_o = ld(b, opts);
-        c_o.addFileSource(a_o.out);
-        c_o.addFileSource(b_o.out);
-        c_o.addFileSource(main_o.out);
+        const c_o = ld(b, "c.o", opts);
+        c_o.addFileSource(a_o.getFile());
+        c_o.addFileSource(b_o.getFile());
+        c_o.addFileSource(main_o.getFile());
         c_o.addArg("-r");
 
-        const exe = cc(b, opts);
-        exe.addFileSource(c_o.out);
+        const exe = cc(b, "a.out", opts);
+        exe.addFileSource(c_o.getFile());
         exe.addArg("-lc++");
 
         const run = exe.run();
@@ -2102,7 +2076,7 @@ fn testRelocatableZig(b: *Build, opts: Options) *Step {
 
     if (!opts.has_zig) return skipTestStep(test_step);
 
-    const a_o = zig(b);
+    const a_o = zig(b, "a.o");
     a_o.addZigSource(
         \\const std = @import("std");
         \\export var foo: i32 = 0;
@@ -2113,7 +2087,7 @@ fn testRelocatableZig(b: *Build, opts: Options) *Step {
     );
     a_o.addArg("-fno-stack-check");
 
-    const b_o = zig(b);
+    const b_o = zig(b, "b.o");
     b_o.addZigSource(
         \\const std = @import("std");
         \\extern var foo: i32;
@@ -2124,7 +2098,7 @@ fn testRelocatableZig(b: *Build, opts: Options) *Step {
     );
     b_o.addArg("-fno-stack-check");
 
-    const main_o = zig(b);
+    const main_o = zig(b, "main.o");
     main_o.addZigSource(
         \\const std = @import("std");
         \\extern var foo: i32;
@@ -2139,14 +2113,14 @@ fn testRelocatableZig(b: *Build, opts: Options) *Step {
     );
     main_o.addArg("-fno-stack-check");
 
-    const c_o = ld(b, opts);
-    c_o.addFileSource(a_o.out);
-    c_o.addFileSource(b_o.out);
-    c_o.addFileSource(main_o.out);
+    const c_o = ld(b, "c.o", opts);
+    c_o.addFileSource(a_o.getFile());
+    c_o.addFileSource(b_o.getFile());
+    c_o.addFileSource(main_o.getFile());
     c_o.addArg("-r");
 
-    const exe = cc(b, opts);
-    exe.addFileSource(c_o.out);
+    const exe = cc(b, "a.out", opts);
+    exe.addFileSource(c_o.getFile());
 
     const run = exe.run();
     run.expectStdErrFuzzy("incrFoo=1");
@@ -2160,7 +2134,7 @@ fn testRelocatableZig(b: *Build, opts: Options) *Step {
 fn testSearchStrategy(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-search-strategy", "");
 
-    const obj = cc(b, opts);
+    const obj = cc(b, "a.o", opts);
     obj.addArg("-c");
     obj.addCSource(
         \\#include<stdio.h>
@@ -2169,16 +2143,13 @@ fn testSearchStrategy(b: *Build, opts: Options) *Step {
         \\  return "Hello";
         \\}
     );
-    const obj_out = obj.saveOutputAs("a.o");
 
-    const lib = ar(b);
-    lib.addFileSource(obj_out.file);
-    const lib_out = lib.saveOutputAs("liba.a");
+    const lib = ar(b, "liba.a");
+    lib.addFileSource(obj.getFile());
 
-    const dylib = ld(b, opts);
-    dylib.addFileSource(obj_out.file);
+    const dylib = ld(b, "liba.dylib", opts);
+    dylib.addFileSource(obj.getFile());
     dylib.addArgs(&.{ "-syslibroot", opts.macos_sdk, "-dylib", "-install_name", "@rpath/liba.dylib" });
-    const dylib_out = dylib.saveOutputAs("liba.dylib");
 
     const main_c =
         \\#include<stdio.h>
@@ -2191,12 +2162,12 @@ fn testSearchStrategy(b: *Build, opts: Options) *Step {
     ;
 
     {
-        const exe = cc(b, opts);
+        const exe = cc(b, "a.out", opts);
         exe.addCSource(main_c);
         exe.addArgs(&.{ "-Wl,-search_dylibs_first", "-la" });
-        exe.addPrefixedDirectorySource("-L", lib_out.dir);
-        exe.addPrefixedDirectorySource("-L", dylib_out.dir);
-        exe.addPrefixedDirectorySource("-Wl,-rpath,", dylib_out.dir);
+        exe.addPrefixedDirectorySource("-L", lib.getDir());
+        exe.addPrefixedDirectorySource("-L", dylib.getDir());
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", dylib.getDir());
 
         const run = exe.run();
         run.expectStdOutEqual("Hello world");
@@ -2210,12 +2181,12 @@ fn testSearchStrategy(b: *Build, opts: Options) *Step {
     }
 
     {
-        const exe = cc(b, opts);
+        const exe = cc(b, "a.out", opts);
         exe.addCSource(main_c);
         exe.addArgs(&.{ "-Wl,-search_paths_first", "-la" });
-        exe.addPrefixedDirectorySource("-L", lib_out.dir);
-        exe.addPrefixedDirectorySource("-L", dylib_out.dir);
-        exe.addPrefixedDirectorySource("-Wl,-rpath,", dylib_out.dir);
+        exe.addPrefixedDirectorySource("-L", lib.getDir());
+        exe.addPrefixedDirectorySource("-L", dylib.getDir());
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", dylib.getDir());
 
         const run = exe.run();
         run.expectStdOutEqual("Hello world");
@@ -2234,13 +2205,13 @@ fn testSearchStrategy(b: *Build, opts: Options) *Step {
 fn testSectionBoundarySymbols(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-section-boundary-symbols", "");
 
-    const obj1 = cc(b, opts);
+    const obj1 = cc(b, "a.o", opts);
     obj1.addCppSource(
         \\constexpr const char* MESSAGE __attribute__((used, section("__DATA_CONST,__message_ptr"))) = "codebase";
     );
     obj1.addArgs(&.{ "-std=c++17", "-c" });
 
-    const main_o = cc(b, opts);
+    const main_o = cc(b, "main.o", opts);
     main_o.addCSource(
         \\#include <stdio.h>
         \\const char* interop();
@@ -2252,7 +2223,7 @@ fn testSectionBoundarySymbols(b: *Build, opts: Options) *Step {
     main_o.addArg("-c");
 
     {
-        const obj2 = cc(b, opts);
+        const obj2 = cc(b, "b.o", opts);
         obj2.addCppSource(
             \\extern const char* message_pointer __asm("section$start$__DATA_CONST$__message_ptr");
             \\extern "C" const char* interop() {
@@ -2261,10 +2232,10 @@ fn testSectionBoundarySymbols(b: *Build, opts: Options) *Step {
         );
         obj2.addArgs(&.{ "-std=c++17", "-c" });
 
-        const exe = cc(b, opts);
-        exe.addFileSource(obj1.out);
-        exe.addFileSource(obj2.out);
-        exe.addFileSource(main_o.out);
+        const exe = cc(b, "main", opts);
+        exe.addFileSource(obj1.getFile());
+        exe.addFileSource(obj2.getFile());
+        exe.addFileSource(main_o.getFile());
 
         const run = exe.run();
         run.expectStdOutEqual("All your codebase are belong to us.\n");
@@ -2277,7 +2248,7 @@ fn testSectionBoundarySymbols(b: *Build, opts: Options) *Step {
     }
 
     {
-        const obj2 = cc(b, opts);
+        const obj2 = cc(b, "b.o", opts);
         obj2.addCppSource(
             \\extern const char* message_pointer __asm("section$start$__DATA_CONST$__not_present");
             \\extern "C" const char* interop() {
@@ -2286,10 +2257,10 @@ fn testSectionBoundarySymbols(b: *Build, opts: Options) *Step {
         );
         obj2.addArgs(&.{ "-std=c++17", "-c" });
 
-        const exe = cc(b, opts);
-        exe.addFileSource(obj1.out);
-        exe.addFileSource(obj2.out);
-        exe.addFileSource(main_o.out);
+        const exe = cc(b, "main", opts);
+        exe.addFileSource(obj1.getFile());
+        exe.addFileSource(obj2.getFile());
+        exe.addFileSource(main_o.getFile());
 
         const run = exe.run();
         run.expectStdOutEqual("All your (null) are belong to us.\n");
@@ -2307,13 +2278,13 @@ fn testSectionBoundarySymbols(b: *Build, opts: Options) *Step {
 fn testSegmentBoundarySymbols(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-segment-boundary-symbols", "");
 
-    const obj1 = cc(b, opts);
+    const obj1 = cc(b, "a.o", opts);
     obj1.addCppSource(
         \\constexpr const char* MESSAGE __attribute__((used, section("__DATA_CONST_1,__message_ptr"))) = "codebase";
     );
     obj1.addArgs(&.{ "-std=c++17", "-c" });
 
-    const main_o = cc(b, opts);
+    const main_o = cc(b, "main.o", opts);
     main_o.addCSource(
         \\#include <stdio.h>
         \\const char* interop();
@@ -2325,7 +2296,7 @@ fn testSegmentBoundarySymbols(b: *Build, opts: Options) *Step {
     main_o.addArg("-c");
 
     {
-        const obj2 = cc(b, opts);
+        const obj2 = cc(b, "b.o", opts);
         obj2.addCppSource(
             \\extern const char* message_pointer __asm("segment$start$__DATA_CONST_1");
             \\extern "C" const char* interop() {
@@ -2334,10 +2305,10 @@ fn testSegmentBoundarySymbols(b: *Build, opts: Options) *Step {
         );
         obj2.addArgs(&.{ "-std=c++17", "-c" });
 
-        const exe = cc(b, opts);
-        exe.addFileSource(obj1.out);
-        exe.addFileSource(obj2.out);
-        exe.addFileSource(main_o.out);
+        const exe = cc(b, "main", opts);
+        exe.addFileSource(obj1.getFile());
+        exe.addFileSource(obj2.getFile());
+        exe.addFileSource(main_o.getFile());
 
         const run = exe.run();
         run.expectStdOutEqual("All your codebase are belong to us.\n");
@@ -2350,7 +2321,7 @@ fn testSegmentBoundarySymbols(b: *Build, opts: Options) *Step {
     }
 
     {
-        const obj2 = cc(b, opts);
+        const obj2 = cc(b, "b.o", opts);
         obj2.addCppSource(
             \\extern const char* message_pointer __asm("segment$start$__DATA_1");
             \\extern "C" const char* interop() {
@@ -2359,10 +2330,10 @@ fn testSegmentBoundarySymbols(b: *Build, opts: Options) *Step {
         );
         obj2.addArgs(&.{ "-std=c++17", "-c" });
 
-        const exe = cc(b, opts);
-        exe.addFileSource(obj1.out);
-        exe.addFileSource(obj2.out);
-        exe.addFileSource(main_o.out);
+        const exe = cc(b, "main", opts);
+        exe.addFileSource(obj1.getFile());
+        exe.addFileSource(obj2.getFile());
+        exe.addFileSource(main_o.getFile());
 
         const check = exe.check();
         check.checkInHeaders();
@@ -2383,7 +2354,7 @@ fn testSegmentBoundarySymbols(b: *Build, opts: Options) *Step {
 fn testStackSize(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-stack-size", "");
 
-    const exe = cc(b, opts);
+    const exe = cc(b, "a.out", opts);
     exe.addEmptyMain();
     exe.addArg("-Wl,-stack_size,0x100000000");
 
@@ -2402,7 +2373,7 @@ fn testStackSize(b: *Build, opts: Options) *Step {
 fn testSymbolStabs(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-symbol-stabs", "");
 
-    const a_o = cc(b, opts);
+    const a_o = cc(b, "a.o", opts);
     a_o.addCSource(
         \\int x;
         \\int get_x() {
@@ -2414,7 +2385,7 @@ fn testSymbolStabs(b: *Build, opts: Options) *Step {
     );
     a_o.addArgs(&.{ "-c", "-g" });
 
-    const b_o = cc(b, opts);
+    const b_o = cc(b, "b.o", opts);
     b_o.addArgs(&.{ "-c", "-g" });
 
     switch (builtin.target.cpu.arch) {
@@ -2445,7 +2416,7 @@ fn testSymbolStabs(b: *Build, opts: Options) *Step {
         else => unreachable,
     }
 
-    const exe = cc(b, opts);
+    const exe = cc(b, "a.out", opts);
     exe.addCSource(
         \\#include <stdio.h>
         \\int get_x();
@@ -2465,8 +2436,8 @@ fn testSymbolStabs(b: *Build, opts: Options) *Step {
         \\  return 0;
         \\}
     );
-    exe.addFileSource(a_o.out);
-    exe.addFileSource(b_o.out);
+    exe.addFileSource(a_o.getFile());
+    exe.addFileSource(b_o.getFile());
     exe.addArg("-g");
 
     const run = exe.run();
@@ -2486,10 +2457,9 @@ fn testSymbolStabs(b: *Build, opts: Options) *Step {
 fn testTbdv3(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-tbdv3", "");
 
-    const dylib = cc(b, opts);
+    const dylib = cc(b, "liba.dylib", opts);
     dylib.addArg("-shared");
     dylib.addCSource("int getFoo() { return 42; }");
-    const dylib_out = dylib.saveOutputAs("liba.dylib");
 
     const tbd = scr: {
         const wf = WriteFile.create(b);
@@ -2506,7 +2476,7 @@ fn testTbdv3(b: *Build, opts: Options) *Step {
         );
     };
 
-    const exe = cc(b, opts);
+    const exe = cc(b, "a.out", opts);
     exe.addCSource(
         \\#include <stdio.h>
         \\int getFoo();
@@ -2515,7 +2485,7 @@ fn testTbdv3(b: *Build, opts: Options) *Step {
         \\}
     );
     exe.addFileSource(tbd);
-    exe.addPrefixedDirectorySource("-Wl,-rpath,", dylib_out.dir);
+    exe.addPrefixedDirectorySource("-Wl,-rpath,", dylib.getDir());
 
     const run = exe.run();
     test_step.dependOn(run.step());
@@ -2526,7 +2496,7 @@ fn testTbdv3(b: *Build, opts: Options) *Step {
 fn testTentative(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-tentative", "");
 
-    const exe = cc(b, opts);
+    const exe = cc(b, "a.out", opts);
     exe.addCSource(
         \\int foo;
         \\int bar;
@@ -2555,7 +2525,7 @@ fn testThunks(b: *Build, opts: Options) *Step {
 
     if (builtin.target.cpu.arch != .aarch64) return skipTestStep(test_step);
 
-    const exe = cc(b, opts);
+    const exe = cc(b, "a.out", opts);
     exe.addCSource(
         \\#include <stdio.h>
         \\__attribute__((aligned(0x8000000))) int bar() {
@@ -2585,7 +2555,7 @@ fn testThunks(b: *Build, opts: Options) *Step {
 fn testTls(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-tls", "");
 
-    const dylib = cc(b, opts);
+    const dylib = cc(b, "liba.dylib", opts);
     dylib.addCSource(
         \\_Thread_local int a;
         \\int getA() {
@@ -2593,9 +2563,8 @@ fn testTls(b: *Build, opts: Options) *Step {
         \\}
     );
     dylib.addArgs(&.{ "-shared", "-Wl,-install_name,@rpath/liba.dylib" });
-    const dylib_out = dylib.saveOutputAs("liba.dylib");
 
-    const exe = cc(b, opts);
+    const exe = cc(b, "a.out", opts);
     exe.addCSource(
         \\#include<stdio.h>
         \\extern _Thread_local int a;
@@ -2610,8 +2579,8 @@ fn testTls(b: *Build, opts: Options) *Step {
         \\}
     );
     exe.addArg("-la");
-    exe.addPrefixedDirectorySource("-L", dylib_out.dir);
-    exe.addPrefixedDirectorySource("-Wl,-rpath,", dylib_out.dir);
+    exe.addPrefixedDirectorySource("-L", dylib.getDir());
+    exe.addPrefixedDirectorySource("-Wl,-rpath,", dylib.getDir());
 
     const run = exe.run();
     run.expectStdOutEqual("2 2 2");
@@ -2623,7 +2592,7 @@ fn testTls(b: *Build, opts: Options) *Step {
 fn testTwoLevelNamespace(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-two-level-namespace", "");
 
-    const liba = cc(b, opts);
+    const liba = cc(b, "liba.dylib", opts);
     liba.addCSource(
         \\#include <stdio.h>
         \\int foo = 1;
@@ -2636,7 +2605,6 @@ fn testTwoLevelNamespace(b: *Build, opts: Options) *Step {
         \\}
     );
     liba.addArgs(&.{ "-shared", "-Wl,-install_name,@rpath/liba.dylib", "-Wl,-two_levelnamespace" });
-    const liba_out = liba.saveOutputAs("liba.dylib");
 
     {
         const check = liba.check();
@@ -2647,7 +2615,7 @@ fn testTwoLevelNamespace(b: *Build, opts: Options) *Step {
         test_step.dependOn(&check.step);
     }
 
-    const libb = cc(b, opts);
+    const libb = cc(b, "libb.dylib", opts);
     libb.addCSource(
         \\#include <stdio.h>
         \\int foo = 2;
@@ -2660,7 +2628,6 @@ fn testTwoLevelNamespace(b: *Build, opts: Options) *Step {
         \\}
     );
     libb.addArgs(&.{ "-shared", "-Wl,-install_name,@rpath/libb.dylib", "-Wl,-two_levelnamespace" });
-    const libb_out = libb.saveOutputAs("libb.dylib");
 
     {
         const check = liba.check();
@@ -2671,7 +2638,7 @@ fn testTwoLevelNamespace(b: *Build, opts: Options) *Step {
         test_step.dependOn(&check.step);
     }
 
-    const main_o = cc(b, opts);
+    const main_o = cc(b, "main.o", opts);
     main_o.addCSource(
         \\#include <stdio.h>
         \\int getFoo();
@@ -2688,12 +2655,12 @@ fn testTwoLevelNamespace(b: *Build, opts: Options) *Step {
     main_o.addArg("-c");
 
     {
-        const exe = cc(b, opts);
-        exe.addFileSource(main_o.out);
-        exe.addPrefixedDirectorySource("-L", liba_out.dir);
-        exe.addPrefixedDirectorySource("-Wl,-rpath,", liba_out.dir);
-        exe.addPrefixedDirectorySource("-L", libb_out.dir);
-        exe.addPrefixedDirectorySource("-Wl,-rpath,", libb_out.dir);
+        const exe = cc(b, "main", opts);
+        exe.addFileSource(main_o.getFile());
+        exe.addPrefixedDirectorySource("-L", liba.getDir());
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", liba.getDir());
+        exe.addPrefixedDirectorySource("-L", libb.getDir());
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", libb.getDir());
         exe.addArgs(&.{ "-la", "-lb", "-Wl,-two_levelnamespace" });
 
         const check = exe.check();
@@ -2716,12 +2683,12 @@ fn testTwoLevelNamespace(b: *Build, opts: Options) *Step {
     }
 
     {
-        const exe = cc(b, opts);
-        exe.addFileSource(main_o.out);
-        exe.addPrefixedDirectorySource("-L", liba_out.dir);
-        exe.addPrefixedDirectorySource("-Wl,-rpath,", liba_out.dir);
-        exe.addPrefixedDirectorySource("-L", libb_out.dir);
-        exe.addPrefixedDirectorySource("-Wl,-rpath,", libb_out.dir);
+        const exe = cc(b, "main", opts);
+        exe.addFileSource(main_o.getFile());
+        exe.addPrefixedDirectorySource("-L", liba.getDir());
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", liba.getDir());
+        exe.addPrefixedDirectorySource("-L", libb.getDir());
+        exe.addPrefixedDirectorySource("-Wl,-rpath,", libb.getDir());
         exe.addArgs(&.{ "-lb", "-la", "-Wl,-two_levelnamespace" });
 
         const check = exe.check();
@@ -2749,7 +2716,7 @@ fn testTwoLevelNamespace(b: *Build, opts: Options) *Step {
 fn testTlsLargeTbss(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-tls-large-tbss", "");
 
-    const exe = cc(b, opts);
+    const exe = cc(b, "a.out", opts);
     exe.addCSource(
         \\#include <stdio.h>
         \\_Thread_local int x[0x8000];
@@ -2771,18 +2738,18 @@ fn testTlsLargeTbss(b: *Build, opts: Options) *Step {
 fn testUndefinedFlag(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-undefined-flag", "");
 
-    const obj = cc(b, opts);
+    const obj = cc(b, "a.o", opts);
     obj.addCSource("int foo = 42;");
     obj.addArg("-c");
 
-    const lib = ar(b);
-    lib.addFileSource(obj.out);
+    const lib = ar(b, "liba.a");
+    lib.addFileSource(obj.getFile());
 
     {
-        const exe = cc(b, opts);
+        const exe = cc(b, "a.out", opts);
         exe.addEmptyMain();
         exe.addArgs(&.{ "-Wl,-u,_foo", "-la" });
-        exe.addPrefixedDirectorySource("-L", lib.saveOutputAs("liba.a").dir);
+        exe.addPrefixedDirectorySource("-L", lib.getDir());
 
         const run = exe.run();
         test_step.dependOn(run.step());
@@ -2794,10 +2761,10 @@ fn testUndefinedFlag(b: *Build, opts: Options) *Step {
     }
 
     {
-        const exe = cc(b, opts);
+        const exe = cc(b, "a.out", opts);
         exe.addEmptyMain();
         exe.addArgs(&.{ "-Wl,-u,_foo", "-la", "-Wl,-dead_strip" });
-        exe.addPrefixedDirectorySource("-L", lib.saveOutputAs("liba.a").dir);
+        exe.addPrefixedDirectorySource("-L", lib.getDir());
 
         const run = exe.run();
         test_step.dependOn(run.step());
@@ -2809,9 +2776,9 @@ fn testUndefinedFlag(b: *Build, opts: Options) *Step {
     }
 
     {
-        const exe = cc(b, opts);
+        const exe = cc(b, "a.out", opts);
         exe.addEmptyMain();
-        exe.addFileSource(obj.out);
+        exe.addFileSource(obj.getFile());
 
         const run = exe.run();
         test_step.dependOn(run.step());
@@ -2823,9 +2790,9 @@ fn testUndefinedFlag(b: *Build, opts: Options) *Step {
     }
 
     {
-        const exe = cc(b, opts);
+        const exe = cc(b, "a.out", opts);
         exe.addEmptyMain();
-        exe.addFileSource(obj.out);
+        exe.addFileSource(obj.getFile());
         exe.addArg("-Wl,-dead_strip");
 
         const run = exe.run();
@@ -2969,26 +2936,26 @@ fn testUnwindInfo(b: *Build, opts: Options) *Step {
     ;
 
     const flags: []const []const u8 = &.{ "-std=c++17", "-c" };
-    const obj = cc(b, opts);
+    const obj = cc(b, "main.o", opts);
     obj.addCppSource(main_c);
     obj.addPrefixedDirectorySource("-I", all_h.dir);
     obj.addArgs(flags);
 
-    const obj1 = cc(b, opts);
+    const obj1 = cc(b, "simple_string.o", opts);
     obj1.addCppSource(simple_string_c);
     obj1.addPrefixedDirectorySource("-I", all_h.dir);
     obj1.addArgs(flags);
 
-    const obj2 = cc(b, opts);
+    const obj2 = cc(b, "simple_string_owner.o", opts);
     obj2.addCppSource(simple_string_owner_c);
     obj2.addPrefixedDirectorySource("-I", all_h.dir);
     obj2.addArgs(flags);
 
-    const exe = ld(b, opts);
+    const exe = ld(b, "main", opts);
     exe.addArgs(&.{ "-syslibroot", opts.macos_sdk, "-lc++" });
-    exe.addFileSource(obj.saveOutputAs("main.o").file);
-    exe.addFileSource(obj1.saveOutputAs("simple_string.o").file);
-    exe.addFileSource(obj2.saveOutputAs("simple_string_owner.o").file);
+    exe.addFileSource(obj.getFile());
+    exe.addFileSource(obj1.getFile());
+    exe.addFileSource(obj2.getFile());
 
     const run = exe.run();
     run.expectStdOutEqual(exp_stdout);
@@ -3007,7 +2974,7 @@ fn testUnwindInfoNoSubsectionsArm64(b: *Build, opts: Options) *Step {
 
     if (builtin.target.cpu.arch != .aarch64) return skipTestStep(test_step);
 
-    const a_o = cc(b, opts);
+    const a_o = cc(b, "a.o", opts);
     a_o.addAsmSource(
         \\.globl _foo
         \\.align 4
@@ -3048,9 +3015,8 @@ fn testUnwindInfoNoSubsectionsArm64(b: *Build, opts: Options) *Step {
         \\  .cfi_endproc
     );
     a_o.addArg("-c");
-    const a_o_out = a_o.saveOutputAs("a.o");
 
-    const exe = cc(b, opts);
+    const exe = cc(b, "a.out", opts);
     exe.addCSource(
         \\#include <stdio.h>
         \\int foo();
@@ -3059,7 +3025,7 @@ fn testUnwindInfoNoSubsectionsArm64(b: *Build, opts: Options) *Step {
         \\  return 0;
         \\}
     );
-    exe.addFileSource(a_o_out.file);
+    exe.addFileSource(a_o.getFile());
 
     const run = exe.run();
     run.expectStdOutEqual("4\n");
@@ -3073,7 +3039,7 @@ fn testUnwindInfoNoSubsectionsX64(b: *Build, opts: Options) *Step {
 
     if (builtin.target.cpu.arch != .x86_64) return skipTestStep(test_step);
 
-    const a_o = cc(b, opts);
+    const a_o = cc(b, "a.o", opts);
     a_o.addAsmSource(
         \\.globl _foo
         \\_foo: 
@@ -3106,9 +3072,8 @@ fn testUnwindInfoNoSubsectionsX64(b: *Build, opts: Options) *Step {
         \\  .cfi_endproc
     );
     a_o.addArg("-c");
-    const a_o_out = a_o.saveOutputAs("a.o");
 
-    const exe = cc(b, opts);
+    const exe = cc(b, "a.out", opts);
     exe.addCSource(
         \\#include <stdio.h>
         \\int foo();
@@ -3117,7 +3082,7 @@ fn testUnwindInfoNoSubsectionsX64(b: *Build, opts: Options) *Step {
         \\  return 0;
         \\}
     );
-    exe.addFileSource(a_o_out.file);
+    exe.addFileSource(a_o.getFile());
 
     const run = exe.run();
     run.expectStdOutEqual("4\n");
@@ -3132,7 +3097,7 @@ fn testWeakBind(b: *Build, opts: Options) *Step {
 
     if (builtin.target.cpu.arch != .x86_64) return skipTestStep(test_step); // TODO
 
-    const lib = cc(b, opts);
+    const lib = cc(b, "libfoo.dylib", opts);
     lib.addAsmSource(
         \\.globl _weak_dysym
         \\.weak_definition _weak_dysym
@@ -3157,7 +3122,6 @@ fn testWeakBind(b: *Build, opts: Options) *Step {
         \\  .quad 0x1234
     );
     lib.addArgs(&.{ "-shared", "-Wl,-install_name,@rpath/libfoo.dylib" });
-    const lib_out = lib.saveOutputAs("libfoo.dylib");
 
     {
         const check = lib.check();
@@ -3169,7 +3133,7 @@ fn testWeakBind(b: *Build, opts: Options) *Step {
         test_step.dependOn(&check.step);
     }
 
-    const exe = cc(b, opts);
+    const exe = cc(b, "a.out", opts);
     exe.addAsmSource(
         \\.globl _main, _weak_external, _weak_external_for_gotpcrel, _weak_external_fn
         \\.weak_definition _weak_external, _weak_external_for_gotpcrel, _weak_external_fn, _weak_internal, _weak_internal_for_gotpcrel, _weak_internal_fn
@@ -3227,8 +3191,8 @@ fn testWeakBind(b: *Build, opts: Options) *Step {
         \\  .quad 0
         \\  .quad _weak_internal_tlv$tlv$init
     );
-    exe.addFileSource(lib_out.file);
-    exe.addPrefixedDirectorySource("-Wl,-rpath,", lib_out.dir);
+    exe.addFileSource(lib.getFile());
+    exe.addPrefixedDirectorySource("-Wl,-rpath,", lib.getDir());
 
     {
         const check = exe.check();
@@ -3267,7 +3231,7 @@ fn testWeakBind(b: *Build, opts: Options) *Step {
 fn testWeakFramework(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-weak-framework", "");
 
-    const exe = cc(b, opts);
+    const exe = cc(b, "a.out", opts);
     exe.addEmptyMain();
     exe.addArgs(&.{ "-weak_framework", "Cocoa" });
 
@@ -3286,7 +3250,7 @@ fn testWeakFramework(b: *Build, opts: Options) *Step {
 fn testWeakLibrary(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-weak-library", "");
 
-    const dylib = cc(b, opts);
+    const dylib = cc(b, "liba.dylib", opts);
     dylib.addCSource(
         \\#include<stdio.h>
         \\int a = 42;
@@ -3297,9 +3261,8 @@ fn testWeakLibrary(b: *Build, opts: Options) *Step {
         \\}
     );
     dylib.addArgs(&.{ "-shared", "-Wl,-install_name,@rpath/liba.dylib" });
-    const dylib_out = dylib.saveOutputAs("liba.dylib");
 
-    const exe = cc(b, opts);
+    const exe = cc(b, "a.out", opts);
     exe.addCSource(
         \\#include<stdio.h>
         \\extern int a;
@@ -3310,8 +3273,8 @@ fn testWeakLibrary(b: *Build, opts: Options) *Step {
         \\}
     );
     exe.addArg("-weak-la");
-    exe.addPrefixedDirectorySource("-L", dylib_out.dir);
-    exe.addPrefixedDirectorySource("-Wl,-rpath,", dylib_out.dir);
+    exe.addPrefixedDirectorySource("-L", dylib.getDir());
+    exe.addPrefixedDirectorySource("-Wl,-rpath,", dylib.getDir());
 
     const check = exe.check();
     check.checkInHeaders();
@@ -3333,7 +3296,7 @@ fn testWeakLibrary(b: *Build, opts: Options) *Step {
 fn testWeakRef(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-weak-ref", "");
 
-    const exe = cc(b, opts);
+    const exe = cc(b, "a.out", opts);
     exe.addCSource(
         \\#include<stdio.h>
         \\__attribute__((weak)) int foo();
@@ -3364,42 +3327,42 @@ const Options = struct {
     cc_override: ?[]const u8,
 };
 
-fn cc(b: *Build, opts: Options) SysCmd {
+fn cc(b: *Build, name: []const u8, opts: Options) SysCmd {
     const cmd = Run.create(b, "cc");
     cmd.addArgs(&.{ opts.cc_override orelse "cc", "-fno-lto" });
     cmd.addArg("-o");
-    const out = cmd.addOutputFileArg("a.out");
+    const out = cmd.addOutputFileArg(name);
     cmd.addPrefixedDirectorySourceArg("-B", opts.zld.dir);
     return .{ .cmd = cmd, .out = out };
 }
 
-fn zig(b: *Build) SysCmd {
+fn zig(b: *Build, name: []const u8) SysCmd {
     const cmd = Run.create(b, "zig");
     cmd.addArgs(&.{ "zig", "build-obj" });
-    const out = cmd.addPrefixedOutputFileArg("-femit-bin=", "a.o");
+    const out = cmd.addPrefixedOutputFileArg("-femit-bin=", name);
     return .{ .cmd = cmd, .out = out };
 }
 
-fn ar(b: *Build) SysCmd {
+fn ar(b: *Build, name: []const u8) SysCmd {
     const cmd = Run.create(b, "ar");
     cmd.addArgs(&.{ "ar", "rcs" });
-    const out = cmd.addOutputFileArg("a.a");
+    const out = cmd.addOutputFileArg(name);
     return .{ .cmd = cmd, .out = out };
 }
 
-fn lipo(b: *Build) SysCmd {
+fn lipo(b: *Build, name: []const u8) SysCmd {
     const cmd = Run.create(b, "lipo");
     cmd.addArgs(&.{ "lipo", "-create", "-output" });
-    const out = cmd.addOutputFileArg("a.out");
+    const out = cmd.addOutputFileArg(name);
     return .{ .cmd = cmd, .out = out };
 }
 
-fn ld(b: *Build, opts: Options) SysCmd {
+fn ld(b: *Build, name: []const u8, opts: Options) SysCmd {
     const cmd = Run.create(b, "ld");
     cmd.addFileArg(opts.zld.file);
     cmd.addArg("-dynamic");
     cmd.addArg("-o");
-    const out = cmd.addOutputFileArg("a.out");
+    const out = cmd.addOutputFileArg(name);
     cmd.addArgs(&.{ "-lSystem", "-lc" });
     return .{ .cmd = cmd, .out = out };
 }

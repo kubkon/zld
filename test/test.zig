@@ -139,6 +139,14 @@ pub const SysCmd = struct {
         );
     }
 
+    pub inline fn getFile(sys_cmd: SysCmd) LazyPath {
+        return sys_cmd.out;
+    }
+
+    pub inline fn getDir(sys_cmd: SysCmd) LazyPath {
+        return sys_cmd.out.dirname();
+    }
+
     pub fn saveOutputAs(sys_cmd: SysCmd, basename: []const u8) FileSourceWithDir {
         return FileSourceWithDir.fromFileSource(sys_cmd.cmd.step.owner, sys_cmd.out, basename);
     }
