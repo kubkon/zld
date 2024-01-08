@@ -9,6 +9,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const mode = b.standardOptimizeOption(.{});
 
+    const strip = b.option(bool, "strip", "Omit debug information");
     const enable_logging = b.option(bool, "log", "Whether to enable logging") orelse (mode == .Debug);
     const enable_tracy = b.option([]const u8, "tracy", "Enable Tracy integration. Supply path to Tracy source");
 
@@ -29,6 +30,7 @@ pub fn build(b: *std.Build) void {
     });
     exe.root_module.addImport("yaml", yaml.module("yaml"));
     exe.root_module.addImport("dis_x86_64", dis_x86_64.module("dis_x86_64"));
+    exe.root_module.strip = strip;
     exe.linkLibC();
 
     const exe_opts = b.addOptions();
@@ -51,7 +53,6 @@ pub fn build(b: *std.Build) void {
         exe.addIncludePath(.{ .cwd_relative = tracy_path });
         exe.addCSourceFile(.{ .file = .{ .cwd_relative = client_cpp }, .flags = tracy_c_flags });
         exe.root_module.linkSystemLibrary("c++", .{ .use_pkg_config = .no });
-        exe.root_module.strip = false;
 
         if (target.result.os.tag == .windows) {
             exe.linkSystemLibrary("dbghelp");
