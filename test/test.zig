@@ -145,10 +145,6 @@ pub const SysCmd = struct {
         return sys_cmd.out.dirname();
     }
 
-    pub fn saveOutputAs(sys_cmd: SysCmd, basename: []const u8) FileSourceWithDir {
-        return FileSourceWithDir.fromFileSource(sys_cmd.cmd.step.owner, sys_cmd.out, basename);
-    }
-
     pub fn check(sys_cmd: SysCmd) *CheckObject {
         const b = sys_cmd.cmd.step.owner;
         const ch = CheckObject.create(b, sys_cmd.out, builtin.target.ofmt);
@@ -205,31 +201,6 @@ pub fn saveBytesToFile(b: *Build, name: []const u8, bytes: []const u8) LazyPath 
     const wf = WriteFile.create(b);
     return wf.add(name, bytes);
 }
-
-/// When going over different linking scenarios, we usually want to save a file
-/// at a particular location however we do not specify the path to file explicitly
-/// on the linker line. Instead, we specify its basename like `-la` and provide
-/// the search directory with a matching companion flag `-L.`.
-/// This abstraction tie the full path of a file with its immediate directory to make
-/// the above scenario possible.
-pub const FileSourceWithDir = struct {
-    dir: LazyPath,
-    file: LazyPath,
-
-    pub fn fromFileSource(b: *Build, in_file: LazyPath, basename: []const u8) FileSourceWithDir {
-        const wf = WriteFile.create(b);
-        const dir = wf.getDirectory();
-        const file = wf.addCopyFile(in_file, basename);
-        return .{ .dir = dir, .file = file };
-    }
-
-    pub fn fromBytes(b: *Build, bytes: []const u8, basename: []const u8) FileSourceWithDir {
-        const wf = WriteFile.create(b);
-        const dir = wf.getDirectory();
-        const file = wf.add(basename, bytes);
-        return .{ .dir = dir, .file = file };
-    }
-};
 
 pub const SkipTestStep = struct {
     pub const base_id = .custom;
