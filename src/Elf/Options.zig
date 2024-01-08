@@ -71,7 +71,7 @@ const usage =
 ;
 
 const version =
-    \\ld.zld 0.0.1 (compatible with GNU ld)
+    \\ld.zld 0.0.4 (compatible with GNU ld)
 ;
 
 const cmd = "ld.zld";

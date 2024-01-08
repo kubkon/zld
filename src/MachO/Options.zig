@@ -85,7 +85,7 @@ const usage =
 ;
 
 const version =
-    \\ld64.zld 0.0.1 (compatible with Apple ld64)
+    \\ld64.zld 0.0.4 (compatible with Apple ld64)
 ;
 
 const cmd = "ld64.zld";
