@@ -55,6 +55,7 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testPagezeroSize(b, opts));
     macho_step.dependOn(testReexportsZig(b, opts));
     macho_step.dependOn(testRelocatable(b, opts));
+    macho_step.dependOn(testRelocatableZig(b, opts));
     macho_step.dependOn(testSearchStrategy(b, opts));
     macho_step.dependOn(testSectionBoundarySymbols(b, opts));
     macho_step.dependOn(testSegmentBoundarySymbols(b, opts));
@@ -2092,6 +2093,66 @@ fn testRelocatable(b: *Build, opts: Options) *Step {
         run.expectStdOutEqual(exp_stdout);
         test_step.dependOn(run.step());
     }
+
+    return test_step;
+}
+
+fn testRelocatableZig(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-relocatable-zig", "");
+
+    if (!opts.has_zig) return skipTestStep(test_step);
+
+    const a_o = zig(b);
+    a_o.addZigSource(
+        \\const std = @import("std");
+        \\export var foo: i32 = 0;
+        \\export fn incrFoo() void {
+        \\    foo += 1;
+        \\    std.debug.print("incrFoo={d}\n", .{foo});
+        \\}
+    );
+    a_o.addArg("-fno-stack-check");
+
+    const b_o = zig(b);
+    b_o.addZigSource(
+        \\const std = @import("std");
+        \\extern var foo: i32;
+        \\export fn decrFoo() void {
+        \\    foo -= 1;
+        \\    std.debug.print("decrFoo={d}\n", .{foo});
+        \\}
+    );
+    b_o.addArg("-fno-stack-check");
+
+    const main_o = zig(b);
+    main_o.addZigSource(
+        \\const std = @import("std");
+        \\extern var foo: i32;
+        \\extern fn incrFoo() void;
+        \\extern fn decrFoo() void;
+        \\pub fn main() void {
+        \\    const init = foo;
+        \\    incrFoo();
+        \\    decrFoo();
+        \\    if (init == foo) @panic("Oh no!");
+        \\}
+    );
+    main_o.addArg("-fno-stack-check");
+
+    const c_o = ld(b, opts);
+    c_o.addFileSource(a_o.out);
+    c_o.addFileSource(b_o.out);
+    c_o.addFileSource(main_o.out);
+    c_o.addArg("-r");
+
+    const exe = cc(b, opts);
+    exe.addFileSource(c_o.out);
+
+    const run = exe.run();
+    run.expectStdErrFuzzy("incrFoo=1");
+    run.expectStdErrFuzzy("decrFoo=0");
+    run.expectStdErrFuzzy("panic: Oh no!");
+    test_step.dependOn(run.step());
 
     return test_step;
 }

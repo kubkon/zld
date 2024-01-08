@@ -162,15 +162,31 @@ pub const SysCmd = struct {
 pub const RunSysCmd = struct {
     run: *Run,
 
-    pub inline fn expectHelloWorld(rsc: RunSysCmd) void {
+    pub fn expectHelloWorld(rsc: RunSysCmd) void {
         rsc.run.expectStdOutEqual("Hello world!\n");
     }
 
-    pub inline fn expectStdOutEqual(rsc: RunSysCmd, exp: []const u8) void {
+    pub fn expectStdOutEqual(rsc: RunSysCmd, exp: []const u8) void {
         rsc.run.expectStdOutEqual(exp);
     }
 
-    pub inline fn expectExitCode(rsc: RunSysCmd, code: u8) void {
+    pub fn expectStdOutFuzzy(rsc: RunSysCmd, exp: []const u8) void {
+        rsc.run.addCheck(.{
+            .expect_stdout_match = rsc.run.step.owner.dupe(exp),
+        });
+    }
+
+    pub fn expectStdErrEqual(rsc: RunSysCmd, exp: []const u8) void {
+        rsc.run.expectStdErrEqual(exp);
+    }
+
+    pub fn expectStdErrFuzzy(rsc: RunSysCmd, exp: []const u8) void {
+        rsc.run.addCheck(.{
+            .expect_stderr_match = rsc.run.step.owner.dupe(exp),
+        });
+    }
+
+    pub fn expectExitCode(rsc: RunSysCmd, code: u8) void {
         rsc.run.expectExitCode(code);
     }
 
