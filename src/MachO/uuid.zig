@@ -14,9 +14,9 @@ pub fn calcUuid(
     const tracy = trace(@src());
     defer tracy.end();
 
-    const num_chunks = thread_pool.threads.len * 0x10;
-    const chunk_size = @divTrunc(file_size, num_chunks);
-    const actual_num_chunks = if (@rem(file_size, num_chunks) > 0) num_chunks + 1 else num_chunks;
+    const chunk_size: usize = 1024 * 1024;
+    const num_chunks: usize = std.math.cast(usize, @divTrunc(file_size, chunk_size)) orelse return error.Overflow;
+    const actual_num_chunks = if (@rem(file_size, chunk_size) > 0) num_chunks + 1 else num_chunks;
 
     const hashes = try allocator.alloc([Md5.digest_length]u8, actual_num_chunks);
     defer allocator.free(hashes);

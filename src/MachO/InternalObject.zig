@@ -25,7 +25,8 @@ pub fn addSymbol(self: *InternalObject, name: [:0]const u8, macho_file: *MachO) 
     const off = try macho_file.string_intern.insert(gpa, name);
     const gop = try macho_file.getOrCreateGlobal(off);
     self.symbols.addOneAssumeCapacity().* = gop.index;
-    macho_file.getSymbol(gop.index).file = self.index;
+    const sym = macho_file.getSymbol(gop.index);
+    sym.* = .{ .name = off, .file = self.index };
     return gop.index;
 }
 

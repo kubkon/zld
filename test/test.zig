@@ -18,9 +18,7 @@ pub fn addTests(b: *Build, comp: *Compile, build_opts: struct {
         error.InvalidUtf8 => @panic("InvalidUtf8"),
         error.OutOfMemory => @panic("OOM"),
     };
-
-    const zld = FileSourceWithDir.fromFileSource(b, comp.getEmittedBin(), "ld");
-
+    const zld = WriteFile.create(b).addCopyFile(comp.getEmittedBin(), "ld");
     const opts: Options = .{
         .zld = zld,
         .system_compiler = system_compiler,
@@ -42,7 +40,7 @@ pub const SystemCompiler = enum {
 };
 
 pub const Options = struct {
-    zld: FileSourceWithDir,
+    zld: LazyPath,
     system_compiler: SystemCompiler,
     has_static: bool = false,
     has_zig: bool = false,
@@ -139,8 +137,12 @@ pub const SysCmd = struct {
         );
     }
 
-    pub fn saveOutputAs(sys_cmd: SysCmd, basename: []const u8) FileSourceWithDir {
-        return FileSourceWithDir.fromFileSource(sys_cmd.cmd.step.owner, sys_cmd.out, basename);
+    pub inline fn getFile(sys_cmd: SysCmd) LazyPath {
+        return sys_cmd.out;
+    }
+
+    pub inline fn getDir(sys_cmd: SysCmd) LazyPath {
+        return sys_cmd.out.dirname();
     }
 
     pub fn check(sys_cmd: SysCmd) *CheckObject {
@@ -170,7 +172,23 @@ pub const RunSysCmd = struct {
         rsc.run.expectStdOutEqual(exp);
     }
 
-    pub inline fn expectExitCode(rsc: RunSysCmd, code: u8) void {
+    pub fn expectStdOutFuzzy(rsc: RunSysCmd, exp: []const u8) void {
+        rsc.run.addCheck(.{
+            .expect_stdout_match = rsc.run.step.owner.dupe(exp),
+        });
+    }
+
+    pub inline fn expectStdErrEqual(rsc: RunSysCmd, exp: []const u8) void {
+        rsc.run.expectStdErrEqual(exp);
+    }
+
+    pub fn expectStdErrFuzzy(rsc: RunSysCmd, exp: []const u8) void {
+        rsc.run.addCheck(.{
+            .expect_stderr_match = rsc.run.step.owner.dupe(exp),
+        });
+    }
+
+    pub fn expectExitCode(rsc: RunSysCmd, code: u8) void {
         rsc.run.expectExitCode(code);
     }
 
@@ -179,30 +197,10 @@ pub const RunSysCmd = struct {
     }
 };
 
-/// When going over different linking scenarios, we usually want to save a file
-/// at a particular location however we do not specify the path to file explicitly
-/// on the linker line. Instead, we specify its basename like `-la` and provide
-/// the search directory with a matching companion flag `-L.`.
-/// This abstraction tie the full path of a file with its immediate directory to make
-/// the above scenario possible.
-pub const FileSourceWithDir = struct {
-    dir: LazyPath,
-    file: LazyPath,
-
-    pub fn fromFileSource(b: *Build, in_file: LazyPath, basename: []const u8) FileSourceWithDir {
-        const wf = WriteFile.create(b);
-        const dir = wf.getDirectory();
-        const file = wf.addCopyFile(in_file, basename);
-        return .{ .dir = dir, .file = file };
-    }
-
-    pub fn fromBytes(b: *Build, bytes: []const u8, basename: []const u8) FileSourceWithDir {
-        const wf = WriteFile.create(b);
-        const dir = wf.getDirectory();
-        const file = wf.add(basename, bytes);
-        return .{ .dir = dir, .file = file };
-    }
-};
+pub fn saveBytesToFile(b: *Build, name: []const u8, bytes: []const u8) LazyPath {
+    const wf = WriteFile.create(b);
+    return wf.add(name, bytes);
+}
 
 pub const SkipTestStep = struct {
     pub const base_id = .custom;
