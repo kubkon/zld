@@ -67,7 +67,7 @@ pub const SysCmd = struct {
     }
 
     pub fn addPrefixedFileSource(sys_cmd: SysCmd, prefix: []const u8, file: LazyPath) void {
-        sys_cmd.cmd.addPrefixedFileSourceArg(prefix, file);
+        sys_cmd.cmd.addPrefixedFileArg(prefix, file);
     }
 
     pub fn addDirectorySource(sys_cmd: SysCmd, dir: LazyPath) void {

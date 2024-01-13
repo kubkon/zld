@@ -36,6 +36,7 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testFlatNamespace(b, opts));
     macho_step.dependOn(testFlatNamespaceExe(b, opts));
     macho_step.dependOn(testFlatNamespaceWeak(b, opts));
+    macho_step.dependOn(testForceLoad(b, opts));
     macho_step.dependOn(testHeaderpad(b, opts));
     macho_step.dependOn(testHeaderWeakFlags(b, opts));
     macho_step.dependOn(testHelloC(b, opts));
@@ -1064,6 +1065,52 @@ fn testFlatNamespaceWeak(b: *Build, opts: Options) *Step {
             \\
         );
         test_step.dependOn(run.step());
+    }
+
+    return test_step;
+}
+
+fn testForceLoad(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-force-load", "");
+
+    const obj = cc(b, "a.o", opts);
+    obj.addCSource("int foo = 1;");
+    obj.addArg("-c");
+
+    const lib = ar(b, "liba.a");
+    lib.addFileSource(obj.getFile());
+
+    const main_o = cc(b, "main.o", opts);
+    main_o.addEmptyMain();
+    main_o.addArg("-c");
+
+    {
+        const exe = cc(b, "a.out", opts);
+        exe.addFileSource(main_o.getFile());
+        exe.addFileSource(lib.getFile());
+
+        const run = exe.run();
+        test_step.dependOn(run.step());
+
+        const check = exe.check();
+        check.checkInSymtab();
+        check.checkNotPresent("external _foo");
+        test_step.dependOn(&check.step);
+    }
+
+    {
+        const exe = cc(b, "a.out", opts);
+        exe.addFileSource(main_o.getFile());
+        exe.addArg("-force_load");
+        exe.addFileSource(lib.getFile());
+
+        const run = exe.run();
+        test_step.dependOn(run.step());
+
+        const check = exe.check();
+        check.checkInSymtab();
+        check.checkContains("external _foo");
+        test_step.dependOn(&check.step);
     }
 
     return test_step;
