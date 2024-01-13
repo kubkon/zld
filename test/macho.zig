@@ -2416,40 +2416,78 @@ fn testSymbolStabs(b: *Build, opts: Options) *Step {
         else => unreachable,
     }
 
-    const exe = cc(b, "a.out", opts);
-    exe.addCSource(
-        \\#include <stdio.h>
-        \\int get_x();
-        \\void incr_x();
-        \\int bar();
-        \\void print_x() {
-        \\  printf("x=%d\n", get_x());
-        \\}
-        \\void print_bar() {
-        \\  printf("bar=%d\n", bar());
-        \\}
-        \\int main() {
-        \\  print_x();
-        \\  incr_x();
-        \\  print_x();
-        \\  print_bar();
-        \\  return 0;
-        \\}
-    );
-    exe.addFileSource(a_o.getFile());
-    exe.addFileSource(b_o.getFile());
-    exe.addArg("-g");
+    {
+        const exe = cc(b, "a.out", opts);
+        exe.addCSource(
+            \\#include <stdio.h>
+            \\int get_x();
+            \\void incr_x();
+            \\int bar();
+            \\void print_x() {
+            \\  printf("x=%d\n", get_x());
+            \\}
+            \\void print_bar() {
+            \\  printf("bar=%d\n", bar());
+            \\}
+            \\int main() {
+            \\  print_x();
+            \\  incr_x();
+            \\  print_x();
+            \\  print_bar();
+            \\  return 0;
+            \\}
+        );
+        exe.addFileSource(a_o.getFile());
+        exe.addFileSource(b_o.getFile());
+        exe.addArg("-g");
 
-    const run = exe.run();
-    run.expectStdOutEqual(
-        \\x=0
-        \\x=1
-        \\bar=42
-        \\
-    );
-    test_step.dependOn(run.step());
+        const run = exe.run();
+        run.expectStdOutEqual(
+            \\x=0
+            \\x=1
+            \\bar=42
+            \\
+        );
+        test_step.dependOn(run.step());
 
-    // TODO check for _foo and _bar having set sizes in stabs
+        // TODO check for _foo and _bar having set sizes in stabs
+
+    }
+
+    {
+        const exe = cc(b, "a.out", opts);
+        exe.addCSource(
+            \\#include <stdio.h>
+            \\int get_x();
+            \\void incr_x();
+            \\int bar();
+            \\void print_x() {
+            \\  printf("x=%d\n", get_x());
+            \\}
+            \\void print_bar() {
+            \\  printf("bar=%d\n", bar());
+            \\}
+            \\int main() {
+            \\  print_x();
+            \\  incr_x();
+            \\  print_x();
+            \\  print_bar();
+            \\  return 0;
+            \\}
+        );
+        exe.addFileSource(a_o.getFile());
+        exe.addFileSource(b_o.getFile());
+        exe.addArgs(&.{ "-g", "-Wl,-dead_strip" });
+
+        const run = exe.run();
+        run.expectStdOutEqual(
+            \\x=0
+            \\x=1
+            \\bar=42
+            \\
+        );
+        test_step.dependOn(run.step());
+    }
 
     return test_step;
 }
