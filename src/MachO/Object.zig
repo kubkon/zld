@@ -55,6 +55,8 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
+    log.debug("parsing input object file {}", .{self.fmtPath()});
+
     const gpa = macho_file.base.allocator;
     var stream = std.io.fixedBufferStream(self.data);
     const reader = stream.reader();
