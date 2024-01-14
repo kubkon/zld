@@ -2712,7 +2712,7 @@ fn testTwoLevelNamespace(b: *Build, opts: Options) *Step {
     libb.addArgs(&.{ "-shared", "-Wl,-install_name,@rpath/libb.dylib", "-Wl,-two_levelnamespace" });
 
     {
-        const check = liba.check();
+        const check = libb.check();
         check.checkInDyldLazyBind();
         check.checkNotPresent("(flat lookup) _getFoo");
         check.checkInIndirectSymtab();
