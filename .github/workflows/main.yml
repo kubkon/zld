@@ -5,13 +5,13 @@ on: [push, pull_request]
 jobs:
   default_tools:
     name: Test default system tools
-    runs-on: ${{ matrix.os }}-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         # https://github.com/kubkon/zld/issues/44
         # os: [macos, ubuntu, windows]
-        os: [macos, ubuntu]
+        os: [ macos-11, macos-12, macos-latest, ubuntu-latest ]
 
     steps:
     - if: matrix.os == 'windows'
