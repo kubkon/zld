@@ -415,7 +415,7 @@ pub fn flush(self: *MachO) !void {
         // The most important here is to have the correct vm and filesize of the __LINKEDIT segment
         // where the code signature goes into.
         var codesig = CodeSignature.init(self.getPageSize());
-        codesig.code_directory.ident = self.options.emit.sub_path;
+        codesig.code_directory.ident = std.fs.path.basename(self.options.emit.sub_path);
         if (self.options.entitlements) |path| try codesig.addEntitlements(gpa, path);
         try self.writeCodeSignaturePadding(&codesig);
         break :blk codesig;
