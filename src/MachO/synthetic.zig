@@ -195,7 +195,7 @@ pub const StubsSection = struct {
 pub const StubsHelperSection = struct {
     pub inline fn preambleSize(cpu_arch: std.Target.Cpu.Arch) usize {
         return switch (cpu_arch) {
-            .x86_64 => 15,
+            .x86_64 => 16,
             .aarch64 => 6 * @sizeOf(u32),
             else => 0,
         };
@@ -288,6 +288,7 @@ pub const StubsHelperSection = struct {
                 try writer.writeInt(i32, @intCast(dyld_private_addr - sect.addr - 3 - 4), .little);
                 try writer.writeAll(&.{ 0x41, 0x53, 0xff, 0x25 });
                 try writer.writeInt(i32, @intCast(dyld_stub_binder_addr - sect.addr - 11 - 4), .little);
+                try writer.writeByte(0x90);
             },
             .aarch64 => {
                 {
