@@ -6,6 +6,7 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     var opts = Options{
         .zld = options.zld,
         .has_zig = options.has_zig,
+        .has_objc_msgsend_stubs = options.has_objc_msgsend_stubs,
         .macos_sdk = undefined,
         .ios_sdk = null,
         .cc_override = options.cc_override,
@@ -1828,6 +1829,8 @@ fn testObjc(b: *Build, opts: Options) *Step {
 fn testObjcStubs(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-objc-stubs", "");
 
+    if (!opts.has_objc_msgsend_stubs) return skipTestStep(test_step);
+
     const exe = cc(b, "a.out", opts);
     exe.addObjCSource(
         \\@import Foundation;
@@ -1872,6 +1875,8 @@ fn testObjcStubs(b: *Build, opts: Options) *Step {
 
 fn testObjcStubs2(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-objc-stubs-2", "");
+
+    if (!opts.has_objc_msgsend_stubs) return skipTestStep(test_step);
 
     const all_h = saveBytesToFile(b, "all.h",
         \\#import <Foundation/Foundation.h>
@@ -3404,6 +3409,7 @@ fn testWeakRef(b: *Build, opts: Options) *Step {
 const Options = struct {
     zld: LazyPath,
     has_zig: bool,
+    has_objc_msgsend_stubs: bool,
     macos_sdk: []const u8,
     ios_sdk: ?[]const u8,
     cc_override: ?[]const u8,
