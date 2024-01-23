@@ -1762,7 +1762,7 @@ fn calcSectionSizes(self: *MachO) !void {
         const header = &self.sections.items(.header)[idx];
         header.size = self.stubs.size(self);
         header.@"align" = switch (cpu_arch) {
-            .x86_64 => 0,
+            .x86_64 => 1,
             .aarch64 => 2,
             else => 0,
         };
@@ -1771,11 +1771,7 @@ fn calcSectionSizes(self: *MachO) !void {
     if (self.stubs_helper_sect_index) |idx| {
         const header = &self.sections.items(.header)[idx];
         header.size = self.stubs_helper.size(self);
-        header.@"align" = switch (cpu_arch) {
-            .x86_64 => 0,
-            .aarch64 => 2,
-            else => 0,
-        };
+        header.@"align" = 2;
     }
 
     if (self.la_symbol_ptr_sect_index) |idx| {
