@@ -340,7 +340,11 @@ pub const LaSymbolPtrSection = struct {
         for (macho_file.stubs.symbols.items, 0..) |sym_index, idx| {
             const sym = macho_file.getSymbol(sym_index);
             const addr = sect.addr + idx * @sizeOf(u64);
-            const entry = bind.Entry{
+            const rebase_entry = Rebase.Entry{
+                .offset = addr - seg.vmaddr,
+                .segment_id = seg_id,
+            };
+            const bind_entry = bind.Entry{
                 .target = sym_index,
                 .offset = addr - seg.vmaddr,
                 .segment_id = seg_id,
@@ -348,20 +352,19 @@ pub const LaSymbolPtrSection = struct {
             };
             if (sym.flags.import) {
                 if (sym.flags.weak) {
-                    try macho_file.bind.entries.append(gpa, entry);
-                    try macho_file.weak_bind.entries.append(gpa, entry);
+                    try macho_file.bind.entries.append(gpa, bind_entry);
+                    try macho_file.weak_bind.entries.append(gpa, bind_entry);
                 } else {
-                    try macho_file.lazy_bind.entries.append(gpa, entry);
+                    try macho_file.lazy_bind.entries.append(gpa, bind_entry);
+                    try macho_file.rebase.entries.append(gpa, rebase_entry);
                 }
             } else {
                 if (sym.flags.weak) {
-                    try macho_file.rebase.entries.append(gpa, .{
-                        .offset = addr - seg.vmaddr,
-                        .segment_id = seg_id,
-                    });
-                    try macho_file.weak_bind.entries.append(gpa, entry);
+                    try macho_file.weak_bind.entries.append(gpa, bind_entry);
+                    try macho_file.rebase.entries.append(gpa, rebase_entry);
                 } else if (sym.flags.interposable) {
-                    try macho_file.lazy_bind.entries.append(gpa, entry);
+                    try macho_file.lazy_bind.entries.append(gpa, bind_entry);
+                    try macho_file.rebase.entries.append(gpa, rebase_entry);
                 }
             }
         }
