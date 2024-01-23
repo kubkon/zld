@@ -377,15 +377,19 @@ pub const LaSymbolPtrSection = struct {
         _ = laptr;
         const cpu_arch = macho_file.options.cpu_arch.?;
         const sect = macho_file.sections.items(.header)[macho_file.stubs_helper_sect_index.?];
-        for (macho_file.stubs.symbols.items, 0..) |sym_index, idx| {
+        var stub_helper_idx: u32 = 0;
+        for (macho_file.stubs.symbols.items) |sym_index| {
             const sym = macho_file.getSymbol(sym_index);
             const value: u64 = if (sym.flags.@"export")
                 sym.getAddress(.{ .stubs = false }, macho_file)
             else if (sym.flags.weak)
                 @as(u64, 0)
-            else
-                sect.addr + StubsHelperSection.preambleSize(cpu_arch) +
-                    StubsHelperSection.entrySize(cpu_arch) * idx;
+            else value: {
+                const value = sect.addr + StubsHelperSection.preambleSize(cpu_arch) +
+                    StubsHelperSection.entrySize(cpu_arch) * stub_helper_idx;
+                stub_helper_idx += 1;
+                break :value value;
+            };
             try writer.writeInt(u64, @intCast(value), .little);
         }
     }
