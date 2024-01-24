@@ -1806,11 +1806,13 @@ fn initSegments(self: *MachO) !void {
         const segname = header.segName();
         if (self.getSegmentByName(segname) == null) {
             const prot = getSegmentProt(segname);
+            const flags: u32 = if (mem.startsWith(u8, segname, "__DATA_CONST")) 0x10 else 0; // TODO usee macho.SG_READ_ONLY once upstreamed
             try self.segments.append(gpa, .{
                 .cmdsize = @sizeOf(macho.segment_command_64),
                 .segname = makeStaticString(segname),
                 .maxprot = prot,
                 .initprot = prot,
+                .flags = flags,
             });
         }
     }
