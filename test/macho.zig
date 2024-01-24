@@ -6,6 +6,7 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     var opts = Options{
         .zld = options.zld,
         .has_zig = options.has_zig,
+        .has_objc_msgsend_stubs = options.has_objc_msgsend_stubs,
         .macos_sdk = undefined,
         .ios_sdk = null,
         .cc_override = options.cc_override,
@@ -1058,12 +1059,24 @@ fn testFlatNamespaceWeak(b: *Build, opts: Options) *Step {
         test_step.dependOn(&check.step);
 
         const run = exe.run();
-        run.expectStdOutEqual(
-            \\main=2
-            \\liba=2
-            \\libb=2
-            \\
-        );
+
+        // TODO: this is quite a huge difference between macOS versions.
+        // I wonder what changed in dyld's behaviour.
+        if (builtin.target.os.version_range.semver.isAtLeast(.{ .major = 12, .minor = 0, .patch = 0 }) orelse false) {
+            run.expectStdOutEqual(
+                \\main=2
+                \\liba=2
+                \\libb=2
+                \\
+            );
+        } else {
+            run.expectStdOutEqual(
+                \\main=2
+                \\liba=1
+                \\libb=2
+                \\
+            );
+        }
         test_step.dependOn(run.step());
     }
 
@@ -1828,6 +1841,8 @@ fn testObjc(b: *Build, opts: Options) *Step {
 fn testObjcStubs(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-objc-stubs", "");
 
+    if (!opts.has_objc_msgsend_stubs) return skipTestStep(test_step);
+
     const exe = cc(b, "a.out", opts);
     exe.addObjCSource(
         \\@import Foundation;
@@ -1872,6 +1887,8 @@ fn testObjcStubs(b: *Build, opts: Options) *Step {
 
 fn testObjcStubs2(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-objc-stubs-2", "");
+
+    if (!opts.has_objc_msgsend_stubs) return skipTestStep(test_step);
 
     const all_h = saveBytesToFile(b, "all.h",
         \\#import <Foundation/Foundation.h>
@@ -3404,6 +3421,7 @@ fn testWeakRef(b: *Build, opts: Options) *Step {
 const Options = struct {
     zld: LazyPath,
     has_zig: bool,
+    has_objc_msgsend_stubs: bool,
     macos_sdk: []const u8,
     ios_sdk: ?[]const u8,
     cc_override: ?[]const u8,

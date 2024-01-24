@@ -5,13 +5,13 @@ on: [push, pull_request]
 jobs:
   default_tools:
     name: Test default system tools
-    runs-on: ${{ matrix.os }}-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         # https://github.com/kubkon/zld/issues/44
         # os: [macos, ubuntu, windows]
-        os: [macos, ubuntu]
+        os: [ macos-12, macos-latest, ubuntu-latest ]
 
     steps:
     - if: matrix.os == 'windows'
@@ -22,6 +22,17 @@ jobs:
         version: master
     - run: zig version
     - run: zig fmt --check src 
+    - run: zig build test -Dhas-static -Dhas-zig -Dhas-objc-msgsend-stubs
+
+  macos_11:
+    name: Test macos 11.0
+    runs-on: macos-11
+    steps:
+    - uses: actions/checkout@v3
+    - uses: goto-bus-stop/setup-zig@v2
+      with:
+        version: master
+    - run: zig version
     - run: zig build test -Dhas-static -Dhas-zig
 
   gcc_musl:

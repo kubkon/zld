@@ -415,7 +415,7 @@ pub fn flush(self: *MachO) !void {
         // The most important here is to have the correct vm and filesize of the __LINKEDIT segment
         // where the code signature goes into.
         var codesig = CodeSignature.init(self.getPageSize());
-        codesig.code_directory.ident = self.options.emit.sub_path;
+        codesig.code_directory.ident = std.fs.path.basename(self.options.emit.sub_path);
         if (self.options.entitlements) |path| try codesig.addEntitlements(gpa, path);
         try self.writeCodeSignaturePadding(&codesig);
         break :blk codesig;
@@ -1470,14 +1470,14 @@ fn initSyntheticSections(self: *MachO) !void {
     }
 
     const needs_unwind_info = for (self.objects.items) |index| {
-        if (self.getFile(index).?.object.compact_unwind_sect_index != null) break true;
+        if (self.getFile(index).?.object.hasUnwindRecords()) break true;
     } else false;
     if (needs_unwind_info) {
         self.unwind_info_sect_index = try self.addSection("__TEXT", "__unwind_info", .{});
     }
 
     const needs_eh_frame = for (self.objects.items) |index| {
-        if (self.getFile(index).?.object.eh_frame_sect_index != null) break true;
+        if (self.getFile(index).?.object.hasEhFrameRecords()) break true;
     } else false;
     if (needs_eh_frame) {
         assert(needs_unwind_info);
@@ -1536,42 +1536,59 @@ fn getSegmentProt(segname: []const u8) macho.vm_prot_t {
 
 fn getSegmentRank(segname: []const u8) u4 {
     if (mem.eql(u8, segname, "__PAGEZERO")) return 0x0;
-    if (mem.eql(u8, segname, "__TEXT")) return 0x1;
-    if (mem.eql(u8, segname, "__DATA_CONST")) return 0x2;
-    if (mem.eql(u8, segname, "__DATA")) return 0x3;
     if (mem.eql(u8, segname, "__LINKEDIT")) return 0x5;
+    if (mem.startsWith(u8, segname, "__TEXT")) return 0x1;
+    if (mem.startsWith(u8, segname, "__DATA_CONST")) return 0x2;
+    if (mem.startsWith(u8, segname, "__DATA")) return 0x3;
     return 0x4;
 }
 
-fn getSectionRank(self: *MachO, sect_index: u8) u8 {
-    const header = self.sections.items(.header)[sect_index];
-    const segment_rank = getSegmentRank(header.segName());
-    const section_rank: u4 = blk: {
-        if (header.isCode()) {
-            if (mem.eql(u8, "__text", header.sectName())) break :blk 0x0;
-            if (header.type() == macho.S_SYMBOL_STUBS) break :blk 0x1;
-            break :blk 0x2;
-        }
-        switch (header.type()) {
-            macho.S_NON_LAZY_SYMBOL_POINTERS,
-            macho.S_LAZY_SYMBOL_POINTERS,
-            => break :blk 0x0,
+fn segmentLessThan(ctx: void, lhs: []const u8, rhs: []const u8) bool {
+    _ = ctx;
+    const lhs_rank = getSegmentRank(lhs);
+    const rhs_rank = getSegmentRank(rhs);
+    if (lhs_rank == rhs_rank) {
+        return mem.order(u8, lhs, rhs) == .lt;
+    }
+    return lhs_rank < rhs_rank;
+}
 
-            macho.S_MOD_INIT_FUNC_POINTERS => break :blk 0x1,
-            macho.S_MOD_TERM_FUNC_POINTERS => break :blk 0x2,
-            macho.S_ZEROFILL => break :blk 0xf,
-            macho.S_THREAD_LOCAL_REGULAR => break :blk 0xd,
-            macho.S_THREAD_LOCAL_ZEROFILL => break :blk 0xe,
+fn getSectionRank(section: macho.section_64) u8 {
+    if (section.isCode()) {
+        if (mem.eql(u8, "__text", section.sectName())) return 0x0;
+        if (section.type() == macho.S_SYMBOL_STUBS) return 0x1;
+        return 0x2;
+    }
+    switch (section.type()) {
+        macho.S_NON_LAZY_SYMBOL_POINTERS,
+        macho.S_LAZY_SYMBOL_POINTERS,
+        => return 0x0,
 
-            else => {
-                if (mem.eql(u8, "__unwind_info", header.sectName())) break :blk 0xe;
-                if (mem.eql(u8, "__compact_unwind", header.sectName())) break :blk 0xe;
-                if (mem.eql(u8, "__eh_frame", header.sectName())) break :blk 0xf;
-                break :blk 0x3;
-            },
+        macho.S_MOD_INIT_FUNC_POINTERS => return 0x1,
+        macho.S_MOD_TERM_FUNC_POINTERS => return 0x2,
+        macho.S_ZEROFILL => return 0xf,
+        macho.S_THREAD_LOCAL_REGULAR => return 0xd,
+        macho.S_THREAD_LOCAL_ZEROFILL => return 0xe,
+
+        else => {
+            if (mem.eql(u8, "__unwind_info", section.sectName())) return 0xe;
+            if (mem.eql(u8, "__compact_unwind", section.sectName())) return 0xe;
+            if (mem.eql(u8, "__eh_frame", section.sectName())) return 0xf;
+            return 0x3;
+        },
+    }
+}
+
+fn sectionLessThan(ctx: void, lhs: macho.section_64, rhs: macho.section_64) bool {
+    if (mem.eql(u8, lhs.segName(), rhs.segName())) {
+        const lhs_rank = getSectionRank(lhs);
+        const rhs_rank = getSectionRank(rhs);
+        if (lhs_rank == rhs_rank) {
+            return mem.order(u8, lhs.sectName(), rhs.sectName()) == .lt;
         }
-    };
-    return (@as(u8, @intCast(segment_rank)) << 4) + section_rank;
+        return lhs_rank < rhs_rank;
+    }
+    return segmentLessThan(ctx, lhs.segName(), rhs.segName());
 }
 
 pub fn sortSections(self: *MachO) !void {
@@ -1579,7 +1596,11 @@ pub fn sortSections(self: *MachO) !void {
         index: u8,
 
         pub fn lessThan(macho_file: *MachO, lhs: @This(), rhs: @This()) bool {
-            return macho_file.getSectionRank(lhs.index) < macho_file.getSectionRank(rhs.index);
+            return sectionLessThan(
+                {},
+                macho_file.sections.items(.header)[lhs.index],
+                macho_file.sections.items(.header)[rhs.index],
+            );
         }
     };
 
@@ -1741,7 +1762,7 @@ fn calcSectionSizes(self: *MachO) !void {
         const header = &self.sections.items(.header)[idx];
         header.size = self.stubs.size(self);
         header.@"align" = switch (cpu_arch) {
-            .x86_64 => 0,
+            .x86_64 => 1,
             .aarch64 => 2,
             else => 0,
         };
@@ -1750,11 +1771,7 @@ fn calcSectionSizes(self: *MachO) !void {
     if (self.stubs_helper_sect_index) |idx| {
         const header = &self.sections.items(.header)[idx];
         header.size = self.stubs_helper.size(self);
-        header.@"align" = switch (cpu_arch) {
-            .x86_64 => 0,
-            .aarch64 => 2,
-            else => 0,
-        };
+        header.@"align" = 2;
     }
 
     if (self.la_symbol_ptr_sect_index) |idx| {
@@ -1789,11 +1806,13 @@ fn initSegments(self: *MachO) !void {
         const segname = header.segName();
         if (self.getSegmentByName(segname) == null) {
             const prot = getSegmentProt(segname);
+            const flags: u32 = if (mem.startsWith(u8, segname, "__DATA_CONST")) 0x10 else 0; // TODO usee macho.SG_READ_ONLY once upstreamed
             try self.segments.append(gpa, .{
                 .cmdsize = @sizeOf(macho.segment_command_64),
                 .segname = makeStaticString(segname),
                 .maxprot = prot,
                 .initprot = prot,
+                .flags = flags,
             });
         }
     }
@@ -1839,8 +1858,7 @@ fn initSegments(self: *MachO) !void {
 
     const sortFn = struct {
         fn sortFn(ctx: void, lhs: macho.segment_command_64, rhs: macho.segment_command_64) bool {
-            _ = ctx;
-            return getSegmentRank(lhs.segName()) < getSegmentRank(rhs.segName());
+            return segmentLessThan(ctx, lhs.segName(), rhs.segName());
         }
     }.sortFn;
 

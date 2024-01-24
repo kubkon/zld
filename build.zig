@@ -72,6 +72,7 @@ pub fn build(b: *std.Build) void {
     const has_static = b.option(bool, "has-static", "Whether the system compiler supports '-static' flag") orelse false;
     const has_zig = b.option(bool, "has-zig", "Whether the Zig compiler is in path") orelse false;
     const is_musl = b.option(bool, "musl", "Whether the tests are linked against musl libc") orelse false;
+    const has_objc_msgsend_stubs = b.option(bool, "has-objc-msgsend-stubs", "Whether the system compiler supports '-fobjc-msgsend-selector-stubs' flag") orelse false;
 
     const unit_tests = b.addTest(.{
         .root_source_file = .{ .path = "src/Zld.zig" },
@@ -93,6 +94,7 @@ pub fn build(b: *std.Build) void {
         .has_static = has_static,
         .has_zig = has_zig,
         .is_musl = is_musl,
+        .has_objc_msgsend_stubs = has_objc_msgsend_stubs,
     }));
 }
 

@@ -195,7 +195,7 @@ pub const StubsSection = struct {
 pub const StubsHelperSection = struct {
     pub inline fn preambleSize(cpu_arch: std.Target.Cpu.Arch) usize {
         return switch (cpu_arch) {
-            .x86_64 => 15,
+            .x86_64 => 16,
             .aarch64 => 6 * @sizeOf(u32),
             else => 0,
         };
@@ -217,9 +217,8 @@ pub const StubsHelperSection = struct {
         var s: usize = preambleSize(cpu_arch);
         for (macho_file.stubs.symbols.items) |sym_index| {
             const sym = macho_file.getSymbol(sym_index);
-            if ((sym.flags.import and !sym.flags.weak) or (!sym.flags.weak and sym.flags.interposable)) {
-                s += entrySize(cpu_arch);
-            }
+            if (sym.flags.weak) continue;
+            s += entrySize(cpu_arch);
         }
         return s;
     }
@@ -238,35 +237,34 @@ pub const StubsHelperSection = struct {
         var idx: usize = 0;
         for (macho_file.stubs.symbols.items) |sym_index| {
             const sym = macho_file.getSymbol(sym_index);
-            if ((sym.flags.import and !sym.flags.weak) or (!sym.flags.weak and sym.flags.interposable)) {
-                const offset = macho_file.lazy_bind.offsets.items[idx];
-                const source: i64 = @intCast(sect.addr + preamble_size + entry_size * idx);
-                const target: i64 = @intCast(sect.addr);
-                switch (cpu_arch) {
-                    .x86_64 => {
-                        try writer.writeByte(0x68);
-                        try writer.writeInt(u32, offset, .little);
-                        try writer.writeByte(0xe9);
-                        try writer.writeInt(i32, @intCast(target - source - 6 - 4), .little);
-                    },
-                    .aarch64 => {
-                        const literal = blk: {
-                            const div_res = try std.math.divExact(u64, entry_size - @sizeOf(u32), 4);
-                            break :blk std.math.cast(u18, div_res) orelse return error.Overflow;
-                        };
-                        try writer.writeInt(u32, aarch64.Instruction.ldrLiteral(
-                            .w16,
-                            literal,
-                        ).toU32(), .little);
-                        const disp = math.cast(i28, @as(i64, @intCast(target)) - @as(i64, @intCast(source + 4))) orelse
-                            return error.Overflow;
-                        try writer.writeInt(u32, aarch64.Instruction.b(disp).toU32(), .little);
-                        try writer.writeAll(&.{ 0x0, 0x0, 0x0, 0x0 });
-                    },
-                    else => unreachable,
-                }
-                idx += 1;
+            if (sym.flags.weak) continue;
+            const offset = macho_file.lazy_bind.offsets.items[idx];
+            const source: i64 = @intCast(sect.addr + preamble_size + entry_size * idx);
+            const target: i64 = @intCast(sect.addr);
+            switch (cpu_arch) {
+                .x86_64 => {
+                    try writer.writeByte(0x68);
+                    try writer.writeInt(u32, offset, .little);
+                    try writer.writeByte(0xe9);
+                    try writer.writeInt(i32, @intCast(target - source - 6 - 4), .little);
+                },
+                .aarch64 => {
+                    const literal = blk: {
+                        const div_res = try std.math.divExact(u64, entry_size - @sizeOf(u32), 4);
+                        break :blk std.math.cast(u18, div_res) orelse return error.Overflow;
+                    };
+                    try writer.writeInt(u32, aarch64.Instruction.ldrLiteral(
+                        .w16,
+                        literal,
+                    ).toU32(), .little);
+                    const disp = math.cast(i28, @as(i64, @intCast(target)) - @as(i64, @intCast(source + 4))) orelse
+                        return error.Overflow;
+                    try writer.writeInt(u32, aarch64.Instruction.b(disp).toU32(), .little);
+                    try writer.writeAll(&.{ 0x0, 0x0, 0x0, 0x0 });
+                },
+                else => unreachable,
             }
+            idx += 1;
         }
     }
 
@@ -288,6 +286,7 @@ pub const StubsHelperSection = struct {
                 try writer.writeInt(i32, @intCast(dyld_private_addr - sect.addr - 3 - 4), .little);
                 try writer.writeAll(&.{ 0x41, 0x53, 0xff, 0x25 });
                 try writer.writeInt(i32, @intCast(dyld_stub_binder_addr - sect.addr - 11 - 4), .little);
+                try writer.writeByte(0x90);
             },
             .aarch64 => {
                 {
@@ -340,7 +339,11 @@ pub const LaSymbolPtrSection = struct {
         for (macho_file.stubs.symbols.items, 0..) |sym_index, idx| {
             const sym = macho_file.getSymbol(sym_index);
             const addr = sect.addr + idx * @sizeOf(u64);
-            const entry = bind.Entry{
+            const rebase_entry = Rebase.Entry{
+                .offset = addr - seg.vmaddr,
+                .segment_id = seg_id,
+            };
+            const bind_entry = bind.Entry{
                 .target = sym_index,
                 .offset = addr - seg.vmaddr,
                 .segment_id = seg_id,
@@ -348,20 +351,19 @@ pub const LaSymbolPtrSection = struct {
             };
             if (sym.flags.import) {
                 if (sym.flags.weak) {
-                    try macho_file.bind.entries.append(gpa, entry);
-                    try macho_file.weak_bind.entries.append(gpa, entry);
+                    try macho_file.bind.entries.append(gpa, bind_entry);
+                    try macho_file.weak_bind.entries.append(gpa, bind_entry);
                 } else {
-                    try macho_file.lazy_bind.entries.append(gpa, entry);
+                    try macho_file.lazy_bind.entries.append(gpa, bind_entry);
+                    try macho_file.rebase.entries.append(gpa, rebase_entry);
                 }
             } else {
                 if (sym.flags.weak) {
-                    try macho_file.rebase.entries.append(gpa, .{
-                        .offset = addr - seg.vmaddr,
-                        .segment_id = seg_id,
-                    });
-                    try macho_file.weak_bind.entries.append(gpa, entry);
+                    try macho_file.weak_bind.entries.append(gpa, bind_entry);
+                    try macho_file.rebase.entries.append(gpa, rebase_entry);
                 } else if (sym.flags.interposable) {
-                    try macho_file.lazy_bind.entries.append(gpa, entry);
+                    try macho_file.lazy_bind.entries.append(gpa, bind_entry);
+                    try macho_file.rebase.entries.append(gpa, rebase_entry);
                 }
             }
         }
@@ -373,16 +375,18 @@ pub const LaSymbolPtrSection = struct {
         _ = laptr;
         const cpu_arch = macho_file.options.cpu_arch.?;
         const sect = macho_file.sections.items(.header)[macho_file.stubs_helper_sect_index.?];
-        for (macho_file.stubs.symbols.items, 0..) |sym_index, idx| {
+        var stub_helper_idx: u32 = 0;
+        for (macho_file.stubs.symbols.items) |sym_index| {
             const sym = macho_file.getSymbol(sym_index);
-            const value: u64 = if (sym.flags.@"export")
-                sym.getAddress(.{ .stubs = false }, macho_file)
-            else if (sym.flags.weak)
-                @as(u64, 0)
-            else
-                sect.addr + StubsHelperSection.preambleSize(cpu_arch) +
-                    StubsHelperSection.entrySize(cpu_arch) * idx;
-            try writer.writeInt(u64, @intCast(value), .little);
+            if (sym.flags.weak) {
+                const value = sym.getAddress(.{ .stubs = false }, macho_file);
+                try writer.writeInt(u64, @intCast(value), .little);
+            } else {
+                const value = sect.addr + StubsHelperSection.preambleSize(cpu_arch) +
+                    StubsHelperSection.entrySize(cpu_arch) * stub_helper_idx;
+                stub_helper_idx += 1;
+                try writer.writeInt(u64, @intCast(value), .little);
+            }
         }
     }
 };

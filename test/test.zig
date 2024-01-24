@@ -3,6 +3,7 @@ pub fn addTests(b: *Build, comp: *Compile, build_opts: struct {
     has_static: bool,
     has_zig: bool,
     is_musl: bool,
+    has_objc_msgsend_stubs: bool,
 }) *Step {
     const test_step = b.step("test-system-tools", "Run all system tools tests");
     test_step.dependOn(&comp.step);
@@ -24,6 +25,7 @@ pub fn addTests(b: *Build, comp: *Compile, build_opts: struct {
         .system_compiler = system_compiler,
         .has_static = build_opts.has_static,
         .has_zig = build_opts.has_zig,
+        .has_objc_msgsend_stubs = build_opts.has_objc_msgsend_stubs,
         .is_musl = build_opts.is_musl,
         .cc_override = cc_override,
     };
@@ -44,6 +46,7 @@ pub const Options = struct {
     system_compiler: SystemCompiler,
     has_static: bool = false,
     has_zig: bool = false,
+    has_objc_msgsend_stubs: bool = false,
     is_musl: bool = false,
     cc_override: ?[]const u8 = null,
 };
