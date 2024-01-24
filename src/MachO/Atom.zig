@@ -183,7 +183,7 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
         switch (rel.type) {
             .branch => {
                 const symbol = rel.getTargetSymbol(macho_file);
-                if (symbol.flags.import or (symbol.flags.@"export" and (symbol.flags.weak or symbol.flags.interposable))) {
+                if (symbol.flags.import or (symbol.flags.@"export" and symbol.flags.weak) or symbol.flags.interposable) {
                     symbol.flags.stubs = true;
                     if (symbol.flags.weak) {
                         macho_file.binds_to_weak = true;
@@ -199,7 +199,8 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
             => {
                 const symbol = rel.getTargetSymbol(macho_file);
                 if (symbol.flags.import or
-                    (symbol.flags.@"export" and (symbol.flags.weak or symbol.flags.interposable)) or
+                    (symbol.flags.@"export" and symbol.flags.weak) or
+                    symbol.flags.interposable or
                     macho_file.options.cpu_arch.? == .aarch64) // TODO relax on arm64
                 {
                     symbol.flags.got = true;
@@ -224,7 +225,7 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
                         .{ object.fmtPath(), self.getName(macho_file), symbol.getName(macho_file) },
                     );
                 }
-                if (symbol.flags.import or (symbol.flags.@"export" and (symbol.flags.weak or symbol.flags.interposable))) {
+                if (symbol.flags.import or (symbol.flags.@"export" and symbol.flags.weak) or symbol.flags.interposable) {
                     symbol.flags.tlv_ptr = true;
                     if (symbol.flags.weak) {
                         macho_file.binds_to_weak = true;
@@ -248,13 +249,11 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
                             }
                             continue;
                         }
-                        if (symbol.flags.@"export") {
-                            if (symbol.flags.weak) {
-                                object.num_weak_bind_relocs += 1;
-                                macho_file.binds_to_weak = true;
-                            } else if (symbol.flags.interposable) {
-                                object.num_bind_relocs += 1;
-                            }
+                        if (symbol.flags.@"export" and symbol.flags.weak) {
+                            object.num_weak_bind_relocs += 1;
+                            macho_file.binds_to_weak = true;
+                        } else if (symbol.flags.interposable) {
+                            object.num_bind_relocs += 1;
                         }
                     }
                     object.num_rebase_relocs += 1;
@@ -391,12 +390,10 @@ fn resolveRelocInner(
                         }
                         return;
                     }
-                    if (sym.flags.@"export") {
-                        if (sym.flags.weak) {
-                            macho_file.weak_bind.entries.appendAssumeCapacity(entry);
-                        } else if (sym.flags.interposable) {
-                            macho_file.bind.entries.appendAssumeCapacity(entry);
-                        }
+                    if (sym.flags.@"export" and sym.flags.weak) {
+                        macho_file.weak_bind.entries.appendAssumeCapacity(entry);
+                    } else if (sym.flags.interposable) {
+                        macho_file.bind.entries.appendAssumeCapacity(entry);
                     }
                 }
                 macho_file.rebase.entries.appendAssumeCapacity(.{
