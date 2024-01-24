@@ -1059,12 +1059,24 @@ fn testFlatNamespaceWeak(b: *Build, opts: Options) *Step {
         test_step.dependOn(&check.step);
 
         const run = exe.run();
-        run.expectStdOutEqual(
-            \\main=2
-            \\liba=2
-            \\libb=2
-            \\
-        );
+
+        // TODO: this is quite a huge difference between macOS versions.
+        // I wonder what changed in dyld's behaviour.
+        if (builtin.target.os.version_range.semver.isAtLeast(.{ .major = 12, .minor = 0, .patch = 0 }) orelse false) {
+            run.expectStdOutEqual(
+                \\main=2
+                \\liba=2
+                \\libb=2
+                \\
+            );
+        } else {
+            run.expectStdOutEqual(
+                \\main=2
+                \\liba=1
+                \\libb=2
+                \\
+            );
+        }
         test_step.dependOn(run.step());
     }
 
