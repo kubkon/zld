@@ -296,15 +296,11 @@ pub fn initOutputSection(self: Object, elf_file: *Elf, shdr: elf.Elf64_Shdr) !u1
             else => flags,
         };
     };
-    const out_shndx = elf_file.getSectionByName(name) orelse try elf_file.addSection(.{
+    return elf_file.getSectionByName(name) orelse try elf_file.addSection(.{
         .type = @"type",
         .flags = flags,
         .name = name,
     });
-    if (mem.eql(u8, ".text", name)) {
-        elf_file.text_sect_index = out_shndx;
-    }
-    return out_shndx;
 }
 
 fn parseEhFrame(self: *Object, shndx: u16, elf_file: *Elf) !void {
