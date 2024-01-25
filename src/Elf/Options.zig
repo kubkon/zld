@@ -156,7 +156,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             opts.emit.sub_path = path;
         } else if (p.flag1("r") or p.flagAny("relocatable")) {
             opts.relocatable = true;
-        } else if (p.arg1("image-base")) |value| {
+        } else if (p.argAny("image-base")) |value| {
             opts.image_base = std.fmt.parseInt(u64, value, 0) catch
                 ctx.fatal("Could not parse value '{s}' into integer", .{value});
         } else if (p.flagAny("gc-sections")) {
