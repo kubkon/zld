@@ -61,10 +61,12 @@ pub fn getPriority(self: Atom, macho_file: *MachO) u64 {
     return (@as(u64, @intCast(file.getIndex())) << 32) | @as(u64, @intCast(self.n_sect));
 }
 
-pub fn getCode(self: Atom, macho_file: *MachO) []const u8 {
+pub fn getCode(self: Atom, macho_file: *MachO) ![]const u8 {
+    const gpa = macho_file.base.allocator;
     const code = switch (self.getFile(macho_file)) {
         .dylib => unreachable,
-        inline else => |x| x.getSectionData(self.n_sect),
+        .object => |x| try x.getSectionData(gpa, self.n_sect),
+        .internal => |x| x.getSectionData(self.n_sect),
     };
     return code[self.off..][0..self.size];
 }
@@ -290,7 +292,9 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, buffer: []u8) !void {
     const relocs = self.getRelocs(macho_file);
     const file = self.getFile(macho_file);
     const name = self.getName(macho_file);
-    @memcpy(buffer, self.getCode(macho_file));
+    const code = try self.getCode(macho_file);
+    defer macho_file.base.allocator.free(code);
+    @memcpy(buffer, code);
 
     relocs_log.debug("{x}: {s}", .{ self.value, name });
 

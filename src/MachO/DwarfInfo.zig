@@ -13,6 +13,10 @@ pub fn init(dw: *DwarfInfo, allocator: Allocator) !void {
 }
 
 pub fn deinit(dw: *DwarfInfo, allocator: Allocator) void {
+    allocator.free(dw.debug_info);
+    allocator.free(dw.debug_abbrev);
+    allocator.free(dw.debug_str);
+
     dw.abbrev_tables.deinit(allocator);
     for (dw.compile_units.items) |*cu| {
         cu.deinit(allocator);

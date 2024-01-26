@@ -664,21 +664,20 @@ fn addUndefinedGlobals(self: *MachO) !void {
 fn parsePositional(self: *MachO, arena: Allocator, obj: LinkObject) !void {
     log.debug("parsing positional {}", .{obj});
 
-    if (try self.parseObject(arena, obj)) return;
-    if (try self.parseArchive(arena, obj)) return;
+    if (try self.parseObject(obj)) return;
+    if (try self.parseArchive(obj)) return;
     if (try self.parseDylib(arena, obj, true)) |_| return;
     if (try self.parseTbd(obj, true)) |_| return;
 
     self.base.fatal("unknown filetype for positional argument: '{s}'", .{obj.path});
 }
 
-fn parseObject(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
+fn parseObject(self: *MachO, obj: LinkObject) !bool {
     const tracy = trace(@src());
     defer tracy.end();
 
     const gpa = self.base.allocator;
     const file = try std.fs.cwd().openFile(obj.path, .{});
-    defer file.close();
 
     const header = file.reader().readStruct(macho.mach_header_64) catch return false;
     try file.seekTo(0);
@@ -689,12 +688,11 @@ fn parseObject(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
         const stat = file.stat() catch break :mtime 0;
         break :mtime @as(u64, @intCast(@divFloor(stat.mtime, 1_000_000_000)));
     };
-    const data = try file.readToEndAlloc(arena, std.math.maxInt(u32));
 
     const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
     self.files.set(index, .{ .object = .{
         .path = obj.path,
-        .data = data,
+        .file = file,
         .index = index,
         .mtime = mtime,
     } });
@@ -707,37 +705,29 @@ fn parseObject(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
     return true;
 }
 
-fn parseArchive(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
+fn parseArchive(self: *MachO, obj: LinkObject) !bool {
     const tracy = trace(@src());
     defer tracy.end();
 
     const gpa = self.base.allocator;
-
     const file = try std.fs.cwd().openFile(obj.path, .{});
-    defer file.close();
 
-    var offset: u64 = 0;
-    var size: u64 = (try file.stat()).size;
-    if (fat.isFatLibrary(file)) {
-        const fat_arch = self.parseFatLibrary(obj.path, file) catch |err| switch (err) {
+    const fat_arch: ?fat.Arch = if (fat.isFatLibrary(file)) blk: {
+        break :blk self.parseFatLibrary(obj.path, file) catch |err| switch (err) {
             error.NoArchSpecified, error.MissingArch => return false,
             else => |e| return e,
         };
-        offset = fat_arch.offset;
-        size = fat_arch.size;
-        try file.seekTo(offset);
-    }
+    } else null;
+    const offset = if (fat_arch) |ar| ar.offset else 0;
+    try file.seekTo(offset);
 
     const magic = file.reader().readBytesNoEof(Archive.SARMAG) catch return false;
     if (!mem.eql(u8, &magic, Archive.ARMAG)) return false;
+    try file.seekTo(0);
 
-    const data = try arena.alloc(u8, size - Archive.SARMAG);
-    const nread = try file.readAll(data);
-    if (nread != size - Archive.SARMAG) return error.InputOutput;
-
-    var archive = Archive{ .path = obj.path, .data = data };
+    var archive = Archive{ .path = obj.path, .file = file, .fat_arch = fat_arch };
     defer archive.deinit(gpa);
-    try archive.parse(arena, self);
+    try archive.parse(self);
 
     var has_parse_error = false;
     for (archive.objects.items) |extracted| {
@@ -1057,6 +1047,8 @@ pub fn resolveSymbols(self: *MachO) !void {
         const index = self.objects.items[i];
         if (!self.getFile(index).?.object.alive) {
             _ = self.objects.orderedRemove(i);
+            self.files.items(.data)[index].object.deinit(self.base.allocator);
+            self.files.set(index, .null);
         } else i += 1;
     }
 
