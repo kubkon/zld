@@ -66,7 +66,7 @@ pub fn getCode(self: Atom, macho_file: *MachO) ![]const u8 {
     const code = switch (self.getFile(macho_file)) {
         .dylib => unreachable,
         .object => |x| try x.getSectionData(gpa, self.n_sect),
-        .internal => |x| x.getSectionData(self.n_sect),
+        .internal => |x| try gpa.dupe(u8, x.getSectionData(self.n_sect)),
     };
     return code[self.off..][0..self.size];
 }

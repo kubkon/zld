@@ -975,7 +975,7 @@ fn initDwarfInfo(self: *Object, macho_file: *MachO) !void {
     var dwarf_info = DwarfInfo{
         .debug_info = try self.getSectionData(gpa, @intCast(debug_info_index.?)),
         .debug_abbrev = try self.getSectionData(gpa, @intCast(debug_abbrev_index.?)),
-        .debug_str = if (debug_str_index) |index| try self.getSectionData(gpa, @intCast(index)) else "",
+        .debug_str = if (debug_str_index) |index| try self.getSectionData(gpa, @intCast(index)) else &[0]u8{},
     };
     errdefer dwarf_info.deinit(gpa);
     dwarf_info.init(gpa) catch {

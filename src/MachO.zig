@@ -691,7 +691,7 @@ fn parseObject(self: *MachO, obj: LinkObject) !bool {
 
     const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
     self.files.set(index, .{ .object = .{
-        .path = obj.path,
+        .path = try gpa.dupe(u8, obj.path),
         .file = file,
         .index = index,
         .mtime = mtime,
