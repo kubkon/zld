@@ -500,6 +500,8 @@ fn initOutputSections(self: *Elf) !void {
             atom.out_shndx = try object.initOutputSection(self, atom.getInputShdr(self));
         }
     }
+
+    self.text_sect_index = self.getSectionByName(".text");
 }
 
 fn initSyntheticSections(self: *Elf) !void {

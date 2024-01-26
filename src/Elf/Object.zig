@@ -260,7 +260,8 @@ pub fn initOutputSection(self: Object, elf_file: *Elf, shdr: elf.Elf64_Shdr) !u1
     const name = blk: {
         const name = self.getShString(shdr.sh_name);
         if (elf_file.options.relocatable) break :blk name;
-        if (shdr.sh_flags & elf.SHF_MERGE != 0) break :blk name;
+        if (shdr.sh_flags & elf.SHF_MERGE != 0 and shdr.sh_flags & elf.SHF_STRINGS == 0)
+            break :blk name; // TODO: consider dropping SHF_STRINGS once ICF is implemented
         const sh_name_prefixes: []const [:0]const u8 = &.{
             ".text",       ".data.rel.ro", ".data", ".rodata", ".bss.rel.ro",       ".bss",
             ".init_array", ".fini_array",  ".tbss", ".tdata",  ".gcc_except_table", ".ctors",
@@ -295,15 +296,11 @@ pub fn initOutputSection(self: Object, elf_file: *Elf, shdr: elf.Elf64_Shdr) !u1
             else => flags,
         };
     };
-    const out_shndx = elf_file.getSectionByName(name) orelse try elf_file.addSection(.{
+    return elf_file.getSectionByName(name) orelse try elf_file.addSection(.{
         .type = @"type",
         .flags = flags,
         .name = name,
     });
-    if (mem.eql(u8, ".text", name)) {
-        elf_file.text_sect_index = out_shndx;
-    }
-    return out_shndx;
 }
 
 fn parseEhFrame(self: *Object, shndx: u16, elf_file: *Elf) !void {
