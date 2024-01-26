@@ -63,12 +63,18 @@ pub fn getPriority(self: Atom, macho_file: *MachO) u64 {
 
 pub fn getCode(self: Atom, macho_file: *MachO) ![]const u8 {
     const gpa = macho_file.base.allocator;
-    const code = switch (self.getFile(macho_file)) {
+    switch (self.getFile(macho_file)) {
         .dylib => unreachable,
-        .object => |x| try x.getSectionData(gpa, self.n_sect),
-        .internal => |x| try gpa.dupe(u8, x.getSectionData(self.n_sect)),
-    };
-    return code[self.off..][0..self.size];
+        .object => |x| {
+            const code = try x.getSectionData(gpa, self.n_sect);
+            defer gpa.free(code);
+            return gpa.dupe(u8, code[self.off..][0..self.size]);
+        },
+        .internal => |x| {
+            const code = x.getSectionData(self.n_sect);
+            return gpa.dupe(u8, code[self.off..][0..self.size]);
+        },
+    }
 }
 
 pub fn getRelocs(self: Atom, macho_file: *MachO) []const Relocation {
