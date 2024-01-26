@@ -7,7 +7,7 @@ pub const enable_allocation = enable;
 pub const enable_callstack = enable;
 
 // TODO: make this configurable
-const callstack_depth = 10;
+const callstack_depth = build_options.tracy_callstack_depth;
 
 const ___tracy_c_zone_context = extern struct {
     id: u32,
@@ -60,7 +60,7 @@ pub const Ctx = if (enable) ___tracy_c_zone_context else struct {
     }
 };
 
-pub inline fn trace(comptime src: std.builtin.SourceLocation) Ctx {
+pub fn trace(comptime src: std.builtin.SourceLocation) Ctx {
     if (!enable) return .{};
 
     const global = struct {
