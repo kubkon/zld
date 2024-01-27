@@ -72,28 +72,12 @@ pub fn getCode(self: Atom, macho_file: *MachO, buffer: []u8) !void {
             const slice = x.sections.slice();
             const offset = if (x.archive) |ar| ar.offset else 0;
             const sect = slice.items(.header)[self.n_sect];
-            try x.preadAll(buffer, sect.offset + offset + self.off);
+            const amt = try x.file.preadAll(buffer, sect.offset + offset + self.off);
+            if (amt != buffer.len) return error.InputOutput;
         },
         .internal => |x| {
             const code = x.getSectionData(self.n_sect);
             @memcpy(buffer, code);
-        },
-    }
-}
-
-pub fn getCodeAlloc(self: Atom, macho_file: *MachO) ![]const u8 {
-    const gpa = macho_file.base.allocator;
-    switch (self.getFile(macho_file)) {
-        .dylib => unreachable,
-        .object => |x| {
-            const slice = x.sections.slice();
-            const offset = if (x.archive) |ar| ar.offset else 0;
-            const sect = slice.items(.header)[self.n_sect];
-            return x.preadAllAlloc(gpa, sect.offset + offset + self.off, self.size);
-        },
-        .internal => |x| {
-            const code = x.getSectionData(self.n_sect);
-            return gpa.dupe(u8, code[self.off..][0..self.size]);
         },
     }
 }

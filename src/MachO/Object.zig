@@ -75,12 +75,16 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
 
     self.header = try reader.readStruct(macho.mach_header_64);
 
-    const lc_data = try self.preadAllAlloc(gpa, offset + @sizeOf(macho.mach_header_64), self.header.?.sizeofcmds);
-    defer gpa.free(lc_data);
+    const lc_buffer = try gpa.alloc(u8, self.header.?.sizeofcmds);
+    defer gpa.free(lc_buffer);
+    {
+        const amt = try self.file.preadAll(lc_buffer, offset + @sizeOf(macho.mach_header_64));
+        if (amt != self.header.?.sizeofcmds) return error.InputOutput;
+    }
 
     var it = LoadCommandIterator{
         .ncmds = self.header.?.ncmds,
-        .buffer = lc_data,
+        .buffer = lc_buffer,
     };
     while (it.next()) |lc| switch (lc.cmd()) {
         .SEGMENT_64 => {
@@ -100,9 +104,17 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
         .SYMTAB => {
             const cmd = lc.cast(macho.symtab_command).?;
             try self.strtab.resize(gpa, cmd.strsize);
-            try self.preadAll(self.strtab.items, cmd.stroff + offset);
-            const symtab_buffer = try self.preadAllAlloc(gpa, cmd.symoff + offset, cmd.nsyms * @sizeOf(macho.nlist_64));
+            {
+                const amt = try self.file.preadAll(self.strtab.items, cmd.stroff + offset);
+                if (amt != self.strtab.items.len) return error.InputOutput;
+            }
+
+            const symtab_buffer = try gpa.alloc(u8, cmd.nsyms * @sizeOf(macho.nlist_64));
             defer gpa.free(symtab_buffer);
+            {
+                const amt = try self.file.preadAll(symtab_buffer, cmd.symoff + offset);
+                if (amt != symtab_buffer.len) return error.InputOutput;
+            }
             const symtab = @as([*]align(1) const macho.nlist_64, @ptrCast(symtab_buffer.ptr))[0..cmd.nsyms];
             try self.symtab.ensureUnusedCapacity(gpa, symtab.len);
             for (symtab) |nlist| {
@@ -115,8 +127,12 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
         },
         .DATA_IN_CODE => {
             const cmd = lc.cast(macho.linkedit_data_command).?;
-            const buffer = try self.preadAllAlloc(gpa, offset + cmd.dataoff, cmd.datasize);
+            const buffer = try gpa.alloc(u8, cmd.datasize);
             defer gpa.free(buffer);
+            {
+                const amt = try self.file.preadAll(buffer, offset + cmd.dataoff);
+                if (amt != buffer.len) return error.InputOutput;
+            }
             const ndice = @divExact(cmd.datasize, @sizeOf(macho.data_in_code_entry));
             const dice = @as([*]align(1) const macho.data_in_code_entry, @ptrCast(buffer.ptr))[0..ndice];
             try self.data_in_code.appendUnalignedSlice(gpa, dice);
@@ -1509,24 +1525,16 @@ pub fn writeStabs(self: *const Object, macho_file: *MachO) void {
     }
 }
 
-pub fn preadAll(self: *const Object, buf: []u8, off: usize) !void {
-    const amt = try self.file.preadAll(buf, off);
-    if (amt != buf.len) return error.InputOutput;
-}
-
-pub fn preadAllAlloc(self: *const Object, allocator: Allocator, off: usize, size: usize) ![]u8 {
-    const buffer = try allocator.alloc(u8, size);
-    errdefer allocator.free(buffer);
-    try self.preadAll(buffer, off);
-    return buffer;
-}
-
 pub fn getSectionData(self: *const Object, allocator: Allocator, index: u32) ![]u8 {
     const slice = self.sections.slice();
     assert(index < slice.items(.header).len);
     const sect = slice.items(.header)[index];
     const offset = if (self.archive) |ar| ar.offset else 0;
-    return self.preadAllAlloc(allocator, sect.offset + offset, sect.size);
+    const buffer = try allocator.alloc(u8, sect.size);
+    errdefer allocator.free(buffer);
+    const amt = try self.file.preadAll(buffer, sect.offset + offset);
+    if (amt != buffer.len) return error.InputOutput;
+    return buffer;
 }
 
 fn addString(self: *Object, allocator: Allocator, name: [:0]const u8) error{OutOfMemory}!u32 {
@@ -1799,9 +1807,12 @@ const x86_64 = struct {
         const gpa = macho_file.base.allocator;
 
         const offset = if (self.archive) |ar| ar.offset else 0;
-        const relocs_buffer = try self.preadAllAlloc(gpa, sect.reloff + offset, sect.nreloc * @sizeOf(macho.relocation_info));
+        const relocs_buffer = try gpa.alloc(u8, sect.nreloc * @sizeOf(macho.relocation_info));
         defer gpa.free(relocs_buffer);
-
+        {
+            const amt = try self.file.preadAll(relocs_buffer, sect.reloff + offset);
+            if (amt != relocs_buffer.len) return error.InputOutput;
+        }
         const relocs = @as([*]align(1) const macho.relocation_info, @ptrCast(relocs_buffer.ptr))[0..sect.nreloc];
 
         const code = try self.getSectionData(gpa, @intCast(n_sect));
@@ -1954,9 +1965,12 @@ const aarch64 = struct {
         const gpa = macho_file.base.allocator;
 
         const offset = if (self.archive) |ar| ar.offset else 0;
-        const relocs_buffer = try self.preadAllAlloc(gpa, sect.reloff + offset, sect.nreloc * @sizeOf(macho.relocation_info));
+        const relocs_buffer = try gpa.alloc(u8, sect.nreloc * @sizeOf(macho.relocation_info));
         defer gpa.free(relocs_buffer);
-
+        {
+            const amt = try self.file.preadAll(relocs_buffer, sect.reloff + offset);
+            if (amt != relocs_buffer.len) return error.InputOutput;
+        }
         const relocs = @as([*]align(1) const macho.relocation_info, @ptrCast(relocs_buffer.ptr))[0..sect.nreloc];
 
         const code = try self.getSectionData(gpa, @intCast(n_sect));
