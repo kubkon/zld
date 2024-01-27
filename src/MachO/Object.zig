@@ -69,11 +69,14 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
     log.debug("parsing input object file {}", .{self.fmtPath()});
 
     const gpa = macho_file.base.allocator;
-    const reader = self.file.reader();
     const offset = if (self.archive) |ar| ar.offset else 0;
-    try self.file.seekTo(offset);
 
-    self.header = try reader.readStruct(macho.mach_header_64);
+    var header_buffer: [@sizeOf(macho.mach_header_64)]u8 = undefined;
+    {
+        const amt = try self.file.preadAll(&header_buffer, offset);
+        if (amt != @sizeOf(macho.mach_header_64)) return error.InputOutput;
+    }
+    self.header = @as(*align(1) const macho.mach_header_64, @ptrCast(&header_buffer)).*;
 
     const lc_buffer = try gpa.alloc(u8, self.header.?.sizeofcmds);
     defer gpa.free(lc_buffer);
