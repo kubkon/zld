@@ -701,6 +701,7 @@ fn parseArchive(self: *MachO, obj: LinkObject) !bool {
 
     const gpa = self.base.allocator;
     const file = try std.fs.cwd().openFile(obj.path, .{});
+    defer file.close();
 
     const fat_arch: ?fat.Arch = if (fat.isFatLibrary(file)) blk: {
         break :blk self.parseFatLibrary(obj.path, file) catch |err| switch (err) {
@@ -715,9 +716,9 @@ fn parseArchive(self: *MachO, obj: LinkObject) !bool {
     if (!mem.eql(u8, &magic, Archive.ARMAG)) return false;
     try file.seekTo(0);
 
-    var archive = Archive{ .path = obj.path, .file = file, .fat_arch = fat_arch };
+    var archive = Archive{};
     defer archive.deinit(gpa);
-    try archive.parse(self);
+    try archive.parse(self, obj.path, file, fat_arch);
 
     var has_parse_error = false;
     for (archive.objects.items) |extracted| {

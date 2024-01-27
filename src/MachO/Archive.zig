@@ -1,7 +1,3 @@
-file: std.fs.File,
-fat_arch: ?fat.Arch,
-path: []const u8,
-
 objects: std.ArrayListUnmanaged(Object) = .{},
 
 // Archive files start with the ARMAG identifying string.  Then follows a
@@ -63,25 +59,24 @@ const ar_hdr = extern struct {
 };
 
 pub fn deinit(self: *Archive, allocator: Allocator) void {
-    self.file.close();
     self.objects.deinit(allocator);
 }
 
-pub fn parse(self: *Archive, macho_file: *MachO) !void {
+pub fn parse(self: *Archive, macho_file: *MachO, path: []const u8, file: std.fs.File, fat_arch: ?fat.Arch) !void {
     const gpa = macho_file.base.allocator;
 
-    const offset = if (self.fat_arch) |ar| ar.offset else 0;
-    const size = if (self.fat_arch) |ar| ar.size else (try self.file.stat()).size;
-    try self.file.seekTo(offset);
+    const offset = if (fat_arch) |ar| ar.offset else 0;
+    const size = if (fat_arch) |ar| ar.size else (try file.stat()).size;
+    try file.seekTo(offset);
 
-    const reader = self.file.reader();
+    const reader = file.reader();
     _ = try reader.readBytesNoEof(Archive.SARMAG);
 
     var pos: usize = Archive.SARMAG;
     while (true) {
         if (pos >= size) break;
         if (!mem.isAligned(pos, 2)) {
-            try self.file.seekBy(1);
+            try file.seekBy(1);
             pos += 1;
         }
 
@@ -90,7 +85,7 @@ pub fn parse(self: *Archive, macho_file: *MachO) !void {
 
         if (!mem.eql(u8, &hdr.ar_fmag, ARFMAG)) {
             macho_file.base.fatal("{s}: invalid header delimiter: expected '{s}', found '{s}'", .{
-                self.path, std.fmt.fmtSliceEscapeLower(ARFMAG), std.fmt.fmtSliceEscapeLower(&hdr.ar_fmag),
+                path, std.fmt.fmtSliceEscapeLower(ARFMAG), std.fmt.fmtSliceEscapeLower(&hdr.ar_fmag),
             });
             return error.ParseFailed;
         }
@@ -109,7 +104,7 @@ pub fn parse(self: *Archive, macho_file: *MachO) !void {
             unreachable;
         };
         defer {
-            _ = self.file.seekBy(hdr_size) catch {};
+            _ = file.seekBy(hdr_size) catch {};
             pos += hdr_size;
         }
 
@@ -117,17 +112,17 @@ pub fn parse(self: *Archive, macho_file: *MachO) !void {
 
         const object = Object{
             .archive = .{
-                .path = try gpa.dupe(u8, self.path),
+                .path = try gpa.dupe(u8, path),
                 .offset = offset + pos,
             },
             .path = name,
-            .file = try std.fs.cwd().openFile(self.path, .{}),
+            .file = try std.fs.cwd().openFile(path, .{}),
             .index = undefined,
             .alive = false,
             .mtime = hdr.date() catch 0,
         };
 
-        log.debug("extracting object '{s}' from archive '{s}'", .{ object.path, self.path });
+        log.debug("extracting object '{s}' from archive '{s}'", .{ object.path, path });
 
         try self.objects.append(gpa, object);
     }
