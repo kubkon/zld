@@ -1226,10 +1226,6 @@ fn createObjcSections(self: *MachO) !void {
         const internal = self.getInternalObject().?;
         const sym = self.getSymbol(sym_index);
         _ = try internal.addSymbol(sym.getName(self), self);
-        sym.value = 0;
-        sym.atom = 0;
-        sym.nlist_idx = 0;
-        sym.flags = .{ .global = true };
         sym.visibility = .hidden;
         const name = eatPrefix(sym.getName(self), "_objc_msgSend$").?;
         const selrefs_index = try internal.addObjcMsgsendSections(name, self);

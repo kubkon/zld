@@ -21,6 +21,7 @@ pub fn deinit(dw: *DwarfInfo, allocator: Allocator) void {
     }
     dw.compile_units.deinit(allocator);
     dw.strtab.deinit(allocator);
+    dw.di_data.deinit(allocator);
 }
 
 fn appendDiData(dw: *DwarfInfo, allocator: Allocator, values: []const u8) error{OutOfMemory}!u32 {
