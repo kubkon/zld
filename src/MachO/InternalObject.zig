@@ -27,6 +27,7 @@ pub fn addSymbol(self: *InternalObject, name: [:0]const u8, macho_file: *MachO) 
     self.symbols.addOneAssumeCapacity().* = gop.index;
     const sym = macho_file.getSymbol(gop.index);
     sym.* = .{ .name = off, .file = self.index };
+    sym.flags.global = true;
     return gop.index;
 }
 

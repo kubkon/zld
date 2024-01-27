@@ -237,7 +237,7 @@ fn initSubsections(self: *Object, nlists: anytype, macho_file: *MachO) !void {
             defer gpa.free(name);
             const size = if (nlist_start == nlist_end) sect.size else nlists[nlist_start].nlist.n_value - sect.addr;
             const atom_index = try self.addAtom(.{
-                .name = name,
+                .name = try self.addString(gpa, name),
                 .n_sect = @intCast(n_sect),
                 .off = 0,
                 .size = size,
@@ -267,7 +267,7 @@ fn initSubsections(self: *Object, nlists: anytype, macho_file: *MachO) !void {
             else
                 sect.@"align";
             const atom_index = try self.addAtom(.{
-                .name = self.getString(nlist.nlist.n_strx),
+                .name = nlist.nlist.n_strx,
                 .n_sect = @intCast(n_sect),
                 .off = nlist.nlist.n_value - sect.addr,
                 .size = size,
@@ -300,7 +300,7 @@ fn initSections(self: *Object, nlists: anytype, macho_file: *MachO) !void {
         defer gpa.free(name);
 
         const atom_index = try self.addAtom(.{
-            .name = name,
+            .name = try self.addString(gpa, name),
             .n_sect = @intCast(n_sect),
             .off = 0,
             .size = sect.size,
@@ -336,7 +336,7 @@ fn initSections(self: *Object, nlists: anytype, macho_file: *MachO) !void {
 }
 
 const AddAtomArgs = struct {
-    name: [:0]const u8,
+    name: u32,
     n_sect: u8,
     off: u64,
     size: u64,
@@ -349,7 +349,7 @@ fn addAtom(self: *Object, args: AddAtomArgs, macho_file: *MachO) !Atom.Index {
     const atom = macho_file.getAtom(atom_index).?;
     atom.file = self.index;
     atom.atom_index = atom_index;
-    atom.name = try macho_file.string_intern.insert(gpa, args.name);
+    atom.name = args.name;
     atom.n_sect = args.n_sect;
     atom.size = args.size;
     atom.alignment = args.alignment;
@@ -376,7 +376,7 @@ fn initLiteralSections(self: *Object, macho_file: *MachO) !void {
         defer gpa.free(name);
 
         const atom_index = try self.addAtom(.{
-            .name = name,
+            .name = try self.addString(gpa, name),
             .n_sect = @intCast(n_sect),
             .off = 0,
             .size = sect.size,
@@ -475,10 +475,9 @@ fn initSymbols(self: *Object, macho_file: *MachO) !void {
         const index = try macho_file.addSymbol();
         self.symbols.appendAssumeCapacity(index);
         const symbol = macho_file.getSymbol(index);
-        const name = self.getString(nlist.n_strx);
         symbol.* = .{
             .value = nlist.n_value,
-            .name = try macho_file.string_intern.insert(gpa, name),
+            .name = nlist.n_strx,
             .nlist_idx = @intCast(i),
             .atom = 0,
             .file = self.index,
@@ -1044,8 +1043,10 @@ pub fn resetGlobals(self: *Object, macho_file: *MachO) void {
         if (!self.symtab.items(.nlist)[nlist_idx].ext()) continue;
         const sym = macho_file.getSymbol(sym_index);
         const name = sym.name;
+        const global = sym.flags.global;
         sym.* = .{};
         sym.name = name;
+        sym.flags.global = global;
     }
 }
 
@@ -1114,7 +1115,7 @@ pub fn convertTentativeDefinitions(self: *Object, macho_file: *MachO) !void {
         defer gpa.free(name);
         const atom = macho_file.getAtom(atom_index).?;
         atom.atom_index = atom_index;
-        atom.name = try macho_file.string_intern.insert(gpa, name);
+        atom.name = try self.addString(gpa, name);
         atom.file = self.index;
         atom.size = nlist.n_value;
         atom.alignment = (nlist.n_desc >> 8) & 0x0f;
@@ -1128,6 +1129,7 @@ pub fn convertTentativeDefinitions(self: *Object, macho_file: *MachO) !void {
 
         sym.value = 0;
         sym.atom = atom_index;
+        sym.flags.global = true;
         sym.flags.weak = false;
         sym.flags.weak_ref = false;
         sym.flags.tentative = false;
@@ -1527,7 +1529,15 @@ pub fn getSectionData(self: *const Object, allocator: Allocator, index: u32) ![]
     return self.preadAllAlloc(allocator, sect.offset + offset, sect.size);
 }
 
-fn getString(self: Object, off: u32) [:0]const u8 {
+fn addString(self: *Object, allocator: Allocator, name: [:0]const u8) error{OutOfMemory}!u32 {
+    const off: u32 = @intCast(self.strtab.items.len);
+    try self.strtab.ensureUnusedCapacity(allocator, name.len + 1);
+    self.strtab.appendSliceAssumeCapacity(name);
+    self.strtab.appendAssumeCapacity(0);
+    return off;
+}
+
+pub fn getString(self: Object, off: u32) [:0]const u8 {
     assert(off < self.strtab.items.len);
     return mem.sliceTo(@as([*:0]const u8, @ptrCast(self.strtab.items.ptr + off)), 0);
 }

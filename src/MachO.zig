@@ -2885,6 +2885,7 @@ pub fn getOrCreateGlobal(self: *MachO, off: u32) !GetOrCreateGlobalResult {
     if (!gop.found_existing) {
         const index = try self.addSymbol();
         const global = self.getSymbol(index);
+        global.flags.global = true;
         global.name = off;
         gop.value_ptr.* = index;
     }

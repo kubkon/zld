@@ -484,8 +484,10 @@ pub fn resetGlobals(self: *Dylib, macho_file: *MachO) void {
     for (self.symbols.items) |sym_index| {
         const sym = macho_file.getSymbol(sym_index);
         const name = sym.name;
+        const global = sym.flags.global;
         sym.* = .{};
         sym.name = name;
+        sym.flags.global = global;
     }
 }
 
