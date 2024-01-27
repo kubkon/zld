@@ -1240,18 +1240,17 @@ fn createObjcSections(self: *MachO) !void {
     }
 
     for (objc_msgsend_syms.keys()) |sym_index| {
+        const internal = self.getInternalObject().?;
         const sym = self.getSymbol(sym_index);
+        _ = try internal.addSymbol(sym.getName(self), self);
         sym.value = 0;
         sym.atom = 0;
         sym.nlist_idx = 0;
-        sym.file = self.internal_object_index.?;
-        sym.flags = .{};
+        sym.flags = .{ .global = true };
         sym.visibility = .hidden;
-        const object = self.getInternalObject().?;
         const name = eatPrefix(sym.getName(self), "_objc_msgSend$").?;
-        const selrefs_index = try object.addObjcMsgsendSections(name, self);
+        const selrefs_index = try internal.addObjcMsgsendSections(name, self);
         try sym.addExtra(.{ .objc_selrefs = selrefs_index }, self);
-        try object.symbols.append(gpa, sym_index);
     }
 }
 

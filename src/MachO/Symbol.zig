@@ -57,8 +57,8 @@ pub fn weakRef(symbol: Symbol, macho_file: *MachO) bool {
 pub fn getName(symbol: Symbol, macho_file: *MachO) [:0]const u8 {
     if (symbol.flags.global) return macho_file.string_intern.getAssumeExists(symbol.name);
     return switch (symbol.getFile(macho_file).?) {
-        .object => |x| x.getString(symbol.name),
-        else => macho_file.string_intern.getAssumeExists(symbol.name),
+        .dylib => unreachable, // There are no local symbols for dylibs
+        inline else => |x| x.getString(symbol.name),
     };
 }
 
