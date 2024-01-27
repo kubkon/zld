@@ -1509,16 +1509,24 @@ pub fn writeStabs(self: *const Object, macho_file: *MachO) void {
     }
 }
 
+pub fn getData(self: *const Object, off: usize, buf: []u8) !void {
+    const amt = try self.file.preadAll(buf, off);
+    if (amt != buf.len) return error.InputOutput;
+}
+
+pub fn getDataAlloc(self: *const Object, allocator: Allocator, off: usize, size: usize) ![]u8 {
+    const buffer = try allocator.alloc(u8, size);
+    errdefer allocator.free(buffer);
+    try self.getData(off, buffer);
+    return buffer;
+}
+
 pub fn getSectionData(self: *const Object, allocator: Allocator, index: u32) ![]u8 {
     const slice = self.sections.slice();
-    const offset = if (self.archive) |ar| ar.offset else 0;
     assert(index < slice.items(.header).len);
     const sect = slice.items(.header)[index];
-    const buffer = try allocator.alloc(u8, sect.size);
-    errdefer allocator.free(buffer);
-    const amt = try self.file.preadAll(buffer, sect.offset + offset);
-    if (amt != sect.size) return error.InputOutput;
-    return buffer;
+    const offset = if (self.archive) |ar| ar.offset else 0;
+    return self.getDataAlloc(allocator, sect.offset + offset, sect.size);
 }
 
 fn getString(self: Object, off: u32) [:0]const u8 {

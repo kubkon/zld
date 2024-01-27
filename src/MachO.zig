@@ -2137,6 +2137,7 @@ fn writeAtoms(self: *MachO) !void {
             const atom = self.getAtom(atom_index).?;
             assert(atom.flags.alive);
             const off = atom.value - header.addr;
+            try atom.getCode(self, buffer[off..][0..atom.size]);
             atom.resolveRelocs(self, buffer[off..][0..atom.size]) catch |err| switch (err) {
                 error.ResolveFailed => has_resolve_error = true,
                 else => |e| return e,

@@ -61,14 +61,32 @@ pub fn getPriority(self: Atom, macho_file: *MachO) u64 {
     return (@as(u64, @intCast(file.getIndex())) << 32) | @as(u64, @intCast(self.n_sect));
 }
 
-pub fn getCode(self: Atom, macho_file: *MachO) ![]const u8 {
+pub fn getCode(self: Atom, macho_file: *MachO, buffer: []u8) !void {
+    assert(buffer.len == self.size);
+    switch (self.getFile(macho_file)) {
+        .dylib => unreachable,
+        .object => |x| {
+            const slice = x.sections.slice();
+            const offset = if (x.archive) |ar| ar.offset else 0;
+            const sect = slice.items(.header)[self.n_sect];
+            try x.getData(sect.offset + offset + self.off, buffer);
+        },
+        .internal => |x| {
+            const code = x.getSectionData(self.n_sect);
+            @memcpy(buffer, code);
+        },
+    }
+}
+
+pub fn getCodeAlloc(self: Atom, macho_file: *MachO) ![]const u8 {
     const gpa = macho_file.base.allocator;
     switch (self.getFile(macho_file)) {
         .dylib => unreachable,
         .object => |x| {
-            const code = try x.getSectionData(gpa, self.n_sect);
-            defer gpa.free(code);
-            return gpa.dupe(u8, code[self.off..][0..self.size]);
+            const slice = x.sections.slice();
+            const offset = if (x.archive) |ar| ar.offset else 0;
+            const sect = slice.items(.header)[self.n_sect];
+            return x.getDataAlloc(gpa, sect.offset + offset + self.off, self.size);
         },
         .internal => |x| {
             const code = x.getSectionData(self.n_sect);
@@ -298,9 +316,6 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, buffer: []u8) !void {
     const relocs = self.getRelocs(macho_file);
     const file = self.getFile(macho_file);
     const name = self.getName(macho_file);
-    const code = try self.getCode(macho_file);
-    defer macho_file.base.allocator.free(code);
-    @memcpy(buffer, code);
 
     relocs_log.debug("{x}: {s}", .{ self.value, name });
 
