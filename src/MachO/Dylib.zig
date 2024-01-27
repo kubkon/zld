@@ -150,7 +150,7 @@ const TrieIterator = struct {
 
 pub fn addExport(self: *Dylib, allocator: Allocator, name: []const u8, flags: Export.Flags) !void {
     try self.exports.append(allocator, .{
-        .name = try self.insertString(allocator, name),
+        .name = try self.addString(allocator, name),
         .flags = flags,
     });
 }
@@ -557,7 +557,7 @@ pub inline fn getUmbrella(self: Dylib, macho_file: *MachO) *Dylib {
     return macho_file.getFile(self.umbrella).?.dylib;
 }
 
-fn insertString(self: *Dylib, allocator: Allocator, name: []const u8) !u32 {
+fn addString(self: *Dylib, allocator: Allocator, name: []const u8) !u32 {
     const off = @as(u32, @intCast(self.strtab.items.len));
     try self.strtab.writer(allocator).print("{s}\x00", .{name});
     return off;
