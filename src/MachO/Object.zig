@@ -963,14 +963,20 @@ fn initDwarfInfo(self: *Object, macho_file: *MachO) !void {
 
     if (debug_info_index == null or debug_abbrev_index == null) return;
 
-    // TODO: do not extend DWARF sections live beyond this function
-    var dwarf_info = DwarfInfo{
-        .debug_info = try self.getSectionData(gpa, @intCast(debug_info_index.?)),
-        .debug_abbrev = try self.getSectionData(gpa, @intCast(debug_abbrev_index.?)),
-        .debug_str = if (debug_str_index) |index| try self.getSectionData(gpa, @intCast(index)) else &[0]u8{},
-    };
+    const debug_info = try self.getSectionData(gpa, @intCast(debug_info_index.?));
+    defer gpa.free(debug_info);
+    const debug_abbrev = try self.getSectionData(gpa, @intCast(debug_abbrev_index.?));
+    defer gpa.free(debug_abbrev);
+    const debug_str = if (debug_str_index) |index| try self.getSectionData(gpa, @intCast(index)) else &[0]u8{};
+    defer gpa.free(debug_str);
+
+    var dwarf_info = DwarfInfo{};
     errdefer dwarf_info.deinit(gpa);
-    dwarf_info.init(gpa) catch {
+    dwarf_info.init(gpa, .{
+        .debug_info = debug_info,
+        .debug_abbrev = debug_abbrev,
+        .debug_str = debug_str,
+    }) catch {
         macho_file.base.fatal("{}: invalid __DWARF info found", .{self.fmtPath()});
         return error.ParseFailed;
     };
