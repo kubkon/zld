@@ -1,7 +1,6 @@
 path: []const u8,
 index: File.Index,
 
-header: ?macho.mach_header_64 = null,
 exports: std.MultiArrayList(Export) = .{},
 strtab: std.ArrayListUnmanaged(u8) = .{},
 id: ?Id = null,
@@ -46,9 +45,9 @@ pub fn parse(self: *Dylib, macho_file: *MachO, file: std.fs.File, fat_arch: ?fat
 
     log.debug("parsing dylib from binary", .{});
 
-    self.header = try file.reader().readStruct(macho.mach_header_64);
+    const header = try file.reader().readStruct(macho.mach_header_64);
 
-    const lc_buffer = try gpa.alloc(u8, self.header.?.sizeofcmds);
+    const lc_buffer = try gpa.alloc(u8, header.sizeofcmds);
     defer gpa.free(lc_buffer);
     {
         const amt = try file.preadAll(lc_buffer, offset + @sizeOf(macho.mach_header_64));
@@ -56,14 +55,14 @@ pub fn parse(self: *Dylib, macho_file: *MachO, file: std.fs.File, fat_arch: ?fat
     }
 
     var it = LoadCommandIterator{
-        .ncmds = self.header.?.ncmds,
+        .ncmds = header.ncmds,
         .buffer = lc_buffer,
     };
     while (it.next()) |lc| switch (lc.cmd()) {
         .ID_DYLIB => {
             self.id = try Id.fromLoadCommand(gpa, lc.cast(macho.dylib_command).?, lc.getDylibPathName());
         },
-        .REEXPORT_DYLIB => if (self.header.?.flags & macho.MH_NO_REEXPORTED_DYLIBS == 0) {
+        .REEXPORT_DYLIB => if (header.flags & macho.MH_NO_REEXPORTED_DYLIBS == 0) {
             const id = try Id.fromLoadCommand(gpa, lc.cast(macho.dylib_command).?, lc.getDylibPathName());
             try self.dependents.append(gpa, id);
         },
@@ -457,24 +456,6 @@ pub fn initSymbols(self: *Dylib, macho_file: *MachO) !void {
         const gop = try macho_file.getOrCreateGlobal(off);
         self.symbols.addOneAssumeCapacity().* = gop.index;
     }
-}
-
-fn initPlatform(self: *Dylib) void {
-    var it = LoadCommandIterator{
-        .ncmds = self.header.?.ncmds,
-        .buffer = self.data[@sizeOf(macho.mach_header_64)..][0..self.header.?.sizeofcmds],
-    };
-    self.platform = while (it.next()) |cmd| {
-        switch (cmd.cmd()) {
-            .BUILD_VERSION,
-            .VERSION_MIN_MACOSX,
-            .VERSION_MIN_IPHONEOS,
-            .VERSION_MIN_TVOS,
-            .VERSION_MIN_WATCHOS,
-            => break MachO.Options.Platform.fromLoadCommand(cmd),
-            else => {},
-        }
-    } else null;
 }
 
 pub fn resolveSymbols(self: *Dylib, macho_file: *MachO) void {

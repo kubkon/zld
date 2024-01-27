@@ -582,13 +582,7 @@ fn inferCpuArchAndPlatform(self: *MachO, obj: LinkObject, platforms: anytype) !v
     } else null;
 }
 
-fn validateCpuArch(self: *MachO, index: File.Index) void {
-    const file = self.getFile(index).?;
-    const cputype = switch (file) {
-        .object => |x| x.header.?.cputype,
-        .dylib => |x| x.header.?.cputype,
-        else => unreachable,
-    };
+fn validateCpuArch(self: *MachO, index: File.Index, cputype: macho.cpu_type_t) void {
     const cpu_arch: std.Target.Cpu.Arch = switch (cputype) {
         macho.CPU_TYPE_ARM64 => .aarch64,
         macho.CPU_TYPE_X86_64 => .x86_64,
@@ -596,7 +590,7 @@ fn validateCpuArch(self: *MachO, index: File.Index) void {
     };
     if (self.options.cpu_arch.? != cpu_arch) {
         return self.base.fatal("{}: invalid architecture '{s}', expected '{s}'", .{
-            file.fmtPath(),
+            self.getFile(index).?.fmtPath(),
             @tagName(cpu_arch),
             @tagName(self.options.cpu_arch.?),
         });
@@ -699,7 +693,7 @@ fn parseObject(self: *MachO, obj: LinkObject) !bool {
     const object = &self.files.items(.data)[index].object;
     try object.parse(self);
     try self.objects.append(gpa, index);
-    self.validateCpuArch(index);
+    self.validateCpuArch(index, header.cputype);
     self.validatePlatform(index);
 
     return true;
@@ -747,7 +741,7 @@ fn parseArchive(self: *MachO, obj: LinkObject) !bool {
         };
         try self.objects.append(gpa, index);
         // TODO this should come before reporting any parse errors
-        self.validateCpuArch(index);
+        self.validateCpuArch(index, object.header.?.cputype);
         self.validatePlatform(index);
 
         // Finally, we do a post-parse check for -ObjC to see if we need to force load this member
@@ -826,7 +820,7 @@ fn parseDylib(self: *MachO, obj: LinkObject, explicit: bool) anyerror!?File.Inde
     try dylib.parse(self, file, fat_arch);
 
     try self.dylibs.append(gpa, index);
-    self.validateCpuArch(index);
+    self.validateCpuArch(index, header.cputype);
     self.validatePlatform(index);
 
     return index;
