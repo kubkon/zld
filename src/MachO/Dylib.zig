@@ -45,7 +45,12 @@ pub fn parse(self: *Dylib, macho_file: *MachO, file: std.fs.File, fat_arch: ?fat
 
     log.debug("parsing dylib from binary", .{});
 
-    const header = try file.reader().readStruct(macho.mach_header_64);
+    var header_buffer: [@sizeOf(macho.mach_header_64)]u8 = undefined;
+    {
+        const amt = try file.preadAll(&header_buffer, offset);
+        if (amt != @sizeOf(macho.mach_header_64)) return error.InputOutput;
+    }
+    const header = @as(*align(1) const macho.mach_header_64, @ptrCast(&header_buffer)).*;
 
     const lc_buffer = try gpa.alloc(u8, header.sizeofcmds);
     defer gpa.free(lc_buffer);
