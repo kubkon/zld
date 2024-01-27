@@ -1,5 +1,4 @@
 base: Zld,
-arena: std.heap.ArenaAllocator.State,
 options: Options,
 
 dyld_info_cmd: macho.dyld_info_command = .{},
@@ -103,7 +102,6 @@ fn createEmpty(gpa: Allocator, options: Options, thread_pool: *ThreadPool) !*Mac
             .file = undefined,
             .thread_pool = thread_pool,
         },
-        .arena = std.heap.ArenaAllocator.init(gpa).state,
         .options = options,
     };
     return self;
@@ -148,8 +146,6 @@ pub fn deinit(self: *MachO) void {
     self.export_trie.deinit(gpa);
     self.unwind_info.deinit(gpa);
     self.unwind_records.deinit(gpa);
-
-    self.arena.promote(gpa).deinit();
 }
 
 pub fn flush(self: *MachO) !void {
@@ -169,8 +165,8 @@ pub fn flush(self: *MachO) !void {
     try self.symbols.append(gpa, .{});
     try self.symbols_extra.append(gpa, 0);
 
-    var arena_allocator = self.arena.promote(gpa);
-    defer self.arena = arena_allocator.state;
+    var arena_allocator = std.heap.ArenaAllocator.init(gpa);
+    defer arena_allocator.deinit();
     const arena = arena_allocator.allocator();
 
     const syslibroot = self.options.syslibroot;
