@@ -313,7 +313,7 @@ pub fn flush(self: *MachO) !void {
 
     var has_parse_error = false;
     for (resolved_objects.items) |obj| {
-        self.parsePositional(arena, obj) catch |err| {
+        self.parsePositional(obj) catch |err| {
             has_parse_error = true;
             switch (err) {
                 error.ParseFailed => {}, // already reported
@@ -661,12 +661,12 @@ fn addUndefinedGlobals(self: *MachO) !void {
     }
 }
 
-fn parsePositional(self: *MachO, arena: Allocator, obj: LinkObject) !void {
+fn parsePositional(self: *MachO, obj: LinkObject) !void {
     log.debug("parsing positional {}", .{obj});
 
     if (try self.parseObject(obj)) return;
     if (try self.parseArchive(obj)) return;
-    if (try self.parseDylib(arena, obj, true)) |_| return;
+    if (try self.parseDylib(obj, true)) |_| return;
     if (try self.parseTbd(obj, true)) |_| return;
 
     self.base.fatal("unknown filetype for positional argument: '{s}'", .{obj.path});
@@ -785,7 +785,7 @@ const DylibOpts = struct {
     reexport: bool = false,
 };
 
-fn parseDylib(self: *MachO, arena: Allocator, obj: LinkObject, explicit: bool) anyerror!?File.Index {
+fn parseDylib(self: *MachO, obj: LinkObject, explicit: bool) anyerror!?File.Index {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -799,31 +799,23 @@ fn parseDylib(self: *MachO, arena: Allocator, obj: LinkObject, explicit: bool) a
     const file = try std.fs.cwd().openFile(obj.path, .{});
     defer file.close();
 
-    var offset: u64 = 0;
-    var size: u64 = (try file.stat()).size;
-    if (fat.isFatLibrary(file)) {
-        const fat_arch = self.parseFatLibrary(obj.path, file) catch |err| switch (err) {
+    const fat_arch = if (fat.isFatLibrary(file)) blk: {
+        break :blk self.parseFatLibrary(obj.path, file) catch |err| switch (err) {
             error.NoArchSpecified, error.MissingArch => return null,
             else => |e| return e,
         };
-        offset = fat_arch.offset;
-        size = fat_arch.size;
-        try file.seekTo(offset);
-    }
+    } else null;
+    const offset = if (fat_arch) |ar| ar.offset else 0;
+    try file.seekTo(offset);
 
     const header = file.reader().readStruct(macho.mach_header_64) catch return null;
     try file.seekTo(offset);
 
     if (header.filetype != macho.MH_DYLIB) return null;
 
-    const data = try arena.alloc(u8, size);
-    const nread = try file.readAll(data);
-    if (nread != size) return error.InputOutput;
-
     const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
     self.files.set(index, .{ .dylib = .{
         .path = obj.path,
-        .data = data,
         .index = index,
         .needed = obj.needed,
         .weak = obj.weak,
@@ -831,7 +823,7 @@ fn parseDylib(self: *MachO, arena: Allocator, obj: LinkObject, explicit: bool) a
         .explicit = explicit,
     } });
     const dylib = &self.files.items(.data)[index].dylib;
-    try dylib.parse(self);
+    try dylib.parse(self, file, fat_arch);
 
     try self.dylibs.append(gpa, index);
     self.validateCpuArch(index);
@@ -861,7 +853,6 @@ fn parseTbd(self: *MachO, obj: LinkObject, explicit: bool) anyerror!?File.Index 
     const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
     self.files.set(index, .{ .dylib = .{
         .path = obj.path,
-        .data = &[0]u8{},
         .index = index,
         .needed = obj.needed,
         .weak = obj.weak,
@@ -989,7 +980,7 @@ fn parseDependentDylibs(
                 .weak = is_weak,
             };
             const file_index = file_index: {
-                if (try self.parseDylib(arena, link_obj, false)) |file| break :file_index file;
+                if (try self.parseDylib(link_obj, false)) |file| break :file_index file;
                 if (try self.parseTbd(link_obj, false)) |file| break :file_index file;
                 break :file_index @as(File.Index, 0);
             };

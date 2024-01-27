@@ -1,5 +1,4 @@
 path: []const u8,
-data: []const u8,
 index: File.Index,
 
 header: ?macho.mach_header_64 = null,
@@ -32,54 +31,77 @@ pub fn deinit(self: *Dylib, allocator: Allocator) void {
         id.deinit(allocator);
     }
     self.dependents.deinit(allocator);
+    for (self.rpaths.keys()) |rpath| {
+        allocator.free(rpath);
+    }
     self.rpaths.deinit(allocator);
 }
 
-pub fn parse(self: *Dylib, macho_file: *MachO) !void {
+pub fn parse(self: *Dylib, macho_file: *MachO, file: std.fs.File, fat_arch: ?fat.Arch) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
     const gpa = macho_file.base.allocator;
-    var stream = std.io.fixedBufferStream(self.data);
-    const reader = stream.reader();
+    const offset = if (fat_arch) |ar| ar.offset else 0;
 
     log.debug("parsing dylib from binary", .{});
 
-    self.header = try reader.readStruct(macho.mach_header_64);
+    self.header = try file.reader().readStruct(macho.mach_header_64);
 
-    const lc_id = self.getLoadCommand(.ID_DYLIB) orelse {
-        macho_file.base.fatal("{s}: missing LC_ID_DYLIB load command", .{self.path});
-        return error.ParseFailed;
-    };
-    self.id = try Id.fromLoadCommand(gpa, lc_id.cast(macho.dylib_command).?, lc_id.getDylibPathName());
+    const lc_buffer = try gpa.alloc(u8, self.header.?.sizeofcmds);
+    defer gpa.free(lc_buffer);
+    {
+        const amt = try file.preadAll(lc_buffer, offset + @sizeOf(macho.mach_header_64));
+        if (amt != lc_buffer.len) return error.InputOutput;
+    }
 
     var it = LoadCommandIterator{
         .ncmds = self.header.?.ncmds,
-        .buffer = self.data[@sizeOf(macho.mach_header_64)..][0..self.header.?.sizeofcmds],
+        .buffer = lc_buffer,
     };
-    while (it.next()) |cmd| switch (cmd.cmd()) {
+    while (it.next()) |lc| switch (lc.cmd()) {
+        .ID_DYLIB => {
+            self.id = try Id.fromLoadCommand(gpa, lc.cast(macho.dylib_command).?, lc.getDylibPathName());
+        },
         .REEXPORT_DYLIB => if (self.header.?.flags & macho.MH_NO_REEXPORTED_DYLIBS == 0) {
-            const id = try Id.fromLoadCommand(gpa, cmd.cast(macho.dylib_command).?, cmd.getDylibPathName());
+            const id = try Id.fromLoadCommand(gpa, lc.cast(macho.dylib_command).?, lc.getDylibPathName());
             try self.dependents.append(gpa, id);
         },
         .DYLD_INFO_ONLY => {
-            const dyld_cmd = cmd.cast(macho.dyld_info_command).?;
-            const data = self.data[dyld_cmd.export_off..][0..dyld_cmd.export_size];
+            const dyld_cmd = lc.cast(macho.dyld_info_command).?;
+            const data = try gpa.alloc(u8, dyld_cmd.export_size);
+            defer gpa.free(data);
+            const amt = try file.preadAll(data, dyld_cmd.export_off + offset);
+            if (amt != data.len) return error.InputOutput;
             try self.parseTrie(data, macho_file);
         },
         .DYLD_EXPORTS_TRIE => {
-            const ld_cmd = cmd.cast(macho.linkedit_data_command).?;
-            const data = self.data[ld_cmd.dataoff..][0..ld_cmd.datasize];
+            const ld_cmd = lc.cast(macho.linkedit_data_command).?;
+            const data = try gpa.alloc(u8, ld_cmd.datasize);
+            defer gpa.free(data);
+            const amt = try file.preadAll(data, ld_cmd.dataoff + offset);
+            if (amt != data.len) return error.InputOutput;
             try self.parseTrie(data, macho_file);
         },
         .RPATH => {
-            const path = cmd.getRpathPathName();
-            try self.rpaths.put(gpa, path, {});
+            const path = lc.getRpathPathName();
+            try self.rpaths.put(gpa, try gpa.dupe(u8, path), {});
+        },
+        .BUILD_VERSION,
+        .VERSION_MIN_MACOSX,
+        .VERSION_MIN_IPHONEOS,
+        .VERSION_MIN_TVOS,
+        .VERSION_MIN_WATCHOS,
+        => {
+            self.platform = MachO.Options.Platform.fromLoadCommand(lc);
         },
         else => {},
     };
 
-    self.initPlatform();
+    if (self.id == null) {
+        macho_file.base.fatal("{s}: missing LC_ID_DYLIB load command", .{self.path});
+        return error.ParseFailed;
+    }
 }
 
 const TrieIterator = struct {
@@ -547,16 +569,6 @@ pub fn writeSymtab(self: Dylib, macho_file: *MachO) void {
 
 pub inline fn getUmbrella(self: Dylib, macho_file: *MachO) *Dylib {
     return macho_file.getFile(self.umbrella).?.dylib;
-}
-
-fn getLoadCommand(self: Dylib, lc: macho.LC) ?LoadCommandIterator.LoadCommand {
-    var it = LoadCommandIterator{
-        .ncmds = self.header.?.ncmds,
-        .buffer = self.data[@sizeOf(macho.mach_header_64)..][0..self.header.?.sizeofcmds],
-    };
-    while (it.next()) |cmd| {
-        if (cmd.cmd() == lc) return cmd;
-    } else return null;
 }
 
 fn insertString(self: *Dylib, allocator: Allocator, name: []const u8) !u32 {
