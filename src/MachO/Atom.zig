@@ -69,7 +69,7 @@ pub fn getCode(self: Atom, macho_file: *MachO, buffer: []u8) !void {
             const slice = x.sections.slice();
             const offset = if (x.archive) |ar| ar.offset else 0;
             const sect = slice.items(.header)[self.n_sect];
-            try x.getData(sect.offset + offset + self.off, buffer);
+            try x.preadAll(buffer, sect.offset + offset + self.off);
         },
         .internal => |x| {
             const code = x.getSectionData(self.n_sect);
@@ -86,7 +86,7 @@ pub fn getCodeAlloc(self: Atom, macho_file: *MachO) ![]const u8 {
             const slice = x.sections.slice();
             const offset = if (x.archive) |ar| ar.offset else 0;
             const sect = slice.items(.header)[self.n_sect];
-            return x.getDataAlloc(gpa, sect.offset + offset + self.off, self.size);
+            return x.preadAllAlloc(gpa, sect.offset + offset + self.off, self.size);
         },
         .internal => |x| {
             const code = x.getSectionData(self.n_sect);
