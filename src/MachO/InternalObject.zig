@@ -3,6 +3,7 @@ index: File.Index,
 sections: std.MultiArrayList(Section) = .{},
 atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
 symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
+strtab: std.ArrayListUnmanaged(u8) = .{},
 
 objc_methnames: std.ArrayListUnmanaged(u8) = .{},
 objc_selrefs: [@sizeOf(u64)]u8 = [_]u8{0} ** @sizeOf(u64),
@@ -16,6 +17,7 @@ pub fn deinit(self: *InternalObject, allocator: Allocator) void {
     self.sections.deinit(allocator);
     self.atoms.deinit(allocator);
     self.symbols.deinit(allocator);
+    self.strtab.deinit(allocator);
     self.objc_methnames.deinit(allocator);
 }
 
@@ -46,7 +48,7 @@ fn addObjcMethnameSection(self: *InternalObject, methname: []const u8, macho_fil
     defer gpa.free(name);
     const atom = macho_file.getAtom(atom_index).?;
     atom.atom_index = atom_index;
-    atom.name = try macho_file.string_intern.insert(gpa, name);
+    atom.name = try self.addString(gpa, name);
     atom.file = self.index;
     atom.size = methname.len + 1;
     atom.alignment = 0;
@@ -80,7 +82,7 @@ fn addObjcSelrefsSection(
     defer gpa.free(name);
     const atom = macho_file.getAtom(atom_index).?;
     atom.atom_index = atom_index;
-    atom.name = try macho_file.string_intern.insert(gpa, name);
+    atom.name = try self.addString(gpa, name);
     atom.file = self.index;
     atom.size = @sizeOf(u64);
     atom.alignment = 3;
@@ -169,6 +171,19 @@ pub fn getSectionData(self: *const InternalObject, index: u32) []const u8 {
     } else if (extra.is_objc_selref) {
         return &self.objc_selrefs;
     } else @panic("ref to non-existent section");
+}
+
+fn addString(self: *InternalObject, allocator: Allocator, name: [:0]const u8) error{OutOfMemory}!u32 {
+    const off: u32 = @intCast(self.strtab.items.len);
+    try self.strtab.ensureUnusedCapacity(allocator, name.len + 1);
+    self.strtab.appendSliceAssumeCapacity(name);
+    self.strtab.appendAssumeCapacity(0);
+    return off;
+}
+
+pub fn getString(self: InternalObject, off: u32) [:0]const u8 {
+    assert(off < self.strtab.items.len);
+    return mem.sliceTo(@as([*:0]const u8, @ptrCast(self.strtab.items.ptr + off)), 0);
 }
 
 pub fn asFile(self: *InternalObject) File {

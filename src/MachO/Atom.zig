@@ -38,7 +38,10 @@ unwind_records: Loc = .{},
 flags: Flags = .{},
 
 pub fn getName(self: Atom, macho_file: *MachO) [:0]const u8 {
-    return self.getFile(macho_file).object.getString(self.name);
+    return switch (self.getFile(macho_file)) {
+        .dylib => unreachable,
+        inline else => |x| x.getString(self.name),
+    };
 }
 
 pub fn getFile(self: Atom, macho_file: *MachO) File {
