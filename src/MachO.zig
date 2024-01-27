@@ -1086,6 +1086,8 @@ fn deadStripDylibs(self: *MachO) void {
         const index = self.dylibs.items[i];
         if (!self.getFile(index).?.dylib.isAlive(self)) {
             _ = self.dylibs.orderedRemove(i);
+            self.files.items(.data)[index].dylib.deinit(self.base.allocator);
+            self.files.set(index, .null);
         } else i += 1;
     }
 }
