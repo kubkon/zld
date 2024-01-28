@@ -1,5 +1,4 @@
 base: Zld,
-arena: std.heap.ArenaAllocator.State,
 options: Options,
 
 dyld_info_cmd: macho.dyld_info_command = .{},
@@ -103,7 +102,6 @@ fn createEmpty(gpa: Allocator, options: Options, thread_pool: *ThreadPool) !*Mac
             .file = undefined,
             .thread_pool = thread_pool,
         },
-        .arena = std.heap.ArenaAllocator.init(gpa).state,
         .options = options,
     };
     return self;
@@ -148,8 +146,6 @@ pub fn deinit(self: *MachO) void {
     self.export_trie.deinit(gpa);
     self.unwind_info.deinit(gpa);
     self.unwind_records.deinit(gpa);
-
-    self.arena.promote(gpa).deinit();
 }
 
 pub fn flush(self: *MachO) !void {
@@ -169,8 +165,8 @@ pub fn flush(self: *MachO) !void {
     try self.symbols.append(gpa, .{});
     try self.symbols_extra.append(gpa, 0);
 
-    var arena_allocator = self.arena.promote(gpa);
-    defer self.arena = arena_allocator.state;
+    var arena_allocator = std.heap.ArenaAllocator.init(gpa);
+    defer arena_allocator.deinit();
     const arena = arena_allocator.allocator();
 
     const syslibroot = self.options.syslibroot;
@@ -313,7 +309,7 @@ pub fn flush(self: *MachO) !void {
 
     var has_parse_error = false;
     for (resolved_objects.items) |obj| {
-        self.parsePositional(arena, obj) catch |err| {
+        self.parsePositional(obj) catch |err| {
             has_parse_error = true;
             switch (err) {
                 error.ParseFailed => {}, // already reported
@@ -582,13 +578,7 @@ fn inferCpuArchAndPlatform(self: *MachO, obj: LinkObject, platforms: anytype) !v
     } else null;
 }
 
-fn validateCpuArch(self: *MachO, index: File.Index) void {
-    const file = self.getFile(index).?;
-    const cputype = switch (file) {
-        .object => |x| x.header.?.cputype,
-        .dylib => |x| x.header.?.cputype,
-        else => unreachable,
-    };
+fn validateCpuArch(self: *MachO, index: File.Index, cputype: macho.cpu_type_t) void {
     const cpu_arch: std.Target.Cpu.Arch = switch (cputype) {
         macho.CPU_TYPE_ARM64 => .aarch64,
         macho.CPU_TYPE_X86_64 => .x86_64,
@@ -596,7 +586,7 @@ fn validateCpuArch(self: *MachO, index: File.Index) void {
     };
     if (self.options.cpu_arch.? != cpu_arch) {
         return self.base.fatal("{}: invalid architecture '{s}', expected '{s}'", .{
-            file.fmtPath(),
+            self.getFile(index).?.fmtPath(),
             @tagName(cpu_arch),
             @tagName(self.options.cpu_arch.?),
         });
@@ -661,24 +651,23 @@ fn addUndefinedGlobals(self: *MachO) !void {
     }
 }
 
-fn parsePositional(self: *MachO, arena: Allocator, obj: LinkObject) !void {
+fn parsePositional(self: *MachO, obj: LinkObject) !void {
     log.debug("parsing positional {}", .{obj});
 
-    if (try self.parseObject(arena, obj)) return;
-    if (try self.parseArchive(arena, obj)) return;
-    if (try self.parseDylib(arena, obj, true)) |_| return;
+    if (try self.parseObject(obj)) return;
+    if (try self.parseArchive(obj)) return;
+    if (try self.parseDylib(obj, true)) |_| return;
     if (try self.parseTbd(obj, true)) |_| return;
 
     self.base.fatal("unknown filetype for positional argument: '{s}'", .{obj.path});
 }
 
-fn parseObject(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
+fn parseObject(self: *MachO, obj: LinkObject) !bool {
     const tracy = trace(@src());
     defer tracy.end();
 
     const gpa = self.base.allocator;
     const file = try std.fs.cwd().openFile(obj.path, .{});
-    defer file.close();
 
     const header = file.reader().readStruct(macho.mach_header_64) catch return false;
     try file.seekTo(0);
@@ -689,55 +678,47 @@ fn parseObject(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
         const stat = file.stat() catch break :mtime 0;
         break :mtime @as(u64, @intCast(@divFloor(stat.mtime, 1_000_000_000)));
     };
-    const data = try file.readToEndAlloc(arena, std.math.maxInt(u32));
 
     const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
     self.files.set(index, .{ .object = .{
-        .path = obj.path,
-        .data = data,
+        .path = try gpa.dupe(u8, obj.path),
+        .file = file,
         .index = index,
         .mtime = mtime,
     } });
     const object = &self.files.items(.data)[index].object;
     try object.parse(self);
     try self.objects.append(gpa, index);
-    self.validateCpuArch(index);
+    self.validateCpuArch(index, header.cputype);
     self.validatePlatform(index);
 
     return true;
 }
 
-fn parseArchive(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
+fn parseArchive(self: *MachO, obj: LinkObject) !bool {
     const tracy = trace(@src());
     defer tracy.end();
 
     const gpa = self.base.allocator;
-
     const file = try std.fs.cwd().openFile(obj.path, .{});
     defer file.close();
 
-    var offset: u64 = 0;
-    var size: u64 = (try file.stat()).size;
-    if (fat.isFatLibrary(file)) {
-        const fat_arch = self.parseFatLibrary(obj.path, file) catch |err| switch (err) {
+    const fat_arch: ?fat.Arch = if (fat.isFatLibrary(file)) blk: {
+        break :blk self.parseFatLibrary(obj.path, file) catch |err| switch (err) {
             error.NoArchSpecified, error.MissingArch => return false,
             else => |e| return e,
         };
-        offset = fat_arch.offset;
-        size = fat_arch.size;
-        try file.seekTo(offset);
-    }
+    } else null;
+    const offset = if (fat_arch) |ar| ar.offset else 0;
+    try file.seekTo(offset);
 
     const magic = file.reader().readBytesNoEof(Archive.SARMAG) catch return false;
     if (!mem.eql(u8, &magic, Archive.ARMAG)) return false;
+    try file.seekTo(0);
 
-    const data = try arena.alloc(u8, size - Archive.SARMAG);
-    const nread = try file.readAll(data);
-    if (nread != size - Archive.SARMAG) return error.InputOutput;
-
-    var archive = Archive{ .path = obj.path, .data = data };
+    var archive = Archive{};
     defer archive.deinit(gpa);
-    try archive.parse(arena, self);
+    try archive.parse(self, obj.path, file, fat_arch);
 
     var has_parse_error = false;
     for (archive.objects.items) |extracted| {
@@ -757,7 +738,7 @@ fn parseArchive(self: *MachO, arena: Allocator, obj: LinkObject) !bool {
         };
         try self.objects.append(gpa, index);
         // TODO this should come before reporting any parse errors
-        self.validateCpuArch(index);
+        self.validateCpuArch(index, object.header.?.cputype);
         self.validatePlatform(index);
 
         // Finally, we do a post-parse check for -ObjC to see if we need to force load this member
@@ -795,7 +776,7 @@ const DylibOpts = struct {
     reexport: bool = false,
 };
 
-fn parseDylib(self: *MachO, arena: Allocator, obj: LinkObject, explicit: bool) anyerror!?File.Index {
+fn parseDylib(self: *MachO, obj: LinkObject, explicit: bool) anyerror!?File.Index {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -809,31 +790,23 @@ fn parseDylib(self: *MachO, arena: Allocator, obj: LinkObject, explicit: bool) a
     const file = try std.fs.cwd().openFile(obj.path, .{});
     defer file.close();
 
-    var offset: u64 = 0;
-    var size: u64 = (try file.stat()).size;
-    if (fat.isFatLibrary(file)) {
-        const fat_arch = self.parseFatLibrary(obj.path, file) catch |err| switch (err) {
+    const fat_arch = if (fat.isFatLibrary(file)) blk: {
+        break :blk self.parseFatLibrary(obj.path, file) catch |err| switch (err) {
             error.NoArchSpecified, error.MissingArch => return null,
             else => |e| return e,
         };
-        offset = fat_arch.offset;
-        size = fat_arch.size;
-        try file.seekTo(offset);
-    }
+    } else null;
+    const offset = if (fat_arch) |ar| ar.offset else 0;
+    try file.seekTo(offset);
 
     const header = file.reader().readStruct(macho.mach_header_64) catch return null;
     try file.seekTo(offset);
 
     if (header.filetype != macho.MH_DYLIB) return null;
 
-    const data = try arena.alloc(u8, size);
-    const nread = try file.readAll(data);
-    if (nread != size) return error.InputOutput;
-
     const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
     self.files.set(index, .{ .dylib = .{
         .path = obj.path,
-        .data = data,
         .index = index,
         .needed = obj.needed,
         .weak = obj.weak,
@@ -841,10 +814,10 @@ fn parseDylib(self: *MachO, arena: Allocator, obj: LinkObject, explicit: bool) a
         .explicit = explicit,
     } });
     const dylib = &self.files.items(.data)[index].dylib;
-    try dylib.parse(self);
+    try dylib.parse(self, file, fat_arch);
 
     try self.dylibs.append(gpa, index);
-    self.validateCpuArch(index);
+    self.validateCpuArch(index, header.cputype);
     self.validatePlatform(index);
 
     return index;
@@ -871,7 +844,6 @@ fn parseTbd(self: *MachO, obj: LinkObject, explicit: bool) anyerror!?File.Index 
     const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
     self.files.set(index, .{ .dylib = .{
         .path = obj.path,
-        .data = &[0]u8{},
         .index = index,
         .needed = obj.needed,
         .weak = obj.weak,
@@ -999,7 +971,7 @@ fn parseDependentDylibs(
                 .weak = is_weak,
             };
             const file_index = file_index: {
-                if (try self.parseDylib(arena, link_obj, false)) |file| break :file_index file;
+                if (try self.parseDylib(link_obj, false)) |file| break :file_index file;
                 if (try self.parseTbd(link_obj, false)) |file| break :file_index file;
                 break :file_index @as(File.Index, 0);
             };
@@ -1057,6 +1029,8 @@ pub fn resolveSymbols(self: *MachO) !void {
         const index = self.objects.items[i];
         if (!self.getFile(index).?.object.alive) {
             _ = self.objects.orderedRemove(i);
+            self.files.items(.data)[index].object.deinit(self.base.allocator);
+            self.files.set(index, .null);
         } else i += 1;
     }
 
@@ -1109,6 +1083,8 @@ fn deadStripDylibs(self: *MachO) void {
         const index = self.dylibs.items[i];
         if (!self.getFile(index).?.dylib.isAlive(self)) {
             _ = self.dylibs.orderedRemove(i);
+            self.files.items(.data)[index].dylib.deinit(self.base.allocator);
+            self.files.set(index, .null);
         } else i += 1;
     }
 }
@@ -1248,18 +1224,13 @@ fn createObjcSections(self: *MachO) !void {
     }
 
     for (objc_msgsend_syms.keys()) |sym_index| {
+        const internal = self.getInternalObject().?;
         const sym = self.getSymbol(sym_index);
-        sym.value = 0;
-        sym.atom = 0;
-        sym.nlist_idx = 0;
-        sym.file = self.internal_object_index.?;
-        sym.flags = .{};
+        _ = try internal.addSymbol(sym.getName(self), self);
         sym.visibility = .hidden;
-        const object = self.getInternalObject().?;
         const name = eatPrefix(sym.getName(self), "_objc_msgSend$").?;
-        const selrefs_index = try object.addObjcMsgsendSections(name, self);
+        const selrefs_index = try internal.addObjcMsgsendSections(name, self);
         try sym.addExtra(.{ .objc_selrefs = selrefs_index }, self);
-        try object.symbols.append(gpa, sym_index);
     }
 }
 
@@ -2145,6 +2116,7 @@ fn writeAtoms(self: *MachO) !void {
             const atom = self.getAtom(atom_index).?;
             assert(atom.flags.alive);
             const off = atom.value - header.addr;
+            try atom.getCode(self, buffer[off..][0..atom.size]);
             atom.resolveRelocs(self, buffer[off..][0..atom.size]) catch |err| switch (err) {
                 error.ResolveFailed => has_resolve_error = true,
                 else => |e| return e,
@@ -2892,6 +2864,7 @@ pub fn getOrCreateGlobal(self: *MachO, off: u32) !GetOrCreateGlobalResult {
     if (!gop.found_existing) {
         const index = try self.addSymbol();
         const global = self.getSymbol(index);
+        global.flags.global = true;
         global.name = off;
         gop.value_ptr.* = index;
     }

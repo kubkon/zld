@@ -12,6 +12,7 @@ pub fn build(b: *std.Build) void {
     const strip = b.option(bool, "strip", "Omit debug information");
     const enable_logging = b.option(bool, "log", "Whether to enable logging") orelse (mode == .Debug);
     const enable_tracy = b.option([]const u8, "tracy", "Enable Tracy integration. Supply path to Tracy source");
+    const tracy_callstack_depth = b.option(usize, "tracy-callstack-depth", "Set Tracy callstack depth") orelse 10;
 
     const yaml = b.dependency("zig-yaml", .{
         .target = target,
@@ -37,6 +38,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addOptions("build_options", exe_opts);
     exe_opts.addOption(bool, "enable_logging", enable_logging);
     exe_opts.addOption(bool, "enable_tracy", enable_tracy != null);
+    exe_opts.addOption(usize, "tracy_callstack_depth", tracy_callstack_depth);
 
     if (enable_tracy) |tracy_path| {
         const client_cpp = fs.path.join(

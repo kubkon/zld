@@ -38,7 +38,10 @@ unwind_records: Loc = .{},
 flags: Flags = .{},
 
 pub fn getName(self: Atom, macho_file: *MachO) [:0]const u8 {
-    return macho_file.string_intern.getAssumeExists(self.name);
+    return switch (self.getFile(macho_file)) {
+        .dylib => unreachable,
+        inline else => |x| x.getString(self.name),
+    };
 }
 
 pub fn getFile(self: Atom, macho_file: *MachO) File {
@@ -61,12 +64,22 @@ pub fn getPriority(self: Atom, macho_file: *MachO) u64 {
     return (@as(u64, @intCast(file.getIndex())) << 32) | @as(u64, @intCast(self.n_sect));
 }
 
-pub fn getCode(self: Atom, macho_file: *MachO) []const u8 {
-    const code = switch (self.getFile(macho_file)) {
+pub fn getCode(self: Atom, macho_file: *MachO, buffer: []u8) !void {
+    assert(buffer.len == self.size);
+    switch (self.getFile(macho_file)) {
         .dylib => unreachable,
-        inline else => |x| x.getSectionData(self.n_sect),
-    };
-    return code[self.off..][0..self.size];
+        .object => |x| {
+            const slice = x.sections.slice();
+            const offset = if (x.archive) |ar| ar.offset else 0;
+            const sect = slice.items(.header)[self.n_sect];
+            const amt = try x.file.preadAll(buffer, sect.offset + offset + self.off);
+            if (amt != buffer.len) return error.InputOutput;
+        },
+        .internal => |x| {
+            const code = x.getSectionData(self.n_sect);
+            @memcpy(buffer, code);
+        },
+    }
 }
 
 pub fn getRelocs(self: Atom, macho_file: *MachO) []const Relocation {
@@ -290,7 +303,6 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, buffer: []u8) !void {
     const relocs = self.getRelocs(macho_file);
     const file = self.getFile(macho_file);
     const name = self.getName(macho_file);
-    @memcpy(buffer, self.getCode(macho_file));
 
     relocs_log.debug("{x}: {s}", .{ self.value, name });
 
