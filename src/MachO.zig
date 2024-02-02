@@ -908,24 +908,13 @@ fn parseDependentDylibs(
             //    dependees list of rpaths, and search there.
             // 4. Finally, just search the provided relative path directly in CWD.
             const full_path = full_path: {
-                fail: {
+                {
                     const stem = std.fs.path.stem(id.name);
-                    const framework_name = try std.fmt.allocPrint(gpa, "{s}.framework" ++ std.fs.path.sep_str ++ "{s}", .{
-                        stem,
-                        stem,
-                    });
-                    defer gpa.free(framework_name);
-
-                    if (mem.endsWith(u8, id.name, framework_name)) {
-                        // Framework
-                        const full_path = (try self.resolveFramework(arena, framework_dirs, stem)) orelse break :fail;
-                        break :full_path full_path;
-                    }
+                    if (try self.resolveFramework(arena, framework_dirs, stem)) |full_path| break :full_path full_path;
 
                     // Library
                     const lib_name = eatPrefix(stem, "lib") orelse stem;
-                    const full_path = (try self.resolveLib(arena, lib_dirs, lib_name)) orelse break :fail;
-                    break :full_path full_path;
+                    if (try self.resolveLib(arena, lib_dirs, lib_name)) |full_path| break :full_path full_path;
                 }
 
                 if (std.fs.path.isAbsolute(id.name)) {
@@ -946,7 +935,7 @@ fn parseDependentDylibs(
                         const rel_path = try std.fs.path.join(arena, &.{ prefix, path });
                         var buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
                         const full_path = std.fs.realpath(rel_path, &buffer) catch continue;
-                        break :full_path full_path;
+                        break :full_path try arena.dupe(u8, full_path);
                     }
                 } else if (eatPrefix(id.name, "@loader_path/")) |_| {
                     return self.base.fatal("{s}: TODO handle install_name '{s}'", .{
@@ -959,11 +948,12 @@ fn parseDependentDylibs(
                 }
 
                 var buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
-                const full_path = std.fs.realpath(id.name, &buffer) catch {
+                if (std.fs.realpath(id.name, &buffer)) |full_path| {
+                    break :full_path try arena.dupe(u8, full_path);
+                } else |_| {
                     dependents.appendAssumeCapacity(0);
                     continue;
-                };
-                break :full_path full_path;
+                }
             };
             const link_obj = LinkObject{
                 .path = full_path,
