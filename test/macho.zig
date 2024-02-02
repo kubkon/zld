@@ -28,6 +28,7 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testDylib(b, opts));
     macho_step.dependOn(testDylibReexport(b, opts));
     macho_step.dependOn(testDylibReexportDeep(b, opts));
+    macho_step.dependOn(testDylibVersionTbd(b, opts));
     macho_step.dependOn(testEmptyObject(b, opts));
     macho_step.dependOn(testEntryPoint(b, opts));
     macho_step.dependOn(testEntryPointArchive(b, opts));
@@ -585,6 +586,39 @@ fn testDylibReexportDeep(b: *Build, opts: Options) *Step {
 
     const run = exe.run();
     test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+fn testDylibVersionTbd(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-dylib-version-tbd", "");
+
+    const tbd = saveBytesToFile(b, "liba.tbd",
+        \\--- !tapi-tbd
+        \\tbd-version:     4
+        \\targets:         [ x86_64-macos, arm64-macos ]
+        \\uuids:
+        \\  - target:          x86_64-macos
+        \\    value:           DEADBEEF
+        \\  - target:          arm64-macos
+        \\    value:           BEEFDEAD
+        \\install-name:    '@rpath/liba.dylib'
+        \\current-version: 1.2
+        \\exports:
+        \\  - targets:     [ x86_64-macos, arm64-macos ]
+        \\    symbols:     [ _foo ]
+    );
+
+    const exe = cc(b, "main", opts);
+    exe.addEmptyMain();
+    exe.addFileSource(tbd);
+
+    const check = exe.check();
+    check.checkInHeaders();
+    check.checkExact("cmd LOAD_DYLIB");
+    check.checkExact("name @rpath/liba.dylib");
+    check.checkExact("current version 10200");
+    test_step.dependOn(&check.step);
 
     return test_step;
 }
