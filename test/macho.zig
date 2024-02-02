@@ -77,6 +77,7 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testWeakFramework(b, opts));
     macho_step.dependOn(testWeakLibrary(b, opts));
     macho_step.dependOn(testWeakRef(b, opts));
+    macho_step.dependOn(testWeakRef2(b, opts));
 
     return macho_step;
 }
@@ -3414,6 +3415,27 @@ fn testWeakRef(b: *Build, opts: Options) *Step {
     const run = exe.run();
     run.expectStdOutEqual("-1");
     test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+fn testWeakRef2(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-weak-ref2", "");
+
+    const exe = cc(b, "a.out", opts);
+    exe.addCSource(
+        \\#include <stdio.h>
+        \\#include <sys/_types/_fd_def.h>
+        \\int main(int argc, char** argv) {
+        \\    printf("__darwin_check_fd_set_overflow: %p\n", __darwin_check_fd_set_overflow);
+        \\}
+    );
+    exe.addArgs(&.{ "-mmacos-version-min=10.13", "-arch", "x86_64" });
+
+    const check = exe.check();
+    check.checkInSymtab();
+    check.checkExact("(undefined) weakref external ___darwin_check_fd_set_overflow (from libSystem.B)");
+    test_step.dependOn(&check.step);
 
     return test_step;
 }

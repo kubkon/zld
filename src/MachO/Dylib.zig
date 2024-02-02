@@ -479,7 +479,6 @@ pub fn resolveSymbols(self: *Dylib, macho_file: *MachO) void {
             global.nlist_idx = 0;
             global.file = self.index;
             global.flags.weak = flags.weak;
-            global.flags.weak_ref = false;
             global.flags.tlv = flags.tlv;
             global.flags.dyn_ref = false;
             global.flags.tentative = false;
@@ -493,9 +492,11 @@ pub fn resetGlobals(self: *Dylib, macho_file: *MachO) void {
         const sym = macho_file.getSymbol(sym_index);
         const name = sym.name;
         const global = sym.flags.global;
+        const weak_ref = sym.flags.weak_ref;
         sym.* = .{};
         sym.name = name;
         sym.flags.global = global;
+        sym.flags.weak_ref = weak_ref;
     }
 }
 

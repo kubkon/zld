@@ -488,6 +488,9 @@ fn initSymbols(self: *Object, macho_file: *MachO) !void {
             const off = try macho_file.string_intern.insert(gpa, name);
             const gop = try macho_file.getOrCreateGlobal(off);
             self.symbols.addOneAssumeCapacity().* = gop.index;
+            if (nlist.undf() and nlist.weakRef()) {
+                macho_file.getSymbol(gop.index).flags.weak_ref = true;
+            }
             continue;
         }
 
@@ -1063,9 +1066,11 @@ pub fn resetGlobals(self: *Object, macho_file: *MachO) void {
         const sym = macho_file.getSymbol(sym_index);
         const name = sym.name;
         const global = sym.flags.global;
+        const weak_ref = sym.flags.weak_ref;
         sym.* = .{};
         sym.name = name;
         sym.flags.global = global;
+        sym.flags.weak_ref = weak_ref;
     }
 }
 
