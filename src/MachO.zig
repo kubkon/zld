@@ -377,7 +377,6 @@ pub fn flush(self: *MachO) !void {
 
     try self.allocateSections();
     self.allocateSegments();
-    self.allocateAtoms();
     self.allocateSyntheticSymbols();
 
     state_log.debug("{}", .{self.dumpState()});
@@ -1923,23 +1922,6 @@ fn allocateSegments(self: *MachO) void {
     }
 }
 
-pub fn allocateAtoms(self: *MachO) void {
-    const slice = self.sections.slice();
-    for (slice.items(.header), slice.items(.atoms)) |header, atoms| {
-        if (atoms.items.len == 0) continue;
-        for (atoms.items) |atom_index| {
-            const atom = self.getAtom(atom_index).?;
-            assert(atom.flags.alive);
-            atom.value += header.addr;
-        }
-    }
-
-    for (self.thunks.items) |*thunk| {
-        const header = self.sections.items(.header)[thunk.out_n_sect];
-        thunk.value += header.addr;
-    }
-}
-
 fn allocateSyntheticSymbols(self: *MachO) void {
     const text_seg = self.getTextSegment();
 
@@ -2105,7 +2087,7 @@ fn writeAtoms(self: *MachO) !void {
         for (atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index).?;
             assert(atom.flags.alive);
-            const off = atom.value - header.addr;
+            const off = atom.value;
             try atom.getCode(self, buffer[off..][0..atom.size]);
             atom.resolveRelocs(self, buffer[off..][0..atom.size]) catch |err| switch (err) {
                 error.ResolveFailed => has_resolve_error = true,
@@ -2118,7 +2100,7 @@ fn writeAtoms(self: *MachO) !void {
 
     for (self.thunks.items) |thunk| {
         const header = slice.items(.header)[thunk.out_n_sect];
-        const offset = thunk.value - header.addr + header.offset;
+        const offset = thunk.value + header.offset;
         const buffer = try gpa.alloc(u8, thunk.size());
         defer gpa.free(buffer);
         var stream = std.io.fixedBufferStream(buffer);
@@ -2318,7 +2300,7 @@ pub fn writeDataInCode(self: *MachO, base_address: u64, off: u32) !u32 {
 
             if (atom.flags.alive) for (in_dices[start_dice..next_dice]) |dice| {
                 dices.appendAssumeCapacity(.{
-                    .offset = @intCast(atom.value + dice.offset - start_off - base_address),
+                    .offset = @intCast(atom.getAddress(self) + dice.offset - start_off - base_address),
                     .length = dice.length,
                     .kind = dice.kind,
                 });

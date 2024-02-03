@@ -42,8 +42,6 @@ pub fn flush(macho_file: *MachO) !void {
         seg.filesize = fileoff - seg.fileoff;
     }
 
-    macho_file.allocateAtoms();
-
     state_log.debug("{}", .{macho_file.dumpState()});
 
     try macho_file.calcSymtabSize();
@@ -237,7 +235,7 @@ fn writeAtoms(macho_file: *MachO) !void {
         for (atoms.items) |atom_index| {
             const atom = macho_file.getAtom(atom_index).?;
             assert(atom.flags.alive);
-            const off = atom.value - header.addr;
+            const off = atom.value;
             try atom.getCode(macho_file, code[off..][0..atom.size]);
             try atom.writeRelocs(macho_file, code[off..][0..atom.size], &relocs);
         }

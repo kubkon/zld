@@ -55,6 +55,11 @@ pub fn getInputSection(self: Atom, macho_file: *MachO) macho.section_64 {
     };
 }
 
+pub fn getAddress(self: Atom, macho_file: *MachO) u64 {
+    const header = macho_file.sections.items(.header)[self.out_n_sect];
+    return header.addr + self.value;
+}
+
 pub fn getInputAddress(self: Atom, macho_file: *MachO) u64 {
     return self.getInputSection(macho_file).addr + self.off;
 }
@@ -352,7 +357,7 @@ fn resolveRelocInner(
     const rel_offset = rel.offset - self.off;
     const seg_id = macho_file.sections.items(.segment_id)[self.out_n_sect];
     const seg = macho_file.segments.items[seg_id];
-    const P = @as(i64, @intCast(self.value)) + @as(i64, @intCast(rel_offset));
+    const P = @as(i64, @intCast(self.getAddress(macho_file))) + @as(i64, @intCast(rel_offset));
     const A = rel.addend + rel.getRelocAddend(cpu_arch);
     const S: i64 = @intCast(rel.getTargetAddress(macho_file));
     const G: i64 = @intCast(rel.getGotTargetAddress(macho_file));
@@ -435,7 +440,7 @@ fn resolveRelocInner(
                 .aarch64 => {
                     const disp: i28 = math.cast(i28, S + A - P) orelse blk: {
                         const thunk = self.getThunk(macho_file);
-                        const S_: i64 = @intCast(thunk.getAddress(rel.target));
+                        const S_: i64 = @intCast(thunk.getTargetAddress(rel.target, macho_file));
                         break :blk math.cast(i28, S_ + A - P) orelse return error.Overflow;
                     };
                     var inst = aarch64.Instruction{
@@ -704,12 +709,11 @@ pub fn writeRelocs(self: Atom, macho_file: *MachO, code: []u8, buffer: *std.Arra
 
     const cpu_arch = macho_file.options.cpu_arch.?;
     const relocs = self.getRelocs(macho_file);
-    const sect = macho_file.sections.items(.header)[self.out_n_sect];
     var stream = std.io.fixedBufferStream(code);
 
     for (relocs) |rel| {
         const rel_offset = rel.offset - self.off;
-        const r_address: i32 = math.cast(i32, self.value + rel_offset - sect.addr) orelse return error.Overflow;
+        const r_address: i32 = math.cast(i32, self.value + rel_offset) orelse return error.Overflow;
         const r_symbolnum = r_symbolnum: {
             const r_symbolnum: u32 = switch (rel.tag) {
                 .local => rel.getTargetAtom(macho_file).out_n_sect + 1,
@@ -775,7 +779,7 @@ pub fn writeRelocs(self: Atom, macho_file: *MachO, code: []u8, buffer: *std.Arra
             .x86_64 => {
                 if (rel.meta.pcrel) {
                     if (rel.tag == .local) {
-                        addend -= @as(i64, @intCast(self.value + rel_offset));
+                        addend -= @as(i64, @intCast(self.getAddress(macho_file) + rel_offset));
                     } else {
                         addend += 4;
                     }
@@ -856,7 +860,7 @@ fn format2(
     const atom = ctx.atom;
     const macho_file = ctx.macho_file;
     try writer.print("atom({d}) : {s} : @{x} : sect({d}) : align({x}) : size({x}) : thunk({d})", .{
-        atom.atom_index,  atom.getName(macho_file), atom.value,
+        atom.atom_index,  atom.getName(macho_file), atom.getAddress(macho_file),
         atom.out_n_sect,  atom.alignment,           atom.size,
         atom.thunk_index,
     });
