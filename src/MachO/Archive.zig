@@ -62,9 +62,10 @@ pub fn deinit(self: *Archive, allocator: Allocator) void {
     self.objects.deinit(allocator);
 }
 
-pub fn parse(self: *Archive, macho_file: *MachO, path: []const u8, file: std.fs.File, fat_arch: ?fat.Arch) !void {
+pub fn parse(self: *Archive, macho_file: *MachO, path: []const u8, file_handle: u32, fat_arch: ?fat.Arch) !void {
     const gpa = macho_file.base.allocator;
 
+    const file = macho_file.getFileHandle(file_handle);
     const offset = if (fat_arch) |ar| ar.offset else 0;
     const size = if (fat_arch) |ar| ar.size else (try file.stat()).size;
     try file.seekTo(offset);
@@ -116,7 +117,7 @@ pub fn parse(self: *Archive, macho_file: *MachO, path: []const u8, file: std.fs.
                 .offset = offset + pos,
             },
             .path = name,
-            .file = try std.fs.cwd().openFile(path, .{}),
+            .file_handle = file_handle,
             .index = undefined,
             .alive = false,
             .mtime = hdr.date() catch 0,

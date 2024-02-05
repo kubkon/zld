@@ -15,6 +15,7 @@ internal_object_index: ?File.Index = null,
 objects: std.ArrayListUnmanaged(File.Index) = .{},
 dylibs: std.ArrayListUnmanaged(File.Index) = .{},
 files: std.MultiArrayList(File.Entry) = .{},
+file_handles: std.ArrayListUnmanaged(std.fs.File) = .{},
 
 segments: std.ArrayListUnmanaged(macho.segment_command_64) = .{},
 sections: std.MultiArrayList(Section) = .{},
@@ -109,6 +110,11 @@ fn createEmpty(gpa: Allocator, options: Options, thread_pool: *ThreadPool) !*Mac
 
 pub fn deinit(self: *MachO) void {
     const gpa = self.base.allocator;
+
+    for (self.file_handles.items) |file| {
+        file.close();
+    }
+    self.file_handles.deinit(gpa);
 
     self.symbols.deinit(gpa);
     self.symbols_extra.deinit(gpa);
@@ -667,6 +673,8 @@ fn parseObject(self: *MachO, obj: LinkObject) !bool {
 
     const gpa = self.base.allocator;
     const file = try std.fs.cwd().openFile(obj.path, .{});
+    errdefer file.close();
+    const fh = try self.addFileHandle(file);
 
     const header = file.reader().readStruct(macho.mach_header_64) catch return false;
     try file.seekTo(0);
@@ -681,7 +689,7 @@ fn parseObject(self: *MachO, obj: LinkObject) !bool {
     const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
     self.files.set(index, .{ .object = .{
         .path = try gpa.dupe(u8, obj.path),
-        .file = file,
+        .file_handle = fh,
         .index = index,
         .mtime = mtime,
     } });
@@ -700,7 +708,8 @@ fn parseArchive(self: *MachO, obj: LinkObject) !bool {
 
     const gpa = self.base.allocator;
     const file = try std.fs.cwd().openFile(obj.path, .{});
-    defer file.close();
+    errdefer file.close();
+    const fh = try self.addFileHandle(file);
 
     const fat_arch: ?fat.Arch = if (fat.isFatLibrary(file)) blk: {
         break :blk self.parseFatLibrary(obj.path, file) catch |err| switch (err) {
@@ -717,7 +726,7 @@ fn parseArchive(self: *MachO, obj: LinkObject) !bool {
 
     var archive = Archive{};
     defer archive.deinit(gpa);
-    try archive.parse(self, obj.path, file, fat_arch);
+    try archive.parse(self, obj.path, fh, fat_arch);
 
     var has_parse_error = false;
     for (archive.objects.items) |extracted| {
@@ -2754,6 +2763,19 @@ pub fn getFile(self: *MachO, index: File.Index) ?File {
 pub fn getInternalObject(self: *MachO) ?*InternalObject {
     const index = self.internal_object_index orelse return null;
     return self.getFile(index).?.internal;
+}
+
+pub fn addFileHandle(self: *MachO, file: std.fs.File) !u32 {
+    const gpa = self.base.allocator;
+    const index: u32 = @intCast(self.file_handles.items.len);
+    const fh = try self.file_handles.addOne(gpa);
+    fh.* = file;
+    return index;
+}
+
+pub fn getFileHandle(self: MachO, index: u32) std.fs.File {
+    assert(index < self.file_handles.items.len);
+    return self.file_handles.items[index];
 }
 
 pub fn addAtom(self: *MachO) !Atom.Index {
