@@ -16,10 +16,12 @@ dwarf_info: ?DwarfInfo = null,
 stab_files: std.ArrayListUnmanaged(StabFile) = .{},
 
 eh_frame_sect_index: ?u8 = null,
-compact_unwind_sect_index: ?u8 = null,
 cies: std.ArrayListUnmanaged(Cie) = .{},
 fdes: std.ArrayListUnmanaged(Fde) = .{},
+
+compact_unwind_sect_index: ?u8 = null,
 unwind_records: std.ArrayListUnmanaged(UnwindInfo.Record.Index) = .{},
+
 data_in_code: std.ArrayListUnmanaged(macho.data_in_code_entry) = .{},
 
 alive: bool = true,
@@ -93,13 +95,6 @@ pub fn parse(self: *Object, file: std.fs.File, macho_file: *MachO) !void {
             for (sections) |sect| {
                 const index = try self.sections.addOne(gpa);
                 self.sections.set(index, .{ .header = sect });
-
-                if (!sect.isZerofill()) {
-                    const out = &self.sections.items(.data)[index];
-                    try out.resize(gpa, sect.size);
-                    const amt = try file.preadAll(out.items, sect.offset + offset);
-                    if (amt != out.items.len) return error.InputOutput;
-                }
 
                 if (mem.eql(u8, sect.sectName(), "__eh_frame")) {
                     self.eh_frame_sect_index = @intCast(index);
@@ -200,6 +195,7 @@ pub fn parse(self: *Object, file: std.fs.File, macho_file: *MachO) !void {
     try self.sortAtoms(macho_file);
     try self.initSymbols(macho_file);
     try self.initSymbolStabs(nlists.items, macho_file);
+    try self.initSectionData(file, macho_file);
     try self.initRelocs(file, macho_file);
 
     if (self.eh_frame_sect_index) |index| {
@@ -613,6 +609,18 @@ fn sortAtoms(self: *Object, macho_file: *MachO) !void {
         }
     }.lessThanAtom;
     mem.sort(Atom.Index, self.atoms.items, macho_file, lessThanAtom);
+}
+
+fn initSectionData(self: *Object, file: std.fs.File, macho_file: *MachO) !void {
+    const gpa = macho_file.base.allocator;
+    const offset = if (self.archive) |ar| ar.offset else 0;
+    const slice = self.sections.slice();
+    for (slice.items(.header), slice.items(.data)) |sect, *out| {
+        if (sect.isZerofill()) continue;
+        try out.resize(gpa, sect.size);
+        const amt = try file.preadAll(out.items, sect.offset + offset);
+        if (amt != out.items.len) return error.InputOutput;
+    }
 }
 
 fn initRelocs(self: *Object, file: std.fs.File, macho_file: *MachO) !void {
