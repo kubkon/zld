@@ -185,6 +185,14 @@ pub fn parse(self: *Object, file: std.fs.File, macho_file: *MachO) !void {
     try self.sortAtoms(macho_file);
     try self.initSymbols(macho_file);
     try self.initSymbolStabs(nlists.items, macho_file);
+}
+
+pub fn initData(self: *Object, file: std.fs.File, macho_file: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    log.debug("initializing data in  object file {}", .{self.fmtPath()});
+
     try self.initSectionData(file, macho_file);
     try self.initRelocs(file, macho_file);
 
@@ -200,7 +208,7 @@ pub fn parse(self: *Object, file: std.fs.File, macho_file: *MachO) !void {
         try self.parseUnwindRecords(macho_file);
     }
 
-    try self.initDataInCode(gpa, file);
+    try self.initDataInCode(macho_file.base.allocator, file);
     try self.initDwarfInfo(macho_file);
 
     for (self.atoms.items) |atom_index| {

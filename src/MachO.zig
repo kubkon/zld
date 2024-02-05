@@ -344,6 +344,7 @@ pub fn flush(self: *MachO) !void {
 
     try self.addUndefinedGlobals();
     try self.resolveSymbols();
+    try self.initObjectData();
 
     if (self.options.relocatable) return relocatable.flush(self);
 
@@ -1046,6 +1047,16 @@ fn markLive(self: *MachO) void {
     for (self.objects.items) |index| {
         const object = self.getFile(index).?.object;
         if (object.alive) object.markLive(self);
+    }
+}
+
+fn initObjectData(self: *MachO) !void {
+    for (self.objects.items) |index| {
+        const object = self.getFile(index).?.object;
+        const path = if (object.archive) |ar| ar.path else object.path;
+        const file = try std.fs.cwd().openFile(path, .{});
+        defer file.close();
+        try object.initData(file, self);
     }
 }
 
