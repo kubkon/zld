@@ -22,6 +22,7 @@ fdes: std.ArrayListUnmanaged(Fde) = .{},
 compact_unwind_sect_index: ?u8 = null,
 unwind_records: std.ArrayListUnmanaged(UnwindInfo.Record.Index) = .{},
 
+data_in_code_cmd: ?macho.linkedit_data_command = null,
 data_in_code: std.ArrayListUnmanaged(macho.data_in_code_entry) = .{},
 
 alive: bool = true,
@@ -127,18 +128,7 @@ pub fn parse(self: *Object, file: std.fs.File, macho_file: *MachO) !void {
                 });
             }
         },
-        .DATA_IN_CODE => {
-            const cmd = lc.cast(macho.linkedit_data_command).?;
-            const buffer = try gpa.alloc(u8, cmd.datasize);
-            defer gpa.free(buffer);
-            {
-                const amt = try file.preadAll(buffer, offset + cmd.dataoff);
-                if (amt != buffer.len) return error.InputOutput;
-            }
-            const ndice = @divExact(cmd.datasize, @sizeOf(macho.data_in_code_entry));
-            const dice = @as([*]align(1) const macho.data_in_code_entry, @ptrCast(buffer.ptr))[0..ndice];
-            try self.data_in_code.appendUnalignedSlice(gpa, dice);
-        },
+        .DATA_IN_CODE => self.data_in_code_cmd = lc.cast(macho.linkedit_data_command).?,
         .BUILD_VERSION,
         .VERSION_MIN_MACOSX,
         .VERSION_MIN_IPHONEOS,
@@ -210,6 +200,7 @@ pub fn parse(self: *Object, file: std.fs.File, macho_file: *MachO) !void {
         try self.parseUnwindRecords(macho_file);
     }
 
+    try self.initDataInCode(gpa, file);
     try self.initDwarfInfo(macho_file);
 
     for (self.atoms.items) |atom_index| {
@@ -966,6 +957,18 @@ fn parseUnwindRecords(self: *Object, macho_file: *MachO) !void {
     }
 }
 
+fn initDataInCode(self: *Object, allocator: Allocator, file: std.fs.File) !void {
+    const cmd = self.data_in_code_cmd orelse return;
+    const offset = if (self.archive) |ar| ar.offset else 0;
+    const buffer = try allocator.alloc(u8, cmd.datasize);
+    defer allocator.free(buffer);
+    const amt = try file.preadAll(buffer, offset + cmd.dataoff);
+    if (amt != buffer.len) return error.InputOutput;
+    const ndice = @divExact(cmd.datasize, @sizeOf(macho.data_in_code_entry));
+    const dice = @as([*]align(1) const macho.data_in_code_entry, @ptrCast(buffer.ptr))[0..ndice];
+    try self.data_in_code.appendUnalignedSlice(allocator, dice);
+}
+
 /// Currently, we only check if a compile unit for this input object file exists
 /// and record that so that we can emit symbol stabs.
 /// TODO in the future, we want parse debug info and debug line sections so that
@@ -1569,7 +1572,11 @@ pub fn hasDebugInfo(self: Object) bool {
     return self.hasSymbolStabs();
 }
 
-fn hasSymbolStabs(self: Object) bool {
+pub inline fn getDataInCode(self: Object) []const macho.data_in_code_entry {
+    return self.data_in_code.items;
+}
+
+inline fn hasSymbolStabs(self: Object) bool {
     return self.stab_files.items.len > 0;
 }
 
@@ -1585,19 +1592,15 @@ pub fn hasObjc(self: Object) bool {
     return false;
 }
 
-pub fn getDataInCode(self: Object) []const macho.data_in_code_entry {
-    return self.data_in_code.items;
-}
-
 pub inline fn hasSubsections(self: Object) bool {
     return self.header.?.flags & macho.MH_SUBSECTIONS_VIA_SYMBOLS != 0;
 }
 
-pub fn hasUnwindRecords(self: Object) bool {
+pub inline fn hasUnwindRecords(self: Object) bool {
     return self.unwind_records.items.len > 0;
 }
 
-pub fn hasEhFrameRecords(self: Object) bool {
+pub inline fn hasEhFrameRecords(self: Object) bool {
     return self.cies.items.len > 0;
 }
 
