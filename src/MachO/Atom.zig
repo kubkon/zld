@@ -69,30 +69,19 @@ pub fn getPriority(self: Atom, macho_file: *MachO) u64 {
     return (@as(u64, @intCast(file.getIndex())) << 32) | @as(u64, @intCast(self.n_sect));
 }
 
-pub fn getCode(self: Atom, macho_file: *MachO, buffer: []u8) !void {
+pub fn getData(self: Atom, macho_file: *MachO, buffer: []u8) !void {
     assert(buffer.len == self.size);
     switch (self.getFile(macho_file)) {
         .dylib => unreachable,
-        .object => |x| {
-            const slice = x.sections.slice();
-            const offset = if (x.archive) |ar| ar.offset else 0;
-            const sect = slice.items(.header)[self.n_sect];
-            const amt = try x.file.preadAll(buffer, sect.offset + offset + self.off);
-            if (amt != buffer.len) return error.InputOutput;
-        },
-        .internal => |x| {
-            const code = x.getSectionData(self.n_sect);
-            @memcpy(buffer, code);
-        },
+        inline else => |x| try x.getAtomData(self, buffer),
     }
 }
 
 pub fn getRelocs(self: Atom, macho_file: *MachO) []const Relocation {
-    const relocs = switch (self.getFile(macho_file)) {
+    return switch (self.getFile(macho_file)) {
         .dylib => unreachable,
-        inline else => |x| x.sections.items(.relocs)[self.n_sect],
+        inline else => |x| x.getAtomRelocs(self),
     };
-    return relocs.items[self.relocs.pos..][0..self.relocs.len];
 }
 
 pub fn getUnwindRecords(self: Atom, macho_file: *MachO) []const UnwindInfo.Record.Index {

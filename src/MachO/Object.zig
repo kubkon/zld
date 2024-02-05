@@ -1,6 +1,5 @@
 archive: ?Archive = null,
 path: []const u8,
-file: std.fs.File,
 mtime: u64,
 index: File.Index,
 
@@ -20,7 +19,6 @@ eh_frame_sect_index: ?u8 = null,
 compact_unwind_sect_index: ?u8 = null,
 cies: std.ArrayListUnmanaged(Cie) = .{},
 fdes: std.ArrayListUnmanaged(Fde) = .{},
-eh_frame_data: std.ArrayListUnmanaged(u8) = .{},
 unwind_records: std.ArrayListUnmanaged(UnwindInfo.Record.Index) = .{},
 data_in_code: std.ArrayListUnmanaged(macho.data_in_code_entry) = .{},
 
@@ -38,12 +36,12 @@ const Archive = struct {
 };
 
 pub fn deinit(self: *Object, allocator: Allocator) void {
-    self.file.close();
     allocator.free(self.path);
     if (self.archive) |*ar| allocator.free(ar.path);
-    for (self.sections.items(.relocs), self.sections.items(.subsections)) |*relocs, *sub| {
+    for (self.sections.items(.relocs), self.sections.items(.subsections), self.sections.items(.data)) |*relocs, *sub, *data| {
         relocs.deinit(allocator);
         sub.deinit(allocator);
+        data.deinit(allocator);
     }
     self.sections.deinit(allocator);
     self.symtab.deinit(allocator);
@@ -52,7 +50,6 @@ pub fn deinit(self: *Object, allocator: Allocator) void {
     self.atoms.deinit(allocator);
     self.cies.deinit(allocator);
     self.fdes.deinit(allocator);
-    self.eh_frame_data.deinit(allocator);
     self.unwind_records.deinit(allocator);
     if (self.dwarf_info) |*dw| dw.deinit(allocator);
     for (self.stab_files.items) |*sf| {
@@ -62,7 +59,7 @@ pub fn deinit(self: *Object, allocator: Allocator) void {
     self.data_in_code.deinit(allocator);
 }
 
-pub fn parse(self: *Object, macho_file: *MachO) !void {
+pub fn parse(self: *Object, file: std.fs.File, macho_file: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -73,7 +70,7 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
 
     var header_buffer: [@sizeOf(macho.mach_header_64)]u8 = undefined;
     {
-        const amt = try self.file.preadAll(&header_buffer, offset);
+        const amt = try file.preadAll(&header_buffer, offset);
         if (amt != @sizeOf(macho.mach_header_64)) return error.InputOutput;
     }
     self.header = @as(*align(1) const macho.mach_header_64, @ptrCast(&header_buffer)).*;
@@ -81,7 +78,7 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
     const lc_buffer = try gpa.alloc(u8, self.header.?.sizeofcmds);
     defer gpa.free(lc_buffer);
     {
-        const amt = try self.file.preadAll(lc_buffer, offset + @sizeOf(macho.mach_header_64));
+        const amt = try file.preadAll(lc_buffer, offset + @sizeOf(macho.mach_header_64));
         if (amt != self.header.?.sizeofcmds) return error.InputOutput;
     }
 
@@ -97,6 +94,13 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
                 const index = try self.sections.addOne(gpa);
                 self.sections.set(index, .{ .header = sect });
 
+                if (!sect.isZerofill()) {
+                    const out = &self.sections.items(.data)[index];
+                    try out.resize(gpa, sect.size);
+                    const amt = try file.preadAll(out.items, sect.offset + offset);
+                    if (amt != out.items.len) return error.InputOutput;
+                }
+
                 if (mem.eql(u8, sect.sectName(), "__eh_frame")) {
                     self.eh_frame_sect_index = @intCast(index);
                 } else if (mem.eql(u8, sect.sectName(), "__compact_unwind")) {
@@ -108,14 +112,14 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
             const cmd = lc.cast(macho.symtab_command).?;
             try self.strtab.resize(gpa, cmd.strsize);
             {
-                const amt = try self.file.preadAll(self.strtab.items, cmd.stroff + offset);
+                const amt = try file.preadAll(self.strtab.items, cmd.stroff + offset);
                 if (amt != self.strtab.items.len) return error.InputOutput;
             }
 
             const symtab_buffer = try gpa.alloc(u8, cmd.nsyms * @sizeOf(macho.nlist_64));
             defer gpa.free(symtab_buffer);
             {
-                const amt = try self.file.preadAll(symtab_buffer, cmd.symoff + offset);
+                const amt = try file.preadAll(symtab_buffer, cmd.symoff + offset);
                 if (amt != symtab_buffer.len) return error.InputOutput;
             }
             const symtab = @as([*]align(1) const macho.nlist_64, @ptrCast(symtab_buffer.ptr))[0..cmd.nsyms];
@@ -133,7 +137,7 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
             const buffer = try gpa.alloc(u8, cmd.datasize);
             defer gpa.free(buffer);
             {
-                const amt = try self.file.preadAll(buffer, offset + cmd.dataoff);
+                const amt = try file.preadAll(buffer, offset + cmd.dataoff);
                 if (amt != buffer.len) return error.InputOutput;
             }
             const ndice = @divExact(cmd.datasize, @sizeOf(macho.data_in_code_entry));
@@ -196,7 +200,7 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
     try self.sortAtoms(macho_file);
     try self.initSymbols(macho_file);
     try self.initSymbolStabs(nlists.items, macho_file);
-    try self.initRelocs(macho_file);
+    try self.initRelocs(file, macho_file);
 
     if (self.eh_frame_sect_index) |index| {
         try self.initEhFrameRecords(index, macho_file);
@@ -611,7 +615,7 @@ fn sortAtoms(self: *Object, macho_file: *MachO) !void {
     mem.sort(Atom.Index, self.atoms.items, macho_file, lessThanAtom);
 }
 
-fn initRelocs(self: *Object, macho_file: *MachO) !void {
+fn initRelocs(self: *Object, file: std.fs.File, macho_file: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
     const cpu_arch = macho_file.options.cpu_arch.?;
@@ -626,8 +630,8 @@ fn initRelocs(self: *Object, macho_file: *MachO) !void {
             !mem.eql(u8, sect.sectName(), "__compact_unwind")) continue;
 
         switch (cpu_arch) {
-            .x86_64 => try x86_64.parseRelocs(self, @intCast(n_sect), sect, out, macho_file),
-            .aarch64 => try aarch64.parseRelocs(self, @intCast(n_sect), sect, out, macho_file),
+            .x86_64 => try x86_64.parseRelocs(self, file, @intCast(n_sect), sect, out, macho_file),
+            .aarch64 => try aarch64.parseRelocs(self, file, @intCast(n_sect), sect, out, macho_file),
             else => unreachable,
         }
 
@@ -660,13 +664,7 @@ fn initEhFrameRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
     const slice = self.sections.slice();
     const sect = slice.items(.header)[sect_id];
     const relocs = slice.items(.relocs)[sect_id];
-
-    // TODO: read into buffer directly
-    const data = try self.getSectionData(gpa, sect_id);
-    defer gpa.free(data);
-
-    try self.eh_frame_data.ensureTotalCapacityPrecise(gpa, data.len);
-    self.eh_frame_data.appendSliceAssumeCapacity(data);
+    const data = slice.items(.data)[sect_id].items;
 
     // Check for non-personality relocs in FDEs and apply them
     for (relocs.items, 0..) |rel, i| {
@@ -687,15 +685,15 @@ fn initEhFrameRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
                 };
                 switch (rel.meta.length) {
                     0, 1 => unreachable,
-                    2 => mem.writeInt(u32, self.eh_frame_data.items[rel.offset..][0..4], @bitCast(@as(i32, @truncate(S + A - SUB))), .little),
-                    3 => mem.writeInt(u64, self.eh_frame_data.items[rel.offset..][0..8], @bitCast(S + A - SUB), .little),
+                    2 => mem.writeInt(u32, data[rel.offset..][0..4], @bitCast(@as(i32, @truncate(S + A - SUB))), .little),
+                    3 => mem.writeInt(u64, data[rel.offset..][0..8], @bitCast(S + A - SUB), .little),
                 }
             },
             else => {},
         }
     }
 
-    var it = eh_frame.Iterator{ .data = self.eh_frame_data.items };
+    var it = eh_frame.Iterator{ .data = data };
     while (try it.next()) |rec| {
         switch (rec.tag) {
             .cie => try self.cies.append(gpa, .{
@@ -765,16 +763,15 @@ fn initUnwindRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
     };
 
     const gpa = macho_file.base.allocator;
-    const data = try self.getSectionData(gpa, sect_id);
-    defer gpa.free(data);
+    const header = self.sections.items(.header)[sect_id];
+    const relocs = self.sections.items(.relocs)[sect_id].items;
+    const data = self.sections.items(.data)[sect_id].items;
     const nrecs = @divExact(data.len, @sizeOf(macho.compact_unwind_entry));
     const recs = @as([*]align(1) const macho.compact_unwind_entry, @ptrCast(data.ptr))[0..nrecs];
     const sym_lookup = SymbolLookup{ .ctx = self };
 
     try self.unwind_records.resize(gpa, nrecs);
 
-    const header = self.sections.items(.header)[sect_id];
-    const relocs = self.sections.items(.relocs)[sect_id].items;
     var reloc_idx: usize = 0;
     for (recs, self.unwind_records.items, 0..) |rec, *out_index, rec_idx| {
         const rec_start = rec_idx * @sizeOf(macho.compact_unwind_entry);
@@ -984,12 +981,9 @@ fn initDwarfInfo(self: *Object, macho_file: *MachO) !void {
 
     if (debug_info_index == null or debug_abbrev_index == null) return;
 
-    const debug_info = try self.getSectionData(gpa, @intCast(debug_info_index.?));
-    defer gpa.free(debug_info);
-    const debug_abbrev = try self.getSectionData(gpa, @intCast(debug_abbrev_index.?));
-    defer gpa.free(debug_abbrev);
-    const debug_str = if (debug_str_index) |index| try self.getSectionData(gpa, @intCast(index)) else &[0]u8{};
-    defer gpa.free(debug_str);
+    const debug_info = self.sections.items(.data)[debug_info_index.?].items;
+    const debug_abbrev = self.sections.items(.data)[debug_abbrev_index.?].items;
+    const debug_str = if (debug_str_index) |index| self.sections.items(.data)[index].items else &[0]u8{};
 
     var dwarf_info = DwarfInfo{};
     errdefer dwarf_info.deinit(gpa);
@@ -1533,16 +1527,17 @@ pub fn writeStabs(self: *const Object, macho_file: *MachO) void {
     }
 }
 
-pub fn getSectionData(self: *const Object, allocator: Allocator, index: u32) ![]u8 {
-    const slice = self.sections.slice();
-    assert(index < slice.items(.header).len);
-    const sect = slice.items(.header)[index];
-    const offset = if (self.archive) |ar| ar.offset else 0;
-    const buffer = try allocator.alloc(u8, sect.size);
-    errdefer allocator.free(buffer);
-    const amt = try self.file.preadAll(buffer, sect.offset + offset);
-    if (amt != buffer.len) return error.InputOutput;
-    return buffer;
+pub fn getAtomData(self: *const Object, atom: Atom, buffer: []u8) !void {
+    assert(buffer.len == atom.size);
+    const data = self.sections.items(.data)[atom.n_sect].items;
+    const off = math.cast(usize, atom.off) orelse return error.Overflow;
+    const size = math.cast(usize, atom.size) orelse return error.Overflow;
+    @memcpy(buffer, data[off..][0..size]);
+}
+
+pub fn getAtomRelocs(self: *const Object, atom: Atom) []const Relocation {
+    const relocs = self.sections.items(.relocs)[atom.n_sect];
+    return relocs.items[atom.relocs.pos..][0..atom.relocs.len];
 }
 
 fn addString(self: *Object, allocator: Allocator, name: [:0]const u8) error{OutOfMemory}!u32 {
@@ -1757,6 +1752,7 @@ const Section = struct {
     header: macho.section_64,
     subsections: std.ArrayListUnmanaged(Subsection) = .{},
     relocs: std.ArrayListUnmanaged(Relocation) = .{},
+    data: std.ArrayListUnmanaged(u8) = .{},
 };
 
 const Subsection = struct {
@@ -1807,6 +1803,7 @@ const StabFile = struct {
 const x86_64 = struct {
     fn parseRelocs(
         self: *const Object,
+        file: std.fs.File,
         n_sect: u8,
         sect: macho.section_64,
         out: *std.ArrayListUnmanaged(Relocation),
@@ -1818,13 +1815,12 @@ const x86_64 = struct {
         const relocs_buffer = try gpa.alloc(u8, sect.nreloc * @sizeOf(macho.relocation_info));
         defer gpa.free(relocs_buffer);
         {
-            const amt = try self.file.preadAll(relocs_buffer, sect.reloff + offset);
+            const amt = try file.preadAll(relocs_buffer, sect.reloff + offset);
             if (amt != relocs_buffer.len) return error.InputOutput;
         }
         const relocs = @as([*]align(1) const macho.relocation_info, @ptrCast(relocs_buffer.ptr))[0..sect.nreloc];
 
-        const code = try self.getSectionData(gpa, @intCast(n_sect));
-        defer gpa.free(code);
+        const code = self.sections.items(.data)[n_sect].items;
 
         try out.ensureTotalCapacityPrecise(gpa, relocs.len);
 
@@ -1965,6 +1961,7 @@ const x86_64 = struct {
 const aarch64 = struct {
     fn parseRelocs(
         self: *const Object,
+        file: std.fs.File,
         n_sect: u8,
         sect: macho.section_64,
         out: *std.ArrayListUnmanaged(Relocation),
@@ -1976,13 +1973,12 @@ const aarch64 = struct {
         const relocs_buffer = try gpa.alloc(u8, sect.nreloc * @sizeOf(macho.relocation_info));
         defer gpa.free(relocs_buffer);
         {
-            const amt = try self.file.preadAll(relocs_buffer, sect.reloff + offset);
+            const amt = try file.preadAll(relocs_buffer, sect.reloff + offset);
             if (amt != relocs_buffer.len) return error.InputOutput;
         }
         const relocs = @as([*]align(1) const macho.relocation_info, @ptrCast(relocs_buffer.ptr))[0..sect.nreloc];
 
-        const code = try self.getSectionData(gpa, @intCast(n_sect));
-        defer gpa.free(code);
+        const code = self.sections.items(.data)[n_sect].items;
 
         try out.ensureTotalCapacityPrecise(gpa, relocs.len);
 

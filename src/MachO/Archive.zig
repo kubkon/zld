@@ -116,7 +116,6 @@ pub fn parse(self: *Archive, macho_file: *MachO, path: []const u8, file: std.fs.
                 .offset = offset + pos,
             },
             .path = name,
-            .file = try std.fs.cwd().openFile(path, .{}),
             .index = undefined,
             .alive = false,
             .mtime = hdr.date() catch 0,

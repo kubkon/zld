@@ -164,16 +164,26 @@ fn addSection(self: *InternalObject, allocator: Allocator, segname: []const u8, 
     return n_sect;
 }
 
-pub fn getSectionData(self: *const InternalObject, index: u32) []const u8 {
+pub fn getAtomData(self: *const InternalObject, atom: Atom, buffer: []u8) !void {
+    assert(buffer.len == atom.size);
     const slice = self.sections.slice();
-    assert(index < slice.items(.header).len);
-    const sect = slice.items(.header)[index];
-    const extra = slice.items(.extra)[index];
-    if (extra.is_objc_methname) {
-        return self.objc_methnames.items[sect.offset..][0..sect.size];
-    } else if (extra.is_objc_selref) {
-        return &self.objc_selrefs;
-    } else @panic("ref to non-existent section");
+    const sect = slice.items(.header)[atom.n_sect];
+    const extra = slice.items(.extra)[atom.n_sect];
+    const data = if (extra.is_objc_methname) blk: {
+        const size = std.math.cast(usize, sect.size) orelse return error.Overflow;
+        break :blk self.objc_methnames.items[sect.offset..][0..size];
+    } else if (extra.is_objc_selref)
+        &self.objc_selrefs
+    else
+        @panic("ref to non-existent section");
+    const off = std.math.cast(usize, atom.off) orelse return error.Overflow;
+    const size = std.math.cast(usize, atom.size) orelse return error.Overflow;
+    @memcpy(buffer, data[off..][0..size]);
+}
+
+pub fn getAtomRelocs(self: *const InternalObject, atom: Atom) []const Relocation {
+    const relocs = self.sections.items(.relocs)[atom.n_sect];
+    return relocs.items[atom.relocs.pos..][0..atom.relocs.len];
 }
 
 fn addString(self: *InternalObject, allocator: Allocator, name: [:0]const u8) error{OutOfMemory}!u32 {

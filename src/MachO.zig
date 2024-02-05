@@ -667,6 +667,7 @@ fn parseObject(self: *MachO, obj: LinkObject) !bool {
 
     const gpa = self.base.allocator;
     const file = try std.fs.cwd().openFile(obj.path, .{});
+    defer file.close();
 
     const header = file.reader().readStruct(macho.mach_header_64) catch return false;
     try file.seekTo(0);
@@ -681,12 +682,11 @@ fn parseObject(self: *MachO, obj: LinkObject) !bool {
     const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
     self.files.set(index, .{ .object = .{
         .path = try gpa.dupe(u8, obj.path),
-        .file = file,
         .index = index,
         .mtime = mtime,
     } });
     const object = &self.files.items(.data)[index].object;
-    try object.parse(self);
+    try object.parse(file, self);
     try self.objects.append(gpa, index);
     self.validateCpuArch(index, header.cputype);
     self.validatePlatform(index);
@@ -727,7 +727,7 @@ fn parseArchive(self: *MachO, obj: LinkObject) !bool {
         object.index = index;
         object.alive = obj.must_link or obj.needed or self.options.all_load;
         object.hidden = obj.hidden;
-        object.parse(self) catch |err| switch (err) {
+        object.parse(file, self) catch |err| switch (err) {
             error.ParseFailed => {
                 has_parse_error = true;
                 // TODO see below
@@ -2088,7 +2088,7 @@ fn writeAtoms(self: *MachO) !void {
             const atom = self.getAtom(atom_index).?;
             assert(atom.flags.alive);
             const off = atom.value;
-            try atom.getCode(self, buffer[off..][0..atom.size]);
+            try atom.getData(self, buffer[off..][0..atom.size]);
             atom.resolveRelocs(self, buffer[off..][0..atom.size]) catch |err| switch (err) {
                 error.ResolveFailed => has_resolve_error = true,
                 else => |e| return e,
