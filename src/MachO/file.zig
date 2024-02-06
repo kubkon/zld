@@ -102,6 +102,9 @@ pub const File = union(enum) {
         object: Object,
         dylib: Dylib,
     };
+
+    pub const Handle = std.fs.File;
+    pub const HandleIndex = Index;
 };
 
 const macho = std.macho;

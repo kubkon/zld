@@ -75,9 +75,10 @@ pub fn getCode(self: Atom, macho_file: *MachO, buffer: []u8) !void {
         .dylib => unreachable,
         .object => |x| {
             const slice = x.sections.slice();
+            const file = macho_file.getFileHandle(x.file_handle);
             const offset = if (x.archive) |ar| ar.offset else 0;
             const sect = slice.items(.header)[self.n_sect];
-            const amt = try x.file.preadAll(buffer, sect.offset + offset + self.off);
+            const amt = try file.preadAll(buffer, sect.offset + offset + self.off);
             if (amt != buffer.len) return error.InputOutput;
         },
         .internal => |x| {
