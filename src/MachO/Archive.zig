@@ -62,7 +62,7 @@ pub fn deinit(self: *Archive, allocator: Allocator) void {
     self.objects.deinit(allocator);
 }
 
-pub fn parse(self: *Archive, macho_file: *MachO, path: []const u8, file_handle: u32, fat_arch: ?fat.Arch) !void {
+pub fn parse(self: *Archive, macho_file: *MachO, path: []const u8, file_handle: File.HandleIndex, fat_arch: ?fat.Arch) !void {
     const gpa = macho_file.base.allocator;
 
     const file = macho_file.getFileHandle(file_handle);
@@ -137,5 +137,6 @@ const std = @import("std");
 
 const Allocator = mem.Allocator;
 const Archive = @This();
+const File = @import("file.zig").File;
 const MachO = @import("../MachO.zig");
 const Object = @import("Object.zig");

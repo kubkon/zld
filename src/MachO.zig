@@ -15,7 +15,7 @@ internal_object_index: ?File.Index = null,
 objects: std.ArrayListUnmanaged(File.Index) = .{},
 dylibs: std.ArrayListUnmanaged(File.Index) = .{},
 files: std.MultiArrayList(File.Entry) = .{},
-file_handles: std.ArrayListUnmanaged(std.fs.File) = .{},
+file_handles: std.ArrayListUnmanaged(File.Handle) = .{},
 
 segments: std.ArrayListUnmanaged(macho.segment_command_64) = .{},
 sections: std.MultiArrayList(Section) = .{},
@@ -2765,15 +2765,15 @@ pub fn getInternalObject(self: *MachO) ?*InternalObject {
     return self.getFile(index).?.internal;
 }
 
-pub fn addFileHandle(self: *MachO, file: std.fs.File) !u32 {
+pub fn addFileHandle(self: *MachO, file: std.fs.File) !File.HandleIndex {
     const gpa = self.base.allocator;
-    const index: u32 = @intCast(self.file_handles.items.len);
+    const index: File.HandleIndex = @intCast(self.file_handles.items.len);
     const fh = try self.file_handles.addOne(gpa);
     fh.* = file;
     return index;
 }
 
-pub fn getFileHandle(self: MachO, index: u32) std.fs.File {
+pub fn getFileHandle(self: MachO, index: File.HandleIndex) File.Handle {
     assert(index < self.file_handles.items.len);
     return self.file_handles.items[index];
 }

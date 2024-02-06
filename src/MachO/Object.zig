@@ -1,6 +1,6 @@
 archive: ?Archive = null,
 path: []const u8,
-file_handle: u32,
+file_handle: File.HandleIndex,
 mtime: u64,
 index: File.Index,
 
