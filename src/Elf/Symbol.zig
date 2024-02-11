@@ -68,6 +68,7 @@ pub fn getSourceSymbol(symbol: Symbol, elf_file: *Elf) elf.Elf64_Sym {
     const file = symbol.getFile(elf_file).?;
     return switch (file) {
         .internal => |x| x.symtab.items[symbol.sym_idx],
+        .object => |x| x.symtab.items[symbol.sym_idx],
         inline else => |x| x.symtab[symbol.sym_idx],
     };
 }

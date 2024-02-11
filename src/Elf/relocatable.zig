@@ -29,7 +29,7 @@ fn claimUnresolved(elf_file: *Elf) void {
         const first_global = object.first_global orelse return;
         for (object.getGlobals(), 0..) |global_index, i| {
             const sym_idx = @as(u32, @intCast(first_global + i));
-            const sym = object.symtab[sym_idx];
+            const sym = object.symtab.items[sym_idx];
             if (sym.st_shndx != elf.SHN_UNDEF) continue;
 
             const global = elf_file.getSymbol(global_index);
@@ -54,8 +54,8 @@ fn initSections(elf_file: *Elf) !void {
             if (!atom.flags.alive) continue;
             atom.out_shndx = try object.initOutputSection(elf_file, atom.getInputShdr(elf_file));
 
-            const rela_shdr = object.getShdrs()[atom.relocs_shndx];
-            if (rela_shdr.sh_type != elf.SHT_NULL) {
+            if (atom.getRelocs(elf_file).len > 0) {
+                const rela_shdr = object.getShdrs()[atom.relocs_shndx];
                 const out_rela_shndx = try object.initOutputSection(elf_file, rela_shdr);
                 const out_rela_shdr = &elf_file.sections.items(.shdr)[out_rela_shndx];
                 out_rela_shdr.sh_flags |= elf.SHF_INFO_LINK;

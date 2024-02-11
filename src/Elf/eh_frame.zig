@@ -5,7 +5,6 @@ pub const Fde = struct {
     cie_index: u32,
     rel_index: u32 = 0,
     rel_num: u32 = 0,
-    rel_shndx: u32 = 0,
     shndx: u32 = 0,
     file: u32 = 0,
     alive: bool = true,
@@ -24,10 +23,9 @@ pub const Fde = struct {
         return base + fde.out_offset;
     }
 
-    pub fn getData(fde: Fde, elf_file: *Elf) []const u8 {
+    pub fn getData(fde: Fde, elf_file: *Elf) []u8 {
         const object = fde.getObject(elf_file);
-        const data = object.getShdrContents(fde.shndx);
-        return data[fde.offset..][0..fde.getSize()];
+        return object.eh_frame_data.items[fde.offset..][0..fde.getSize()];
     }
 
     pub fn getCie(fde: Fde, elf_file: *Elf) Cie {
@@ -48,14 +46,14 @@ pub const Fde = struct {
         const object = fde.getObject(elf_file);
         const relocs = fde.getRelocs(elf_file);
         const rel = relocs[0];
-        const sym = object.symtab[rel.r_sym()];
+        const sym = object.symtab.items[rel.r_sym()];
         const atom_index = object.atoms.items[sym.st_shndx];
         return elf_file.getAtom(atom_index).?;
     }
 
     pub fn getRelocs(fde: Fde, elf_file: *Elf) []align(1) const elf.Elf64_Rela {
         const object = fde.getObject(elf_file);
-        return object.getRelocs(fde.rel_shndx)[fde.rel_index..][0..fde.rel_num];
+        return object.relocs.items[fde.rel_index..][0..fde.rel_num];
     }
 
     pub fn format(
@@ -110,7 +108,6 @@ pub const Cie = struct {
     size: u64,
     rel_index: u32 = 0,
     rel_num: u32 = 0,
-    rel_shndx: u32 = 0,
     shndx: u32 = 0,
     file: u32 = 0,
     /// Includes 4byte size cell.
@@ -129,10 +126,9 @@ pub const Cie = struct {
         return base + cie.out_offset;
     }
 
-    pub fn getData(cie: Cie, elf_file: *Elf) []const u8 {
+    pub fn getData(cie: Cie, elf_file: *Elf) []u8 {
         const object = cie.getObject(elf_file);
-        const data = object.getShdrContents(cie.shndx);
-        return data[cie.offset..][0..cie.getSize()];
+        return object.eh_frame_data.items[cie.offset..][0..cie.getSize()];
     }
 
     pub inline fn getSize(cie: Cie) u64 {
@@ -141,7 +137,7 @@ pub const Cie = struct {
 
     pub fn getRelocs(cie: Cie, elf_file: *Elf) []align(1) const elf.Elf64_Rela {
         const object = cie.getObject(elf_file);
-        return object.getRelocs(cie.rel_shndx)[cie.rel_index..][0..cie.rel_num];
+        return object.relocs.items[cie.rel_index..][0..cie.rel_num];
     }
 
     pub fn eql(cie: Cie, other: Cie, elf_file: *Elf) bool {
@@ -333,8 +329,6 @@ fn resolveReloc(rec: anytype, sym: *const Symbol, rel: elf.Elf64_Rela, elf_file:
 }
 
 pub fn writeEhFrame(elf_file: *Elf, writer: anytype) !void {
-    const gpa = elf_file.base.allocator;
-
     relocs_log.debug("{x}: .eh_frame", .{
         elf_file.sections.items(.shdr)[elf_file.eh_frame_sect_index.?].sh_addr,
     });
@@ -345,8 +339,7 @@ pub fn writeEhFrame(elf_file: *Elf, writer: anytype) !void {
         for (object.cies.items) |cie| {
             if (!cie.alive) continue;
 
-            const data = try gpa.dupe(u8, cie.getData(elf_file));
-            defer gpa.free(data);
+            const data = cie.getData(elf_file);
 
             for (cie.getRelocs(elf_file)) |rel| {
                 const sym = object.getSymbol(rel.r_sym(), elf_file);
@@ -363,8 +356,7 @@ pub fn writeEhFrame(elf_file: *Elf, writer: anytype) !void {
         for (object.fdes.items) |fde| {
             if (!fde.alive) continue;
 
-            const data = try gpa.dupe(u8, fde.getData(elf_file));
-            defer gpa.free(data);
+            const data = fde.getData(elf_file);
 
             std.mem.writeInt(
                 i32,

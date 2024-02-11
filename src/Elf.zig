@@ -6,6 +6,7 @@ shoff: u64 = 0,
 objects: std.ArrayListUnmanaged(File.Index) = .{},
 shared_objects: std.ArrayListUnmanaged(File.Index) = .{},
 files: std.MultiArrayList(File.Entry) = .{},
+file_handles: std.ArrayListUnmanaged(File.Handle) = .{},
 
 sections: std.MultiArrayList(Section) = .{},
 phdrs: std.ArrayListUnmanaged(elf.Elf64_Phdr) = .{},
@@ -152,6 +153,12 @@ pub fn deinit(self: *Elf) void {
         atoms.deinit(gpa);
     }
     self.sections.deinit(gpa);
+
+    for (self.file_handles.items) |file| {
+        file.close();
+    }
+    self.file_handles.deinit(gpa);
+
     for (self.files.items(.tags), self.files.items(.data)) |tag, *data| switch (tag) {
         .null => {},
         .internal => data.internal.deinit(gpa),
@@ -1628,18 +1635,18 @@ fn parsePositional(self: *Elf, arena: Allocator, obj: LinkObject, search_dirs: [
 
     log.debug("parsing positional argument '{s}'", .{resolved_obj.path});
 
-    if (try self.parseObject(arena, resolved_obj)) return;
-    if (try self.parseArchive(arena, resolved_obj)) return;
+    if (try self.parseObject(resolved_obj)) return;
+    if (try self.parseArchive(resolved_obj)) return;
     if (try self.parseShared(arena, resolved_obj)) return;
     if (try self.parseLdScript(arena, resolved_obj, search_dirs)) return;
 
     self.base.fatal("unknown filetype for positional argument: '{s}'", .{resolved_obj.path});
 }
 
-fn parseObject(self: *Elf, arena: Allocator, obj: LinkObject) !bool {
+fn parseObject(self: *Elf, obj: LinkObject) !bool {
     const gpa = self.base.allocator;
     const file = try fs.cwd().openFile(obj.path, .{});
-    defer file.close();
+    const fh = try self.addFileHandle(file);
 
     const header = file.reader().readStruct(elf.Elf64_Ehdr) catch return false;
     try file.seekTo(0);
@@ -1647,12 +1654,10 @@ fn parseObject(self: *Elf, arena: Allocator, obj: LinkObject) !bool {
     if (!Object.isValidHeader(&header)) return false;
     self.validateOrSetCpuArch(obj.path, header.e_machine.toTargetCpuArch().?);
 
-    const data = try file.readToEndAlloc(arena, std.math.maxInt(u32));
-
     const index = @as(u32, @intCast(try self.files.addOne(gpa)));
     self.files.set(index, .{ .object = .{
         .path = obj.path,
-        .data = data,
+        .file_handle = fh,
         .index = index,
     } });
     const object = &self.files.items(.data)[index].object;
@@ -1662,20 +1667,19 @@ fn parseObject(self: *Elf, arena: Allocator, obj: LinkObject) !bool {
     return true;
 }
 
-fn parseArchive(self: *Elf, arena: Allocator, obj: LinkObject) !bool {
+fn parseArchive(self: *Elf, obj: LinkObject) !bool {
     const gpa = self.base.allocator;
     const file = try fs.cwd().openFile(obj.path, .{});
-    defer file.close();
+    const fh = try self.addFileHandle(file);
 
     const magic = file.reader().readBytesNoEof(elf.ARMAG.len) catch return false;
     try file.seekTo(0);
 
     if (!Archive.isValidMagic(&magic)) return false;
 
-    const data = try file.readToEndAlloc(arena, std.math.maxInt(u32));
-    var archive = Archive{ .path = obj.path, .data = data };
+    var archive = Archive{};
     defer archive.deinit(gpa);
-    try archive.parse(arena, self);
+    try archive.parse(self, obj.path, fh);
 
     var has_parse_error = false;
     for (archive.objects.items) |extracted| {
@@ -1838,7 +1842,7 @@ fn resolveSymbols(self: *Elf) !void {
             const cg = self.getComdatGroup(cg_index);
             const cg_owner = self.getComdatGroupOwner(cg.owner);
             if (cg_owner.file != index) {
-                for (object.getComdatGroupMembers(cg.shndx)) |shndx| {
+                for (cg.getComdatGroupMembers(self)) |shndx| {
                     const atom_index = object.atoms.items[shndx];
                     if (self.getAtom(atom_index)) |atom| {
                         atom.flags.alive = false;
@@ -1983,7 +1987,7 @@ fn claimUnresolved(self: *Elf) void {
         const first_global = object.first_global orelse return;
         for (object.getGlobals(), 0..) |global_index, i| {
             const sym_idx = @as(u32, @intCast(first_global + i));
-            const sym = object.symtab[sym_idx];
+            const sym = object.symtab.items[sym_idx];
             if (sym.st_shndx != elf.SHN_UNDEF) continue;
 
             const global = self.getSymbol(global_index);
@@ -2433,6 +2437,19 @@ pub fn getFile(self: *Elf, index: File.Index) ?File {
     };
 }
 
+pub fn addFileHandle(self: *Elf, file: std.fs.File) !File.HandleIndex {
+    const gpa = self.base.allocator;
+    const index: File.HandleIndex = @intCast(self.file_handles.items.len);
+    const fh = try self.file_handles.addOne(gpa);
+    fh.* = file;
+    return index;
+}
+
+pub fn getFileHandle(self: Elf, index: File.HandleIndex) File.Handle {
+    assert(index < self.file_handles.items.len);
+    return self.file_handles.items[index];
+}
+
 pub fn addAtom(self: *Elf) !Atom.Index {
     const index = @as(u32, @intCast(self.atoms.items.len));
     const atom = try self.atoms.addOne(self.base.allocator);
@@ -2792,7 +2809,15 @@ const ComdatGroupOwner = struct {
 
 pub const ComdatGroup = struct {
     owner: ComdatGroupOwner.Index,
-    shndx: u16,
+    shndx: u32,
+    members_start: u32,
+    members_len: u32,
+
+    pub fn getComdatGroupMembers(cg: ComdatGroup, elf_file: *Elf) []const u32 {
+        const owner = elf_file.getComdatGroupOwner(cg.owner);
+        const object = elf_file.getFile(owner.file).?.object;
+        return object.comdat_group_data.items[cg.members_start..][0..cg.members_len];
+    }
 
     pub const Index = u32;
 };

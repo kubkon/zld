@@ -22,6 +22,12 @@ out_shndx: u16 = 0,
 /// Index of the input section containing this atom's relocs.
 relocs_shndx: u32 = 0,
 
+/// Start index of relocations belonging to this atom.
+rel_index: u32 = 0,
+
+/// Number of relocations belonging to this atom.
+rel_num: u32 = 0,
+
 /// Index of this atom in the linker's atoms table.
 atom_index: Index = 0,
 
@@ -37,17 +43,16 @@ pub fn getName(self: Atom, elf_file: *Elf) [:0]const u8 {
     return elf_file.string_intern.getAssumeExists(self.name);
 }
 
-pub fn getCode(self: Atom, elf_file: *Elf) []const u8 {
-    const object = self.getObject(elf_file);
-    return object.getShdrContents(self.shndx);
-}
-
 /// Returns atom's code and optionally uncompresses data if required (for compressed sections).
 /// Caller owns the memory.
 pub fn getCodeUncompressAlloc(self: Atom, elf_file: *Elf) ![]u8 {
     const gpa = elf_file.base.allocator;
-    const data = self.getCode(elf_file);
     const shdr = self.getInputShdr(elf_file);
+    const object = self.getObject(elf_file);
+    const file = elf_file.getFileHandle(object.file_handle);
+    const data = try object.preadShdrContentsAlloc(gpa, file, self.shndx);
+    defer if (shdr.sh_flags & elf.SHF_COMPRESSED != 0) gpa.free(data);
+
     if (shdr.sh_flags & elf.SHF_COMPRESSED != 0) {
         const chdr = @as(*align(1) const elf.Elf64_Chdr, @ptrCast(data.ptr)).*;
         switch (chdr.ch_type) {
@@ -58,13 +63,15 @@ pub fn getCodeUncompressAlloc(self: Atom, elf_file: *Elf) ![]u8 {
                 const decomp = try gpa.alloc(u8, chdr.ch_size);
                 const nread = try zlib_stream.reader().readAll(decomp);
                 if (nread != decomp.len) {
-                    return error.Io;
+                    return error.InputOutput;
                 }
                 return decomp;
             },
             else => @panic("TODO unhandled compression scheme"),
         }
-    } else return gpa.dupe(u8, data);
+    }
+
+    return data;
 }
 
 pub fn getObject(self: Atom, elf_file: *Elf) *Object {
@@ -73,7 +80,7 @@ pub fn getObject(self: Atom, elf_file: *Elf) *Object {
 
 pub fn getInputShdr(self: Atom, elf_file: *Elf) elf.Elf64_Shdr {
     const object = self.getObject(elf_file);
-    return object.getShdr(self.shndx);
+    return object.shdrs.items[self.shndx];
 }
 
 pub fn getPriority(self: Atom, elf_file: *Elf) u64 {
@@ -81,10 +88,9 @@ pub fn getPriority(self: Atom, elf_file: *Elf) u64 {
     return (@as(u64, @intCast(object.index)) << 32) | @as(u64, @intCast(self.shndx));
 }
 
-pub fn getRelocs(self: Atom, elf_file: *Elf) []align(1) const elf.Elf64_Rela {
-    if (self.relocs_shndx == @as(u16, @bitCast(@as(i16, -1)))) return &[0]elf.Elf64_Rela{};
+pub fn getRelocs(self: Atom, elf_file: *Elf) []const elf.Elf64_Rela {
     const object = self.getObject(elf_file);
-    return object.getRelocs(self.relocs_shndx);
+    return object.relocs.items[self.rel_index..][0..self.rel_num];
 }
 
 pub fn writeRelocs(self: Atom, elf_file: *Elf, out_relocs: *std.ArrayList(elf.Elf64_Rela)) !void {
@@ -452,7 +458,7 @@ inline fn getDataType(symbol: *const Symbol, elf_file: *Elf) u2 {
 fn reportUndefSymbol(self: Atom, rel: elf.Elf64_Rela, elf_file: *Elf) !bool {
     const object = self.getObject(elf_file);
     const sym = object.getSymbol(rel.r_sym(), elf_file);
-    const s_rel_sym = object.symtab[rel.r_sym()];
+    const s_rel_sym = object.symtab.items[rel.r_sym()];
 
     // Check for violation of One Definition Rule for COMDATs.
     if (sym.getFile(elf_file) == null) {
