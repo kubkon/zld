@@ -51,7 +51,7 @@ pub fn parse(self: *Archive, elf_file: *Elf, path: []const u8, file_handle: File
         if (hdr.isSymtab()) continue;
         if (hdr.isStrtab()) {
             try self.strtab.resize(gpa, obj_size);
-            const amt = try file.readAll(self.strtab.items);
+            const amt = try file.preadAll(self.strtab.items, pos);
             if (amt != obj_size) return error.InputOutput;
             continue;
         }

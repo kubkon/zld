@@ -2809,13 +2809,13 @@ const ComdatGroupOwner = struct {
 
 pub const ComdatGroup = struct {
     owner: ComdatGroupOwner.Index,
+    file: File.Index,
     shndx: u32,
     members_start: u32,
     members_len: u32,
 
     pub fn getComdatGroupMembers(cg: ComdatGroup, elf_file: *Elf) []const u32 {
-        const owner = elf_file.getComdatGroupOwner(cg.owner);
-        const object = elf_file.getFile(owner.file).?.object;
+        const object = elf_file.getFile(cg.file).?.object;
         return object.comdat_group_data.items[cg.members_start..][0..cg.members_len];
     }
 

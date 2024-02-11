@@ -58,7 +58,7 @@ pub fn parse(self: *Object, elf_file: *Elf) !void {
 
     const header_buffer = try preadAllAlloc(gpa, file, offset, @sizeOf(elf.Elf64_Ehdr));
     defer gpa.free(header_buffer);
-    self.header = @as(*align(1) const elf.Elf64_Ehdr, @ptrCast(&header_buffer)).*;
+    self.header = @as(*align(1) const elf.Elf64_Ehdr, @ptrCast(header_buffer)).*;
 
     if (self.header.?.e_shnum == 0) return;
 
@@ -157,6 +157,7 @@ fn initAtoms(self: *Object, allocator: Allocator, file: std.fs.File, elf_file: *
                 const comdat_group = elf_file.getComdatGroup(comdat_group_index);
                 comdat_group.* = .{
                     .owner = gop.index,
+                    .file = self.index,
                     .shndx = @intCast(i),
                     .members_start = group_start,
                     .members_len = @intCast(group_nmembers - 1),
@@ -357,7 +358,7 @@ fn parseEhFrame(self: *Object, allocator: Allocator, file: std.fs.File, shndx: u
                 .offset = rec.offset,
                 .size = rec.size,
                 .rel_index = rel_start + @as(u32, @intCast(rel_range.start)),
-                .rel_num = rel_start + @as(u32, @intCast(rel_range.len)),
+                .rel_num = @as(u32, @intCast(rel_range.len)),
                 .shndx = shndx,
                 .file = self.index,
             }),
@@ -366,7 +367,7 @@ fn parseEhFrame(self: *Object, allocator: Allocator, file: std.fs.File, shndx: u
                 .size = rec.size,
                 .cie_index = undefined,
                 .rel_index = rel_start + @as(u32, @intCast(rel_range.start)),
-                .rel_num = rel_start + @as(u32, @intCast(rel_range.len)),
+                .rel_num = @as(u32, @intCast(rel_range.len)),
                 .shndx = shndx,
                 .file = self.index,
             }),
