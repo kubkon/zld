@@ -118,6 +118,9 @@ pub const File = union(enum) {
         object: Object,
         shared: SharedObject,
     };
+
+    pub const Handle = std.fs.File;
+    pub const HandleIndex = Index;
 };
 
 const std = @import("std");

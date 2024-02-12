@@ -1308,24 +1308,23 @@ pub const ComdatGroupSection = struct {
     pub fn getSymbol(cgs: ComdatGroupSection, elf_file: *Elf) Symbol.Index {
         const cg = elf_file.getComdatGroup(cgs.cg_index);
         const object = cgs.getFile(elf_file).?.object;
-        const shdr = object.getShdrs()[cg.shndx];
+        const shdr = object.shdrs.items[cg.shndx];
         return object.symbols.items[shdr.sh_info];
     }
 
     pub fn size(cgs: ComdatGroupSection, elf_file: *Elf) usize {
         const cg = elf_file.getComdatGroup(cgs.cg_index);
-        const object = cgs.getFile(elf_file).?.object;
-        const members = object.getComdatGroupMembers(cg.shndx);
+        const members = cg.getComdatGroupMembers(elf_file);
         return (members.len + 1) * @sizeOf(u32);
     }
 
     pub fn write(cgs: ComdatGroupSection, elf_file: *Elf, writer: anytype) !void {
         const cg = elf_file.getComdatGroup(cgs.cg_index);
         const object = cgs.getFile(elf_file).?.object;
-        const members = object.getComdatGroupMembers(cg.shndx);
+        const members = cg.getComdatGroupMembers(elf_file);
         try writer.writeInt(u32, elf.GRP_COMDAT, .little);
         for (members) |shndx| {
-            const shdr = object.getShdrs()[shndx];
+            const shdr = object.shdrs.items[shndx];
             switch (shdr.sh_type) {
                 elf.SHT_RELA => {
                     const atom_index = object.atoms.items[shdr.sh_info];

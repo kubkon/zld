@@ -1,4 +1,7 @@
 pub fn flush(elf_file: *Elf) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     claimUnresolved(elf_file);
     try initSections(elf_file);
     try elf_file.sortSections();
@@ -24,12 +27,15 @@ pub fn flush(elf_file: *Elf) !void {
 }
 
 fn claimUnresolved(elf_file: *Elf) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     for (elf_file.objects.items) |index| {
         const object = elf_file.getFile(index).?.object;
         const first_global = object.first_global orelse return;
         for (object.getGlobals(), 0..) |global_index, i| {
             const sym_idx = @as(u32, @intCast(first_global + i));
-            const sym = object.symtab[sym_idx];
+            const sym = object.symtab.items[sym_idx];
             if (sym.st_shndx != elf.SHN_UNDEF) continue;
 
             const global = elf_file.getSymbol(global_index);
@@ -46,6 +52,9 @@ fn claimUnresolved(elf_file: *Elf) void {
 }
 
 fn initSections(elf_file: *Elf) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     for (elf_file.objects.items) |index| {
         const object = elf_file.getFile(index).?.object;
 
@@ -54,8 +63,8 @@ fn initSections(elf_file: *Elf) !void {
             if (!atom.flags.alive) continue;
             atom.out_shndx = try object.initOutputSection(elf_file, atom.getInputShdr(elf_file));
 
-            const rela_shdr = object.getShdrs()[atom.relocs_shndx];
-            if (rela_shdr.sh_type != elf.SHT_NULL) {
+            if (atom.getRelocs(elf_file).len > 0) {
+                const rela_shdr = object.getShdrs()[atom.relocs_shndx];
                 const out_rela_shndx = try object.initOutputSection(elf_file, rela_shdr);
                 const out_rela_shdr = &elf_file.sections.items(.shdr)[out_rela_shndx];
                 out_rela_shdr.sh_flags |= elf.SHF_INFO_LINK;
@@ -92,6 +101,9 @@ fn initSections(elf_file: *Elf) !void {
 }
 
 fn initComdatGroups(elf_file: *Elf) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const gpa = elf_file.base.allocator;
 
     for (elf_file.objects.items) |index| {
@@ -117,6 +129,9 @@ fn initComdatGroups(elf_file: *Elf) !void {
 }
 
 fn calcSectionSizes(elf_file: *Elf) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     for (
         elf_file.sections.items(.shdr),
         elf_file.sections.items(.atoms),
@@ -161,6 +176,9 @@ fn calcSectionSizes(elf_file: *Elf) !void {
 }
 
 fn calcComdatGroupsSizes(elf_file: *Elf) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     for (elf_file.comdat_group_sections.items) |cg| {
         const shdr = &elf_file.sections.items(.shdr)[cg.shndx];
         shdr.sh_size = cg.size(elf_file);
@@ -183,6 +201,9 @@ fn allocateSections(elf_file: *Elf, base_offset: u64) void {
 }
 
 fn writeAtoms(elf_file: *Elf) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const gpa = elf_file.base.allocator;
     const slice = elf_file.sections.slice();
     for (slice.items(.shdr), slice.items(.atoms)) |shdr, atoms| {
@@ -223,6 +244,9 @@ fn writeAtoms(elf_file: *Elf) !void {
 }
 
 fn writeSyntheticSections(elf_file: *Elf) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const gpa = elf_file.base.allocator;
 
     for (elf_file.sections.items(.rela_shndx), elf_file.sections.items(.atoms)) |rela_shndx, atoms| {
@@ -299,6 +323,9 @@ fn writeSyntheticSections(elf_file: *Elf) !void {
 }
 
 fn writeComdatGroup(elf_file: *Elf) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const gpa = elf_file.base.allocator;
 
     for (elf_file.comdat_group_sections.items) |cgs| {
@@ -358,5 +385,6 @@ const math = std.math;
 const mem = std.mem;
 const state_log = std.log.scoped(.state);
 const std = @import("std");
+const trace = @import("../tracy.zig").trace;
 
 const Elf = @import("../Elf.zig");

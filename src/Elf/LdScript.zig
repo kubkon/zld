@@ -6,6 +6,9 @@ pub fn deinit(scr: *LdScript, allocator: Allocator) void {
 }
 
 pub fn parse(scr: *LdScript, data: []const u8, elf_file: *Elf) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const gpa = elf_file.base.allocator;
     var tokenizer = Tokenizer{ .source = data };
     var tokens = std.ArrayList(Token).init(gpa);
@@ -67,6 +70,9 @@ fn doParse(scr: *LdScript, ctx: struct {
     parser: *Parser,
     args: *std.ArrayList(Elf.LinkObject),
 }) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     while (true) {
         ctx.parser.skipAny(&.{ .comment, .new_line });
 
@@ -521,6 +527,7 @@ const LdScript = @This();
 
 const std = @import("std");
 const assert = std.debug.assert;
+const trace = @import("../tracy.zig").trace;
 
 const Allocator = std.mem.Allocator;
 const Elf = @import("../Elf.zig");

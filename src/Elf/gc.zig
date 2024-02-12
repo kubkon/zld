@@ -1,4 +1,7 @@
 pub fn gcAtoms(elf_file: *Elf) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     var roots = std.ArrayList(*Atom).init(elf_file.base.allocator);
     defer roots.deinit();
     try collectRoots(&roots, elf_file);
@@ -7,6 +10,9 @@ pub fn gcAtoms(elf_file: *Elf) !void {
 }
 
 fn collectRoots(roots: *std.ArrayList(*Atom), elf_file: *Elf) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     if (elf_file.entry_index) |index| {
         const global = elf_file.getSymbol(index);
         try markSymbol(global, roots, elf_file);
@@ -70,6 +76,9 @@ fn markAtom(atom: *Atom) bool {
 }
 
 fn markLive(atom: *Atom, elf_file: *Elf) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     assert(atom.flags.visited);
     atom.flags.alive = true;
     track_live_log.debug("{}marking live atom({d})", .{ track_live_level, atom.atom_index });
@@ -95,12 +104,18 @@ fn markLive(atom: *Atom, elf_file: *Elf) void {
 }
 
 fn mark(roots: std.ArrayList(*Atom), elf_file: *Elf) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     for (roots.items) |root| {
         markLive(root, elf_file);
     }
 }
 
 fn prune(elf_file: *Elf) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     for (elf_file.objects.items) |index| {
         for (elf_file.getFile(index).?.object.atoms.items) |atom_index| {
             const atom = elf_file.getAtom(atom_index) orelse continue;
@@ -152,6 +167,7 @@ const assert = std.debug.assert;
 const elf = std.elf;
 const track_live_log = std.log.scoped(.gc_track_live);
 const mem = std.mem;
+const trace = @import("../tracy.zig").trace;
 const std = @import("std");
 
 const Allocator = mem.Allocator;

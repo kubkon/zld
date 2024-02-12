@@ -673,7 +673,6 @@ fn parseObject(self: *MachO, obj: LinkObject) !bool {
 
     const gpa = self.base.allocator;
     const file = try std.fs.cwd().openFile(obj.path, .{});
-    errdefer file.close();
     const fh = try self.addFileHandle(file);
 
     const header = file.reader().readStruct(macho.mach_header_64) catch return false;
@@ -708,7 +707,6 @@ fn parseArchive(self: *MachO, obj: LinkObject) !bool {
 
     const gpa = self.base.allocator;
     const file = try std.fs.cwd().openFile(obj.path, .{});
-    errdefer file.close();
     const fh = try self.addFileHandle(file);
 
     const fat_arch: ?fat.Arch = if (fat.isFatLibrary(file)) blk: {

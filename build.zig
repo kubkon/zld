@@ -9,10 +9,13 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const mode = b.standardOptimizeOption(.{});
 
-    const strip = b.option(bool, "strip", "Omit debug information");
     const enable_logging = b.option(bool, "log", "Whether to enable logging") orelse (mode == .Debug);
     const enable_tracy = b.option([]const u8, "tracy", "Enable Tracy integration. Supply path to Tracy source");
-    const tracy_callstack_depth = b.option(usize, "tracy-callstack-depth", "Set Tracy callstack depth") orelse 10;
+    const tracy_callstack_depth = b.option(usize, "tracy-callstack-depth", "Set Tracy callstack depth") orelse 20;
+    const strip = b.option(bool, "strip", "Omit debug information") orelse blk: {
+        if (enable_tracy != null) break :blk false;
+        break :blk null;
+    };
 
     const yaml = b.dependency("zig-yaml", .{
         .target = target,
