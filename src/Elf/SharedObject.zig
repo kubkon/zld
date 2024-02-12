@@ -57,16 +57,15 @@ pub fn parse(self: *SharedObject, elf_file: *Elf, file: std.fs.File) !void {
     defer gpa.free(header_buffer);
     self.header = @as(*align(1) const elf.Elf64_Ehdr, @ptrCast(header_buffer)).*;
 
-    if (file_size < self.header.?.e_shoff or
-        file_size < self.header.?.e_shoff + @as(u64, @intCast(self.header.?.e_shnum)) * @sizeOf(elf.Elf64_Shdr))
-    {
+    const shdrs_size = @as(usize, @intCast(self.header.?.e_shnum)) * @sizeOf(elf.Elf64_Shdr);
+    if (file_size < self.header.?.e_shoff or file_size < self.header.?.e_shoff + shdrs_size) {
         elf_file.base.fatal("{s}: corrupt header: section header table extends past the end of file", .{
             self.path,
         });
         return error.ParseFailed;
     }
 
-    const shdrs_buffer = try Elf.preadAllAlloc(gpa, file, self.header.?.e_shoff, @sizeOf(elf.Elf64_Shdr) * self.header.?.e_shnum);
+    const shdrs_buffer = try Elf.preadAllAlloc(gpa, file, self.header.?.e_shoff, shdrs_size);
     defer gpa.free(shdrs_buffer);
     const shdrs = @as([*]align(1) const elf.Elf64_Shdr, @ptrCast(shdrs_buffer.ptr))[0..self.header.?.e_shnum];
     try self.shdrs.appendUnalignedSlice(gpa, shdrs);
