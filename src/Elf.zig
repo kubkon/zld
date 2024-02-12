@@ -252,6 +252,9 @@ fn resolveFile(
 }
 
 pub fn flush(self: *Elf) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const gpa = self.base.allocator;
 
     // Append empty string to string tables.
@@ -715,6 +718,9 @@ pub fn addAtomsToSections(self: *Elf) !void {
 }
 
 fn calcSectionSizes(self: *Elf) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     for (self.sections.items(.shdr), self.sections.items(.atoms)) |*shdr, atoms| {
         if (atoms.items.len == 0) continue;
 
@@ -1280,6 +1286,9 @@ fn allocateSectionsInFile(self: *Elf, base_offset: u64) void {
 }
 
 fn allocateSections(self: *Elf) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     while (true) {
         const nphdrs = self.phdrs.items.len;
         const base_offset: u64 = @sizeOf(elf.Elf64_Ehdr) + nphdrs * @sizeOf(elf.Elf64_Phdr);
@@ -1469,6 +1478,9 @@ pub fn sortSections(self: *Elf) !void {
 }
 
 fn allocateAtoms(self: *Elf) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     for (self.sections.items(.shdr), self.sections.items(.atoms)) |shdr, atoms| {
         if (atoms.items.len == 0) continue;
         for (atoms.items) |atom_index| {
@@ -1480,6 +1492,9 @@ fn allocateAtoms(self: *Elf) void {
 }
 
 pub fn allocateLocals(self: *Elf) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     for (self.objects.items) |index| {
         for (self.getFile(index).?.object.getLocals()) |local_index| {
             const local = self.getSymbol(local_index);
@@ -1492,6 +1507,9 @@ pub fn allocateLocals(self: *Elf) void {
 }
 
 pub fn allocateGlobals(self: *Elf) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     for (self.objects.items) |index| {
         for (self.getFile(index).?.object.getGlobals()) |global_index| {
             const global = self.getSymbol(global_index);
@@ -1641,6 +1659,9 @@ fn parsePositional(self: *Elf, arena: Allocator, obj: LinkObject, search_dirs: [
 }
 
 fn parseObject(self: *Elf, obj: LinkObject) !bool {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const gpa = self.base.allocator;
     const file = try fs.cwd().openFile(obj.path, .{});
     const fh = try self.addFileHandle(file);
@@ -1665,6 +1686,9 @@ fn parseObject(self: *Elf, obj: LinkObject) !bool {
 }
 
 fn parseArchive(self: *Elf, obj: LinkObject) !bool {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const gpa = self.base.allocator;
     const file = try fs.cwd().openFile(obj.path, .{});
     const fh = try self.addFileHandle(file);
@@ -1699,6 +1723,9 @@ fn parseArchive(self: *Elf, obj: LinkObject) !bool {
 }
 
 fn parseShared(self: *Elf, obj: LinkObject) !bool {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const gpa = self.base.allocator;
     const file = try fs.cwd().openFile(obj.path, .{});
     defer file.close();
@@ -1724,6 +1751,9 @@ fn parseShared(self: *Elf, obj: LinkObject) !bool {
 }
 
 fn parseLdScript(self: *Elf, arena: Allocator, obj: LinkObject, search_dirs: []const []const u8) !bool {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const gpa = self.base.allocator;
     const file = try fs.cwd().openFile(obj.path, .{});
     defer file.close();
@@ -1788,6 +1818,9 @@ fn validateOrSetCpuArch(self: *Elf, name: []const u8, cpu_arch: std.Target.Cpu.A
 /// 5. Remove references to dead objects/shared objects
 /// 6. Re-run symbol resolution on pruned objects and shared objects sets.
 fn resolveSymbols(self: *Elf) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     // Resolve symbols on the set of all objects and shared objects (even if some are unneeded).
     for (self.objects.items) |index| self.getFile(index).?.resolveSymbols(self);
     for (self.shared_objects.items) |index| self.getFile(index).?.resolveSymbols(self);
@@ -1857,6 +1890,9 @@ fn resolveSymbols(self: *Elf) !void {
 /// This routine will prune unneeded objects extracted from archives and
 /// unneeded shared objects.
 fn markLive(self: *Elf) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     for (self.objects.items) |index| {
         const file = self.getFile(index).?;
         if (file.isAlive()) file.markLive(self);
@@ -1868,6 +1904,9 @@ fn markLive(self: *Elf) void {
 }
 
 fn markEhFrameAtomsDead(self: *Elf) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     for (self.objects.items) |index| {
         const file = self.getFile(index).?;
         if (!file.isAlive()) continue;
@@ -1976,6 +2015,9 @@ fn checkDuplicates(self: *Elf) !void {
 }
 
 fn claimUnresolved(self: *Elf) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     for (self.objects.items) |index| {
         const object = self.getFile(index).?.object;
         const first_global = object.first_global orelse return;
@@ -2036,6 +2078,9 @@ fn reportUndefs(self: *Elf) !void {
 }
 
 fn scanRelocs(self: *Elf) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     var has_reloc_error = false;
     for (self.objects.items) |index| {
         self.getFile(index).?.object.scanRelocs(self) catch |err| switch (err) {
@@ -2141,6 +2186,9 @@ fn setHashes(self: *Elf) !void {
 }
 
 fn writeAtoms(self: *Elf) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const slice = self.sections.slice();
     for (slice.items(.shdr), slice.items(.atoms)) |shdr, atoms| {
         if (atoms.items.len == 0) continue;
@@ -2853,11 +2901,12 @@ const elf = std.elf;
 const fs = std.fs;
 const gc = @import("Elf/gc.zig");
 const log = std.log.scoped(.elf);
+const math = std.math;
+const mem = std.mem;
 const relocatable = @import("Elf/relocatable.zig");
 const state_log = std.log.scoped(.state);
 const synthetic = @import("Elf/synthetic.zig");
-const math = std.math;
-const mem = std.mem;
+const trace = @import("tracy.zig").trace;
 
 const Allocator = mem.Allocator;
 const Archive = @import("Elf/Archive.zig");

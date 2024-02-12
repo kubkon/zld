@@ -235,6 +235,9 @@ pub const Iterator = struct {
 };
 
 pub fn calcEhFrameSize(elf_file: *Elf) !usize {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     var offset: u64 = 0;
 
     var cies = std.ArrayList(Cie).init(elf_file.base.allocator);
@@ -278,6 +281,9 @@ pub fn calcEhFrameSize(elf_file: *Elf) !usize {
 }
 
 pub fn calcEhFrameHdrSize(elf_file: *Elf) usize {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     var count: usize = 0;
     for (elf_file.objects.items) |index| {
         for (elf_file.getFile(index).?.object.fdes.items) |fde| {
@@ -289,6 +295,9 @@ pub fn calcEhFrameHdrSize(elf_file: *Elf) usize {
 }
 
 pub fn calcEhFrameRelocs(elf_file: *Elf) usize {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     var count: usize = 0;
     for (elf_file.objects.items) |index| {
         const object = elf_file.getFile(index).?.object;
@@ -305,6 +314,9 @@ pub fn calcEhFrameRelocs(elf_file: *Elf) usize {
 }
 
 fn resolveReloc(rec: anytype, sym: *const Symbol, rel: elf.Elf64_Rela, elf_file: *Elf, data: []u8) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const offset = rel.r_offset - rec.offset;
     const P = @as(i64, @intCast(rec.getAddress(elf_file) + offset));
     const S = @as(i64, @intCast(sym.getAddress(.{}, elf_file)));
@@ -329,6 +341,9 @@ fn resolveReloc(rec: anytype, sym: *const Symbol, rel: elf.Elf64_Rela, elf_file:
 }
 
 pub fn writeEhFrame(elf_file: *Elf, writer: anytype) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     relocs_log.debug("{x}: .eh_frame", .{
         elf_file.sections.items(.shdr)[elf_file.eh_frame_sect_index.?].sh_addr,
     });
@@ -378,6 +393,9 @@ pub fn writeEhFrame(elf_file: *Elf, writer: anytype) !void {
 }
 
 pub fn writeEhFrameRelocatable(elf_file: *Elf, writer: anytype) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const gpa = elf_file.base.allocator;
 
     for (elf_file.objects.items) |index| {
@@ -411,6 +429,9 @@ pub fn writeEhFrameRelocatable(elf_file: *Elf, writer: anytype) !void {
 }
 
 fn emitReloc(elf_file: *Elf, rec: anytype, sym: *const Symbol, rel: elf.Elf64_Rela) elf.Elf64_Rela {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const r_offset = rec.getAddress(elf_file) + rel.r_offset - rec.offset;
     const r_type = rel.r_type();
     var r_addend = rel.r_addend;
@@ -441,6 +462,9 @@ fn emitReloc(elf_file: *Elf, rec: anytype, sym: *const Symbol, rel: elf.Elf64_Re
 }
 
 pub fn writeEhFrameRelocs(elf_file: *Elf, writer: anytype) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     relocs_log.debug("{x}: .eh_frame", .{elf_file.sections.items(.shdr)[elf_file.eh_frame_sect_index.?].sh_addr});
 
     for (elf_file.objects.items) |index| {
@@ -467,6 +491,9 @@ pub fn writeEhFrameRelocs(elf_file: *Elf, writer: anytype) !void {
 }
 
 pub fn writeEhFrameHdr(elf_file: *Elf, writer: anytype) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     try writer.writeByte(1); // version
     try writer.writeByte(EH_PE.pcrel | EH_PE.sdata4);
     try writer.writeByte(EH_PE.udata4);
@@ -550,6 +577,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const elf = std.elf;
 const relocs_log = std.log.scoped(.relocs);
+const trace = @import("../tracy.zig").trace;
 
 const Allocator = std.mem.Allocator;
 const Atom = @import("Atom.zig");

@@ -46,6 +46,9 @@ pub fn getName(self: Atom, elf_file: *Elf) [:0]const u8 {
 /// Returns atom's code and optionally uncompresses data if required (for compressed sections).
 /// Caller owns the memory.
 pub fn getCodeUncompressAlloc(self: Atom, elf_file: *Elf) ![]u8 {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const gpa = elf_file.base.allocator;
     const shdr = self.getInputShdr(elf_file);
     const object = self.getObject(elf_file);
@@ -94,6 +97,9 @@ pub fn getRelocs(self: Atom, elf_file: *Elf) []const elf.Elf64_Rela {
 }
 
 pub fn writeRelocs(self: Atom, elf_file: *Elf, out_relocs: *std.ArrayList(elf.Elf64_Rela)) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     relocs_log.debug("0x{x}: {s}", .{ self.value, self.getName(elf_file) });
 
     const object = self.getObject(elf_file);
@@ -142,6 +148,9 @@ pub fn markFdesDead(self: Atom, elf_file: *Elf) void {
 }
 
 pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const object = self.getObject(elf_file);
     const relocs = self.getRelocs(elf_file);
     const code = try self.getCodeUncompressAlloc(elf_file);
@@ -286,6 +295,9 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
 }
 
 fn scanReloc(self: Atom, symbol: *Symbol, rel: elf.Elf64_Rela, action: RelocAction, elf_file: *Elf) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const is_writeable = self.getInputShdr(elf_file).sh_flags & elf.SHF_WRITE != 0;
     const object = self.getObject(elf_file);
 
@@ -491,6 +503,9 @@ fn reportUndefSymbol(self: Atom, rel: elf.Elf64_Rela, elf_file: *Elf) !bool {
 }
 
 pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     assert(self.getInputShdr(elf_file).sh_flags & elf.SHF_ALLOC != 0);
     const gpa = elf_file.base.allocator;
     const code = try self.getCodeUncompressAlloc(elf_file);
@@ -665,6 +680,9 @@ fn resolveDynAbsReloc(
     elf_file: *Elf,
     writer: anytype,
 ) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const P = self.value + rel.r_offset;
     const A = rel.r_addend;
     const S = @as(i64, @intCast(target.getAddress(.{}, elf_file)));
@@ -749,6 +767,9 @@ inline fn applyDynamicReloc(value: i64, elf_file: *Elf, writer: anytype) !void {
 }
 
 pub fn resolveRelocsNonAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     assert(self.getInputShdr(elf_file).sh_flags & elf.SHF_ALLOC == 0);
     const gpa = elf_file.base.allocator;
     const code = try self.getCodeUncompressAlloc(elf_file);
@@ -1126,6 +1147,7 @@ const log = std.log.scoped(.elf);
 const relocs_log = std.log.scoped(.relocs);
 const math = std.math;
 const mem = std.mem;
+const trace = @import("../tracy.zig").trace;
 
 const Allocator = mem.Allocator;
 const Disassembler = dis_x86_64.Disassembler;

@@ -47,6 +47,9 @@ pub fn deinit(self: *SharedObject, allocator: Allocator) void {
 }
 
 pub fn parse(self: *SharedObject, elf_file: *Elf, file: std.fs.File) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const gpa = elf_file.base.allocator;
     const file_size = (try file.stat()).size;
 
@@ -114,6 +117,9 @@ fn parseVersions(self: *SharedObject, elf_file: *Elf, file: std.fs.File, opts: s
     verdef_sect_index: ?u32,
     versym_sect_index: ?u32,
 }) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const gpa = elf_file.base.allocator;
 
     try self.verstrings.resize(gpa, 2);
@@ -162,6 +168,9 @@ fn parseVersions(self: *SharedObject, elf_file: *Elf, file: std.fs.File, opts: s
 }
 
 fn initSymtab(self: *SharedObject, elf_file: *Elf) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const gpa = elf_file.base.allocator;
 
     try self.symbols.ensureTotalCapacityPrecise(gpa, self.symtab.items.len);
@@ -181,6 +190,9 @@ fn initSymtab(self: *SharedObject, elf_file: *Elf) !void {
 }
 
 pub fn resolveSymbols(self: *SharedObject, elf_file: *Elf) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     for (self.getGlobals(), 0..) |index, i| {
         const sym_idx = @as(Symbol.Index, @intCast(i));
         const this_sym = self.symtab.items[sym_idx];
@@ -199,6 +211,9 @@ pub fn resolveSymbols(self: *SharedObject, elf_file: *Elf) void {
 }
 
 pub fn markLive(self: *SharedObject, elf_file: *Elf) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     for (self.symbols.items, 0..) |index, i| {
         const sym = self.symtab.items[i];
         if (sym.st_shndx != elf.SHN_UNDEF) continue;
@@ -283,6 +298,9 @@ pub inline fn getGlobals(self: SharedObject) []const Symbol.Index {
 }
 
 pub fn initSymbolAliases(self: *SharedObject, elf_file: *Elf) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     assert(self.aliases == null);
 
     const SortAlias = struct {
@@ -377,6 +395,7 @@ const assert = std.debug.assert;
 const elf = std.elf;
 const log = std.log.scoped(.elf);
 const mem = std.mem;
+const trace = @import("../tracy.zig").trace;
 
 const Allocator = mem.Allocator;
 const Elf = @import("../Elf.zig");

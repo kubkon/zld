@@ -51,6 +51,9 @@ pub fn deinit(self: *Object, allocator: Allocator) void {
 }
 
 pub fn parse(self: *Object, elf_file: *Elf) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const gpa = elf_file.base.allocator;
     const offset = if (self.archive) |ar| ar.offset else 0;
     const file = elf_file.getFileHandle(self.file_handle);
@@ -114,6 +117,9 @@ pub fn parse(self: *Object, elf_file: *Elf) !void {
 }
 
 fn initAtoms(self: *Object, allocator: Allocator, file: std.fs.File, elf_file: *Elf) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const shdrs = self.shdrs.items;
     try self.atoms.resize(allocator, shdrs.len);
     @memset(self.atoms.items, 0);
@@ -251,6 +257,9 @@ fn skipShdr(self: *Object, index: u32, elf_file: *Elf) bool {
 }
 
 fn initSymtab(self: *Object, allocator: Allocator, elf_file: *Elf) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const first_global = self.first_global orelse self.symtab.items.len;
     const shdrs = self.shdrs.items;
 
@@ -332,6 +341,9 @@ pub fn initOutputSection(self: Object, elf_file: *Elf, shdr: elf.Elf64_Shdr) !u1
 }
 
 fn parseEhFrame(self: *Object, allocator: Allocator, file: std.fs.File, shndx: u32, elf_file: *Elf) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const relocs_shndx = for (self.shdrs.items, 0..) |shdr, i| switch (shdr.sh_type) {
         elf.SHT_RELA => if (shdr.sh_info == shndx) break @as(u32, @intCast(i)),
         else => {},
@@ -419,6 +431,9 @@ fn filterRelocs(
     start: u64,
     len: u64,
 ) struct { start: u64, len: u64 } {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const Predicate = struct {
         value: u64,
 
@@ -441,6 +456,9 @@ fn filterRelocs(
 }
 
 pub fn scanRelocs(self: *Object, elf_file: *Elf) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     for (self.atoms.items) |atom_index| {
         const atom = elf_file.getAtom(atom_index) orelse continue;
         if (!atom.flags.alive) continue;
@@ -467,6 +485,9 @@ pub fn scanRelocs(self: *Object, elf_file: *Elf) !void {
 }
 
 pub fn resolveSymbols(self: *Object, elf_file: *Elf) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const first_global = self.first_global orelse return;
     for (self.getGlobals(), 0..) |index, i| {
         const sym_idx = @as(Symbol.Index, @intCast(first_global + i));
@@ -497,6 +518,9 @@ pub fn resolveSymbols(self: *Object, elf_file: *Elf) void {
 }
 
 pub fn markLive(self: *Object, elf_file: *Elf) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const first_global = self.first_global orelse return;
     for (self.getGlobals(), 0..) |index, i| {
         const sym_idx = first_global + i;
@@ -889,6 +913,7 @@ const fs = std.fs;
 const log = std.log.scoped(.elf);
 const math = std.math;
 const mem = std.mem;
+const trace = @import("../tracy.zig").trace;
 
 const Allocator = mem.Allocator;
 const Atom = @import("Atom.zig");

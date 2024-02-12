@@ -15,6 +15,9 @@ pub fn deinit(self: *Archive, allocator: Allocator) void {
 }
 
 pub fn parse(self: *Archive, elf_file: *Elf, path: []const u8, file_handle: File.HandleIndex) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const gpa = elf_file.base.allocator;
     const file = elf_file.getFileHandle(file_handle);
 
@@ -92,6 +95,7 @@ const elf = std.elf;
 const fs = std.fs;
 const log = std.log.scoped(.elf);
 const mem = std.mem;
+const trace = @import("../tracy.zig").trace;
 
 const Allocator = mem.Allocator;
 const Archive = @This();
