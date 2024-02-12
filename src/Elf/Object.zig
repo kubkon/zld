@@ -66,7 +66,7 @@ pub fn parse(self: *Object, elf_file: *Elf) !void {
     if (self.header.?.e_shnum == 0) return;
 
     const shdrs_size = @as(usize, @intCast(self.header.?.e_shnum)) * @sizeOf(elf.Elf64_Shdr);
-    if (file_size < self.header.?.e_shoff or file_size < self.header.?.e_shoff + shdrs_size) {
+    if (file_size < self.header.?.e_shoff + offset or file_size < self.header.?.e_shoff + offset + shdrs_size) {
         elf_file.base.fatal("{}: corrupt header: section header table extends past the end of file", .{
             self.fmtPath(),
         });
@@ -353,6 +353,7 @@ fn parseEhFrame(self: *Object, allocator: Allocator, file: std.fs.File, shndx: u
 
     const raw = try self.preadShdrContentsAlloc(allocator, file, shndx);
     defer allocator.free(raw);
+    const data_start = @as(u32, @intCast(self.eh_frame_data.items.len));
     try self.eh_frame_data.appendSlice(allocator, raw);
     const relocs = try self.preadRelocsAlloc(allocator, file, relocs_shndx);
     defer allocator.free(relocs);
@@ -366,7 +367,7 @@ fn parseEhFrame(self: *Object, allocator: Allocator, file: std.fs.File, shndx: u
         const rel_range = filterRelocs(relocs, rec.offset, rec.size + 4);
         switch (rec.tag) {
             .cie => try self.cies.append(allocator, .{
-                .offset = rec.offset,
+                .offset = data_start + rec.offset,
                 .size = rec.size,
                 .rel_index = rel_start + @as(u32, @intCast(rel_range.start)),
                 .rel_num = @as(u32, @intCast(rel_range.len)),
@@ -374,7 +375,7 @@ fn parseEhFrame(self: *Object, allocator: Allocator, file: std.fs.File, shndx: u
                 .file = self.index,
             }),
             .fde => try self.fdes.append(allocator, .{
-                .offset = rec.offset,
+                .offset = data_start + rec.offset,
                 .size = rec.size,
                 .cie_index = undefined,
                 .rel_index = rel_start + @as(u32, @intCast(rel_range.start)),
