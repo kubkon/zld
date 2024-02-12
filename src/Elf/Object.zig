@@ -56,7 +56,7 @@ pub fn parse(self: *Object, elf_file: *Elf) !void {
     const file = elf_file.getFileHandle(self.file_handle);
     const file_size = (try file.stat()).size;
 
-    const header_buffer = try preadAllAlloc(gpa, file, offset, @sizeOf(elf.Elf64_Ehdr));
+    const header_buffer = try Elf.preadAllAlloc(gpa, file, offset, @sizeOf(elf.Elf64_Ehdr));
     defer gpa.free(header_buffer);
     self.header = @as(*align(1) const elf.Elf64_Ehdr, @ptrCast(header_buffer)).*;
 
@@ -71,7 +71,7 @@ pub fn parse(self: *Object, elf_file: *Elf) !void {
         return error.ParseFailed;
     }
 
-    const shdrs_buffer = try preadAllAlloc(gpa, file, offset + self.header.?.e_shoff, @sizeOf(elf.Elf64_Shdr) * self.header.?.e_shnum);
+    const shdrs_buffer = try Elf.preadAllAlloc(gpa, file, offset + self.header.?.e_shoff, @sizeOf(elf.Elf64_Shdr) * self.header.?.e_shnum);
     defer gpa.free(shdrs_buffer);
     const shdrs = @as([*]align(1) const elf.Elf64_Shdr, @ptrCast(shdrs_buffer.ptr))[0..self.header.?.e_shnum];
     try self.shdrs.appendUnalignedSlice(gpa, shdrs);
@@ -685,20 +685,11 @@ pub inline fn getShdrs(self: Object) []const elf.Elf64_Shdr {
 }
 
 /// Caller owns the memory.
-fn preadAllAlloc(allocator: Allocator, file: std.fs.File, offset: usize, size: usize) ![]u8 {
-    const buffer = try allocator.alloc(u8, size);
-    errdefer allocator.free(buffer);
-    const amt = try file.preadAll(buffer, offset);
-    if (amt != size) return error.InputOutput;
-    return buffer;
-}
-
-/// Caller owns the memory.
 pub fn preadShdrContentsAlloc(self: Object, allocator: Allocator, file: std.fs.File, index: u32) ![]u8 {
     assert(index < self.shdrs.items.len);
     const offset = if (self.archive) |ar| ar.offset else 0;
     const shdr = self.shdrs.items[index];
-    return preadAllAlloc(allocator, file, offset + shdr.sh_offset, shdr.sh_size);
+    return Elf.preadAllAlloc(allocator, file, offset + shdr.sh_offset, shdr.sh_size);
 }
 
 fn preadRelocsAlloc(self: Object, allocator: Allocator, file: std.fs.File, shndx: u32) ![]align(1) const elf.Elf64_Rela {

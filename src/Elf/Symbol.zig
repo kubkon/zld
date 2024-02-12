@@ -67,9 +67,7 @@ pub inline fn getFile(symbol: Symbol, elf_file: *Elf) ?File {
 pub fn getSourceSymbol(symbol: Symbol, elf_file: *Elf) elf.Elf64_Sym {
     const file = symbol.getFile(elf_file).?;
     return switch (file) {
-        .internal => |x| x.symtab.items[symbol.sym_idx],
-        .object => |x| x.symtab.items[symbol.sym_idx],
-        inline else => |x| x.symtab[symbol.sym_idx],
+        inline else => |x| x.symtab.items[symbol.sym_idx],
     };
 }
 
@@ -177,7 +175,7 @@ pub fn getAlignment(symbol: Symbol, elf_file: *Elf) !u64 {
     const file = symbol.getFile(elf_file) orelse return 0;
     const shared = file.shared;
     const s_sym = symbol.getSourceSymbol(elf_file);
-    const shdr = shared.getShdrs()[s_sym.st_shndx];
+    const shdr = shared.shdrs.items[s_sym.st_shndx];
     const alignment = @max(1, shdr.sh_addralign);
     return if (s_sym.st_value == 0)
         alignment

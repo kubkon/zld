@@ -1,5 +1,4 @@
 base: Zld,
-arena: std.heap.ArenaAllocator.State,
 options: Options,
 shoff: u64 = 0,
 
@@ -120,7 +119,6 @@ fn createEmpty(gpa: Allocator, options: Options, thread_pool: *ThreadPool) !*Elf
             .file = undefined,
             .thread_pool = thread_pool,
         },
-        .arena = std.heap.ArenaAllocator.init(gpa).state,
         .options = options,
         .default_sym_version = if (self.options.shared or options.export_dynamic)
             elf.VER_NDX_GLOBAL
@@ -185,7 +183,6 @@ pub fn deinit(self: *Elf) void {
         }
         self.undefs.deinit(gpa);
     }
-    self.arena.promote(gpa).deinit();
 }
 
 fn resolveFile(
@@ -273,8 +270,8 @@ pub fn flush(self: *Elf) !void {
     // Append null file.
     try self.files.append(gpa, .null);
 
-    var arena_allocator = self.arena.promote(gpa);
-    defer self.arena = arena_allocator.state;
+    var arena_allocator = std.heap.ArenaAllocator.init(gpa);
+    defer arena_allocator.deinit();
     const arena = arena_allocator.allocator();
 
     log.debug("search dirs", .{});
@@ -1637,7 +1634,7 @@ fn parsePositional(self: *Elf, arena: Allocator, obj: LinkObject, search_dirs: [
 
     if (try self.parseObject(resolved_obj)) return;
     if (try self.parseArchive(resolved_obj)) return;
-    if (try self.parseShared(arena, resolved_obj)) return;
+    if (try self.parseShared(resolved_obj)) return;
     if (try self.parseLdScript(arena, resolved_obj, search_dirs)) return;
 
     self.base.fatal("unknown filetype for positional argument: '{s}'", .{resolved_obj.path});
@@ -1656,7 +1653,7 @@ fn parseObject(self: *Elf, obj: LinkObject) !bool {
 
     const index = @as(u32, @intCast(try self.files.addOne(gpa)));
     self.files.set(index, .{ .object = .{
-        .path = obj.path,
+        .path = try gpa.dupe(u8, obj.path),
         .file_handle = fh,
         .index = index,
     } });
@@ -1701,7 +1698,7 @@ fn parseArchive(self: *Elf, obj: LinkObject) !bool {
     return true;
 }
 
-fn parseShared(self: *Elf, arena: Allocator, obj: LinkObject) !bool {
+fn parseShared(self: *Elf, obj: LinkObject) !bool {
     const gpa = self.base.allocator;
     const file = try fs.cwd().openFile(obj.path, .{});
     defer file.close();
@@ -1712,18 +1709,15 @@ fn parseShared(self: *Elf, arena: Allocator, obj: LinkObject) !bool {
     if (!SharedObject.isValidHeader(&header)) return false;
     self.validateOrSetCpuArch(obj.path, header.e_machine.toTargetCpuArch().?);
 
-    const data = try file.readToEndAlloc(arena, std.math.maxInt(u32));
-
     const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
     self.files.set(index, .{ .shared = .{
-        .path = obj.path,
-        .data = data,
+        .path = try gpa.dupe(u8, obj.path),
         .index = index,
         .needed = obj.needed,
         .alive = obj.needed,
     } });
     const dso = &self.files.items(.data)[index].shared;
-    try dso.parse(self);
+    try dso.parse(self, file);
     try self.shared_objects.append(gpa, index);
 
     return true;
@@ -2673,6 +2667,15 @@ pub fn getTlsAddress(self: *Elf) u64 {
     const index = self.tls_phdr_index orelse return 0;
     const phdr = self.phdrs.items[index];
     return phdr.p_vaddr;
+}
+
+/// Caller owns the memory.
+pub fn preadAllAlloc(allocator: Allocator, file: std.fs.File, offset: usize, size: usize) ![]u8 {
+    const buffer = try allocator.alloc(u8, size);
+    errdefer allocator.free(buffer);
+    const amt = try file.preadAll(buffer, offset);
+    if (amt != size) return error.InputOutput;
+    return buffer;
 }
 
 fn fmtSections(self: *Elf) std.fmt.Formatter(formatSections) {
