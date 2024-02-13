@@ -15,7 +15,7 @@ file: File.Index = 0,
 atom: Atom.Index = 0,
 
 /// Assigned output section index for this atom.
-shndx: u16 = 0,
+shndx: u32 = 0,
 
 /// Index of the source symbol this symbol references.
 /// Use `getSourceSymbol` to pull the source symbol from the relevant file.
@@ -94,6 +94,9 @@ pub fn getAddress(symbol: Symbol, opts: struct {
         }
         // Lazy-bound function it is!
         return symbol.getPltAddress(elf_file);
+    }
+    if (symbol.getAtom(elf_file)) |atom| {
+        return atom.getAddress(elf_file) + symbol.value;
     }
     return symbol.value;
 }
@@ -218,14 +221,14 @@ pub fn setOutputSym(symbol: Symbol, elf_file: *Elf, out: *elf.Elf64_Sym) void {
             if (symbol.flags.is_canonical) break :blk symbol.getAddress(.{}, elf_file);
             break :blk 0;
         }
-        if (st_shndx == elf.SHN_ABS or st_shndx == elf.SHN_COMMON) break :blk symbol.value;
+        if (st_shndx == elf.SHN_ABS or st_shndx == elf.SHN_COMMON) break :blk symbol.getAddress(.{ .plt = false }, elf_file);
         const shdr = &elf_file.sections.items(.shdr)[st_shndx];
-        if (Elf.shdrIsTls(shdr)) break :blk symbol.value - elf_file.getTlsAddress();
-        break :blk symbol.value;
+        if (Elf.shdrIsTls(shdr)) break :blk symbol.getAddress(.{ .plt = false }, elf_file) - elf_file.getTlsAddress();
+        break :blk symbol.getAddress(.{ .plt = false }, elf_file);
     };
     out.st_info = (st_bind << 4) | st_type;
     out.st_other = s_sym.st_other;
-    out.st_shndx = st_shndx;
+    out.st_shndx = @intCast(st_shndx);
     out.st_value = st_value;
     out.st_size = s_sym.st_size;
 }
@@ -291,7 +294,7 @@ fn format2(
     _ = options;
     _ = unused_fmt_string;
     const symbol = ctx.symbol;
-    try writer.print("%{d} : {s} : @{x}", .{ symbol.sym_idx, symbol.fmtName(ctx.elf_file), symbol.value });
+    try writer.print("%{d} : {s} : @{x}", .{ symbol.sym_idx, symbol.fmtName(ctx.elf_file), symbol.getAddress(.{}, ctx.elf_file) });
     if (symbol.getFile(ctx.elf_file)) |file| {
         if (symbol.isAbs(ctx.elf_file)) {
             if (symbol.getSourceSymbol(ctx.elf_file).st_shndx == elf.SHN_UNDEF) {

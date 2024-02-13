@@ -9,8 +9,6 @@ pub fn flush(elf_file: *Elf) !void {
     try calcSectionSizes(elf_file);
 
     allocateSections(elf_file, @sizeOf(elf.Elf64_Ehdr));
-    elf_file.allocateLocals();
-    elf_file.allocateGlobals();
 
     elf_file.shoff = blk: {
         const shdr = elf_file.sections.items(.shdr)[elf_file.sections.len - 1];
@@ -359,7 +357,7 @@ fn writeHeader(elf_file: *Elf) !void {
         .e_phnum = 0,
         .e_shentsize = @sizeOf(elf.Elf64_Shdr),
         .e_shnum = @as(u16, @intCast(elf_file.sections.items(.shdr).len)),
-        .e_shstrndx = elf_file.shstrtab_sect_index.?,
+        .e_shstrndx = @intCast(elf_file.shstrtab_sect_index.?),
     };
     // Magic
     @memcpy(header.e_ident[0..4], "\x7fELF");
