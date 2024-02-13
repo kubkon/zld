@@ -396,8 +396,6 @@ pub fn writeEhFrameRelocatable(elf_file: *Elf, writer: anytype) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
-    const gpa = elf_file.base.allocator;
-
     for (elf_file.objects.items) |index| {
         const object = elf_file.getFile(index).?.object;
 
@@ -413,8 +411,7 @@ pub fn writeEhFrameRelocatable(elf_file: *Elf, writer: anytype) !void {
         for (object.fdes.items) |fde| {
             if (!fde.alive) continue;
 
-            const data = try gpa.dupe(u8, fde.getData(elf_file));
-            defer gpa.free(data);
+            const data = fde.getData(elf_file);
 
             std.mem.writeInt(
                 i32,
@@ -438,7 +435,7 @@ fn emitReloc(elf_file: *Elf, rec: anytype, sym: *const Symbol, rel: elf.Elf64_Re
     var r_sym: u32 = 0;
     switch (sym.getType(elf_file)) {
         elf.STT_SECTION => {
-            r_addend += @intCast(sym.value);
+            r_addend += @intCast(sym.getAddress(.{}, elf_file));
             r_sym = elf_file.sections.items(.sym_index)[sym.shndx];
         },
         else => {

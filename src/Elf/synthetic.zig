@@ -972,7 +972,7 @@ pub const GotSection = struct {
                 .st_name = st_name,
                 .st_info = elf.STT_OBJECT,
                 .st_other = 0,
-                .st_shndx = elf_file.got_sect_index.?,
+                .st_shndx = @intCast(elf_file.got_sect_index.?),
                 .st_value = st_value,
                 .st_size = st_size,
             };
@@ -1110,7 +1110,7 @@ pub const PltSection = struct {
                 .st_name = st_name,
                 .st_info = elf.STT_FUNC,
                 .st_other = 0,
-                .st_shndx = elf_file.plt_sect_index.?,
+                .st_shndx = @intCast(elf_file.plt_sect_index.?),
                 .st_value = sym.getPltAddress(elf_file),
                 .st_size = 16,
             };
@@ -1209,7 +1209,7 @@ pub const PltGotSection = struct {
                 .st_name = st_name,
                 .st_info = elf.STT_FUNC,
                 .st_other = 0,
-                .st_shndx = elf_file.plt_got_sect_index.?,
+                .st_shndx = @intCast(elf_file.plt_got_sect_index.?),
                 .st_value = sym.getPltGotAddress(elf_file),
                 .st_size = 16,
             };
@@ -1257,7 +1257,7 @@ pub const CopyRelSection = struct {
         }
     }
 
-    pub fn calcSectionSize(copy_rel: CopyRelSection, shndx: u16, elf_file: *Elf) !void {
+    pub fn calcSectionSize(copy_rel: CopyRelSection, shndx: u32, elf_file: *Elf) !void {
         const shdr = &elf_file.sections.items(.shdr)[shndx];
         for (copy_rel.symbols.items) |sym_index| {
             const symbol = elf_file.getSymbol(sym_index);

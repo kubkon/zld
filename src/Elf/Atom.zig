@@ -17,7 +17,7 @@ alignment: u8 = 0,
 shndx: u32 = 0,
 
 /// Index of the output section.
-out_shndx: u16 = 0,
+out_shndx: u32 = 0,
 
 /// Index of the input section containing this atom's relocs.
 relocs_shndx: u32 = 0,
@@ -41,6 +41,11 @@ fde_end: u32 = 0,
 
 pub fn getName(self: Atom, elf_file: *Elf) [:0]const u8 {
     return elf_file.string_intern.getAssumeExists(self.name);
+}
+
+pub fn getAddress(self: Atom, elf_file: *Elf) u64 {
+    const shdr = elf_file.sections.items(.shdr)[self.out_shndx];
+    return shdr.sh_addr + self.value;
 }
 
 /// Returns atom's code and optionally uncompresses data if required (for compressed sections).
@@ -100,7 +105,7 @@ pub fn writeRelocs(self: Atom, elf_file: *Elf, out_relocs: *std.ArrayList(elf.El
     const tracy = trace(@src());
     defer tracy.end();
 
-    relocs_log.debug("0x{x}: {s}", .{ self.value, self.getName(elf_file) });
+    relocs_log.debug("0x{x}: {s}", .{ self.getAddress(elf_file), self.getName(elf_file) });
 
     const object = self.getObject(elf_file);
     for (self.getRelocs(elf_file)) |rel| {
@@ -111,7 +116,7 @@ pub fn writeRelocs(self: Atom, elf_file: *Elf, out_relocs: *std.ArrayList(elf.El
         var r_sym: u32 = 0;
         switch (target.getType(elf_file)) {
             elf.STT_SECTION => {
-                r_addend += @intCast(target.value);
+                r_addend += @intCast(target.getAddress(.{}, elf_file));
                 r_sym = elf_file.sections.items(.sym_index)[target.shndx];
             },
             else => {
@@ -513,7 +518,7 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
     const relocs = self.getRelocs(elf_file);
     const object = self.getObject(elf_file);
 
-    relocs_log.debug("{x}: {s}", .{ self.value, self.getName(elf_file) });
+    relocs_log.debug("{x}: {s}", .{ self.getAddress(elf_file), self.getName(elf_file) });
 
     var stream = std.io.fixedBufferStream(code);
     const cwriter = stream.writer();
@@ -531,7 +536,7 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
         // https://intezer.com/blog/malware-analysis/executable-and-linkable-format-101-part-3-relocations/
         //
         // Address of the source atom.
-        const P = @as(i64, @intCast(self.value + rel.r_offset));
+        const P = @as(i64, @intCast(self.getAddress(elf_file) + rel.r_offset));
         // Addend from the relocation.
         const A = rel.r_addend;
         // Address of the target symbol - can be address of the symbol within an atom or address of PLT stub.
@@ -683,7 +688,7 @@ fn resolveDynAbsReloc(
     const tracy = trace(@src());
     defer tracy.end();
 
-    const P = self.value + rel.r_offset;
+    const P = self.getAddress(elf_file) + rel.r_offset;
     const A = rel.r_addend;
     const S = @as(i64, @intCast(target.getAddress(.{}, elf_file)));
     const is_writeable = self.getInputShdr(elf_file).sh_flags & elf.SHF_WRITE != 0;
@@ -1110,7 +1115,7 @@ fn format2(
     const atom = ctx.atom;
     const elf_file = ctx.elf_file;
     try writer.print("atom({d}) : {s} : @{x} : sect({d}) : align({x}) : size({x})", .{
-        atom.atom_index, atom.getName(elf_file), atom.value,
+        atom.atom_index, atom.getName(elf_file), atom.getAddress(elf_file),
         atom.out_shndx,  atom.alignment,         atom.size,
     });
     if (atom.fde_start != atom.fde_end) {

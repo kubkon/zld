@@ -292,7 +292,7 @@ fn initSymtab(self: *Object, allocator: Allocator, elf_file: *Elf) !void {
     }
 }
 
-pub fn initOutputSection(self: Object, elf_file: *Elf, shdr: elf.Elf64_Shdr) !u16 {
+pub fn initOutputSection(self: Object, elf_file: *Elf, shdr: elf.Elf64_Shdr) !u32 {
     const name = blk: {
         const name = self.getShString(shdr.sh_name);
         if (elf_file.options.relocatable) break :blk name;
@@ -607,7 +607,7 @@ pub fn convertCommonSymbols(self: *Object, elf_file: *Elf) !void {
 
         var sh_flags: u32 = elf.SHF_ALLOC | elf.SHF_WRITE;
         if (is_tls) sh_flags |= elf.SHF_TLS;
-        const shndx = @as(u16, @intCast(self.shdrs.items.len));
+        const shndx = @as(u32, @intCast(self.shdrs.items.len));
         const shdr = try self.shdrs.addOne(gpa);
         shdr.* = .{
             .sh_name = try self.shstrtab.insert(gpa, name),
