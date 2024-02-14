@@ -109,10 +109,8 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         } else if (p.arg1("e")) |name| {
             opts.entry = name;
         } else if (p.arg1("m")) |target| {
-            if (isTargetSupported(target)) |out| {
-                opts.cpu_arch = out.cpu_arch;
-                opts.os_tag = out.os_tag;
-                opts.page_size = opts.page_size;
+            if (cpuArchFromElfEmulation(target)) |cpu_arch| {
+                opts.cpu_arch = cpu_arch;
             } else {
                 ctx.fatal("unknown target emulation '{s}'", .{target});
             }
@@ -253,13 +251,15 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
     if (positionals.items.len == 0) ctx.fatal("Expected at least one positional argument", .{});
     if (opts.shared) opts.pic = true;
     if (opts.pic) opts.image_base = 0;
-    if (opts.page_size) |page_size| {
+    if (opts.cpu_arch) |cpu_arch| {
+        const page_size = defaultPageSize(cpu_arch).?;
         if (opts.image_base % page_size != 0) {
             ctx.fatal("specified --image-base=0x{x} is not a multiple of page size of 0x{x}", .{
                 opts.image_base,
                 page_size,
             });
         }
+        opts.page_size = page_size;
     }
 
     opts.positionals = try unpackPositionals(arena, .{
@@ -397,45 +397,31 @@ const version =
     \\ld.zld 0.0.4 (compatible with GNU ld)
 ;
 
-pub const SupportedTarget = struct {
-    cpu_arch: std.Target.Cpu.Arch,
-    os_tag: ?std.Target.Os.Tag = null,
-    page_size: u16,
+fn cpuArchToElfEmulation(cpu_arch: std.Target.Cpu.Arch) []const u8 {
+    return switch (cpu_arch) {
+        .x86_64 => "elf_x86_64",
+        .aarch64 => "aarch64linux",
+        else => unreachable,
+    };
+}
 
-    fn fmtTarget(st: SupportedTarget) []const u8 {
-        return switch (st.cpu_arch) {
-            .x86_64 => "elf64-x86-64",
-            .aarch64 => "elf64-littleaarch64",
-            else => unreachable,
-        };
-    }
-
-    fn fmtEmulation(st: SupportedTarget) []const u8 {
-        switch (st.cpu_arch) {
-            .x86_64 => return "elf_x86_64",
-            .aarch64 => {
-                if (st.os_tag) |os_tag| {
-                    if (os_tag == .linux) {
-                        return "aarch64linux";
-                    }
-                }
-                return "aarch64elf";
-            },
-            else => unreachable,
-        }
-    }
+const supported_emulations = [_]struct { std.Target.Cpu.Arch, u16 }{
+    .{ .x86_64, 0x1000 },
+    .{ .aarch64, 0x1000 },
 };
 
-pub const supported_targets = [_]SupportedTarget{
-    .{ .cpu_arch = .x86_64, .page_size = 0x1000 },
-    .{ .cpu_arch = .aarch64, .os_tag = .linux, .page_size = 0x1000 },
-};
-
-fn isTargetSupported(value: []const u8) ?SupportedTarget {
-    inline for (supported_targets) |target| {
-        if (mem.eql(u8, target.fmtEmulation(), value)) {
-            return target;
+fn cpuArchFromElfEmulation(value: []const u8) ?std.Target.Cpu.Arch {
+    inline for (supported_emulations) |emulation| {
+        if (mem.eql(u8, cpuArchToElfEmulation(emulation[0]), value)) {
+            return emulation[0];
         }
+    }
+    return null;
+}
+
+pub fn defaultPageSize(cpu_arch: std.Target.Cpu.Arch) ?u16 {
+    inline for (supported_emulations) |emulation| {
+        if (cpu_arch == emulation[0]) return emulation[1];
     }
     return null;
 }

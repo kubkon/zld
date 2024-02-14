@@ -1756,11 +1756,8 @@ fn parseLdScript(self: *Elf, arena: Allocator, obj: LinkObject, search_dirs: []c
 fn validateOrSetCpuArch(self: *Elf, name: []const u8, cpu_arch: std.Target.Cpu.Arch) void {
     const self_cpu_arch = self.options.cpu_arch orelse blk: {
         self.options.cpu_arch = cpu_arch;
-        const page_size = inline for (Options.supported_targets) |target| {
-            if (target.cpu_arch == cpu_arch) break target.page_size;
-        } else {
+        const page_size = Options.defaultPageSize(cpu_arch) orelse
             return self.base.fatal("{s}: unhandled architecture '{s}'", .{ name, @tagName(cpu_arch.toElfMachine()) });
-        };
         // TODO move this error into Options
         if (self.options.image_base % page_size != 0) {
             self.base.fatal("specified --image-base=0x{x} is not a multiple of page size of 0x{x}", .{
