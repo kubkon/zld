@@ -47,13 +47,14 @@ z_text: bool = false,
 z_relro: bool = false,
 
 pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options {
-    if (args.len == 0) ctx.fatal(usage, .{cmd});
+    if (args.len == 0) ctx.fatal(usage ++ "\n", .{cmd});
 
     var positionals = std.ArrayList(Positional).init(arena);
     var search_dirs = std.StringArrayHashMap(void).init(arena);
     var rpath_list = std.StringArrayHashMap(void).init(arena);
     var verbose = false;
     var print_version = false;
+    var print_target_info = false;
     var opts: Options = .{
         .emit = .{
             .directory = std.fs.cwd(),
@@ -68,7 +69,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
     var p = Zld.ArgParser(@TypeOf(ctx)){ .it = &it, .ctx = ctx };
     while (p.hasMore()) {
         if (p.flag2("help")) {
-            ctx.fatal(usage, .{cmd});
+            ctx.fatal(usage ++ "\n", .{cmd});
         } else if (p.arg2("debug-log")) |scope| {
             try ctx.log_scopes.append(scope);
         } else if (p.arg1("l")) |lib| {
@@ -81,7 +82,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             opts.relocatable = true;
         } else if (p.argAny("image-base")) |value| {
             opts.image_base = std.fmt.parseInt(u64, value, 0) catch
-                ctx.fatal("Could not parse value '{s}' into integer", .{value});
+                ctx.fatal("Could not parse value '{s}' into integer\n", .{value});
         } else if (p.flagAny("gc-sections")) {
             opts.gc_sections = true;
         } else if (p.flagAny("no-gc-sections")) {
@@ -112,7 +113,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             if (cpuArchFromElfEmulation(target)) |cpu_arch| {
                 opts.cpu_arch = cpu_arch;
             } else {
-                ctx.fatal("unknown target emulation '{s}'", .{target});
+                ctx.fatal("unknown target emulation '{s}'\n", .{target});
             }
         } else if (p.flagAny("allow-multiple-definition")) {
             opts.allow_multiple_definition = true;
@@ -132,7 +133,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
                 opts.static = false;
                 try positionals.append(.{ .tag = .dynamic });
             } else {
-                ctx.fatal("unknown argument '--B{s}'", .{b_arg});
+                ctx.fatal("unknown argument '--B{s}'\n", .{b_arg});
             }
         } else if (p.flagAny("start-group") or p.flagAny("end-group")) {
             // Ignored
@@ -176,7 +177,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             } else if (std.mem.eql(u8, "uuid", value)) {
                 opts.build_id = .uuid;
             } else {
-                ctx.fatal("invalid build-id value '--build-id={s}'", .{value});
+                ctx.fatal("invalid build-id value '--build-id={s}'\n", .{value});
             }
         } else if (p.flagAny("build-id")) {
             opts.build_id = .none;
@@ -192,7 +193,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             } else if (std.mem.eql(u8, "both", value)) {
                 opts.hash_style = .both;
             } else {
-                ctx.fatal("invalid hash-style value '--hash-style={s}'", .{value});
+                ctx.fatal("invalid hash-style value '--hash-style={s}'\n", .{value});
             }
         } else if (p.flagAny("apply-dynamic-relocs")) {
             opts.apply_dynamic_relocs = true;
@@ -200,15 +201,18 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             opts.apply_dynamic_relocs = false;
         } else if (p.flagAny("nostdlib")) {
             // ignore
-        } else if (p.flag1("v")) {
+        } else if (p.flag1("v") or p.flagAny("version")) {
             print_version = true;
+        } else if (p.flag1("V")) {
+            print_version = true;
+            print_target_info = true;
         } else if (p.argAny("soname")) |value| {
             opts.soname = value;
         } else if (p.arg1("h")) |value| {
             opts.soname = value;
         } else if (p.argZ("stack-size")) |value| {
             opts.z_stack_size = std.fmt.parseInt(u64, value, 0) catch
-                ctx.fatal("Could not parse value '{s}' into integer", .{value});
+                ctx.fatal("Could not parse value '{s}' into integer\n", .{value});
         } else if (p.flagZ("execstack")) {
             opts.z_execstack = true;
         } else if (p.flagZ("noexecstack")) {
@@ -239,22 +243,32 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
     }
 
     if (verbose) {
-        std.debug.print("{s} ", .{cmd});
+        ctx.print("{s} ", .{cmd});
         for (args[0 .. args.len - 1]) |arg| {
-            std.debug.print("{s} ", .{arg});
+            ctx.print("{s} ", .{arg});
         }
-        std.debug.print("{s}\n", .{args[args.len - 1]});
+        ctx.print("{s}\n", .{args[args.len - 1]});
     }
 
-    if (print_version) ctx.print("{s}", .{version});
+    if (print_version) {
+        ctx.print("{s}\n", .{version});
+    }
+    if (print_target_info) {
+        const nemuls = supported_emulations.len;
+        ctx.print(" Supported emulations:\n", .{});
+        inline for (supported_emulations[0 .. nemuls - 1]) |emulation| {
+            ctx.print("  {s}\n", .{cpuArchToElfEmulation(emulation[0])});
+        }
+        ctx.print("  {s}\n", .{cpuArchToElfEmulation(supported_emulations[nemuls - 1][0])});
+    }
 
-    if (positionals.items.len == 0) ctx.fatal("Expected at least one positional argument", .{});
+    if (positionals.items.len == 0) ctx.fatal("Expected at least one positional argument\n", .{});
     if (opts.shared) opts.pic = true;
     if (opts.pic) opts.image_base = 0;
     if (opts.cpu_arch) |cpu_arch| {
         const page_size = defaultPageSize(cpu_arch).?;
         if (opts.image_base % page_size != 0) {
-            ctx.fatal("specified --image-base=0x{x} is not a multiple of page size of 0x{x}", .{
+            ctx.fatal("specified --image-base=0x{x} is not a multiple of page size of 0x{x}\n", .{
                 opts.image_base,
                 page_size,
             });
@@ -315,7 +329,7 @@ fn unpackPositionals(arena: Allocator, args: UnpackArgs, ctx: anytype) ![]const 
         .as_needed => state.needed = false,
         .no_as_needed => state.needed = true,
         .push_state => try stack.append(state),
-        .pop_state => state = stack.popOrNull() orelse return ctx.fatal("no state pushed before pop", .{}),
+        .pop_state => state = stack.popOrNull() orelse return ctx.fatal("no state pushed before pop\n", .{}),
     };
 
     return positionals.toOwnedSlice();
@@ -387,7 +401,8 @@ const usage =
     \\  relro                       Make some sections read-only after dynamic relocations
     \\    norelro                   
     \\--verbose                     Print full linker invocation to stderr
-    \\-v                            Print version
+    \\-v, --version                 Print version
+    \\-V                            Print version and target information
     \\
     \\ld.zld: supported target: elf64-x86-64, elf64-littleaarch64
     \\ld.zld: supported emulations: elf64_x86_64, aarch64linux, aarch64elf
