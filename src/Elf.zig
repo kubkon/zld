@@ -2621,9 +2621,12 @@ fn sortRelaDyn(self: *Elf) void {
         inline fn getRank(rel: elf.Elf64_Rela, ctx: *const Elf) u2 {
             const cpu_arch = ctx.options.cpu_arch.?;
             const r_type = rel.r_type();
-            if (relocation.isRelative(r_type, cpu_arch)) return 0;
-            if (relocation.isIRelative(r_type, cpu_arch)) return 2;
-            return 1;
+            const r_kind = relocation.decode(r_type, cpu_arch);
+            return switch (r_kind) {
+                .rel => 0,
+                .irel => 2,
+                else => 1,
+            };
         }
 
         pub fn lessThan(ctx: *const Elf, lhs: elf.Elf64_Rela, rhs: elf.Elf64_Rela) bool {

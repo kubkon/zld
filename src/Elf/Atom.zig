@@ -168,8 +168,9 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
     while (i < relocs.len) : (i += 1) {
         const rel = relocs[i];
         const r_type = rel.r_type();
+        const r_kind = relocation.decode(r_type, cpu_arch);
 
-        if (relocation.isNone(r_type, cpu_arch)) continue;
+        if (r_kind == .none) continue;
         if (try self.reportUndefSymbol(rel, elf_file)) continue;
 
         const symbol = object.getSymbol(rel.r_sym(), elf_file);
@@ -531,8 +532,9 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
     while (i < relocs.len) : (i += 1) {
         const rel = relocs[i];
         const r_type = rel.r_type();
+        const r_kind = relocation.decode(r_type, cpu_arch);
 
-        if (relocation.isNone(r_type, cpu_arch)) continue;
+        if (r_kind == .none) continue;
 
         const target = object.getSymbol(rel.r_sym(), elf_file);
 
@@ -798,8 +800,9 @@ pub fn resolveRelocsNonAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void 
     while (i < relocs.len) : (i += 1) {
         const rel = relocs[i];
         const r_type = rel.r_type();
+        const r_kind = relocation.decode(r_type, cpu_arch);
 
-        if (relocation.isNone(r_type, cpu_arch)) continue;
+        if (r_kind == .none) continue;
         if (try self.reportUndefSymbol(rel, elf_file)) continue;
 
         const target = object.getSymbol(rel.r_sym(), elf_file);

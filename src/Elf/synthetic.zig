@@ -801,6 +801,7 @@ pub const GotSection = struct {
 
     pub fn addRela(got: GotSection, elf_file: *Elf) !void {
         const is_shared = elf_file.options.shared;
+        const cpu_arch = elf_file.options.cpu_arch.?;
         try elf_file.rela_dyn.ensureUnusedCapacity(elf_file.base.allocator, got.numRela(elf_file));
 
         for (got.entries.items) |entry| {
@@ -818,7 +819,7 @@ pub const GotSection = struct {
                         elf_file.addRelaDynAssumeCapacity(.{
                             .offset = offset,
                             .sym = extra.?.dynamic,
-                            .type = elf.R_X86_64_GLOB_DAT,
+                            .type = relocation.encode(.glob_dat, cpu_arch),
                         });
                         continue;
                     }
@@ -826,7 +827,7 @@ pub const GotSection = struct {
                     if (symbol.?.isIFunc(elf_file)) {
                         elf_file.addRelaDynAssumeCapacity(.{
                             .offset = offset,
-                            .type = elf.R_X86_64_IRELATIVE,
+                            .type = relocation.encode(.irel, cpu_arch),
                             .addend = @intCast(symbol.?.getAddress(.{ .plt = false }, elf_file)),
                         });
                         continue;
@@ -835,7 +836,7 @@ pub const GotSection = struct {
                     if (elf_file.options.pic and !symbol.?.isAbs(elf_file)) {
                         elf_file.addRelaDynAssumeCapacity(.{
                             .offset = offset,
-                            .type = elf.R_X86_64_RELATIVE,
+                            .type = relocation.encode(.rel, cpu_arch),
                             .addend = @intCast(symbol.?.getAddress(.{ .plt = false }, elf_file)),
                         });
                     }
@@ -846,7 +847,7 @@ pub const GotSection = struct {
                         const offset = entry.getAddress(elf_file);
                         elf_file.addRelaDynAssumeCapacity(.{
                             .offset = offset,
-                            .type = elf.R_X86_64_DTPMOD64,
+                            .type = relocation.encode(.dtpmod, cpu_arch),
                         });
                     }
                 },
@@ -857,18 +858,18 @@ pub const GotSection = struct {
                         elf_file.addRelaDynAssumeCapacity(.{
                             .offset = offset,
                             .sym = extra.?.dynamic,
-                            .type = elf.R_X86_64_DTPMOD64,
+                            .type = relocation.encode(.dtpmod, cpu_arch),
                         });
                         elf_file.addRelaDynAssumeCapacity(.{
                             .offset = offset + 8,
                             .sym = extra.?.dynamic,
-                            .type = elf.R_X86_64_DTPOFF64,
+                            .type = relocation.encode(.dtpoff, cpu_arch),
                         });
                     } else if (is_shared) {
                         elf_file.addRelaDynAssumeCapacity(.{
                             .offset = offset,
                             .sym = extra.?.dynamic,
-                            .type = elf.R_X86_64_DTPMOD64,
+                            .type = relocation.encode(.dtpmod, cpu_arch),
                         });
                     }
                 },
@@ -879,12 +880,12 @@ pub const GotSection = struct {
                         elf_file.addRelaDynAssumeCapacity(.{
                             .offset = offset,
                             .sym = extra.?.dynamic,
-                            .type = elf.R_X86_64_TPOFF64,
+                            .type = relocation.encode(.tpoff, cpu_arch),
                         });
                     } else if (is_shared) {
                         elf_file.addRelaDynAssumeCapacity(.{
                             .offset = offset,
-                            .type = elf.R_X86_64_TPOFF64,
+                            .type = relocation.encode(.tpoff, cpu_arch),
                             .addend = @intCast(symbol.?.getAddress(.{}, elf_file) - elf_file.getTlsAddress()),
                         });
                     }
@@ -895,7 +896,7 @@ pub const GotSection = struct {
                     elf_file.addRelaDynAssumeCapacity(.{
                         .offset = offset,
                         .sym = extra.?.dynamic,
-                        .type = elf.R_X86_64_TLSDESC,
+                        .type = relocation.encode(.tlsdesc, cpu_arch),
                     });
                 },
             }
@@ -1074,7 +1075,7 @@ pub const PltSection = struct {
             const extra = sym.getExtra(elf_file).?;
             const r_offset = sym.getGotPltAddress(elf_file);
             const r_sym: u64 = extra.dynamic;
-            const r_type: u32 = elf.R_X86_64_JUMP_SLOT;
+            const r_type = relocation.encode(.jump_slot, elf_file.options.cpu_arch.?);
             elf_file.rela_plt.appendAssumeCapacity(.{
                 .r_offset = r_offset,
                 .r_info = (r_sym << 32) | r_type,
@@ -1285,7 +1286,7 @@ pub const CopyRelSection = struct {
             elf_file.addRelaDynAssumeCapacity(.{
                 .offset = sym.getAddress(.{}, elf_file),
                 .sym = extra.dynamic,
-                .type = elf.R_X86_64_COPY,
+                .type = relocation.encode(.copy, elf_file.options.cpu_arch.?),
             });
         }
     }
@@ -1346,6 +1347,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const elf = std.elf;
 const mem = std.mem;
+const relocation = @import("relocation.zig");
 
 const Allocator = mem.Allocator;
 const Elf = @import("../Elf.zig");
