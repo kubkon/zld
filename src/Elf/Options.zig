@@ -1,81 +1,3 @@
-const usage =
-    \\Usage: {s} [files...]
-    \\
-    \\General Options:
-    \\--allow-multiple-definition   Allow multiple definitions
-    \\--apply-dynamic-relocs        Apply link-time values for dynamic relocations (default)
-    \\  --no-apply-dynamic-relocs
-    \\--as-needed                   Only set DT_NEEDED for shared libraries if used
-    \\  --no-as-needed
-    \\--Bstatic, --static           Do not link against shared libraries
-    \\--Bdynamic                    Link against shared libraries (default)
-    \\--build-id=[none,md5,sha1,sha256,uuid,HEXSTRING]
-    \\                              Generate build ID
-    \\  --no-build-id
-    \\--debug-log [value]           Turn on debugging logs for [value] (requires zld compiled with -Dlog)
-    \\--dynamic                     Alias for --Bdynamic
-    \\--dynamic-linker=[value], -I [value]      
-    \\                              Set the dynamic linker to use
-    \\  --no-dynamic-linker
-    \\--eh-frame-hdr                Create .eh_frame_hdr section (default)
-    \\  --no-eh-frame-hdr
-    \\--end-group                   Ignored for compatibility with GNU
-    \\--entry=[value], -e [value]   Set name of the entry point symbol
-    \\--export-dynamic, -E          Export all dynamic symbols
-    \\  --no-export-dynamic
-    \\--gc-sections                 Remove unused sections
-    \\  --no-gc-sections
-    \\--hash-style=[none,sysv,gnu,both]
-    \\                              Set hash style
-    \\--help                        Print this help and exit
-    \\--image-base=[value]          Set the base address
-    \\-l[value]                     Specify library to link against
-    \\-L[value]                     Specify library search dir
-    \\-m [value]                    Set target emulation
-    \\-o [value]                    Specify output path for the final artifact
-    \\--pie, --pic-executable       Create a position independent executable
-    \\  --no-pie, --no-pic-executable
-    \\--pop-state                   Restore the states saved by --push-state
-    \\--print-gc-sections           List removed unused sections to stderr
-    \\--push-state                  Save the current state of --as-needed, -static and --whole-archive
-    \\-r                            Create a relocatable object file
-    \\  --relocatable
-    \\--relax                       Optimize instructions (default)
-    \\  --no-relax
-    \\--rpath=[value], -R [value]   Specify runtime path
-    \\--shared                      Create dynamic library
-    \\--soname=[value], -h [value]  Set shared library name
-    \\--start-group                 Ignored for compatibility with GNU
-    \\--strip-all, -s               Strip all symbols. Implies --strip-debug
-    \\--strip-debug, -S             Strip .debug_ sections
-    \\--warn-common                 Warn about duplicate common symbols
-    \\-z                            Set linker extension flags
-    \\  execstack                   Require executable stack
-    \\    noexecstack               
-    \\  execstack-if-needed         Make the stack executable if the input file explicitly requests it
-    \\  lazy                        Enable lazy function resolution (default)
-    \\  muldefs                     Allow multiple definitions
-    \\  nocopyreloc                 Do not create copy relocations
-    \\  nodlopen                    Mark DSO not available to dlopen
-    \\  now                         Disable lazy function resolution
-    \\  stack-size=[value]          Override default stack size
-    \\  text                        Do not allow relocations against read-only segments
-    \\    notext                    
-    \\  relro                       Make some sections read-only after dynamic relocations
-    \\    norelro                   
-    \\--verbose                     Print full linker invocation to stderr
-    \\-v                            Print version
-    \\
-    \\ld.zld: supported targets: elf64-x86-64
-    \\ld.zld: supported emulations: elf_x86_64
-;
-
-const version =
-    \\ld.zld 0.0.4 (compatible with GNU ld)
-;
-
-const cmd = "ld.zld";
-
 emit: Zld.Emit,
 shared: bool = false,
 relocatable: bool = false,
@@ -89,6 +11,7 @@ gc_sections: bool = false,
 print_gc_sections: bool = false,
 allow_multiple_definition: bool = false,
 cpu_arch: ?std.Target.Cpu.Arch = null,
+os_tag: ?std.Target.Os.Tag = null,
 dynamic_linker: ?[]const u8 = null,
 eh_frame_hdr: bool = true,
 static: bool = false,
@@ -186,8 +109,9 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         } else if (p.arg1("e")) |name| {
             opts.entry = name;
         } else if (p.arg1("m")) |target| {
-            if (mem.eql(u8, target, "elf_x86_64")) {
-                opts.cpu_arch = .x86_64;
+            if (isTargetSupported(target)) |out| {
+                opts.cpu_arch = out.cpu_arch;
+                opts.os_tag = out.os_tag;
                 opts.page_size = 0x1000;
             } else {
                 ctx.fatal("unknown target emulation '{s}'", .{target});
@@ -396,6 +320,126 @@ fn unpackPositionals(arena: Allocator, args: UnpackArgs, ctx: anytype) ![]const 
 
     return positionals.toOwnedSlice();
 }
+
+const usage =
+    \\Usage: {s} [files...]
+    \\
+    \\General Options:
+    \\--allow-multiple-definition   Allow multiple definitions
+    \\--apply-dynamic-relocs        Apply link-time values for dynamic relocations (default)
+    \\  --no-apply-dynamic-relocs
+    \\--as-needed                   Only set DT_NEEDED for shared libraries if used
+    \\  --no-as-needed
+    \\--Bstatic, --static           Do not link against shared libraries
+    \\--Bdynamic                    Link against shared libraries (default)
+    \\--build-id=[none,md5,sha1,sha256,uuid,HEXSTRING]
+    \\                              Generate build ID
+    \\  --no-build-id
+    \\--debug-log [value]           Turn on debugging logs for [value] (requires zld compiled with -Dlog)
+    \\--dynamic                     Alias for --Bdynamic
+    \\--dynamic-linker=[value], -I [value]      
+    \\                              Set the dynamic linker to use
+    \\  --no-dynamic-linker
+    \\--eh-frame-hdr                Create .eh_frame_hdr section (default)
+    \\  --no-eh-frame-hdr
+    \\--end-group                   Ignored for compatibility with GNU
+    \\--entry=[value], -e [value]   Set name of the entry point symbol
+    \\--export-dynamic, -E          Export all dynamic symbols
+    \\  --no-export-dynamic
+    \\--gc-sections                 Remove unused sections
+    \\  --no-gc-sections
+    \\--hash-style=[none,sysv,gnu,both]
+    \\                              Set hash style
+    \\--help                        Print this help and exit
+    \\--image-base=[value]          Set the base address
+    \\-l[value]                     Specify library to link against
+    \\-L[value]                     Specify library search dir
+    \\-m [value]                    Set target emulation
+    \\-o [value]                    Specify output path for the final artifact
+    \\--pie, --pic-executable       Create a position independent executable
+    \\  --no-pie, --no-pic-executable
+    \\--pop-state                   Restore the states saved by --push-state
+    \\--print-gc-sections           List removed unused sections to stderr
+    \\--push-state                  Save the current state of --as-needed, -static and --whole-archive
+    \\-r                            Create a relocatable object file
+    \\  --relocatable
+    \\--relax                       Optimize instructions (default)
+    \\  --no-relax
+    \\--rpath=[value], -R [value]   Specify runtime path
+    \\--shared                      Create dynamic library
+    \\--soname=[value], -h [value]  Set shared library name
+    \\--start-group                 Ignored for compatibility with GNU
+    \\--strip-all, -s               Strip all symbols. Implies --strip-debug
+    \\--strip-debug, -S             Strip .debug_ sections
+    \\--warn-common                 Warn about duplicate common symbols
+    \\-z                            Set linker extension flags
+    \\  execstack                   Require executable stack
+    \\    noexecstack               
+    \\  execstack-if-needed         Make the stack executable if the input file explicitly requests it
+    \\  lazy                        Enable lazy function resolution (default)
+    \\  muldefs                     Allow multiple definitions
+    \\  nocopyreloc                 Do not create copy relocations
+    \\  nodlopen                    Mark DSO not available to dlopen
+    \\  now                         Disable lazy function resolution
+    \\  stack-size=[value]          Override default stack size
+    \\  text                        Do not allow relocations against read-only segments
+    \\    notext                    
+    \\  relro                       Make some sections read-only after dynamic relocations
+    \\    norelro                   
+    \\--verbose                     Print full linker invocation to stderr
+    \\-v                            Print version
+    \\
+    \\ld.zld: supported target: elf64-x86-64, elf64-littleaarch64
+    \\ld.zld: supported emulations: elf64_x86_64, aarch64linux, aarch64elf
+;
+
+const version =
+    \\ld.zld 0.0.4 (compatible with GNU ld)
+;
+
+const SupportedTarget = struct {
+    cpu_arch: std.Target.Cpu.Arch,
+    os_tag: ?std.Target.Os.Tag = null,
+
+    fn fmtTarget(st: SupportedTarget) []const u8 {
+        return switch (st.cpu_arch) {
+            .x86_64 => "elf64-x86-64",
+            .aarch64 => "elf64-littleaarch64",
+            else => unreachable,
+        };
+    }
+
+    fn fmtEmulation(st: SupportedTarget) []const u8 {
+        switch (st.cpu_arch) {
+            .x86_64 => return "elf_x86_64",
+            .aarch64 => {
+                if (st.os_tag) |os_tag| {
+                    if (os_tag == .linux) {
+                        return "aarch64linux";
+                    }
+                }
+                return "aarch64elf";
+            },
+            else => unreachable,
+        }
+    }
+};
+
+const supported_targets = [_]SupportedTarget{
+    .{ .cpu_arch = .x86_64 },
+    .{ .cpu_arch = .aarch64, .os_tag = .linux },
+};
+
+fn isTargetSupported(value: []const u8) ?SupportedTarget {
+    inline for (supported_targets) |target| {
+        if (mem.eql(u8, target.fmtEmulation(), value)) {
+            return target;
+        }
+    }
+    return null;
+}
+
+const cmd = "ld.zld";
 
 pub const BuildId = enum {
     none,
