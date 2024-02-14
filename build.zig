@@ -16,6 +16,7 @@ pub fn build(b: *std.Build) void {
         if (enable_tracy != null) break :blk false;
         break :blk null;
     };
+    const use_llvm = b.option(bool, "use-llvm", "Whether to use LLVM") orelse true;
 
     const yaml = b.dependency("zig-yaml", .{
         .target = target,
@@ -31,6 +32,8 @@ pub fn build(b: *std.Build) void {
         .root_source_file = .{ .path = "src/main.zig" },
         .target = target,
         .optimize = mode,
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
     });
     exe.root_module.addImport("yaml", yaml.module("yaml"));
     exe.root_module.addImport("dis_x86_64", dis_x86_64.module("dis_x86_64"));
@@ -83,6 +86,8 @@ pub fn build(b: *std.Build) void {
         .root_source_file = .{ .path = "src/Zld.zig" },
         .target = target,
         .optimize = mode,
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
     });
     const unit_tests_opts = b.addOptions();
     unit_tests.root_module.addOptions("build_options", unit_tests_opts);
