@@ -2618,24 +2618,23 @@ pub inline fn addRelaDynAssumeCapacity(self: *Elf, opts: RelaDyn) void {
 
 fn sortRelaDyn(self: *Elf) void {
     const Sort = struct {
-        inline fn getRank(rel: elf.Elf64_Rela) u2 {
-            return switch (rel.r_type()) {
-                elf.R_X86_64_RELATIVE => 0,
-                elf.R_X86_64_IRELATIVE => 2,
-                else => 1,
-            };
+        inline fn getRank(rel: elf.Elf64_Rela, ctx: *const Elf) u2 {
+            const cpu_arch = ctx.options.cpu_arch.?;
+            const r_type = rel.r_type();
+            if (relocation.isRelative(r_type, cpu_arch)) return 0;
+            if (relocation.isIRelative(r_type, cpu_arch)) return 2;
+            return 1;
         }
 
-        pub fn lessThan(ctx: void, lhs: elf.Elf64_Rela, rhs: elf.Elf64_Rela) bool {
-            _ = ctx;
-            if (getRank(lhs) == getRank(rhs)) {
+        pub fn lessThan(ctx: *const Elf, lhs: elf.Elf64_Rela, rhs: elf.Elf64_Rela) bool {
+            if (getRank(lhs, ctx) == getRank(rhs, ctx)) {
                 if (lhs.r_sym() == rhs.r_sym()) return lhs.r_offset < rhs.r_offset;
                 return lhs.r_sym() < rhs.r_sym();
             }
-            return getRank(lhs) < getRank(rhs);
+            return getRank(lhs, ctx) < getRank(rhs, ctx);
         }
     };
-    mem.sort(elf.Elf64_Rela, self.rela_dyn.items, {}, Sort.lessThan);
+    mem.sort(elf.Elf64_Rela, self.rela_dyn.items, self, Sort.lessThan);
 }
 
 fn getNumIRelativeRelocs(self: *Elf) usize {
@@ -2871,6 +2870,7 @@ const log = std.log.scoped(.elf);
 const math = std.math;
 const mem = std.mem;
 const relocatable = @import("Elf/relocatable.zig");
+const relocation = @import("Elf/relocation.zig");
 const state_log = std.log.scoped(.state);
 const synthetic = @import("Elf/synthetic.zig");
 const trace = @import("tracy.zig").trace;
