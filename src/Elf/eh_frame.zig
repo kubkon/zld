@@ -319,8 +319,8 @@ fn resolveReloc(rec: anytype, sym: *const Symbol, rel: elf.Elf64_Rela, elf_file:
 
     const cpu_arch = elf_file.options.cpu_arch.?;
     const offset = rel.r_offset - rec.offset;
-    const P = @as(i64, @intCast(rec.getAddress(elf_file) + offset));
-    const S = @as(i64, @intCast(sym.getAddress(.{}, elf_file)));
+    const P = std.math.cast(i64, rec.getAddress(elf_file) + offset) orelse return error.Overflow;
+    const S = std.math.cast(i64, sym.getAddress(.{}, elf_file)) orelse return error.Overflow;
     const A = rel.r_addend;
 
     relocs_log.debug("  {s}: {x}: [{x} => {x}] ({s})", .{
@@ -331,12 +331,9 @@ fn resolveReloc(rec: anytype, sym: *const Symbol, rel: elf.Elf64_Rela, elf_file:
         sym.getName(elf_file),
     });
 
-    var where = data[offset..];
-    switch (rel.r_type()) {
-        elf.R_X86_64_32 => std.mem.writeInt(i32, where[0..4], @as(i32, @truncate(S + A)), .little),
-        elf.R_X86_64_64 => std.mem.writeInt(i64, where[0..8], S + A, .little),
-        elf.R_X86_64_PC32 => std.mem.writeInt(i32, where[0..4], @as(i32, @intCast(S - P + A)), .little),
-        elf.R_X86_64_PC64 => std.mem.writeInt(i64, where[0..8], S - P + A, .little),
+    switch (cpu_arch) {
+        .x86_64 => x86_64.resolveReloc(rel, P, S + A, data[offset..]),
+        .aarch64 => @panic("TODO .eh_frame aarch64"),
         else => unreachable,
     }
 }
@@ -570,6 +567,18 @@ const EH_PE = struct {
     pub const aligned = 0x50;
     pub const indirect = 0x80;
     pub const omit = 0xFF;
+};
+
+const x86_64 = struct {
+    fn resolveReloc(rel: elf.Elf64_Rela, source: i64, target: i64, data: []u8) void {
+        switch (rel.r_type()) {
+            elf.R_X86_64_32 => std.mem.writeInt(i32, data[0..4], @as(i32, @truncate(target)), .little),
+            elf.R_X86_64_64 => std.mem.writeInt(i64, data[0..8], target, .little),
+            elf.R_X86_64_PC32 => std.mem.writeInt(i32, data[0..4], @as(i32, @intCast(target - source)), .little),
+            elf.R_X86_64_PC64 => std.mem.writeInt(i64, data[0..8], target - source, .little),
+            else => unreachable,
+        }
+    }
 };
 
 const std = @import("std");
