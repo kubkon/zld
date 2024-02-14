@@ -107,6 +107,7 @@ pub fn writeRelocs(self: Atom, elf_file: *Elf, out_relocs: *std.ArrayList(elf.El
 
     relocs_log.debug("0x{x}: {s}", .{ self.getAddress(elf_file), self.getName(elf_file) });
 
+    const cpu_arch = elf_file.options.cpu_arch.?;
     const object = self.getObject(elf_file);
     for (self.getRelocs(elf_file)) |rel| {
         const target = object.getSymbol(rel.r_sym(), elf_file);
@@ -125,7 +126,7 @@ pub fn writeRelocs(self: Atom, elf_file: *Elf, out_relocs: *std.ArrayList(elf.El
         }
 
         relocs_log.debug("  {s}: [{x} => {d}({s})] + {x}", .{
-            fmtRelocType(r_type),
+            relocation.fmtRelocType(r_type, cpu_arch),
             r_offset,
             r_sym,
             target.getName(elf_file),
@@ -156,6 +157,7 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
+    const cpu_arch = elf_file.options.cpu_arch.?;
     const object = self.getObject(elf_file);
     const relocs = self.getRelocs(elf_file);
     const code = try self.getCodeUncompressAlloc(elf_file);
@@ -165,8 +167,9 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
     var i: usize = 0;
     while (i < relocs.len) : (i += 1) {
         const rel = relocs[i];
+        const r_type = rel.r_type();
 
-        if (rel.r_type() == elf.R_X86_64_NONE) continue;
+        if (relocation.isNone(r_type, cpu_arch)) continue;
         if (try self.reportUndefSymbol(rel, elf_file)) continue;
 
         const symbol = object.getSymbol(rel.r_sym(), elf_file);
@@ -179,7 +182,7 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
 
         // While traversing relocations, mark symbols that require special handling such as
         // pointer indirection via GOT, or a stub trampoline via PLT.
-        switch (rel.r_type()) {
+        switch (r_type) {
             elf.R_X86_64_64 => {
                 self.scanReloc(symbol, rel, getDynAbsRelocAction(symbol, elf_file), elf_file) catch {
                     has_errors = true;
@@ -289,7 +292,7 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
             else => {
                 elf_file.base.fatal("{s}: unknown relocation type: {}", .{
                     self.getName(elf_file),
-                    fmtRelocType(rel.r_type()),
+                    relocation.fmtRelocType(r_type, cpu_arch),
                 });
                 has_errors = true;
             },
@@ -382,7 +385,7 @@ inline fn noPicError(self: Atom, symbol: *const Symbol, rel: elf.Elf64_Rela, elf
         .{
             self.getObject(elf_file).fmtPath(),
             self.getName(elf_file),
-            fmtRelocType(rel.r_type()),
+            relocation.fmtRelocType(rel.r_type(), elf_file.options.cpu_arch.?),
             rel.r_offset,
             symbol.getName(elf_file),
         },
@@ -396,7 +399,7 @@ inline fn picError(self: Atom, symbol: *const Symbol, rel: elf.Elf64_Rela, elf_f
         .{
             self.getObject(elf_file).fmtPath(),
             self.getName(elf_file),
-            fmtRelocType(rel.r_type()),
+            relocation.fmtRelocType(rel.r_type(), elf_file.options.cpu_arch.?),
             rel.r_offset,
             symbol.getName(elf_file),
         },
@@ -511,6 +514,7 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
+    const cpu_arch = elf_file.options.cpu_arch.?;
     assert(self.getInputShdr(elf_file).sh_flags & elf.SHF_ALLOC != 0);
     const gpa = elf_file.base.allocator;
     const code = try self.getCodeUncompressAlloc(elf_file);
@@ -528,7 +532,7 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
         const rel = relocs[i];
         const r_type = rel.r_type();
 
-        if (r_type == elf.R_X86_64_NONE) continue;
+        if (relocation.isNone(r_type, cpu_arch)) continue;
 
         const target = object.getSymbol(rel.r_sym(), elf_file);
 
@@ -559,7 +563,7 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
         const DTP = @as(i64, @intCast(elf_file.getDtpAddress()));
 
         relocs_log.debug("  {s}: {x}: [{x} => {x}] G({x}) ({s})", .{
-            fmtRelocType(r_type),
+            relocation.fmtRelocType(r_type, cpu_arch),
             rel.r_offset,
             P,
             S + A,
@@ -670,7 +674,9 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
                 try cwriter.writeAll(&.{ 0x66, 0x90 });
             },
 
-            else => elf_file.base.fatal("unhandled relocation type: {}", .{fmtRelocType(r_type)}),
+            else => elf_file.base.fatal("unhandled relocation type: {}", .{
+                relocation.fmtRelocType(r_type, cpu_arch),
+            }),
         }
     }
 
@@ -775,6 +781,7 @@ pub fn resolveRelocsNonAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void 
     const tracy = trace(@src());
     defer tracy.end();
 
+    const cpu_arch = elf_file.options.cpu_arch.?;
     assert(self.getInputShdr(elf_file).sh_flags & elf.SHF_ALLOC == 0);
     const gpa = elf_file.base.allocator;
     const code = try self.getCodeUncompressAlloc(elf_file);
@@ -792,7 +799,7 @@ pub fn resolveRelocsNonAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void 
         const rel = relocs[i];
         const r_type = rel.r_type();
 
-        if (r_type == elf.R_X86_64_NONE) continue;
+        if (relocation.isNone(r_type, cpu_arch)) continue;
         if (try self.reportUndefSymbol(rel, elf_file)) continue;
 
         const target = object.getSymbol(rel.r_sym(), elf_file);
@@ -819,7 +826,7 @@ pub fn resolveRelocsNonAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void 
         const DTP = @as(i64, @intCast(elf_file.getDtpAddress()));
 
         relocs_log.debug("  {s}: {x}: [{x} => {x}] ({s})", .{
-            fmtRelocType(r_type),
+            relocation.fmtRelocType(r_type, cpu_arch),
             rel.r_offset,
             P,
             S + A,
@@ -849,7 +856,7 @@ pub fn resolveRelocsNonAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void 
             },
             else => elf_file.base.fatal("{s}: invalid relocation type for non-alloc section: {}", .{
                 self.getName(elf_file),
-                fmtRelocType(r_type),
+                relocation.fmtRelocType(r_type, cpu_arch),
             }),
         }
     }
@@ -904,8 +911,8 @@ fn relaxTlsGdToIe(rels: []align(1) const elf.Elf64_Rela, value: i32, elf_file: *
         },
 
         else => elf_file.base.fatal("TODO rewrite {} when followed by {}", .{
-            fmtRelocType(rels[0].r_type()),
-            fmtRelocType(rels[1].r_type()),
+            relocation.fmtRelocType(rels[0].r_type(), .x86_64),
+            relocation.fmtRelocType(rels[1].r_type(), .x86_64),
         }),
     }
 }
@@ -929,8 +936,8 @@ fn relaxTlsGdToLe(rels: []align(1) const elf.Elf64_Rela, value: i32, elf_file: *
         },
 
         else => elf_file.base.fatal("TODO rewrite {} when followed by {}", .{
-            fmtRelocType(rels[0].r_type()),
-            fmtRelocType(rels[1].r_type()),
+            relocation.fmtRelocType(rels[0].r_type(), .x86_64),
+            relocation.fmtRelocType(rels[1].r_type(), .x86_64),
         }),
     }
 }
@@ -967,8 +974,8 @@ fn relaxTlsLdToLe(rels: []align(1) const elf.Elf64_Rela, value: i32, elf_file: *
         },
 
         else => elf_file.base.fatal("TODO rewrite {} when followed by {}", .{
-            fmtRelocType(rels[0].r_type()),
-            fmtRelocType(rels[1].r_type()),
+            relocation.fmtRelocType(rels[0].r_type(), .x86_64),
+            relocation.fmtRelocType(rels[1].r_type(), .x86_64),
         }),
     }
 }
@@ -1017,66 +1024,6 @@ fn encode(insts: []const Instruction, code: []u8) !void {
     for (insts) |inst| {
         try inst.encode(writer, .{});
     }
-}
-
-pub fn fmtRelocType(r_type: u32) std.fmt.Formatter(formatRelocType) {
-    return .{ .data = r_type };
-}
-
-fn formatRelocType(
-    r_type: u32,
-    comptime unused_fmt_string: []const u8,
-    options: std.fmt.FormatOptions,
-    writer: anytype,
-) !void {
-    _ = unused_fmt_string;
-    _ = options;
-    const str = switch (r_type) {
-        elf.R_X86_64_NONE => "R_X86_64_NONE",
-        elf.R_X86_64_64 => "R_X86_64_64",
-        elf.R_X86_64_PC32 => "R_X86_64_PC32",
-        elf.R_X86_64_GOT32 => "R_X86_64_GOT32",
-        elf.R_X86_64_PLT32 => "R_X86_64_PLT32",
-        elf.R_X86_64_COPY => "R_X86_64_COPY",
-        elf.R_X86_64_GLOB_DAT => "R_X86_64_GLOB_DAT",
-        elf.R_X86_64_JUMP_SLOT => "R_X86_64_JUMP_SLOT",
-        elf.R_X86_64_RELATIVE => "R_X86_64_RELATIVE",
-        elf.R_X86_64_GOTPCREL => "R_X86_64_GOTPCREL",
-        elf.R_X86_64_32 => "R_X86_64_32",
-        elf.R_X86_64_32S => "R_X86_64_32S",
-        elf.R_X86_64_16 => "R_X86_64_16",
-        elf.R_X86_64_PC16 => "R_X86_64_PC16",
-        elf.R_X86_64_8 => "R_X86_64_8",
-        elf.R_X86_64_PC8 => "R_X86_64_PC8",
-        elf.R_X86_64_DTPMOD64 => "R_X86_64_DTPMOD64",
-        elf.R_X86_64_DTPOFF64 => "R_X86_64_DTPOFF64",
-        elf.R_X86_64_TPOFF64 => "R_X86_64_TPOFF64",
-        elf.R_X86_64_TLSGD => "R_X86_64_TLSGD",
-        elf.R_X86_64_TLSLD => "R_X86_64_TLSLD",
-        elf.R_X86_64_DTPOFF32 => "R_X86_64_DTPOFF32",
-        elf.R_X86_64_GOTTPOFF => "R_X86_64_GOTTPOFF",
-        elf.R_X86_64_TPOFF32 => "R_X86_64_TPOFF32",
-        elf.R_X86_64_PC64 => "R_X86_64_PC64",
-        elf.R_X86_64_GOTOFF64 => "R_X86_64_GOTOFF64",
-        elf.R_X86_64_GOTPC32 => "R_X86_64_GOTPC32",
-        elf.R_X86_64_GOT64 => "R_X86_64_GOT64",
-        elf.R_X86_64_GOTPCREL64 => "R_X86_64_GOTPCREL64",
-        elf.R_X86_64_GOTPC64 => "R_X86_64_GOTPC64",
-        elf.R_X86_64_GOTPLT64 => "R_X86_64_GOTPLT64",
-        elf.R_X86_64_PLTOFF64 => "R_X86_64_PLTOFF64",
-        elf.R_X86_64_SIZE32 => "R_X86_64_SIZE32",
-        elf.R_X86_64_SIZE64 => "R_X86_64_SIZE64",
-        elf.R_X86_64_GOTPC32_TLSDESC => "R_X86_64_GOTPC32_TLSDESC",
-        elf.R_X86_64_TLSDESC_CALL => "R_X86_64_TLSDESC_CALL",
-        elf.R_X86_64_TLSDESC => "R_X86_64_TLSDESC",
-        elf.R_X86_64_IRELATIVE => "R_X86_64_IRELATIVE",
-        elf.R_X86_64_RELATIVE64 => "R_X86_64_RELATIVE64",
-        elf.R_X86_64_GOTPCRELX => "R_X86_64_GOTPCRELX",
-        elf.R_X86_64_REX_GOTPCRELX => "R_X86_64_REX_GOTPCRELX",
-        elf.R_X86_64_NUM => "R_X86_64_NUM",
-        else => "R_X86_64_UNKNOWN",
-    };
-    try writer.print("{s}", .{str});
 }
 
 pub fn format(
@@ -1150,6 +1097,7 @@ const dis_x86_64 = @import("dis_x86_64");
 const elf = std.elf;
 const log = std.log.scoped(.elf);
 const relocs_log = std.log.scoped(.relocs);
+const relocation = @import("relocation.zig");
 const math = std.math;
 const mem = std.mem;
 const trace = @import("../tracy.zig").trace;

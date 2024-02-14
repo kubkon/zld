@@ -317,13 +317,14 @@ fn resolveReloc(rec: anytype, sym: *const Symbol, rel: elf.Elf64_Rela, elf_file:
     const tracy = trace(@src());
     defer tracy.end();
 
+    const cpu_arch = elf_file.options.cpu_arch.?;
     const offset = rel.r_offset - rec.offset;
     const P = @as(i64, @intCast(rec.getAddress(elf_file) + offset));
     const S = @as(i64, @intCast(sym.getAddress(.{}, elf_file)));
     const A = rel.r_addend;
 
     relocs_log.debug("  {s}: {x}: [{x} => {x}] ({s})", .{
-        Atom.fmtRelocType(rel.r_type()),
+        relocation.fmtRelocType(rel.r_type(), cpu_arch),
         offset,
         P,
         S + A,
@@ -429,6 +430,7 @@ fn emitReloc(elf_file: *Elf, rec: anytype, sym: *const Symbol, rel: elf.Elf64_Re
     const tracy = trace(@src());
     defer tracy.end();
 
+    const cpu_arch = elf_file.options.cpu_arch.?;
     const r_offset = rec.getAddress(elf_file) + rel.r_offset - rec.offset;
     const r_type = rel.r_type();
     var r_addend = rel.r_addend;
@@ -444,7 +446,7 @@ fn emitReloc(elf_file: *Elf, rec: anytype, sym: *const Symbol, rel: elf.Elf64_Re
     }
 
     relocs_log.debug("  {s}: [{x} => {d}({s})] + {x}", .{
-        Atom.fmtRelocType(r_type),
+        relocation.fmtRelocType(r_type, cpu_arch),
         r_offset,
         r_sym,
         sym.getName(elf_file),
@@ -574,6 +576,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const elf = std.elf;
 const relocs_log = std.log.scoped(.relocs);
+const relocation = @import("relocation.zig");
 const trace = @import("../tracy.zig").trace;
 
 const Allocator = std.mem.Allocator;
