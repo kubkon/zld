@@ -818,7 +818,7 @@ pub const GotSection = struct {
                         elf_file.addRelaDynAssumeCapacity(.{
                             .offset = offset,
                             .sym = extra.?.dynamic,
-                            .type = elf.R_X86_64_GLOB_DAT,
+                            .type = @intFromEnum(@as(elf.R_X86_64, .GLOB_DAT)),
                         });
                         continue;
                     }
@@ -826,7 +826,7 @@ pub const GotSection = struct {
                     if (symbol.?.isIFunc(elf_file)) {
                         elf_file.addRelaDynAssumeCapacity(.{
                             .offset = offset,
-                            .type = elf.R_X86_64_IRELATIVE,
+                            .type = @intFromEnum(@as(elf.R_X86_64, .IRELATIVE)),
                             .addend = @intCast(symbol.?.getAddress(.{ .plt = false }, elf_file)),
                         });
                         continue;
@@ -835,7 +835,7 @@ pub const GotSection = struct {
                     if (elf_file.options.pic and !symbol.?.isAbs(elf_file)) {
                         elf_file.addRelaDynAssumeCapacity(.{
                             .offset = offset,
-                            .type = elf.R_X86_64_RELATIVE,
+                            .type = @intFromEnum(@as(elf.R_X86_64, .RELATIVE)),
                             .addend = @intCast(symbol.?.getAddress(.{ .plt = false }, elf_file)),
                         });
                     }
@@ -846,7 +846,7 @@ pub const GotSection = struct {
                         const offset = entry.getAddress(elf_file);
                         elf_file.addRelaDynAssumeCapacity(.{
                             .offset = offset,
-                            .type = elf.R_X86_64_DTPMOD64,
+                            .type = @intFromEnum(@as(elf.R_X86_64, .DTPMOD64)),
                         });
                     }
                 },
@@ -857,18 +857,18 @@ pub const GotSection = struct {
                         elf_file.addRelaDynAssumeCapacity(.{
                             .offset = offset,
                             .sym = extra.?.dynamic,
-                            .type = elf.R_X86_64_DTPMOD64,
+                            .type = @intFromEnum(@as(elf.R_X86_64, .DTPMOD64)),
                         });
                         elf_file.addRelaDynAssumeCapacity(.{
                             .offset = offset + 8,
                             .sym = extra.?.dynamic,
-                            .type = elf.R_X86_64_DTPOFF64,
+                            .type = @intFromEnum(@as(elf.R_X86_64, .DTPOFF64)),
                         });
                     } else if (is_shared) {
                         elf_file.addRelaDynAssumeCapacity(.{
                             .offset = offset,
                             .sym = extra.?.dynamic,
-                            .type = elf.R_X86_64_DTPMOD64,
+                            .type = @intFromEnum(@as(elf.R_X86_64, .DTPMOD64)),
                         });
                     }
                 },
@@ -879,12 +879,12 @@ pub const GotSection = struct {
                         elf_file.addRelaDynAssumeCapacity(.{
                             .offset = offset,
                             .sym = extra.?.dynamic,
-                            .type = elf.R_X86_64_TPOFF64,
+                            .type = @intFromEnum(@as(elf.R_X86_64, .TPOFF64)),
                         });
                     } else if (is_shared) {
                         elf_file.addRelaDynAssumeCapacity(.{
                             .offset = offset,
-                            .type = elf.R_X86_64_TPOFF64,
+                            .type = @intFromEnum(@as(elf.R_X86_64, .TPOFF64)),
                             .addend = @intCast(symbol.?.getAddress(.{}, elf_file) - elf_file.getTlsAddress()),
                         });
                     }
@@ -895,7 +895,7 @@ pub const GotSection = struct {
                     elf_file.addRelaDynAssumeCapacity(.{
                         .offset = offset,
                         .sym = extra.?.dynamic,
-                        .type = elf.R_X86_64_TLSDESC,
+                        .type = @intFromEnum(@as(elf.R_X86_64, .TLSDESC)),
                     });
                 },
             }
@@ -1074,7 +1074,7 @@ pub const PltSection = struct {
             const extra = sym.getExtra(elf_file).?;
             const r_offset = sym.getGotPltAddress(elf_file);
             const r_sym: u64 = extra.dynamic;
-            const r_type: u32 = elf.R_X86_64_JUMP_SLOT;
+            const r_type: u32 = @intFromEnum(@as(elf.R_X86_64, .JUMP_SLOT));
             elf_file.rela_plt.appendAssumeCapacity(.{
                 .r_offset = r_offset,
                 .r_info = (r_sym << 32) | r_type,
@@ -1285,7 +1285,7 @@ pub const CopyRelSection = struct {
             elf_file.addRelaDynAssumeCapacity(.{
                 .offset = sym.getAddress(.{}, elf_file),
                 .sym = extra.dynamic,
-                .type = elf.R_X86_64_COPY,
+                .type = @intFromEnum(@as(elf.R_X86_64, .COPY)),
             });
         }
     }

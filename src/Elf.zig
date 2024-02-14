@@ -2620,9 +2620,9 @@ pub inline fn addRelaDynAssumeCapacity(self: *Elf, opts: RelaDyn) void {
 fn sortRelaDyn(self: *Elf) void {
     const Sort = struct {
         inline fn getRank(rel: elf.Elf64_Rela) u2 {
-            return switch (rel.r_type()) {
-                elf.R_X86_64_RELATIVE => 0,
-                elf.R_X86_64_IRELATIVE => 2,
+            return switch (@as(elf.R_X86_64, @enumFromInt(rel.r_type()))) {
+                .RELATIVE => 0,
+                .IRELATIVE => 2,
                 else => 1,
             };
         }
