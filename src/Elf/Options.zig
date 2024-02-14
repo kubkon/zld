@@ -112,7 +112,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             if (isTargetSupported(target)) |out| {
                 opts.cpu_arch = out.cpu_arch;
                 opts.os_tag = out.os_tag;
-                opts.page_size = 0x1000;
+                opts.page_size = opts.page_size;
             } else {
                 ctx.fatal("unknown target emulation '{s}'", .{target});
             }
@@ -397,9 +397,10 @@ const version =
     \\ld.zld 0.0.4 (compatible with GNU ld)
 ;
 
-const SupportedTarget = struct {
+pub const SupportedTarget = struct {
     cpu_arch: std.Target.Cpu.Arch,
     os_tag: ?std.Target.Os.Tag = null,
+    page_size: u16,
 
     fn fmtTarget(st: SupportedTarget) []const u8 {
         return switch (st.cpu_arch) {
@@ -425,9 +426,9 @@ const SupportedTarget = struct {
     }
 };
 
-const supported_targets = [_]SupportedTarget{
-    .{ .cpu_arch = .x86_64 },
-    .{ .cpu_arch = .aarch64, .os_tag = .linux },
+pub const supported_targets = [_]SupportedTarget{
+    .{ .cpu_arch = .x86_64, .page_size = 0x1000 },
+    .{ .cpu_arch = .aarch64, .os_tag = .linux, .page_size = 0x1000 },
 };
 
 fn isTargetSupported(value: []const u8) ?SupportedTarget {

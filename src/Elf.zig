@@ -1752,12 +1752,14 @@ fn parseLdScript(self: *Elf, arena: Allocator, obj: LinkObject, search_dirs: []c
     return true;
 }
 
+// TODO we should also include extracted OS in here.
 fn validateOrSetCpuArch(self: *Elf, name: []const u8, cpu_arch: std.Target.Cpu.Arch) void {
     const self_cpu_arch = self.options.cpu_arch orelse blk: {
         self.options.cpu_arch = cpu_arch;
-        const page_size: u16 = switch (cpu_arch) {
-            .x86_64 => 0x1000,
-            else => @panic("TODO"),
+        const page_size = inline for (Options.supported_targets) |target| {
+            if (target.cpu_arch == cpu_arch) break target.page_size;
+        } else {
+            return self.base.fatal("{s}: unhandled architecture '{s}'", .{ name, @tagName(cpu_arch.toElfMachine()) });
         };
         // TODO move this error into Options
         if (self.options.image_base % page_size != 0) {
