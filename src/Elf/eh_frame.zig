@@ -321,10 +321,9 @@ fn resolveReloc(rec: anytype, sym: *const Symbol, rel: elf.Elf64_Rela, elf_file:
     const P = @as(i64, @intCast(rec.getAddress(elf_file) + offset));
     const S = @as(i64, @intCast(sym.getAddress(.{}, elf_file)));
     const A = rel.r_addend;
-    const r_type: elf.R_X86_64 = @enumFromInt(rel.r_type());
 
     relocs_log.debug("  {s}: {x}: [{x} => {x}] ({s})", .{
-        @tagName(r_type),
+        Atom.fmtRelocType(rel.r_type()),
         offset,
         P,
         S + A,
@@ -332,11 +331,11 @@ fn resolveReloc(rec: anytype, sym: *const Symbol, rel: elf.Elf64_Rela, elf_file:
     });
 
     var where = data[offset..];
-    switch (r_type) {
-        ._32 => std.mem.writeInt(i32, where[0..4], @as(i32, @truncate(S + A)), .little),
-        ._64 => std.mem.writeInt(i64, where[0..8], S + A, .little),
-        .PC32 => std.mem.writeInt(i32, where[0..4], @as(i32, @intCast(S - P + A)), .little),
-        .PC64 => std.mem.writeInt(i64, where[0..8], S - P + A, .little),
+    switch (rel.r_type()) {
+        elf.R_X86_64_32 => std.mem.writeInt(i32, where[0..4], @as(i32, @truncate(S + A)), .little),
+        elf.R_X86_64_64 => std.mem.writeInt(i64, where[0..8], S + A, .little),
+        elf.R_X86_64_PC32 => std.mem.writeInt(i32, where[0..4], @as(i32, @intCast(S - P + A)), .little),
+        elf.R_X86_64_PC64 => std.mem.writeInt(i64, where[0..8], S - P + A, .little),
         else => unreachable,
     }
 }
@@ -445,7 +444,7 @@ fn emitReloc(elf_file: *Elf, rec: anytype, sym: *const Symbol, rel: elf.Elf64_Re
     }
 
     relocs_log.debug("  {s}: [{x} => {d}({s})] + {x}", .{
-        @tagName(@as(elf.R_X86_64, @enumFromInt(rel.r_type()))),
+        Atom.fmtRelocType(r_type),
         r_offset,
         r_sym,
         sym.getName(elf_file),
