@@ -696,6 +696,7 @@ fn resolveDynAbsReloc(
     const tracy = trace(@src());
     defer tracy.end();
 
+    const cpu_arch = elf_file.options.cpu_arch.?;
     const P = self.getAddress(elf_file) + rel.r_offset;
     const A = rel.r_addend;
     const S = @as(i64, @intCast(target.getAddress(.{}, elf_file)));
@@ -719,7 +720,7 @@ fn resolveDynAbsReloc(
                 elf_file.addRelaDynAssumeCapacity(.{
                     .offset = P,
                     .sym = target.getExtra(elf_file).?.dynamic,
-                    .type = elf.R_X86_64_64,
+                    .type = relocation.encode(.abs, cpu_arch),
                     .addend = A,
                 });
                 try applyDynamicReloc(A, elf_file, writer);
@@ -733,7 +734,7 @@ fn resolveDynAbsReloc(
                 elf_file.addRelaDynAssumeCapacity(.{
                     .offset = P,
                     .sym = target.getExtra(elf_file).?.dynamic,
-                    .type = elf.R_X86_64_64,
+                    .type = relocation.encode(.abs, cpu_arch),
                     .addend = A,
                 });
                 try applyDynamicReloc(A, elf_file, writer);
@@ -746,7 +747,7 @@ fn resolveDynAbsReloc(
             elf_file.addRelaDynAssumeCapacity(.{
                 .offset = P,
                 .sym = target.getExtra(elf_file).?.dynamic,
-                .type = elf.R_X86_64_64,
+                .type = relocation.encode(.abs, cpu_arch),
                 .addend = A,
             });
             try applyDynamicReloc(A, elf_file, writer);
@@ -755,7 +756,7 @@ fn resolveDynAbsReloc(
         .baserel => {
             elf_file.addRelaDynAssumeCapacity(.{
                 .offset = P,
-                .type = elf.R_X86_64_RELATIVE,
+                .type = relocation.encode(.rel, cpu_arch),
                 .addend = S + A,
             });
             try applyDynamicReloc(S + A, elf_file, writer);
@@ -765,7 +766,7 @@ fn resolveDynAbsReloc(
             const S_ = @as(i64, @intCast(target.getAddress(.{ .plt = false }, elf_file)));
             elf_file.addRelaDynAssumeCapacity(.{
                 .offset = P,
-                .type = elf.R_X86_64_IRELATIVE,
+                .type = relocation.encode(.irel, cpu_arch),
                 .addend = S_ + A,
             });
             try applyDynamicReloc(S_ + A, elf_file, writer);
