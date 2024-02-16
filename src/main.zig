@@ -63,7 +63,7 @@ fn logFn(
 pub const std_options: std.Options = .{ .logFn = logFn };
 
 fn print(comptime format: []const u8, args: anytype) void {
-    const msg = std.fmt.allocPrint(gpa, format ++ "\n", args) catch return;
+    const msg = std.fmt.allocPrint(gpa, format, args) catch return;
     std.io.getStdErr().writeAll(msg) catch {};
 }
 
@@ -125,7 +125,8 @@ pub fn main() !void {
             std.process.exit(1);
         },
         else => |e| {
-            print("unexpected linker error: {s}", .{@errorName(e)});
+            zld.reportErrors();
+            print("unexpected linker error: {s}\n", .{@errorName(e)});
             return e;
         },
     };

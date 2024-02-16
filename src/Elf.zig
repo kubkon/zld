@@ -1752,13 +1752,12 @@ fn parseLdScript(self: *Elf, arena: Allocator, obj: LinkObject, search_dirs: []c
     return true;
 }
 
+// TODO we should also include extracted OS in here.
 fn validateOrSetCpuArch(self: *Elf, name: []const u8, cpu_arch: std.Target.Cpu.Arch) void {
     const self_cpu_arch = self.options.cpu_arch orelse blk: {
         self.options.cpu_arch = cpu_arch;
-        const page_size: u16 = switch (cpu_arch) {
-            .x86_64 => 0x1000,
-            else => @panic("TODO"),
-        };
+        const page_size = Options.defaultPageSize(cpu_arch) orelse
+            return self.base.fatal("{s}: unhandled architecture '{s}'", .{ name, @tagName(cpu_arch.toElfMachine()) });
         // TODO move this error into Options
         if (self.options.image_base % page_size != 0) {
             self.base.fatal("specified --image-base=0x{x} is not a multiple of page size of 0x{x}", .{
@@ -1881,7 +1880,7 @@ fn markEhFrameAtomsDead(self: *Elf) void {
         const object = file.object;
         for (object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index) orelse continue;
-            const is_eh_frame = atom.getInputShdr(self).sh_type == elf.SHT_X86_64_UNWIND or
+            const is_eh_frame = (self.options.cpu_arch.? == .x86_64 and atom.getInputShdr(self).sh_type == elf.SHT_X86_64_UNWIND) or
                 mem.eql(u8, atom.getName(self), ".eh_frame");
             if (atom.flags.alive and is_eh_frame) atom.flags.alive = false;
         }
@@ -2619,24 +2618,26 @@ pub inline fn addRelaDynAssumeCapacity(self: *Elf, opts: RelaDyn) void {
 
 fn sortRelaDyn(self: *Elf) void {
     const Sort = struct {
-        inline fn getRank(rel: elf.Elf64_Rela) u2 {
-            return switch (rel.r_type()) {
-                elf.R_X86_64_RELATIVE => 0,
-                elf.R_X86_64_IRELATIVE => 2,
+        inline fn getRank(rel: elf.Elf64_Rela, ctx: *const Elf) u2 {
+            const cpu_arch = ctx.options.cpu_arch.?;
+            const r_type = rel.r_type();
+            const r_kind = relocation.decode(r_type, cpu_arch).?;
+            return switch (r_kind) {
+                .rel => 0,
+                .irel => 2,
                 else => 1,
             };
         }
 
-        pub fn lessThan(ctx: void, lhs: elf.Elf64_Rela, rhs: elf.Elf64_Rela) bool {
-            _ = ctx;
-            if (getRank(lhs) == getRank(rhs)) {
+        pub fn lessThan(ctx: *const Elf, lhs: elf.Elf64_Rela, rhs: elf.Elf64_Rela) bool {
+            if (getRank(lhs, ctx) == getRank(rhs, ctx)) {
                 if (lhs.r_sym() == rhs.r_sym()) return lhs.r_offset < rhs.r_offset;
                 return lhs.r_sym() < rhs.r_sym();
             }
-            return getRank(lhs) < getRank(rhs);
+            return getRank(lhs, ctx) < getRank(rhs, ctx);
         }
     };
-    mem.sort(elf.Elf64_Rela, self.rela_dyn.items, {}, Sort.lessThan);
+    mem.sort(elf.Elf64_Rela, self.rela_dyn.items, self, Sort.lessThan);
 }
 
 fn getNumIRelativeRelocs(self: *Elf) usize {
@@ -2872,6 +2873,7 @@ const log = std.log.scoped(.elf);
 const math = std.math;
 const mem = std.mem;
 const relocatable = @import("Elf/relocatable.zig");
+const relocation = @import("Elf/relocation.zig");
 const state_log = std.log.scoped(.state);
 const synthetic = @import("Elf/synthetic.zig");
 const trace = @import("tracy.zig").trace;

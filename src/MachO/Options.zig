@@ -126,7 +126,7 @@ force_load_objc: bool = false,
 adhoc_codesign: ?bool = null,
 
 pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options {
-    if (args.len == 0) ctx.fatal(usage, .{cmd});
+    if (args.len == 0) ctx.fatal(usage ++ "\n", .{cmd});
 
     var positionals = std.ArrayList(MachO.LinkObject).init(arena);
     var lib_dirs = std.StringArrayHashMap(void).init(arena);
@@ -150,7 +150,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
     var p = Zld.ArgParser(@TypeOf(ctx)){ .it = &it, .ctx = ctx };
     while (p.hasMore()) {
         if (p.flag2("help")) {
-            ctx.fatal(usage, .{cmd});
+            ctx.fatal(usage ++ "\n", .{cmd});
         } else if (p.arg2("debug-log")) |scope| {
             try ctx.log_scopes.append(scope);
         } else if (p.arg2("entitlements")) |path| {
@@ -191,7 +191,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             opts.emit.sub_path = path;
         } else if (p.arg1("stack_size")) |value| {
             opts.stack_size = std.fmt.parseUnsigned(u64, value, 0) catch
-                ctx.fatal("Could not parse value '{s}' into integer", .{value});
+                ctx.fatal("Could not parse value '{s}' into integer\n", .{value});
         } else if (p.flag1("dylib")) {
             opts.dylib = true;
         } else if (p.flag1("dynamic")) {
@@ -202,22 +202,22 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             try rpath_list.put(path, {});
         } else if (p.arg1("compatibility_version")) |raw| {
             opts.compatibility_version = Version.parse(raw) orelse
-                ctx.fatal("Unable to parse version from '{s}'", .{raw});
+                ctx.fatal("Unable to parse version from '{s}'\n", .{raw});
         } else if (p.arg1("current_version")) |raw| {
             opts.current_version = Version.parse(raw) orelse
-                ctx.fatal("Unable to parse version from '{s}'", .{raw});
+                ctx.fatal("Unable to parse version from '{s}'\n", .{raw});
         } else if (p.arg1("install_name")) |name| {
             opts.install_name = name;
         } else if (p.arg1("dylib_install_name")) |name| {
             opts.install_name = name;
         } else if (p.arg1("headerpad")) |value| {
             opts.headerpad = std.fmt.parseUnsigned(u32, value, 0) catch
-                ctx.fatal("Could not parse value '{s}' into integer", .{value});
+                ctx.fatal("Could not parse value '{s}' into integer\n", .{value});
         } else if (p.flag1("headerpad_max_install_names")) {
             opts.headerpad_max_install_names = true;
         } else if (p.arg1("pagezero_size")) |value| {
             opts.pagezero_size = std.fmt.parseUnsigned(u64, value, 0) catch
-                ctx.fatal("Could not parse value '{s}' into integer", .{value});
+                ctx.fatal("Could not parse value '{s}' into integer\n", .{value});
         } else if (p.flag1("dead_strip")) {
             opts.dead_strip = true;
         } else if (p.flag1("dead_strip_dylibs")) {
@@ -234,7 +234,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             } else if (mem.eql(u8, treatment, "dynamic_lookup")) {
                 opts.undefined_treatment = .dynamic_lookup;
             } else {
-                ctx.fatal("Unknown option -undefined {s}", .{treatment});
+                ctx.fatal("Unknown option -undefined {s}\n", .{treatment});
             }
         } else if (p.arg1("u")) |name| {
             try force_undefined_symbols.put(name, {});
@@ -254,14 +254,14 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             } else if (mem.eql(u8, value, "x86_64")) {
                 opts.cpu_arch = .x86_64;
             } else {
-                ctx.fatal("Could not parse CPU architecture from '{s}'", .{value});
+                ctx.fatal("Could not parse CPU architecture from '{s}'\n", .{value});
             }
         } else if (p.arg1("platform_version")) |platform_s| {
             // TODO clunky!
             const min_v = it.next() orelse
-                ctx.fatal("Expected minimum platform version after '{s}' '{s}'", .{ p.arg, platform_s });
+                ctx.fatal("Expected minimum platform version after '{s}' '{s}'\n", .{ p.arg, platform_s });
             const sdk_v = it.next() orelse
-                ctx.fatal("Expected SDK version after '{s}' '{s}' '{s}'", .{ p.arg, platform_s, min_v });
+                ctx.fatal("Expected SDK version after '{s}' '{s}' '{s}'\n", .{ p.arg, platform_s, min_v });
 
             var tmp_platform: macho.PLATFORM = undefined;
 
@@ -284,14 +284,14 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
                 } else if (mem.eql(u8, platform_s, "watchos-simulator")) {
                     tmp_platform = .WATCHOSSIMULATOR;
                 } else {
-                    ctx.fatal("Unsupported Apple OS: {s}", .{platform_s});
+                    ctx.fatal("Unsupported Apple OS: {s}\n", .{platform_s});
                 }
             }
 
             const min_ver = Version.parse(min_v) orelse
-                ctx.fatal("Unable to parse version from '{s}'", .{min_v});
+                ctx.fatal("Unable to parse version from '{s}'\n", .{min_v});
             opts.sdk_version = Version.parse(sdk_v) orelse
-                ctx.fatal("Unable to parse version from '{s}'", .{sdk_v});
+                ctx.fatal("Unable to parse version from '{s}'\n", .{sdk_v});
             opts.platform = .{ .platform = tmp_platform, .version = min_ver };
         } else if (p.arg1("lto_library")) |path| {
             std.log.debug("TODO unimplemented -lto_library {s} option", .{path});
@@ -321,19 +321,19 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
     }
 
     if (verbose) {
-        std.debug.print("{s} ", .{cmd});
+        ctx.print("{s} ", .{cmd});
         for (args[0 .. args.len - 1]) |arg| {
-            std.debug.print("{s} ", .{arg});
+            ctx.print("{s} ", .{arg});
         }
-        std.debug.print("{s}\n", .{args[args.len - 1]});
+        ctx.print("{s}\n", .{args[args.len - 1]});
     }
 
-    if (print_version) ctx.print("{s}", .{version});
+    if (print_version) ctx.print("{s}\n", .{version});
 
-    if (positionals.items.len == 0) ctx.fatal("Expected at least one positional argument", .{});
+    if (positionals.items.len == 0) ctx.fatal("Expected at least one positional argument\n", .{});
 
     if (opts.namespace == .two_level) switch (opts.undefined_treatment) {
-        .warn, .suppress => |x| ctx.fatal("illegal flags: '-undefined {s}' with '-two_levelnamespace'", .{
+        .warn, .suppress => |x| ctx.fatal("illegal flags: '-undefined {s}' with '-two_levelnamespace'\n", .{
             @tagName(x),
         }),
         else => {},
@@ -341,7 +341,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
 
     if (opts.adhoc_codesign) |cs| {
         if (!cs and opts.entitlements != null) {
-            ctx.fatal("illegal flags: '--entitlements {s}' with -no_adhoc_codesign", .{opts.entitlements.?});
+            ctx.fatal("illegal flags: '--entitlements {s}' with -no_adhoc_codesign\n", .{opts.entitlements.?});
         }
     }
 
