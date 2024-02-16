@@ -125,6 +125,7 @@ pub fn main() !void {
             std.process.exit(1);
         },
         else => |e| {
+            zld.reportErrors();
             print("unexpected linker error: {s}\n", .{@errorName(e)});
             return e;
         },

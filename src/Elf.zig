@@ -2621,7 +2621,7 @@ fn sortRelaDyn(self: *Elf) void {
         inline fn getRank(rel: elf.Elf64_Rela, ctx: *const Elf) u2 {
             const cpu_arch = ctx.options.cpu_arch.?;
             const r_type = rel.r_type();
-            const r_kind = relocation.decode(r_type, cpu_arch);
+            const r_kind = relocation.decode(r_type, cpu_arch).?;
             return switch (r_kind) {
                 .rel => 0,
                 .irel => 2,

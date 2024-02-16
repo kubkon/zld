@@ -158,40 +158,14 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
     defer tracy.end();
 
     const cpu_arch = elf_file.options.cpu_arch.?;
-    const object = self.getObject(elf_file);
-    const relocs = self.getRelocs(elf_file);
-    const code = try self.getCodeUncompressAlloc(elf_file);
-    defer elf_file.base.allocator.free(code);
 
-    var has_errors = false;
-    var i: usize = 0;
-    while (i < relocs.len) : (i += 1) {
-        const rel = relocs[i];
-        const r_kind = relocation.decode(rel.r_type(), cpu_arch);
-
-        if (r_kind == .none) continue;
-        if (try self.reportUndefSymbol(rel, elf_file)) continue;
-
-        const symbol = object.getSymbol(rel.r_sym(), elf_file);
-
-        if (symbol.isIFunc(elf_file)) {
-            symbol.flags.got = true;
-            symbol.flags.plt = true;
-        }
-
-        // While traversing relocations, mark symbols that require special handling such as
-        // pointer indirection via GOT, or a stub trampoline via PLT.
-        (switch (cpu_arch) {
-            .x86_64 => x86_64.scanReloc(self, elf_file, rel, symbol, code),
-            .aarch64 => @panic("TODO"),
-            else => unreachable,
-        }) catch |err| switch (err) {
-            error.SkipRelax => i += 1,
-            else => has_errors = true,
-        };
+    switch (cpu_arch) {
+        .x86_64 => try x86_64.scanRelocs(self, elf_file),
+        else => |arch| {
+            elf_file.base.fatal("TODO support {s} architecture", .{@tagName(arch)});
+            return error.UnhandledCpuArch;
+        },
     }
-
-    if (has_errors) return error.RelocError;
 }
 
 fn scanReloc(self: Atom, symbol: *Symbol, rel: elf.Elf64_Rela, action: RelocAction, elf_file: *Elf) !void {
@@ -408,172 +382,16 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
 
     const cpu_arch = elf_file.options.cpu_arch.?;
     assert(self.getInputShdr(elf_file).sh_flags & elf.SHF_ALLOC != 0);
-    const gpa = elf_file.base.allocator;
-    const code = try self.getCodeUncompressAlloc(elf_file);
-    defer gpa.free(code);
-    const relocs = self.getRelocs(elf_file);
-    const object = self.getObject(elf_file);
 
     relocs_log.debug("{x}: {s}", .{ self.getAddress(elf_file), self.getName(elf_file) });
 
-    var stream = std.io.fixedBufferStream(code);
-    const cwriter = stream.writer();
-
-    var i: usize = 0;
-    while (i < relocs.len) : (i += 1) {
-        const rel = relocs[i];
-        const r_type = rel.r_type();
-        const r_kind = relocation.decode(r_type, cpu_arch);
-
-        if (r_kind == .none) continue;
-
-        const target = object.getSymbol(rel.r_sym(), elf_file);
-
-        // We will use equation format to resolve relocations:
-        // https://intezer.com/blog/malware-analysis/executable-and-linkable-format-101-part-3-relocations/
-        //
-        // Address of the source atom.
-        const P = @as(i64, @intCast(self.getAddress(elf_file) + rel.r_offset));
-        // Addend from the relocation.
-        const A = rel.r_addend;
-        // Address of the target symbol - can be address of the symbol within an atom or address of PLT stub.
-        const S = @as(i64, @intCast(target.getAddress(.{}, elf_file)));
-        // Address of the global offset table.
-        const GOT = blk: {
-            const shndx = if (elf_file.got_plt_sect_index) |shndx|
-                shndx
-            else if (elf_file.got_sect_index) |shndx|
-                shndx
-            else
-                null;
-            break :blk if (shndx) |index| @as(i64, @intCast(elf_file.sections.items(.shdr)[index].sh_addr)) else 0;
-        };
-        // Relative offset to the start of the global offset table.
-        const G = @as(i64, @intCast(target.getGotAddress(elf_file))) - GOT;
-        // Address of the thread pointer.
-        const TP = @as(i64, @intCast(elf_file.getTpAddress()));
-        // Address of the dynamic thread pointer.
-        const DTP = @as(i64, @intCast(elf_file.getDtpAddress()));
-
-        relocs_log.debug("  {s}: {x}: [{x} => {x}] G({x}) ({s})", .{
-            relocation.fmtRelocType(r_type, cpu_arch),
-            rel.r_offset,
-            P,
-            S + A,
-            G + GOT + A,
-            target.getName(elf_file),
-        });
-
-        try stream.seekTo(rel.r_offset);
-
-        switch (r_type) {
-            elf.R_X86_64_NONE => unreachable,
-            elf.R_X86_64_64 => {
-                try self.resolveDynAbsReloc(
-                    target,
-                    rel,
-                    getDynAbsRelocAction(target, elf_file),
-                    elf_file,
-                    cwriter,
-                );
-            },
-
-            elf.R_X86_64_PLT32,
-            elf.R_X86_64_PC32,
-            => try cwriter.writeInt(i32, @as(i32, @intCast(S + A - P)), .little),
-
-            elf.R_X86_64_GOTPCREL => try cwriter.writeInt(i32, @as(i32, @intCast(G + GOT + A - P)), .little),
-            elf.R_X86_64_GOTPC32 => try cwriter.writeInt(i32, @as(i32, @intCast(GOT + A - P)), .little),
-            elf.R_X86_64_GOTPC64 => try cwriter.writeInt(i64, GOT + A - P, .little),
-
-            elf.R_X86_64_GOTPCRELX => {
-                if (!target.flags.import and !target.isIFunc(elf_file) and !target.isAbs(elf_file)) blk: {
-                    x86_64.relaxGotpcrelx(code[rel.r_offset - 2 ..]) catch break :blk;
-                    try cwriter.writeInt(i32, @as(i32, @intCast(S + A - P)), .little);
-                    continue;
-                }
-                try cwriter.writeInt(i32, @as(i32, @intCast(G + GOT + A - P)), .little);
-            },
-
-            elf.R_X86_64_REX_GOTPCRELX => {
-                if (!target.flags.import and !target.isIFunc(elf_file) and !target.isAbs(elf_file)) blk: {
-                    x86_64.relaxRexGotpcrelx(code[rel.r_offset - 3 ..]) catch break :blk;
-                    try cwriter.writeInt(i32, @as(i32, @intCast(S + A - P)), .little);
-                    continue;
-                }
-                try cwriter.writeInt(i32, @as(i32, @intCast(G + GOT + A - P)), .little);
-            },
-
-            elf.R_X86_64_32 => try cwriter.writeInt(u32, @as(u32, @truncate(@as(u64, @intCast(S + A)))), .little),
-            elf.R_X86_64_32S => try cwriter.writeInt(i32, @as(i32, @truncate(S + A)), .little),
-
-            elf.R_X86_64_TPOFF32 => try cwriter.writeInt(i32, @as(i32, @truncate(S + A - TP)), .little),
-            elf.R_X86_64_TPOFF64 => try cwriter.writeInt(i64, S + A - TP, .little),
-            elf.R_X86_64_DTPOFF32 => try cwriter.writeInt(i32, @as(i32, @truncate(S + A - DTP)), .little),
-            elf.R_X86_64_DTPOFF64 => try cwriter.writeInt(i64, S + A - DTP, .little),
-
-            elf.R_X86_64_GOTTPOFF => {
-                if (target.flags.gottp) {
-                    const S_ = @as(i64, @intCast(target.getGotTpAddress(elf_file)));
-                    try cwriter.writeInt(i32, @as(i32, @intCast(S_ + A - P)), .little);
-                } else {
-                    try x86_64.relaxGotTpOff(code[rel.r_offset - 3 ..]);
-                    try cwriter.writeInt(i32, @as(i32, @intCast(S - TP)), .little);
-                }
-            },
-
-            elf.R_X86_64_TLSGD => {
-                if (target.flags.tlsgd) {
-                    const S_ = @as(i64, @intCast(target.getTlsGdAddress(elf_file)));
-                    try cwriter.writeInt(i32, @as(i32, @intCast(S_ + A - P)), .little);
-                } else if (target.flags.gottp) {
-                    const S_ = @as(i64, @intCast(target.getGotTpAddress(elf_file)));
-                    try x86_64.relaxTlsGdToIe(relocs[i .. i + 2], @intCast(S_ - P), elf_file, &stream);
-                    i += 1;
-                } else {
-                    try x86_64.relaxTlsGdToLe(relocs[i .. i + 2], @as(i32, @intCast(S - TP)), elf_file, &stream);
-                    i += 1;
-                }
-            },
-
-            elf.R_X86_64_TLSLD => {
-                if (elf_file.got.tlsld_index) |entry_index| {
-                    const tlsld_entry = elf_file.got.entries.items[entry_index];
-                    const S_ = @as(i64, @intCast(tlsld_entry.getAddress(elf_file)));
-                    try cwriter.writeInt(i32, @as(i32, @intCast(S_ + A - P)), .little);
-                } else {
-                    try x86_64.relaxTlsLdToLe(
-                        relocs[i .. i + 2],
-                        @as(i32, @intCast(TP - @as(i64, @intCast(elf_file.getTlsAddress())))),
-                        elf_file,
-                        &stream,
-                    );
-                    i += 1;
-                }
-            },
-
-            elf.R_X86_64_GOTPC32_TLSDESC => {
-                if (target.flags.tlsdesc) {
-                    const S_ = @as(i64, @intCast(target.getTlsDescAddress(elf_file)));
-                    try cwriter.writeInt(i32, @as(i32, @intCast(S_ + A - P)), .little);
-                } else {
-                    try x86_64.relaxGotPcTlsDesc(code[rel.r_offset - 3 ..]);
-                    try cwriter.writeInt(i32, @as(i32, @intCast(S - TP)), .little);
-                }
-            },
-
-            elf.R_X86_64_TLSDESC_CALL => if (!target.flags.tlsdesc) {
-                // call -> nop
-                try cwriter.writeAll(&.{ 0x66, 0x90 });
-            },
-
-            else => elf_file.base.fatal("unhandled relocation type: {}", .{
-                relocation.fmtRelocType(r_type, cpu_arch),
-            }),
-        }
+    switch (cpu_arch) {
+        .x86_64 => try x86_64.resolveRelocsAlloc(self, elf_file, writer),
+        else => |arch| {
+            elf_file.base.fatal("TODO support {s} architecture", .{@tagName(arch)});
+            return error.UnhandledCpuArch;
+        },
     }
-
-    try writer.writeAll(code);
 }
 
 fn resolveDynAbsReloc(
@@ -677,86 +495,16 @@ pub fn resolveRelocsNonAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void 
 
     const cpu_arch = elf_file.options.cpu_arch.?;
     assert(self.getInputShdr(elf_file).sh_flags & elf.SHF_ALLOC == 0);
-    const gpa = elf_file.base.allocator;
-    const code = try self.getCodeUncompressAlloc(elf_file);
-    defer gpa.free(code);
-    const relocs = self.getRelocs(elf_file);
-    const object = self.getObject(elf_file);
 
     relocs_log.debug("{x}: {s}", .{ self.value, self.getName(elf_file) });
 
-    var stream = std.io.fixedBufferStream(code);
-    const cwriter = stream.writer();
-
-    var i: usize = 0;
-    while (i < relocs.len) : (i += 1) {
-        const rel = relocs[i];
-        const r_type = rel.r_type();
-        const r_kind = relocation.decode(r_type, cpu_arch);
-
-        if (r_kind == .none) continue;
-        if (try self.reportUndefSymbol(rel, elf_file)) continue;
-
-        const target = object.getSymbol(rel.r_sym(), elf_file);
-
-        // We will use equation format to resolve relocations:
-        // https://intezer.com/blog/malware-analysis/executable-and-linkable-format-101-part-3-relocations/
-        //
-        const P = self.value + rel.r_offset;
-        // Addend from the relocation.
-        const A = rel.r_addend;
-        // Address of the target symbol - can be address of the symbol within an atom or address of PLT stub.
-        const S = @as(i64, @intCast(target.getAddress(.{}, elf_file)));
-        // Address of the global offset table.
-        const GOT = blk: {
-            const shndx = if (elf_file.got_plt_sect_index) |shndx|
-                shndx
-            else if (elf_file.got_sect_index) |shndx|
-                shndx
-            else
-                null;
-            break :blk if (shndx) |index| @as(i64, @intCast(elf_file.sections.items(.shdr)[index].sh_addr)) else 0;
-        };
-        // Address of the dynamic thread pointer.
-        const DTP = @as(i64, @intCast(elf_file.getDtpAddress()));
-
-        relocs_log.debug("  {s}: {x}: [{x} => {x}] ({s})", .{
-            relocation.fmtRelocType(r_type, cpu_arch),
-            rel.r_offset,
-            P,
-            S + A,
-            target.getName(elf_file),
-        });
-
-        try stream.seekTo(rel.r_offset);
-
-        switch (r_type) {
-            elf.R_X86_64_NONE => unreachable,
-            elf.R_X86_64_8 => try cwriter.writeInt(u8, @as(u8, @bitCast(@as(i8, @intCast(S + A)))), .little),
-            elf.R_X86_64_16 => try cwriter.writeInt(u16, @as(u16, @bitCast(@as(i16, @intCast(S + A)))), .little),
-            elf.R_X86_64_32 => try cwriter.writeInt(u32, @as(u32, @bitCast(@as(i32, @intCast(S + A)))), .little),
-            elf.R_X86_64_32S => try cwriter.writeInt(i32, @as(i32, @intCast(S + A)), .little),
-            elf.R_X86_64_64 => try cwriter.writeInt(i64, S + A, .little),
-            elf.R_X86_64_DTPOFF32 => try cwriter.writeInt(i32, @as(i32, @intCast(S + A - DTP)), .little),
-            elf.R_X86_64_DTPOFF64 => try cwriter.writeInt(i64, S + A - DTP, .little),
-            elf.R_X86_64_GOTOFF64 => try cwriter.writeInt(i64, S + A - GOT, .little),
-            elf.R_X86_64_GOTPC64 => try cwriter.writeInt(i64, GOT + A, .little),
-            elf.R_X86_64_SIZE32 => {
-                const size = @as(i64, @intCast(target.getSourceSymbol(elf_file).st_size));
-                try cwriter.writeInt(u32, @as(u32, @bitCast(@as(i32, @intCast(size + A)))), .little);
-            },
-            elf.R_X86_64_SIZE64 => {
-                const size = @as(i64, @intCast(target.getSourceSymbol(elf_file).st_size));
-                try cwriter.writeInt(i64, @as(i64, @intCast(size + A)), .little);
-            },
-            else => elf_file.base.fatal("{s}: invalid relocation type for non-alloc section: {}", .{
-                self.getName(elf_file),
-                relocation.fmtRelocType(r_type, cpu_arch),
-            }),
-        }
+    switch (cpu_arch) {
+        .x86_64 => try x86_64.resolveRelocsNonAlloc(self, elf_file, writer),
+        else => |arch| {
+            elf_file.base.fatal("TODO support {s} architecture", .{@tagName(arch)});
+            return error.UnhandledCpuArch;
+        },
     }
-
-    try writer.writeAll(code);
 }
 
 pub fn format(
@@ -822,117 +570,415 @@ pub const Flags = packed struct {
     visited: bool = false,
 };
 
+const ResolveRelocAllocArgs = struct {
+    target: *const Symbol,
+    P: i64,
+    A: i64,
+    S: i64,
+    GOT: i64,
+    G: i64,
+    TP: i64,
+    DTP: i64,
+};
+
 const x86_64 = struct {
-    fn scanReloc(atom: Atom, elf_file: *Elf, rel: elf.Elf64_Rela, symbol: *Symbol, code: []u8) !void {
-        const is_shared = elf_file.options.shared;
-        const r_type = rel.r_type();
-        switch (r_type) {
-            elf.R_X86_64_64 => {
-                try atom.scanReloc(symbol, rel, getDynAbsRelocAction(symbol, elf_file), elf_file);
-            },
+    fn scanRelocs(atom: Atom, elf_file: *Elf) !void {
+        const tracy = trace(@src());
+        defer tracy.end();
 
-            elf.R_X86_64_32,
-            elf.R_X86_64_32S,
-            => {
-                try atom.scanReloc(symbol, rel, getAbsRelocAction(symbol, elf_file), elf_file);
-            },
+        const object = atom.getObject(elf_file);
+        const relocs = atom.getRelocs(elf_file);
+        const code = try atom.getCodeUncompressAlloc(elf_file);
+        defer elf_file.base.allocator.free(code);
 
-            elf.R_X86_64_GOT32,
-            elf.R_X86_64_GOT64,
-            elf.R_X86_64_GOTPC32,
-            elf.R_X86_64_GOTPC64,
-            elf.R_X86_64_GOTPCREL,
-            elf.R_X86_64_GOTPCREL64,
-            elf.R_X86_64_GOTPCRELX,
-            elf.R_X86_64_REX_GOTPCRELX,
-            => {
+        var has_errors = false;
+        var i: usize = 0;
+        while (i < relocs.len) : (i += 1) {
+            const rel = relocs[i];
+
+            if (rel.r_type() == elf.R_X86_64_NONE) continue;
+            if (try atom.reportUndefSymbol(rel, elf_file)) continue;
+
+            const symbol = object.getSymbol(rel.r_sym(), elf_file);
+            const is_shared = elf_file.options.shared;
+
+            if (symbol.isIFunc(elf_file)) {
                 symbol.flags.got = true;
-            },
+                symbol.flags.plt = true;
+            }
 
-            elf.R_X86_64_PLT32,
-            elf.R_X86_64_PLTOFF64,
-            => {
-                if (symbol.flags.import) {
-                    symbol.flags.plt = true;
-                }
-            },
+            // While traversing relocations, mark symbols that require special handling such as
+            // pointer indirection via GOT, or a stub trampoline via PLT.
+            switch (rel.r_type()) {
+                elf.R_X86_64_64 => {
+                    atom.scanReloc(symbol, rel, getDynAbsRelocAction(symbol, elf_file), elf_file) catch {
+                        has_errors = true;
+                    };
+                },
 
-            elf.R_X86_64_PC32 => {
-                try atom.scanReloc(symbol, rel, getPcRelocAction(symbol, elf_file), elf_file);
-            },
+                elf.R_X86_64_32,
+                elf.R_X86_64_32S,
+                => {
+                    atom.scanReloc(symbol, rel, getAbsRelocAction(symbol, elf_file), elf_file) catch {
+                        has_errors = true;
+                    };
+                },
 
-            elf.R_X86_64_TLSGD => {
-                // TODO verify followed by appropriate relocation such as PLT32 __tls_get_addr
+                elf.R_X86_64_GOT32,
+                elf.R_X86_64_GOT64,
+                elf.R_X86_64_GOTPC32,
+                elf.R_X86_64_GOTPC64,
+                elf.R_X86_64_GOTPCREL,
+                elf.R_X86_64_GOTPCREL64,
+                elf.R_X86_64_GOTPCRELX,
+                elf.R_X86_64_REX_GOTPCRELX,
+                => {
+                    symbol.flags.got = true;
+                },
 
-                if (elf_file.options.static or
-                    (elf_file.options.relax and !symbol.flags.import and !is_shared))
-                {
-                    // Relax if building with -static flag as __tls_get_addr() will not be present in libc.a
-                    // We skip the next relocation.
-                    return error.SkipRelax;
-                } else if (elf_file.options.relax and !symbol.flags.import and is_shared and
-                    elf_file.options.z_nodlopen)
-                {
-                    symbol.flags.gottp = true;
-                    return error.SkipRelax;
-                } else {
-                    symbol.flags.tlsgd = true;
-                }
-            },
+                elf.R_X86_64_PLT32,
+                elf.R_X86_64_PLTOFF64,
+                => {
+                    if (symbol.flags.import) {
+                        symbol.flags.plt = true;
+                    }
+                },
 
-            elf.R_X86_64_TLSLD => {
-                // TODO verify followed by appropriate relocation such as PLT32 __tls_get_addr
+                elf.R_X86_64_PC32 => {
+                    atom.scanReloc(symbol, rel, getPcRelocAction(symbol, elf_file), elf_file) catch {
+                        has_errors = true;
+                    };
+                },
 
-                if (elf_file.options.static or (elf_file.options.relax and !is_shared)) {
-                    // Relax if building with -static flag as __tls_get_addr() will not be present in libc.a
-                    // We skip the next relocation.
-                    return error.SkipRelax;
-                } else {
-                    elf_file.got.flags.needs_tlsld = true;
-                }
-            },
+                elf.R_X86_64_TLSGD => {
+                    // TODO verify followed by appropriate relocation such as PLT32 __tls_get_addr
 
-            elf.R_X86_64_GOTTPOFF => {
-                const should_relax = blk: {
-                    if (!elf_file.options.relax or is_shared or symbol.flags.import) break :blk false;
-                    relaxGotTpOff(code[rel.r_offset - 3 ..]) catch break :blk false;
-                    break :blk true;
-                };
-                if (!should_relax) {
-                    symbol.flags.gottp = true;
-                }
-            },
+                    if (elf_file.options.static or
+                        (elf_file.options.relax and !symbol.flags.import and !is_shared))
+                    {
+                        // Relax if building with -static flag as __tls_get_addr() will not be present in libc.a
+                        // We skip the next relocation.
+                        i += 1;
+                    } else if (elf_file.options.relax and !symbol.flags.import and is_shared and
+                        elf_file.options.z_nodlopen)
+                    {
+                        symbol.flags.gottp = true;
+                        i += 1;
+                    } else {
+                        symbol.flags.tlsgd = true;
+                    }
+                },
 
-            elf.R_X86_64_GOTPC32_TLSDESC => {
-                const should_relax = elf_file.options.static or
-                    (elf_file.options.relax and !is_shared and !symbol.flags.import);
-                if (!should_relax) {
-                    symbol.flags.tlsdesc = true;
-                }
-            },
+                elf.R_X86_64_TLSLD => {
+                    // TODO verify followed by appropriate relocation such as PLT32 __tls_get_addr
 
-            elf.R_X86_64_TPOFF32,
-            elf.R_X86_64_TPOFF64,
-            => {
-                if (is_shared) try atom.picError(symbol, rel, elf_file);
-            },
+                    if (elf_file.options.static or (elf_file.options.relax and !is_shared)) {
+                        // Relax if building with -static flag as __tls_get_addr() will not be present in libc.a
+                        // We skip the next relocation.
+                        i += 1;
+                    } else {
+                        elf_file.got.flags.needs_tlsld = true;
+                    }
+                },
 
-            elf.R_X86_64_GOTOFF64,
-            elf.R_X86_64_DTPOFF32,
-            elf.R_X86_64_DTPOFF64,
-            elf.R_X86_64_SIZE32,
-            elf.R_X86_64_SIZE64,
-            elf.R_X86_64_TLSDESC_CALL,
-            => {},
+                elf.R_X86_64_GOTTPOFF => {
+                    const should_relax = blk: {
+                        if (!elf_file.options.relax or is_shared or symbol.flags.import) break :blk false;
+                        relaxGotTpOff(code[rel.r_offset - 3 ..]) catch break :blk false;
+                        break :blk true;
+                    };
+                    if (!should_relax) {
+                        symbol.flags.gottp = true;
+                    }
+                },
 
-            else => {
-                elf_file.base.fatal("{s}: unknown relocation type: {}", .{
+                elf.R_X86_64_GOTPC32_TLSDESC => {
+                    const should_relax = elf_file.options.static or
+                        (elf_file.options.relax and !is_shared and !symbol.flags.import);
+                    if (!should_relax) {
+                        symbol.flags.tlsdesc = true;
+                    }
+                },
+
+                elf.R_X86_64_TPOFF32,
+                elf.R_X86_64_TPOFF64,
+                => {
+                    if (is_shared) atom.picError(symbol, rel, elf_file) catch {
+                        has_errors = true;
+                    };
+                },
+
+                elf.R_X86_64_GOTOFF64,
+                elf.R_X86_64_DTPOFF32,
+                elf.R_X86_64_DTPOFF64,
+                elf.R_X86_64_SIZE32,
+                elf.R_X86_64_SIZE64,
+                elf.R_X86_64_TLSDESC_CALL,
+                => {},
+
+                else => {
+                    elf_file.base.fatal("{s}: unknown relocation type: {}", .{
+                        atom.getName(elf_file),
+                        relocation.fmtRelocType(rel.r_type(), .x86_64),
+                    });
+                    has_errors = true;
+                },
+            }
+        }
+
+        if (has_errors) return error.RelocError;
+    }
+
+    pub fn resolveRelocsAlloc(atom: Atom, elf_file: *Elf, writer: anytype) !void {
+        const tracy = trace(@src());
+        defer tracy.end();
+
+        const gpa = elf_file.base.allocator;
+        const code = try atom.getCodeUncompressAlloc(elf_file);
+        defer gpa.free(code);
+        const relocs = atom.getRelocs(elf_file);
+        const object = atom.getObject(elf_file);
+
+        var stream = std.io.fixedBufferStream(code);
+        const cwriter = stream.writer();
+
+        var i: usize = 0;
+        while (i < relocs.len) : (i += 1) {
+            const rel = relocs[i];
+            const r_type = rel.r_type();
+
+            if (r_type == elf.R_X86_64_NONE) continue;
+
+            const target = object.getSymbol(rel.r_sym(), elf_file);
+
+            // We will use equation format to resolve relocations:
+            // https://intezer.com/blog/malware-analysis/executable-and-linkable-format-101-part-3-relocations/
+            //
+            // Address of the source atom.
+            const P = @as(i64, @intCast(atom.getAddress(elf_file) + rel.r_offset));
+            // Addend from the relocation.
+            const A = rel.r_addend;
+            // Address of the target symbol - can be address of the symbol within an atom or address of PLT stub.
+            const S = @as(i64, @intCast(target.getAddress(.{}, elf_file)));
+            // Address of the global offset table.
+            const GOT = blk: {
+                const shndx = if (elf_file.got_plt_sect_index) |shndx|
+                    shndx
+                else if (elf_file.got_sect_index) |shndx|
+                    shndx
+                else
+                    null;
+                break :blk if (shndx) |index| @as(i64, @intCast(elf_file.sections.items(.shdr)[index].sh_addr)) else 0;
+            };
+            // Relative offset to the start of the global offset table.
+            const G = @as(i64, @intCast(target.getGotAddress(elf_file))) - GOT;
+            // Address of the thread pointer.
+            const TP = @as(i64, @intCast(elf_file.getTpAddress()));
+            // Address of the dynamic thread pointer.
+            const DTP = @as(i64, @intCast(elf_file.getDtpAddress()));
+
+            relocs_log.debug("  {s}: {x}: [{x} => {x}] G({x}) ({s})", .{
+                relocation.fmtRelocType(r_type, .x86_64),
+                rel.r_offset,
+                P,
+                S + A,
+                G + GOT + A,
+                target.getName(elf_file),
+            });
+
+            try stream.seekTo(rel.r_offset);
+
+            switch (r_type) {
+                elf.R_X86_64_NONE => unreachable,
+                elf.R_X86_64_64 => {
+                    try atom.resolveDynAbsReloc(
+                        target,
+                        rel,
+                        getDynAbsRelocAction(target, elf_file),
+                        elf_file,
+                        cwriter,
+                    );
+                },
+
+                elf.R_X86_64_PLT32,
+                elf.R_X86_64_PC32,
+                => try cwriter.writeInt(i32, @as(i32, @intCast(S + A - P)), .little),
+
+                elf.R_X86_64_GOTPCREL => try cwriter.writeInt(i32, @as(i32, @intCast(G + GOT + A - P)), .little),
+                elf.R_X86_64_GOTPC32 => try cwriter.writeInt(i32, @as(i32, @intCast(GOT + A - P)), .little),
+                elf.R_X86_64_GOTPC64 => try cwriter.writeInt(i64, GOT + A - P, .little),
+
+                elf.R_X86_64_GOTPCRELX => {
+                    if (!target.flags.import and !target.isIFunc(elf_file) and !target.isAbs(elf_file)) blk: {
+                        relaxGotpcrelx(code[rel.r_offset - 2 ..]) catch break :blk;
+                        try cwriter.writeInt(i32, @as(i32, @intCast(S + A - P)), .little);
+                        continue;
+                    }
+                    try cwriter.writeInt(i32, @as(i32, @intCast(G + GOT + A - P)), .little);
+                },
+
+                elf.R_X86_64_REX_GOTPCRELX => {
+                    if (!target.flags.import and !target.isIFunc(elf_file) and !target.isAbs(elf_file)) blk: {
+                        relaxRexGotpcrelx(code[rel.r_offset - 3 ..]) catch break :blk;
+                        try cwriter.writeInt(i32, @as(i32, @intCast(S + A - P)), .little);
+                        continue;
+                    }
+                    try cwriter.writeInt(i32, @as(i32, @intCast(G + GOT + A - P)), .little);
+                },
+
+                elf.R_X86_64_32 => try cwriter.writeInt(u32, @as(u32, @truncate(@as(u64, @intCast(S + A)))), .little),
+                elf.R_X86_64_32S => try cwriter.writeInt(i32, @as(i32, @truncate(S + A)), .little),
+
+                elf.R_X86_64_TPOFF32 => try cwriter.writeInt(i32, @as(i32, @truncate(S + A - TP)), .little),
+                elf.R_X86_64_TPOFF64 => try cwriter.writeInt(i64, S + A - TP, .little),
+                elf.R_X86_64_DTPOFF32 => try cwriter.writeInt(i32, @as(i32, @truncate(S + A - DTP)), .little),
+                elf.R_X86_64_DTPOFF64 => try cwriter.writeInt(i64, S + A - DTP, .little),
+
+                elf.R_X86_64_GOTTPOFF => {
+                    if (target.flags.gottp) {
+                        const S_ = @as(i64, @intCast(target.getGotTpAddress(elf_file)));
+                        try cwriter.writeInt(i32, @as(i32, @intCast(S_ + A - P)), .little);
+                    } else {
+                        try relaxGotTpOff(code[rel.r_offset - 3 ..]);
+                        try cwriter.writeInt(i32, @as(i32, @intCast(S - TP)), .little);
+                    }
+                },
+
+                elf.R_X86_64_TLSGD => {
+                    if (target.flags.tlsgd) {
+                        const S_ = @as(i64, @intCast(target.getTlsGdAddress(elf_file)));
+                        try cwriter.writeInt(i32, @as(i32, @intCast(S_ + A - P)), .little);
+                    } else if (target.flags.gottp) {
+                        const S_ = @as(i64, @intCast(target.getGotTpAddress(elf_file)));
+                        try relaxTlsGdToIe(relocs[i .. i + 2], @intCast(S_ - P), elf_file, &stream);
+                        i += 1;
+                    } else {
+                        try relaxTlsGdToLe(relocs[i .. i + 2], @as(i32, @intCast(S - TP)), elf_file, &stream);
+                        i += 1;
+                    }
+                },
+
+                elf.R_X86_64_TLSLD => {
+                    if (elf_file.got.tlsld_index) |entry_index| {
+                        const tlsld_entry = elf_file.got.entries.items[entry_index];
+                        const S_ = @as(i64, @intCast(tlsld_entry.getAddress(elf_file)));
+                        try cwriter.writeInt(i32, @as(i32, @intCast(S_ + A - P)), .little);
+                    } else {
+                        try relaxTlsLdToLe(
+                            relocs[i .. i + 2],
+                            @as(i32, @intCast(TP - @as(i64, @intCast(elf_file.getTlsAddress())))),
+                            elf_file,
+                            &stream,
+                        );
+                        i += 1;
+                    }
+                },
+
+                elf.R_X86_64_GOTPC32_TLSDESC => {
+                    if (target.flags.tlsdesc) {
+                        const S_ = @as(i64, @intCast(target.getTlsDescAddress(elf_file)));
+                        try cwriter.writeInt(i32, @as(i32, @intCast(S_ + A - P)), .little);
+                    } else {
+                        try relaxGotPcTlsDesc(code[rel.r_offset - 3 ..]);
+                        try cwriter.writeInt(i32, @as(i32, @intCast(S - TP)), .little);
+                    }
+                },
+
+                elf.R_X86_64_TLSDESC_CALL => if (!target.flags.tlsdesc) {
+                    // call -> nop
+                    try cwriter.writeAll(&.{ 0x66, 0x90 });
+                },
+
+                else => elf_file.base.fatal("unhandled relocation type: {}", .{relocation.fmtRelocType(r_type, .x86_64)}),
+            }
+        }
+
+        try writer.writeAll(code);
+    }
+
+    pub fn resolveRelocsNonAlloc(atom: Atom, elf_file: *Elf, writer: anytype) !void {
+        const tracy = trace(@src());
+        defer tracy.end();
+
+        const gpa = elf_file.base.allocator;
+        const code = try atom.getCodeUncompressAlloc(elf_file);
+        defer gpa.free(code);
+        const relocs = atom.getRelocs(elf_file);
+        const object = atom.getObject(elf_file);
+
+        relocs_log.debug("{x}: {s}", .{ atom.value, atom.getName(elf_file) });
+
+        var stream = std.io.fixedBufferStream(code);
+        const cwriter = stream.writer();
+
+        var i: usize = 0;
+        while (i < relocs.len) : (i += 1) {
+            const rel = relocs[i];
+            const r_type = rel.r_type();
+
+            if (r_type == elf.R_X86_64_NONE) continue;
+            if (try atom.reportUndefSymbol(rel, elf_file)) continue;
+
+            const target = object.getSymbol(rel.r_sym(), elf_file);
+
+            // We will use equation format to resolve relocations:
+            // https://intezer.com/blog/malware-analysis/executable-and-linkable-format-101-part-3-relocations/
+            //
+            const P = atom.value + rel.r_offset;
+            // Addend from the relocation.
+            const A = rel.r_addend;
+            // Address of the target symbol - can be address of the symbol within an atom or address of PLT stub.
+            const S = @as(i64, @intCast(target.getAddress(.{}, elf_file)));
+            // Address of the global offset table.
+            const GOT = blk: {
+                const shndx = if (elf_file.got_plt_sect_index) |shndx|
+                    shndx
+                else if (elf_file.got_sect_index) |shndx|
+                    shndx
+                else
+                    null;
+                break :blk if (shndx) |index| @as(i64, @intCast(elf_file.sections.items(.shdr)[index].sh_addr)) else 0;
+            };
+            // Address of the dynamic thread pointer.
+            const DTP = @as(i64, @intCast(elf_file.getDtpAddress()));
+
+            relocs_log.debug("  {s}: {x}: [{x} => {x}] ({s})", .{
+                relocation.fmtRelocType(r_type, .x86_64),
+                rel.r_offset,
+                P,
+                S + A,
+                target.getName(elf_file),
+            });
+
+            try stream.seekTo(rel.r_offset);
+
+            switch (r_type) {
+                elf.R_X86_64_NONE => unreachable,
+                elf.R_X86_64_8 => try cwriter.writeInt(u8, @as(u8, @bitCast(@as(i8, @intCast(S + A)))), .little),
+                elf.R_X86_64_16 => try cwriter.writeInt(u16, @as(u16, @bitCast(@as(i16, @intCast(S + A)))), .little),
+                elf.R_X86_64_32 => try cwriter.writeInt(u32, @as(u32, @bitCast(@as(i32, @intCast(S + A)))), .little),
+                elf.R_X86_64_32S => try cwriter.writeInt(i32, @as(i32, @intCast(S + A)), .little),
+                elf.R_X86_64_64 => try cwriter.writeInt(i64, S + A, .little),
+                elf.R_X86_64_DTPOFF32 => try cwriter.writeInt(i32, @as(i32, @intCast(S + A - DTP)), .little),
+                elf.R_X86_64_DTPOFF64 => try cwriter.writeInt(i64, S + A - DTP, .little),
+                elf.R_X86_64_GOTOFF64 => try cwriter.writeInt(i64, S + A - GOT, .little),
+                elf.R_X86_64_GOTPC64 => try cwriter.writeInt(i64, GOT + A, .little),
+                elf.R_X86_64_SIZE32 => {
+                    const size = @as(i64, @intCast(target.getSourceSymbol(elf_file).st_size));
+                    try cwriter.writeInt(u32, @as(u32, @bitCast(@as(i32, @intCast(size + A)))), .little);
+                },
+                elf.R_X86_64_SIZE64 => {
+                    const size = @as(i64, @intCast(target.getSourceSymbol(elf_file).st_size));
+                    try cwriter.writeInt(i64, @as(i64, @intCast(size + A)), .little);
+                },
+                else => elf_file.base.fatal("{s}: invalid relocation type for non-alloc section: {}", .{
                     atom.getName(elf_file),
                     relocation.fmtRelocType(r_type, .x86_64),
-                });
-                return error.UnknownRelocType;
-            },
+                }),
+            }
         }
+
+        try writer.writeAll(code);
     }
 
     fn relaxGotpcrelx(code: []u8) !void {

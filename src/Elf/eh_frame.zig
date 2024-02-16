@@ -333,8 +333,10 @@ fn resolveReloc(rec: anytype, sym: *const Symbol, rel: elf.Elf64_Rela, elf_file:
 
     switch (cpu_arch) {
         .x86_64 => x86_64.resolveReloc(rel, P, S + A, data[offset..]),
-        .aarch64 => @panic("TODO .eh_frame aarch64"),
-        else => unreachable,
+        else => |arch| {
+            elf_file.base.fatal("TODO support {s} architecture", .{@tagName(arch)});
+            return error.UnhandledCpuArch;
+        },
     }
 }
 

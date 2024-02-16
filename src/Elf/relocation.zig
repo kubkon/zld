@@ -1,5 +1,4 @@
 pub const Kind = enum {
-    none,
     abs,
     copy,
     rel,
@@ -10,11 +9,9 @@ pub const Kind = enum {
     dtpoff,
     tpoff,
     tlsdesc,
-    other,
 };
 
 const x86_64_relocs = [_]struct { Kind, u32 }{
-    .{ .none, elf.R_X86_64_NONE },
     .{ .abs, elf.R_X86_64_64 },
     .{ .copy, elf.R_X86_64_COPY },
     .{ .rel, elf.R_X86_64_RELATIVE },
@@ -28,7 +25,6 @@ const x86_64_relocs = [_]struct { Kind, u32 }{
 };
 
 const aarch64_relocs = [_]struct { Kind, u32 }{
-    .{ .none, elf.R_AARCH64_NONE },
     .{ .abs, elf.R_AARCH64_ABS64 },
     .{ .copy, elf.R_AARCH64_COPY },
     .{ .rel, elf.R_AARCH64_RELATIVE },
@@ -41,7 +37,7 @@ const aarch64_relocs = [_]struct { Kind, u32 }{
     .{ .tlsdesc, elf.R_AARCH64_TLSDESC },
 };
 
-pub fn decode(r_type: u32, cpu_arch: std.Target.Cpu.Arch) Kind {
+pub fn decode(r_type: u32, cpu_arch: std.Target.Cpu.Arch) ?Kind {
     const relocs = switch (cpu_arch) {
         .x86_64 => &x86_64_relocs,
         .aarch64 => &aarch64_relocs,
@@ -50,8 +46,7 @@ pub fn decode(r_type: u32, cpu_arch: std.Target.Cpu.Arch) Kind {
     inline for (relocs) |entry| {
         if (entry[1] == r_type) return entry[0];
     }
-    // .other means the reloc requires arch-specific handling
-    return .other;
+    return null;
 }
 
 pub fn encode(comptime kind: Kind, cpu_arch: std.Target.Cpu.Arch) u32 {
@@ -63,8 +58,7 @@ pub fn encode(comptime kind: Kind, cpu_arch: std.Target.Cpu.Arch) u32 {
     inline for (relocs) |entry| {
         if (entry[0] == kind) return entry[1];
     }
-    assert(kind == .other);
-    @panic(".other is ambiguous and cannot be encoded");
+    unreachable;
 }
 
 const FormatRelocTypeCtx = struct {
