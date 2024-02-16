@@ -1880,7 +1880,7 @@ fn markEhFrameAtomsDead(self: *Elf) void {
         const object = file.object;
         for (object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index) orelse continue;
-            const is_eh_frame = atom.getInputShdr(self).sh_type == elf.SHT_X86_64_UNWIND or
+            const is_eh_frame = (self.options.cpu_arch.? == .x86_64 and atom.getInputShdr(self).sh_type == elf.SHT_X86_64_UNWIND) or
                 mem.eql(u8, atom.getName(self), ".eh_frame");
             if (atom.flags.alive and is_eh_frame) atom.flags.alive = false;
         }

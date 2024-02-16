@@ -110,8 +110,11 @@ pub fn parse(self: *Object, elf_file: *Elf) !void {
     for (self.shdrs.items, 0..) |shdr, i| {
         const atom = elf_file.getAtom(self.atoms.items[i]) orelse continue;
         if (!atom.flags.alive) continue;
-        if (shdr.sh_type == elf.SHT_X86_64_UNWIND or mem.eql(u8, atom.getName(elf_file), ".eh_frame"))
+        if ((elf_file.options.cpu_arch.? == .x86_64 and shdr.sh_type == elf.SHT_X86_64_UNWIND) or
+            mem.eql(u8, atom.getName(elf_file), ".eh_frame"))
+        {
             try self.parseEhFrame(gpa, file, @as(u32, @intCast(i)), elf_file);
+        }
     }
 }
 
@@ -310,17 +313,21 @@ pub fn initOutputSection(self: Object, elf_file: *Elf, shdr: elf.Elf64_Shdr) !u3
         }
         break :blk name;
     };
-    const @"type" = switch (shdr.sh_type) {
-        elf.SHT_NULL => unreachable,
-        elf.SHT_PROGBITS => blk: {
-            if (std.mem.eql(u8, name, ".init_array") or std.mem.startsWith(u8, name, ".init_array."))
-                break :blk elf.SHT_INIT_ARRAY;
-            if (std.mem.eql(u8, name, ".fini_array") or std.mem.startsWith(u8, name, ".fini_array."))
-                break :blk elf.SHT_FINI_ARRAY;
-            break :blk shdr.sh_type;
-        },
-        elf.SHT_X86_64_UNWIND => elf.SHT_PROGBITS,
-        else => shdr.sh_type,
+    const @"type" = tt: {
+        if (elf_file.options.cpu_arch.? == .x86_64 and shdr.sh_type == elf.SHT_X86_64_UNWIND) break :tt elf.SHT_PROGBITS;
+
+        const @"type" = switch (shdr.sh_type) {
+            elf.SHT_NULL => unreachable,
+            elf.SHT_PROGBITS => blk: {
+                if (std.mem.eql(u8, name, ".init_array") or std.mem.startsWith(u8, name, ".init_array."))
+                    break :blk elf.SHT_INIT_ARRAY;
+                if (std.mem.eql(u8, name, ".fini_array") or std.mem.startsWith(u8, name, ".fini_array."))
+                    break :blk elf.SHT_FINI_ARRAY;
+                break :blk shdr.sh_type;
+            },
+            else => shdr.sh_type,
+        };
+        break :tt @"type";
     };
     const flags = blk: {
         var flags = shdr.sh_flags;
