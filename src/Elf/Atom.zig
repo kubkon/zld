@@ -160,6 +160,7 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
 
     switch (cpu_arch) {
         .x86_64 => try x86_64.scanRelocs(self, elf_file),
+        .aarch64 => try aarch64.scanRelocs(self, elf_file),
         else => |arch| {
             elf_file.base.fatal("TODO support {s} architecture", .{@tagName(arch)});
             return error.UnhandledCpuArch;
@@ -386,6 +387,7 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
 
     switch (cpu_arch) {
         .x86_64 => try x86_64.resolveRelocsAlloc(self, elf_file, writer),
+        .aarch64 => try aarch64.resolveRelocsAlloc(self, elf_file, writer),
         else => |arch| {
             elf_file.base.fatal("TODO support {s} architecture", .{@tagName(arch)});
             return error.UnhandledCpuArch;
@@ -499,6 +501,7 @@ pub fn resolveRelocsNonAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void 
 
     switch (cpu_arch) {
         .x86_64 => try x86_64.resolveRelocsNonAlloc(self, elf_file, writer),
+        .aarch64 => try aarch64.resolveRelocsNonAlloc(self, elf_file, writer),
         else => |arch| {
             elf_file.base.fatal("TODO support {s} architecture", .{@tagName(arch)});
             return error.UnhandledCpuArch;
@@ -1152,6 +1155,273 @@ const x86_64 = struct {
     const Disassembler = dis_x86_64.Disassembler;
     const Instruction = dis_x86_64.Instruction;
     const Immediate = dis_x86_64.Immediate;
+};
+
+const aarch64 = struct {
+    fn scanRelocs(atom: Atom, elf_file: *Elf) !void {
+        const tracy = trace(@src());
+        defer tracy.end();
+
+        const object = atom.getObject(elf_file);
+        const relocs = atom.getRelocs(elf_file);
+        const code = try atom.getCodeUncompressAlloc(elf_file);
+        defer elf_file.base.allocator.free(code);
+
+        var has_errors = false;
+        var i: usize = 0;
+        while (i < relocs.len) : (i += 1) {
+            const rel = relocs[i];
+            const r_type: elf.R_AARCH64 = @enumFromInt(rel.r_type());
+
+            if (r_type == .NONE) continue;
+            if (try atom.reportUndefSymbol(rel, elf_file)) continue;
+
+            const symbol = object.getSymbol(rel.r_sym(), elf_file);
+            const is_shared = elf_file.options.shared;
+            _ = is_shared;
+
+            if (symbol.isIFunc(elf_file)) {
+                symbol.flags.got = true;
+                symbol.flags.plt = true;
+            }
+
+            switch (r_type) {
+                .ABS64 => {
+                    atom.scanReloc(symbol, rel, getDynAbsRelocAction(symbol, elf_file), elf_file) catch {
+                        has_errors = true;
+                    };
+                },
+
+                .ADR_PREL_PG_HI21 => {
+                    atom.scanReloc(symbol, rel, getPcRelocAction(symbol, elf_file), elf_file) catch {
+                        has_errors = true;
+                    };
+                },
+
+                .ADR_GOT_PAGE => {
+                    // TODO: relax if possible
+                    symbol.flags.got = true;
+                },
+
+                .LD64_GOT_LO12_NC,
+                .LD64_GOTPAGE_LO15,
+                => {
+                    symbol.flags.got = true;
+                },
+
+                .CALL26,
+                .JUMP26,
+                => {
+                    if (symbol.flags.import) {
+                        symbol.flags.plt = true;
+                    }
+                },
+
+                .ADD_ABS_LO12_NC,
+                .ADR_PREL_LO21,
+                .LDST8_ABS_LO12_NC,
+                .LDST16_ABS_LO12_NC,
+                .LDST32_ABS_LO12_NC,
+                .LDST64_ABS_LO12_NC,
+                .LDST128_ABS_LO12_NC,
+                => {},
+
+                else => {
+                    elf_file.base.fatal("{s}: unknown relocation type: {}", .{
+                        atom.getName(elf_file),
+                        relocation.fmtRelocType(rel.r_type(), .aarch64),
+                    });
+                    has_errors = true;
+                },
+            }
+        }
+
+        if (has_errors) return error.RelocError;
+    }
+
+    pub fn resolveRelocsAlloc(atom: Atom, elf_file: *Elf, writer: anytype) !void {
+        const tracy = trace(@src());
+        defer tracy.end();
+
+        const gpa = elf_file.base.allocator;
+        const code = try atom.getCodeUncompressAlloc(elf_file);
+        defer gpa.free(code);
+        const relocs = atom.getRelocs(elf_file);
+        const object = atom.getObject(elf_file);
+
+        var stream = std.io.fixedBufferStream(code);
+        const cwriter = stream.writer();
+
+        var i: usize = 0;
+        while (i < relocs.len) : (i += 1) {
+            const rel = relocs[i];
+            const r_type: elf.R_AARCH64 = @enumFromInt(rel.r_type());
+
+            if (r_type == .NONE) continue;
+
+            const target = object.getSymbol(rel.r_sym(), elf_file);
+
+            const P = @as(i64, @intCast(atom.getAddress(elf_file) + rel.r_offset));
+            const A = rel.r_addend;
+            const S = @as(i64, @intCast(target.getAddress(.{}, elf_file)));
+            const GOT = blk: {
+                const shndx = if (elf_file.got_sect_index) |shndx| shndx else null;
+                break :blk if (shndx) |index| @as(i64, @intCast(elf_file.sections.items(.shdr)[index].sh_addr)) else 0;
+            };
+            const G = @as(i64, @intCast(target.getGotAddress(elf_file))) - GOT;
+
+            relocs_log.debug("  {s}: {x}: [{x} => {x}] G({x}) ({s})", .{
+                relocation.fmtRelocType(rel.r_type(), .aarch64),
+                rel.r_offset,
+                P,
+                S + A,
+                G + GOT + A,
+                target.getName(elf_file),
+            });
+
+            try stream.seekTo(rel.r_offset);
+
+            switch (r_type) {
+                .NONE => unreachable,
+                .ABS64 => {
+                    try atom.resolveDynAbsReloc(
+                        target,
+                        rel,
+                        getDynAbsRelocAction(target, elf_file),
+                        elf_file,
+                        cwriter,
+                    );
+                },
+
+                .CALL26,
+                .JUMP26,
+                => {
+                    // TODO: add thunk support
+                    const disp: i28 = math.cast(i28, S + A - P) orelse {
+                        elf_file.base.fatal("{s}: {x}: TODO relocation target exceeds max jump distance", .{
+                            atom.getName(elf_file),
+                            rel.r_offset,
+                        });
+                        continue;
+                    };
+                    try aarch64_util.writeBranchImm(disp, code[rel.r_offset..][0..4]);
+                },
+
+                .ADR_PREL_PG_HI21 => {
+                    // TODO: check for relaxation of ADRP+ADD
+                    const saddr = @as(u64, @intCast(P));
+                    const taddr = @as(u64, @intCast(S + A));
+                    const pages = @as(u21, @bitCast(try aarch64_util.calcNumberOfPages(saddr, taddr)));
+                    try aarch64_util.writePages(pages, code[rel.r_offset..][0..4]);
+                },
+
+                .ADR_GOT_PAGE => if (target.flags.got) {
+                    const saddr = @as(u64, @intCast(P));
+                    const taddr = @as(u64, @intCast(G + GOT + A));
+                    const pages = @as(u21, @bitCast(try aarch64_util.calcNumberOfPages(saddr, taddr)));
+                    try aarch64_util.writePages(pages, code[rel.r_offset..][0..4]);
+                } else {
+                    // TODO: relax
+                    elf_file.base.fatal("TODO relax ADR_GOT_PAGE", .{});
+                },
+
+                .LD64_GOT_LO12_NC => {
+                    assert(target.flags.got);
+                    const taddr = @as(u64, @intCast(G + GOT + A));
+                    try aarch64_util.writePageOffset(.load_store_64, taddr, code[rel.r_offset..][0..4]);
+                },
+
+                .ADD_ABS_LO12_NC,
+                .LDST8_ABS_LO12_NC,
+                .LDST16_ABS_LO12_NC,
+                .LDST32_ABS_LO12_NC,
+                .LDST64_ABS_LO12_NC,
+                .LDST128_ABS_LO12_NC,
+                => {
+                    // TODO: NC means no overflow check
+                    const taddr = @as(u64, @intCast(S + A));
+                    const kind: aarch64_util.PageOffsetInstKind = switch (r_type) {
+                        .ADD_ABS_LO12_NC => .arithmetic,
+                        .LDST8_ABS_LO12_NC => .load_store_8,
+                        .LDST16_ABS_LO12_NC => .load_store_16,
+                        .LDST32_ABS_LO12_NC => .load_store_32,
+                        .LDST64_ABS_LO12_NC => .load_store_64,
+                        .LDST128_ABS_LO12_NC => .load_store_128,
+                        else => unreachable,
+                    };
+                    try aarch64_util.writePageOffset(kind, taddr, code[rel.r_offset..][0..4]);
+                },
+
+                else => elf_file.base.fatal("unhandled relocation type: {}", .{
+                    relocation.fmtRelocType(rel.r_type(), .aarch64),
+                }),
+            }
+        }
+
+        try writer.writeAll(code);
+    }
+
+    pub fn resolveRelocsNonAlloc(atom: Atom, elf_file: *Elf, writer: anytype) !void {
+        const tracy = trace(@src());
+        defer tracy.end();
+
+        const gpa = elf_file.base.allocator;
+        const code = try atom.getCodeUncompressAlloc(elf_file);
+        defer gpa.free(code);
+        const relocs = atom.getRelocs(elf_file);
+        const object = atom.getObject(elf_file);
+
+        relocs_log.debug("{x}: {s}", .{ atom.value, atom.getName(elf_file) });
+
+        var stream = std.io.fixedBufferStream(code);
+        const cwriter = stream.writer();
+
+        var i: usize = 0;
+        while (i < relocs.len) : (i += 1) {
+            const rel = relocs[i];
+            const r_type: elf.R_AARCH64 = @enumFromInt(rel.r_type());
+
+            if (r_type == .NONE) continue;
+            if (try atom.reportUndefSymbol(rel, elf_file)) continue;
+
+            const target = object.getSymbol(rel.r_sym(), elf_file);
+
+            const P = atom.value + rel.r_offset;
+            const A = rel.r_addend;
+            const S = @as(i64, @intCast(target.getAddress(.{}, elf_file)));
+            const GOT = blk: {
+                const shndx = if (elf_file.got_sect_index) |shndx| shndx else null;
+                break :blk if (shndx) |index| @as(i64, @intCast(elf_file.sections.items(.shdr)[index].sh_addr)) else 0;
+            };
+            _ = GOT;
+            const DTP = @as(i64, @intCast(elf_file.getDtpAddress()));
+            _ = DTP;
+
+            relocs_log.debug("  {s}: {x}: [{x} => {x}] ({s})", .{
+                relocation.fmtRelocType(rel.r_type(), .aarch64),
+                rel.r_offset,
+                P,
+                S + A,
+                target.getName(elf_file),
+            });
+
+            try stream.seekTo(rel.r_offset);
+
+            switch (r_type) {
+                .NONE => unreachable,
+                .ABS32 => try cwriter.writeInt(i32, @as(i32, @intCast(S + A)), .little),
+                .ABS64 => try cwriter.writeInt(i64, S + A, .little),
+                else => elf_file.base.fatal("{s}: invalid relocation type for non-alloc section: {}", .{
+                    atom.getName(elf_file),
+                    relocation.fmtRelocType(rel.r_type(), .aarch64),
+                }),
+            }
+        }
+
+        try writer.writeAll(code);
+    }
+
+    const aarch64_util = @import("../aarch64.zig");
 };
 
 const Atom = @This();
