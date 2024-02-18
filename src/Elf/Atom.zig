@@ -387,6 +387,7 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
 
     switch (cpu_arch) {
         .x86_64 => try x86_64.resolveRelocsAlloc(self, elf_file, writer),
+        .aarch64 => try aarch64.resolveRelocsAlloc(self, elf_file, writer),
         else => |arch| {
             elf_file.base.fatal("TODO support {s} architecture", .{@tagName(arch)});
             return error.UnhandledCpuArch;
@@ -1235,6 +1236,69 @@ const aarch64 = struct {
         }
 
         if (has_errors) return error.RelocError;
+    }
+
+    pub fn resolveRelocsAlloc(atom: Atom, elf_file: *Elf, writer: anytype) !void {
+        const tracy = trace(@src());
+        defer tracy.end();
+
+        const gpa = elf_file.base.allocator;
+        const code = try atom.getCodeUncompressAlloc(elf_file);
+        defer gpa.free(code);
+        const relocs = atom.getRelocs(elf_file);
+        const object = atom.getObject(elf_file);
+
+        var stream = std.io.fixedBufferStream(code);
+        const cwriter = stream.writer();
+
+        var i: usize = 0;
+        while (i < relocs.len) : (i += 1) {
+            const rel = relocs[i];
+            const r_type: elf.R_AARCH64 = @enumFromInt(rel.r_type());
+
+            if (r_type == .NONE) continue;
+
+            const target = object.getSymbol(rel.r_sym(), elf_file);
+
+            const P = @as(i64, @intCast(atom.getAddress(elf_file) + rel.r_offset));
+            const A = rel.r_addend;
+            const S = @as(i64, @intCast(target.getAddress(.{}, elf_file)));
+            const GOT = blk: {
+                const shndx = if (elf_file.got_sect_index) |shndx| shndx else null;
+                break :blk if (shndx) |index| @as(i64, @intCast(elf_file.sections.items(.shdr)[index].sh_addr)) else 0;
+            };
+            const G = @as(i64, @intCast(target.getGotAddress(elf_file))) - GOT;
+
+            relocs_log.debug("  {s}: {x}: [{x} => {x}] G({x}) ({s})", .{
+                relocation.fmtRelocType(rel.r_type(), .aarch64),
+                rel.r_offset,
+                P,
+                S + A,
+                G + GOT + A,
+                target.getName(elf_file),
+            });
+
+            try stream.seekTo(rel.r_offset);
+
+            switch (r_type) {
+                .NONE => unreachable,
+                .ABS64 => {
+                    try atom.resolveDynAbsReloc(
+                        target,
+                        rel,
+                        getDynAbsRelocAction(target, elf_file),
+                        elf_file,
+                        cwriter,
+                    );
+                },
+
+                else => elf_file.base.fatal("unhandled relocation type: {}", .{
+                    relocation.fmtRelocType(rel.r_type(), .aarch64),
+                }),
+            }
+        }
+
+        try writer.writeAll(code);
     }
 };
 
