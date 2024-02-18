@@ -510,16 +510,8 @@ fn resolveRelocInner(
                 };
                 break :target math.cast(u64, target) orelse return error.Overflow;
             };
-            const pages = @as(u21, @bitCast(try Relocation.calcNumberOfPages(source, target)));
-            var inst = aarch64.Instruction{
-                .pc_relative_address = mem.bytesToValue(std.meta.TagPayload(
-                    aarch64.Instruction,
-                    aarch64.Instruction.pc_relative_address,
-                ), code[rel_offset..][0..4]),
-            };
-            inst.pc_relative_address.immhi = @as(u19, @truncate(pages >> 2));
-            inst.pc_relative_address.immlo = @as(u2, @truncate(pages));
-            try writer.writeInt(u32, inst.toU32(), .little);
+            const pages = @as(u21, @bitCast(try aarch64.calcNumberOfPages(source, target)));
+            try aarch64.writePages(pages, code[rel_offset..][0..4]);
         },
 
         .pageoff => {
@@ -528,8 +520,8 @@ fn resolveRelocInner(
             assert(!rel.meta.pcrel);
             const target = math.cast(u64, S + A) orelse return error.Overflow;
             const inst_code = code[rel_offset..][0..4];
-            if (Relocation.isArithmeticOp(inst_code)) {
-                const off = try Relocation.calcPageOffset(target, .arithmetic);
+            if (aarch64.isArithmeticOp(inst_code)) {
+                const off = try aarch64.calcPageOffset(target, .arithmetic);
                 var inst = aarch64.Instruction{
                     .add_subtract_immediate = mem.bytesToValue(std.meta.TagPayload(
                         aarch64.Instruction,
@@ -545,11 +537,11 @@ fn resolveRelocInner(
                         aarch64.Instruction.load_store_register,
                     ), inst_code),
                 };
-                const off = try Relocation.calcPageOffset(target, switch (inst.load_store_register.size) {
+                const off = try aarch64.calcPageOffset(target, switch (inst.load_store_register.size) {
                     0 => if (inst.load_store_register.v == 1)
-                        Relocation.PageOffsetInstKind.load_store_128
+                        aarch64.PageOffsetInstKind.load_store_128
                     else
-                        Relocation.PageOffsetInstKind.load_store_8,
+                        aarch64.PageOffsetInstKind.load_store_8,
                     1 => .load_store_16,
                     2 => .load_store_32,
                     3 => .load_store_64,
@@ -564,7 +556,7 @@ fn resolveRelocInner(
             assert(rel.meta.length == 2);
             assert(!rel.meta.pcrel);
             const target = math.cast(u64, G + A) orelse return error.Overflow;
-            const off = try Relocation.calcPageOffset(target, .load_store_64);
+            const off = try aarch64.calcPageOffset(target, .load_store_64);
             var inst: aarch64.Instruction = .{
                 .load_store_register = mem.bytesToValue(std.meta.TagPayload(
                     aarch64.Instruction,
@@ -597,7 +589,7 @@ fn resolveRelocInner(
 
             const inst_code = code[rel_offset..][0..4];
             const reg_info: RegInfo = blk: {
-                if (Relocation.isArithmeticOp(inst_code)) {
+                if (aarch64.isArithmeticOp(inst_code)) {
                     const inst = mem.bytesToValue(std.meta.TagPayload(
                         aarch64.Instruction,
                         aarch64.Instruction.add_subtract_immediate,
@@ -624,7 +616,7 @@ fn resolveRelocInner(
                 .load_store_register = .{
                     .rt = reg_info.rd,
                     .rn = reg_info.rn,
-                    .offset = try Relocation.calcPageOffset(target, .load_store_64),
+                    .offset = try aarch64.calcPageOffset(target, .load_store_64),
                     .opc = 0b01,
                     .op1 = 0b01,
                     .v = 0,
@@ -634,7 +626,7 @@ fn resolveRelocInner(
                 .add_subtract_immediate = .{
                     .rd = reg_info.rd,
                     .rn = reg_info.rn,
-                    .imm12 = try Relocation.calcPageOffset(target, .arithmetic),
+                    .imm12 = try aarch64.calcPageOffset(target, .arithmetic),
                     .sh = 0,
                     .s = 0,
                     .op = 0,

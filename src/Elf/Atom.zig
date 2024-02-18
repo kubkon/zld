@@ -1292,6 +1292,24 @@ const aarch64 = struct {
                     );
                 },
 
+                .ADR_PREL_PG_HI21 => {
+                    // TODO: check for relaxation of ADRP+ADD
+                    const saddr = @as(u64, @intCast(P));
+                    const taddr = @as(u64, @intCast(S + A));
+                    const pages = @as(u21, @bitCast(try aarch64_util.calcNumberOfPages(saddr, taddr)));
+                    try aarch64_util.writePages(pages, code[rel.r_offset..][0..4]);
+                },
+
+                .ADR_GOT_PAGE => if (target.flags.got) {
+                    const saddr = @as(u64, @intCast(P));
+                    const taddr = @as(u64, @intCast(G + GOT + A));
+                    const pages = @as(u21, @bitCast(try aarch64_util.calcNumberOfPages(saddr, taddr)));
+                    try aarch64_util.writePages(pages, code[rel.r_offset..][0..4]);
+                } else {
+                    // TODO: relax
+                    elf_file.base.fatal("TODO relax ADR_GOT_PAGE", .{});
+                },
+
                 else => elf_file.base.fatal("unhandled relocation type: {}", .{
                     relocation.fmtRelocType(rel.r_type(), .aarch64),
                 }),
@@ -1300,6 +1318,8 @@ const aarch64 = struct {
 
         try writer.writeAll(code);
     }
+
+    const aarch64_util = @import("../aarch64.zig");
 };
 
 const Atom = @This();

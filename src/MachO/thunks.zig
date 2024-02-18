@@ -100,9 +100,9 @@ pub const Thunk = struct {
             const sym = macho_file.getSymbol(sym_index);
             const saddr = thunk.getAddress(macho_file) + i * trampoline_size;
             const taddr = sym.getAddress(.{}, macho_file);
-            const pages = try Relocation.calcNumberOfPages(saddr, taddr);
+            const pages = try aarch64.calcNumberOfPages(saddr, taddr);
             try writer.writeInt(u32, aarch64.Instruction.adrp(.x16, pages).toU32(), .little);
-            const off = try Relocation.calcPageOffset(taddr, .arithmetic);
+            const off = try aarch64.calcPageOffset(taddr, .arithmetic);
             try writer.writeInt(u32, aarch64.Instruction.add(.x16, .x16, off, false).toU32(), .little);
             try writer.writeInt(u32, aarch64.Instruction.br(.x16).toU32(), .little);
         }
