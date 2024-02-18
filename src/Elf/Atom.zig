@@ -160,6 +160,7 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
 
     switch (cpu_arch) {
         .x86_64 => try x86_64.scanRelocs(self, elf_file),
+        .aarch64 => try aarch64.scanRelocs(self, elf_file),
         else => |arch| {
             elf_file.base.fatal("TODO support {s} architecture", .{@tagName(arch)});
             return error.UnhandledCpuArch;
@@ -1152,6 +1153,89 @@ const x86_64 = struct {
     const Disassembler = dis_x86_64.Disassembler;
     const Instruction = dis_x86_64.Instruction;
     const Immediate = dis_x86_64.Immediate;
+};
+
+const aarch64 = struct {
+    fn scanRelocs(atom: Atom, elf_file: *Elf) !void {
+        const tracy = trace(@src());
+        defer tracy.end();
+
+        const object = atom.getObject(elf_file);
+        const relocs = atom.getRelocs(elf_file);
+        const code = try atom.getCodeUncompressAlloc(elf_file);
+        defer elf_file.base.allocator.free(code);
+
+        var has_errors = false;
+        var i: usize = 0;
+        while (i < relocs.len) : (i += 1) {
+            const rel = relocs[i];
+            const r_type: elf.R_AARCH64 = @enumFromInt(rel.r_type());
+
+            if (r_type == .NONE) continue;
+            if (try atom.reportUndefSymbol(rel, elf_file)) continue;
+
+            const symbol = object.getSymbol(rel.r_sym(), elf_file);
+            const is_shared = elf_file.options.shared;
+            _ = is_shared;
+
+            if (symbol.isIFunc(elf_file)) {
+                symbol.flags.got = true;
+                symbol.flags.plt = true;
+            }
+
+            switch (r_type) {
+                .ABS64 => {
+                    atom.scanReloc(symbol, rel, getDynAbsRelocAction(symbol, elf_file), elf_file) catch {
+                        has_errors = true;
+                    };
+                },
+
+                .ADR_PREL_PG_HI21 => {
+                    atom.scanReloc(symbol, rel, getPcRelocAction(symbol, elf_file), elf_file) catch {
+                        has_errors = true;
+                    };
+                },
+
+                .ADR_GOT_PAGE => {
+                    // TODO: relax if possible
+                    symbol.flags.got = true;
+                },
+
+                .LD64_GOT_LO12_NC,
+                .LD64_GOTPAGE_LO15,
+                => {
+                    symbol.flags.got = true;
+                },
+
+                .CALL26,
+                .JUMP26,
+                => {
+                    if (symbol.flags.import) {
+                        symbol.flags.plt = true;
+                    }
+                },
+
+                .ADD_ABS_LO12_NC,
+                .ADR_PREL_LO21,
+                .LDST8_ABS_LO12_NC,
+                .LDST16_ABS_LO12_NC,
+                .LDST32_ABS_LO12_NC,
+                .LDST64_ABS_LO12_NC,
+                .LDST128_ABS_LO12_NC,
+                => {},
+
+                else => {
+                    elf_file.base.fatal("{s}: unknown relocation type: {}", .{
+                        atom.getName(elf_file),
+                        relocation.fmtRelocType(rel.r_type(), .aarch64),
+                    });
+                    has_errors = true;
+                },
+            }
+        }
+
+        if (has_errors) return error.RelocError;
+    }
 };
 
 const Atom = @This();
