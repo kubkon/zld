@@ -333,6 +333,7 @@ fn resolveReloc(rec: anytype, sym: *const Symbol, rel: elf.Elf64_Rela, elf_file:
 
     switch (cpu_arch) {
         .x86_64 => x86_64.resolveReloc(rel, P, S + A, data[offset..]),
+        .aarch64 => aarch64.resolveReloc(rel, P, S + A, data[offset..]),
         else => |arch| {
             elf_file.base.fatal("TODO support {s} architecture", .{@tagName(arch)});
             return error.UnhandledCpuArch;
@@ -579,6 +580,18 @@ const x86_64 = struct {
             .@"64" => std.mem.writeInt(i64, data[0..8], target, .little),
             .PC32 => std.mem.writeInt(i32, data[0..4], @as(i32, @intCast(target - source)), .little),
             .PC64 => std.mem.writeInt(i64, data[0..8], target - source, .little),
+            else => unreachable,
+        }
+    }
+};
+
+const aarch64 = struct {
+    fn resolveReloc(rel: elf.Elf64_Rela, source: i64, target: i64, data: []u8) void {
+        const r_type: elf.R_AARCH64 = @enumFromInt(rel.r_type());
+        switch (r_type) {
+            .ABS64 => std.mem.writeInt(i64, data[0..8], target, .little),
+            .PREL32 => std.mem.writeInt(i32, data[0..4], @as(i32, @intCast(target - source)), .little),
+            .PREL64 => std.mem.writeInt(i64, data[0..8], target - source, .little),
             else => unreachable,
         }
     }
