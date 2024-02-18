@@ -1292,6 +1292,20 @@ const aarch64 = struct {
                     );
                 },
 
+                .CALL26,
+                .JUMP26,
+                => {
+                    // TODO: add thunk support
+                    const disp: i28 = math.cast(i28, S + A - P) orelse {
+                        elf_file.base.fatal("{s}: {x}: TODO relocation target exceeds max jump distance", .{
+                            atom.getName(elf_file),
+                            rel.r_offset,
+                        });
+                        continue;
+                    };
+                    try aarch64_util.writeBranchImm(disp, code[rel.r_offset..][0..4]);
+                },
+
                 .ADR_PREL_PG_HI21 => {
                     // TODO: check for relaxation of ADRP+ADD
                     const saddr = @as(u64, @intCast(P));

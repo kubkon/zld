@@ -1792,6 +1792,17 @@ pub fn writePages(pages: u21, code: *[4]u8) !void {
     mem.writeInt(u32, code, inst.toU32(), .little);
 }
 
+pub fn writeBranchImm(disp: i28, code: *[4]u8) !void {
+    var inst = Instruction{
+        .unconditional_branch_immediate = mem.bytesToValue(std.meta.TagPayload(
+            Instruction,
+            Instruction.unconditional_branch_immediate,
+        ), code),
+    };
+    inst.unconditional_branch_immediate.imm26 = @as(u26, @truncate(@as(u28, @bitCast(disp >> 2))));
+    mem.writeInt(u32, code, inst.toU32(), .little);
+}
+
 const std = @import("std");
 const builtin = @import("builtin");
 const math = std.math;

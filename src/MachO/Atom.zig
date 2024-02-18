@@ -444,14 +444,7 @@ fn resolveRelocInner(
                         const S_: i64 = @intCast(thunk.getTargetAddress(rel.target, macho_file));
                         break :blk math.cast(i28, S_ + A - P) orelse return error.Overflow;
                     };
-                    var inst = aarch64.Instruction{
-                        .unconditional_branch_immediate = mem.bytesToValue(std.meta.TagPayload(
-                            aarch64.Instruction,
-                            aarch64.Instruction.unconditional_branch_immediate,
-                        ), code[rel_offset..][0..4]),
-                    };
-                    inst.unconditional_branch_immediate.imm26 = @as(u26, @truncate(@as(u28, @bitCast(disp >> 2))));
-                    try writer.writeInt(u32, inst.toU32(), .little);
+                    try aarch64.writeBranchImm(disp, code[rel_offset..][0..4]);
                 },
                 else => unreachable,
             }
