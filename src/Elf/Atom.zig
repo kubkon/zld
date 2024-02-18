@@ -1310,6 +1310,33 @@ const aarch64 = struct {
                     elf_file.base.fatal("TODO relax ADR_GOT_PAGE", .{});
                 },
 
+                .LD64_GOT_LO12_NC => {
+                    assert(target.flags.got);
+                    const taddr = @as(u64, @intCast(G + GOT + A));
+                    try aarch64_util.writePageOffset(.load_store_64, taddr, code[rel.r_offset..][0..4]);
+                },
+
+                .ADD_ABS_LO12_NC,
+                .LDST8_ABS_LO12_NC,
+                .LDST16_ABS_LO12_NC,
+                .LDST32_ABS_LO12_NC,
+                .LDST64_ABS_LO12_NC,
+                .LDST128_ABS_LO12_NC,
+                => {
+                    // TODO: NC means no overflow check
+                    const taddr = @as(u64, @intCast(S + A));
+                    const kind: aarch64_util.PageOffsetInstKind = switch (r_type) {
+                        .ADD_ABS_LO12_NC => .arithmetic,
+                        .LDST8_ABS_LO12_NC => .load_store_8,
+                        .LDST16_ABS_LO12_NC => .load_store_16,
+                        .LDST32_ABS_LO12_NC => .load_store_32,
+                        .LDST64_ABS_LO12_NC => .load_store_64,
+                        .LDST128_ABS_LO12_NC => .load_store_128,
+                        else => unreachable,
+                    };
+                    try aarch64_util.writePageOffset(kind, taddr, code[rel.r_offset..][0..4]);
+                },
+
                 else => elf_file.base.fatal("unhandled relocation type: {}", .{
                     relocation.fmtRelocType(rel.r_type(), .aarch64),
                 }),

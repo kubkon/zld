@@ -1706,6 +1706,11 @@ pub const Instruction = union(enum) {
     pub const lsrRegister = lsrv;
 };
 
+pub inline fn isArithmeticOp(inst: *const [4]u8) bool {
+    const group_decode = @as(u5, @truncate(inst[3]));
+    return ((group_decode >> 2) == 4);
+}
+
 pub const PageOffsetInstKind = enum {
     arithmetic,
     load_store_8,
@@ -1715,7 +1720,23 @@ pub const PageOffsetInstKind = enum {
     load_store_128,
 };
 
-pub fn calcPageOffset(taddr: u64, kind: PageOffsetInstKind) !u12 {
+pub fn classifyInst(code: *const [4]u8) PageOffsetInstKind {
+    if (isArithmeticOp(code)) return .arithmetic;
+    const inst = Instruction{
+        .load_store_register = mem.bytesToValue(std.meta.TagPayload(
+            Instruction,
+            Instruction.load_store_register,
+        ), code),
+    };
+    return switch (inst.load_store_register.size) {
+        0 => if (inst.load_store_register.v == 1) .load_store_128 else .load_store_8,
+        1 => .load_store_16,
+        2 => .load_store_32,
+        3 => .load_store_64,
+    };
+}
+
+pub fn calcPageOffset(kind: PageOffsetInstKind, taddr: u64) !u12 {
     const narrowed = @as(u12, @truncate(taddr));
     return switch (kind) {
         .arithmetic, .load_store_8 => narrowed,
@@ -1726,9 +1747,30 @@ pub fn calcPageOffset(taddr: u64, kind: PageOffsetInstKind) !u12 {
     };
 }
 
-pub inline fn isArithmeticOp(inst: *const [4]u8) bool {
-    const group_decode = @as(u5, @truncate(inst[3]));
-    return ((group_decode >> 2) == 4);
+pub fn writePageOffset(kind: PageOffsetInstKind, taddr: u64, code: *[4]u8) !void {
+    const value = try calcPageOffset(kind, taddr);
+    switch (kind) {
+        .arithmetic => {
+            var inst = Instruction{
+                .add_subtract_immediate = mem.bytesToValue(std.meta.TagPayload(
+                    Instruction,
+                    Instruction.add_subtract_immediate,
+                ), code),
+            };
+            inst.add_subtract_immediate.imm12 = value;
+            mem.writeInt(u32, code, inst.toU32(), .little);
+        },
+        else => {
+            var inst: Instruction = .{
+                .load_store_register = mem.bytesToValue(std.meta.TagPayload(
+                    Instruction,
+                    Instruction.load_store_register,
+                ), code),
+            };
+            inst.load_store_register.offset = value;
+            mem.writeInt(u32, code, inst.toU32(), .little);
+        },
+    }
 }
 
 pub fn calcNumberOfPages(saddr: u64, taddr: u64) error{Overflow}!i21 {

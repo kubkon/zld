@@ -520,35 +520,8 @@ fn resolveRelocInner(
             assert(!rel.meta.pcrel);
             const target = math.cast(u64, S + A) orelse return error.Overflow;
             const inst_code = code[rel_offset..][0..4];
-            if (aarch64.isArithmeticOp(inst_code)) {
-                const off = try aarch64.calcPageOffset(target, .arithmetic);
-                var inst = aarch64.Instruction{
-                    .add_subtract_immediate = mem.bytesToValue(std.meta.TagPayload(
-                        aarch64.Instruction,
-                        aarch64.Instruction.add_subtract_immediate,
-                    ), inst_code),
-                };
-                inst.add_subtract_immediate.imm12 = off;
-                try writer.writeInt(u32, inst.toU32(), .little);
-            } else {
-                var inst = aarch64.Instruction{
-                    .load_store_register = mem.bytesToValue(std.meta.TagPayload(
-                        aarch64.Instruction,
-                        aarch64.Instruction.load_store_register,
-                    ), inst_code),
-                };
-                const off = try aarch64.calcPageOffset(target, switch (inst.load_store_register.size) {
-                    0 => if (inst.load_store_register.v == 1)
-                        aarch64.PageOffsetInstKind.load_store_128
-                    else
-                        aarch64.PageOffsetInstKind.load_store_8,
-                    1 => .load_store_16,
-                    2 => .load_store_32,
-                    3 => .load_store_64,
-                });
-                inst.load_store_register.offset = off;
-                try writer.writeInt(u32, inst.toU32(), .little);
-            }
+            const kind = aarch64.classifyInst(inst_code);
+            try aarch64.writePageOffset(kind, target, inst_code);
         },
 
         .got_load_pageoff => {
@@ -556,15 +529,7 @@ fn resolveRelocInner(
             assert(rel.meta.length == 2);
             assert(!rel.meta.pcrel);
             const target = math.cast(u64, G + A) orelse return error.Overflow;
-            const off = try aarch64.calcPageOffset(target, .load_store_64);
-            var inst: aarch64.Instruction = .{
-                .load_store_register = mem.bytesToValue(std.meta.TagPayload(
-                    aarch64.Instruction,
-                    aarch64.Instruction.load_store_register,
-                ), code[rel_offset..][0..4]),
-            };
-            inst.load_store_register.offset = off;
-            try writer.writeInt(u32, inst.toU32(), .little);
+            try aarch64.writePageOffset(.load_store_64, target, code[rel_offset..][0..4]);
         },
 
         .tlvp_pageoff => {
@@ -616,7 +581,7 @@ fn resolveRelocInner(
                 .load_store_register = .{
                     .rt = reg_info.rd,
                     .rn = reg_info.rn,
-                    .offset = try aarch64.calcPageOffset(target, .load_store_64),
+                    .offset = try aarch64.calcPageOffset(.load_store_64, target),
                     .opc = 0b01,
                     .op1 = 0b01,
                     .v = 0,
@@ -626,7 +591,7 @@ fn resolveRelocInner(
                 .add_subtract_immediate = .{
                     .rd = reg_info.rd,
                     .rn = reg_info.rn,
-                    .imm12 = try aarch64.calcPageOffset(target, .arithmetic),
+                    .imm12 = try aarch64.calcPageOffset(.arithmetic, target),
                     .sh = 0,
                     .s = 0,
                     .op = 0,
