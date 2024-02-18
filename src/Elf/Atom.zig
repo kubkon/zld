@@ -501,6 +501,7 @@ pub fn resolveRelocsNonAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void 
 
     switch (cpu_arch) {
         .x86_64 => try x86_64.resolveRelocsNonAlloc(self, elf_file, writer),
+        .aarch64 => try aarch64.resolveRelocsNonAlloc(self, elf_file, writer),
         else => |arch| {
             elf_file.base.fatal("TODO support {s} architecture", .{@tagName(arch)});
             return error.UnhandledCpuArch;
@@ -1352,6 +1353,66 @@ const aarch64 = struct {
                 },
 
                 else => elf_file.base.fatal("unhandled relocation type: {}", .{
+                    relocation.fmtRelocType(rel.r_type(), .aarch64),
+                }),
+            }
+        }
+
+        try writer.writeAll(code);
+    }
+
+    pub fn resolveRelocsNonAlloc(atom: Atom, elf_file: *Elf, writer: anytype) !void {
+        const tracy = trace(@src());
+        defer tracy.end();
+
+        const gpa = elf_file.base.allocator;
+        const code = try atom.getCodeUncompressAlloc(elf_file);
+        defer gpa.free(code);
+        const relocs = atom.getRelocs(elf_file);
+        const object = atom.getObject(elf_file);
+
+        relocs_log.debug("{x}: {s}", .{ atom.value, atom.getName(elf_file) });
+
+        var stream = std.io.fixedBufferStream(code);
+        const cwriter = stream.writer();
+
+        var i: usize = 0;
+        while (i < relocs.len) : (i += 1) {
+            const rel = relocs[i];
+            const r_type: elf.R_AARCH64 = @enumFromInt(rel.r_type());
+
+            if (r_type == .NONE) continue;
+            if (try atom.reportUndefSymbol(rel, elf_file)) continue;
+
+            const target = object.getSymbol(rel.r_sym(), elf_file);
+
+            const P = atom.value + rel.r_offset;
+            const A = rel.r_addend;
+            const S = @as(i64, @intCast(target.getAddress(.{}, elf_file)));
+            const GOT = blk: {
+                const shndx = if (elf_file.got_sect_index) |shndx| shndx else null;
+                break :blk if (shndx) |index| @as(i64, @intCast(elf_file.sections.items(.shdr)[index].sh_addr)) else 0;
+            };
+            _ = GOT;
+            const DTP = @as(i64, @intCast(elf_file.getDtpAddress()));
+            _ = DTP;
+
+            relocs_log.debug("  {s}: {x}: [{x} => {x}] ({s})", .{
+                relocation.fmtRelocType(rel.r_type(), .aarch64),
+                rel.r_offset,
+                P,
+                S + A,
+                target.getName(elf_file),
+            });
+
+            try stream.seekTo(rel.r_offset);
+
+            switch (r_type) {
+                .NONE => unreachable,
+                .ABS32 => try cwriter.writeInt(i32, @as(i32, @intCast(S + A)), .little),
+                .ABS64 => try cwriter.writeInt(i64, S + A, .little),
+                else => elf_file.base.fatal("{s}: invalid relocation type for non-alloc section: {}", .{
+                    atom.getName(elf_file),
                     relocation.fmtRelocType(rel.r_type(), .aarch64),
                 }),
             }
