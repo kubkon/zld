@@ -157,15 +157,42 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
     defer tracy.end();
 
     const cpu_arch = elf_file.options.cpu_arch.?;
+    const object = self.getObject(elf_file);
+    const relocs = self.getRelocs(elf_file);
+    const code = try self.getCodeUncompressAlloc(elf_file);
+    defer elf_file.base.allocator.free(code);
 
-    switch (cpu_arch) {
-        .x86_64 => try x86_64.scanRelocs(self, elf_file),
-        .aarch64 => try aarch64.scanRelocs(self, elf_file),
-        else => |arch| {
-            elf_file.base.fatal("TODO support {s} architecture", .{@tagName(arch)});
-            return error.UnhandledCpuArch;
-        },
+    var has_reloc_errors = false;
+    var it = RelocsIterator{ .relocs = relocs };
+    while (it.next()) |rel| {
+        const r_kind = relocation.decode(rel.r_type(), cpu_arch);
+
+        if (r_kind == .none) continue;
+        if (try self.reportUndefSymbol(rel, elf_file)) continue;
+
+        const symbol = object.getSymbol(rel.r_sym(), elf_file);
+
+        if (symbol.isIFunc(elf_file)) {
+            symbol.flags.got = true;
+            symbol.flags.plt = true;
+        }
+
+        // While traversing relocations, mark symbols that require special handling such as
+        // pointer indirection via GOT, or a stub trampoline via PLT.
+        switch (cpu_arch) {
+            .x86_64 => x86_64.scanReloc(self, elf_file, rel, symbol, code, &it) catch {
+                has_reloc_errors = true;
+            },
+            .aarch64 => aarch64.scanReloc(self, elf_file, rel, symbol, code, &it) catch {
+                has_reloc_errors = true;
+            },
+            else => |arch| {
+                elf_file.base.fatal("TODO support {s} architecture", .{@tagName(arch)});
+                return error.UnhandledCpuArch;
+            },
+        }
     }
+    if (has_reloc_errors) return error.RelocError;
 }
 
 fn scanReloc(self: Atom, symbol: *Symbol, rel: elf.Elf64_Rela, action: RelocAction, elf_file: *Elf) !void {
@@ -584,152 +611,127 @@ const ResolveRelocAllocArgs = struct {
 };
 
 const x86_64 = struct {
-    fn scanRelocs(atom: Atom, elf_file: *Elf) !void {
+    fn scanReloc(
+        atom: Atom,
+        elf_file: *Elf,
+        rel: elf.Elf64_Rela,
+        symbol: *Symbol,
+        code: []u8,
+        it: *RelocsIterator,
+    ) !void {
         const tracy = trace(@src());
         defer tracy.end();
 
-        const object = atom.getObject(elf_file);
-        const relocs = atom.getRelocs(elf_file);
-        const code = try atom.getCodeUncompressAlloc(elf_file);
-        defer elf_file.base.allocator.free(code);
+        const r_type: elf.R_X86_64 = @enumFromInt(rel.r_type());
+        const is_shared = elf_file.options.shared;
 
-        var has_errors = false;
-        var i: usize = 0;
-        while (i < relocs.len) : (i += 1) {
-            const rel = relocs[i];
-            const r_type: elf.R_X86_64 = @enumFromInt(rel.r_type());
+        switch (r_type) {
+            .@"64" => {
+                try atom.scanReloc(symbol, rel, getDynAbsRelocAction(symbol, elf_file), elf_file);
+            },
 
-            if (r_type == .NONE) continue;
-            if (try atom.reportUndefSymbol(rel, elf_file)) continue;
+            .@"32",
+            .@"32S",
+            => {
+                try atom.scanReloc(symbol, rel, getAbsRelocAction(symbol, elf_file), elf_file);
+            },
 
-            const symbol = object.getSymbol(rel.r_sym(), elf_file);
-            const is_shared = elf_file.options.shared;
-
-            if (symbol.isIFunc(elf_file)) {
+            .GOT32,
+            .GOT64,
+            .GOTPC32,
+            .GOTPC64,
+            .GOTPCREL,
+            .GOTPCREL64,
+            .GOTPCRELX,
+            .REX_GOTPCRELX,
+            => {
                 symbol.flags.got = true;
-                symbol.flags.plt = true;
-            }
+            },
 
-            // While traversing relocations, mark symbols that require special handling such as
-            // pointer indirection via GOT, or a stub trampoline via PLT.
-            switch (r_type) {
-                .@"64" => {
-                    atom.scanReloc(symbol, rel, getDynAbsRelocAction(symbol, elf_file), elf_file) catch {
-                        has_errors = true;
-                    };
-                },
+            .PLT32,
+            .PLTOFF64,
+            => {
+                if (symbol.flags.import) {
+                    symbol.flags.plt = true;
+                }
+            },
 
-                .@"32",
-                .@"32S",
-                => {
-                    atom.scanReloc(symbol, rel, getAbsRelocAction(symbol, elf_file), elf_file) catch {
-                        has_errors = true;
-                    };
-                },
+            .PC32 => {
+                try atom.scanReloc(symbol, rel, getPcRelocAction(symbol, elf_file), elf_file);
+            },
 
-                .GOT32,
-                .GOT64,
-                .GOTPC32,
-                .GOTPC64,
-                .GOTPCREL,
-                .GOTPCREL64,
-                .GOTPCRELX,
-                .REX_GOTPCRELX,
-                => {
-                    symbol.flags.got = true;
-                },
+            .TLSGD => {
+                // TODO verify followed by appropriate relocation such as PLT32 __tls_get_addr
 
-                .PLT32,
-                .PLTOFF64,
-                => {
-                    if (symbol.flags.import) {
-                        symbol.flags.plt = true;
-                    }
-                },
+                if (elf_file.options.static or
+                    (elf_file.options.relax and !symbol.flags.import and !is_shared))
+                {
+                    // Relax if building with -static flag as __tls_get_addr() will not be present in libc.a
+                    // We skip the next relocation.
+                    it.skip(1);
+                } else if (elf_file.options.relax and !symbol.flags.import and is_shared and
+                    elf_file.options.z_nodlopen)
+                {
+                    symbol.flags.gottp = true;
+                    it.skip(1);
+                } else {
+                    symbol.flags.tlsgd = true;
+                }
+            },
 
-                .PC32 => {
-                    atom.scanReloc(symbol, rel, getPcRelocAction(symbol, elf_file), elf_file) catch {
-                        has_errors = true;
-                    };
-                },
+            .TLSLD => {
+                // TODO verify followed by appropriate relocation such as PLT32 __tls_get_addr
 
-                .TLSGD => {
-                    // TODO verify followed by appropriate relocation such as PLT32 __tls_get_addr
+                if (elf_file.options.static or (elf_file.options.relax and !is_shared)) {
+                    // Relax if building with -static flag as __tls_get_addr() will not be present in libc.a
+                    // We skip the next relocation.
+                    it.skip(1);
+                } else {
+                    elf_file.got.flags.needs_tlsld = true;
+                }
+            },
 
-                    if (elf_file.options.static or
-                        (elf_file.options.relax and !symbol.flags.import and !is_shared))
-                    {
-                        // Relax if building with -static flag as __tls_get_addr() will not be present in libc.a
-                        // We skip the next relocation.
-                        i += 1;
-                    } else if (elf_file.options.relax and !symbol.flags.import and is_shared and
-                        elf_file.options.z_nodlopen)
-                    {
-                        symbol.flags.gottp = true;
-                        i += 1;
-                    } else {
-                        symbol.flags.tlsgd = true;
-                    }
-                },
+            .GOTTPOFF => {
+                const should_relax = blk: {
+                    if (!elf_file.options.relax or is_shared or symbol.flags.import) break :blk false;
+                    relaxGotTpOff(code[rel.r_offset - 3 ..]) catch break :blk false;
+                    break :blk true;
+                };
+                if (!should_relax) {
+                    symbol.flags.gottp = true;
+                }
+            },
 
-                .TLSLD => {
-                    // TODO verify followed by appropriate relocation such as PLT32 __tls_get_addr
+            .GOTPC32_TLSDESC => {
+                const should_relax = elf_file.options.static or
+                    (elf_file.options.relax and !is_shared and !symbol.flags.import);
+                if (!should_relax) {
+                    symbol.flags.tlsdesc = true;
+                }
+            },
 
-                    if (elf_file.options.static or (elf_file.options.relax and !is_shared)) {
-                        // Relax if building with -static flag as __tls_get_addr() will not be present in libc.a
-                        // We skip the next relocation.
-                        i += 1;
-                    } else {
-                        elf_file.got.flags.needs_tlsld = true;
-                    }
-                },
+            .TPOFF32,
+            .TPOFF64,
+            => {
+                if (is_shared) try atom.picError(symbol, rel, elf_file);
+            },
 
-                .GOTTPOFF => {
-                    const should_relax = blk: {
-                        if (!elf_file.options.relax or is_shared or symbol.flags.import) break :blk false;
-                        relaxGotTpOff(code[rel.r_offset - 3 ..]) catch break :blk false;
-                        break :blk true;
-                    };
-                    if (!should_relax) {
-                        symbol.flags.gottp = true;
-                    }
-                },
+            .GOTOFF64,
+            .DTPOFF32,
+            .DTPOFF64,
+            .SIZE32,
+            .SIZE64,
+            .TLSDESC_CALL,
+            => {},
 
-                .GOTPC32_TLSDESC => {
-                    const should_relax = elf_file.options.static or
-                        (elf_file.options.relax and !is_shared and !symbol.flags.import);
-                    if (!should_relax) {
-                        symbol.flags.tlsdesc = true;
-                    }
-                },
-
-                .TPOFF32,
-                .TPOFF64,
-                => {
-                    if (is_shared) atom.picError(symbol, rel, elf_file) catch {
-                        has_errors = true;
-                    };
-                },
-
-                .GOTOFF64,
-                .DTPOFF32,
-                .DTPOFF64,
-                .SIZE32,
-                .SIZE64,
-                .TLSDESC_CALL,
-                => {},
-
-                else => {
-                    elf_file.base.fatal("{s}: unknown relocation type: {}", .{
-                        atom.getName(elf_file),
-                        relocation.fmtRelocType(rel.r_type(), .x86_64),
-                    });
-                    has_errors = true;
-                },
-            }
+            else => {
+                elf_file.base.fatal("{s}: unknown relocation type: {}", .{
+                    atom.getName(elf_file),
+                    relocation.fmtRelocType(rel.r_type(), .x86_64),
+                });
+                return error.RelocError;
+            },
         }
-
-        if (has_errors) return error.RelocError;
     }
 
     pub fn resolveRelocsAlloc(atom: Atom, elf_file: *Elf, writer: anytype) !void {
@@ -1158,85 +1160,65 @@ const x86_64 = struct {
 };
 
 const aarch64 = struct {
-    fn scanRelocs(atom: Atom, elf_file: *Elf) !void {
+    fn scanReloc(
+        atom: Atom,
+        elf_file: *Elf,
+        rel: elf.Elf64_Rela,
+        symbol: *Symbol,
+        code: []u8,
+        it: *RelocsIterator,
+    ) !void {
         const tracy = trace(@src());
         defer tracy.end();
+        _ = code;
+        _ = it;
 
-        const object = atom.getObject(elf_file);
-        const relocs = atom.getRelocs(elf_file);
-        const code = try atom.getCodeUncompressAlloc(elf_file);
-        defer elf_file.base.allocator.free(code);
+        const r_type: elf.R_AARCH64 = @enumFromInt(rel.r_type());
+        switch (r_type) {
+            .ABS64 => {
+                try atom.scanReloc(symbol, rel, getDynAbsRelocAction(symbol, elf_file), elf_file);
+            },
 
-        var has_errors = false;
-        var i: usize = 0;
-        while (i < relocs.len) : (i += 1) {
-            const rel = relocs[i];
-            const r_type: elf.R_AARCH64 = @enumFromInt(rel.r_type());
+            .ADR_PREL_PG_HI21 => {
+                try atom.scanReloc(symbol, rel, getPcRelocAction(symbol, elf_file), elf_file);
+            },
 
-            if (r_type == .NONE) continue;
-            if (try atom.reportUndefSymbol(rel, elf_file)) continue;
-
-            const symbol = object.getSymbol(rel.r_sym(), elf_file);
-            const is_shared = elf_file.options.shared;
-            _ = is_shared;
-
-            if (symbol.isIFunc(elf_file)) {
+            .ADR_GOT_PAGE => {
+                // TODO: relax if possible
                 symbol.flags.got = true;
-                symbol.flags.plt = true;
-            }
+            },
 
-            switch (r_type) {
-                .ABS64 => {
-                    atom.scanReloc(symbol, rel, getDynAbsRelocAction(symbol, elf_file), elf_file) catch {
-                        has_errors = true;
-                    };
-                },
+            .LD64_GOT_LO12_NC,
+            .LD64_GOTPAGE_LO15,
+            => {
+                symbol.flags.got = true;
+            },
 
-                .ADR_PREL_PG_HI21 => {
-                    atom.scanReloc(symbol, rel, getPcRelocAction(symbol, elf_file), elf_file) catch {
-                        has_errors = true;
-                    };
-                },
+            .CALL26,
+            .JUMP26,
+            => {
+                if (symbol.flags.import) {
+                    symbol.flags.plt = true;
+                }
+            },
 
-                .ADR_GOT_PAGE => {
-                    // TODO: relax if possible
-                    symbol.flags.got = true;
-                },
+            .ADD_ABS_LO12_NC,
+            .ADR_PREL_LO21,
+            .LDST8_ABS_LO12_NC,
+            .LDST16_ABS_LO12_NC,
+            .LDST32_ABS_LO12_NC,
+            .LDST64_ABS_LO12_NC,
+            .LDST128_ABS_LO12_NC,
+            => {},
 
-                .LD64_GOT_LO12_NC,
-                .LD64_GOTPAGE_LO15,
-                => {
-                    symbol.flags.got = true;
-                },
-
-                .CALL26,
-                .JUMP26,
-                => {
-                    if (symbol.flags.import) {
-                        symbol.flags.plt = true;
-                    }
-                },
-
-                .ADD_ABS_LO12_NC,
-                .ADR_PREL_LO21,
-                .LDST8_ABS_LO12_NC,
-                .LDST16_ABS_LO12_NC,
-                .LDST32_ABS_LO12_NC,
-                .LDST64_ABS_LO12_NC,
-                .LDST128_ABS_LO12_NC,
-                => {},
-
-                else => {
-                    elf_file.base.fatal("{s}: unknown relocation type: {}", .{
-                        atom.getName(elf_file),
-                        relocation.fmtRelocType(rel.r_type(), .aarch64),
-                    });
-                    has_errors = true;
-                },
-            }
+            else => {
+                elf_file.base.fatal("{s}: unknown relocation type: {}", .{
+                    atom.getName(elf_file),
+                    relocation.fmtRelocType(rel.r_type(), .aarch64),
+                });
+                return error.RelocError;
+            },
         }
-
-        if (has_errors) return error.RelocError;
     }
 
     pub fn resolveRelocsAlloc(atom: Atom, elf_file: *Elf, writer: anytype) !void {
@@ -1422,6 +1404,23 @@ const aarch64 = struct {
     }
 
     const aarch64_util = @import("../aarch64.zig");
+};
+
+const RelocsIterator = struct {
+    relocs: []const elf.Elf64_Rela,
+    pos: usize = 0,
+
+    fn next(it: *RelocsIterator) ?elf.Elf64_Rela {
+        if (it.pos >= it.relocs.len) return null;
+        const rel = it.relocs[it.pos];
+        it.pos += 1;
+        return rel;
+    }
+
+    fn skip(it: *RelocsIterator, num: usize) void {
+        assert(num > 0);
+        it.pos += num;
+    }
 };
 
 const Atom = @This();
