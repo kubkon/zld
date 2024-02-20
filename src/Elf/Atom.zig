@@ -1391,6 +1391,10 @@ const riscv = struct {
         const r_type: elf.R_RISCV = @enumFromInt(rel.r_type());
 
         switch (r_type) {
+            .@"64" => {
+                try atom.scanReloc(symbol, rel, getDynAbsRelocAction(symbol, elf_file), elf_file);
+            },
+
             .CALL_PLT => if (symbol.flags.import) {
                 symbol.flags.plt = true;
             },
@@ -1417,15 +1421,12 @@ const riscv = struct {
     ) !void {
         const tracy = trace(@src());
         defer tracy.end();
-        _ = atom;
-        _ = target;
         _ = it;
 
         const r_type: elf.R_RISCV = @enumFromInt(rel.r_type());
 
         try stream.seekTo(rel.r_offset);
         const cwriter = stream.writer();
-        _ = cwriter;
 
         const P, const A, const S, const GOT, const G, const TP, const DTP = args;
         _ = GOT;
@@ -1435,6 +1436,16 @@ const riscv = struct {
 
         switch (r_type) {
             .NONE => unreachable,
+
+            .@"64" => {
+                try atom.resolveDynAbsReloc(
+                    target,
+                    rel,
+                    getDynAbsRelocAction(target, elf_file),
+                    elf_file,
+                    cwriter,
+                );
+            },
 
             .CALL_PLT => {
                 // TODO: relax
