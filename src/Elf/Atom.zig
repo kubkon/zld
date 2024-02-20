@@ -638,9 +638,9 @@ pub fn resolveRelocsNonAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void 
                 return error.UnhandledCpuArch;
             },
         }
-
-        try writer.writeAll(code);
     }
+
+    try writer.writeAll(code);
 }
 
 pub fn format(
