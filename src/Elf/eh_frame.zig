@@ -332,8 +332,9 @@ fn resolveReloc(rec: anytype, sym: *const Symbol, rel: elf.Elf64_Rela, elf_file:
     });
 
     switch (cpu_arch) {
-        .x86_64 => x86_64.resolveReloc(rel, P, S + A, data[offset..]),
-        .aarch64 => aarch64.resolveReloc(rel, P, S + A, data[offset..]),
+        .x86_64 => x86_64.resolveReloc(elf_file, rel, P, S + A, data[offset..]),
+        .aarch64 => aarch64.resolveReloc(elf_file, rel, P, S + A, data[offset..]),
+        .riscv64 => riscv.resolveReloc(elf_file, rel, P, S + A, data[offset..]),
         else => |arch| {
             elf_file.base.fatal("TODO support {s} architecture", .{@tagName(arch)});
             return error.UnhandledCpuArch;
@@ -573,26 +574,47 @@ const EH_PE = struct {
 };
 
 const x86_64 = struct {
-    fn resolveReloc(rel: elf.Elf64_Rela, source: i64, target: i64, data: []u8) void {
+    fn resolveReloc(elf_file: *Elf, rel: elf.Elf64_Rela, source: i64, target: i64, data: []u8) void {
         const r_type: elf.R_X86_64 = @enumFromInt(rel.r_type());
         switch (r_type) {
+            .NONE => {},
             .@"32" => std.mem.writeInt(i32, data[0..4], @as(i32, @truncate(target)), .little),
             .@"64" => std.mem.writeInt(i64, data[0..8], target, .little),
             .PC32 => std.mem.writeInt(i32, data[0..4], @as(i32, @intCast(target - source)), .little),
             .PC64 => std.mem.writeInt(i64, data[0..8], target - source, .little),
-            else => unreachable,
+            else => elf_file.base.fatal("invalid relocation type for .eh_frame section: {}", .{
+                relocation.fmtRelocType(rel.r_type(), .x86_64),
+            }),
         }
     }
 };
 
 const aarch64 = struct {
-    fn resolveReloc(rel: elf.Elf64_Rela, source: i64, target: i64, data: []u8) void {
+    fn resolveReloc(elf_file: *Elf, rel: elf.Elf64_Rela, source: i64, target: i64, data: []u8) void {
         const r_type: elf.R_AARCH64 = @enumFromInt(rel.r_type());
         switch (r_type) {
+            .NONE => {},
             .ABS64 => std.mem.writeInt(i64, data[0..8], target, .little),
             .PREL32 => std.mem.writeInt(i32, data[0..4], @as(i32, @intCast(target - source)), .little),
             .PREL64 => std.mem.writeInt(i64, data[0..8], target - source, .little),
-            else => unreachable,
+            else => elf_file.base.fatal("invalid relocation type for .eh_frame section: {}", .{
+                relocation.fmtRelocType(rel.r_type(), .aarch64),
+            }),
+        }
+    }
+};
+
+const riscv = struct {
+    fn resolveReloc(elf_file: *Elf, rel: elf.Elf64_Rela, source: i64, target: i64, data: []u8) void {
+        _ = source;
+        _ = target;
+        _ = data;
+        const r_type: elf.R_RISCV = @enumFromInt(rel.r_type());
+        switch (r_type) {
+            .NONE => {},
+            else => elf_file.base.fatal("invalid relocation type for .eh_frame section: {}", .{
+                relocation.fmtRelocType(rel.r_type(), .riscv64),
+            }),
         }
     }
 };
