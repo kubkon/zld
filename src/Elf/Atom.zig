@@ -186,6 +186,9 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
             .aarch64 => aarch64.scanReloc(self, elf_file, rel, symbol, code, &it) catch {
                 has_reloc_errors = true;
             },
+            .riscv64 => riscv.scanReloc(self, elf_file, rel, symbol, code, &it) catch {
+                has_reloc_errors = true;
+            },
             else => |arch| {
                 elf_file.base.fatal("TODO support {s} architecture", .{@tagName(arch)});
                 return error.UnhandledCpuArch;
@@ -469,6 +472,7 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
         switch (cpu_arch) {
             .x86_64 => try x86_64.resolveRelocAlloc(self, elf_file, rel, target, args, &it, code, &stream),
             .aarch64 => try aarch64.resolveRelocAlloc(self, elf_file, rel, target, args, &it, code, &stream),
+            .riscv64 => try riscv.resolveRelocAlloc(self, elf_file, rel, target, args, &it, code, &stream),
             else => |arch| {
                 elf_file.base.fatal("TODO support {s} architecture", .{@tagName(arch)});
                 return error.UnhandledCpuArch;
@@ -628,6 +632,7 @@ pub fn resolveRelocsNonAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void 
         switch (cpu_arch) {
             .x86_64 => try x86_64.resolveRelocNonAlloc(self, elf_file, rel, target, args, &it, code, &stream),
             .aarch64 => try aarch64.resolveRelocNonAlloc(self, elf_file, rel, target, args, &it, code, &stream),
+            .riscv64 => try riscv.resolveRelocNonAlloc(self, elf_file, rel, target, args, &it, code, &stream),
             else => |arch| {
                 elf_file.base.fatal("TODO support {s} architecture", .{@tagName(arch)});
                 return error.UnhandledCpuArch;
@@ -827,7 +832,7 @@ const x86_64 = struct {
         }
     }
 
-    pub fn resolveRelocAlloc(
+    fn resolveRelocAlloc(
         atom: Atom,
         elf_file: *Elf,
         rel: elf.Elf64_Rela,
@@ -951,7 +956,7 @@ const x86_64 = struct {
         }
     }
 
-    pub fn resolveRelocNonAlloc(
+    fn resolveRelocNonAlloc(
         atom: Atom,
         elf_file: *Elf,
         rel: elf.Elf64_Rela,
@@ -1232,7 +1237,7 @@ const aarch64 = struct {
         }
     }
 
-    pub fn resolveRelocAlloc(
+    fn resolveRelocAlloc(
         atom: Atom,
         elf_file: *Elf,
         rel: elf.Elf64_Rela,
@@ -1332,7 +1337,7 @@ const aarch64 = struct {
         }
     }
 
-    pub fn resolveRelocNonAlloc(
+    fn resolveRelocNonAlloc(
         atom: Atom,
         elf_file: *Elf,
         rel: elf.Elf64_Rela,
@@ -1367,6 +1372,113 @@ const aarch64 = struct {
     }
 
     const aarch64_util = @import("../aarch64.zig");
+};
+
+const riscv = struct {
+    fn scanReloc(
+        atom: Atom,
+        elf_file: *Elf,
+        rel: elf.Elf64_Rela,
+        symbol: *Symbol,
+        code: []u8,
+        it: *RelocsIterator,
+    ) !void {
+        const tracy = trace(@src());
+        defer tracy.end();
+        _ = symbol;
+        _ = code;
+        _ = it;
+
+        const r_type: elf.R_RISCV = @enumFromInt(rel.r_type());
+
+        switch (r_type) {
+            else => {
+                elf_file.base.fatal("{s}: unknown relocation type: {}", .{
+                    atom.getName(elf_file),
+                    relocation.fmtRelocType(rel.r_type(), .riscv64),
+                });
+                return error.RelocError;
+            },
+        }
+    }
+
+    fn resolveRelocAlloc(
+        atom: Atom,
+        elf_file: *Elf,
+        rel: elf.Elf64_Rela,
+        target: *const Symbol,
+        args: ResolveArgs,
+        it: *RelocsIterator,
+        code: []u8,
+        stream: anytype,
+    ) !void {
+        const tracy = trace(@src());
+        defer tracy.end();
+        _ = atom;
+        _ = target;
+        _ = it;
+        _ = code;
+
+        const r_type: elf.R_RISCV = @enumFromInt(rel.r_type());
+
+        try stream.seekTo(rel.r_offset);
+        const cwriter = stream.writer();
+        _ = cwriter;
+
+        const P, const A, const S, const GOT, const G, const TP, const DTP = args;
+        _ = P;
+        _ = A;
+        _ = S;
+        _ = GOT;
+        _ = G;
+        _ = TP;
+        _ = DTP;
+
+        switch (r_type) {
+            .NONE => unreachable,
+
+            else => elf_file.base.fatal("unhandled relocation type: {}", .{
+                relocation.fmtRelocType(rel.r_type(), .riscv64),
+            }),
+        }
+    }
+
+    fn resolveRelocNonAlloc(
+        atom: Atom,
+        elf_file: *Elf,
+        rel: elf.Elf64_Rela,
+        target: *const Symbol,
+        args: ResolveArgs,
+        it: *RelocsIterator,
+        code: []u8,
+        stream: anytype,
+    ) !void {
+        const tracy = trace(@src());
+        defer tracy.end();
+        _ = target;
+        _ = it;
+        _ = code;
+
+        const r_type: elf.R_RISCV = @enumFromInt(rel.r_type());
+
+        try stream.seekTo(rel.r_offset);
+        const cwriter = stream.writer();
+        _ = cwriter;
+
+        _, const A, const S, const GOT, _, _, const DTP = args;
+        _ = A;
+        _ = S;
+        _ = GOT;
+        _ = DTP;
+
+        switch (r_type) {
+            .NONE => unreachable,
+            else => elf_file.base.fatal("{s}: invalid relocation type for non-alloc section: {}", .{
+                atom.getName(elf_file),
+                relocation.fmtRelocType(rel.r_type(), .riscv64),
+            }),
+        }
+    }
 };
 
 const RelocsIterator = struct {
