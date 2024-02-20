@@ -621,12 +621,10 @@ const aarch64 = struct {
 
 const riscv = struct {
     fn resolveReloc(elf_file: *Elf, rel: elf.Elf64_Rela, source: i64, target: i64, data: []u8) !void {
-        _ = source;
-        _ = target;
-        _ = data;
         const r_type: elf.R_RISCV = @enumFromInt(rel.r_type());
         switch (r_type) {
             .NONE => {},
+            .@"32_PCREL" => std.mem.writeInt(i32, data[0..4], @as(i32, @intCast(target - source)), .little),
             else => {
                 elf_file.base.fatal("invalid relocation type for .eh_frame section: {}", .{
                     relocation.fmtRelocType(rel.r_type(), .riscv64),
