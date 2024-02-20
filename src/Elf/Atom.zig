@@ -1399,6 +1399,10 @@ const riscv = struct {
                 symbol.flags.plt = true;
             },
 
+            .GOT_HI20 => {
+                symbol.flags.got = true;
+            },
+
             .PCREL_HI20,
             .PCREL_LO12_I,
             .PCREL_LO12_S,
@@ -1434,8 +1438,6 @@ const riscv = struct {
         const cwriter = stream.writer();
 
         const P, const A, const S, const GOT, const G, const TP, const DTP = args;
-        _ = GOT;
-        _ = G;
         _ = TP;
         _ = DTP;
 
@@ -1450,6 +1452,12 @@ const riscv = struct {
                     elf_file,
                     cwriter,
                 );
+            },
+
+            .GOT_HI20 => {
+                assert(target.flags.got);
+                const disp: u32 = @bitCast(math.cast(i32, G + GOT + A - P) orelse return error.Overflow);
+                writeInstU(code[rel.r_offset..][0..4], disp);
             },
 
             .CALL_PLT => {
