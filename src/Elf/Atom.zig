@@ -1385,13 +1385,16 @@ const riscv = struct {
     ) !void {
         const tracy = trace(@src());
         defer tracy.end();
-        _ = symbol;
         _ = code;
         _ = it;
 
         const r_type: elf.R_RISCV = @enumFromInt(rel.r_type());
 
         switch (r_type) {
+            .CALL_PLT => if (symbol.flags.import) {
+                symbol.flags.plt = true;
+            },
+
             else => {
                 elf_file.base.fatal("{s}: unknown relocation type: {}", .{
                     atom.getName(elf_file),
@@ -1417,7 +1420,6 @@ const riscv = struct {
         _ = atom;
         _ = target;
         _ = it;
-        _ = code;
 
         const r_type: elf.R_RISCV = @enumFromInt(rel.r_type());
 
@@ -1426,9 +1428,6 @@ const riscv = struct {
         _ = cwriter;
 
         const P, const A, const S, const GOT, const G, const TP, const DTP = args;
-        _ = P;
-        _ = A;
-        _ = S;
         _ = GOT;
         _ = G;
         _ = TP;
@@ -1436,6 +1435,13 @@ const riscv = struct {
 
         switch (r_type) {
             .NONE => unreachable,
+
+            .CALL_PLT => {
+                // TODO: relax
+                const disp: u32 = @bitCast(math.cast(i32, S + A - P) orelse return error.Overflow);
+                writeInstU(code[rel.r_offset..][0..4], disp); // auipc
+                writeInstI(code[rel.r_offset..][4..8], disp); // jalr
+            },
 
             else => elf_file.base.fatal("unhandled relocation type: {}", .{
                 relocation.fmtRelocType(rel.r_type(), .riscv64),
@@ -1478,6 +1484,22 @@ const riscv = struct {
                 relocation.fmtRelocType(rel.r_type(), .riscv64),
             }),
         }
+    }
+
+    fn writeInstU(code: *[4]u8, value: u32) void {
+        const mask: u32 = 0b00000000000000000000_11111_1111111;
+        var inst = mem.readInt(u32, code, .little);
+        inst &= mask;
+        inst |= ((value + 0x800) & ~mask);
+        mem.writeInt(u32, code, inst, .little);
+    }
+
+    fn writeInstI(code: *[4]u8, value: u32) void {
+        const mask: u32 = 0b00000000000_11111_111_11111_1111111;
+        var inst = mem.readInt(u32, code, .little);
+        inst &= mask;
+        inst |= (value & ~mask);
+        mem.writeInt(u32, code, inst, .little);
     }
 };
 
