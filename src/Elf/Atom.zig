@@ -1395,6 +1395,10 @@ const riscv = struct {
                 try atom.scanReloc(symbol, rel, getDynAbsRelocAction(symbol, elf_file), elf_file);
             },
 
+            .HI20 => {
+                try atom.scanReloc(symbol, rel, getAbsRelocAction(symbol, elf_file), elf_file);
+            },
+
             .CALL_PLT => if (symbol.flags.import) {
                 symbol.flags.plt = true;
             },
@@ -1406,6 +1410,7 @@ const riscv = struct {
             .PCREL_HI20,
             .PCREL_LO12_I,
             .PCREL_LO12_S,
+            .LO12_I,
             => {},
 
             else => {
@@ -1454,6 +1459,16 @@ const riscv = struct {
                 );
             },
 
+            .HI20 => {
+                const value: u32 = @bitCast(math.cast(i32, S + A) orelse return error.Overflow);
+                writeInstU(code[rel.r_offset..][0..4], value);
+            },
+
+            .LO12_I => {
+                const value: u32 = @bitCast(math.cast(i32, S + A) orelse return error.Overflow);
+                writeInstI(code[rel.r_offset..][0..4], value);
+            },
+
             .GOT_HI20 => {
                 assert(target.flags.got);
                 const disp: u32 = @bitCast(math.cast(i32, G + GOT + A - P) orelse return error.Overflow);
@@ -1473,12 +1488,16 @@ const riscv = struct {
             },
 
             .PCREL_LO12_I => {
-                const disp: u32 = @bitCast(math.cast(i32, S + A - P) orelse return error.Overflow);
+                assert(A == 0); // according to the spec
+                // TODO: modl does something different here so I'll need to investigate more
+                const disp: u32 = @bitCast(math.cast(i32, S - P) orelse return error.Overflow);
                 writeInstI(code[rel.r_offset..][0..4], disp);
             },
 
             .PCREL_LO12_S => {
-                const disp: u32 = @bitCast(math.cast(i32, S + A - P) orelse return error.Overflow);
+                assert(A == 0); // according to the spec
+                // TODO: modl does something different here so I'll need to investigate more
+                const disp: u32 = @bitCast(math.cast(i32, S - P) orelse return error.Overflow);
                 writeInstS(code[rel.r_offset..][0..4], disp);
             },
 
