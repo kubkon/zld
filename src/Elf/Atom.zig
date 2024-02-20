@@ -1461,15 +1461,16 @@ const riscv = struct {
                 );
             },
 
-            .ADD32 => {
+            .ADD32,
+            .SUB32,
+            => {
                 var val: i32 = mem.readInt(i32, code[rel.r_offset..][0..4], .little);
-                val += math.cast(i32, S + A) orelse return error.Overflow;
-                mem.writeInt(i32, code[rel.r_offset..][0..4], val, .little);
-            },
-
-            .SUB32 => {
-                var val: i32 = mem.readInt(i32, code[rel.r_offset..][0..4], .little);
-                val -= math.cast(i32, S + A) orelse return error.Overflow;
+                const addend = math.cast(i32, S + A) orelse return error.Overflow;
+                switch (r_type) {
+                    .ADD32 => val += addend,
+                    .SUB32 => val -= addend,
+                    else => unreachable,
+                }
                 mem.writeInt(i32, code[rel.r_offset..][0..4], val, .little);
             },
 
@@ -1535,22 +1536,34 @@ const riscv = struct {
         defer tracy.end();
         _ = target;
         _ = it;
-        _ = code;
 
         const r_type: elf.R_RISCV = @enumFromInt(rel.r_type());
 
         try stream.seekTo(rel.r_offset);
         const cwriter = stream.writer();
-        _ = cwriter;
 
         _, const A, const S, const GOT, _, _, const DTP = args;
-        _ = A;
-        _ = S;
         _ = GOT;
         _ = DTP;
 
         switch (r_type) {
             .NONE => unreachable,
+
+            .@"64" => try cwriter.writeInt(i64, S + A, .little),
+
+            .ADD64,
+            .SUB64,
+            => {
+                var val: i64 = mem.readInt(i64, code[rel.r_offset..][0..8], .little);
+                const addend = S + A;
+                switch (r_type) {
+                    .ADD64 => val += addend,
+                    .SUB64 => val -= addend,
+                    else => unreachable,
+                }
+                mem.writeInt(i64, code[rel.r_offset..][0..8], val, .little);
+            },
+
             else => elf_file.base.fatal("{s}: invalid relocation type for non-alloc section: {}", .{
                 atom.getName(elf_file),
                 relocation.fmtRelocType(rel.r_type(), .riscv64),
@@ -1562,7 +1575,8 @@ const riscv = struct {
         const mask: u32 = 0b00000000000000000000_11111_1111111;
         var inst = mem.readInt(u32, code, .little);
         inst &= mask;
-        inst |= ((value + 0x800) & ~mask);
+        const compensated: u32 = @bitCast(@as(i32, @bitCast(value)) + 0x800);
+        inst |= (compensated & ~mask);
         mem.writeInt(u32, code, inst, .little);
     }
 
