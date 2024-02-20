@@ -1399,6 +1399,11 @@ const riscv = struct {
                 symbol.flags.plt = true;
             },
 
+            .PCREL_HI20,
+            .PCREL_LO12_I,
+            .PCREL_LO12_S,
+            => {},
+
             else => {
                 elf_file.base.fatal("{s}: unknown relocation type: {}", .{
                     atom.getName(elf_file),
@@ -1454,6 +1459,21 @@ const riscv = struct {
                 writeInstI(code[rel.r_offset..][4..8], disp); // jalr
             },
 
+            .PCREL_HI20 => {
+                const disp: u32 = @bitCast(math.cast(i32, S + A - P) orelse return error.Overflow);
+                writeInstU(code[rel.r_offset..][0..4], disp);
+            },
+
+            .PCREL_LO12_I => {
+                const disp: u32 = @bitCast(math.cast(i32, S + A - P) orelse return error.Overflow);
+                writeInstI(code[rel.r_offset..][0..4], disp);
+            },
+
+            .PCREL_LO12_S => {
+                const disp: u32 = @bitCast(math.cast(i32, S + A - P) orelse return error.Overflow);
+                writeInstS(code[rel.r_offset..][0..4], disp);
+            },
+
             else => elf_file.base.fatal("unhandled relocation type: {}", .{
                 relocation.fmtRelocType(rel.r_type(), .riscv64),
             }),
@@ -1507,6 +1527,14 @@ const riscv = struct {
 
     fn writeInstI(code: *[4]u8, value: u32) void {
         const mask: u32 = 0b00000000000_11111_111_11111_1111111;
+        var inst = mem.readInt(u32, code, .little);
+        inst &= mask;
+        inst |= (value & ~mask);
+        mem.writeInt(u32, code, inst, .little);
+    }
+
+    fn writeInstS(code: *[4]u8, value: u32) void {
+        const mask: u32 = 0b0000000_11111_11111_111_11111_1111111;
         var inst = mem.readInt(u32, code, .little);
         inst &= mask;
         inst |= (value & ~mask);
