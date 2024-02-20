@@ -1461,49 +1461,49 @@ const riscv = struct {
                 );
             },
 
-            .ADD32 => writeAddend(i32, .add, S + A, code[rel.r_offset..][0..4]),
-            .SUB32 => writeAddend(i32, .sub, S + A, code[rel.r_offset..][0..4]),
+            .ADD32 => riscv_util.writeAddend(i32, .add, code[rel.r_offset..][0..4], S + A),
+            .SUB32 => riscv_util.writeAddend(i32, .sub, code[rel.r_offset..][0..4], S + A),
 
             .HI20 => {
                 const value: u32 = @bitCast(math.cast(i32, S + A) orelse return error.Overflow);
-                writeInstU(code[rel.r_offset..][0..4], value);
+                riscv_util.writeInstU(code[rel.r_offset..][0..4], value);
             },
 
             .LO12_I => {
                 const value: u32 = @bitCast(math.cast(i32, S + A) orelse return error.Overflow);
-                writeInstI(code[rel.r_offset..][0..4], value);
+                riscv_util.writeInstI(code[rel.r_offset..][0..4], value);
             },
 
             .GOT_HI20 => {
                 assert(target.flags.got);
                 const disp: u32 = @bitCast(math.cast(i32, G + GOT + A - P) orelse return error.Overflow);
-                writeInstU(code[rel.r_offset..][0..4], disp);
+                riscv_util.writeInstU(code[rel.r_offset..][0..4], disp);
             },
 
             .CALL_PLT => {
                 // TODO: relax
                 const disp: u32 = @bitCast(math.cast(i32, S + A - P) orelse return error.Overflow);
-                writeInstU(code[rel.r_offset..][0..4], disp); // auipc
-                writeInstI(code[rel.r_offset..][4..8], disp); // jalr
+                riscv_util.writeInstU(code[rel.r_offset..][0..4], disp); // auipc
+                riscv_util.writeInstI(code[rel.r_offset..][4..8], disp); // jalr
             },
 
             .PCREL_HI20 => {
                 const disp: u32 = @bitCast(math.cast(i32, S + A - P) orelse return error.Overflow);
-                writeInstU(code[rel.r_offset..][0..4], disp);
+                riscv_util.writeInstU(code[rel.r_offset..][0..4], disp);
             },
 
             .PCREL_LO12_I => {
                 assert(A == 0); // according to the spec
                 // TODO: modl does something different here so I'll need to investigate more
                 const disp: u32 = @bitCast(math.cast(i32, S - P) orelse return error.Overflow);
-                writeInstI(code[rel.r_offset..][0..4], disp);
+                riscv_util.writeInstI(code[rel.r_offset..][0..4], disp);
             },
 
             .PCREL_LO12_S => {
                 assert(A == 0); // according to the spec
                 // TODO: modl does something different here so I'll need to investigate more
                 const disp: u32 = @bitCast(math.cast(i32, S - P) orelse return error.Overflow);
-                writeInstS(code[rel.r_offset..][0..4], disp);
+                riscv_util.writeInstS(code[rel.r_offset..][0..4], disp);
             },
 
             else => elf_file.base.fatal("unhandled relocation type: {}", .{
@@ -1542,32 +1542,21 @@ const riscv = struct {
             .@"32" => try cwriter.writeInt(i32, @as(i32, @intCast(S + A)), .little),
             .@"64" => try cwriter.writeInt(i64, S + A, .little),
 
-            .ADD8 => writeAddend(i8, .add, S + A, code[rel.r_offset..][0..1]),
-            .SUB8 => writeAddend(i8, .sub, S + A, code[rel.r_offset..][0..1]),
-            .ADD16 => writeAddend(i16, .add, S + A, code[rel.r_offset..][0..2]),
-            .SUB16 => writeAddend(i16, .sub, S + A, code[rel.r_offset..][0..2]),
-            .ADD32 => writeAddend(i32, .add, S + A, code[rel.r_offset..][0..4]),
-            .SUB32 => writeAddend(i32, .sub, S + A, code[rel.r_offset..][0..4]),
-            .ADD64 => writeAddend(i64, .add, S + A, code[rel.r_offset..][0..8]),
-            .SUB64 => writeAddend(i64, .sub, S + A, code[rel.r_offset..][0..8]),
+            .ADD8 => riscv_util.writeAddend(i8, .add, code[rel.r_offset..][0..1], S + A),
+            .SUB8 => riscv_util.writeAddend(i8, .sub, code[rel.r_offset..][0..1], S + A),
+            .ADD16 => riscv_util.writeAddend(i16, .add, code[rel.r_offset..][0..2], S + A),
+            .SUB16 => riscv_util.writeAddend(i16, .sub, code[rel.r_offset..][0..2], S + A),
+            .ADD32 => riscv_util.writeAddend(i32, .add, code[rel.r_offset..][0..4], S + A),
+            .SUB32 => riscv_util.writeAddend(i32, .sub, code[rel.r_offset..][0..4], S + A),
+            .ADD64 => riscv_util.writeAddend(i64, .add, code[rel.r_offset..][0..8], S + A),
+            .SUB64 => riscv_util.writeAddend(i64, .sub, code[rel.r_offset..][0..8], S + A),
 
             .SET8 => mem.writeInt(i8, code[rel.r_offset..][0..1], @as(i8, @truncate(S + A)), .little),
             .SET16 => mem.writeInt(i16, code[rel.r_offset..][0..2], @as(i16, @truncate(S + A)), .little),
             .SET32 => mem.writeInt(i32, code[rel.r_offset..][0..4], @as(i32, @truncate(S + A)), .little),
 
-            .SET6,
-            .SUB6,
-            => {
-                const mask: u8 = 0b11_000000;
-                const addend: i8 = @truncate(S + A);
-                var value: u8 = mem.readInt(u8, code[rel.r_offset..][0..1], .little);
-                switch (r_type) {
-                    .SET6 => value = (value & mask) | @as(u8, @bitCast(addend & ~mask)),
-                    .SUB6 => value = (value & mask) | (@as(u8, @bitCast(@as(i8, @bitCast(value)) -| addend)) & ~mask),
-                    else => unreachable,
-                }
-                mem.writeInt(u8, code[rel.r_offset..][0..1], value, .little);
-            },
+            .SET6 => riscv_util.writeSetSub6(.set, code[rel.r_offset..][0..1], S + A),
+            .SUB6 => riscv_util.writeSetSub6(.sub, code[rel.r_offset..][0..1], S + A),
 
             else => elf_file.base.fatal("{s}: invalid relocation type for non-alloc section: {}", .{
                 atom.getName(elf_file),
@@ -1576,45 +1565,7 @@ const riscv = struct {
         }
     }
 
-    fn writeAddend(
-        comptime Int: type,
-        comptime op: enum { add, sub },
-        value: anytype,
-        code: *[@typeInfo(Int).Int.bits / 8]u8,
-    ) void {
-        var V: Int = mem.readInt(Int, code, .little);
-        const addend: Int = @truncate(value);
-        switch (op) {
-            .add => V +|= addend, // TODO: I think saturating arithmetic is correct here
-            .sub => V -|= addend,
-        }
-        mem.writeInt(Int, code, V, .little);
-    }
-
-    fn writeInstU(code: *[4]u8, value: u32) void {
-        const mask: u32 = 0b00000000000000000000_11111_1111111;
-        var inst = mem.readInt(u32, code, .little);
-        inst &= mask;
-        const compensated: u32 = @bitCast(@as(i32, @bitCast(value)) + 0x800);
-        inst |= (compensated & ~mask);
-        mem.writeInt(u32, code, inst, .little);
-    }
-
-    fn writeInstI(code: *[4]u8, value: u32) void {
-        const mask: u32 = 0b00000000000_11111_111_11111_1111111;
-        var inst = mem.readInt(u32, code, .little);
-        inst &= mask;
-        inst |= (value & ~mask);
-        mem.writeInt(u32, code, inst, .little);
-    }
-
-    fn writeInstS(code: *[4]u8, value: u32) void {
-        const mask: u32 = 0b0000000_11111_11111_111_11111_1111111;
-        var inst = mem.readInt(u32, code, .little);
-        inst &= mask;
-        inst |= (value & ~mask);
-        mem.writeInt(u32, code, inst, .little);
-    }
+    const riscv_util = @import("../riscv.zig");
 };
 
 const RelocsIterator = struct {
