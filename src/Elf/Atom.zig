@@ -1411,6 +1411,8 @@ const riscv = struct {
             .PCREL_LO12_I,
             .PCREL_LO12_S,
             .LO12_I,
+            .ADD32,
+            .SUB32,
             => {},
 
             else => {
@@ -1457,6 +1459,18 @@ const riscv = struct {
                     elf_file,
                     cwriter,
                 );
+            },
+
+            .ADD32 => {
+                var val: i32 = mem.readInt(i32, code[rel.r_offset..][0..4], .little);
+                val += math.cast(i32, S + A) orelse return error.Overflow;
+                mem.writeInt(i32, code[rel.r_offset..][0..4], val, .little);
+            },
+
+            .SUB32 => {
+                var val: i32 = mem.readInt(i32, code[rel.r_offset..][0..4], .little);
+                val -= math.cast(i32, S + A) orelse return error.Overflow;
+                mem.writeInt(i32, code[rel.r_offset..][0..4], val, .little);
             },
 
             .HI20 => {
