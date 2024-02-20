@@ -1461,18 +1461,8 @@ const riscv = struct {
                 );
             },
 
-            .ADD32,
-            .SUB32,
-            => {
-                var val: i32 = mem.readInt(i32, code[rel.r_offset..][0..4], .little);
-                const addend = math.cast(i32, S + A) orelse return error.Overflow;
-                switch (r_type) {
-                    .ADD32 => val += addend,
-                    .SUB32 => val -= addend,
-                    else => unreachable,
-                }
-                mem.writeInt(i32, code[rel.r_offset..][0..4], val, .little);
-            },
+            .ADD32 => writeAddend(i32, .add, S + A, code[rel.r_offset..][0..4]),
+            .SUB32 => writeAddend(i32, .sub, S + A, code[rel.r_offset..][0..4]),
 
             .HI20 => {
                 const value: u32 = @bitCast(math.cast(i32, S + A) orelse return error.Overflow);
@@ -1551,24 +1541,35 @@ const riscv = struct {
 
             .@"64" => try cwriter.writeInt(i64, S + A, .little),
 
-            .ADD64,
-            .SUB64,
-            => {
-                var val: i64 = mem.readInt(i64, code[rel.r_offset..][0..8], .little);
-                const addend = S + A;
-                switch (r_type) {
-                    .ADD64 => val += addend,
-                    .SUB64 => val -= addend,
-                    else => unreachable,
-                }
-                mem.writeInt(i64, code[rel.r_offset..][0..8], val, .little);
-            },
+            .ADD8 => writeAddend(i8, .add, S + A, code[rel.r_offset..][0..1]),
+            .SUB8 => writeAddend(i8, .sub, S + A, code[rel.r_offset..][0..1]),
+            .ADD16 => writeAddend(i16, .add, S + A, code[rel.r_offset..][0..2]),
+            .SUB16 => writeAddend(i16, .sub, S + A, code[rel.r_offset..][0..2]),
+            .ADD32 => writeAddend(i32, .add, S + A, code[rel.r_offset..][0..4]),
+            .SUB32 => writeAddend(i32, .sub, S + A, code[rel.r_offset..][0..4]),
+            .ADD64 => writeAddend(i64, .add, S + A, code[rel.r_offset..][0..8]),
+            .SUB64 => writeAddend(i64, .sub, S + A, code[rel.r_offset..][0..8]),
 
             else => elf_file.base.fatal("{s}: invalid relocation type for non-alloc section: {}", .{
                 atom.getName(elf_file),
                 relocation.fmtRelocType(rel.r_type(), .riscv64),
             }),
         }
+    }
+
+    fn writeAddend(
+        comptime Int: type,
+        comptime op: enum { add, sub },
+        value: anytype,
+        code: *[@typeInfo(Int).Int.bits / 8]u8,
+    ) void {
+        var V: Int = mem.readInt(Int, code, .little);
+        const addend: Int = @truncate(value);
+        switch (op) {
+            .add => V +%= addend, // TODO: no clue if this is the right approach here
+            .sub => V -%= addend,
+        }
+        mem.writeInt(Int, code, V, .little);
     }
 
     fn writeInstU(code: *[4]u8, value: u32) void {
