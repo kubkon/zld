@@ -1539,6 +1539,7 @@ const riscv = struct {
         switch (r_type) {
             .NONE => unreachable,
 
+            .@"32" => try cwriter.writeInt(i32, @as(i32, @intCast(S + A)), .little),
             .@"64" => try cwriter.writeInt(i64, S + A, .little),
 
             .ADD8 => writeAddend(i8, .add, S + A, code[rel.r_offset..][0..1]),
@@ -1549,6 +1550,24 @@ const riscv = struct {
             .SUB32 => writeAddend(i32, .sub, S + A, code[rel.r_offset..][0..4]),
             .ADD64 => writeAddend(i64, .add, S + A, code[rel.r_offset..][0..8]),
             .SUB64 => writeAddend(i64, .sub, S + A, code[rel.r_offset..][0..8]),
+
+            .SET8 => mem.writeInt(i8, code[rel.r_offset..][0..1], @as(i8, @truncate(S + A)), .little),
+            .SET16 => mem.writeInt(i16, code[rel.r_offset..][0..2], @as(i16, @truncate(S + A)), .little),
+            .SET32 => mem.writeInt(i32, code[rel.r_offset..][0..4], @as(i32, @truncate(S + A)), .little),
+
+            .SET6,
+            .SUB6,
+            => {
+                const mask: u8 = 0b11_000000;
+                const addend: i8 = @truncate(S + A);
+                var value: u8 = mem.readInt(u8, code[rel.r_offset..][0..1], .little);
+                switch (r_type) {
+                    .SET6 => value = (value & mask) | @as(u8, @bitCast(addend & ~mask)),
+                    .SUB6 => value = (value & mask) | (@as(u8, @bitCast(@as(i8, @bitCast(value)) -| addend)) & ~mask),
+                    else => unreachable,
+                }
+                mem.writeInt(u8, code[rel.r_offset..][0..1], value, .little);
+            },
 
             else => elf_file.base.fatal("{s}: invalid relocation type for non-alloc section: {}", .{
                 atom.getName(elf_file),
@@ -1566,8 +1585,8 @@ const riscv = struct {
         var V: Int = mem.readInt(Int, code, .little);
         const addend: Int = @truncate(value);
         switch (op) {
-            .add => V +%= addend, // TODO: no clue if this is the right approach here
-            .sub => V -%= addend,
+            .add => V +|= addend, // TODO: I think saturating arithmetic is correct here
+            .sub => V -|= addend,
         }
         mem.writeInt(Int, code, V, .little);
     }
