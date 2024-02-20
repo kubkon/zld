@@ -1484,7 +1484,7 @@ const riscv = struct {
                 // TODO: relax
                 const disp: u32 = @bitCast(math.cast(i32, S + A - P) orelse return error.Overflow);
                 riscv_util.writeInstU(code[rel.r_offset..][0..4], disp); // auipc
-                riscv_util.writeInstI(code[rel.r_offset..][4..8], disp); // jalr
+                riscv_util.writeInstI(code[rel.r_offset + 4 ..][0..4], disp); // jalr
             },
 
             .PCREL_HI20 => {

@@ -25,27 +25,30 @@ pub fn writeAddend(
 }
 
 pub fn writeInstU(code: *[4]u8, value: u32) void {
-    const mask: u32 = 0b00000000000000000000_11111_1111111;
+    const inst_mask: u32 = 0b00000000000000000000_11111_1111111;
+    const val_mask: u32 = 0xffff_f000;
     var inst = mem.readInt(u32, code, .little);
-    inst &= mask;
+    inst &= inst_mask;
     const compensated: u32 = @bitCast(@as(i32, @bitCast(value)) + 0x800);
-    inst |= (compensated & ~mask);
+    inst |= (compensated & val_mask);
     mem.writeInt(u32, code, inst, .little);
 }
 
 pub fn writeInstI(code: *[4]u8, value: u32) void {
-    const mask: u32 = 0b00000000000_11111_111_11111_1111111;
+    const inst_mask: u32 = 0b00000000000_11111_111_11111_1111111;
+    const val_mask: u32 = 0b111_11111111;
     var inst = mem.readInt(u32, code, .little);
-    inst &= mask;
-    inst |= (value & ~mask);
+    inst &= inst_mask;
+    inst |= ((value & val_mask) << 20);
     mem.writeInt(u32, code, inst, .little);
 }
 
 pub fn writeInstS(code: *[4]u8, value: u32) void {
-    const mask: u32 = 0b0000000_11111_11111_111_11111_1111111;
+    const inst_mask: u32 = 0b0000000_11111_11111_111_11111_1111111;
+    const val_mask: u32 = 0b111_1111;
     var inst = mem.readInt(u32, code, .little);
-    inst &= mask;
-    inst |= (value & ~mask);
+    inst &= inst_mask;
+    inst |= ((value & val_mask) << 25);
     mem.writeInt(u32, code, inst, .little);
 }
 
