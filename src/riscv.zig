@@ -44,11 +44,12 @@ pub fn writeInstI(code: *[4]u8, value: u32) void {
 }
 
 pub fn writeInstS(code: *[4]u8, value: u32) void {
-    const inst_mask: u32 = 0b0000000_11111_11111_111_11111_1111111;
-    const val_mask: u32 = 0b111_1111;
+    const inst_mask: u32 = 0b000000_11111_11111_111_00000_1111111;
+    const val_mask_up: u32 = 0b11_1111;
+    const val_mask_down: u32 = 0b1_1111;
     var inst = mem.readInt(u32, code, .little);
     inst &= inst_mask;
-    inst |= ((value & val_mask) << 25);
+    inst |= ((value & val_mask_up) << 25) | ((value & val_mask_down) << 7);
     mem.writeInt(u32, code, inst, .little);
 }
 
