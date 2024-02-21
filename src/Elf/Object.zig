@@ -659,7 +659,8 @@ pub fn calcSymtabSize(self: *Object, elf_file: *Elf) !void {
         if (local.getAtom(elf_file)) |atom| if (!atom.flags.alive) continue;
         const s_sym = local.getSourceSymbol(elf_file);
         switch (s_sym.st_type()) {
-            elf.STT_SECTION, elf.STT_NOTYPE => continue,
+            elf.STT_SECTION => continue,
+            elf.STT_NOTYPE => if (s_sym.st_shndx == elf.SHN_UNDEF) continue,
             else => {},
         }
         local.flags.output_symtab = true;
