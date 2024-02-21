@@ -35,22 +35,23 @@ pub fn writeInstU(code: *[4]u8, value: u32) void {
 }
 
 pub fn writeInstI(code: *[4]u8, value: u32) void {
-    const inst_mask: u32 = 0b00000000000_11111_111_11111_1111111;
-    const val_mask: u32 = 0b111_11111111;
+    const mask: u32 = 0b00000000000_11111_111_11111_1111111;
     var inst = mem.readInt(u32, code, .little);
-    inst &= inst_mask;
-    inst |= ((value & val_mask) << 20);
+    inst &= mask;
+    inst |= (bitSlice(value, 11, 0) << 20);
     mem.writeInt(u32, code, inst, .little);
 }
 
 pub fn writeInstS(code: *[4]u8, value: u32) void {
-    const inst_mask: u32 = 0b000000_11111_11111_111_00000_1111111;
-    const val_mask_up: u32 = 0b11_1111;
-    const val_mask_down: u32 = 0b1_1111;
+    const mask: u32 = 0b000000_11111_11111_111_00000_1111111;
     var inst = mem.readInt(u32, code, .little);
-    inst &= inst_mask;
-    inst |= ((value & val_mask_up) << 25) | ((value & val_mask_down) << 7);
+    inst &= mask;
+    inst |= (bitSlice(value, 11, 5) << 25) | (bitSlice(value, 4, 0) << 7);
     mem.writeInt(u32, code, inst, .little);
+}
+
+fn bitSlice(value: anytype, high: std.math.Log2Int(@TypeOf(value)), low: std.math.Log2Int(@TypeOf(value))) @TypeOf(value) {
+    return (value >> low) & ((@as(@TypeOf(value), 1) << (high - low + 1)) - 1);
 }
 
 const mem = std.mem;
