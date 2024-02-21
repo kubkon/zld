@@ -2361,6 +2361,12 @@ pub fn writeShdrs(self: *Elf) !void {
     try self.base.file.pwriteAll(mem.sliceAsBytes(self.sections.items(.shdr)), self.shoff);
 }
 
+fn getRiscvEFlags(self: *Elf) !u32 {
+    _ = self;
+    // TODO: implement this
+    return 5;
+}
+
 fn writeHeader(self: *Elf) !void {
     var header = elf.Elf64_Ehdr{
         .e_ident = undefined,
@@ -2370,7 +2376,7 @@ fn writeHeader(self: *Elf) !void {
         .e_entry = if (self.entry_index) |index| self.getSymbol(index).getAddress(.{}, self) else 0,
         .e_phoff = @sizeOf(elf.Elf64_Ehdr),
         .e_shoff = self.shoff,
-        .e_flags = 0,
+        .e_flags = if (self.options.cpu_arch.? == .riscv64) try self.getRiscvEFlags() else 0,
         .e_ehsize = @sizeOf(elf.Elf64_Ehdr),
         .e_phentsize = @sizeOf(elf.Elf64_Phdr),
         .e_phnum = @intCast(self.phdrs.items.len),
