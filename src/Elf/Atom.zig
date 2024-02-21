@@ -1493,10 +1493,10 @@ const riscv = struct {
                 const S_ = @as(i64, @intCast(target_.getAddress(.{}, elf_file)));
                 const A_ = pair.r_addend;
                 const P_ = @as(i64, @intCast(atom.getAddress(elf_file) + pair.r_offset));
-                const G_ = @as(i64, @intCast(target_.getGotAddress(elf_file)));
+                const G_ = @as(i64, @intCast(target_.getGotAddress(elf_file))) - GOT;
                 const disp = switch (@as(elf.R_RISCV, @enumFromInt(pair.r_type()))) {
                     .PCREL_HI20 => math.cast(i32, S_ + A_ - P_) orelse return error.Overflow,
-                    .GOT_HI20 => math.cast(i32, G_ + A_ - P_) orelse return error.Overflow,
+                    .GOT_HI20 => math.cast(i32, G_ + GOT + A_ - P_) orelse return error.Overflow,
                     else => unreachable,
                 };
                 relocs_log.debug("      [{x} => {x}]", .{ P_, disp + P_ });
