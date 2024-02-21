@@ -50,6 +50,7 @@ gnu_eh_frame_hdr_index: ?u32 = null,
 rela_iplt_start_index: ?u32 = null,
 rela_iplt_end_index: ?u32 = null,
 end_index: ?u32 = null,
+global_pointer_index: ?u32 = null,
 start_stop_indexes: std.ArrayListUnmanaged(u32) = .{},
 
 entry_index: ?u32 = null,
@@ -1611,6 +1612,19 @@ fn allocateSyntheticSymbols(self: *Elf) void {
             stop.shndx = shndx;
         }
     }
+
+    // __global_pointer$
+    if (self.global_pointer_index) |index| {
+        const sym = self.getSymbol(index);
+        if (self.getSectionByName(".sdata")) |shndx| {
+            const shdr = self.sections.items(.shdr)[shndx];
+            sym.value = shdr.sh_addr + 0x800;
+            sym.shndx = shndx;
+        } else {
+            sym.value = 0;
+            sym.shndx = 0;
+        }
+    }
 }
 
 fn parsePositional(self: *Elf, arena: Allocator, obj: LinkObject, search_dirs: []const []const u8) anyerror!void {
@@ -1927,6 +1941,7 @@ fn markImportsAndExports(self: *Elf) !void {
 }
 
 fn resolveSyntheticSymbols(self: *Elf) !void {
+    const is_shared = self.options.shared;
     const internal_index = self.internal_object_index orelse return;
     const internal = self.getFile(internal_index).?.internal;
     self.dynamic_index = try internal.addSyntheticGlobal("_DYNAMIC", self);
@@ -1966,6 +1981,10 @@ fn resolveSyntheticSymbols(self: *Elf) !void {
             self.start_stop_indexes.appendAssumeCapacity(try internal.addSyntheticGlobal(start, self));
             self.start_stop_indexes.appendAssumeCapacity(try internal.addSyntheticGlobal(stop, self));
         }
+    }
+
+    if (self.options.cpu_arch.? == .riscv64 and !is_shared) {
+        self.global_pointer_index = try internal.addSyntheticGlobal("__global_pointer$", self);
     }
 
     internal.resolveSymbols(self);
