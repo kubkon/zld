@@ -1437,7 +1437,6 @@ const riscv = struct {
     ) !void {
         const tracy = trace(@src());
         defer tracy.end();
-        _ = it;
 
         const r_type: elf.R_RISCV = @enumFromInt(rel.r_type());
 
@@ -1492,18 +1491,36 @@ const riscv = struct {
                 riscv_util.writeInstU(code[rel.r_offset..][0..4], disp);
             },
 
-            .PCREL_LO12_I => {
+            .PCREL_LO12_I,
+            .PCREL_LO12_S,
+            => {
                 assert(A == 0); // according to the spec
-                // TODO: modl does something different here so I'll need to investigate more
-                const disp: u32 = @bitCast(math.cast(i32, S - P) orelse return error.Overflow);
-                riscv_util.writeInstI(code[rel.r_offset..][0..4], disp);
-            },
-
-            .PCREL_LO12_S => {
-                assert(A == 0); // according to the spec
-                // TODO: modl does something different here so I'll need to investigate more
-                const disp: u32 = @bitCast(math.cast(i32, S - P) orelse return error.Overflow);
-                riscv_util.writeInstS(code[rel.r_offset..][0..4], disp);
+                // We need to find the paired reloc for this relocation.
+                // TODO: should we search forward too?
+                const object = atom.getObject(elf_file);
+                const pos = it.pos;
+                const pair = while (it.prev()) |pair| {
+                    if (target.getAddress(.{}, elf_file) == atom.getAddress(elf_file) + pair.r_offset) {
+                        break pair;
+                    }
+                } else unreachable; // TODO error
+                it.pos = pos;
+                const target_ = object.getSymbol(pair.r_sym(), elf_file);
+                const S_ = @as(i64, @intCast(target_.getAddress(.{}, elf_file)));
+                const A_ = pair.r_addend;
+                const P_ = @as(i64, @intCast(atom.getAddress(elf_file) + pair.r_offset));
+                const G_ = @as(i64, @intCast(target_.getGotAddress(elf_file)));
+                const disp = switch (@as(elf.R_RISCV, @enumFromInt(pair.r_type()))) {
+                    .PCREL_HI20 => math.cast(i32, S_ + A_ - P_) orelse return error.Overflow,
+                    .GOT_HI20 => math.cast(i32, G_ + A_ - P_) orelse return error.Overflow,
+                    else => unreachable,
+                };
+                relocs_log.debug("      [{x} => {x}]", .{ P_, disp + P_ });
+                switch (r_type) {
+                    .PCREL_LO12_I => riscv_util.writeInstI(code[rel.r_offset..][0..4], @bitCast(disp)),
+                    .PCREL_LO12_S => riscv_util.writeInstS(code[rel.r_offset..][0..4], @bitCast(disp)),
+                    else => unreachable,
+                }
             },
 
             else => elf_file.base.fatal("unhandled relocation type: {}", .{
@@ -1570,18 +1587,24 @@ const riscv = struct {
 
 const RelocsIterator = struct {
     relocs: []const elf.Elf64_Rela,
-    pos: usize = 0,
+    pos: i64 = -1,
 
     fn next(it: *RelocsIterator) ?elf.Elf64_Rela {
-        if (it.pos >= it.relocs.len) return null;
-        const rel = it.relocs[it.pos];
         it.pos += 1;
+        if (it.pos >= it.relocs.len) return null;
+        return it.relocs[@intCast(it.pos)];
+    }
+
+    fn prev(it: *RelocsIterator) ?elf.Elf64_Rela {
+        if (it.pos == -1) return null;
+        const rel = it.relocs[@intCast(it.pos)];
+        it.pos -= 1;
         return rel;
     }
 
     fn skip(it: *RelocsIterator, num: usize) void {
         assert(num > 0);
-        it.pos += num;
+        it.pos += @intCast(num);
     }
 };
 
