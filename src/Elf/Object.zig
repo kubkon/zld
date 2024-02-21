@@ -216,6 +216,7 @@ fn initAtoms(self: *Object, allocator: Allocator, file: std.fs.File, elf_file: *
                 atom.rel_index = @intCast(self.relocs.items.len);
                 atom.rel_num = @intCast(relocs.len);
                 try self.relocs.appendUnalignedSlice(allocator, relocs);
+                sortRelocs(self.relocs.items[atom.rel_index..][0..atom.rel_num], elf_file);
             }
         },
         else => {},
@@ -366,12 +367,13 @@ fn parseEhFrame(self: *Object, allocator: Allocator, file: std.fs.File, shndx: u
     defer allocator.free(relocs);
     const rel_start = @as(u32, @intCast(self.relocs.items.len));
     try self.relocs.appendUnalignedSlice(allocator, relocs);
+    sortRelocs(self.relocs.items[rel_start..][0..relocs.len], elf_file);
     const fdes_start = self.fdes.items.len;
     const cies_start = self.cies.items.len;
 
     var it = eh_frame.Iterator{ .data = self.eh_frame_data.items };
     while (try it.next()) |rec| {
-        const rel_range = filterRelocs(relocs, rec.offset, rec.size + 4);
+        const rel_range = filterRelocs(self.relocs.items[rel_start..][0..relocs.len], rec.offset, rec.size + 4);
         switch (rec.tag) {
             .cie => try self.cies.append(allocator, .{
                 .offset = data_start + rec.offset,
@@ -433,8 +435,21 @@ fn parseEhFrame(self: *Object, allocator: Allocator, file: std.fs.File, shndx: u
     }
 }
 
+fn sortRelocs(relocs: []elf.Elf64_Rela, ctx: *Elf) void {
+    const sortFn = struct {
+        fn lessThan(c: void, lhs: elf.Elf64_Rela, rhs: elf.Elf64_Rela) bool {
+            _ = c;
+            return lhs.r_offset < rhs.r_offset;
+        }
+    }.lessThan;
+
+    if (ctx.options.cpu_arch.? == .riscv64) {
+        mem.sort(elf.Elf64_Rela, relocs, {}, sortFn);
+    }
+}
+
 fn filterRelocs(
-    relocs: []align(1) const elf.Elf64_Rela,
+    relocs: []const elf.Elf64_Rela,
     start: u64,
     len: u64,
 ) struct { start: u64, len: u64 } {
