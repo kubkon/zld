@@ -440,15 +440,7 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
         // Address of the target symbol - can be address of the symbol within an atom or address of PLT stub.
         const S = @as(i64, @intCast(target.getAddress(.{}, elf_file)));
         // Address of the global offset table.
-        const GOT = blk: {
-            const shndx = if (elf_file.got_plt_sect_index) |shndx|
-                shndx
-            else if (elf_file.got_sect_index) |shndx|
-                shndx
-            else
-                null;
-            break :blk if (shndx) |index| @as(i64, @intCast(elf_file.sections.items(.shdr)[index].sh_addr)) else 0;
-        };
+        const GOT = @as(i64, @intCast(elf_file.getGotAddress()));
         // Relative offset to the start of the global offset table.
         const G = @as(i64, @intCast(target.getGotAddress(elf_file))) - GOT;
         // Address of the thread pointer.
@@ -606,15 +598,7 @@ pub fn resolveRelocsNonAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void 
         const P = @as(i64, @intCast(self.getAddress(elf_file) + rel.r_offset));
         const A = rel.r_addend;
         const S = @as(i64, @intCast(target.getAddress(.{}, elf_file)));
-        const GOT = blk: {
-            const shndx = if (elf_file.got_plt_sect_index) |shndx|
-                shndx
-            else if (elf_file.got_sect_index) |shndx|
-                shndx
-            else
-                null;
-            break :blk if (shndx) |index| @as(i64, @intCast(elf_file.sections.items(.shdr)[index].sh_addr)) else 0;
-        };
+        const GOT = @as(i64, @intCast(elf_file.getGotAddress()));
         const DTP = @as(i64, @intCast(elf_file.getDtpAddress()));
 
         relocs_log.debug("  {s}: {x}: [{x} => {x}] ({s})", .{

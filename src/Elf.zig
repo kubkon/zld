@@ -2670,6 +2670,15 @@ fn getStartStopBasename(self: *Elf, shdr: elf.Elf64_Shdr) ?[]const u8 {
     return null;
 }
 
+pub fn getGotAddress(self: *Elf) u64 {
+    const shndx = blk: {
+        if (self.options.cpu_arch.? == .x86_64 and self.got_plt_sect_index != null)
+            break :blk self.got_plt_sect_index.?;
+        break :blk if (self.got_sect_index) |shndx| shndx else null;
+    };
+    return if (shndx) |index| self.sections.items(.shdr)[index].sh_addr else 0;
+}
+
 pub fn getTpAddress(self: *Elf) u64 {
     const index = self.tls_phdr_index orelse return 0;
     const phdr = self.phdrs.items[index];
