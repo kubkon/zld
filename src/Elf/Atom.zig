@@ -1285,7 +1285,10 @@ const aarch64 = struct {
                 try aarch64_util.writePages(pages, code[rel.r_offset..][0..4]);
             } else {
                 // TODO: relax
-                elf_file.base.fatal("TODO relax ADR_GOT_PAGE", .{});
+                elf_file.base.fatal("{s}: {x}: TODO relax ADR_GOT_PAGE", .{
+                    atom.getName(elf_file),
+                    rel.r_offset,
+                });
             },
 
             .LD64_GOT_LO12_NC => {
@@ -1480,19 +1483,24 @@ const riscv = struct {
             => {
                 assert(A == 0); // according to the spec
                 // We need to find the paired reloc for this relocation.
-                // TODO: should we search forward too?
                 const object = atom.getObject(elf_file);
                 const pos = it.pos;
+                const atom_addr = atom.getAddress(elf_file);
                 const pair = while (it.prev()) |pair| {
-                    if (target.getAddress(.{}, elf_file) == atom.getAddress(elf_file) + pair.r_offset) {
-                        break pair;
-                    }
-                } else unreachable; // TODO error
+                    if (S == atom_addr + pair.r_offset) break pair;
+                } else {
+                    // TODO: search forward too
+                    elf_file.base.fatal("{s}: {x}: TODO search forward for matching HI20 reloc", .{
+                        atom.getName(elf_file),
+                        rel.r_offset,
+                    });
+                    return error.RelocError;
+                };
                 it.pos = pos;
                 const target_ = object.getSymbol(pair.r_sym(), elf_file);
                 const S_ = @as(i64, @intCast(target_.getAddress(.{}, elf_file)));
                 const A_ = pair.r_addend;
-                const P_ = @as(i64, @intCast(atom.getAddress(elf_file) + pair.r_offset));
+                const P_ = @as(i64, @intCast(atom_addr + pair.r_offset));
                 const G_ = @as(i64, @intCast(target_.getGotAddress(elf_file))) - GOT;
                 const disp = switch (@as(elf.R_RISCV, @enumFromInt(pair.r_type()))) {
                     .PCREL_HI20 => math.cast(i32, S_ + A_ - P_) orelse return error.Overflow,
