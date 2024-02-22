@@ -3,49 +3,40 @@ name: CI
 on: [pull_request]
 
 jobs:
-  default_tools:
+  macos:
     name: Test default system tools
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        # https://github.com/kubkon/zld/issues/44
-        # os: [macos, ubuntu, windows]
-        os: [ macos-12, macos-13, macos-14, ubuntu-latest ]
+        os: [ macos-11, macos-12, macos-13, macos-14 ]
 
     steps:
-    - if: matrix.os == 'windows'
-      run: git config --global core.autocrlf false
     - uses: actions/checkout@v3
     - uses: goto-bus-stop/setup-zig@v2
       with:
         version: master
     - run: zig version
     - run: zig fmt --check src 
-    - run: zig build test -Dhas-static -Dhas-zig -Dhas-objc-msgsend-stubs
+    - if: matrix.os == 'macos-11'
+      run: zig build test -Dhas-static -Dhas-zig
+    - if: ${{ matrix.os != 'macos-11' }}
+      run: zig build test -Dhas-static -Dhas-zig -Dhas-objc-msgsend-stubs
 
-  macos_11:
-    name: Test macos 11.0
-    runs-on: macos-11
-    steps:
-    - uses: actions/checkout@v3
-    - uses: goto-bus-stop/setup-zig@v2
-      with:
-        version: master
-    - run: zig version
-    - run: zig build test -Dhas-static -Dhas-zig
-
-  gcc_musl:
-    name: Test gcc with musl
+  gcc:
+    name: Test gcc
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v3
     - uses: goto-bus-stop/setup-zig@v2
       with:
         version: master
-    - run: sudo apt-get install -y musl-tools
+    - run: sudo apt-get install -y musl-tools gcc-aarch64-linux-gnu qemu-user
     - run: zig version
-    - run: CC=musl-gcc zig build test -Dhas-static -Dmusl
+    - run: zig fmt --check src 
+    - run: zig build test -Dhas-static -Dhas-zig
+    - run: USE_CC=musl-gcc zig build test -Dhas-static -Dmusl
+    - run: USE_CC=aarch64-linux-gnu-gcc zig build test -Dhas-static -fqemu
 
   clang_glibc:
     name: Test clang with glibc
@@ -57,4 +48,4 @@ jobs:
         version: master
     - run: sudo apt-get install -y clang
     - run: zig version
-    - run: CC=clang zig build test -Dhas-static -Dsystem-compiler=clang
+    - run: USE_CC=clang zig build test -Dhas-static -Dsystem-compiler=clang
