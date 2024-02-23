@@ -137,7 +137,7 @@ pub fn getPltAddress(symbol: Symbol, elf_file: *Elf) u64 {
     if (!symbol.flags.plt) return 0;
     const extra = symbol.getExtra(elf_file).?;
     const shdr = elf_file.sections.items(.shdr)[elf_file.plt_sect_index.?];
-    return shdr.sh_addr + extra.plt * 16 + PltSection.preamble_size;
+    return shdr.sh_addr + extra.plt * 16 + PltSection.preambleSize(elf_file.options.cpu_arch.?);
 }
 
 pub fn getGotPltAddress(symbol: Symbol, elf_file: *Elf) u64 {
