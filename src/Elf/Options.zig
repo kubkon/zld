@@ -13,7 +13,7 @@ allow_multiple_definition: bool = false,
 discard_temp_locals: bool = true,
 discard_all_locals: bool = false,
 cpu_arch: ?std.Target.Cpu.Arch = null,
-os_tag: ?std.Target.Os.Tag = null,
+endian: std.builtin.Endian = .little,
 dynamic_linker: ?[]const u8 = null,
 eh_frame_hdr: bool = true,
 static: bool = false,
@@ -117,6 +117,10 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             } else {
                 ctx.fatal("unknown target emulation '{s}'\n", .{target});
             }
+        } else if (p.flag1("EL")) {
+            opts.endian = .little;
+        } else if (p.flag1("EB")) {
+            opts.endian = .big;
         } else if (p.flagAny("allow-multiple-definition")) {
             opts.allow_multiple_definition = true;
         } else if (p.flag1("X") or p.flagAny("discard-locals")) {
@@ -284,6 +288,9 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             });
         }
         opts.page_size = page_size;
+    }
+    if (opts.endian == .big) {
+        ctx.fatal("linking big endian objects is currently unsupported", .{});
     }
 
     opts.positionals = try unpackPositionals(arena, .{
