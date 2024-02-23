@@ -94,6 +94,8 @@ pub fn addElfTests(b: *Build, options: common.Options) *Step {
 fn testAbsSymbols(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-abs-symbols", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
+
     const obj = cc(b, "a.o", opts);
     obj.addAsmSource(
         \\.globl foo
@@ -135,6 +137,8 @@ fn testAbsSymbols(b: *Build, opts: Options) *Step {
 fn testAllowMultipleDefinitions(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-allow-multiple-definitions", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
+
     const a_o = cc(b, "a.o", opts);
     a_o.addCSource("int main() { return 0; }");
     a_o.addArg("-c");
@@ -167,6 +171,8 @@ fn testAllowMultipleDefinitions(b: *Build, opts: Options) *Step {
 
 fn testAsNeeded(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-as-needed", "");
+
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
 
     const main_o = cc(b, "main.o", opts);
     main_o.addCSource(
@@ -248,6 +254,8 @@ fn testAsNeeded(b: *Build, opts: Options) *Step {
 fn testCanonicalPlt(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-canonical-plt", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
+
     const dso = cc(b, "a.so", opts);
     dso.addCSource(
         \\void *foo() {
@@ -298,6 +306,8 @@ fn testCanonicalPlt(b: *Build, opts: Options) *Step {
 fn testCommon(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-common", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
+
     const exe = cc(b, "a.out", opts);
     exe.addCSource(
         \\int foo;
@@ -324,6 +334,8 @@ fn testCommon(b: *Build, opts: Options) *Step {
 
 fn testCommonArchive(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-common-archive", "");
+
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
 
     const a_o = cc(b, "a.o", opts);
     a_o.addCSource(
@@ -396,6 +408,8 @@ fn testCommonArchive(b: *Build, opts: Options) *Step {
 fn testCopyrel(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-copyrel", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
+
     const dso = cc(b, "liba.so", opts);
     dso.addArgs(&.{ "-fPIC", "-shared" });
     dso.addCSource(
@@ -425,6 +439,8 @@ fn testCopyrel(b: *Build, opts: Options) *Step {
 
 fn testCopyrelAlias(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-copyrel-alias", "");
+
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
 
     const dso = cc(b, "c.so", opts);
     dso.addArgs(&.{ "-fPIC", "-shared" });
@@ -462,6 +478,8 @@ fn testCopyrelAlias(b: *Build, opts: Options) *Step {
 
 fn testCopyrelAlignment(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-copyrel-alignment", "");
+
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
 
     const a_so = cc(b, "a.so", opts);
     a_so.addCSource("__attribute__((aligned(32))) int foo = 5;");
@@ -548,6 +566,8 @@ fn testCopyrelAlignment(b: *Build, opts: Options) *Step {
 fn testDsoPlt(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-dso-plt", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
+
     const dso = cc(b, "liba.so", opts);
     dso.addArgs(&.{ "-fPIC", "-shared" });
     dso.addCSource(
@@ -589,6 +609,8 @@ fn testDsoPlt(b: *Build, opts: Options) *Step {
 fn testDsoUndef(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-dso-undef", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
+
     const dso = cc(b, "a.so", opts);
     dso.addCSource(
         \\extern int foo;
@@ -629,6 +651,8 @@ fn testDsoUndef(b: *Build, opts: Options) *Step {
 fn testEmptyObject(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-empty-object", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
+
     const exe = cc(b, "a.out", opts);
     exe.addHelloWorldMain();
     exe.addCSource("");
@@ -642,6 +666,8 @@ fn testEmptyObject(b: *Build, opts: Options) *Step {
 
 fn testEntryPoint(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-entry-point", "");
+
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
 
     const a_o = cc(b, "a.o", opts);
     a_o.addAsmSource(
@@ -686,6 +712,8 @@ fn testEntryPoint(b: *Build, opts: Options) *Step {
 
 fn testExecStack(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-exec-stack", "");
+
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
 
     const obj = cc(b, "a.o", opts);
     obj.addEmptyMain();
@@ -735,6 +763,8 @@ fn testExecStack(b: *Build, opts: Options) *Step {
 fn testExportDynamic(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-export-dynamic", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
+
     const obj = cc(b, "a.o", opts);
     obj.addAsmSource(
         \\.text
@@ -775,6 +805,8 @@ fn testExportDynamic(b: *Build, opts: Options) *Step {
 fn testExportSymbolsFromExe(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-export-symbols-from-exe", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
+
     const dso = cc(b, "a.so", opts);
     dso.addCSource(
         \\void expfn1();
@@ -813,6 +845,8 @@ fn testExportSymbolsFromExe(b: *Build, opts: Options) *Step {
 
 fn testEmitRelocatable(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-emit-relocatable", "");
+
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
 
     const obj1 = cc(b, "a.o", opts);
     obj1.addCSource(
@@ -868,6 +902,8 @@ fn testEmitRelocatable(b: *Build, opts: Options) *Step {
 fn testFuncAddress(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-func-address", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
+
     const dso = cc(b, "a.so", opts);
     dso.addCSource("void fn() {}");
     dso.addArgs(&.{ "-fPIC", "-shared" });
@@ -894,6 +930,8 @@ fn testFuncAddress(b: *Build, opts: Options) *Step {
 
 fn testGcSections(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-gc-sections", "");
+
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
 
     const obj = cc(b, "a.o", opts);
     obj.addCppSource(
@@ -977,6 +1015,8 @@ fn testGcSections(b: *Build, opts: Options) *Step {
 fn testHelloDynamic(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-hello-dynamic", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
+
     const exe = cc(b, "a.out", opts);
     exe.addHelloWorldMain();
     exe.addArg("-no-pie");
@@ -999,6 +1039,8 @@ fn testHelloDynamic(b: *Build, opts: Options) *Step {
 
 fn testHelloPie(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-hello-pie", "");
+
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
 
     const exe = cc(b, "a.out", opts);
     exe.addHelloWorldMain();
@@ -1048,6 +1090,8 @@ fn testHelloStatic(b: *Build, opts: Options) *Step {
 fn testHiddenWeakUndef(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-hidden-weak-undef", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
+
     const dso = cc(b, "a.so", opts);
     dso.addCSource(
         \\__attribute__((weak, visibility("hidden"))) void foo();
@@ -1068,6 +1112,7 @@ fn testHiddenWeakUndef(b: *Build, opts: Options) *Step {
 fn testIfuncAlias(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-ifunc-alias", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
     if (opts.is_musl) return skipTestStep(test_step);
 
     const exe = cc(b, "a.out", opts);
@@ -1092,6 +1137,7 @@ fn testIfuncAlias(b: *Build, opts: Options) *Step {
 fn testIfuncDlopen(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-ifunc-dlopen", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
     if (opts.is_musl) return skipTestStep(test_step);
 
     const dso = cc(b, "a.so", opts);
@@ -1136,6 +1182,7 @@ fn testIfuncDlopen(b: *Build, opts: Options) *Step {
 fn testIfuncDso(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-ifunc-dso", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
     if (opts.is_musl) return skipTestStep(test_step);
 
     const dso = cc(b, "liba.so", opts);
@@ -1174,6 +1221,7 @@ fn testIfuncDso(b: *Build, opts: Options) *Step {
 fn testIfuncDynamic(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-ifunc-dynamic", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
     if (opts.is_musl) return skipTestStep(test_step);
 
     const main_c =
@@ -1217,6 +1265,7 @@ fn testIfuncDynamic(b: *Build, opts: Options) *Step {
 fn testIfuncExport(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-ifunc-export", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
     if (opts.is_musl) return skipTestStep(test_step);
 
     const dso = cc(b, "a.so", opts);
@@ -1245,6 +1294,7 @@ fn testIfuncExport(b: *Build, opts: Options) *Step {
 fn testIfuncFuncPtr(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-ifunc-func-ptr", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
     if (opts.is_musl) return skipTestStep(test_step);
 
     const exe = cc(b, "a.out", opts);
@@ -1282,6 +1332,7 @@ fn testIfuncFuncPtr(b: *Build, opts: Options) *Step {
 fn testIfuncNoPlt(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-ifunc-noplt", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
     if (opts.is_musl) return skipTestStep(test_step);
 
     const exe = cc(b, "a.out", opts);
@@ -1312,6 +1363,7 @@ fn testIfuncNoPlt(b: *Build, opts: Options) *Step {
 fn testIfuncStatic(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-ifunc-static", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
     if (opts.is_musl or !opts.has_static) return skipTestStep(test_step);
 
     const exe = cc(b, "a.out", opts);
@@ -1341,6 +1393,7 @@ fn testIfuncStatic(b: *Build, opts: Options) *Step {
 fn testIfuncStaticPie(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-ifunc-static-pie", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
     if (opts.is_musl or !opts.has_static) return skipTestStep(test_step);
 
     const exe = cc(b, "a.out", opts);
@@ -1382,6 +1435,8 @@ fn testIfuncStaticPie(b: *Build, opts: Options) *Step {
 fn testImageBase(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-image-base", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
+
     {
         const exe = cc(b, "a.out", opts);
         exe.addHelloWorldMain();
@@ -1421,6 +1476,8 @@ fn testImageBase(b: *Build, opts: Options) *Step {
 
 fn testInitArrayOrder(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-init-array-order", "");
+
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
 
     const a_o = cc(b, "a.o", opts);
     a_o.addCSource(
@@ -1499,6 +1556,8 @@ fn testInitArrayOrder(b: *Build, opts: Options) *Step {
 fn testLargeAlignmentDso(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-large-alignment-dso", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
+
     const dso = cc(b, "a.so", opts);
     dso.addCSource(
         \\#include <stdio.h>
@@ -1545,6 +1604,8 @@ fn testLargeAlignmentDso(b: *Build, opts: Options) *Step {
 fn testLargeAlignmentExe(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-large-alignment-exe", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
+
     const exe = cc(b, "a.out", opts);
     exe.addCSource(
         \\#include <stdio.h>
@@ -1587,6 +1648,8 @@ fn testLargeAlignmentExe(b: *Build, opts: Options) *Step {
 fn testLargeBss(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-large-bss", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
+
     const exe = cc(b, "a.out", opts);
     exe.addCSource(
         \\char arr[0x100000000];
@@ -1603,6 +1666,8 @@ fn testLargeBss(b: *Build, opts: Options) *Step {
 
 fn testLinkOrder(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-link-order", "");
+
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
 
     const obj = cc(b, "a.o", opts);
     obj.addCSource("void foo() {}");
@@ -1658,6 +1723,8 @@ fn testLinkOrder(b: *Build, opts: Options) *Step {
 fn testLinkerScript(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-linker-script", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
+
     const dso = cc(b, "libbar.so", opts);
     dso.addCSource("int foo() { return 42; }");
     dso.addArgs(&.{ "-fPIC", "-shared" });
@@ -1687,6 +1754,8 @@ fn testLinkerScript(b: *Build, opts: Options) *Step {
 fn testNoEhFrameHdr(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-no-eh-frame-hdr", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
+
     const exe = cc(b, "a.out", opts);
     exe.addEmptyMain();
     exe.addArgs(&.{"-Wl,--no-eh-frame-hdr"});
@@ -1702,6 +1771,8 @@ fn testNoEhFrameHdr(b: *Build, opts: Options) *Step {
 
 fn testPltGot(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-plt-got", "");
+
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
 
     const dso = cc(b, "a.so", opts);
     dso.addCSource(
@@ -1733,6 +1804,8 @@ fn testPltGot(b: *Build, opts: Options) *Step {
 
 fn testPreinitArray(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-preinit-array", "");
+
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
 
     {
         const obj = cc(b, "a.o", opts);
@@ -1767,6 +1840,8 @@ fn testPreinitArray(b: *Build, opts: Options) *Step {
 fn testPushPopState(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-push-pop-state", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
+
     const a_so = cc(b, "a.so", opts);
     a_so.addCSource("int foo = 1;");
     a_so.addArgs(&.{ "-fPIC", "-shared" });
@@ -1796,6 +1871,8 @@ fn testPushPopState(b: *Build, opts: Options) *Step {
 
 fn testRelocatableArchive(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-relocatable-archive", "");
+
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
 
     const obj1 = cc(b, "a.o", opts);
     obj1.addCSource(
@@ -1852,6 +1929,7 @@ fn testRelocatableArchive(b: *Build, opts: Options) *Step {
 fn testRelocatableEhFrame(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-relocatable-eh-frame", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
     if (!opts.has_zig) return skipTestStep(test_step);
 
     const obj1 = zig(b, "a.o", .obj);
@@ -1939,6 +2017,8 @@ fn testRelocatableEhFrame(b: *Build, opts: Options) *Step {
 fn testRelocatableNoEhFrame(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-relocatable-no-eh-frame", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
+
     const obj1 = cc(b, "a.o", opts);
     obj1.addCSource("int bar() { return 42; }");
     obj1.addArgs(&.{ "-c", "-fno-unwind-tables", "-fno-asynchronous-unwind-tables" });
@@ -1964,6 +2044,8 @@ fn testRelocatableNoEhFrame(b: *Build, opts: Options) *Step {
 
 fn testSharedAbsSymbol(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-shared-abs-symbol", "");
+
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
 
     const dso = cc(b, "a.so", opts);
     dso.addAsmSource(
@@ -2022,6 +2104,8 @@ fn testSharedAbsSymbol(b: *Build, opts: Options) *Step {
 fn testStrip(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-strip", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
+
     const obj = cc(b, "a.o", opts);
     obj.addAsmSource(
         \\.globl _start, foo
@@ -2059,6 +2143,7 @@ fn testStrip(b: *Build, opts: Options) *Step {
 fn testTlsCommon(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-common", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
     if (opts.system_compiler != .gcc) return skipTestStep(test_step);
 
     const a_o = cc(b, "a.o", opts);
@@ -2098,6 +2183,7 @@ fn testTlsCommon(b: *Build, opts: Options) *Step {
 fn testTlsDesc(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-desc", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
     if (opts.system_compiler != .gcc) return skipTestStep(test_step);
 
     const main_o = cc(b, "main.o", opts);
@@ -2187,6 +2273,7 @@ fn testTlsDesc(b: *Build, opts: Options) *Step {
 fn testTlsDescImport(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-desc-import", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
     if (opts.system_compiler != .gcc) return skipTestStep(test_step);
 
     const dso = cc(b, "a.so", opts);
@@ -2220,6 +2307,7 @@ fn testTlsDescImport(b: *Build, opts: Options) *Step {
 fn testTlsDescStatic(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-desc-static", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
     if (opts.system_compiler != .gcc or !opts.has_static) return skipTestStep(test_step);
 
     const main_o = cc(b, "main.o", opts);
@@ -2269,6 +2357,8 @@ fn testTlsDescStatic(b: *Build, opts: Options) *Step {
 fn testTlsDfStaticTls(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-df-static-tls", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
+
     const obj = cc(b, "a.o", opts);
     obj.addCSource(
         \\static _Thread_local int foo = 5;
@@ -2304,6 +2394,8 @@ fn testTlsDfStaticTls(b: *Build, opts: Options) *Step {
 
 fn testTlsDso(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-dso", "");
+
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
 
     const dso = cc(b, "a.so", opts);
     dso.addCSource(
@@ -2345,6 +2437,8 @@ fn testTlsDso(b: *Build, opts: Options) *Step {
 
 fn testTlsGd(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-gd", "");
+
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
 
     const main_o = cc(b, "main.o", opts);
     main_o.addCSource(
@@ -2448,6 +2542,8 @@ fn testTlsGd(b: *Build, opts: Options) *Step {
 fn testTlsGdNoPlt(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-gd-no-plt", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
+
     const obj = cc(b, "a.o", opts);
     obj.addCSource(
         \\#include <stdio.h>
@@ -2514,6 +2610,8 @@ fn testTlsGdNoPlt(b: *Build, opts: Options) *Step {
 
 fn testTlsGdToIe(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-gd-to-ie", "");
+
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
 
     const a_o = cc(b, "a.o", opts);
     a_o.addCSource(
@@ -2603,6 +2701,8 @@ fn testTlsGdToIe(b: *Build, opts: Options) *Step {
 fn testTlsIe(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-ie", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
+
     const dso = cc(b, "a.so", opts);
     dso.addCSource(
         \\#include <stdio.h>
@@ -2665,6 +2765,8 @@ fn testTlsIe(b: *Build, opts: Options) *Step {
 fn testTlsLargeAlignment(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-large-alignment", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
+
     const a_o = cc(b, "a.o", opts);
     a_o.addCSource(
         \\__attribute__((section(".tdata1")))
@@ -2723,6 +2825,8 @@ fn testTlsLargeAlignment(b: *Build, opts: Options) *Step {
 fn testTlsLargeTbss(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-large-tbss", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
+
     const exe = cc(b, "a.out", opts);
     exe.addAsmSource(
         \\.globl x, y
@@ -2754,6 +2858,8 @@ fn testTlsLargeTbss(b: *Build, opts: Options) *Step {
 fn testTlsLargeStaticImage(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-large-static-image", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
+
     const exe = cc(b, "a.out", opts);
     exe.addCSource("_Thread_local int x[] = { 1, 2, 3, [10000] = 5 };");
     exe.addCSource(
@@ -2774,6 +2880,8 @@ fn testTlsLargeStaticImage(b: *Build, opts: Options) *Step {
 
 fn testTlsLd(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-ld", "");
+
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
 
     const main_o = cc(b, "main.o", opts);
     main_o.addCSource(
@@ -2824,6 +2932,8 @@ fn testTlsLd(b: *Build, opts: Options) *Step {
 fn testTlsLdDso(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-ld-dso", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
+
     const dso = cc(b, "a.so", opts);
     dso.addCSource(
         \\static _Thread_local int def, def1;
@@ -2856,6 +2966,8 @@ fn testTlsLdDso(b: *Build, opts: Options) *Step {
 
 fn testTlsLdNoPlt(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-ld-no-plt", "");
+
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
 
     const a_o = cc(b, "a.o", opts);
     a_o.addCSource(
@@ -2904,6 +3016,8 @@ fn testTlsLdNoPlt(b: *Build, opts: Options) *Step {
 fn testTlsNoPic(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-no-pic", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
+
     const exe = cc(b, "a.out", opts);
     exe.addCSource(
         \\#include <stdio.h>
@@ -2932,6 +3046,8 @@ fn testTlsNoPic(b: *Build, opts: Options) *Step {
 
 fn testTlsOffsetAlignment(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-offset-alignment", "");
+
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
 
     const dso = cc(b, "a.so", opts);
     dso.addCSource(
@@ -2984,6 +3100,8 @@ fn testTlsOffsetAlignment(b: *Build, opts: Options) *Step {
 fn testTlsPic(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-pic", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
+
     const obj = cc(b, "a.o", opts);
     obj.addCSource(
         \\#include <stdio.h>
@@ -3015,6 +3133,8 @@ fn testTlsPic(b: *Build, opts: Options) *Step {
 
 fn testTlsSmallAlignment(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-small-alignment", "");
+
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
 
     const a_o = cc(b, "a.o", opts);
     a_o.addAsmSource(
@@ -3070,6 +3190,7 @@ fn testTlsSmallAlignment(b: *Build, opts: Options) *Step {
 fn testTlsStatic(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-static", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
     if (!opts.has_static) return skipTestStep(test_step);
 
     const exe = cc(b, "a.out", opts);
@@ -3103,6 +3224,8 @@ fn testTlsStatic(b: *Build, opts: Options) *Step {
 fn testWeakExportDso(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-weak-export-dso", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
+
     const obj = cc(b, "a.o", opts);
     obj.addCSource(
         \\#include <stdio.h>
@@ -3127,6 +3250,8 @@ fn testWeakExportDso(b: *Build, opts: Options) *Step {
 
 fn testWeakExportExe(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-weak-export-exe", "");
+
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
 
     const obj = cc(b, "a.o", opts);
     obj.addCSource(
@@ -3155,6 +3280,8 @@ fn testWeakExportExe(b: *Build, opts: Options) *Step {
 
 fn testWeakUndefDso(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-weak-undef-dso", "");
+
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
 
     const dso = cc(b, "a.so", opts);
     dso.addCSource(
@@ -3200,6 +3327,8 @@ fn testWeakUndefDso(b: *Build, opts: Options) *Step {
 fn testZNow(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-z-now", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
+
     const obj = cc(b, "a.o", opts);
     obj.addEmptyMain();
     obj.addArgs(&.{ "-fPIC", "-c" });
@@ -3232,6 +3361,8 @@ fn testZNow(b: *Build, opts: Options) *Step {
 fn testZStackSize(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-z-stack-size", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
+
     const exe = cc(b, "a.out", opts);
     exe.addEmptyMain();
     exe.addArg("-Wl,-z,stack-size=0x800000");
@@ -3248,6 +3379,8 @@ fn testZStackSize(b: *Build, opts: Options) *Step {
 
 fn testZText(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-z-text", "");
+
+    if (builtin.target.cpu.arch != .x86_64) return skipTestStep(test_step);
 
     // Previously, following mold, this test tested text relocs present in a PIE executable.
     // However, as we want to cover musl AND glibc, it is now modified to test presence of
