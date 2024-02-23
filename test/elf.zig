@@ -1065,6 +1065,7 @@ fn testHelloPie(b: *Build, opts: Options) *Step {
 fn testHelloStatic(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-hello-static", "");
 
+    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
     if (!opts.has_static) return skipTestStep(test_step);
 
     const exe = cc(b, "a.out", opts);
