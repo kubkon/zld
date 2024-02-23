@@ -655,19 +655,22 @@ pub fn convertCommonSymbols(self: *Object, elf_file: *Elf) !void {
 pub fn calcSymtabSize(self: *Object, elf_file: *Elf) !void {
     if (elf_file.options.strip_all) return;
 
-    for (self.getLocals()) |local_index| {
-        const local = elf_file.getSymbol(local_index);
-        if (local.getAtom(elf_file)) |atom| if (!atom.flags.alive) continue;
-        const s_sym = local.getSourceSymbol(elf_file);
-        switch (s_sym.st_type()) {
-            elf.STT_SECTION => continue,
-            elf.STT_NOTYPE => if (s_sym.st_shndx == elf.SHN_UNDEF) continue,
-            else => {},
+    if (!elf_file.options.discard_all_locals) {
+        // TODO: discard temp locals
+        for (self.getLocals()) |local_index| {
+            const local = elf_file.getSymbol(local_index);
+            if (local.getAtom(elf_file)) |atom| if (!atom.flags.alive) continue;
+            const s_sym = local.getSourceSymbol(elf_file);
+            switch (s_sym.st_type()) {
+                elf.STT_SECTION => continue,
+                elf.STT_NOTYPE => if (s_sym.st_shndx == elf.SHN_UNDEF) continue,
+                else => {},
+            }
+            local.flags.output_symtab = true;
+            try local.setOutputSymtabIndex(self.output_symtab_ctx.nlocals, elf_file);
+            self.output_symtab_ctx.nlocals += 1;
+            self.output_symtab_ctx.strsize += @as(u32, @intCast(local.getName(elf_file).len + 1));
         }
-        local.flags.output_symtab = true;
-        try local.setOutputSymtabIndex(self.output_symtab_ctx.nlocals, elf_file);
-        self.output_symtab_ctx.nlocals += 1;
-        self.output_symtab_ctx.strsize += @as(u32, @intCast(local.getName(elf_file).len + 1));
     }
 
     for (self.getGlobals()) |global_index| {

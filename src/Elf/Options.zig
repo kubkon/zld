@@ -10,6 +10,8 @@ entry: ?[]const u8 = null,
 gc_sections: bool = false,
 print_gc_sections: bool = false,
 allow_multiple_definition: bool = false,
+discard_temp_locals: bool = true,
+discard_all_locals: bool = false,
 cpu_arch: ?std.Target.Cpu.Arch = null,
 os_tag: ?std.Target.Os.Tag = null,
 dynamic_linker: ?[]const u8 = null,
@@ -117,6 +119,14 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             }
         } else if (p.flagAny("allow-multiple-definition")) {
             opts.allow_multiple_definition = true;
+        } else if (p.flag1("X") or p.flagAny("discard-locals")) {
+            opts.discard_temp_locals = true;
+        } else if (p.flag1("x") or p.flagAny("discard-all")) {
+            opts.discard_temp_locals = true;
+            opts.discard_all_locals = true;
+        } else if (p.flagAny("discard-none")) {
+            opts.discard_temp_locals = false;
+            opts.discard_all_locals = false;
         } else if (p.flagAny("warn-common")) {
             opts.warn_common = true;
         } else if (p.flagAny("static")) {
