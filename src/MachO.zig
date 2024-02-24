@@ -1773,13 +1773,11 @@ fn initSegments(self: *MachO) !void {
         const segname = header.segName();
         if (self.getSegmentByName(segname) == null) {
             const prot = getSegmentProt(segname);
-            const flags: u32 = if (mem.startsWith(u8, segname, "__DATA_CONST")) 0x10 else 0; // TODO usee macho.SG_READ_ONLY once upstreamed
             try self.segments.append(gpa, .{
                 .cmdsize = @sizeOf(macho.segment_command_64),
                 .segname = makeStaticString(segname),
                 .maxprot = prot,
                 .initprot = prot,
-                .flags = flags,
             });
         }
     }
@@ -1855,6 +1853,11 @@ fn initSegments(self: *MachO) !void {
     self.pagezero_seg_index = self.getSegmentByName("__PAGEZERO");
     self.text_seg_index = self.getSegmentByName("__TEXT").?;
     self.linkedit_seg_index = self.getSegmentByName("__LINKEDIT").?;
+
+    if (self.getSegmentByName("__DATA_CONST")) |seg_id| {
+        const seg = &self.segments.items[seg_id];
+        seg.flags |= macho.SG_READ_ONLY;
+    }
 }
 
 fn allocateSections(self: *MachO) !void {
