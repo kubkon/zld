@@ -769,7 +769,7 @@ fn calcSectionSizes(self: *Elf) !void {
 
     if (self.plt_sect_index) |index| {
         const shdr = &self.sections.items(.shdr)[index];
-        shdr.sh_size = self.plt.size();
+        shdr.sh_size = self.plt.size(self);
         shdr.sh_addralign = 16;
     }
 
@@ -2310,7 +2310,7 @@ fn writeSyntheticSections(self: *Elf) !void {
 
     if (self.plt_sect_index) |shndx| {
         const shdr = self.sections.items(.shdr)[shndx];
-        var buffer = try std.ArrayList(u8).initCapacity(gpa, self.plt.size());
+        var buffer = try std.ArrayList(u8).initCapacity(gpa, self.plt.size(self));
         defer buffer.deinit();
         try self.plt.write(self, buffer.writer());
         try self.base.file.pwriteAll(buffer.items, shdr.sh_offset);

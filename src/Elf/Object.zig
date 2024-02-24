@@ -355,16 +355,16 @@ fn parseEhFrame(self: *Object, allocator: Allocator, file: std.fs.File, shndx: u
     const relocs_shndx = for (self.shdrs.items, 0..) |shdr, i| switch (shdr.sh_type) {
         elf.SHT_RELA => if (shdr.sh_info == shndx) break @as(u32, @intCast(i)),
         else => {},
-    } else {
-        log.debug("{s}: missing reloc section for unwind info section", .{self.fmtPath()});
-        return;
-    };
+    } else null;
 
     const raw = try self.preadShdrContentsAlloc(allocator, file, shndx);
     defer allocator.free(raw);
     const data_start = @as(u32, @intCast(self.eh_frame_data.items.len));
     try self.eh_frame_data.appendSlice(allocator, raw);
-    const relocs = try self.preadRelocsAlloc(allocator, file, relocs_shndx);
+    const relocs = if (relocs_shndx) |index|
+        try self.preadRelocsAlloc(allocator, file, index)
+    else
+        &[0]elf.Elf64_Rela{};
     defer allocator.free(relocs);
     const rel_start = @as(u32, @intCast(self.relocs.items.len));
     try self.relocs.appendUnalignedSlice(allocator, relocs);
@@ -655,19 +655,22 @@ pub fn convertCommonSymbols(self: *Object, elf_file: *Elf) !void {
 pub fn calcSymtabSize(self: *Object, elf_file: *Elf) !void {
     if (elf_file.options.strip_all) return;
 
-    for (self.getLocals()) |local_index| {
-        const local = elf_file.getSymbol(local_index);
-        if (local.getAtom(elf_file)) |atom| if (!atom.flags.alive) continue;
-        const s_sym = local.getSourceSymbol(elf_file);
-        switch (s_sym.st_type()) {
-            elf.STT_SECTION => continue,
-            elf.STT_NOTYPE => if (s_sym.st_shndx == elf.SHN_UNDEF) continue,
-            else => {},
+    if (!elf_file.options.discard_all_locals) {
+        // TODO: discard temp locals
+        for (self.getLocals()) |local_index| {
+            const local = elf_file.getSymbol(local_index);
+            if (local.getAtom(elf_file)) |atom| if (!atom.flags.alive) continue;
+            const s_sym = local.getSourceSymbol(elf_file);
+            switch (s_sym.st_type()) {
+                elf.STT_SECTION => continue,
+                elf.STT_NOTYPE => if (s_sym.st_shndx == elf.SHN_UNDEF) continue,
+                else => {},
+            }
+            local.flags.output_symtab = true;
+            try local.setOutputSymtabIndex(self.output_symtab_ctx.nlocals, elf_file);
+            self.output_symtab_ctx.nlocals += 1;
+            self.output_symtab_ctx.strsize += @as(u32, @intCast(local.getName(elf_file).len + 1));
         }
-        local.flags.output_symtab = true;
-        try local.setOutputSymtabIndex(self.output_symtab_ctx.nlocals, elf_file);
-        self.output_symtab_ctx.nlocals += 1;
-        self.output_symtab_ctx.strsize += @as(u32, @intCast(local.getName(elf_file).len + 1));
     }
 
     for (self.getGlobals()) |global_index| {
