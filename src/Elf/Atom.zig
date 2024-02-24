@@ -1174,6 +1174,8 @@ const aarch64 = struct {
         _ = it;
 
         const r_type: elf.R_AARCH64 = @enumFromInt(rel.r_type());
+        const is_shared = elf_file.options.shared;
+
         switch (r_type) {
             .ABS64 => {
                 try atom.scanReloc(symbol, rel, getDynAbsRelocAction(symbol, elf_file), elf_file);
@@ -1211,6 +1213,12 @@ const aarch64 = struct {
             .LDST128_ABS_LO12_NC,
             => {},
 
+            .TLSLE_ADD_TPREL_HI12,
+            .TLSLE_ADD_TPREL_LO12_NC,
+            => {
+                if (is_shared) try atom.picError(symbol, rel, elf_file);
+            },
+
             else => {
                 elf_file.base.fatal("{s}: unknown relocation type: {}", .{
                     atom.getName(elf_file),
@@ -1241,7 +1249,6 @@ const aarch64 = struct {
         const cwriter = stream.writer();
 
         const P, const A, const S, const GOT, const G, const TP, const DTP = args;
-        _ = TP;
         _ = DTP;
 
         switch (r_type) {
@@ -1316,6 +1323,17 @@ const aarch64 = struct {
                     else => unreachable,
                 };
                 try aarch64_util.writePageOffset(kind, taddr, code[rel.r_offset..][0..4]);
+            },
+
+            .TLSLE_ADD_TPREL_HI12 => {
+                const value = math.cast(i12, (S + A - TP) >> 12) orelse
+                    return error.Overflow;
+                try aarch64_util.writeAddInst(@bitCast(value), code[rel.r_offset..][0..4]);
+            },
+
+            .TLSLE_ADD_TPREL_LO12_NC => {
+                const value: i12 = @truncate(S + A - TP);
+                try aarch64_util.writeAddInst(@bitCast(value), code[rel.r_offset..][0..4]);
             },
 
             else => elf_file.base.fatal("unhandled relocation type: {}", .{

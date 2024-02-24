@@ -668,6 +668,17 @@ pub fn writePageOffset(kind: PageOffsetInstKind, taddr: u64, code: *[4]u8) !void
     }
 }
 
+pub fn writeAddInst(value: u12, code: *[4]u8) !void {
+    var inst = Instruction{
+        .add_subtract_immediate = mem.bytesToValue(std.meta.TagPayload(
+            Instruction,
+            Instruction.add_subtract_immediate,
+        ), code),
+    };
+    inst.add_subtract_immediate.imm12 = value;
+    mem.writeInt(u32, code, inst.toU32(), .little);
+}
+
 pub fn calcNumberOfPages(saddr: u64, taddr: u64) error{Overflow}!i21 {
     const spage = math.cast(i32, saddr >> 12) orelse return error.Overflow;
     const tpage = math.cast(i32, taddr >> 12) orelse return error.Overflow;
