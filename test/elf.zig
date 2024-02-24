@@ -168,8 +168,6 @@ fn testAllowMultipleDefinitions(b: *Build, opts: Options) *Step {
 fn testAsNeeded(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-as-needed", "");
 
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
-
     const main_o = cc(b, "main.o", opts);
     main_o.addCSource(
         \\#include <stdio.h>
@@ -249,8 +247,6 @@ fn testAsNeeded(b: *Build, opts: Options) *Step {
 
 fn testCanonicalPlt(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-canonical-plt", "");
-
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
 
     const dso = cc(b, "a.so", opts);
     dso.addCSource(
@@ -400,8 +396,6 @@ fn testCommonArchive(b: *Build, opts: Options) *Step {
 fn testCopyrel(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-copyrel", "");
 
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
-
     const dso = cc(b, "liba.so", opts);
     dso.addArgs(&.{ "-fPIC", "-shared" });
     dso.addCSource(
@@ -431,8 +425,6 @@ fn testCopyrel(b: *Build, opts: Options) *Step {
 
 fn testCopyrelAlias(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-copyrel-alias", "");
-
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
 
     const dso = cc(b, "c.so", opts);
     dso.addArgs(&.{ "-fPIC", "-shared" });
@@ -470,8 +462,6 @@ fn testCopyrelAlias(b: *Build, opts: Options) *Step {
 
 fn testCopyrelAlignment(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-copyrel-alignment", "");
-
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
 
     const a_so = cc(b, "a.so", opts);
     a_so.addCSource("__attribute__((aligned(32))) int foo = 5;");
@@ -558,8 +548,6 @@ fn testCopyrelAlignment(b: *Build, opts: Options) *Step {
 fn testDsoPlt(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-dso-plt", "");
 
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
-
     const dso = cc(b, "liba.so", opts);
     dso.addArgs(&.{ "-fPIC", "-shared" });
     dso.addCSource(
@@ -600,8 +588,6 @@ fn testDsoPlt(b: *Build, opts: Options) *Step {
 
 fn testDsoUndef(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-dso-undef", "");
-
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
 
     const dso = cc(b, "a.so", opts);
     dso.addCSource(
@@ -882,8 +868,6 @@ fn testEmitRelocatable(b: *Build, opts: Options) *Step {
 fn testFuncAddress(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-func-address", "");
 
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
-
     const dso = cc(b, "a.so", opts);
     dso.addCSource("void fn() {}");
     dso.addArgs(&.{ "-fPIC", "-shared" });
@@ -1016,8 +1000,6 @@ fn testHelloDynamic(b: *Build, opts: Options) *Step {
 fn testHelloPie(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-hello-pie", "");
 
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
-
     const exe = cc(b, "a.out", opts);
     exe.addHelloWorldMain();
     exe.addArgs(&.{ "-fPIC", "-pie" });
@@ -1041,7 +1023,6 @@ fn testHelloPie(b: *Build, opts: Options) *Step {
 fn testHelloStatic(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-hello-static", "");
 
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
     if (!opts.has_static) return skipTestStep(test_step);
 
     const exe = cc(b, "a.out", opts);
@@ -1111,7 +1092,6 @@ fn testIfuncAlias(b: *Build, opts: Options) *Step {
 fn testIfuncDlopen(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-ifunc-dlopen", "");
 
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
     if (opts.is_musl) return skipTestStep(test_step);
 
     const dso = cc(b, "a.so", opts);
@@ -1156,7 +1136,6 @@ fn testIfuncDlopen(b: *Build, opts: Options) *Step {
 fn testIfuncDso(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-ifunc-dso", "");
 
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
     if (opts.is_musl) return skipTestStep(test_step);
 
     const dso = cc(b, "liba.so", opts);
@@ -1195,7 +1174,6 @@ fn testIfuncDso(b: *Build, opts: Options) *Step {
 fn testIfuncDynamic(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-ifunc-dynamic", "");
 
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
     if (opts.is_musl) return skipTestStep(test_step);
 
     const main_c =
@@ -1521,8 +1499,6 @@ fn testInitArrayOrder(b: *Build, opts: Options) *Step {
 fn testLargeAlignmentDso(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-large-alignment-dso", "");
 
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
-
     const dso = cc(b, "a.so", opts);
     dso.addCSource(
         \\#include <stdio.h>
@@ -1682,8 +1658,6 @@ fn testLinkOrder(b: *Build, opts: Options) *Step {
 fn testLinkerScript(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-linker-script", "");
 
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
-
     const dso = cc(b, "libbar.so", opts);
     dso.addCSource("int foo() { return 42; }");
     dso.addArgs(&.{ "-fPIC", "-shared" });
@@ -1728,8 +1702,6 @@ fn testNoEhFrameHdr(b: *Build, opts: Options) *Step {
 
 fn testPltGot(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-plt-got", "");
-
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
 
     const dso = cc(b, "a.so", opts);
     dso.addCSource(
@@ -1992,8 +1964,6 @@ fn testRelocatableNoEhFrame(b: *Build, opts: Options) *Step {
 
 fn testSharedAbsSymbol(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-shared-abs-symbol", "");
-
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
 
     const dso = cc(b, "a.so", opts);
     dso.addAsmSource(
@@ -3222,8 +3192,6 @@ fn testWeakExportExe(b: *Build, opts: Options) *Step {
 
 fn testWeakUndefDso(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-weak-undef-dso", "");
-
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
 
     const dso = cc(b, "a.so", opts);
     dso.addCSource(
