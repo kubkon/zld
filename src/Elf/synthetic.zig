@@ -1030,7 +1030,8 @@ pub const PltSection = struct {
     }
 
     pub fn size(plt: PltSection, elf_file: *Elf) usize {
-        return preambleSize(elf_file.options.cpu_arch.?) + plt.symbols.items.len * 16;
+        const cpu_arch = elf_file.options.cpu_arch.?;
+        return preambleSize(cpu_arch) + plt.symbols.items.len * entrySize(cpu_arch);
     }
 
     pub fn preambleSize(cpu_arch: std.Target.Cpu.Arch) usize {
@@ -1038,6 +1039,14 @@ pub const PltSection = struct {
             .x86_64 => 32,
             .aarch64 => 8 * @sizeOf(u32),
             else => @panic("TODO implement preambleSize for this cpu arch"),
+        };
+    }
+
+    pub fn entrySize(cpu_arch: std.Target.Cpu.Arch) usize {
+        return switch (cpu_arch) {
+            .x86_64 => 16,
+            .aarch64 => 16, // TODO
+            else => @panic("TODO implement entrySize for this cpu arch"),
         };
     }
 
@@ -1086,6 +1095,7 @@ pub const PltSection = struct {
 
     pub fn writeSymtab(plt: PltSection, elf_file: *Elf) void {
         if (elf_file.options.strip_all) return;
+        const cpu_arch = elf_file.options.cpu_arch.?;
 
         for (plt.symbols.items, plt.output_symtab_ctx.ilocal..) |sym_index, ilocal| {
             const sym = elf_file.getSymbol(sym_index);
@@ -1099,7 +1109,7 @@ pub const PltSection = struct {
                 .st_other = 0,
                 .st_shndx = @intCast(elf_file.plt_sect_index.?),
                 .st_value = sym.getPltAddress(elf_file),
-                .st_size = 16,
+                .st_size = entrySize(cpu_arch),
             };
         }
     }
@@ -1140,17 +1150,37 @@ pub const PltSection = struct {
 
     const aarch64 = struct {
         fn write(plt: PltSection, elf_file: *Elf, writer: anytype) !void {
-            // const plt_addr = elf_file.sections.items(.shdr)[elf_file.plt_sect_index.?].sh_addr;
-            // const got_plt_addr = elf_file.sections.items(.shdr)[elf_file.got_plt_sect_index.?].sh_addr;
             {
-                try writer.writeInt(u32, aarch64_util.Instruction.stp(
-                    .x16,
-                    .x30,
-                    aarch64_util.Register.sp,
-                    aarch64_util.Instruction.LoadStorePairOffset.pre_index(-16),
-                ).toU32(), .little);
-                for (0..7) |_| {
-                    try writer.writeInt(u32, aarch64_util.Instruction.nop().toU32(), .little);
+                const plt_addr = elf_file.sections.items(.shdr)[elf_file.plt_sect_index.?].sh_addr;
+                const got_plt_addr = elf_file.sections.items(.shdr)[elf_file.got_plt_sect_index.?].sh_addr;
+                // .got.plt[1]
+                const got_plt_1_pages = try aarch64_util.calcNumberOfPages(plt_addr + 4, got_plt_addr + 8);
+                const got_plt_1_off = try aarch64_util.calcPageOffset(.load_store_64, got_plt_addr + 8);
+                // .got.plt[2]
+                const got_plt_2_pages = try aarch64_util.calcNumberOfPages(plt_addr + 12, got_plt_addr + 16);
+                const got_plt_2_off = try aarch64_util.calcPageOffset(.arithmetic, got_plt_addr + 16);
+
+                const preamble = &[_]Instruction{
+                    Instruction.stp(
+                        .x16,
+                        .x30,
+                        Register.sp,
+                        Instruction.LoadStorePairOffset.pre_index(-16),
+                    ),
+                    // .got.plt[1]
+                    Instruction.adrp(.x16, got_plt_1_pages),
+                    Instruction.ldr(.x17, .x16, Instruction.LoadStoreOffset.imm(got_plt_1_off)),
+                    // .got.plt[2]
+                    Instruction.adrp(.x16, got_plt_2_pages),
+                    Instruction.add(.x16, .x16, got_plt_2_off, false),
+                    Instruction.br(.x17),
+                    Instruction.nop(),
+                    Instruction.nop(),
+                };
+                comptime assert(preamble.len == 8);
+
+                for (preamble) |inst| {
+                    try writer.writeInt(u32, inst.toU32(), .little);
                 }
             }
 
@@ -1171,6 +1201,8 @@ pub const PltSection = struct {
         }
 
         const aarch64_util = @import("../aarch64.zig");
+        const Instruction = aarch64_util.Instruction;
+        const Register = aarch64_util.Register;
     };
 };
 
