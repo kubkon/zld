@@ -1045,7 +1045,7 @@ pub const PltSection = struct {
     pub fn entrySize(cpu_arch: std.Target.Cpu.Arch) usize {
         return switch (cpu_arch) {
             .x86_64 => 16,
-            .aarch64 => 16, // TODO
+            .aarch64 => 4 * @sizeOf(u32),
             else => @panic("TODO implement entrySize for this cpu arch"),
         };
     }
@@ -1153,12 +1153,11 @@ pub const PltSection = struct {
             {
                 const plt_addr = elf_file.sections.items(.shdr)[elf_file.plt_sect_index.?].sh_addr;
                 const got_plt_addr = elf_file.sections.items(.shdr)[elf_file.got_plt_sect_index.?].sh_addr;
-                // .got.plt[1]
-                const got_plt_1_pages = try aarch64_util.calcNumberOfPages(plt_addr + 4, got_plt_addr + 8);
-                const got_plt_1_off = try aarch64_util.calcPageOffset(.load_store_64, got_plt_addr + 8);
+                // TODO: relax if possible
                 // .got.plt[2]
-                const got_plt_2_pages = try aarch64_util.calcNumberOfPages(plt_addr + 12, got_plt_addr + 16);
-                const got_plt_2_off = try aarch64_util.calcPageOffset(.arithmetic, got_plt_addr + 16);
+                const pages = try aarch64_util.calcNumberOfPages(plt_addr + 4, got_plt_addr + 16);
+                const ldr_off = try aarch64_util.calcPageOffset(.load_store_64, got_plt_addr + 16);
+                const add_off = try aarch64_util.calcPageOffset(.arithmetic, got_plt_addr + 16);
 
                 const preamble = &[_]Instruction{
                     Instruction.stp(
@@ -1167,36 +1166,37 @@ pub const PltSection = struct {
                         Register.sp,
                         Instruction.LoadStorePairOffset.pre_index(-16),
                     ),
-                    // .got.plt[1]
-                    Instruction.adrp(.x16, got_plt_1_pages),
-                    Instruction.ldr(.x17, .x16, Instruction.LoadStoreOffset.imm(got_plt_1_off)),
-                    // .got.plt[2]
-                    Instruction.adrp(.x16, got_plt_2_pages),
-                    Instruction.add(.x16, .x16, got_plt_2_off, false),
+                    Instruction.adrp(.x16, pages),
+                    Instruction.ldr(.x17, .x16, Instruction.LoadStoreOffset.imm(ldr_off)),
+                    Instruction.add(.x16, .x16, add_off, false),
                     Instruction.br(.x17),
+                    Instruction.nop(),
                     Instruction.nop(),
                     Instruction.nop(),
                 };
                 comptime assert(preamble.len == 8);
-
                 for (preamble) |inst| {
                     try writer.writeInt(u32, inst.toU32(), .little);
                 }
             }
 
-            for (plt.symbols.items, 0..) |sym_index, i| {
+            for (plt.symbols.items) |sym_index| {
                 const sym = elf_file.getSymbol(sym_index);
                 const target_addr = sym.getGotPltAddress(elf_file);
                 const source_addr = sym.getPltAddress(elf_file);
-                const disp = @as(i64, @intCast(target_addr)) - @as(i64, @intCast(source_addr + 12)) - 4;
-                var entry = [_]u8{
-                    0xf3, 0x0f, 0x1e, 0xfa, // endbr64
-                    0x41, 0xbb, 0x00, 0x00, 0x00, 0x00, // mov r11d, N
-                    0xff, 0x25, 0x00, 0x00, 0x00, 0x00, // jmp qword ptr [rip] -> .got.plt[N]
+                const pages = try aarch64_util.calcNumberOfPages(source_addr, target_addr);
+                const ldr_off = try aarch64_util.calcPageOffset(.load_store_64, target_addr);
+                const add_off = try aarch64_util.calcPageOffset(.arithmetic, target_addr);
+                const insts = &[_]Instruction{
+                    Instruction.adrp(.x16, pages),
+                    Instruction.ldr(.x17, .x16, Instruction.LoadStoreOffset.imm(ldr_off)),
+                    Instruction.add(.x16, .x16, add_off, false),
+                    Instruction.br(.x17),
                 };
-                mem.writeInt(i32, entry[6..][0..4], @as(i32, @intCast(i)), .little);
-                mem.writeInt(i32, entry[12..][0..4], @as(i32, @intCast(disp)), .little);
-                try writer.writeAll(&entry);
+                comptime assert(insts.len == 4);
+                for (insts) |inst| {
+                    try writer.writeInt(u32, inst.toU32(), .little);
+                }
             }
         }
 
