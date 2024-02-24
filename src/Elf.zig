@@ -2707,11 +2707,17 @@ pub fn getGotAddress(self: *Elf) u64 {
 pub fn getTpAddress(self: *Elf) u64 {
     const index = self.tls_phdr_index orelse return 0;
     const phdr = self.phdrs.items[index];
-    return mem.alignForward(u64, phdr.p_vaddr + phdr.p_memsz, phdr.p_align);
+    return switch (self.options.cpu_arch.?) {
+        .x86_64 => mem.alignForward(u64, phdr.p_vaddr + phdr.p_memsz, phdr.p_align),
+        .aarch64 => mem.alignBackward(u64, phdr.p_vaddr - 16, phdr.p_align),
+        else => @panic("TODO implement getTpAddress for this arch"),
+    };
 }
 
 pub fn getDtpAddress(self: *Elf) u64 {
-    return self.getTlsAddress();
+    const index = self.tls_phdr_index orelse return 0;
+    const phdr = self.phdrs.items[index];
+    return phdr.p_vaddr;
 }
 
 pub fn getTlsAddress(self: *Elf) u64 {
