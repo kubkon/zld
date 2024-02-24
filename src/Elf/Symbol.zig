@@ -130,7 +130,8 @@ pub fn getPltGotAddress(symbol: Symbol, elf_file: *Elf) u64 {
     if (!(symbol.flags.plt and symbol.flags.got)) return 0;
     const extra = symbol.getExtra(elf_file).?;
     const shdr = elf_file.sections.items(.shdr)[elf_file.plt_got_sect_index.?];
-    return shdr.sh_addr + extra.plt_got * 16;
+    const cpu_arch = elf_file.options.cpu_arch.?;
+    return shdr.sh_addr + extra.plt_got * PltGotSection.entrySize(cpu_arch);
 }
 
 pub fn getPltAddress(symbol: Symbol, elf_file: *Elf) u64 {
@@ -385,5 +386,6 @@ const GotSection = synthetic.GotSection;
 const GotPltSection = synthetic.GotPltSection;
 const Object = @import("Object.zig");
 const PltSection = synthetic.PltSection;
+const PltGotSection = synthetic.PltGotSection;
 const SharedObject = @import("SharedObject.zig");
 const Symbol = @This();
