@@ -55,6 +55,7 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testObjc(b, opts));
     macho_step.dependOn(testObjcStubs(b, opts));
     macho_step.dependOn(testObjcStubs2(b, opts));
+    macho_step.dependOn(testObjCpp(b, opts));
     macho_step.dependOn(testPagezeroSize(b, opts));
     macho_step.dependOn(testReexportsZig(b, opts));
     macho_step.dependOn(testRelocatable(b, opts));
@@ -2014,6 +2015,58 @@ fn testObjcStubs2(b: *Build, opts: Options) *Step {
     return test_step;
 }
 
+fn testObjCpp(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-obj-cpp", "");
+
+    const includes = WriteFile.create(b);
+    _ = includes.add("Foo.h",
+        \\#import <Foundation/Foundation.h>
+        \\@interface Foo : NSObject
+        \\- (NSString *)name;
+        \\@end
+    );
+
+    const foo_o = cc(b, "foo.o", opts);
+    foo_o.addObjCppSource(
+        \\#import "Foo.h"
+        \\@implementation Foo
+        \\- (NSString *)name
+        \\{
+        \\      NSString *str = [[NSString alloc] initWithFormat:@"Zig"];
+        \\      return str;
+        \\}
+        \\@end
+    );
+    foo_o.addPrefixedDirectorySource("-I", includes.getDirectory());
+    foo_o.addArg("-c");
+
+    const exe = cc(b, "a.out", opts);
+    exe.addObjCppSource(
+        \\#import "Foo.h"
+        \\#import <assert.h>
+        \\#include <iostream>
+        \\int main(int argc, char *argv[])
+        \\{
+        \\  @autoreleasepool {
+        \\      Foo *foo = [[Foo alloc] init];
+        \\      NSString *result = [foo name];
+        \\      std::cout << "Hello from C++ and " << [result UTF8String];
+        \\      assert([result isEqualToString:@"Zig"]);
+        \\      return 0;
+        \\  }
+        \\}
+    );
+    exe.addPrefixedDirectorySource("-I", includes.getDirectory());
+    exe.addFileSource(foo_o.getFile());
+    exe.addArgs(&.{ "-framework", "Foundation", "-lc++" });
+
+    const run = exe.run();
+    run.expectStdOutEqual("Hello from C++ and Zig");
+    test_step.dependOn(run.step());
+
+    return test_step;
+}
+
 fn testPagezeroSize(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-pagezero-size", "");
 
@@ -3535,3 +3588,4 @@ const LazyPath = Build.LazyPath;
 const Run = Step.Run;
 const Step = Build.Step;
 const SysCmd = common.SysCmd;
+const WriteFile = Step.WriteFile;

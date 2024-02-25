@@ -163,8 +163,7 @@ pub fn initOutputSection(sect: macho.section_64, macho_file: *MachO) !u8 {
                 const segname = sect.segName();
                 const sectname = sect.sectName();
                 if (mem.eql(u8, segname, "__DATA")) {
-                    if (mem.eql(u8, sectname, "__const") or
-                        mem.eql(u8, sectname, "__cfstring") or
+                    if (mem.eql(u8, sectname, "__cfstring") or
                         mem.eql(u8, sectname, "__objc_classlist") or
                         mem.eql(u8, sectname, "__objc_imageinfo")) break :blk .{
                         "__DATA_CONST",
