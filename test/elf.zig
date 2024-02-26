@@ -2113,7 +2113,7 @@ fn testTlsDesc(b: *Build, opts: Options) *Step {
         \\}
     );
     main_o.addArgs(&.{ "-c", "-fPIC" });
-    forceTlsDescDialect(main_o);
+    forceTlsDialect(main_o, .desc);
 
     const a_o = cc(b, "a.o", opts);
     a_o.addCSource(
@@ -2127,7 +2127,7 @@ fn testTlsDesc(b: *Build, opts: Options) *Step {
         \\}
     );
     a_o.addArgs(&.{ "-c", "-fPIC" });
-    forceTlsDescDialect(a_o);
+    forceTlsDialect(a_o, .desc);
 
     const exp_stdout = "42 5\n";
 
@@ -2197,7 +2197,7 @@ fn testTlsDescImport(b: *Build, opts: Options) *Step {
         \\_Thread_local int bar;
     );
     dso.addArgs(&.{ "-fPIC", "-shared" });
-    forceTlsDescDialect(dso);
+    forceTlsDialect(dso, .desc);
 
     const exe = cc(b, "a.out", opts);
     exe.addCSource(
@@ -2212,7 +2212,7 @@ fn testTlsDescImport(b: *Build, opts: Options) *Step {
     exe.addArgs(&.{"-fPIC"});
     exe.addFileSource(dso.getFile());
     exe.addPrefixedDirectorySource("-Wl,-rpath,", dso.getDir());
-    forceTlsDescDialect(exe);
+    forceTlsDialect(exe, .desc);
 
     const run = exe.run();
     run.expectStdOutEqual("5 7\n");
@@ -2236,14 +2236,14 @@ fn testTlsDescStatic(b: *Build, opts: Options) *Step {
         \\}
     );
     main_o.addArgs(&.{ "-c", "-fPIC" });
-    forceTlsDescDialect(main_o);
+    forceTlsDialect(main_o, .desc);
 
     const a_o = cc(b, "a.o", opts);
     a_o.addCSource(
         \\_Thread_local int foo;
     );
     a_o.addArgs(&.{ "-c", "-fPIC" });
-    forceTlsDescDialect(a_o);
+    forceTlsDialect(a_o, .desc);
 
     const exp_stdout = "42\n";
 
@@ -2352,8 +2352,6 @@ fn testTlsDso(b: *Build, opts: Options) *Step {
 fn testTlsGd(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-gd", "");
 
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
-
     const main_o = cc(b, "main.o", opts);
     main_o.addCSource(
         \\#include <stdio.h>
@@ -2370,6 +2368,7 @@ fn testTlsGd(b: *Build, opts: Options) *Step {
         \\}
     );
     main_o.addArgs(&.{ "-c", "-fPIC" });
+    forceTlsDialect(main_o, .trad);
 
     const a_o = cc(b, "a.o", opts);
     a_o.addCSource(
@@ -2378,6 +2377,7 @@ fn testTlsGd(b: *Build, opts: Options) *Step {
         \\int get_x5() { return x5; }
     );
     a_o.addArgs(&.{ "-c", "-fPIC" });
+    forceTlsDialect(a_o, .trad);
 
     const b_o = cc(b, "b.o", opts);
     b_o.addCSource(
@@ -2386,6 +2386,7 @@ fn testTlsGd(b: *Build, opts: Options) *Step {
         \\int get_x6() { return x6; }
     );
     b_o.addArgs(&.{ "-c", "-fPIC" });
+    forceTlsDialect(b_o, .trad);
 
     const exp_stdout = "1 2 3 4 5 6\n";
 
@@ -3335,12 +3336,23 @@ fn testZText(b: *Build, opts: Options) *Step {
     return test_step;
 }
 
-fn forceTlsDescDialect(cmd: SysCmd) void {
-    switch (builtin.target.cpu.arch) {
-        .x86_64 => cmd.addArg("-mtls-dialect=gnu2"),
-        .aarch64 => cmd.addArg("-mtls-dialect=desc"),
+fn forceTlsDialect(cmd: SysCmd, dialect: enum { desc, trad }) void {
+    const opt = "-mtls-dialect=";
+    var buffer: [opt.len + 4]u8 = undefined;
+    const arg = switch (builtin.target.cpu.arch) {
+        .x86_64 => switch (dialect) {
+            .desc => "gnu2",
+            .trad => "trad",
+        },
+        .aarch64 => switch (dialect) {
+            .desc => "desc",
+            .trad => "trad",
+        },
         else => @panic("TODO handle this arch"),
-    }
+    };
+    @memcpy(buffer[0..opt.len], opt);
+    @memcpy(buffer[opt.len..][0..arg.len], arg);
+    cmd.addArg(&buffer);
 }
 
 fn cc(b: *Build, name: []const u8, opts: Options) SysCmd {
