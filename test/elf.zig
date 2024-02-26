@@ -2615,8 +2615,6 @@ fn testTlsGdToIe(b: *Build, opts: Options) *Step {
 fn testTlsIe(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-ie", "");
 
-    // if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
-
     const dso = cc(b, "a.so", opts);
     dso.addCSource(
         \\#include <stdio.h>
@@ -2679,8 +2677,6 @@ fn testTlsIe(b: *Build, opts: Options) *Step {
 fn testTlsLargeAlignment(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-large-alignment", "");
 
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
-
     const a_o = cc(b, "a.o", opts);
     a_o.addCSource(
         \\__attribute__((section(".tdata1")))
@@ -2739,8 +2735,6 @@ fn testTlsLargeAlignment(b: *Build, opts: Options) *Step {
 fn testTlsLargeTbss(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-large-tbss", "");
 
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
-
     const exe = cc(b, "a.out", opts);
     exe.addAsmSource(
         \\.globl x, y
@@ -2771,8 +2765,6 @@ fn testTlsLargeTbss(b: *Build, opts: Options) *Step {
 
 fn testTlsLargeStaticImage(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-large-static-image", "");
-
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
 
     const exe = cc(b, "a.out", opts);
     exe.addCSource("_Thread_local int x[] = { 1, 2, 3, [10000] = 5 };");
@@ -2961,8 +2953,6 @@ fn testTlsNoPic(b: *Build, opts: Options) *Step {
 fn testTlsOffsetAlignment(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-offset-alignment", "");
 
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
-
     const dso = cc(b, "a.so", opts);
     dso.addCSource(
         \\#include <assert.h>
@@ -3048,8 +3038,6 @@ fn testTlsPic(b: *Build, opts: Options) *Step {
 fn testTlsSmallAlignment(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-small-alignment", "");
 
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
-
     const a_o = cc(b, "a.o", opts);
     a_o.addAsmSource(
         \\.text
@@ -3104,7 +3092,6 @@ fn testTlsSmallAlignment(b: *Build, opts: Options) *Step {
 fn testTlsStatic(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-static", "");
 
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
     if (!opts.has_static) return skipTestStep(test_step);
 
     const exe = cc(b, "a.out", opts);
