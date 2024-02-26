@@ -2368,7 +2368,7 @@ fn testTlsGd(b: *Build, opts: Options) *Step {
         \\}
     );
     main_o.addArgs(&.{ "-c", "-fPIC" });
-    forceTlsDialect(main_o, .trad);
+    if (opts.system_compiler == .gcc) forceTlsDialect(main_o, .trad);
 
     const a_o = cc(b, "a.o", opts);
     a_o.addCSource(
@@ -2377,7 +2377,7 @@ fn testTlsGd(b: *Build, opts: Options) *Step {
         \\int get_x5() { return x5; }
     );
     a_o.addArgs(&.{ "-c", "-fPIC" });
-    forceTlsDialect(a_o, .trad);
+    if (opts.system_compiler == .gcc) forceTlsDialect(a_o, .trad);
 
     const b_o = cc(b, "b.o", opts);
     b_o.addCSource(
@@ -2386,7 +2386,7 @@ fn testTlsGd(b: *Build, opts: Options) *Step {
         \\int get_x6() { return x6; }
     );
     b_o.addArgs(&.{ "-c", "-fPIC" });
-    forceTlsDialect(b_o, .trad);
+    if (opts.system_compiler == .gcc) forceTlsDialect(b_o, .trad);
 
     const exp_stdout = "1 2 3 4 5 6\n";
 
@@ -2474,7 +2474,7 @@ fn testTlsGdNoPlt(b: *Build, opts: Options) *Step {
         \\}
     );
     obj.addArgs(&.{ "-fPIC", "-fno-plt", "-c" });
-    forceTlsDialect(obj, .trad);
+    if (opts.system_compiler == .gcc) forceTlsDialect(obj, .trad);
 
     const a_so = cc(b, "a.so", opts);
     a_so.addCSource(
@@ -2483,7 +2483,7 @@ fn testTlsGdNoPlt(b: *Build, opts: Options) *Step {
         \\int get_x5() { return x5; }
     );
     a_so.addArgs(&.{ "-fPIC", "-shared", "-fno-plt" });
-    forceTlsDialect(a_so, .trad);
+    if (opts.system_compiler == .gcc) forceTlsDialect(a_so, .trad);
 
     const b_so = cc(b, "b.so", opts);
     b_so.addCSource(
@@ -2492,7 +2492,7 @@ fn testTlsGdNoPlt(b: *Build, opts: Options) *Step {
         \\int get_x6() { return x6; }
     );
     b_so.addArgs(&.{ "-fPIC", "-shared", "-fno-plt", "-Wl,-no-relax" });
-    forceTlsDialect(b_so, .trad);
+    if (opts.system_compiler == .gcc) forceTlsDialect(b_so, .trad);
 
     {
         const exe = cc(b, "a.out", opts);
