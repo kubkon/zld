@@ -2275,8 +2275,6 @@ fn testTlsDescStatic(b: *Build, opts: Options) *Step {
 fn testTlsDfStaticTls(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-df-static-tls", "");
 
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
-
     const obj = cc(b, "a.o", opts);
     obj.addCSource(
         \\static _Thread_local int foo = 5;
