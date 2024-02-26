@@ -2099,7 +2099,6 @@ fn testTlsCommon(b: *Build, opts: Options) *Step {
 fn testTlsDesc(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-desc", "");
 
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
     if (opts.system_compiler != .gcc) return skipTestStep(test_step);
 
     const main_o = cc(b, "main.o", opts);
@@ -2114,7 +2113,8 @@ fn testTlsDesc(b: *Build, opts: Options) *Step {
         \\  return 0;
         \\}
     );
-    main_o.addArgs(&.{ "-c", "-fPIC", "-mtls-dialect=gnu2" });
+    main_o.addArgs(&.{ "-c", "-fPIC" });
+    forceTlsDescDialect(main_o);
 
     const a_o = cc(b, "a.o", opts);
     a_o.addCSource(
@@ -2127,7 +2127,8 @@ fn testTlsDesc(b: *Build, opts: Options) *Step {
         \\  return bar;
         \\}
     );
-    a_o.addArgs(&.{ "-c", "-fPIC", "-mtls-dialect=gnu2" });
+    a_o.addArgs(&.{ "-c", "-fPIC" });
+    forceTlsDescDialect(a_o);
 
     const exp_stdout = "42 5\n";
 
@@ -3348,6 +3349,14 @@ fn testZText(b: *Build, opts: Options) *Step {
     test_step.dependOn(&check.step);
 
     return test_step;
+}
+
+fn forceTlsDescDialect(cmd: SysCmd) void {
+    switch (builtin.target.cpu.arch) {
+        .x86_64 => cmd.addArg("-mtls-dialect=gnu2"),
+        .aarch64 => cmd.addArg("-mtls-dialect=desc"),
+        else => @panic("TODO handle this arch"),
+    }
 }
 
 fn cc(b: *Build, name: []const u8, opts: Options) SysCmd {
