@@ -2615,7 +2615,7 @@ fn testTlsGdToIe(b: *Build, opts: Options) *Step {
 fn testTlsIe(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-ie", "");
 
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
+    // if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
 
     const dso = cc(b, "a.so", opts);
     dso.addCSource(
