@@ -2190,7 +2190,6 @@ fn testTlsDesc(b: *Build, opts: Options) *Step {
 fn testTlsDescImport(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-desc-import", "");
 
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
     if (opts.system_compiler != .gcc) return skipTestStep(test_step);
 
     const dso = cc(b, "a.so", opts);
@@ -2198,7 +2197,8 @@ fn testTlsDescImport(b: *Build, opts: Options) *Step {
         \\_Thread_local int foo = 5;
         \\_Thread_local int bar;
     );
-    dso.addArgs(&.{ "-fPIC", "-shared", "-mtls-dialect=gnu2" });
+    dso.addArgs(&.{ "-fPIC", "-shared" });
+    forceTlsDescDialect(dso);
 
     const exe = cc(b, "a.out", opts);
     exe.addCSource(
@@ -2210,9 +2210,10 @@ fn testTlsDescImport(b: *Build, opts: Options) *Step {
         \\  printf("%d %d\n", foo, bar);
         \\}
     );
-    exe.addArgs(&.{ "-fPIC", "-mtls-dialect=gnu2" });
+    exe.addArgs(&.{"-fPIC"});
     exe.addFileSource(dso.getFile());
     exe.addPrefixedDirectorySource("-Wl,-rpath,", dso.getDir());
+    forceTlsDescDialect(exe);
 
     const run = exe.run();
     run.expectStdOutEqual("5 7\n");
@@ -2224,7 +2225,6 @@ fn testTlsDescImport(b: *Build, opts: Options) *Step {
 fn testTlsDescStatic(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-desc-static", "");
 
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
     if (opts.system_compiler != .gcc or !opts.has_static) return skipTestStep(test_step);
 
     const main_o = cc(b, "main.o", opts);
@@ -2236,13 +2236,15 @@ fn testTlsDescStatic(b: *Build, opts: Options) *Step {
         \\  printf("%d\n", foo);
         \\}
     );
-    main_o.addArgs(&.{ "-c", "-fPIC", "-mtls-dialect=gnu2" });
+    main_o.addArgs(&.{ "-c", "-fPIC" });
+    forceTlsDescDialect(main_o);
 
     const a_o = cc(b, "a.o", opts);
     a_o.addCSource(
         \\_Thread_local int foo;
     );
-    a_o.addArgs(&.{ "-c", "-fPIC", "-mtls-dialect=gnu2" });
+    a_o.addArgs(&.{ "-c", "-fPIC" });
+    forceTlsDescDialect(a_o);
 
     const exp_stdout = "42\n";
 
