@@ -1280,6 +1280,7 @@ const aarch64 = struct {
             .LDST32_ABS_LO12_NC,
             .LDST64_ABS_LO12_NC,
             .LDST128_ABS_LO12_NC,
+            .PREL32,
             => {},
 
             else => {
@@ -1325,6 +1326,11 @@ const aarch64 = struct {
                     elf_file,
                     cwriter,
                 );
+            },
+
+            .PREL32 => {
+                const value = math.cast(i32, S + A - P) orelse return error.Overflow;
+                mem.writeInt(u32, code, @bitCast(value), .little);
             },
 
             .CALL26,
