@@ -165,6 +165,14 @@ pub const Instruction = union(enum) {
         op: u1,
         sf: u1,
     },
+    move_wide_immediate: packed struct {
+        rd: u5,
+        imm16: u16,
+        hw: u2,
+        fixed: u6 = 0b100101,
+        opc: u2,
+        sf: u1,
+    },
 
     pub fn toU32(self: Instruction) u32 {
         return switch (self) {
@@ -177,6 +185,7 @@ pub const Instruction = union(enum) {
             .unconditional_branch_immediate => |v| @as(u32, @bitCast(v)),
             .no_operation => |v| @as(u32, @bitCast(v)),
             .add_subtract_immediate => |v| @as(u32, @bitCast(v)),
+            .move_wide_immediate => |v| @as(u32, @bitCast(v)),
         };
     }
 
@@ -533,6 +542,34 @@ pub const Instruction = union(enum) {
                 },
             },
         };
+    }
+
+    fn moveWideImmediate(opc: u2, rd: Register, imm16: u16, shift: u6) Instruction {
+        assert(shift % 16 == 0);
+        assert(!(rd.size() == 32 and shift > 16));
+        assert(!(rd.size() == 64 and shift > 48));
+
+        return Instruction{
+            .move_wide_immediate = .{
+                .rd = rd.enc(),
+                .imm16 = imm16,
+                .hw = @as(u2, @intCast(shift / 16)),
+                .opc = opc,
+                .sf = switch (rd.size()) {
+                    32 => 0,
+                    64 => 1,
+                    else => unreachable, // unexpected register size
+                },
+            },
+        };
+    }
+
+    pub fn movz(rd: Register, imm16: u16, shift: u6) Instruction {
+        return moveWideImmediate(0b10, rd, imm16, shift);
+    }
+
+    pub fn movk(rd: Register, imm16: u16, shift: u6) Instruction {
+        return moveWideImmediate(0b11, rd, imm16, shift);
     }
 
     pub fn adr(rd: Register, imm21: i21) Instruction {

@@ -1249,7 +1249,10 @@ const aarch64 = struct {
                 if (is_shared) try atom.picError(symbol, rel, elf_file);
             },
 
-            .TLSDESC_CALL => {
+            .TLSDESC_ADR_PAGE21,
+            .TLSDESC_LD64_LO12,
+            .TLSDESC_ADD_LO12,
+            => {
                 const should_relax = elf_file.options.static or
                     (elf_file.options.relax and !is_shared and !symbol.flags.import);
                 if (!should_relax) {
@@ -1264,9 +1267,7 @@ const aarch64 = struct {
             .LDST32_ABS_LO12_NC,
             .LDST64_ABS_LO12_NC,
             .LDST128_ABS_LO12_NC,
-            .TLSDESC_ADR_PAGE21,
-            .TLSDESC_LD64_LO12,
-            .TLSDESC_ADD_LO12,
+            .TLSDESC_CALL,
             => {},
 
             else => {
@@ -1286,7 +1287,7 @@ const aarch64 = struct {
         target: *const Symbol,
         args: ResolveArgs,
         it: *RelocsIterator,
-        code: []u8,
+        code_buffer: []u8,
         stream: anytype,
     ) !void {
         const tracy = trace(@src());
@@ -1297,6 +1298,7 @@ const aarch64 = struct {
 
         try stream.seekTo(rel.r_offset);
         const cwriter = stream.writer();
+        const code = code_buffer[rel.r_offset..][0..4];
 
         const P, const A, const S, const GOT, const G, const TP, const DTP = args;
         _ = DTP;
@@ -1324,7 +1326,7 @@ const aarch64 = struct {
                     });
                     return;
                 };
-                aarch64_util.writeBranchImm(disp, code[rel.r_offset..][0..4]);
+                aarch64_util.writeBranchImm(disp, code);
             },
 
             .ADR_PREL_PG_HI21 => {
@@ -1332,14 +1334,14 @@ const aarch64 = struct {
                 const saddr = @as(u64, @intCast(P));
                 const taddr = @as(u64, @intCast(S + A));
                 const pages = @as(u21, @bitCast(try aarch64_util.calcNumberOfPages(saddr, taddr)));
-                aarch64_util.writeAdrpInst(pages, code[rel.r_offset..][0..4]);
+                aarch64_util.writeAdrpInst(pages, code);
             },
 
             .ADR_GOT_PAGE => if (target.flags.got) {
                 const saddr = @as(u64, @intCast(P));
                 const taddr = @as(u64, @intCast(G + GOT + A));
                 const pages = @as(u21, @bitCast(try aarch64_util.calcNumberOfPages(saddr, taddr)));
-                aarch64_util.writeAdrpInst(pages, code[rel.r_offset..][0..4]);
+                aarch64_util.writeAdrpInst(pages, code);
             } else {
                 // TODO: relax
                 elf_file.base.fatal("{s}: {x}: TODO relax ADR_GOT_PAGE", .{
@@ -1351,12 +1353,12 @@ const aarch64 = struct {
             .LD64_GOT_LO12_NC => {
                 assert(target.flags.got);
                 const taddr = @as(u64, @intCast(G + GOT + A));
-                aarch64_util.writeLoadStoreRegInst(@divExact(@as(u12, @truncate(taddr)), 8), code[rel.r_offset..][0..4]);
+                aarch64_util.writeLoadStoreRegInst(@divExact(@as(u12, @truncate(taddr)), 8), code);
             },
 
             .ADD_ABS_LO12_NC => {
                 const taddr = @as(u64, @intCast(S + A));
-                aarch64_util.writeAddImmInst(@truncate(taddr), code[rel.r_offset..][0..4]);
+                aarch64_util.writeAddImmInst(@truncate(taddr), code);
             },
 
             .LDST8_ABS_LO12_NC,
@@ -1375,18 +1377,17 @@ const aarch64 = struct {
                     .LDST128_ABS_LO12_NC => @divExact(@as(u12, @truncate(taddr)), 16),
                     else => unreachable,
                 };
-                aarch64_util.writeLoadStoreRegInst(offset, code[rel.r_offset..][0..4]);
+                aarch64_util.writeLoadStoreRegInst(offset, code);
             },
 
             .TLSLE_ADD_TPREL_HI12 => {
-                const value = math.cast(i12, (S + A - TP) >> 12) orelse
-                    return error.Overflow;
-                aarch64_util.writeAddImmInst(@bitCast(value), code[rel.r_offset..][0..4]);
+                const value = math.cast(i12, (S + A - TP) >> 12) orelse return error.Overflow;
+                aarch64_util.writeAddImmInst(@bitCast(value), code);
             },
 
             .TLSLE_ADD_TPREL_LO12_NC => {
                 const value: i12 = @truncate(S + A - TP);
-                aarch64_util.writeAddImmInst(@bitCast(value), code[rel.r_offset..][0..4]);
+                aarch64_util.writeAddImmInst(@bitCast(value), code);
             },
 
             .TLSDESC_ADR_PAGE21 => {
@@ -1396,30 +1397,59 @@ const aarch64 = struct {
                     const taddr: u64 = @intCast(S_ + A);
                     relocs_log.debug("      [{x} => {x}]", .{ P, taddr });
                     const pages: u21 = @bitCast(try aarch64_util.calcNumberOfPages(saddr, taddr));
-                    aarch64_util.writeAdrpInst(pages, code[rel.r_offset..][0..4]);
+                    aarch64_util.writeAdrpInst(pages, code);
                 } else {
-                    elf_file.base.fatal("TODO relax TLSDESC sequence", .{});
-                    return error.RelocError;
+                    relocs_log.debug("      relaxing adrp => nop", .{});
+                    mem.writeInt(u32, code, Instruction.nop().toU32(), .little);
                 }
             },
 
             .TLSDESC_LD64_LO12 => {
-                const S_: i64 = @intCast(target.getTlsDescAddress(elf_file));
-                const taddr: u64 = @intCast(S_ + A);
-                relocs_log.debug("      [{x} => {x}]", .{ P, taddr });
-                const offset: u12 = try math.divExact(u12, @truncate(taddr), 8);
-                aarch64_util.writeLoadStoreRegInst(offset, code[rel.r_offset..][0..4]);
+                if (target.flags.tlsdesc) {
+                    const S_: i64 = @intCast(target.getTlsDescAddress(elf_file));
+                    const taddr: u64 = @intCast(S_ + A);
+                    relocs_log.debug("      [{x} => {x}]", .{ P, taddr });
+                    const offset: u12 = try math.divExact(u12, @truncate(taddr), 8);
+                    aarch64_util.writeLoadStoreRegInst(offset, code);
+                } else {
+                    relocs_log.debug("      relaxing ldr => nop", .{});
+                    mem.writeInt(u32, code, Instruction.nop().toU32(), .little);
+                }
             },
 
             .TLSDESC_ADD_LO12 => {
-                const S_: i64 = @intCast(target.getTlsDescAddress(elf_file));
-                const taddr: u64 = @intCast(S_ + A);
-                relocs_log.debug("      [{x} => {x}]", .{ P, taddr });
-                const offset: u12 = @truncate(taddr);
-                aarch64_util.writeAddImmInst(offset, code[rel.r_offset..][0..4]);
+                if (target.flags.tlsdesc) {
+                    const S_: i64 = @intCast(target.getTlsDescAddress(elf_file));
+                    const taddr: u64 = @intCast(S_ + A);
+                    relocs_log.debug("      [{x} => {x}]", .{ P, taddr });
+                    const offset: u12 = @truncate(taddr);
+                    aarch64_util.writeAddImmInst(offset, code);
+                } else {
+                    const old_inst = Instruction{
+                        .add_subtract_immediate = mem.bytesToValue(std.meta.TagPayload(
+                            Instruction,
+                            Instruction.add_subtract_immediate,
+                        ), code),
+                    };
+                    const rd: Register = @enumFromInt(old_inst.add_subtract_immediate.rd);
+                    relocs_log.debug("      relaxing add({s}) => movz(x0, {x})", .{ @tagName(rd), S + A - TP });
+                    const value: u16 = @bitCast(math.cast(i16, (S + A - TP) >> 16) orelse return error.Overflow);
+                    mem.writeInt(u32, code, Instruction.movz(.x0, value, 16).toU32(), .little);
+                }
             },
 
-            .TLSDESC_CALL => {},
+            .TLSDESC_CALL => if (!target.flags.tlsdesc) {
+                const old_inst = Instruction{
+                    .unconditional_branch_register = mem.bytesToValue(std.meta.TagPayload(
+                        Instruction,
+                        Instruction.unconditional_branch_register,
+                    ), code),
+                };
+                const rn: Register = @enumFromInt(old_inst.unconditional_branch_register.rn);
+                relocs_log.debug("      relaxing br({s}) => movk(x0, {x})", .{ @tagName(rn), S + A - TP });
+                const value: u16 = @bitCast(@as(i16, @truncate(S + A - TP)));
+                mem.writeInt(u32, code, Instruction.movk(.x0, value, 0).toU32(), .little);
+            },
 
             else => {
                 elf_file.base.fatal("unhandled relocation type: {}", .{
@@ -1468,6 +1498,8 @@ const aarch64 = struct {
     }
 
     const aarch64_util = @import("../aarch64.zig");
+    const Instruction = aarch64_util.Instruction;
+    const Register = aarch64_util.Register;
 };
 
 const riscv = struct {
