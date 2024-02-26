@@ -2059,7 +2059,6 @@ fn testStrip(b: *Build, opts: Options) *Step {
 fn testTlsCommon(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-common", "");
 
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
     if (opts.system_compiler != .gcc) return skipTestStep(test_step);
 
     const a_o = cc(b, "a.o", opts);
