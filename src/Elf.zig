@@ -1541,11 +1541,20 @@ fn allocateSyntheticSymbols(self: *Elf) void {
     }
 
     // _GLOBAL_OFFSET_TABLE_
-    if (self.got_plt_sect_index) |shndx| {
-        const shdr = self.sections.items(.shdr)[shndx];
-        const symbol = self.getSymbol(self.got_index.?);
-        symbol.value = shdr.sh_addr;
-        symbol.shndx = shndx;
+    if (self.options.cpu_arch.? == .x86_64) {
+        if (self.got_plt_sect_index) |shndx| {
+            const shdr = self.sections.items(.shdr)[shndx];
+            const symbol = self.getSymbol(self.got_index.?);
+            symbol.value = shdr.sh_addr;
+            symbol.shndx = shndx;
+        }
+    } else {
+        if (self.got_sect_index) |shndx| {
+            const shdr = self.sections.items(.shdr)[shndx];
+            const symbol = self.getSymbol(self.got_index.?);
+            symbol.value = shdr.sh_addr;
+            symbol.shndx = shndx;
+        }
     }
 
     // _PROCEDURE_LINKAGE_TABLE_
