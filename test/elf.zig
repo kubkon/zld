@@ -2789,8 +2789,6 @@ fn testTlsLargeStaticImage(b: *Build, opts: Options) *Step {
 fn testTlsLd(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-ld", "");
 
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
-
     const main_o = cc(b, "main.o", opts);
     main_o.addCSource(
         \\#include <stdio.h>
@@ -2840,8 +2838,6 @@ fn testTlsLd(b: *Build, opts: Options) *Step {
 fn testTlsLdDso(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-ld-dso", "");
 
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
-
     const dso = cc(b, "a.so", opts);
     dso.addCSource(
         \\static _Thread_local int def, def1;
@@ -2874,8 +2870,6 @@ fn testTlsLdDso(b: *Build, opts: Options) *Step {
 
 fn testTlsLdNoPlt(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-ld-no-plt", "");
-
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
 
     const a_o = cc(b, "a.o", opts);
     a_o.addCSource(
