@@ -787,13 +787,22 @@ pub const GotSection = struct {
                     } else {
                         const offset = @as(i64, @intCast(symbol.?.getAddress(.{}, elf_file))) -
                             @as(i64, @intCast(elf_file.getTpAddress()));
-                        try writer.writeInt(u64, @as(u64, @bitCast(offset)), .little);
+                        try writer.writeInt(u64, @bitCast(offset), .little);
                     }
                 },
 
                 .tlsdesc => {
-                    try writer.writeInt(u64, 0, .little);
-                    try writer.writeInt(u64, 0, .little);
+                    if (symbol.?.flags.import) {
+                        try writer.writeInt(u64, 0, .little);
+                        try writer.writeInt(u64, 0, .little);
+                    } else {
+                        try writer.writeInt(u64, 0, .little);
+                        const offset = if (apply_relocs)
+                            @as(i64, @intCast(symbol.?.getAddress(.{}, elf_file))) - @as(i64, @intCast(elf_file.getTlsAddress()))
+                        else
+                            0;
+                        try writer.writeInt(u64, @bitCast(offset), .little);
+                    }
                 },
             }
         }
@@ -895,8 +904,9 @@ pub const GotSection = struct {
                     const offset = symbol.?.getTlsDescAddress(elf_file);
                     elf_file.addRelaDynAssumeCapacity(.{
                         .offset = offset,
-                        .sym = extra.?.dynamic,
+                        .sym = if (symbol.?.flags.import) extra.?.dynamic else 0,
                         .type = relocation.encode(.tlsdesc, cpu_arch),
+                        .addend = if (symbol.?.flags.import) 0 else @intCast(symbol.?.getAddress(.{}, elf_file) - elf_file.getTlsAddress()),
                     });
                 },
             }
