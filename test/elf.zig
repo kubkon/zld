@@ -2457,8 +2457,6 @@ fn testTlsGd(b: *Build, opts: Options) *Step {
 fn testTlsGdNoPlt(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-gd-no-plt", "");
 
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
-
     const obj = cc(b, "a.o", opts);
     obj.addCSource(
         \\#include <stdio.h>
@@ -2476,6 +2474,7 @@ fn testTlsGdNoPlt(b: *Build, opts: Options) *Step {
         \\}
     );
     obj.addArgs(&.{ "-fPIC", "-fno-plt", "-c" });
+    forceTlsDialect(obj, .trad);
 
     const a_so = cc(b, "a.so", opts);
     a_so.addCSource(
@@ -2484,6 +2483,7 @@ fn testTlsGdNoPlt(b: *Build, opts: Options) *Step {
         \\int get_x5() { return x5; }
     );
     a_so.addArgs(&.{ "-fPIC", "-shared", "-fno-plt" });
+    forceTlsDialect(a_so, .trad);
 
     const b_so = cc(b, "b.so", opts);
     b_so.addCSource(
@@ -2492,6 +2492,7 @@ fn testTlsGdNoPlt(b: *Build, opts: Options) *Step {
         \\int get_x6() { return x6; }
     );
     b_so.addArgs(&.{ "-fPIC", "-shared", "-fno-plt", "-Wl,-no-relax" });
+    forceTlsDialect(b_so, .trad);
 
     {
         const exe = cc(b, "a.out", opts);
@@ -2526,7 +2527,7 @@ fn testTlsGdNoPlt(b: *Build, opts: Options) *Step {
 fn testTlsGdToIe(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-gd-to-ie", "");
 
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
+    if (builtin.target.cpu.arch != .x86_64) return skipTestStep(test_step);
 
     const a_o = cc(b, "a.o", opts);
     a_o.addCSource(
@@ -2923,8 +2924,6 @@ fn testTlsLdNoPlt(b: *Build, opts: Options) *Step {
 fn testTlsNoPic(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-no-pic", "");
 
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
-
     const exe = cc(b, "a.out", opts);
     exe.addCSource(
         \\#include <stdio.h>
@@ -3004,8 +3003,6 @@ fn testTlsOffsetAlignment(b: *Build, opts: Options) *Step {
 
 fn testTlsPic(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-pic", "");
-
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
 
     const obj = cc(b, "a.o", opts);
     obj.addCSource(
