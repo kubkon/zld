@@ -2012,6 +2012,35 @@ fn testSectionStart(b: *Build, opts: Options) *Step {
         test_step.dependOn(run.step());
     }
 
+    {
+        const exe = cc(b, "exe3", opts);
+        exe.addCSource(
+            \\#include <stdio.h>
+            \\__attribute__((section(".dummy"))) void dummy() { printf("dummy"); }
+            \\int main() { 
+            \\  printf("hi ");
+            \\  dummy();
+            \\  return 0;
+            \\}
+        );
+        exe.addArgs(&.{ "-Wl,--section-start,.dummy=0x10000", "-Wl,-Ttext,0x1000" });
+
+        const check = exe.check();
+        check.checkInHeaders();
+        check.checkExact("section headers");
+        check.checkExact("name .text");
+        check.checkExact("addr 1000");
+        check.checkInHeaders();
+        check.checkExact("section headers");
+        check.checkExact("name .dummy");
+        check.checkExact("addr 10000");
+        test_step.dependOn(&check.step);
+
+        const run = exe.run();
+        run.expectStdOutEqual("hi dummy");
+        test_step.dependOn(run.step());
+    }
+
     return test_step;
 }
 
