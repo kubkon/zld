@@ -423,6 +423,7 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
 
     var stream = std.io.fixedBufferStream(code);
 
+    var has_reloc_errors = false;
     var it = RelocsIterator{ .relocs = relocs };
     while (it.next()) |rel| {
         const r_kind = relocation.decode(rel.r_type(), cpu_arch);
@@ -462,9 +463,18 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
         const args = ResolveArgs{ P, A, S, GOT, G, TP, DTP };
 
         switch (cpu_arch) {
-            .x86_64 => try x86_64.resolveRelocAlloc(self, elf_file, rel, target, args, &it, code, &stream),
-            .aarch64 => try aarch64.resolveRelocAlloc(self, elf_file, rel, target, args, &it, code, &stream),
-            .riscv64 => try riscv.resolveRelocAlloc(self, elf_file, rel, target, args, &it, code, &stream),
+            .x86_64 => x86_64.resolveRelocAlloc(self, elf_file, rel, target, args, &it, code, &stream) catch |err| switch (err) {
+                error.RelocError => has_reloc_errors = true,
+                else => |e| return e,
+            },
+            .aarch64 => aarch64.resolveRelocAlloc(self, elf_file, rel, target, args, &it, code, &stream) catch |err| switch (err) {
+                error.RelocError => has_reloc_errors = true,
+                else => |e| return e,
+            },
+            .riscv64 => riscv.resolveRelocAlloc(self, elf_file, rel, target, args, &it, code, &stream) catch |err| switch (err) {
+                error.RelocError => has_reloc_errors = true,
+                else => |e| return e,
+            },
             else => |arch| {
                 elf_file.base.fatal("TODO support {s} architecture", .{@tagName(arch)});
                 return error.UnhandledCpuArch;
@@ -473,6 +483,8 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
     }
 
     try writer.writeAll(code);
+
+    if (has_reloc_errors) return error.RelocError;
 }
 
 fn resolveDynAbsReloc(
@@ -587,6 +599,7 @@ pub fn resolveRelocsNonAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void 
 
     var stream = std.io.fixedBufferStream(code);
 
+    var has_reloc_errors = false;
     var it = RelocsIterator{ .relocs = relocs };
     while (it.next()) |rel| {
         const r_kind = relocation.decode(rel.r_type(), cpu_arch);
@@ -614,9 +627,18 @@ pub fn resolveRelocsNonAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void 
         const args = ResolveArgs{ 0, A, S, GOT, 0, 0, DTP };
 
         switch (cpu_arch) {
-            .x86_64 => try x86_64.resolveRelocNonAlloc(self, elf_file, rel, target, args, &it, code, &stream),
-            .aarch64 => try aarch64.resolveRelocNonAlloc(self, elf_file, rel, target, args, &it, code, &stream),
-            .riscv64 => try riscv.resolveRelocNonAlloc(self, elf_file, rel, target, args, &it, code, &stream),
+            .x86_64 => x86_64.resolveRelocNonAlloc(self, elf_file, rel, target, args, &it, code, &stream) catch |err| switch (err) {
+                error.RelocError => has_reloc_errors = true,
+                else => |e| return e,
+            },
+            .aarch64 => aarch64.resolveRelocNonAlloc(self, elf_file, rel, target, args, &it, code, &stream) catch |err| switch (err) {
+                error.RelocError => has_reloc_errors = true,
+                else => |e| return e,
+            },
+            .riscv64 => riscv.resolveRelocNonAlloc(self, elf_file, rel, target, args, &it, code, &stream) catch |err| switch (err) {
+                error.RelocError => has_reloc_errors = true,
+                else => |e| return e,
+            },
             else => |arch| {
                 elf_file.base.fatal("TODO support {s} architecture", .{@tagName(arch)});
                 return error.UnhandledCpuArch;
@@ -625,6 +647,8 @@ pub fn resolveRelocsNonAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void 
     }
 
     try writer.writeAll(code);
+
+    if (has_reloc_errors) return error.RelocError;
 }
 
 pub fn format(
@@ -934,9 +958,12 @@ const x86_64 = struct {
                 try cwriter.writeAll(&.{ 0x66, 0x90 });
             },
 
-            else => elf_file.base.fatal("unhandled relocation type: {}", .{
-                relocation.fmtRelocType(rel.r_type(), .x86_64),
-            }),
+            else => {
+                elf_file.base.fatal("unhandled relocation type: {}", .{
+                    relocation.fmtRelocType(rel.r_type(), .x86_64),
+                });
+                return error.RelocError;
+            },
         }
     }
 
@@ -981,10 +1008,13 @@ const x86_64 = struct {
                 const size = @as(i64, @intCast(target.getSourceSymbol(elf_file).st_size));
                 try cwriter.writeInt(i64, @as(i64, @intCast(size + A)), .little);
             },
-            else => elf_file.base.fatal("{s}: invalid relocation type for non-alloc section: {}", .{
-                atom.getName(elf_file),
-                relocation.fmtRelocType(rel.r_type(), .x86_64),
-            }),
+            else => {
+                elf_file.base.fatal("{s}: invalid relocation type for non-alloc section: {}", .{
+                    atom.getName(elf_file),
+                    relocation.fmtRelocType(rel.r_type(), .x86_64),
+                });
+                return error.RelocError;
+            },
         }
     }
 
@@ -1035,10 +1065,13 @@ const x86_64 = struct {
                 try writer.writeAll(&insts);
             },
 
-            else => elf_file.base.fatal("TODO rewrite {} when followed by {}", .{
-                relocation.fmtRelocType(rels[0].r_type(), .x86_64),
-                relocation.fmtRelocType(rels[1].r_type(), .x86_64),
-            }),
+            else => {
+                elf_file.base.fatal("TODO rewrite {} when followed by {}", .{
+                    relocation.fmtRelocType(rels[0].r_type(), .x86_64),
+                    relocation.fmtRelocType(rels[1].r_type(), .x86_64),
+                });
+                return error.RelocError;
+            },
         }
     }
 
@@ -1061,10 +1094,13 @@ const x86_64 = struct {
                 try writer.writeAll(&insts);
             },
 
-            else => elf_file.base.fatal("TODO rewrite {} when followed by {}", .{
-                relocation.fmtRelocType(rels[0].r_type(), .x86_64),
-                relocation.fmtRelocType(rels[1].r_type(), .x86_64),
-            }),
+            else => {
+                elf_file.base.fatal("TODO rewrite {} when followed by {}", .{
+                    relocation.fmtRelocType(rels[0].r_type(), .x86_64),
+                    relocation.fmtRelocType(rels[1].r_type(), .x86_64),
+                });
+                return error.RelocError;
+            },
         }
     }
 
@@ -1100,10 +1136,13 @@ const x86_64 = struct {
                 try writer.writeAll(&insts);
             },
 
-            else => elf_file.base.fatal("TODO rewrite {} when followed by {}", .{
-                relocation.fmtRelocType(rels[0].r_type(), .x86_64),
-                relocation.fmtRelocType(rels[1].r_type(), .x86_64),
-            }),
+            else => {
+                elf_file.base.fatal("TODO rewrite {} when followed by {}", .{
+                    relocation.fmtRelocType(rels[0].r_type(), .x86_64),
+                    relocation.fmtRelocType(rels[1].r_type(), .x86_64),
+                });
+                return error.RelocError;
+            },
         }
     }
 
@@ -1174,6 +1213,8 @@ const aarch64 = struct {
         _ = it;
 
         const r_type: elf.R_AARCH64 = @enumFromInt(rel.r_type());
+        const is_shared = elf_file.options.shared;
+
         switch (r_type) {
             .ABS64 => {
                 try atom.scanReloc(symbol, rel, getDynAbsRelocAction(symbol, elf_file), elf_file);
@@ -1202,6 +1243,36 @@ const aarch64 = struct {
                 }
             },
 
+            .TLSLE_ADD_TPREL_HI12,
+            .TLSLE_ADD_TPREL_LO12_NC,
+            => {
+                if (is_shared) try atom.picError(symbol, rel, elf_file);
+            },
+
+            .TLSIE_ADR_GOTTPREL_PAGE21,
+            .TLSIE_LD64_GOTTPREL_LO12_NC,
+            => {
+                symbol.flags.gottp = true;
+            },
+
+            .TLSGD_ADR_PAGE21,
+            .TLSGD_ADD_LO12_NC,
+            => {
+                symbol.flags.tlsgd = true;
+            },
+
+            .TLSDESC_ADR_PAGE21,
+            .TLSDESC_LD64_LO12,
+            .TLSDESC_ADD_LO12,
+            .TLSDESC_CALL,
+            => {
+                const should_relax = elf_file.options.static or
+                    (elf_file.options.relax and !is_shared and !symbol.flags.import);
+                if (!should_relax) {
+                    symbol.flags.tlsdesc = true;
+                }
+            },
+
             .ADD_ABS_LO12_NC,
             .ADR_PREL_LO21,
             .LDST8_ABS_LO12_NC,
@@ -1209,6 +1280,7 @@ const aarch64 = struct {
             .LDST32_ABS_LO12_NC,
             .LDST64_ABS_LO12_NC,
             .LDST128_ABS_LO12_NC,
+            .PREL32,
             => {},
 
             else => {
@@ -1228,7 +1300,7 @@ const aarch64 = struct {
         target: *const Symbol,
         args: ResolveArgs,
         it: *RelocsIterator,
-        code: []u8,
+        code_buffer: []u8,
         stream: anytype,
     ) !void {
         const tracy = trace(@src());
@@ -1239,9 +1311,9 @@ const aarch64 = struct {
 
         try stream.seekTo(rel.r_offset);
         const cwriter = stream.writer();
+        const code = code_buffer[rel.r_offset..][0..4];
 
         const P, const A, const S, const GOT, const G, const TP, const DTP = args;
-        _ = TP;
         _ = DTP;
 
         switch (r_type) {
@@ -1256,6 +1328,11 @@ const aarch64 = struct {
                 );
             },
 
+            .PREL32 => {
+                const value = math.cast(i32, S + A - P) orelse return error.Overflow;
+                mem.writeInt(u32, code, @bitCast(value), .little);
+            },
+
             .CALL26,
             .JUMP26,
             => {
@@ -1267,7 +1344,7 @@ const aarch64 = struct {
                     });
                     return;
                 };
-                try aarch64_util.writeBranchImm(disp, code[rel.r_offset..][0..4]);
+                aarch64_util.writeBranchImm(disp, code);
             },
 
             .ADR_PREL_PG_HI21 => {
@@ -1275,14 +1352,14 @@ const aarch64 = struct {
                 const saddr = @as(u64, @intCast(P));
                 const taddr = @as(u64, @intCast(S + A));
                 const pages = @as(u21, @bitCast(try aarch64_util.calcNumberOfPages(saddr, taddr)));
-                try aarch64_util.writePages(pages, code[rel.r_offset..][0..4]);
+                aarch64_util.writeAdrpInst(pages, code);
             },
 
             .ADR_GOT_PAGE => if (target.flags.got) {
                 const saddr = @as(u64, @intCast(P));
                 const taddr = @as(u64, @intCast(G + GOT + A));
                 const pages = @as(u21, @bitCast(try aarch64_util.calcNumberOfPages(saddr, taddr)));
-                try aarch64_util.writePages(pages, code[rel.r_offset..][0..4]);
+                aarch64_util.writeAdrpInst(pages, code);
             } else {
                 // TODO: relax
                 elf_file.base.fatal("{s}: {x}: TODO relax ADR_GOT_PAGE", .{
@@ -1294,10 +1371,14 @@ const aarch64 = struct {
             .LD64_GOT_LO12_NC => {
                 assert(target.flags.got);
                 const taddr = @as(u64, @intCast(G + GOT + A));
-                try aarch64_util.writePageOffset(.load_store_64, taddr, code[rel.r_offset..][0..4]);
+                aarch64_util.writeLoadStoreRegInst(@divExact(@as(u12, @truncate(taddr)), 8), code);
             },
 
-            .ADD_ABS_LO12_NC,
+            .ADD_ABS_LO12_NC => {
+                const taddr = @as(u64, @intCast(S + A));
+                aarch64_util.writeAddImmInst(@truncate(taddr), code);
+            },
+
             .LDST8_ABS_LO12_NC,
             .LDST16_ABS_LO12_NC,
             .LDST32_ABS_LO12_NC,
@@ -1306,21 +1387,128 @@ const aarch64 = struct {
             => {
                 // TODO: NC means no overflow check
                 const taddr = @as(u64, @intCast(S + A));
-                const kind: aarch64_util.PageOffsetInstKind = switch (r_type) {
-                    .ADD_ABS_LO12_NC => .arithmetic,
-                    .LDST8_ABS_LO12_NC => .load_store_8,
-                    .LDST16_ABS_LO12_NC => .load_store_16,
-                    .LDST32_ABS_LO12_NC => .load_store_32,
-                    .LDST64_ABS_LO12_NC => .load_store_64,
-                    .LDST128_ABS_LO12_NC => .load_store_128,
+                const offset: u12 = switch (r_type) {
+                    .LDST8_ABS_LO12_NC => @truncate(taddr),
+                    .LDST16_ABS_LO12_NC => @divExact(@as(u12, @truncate(taddr)), 2),
+                    .LDST32_ABS_LO12_NC => @divExact(@as(u12, @truncate(taddr)), 4),
+                    .LDST64_ABS_LO12_NC => @divExact(@as(u12, @truncate(taddr)), 8),
+                    .LDST128_ABS_LO12_NC => @divExact(@as(u12, @truncate(taddr)), 16),
                     else => unreachable,
                 };
-                try aarch64_util.writePageOffset(kind, taddr, code[rel.r_offset..][0..4]);
+                aarch64_util.writeLoadStoreRegInst(offset, code);
             },
 
-            else => elf_file.base.fatal("unhandled relocation type: {}", .{
-                relocation.fmtRelocType(rel.r_type(), .aarch64),
-            }),
+            .TLSLE_ADD_TPREL_HI12 => {
+                const value = math.cast(i12, (S + A - TP) >> 12) orelse return error.Overflow;
+                aarch64_util.writeAddImmInst(@bitCast(value), code);
+            },
+
+            .TLSLE_ADD_TPREL_LO12_NC => {
+                const value: i12 = @truncate(S + A - TP);
+                aarch64_util.writeAddImmInst(@bitCast(value), code);
+            },
+
+            .TLSIE_ADR_GOTTPREL_PAGE21 => {
+                const S_: i64 = @intCast(target.getGotTpAddress(elf_file));
+                const saddr: u64 = @intCast(P);
+                const taddr: u64 = @intCast(S_ + A);
+                relocs_log.debug("      [{x} => {x}]", .{ P, taddr });
+                const pages: u21 = @bitCast(try aarch64_util.calcNumberOfPages(saddr, taddr));
+                aarch64_util.writeAdrpInst(pages, code);
+            },
+
+            .TLSIE_LD64_GOTTPREL_LO12_NC => {
+                const S_: i64 = @intCast(target.getGotTpAddress(elf_file));
+                const taddr: u64 = @intCast(S_ + A);
+                relocs_log.debug("      [{x} => {x}]", .{ P, taddr });
+                const offset: u12 = try math.divExact(u12, @truncate(taddr), 8);
+                aarch64_util.writeLoadStoreRegInst(offset, code);
+            },
+
+            .TLSGD_ADR_PAGE21 => {
+                const S_: i64 = @intCast(target.getTlsGdAddress(elf_file));
+                const saddr: u64 = @intCast(P);
+                const taddr: u64 = @intCast(S_ + A);
+                relocs_log.debug("      [{x} => {x}]", .{ P, taddr });
+                const pages: u21 = @bitCast(try aarch64_util.calcNumberOfPages(saddr, taddr));
+                aarch64_util.writeAdrpInst(pages, code);
+            },
+
+            .TLSGD_ADD_LO12_NC => {
+                const S_: i64 = @intCast(target.getTlsGdAddress(elf_file));
+                const taddr: u64 = @intCast(S_ + A);
+                relocs_log.debug("      [{x} => {x}]", .{ P, taddr });
+                const offset: u12 = @truncate(taddr);
+                aarch64_util.writeAddImmInst(offset, code);
+            },
+
+            .TLSDESC_ADR_PAGE21 => {
+                if (target.flags.tlsdesc) {
+                    const S_: i64 = @intCast(target.getTlsDescAddress(elf_file));
+                    const saddr: u64 = @intCast(P);
+                    const taddr: u64 = @intCast(S_ + A);
+                    relocs_log.debug("      [{x} => {x}]", .{ P, taddr });
+                    const pages: u21 = @bitCast(try aarch64_util.calcNumberOfPages(saddr, taddr));
+                    aarch64_util.writeAdrpInst(pages, code);
+                } else {
+                    relocs_log.debug("      relaxing adrp => nop", .{});
+                    mem.writeInt(u32, code, Instruction.nop().toU32(), .little);
+                }
+            },
+
+            .TLSDESC_LD64_LO12 => {
+                if (target.flags.tlsdesc) {
+                    const S_: i64 = @intCast(target.getTlsDescAddress(elf_file));
+                    const taddr: u64 = @intCast(S_ + A);
+                    relocs_log.debug("      [{x} => {x}]", .{ P, taddr });
+                    const offset: u12 = try math.divExact(u12, @truncate(taddr), 8);
+                    aarch64_util.writeLoadStoreRegInst(offset, code);
+                } else {
+                    relocs_log.debug("      relaxing ldr => nop", .{});
+                    mem.writeInt(u32, code, Instruction.nop().toU32(), .little);
+                }
+            },
+
+            .TLSDESC_ADD_LO12 => {
+                if (target.flags.tlsdesc) {
+                    const S_: i64 = @intCast(target.getTlsDescAddress(elf_file));
+                    const taddr: u64 = @intCast(S_ + A);
+                    relocs_log.debug("      [{x} => {x}]", .{ P, taddr });
+                    const offset: u12 = @truncate(taddr);
+                    aarch64_util.writeAddImmInst(offset, code);
+                } else {
+                    const old_inst = Instruction{
+                        .add_subtract_immediate = mem.bytesToValue(std.meta.TagPayload(
+                            Instruction,
+                            Instruction.add_subtract_immediate,
+                        ), code),
+                    };
+                    const rd: Register = @enumFromInt(old_inst.add_subtract_immediate.rd);
+                    relocs_log.debug("      relaxing add({s}) => movz(x0, {x})", .{ @tagName(rd), S + A - TP });
+                    const value: u16 = @bitCast(math.cast(i16, (S + A - TP) >> 16) orelse return error.Overflow);
+                    mem.writeInt(u32, code, Instruction.movz(.x0, value, 16).toU32(), .little);
+                }
+            },
+
+            .TLSDESC_CALL => if (!target.flags.tlsdesc) {
+                const old_inst = Instruction{
+                    .unconditional_branch_register = mem.bytesToValue(std.meta.TagPayload(
+                        Instruction,
+                        Instruction.unconditional_branch_register,
+                    ), code),
+                };
+                const rn: Register = @enumFromInt(old_inst.unconditional_branch_register.rn);
+                relocs_log.debug("      relaxing br({s}) => movk(x0, {x})", .{ @tagName(rn), S + A - TP });
+                const value: u16 = @bitCast(@as(i16, @truncate(S + A - TP)));
+                mem.writeInt(u32, code, Instruction.movk(.x0, value, 0).toU32(), .little);
+            },
+
+            else => {
+                elf_file.base.fatal("unhandled relocation type: {}", .{
+                    relocation.fmtRelocType(rel.r_type(), .aarch64),
+                });
+                return error.RelocError;
+            },
         }
     }
 
@@ -1351,14 +1539,19 @@ const aarch64 = struct {
             .NONE => unreachable,
             .ABS32 => try cwriter.writeInt(i32, @as(i32, @intCast(S + A)), .little),
             .ABS64 => try cwriter.writeInt(i64, S + A, .little),
-            else => elf_file.base.fatal("{s}: invalid relocation type for non-alloc section: {}", .{
-                atom.getName(elf_file),
-                relocation.fmtRelocType(rel.r_type(), .aarch64),
-            }),
+            else => {
+                elf_file.base.fatal("{s}: invalid relocation type for non-alloc section: {}", .{
+                    atom.getName(elf_file),
+                    relocation.fmtRelocType(rel.r_type(), .aarch64),
+                });
+                return error.RelocError;
+            },
         }
     }
 
     const aarch64_util = @import("../aarch64.zig");
+    const Instruction = aarch64_util.Instruction;
+    const Register = aarch64_util.Register;
 };
 
 const riscv = struct {
@@ -1515,9 +1708,12 @@ const riscv = struct {
                 }
             },
 
-            else => elf_file.base.fatal("unhandled relocation type: {}", .{
-                relocation.fmtRelocType(rel.r_type(), .riscv64),
-            }),
+            else => {
+                elf_file.base.fatal("unhandled relocation type: {}", .{
+                    relocation.fmtRelocType(rel.r_type(), .riscv64),
+                });
+                return error.RelocError;
+            },
         }
     }
 
@@ -1567,10 +1763,13 @@ const riscv = struct {
             .SET6 => riscv_util.writeSetSub6(.set, code[rel.r_offset..][0..1], S + A),
             .SUB6 => riscv_util.writeSetSub6(.sub, code[rel.r_offset..][0..1], S + A),
 
-            else => elf_file.base.fatal("{s}: invalid relocation type for non-alloc section: {}", .{
-                atom.getName(elf_file),
-                relocation.fmtRelocType(rel.r_type(), .riscv64),
-            }),
+            else => {
+                elf_file.base.fatal("{s}: invalid relocation type for non-alloc section: {}", .{
+                    atom.getName(elf_file),
+                    relocation.fmtRelocType(rel.r_type(), .riscv64),
+                });
+                return error.RelocError;
+            },
         }
     }
 

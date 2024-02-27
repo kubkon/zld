@@ -1541,11 +1541,20 @@ fn allocateSyntheticSymbols(self: *Elf) void {
     }
 
     // _GLOBAL_OFFSET_TABLE_
-    if (self.got_plt_sect_index) |shndx| {
-        const shdr = self.sections.items(.shdr)[shndx];
-        const symbol = self.getSymbol(self.got_index.?);
-        symbol.value = shdr.sh_addr;
-        symbol.shndx = shndx;
+    if (self.options.cpu_arch.? == .x86_64) {
+        if (self.got_plt_sect_index) |shndx| {
+            const shdr = self.sections.items(.shdr)[shndx];
+            const symbol = self.getSymbol(self.got_index.?);
+            symbol.value = shdr.sh_addr;
+            symbol.shndx = shndx;
+        }
+    } else {
+        if (self.got_sect_index) |shndx| {
+            const shdr = self.sections.items(.shdr)[shndx];
+            const symbol = self.getSymbol(self.got_index.?);
+            symbol.value = shdr.sh_addr;
+            symbol.shndx = shndx;
+        }
     }
 
     // _PROCEDURE_LINKAGE_TABLE_
@@ -2114,7 +2123,6 @@ fn scanRelocs(self: *Elf) !void {
         }
         if (symbol.flags.tlsdesc) {
             log.debug("'{s}' needs TLSDESC", .{symbol.getName(self)});
-            try self.dynsym.addSymbol(index, self);
             try self.got.addTlsDescSymbol(index, self);
         }
     }
@@ -2185,7 +2193,7 @@ fn writeAtoms(self: *Elf) !void {
         const buffer = try self.base.allocator.alloc(u8, shdr.sh_size);
         defer self.base.allocator.free(buffer);
         const padding_byte: u8 = if (shdr.sh_type == elf.SHT_PROGBITS and
-            shdr.sh_flags & elf.SHF_EXECINSTR != 0)
+            shdr.sh_flags & elf.SHF_EXECINSTR != 0 and self.options.cpu_arch.? == .x86_64)
             0xcc // int3
         else
             0;
@@ -2707,11 +2715,17 @@ pub fn getGotAddress(self: *Elf) u64 {
 pub fn getTpAddress(self: *Elf) u64 {
     const index = self.tls_phdr_index orelse return 0;
     const phdr = self.phdrs.items[index];
-    return mem.alignForward(u64, phdr.p_vaddr + phdr.p_memsz, phdr.p_align);
+    return switch (self.options.cpu_arch.?) {
+        .x86_64 => mem.alignForward(u64, phdr.p_vaddr + phdr.p_memsz, phdr.p_align),
+        .aarch64 => mem.alignBackward(u64, phdr.p_vaddr - 16, phdr.p_align),
+        else => @panic("TODO implement getTpAddress for this arch"),
+    };
 }
 
 pub fn getDtpAddress(self: *Elf) u64 {
-    return self.getTlsAddress();
+    const index = self.tls_phdr_index orelse return 0;
+    const phdr = self.phdrs.items[index];
+    return phdr.p_vaddr;
 }
 
 pub fn getTlsAddress(self: *Elf) u64 {

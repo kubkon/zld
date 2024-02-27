@@ -165,6 +165,14 @@ pub const Instruction = union(enum) {
         op: u1,
         sf: u1,
     },
+    move_wide_immediate: packed struct {
+        rd: u5,
+        imm16: u16,
+        hw: u2,
+        fixed: u6 = 0b100101,
+        opc: u2,
+        sf: u1,
+    },
 
     pub fn toU32(self: Instruction) u32 {
         return switch (self) {
@@ -177,6 +185,7 @@ pub const Instruction = union(enum) {
             .unconditional_branch_immediate => |v| @as(u32, @bitCast(v)),
             .no_operation => |v| @as(u32, @bitCast(v)),
             .add_subtract_immediate => |v| @as(u32, @bitCast(v)),
+            .move_wide_immediate => |v| @as(u32, @bitCast(v)),
         };
     }
 
@@ -535,6 +544,34 @@ pub const Instruction = union(enum) {
         };
     }
 
+    fn moveWideImmediate(opc: u2, rd: Register, imm16: u16, shift: u6) Instruction {
+        assert(shift % 16 == 0);
+        assert(!(rd.size() == 32 and shift > 16));
+        assert(!(rd.size() == 64 and shift > 48));
+
+        return Instruction{
+            .move_wide_immediate = .{
+                .rd = rd.enc(),
+                .imm16 = imm16,
+                .hw = @as(u2, @intCast(shift / 16)),
+                .opc = opc,
+                .sf = switch (rd.size()) {
+                    32 => 0,
+                    64 => 1,
+                    else => unreachable, // unexpected register size
+                },
+            },
+        };
+    }
+
+    pub fn movz(rd: Register, imm16: u16, shift: u6) Instruction {
+        return moveWideImmediate(0b10, rd, imm16, shift);
+    }
+
+    pub fn movk(rd: Register, imm16: u16, shift: u6) Instruction {
+        return moveWideImmediate(0b11, rd, imm16, shift);
+    }
+
     pub fn adr(rd: Register, imm21: i21) Instruction {
         return pcRelativeAddress(rd, imm21, 0b0);
     }
@@ -606,66 +643,26 @@ pub inline fn isArithmeticOp(inst: *const [4]u8) bool {
     return ((group_decode >> 2) == 4);
 }
 
-pub const PageOffsetInstKind = enum {
-    arithmetic,
-    load_store_8,
-    load_store_16,
-    load_store_32,
-    load_store_64,
-    load_store_128,
-};
+pub fn writeAddImmInst(value: u12, code: *[4]u8) void {
+    var inst = Instruction{
+        .add_subtract_immediate = mem.bytesToValue(std.meta.TagPayload(
+            Instruction,
+            Instruction.add_subtract_immediate,
+        ), code),
+    };
+    inst.add_subtract_immediate.imm12 = value;
+    mem.writeInt(u32, code, inst.toU32(), .little);
+}
 
-pub fn classifyInst(code: *const [4]u8) PageOffsetInstKind {
-    if (isArithmeticOp(code)) return .arithmetic;
-    const inst = Instruction{
+pub fn writeLoadStoreRegInst(value: u12, code: *[4]u8) void {
+    var inst: Instruction = .{
         .load_store_register = mem.bytesToValue(std.meta.TagPayload(
             Instruction,
             Instruction.load_store_register,
         ), code),
     };
-    return switch (inst.load_store_register.size) {
-        0 => if (inst.load_store_register.v == 1) .load_store_128 else .load_store_8,
-        1 => .load_store_16,
-        2 => .load_store_32,
-        3 => .load_store_64,
-    };
-}
-
-pub fn calcPageOffset(kind: PageOffsetInstKind, taddr: u64) !u12 {
-    const narrowed = @as(u12, @truncate(taddr));
-    return switch (kind) {
-        .arithmetic, .load_store_8 => narrowed,
-        .load_store_16 => try math.divExact(u12, narrowed, 2),
-        .load_store_32 => try math.divExact(u12, narrowed, 4),
-        .load_store_64 => try math.divExact(u12, narrowed, 8),
-        .load_store_128 => try math.divExact(u12, narrowed, 16),
-    };
-}
-
-pub fn writePageOffset(kind: PageOffsetInstKind, taddr: u64, code: *[4]u8) !void {
-    const value = try calcPageOffset(kind, taddr);
-    switch (kind) {
-        .arithmetic => {
-            var inst = Instruction{
-                .add_subtract_immediate = mem.bytesToValue(std.meta.TagPayload(
-                    Instruction,
-                    Instruction.add_subtract_immediate,
-                ), code),
-            };
-            inst.add_subtract_immediate.imm12 = value;
-            mem.writeInt(u32, code, inst.toU32(), .little);
-        },
-        else => {
-            var inst: Instruction = .{
-                .load_store_register = mem.bytesToValue(std.meta.TagPayload(
-                    Instruction,
-                    Instruction.load_store_register,
-                ), code),
-            };
-            inst.load_store_register.offset = value;
-            mem.writeInt(u32, code, inst.toU32(), .little);
-        },
-    }
+    inst.load_store_register.offset = value;
+    mem.writeInt(u32, code, inst.toU32(), .little);
 }
 
 pub fn calcNumberOfPages(saddr: u64, taddr: u64) error{Overflow}!i21 {
@@ -675,7 +672,7 @@ pub fn calcNumberOfPages(saddr: u64, taddr: u64) error{Overflow}!i21 {
     return pages;
 }
 
-pub fn writePages(pages: u21, code: *[4]u8) !void {
+pub fn writeAdrpInst(pages: u21, code: *[4]u8) void {
     var inst = Instruction{
         .pc_relative_address = mem.bytesToValue(std.meta.TagPayload(
             Instruction,
@@ -687,7 +684,7 @@ pub fn writePages(pages: u21, code: *[4]u8) !void {
     mem.writeInt(u32, code, inst.toU32(), .little);
 }
 
-pub fn writeBranchImm(disp: i28, code: *[4]u8) !void {
+pub fn writeBranchImm(disp: i28, code: *[4]u8) void {
     var inst = Instruction{
         .unconditional_branch_immediate = mem.bytesToValue(std.meta.TagPayload(
             Instruction,

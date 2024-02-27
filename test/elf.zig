@@ -2059,7 +2059,6 @@ fn testStrip(b: *Build, opts: Options) *Step {
 fn testTlsCommon(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-common", "");
 
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
     if (opts.system_compiler != .gcc) return skipTestStep(test_step);
 
     const a_o = cc(b, "a.o", opts);
@@ -2099,7 +2098,6 @@ fn testTlsCommon(b: *Build, opts: Options) *Step {
 fn testTlsDesc(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-desc", "");
 
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
     if (opts.system_compiler != .gcc) return skipTestStep(test_step);
 
     const main_o = cc(b, "main.o", opts);
@@ -2114,7 +2112,8 @@ fn testTlsDesc(b: *Build, opts: Options) *Step {
         \\  return 0;
         \\}
     );
-    main_o.addArgs(&.{ "-c", "-fPIC", "-mtls-dialect=gnu2" });
+    main_o.addArgs(&.{ "-c", "-fPIC" });
+    forceTlsDialect(main_o, .desc);
 
     const a_o = cc(b, "a.o", opts);
     a_o.addCSource(
@@ -2127,7 +2126,8 @@ fn testTlsDesc(b: *Build, opts: Options) *Step {
         \\  return bar;
         \\}
     );
-    a_o.addArgs(&.{ "-c", "-fPIC", "-mtls-dialect=gnu2" });
+    a_o.addArgs(&.{ "-c", "-fPIC" });
+    forceTlsDialect(a_o, .desc);
 
     const exp_stdout = "42 5\n";
 
@@ -2189,7 +2189,6 @@ fn testTlsDesc(b: *Build, opts: Options) *Step {
 fn testTlsDescImport(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-desc-import", "");
 
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
     if (opts.system_compiler != .gcc) return skipTestStep(test_step);
 
     const dso = cc(b, "a.so", opts);
@@ -2197,7 +2196,8 @@ fn testTlsDescImport(b: *Build, opts: Options) *Step {
         \\_Thread_local int foo = 5;
         \\_Thread_local int bar;
     );
-    dso.addArgs(&.{ "-fPIC", "-shared", "-mtls-dialect=gnu2" });
+    dso.addArgs(&.{ "-fPIC", "-shared" });
+    forceTlsDialect(dso, .desc);
 
     const exe = cc(b, "a.out", opts);
     exe.addCSource(
@@ -2209,9 +2209,10 @@ fn testTlsDescImport(b: *Build, opts: Options) *Step {
         \\  printf("%d %d\n", foo, bar);
         \\}
     );
-    exe.addArgs(&.{ "-fPIC", "-mtls-dialect=gnu2" });
+    exe.addArgs(&.{"-fPIC"});
     exe.addFileSource(dso.getFile());
     exe.addPrefixedDirectorySource("-Wl,-rpath,", dso.getDir());
+    forceTlsDialect(exe, .desc);
 
     const run = exe.run();
     run.expectStdOutEqual("5 7\n");
@@ -2223,7 +2224,6 @@ fn testTlsDescImport(b: *Build, opts: Options) *Step {
 fn testTlsDescStatic(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-desc-static", "");
 
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
     if (opts.system_compiler != .gcc or !opts.has_static) return skipTestStep(test_step);
 
     const main_o = cc(b, "main.o", opts);
@@ -2235,13 +2235,15 @@ fn testTlsDescStatic(b: *Build, opts: Options) *Step {
         \\  printf("%d\n", foo);
         \\}
     );
-    main_o.addArgs(&.{ "-c", "-fPIC", "-mtls-dialect=gnu2" });
+    main_o.addArgs(&.{ "-c", "-fPIC" });
+    forceTlsDialect(main_o, .desc);
 
     const a_o = cc(b, "a.o", opts);
     a_o.addCSource(
         \\_Thread_local int foo;
     );
-    a_o.addArgs(&.{ "-c", "-fPIC", "-mtls-dialect=gnu2" });
+    a_o.addArgs(&.{ "-c", "-fPIC" });
+    forceTlsDialect(a_o, .desc);
 
     const exp_stdout = "42\n";
 
@@ -2272,8 +2274,6 @@ fn testTlsDescStatic(b: *Build, opts: Options) *Step {
 
 fn testTlsDfStaticTls(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-df-static-tls", "");
-
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
 
     const obj = cc(b, "a.o", opts);
     obj.addCSource(
@@ -2310,8 +2310,6 @@ fn testTlsDfStaticTls(b: *Build, opts: Options) *Step {
 
 fn testTlsDso(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-dso", "");
-
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
 
     const dso = cc(b, "a.so", opts);
     dso.addCSource(
@@ -2354,8 +2352,6 @@ fn testTlsDso(b: *Build, opts: Options) *Step {
 fn testTlsGd(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-gd", "");
 
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
-
     const main_o = cc(b, "main.o", opts);
     main_o.addCSource(
         \\#include <stdio.h>
@@ -2372,6 +2368,7 @@ fn testTlsGd(b: *Build, opts: Options) *Step {
         \\}
     );
     main_o.addArgs(&.{ "-c", "-fPIC" });
+    if (opts.system_compiler == .gcc) forceTlsDialect(main_o, .trad);
 
     const a_o = cc(b, "a.o", opts);
     a_o.addCSource(
@@ -2380,6 +2377,7 @@ fn testTlsGd(b: *Build, opts: Options) *Step {
         \\int get_x5() { return x5; }
     );
     a_o.addArgs(&.{ "-c", "-fPIC" });
+    if (opts.system_compiler == .gcc) forceTlsDialect(a_o, .trad);
 
     const b_o = cc(b, "b.o", opts);
     b_o.addCSource(
@@ -2388,6 +2386,7 @@ fn testTlsGd(b: *Build, opts: Options) *Step {
         \\int get_x6() { return x6; }
     );
     b_o.addArgs(&.{ "-c", "-fPIC" });
+    if (opts.system_compiler == .gcc) forceTlsDialect(b_o, .trad);
 
     const exp_stdout = "1 2 3 4 5 6\n";
 
@@ -2458,8 +2457,6 @@ fn testTlsGd(b: *Build, opts: Options) *Step {
 fn testTlsGdNoPlt(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-gd-no-plt", "");
 
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
-
     const obj = cc(b, "a.o", opts);
     obj.addCSource(
         \\#include <stdio.h>
@@ -2477,6 +2474,7 @@ fn testTlsGdNoPlt(b: *Build, opts: Options) *Step {
         \\}
     );
     obj.addArgs(&.{ "-fPIC", "-fno-plt", "-c" });
+    if (opts.system_compiler == .gcc) forceTlsDialect(obj, .trad);
 
     const a_so = cc(b, "a.so", opts);
     a_so.addCSource(
@@ -2485,6 +2483,7 @@ fn testTlsGdNoPlt(b: *Build, opts: Options) *Step {
         \\int get_x5() { return x5; }
     );
     a_so.addArgs(&.{ "-fPIC", "-shared", "-fno-plt" });
+    if (opts.system_compiler == .gcc) forceTlsDialect(a_so, .trad);
 
     const b_so = cc(b, "b.so", opts);
     b_so.addCSource(
@@ -2493,6 +2492,7 @@ fn testTlsGdNoPlt(b: *Build, opts: Options) *Step {
         \\int get_x6() { return x6; }
     );
     b_so.addArgs(&.{ "-fPIC", "-shared", "-fno-plt", "-Wl,-no-relax" });
+    if (opts.system_compiler == .gcc) forceTlsDialect(b_so, .trad);
 
     {
         const exe = cc(b, "a.out", opts);
@@ -2527,7 +2527,7 @@ fn testTlsGdNoPlt(b: *Build, opts: Options) *Step {
 fn testTlsGdToIe(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-gd-to-ie", "");
 
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
+    if (builtin.target.cpu.arch != .x86_64) return skipTestStep(test_step);
 
     const a_o = cc(b, "a.o", opts);
     a_o.addCSource(
@@ -2617,8 +2617,6 @@ fn testTlsGdToIe(b: *Build, opts: Options) *Step {
 fn testTlsIe(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-ie", "");
 
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
-
     const dso = cc(b, "a.so", opts);
     dso.addCSource(
         \\#include <stdio.h>
@@ -2681,8 +2679,6 @@ fn testTlsIe(b: *Build, opts: Options) *Step {
 fn testTlsLargeAlignment(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-large-alignment", "");
 
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
-
     const a_o = cc(b, "a.o", opts);
     a_o.addCSource(
         \\__attribute__((section(".tdata1")))
@@ -2741,8 +2737,6 @@ fn testTlsLargeAlignment(b: *Build, opts: Options) *Step {
 fn testTlsLargeTbss(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-large-tbss", "");
 
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
-
     const exe = cc(b, "a.out", opts);
     exe.addAsmSource(
         \\.globl x, y
@@ -2774,8 +2768,6 @@ fn testTlsLargeTbss(b: *Build, opts: Options) *Step {
 fn testTlsLargeStaticImage(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-large-static-image", "");
 
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
-
     const exe = cc(b, "a.out", opts);
     exe.addCSource("_Thread_local int x[] = { 1, 2, 3, [10000] = 5 };");
     exe.addCSource(
@@ -2796,8 +2788,6 @@ fn testTlsLargeStaticImage(b: *Build, opts: Options) *Step {
 
 fn testTlsLd(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-ld", "");
-
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
 
     const main_o = cc(b, "main.o", opts);
     main_o.addCSource(
@@ -2848,8 +2838,6 @@ fn testTlsLd(b: *Build, opts: Options) *Step {
 fn testTlsLdDso(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-ld-dso", "");
 
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
-
     const dso = cc(b, "a.so", opts);
     dso.addCSource(
         \\static _Thread_local int def, def1;
@@ -2882,8 +2870,6 @@ fn testTlsLdDso(b: *Build, opts: Options) *Step {
 
 fn testTlsLdNoPlt(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-ld-no-plt", "");
-
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
 
     const a_o = cc(b, "a.o", opts);
     a_o.addCSource(
@@ -2932,8 +2918,6 @@ fn testTlsLdNoPlt(b: *Build, opts: Options) *Step {
 fn testTlsNoPic(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-no-pic", "");
 
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
-
     const exe = cc(b, "a.out", opts);
     exe.addCSource(
         \\#include <stdio.h>
@@ -2962,8 +2946,6 @@ fn testTlsNoPic(b: *Build, opts: Options) *Step {
 
 fn testTlsOffsetAlignment(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-offset-alignment", "");
-
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
 
     const dso = cc(b, "a.so", opts);
     dso.addCSource(
@@ -3016,8 +2998,6 @@ fn testTlsOffsetAlignment(b: *Build, opts: Options) *Step {
 fn testTlsPic(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-pic", "");
 
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
-
     const obj = cc(b, "a.o", opts);
     obj.addCSource(
         \\#include <stdio.h>
@@ -3049,8 +3029,6 @@ fn testTlsPic(b: *Build, opts: Options) *Step {
 
 fn testTlsSmallAlignment(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-small-alignment", "");
-
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
 
     const a_o = cc(b, "a.o", opts);
     a_o.addAsmSource(
@@ -3106,7 +3084,6 @@ fn testTlsSmallAlignment(b: *Build, opts: Options) *Step {
 fn testTlsStatic(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-tls-static", "");
 
-    if (builtin.target.cpu.arch == .aarch64) return skipTestStep(test_step);
     if (!opts.has_static) return skipTestStep(test_step);
 
     const exe = cc(b, "a.out", opts);
@@ -3348,6 +3325,26 @@ fn testZText(b: *Build, opts: Options) *Step {
     test_step.dependOn(&check.step);
 
     return test_step;
+}
+
+fn forceTlsDialect(cmd: SysCmd, dialect: enum { desc, trad }) void {
+    const opt = "-mtls-dialect=";
+    var buffer: [opt.len + 4]u8 = undefined;
+    const arg = switch (builtin.target.cpu.arch) {
+        .x86_64 => switch (dialect) {
+            .desc => "gnu2",
+            .trad => "gnu",
+        },
+        .aarch64 => switch (dialect) {
+            .desc => "desc",
+            .trad => "trad",
+        },
+        else => @panic("TODO handle this arch"),
+    };
+    @memcpy(buffer[0..opt.len], opt);
+    @memcpy(buffer[opt.len..][0..arg.len], arg);
+    const len = opt.len + arg.len;
+    cmd.addArg(buffer[0..len]);
 }
 
 fn cc(b: *Build, name: []const u8, opts: Options) SysCmd {
