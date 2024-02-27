@@ -3333,7 +3333,7 @@ fn forceTlsDialect(cmd: SysCmd, dialect: enum { desc, trad }) void {
     const arg = switch (builtin.target.cpu.arch) {
         .x86_64 => switch (dialect) {
             .desc => "gnu2",
-            .trad => "trad",
+            .trad => "gnu",
         },
         .aarch64 => switch (dialect) {
             .desc => "desc",
@@ -3343,7 +3343,8 @@ fn forceTlsDialect(cmd: SysCmd, dialect: enum { desc, trad }) void {
     };
     @memcpy(buffer[0..opt.len], opt);
     @memcpy(buffer[opt.len..][0..arg.len], arg);
-    cmd.addArg(&buffer);
+    const len = opt.len + arg.len;
+    cmd.addArg(buffer[0..len]);
 }
 
 fn cc(b: *Build, name: []const u8, opts: Options) SysCmd {
