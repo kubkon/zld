@@ -61,6 +61,7 @@ pub fn addElfTests(b: *Build, options: common.Options) *Step {
     elf_step.dependOn(testSectionStart(b, opts));
     elf_step.dependOn(testSharedAbsSymbol(b, opts));
     elf_step.dependOn(testStrip(b, opts));
+    elf_step.dependOn(testThunks(b, opts));
     elf_step.dependOn(testTlsCommon(b, opts));
     elf_step.dependOn(testTlsDesc(b, opts));
     elf_step.dependOn(testTlsDescImport(b, opts));
@@ -2134,6 +2135,32 @@ fn testStrip(b: *Build, opts: Options) *Step {
         check.checkNotPresent("name .symtab");
         test_step.dependOn(&check.step);
     }
+
+    return test_step;
+}
+
+fn testThunks(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-thunks", "");
+
+    if (builtin.target.cpu.arch != .aarch64) return skipTestStep(test_step);
+
+    const exe = cc(b, "a.out", opts);
+    exe.addCSource(
+        \\void foo();
+        \\void foobar();
+        \\__attribute__((section(".foo"))) void foo() { foobar(); }
+        \\__attribute__((section(".foobar"))) void foobar() { foo(); }
+        \\int main() {
+        \\  foo();
+        \\  return 0;
+        \\}
+    );
+    exe.addArgs(&.{ "-Wl,--section-start,.foo=0x1000", "-Wl,--section-start,.foobar=0x20000000" });
+
+    const check = exe.check();
+    check.checkInSymtab();
+    check.checkContains("foo$thunk");
+    test_step.dependOn(&check.step);
 
     return test_step;
 }

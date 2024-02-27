@@ -1342,7 +1342,7 @@ const aarch64 = struct {
                         atom.getName(elf_file),
                         rel.r_offset,
                     });
-                    return;
+                    return error.RelocError;
                 };
                 aarch64_util.writeBranchImm(disp, code);
             },
