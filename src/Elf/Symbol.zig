@@ -224,7 +224,7 @@ pub fn setOutputSym(symbol: Symbol, elf_file: *Elf, out: *elf.Elf64_Sym) void {
             break :blk 0;
         }
         if (st_shndx == elf.SHN_ABS or st_shndx == elf.SHN_COMMON) break :blk symbol.getAddress(.{ .plt = false }, elf_file);
-        const shdr = &elf_file.sections.items(.shdr)[st_shndx];
+        const shdr = elf_file.sections.items(.shdr)[st_shndx];
         if (Elf.shdrIsTls(shdr)) break :blk symbol.getAddress(.{ .plt = false }, elf_file) - elf_file.getTlsAddress();
         break :blk symbol.getAddress(.{ .plt = false }, elf_file);
     };
