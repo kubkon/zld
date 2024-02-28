@@ -16,7 +16,7 @@ pub fn addTests(b: *Build, comp: *Compile, build_opts: struct {
     };
     const cc_override: ?[]const u8 = std.process.getEnvVarOwned(b.allocator, "CC") catch |e| switch (e) {
         error.EnvironmentVariableNotFound => null,
-        error.InvalidUtf8 => @panic("InvalidUtf8"),
+        error.InvalidWtf8 => @panic("InvalidWtf8"),
         error.OutOfMemory => @panic("OOM"),
     };
     const zld = WriteFile.create(b).addCopyFile(comp.getEmittedBin(), "ld");
