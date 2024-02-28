@@ -735,8 +735,11 @@ fn calcSectionSizes(self: *Elf) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
-    for (self.sections.items(.shdr), self.sections.items(.atoms)) |*shdr, atoms| {
+    const slice = self.sections.slice();
+
+    for (slice.items(.shdr), slice.items(.atoms)) |*shdr, atoms| {
         if (atoms.items.len == 0) continue;
+        if (self.requiresThunks() and shdr.sh_flags & elf.SHF_EXECINSTR != 0) continue;
 
         for (atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index).?;
@@ -746,6 +749,16 @@ fn calcSectionSizes(self: *Elf) !void {
             atom.value = offset;
             shdr.sh_size += padding + atom.size;
             shdr.sh_addralign = @max(shdr.sh_addralign, alignment);
+        }
+    }
+
+    if (self.requiresThunks()) {
+        for (slice.items(.shdr), slice.items(.atoms), 0..) |shdr, atoms, i| {
+            if (shdr.sh_flags & elf.SHF_EXECINSTR == 0) continue;
+            if (atoms.items.len == 0) continue;
+
+            // Create jump/branch range extenders if needed.
+            try thunks.createThunks(@intCast(i), self);
         }
     }
 
@@ -2761,6 +2774,14 @@ pub fn getTlsAddress(self: *Elf) u64 {
     return phdr.p_vaddr;
 }
 
+fn requiresThunks(self: Elf) bool {
+    return switch (self.options.cpu_arch.?) {
+        .aarch64 => true,
+        .x86_64, .riscv64 => false,
+        else => @panic("unsupported architecture"),
+    };
+}
+
 /// Caller owns the memory.
 pub fn preadAllAlloc(allocator: Allocator, file: std.fs.File, offset: usize, size: usize) ![]u8 {
     const buffer = try allocator.alloc(u8, size);
@@ -2951,6 +2972,7 @@ const relocatable = @import("Elf/relocatable.zig");
 const relocation = @import("Elf/relocation.zig");
 const state_log = std.log.scoped(.state);
 const synthetic = @import("Elf/synthetic.zig");
+const thunks = @import("Elf/thunks.zig");
 const trace = @import("tracy.zig").trace;
 
 const Allocator = mem.Allocator;
