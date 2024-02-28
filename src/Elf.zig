@@ -896,6 +896,13 @@ pub fn calcSymtabSize(self: *Elf) !void {
         nlocals += 1;
     }
 
+    for (self.thunks.items) |*thunk| {
+        thunk.output_symtab_ctx.ilocal = nlocals + 1;
+        thunk.calcSymtabSize(self);
+        nlocals += thunk.output_symtab_ctx.nlocals;
+        strsize += thunk.output_symtab_ctx.strsize;
+    }
+
     for (files.items) |index| {
         const file = self.getFile(index).?;
         const ctx = switch (file) {
@@ -964,6 +971,10 @@ pub fn writeSymtab(self: *Elf) !void {
     try self.strtab.ensureUnusedCapacity(gpa, needed_strtab_size);
 
     self.writeSectionSymbols();
+
+    for (self.thunks.items) |thunk| {
+        thunk.writeSymtab(self);
+    }
 
     for (self.objects.items) |index| {
         self.getFile(index).?.writeSymtab(self);
