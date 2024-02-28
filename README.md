@@ -70,8 +70,8 @@ will be to swap in `zig ld` in place of any other linker.
 - [x] Mach-O
 - [x] ELF (non-PIE static and dynamic, x86_64)
 - [x] ELF (PIE, DSO, x86_64)
-- [ ] ELF (aarch64)
-- [ ] ELF (other architectures)
+- [x] ELF (aarch64)
+- [ ] ELF (riscv64)
 - [ ] COFF/PE
 - [x] Wasm (static)
 
