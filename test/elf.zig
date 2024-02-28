@@ -58,8 +58,10 @@ pub fn addElfTests(b: *Build, options: common.Options) *Step {
     elf_step.dependOn(testRelocatableArchive(b, opts));
     elf_step.dependOn(testRelocatableEhFrame(b, opts));
     elf_step.dependOn(testRelocatableNoEhFrame(b, opts));
+    elf_step.dependOn(testSectionStart(b, opts));
     elf_step.dependOn(testSharedAbsSymbol(b, opts));
     elf_step.dependOn(testStrip(b, opts));
+    elf_step.dependOn(testThunks(b, opts));
     elf_step.dependOn(testTlsCommon(b, opts));
     elf_step.dependOn(testTlsDesc(b, opts));
     elf_step.dependOn(testTlsDescImport(b, opts));
@@ -1962,6 +1964,87 @@ fn testRelocatableNoEhFrame(b: *Build, opts: Options) *Step {
     return test_step;
 }
 
+fn testSectionStart(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-section-start", "");
+
+    {
+        const exe = cc(b, "exe1", opts);
+        exe.addCSource(
+            \\#include <stdio.h>
+            \\__attribute__((section(".dummy"))) void dummy() { printf("dummy"); }
+            \\int main() { 
+            \\  dummy();
+            \\  return 0;
+            \\}
+        );
+        exe.addArgs(&.{"-Wl,--section-start,.dummy=0x10000"});
+
+        const check = exe.check();
+        check.checkInHeaders();
+        check.checkExact("section headers");
+        check.checkExact("name .dummy");
+        check.checkExact("addr 10000");
+        test_step.dependOn(&check.step);
+
+        const run = exe.run();
+        run.expectStdOutEqual("dummy");
+        test_step.dependOn(run.step());
+    }
+
+    {
+        const exe = cc(b, "exe2", opts);
+        exe.addCSource(
+            \\#include <stdio.h>
+            \\int foo;
+            \\int main() { 
+            \\  return foo;
+            \\}
+        );
+        exe.addArgs(&.{"-Wl,-Tbss,0x10000"});
+
+        const check = exe.check();
+        check.checkInHeaders();
+        check.checkExact("section headers");
+        check.checkExact("name .bss");
+        check.checkExact("addr 10000");
+        test_step.dependOn(&check.step);
+
+        const run = exe.run();
+        test_step.dependOn(run.step());
+    }
+
+    {
+        const exe = cc(b, "exe3", opts);
+        exe.addCSource(
+            \\#include <stdio.h>
+            \\__attribute__((section(".dummy"))) void dummy() { printf("dummy"); }
+            \\int main() { 
+            \\  printf("hi ");
+            \\  dummy();
+            \\  return 0;
+            \\}
+        );
+        exe.addArgs(&.{ "-Wl,--section-start,.dummy=0x10000", "-Wl,-Ttext,0x1000" });
+
+        const check = exe.check();
+        check.checkInHeaders();
+        check.checkExact("section headers");
+        check.checkExact("name .text");
+        check.checkExact("addr 1000");
+        check.checkInHeaders();
+        check.checkExact("section headers");
+        check.checkExact("name .dummy");
+        check.checkExact("addr 10000");
+        test_step.dependOn(&check.step);
+
+        const run = exe.run();
+        run.expectStdOutEqual("hi dummy");
+        test_step.dependOn(run.step());
+    }
+
+    return test_step;
+}
+
 fn testSharedAbsSymbol(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-elf-shared-abs-symbol", "");
 
@@ -2052,6 +2135,32 @@ fn testStrip(b: *Build, opts: Options) *Step {
         check.checkNotPresent("name .symtab");
         test_step.dependOn(&check.step);
     }
+
+    return test_step;
+}
+
+fn testThunks(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-thunks", "");
+
+    if (builtin.target.cpu.arch != .aarch64) return skipTestStep(test_step);
+
+    const exe = cc(b, "a.out", opts);
+    exe.addCSource(
+        \\void foo();
+        \\void foobar();
+        \\__attribute__((section(".foo"))) void foo() { foobar(); }
+        \\__attribute__((section(".foobar"))) void foobar() { foo(); }
+        \\int main() {
+        \\  foo();
+        \\  return 0;
+        \\}
+    );
+    exe.addArgs(&.{ "-Wl,--section-start,.foo=0x1000", "-Wl,--section-start,.foobar=0x20000000" });
+
+    const check = exe.check();
+    check.checkInSymtab();
+    check.checkContains("foo$thunk");
+    test_step.dependOn(&check.step);
 
     return test_step;
 }

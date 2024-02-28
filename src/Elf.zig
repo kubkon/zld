@@ -85,6 +85,7 @@ rela_plt: std.ArrayListUnmanaged(elf.Elf64_Rela) = .{},
 comdat_group_sections: std.ArrayListUnmanaged(ComdatGroupSection) = .{},
 
 atoms: std.ArrayListUnmanaged(Atom) = .{},
+thunks: std.ArrayListUnmanaged(Thunk) = .{},
 
 comdat_groups: std.ArrayListUnmanaged(ComdatGroup) = .{},
 comdat_groups_owners: std.ArrayListUnmanaged(ComdatGroupOwner) = .{},
@@ -137,6 +138,7 @@ pub fn deinit(self: *Elf) void {
     self.symtab.deinit(gpa);
     self.strtab.deinit(gpa);
     self.atoms.deinit(gpa);
+    self.thunks.deinit(gpa);
     self.comdat_groups.deinit(gpa);
     self.comdat_groups_owners.deinit(gpa);
     self.comdat_groups_table.deinit(gpa);
@@ -446,7 +448,7 @@ fn sortInitFini(self: *Elf) !void {
         }
     };
 
-    for (self.sections.items(.shdr), 0..) |*shdr, shndx| {
+    for (self.sections.items(.shdr), 0..) |shdr, shndx| {
         if (!shdrIsAlloc(shdr)) continue;
 
         var is_init_fini = false;
@@ -735,8 +737,11 @@ fn calcSectionSizes(self: *Elf) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
-    for (self.sections.items(.shdr), self.sections.items(.atoms)) |*shdr, atoms| {
+    const slice = self.sections.slice();
+
+    for (slice.items(.shdr), slice.items(.atoms)) |*shdr, atoms| {
         if (atoms.items.len == 0) continue;
+        if (self.requiresThunks() and shdr.sh_flags & elf.SHF_EXECINSTR != 0) continue;
 
         for (atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index).?;
@@ -746,6 +751,16 @@ fn calcSectionSizes(self: *Elf) !void {
             atom.value = offset;
             shdr.sh_size += padding + atom.size;
             shdr.sh_addralign = @max(shdr.sh_addralign, alignment);
+        }
+    }
+
+    if (self.requiresThunks()) {
+        for (slice.items(.shdr), slice.items(.atoms), 0..) |shdr, atoms, i| {
+            if (shdr.sh_flags & elf.SHF_EXECINSTR == 0) continue;
+            if (atoms.items.len == 0) continue;
+
+            // Create jump/branch range extenders if needed.
+            try thunks.createThunks(@intCast(i), self);
         }
     }
 
@@ -881,6 +896,13 @@ pub fn calcSymtabSize(self: *Elf) !void {
         nlocals += 1;
     }
 
+    for (self.thunks.items) |*thunk| {
+        thunk.output_symtab_ctx.ilocal = nlocals + 1;
+        thunk.calcSymtabSize(self);
+        nlocals += thunk.output_symtab_ctx.nlocals;
+        strsize += thunk.output_symtab_ctx.strsize;
+    }
+
     for (files.items) |index| {
         const file = self.getFile(index).?;
         const ctx = switch (file) {
@@ -950,6 +972,10 @@ pub fn writeSymtab(self: *Elf) !void {
 
     self.writeSectionSymbols();
 
+    for (self.thunks.items) |thunk| {
+        thunk.writeSymtab(self);
+    }
+
     for (self.objects.items) |index| {
         self.getFile(index).?.writeSymtab(self);
     }
@@ -1017,34 +1043,56 @@ fn initPhdrs(self: *Elf) !void {
         });
     }
 
-    // Add LOAD phdrs
     const slice = self.sections.slice();
+
+    // Add LOAD phdrs
     {
-        var last_phdr: ?u16 = null;
-        var shndx: usize = 0;
-        while (shndx < slice.len) {
-            const shdr = &slice.items(.shdr)[shndx];
-            if (!shdrIsAlloc(shdr) or shdrIsTbss(shdr)) {
-                shndx += 1;
-                continue;
+        var sorted = try std.ArrayList(elf.Elf64_Shdr).initCapacity(self.base.allocator, slice.len);
+        defer sorted.deinit();
+
+        for (slice.items(.shdr)) |shdr| {
+            if (!shdrIsAlloc(shdr) or shdrIsTbss(shdr)) continue;
+            sorted.appendAssumeCapacity(shdr);
+        }
+
+        const sortShdr = struct {
+            fn lessThan(ctx: void, lhs: elf.Elf64_Shdr, rhs: elf.Elf64_Shdr) bool {
+                _ = ctx;
+                return lhs.sh_addr < rhs.sh_addr;
             }
-            last_phdr = try self.addPhdr(.{
+        }.lessThan;
+        mem.sort(elf.Elf64_Shdr, sorted.items, {}, sortShdr);
+
+        var is_phdr_included = false;
+        var shndx: usize = 0;
+        while (shndx < sorted.items.len) {
+            const shdr = sorted.items[shndx];
+            const p_flags = shdrToPhdrFlags(shdr.sh_flags);
+            const phndx = try self.addPhdr(.{
                 .type = elf.PT_LOAD,
-                .flags = shdrToPhdrFlags(shdr.sh_flags),
+                .flags = p_flags,
                 .@"align" = @max(self.options.page_size.?, shdr.sh_addralign),
-                .offset = if (last_phdr == null) 0 else shdr.sh_offset,
-                .addr = if (last_phdr == null) self.options.image_base else shdr.sh_addr,
+                .offset = shdr.sh_offset,
+                .addr = shdr.sh_addr,
             });
-            const p_flags = self.phdrs.items[last_phdr.?].p_flags;
-            try self.addShdrToPhdr(last_phdr.?, shdr);
+            if (!is_phdr_included and p_flags == elf.PF_R) {
+                const phdr = &self.phdrs.items[phndx];
+                phdr.p_offset = 0;
+                phdr.p_vaddr = self.options.image_base;
+                phdr.p_paddr = phdr.p_vaddr;
+                is_phdr_included = true;
+            }
+            try self.addShdrToPhdr(phndx, shdr);
             shndx += 1;
 
-            while (shndx < slice.len) : (shndx += 1) {
-                const next = &slice.items(.shdr)[shndx];
-                if (shdrIsTbss(next)) continue;
+            while (shndx < sorted.items.len) : (shndx += 1) {
+                const next = sorted.items[shndx];
                 if (p_flags == shdrToPhdrFlags(next.sh_flags)) {
-                    if (shdrIsBss(next) or next.sh_offset - shdr.sh_offset == next.sh_addr - shdr.sh_addr) {
-                        try self.addShdrToPhdr(last_phdr.?, next);
+                    if (shdrIsBss(next) or
+                        (next.sh_offset > shdr.sh_offset and next.sh_addr > shdr.sh_addr and
+                        next.sh_offset - shdr.sh_offset == next.sh_addr - shdr.sh_addr))
+                    {
+                        try self.addShdrToPhdr(phndx, next);
                         continue;
                     }
                 }
@@ -1057,7 +1105,7 @@ fn initPhdrs(self: *Elf) !void {
     {
         var shndx: usize = 0;
         outer: while (shndx < slice.len) {
-            const shdr = &slice.items(.shdr)[shndx];
+            const shdr = slice.items(.shdr)[shndx];
             if (!shdrIsTls(shdr)) {
                 shndx += 1;
                 continue;
@@ -1073,7 +1121,7 @@ fn initPhdrs(self: *Elf) !void {
             shndx += 1;
 
             while (shndx < slice.len) : (shndx += 1) {
-                const next = &slice.items(.shdr)[shndx];
+                const next = slice.items(.shdr)[shndx];
                 if (!shdrIsTls(next)) continue :outer;
                 try self.addShdrToPhdr(self.tls_phdr_index.?, next);
             }
@@ -1130,7 +1178,7 @@ fn initPhdrs(self: *Elf) !void {
         .@"align" = 1,
     });
 
-    // Backpatch size of the PHDR phdr
+    // Backpatch size of the PHDR phdr and possibly RO segment that holds it
     {
         const phdr = &self.phdrs.items[phdr_index];
         const size = @sizeOf(elf.Elf64_Phdr) * self.phdrs.items.len;
@@ -1139,7 +1187,7 @@ fn initPhdrs(self: *Elf) !void {
     }
 }
 
-fn addShdrToPhdr(self: *Elf, phdr_index: u16, shdr: *const elf.Elf64_Shdr) !void {
+fn addShdrToPhdr(self: *Elf, phdr_index: u16, shdr: elf.Elf64_Shdr) !void {
     const phdr = &self.phdrs.items[phdr_index];
     phdr.p_align = @max(phdr.p_align, shdr.sh_addralign);
     if (shdr.sh_type != elf.SHT_NOBITS) {
@@ -1157,23 +1205,23 @@ fn shdrToPhdrFlags(sh_flags: u64) u32 {
     return out_flags;
 }
 
-inline fn shdrIsAlloc(shdr: *const elf.Elf64_Shdr) bool {
+inline fn shdrIsAlloc(shdr: elf.Elf64_Shdr) bool {
     return shdr.sh_flags & elf.SHF_ALLOC != 0;
 }
 
-inline fn shdrIsBss(shdr: *const elf.Elf64_Shdr) bool {
+inline fn shdrIsBss(shdr: elf.Elf64_Shdr) bool {
     return shdrIsZerofill(shdr) and !shdrIsTls(shdr);
 }
 
-inline fn shdrIsTbss(shdr: *const elf.Elf64_Shdr) bool {
+inline fn shdrIsTbss(shdr: elf.Elf64_Shdr) bool {
     return shdrIsZerofill(shdr) and shdrIsTls(shdr);
 }
 
-pub inline fn shdrIsZerofill(shdr: *const elf.Elf64_Shdr) bool {
+pub inline fn shdrIsZerofill(shdr: elf.Elf64_Shdr) bool {
     return shdr.sh_type == elf.SHT_NOBITS;
 }
 
-pub inline fn shdrIsTls(shdr: *const elf.Elf64_Shdr) bool {
+pub inline fn shdrIsTls(shdr: elf.Elf64_Shdr) bool {
     return shdr.sh_flags & elf.SHF_TLS != 0;
 }
 
@@ -1201,7 +1249,7 @@ fn allocateSectionsInMemory(self: *Elf, base_offset: u64) !void {
     };
 
     var alignment = Align{};
-    for (shdrs, 0..) |*shdr, i| {
+    for (shdrs, 0..) |shdr, i| {
         if (!shdrIsTls(shdr)) continue;
         if (alignment.first_tls_index == null) alignment.first_tls_index = i;
         alignment.tls_start_align = @max(alignment.tls_start_align, shdr.sh_addralign);
@@ -1211,7 +1259,14 @@ fn allocateSectionsInMemory(self: *Elf, base_offset: u64) !void {
     var i: usize = 0;
     while (i < shdrs.len) : (i += 1) {
         const shdr = &shdrs[i];
-        if (!shdrIsAlloc(shdr)) continue;
+        const name = self.shstrtab.getAssumeExists(shdr.sh_name);
+        if (!shdrIsAlloc(shdr.*)) continue;
+        if (self.options.section_start.get(name)) |sh_addr| {
+            addr = sh_addr;
+            shdr.sh_addr = addr;
+            addr += shdr.sh_size;
+            continue;
+        }
         if (i > 0) {
             const prev_shdr = shdrs[i - 1];
             if (shdrToPhdrFlags(shdr.sh_flags) != shdrToPhdrFlags(prev_shdr.sh_flags)) {
@@ -1219,7 +1274,7 @@ fn allocateSectionsInMemory(self: *Elf, base_offset: u64) !void {
                 addr += self.options.page_size.?;
             }
         }
-        if (shdrIsTbss(shdr)) {
+        if (shdrIsTbss(shdr.*)) {
             // .tbss is a little special as it's used only by the loader meaning it doesn't
             // need to be actually mmap'ed at runtime. We still need to correctly increment
             // the addresses of every TLS zerofill section tho. Thus, we hack it so that
@@ -1233,7 +1288,7 @@ fn allocateSectionsInMemory(self: *Elf, base_offset: u64) !void {
             // .data 0x10
             // ...
             var tbss_addr = addr;
-            while (i < shdrs.len and shdrIsTbss(&shdrs[i])) : (i += 1) {
+            while (i < shdrs.len and shdrIsTbss(shdrs[i])) : (i += 1) {
                 const tbss_shdr = &shdrs[i];
                 tbss_addr = alignment.@"align"(i, tbss_shdr.sh_addralign, tbss_addr);
                 tbss_shdr.sh_addr = tbss_addr;
@@ -1257,18 +1312,18 @@ fn allocateSectionsInFile(self: *Elf, base_offset: u64) void {
     var i: usize = 0;
     while (i < shdrs.len) {
         const first = &shdrs[i];
-        defer if (!shdrIsAlloc(first) or shdrIsZerofill(first)) {
+        defer if (!shdrIsAlloc(first.*) or shdrIsZerofill(first.*)) {
             i += 1;
         };
 
         // Non-alloc sections don't need congruency with their allocated virtual memory addresses
-        if (!shdrIsAlloc(first)) {
+        if (!shdrIsAlloc(first.*)) {
             first.sh_offset = mem.alignForward(u64, offset, first.sh_addralign);
             offset = first.sh_offset + first.sh_size;
             continue;
         }
         // Skip any zerofill section
-        if (shdrIsZerofill(first)) continue;
+        if (shdrIsZerofill(first.*)) continue;
 
         // Set the offset to a value that is congruent with the section's allocated virtual memory address
         if (first.sh_addralign > page_size) {
@@ -1283,7 +1338,7 @@ fn allocateSectionsInFile(self: *Elf, base_offset: u64) void {
             prev.sh_offset = offset + prev.sh_addr - first.sh_addr;
             i += 1;
 
-            const next = &shdrs[i];
+            const next = shdrs[i];
             if (i >= shdrs.len or !shdrIsAlloc(next) or shdrIsZerofill(next)) break;
             if (next.sh_addr < first.sh_addr) break;
 
@@ -1295,7 +1350,7 @@ fn allocateSectionsInFile(self: *Elf, base_offset: u64) void {
         offset = prev.sh_offset + prev.sh_size;
 
         // Skip any zerofill section
-        while (i < shdrs.len and shdrIsAlloc(&shdrs[i]) and shdrIsZerofill(&shdrs[i])) : (i += 1) {}
+        while (i < shdrs.len and shdrIsAlloc(shdrs[i]) and shdrIsZerofill(shdrs[i])) : (i += 1) {}
     }
 }
 
@@ -1318,47 +1373,45 @@ fn getSectionRank(self: *Elf, shndx: u32) u8 {
     const shdr = self.sections.items(.shdr)[shndx];
     const name = self.shstrtab.getAssumeExists(shdr.sh_name);
     const flags = shdr.sh_flags;
-    switch (shdr.sh_type) {
-        elf.SHT_NULL => return 0,
-        elf.SHT_DYNSYM => return 2,
-        elf.SHT_HASH => return 3,
-        elf.SHT_GNU_HASH => return 3,
-        elf.SHT_GNU_VERSYM => return 4,
-        elf.SHT_GNU_VERDEF => return 4,
-        elf.SHT_GNU_VERNEED => return 4,
+    const rank: u8 = switch (shdr.sh_type) {
+        elf.SHT_NULL => 0,
+        elf.SHT_DYNSYM => 2,
+        elf.SHT_HASH => 3,
+        elf.SHT_GNU_HASH => 3,
+        elf.SHT_GNU_VERSYM => 4,
+        elf.SHT_GNU_VERDEF => 4,
+        elf.SHT_GNU_VERNEED => 4,
 
         elf.SHT_PREINIT_ARRAY,
         elf.SHT_INIT_ARRAY,
         elf.SHT_FINI_ARRAY,
-        => return 0xf2,
+        => 0xf2,
 
-        elf.SHT_DYNAMIC => return 0xf3,
+        elf.SHT_DYNAMIC => 0xf3,
 
-        elf.SHT_RELA, elf.SHT_GROUP => return 0xf,
+        elf.SHT_RELA, elf.SHT_GROUP => 0xf,
 
-        elf.SHT_PROGBITS => if (flags & elf.SHF_ALLOC != 0) {
+        elf.SHT_PROGBITS => if (flags & elf.SHF_ALLOC != 0) blk: {
             if (flags & elf.SHF_EXECINSTR != 0) {
-                return 0xf1;
+                break :blk 0xf1;
             } else if (flags & elf.SHF_WRITE != 0) {
-                return if (flags & elf.SHF_TLS != 0) 0xf4 else 0xf6;
+                break :blk if (flags & elf.SHF_TLS != 0) 0xf4 else 0xf6;
             } else if (mem.eql(u8, name, ".interp")) {
-                return 1;
+                break :blk 1;
             } else {
-                return 0xf0;
+                break :blk 0xf0;
             }
-        } else {
-            if (mem.startsWith(u8, name, ".debug")) {
-                return 0xf8;
-            } else {
-                return 0xf9;
-            }
-        },
+        } else if (mem.startsWith(u8, name, ".debug"))
+            0xf8
+        else
+            0xf9,
 
-        elf.SHT_NOBITS => return if (flags & elf.SHF_TLS != 0) 0xf5 else 0xf7,
-        elf.SHT_SYMTAB => return 0xfa,
-        elf.SHT_STRTAB => return if (mem.eql(u8, name, ".dynstr")) 4 else 0xfb,
-        else => return 0xff,
-    }
+        elf.SHT_NOBITS => if (flags & elf.SHF_TLS != 0) 0xf5 else 0xf7,
+        elf.SHT_SYMTAB => 0xfa,
+        elf.SHT_STRTAB => if (mem.eql(u8, name, ".dynstr")) 4 else 0xfb,
+        else => 0xff,
+    };
+    return rank;
 }
 
 pub fn sortSections(self: *Elf) !void {
@@ -2505,6 +2558,18 @@ pub fn getAtom(self: Elf, atom_index: Atom.Index) ?*Atom {
     return &self.atoms.items[atom_index];
 }
 
+pub fn addThunk(self: *Elf) !Thunk.Index {
+    const index = @as(Thunk.Index, @intCast(self.thunks.items.len));
+    const thunk = try self.thunks.addOne(self.base.allocator);
+    thunk.* = .{};
+    return index;
+}
+
+pub fn getThunk(self: *Elf, index: Thunk.Index) *Thunk {
+    assert(index < self.thunks.items.len);
+    return &self.thunks.items[index];
+}
+
 pub fn addSymbol(self: *Elf) !Symbol.Index {
     const index = @as(Symbol.Index, @intCast(self.symbols.items.len));
     const symbol = try self.symbols.addOne(self.base.allocator);
@@ -2734,6 +2799,14 @@ pub fn getTlsAddress(self: *Elf) u64 {
     return phdr.p_vaddr;
 }
 
+fn requiresThunks(self: Elf) bool {
+    return switch (self.options.cpu_arch.?) {
+        .aarch64 => true,
+        .x86_64, .riscv64 => false,
+        else => @panic("unsupported architecture"),
+    };
+}
+
 /// Caller owns the memory.
 pub fn preadAllAlloc(allocator: Allocator, file: std.fs.File, offset: usize, size: usize) ![]u8 {
     const buffer = try allocator.alloc(u8, size);
@@ -2827,6 +2900,10 @@ fn fmtDumpState(
         const internal = self.getFile(index).?.internal;
         try writer.print("internal({d}) : internal\n", .{index});
         try writer.print("{}\n", .{internal.fmtSymtab(self)});
+    }
+    try writer.writeAll("THUNKS\n");
+    for (self.thunks.items, 0..) |thunk, index| {
+        try writer.print("thunk({d}) : {}\n", .{ index, thunk.fmt(self) });
     }
     try writer.print("GOT\n{}\n", .{self.got.fmt(self)});
     try writer.writeAll("PLT\n");
@@ -2924,6 +3001,7 @@ const relocatable = @import("Elf/relocatable.zig");
 const relocation = @import("Elf/relocation.zig");
 const state_log = std.log.scoped(.state);
 const synthetic = @import("Elf/synthetic.zig");
+const thunks = @import("Elf/thunks.zig");
 const trace = @import("tracy.zig").trace;
 
 const Allocator = mem.Allocator;
@@ -2949,5 +3027,6 @@ const SharedObject = @import("Elf/SharedObject.zig");
 const StringTable = @import("strtab.zig").StringTable;
 const Symbol = @import("Elf/Symbol.zig");
 const ThreadPool = std.Thread.Pool;
+const Thunk = @import("Elf/thunks.zig").Thunk;
 const VerneedSection = synthetic.VerneedSection;
 const Zld = @import("Zld.zig");

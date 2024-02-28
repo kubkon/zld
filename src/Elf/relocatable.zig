@@ -192,7 +192,7 @@ fn allocateSections(elf_file: *Elf, base_offset: u64) void {
     const shdrs = elf_file.sections.slice().items(.shdr)[1..];
     var offset = base_offset;
     for (shdrs) |*shdr| {
-        if (Elf.shdrIsZerofill(shdr)) continue;
+        if (Elf.shdrIsZerofill(shdr.*)) continue;
         shdr.sh_offset = mem.alignForward(u64, offset, shdr.sh_addralign);
         offset = shdr.sh_offset + shdr.sh_size;
     }

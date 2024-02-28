@@ -20,7 +20,7 @@ static: bool = false,
 relax: bool = true,
 export_dynamic: bool = false,
 image_base: u64 = 0x200000,
-page_size: ?u16 = null,
+page_size: ?u64 = null,
 pie: bool = false,
 pic: bool = false,
 warn_common: bool = false,
@@ -28,6 +28,7 @@ build_id: ?BuildId = null,
 hash_style: ?HashStyle = null,
 apply_dynamic_relocs: bool = true,
 soname: ?[]const u8 = null,
+section_start: std.StringHashMapUnmanaged(u64) = .{},
 /// -z flags
 /// Overrides default stack size.
 z_stack_size: ?u64 = null,
@@ -251,6 +252,17 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             opts.z_relro = false;
         } else if (p.flagZ("muldefs")) {
             opts.allow_multiple_definition = true;
+        } else if (p.argAny("section-start")) |pair| {
+            var pair_it = std.mem.split(u8, pair, "=");
+            const name = pair_it.next() orelse ctx.fatal("expected section=address mapping", .{});
+            const value = pair_it.next() orelse ctx.fatal("expected section=address mapping", .{});
+            try opts.parseSectionStart(arena, name, value, ctx);
+        } else if (p.arg1("Tbss")) |value| {
+            try opts.parseSectionStart(arena, ".bss", value, ctx);
+        } else if (p.arg1("Ttext")) |value| {
+            try opts.parseSectionStart(arena, ".text", value, ctx);
+        } else if (p.arg1("Tdata")) |value| {
+            try opts.parseSectionStart(arena, ".data", value, ctx);
         } else {
             try positionals.append(.{ .tag = .path, .path = p.arg });
         }
@@ -397,11 +409,16 @@ const usage =
     \\--relax                       Optimize instructions (default)
     \\  --no-relax
     \\--rpath=[value], -R [value]   Specify runtime path
+    \\--section-start section=address
+    \\                              Set address of named section
     \\--shared                      Create dynamic library
     \\--soname=[value], -h [value]  Set shared library name
     \\--start-group                 Ignored for compatibility with GNU
     \\--strip-all, -s               Strip all symbols. Implies --strip-debug
     \\--strip-debug, -S             Strip .debug_ sections
+    \\-Tbss                         Set address of .bss section
+    \\-Tdata                        Set address of .data section
+    \\-Ttext                        Set address of .text section
     \\--warn-common                 Warn about duplicate common symbols
     \\-z                            Set linker extension flags
     \\  execstack                   Require executable stack
@@ -438,9 +455,9 @@ fn cpuArchToElfEmulation(cpu_arch: std.Target.Cpu.Arch) []const u8 {
     };
 }
 
-const supported_emulations = [_]struct { std.Target.Cpu.Arch, u16 }{
+const supported_emulations = [_]struct { std.Target.Cpu.Arch, u64 }{
     .{ .x86_64, 0x1000 },
-    .{ .aarch64, 0x1000 },
+    .{ .aarch64, 0x10000 },
     .{ .riscv64, 0x1000 },
 };
 
@@ -453,11 +470,17 @@ fn cpuArchFromElfEmulation(value: []const u8) ?std.Target.Cpu.Arch {
     return null;
 }
 
-pub fn defaultPageSize(cpu_arch: std.Target.Cpu.Arch) ?u16 {
+pub fn defaultPageSize(cpu_arch: std.Target.Cpu.Arch) ?u64 {
     inline for (supported_emulations) |emulation| {
         if (cpu_arch == emulation[0]) return emulation[1];
     }
     return null;
+}
+
+fn parseSectionStart(opts: *Options, arena: Allocator, name: []const u8, value: []const u8, ctx: anytype) !void {
+    const start = std.fmt.parseInt(u64, value, 0) catch
+        ctx.fatal("Could not parse value '{s}' into integer\n", .{value});
+    _ = try opts.section_start.put(arena, try arena.dupe(u8, name), start);
 }
 
 const cmd = "ld.zld";
