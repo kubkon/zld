@@ -31,6 +31,9 @@ rel_num: u32 = 0,
 /// Index of this atom in the linker's atoms table.
 atom_index: Index = 0,
 
+/// Index of the thunk for this atom.
+thunk_index: Thunk.Index = 0,
+
 flags: Flags = .{},
 
 /// Start index of FDEs referencing this atom.
@@ -98,6 +101,10 @@ pub fn getPriority(self: Atom, elf_file: *Elf) u64 {
 pub fn getRelocs(self: Atom, elf_file: *Elf) []const elf.Elf64_Rela {
     const object = self.getObject(elf_file);
     return object.relocs.items[self.rel_index..][0..self.rel_num];
+}
+
+pub fn getThunk(self: Atom, elf_file: *Elf) *Thunk {
+    return elf_file.getThunk(self.thunk_index);
 }
 
 pub fn writeRelocs(self: Atom, elf_file: *Elf, out_relocs: *std.ArrayList(elf.Elf64_Rela)) !void {
@@ -1312,6 +1319,7 @@ const aarch64 = struct {
         try stream.seekTo(rel.r_offset);
         const cwriter = stream.writer();
         const code = code_buffer[rel.r_offset..][0..4];
+        const object = atom.getObject(elf_file);
 
         const P, const A, const S, const GOT, const G, const TP, const DTP = args;
         _ = DTP;
@@ -1336,13 +1344,11 @@ const aarch64 = struct {
             .CALL26,
             .JUMP26,
             => {
-                // TODO: add thunk support
-                const disp: i28 = math.cast(i28, S + A - P) orelse {
-                    elf_file.base.fatal("{s}: {x}: TODO relocation target exceeds max jump distance", .{
-                        atom.getName(elf_file),
-                        rel.r_offset,
-                    });
-                    return error.RelocError;
+                const disp: i28 = math.cast(i28, S + A - P) orelse blk: {
+                    const thunk = atom.getThunk(elf_file);
+                    const target_index = object.symbols.items[rel.r_sym()];
+                    const S_: i64 = @intCast(thunk.getTargetAddress(target_index, elf_file));
+                    break :blk math.cast(i28, S_ + A - P) orelse return error.Overflow;
                 };
                 aarch64_util.writeBranchImm(disp, code);
             },
@@ -1817,3 +1823,4 @@ const Fde = @import("eh_frame.zig").Fde;
 const File = @import("file.zig").File;
 const Object = @import("Object.zig");
 const Symbol = @import("Symbol.zig");
+const Thunk = @import("thunks.zig").Thunk;

@@ -85,6 +85,7 @@ rela_plt: std.ArrayListUnmanaged(elf.Elf64_Rela) = .{},
 comdat_group_sections: std.ArrayListUnmanaged(ComdatGroupSection) = .{},
 
 atoms: std.ArrayListUnmanaged(Atom) = .{},
+thunks: std.ArrayListUnmanaged(Thunk) = .{},
 
 comdat_groups: std.ArrayListUnmanaged(ComdatGroup) = .{},
 comdat_groups_owners: std.ArrayListUnmanaged(ComdatGroupOwner) = .{},
@@ -137,6 +138,7 @@ pub fn deinit(self: *Elf) void {
     self.symtab.deinit(gpa);
     self.strtab.deinit(gpa);
     self.atoms.deinit(gpa);
+    self.thunks.deinit(gpa);
     self.comdat_groups.deinit(gpa);
     self.comdat_groups_owners.deinit(gpa);
     self.comdat_groups_table.deinit(gpa);
@@ -2545,6 +2547,18 @@ pub fn getAtom(self: Elf, atom_index: Atom.Index) ?*Atom {
     return &self.atoms.items[atom_index];
 }
 
+pub fn addThunk(self: *Elf) !Thunk.Index {
+    const index = @as(Thunk.Index, @intCast(self.thunks.items.len));
+    const thunk = try self.thunks.addOne(self.base.allocator);
+    thunk.* = .{};
+    return index;
+}
+
+pub fn getThunk(self: *Elf, index: Thunk.Index) *Thunk {
+    assert(index < self.thunks.items.len);
+    return &self.thunks.items[index];
+}
+
 pub fn addSymbol(self: *Elf) !Symbol.Index {
     const index = @as(Symbol.Index, @intCast(self.symbols.items.len));
     const symbol = try self.symbols.addOne(self.base.allocator);
@@ -2876,6 +2890,10 @@ fn fmtDumpState(
         try writer.print("internal({d}) : internal\n", .{index});
         try writer.print("{}\n", .{internal.fmtSymtab(self)});
     }
+    try writer.writeAll("THUNKS\n");
+    for (self.thunks.items, 0..) |thunk, index| {
+        try writer.print("thunk({d}) : {}\n", .{ index, thunk.fmt(self) });
+    }
     try writer.print("GOT\n{}\n", .{self.got.fmt(self)});
     try writer.writeAll("PLT\n");
     for (self.plt.symbols.items, 0..) |sym_index, i| {
@@ -2998,5 +3016,6 @@ const SharedObject = @import("Elf/SharedObject.zig");
 const StringTable = @import("strtab.zig").StringTable;
 const Symbol = @import("Elf/Symbol.zig");
 const ThreadPool = std.Thread.Pool;
+const Thunk = @import("Elf/thunks.zig").Thunk;
 const VerneedSection = synthetic.VerneedSection;
 const Zld = @import("Zld.zig");
