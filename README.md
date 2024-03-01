@@ -67,12 +67,13 @@ will be to swap in `zig ld` in place of any other linker.
 
 ## Supported backends
 
-- [x] Mach-O
-- [x] ELF (non-PIE static and dynamic, x86_64)
-- [x] ELF (PIE, DSO, x86_64)
+- [x] Mach-O (x86_64)
+- [x] Mach-O (aarch64)
+- [x] ELF (x86_64)
 - [x] ELF (aarch64)
 - [ ] ELF (riscv64)
-- [ ] COFF/PE
+- [ ] COFF (x86_64)
+- [ ] COFF (aarch64)
 - [x] Wasm (static)
 
 ## Contributing
