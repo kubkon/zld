@@ -2236,6 +2236,8 @@ fn writeAtoms(self: *Elf) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
+    const gpa = self.base.allocator;
+
     const slice = self.sections.slice();
     for (slice.items(.shdr), slice.items(.atoms)) |shdr, atoms| {
         if (atoms.items.len == 0) continue;
@@ -2272,6 +2274,16 @@ fn writeAtoms(self: *Elf) !void {
         }
 
         try self.base.file.pwriteAll(buffer, shdr.sh_offset);
+    }
+
+    for (self.thunks.items) |thunk| {
+        const shdr = slice.items(.shdr)[thunk.out_shndx];
+        const offset = thunk.value + shdr.sh_offset;
+        const buffer = try gpa.alloc(u8, thunk.size(self));
+        defer gpa.free(buffer);
+        var stream = std.io.fixedBufferStream(buffer);
+        try thunk.write(self, stream.writer());
+        try self.base.file.pwriteAll(buffer, offset);
     }
 
     try self.reportUndefs();
