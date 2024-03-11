@@ -18,12 +18,12 @@ pub fn createThunks(shndx: u32, elf_file: *Elf) !void {
         start_atom.value = try advance(shdr, start_atom.size, start_atom.alignment);
         i += 1;
 
-        while (i < atoms.len and
-            shdr.sh_size - start_atom.value < maxAllowedDistance(cpu_arch)) : (i += 1)
-        {
+        while (i < atoms.len) : (i += 1) {
             const atom_index = atoms[i];
             const atom = elf_file.getAtom(atom_index).?;
             assert(atom.flags.alive);
+            const alignment = try math.powi(u32, 2, atom.alignment);
+            if (mem.alignForward(u64, shdr.sh_size, alignment) - start_atom.value >= maxAllowedDistance(cpu_arch)) break;
             atom.value = try advance(shdr, atom.size, atom.alignment);
         }
 

@@ -62,6 +62,7 @@ pub fn addElfTests(b: *Build, options: common.Options) *Step {
     elf_step.dependOn(testSharedAbsSymbol(b, opts));
     elf_step.dependOn(testStrip(b, opts));
     elf_step.dependOn(testThunks(b, opts));
+    elf_step.dependOn(testThunks2(b, opts));
     elf_step.dependOn(testTlsCommon(b, opts));
     elf_step.dependOn(testTlsDesc(b, opts));
     elf_step.dependOn(testTlsDescImport(b, opts));
@@ -2161,6 +2162,65 @@ fn testThunks(b: *Build, opts: Options) *Step {
     check.checkInSymtab();
     check.checkContains("foo$thunk");
     test_step.dependOn(&check.step);
+
+    return test_step;
+}
+
+fn testThunks2(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-thunks2", "");
+
+    if (builtin.target.cpu.arch != .aarch64) return skipTestStep(test_step);
+
+    const src =
+        \\#include <stdio.h>
+        \\__attribute__((aligned(0x8000000))) int bar() {
+        \\  return 42;
+        \\}
+        \\int foobar();
+        \\int foo() {
+        \\  return bar() - foobar();
+        \\}
+        \\__attribute__((aligned(0x8000000))) int foobar() {
+        \\  return 42;
+        \\}
+        \\int main() {
+        \\  printf("bar=%d, foo=%d, foobar=%d", bar(), foo(), foobar());
+        \\  return foo();
+        \\}
+    ;
+
+    {
+        const exe = cc(b, "a.out", opts);
+        exe.addCSource(src);
+        exe.addArg("-ffunction-sections");
+
+        const run = exe.run();
+        run.expectStdOutEqual("bar=42, foo=0, foobar=42");
+        run.expectExitCode(0);
+        test_step.dependOn(run.step());
+
+        const check = exe.check();
+        check.max_bytes = std.math.maxInt(u32);
+        check.checkInSymtab();
+        check.checkContains("_libc_start_main$thunk");
+        test_step.dependOn(&check.step);
+    }
+
+    {
+        const exe = cc(b, "a.out", opts);
+        exe.addCSource(src);
+
+        const run = exe.run();
+        run.expectStdOutEqual("bar=42, foo=0, foobar=42");
+        run.expectExitCode(0);
+        test_step.dependOn(run.step());
+
+        const check = exe.check();
+        check.max_bytes = std.math.maxInt(u32);
+        check.checkInSymtab();
+        check.checkContains("_libc_start_main$thunk");
+        test_step.dependOn(&check.step);
+    }
 
     return test_step;
 }
