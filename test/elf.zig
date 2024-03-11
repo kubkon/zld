@@ -2171,8 +2171,7 @@ fn testThunks2(b: *Build, opts: Options) *Step {
 
     if (builtin.target.cpu.arch != .aarch64) return skipTestStep(test_step);
 
-    const exe = cc(b, "a.out", opts);
-    exe.addCSource(
+    const src =
         \\#include <stdio.h>
         \\__attribute__((aligned(0x8000000))) int bar() {
         \\  return 42;
@@ -2188,13 +2187,40 @@ fn testThunks2(b: *Build, opts: Options) *Step {
         \\  printf("bar=%d, foo=%d, foobar=%d", bar(), foo(), foobar());
         \\  return foo();
         \\}
-    );
-    exe.addArg("-ffunction-sections"); // TODO: the same but without -ffunction-sections
+    ;
 
-    const run = exe.run();
-    run.expectStdOutEqual("bar=42, foo=0, foobar=42");
-    run.expectExitCode(0);
-    test_step.dependOn(run.step());
+    {
+        const exe = cc(b, "a.out", opts);
+        exe.addCSource(src);
+        exe.addArg("-ffunction-sections");
+
+        const run = exe.run();
+        run.expectStdOutEqual("bar=42, foo=0, foobar=42");
+        run.expectExitCode(0);
+        test_step.dependOn(run.step());
+
+        const check = exe.check();
+        check.max_bytes = std.math.maxInt(u32);
+        check.checkInSymtab();
+        check.checkContains("_libc_start_main$thunk");
+        test_step.dependOn(&check.step);
+    }
+
+    {
+        const exe = cc(b, "a.out", opts);
+        exe.addCSource(src);
+
+        const run = exe.run();
+        run.expectStdOutEqual("bar=42, foo=0, foobar=42");
+        run.expectExitCode(0);
+        test_step.dependOn(run.step());
+
+        const check = exe.check();
+        check.max_bytes = std.math.maxInt(u32);
+        check.checkInSymtab();
+        check.checkContains("_libc_start_main$thunk");
+        test_step.dependOn(&check.step);
+    }
 
     return test_step;
 }
