@@ -2116,7 +2116,7 @@ fn testReexportsZig(b: *Build, opts: Options) *Step {
         \\    return x;
         \\}
         \\comptime {
-        \\    @export(foo, .{ .name = "bar", .linkage = .Strong });
+        \\    @export(foo, .{ .name = "bar", .linkage = .strong });
         \\}
     );
 
