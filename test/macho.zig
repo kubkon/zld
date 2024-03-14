@@ -70,6 +70,7 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testThunks(b, opts));
     macho_step.dependOn(testTls(b, opts));
     macho_step.dependOn(testTlsLargeTbss(b, opts));
+    macho_step.dependOn(testTlsPointers(b, opts));
     macho_step.dependOn(testTwoLevelNamespace(b, opts));
     macho_step.dependOn(testUndefinedFlag(b, opts));
     macho_step.dependOn(testUnwindInfo(b, opts));
@@ -2115,7 +2116,7 @@ fn testReexportsZig(b: *Build, opts: Options) *Step {
         \\    return x;
         \\}
         \\comptime {
-        \\    @export(foo, .{ .name = "bar", .linkage = .Strong });
+        \\    @export(foo, .{ .name = "bar", .linkage = .strong });
         \\}
     );
 
@@ -2917,6 +2918,72 @@ fn testTlsLargeTbss(b: *Build, opts: Options) *Step {
 
     const run = exe.run();
     run.expectStdOutEqual("3 0 5 0 0 0\n");
+    test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+// https://github.com/ziglang/zig/issues/19221
+fn testTlsPointers(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-tls-pointers", "");
+
+    const includes = WriteFile.create(b);
+    _ = includes.add("foo.h",
+        \\template<typename just4fun>
+        \\struct Foo {
+        \\  
+        \\public:
+        \\  static int getVar() {
+        \\  static int thread_local var = 0;
+        \\  ++var;
+        \\  return var;
+        \\}
+        \\};
+    );
+
+    const bar_o = cc(b, "bar.o", opts);
+    bar_o.addCppSource(
+        \\#include "foo.h"
+        \\int bar() {
+        \\  int v1 = Foo<int>::getVar();
+        \\  return v1;
+        \\}
+    );
+    bar_o.addArgs(&.{ "-c", "-std=c++17" });
+    bar_o.addPrefixedDirectorySource("-I", includes.getDirectory());
+
+    const baz_o = cc(b, "baz.o", opts);
+    baz_o.addCppSource(
+        \\#include "foo.h"
+        \\int baz() {
+        \\  int v1 = Foo<unsigned>::getVar();
+        \\  return v1;
+        \\}
+    );
+    baz_o.addArgs(&.{ "-c", "-std=c++17" });
+    baz_o.addPrefixedDirectorySource("-I", includes.getDirectory());
+
+    const main_o = cc(b, "main.o", opts);
+    main_o.addCppSource(
+        \\extern int bar();
+        \\extern int baz();
+        \\int main() {
+        \\  int v1 = bar();
+        \\  int v2 = baz();
+        \\  return v1 != v2;
+        \\}
+    );
+    main_o.addArgs(&.{ "-c", "-std=c++17" });
+    main_o.addPrefixedDirectorySource("-I", includes.getDirectory());
+
+    const exe = cc(b, "a.out", opts);
+    exe.addFileSource(bar_o.getFile());
+    exe.addFileSource(baz_o.getFile());
+    exe.addFileSource(main_o.getFile());
+    exe.addArg("-lc++");
+
+    const run = exe.run();
+    run.expectExitCode(0);
     test_step.dependOn(run.step());
 
     return test_step;
