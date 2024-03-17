@@ -18,9 +18,9 @@ else
 const usage =
     \\zld is a generic linker driver.
     \\Call
-    \\  ELF: ld.zld, ld
-    \\  MachO: ld64.zld, ld64
-    \\  COFF: link-dl
+    \\  ELF: ld.zld
+    \\  MachO: ld64.zld
+    \\  COFF: link-zld
     \\  Wasm: wasm-zld
 ;
 
@@ -90,7 +90,7 @@ pub fn main() !void {
             break :blk .elf;
         } else if (mem.eql(u8, cmd, "ld64.zld")) {
             break :blk .macho;
-        } else if (mem.eql(u8, cmd, "link-zld")) {
+        } else if (mem.eql(u8, cmd, "link-zld.exe")) {
             break :blk .coff;
         } else if (mem.eql(u8, cmd, "wasm-zld")) {
             break :blk .wasm;
