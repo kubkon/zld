@@ -43,18 +43,7 @@ pub fn parse(self: *Object, coff_file: *Coff) !void {
     if (self.header.?.number_of_sections > 0) try self.parseInputSectionHeaders(gpa, file, offset);
 
     // Parse symbol table
-    if (self.header.?.number_of_symbols > 0) try self.parseInputSymbolTable(gpa, file, offset);
-
-    for (self.sections.items(.header)) |header| {
-        std.debug.print("{s}\n", .{self.getString(header.name)});
-    }
-
-    for (self.symtab.items) |sym| {
-        std.debug.print("{s}\n", .{self.getString(sym.name)});
-        for (self.auxtab.items(.tags)[sym.index_of_aux_symbols..][0..sym.number_of_aux_symbols]) |aux| {
-            std.debug.print("  {s}\n", .{@tagName(aux)});
-        }
-    }
+    if (self.header.?.number_of_symbols > 0) try self.parseInputSymbolTable(gpa, file, offset, coff_file);
 
     // Init symbols
     // Init atoms
@@ -108,21 +97,115 @@ fn parseInputSectionHeaders(self: *Object, allocator: Allocator, file: std.fs.Fi
     }
 }
 
-fn parseInputSymbolTable(self: *Object, allocator: Allocator, file: std.fs.File, offset: usize) !void {
+fn parseInputSymbolTable(
+    self: *Object,
+    allocator: Allocator,
+    file: std.fs.File,
+    offset: usize,
+    coff_file: *Coff,
+) !void {
     const num_symbols = self.header.?.number_of_symbols;
     const raw_size = num_symbols * symtab_entry_size;
     const buffer = try allocator.alloc(u8, raw_size);
     defer allocator.free(buffer);
     const amt = try file.preadAll(buffer, offset + self.header.?.pointer_to_symbol_table);
     if (amt != raw_size) return error.InputOutput;
+
     const symtab = coff.Symtab{ .buffer = buffer };
-    var slice = symtab.slice(0, null);
+
+    var index_map = std.AutoHashMap(u32, u32).init(allocator);
+    defer index_map.deinit();
+    {
+        var index: u32 = 0;
+        var symbol_count: u32 = 0;
+        while (index < num_symbols) : ({
+            index += 1;
+            symbol_count += 1;
+        }) {
+            const sym = symtab.at(index, .symbol).symbol;
+            try index_map.put(index, symbol_count);
+            index += sym.number_of_aux_symbols;
+        }
+    }
 
     var index: usize = 0;
-    var aux_counter: usize = 0;
-    var aux_tag: ?coff.Symtab.Tag = null;
-    while (slice.next()) |rec| {
-        if (aux_counter == 0) {
+    var aux_data: struct {
+        tag: ?coff.Symtab.Tag = null,
+        count: u8 = 0,
+    } = .{};
+    while (index < num_symbols) : (index += 1) {
+        if (aux_data.count > 0) {
+            defer index += aux_data.count;
+            defer aux_data = .{};
+
+            if (aux_data.tag == null) continue;
+            if (aux_data.count > 1 and aux_data.tag != null) switch (aux_data.tag.?) {
+                .file_def => {},
+                .func_def, .weak_ext, .sect_def, .debug_info => |tag| {
+                    coff_file.base.fatal("{}: invalid symbol table: too many aux symbols for record type '{s}'", .{ self.fmtPath(), @tagName(tag) });
+                    return error.ParseFailed;
+                },
+                .symbol => unreachable,
+            };
+            self.symtab.items[self.symtab.items.len - 1].aux_index = @intCast(self.auxtab.slice().len);
+
+            switch (aux_data.tag.?) {
+                .func_def => {
+                    const func_def = symtab.at(index, .func_def).func_def;
+                    try self.auxtab.append(allocator, .{
+                        .func = .{
+                            .sym_index = index_map.get(func_def.tag_index).?,
+                            .total_size = func_def.total_size,
+                            .pointer_to_linenumber = func_def.pointer_to_linenumber,
+                            .pointer_to_next_function = index_map.get(func_def.pointer_to_next_function).?,
+                        },
+                    });
+                },
+                .file_def => {
+                    var file_buffer = std.ArrayList(u8).init(allocator);
+                    defer file_buffer.deinit();
+                    var next: usize = 0;
+                    while (next < aux_data.count) : (next += 1) {
+                        const file_def = symtab.at(next + index, .file_def).file_def;
+                        try file_buffer.writer().writeAll(file_def.getFileName());
+                    }
+                    try self.auxtab.append(allocator, .{
+                        .file = try self.insertString(allocator, file_buffer.items),
+                    });
+                },
+                .debug_info => {
+                    const debug_info = symtab.at(index, .debug_info).debug_info;
+                    try self.auxtab.append(allocator, .{
+                        .debug_info = .{
+                            .line_number = debug_info.linenumber,
+                            .pointer_to_next_function = index_map.get(debug_info.pointer_to_next_function).?,
+                        },
+                    });
+                },
+                .sect_def => {
+                    const sect_def = symtab.at(index, .sect_def).sect_def;
+                    try self.auxtab.append(allocator, .{ .sect = .{
+                        .length = sect_def.length,
+                        .number_of_relocations = sect_def.number_of_relocations,
+                        .number_of_linenumbers = sect_def.number_of_linenumbers,
+                        .checksum = sect_def.checksum,
+                        .number = sect_def.number,
+                        .selection = sect_def.selection,
+                    } });
+                },
+                .weak_ext => {
+                    const weak_ext = symtab.at(index, .weak_ext).weak_ext;
+                    try self.auxtab.append(allocator, .{
+                        .weak = .{
+                            .sym_index = index_map.get(weak_ext.tag_index).?,
+                            .flag = weak_ext.flag,
+                        },
+                    });
+                },
+                .symbol => unreachable,
+            }
+        } else {
+            const rec = symtab.at(index, .symbol).symbol;
             const name_off = if (rec.getNameOffset()) |off|
                 off - 4
             else
@@ -134,79 +217,39 @@ fn parseInputSymbolTable(self: *Object, allocator: Allocator, file: std.fs.File,
                 .section_number = rec.section_number,
                 .type = rec.type,
                 .storage_class = rec.storage_class,
-                .index_of_aux_symbols = @intCast(self.auxtab.slice().len),
-                .number_of_aux_symbols = 0,
+                .aux_index = null,
             });
 
-            aux_tag = aux_tag: {
-                switch (rec.section_number) {
-                    .UNDEFINED => {
-                        if (rec.storage_class == .WEAK_EXTERNAL and rec.value == 0) {
-                            break :aux_tag .weak_ext;
-                        }
-                    },
-                    .ABSOLUTE => {},
-                    .DEBUG => {
-                        if (rec.storage_class == .FILE) {
-                            break :aux_tag .file_def;
-                        }
-                    },
-                    else => {
-                        if (rec.storage_class == .FUNCTION) {
-                            break :aux_tag .debug_info;
-                        }
-                        if (rec.storage_class == .EXTERNAL and rec.type.complex_type == .FUNCTION) {
-                            break :aux_tag .func_def;
-                        }
-                        if (rec.storage_class == .STATIC) {
-                            for (self.sections.items(.header)) |header| {
-                                const sect_name = self.getString(header.name);
-                                if (mem.eql(u8, sect_name, name)) {
-                                    break :aux_tag .sect_def;
-                                }
+            aux_data.tag = switch (rec.section_number) {
+                .UNDEFINED => if (rec.storage_class == .WEAK_EXTERNAL and rec.value == 0)
+                    .weak_ext
+                else
+                    null,
+                .ABSOLUTE => null,
+                .DEBUG => if (rec.storage_class == .FILE)
+                    .file_def
+                else
+                    null,
+                else => tag: {
+                    if (rec.storage_class == .FUNCTION) {
+                        break :tag .debug_info;
+                    }
+                    if (rec.storage_class == .EXTERNAL and rec.type.complex_type == .FUNCTION) {
+                        break :tag .func_def;
+                    }
+                    if (rec.storage_class == .STATIC) {
+                        for (self.sections.items(.header)) |header| {
+                            const sect_name = self.getString(header.name);
+                            if (mem.eql(u8, sect_name, name)) {
+                                break :tag .sect_def;
                             }
                         }
-                    },
-                }
-                break :aux_tag null;
-            };
-            aux_counter = rec.number_of_aux_symbols;
-        } else {
-            const sym = &self.symtab.items[self.symtab.items.len - 1];
-            if (aux_tag) |tag| switch (symtab.at(index, tag)) {
-                .weak_ext => |weak_ext| {
-                    try self.auxtab.append(allocator, .{ .weak = weak_ext });
-                    sym.number_of_aux_symbols += 1;
-                },
-                .file_def => |*file_def| {
-                    const auxtab_index = try self.auxtab.addOne(allocator);
-                    self.auxtab.set(auxtab_index, .{ .file = undefined });
-                    const el = &self.auxtab.items(.data)[auxtab_index].file;
-                    @memcpy(&el.file_name, &file_def.file_name);
-                    sym.number_of_aux_symbols += 1;
-                },
-                .sect_def => |sect_def| {
-                    const sect = self.sections.items(.header)[@intFromEnum(sym.section_number) - 1];
-                    if (!sect.isComdat()) {
-                        // TODO convert into an error
-                        // Expected non COMDAT section would not set the selection field in aux record.
-                        assert(sect_def.selection == .NONE);
                     }
-                    try self.auxtab.append(allocator, .{ .sect = sect_def });
-                    sym.number_of_aux_symbols += 1;
-                },
-                .debug_info => |debug_info| {
-                    try self.auxtab.append(allocator, .{ .debug_info = debug_info });
-                    sym.number_of_aux_symbols += 1;
-                },
-                else => |other| {
-                    log.warn("{s}: unhandled auxiliary symbol: {}", .{ self.fmtPath(), other });
+                    break :tag null;
                 },
             };
-            aux_counter -= 1;
+            aux_data.count = rec.number_of_aux_symbols;
         }
-
-        index += 1;
     }
 }
 
@@ -417,8 +460,7 @@ const InputSymbol = struct {
     section_number: coff.SectionNumber,
     type: coff.SymType,
     storage_class: coff.StorageClass,
-    index_of_aux_symbols: u32,
-    number_of_aux_symbols: u8,
+    aux_index: ?u32,
 };
 
 const AuxSymbolTag = enum {
@@ -430,11 +472,29 @@ const AuxSymbolTag = enum {
 };
 
 const AuxSymbol = union(AuxSymbolTag) {
-    file: coff.FileDefinition,
-    func: coff.FunctionDefinition,
-    debug_info: coff.DebugInfoDefinition,
-    sect: coff.SectionDefinition,
-    weak: coff.WeakExternalDefinition,
+    file: u32,
+    func: struct {
+        sym_index: u32,
+        total_size: u32,
+        pointer_to_linenumber: u32,
+        pointer_to_next_function: u32,
+    },
+    debug_info: struct {
+        line_number: u16,
+        pointer_to_next_function: u32,
+    },
+    sect: struct {
+        length: u32,
+        number_of_relocations: u16,
+        number_of_linenumbers: u16,
+        checksum: u32,
+        number: u16,
+        selection: coff.ComdatSelection,
+    },
+    weak: struct {
+        sym_index: u32,
+        flag: coff.WeakExternalFlag,
+    },
 };
 
 const relocation_entry_size = 10;
