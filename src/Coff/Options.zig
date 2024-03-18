@@ -1,11 +1,11 @@
 emit: Zld.Emit,
 cpu_arch: ?std.Target.Cpu.Arch = null,
-positionals: []const []const u8,
+positionals: []const Coff.LinkObject,
 
 pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options {
     if (args.len == 0) ctx.fatal(usage, .{cmd});
 
-    var positionals = std.ArrayList([]const u8).init(arena);
+    var positionals = std.ArrayList(Coff.LinkObject).init(arena);
     var opts: Options = .{
         .emit = .{
             .directory = std.fs.cwd(),
@@ -37,7 +37,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
                 ctx.fatal("unsupported machine value: {s}\n", .{target});
             }
         } else {
-            try positionals.append(p.next_arg);
+            try positionals.append(.{ .path = p.next_arg, .tag = .obj });
         }
     }
 
@@ -49,6 +49,8 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         ctx.print("{s}\n", .{args[args.len - 1]});
     }
     if (positionals.items.len == 0) ctx.fatal("Expected at least one positional argument\n", .{});
+
+    opts.positionals = positionals.items;
 
     return opts;
 }
