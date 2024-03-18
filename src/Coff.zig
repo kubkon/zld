@@ -103,7 +103,7 @@ pub fn flush(self: *Coff) !void {
         self.parsePositional(obj) catch |err| {
             has_parse_error = true;
             switch (err) {
-                // error.ParseFailed => {}, // already reported
+                error.ParseFailed => {}, // already reported
                 else => |e| {
                     self.base.fatal("{s}: unexpected error occurred while parsing input file: {s}", .{
                         obj.path, @errorName(e),

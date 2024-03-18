@@ -4,6 +4,7 @@ index: File.Index,
 
 header: ?coff.CoffHeader = null,
 sections: std.MultiArrayList(Section) = .{},
+strtab: std.ArrayListUnmanaged(u8) = .{},
 
 pub fn deinit(self: *Object, allocator: Allocator) void {
     allocator.free(self.path);
@@ -11,6 +12,7 @@ pub fn deinit(self: *Object, allocator: Allocator) void {
         relocs.deinit(allocator);
     }
     self.sections.deinit(allocator);
+    self.strtab.deinit(allocator);
 }
 
 pub fn parse(self: *Object, coff_file: *Coff) !void {
@@ -34,20 +36,16 @@ pub fn parse(self: *Object, coff_file: *Coff) !void {
     if (self.header.?.number_of_sections > 0) try self.parseInputSectionHeaders(gpa, file, offset);
 
     // Parse symbol table
-    const num_symbols = self.header.?.number_of_symbols;
-    if (num_symbols > 0) {}
+    if (self.header.?.number_of_symbols > 0) try self.parseInputSymbolTable(gpa, file, offset);
 
     // Parse string table
+    try self.parseInputStringTable(gpa, file, offset, coff_file);
+
     // Init symbols
     // Init atoms
 }
 
-fn parseInputSectionHeaders(
-    self: *Object,
-    allocator: Allocator,
-    file: std.fs.File,
-    offset: usize,
-) !void {
+fn parseInputSectionHeaders(self: *Object, allocator: Allocator, file: std.fs.File, offset: usize) !void {
     const num_sects = self.header.?.number_of_sections;
     try self.sections.ensureUnusedCapacity(allocator, num_sects);
     const raw_sects_size = num_sects * @sizeOf(coff.SectionHeader);
@@ -65,7 +63,7 @@ fn parseInputSectionHeaders(
 
         if (header.number_of_relocations > 0) {
             try relocs.ensureTotalCapacityPrecise(allocator, header.number_of_relocations);
-            const raw_relocs_size = header.number_of_relocations * 10;
+            const raw_relocs_size = header.number_of_relocations * relocation_entry_size;
             try relocs_buffer.ensureUnusedCapacity(raw_relocs_size);
             try relocs_buffer.resize(raw_relocs_size);
             defer relocs_buffer.clearRetainingCapacity();
@@ -78,10 +76,41 @@ fn parseInputSectionHeaders(
             }
         }
     }
+}
 
-    for (self.sections.items(.header), self.sections.items(.relocs)) |header, relocs| {
-        std.debug.print("{}, {d}\n", .{ header, relocs.items.len });
+fn parseInputSymbolTable(self: *Object, allocator: Allocator, file: std.fs.File, offset: usize) !void {
+    _ = self;
+    _ = allocator;
+    _ = file;
+    _ = offset;
+}
+
+fn parseInputStringTable(
+    self: *Object,
+    allocator: Allocator,
+    file: std.fs.File,
+    offset: usize,
+    coff_file: *Coff,
+) !void {
+    const strtab_offset = offset + self.header.?.pointer_to_symbol_table + self.header.?.number_of_symbols * symtab_entry_size;
+    var size_buffer: [@sizeOf(u32)]u8 = undefined;
+    var amt = try file.preadAll(&size_buffer, strtab_offset);
+    if (amt != @sizeOf(u32)) return error.InputOutput;
+    var strtab_size = mem.readInt(u32, &size_buffer, .little);
+    if (strtab_size < @sizeOf(u32)) {
+        coff_file.base.fatal("{}: malformed object: invalid strtab size", .{self.fmtPath()});
+        return error.ParseFailed;
     }
+    strtab_size -= @sizeOf(u32);
+    try self.strtab.ensureTotalCapacityPrecise(allocator, strtab_size);
+    try self.strtab.resize(allocator, strtab_size);
+    amt = try file.preadAll(self.strtab.items, strtab_offset + @sizeOf(u32));
+    if (amt != strtab_size) return error.InputOutput;
+}
+
+pub fn getString(self: Object, off: u32) []const u8 {
+    assert(off < self.strtab.items.len);
+    return mem.sliceTo(@as([*:0]const u8, @ptrCast(self.strtab.items.ptr + off)), 0);
 }
 
 pub fn fmtPath(self: Object) std.fmt.Formatter(formatPath) {
@@ -222,6 +251,9 @@ const ImageRelArm64 = enum(u16) {
     /// The 32-bit relative address from the byte following the relocation.
     rel32 = 17,
 };
+
+const relocation_entry_size = 10;
+const symtab_entry_size = 18;
 
 const assert = std.debug.assert;
 const coff = std.coff;
