@@ -5,6 +5,12 @@ objects: std.ArrayListUnmanaged(File.Index) = .{},
 files: std.MultiArrayList(File.Entry) = .{},
 file_handles: std.ArrayListUnmanaged(File.Handle) = .{},
 
+sections: std.MultiArrayList(Section) = .{},
+
+string_intern: StringTable = .{},
+
+atoms: std.ArrayListUnmanaged(Atom) = .{},
+
 pub fn openPath(allocator: Allocator, options: Options, thread_pool: *ThreadPool) !*Coff {
     const file = try options.emit.directory.createFile(options.emit.sub_path, .{
         .truncate = true,
@@ -51,6 +57,12 @@ pub fn deinit(self: *Coff) void {
     };
     self.files.deinit(gpa);
     self.objects.deinit(gpa);
+
+    for (self.sections.items(.atoms)) |*list| {
+        list.deinit(gpa);
+    }
+    self.sections.deinit(gpa);
+    self.atoms.deinit(gpa);
 }
 
 pub fn flush(self: *Coff) !void {
@@ -59,6 +71,10 @@ pub fn flush(self: *Coff) !void {
 
     const gpa = self.base.allocator;
 
+    // Atom at index 0 is reserved as null atom
+    try self.atoms.append(gpa, .{});
+    // Append empty string to string tables
+    try self.string_intern.buffer.append(gpa, 0);
     // Append null file.
     try self.files.append(gpa, .null);
 
@@ -115,6 +131,8 @@ pub fn flush(self: *Coff) !void {
     }
 
     if (has_parse_error) return error.ParseFailed;
+
+    state_log.debug("{}", .{self.dumpState()});
 
     return error.Todo;
 }
@@ -175,6 +193,42 @@ pub fn getFileHandle(self: Coff, index: File.HandleIndex) File.Handle {
     return self.file_handles.items[index];
 }
 
+pub fn addAtom(self: *Coff) !Atom.Index {
+    const index = @as(Atom.Index, @intCast(self.atoms.items.len));
+    const atom = try self.atoms.addOne(self.base.allocator);
+    atom.* = .{};
+    return index;
+}
+
+pub fn getAtom(self: *Coff, atom_index: Atom.Index) ?*Atom {
+    if (atom_index == 0) return null;
+    assert(atom_index < self.atoms.items.len);
+    return &self.atoms.items[atom_index];
+}
+
+pub fn dumpState(self: *Coff) std.fmt.Formatter(fmtDumpState) {
+    return .{ .data = self };
+}
+
+fn fmtDumpState(
+    self: *Coff,
+    comptime unused_fmt_string: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = options;
+    _ = unused_fmt_string;
+    for (self.objects.items) |index| {
+        const object = self.getFile(index).?.object;
+        try writer.print("object({d}) : {}", .{ index, object.fmtPath() });
+        if (!object.alive) try writer.writeAll(" : [*]");
+        try writer.writeByte('\n');
+        try writer.print("{}\n", .{
+            object.fmtAtoms(self),
+        });
+    }
+}
+
 pub const LinkObject = struct {
     path: []const u8,
     tag: enum { obj, lib },
@@ -195,6 +249,37 @@ pub const LinkObject = struct {
     }
 };
 
+const Section = struct {
+    header: SectionHeader,
+    atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
+};
+
+pub const SectionHeader = struct {
+    name: u32,
+    virtual_size: u32,
+    virtual_address: u32,
+    size_of_raw_data: u32,
+    pointer_to_raw_data: u32,
+    pointer_to_relocations: u32,
+    pointer_to_linenumbers: u32,
+    number_of_relocations: u16,
+    number_of_linenumbers: u16,
+    flags: coff.SectionHeaderFlags,
+
+    pub fn isComdat(hdr: SectionHeader) bool {
+        return hdr.flags.LNK_COMDAT == 0b1;
+    }
+
+    pub fn isCode(hdr: SectionHeader) bool {
+        return hdr.flags.CNT_CODE == 0b1;
+    }
+
+    pub fn getAlignment(hdr: SectionHeader) ?u16 {
+        if (hdr.flags.ALIGN == 0) return null;
+        return hdr.flags.ALIGN - 1;
+    }
+};
+
 pub const base_tag = Zld.Tag.coff;
 
 const build_options = @import("build_options");
@@ -204,13 +289,16 @@ const coff = std.coff;
 const fs = std.fs;
 const log = std.log.scoped(.coff);
 const mem = std.mem;
+const state_log = std.log.scoped(.state);
 const std = @import("std");
 const trace = @import("tracy.zig").trace;
 
 const Allocator = mem.Allocator;
+const Atom = @import("Coff/Atom.zig");
 const Coff = @This();
 const File = @import("Coff/file.zig").File;
 const Object = @import("Coff/Object.zig");
 pub const Options = @import("Coff/Options.zig");
+const StringTable = @import("StringTable.zig");
 const ThreadPool = std.Thread.Pool;
 const Zld = @import("Zld.zig");

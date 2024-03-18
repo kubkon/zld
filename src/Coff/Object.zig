@@ -8,6 +8,10 @@ symtab: std.ArrayListUnmanaged(InputSymbol) = .{},
 auxtab: std.MultiArrayList(AuxSymbol) = .{},
 strtab: std.ArrayListUnmanaged(u8) = .{},
 
+atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
+
+alive: bool = true,
+
 pub fn deinit(self: *Object, allocator: Allocator) void {
     allocator.free(self.path);
     for (self.sections.items(.relocs)) |*relocs| {
@@ -17,6 +21,7 @@ pub fn deinit(self: *Object, allocator: Allocator) void {
     self.symtab.deinit(allocator);
     self.auxtab.deinit(allocator);
     self.strtab.deinit(allocator);
+    self.atoms.deinit(allocator);
 }
 
 pub fn parse(self: *Object, coff_file: *Coff) !void {
@@ -45,8 +50,10 @@ pub fn parse(self: *Object, coff_file: *Coff) !void {
     // Parse symbol table
     if (self.header.?.number_of_symbols > 0) try self.parseInputSymbolTable(gpa, file, offset, coff_file);
 
-    // Init symbols
     // Init atoms
+    try self.initAtoms(gpa, coff_file);
+
+    // Init symbols
 }
 
 fn parseInputSectionHeaders(self: *Object, allocator: Allocator, file: std.fs.File, offset: usize) !void {
@@ -276,7 +283,54 @@ fn parseInputStringTable(
     if (amt != strtab_size) return error.InputOutput;
 }
 
-pub fn getString(self: Object, off: u32) []const u8 {
+fn initAtoms(self: *Object, allocator: Allocator, coff_file: *Coff) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    const headers = self.sections.items(.header);
+    try self.atoms.resize(allocator, headers.len);
+    @memset(self.atoms.items, 0);
+
+    for (headers, 0..) |header, i| {
+        if (header.flags.LNK_REMOVE == 0b1) continue;
+
+        // TODO handle LNK_COMDAT
+        if (self.skipSection(@intCast(i))) continue;
+        try self.addAtom(header, @intCast(i), coff_file);
+    }
+}
+
+fn skipSection(self: *Object, index: u16) bool {
+    const header = self.sections.items(.header)[index];
+    const name = self.getString(header.name);
+    const ignore = blk: {
+        if (header.flags.LNK_INFO == 0b1) break :blk true; // TODO info sections
+        if (mem.startsWith(u8, name, ".debug")) break :blk true; // TODO debug info
+        break :blk false;
+    };
+    return ignore;
+}
+
+fn addAtom(self: *Object, header: Coff.SectionHeader, section_number: u16, coff_file: *Coff) !void {
+    const atom_index = try coff_file.addAtom();
+    const atom = coff_file.getAtom(atom_index).?;
+    atom.atom_index = atom_index;
+    atom.file = self.index;
+    atom.name = header.name; // TODO do we handle $ here?
+    atom.section_number = section_number;
+    atom.size = header.size_of_raw_data;
+    atom.alignment = header.getAlignment() orelse {
+        coff_file.base.fatal("{}: malformed section header #{X}, '{s}': missing alignment flag", .{
+            self.fmtPath(),
+            section_number,
+            self.getString(header.name),
+        });
+        return error.ParseFailed;
+    };
+    self.atoms.items[section_number] = atom_index;
+}
+
+pub fn getString(self: Object, off: u32) [:0]const u8 {
     assert(off < self.strtab.items.len);
     return mem.sliceTo(@as([*:0]const u8, @ptrCast(self.strtab.items.ptr + off)), 0);
 }
@@ -287,6 +341,47 @@ fn insertString(self: *Object, allocator: Allocator, str: []const u8) !u32 {
     self.strtab.appendSliceAssumeCapacity(str);
     self.strtab.appendAssumeCapacity(0);
     return off;
+}
+
+pub fn format(
+    self: *Object,
+    comptime unused_fmt_string: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = self;
+    _ = unused_fmt_string;
+    _ = options;
+    _ = writer;
+    @compileError("do not format objects directly");
+}
+
+const FormatContext = struct {
+    object: *Object,
+    coff_file: *Coff,
+};
+
+pub fn fmtAtoms(self: *Object, coff_file: *Coff) std.fmt.Formatter(formatAtoms) {
+    return .{ .data = .{
+        .object = self,
+        .coff_file = coff_file,
+    } };
+}
+
+fn formatAtoms(
+    ctx: FormatContext,
+    comptime unused_fmt_string: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = unused_fmt_string;
+    _ = options;
+    const object = ctx.object;
+    try writer.writeAll("  atoms\n");
+    for (object.atoms.items) |atom_index| {
+        const atom = ctx.coff_file.getAtom(atom_index) orelse continue;
+        try writer.print("    {}\n", .{atom.fmt(ctx.coff_file)});
+    }
 }
 
 pub fn fmtPath(self: Object) std.fmt.Formatter(formatPath) {
@@ -304,35 +399,9 @@ fn formatPath(
     try writer.writeAll(object.path);
 }
 
-const InputSection = struct {
-    header: SectionHeader,
+pub const InputSection = struct {
+    header: Coff.SectionHeader,
     relocs: std.ArrayListUnmanaged(Relocation) = .{},
-};
-
-const SectionHeader = struct {
-    name: u32,
-    virtual_size: u32,
-    virtual_address: u32,
-    size_of_raw_data: u32,
-    pointer_to_raw_data: u32,
-    pointer_to_relocations: u32,
-    pointer_to_linenumbers: u32,
-    number_of_relocations: u16,
-    number_of_linenumbers: u16,
-    flags: coff.SectionHeaderFlags,
-
-    pub fn isComdat(hdr: SectionHeader) bool {
-        return hdr.flags.LNK_COMDAT == 0b1;
-    }
-
-    pub fn isCode(hdr: SectionHeader) bool {
-        return hdr.flags.CNT_CODE == 0b1;
-    }
-
-    pub fn getAlignment(hdr: SectionHeader) ?u16 {
-        if (hdr.flags.ALIGN == 0) return null;
-        return std.math.powi(u16, 2, hdr.flags.ALIGN - 1) catch return null;
-    }
 };
 
 const Relocation = extern struct {
@@ -509,6 +578,7 @@ const std = @import("std");
 const trace = @import("../tracy.zig").trace;
 
 const Allocator = mem.Allocator;
+const Atom = @import("Atom.zig");
 const Coff = @import("../Coff.zig");
 const File = @import("file.zig").File;
 const Object = @This();

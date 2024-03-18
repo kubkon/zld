@@ -52,7 +52,7 @@ objc_msg_send_index: ?Symbol.Index = null,
 
 entry_index: ?Symbol.Index = null,
 
-string_intern: StringTable(.string_intern) = .{},
+string_intern: StringTable = .{},
 
 symtab: std.ArrayListUnmanaged(macho.nlist_64) = .{},
 strtab: std.ArrayListUnmanaged(u8) = .{},
@@ -3168,7 +3168,7 @@ const LaSymbolPtrSection = synthetic.LaSymbolPtrSection;
 const LibStub = @import("tapi.zig").LibStub;
 const RebaseSection = synthetic.RebaseSection;
 const Symbol = @import("MachO/Symbol.zig");
-const StringTable = @import("strtab.zig").StringTable;
+const StringTable = @import("StringTable.zig");
 const StubsSection = synthetic.StubsSection;
 const StubsHelperSection = synthetic.StubsHelperSection;
 const Thunk = thunks.Thunk;
