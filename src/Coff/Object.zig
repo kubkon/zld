@@ -3,7 +3,9 @@ file_handle: File.HandleIndex,
 index: File.Index,
 
 header: ?coff.CoffHeader = null,
-sections: std.MultiArrayList(Section) = .{},
+sections: std.MultiArrayList(InputSection) = .{},
+symtab: std.ArrayListUnmanaged(InputSymbol) = .{},
+auxtab: std.MultiArrayList(AuxSymbol) = .{},
 strtab: std.ArrayListUnmanaged(u8) = .{},
 
 pub fn deinit(self: *Object, allocator: Allocator) void {
@@ -12,6 +14,8 @@ pub fn deinit(self: *Object, allocator: Allocator) void {
         relocs.deinit(allocator);
     }
     self.sections.deinit(allocator);
+    self.symtab.deinit(allocator);
+    self.auxtab.deinit(allocator);
     self.strtab.deinit(allocator);
 }
 
@@ -32,14 +36,25 @@ pub fn parse(self: *Object, coff_file: *Coff) !void {
     }
     self.header = @as(*align(1) const coff.CoffHeader, @ptrCast(&header_buffer)).*;
 
+    // Parse string table
+    try self.parseInputStringTable(gpa, file, offset, coff_file);
+
     // Parse section headers
     if (self.header.?.number_of_sections > 0) try self.parseInputSectionHeaders(gpa, file, offset);
 
     // Parse symbol table
     if (self.header.?.number_of_symbols > 0) try self.parseInputSymbolTable(gpa, file, offset);
 
-    // Parse string table
-    try self.parseInputStringTable(gpa, file, offset, coff_file);
+    for (self.sections.items(.header)) |header| {
+        std.debug.print("{s}\n", .{self.getString(header.name)});
+    }
+
+    for (self.symtab.items) |sym| {
+        std.debug.print("{s}\n", .{self.getString(sym.name)});
+        for (self.auxtab.items(.tags)[sym.index_of_aux_symbols..][0..sym.number_of_aux_symbols]) |aux| {
+            std.debug.print("  {s}\n", .{@tagName(aux)});
+        }
+    }
 
     // Init symbols
     // Init atoms
@@ -58,7 +73,22 @@ fn parseInputSectionHeaders(self: *Object, allocator: Allocator, file: std.fs.Fi
     defer relocs_buffer.deinit();
     for (sections) |header| {
         const index = try self.sections.addOne(allocator);
-        self.sections.set(index, .{ .header = header });
+        const name = if (header.getNameOffset()) |off|
+            off - 4
+        else
+            try self.insertString(allocator, header.getName().?);
+        self.sections.set(index, .{ .header = .{
+            .name = name,
+            .virtual_size = header.virtual_size,
+            .virtual_address = header.virtual_address,
+            .size_of_raw_data = header.size_of_raw_data,
+            .pointer_to_raw_data = header.pointer_to_raw_data,
+            .pointer_to_relocations = header.pointer_to_relocations,
+            .pointer_to_linenumbers = header.pointer_to_linenumbers,
+            .number_of_relocations = header.number_of_relocations,
+            .number_of_linenumbers = header.number_of_linenumbers,
+            .flags = header.flags,
+        } });
         const relocs = &self.sections.items(.relocs)[index];
 
         if (header.number_of_relocations > 0) {
@@ -79,10 +109,105 @@ fn parseInputSectionHeaders(self: *Object, allocator: Allocator, file: std.fs.Fi
 }
 
 fn parseInputSymbolTable(self: *Object, allocator: Allocator, file: std.fs.File, offset: usize) !void {
-    _ = self;
-    _ = allocator;
-    _ = file;
-    _ = offset;
+    const num_symbols = self.header.?.number_of_symbols;
+    const raw_size = num_symbols * symtab_entry_size;
+    const buffer = try allocator.alloc(u8, raw_size);
+    defer allocator.free(buffer);
+    const amt = try file.preadAll(buffer, offset + self.header.?.pointer_to_symbol_table);
+    if (amt != raw_size) return error.InputOutput;
+    const symtab = coff.Symtab{ .buffer = buffer };
+    var slice = symtab.slice(0, null);
+
+    var index: usize = 0;
+    var aux_counter: usize = 0;
+    var aux_tag: ?coff.Symtab.Tag = null;
+    while (slice.next()) |rec| {
+        if (aux_counter == 0) {
+            const name_off = if (rec.getNameOffset()) |off|
+                off - 4
+            else
+                try self.insertString(allocator, rec.getName().?);
+            const name = self.getString(name_off);
+            try self.symtab.append(allocator, .{
+                .name = name_off,
+                .value = rec.value,
+                .section_number = rec.section_number,
+                .type = rec.type,
+                .storage_class = rec.storage_class,
+                .index_of_aux_symbols = @intCast(self.auxtab.slice().len),
+                .number_of_aux_symbols = 0,
+            });
+
+            aux_tag = aux_tag: {
+                switch (rec.section_number) {
+                    .UNDEFINED => {
+                        if (rec.storage_class == .WEAK_EXTERNAL and rec.value == 0) {
+                            break :aux_tag .weak_ext;
+                        }
+                    },
+                    .ABSOLUTE => {},
+                    .DEBUG => {
+                        if (rec.storage_class == .FILE) {
+                            break :aux_tag .file_def;
+                        }
+                    },
+                    else => {
+                        if (rec.storage_class == .FUNCTION) {
+                            break :aux_tag .debug_info;
+                        }
+                        if (rec.storage_class == .EXTERNAL and rec.type.complex_type == .FUNCTION) {
+                            break :aux_tag .func_def;
+                        }
+                        if (rec.storage_class == .STATIC) {
+                            for (self.sections.items(.header)) |header| {
+                                const sect_name = self.getString(header.name);
+                                if (mem.eql(u8, sect_name, name)) {
+                                    break :aux_tag .sect_def;
+                                }
+                            }
+                        }
+                    },
+                }
+                break :aux_tag null;
+            };
+            aux_counter = rec.number_of_aux_symbols;
+        } else {
+            const sym = &self.symtab.items[self.symtab.items.len - 1];
+            if (aux_tag) |tag| switch (symtab.at(index, tag)) {
+                .weak_ext => |weak_ext| {
+                    try self.auxtab.append(allocator, .{ .weak = weak_ext });
+                    sym.number_of_aux_symbols += 1;
+                },
+                .file_def => |*file_def| {
+                    const auxtab_index = try self.auxtab.addOne(allocator);
+                    self.auxtab.set(auxtab_index, .{ .file = undefined });
+                    const el = &self.auxtab.items(.data)[auxtab_index].file;
+                    @memcpy(&el.file_name, &file_def.file_name);
+                    sym.number_of_aux_symbols += 1;
+                },
+                .sect_def => |sect_def| {
+                    const sect = self.sections.items(.header)[@intFromEnum(sym.section_number) - 1];
+                    if (!sect.isComdat()) {
+                        // TODO convert into an error
+                        // Expected non COMDAT section would not set the selection field in aux record.
+                        assert(sect_def.selection == .NONE);
+                    }
+                    try self.auxtab.append(allocator, .{ .sect = sect_def });
+                    sym.number_of_aux_symbols += 1;
+                },
+                .debug_info => |debug_info| {
+                    try self.auxtab.append(allocator, .{ .debug_info = debug_info });
+                    sym.number_of_aux_symbols += 1;
+                },
+                else => |other| {
+                    log.warn("{s}: unhandled auxiliary symbol: {}", .{ self.fmtPath(), other });
+                },
+            };
+            aux_counter -= 1;
+        }
+
+        index += 1;
+    }
 }
 
 fn parseInputStringTable(
@@ -113,6 +238,14 @@ pub fn getString(self: Object, off: u32) []const u8 {
     return mem.sliceTo(@as([*:0]const u8, @ptrCast(self.strtab.items.ptr + off)), 0);
 }
 
+fn insertString(self: *Object, allocator: Allocator, str: []const u8) !u32 {
+    const off: u32 = @intCast(self.strtab.items.len);
+    try self.strtab.ensureUnusedCapacity(allocator, str.len + 1);
+    self.strtab.appendSliceAssumeCapacity(str);
+    self.strtab.appendAssumeCapacity(0);
+    return off;
+}
+
 pub fn fmtPath(self: Object) std.fmt.Formatter(formatPath) {
     return .{ .data = self };
 }
@@ -128,9 +261,35 @@ fn formatPath(
     try writer.writeAll(object.path);
 }
 
-const Section = struct {
-    header: coff.SectionHeader,
+const InputSection = struct {
+    header: SectionHeader,
     relocs: std.ArrayListUnmanaged(Relocation) = .{},
+};
+
+const SectionHeader = struct {
+    name: u32,
+    virtual_size: u32,
+    virtual_address: u32,
+    size_of_raw_data: u32,
+    pointer_to_raw_data: u32,
+    pointer_to_relocations: u32,
+    pointer_to_linenumbers: u32,
+    number_of_relocations: u16,
+    number_of_linenumbers: u16,
+    flags: coff.SectionHeaderFlags,
+
+    pub fn isComdat(hdr: SectionHeader) bool {
+        return hdr.flags.LNK_COMDAT == 0b1;
+    }
+
+    pub fn isCode(hdr: SectionHeader) bool {
+        return hdr.flags.CNT_CODE == 0b1;
+    }
+
+    pub fn getAlignment(hdr: SectionHeader) ?u16 {
+        if (hdr.flags.ALIGN == 0) return null;
+        return std.math.powi(u16, 2, hdr.flags.ALIGN - 1) catch return null;
+    }
 };
 
 const Relocation = extern struct {
@@ -250,6 +409,32 @@ const ImageRelArm64 = enum(u16) {
 
     /// The 32-bit relative address from the byte following the relocation.
     rel32 = 17,
+};
+
+const InputSymbol = struct {
+    name: u32,
+    value: u32,
+    section_number: coff.SectionNumber,
+    type: coff.SymType,
+    storage_class: coff.StorageClass,
+    index_of_aux_symbols: u32,
+    number_of_aux_symbols: u8,
+};
+
+const AuxSymbolTag = enum {
+    file,
+    func,
+    debug_info,
+    sect,
+    weak,
+};
+
+const AuxSymbol = union(AuxSymbolTag) {
+    file: coff.FileDefinition,
+    func: coff.FunctionDefinition,
+    debug_info: coff.DebugInfoDefinition,
+    sect: coff.SectionDefinition,
+    weak: coff.WeakExternalDefinition,
 };
 
 const relocation_entry_size = 10;
