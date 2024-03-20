@@ -169,6 +169,11 @@ fn parseObject(self: *Coff, obj: LinkObject) !bool {
     try self.objects.append(gpa, index);
     // TODO validate CPU arch
 
+    for (object.directives.items) |off| {
+        const dir = object.getString(off);
+        std.debug.print("{s}\n", .{dir});
+    }
+
     return true;
 }
 

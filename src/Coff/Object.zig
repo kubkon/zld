@@ -8,6 +8,8 @@ symtab: std.ArrayListUnmanaged(InputSymbol) = .{},
 auxtab: std.MultiArrayList(AuxSymbol) = .{},
 strtab: std.ArrayListUnmanaged(u8) = .{},
 
+directives: std.ArrayListUnmanaged(u32) = .{},
+
 atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
 
 alive: bool = true,
@@ -21,6 +23,7 @@ pub fn deinit(self: *Object, allocator: Allocator) void {
     self.symtab.deinit(allocator);
     self.auxtab.deinit(allocator);
     self.strtab.deinit(allocator);
+    self.directives.deinit(allocator);
     self.atoms.deinit(allocator);
 }
 
@@ -31,7 +34,7 @@ pub fn parse(self: *Object, coff_file: *Coff) !void {
     log.debug("parsing input object file {}", .{self.fmtPath()});
 
     const gpa = coff_file.base.allocator;
-    const offset: usize = 0;
+    const offset: u64 = 0;
     const file = coff_file.getFileHandle(self.file_handle);
 
     var header_buffer: [@sizeOf(coff.CoffHeader)]u8 = undefined;
@@ -50,13 +53,16 @@ pub fn parse(self: *Object, coff_file: *Coff) !void {
     // Parse symbol table
     if (self.header.?.number_of_symbols > 0) try self.parseInputSymbolTable(gpa, file, offset, coff_file);
 
+    // Parse linker directives if any
+    try self.parseDirectives(gpa, file, offset, coff_file);
+
     // Init atoms
     try self.initAtoms(gpa, coff_file);
 
     // Init symbols
 }
 
-fn parseInputSectionHeaders(self: *Object, allocator: Allocator, file: std.fs.File, offset: usize) !void {
+fn parseInputSectionHeaders(self: *Object, allocator: Allocator, file: std.fs.File, offset: u64) !void {
     const num_sects = self.header.?.number_of_sections;
     try self.sections.ensureUnusedCapacity(allocator, num_sects);
     const raw_sects_size = num_sects * @sizeOf(coff.SectionHeader);
@@ -108,7 +114,7 @@ fn parseInputSymbolTable(
     self: *Object,
     allocator: Allocator,
     file: std.fs.File,
-    offset: usize,
+    offset: u64,
     coff_file: *Coff,
 ) !void {
     const num_symbols = self.header.?.number_of_symbols;
@@ -264,7 +270,7 @@ fn parseInputStringTable(
     self: *Object,
     allocator: Allocator,
     file: std.fs.File,
-    offset: usize,
+    offset: u64,
     coff_file: *Coff,
 ) !void {
     const strtab_offset = offset + self.header.?.pointer_to_symbol_table + self.header.?.number_of_symbols * symtab_entry_size;
@@ -281,6 +287,29 @@ fn parseInputStringTable(
     try self.strtab.resize(allocator, strtab_size);
     amt = try file.preadAll(self.strtab.items, strtab_offset + @sizeOf(u32));
     if (amt != strtab_size) return error.InputOutput;
+}
+
+fn parseDirectives(self: *Object, allocator: Allocator, file: std.fs.File, offset: u64, coff_file: *Coff) !void {
+    for (self.sections.items(.header), self.sections.items(.relocs)) |header, relocs| {
+        if (header.flags.LNK_INFO == 0b1 and mem.eql(u8, self.getString(header.name), ".drectve")) {
+            if (relocs.items.len > 0) {
+                coff_file.base.fatal("{}: unexpected relocations for .drectve section", .{self.fmtPath()});
+                return error.ParseFailed;
+            }
+
+            const buffer = try allocator.alloc(u8, header.size_of_raw_data);
+            defer allocator.free(buffer);
+            const amt = try file.preadAll(buffer, offset + header.pointer_to_raw_data);
+            if (amt != header.size_of_raw_data) return error.InputOutput;
+
+            var it = mem.splitScalar(u8, buffer, ' ');
+            while (it.next()) |dir| {
+                if (dir.len == 0) continue;
+                const off = try self.insertString(allocator, dir);
+                try self.directives.append(allocator, off);
+            }
+        }
+    }
 }
 
 fn initAtoms(self: *Object, allocator: Allocator, coff_file: *Coff) !void {
