@@ -1,17 +1,20 @@
 emit: Zld.Emit,
 cpu_arch: ?std.Target.Cpu.Arch = null,
 positionals: []const Coff.LinkObject,
+lib_paths: []const []const u8,
 
 pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options {
     if (args.len == 0) ctx.fatal(usage, .{cmd});
 
     var positionals = std.ArrayList(Coff.LinkObject).init(arena);
+    var lib_paths = std.StringArrayHashMap(void).init(arena);
     var opts: Options = .{
         .emit = .{
             .directory = std.fs.cwd(),
             .sub_path = "a.exe",
         },
         .positionals = undefined,
+        .lib_paths = undefined,
     };
     var verbose = false;
 
@@ -36,6 +39,8 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             } else {
                 ctx.fatal("unsupported machine value: {s}\n", .{target});
             }
+        } else if (p.arg("libpath")) |path| {
+            try lib_paths.put(path, {});
         } else {
             try positionals.append(.{ .path = p.next_arg, .tag = .obj });
         }
@@ -51,6 +56,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
     if (positionals.items.len == 0) ctx.fatal("Expected at least one positional argument\n", .{});
 
     opts.positionals = positionals.items;
+    opts.lib_paths = lib_paths.keys();
 
     return opts;
 }
@@ -109,6 +115,7 @@ const usage =
     \\General Options:
     \\-debug-log:scope              Turn on debugging logs for 'scope' (requires zld compiled with -Dlog)
     \\-help                         Print this help and exit
+    \\-libpath:path                 Add additional library search path
     \\-nologo                       No comment...
     \\-out:path                     Specify output path fo the final artifact
     \\-v                            Print full linker invocation to stderr

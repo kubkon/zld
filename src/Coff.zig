@@ -82,9 +82,23 @@ pub fn flush(self: *Coff) !void {
     defer arena_allocator.deinit();
     const arena = arena_allocator.allocator();
 
-    // Resolve search dirs
-    const search_dirs = std.ArrayList([]const u8).init(arena);
-    _ = search_dirs;
+    // Resolve library search paths
+    var lib_paths = std.ArrayList([]const u8).init(arena);
+    try lib_paths.ensureUnusedCapacity(self.options.lib_paths.len + 1);
+    lib_paths.appendAssumeCapacity("");
+    lib_paths.appendSliceAssumeCapacity(self.options.lib_paths);
+    // TODO: do not parse LIB env var if mingw
+    try addLibPathsFromEnv(arena, &lib_paths);
+
+    if (build_options.enable_logging) {
+        log.debug("library search paths:", .{});
+        for (lib_paths.items) |path| {
+            if (path.len == 0)
+                log.debug("  (cwd)", .{})
+            else
+                log.debug("  {s}", .{path});
+        }
+    }
 
     // Resolve link objects
     var resolved_objects = std.ArrayList(LinkObject).init(arena);
@@ -132,9 +146,18 @@ pub fn flush(self: *Coff) !void {
 
     if (has_parse_error) return error.ParseFailed;
 
-    state_log.debug("{}", .{self.dumpState()});
+    if (build_options.enable_logging)
+        state_log.debug("{}", .{self.dumpState()});
 
     return error.Todo;
+}
+
+fn addLibPathsFromEnv(arena: Allocator, lib_paths: *std.ArrayList([]const u8)) !void {
+    const env_var = try std.process.getEnvVarOwned(arena, "LIB");
+    var it = mem.splitScalar(u8, env_var, ';');
+    while (it.next()) |path| {
+        try lib_paths.append(path);
+    }
 }
 
 fn parsePositional(self: *Coff, obj: LinkObject) !void {
