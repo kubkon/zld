@@ -104,8 +104,15 @@ pub fn flush(self: *Coff) !void {
     // by any of the already parsed positionals via the linker directives section.
     var has_file_not_found_error = false;
     var has_parse_error = false;
+    var positionals = std.fifo.LinearFifo(LinkObject, .Dynamic).init(gpa);
+    defer positionals.deinit();
+    try positionals.ensureUnusedCapacity(self.options.positionals.len);
     for (self.options.positionals) |obj| {
-        self.parsePositional(arena, obj, lib_paths.items) catch |err| switch (err) {
+        positionals.writeItemAssumeCapacity(obj);
+    }
+
+    while (positionals.readItem()) |obj| {
+        self.parsePositional(arena, obj, lib_paths.items, &positionals) catch |err| switch (err) {
             error.FileNotFound => has_file_not_found_error = true,
             error.ParseFailed => has_parse_error = true,
             else => |e| {
@@ -177,11 +184,18 @@ const ParseError = error{
     OutOfMemory,
 } || std.os.AccessError || std.fs.File.OpenError || std.os.SeekError || std.os.PReadError;
 
-fn parsePositional(self: *Coff, arena: Allocator, obj: LinkObject, lib_paths: []const []const u8) ParseError!void {
+fn parsePositional(
+    self: *Coff,
+    arena: Allocator,
+    obj: LinkObject,
+    lib_paths: []const []const u8,
+    queue: anytype,
+) ParseError!void {
     log.debug("parsing positional {}", .{obj});
 
     const resolved_obj = try self.resolveFile(arena, obj, lib_paths);
-    if (try self.parseObject(arena, resolved_obj, lib_paths)) return;
+
+    if (try self.parseObject(resolved_obj, queue)) return;
 
     self.base.fatal("unknown filetype for positional argument: {} resolved as {s}", .{
         resolved_obj,
@@ -189,7 +203,7 @@ fn parsePositional(self: *Coff, arena: Allocator, obj: LinkObject, lib_paths: []
     });
 }
 
-fn parseObject(self: *Coff, arena: Allocator, obj: LinkObject, lib_paths: []const []const u8) ParseError!bool {
+fn parseObject(self: *Coff, obj: LinkObject, queue: anytype) ParseError!bool {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -215,20 +229,12 @@ fn parseObject(self: *Coff, arena: Allocator, obj: LinkObject, lib_paths: []cons
     // TODO validate CPU arch
 
     {
-        var has_file_not_found_error = false;
         var has_parse_error = false;
         var it = mem.splitScalar(u8, object.directives.items, ' ');
         var p = Options.ArgsParser(@TypeOf(it)){ .it = &it };
         while (p.hasMore()) {
             if (p.arg("defaultlib")) |name| {
-                self.parsePositional(arena, .{
-                    .name = name,
-                    .tag = .default_lib,
-                }, lib_paths) catch |err| switch (err) {
-                    error.FileNotFound => has_file_not_found_error = true,
-                    error.ParseFailed => has_parse_error = true,
-                    else => |e| return e,
-                };
+                try queue.writeItem(.{ .name = name, .tag = .default_lib });
             } else {
                 self.base.fatal("{}: unhandled directive: {s}", .{
                     object.fmtPath(),
@@ -237,8 +243,6 @@ fn parseObject(self: *Coff, arena: Allocator, obj: LinkObject, lib_paths: []cons
                 has_parse_error = true;
             }
         }
-
-        if (has_file_not_found_error) return error.FileNotFound;
         if (has_parse_error) return error.ParseFailed;
     }
 
