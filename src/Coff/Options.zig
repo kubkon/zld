@@ -1,12 +1,12 @@
 emit: Zld.Emit,
 cpu_arch: ?std.Target.Cpu.Arch = null,
-positionals: []const Coff.LinkObject,
+positionals: []const []const u8,
 lib_paths: []const []const u8,
 
 pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options {
     if (args.len == 0) ctx.fatal(usage, .{cmd});
 
-    var positionals = std.ArrayList(Coff.LinkObject).init(arena);
+    var positionals = std.ArrayList([]const u8).init(arena);
     var lib_paths = std.StringArrayHashMap(void).init(arena);
     var opts: Options = .{
         .emit = .{
@@ -42,7 +42,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         } else if (p.arg("libpath")) |path| {
             try lib_paths.put(path, {});
         } else {
-            try positionals.append(.{ .path = p.next_arg, .tag = .obj });
+            try positionals.append(p.next_arg);
         }
     }
 
@@ -61,7 +61,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
     return opts;
 }
 
-fn ArgParser(comptime Ctx: type) type {
+pub fn ArgParser(comptime Ctx: type) type {
     return struct {
         next_arg: []const u8 = undefined,
         it: *Zld.Options.ArgsIterator,

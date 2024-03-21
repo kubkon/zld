@@ -82,61 +82,57 @@ pub fn flush(self: *Coff) !void {
     defer arena_allocator.deinit();
     const arena = arena_allocator.allocator();
 
-    // Resolve library search paths
+    // Set up library search paths
     var lib_paths = std.ArrayList([]const u8).init(arena);
     try lib_paths.ensureUnusedCapacity(self.options.lib_paths.len + 1);
     lib_paths.appendAssumeCapacity("");
     lib_paths.appendSliceAssumeCapacity(self.options.lib_paths);
     // TODO: do not parse LIB env var if mingw
+    // TODO: detect WinSDK
     try addLibPathsFromEnv(arena, &lib_paths);
 
     if (build_options.enable_logging) {
         log.debug("library search paths:", .{});
         for (lib_paths.items) |path| {
-            if (path.len == 0)
-                log.debug("  (cwd)", .{})
-            else
-                log.debug("  {s}", .{path});
+            log.debug("  {s}", .{if (path.len == 0) "(cwd)" else path});
         }
     }
 
-    // Resolve link objects
-    var resolved_objects = std.ArrayList(LinkObject).init(arena);
-    try resolved_objects.ensureTotalCapacityPrecise(self.options.positionals.len);
-    for (self.options.positionals) |obj| {
-        const full_path = blk: {
-            switch (obj.tag) {
-                .obj => {
-                    var buffer: [fs.MAX_PATH_BYTES]u8 = undefined;
-                    const full_path = std.fs.realpath(obj.path, &buffer) catch |err| switch (err) {
-                        error.FileNotFound => {
-                            self.base.fatal("file not found {}", .{obj});
-                            continue;
-                        },
-                        else => |e| return e,
-                    };
-                    break :blk try arena.dupe(u8, full_path);
-                },
-                .lib => return error.Todo,
-            }
+    // Parse positionals and any additional file that might have been requested
+    // by any of the already parsed positionals via the linker directives section.
+    var resolved = std.ArrayList([]const u8).init(arena);
+    try resolved.ensureUnusedCapacity(self.options.positionals.len);
+    var has_resolve_error = false;
+    for (self.options.positionals) |path| {
+        const resolved_path = self.resolveFile(arena, path, lib_paths.items) catch |err| switch (err) {
+            error.FileNotFound => {
+                has_resolve_error = true;
+                continue;
+            },
+            else => |e| return e,
         };
-        resolved_objects.appendAssumeCapacity(.{
-            .path = full_path,
-            .tag = obj.tag,
-        });
+        resolved.appendAssumeCapacity(resolved_path);
+    }
+
+    if (has_resolve_error) {
+        self.base.fatal("tried library search paths:", .{});
+        for (lib_paths.items) |path| {
+            self.base.fatal("  {s}", .{if (path.len == 0) "(cwd)" else path});
+        }
+        return error.ParseFailed;
     }
 
     // TODO infer CPU arch and perhaps subsystem and whatnot?
 
     var has_parse_error = false;
-    for (resolved_objects.items) |obj| {
-        self.parsePositional(obj) catch |err| {
+    for (resolved.items) |path| {
+        self.parsePositional(path) catch |err| {
             has_parse_error = true;
             switch (err) {
                 error.ParseFailed => {}, // already reported
                 else => |e| {
                     self.base.fatal("{s}: unexpected error occurred while parsing input file: {s}", .{
-                        obj.path, @errorName(e),
+                        path, @errorName(e),
                     });
                     return e;
                 },
@@ -160,20 +156,48 @@ fn addLibPathsFromEnv(arena: Allocator, lib_paths: *std.ArrayList([]const u8)) !
     }
 }
 
-fn parsePositional(self: *Coff, obj: LinkObject) !void {
-    log.debug("parsing positional {}", .{obj});
+fn resolveFile(self: *Coff, arena: Allocator, path: []const u8, lib_dirs: []const []const u8) ![]const u8 {
+    // TODO: cache visited files
+    if (std.fs.path.isAbsolute(path)) {
+        if (try accessPath(path)) return path;
+        self.base.fatal("file not found '{s}'", .{path});
+        return error.FileNotFound;
+    }
+    const gpa = self.base.allocator;
+    var buffer = std.ArrayList(u8).init(gpa);
+    defer buffer.deinit();
 
-    if (try self.parseObject(obj)) return;
-
-    self.base.fatal("unknown filetype for positional argument: '{s}'", .{obj.path});
+    for (lib_dirs) |dir| {
+        try buffer.writer().print("{s}" ++ std.fs.path.sep_str ++ "{s}", .{ dir, path });
+        if (try accessPath(buffer.items)) return arena.dupe(u8, buffer.items);
+        buffer.clearRetainingCapacity();
+    }
+    self.base.fatal("file not found '{s}'", .{path});
+    return error.FileNotFound;
 }
 
-fn parseObject(self: *Coff, obj: LinkObject) !bool {
+fn accessPath(path: []const u8) !bool {
+    std.fs.cwd().access(path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => |e| return e,
+    };
+    return true;
+}
+
+fn parsePositional(self: *Coff, path: []const u8) !void {
+    log.debug("parsing positional {s}", .{path});
+
+    if (try self.parseObject(path)) return;
+
+    self.base.fatal("unknown filetype for positional argument: '{s}'", .{path});
+}
+
+fn parseObject(self: *Coff, path: []const u8) !bool {
     const tracy = trace(@src());
     defer tracy.end();
 
     const gpa = self.base.allocator;
-    const file = try std.fs.cwd().openFile(obj.path, .{});
+    const file = try std.fs.cwd().openFile(path, .{});
     const fh = try self.addFileHandle(file);
 
     const header = file.reader().readStruct(coff.CoffHeader) catch return false;
@@ -183,7 +207,7 @@ fn parseObject(self: *Coff, obj: LinkObject) !bool {
 
     const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
     self.files.set(index, .{ .object = .{
-        .path = try gpa.dupe(u8, obj.path),
+        .path = try gpa.dupe(u8, path),
         .file_handle = fh,
         .index = index,
     } });
@@ -256,26 +280,6 @@ fn fmtDumpState(
         });
     }
 }
-
-pub const LinkObject = struct {
-    path: []const u8,
-    tag: enum { obj, lib },
-
-    pub fn format(
-        self: LinkObject,
-        comptime unused_fmt_string: []const u8,
-        options: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
-        _ = options;
-        _ = unused_fmt_string;
-        switch (self.tag) {
-            .lib => try writer.writeAll("-l"),
-            .obj => {},
-        }
-        try writer.writeAll(self.path);
-    }
-};
 
 const Section = struct {
     header: SectionHeader,
