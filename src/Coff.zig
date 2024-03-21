@@ -234,7 +234,9 @@ fn parseObject(self: *Coff, obj: LinkObject, queue: anytype) ParseError!bool {
         var p = Options.ArgsParser(@TypeOf(it)){ .it = &it };
         while (p.hasMore()) {
             if (p.arg("defaultlib")) |name| {
-                try queue.writeItem(.{ .name = name, .tag = .default_lib });
+                const dir_obj = LinkObject{ .name = name, .tag = .default_lib };
+                log.debug("{}: adding implicit include {}", .{ object.fmtPath(), dir_obj });
+                try queue.writeItem(dir_obj);
             } else {
                 self.base.fatal("{}: unhandled directive: {s}", .{
                     object.fmtPath(),
