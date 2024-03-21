@@ -1,12 +1,13 @@
 emit: Zld.Emit,
 cpu_arch: ?std.Target.Cpu.Arch = null,
-positionals: []const []const u8,
+positionals: []const Coff.LinkObject,
+
 lib_paths: []const []const u8,
 
 pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options {
     if (args.len == 0) ctx.fatal(usage, .{cmd});
 
-    var positionals = std.ArrayList([]const u8).init(arena);
+    var positionals = std.ArrayList(Coff.LinkObject).init(arena);
     var lib_paths = std.StringArrayHashMap(void).init(arena);
     var opts: Options = .{
         .emit = .{
@@ -25,6 +26,8 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             ctx.fatal(usage ++ "\n", .{cmd});
         } else if (p.arg("debug-log")) |scope| {
             try ctx.log_scopes.append(scope);
+        } else if (p.arg("defaultlib")) |name| {
+            try positionals.append(.{ .name = name, .tag = .default_lib });
         } else if (p.arg("out")) |path| {
             opts.emit.sub_path = path;
         } else if (p.flag("v")) {
@@ -42,7 +45,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         } else if (p.arg("libpath")) |path| {
             try lib_paths.put(path, {});
         } else {
-            try positionals.append(p.next_arg);
+            try positionals.append(.{ .name = p.next_arg, .tag = .explicit });
         }
     }
 
@@ -83,7 +86,7 @@ pub fn ArgsParser(comptime Iterator: type) type {
         fn flagPrefix(p: *Self, comptime pat: []const u8, comptime prefix: []const u8) bool {
             if (mem.startsWith(u8, p.next_arg, prefix)) {
                 const actual_arg = p.next_arg[prefix.len..];
-                if (mem.eql(u8, actual_arg, pat)) {
+                if (mem.eql(u8, actual_arg, pat) or mem.eql(u8, actual_arg, upperPattern(pat))) {
                     return true;
                 }
             }
@@ -97,7 +100,9 @@ pub fn ArgsParser(comptime Iterator: type) type {
         fn argPrefix(p: *Self, comptime pat: []const u8, comptime prefix: []const u8) ?[]const u8 {
             if (mem.startsWith(u8, p.next_arg, prefix)) {
                 const actual_arg = p.next_arg[prefix.len..];
-                if (mem.startsWith(u8, actual_arg, pat)) {
+                if (mem.startsWith(u8, actual_arg, pat) or
+                    mem.startsWith(u8, actual_arg, upperPattern(pat)))
+                {
                     if (mem.indexOf(u8, actual_arg, ":")) |index| {
                         if (index == pat.len) {
                             const value = actual_arg[index + 1 ..];
@@ -109,6 +114,11 @@ pub fn ArgsParser(comptime Iterator: type) type {
             return null;
         }
 
+        fn upperPattern(comptime pat: []const u8) []const u8 {
+            comptime var buffer: [pat.len]u8 = undefined;
+            return comptime std.ascii.upperString(&buffer, pat);
+        }
+
         const Self = @This();
     };
 }
@@ -118,6 +128,7 @@ const usage =
     \\
     \\General Options:
     \\-debug-log:scope              Turn on debugging logs for 'scope' (requires zld compiled with -Dlog)
+    \\-defaultlib:name              Link a default library
     \\-help                         Print this help and exit
     \\-libpath:path                 Add additional library search path
     \\-nologo                       No comment...

@@ -98,48 +98,32 @@ pub fn flush(self: *Coff) !void {
         }
     }
 
+    // TODO infer CPU arch and perhaps subsystem and whatnot?
+
     // Parse positionals and any additional file that might have been requested
     // by any of the already parsed positionals via the linker directives section.
-    var resolved = std.ArrayList([]const u8).init(arena);
-    try resolved.ensureUnusedCapacity(self.options.positionals.len);
-    var has_resolve_error = false;
-    for (self.options.positionals) |path| {
-        const resolved_path = self.resolveFile(arena, path, lib_paths.items) catch |err| switch (err) {
-            error.FileNotFound => {
-                has_resolve_error = true;
-                continue;
+    var has_file_not_found_error = false;
+    var has_parse_error = false;
+    for (self.options.positionals) |obj| {
+        self.parsePositional(arena, obj, lib_paths.items) catch |err| switch (err) {
+            error.FileNotFound => has_file_not_found_error = true,
+            error.ParseFailed => has_parse_error = true,
+            else => |e| {
+                self.base.fatal("{s}: unexpected error occurred while parsing input file: {s}", .{
+                    obj.path, @errorName(e),
+                });
+                return e;
             },
-            else => |e| return e,
         };
-        resolved.appendAssumeCapacity(resolved_path);
     }
 
-    if (has_resolve_error) {
+    if (has_file_not_found_error) {
         self.base.fatal("tried library search paths:", .{});
         for (lib_paths.items) |path| {
             self.base.fatal("  {s}", .{path});
         }
-        return error.ParseFailed;
+        has_parse_error = true;
     }
-
-    // TODO infer CPU arch and perhaps subsystem and whatnot?
-
-    var has_parse_error = false;
-    for (resolved.items) |path| {
-        self.parsePositional(path) catch |err| {
-            has_parse_error = true;
-            switch (err) {
-                error.ParseFailed => {}, // already reported
-                else => |e| {
-                    self.base.fatal("{s}: unexpected error occurred while parsing input file: {s}", .{
-                        path, @errorName(e),
-                    });
-                    return e;
-                },
-            }
-        };
-    }
-
     if (has_parse_error) return error.ParseFailed;
 
     if (build_options.enable_logging)
@@ -156,11 +140,11 @@ fn addLibPathsFromEnv(arena: Allocator, lib_paths: *std.ArrayList([]const u8)) !
     }
 }
 
-fn resolveFile(self: *Coff, arena: Allocator, path: []const u8, lib_dirs: []const []const u8) ![]const u8 {
+fn resolveFile(self: *Coff, arena: Allocator, obj: LinkObject, lib_dirs: []const []const u8) !LinkObject {
     // TODO: cache visited files
-    if (std.fs.path.isAbsolute(path)) {
-        if (try accessPath(path)) return path;
-        self.base.fatal("file not found '{s}'", .{path});
+    if (std.fs.path.isAbsolute(obj.name)) {
+        if (try accessPath(obj.name)) return .{ .name = obj.name, .path = obj.name, .tag = obj.tag };
+        self.base.fatal("file not found '{s}'", .{obj.name});
         return error.FileNotFound;
     }
     const gpa = self.base.allocator;
@@ -168,11 +152,14 @@ fn resolveFile(self: *Coff, arena: Allocator, path: []const u8, lib_dirs: []cons
     defer buffer.deinit();
 
     for (lib_dirs) |dir| {
-        try buffer.writer().print("{s}" ++ std.fs.path.sep_str ++ "{s}", .{ dir, path });
-        if (try accessPath(buffer.items)) return arena.dupe(u8, buffer.items);
+        try buffer.writer().print("{s}" ++ std.fs.path.sep_str ++ "{s}", .{ dir, obj.name });
+        if (try accessPath(buffer.items)) {
+            const path = try arena.dupe(u8, buffer.items);
+            return .{ .name = obj.name, .path = path, .tag = obj.tag };
+        }
         buffer.clearRetainingCapacity();
     }
-    self.base.fatal("file not found '{s}'", .{path});
+    self.base.fatal("file not found '{s}'", .{obj.name});
     return error.FileNotFound;
 }
 
@@ -184,20 +171,30 @@ fn accessPath(path: []const u8) !bool {
     return true;
 }
 
-fn parsePositional(self: *Coff, path: []const u8) !void {
-    log.debug("parsing positional {s}", .{path});
+const ParseError = error{
+    FileNotFound,
+    ParseFailed,
+    OutOfMemory,
+} || std.os.AccessError || std.fs.File.OpenError || std.os.SeekError || std.os.PReadError;
 
-    if (try self.parseObject(path)) return;
+fn parsePositional(self: *Coff, arena: Allocator, obj: LinkObject, lib_paths: []const []const u8) ParseError!void {
+    log.debug("parsing positional {}", .{obj});
 
-    self.base.fatal("unknown filetype for positional argument: '{s}'", .{path});
+    const resolved_obj = try self.resolveFile(arena, obj, lib_paths);
+    if (try self.parseObject(arena, resolved_obj, lib_paths)) return;
+
+    self.base.fatal("unknown filetype for positional argument: {} resolved as {s}", .{
+        resolved_obj,
+        resolved_obj.path,
+    });
 }
 
-fn parseObject(self: *Coff, path: []const u8) !bool {
+fn parseObject(self: *Coff, arena: Allocator, obj: LinkObject, lib_paths: []const []const u8) ParseError!bool {
     const tracy = trace(@src());
     defer tracy.end();
 
     const gpa = self.base.allocator;
-    const file = try std.fs.cwd().openFile(path, .{});
+    const file = try std.fs.cwd().openFile(obj.path, .{});
     const fh = try self.addFileHandle(file);
 
     const header = file.reader().readStruct(coff.CoffHeader) catch return false;
@@ -208,7 +205,7 @@ fn parseObject(self: *Coff, path: []const u8) !bool {
 
     const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
     self.files.set(index, .{ .object = .{
-        .path = try gpa.dupe(u8, path),
+        .path = try gpa.dupe(u8, obj.path),
         .file_handle = fh,
         .index = index,
     } });
@@ -218,17 +215,30 @@ fn parseObject(self: *Coff, path: []const u8) !bool {
     // TODO validate CPU arch
 
     {
+        var has_file_not_found_error = false;
         var has_parse_error = false;
         var it = mem.splitScalar(u8, object.directives.items, ' ');
         var p = Options.ArgsParser(@TypeOf(it)){ .it = &it };
         while (p.hasMore()) {
-            self.base.fatal("{}: unhandled directive: {s}", .{
-                object.fmtPath(),
-                p.next_arg,
-            });
-            has_parse_error = true;
+            if (p.arg("defaultlib")) |name| {
+                self.parsePositional(arena, .{
+                    .name = name,
+                    .tag = .default_lib,
+                }, lib_paths) catch |err| switch (err) {
+                    error.FileNotFound => has_file_not_found_error = true,
+                    error.ParseFailed => has_parse_error = true,
+                    else => |e| return e,
+                };
+            } else {
+                self.base.fatal("{}: unhandled directive: {s}", .{
+                    object.fmtPath(),
+                    p.next_arg,
+                });
+                has_parse_error = true;
+            }
         }
 
+        if (has_file_not_found_error) return error.FileNotFound;
         if (has_parse_error) return error.ParseFailed;
     }
 
@@ -320,6 +330,27 @@ pub const SectionHeader = struct {
     pub fn getAlignment(hdr: SectionHeader) ?u16 {
         if (hdr.flags.ALIGN == 0) return null;
         return hdr.flags.ALIGN - 1;
+    }
+};
+
+pub const LinkObject = struct {
+    name: []const u8,
+    path: []const u8 = "",
+    tag: enum { explicit, default_lib },
+
+    pub fn format(
+        obj: LinkObject,
+        comptime unused_fmt_string: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = options;
+        _ = unused_fmt_string;
+        switch (obj.tag) {
+            .explicit => {},
+            .default_lib => try writer.writeAll("/defaultlib:"),
+        }
+        try writer.print("{s}", .{obj.name});
     }
 };
 
