@@ -85,7 +85,7 @@ pub fn flush(self: *Coff) !void {
     // Set up library search paths
     var lib_paths = std.ArrayList([]const u8).init(arena);
     try lib_paths.ensureUnusedCapacity(self.options.lib_paths.len + 1);
-    lib_paths.appendAssumeCapacity("");
+    lib_paths.appendAssumeCapacity(".");
     lib_paths.appendSliceAssumeCapacity(self.options.lib_paths);
     // TODO: do not parse LIB env var if mingw
     // TODO: detect WinSDK
@@ -94,7 +94,7 @@ pub fn flush(self: *Coff) !void {
     if (build_options.enable_logging) {
         log.debug("library search paths:", .{});
         for (lib_paths.items) |path| {
-            log.debug("  {s}", .{if (path.len == 0) "(cwd)" else path});
+            log.debug("  {s}", .{path});
         }
     }
 
@@ -117,7 +117,7 @@ pub fn flush(self: *Coff) !void {
     if (has_resolve_error) {
         self.base.fatal("tried library search paths:", .{});
         for (lib_paths.items) |path| {
-            self.base.fatal("  {s}", .{if (path.len == 0) "(cwd)" else path});
+            self.base.fatal("  {s}", .{path});
         }
         return error.ParseFailed;
     }
@@ -203,6 +203,7 @@ fn parseObject(self: *Coff, path: []const u8) !bool {
     const header = file.reader().readStruct(coff.CoffHeader) catch return false;
     try file.seekTo(0);
 
+    if (header.number_of_sections == 0xffff) return false;
     if (header.size_of_optional_header != 0) return false;
 
     const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
@@ -216,9 +217,19 @@ fn parseObject(self: *Coff, path: []const u8) !bool {
     try self.objects.append(gpa, index);
     // TODO validate CPU arch
 
-    for (object.directives.items) |off| {
-        const dir = object.getString(off);
-        std.debug.print("{s}\n", .{dir});
+    {
+        var has_parse_error = false;
+        var it = mem.splitScalar(u8, object.directives.items, ' ');
+        var p = Options.ArgsParser(@TypeOf(it)){ .it = &it };
+        while (p.hasMore()) {
+            self.base.fatal("{}: unhandled directive: {s}", .{
+                object.fmtPath(),
+                p.next_arg,
+            });
+            has_parse_error = true;
+        }
+
+        if (has_parse_error) return error.ParseFailed;
     }
 
     return true;

@@ -8,7 +8,7 @@ symtab: std.ArrayListUnmanaged(InputSymbol) = .{},
 auxtab: std.MultiArrayList(AuxSymbol) = .{},
 strtab: std.ArrayListUnmanaged(u8) = .{},
 
-directives: std.ArrayListUnmanaged(u32) = .{},
+directives: std.ArrayListUnmanaged(u8) = .{},
 
 atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
 
@@ -297,17 +297,9 @@ fn parseDirectives(self: *Object, allocator: Allocator, file: std.fs.File, offse
                 return error.ParseFailed;
             }
 
-            const buffer = try allocator.alloc(u8, header.size_of_raw_data);
-            defer allocator.free(buffer);
+            const buffer = try self.directives.addManyAsSlice(allocator, header.size_of_raw_data);
             const amt = try file.preadAll(buffer, offset + header.pointer_to_raw_data);
             if (amt != header.size_of_raw_data) return error.InputOutput;
-
-            var it = mem.splitScalar(u8, buffer, ' ');
-            while (it.next()) |dir| {
-                if (dir.len == 0) continue;
-                const off = try self.insertString(allocator, dir);
-                try self.directives.append(allocator, off);
-            }
         }
     }
 }

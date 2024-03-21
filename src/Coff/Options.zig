@@ -19,7 +19,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
     var verbose = false;
 
     var it = Zld.Options.ArgsIterator{ .args = args };
-    var p = ArgParser(@TypeOf(ctx)){ .it = &it, .ctx = ctx };
+    var p = ArgsParser(@TypeOf(it)){ .it = &it };
     while (p.hasMore()) {
         if (p.flag("help")) {
             ctx.fatal(usage ++ "\n", .{cmd});
@@ -61,14 +61,18 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
     return opts;
 }
 
-pub fn ArgParser(comptime Ctx: type) type {
+pub fn ArgsParser(comptime Iterator: type) type {
     return struct {
         next_arg: []const u8 = undefined,
-        it: *Zld.Options.ArgsIterator,
-        ctx: Ctx,
+        it: *Iterator,
 
         pub fn hasMore(p: *Self) bool {
-            p.next_arg = p.it.next() orelse return false;
+            var next_arg = p.it.next() orelse return false;
+            while (true) {
+                if (next_arg.len != 0) break;
+                next_arg = p.it.next() orelse return false;
+            }
+            p.next_arg = next_arg;
             return true;
         }
 
