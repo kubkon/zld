@@ -1,3 +1,4 @@
+archive: ?Archive = null,
 path: []const u8,
 file_handle: File.HandleIndex,
 index: File.Index,
@@ -14,7 +15,15 @@ atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
 
 alive: bool = true,
 
+pub fn isValidHeader(buffer: *const [@sizeOf(coff.CoffHeader)]u8) bool {
+    const header = @as(*align(1) const coff.CoffHeader, @ptrCast(buffer)).*;
+    if (header.machine == .Unknown and header.number_of_sections == 0xffff) return false;
+    if (header.size_of_optional_header != 0) return false;
+    return true;
+}
+
 pub fn deinit(self: *Object, allocator: Allocator) void {
+    if (self.archive) |*ar| allocator.free(ar.path);
     allocator.free(self.path);
     for (self.sections.items(.relocs)) |*relocs| {
         relocs.deinit(allocator);
@@ -34,7 +43,7 @@ pub fn parse(self: *Object, coff_file: *Coff) !void {
     log.debug("parsing input object file {}", .{self.fmtPath()});
 
     const gpa = coff_file.base.allocator;
-    const offset: u64 = 0;
+    const offset = if (self.archive) |ar| ar.offset else 0;
     const file = coff_file.getFileHandle(self.file_handle);
 
     var header_buffer: [@sizeOf(coff.CoffHeader)]u8 = undefined;
@@ -417,7 +426,12 @@ fn formatPath(
 ) !void {
     _ = unused_fmt_string;
     _ = options;
-    try writer.writeAll(object.path);
+    if (object.archive) |ar| {
+        try writer.writeAll(ar.path);
+        try writer.writeByte('(');
+        try writer.writeAll(object.path);
+        try writer.writeByte(')');
+    } else try writer.writeAll(object.path);
 }
 
 pub const InputSection = struct {
@@ -589,6 +603,11 @@ const AuxSymbol = union(AuxSymbolTag) {
 
 const relocation_entry_size = 10;
 const symtab_entry_size = 18;
+
+const Archive = struct {
+    path: []const u8,
+    offset: u64,
+};
 
 const assert = std.debug.assert;
 const coff = std.coff;

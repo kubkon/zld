@@ -182,6 +182,9 @@ const ParseError = error{
     FileNotFound,
     ParseFailed,
     OutOfMemory,
+    Overflow,
+    InvalidCharacter,
+    EndOfStream,
 } || std.os.AccessError || std.fs.File.OpenError || std.os.SeekError || std.os.PReadError;
 
 fn parsePositional(
@@ -196,6 +199,7 @@ fn parsePositional(
     const resolved_obj = try self.resolveFile(arena, obj, lib_paths);
 
     if (try self.parseObject(resolved_obj, queue)) return;
+    if (try self.parseArchive(resolved_obj, queue)) return;
 
     self.base.fatal("unknown filetype for positional argument: {} resolved as {s}", .{
         resolved_obj,
@@ -214,8 +218,8 @@ fn parseObject(self: *Coff, obj: LinkObject, queue: anytype) ParseError!bool {
     const header = file.reader().readStruct(coff.CoffHeader) catch return false;
     try file.seekTo(0);
 
-    if (header.number_of_sections == 0xffff) return false;
-    if (header.size_of_optional_header != 0) return false;
+    if (!Object.isValidHeader(mem.asBytes(&header))) return false;
+    // TODO validate CPU arch
 
     const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
     self.files.set(index, .{ .object = .{
@@ -226,27 +230,71 @@ fn parseObject(self: *Coff, obj: LinkObject, queue: anytype) ParseError!bool {
     const object = &self.files.items(.data)[index].object;
     try object.parse(self);
     try self.objects.append(gpa, index);
-    // TODO validate CPU arch
+    try self.parseDirectives(object, queue);
 
-    {
-        var has_parse_error = false;
-        var it = mem.splitScalar(u8, object.directives.items, ' ');
-        var p = Options.ArgsParser(@TypeOf(it)){ .it = &it };
-        while (p.hasMore()) {
-            if (p.arg("defaultlib")) |name| {
-                const dir_obj = LinkObject{ .name = name, .tag = .default_lib };
-                log.debug("{}: adding implicit include {}", .{ object.fmtPath(), dir_obj });
-                try queue.writeItem(dir_obj);
-            } else {
-                self.base.fatal("{}: unhandled directive: {s}", .{
-                    object.fmtPath(),
-                    p.next_arg,
-                });
-                has_parse_error = true;
-            }
+    return true;
+}
+
+fn parseDirectives(self: *Coff, object: *const Object, queue: anytype) ParseError!void {
+    var has_parse_error = false;
+    var it = mem.splitScalar(u8, object.directives.items, ' ');
+    var p = Options.ArgsParser(@TypeOf(it)){ .it = &it };
+    while (p.hasMore()) {
+        if (p.arg("defaultlib")) |name| {
+            const dir_obj = LinkObject{ .name = name, .tag = .default_lib };
+            log.debug("{}: adding implicit include {}", .{ object.fmtPath(), dir_obj });
+            try queue.writeItem(dir_obj);
+        } else {
+            self.base.fatal("{}: unhandled directive: {s}", .{
+                object.fmtPath(),
+                p.next_arg,
+            });
+            has_parse_error = true;
         }
-        if (has_parse_error) return error.ParseFailed;
     }
+    if (has_parse_error) return error.ParseFailed;
+}
+
+fn parseArchive(self: *Coff, obj: LinkObject, queue: anytype) ParseError!bool {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    const gpa = self.base.allocator;
+    const file = try fs.cwd().openFile(obj.path, .{});
+    const fh = try self.addFileHandle(file);
+
+    const magic = file.reader().readBytesNoEof(Archive.magic.len) catch return false;
+    try file.seekTo(0);
+
+    if (!Archive.isValidMagic(&magic)) return false;
+
+    var archive = Archive{};
+    defer archive.deinit(gpa);
+    try archive.parse(obj.path, fh, self);
+
+    var has_parse_error = false;
+    for (archive.objects.items) |extracted| {
+        const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
+        self.files.set(index, .{ .object = extracted });
+        const object = &self.files.items(.data)[index].object;
+        object.index = index;
+        object.parse(self) catch |err| switch (err) {
+            error.ParseFailed => {
+                has_parse_error = true;
+                continue;
+            },
+            else => |e| return e,
+        };
+        self.parseDirectives(object, queue) catch |err| switch (err) {
+            error.ParseFailed => {
+                has_parse_error = true;
+                continue;
+            },
+            else => |e| return e,
+        };
+        try self.objects.append(gpa, index);
+    }
+    if (has_parse_error) return error.ParseFailed;
 
     return true;
 }
@@ -374,6 +422,7 @@ const std = @import("std");
 const trace = @import("tracy.zig").trace;
 
 const Allocator = mem.Allocator;
+const Archive = @import("Coff/Archive.zig");
 const Atom = @import("Coff/Atom.zig");
 const Coff = @This();
 const File = @import("Coff/file.zig").File;
