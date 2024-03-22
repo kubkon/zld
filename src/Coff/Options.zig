@@ -1,7 +1,6 @@
 emit: Zld.Emit,
 cpu_arch: ?std.Target.Cpu.Arch = null,
 positionals: []const Coff.LinkObject,
-
 lib_paths: []const []const u8,
 
 pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options {

@@ -16,11 +16,10 @@ pub fn deinit(self: *Archive, allocator: Allocator) void {
 
 pub fn parse(self: *Archive, path: []const u8, file_handle: File.HandleIndex, coff_file: *Coff) !void {
     const gpa = coff_file.base.allocator;
+    const cpu_arch = coff_file.options.cpu_arch.?;
     const file = coff_file.getFileHandle(file_handle);
 
     const size = (try file.stat()).size;
-    const reader = file.reader();
-    _ = try reader.readBytesNoEof(magic.len);
 
     var check: packed struct {
         symdef: bool = false,
@@ -29,19 +28,23 @@ pub fn parse(self: *Archive, path: []const u8, file_handle: File.HandleIndex, co
     } = .{};
     var member_count: usize = 0;
 
+    log.debug("parsing archive {s}", .{path});
+
     var pos: usize = magic.len;
     while (true) {
-        if (!std.mem.isAligned(pos, 2)) {
-            if (pos + 1 >= size) break;
-            try file.seekBy(1);
+        if (!mem.isAligned(pos, 2)) {
             pos += 1;
         }
         if (pos >= size) break;
 
-        const hdr = try reader.readStruct(Header);
+        var hdr_buffer: [@sizeOf(Header)]u8 = undefined;
+        var amt = try file.preadAll(&hdr_buffer, pos);
+        if (amt != @sizeOf(Header)) return error.InputOutput;
+        const hdr = @as(*align(1) const Header, @ptrCast(&hdr_buffer));
         pos += @sizeOf(Header);
 
         if (!std.mem.eql(u8, &hdr.end, end)) {
+            log.debug("invalid header? {}", .{hdr});
             coff_file.base.fatal("{s}: invalid header delimiter: expected '{s}', found '{s}'", .{
                 path,
                 std.fmt.fmtSliceEscapeLower(magic),
@@ -52,7 +55,6 @@ pub fn parse(self: *Archive, path: []const u8, file_handle: File.HandleIndex, co
 
         const obj_size = try hdr.getSize();
         defer {
-            _ = file.seekBy(obj_size) catch {};
             pos += obj_size;
             member_count += 1;
         }
@@ -89,22 +91,31 @@ pub fn parse(self: *Archive, path: []const u8, file_handle: File.HandleIndex, co
                     return error.ParseFailed;
                 }
                 try self.strtab.resize(gpa, obj_size);
-                const amt = try file.preadAll(self.strtab.items, pos);
+                amt = try file.preadAll(self.strtab.items, pos);
                 if (amt != obj_size) return error.InputOutput;
                 check.longnames = true;
                 continue;
             }
         }
 
+        if (hdr.isHybridMap() or hdr.isEcSymbols()) continue;
+
         const name = if (hdr.getName()) |name|
             name
         else if (try hdr.getNameOffset()) |off| self.getString(off) else unreachable;
 
-        var obj_hdr: [@sizeOf(coff.CoffHeader)]u8 = undefined;
-        const amt = try file.preadAll(&obj_hdr, pos);
+        var obj_hdr_buffer: [@sizeOf(coff.CoffHeader)]u8 = undefined;
+        amt = try file.preadAll(&obj_hdr_buffer, pos);
         if (amt != @sizeOf(coff.CoffHeader)) return error.InputOutput;
 
-        if (Object.isValidHeader(&obj_hdr)) {
+        if (Object.isValidHeader(&obj_hdr_buffer)) {
+            const obj_hdr = @as(*align(1) const coff.CoffHeader, @ptrCast(&obj_hdr_buffer));
+            const obj_cpu_arch = obj_hdr.machine.toTargetCpuArch() orelse {
+                log.debug("{s}: TODO unhandled machine type {}", .{ path, obj_hdr.machine });
+                continue;
+            };
+            if (obj_cpu_arch != cpu_arch) continue;
+
             const object = Object{
                 .archive = .{
                     .path = try gpa.dupe(u8, path),
@@ -115,7 +126,6 @@ pub fn parse(self: *Archive, path: []const u8, file_handle: File.HandleIndex, co
                 .index = undefined,
                 .alive = false,
             };
-            log.debug("{s}: extracting COFF object {s}", .{ path, name });
             try self.objects.append(gpa, object);
         } else {
             coff_file.base.fatal("{s}: unhandled object member at position {d}", .{
@@ -173,6 +183,33 @@ const Header = extern struct {
     fn isStrtab(hdr: *const Header) bool {
         return std.mem.eql(u8, &hdr.name, longnames_member);
     }
+
+    fn isHybridMap(hdr: *const Header) bool {
+        return std.mem.eql(u8, &hdr.name, hybridmap_member);
+    }
+
+    fn isEcSymbols(hdr: *const Header) bool {
+        return std.mem.eql(u8, &hdr.name, ecsymbols_member);
+    }
+
+    pub fn format(
+        hdr: *const Header,
+        comptime unused_fmt_string: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = options;
+        _ = unused_fmt_string;
+        try writer.print("Header {{ .name = {s}, .date = {s}, .user_id = {s}, .group_id = {s}, .mode = {s}, .size = {s}, .end = {s} }}", .{
+            std.fmt.fmtSliceEscapeLower(&hdr.name),
+            std.fmt.fmtSliceEscapeLower(&hdr.date),
+            std.fmt.fmtSliceEscapeLower(&hdr.user_id),
+            std.fmt.fmtSliceEscapeLower(&hdr.group_id),
+            std.fmt.fmtSliceEscapeLower(&hdr.mode),
+            std.fmt.fmtSliceEscapeLower(&hdr.size),
+            std.fmt.fmtSliceEscapeLower(&hdr.end),
+        });
+    }
 };
 
 pub const magic = "!<arch>\n";
@@ -181,6 +218,7 @@ const pad = "\n";
 const linker_member = genMemberName("/");
 const longnames_member = genMemberName("//");
 const hybridmap_member = genMemberName("/<HYBRIDMAP>/");
+const ecsymbols_member = genMemberName("/<ECSYMBOLS>/");
 
 const assert = std.debug.assert;
 const coff = std.coff;

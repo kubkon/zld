@@ -184,8 +184,7 @@ const ParseError = error{
     OutOfMemory,
     Overflow,
     InvalidCharacter,
-    EndOfStream,
-} || std.os.AccessError || std.fs.File.OpenError || std.os.SeekError || std.os.PReadError;
+} || std.os.AccessError || std.fs.File.OpenError || std.os.PReadError;
 
 fn parsePositional(
     self: *Coff,
@@ -215,10 +214,10 @@ fn parseObject(self: *Coff, obj: LinkObject, queue: anytype) ParseError!bool {
     const file = try std.fs.cwd().openFile(obj.path, .{});
     const fh = try self.addFileHandle(file);
 
-    const header = file.reader().readStruct(coff.CoffHeader) catch return false;
-    try file.seekTo(0);
-
-    if (!Object.isValidHeader(mem.asBytes(&header))) return false;
+    var header_buffer: [@sizeOf(coff.CoffHeader)]u8 = undefined;
+    const amt = file.preadAll(&header_buffer, 0) catch return false;
+    if (amt != @sizeOf(coff.CoffHeader)) return false;
+    if (!Object.isValidHeader(&header_buffer)) return false;
     // TODO validate CPU arch
 
     const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
@@ -263,9 +262,9 @@ fn parseArchive(self: *Coff, obj: LinkObject, queue: anytype) ParseError!bool {
     const file = try fs.cwd().openFile(obj.path, .{});
     const fh = try self.addFileHandle(file);
 
-    const magic = file.reader().readBytesNoEof(Archive.magic.len) catch return false;
-    try file.seekTo(0);
-
+    var magic: [Archive.magic.len]u8 = undefined;
+    const amt = file.preadAll(&magic, 0) catch return false;
+    if (amt != Archive.magic.len) return false;
     if (!Archive.isValidMagic(&magic)) return false;
 
     var archive = Archive{};
