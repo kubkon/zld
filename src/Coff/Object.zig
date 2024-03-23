@@ -72,7 +72,7 @@ pub fn parse(self: *Object, coff_file: *Coff) !void {
 }
 
 fn parseInputSectionHeaders(self: *Object, allocator: Allocator, file: std.fs.File, offset: u64) !void {
-    const num_sects = self.header.?.number_of_sections;
+    const num_sects: usize = self.header.?.number_of_sections;
     try self.sections.ensureUnusedCapacity(allocator, num_sects);
     const raw_sects_size = num_sects * @sizeOf(coff.SectionHeader);
     const buffer = try allocator.alloc(u8, raw_sects_size);
