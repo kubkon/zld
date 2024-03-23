@@ -112,7 +112,13 @@ fn parseInputSectionHeaders(self: *Object, allocator: Allocator, file: std.fs.Fi
             if (amt != raw_relocs_size) return error.InputOutput;
             var i: usize = 0;
             while (i < header.number_of_relocations) : (i += 1) {
-                const reloc = @as(*align(1) const coff.Relocation, @ptrCast(relocs_buffer.items.ptr + i * 10)).*;
+                const pos = i * relocation_entry_size;
+                const raw_reloc = relocs_buffer.items[pos..][0..relocation_entry_size];
+                const reloc = coff.Relocation{
+                    .virtual_address = mem.readInt(u32, raw_reloc[0..4], .little),
+                    .symbol_table_index = mem.readInt(u32, raw_reloc[4..8], .little),
+                    .type = mem.readInt(u16, raw_reloc[8..10], .little),
+                };
                 relocs.appendAssumeCapacity(reloc);
             }
         }
