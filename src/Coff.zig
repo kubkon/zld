@@ -111,8 +111,12 @@ pub fn flush(self: *Coff) !void {
         positionals.writeItemAssumeCapacity(obj);
     }
 
+    var visited = std.StringHashMap(void).init(gpa);
+    defer visited.deinit();
+
     while (positionals.readItem()) |obj| {
-        self.parsePositional(arena, obj, lib_paths.items, &positionals) catch |err| switch (err) {
+        self.parsePositional(arena, obj, lib_paths.items, &positionals, &visited) catch |err| switch (err) {
+            error.AlreadyVisited => continue,
             error.FileNotFound => has_file_not_found_error = true,
             error.ParseFailed => has_parse_error = true,
             else => |e| {
@@ -147,10 +151,19 @@ fn addLibPathsFromEnv(arena: Allocator, lib_paths: *std.ArrayList([]const u8)) !
     }
 }
 
-fn resolveFile(self: *Coff, arena: Allocator, obj: LinkObject, lib_dirs: []const []const u8) !LinkObject {
-    // TODO: cache visited files
+fn resolveFile(
+    self: *Coff,
+    arena: Allocator,
+    obj: LinkObject,
+    lib_dirs: []const []const u8,
+    visited: anytype,
+) !LinkObject {
     if (std.fs.path.isAbsolute(obj.name)) {
-        if (try accessPath(obj.name)) return .{ .name = obj.name, .path = obj.name, .tag = obj.tag };
+        if (visited.get(obj.name)) |_| return error.AlreadyVisited;
+        if (try accessPath(obj.name)) {
+            try visited.putNoClobber(obj.name, {});
+            return .{ .name = obj.name, .path = obj.name, .tag = obj.tag };
+        }
         self.base.fatal("file not found '{s}'", .{obj.name});
         return error.FileNotFound;
     }
@@ -160,8 +173,10 @@ fn resolveFile(self: *Coff, arena: Allocator, obj: LinkObject, lib_dirs: []const
 
     for (lib_dirs) |dir| {
         try buffer.writer().print("{s}" ++ std.fs.path.sep_str ++ "{s}", .{ dir, obj.name });
+        if (visited.get(buffer.items)) |_| return error.AlreadyVisited;
         if (try accessPath(buffer.items)) {
             const path = try arena.dupe(u8, buffer.items);
+            try visited.putNoClobber(path, {});
             return .{ .name = obj.name, .path = path, .tag = obj.tag };
         }
         buffer.clearRetainingCapacity();
@@ -179,6 +194,7 @@ fn accessPath(path: []const u8) !bool {
 }
 
 const ParseError = error{
+    AlreadyVisited,
     FileNotFound,
     ParseFailed,
     OutOfMemory,
@@ -192,10 +208,11 @@ fn parsePositional(
     obj: LinkObject,
     lib_paths: []const []const u8,
     queue: anytype,
+    visited: anytype,
 ) ParseError!void {
     log.debug("parsing positional {}", .{obj});
 
-    const resolved_obj = try self.resolveFile(arena, obj, lib_paths);
+    const resolved_obj = try self.resolveFile(arena, obj, lib_paths, visited);
 
     if (try self.parseObject(resolved_obj, queue)) return;
     if (try self.parseArchive(resolved_obj, queue)) return;
