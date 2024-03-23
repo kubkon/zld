@@ -105,7 +105,7 @@ pub fn ArgsParser(comptime Iterator: type) type {
                     if (mem.indexOf(u8, actual_arg, ":")) |index| {
                         if (index == pat.len) {
                             const value = actual_arg[index + 1 ..];
-                            return value;
+                            return mem.trim(u8, value, "\"");
                         }
                     }
                 }
