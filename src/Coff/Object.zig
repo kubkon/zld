@@ -357,6 +357,10 @@ fn addAtom(self: *Object, header: Coff.SectionHeader, section_number: u16, coff_
     self.atoms.items[section_number] = atom_index;
 }
 
+pub fn getDirectives(self: Object) []const u8 {
+    return mem.trim(u8, self.directives.items, " ");
+}
+
 pub fn getString(self: Object, off: u32) [:0]const u8 {
     assert(off < self.strtab.items.len);
     return mem.sliceTo(@as([*:0]const u8, @ptrCast(self.strtab.items.ptr + off)), 0);

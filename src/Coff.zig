@@ -246,20 +246,38 @@ fn parseObject(self: *Coff, obj: LinkObject, queue: anytype) ParseError!bool {
     const object = &self.files.items(.data)[index].object;
     try object.parse(self);
     try self.objects.append(gpa, index);
-    try self.parseDirectives(object, queue);
+    try parseLibsFromDirectives(object, queue);
 
     return true;
 }
 
-fn parseDirectives(self: *Coff, object: *const Object, queue: anytype) ParseError!void {
-    var has_parse_error = false;
-    var it = mem.splitScalar(u8, object.directives.items, ' ');
+fn parseLibsFromDirectives(object: *const Object, queue: anytype) error{OutOfMemory}!void {
+    var it = mem.splitScalar(u8, object.getDirectives(), ' ');
     var p = Options.ArgsParser(@TypeOf(it)){ .it = &it };
     while (p.hasMore()) {
         if (p.arg("defaultlib")) |name| {
             const dir_obj = LinkObject{ .name = name, .tag = .default_lib };
-            log.debug("{}: adding implicit include {}", .{ object.fmtPath(), dir_obj });
+            log.debug("{}: adding implicit import {}", .{ object.fmtPath(), dir_obj });
             try queue.writeItem(dir_obj);
+        } else if (p.arg("disallowlib")) |_| {
+            // TODO: gotta handle that somehow
+        } else if (p.arg("nodefaultlib")) |_| {
+            // TODO: gotta handle that somehow
+        } else {
+            // We ignore everything else
+        }
+    }
+}
+
+fn parseDirectives(self: *Coff, object: *const Object) ParseError!void {
+    var has_parse_error = false;
+    var it = mem.splitScalar(u8, object.getDirectives(), ' ');
+    var p = Options.ArgsParser(@TypeOf(it)){ .it = &it };
+    while (p.hasMore()) {
+        if (p.arg("defaultlib") != null or p.arg("disallowlib") != null or p.arg("nodefaultlib") != null) {
+            // We already handle those
+        } else if (p.flag("throwingnew") or p.arg("guardsym")) {
+            // These have nothing to do with linking so we ignore them.
         } else {
             self.base.fatal("{}: unhandled directive: {s}", .{
                 object.fmtPath(),
@@ -301,13 +319,7 @@ fn parseArchive(self: *Coff, obj: LinkObject, queue: anytype) ParseError!bool {
             },
             else => |e| return e,
         };
-        self.parseDirectives(object, queue) catch |err| switch (err) {
-            error.ParseFailed => {
-                has_parse_error = true;
-                continue;
-            },
-            else => |e| return e,
-        };
+        try parseLibsFromDirectives(object, queue);
         try self.objects.append(gpa, index);
     }
     if (has_parse_error) return error.ParseFailed;
