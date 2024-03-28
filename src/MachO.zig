@@ -304,7 +304,7 @@ pub fn flush(self: *MachO) !void {
             {
                 var ver_str: [100]u8 = undefined;
                 var size: usize = 100;
-                std.os.sysctlbynameZ("kern.osrelease", &ver_str, &size, null, 0) catch break :blk;
+                std.posix.sysctlbynameZ("kern.osrelease", &ver_str, &size, null, 0) catch break :blk;
                 const kern_ver = Options.Version.parse(ver_str[0 .. size - 1]) orelse break :blk;
                 // According to Apple, kernel major version is 4 ahead of x in 10.
                 const minor = @as(u8, @truncate((kern_ver.value >> 16) - 4));
