@@ -55,6 +55,7 @@ pub fn deinit(self: *Coff) void {
     for (self.files.items(.tags), self.files.items(.data)) |tag, *data| switch (tag) {
         .null => {},
         .object => data.object.deinit(gpa),
+        .dll => data.dll.deinit(gpa),
     };
     self.files.deinit(gpa);
     self.objects.deinit(gpa);

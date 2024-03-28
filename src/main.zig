@@ -111,6 +111,7 @@ pub fn main() !void {
     defer thread_pool.deinit();
 
     const zld = try Zld.openPath(gpa, tag, opts, &thread_pool);
+    defer zld.deinit();
     zld.flush() catch |err| switch (err) {
         error.InferCpuFailed,
         error.ParseFailed,
