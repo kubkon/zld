@@ -2,7 +2,7 @@ base: Zld,
 options: Options,
 
 objects: std.ArrayListUnmanaged(File.Index) = .{},
-dlls: std.ArrayListUnmanaged(File.Index) = .{},
+dlls: std.StringArrayHashMapUnmanaged(File.Index) = .{},
 files: std.MultiArrayList(File.Entry) = .{},
 file_handles: std.ArrayListUnmanaged(File.Handle) = .{},
 
@@ -334,8 +334,18 @@ fn parseArchive(self: *Coff, obj: LinkObject, queue: anytype) ParseError!bool {
             try parseLibsFromDirectives(object, queue);
         },
         .import => {
-            // TODO create DLL if we haven't already and add exports to it
-            log.debug("TODO: parse DLL from implib member {s}({s})", .{ obj.path, member.name });
+            const name = try gpa.dupe(u8, member.name);
+            const gop = try self.dlls.getOrPut(gpa, name);
+            defer if (gop.found_existing) gpa.free(name);
+            if (!gop.found_existing) {
+                const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
+                self.files.set(index, .{ .dll = .{
+                    .path = name,
+                    .index = index,
+                } });
+                gop.value_ptr.* = index;
+            }
+            // TODO add exports to the DLL
         },
     };
     if (has_parse_error) return error.ParseFailed;
@@ -419,7 +429,7 @@ fn fmtDumpState(
             object.fmtAtoms(self),
         });
     }
-    for (self.dlls.items) |index| {
+    for (self.dlls.values()) |index| {
         const dll = self.getFile(index).?.dll;
         try writer.print("dll({d}) : {s}", .{ index, dll.path });
         if (!dll.alive) try writer.writeAll(" : [*]");
