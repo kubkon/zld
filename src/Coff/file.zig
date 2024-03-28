@@ -1,5 +1,6 @@
 pub const File = union(enum) {
     object: *Object,
+    dll: *Dll,
 
     pub fn getIndex(file: File) Index {
         return switch (file) {
@@ -21,6 +22,7 @@ pub const File = union(enum) {
         _ = options;
         switch (file) {
             .object => |x| try writer.print("{}", .{x.fmtPath()}),
+            .dll => |x| try writer.writeAll(x.path),
         }
     }
 
@@ -29,6 +31,7 @@ pub const File = union(enum) {
     pub const Entry = union(enum) {
         null: void,
         object: Object,
+        dll: Dll,
     };
 
     pub const Handle = std.fs.File;
@@ -39,4 +42,5 @@ const std = @import("std");
 
 const Allocator = std.mem.Allocator;
 const Coff = @import("../Coff.zig");
+const Dll = @import("Dll.zig");
 const Object = @import("Object.zig");

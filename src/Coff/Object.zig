@@ -15,13 +15,6 @@ atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
 
 alive: bool = true,
 
-pub fn isValidHeader(buffer: *const [@sizeOf(coff.CoffHeader)]u8) bool {
-    const header = @as(*align(1) const coff.CoffHeader, @ptrCast(buffer)).*;
-    if (header.machine == .Unknown and header.number_of_sections == 0xffff) return false;
-    if (header.size_of_optional_header != 0) return false;
-    return true;
-}
-
 pub fn deinit(self: *Object, allocator: Allocator) void {
     if (self.archive) |*ar| allocator.free(ar.path);
     allocator.free(self.path);
@@ -384,7 +377,7 @@ pub fn format(
     _ = unused_fmt_string;
     _ = options;
     _ = writer;
-    @compileError("do not format objects directly");
+    @compileError("do not format Object directly");
 }
 
 const FormatContext = struct {

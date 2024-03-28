@@ -1,16 +1,8 @@
-objects: std.ArrayListUnmanaged(Object) = .{},
+members: std.ArrayListUnmanaged(Member) = .{},
 strtab: std.ArrayListUnmanaged(u8) = .{},
 
-pub fn isValidMagic(data: []const u8) bool {
-    if (!mem.eql(u8, data, magic)) {
-        log.debug("invalid archive magic: expected '{s}', found '{s}'", .{ magic, data });
-        return false;
-    }
-    return true;
-}
-
 pub fn deinit(self: *Archive, allocator: Allocator) void {
-    self.objects.deinit(allocator);
+    self.members.deinit(allocator);
     self.strtab.deinit(allocator);
 }
 
@@ -103,37 +95,30 @@ pub fn parse(self: *Archive, path: []const u8, file_handle: File.HandleIndex, co
         const name = if (hdr.getName()) |name|
             name
         else if (try hdr.getNameOffset()) |off| self.getString(off) else unreachable;
+        _ = name;
 
-        var obj_hdr_buffer: [@sizeOf(coff.CoffHeader)]u8 = undefined;
-        amt = try file.preadAll(&obj_hdr_buffer, pos);
+        var member_hdr_buffer: [@sizeOf(coff.CoffHeader)]u8 = undefined;
+        amt = try file.preadAll(&member_hdr_buffer, pos);
         if (amt != @sizeOf(coff.CoffHeader)) return error.InputOutput;
 
-        if (Object.isValidHeader(&obj_hdr_buffer)) {
-            const obj_hdr = @as(*align(1) const coff.CoffHeader, @ptrCast(&obj_hdr_buffer));
+        const tag: Member.Tag = if (Coff.isCoffObj(&member_hdr_buffer)) object: {
+            const obj_hdr = @as(*align(1) const coff.CoffHeader, @ptrCast(&member_hdr_buffer));
             const obj_cpu_arch = obj_hdr.machine.toTargetCpuArch() orelse {
                 log.debug("{s}: TODO unhandled machine type {}", .{ path, obj_hdr.machine });
                 continue;
             };
             if (obj_cpu_arch != cpu_arch) continue;
-
-            const object = Object{
-                .archive = .{
-                    .path = try gpa.dupe(u8, path),
-                    .offset = pos,
-                },
-                .path = try gpa.dupe(u8, name),
-                .file_handle = file_handle,
-                .index = undefined,
-                .alive = false,
-            };
-            try self.objects.append(gpa, object);
+            break :object .object;
+        } else if (Coff.isImportLib(&member_hdr_buffer)) import: {
+            break :import .import;
         } else {
             coff_file.base.fatal("{s}: unhandled object member at position {d}", .{
                 path,
                 member_count,
             });
             return error.ParseFailed;
-        }
+        };
+        try self.members.append(gpa, .{ .tag = tag, .offset = pos });
     }
 }
 
@@ -212,6 +197,13 @@ const Header = extern struct {
     }
 };
 
+const Member = struct {
+    tag: Tag,
+    offset: u64,
+
+    const Tag = enum { object, import };
+};
+
 pub const magic = "!<arch>\n";
 const end = "`\n";
 const pad = "\n";
@@ -229,5 +221,6 @@ const std = @import("std");
 const Allocator = mem.Allocator;
 const Archive = @This();
 const Coff = @import("../Coff.zig");
+const Dll = @import("Dll.zig");
 const File = @import("file.zig").File;
 const Object = @import("Object.zig");

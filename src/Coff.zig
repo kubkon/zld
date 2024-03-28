@@ -2,6 +2,7 @@ base: Zld,
 options: Options,
 
 objects: std.ArrayListUnmanaged(File.Index) = .{},
+dlls: std.ArrayListUnmanaged(File.Index) = .{},
 files: std.MultiArrayList(File.Entry) = .{},
 file_handles: std.ArrayListUnmanaged(File.Handle) = .{},
 
@@ -57,6 +58,7 @@ pub fn deinit(self: *Coff) void {
     };
     self.files.deinit(gpa);
     self.objects.deinit(gpa);
+    self.dlls.deinit(gpa);
 
     for (self.sections.items(.atoms)) |*list| {
         list.deinit(gpa);
@@ -234,7 +236,7 @@ fn parseObject(self: *Coff, obj: LinkObject, queue: anytype) ParseError!bool {
     var header_buffer: [@sizeOf(coff.CoffHeader)]u8 = undefined;
     const amt = file.preadAll(&header_buffer, 0) catch return false;
     if (amt != @sizeOf(coff.CoffHeader)) return false;
-    if (!Object.isValidHeader(&header_buffer)) return false;
+    if (!isCoffObj(&header_buffer)) return false;
     // TODO validate CPU arch
 
     const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
@@ -300,30 +302,63 @@ fn parseArchive(self: *Coff, obj: LinkObject, queue: anytype) ParseError!bool {
     var magic: [Archive.magic.len]u8 = undefined;
     const amt = file.preadAll(&magic, 0) catch return false;
     if (amt != Archive.magic.len) return false;
-    if (!Archive.isValidMagic(&magic)) return false;
+    if (!isArchive(&magic)) return false;
 
     var archive = Archive{};
     defer archive.deinit(gpa);
     try archive.parse(obj.path, fh, self);
 
-    var has_parse_error = false;
-    for (archive.objects.items) |extracted| {
-        const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
-        self.files.set(index, .{ .object = extracted });
-        const object = &self.files.items(.data)[index].object;
-        object.index = index;
-        object.parse(self) catch |err| switch (err) {
-            error.ParseFailed => {
-                has_parse_error = true;
-                continue;
-            },
-            else => |e| return e,
-        };
-        try parseLibsFromDirectives(object, queue);
-        try self.objects.append(gpa, index);
-    }
+    const has_parse_error = false;
+    _ = queue;
+
+    for (archive.members.items) |member| switch (member.tag) {
+        .object => {},
+        .import => {},
+    };
+    // for (archive.objects.items) |extracted| {
+    //     const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
+    //     self.files.set(index, .{ .object = extracted });
+    //     const object = &self.files.items(.data)[index].object;
+    //     object.index = index;
+    //     object.parse(self) catch |err| switch (err) {
+    //         error.ParseFailed => {
+    //             has_parse_error = true;
+    //             continue;
+    //         },
+    //         else => |e| return e,
+    //     };
+    //     try parseLibsFromDirectives(object, queue);
+    //     try self.objects.append(gpa, index);
+    // }
+    // for (archive.dlls.items) |extracted| {
+    //     const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
+    //     self.files.set(index, .{ .dll = extracted });
+    //     const dll = &self.files.items(.data)[index].dll;
+    //     dll.index = index;
+    //     try self.dlls.append(gpa, index);
+    // }
     if (has_parse_error) return error.ParseFailed;
 
+    return true;
+}
+
+pub fn isCoffObj(buffer: *const [@sizeOf(coff.CoffHeader)]u8) bool {
+    const header = @as(*align(1) const coff.CoffHeader, @ptrCast(buffer)).*;
+    if (header.machine == .Unknown and header.number_of_sections == 0xffff) return false;
+    if (header.size_of_optional_header != 0) return false;
+    return true;
+}
+
+pub fn isImportLib(buffer: *const [@sizeOf(coff.ImportHeader)]u8) bool {
+    const header = @as(*align(1) const coff.ImportHeader, @ptrCast(buffer)).*;
+    return header.sig1 == .Unknown and header.sig2 == 0xffff;
+}
+
+pub fn isArchive(data: *const [Archive.magic.len]u8) bool {
+    if (!mem.eql(u8, data, Archive.magic)) {
+        log.debug("invalid archive magic: expected '{s}', found '{s}'", .{ Archive.magic, data });
+        return false;
+    }
     return true;
 }
 
@@ -332,6 +367,7 @@ pub fn getFile(self: *Coff, index: File.Index) ?File {
     return switch (tag) {
         .null => null,
         .object => .{ .object = &self.files.items(.data)[index].object },
+        .dll => .{ .dll = &self.files.items(.data)[index].dll },
     };
 }
 
@@ -381,6 +417,12 @@ fn fmtDumpState(
         try writer.print("{}\n", .{
             object.fmtAtoms(self),
         });
+    }
+    for (self.dlls.items) |index| {
+        const dll = self.getFile(index).?.dll;
+        try writer.print("dll({d}) : {s}", .{ index, dll.path });
+        if (!dll.alive) try writer.writeAll(" : [*]");
+        try writer.writeByte('\n');
     }
 }
 
