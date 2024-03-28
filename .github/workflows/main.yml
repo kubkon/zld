@@ -9,13 +9,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # https://github.com/kubkon/zld/issues/44
-        # os: [macos, ubuntu, windows]
         os: [ macos-12, macos-13, macos-14, ubuntu-latest ]
 
     steps:
-    - if: matrix.os == 'windows'
-      run: git config --global core.autocrlf false
     - uses: actions/checkout@v3
     - uses: goto-bus-stop/setup-zig@v2
       with:
@@ -23,6 +19,19 @@ jobs:
     - run: zig version
     - run: zig fmt --check src 
     - run: zig build test -Dhas-static -Dhas-zig -Dhas-objc-msgsend-stubs
+
+  windows:
+    name: Test Windows
+    runs-on: windows-latest
+    steps:
+    - run: git config --global core.autocrlf false
+    - uses: actions/checkout@v3
+    - uses: goto-bus-stop/setup-zig@v2
+      with:
+        version: master
+    - run: zig version
+    - run: zig fmt --check src 
+    - run: zig build install # temp until we can run some tests
 
   macos_11:
     name: Test macos 11.0
