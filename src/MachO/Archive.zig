@@ -65,6 +65,9 @@ pub fn deinit(self: *Archive, allocator: Allocator) void {
 pub fn parse(self: *Archive, macho_file: *MachO, path: []const u8, file_handle: File.HandleIndex, fat_arch: ?fat.Arch) !void {
     const gpa = macho_file.base.allocator;
 
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+
     const file = macho_file.getFileHandle(file_handle);
     const offset = if (fat_arch) |ar| ar.offset else 0;
     const size = if (fat_arch) |ar| ar.size else (try file.stat()).size;
@@ -93,10 +96,10 @@ pub fn parse(self: *Archive, macho_file: *MachO, path: []const u8, file_handle: 
 
         var hdr_size = try hdr.size();
         const name = name: {
-            if (hdr.name()) |n| break :name try gpa.dupe(u8, n);
+            if (hdr.name()) |n| break :name n;
             if (try hdr.nameLength()) |len| {
                 hdr_size -= len;
-                const buf = try gpa.alloc(u8, len);
+                const buf = try arena.allocator().alloc(u8, len);
                 try reader.readNoEof(buf);
                 pos += len;
                 const actual_len = mem.indexOfScalar(u8, buf, @as(u8, 0)) orelse len;
@@ -116,7 +119,7 @@ pub fn parse(self: *Archive, macho_file: *MachO, path: []const u8, file_handle: 
                 .path = try gpa.dupe(u8, path),
                 .offset = offset + pos,
             },
-            .path = name,
+            .path = try gpa.dupe(u8, name),
             .file_handle = file_handle,
             .index = undefined,
             .alive = false,
