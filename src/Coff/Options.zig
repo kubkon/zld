@@ -85,7 +85,7 @@ pub fn ArgsParser(comptime Iterator: type) type {
         fn flagPrefix(p: *Self, comptime pat: []const u8, comptime prefix: []const u8) bool {
             if (mem.startsWith(u8, p.next_arg, prefix)) {
                 const actual_arg = p.next_arg[prefix.len..];
-                if (mem.eql(u8, actual_arg, pat) or mem.eql(u8, actual_arg, upperPattern(pat))) {
+                if (mem.eql(u8, actual_arg, pat) or mem.eql(u8, actual_arg, &upperPattern(pat))) {
                     return true;
                 }
             }
@@ -100,7 +100,7 @@ pub fn ArgsParser(comptime Iterator: type) type {
             if (mem.startsWith(u8, p.next_arg, prefix)) {
                 const actual_arg = p.next_arg[prefix.len..];
                 if (mem.startsWith(u8, actual_arg, pat) or
-                    mem.startsWith(u8, actual_arg, upperPattern(pat)))
+                    mem.startsWith(u8, actual_arg, &upperPattern(pat)))
                 {
                     if (mem.indexOf(u8, actual_arg, ":")) |index| {
                         if (index == pat.len) {
@@ -113,9 +113,12 @@ pub fn ArgsParser(comptime Iterator: type) type {
             return null;
         }
 
-        fn upperPattern(comptime pat: []const u8) []const u8 {
+        fn upperPattern(comptime pat: []const u8) [pat.len]u8 {
             comptime var buffer: [pat.len]u8 = undefined;
-            return comptime std.ascii.upperString(&buffer, pat);
+            inline for (&buffer, pat) |*out, c| {
+                out.* = comptime std.ascii.toUpper(c);
+            }
+            return buffer;
         }
 
         const Self = @This();

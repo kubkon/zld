@@ -209,7 +209,7 @@ pub fn parseObject(archive: Archive, allocator: Allocator, file_offset: u32) !Ob
     const object_name = try archive.parseName(header);
     const name = name: {
         var buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
-        const path = try std.os.realpath(archive.name, &buffer);
+        const path = try std.posix.realpath(archive.name, &buffer);
         break :name try std.fmt.allocPrint(allocator, "{s}({s})", .{ path, object_name });
     };
     defer allocator.free(name);

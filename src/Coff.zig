@@ -202,7 +202,7 @@ const ParseError = error{
     OutOfMemory,
     Overflow,
     InvalidCharacter,
-} || std.os.AccessError || std.fs.File.OpenError || std.os.PReadError;
+} || std.fs.Dir.AccessError || std.fs.File.OpenError || std.fs.File.PReadError;
 
 fn parsePositional(
     self: *Coff,
@@ -300,7 +300,7 @@ fn parseArchive(self: *Coff, obj: LinkObject, queue: anytype) ParseError!bool {
     const fh = try self.addFileHandle(file);
 
     var magic: [Archive.magic.len]u8 = undefined;
-    const amt = file.preadAll(&magic, 0) catch return false;
+    var amt = file.preadAll(&magic, 0) catch return false;
     if (amt != Archive.magic.len) return false;
     if (!isArchive(&magic)) return false;
 
@@ -334,7 +334,17 @@ fn parseArchive(self: *Coff, obj: LinkObject, queue: anytype) ParseError!bool {
             try parseLibsFromDirectives(object, queue);
         },
         .import => {
-            const name = try gpa.dupe(u8, member.name);
+            var import_hdr_buffer: [@sizeOf(coff.ImportHeader)]u8 = undefined;
+            amt = try file.preadAll(&import_hdr_buffer, member.offset);
+            if (amt != @sizeOf(coff.ImportHeader)) return error.InputOutput;
+            const import_hdr = @as(*align(1) const coff.ImportHeader, @ptrCast(&import_hdr_buffer));
+
+            const strings = try gpa.alloc(u8, import_hdr.size_of_data);
+            defer gpa.free(strings);
+            const import_name = mem.sliceTo(@as([*:0]const u8, @ptrCast(strings.ptr)), 0);
+            const dll_name = mem.sliceTo(@as([*:0]const u8, @ptrCast(strings.ptr + import_name.len + 1)), 0);
+
+            const name = try gpa.dupe(u8, dll_name);
             const gop = try self.dlls.getOrPut(gpa, name);
             defer if (gop.found_existing) gpa.free(name);
             if (!gop.found_existing) {
@@ -345,7 +355,20 @@ fn parseArchive(self: *Coff, obj: LinkObject, queue: anytype) ParseError!bool {
                 } });
                 gop.value_ptr.* = index;
             }
-            // TODO add exports to the DLL
+
+            const dll = &self.files.items(.data)[gop.value_ptr.*].dll;
+            dll.addExport(self, .{
+                .name = import_name,
+                .type = import_hdr.types.type,
+                .name_type = import_hdr.types.name_type,
+                .hint = import_hdr.hint,
+            }) catch |err| switch (err) {
+                error.ParseFailed => {
+                    has_parse_error = true;
+                    continue;
+                },
+                else => |e| return e,
+            };
         },
     };
     if (has_parse_error) return error.ParseFailed;
