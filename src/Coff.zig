@@ -212,9 +212,9 @@ fn parsePositional(
     queue: anytype,
     visited: anytype,
 ) ParseError!void {
-    log.debug("parsing positional {}", .{obj});
-
     const resolved_obj = try self.resolveFile(arena, obj, lib_paths, visited);
+
+    log.debug("parsing positional {}", .{resolved_obj});
 
     if (try self.parseObject(resolved_obj, queue)) return;
     if (try self.parseArchive(resolved_obj, queue)) return;
@@ -308,35 +308,36 @@ fn parseArchive(self: *Coff, obj: LinkObject, queue: anytype) ParseError!bool {
     defer archive.deinit(gpa);
     try archive.parse(obj.path, fh, self);
 
-    const has_parse_error = false;
-    _ = queue;
-
+    var has_parse_error = false;
     for (archive.members.items) |member| switch (member.tag) {
-        .object => {},
-        .import => {},
+        .object => {
+            const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
+            self.files.set(index, .{ .object = .{
+                .archive = .{
+                    .path = try gpa.dupe(u8, obj.path),
+                    .offset = member.offset,
+                },
+                .path = try gpa.dupe(u8, member.name),
+                .file_handle = fh,
+                .index = index,
+                .alive = false,
+            } });
+            const object = &self.files.items(.data)[index].object;
+            object.parse(self) catch |err| switch (err) {
+                error.ParseFailed => {
+                    has_parse_error = true;
+                    continue;
+                },
+                else => |e| return e,
+            };
+            try self.objects.append(gpa, index);
+            try parseLibsFromDirectives(object, queue);
+        },
+        .import => {
+            // TODO create DLL if we haven't already and add exports to it
+            log.debug("TODO: parse DLL from implib member {s}({s})", .{ obj.path, member.name });
+        },
     };
-    // for (archive.objects.items) |extracted| {
-    //     const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
-    //     self.files.set(index, .{ .object = extracted });
-    //     const object = &self.files.items(.data)[index].object;
-    //     object.index = index;
-    //     object.parse(self) catch |err| switch (err) {
-    //         error.ParseFailed => {
-    //             has_parse_error = true;
-    //             continue;
-    //         },
-    //         else => |e| return e,
-    //     };
-    //     try parseLibsFromDirectives(object, queue);
-    //     try self.objects.append(gpa, index);
-    // }
-    // for (archive.dlls.items) |extracted| {
-    //     const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
-    //     self.files.set(index, .{ .dll = extracted });
-    //     const dll = &self.files.items(.data)[index].dll;
-    //     dll.index = index;
-    //     try self.dlls.append(gpa, index);
-    // }
     if (has_parse_error) return error.ParseFailed;
 
     return true;

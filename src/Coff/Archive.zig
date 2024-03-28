@@ -2,6 +2,9 @@ members: std.ArrayListUnmanaged(Member) = .{},
 strtab: std.ArrayListUnmanaged(u8) = .{},
 
 pub fn deinit(self: *Archive, allocator: Allocator) void {
+    for (self.members.items) |member| {
+        allocator.free(member.name);
+    }
     self.members.deinit(allocator);
     self.strtab.deinit(allocator);
 }
@@ -95,7 +98,6 @@ pub fn parse(self: *Archive, path: []const u8, file_handle: File.HandleIndex, co
         const name = if (hdr.getName()) |name|
             name
         else if (try hdr.getNameOffset()) |off| self.getString(off) else unreachable;
-        _ = name;
 
         var member_hdr_buffer: [@sizeOf(coff.CoffHeader)]u8 = undefined;
         amt = try file.preadAll(&member_hdr_buffer, pos);
@@ -118,7 +120,7 @@ pub fn parse(self: *Archive, path: []const u8, file_handle: File.HandleIndex, co
             });
             return error.ParseFailed;
         };
-        try self.members.append(gpa, .{ .tag = tag, .offset = pos });
+        try self.members.append(gpa, .{ .tag = tag, .offset = pos, .name = try gpa.dupe(u8, name) });
     }
 }
 
@@ -200,6 +202,7 @@ const Header = extern struct {
 const Member = struct {
     tag: Tag,
     offset: u64,
+    name: []const u8,
 
     const Tag = enum { object, import };
 };
