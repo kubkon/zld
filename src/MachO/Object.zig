@@ -2172,6 +2172,5 @@ const LoadCommandIterator = macho.LoadCommandIterator;
 const MachO = @import("../MachO.zig");
 const Object = @This();
 const Relocation = @import("Relocation.zig");
-const StringTable = @import("../strtab.zig").StringTable;
 const Symbol = @import("Symbol.zig");
 const UnwindInfo = @import("UnwindInfo.zig");

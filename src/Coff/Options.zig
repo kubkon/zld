@@ -1,75 +1,153 @@
-const Options = @This();
+emit: Zld.Emit,
+cpu_arch: ?std.Target.Cpu.Arch = null,
+positionals: []const Coff.LinkObject,
+lib_paths: []const []const u8,
 
-const std = @import("std");
-const builtin = @import("builtin");
-const io = std.io;
-const mem = std.mem;
-const process = std.process;
+pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options {
+    if (args.len == 0) ctx.fatal(usage, .{cmd});
 
-const Allocator = mem.Allocator;
-const CrossTarget = std.zig.CrossTarget;
-const Coff = @import("../Coff.zig");
-const Zld = @import("../Zld.zig");
+    var positionals = std.ArrayList(Coff.LinkObject).init(arena);
+    var lib_paths = std.StringArrayHashMap(void).init(arena);
+    var opts: Options = .{
+        .emit = .{
+            .directory = std.fs.cwd(),
+            .sub_path = "a.exe",
+        },
+        .positionals = undefined,
+        .lib_paths = undefined,
+    };
+    var verbose = false;
+
+    var it = Zld.Options.ArgsIterator{ .args = args };
+    var p = ArgsParser(@TypeOf(it)){ .it = &it };
+    while (p.hasMore()) {
+        if (p.flag("help")) {
+            ctx.fatal(usage ++ "\n", .{cmd});
+        } else if (p.arg("debug-log")) |scope| {
+            try ctx.log_scopes.append(scope);
+        } else if (p.arg("defaultlib")) |name| {
+            try positionals.append(.{ .name = name, .tag = .default_lib });
+        } else if (p.arg("out")) |path| {
+            opts.emit.sub_path = path;
+        } else if (p.flag("v")) {
+            verbose = true;
+        } else if (p.flag("nologo")) {
+            // Ignore...
+        } else if (p.arg("machine")) |target| {
+            if (mem.eql(u8, target, "x64")) {
+                opts.cpu_arch = .x86_64;
+            } else if (mem.eql(u8, target, "arm64")) {
+                opts.cpu_arch = .aarch64;
+            } else {
+                ctx.fatal("unsupported machine value: {s}\n", .{target});
+            }
+        } else if (p.arg("libpath")) |path| {
+            try lib_paths.put(path, {});
+        } else {
+            try positionals.append(.{ .name = p.next_arg, .tag = .explicit });
+        }
+    }
+
+    if (verbose) {
+        ctx.print("{s} ", .{cmd});
+        for (args[0 .. args.len - 1]) |arg| {
+            ctx.print("{s} ", .{arg});
+        }
+        ctx.print("{s}\n", .{args[args.len - 1]});
+    }
+    if (positionals.items.len == 0) ctx.fatal("Expected at least one positional argument\n", .{});
+
+    opts.positionals = positionals.items;
+    opts.lib_paths = lib_paths.keys();
+
+    return opts;
+}
+
+pub fn ArgsParser(comptime Iterator: type) type {
+    return struct {
+        next_arg: []const u8 = undefined,
+        it: *Iterator,
+
+        pub fn hasMore(p: *Self) bool {
+            var next_arg = p.it.next() orelse return false;
+            while (true) {
+                if (next_arg.len != 0) break;
+                next_arg = p.it.next() orelse return false;
+            }
+            p.next_arg = next_arg;
+            return true;
+        }
+
+        pub fn flag(p: *Self, comptime pat: []const u8) bool {
+            return p.flagPrefix(pat, "-") or p.flagPrefix(pat, "/");
+        }
+
+        fn flagPrefix(p: *Self, comptime pat: []const u8, comptime prefix: []const u8) bool {
+            if (mem.startsWith(u8, p.next_arg, prefix)) {
+                const actual_arg = p.next_arg[prefix.len..];
+                if (mem.eql(u8, actual_arg, pat) or mem.eql(u8, actual_arg, &upperPattern(pat))) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        pub fn arg(p: *Self, comptime pat: []const u8) ?[]const u8 {
+            return p.argPrefix(pat, "-") orelse p.argPrefix(pat, "/");
+        }
+
+        fn argPrefix(p: *Self, comptime pat: []const u8, comptime prefix: []const u8) ?[]const u8 {
+            if (mem.startsWith(u8, p.next_arg, prefix)) {
+                const actual_arg = p.next_arg[prefix.len..];
+                if (mem.startsWith(u8, actual_arg, pat) or
+                    mem.startsWith(u8, actual_arg, &upperPattern(pat)))
+                {
+                    if (mem.indexOf(u8, actual_arg, ":")) |index| {
+                        if (index == pat.len) {
+                            const value = actual_arg[index + 1 ..];
+                            return mem.trim(u8, value, "\"");
+                        }
+                    }
+                }
+            }
+            return null;
+        }
+
+        fn upperPattern(comptime pat: []const u8) [pat.len]u8 {
+            comptime var buffer: [pat.len]u8 = undefined;
+            inline for (&buffer, pat) |*out, c| {
+                out.* = comptime std.ascii.toUpper(c);
+            }
+            return buffer;
+        }
+
+        const Self = @This();
+    };
+}
 
 const usage =
     \\Usage: {s} [files...]
     \\
     \\General Options:
-    \\-l[name]                      Specify library to link against
-    \\-L[path]                      Specify library search dir
-    \\-o [path]                     Specify output path for the final artifact
-    \\-h, --help                    Print this help and exit
-    \\--debug-log [scope]           Turn on debugging logs for [scope] (requires zld compiled with -Dlog)
+    \\-debug-log:scope              Turn on debugging logs for 'scope' (requires zld compiled with -Dlog)
+    \\-defaultlib:name              Link a default library
+    \\-help                         Print this help and exit
+    \\-libpath:path                 Add additional library search path
+    \\-nologo                       No comment...
+    \\-out:path                     Specify output path fo the final artifact
+    \\-v                            Print full linker invocation to stderr
 ;
 
-emit: Zld.Emit,
-output_mode: Zld.OutputMode,
-target: CrossTarget,
-positionals: []const Zld.LinkObject,
-libs: std.StringArrayHashMap(Zld.SystemLib),
-lib_dirs: []const []const u8,
+const cmd = "link-zld.exe";
 
-const cmd = "link.zld";
+const builtin = @import("builtin");
+const io = std.io;
+const mem = std.mem;
+const process = std.process;
+const std = @import("std");
 
-pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options {
-    if (args.len == 0) ctx.fatal(usage, .{cmd});
-
-    var positionals = std.ArrayList(Zld.LinkObject).init(arena);
-    var libs = std.StringArrayHashMap(Zld.SystemLib).init(arena);
-    var lib_dirs = std.ArrayList([]const u8).init(arena);
-    var out_path: ?[]const u8 = null;
-
-    var it = Zld.Options.ArgsIterator{ .args = args };
-    while (it.next()) |arg| {
-        if (mem.eql(u8, arg, "--help") or mem.eql(u8, arg, "-h")) {
-            ctx.fatal(usage, .{cmd});
-        } else if (mem.eql(u8, arg, "--debug-log")) {
-            try ctx.log_scopes.append(it.nextOrFatal(ctx));
-        } else if (mem.startsWith(u8, arg, "-l")) {
-            try libs.put(arg[2..], .{});
-        } else if (mem.startsWith(u8, arg, "-L")) {
-            try lib_dirs.append(arg[2..]);
-        } else if (mem.eql(u8, arg, "-o")) {
-            out_path = it.nextOrFatal(ctx);
-        } else {
-            try positionals.append(.{
-                .path = arg,
-                .must_link = true,
-            });
-        }
-    }
-
-    if (positionals.items.len == 0) ctx.fatal("Expected at least one input .o file", .{});
-
-    return Options{
-        .emit = .{
-            .directory = std.fs.cwd(),
-            .sub_path = out_path orelse "a.out",
-        },
-        .target = CrossTarget.fromTarget(builtin.target),
-        .output_mode = .exe,
-        .positionals = positionals.items,
-        .libs = libs,
-        .lib_dirs = lib_dirs.items,
-    };
-}
+const Allocator = mem.Allocator;
+const CrossTarget = std.zig.CrossTarget;
+const Coff = @import("../Coff.zig");
+const Options = @This();
+const Zld = @import("../Zld.zig");

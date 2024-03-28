@@ -62,13 +62,13 @@ globals: std.AutoHashMapUnmanaged(u32, Symbol.Index) = .{},
 /// Key is symbol index.
 undefs: std.AutoHashMapUnmanaged(Symbol.Index, std.ArrayListUnmanaged(Atom.Index)) = .{},
 
-string_intern: StringTable(.string_intern) = .{},
+string_intern: StringTable = .{},
 
-shstrtab: StringTable(.shstrtab) = .{},
+shstrtab: StringTable = .{},
 symtab: std.ArrayListUnmanaged(elf.Elf64_Sym) = .{},
 strtab: std.ArrayListUnmanaged(u8) = .{},
 dynsym: DynsymSection = .{},
-dynstrtab: StringTable(.dynstrtab) = .{},
+dynstrtab: StringTable = .{},
 versym: std.ArrayListUnmanaged(elf.Elf64_Versym) = .{},
 verneed: VerneedSection = .{},
 
@@ -3036,7 +3036,7 @@ pub const Options = @import("Elf/Options.zig");
 const PltSection = synthetic.PltSection;
 const PltGotSection = synthetic.PltGotSection;
 const SharedObject = @import("Elf/SharedObject.zig");
-const StringTable = @import("strtab.zig").StringTable;
+const StringTable = @import("StringTable.zig");
 const Symbol = @import("Elf/Symbol.zig");
 const ThreadPool = std.Thread.Pool;
 const Thunk = @import("Elf/thunks.zig").Thunk;

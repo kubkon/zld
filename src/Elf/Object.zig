@@ -5,7 +5,7 @@ index: File.Index,
 
 header: ?elf.Elf64_Ehdr = null,
 shdrs: std.ArrayListUnmanaged(elf.Elf64_Shdr) = .{},
-shstrtab: StringTable(.object_shstrtab) = .{},
+shstrtab: StringTable = .{},
 symtab: std.ArrayListUnmanaged(elf.Elf64_Sym) = .{},
 strtab: std.ArrayListUnmanaged(u8) = .{},
 first_global: ?Symbol.Index = null,
@@ -948,6 +948,6 @@ const Cie = eh_frame.Cie;
 const Elf = @import("../Elf.zig");
 const Fde = eh_frame.Fde;
 const File = @import("file.zig").File;
-const StringTable = @import("../strtab.zig").StringTable;
+const StringTable = @import("../StringTable.zig");
 const Symbol = @import("Symbol.zig");
 const Zld = @import("../Zld.zig");

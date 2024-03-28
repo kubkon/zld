@@ -52,7 +52,7 @@ objc_msg_send_index: ?Symbol.Index = null,
 
 entry_index: ?Symbol.Index = null,
 
-string_intern: StringTable(.string_intern) = .{},
+string_intern: StringTable = .{},
 
 symtab: std.ArrayListUnmanaged(macho.nlist_64) = .{},
 strtab: std.ArrayListUnmanaged(u8) = .{},
@@ -304,7 +304,7 @@ pub fn flush(self: *MachO) !void {
             {
                 var ver_str: [100]u8 = undefined;
                 var size: usize = 100;
-                std.os.sysctlbynameZ("kern.osrelease", &ver_str, &size, null, 0) catch break :blk;
+                std.posix.sysctlbynameZ("kern.osrelease", &ver_str, &size, null, 0) catch break :blk;
                 const kern_ver = Options.Version.parse(ver_str[0 .. size - 1]) orelse break :blk;
                 // According to Apple, kernel major version is 4 ahead of x in 10.
                 const minor = @as(u8, @truncate((kern_ver.value >> 16) - 4));
@@ -989,7 +989,7 @@ fn parseDependentDylibs(
                     }
                     try umbrella.rpaths.ensureUnusedCapacity(gpa, dep_dylib.rpaths.keys().len);
                     for (dep_dylib.rpaths.keys()) |rpath| {
-                        umbrella.rpaths.putAssumeCapacity(rpath, {});
+                        umbrella.rpaths.putAssumeCapacity(try gpa.dupe(u8, rpath), {});
                     }
                 }
             } else self.base.fatal("{s}: unable to resolve dependency {s}", .{ dylib.getUmbrella(self).path, id.name });
@@ -3168,7 +3168,7 @@ const LaSymbolPtrSection = synthetic.LaSymbolPtrSection;
 const LibStub = @import("tapi.zig").LibStub;
 const RebaseSection = synthetic.RebaseSection;
 const Symbol = @import("MachO/Symbol.zig");
-const StringTable = @import("strtab.zig").StringTable;
+const StringTable = @import("StringTable.zig");
 const StubsSection = synthetic.StubsSection;
 const StubsHelperSection = synthetic.StubsHelperSection;
 const Thunk = thunks.Thunk;

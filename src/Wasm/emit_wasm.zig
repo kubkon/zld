@@ -320,7 +320,7 @@ pub fn emit(wasm: *Wasm) !void {
     }
 
     // finally, write the entire binary into the file.
-    var iovec = [_]std.os.iovec_const{.{
+    var iovec = [_]std.posix.iovec_const{.{
         .iov_base = binary_bytes.items.ptr,
         .iov_len = binary_bytes.items.len,
     }};

@@ -17,22 +17,6 @@ pub const Emit = struct {
     sub_path: []const u8,
 };
 
-pub const OutputMode = enum {
-    exe,
-    lib,
-};
-
-pub const SystemLib = struct {
-    needed: bool = true,
-    weak: bool = false,
-    static: bool = false,
-};
-
-pub const LinkObject = struct {
-    path: []const u8,
-    must_link: bool = false,
-};
-
 pub const Options = union {
     elf: Elf.Options,
     macho: MachO.Options,

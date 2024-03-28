@@ -1,25 +1,16 @@
-const Coff = @This();
-
-const std = @import("std");
-const builtin = @import("builtin");
-const assert = std.debug.assert;
-const coff = std.coff;
-const fs = std.fs;
-const log = std.log.scoped(.coff);
-const mem = std.mem;
-
-const Allocator = mem.Allocator;
-const Object = @import("Coff/Object.zig");
-pub const Options = @import("Coff/Options.zig");
-const ThreadPool = std.Thread.Pool;
-const Zld = @import("Zld.zig");
-
-pub const base_tag = Zld.Tag.coff;
-
 base: Zld,
 options: Options,
 
-objects: std.ArrayListUnmanaged(Object) = .{},
+objects: std.ArrayListUnmanaged(File.Index) = .{},
+dlls: std.StringArrayHashMapUnmanaged(File.Index) = .{},
+files: std.MultiArrayList(File.Entry) = .{},
+file_handles: std.ArrayListUnmanaged(File.Handle) = .{},
+
+sections: std.MultiArrayList(Section) = .{},
+
+string_intern: StringTable = .{},
+
+atoms: std.ArrayListUnmanaged(Atom) = .{},
 
 pub fn openPath(allocator: Allocator, options: Options, thread_pool: *ThreadPool) !*Coff {
     const file = try options.emit.directory.createFile(options.emit.sub_path, .{
@@ -54,67 +45,494 @@ fn createEmpty(gpa: Allocator, options: Options, thread_pool: *ThreadPool) !*Cof
 }
 
 pub fn deinit(self: *Coff) void {
-    for (self.objects.items) |*object| {
-        object.deinit(self.base.allocator);
-    }
+    const gpa = self.base.allocator;
 
-    self.objects.deinit(self.base.allocator);
+    for (self.file_handles.items) |file| {
+        file.close();
+    }
+    self.file_handles.deinit(gpa);
+
+    for (self.files.items(.tags), self.files.items(.data)) |tag, *data| switch (tag) {
+        .null => {},
+        .object => data.object.deinit(gpa),
+        .dll => data.dll.deinit(gpa),
+    };
+    self.files.deinit(gpa);
+    self.objects.deinit(gpa);
+    self.dlls.deinit(gpa);
+
+    for (self.sections.items(.atoms)) |*list| {
+        list.deinit(gpa);
+    }
+    self.sections.deinit(gpa);
+    self.atoms.deinit(gpa);
 }
 
 pub fn flush(self: *Coff) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const gpa = self.base.allocator;
 
-    var positionals = std.ArrayList([]const u8).init(gpa);
+    // Atom at index 0 is reserved as null atom
+    try self.atoms.append(gpa, .{});
+    // Append empty string to string tables
+    try self.string_intern.buffer.append(gpa, 0);
+    // Append null file.
+    try self.files.append(gpa, .null);
+
+    var arena_allocator = std.heap.ArenaAllocator.init(gpa);
+    defer arena_allocator.deinit();
+    const arena = arena_allocator.allocator();
+
+    // Set up library search paths
+    var lib_paths = std.ArrayList([]const u8).init(arena);
+    try lib_paths.ensureUnusedCapacity(self.options.lib_paths.len + 1);
+    lib_paths.appendAssumeCapacity(".");
+    lib_paths.appendSliceAssumeCapacity(self.options.lib_paths);
+    // TODO: do not parse LIB env var if mingw
+    // TODO: detect WinSDK
+    try addLibPathsFromEnv(arena, &lib_paths);
+
+    if (build_options.enable_logging) {
+        log.debug("library search paths:", .{});
+        for (lib_paths.items) |path| {
+            log.debug("  {s}", .{path});
+        }
+    }
+
+    // TODO infer CPU arch and perhaps subsystem and whatnot?
+
+    // Parse positionals and any additional file that might have been requested
+    // by any of the already parsed positionals via the linker directives section.
+    var has_file_not_found_error = false;
+    var has_parse_error = false;
+    var positionals = std.fifo.LinearFifo(LinkObject, .Dynamic).init(gpa);
     defer positionals.deinit();
-    try positionals.ensureTotalCapacity(self.options.positionals.len);
-
+    try positionals.ensureUnusedCapacity(self.options.positionals.len);
     for (self.options.positionals) |obj| {
-        positionals.appendAssumeCapacity(obj.path);
+        positionals.writeItemAssumeCapacity(obj);
     }
 
-    try self.parsePositionals(positionals.items);
-}
+    var visited = std.StringHashMap(void).init(gpa);
+    defer visited.deinit();
 
-fn parsePositionals(self: *Coff, files: []const []const u8) !void {
-    for (files) |file_name| {
-        const full_path = full_path: {
-            var buffer: [fs.MAX_PATH_BYTES]u8 = undefined;
-            const path = try std.fs.realpath(file_name, &buffer);
-            break :full_path try self.base.allocator.dupe(u8, path);
+    while (positionals.readItem()) |obj| {
+        self.parsePositional(arena, obj, lib_paths.items, &positionals, &visited) catch |err| switch (err) {
+            error.AlreadyVisited => continue,
+            error.FileNotFound => has_file_not_found_error = true,
+            error.ParseFailed => has_parse_error = true,
+            else => |e| {
+                self.base.fatal("{s}: unexpected error occurred while parsing input file: {s}", .{
+                    obj.path, @errorName(e),
+                });
+                return e;
+            },
         };
-        defer self.base.allocator.free(full_path);
-        log.debug("parsing input file path '{s}'", .{full_path});
+    }
 
-        if (try self.parseObject(full_path)) continue;
+    if (has_file_not_found_error) {
+        self.base.fatal("tried library search paths:", .{});
+        for (lib_paths.items) |path| {
+            self.base.fatal("  {s}", .{path});
+        }
+        has_parse_error = true;
+    }
+    if (has_parse_error) return error.ParseFailed;
 
-        log.warn("unknown filetype for positional input file: '{s}'", .{file_name});
+    if (build_options.enable_logging)
+        state_log.debug("{}", .{self.dumpState()});
+
+    return error.Todo;
+}
+
+fn addLibPathsFromEnv(arena: Allocator, lib_paths: *std.ArrayList([]const u8)) !void {
+    const env_var = try std.process.getEnvVarOwned(arena, "LIB");
+    var it = mem.splitScalar(u8, env_var, ';');
+    while (it.next()) |path| {
+        try lib_paths.append(path);
     }
 }
 
-fn parseObject(self: *Coff, path: []const u8) !bool {
-    const file = fs.cwd().openFile(path, .{}) catch |err| switch (err) {
+fn resolveFile(
+    self: *Coff,
+    arena: Allocator,
+    obj: LinkObject,
+    lib_dirs: []const []const u8,
+    visited: anytype,
+) !LinkObject {
+    if (std.fs.path.isAbsolute(obj.name)) {
+        if (visited.get(obj.name)) |_| return error.AlreadyVisited;
+        if (try accessPath(obj.name)) {
+            try visited.putNoClobber(obj.name, {});
+            return .{ .name = obj.name, .path = obj.name, .tag = obj.tag };
+        }
+        self.base.fatal("file not found '{s}'", .{obj.name});
+        return error.FileNotFound;
+    }
+    const gpa = self.base.allocator;
+    var buffer = std.ArrayList(u8).init(gpa);
+    defer buffer.deinit();
+
+    for (lib_dirs) |dir| {
+        try buffer.writer().print("{s}" ++ std.fs.path.sep_str ++ "{s}", .{ dir, obj.name });
+        if (visited.get(buffer.items)) |_| return error.AlreadyVisited;
+        if (try accessPath(buffer.items)) {
+            const path = try arena.dupe(u8, buffer.items);
+            try visited.putNoClobber(path, {});
+            return .{ .name = obj.name, .path = path, .tag = obj.tag };
+        }
+        buffer.clearRetainingCapacity();
+    }
+    self.base.fatal("file not found '{s}'", .{obj.name});
+    return error.FileNotFound;
+}
+
+fn accessPath(path: []const u8) !bool {
+    std.fs.cwd().access(path, .{}) catch |err| switch (err) {
         error.FileNotFound => return false,
         else => |e| return e,
     };
-    errdefer file.close();
+    return true;
+}
 
-    const name = try self.base.allocator.dupe(u8, path);
-    errdefer self.base.allocator.free(name);
+const ParseError = error{
+    AlreadyVisited,
+    FileNotFound,
+    ParseFailed,
+    OutOfMemory,
+    Overflow,
+    InvalidCharacter,
+} || std.fs.Dir.AccessError || std.fs.File.OpenError || std.fs.File.PReadError;
 
-    var object = Object{
-        .name = name,
-        .file = file,
-    };
+fn parsePositional(
+    self: *Coff,
+    arena: Allocator,
+    obj: LinkObject,
+    lib_paths: []const []const u8,
+    queue: anytype,
+    visited: anytype,
+) ParseError!void {
+    const resolved_obj = try self.resolveFile(arena, obj, lib_paths, visited);
 
-    object.parse(self.base.allocator, self.options.target.cpu_arch.?) catch |err| switch (err) {
-        error.EndOfStream => {
-            object.deinit(self.base.allocator);
-            return false;
-        },
-        else => |e| return e,
-    };
+    log.debug("parsing positional {}", .{resolved_obj});
 
-    try self.objects.append(self.base.allocator, object);
+    if (try self.parseObject(resolved_obj, queue)) return;
+    if (try self.parseArchive(resolved_obj, queue)) return;
+
+    self.base.fatal("unknown filetype for positional argument: {} resolved as {s}", .{
+        resolved_obj,
+        resolved_obj.path,
+    });
+}
+
+fn parseObject(self: *Coff, obj: LinkObject, queue: anytype) ParseError!bool {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    const gpa = self.base.allocator;
+    const file = try std.fs.cwd().openFile(obj.path, .{});
+    const fh = try self.addFileHandle(file);
+
+    var header_buffer: [@sizeOf(coff.CoffHeader)]u8 = undefined;
+    const amt = file.preadAll(&header_buffer, 0) catch return false;
+    if (amt != @sizeOf(coff.CoffHeader)) return false;
+    if (!isCoffObj(&header_buffer)) return false;
+    // TODO validate CPU arch
+
+    const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
+    self.files.set(index, .{ .object = .{
+        .path = try gpa.dupe(u8, obj.path),
+        .file_handle = fh,
+        .index = index,
+    } });
+    const object = &self.files.items(.data)[index].object;
+    try object.parse(self);
+    try self.objects.append(gpa, index);
+    try parseLibsFromDirectives(object, queue);
 
     return true;
 }
+
+fn parseLibsFromDirectives(object: *const Object, queue: anytype) error{OutOfMemory}!void {
+    var it = mem.splitScalar(u8, object.getDirectives(), ' ');
+    var p = Options.ArgsParser(@TypeOf(it)){ .it = &it };
+    while (p.hasMore()) {
+        if (p.arg("defaultlib")) |name| {
+            const dir_obj = LinkObject{ .name = name, .tag = .default_lib };
+            log.debug("{}: adding implicit import {}", .{ object.fmtPath(), dir_obj });
+            try queue.writeItem(dir_obj);
+        } else if (p.arg("disallowlib")) |_| {
+            // TODO: gotta handle that somehow
+        } else if (p.arg("nodefaultlib")) |_| {
+            // TODO: gotta handle that somehow
+        } else {
+            // We ignore everything else
+        }
+    }
+}
+
+fn parseDirectives(self: *Coff, object: *const Object) ParseError!void {
+    var has_parse_error = false;
+    var it = mem.splitScalar(u8, object.getDirectives(), ' ');
+    var p = Options.ArgsParser(@TypeOf(it)){ .it = &it };
+    while (p.hasMore()) {
+        if (p.arg("defaultlib") != null or p.arg("disallowlib") != null or p.arg("nodefaultlib") != null) {
+            // We already handle those
+        } else if (p.flag("throwingnew") or p.arg("guardsym")) {
+            // These have nothing to do with linking so we ignore them.
+        } else {
+            self.base.fatal("{}: unhandled directive: {s}", .{
+                object.fmtPath(),
+                p.next_arg,
+            });
+            has_parse_error = true;
+        }
+    }
+    if (has_parse_error) return error.ParseFailed;
+}
+
+fn parseArchive(self: *Coff, obj: LinkObject, queue: anytype) ParseError!bool {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    const gpa = self.base.allocator;
+    const file = try fs.cwd().openFile(obj.path, .{});
+    const fh = try self.addFileHandle(file);
+
+    var magic: [Archive.magic.len]u8 = undefined;
+    var amt = file.preadAll(&magic, 0) catch return false;
+    if (amt != Archive.magic.len) return false;
+    if (!isArchive(&magic)) return false;
+
+    var archive = Archive{};
+    defer archive.deinit(gpa);
+    try archive.parse(obj.path, fh, self);
+
+    var has_parse_error = false;
+    for (archive.members.items) |member| switch (member.tag) {
+        .object => {
+            const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
+            self.files.set(index, .{ .object = .{
+                .archive = .{
+                    .path = try gpa.dupe(u8, obj.path),
+                    .offset = member.offset,
+                },
+                .path = try gpa.dupe(u8, member.name),
+                .file_handle = fh,
+                .index = index,
+                .alive = false,
+            } });
+            const object = &self.files.items(.data)[index].object;
+            object.parse(self) catch |err| switch (err) {
+                error.ParseFailed => {
+                    has_parse_error = true;
+                    continue;
+                },
+                else => |e| return e,
+            };
+            try self.objects.append(gpa, index);
+            try parseLibsFromDirectives(object, queue);
+        },
+        .import => {
+            var import_hdr_buffer: [@sizeOf(coff.ImportHeader)]u8 = undefined;
+            amt = try file.preadAll(&import_hdr_buffer, member.offset);
+            if (amt != @sizeOf(coff.ImportHeader)) return error.InputOutput;
+            const import_hdr = @as(*align(1) const coff.ImportHeader, @ptrCast(&import_hdr_buffer));
+
+            const strings = try gpa.alloc(u8, import_hdr.size_of_data);
+            defer gpa.free(strings);
+            const import_name = mem.sliceTo(@as([*:0]const u8, @ptrCast(strings.ptr)), 0);
+            const dll_name = mem.sliceTo(@as([*:0]const u8, @ptrCast(strings.ptr + import_name.len + 1)), 0);
+
+            const name = try gpa.dupe(u8, dll_name);
+            const gop = try self.dlls.getOrPut(gpa, name);
+            defer if (gop.found_existing) gpa.free(name);
+            if (!gop.found_existing) {
+                const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
+                self.files.set(index, .{ .dll = .{
+                    .path = name,
+                    .index = index,
+                } });
+                gop.value_ptr.* = index;
+            }
+
+            const dll = &self.files.items(.data)[gop.value_ptr.*].dll;
+            dll.addExport(self, .{
+                .name = import_name,
+                .type = import_hdr.types.type,
+                .name_type = import_hdr.types.name_type,
+                .hint = import_hdr.hint,
+            }) catch |err| switch (err) {
+                error.ParseFailed => {
+                    has_parse_error = true;
+                    continue;
+                },
+                else => |e| return e,
+            };
+        },
+    };
+    if (has_parse_error) return error.ParseFailed;
+
+    return true;
+}
+
+pub fn isCoffObj(buffer: *const [@sizeOf(coff.CoffHeader)]u8) bool {
+    const header = @as(*align(1) const coff.CoffHeader, @ptrCast(buffer)).*;
+    if (header.machine == .Unknown and header.number_of_sections == 0xffff) return false;
+    if (header.size_of_optional_header != 0) return false;
+    return true;
+}
+
+pub fn isImportLib(buffer: *const [@sizeOf(coff.ImportHeader)]u8) bool {
+    const header = @as(*align(1) const coff.ImportHeader, @ptrCast(buffer)).*;
+    return header.sig1 == .Unknown and header.sig2 == 0xffff;
+}
+
+pub fn isArchive(data: *const [Archive.magic.len]u8) bool {
+    if (!mem.eql(u8, data, Archive.magic)) {
+        log.debug("invalid archive magic: expected '{s}', found '{s}'", .{ Archive.magic, data });
+        return false;
+    }
+    return true;
+}
+
+pub fn getFile(self: *Coff, index: File.Index) ?File {
+    const tag = self.files.items(.tags)[index];
+    return switch (tag) {
+        .null => null,
+        .object => .{ .object = &self.files.items(.data)[index].object },
+        .dll => .{ .dll = &self.files.items(.data)[index].dll },
+    };
+}
+
+pub fn addFileHandle(self: *Coff, file: std.fs.File) !File.HandleIndex {
+    const gpa = self.base.allocator;
+    const index: File.HandleIndex = @intCast(self.file_handles.items.len);
+    const fh = try self.file_handles.addOne(gpa);
+    fh.* = file;
+    return index;
+}
+
+pub fn getFileHandle(self: Coff, index: File.HandleIndex) File.Handle {
+    assert(index < self.file_handles.items.len);
+    return self.file_handles.items[index];
+}
+
+pub fn addAtom(self: *Coff) !Atom.Index {
+    const index = @as(Atom.Index, @intCast(self.atoms.items.len));
+    const atom = try self.atoms.addOne(self.base.allocator);
+    atom.* = .{};
+    return index;
+}
+
+pub fn getAtom(self: *Coff, atom_index: Atom.Index) ?*Atom {
+    if (atom_index == 0) return null;
+    assert(atom_index < self.atoms.items.len);
+    return &self.atoms.items[atom_index];
+}
+
+pub fn dumpState(self: *Coff) std.fmt.Formatter(fmtDumpState) {
+    return .{ .data = self };
+}
+
+fn fmtDumpState(
+    self: *Coff,
+    comptime unused_fmt_string: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = options;
+    _ = unused_fmt_string;
+    for (self.objects.items) |index| {
+        const object = self.getFile(index).?.object;
+        try writer.print("object({d}) : {}", .{ index, object.fmtPath() });
+        if (!object.alive) try writer.writeAll(" : [*]");
+        try writer.writeByte('\n');
+        try writer.print("{}\n", .{
+            object.fmtAtoms(self),
+        });
+    }
+    for (self.dlls.values()) |index| {
+        const dll = self.getFile(index).?.dll;
+        try writer.print("dll({d}) : {s}", .{ index, dll.path });
+        if (!dll.alive) try writer.writeAll(" : [*]");
+        try writer.writeByte('\n');
+    }
+}
+
+const Section = struct {
+    header: SectionHeader,
+    atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
+};
+
+pub const SectionHeader = struct {
+    name: u32,
+    virtual_size: u32,
+    virtual_address: u32,
+    size_of_raw_data: u32,
+    pointer_to_raw_data: u32,
+    pointer_to_relocations: u32,
+    pointer_to_linenumbers: u32,
+    number_of_relocations: u16,
+    number_of_linenumbers: u16,
+    flags: coff.SectionHeaderFlags,
+
+    pub fn isComdat(hdr: SectionHeader) bool {
+        return hdr.flags.LNK_COMDAT == 0b1;
+    }
+
+    pub fn isCode(hdr: SectionHeader) bool {
+        return hdr.flags.CNT_CODE == 0b1;
+    }
+
+    pub fn getAlignment(hdr: SectionHeader) ?u16 {
+        if (hdr.flags.ALIGN == 0) return null;
+        return hdr.flags.ALIGN - 1;
+    }
+};
+
+pub const LinkObject = struct {
+    name: []const u8,
+    path: []const u8 = "",
+    tag: enum { explicit, default_lib },
+
+    pub fn format(
+        obj: LinkObject,
+        comptime unused_fmt_string: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = options;
+        _ = unused_fmt_string;
+        switch (obj.tag) {
+            .explicit => {},
+            .default_lib => try writer.writeAll("/defaultlib:"),
+        }
+        try writer.print("{s}", .{obj.name});
+    }
+};
+
+pub const base_tag = Zld.Tag.coff;
+
+const build_options = @import("build_options");
+const builtin = @import("builtin");
+const assert = std.debug.assert;
+const coff = std.coff;
+const fs = std.fs;
+const log = std.log.scoped(.coff);
+const mem = std.mem;
+const state_log = std.log.scoped(.state);
+const std = @import("std");
+const trace = @import("tracy.zig").trace;
+
+const Allocator = mem.Allocator;
+const Archive = @import("Coff/Archive.zig");
+const Atom = @import("Coff/Atom.zig");
+const Coff = @This();
+const File = @import("Coff/file.zig").File;
+const Object = @import("Coff/Object.zig");
+pub const Options = @import("Coff/Options.zig");
+const StringTable = @import("StringTable.zig");
+const ThreadPool = std.Thread.Pool;
+const Zld = @import("Zld.zig");
