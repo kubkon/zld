@@ -9,6 +9,7 @@ pub fn deinit(self: *Dll, allocator: Allocator) void {
 
 pub fn addExport(self: *Dll, coff_file: *Coff, args: struct {
     name: [:0]const u8,
+    strings: []const u8,
     type: coff.ImportType,
     name_type: coff.ImportNameType,
     hint: u16,

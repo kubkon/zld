@@ -297,6 +297,7 @@ fn parseArchive(self: *Coff, obj: LinkObject, queue: anytype) ParseError!bool {
     defer tracy.end();
 
     const gpa = self.base.allocator;
+    const cpu_arch = self.options.cpu_arch.?;
     const file = try fs.cwd().openFile(obj.path, .{});
     const fh = try self.addFileHandle(file);
 
@@ -310,68 +311,79 @@ fn parseArchive(self: *Coff, obj: LinkObject, queue: anytype) ParseError!bool {
     try archive.parse(obj.path, fh, self);
 
     var has_parse_error = false;
-    for (archive.members.items) |member| switch (member.tag) {
-        .object => {
-            const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
-            self.files.set(index, .{ .object = .{
-                .archive = .{
-                    .path = try gpa.dupe(u8, obj.path),
-                    .offset = member.offset,
-                },
-                .path = try gpa.dupe(u8, member.name),
-                .file_handle = fh,
-                .index = index,
-                .alive = false,
-            } });
-            const object = &self.files.items(.data)[index].object;
-            object.parse(self) catch |err| switch (err) {
-                error.ParseFailed => {
-                    has_parse_error = true;
-                    continue;
-                },
-                else => |e| return e,
-            };
-            try self.objects.append(gpa, index);
-            try parseLibsFromDirectives(object, queue);
-        },
-        .import => {
-            var import_hdr_buffer: [@sizeOf(coff.ImportHeader)]u8 = undefined;
-            amt = try file.preadAll(&import_hdr_buffer, member.offset);
-            if (amt != @sizeOf(coff.ImportHeader)) return error.InputOutput;
-            const import_hdr = @as(*align(1) const coff.ImportHeader, @ptrCast(&import_hdr_buffer));
+    for (archive.members.items) |member| {
+        const member_cpu_arch = member.machine.toTargetCpuArch() orelse {
+            log.debug("{s}({s}): TODO unhandled machine type {}", .{ obj.path, member.name, member.machine });
+            continue;
+        };
+        if (member_cpu_arch != cpu_arch) continue;
 
-            const strings = try gpa.alloc(u8, import_hdr.size_of_data);
-            defer gpa.free(strings);
-            const import_name = mem.sliceTo(@as([*:0]const u8, @ptrCast(strings.ptr)), 0);
-            const dll_name = mem.sliceTo(@as([*:0]const u8, @ptrCast(strings.ptr + import_name.len + 1)), 0);
-
-            const name = try gpa.dupe(u8, dll_name);
-            const gop = try self.dlls.getOrPut(gpa, name);
-            defer if (gop.found_existing) gpa.free(name);
-            if (!gop.found_existing) {
+        switch (member.tag) {
+            .object => {
                 const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
-                self.files.set(index, .{ .dll = .{
-                    .path = name,
+                self.files.set(index, .{ .object = .{
+                    .archive = .{
+                        .path = try gpa.dupe(u8, obj.path),
+                        .offset = member.offset,
+                    },
+                    .path = try gpa.dupe(u8, member.name),
+                    .file_handle = fh,
                     .index = index,
+                    .alive = false,
                 } });
-                gop.value_ptr.* = index;
-            }
+                const object = &self.files.items(.data)[index].object;
+                object.parse(self) catch |err| switch (err) {
+                    error.ParseFailed => {
+                        has_parse_error = true;
+                        continue;
+                    },
+                    else => |e| return e,
+                };
+                try self.objects.append(gpa, index);
+                try parseLibsFromDirectives(object, queue);
+            },
+            .import => {
+                var import_hdr_buffer: [@sizeOf(coff.ImportHeader)]u8 = undefined;
+                amt = try file.preadAll(&import_hdr_buffer, member.offset);
+                if (amt != @sizeOf(coff.ImportHeader)) return error.InputOutput;
+                const import_hdr = @as(*align(1) const coff.ImportHeader, @ptrCast(&import_hdr_buffer));
 
-            const dll = &self.files.items(.data)[gop.value_ptr.*].dll;
-            dll.addExport(self, .{
-                .name = import_name,
-                .type = import_hdr.types.type,
-                .name_type = import_hdr.types.name_type,
-                .hint = import_hdr.hint,
-            }) catch |err| switch (err) {
-                error.ParseFailed => {
-                    has_parse_error = true;
-                    continue;
-                },
-                else => |e| return e,
-            };
-        },
-    };
+                const strings = try gpa.alloc(u8, import_hdr.size_of_data);
+                defer gpa.free(strings);
+                amt = try file.preadAll(strings, member.offset + @sizeOf(coff.ImportHeader));
+                if (amt != import_hdr.size_of_data) return error.InputOutput;
+
+                const import_name = mem.sliceTo(@as([*:0]const u8, @ptrCast(strings.ptr)), 0);
+                const dll_name = mem.sliceTo(@as([*:0]const u8, @ptrCast(strings.ptr + import_name.len + 1)), 0);
+
+                const name = try gpa.dupe(u8, dll_name);
+                const gop = try self.dlls.getOrPut(gpa, name);
+                defer if (gop.found_existing) gpa.free(name);
+                if (!gop.found_existing) {
+                    const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
+                    self.files.set(index, .{ .dll = .{
+                        .path = name,
+                        .index = index,
+                    } });
+                    gop.value_ptr.* = index;
+                }
+
+                const dll = &self.files.items(.data)[gop.value_ptr.*].dll;
+                dll.addExport(self, .{
+                    .name = import_name,
+                    .type = import_hdr.types.type,
+                    .name_type = import_hdr.types.name_type,
+                    .hint = import_hdr.hint,
+                }) catch |err| switch (err) {
+                    error.ParseFailed => {
+                        has_parse_error = true;
+                        continue;
+                    },
+                    else => |e| return e,
+                };
+            },
+        }
+    }
     if (has_parse_error) return error.ParseFailed;
 
     return true;
