@@ -147,6 +147,10 @@ pub fn flush(self: *Coff) !void {
     }
     if (has_parse_error) return error.ParseFailed;
 
+    for (self.dlls.values()) |index| {
+        try self.getFile(index).?.dll.initSymbols(self);
+    }
+
     if (build_options.enable_logging)
         state_log.debug("{}", .{self.dumpState()});
 

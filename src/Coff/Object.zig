@@ -337,12 +337,10 @@ fn initSymbols(self: *Object, allocator: Allocator, coff_file: *Coff) !void {
             self.symbols.addOneAssumeCapacity().* = gop.index;
         },
         else => {
+            if (coff_sym.section_number == .DEBUG) continue; // TODO: handle debug symbols
+            if (coff_sym.section_number == .UNDEFINED and coff_sym.storage_class == .SECTION) continue;
+
             assert(coff_sym.section_number != .UNDEFINED);
-            if (coff_sym.section_number == .DEBUG) {
-                // TODO: handle debug symbols
-                self.symbols.appendAssumeCapacity(0);
-                continue;
-            }
             const index = try coff_file.addSymbol();
             self.symbols.appendAssumeCapacity(index);
             const symbol = coff_file.getSymbol(index);
