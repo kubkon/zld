@@ -8,6 +8,7 @@ sections: std.MultiArrayList(InputSection) = .{},
 symtab: std.ArrayListUnmanaged(InputSymbol) = .{},
 auxtab: std.MultiArrayList(AuxSymbol) = .{},
 strtab: std.ArrayListUnmanaged(u8) = .{},
+symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
 
 directives: std.ArrayListUnmanaged(u8) = .{},
 
@@ -25,6 +26,7 @@ pub fn deinit(self: *Object, allocator: Allocator) void {
     self.symtab.deinit(allocator);
     self.auxtab.deinit(allocator);
     self.strtab.deinit(allocator);
+    self.symbols.deinit(allocator);
     self.directives.deinit(allocator);
     self.atoms.deinit(allocator);
 }
@@ -62,6 +64,7 @@ pub fn parse(self: *Object, coff_file: *Coff) !void {
     try self.initAtoms(gpa, coff_file);
 
     // Init symbols
+    try self.initSymbols(gpa, coff_file);
 }
 
 fn parseInputSectionHeaders(self: *Object, allocator: Allocator, file: std.fs.File, offset: u64) !void {
@@ -320,6 +323,40 @@ fn initAtoms(self: *Object, allocator: Allocator, coff_file: *Coff) !void {
     }
 }
 
+fn initSymbols(self: *Object, allocator: Allocator, coff_file: *Coff) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    try self.symbols.ensureUnusedCapacity(allocator, self.symtab.items.len);
+
+    for (self.symtab.items, 0..) |coff_sym, i| switch (coff_sym.storage_class) {
+        .EXTERNAL, .WEAK_EXTERNAL => {
+            const name = self.getString(coff_sym.name);
+            const off = try coff_file.string_intern.insert(allocator, name);
+            const gop = try coff_file.getOrCreateGlobal(off);
+            self.symbols.addOneAssumeCapacity().* = gop.index;
+        },
+        else => {
+            assert(coff_sym.section_number != .UNDEFINED);
+            if (coff_sym.section_number == .DEBUG) {
+                // TODO: handle debug symbols
+                self.symbols.appendAssumeCapacity(0);
+                continue;
+            }
+            const index = try coff_file.addSymbol();
+            self.symbols.appendAssumeCapacity(index);
+            const symbol = coff_file.getSymbol(index);
+            symbol.* = .{
+                .value = coff_sym.value,
+                .name = coff_sym.name,
+                .coff_sym_idx = @intCast(i),
+                .atom = if (coff_sym.section_number == .ABSOLUTE) 0 else self.atoms.items[@intFromEnum(coff_sym.section_number) - 1],
+                .file = self.index,
+            };
+        },
+    };
+}
+
 fn skipSection(self: *Object, index: u16) bool {
     const header = self.sections.items(.header)[index];
     const name = self.getString(header.name);
@@ -408,6 +445,29 @@ fn formatAtoms(
     }
 }
 
+pub fn fmtSymbols(self: *Object, coff_file: *Coff) std.fmt.Formatter(formatSymbols) {
+    return .{ .data = .{
+        .object = self,
+        .coff_file = coff_file,
+    } };
+}
+
+fn formatSymbols(
+    ctx: FormatContext,
+    comptime unused_fmt_string: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = unused_fmt_string;
+    _ = options;
+    const object = ctx.object;
+    try writer.writeAll("  symbols\n");
+    for (object.symbols.items) |index| {
+        const sym = ctx.coff_file.getSymbol(index);
+        try writer.print("    {}\n", .{sym.fmt(ctx.coff_file)});
+    }
+}
+
 pub fn fmtPath(self: Object) std.fmt.Formatter(formatPath) {
     return .{ .data = self };
 }
@@ -490,7 +550,7 @@ pub const InputSection = struct {
     relocs: std.ArrayListUnmanaged(coff.Relocation) = .{},
 };
 
-const InputSymbol = struct {
+pub const InputSymbol = struct {
     name: u32,
     value: u32,
     section_number: coff.SectionNumber,
@@ -563,3 +623,4 @@ const Atom = @import("Atom.zig");
 const Coff = @import("../Coff.zig");
 const File = @import("file.zig").File;
 const Object = @This();
+const Symbol = @import("Symbol.zig");

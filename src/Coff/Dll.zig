@@ -3,6 +3,7 @@ index: File.Index,
 
 exports: std.ArrayListUnmanaged(Export) = .{},
 strtab: std.ArrayListUnmanaged(u8) = .{},
+symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
 
 alive: bool = false,
 
@@ -10,6 +11,18 @@ pub fn deinit(self: *Dll, allocator: Allocator) void {
     allocator.free(self.path);
     self.exports.deinit(allocator);
     self.strtab.deinit(allocator);
+}
+
+pub fn initSymbols(self: *Dll, coff_file: *Coff) !void {
+    const gpa = coff_file.base.allocator;
+    try self.symbols.ensureTotalCapacityPrecise(gpa, self.exports.items.len);
+    for (self.exports.items) |exp| {
+        // TODO what about `__imp_name`?
+        const name = self.getString(exp.name);
+        const off = try coff_file.string_intern.insert(gpa, name);
+        const gop = try coff_file.getOrCreateGlobal(off);
+        self.symbols.addOneAssumeCapacity().* = gop.index;
+    }
 }
 
 pub fn addExport(self: *Dll, coff_file: *Coff, args: struct {
@@ -77,6 +90,34 @@ pub fn format(
     @compileError("do not format Dll directly");
 }
 
+const FormatContext = struct {
+    dll: *Dll,
+    coff_file: *Coff,
+};
+
+pub fn fmtSymbols(self: *Dll, coff_file: *Coff) std.fmt.Formatter(formatSymbols) {
+    return .{ .data = .{
+        .dll = self,
+        .coff_file = coff_file,
+    } };
+}
+
+fn formatSymbols(
+    ctx: FormatContext,
+    comptime unused_fmt_string: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = unused_fmt_string;
+    _ = options;
+    const dll = ctx.dll;
+    try writer.writeAll("  symbols\n");
+    for (dll.symbols.items) |index| {
+        const symbol = ctx.coff_file.getSymbol(index);
+        try writer.print("    {}\n", .{symbol.fmt(ctx.coff_file)});
+    }
+}
+
 const Export = packed struct {
     name: u32,
     hint: u16,
@@ -93,3 +134,4 @@ const Allocator = mem.Allocator;
 const Coff = @import("../Coff.zig");
 const Dll = @This();
 const File = @import("file.zig").File;
+const Symbol = @import("Symbol.zig");

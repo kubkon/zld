@@ -10,6 +10,9 @@ sections: std.MultiArrayList(Section) = .{},
 
 string_intern: StringTable = .{},
 
+symbols: std.ArrayListUnmanaged(Symbol) = .{},
+globals: std.AutoHashMapUnmanaged(u32, Symbol.Index) = .{},
+
 atoms: std.ArrayListUnmanaged(Atom) = .{},
 
 pub fn openPath(allocator: Allocator, options: Options, thread_pool: *ThreadPool) !*Coff {
@@ -66,6 +69,8 @@ pub fn deinit(self: *Coff) void {
     }
     self.sections.deinit(gpa);
     self.atoms.deinit(gpa);
+    self.symbols.deinit(gpa);
+    self.globals.deinit(gpa);
 }
 
 pub fn flush(self: *Coff) !void {
@@ -80,6 +85,8 @@ pub fn flush(self: *Coff) !void {
     try self.string_intern.buffer.append(gpa, 0);
     // Append null file.
     try self.files.append(gpa, .null);
+    // Append null symbols.
+    try self.symbols.append(gpa, .{});
 
     var arena_allocator = std.heap.ArenaAllocator.init(gpa);
     defer arena_allocator.deinit();
@@ -445,6 +452,39 @@ pub fn getAtom(self: *Coff, atom_index: Atom.Index) ?*Atom {
     return &self.atoms.items[atom_index];
 }
 
+pub fn addSymbol(self: *Coff) !Symbol.Index {
+    const index = @as(Symbol.Index, @intCast(self.symbols.items.len));
+    const symbol = try self.symbols.addOne(self.base.allocator);
+    symbol.* = .{};
+    return index;
+}
+
+pub fn getSymbol(self: *Coff, index: Symbol.Index) *Symbol {
+    assert(index < self.symbols.items.len);
+    return &self.symbols.items[index];
+}
+
+const GetOrCreateGlobalResult = struct {
+    found_existing: bool,
+    index: Symbol.Index,
+};
+
+pub fn getOrCreateGlobal(self: *Coff, off: u32) !GetOrCreateGlobalResult {
+    const gpa = self.base.allocator;
+    const gop = try self.globals.getOrPut(gpa, off);
+    if (!gop.found_existing) {
+        const index = try self.addSymbol();
+        const global = self.getSymbol(index);
+        global.flags.global = true;
+        global.name = off;
+        gop.value_ptr.* = index;
+    }
+    return .{
+        .found_existing = gop.found_existing,
+        .index = gop.value_ptr.*,
+    };
+}
+
 pub fn dumpState(self: *Coff) std.fmt.Formatter(fmtDumpState) {
     return .{ .data = self };
 }
@@ -462,8 +502,9 @@ fn fmtDumpState(
         try writer.print("object({d}) : {}", .{ index, object.fmtPath() });
         if (!object.alive) try writer.writeAll(" : [*]");
         try writer.writeByte('\n');
-        try writer.print("{}\n", .{
+        try writer.print("{}{}\n", .{
             object.fmtAtoms(self),
+            object.fmtSymbols(self),
         });
     }
     for (self.dlls.values()) |index| {
@@ -471,6 +512,9 @@ fn fmtDumpState(
         try writer.print("dll({d}) : {s}", .{ index, dll.path });
         if (!dll.alive) try writer.writeAll(" : [*]");
         try writer.writeByte('\n');
+        try writer.print("{}\n", .{
+            dll.fmtSymbols(self),
+        });
     }
 }
 
@@ -547,5 +591,6 @@ const File = @import("Coff/file.zig").File;
 const Object = @import("Coff/Object.zig");
 pub const Options = @import("Coff/Options.zig");
 const StringTable = @import("StringTable.zig");
+const Symbol = @import("Coff/Symbol.zig");
 const ThreadPool = std.Thread.Pool;
 const Zld = @import("Zld.zig");
