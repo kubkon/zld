@@ -371,6 +371,7 @@ fn parseArchive(self: *Coff, obj: LinkObject, queue: anytype) ParseError!bool {
                 const dll = &self.files.items(.data)[gop.value_ptr.*].dll;
                 dll.addExport(self, .{
                     .name = import_name,
+                    .strings = strings,
                     .type = import_hdr.types.type,
                     .name_type = import_hdr.types.name_type,
                     .hint = import_hdr.hint,
