@@ -50,6 +50,19 @@ pub fn getCoffSymbol(symbol: Symbol, coff_file: *Coff) Object.InputSymbol {
     return object.symtab.items[symbol.coff_sym_idx];
 }
 
+pub fn getSymbolRank(symbol: Symbol, coff_file: *Coff) u32 {
+    const file = symbol.getFile(coff_file) orelse return std.math.maxInt(u32);
+    const in_archive = switch (file) {
+        .object => |x| !x.alive,
+        else => false,
+    };
+    return file.getSymbolRank(.{
+        .archive = in_archive,
+        .weak = false, // TODO
+        .tentative = false, // TODO
+    });
+}
+
 pub fn format(
     symbol: Symbol,
     comptime unused_fmt_string: []const u8,

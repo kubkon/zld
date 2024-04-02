@@ -8,6 +8,66 @@ pub const File = union(enum) {
         };
     }
 
+    pub fn resolveSymbols(file: File, coff_file: *Coff) void {
+        switch (file) {
+            inline else => |x| x.resolveSymbols(coff_file),
+        }
+    }
+
+    pub fn resetGlobals(file: File, coff_file: *Coff) void {
+        for (file.getSymbols()) |global_index| {
+            const global = coff_file.getSymbol(global_index);
+            const name = global.name;
+            global.* = .{};
+            global.name = name;
+            global.flags.global = true;
+        }
+    }
+
+    pub fn getSymbolRank(file: File, args: struct {
+        archive: bool = false,
+        weak: bool = false,
+        tentative: bool = false,
+    }) u32 {
+        const base: u32 = blk: {
+            if (args.tentative) break :blk 3;
+            break :blk if (args.weak) 2 else 1;
+        };
+        return (base << 24) + file.getIndex();
+    }
+
+    pub fn getAtoms(file: File) []const Atom.Index {
+        return switch (file) {
+            .dll => unreachable,
+            inline else => |x| x.atoms.items,
+        };
+    }
+
+    pub fn getSymbols(file: File) []const Symbol.Index {
+        return switch (file) {
+            inline else => |x| x.symbols.items,
+        };
+    }
+
+    pub fn isAlive(file: File) bool {
+        return switch (file) {
+            inline else => |x| x.alive,
+        };
+    }
+
+    pub fn setAlive(file: File) void {
+        switch (file) {
+            inline else => |x| x.alive = true,
+        }
+    }
+
+    pub fn markLive(file: File, coff_file: *Coff) void {
+        switch (file) {
+            .dll => unreachable,
+            .object => |x| x.markLive(coff_file),
+        }
+    }
+
     pub fn fmtPath(file: File) std.fmt.Formatter(formatPath) {
         return .{ .data = file };
     }
@@ -41,6 +101,8 @@ pub const File = union(enum) {
 const std = @import("std");
 
 const Allocator = std.mem.Allocator;
+const Atom = @import("Atom.zig");
 const Coff = @import("../Coff.zig");
 const Dll = @import("Dll.zig");
 const Object = @import("Object.zig");
+const Symbol = @import("Symbol.zig");

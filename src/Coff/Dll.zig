@@ -17,7 +17,6 @@ pub fn initSymbols(self: *Dll, coff_file: *Coff) !void {
     const gpa = coff_file.base.allocator;
     try self.symbols.ensureTotalCapacityPrecise(gpa, self.exports.items.len);
     for (self.exports.items) |exp| {
-        // TODO what about `__imp_name`?
         const name = self.getString(exp.name);
         const off = try coff_file.string_intern.insert(gpa, name);
         const gop = try coff_file.getOrCreateGlobal(off);
@@ -53,6 +52,7 @@ pub fn addExport(self: *Dll, coff_file: *Coff, args: struct {
             return error.ParseFailed;
         },
     };
+    const is_by_ordinal = args.name_type == .ORDINAL;
     log.debug("{s}: adding export '{s}' of type {s} and hint {x}", .{
         self.path,
         actual_name,
@@ -62,8 +62,39 @@ pub fn addExport(self: *Dll, coff_file: *Coff, args: struct {
     try self.exports.append(gpa, .{
         .name = try self.addString(gpa, actual_name),
         .hint = args.hint,
-        .type = args.type,
+        .ordinal = is_by_ordinal,
     });
+
+    switch (args.type) {
+        .CODE => {
+            const imp_name = try std.fmt.allocPrint(gpa, "__imp_{s}", .{actual_name});
+            try self.exports.append(gpa, .{
+                .name = try self.addString(gpa, imp_name),
+                .hint = args.hint,
+                .ordinal = is_by_ordinal,
+            });
+        },
+        .DATA, .CONST => {},
+        else => |other| {
+            coff_file.base.fatal("{s}: unhandled IMPORT_OBJECT_TYPE variant: {}", .{ self.path, other });
+            return error.ParseFailed;
+        },
+    }
+}
+
+pub fn resolveSymbols(self: *Dll, coff_file: *Coff) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    for (self.symbols.items) |index| {
+        const global = coff_file.getSymbol(index);
+        if (self.asFile().getSymbolRank(.{}) < global.getSymbolRank(coff_file)) {
+            global.value = 0;
+            global.atom = 0;
+            global.coff_sym_idx = 0;
+            global.file = self.index;
+        }
+    }
 }
 
 fn addString(self: *Dll, allocator: Allocator, str: []const u8) error{OutOfMemory}!u32 {
@@ -75,6 +106,10 @@ fn addString(self: *Dll, allocator: Allocator, str: []const u8) error{OutOfMemor
 pub fn getString(self: Dll, off: u32) [:0]const u8 {
     assert(off < self.strtab.items.len);
     return mem.sliceTo(@as([*:0]const u8, @ptrCast(self.strtab.items.ptr + off)), 0);
+}
+
+pub fn asFile(self: *Dll) File {
+    return .{ .dll = self };
 }
 
 pub fn format(
@@ -121,7 +156,7 @@ fn formatSymbols(
 const Export = packed struct {
     name: u32,
     hint: u16,
-    type: coff.ImportType,
+    ordinal: bool,
 };
 
 const assert = std.debug.assert;
@@ -129,6 +164,7 @@ const coff = std.coff;
 const log = std.log.scoped(.coff);
 const mem = std.mem;
 const std = @import("std");
+const trace = @import("../tracy.zig").trace;
 
 const Allocator = mem.Allocator;
 const Coff = @import("../Coff.zig");

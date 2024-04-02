@@ -385,6 +385,61 @@ fn addAtom(self: *Object, header: Coff.SectionHeader, section_number: u16, coff_
     self.atoms.items[section_number] = atom_index;
 }
 
+pub fn resolveSymbols(self: *Object, coff_file: *Coff) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    for (self.symbols.items, 0..) |index, i| {
+        const global = coff_file.getSymbol(index);
+        if (!global.flags.global) continue;
+
+        const coff_sym_idx = @as(u32, @intCast(i));
+        const coff_sym = self.symtab.items[coff_sym_idx];
+
+        const sect_idx: ?u32 = switch (coff_sym.section_number) {
+            .UNDEFINED, .DEBUG => continue,
+            .ABSOLUTE => null,
+            else => |x| @intFromEnum(x) - 1,
+        };
+        if (sect_idx) |idx| {
+            const atom_index = self.atoms.items[idx];
+            const atom = coff_file.getAtom(atom_index) orelse continue;
+            if (!atom.flags.alive) continue;
+        }
+
+        if (self.asFile().getSymbolRank(.{
+            .archive = !self.alive,
+            .weak = false, // TODO
+            // .weak = coff_sym.storage_class == .WEAK_EXTERNAL,
+            .tentative = false, // TODO
+        }) < global.getSymbolRank(coff_file)) {
+            global.value = coff_sym.value;
+            global.atom = if (sect_idx) |idx| self.atoms.items[idx] else 0;
+            global.coff_sym_idx = coff_sym_idx;
+            global.file = self.index;
+        }
+    }
+}
+
+pub fn markLive(self: *Object, coff_file: *Coff) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    for (self.symbols.items, 0..) |index, csym_idx| {
+        const sym = coff_file.getSymbol(index);
+        if (!sym.flags.global) continue;
+        if (sym.getFile(coff_file) == null) continue;
+
+        const file = sym.getFile(coff_file).?;
+        const coff_sym = self.symtab.items[csym_idx];
+        const should_keep = coff_sym.section_number == .UNDEFINED;
+        if (should_keep and !file.isAlive()) {
+            file.setAlive();
+            if (file == .object) file.markLive(coff_file);
+        }
+    }
+}
+
 pub fn getDirectives(self: Object) []const u8 {
     return mem.trim(u8, self.directives.items, " ");
 }
@@ -400,6 +455,10 @@ fn insertString(self: *Object, allocator: Allocator, str: []const u8) !u32 {
     self.strtab.appendSliceAssumeCapacity(str);
     self.strtab.appendAssumeCapacity(0);
     return off;
+}
+
+pub fn asFile(self: *Object) File {
+    return .{ .object = self };
 }
 
 pub fn format(

@@ -151,6 +151,8 @@ pub fn flush(self: *Coff) !void {
         try self.getFile(index).?.dll.initSymbols(self);
     }
 
+    try self.resolveSymbols();
+
     if (build_options.enable_logging)
         state_log.debug("{}", .{self.dumpState()});
 
@@ -399,6 +401,58 @@ fn parseArchive(self: *Coff, obj: LinkObject, queue: anytype) ParseError!bool {
     if (has_parse_error) return error.ParseFailed;
 
     return true;
+}
+
+fn resolveSymbols(self: *Coff) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    // Resolve symbols on the set of all objects and shared objects (even if some are unneeded).
+    for (self.objects.items) |index| self.getFile(index).?.resolveSymbols(self);
+    for (self.dlls.values()) |index| self.getFile(index).?.resolveSymbols(self);
+
+    // Mark live objects.
+    self.markLive();
+
+    // Reset state of all globals after marking live objects.
+    for (self.objects.items) |index| self.getFile(index).?.resetGlobals(self);
+    for (self.dlls.values()) |index| self.getFile(index).?.resetGlobals(self);
+
+    // Prune dead objects.
+    var i: usize = 0;
+    while (i < self.objects.items.len) {
+        const index = self.objects.items[i];
+        if (!self.getFile(index).?.object.alive) {
+            _ = self.objects.orderedRemove(i);
+            self.files.items(.data)[index].object.deinit(self.base.allocator);
+            self.files.set(index, .null);
+        } else i += 1;
+    }
+
+    i = 0;
+    while (i < self.dlls.keys().len) {
+        const key = self.dlls.keys()[i];
+        const index = self.dlls.values()[i];
+        if (!self.getFile(index).?.dll.alive) {
+            _ = self.dlls.orderedRemove(key);
+            self.files.items(.data)[index].dll.deinit(self.base.allocator);
+            self.files.set(index, .null);
+        } else i += 1;
+    }
+
+    // Re-resolve the symbols.
+    for (self.objects.items) |index| self.getFile(index).?.resolveSymbols(self);
+    for (self.dlls.values()) |index| self.getFile(index).?.resolveSymbols(self);
+}
+
+fn markLive(self: *Coff) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    for (self.objects.items) |index| {
+        const object = self.getFile(index).?.object;
+        if (object.alive) object.markLive(self);
+    }
 }
 
 pub fn isCoffObj(buffer: *const [@sizeOf(coff.CoffHeader)]u8) bool {
