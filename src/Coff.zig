@@ -427,7 +427,7 @@ fn resolveSymbols(self: *Coff) !void {
     var i: usize = 0;
     while (i < self.objects.items.len) {
         const index = self.objects.items[i];
-        if (!self.getFile(index).?.object.alive) {
+        if (!self.getFile(index).?.isAlive()) {
             _ = self.objects.orderedRemove(i);
             self.files.items(.data)[index].object.deinit(self.base.allocator);
             self.files.set(index, .null);
@@ -438,7 +438,7 @@ fn resolveSymbols(self: *Coff) !void {
     while (i < self.dlls.keys().len) {
         const key = self.dlls.keys()[i];
         const index = self.dlls.values()[i];
-        if (!self.getFile(index).?.dll.alive) {
+        if (!self.getFile(index).?.isAlive()) {
             _ = self.dlls.orderedRemove(key);
             self.files.items(.data)[index].dll.deinit(self.base.allocator);
             self.files.set(index, .null);

@@ -337,10 +337,10 @@ fn initSymbols(self: *Object, allocator: Allocator, coff_file: *Coff) !void {
             self.symbols.addOneAssumeCapacity().* = gop.index;
         },
         else => {
-            if (coff_sym.section_number == .DEBUG) continue; // TODO: handle debug symbols
-            if (coff_sym.section_number == .UNDEFINED and coff_sym.storage_class == .SECTION) continue;
-
-            assert(coff_sym.section_number != .UNDEFINED);
+            const atom = switch (coff_sym.section_number) {
+                .ABSOLUTE, .DEBUG, .UNDEFINED => 0,
+                else => self.atoms.items[@intFromEnum(coff_sym.section_number) - 1],
+            };
             const index = try coff_file.addSymbol();
             self.symbols.appendAssumeCapacity(index);
             const symbol = coff_file.getSymbol(index);
@@ -348,7 +348,7 @@ fn initSymbols(self: *Object, allocator: Allocator, coff_file: *Coff) !void {
                 .value = coff_sym.value,
                 .name = coff_sym.name,
                 .coff_sym_idx = @intCast(i),
-                .atom = if (coff_sym.section_number == .ABSOLUTE) 0 else self.atoms.items[@intFromEnum(coff_sym.section_number) - 1],
+                .atom = atom,
                 .file = self.index,
             };
         },
@@ -395,7 +395,6 @@ pub fn resolveSymbols(self: *Object, coff_file: *Coff) void {
 
         const coff_sym_idx = @as(u32, @intCast(i));
         const coff_sym = self.symtab.items[coff_sym_idx];
-
         const sect_idx: ?u32 = switch (coff_sym.section_number) {
             .UNDEFINED, .DEBUG => continue,
             .ABSOLUTE => null,

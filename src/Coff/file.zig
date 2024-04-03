@@ -31,7 +31,8 @@ pub const File = union(enum) {
         tentative: bool = false,
     }) u32 {
         const base: u32 = blk: {
-            if (args.tentative) break :blk 3;
+            if (args.tentative) break :blk if (args.archive) 6 else 5;
+            if (file == .dll or args.archive) break :blk if (args.weak) 4 else 3;
             break :blk if (args.weak) 2 else 1;
         };
         return (base << 24) + file.getIndex();
