@@ -12,8 +12,10 @@ string_intern: StringTable = .{},
 
 symbols: std.ArrayListUnmanaged(Symbol) = .{},
 globals: std.AutoHashMapUnmanaged(u32, Symbol.Index) = .{},
+alternate_names: std.AutoHashMapUnmanaged(u32, u32) = .{},
 
 atoms: std.ArrayListUnmanaged(Atom) = .{},
+merge_rules: std.AutoArrayHashMapUnmanaged(u32, u32) = .{},
 
 pub fn openPath(allocator: Allocator, options: Options, thread_pool: *ThreadPool) !*Coff {
     const file = try options.emit.directory.createFile(options.emit.sub_path, .{
@@ -71,6 +73,8 @@ pub fn deinit(self: *Coff) void {
     self.atoms.deinit(gpa);
     self.symbols.deinit(gpa);
     self.globals.deinit(gpa);
+    self.alternate_names.deinit(gpa);
+    self.merge_rules.deinit(gpa);
 }
 
 pub fn flush(self: *Coff) !void {
@@ -267,12 +271,13 @@ fn parseObject(self: *Coff, obj: LinkObject, queue: anytype) ParseError!bool {
     const object = &self.files.items(.data)[index].object;
     try object.parse(self);
     try self.objects.append(gpa, index);
-    try parseLibsFromDirectives(object, queue);
+    try self.parseDirectives(object, queue);
 
     return true;
 }
 
-fn parseLibsFromDirectives(object: *const Object, queue: anytype) error{OutOfMemory}!void {
+fn parseDirectives(self: *Coff, object: *const Object, queue: anytype) ParseError!void {
+    var has_parse_error = false;
     var it = mem.splitScalar(u8, object.getDirectives(), ' ');
     var p = Options.ArgsParser(@TypeOf(it)){ .it = &it };
     while (p.hasMore()) {
@@ -281,25 +286,31 @@ fn parseLibsFromDirectives(object: *const Object, queue: anytype) error{OutOfMem
             log.debug("{}: adding implicit import {}", .{ object.fmtPath(), dir_obj });
             try queue.writeItem(dir_obj);
         } else if (p.arg("disallowlib")) |_| {
-            // TODO: gotta handle that somehow
+            // TODO
         } else if (p.arg("nodefaultlib")) |_| {
-            // TODO: gotta handle that somehow
+            // TODO
+        } else if (p.flag("ThrowingNew")) {
+            // Not a linker flag, ignore
+        } else if (p.arg("guardsym")) |_| {
+            // Not a linker flag, ignore
+        } else if (p.arg("alternatename")) |mapping| {
+            const tok = mem.indexOfScalar(u8, mapping, '=') orelse {
+                self.base.fatal("{}: invalid format for /alternatename", .{object.fmtPath()});
+                has_parse_error = true;
+                continue;
+            };
+            try self.addAlternateName(mapping[0..tok], mapping[tok + 1 ..]);
+        } else if (p.arg("include")) |name| {
+            try self.addUndefined(name);
+        } else if (p.arg("merge")) |mapping| {
+            const tok = mem.indexOfScalar(u8, mapping, '=') orelse {
+                self.base.fatal("{}: invalid format for /merge", .{object.fmtPath()});
+                has_parse_error = true;
+                continue;
+            };
+            try self.addMergeRule(mapping[0..tok], mapping[tok + 1 ..]);
         } else {
-            // We ignore everything else
-        }
-    }
-}
-
-fn parseDirectives(self: *Coff, object: *const Object) ParseError!void {
-    var has_parse_error = false;
-    var it = mem.splitScalar(u8, object.getDirectives(), ' ');
-    var p = Options.ArgsParser(@TypeOf(it)){ .it = &it };
-    while (p.hasMore()) {
-        if (p.arg("defaultlib") != null or p.arg("disallowlib") != null or p.arg("nodefaultlib") != null) {
-            // We already handle those
-        } else if (p.flag("throwingnew") or p.arg("guardsym")) {
-            // These have nothing to do with linking so we ignore them.
-        } else {
+            std.debug.print("{s}\n", .{std.fmt.fmtSliceEscapeLower(object.getDirectives())});
             self.base.fatal("{}: unhandled directive: {s}", .{
                 object.fmtPath(),
                 p.next_arg,
@@ -358,7 +369,7 @@ fn parseArchive(self: *Coff, obj: LinkObject, queue: anytype) ParseError!bool {
                     else => |e| return e,
                 };
                 try self.objects.append(gpa, index);
-                try parseLibsFromDirectives(object, queue);
+                try self.parseDirectives(object, queue);
             },
             .import => {
                 var import_hdr_buffer: [@sizeOf(coff.ImportHeader)]u8 = undefined;
@@ -546,6 +557,28 @@ pub fn getOrCreateGlobal(self: *Coff, off: u32) !GetOrCreateGlobalResult {
         .found_existing = gop.found_existing,
         .index = gop.value_ptr.*,
     };
+}
+
+fn addUndefined(self: *Coff, name: []const u8) !void {
+    const gpa = self.base.allocator;
+    const off = try self.string_intern.insert(gpa, name);
+    _ = try self.getOrCreateGlobal(off);
+}
+
+fn addAlternateName(self: *Coff, from_name: []const u8, to_name: []const u8) !void {
+    const gpa = self.base.allocator;
+    const from = try self.string_intern.insert(gpa, from_name);
+    const to = try self.string_intern.insert(gpa, to_name);
+    _ = try self.getOrCreateGlobal(from);
+    _ = try self.getOrCreateGlobal(to);
+    try self.alternate_names.put(gpa, from, to);
+}
+
+fn addMergeRule(self: *Coff, from: []const u8, to: []const u8) !void {
+    const gpa = self.base.allocator;
+    const from_rule = try self.string_intern.insert(gpa, from);
+    const to_rule = try self.string_intern.insert(gpa, to);
+    try self.merge_rules.put(gpa, from_rule, to_rule);
 }
 
 pub fn dumpState(self: *Coff) std.fmt.Formatter(fmtDumpState) {

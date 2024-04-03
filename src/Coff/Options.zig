@@ -71,8 +71,10 @@ pub fn ArgsParser(comptime Iterator: type) type {
         pub fn hasMore(p: *Self) bool {
             var next_arg = p.it.next() orelse return false;
             while (true) {
-                if (next_arg.len != 0) break;
-                next_arg = p.it.next() orelse return false;
+                if (next_arg.len == 0 or (next_arg.len == 1 and next_arg[0] == 0)) {
+                    next_arg = p.it.next() orelse return false;
+                }
+                break;
             }
             p.next_arg = next_arg;
             return true;
