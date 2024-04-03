@@ -187,17 +187,22 @@ fn resolveFile(
     var buffer = std.ArrayList(u8).init(gpa);
     defer buffer.deinit();
 
+    const obj_name = if (std.fs.path.extension(obj.name).len == 0 and obj.tag == .default_lib)
+        try std.fmt.allocPrint(arena, "{s}.lib", .{obj.name})
+    else
+        obj.name;
+
     for (lib_dirs) |dir| {
-        try buffer.writer().print("{s}" ++ std.fs.path.sep_str ++ "{s}", .{ dir, obj.name });
+        try buffer.writer().print("{s}" ++ std.fs.path.sep_str ++ "{s}", .{ dir, obj_name });
         if (visited.get(buffer.items)) |_| return error.AlreadyVisited;
         if (try accessPath(buffer.items)) {
             const path = try arena.dupe(u8, buffer.items);
             try visited.putNoClobber(path, {});
-            return .{ .name = obj.name, .path = path, .tag = obj.tag };
+            return .{ .name = obj_name, .path = path, .tag = obj.tag };
         }
         buffer.clearRetainingCapacity();
     }
-    self.base.fatal("file not found '{s}'", .{obj.name});
+    self.base.fatal("file not found '{s}'", .{obj_name});
     return error.FileNotFound;
 }
 
