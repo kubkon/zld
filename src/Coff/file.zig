@@ -17,6 +17,7 @@ pub const File = union(enum) {
     pub fn resetGlobals(file: File, coff_file: *Coff) void {
         for (file.getSymbols()) |global_index| {
             const global = coff_file.getSymbol(global_index);
+            if (!global.flags.global) continue;
             const name = global.name;
             global.* = .{};
             global.name = name;
@@ -98,6 +99,7 @@ pub const File = union(enum) {
     pub const HandleIndex = Index;
 };
 
+const assert = std.debug.assert;
 const std = @import("std");
 
 const Allocator = std.mem.Allocator;
