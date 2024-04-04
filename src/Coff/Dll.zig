@@ -17,7 +17,7 @@ pub fn initSymbols(self: *Dll, coff_file: *Coff) !void {
     const gpa = coff_file.base.allocator;
     try self.symbols.ensureTotalCapacityPrecise(gpa, self.exports.items.len);
     for (self.exports.items) |exp| {
-        const name = self.getString(exp.name);
+        const name = exp.getImportName(self);
         const off = try coff_file.string_intern.insert(gpa, name);
         const gop = try coff_file.getOrCreateGlobal(off);
         self.symbols.addOneAssumeCapacity().* = gop.index;
@@ -32,8 +32,11 @@ pub fn addExport(self: *Dll, coff_file: *Coff, args: struct {
     hint: u16,
 }) !void {
     const gpa = coff_file.base.allocator;
-    const actual_name = switch (args.name_type) {
-        .ORDINAL, .NAME => args.name,
+    const imp_name = try std.fmt.allocPrint(gpa, "__imp_{s}", .{args.name});
+    defer gpa.free(imp_name);
+    const ext_name = switch (args.name_type) {
+        .ORDINAL => "",
+        .NAME => args.name,
         .NAME_NOPREFIX => mem.trimLeft(u8, args.name, "?@_"),
         .NAME_UNDECORATE => blk: {
             const trimmed = std.mem.trimLeft(u8, args.name, "?@_");
@@ -52,34 +55,18 @@ pub fn addExport(self: *Dll, coff_file: *Coff, args: struct {
             return error.ParseFailed;
         },
     };
-    const is_by_ordinal = args.name_type == .ORDINAL;
     log.debug("{s}: adding export '{s}' of type {s} and hint {x}", .{
         self.path,
-        actual_name,
+        imp_name,
         @tagName(args.type),
         args.hint,
     });
     try self.exports.append(gpa, .{
-        .name = try self.addString(gpa, actual_name),
+        .imp_name = try self.addString(gpa, imp_name),
+        .ext_name = try self.addString(gpa, ext_name),
         .hint = args.hint,
-        .ordinal = is_by_ordinal,
+        .type = args.type,
     });
-
-    switch (args.type) {
-        .CODE => {
-            const imp_name = try std.fmt.allocPrint(gpa, "__imp_{s}", .{actual_name});
-            try self.exports.append(gpa, .{
-                .name = try self.addString(gpa, imp_name),
-                .hint = args.hint,
-                .ordinal = is_by_ordinal,
-            });
-        },
-        .DATA, .CONST => {},
-        else => |other| {
-            coff_file.base.fatal("{s}: unhandled IMPORT_OBJECT_TYPE variant: {}", .{ self.path, other });
-            return error.ParseFailed;
-        },
-    }
 }
 
 pub fn resolveSymbols(self: *Dll, coff_file: *Coff) void {
@@ -153,10 +140,23 @@ fn formatSymbols(
     }
 }
 
-const Export = packed struct {
-    name: u32,
+pub const Export = packed struct {
+    imp_name: u32,
+    ext_name: u32,
     hint: u16,
-    ordinal: bool,
+    type: coff.ImportType,
+
+    pub fn getImportName(exp: Export, dll: *const Dll) [:0]const u8 {
+        return dll.getString(exp.imp_name);
+    }
+
+    pub fn getExternName(exp: Export, dll: *const Dll) [:0]const u8 {
+        return dll.getString(exp.ext_name);
+    }
+
+    pub fn isByOrdinal(exp: Export, dll: *const Dll) bool {
+        return exp.getExternName(dll).len == 0;
+    }
 };
 
 const assert = std.debug.assert;
