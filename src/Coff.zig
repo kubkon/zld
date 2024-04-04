@@ -11,8 +11,8 @@ sections: std.MultiArrayList(Section) = .{},
 string_intern: StringTable = .{},
 
 symbols: std.ArrayListUnmanaged(Symbol) = .{},
+symbols_extra: std.ArrayListUnmanaged(u32) = .{},
 globals: std.AutoHashMapUnmanaged(u32, Symbol.Index) = .{},
-alternate_names: std.AutoArrayHashMapUnmanaged(u32, AlternateName) = .{},
 /// Global symbols we need to resolve for the link to succeed.
 undefined_symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
 
@@ -76,8 +76,8 @@ pub fn deinit(self: *Coff) void {
     self.sections.deinit(gpa);
     self.atoms.deinit(gpa);
     self.symbols.deinit(gpa);
+    self.symbols_extra.deinit(gpa);
     self.globals.deinit(gpa);
-    self.alternate_names.deinit(gpa);
     self.undefined_symbols.deinit(gpa);
     self.merge_rules.deinit(gpa);
 }
@@ -96,6 +96,7 @@ pub fn flush(self: *Coff) !void {
     try self.files.append(gpa, .null);
     // Append null symbols.
     try self.symbols.append(gpa, .{});
+    try self.symbols_extra.append(gpa, 0);
 
     var arena_allocator = std.heap.ArenaAllocator.init(gpa);
     defer arena_allocator.deinit();
@@ -277,57 +278,19 @@ fn parseObject(self: *Coff, obj: LinkObject, queue: anytype) ParseError!bool {
     const object = &self.files.items(.data)[index].object;
     try object.parse(self);
     try self.objects.append(gpa, index);
-    try self.parseDirectives(object, queue);
+    try parseLibsFromDirectives(object, queue);
 
     return true;
 }
 
-fn parseDirectives(self: *Coff, object: *const Object, queue: anytype) ParseError!void {
-    const gpa = self.base.allocator;
-    var has_parse_error = false;
-    var it = mem.splitScalar(u8, object.getDirectives(), ' ');
-    var p = Options.ArgsParser(@TypeOf(it)){ .it = &it };
-    while (p.hasMore()) {
-        if (p.arg("defaultlib")) |name| {
-            const dir_obj = LinkObject{ .name = name, .tag = .default_lib };
-            log.debug("{}: adding implicit import {}", .{ object.fmtPath(), dir_obj });
-            try queue.writeItem(dir_obj);
-        } else if (p.arg("disallowlib")) |_| {
-            // TODO
-        } else if (p.arg("nodefaultlib")) |_| {
-            // TODO
-        } else if (p.flag("ThrowingNew")) {
-            // Not a linker flag, ignore
-        } else if (p.arg("guardsym")) |_| {
-            // Not a linker flag, ignore
-        } else if (p.arg("alternatename")) |mapping| {
-            const tok = mem.indexOfScalar(u8, mapping, '=') orelse {
-                self.base.fatal("{}: invalid format for /alternatename", .{object.fmtPath()});
-                has_parse_error = true;
-                continue;
-            };
-            try self.addAlternateName(mapping[0..tok], mapping[tok + 1 ..]);
-        } else if (p.arg("include")) |name| {
-            const off = try self.string_intern.insert(gpa, name);
-            const gop = try self.getOrCreateGlobal(off);
-            try self.undefined_symbols.append(gpa, gop.index);
-        } else if (p.arg("merge")) |mapping| {
-            const tok = mem.indexOfScalar(u8, mapping, '=') orelse {
-                self.base.fatal("{}: invalid format for /merge", .{object.fmtPath()});
-                has_parse_error = true;
-                continue;
-            };
-            try self.addMergeRule(mapping[0..tok], mapping[tok + 1 ..]);
-        } else {
-            std.debug.print("{s}\n", .{std.fmt.fmtSliceEscapeLower(object.getDirectives())});
-            self.base.fatal("{}: unhandled directive: {s}", .{
-                object.fmtPath(),
-                p.next_arg,
-            });
-            has_parse_error = true;
-        }
+fn parseLibsFromDirectives(object: *const Object, queue: anytype) !void {
+    for (object.default_libs.items) |off| {
+        const name = object.getString(off);
+        const dir_obj = LinkObject{ .name = name, .tag = .default_lib };
+        log.debug("{}: adding implicit import {}", .{ object.fmtPath(), dir_obj });
+        try queue.writeItem(dir_obj);
     }
-    if (has_parse_error) return error.ParseFailed;
+    // TODO handle /disallowlib and /nodefaultlib
 }
 
 fn parseArchive(self: *Coff, obj: LinkObject, queue: anytype) ParseError!bool {
@@ -378,7 +341,7 @@ fn parseArchive(self: *Coff, obj: LinkObject, queue: anytype) ParseError!bool {
                     else => |e| return e,
                 };
                 try self.objects.append(gpa, index);
-                try self.parseDirectives(object, queue);
+                try parseLibsFromDirectives(object, queue);
             },
             .import => {
                 var import_hdr_buffer: [@sizeOf(coff.ImportHeader)]u8 = undefined;
@@ -498,16 +461,6 @@ fn markLive(self: *Coff) void {
         }
     }
 
-    for (self.alternate_names.keys(), self.alternate_names.values()) |from, alt| {
-        if (self.globals.get(from)) |from_index| {
-            if (self.getSymbol(from_index).getFile(self) == null) {
-                if (self.getSymbol(alt.index).getFile(self)) |file| {
-                    if (file == .object) file.object.alive = true;
-                }
-            }
-        }
-    }
-
     for (self.objects.items) |index| {
         const object = self.getFile(index).?.object;
         if (object.alive) object.markLive(self);
@@ -538,6 +491,24 @@ fn getDefaultEntryPoint(self: *Coff) [:0]const u8 {
     // TODO: actually implement this
     _ = self;
     return "mainCRTStartup";
+}
+
+pub fn addAlternateName(self: *Coff, from: []const u8, to: []const u8) !void {
+    const addGlobalWithAlt = struct {
+        fn addGlobalWithAlt(ctx: *Coff, name: []const u8) !Symbol.Index {
+            const gpa = ctx.base.allocator;
+            const off = try ctx.string_intern.insert(gpa, name);
+            const gop = try ctx.getOrCreateGlobal(off);
+            const sym = ctx.getSymbol(gop.index);
+            sym.flags.alt_name = true;
+            return gop.index;
+        }
+    }.addGlobalWithAlt;
+
+    const from_index = try addGlobalWithAlt(self, from);
+    const to_index = try addGlobalWithAlt(self, to);
+    try self.getSymbol(from_index).addExtra(.{ .alt_name = to_index }, self);
+    try self.getSymbol(to_index).addExtra(.{ .alt_name = from_index }, self);
 }
 
 pub fn getFile(self: *Coff, index: File.Index) ?File {
@@ -587,6 +558,50 @@ pub fn getSymbol(self: *Coff, index: Symbol.Index) *Symbol {
     return &self.symbols.items[index];
 }
 
+pub fn addSymbolExtra(self: *Coff, extra: Symbol.Extra) !u32 {
+    const fields = @typeInfo(Symbol.Extra).Struct.fields;
+    try self.symbols_extra.ensureUnusedCapacity(self.base.allocator, fields.len);
+    return self.addSymbolExtraAssumeCapacity(extra);
+}
+
+pub fn addSymbolExtraAssumeCapacity(self: *Coff, extra: Symbol.Extra) u32 {
+    const index = @as(u32, @intCast(self.symbols_extra.items.len));
+    const fields = @typeInfo(Symbol.Extra).Struct.fields;
+    inline for (fields) |field| {
+        self.symbols_extra.appendAssumeCapacity(switch (field.type) {
+            u32 => @field(extra, field.name),
+            else => @compileError("bad field type"),
+        });
+    }
+    return index;
+}
+
+pub fn getSymbolExtra(self: Coff, index: u32) ?Symbol.Extra {
+    if (index == 0) return null;
+    const fields = @typeInfo(Symbol.Extra).Struct.fields;
+    var i: usize = index;
+    var result: Symbol.Extra = undefined;
+    inline for (fields) |field| {
+        @field(result, field.name) = switch (field.type) {
+            u32 => self.symbols_extra.items[i],
+            else => @compileError("bad field type"),
+        };
+        i += 1;
+    }
+    return result;
+}
+
+pub fn setSymbolExtra(self: *Coff, index: u32, extra: Symbol.Extra) void {
+    assert(index > 0);
+    const fields = @typeInfo(Symbol.Extra).Struct.fields;
+    inline for (fields, 0..) |field, i| {
+        self.symbols_extra.items[index + i] = switch (field.type) {
+            u32 => @field(extra, field.name),
+            else => @compileError("bad field type"),
+        };
+    }
+}
+
 const GetOrCreateGlobalResult = struct {
     found_existing: bool,
     index: Symbol.Index,
@@ -606,14 +621,6 @@ pub fn getOrCreateGlobal(self: *Coff, off: u32) !GetOrCreateGlobalResult {
         .found_existing = gop.found_existing,
         .index = gop.value_ptr.*,
     };
-}
-
-fn addAlternateName(self: *Coff, from_name: []const u8, to_name: []const u8) !void {
-    const gpa = self.base.allocator;
-    const from = try self.string_intern.insert(gpa, from_name);
-    const to = try self.string_intern.insert(gpa, to_name);
-    const gop = try self.getOrCreateGlobal(to);
-    try self.alternate_names.put(gpa, from, .{ .name = to, .index = gop.index });
 }
 
 fn addMergeRule(self: *Coff, from: []const u8, to: []const u8) !void {

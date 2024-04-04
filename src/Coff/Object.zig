@@ -10,7 +10,9 @@ auxtab: std.MultiArrayList(AuxSymbol) = .{},
 strtab: std.ArrayListUnmanaged(u8) = .{},
 symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
 
-directives: std.ArrayListUnmanaged(u8) = .{},
+default_libs: std.ArrayListUnmanaged(u32) = .{},
+disallow_libs: std.ArrayListUnmanaged(u32) = .{},
+merge_rules: std.ArrayListUnmanaged(struct { u32, u32 }) = .{},
 
 atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
 
@@ -27,7 +29,9 @@ pub fn deinit(self: *Object, allocator: Allocator) void {
     self.auxtab.deinit(allocator);
     self.strtab.deinit(allocator);
     self.symbols.deinit(allocator);
-    self.directives.deinit(allocator);
+    self.default_libs.deinit(allocator);
+    self.disallow_libs.deinit(allocator);
+    self.merge_rules.deinit(allocator);
     self.atoms.deinit(allocator);
 }
 
@@ -292,6 +296,9 @@ fn parseInputStringTable(
 }
 
 fn parseDirectives(self: *Object, allocator: Allocator, file: std.fs.File, offset: u64, coff_file: *Coff) !void {
+    var directives = std.ArrayList(u8).init(allocator);
+    defer directives.deinit();
+
     for (self.sections.items(.header), self.sections.items(.relocs)) |header, relocs| {
         if (header.flags.LNK_INFO == 0b1 and mem.eql(u8, self.getString(header.name), ".drectve")) {
             if (relocs.items.len > 0) {
@@ -299,11 +306,67 @@ fn parseDirectives(self: *Object, allocator: Allocator, file: std.fs.File, offse
                 return error.ParseFailed;
             }
 
-            const buffer = try self.directives.addManyAsSlice(allocator, header.size_of_raw_data);
+            const buffer = try directives.addManyAsSlice(header.size_of_raw_data);
             const amt = try file.preadAll(buffer, offset + header.pointer_to_raw_data);
             if (amt != header.size_of_raw_data) return error.InputOutput;
         }
     }
+
+    // Preparse directives acting on things like /include, /alternatename, /merge, etc.
+    var has_parse_error = false;
+    var it = mem.splitScalar(u8, mem.trim(u8, directives.items, " "), ' ');
+    var p = Coff.Options.ArgsParser(@TypeOf(it)){ .it = &it };
+    while (p.hasMore()) {
+        if (p.arg("defaultlib")) |name| {
+            const off = try self.insertString(allocator, name);
+            try self.default_libs.append(allocator, off);
+        } else if (p.arg("disallowlib")) |name| {
+            const off = try self.insertString(allocator, name);
+            try self.disallow_libs.append(allocator, off);
+        } else if (p.arg("nodefaultlib")) |name| {
+            const off = try self.insertString(allocator, name);
+            try self.disallow_libs.append(allocator, off);
+        } else if (p.flag("ThrowingNew")) {
+            // Not a linker flag, ignore
+        } else if (p.arg("guardsym")) |_| {
+            // Not a linker flag, ignore
+        } else if (p.arg("alternatename")) |mapping| {
+            // TODO
+            const tok = mem.indexOfScalar(u8, mapping, '=') orelse {
+                coff_file.base.fatal("{}: invalid format for /alternatename", .{self.fmtPath()});
+                has_parse_error = true;
+                continue;
+            };
+            try coff_file.addAlternateName(mapping[0..tok], mapping[tok + 1 ..]);
+        } else if (p.arg("include")) |name| {
+            try self.symtab.append(allocator, .{
+                .name = try self.insertString(allocator, name),
+                .value = 0,
+                .section_number = .UNDEFINED,
+                .type = .{ .base_type = .NULL, .complex_type = .NULL },
+                .storage_class = .EXTERNAL,
+                .aux_index = 0,
+                .aux_len = 0,
+            });
+        } else if (p.arg("merge")) |mapping| {
+            const tok = mem.indexOfScalar(u8, mapping, '=') orelse {
+                coff_file.base.fatal("{}: invalid format for /merge", .{self.fmtPath()});
+                has_parse_error = true;
+                continue;
+            };
+            try self.merge_rules.append(allocator, .{
+                try self.insertString(allocator, mapping[0..tok]),
+                try self.insertString(allocator, mapping[tok + 1 ..]),
+            });
+        } else {
+            coff_file.base.fatal("{}: unhandled directive: {s}", .{
+                self.fmtPath(),
+                p.next_arg,
+            });
+            has_parse_error = true;
+        }
+    }
+    if (has_parse_error) return error.ParseFailed;
 }
 
 fn initAtoms(self: *Object, allocator: Allocator, coff_file: *Coff) !void {
@@ -437,10 +500,6 @@ pub fn markLive(self: *Object, coff_file: *Coff) void {
             if (file == .object) file.markLive(coff_file);
         }
     }
-}
-
-pub fn getDirectives(self: Object) []const u8 {
-    return mem.trim(u8, self.directives.items, " ");
 }
 
 pub fn getString(self: Object, off: u32) [:0]const u8 {

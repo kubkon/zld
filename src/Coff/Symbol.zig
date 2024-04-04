@@ -22,12 +22,20 @@ coff_sym_idx: u32 = 0,
 /// Misc flags for the symbol.
 flags: Flags = .{},
 
+extra: u32 = 0,
+
 pub fn getName(symbol: Symbol, coff_file: *Coff) [:0]const u8 {
     if (symbol.flags.global) return coff_file.string_intern.getAssumeExists(symbol.name);
     return switch (symbol.getFile(coff_file).?) {
         .dll => unreachable, // There are no local symbols for DLLs
         inline else => |x| x.getString(symbol.name),
     };
+}
+
+pub fn getAltSymbol(symbol: Symbol, coff_file: *Coff) ?*Symbol {
+    if (!symbol.flags.alt_name) return null;
+    const extra = symbol.getExtra(coff_file).?;
+    return coff_file.getSymbol(extra.alt_name);
 }
 
 pub fn getFile(symbol: Symbol, coff_file: *Coff) ?File {
@@ -61,6 +69,31 @@ pub fn getSymbolRank(symbol: Symbol, coff_file: *Coff) u32 {
         .weak = false, // TODO
         .tentative = false, // TODO
     });
+}
+
+const AddExtraOpts = struct {
+    alt_name: ?u32 = null,
+};
+
+pub fn addExtra(symbol: *Symbol, opts: AddExtraOpts, coff_file: *Coff) !void {
+    if (symbol.getExtra(coff_file) == null) {
+        symbol.extra = try coff_file.addSymbolExtra(.{});
+    }
+    var extra = symbol.getExtra(coff_file).?;
+    inline for (@typeInfo(@TypeOf(opts)).Struct.fields) |field| {
+        if (@field(opts, field.name)) |x| {
+            @field(extra, field.name) = x;
+        }
+    }
+    symbol.setExtra(extra, coff_file);
+}
+
+pub inline fn getExtra(symbol: Symbol, coff_file: *Coff) ?Extra {
+    return coff_file.getSymbolExtra(symbol.extra);
+}
+
+pub inline fn setExtra(symbol: Symbol, extra: Extra, coff_file: *Coff) void {
+    coff_file.setSymbolExtra(symbol.extra, extra);
 }
 
 pub fn format(
@@ -135,6 +168,13 @@ pub const Flags = packed struct {
 
     /// Whether the symbol is weak.
     weak: bool = false,
+
+    /// Whether the symbol has alternate name.
+    alt_name: bool = false,
+};
+
+pub const Extra = struct {
+    alt_name: u32 = 0,
 };
 
 pub const Index = u32;
