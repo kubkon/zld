@@ -12,10 +12,14 @@ string_intern: StringTable = .{},
 
 symbols: std.ArrayListUnmanaged(Symbol) = .{},
 globals: std.AutoHashMapUnmanaged(u32, Symbol.Index) = .{},
-alternate_names: std.AutoHashMapUnmanaged(u32, u32) = .{},
+alternate_names: std.AutoArrayHashMapUnmanaged(u32, AlternateName) = .{},
+/// Global symbols we need to resolve for the link to succeed.
+undefined_symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
 
 atoms: std.ArrayListUnmanaged(Atom) = .{},
 merge_rules: std.AutoArrayHashMapUnmanaged(u32, u32) = .{},
+
+entry_index: ?Symbol.Index = null,
 
 pub fn openPath(allocator: Allocator, options: Options, thread_pool: *ThreadPool) !*Coff {
     const file = try options.emit.directory.createFile(options.emit.sub_path, .{
@@ -74,6 +78,7 @@ pub fn deinit(self: *Coff) void {
     self.symbols.deinit(gpa);
     self.globals.deinit(gpa);
     self.alternate_names.deinit(gpa);
+    self.undefined_symbols.deinit(gpa);
     self.merge_rules.deinit(gpa);
 }
 
@@ -155,6 +160,7 @@ pub fn flush(self: *Coff) !void {
         try self.getFile(index).?.dll.initSymbols(self);
     }
 
+    try self.addUndefinedSymbols();
     try self.resolveSymbols();
 
     if (build_options.enable_logging)
@@ -277,6 +283,7 @@ fn parseObject(self: *Coff, obj: LinkObject, queue: anytype) ParseError!bool {
 }
 
 fn parseDirectives(self: *Coff, object: *const Object, queue: anytype) ParseError!void {
+    const gpa = self.base.allocator;
     var has_parse_error = false;
     var it = mem.splitScalar(u8, object.getDirectives(), ' ');
     var p = Options.ArgsParser(@TypeOf(it)){ .it = &it };
@@ -301,7 +308,9 @@ fn parseDirectives(self: *Coff, object: *const Object, queue: anytype) ParseErro
             };
             try self.addAlternateName(mapping[0..tok], mapping[tok + 1 ..]);
         } else if (p.arg("include")) |name| {
-            try self.addUndefined(name);
+            const off = try self.string_intern.insert(gpa, name);
+            const gop = try self.getOrCreateGlobal(off);
+            try self.undefined_symbols.append(gpa, gop.index);
         } else if (p.arg("merge")) |mapping| {
             const tok = mem.indexOfScalar(u8, mapping, '=') orelse {
                 self.base.fatal("{}: invalid format for /merge", .{object.fmtPath()});
@@ -419,6 +428,18 @@ fn parseArchive(self: *Coff, obj: LinkObject, queue: anytype) ParseError!bool {
     return true;
 }
 
+fn addUndefinedSymbols(self: *Coff) !void {
+    const gpa = self.base.allocator;
+
+    {
+        // Entry point
+        const name = self.getDefaultEntryPoint();
+        const off = try self.string_intern.insert(gpa, name);
+        const gop = try self.getOrCreateGlobal(off);
+        self.entry_index = gop.index;
+    }
+}
+
 fn resolveSymbols(self: *Coff) !void {
     const tracy = trace(@src());
     defer tracy.end();
@@ -465,6 +486,28 @@ fn markLive(self: *Coff) void {
     const tracy = trace(@src());
     defer tracy.end();
 
+    for (self.undefined_symbols.items) |index| {
+        if (self.getSymbol(index).getFile(self)) |file| {
+            if (file == .object) file.object.alive = true;
+        }
+    }
+
+    if (self.entry_index) |index| {
+        if (self.getSymbol(index).getFile(self)) |file| {
+            if (file == .object) file.object.alive = true;
+        }
+    }
+
+    for (self.alternate_names.keys(), self.alternate_names.values()) |from, alt| {
+        if (self.globals.get(from)) |from_index| {
+            if (self.getSymbol(from_index).getFile(self) == null) {
+                if (self.getSymbol(alt.index).getFile(self)) |file| {
+                    if (file == .object) file.object.alive = true;
+                }
+            }
+        }
+    }
+
     for (self.objects.items) |index| {
         const object = self.getFile(index).?.object;
         if (object.alive) object.markLive(self);
@@ -489,6 +532,12 @@ pub fn isArchive(data: *const [Archive.magic.len]u8) bool {
         return false;
     }
     return true;
+}
+
+fn getDefaultEntryPoint(self: *Coff) [:0]const u8 {
+    // TODO: actually implement this
+    _ = self;
+    return "mainCRTStartup";
 }
 
 pub fn getFile(self: *Coff, index: File.Index) ?File {
@@ -559,19 +608,12 @@ pub fn getOrCreateGlobal(self: *Coff, off: u32) !GetOrCreateGlobalResult {
     };
 }
 
-fn addUndefined(self: *Coff, name: []const u8) !void {
-    const gpa = self.base.allocator;
-    const off = try self.string_intern.insert(gpa, name);
-    _ = try self.getOrCreateGlobal(off);
-}
-
 fn addAlternateName(self: *Coff, from_name: []const u8, to_name: []const u8) !void {
     const gpa = self.base.allocator;
     const from = try self.string_intern.insert(gpa, from_name);
     const to = try self.string_intern.insert(gpa, to_name);
-    _ = try self.getOrCreateGlobal(from);
-    _ = try self.getOrCreateGlobal(to);
-    try self.alternate_names.put(gpa, from, to);
+    const gop = try self.getOrCreateGlobal(to);
+    try self.alternate_names.put(gpa, from, .{ .name = to, .index = gop.index });
 }
 
 fn addMergeRule(self: *Coff, from: []const u8, to: []const u8) !void {
@@ -612,6 +654,52 @@ fn fmtDumpState(
             dll.fmtSymbols(self),
         });
     }
+    {
+        try writer.writeAll("globals\n");
+        try writer.writeAll("  undefined\n");
+        for (self.undefined_symbols.items) |index| {
+            try writer.print("    {}\n", .{self.fmtGlobal(index)});
+        }
+        if (self.entry_index) |index| {
+            try writer.print("  entry\n    {}\n", .{self.fmtGlobal(index)});
+        }
+        for (self.objects.items) |index| {
+            const object = self.getFile(index).?.object;
+            try writer.print("  {}\n", .{object.fmtPath()});
+            for (object.symbols.items) |sym_index| {
+                const sym = self.getSymbol(sym_index);
+                if (!sym.flags.global) continue;
+                try writer.print("    {}\n", .{self.fmtGlobal(sym_index)});
+            }
+        }
+    }
+}
+
+const FormatGlobalCtx = struct {
+    coff_file: *Coff,
+    index: Symbol.Index,
+};
+
+fn fmtGlobal(self: *Coff, index: Symbol.Index) std.fmt.Formatter(formatGlobal) {
+    return .{ .data = .{ .coff_file = self, .index = index } };
+}
+
+fn formatGlobal(
+    ctx: FormatGlobalCtx,
+    comptime unused_fmt_string: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = options;
+    _ = unused_fmt_string;
+    const self = ctx.coff_file;
+    const index = ctx.index;
+    const sym = self.getSymbol(index);
+    try writer.print("{s} => ", .{sym.getName(self)});
+    if (sym.getFile(self)) |file|
+        try writer.print(" resolved in {}", .{file.fmtPath()})
+    else
+        try writer.writeAll("unresolved");
 }
 
 const Section = struct {
@@ -664,6 +752,11 @@ pub const LinkObject = struct {
         }
         try writer.print("{s}", .{obj.name});
     }
+};
+
+const AlternateName = struct {
+    name: u32,
+    index: Symbol.Index,
 };
 
 pub const base_tag = Zld.Tag.coff;
