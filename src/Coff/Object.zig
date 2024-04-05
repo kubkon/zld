@@ -6,7 +6,7 @@ index: File.Index,
 header: ?coff.CoffHeader = null,
 sections: std.MultiArrayList(InputSection) = .{},
 symtab: std.ArrayListUnmanaged(InputSymbol) = .{},
-auxtab: std.MultiArrayList(AuxSymbol) = .{},
+auxtab: std.ArrayListUnmanaged(AuxSymbol) = .{},
 strtab: std.ArrayListUnmanaged(u8) = .{},
 symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
 
@@ -166,46 +166,17 @@ fn parseInputSymbolTable(self: *Object, allocator: Allocator, file: std.fs.File,
             .section_number = sym.section_number,
             .type = sym.type,
             .storage_class = sym.storage_class,
-            .aux_index = @intCast(self.auxtab.slice().len),
+            .aux_index = @intCast(self.auxtab.items.len),
             .aux_len = 0,
         };
         index += 1;
 
-        if (sym.section_number == .UNDEFINED and sym.value > 0) {
+        if (out_sym.common()) {
             std.debug.print("  {s} is common!\n", .{name});
         }
-        if (sym.section_number == .UNDEFINED and sym.storage_class == .WEAK_EXTERNAL and sym.value == 0) {
-            std.debug.print("  {s} is weak ext!\n", .{name});
+        if (out_sym.weakExt()) {
+            std.debug.print("  {s} is weak!\n", .{name});
         }
-
-        const aux_tag: ?AuxSymbolTag = switch (sym.section_number) {
-            .UNDEFINED => if (sym.storage_class == .WEAK_EXTERNAL and sym.value == 0)
-                .weak
-            else
-                null,
-            .ABSOLUTE => null,
-            .DEBUG => if (sym.storage_class == .FILE)
-                .file
-            else
-                null,
-            else => tag: {
-                if (sym.storage_class == .FUNCTION) {
-                    break :tag .debug_info;
-                }
-                if (sym.storage_class == .EXTERNAL and sym.type.complex_type == .FUNCTION) {
-                    break :tag .func;
-                }
-                if (sym.storage_class == .STATIC) {
-                    for (self.sections.items(.header)) |header| {
-                        const sect_name = self.getString(header.name);
-                        if (mem.eql(u8, sect_name, name)) {
-                            break :tag .sect;
-                        }
-                    }
-                }
-                break :tag null;
-            },
-        };
 
         var file_name_buffer = std.ArrayList(u8).init(allocator);
         defer file_name_buffer.deinit();
@@ -215,71 +186,60 @@ fn parseInputSymbolTable(self: *Object, allocator: Allocator, file: std.fs.File,
             aux_count += 1;
             index += 1;
         }) {
-            if (aux_tag == null) continue;
-
             const aux_raw = buffer[index * symtab_entry_size ..][0..symtab_entry_size];
-
-            switch (aux_tag.?) {
-                .func => {
-                    const func_def = parseFuncDef(aux_raw);
+            if (out_sym.funcDef()) {
+                const func_def = parseFuncDef(aux_raw);
+                try self.auxtab.append(allocator, .{ .func_def = .{
+                    .sym_index = index_map.get(func_def.tag_index).?,
+                    .total_size = func_def.total_size,
+                    .pointer_to_linenumber = func_def.pointer_to_linenumber,
+                    .pointer_to_next_function = index_map.get(func_def.pointer_to_next_function).?,
+                } });
+                out_sym.aux_len += 1;
+            } else if (out_sym.fileRec()) {
+                const file_def = parseFileDef(aux_raw);
+                try file_name_buffer.writer().writeAll(file_def.getFileName());
+                if (aux_count == sym.number_of_aux_symbols) {
                     try self.auxtab.append(allocator, .{
-                        .func = .{
-                            .sym_index = index_map.get(func_def.tag_index).?,
-                            .total_size = func_def.total_size,
-                            .pointer_to_linenumber = func_def.pointer_to_linenumber,
-                            .pointer_to_next_function = index_map.get(func_def.pointer_to_next_function).?,
-                        },
+                        .file_rec = try self.insertString(allocator, file_name_buffer.items),
                     });
                     out_sym.aux_len += 1;
-                },
-                .file => {
-                    const file_def = parseFileDef(aux_raw);
-                    try file_name_buffer.writer().writeAll(file_def.getFileName());
-                    if (aux_count == sym.number_of_aux_symbols) {
-                        try self.auxtab.append(allocator, .{
-                            .file = try self.insertString(allocator, file_name_buffer.items),
-                        });
-                        out_sym.aux_len += 1;
-                    }
-                },
-                .debug_info => {
-                    const debug_info = parseDebugInfo(aux_raw);
-                    var out_aux: DebugInfo = .{
-                        .line_number = debug_info.linenumber,
-                        .pointer_to_next_function = 0,
-                    };
-                    if (mem.eql(u8, name, ".bf")) {
-                        out_aux.pointer_to_next_function = index_map.get(debug_info.pointer_to_next_function).?;
-                    }
-                    try self.auxtab.append(allocator, .{ .debug_info = out_aux });
-                    out_sym.aux_len += 1;
-                },
-                .sect => {
-                    const sect_def = parseSectDef(aux_raw);
-                    try self.auxtab.append(allocator, .{ .sect = .{
-                        .length = sect_def.length,
-                        .number_of_relocations = sect_def.number_of_relocations,
-                        .number_of_linenumbers = sect_def.number_of_linenumbers,
-                        .checksum = sect_def.checksum,
-                        .number = sect_def.number,
-                        .selection = sect_def.selection,
-                    } });
-                    out_sym.aux_len += 1;
-                },
-                .weak => {
-                    const weak_ext = parseWeakExtDef(aux_raw);
-                    try self.auxtab.append(allocator, .{
-                        .weak = .{
-                            .sym_index = index_map.get(weak_ext.tag_index).?,
-                            .flag = weak_ext.flag,
-                        },
-                    });
-                    out_sym.aux_len += 1;
-                    std.debug.print("    ch {}\n", .{weak_ext.flag});
-                    std.debug.print("    sym2 {s}\n", .{
-                        self.getString(self.symtab.items[index_map.get(weak_ext.tag_index).?].name),
-                    });
-                },
+                }
+            } else if (out_sym.funcLineInfo()) {
+                const debug_info = parseDebugInfo(aux_raw);
+                var out_aux: DebugInfo = .{
+                    .line_number = debug_info.linenumber,
+                    .pointer_to_next_function = 0,
+                };
+                if (mem.eql(u8, name, ".bf")) {
+                    out_aux.pointer_to_next_function = index_map.get(debug_info.pointer_to_next_function).?;
+                }
+                try self.auxtab.append(allocator, .{ .debug_info = out_aux });
+                out_sym.aux_len += 1;
+            } else if ((out_sym.ext() and out_sym.abs()) or out_sym.storage_class == .STATIC) {
+                const sect_def = parseSectDef(aux_raw);
+                try self.auxtab.append(allocator, .{ .sect_def = .{
+                    .length = sect_def.length,
+                    .number_of_relocations = sect_def.number_of_relocations,
+                    .number_of_linenumbers = sect_def.number_of_linenumbers,
+                    .checksum = sect_def.checksum,
+                    .number = sect_def.number,
+                    .selection = sect_def.selection,
+                } });
+                out_sym.aux_len += 1;
+            } else if (out_sym.weakExt()) {
+                const weak_ext = parseWeakExtDef(aux_raw);
+                try self.auxtab.append(allocator, .{ .weak_ext = .{
+                    .sym_index = index_map.get(weak_ext.tag_index).?,
+                    .flag = weak_ext.flag,
+                } });
+                out_sym.aux_len += 1;
+                std.debug.print("    ch {}\n", .{weak_ext.flag});
+                std.debug.print("    sym2 {s}\n", .{
+                    self.getString(self.symtab.items[index_map.get(weak_ext.tag_index).?].name),
+                });
+            } else {
+                log.debug("{}: unhandled aux record for symbol '{s}'", .{ self.fmtPath(), name });
             }
         }
     }
@@ -691,22 +651,60 @@ pub const InputSymbol = struct {
     storage_class: coff.StorageClass,
     aux_index: u32,
     aux_len: u32,
+
+    pub fn sect(sym: InputSymbol) bool {
+        return sym.storage_class == .SECTION;
+    }
+
+    pub fn ext(sym: InputSymbol) bool {
+        return sym.storage_class == .EXTERNAL;
+    }
+
+    pub fn abs(sym: InputSymbol) bool {
+        return sym.section_number == .ABSOLUTE;
+    }
+
+    pub fn clrTok(sym: InputSymbol) bool {
+        return sym.storage_class == .CLR_TOKEN;
+    }
+
+    pub fn fileRec(sym: InputSymbol) bool {
+        return sym.storage_class == .FILE;
+    }
+
+    pub fn funcLineInfo(sym: InputSymbol) bool {
+        return sym.storage_class == .FUNCTION;
+    }
+
+    pub fn funcDef(sym: InputSymbol) bool {
+        const sect_num: i16 = @bitCast(@intFromEnum(sym.section_number));
+        return sym.ext() and sym.type.base_type == .NULL and sym.type.complex_type == .FUNCTION and sect_num > 0;
+    }
+
+    pub fn sectDef(sym: InputSymbol) bool {
+        if (sym.aux_len == 0) return false;
+        return (sym.ext() and sym.abs()) or sym.storage_class == .STATIC;
+    }
+
+    pub fn common(sym: InputSymbol) bool {
+        return (sym.ext() or sym.sect()) and sym.section_number == .UNDEFINED and sym.value != 0;
+    }
+
+    pub fn weakExt(sym: InputSymbol) bool {
+        return sym.storage_class == .WEAK_EXTERNAL;
+    }
+
+    pub fn undf(sym: InputSymbol) bool {
+        return sym.ext() and sym.section_number == .UNDEFINED and sym.value == 0;
+    }
 };
 
-const AuxSymbolTag = enum {
-    file,
-    func,
-    debug_info,
-    sect,
-    weak,
-};
-
-const AuxSymbol = union(AuxSymbolTag) {
-    file: u32,
-    func: FuncDef,
+const AuxSymbol = union {
+    file_rec: u32,
+    func_def: FuncDef,
     debug_info: DebugInfo,
-    sect: SectDef,
-    weak: WeakDef,
+    sect_def: SectDef,
+    weak_ext: WeakExt,
 };
 
 const FuncDef = struct {
@@ -725,7 +723,7 @@ const SectDef = struct {
     selection: coff.ComdatSelection,
 };
 
-const WeakDef = struct {
+const WeakExt = struct {
     sym_index: u32,
     flag: coff.WeakExternalFlag,
 };
