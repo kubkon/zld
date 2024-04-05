@@ -77,7 +77,6 @@ pub fn getSymbolRank(symbol: Symbol, coff_file: *Coff) u32 {
     };
     return file.getSymbolRank(.{
         .archive = in_archive,
-        .weak = symbol.flags.weak,
         .common = symbol.flags.common,
     });
 }

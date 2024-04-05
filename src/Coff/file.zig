@@ -23,26 +23,27 @@ pub const File = union(enum) {
                 const global = coff_file.getSymbol(global_index);
                 if (!global.flags.global) continue;
                 const name = global.name;
-                const alt_name = global.flags.alt_name;
                 const extra = global.extra;
+                const alt_name = global.flags.alt_name;
+                const weak = global.flags.weak;
                 global.* = .{};
                 global.name = name;
+                global.extra = extra;
                 global.flags.global = true;
                 global.flags.alt_name = alt_name;
-                global.extra = extra;
+                global.flags.weak = weak;
             },
         }
     }
 
     pub fn getSymbolRank(file: File, args: struct {
         archive: bool = false,
-        weak: bool = false,
         common: bool = false,
     }) u32 {
         const base: u32 = blk: {
-            if (args.common) break :blk if (args.archive) 6 else 5;
-            if (file == .dll or args.archive) break :blk if (args.weak) 4 else 3;
-            break :blk if (args.weak) 2 else 1;
+            if (args.common) break :blk if (args.archive) 4 else 3;
+            if (file == .dll or args.archive) break :blk 2;
+            break :blk 1;
         };
         return (base << 24) + file.getIndex();
     }

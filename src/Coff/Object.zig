@@ -351,30 +351,34 @@ fn initSymbols(self: *Object, allocator: Allocator, coff_file: *Coff) !void {
 
     try self.symbols.ensureUnusedCapacity(allocator, self.symtab.items.len);
 
-    for (self.symtab.items, 0..) |coff_sym, i| switch (coff_sym.storage_class) {
-        .EXTERNAL, .WEAK_EXTERNAL => {
+    for (self.symtab.items, 0..) |coff_sym, i| {
+        if (coff_sym.ext() or coff_sym.weakExt()) {
             const name = self.getString(coff_sym.name);
             const off = try coff_file.string_intern.insert(allocator, name);
             const gop = try coff_file.getOrCreateGlobal(off);
             self.symbols.addOneAssumeCapacity().* = gop.index;
-        },
-        else => {
-            const atom = switch (coff_sym.section_number) {
-                .ABSOLUTE, .DEBUG, .UNDEFINED => 0,
-                else => self.atoms.items[@intFromEnum(coff_sym.section_number) - 1],
-            };
-            const index = try coff_file.addSymbol();
-            self.symbols.appendAssumeCapacity(index);
-            const symbol = coff_file.getSymbol(index);
-            symbol.* = .{
-                .value = coff_sym.value,
-                .name = coff_sym.name,
-                .coff_sym_idx = @intCast(i),
-                .atom = atom,
-                .file = self.index,
-            };
-        },
-    };
+            if (coff_sym.weakExt()) {
+                coff_file.getSymbol(gop.index).flags.weak = true;
+            }
+            continue;
+        }
+
+        const atom = switch (coff_sym.section_number) {
+            .UNDEFINED, .DEBUG, .ABSOLUTE => 0,
+            else => |x| self.atoms.items[@intFromEnum(x) - 1],
+        };
+        const index = try coff_file.addSymbol();
+        self.symbols.appendAssumeCapacity(index);
+        const symbol = coff_file.getSymbol(index);
+        symbol.* = .{
+            .value = coff_sym.value,
+            .name = coff_sym.name,
+            .coff_sym_idx = @intCast(i),
+            .atom = atom,
+            .file = self.index,
+        };
+        symbol.flags.common = coff_sym.common();
+    }
 }
 
 fn skipSection(self: *Object, index: u16) bool {
@@ -417,9 +421,11 @@ pub fn resolveSymbols(self: *Object, coff_file: *Coff) void {
 
         const coff_sym_idx = @as(u32, @intCast(i));
         const coff_sym = self.symtab.items[coff_sym_idx];
+        if (coff_sym.undf() or coff_sym.weakExt()) continue;
+
         const sect_idx: ?u32 = switch (coff_sym.section_number) {
-            .UNDEFINED, .DEBUG => continue,
-            .ABSOLUTE => null,
+            .DEBUG => unreachable,
+            .UNDEFINED, .ABSOLUTE => null,
             else => |x| @intFromEnum(x) - 1,
         };
         if (sect_idx) |idx| {
@@ -430,14 +436,14 @@ pub fn resolveSymbols(self: *Object, coff_file: *Coff) void {
 
         if (self.asFile().getSymbolRank(.{
             .archive = !self.alive,
-            .weak = false, // TODO
-            // .weak = coff_sym.storage_class == .WEAK_EXTERNAL,
-            .common = false, // TODO
+            .common = coff_sym.common(),
         }) < global.getSymbolRank(coff_file)) {
             global.value = coff_sym.value;
             global.atom = if (sect_idx) |idx| self.atoms.items[idx] else 0;
             global.coff_sym_idx = coff_sym_idx;
             global.file = self.index;
+            global.flags.common = coff_sym.common();
+            global.flags.weak = false;
         }
     }
 }
