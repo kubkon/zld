@@ -150,6 +150,8 @@ fn parseInputSymbolTable(self: *Object, allocator: Allocator, file: std.fs.File,
         }
     }
 
+    std.debug.print("{}\n", .{self.fmtPath()});
+
     var index: u32 = 0;
     while (index < num_symbols) {
         const rec = buffer[index * symtab_entry_size ..][0..symtab_entry_size];
@@ -168,6 +170,13 @@ fn parseInputSymbolTable(self: *Object, allocator: Allocator, file: std.fs.File,
             .aux_len = 0,
         };
         index += 1;
+
+        if (sym.section_number == .UNDEFINED and sym.value > 0) {
+            std.debug.print("  {s} is common!\n", .{name});
+        }
+        if (sym.section_number == .UNDEFINED and sym.storage_class == .WEAK_EXTERNAL and sym.value == 0) {
+            std.debug.print("  {s} is weak ext!\n", .{name});
+        }
 
         const aux_tag: ?AuxSymbolTag = switch (sym.section_number) {
             .UNDEFINED => if (sym.storage_class == .WEAK_EXTERNAL and sym.value == 0)
@@ -201,9 +210,9 @@ fn parseInputSymbolTable(self: *Object, allocator: Allocator, file: std.fs.File,
         var file_name_buffer = std.ArrayList(u8).init(allocator);
         defer file_name_buffer.deinit();
 
-        var aux_index: u32 = 0;
-        while (aux_index < sym.number_of_aux_symbols) : ({
-            aux_index += 1;
+        var aux_count: u32 = 0;
+        while (aux_count < sym.number_of_aux_symbols) : ({
+            aux_count += 1;
             index += 1;
         }) {
             if (aux_tag == null) continue;
@@ -226,7 +235,7 @@ fn parseInputSymbolTable(self: *Object, allocator: Allocator, file: std.fs.File,
                 .file => {
                     const file_def = parseFileDef(aux_raw);
                     try file_name_buffer.writer().writeAll(file_def.getFileName());
-                    if (aux_index == sym.number_of_aux_symbols) {
+                    if (aux_count == sym.number_of_aux_symbols) {
                         try self.auxtab.append(allocator, .{
                             .file = try self.insertString(allocator, file_name_buffer.items),
                         });
@@ -266,6 +275,10 @@ fn parseInputSymbolTable(self: *Object, allocator: Allocator, file: std.fs.File,
                         },
                     });
                     out_sym.aux_len += 1;
+                    std.debug.print("    ch {}\n", .{weak_ext.flag});
+                    std.debug.print("    sym2 {s}\n", .{
+                        self.getString(self.symtab.items[index_map.get(weak_ext.tag_index).?].name),
+                    });
                 },
             }
         }
@@ -331,7 +344,6 @@ fn parseDirectives(self: *Object, allocator: Allocator, file: std.fs.File, offse
         } else if (p.arg("guardsym")) |_| {
             // Not a linker flag, ignore
         } else if (p.arg("alternatename")) |mapping| {
-            // TODO
             const tok = mem.indexOfScalar(u8, mapping, '=') orelse {
                 coff_file.base.fatal("{}: invalid format for /alternatename", .{self.fmtPath()});
                 has_parse_error = true;
@@ -490,9 +502,15 @@ pub fn markLive(self: *Object, coff_file: *Coff) void {
     for (self.symbols.items, 0..) |index, csym_idx| {
         const sym = coff_file.getSymbol(index);
         if (!sym.flags.global) continue;
-        if (sym.getFile(coff_file) == null) continue;
 
-        const file = sym.getFile(coff_file).?;
+        const file = sym.getFile(coff_file) orelse blk: {
+            // Before giving up, check for alt_sym first.
+            if (sym.getAltSymbol(coff_file)) |alt_sym| {
+                if (alt_sym.getFile(coff_file)) |file|
+                    break :blk file;
+            }
+            continue;
+        };
         const coff_sym = self.symtab.items[csym_idx];
         const should_keep = coff_sym.section_number == .UNDEFINED;
         if (should_keep and !file.isAlive()) {

@@ -494,21 +494,20 @@ fn getDefaultEntryPoint(self: *Coff) [:0]const u8 {
 }
 
 pub fn addAlternateName(self: *Coff, from: []const u8, to: []const u8) !void {
-    const addGlobalWithAlt = struct {
-        fn addGlobalWithAlt(ctx: *Coff, name: []const u8) !Symbol.Index {
-            const gpa = ctx.base.allocator;
-            const off = try ctx.string_intern.insert(gpa, name);
-            const gop = try ctx.getOrCreateGlobal(off);
-            const sym = ctx.getSymbol(gop.index);
-            sym.flags.alt_name = true;
-            return gop.index;
-        }
-    }.addGlobalWithAlt;
-
-    const from_index = try addGlobalWithAlt(self, from);
-    const to_index = try addGlobalWithAlt(self, to);
+    const gpa = self.base.allocator;
+    const from_index = blk: {
+        const off = try self.string_intern.insert(gpa, from);
+        const gop = try self.getOrCreateGlobal(off);
+        const sym = self.getSymbol(gop.index);
+        sym.flags.alt_name = true;
+        break :blk gop.index;
+    };
+    const to_index = blk: {
+        const off = try self.string_intern.insert(gpa, to);
+        const gop = try self.getOrCreateGlobal(off);
+        break :blk gop.index;
+    };
     try self.getSymbol(from_index).addExtra(.{ .alt_name = to_index }, self);
-    try self.getSymbol(to_index).addExtra(.{ .alt_name = from_index }, self);
 }
 
 pub fn getFile(self: *Coff, index: File.Index) ?File {
