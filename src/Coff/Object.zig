@@ -432,7 +432,7 @@ pub fn resolveSymbols(self: *Object, coff_file: *Coff) void {
             .archive = !self.alive,
             .weak = false, // TODO
             // .weak = coff_sym.storage_class == .WEAK_EXTERNAL,
-            .tentative = false, // TODO
+            .common = false, // TODO
         }) < global.getSymbolRank(coff_file)) {
             global.value = coff_sym.value;
             global.atom = if (sect_idx) |idx| self.atoms.items[idx] else 0;
@@ -465,6 +465,11 @@ pub fn markLive(self: *Object, coff_file: *Coff) void {
             if (file == .object) file.markLive(coff_file);
         }
     }
+}
+
+pub fn convertCommonSymbols(self: *Object, coff_file: *Coff) !void {
+    _ = self;
+    _ = coff_file;
 }
 
 pub fn getString(self: Object, off: u32) [:0]const u8 {

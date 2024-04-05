@@ -46,9 +46,20 @@ pub fn getAtom(symbol: Symbol, coff_file: *Coff) ?*Atom {
     return coff_file.getAtom(symbol.atom);
 }
 
-pub fn getAddress(symbol: Symbol, args: struct {}, coff_file: *Coff) u64 {
-    _ = args;
+pub fn getAddress(symbol: Symbol, args: struct {
+    alt: bool = true,
+}, coff_file: *Coff) u64 {
     if (symbol.out_section_number == 0) return symbol.value;
+    if (symbol.getFile(coff_file) == null) {
+        if (args.alt and symbol.getAltSymbol(coff_file) != null) {
+            const alt = symbol.getAltSymbol(coff_file).?;
+            if (alt.getFile(coff_file)) |_| {
+                const header = coff_file.sections.items(.header)[alt.out_section_number];
+                return header.virtual_address + alt.value;
+            }
+        }
+        return 0;
+    }
     const header = coff_file.sections.items(.header)[symbol.out_section_number];
     return header.virtual_address + symbol.value;
 }
@@ -66,8 +77,8 @@ pub fn getSymbolRank(symbol: Symbol, coff_file: *Coff) u32 {
     };
     return file.getSymbolRank(.{
         .archive = in_archive,
-        .weak = false, // TODO
-        .tentative = false, // TODO
+        .weak = symbol.flags.weak,
+        .common = symbol.flags.common,
     });
 }
 
@@ -135,24 +146,30 @@ fn format2(
         symbol.getName(ctx.coff_file),
         symbol.getAddress(.{}, ctx.coff_file),
     });
-    if (symbol.getFile(ctx.coff_file)) |file| {
-        if (symbol.out_section_number != 0) {
-            try writer.print(" : sect({d})", .{symbol.out_section_number});
+    const file = symbol.getFile(ctx.coff_file) orelse blk: {
+        if (symbol.getAltSymbol(ctx.coff_file)) |alt| {
+            try writer.print(" : alt({s})", .{alt.getName(ctx.coff_file)});
+            if (alt.getFile(ctx.coff_file)) |file| break :blk file;
         }
-        if (symbol.getAtom(ctx.coff_file)) |atom| {
-            try writer.print(" : atom({d})", .{atom.atom_index});
-        }
-        var buf: [2]u8 = .{'_'} ** 2;
-        if (symbol.flags.@"export") buf[0] = 'E';
-        if (symbol.flags.import) buf[1] = 'I';
-        try writer.print(" : {s}", .{&buf});
-        if (symbol.flags.weak) try writer.writeAll(" : weak");
-        switch (file) {
-            .internal => |x| try writer.print(" : internal({d})", .{x.index}),
-            .object => |x| try writer.print(" : object({d})", .{x.index}),
-            .dll => |x| try writer.print(" : dll({d})", .{x.index}),
-        }
-    } else try writer.writeAll(" : unresolved");
+        try writer.writeAll(" : unresolved");
+        return;
+    };
+    if (symbol.out_section_number != 0) {
+        try writer.print(" : sect({d})", .{symbol.out_section_number});
+    }
+    if (symbol.getAtom(ctx.coff_file)) |atom| {
+        try writer.print(" : atom({d})", .{atom.atom_index});
+    }
+    var buf: [2]u8 = .{'_'} ** 2;
+    if (symbol.flags.@"export") buf[0] = 'E';
+    if (symbol.flags.import) buf[1] = 'I';
+    try writer.print(" : {s}", .{&buf});
+    if (symbol.flags.weak) try writer.writeAll(" : weak");
+    switch (file) {
+        .internal => |x| try writer.print(" : internal({d})", .{x.index}),
+        .object => |x| try writer.print(" : object({d})", .{x.index}),
+        .dll => |x| try writer.print(" : dll({d})", .{x.index}),
+    }
 }
 
 pub const Flags = packed struct {
@@ -169,6 +186,9 @@ pub const Flags = packed struct {
 
     /// Whether the symbol is weak.
     weak: bool = false,
+
+    /// Whether the symbol is a common definition.
+    common: bool = false,
 
     /// Whether the symbol has alternate name.
     alt_name: bool = false,

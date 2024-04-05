@@ -173,6 +173,7 @@ pub fn flush(self: *Coff) !void {
     try self.addUndefinedSymbols();
     try self.resolveSymbols();
     try self.resolveSyntheticSymbols();
+    try self.convertCommonSymbols();
 
     if (build_options.enable_logging)
         state_log.debug("{}", .{self.dumpState()});
@@ -483,6 +484,12 @@ fn resolveSyntheticSymbols(self: *Coff) !void {
     self.image_base_index = try internal.addSymbol("__ImageBase", self);
 }
 
+fn convertCommonSymbols(self: *Coff) !void {
+    for (self.objects.items) |index| {
+        try self.getFile(index).?.object.convertCommonSymbols(self);
+    }
+}
+
 pub fn isCoffObj(buffer: *const [@sizeOf(coff.CoffHeader)]u8) bool {
     const header = @as(*align(1) const coff.CoffHeader, @ptrCast(buffer)).*;
     if (header.machine == .Unknown and header.number_of_sections == 0xffff) return false;
@@ -523,6 +530,10 @@ pub fn addAlternateName(self: *Coff, from: []const u8, to: []const u8) !void {
         const gop = try self.getOrCreateGlobal(off);
         break :blk gop.index;
     };
+    log.debug("adding /alternatename:{s}={s}", .{
+        self.getSymbol(from_index).getName(self),
+        self.getSymbol(to_index).getName(self),
+    });
     try self.getSymbol(from_index).addExtra(.{ .alt_name = to_index }, self);
 }
 
@@ -728,10 +739,16 @@ fn formatGlobal(
     const index = ctx.index;
     const sym = self.getSymbol(index);
     try writer.print("{s} => ", .{sym.getName(self)});
-    if (sym.getFile(self)) |file|
-        try writer.print(" resolved in {}", .{file.fmtPath()})
-    else
-        try writer.writeAll("unresolved");
+
+    const file = sym.getFile(self) orelse blk: {
+        if (sym.getAltSymbol(self)) |alt| {
+            if (alt.getFile(self)) |file| break :blk file;
+        }
+        break :blk null;
+    };
+    if (file) |f| {
+        try writer.print(" resolved in {}", .{f.fmtPath()});
+    } else try writer.writeAll("unresolved");
 }
 
 const Section = struct {
