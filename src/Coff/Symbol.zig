@@ -148,6 +148,7 @@ fn format2(
         try writer.print(" : {s}", .{&buf});
         if (symbol.flags.weak) try writer.writeAll(" : weak");
         switch (file) {
+            .internal => |x| try writer.print(" : internal({d})", .{x.index}),
             .object => |x| try writer.print(" : object({d})", .{x.index}),
             .dll => |x| try writer.print(" : dll({d})", .{x.index}),
         }

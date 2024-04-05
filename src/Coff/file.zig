@@ -1,4 +1,5 @@
 pub const File = union(enum) {
+    internal: *InternalObject,
     object: *Object,
     dll: *Dll,
 
@@ -10,18 +11,22 @@ pub const File = union(enum) {
 
     pub fn resolveSymbols(file: File, coff_file: *Coff) void {
         switch (file) {
+            .internal => unreachable,
             inline else => |x| x.resolveSymbols(coff_file),
         }
     }
 
     pub fn resetGlobals(file: File, coff_file: *Coff) void {
-        for (file.getSymbols()) |global_index| {
-            const global = coff_file.getSymbol(global_index);
-            if (!global.flags.global) continue;
-            const name = global.name;
-            global.* = .{};
-            global.name = name;
-            global.flags.global = true;
+        switch (file) {
+            .internal => unreachable,
+            inline else => |x| for (x.asFile().getSymbols()) |global_index| {
+                const global = coff_file.getSymbol(global_index);
+                if (!global.flags.global) continue;
+                const name = global.name;
+                global.* = .{};
+                global.name = name;
+                global.flags.global = true;
+            },
         }
     }
 
@@ -53,19 +58,21 @@ pub const File = union(enum) {
 
     pub fn isAlive(file: File) bool {
         return switch (file) {
+            .internal => true,
             inline else => |x| x.alive,
         };
     }
 
     pub fn setAlive(file: File) void {
         switch (file) {
+            .internal => {},
             inline else => |x| x.alive = true,
         }
     }
 
     pub fn markLive(file: File, coff_file: *Coff) void {
         switch (file) {
-            .dll => unreachable,
+            .internal, .dll => unreachable,
             .object => |x| x.markLive(coff_file),
         }
     }
@@ -83,6 +90,7 @@ pub const File = union(enum) {
         _ = unused_fmt_string;
         _ = options;
         switch (file) {
+            .internal => try writer.writeAll("(internal)"),
             .object => |x| try writer.print("{}", .{x.fmtPath()}),
             .dll => |x| try writer.writeAll(x.path),
         }
@@ -92,6 +100,7 @@ pub const File = union(enum) {
 
     pub const Entry = union(enum) {
         null: void,
+        internal: InternalObject,
         object: Object,
         dll: Dll,
     };
@@ -107,5 +116,6 @@ const Allocator = std.mem.Allocator;
 const Atom = @import("Atom.zig");
 const Coff = @import("../Coff.zig");
 const Dll = @import("Dll.zig");
+const InternalObject = @import("InternalObject.zig");
 const Object = @import("Object.zig");
 const Symbol = @import("Symbol.zig");

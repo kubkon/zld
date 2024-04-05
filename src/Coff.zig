@@ -1,6 +1,7 @@
 base: Zld,
 options: Options,
 
+internal_object_index: ?File.Index = null,
 objects: std.ArrayListUnmanaged(File.Index) = .{},
 dlls: std.StringArrayHashMapUnmanaged(File.Index) = .{},
 files: std.MultiArrayList(File.Entry) = .{},
@@ -20,6 +21,7 @@ atoms: std.ArrayListUnmanaged(Atom) = .{},
 merge_rules: std.AutoArrayHashMapUnmanaged(u32, u32) = .{},
 
 entry_index: ?Symbol.Index = null,
+image_base_index: ?Symbol.Index = null,
 
 pub fn openPath(allocator: Allocator, options: Options, thread_pool: *ThreadPool) !*Coff {
     const file = try options.emit.directory.createFile(options.emit.sub_path, .{
@@ -63,6 +65,7 @@ pub fn deinit(self: *Coff) void {
 
     for (self.files.items(.tags), self.files.items(.data)) |tag, *data| switch (tag) {
         .null => {},
+        .internal => data.internal.deinit(gpa),
         .object => data.object.deinit(gpa),
         .dll => data.dll.deinit(gpa),
     };
@@ -161,8 +164,15 @@ pub fn flush(self: *Coff) !void {
         try self.getFile(index).?.dll.initSymbols(self);
     }
 
+    {
+        const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
+        self.files.set(index, .{ .internal = .{ .index = index } });
+        self.internal_object_index = index;
+    }
+
     try self.addUndefinedSymbols();
     try self.resolveSymbols();
+    try self.resolveSyntheticSymbols();
 
     if (build_options.enable_logging)
         state_log.debug("{}", .{self.dumpState()});
@@ -467,6 +477,12 @@ fn markLive(self: *Coff) void {
     }
 }
 
+fn resolveSyntheticSymbols(self: *Coff) !void {
+    const internal = self.getInternalObject() orelse return;
+
+    self.image_base_index = try internal.addSymbol("__ImageBase", self);
+}
+
 pub fn isCoffObj(buffer: *const [@sizeOf(coff.CoffHeader)]u8) bool {
     const header = @as(*align(1) const coff.CoffHeader, @ptrCast(buffer)).*;
     if (header.machine == .Unknown and header.number_of_sections == 0xffff) return false;
@@ -514,6 +530,7 @@ pub fn getFile(self: *Coff, index: File.Index) ?File {
     const tag = self.files.items(.tags)[index];
     return switch (tag) {
         .null => null,
+        .internal => .{ .internal = &self.files.items(.data)[index].internal },
         .object => .{ .object = &self.files.items(.data)[index].object },
         .dll => .{ .dll = &self.files.items(.data)[index].dll },
     };
@@ -530,6 +547,11 @@ pub fn addFileHandle(self: *Coff, file: std.fs.File) !File.HandleIndex {
 pub fn getFileHandle(self: Coff, index: File.HandleIndex) File.Handle {
     assert(index < self.file_handles.items.len);
     return self.file_handles.items[index];
+}
+
+pub fn getInternalObject(self: *Coff) ?*InternalObject {
+    const index = self.internal_object_index orelse return null;
+    return self.getFile(index).?.internal;
 }
 
 pub fn addAtom(self: *Coff) !Atom.Index {
@@ -660,6 +682,10 @@ fn fmtDumpState(
             dll.fmtSymbols(self),
         });
     }
+    if (self.getInternalObject()) |internal| {
+        try writer.print("internal({d}) : internal\n", .{internal.index});
+        try writer.print("{}\n", .{internal.fmtSymbols(self)});
+    }
     {
         try writer.writeAll("globals\n");
         try writer.writeAll("  undefined\n");
@@ -783,6 +809,7 @@ const Archive = @import("Coff/Archive.zig");
 const Atom = @import("Coff/Atom.zig");
 const Coff = @This();
 const File = @import("Coff/file.zig").File;
+const InternalObject = @import("Coff/InternalObject.zig");
 const Object = @import("Coff/Object.zig");
 pub const Options = @import("Coff/Options.zig");
 const StringTable = @import("StringTable.zig");
