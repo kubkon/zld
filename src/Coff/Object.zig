@@ -150,8 +150,6 @@ fn parseInputSymbolTable(self: *Object, allocator: Allocator, file: std.fs.File,
         }
     }
 
-    std.debug.print("{}\n", .{self.fmtPath()});
-
     var index: u32 = 0;
     while (index < num_symbols) {
         const rec = buffer[index * symtab_entry_size ..][0..symtab_entry_size];
@@ -170,13 +168,6 @@ fn parseInputSymbolTable(self: *Object, allocator: Allocator, file: std.fs.File,
             .aux_len = 0,
         };
         index += 1;
-
-        if (out_sym.common()) {
-            std.debug.print("  {s} is common!\n", .{name});
-        }
-        if (out_sym.weakExt()) {
-            std.debug.print("  {s} is weak!\n", .{name});
-        }
 
         var file_name_buffer = std.ArrayList(u8).init(allocator);
         defer file_name_buffer.deinit();
@@ -234,10 +225,6 @@ fn parseInputSymbolTable(self: *Object, allocator: Allocator, file: std.fs.File,
                     .flag = weak_ext.flag,
                 } });
                 out_sym.aux_len += 1;
-                std.debug.print("    ch {}\n", .{weak_ext.flag});
-                std.debug.print("    sym2 {s}\n", .{
-                    self.getString(self.symtab.items[index_map.get(weak_ext.tag_index).?].name),
-                });
             } else {
                 log.debug("{}: unhandled aux record for symbol '{s}'", .{ self.fmtPath(), name });
             }
@@ -472,7 +459,7 @@ pub fn markLive(self: *Object, coff_file: *Coff) void {
             continue;
         };
         const coff_sym = self.symtab.items[csym_idx];
-        const should_keep = coff_sym.section_number == .UNDEFINED;
+        const should_keep = coff_sym.undf() or coff_sym.common();
         if (should_keep and !file.isAlive()) {
             file.setAlive();
             if (file == .object) file.markLive(coff_file);
