@@ -1,6 +1,7 @@
 base: Zld,
 options: Options,
 
+internal_object_index: ?File.Index = null,
 objects: std.ArrayListUnmanaged(File.Index) = .{},
 dlls: std.StringArrayHashMapUnmanaged(File.Index) = .{},
 files: std.MultiArrayList(File.Entry) = .{},
@@ -10,7 +11,17 @@ sections: std.MultiArrayList(Section) = .{},
 
 string_intern: StringTable = .{},
 
+symbols: std.ArrayListUnmanaged(Symbol) = .{},
+symbols_extra: std.ArrayListUnmanaged(u32) = .{},
+globals: std.AutoHashMapUnmanaged(u32, Symbol.Index) = .{},
+/// Global symbols we need to resolve for the link to succeed.
+undefined_symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
+
 atoms: std.ArrayListUnmanaged(Atom) = .{},
+merge_rules: std.AutoArrayHashMapUnmanaged(u32, u32) = .{},
+
+entry_index: ?Symbol.Index = null,
+image_base_index: ?Symbol.Index = null,
 
 pub fn openPath(allocator: Allocator, options: Options, thread_pool: *ThreadPool) !*Coff {
     const file = try options.emit.directory.createFile(options.emit.sub_path, .{
@@ -54,6 +65,7 @@ pub fn deinit(self: *Coff) void {
 
     for (self.files.items(.tags), self.files.items(.data)) |tag, *data| switch (tag) {
         .null => {},
+        .internal => data.internal.deinit(gpa),
         .object => data.object.deinit(gpa),
         .dll => data.dll.deinit(gpa),
     };
@@ -66,6 +78,11 @@ pub fn deinit(self: *Coff) void {
     }
     self.sections.deinit(gpa);
     self.atoms.deinit(gpa);
+    self.symbols.deinit(gpa);
+    self.symbols_extra.deinit(gpa);
+    self.globals.deinit(gpa);
+    self.undefined_symbols.deinit(gpa);
+    self.merge_rules.deinit(gpa);
 }
 
 pub fn flush(self: *Coff) !void {
@@ -80,6 +97,9 @@ pub fn flush(self: *Coff) !void {
     try self.string_intern.buffer.append(gpa, 0);
     // Append null file.
     try self.files.append(gpa, .null);
+    // Append null symbols.
+    try self.symbols.append(gpa, .{});
+    try self.symbols_extra.append(gpa, 0);
 
     var arena_allocator = std.heap.ArenaAllocator.init(gpa);
     defer arena_allocator.deinit();
@@ -140,6 +160,21 @@ pub fn flush(self: *Coff) !void {
     }
     if (has_parse_error) return error.ParseFailed;
 
+    for (self.dlls.values()) |index| {
+        try self.getFile(index).?.dll.initSymbols(self);
+    }
+
+    {
+        const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
+        self.files.set(index, .{ .internal = .{ .index = index } });
+        self.internal_object_index = index;
+    }
+
+    try self.addUndefinedSymbols();
+    try self.resolveSymbols();
+    try self.resolveSyntheticSymbols();
+    try self.convertCommonSymbols();
+
     if (build_options.enable_logging)
         state_log.debug("{}", .{self.dumpState()});
 
@@ -174,17 +209,22 @@ fn resolveFile(
     var buffer = std.ArrayList(u8).init(gpa);
     defer buffer.deinit();
 
+    const obj_name = if (std.fs.path.extension(obj.name).len == 0 and obj.tag == .default_lib)
+        try std.fmt.allocPrint(arena, "{s}.lib", .{obj.name})
+    else
+        obj.name;
+
     for (lib_dirs) |dir| {
-        try buffer.writer().print("{s}" ++ std.fs.path.sep_str ++ "{s}", .{ dir, obj.name });
+        try buffer.writer().print("{s}" ++ std.fs.path.sep_str ++ "{s}", .{ dir, obj_name });
         if (visited.get(buffer.items)) |_| return error.AlreadyVisited;
         if (try accessPath(buffer.items)) {
             const path = try arena.dupe(u8, buffer.items);
             try visited.putNoClobber(path, {});
-            return .{ .name = obj.name, .path = path, .tag = obj.tag };
+            return .{ .name = obj_name, .path = path, .tag = obj.tag };
         }
         buffer.clearRetainingCapacity();
     }
-    self.base.fatal("file not found '{s}'", .{obj.name});
+    self.base.fatal("file not found '{s}'", .{obj_name});
     return error.FileNotFound;
 }
 
@@ -254,42 +294,14 @@ fn parseObject(self: *Coff, obj: LinkObject, queue: anytype) ParseError!bool {
     return true;
 }
 
-fn parseLibsFromDirectives(object: *const Object, queue: anytype) error{OutOfMemory}!void {
-    var it = mem.splitScalar(u8, object.getDirectives(), ' ');
-    var p = Options.ArgsParser(@TypeOf(it)){ .it = &it };
-    while (p.hasMore()) {
-        if (p.arg("defaultlib")) |name| {
-            const dir_obj = LinkObject{ .name = name, .tag = .default_lib };
-            log.debug("{}: adding implicit import {}", .{ object.fmtPath(), dir_obj });
-            try queue.writeItem(dir_obj);
-        } else if (p.arg("disallowlib")) |_| {
-            // TODO: gotta handle that somehow
-        } else if (p.arg("nodefaultlib")) |_| {
-            // TODO: gotta handle that somehow
-        } else {
-            // We ignore everything else
-        }
+fn parseLibsFromDirectives(object: *const Object, queue: anytype) !void {
+    for (object.default_libs.items) |off| {
+        const name = object.getString(off);
+        const dir_obj = LinkObject{ .name = name, .tag = .default_lib };
+        log.debug("{}: adding implicit import {}", .{ object.fmtPath(), dir_obj });
+        try queue.writeItem(dir_obj);
     }
-}
-
-fn parseDirectives(self: *Coff, object: *const Object) ParseError!void {
-    var has_parse_error = false;
-    var it = mem.splitScalar(u8, object.getDirectives(), ' ');
-    var p = Options.ArgsParser(@TypeOf(it)){ .it = &it };
-    while (p.hasMore()) {
-        if (p.arg("defaultlib") != null or p.arg("disallowlib") != null or p.arg("nodefaultlib") != null) {
-            // We already handle those
-        } else if (p.flag("throwingnew") or p.arg("guardsym")) {
-            // These have nothing to do with linking so we ignore them.
-        } else {
-            self.base.fatal("{}: unhandled directive: {s}", .{
-                object.fmtPath(),
-                p.next_arg,
-            });
-            has_parse_error = true;
-        }
-    }
-    if (has_parse_error) return error.ParseFailed;
+    // TODO handle /disallowlib and /nodefaultlib
 }
 
 fn parseArchive(self: *Coff, obj: LinkObject, queue: anytype) ParseError!bool {
@@ -297,6 +309,7 @@ fn parseArchive(self: *Coff, obj: LinkObject, queue: anytype) ParseError!bool {
     defer tracy.end();
 
     const gpa = self.base.allocator;
+    const cpu_arch = self.options.cpu_arch.?;
     const file = try fs.cwd().openFile(obj.path, .{});
     const fh = try self.addFileHandle(file);
 
@@ -310,71 +323,171 @@ fn parseArchive(self: *Coff, obj: LinkObject, queue: anytype) ParseError!bool {
     try archive.parse(obj.path, fh, self);
 
     var has_parse_error = false;
-    for (archive.members.items) |member| switch (member.tag) {
-        .object => {
-            const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
-            self.files.set(index, .{ .object = .{
-                .archive = .{
-                    .path = try gpa.dupe(u8, obj.path),
-                    .offset = member.offset,
-                },
-                .path = try gpa.dupe(u8, member.name),
-                .file_handle = fh,
-                .index = index,
-                .alive = false,
-            } });
-            const object = &self.files.items(.data)[index].object;
-            object.parse(self) catch |err| switch (err) {
-                error.ParseFailed => {
-                    has_parse_error = true;
-                    continue;
-                },
-                else => |e| return e,
-            };
-            try self.objects.append(gpa, index);
-            try parseLibsFromDirectives(object, queue);
-        },
-        .import => {
-            var import_hdr_buffer: [@sizeOf(coff.ImportHeader)]u8 = undefined;
-            amt = try file.preadAll(&import_hdr_buffer, member.offset);
-            if (amt != @sizeOf(coff.ImportHeader)) return error.InputOutput;
-            const import_hdr = @as(*align(1) const coff.ImportHeader, @ptrCast(&import_hdr_buffer));
+    for (archive.members.items) |member| {
+        const member_cpu_arch = member.machine.toTargetCpuArch() orelse {
+            log.debug("{s}({s}): TODO unhandled machine type {}", .{ obj.path, member.name, member.machine });
+            continue;
+        };
+        if (member_cpu_arch != cpu_arch) continue;
 
-            const strings = try gpa.alloc(u8, import_hdr.size_of_data);
-            defer gpa.free(strings);
-            const import_name = mem.sliceTo(@as([*:0]const u8, @ptrCast(strings.ptr)), 0);
-            const dll_name = mem.sliceTo(@as([*:0]const u8, @ptrCast(strings.ptr + import_name.len + 1)), 0);
-
-            const name = try gpa.dupe(u8, dll_name);
-            const gop = try self.dlls.getOrPut(gpa, name);
-            defer if (gop.found_existing) gpa.free(name);
-            if (!gop.found_existing) {
+        switch (member.tag) {
+            .object => {
                 const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
-                self.files.set(index, .{ .dll = .{
-                    .path = name,
+                self.files.set(index, .{ .object = .{
+                    .archive = .{
+                        .path = try gpa.dupe(u8, obj.path),
+                        .offset = member.offset,
+                    },
+                    .path = try gpa.dupe(u8, member.name),
+                    .file_handle = fh,
                     .index = index,
+                    .alive = false,
                 } });
-                gop.value_ptr.* = index;
-            }
+                const object = &self.files.items(.data)[index].object;
+                object.parse(self) catch |err| switch (err) {
+                    error.ParseFailed => {
+                        has_parse_error = true;
+                        continue;
+                    },
+                    else => |e| return e,
+                };
+                try self.objects.append(gpa, index);
+                try parseLibsFromDirectives(object, queue);
+            },
+            .import => {
+                var import_hdr_buffer: [@sizeOf(coff.ImportHeader)]u8 = undefined;
+                amt = try file.preadAll(&import_hdr_buffer, member.offset);
+                if (amt != @sizeOf(coff.ImportHeader)) return error.InputOutput;
+                const import_hdr = @as(*align(1) const coff.ImportHeader, @ptrCast(&import_hdr_buffer));
 
-            const dll = &self.files.items(.data)[gop.value_ptr.*].dll;
-            dll.addExport(self, .{
-                .name = import_name,
-                .type = import_hdr.types.type,
-                .name_type = import_hdr.types.name_type,
-                .hint = import_hdr.hint,
-            }) catch |err| switch (err) {
-                error.ParseFailed => {
-                    has_parse_error = true;
-                    continue;
-                },
-                else => |e| return e,
-            };
-        },
-    };
+                const strings = try gpa.alloc(u8, import_hdr.size_of_data);
+                defer gpa.free(strings);
+                amt = try file.preadAll(strings, member.offset + @sizeOf(coff.ImportHeader));
+                if (amt != import_hdr.size_of_data) return error.InputOutput;
+
+                const import_name = mem.sliceTo(@as([*:0]const u8, @ptrCast(strings.ptr)), 0);
+                const dll_name = mem.sliceTo(@as([*:0]const u8, @ptrCast(strings.ptr + import_name.len + 1)), 0);
+
+                const name = try gpa.dupe(u8, dll_name);
+                const gop = try self.dlls.getOrPut(gpa, name);
+                defer if (gop.found_existing) gpa.free(name);
+                if (!gop.found_existing) {
+                    const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
+                    self.files.set(index, .{ .dll = .{
+                        .path = name,
+                        .index = index,
+                    } });
+                    gop.value_ptr.* = index;
+                }
+
+                const dll = &self.files.items(.data)[gop.value_ptr.*].dll;
+                dll.addExport(self, .{
+                    .name = import_name,
+                    .strings = strings,
+                    .type = import_hdr.types.type,
+                    .name_type = import_hdr.types.name_type,
+                    .hint = import_hdr.hint,
+                }) catch |err| switch (err) {
+                    error.ParseFailed => {
+                        has_parse_error = true;
+                        continue;
+                    },
+                    else => |e| return e,
+                };
+            },
+        }
+    }
     if (has_parse_error) return error.ParseFailed;
 
     return true;
+}
+
+fn addUndefinedSymbols(self: *Coff) !void {
+    const gpa = self.base.allocator;
+
+    {
+        // Entry point
+        const name = self.getDefaultEntryPoint();
+        const off = try self.string_intern.insert(gpa, name);
+        const gop = try self.getOrCreateGlobal(off);
+        self.entry_index = gop.index;
+    }
+}
+
+fn resolveSymbols(self: *Coff) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    // Resolve symbols on the set of all objects and shared objects (even if some are unneeded).
+    for (self.objects.items) |index| self.getFile(index).?.resolveSymbols(self);
+    for (self.dlls.values()) |index| self.getFile(index).?.resolveSymbols(self);
+
+    // Mark live objects.
+    self.markLive();
+
+    // Reset state of all globals after marking live objects.
+    for (self.objects.items) |index| self.getFile(index).?.resetGlobals(self);
+    for (self.dlls.values()) |index| self.getFile(index).?.resetGlobals(self);
+
+    // Prune dead objects.
+    var i: usize = 0;
+    while (i < self.objects.items.len) {
+        const index = self.objects.items[i];
+        if (!self.getFile(index).?.isAlive()) {
+            _ = self.objects.orderedRemove(i);
+            self.files.items(.data)[index].object.deinit(self.base.allocator);
+            self.files.set(index, .null);
+        } else i += 1;
+    }
+
+    i = 0;
+    while (i < self.dlls.keys().len) {
+        const key = self.dlls.keys()[i];
+        const index = self.dlls.values()[i];
+        if (!self.getFile(index).?.isAlive()) {
+            _ = self.dlls.orderedRemove(key);
+            self.files.items(.data)[index].dll.deinit(self.base.allocator);
+            self.files.set(index, .null);
+        } else i += 1;
+    }
+
+    // Re-resolve the symbols.
+    for (self.objects.items) |index| self.getFile(index).?.resolveSymbols(self);
+    for (self.dlls.values()) |index| self.getFile(index).?.resolveSymbols(self);
+}
+
+fn markLive(self: *Coff) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    for (self.undefined_symbols.items) |index| {
+        if (self.getSymbol(index).getFile(self)) |file| {
+            if (file == .object) file.object.alive = true;
+        }
+    }
+
+    if (self.entry_index) |index| {
+        if (self.getSymbol(index).getFile(self)) |file| {
+            if (file == .object) file.object.alive = true;
+        }
+    }
+
+    for (self.objects.items) |index| {
+        const object = self.getFile(index).?.object;
+        if (object.alive) object.markLive(self);
+    }
+}
+
+fn resolveSyntheticSymbols(self: *Coff) !void {
+    const internal = self.getInternalObject() orelse return;
+
+    self.image_base_index = try internal.addSymbol("__ImageBase", self);
+}
+
+fn convertCommonSymbols(self: *Coff) !void {
+    for (self.objects.items) |index| {
+        try self.getFile(index).?.object.convertCommonSymbols(self);
+    }
 }
 
 pub fn isCoffObj(buffer: *const [@sizeOf(coff.CoffHeader)]u8) bool {
@@ -397,10 +510,38 @@ pub fn isArchive(data: *const [Archive.magic.len]u8) bool {
     return true;
 }
 
+fn getDefaultEntryPoint(self: *Coff) [:0]const u8 {
+    // TODO: actually implement this
+    _ = self;
+    return "mainCRTStartup";
+}
+
+pub fn addAlternateName(self: *Coff, from: []const u8, to: []const u8) !void {
+    const gpa = self.base.allocator;
+    const from_index = blk: {
+        const off = try self.string_intern.insert(gpa, from);
+        const gop = try self.getOrCreateGlobal(off);
+        const sym = self.getSymbol(gop.index);
+        sym.flags.alt_name = true;
+        break :blk gop.index;
+    };
+    const to_index = blk: {
+        const off = try self.string_intern.insert(gpa, to);
+        const gop = try self.getOrCreateGlobal(off);
+        break :blk gop.index;
+    };
+    log.debug("adding /alternatename:{s}={s}", .{
+        self.getSymbol(from_index).getName(self),
+        self.getSymbol(to_index).getName(self),
+    });
+    try self.getSymbol(from_index).addExtra(.{ .alt_name = to_index }, self);
+}
+
 pub fn getFile(self: *Coff, index: File.Index) ?File {
     const tag = self.files.items(.tags)[index];
     return switch (tag) {
         .null => null,
+        .internal => .{ .internal = &self.files.items(.data)[index].internal },
         .object => .{ .object = &self.files.items(.data)[index].object },
         .dll => .{ .dll = &self.files.items(.data)[index].dll },
     };
@@ -419,6 +560,11 @@ pub fn getFileHandle(self: Coff, index: File.HandleIndex) File.Handle {
     return self.file_handles.items[index];
 }
 
+pub fn getInternalObject(self: *Coff) ?*InternalObject {
+    const index = self.internal_object_index orelse return null;
+    return self.getFile(index).?.internal;
+}
+
 pub fn addAtom(self: *Coff) !Atom.Index {
     const index = @as(Atom.Index, @intCast(self.atoms.items.len));
     const atom = try self.atoms.addOne(self.base.allocator);
@@ -430,6 +576,90 @@ pub fn getAtom(self: *Coff, atom_index: Atom.Index) ?*Atom {
     if (atom_index == 0) return null;
     assert(atom_index < self.atoms.items.len);
     return &self.atoms.items[atom_index];
+}
+
+pub fn addSymbol(self: *Coff) !Symbol.Index {
+    const index = @as(Symbol.Index, @intCast(self.symbols.items.len));
+    const symbol = try self.symbols.addOne(self.base.allocator);
+    symbol.* = .{};
+    return index;
+}
+
+pub fn getSymbol(self: *Coff, index: Symbol.Index) *Symbol {
+    assert(index < self.symbols.items.len);
+    return &self.symbols.items[index];
+}
+
+pub fn addSymbolExtra(self: *Coff, extra: Symbol.Extra) !u32 {
+    const fields = @typeInfo(Symbol.Extra).Struct.fields;
+    try self.symbols_extra.ensureUnusedCapacity(self.base.allocator, fields.len);
+    return self.addSymbolExtraAssumeCapacity(extra);
+}
+
+pub fn addSymbolExtraAssumeCapacity(self: *Coff, extra: Symbol.Extra) u32 {
+    const index = @as(u32, @intCast(self.symbols_extra.items.len));
+    const fields = @typeInfo(Symbol.Extra).Struct.fields;
+    inline for (fields) |field| {
+        self.symbols_extra.appendAssumeCapacity(switch (field.type) {
+            u32 => @field(extra, field.name),
+            else => @compileError("bad field type"),
+        });
+    }
+    return index;
+}
+
+pub fn getSymbolExtra(self: Coff, index: u32) ?Symbol.Extra {
+    if (index == 0) return null;
+    const fields = @typeInfo(Symbol.Extra).Struct.fields;
+    var i: usize = index;
+    var result: Symbol.Extra = undefined;
+    inline for (fields) |field| {
+        @field(result, field.name) = switch (field.type) {
+            u32 => self.symbols_extra.items[i],
+            else => @compileError("bad field type"),
+        };
+        i += 1;
+    }
+    return result;
+}
+
+pub fn setSymbolExtra(self: *Coff, index: u32, extra: Symbol.Extra) void {
+    assert(index > 0);
+    const fields = @typeInfo(Symbol.Extra).Struct.fields;
+    inline for (fields, 0..) |field, i| {
+        self.symbols_extra.items[index + i] = switch (field.type) {
+            u32 => @field(extra, field.name),
+            else => @compileError("bad field type"),
+        };
+    }
+}
+
+const GetOrCreateGlobalResult = struct {
+    found_existing: bool,
+    index: Symbol.Index,
+};
+
+pub fn getOrCreateGlobal(self: *Coff, off: u32) !GetOrCreateGlobalResult {
+    const gpa = self.base.allocator;
+    const gop = try self.globals.getOrPut(gpa, off);
+    if (!gop.found_existing) {
+        const index = try self.addSymbol();
+        const global = self.getSymbol(index);
+        global.flags.global = true;
+        global.name = off;
+        gop.value_ptr.* = index;
+    }
+    return .{
+        .found_existing = gop.found_existing,
+        .index = gop.value_ptr.*,
+    };
+}
+
+fn addMergeRule(self: *Coff, from: []const u8, to: []const u8) !void {
+    const gpa = self.base.allocator;
+    const from_rule = try self.string_intern.insert(gpa, from);
+    const to_rule = try self.string_intern.insert(gpa, to);
+    try self.merge_rules.put(gpa, from_rule, to_rule);
 }
 
 pub fn dumpState(self: *Coff) std.fmt.Formatter(fmtDumpState) {
@@ -449,8 +679,9 @@ fn fmtDumpState(
         try writer.print("object({d}) : {}", .{ index, object.fmtPath() });
         if (!object.alive) try writer.writeAll(" : [*]");
         try writer.writeByte('\n');
-        try writer.print("{}\n", .{
+        try writer.print("{}{}\n", .{
             object.fmtAtoms(self),
+            object.fmtSymbols(self),
         });
     }
     for (self.dlls.values()) |index| {
@@ -458,7 +689,66 @@ fn fmtDumpState(
         try writer.print("dll({d}) : {s}", .{ index, dll.path });
         if (!dll.alive) try writer.writeAll(" : [*]");
         try writer.writeByte('\n');
+        try writer.print("{}\n", .{
+            dll.fmtSymbols(self),
+        });
     }
+    if (self.getInternalObject()) |internal| {
+        try writer.print("internal({d}) : internal\n", .{internal.index});
+        try writer.print("{}\n", .{internal.fmtSymbols(self)});
+    }
+    {
+        try writer.writeAll("globals\n");
+        try writer.writeAll("  undefined\n");
+        for (self.undefined_symbols.items) |index| {
+            try writer.print("    {}\n", .{self.fmtGlobal(index)});
+        }
+        if (self.entry_index) |index| {
+            try writer.print("  entry\n    {}\n", .{self.fmtGlobal(index)});
+        }
+        for (self.objects.items) |index| {
+            const object = self.getFile(index).?.object;
+            try writer.print("  {}\n", .{object.fmtPath()});
+            for (object.symbols.items) |sym_index| {
+                const sym = self.getSymbol(sym_index);
+                if (!sym.flags.global) continue;
+                try writer.print("    {}\n", .{self.fmtGlobal(sym_index)});
+            }
+        }
+    }
+}
+
+const FormatGlobalCtx = struct {
+    coff_file: *Coff,
+    index: Symbol.Index,
+};
+
+fn fmtGlobal(self: *Coff, index: Symbol.Index) std.fmt.Formatter(formatGlobal) {
+    return .{ .data = .{ .coff_file = self, .index = index } };
+}
+
+fn formatGlobal(
+    ctx: FormatGlobalCtx,
+    comptime unused_fmt_string: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = options;
+    _ = unused_fmt_string;
+    const self = ctx.coff_file;
+    const index = ctx.index;
+    const sym = self.getSymbol(index);
+    try writer.print("{s} => ", .{sym.getName(self)});
+
+    const file = sym.getFile(self) orelse blk: {
+        if (sym.getAltSymbol(self)) |alt| {
+            if (alt.getFile(self)) |file| break :blk file;
+        }
+        break :blk null;
+    };
+    if (file) |f| {
+        try writer.print(" resolved in {}", .{f.fmtPath()});
+    } else try writer.writeAll("unresolved");
 }
 
 const Section = struct {
@@ -513,6 +803,11 @@ pub const LinkObject = struct {
     }
 };
 
+const AlternateName = struct {
+    name: u32,
+    index: Symbol.Index,
+};
+
 pub const base_tag = Zld.Tag.coff;
 
 const build_options = @import("build_options");
@@ -531,8 +826,10 @@ const Archive = @import("Coff/Archive.zig");
 const Atom = @import("Coff/Atom.zig");
 const Coff = @This();
 const File = @import("Coff/file.zig").File;
+const InternalObject = @import("Coff/InternalObject.zig");
 const Object = @import("Coff/Object.zig");
 pub const Options = @import("Coff/Options.zig");
 const StringTable = @import("StringTable.zig");
+const Symbol = @import("Coff/Symbol.zig");
 const ThreadPool = std.Thread.Pool;
 const Zld = @import("Zld.zig");

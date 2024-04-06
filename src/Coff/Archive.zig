@@ -11,7 +11,6 @@ pub fn deinit(self: *Archive, allocator: Allocator) void {
 
 pub fn parse(self: *Archive, path: []const u8, file_handle: File.HandleIndex, coff_file: *Coff) !void {
     const gpa = coff_file.base.allocator;
-    const cpu_arch = coff_file.options.cpu_arch.?;
     const file = coff_file.getFileHandle(file_handle);
 
     const size = (try file.stat()).size;
@@ -103,24 +102,28 @@ pub fn parse(self: *Archive, path: []const u8, file_handle: File.HandleIndex, co
         amt = try file.preadAll(&member_hdr_buffer, pos);
         if (amt != @sizeOf(coff.CoffHeader)) return error.InputOutput;
 
-        const tag: Member.Tag = if (Coff.isCoffObj(&member_hdr_buffer)) object: {
+        var member: Member = .{
+            .tag = undefined,
+            .machine = undefined,
+            .offset = pos,
+            .name = try gpa.dupe(u8, name),
+        };
+        if (Coff.isCoffObj(&member_hdr_buffer)) {
             const obj_hdr = @as(*align(1) const coff.CoffHeader, @ptrCast(&member_hdr_buffer));
-            const obj_cpu_arch = obj_hdr.machine.toTargetCpuArch() orelse {
-                log.debug("{s}: TODO unhandled machine type {}", .{ path, obj_hdr.machine });
-                continue;
-            };
-            if (obj_cpu_arch != cpu_arch) continue;
-            break :object .object;
-        } else if (Coff.isImportLib(&member_hdr_buffer)) import: {
-            break :import .import;
+            member.tag = .object;
+            member.machine = obj_hdr.machine;
+        } else if (Coff.isImportLib(&member_hdr_buffer)) {
+            const import_hdr = @as(*align(1) const coff.ImportHeader, @ptrCast(&member_hdr_buffer));
+            member.tag = .import;
+            member.machine = import_hdr.machine;
         } else {
             coff_file.base.fatal("{s}: unhandled object member at position {d}", .{
                 path,
                 member_count,
             });
             return error.ParseFailed;
-        };
-        try self.members.append(gpa, .{ .tag = tag, .offset = pos, .name = try gpa.dupe(u8, name) });
+        }
+        try self.members.append(gpa, member);
     }
 }
 
@@ -203,6 +206,7 @@ const Member = struct {
     tag: Tag,
     offset: u64,
     name: []const u8,
+    machine: coff.MachineType,
 
     const Tag = enum { object, import };
 };
