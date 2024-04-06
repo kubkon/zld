@@ -2680,8 +2680,17 @@ pub fn requiresCodeSig(self: MachO) bool {
     if (self.options.entitlements) |_| return true;
     if (self.options.adhoc_codesign) |cs| return cs;
     return switch (self.options.cpu_arch.?) {
-        .aarch64 => true,
-        else => false,
+        .aarch64 => switch (self.options.platform.?.platform) {
+            .MACOS,
+            .IOSSIMULATOR,
+            .TVOSSIMULATOR,
+            .WATCHOSSIMULATOR,
+            .VISIONOSSIMULATOR,
+            => true,
+            else => false,
+        },
+        .x86_64 => false,
+        else => unreachable,
     };
 }
 
