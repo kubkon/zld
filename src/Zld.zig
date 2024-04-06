@@ -210,22 +210,22 @@ pub fn deinit(base: *Zld) void {
     base.errors.deinit(base.allocator);
     switch (base.tag) {
         .elf => {
-            const parent = @fieldParentPtr(Elf, "base", base);
+            const parent: *Elf = @fieldParentPtr("base", base);
             parent.deinit();
             base.allocator.destroy(parent);
         },
         .macho => {
-            const parent = @fieldParentPtr(MachO, "base", base);
+            const parent: *MachO = @fieldParentPtr("base", base);
             parent.deinit();
             base.allocator.destroy(parent);
         },
         .coff => {
-            const parent = @fieldParentPtr(Coff, "base", base);
+            const parent: *Coff = @fieldParentPtr("base", base);
             parent.deinit();
             base.allocator.destroy(parent);
         },
         .wasm => {
-            const parent = @fieldParentPtr(Wasm, "base", base);
+            const parent: *Wasm = @fieldParentPtr("base", base);
             parent.deinit();
             base.allocator.destroy(parent);
         },
@@ -234,10 +234,10 @@ pub fn deinit(base: *Zld) void {
 
 pub fn flush(base: *Zld) !void {
     switch (base.tag) {
-        .elf => try @fieldParentPtr(Elf, "base", base).flush(),
-        .macho => try @fieldParentPtr(MachO, "base", base).flush(),
-        .coff => try @fieldParentPtr(Coff, "base", base).flush(),
-        .wasm => try @fieldParentPtr(Wasm, "base", base).flush(),
+        .elf => try @as(*Elf, @fieldParentPtr("base", base)).flush(),
+        .macho => try @as(*MachO, @fieldParentPtr("base", base)).flush(),
+        .coff => try @as(*Coff, @fieldParentPtr("base", base)).flush(),
+        .wasm => try @as(*Wasm, @fieldParentPtr("base", base)).flush(),
     }
 }
 
