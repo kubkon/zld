@@ -150,7 +150,7 @@ const CreateSymlinksStep = struct {
     }
 
     fn make(step: *std.Build.Step, prog_node: *std.Progress.Node) anyerror!void {
-        const self = @fieldParentPtr(CreateSymlinksStep, "step", step);
+        const self: *CreateSymlinksStep = @fieldParentPtr("step", step);
         const install_path = self.install.artifact.getEmittedBin().getPath(self.builder);
         const rel_source = fs.path.basename(install_path);
 
