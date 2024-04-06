@@ -277,12 +277,16 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
                     tmp_platform = .TVOS;
                 } else if (mem.eql(u8, platform_s, "watchos")) {
                     tmp_platform = .WATCHOS;
+                } else if (mem.eql(u8, platform_s, "xros")) {
+                    tmp_platform = .VISIONOS;
                 } else if (mem.eql(u8, platform_s, "ios-simulator")) {
                     tmp_platform = .IOSSIMULATOR;
                 } else if (mem.eql(u8, platform_s, "tvos-simulator")) {
                     tmp_platform = .TVOSSIMULATOR;
                 } else if (mem.eql(u8, platform_s, "watchos-simulator")) {
                     tmp_platform = .WATCHOSSIMULATOR;
+                } else if (mem.eql(u8, platform_s, "xros-simulator")) {
+                    tmp_platform = .VISIONOSSIMULATOR;
                 } else {
                     ctx.fatal("Unsupported Apple OS: {s}\n", .{platform_s});
                 }
@@ -366,7 +370,8 @@ fn inferPlatformVersions(opts: *Options, arena: Allocator) !void {
     }
 
     inline for (&opts.inferred_platform_versions, 0..) |*platform, i| {
-        if (supported_platforms[i][3]) |var_name| {
+        if (supported_platforms[i][3].len > 0) {
+            const var_name = supported_platforms[i][3];
             if (std.process.getEnvVarOwned(arena, var_name)) |env_var| {
                 const v = Version.parse(env_var) orelse Version{ .value = 0 };
                 platform.* = .{ .platform = supported_platforms[i][0], .version = v };
@@ -484,22 +489,24 @@ pub const Version = struct {
     }
 };
 
-const SupportedPlatforms = struct {
+const SupportedPlatform = struct {
     macho.PLATFORM, // Platform identifier
     u32, // Min platform version for which to emit LC_BUILD_VERSION
     u32, // Min supported platform version
-    ?[]const u8, // Env var to look for
+    []const u8, // Env var to look for
 };
 
 // Source: https://github.com/apple-oss-distributions/ld64/blob/59a99ab60399c5e6c49e6945a9e1049c42b71135/src/ld/PlatformSupport.cpp#L52
-const supported_platforms = [_]SupportedPlatforms{
+const supported_platforms = [_]SupportedPlatform{
     .{ .MACOS, 0xA0E00, 0xA0800, "MACOSX_DEPLOYMENT_TARGET" },
     .{ .IOS, 0xC0000, 0x70000, "IPHONEOS_DEPLOYMENT_TARGET" },
     .{ .TVOS, 0xC0000, 0x70000, "TVOS_DEPLOYMENT_TARGET" },
     .{ .WATCHOS, 0x50000, 0x20000, "WATCHOS_DEPLOYMENT_TARGET" },
-    .{ .IOSSIMULATOR, 0xD0000, 0x80000, null },
-    .{ .TVOSSIMULATOR, 0xD0000, 0x80000, null },
-    .{ .WATCHOSSIMULATOR, 0x60000, 0x20000, null },
+    .{ .VISIONOS, 0x10000, 0x10000, "XROS_DEPLOYMENT_TARGET" },
+    .{ .IOSSIMULATOR, 0xD0000, 0x80000, "" },
+    .{ .TVOSSIMULATOR, 0xD0000, 0x80000, "" },
+    .{ .WATCHOSSIMULATOR, 0x60000, 0x20000, "" },
+    .{ .VISIONOSSIMULATOR, 0x10000, 0x10000, "" },
 };
 
 pub fn inferSdkVersionFromSdkPath(path: []const u8) ?Version {
