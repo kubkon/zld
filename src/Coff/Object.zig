@@ -474,8 +474,62 @@ pub fn markLive(self: *Object, coff_file: *Coff) void {
 }
 
 pub fn convertCommonSymbols(self: *Object, coff_file: *Coff) !void {
-    _ = self;
-    _ = coff_file;
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    const gpa = coff_file.base.allocator;
+
+    for (self.symbols.items, 0..) |index, i| {
+        const sym = coff_file.getSymbol(index);
+        if (!sym.flags.common) continue;
+        const sym_file = sym.getFile(coff_file).?;
+        if (sym_file.getIndex() != self.index) continue;
+
+        const coff_sym = &self.symtab.items[i];
+        const atom_index = try coff_file.addAtom();
+        try self.atoms.append(gpa, atom_index);
+
+        const name = ".common";
+        const atom = coff_file.getAtom(atom_index).?;
+        atom.atom_index = atom_index;
+        atom.name = try self.insertString(gpa, name);
+        atom.file = self.index;
+        // MSVC link.exe and link-lld.exe align all common symbols smaller than 32 bytes naturally.
+        // That is, they round the size up to the next power of two.
+        const size = std.math.cast(u16, coff_sym.value) orelse return error.Overflow;
+        const alignment = @min(std.math.ceilPowerOfTwoAssert(u16, size), 32);
+        atom.alignment = std.math.log2_int(u16, alignment);
+        atom.size = size;
+
+        const sect_num: u16 = @intCast(try self.sections.addOne(gpa));
+        const sect = &self.sections.items(.header)[sect_num];
+        sect.* = .{
+            .name = atom.name,
+            .virtual_size = atom.size,
+            .virtual_address = 0,
+            .size_of_raw_data = 0,
+            .pointer_to_raw_data = 0,
+            .pointer_to_relocations = 0,
+            .pointer_to_linenumbers = 0,
+            .number_of_relocations = 0,
+            .number_of_linenumbers = 0,
+            .flags = .{
+                .CNT_UNINITIALIZED_DATA = 0b1,
+                .MEM_READ = 0b1,
+            },
+        };
+        sect.setAlignment(alignment);
+        self.sections.items(.relocs)[sect_num] = .{};
+
+        sym.value = 0;
+        sym.atom = atom_index;
+        sym.flags.global = true;
+        sym.flags.common = false;
+
+        coff_sym.value = 0;
+        coff_sym.section_number = @enumFromInt(sect_num + 1);
+        coff_sym.storage_class = .EXTERNAL;
+    }
 }
 
 pub fn getString(self: Object, off: u32) [:0]const u8 {

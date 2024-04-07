@@ -1,7 +1,7 @@
 /// Allocated address for this Atom.
 /// Value is relative to the output section address.
 /// Use `getAddress()` to get full absolute address of this Atom.
-value: u64 = 0,
+value: u32 = 0,
 
 /// Name of this Atom.
 name: u32 = 0,
@@ -10,10 +10,10 @@ name: u32 = 0,
 file: File.Index = 0,
 
 /// Size of this Atom.
-size: u64 = 0,
+size: u32 = 0,
 
 /// Alignment of this Atom as a power of 2.
-alignment: u32 = 0,
+alignment: u16 = 0,
 
 /// Index of the input section.
 section_number: u16 = 0,
@@ -40,7 +40,7 @@ pub fn getInputSection(self: Atom, coff_file: *Coff) Object.SectionHeader {
     return object.sections.items(.header)[self.section_number - 1];
 }
 
-pub fn getAddress(self: Atom, coff_file: *Coff) u64 {
+pub fn getAddress(self: Atom, coff_file: *Coff) u32 {
     if (self.out_section_number == 0) return self.value;
     const header = coff_file.sections.items(.header)[self.out_section_number];
     return header.virtual_address + self.value;

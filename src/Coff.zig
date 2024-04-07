@@ -780,6 +780,11 @@ pub const SectionHeader = struct {
         if (hdr.flags.ALIGN == 0) return null;
         return hdr.flags.ALIGN - 1;
     }
+
+    pub fn setAlignment(hdr: *SectionHeader, alignment: u16) void {
+        assert(alignment > 0 and alignment <= 8192);
+        hdr.flags.ALIGN = std.math.log2_int(u16, alignment);
+    }
 };
 
 pub const LinkObject = struct {
