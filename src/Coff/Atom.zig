@@ -86,7 +86,7 @@ fn reportUndefSymbol(self: Atom, rel: coff.Relocation, coff_file: *Coff) !bool {
     const object = self.getObject(coff_file);
     const sym_index = object.symbols.items[rel.symbol_table_index];
     const sym = coff_file.getSymbol(sym_index);
-    if (sym.getFile(coff_file) == null) {
+    if (sym.getFile(coff_file) == null and sym.getAltSymbol(coff_file) == null) {
         const gpa = coff_file.base.allocator;
         const gop = try coff_file.undefs.getOrPut(gpa, sym_index);
         if (!gop.found_existing) {
