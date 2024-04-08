@@ -554,16 +554,13 @@ pub fn convertCommonSymbols(self: *Object, coff_file: *Coff) !void {
     }
 }
 
-pub fn scanRelocs(self: *Object, coff_file: *Coff) !void {
-    const tracy = trace(@src());
-    defer tracy.end();
-
+pub fn reportUndefs(self: *Object, coff_file: *Coff, undefs: anytype) !void {
     for (self.atoms.items) |atom_index| {
         const atom = coff_file.getAtom(atom_index) orelse continue;
         if (!atom.flags.alive) continue;
         const isec = atom.getInputSection(coff_file);
         if (isec.flags.CNT_UNINITIALIZED_DATA == 0b1) continue;
-        try atom.scanRelocs(coff_file);
+        try atom.reportUndefs(coff_file, undefs);
     }
 }
 

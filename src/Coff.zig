@@ -16,9 +16,6 @@ symbols_extra: std.ArrayListUnmanaged(u32) = .{},
 globals: std.AutoHashMapUnmanaged(u32, Symbol.Index) = .{},
 /// Global symbols we need to resolve for the link to succeed.
 undefined_symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
-/// This table will be populated after `scanRelocs` has run.
-/// Key is symbol index.
-undefs: std.AutoHashMapUnmanaged(Symbol.Index, std.ArrayListUnmanaged(Atom.Index)) = .{},
 
 atoms: std.ArrayListUnmanaged(Atom) = .{},
 merge_rules: std.AutoArrayHashMapUnmanaged(u32, u32) = .{},
@@ -86,14 +83,6 @@ pub fn deinit(self: *Coff) void {
     self.globals.deinit(gpa);
     self.undefined_symbols.deinit(gpa);
     self.merge_rules.deinit(gpa);
-
-    {
-        var it = self.undefs.valueIterator();
-        while (it.next()) |notes| {
-            notes.deinit(gpa);
-        }
-        self.undefs.deinit(gpa);
-    }
 }
 
 pub fn flush(self: *Coff) !void {
@@ -188,8 +177,7 @@ pub fn flush(self: *Coff) !void {
     try self.claimUnresolved();
     self.markExports();
     self.markImports();
-
-    try self.scanRelocs();
+    try self.reportUndefs();
 
     if (build_options.enable_logging)
         state_log.debug("{}", .{self.dumpState()});
@@ -576,29 +564,29 @@ fn markImports(self: *Coff) void {
     }
 }
 
-fn scanRelocs(self: *Coff) !void {
+fn reportUndefs(self: *Coff) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
-    var has_reloc_error = false;
-    for (self.objects.items) |index| {
-        self.getFile(index).?.object.scanRelocs(self) catch |err| switch (err) {
-            error.RelocError => has_reloc_error = true,
-            else => |e| return e,
-        };
+    const gpa = self.base.allocator;
+    var undefs = std.AutoHashMap(Symbol.Index, std.ArrayListUnmanaged(Atom.Index)).init(gpa);
+    defer {
+        var it = undefs.valueIterator();
+        while (it.next()) |notes| {
+            notes.deinit(gpa);
+        }
+        undefs.deinit();
     }
 
-    try self.reportUndefs();
+    for (self.objects.items) |index| {
+        try self.getFile(index).?.object.reportUndefs(self, &undefs);
+    }
 
-    if (has_reloc_error) return error.RelocError;
-}
-
-fn reportUndefs(self: *Coff) !void {
-    if (self.undefs.count() == 0) return;
+    if (undefs.count() == 0) return;
 
     const max_notes = 4;
 
-    var it = self.undefs.iterator();
+    var it = undefs.iterator();
     while (it.next()) |entry| {
         const undef_sym = self.getSymbol(entry.key_ptr.*);
         const notes = entry.value_ptr.*;
