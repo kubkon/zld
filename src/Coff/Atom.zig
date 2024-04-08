@@ -34,16 +34,35 @@ pub fn getObject(self: Atom, coff_file: *Coff) *Object {
     return coff_file.getFile(self.file).?.object;
 }
 
-pub fn getInputSection(self: Atom, coff_file: *Coff) Object.SectionHeader {
-    assert(self.section_number > 0);
+pub fn getInputSection(self: Atom, coff_file: *Coff) Coff.SectionHeader {
     const object = self.getObject(coff_file);
-    return object.sections.items(.header)[self.section_number - 1];
+    return object.sections.items(.header)[self.section_number];
+}
+
+pub fn getRelocs(self: Atom, coff_file: *Coff) []const coff.Relocation {
+    const object = self.getObject(coff_file);
+    return object.sections.items(.relocs)[self.section_number].items;
 }
 
 pub fn getAddress(self: Atom, coff_file: *Coff) u32 {
     if (self.out_section_number == 0) return self.value;
     const header = coff_file.sections.items(.header)[self.out_section_number];
     return header.virtual_address + self.value;
+}
+
+pub fn scanRelocs(self: Atom, coff_file: *Coff) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    const cpu_arch = coff_file.options.cpu_arch.?;
+    _ = cpu_arch;
+    const object = self.getObject(coff_file);
+    _ = object;
+    const relocs = self.getRelocs(coff_file);
+
+    for (relocs) |rel| {
+        std.debug.print("    {}\n", .{rel});
+    }
 }
 
 pub fn format(
@@ -101,6 +120,7 @@ pub const Flags = packed struct {
 const assert = std.debug.assert;
 const coff = std.coff;
 const std = @import("std");
+const trace = @import("../tracy.zig").trace;
 
 const Atom = @This();
 const Coff = @import("../Coff.zig");

@@ -503,7 +503,7 @@ pub fn convertCommonSymbols(self: *Object, coff_file: *Coff) !void {
         const atom_index = try coff_file.addAtom();
         try self.atoms.append(gpa, atom_index);
 
-        const name = ".common";
+        const name = ".bss";
         const atom = coff_file.getAtom(atom_index).?;
         atom.atom_index = atom_index;
         atom.name = try self.insertString(gpa, name);
@@ -544,6 +544,22 @@ pub fn convertCommonSymbols(self: *Object, coff_file: *Coff) !void {
         coff_sym.value = 0;
         coff_sym.section_number = @enumFromInt(sect_num + 1);
         coff_sym.storage_class = .EXTERNAL;
+    }
+}
+
+pub fn scanRelocs(self: *Object, coff_file: *Coff) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    std.debug.print("{}\n", .{self.fmtPath()});
+
+    for (self.atoms.items) |atom_index| {
+        const atom = coff_file.getAtom(atom_index) orelse continue;
+        std.debug.print("  {s}\n", .{atom.getName(coff_file)});
+        if (!atom.flags.alive) continue;
+        const isec = atom.getInputSection(coff_file);
+        if (isec.flags.CNT_UNINITIALIZED_DATA == 0b1) continue;
+        try atom.scanRelocs(coff_file);
     }
 }
 

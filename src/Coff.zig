@@ -178,6 +178,8 @@ pub fn flush(self: *Coff) !void {
     self.markExports();
     self.markImports();
 
+    try self.scanRelocs();
+
     if (build_options.enable_logging)
         state_log.debug("{}", .{self.dumpState()});
 
@@ -560,6 +562,15 @@ fn markImports(self: *Coff) void {
         if (sym.getFile(self)) |file| {
             if (file == .dll) sym.flags.import = true;
         }
+    }
+}
+
+fn scanRelocs(self: *Coff) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    for (self.objects.items) |index| {
+        try self.getFile(index).?.object.scanRelocs(self);
     }
 }
 
