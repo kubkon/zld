@@ -230,6 +230,13 @@ fn parseInputSymbolTable(self: *Object, allocator: Allocator, file: std.fs.File,
             }
         }
     }
+
+    // Remap symbol table indexes in relocation entries.
+    for (self.sections.items(.relocs)) |*relocs| {
+        for (relocs.items) |*rel| {
+            rel.symbol_table_index = index_map.get(rel.symbol_table_index).?;
+        }
+    }
 }
 
 fn parseInputStringTable(
