@@ -175,6 +175,8 @@ pub fn flush(self: *Coff) !void {
     try self.resolveSyntheticSymbols();
     try self.convertCommonSymbols();
     try self.claimUnresolved();
+    self.markExports();
+    self.markImports();
 
     if (build_options.enable_logging)
         state_log.debug("{}", .{self.dumpState()});
@@ -526,6 +528,37 @@ fn claimUnresolved(self: *Coff) !void {
                 sym.flags = .{ .global = true, .import = true, .weak = true };
                 try self.getInternalObject().?.symbols.append(self.base.allocator, sym_index);
             }
+        }
+    }
+}
+
+fn markExports(self: *Coff) void {
+    _ = self;
+    // TODO: traverse self.exports and for (self.objects.items) { object.exports }
+    // and mark any referenced symbol as export.
+}
+
+fn markImports(self: *Coff) void {
+    for (self.objects.items) |index| {
+        for (self.getFile(index).?.getSymbols()) |sym_index| {
+            const sym = self.getSymbol(sym_index);
+            const file = sym.getFile(self) orelse continue;
+            if (!sym.flags.global) continue;
+            if (file == .dll) sym.flags.import = true;
+        }
+    }
+
+    for (self.undefined_symbols.items) |index| {
+        const sym = self.getSymbol(index);
+        if (sym.getFile(self)) |file| {
+            if (file == .dll) sym.flags.import = true;
+        }
+    }
+
+    if (self.entry_index) |index| {
+        const sym = self.getSymbol(index);
+        if (sym.getFile(self)) |file| {
+            if (file == .dll) sym.flags.import = true;
         }
     }
 }
