@@ -17,7 +17,7 @@ out_section_number: u16 = 0,
 
 /// Index of the source COFF symbol this symbol references.
 /// Use `getCoffSymbol` to pull the COFF symbol from the relevant input file.
-coff_sym_idx: u32 = 0,
+coff_sym_idx: Index = 0,
 
 /// Misc flags for the symbol.
 flags: Flags = .{},

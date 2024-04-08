@@ -174,6 +174,7 @@ pub fn flush(self: *Coff) !void {
     try self.resolveSymbols();
     try self.resolveSyntheticSymbols();
     try self.convertCommonSymbols();
+    try self.claimUnresolved();
 
     if (build_options.enable_logging)
         state_log.debug("{}", .{self.dumpState()});
@@ -487,6 +488,45 @@ fn resolveSyntheticSymbols(self: *Coff) !void {
 fn convertCommonSymbols(self: *Coff) !void {
     for (self.objects.items) |index| {
         try self.getFile(index).?.object.convertCommonSymbols(self);
+    }
+}
+
+fn claimUnresolved(self: *Coff) !void {
+    for (self.objects.items) |index| {
+        const object = self.getFile(index).?.object;
+
+        for (object.symbols.items, 0..) |sym_index, i| {
+            const sym = self.getSymbol(sym_index);
+            if (sym.getFile(self)) |_| continue;
+            if (!sym.flags.global and !sym.flags.weak) continue;
+
+            if (sym.flags.weak) {
+                const coff_sym_idx = @as(Symbol.Index, @intCast(i));
+                const coff_sym = object.symtab.items[coff_sym_idx];
+                const aux = object.auxtab.items[coff_sym.aux_index].weak_ext;
+                const alt_index = object.symbols.items[aux.sym_index];
+                const alt = self.getSymbol(alt_index);
+                if (alt.getFile(self)) |_| {
+                    sym.value = alt.value;
+                    sym.file = alt.file;
+                    sym.atom = alt.atom;
+                    sym.coff_sym_idx = alt.coff_sym_idx;
+                    sym.flags = alt.flags;
+                    sym.extra = alt.extra;
+                    continue;
+                }
+            }
+
+            const is_undf_ok = sym.flags.weak; // TODO: or /force
+            if (is_undf_ok) {
+                sym.value = 0;
+                sym.atom = 0;
+                sym.coff_sym_idx = 0;
+                sym.file = self.internal_object_index.?;
+                sym.flags = .{ .global = true, .import = true, .weak = true };
+                try self.getInternalObject().?.symbols.append(self.base.allocator, sym_index);
+            }
+        }
     }
 }
 

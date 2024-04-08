@@ -433,7 +433,7 @@ pub fn resolveSymbols(self: *Object, coff_file: *Coff) void {
             }
         }
 
-        const coff_sym_idx = @as(u32, @intCast(i));
+        const coff_sym_idx = @as(Symbol.Index, @intCast(i));
         const coff_sym = self.symtab.items[coff_sym_idx];
         if (coff_sym.undf() or coff_sym.weakExt()) continue;
 
