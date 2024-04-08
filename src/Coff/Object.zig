@@ -358,7 +358,11 @@ fn initSymbols(self: *Object, allocator: Allocator, coff_file: *Coff) !void {
             const gop = try coff_file.getOrCreateGlobal(off);
             self.symbols.addOneAssumeCapacity().* = gop.index;
             if (coff_sym.weakExt()) {
-                coff_file.getSymbol(gop.index).flags.weak = true;
+                const sym = coff_file.getSymbol(gop.index);
+                assert(coff_sym.aux_len == 1);
+                const aux = self.auxtab.items[coff_sym.aux_index].weak_ext;
+                sym.flags.weak = true;
+                try sym.addExtra(.{ .weak_flag = @intFromEnum(aux.flag) }, coff_file);
             }
             continue;
         }
@@ -418,6 +422,16 @@ pub fn resolveSymbols(self: *Object, coff_file: *Coff) void {
     for (self.symbols.items, 0..) |index, i| {
         const global = coff_file.getSymbol(index);
         if (!global.flags.global) continue;
+
+        if (global.flags.weak) {
+            const weak_flag = global.getWeakFlag(coff_file).?;
+            if (weak_flag == .SEARCH_NOLIBRARY and !self.alive) {
+                log.debug("{} is archive: skipping weak symbol {s}\n", .{
+                    self.fmtPath(), global.getName(coff_file),
+                });
+                continue;
+            }
+        }
 
         const coff_sym_idx = @as(u32, @intCast(i));
         const coff_sym = self.symtab.items[coff_sym_idx];
@@ -525,6 +539,7 @@ pub fn convertCommonSymbols(self: *Object, coff_file: *Coff) !void {
         sym.atom = atom_index;
         sym.flags.global = true;
         sym.flags.common = false;
+        sym.flags.weak = false;
 
         coff_sym.value = 0;
         coff_sym.section_number = @enumFromInt(sect_num + 1);
@@ -759,14 +774,14 @@ const AuxSymbol = union {
     weak_ext: WeakExt,
 };
 
-const FuncDef = struct {
+pub const FuncDef = struct {
     sym_index: u32,
     total_size: u32,
     pointer_to_linenumber: u32,
     pointer_to_next_function: u32,
 };
 
-const SectDef = struct {
+pub const SectDef = struct {
     length: u32,
     number_of_relocations: u16,
     number_of_linenumbers: u16,
@@ -775,12 +790,12 @@ const SectDef = struct {
     selection: coff.ComdatSelection,
 };
 
-const WeakExt = struct {
+pub const WeakExt = struct {
     sym_index: u32,
     flag: coff.WeakExternalFlag,
 };
 
-const DebugInfo = struct {
+pub const DebugInfo = struct {
     line_number: u16,
     pointer_to_next_function: u32,
 };

@@ -38,6 +38,12 @@ pub fn getAltSymbol(symbol: Symbol, coff_file: *Coff) ?*Symbol {
     return coff_file.getSymbol(extra.alt_name);
 }
 
+pub fn getWeakFlag(symbol: Symbol, coff_file: *Coff) ?std.coff.WeakExternalFlag {
+    if (!symbol.flags.weak) return null;
+    const extra = symbol.getExtra(coff_file).?;
+    return @enumFromInt(extra.weak_flag);
+}
+
 pub fn getFile(symbol: Symbol, coff_file: *Coff) ?File {
     return coff_file.getFile(symbol.file);
 }
@@ -83,6 +89,7 @@ pub fn getSymbolRank(symbol: Symbol, coff_file: *Coff) u32 {
 
 const AddExtraOpts = struct {
     alt_name: ?u32 = null,
+    weak_flag: ?u32 = null,
 };
 
 pub fn addExtra(symbol: *Symbol, opts: AddExtraOpts, coff_file: *Coff) !void {
@@ -195,6 +202,7 @@ pub const Flags = packed struct {
 
 pub const Extra = struct {
     alt_name: u32 = 0,
+    weak_flag: u32 = 0,
 };
 
 pub const Index = u32;
