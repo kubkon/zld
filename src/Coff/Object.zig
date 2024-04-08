@@ -558,11 +558,8 @@ pub fn scanRelocs(self: *Object, coff_file: *Coff) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
-    std.debug.print("{}\n", .{self.fmtPath()});
-
     for (self.atoms.items) |atom_index| {
         const atom = coff_file.getAtom(atom_index) orelse continue;
-        std.debug.print("  {s}\n", .{atom.getName(coff_file)});
         if (!atom.flags.alive) continue;
         const isec = atom.getInputSection(coff_file);
         if (isec.flags.CNT_UNINITIALIZED_DATA == 0b1) continue;

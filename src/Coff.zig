@@ -16,6 +16,9 @@ symbols_extra: std.ArrayListUnmanaged(u32) = .{},
 globals: std.AutoHashMapUnmanaged(u32, Symbol.Index) = .{},
 /// Global symbols we need to resolve for the link to succeed.
 undefined_symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
+/// This table will be populated after `scanRelocs` has run.
+/// Key is symbol index.
+undefs: std.AutoHashMapUnmanaged(Symbol.Index, std.ArrayListUnmanaged(Atom.Index)) = .{},
 
 atoms: std.ArrayListUnmanaged(Atom) = .{},
 merge_rules: std.AutoArrayHashMapUnmanaged(u32, u32) = .{},
@@ -83,6 +86,14 @@ pub fn deinit(self: *Coff) void {
     self.globals.deinit(gpa);
     self.undefined_symbols.deinit(gpa);
     self.merge_rules.deinit(gpa);
+
+    {
+        var it = self.undefs.valueIterator();
+        while (it.next()) |notes| {
+            notes.deinit(gpa);
+        }
+        self.undefs.deinit(gpa);
+    }
 }
 
 pub fn flush(self: *Coff) !void {
@@ -569,9 +580,46 @@ fn scanRelocs(self: *Coff) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
+    var has_reloc_error = false;
     for (self.objects.items) |index| {
-        try self.getFile(index).?.object.scanRelocs(self);
+        self.getFile(index).?.object.scanRelocs(self) catch |err| switch (err) {
+            error.RelocError => has_reloc_error = true,
+            else => |e| return e,
+        };
     }
+
+    try self.reportUndefs();
+
+    if (has_reloc_error) return error.RelocError;
+}
+
+fn reportUndefs(self: *Coff) !void {
+    if (self.undefs.count() == 0) return;
+
+    const max_notes = 4;
+
+    var it = self.undefs.iterator();
+    while (it.next()) |entry| {
+        const undef_sym = self.getSymbol(entry.key_ptr.*);
+        const notes = entry.value_ptr.*;
+        const nnotes = @min(notes.items.len, max_notes) + @intFromBool(notes.items.len > max_notes);
+
+        const err = try self.base.addErrorWithNotes(nnotes);
+        try err.addMsg("undefined symbol: {s}", .{undef_sym.getName(self)});
+
+        var inote: usize = 0;
+        while (inote < @min(notes.items.len, max_notes)) : (inote += 1) {
+            const atom = self.getAtom(notes.items[inote]).?;
+            const object = atom.getObject(self);
+            try err.addNote("referenced by {}:{s}", .{ object.fmtPath(), atom.getName(self) });
+        }
+
+        if (notes.items.len > max_notes) {
+            const remaining = notes.items.len - max_notes;
+            try err.addNote("referenced {d} more times", .{remaining});
+        }
+    }
+    return error.UndefinedSymbols;
 }
 
 pub fn isCoffObj(buffer: *const [@sizeOf(coff.CoffHeader)]u8) bool {

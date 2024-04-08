@@ -55,14 +55,47 @@ pub fn scanRelocs(self: Atom, coff_file: *Coff) !void {
     defer tracy.end();
 
     const cpu_arch = coff_file.options.cpu_arch.?;
-    _ = cpu_arch;
     const object = self.getObject(coff_file);
-    _ = object;
     const relocs = self.getRelocs(coff_file);
 
+    var has_reloc_errors = false;
     for (relocs) |rel| {
-        std.debug.print("    {}\n", .{rel});
+        if (try self.reportUndefSymbol(rel, coff_file)) continue;
+
+        const sym_index = object.symbols.items[rel.symbol_table_index];
+        const sym = coff_file.getSymbol(sym_index);
+
+        switch (cpu_arch) {
+            .x86_64 => x86_64.scanReloc(self, coff_file, rel, sym) catch {
+                has_reloc_errors = true;
+            },
+            .aarch64 => aarch64.scanReloc(self, coff_file, rel, sym) catch {
+                has_reloc_errors = true;
+            },
+            else => |arch| {
+                coff_file.base.fatal("TODO support {s} architecture", .{@tagName(arch)});
+                return error.UnhandledCpuArch;
+            },
+        }
     }
+
+    if (has_reloc_errors) return error.RelocError;
+}
+
+fn reportUndefSymbol(self: Atom, rel: coff.Relocation, coff_file: *Coff) !bool {
+    const object = self.getObject(coff_file);
+    const sym_index = object.symbols.items[rel.symbol_table_index];
+    const sym = coff_file.getSymbol(sym_index);
+    if (sym.getFile(coff_file) == null) {
+        const gpa = coff_file.base.allocator;
+        const gop = try coff_file.undefs.getOrPut(gpa, sym_index);
+        if (!gop.found_existing) {
+            gop.value_ptr.* = .{};
+        }
+        try gop.value_ptr.append(gpa, self.atom_index);
+        return true;
+    }
+    return false;
 }
 
 pub fn format(
@@ -117,6 +150,25 @@ pub const Flags = packed struct {
     visited: bool = false,
 };
 
+const aarch64 = struct {
+    fn scanReloc(atom: Atom, coff_file: *Coff, rel: coff.Relocation, symbol: *Symbol) !void {
+        _ = atom;
+        _ = coff_file;
+        _ = rel;
+        _ = symbol;
+    }
+};
+
+const x86_64 = struct {
+    fn scanReloc(atom: Atom, coff_file: *Coff, rel: coff.Relocation, symbol: *Symbol) !void {
+        _ = atom;
+        _ = coff_file;
+        _ = rel;
+        _ = symbol;
+        @panic("TODO x86_64 support");
+    }
+};
+
 const assert = std.debug.assert;
 const coff = std.coff;
 const std = @import("std");
@@ -126,3 +178,4 @@ const Atom = @This();
 const Coff = @import("../Coff.zig");
 const File = @import("file.zig").File;
 const Object = @import("Object.zig");
+const Symbol = @import("Symbol.zig");
