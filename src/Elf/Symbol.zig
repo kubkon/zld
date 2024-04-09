@@ -96,6 +96,29 @@ pub fn getAddress(symbol: Symbol, opts: struct {
         return symbol.getPltAddress(elf_file);
     }
     if (symbol.getAtom(elf_file)) |atom| {
+        if (!atom.flags.alive) {
+            if (mem.eql(u8, atom.getName(elf_file), ".eh_frame")) {
+                const sym_name = symbol.getName(elf_file);
+                if (mem.startsWith(u8, sym_name, "__EH_FRAME_BEGIN__") or
+                    mem.startsWith(u8, sym_name, "__EH_FRAME_LIST__") or
+                    mem.startsWith(u8, sym_name, ".eh_frame_seg") or
+                    symbol.getSourceSymbol(elf_file).st_type() == elf.STT_SECTION)
+                {
+                    return elf_file.sections.items(.shdr)[elf_file.eh_frame_sect_index.?].sh_addr;
+                }
+
+                if (mem.startsWith(u8, sym_name, "__FRAME_END__") or
+                    mem.startsWith(u8, sym_name, "__EH_FRAME_LIST_END__"))
+                {
+                    const shdr = elf_file.sections.items(.shdr)[elf_file.eh_frame_sect_index.?];
+                    return shdr.sh_addr + shdr.sh_size;
+                }
+
+                // TODO I think we potentially should error here
+            }
+
+            return 0;
+        }
         return atom.getAddress(elf_file) + symbol.value;
     }
     return symbol.value;
@@ -376,6 +399,7 @@ pub const Index = u32;
 const std = @import("std");
 const assert = std.debug.assert;
 const elf = std.elf;
+const mem = std.mem;
 const synthetic = @import("synthetic.zig");
 
 const Atom = @import("Atom.zig");
