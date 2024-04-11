@@ -31,16 +31,15 @@ rel_num: u32 = 0,
 /// Index of this atom in the linker's atoms table.
 atom_index: Index = 0,
 
-/// Index of the thunk for this atom.
-thunk_index: Thunk.Index = 0,
-
-flags: Flags = .{},
-
 /// Start index of FDEs referencing this atom.
 fde_start: u32 = 0,
 
 /// End index of FDEs referencing this atom.
 fde_end: u32 = 0,
+
+flags: Flags = .{},
+
+extra: u32 = 0,
 
 pub fn getName(self: Atom, elf_file: *Elf) [:0]const u8 {
     return elf_file.string_intern.getAssumeExists(self.name);
@@ -104,7 +103,34 @@ pub fn getRelocs(self: Atom, elf_file: *Elf) []const elf.Elf64_Rela {
 }
 
 pub fn getThunk(self: Atom, elf_file: *Elf) *Thunk {
-    return elf_file.getThunk(self.thunk_index);
+    assert(self.flags.thunk);
+    const extra = self.getExtra(elf_file).?;
+    return elf_file.getThunk(extra.thunk);
+}
+
+const AddExtraOpts = struct {
+    thunk: ?u32 = null,
+};
+
+pub fn addExtra(atom: *Atom, opts: AddExtraOpts, elf_file: *Elf) !void {
+    if (atom.getExtra(elf_file) == null) {
+        atom.extra = try elf_file.addAtomExtra(.{});
+    }
+    var extra = atom.getExtra(elf_file).?;
+    inline for (@typeInfo(@TypeOf(opts)).Struct.fields) |field| {
+        if (@field(opts, field.name)) |x| {
+            @field(extra, field.name) = x;
+        }
+    }
+    atom.setExtra(extra, elf_file);
+}
+
+pub inline fn getExtra(atom: Atom, elf_file: *Elf) ?Extra {
+    return elf_file.getAtomExtra(atom.extra);
+}
+
+pub inline fn setExtra(atom: Atom, extra: Extra, elf_file: *Elf) void {
+    elf_file.setAtomExtra(atom.extra, extra);
 }
 
 pub fn writeRelocs(self: Atom, elf_file: *Elf, out_relocs: *std.ArrayList(elf.Elf64_Rela)) !void {
@@ -719,6 +745,9 @@ pub const Flags = packed struct {
 
     /// Specifies if the atom has been visited during garbage collection.
     visited: bool = false,
+
+    /// Whether this symbol has a range extension thunk.
+    thunk: bool = false,
 };
 
 const ResolveArgs = struct { i64, i64, i64, i64, i64, i64, i64 };
@@ -1809,6 +1838,10 @@ const RelocsIterator = struct {
         assert(num > 0);
         it.pos += @intCast(num);
     }
+};
+
+pub const Extra = struct {
+    thunk: u32 = 0,
 };
 
 const Atom = @This();
