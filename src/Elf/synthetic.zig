@@ -404,11 +404,7 @@ pub const DynsymSection = struct {
         const index = @as(u32, @intCast(dynsym.entries.items.len + 1));
         const sym = elf_file.getSymbol(sym_index);
         sym.flags.has_dynamic = true;
-        if (sym.getExtra(elf_file)) |extra| {
-            var new_extra = extra;
-            new_extra.dynamic = index;
-            sym.setExtra(new_extra, elf_file);
-        } else try sym.addExtra(.{ .dynamic = index }, elf_file);
+        try sym.addExtra(.{ .dynamic = index }, elf_file);
         const name = try elf_file.dynstrtab.insert(gpa, sym.getName(elf_file));
         try dynsym.entries.append(gpa, .{ .index = sym_index, .off = name });
     }
@@ -669,11 +665,7 @@ pub const GotSection = struct {
         const symbol = elf_file.getSymbol(sym_index);
         if (symbol.flags.import or symbol.isIFunc(elf_file) or (elf_file.options.pic and !symbol.isAbs(elf_file)))
             got.flags.needs_rela = true;
-        if (symbol.getExtra(elf_file)) |extra| {
-            var new_extra = extra;
-            new_extra.got = index;
-            symbol.setExtra(new_extra, elf_file);
-        } else try symbol.addExtra(.{ .got = index }, elf_file);
+        try symbol.addExtra(.{ .got = index }, elf_file);
     }
 
     pub fn addTlsLdSymbol(got: *GotSection, elf_file: *Elf) !void {
@@ -693,11 +685,7 @@ pub const GotSection = struct {
         entry.symbol_index = sym_index;
         const symbol = elf_file.getSymbol(sym_index);
         if (symbol.flags.import or elf_file.options.shared) got.flags.needs_rela = true;
-        if (symbol.getExtra(elf_file)) |extra| {
-            var new_extra = extra;
-            new_extra.tlsgd = index;
-            symbol.setExtra(new_extra, elf_file);
-        } else try symbol.addExtra(.{ .tlsgd = index }, elf_file);
+        try symbol.addExtra(.{ .tlsgd = index }, elf_file);
     }
 
     pub fn addGotTpSymbol(got: *GotSection, sym_index: u32, elf_file: *Elf) !void {
@@ -707,11 +695,7 @@ pub const GotSection = struct {
         entry.symbol_index = sym_index;
         const symbol = elf_file.getSymbol(sym_index);
         if (symbol.flags.import or elf_file.options.shared) got.flags.needs_rela = true;
-        if (symbol.getExtra(elf_file)) |extra| {
-            var new_extra = extra;
-            new_extra.gottp = index;
-            symbol.setExtra(new_extra, elf_file);
-        } else try symbol.addExtra(.{ .gottp = index }, elf_file);
+        try symbol.addExtra(.{ .gottp = index }, elf_file);
     }
 
     pub fn addTlsDescSymbol(got: *GotSection, sym_index: u32, elf_file: *Elf) !void {
@@ -721,11 +705,7 @@ pub const GotSection = struct {
         entry.symbol_index = sym_index;
         const symbol = elf_file.getSymbol(sym_index);
         got.flags.needs_rela = true;
-        if (symbol.getExtra(elf_file)) |extra| {
-            var new_extra = extra;
-            new_extra.tlsdesc = index;
-            symbol.setExtra(new_extra, elf_file);
-        } else try symbol.addExtra(.{ .tlsdesc = index }, elf_file);
+        try symbol.addExtra(.{ .tlsdesc = index }, elf_file);
     }
 
     pub fn size(got: GotSection) usize {
@@ -1031,11 +1011,7 @@ pub const PltSection = struct {
     pub fn addSymbol(plt: *PltSection, sym_index: Symbol.Index, elf_file: *Elf) !void {
         const index = @as(u32, @intCast(plt.symbols.items.len));
         const symbol = elf_file.getSymbol(sym_index);
-        if (symbol.getExtra(elf_file)) |extra| {
-            var new_extra = extra;
-            new_extra.plt = index;
-            symbol.setExtra(new_extra, elf_file);
-        } else try symbol.addExtra(.{ .plt = index }, elf_file);
+        try symbol.addExtra(.{ .plt = index }, elf_file);
         try plt.symbols.append(elf_file.base.allocator, sym_index);
     }
 
@@ -1256,11 +1232,7 @@ pub const PltGotSection = struct {
     pub fn addSymbol(plt_got: *PltGotSection, sym_index: Symbol.Index, elf_file: *Elf) !void {
         const index = @as(u32, @intCast(plt_got.symbols.items.len));
         const symbol = elf_file.getSymbol(sym_index);
-        if (symbol.getExtra(elf_file)) |extra| {
-            var new_extra = extra;
-            new_extra.plt_got = index;
-            symbol.setExtra(new_extra, elf_file);
-        } else try symbol.addExtra(.{ .plt_got = index }, elf_file);
+        try symbol.addExtra(.{ .plt_got = index }, elf_file);
         try plt_got.symbols.append(elf_file.base.allocator, sym_index);
     }
 
@@ -1377,12 +1349,7 @@ pub const CopyRelSection = struct {
         symbol.flags.@"export" = true;
         symbol.flags.has_copy_rel = true;
         symbol.flags.weak = false;
-
-        if (symbol.getExtra(elf_file)) |extra| {
-            var new_extra = extra;
-            new_extra.copy_rel = index;
-            symbol.setExtra(new_extra, elf_file);
-        } else try symbol.addExtra(.{ .copy_rel = index }, elf_file);
+        try symbol.addExtra(.{ .copy_rel = index }, elf_file);
         try copy_rel.symbols.append(elf_file.base.allocator, sym_index);
 
         const shared = symbol.getFile(elf_file).?.shared;

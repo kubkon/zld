@@ -134,14 +134,6 @@ pub fn getOutputSymtabIndex(symbol: Symbol, elf_file: *Elf) ?u32 {
     return if (symbol.isLocal(elf_file)) idx + symtab_ctx.ilocal else idx + symtab_ctx.iglobal;
 }
 
-pub fn setOutputSymtabIndex(symbol: *Symbol, index: u32, elf_file: *Elf) !void {
-    if (symbol.getExtra(elf_file)) |extra| {
-        var new_extra = extra;
-        new_extra.symtab = index;
-        symbol.setExtra(new_extra, elf_file);
-    } else try symbol.addExtra(.{ .symtab = index }, elf_file);
-}
-
 pub fn getGotAddress(symbol: Symbol, elf_file: *Elf) u64 {
     if (!symbol.flags.got) return 0;
     const extra = symbol.getExtra(elf_file).?;
@@ -211,8 +203,29 @@ pub fn getAlignment(symbol: Symbol, elf_file: *Elf) !u64 {
         @min(alignment, try std.math.powi(u64, 2, @ctz(s_sym.st_value)));
 }
 
-pub fn addExtra(symbol: *Symbol, extra: Extra, elf_file: *Elf) !void {
-    symbol.extra = try elf_file.addSymbolExtra(extra);
+const AddExtraOpts = struct {
+    got: ?u32 = null,
+    plt: ?u32 = null,
+    plt_got: ?u32 = null,
+    dynamic: ?u32 = null,
+    symtab: ?u32 = null,
+    copy_rel: ?u32 = null,
+    tlsgd: ?u32 = null,
+    gottp: ?u32 = null,
+    tlsdesc: ?u32 = null,
+};
+
+pub fn addExtra(symbol: *Symbol, opts: AddExtraOpts, elf_file: *Elf) !void {
+    if (symbol.getExtra(elf_file) == null) {
+        symbol.extra = try elf_file.addSymbolExtra(.{});
+    }
+    var extra = symbol.getExtra(elf_file).?;
+    inline for (@typeInfo(@TypeOf(opts)).Struct.fields) |field| {
+        if (@field(opts, field.name)) |x| {
+            @field(extra, field.name) = x;
+        }
+    }
+    symbol.setExtra(extra, elf_file);
 }
 
 pub inline fn getExtra(symbol: Symbol, elf_file: *Elf) ?Extra {
