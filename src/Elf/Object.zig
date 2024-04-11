@@ -667,6 +667,11 @@ pub fn initMergeSections(self: *Object, elf_file: *Elf) !void {
     }
 }
 
+pub fn resolveMergeSubsections(self: *Object, elf_file: *Elf) !void {
+    _ = self;
+    _ = elf_file;
+}
+
 /// We will create dummy shdrs per each resolved common symbols to make it
 /// play nicely with the rest of the system.
 pub fn convertCommonSymbols(self: *Object, elf_file: *Elf) !void {

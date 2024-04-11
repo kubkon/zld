@@ -1997,6 +1997,12 @@ fn resolveMergeSections(self: *Elf) !void {
         if (!file.isAlive()) continue;
         try file.object.initMergeSections(self);
     }
+
+    for (self.objects.items) |index| {
+        const file = self.getFile(index).?;
+        if (!file.isAlive()) continue;
+        try file.object.resolveMergeSubsections(self);
+    }
 }
 
 fn convertCommonSymbols(self: *Elf) !void {
@@ -3131,41 +3137,96 @@ pub const InputMergeSection = struct {
     merge_section: MergeSection.Index = 0,
     atom_index: Atom.Index = 0,
     offsets: std.ArrayListUnmanaged(u32) = .{},
-    strings: std.ArrayListUnmanaged(u32) = .{},
+    subsections: std.ArrayListUnmanaged(MergeSubsection.Index) = .{},
     bytes: std.ArrayListUnmanaged(u8) = .{},
-    hashes: std.ArrayListUnmanaged(u64) = .{},
+    table: std.HashMapUnmanaged(
+        u32,
+        void,
+        IndexContext,
+        std.hash_map.default_max_load_percentage,
+    ) = .{},
 
     pub fn deinit(imsec: *InputMergeSection, allocator: Allocator) void {
         imsec.offsets.deinit(allocator);
-        imsec.strings.deinit(allocator);
+        imsec.subsections.deinit(allocator);
         imsec.bytes.deinit(allocator);
-        imsec.hashes.deinit(allocator);
+        imsec.table.deinit(allocator);
+    }
+
+    pub fn clearAndFree(imsec: *InputMergeSection, allocator: Allocator) void {
+        imsec.bytes.clearAndFree(allocator);
+        imsec.table.clearAndFree(allocator);
     }
 
     pub fn insert(imsec: *InputMergeSection, string: []const u8, elf_file: *Elf) !void {
-        assert(elf_file.getAtom(imsec.atom_index).?.getInputShdr(elf_file).sh_entsize == string.len);
+        const entsize = elf_file.getAtom(imsec.atom_index).?.getInputShdr(elf_file).sh_entsize;
+        assert(entsize == string.len);
         const gpa = elf_file.base.allocator;
+        const gop = try imsec.table.getOrPutContextAdapted(
+            gpa,
+            string,
+            IndexAdapter{ .bytes = imsec.bytes.items, .entsize = @intCast(entsize) },
+            IndexContext{ .bytes = imsec.bytes.items, .entsize = @intCast(entsize) },
+        );
+        if (gop.found_existing) return;
         const index: u32 = @intCast(imsec.bytes.items.len);
-        const hash = std.hash_map.hashString(string);
         try imsec.bytes.appendSlice(gpa, string);
-        try imsec.strings.append(gpa, index);
-        try imsec.hashes.append(gpa, hash);
+        gop.key_ptr.* = index;
     }
 
     pub fn insertZ(imsec: *InputMergeSection, string: [:0]const u8, elf_file: *Elf) !void {
         const gpa = elf_file.base.allocator;
+        const gop = try imsec.table.getOrPutContextAdapted(
+            gpa,
+            @as([]const u8, string),
+            IndexAdapter{ .bytes = imsec.bytes.items },
+            IndexContext{ .bytes = imsec.bytes.items },
+        );
+        if (gop.found_existing) return;
         const index: u32 = @intCast(imsec.bytes.items.len);
-        const hash = std.hash_map.hashString(string);
         try imsec.bytes.ensureUnusedCapacity(gpa, string.len + 1);
         imsec.bytes.appendSliceAssumeCapacity(string);
         imsec.bytes.appendAssumeCapacity(0);
-        try imsec.strings.append(gpa, index);
-        try imsec.hashes.append(gpa, hash);
+        gop.key_ptr.* = index;
     }
 
     pub fn getAlignment(imsec: InputMergeSection, elf_file: *Elf) u8 {
         return elf_file.getAtom(imsec.atom_index).?.alignment;
     }
+
+    pub const IndexContext = struct {
+        bytes: []const u8,
+        entsize: ?u32 = null,
+
+        pub fn eql(_: @This(), a: u32, b: u32) bool {
+            return a == b;
+        }
+
+        pub fn hash(ctx: @This(), key: u32) u64 {
+            const str = if (ctx.entsize) |entsize|
+                ctx.bytes[key..][0..entsize]
+            else
+                mem.sliceTo(ctx.bytes[key..], 0);
+            return std.hash_map.hashString(str);
+        }
+    };
+
+    pub const IndexAdapter = struct {
+        bytes: []const u8,
+        entsize: ?u32 = null,
+
+        pub fn eql(ctx: @This(), a: []const u8, b: u32) bool {
+            const str = if (ctx.entsize) |entsize|
+                ctx.bytes[b..][0..entsize]
+            else
+                mem.sliceTo(ctx.bytes[b..], 0);
+            return mem.eql(u8, a, str);
+        }
+
+        pub fn hash(_: @This(), adapted_key: []const u8) u64 {
+            return std.hash_map.hashString(adapted_key);
+        }
+    };
 
     pub const Index = u32;
 };
