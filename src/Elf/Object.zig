@@ -611,11 +611,11 @@ pub fn initMergeSections(self: *Object, elf_file: *Elf) !void {
         if (atom.getRelocs(elf_file).len > 0) continue;
 
         const imsec_idx = try elf_file.addInputMergeSection();
-        const imsec = elf_file.getInputMergeSection(imsec_idx);
+        const imsec = elf_file.getInputMergeSection(imsec_idx).?;
         self.merge_sections.items[shndx] = imsec_idx;
 
         imsec.merge_section = try elf_file.getOrCreateMergeSection(atom.getName(elf_file), shdr);
-        imsec.atom_index = atom_index;
+        imsec.atom = atom_index;
 
         const data = try atom.getCodeUncompressAlloc(elf_file);
         defer gpa.free(data);
@@ -643,7 +643,7 @@ pub fn initMergeSections(self: *Object, elf_file: *Elf) !void {
                 }
                 pos += 1; // account for null
                 if (string.len == 0) continue;
-                try imsec.insertZ(string, elf_file);
+                try imsec.insertZ(gpa, string);
                 try imsec.offsets.append(gpa, pos);
             }
         } else {
@@ -658,7 +658,7 @@ pub fn initMergeSections(self: *Object, elf_file: *Elf) !void {
             var pos: u32 = 0;
             while (pos < data.len) : (pos += sh_entsize) {
                 const string = data.ptr[pos..][0..sh_entsize];
-                try imsec.insert(string, elf_file);
+                try imsec.insert(gpa, string);
                 try imsec.offsets.append(gpa, pos);
             }
         }
@@ -668,8 +668,37 @@ pub fn initMergeSections(self: *Object, elf_file: *Elf) !void {
 }
 
 pub fn resolveMergeSubsections(self: *Object, elf_file: *Elf) !void {
-    _ = self;
-    _ = elf_file;
+    const gpa = elf_file.base.allocator;
+
+    for (self.merge_sections.items) |index| {
+        const imsec = elf_file.getInputMergeSection(index) orelse continue;
+        const msec = elf_file.getMergeSection(imsec.merge_section);
+        const atom = elf_file.getAtom(imsec.atom).?;
+        const isec = atom.getInputShdr(elf_file);
+        const entsize: ?u32 = if (isec.sh_flags & elf.SHF_STRINGS != 0) null else @intCast(isec.sh_entsize);
+
+        try imsec.subsections.resize(gpa, imsec.strings.items.len);
+
+        for (imsec.strings.items, imsec.subsections.items) |off, *imsec_msub| {
+            const res = if (entsize) |ent| ent: {
+                const string = imsec.bytes.items[off..][0..ent];
+                break :ent try msec.insert(gpa, string);
+            } else nul: {
+                const string = mem.sliceTo(@as([*:0]const u8, @ptrCast(imsec.bytes.items.ptr + off)), 0);
+                break :nul try msec.insertZ(gpa, string);
+            };
+            if (!res.found_existing) {
+                const msub_index = try elf_file.addMergeSubsection();
+                const msub = elf_file.getMergeSubsection(msub_index);
+                msub.merge_section = imsec.merge_section;
+                msub.string_index = res.index;
+                res.sub.* = msub_index;
+            }
+            imsec_msub.* = res.sub.*;
+        }
+
+        imsec.clearAndFree(gpa);
+    }
 }
 
 /// We will create dummy shdrs per each resolved common symbols to make it

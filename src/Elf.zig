@@ -2763,13 +2763,13 @@ pub fn addInputMergeSection(self: *Elf) !InputMergeSection.Index {
     return index;
 }
 
-pub fn getInputMergeSection(self: *Elf, index: InputMergeSection.Index) *InputMergeSection {
-    assert(index < self.merge_input_sections.items.len);
+pub fn getInputMergeSection(self: *Elf, index: InputMergeSection.Index) ?*InputMergeSection {
+    if (index == 0) return null;
     return &self.merge_input_sections.items[index];
 }
 
 pub fn addMergeSubsection(self: *Elf) !MergeSubsection.Index {
-    const index: MergeSubsection.Index = @intCast(self.merge_subections.items.len);
+    const index: MergeSubsection.Index = @intCast(self.merge_subsections.items.len);
     const msec = try self.merge_subsections.addOne(self.base.allocator);
     msec.* = .{};
     return index;
@@ -3115,83 +3115,55 @@ pub const ComdatGroup = struct {
 };
 
 pub const MergeSection = struct {
-    pub fn deinit(msec: *MergeSection, allocator: Allocator) void {
-        _ = msec;
-        _ = allocator;
-    }
-
-    pub const Index = u32;
-};
-
-pub const MergeSubsection = struct {
-    merge_section_index: MergeSection.Index = 0,
-
-    pub fn getMergeSection(msub: MergeSubsection, elf_file: *Elf) *MergeSection {
-        return elf_file.getMergeSection(msub.merge_section_index);
-    }
-
-    pub const Index = u32;
-};
-
-pub const InputMergeSection = struct {
-    merge_section: MergeSection.Index = 0,
-    atom_index: Atom.Index = 0,
-    offsets: std.ArrayListUnmanaged(u32) = .{},
-    subsections: std.ArrayListUnmanaged(MergeSubsection.Index) = .{},
     bytes: std.ArrayListUnmanaged(u8) = .{},
     table: std.HashMapUnmanaged(
         u32,
-        void,
+        MergeSubsection.Index,
         IndexContext,
         std.hash_map.default_max_load_percentage,
     ) = .{},
 
-    pub fn deinit(imsec: *InputMergeSection, allocator: Allocator) void {
-        imsec.offsets.deinit(allocator);
-        imsec.subsections.deinit(allocator);
-        imsec.bytes.deinit(allocator);
-        imsec.table.deinit(allocator);
+    pub fn deinit(msec: *MergeSection, allocator: Allocator) void {
+        msec.bytes.deinit(allocator);
+        msec.table.deinit(allocator);
     }
 
-    pub fn clearAndFree(imsec: *InputMergeSection, allocator: Allocator) void {
-        imsec.bytes.clearAndFree(allocator);
-        imsec.table.clearAndFree(allocator);
-    }
+    const InsertResult = struct {
+        found_existing: bool,
+        index: u32,
+        sub: *MergeSubsection.Index,
+    };
 
-    pub fn insert(imsec: *InputMergeSection, string: []const u8, elf_file: *Elf) !void {
-        const entsize = elf_file.getAtom(imsec.atom_index).?.getInputShdr(elf_file).sh_entsize;
-        assert(entsize == string.len);
-        const gpa = elf_file.base.allocator;
-        const gop = try imsec.table.getOrPutContextAdapted(
-            gpa,
+    pub fn insert(msec: *MergeSection, allocator: Allocator, string: []const u8) !InsertResult {
+        const gop = try msec.table.getOrPutContextAdapted(
+            allocator,
             string,
-            IndexAdapter{ .bytes = imsec.bytes.items, .entsize = @intCast(entsize) },
-            IndexContext{ .bytes = imsec.bytes.items, .entsize = @intCast(entsize) },
+            IndexAdapter{ .bytes = msec.bytes.items, .entsize = @intCast(string.len) },
+            IndexContext{ .bytes = msec.bytes.items, .entsize = @intCast(string.len) },
         );
-        if (gop.found_existing) return;
-        const index: u32 = @intCast(imsec.bytes.items.len);
-        try imsec.bytes.appendSlice(gpa, string);
-        gop.key_ptr.* = index;
+        if (!gop.found_existing) {
+            const index: u32 = @intCast(msec.bytes.items.len);
+            try msec.bytes.appendSlice(allocator, string);
+            gop.key_ptr.* = index;
+        }
+        return .{ .found_existing = gop.found_existing, .index = gop.key_ptr.*, .sub = gop.value_ptr };
     }
 
-    pub fn insertZ(imsec: *InputMergeSection, string: [:0]const u8, elf_file: *Elf) !void {
-        const gpa = elf_file.base.allocator;
-        const gop = try imsec.table.getOrPutContextAdapted(
-            gpa,
+    pub fn insertZ(msec: *MergeSection, allocator: Allocator, string: [:0]const u8) !InsertResult {
+        const gop = try msec.table.getOrPutContextAdapted(
+            allocator,
             @as([]const u8, string),
-            IndexAdapter{ .bytes = imsec.bytes.items },
-            IndexContext{ .bytes = imsec.bytes.items },
+            IndexAdapter{ .bytes = msec.bytes.items },
+            IndexContext{ .bytes = msec.bytes.items },
         );
-        if (gop.found_existing) return;
-        const index: u32 = @intCast(imsec.bytes.items.len);
-        try imsec.bytes.ensureUnusedCapacity(gpa, string.len + 1);
-        imsec.bytes.appendSliceAssumeCapacity(string);
-        imsec.bytes.appendAssumeCapacity(0);
-        gop.key_ptr.* = index;
-    }
-
-    pub fn getAlignment(imsec: InputMergeSection, elf_file: *Elf) u8 {
-        return elf_file.getAtom(imsec.atom_index).?.alignment;
+        if (!gop.found_existing) {
+            const index: u32 = @intCast(msec.bytes.items.len);
+            try msec.bytes.ensureUnusedCapacity(allocator, string.len + 1);
+            msec.bytes.appendSliceAssumeCapacity(string);
+            msec.bytes.appendAssumeCapacity(0);
+            gop.key_ptr.* = index;
+        }
+        return .{ .found_existing = gop.found_existing, .index = gop.key_ptr.*, .sub = gop.value_ptr };
     }
 
     pub const IndexContext = struct {
@@ -3227,6 +3199,64 @@ pub const InputMergeSection = struct {
             return std.hash_map.hashString(adapted_key);
         }
     };
+
+    pub const Index = u32;
+};
+
+pub const MergeSubsection = struct {
+    merge_section: MergeSection.Index = 0,
+    string_index: u32 = 0,
+
+    pub fn getMergeSection(msub: MergeSubsection, elf_file: *Elf) *MergeSection {
+        return elf_file.getMergeSection(msub.merge_section);
+    }
+
+    pub fn getString(msub: MergeSubsection, elf_file: *Elf, entsize: u32) []const u8 {
+        const msec = msub.getMergeSection(elf_file);
+        return msec.bytes.items[msub.string_index..][0..entsize];
+    }
+
+    pub fn getStringZ(msub: MergeSubsection, elf_file: *Elf) [:0]const u8 {
+        const msec = msub.getMergeSection(elf_file);
+        return mem.sliceTo(msec.bytes.items[msub.string_index..], 0);
+    }
+
+    pub const Index = u32;
+};
+
+pub const InputMergeSection = struct {
+    merge_section: MergeSection.Index = 0,
+    atom: Atom.Index = 0,
+    offsets: std.ArrayListUnmanaged(u32) = .{},
+    subsections: std.ArrayListUnmanaged(MergeSubsection.Index) = .{},
+    bytes: std.ArrayListUnmanaged(u8) = .{},
+    strings: std.ArrayListUnmanaged(u32) = .{},
+
+    pub fn deinit(imsec: *InputMergeSection, allocator: Allocator) void {
+        imsec.offsets.deinit(allocator);
+        imsec.subsections.deinit(allocator);
+        imsec.bytes.deinit(allocator);
+        imsec.strings.deinit(allocator);
+    }
+
+    pub fn clearAndFree(imsec: *InputMergeSection, allocator: Allocator) void {
+        imsec.bytes.clearAndFree(allocator);
+        imsec.strings.clearAndFree(allocator);
+    }
+
+    pub fn insert(imsec: *InputMergeSection, allocator: Allocator, string: []const u8) !void {
+        const index: u32 = @intCast(imsec.bytes.items.len);
+        try imsec.bytes.appendSlice(allocator, string);
+        try imsec.strings.append(allocator, index);
+    }
+
+    pub fn insertZ(imsec: *InputMergeSection, allocator: Allocator, string: [:0]const u8) !void {
+        const index: u32 = @intCast(imsec.bytes.items.len);
+        try imsec.bytes.ensureUnusedCapacity(allocator, string.len + 1);
+        imsec.bytes.appendSliceAssumeCapacity(string);
+        imsec.bytes.appendAssumeCapacity(0);
+        try imsec.strings.append(allocator, index);
+    }
 
     pub const Index = u32;
 };
