@@ -213,10 +213,11 @@ fn initAtoms(self: *Object, allocator: Allocator, file: std.fs.File, elf_file: *
                 const relocs = try self.preadRelocsAlloc(allocator, file, @intCast(i));
                 defer allocator.free(relocs);
                 atom.relocs_shndx = @intCast(i);
-                atom.rel_index = @intCast(self.relocs.items.len);
-                atom.rel_num = @intCast(relocs.len);
+                const rel_index: u32 = @intCast(self.relocs.items.len);
+                const rel_count: u32 = @intCast(relocs.len);
+                try atom.addExtra(.{ .rel_index = rel_index, .rel_count = rel_count }, elf_file);
                 try self.relocs.appendUnalignedSlice(allocator, relocs);
-                sortRelocs(self.relocs.items[atom.rel_index..][0..atom.rel_num], elf_file);
+                sortRelocs(self.relocs.items[rel_index..][0..rel_count], elf_file);
             }
         },
         else => {},

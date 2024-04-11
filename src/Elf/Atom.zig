@@ -22,12 +22,6 @@ out_shndx: u32 = 0,
 /// Index of the input section containing this atom's relocs.
 relocs_shndx: u32 = 0,
 
-/// Start index of relocations belonging to this atom.
-rel_index: u32 = 0,
-
-/// Number of relocations belonging to this atom.
-rel_num: u32 = 0,
-
 /// Index of this atom in the linker's atoms table.
 atom_index: Index = 0,
 
@@ -92,8 +86,10 @@ pub fn getPriority(self: Atom, elf_file: *Elf) u64 {
 }
 
 pub fn getRelocs(self: Atom, elf_file: *Elf) []const elf.Elf64_Rela {
+    if (self.relocs_shndx == 0) return &[0]elf.Elf64_Rela{};
+    const extra = self.getExtra(elf_file).?;
     const object = self.getObject(elf_file);
-    return object.relocs.items[self.rel_index..][0..self.rel_num];
+    return object.relocs.items[extra.rel_index..][0..extra.rel_count];
 }
 
 pub fn getThunk(self: Atom, elf_file: *Elf) *Thunk {
@@ -106,6 +102,8 @@ const AddExtraOpts = struct {
     thunk: ?u32 = null,
     fde_start: ?u32 = null,
     fde_count: ?u32 = null,
+    rel_index: ?u32 = null,
+    rel_count: ?u32 = null,
 };
 
 pub fn addExtra(atom: *Atom, opts: AddExtraOpts, elf_file: *Elf) !void {
@@ -1850,6 +1848,12 @@ pub const Extra = struct {
 
     /// Count of FDEs referencing this atom.
     fde_count: u32 = 0,
+
+    /// Start index of relocations belonging to this atom.
+    rel_index: u32 = 0,
+
+    /// Count of relocations belonging to this atom.
+    rel_count: u32 = 0,
 };
 
 const Atom = @This();
