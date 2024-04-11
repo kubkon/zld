@@ -88,6 +88,11 @@ atoms: std.ArrayListUnmanaged(Atom) = .{},
 atoms_extra: std.ArrayListUnmanaged(u32) = .{},
 thunks: std.ArrayListUnmanaged(Thunk) = .{},
 
+merge_sections: std.ArrayListUnmanaged(MergeSection) = .{},
+merge_sections_table: std.AutoHashMapUnmanaged(u32, MergeSection.Index) = .{},
+merge_subsections: std.ArrayListUnmanaged(MergeSubsection) = .{},
+merge_input_sections: std.ArrayListUnmanaged(InputMergeSection) = .{},
+
 comdat_groups: std.ArrayListUnmanaged(ComdatGroup) = .{},
 comdat_groups_owners: std.ArrayListUnmanaged(ComdatGroupOwner) = .{},
 comdat_groups_table: std.AutoHashMapUnmanaged(u32, ComdatGroupOwner.Index) = .{},
@@ -140,7 +145,20 @@ pub fn deinit(self: *Elf) void {
     self.strtab.deinit(gpa);
     self.atoms.deinit(gpa);
     self.atoms_extra.deinit(gpa);
+    for (self.thunks.items) |*thunk| {
+        thunk.deinit(gpa);
+    }
     self.thunks.deinit(gpa);
+    for (self.merge_sections.items) |*sect| {
+        sect.deinit(gpa);
+    }
+    self.merge_sections.deinit(gpa);
+    self.merge_sections_table.deinit(gpa);
+    self.merge_subsections.deinit(gpa);
+    for (self.merge_input_sections.items) |*sect| {
+        sect.deinit(gpa);
+    }
+    self.merge_input_sections.deinit(gpa);
     self.comdat_groups.deinit(gpa);
     self.comdat_groups_owners.deinit(gpa);
     self.comdat_groups_table.deinit(gpa);
@@ -278,6 +296,9 @@ pub fn flush(self: *Elf) !void {
     try self.symbols_extra.append(gpa, 0);
     // Append null file.
     try self.files.append(gpa, .null);
+    // Append null merge section.
+    try self.merge_sections.append(gpa, .{});
+    try self.merge_input_sections.append(gpa, .{});
 
     var arena_allocator = std.heap.ArenaAllocator.init(gpa);
     defer arena_allocator.deinit();
@@ -350,6 +371,7 @@ pub fn flush(self: *Elf) !void {
 
     try self.resolveSymbols();
     self.markEhFrameAtomsDead();
+    try self.resolveMergeSections();
 
     if (self.options.relocatable) return relocatable.flush(self);
 
@@ -1966,6 +1988,17 @@ fn markEhFrameAtomsDead(self: *Elf) void {
     }
 }
 
+fn resolveMergeSections(self: *Elf) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    for (self.objects.items) |index| {
+        const file = self.getFile(index).?;
+        if (!file.isAlive()) continue;
+        try file.object.initMergeSections(self);
+    }
+}
+
 fn convertCommonSymbols(self: *Elf) !void {
     for (self.objects.items) |index| {
         try self.getFile(index).?.object.convertCommonSymbols(self);
@@ -2717,6 +2750,55 @@ pub fn getGlobalByName(self: *Elf, name: []const u8) ?u32 {
     return self.globals.get(off);
 }
 
+pub fn addInputMergeSection(self: *Elf) !InputMergeSection.Index {
+    const index: InputMergeSection.Index = @intCast(self.merge_input_sections.items.len);
+    const msec = try self.merge_input_sections.addOne(self.base.allocator);
+    msec.* = .{};
+    return index;
+}
+
+pub fn getInputMergeSection(self: *Elf, index: InputMergeSection.Index) *InputMergeSection {
+    assert(index < self.merge_input_sections.items.len);
+    return &self.merge_input_sections.items[index];
+}
+
+pub fn addMergeSubsection(self: *Elf) !MergeSubsection.Index {
+    const index: MergeSubsection.Index = @intCast(self.merge_subections.items.len);
+    const msec = try self.merge_subsections.addOne(self.base.allocator);
+    msec.* = .{};
+    return index;
+}
+
+pub fn getMergeSubsection(self: *Elf, index: MergeSubsection.Index) *MergeSubsection {
+    assert(index < self.merge_subsections.items.len);
+    return &self.merge_subsections.items[index];
+}
+
+pub fn getOrCreateMergeSection(self: *Elf, sh_name: [:0]const u8, shdr: elf.Elf64_Shdr) !MergeSection.Index {
+    const gpa = self.base.allocator;
+    const name = if (mem.eql(u8, sh_name, ".rodata") or mem.startsWith(u8, sh_name, ".rodata")) name: {
+        break :name if (shdr.sh_flags & elf.SHF_STRINGS != 0) ".rodata.str" else ".rodata.cst";
+    } else sh_name;
+    const osec = self.getSectionByName(name) orelse try self.addSection(.{
+        .type = shdr.sh_type,
+        .flags = shdr.sh_flags & ~@as(u64, elf.SHF_COMPRESSED | elf.SHF_GROUP),
+        .name = name,
+    });
+    const gop = try self.merge_sections_table.getOrPut(gpa, osec);
+    if (!gop.found_existing) {
+        const index = @as(MergeSection.Index, @intCast(self.merge_sections.items.len));
+        const msec = try self.merge_sections.addOne(gpa);
+        msec.* = .{};
+        gop.value_ptr.* = index;
+    }
+    return gop.value_ptr.*;
+}
+
+pub fn getMergeSection(self: *Elf, index: MergeSection.Index) *MergeSection {
+    assert(index < self.merge_sections.items.len);
+    return &self.merge_sections.items[index];
+}
+
 const GetOrCreateComdatGroupOwnerResult = struct {
     found_existing: bool,
     index: ComdatGroupOwner.Index,
@@ -3021,6 +3103,68 @@ pub const ComdatGroup = struct {
     pub fn getComdatGroupMembers(cg: ComdatGroup, elf_file: *Elf) []const u32 {
         const object = elf_file.getFile(cg.file).?.object;
         return object.comdat_group_data.items[cg.members_start..][0..cg.members_len];
+    }
+
+    pub const Index = u32;
+};
+
+pub const MergeSection = struct {
+    pub fn deinit(msec: *MergeSection, allocator: Allocator) void {
+        _ = msec;
+        _ = allocator;
+    }
+
+    pub const Index = u32;
+};
+
+pub const MergeSubsection = struct {
+    merge_section_index: MergeSection.Index = 0,
+
+    pub fn getMergeSection(msub: MergeSubsection, elf_file: *Elf) *MergeSection {
+        return elf_file.getMergeSection(msub.merge_section_index);
+    }
+
+    pub const Index = u32;
+};
+
+pub const InputMergeSection = struct {
+    merge_section: MergeSection.Index = 0,
+    atom_index: Atom.Index = 0,
+    offsets: std.ArrayListUnmanaged(u32) = .{},
+    strings: std.ArrayListUnmanaged(u32) = .{},
+    bytes: std.ArrayListUnmanaged(u8) = .{},
+    hashes: std.ArrayListUnmanaged(u64) = .{},
+
+    pub fn deinit(imsec: *InputMergeSection, allocator: Allocator) void {
+        imsec.offsets.deinit(allocator);
+        imsec.strings.deinit(allocator);
+        imsec.bytes.deinit(allocator);
+        imsec.hashes.deinit(allocator);
+    }
+
+    pub fn insert(imsec: *InputMergeSection, string: []const u8, elf_file: *Elf) !void {
+        assert(elf_file.getAtom(imsec.atom_index).?.getInputShdr(elf_file).sh_entsize == string.len);
+        const gpa = elf_file.base.allocator;
+        const index: u32 = @intCast(imsec.bytes.items.len);
+        const hash = std.hash_map.hashString(string);
+        try imsec.bytes.appendSlice(gpa, string);
+        try imsec.strings.append(gpa, index);
+        try imsec.hashes.append(gpa, hash);
+    }
+
+    pub fn insertZ(imsec: *InputMergeSection, string: [:0]const u8, elf_file: *Elf) !void {
+        const gpa = elf_file.base.allocator;
+        const index: u32 = @intCast(imsec.bytes.items.len);
+        const hash = std.hash_map.hashString(string);
+        try imsec.bytes.ensureUnusedCapacity(gpa, string.len + 1);
+        imsec.bytes.appendSliceAssumeCapacity(string);
+        imsec.bytes.appendAssumeCapacity(0);
+        try imsec.strings.append(gpa, index);
+        try imsec.hashes.append(gpa, hash);
+    }
+
+    pub fn getAlignment(imsec: InputMergeSection, elf_file: *Elf) u8 {
+        return elf_file.getAtom(imsec.atom_index).?.alignment;
     }
 
     pub const Index = u32;

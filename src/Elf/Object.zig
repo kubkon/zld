@@ -16,6 +16,8 @@ comdat_groups: std.ArrayListUnmanaged(Elf.ComdatGroup.Index) = .{},
 comdat_group_data: std.ArrayListUnmanaged(u32) = .{},
 relocs: std.ArrayListUnmanaged(elf.Elf64_Rela) = .{},
 
+merge_sections: std.ArrayListUnmanaged(Elf.InputMergeSection.Index) = .{},
+
 fdes: std.ArrayListUnmanaged(Fde) = .{},
 cies: std.ArrayListUnmanaged(Cie) = .{},
 eh_frame_data: std.ArrayListUnmanaged(u8) = .{},
@@ -48,6 +50,7 @@ pub fn deinit(self: *Object, allocator: Allocator) void {
     self.relocs.deinit(allocator);
     self.fdes.deinit(allocator);
     self.cies.deinit(allocator);
+    self.merge_sections.deinit(allocator);
 }
 
 pub fn parse(self: *Object, elf_file: *Elf) !void {
@@ -250,7 +253,6 @@ fn skipShdr(self: *Object, index: u32, elf_file: *Elf) bool {
     const name = self.getShString(shdr.sh_name);
     const ignore = blk: {
         if (mem.startsWith(u8, name, ".note")) break :blk true;
-        if (mem.startsWith(u8, name, ".comment")) break :blk true;
         if (mem.startsWith(u8, name, ".llvm_addrsig")) break :blk true;
         if (mem.startsWith(u8, name, ".riscv.attributes")) break :blk true; // TODO: riscv attributes
         if ((elf_file.options.strip_debug or elf_file.options.strip_all) and
@@ -302,8 +304,6 @@ pub fn initOutputSection(self: Object, elf_file: *Elf, shdr: elf.Elf64_Shdr) !u3
     const name = blk: {
         const name = self.getShString(shdr.sh_name);
         if (elf_file.options.relocatable) break :blk name;
-        if (shdr.sh_flags & elf.SHF_MERGE != 0 and shdr.sh_flags & elf.SHF_STRINGS == 0)
-            break :blk name; // TODO: consider dropping SHF_STRINGS once ICF is implemented
         const sh_name_prefixes: []const [:0]const u8 = &.{
             ".text",       ".data.rel.ro", ".data", ".rodata", ".bss.rel.ro",       ".bss",
             ".init_array", ".fini_array",  ".tbss", ".tdata",  ".gcc_except_table", ".ctors",
@@ -591,6 +591,80 @@ pub fn checkDuplicates(self: *Object, elf_file: *Elf) bool {
         has_dupes = true;
     }
     return has_dupes;
+}
+
+pub fn initMergeSections(self: *Object, elf_file: *Elf) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    const gpa = elf_file.base.allocator;
+
+    try self.merge_sections.resize(gpa, self.shdrs.items.len);
+    @memset(self.merge_sections.items, 0);
+
+    for (self.shdrs.items, 0..) |shdr, shndx| {
+        if (shdr.sh_flags & elf.SHF_MERGE == 0) continue;
+
+        const atom_index = self.atoms.items[shndx];
+        const atom = elf_file.getAtom(atom_index) orelse continue;
+        if (!atom.flags.alive) continue;
+        if (atom.getRelocs(elf_file).len > 0) continue;
+
+        const imsec_idx = try elf_file.addInputMergeSection();
+        const imsec = elf_file.getInputMergeSection(imsec_idx);
+        self.merge_sections.items[shndx] = imsec_idx;
+
+        imsec.merge_section = try elf_file.getOrCreateMergeSection(atom.getName(elf_file), shdr);
+        imsec.atom_index = atom_index;
+
+        const data = try atom.getCodeUncompressAlloc(elf_file);
+        defer gpa.free(data);
+        const sh_entsize: u32 = @intCast(shdr.sh_entsize);
+
+        if (shdr.sh_flags & elf.SHF_STRINGS != 0) {
+            if (sh_entsize == 0) {
+                elf_file.base.fatal("{}:{s}: invalid sh_entsize value", .{
+                    self.fmtPath(),
+                    atom.getName(elf_file),
+                });
+                return error.ParseFailed;
+            }
+
+            var pos: u32 = 0;
+            while (pos < data.len) {
+                const string = mem.sliceTo(@as([*:0]const u8, @ptrCast(data.ptr + pos)), 0);
+                pos += @intCast(string.len);
+                if (pos == data.len) {
+                    elf_file.base.fatal("{}:{s}: string not null terminated", .{
+                        self.fmtPath(),
+                        atom.getName(elf_file),
+                    });
+                    return error.ParseFailed;
+                }
+                pos += 1; // account for null
+                if (string.len == 0) continue;
+                try imsec.insertZ(string, elf_file);
+                try imsec.offsets.append(gpa, pos);
+            }
+        } else {
+            if (shdr.sh_size % sh_entsize != 0) {
+                elf_file.base.fatal("{}:{s}: size not multiple of sh_entsize", .{
+                    self.fmtPath(),
+                    atom.getName(elf_file),
+                });
+                return error.ParseFailed;
+            }
+
+            var pos: u32 = 0;
+            while (pos < data.len) : (pos += sh_entsize) {
+                const string = data.ptr[pos..][0..sh_entsize];
+                try imsec.insert(string, elf_file);
+                try imsec.offsets.append(gpa, pos);
+            }
+        }
+
+        atom.flags.alive = false;
+    }
 }
 
 /// We will create dummy shdrs per each resolved common symbols to make it
