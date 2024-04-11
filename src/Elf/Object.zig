@@ -426,13 +426,14 @@ fn parseEhFrame(self: *Object, allocator: Allocator, file: std.fs.File, shndx: u
     while (i < self.fdes.items.len) {
         const fde = self.fdes.items[i];
         const atom = fde.getAtom(elf_file);
-        atom.fde_start = i;
+        const start = i;
         i += 1;
         while (i < self.fdes.items.len) : (i += 1) {
             const next_fde = self.fdes.items[i];
             if (atom.atom_index != next_fde.getAtom(elf_file).atom_index) break;
         }
-        atom.fde_end = i;
+        try atom.addExtra(.{ .fde_start = start, .fde_count = i - start }, elf_file);
+        atom.flags.fde = true;
     }
 }
 

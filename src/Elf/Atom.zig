@@ -31,12 +31,6 @@ rel_num: u32 = 0,
 /// Index of this atom in the linker's atoms table.
 atom_index: Index = 0,
 
-/// Start index of FDEs referencing this atom.
-fde_start: u32 = 0,
-
-/// End index of FDEs referencing this atom.
-fde_end: u32 = 0,
-
 flags: Flags = .{},
 
 extra: u32 = 0,
@@ -110,6 +104,8 @@ pub fn getThunk(self: Atom, elf_file: *Elf) *Thunk {
 
 const AddExtraOpts = struct {
     thunk: ?u32 = null,
+    fde_start: ?u32 = null,
+    fde_count: ?u32 = null,
 };
 
 pub fn addExtra(atom: *Atom, opts: AddExtraOpts, elf_file: *Elf) !void {
@@ -174,9 +170,10 @@ pub fn writeRelocs(self: Atom, elf_file: *Elf, out_relocs: *std.ArrayList(elf.El
 }
 
 pub fn getFdes(self: Atom, elf_file: *Elf) []Fde {
-    if (self.fde_start == self.fde_end) return &[0]Fde{};
+    if (!self.flags.fde) return &[0]Fde{};
+    const extra = self.getExtra(elf_file).?;
     const object = self.getObject(elf_file);
-    return object.fdes.items[self.fde_start..self.fde_end];
+    return object.fdes.items[extra.fde_start..][0..extra.fde_count];
 }
 
 pub fn markFdesDead(self: Atom, elf_file: *Elf) void {
@@ -723,12 +720,13 @@ fn format2(
         atom.atom_index, atom.getName(elf_file), atom.getAddress(elf_file),
         atom.out_shndx,  atom.alignment,         atom.size,
     });
-    if (atom.fde_start != atom.fde_end) {
+    if (atom.flags.fde) {
         try writer.writeAll(" : fdes{ ");
-        for (atom.getFdes(elf_file), atom.fde_start..) |fde, i| {
+        const extra = atom.getExtra(elf_file).?;
+        for (atom.getFdes(elf_file), extra.fde_start..) |fde, i| {
             try writer.print("{d}", .{i});
             if (!fde.alive) try writer.writeAll("([*])");
-            if (i < atom.fde_end - 1) try writer.writeAll(", ");
+            if (i - extra.fde_start < extra.fde_count - 1) try writer.writeAll(", ");
         }
         try writer.writeAll(" }");
     }
@@ -746,8 +744,11 @@ pub const Flags = packed struct {
     /// Specifies if the atom has been visited during garbage collection.
     visited: bool = false,
 
-    /// Whether this symbol has a range extension thunk.
+    /// Whether this atom has a range extension thunk.
     thunk: bool = false,
+
+    /// Whether this atom has FDE records.
+    fde: bool = false,
 };
 
 const ResolveArgs = struct { i64, i64, i64, i64, i64, i64, i64 };
@@ -1841,7 +1842,14 @@ const RelocsIterator = struct {
 };
 
 pub const Extra = struct {
+    /// Index of the range extension thunk of this atom.
     thunk: u32 = 0,
+
+    /// Start index of FDEs referencing this atom.
+    fde_start: u32 = 0,
+
+    /// Count of FDEs referencing this atom.
+    fde_count: u32 = 0,
 };
 
 const Atom = @This();
