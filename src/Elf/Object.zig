@@ -633,18 +633,16 @@ pub fn initMergeSections(self: *Object, elf_file: *Elf) !void {
             var pos: u32 = 0;
             while (pos < data.len) {
                 const string = mem.sliceTo(@as([*:0]const u8, @ptrCast(data.ptr + pos)), 0);
-                pos += @intCast(string.len);
-                if (pos == data.len) {
+                if (pos + string.len == data.len) {
                     elf_file.base.fatal("{}:{s}: string not null terminated", .{
                         self.fmtPath(),
                         atom.getName(elf_file),
                     });
                     return error.ParseFailed;
                 }
-                pos += 1; // account for null
-                if (string.len == 0) continue;
                 try imsec.insertZ(gpa, string);
                 try imsec.offsets.append(gpa, pos);
+                pos += @as(u32, @intCast(string.len)) + 1; // account for null
             }
         } else {
             if (shdr.sh_size % sh_entsize != 0) {
@@ -676,6 +674,7 @@ pub fn resolveMergeSubsections(self: *Object, elf_file: *Elf) !void {
         const atom = elf_file.getAtom(imsec.atom).?;
         const isec = atom.getInputShdr(elf_file);
         const entsize: ?u32 = if (isec.sh_flags & elf.SHF_STRINGS != 0) null else @intCast(isec.sh_entsize);
+        msec.alignment = @max(msec.alignment, atom.alignment);
 
         try imsec.subsections.resize(gpa, imsec.strings.items.len);
 
@@ -698,6 +697,27 @@ pub fn resolveMergeSubsections(self: *Object, elf_file: *Elf) !void {
         }
 
         imsec.clearAndFree(gpa);
+    }
+
+    for (self.symtab.items, 0..) |*esym, idx| {
+        const sym_index = self.symbols.items[idx];
+        const sym = elf_file.getSymbol(sym_index);
+
+        if (esym.st_shndx == elf.SHN_COMMON or esym.st_shndx == elf.SHN_UNDEF or esym.st_shndx == elf.SHN_ABS) continue;
+
+        const imsec_index = self.merge_sections.items[esym.st_shndx];
+        const imsec = elf_file.getInputMergeSection(imsec_index) orelse continue;
+        if (imsec.subsections.items.len == 0) continue;
+
+        const msub_index, const offset = imsec.findSubsection(@intCast(esym.st_value)) orelse {
+            elf_file.base.fatal("{}: invalid symbol value: {s}:{x}", .{
+                self.fmtPath(),
+                sym.getName(elf_file),
+                esym.st_value,
+            });
+            return error.ParseFailed;
+        };
+        std.debug.print("{}: {s} => in subsection {d} @ {x}\n", .{ self.fmtPath(), sym.getName(elf_file), msub_index, offset });
     }
 }
 

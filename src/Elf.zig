@@ -2794,7 +2794,7 @@ pub fn getOrCreateMergeSection(self: *Elf, sh_name: [:0]const u8, shdr: elf.Elf6
     if (!gop.found_existing) {
         const index = @as(MergeSection.Index, @intCast(self.merge_sections.items.len));
         const msec = try self.merge_sections.addOne(gpa);
-        msec.* = .{};
+        msec.* = .{ .out_shndx = osec };
         gop.value_ptr.* = index;
     }
     return gop.value_ptr.*;
@@ -3115,6 +3115,9 @@ pub const ComdatGroup = struct {
 };
 
 pub const MergeSection = struct {
+    out_shndx: u32 = 0,
+    alignment: u8 = 0,
+
     bytes: std.ArrayListUnmanaged(u8) = .{},
     table: std.HashMapUnmanaged(
         u32,
@@ -3204,6 +3207,7 @@ pub const MergeSection = struct {
 };
 
 pub const MergeSubsection = struct {
+    value: u64 = 0,
     merge_section: MergeSection.Index = 0,
     string_index: u32 = 0,
 
@@ -3242,6 +3246,14 @@ pub const InputMergeSection = struct {
     pub fn clearAndFree(imsec: *InputMergeSection, allocator: Allocator) void {
         imsec.bytes.clearAndFree(allocator);
         imsec.strings.clearAndFree(allocator);
+    }
+
+    pub fn findSubsection(imsec: InputMergeSection, offset: u32) ?struct { MergeSubsection.Index, u32 } {
+        // TODO: binary search
+        for (imsec.offsets.items, imsec.subsections.items) |off, msub| {
+            if (off <= offset) return .{ msub, offset - off };
+        }
+        return null;
     }
 
     pub fn insert(imsec: *InputMergeSection, allocator: Allocator, string: []const u8) !void {
