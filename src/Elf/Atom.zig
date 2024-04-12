@@ -404,6 +404,8 @@ inline fn getDataType(symbol: *const Symbol, elf_file: *Elf) u2 {
 
 fn reportUndefSymbol(self: Atom, rel: elf.Elf64_Rela, elf_file: *Elf) !bool {
     const object = self.getObject(elf_file);
+    if (rel.r_sym() >= object.symtab.items.len) return false;
+
     const sym = object.getSymbol(rel.r_sym(), elf_file);
     const s_rel_sym = object.symtab.items[rel.r_sym()];
 
