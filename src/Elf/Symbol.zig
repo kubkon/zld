@@ -84,6 +84,12 @@ pub fn getSymbolRank(symbol: Symbol, elf_file: *Elf) u32 {
 pub fn getAddress(symbol: Symbol, opts: struct {
     plt: bool = true,
 }, elf_file: *Elf) u64 {
+    if (symbol.flags.merge_subsection) {
+        const extra = symbol.getExtra(elf_file).?;
+        const msub = elf_file.getMergeSubsection(extra.subsection);
+        if (!msub.alive) return 0;
+        return msub.getAddress(elf_file) + symbol.value;
+    }
     if (symbol.flags.copy_rel) {
         return symbol.getCopyRelAddress(elf_file);
     }
@@ -213,6 +219,7 @@ const AddExtraOpts = struct {
     tlsgd: ?u32 = null,
     gottp: ?u32 = null,
     tlsdesc: ?u32 = null,
+    subsection: ?u32 = null,
 };
 
 pub fn addExtra(symbol: *Symbol, opts: AddExtraOpts, elf_file: *Elf) !void {
@@ -393,6 +400,9 @@ pub const Flags = packed struct {
 
     /// Whether the symbol contains TLSDESC indirection.
     tlsdesc: bool = false,
+
+    /// Whether the symbol is a merge subsection.
+    merge_subsection: bool = false,
 };
 
 pub const Extra = struct {
@@ -405,6 +415,7 @@ pub const Extra = struct {
     tlsgd: u32 = 0,
     gottp: u32 = 0,
     tlsdesc: u32 = 0,
+    subsection: u32 = 0,
 };
 
 pub const Index = u32;

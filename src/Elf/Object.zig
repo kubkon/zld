@@ -16,7 +16,7 @@ comdat_groups: std.ArrayListUnmanaged(Elf.ComdatGroup.Index) = .{},
 comdat_group_data: std.ArrayListUnmanaged(u32) = .{},
 relocs: std.ArrayListUnmanaged(elf.Elf64_Rela) = .{},
 
-merge_sections: std.ArrayListUnmanaged(Elf.InputMergeSection.Index) = .{},
+merge_sections: std.ArrayListUnmanaged(InputMergeSection.Index) = .{},
 
 fdes: std.ArrayListUnmanaged(Fde) = .{},
 cies: std.ArrayListUnmanaged(Cie) = .{},
@@ -718,6 +718,9 @@ pub fn resolveMergeSubsections(self: *Object, elf_file: *Elf) !void {
             return error.ParseFailed;
         };
         std.debug.print("{}: {s} => in subsection {d} @ {x}\n", .{ self.fmtPath(), sym.getName(elf_file), msub_index, offset });
+
+        try sym.addExtra(.{ .subsection = msub_index }, elf_file);
+        sym.flags.merge_subsection = true;
     }
 }
 
@@ -1078,6 +1081,7 @@ const Cie = eh_frame.Cie;
 const Elf = @import("../Elf.zig");
 const Fde = eh_frame.Fde;
 const File = @import("file.zig").File;
+const InputMergeSection = @import("merge_section.zig").InputMergeSection;
 const StringTable = @import("../StringTable.zig");
 const Symbol = @import("Symbol.zig");
 const Zld = @import("../Zld.zig");
