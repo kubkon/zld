@@ -779,6 +779,22 @@ fn calcSectionSizes(self: *Elf) !void {
         }
     }
 
+    for (self.merge_sections.items) |msec| {
+        // TODO: sort subsections
+        const shdr = &self.sections.items(.shdr)[msec.out_shndx];
+        var it = msec.table.iterator();
+        while (it.next()) |entry| {
+            const msub = self.getMergeSubsection(entry.value_ptr.*);
+            if (!msub.alive) continue;
+            const alignment = try math.powi(u64, 2, msub.alignment);
+            const offset = mem.alignForward(u64, shdr.sh_size, alignment);
+            const padding = offset - shdr.sh_size;
+            msub.value = offset;
+            shdr.sh_size += padding + msub.size;
+            shdr.sh_addralign = @max(shdr.sh_addralign, alignment);
+        }
+    }
+
     if (self.requiresThunks()) {
         for (slice.items(.shdr), slice.items(.atoms), 0..) |shdr, atoms, i| {
             if (shdr.sh_flags & elf.SHF_EXECINSTR == 0) continue;
@@ -1480,6 +1496,10 @@ pub fn sortSections(self: *Elf) !void {
             if (!atom.flags.alive) continue;
             atom.out_shndx = backlinks[atom.out_shndx];
         }
+    }
+
+    for (self.merge_sections.items) |*msec| {
+        msec.out_shndx = backlinks[msec.out_shndx];
     }
 
     for (&[_]*?u32{

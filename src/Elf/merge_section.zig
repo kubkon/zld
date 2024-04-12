@@ -1,7 +1,5 @@
 pub const MergeSection = struct {
     out_shndx: u32 = 0,
-    alignment: u8 = 0,
-
     bytes: std.ArrayListUnmanaged(u8) = .{},
     table: std.HashMapUnmanaged(
         u32,
@@ -41,49 +39,26 @@ pub const MergeSection = struct {
         return .{ .found_existing = gop.found_existing, .index = gop.key_ptr.*, .sub = gop.value_ptr };
     }
 
-    pub fn insertZ(msec: *MergeSection, allocator: Allocator, string: [:0]const u8) !InsertResult {
-        const gop = try msec.table.getOrPutContextAdapted(
-            allocator,
-            @as([]const u8, string),
-            IndexAdapter{ .bytes = msec.bytes.items },
-            IndexContext{ .bytes = msec.bytes.items },
-        );
-        if (!gop.found_existing) {
-            const index: u32 = @intCast(msec.bytes.items.len);
-            try msec.bytes.ensureUnusedCapacity(allocator, string.len + 1);
-            msec.bytes.appendSliceAssumeCapacity(string);
-            msec.bytes.appendAssumeCapacity(0);
-            gop.key_ptr.* = index;
-        }
-        return .{ .found_existing = gop.found_existing, .index = gop.key_ptr.*, .sub = gop.value_ptr };
-    }
-
     pub const IndexContext = struct {
         bytes: []const u8,
-        entsize: ?u32 = null,
+        entsize: u32,
 
         pub fn eql(_: @This(), a: u32, b: u32) bool {
             return a == b;
         }
 
         pub fn hash(ctx: @This(), key: u32) u64 {
-            const str = if (ctx.entsize) |entsize|
-                ctx.bytes[key..][0..entsize]
-            else
-                mem.sliceTo(ctx.bytes[key..], 0);
+            const str = ctx.bytes[key..][0..ctx.entsize];
             return std.hash_map.hashString(str);
         }
     };
 
     pub const IndexAdapter = struct {
         bytes: []const u8,
-        entsize: ?u32 = null,
+        entsize: u32,
 
         pub fn eql(ctx: @This(), a: []const u8, b: u32) bool {
-            const str = if (ctx.entsize) |entsize|
-                ctx.bytes[b..][0..entsize]
-            else
-                mem.sliceTo(ctx.bytes[b..], 0);
+            const str = ctx.bytes[b..][0..ctx.entsize];
             return mem.eql(u8, a, str);
         }
 
@@ -99,7 +74,9 @@ pub const MergeSubsection = struct {
     value: u64 = 0,
     merge_section: MergeSection.Index = 0,
     string_index: u32 = 0,
-    alive: bool = false,
+    size: u32 = 0,
+    alignment: u8 = 0,
+    alive: bool = true,
 
     pub fn getAddress(msub: MergeSubsection, elf_file: *Elf) u64 {
         return msub.getMergeSection(elf_file).getAddress(elf_file) + msub.value;
@@ -109,14 +86,9 @@ pub const MergeSubsection = struct {
         return elf_file.getMergeSection(msub.merge_section);
     }
 
-    pub fn getString(msub: MergeSubsection, elf_file: *Elf, entsize: u32) []const u8 {
+    pub fn getString(msub: MergeSubsection, elf_file: *Elf) []const u8 {
         const msec = msub.getMergeSection(elf_file);
-        return msec.bytes.items[msub.string_index..][0..entsize];
-    }
-
-    pub fn getStringZ(msub: MergeSubsection, elf_file: *Elf) [:0]const u8 {
-        const msec = msub.getMergeSection(elf_file);
-        return mem.sliceTo(msec.bytes.items[msub.string_index..], 0);
+        return msec.bytes.items[msub.string_index..][0..msub.size];
     }
 
     pub const Index = u32;
@@ -128,7 +100,7 @@ pub const InputMergeSection = struct {
     offsets: std.ArrayListUnmanaged(u32) = .{},
     subsections: std.ArrayListUnmanaged(MergeSubsection.Index) = .{},
     bytes: std.ArrayListUnmanaged(u8) = .{},
-    strings: std.ArrayListUnmanaged(u32) = .{},
+    strings: std.ArrayListUnmanaged(struct { u32, u32 }) = .{},
 
     pub fn deinit(imsec: *InputMergeSection, allocator: Allocator) void {
         imsec.offsets.deinit(allocator);
@@ -153,7 +125,7 @@ pub const InputMergeSection = struct {
     pub fn insert(imsec: *InputMergeSection, allocator: Allocator, string: []const u8) !void {
         const index: u32 = @intCast(imsec.bytes.items.len);
         try imsec.bytes.appendSlice(allocator, string);
-        try imsec.strings.append(allocator, index);
+        try imsec.strings.append(allocator, .{ index, @intCast(string.len) });
     }
 
     pub fn insertZ(imsec: *InputMergeSection, allocator: Allocator, string: [:0]const u8) !void {
@@ -161,7 +133,7 @@ pub const InputMergeSection = struct {
         try imsec.bytes.ensureUnusedCapacity(allocator, string.len + 1);
         imsec.bytes.appendSliceAssumeCapacity(string);
         imsec.bytes.appendAssumeCapacity(0);
-        try imsec.strings.append(allocator, index);
+        try imsec.strings.append(allocator, .{ index, @intCast(string.len + 1) });
     }
 
     pub const Index = u32;

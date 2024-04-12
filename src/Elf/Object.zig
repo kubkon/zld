@@ -672,25 +672,19 @@ pub fn resolveMergeSubsections(self: *Object, elf_file: *Elf) !void {
         const imsec = elf_file.getInputMergeSection(index) orelse continue;
         const msec = elf_file.getMergeSection(imsec.merge_section);
         const atom = elf_file.getAtom(imsec.atom).?;
-        const isec = atom.getInputShdr(elf_file);
-        const entsize: ?u32 = if (isec.sh_flags & elf.SHF_STRINGS != 0) null else @intCast(isec.sh_entsize);
-        msec.alignment = @max(msec.alignment, atom.alignment);
 
         try imsec.subsections.resize(gpa, imsec.strings.items.len);
 
-        for (imsec.strings.items, imsec.subsections.items) |off, *imsec_msub| {
-            const res = if (entsize) |ent| ent: {
-                const string = imsec.bytes.items[off..][0..ent];
-                break :ent try msec.insert(gpa, string);
-            } else nul: {
-                const string = mem.sliceTo(@as([*:0]const u8, @ptrCast(imsec.bytes.items.ptr + off)), 0);
-                break :nul try msec.insertZ(gpa, string);
-            };
+        for (imsec.strings.items, imsec.subsections.items) |pair, *imsec_msub| {
+            const string = imsec.bytes.items[pair[0]..][0..pair[1]];
+            const res = try msec.insert(gpa, string);
             if (!res.found_existing) {
                 const msub_index = try elf_file.addMergeSubsection();
                 const msub = elf_file.getMergeSubsection(msub_index);
                 msub.merge_section = imsec.merge_section;
                 msub.string_index = res.index;
+                msub.alignment = atom.alignment;
+                msub.size = pair[1];
                 res.sub.* = msub_index;
             }
             imsec_msub.* = res.sub.*;
@@ -839,6 +833,7 @@ pub fn calcSymtabSize(self: *Object, elf_file: *Elf) !void {
         // TODO: discard temp locals
         for (self.getLocals()) |local_index| {
             const local = elf_file.getSymbol(local_index);
+            if (local.getMergeSubsection(elf_file)) |msub| if (!msub.alive) continue;
             if (local.getAtom(elf_file)) |atom| if (!atom.flags.alive) continue;
             const s_sym = local.getSourceSymbol(elf_file);
             switch (s_sym.st_type()) {
@@ -857,6 +852,7 @@ pub fn calcSymtabSize(self: *Object, elf_file: *Elf) !void {
         const global = elf_file.getSymbol(global_index);
         const file_ptr = global.getFile(elf_file) orelse continue;
         if (file_ptr.getIndex() != self.index) continue;
+        if (global.getMergeSubsection(elf_file)) |msub| if (!msub.alive) continue;
         if (global.getAtom(elf_file)) |atom| if (!atom.flags.alive) continue;
         global.flags.output_symtab = true;
         if (global.isLocal(elf_file)) {
@@ -985,6 +981,12 @@ fn formatSymtab(
     for (object.getGlobals()) |index| {
         const global = ctx.elf_file.getSymbol(index);
         try writer.print("    {}\n", .{global.fmt(ctx.elf_file)});
+    }
+    try writer.writeAll("  merged\n");
+    const count = object.getLocals().len + object.getGlobals().len;
+    for (object.symbols.items[count..]) |index| {
+        const msym = ctx.elf_file.getSymbol(index);
+        try writer.print("    {}\n", .{msym.fmt(ctx.elf_file)});
     }
 }
 

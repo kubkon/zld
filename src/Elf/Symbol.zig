@@ -33,7 +33,7 @@ extra: u32 = 0,
 pub fn isAbs(symbol: Symbol, elf_file: *Elf) bool {
     const file = symbol.getFile(elf_file).?;
     if (file == .shared) return symbol.getSourceSymbol(elf_file).st_shndx == elf.SHN_ABS;
-    return !symbol.flags.import and symbol.getAtom(elf_file) == null and symbol.shndx == 0 and file != .internal;
+    return !symbol.flags.import and symbol.getAtom(elf_file) == null and symbol.getMergeSubsection(elf_file) == null and symbol.shndx == 0 and file != .internal;
 }
 
 pub fn isLocal(symbol: Symbol, elf_file: *Elf) bool {
@@ -60,6 +60,12 @@ pub fn getAtom(symbol: Symbol, elf_file: *Elf) ?*Atom {
     return elf_file.getAtom(symbol.atom);
 }
 
+pub fn getMergeSubsection(symbol: Symbol, elf_file: *Elf) ?*MergeSubsection {
+    if (!symbol.flags.merge_subsection) return null;
+    const extra = symbol.getExtra(elf_file).?;
+    return elf_file.getMergeSubsection(extra.subsection);
+}
+
 pub inline fn getFile(symbol: Symbol, elf_file: *Elf) ?File {
     return elf_file.getFile(symbol.file);
 }
@@ -84,9 +90,7 @@ pub fn getSymbolRank(symbol: Symbol, elf_file: *Elf) u32 {
 pub fn getAddress(symbol: Symbol, opts: struct {
     plt: bool = true,
 }, elf_file: *Elf) u64 {
-    if (symbol.flags.merge_subsection) {
-        const extra = symbol.getExtra(elf_file).?;
-        const msub = elf_file.getMergeSubsection(extra.subsection);
+    if (symbol.getMergeSubsection(elf_file)) |msub| {
         if (!msub.alive) return 0;
         return msub.getAddress(elf_file) + symbol.value;
     }
@@ -432,6 +436,7 @@ const File = @import("file.zig").File;
 const InternalObject = @import("InternalObject.zig");
 const GotSection = synthetic.GotSection;
 const GotPltSection = synthetic.GotPltSection;
+const MergeSubsection = @import("merge_section.zig").MergeSubsection;
 const Object = @import("Object.zig");
 const PltSection = synthetic.PltSection;
 const PltGotSection = synthetic.PltGotSection;

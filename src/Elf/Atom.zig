@@ -728,7 +728,7 @@ fn format2(
         }
         try writer.writeAll(" }");
     }
-    if (elf_file.options.gc_sections and !atom.flags.alive) {
+    if (!atom.flags.alive) {
         try writer.writeAll(" : [*]");
     }
 }
