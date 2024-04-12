@@ -39,6 +39,14 @@ pub const MergeSection = struct {
         return .{ .found_existing = gop.found_existing, .index = gop.key_ptr.*, .sub = gop.value_ptr };
     }
 
+    pub fn insertZ(msec: *MergeSection, allocator: Allocator, string: []const u8) !InsertResult {
+        const with_null = try allocator.alloc(u8, string.len + 1);
+        defer allocator.free(with_null);
+        @memcpy(with_null[0..string.len], string);
+        with_null[string.len] = 0;
+        return msec.insert(allocator, with_null);
+    }
+
     pub const IndexContext = struct {
         bytes: []const u8,
         entsize: u32,

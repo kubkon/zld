@@ -442,7 +442,7 @@ const usage =
     \\ld.zld: supported emulations: elf64_x86_64, aarch64linux, aarch64elf, elf64lriscv
 ;
 
-const version =
+pub const version =
     \\ld.zld 0.0.4 (compatible with GNU ld)
 ;
 

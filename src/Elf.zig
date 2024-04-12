@@ -423,6 +423,7 @@ pub fn flush(self: *Elf) !void {
     self.setDynsym();
     try self.setHashes();
     try self.setVerSymtab();
+    try self.addCommentString();
     try self.calcSectionSizes();
 
     try self.allocateSections();
@@ -756,6 +757,20 @@ pub fn addAtomsToSections(self: *Elf) !void {
             global.shndx = atom.out_shndx;
         }
     }
+}
+
+fn addCommentString(self: *Elf) !void {
+    const msec_index = try self.getOrCreateMergeSection(".comment", elf.SHF_MERGE | elf.SHF_STRINGS, elf.SHT_PROGBITS);
+    const msec = self.getMergeSection(msec_index);
+    const res = try msec.insertZ(self.base.allocator, Options.version);
+    assert(!res.found_existing);
+    const msub_index = try self.addMergeSubsection();
+    const msub = self.getMergeSubsection(msub_index);
+    msub.merge_section = msec_index;
+    msub.string_index = res.index;
+    msub.alignment = 0;
+    msub.size = Options.version.len + 1;
+    res.sub.* = msub_index;
 }
 
 fn calcSectionSizes(self: *Elf) !void {
@@ -2800,14 +2815,14 @@ pub fn getMergeSubsection(self: *Elf, index: MergeSubsection.Index) *MergeSubsec
     return &self.merge_subsections.items[index];
 }
 
-pub fn getOrCreateMergeSection(self: *Elf, sh_name: [:0]const u8, shdr: elf.Elf64_Shdr) !MergeSection.Index {
+pub fn getOrCreateMergeSection(self: *Elf, sh_name: [:0]const u8, sh_flags: u64, sh_type: u32) !MergeSection.Index {
     const gpa = self.base.allocator;
     const name = if (mem.eql(u8, sh_name, ".rodata") or mem.startsWith(u8, sh_name, ".rodata")) name: {
-        break :name if (shdr.sh_flags & elf.SHF_STRINGS != 0) ".rodata.str" else ".rodata.cst";
+        break :name if (sh_flags & elf.SHF_STRINGS != 0) ".rodata.str" else ".rodata.cst";
     } else sh_name;
     const osec = self.getSectionByName(name) orelse try self.addSection(.{
-        .type = shdr.sh_type,
-        .flags = shdr.sh_flags & ~@as(u64, elf.SHF_COMPRESSED | elf.SHF_GROUP),
+        .type = sh_type,
+        .flags = sh_flags & ~@as(u64, elf.SHF_COMPRESSED | elf.SHF_GROUP),
         .name = name,
     });
     const gop = try self.merge_sections_table.getOrPut(gpa, osec);

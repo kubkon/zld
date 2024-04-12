@@ -614,7 +614,7 @@ pub fn initMergeSections(self: *Object, elf_file: *Elf) !void {
         const imsec = elf_file.getInputMergeSection(imsec_idx).?;
         self.merge_sections.items[shndx] = imsec_idx;
 
-        imsec.merge_section = try elf_file.getOrCreateMergeSection(atom.getName(elf_file), shdr);
+        imsec.merge_section = try elf_file.getOrCreateMergeSection(atom.getName(elf_file), shdr.sh_flags, shdr.sh_type);
         imsec.atom = atom_index;
 
         const data = try atom.getCodeUncompressAlloc(elf_file);
@@ -701,9 +701,7 @@ pub fn resolveMergeSubsections(self: *Object, elf_file: *Elf) !void {
 
         const imsec_index = self.merge_sections.items[esym.st_shndx];
         const imsec = elf_file.getInputMergeSection(imsec_index) orelse continue;
-        if (imsec.subsections.items.len == 0) continue;
-
-        const msub_index, const offset = imsec.findSubsection(@intCast(esym.st_value)) orelse {
+        const msub_index, _ = imsec.findSubsection(@intCast(esym.st_value)) orelse {
             elf_file.base.fatal("{}: invalid symbol value: {s}:{x}", .{
                 self.fmtPath(),
                 sym.getName(elf_file),
@@ -711,7 +709,6 @@ pub fn resolveMergeSubsections(self: *Object, elf_file: *Elf) !void {
             });
             return error.ParseFailed;
         };
-        std.debug.print("{}: {s} => in subsection {d} @ {x}\n", .{ self.fmtPath(), sym.getName(elf_file), msub_index, offset });
 
         try sym.addExtra(.{ .subsection = msub_index }, elf_file);
         sym.flags.merge_subsection = true;
