@@ -7,10 +7,12 @@ pub const MergeSection = struct {
         IndexContext,
         std.hash_map.default_max_load_percentage,
     ) = .{},
+    subsections: std.ArrayListUnmanaged(MergeSubsection.Index) = .{},
 
     pub fn deinit(msec: *MergeSection, allocator: Allocator) void {
         msec.bytes.deinit(allocator);
         msec.table.deinit(allocator);
+        msec.subsections.deinit(allocator);
     }
 
     pub fn getAddress(msec: MergeSection, elf_file: *Elf) u64 {
@@ -45,6 +47,37 @@ pub const MergeSection = struct {
         @memcpy(with_null[0..string.len], string);
         with_null[string.len] = 0;
         return msec.insert(allocator, with_null);
+    }
+
+    /// Sorts all owned subsections.
+    /// Clears string table.
+    pub fn finalize(msec: *MergeSection, elf_file: *Elf) !void {
+        const gpa = elf_file.base.allocator;
+        try msec.subsections.ensureTotalCapacityPrecise(gpa, msec.table.count());
+
+        var it = msec.table.iterator();
+        while (it.next()) |entry| {
+            const msub = elf_file.getMergeSubsection(entry.value_ptr.*);
+            if (!msub.alive) continue;
+            msec.subsections.appendAssumeCapacity(entry.value_ptr.*);
+        }
+        msec.table.clearAndFree(gpa);
+
+        const sortFn = struct {
+            pub fn sortFn(ctx: *Elf, lhs: MergeSubsection.Index, rhs: MergeSubsection.Index) bool {
+                const lhs_msub = ctx.getMergeSubsection(lhs);
+                const rhs_msub = ctx.getMergeSubsection(rhs);
+                if (lhs_msub.alignment == rhs_msub.alignment) {
+                    if (lhs_msub.size == rhs_msub.size) {
+                        return mem.order(u8, lhs_msub.getString(ctx), rhs_msub.getString(ctx)) == .lt;
+                    }
+                    return lhs_msub.size < rhs_msub.size;
+                }
+                return lhs_msub.alignment < rhs_msub.alignment;
+            }
+        }.sortFn;
+
+        std.mem.sort(MergeSubsection.Index, msec.subsections.items, elf_file, sortFn);
     }
 
     pub const IndexContext = struct {
