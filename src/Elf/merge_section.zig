@@ -15,9 +15,9 @@ pub const MergeSection = struct {
         msec.subsections.deinit(allocator);
     }
 
-    pub fn getAddress(msec: MergeSection, elf_file: *Elf) u64 {
+    pub fn getAddress(msec: MergeSection, elf_file: *Elf) i64 {
         const shdr = elf_file.sections.items(.shdr)[msec.out_shndx];
-        return shdr.sh_addr;
+        return @intCast(shdr.sh_addr);
     }
 
     const InsertResult = struct {
@@ -110,14 +110,14 @@ pub const MergeSection = struct {
 };
 
 pub const MergeSubsection = struct {
-    value: u64 = 0,
+    value: i64 = 0,
     merge_section: MergeSection.Index = 0,
     string_index: u32 = 0,
     size: u32 = 0,
     alignment: u8 = 0,
     alive: bool = true,
 
-    pub fn getAddress(msub: MergeSubsection, elf_file: *Elf) u64 {
+    pub fn getAddress(msub: MergeSubsection, elf_file: *Elf) i64 {
         return msub.getMergeSection(elf_file).getAddress(elf_file) + msub.value;
     }
 

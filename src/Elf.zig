@@ -783,7 +783,7 @@ pub fn calcMergeSectionSizes(self: *Elf) !void {
             const alignment = try math.powi(u64, 2, msub.alignment);
             const offset = mem.alignForward(u64, shdr.sh_size, alignment);
             const padding = offset - shdr.sh_size;
-            msub.value = offset;
+            msub.value = @intCast(offset);
             shdr.sh_size += padding + msub.size;
             shdr.sh_addralign = @max(shdr.sh_addralign, alignment);
         }
@@ -805,7 +805,7 @@ fn calcSectionSizes(self: *Elf) !void {
             const alignment = try math.powi(u64, 2, atom.alignment);
             const offset = mem.alignForward(u64, shdr.sh_size, alignment);
             const padding = offset - shdr.sh_size;
-            atom.value = offset;
+            atom.value = @intCast(offset);
             shdr.sh_size += padding + atom.size;
             shdr.sh_addralign = @max(shdr.sh_addralign, alignment);
         }
@@ -1619,14 +1619,14 @@ fn allocateSyntheticSymbols(self: *Elf) void {
     if (self.dynamic_sect_index) |shndx| {
         const shdr = self.sections.items(.shdr)[shndx];
         const symbol = self.getSymbol(self.dynamic_index.?);
-        symbol.value = shdr.sh_addr;
+        symbol.value = @intCast(shdr.sh_addr);
         symbol.shndx = shndx;
     }
 
     // __ehdr_start
     {
         const symbol = self.getSymbol(self.ehdr_start_index.?);
-        symbol.value = self.options.image_base;
+        symbol.value = @intCast(self.options.image_base);
         symbol.shndx = 1;
     }
 
@@ -1636,9 +1636,9 @@ fn allocateSyntheticSymbols(self: *Elf) void {
         const end_sym = self.getSymbol(self.init_array_end_index.?);
         const shdr = self.sections.items(.shdr)[shndx];
         start_sym.shndx = shndx;
-        start_sym.value = shdr.sh_addr;
+        start_sym.value = @intCast(shdr.sh_addr);
         end_sym.shndx = shndx;
-        end_sym.value = shdr.sh_addr + shdr.sh_size;
+        end_sym.value = @intCast(shdr.sh_addr + shdr.sh_size);
     }
 
     // __fini_array_start, __fini_array_end
@@ -1647,9 +1647,9 @@ fn allocateSyntheticSymbols(self: *Elf) void {
         const end_sym = self.getSymbol(self.fini_array_end_index.?);
         const shdr = self.sections.items(.shdr)[shndx];
         start_sym.shndx = shndx;
-        start_sym.value = shdr.sh_addr;
+        start_sym.value = @intCast(shdr.sh_addr);
         end_sym.shndx = shndx;
-        end_sym.value = shdr.sh_addr + shdr.sh_size;
+        end_sym.value = @intCast(shdr.sh_addr + shdr.sh_size);
     }
 
     // __preinit_array_start, __preinit_array_end
@@ -1658,9 +1658,9 @@ fn allocateSyntheticSymbols(self: *Elf) void {
         const end_sym = self.getSymbol(self.preinit_array_end_index.?);
         const shdr = self.sections.items(.shdr)[shndx];
         start_sym.shndx = shndx;
-        start_sym.value = shdr.sh_addr;
+        start_sym.value = @intCast(shdr.sh_addr);
         end_sym.shndx = shndx;
-        end_sym.value = shdr.sh_addr + shdr.sh_size;
+        end_sym.value = @intCast(shdr.sh_addr + shdr.sh_size);
     }
 
     // _GLOBAL_OFFSET_TABLE_
@@ -1668,14 +1668,14 @@ fn allocateSyntheticSymbols(self: *Elf) void {
         if (self.got_plt_sect_index) |shndx| {
             const shdr = self.sections.items(.shdr)[shndx];
             const symbol = self.getSymbol(self.got_index.?);
-            symbol.value = shdr.sh_addr;
+            symbol.value = @intCast(shdr.sh_addr);
             symbol.shndx = shndx;
         }
     } else {
         if (self.got_sect_index) |shndx| {
             const shdr = self.sections.items(.shdr)[shndx];
             const symbol = self.getSymbol(self.got_index.?);
-            symbol.value = shdr.sh_addr;
+            symbol.value = @intCast(shdr.sh_addr);
             symbol.shndx = shndx;
         }
     }
@@ -1684,7 +1684,7 @@ fn allocateSyntheticSymbols(self: *Elf) void {
     if (self.plt_sect_index) |shndx| {
         const shdr = self.sections.items(.shdr)[shndx];
         const symbol = self.getSymbol(self.plt_index.?);
-        symbol.value = shdr.sh_addr;
+        symbol.value = @intCast(shdr.sh_addr);
         symbol.shndx = shndx;
     }
 
@@ -1692,7 +1692,7 @@ fn allocateSyntheticSymbols(self: *Elf) void {
     if (self.dso_handle_index) |index| {
         const shdr = self.sections.items(.shdr)[1];
         const symbol = self.getSymbol(index);
-        symbol.value = shdr.sh_addr;
+        symbol.value = @intCast(shdr.sh_addr);
         symbol.shndx = 0;
     }
 
@@ -1700,7 +1700,7 @@ fn allocateSyntheticSymbols(self: *Elf) void {
     if (self.eh_frame_hdr_sect_index) |shndx| {
         const shdr = self.sections.items(.shdr)[shndx];
         const symbol = self.getSymbol(self.gnu_eh_frame_hdr_index.?);
-        symbol.value = shdr.sh_addr;
+        symbol.value = @intCast(shdr.sh_addr);
         symbol.shndx = shndx;
     }
 
@@ -1712,9 +1712,9 @@ fn allocateSyntheticSymbols(self: *Elf) void {
         const start_addr = end_addr - self.getNumIRelativeRelocs() * @sizeOf(elf.Elf64_Rela);
         const start_sym = self.getSymbol(self.rela_iplt_start_index.?);
         const end_sym = self.getSymbol(self.rela_iplt_end_index.?);
-        start_sym.value = start_addr;
+        start_sym.value = @intCast(start_addr);
         start_sym.shndx = shndx;
-        end_sym.value = end_addr;
+        end_sym.value = @intCast(end_addr);
         end_sym.shndx = shndx;
     }
 
@@ -1723,7 +1723,7 @@ fn allocateSyntheticSymbols(self: *Elf) void {
         const end_symbol = self.getSymbol(self.end_index.?);
         for (self.sections.items(.shdr), 0..) |shdr, shndx| {
             if (shdr.sh_flags & elf.SHF_ALLOC != 0) {
-                end_symbol.value = shdr.sh_addr + shdr.sh_size;
+                end_symbol.value = @intCast(shdr.sh_addr + shdr.sh_size);
                 end_symbol.shndx = @intCast(shndx);
             }
         }
@@ -1738,9 +1738,9 @@ fn allocateSyntheticSymbols(self: *Elf) void {
             const stop = self.getSymbol(self.start_stop_indexes.items[index + 1]);
             const shndx = self.getSectionByName(name["__start_".len..]).?;
             const shdr = self.sections.items(.shdr)[shndx];
-            start.value = shdr.sh_addr;
+            start.value = @intCast(shdr.sh_addr);
             start.shndx = shndx;
-            stop.value = shdr.sh_addr + shdr.sh_size;
+            stop.value = @intCast(shdr.sh_addr + shdr.sh_size);
             stop.shndx = shndx;
         }
     }
@@ -1750,7 +1750,7 @@ fn allocateSyntheticSymbols(self: *Elf) void {
         const sym = self.getSymbol(index);
         if (self.getSectionByName(".sdata")) |shndx| {
             const shdr = self.sections.items(.shdr)[shndx];
-            sym.value = shdr.sh_addr + 0x800;
+            sym.value = @intCast(shdr.sh_addr + 0x800);
             sym.shndx = shndx;
         } else {
             sym.value = 0;
@@ -2346,7 +2346,7 @@ fn writeAtoms(self: *Elf) !void {
         for (atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index).?;
             assert(atom.flags.alive);
-            const off = atom.value;
+            const off: u64 = @intCast(atom.value);
             log.debug("writing ATOM(%{d},'{s}') at offset 0x{x}", .{
                 atom_index,
                 atom.getName(self),
@@ -2365,7 +2365,7 @@ fn writeAtoms(self: *Elf) !void {
 
     for (self.thunks.items) |thunk| {
         const shdr = slice.items(.shdr)[thunk.out_shndx];
-        const offset = thunk.value + shdr.sh_offset;
+        const offset = @as(u64, @intCast(thunk.value)) + shdr.sh_offset;
         const buffer = try gpa.alloc(u8, thunk.size(self));
         defer gpa.free(buffer);
         var stream = std.io.fixedBufferStream(buffer);
@@ -2391,7 +2391,8 @@ pub fn writeMergeSections(self: *Elf) !void {
             const msub = self.getMergeSubsection(msub_index);
             assert(msub.alive);
             const string = msub.getString(self);
-            @memcpy(buffer.items[msub.value..][0..string.len], string);
+            const off: u64 = @intCast(msub.value);
+            @memcpy(buffer.items[off..][0..string.len], string);
         }
 
         try self.base.file.pwriteAll(buffer.items, shdr.sh_offset);
@@ -2556,7 +2557,7 @@ fn writeHeader(self: *Elf) !void {
         .e_type = if (self.options.pic) .DYN else .EXEC,
         .e_machine = self.options.cpu_arch.?.toElfMachine(),
         .e_version = 1,
-        .e_entry = if (self.entry_index) |index| self.getSymbol(index).getAddress(.{}, self) else 0,
+        .e_entry = if (self.entry_index) |index| @as(u64, @intCast(self.getSymbol(index).getAddress(.{}, self))) else 0,
         .e_phoff = @sizeOf(elf.Elf64_Ehdr),
         .e_shoff = self.shoff,
         .e_flags = if (self.options.cpu_arch.? == .riscv64) try self.getRiscvEFlags() else 0,
@@ -2985,35 +2986,36 @@ fn getStartStopBasename(self: *Elf, shdr: elf.Elf64_Shdr) ?[]const u8 {
     return null;
 }
 
-pub fn getGotAddress(self: *Elf) u64 {
+pub fn getGotAddress(self: *Elf) i64 {
     const shndx = blk: {
         if (self.options.cpu_arch.? == .x86_64 and self.got_plt_sect_index != null)
             break :blk self.got_plt_sect_index.?;
         break :blk if (self.got_sect_index) |shndx| shndx else null;
     };
-    return if (shndx) |index| self.sections.items(.shdr)[index].sh_addr else 0;
+    return if (shndx) |index| @intCast(self.sections.items(.shdr)[index].sh_addr) else 0;
 }
 
-pub fn getTpAddress(self: *Elf) u64 {
+pub fn getTpAddress(self: *Elf) i64 {
     const index = self.tls_phdr_index orelse return 0;
     const phdr = self.phdrs.items[index];
-    return switch (self.options.cpu_arch.?) {
+    const addr = switch (self.options.cpu_arch.?) {
         .x86_64 => mem.alignForward(u64, phdr.p_vaddr + phdr.p_memsz, phdr.p_align),
         .aarch64 => mem.alignBackward(u64, phdr.p_vaddr - 16, phdr.p_align),
         else => @panic("TODO implement getTpAddress for this arch"),
     };
+    return @intCast(addr);
 }
 
-pub fn getDtpAddress(self: *Elf) u64 {
+pub fn getDtpAddress(self: *Elf) i64 {
     const index = self.tls_phdr_index orelse return 0;
     const phdr = self.phdrs.items[index];
-    return phdr.p_vaddr;
+    return @intCast(phdr.p_vaddr);
 }
 
-pub fn getTlsAddress(self: *Elf) u64 {
+pub fn getTlsAddress(self: *Elf) i64 {
     const index = self.tls_phdr_index orelse return 0;
     const phdr = self.phdrs.items[index];
-    return phdr.p_vaddr;
+    return @intCast(phdr.p_vaddr);
 }
 
 fn requiresThunks(self: Elf) bool {

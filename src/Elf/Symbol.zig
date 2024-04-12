@@ -1,7 +1,7 @@
 //! Represents a defined symbol.
 
 /// Allocated address value of this symbol.
-value: u64 = 0,
+value: i64 = 0,
 
 /// Offset into the linker's intern table.
 name: u32 = 0,
@@ -89,7 +89,7 @@ pub fn getSymbolRank(symbol: Symbol, elf_file: *Elf) u32 {
 
 pub fn getAddress(symbol: Symbol, opts: struct {
     plt: bool = true,
-}, elf_file: *Elf) u64 {
+}, elf_file: *Elf) i64 {
     if (symbol.getMergeSubsection(elf_file)) |msub| {
         if (!msub.alive) return 0;
         return msub.getAddress(elf_file) + symbol.value;
@@ -114,14 +114,14 @@ pub fn getAddress(symbol: Symbol, opts: struct {
                     mem.startsWith(u8, sym_name, ".eh_frame_seg") or
                     symbol.getSourceSymbol(elf_file).st_type() == elf.STT_SECTION)
                 {
-                    return elf_file.sections.items(.shdr)[elf_file.eh_frame_sect_index.?].sh_addr;
+                    return @intCast(elf_file.sections.items(.shdr)[elf_file.eh_frame_sect_index.?].sh_addr);
                 }
 
                 if (mem.startsWith(u8, sym_name, "__FRAME_END__") or
                     mem.startsWith(u8, sym_name, "__EH_FRAME_LIST_END__"))
                 {
                     const shdr = elf_file.sections.items(.shdr)[elf_file.eh_frame_sect_index.?];
-                    return shdr.sh_addr + shdr.sh_size;
+                    return @intCast(shdr.sh_addr + shdr.sh_size);
                 }
 
                 // TODO I think we potentially should error here
@@ -144,57 +144,57 @@ pub fn getOutputSymtabIndex(symbol: Symbol, elf_file: *Elf) ?u32 {
     return if (symbol.isLocal(elf_file)) idx + symtab_ctx.ilocal else idx + symtab_ctx.iglobal;
 }
 
-pub fn getGotAddress(symbol: Symbol, elf_file: *Elf) u64 {
+pub fn getGotAddress(symbol: Symbol, elf_file: *Elf) i64 {
     if (!symbol.flags.got) return 0;
     const extra = symbol.getExtra(elf_file).?;
     const entry = elf_file.got.entries.items[extra.got];
     return entry.getAddress(elf_file);
 }
 
-pub fn getPltGotAddress(symbol: Symbol, elf_file: *Elf) u64 {
+pub fn getPltGotAddress(symbol: Symbol, elf_file: *Elf) i64 {
     if (!(symbol.flags.plt and symbol.flags.got)) return 0;
     const extra = symbol.getExtra(elf_file).?;
     const shdr = elf_file.sections.items(.shdr)[elf_file.plt_got_sect_index.?];
     const cpu_arch = elf_file.options.cpu_arch.?;
-    return shdr.sh_addr + extra.plt_got * PltGotSection.entrySize(cpu_arch);
+    return @intCast(shdr.sh_addr + extra.plt_got * PltGotSection.entrySize(cpu_arch));
 }
 
-pub fn getPltAddress(symbol: Symbol, elf_file: *Elf) u64 {
+pub fn getPltAddress(symbol: Symbol, elf_file: *Elf) i64 {
     if (!symbol.flags.plt) return 0;
     const extra = symbol.getExtra(elf_file).?;
     const shdr = elf_file.sections.items(.shdr)[elf_file.plt_sect_index.?];
     const cpu_arch = elf_file.options.cpu_arch.?;
-    return shdr.sh_addr + extra.plt * PltSection.entrySize(cpu_arch) + PltSection.preambleSize(cpu_arch);
+    return @intCast(shdr.sh_addr + extra.plt * PltSection.entrySize(cpu_arch) + PltSection.preambleSize(cpu_arch));
 }
 
-pub fn getGotPltAddress(symbol: Symbol, elf_file: *Elf) u64 {
+pub fn getGotPltAddress(symbol: Symbol, elf_file: *Elf) i64 {
     if (!symbol.flags.plt) return 0;
     const extra = symbol.getExtra(elf_file).?;
     const shdr = elf_file.sections.items(.shdr)[elf_file.got_plt_sect_index.?];
-    return shdr.sh_addr + extra.plt * 8 + GotPltSection.preamble_size;
+    return @intCast(shdr.sh_addr + extra.plt * 8 + GotPltSection.preamble_size);
 }
 
-pub fn getCopyRelAddress(symbol: Symbol, elf_file: *Elf) u64 {
+pub fn getCopyRelAddress(symbol: Symbol, elf_file: *Elf) i64 {
     if (!symbol.flags.copy_rel) return 0;
     const shdr = elf_file.sections.items(.shdr)[elf_file.copy_rel_sect_index.?];
-    return shdr.sh_addr + symbol.value;
+    return @as(i64, @intCast(shdr.sh_addr)) + symbol.value;
 }
 
-pub fn getTlsGdAddress(symbol: Symbol, elf_file: *Elf) u64 {
+pub fn getTlsGdAddress(symbol: Symbol, elf_file: *Elf) i64 {
     if (!symbol.flags.tlsgd) return 0;
     const extra = symbol.getExtra(elf_file).?;
     const entry = elf_file.got.entries.items[extra.tlsgd];
     return entry.getAddress(elf_file);
 }
 
-pub fn getGotTpAddress(symbol: Symbol, elf_file: *Elf) u64 {
+pub fn getGotTpAddress(symbol: Symbol, elf_file: *Elf) i64 {
     if (!symbol.flags.gottp) return 0;
     const extra = symbol.getExtra(elf_file).?;
     const entry = elf_file.got.entries.items[extra.gottp];
     return entry.getAddress(elf_file);
 }
 
-pub fn getTlsDescAddress(symbol: Symbol, elf_file: *Elf) u64 {
+pub fn getTlsDescAddress(symbol: Symbol, elf_file: *Elf) i64 {
     if (!symbol.flags.tlsdesc) return 0;
     const extra = symbol.getExtra(elf_file).?;
     const entry = elf_file.got.entries.items[extra.tlsdesc];
@@ -279,7 +279,7 @@ pub fn setOutputSym(symbol: Symbol, elf_file: *Elf, out: *elf.Elf64_Sym) void {
     out.st_info = (st_bind << 4) | st_type;
     out.st_other = s_sym.st_other;
     out.st_shndx = @intCast(st_shndx);
-    out.st_value = st_value;
+    out.st_value = @intCast(st_value);
     out.st_size = s_sym.st_size;
 }
 

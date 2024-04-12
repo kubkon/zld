@@ -147,7 +147,7 @@ fn calcSectionSizes(elf_file: *Elf) !void {
             const alignment = try math.powi(u64, 2, atom.alignment);
             const offset = mem.alignForward(u64, shdr.sh_size, alignment);
             const padding = offset - shdr.sh_size;
-            atom.value = offset;
+            atom.value = @intCast(offset);
             shdr.sh_size += padding + atom.size;
             shdr.sh_addralign = @max(shdr.sh_addralign, alignment);
 
@@ -226,7 +226,7 @@ fn writeAtoms(elf_file: *Elf) !void {
         for (atoms.items) |atom_index| {
             const atom = elf_file.getAtom(atom_index).?;
             assert(atom.flags.alive);
-            const off = atom.value;
+            const off: u64 = @intCast(atom.value);
             log.debug("writing ATOM(%{d},'{s}') at offset 0x{x}", .{
                 atom_index,
                 atom.getName(elf_file),

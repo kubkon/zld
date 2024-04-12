@@ -635,9 +635,9 @@ pub const GotSection = struct {
             };
         }
 
-        pub fn getAddress(entry: Entry, elf_file: *Elf) u64 {
+        pub fn getAddress(entry: Entry, elf_file: *Elf) i64 {
             const shdr = &elf_file.sections.items(.shdr)[elf_file.got_sect_index.?];
-            return shdr.sh_addr + @as(u64, entry.cell_index) * @sizeOf(u64);
+            return @as(i64, @intCast(shdr.sh_addr)) + entry.cell_index * @sizeOf(u64);
         }
     };
 
@@ -727,7 +727,7 @@ pub const GotSection = struct {
             };
             switch (entry.tag) {
                 .got => {
-                    const value: u64 = blk: {
+                    const value: i64 = blk: {
                         const value = symbol.?.getAddress(.{ .plt = false }, elf_file);
                         if (symbol.?.flags.import) break :blk 0;
                         if (symbol.?.isIFunc(elf_file))
@@ -736,7 +736,7 @@ pub const GotSection = struct {
                             break :blk if (apply_relocs) value else 0;
                         break :blk value;
                     };
-                    try writer.writeInt(u64, value, .little);
+                    try writer.writeInt(u64, @bitCast(value), .little);
                 },
 
                 .tlsld => {
@@ -751,7 +751,7 @@ pub const GotSection = struct {
                     } else {
                         try writer.writeInt(u64, if (is_shared) @as(u64, 0) else 1, .little);
                         const offset = symbol.?.getAddress(.{}, elf_file) - elf_file.getDtpAddress();
-                        try writer.writeInt(u64, offset, .little);
+                        try writer.writeInt(u64, @bitCast(offset), .little);
                     }
                 },
 
@@ -763,10 +763,9 @@ pub const GotSection = struct {
                             symbol.?.getAddress(.{}, elf_file) - elf_file.getTlsAddress()
                         else
                             0;
-                        try writer.writeInt(u64, offset, .little);
+                        try writer.writeInt(u64, @bitCast(offset), .little);
                     } else {
-                        const offset = @as(i64, @intCast(symbol.?.getAddress(.{}, elf_file))) -
-                            @as(i64, @intCast(elf_file.getTpAddress()));
+                        const offset = symbol.?.getAddress(.{}, elf_file) - elf_file.getTpAddress();
                         try writer.writeInt(u64, @bitCast(offset), .little);
                     }
                 },
@@ -778,7 +777,7 @@ pub const GotSection = struct {
                     } else {
                         try writer.writeInt(u64, 0, .little);
                         const offset = if (apply_relocs)
-                            @as(i64, @intCast(symbol.?.getAddress(.{}, elf_file))) - @as(i64, @intCast(elf_file.getTlsAddress()))
+                            symbol.?.getAddress(.{}, elf_file) - elf_file.getTlsAddress()
                         else
                             0;
                         try writer.writeInt(u64, @bitCast(offset), .little);
@@ -802,7 +801,7 @@ pub const GotSection = struct {
 
             switch (entry.tag) {
                 .got => {
-                    const offset = symbol.?.getGotAddress(elf_file);
+                    const offset: u64 = @intCast(symbol.?.getGotAddress(elf_file));
 
                     if (symbol.?.flags.import) {
                         elf_file.addRelaDynAssumeCapacity(.{
@@ -835,14 +834,14 @@ pub const GotSection = struct {
                     if (is_shared) {
                         const offset = entry.getAddress(elf_file);
                         elf_file.addRelaDynAssumeCapacity(.{
-                            .offset = offset,
+                            .offset = @intCast(offset),
                             .type = relocation.encode(.dtpmod, cpu_arch),
                         });
                     }
                 },
 
                 .tlsgd => {
-                    const offset = symbol.?.getTlsGdAddress(elf_file);
+                    const offset: u64 = @intCast(symbol.?.getTlsGdAddress(elf_file));
                     if (symbol.?.flags.import) {
                         elf_file.addRelaDynAssumeCapacity(.{
                             .offset = offset,
@@ -864,7 +863,7 @@ pub const GotSection = struct {
                 },
 
                 .gottp => {
-                    const offset = symbol.?.getGotTpAddress(elf_file);
+                    const offset: u64 = @intCast(symbol.?.getGotTpAddress(elf_file));
                     if (symbol.?.flags.import) {
                         elf_file.addRelaDynAssumeCapacity(.{
                             .offset = offset,
@@ -883,7 +882,7 @@ pub const GotSection = struct {
                 .tlsdesc => {
                     const offset = symbol.?.getTlsDescAddress(elf_file);
                     elf_file.addRelaDynAssumeCapacity(.{
-                        .offset = offset,
+                        .offset = @intCast(offset),
                         .sym = if (symbol.?.flags.import) extra.?.dynamic else 0,
                         .type = relocation.encode(.tlsdesc, cpu_arch),
                         .addend = if (symbol.?.flags.import) 0 else @intCast(symbol.?.getAddress(.{}, elf_file) - elf_file.getTlsAddress()),
@@ -964,7 +963,7 @@ pub const GotSection = struct {
                 .st_info = elf.STT_OBJECT,
                 .st_other = 0,
                 .st_shndx = @intCast(elf_file.got_sect_index.?),
-                .st_value = st_value,
+                .st_value = @intCast(st_value),
                 .st_size = st_size,
             };
         }
@@ -1054,7 +1053,7 @@ pub const PltSection = struct {
             const sym = elf_file.getSymbol(sym_index);
             assert(sym.flags.import);
             const extra = sym.getExtra(elf_file).?;
-            const r_offset = sym.getGotPltAddress(elf_file);
+            const r_offset: u64 = @intCast(sym.getGotPltAddress(elf_file));
             const r_sym: u64 = extra.dynamic;
             const r_type = relocation.encode(.jump_slot, elf_file.options.cpu_arch.?);
             elf_file.rela_plt.appendAssumeCapacity(.{
@@ -1094,7 +1093,7 @@ pub const PltSection = struct {
                 .st_info = elf.STT_FUNC,
                 .st_other = 0,
                 .st_shndx = @intCast(elf_file.plt_sect_index.?),
-                .st_value = sym.getPltAddress(elf_file),
+                .st_value = @intCast(sym.getPltAddress(elf_file)),
                 .st_size = entrySize(cpu_arch),
             };
         }
@@ -1137,13 +1136,13 @@ pub const PltSection = struct {
     const aarch64 = struct {
         fn write(plt: PltSection, elf_file: *Elf, writer: anytype) !void {
             {
-                const plt_addr = elf_file.sections.items(.shdr)[elf_file.plt_sect_index.?].sh_addr;
-                const got_plt_addr = elf_file.sections.items(.shdr)[elf_file.got_plt_sect_index.?].sh_addr;
+                const plt_addr: i64 = @intCast(elf_file.sections.items(.shdr)[elf_file.plt_sect_index.?].sh_addr);
+                const got_plt_addr: i64 = @intCast(elf_file.sections.items(.shdr)[elf_file.got_plt_sect_index.?].sh_addr);
                 // TODO: relax if possible
                 // .got.plt[2]
                 const pages = try aarch64_util.calcNumberOfPages(plt_addr + 4, got_plt_addr + 16);
-                const ldr_off = try math.divExact(u12, @truncate(got_plt_addr + 16), 8);
-                const add_off: u12 = @truncate(got_plt_addr + 16);
+                const ldr_off = try math.divExact(u12, @truncate(@as(u64, @bitCast(got_plt_addr + 16))), 8);
+                const add_off: u12 = @truncate(@as(u64, @bitCast(got_plt_addr + 16)));
 
                 const preamble = &[_]Instruction{
                     Instruction.stp(
@@ -1171,8 +1170,8 @@ pub const PltSection = struct {
                 const target_addr = sym.getGotPltAddress(elf_file);
                 const source_addr = sym.getPltAddress(elf_file);
                 const pages = try aarch64_util.calcNumberOfPages(source_addr, target_addr);
-                const ldr_off = try math.divExact(u12, @truncate(target_addr), 8);
-                const add_off: u12 = @truncate(target_addr);
+                const ldr_off = try math.divExact(u12, @truncate(@as(u64, @bitCast(target_addr))), 8);
+                const add_off: u12 = @truncate(@as(u64, @intCast(target_addr)));
                 const insts = &[_]Instruction{
                     Instruction.adrp(.x16, pages),
                     Instruction.ldr(.x17, .x16, Instruction.LoadStoreOffset.imm(ldr_off)),
@@ -1205,7 +1204,7 @@ pub const GotPltSection = struct {
         {
             // [0]: _DYNAMIC
             const symbol = elf_file.getSymbol(elf_file.dynamic_index.?);
-            try writer.writeInt(u64, symbol.value, .little);
+            try writer.writeInt(u64, @bitCast(symbol.value), .little);
         }
         // [1]: 0x0
         // [2]: 0x0
@@ -1284,7 +1283,7 @@ pub const PltGotSection = struct {
                 .st_info = elf.STT_FUNC,
                 .st_other = 0,
                 .st_shndx = @intCast(elf_file.plt_got_sect_index.?),
-                .st_value = sym.getPltGotAddress(elf_file),
+                .st_value = @intCast(sym.getPltGotAddress(elf_file)),
                 .st_size = 16,
             };
         }
@@ -1315,7 +1314,7 @@ pub const PltGotSection = struct {
                 const target_addr = sym.getGotAddress(elf_file);
                 const source_addr = sym.getPltGotAddress(elf_file);
                 const pages = try aarch64_util.calcNumberOfPages(source_addr, target_addr);
-                const off = try math.divExact(u12, @truncate(target_addr), 8);
+                const off = try math.divExact(u12, @truncate(@as(u64, @intCast(target_addr))), 8);
                 const insts = &[_]Instruction{
                     Instruction.adrp(.x16, pages),
                     Instruction.ldr(.x17, .x16, Instruction.LoadStoreOffset.imm(off)),
@@ -1376,9 +1375,9 @@ pub const CopyRelSection = struct {
             const symbol = elf_file.getSymbol(sym_index);
             const shared = symbol.getFile(elf_file).?.shared;
             const alignment = try symbol.getAlignment(elf_file);
-            symbol.value = mem.alignForward(u64, shdr.sh_size, alignment);
+            symbol.value = @intCast(mem.alignForward(u64, shdr.sh_size, alignment));
             shdr.sh_addralign = @max(shdr.sh_addralign, alignment);
-            shdr.sh_size = symbol.value + symbol.getSourceSymbol(elf_file).st_size;
+            shdr.sh_size = @as(u64, @intCast(symbol.value)) + symbol.getSourceSymbol(elf_file).st_size;
 
             const aliases = shared.getSymbolAliases(sym_index, elf_file);
             for (aliases) |alias| {
@@ -1396,7 +1395,7 @@ pub const CopyRelSection = struct {
             assert(sym.flags.import and sym.flags.copy_rel);
             const extra = sym.getExtra(elf_file).?;
             elf_file.addRelaDynAssumeCapacity(.{
-                .offset = sym.getAddress(.{}, elf_file),
+                .offset = @intCast(sym.getAddress(.{}, elf_file)),
                 .sym = extra.dynamic,
                 .type = relocation.encode(.copy, elf_file.options.cpu_arch.?),
             });

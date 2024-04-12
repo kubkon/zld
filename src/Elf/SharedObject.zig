@@ -200,7 +200,7 @@ pub fn resolveSymbols(self: *SharedObject, elf_file: *Elf) void {
 
         const global = elf_file.getSymbol(index);
         if (self.asFile().getSymbolRank(this_sym, false) < global.getSymbolRank(elf_file)) {
-            global.value = this_sym.st_value;
+            global.value = @intCast(this_sym.st_value);
             global.atom = 0;
             global.sym_idx = sym_idx;
             global.ver_idx = self.versyms.items[sym_idx];

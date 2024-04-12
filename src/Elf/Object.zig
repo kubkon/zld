@@ -284,7 +284,7 @@ fn initSymtab(self: *Object, allocator: Allocator, elf_file: *Elf) !void {
             break :blk self.getString(sym.st_name);
         };
         symbol.* = .{
-            .value = sym.st_value,
+            .value = @intCast(sym.st_value),
             .name = try elf_file.string_intern.insert(elf_file.base.allocator, name),
             .sym_idx = @as(u32, @intCast(i)),
             .atom = if (sym.st_shndx == elf.SHN_ABS) 0 else self.atoms.items[sym.st_shndx],
@@ -532,7 +532,7 @@ pub fn resolveSymbols(self: *Object, elf_file: *Elf) void {
                 elf.SHN_ABS, elf.SHN_COMMON => 0,
                 else => self.atoms.items[this_sym.st_shndx],
             };
-            global.value = this_sym.st_value;
+            global.value = @intCast(this_sym.st_value);
             global.atom = atom;
             global.sym_idx = sym_idx;
             global.file = self.index;
@@ -748,7 +748,7 @@ pub fn resolveMergeSubsections(self: *Object, elf_file: *Elf) !void {
             const sym_index = try elf_file.addSymbol();
             const sym = elf_file.getSymbol(sym_index);
             sym.* = .{
-                .value = @intCast(@as(i64, @intCast(offset)) - rel.r_addend),
+                .value = @bitCast(@as(i64, @intCast(offset)) - rel.r_addend),
                 .name = try elf_file.string_intern.insert(gpa, name),
                 .sym_idx = rel.r_sym(),
                 .file = self.index,

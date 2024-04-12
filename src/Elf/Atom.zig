@@ -1,5 +1,5 @@
 /// Address allocated for this Atom.
-value: u64 = 0,
+value: i64 = 0,
 
 /// Name of this Atom.
 name: u32 = 0,
@@ -33,9 +33,9 @@ pub fn getName(self: Atom, elf_file: *Elf) [:0]const u8 {
     return elf_file.string_intern.getAssumeExists(self.name);
 }
 
-pub fn getAddress(self: Atom, elf_file: *Elf) u64 {
+pub fn getAddress(self: Atom, elf_file: *Elf) i64 {
     const shdr = elf_file.sections.items(.shdr)[self.out_shndx];
-    return shdr.sh_addr + self.value;
+    return @as(i64, @intCast(shdr.sh_addr)) + self.value;
 }
 
 /// Returns atom's code and optionally uncompresses data if required (for compressed sections).
@@ -138,7 +138,7 @@ pub fn writeRelocs(self: Atom, elf_file: *Elf, out_relocs: *std.ArrayList(elf.El
     for (self.getRelocs(elf_file)) |rel| {
         const target = object.getSymbol(rel.r_sym(), elf_file);
         const r_type = rel.r_type();
-        const r_offset = self.value + rel.r_offset;
+        const r_offset: u64 = @intCast(self.value + @as(i64, @intCast(rel.r_offset)));
         var r_addend = rel.r_addend;
         var r_sym: u32 = 0;
         switch (target.getType(elf_file)) {
@@ -468,19 +468,19 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
         // https://intezer.com/blog/malware-analysis/executable-and-linkable-format-101-part-3-relocations/
         //
         // Address of the source atom.
-        const P = @as(i64, @intCast(self.getAddress(elf_file) + rel.r_offset));
+        const P = self.getAddress(elf_file) + @as(i64, @intCast(rel.r_offset));
         // Addend from the relocation.
         const A = rel.r_addend;
         // Address of the target symbol - can be address of the symbol within an atom or address of PLT stub.
-        const S = @as(i64, @intCast(target.getAddress(.{}, elf_file)));
+        const S = target.getAddress(.{}, elf_file);
         // Address of the global offset table.
-        const GOT = @as(i64, @intCast(elf_file.getGotAddress()));
+        const GOT = elf_file.getGotAddress();
         // Relative offset to the start of the global offset table.
-        const G = @as(i64, @intCast(target.getGotAddress(elf_file))) - GOT;
+        const G = target.getGotAddress(elf_file) - GOT;
         // Address of the thread pointer.
-        const TP = @as(i64, @intCast(elf_file.getTpAddress()));
+        const TP = elf_file.getTpAddress();
         // Address of the dynamic thread pointer.
-        const DTP = @as(i64, @intCast(elf_file.getDtpAddress()));
+        const DTP = elf_file.getDtpAddress();
 
         relocs_log.debug("  {s}: {x}: [{x} => {x}] G({x}) ({s})", .{
             relocation.fmtRelocType(rel.r_type(), cpu_arch),
@@ -532,9 +532,9 @@ fn resolveDynAbsReloc(
     defer tracy.end();
 
     const cpu_arch = elf_file.options.cpu_arch.?;
-    const P = self.getAddress(elf_file) + rel.r_offset;
+    const P: u64 = @intCast(self.getAddress(elf_file) + @as(i64, @intCast(rel.r_offset)));
     const A = rel.r_addend;
-    const S = @as(i64, @intCast(target.getAddress(.{}, elf_file)));
+    const S = target.getAddress(.{}, elf_file);
     const is_writeable = self.getInputShdr(elf_file).sh_flags & elf.SHF_WRITE != 0;
     const object = self.getObject(elf_file);
 
@@ -598,7 +598,7 @@ fn resolveDynAbsReloc(
         },
 
         .ifunc => {
-            const S_ = @as(i64, @intCast(target.getAddress(.{ .plt = false }, elf_file)));
+            const S_ = target.getAddress(.{ .plt = false }, elf_file);
             elf_file.addRelaDynAssumeCapacity(.{
                 .offset = P,
                 .type = relocation.encode(.irel, cpu_arch),
@@ -641,11 +641,11 @@ pub fn resolveRelocsNonAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void 
 
         const target = object.getSymbol(rel.r_sym(), elf_file);
 
-        const P = @as(i64, @intCast(self.getAddress(elf_file) + rel.r_offset));
+        const P = self.getAddress(elf_file) + @as(i64, @intCast(rel.r_offset));
         const A = rel.r_addend;
-        const S = @as(i64, @intCast(target.getAddress(.{}, elf_file)));
-        const GOT = @as(i64, @intCast(elf_file.getGotAddress()));
-        const DTP = @as(i64, @intCast(elf_file.getDtpAddress()));
+        const S = target.getAddress(.{}, elf_file);
+        const GOT = elf_file.getGotAddress();
+        const DTP = elf_file.getDtpAddress();
 
         relocs_log.debug("  {s}: {x}: [{x} => {x}] ({s})", .{
             relocation.fmtRelocType(rel.r_type(), cpu_arch),
@@ -948,7 +948,7 @@ const x86_64 = struct {
 
             .GOTTPOFF => {
                 if (target.flags.gottp) {
-                    const S_ = @as(i64, @intCast(target.getGotTpAddress(elf_file)));
+                    const S_ = target.getGotTpAddress(elf_file);
                     try cwriter.writeInt(i32, @as(i32, @intCast(S_ + A - P)), .little);
                 } else {
                     try relaxGotTpOff(code[rel.r_offset - 3 ..]);
@@ -958,10 +958,10 @@ const x86_64 = struct {
 
             .TLSGD => {
                 if (target.flags.tlsgd) {
-                    const S_ = @as(i64, @intCast(target.getTlsGdAddress(elf_file)));
+                    const S_ = target.getTlsGdAddress(elf_file);
                     try cwriter.writeInt(i32, @as(i32, @intCast(S_ + A - P)), .little);
                 } else if (target.flags.gottp) {
-                    const S_ = @as(i64, @intCast(target.getGotTpAddress(elf_file)));
+                    const S_ = target.getGotTpAddress(elf_file);
                     try relaxTlsGdToIe(&.{ rel, it.next().? }, @intCast(S_ - P), elf_file, stream);
                 } else {
                     try relaxTlsGdToLe(&.{ rel, it.next().? }, @as(i32, @intCast(S - TP)), elf_file, stream);
@@ -971,12 +971,12 @@ const x86_64 = struct {
             .TLSLD => {
                 if (elf_file.got.tlsld_index) |entry_index| {
                     const tlsld_entry = elf_file.got.entries.items[entry_index];
-                    const S_ = @as(i64, @intCast(tlsld_entry.getAddress(elf_file)));
+                    const S_ = tlsld_entry.getAddress(elf_file);
                     try cwriter.writeInt(i32, @as(i32, @intCast(S_ + A - P)), .little);
                 } else {
                     try relaxTlsLdToLe(
                         &.{ rel, it.next().? },
-                        @as(i32, @intCast(TP - @as(i64, @intCast(elf_file.getTlsAddress())))),
+                        @as(i32, @intCast(TP - elf_file.getTlsAddress())),
                         elf_file,
                         stream,
                     );
@@ -985,7 +985,7 @@ const x86_64 = struct {
 
             .GOTPC32_TLSDESC => {
                 if (target.flags.tlsdesc) {
-                    const S_ = @as(i64, @intCast(target.getTlsDescAddress(elf_file)));
+                    const S_ = target.getTlsDescAddress(elf_file);
                     try cwriter.writeInt(i32, @as(i32, @intCast(S_ + A - P)), .little);
                 } else {
                     try relaxGotPcTlsDesc(code[rel.r_offset - 3 ..]);
@@ -1386,7 +1386,7 @@ const aarch64 = struct {
                 const disp: i28 = math.cast(i28, S + A - P) orelse blk: {
                     const thunk = atom.getThunk(elf_file);
                     const target_index = object.symbols.items[rel.r_sym()];
-                    const S_: i64 = @intCast(thunk.getTargetAddress(target_index, elf_file));
+                    const S_ = thunk.getTargetAddress(target_index, elf_file);
                     break :blk math.cast(i28, S_ + A - P) orelse return error.Overflow;
                 };
                 aarch64_util.writeBranchImm(disp, code);
@@ -1394,16 +1394,12 @@ const aarch64 = struct {
 
             .ADR_PREL_PG_HI21 => {
                 // TODO: check for relaxation of ADRP+ADD
-                const saddr = @as(u64, @intCast(P));
-                const taddr = @as(u64, @intCast(S + A));
-                const pages = @as(u21, @bitCast(try aarch64_util.calcNumberOfPages(saddr, taddr)));
+                const pages = @as(u21, @bitCast(try aarch64_util.calcNumberOfPages(P, S + A)));
                 aarch64_util.writeAdrpInst(pages, code);
             },
 
             .ADR_GOT_PAGE => if (target.flags.got) {
-                const saddr = @as(u64, @intCast(P));
-                const taddr = @as(u64, @intCast(G + GOT + A));
-                const pages = @as(u21, @bitCast(try aarch64_util.calcNumberOfPages(saddr, taddr)));
+                const pages = @as(u21, @bitCast(try aarch64_util.calcNumberOfPages(P, G + GOT + A)));
                 aarch64_util.writeAdrpInst(pages, code);
             } else {
                 // TODO: relax
@@ -1454,46 +1450,38 @@ const aarch64 = struct {
             },
 
             .TLSIE_ADR_GOTTPREL_PAGE21 => {
-                const S_: i64 = @intCast(target.getGotTpAddress(elf_file));
-                const saddr: u64 = @intCast(P);
-                const taddr: u64 = @intCast(S_ + A);
-                relocs_log.debug("      [{x} => {x}]", .{ P, taddr });
-                const pages: u21 = @bitCast(try aarch64_util.calcNumberOfPages(saddr, taddr));
+                const S_ = target.getGotTpAddress(elf_file);
+                relocs_log.debug("      [{x} => {x}]", .{ P, S_ + A });
+                const pages: u21 = @bitCast(try aarch64_util.calcNumberOfPages(P, S_ + A));
                 aarch64_util.writeAdrpInst(pages, code);
             },
 
             .TLSIE_LD64_GOTTPREL_LO12_NC => {
-                const S_: i64 = @intCast(target.getGotTpAddress(elf_file));
-                const taddr: u64 = @intCast(S_ + A);
-                relocs_log.debug("      [{x} => {x}]", .{ P, taddr });
-                const offset: u12 = try math.divExact(u12, @truncate(taddr), 8);
+                const S_ = target.getGotTpAddress(elf_file);
+                relocs_log.debug("      [{x} => {x}]", .{ P, S_ + A });
+                const offset: u12 = try math.divExact(u12, @truncate(@as(u64, @bitCast(S_ + A))), 8);
                 aarch64_util.writeLoadStoreRegInst(offset, code);
             },
 
             .TLSGD_ADR_PAGE21 => {
-                const S_: i64 = @intCast(target.getTlsGdAddress(elf_file));
-                const saddr: u64 = @intCast(P);
-                const taddr: u64 = @intCast(S_ + A);
-                relocs_log.debug("      [{x} => {x}]", .{ P, taddr });
-                const pages: u21 = @bitCast(try aarch64_util.calcNumberOfPages(saddr, taddr));
+                const S_ = target.getTlsGdAddress(elf_file);
+                relocs_log.debug("      [{x} => {x}]", .{ P, S_ + A });
+                const pages: u21 = @bitCast(try aarch64_util.calcNumberOfPages(P, S_ + A));
                 aarch64_util.writeAdrpInst(pages, code);
             },
 
             .TLSGD_ADD_LO12_NC => {
-                const S_: i64 = @intCast(target.getTlsGdAddress(elf_file));
-                const taddr: u64 = @intCast(S_ + A);
-                relocs_log.debug("      [{x} => {x}]", .{ P, taddr });
-                const offset: u12 = @truncate(taddr);
+                const S_ = target.getTlsGdAddress(elf_file);
+                relocs_log.debug("      [{x} => {x}]", .{ P, S_ + A });
+                const offset: u12 = @truncate(@as(u64, @bitCast(S_ + A)));
                 aarch64_util.writeAddImmInst(offset, code);
             },
 
             .TLSDESC_ADR_PAGE21 => {
                 if (target.flags.tlsdesc) {
-                    const S_: i64 = @intCast(target.getTlsDescAddress(elf_file));
-                    const saddr: u64 = @intCast(P);
-                    const taddr: u64 = @intCast(S_ + A);
-                    relocs_log.debug("      [{x} => {x}]", .{ P, taddr });
-                    const pages: u21 = @bitCast(try aarch64_util.calcNumberOfPages(saddr, taddr));
+                    const S_ = target.getTlsDescAddress(elf_file);
+                    relocs_log.debug("      [{x} => {x}]", .{ P, S_ + A });
+                    const pages: u21 = @bitCast(try aarch64_util.calcNumberOfPages(P, S_ + A));
                     aarch64_util.writeAdrpInst(pages, code);
                 } else {
                     relocs_log.debug("      relaxing adrp => nop", .{});
@@ -1503,10 +1491,9 @@ const aarch64 = struct {
 
             .TLSDESC_LD64_LO12 => {
                 if (target.flags.tlsdesc) {
-                    const S_: i64 = @intCast(target.getTlsDescAddress(elf_file));
-                    const taddr: u64 = @intCast(S_ + A);
-                    relocs_log.debug("      [{x} => {x}]", .{ P, taddr });
-                    const offset: u12 = try math.divExact(u12, @truncate(taddr), 8);
+                    const S_ = target.getTlsDescAddress(elf_file);
+                    relocs_log.debug("      [{x} => {x}]", .{ P, S_ + A });
+                    const offset: u12 = try math.divExact(u12, @truncate(@as(u64, @bitCast(S_ + A))), 8);
                     aarch64_util.writeLoadStoreRegInst(offset, code);
                 } else {
                     relocs_log.debug("      relaxing ldr => nop", .{});
@@ -1516,10 +1503,9 @@ const aarch64 = struct {
 
             .TLSDESC_ADD_LO12 => {
                 if (target.flags.tlsdesc) {
-                    const S_: i64 = @intCast(target.getTlsDescAddress(elf_file));
-                    const taddr: u64 = @intCast(S_ + A);
-                    relocs_log.debug("      [{x} => {x}]", .{ P, taddr });
-                    const offset: u12 = @truncate(taddr);
+                    const S_ = target.getTlsDescAddress(elf_file);
+                    relocs_log.debug("      [{x} => {x}]", .{ P, S_ + A });
+                    const offset: u12 = @truncate(@as(u64, @bitCast(S_ + A)));
                     aarch64_util.writeAddImmInst(offset, code);
                 } else {
                     const old_inst = Instruction{
@@ -1725,7 +1711,7 @@ const riscv = struct {
                 const pos = it.pos;
                 const atom_addr = atom.getAddress(elf_file);
                 const pair = while (it.prev()) |pair| {
-                    if (S == atom_addr + pair.r_offset) break pair;
+                    if (S == atom_addr + @as(i64, @intCast(pair.r_offset))) break pair;
                 } else {
                     // TODO: search forward too
                     elf_file.base.fatal("{s}: {x}: TODO search forward for matching HI20 reloc", .{
@@ -1736,10 +1722,10 @@ const riscv = struct {
                 };
                 it.pos = pos;
                 const target_ = object.getSymbol(pair.r_sym(), elf_file);
-                const S_ = @as(i64, @intCast(target_.getAddress(.{}, elf_file)));
+                const S_ = target_.getAddress(.{}, elf_file);
                 const A_ = pair.r_addend;
-                const P_ = @as(i64, @intCast(atom_addr + pair.r_offset));
-                const G_ = @as(i64, @intCast(target_.getGotAddress(elf_file))) - GOT;
+                const P_ = atom_addr + @as(i64, @intCast(pair.r_offset));
+                const G_ = target_.getGotAddress(elf_file) - GOT;
                 const disp = switch (@as(elf.R_RISCV, @enumFromInt(pair.r_type()))) {
                     .PCREL_HI20 => math.cast(i32, S_ + A_ - P_) orelse return error.Overflow,
                     .GOT_HI20 => math.cast(i32, G_ + GOT + A_ - P_) orelse return error.Overflow,
