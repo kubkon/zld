@@ -897,13 +897,13 @@ pub fn writeSymtab(self: Object, elf_file: *Elf) void {
 }
 
 pub fn getLocals(self: Object) []const Symbol.Index {
-    const end = self.first_global orelse self.symbols.items.len;
+    const end = self.first_global orelse self.symtab.items.len;
     return self.symbols.items[0..end];
 }
 
 pub fn getGlobals(self: Object) []const Symbol.Index {
-    const start = self.first_global orelse self.symbols.items.len;
-    return self.symbols.items[start..];
+    const start = self.first_global orelse return &[0]Symbol.Index{};
+    return self.symbols.items[start..self.symtab.items.len];
 }
 
 pub inline fn getSymbol(self: Object, index: Symbol.Index, elf_file: *Elf) *Symbol {
