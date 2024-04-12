@@ -825,12 +825,19 @@ pub fn convertCommonSymbols(self: *Object, elf_file: *Elf) !void {
 pub fn calcSymtabSize(self: *Object, elf_file: *Elf) !void {
     if (elf_file.options.strip_all) return;
 
+    const isAlive = struct {
+        fn isAlive(sym: *const Symbol, ctx: *Elf) bool {
+            if (sym.getMergeSubsection(ctx)) |msub| return msub.alive;
+            if (sym.getAtom(ctx)) |atom| return atom.flags.alive;
+            return true;
+        }
+    }.isAlive;
+
     if (!elf_file.options.discard_all_locals) {
         // TODO: discard temp locals
         for (self.getLocals()) |local_index| {
             const local = elf_file.getSymbol(local_index);
-            if (local.getMergeSubsection(elf_file)) |msub| if (!msub.alive) continue;
-            if (local.getAtom(elf_file)) |atom| if (!atom.flags.alive) continue;
+            if (!isAlive(local, elf_file)) continue;
             const s_sym = local.getSourceSymbol(elf_file);
             switch (s_sym.st_type()) {
                 elf.STT_SECTION => continue,
@@ -848,8 +855,7 @@ pub fn calcSymtabSize(self: *Object, elf_file: *Elf) !void {
         const global = elf_file.getSymbol(global_index);
         const file_ptr = global.getFile(elf_file) orelse continue;
         if (file_ptr.getIndex() != self.index) continue;
-        if (global.getMergeSubsection(elf_file)) |msub| if (!msub.alive) continue;
-        if (global.getAtom(elf_file)) |atom| if (!atom.flags.alive) continue;
+        if (!isAlive(global, elf_file)) continue;
         global.flags.output_symtab = true;
         if (global.isLocal(elf_file)) {
             try global.addExtra(.{ .symtab = self.output_symtab_ctx.nlocals }, elf_file);
@@ -977,12 +983,6 @@ fn formatSymtab(
     for (object.getGlobals()) |index| {
         const global = ctx.elf_file.getSymbol(index);
         try writer.print("    {}\n", .{global.fmt(ctx.elf_file)});
-    }
-    try writer.writeAll("  merged\n");
-    const count = object.getLocals().len + object.getGlobals().len;
-    for (object.symbols.items[count..]) |index| {
-        const msym = ctx.elf_file.getSymbol(index);
-        try writer.print("    {}\n", .{msym.fmt(ctx.elf_file)});
     }
 }
 

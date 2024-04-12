@@ -943,8 +943,17 @@ pub fn calcSymtabSize(self: *Elf) !void {
     if (self.internal_object_index) |index| files.appendAssumeCapacity(index);
 
     // Section symbols
-    for (self.sections.items(.atoms), self.sections.items(.sym_index)) |atoms, *sym_index| {
-        if (atoms.items.len == 0) continue;
+    const isMergeSection = struct {
+        fn isMergeSection(ctx: *Elf, index: usize) bool {
+            for (ctx.merge_sections.items) |msec| {
+                if (msec.out_shndx == index) return true;
+            }
+            return false;
+        }
+    }.isMergeSection;
+
+    for (self.sections.items(.atoms), self.sections.items(.sym_index), 0..) |atoms, *sym_index, index| {
+        if (atoms.items.len == 0 and !isMergeSection(self, index)) continue;
         sym_index.* = nlocals + 1;
         nlocals += 1;
     }
@@ -2841,9 +2850,12 @@ pub fn getMergeSubsection(self: *Elf, index: MergeSubsection.Index) *MergeSubsec
 
 pub fn getOrCreateMergeSection(self: *Elf, sh_name: [:0]const u8, sh_flags: u64, sh_type: u32) !MergeSection.Index {
     const gpa = self.base.allocator;
-    const name = if (mem.eql(u8, sh_name, ".rodata") or mem.startsWith(u8, sh_name, ".rodata")) name: {
-        break :name if (sh_flags & elf.SHF_STRINGS != 0) ".rodata.str" else ".rodata.cst";
-    } else sh_name;
+    const name = name: {
+        // if (self.options.relocatable) break :name sh_name;
+        if (mem.eql(u8, sh_name, ".rodata") or mem.startsWith(u8, sh_name, ".rodata"))
+            break :name if (sh_flags & elf.SHF_STRINGS != 0) ".rodata.str" else ".rodata.cst";
+        break :name sh_name;
+    };
     const osec = self.getSectionByName(name) orelse try self.addSection(.{
         .type = sh_type,
         .flags = sh_flags & ~@as(u64, elf.SHF_COMPRESSED | elf.SHF_GROUP),
