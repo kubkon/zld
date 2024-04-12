@@ -150,14 +150,21 @@ pub const InputMergeSection = struct {
 
     pub fn clearAndFree(imsec: *InputMergeSection, allocator: Allocator) void {
         imsec.bytes.clearAndFree(allocator);
-        imsec.strings.clearAndFree(allocator);
+        // TODO: imsec.strings.clearAndFree(allocator);
     }
 
     pub fn findSubsection(imsec: InputMergeSection, offset: u32) ?struct { MergeSubsection.Index, u32 } {
         // TODO: binary search
-        for (imsec.offsets.items, imsec.subsections.items) |off, msub| {
-            if (off <= offset) return .{ msub, offset - off };
+        for (imsec.offsets.items, 0..) |off, index| {
+            if (offset < off) return .{
+                imsec.subsections.items[index - 1],
+                offset - imsec.offsets.items[index - 1],
+            };
         }
+        const last = imsec.offsets.items.len - 1;
+        const last_off = imsec.offsets.items[last];
+        const last_len = imsec.strings.items[last].len;
+        if (offset < last_off + last_len) return .{ imsec.subsections.items[last], offset - last_off };
         return null;
     }
 
