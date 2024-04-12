@@ -758,21 +758,21 @@ pub fn addAtomsToSections(self: *Elf) !void {
     }
 }
 
-fn addCommentString(self: *Elf) !void {
+pub fn addCommentString(self: *Elf) !void {
     const msec_index = try self.getOrCreateMergeSection(".comment", elf.SHF_MERGE | elf.SHF_STRINGS, elf.SHT_PROGBITS);
     const msec = self.getMergeSection(msec_index);
     const res = try msec.insertZ(self.base.allocator, Options.version);
-    assert(!res.found_existing);
+    if (res.found_existing) return;
     const msub_index = try self.addMergeSubsection();
     const msub = self.getMergeSubsection(msub_index);
     msub.merge_section = msec_index;
-    msub.string_index = res.index;
+    msub.string_index = res.key.pos;
     msub.alignment = 0;
-    msub.size = Options.version.len + 1;
+    msub.size = res.key.len;
     res.sub.* = msub_index;
 }
 
-fn calcMergeSectionSizes(self: *Elf) !void {
+pub fn calcMergeSectionSizes(self: *Elf) !void {
     for (self.merge_sections.items) |*msec| {
         try msec.finalize(self);
 
@@ -2367,7 +2367,7 @@ fn writeAtoms(self: *Elf) !void {
     try self.reportUndefs();
 }
 
-fn writeMergeSections(self: *Elf) !void {
+pub fn writeMergeSections(self: *Elf) !void {
     const gpa = self.base.allocator;
     var buffer = std.ArrayList(u8).init(gpa);
     defer buffer.deinit();

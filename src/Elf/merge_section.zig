@@ -2,7 +2,7 @@ pub const MergeSection = struct {
     out_shndx: u32 = 0,
     bytes: std.ArrayListUnmanaged(u8) = .{},
     table: std.HashMapUnmanaged(
-        u32,
+        String,
         MergeSubsection.Index,
         IndexContext,
         std.hash_map.default_max_load_percentage,
@@ -22,7 +22,7 @@ pub const MergeSection = struct {
 
     const InsertResult = struct {
         found_existing: bool,
-        index: u32,
+        key: String,
         sub: *MergeSubsection.Index,
     };
 
@@ -30,15 +30,15 @@ pub const MergeSection = struct {
         const gop = try msec.table.getOrPutContextAdapted(
             allocator,
             string,
-            IndexAdapter{ .bytes = msec.bytes.items, .entsize = @intCast(string.len) },
-            IndexContext{ .bytes = msec.bytes.items, .entsize = @intCast(string.len) },
+            IndexAdapter{ .bytes = msec.bytes.items },
+            IndexContext{ .bytes = msec.bytes.items },
         );
         if (!gop.found_existing) {
             const index: u32 = @intCast(msec.bytes.items.len);
             try msec.bytes.appendSlice(allocator, string);
-            gop.key_ptr.* = index;
+            gop.key_ptr.* = .{ .pos = index, .len = @intCast(string.len) };
         }
-        return .{ .found_existing = gop.found_existing, .index = gop.key_ptr.*, .sub = gop.value_ptr };
+        return .{ .found_existing = gop.found_existing, .key = gop.key_ptr.*, .sub = gop.value_ptr };
     }
 
     pub fn insertZ(msec: *MergeSection, allocator: Allocator, string: []const u8) !InsertResult {
@@ -82,24 +82,22 @@ pub const MergeSection = struct {
 
     pub const IndexContext = struct {
         bytes: []const u8,
-        entsize: u32,
 
-        pub fn eql(_: @This(), a: u32, b: u32) bool {
-            return a == b;
+        pub fn eql(_: @This(), a: String, b: String) bool {
+            return a.pos == b.pos;
         }
 
-        pub fn hash(ctx: @This(), key: u32) u64 {
-            const str = ctx.bytes[key..][0..ctx.entsize];
+        pub fn hash(ctx: @This(), key: String) u64 {
+            const str = ctx.bytes[key.pos..][0..key.len];
             return std.hash_map.hashString(str);
         }
     };
 
     pub const IndexAdapter = struct {
         bytes: []const u8,
-        entsize: u32,
 
-        pub fn eql(ctx: @This(), a: []const u8, b: u32) bool {
-            const str = ctx.bytes[b..][0..ctx.entsize];
+        pub fn eql(ctx: @This(), a: []const u8, b: String) bool {
+            const str = ctx.bytes[b.pos..][0..b.len];
             return mem.eql(u8, a, str);
         }
 
@@ -141,7 +139,7 @@ pub const InputMergeSection = struct {
     offsets: std.ArrayListUnmanaged(u32) = .{},
     subsections: std.ArrayListUnmanaged(MergeSubsection.Index) = .{},
     bytes: std.ArrayListUnmanaged(u8) = .{},
-    strings: std.ArrayListUnmanaged(struct { u32, u32 }) = .{},
+    strings: std.ArrayListUnmanaged(String) = .{},
 
     pub fn deinit(imsec: *InputMergeSection, allocator: Allocator) void {
         imsec.offsets.deinit(allocator);
@@ -166,20 +164,23 @@ pub const InputMergeSection = struct {
     pub fn insert(imsec: *InputMergeSection, allocator: Allocator, string: []const u8) !void {
         const index: u32 = @intCast(imsec.bytes.items.len);
         try imsec.bytes.appendSlice(allocator, string);
-        try imsec.strings.append(allocator, .{ index, @intCast(string.len) });
+        try imsec.strings.append(allocator, .{ .pos = index, .len = @intCast(string.len) });
     }
 
-    pub fn insertZ(imsec: *InputMergeSection, allocator: Allocator, string: [:0]const u8) !void {
+    pub fn insertZ(imsec: *InputMergeSection, allocator: Allocator, string: []const u8) !void {
         const index: u32 = @intCast(imsec.bytes.items.len);
         try imsec.bytes.ensureUnusedCapacity(allocator, string.len + 1);
         imsec.bytes.appendSliceAssumeCapacity(string);
         imsec.bytes.appendAssumeCapacity(0);
-        try imsec.strings.append(allocator, .{ index, @intCast(string.len + 1) });
+        try imsec.strings.append(allocator, .{ .pos = index, .len = @intCast(string.len + 1) });
     }
 
     pub const Index = u32;
 };
 
+const String = struct { pos: u32, len: u32 };
+
+const assert = std.debug.assert;
 const mem = std.mem;
 const std = @import("std");
 

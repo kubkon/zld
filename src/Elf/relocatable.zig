@@ -6,6 +6,8 @@ pub fn flush(elf_file: *Elf) !void {
     try initSections(elf_file);
     try elf_file.sortSections();
     try elf_file.addAtomsToSections();
+    try elf_file.addCommentString();
+    try elf_file.calcMergeSectionSizes();
     try calcSectionSizes(elf_file);
 
     allocateSections(elf_file, @sizeOf(elf.Elf64_Ehdr));
@@ -19,6 +21,7 @@ pub fn flush(elf_file: *Elf) !void {
     state_log.debug("{}", .{elf_file.dumpState()});
 
     try writeAtoms(elf_file);
+    try elf_file.writeMergeSections();
     try writeSyntheticSections(elf_file);
     try elf_file.writeShdrs();
     try writeHeader(elf_file);

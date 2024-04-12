@@ -623,11 +623,9 @@ pub fn initMergeSections(self: *Object, elf_file: *Elf) !void {
 
         if (shdr.sh_flags & elf.SHF_STRINGS != 0) {
             if (sh_entsize == 0) {
-                elf_file.base.fatal("{}:{s}: invalid sh_entsize value", .{
-                    self.fmtPath(),
-                    atom.getName(elf_file),
-                });
-                return error.ParseFailed;
+                // According to mold's source code, GHC emits MS sections with sh_entsize = 0.
+                // This actually can also happen for output created with `-r` mode.
+                log.debug("{}:{s}: invalid sh_entsize value", .{ self.fmtPath(), atom.getName(elf_file) });
             }
 
             var pos: u32 = 0;
@@ -645,6 +643,7 @@ pub fn initMergeSections(self: *Object, elf_file: *Elf) !void {
                 pos += @as(u32, @intCast(string.len)) + 1; // account for null
             }
         } else {
+            if (sh_entsize == 0) continue; // Malformed, don't split but don't error out
             if (shdr.sh_size % sh_entsize != 0) {
                 elf_file.base.fatal("{}:{s}: size not multiple of sh_entsize", .{
                     self.fmtPath(),
@@ -675,16 +674,16 @@ pub fn resolveMergeSubsections(self: *Object, elf_file: *Elf) !void {
 
         try imsec.subsections.resize(gpa, imsec.strings.items.len);
 
-        for (imsec.strings.items, imsec.subsections.items) |pair, *imsec_msub| {
-            const string = imsec.bytes.items[pair[0]..][0..pair[1]];
+        for (imsec.strings.items, imsec.subsections.items) |str, *imsec_msub| {
+            const string = imsec.bytes.items[str.pos..][0..str.len];
             const res = try msec.insert(gpa, string);
             if (!res.found_existing) {
                 const msub_index = try elf_file.addMergeSubsection();
                 const msub = elf_file.getMergeSubsection(msub_index);
                 msub.merge_section = imsec.merge_section;
-                msub.string_index = res.index;
+                msub.string_index = res.key.pos;
                 msub.alignment = atom.alignment;
-                msub.size = pair[1];
+                msub.size = res.key.len;
                 res.sub.* = msub_index;
             }
             imsec_msub.* = res.sub.*;
