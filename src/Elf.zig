@@ -2851,7 +2851,7 @@ pub fn getMergeSubsection(self: *Elf, index: MergeSubsection.Index) *MergeSubsec
 pub fn getOrCreateMergeSection(self: *Elf, sh_name: [:0]const u8, sh_flags: u64, sh_type: u32) !MergeSection.Index {
     const gpa = self.base.allocator;
     const name = name: {
-        // if (self.options.relocatable) break :name sh_name;
+        if (self.options.relocatable) break :name sh_name;
         if (mem.eql(u8, sh_name, ".rodata") or mem.startsWith(u8, sh_name, ".rodata"))
             break :name if (sh_flags & elf.SHF_STRINGS != 0) ".rodata.str" else ".rodata.cst";
         break :name sh_name;
