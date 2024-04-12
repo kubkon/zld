@@ -722,6 +722,53 @@ pub fn resolveMergeSubsections(self: *Object, elf_file: *Elf) !void {
         try sym.addExtra(.{ .subsection = msub_index }, elf_file);
         sym.flags.merge_subsection = true;
     }
+
+    for (self.atoms.items) |atom_index| {
+        const atom = elf_file.getAtom(atom_index) orelse continue;
+        if (!atom.flags.alive) continue;
+        if (atom.getInputShdr(elf_file).sh_flags & elf.SHF_ALLOC == 0) continue;
+        const extra = atom.getExtra(elf_file) orelse continue;
+        if (extra.rel_count == 0) continue;
+        const relocs = self.relocs.items[extra.rel_index..][0..extra.rel_count];
+        for (relocs) |*rel| {
+            const esym = self.symtab.items[rel.r_sym()];
+            if (esym.st_type() != elf.STT_SECTION) continue;
+
+            const imsec_index = self.merge_sections.items[esym.st_shndx];
+            const imsec = elf_file.getInputMergeSection(imsec_index) orelse continue;
+            const msub_index, const offset = imsec.findSubsection(@intCast(@as(i64, @intCast(esym.st_value)) + rel.r_addend)) orelse {
+                elf_file.base.fatal("{}: {s}: invalid relocation at offset 0x{x}", .{
+                    self.fmtPath(),
+                    atom.getName(elf_file),
+                    rel.r_offset,
+                });
+                return error.ParseFailed;
+            };
+            const msub = elf_file.getMergeSubsection(msub_index);
+            const osec = elf_file.sections.items(.shdr)[msub.getMergeSection(elf_file).out_shndx];
+
+            const out_sym_idx: u64 = @intCast(self.symbols.items.len);
+            try self.symbols.ensureUnusedCapacity(gpa, 1);
+            const name = try std.fmt.allocPrint(gpa, "{s}$subsection{d}", .{
+                elf_file.shstrtab.getAssumeExists(osec.sh_name),
+                msub_index,
+            });
+            defer gpa.free(name);
+            const sym_index = try elf_file.addSymbol();
+            const sym = elf_file.getSymbol(sym_index);
+            sym.* = .{
+                .value = @intCast(@as(i64, @intCast(offset)) - rel.r_addend),
+                .name = try elf_file.string_intern.insert(gpa, name),
+                .sym_idx = rel.r_sym(),
+                .file = self.index,
+                .shndx = msub.getMergeSection(elf_file).out_shndx,
+            };
+            try sym.addExtra(.{ .subsection = msub_index }, elf_file);
+            sym.flags.merge_subsection = true;
+            self.symbols.addOneAssumeCapacity().* = sym_index;
+            rel.r_info = (out_sym_idx << 32) | rel.r_type();
+        }
+    }
 }
 
 /// We will create dummy shdrs per each resolved common symbols to make it
