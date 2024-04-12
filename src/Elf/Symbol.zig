@@ -261,6 +261,7 @@ pub fn setOutputSym(symbol: Symbol, elf_file: *Elf, out: *elf.Elf64_Sym) void {
         if (symbol.flags.copy_rel) break :blk elf_file.copy_rel_sect_index.?;
         if (file == .shared or s_sym.st_shndx == elf.SHN_UNDEF) break :blk elf.SHN_UNDEF;
         if (elf_file.options.relocatable and s_sym.st_shndx == elf.SHN_COMMON) break :blk elf.SHN_COMMON;
+        if (symbol.getMergeSubsection(elf_file)) |msub| break :blk msub.getMergeSection(elf_file).out_shndx;
         if (symbol.getAtom(elf_file) == null and file != .internal) break :blk elf.SHN_ABS;
         break :blk symbol.shndx;
     };
