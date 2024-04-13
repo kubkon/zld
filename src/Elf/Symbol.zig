@@ -109,19 +109,23 @@ pub fn getAddress(symbol: Symbol, opts: struct {
         if (!atom.flags.alive) {
             if (mem.eql(u8, atom.getName(elf_file), ".eh_frame")) {
                 const sym_name = symbol.getName(elf_file);
+                const sh_addr, const sh_size = blk: {
+                    const shndx = elf_file.eh_frame_sect_index orelse break :blk .{ 0, 0 };
+                    const shdr = elf_file.sections.items(.shdr)[shndx];
+                    break :blk .{ shdr.sh_addr, shdr.sh_size };
+                };
                 if (mem.startsWith(u8, sym_name, "__EH_FRAME_BEGIN__") or
                     mem.startsWith(u8, sym_name, "__EH_FRAME_LIST__") or
                     mem.startsWith(u8, sym_name, ".eh_frame_seg") or
                     symbol.getSourceSymbol(elf_file).st_type() == elf.STT_SECTION)
                 {
-                    return @intCast(elf_file.sections.items(.shdr)[elf_file.eh_frame_sect_index.?].sh_addr);
+                    return @intCast(sh_addr);
                 }
 
                 if (mem.startsWith(u8, sym_name, "__FRAME_END__") or
                     mem.startsWith(u8, sym_name, "__EH_FRAME_LIST_END__"))
                 {
-                    const shdr = elf_file.sections.items(.shdr)[elf_file.eh_frame_sect_index.?];
-                    return @intCast(shdr.sh_addr + shdr.sh_size);
+                    return @intCast(sh_addr + sh_size);
                 }
 
                 // TODO I think we potentially should error here
