@@ -38,6 +38,18 @@ pub fn getAddress(self: Atom, elf_file: *Elf) i64 {
     return @as(i64, @intCast(shdr.sh_addr)) + self.value;
 }
 
+pub fn getDebugTombstoneValue(self: Atom, target: Symbol, elf_file: *Elf) ?u64 {
+    if (target.getMergeSubsection(elf_file)) |msub| {
+        if (msub.alive) return null;
+    }
+    if (target.getAtom(elf_file)) |atom| {
+        if (atom.flags.alive) return null;
+    }
+    const name = self.getName(elf_file);
+    if (!mem.startsWith(u8, name, ".debug")) return null;
+    return if (mem.eql(u8, name, ".debug_loc") or mem.eql(u8, name, ".debug_ranges")) 1 else 0;
+}
+
 /// Returns atom's code and optionally uncompresses data if required (for compressed sections).
 /// Caller owns the memory.
 pub fn getCodeUncompressAlloc(self: Atom, elf_file: *Elf) ![]u8 {
@@ -1035,9 +1047,18 @@ const x86_64 = struct {
             .@"16" => try cwriter.writeInt(u16, @as(u16, @bitCast(@as(i16, @intCast(S + A)))), .little),
             .@"32" => try cwriter.writeInt(u32, @as(u32, @bitCast(@as(i32, @intCast(S + A)))), .little),
             .@"32S" => try cwriter.writeInt(i32, @as(i32, @intCast(S + A)), .little),
-            .@"64" => try cwriter.writeInt(i64, S + A, .little),
-            .DTPOFF32 => try cwriter.writeInt(i32, @as(i32, @intCast(S + A - DTP)), .little),
-            .DTPOFF64 => try cwriter.writeInt(i64, S + A - DTP, .little),
+            .@"64" => if (atom.getDebugTombstoneValue(target.*, elf_file)) |value|
+                try cwriter.writeInt(u64, value, .little)
+            else
+                try cwriter.writeInt(i64, S + A, .little),
+            .DTPOFF32 => if (atom.getDebugTombstoneValue(target.*, elf_file)) |value|
+                try cwriter.writeInt(u32, @truncate(value), .little)
+            else
+                try cwriter.writeInt(i32, @as(i32, @intCast(S + A - DTP)), .little),
+            .DTPOFF64 => if (atom.getDebugTombstoneValue(target.*, elf_file)) |value|
+                try cwriter.writeInt(u64, value, .little)
+            else
+                try cwriter.writeInt(i64, S + A - DTP, .little),
             .GOTOFF64 => try cwriter.writeInt(i64, S + A - GOT, .little),
             .GOTPC64 => try cwriter.writeInt(i64, GOT + A, .little),
             .SIZE32 => {

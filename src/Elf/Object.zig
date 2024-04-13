@@ -719,7 +719,6 @@ pub fn resolveMergeSubsections(self: *Object, elf_file: *Elf) !void {
     for (self.atoms.items) |atom_index| {
         const atom = elf_file.getAtom(atom_index) orelse continue;
         if (!atom.flags.alive) continue;
-        if (atom.getInputShdr(elf_file).sh_flags & elf.SHF_ALLOC == 0) continue;
         const extra = atom.getExtra(elf_file) orelse continue;
         if (extra.rel_count == 0) continue;
         const relocs = self.relocs.items[extra.rel_index..][0..extra.rel_count];
