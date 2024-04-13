@@ -671,6 +671,7 @@ pub fn resolveMergeSubsections(self: *Object, elf_file: *Elf) !void {
         const imsec = elf_file.getInputMergeSection(index) orelse continue;
         const msec = elf_file.getMergeSection(imsec.merge_section);
         const atom = elf_file.getAtom(imsec.atom).?;
+        const isec = atom.getInputShdr(elf_file);
 
         try imsec.subsections.resize(gpa, imsec.strings.items.len);
 
@@ -684,6 +685,7 @@ pub fn resolveMergeSubsections(self: *Object, elf_file: *Elf) !void {
                 msub.string_index = res.key.pos;
                 msub.alignment = atom.alignment;
                 msub.size = res.key.len;
+                msub.alive = !elf_file.options.gc_sections or isec.sh_flags & elf.SHF_ALLOC == 0;
                 res.sub.* = msub_index;
             }
             imsec_msub.* = res.sub.*;
@@ -736,12 +738,12 @@ pub fn resolveMergeSubsections(self: *Object, elf_file: *Elf) !void {
                 return error.ParseFailed;
             };
             const msub = elf_file.getMergeSubsection(msub_index);
-            const osec = elf_file.sections.items(.shdr)[msub.getMergeSection(elf_file).out_shndx];
+            const msec = msub.getMergeSection(elf_file);
 
             const out_sym_idx: u64 = @intCast(self.symbols.items.len);
             try self.symbols.ensureUnusedCapacity(gpa, 1);
             const name = try std.fmt.allocPrint(gpa, "{s}$subsection{d}", .{
-                elf_file.shstrtab.getAssumeExists(osec.sh_name),
+                msec.getName(elf_file),
                 msub_index,
             });
             defer gpa.free(name);
@@ -752,7 +754,6 @@ pub fn resolveMergeSubsections(self: *Object, elf_file: *Elf) !void {
                 .name = try elf_file.string_intern.insert(gpa, name),
                 .sym_idx = rel.r_sym(),
                 .file = self.index,
-                .shndx = msub.getMergeSection(elf_file).out_shndx,
             };
             try sym.addExtra(.{ .subsection = msub_index }, elf_file);
             sym.flags.merge_subsection = true;

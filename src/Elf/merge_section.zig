@@ -1,4 +1,7 @@
 pub const MergeSection = struct {
+    name: u32 = 0,
+    type: u32 = 0,
+    flags: u64 = 0,
     out_shndx: u32 = 0,
     bytes: std.ArrayListUnmanaged(u8) = .{},
     table: std.HashMapUnmanaged(
@@ -13,6 +16,10 @@ pub const MergeSection = struct {
         msec.bytes.deinit(allocator);
         msec.table.deinit(allocator);
         msec.subsections.deinit(allocator);
+    }
+
+    pub fn getName(msec: MergeSection, elf_file: *Elf) [:0]const u8 {
+        return elf_file.string_intern.getAssumeExists(msec.name);
     }
 
     pub fn getAddress(msec: MergeSection, elf_file: *Elf) i64 {
@@ -51,7 +58,7 @@ pub const MergeSection = struct {
 
     /// Sorts all owned subsections.
     /// Clears string table.
-    pub fn finalize(msec: *MergeSection, elf_file: *Elf) !void {
+    pub fn sort(msec: *MergeSection, elf_file: *Elf) !void {
         const gpa = elf_file.base.allocator;
         try msec.subsections.ensureTotalCapacityPrecise(gpa, msec.table.count());
 
@@ -106,6 +113,53 @@ pub const MergeSection = struct {
         }
     };
 
+    pub fn format(
+        msec: MergeSection,
+        comptime unused_fmt_string: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = msec;
+        _ = unused_fmt_string;
+        _ = options;
+        _ = writer;
+        @compileError("do not format MergeSection directly");
+    }
+
+    pub fn fmt(msec: MergeSection, elf_file: *Elf) std.fmt.Formatter(format2) {
+        return .{ .data = .{
+            .msec = msec,
+            .elf_file = elf_file,
+        } };
+    }
+
+    const FormatContext = struct {
+        msec: MergeSection,
+        elf_file: *Elf,
+    };
+
+    pub fn format2(
+        ctx: FormatContext,
+        comptime unused_fmt_string: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = options;
+        _ = unused_fmt_string;
+        const msec = ctx.msec;
+        const elf_file = ctx.elf_file;
+        try writer.print("{s} : @{x} : sect({d}) : type({x}) : flags({x})\n", .{
+            msec.getName(elf_file),
+            msec.getAddress(elf_file),
+            msec.out_shndx,
+            msec.type,
+            msec.flags,
+        });
+        for (msec.subsections.items) |index| {
+            try writer.print("   subsection({d}) : {}\n", .{ index, elf_file.getMergeSubsection(index).fmt(elf_file) });
+        }
+    }
+
     pub const Index = u32;
 };
 
@@ -115,7 +169,7 @@ pub const MergeSubsection = struct {
     string_index: u32 = 0,
     size: u32 = 0,
     alignment: u8 = 0,
-    alive: bool = true,
+    alive: bool = false,
 
     pub fn getAddress(msub: MergeSubsection, elf_file: *Elf) i64 {
         return msub.getMergeSection(elf_file).getAddress(elf_file) + msub.value;
@@ -128,6 +182,50 @@ pub const MergeSubsection = struct {
     pub fn getString(msub: MergeSubsection, elf_file: *Elf) []const u8 {
         const msec = msub.getMergeSection(elf_file);
         return msec.bytes.items[msub.string_index..][0..msub.size];
+    }
+
+    pub fn format(
+        msub: MergeSubsection,
+        comptime unused_fmt_string: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = msub;
+        _ = unused_fmt_string;
+        _ = options;
+        _ = writer;
+        @compileError("do not format MergeSubsection directly");
+    }
+
+    pub fn fmt(msub: MergeSubsection, elf_file: *Elf) std.fmt.Formatter(format2) {
+        return .{ .data = .{
+            .msub = msub,
+            .elf_file = elf_file,
+        } };
+    }
+
+    const FormatContext = struct {
+        msub: MergeSubsection,
+        elf_file: *Elf,
+    };
+
+    pub fn format2(
+        ctx: FormatContext,
+        comptime unused_fmt_string: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = options;
+        _ = unused_fmt_string;
+        const msub = ctx.msub;
+        const elf_file = ctx.elf_file;
+        try writer.print("@{x} : merge_sect({d}) : align({x}) : size({x})", .{
+            msub.getAddress(elf_file),
+            msub.merge_section,
+            msub.alignment,
+            msub.size,
+        });
+        if (!msub.alive) try writer.writeAll(" : [*]");
     }
 
     pub const Index = u32;

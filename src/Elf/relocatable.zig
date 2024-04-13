@@ -3,10 +3,11 @@ pub fn flush(elf_file: *Elf) !void {
     defer tracy.end();
 
     claimUnresolved(elf_file);
+    try elf_file.addCommentString();
+    try elf_file.sortMergeSections();
     try initSections(elf_file);
     try elf_file.sortSections();
     try elf_file.addAtomsToSections();
-    try elf_file.addCommentString();
     try elf_file.calcMergeSectionSizes();
     try calcSectionSizes(elf_file);
 
@@ -74,6 +75,17 @@ fn initSections(elf_file: *Elf) !void {
                 elf_file.sections.items(.rela_shndx)[atom.out_shndx] = out_rela_shndx;
             }
         }
+    }
+
+    for (elf_file.merge_sections.items) |*msec| {
+        if (msec.subsections.items.len == 0) continue;
+        const name = msec.getName(elf_file);
+        const shndx = elf_file.getSectionByName(name) orelse try elf_file.addSection(.{
+            .name = name,
+            .type = msec.type,
+            .flags = msec.flags,
+        });
+        msec.out_shndx = shndx;
     }
 
     const needs_eh_frame = for (elf_file.objects.items) |index| {

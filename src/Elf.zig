@@ -397,6 +397,8 @@ pub fn flush(self: *Elf) !void {
         try self.checkDuplicates();
     }
 
+    try self.addCommentString();
+    try self.sortMergeSections();
     try self.initOutputSections();
     try self.resolveSyntheticSymbols();
 
@@ -420,7 +422,6 @@ pub fn flush(self: *Elf) !void {
     self.setDynsym();
     try self.setHashes();
     try self.setVerSymtab();
-    try self.addCommentString();
     try self.calcMergeSectionSizes();
     try self.calcSectionSizes();
 
@@ -531,6 +532,17 @@ fn initOutputSections(self: *Elf) !void {
             if (!atom.flags.alive) continue;
             atom.out_shndx = try object.initOutputSection(self, atom.getInputShdr(self));
         }
+    }
+
+    for (self.merge_sections.items) |*msec| {
+        if (msec.subsections.items.len == 0) continue;
+        const name = msec.getName(self);
+        const shndx = self.getSectionByName(name) orelse try self.addSection(.{
+            .name = name,
+            .type = msec.type,
+            .flags = msec.flags,
+        });
+        msec.out_shndx = shndx;
     }
 
     self.text_sect_index = self.getSectionByName(".text");
@@ -743,6 +755,11 @@ pub fn addAtomsToSections(self: *Elf) !void {
 
         for (object.getLocals()) |local_index| {
             const local = self.getSymbol(local_index);
+            if (local.getMergeSubsection(self)) |msub| {
+                if (!msub.alive) continue;
+                local.shndx = msub.getMergeSection(self).out_shndx;
+                continue;
+            }
             const atom = local.getAtom(self) orelse continue;
             if (!atom.flags.alive) continue;
             local.shndx = atom.out_shndx;
@@ -750,10 +767,22 @@ pub fn addAtomsToSections(self: *Elf) !void {
 
         for (object.getGlobals()) |global_index| {
             const global = self.getSymbol(global_index);
+            if (global.getFile(self).?.getIndex() != index) continue;
+            if (global.getMergeSubsection(self)) |msub| {
+                if (!msub.alive) continue;
+                global.shndx = msub.getMergeSection(self).out_shndx;
+                continue;
+            }
             const atom = global.getAtom(self) orelse continue;
             if (!atom.flags.alive) continue;
-            if (global.getFile(self).?.object.index != index) continue;
             global.shndx = atom.out_shndx;
+        }
+
+        for (object.symbols.items[object.symtab.items.len..]) |local_index| {
+            const local = self.getSymbol(local_index);
+            const msub = local.getMergeSubsection(self).?;
+            if (!msub.alive) continue;
+            local.shndx = msub.getMergeSection(self).out_shndx;
         }
     }
 }
@@ -769,13 +798,18 @@ pub fn addCommentString(self: *Elf) !void {
     msub.string_index = res.key.pos;
     msub.alignment = 0;
     msub.size = res.key.len;
+    msub.alive = true;
     res.sub.* = msub_index;
+}
+
+pub fn sortMergeSections(self: *Elf) !void {
+    for (self.merge_sections.items) |*msec| {
+        try msec.sort(self);
+    }
 }
 
 pub fn calcMergeSectionSizes(self: *Elf) !void {
     for (self.merge_sections.items) |*msec| {
-        try msec.finalize(self);
-
         const shdr = &self.sections.items(.shdr)[msec.out_shndx];
         for (msec.subsections.items) |msub_index| {
             const msub = self.getMergeSubsection(msub_index);
@@ -2849,25 +2883,26 @@ pub fn getMergeSubsection(self: *Elf, index: MergeSubsection.Index) *MergeSubsec
     return &self.merge_subsections.items[index];
 }
 
-pub fn getOrCreateMergeSection(self: *Elf, sh_name: [:0]const u8, sh_flags: u64, sh_type: u32) !MergeSection.Index {
+pub fn getOrCreateMergeSection(self: *Elf, name: [:0]const u8, flags: u64, @"type": u32) !MergeSection.Index {
     const gpa = self.base.allocator;
-    const name = name: {
-        if (self.options.relocatable) break :name sh_name;
-        if (mem.eql(u8, sh_name, ".rodata") or mem.startsWith(u8, sh_name, ".rodata"))
-            break :name if (sh_flags & elf.SHF_STRINGS != 0) ".rodata.str" else ".rodata.cst";
-        break :name sh_name;
+    const out_name = name: {
+        if (self.options.relocatable) break :name name;
+        if (mem.eql(u8, name, ".rodata") or mem.startsWith(u8, name, ".rodata"))
+            break :name if (flags & elf.SHF_STRINGS != 0) ".rodata.str" else ".rodata.cst";
+        break :name name;
     };
-    const osec = self.getSectionByName(name) orelse try self.addSection(.{
-        .type = sh_type,
-        .flags = sh_flags & ~@as(u64, elf.SHF_COMPRESSED | elf.SHF_GROUP),
-        .name = name,
-    });
+    const out_off = try self.string_intern.insert(gpa, out_name);
+    const out_flags = flags & ~@as(u64, elf.SHF_COMPRESSED | elf.SHF_GROUP);
     for (self.merge_sections.items, 0..) |msec, index| {
-        if (msec.out_shndx == osec) return @intCast(index);
+        if (msec.name == out_off) return @intCast(index);
     }
     const index = @as(MergeSection.Index, @intCast(self.merge_sections.items.len));
     const msec = try self.merge_sections.addOne(gpa);
-    msec.* = .{ .out_shndx = osec };
+    msec.* = .{
+        .name = out_off,
+        .flags = out_flags,
+        .type = @"type",
+    };
     return index;
 }
 
@@ -3144,6 +3179,11 @@ fn fmtDumpState(
             sym_index,
             symbol.getName(self),
         });
+    }
+    try writer.writeByte('\n');
+    try writer.writeAll("Merge sections\n");
+    for (self.merge_sections.items, 0..) |msec, index| {
+        try writer.print("merge_sect({d}) : {}\n", .{ index, msec.fmt(self) });
     }
     try writer.writeByte('\n');
     try writer.writeAll("Output sections\n");
