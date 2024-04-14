@@ -1578,7 +1578,6 @@ const aarch64 = struct {
         defer tracy.end();
         _ = it;
         _ = code;
-        _ = target;
 
         const r_type: elf.R_AARCH64 = @enumFromInt(rel.r_type());
 
@@ -1590,7 +1589,10 @@ const aarch64 = struct {
         switch (r_type) {
             .NONE => unreachable,
             .ABS32 => try cwriter.writeInt(i32, @as(i32, @intCast(S + A)), .little),
-            .ABS64 => try cwriter.writeInt(i64, S + A, .little),
+            .ABS64 => if (atom.getDebugTombstoneValue(target.*, elf_file)) |value|
+                try cwriter.writeInt(u64, value, .little)
+            else
+                try cwriter.writeInt(i64, S + A, .little),
             else => {
                 elf_file.base.fatal("{s}: invalid relocation type for non-alloc section: {}", .{
                     atom.getName(elf_file),
@@ -1781,7 +1783,6 @@ const riscv = struct {
     ) !void {
         const tracy = trace(@src());
         defer tracy.end();
-        _ = target;
         _ = it;
 
         const r_type: elf.R_RISCV = @enumFromInt(rel.r_type());
@@ -1797,7 +1798,10 @@ const riscv = struct {
             .NONE => unreachable,
 
             .@"32" => try cwriter.writeInt(i32, @as(i32, @intCast(S + A)), .little),
-            .@"64" => try cwriter.writeInt(i64, S + A, .little),
+            .@"64" => if (atom.getDebugTombstoneValue(target.*, elf_file)) |value|
+                try cwriter.writeInt(u64, value, .little)
+            else
+                try cwriter.writeInt(i64, S + A, .little),
 
             .ADD8 => riscv_util.writeAddend(i8, .add, code[rel.r_offset..][0..1], S + A),
             .SUB8 => riscv_util.writeAddend(i8, .sub, code[rel.r_offset..][0..1], S + A),
