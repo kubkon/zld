@@ -2008,6 +2008,9 @@ fn testRelocatableMergeStrings(b: *Build, opts: Options) *Step {
         \\.section .rodata.str1.1,"aMS",@progbits,1
         \\val5:
         \\.ascii "World \0"
+        \\.section .rodata.str1.1,"aMS",@progbits,1
+        \\val7:
+        \\.ascii "Hello \0"
     );
     obj1.addArg("-c");
 
