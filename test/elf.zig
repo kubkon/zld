@@ -58,6 +58,7 @@ pub fn addElfTests(b: *Build, options: common.Options) *Step {
     elf_step.dependOn(testPushPopState(b, opts));
     elf_step.dependOn(testRelocatableArchive(b, opts));
     elf_step.dependOn(testRelocatableEhFrame(b, opts));
+    elf_step.dependOn(testRelocatableMergeStrings(b, opts));
     elf_step.dependOn(testRelocatableNoEhFrame(b, opts));
     elf_step.dependOn(testSectionStart(b, opts));
     elf_step.dependOn(testSharedAbsSymbol(b, opts));
@@ -1991,6 +1992,30 @@ fn testRelocatableEhFrame(b: *Build, opts: Options) *Step {
         run.expectStdOutEqual("exception=Oh no!");
         test_step.dependOn(run.step());
     }
+
+    return test_step;
+}
+
+// Adapted from https://github.com/rui314/mold/blob/main/test/elf/relocatable-mergeable-sections.sh
+fn testRelocatableMergeStrings(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-relocatable-merge-strings", "");
+
+    const obj1 = cc(b, "a.o", opts);
+    obj1.addAsmSource(
+        \\.section .rodata.str1.1,"aMS",@progbits,1
+        \\val1:
+        \\.ascii "Hello \0"
+        \\.section .rodata.str1.1,"aMS",@progbits,1
+        \\val5:
+        \\.ascii "World \0"
+    );
+    obj1.addArg("-c");
+
+    const obj2 = ld(b, "b.o", opts);
+    obj2.addFileSource(obj1.getFile());
+    obj2.addArg("-r");
+
+    // TODO dump contents of .rodata.str1.1
 
     return test_step;
 }
