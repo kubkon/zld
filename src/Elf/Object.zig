@@ -622,26 +622,37 @@ pub fn initMergeSections(self: *Object, elf_file: *Elf) !void {
         const sh_entsize: u32 = @intCast(shdr.sh_entsize);
 
         if (shdr.sh_flags & elf.SHF_STRINGS != 0) {
-            if (sh_entsize == 0) {
-                // According to mold's source code, GHC emits MS sections with sh_entsize = 0.
-                // This actually can also happen for output created with `-r` mode.
-                log.debug("{}:{s}: invalid sh_entsize value", .{ self.fmtPath(), atom.getName(elf_file) });
-            }
-
             var pos: u32 = 0;
-            while (pos < data.len) {
-                const string = mem.sliceTo(@as([*:0]const u8, @ptrCast(data.ptr + pos)), 0);
-                if (pos + string.len == data.len) {
-                    elf_file.base.fatal("{}:{s}: string not null terminated", .{
-                        self.fmtPath(),
-                        atom.getName(elf_file),
-                    });
-                    return error.ParseFailed;
-                }
-                try imsec.insertZ(gpa, string);
-                try imsec.offsets.append(gpa, pos);
-                pos += @as(u32, @intCast(string.len)) + 1; // account for null
-            }
+            while (pos < data.len) switch (sh_entsize) {
+                0, 1 => {
+                    // According to mold's source code, GHC emits MS sections with sh_entsize = 0.
+                    // This actually can also happen for output created with `-r` mode.
+                    const string = mem.sliceTo(@as([*:0]const u8, @ptrCast(data.ptr + pos)), 0);
+                    if (pos + string.len == data.len) {
+                        elf_file.base.fatal("{}:{s}: string not null terminated", .{
+                            self.fmtPath(),
+                            atom.getName(elf_file),
+                        });
+                        return error.ParseFailed;
+                    }
+                    try imsec.insertZ(gpa, string);
+                    try imsec.offsets.append(gpa, pos);
+                    pos += @as(u32, @intCast(string.len)) + 1; // account for null
+                },
+                else => |entsize| {
+                    const string = data.ptr[pos..][0..entsize];
+                    if (string[string.len - 1] != 0) {
+                        elf_file.base.fatal("{}:{s}: string not null terminated", .{
+                            self.fmtPath(),
+                            atom.getName(elf_file),
+                        });
+                        return error.ParseFailed;
+                    }
+                    try imsec.insert(gpa, string);
+                    try imsec.offsets.append(gpa, pos);
+                    pos += @as(u32, @intCast(string.len));
+                },
+            };
         } else {
             if (sh_entsize == 0) continue; // Malformed, don't split but don't error out
             if (shdr.sh_size % sh_entsize != 0) {

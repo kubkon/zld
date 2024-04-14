@@ -51,6 +51,7 @@ pub fn addElfTests(b: *Build, options: common.Options) *Step {
     elf_step.dependOn(testLargeBss(b, opts));
     elf_step.dependOn(testLinkOrder(b, opts));
     elf_step.dependOn(testLinkerScript(b, opts));
+    elf_step.dependOn(testMergeStrings(b, opts));
     elf_step.dependOn(testNoEhFrameHdr(b, opts));
     elf_step.dependOn(testPltGot(b, opts));
     elf_step.dependOn(testPreinitArray(b, opts));
@@ -1680,6 +1681,61 @@ fn testLinkerScript(b: *Build, opts: Options) *Step {
     exe.addPrefixedDirectorySource("-L", scripts.getDirectory());
     exe.addPrefixedDirectorySource("-L", dso.getDir());
     exe.addPrefixedDirectorySource("-Wl,-rpath,", dso.getDir());
+
+    const run = exe.run();
+    test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+// Adapted from https://github.com/rui314/mold/blob/main/test/elf/mergeable-strings.sh
+fn testMergeStrings(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-merge-strings", "");
+
+    const obj1 = cc(b, "a.o", opts);
+    obj1.addCSource(
+        \\#include <uchar.h>
+        \\#include <wchar.h>
+        \\char *cstr1 = "foo";
+        \\wchar_t *wide1 = L"foo";
+        \\char16_t *utf16_1 = u"foo";
+        \\char32_t *utf32_1 = U"foo";
+    );
+    obj1.addArg("-c");
+    obj1.addArg("-O2");
+
+    const obj2 = cc(b, "b.o", opts);
+    obj2.addCSource(
+        \\#include <stdio.h>
+        \\#include <assert.h>
+        \\#include <uchar.h>
+        \\#include <wchar.h>
+        \\extern char *cstr1;
+        \\extern wchar_t *wide1;
+        \\extern char16_t *utf16_1;
+        \\extern char32_t *utf32_1;
+        \\char *cstr2 = "foo";
+        \\wchar_t *wide2 = L"foo";
+        \\char16_t *utf16_2 = u"foo";
+        \\char32_t *utf32_2 = U"foo";
+        \\int main() {
+        \\  assert((void*)cstr1 ==   (void*)cstr2);
+        \\  assert((void*)wide1 ==   (void*)wide2);
+        \\  assert((void*)utf16_1 == (void*)utf16_2);
+        \\  assert((void*)utf32_1 == (void*)utf32_2);
+        \\  assert((void*)wide1 ==   (void*)utf32_1);
+        \\  assert((void*)cstr1 !=   (void*)wide1);
+        \\  assert((void*)cstr1 !=   (void*)utf32_1);
+        \\  assert((void*)wide1 !=   (void*)utf16_1);
+        \\}
+    );
+    obj2.addArg("-c");
+    obj2.addArg("-O2");
+
+    const exe = cc(b, "a.out", opts);
+    exe.addFileSource(obj1.getFile());
+    exe.addFileSource(obj2.getFile());
+    exe.addArg("-no-pie");
 
     const run = exe.run();
     test_step.dependOn(run.step());
