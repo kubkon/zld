@@ -16,6 +16,7 @@ pub fn addElfTests(b: *Build, options: common.Options) *Step {
     elf_step.dependOn(testAllowMultipleDefinitions(b, opts));
     elf_step.dependOn(testAsNeeded(b, opts));
     elf_step.dependOn(testCanonicalPlt(b, opts));
+    elf_step.dependOn(testComment(b, opts));
     elf_step.dependOn(testCommon(b, opts));
     elf_step.dependOn(testCommonArchive(b, opts));
     elf_step.dependOn(testCopyrel(b, opts));
@@ -296,6 +297,20 @@ fn testCanonicalPlt(b: *Build, opts: Options) *Step {
 
     const run = exe.run();
     test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+fn testComment(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-comment", "");
+
+    const exe = cc(b, "a.out", opts);
+    exe.addHelloWorldMain();
+
+    const check = exe.check();
+    check.dumpSection(".comment");
+    check.checkContains("ld.zld");
+    test_step.dependOn(&check.step);
 
     return test_step;
 }
