@@ -1,7 +1,7 @@
 //! Represents a defined symbol.
 
 /// Allocated address value of this symbol.
-value: u64 = 0,
+value: i64 = 0,
 
 /// Offset into the linker's intern table.
 name: u32 = 0,
@@ -14,7 +14,7 @@ file: File.Index = 0,
 /// Use `getAtom` to get the pointer to the atom.
 atom: Atom.Index = 0,
 
-/// Assigned output section index for this atom.
+/// Assigned output section index for this symbol.
 shndx: u32 = 0,
 
 /// Index of the source symbol this symbol references.
@@ -33,7 +33,7 @@ extra: u32 = 0,
 pub fn isAbs(symbol: Symbol, elf_file: *Elf) bool {
     const file = symbol.getFile(elf_file).?;
     if (file == .shared) return symbol.getSourceSymbol(elf_file).st_shndx == elf.SHN_ABS;
-    return !symbol.flags.import and symbol.getAtom(elf_file) == null and symbol.shndx == 0 and file != .internal;
+    return !symbol.flags.import and symbol.getAtom(elf_file) == null and symbol.getMergeSubsection(elf_file) == null and symbol.shndx == 0 and file != .internal;
 }
 
 pub fn isLocal(symbol: Symbol, elf_file: *Elf) bool {
@@ -60,6 +60,12 @@ pub fn getAtom(symbol: Symbol, elf_file: *Elf) ?*Atom {
     return elf_file.getAtom(symbol.atom);
 }
 
+pub fn getMergeSubsection(symbol: Symbol, elf_file: *Elf) ?*MergeSubsection {
+    if (!symbol.flags.merge_subsection) return null;
+    const extra = symbol.getExtra(elf_file).?;
+    return elf_file.getMergeSubsection(extra.subsection);
+}
+
 pub inline fn getFile(symbol: Symbol, elf_file: *Elf) ?File {
     return elf_file.getFile(symbol.file);
 }
@@ -83,7 +89,11 @@ pub fn getSymbolRank(symbol: Symbol, elf_file: *Elf) u32 {
 
 pub fn getAddress(symbol: Symbol, opts: struct {
     plt: bool = true,
-}, elf_file: *Elf) u64 {
+}, elf_file: *Elf) i64 {
+    if (symbol.getMergeSubsection(elf_file)) |msub| {
+        if (!msub.alive) return 0;
+        return msub.getAddress(elf_file) + symbol.value;
+    }
     if (symbol.flags.copy_rel) {
         return symbol.getCopyRelAddress(elf_file);
     }
@@ -99,19 +109,23 @@ pub fn getAddress(symbol: Symbol, opts: struct {
         if (!atom.flags.alive) {
             if (mem.eql(u8, atom.getName(elf_file), ".eh_frame")) {
                 const sym_name = symbol.getName(elf_file);
+                const sh_addr, const sh_size = blk: {
+                    const shndx = elf_file.eh_frame_sect_index orelse break :blk .{ 0, 0 };
+                    const shdr = elf_file.sections.items(.shdr)[shndx];
+                    break :blk .{ shdr.sh_addr, shdr.sh_size };
+                };
                 if (mem.startsWith(u8, sym_name, "__EH_FRAME_BEGIN__") or
                     mem.startsWith(u8, sym_name, "__EH_FRAME_LIST__") or
                     mem.startsWith(u8, sym_name, ".eh_frame_seg") or
                     symbol.getSourceSymbol(elf_file).st_type() == elf.STT_SECTION)
                 {
-                    return elf_file.sections.items(.shdr)[elf_file.eh_frame_sect_index.?].sh_addr;
+                    return @intCast(sh_addr);
                 }
 
                 if (mem.startsWith(u8, sym_name, "__FRAME_END__") or
                     mem.startsWith(u8, sym_name, "__EH_FRAME_LIST_END__"))
                 {
-                    const shdr = elf_file.sections.items(.shdr)[elf_file.eh_frame_sect_index.?];
-                    return shdr.sh_addr + shdr.sh_size;
+                    return @intCast(sh_addr + sh_size);
                 }
 
                 // TODO I think we potentially should error here
@@ -134,65 +148,57 @@ pub fn getOutputSymtabIndex(symbol: Symbol, elf_file: *Elf) ?u32 {
     return if (symbol.isLocal(elf_file)) idx + symtab_ctx.ilocal else idx + symtab_ctx.iglobal;
 }
 
-pub fn setOutputSymtabIndex(symbol: *Symbol, index: u32, elf_file: *Elf) !void {
-    if (symbol.getExtra(elf_file)) |extra| {
-        var new_extra = extra;
-        new_extra.symtab = index;
-        symbol.setExtra(new_extra, elf_file);
-    } else try symbol.addExtra(.{ .symtab = index }, elf_file);
-}
-
-pub fn getGotAddress(symbol: Symbol, elf_file: *Elf) u64 {
+pub fn getGotAddress(symbol: Symbol, elf_file: *Elf) i64 {
     if (!symbol.flags.got) return 0;
     const extra = symbol.getExtra(elf_file).?;
     const entry = elf_file.got.entries.items[extra.got];
     return entry.getAddress(elf_file);
 }
 
-pub fn getPltGotAddress(symbol: Symbol, elf_file: *Elf) u64 {
+pub fn getPltGotAddress(symbol: Symbol, elf_file: *Elf) i64 {
     if (!(symbol.flags.plt and symbol.flags.got)) return 0;
     const extra = symbol.getExtra(elf_file).?;
     const shdr = elf_file.sections.items(.shdr)[elf_file.plt_got_sect_index.?];
     const cpu_arch = elf_file.options.cpu_arch.?;
-    return shdr.sh_addr + extra.plt_got * PltGotSection.entrySize(cpu_arch);
+    return @intCast(shdr.sh_addr + extra.plt_got * PltGotSection.entrySize(cpu_arch));
 }
 
-pub fn getPltAddress(symbol: Symbol, elf_file: *Elf) u64 {
+pub fn getPltAddress(symbol: Symbol, elf_file: *Elf) i64 {
     if (!symbol.flags.plt) return 0;
     const extra = symbol.getExtra(elf_file).?;
     const shdr = elf_file.sections.items(.shdr)[elf_file.plt_sect_index.?];
     const cpu_arch = elf_file.options.cpu_arch.?;
-    return shdr.sh_addr + extra.plt * PltSection.entrySize(cpu_arch) + PltSection.preambleSize(cpu_arch);
+    return @intCast(shdr.sh_addr + extra.plt * PltSection.entrySize(cpu_arch) + PltSection.preambleSize(cpu_arch));
 }
 
-pub fn getGotPltAddress(symbol: Symbol, elf_file: *Elf) u64 {
+pub fn getGotPltAddress(symbol: Symbol, elf_file: *Elf) i64 {
     if (!symbol.flags.plt) return 0;
     const extra = symbol.getExtra(elf_file).?;
     const shdr = elf_file.sections.items(.shdr)[elf_file.got_plt_sect_index.?];
-    return shdr.sh_addr + extra.plt * 8 + GotPltSection.preamble_size;
+    return @intCast(shdr.sh_addr + extra.plt * 8 + GotPltSection.preamble_size);
 }
 
-pub fn getCopyRelAddress(symbol: Symbol, elf_file: *Elf) u64 {
+pub fn getCopyRelAddress(symbol: Symbol, elf_file: *Elf) i64 {
     if (!symbol.flags.copy_rel) return 0;
     const shdr = elf_file.sections.items(.shdr)[elf_file.copy_rel_sect_index.?];
-    return shdr.sh_addr + symbol.value;
+    return @as(i64, @intCast(shdr.sh_addr)) + symbol.value;
 }
 
-pub fn getTlsGdAddress(symbol: Symbol, elf_file: *Elf) u64 {
+pub fn getTlsGdAddress(symbol: Symbol, elf_file: *Elf) i64 {
     if (!symbol.flags.tlsgd) return 0;
     const extra = symbol.getExtra(elf_file).?;
     const entry = elf_file.got.entries.items[extra.tlsgd];
     return entry.getAddress(elf_file);
 }
 
-pub fn getGotTpAddress(symbol: Symbol, elf_file: *Elf) u64 {
+pub fn getGotTpAddress(symbol: Symbol, elf_file: *Elf) i64 {
     if (!symbol.flags.gottp) return 0;
     const extra = symbol.getExtra(elf_file).?;
     const entry = elf_file.got.entries.items[extra.gottp];
     return entry.getAddress(elf_file);
 }
 
-pub fn getTlsDescAddress(symbol: Symbol, elf_file: *Elf) u64 {
+pub fn getTlsDescAddress(symbol: Symbol, elf_file: *Elf) i64 {
     if (!symbol.flags.tlsdesc) return 0;
     const extra = symbol.getExtra(elf_file).?;
     const entry = elf_file.got.entries.items[extra.tlsdesc];
@@ -211,8 +217,30 @@ pub fn getAlignment(symbol: Symbol, elf_file: *Elf) !u64 {
         @min(alignment, try std.math.powi(u64, 2, @ctz(s_sym.st_value)));
 }
 
-pub fn addExtra(symbol: *Symbol, extra: Extra, elf_file: *Elf) !void {
-    symbol.extra = try elf_file.addSymbolExtra(extra);
+const AddExtraOpts = struct {
+    got: ?u32 = null,
+    plt: ?u32 = null,
+    plt_got: ?u32 = null,
+    dynamic: ?u32 = null,
+    symtab: ?u32 = null,
+    copy_rel: ?u32 = null,
+    tlsgd: ?u32 = null,
+    gottp: ?u32 = null,
+    tlsdesc: ?u32 = null,
+    subsection: ?u32 = null,
+};
+
+pub fn addExtra(symbol: *Symbol, opts: AddExtraOpts, elf_file: *Elf) !void {
+    if (symbol.getExtra(elf_file) == null) {
+        symbol.extra = try elf_file.addSymbolExtra(.{});
+    }
+    var extra = symbol.getExtra(elf_file).?;
+    inline for (@typeInfo(@TypeOf(opts)).Struct.fields) |field| {
+        if (@field(opts, field.name)) |x| {
+            @field(extra, field.name) = x;
+        }
+    }
+    symbol.setExtra(extra, elf_file);
 }
 
 pub inline fn getExtra(symbol: Symbol, elf_file: *Elf) ?Extra {
@@ -237,6 +265,7 @@ pub fn setOutputSym(symbol: Symbol, elf_file: *Elf, out: *elf.Elf64_Sym) void {
         if (symbol.flags.copy_rel) break :blk elf_file.copy_rel_sect_index.?;
         if (file == .shared or s_sym.st_shndx == elf.SHN_UNDEF) break :blk elf.SHN_UNDEF;
         if (elf_file.options.relocatable and s_sym.st_shndx == elf.SHN_COMMON) break :blk elf.SHN_COMMON;
+        if (symbol.getMergeSubsection(elf_file)) |msub| break :blk msub.getMergeSection(elf_file).out_shndx;
         if (symbol.getAtom(elf_file) == null and file != .internal) break :blk elf.SHN_ABS;
         break :blk symbol.shndx;
     };
@@ -254,7 +283,7 @@ pub fn setOutputSym(symbol: Symbol, elf_file: *Elf, out: *elf.Elf64_Sym) void {
     out.st_info = (st_bind << 4) | st_type;
     out.st_other = s_sym.st_other;
     out.st_shndx = @intCast(st_shndx);
-    out.st_value = st_value;
+    out.st_value = @intCast(st_value);
     out.st_size = s_sym.st_size;
 }
 
@@ -380,6 +409,9 @@ pub const Flags = packed struct {
 
     /// Whether the symbol contains TLSDESC indirection.
     tlsdesc: bool = false,
+
+    /// Whether the symbol is a merge subsection.
+    merge_subsection: bool = false,
 };
 
 pub const Extra = struct {
@@ -392,6 +424,7 @@ pub const Extra = struct {
     tlsgd: u32 = 0,
     gottp: u32 = 0,
     tlsdesc: u32 = 0,
+    subsection: u32 = 0,
 };
 
 pub const Index = u32;
@@ -408,6 +441,7 @@ const File = @import("file.zig").File;
 const InternalObject = @import("InternalObject.zig");
 const GotSection = synthetic.GotSection;
 const GotPltSection = synthetic.GotPltSection;
+const MergeSubsection = @import("merge_section.zig").MergeSubsection;
 const Object = @import("Object.zig");
 const PltSection = synthetic.PltSection;
 const PltGotSection = synthetic.PltGotSection;

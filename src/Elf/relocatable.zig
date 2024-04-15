@@ -3,9 +3,12 @@ pub fn flush(elf_file: *Elf) !void {
     defer tracy.end();
 
     claimUnresolved(elf_file);
+    try elf_file.addCommentString();
+    try elf_file.sortMergeSections();
     try initSections(elf_file);
     try elf_file.sortSections();
     try elf_file.addAtomsToSections();
+    try elf_file.calcMergeSectionSizes();
     try calcSectionSizes(elf_file);
 
     allocateSections(elf_file, @sizeOf(elf.Elf64_Ehdr));
@@ -19,6 +22,7 @@ pub fn flush(elf_file: *Elf) !void {
     state_log.debug("{}", .{elf_file.dumpState()});
 
     try writeAtoms(elf_file);
+    try elf_file.writeMergeSections();
     try writeSyntheticSections(elf_file);
     try elf_file.writeShdrs();
     try writeHeader(elf_file);
@@ -71,6 +75,17 @@ fn initSections(elf_file: *Elf) !void {
                 elf_file.sections.items(.rela_shndx)[atom.out_shndx] = out_rela_shndx;
             }
         }
+    }
+
+    for (elf_file.merge_sections.items) |*msec| {
+        if (msec.subsections.items.len == 0) continue;
+        const name = msec.getName(elf_file);
+        const shndx = elf_file.getSectionByName(name) orelse try elf_file.addSection(.{
+            .name = name,
+            .type = msec.type,
+            .flags = msec.flags,
+        });
+        msec.out_shndx = shndx;
     }
 
     const needs_eh_frame = for (elf_file.objects.items) |index| {
@@ -144,7 +159,7 @@ fn calcSectionSizes(elf_file: *Elf) !void {
             const alignment = try math.powi(u64, 2, atom.alignment);
             const offset = mem.alignForward(u64, shdr.sh_size, alignment);
             const padding = offset - shdr.sh_size;
-            atom.value = offset;
+            atom.value = @intCast(offset);
             shdr.sh_size += padding + atom.size;
             shdr.sh_addralign = @max(shdr.sh_addralign, alignment);
 
@@ -223,7 +238,7 @@ fn writeAtoms(elf_file: *Elf) !void {
         for (atoms.items) |atom_index| {
             const atom = elf_file.getAtom(atom_index).?;
             assert(atom.flags.alive);
-            const off = atom.value;
+            const off: u64 = @intCast(atom.value);
             log.debug("writing ATOM(%{d},'{s}') at offset 0x{x}", .{
                 atom_index,
                 atom.getName(elf_file),

@@ -16,6 +16,8 @@ comdat_groups: std.ArrayListUnmanaged(Elf.ComdatGroup.Index) = .{},
 comdat_group_data: std.ArrayListUnmanaged(u32) = .{},
 relocs: std.ArrayListUnmanaged(elf.Elf64_Rela) = .{},
 
+merge_sections: std.ArrayListUnmanaged(InputMergeSection.Index) = .{},
+
 fdes: std.ArrayListUnmanaged(Fde) = .{},
 cies: std.ArrayListUnmanaged(Cie) = .{},
 eh_frame_data: std.ArrayListUnmanaged(u8) = .{},
@@ -48,6 +50,7 @@ pub fn deinit(self: *Object, allocator: Allocator) void {
     self.relocs.deinit(allocator);
     self.fdes.deinit(allocator);
     self.cies.deinit(allocator);
+    self.merge_sections.deinit(allocator);
 }
 
 pub fn parse(self: *Object, elf_file: *Elf) !void {
@@ -213,10 +216,11 @@ fn initAtoms(self: *Object, allocator: Allocator, file: std.fs.File, elf_file: *
                 const relocs = try self.preadRelocsAlloc(allocator, file, @intCast(i));
                 defer allocator.free(relocs);
                 atom.relocs_shndx = @intCast(i);
-                atom.rel_index = @intCast(self.relocs.items.len);
-                atom.rel_num = @intCast(relocs.len);
+                const rel_index: u32 = @intCast(self.relocs.items.len);
+                const rel_count: u32 = @intCast(relocs.len);
+                try atom.addExtra(.{ .rel_index = rel_index, .rel_count = rel_count }, elf_file);
                 try self.relocs.appendUnalignedSlice(allocator, relocs);
-                sortRelocs(self.relocs.items[atom.rel_index..][0..atom.rel_num], elf_file);
+                sortRelocs(self.relocs.items[rel_index..][0..rel_count], elf_file);
             }
         },
         else => {},
@@ -249,7 +253,6 @@ fn skipShdr(self: *Object, index: u32, elf_file: *Elf) bool {
     const name = self.getShString(shdr.sh_name);
     const ignore = blk: {
         if (mem.startsWith(u8, name, ".note")) break :blk true;
-        if (mem.startsWith(u8, name, ".comment")) break :blk true;
         if (mem.startsWith(u8, name, ".llvm_addrsig")) break :blk true;
         if (mem.startsWith(u8, name, ".riscv.attributes")) break :blk true; // TODO: riscv attributes
         if ((elf_file.options.strip_debug or elf_file.options.strip_all) and
@@ -281,7 +284,7 @@ fn initSymtab(self: *Object, allocator: Allocator, elf_file: *Elf) !void {
             break :blk self.getString(sym.st_name);
         };
         symbol.* = .{
-            .value = sym.st_value,
+            .value = @intCast(sym.st_value),
             .name = try elf_file.string_intern.insert(elf_file.base.allocator, name),
             .sym_idx = @as(u32, @intCast(i)),
             .atom = if (sym.st_shndx == elf.SHN_ABS) 0 else self.atoms.items[sym.st_shndx],
@@ -301,8 +304,6 @@ pub fn initOutputSection(self: Object, elf_file: *Elf, shdr: elf.Elf64_Shdr) !u3
     const name = blk: {
         const name = self.getShString(shdr.sh_name);
         if (elf_file.options.relocatable) break :blk name;
-        if (shdr.sh_flags & elf.SHF_MERGE != 0 and shdr.sh_flags & elf.SHF_STRINGS == 0)
-            break :blk name; // TODO: consider dropping SHF_STRINGS once ICF is implemented
         const sh_name_prefixes: []const [:0]const u8 = &.{
             ".text",       ".data.rel.ro", ".data", ".rodata", ".bss.rel.ro",       ".bss",
             ".init_array", ".fini_array",  ".tbss", ".tdata",  ".gcc_except_table", ".ctors",
@@ -426,13 +427,14 @@ fn parseEhFrame(self: *Object, allocator: Allocator, file: std.fs.File, shndx: u
     while (i < self.fdes.items.len) {
         const fde = self.fdes.items[i];
         const atom = fde.getAtom(elf_file);
-        atom.fde_start = i;
+        const start = i;
         i += 1;
         while (i < self.fdes.items.len) : (i += 1) {
             const next_fde = self.fdes.items[i];
             if (atom.atom_index != next_fde.getAtom(elf_file).atom_index) break;
         }
-        atom.fde_end = i;
+        try atom.addExtra(.{ .fde_start = start, .fde_count = i - start }, elf_file);
+        atom.flags.fde = true;
     }
 }
 
@@ -530,7 +532,7 @@ pub fn resolveSymbols(self: *Object, elf_file: *Elf) void {
                 elf.SHN_ABS, elf.SHN_COMMON => 0,
                 else => self.atoms.items[this_sym.st_shndx],
             };
-            global.value = this_sym.st_value;
+            global.value = @intCast(this_sym.st_value);
             global.atom = atom;
             global.sym_idx = sym_idx;
             global.file = self.index;
@@ -589,6 +591,186 @@ pub fn checkDuplicates(self: *Object, elf_file: *Elf) bool {
         has_dupes = true;
     }
     return has_dupes;
+}
+
+pub fn initMergeSections(self: *Object, elf_file: *Elf) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    const gpa = elf_file.base.allocator;
+
+    try self.merge_sections.resize(gpa, self.shdrs.items.len);
+    @memset(self.merge_sections.items, 0);
+
+    for (self.shdrs.items, 0..) |shdr, shndx| {
+        if (shdr.sh_flags & elf.SHF_MERGE == 0) continue;
+
+        const atom_index = self.atoms.items[shndx];
+        const atom = elf_file.getAtom(atom_index) orelse continue;
+        if (!atom.flags.alive) continue;
+        if (atom.getRelocs(elf_file).len > 0) continue;
+
+        const imsec_idx = try elf_file.addInputMergeSection();
+        const imsec = elf_file.getInputMergeSection(imsec_idx).?;
+        self.merge_sections.items[shndx] = imsec_idx;
+
+        imsec.merge_section = try elf_file.getOrCreateMergeSection(atom.getName(elf_file), shdr.sh_flags, shdr.sh_type);
+        imsec.atom = atom_index;
+
+        const data = try atom.getCodeUncompressAlloc(elf_file);
+        defer gpa.free(data);
+        const sh_entsize: u32 = @intCast(shdr.sh_entsize);
+
+        if (shdr.sh_flags & elf.SHF_STRINGS != 0) {
+            var pos: u32 = 0;
+            while (pos < data.len) switch (sh_entsize) {
+                0, 1 => {
+                    // According to mold's source code, GHC emits MS sections with sh_entsize = 0.
+                    // This actually can also happen for output created with `-r` mode.
+                    const string = mem.sliceTo(@as([*:0]const u8, @ptrCast(data.ptr + pos)), 0);
+                    if (pos + string.len == data.len) {
+                        elf_file.base.fatal("{}:{s}: string not null terminated", .{
+                            self.fmtPath(),
+                            atom.getName(elf_file),
+                        });
+                        return error.ParseFailed;
+                    }
+                    try imsec.insertZ(gpa, string);
+                    try imsec.offsets.append(gpa, pos);
+                    pos += @as(u32, @intCast(string.len)) + 1; // account for null
+                },
+                else => |entsize| {
+                    const string = data.ptr[pos..][0..entsize];
+                    if (string[string.len - 1] != 0) {
+                        elf_file.base.fatal("{}:{s}: string not null terminated", .{
+                            self.fmtPath(),
+                            atom.getName(elf_file),
+                        });
+                        return error.ParseFailed;
+                    }
+                    try imsec.insert(gpa, string);
+                    try imsec.offsets.append(gpa, pos);
+                    pos += @as(u32, @intCast(string.len));
+                },
+            };
+        } else {
+            if (sh_entsize == 0) continue; // Malformed, don't split but don't error out
+            if (shdr.sh_size % sh_entsize != 0) {
+                elf_file.base.fatal("{}:{s}: size not multiple of sh_entsize", .{
+                    self.fmtPath(),
+                    atom.getName(elf_file),
+                });
+                return error.ParseFailed;
+            }
+
+            var pos: u32 = 0;
+            while (pos < data.len) : (pos += sh_entsize) {
+                const string = data.ptr[pos..][0..sh_entsize];
+                try imsec.insert(gpa, string);
+                try imsec.offsets.append(gpa, pos);
+            }
+        }
+
+        atom.flags.alive = false;
+    }
+}
+
+pub fn resolveMergeSubsections(self: *Object, elf_file: *Elf) !void {
+    const gpa = elf_file.base.allocator;
+
+    for (self.merge_sections.items) |index| {
+        const imsec = elf_file.getInputMergeSection(index) orelse continue;
+        const msec = elf_file.getMergeSection(imsec.merge_section);
+        const atom = elf_file.getAtom(imsec.atom).?;
+        const isec = atom.getInputShdr(elf_file);
+
+        try imsec.subsections.resize(gpa, imsec.strings.items.len);
+
+        for (imsec.strings.items, imsec.subsections.items) |str, *imsec_msub| {
+            const string = imsec.bytes.items[str.pos..][0..str.len];
+            const res = try msec.insert(gpa, string);
+            if (!res.found_existing) {
+                const msub_index = try elf_file.addMergeSubsection();
+                const msub = elf_file.getMergeSubsection(msub_index);
+                msub.merge_section = imsec.merge_section;
+                msub.string_index = res.key.pos;
+                msub.alignment = atom.alignment;
+                msub.size = res.key.len;
+                msub.alive = !elf_file.options.gc_sections or isec.sh_flags & elf.SHF_ALLOC == 0;
+                res.sub.* = msub_index;
+            }
+            imsec_msub.* = res.sub.*;
+        }
+
+        imsec.clearAndFree(gpa);
+    }
+
+    for (self.symtab.items, 0..) |*esym, idx| {
+        const sym_index = self.symbols.items[idx];
+        const sym = elf_file.getSymbol(sym_index);
+
+        if (esym.st_shndx == elf.SHN_COMMON or esym.st_shndx == elf.SHN_UNDEF or esym.st_shndx == elf.SHN_ABS) continue;
+
+        const imsec_index = self.merge_sections.items[esym.st_shndx];
+        const imsec = elf_file.getInputMergeSection(imsec_index) orelse continue;
+        const msub_index, const offset = imsec.findSubsection(@intCast(esym.st_value)) orelse {
+            elf_file.base.fatal("{}: invalid symbol value: {s}:{x}", .{
+                self.fmtPath(),
+                sym.getName(elf_file),
+                esym.st_value,
+            });
+            return error.ParseFailed;
+        };
+
+        try sym.addExtra(.{ .subsection = msub_index }, elf_file);
+        sym.flags.merge_subsection = true;
+        sym.value = offset;
+    }
+
+    for (self.atoms.items) |atom_index| {
+        const atom = elf_file.getAtom(atom_index) orelse continue;
+        if (!atom.flags.alive) continue;
+        const extra = atom.getExtra(elf_file) orelse continue;
+        if (extra.rel_count == 0) continue;
+        const relocs = self.relocs.items[extra.rel_index..][0..extra.rel_count];
+        for (relocs) |*rel| {
+            const esym = self.symtab.items[rel.r_sym()];
+            if (esym.st_type() != elf.STT_SECTION) continue;
+
+            const imsec_index = self.merge_sections.items[esym.st_shndx];
+            const imsec = elf_file.getInputMergeSection(imsec_index) orelse continue;
+            const msub_index, const offset = imsec.findSubsection(@intCast(@as(i64, @intCast(esym.st_value)) + rel.r_addend)) orelse {
+                elf_file.base.fatal("{}: {s}: invalid relocation at offset 0x{x}", .{
+                    self.fmtPath(),
+                    atom.getName(elf_file),
+                    rel.r_offset,
+                });
+                return error.ParseFailed;
+            };
+            const msub = elf_file.getMergeSubsection(msub_index);
+            const msec = msub.getMergeSection(elf_file);
+
+            const out_sym_idx: u64 = @intCast(self.symbols.items.len);
+            try self.symbols.ensureUnusedCapacity(gpa, 1);
+            const name = try std.fmt.allocPrint(gpa, "{s}$subsection{d}", .{
+                msec.getName(elf_file),
+                msub_index,
+            });
+            defer gpa.free(name);
+            const sym_index = try elf_file.addSymbol();
+            const sym = elf_file.getSymbol(sym_index);
+            sym.* = .{
+                .value = @bitCast(@as(i64, @intCast(offset)) - rel.r_addend),
+                .name = try elf_file.string_intern.insert(gpa, name),
+                .sym_idx = rel.r_sym(),
+                .file = self.index,
+            };
+            try sym.addExtra(.{ .subsection = msub_index }, elf_file);
+            sym.flags.merge_subsection = true;
+            self.symbols.addOneAssumeCapacity().* = sym_index;
+            rel.r_info = (out_sym_idx << 32) | rel.r_type();
+        }
+    }
 }
 
 /// We will create dummy shdrs per each resolved common symbols to make it
@@ -655,11 +837,19 @@ pub fn convertCommonSymbols(self: *Object, elf_file: *Elf) !void {
 pub fn calcSymtabSize(self: *Object, elf_file: *Elf) !void {
     if (elf_file.options.strip_all) return;
 
+    const isAlive = struct {
+        fn isAlive(sym: *const Symbol, ctx: *Elf) bool {
+            if (sym.getMergeSubsection(ctx)) |msub| return msub.alive;
+            if (sym.getAtom(ctx)) |atom| return atom.flags.alive;
+            return true;
+        }
+    }.isAlive;
+
     if (!elf_file.options.discard_all_locals) {
         // TODO: discard temp locals
         for (self.getLocals()) |local_index| {
             const local = elf_file.getSymbol(local_index);
-            if (local.getAtom(elf_file)) |atom| if (!atom.flags.alive) continue;
+            if (!isAlive(local, elf_file)) continue;
             const s_sym = local.getSourceSymbol(elf_file);
             switch (s_sym.st_type()) {
                 elf.STT_SECTION => continue,
@@ -667,7 +857,7 @@ pub fn calcSymtabSize(self: *Object, elf_file: *Elf) !void {
                 else => {},
             }
             local.flags.output_symtab = true;
-            try local.setOutputSymtabIndex(self.output_symtab_ctx.nlocals, elf_file);
+            try local.addExtra(.{ .symtab = self.output_symtab_ctx.nlocals }, elf_file);
             self.output_symtab_ctx.nlocals += 1;
             self.output_symtab_ctx.strsize += @as(u32, @intCast(local.getName(elf_file).len + 1));
         }
@@ -677,13 +867,13 @@ pub fn calcSymtabSize(self: *Object, elf_file: *Elf) !void {
         const global = elf_file.getSymbol(global_index);
         const file_ptr = global.getFile(elf_file) orelse continue;
         if (file_ptr.getIndex() != self.index) continue;
-        if (global.getAtom(elf_file)) |atom| if (!atom.flags.alive) continue;
+        if (!isAlive(global, elf_file)) continue;
         global.flags.output_symtab = true;
         if (global.isLocal(elf_file)) {
-            try global.setOutputSymtabIndex(self.output_symtab_ctx.nlocals, elf_file);
+            try global.addExtra(.{ .symtab = self.output_symtab_ctx.nlocals }, elf_file);
             self.output_symtab_ctx.nlocals += 1;
         } else {
-            try global.setOutputSymtabIndex(self.output_symtab_ctx.nglobals, elf_file);
+            try global.addExtra(.{ .symtab = self.output_symtab_ctx.nglobals }, elf_file);
             self.output_symtab_ctx.nglobals += 1;
         }
         self.output_symtab_ctx.strsize += @as(u32, @intCast(global.getName(elf_file).len + 1));
@@ -718,13 +908,13 @@ pub fn writeSymtab(self: Object, elf_file: *Elf) void {
 }
 
 pub fn getLocals(self: Object) []const Symbol.Index {
-    const end = self.first_global orelse self.symbols.items.len;
+    const end = self.first_global orelse self.symtab.items.len;
     return self.symbols.items[0..end];
 }
 
 pub fn getGlobals(self: Object) []const Symbol.Index {
-    const start = self.first_global orelse self.symbols.items.len;
-    return self.symbols.items[start..];
+    const start = self.first_global orelse return &[0]Symbol.Index{};
+    return self.symbols.items[start..self.symtab.items.len];
 }
 
 pub inline fn getSymbol(self: Object, index: Symbol.Index, elf_file: *Elf) *Symbol {
@@ -948,6 +1138,7 @@ const Cie = eh_frame.Cie;
 const Elf = @import("../Elf.zig");
 const Fde = eh_frame.Fde;
 const File = @import("file.zig").File;
+const InputMergeSection = @import("merge_section.zig").InputMergeSection;
 const StringTable = @import("../StringTable.zig");
 const Symbol = @import("Symbol.zig");
 const Zld = @import("../Zld.zig");

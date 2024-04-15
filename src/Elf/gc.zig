@@ -65,6 +65,10 @@ fn collectRoots(roots: *std.ArrayList(*Atom), elf_file: *Elf) !void {
 }
 
 fn markSymbol(sym: *Symbol, roots: *std.ArrayList(*Atom), elf_file: *Elf) !void {
+    if (sym.getMergeSubsection(elf_file)) |msub| {
+        msub.alive = true;
+        return;
+    }
     const atom = sym.getAtom(elf_file) orelse return;
     if (markAtom(atom)) try roots.append(atom);
 }
@@ -98,6 +102,10 @@ fn markLive(atom: *Atom, elf_file: *Elf) void {
 
     for (atom.getRelocs(elf_file)) |rel| {
         const target_sym = object.getSymbol(rel.r_sym(), elf_file);
+        if (target_sym.getMergeSubsection(elf_file)) |msub| {
+            msub.alive = true;
+            continue;
+        }
         const target_atom = target_sym.getAtom(elf_file) orelse continue;
         if (markAtom(target_atom)) markLive(target_atom, elf_file);
     }
