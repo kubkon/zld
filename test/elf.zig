@@ -2018,7 +2018,10 @@ fn testRelocatableMergeStrings(b: *Build, opts: Options) *Step {
     obj2.addFileSource(obj1.getFile());
     obj2.addArg("-r");
 
-    // TODO dump contents of .rodata.str1.1
+    const check = obj2.check();
+    check.dumpSection(".rodata.str1.1");
+    check.checkExact("Hello \x00World \x00");
+    test_step.dependOn(&check.step);
 
     return test_step;
 }
