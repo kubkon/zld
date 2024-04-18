@@ -4,7 +4,7 @@ pub fn flush(elf_file: *Elf) !void {
 
     claimUnresolved(elf_file);
     try elf_file.addCommentString();
-    try elf_file.sortMergeSections();
+    try elf_file.finalizeMergeSections();
     try initSections(elf_file);
     try elf_file.sortSections();
     try elf_file.addAtomsToSections();
