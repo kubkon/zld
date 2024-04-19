@@ -53,6 +53,7 @@ pub fn addElfTests(b: *Build, options: common.Options) *Step {
     elf_step.dependOn(testLinkOrder(b, opts));
     elf_step.dependOn(testLinkerScript(b, opts));
     elf_step.dependOn(testMergeStrings(b, opts));
+    elf_step.dependOn(testMergeStrings2(b, opts));
     elf_step.dependOn(testNoEhFrameHdr(b, opts));
     elf_step.dependOn(testPltGot(b, opts));
     elf_step.dependOn(testPreinitArray(b, opts));
@@ -1755,6 +1756,54 @@ fn testMergeStrings(b: *Build, opts: Options) *Step {
 
     const run = exe.run();
     test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+fn testMergeStrings2(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-elf-merge-strings2", "");
+
+    if (!opts.has_zig) return skipTestStep(test_step);
+
+    const obj1 = zig(b, "a.o", .obj);
+    obj1.addZigSource(
+        \\const std = @import("std");
+        \\export fn foo() void {
+        \\    var arr: [5:0]u16 = [_:0]u16{ 1, 2, 3, 4, 5 };
+        \\    const slice = std.mem.sliceTo(&arr, 3);
+        \\    std.testing.expectEqualSlices(u16, arr[0..2], slice) catch unreachable;
+        \\}
+    );
+    obj1.addArg("-lc");
+    obj1.addArg("-fno-stack-check");
+
+    const obj2 = zig(b, "b.o", .obj);
+    obj2.addZigSource(
+        \\const std = @import("std");
+        \\extern fn foo() void;
+        \\pub fn main() void {
+        \\    foo();
+        \\    var arr: [5:0]u16 = [_:0]u16{ 5, 4, 3, 2, 1 };
+        \\    const slice = std.mem.sliceTo(&arr, 3);
+        \\    std.testing.expectEqualSlices(u16, arr[0..2], slice) catch unreachable;
+        \\}
+    );
+    obj2.addArg("-lc");
+    obj2.addArg("-fno-stack-check");
+
+    const exe = cc(b, "a.out", opts);
+    exe.addFileSource(obj1.getFile());
+    exe.addFileSource(obj2.getFile());
+
+    const run = exe.run();
+    test_step.dependOn(run.step());
+
+    const check = exe.check();
+    check.dumpSection(".rodata.str");
+    check.checkContains("\x01\x00\x02\x00\x03\x00\x04\x00\x05\x00\x00\x00");
+    check.dumpSection(".rodata.str");
+    check.checkContains("\x05\x00\x04\x00\x03\x00\x02\x00\x01\x00\x00\x00");
+    test_step.dependOn(&check.step);
 
     return test_step;
 }

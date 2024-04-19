@@ -398,7 +398,7 @@ pub fn flush(self: *Elf) !void {
     }
 
     try self.addCommentString();
-    try self.sortMergeSections();
+    try self.finalizeMergeSections();
     try self.initOutputSections();
     try self.resolveSyntheticSymbols();
 
@@ -802,9 +802,9 @@ pub fn addCommentString(self: *Elf) !void {
     res.sub.* = msub_index;
 }
 
-pub fn sortMergeSections(self: *Elf) !void {
+pub fn finalizeMergeSections(self: *Elf) !void {
     for (self.merge_sections.items) |*msec| {
-        try msec.sort(self);
+        try msec.finalize(self);
     }
 }
 
