@@ -1791,19 +1791,65 @@ fn testMergeStrings2(b: *Build, opts: Options) *Step {
     obj2.addArg("-lc");
     obj2.addArg("-fno-stack-check");
 
-    const exe = cc(b, "a.out", opts);
-    exe.addFileSource(obj1.getFile());
-    exe.addFileSource(obj2.getFile());
+    {
+        const exe = cc(b, "a.out", opts);
+        exe.addFileSource(obj1.getFile());
+        exe.addFileSource(obj2.getFile());
 
-    const run = exe.run();
-    test_step.dependOn(run.step());
+        const run = exe.run();
+        test_step.dependOn(run.step());
 
-    const check = exe.check();
-    check.dumpSection(".rodata.str");
-    check.checkContains("\x01\x00\x02\x00\x03\x00\x04\x00\x05\x00\x00\x00");
-    check.dumpSection(".rodata.str");
-    check.checkContains("\x05\x00\x04\x00\x03\x00\x02\x00\x01\x00\x00\x00");
-    test_step.dependOn(&check.step);
+        const check = exe.check();
+        check.dumpSection(".rodata.str");
+        check.checkContains("\x01\x00\x02\x00\x03\x00\x04\x00\x05\x00\x00\x00");
+        check.dumpSection(".rodata.str");
+        check.checkContains("\x05\x00\x04\x00\x03\x00\x02\x00\x01\x00\x00\x00");
+        test_step.dependOn(&check.step);
+    }
+
+    {
+        const obj3 = ld(b, "c.o", opts);
+        obj3.addFileSource(obj1.getFile());
+        obj3.addArg("-r");
+
+        const obj4 = ld(b, "d.o", opts);
+        obj4.addFileSource(obj2.getFile());
+        obj4.addArg("-r");
+
+        const exe = cc(b, "a.out2", opts);
+        exe.addFileSource(obj3.getFile());
+        exe.addFileSource(obj4.getFile());
+
+        const run = exe.run();
+        test_step.dependOn(run.step());
+
+        const check = exe.check();
+        check.dumpSection(".rodata.str");
+        check.checkContains("\x01\x00\x02\x00\x03\x00\x04\x00\x05\x00\x00\x00");
+        check.dumpSection(".rodata.str");
+        check.checkContains("\x05\x00\x04\x00\x03\x00\x02\x00\x01\x00\x00\x00");
+        test_step.dependOn(&check.step);
+    }
+
+    {
+        const obj5 = ld(b, "e.o", opts);
+        obj5.addFileSource(obj1.getFile());
+        obj5.addFileSource(obj2.getFile());
+        obj5.addArg("-r");
+
+        const exe = cc(b, "a.out3", opts);
+        exe.addFileSource(obj5.getFile());
+
+        const run = exe.run();
+        test_step.dependOn(run.step());
+
+        const check = exe.check();
+        check.dumpSection(".rodata.str");
+        check.checkContains("\x01\x00\x02\x00\x03\x00\x04\x00\x05\x00\x00\x00");
+        check.dumpSection(".rodata.str");
+        check.checkContains("\x05\x00\x04\x00\x03\x00\x02\x00\x01\x00\x00\x00");
+        test_step.dependOn(&check.step);
+    }
 
     return test_step;
 }
