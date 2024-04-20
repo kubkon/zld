@@ -696,6 +696,7 @@ pub fn resolveMergeSubsections(self: *Object, elf_file: *Elf) !void {
                 const msub = elf_file.getMergeSubsection(msub_index);
                 msub.merge_section = imsec.merge_section;
                 msub.string_index = res.key.pos;
+                msub.entsize = @intCast(isec.sh_entsize);
                 msub.alignment = atom.alignment;
                 msub.size = res.key.len;
                 msub.alive = !elf_file.options.gc_sections or isec.sh_flags & elf.SHF_ALLOC == 0;

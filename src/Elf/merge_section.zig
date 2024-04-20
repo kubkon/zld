@@ -169,6 +169,7 @@ pub const MergeSubsection = struct {
     string_index: u32 = 0,
     size: u32 = 0,
     alignment: u8 = 0,
+    entsize: u32 = 0,
     alive: bool = false,
 
     pub fn getAddress(msub: MergeSubsection, elf_file: *Elf) i64 {
