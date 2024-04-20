@@ -86,6 +86,14 @@ fn initSections(elf_file: *Elf) !void {
             .flags = msec.flags,
         });
         msec.out_shndx = shndx;
+
+        var entsize = elf_file.getMergeSubsection(msec.subsections.items[0]).entsize;
+        for (msec.subsections.items) |index| {
+            const msub = elf_file.getMergeSubsection(index);
+            entsize = @min(entsize, msub.entsize);
+        }
+        const shdr = &elf_file.sections.items(.shdr)[shndx];
+        shdr.sh_entsize = entsize;
     }
 
     const needs_eh_frame = for (elf_file.objects.items) |index| {

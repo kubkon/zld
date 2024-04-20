@@ -543,6 +543,14 @@ fn initOutputSections(self: *Elf) !void {
             .flags = msec.flags,
         });
         msec.out_shndx = shndx;
+
+        var entsize = self.getMergeSubsection(msec.subsections.items[0]).entsize;
+        for (msec.subsections.items) |index| {
+            const msub = self.getMergeSubsection(index);
+            entsize = @min(entsize, msub.entsize);
+        }
+        const shdr = &self.sections.items(.shdr)[shndx];
+        shdr.sh_entsize = entsize;
     }
 
     self.text_sect_index = self.getSectionByName(".text");
@@ -798,6 +806,7 @@ pub fn addCommentString(self: *Elf) !void {
     msub.string_index = res.key.pos;
     msub.alignment = 0;
     msub.size = res.key.len;
+    msub.entsize = 1;
     msub.alive = true;
     res.sub.* = msub_index;
 }
