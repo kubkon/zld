@@ -970,7 +970,8 @@ fn parseUnwindRecords(self: *Object, macho_file: *MachO) !void {
         {}
 
         const atom = rec.getAtom(macho_file);
-        atom.unwind_records = .{ .pos = start, .len = next_cu - start };
+        try atom.addExtra(.{ .unwind_index = start, .unwind_count = next_cu - start }, macho_file);
+        atom.flags.unwind = true;
     }
 }
 

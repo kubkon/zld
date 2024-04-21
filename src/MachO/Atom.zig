@@ -26,9 +26,6 @@ off: u64 = 0,
 /// Index of this atom in the linker's atoms table.
 atom_index: Index = 0,
 
-/// Unwind records associated with this atom.
-unwind_records: Loc = .{},
-
 flags: Flags = .{},
 
 extra: u32 = 0,
@@ -95,10 +92,11 @@ pub fn getRelocs(self: Atom, macho_file: *MachO) []const Relocation {
 }
 
 pub fn getUnwindRecords(self: Atom, macho_file: *MachO) []const UnwindInfo.Record.Index {
+    if (!self.flags.unwind) return &[0]UnwindInfo.Record.Index{};
+    const extra = self.getExtra(macho_file).?;
     return switch (self.getFile(macho_file)) {
-        .dylib => unreachable,
-        .internal => &[0]UnwindInfo.Record.Index{},
-        .object => |x| x.unwind_records.items[self.unwind_records.pos..][0..self.unwind_records.len],
+        .dylib, .internal => unreachable,
+        .object => |x| x.unwind_records.items[extra.unwind_index..][0..extra.unwind_count],
     };
 }
 
@@ -123,6 +121,8 @@ const AddExtraOpts = struct {
     thunk: ?u32 = null,
     rel_index: ?u32 = null,
     rel_count: ?u32 = null,
+    unwind_index: ?u32 = null,
+    unwind_count: ?u32 = null,
 };
 
 pub fn addExtra(atom: *Atom, opts: AddExtraOpts, macho_file: *MachO) !void {
@@ -860,13 +860,14 @@ fn format2(
     });
     if (atom.flags.thunk) try writer.print(" : thunk({d})", .{atom.getExtra(macho_file).?.thunk});
     if (!atom.flags.alive) try writer.writeAll(" : [*]");
-    if (atom.unwind_records.len > 0) {
+    if (atom.flags.unwind) {
         try writer.writeAll(" : unwind{ ");
-        for (atom.getUnwindRecords(macho_file), atom.unwind_records.pos..) |index, i| {
+        const extra = atom.getExtra(macho_file).?;
+        for (atom.getUnwindRecords(macho_file), extra.unwind_index..) |index, i| {
             const rec = macho_file.getUnwindRecord(index);
             try writer.print("{d}", .{index});
             if (!rec.alive) try writer.writeAll("([*])");
-            if (i < atom.unwind_records.pos + atom.unwind_records.len - 1) try writer.writeAll(", ");
+            if (i < extra.unwind_index + extra.unwind_count - 1) try writer.writeAll(", ");
         }
         try writer.writeAll(" }");
     }
@@ -886,6 +887,9 @@ pub const Flags = packed struct {
 
     /// Whether this atom has any relocations.
     relocs: bool = false,
+
+    /// Whether this atom has any unwind records.
+    unwind: bool = false,
 };
 
 pub const Extra = struct {
@@ -897,11 +901,12 @@ pub const Extra = struct {
 
     /// Count of relocations belonging to this atom.
     rel_count: u32 = 0,
-};
 
-pub const Loc = struct {
-    pos: usize = 0,
-    len: usize = 0,
+    /// Start index of relocations belonging to this atom.
+    unwind_index: u32 = 0,
+
+    /// Count of relocations belonging to this atom.
+    unwind_count: u32 = 0,
 };
 
 const aarch64 = @import("../aarch64.zig");
