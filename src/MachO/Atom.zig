@@ -23,9 +23,6 @@ out_n_sect: u8 = 0,
 /// off + size <= parent section size.
 off: u64 = 0,
 
-/// Relocations of this atom.
-relocs: Loc = .{},
-
 /// Index of this atom in the linker's atoms table.
 atom_index: Index = 0,
 
@@ -88,11 +85,13 @@ pub fn getCode(self: Atom, macho_file: *MachO, buffer: []u8) !void {
 }
 
 pub fn getRelocs(self: Atom, macho_file: *MachO) []const Relocation {
+    if (!self.flags.relocs) return &[0]Relocation{};
     const relocs = switch (self.getFile(macho_file)) {
         .dylib => unreachable,
         inline else => |x| x.sections.items(.relocs)[self.n_sect],
     };
-    return relocs.items[self.relocs.pos..][0..self.relocs.len];
+    const extra = self.getExtra(macho_file).?;
+    return relocs.items[extra.rel_index..][0..extra.rel_count];
 }
 
 pub fn getUnwindRecords(self: Atom, macho_file: *MachO) []const UnwindInfo.Record.Index {
@@ -122,6 +121,8 @@ pub fn getThunk(self: Atom, macho_file: *MachO) *Thunk {
 
 const AddExtraOpts = struct {
     thunk: ?u32 = null,
+    rel_index: ?u32 = null,
+    rel_count: ?u32 = null,
 };
 
 pub fn addExtra(atom: *Atom, opts: AddExtraOpts, macho_file: *MachO) !void {
@@ -882,11 +883,20 @@ pub const Flags = packed struct {
 
     /// Whether this atom has a range extension thunk.
     thunk: bool = false,
+
+    /// Whether this atom has any relocations.
+    relocs: bool = false,
 };
 
 pub const Extra = struct {
     /// Index of the range extension thunk of this atom.
     thunk: u32 = 0,
+
+    /// Start index of relocations belonging to this atom.
+    rel_index: u32 = 0,
+
+    /// Count of relocations belonging to this atom.
+    rel_count: u32 = 0,
 };
 
 pub const Loc = struct {
