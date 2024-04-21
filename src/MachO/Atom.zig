@@ -29,13 +29,12 @@ relocs: Loc = .{},
 /// Index of this atom in the linker's atoms table.
 atom_index: Index = 0,
 
-/// Index of the thunk for this atom.
-thunk_index: Thunk.Index = 0,
-
 /// Unwind records associated with this atom.
 unwind_records: Loc = .{},
 
 flags: Flags = .{},
+
+extra: u32 = 0,
 
 pub fn getName(self: Atom, macho_file: *MachO) [:0]const u8 {
     return switch (self.getFile(macho_file)) {
@@ -116,7 +115,34 @@ pub fn markUnwindRecordsDead(self: Atom, macho_file: *MachO) void {
 }
 
 pub fn getThunk(self: Atom, macho_file: *MachO) *Thunk {
-    return macho_file.getThunk(self.thunk_index);
+    assert(self.flags.thunk);
+    const extra = self.getExtra(macho_file).?;
+    return macho_file.getThunk(extra.thunk);
+}
+
+const AddExtraOpts = struct {
+    thunk: ?u32 = null,
+};
+
+pub fn addExtra(atom: *Atom, opts: AddExtraOpts, macho_file: *MachO) !void {
+    if (atom.getExtra(macho_file) == null) {
+        atom.extra = try macho_file.addAtomExtra(.{});
+    }
+    var extra = atom.getExtra(macho_file).?;
+    inline for (@typeInfo(@TypeOf(opts)).Struct.fields) |field| {
+        if (@field(opts, field.name)) |x| {
+            @field(extra, field.name) = x;
+        }
+    }
+    atom.setExtra(extra, macho_file);
+}
+
+pub inline fn getExtra(atom: Atom, macho_file: *MachO) ?Extra {
+    return macho_file.getAtomExtra(atom.extra);
+}
+
+pub inline fn setExtra(atom: Atom, extra: Extra, macho_file: *MachO) void {
+    macho_file.setAtomExtra(atom.extra, extra);
 }
 
 pub fn initOutputSection(sect: macho.section_64, macho_file: *MachO) !u8 {
@@ -827,11 +853,11 @@ fn format2(
     _ = unused_fmt_string;
     const atom = ctx.atom;
     const macho_file = ctx.macho_file;
-    try writer.print("atom({d}) : {s} : @{x} : sect({d}) : align({x}) : size({x}) : thunk({d})", .{
-        atom.atom_index,  atom.getName(macho_file), atom.getAddress(macho_file),
-        atom.out_n_sect,  atom.alignment,           atom.size,
-        atom.thunk_index,
+    try writer.print("atom({d}) : {s} : @{x} : sect({d}) : align({x}) : size({x})", .{
+        atom.atom_index, atom.getName(macho_file), atom.getAddress(macho_file),
+        atom.out_n_sect, atom.alignment,           atom.size,
     });
+    if (atom.flags.thunk) try writer.print(" : thunk({d})", .{atom.getExtra(macho_file).?.thunk});
     if (!atom.flags.alive) try writer.writeAll(" : [*]");
     if (atom.unwind_records.len > 0) {
         try writer.writeAll(" : unwind{ ");
@@ -853,6 +879,14 @@ pub const Flags = packed struct {
 
     /// Specifies if the atom has been visited during garbage collection.
     visited: bool = false,
+
+    /// Whether this atom has a range extension thunk.
+    thunk: bool = false,
+};
+
+pub const Extra = struct {
+    /// Index of the range extension thunk of this atom.
+    thunk: u32 = 0,
 };
 
 pub const Loc = struct {
