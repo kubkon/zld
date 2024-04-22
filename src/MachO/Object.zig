@@ -654,11 +654,13 @@ fn initRelocs(self: *Object, macho_file: *MachO) !void {
             if (!atom.flags.alive) continue;
             if (next_reloc >= relocs.items.len) break;
             const end_addr = atom.off + atom.size;
-            atom.relocs.pos = next_reloc;
+            const rel_index = next_reloc;
 
             while (next_reloc < relocs.items.len and relocs.items[next_reloc].offset < end_addr) : (next_reloc += 1) {}
 
-            atom.relocs.len = next_reloc - atom.relocs.pos;
+            const rel_count = next_reloc - rel_index;
+            try atom.addExtra(.{ .rel_index = @intCast(rel_index), .rel_count = @intCast(rel_count) }, macho_file);
+            atom.flags.relocs = true;
         }
     }
 }
@@ -968,7 +970,8 @@ fn parseUnwindRecords(self: *Object, macho_file: *MachO) !void {
         {}
 
         const atom = rec.getAtom(macho_file);
-        atom.unwind_records = .{ .pos = start, .len = next_cu - start };
+        try atom.addExtra(.{ .unwind_index = start, .unwind_count = next_cu - start }, macho_file);
+        atom.flags.unwind = true;
     }
 }
 
@@ -1206,6 +1209,7 @@ pub fn calcSymtabSize(self: *Object, macho_file: *MachO) !void {
         sym.flags.output_symtab = true;
         if (sym.isLocal()) {
             try sym.addExtra(.{ .symtab = self.output_symtab_ctx.nlocals }, macho_file);
+
             self.output_symtab_ctx.nlocals += 1;
         } else if (sym.flags.@"export") {
             try sym.addExtra(.{ .symtab = self.output_symtab_ctx.nexports }, macho_file);

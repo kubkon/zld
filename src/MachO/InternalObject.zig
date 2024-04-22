@@ -115,7 +115,8 @@ fn addObjcSelrefsSection(
             .has_subtractor = false,
         },
     });
-    atom.relocs = .{ .pos = 0, .len = 1 };
+    try atom.addExtra(.{ .rel_index = 0, .rel_count = 1 }, macho_file);
+    atom.flags.relocs = true;
     self.num_rebase_relocs += 1;
 
     return atom_index;

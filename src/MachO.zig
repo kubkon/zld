@@ -71,6 +71,7 @@ export_trie: ExportTrieSection = .{},
 unwind_info: UnwindInfo = .{},
 
 atoms: std.ArrayListUnmanaged(Atom) = .{},
+atoms_extra: std.ArrayListUnmanaged(u32) = .{},
 thunks: std.ArrayListUnmanaged(Thunk) = .{},
 unwind_records: std.ArrayListUnmanaged(UnwindInfo.Record) = .{},
 
@@ -137,6 +138,7 @@ pub fn deinit(self: *MachO) void {
     self.segments.deinit(gpa);
     self.sections.deinit(gpa);
     self.atoms.deinit(gpa);
+    self.atoms_extra.deinit(gpa);
     self.thunks.deinit(gpa);
 
     self.symtab.deinit(gpa);
@@ -162,6 +164,7 @@ pub fn flush(self: *MachO) !void {
 
     // Atom at index 0 is reserved as null atom
     try self.atoms.append(gpa, .{});
+    try self.atoms_extra.append(gpa, 0);
     // Append empty string to string tables
     try self.string_intern.buffer.append(gpa, 0);
     try self.strtab.append(gpa, 0);
@@ -2802,6 +2805,50 @@ pub fn getAtom(self: *MachO, atom_index: Atom.Index) ?*Atom {
     if (atom_index == 0) return null;
     assert(atom_index < self.atoms.items.len);
     return &self.atoms.items[atom_index];
+}
+
+pub fn addAtomExtra(self: *MachO, extra: Atom.Extra) !u32 {
+    const fields = @typeInfo(Atom.Extra).Struct.fields;
+    try self.atoms_extra.ensureUnusedCapacity(self.base.allocator, fields.len);
+    return self.addAtomExtraAssumeCapacity(extra);
+}
+
+pub fn addAtomExtraAssumeCapacity(self: *MachO, extra: Atom.Extra) u32 {
+    const index = @as(u32, @intCast(self.atoms_extra.items.len));
+    const fields = @typeInfo(Atom.Extra).Struct.fields;
+    inline for (fields) |field| {
+        self.atoms_extra.appendAssumeCapacity(switch (field.type) {
+            u32 => @field(extra, field.name),
+            else => @compileError("bad field type"),
+        });
+    }
+    return index;
+}
+
+pub fn getAtomExtra(self: *MachO, index: u32) ?Atom.Extra {
+    if (index == 0) return null;
+    const fields = @typeInfo(Atom.Extra).Struct.fields;
+    var i: usize = index;
+    var result: Atom.Extra = undefined;
+    inline for (fields) |field| {
+        @field(result, field.name) = switch (field.type) {
+            u32 => self.atoms_extra.items[i],
+            else => @compileError("bad field type"),
+        };
+        i += 1;
+    }
+    return result;
+}
+
+pub fn setAtomExtra(self: *MachO, index: u32, extra: Atom.Extra) void {
+    assert(index > 0);
+    const fields = @typeInfo(Atom.Extra).Struct.fields;
+    inline for (fields, 0..) |field, i| {
+        self.atoms_extra.items[index + i] = switch (field.type) {
+            u32 => @field(extra, field.name),
+            else => @compileError("bad field type"),
+        };
+    }
 }
 
 pub fn addSymbol(self: *MachO) !Symbol.Index {
