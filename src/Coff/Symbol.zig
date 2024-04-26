@@ -1,5 +1,5 @@
 /// Allocated address value of this symbol.
-value: u64 = 0,
+value: u32 = 0,
 
 /// Offset into the string table, either global or local to object.
 name: u32 = 0,
@@ -54,7 +54,7 @@ pub fn getAtom(symbol: Symbol, coff_file: *Coff) ?*Atom {
 
 pub fn getAddress(symbol: Symbol, args: struct {
     alt: bool = true,
-}, coff_file: *Coff) u64 {
+}, coff_file: *Coff) u32 {
     if (symbol.out_section_number == 0) return symbol.value;
     if (symbol.getFile(coff_file) == null) {
         if (args.alt and symbol.getAltSymbol(coff_file) != null) {
@@ -90,7 +90,7 @@ pub fn getSymbolRank(symbol: Symbol, coff_file: *Coff) u32 {
 const AddExtraOpts = struct {
     alt_name: ?u32 = null,
     weak_flag: ?u32 = null,
-    import_thunk: ?u32 = null,
+    thunk: ?u32 = null,
 };
 
 pub fn addExtra(symbol: *Symbol, opts: AddExtraOpts, coff_file: *Coff) !void {
@@ -200,14 +200,14 @@ pub const Flags = packed struct {
     /// Whether the symbol has alternate name.
     alt_name: bool = false,
 
-    /// Whether the symbol has an import jump thunk.
-    import_thunk: bool = false,
+    /// Whether the symbol has a jump thunk.
+    thunk: bool = false,
 };
 
 pub const Extra = struct {
     alt_name: u32 = 0,
     weak_flag: u32 = 0,
-    import_thunk: u32 = 0,
+    thunk: u32 = 0,
 };
 
 pub const Index = u32;

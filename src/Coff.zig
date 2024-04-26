@@ -182,7 +182,7 @@ pub fn flush(self: *Coff) !void {
     self.markImports();
     try self.reportUndefs();
 
-    try self.initSyntheticSections();
+    try self.createImportThunks();
 
     if (build_options.enable_logging)
         state_log.debug("{}", .{self.dumpState()});
@@ -615,34 +615,9 @@ fn reportUndefs(self: *Coff) !void {
     return error.UndefinedSymbols;
 }
 
-fn initSyntheticSections(self: *Coff) !void {
+fn createImportThunks(self: *Coff) !void {
     for (self.dlls.values()) |index| {
-        const dll = self.getFile(index).?.dll;
-        for (dll.symbols.items, dll.exports.items, 0..) |sym_index, exp, exp_index| {
-            const sym = self.getSymbol(sym_index);
-            if (!sym.flags.import) continue;
-
-            switch (exp.type) {
-                .DATA, .CONST => {
-                    self.base.fatal("{s}: TODO unhandled import type for symbol '{s}':  {s}", .{
-                        dll.path,
-                        sym.getName(self),
-                        @tagName(exp.type),
-                    });
-                },
-                .CODE => {
-                    sym.flags.import_thunk = true;
-                    try self.idata.addThunk(sym_index, @intCast(exp_index), self);
-                },
-                else => |other| {
-                    self.base.fatal("{s}: unknown import type for symbol '{s}': 0x{x}", .{
-                        dll.path,
-                        sym.getName(self),
-                        other,
-                    });
-                },
-            }
-        }
+        try self.getFile(index).?.dll.addThunks(self);
     }
 }
 
@@ -845,23 +820,14 @@ fn fmtDumpState(
         try writer.print("dll({d}) : {s}", .{ index, dll.path });
         if (!dll.alive) try writer.writeAll(" : [*]");
         try writer.writeByte('\n');
-        try writer.print("{}\n", .{
+        try writer.print("{}{}\n", .{
             dll.fmtSymbols(self),
+            dll.fmtThunks(self),
         });
     }
     if (self.getInternalObject()) |internal| {
         try writer.print("internal({d}) : internal\n", .{internal.index});
         try writer.print("{}\n", .{internal.fmtSymbols(self)});
-    }
-    try writer.writeByte('\n');
-    try writer.writeAll("idata\n");
-    for (self.idata.entries.items, 0..) |entry, i| {
-        const sym = entry.getSymbol(self);
-        const exp = entry.getExport(self);
-        try writer.print("  {d} => {d} '{s}' ({s})\n", .{
-            i,                 entry.sym_index,
-            sym.getName(self), @tagName(exp.type),
-        });
     }
 }
 
