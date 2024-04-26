@@ -90,6 +90,7 @@ pub fn getSymbolRank(symbol: Symbol, coff_file: *Coff) u32 {
 const AddExtraOpts = struct {
     alt_name: ?u32 = null,
     weak_flag: ?u32 = null,
+    import_thunk: ?u32 = null,
 };
 
 pub fn addExtra(symbol: *Symbol, opts: AddExtraOpts, coff_file: *Coff) !void {
@@ -198,11 +199,15 @@ pub const Flags = packed struct {
 
     /// Whether the symbol has alternate name.
     alt_name: bool = false,
+
+    /// Whether the symbol has an import jump thunk.
+    import_thunk: bool = false,
 };
 
 pub const Extra = struct {
     alt_name: u32 = 0,
     weak_flag: u32 = 0,
+    import_thunk: u32 = 0,
 };
 
 pub const Index = u32;

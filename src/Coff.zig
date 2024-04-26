@@ -23,6 +23,8 @@ merge_rules: std.AutoArrayHashMapUnmanaged(u32, u32) = .{},
 entry_index: ?Symbol.Index = null,
 image_base_index: ?Symbol.Index = null,
 
+idata: IdataSection = .{},
+
 pub fn openPath(allocator: Allocator, options: Options, thread_pool: *ThreadPool) !*Coff {
     const file = try options.emit.directory.createFile(options.emit.sub_path, .{
         .truncate = true,
@@ -83,6 +85,7 @@ pub fn deinit(self: *Coff) void {
     self.globals.deinit(gpa);
     self.undefined_symbols.deinit(gpa);
     self.merge_rules.deinit(gpa);
+    self.idata.deinit(gpa);
 }
 
 pub fn flush(self: *Coff) !void {
@@ -178,6 +181,8 @@ pub fn flush(self: *Coff) !void {
     self.markExports();
     self.markImports();
     try self.reportUndefs();
+
+    try self.initSyntheticSections();
 
     if (build_options.enable_logging)
         state_log.debug("{}", .{self.dumpState()});
@@ -610,6 +615,37 @@ fn reportUndefs(self: *Coff) !void {
     return error.UndefinedSymbols;
 }
 
+fn initSyntheticSections(self: *Coff) !void {
+    for (self.dlls.values()) |index| {
+        const dll = self.getFile(index).?.dll;
+        for (dll.symbols.items, dll.exports.items, 0..) |sym_index, exp, exp_index| {
+            const sym = self.getSymbol(sym_index);
+            if (!sym.flags.import) continue;
+
+            switch (exp.type) {
+                .DATA, .CONST => {
+                    self.base.fatal("{s}: TODO unhandled import type for symbol '{s}':  {s}", .{
+                        dll.path,
+                        sym.getName(self),
+                        @tagName(exp.type),
+                    });
+                },
+                .CODE => {
+                    sym.flags.import_thunk = true;
+                    try self.idata.addThunk(sym_index, @intCast(exp_index), self);
+                },
+                else => |other| {
+                    self.base.fatal("{s}: unknown import type for symbol '{s}': 0x{x}", .{
+                        dll.path,
+                        sym.getName(self),
+                        other,
+                    });
+                },
+            }
+        }
+    }
+}
+
 pub fn isCoffObj(buffer: *const [@sizeOf(coff.CoffHeader)]u8) bool {
     const header = @as(*align(1) const coff.CoffHeader, @ptrCast(buffer)).*;
     if (header.machine == .Unknown and header.number_of_sections == 0xffff) return false;
@@ -817,58 +853,16 @@ fn fmtDumpState(
         try writer.print("internal({d}) : internal\n", .{internal.index});
         try writer.print("{}\n", .{internal.fmtSymbols(self)});
     }
-    {
-        try writer.writeAll("globals\n");
-        try writer.writeAll("  undefined\n");
-        for (self.undefined_symbols.items) |index| {
-            try writer.print("    {}\n", .{self.fmtGlobal(index)});
-        }
-        if (self.entry_index) |index| {
-            try writer.print("  entry\n    {}\n", .{self.fmtGlobal(index)});
-        }
-        for (self.objects.items) |index| {
-            const object = self.getFile(index).?.object;
-            try writer.print("  {}\n", .{object.fmtPath()});
-            for (object.symbols.items) |sym_index| {
-                const sym = self.getSymbol(sym_index);
-                if (!sym.flags.global) continue;
-                try writer.print("    {}\n", .{self.fmtGlobal(sym_index)});
-            }
-        }
+    try writer.writeByte('\n');
+    try writer.writeAll("idata\n");
+    for (self.idata.entries.items, 0..) |entry, i| {
+        const sym = entry.getSymbol(self);
+        const exp = entry.getExport(self);
+        try writer.print("  {d} => {d} '{s}' ({s})\n", .{
+            i,                 entry.sym_index,
+            sym.getName(self), @tagName(exp.type),
+        });
     }
-}
-
-const FormatGlobalCtx = struct {
-    coff_file: *Coff,
-    index: Symbol.Index,
-};
-
-fn fmtGlobal(self: *Coff, index: Symbol.Index) std.fmt.Formatter(formatGlobal) {
-    return .{ .data = .{ .coff_file = self, .index = index } };
-}
-
-fn formatGlobal(
-    ctx: FormatGlobalCtx,
-    comptime unused_fmt_string: []const u8,
-    options: std.fmt.FormatOptions,
-    writer: anytype,
-) !void {
-    _ = options;
-    _ = unused_fmt_string;
-    const self = ctx.coff_file;
-    const index = ctx.index;
-    const sym = self.getSymbol(index);
-    try writer.print("{s} => ", .{sym.getName(self)});
-
-    const file = sym.getFile(self) orelse blk: {
-        if (sym.getAltSymbol(self)) |alt| {
-            if (alt.getFile(self)) |file| break :blk file;
-        }
-        break :blk null;
-    };
-    if (file) |f| {
-        try writer.print(" resolved in {}", .{f.fmtPath()});
-    } else try writer.writeAll("unresolved");
 }
 
 const Section = struct {
@@ -944,6 +938,7 @@ const log = std.log.scoped(.coff);
 const mem = std.mem;
 const state_log = std.log.scoped(.state);
 const std = @import("std");
+const synthetic = @import("Coff/synthetic.zig");
 const trace = @import("tracy.zig").trace;
 
 const Allocator = mem.Allocator;
@@ -951,6 +946,7 @@ const Archive = @import("Coff/Archive.zig");
 const Atom = @import("Coff/Atom.zig");
 const Coff = @This();
 const File = @import("Coff/file.zig").File;
+const IdataSection = synthetic.IdataSection;
 const InternalObject = @import("Coff/InternalObject.zig");
 const Object = @import("Coff/Object.zig");
 pub const Options = @import("Coff/Options.zig");
