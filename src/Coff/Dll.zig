@@ -8,6 +8,7 @@ thunks: std.ArrayListUnmanaged(Thunk) = .{},
 thunks_table: std.ArrayListUnmanaged(Thunk.Index) = .{},
 
 alive: bool = false,
+idata_ctx: IdataCtx = .{},
 
 pub fn deinit(self: *Dll, allocator: Allocator) void {
     allocator.free(self.path);
@@ -116,6 +117,12 @@ pub fn addThunks(self: *Dll, coff_file: *Coff) !void {
             else => unreachable, // Already reported in addExport()
         }
     }
+}
+
+pub fn updateIdataSize(self: *Dll, coff_file: *Coff) void {
+    _ = self;
+    _ = coff_file;
+    // TODO
 }
 
 fn addString(self: *Dll, allocator: Allocator, str: []const u8) error{OutOfMemory}!u32 {
@@ -271,6 +278,19 @@ pub const Thunk = struct {
     }
 
     const Index = u32;
+};
+
+const IdataCtx = struct {
+    /// Import directory table size for DLL is always fixed so we don't track it.
+    dir_table_offset: u32 = 0,
+    lookup_table_offset: u32 = 0,
+    lookup_table_size: u32 = 0,
+    names_table_offset: u32 = 0,
+    names_table_size: u32 = 0,
+    dll_names_offset: u32 = 0,
+    dll_names_size: u32 = 0,
+    iat_offset: u32 = 0,
+    iat_size: u32 = 0,
 };
 
 const assert = std.debug.assert;

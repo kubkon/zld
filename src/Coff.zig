@@ -183,6 +183,7 @@ pub fn flush(self: *Coff) !void {
     try self.reportUndefs();
 
     try self.createImportThunks();
+    self.updateSectionSizes();
 
     if (build_options.enable_logging)
         state_log.debug("{}", .{self.dumpState()});
@@ -617,7 +618,64 @@ fn reportUndefs(self: *Coff) !void {
 
 fn createImportThunks(self: *Coff) !void {
     for (self.dlls.values()) |index| {
-        try self.getFile(index).?.dll.addThunks(self);
+        const dll = self.getFile(index).?.dll;
+        if (!dll.alive) continue;
+        try dll.addThunks(self);
+    }
+}
+
+fn initSections(self: *Coff) !void {
+    const needs_idata = for (self.dlls.values()) |index| {
+        if (self.getFile(index).?.dll.alive) break true;
+    } else false;
+    if (needs_idata) {
+        // TODO create .idata output section
+    }
+}
+
+fn updateSectionSizes(self: *Coff) void {
+    // TODO if (self.idata_sect_index)
+    self.updateIdataSize();
+}
+
+fn updateIdataSize(self: *Coff) void {
+    var dir_table_size: u32 = 0;
+    var lookup_table_size: u32 = 0;
+    var names_table_size: u32 = 0;
+    var dll_names_size: u32 = 0;
+    var iat_size: u32 = 0;
+
+    for (self.dlls.values()) |index| {
+        const dll = self.getFile(index).?.dll;
+        if (!dll.alive) continue;
+        const ctx = &dll.idata_ctx;
+
+        ctx.dir_table_offset = dir_table_size;
+        ctx.lookup_table_offset = lookup_table_size;
+        ctx.names_table_offset = names_table_size;
+        ctx.dll_names_offset = dll_names_size;
+        ctx.iat_offset = iat_size;
+
+        dll.updateIdataSize(self);
+
+        dir_table_size += @sizeOf(coff.ImportDirectoryEntry);
+        lookup_table_size += ctx.lookup_table_size;
+        names_table_size += ctx.names_table_size;
+        dll_names_size += ctx.dll_names_size;
+        iat_size += ctx.iat_size;
+    }
+
+    dir_table_size += @sizeOf(coff.ImportDirectoryEntry); // sentinel
+
+    for (self.dlls.values()) |index| {
+        const dll = self.getFile(index).?.dll;
+        if (!dll.alive) continue;
+        const ctx = &dll.idata_ctx;
+
+        ctx.lookup_table_offset += dir_table_size;
+        ctx.names_table_offset += dir_table_size + lookup_table_size;
+        ctx.dll_names_offset += dir_table_size + lookup_table_size + names_table_size;
+        ctx.iat_offset += dir_table_size + lookup_table_size + names_table_size + dll_names_size;
     }
 }
 
