@@ -119,10 +119,25 @@ pub fn addThunks(self: *Dll, coff_file: *Coff) !void {
     }
 }
 
-pub fn updateIdataSize(self: *Dll, coff_file: *Coff) void {
-    _ = self;
-    _ = coff_file;
-    // TODO
+pub fn updateIdataSize(self: *Dll, coff_file: *Coff) !void {
+    const ctx = &self.idata_ctx;
+    var index: u32 = 0;
+    for (self.symbols.items, self.exports.items) |sym_index, exp| {
+        const sym = coff_file.getSymbol(sym_index);
+        if (!sym.flags.import) continue;
+
+        if (!exp.isByOrdinal(self)) {
+            ctx.names_table_size += @sizeOf(u16) + @as(u32, @intCast(exp.getExternName(self).len)) + 1;
+            if (ctx.names_table_size % 2 != 0) ctx.names_table_size += 1;
+        }
+
+        try sym.addExtra(.{ .iat = index }, coff_file);
+        index += 1;
+    }
+
+    ctx.lookup_table_size = index * @sizeOf(u64);
+    ctx.iat_size = index * @sizeOf(u64);
+    ctx.dll_names_size += @as(u32, @intCast(self.path.len)) + 1;
 }
 
 fn addString(self: *Dll, allocator: Allocator, str: []const u8) error{OutOfMemory}!u32 {

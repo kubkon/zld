@@ -9,6 +9,8 @@ file_handles: std.ArrayListUnmanaged(File.Handle) = .{},
 
 sections: std.MultiArrayList(Section) = .{},
 
+idata_section_index: ?u32 = null,
+
 string_intern: StringTable = .{},
 
 symbols: std.ArrayListUnmanaged(Symbol) = .{},
@@ -183,7 +185,7 @@ pub fn flush(self: *Coff) !void {
     try self.reportUndefs();
 
     try self.createImportThunks();
-    self.updateSectionSizes();
+    try self.updateSectionSizes();
 
     if (build_options.enable_logging)
         state_log.debug("{}", .{self.dumpState()});
@@ -633,12 +635,12 @@ fn initSections(self: *Coff) !void {
     }
 }
 
-fn updateSectionSizes(self: *Coff) void {
+fn updateSectionSizes(self: *Coff) !void {
     // TODO if (self.idata_sect_index)
-    self.updateIdataSize();
+    try self.updateIdataSize();
 }
 
-fn updateIdataSize(self: *Coff) void {
+fn updateIdataSize(self: *Coff) !void {
     var dir_table_size: u32 = 0;
     var lookup_table_size: u32 = 0;
     var names_table_size: u32 = 0;
@@ -656,13 +658,13 @@ fn updateIdataSize(self: *Coff) void {
         ctx.dll_names_offset = dll_names_size;
         ctx.iat_offset = iat_size;
 
-        dll.updateIdataSize(self);
+        try dll.updateIdataSize(self);
 
         dir_table_size += @sizeOf(coff.ImportDirectoryEntry);
         lookup_table_size += ctx.lookup_table_size;
+        iat_size += ctx.iat_size;
         names_table_size += ctx.names_table_size;
         dll_names_size += ctx.dll_names_size;
-        iat_size += ctx.iat_size;
     }
 
     dir_table_size += @sizeOf(coff.ImportDirectoryEntry); // sentinel
@@ -673,9 +675,11 @@ fn updateIdataSize(self: *Coff) void {
         const ctx = &dll.idata_ctx;
 
         ctx.lookup_table_offset += dir_table_size;
-        ctx.names_table_offset += dir_table_size + lookup_table_size;
-        ctx.dll_names_offset += dir_table_size + lookup_table_size + names_table_size;
-        ctx.iat_offset += dir_table_size + lookup_table_size + names_table_size + dll_names_size;
+        ctx.iat_offset += dir_table_size + lookup_table_size;
+        ctx.names_table_offset += dir_table_size + lookup_table_size + iat_size;
+        ctx.dll_names_offset += dir_table_size + lookup_table_size + iat_size + names_table_size;
+
+        std.debug.print("{s}: {}\n", .{ dll.path, ctx.* });
     }
 }
 

@@ -53,19 +53,23 @@ pub fn getAtom(symbol: Symbol, coff_file: *Coff) ?*Atom {
 }
 
 pub fn getAddress(symbol: Symbol, args: struct {
+    thunk: bool = true,
     alt: bool = true,
 }, coff_file: *Coff) u32 {
-    if (symbol.out_section_number == 0) return symbol.value;
     if (symbol.getFile(coff_file) == null) {
         if (args.alt and symbol.getAltSymbol(coff_file) != null) {
             const alt = symbol.getAltSymbol(coff_file).?;
-            if (alt.getFile(coff_file)) |_| {
-                const header = coff_file.sections.items(.header)[alt.out_section_number];
-                return header.virtual_address + alt.value;
-            }
+            return alt.getAddress(.{}, coff_file);
         }
         return 0;
     }
+    if (symbol.flags.thunk and args.thunk) {
+        return symbol.getThunkAddress(coff_file);
+    }
+    if (symbol.flags.import and symbol.getFile(coff_file).? == .dll) {
+        return symbol.getIATAddress(coff_file);
+    }
+    if (symbol.out_section_number == 0) return symbol.value;
     const header = coff_file.sections.items(.header)[symbol.out_section_number];
     return header.virtual_address + symbol.value;
 }
@@ -87,10 +91,29 @@ pub fn getSymbolRank(symbol: Symbol, coff_file: *Coff) u32 {
     });
 }
 
+pub fn getThunkAddress(symbol: Symbol, coff_file: *Coff) u32 {
+    if (!symbol.flags.thunk) return 0;
+    const extra = symbol.getExtra(coff_file).?;
+    const dll = symbol.getFile(coff_file).?.dll;
+    const thunk = dll.getThunk(extra.thunk).?;
+    const header = coff_file.sections.items(.header)[thunk.out_section_number];
+    return header.virtual_address + thunk.value;
+}
+
+pub fn getIATAddress(symbol: Symbol, coff_file: *Coff) u32 {
+    const file = symbol.getFile(coff_file).?;
+    if (!symbol.flags.import or file != .dll) return 0;
+    const header = coff_file.sections.items(.header)[coff_file.idata_section_index.?];
+    const ctx = file.dll.idata_ctx;
+    const extra = symbol.getExtra(coff_file).?;
+    return header.virtual_address + ctx.iat_offset + extra.iat * @sizeOf(u64);
+}
+
 const AddExtraOpts = struct {
     alt_name: ?u32 = null,
     weak_flag: ?u32 = null,
     thunk: ?u32 = null,
+    iat: ?u32 = null,
 };
 
 pub fn addExtra(symbol: *Symbol, opts: AddExtraOpts, coff_file: *Coff) !void {
@@ -208,6 +231,7 @@ pub const Extra = struct {
     alt_name: u32 = 0,
     weak_flag: u32 = 0,
     thunk: u32 = 0,
+    iat: u32 = 0,
 };
 
 pub const Index = u32;
