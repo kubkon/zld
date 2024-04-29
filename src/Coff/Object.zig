@@ -541,6 +541,7 @@ pub fn convertCommonSymbols(self: *Object, coff_file: *Coff) !void {
         };
         sect.setAlignment(alignment);
         self.sections.items(.relocs)[sect_num] = .{};
+        atom.section_number = sect_num;
 
         sym.value = 0;
         sym.atom = atom_index;
