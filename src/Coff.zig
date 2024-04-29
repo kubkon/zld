@@ -692,6 +692,11 @@ fn updateIdataSize(self: *Coff) !void {
 
         std.debug.print("{s}: {}\n", .{ dll.path, ctx.* });
     }
+
+    const needed_size = dir_table_size + lookup_table_size + names_table_size + dll_names_size + iat_size;
+    const header = &self.sections.items(.header)[self.idata_section_index.?];
+    header.size_of_raw_data = mem.alignForward(u32, needed_size, self.getFileAlignment());
+    header.virtual_size = needed_size;
 }
 
 pub fn isCoffObj(buffer: *const [@sizeOf(coff.CoffHeader)]u8) bool {
@@ -718,6 +723,10 @@ fn getDefaultEntryPoint(self: *Coff) [:0]const u8 {
     // TODO: actually implement this
     _ = self;
     return "mainCRTStartup";
+}
+
+fn getFileAlignment(self: *Coff) u32 {
+    return self.options.file_align orelse 0x200;
 }
 
 pub fn addAlternateName(self: *Coff, from: []const u8, to: []const u8) !void {
