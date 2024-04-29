@@ -9,6 +9,7 @@ file_handles: std.ArrayListUnmanaged(File.Handle) = .{},
 
 sections: std.MultiArrayList(Section) = .{},
 
+text_section_index: ?u16 = null,
 idata_section_index: ?u16 = null,
 reloc_section_index: ?u16 = null,
 
@@ -629,6 +630,16 @@ fn createImportThunks(self: *Coff) !void {
 }
 
 fn initSections(self: *Coff) !void {
+    for (self.objects.items) |index| {
+        const object = self.getFile(index).?.object;
+        for (object.atoms.items) |atom_index| {
+            const atom = self.getAtom(atom_index) orelse continue;
+            if (!atom.flags.alive) continue;
+            atom.out_section_number = try object.initSection(atom, self);
+        }
+    }
+    self.text_section_index = self.getSectionByName(".text");
+
     const needs_idata = for (self.dlls.values()) |index| {
         if (self.getFile(index).?.dll.alive) break true;
     } else false;
@@ -802,6 +813,14 @@ pub fn addSection(self: *Coff, name: []const u8, flags: coff.SectionHeaderFlags)
     return index;
 }
 
+pub fn getSectionByName(self: *Coff, name: []const u8) ?u16 {
+    for (self.sections.items(.header), 0..) |header, index| {
+        const sect_name = self.string_intern.getAssumeExists(header.name);
+        if (mem.eql(u8, sect_name, name)) return @intCast(index);
+    }
+    return null;
+}
+
 pub fn addAtom(self: *Coff) !Atom.Index {
     const index = @as(Atom.Index, @intCast(self.atoms.items.len));
     const atom = try self.atoms.addOne(self.base.allocator);
@@ -953,7 +972,35 @@ fn formatSections(
     _ = options;
     _ = unused_fmt_string;
     for (self.sections.items(.header), 0..) |header, i| {
-        try writer.print("sect({d}) : {}\n", .{ i, header.fmt(self) });
+        try writer.print("sect({d}) : {s} : @{x} ({x}) : align({?x}) : size({x};{x}) : flags({})\n", .{
+            i,
+            self.string_intern.getAssumeExists(header.name),
+            header.virtual_address,
+            header.pointer_to_raw_data,
+            header.getAlignment(),
+            header.virtual_size,
+            header.size_of_raw_data,
+            fmtSectionFlags(header.flags),
+        });
+    }
+}
+
+fn fmtSectionFlags(flags: coff.SectionHeaderFlags) std.fmt.Formatter(formatSectionFlags) {
+    return .{ .data = flags };
+}
+
+fn formatSectionFlags(
+    flags: coff.SectionHeaderFlags,
+    comptime unused_fmt_string: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = options;
+    _ = unused_fmt_string;
+    inline for (@typeInfo(coff.SectionHeaderFlags).Struct.fields) |field| {
+        if (@field(flags, field.name) == 0b1) {
+            try writer.writeAll(field.name ++ " ");
+        }
     }
 }
 
@@ -990,47 +1037,6 @@ pub const SectionHeader = struct {
     pub fn setAlignment(hdr: *SectionHeader, alignment: u16) void {
         assert(alignment > 0 and alignment <= 8192);
         hdr.flags.ALIGN = std.math.log2_int(u16, alignment);
-    }
-
-    pub fn getName(hdr: SectionHeader, coff_file: *Coff) [:0]const u8 {
-        return coff_file.string_intern.getAssumeExists(hdr.name);
-    }
-
-    pub fn format(
-        hdr: SectionHeader,
-        comptime unused_fmt_string: []const u8,
-        options: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
-        _ = hdr;
-        _ = unused_fmt_string;
-        _ = options;
-        _ = writer;
-        @compileError("do not format SectionHeader directly");
-    }
-
-    pub fn fmt(hdr: SectionHeader, coff_file: *Coff) std.fmt.Formatter(format2) {
-        return .{ .data = .{ hdr, coff_file } };
-    }
-
-    fn format2(
-        ctx: struct { SectionHeader, *Coff },
-        comptime unused_fmt_string: []const u8,
-        options: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
-        _ = unused_fmt_string;
-        _ = options;
-        const hdr, const coff_file = ctx;
-        try writer.print("{s} : @{x} ({x}) : align({?x}) : size({x};{x}) : flags({b})", .{
-            hdr.getName(coff_file),
-            hdr.virtual_address,
-            hdr.pointer_to_raw_data,
-            hdr.getAlignment(),
-            hdr.virtual_size,
-            hdr.size_of_raw_data,
-            @as(u32, @bitCast(hdr.flags)),
-        });
     }
 };
 

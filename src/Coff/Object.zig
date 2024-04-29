@@ -564,6 +564,17 @@ pub fn reportUndefs(self: *Object, coff_file: *Coff, undefs: anytype) !void {
     }
 }
 
+pub fn initSection(self: Object, atom: *const Atom, coff_file: *Coff) !u16 {
+    // TODO handle ordering (here?)
+    // TODO take /merge directives into account
+    const header = atom.getInputSection(coff_file);
+    const full_name = self.getString(header.name);
+    const flags = header.flags;
+    const name_sep = mem.indexOfScalar(u8, full_name, '$') orelse full_name.len;
+    const name = full_name[0..name_sep];
+    return coff_file.getSectionByName(name) orelse try coff_file.addSection(name, flags);
+}
+
 pub fn getString(self: Object, off: u32) [:0]const u8 {
     assert(off < self.strtab.items.len);
     return mem.sliceTo(@as([*:0]const u8, @ptrCast(self.strtab.items.ptr + off)), 0);
