@@ -9,7 +9,8 @@ file_handles: std.ArrayListUnmanaged(File.Handle) = .{},
 
 sections: std.MultiArrayList(Section) = .{},
 
-idata_section_index: ?u32 = null,
+idata_section_index: ?u16 = null,
+reloc_section_index: ?u16 = null,
 
 string_intern: StringTable = .{},
 
@@ -185,6 +186,7 @@ pub fn flush(self: *Coff) !void {
     try self.reportUndefs();
 
     try self.createImportThunks();
+    try self.initSections();
     try self.updateSectionSizes();
 
     if (build_options.enable_logging)
@@ -631,13 +633,22 @@ fn initSections(self: *Coff) !void {
         if (self.getFile(index).?.dll.alive) break true;
     } else false;
     if (needs_idata) {
-        // TODO create .idata output section
+        self.idata_section_index = try self.addSection(".idata", .{
+            .CNT_INITIALIZED_DATA = 1,
+            .MEM_READ = 1,
+        });
+        self.reloc_section_index = try self.addSection(".reloc", .{
+            .CNT_INITIALIZED_DATA = 1,
+            .MEM_READ = 1,
+            .MEM_DISCARDABLE = 1,
+        });
     }
 }
 
 fn updateSectionSizes(self: *Coff) !void {
-    // TODO if (self.idata_sect_index)
-    try self.updateIdataSize();
+    if (self.idata_section_index != null) {
+        try self.updateIdataSize();
+    }
 }
 
 fn updateIdataSize(self: *Coff) !void {
@@ -756,6 +767,26 @@ pub fn getFileHandle(self: Coff, index: File.HandleIndex) File.Handle {
 pub fn getInternalObject(self: *Coff) ?*InternalObject {
     const index = self.internal_object_index orelse return null;
     return self.getFile(index).?.internal;
+}
+
+pub fn addSection(self: *Coff, name: []const u8, flags: coff.SectionHeaderFlags) !u16 {
+    const gpa = self.base.allocator;
+    const index = @as(u16, @intCast(try self.sections.addOne(gpa)));
+    self.sections.set(index, .{
+        .header = .{
+            .name = try self.string_intern.insert(gpa, name),
+            .virtual_address = 0,
+            .virtual_size = 0,
+            .pointer_to_raw_data = 0,
+            .size_of_raw_data = 0,
+            .pointer_to_relocations = 0,
+            .number_of_relocations = 0,
+            .pointer_to_linenumbers = 0,
+            .number_of_linenumbers = 0,
+            .flags = flags,
+        },
+    });
+    return index;
 }
 
 pub fn addAtom(self: *Coff) !Atom.Index {
@@ -891,6 +922,26 @@ fn fmtDumpState(
         try writer.print("internal({d}) : internal\n", .{internal.index});
         try writer.print("{}\n", .{internal.fmtSymbols(self)});
     }
+    try writer.writeByte('\n');
+    try writer.writeAll("Output sections\n");
+    try writer.print("{}\n", .{self.fmtSections()});
+}
+
+fn fmtSections(self: *Coff) std.fmt.Formatter(formatSections) {
+    return .{ .data = self };
+}
+
+fn formatSections(
+    self: *Coff,
+    comptime unused_fmt_string: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = options;
+    _ = unused_fmt_string;
+    for (self.sections.items(.header), 0..) |header, i| {
+        try writer.print("sect({d}) : {}\n", .{ i, header.fmt(self) });
+    }
 }
 
 const Section = struct {
@@ -926,6 +977,47 @@ pub const SectionHeader = struct {
     pub fn setAlignment(hdr: *SectionHeader, alignment: u16) void {
         assert(alignment > 0 and alignment <= 8192);
         hdr.flags.ALIGN = std.math.log2_int(u16, alignment);
+    }
+
+    pub fn getName(hdr: SectionHeader, coff_file: *Coff) [:0]const u8 {
+        return coff_file.string_intern.getAssumeExists(hdr.name);
+    }
+
+    pub fn format(
+        hdr: SectionHeader,
+        comptime unused_fmt_string: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = hdr;
+        _ = unused_fmt_string;
+        _ = options;
+        _ = writer;
+        @compileError("do not format SectionHeader directly");
+    }
+
+    pub fn fmt(hdr: SectionHeader, coff_file: *Coff) std.fmt.Formatter(format2) {
+        return .{ .data = .{ hdr, coff_file } };
+    }
+
+    fn format2(
+        ctx: struct { SectionHeader, *Coff },
+        comptime unused_fmt_string: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = unused_fmt_string;
+        _ = options;
+        const hdr, const coff_file = ctx;
+        try writer.print("{s} : @{x} ({x}) : align({?x}) : size({x};{x}) : flags({b})", .{
+            hdr.getName(coff_file),
+            hdr.virtual_address,
+            hdr.pointer_to_raw_data,
+            hdr.getAlignment(),
+            hdr.virtual_size,
+            hdr.size_of_raw_data,
+            @as(u32, @bitCast(hdr.flags)),
+        });
     }
 };
 
