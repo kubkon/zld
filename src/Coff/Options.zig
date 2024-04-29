@@ -2,6 +2,7 @@ emit: Zld.Emit,
 cpu_arch: ?std.Target.Cpu.Arch = null,
 positionals: []const Coff.LinkObject,
 lib_paths: []const []const u8,
+@"align": ?u32 = null,
 file_align: ?u32 = null,
 
 pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options {
@@ -44,6 +45,9 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             }
         } else if (p.arg("libpath")) |path| {
             try lib_paths.put(path, {});
+        } else if (p.arg("align")) |value| {
+            opts.@"align" = std.fmt.parseInt(u32, value, 0) catch
+                ctx.fatal("Could not parse /align:{s} into integer\n", .{value});
         } else if (p.arg("filealign")) |value| {
             opts.file_align = std.fmt.parseInt(u32, value, 0) catch
                 ctx.fatal("Could not parse /filealign:{s} into integer\n", .{value});
@@ -60,6 +64,9 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         ctx.print("{s}\n", .{args[args.len - 1]});
     }
     if (positionals.items.len == 0) ctx.fatal("Expected at least one positional argument\n", .{});
+    if (opts.@"align") |alignment| {
+        if (alignment % 2 != 0) ctx.fatal("/align:{x} is not a power of two\n", .{alignment});
+    }
     if (opts.file_align) |alignment| {
         if (alignment % 2 != 0) ctx.fatal("/filealign:{x} is not a power of two\n", .{alignment});
     }
@@ -138,6 +145,7 @@ const usage =
     \\Usage: {s} [files...]
     \\
     \\General Options:
+    \\-align:number                 Alignment value in bytes
     \\-debug-log:scope              Turn on debugging logs for 'scope' (requires zld compiled with -Dlog)
     \\-defaultlib:name              Link a default library
     \\-filealign:size               Section alignment size in bytes, must be power of two

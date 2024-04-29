@@ -725,6 +725,10 @@ fn getDefaultEntryPoint(self: *Coff) [:0]const u8 {
     return "mainCRTStartup";
 }
 
+fn getSectionAlignment(self: *Coff) u32 {
+    return self.options.@"align" orelse 0x1000;
+}
+
 fn getFileAlignment(self: *Coff) u32 {
     return self.options.file_align orelse 0x200;
 }
