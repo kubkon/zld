@@ -491,7 +491,7 @@ pub fn markLive(self: *Object, coff_file: *Coff) void {
             continue;
         };
         const coff_sym = self.symtab.items[csym_idx];
-        const should_keep = coff_sym.undf() or coff_sym.common();
+        const should_keep = coff_sym.undf();
         if (should_keep and !file.isAlive()) {
             file.setAlive();
             if (file == .object) file.markLive(coff_file);

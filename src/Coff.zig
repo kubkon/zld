@@ -735,8 +735,6 @@ fn updateIdataSize(self: *Coff) !void {
         ctx.iat_offset += dir_table_size + lookup_table_size;
         ctx.names_table_offset += dir_table_size + lookup_table_size + iat_size;
         ctx.dll_names_offset += dir_table_size + lookup_table_size + iat_size + names_table_size;
-
-        std.debug.print("{s}: {}\n", .{ dll.path, ctx.* });
     }
 
     const needed_size = dir_table_size + lookup_table_size + names_table_size + dll_names_size + iat_size;
