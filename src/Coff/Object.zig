@@ -388,7 +388,6 @@ fn initSymbols(self: *Object, allocator: Allocator, coff_file: *Coff) !void {
             .atom = atom,
             .file = self.index,
         };
-        symbol.flags.common = coff_sym.common();
     }
 }
 
