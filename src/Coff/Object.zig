@@ -395,7 +395,7 @@ fn skipSection(self: *Object, index: u16) bool {
     const header = self.sections.items(.header)[index];
     const name = self.getString(header.name);
     const ignore = blk: {
-        if (header.flags.LNK_INFO == 0b1) break :blk true; // TODO info sections
+        if (header.flags.LNK_INFO == 0b1) break :blk true; // TODO info sections such as .voltbl
         if (mem.startsWith(u8, name, ".debug")) break :blk true; // TODO debug info
         if (mem.eql(u8, name, ".gfids$y")) break :blk true; // TODO guard FID chunks
         if (mem.eql(u8, name, ".giats$y")) break :blk true; // TODO guard IAT chunks
