@@ -12,7 +12,7 @@ symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
 
 default_libs: std.ArrayListUnmanaged(u32) = .{},
 disallow_libs: std.ArrayListUnmanaged(u32) = .{},
-merge_rules: std.ArrayListUnmanaged(struct { u32, u32 }) = .{},
+merge_rules: std.ArrayListUnmanaged(MergeRule) = .{},
 
 atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
 
@@ -321,8 +321,8 @@ fn parseDirectives(self: *Object, allocator: Allocator, file: std.fs.File, offse
                 continue;
             };
             try self.merge_rules.append(allocator, .{
-                try self.insertString(allocator, mapping[0..tok]),
-                try self.insertString(allocator, mapping[tok + 1 ..]),
+                .from = try self.insertString(allocator, mapping[0..tok]),
+                .to = try self.insertString(allocator, mapping[tok + 1 ..]),
             });
         } else {
             coff_file.base.fatal("{}: unhandled directive: {s}", .{
@@ -398,6 +398,12 @@ fn skipSection(self: *Object, index: u16) bool {
     const ignore = blk: {
         if (header.flags.LNK_INFO == 0b1) break :blk true; // TODO info sections
         if (mem.startsWith(u8, name, ".debug")) break :blk true; // TODO debug info
+        if (mem.eql(u8, name, ".gfids$y")) break :blk true; // TODO guard FID chunks
+        if (mem.eql(u8, name, ".giats$y")) break :blk true; // TODO guard IAT chunks
+        if (mem.eql(u8, name, ".gljmp$y")) break :blk true; // TODO guard LJmp chunks
+        if (mem.eql(u8, name, ".gehcont$y")) break :blk true; // TODO guard EHCont chunks
+        if (mem.eql(u8, name, ".sxdata")) break :blk true; // TODO .sxdata chunks
+        if (mem.eql(u8, name, ".rsrc") or mem.startsWith(u8, name, "rsrc$")) break :blk true; // TODO resource chunks
         break :blk false;
     };
     return ignore;
@@ -567,14 +573,14 @@ pub fn reportUndefs(self: *Object, coff_file: *Coff, undefs: anytype) !void {
 
 pub fn initSection(self: Object, atom: *const Atom, coff_file: *Coff) !u16 {
     // TODO handle ordering (here?)
-    // TODO take /merge directives into account
     const header = atom.getInputSection(coff_file);
     const full_name = self.getString(header.name);
     var flags = header.flags;
     flags.ALIGN = 0;
     const name_sep = mem.indexOfScalar(u8, full_name, '$') orelse full_name.len;
     const name = full_name[0..name_sep];
-    return coff_file.getSectionByName(name) orelse try coff_file.addSection(name, flags);
+    const out_name = coff_file.getMergeRule(name) orelse name;
+    return coff_file.getSectionByName(out_name) orelse try coff_file.addSection(out_name, flags);
 }
 
 pub fn getString(self: Object, off: u32) [:0]const u8 {
@@ -836,6 +842,11 @@ const symtab_entry_size = 18;
 const Archive = struct {
     path: []const u8,
     offset: u64,
+};
+
+const MergeRule = struct {
+    from: u32,
+    to: u32,
 };
 
 const assert = std.debug.assert;

@@ -186,6 +186,7 @@ pub fn flush(self: *Coff) !void {
     self.markImports();
     try self.reportUndefs();
 
+    try self.parseMergeRules();
     try self.createImportThunks();
     try self.initSections();
     try self.updateSectionSizes();
@@ -621,6 +622,40 @@ fn reportUndefs(self: *Coff) !void {
     return error.UndefinedSymbols;
 }
 
+fn parseMergeRules(self: *Coff) !void {
+    const addRule = struct {
+        fn addRule(coff_file: *Coff, from: []const u8, to: []const u8) !void {
+            const gpa = coff_file.base.allocator;
+            const from_rule = try coff_file.string_intern.insert(gpa, from);
+            const to_rule = try coff_file.string_intern.insert(gpa, to);
+            try coff_file.merge_rules.put(gpa, from_rule, to_rule);
+        }
+    }.addRule;
+
+    // TODO break/report cycles, report duplicates
+    for (self.objects.items) |index| {
+        const object = self.getFile(index).?.object;
+        assert(object.alive);
+        for (object.merge_rules.items) |rule| {
+            try addRule(self, object.getString(rule.from), object.getString(rule.to));
+        }
+    }
+
+    // Add default merge rules
+    // try addRule(self, ".idata", ".rdata"); // TODO why does LLD do it?
+    // try addRule(self, ".edata", ".rdata"); // TODO why does LLD do it?
+    try addRule(self, ".didat", ".rdata");
+    try addRule(self, ".xdata", ".rdata");
+    try addRule(self, ".00cfg", ".rdata");
+    try addRule(self, ".bss", ".data");
+}
+
+pub fn getMergeRule(self: *Coff, from: []const u8) ?[]const u8 {
+    const from_off = self.string_intern.getOffset(from) orelse return null;
+    const to_off = self.merge_rules.get(from_off) orelse return null;
+    return self.string_intern.getAssumeExists(to_off);
+}
+
 fn createImportThunks(self: *Coff) !void {
     for (self.dlls.values()) |index| {
         const dll = self.getFile(index).?.dll;
@@ -909,13 +944,6 @@ pub fn getOrCreateGlobal(self: *Coff, off: u32) !GetOrCreateGlobalResult {
         .found_existing = gop.found_existing,
         .index = gop.value_ptr.*,
     };
-}
-
-fn addMergeRule(self: *Coff, from: []const u8, to: []const u8) !void {
-    const gpa = self.base.allocator;
-    const from_rule = try self.string_intern.insert(gpa, from);
-    const to_rule = try self.string_intern.insert(gpa, to);
-    try self.merge_rules.put(gpa, from_rule, to_rule);
 }
 
 pub fn dumpState(self: *Coff) std.fmt.Formatter(fmtDumpState) {
