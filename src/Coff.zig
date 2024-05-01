@@ -487,8 +487,9 @@ fn markLive(self: *Coff) void {
 
     for (self.objects.items) |index| {
         const object = self.getFile(index).?.object;
-        if (object.alive) {
+        if (object.alive and !object.visited) {
             log.debug("Reading {}", .{object.fmtPathShort()});
+            log.debug("Directives: {}: {}", .{ object.fmtPathShort(), object.fmtDirectives() });
             object.markLive(self);
         }
     }
@@ -496,18 +497,14 @@ fn markLive(self: *Coff) void {
     for (self.undefined_symbols.items) |index| {
         const sym = self.getSymbol(index);
         if (sym.getFile(self)) |file| {
-            if (file == .object and file.object.archive != null) {
-                log.debug("Loaded {} for {s}\n", .{ file.object.fmtPathShort(), sym.getName(self) });
-            }
+            log.debug("Loaded {} for {s}", .{ file.fmtPathShort(), sym.getName(self) });
         }
     }
 
     if (self.entry_index) |index| {
         const sym = self.getSymbol(index);
         if (sym.getFile(self)) |file| {
-            if (file == .object and file.object.archive != null) {
-                log.debug("Loaded {} for {s}\n", .{ file.object.fmtPathShort(), sym.getName(self) });
-            }
+            log.debug("Loaded {} for {s}", .{ file.fmtPathShort(), sym.getName(self) });
         }
     }
 }

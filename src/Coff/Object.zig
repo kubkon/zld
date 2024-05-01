@@ -10,6 +10,7 @@ auxtab: std.ArrayListUnmanaged(AuxSymbol) = .{},
 strtab: std.ArrayListUnmanaged(u8) = .{},
 symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
 
+directives: std.ArrayListUnmanaged(u8) = .{},
 default_libs: std.ArrayListUnmanaged(u32) = .{},
 disallow_libs: std.ArrayListUnmanaged(u32) = .{},
 merge_rules: std.ArrayListUnmanaged(MergeRule) = .{},
@@ -17,6 +18,7 @@ merge_rules: std.ArrayListUnmanaged(MergeRule) = .{},
 atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
 
 alive: bool = true,
+visited: bool = false,
 
 pub fn deinit(self: *Object, allocator: Allocator) void {
     if (self.archive) |*ar| allocator.free(ar.path);
@@ -29,6 +31,7 @@ pub fn deinit(self: *Object, allocator: Allocator) void {
     self.auxtab.deinit(allocator);
     self.strtab.deinit(allocator);
     self.symbols.deinit(allocator);
+    self.directives.deinit(allocator);
     self.default_libs.deinit(allocator);
     self.disallow_libs.deinit(allocator);
     self.merge_rules.deinit(allocator);
@@ -271,7 +274,8 @@ fn parseDirectives(self: *Object, allocator: Allocator, file: std.fs.File, offse
                 return error.ParseFailed;
             }
 
-            const buffer = try directives.addManyAsSlice(header.size_of_raw_data);
+            try self.directives.ensureUnusedCapacity(allocator, header.size_of_raw_data);
+            const buffer = self.directives.addManyAsSliceAssumeCapacity(header.size_of_raw_data);
             const amt = try file.preadAll(buffer, offset + header.pointer_to_raw_data);
             if (amt != header.size_of_raw_data) return error.InputOutput;
         }
@@ -279,7 +283,7 @@ fn parseDirectives(self: *Object, allocator: Allocator, file: std.fs.File, offse
 
     // Preparse directives acting on things like /include, /alternatename, /merge, etc.
     var has_parse_error = false;
-    var it = mem.splitScalar(u8, mem.trim(u8, directives.items, " "), ' ');
+    var it = mem.splitScalar(u8, mem.trim(u8, self.directives.items, " "), ' ');
     var p = Coff.Options.ArgsParser(@TypeOf(it)){ .it = &it };
     while (p.hasMore()) {
         if (p.arg("defaultlib")) |name| {
@@ -471,6 +475,9 @@ pub fn markLive(self: *Object, coff_file: *Coff) void {
     const tracy = trace(@src());
     defer tracy.end();
 
+    if (self.visited) return;
+    self.visited = true;
+
     for (self.symbols.items, 0..) |index, csym_idx| {
         const sym = coff_file.getSymbol(index);
         if (!sym.flags.global) continue;
@@ -486,6 +493,11 @@ pub fn markLive(self: *Object, coff_file: *Coff) void {
         const coff_sym = self.symtab.items[csym_idx];
         const should_keep = coff_sym.undf();
         if (should_keep and !file.isAlive()) {
+            log.debug("Reading {}", .{file.fmtPathShort()});
+            if (file == .object) {
+                log.debug("Directives: {}: {}", .{ file.fmtPathShort(), file.object.fmtDirectives() });
+            }
+            log.debug("Loaded {} for {s}", .{ file.fmtPathShort(), sym.getName(coff_file) });
             file.setAlive();
             if (file == .object) file.markLive(coff_file);
         }
@@ -605,16 +617,10 @@ pub fn format(
     @compileError("do not format Object directly");
 }
 
-const FormatContext = struct {
-    object: Object,
-    coff_file: *Coff,
-};
+const FormatContext = struct { Object, *Coff };
 
 pub fn fmtAtoms(self: Object, coff_file: *Coff) std.fmt.Formatter(formatAtoms) {
-    return .{ .data = .{
-        .object = self,
-        .coff_file = coff_file,
-    } };
+    return .{ .data = .{ self, coff_file } };
 }
 
 fn formatAtoms(
@@ -625,19 +631,16 @@ fn formatAtoms(
 ) !void {
     _ = unused_fmt_string;
     _ = options;
-    const object = ctx.object;
+    const object, const coff_file = ctx;
     try writer.writeAll("  atoms\n");
     for (object.atoms.items) |atom_index| {
-        const atom = ctx.coff_file.getAtom(atom_index) orelse continue;
-        try writer.print("    {}\n", .{atom.fmt(ctx.coff_file)});
+        const atom = coff_file.getAtom(atom_index) orelse continue;
+        try writer.print("    {}\n", .{atom.fmt(coff_file)});
     }
 }
 
 pub fn fmtSymbols(self: Object, coff_file: *Coff) std.fmt.Formatter(formatSymbols) {
-    return .{ .data = .{
-        .object = self,
-        .coff_file = coff_file,
-    } };
+    return .{ .data = .{ self, coff_file } };
 }
 
 fn formatSymbols(
@@ -648,11 +651,11 @@ fn formatSymbols(
 ) !void {
     _ = unused_fmt_string;
     _ = options;
-    const object = ctx.object;
+    const object, const coff_file = ctx;
     try writer.writeAll("  symbols\n");
     for (object.symbols.items) |index| {
-        const sym = ctx.coff_file.getSymbol(index);
-        try writer.print("    {}\n", .{sym.fmt(ctx.coff_file)});
+        const sym = coff_file.getSymbol(index);
+        try writer.print("    {}\n", .{sym.fmt(coff_file)});
     }
 }
 
@@ -694,6 +697,21 @@ fn formatPathShort(
         try writer.writeAll(std.fs.path.basename(object.path));
         try writer.writeByte(')');
     } else try writer.writeAll(std.fs.path.basename(object.path));
+}
+
+pub fn fmtDirectives(self: Object) std.fmt.Formatter(formatDirectives) {
+    return .{ .data = self };
+}
+
+fn formatDirectives(
+    object: Object,
+    comptime unused_fmt_string: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = unused_fmt_string;
+    _ = options;
+    try writer.print("{s}", .{object.directives.items});
 }
 
 fn parseSymbol(raw: *const [symtab_entry_size]u8) coff.Symbol {
