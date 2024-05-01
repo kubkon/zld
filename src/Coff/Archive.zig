@@ -22,8 +22,6 @@ pub fn parse(self: *Archive, path: []const u8, file_handle: File.HandleIndex, co
     } = .{};
     var member_count: usize = 0;
 
-    log.debug("parsing archive {s}", .{path});
-
     var pos: usize = magic.len;
     while (true) {
         if (!mem.isAligned(pos, 2)) {
@@ -38,7 +36,6 @@ pub fn parse(self: *Archive, path: []const u8, file_handle: File.HandleIndex, co
         pos += @sizeOf(Header);
 
         if (!std.mem.eql(u8, &hdr.end, end)) {
-            log.debug("invalid header? {}", .{hdr});
             coff_file.base.fatal("{s}: invalid header delimiter: expected '{s}', found '{s}'", .{
                 path,
                 std.fmt.fmtSliceEscapeLower(magic),

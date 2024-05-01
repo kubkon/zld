@@ -39,8 +39,6 @@ pub fn parse(self: *Object, coff_file: *Coff) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
-    log.debug("parsing COFF object {}", .{self.fmtPath()});
-
     const gpa = coff_file.base.allocator;
     const offset = if (self.archive) |ar| ar.offset else 0;
     const file = coff_file.getFileHandle(self.file_handle);
@@ -226,7 +224,7 @@ fn parseInputSymbolTable(self: *Object, allocator: Allocator, file: std.fs.File,
                 } });
                 out_sym.aux_len += 1;
             } else {
-                log.debug("{}: unhandled aux record for symbol '{s}'", .{ self.fmtPath(), name });
+                extra_log.debug("{}: unhandled aux record for symbol '{s}'", .{ self.fmtPath(), name });
             }
         }
     }
@@ -437,12 +435,7 @@ pub fn resolveSymbols(self: *Object, coff_file: *Coff) void {
 
         if (global.flags.weak) {
             const weak_flag = global.getWeakFlag(coff_file).?;
-            if (weak_flag == .SEARCH_NOLIBRARY and !self.alive) {
-                log.debug("{} is archive: skipping weak symbol {s}\n", .{
-                    self.fmtPath(), global.getName(coff_file),
-                });
-                continue;
-            }
+            if (weak_flag == .SEARCH_NOLIBRARY and !self.alive) continue;
         }
 
         const coff_sym_idx = @as(Symbol.Index, @intCast(i));
@@ -600,7 +593,7 @@ pub fn asFile(self: *Object) File {
 }
 
 pub fn format(
-    self: *Object,
+    self: Object,
     comptime unused_fmt_string: []const u8,
     options: std.fmt.FormatOptions,
     writer: anytype,
@@ -613,11 +606,11 @@ pub fn format(
 }
 
 const FormatContext = struct {
-    object: *Object,
+    object: Object,
     coff_file: *Coff,
 };
 
-pub fn fmtAtoms(self: *Object, coff_file: *Coff) std.fmt.Formatter(formatAtoms) {
+pub fn fmtAtoms(self: Object, coff_file: *Coff) std.fmt.Formatter(formatAtoms) {
     return .{ .data = .{
         .object = self,
         .coff_file = coff_file,
@@ -640,7 +633,7 @@ fn formatAtoms(
     }
 }
 
-pub fn fmtSymbols(self: *Object, coff_file: *Coff) std.fmt.Formatter(formatSymbols) {
+pub fn fmtSymbols(self: Object, coff_file: *Coff) std.fmt.Formatter(formatSymbols) {
     return .{ .data = .{
         .object = self,
         .coff_file = coff_file,
@@ -681,6 +674,26 @@ fn formatPath(
         try writer.writeAll(object.path);
         try writer.writeByte(')');
     } else try writer.writeAll(object.path);
+}
+
+pub fn fmtPathShort(self: Object) std.fmt.Formatter(formatPathShort) {
+    return .{ .data = self };
+}
+
+fn formatPathShort(
+    object: Object,
+    comptime unused_fmt_string: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = unused_fmt_string;
+    _ = options;
+    if (object.archive) |ar| {
+        try writer.writeAll(std.fs.path.basename(ar.path));
+        try writer.writeByte('(');
+        try writer.writeAll(std.fs.path.basename(object.path));
+        try writer.writeByte(')');
+    } else try writer.writeAll(std.fs.path.basename(object.path));
 }
 
 fn parseSymbol(raw: *const [symtab_entry_size]u8) coff.Symbol {
@@ -853,6 +866,7 @@ const coff = std.coff;
 const mem = std.mem;
 const fs = std.fs;
 const log = std.log.scoped(.coff);
+const extra_log = std.log.scoped(.coff_extra);
 const std = @import("std");
 const trace = @import("../tracy.zig").trace;
 

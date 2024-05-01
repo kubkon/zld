@@ -271,8 +271,6 @@ fn parsePositional(
 ) ParseError!void {
     const resolved_obj = try self.resolveFile(arena, obj, lib_paths, visited);
 
-    log.debug("parsing positional {}", .{resolved_obj});
-
     if (try self.parseObject(resolved_obj, queue)) return;
     if (try self.parseArchive(resolved_obj, queue)) return;
 
@@ -314,7 +312,6 @@ fn parseLibsFromDirectives(object: *const Object, queue: anytype) !void {
     for (object.default_libs.items) |off| {
         const name = object.getString(off);
         const dir_obj = LinkObject{ .name = name, .tag = .default_lib };
-        log.debug("{}: adding implicit import {}", .{ object.fmtPath(), dir_obj });
         try queue.writeItem(dir_obj);
     }
     // TODO handle /disallowlib and /nodefaultlib
@@ -341,7 +338,7 @@ fn parseArchive(self: *Coff, obj: LinkObject, queue: anytype) ParseError!bool {
     var has_parse_error = false;
     for (archive.members.items) |member| {
         const member_cpu_arch = member.machine.toTargetCpuArch() orelse {
-            log.debug("{s}({s}): TODO unhandled machine type {}", .{ obj.path, member.name, member.machine });
+            extra_log.debug("{s}({s}): TODO unhandled machine type {}", .{ obj.path, member.name, member.machine });
             continue;
         };
         if (member_cpu_arch != cpu_arch) continue;
@@ -490,7 +487,28 @@ fn markLive(self: *Coff) void {
 
     for (self.objects.items) |index| {
         const object = self.getFile(index).?.object;
-        if (object.alive) object.markLive(self);
+        if (object.alive) {
+            log.debug("Reading {}", .{object.fmtPathShort()});
+            object.markLive(self);
+        }
+    }
+
+    for (self.undefined_symbols.items) |index| {
+        const sym = self.getSymbol(index);
+        if (sym.getFile(self)) |file| {
+            if (file == .object and file.object.archive != null) {
+                log.debug("Loaded {} for {s}\n", .{ file.object.fmtPathShort(), sym.getName(self) });
+            }
+        }
+    }
+
+    if (self.entry_index) |index| {
+        const sym = self.getSymbol(index);
+        if (sym.getFile(self)) |file| {
+            if (file == .object and file.object.archive != null) {
+                log.debug("Loaded {} for {s}\n", .{ file.object.fmtPathShort(), sym.getName(self) });
+            }
+        }
     }
 }
 
@@ -757,7 +775,7 @@ pub fn isImportLib(buffer: *const [@sizeOf(coff.ImportHeader)]u8) bool {
 
 pub fn isArchive(data: *const [Archive.magic.len]u8) bool {
     if (!mem.eql(u8, data, Archive.magic)) {
-        log.debug("invalid archive magic: expected '{s}', found '{s}'", .{ Archive.magic, data });
+        extra_log.debug("invalid archive magic: expected '{s}', found '{s}'", .{ Archive.magic, data });
         return false;
     }
     return true;
@@ -791,10 +809,6 @@ pub fn addAlternateName(self: *Coff, from: []const u8, to: []const u8) !void {
         const gop = try self.getOrCreateGlobal(off);
         break :blk gop.index;
     };
-    log.debug("adding /alternatename:{s}={s}", .{
-        self.getSymbol(from_index).getName(self),
-        self.getSymbol(to_index).getName(self),
-    });
     try self.getSymbol(from_index).addExtra(.{ .alt_name = to_index }, self);
 }
 
@@ -1100,6 +1114,7 @@ const assert = std.debug.assert;
 const coff = std.coff;
 const fs = std.fs;
 const log = std.log.scoped(.coff);
+const extra_log = std.log.scoped(.coff_extra);
 const mem = std.mem;
 const state_log = std.log.scoped(.state);
 const std = @import("std");

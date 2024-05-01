@@ -60,12 +60,6 @@ pub fn addExport(self: *Dll, coff_file: *Coff, args: struct {
             return error.ParseFailed;
         },
     };
-    log.debug("{s}: adding export '{s}' of type {s} and hint {x}", .{
-        self.path,
-        imp_name,
-        @tagName(args.type),
-        args.hint,
-    });
     try self.exports.append(gpa, .{
         .imp_name = try self.addString(gpa, imp_name),
         .ext_name = try self.addString(gpa, ext_name),
@@ -161,7 +155,7 @@ pub fn asFile(self: *Dll) File {
 }
 
 pub fn format(
-    self: *Dll,
+    self: Dll,
     comptime unused_fmt_string: []const u8,
     options: std.fmt.FormatOptions,
     writer: anytype,
@@ -173,9 +167,9 @@ pub fn format(
     @compileError("do not format Dll directly");
 }
 
-const FormatContext = struct { *Dll, *Coff };
+const FormatContext = struct { Dll, *Coff };
 
-pub fn fmtSymbols(self: *Dll, coff_file: *Coff) std.fmt.Formatter(formatSymbols) {
+pub fn fmtSymbols(self: Dll, coff_file: *Coff) std.fmt.Formatter(formatSymbols) {
     return .{ .data = .{ self, coff_file } };
 }
 
@@ -195,7 +189,7 @@ fn formatSymbols(
     }
 }
 
-pub fn fmtThunks(self: *Dll, coff_file: *Coff) std.fmt.Formatter(formatThunks) {
+pub fn fmtThunks(self: Dll, coff_file: *Coff) std.fmt.Formatter(formatThunks) {
     return .{ .data = .{ self, coff_file } };
 }
 
@@ -213,6 +207,36 @@ fn formatThunks(
         const thunk = dll.getThunk(index) orelse continue;
         try writer.print("    {d} : {}\n", .{ index, thunk.fmt(coff_file) });
     }
+}
+
+pub fn fmtPath(self: Dll) std.fmt.Formatter(formatPath) {
+    return .{ .data = self };
+}
+
+fn formatPath(
+    dll: Dll,
+    comptime unused_fmt_string: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = unused_fmt_string;
+    _ = options;
+    try writer.writeAll(dll.path);
+}
+
+pub fn fmtPathShort(self: Dll) std.fmt.Formatter(formatPathShort) {
+    return .{ .data = self };
+}
+
+fn formatPathShort(
+    dll: Dll,
+    comptime unused_fmt_string: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = unused_fmt_string;
+    _ = options;
+    try writer.writeAll(std.fs.path.basename(dll.path));
 }
 
 pub const Export = packed struct {
