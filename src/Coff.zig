@@ -25,8 +25,18 @@ atoms: std.ArrayListUnmanaged(Atom) = .{},
 merge_rules: std.AutoArrayHashMapUnmanaged(u32, u32) = .{},
 
 entry_index: ?Symbol.Index = null,
-image_base_index: ?Symbol.Index = null,
 load_config_used_index: ?Symbol.Index = null,
+image_base_index: ?Symbol.Index = null,
+guard_fids_count_index: ?Symbol.Index = null,
+guard_fids_table_index: ?Symbol.Index = null,
+guard_flags_index: ?Symbol.Index = null,
+guard_iat_count_index: ?Symbol.Index = null,
+guard_iat_table_index: ?Symbol.Index = null,
+guard_longjmp_count_index: ?Symbol.Index = null,
+guard_longjmp_table_index: ?Symbol.Index = null,
+enclave_config_index: ?Symbol.Index = null,
+guard_eh_cont_count_index: ?Symbol.Index = null,
+guard_eh_cont_table_index: ?Symbol.Index = null,
 
 idata: IdataSection = .{},
 
@@ -507,6 +517,18 @@ fn resolveSyntheticSymbols(self: *Coff) !void {
     const internal = self.getInternalObject() orelse return;
 
     self.image_base_index = try internal.addSymbol("__ImageBase", self);
+    self.guard_fids_count_index = try internal.addSymbol("__guard_fids_count", self);
+    self.guard_fids_table_index = try internal.addSymbol("__guard_fids_table", self);
+    self.guard_flags_index = try internal.addSymbol("__guard_flags", self);
+    self.guard_iat_count_index = try internal.addSymbol("__guard_iat_count", self);
+    self.guard_iat_table_index = try internal.addSymbol("__guard_iat_table", self);
+    self.guard_longjmp_count_index = try internal.addSymbol("__guard_longjmp_count", self);
+    self.guard_longjmp_table_index = try internal.addSymbol("__guard_longjmp_table", self);
+    // Needed for MSVC 2017 15.5 CRT
+    self.enclave_config_index = try internal.addSymbol("__enclave_config", self);
+    // Needed for MSVC 2019 16.8 CRT
+    self.guard_eh_cont_count_index = try internal.addSymbol("__guard_eh_cont_count", self);
+    self.guard_eh_cont_table_index = try internal.addSymbol("__guard_eh_cont_table", self);
 }
 
 fn convertCommonSymbols(self: *Coff) !void {
