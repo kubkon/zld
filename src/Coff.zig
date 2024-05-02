@@ -19,13 +19,14 @@ symbols: std.ArrayListUnmanaged(Symbol) = .{},
 symbols_extra: std.ArrayListUnmanaged(u32) = .{},
 globals: std.AutoHashMapUnmanaged(u32, Symbol.Index) = .{},
 /// Global symbols we need to resolve for the link to succeed.
-undefined_symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
+undefined_symbols: std.AutoArrayHashMapUnmanaged(Symbol.Index, void) = .{},
 
 atoms: std.ArrayListUnmanaged(Atom) = .{},
 merge_rules: std.AutoArrayHashMapUnmanaged(u32, u32) = .{},
 
 entry_index: ?Symbol.Index = null,
 image_base_index: ?Symbol.Index = null,
+load_config_used_index: ?Symbol.Index = null,
 
 idata: IdataSection = .{},
 
@@ -416,15 +417,21 @@ fn parseArchive(self: *Coff, obj: LinkObject, queue: anytype) ParseError!bool {
 }
 
 fn addUndefinedSymbols(self: *Coff) !void {
-    const gpa = self.base.allocator;
+    const addUndefined = struct {
+        fn addUndefined(coff_file: *Coff, name: []const u8) !Symbol.Index {
+            const gpa = coff_file.base.allocator;
+            const off = try coff_file.string_intern.insert(gpa, name);
+            const gop = try coff_file.getOrCreateGlobal(off);
+            try coff_file.undefined_symbols.put(gpa, gop.index, {});
+            return gop.index;
+        }
+    }.addUndefined;
 
-    {
-        // Entry point
-        const name = self.getDefaultEntryPoint();
-        const off = try self.string_intern.insert(gpa, name);
-        const gop = try self.getOrCreateGlobal(off);
-        self.entry_index = gop.index;
-    }
+    // Entry point
+    self.entry_index = try addUndefined(self, self.getDefaultEntryPoint());
+
+    // Windows specific - try resolving _load_config_used
+    self.load_config_used_index = try addUndefined(self, "_load_config_used");
 }
 
 fn resolveSymbols(self: *Coff) !void {
@@ -473,13 +480,7 @@ fn markLive(self: *Coff) void {
     const tracy = trace(@src());
     defer tracy.end();
 
-    for (self.undefined_symbols.items) |index| {
-        if (self.getSymbol(index).getFile(self)) |file| {
-            if (file == .object) file.object.alive = true;
-        }
-    }
-
-    if (self.entry_index) |index| {
+    for (self.undefined_symbols.keys()) |index| {
         if (self.getSymbol(index).getFile(self)) |file| {
             if (file == .object) file.object.alive = true;
         }
@@ -494,14 +495,7 @@ fn markLive(self: *Coff) void {
         }
     }
 
-    for (self.undefined_symbols.items) |index| {
-        const sym = self.getSymbol(index);
-        if (sym.getFile(self)) |file| {
-            log.debug("Loaded {} for {s}", .{ file.fmtPathShort(), sym.getName(self) });
-        }
-    }
-
-    if (self.entry_index) |index| {
+    for (self.undefined_symbols.keys()) |index| {
         const sym = self.getSymbol(index);
         if (sym.getFile(self)) |file| {
             log.debug("Loaded {} for {s}", .{ file.fmtPathShort(), sym.getName(self) });
@@ -522,6 +516,19 @@ fn convertCommonSymbols(self: *Coff) !void {
 }
 
 fn claimUnresolved(self: *Coff) !void {
+    const claim = struct {
+        fn claim(coff_file: *Coff, sym_index: Symbol.Index) !void {
+            const gpa = coff_file.base.allocator;
+            const sym = coff_file.getSymbol(sym_index);
+            sym.value = 0;
+            sym.atom = 0;
+            sym.coff_sym_idx = 0;
+            sym.file = coff_file.internal_object_index.?;
+            sym.flags = .{ .global = true, .import = true, .weak = true };
+            try coff_file.getInternalObject().?.symbols.append(gpa, sym_index);
+        }
+    }.claim;
+
     for (self.objects.items) |index| {
         const object = self.getFile(index).?.object;
 
@@ -548,14 +555,14 @@ fn claimUnresolved(self: *Coff) !void {
             }
 
             const is_undf_ok = sym.flags.weak; // TODO: or /force
-            if (is_undf_ok) {
-                sym.value = 0;
-                sym.atom = 0;
-                sym.coff_sym_idx = 0;
-                sym.file = self.internal_object_index.?;
-                sym.flags = .{ .global = true, .import = true, .weak = true };
-                try self.getInternalObject().?.symbols.append(self.base.allocator, sym_index);
-            }
+            if (is_undf_ok) try claim(self, sym_index);
+        }
+    }
+
+    if (self.load_config_used_index) |sym_index| {
+        const sym = self.getSymbol(sym_index);
+        if (sym.getFile(self) == null) {
+            try claim(self, sym_index);
         }
     }
 }
@@ -576,14 +583,7 @@ fn markImports(self: *Coff) void {
         }
     }
 
-    for (self.undefined_symbols.items) |index| {
-        const sym = self.getSymbol(index);
-        if (sym.getFile(self)) |file| {
-            if (file == .dll) sym.flags.import = true;
-        }
-    }
-
-    if (self.entry_index) |index| {
+    for (self.undefined_symbols.keys()) |index| {
         const sym = self.getSymbol(index);
         if (sym.getFile(self)) |file| {
             if (file == .dll) sym.flags.import = true;
@@ -609,10 +609,9 @@ fn reportUndefs(self: *Coff) !void {
         try self.getFile(index).?.object.reportUndefs(self, &undefs);
     }
 
-    if (undefs.count() == 0) return;
-
     const max_notes = 4;
 
+    var has_undefs = false;
     var it = undefs.iterator();
     while (it.next()) |entry| {
         const undef_sym = self.getSymbol(entry.key_ptr.*);
@@ -621,6 +620,7 @@ fn reportUndefs(self: *Coff) !void {
 
         const err = try self.base.addErrorWithNotes(nnotes);
         try err.addMsg("undefined symbol: {s}", .{undef_sym.getName(self)});
+        has_undefs = true;
 
         var inote: usize = 0;
         while (inote < @min(notes.items.len, max_notes)) : (inote += 1) {
@@ -634,7 +634,17 @@ fn reportUndefs(self: *Coff) !void {
             try err.addNote("referenced {d} more times", .{remaining});
         }
     }
-    return error.UndefinedSymbols;
+
+    for (self.undefined_symbols.keys()) |index| {
+        const sym = self.getSymbol(index);
+        if (sym.getFile(self)) |_| continue;
+        has_undefs = true;
+        const err = try self.base.addErrorWithNotes(1);
+        try err.addMsg("undefined symbol: {s}", .{sym.getName(self)});
+        try err.addNote("/force command line option", .{});
+    }
+
+    if (has_undefs) return error.UndefinedSymbols;
 }
 
 fn parseMergeRules(self: *Coff) !void {
