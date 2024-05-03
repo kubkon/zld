@@ -265,7 +265,17 @@ pub const Thunk = struct {
     sym_index: Symbol.Index = 0,
     exp_index: u32 = 0,
 
-    pub fn getSize(thunk: Thunk, coff_file: *Coff) usize {
+    pub fn getAlignment(thunk: Thunk, coff_file: *Coff) u4 {
+        _ = thunk;
+        const cpu_arch = coff_file.options.cpu_arch.?;
+        return switch (cpu_arch) {
+            .aarch64 => 2,
+            .x86_64 => 0,
+            else => @panic("unhandled arch"),
+        };
+    }
+
+    pub fn getSize(thunk: Thunk, coff_file: *Coff) u32 {
         _ = thunk;
         const cpu_arch = coff_file.options.cpu_arch.?;
         return switch (cpu_arch) {

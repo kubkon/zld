@@ -735,6 +735,14 @@ fn initSections(self: *Coff) !void {
             .MEM_DISCARDABLE = 1,
         });
     }
+
+    for (self.dlls.values()) |index| {
+        const dll = self.getFile(index).?.dll;
+        for (dll.thunks_table.items) |thunk_index| {
+            const thunk = dll.getThunk(thunk_index) orelse continue;
+            thunk.out_section_number = self.text_section_index.?;
+        }
+    }
 }
 
 /// Copying lld logic for now.
@@ -847,6 +855,20 @@ fn updateSectionSizes(self: *Coff) !void {
             atom.value = offset;
             header.virtual_size += padding + atom.size;
             header.setAlignment(@max(header.getAlignment() orelse 0, atom.alignment));
+        }
+    }
+
+    for (self.dlls.values()) |index| {
+        const dll = self.getFile(index).?.dll;
+        for (dll.thunks_table.items) |thunk_index| {
+            const thunk = dll.getThunk(thunk_index) orelse continue;
+            const thunk_alignment = try std.math.powi(u32, 2, thunk.getAlignment(self));
+            const header = &self.sections.items(.header)[thunk.out_section_number];
+            const offset = mem.alignForward(u32, header.virtual_size, thunk_alignment);
+            const padding = offset - header.virtual_size;
+            thunk.value = offset;
+            header.virtual_size += padding + thunk.getSize(self);
+            header.setAlignment(@max(header.getAlignment() orelse 0, thunk.getAlignment(self)));
         }
     }
 
