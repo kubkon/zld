@@ -864,6 +864,7 @@ fn updateIdataSize(self: *Coff) !void {
     const header = &self.sections.items(.header)[self.idata_section_index.?];
     header.size_of_raw_data = mem.alignForward(u32, needed_size, self.getFileAlignment());
     header.virtual_size = needed_size;
+    header.setAlignment(@sizeOf(u64));
 }
 
 pub fn isCoffObj(buffer: *const [@sizeOf(coff.CoffHeader)]u8) bool {
@@ -1184,7 +1185,7 @@ pub const SectionHeader = struct {
 
     pub fn setAlignment(hdr: *SectionHeader, alignment: u16) void {
         assert(alignment > 0 and alignment <= 8192);
-        hdr.flags.ALIGN = std.math.log2_int(u16, alignment);
+        hdr.flags.ALIGN = std.math.log2_int(u16, alignment) + 1;
     }
 };
 
