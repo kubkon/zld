@@ -38,8 +38,6 @@ enclave_config_index: ?Symbol.Index = null,
 guard_eh_cont_count_index: ?Symbol.Index = null,
 guard_eh_cont_table_index: ?Symbol.Index = null,
 
-idata: IdataSection = .{},
-
 pub fn openPath(allocator: Allocator, options: Options, thread_pool: *ThreadPool) !*Coff {
     const file = try options.emit.directory.createFile(options.emit.sub_path, .{
         .truncate = true,
@@ -100,7 +98,6 @@ pub fn deinit(self: *Coff) void {
     self.globals.deinit(gpa);
     self.undefined_symbols.deinit(gpa);
     self.merge_rules.deinit(gpa);
-    self.idata.deinit(gpa);
 }
 
 pub fn flush(self: *Coff) !void {
@@ -200,6 +197,7 @@ pub fn flush(self: *Coff) !void {
     try self.parseMergeRules();
     try self.createImportThunks();
     try self.initSections();
+    try self.sortSections();
     try self.updateSectionSizes();
 
     if (build_options.enable_logging)
@@ -738,6 +736,84 @@ fn initSections(self: *Coff) !void {
     }
 }
 
+/// Copying lld logic for now.
+fn getSectionRank(self: *Coff, header: SectionHeader) u8 {
+    const name = header.getName(self);
+    if (mem.eql(u8, name, ".text")) return 0;
+    if (mem.eql(u8, name, ".bss")) return 1;
+    if (mem.eql(u8, name, ".rdata")) return 2;
+    if (mem.eql(u8, name, ".buildid")) return 3;
+    if (mem.eql(u8, name, ".data")) return 4;
+    if (mem.eql(u8, name, ".pdata")) return 5;
+    if (mem.eql(u8, name, ".idata")) return 6;
+    if (mem.eql(u8, name, ".edata")) return 7;
+    if (mem.eql(u8, name, ".didat")) return 8;
+    if (mem.eql(u8, name, ".rsrc")) return 9;
+    if (mem.eql(u8, name, ".reloc")) return 10;
+    if (mem.eql(u8, name, ".ctors")) return 11;
+    if (mem.eql(u8, name, ".dtors")) return 12;
+    return std.math.maxInt(u8);
+}
+
+fn sortSections(self: *Coff) !void {
+    const Entry = struct {
+        index: u16,
+
+        pub fn lessThan(coff_file: *Coff, lhs: @This(), rhs: @This()) bool {
+            const lhs_header = coff_file.sections.items(.header)[lhs.index];
+            const rhs_header = coff_file.sections.items(.header)[rhs.index];
+            const lhs_rank = coff_file.getSectionRank(lhs_header);
+            const rhs_rank = coff_file.getSectionRank(rhs_header);
+            if (lhs_rank == rhs_rank) {
+                return mem.order(u8, lhs_header.getName(coff_file), rhs_header.getName(coff_file)) == .lt;
+            }
+            return lhs_rank < rhs_rank;
+        }
+    };
+
+    const gpa = self.base.allocator;
+
+    var entries = try std.ArrayList(Entry).initCapacity(gpa, self.sections.slice().len);
+    defer entries.deinit();
+    for (0..self.sections.slice().len) |index| {
+        entries.appendAssumeCapacity(.{ .index = @intCast(index) });
+    }
+
+    mem.sort(Entry, entries.items, self, Entry.lessThan);
+
+    const backlinks = try gpa.alloc(u8, entries.items.len);
+    defer gpa.free(backlinks);
+    for (entries.items, 0..) |entry, i| {
+        backlinks[entry.index] = @intCast(i);
+    }
+
+    var slice = self.sections.toOwnedSlice();
+    defer slice.deinit(gpa);
+
+    try self.sections.ensureTotalCapacity(gpa, slice.len);
+    for (entries.items) |sorted| {
+        self.sections.appendAssumeCapacity(slice.get(sorted.index));
+    }
+
+    for (self.objects.items) |index| {
+        for (self.getFile(index).?.object.atoms.items) |atom_index| {
+            const atom = self.getAtom(atom_index) orelse continue;
+            if (!atom.flags.alive) continue;
+            atom.out_section_number = backlinks[atom.out_section_number];
+        }
+    }
+
+    for (&[_]*?u16{
+        &self.text_section_index,
+        &self.idata_section_index,
+        &self.reloc_section_index,
+    }) |maybe_index| {
+        if (maybe_index.*) |*index| {
+            index.* = backlinks[index.*];
+        }
+    }
+}
+
 fn updateSectionSizes(self: *Coff) !void {
     if (self.idata_section_index != null) {
         try self.updateIdataSize();
@@ -891,8 +967,7 @@ pub fn addSection(self: *Coff, name: []const u8, flags: coff.SectionHeaderFlags)
 
 pub fn getSectionByName(self: *Coff, name: []const u8) ?u16 {
     for (self.sections.items(.header), 0..) |header, index| {
-        const sect_name = self.string_intern.getAssumeExists(header.name);
-        if (mem.eql(u8, sect_name, name)) return @intCast(index);
+        if (mem.eql(u8, header.getName(self), name)) return @intCast(index);
     }
     return null;
 }
@@ -1043,7 +1118,7 @@ fn formatSections(
     for (self.sections.items(.header), 0..) |header, i| {
         try writer.print("sect({d}) : {s} : @{x} ({x}) : align({?x}) : size({x};{x}) : flags({})\n", .{
             i,
-            self.string_intern.getAssumeExists(header.name),
+            header.getName(self),
             header.virtual_address,
             header.pointer_to_raw_data,
             header.getAlignment(),
@@ -1089,6 +1164,10 @@ pub const SectionHeader = struct {
     number_of_relocations: u16,
     number_of_linenumbers: u16,
     flags: coff.SectionHeaderFlags,
+
+    pub fn getName(hdr: SectionHeader, coff_file: *Coff) [:0]const u8 {
+        return coff_file.string_intern.getAssumeExists(hdr.name);
+    }
 
     pub fn isComdat(hdr: SectionHeader) bool {
         return hdr.flags.LNK_COMDAT == 0b1;
@@ -1155,7 +1234,6 @@ const Archive = @import("Coff/Archive.zig");
 const Atom = @import("Coff/Atom.zig");
 const Coff = @This();
 const File = @import("Coff/file.zig").File;
-const IdataSection = synthetic.IdataSection;
 const InternalObject = @import("Coff/InternalObject.zig");
 const Object = @import("Coff/Object.zig");
 pub const Options = @import("Coff/Options.zig");
