@@ -549,7 +549,7 @@ pub fn convertCommonSymbols(self: *Object, coff_file: *Coff) !void {
                 .MEM_READ = 0b1,
             },
         };
-        sect.setAlignment(alignment);
+        sect.setAlignment(@intCast(alignment));
         self.sections.items(.relocs)[sect_num] = .{};
         atom.section_number = sect_num;
 

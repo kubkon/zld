@@ -13,7 +13,7 @@ file: File.Index = 0,
 size: u32 = 0,
 
 /// Alignment of this Atom as a power of 2.
-alignment: u16 = 0,
+alignment: u4 = 0,
 
 /// Index of the input section.
 section_number: u16 = 0,

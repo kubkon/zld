@@ -835,6 +835,21 @@ fn addAtomsToSections(self: *Coff) !void {
 }
 
 fn updateSectionSizes(self: *Coff) !void {
+    const slice = self.sections.slice();
+    for (slice.items(.header), slice.items(.atoms)) |*header, atoms| {
+        if (atoms.items.len == 0) continue;
+
+        for (atoms.items) |atom_index| {
+            const atom = self.getAtom(atom_index).?;
+            const atom_alignment = try std.math.powi(u32, 2, atom.alignment);
+            const offset = mem.alignForward(u32, header.virtual_size, atom_alignment);
+            const padding = offset - header.virtual_size;
+            atom.value = offset;
+            header.virtual_size += padding + atom.size;
+            header.setAlignment(@max(header.getAlignment() orelse 0, atom.alignment));
+        }
+    }
+
     if (self.idata_section_index != null) {
         try self.updateIdataSize();
     }
@@ -884,7 +899,7 @@ fn updateIdataSize(self: *Coff) !void {
     const header = &self.sections.items(.header)[self.idata_section_index.?];
     header.size_of_raw_data = mem.alignForward(u32, needed_size, self.getFileAlignment());
     header.virtual_size = needed_size;
-    header.setAlignment(@sizeOf(u64));
+    header.setAlignment(3);
 }
 
 pub fn isCoffObj(buffer: *const [@sizeOf(coff.CoffHeader)]u8) bool {
@@ -1198,14 +1213,14 @@ pub const SectionHeader = struct {
         return hdr.flags.CNT_CODE == 0b1;
     }
 
-    pub fn getAlignment(hdr: SectionHeader) ?u16 {
+    pub fn getAlignment(hdr: SectionHeader) ?u4 {
         if (hdr.flags.ALIGN == 0) return null;
         return hdr.flags.ALIGN - 1;
     }
 
-    pub fn setAlignment(hdr: *SectionHeader, alignment: u16) void {
-        assert(alignment > 0 and alignment <= 8192);
-        hdr.flags.ALIGN = std.math.log2_int(u16, alignment) + 1;
+    pub fn setAlignment(hdr: *SectionHeader, alignment: u4) void {
+        assert(alignment <= 0xd);
+        hdr.flags.ALIGN = alignment + 1;
     }
 };
 
