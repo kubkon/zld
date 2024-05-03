@@ -198,6 +198,7 @@ pub fn flush(self: *Coff) !void {
     try self.createImportThunks();
     try self.initSections();
     try self.sortSections();
+    try self.addAtomsToSections();
     try self.updateSectionSizes();
 
     if (build_options.enable_logging)
@@ -810,6 +811,25 @@ fn sortSections(self: *Coff) !void {
     }) |maybe_index| {
         if (maybe_index.*) |*index| {
             index.* = backlinks[index.*];
+        }
+    }
+}
+
+fn addAtomsToSections(self: *Coff) !void {
+    for (self.objects.items) |index| {
+        const object = self.getFile(index).?.object;
+        for (object.atoms.items) |atom_index| {
+            const atom = self.getAtom(atom_index) orelse continue;
+            if (!atom.flags.alive) continue;
+            const atoms = &self.sections.items(.atoms)[atom.out_section_number];
+            try atoms.append(self.base.allocator, atom_index);
+        }
+        for (object.symbols.items) |sym_index| {
+            const sym = self.getSymbol(sym_index);
+            const atom = sym.getAtom(self) orelse continue;
+            if (!atom.flags.alive) continue;
+            if (sym.getFile(self).?.getIndex() != index) continue;
+            sym.out_section_number = atom.out_section_number;
         }
     }
 }
