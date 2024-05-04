@@ -10,6 +10,7 @@ file_handles: std.ArrayListUnmanaged(File.Handle) = .{},
 sections: std.MultiArrayList(Section) = .{},
 
 text_section_index: ?u16 = null,
+data_section_index: ?u16 = null,
 idata_section_index: ?u16 = null,
 reloc_section_index: ?u16 = null,
 
@@ -201,10 +202,12 @@ pub fn flush(self: *Coff) !void {
     try self.addAtomsToSections();
     try self.updateSectionSizes();
 
+    try self.allocateSections();
+
     if (build_options.enable_logging)
         state_log.debug("{}", .{self.dumpState()});
 
-    return error.Todo;
+    try self.writeHeader();
 }
 
 fn addLibPathsFromEnv(arena: Allocator, lib_paths: *std.ArrayList([]const u8)) !void {
@@ -720,6 +723,7 @@ fn initSections(self: *Coff) !void {
         }
     }
     self.text_section_index = self.getSectionByName(".text");
+    self.data_section_index = self.getSectionByName(".data");
 
     const needs_idata = for (self.dlls.values()) |index| {
         if (self.getFile(index).?.dll.alive) break true;
@@ -919,9 +923,147 @@ fn updateIdataSize(self: *Coff) !void {
 
     const needed_size = dir_table_size + lookup_table_size + names_table_size + dll_names_size + iat_size;
     const header = &self.sections.items(.header)[self.idata_section_index.?];
-    header.size_of_raw_data = mem.alignForward(u32, needed_size, self.getFileAlignment());
     header.virtual_size = needed_size;
     header.setAlignment(3);
+}
+
+fn allocateSections(self: *Coff) !void {
+    _ = self;
+    // TODO
+}
+
+fn writeHeader(self: *Coff) !void {
+    const gpa = self.base.allocator;
+
+    var buffer = std.ArrayList(u8).init(gpa);
+    defer buffer.deinit();
+    const writer = buffer.writer();
+
+    try buffer.ensureTotalCapacity(self.getSizeOfHeaders());
+    writer.writeAll(msdos_stub) catch unreachable;
+    mem.writeInt(u32, buffer.items[0x3c..][0..4], msdos_stub.len, .little);
+
+    writer.writeAll("PE\x00\x00") catch unreachable;
+    const flags = coff.CoffHeaderFlags{
+        .EXECUTABLE_IMAGE = 1,
+        .DEBUG_STRIPPED = 1, // TODO
+        .LARGE_ADDRESS_AWARE = 1,
+    };
+
+    const timestamp = std.time.timestamp();
+    const size_of_optional_header = @as(u16, @intCast(self.getOptionalHeaderSize() + self.getDataDirectoryHeadersSize()));
+    var coff_header = coff.CoffHeader{
+        .machine = coff.MachineType.fromTargetCpuArch(self.options.cpu_arch.?),
+        .number_of_sections = @as(u16, @intCast(self.sections.slice().len)), // TODO what if we prune a section
+        .time_date_stamp = @as(u32, @truncate(@as(u64, @bitCast(timestamp)))),
+        .pointer_to_symbol_table = self.strtab_offset orelse 0,
+        .number_of_symbols = 0,
+        .size_of_optional_header = size_of_optional_header,
+        .flags = flags,
+    };
+
+    writer.writeAll(mem.asBytes(&coff_header)) catch unreachable;
+
+    const dll_flags: coff.DllFlags = .{
+        .HIGH_ENTROPY_VA = 1, // TODO do we want to permit non-PIE builds at all?
+        .DYNAMIC_BASE = 1,
+        .TERMINAL_SERVER_AWARE = 1, // We are not a legacy app
+        .NX_COMPAT = 1, // We are compatible with Data Execution Prevention
+    };
+    const subsystem: coff.Subsystem = .WINDOWS_CUI;
+    const size_of_image: u32 = self.getSizeOfImage();
+    const size_of_headers: u32 = mem.alignForward(u32, self.getSizeOfHeaders(), default_file_alignment);
+    const base_of_code = self.sections.get(self.text_section_index.?).header.virtual_address;
+    const base_of_data = self.sections.get(self.data_section_index.?).header.virtual_address;
+
+    var size_of_code: u32 = 0;
+    var size_of_initialized_data: u32 = 0;
+    var size_of_uninitialized_data: u32 = 0;
+    for (self.sections.items(.header)) |header| {
+        if (header.flags.CNT_CODE == 1) {
+            size_of_code += header.size_of_raw_data;
+        }
+        if (header.flags.CNT_INITIALIZED_DATA == 1) {
+            size_of_initialized_data += header.size_of_raw_data;
+        }
+        if (header.flags.CNT_UNINITIALIZED_DATA == 1) {
+            size_of_uninitialized_data += header.size_of_raw_data;
+        }
+    }
+
+    switch (self.ptr_width) {
+        .p32 => {
+            var opt_header = coff.OptionalHeaderPE32{
+                .magic = coff.IMAGE_NT_OPTIONAL_HDR32_MAGIC,
+                .major_linker_version = 0,
+                .minor_linker_version = 0,
+                .size_of_code = size_of_code,
+                .size_of_initialized_data = size_of_initialized_data,
+                .size_of_uninitialized_data = size_of_uninitialized_data,
+                .address_of_entry_point = self.entry_addr orelse 0,
+                .base_of_code = base_of_code,
+                .base_of_data = base_of_data,
+                .image_base = @intCast(self.image_base),
+                .section_alignment = self.page_size,
+                .file_alignment = default_file_alignment,
+                .major_operating_system_version = 6,
+                .minor_operating_system_version = 0,
+                .major_image_version = 0,
+                .minor_image_version = 0,
+                .major_subsystem_version = @intCast(self.major_subsystem_version),
+                .minor_subsystem_version = @intCast(self.minor_subsystem_version),
+                .win32_version_value = 0,
+                .size_of_image = size_of_image,
+                .size_of_headers = size_of_headers,
+                .checksum = 0,
+                .subsystem = subsystem,
+                .dll_flags = dll_flags,
+                .size_of_stack_reserve = default_size_of_stack_reserve,
+                .size_of_stack_commit = default_size_of_stack_commit,
+                .size_of_heap_reserve = default_size_of_heap_reserve,
+                .size_of_heap_commit = default_size_of_heap_commit,
+                .loader_flags = 0,
+                .number_of_rva_and_sizes = @intCast(self.data_directories.len),
+            };
+            writer.writeAll(mem.asBytes(&opt_header)) catch unreachable;
+        },
+        .p64 => {
+            var opt_header = coff.OptionalHeaderPE64{
+                .magic = coff.IMAGE_NT_OPTIONAL_HDR64_MAGIC,
+                .major_linker_version = 0,
+                .minor_linker_version = 0,
+                .size_of_code = size_of_code,
+                .size_of_initialized_data = size_of_initialized_data,
+                .size_of_uninitialized_data = size_of_uninitialized_data,
+                .address_of_entry_point = self.entry_addr orelse 0,
+                .base_of_code = base_of_code,
+                .image_base = self.image_base,
+                .section_alignment = self.page_size,
+                .file_alignment = default_file_alignment,
+                .major_operating_system_version = 6,
+                .minor_operating_system_version = 0,
+                .major_image_version = 0,
+                .minor_image_version = 0,
+                .major_subsystem_version = self.major_subsystem_version,
+                .minor_subsystem_version = self.minor_subsystem_version,
+                .win32_version_value = 0,
+                .size_of_image = size_of_image,
+                .size_of_headers = size_of_headers,
+                .checksum = 0,
+                .subsystem = subsystem,
+                .dll_flags = dll_flags,
+                .size_of_stack_reserve = default_size_of_stack_reserve,
+                .size_of_stack_commit = default_size_of_stack_commit,
+                .size_of_heap_reserve = default_size_of_heap_reserve,
+                .size_of_heap_commit = default_size_of_heap_commit,
+                .loader_flags = 0,
+                .number_of_rva_and_sizes = @intCast(self.data_directories.len),
+            };
+            writer.writeAll(mem.asBytes(&opt_header)) catch unreachable;
+        },
+    }
+
+    try self.base.file.?.pwriteAll(buffer.items, 0);
 }
 
 pub fn isCoffObj(buffer: *const [@sizeOf(coff.CoffHeader)]u8) bool {
@@ -950,12 +1092,21 @@ fn getDefaultEntryPoint(self: *Coff) [:0]const u8 {
     return "mainCRTStartup";
 }
 
-fn getSectionAlignment(self: *Coff) u32 {
+fn getSectionAlignment(self: Coff) u32 {
     return self.options.@"align" orelse 0x1000;
 }
 
-fn getFileAlignment(self: *Coff) u32 {
+fn getFileAlignment(self: Coff) u32 {
     return self.options.file_align orelse 0x200;
+}
+
+/// Returns the maximum of section alignment and file alignment.
+fn getEffectiveAlignment(self: Coff) u32 {
+    return @max(self.getSectionAlignment(), self.getFileAlignment());
+}
+
+fn getSizeOfHeaders(self: Coff) u32 {
+    
 }
 
 pub fn addAlternateName(self: *Coff, from: []const u8, to: []const u8) !void {
@@ -1282,6 +1433,7 @@ const fs = std.fs;
 const log = std.log.scoped(.coff);
 const extra_log = std.log.scoped(.coff_extra);
 const mem = std.mem;
+const msdos_stub = @embedFile("msdos-stub.bin");
 const state_log = std.log.scoped(.state);
 const std = @import("std");
 const synthetic = @import("Coff/synthetic.zig");
