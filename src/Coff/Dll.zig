@@ -4,6 +4,7 @@ index: File.Index,
 exports: std.ArrayListUnmanaged(Export) = .{},
 strtab: std.ArrayListUnmanaged(u8) = .{},
 symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
+
 thunks: std.ArrayListUnmanaged(Thunk) = .{},
 thunks_table: std.ArrayListUnmanaged(Thunk.Index) = .{},
 
@@ -129,8 +130,8 @@ pub fn updateIdataSize(self: *Dll, coff_file: *Coff) !void {
         index += 1;
     }
 
-    ctx.lookup_table_size = index * @sizeOf(u64);
-    ctx.iat_size = index * @sizeOf(u64);
+    ctx.lookup_table_size = (index + 1) * @sizeOf(u64);
+    ctx.iat_size = (index + 1) * @sizeOf(u64);
     ctx.dll_names_size += @as(u32, @intCast(self.path.len)) + 1;
 }
 
