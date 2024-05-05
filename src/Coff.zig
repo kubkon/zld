@@ -838,6 +838,7 @@ fn sortSections(self: *Coff) !void {
 
     for (&[_]*?u16{
         &self.text_section_index,
+        &self.data_section_index,
         &self.idata_section_index,
         &self.reloc_section_index,
     }) |maybe_index| {
