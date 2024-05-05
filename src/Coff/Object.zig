@@ -588,6 +588,14 @@ pub fn initSection(self: Object, atom: *const Atom, coff_file: *Coff) !u16 {
     return coff_file.getSectionByName(out_name) orelse try coff_file.addSection(out_name, flags);
 }
 
+pub fn collectBaseRelocs(self: Object, coff_file: *Coff) !void {
+    for (self.atoms.items) |atom_index| {
+        const atom = coff_file.getAtom(atom_index) orelse continue;
+        if (!atom.flags.alive) continue;
+        try atom.collectBaseRelocs(coff_file);
+    }
+}
+
 pub fn getString(self: Object, off: u32) [:0]const u8 {
     assert(off < self.strtab.items.len);
     return mem.sliceTo(@as([*:0]const u8, @ptrCast(self.strtab.items.ptr + off)), 0);

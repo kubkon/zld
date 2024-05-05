@@ -727,7 +727,9 @@ fn createImportThunks(self: *Coff) !void {
 }
 
 fn collectBaseRelocs(self: *Coff) !void {
-    _ = self; // TODO
+    for (self.objects.items) |index| {
+        try self.getFile(index).?.object.collectBaseRelocs(self);
+    }
 }
 
 fn initSections(self: *Coff) !void {
@@ -752,7 +754,7 @@ fn initSections(self: *Coff) !void {
         });
     }
 
-    if (self.base_relocs.symbols.items.len > 0) {
+    if (self.base_relocs.entries.items.len > 0) {
         self.reloc_section_index = try self.addSection(".reloc", .{
             .CNT_INITIALIZED_DATA = 1,
             .MEM_READ = 1,

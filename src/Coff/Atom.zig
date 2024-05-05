@@ -70,6 +70,21 @@ fn reportUndefSymbol(self: Atom, rel: coff.Relocation, coff_file: *Coff, undefs:
     }
 }
 
+/// TODO: handle different archs
+/// TODO: handle non-ptr-width relocs too
+pub fn collectBaseRelocs(self: Atom, coff_file: *Coff) !void {
+    const gpa = coff_file.base.allocator;
+    for (self.getRelocs(coff_file)) |rel| {
+        switch (@as(coff.ImageRelAmd64, @enumFromInt(rel.type))) {
+            .addr64 => try coff_file.base_relocs.entries.append(gpa, .{
+                .atom = self.atom_index,
+                .offset = rel.virtual_address,
+            }),
+            else => {},
+        }
+    }
+}
+
 pub fn format(
     atom: Atom,
     comptime unused_fmt_string: []const u8,
