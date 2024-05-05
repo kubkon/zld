@@ -39,6 +39,8 @@ enclave_config_index: ?Symbol.Index = null,
 guard_eh_cont_count_index: ?Symbol.Index = null,
 guard_eh_cont_table_index: ?Symbol.Index = null,
 
+data_dirs: [coff.IMAGE_NUMBEROF_DIRECTORY_ENTRIES]coff.ImageDataDirectory,
+
 pub fn openPath(allocator: Allocator, options: Options, thread_pool: *ThreadPool) !*Coff {
     const file = try options.emit.directory.createFile(options.emit.sub_path, .{
         .truncate = true,
@@ -66,6 +68,10 @@ fn createEmpty(gpa: Allocator, options: Options, thread_pool: *ThreadPool) !*Cof
             .thread_pool = thread_pool,
         },
         .options = options,
+        .data_dirs = [_]coff.ImageDataDirectory{.{
+            .virtual_address = 0,
+            .size = 0,
+        }} ** coff.IMAGE_NUMBEROF_DIRECTORY_ENTRIES,
     };
 
     return self;
@@ -201,12 +207,16 @@ pub fn flush(self: *Coff) !void {
     try self.sortSections();
     try self.addAtomsToSections();
     try self.updateSectionSizes();
+    self.updateDataDirectorySizes();
 
     try self.allocateSections();
+    self.allocateDataDirectories();
 
     if (build_options.enable_logging)
         state_log.debug("{}", .{self.dumpState()});
 
+    try self.writeDataDirectoryHeaders();
+    try self.writeSectionHeaders();
     try self.writeHeader();
 }
 
@@ -927,9 +937,86 @@ fn updateIdataSize(self: *Coff) !void {
     header.setAlignment(3);
 }
 
+fn updateDataDirectorySizes(self: *Coff) void {
+    if (self.idata_section_index) |_| {
+        const import_dir = &self.data_dirs[@intFromEnum(coff.DirectoryEntry.IMPORT)];
+        const iat_dir = &self.data_dirs[@intFromEnum(coff.DirectoryEntry.IAT)];
+
+        var import_size: u32 = @sizeOf(coff.ImportDirectoryEntry);
+        var iat_offset: u32 = std.math.maxInt(u32);
+        var iat_size: u32 = 0;
+        for (self.dlls.values()) |index| {
+            const ctx = self.getFile(index).?.dll.idata_ctx;
+            import_size += @sizeOf(coff.ImportDirectoryEntry);
+            iat_offset = @min(iat_offset, ctx.iat_offset);
+            iat_size += ctx.iat_size;
+        }
+        import_dir.size = import_size;
+        iat_dir.virtual_address = iat_offset;
+        iat_dir.size = iat_size;
+    }
+
+    if (self.reloc_section_index) |index| {
+        const header = self.sections.items(.header)[index];
+        const dir = &self.data_dirs[@intFromEnum(coff.DirectoryEntry.BASERELOC)];
+        dir.size = header.virtual_size;
+    }
+}
+
 fn allocateSections(self: *Coff) !void {
     _ = self;
     // TODO
+}
+
+fn allocateDataDirectories(self: *Coff) void {
+    if (self.idata_section_index) |index| {
+        const header = self.sections.items(.header)[index];
+        const import_dir = &self.data_dirs[@intFromEnum(coff.DirectoryEntry.IMPORT)];
+        const iat_dir = &self.data_dirs[@intFromEnum(coff.DirectoryEntry.IAT)];
+        import_dir.virtual_address += header.virtual_address;
+        iat_dir.virtual_address += header.virtual_address;
+    }
+
+    if (self.reloc_section_index) |index| {
+        const header = self.sections.items(.header)[index];
+        const dir = &self.data_dirs[@intFromEnum(coff.DirectoryEntry.BASERELOC)];
+        dir.virtual_address += header.virtual_address;
+    }
+}
+
+fn writeSectionHeaders(self: *Coff) !void {
+    const offset = self.getSectionHeadersOffset();
+    var headers = try std.ArrayList(coff.SectionHeader).initCapacity(self.base.allocator, self.sections.items(.header).len);
+    defer headers.deinit();
+    for (self.sections.items(.header)) |header| {
+        const out = headers.addOneAssumeCapacity();
+        out.* = .{
+            .name = undefined,
+            .virtual_size = header.virtual_size,
+            .virtual_address = header.virtual_address,
+            .size_of_raw_data = header.size_of_raw_data,
+            .pointer_to_raw_data = header.pointer_to_raw_data,
+            .pointer_to_relocations = header.pointer_to_relocations,
+            .pointer_to_linenumbers = header.pointer_to_linenumbers,
+            .number_of_relocations = header.number_of_relocations,
+            .number_of_linenumbers = header.number_of_linenumbers,
+            .flags = header.flags,
+        };
+        out.flags.ALIGN = 0;
+        @memset(&out.name, 0);
+        const name = self.string_intern.getAssumeExists(header.name);
+        if (name.len >= out.name.len) {
+            @memcpy(out.name[0 .. out.name.len - 1], name[0 .. out.name.len - 1]);
+        } else {
+            @memcpy(out.name[0..name.len], name);
+        }
+    }
+    try self.base.file.pwriteAll(mem.sliceAsBytes(headers.items), offset);
+}
+
+fn writeDataDirectoryHeaders(self: *Coff) !void {
+    const offset = self.getDataDirectoryHeadersOffset();
+    try self.base.file.pwriteAll(mem.sliceAsBytes(&self.data_dirs), offset);
 }
 
 fn writeHeader(self: *Coff) !void {
@@ -1026,7 +1113,7 @@ fn writeHeader(self: *Coff) !void {
         .size_of_heap_reserve = self.getSizeOfHeapReserve(),
         .size_of_heap_commit = self.getSizeOfHeapCommit(),
         .loader_flags = 0,
-        .number_of_rva_and_sizes = 0, // TODO
+        .number_of_rva_and_sizes = @intCast(self.data_dirs.len),
     };
     writer.writeAll(mem.asBytes(&opt_header)) catch unreachable;
 
@@ -1108,9 +1195,7 @@ fn getOptionalHeaderSize(self: Coff) u32 {
 }
 
 fn getDataDirectoryHeadersSize(self: Coff) u32 {
-    _ = self;
-    // TODO
-    return 0;
+    return @intCast(self.data_dirs.len * @sizeOf(coff.ImageDataDirectory));
 }
 
 fn getSectionHeadersSize(self: Coff) u32 {

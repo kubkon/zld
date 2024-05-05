@@ -581,6 +581,7 @@ pub fn initSection(self: Object, atom: *const Atom, coff_file: *Coff) !u16 {
     const full_name = self.getString(header.name);
     var flags = header.flags;
     flags.ALIGN = 0;
+    flags.LNK_COMDAT = 0;
     const name_sep = mem.indexOfScalar(u8, full_name, '$') orelse full_name.len;
     const name = full_name[0..name_sep];
     const out_name = coff_file.getMergeRule(name) orelse name;
