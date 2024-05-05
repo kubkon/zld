@@ -40,6 +40,7 @@ guard_eh_cont_count_index: ?Symbol.Index = null,
 guard_eh_cont_table_index: ?Symbol.Index = null,
 
 data_dirs: [coff.IMAGE_NUMBEROF_DIRECTORY_ENTRIES]coff.ImageDataDirectory,
+base_relocs: RelocSection = .{},
 
 pub fn openPath(allocator: Allocator, options: Options, thread_pool: *ThreadPool) !*Coff {
     const file = try options.emit.directory.createFile(options.emit.sub_path, .{
@@ -105,6 +106,7 @@ pub fn deinit(self: *Coff) void {
     self.globals.deinit(gpa);
     self.undefined_symbols.deinit(gpa);
     self.merge_rules.deinit(gpa);
+    self.base_relocs.deinit(gpa);
 }
 
 pub fn flush(self: *Coff) !void {
@@ -203,6 +205,7 @@ pub fn flush(self: *Coff) !void {
 
     try self.parseMergeRules();
     try self.createImportThunks();
+    try self.collectBaseRelocs();
     try self.initSections();
     try self.sortSections();
     try self.addAtomsToSections();
@@ -723,6 +726,10 @@ fn createImportThunks(self: *Coff) !void {
     }
 }
 
+fn collectBaseRelocs(self: *Coff) !void {
+    _ = self; // TODO
+}
+
 fn initSections(self: *Coff) !void {
     for (self.objects.items) |index| {
         const object = self.getFile(index).?.object;
@@ -743,6 +750,9 @@ fn initSections(self: *Coff) !void {
             .CNT_INITIALIZED_DATA = 1,
             .MEM_READ = 1,
         });
+    }
+
+    if (self.base_relocs.symbols.items.len > 0) {
         self.reloc_section_index = try self.addSection(".reloc", .{
             .CNT_INITIALIZED_DATA = 1,
             .MEM_READ = 1,
@@ -888,6 +898,11 @@ fn updateSectionSizes(self: *Coff) !void {
 
     if (self.idata_section_index != null) {
         try self.updateIdataSize();
+    }
+
+    if (self.reloc_section_index) |index| {
+        const header = &self.sections.items(.header)[index];
+        header.virtual_size = self.base_relocs.size(self);
     }
 }
 
@@ -1567,6 +1582,7 @@ const File = @import("Coff/file.zig").File;
 const InternalObject = @import("Coff/InternalObject.zig");
 const Object = @import("Coff/Object.zig");
 pub const Options = @import("Coff/Options.zig");
+const RelocSection = synthetic.RelocSection;
 const StringTable = @import("StringTable.zig");
 const Symbol = @import("Coff/Symbol.zig");
 const ThreadPool = std.Thread.Pool;
