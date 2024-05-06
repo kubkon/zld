@@ -114,6 +114,7 @@ const AddExtraOpts = struct {
     weak_flag: ?u32 = null,
     thunk: ?u32 = null,
     iat: ?u32 = null,
+    names: ?u32 = null,
 };
 
 pub fn addExtra(symbol: *Symbol, opts: AddExtraOpts, coff_file: *Coff) !void {
@@ -225,6 +226,9 @@ pub const Flags = packed struct {
 
     /// Whether the symbol has a jump thunk.
     thunk: bool = false,
+
+    /// Whether the symbol is imported by name.
+    names: bool = false,
 };
 
 pub const Extra = struct {
@@ -232,6 +236,7 @@ pub const Extra = struct {
     weak_flag: u32 = 0,
     thunk: u32 = 0,
     iat: u32 = 0,
+    names: u32 = 0,
 };
 
 pub const Index = u32;

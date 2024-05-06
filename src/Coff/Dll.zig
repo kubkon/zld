@@ -114,25 +114,72 @@ pub fn addThunks(self: *Dll, coff_file: *Coff) !void {
     }
 }
 
-pub fn updateIdataSize(self: *Dll, coff_file: *Coff) !void {
+pub fn updateImportSectionSize(self: *Dll, coff_file: *Coff) !void {
     const ctx = &self.idata_ctx;
-    var index: u32 = 0;
+    var iat: u32 = 0;
+    var names: u32 = 0;
     for (self.symbols.items, self.exports.items) |sym_index, exp| {
         const sym = coff_file.getSymbol(sym_index);
         if (!sym.flags.import) continue;
 
         if (!exp.isByOrdinal(self)) {
-            ctx.names_table_size += @sizeOf(u16) + @as(u32, @intCast(exp.getExternName(self).len)) + 1;
-            if (ctx.names_table_size % 2 != 0) ctx.names_table_size += 1;
+            try sym.addExtra(.{ .names = names }, coff_file);
+            sym.flags.names = true;
+            var size: u32 = @sizeOf(u16) + @as(u32, @intCast(exp.getExternName(self).len + 1));
+            if (size % 2 != 0) size += 1;
+            ctx.names_table_size += size;
+            names += size;
         }
 
-        try sym.addExtra(.{ .iat = index }, coff_file);
-        index += 1;
+        try sym.addExtra(.{ .iat = iat }, coff_file);
+        iat += 1;
     }
 
-    ctx.lookup_table_size = (index + 1) * @sizeOf(u64);
-    ctx.iat_size = (index + 1) * @sizeOf(u64);
+    ctx.lookup_table_size = (iat + 1) * @sizeOf(u64);
+    ctx.iat_size = (iat + 1) * @sizeOf(u64);
     ctx.dll_names_size += @as(u32, @intCast(self.path.len)) + 1;
+}
+
+pub fn writeImportSection(self: *Dll, buffer: []u8, coff_file: *Coff) !void {
+    const ctx = self.idata_ctx;
+    const base_addr = coff_file.sections.items(.header)[coff_file.idata_section_index.?].virtual_address;
+    // Dir header
+    const dir_header = coff.ImportDirectoryEntry{
+        .import_lookup_table_rva = base_addr + ctx.lookup_table_offset,
+        .time_date_stamp = 0,
+        .forwarder_chain = 0,
+        .name_rva = base_addr + ctx.dll_names_offset,
+        .import_address_table_rva = base_addr + ctx.iat_offset,
+    };
+    @memcpy(buffer[ctx.dir_table_offset..][0..@sizeOf(coff.ImportDirectoryEntry)], mem.asBytes(&dir_header));
+
+    // Lookup and IAT entries
+    for (self.symbols.items, self.exports.items) |sym_index, exp| {
+        const sym = coff_file.getSymbol(sym_index);
+        if (!sym.flags.import) continue;
+
+        const extra = sym.getExtra(coff_file).?;
+        if (exp.isByOrdinal(self)) {
+            const lookup_entry = coff.ImportLookupEntry64.ByOrdinal{
+                .ordinal_number = exp.hint,
+            };
+            @memcpy(buffer[ctx.lookup_table_offset + extra.iat * @sizeOf(u64) ..][0..@sizeOf(u64)], mem.asBytes(&lookup_entry));
+            @memcpy(buffer[ctx.iat_offset + extra.iat * @sizeOf(u64) ..][0..@sizeOf(u64)], mem.asBytes(&lookup_entry));
+        } else {
+            const lookup_entry = coff.ImportLookupEntry64.ByName{
+                .name_table_rva = @intCast(base_addr + ctx.names_table_offset + extra.names),
+            };
+            @memcpy(buffer[ctx.lookup_table_offset + extra.iat * @sizeOf(u64) ..][0..@sizeOf(u64)], mem.asBytes(&lookup_entry));
+            @memcpy(buffer[ctx.iat_offset + extra.iat * @sizeOf(u64) ..][0..@sizeOf(u64)], mem.asBytes(&lookup_entry));
+
+            const name = exp.getExternName(self);
+            mem.writeInt(u16, buffer[ctx.names_table_offset + extra.names ..][0..2], exp.hint, .little);
+            @memcpy(buffer[ctx.names_table_offset + extra.names + 2 ..][0..name.len], name);
+        }
+    }
+
+    // DLL name
+    @memcpy(buffer[ctx.dll_names_offset..][0..self.path.len], self.path);
 }
 
 fn addString(self: *Dll, allocator: Allocator, str: []const u8) error{OutOfMemory}!u32 {

@@ -214,10 +214,14 @@ pub fn flush(self: *Coff) !void {
 
     try self.allocateSections();
     self.allocateDataDirectories();
+    self.allocateSyntheticSymbols();
 
     if (build_options.enable_logging)
         state_log.debug("{}", .{self.dumpState()});
 
+    try self.writeAtoms();
+    try self.writeImportSection();
+    try self.writeBaseRelocs();
     try self.writeDataDirectoryHeaders();
     try self.writeSectionHeaders();
     try self.writeHeader();
@@ -941,7 +945,7 @@ fn updateSectionSizes(self: *Coff) !void {
     }
 
     if (self.idata_section_index != null) {
-        try self.updateIdataSize();
+        try self.updateImportSectionSize();
     }
 
     if (self.reloc_section_index) |index| {
@@ -957,7 +961,7 @@ fn updateSectionSizes(self: *Coff) !void {
     }
 }
 
-fn updateIdataSize(self: *Coff) !void {
+fn updateImportSectionSize(self: *Coff) !void {
     var dir_table_size: u32 = 0;
     var lookup_table_size: u32 = 0;
     var names_table_size: u32 = 0;
@@ -975,7 +979,7 @@ fn updateIdataSize(self: *Coff) !void {
         ctx.dll_names_offset = dll_names_size;
         ctx.iat_offset = iat_size;
 
-        try dll.updateIdataSize(self);
+        try dll.updateImportSectionSize(self);
 
         dir_table_size += @sizeOf(coff.ImportDirectoryEntry);
         lookup_table_size += ctx.lookup_table_size;
@@ -1064,6 +1068,35 @@ fn allocateDataDirectories(self: *Coff) void {
         const dir = &self.data_dirs[@intFromEnum(coff.DirectoryEntry.BASERELOC)];
         dir.virtual_address += header.virtual_address;
     }
+}
+
+fn allocateSyntheticSymbols(self: *Coff) void {
+    _ = self;
+    // TODO __guard_* symbols
+}
+
+fn writeAtoms(self: *Coff) !void {
+    _ = self;
+}
+
+fn writeImportSection(self: *Coff) !void {
+    const sect_index = self.idata_section_index orelse return;
+    const gpa = self.base.allocator;
+    const header = self.sections.items(.header)[sect_index];
+    var buffer = try std.ArrayList(u8).initCapacity(gpa, header.size_of_raw_data);
+    defer buffer.deinit();
+    try buffer.resize(header.size_of_raw_data);
+    @memset(buffer.items, 0);
+
+    for (self.dlls.values()) |index| {
+        try self.getFile(index).?.dll.writeImportSection(buffer.items, self);
+    }
+
+    try self.base.file.pwriteAll(buffer.items, header.pointer_to_raw_data);
+}
+
+fn writeBaseRelocs(self: *Coff) !void {
+    _ = self;
 }
 
 fn writeSectionHeaders(self: *Coff) !void {
