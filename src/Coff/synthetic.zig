@@ -11,14 +11,56 @@ pub const RelocSection = struct {
     }
 
     pub fn updateSize(rel: *RelocSection, coff_file: *Coff) !u32 {
+        // Sort entries by output section and offset.
         rel.sort(coff_file);
-        for (rel.entries.items) |entry| {
-            std.debug.print("{d} : {x}\n", .{
-                entry.getAtom(coff_file).out_section_number,
-                entry.getAddress(coff_file),
+
+        // Bin relocations in pages.
+        const gpa = coff_file.base.allocator;
+        var rel_index: usize = 0;
+        var last_page: ?*Page = null;
+        while (rel_index < rel.entries.items.len) {
+            const entry = rel.entries.items[rel_index];
+            const addr = entry.getAddress(coff_file);
+            const page = mem.alignBackward(u32, addr, Page.size);
+            const off = std.math.cast(u12, addr - page) orelse return error.Overflow;
+            const last = if (last_page) |last| blk: {
+                if (last.getAddress(coff_file) != page) {
+                    const next = try rel.pages.addOne(gpa);
+                    next.* = .{ .atom = entry.atom };
+                    last_page = next;
+                    break :blk next;
+                }
+                break :blk last;
+            } else blk: {
+                const last = try rel.pages.addOne(gpa);
+                last.* = .{ .atom = entry.atom };
+                last_page = last;
+                break :blk last;
+            };
+            try last.relocs.append(gpa, .{
+                .offset = off,
+                .type = .DIR64, // TODO handle more types
             });
+            rel_index += 1;
         }
-        return 0;
+
+        // Pad to required 4-byte alignment.
+        for (rel.pages.items) |*page| {
+            const size = page.relocs.items.len * @sizeOf(coff.BaseRelocation);
+            if (!mem.isAlignedGeneric(usize, size, @sizeOf(u32))) {
+                try page.relocs.append(gpa, .{
+                    .offset = 0,
+                    .type = .ABSOLUTE,
+                });
+            }
+        }
+
+        var size: u32 = @intCast(rel.pages.items.len * @sizeOf(coff.BaseRelocationDirectoryEntry));
+        for (rel.pages.items) |page| {
+            size += @intCast(page.relocs.items.len * @sizeOf(coff.BaseRelocation));
+        }
+
+        return size;
     }
 
     fn sort(rel: *RelocSection, coff_file: *Coff) void {
@@ -49,12 +91,19 @@ pub const RelocSection = struct {
     };
 
     const Page = struct {
-        value: u32,
+        atom: Atom.Index,
         relocs: std.ArrayListUnmanaged(coff.BaseRelocation) = .{},
 
         fn deinit(page: *Page, allocator: Allocator) void {
             page.relocs.deinit(allocator);
         }
+
+        fn getAddress(page: Page, coff_file: *Coff) u32 {
+            const addr = coff_file.getAtom(page.atom).?.getAddress(coff_file);
+            return mem.alignBackward(u32, addr, Page.size);
+        }
+
+        const size = 0x1000;
     };
 };
 
