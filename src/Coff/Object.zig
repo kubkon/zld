@@ -575,8 +575,7 @@ pub fn reportUndefs(self: *Object, coff_file: *Coff, undefs: anytype) !void {
     }
 }
 
-pub fn initSection(self: Object, atom: *const Atom, coff_file: *Coff) !u16 {
-    // TODO handle ordering (here?)
+pub fn initSection(self: Object, atom: *const Atom, coff_file: *Coff) !struct { u16, i32 } {
     const header = atom.getInputSection(coff_file);
     const full_name = self.getString(header.name);
     var flags = header.flags;
@@ -584,8 +583,10 @@ pub fn initSection(self: Object, atom: *const Atom, coff_file: *Coff) !u16 {
     flags.LNK_COMDAT = 0;
     const name_sep = mem.indexOfScalar(u8, full_name, '$') orelse full_name.len;
     const name = full_name[0..name_sep];
-    const out_name = coff_file.getMergeRule(name) orelse name;
-    return coff_file.getSectionByName(out_name) orelse try coff_file.addSection(out_name, flags);
+    const out_name, const index: i32 = coff_file.getMergeRule(name) orelse .{ name, -1 };
+    const out_sect = coff_file.getSectionByName(out_name) orelse
+        try coff_file.addSection(out_name, flags);
+    return .{ out_sect, index };
 }
 
 pub fn collectBaseRelocs(self: Object, coff_file: *Coff) !void {

@@ -24,6 +24,12 @@ out_section_number: u16 = 0,
 /// Index of this atom in the linker's atoms table.
 atom_index: Index = 0,
 
+/// Merge rule index.
+/// -1 means no rule.
+/// We use this to sort atoms in each output section to match
+/// link.exe and lld.
+merge_rule_index: i32 = -1,
+
 flags: Flags = .{},
 
 pub fn getName(self: Atom, coff_file: *Coff) [:0]const u8 {
@@ -48,6 +54,10 @@ pub fn getAddress(self: Atom, coff_file: *Coff) u32 {
     if (self.out_section_number == 0) return self.value;
     const header = coff_file.sections.items(.header)[self.out_section_number];
     return header.virtual_address + self.value;
+}
+
+pub fn hasData(self: Atom, coff_file: *Coff) bool {
+    return self.getInputSection(coff_file).flags.CNT_UNINITIALIZED_DATA == 0;
 }
 
 pub fn reportUndefs(self: Atom, coff_file: *Coff, undefs: anytype) !void {

@@ -712,10 +712,11 @@ fn parseMergeRules(self: *Coff) !void {
     try addRule(self, ".bss", ".data");
 }
 
-pub fn getMergeRule(self: *Coff, from: []const u8) ?[]const u8 {
+pub fn getMergeRule(self: *Coff, from: []const u8) ?struct { []const u8, i32 } {
     const from_off = self.string_intern.getOffset(from) orelse return null;
-    const to_off = self.merge_rules.get(from_off) orelse return null;
-    return self.string_intern.getAssumeExists(to_off);
+    const index = self.merge_rules.getIndex(from_off) orelse return null;
+    const to_off = self.merge_rules.values()[index];
+    return .{ self.string_intern.getAssumeExists(to_off), @intCast(index) };
 }
 
 fn createImportThunks(self: *Coff) !void {
@@ -738,7 +739,9 @@ fn initSections(self: *Coff) !void {
         for (object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index) orelse continue;
             if (!atom.flags.alive) continue;
-            atom.out_section_number = try object.initSection(atom, self);
+            const out_section_number, const merge_rule_index = try object.initSection(atom, self);
+            atom.out_section_number = out_section_number;
+            atom.merge_rule_index = merge_rule_index;
         }
     }
     self.text_section_index = self.getSectionByName(".text");
@@ -867,6 +870,28 @@ fn addAtomsToSections(self: *Coff) !void {
             sym.out_section_number = atom.out_section_number;
         }
     }
+
+    // Sort atoms by merge rule index.
+    const sortFn = struct {
+        fn sortFn(ctx: *Coff, lhs: Atom.Index, rhs: Atom.Index) bool {
+            const lhs_atom = ctx.getAtom(lhs).?;
+            const rhs_atom = ctx.getAtom(rhs).?;
+            if (lhs_atom.merge_rule_index == rhs_atom.merge_rule_index) {
+                return lhs_atom.file < rhs_atom.file;
+            }
+            return lhs_atom.merge_rule_index < rhs_atom.merge_rule_index;
+        }
+    }.sortFn;
+
+    for (self.sections.items(.atoms), self.sections.items(.header)) |*atoms, header| {
+        mem.sort(Atom.Index, atoms.items, self, sortFn);
+
+        std.debug.print("{s}\n", .{self.string_intern.getAssumeExists(header.name)});
+        for (atoms.items) |atom_index| {
+            const atom = self.getAtom(atom_index).?;
+            std.debug.print("  {s}\n", .{atom.getName(self)});
+        }
+    }
 }
 
 fn updateSectionSizes(self: *Coff) !void {
@@ -881,6 +906,9 @@ fn updateSectionSizes(self: *Coff) !void {
             const padding = offset - header.virtual_size;
             atom.value = offset;
             header.virtual_size += padding + atom.size;
+            if (atom.hasData(self)) {
+                header.size_of_raw_data += padding + atom.size;
+            }
             header.setAlignment(@max(header.getAlignment() orelse 0, atom.alignment));
         }
     }
@@ -889,12 +917,13 @@ fn updateSectionSizes(self: *Coff) !void {
         const dll = self.getFile(index).?.dll;
         for (dll.thunks_table.items) |thunk_index| {
             const thunk = dll.getThunk(thunk_index) orelse continue;
-            const thunk_alignment = try std.math.powi(u32, 2, thunk.getAlignment(self));
             const header = &self.sections.items(.header)[thunk.out_section_number];
+            const thunk_alignment = try std.math.powi(u32, 2, thunk.getAlignment(self));
             const offset = mem.alignForward(u32, header.virtual_size, thunk_alignment);
             const padding = offset - header.virtual_size;
             thunk.value = offset;
             header.virtual_size += padding + thunk.getSize(self);
+            header.size_of_raw_data += padding + thunk.getSize(self);
             header.setAlignment(@max(header.getAlignment() orelse 0, thunk.getAlignment(self)));
         }
     }
@@ -905,8 +934,14 @@ fn updateSectionSizes(self: *Coff) !void {
 
     if (self.reloc_section_index) |index| {
         const header = &self.sections.items(.header)[index];
-        header.virtual_size = try self.base_relocs.updateSize(self);
+        const size = try self.base_relocs.updateSize(self);
+        header.virtual_size = size;
+        header.size_of_raw_data = size;
         header.setAlignment(2);
+    }
+
+    for (slice.items(.header)) |*header| {
+        header.size_of_raw_data = mem.alignForward(u32, header.size_of_raw_data, self.getFileAlignment());
     }
 }
 
@@ -953,6 +988,7 @@ fn updateIdataSize(self: *Coff) !void {
     const needed_size = dir_table_size + lookup_table_size + names_table_size + dll_names_size + iat_size;
     const header = &self.sections.items(.header)[self.idata_section_index.?];
     header.virtual_size = needed_size;
+    header.size_of_raw_data = needed_size;
     header.setAlignment(3);
 }
 
@@ -983,8 +1019,23 @@ fn updateDataDirectorySizes(self: *Coff) void {
 }
 
 fn allocateSections(self: *Coff) !void {
-    _ = self;
-    // TODO
+    const sect_align = self.getSectionAlignment();
+    const file_align = self.getFileAlignment();
+    const size_headers = mem.alignForward(u32, self.getSizeOfHeaders(), file_align);
+
+    // According to LLD, the first page is left unmapped.
+    var vmaddr = mem.alignForward(u32, size_headers, sect_align);
+    var fileoff = size_headers;
+
+    for (self.sections.items(.header)) |*header| {
+        vmaddr = mem.alignForward(u32, vmaddr, sect_align);
+        header.virtual_address = vmaddr;
+        vmaddr += header.virtual_size;
+
+        fileoff = mem.alignForward(u32, fileoff, file_align);
+        header.pointer_to_raw_data = fileoff;
+        fileoff += header.size_of_raw_data;
+    }
 }
 
 fn allocateDataDirectories(self: *Coff) void {
@@ -1173,11 +1224,6 @@ fn getFileAlignment(self: Coff) u32 {
     return self.options.file_align orelse 0x200;
 }
 
-/// Returns the maximum of section alignment and file alignment.
-fn getEffectiveAlignment(self: Coff) u32 {
-    return @max(self.getSectionAlignment(), self.getFileAlignment());
-}
-
 fn getSizeOfStackReserve(self: Coff) u32 {
     _ = self;
     // TODO handle user flag
@@ -1231,7 +1277,7 @@ fn getSectionHeadersOffset(self: Coff) u32 {
 }
 
 fn getSizeOfImage(self: Coff) u32 {
-    const alignment = self.getEffectiveAlignment();
+    const alignment = self.getSectionAlignment();
     var image_size: u32 = mem.alignForward(u32, self.getSizeOfHeaders(), alignment);
     for (self.sections.items(.header)) |header| {
         image_size += mem.alignForward(u32, header.virtual_size, alignment);
