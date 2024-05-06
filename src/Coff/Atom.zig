@@ -36,6 +36,12 @@ pub fn getName(self: Atom, coff_file: *Coff) [:0]const u8 {
     return self.getObject(coff_file).getString(self.name);
 }
 
+pub fn getNameSuffix(self: Atom, coff_file: *Coff) []const u8 {
+    const name = self.getName(coff_file);
+    const index = std.mem.indexOfScalar(u8, name, '$') orelse return "";
+    return name[index + 1 ..];
+}
+
 pub fn getObject(self: Atom, coff_file: *Coff) *Object {
     return coff_file.getFile(self.file).?.object;
 }

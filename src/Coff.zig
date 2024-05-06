@@ -871,27 +871,39 @@ fn addAtomsToSections(self: *Coff) !void {
         }
     }
 
-    // Sort atoms by merge rule index.
+    // Sort atoms by name suffix and merge rule index.
+    // https://learn.microsoft.com/en-us/windows/win32/debug/pe-format#grouped-sections-object-only
     const sortFn = struct {
         fn sortFn(ctx: *Coff, lhs: Atom.Index, rhs: Atom.Index) bool {
             const lhs_atom = ctx.getAtom(lhs).?;
+            const lhs_name_suffix = lhs_atom.getNameSuffix(ctx);
             const rhs_atom = ctx.getAtom(rhs).?;
+            const rhs_name_suffix = rhs_atom.getNameSuffix(ctx);
             if (lhs_atom.merge_rule_index == rhs_atom.merge_rule_index) {
-                return lhs_atom.file < rhs_atom.file;
+                const rel = mem.order(u8, lhs_name_suffix, rhs_name_suffix);
+                if (rel == .eq) {
+                    if (lhs_atom.file == rhs_atom.file) {
+                        return lhs < rhs;
+                    }
+                    return lhs_atom.file < rhs_atom.file;
+                }
+                return rel == .lt;
             }
             return lhs_atom.merge_rule_index < rhs_atom.merge_rule_index;
         }
     }.sortFn;
 
-    for (self.sections.items(.atoms), self.sections.items(.header)) |*atoms, header| {
+    for (self.sections.items(.atoms)) |*atoms| {
         mem.sort(Atom.Index, atoms.items, self, sortFn);
-
-        std.debug.print("{s}\n", .{self.string_intern.getAssumeExists(header.name)});
-        for (atoms.items) |atom_index| {
-            const atom = self.getAtom(atom_index).?;
-            std.debug.print("  {s}\n", .{atom.getName(self)});
-        }
     }
+
+    // for (self.sections.items(.atoms), self.sections.items(.header)) |atoms, header| {
+    //     std.debug.print("\n{s}\n", .{self.string_intern.getAssumeExists(header.name)});
+    //     for (atoms.items) |atom_index| {
+    //         const atom = self.getAtom(atom_index).?;
+    //         std.debug.print("  atom({d}) : {s} : {d} : {d}\n", .{ atom_index, atom.getName(self), atom.file, atom.merge_rule_index });
+    //     }
+    // }
 }
 
 fn updateSectionSizes(self: *Coff) !void {
