@@ -904,18 +904,9 @@ fn updateSectionSizes(self: *Coff) !void {
     }
 
     if (self.reloc_section_index) |index| {
-        for (self.base_relocs.entries.items) |entry| {
-            const atom = self.getAtom(entry.atom).?;
-            std.debug.print("atom({d},{d}): {x},{x} => {x}\n", .{
-                entry.atom,
-                atom.out_section_number,
-                atom.value,
-                entry.offset,
-                atom.value + entry.offset,
-            });
-        }
         const header = &self.sections.items(.header)[index];
-        header.virtual_size = self.base_relocs.size(self);
+        header.virtual_size = try self.base_relocs.updateSize(self);
+        header.setAlignment(2);
     }
 }
 
