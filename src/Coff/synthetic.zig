@@ -21,7 +21,7 @@ pub const RelocSection = struct {
         while (rel_index < rel.entries.items.len) {
             const entry = rel.entries.items[rel_index];
             const addr = entry.getAddress(coff_file);
-            const page = mem.alignBackward(u32, addr, Page.size);
+            const page = mem.alignBackward(u32, addr, Page.page_size);
             const off = std.math.cast(u12, addr - page) orelse return error.Overflow;
             const last = if (last_page) |last| blk: {
                 if (last.getAddress(coff_file) != page) {
@@ -57,10 +57,21 @@ pub const RelocSection = struct {
 
         var size: u32 = @intCast(rel.pages.items.len * @sizeOf(coff.BaseRelocationDirectoryEntry));
         for (rel.pages.items) |page| {
-            size += @intCast(page.relocs.items.len * @sizeOf(coff.BaseRelocation));
+            size += page.size();
         }
 
         return size;
+    }
+
+    pub fn write(rel: RelocSection, coff_file: *Coff, writer: anytype) !void {
+        for (rel.pages.items) |page| {
+            const dir_entry = coff.BaseRelocationDirectoryEntry{
+                .page_rva = page.getAddress(coff_file),
+                .block_size = page.size() + @sizeOf(coff.BaseRelocationDirectoryEntry),
+            };
+            try writer.writeAll(mem.asBytes(&dir_entry));
+            try writer.writeAll(mem.sliceAsBytes(page.relocs.items));
+        }
     }
 
     fn sort(rel: *RelocSection, coff_file: *Coff) void {
@@ -100,10 +111,14 @@ pub const RelocSection = struct {
 
         fn getAddress(page: Page, coff_file: *Coff) u32 {
             const addr = coff_file.getAtom(page.atom).?.getAddress(coff_file);
-            return mem.alignBackward(u32, addr, Page.size);
+            return mem.alignBackward(u32, addr, Page.page_size);
         }
 
-        const size = 0x1000;
+        fn size(page: Page) u32 {
+            return @intCast(page.relocs.items.len * @sizeOf(coff.BaseRelocation));
+        }
+
+        const page_size = 0x1000;
     };
 };
 

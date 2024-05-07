@@ -1083,20 +1083,27 @@ fn writeImportSection(self: *Coff) !void {
     const sect_index = self.idata_section_index orelse return;
     const gpa = self.base.allocator;
     const header = self.sections.items(.header)[sect_index];
-    var buffer = try std.ArrayList(u8).initCapacity(gpa, header.size_of_raw_data);
-    defer buffer.deinit();
-    try buffer.resize(header.size_of_raw_data);
-    @memset(buffer.items, 0);
+    const buffer = try gpa.alloc(u8, header.size_of_raw_data);
+    defer gpa.free(buffer);
+    @memset(buffer, 0);
 
     for (self.dlls.values()) |index| {
-        try self.getFile(index).?.dll.writeImportSection(buffer.items, self);
+        try self.getFile(index).?.dll.writeImportSection(buffer, self);
     }
 
-    try self.base.file.pwriteAll(buffer.items, header.pointer_to_raw_data);
+    try self.base.file.pwriteAll(buffer, header.pointer_to_raw_data);
 }
 
 fn writeBaseRelocs(self: *Coff) !void {
-    _ = self;
+    const sect_index = self.reloc_section_index orelse return;
+    const gpa = self.base.allocator;
+    const header = self.sections.items(.header)[sect_index];
+    const buffer = try gpa.alloc(u8, header.size_of_raw_data);
+    defer gpa.free(buffer);
+    @memset(buffer, 0);
+    var stream = std.io.fixedBufferStream(buffer);
+    try self.base_relocs.write(self, stream.writer());
+    try self.base.file.pwriteAll(buffer, header.pointer_to_raw_data);
 }
 
 fn writeSectionHeaders(self: *Coff) !void {
