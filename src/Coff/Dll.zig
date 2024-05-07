@@ -309,7 +309,7 @@ pub const Export = packed struct {
 /// Import thunk
 pub const Thunk = struct {
     value: u32 = 0,
-    out_section_number: u16 = 0,
+    out_section_number: ?u16 = null,
     sym_index: Symbol.Index = 0,
     exp_index: u32 = 0,
 
@@ -335,6 +335,11 @@ pub const Thunk = struct {
         return coff_file.getSymbol(thunk.sym_index);
     }
 
+    pub fn getAddress(thunk: Thunk, coff_file: *Coff) u32 {
+        const sect_index = thunk.out_section_number orelse return 0;
+        return coff_file.sections.items(.header)[sect_index].virtual_address + thunk.value;
+    }
+
     pub fn write(thunk: Thunk, buffer: []u8, coff_file: *Coff) !void {
         assert(buffer.len == thunkSize(coff_file));
         const cpu_arch = coff_file.options.cpu_arch.?;
@@ -343,7 +348,7 @@ pub const Thunk = struct {
         switch (cpu_arch) {
             .aarch64 => @panic("TODO aarch64"),
             .x86_64 => {
-                @memcpy(buffer, &.{ 0xff, 0x25, 0x00, 0x00, 0x00, 0x00 });
+                @memcpy(buffer, &[_]u8{ 0xff, 0x25, 0x00, 0x00, 0x00, 0x00 });
                 mem.writeInt(u32, buffer[2..][0..4], target, .little);
             },
             else => @panic("unhandled arch"),
@@ -381,7 +386,7 @@ pub const Thunk = struct {
         const target_sym = thunk.getSymbol(coff_file);
         try writer.print("@{x} : size({x}) : {s} : @{x}", .{
             thunk.value,
-            thunk.getSize(coff_file),
+            thunkSize(coff_file),
             target_sym.getName(coff_file),
             target_sym.getAddress(.{}, coff_file),
         });

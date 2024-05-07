@@ -13,7 +13,7 @@ file: File.Index = 0,
 atom: Atom.Index = 0,
 
 /// Assigned output section.
-out_section_number: u16 = 0,
+out_section_number: ?u16 = null,
 
 /// Index of the source COFF symbol this symbol references.
 /// Use `getCoffSymbol` to pull the COFF symbol from the relevant input file.
@@ -69,8 +69,8 @@ pub fn getAddress(symbol: Symbol, args: struct {
     if (symbol.flags.import and symbol.getFile(coff_file).? == .dll) {
         return symbol.getIATAddress(coff_file);
     }
-    if (symbol.out_section_number == 0) return symbol.value;
-    const header = coff_file.sections.items(.header)[symbol.out_section_number];
+    const sect_index = symbol.out_section_number orelse return symbol.value;
+    const header = coff_file.sections.items(.header)[sect_index];
     return header.virtual_address + symbol.value;
 }
 
@@ -95,9 +95,7 @@ pub fn getThunkAddress(symbol: Symbol, coff_file: *Coff) u32 {
     if (!symbol.flags.thunk) return 0;
     const extra = symbol.getExtra(coff_file).?;
     const dll = symbol.getFile(coff_file).?.dll;
-    const thunk = dll.getThunk(extra.thunk).?;
-    const header = coff_file.sections.items(.header)[thunk.out_section_number];
-    return header.virtual_address + thunk.value;
+    return dll.getThunk(extra.thunk).?.getAddress(coff_file);
 }
 
 pub fn getIATAddress(symbol: Symbol, coff_file: *Coff) u32 {
@@ -185,8 +183,8 @@ fn format2(
         try writer.writeAll(" : unresolved");
         return;
     };
-    if (symbol.out_section_number != 0) {
-        try writer.print(" : sect({d})", .{symbol.out_section_number});
+    if (symbol.out_section_number) |sect_index| {
+        try writer.print(" : sect({d})", .{sect_index});
     }
     if (symbol.getAtom(ctx.coff_file)) |atom| {
         try writer.print(" : atom({d})", .{atom.atom_index});

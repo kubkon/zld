@@ -79,10 +79,10 @@ pub const RelocSection = struct {
             fn sortFn(ctx: *Coff, lhs: Entry, rhs: Entry) bool {
                 const lhs_atom = ctx.getAtom(lhs.atom).?;
                 const rhs_atom = ctx.getAtom(rhs.atom).?;
-                if (lhs_atom.out_section_number == rhs_atom.out_section_number) {
+                if (lhs_atom.out_section_number.? == rhs_atom.out_section_number.?) {
                     return lhs.getAddress(ctx) < rhs.getAddress(ctx);
                 }
-                return lhs_atom.out_section_number < rhs_atom.out_section_number;
+                return lhs_atom.out_section_number.? < rhs_atom.out_section_number.?;
             }
         }.sortFn;
         mem.sort(Entry, rel.entries.items, coff_file, sortFn);

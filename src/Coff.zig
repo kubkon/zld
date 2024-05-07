@@ -841,7 +841,7 @@ fn sortSections(self: *Coff) !void {
         for (self.getFile(index).?.object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index) orelse continue;
             if (!atom.flags.alive) continue;
-            atom.out_section_number = backlinks[atom.out_section_number];
+            atom.out_section_number = backlinks[atom.out_section_number.?];
         }
     }
 
@@ -863,7 +863,7 @@ fn addAtomsToSections(self: *Coff) !void {
         for (object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index) orelse continue;
             if (!atom.flags.alive) continue;
-            const atoms = &self.sections.items(.atoms)[atom.out_section_number];
+            const atoms = &self.sections.items(.atoms)[atom.out_section_number.?];
             try atoms.append(self.base.allocator, atom_index);
         }
         for (object.symbols.items) |sym_index| {
@@ -933,7 +933,7 @@ fn updateSectionSizes(self: *Coff) !void {
         const dll = self.getFile(index).?.dll;
         for (dll.thunks_table.items) |thunk_index| {
             const thunk = dll.getThunk(thunk_index) orelse continue;
-            const header = &self.sections.items(.header)[thunk.out_section_number];
+            const header = &self.sections.items(.header)[thunk.out_section_number.?];
             const thunk_alignment = try std.math.powi(u32, 2, Dll.Thunk.thunkAlignment(self));
             const offset = mem.alignForward(u32, header.virtual_size, thunk_alignment);
             const padding = offset - header.virtual_size;
@@ -1083,7 +1083,6 @@ fn writeAtoms(self: *Coff) !void {
     const cpu_arch = self.options.cpu_arch.?;
     const slice = self.sections.slice();
 
-    var has_resolve_error = false;
     for (slice.items(.header), slice.items(.atoms)) |header, atoms| {
         if (atoms.items.len == 0) continue;
         if (header.flags.CNT_UNINITIALIZED_DATA == 1) continue;
@@ -1098,11 +1097,8 @@ fn writeAtoms(self: *Coff) !void {
             assert(atom.flags.alive);
             if (!atom.hasData(self)) continue;
             const off = atom.value;
-            try atom.getCode(self, buffer[off..][0..atom.size]);
-            atom.resolveRelocs(self, buffer[off..][0..atom.size]) catch |err| switch (err) {
-                error.ResolveFailed => has_resolve_error = true,
-                else => |e| return e,
-            };
+            try atom.getData(buffer[off..][0..atom.size], self);
+            try atom.resolveRelocs(buffer[off..][0..atom.size], self);
         }
 
         try self.base.file.pwriteAll(buffer, header.pointer_to_raw_data);
@@ -1118,7 +1114,7 @@ fn writeAtoms(self: *Coff) !void {
             if (dll.thunks_table.items.len == 0) continue;
             for (dll.thunks_table.items) |thunk_index| {
                 if (dll.getThunk(thunk_index)) |th| {
-                    const header = self.sections.items(.header)[th.out_section_number];
+                    const header = self.sections.items(.header)[th.out_section_number.?];
                     const off = th.value;
                     try th.write(buffer, self);
                     try self.base.file.pwriteAll(buffer, header.pointer_to_raw_data + off);

@@ -19,7 +19,7 @@ alignment: u4 = 0,
 section_number: u16 = 0,
 
 /// Index of the output section.
-out_section_number: u16 = 0,
+out_section_number: ?u16 = null,
 
 /// Index of this atom in the linker's atoms table.
 atom_index: Index = 0,
@@ -57,13 +57,23 @@ pub fn getRelocs(self: Atom, coff_file: *Coff) []const coff.Relocation {
 }
 
 pub fn getAddress(self: Atom, coff_file: *Coff) u32 {
-    if (self.out_section_number == 0) return self.value;
-    const header = coff_file.sections.items(.header)[self.out_section_number];
+    const sect_index = self.out_section_number orelse self.value;
+    const header = coff_file.sections.items(.header)[sect_index];
     return header.virtual_address + self.value;
 }
 
 pub fn hasData(self: Atom, coff_file: *Coff) bool {
     return self.getInputSection(coff_file).flags.CNT_UNINITIALIZED_DATA == 0;
+}
+
+pub fn getData(self: Atom, buffer: []u8, coff_file: *Coff) !void {
+    assert(self.hasData(coff_file));
+    const object = self.getObject(coff_file);
+    const file = coff_file.getFileHandle(object.file_handle);
+    const offset = if (object.archive) |ar| ar.offset else 0;
+    const header = object.sections.items(.header)[self.section_number];
+    const amt = try file.preadAll(buffer, offset + header.pointer_to_raw_data);
+    if (amt != buffer.len) return error.InputOutput;
 }
 
 pub fn reportUndefs(self: Atom, coff_file: *Coff, undefs: anytype) !void {
@@ -105,6 +115,46 @@ pub fn collectBaseRelocs(self: Atom, coff_file: *Coff) !void {
     }
 }
 
+pub fn resolveRelocs(self: Atom, buffer: []u8, coff_file: *Coff) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    assert(self.hasData(coff_file));
+    const relocs = self.getRelocs(coff_file);
+    const object = self.getObject(coff_file);
+    const name = self.getName(coff_file);
+
+    relocs_log.debug("{x}: {s}({})", .{ self.getAddress(coff_file), name, object.fmtPath() });
+
+    const stream = std.io.fixedBufferStream(buffer);
+    _ = stream;
+
+    const has_reloc_errors = false;
+    var i: usize = 0;
+    while (i < relocs.len) : (i += 1) {
+        const rel = relocs[i];
+        const rel_type: coff.ImageRelAmd64 = @enumFromInt(rel.type);
+        const offset = rel.virtual_address;
+        const sym_index = object.symbols.items[rel.symbol_table_index];
+        const sym = coff_file.getSymbol(sym_index);
+
+        const P = self.getAddress(coff_file) + offset;
+        const A = 0; // TODO: oops we didn't parse it
+        const S = sym.getAddress(.{}, coff_file);
+
+        relocs_log.debug("  {s}: {x}: [{x} => {x}] ({s},{?})", .{
+            @tagName(rel_type),
+            offset,
+            P,
+            S + A,
+            sym.getName(coff_file),
+            sym.file,
+        });
+    }
+
+    if (has_reloc_errors) return error.RelocError;
+}
+
 pub fn format(
     atom: Atom,
     comptime unused_fmt_string: []const u8,
@@ -140,7 +190,7 @@ fn format2(
     _ = unused_fmt_string;
     const atom = ctx.atom;
     const coff_file = ctx.coff_file;
-    try writer.print("atom({d}) : {s} : @{x} : sect({d}) : align({x}) : size({x})", .{
+    try writer.print("atom({d}) : {s} : @{x} : sect({?d}) : align({x}) : size({x})", .{
         atom.atom_index,         atom.getName(coff_file), atom.getAddress(coff_file),
         atom.out_section_number, atom.alignment,          atom.size,
     });
@@ -159,6 +209,7 @@ pub const Flags = packed struct {
 
 const assert = std.debug.assert;
 const coff = std.coff;
+const relocs_log = std.log.scoped(.relocs);
 const std = @import("std");
 const trace = @import("../tracy.zig").trace;
 
