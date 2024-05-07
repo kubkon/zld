@@ -124,7 +124,11 @@ pub fn resolveRelocs(self: Atom, buffer: []u8, coff_file: *Coff) !void {
     const object = self.getObject(coff_file);
     const name = self.getName(coff_file);
 
-    relocs_log.debug("{x}: {s}({})", .{ self.getAddress(coff_file), name, object.fmtPath() });
+    relocs_log.debug("{x}: {s}({})", .{
+        self.getAddress(coff_file),
+        name,
+        object.fmtPathShort(),
+    });
 
     var has_reloc_errors = false;
     var i: usize = 0;
@@ -208,7 +212,7 @@ pub fn resolveRelocs(self: Atom, buffer: []u8, coff_file: *Coff) !void {
     if (has_reloc_errors) return error.RelocError;
 }
 
-fn doSignedRel(source: u32, target: u32) !i32 {
+pub fn doSignedRel(source: u32, target: u32) !i32 {
     const ssource = math.cast(i32, source) orelse return error.Overflow;
     const starget = math.cast(i32, target) orelse return error.Overflow;
     return starget - ssource - 4;

@@ -344,12 +344,14 @@ pub const Thunk = struct {
         assert(buffer.len == thunkSize(coff_file));
         const cpu_arch = coff_file.options.cpu_arch.?;
         const sym = thunk.getSymbol(coff_file);
-        const target = sym.getIATAddress(coff_file);
+        const P = thunk.getAddress(coff_file);
+        const S = sym.getIATAddress(coff_file);
+        const target = try Atom.doSignedRel(P, S);
         switch (cpu_arch) {
             .aarch64 => @panic("TODO aarch64"),
             .x86_64 => {
                 @memcpy(buffer, &[_]u8{ 0xff, 0x25, 0x00, 0x00, 0x00, 0x00 });
-                mem.writeInt(u32, buffer[2..][0..4], target, .little);
+                mem.writeInt(i32, buffer[2..][0..4], target, .little);
             },
             else => @panic("unhandled arch"),
         }
@@ -385,7 +387,7 @@ pub const Thunk = struct {
         const thunk, const coff_file = ctx;
         const target_sym = thunk.getSymbol(coff_file);
         try writer.print("@{x} : size({x}) : {s} : @{x}", .{
-            thunk.value,
+            thunk.getAddress(coff_file),
             thunkSize(coff_file),
             target_sym.getName(coff_file),
             target_sym.getAddress(.{}, coff_file),
@@ -416,6 +418,7 @@ const std = @import("std");
 const trace = @import("../tracy.zig").trace;
 
 const Allocator = mem.Allocator;
+const Atom = @import("Atom.zig");
 const Coff = @import("../Coff.zig");
 const Dll = @This();
 const File = @import("file.zig").File;
