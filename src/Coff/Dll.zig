@@ -313,8 +313,7 @@ pub const Thunk = struct {
     sym_index: Symbol.Index = 0,
     exp_index: u32 = 0,
 
-    pub fn getAlignment(thunk: Thunk, coff_file: *Coff) u4 {
-        _ = thunk;
+    pub fn thunkAlignment(coff_file: *Coff) u4 {
         const cpu_arch = coff_file.options.cpu_arch.?;
         return switch (cpu_arch) {
             .aarch64 => 2,
@@ -323,8 +322,7 @@ pub const Thunk = struct {
         };
     }
 
-    pub fn getSize(thunk: Thunk, coff_file: *Coff) u32 {
-        _ = thunk;
+    pub fn thunkSize(coff_file: *Coff) u32 {
         const cpu_arch = coff_file.options.cpu_arch.?;
         return switch (cpu_arch) {
             .aarch64 => 3 * @sizeOf(u64),
@@ -335,6 +333,21 @@ pub const Thunk = struct {
 
     pub fn getSymbol(thunk: Thunk, coff_file: *Coff) *Symbol {
         return coff_file.getSymbol(thunk.sym_index);
+    }
+
+    pub fn write(thunk: Thunk, buffer: []u8, coff_file: *Coff) !void {
+        assert(buffer.len == thunkSize(coff_file));
+        const cpu_arch = coff_file.options.cpu_arch.?;
+        const sym = thunk.getSymbol(coff_file);
+        const target = sym.getIATAddress(coff_file);
+        switch (cpu_arch) {
+            .aarch64 => @panic("TODO aarch64"),
+            .x86_64 => {
+                @memcpy(buffer, &.{ 0xff, 0x25, 0x00, 0x00, 0x00, 0x00 });
+                mem.writeInt(u32, buffer[2..][0..4], target, .little);
+            },
+            else => @panic("unhandled arch"),
+        }
     }
 
     pub fn format(

@@ -934,13 +934,13 @@ fn updateSectionSizes(self: *Coff) !void {
         for (dll.thunks_table.items) |thunk_index| {
             const thunk = dll.getThunk(thunk_index) orelse continue;
             const header = &self.sections.items(.header)[thunk.out_section_number];
-            const thunk_alignment = try std.math.powi(u32, 2, thunk.getAlignment(self));
+            const thunk_alignment = try std.math.powi(u32, 2, Dll.Thunk.thunkAlignment(self));
             const offset = mem.alignForward(u32, header.virtual_size, thunk_alignment);
             const padding = offset - header.virtual_size;
             thunk.value = offset;
-            header.virtual_size += padding + thunk.getSize(self);
-            header.size_of_raw_data += padding + thunk.getSize(self);
-            header.setAlignment(@max(header.getAlignment() orelse 0, thunk.getAlignment(self)));
+            header.virtual_size += padding + Dll.Thunk.thunkSize(self);
+            header.size_of_raw_data += padding + Dll.Thunk.thunkSize(self);
+            header.setAlignment(@max(header.getAlignment() orelse 0, Dll.Thunk.thunkAlignment(self)));
         }
     }
 
@@ -1076,7 +1076,56 @@ fn allocateSyntheticSymbols(self: *Coff) void {
 }
 
 fn writeAtoms(self: *Coff) !void {
-    _ = self;
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    const gpa = self.base.allocator;
+    const cpu_arch = self.options.cpu_arch.?;
+    const slice = self.sections.slice();
+
+    var has_resolve_error = false;
+    for (slice.items(.header), slice.items(.atoms)) |header, atoms| {
+        if (atoms.items.len == 0) continue;
+        if (header.flags.CNT_UNINITIALIZED_DATA == 1) continue;
+
+        const buffer = try gpa.alloc(u8, header.size_of_raw_data);
+        defer gpa.free(buffer);
+        const padding_byte: u8 = if (header.flags.CNT_CODE == 1 and cpu_arch == .x86_64) 0xcc else 0;
+        @memset(buffer, padding_byte);
+
+        for (atoms.items) |atom_index| {
+            const atom = self.getAtom(atom_index).?;
+            assert(atom.flags.alive);
+            if (!atom.hasData(self)) continue;
+            const off = atom.value;
+            try atom.getCode(self, buffer[off..][0..atom.size]);
+            atom.resolveRelocs(self, buffer[off..][0..atom.size]) catch |err| switch (err) {
+                error.ResolveFailed => has_resolve_error = true,
+                else => |e| return e,
+            };
+        }
+
+        try self.base.file.pwriteAll(buffer, header.pointer_to_raw_data);
+    }
+
+    // TODO: collect thunks by output section
+    {
+        const buffer = try gpa.alloc(u8, Dll.Thunk.thunkSize(self));
+        defer gpa.free(buffer);
+        @memset(buffer, 0);
+        for (self.dlls.values()) |index| {
+            const dll = self.getFile(index).?.dll;
+            if (dll.thunks_table.items.len == 0) continue;
+            for (dll.thunks_table.items) |thunk_index| {
+                if (dll.getThunk(thunk_index)) |th| {
+                    const header = self.sections.items(.header)[th.out_section_number];
+                    const off = th.value;
+                    try th.write(buffer, self);
+                    try self.base.file.pwriteAll(buffer, header.pointer_to_raw_data + off);
+                }
+            }
+        }
+    }
 }
 
 fn writeImportSection(self: *Coff) !void {
@@ -1680,6 +1729,7 @@ const Allocator = mem.Allocator;
 const Archive = @import("Coff/Archive.zig");
 const Atom = @import("Coff/Atom.zig");
 const Coff = @This();
+const Dll = @import("Coff/Dll.zig");
 const File = @import("Coff/file.zig").File;
 const InternalObject = @import("Coff/InternalObject.zig");
 const Object = @import("Coff/Object.zig");
