@@ -69,9 +69,8 @@ pub fn getAddress(symbol: Symbol, args: struct {
     if (symbol.flags.import and symbol.getFile(coff_file).? == .dll) {
         return symbol.getIATAddress(coff_file);
     }
-    const sect_index = symbol.out_section_number orelse return symbol.value;
-    const header = coff_file.sections.items(.header)[sect_index];
-    return header.virtual_address + symbol.value;
+    if (symbol.getAtom(coff_file)) |atom| return atom.getAddress(coff_file) + symbol.value;
+    return symbol.value;
 }
 
 pub fn getCoffSymbol(symbol: Symbol, coff_file: *Coff) Object.InputSymbol {
