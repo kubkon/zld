@@ -136,40 +136,52 @@ pub fn resolveRelocs(self: Atom, buffer: []u8, coff_file: *Coff) !void {
         const rel = relocs[i];
         const rel_type: coff.ImageRelAmd64 = @enumFromInt(rel.type);
         const offset = rel.virtual_address;
+        const rel_buffer = buffer[offset..];
         const sym_index = object.symbols.items[rel.symbol_table_index];
         const sym = coff_file.getSymbol(sym_index);
 
-        const P = self.getAddress(coff_file) + offset;
-        const S = sym.getAddress(.{}, coff_file);
-        const image_base = coff_file.getImageBase();
+        const P: i64 = @intCast(self.getAddress(coff_file) + offset);
+        const S: i64 = @intCast(sym.getAddress(.{}, coff_file));
+        const A: i64 = switch (rel_type) {
+            .absolute => 0,
+            .addr64 => mem.readInt(i64, rel_buffer[0..8], .little),
+            .addr32,
+            .addr32nb,
+            .rel32,
+            .rel32_1,
+            .rel32_2,
+            .rel32_3,
+            .rel32_4,
+            .rel32_5,
+            => mem.readInt(i32, rel_buffer[0..4], .little),
+            else => {
+                coff_file.base.fatal("{}:{s}: unhandled relocation type {s} at offset 0x{x}", .{
+                    object.fmtPath(),
+                    name,
+                    @tagName(rel_type),
+                    offset,
+                });
+                has_reloc_errors = true;
+                continue;
+            },
+        };
+        const image_base: i64 = @intCast(coff_file.getImageBase());
 
-        relocs_log.debug("  {s}: {x}: [{x} => {x}] ({s},{?})", .{
+        relocs_log.debug("  {s}: {x}: [{x} => {x} + {x}] ({s},{?})", .{
             @tagName(rel_type),
             offset,
             P,
             S,
+            A,
             sym.getName(coff_file),
             sym.file,
         });
 
-        const rel_buffer = buffer[offset..];
         switch (rel_type) {
             .absolute => {},
-            .addr32 => {
-                const target = math.cast(u32, S + image_base) orelse {
-                    coff_file.base.fatal("{}:{s}: RVA exceeds 32-bit range in relocation {s} at offset 0x{x}", .{
-                        object.fmtPath(),
-                        name,
-                        @tagName(rel_type), // TODO properly format reloc type
-                        offset,
-                    });
-                    has_reloc_errors = true;
-                    continue;
-                };
-                mem.writeInt(u32, rel_buffer[0..4], target, .little);
-            },
-            .addr64 => mem.writeInt(u64, rel_buffer[0..8], S + image_base, .little),
-            .addr32nb => mem.writeInt(u32, rel_buffer[0..4], S, .little),
+            .addr32 => mem.writeInt(u32, rel_buffer[0..4], @truncate(@as(u32, @intCast(S + A + image_base))), .little),
+            .addr64 => mem.writeInt(u64, rel_buffer[0..8], @bitCast(S + A + image_base), .little),
+            .addr32nb => mem.writeInt(u32, rel_buffer[0..4], @intCast(S + A), .little),
             .rel32,
             .rel32_1,
             .rel32_2,
@@ -177,16 +189,7 @@ pub fn resolveRelocs(self: Atom, buffer: []u8, coff_file: *Coff) !void {
             .rel32_4,
             .rel32_5,
             => {
-                const value = doSignedRel(P, S) catch {
-                    coff_file.base.fatal("{}:{s}: RVA exceeds signed 32-bit range in relocation {s} at offset 0x{x}", .{
-                        object.fmtPath(),
-                        name,
-                        @tagName(rel_type),
-                        offset,
-                    });
-                    has_reloc_errors = true;
-                    continue;
-                };
+                const value: i32 = @intCast(S + A - P - 4);
                 switch (rel_type) {
                     .rel32 => mem.writeInt(i32, rel_buffer[0..4], value, .little),
                     .rel32_1 => mem.writeInt(i32, rel_buffer[0..4], value - 1, .little),
@@ -210,12 +213,6 @@ pub fn resolveRelocs(self: Atom, buffer: []u8, coff_file: *Coff) !void {
     }
 
     if (has_reloc_errors) return error.RelocError;
-}
-
-pub fn doSignedRel(source: u32, target: u32) !i32 {
-    const ssource = math.cast(i32, source) orelse return error.Overflow;
-    const starget = math.cast(i32, target) orelse return error.Overflow;
-    return starget - ssource - 4;
 }
 
 pub fn format(

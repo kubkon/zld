@@ -344,14 +344,13 @@ pub const Thunk = struct {
         assert(buffer.len == thunkSize(coff_file));
         const cpu_arch = coff_file.options.cpu_arch.?;
         const sym = thunk.getSymbol(coff_file);
-        const P = thunk.getAddress(coff_file);
-        const S = sym.getIATAddress(coff_file);
-        const target = try Atom.doSignedRel(P, S);
+        const P: i64 = @intCast(thunk.getAddress(coff_file));
+        const S: i64 = @intCast(sym.getIATAddress(coff_file));
         switch (cpu_arch) {
             .aarch64 => @panic("TODO aarch64"),
             .x86_64 => {
                 @memcpy(buffer, &[_]u8{ 0xff, 0x25, 0x00, 0x00, 0x00, 0x00 });
-                mem.writeInt(i32, buffer[2..][0..4], target, .little);
+                mem.writeInt(i32, buffer[2..][0..4], @intCast(S - P - 4), .little);
             },
             else => @panic("unhandled arch"),
         }
