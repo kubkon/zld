@@ -1382,7 +1382,7 @@ fn getSizeOfImage(self: Coff) u32 {
     return image_size;
 }
 
-fn getImageBase(self: Coff) u64 {
+pub fn getImageBase(self: Coff) u64 {
     // TODO handle user flag
     return switch (self.options.cpu_arch.?) {
         .aarch64 => 0x140000000,
