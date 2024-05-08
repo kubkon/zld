@@ -10,13 +10,15 @@ auxtab: std.ArrayListUnmanaged(AuxSymbol) = .{},
 strtab: std.ArrayListUnmanaged(u8) = .{},
 symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
 
+directives: std.ArrayListUnmanaged(u8) = .{},
 default_libs: std.ArrayListUnmanaged(u32) = .{},
 disallow_libs: std.ArrayListUnmanaged(u32) = .{},
-merge_rules: std.ArrayListUnmanaged(struct { u32, u32 }) = .{},
+merge_rules: std.ArrayListUnmanaged(MergeRule) = .{},
 
 atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
 
 alive: bool = true,
+visited: bool = false,
 
 pub fn deinit(self: *Object, allocator: Allocator) void {
     if (self.archive) |*ar| allocator.free(ar.path);
@@ -29,6 +31,7 @@ pub fn deinit(self: *Object, allocator: Allocator) void {
     self.auxtab.deinit(allocator);
     self.strtab.deinit(allocator);
     self.symbols.deinit(allocator);
+    self.directives.deinit(allocator);
     self.default_libs.deinit(allocator);
     self.disallow_libs.deinit(allocator);
     self.merge_rules.deinit(allocator);
@@ -38,8 +41,6 @@ pub fn deinit(self: *Object, allocator: Allocator) void {
 pub fn parse(self: *Object, coff_file: *Coff) !void {
     const tracy = trace(@src());
     defer tracy.end();
-
-    log.debug("parsing COFF object {}", .{self.fmtPath()});
 
     const gpa = coff_file.base.allocator;
     const offset = if (self.archive) |ar| ar.offset else 0;
@@ -226,8 +227,15 @@ fn parseInputSymbolTable(self: *Object, allocator: Allocator, file: std.fs.File,
                 } });
                 out_sym.aux_len += 1;
             } else {
-                log.debug("{}: unhandled aux record for symbol '{s}'", .{ self.fmtPath(), name });
+                extra_log.debug("{}: unhandled aux record for symbol '{s}'", .{ self.fmtPath(), name });
             }
+        }
+    }
+
+    // Remap symbol table indexes in relocation entries.
+    for (self.sections.items(.relocs)) |*relocs| {
+        for (relocs.items) |*rel| {
+            rel.symbol_table_index = index_map.get(rel.symbol_table_index).?;
         }
     }
 }
@@ -266,7 +274,8 @@ fn parseDirectives(self: *Object, allocator: Allocator, file: std.fs.File, offse
                 return error.ParseFailed;
             }
 
-            const buffer = try directives.addManyAsSlice(header.size_of_raw_data);
+            try self.directives.ensureUnusedCapacity(allocator, header.size_of_raw_data);
+            const buffer = self.directives.addManyAsSliceAssumeCapacity(header.size_of_raw_data);
             const amt = try file.preadAll(buffer, offset + header.pointer_to_raw_data);
             if (amt != header.size_of_raw_data) return error.InputOutput;
         }
@@ -274,7 +283,7 @@ fn parseDirectives(self: *Object, allocator: Allocator, file: std.fs.File, offse
 
     // Preparse directives acting on things like /include, /alternatename, /merge, etc.
     var has_parse_error = false;
-    var it = mem.splitScalar(u8, mem.trim(u8, directives.items, " "), ' ');
+    var it = mem.splitScalar(u8, mem.trim(u8, self.directives.items, " "), ' ');
     var p = Coff.Options.ArgsParser(@TypeOf(it)){ .it = &it };
     while (p.hasMore()) {
         if (p.arg("defaultlib")) |name| {
@@ -314,8 +323,8 @@ fn parseDirectives(self: *Object, allocator: Allocator, file: std.fs.File, offse
                 continue;
             };
             try self.merge_rules.append(allocator, .{
-                try self.insertString(allocator, mapping[0..tok]),
-                try self.insertString(allocator, mapping[tok + 1 ..]),
+                .from = try self.insertString(allocator, mapping[0..tok]),
+                .to = try self.insertString(allocator, mapping[tok + 1 ..]),
             });
         } else {
             coff_file.base.fatal("{}: unhandled directive: {s}", .{
@@ -358,7 +367,11 @@ fn initSymbols(self: *Object, allocator: Allocator, coff_file: *Coff) !void {
             const gop = try coff_file.getOrCreateGlobal(off);
             self.symbols.addOneAssumeCapacity().* = gop.index;
             if (coff_sym.weakExt()) {
-                coff_file.getSymbol(gop.index).flags.weak = true;
+                const sym = coff_file.getSymbol(gop.index);
+                assert(coff_sym.aux_len == 1);
+                const aux = self.auxtab.items[coff_sym.aux_index].weak_ext;
+                sym.flags.weak = true;
+                try sym.addExtra(.{ .weak_flag = @intFromEnum(aux.flag) }, coff_file);
             }
             continue;
         }
@@ -377,7 +390,6 @@ fn initSymbols(self: *Object, allocator: Allocator, coff_file: *Coff) !void {
             .atom = atom,
             .file = self.index,
         };
-        symbol.flags.common = coff_sym.common();
     }
 }
 
@@ -385,8 +397,14 @@ fn skipSection(self: *Object, index: u16) bool {
     const header = self.sections.items(.header)[index];
     const name = self.getString(header.name);
     const ignore = blk: {
-        if (header.flags.LNK_INFO == 0b1) break :blk true; // TODO info sections
+        if (header.flags.LNK_INFO == 0b1) break :blk true; // TODO info sections such as .voltbl
         if (mem.startsWith(u8, name, ".debug")) break :blk true; // TODO debug info
+        if (mem.eql(u8, name, ".gfids$y")) break :blk true; // TODO guard FID chunks
+        if (mem.eql(u8, name, ".giats$y")) break :blk true; // TODO guard IAT chunks
+        if (mem.eql(u8, name, ".gljmp$y")) break :blk true; // TODO guard LJmp chunks
+        if (mem.eql(u8, name, ".gehcont$y")) break :blk true; // TODO guard EHCont chunks
+        if (mem.eql(u8, name, ".sxdata")) break :blk true; // TODO .sxdata chunks
+        if (mem.eql(u8, name, ".rsrc") or mem.startsWith(u8, name, "rsrc$")) break :blk true; // TODO resource chunks
         break :blk false;
     };
     return ignore;
@@ -419,7 +437,12 @@ pub fn resolveSymbols(self: *Object, coff_file: *Coff) void {
         const global = coff_file.getSymbol(index);
         if (!global.flags.global) continue;
 
-        const coff_sym_idx = @as(u32, @intCast(i));
+        if (global.flags.weak) {
+            const weak_flag = global.getWeakFlag(coff_file).?;
+            if (weak_flag == .SEARCH_NOLIBRARY and !self.alive) continue;
+        }
+
+        const coff_sym_idx = @as(Symbol.Index, @intCast(i));
         const coff_sym = self.symtab.items[coff_sym_idx];
         if (coff_sym.undf() or coff_sym.weakExt()) continue;
 
@@ -452,6 +475,9 @@ pub fn markLive(self: *Object, coff_file: *Coff) void {
     const tracy = trace(@src());
     defer tracy.end();
 
+    if (self.visited) return;
+    self.visited = true;
+
     for (self.symbols.items, 0..) |index, csym_idx| {
         const sym = coff_file.getSymbol(index);
         if (!sym.flags.global) continue;
@@ -465,8 +491,13 @@ pub fn markLive(self: *Object, coff_file: *Coff) void {
             continue;
         };
         const coff_sym = self.symtab.items[csym_idx];
-        const should_keep = coff_sym.undf() or coff_sym.common();
+        const should_keep = coff_sym.undf();
         if (should_keep and !file.isAlive()) {
+            log.debug("Reading {}", .{file.fmtPathShort()});
+            if (file == .object) {
+                log.debug("Directives: {}: {}", .{ file.fmtPathShort(), file.object.fmtDirectives() });
+            }
+            log.debug("Loaded {} for {s}", .{ file.fmtPathShort(), sym.getName(coff_file) });
             file.setAlive();
             if (file == .object) file.markLive(coff_file);
         }
@@ -474,8 +505,96 @@ pub fn markLive(self: *Object, coff_file: *Coff) void {
 }
 
 pub fn convertCommonSymbols(self: *Object, coff_file: *Coff) !void {
-    _ = self;
-    _ = coff_file;
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    const gpa = coff_file.base.allocator;
+
+    for (self.symbols.items, 0..) |index, i| {
+        const sym = coff_file.getSymbol(index);
+        if (!sym.flags.common) continue;
+        const sym_file = sym.getFile(coff_file).?;
+        if (sym_file.getIndex() != self.index) continue;
+
+        const coff_sym = &self.symtab.items[i];
+        const atom_index = try coff_file.addAtom();
+        try self.atoms.append(gpa, atom_index);
+
+        const name = ".bss";
+        const atom = coff_file.getAtom(atom_index).?;
+        atom.atom_index = atom_index;
+        atom.name = try self.insertString(gpa, name);
+        atom.file = self.index;
+        // MSVC link.exe and link-lld.exe align all common symbols smaller than 32 bytes naturally.
+        // That is, they round the size up to the next power of two.
+        const size = std.math.cast(u16, coff_sym.value) orelse return error.Overflow;
+        const alignment = @min(std.math.ceilPowerOfTwoAssert(u16, size), 32);
+        atom.alignment = std.math.log2_int(u16, alignment);
+        atom.size = size;
+
+        const sect_num: u16 = @intCast(try self.sections.addOne(gpa));
+        const sect = &self.sections.items(.header)[sect_num];
+        sect.* = .{
+            .name = atom.name,
+            .virtual_size = atom.size,
+            .virtual_address = 0,
+            .size_of_raw_data = 0,
+            .pointer_to_raw_data = 0,
+            .pointer_to_relocations = 0,
+            .pointer_to_linenumbers = 0,
+            .number_of_relocations = 0,
+            .number_of_linenumbers = 0,
+            .flags = .{
+                .CNT_UNINITIALIZED_DATA = 0b1,
+                .MEM_READ = 0b1,
+            },
+        };
+        sect.setAlignment(@intCast(alignment));
+        self.sections.items(.relocs)[sect_num] = .{};
+        atom.section_number = sect_num;
+
+        sym.value = 0;
+        sym.atom = atom_index;
+        sym.flags.global = true;
+        sym.flags.common = false;
+        sym.flags.weak = false;
+
+        coff_sym.value = 0;
+        coff_sym.section_number = @enumFromInt(sect_num + 1);
+        coff_sym.storage_class = .EXTERNAL;
+    }
+}
+
+pub fn reportUndefs(self: *Object, coff_file: *Coff, undefs: anytype) !void {
+    for (self.atoms.items) |atom_index| {
+        const atom = coff_file.getAtom(atom_index) orelse continue;
+        if (!atom.flags.alive) continue;
+        const isec = atom.getInputSection(coff_file);
+        if (isec.flags.CNT_UNINITIALIZED_DATA == 0b1) continue;
+        try atom.reportUndefs(coff_file, undefs);
+    }
+}
+
+pub fn initSection(self: Object, atom: *const Atom, coff_file: *Coff) !struct { u16, i32 } {
+    const header = atom.getInputSection(coff_file);
+    const full_name = self.getString(header.name);
+    var flags = header.flags;
+    flags.ALIGN = 0;
+    flags.LNK_COMDAT = 0;
+    const name_sep = mem.indexOfScalar(u8, full_name, '$') orelse full_name.len;
+    const name = full_name[0..name_sep];
+    const out_name, const index: i32 = coff_file.getMergeRule(name) orelse .{ name, -1 };
+    const out_sect = coff_file.getSectionByName(out_name) orelse
+        try coff_file.addSection(out_name, flags);
+    return .{ out_sect, index };
+}
+
+pub fn collectBaseRelocs(self: Object, coff_file: *Coff) !void {
+    for (self.atoms.items) |atom_index| {
+        const atom = coff_file.getAtom(atom_index) orelse continue;
+        if (!atom.flags.alive) continue;
+        try atom.collectBaseRelocs(coff_file);
+    }
 }
 
 pub fn getString(self: Object, off: u32) [:0]const u8 {
@@ -496,7 +615,7 @@ pub fn asFile(self: *Object) File {
 }
 
 pub fn format(
-    self: *Object,
+    self: Object,
     comptime unused_fmt_string: []const u8,
     options: std.fmt.FormatOptions,
     writer: anytype,
@@ -508,16 +627,10 @@ pub fn format(
     @compileError("do not format Object directly");
 }
 
-const FormatContext = struct {
-    object: *Object,
-    coff_file: *Coff,
-};
+const FormatContext = struct { Object, *Coff };
 
-pub fn fmtAtoms(self: *Object, coff_file: *Coff) std.fmt.Formatter(formatAtoms) {
-    return .{ .data = .{
-        .object = self,
-        .coff_file = coff_file,
-    } };
+pub fn fmtAtoms(self: Object, coff_file: *Coff) std.fmt.Formatter(formatAtoms) {
+    return .{ .data = .{ self, coff_file } };
 }
 
 fn formatAtoms(
@@ -528,19 +641,16 @@ fn formatAtoms(
 ) !void {
     _ = unused_fmt_string;
     _ = options;
-    const object = ctx.object;
+    const object, const coff_file = ctx;
     try writer.writeAll("  atoms\n");
     for (object.atoms.items) |atom_index| {
-        const atom = ctx.coff_file.getAtom(atom_index) orelse continue;
-        try writer.print("    {}\n", .{atom.fmt(ctx.coff_file)});
+        const atom = coff_file.getAtom(atom_index) orelse continue;
+        try writer.print("    {}\n", .{atom.fmt(coff_file)});
     }
 }
 
-pub fn fmtSymbols(self: *Object, coff_file: *Coff) std.fmt.Formatter(formatSymbols) {
-    return .{ .data = .{
-        .object = self,
-        .coff_file = coff_file,
-    } };
+pub fn fmtSymbols(self: Object, coff_file: *Coff) std.fmt.Formatter(formatSymbols) {
+    return .{ .data = .{ self, coff_file } };
 }
 
 fn formatSymbols(
@@ -551,11 +661,11 @@ fn formatSymbols(
 ) !void {
     _ = unused_fmt_string;
     _ = options;
-    const object = ctx.object;
+    const object, const coff_file = ctx;
     try writer.writeAll("  symbols\n");
     for (object.symbols.items) |index| {
-        const sym = ctx.coff_file.getSymbol(index);
-        try writer.print("    {}\n", .{sym.fmt(ctx.coff_file)});
+        const sym = coff_file.getSymbol(index);
+        try writer.print("    {}\n", .{sym.fmt(coff_file)});
     }
 }
 
@@ -577,6 +687,41 @@ fn formatPath(
         try writer.writeAll(object.path);
         try writer.writeByte(')');
     } else try writer.writeAll(object.path);
+}
+
+pub fn fmtPathShort(self: Object) std.fmt.Formatter(formatPathShort) {
+    return .{ .data = self };
+}
+
+fn formatPathShort(
+    object: Object,
+    comptime unused_fmt_string: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = unused_fmt_string;
+    _ = options;
+    if (object.archive) |ar| {
+        try writer.writeAll(std.fs.path.basename(ar.path));
+        try writer.writeByte('(');
+        try writer.writeAll(std.fs.path.basename(object.path));
+        try writer.writeByte(')');
+    } else try writer.writeAll(std.fs.path.basename(object.path));
+}
+
+pub fn fmtDirectives(self: Object) std.fmt.Formatter(formatDirectives) {
+    return .{ .data = self };
+}
+
+fn formatDirectives(
+    object: Object,
+    comptime unused_fmt_string: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = unused_fmt_string;
+    _ = options;
+    try writer.print("{s}", .{object.directives.items});
 }
 
 fn parseSymbol(raw: *const [symtab_entry_size]u8) coff.Symbol {
@@ -705,14 +850,14 @@ const AuxSymbol = union {
     weak_ext: WeakExt,
 };
 
-const FuncDef = struct {
+pub const FuncDef = struct {
     sym_index: u32,
     total_size: u32,
     pointer_to_linenumber: u32,
     pointer_to_next_function: u32,
 };
 
-const SectDef = struct {
+pub const SectDef = struct {
     length: u32,
     number_of_relocations: u16,
     number_of_linenumbers: u16,
@@ -721,12 +866,12 @@ const SectDef = struct {
     selection: coff.ComdatSelection,
 };
 
-const WeakExt = struct {
+pub const WeakExt = struct {
     sym_index: u32,
     flag: coff.WeakExternalFlag,
 };
 
-const DebugInfo = struct {
+pub const DebugInfo = struct {
     line_number: u16,
     pointer_to_next_function: u32,
 };
@@ -739,11 +884,17 @@ const Archive = struct {
     offset: u64,
 };
 
+const MergeRule = struct {
+    from: u32,
+    to: u32,
+};
+
 const assert = std.debug.assert;
 const coff = std.coff;
 const mem = std.mem;
 const fs = std.fs;
 const log = std.log.scoped(.coff);
+const extra_log = std.log.scoped(.coff_extra);
 const std = @import("std");
 const trace = @import("../tracy.zig").trace;
 

@@ -41,11 +41,11 @@ pub fn asFile(self: *InternalObject) File {
 }
 
 const FormatContext = struct {
-    self: *InternalObject,
+    self: InternalObject,
     coff_file: *Coff,
 };
 
-pub fn fmtSymbols(self: *InternalObject, coff_file: *Coff) std.fmt.Formatter(formatSymbols) {
+pub fn fmtSymbols(self: InternalObject, coff_file: *Coff) std.fmt.Formatter(formatSymbols) {
     return .{ .data = .{
         .self = self,
         .coff_file = coff_file,
@@ -65,6 +65,35 @@ fn formatSymbols(
         const sym = ctx.coff_file.getSymbol(index);
         try writer.print("    {}\n", .{sym.fmt(ctx.coff_file)});
     }
+}
+
+pub fn fmtPath(self: InternalObject) std.fmt.Formatter(formatPath) {
+    return .{ .data = self };
+}
+
+fn formatPath(
+    obj: InternalObject,
+    comptime unused_fmt_string: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = obj;
+    _ = unused_fmt_string;
+    _ = options;
+    try writer.writeAll("(internal)");
+}
+
+pub fn fmtPathShort(self: InternalObject) std.fmt.Formatter(formatPathShort) {
+    return .{ .data = self };
+}
+
+fn formatPathShort(
+    obj: InternalObject,
+    comptime unused_fmt_string: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    return obj.formatPath(unused_fmt_string, options, writer);
 }
 
 const assert = std.debug.assert;

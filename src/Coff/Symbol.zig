@@ -1,5 +1,5 @@
 /// Allocated address value of this symbol.
-value: u64 = 0,
+value: u32 = 0,
 
 /// Offset into the string table, either global or local to object.
 name: u32 = 0,
@@ -13,11 +13,11 @@ file: File.Index = 0,
 atom: Atom.Index = 0,
 
 /// Assigned output section.
-out_section_number: u16 = 0,
+out_section_number: ?u16 = null,
 
 /// Index of the source COFF symbol this symbol references.
 /// Use `getCoffSymbol` to pull the COFF symbol from the relevant input file.
-coff_sym_idx: u32 = 0,
+coff_sym_idx: Index = 0,
 
 /// Misc flags for the symbol.
 flags: Flags = .{},
@@ -38,6 +38,12 @@ pub fn getAltSymbol(symbol: Symbol, coff_file: *Coff) ?*Symbol {
     return coff_file.getSymbol(extra.alt_name);
 }
 
+pub fn getWeakFlag(symbol: Symbol, coff_file: *Coff) ?std.coff.WeakExternalFlag {
+    if (!symbol.flags.weak) return null;
+    const extra = symbol.getExtra(coff_file).?;
+    return @enumFromInt(extra.weak_flag);
+}
+
 pub fn getFile(symbol: Symbol, coff_file: *Coff) ?File {
     return coff_file.getFile(symbol.file);
 }
@@ -47,21 +53,24 @@ pub fn getAtom(symbol: Symbol, coff_file: *Coff) ?*Atom {
 }
 
 pub fn getAddress(symbol: Symbol, args: struct {
+    thunk: bool = true,
     alt: bool = true,
-}, coff_file: *Coff) u64 {
-    if (symbol.out_section_number == 0) return symbol.value;
+}, coff_file: *Coff) u32 {
     if (symbol.getFile(coff_file) == null) {
         if (args.alt and symbol.getAltSymbol(coff_file) != null) {
             const alt = symbol.getAltSymbol(coff_file).?;
-            if (alt.getFile(coff_file)) |_| {
-                const header = coff_file.sections.items(.header)[alt.out_section_number];
-                return header.virtual_address + alt.value;
-            }
+            return alt.getAddress(.{}, coff_file);
         }
         return 0;
     }
-    const header = coff_file.sections.items(.header)[symbol.out_section_number];
-    return header.virtual_address + symbol.value;
+    if (symbol.flags.thunk and args.thunk) {
+        return symbol.getThunkAddress(coff_file);
+    }
+    if (symbol.flags.import and symbol.getFile(coff_file).? == .dll) {
+        return symbol.getIATAddress(coff_file);
+    }
+    if (symbol.getAtom(coff_file)) |atom| return atom.getAddress(coff_file) + symbol.value;
+    return symbol.value;
 }
 
 pub fn getCoffSymbol(symbol: Symbol, coff_file: *Coff) Object.InputSymbol {
@@ -81,8 +90,28 @@ pub fn getSymbolRank(symbol: Symbol, coff_file: *Coff) u32 {
     });
 }
 
+pub fn getThunkAddress(symbol: Symbol, coff_file: *Coff) u32 {
+    if (!symbol.flags.thunk) return 0;
+    const extra = symbol.getExtra(coff_file).?;
+    const dll = symbol.getFile(coff_file).?.dll;
+    return dll.getThunk(extra.thunk).?.getAddress(coff_file);
+}
+
+pub fn getIATAddress(symbol: Symbol, coff_file: *Coff) u32 {
+    const file = symbol.getFile(coff_file).?;
+    if (!symbol.flags.import or file != .dll) return 0;
+    const header = coff_file.sections.items(.header)[coff_file.idata_section_index.?];
+    const ctx = file.dll.idata_ctx;
+    const extra = symbol.getExtra(coff_file).?;
+    return header.virtual_address + ctx.iat_offset + extra.iat * @sizeOf(u64);
+}
+
 const AddExtraOpts = struct {
     alt_name: ?u32 = null,
+    weak_flag: ?u32 = null,
+    thunk: ?u32 = null,
+    iat: ?u32 = null,
+    names: ?u32 = null,
 };
 
 pub fn addExtra(symbol: *Symbol, opts: AddExtraOpts, coff_file: *Coff) !void {
@@ -153,8 +182,8 @@ fn format2(
         try writer.writeAll(" : unresolved");
         return;
     };
-    if (symbol.out_section_number != 0) {
-        try writer.print(" : sect({d})", .{symbol.out_section_number});
+    if (symbol.out_section_number) |sect_index| {
+        try writer.print(" : sect({d})", .{sect_index});
     }
     if (symbol.getAtom(ctx.coff_file)) |atom| {
         try writer.print(" : atom({d})", .{atom.atom_index});
@@ -191,10 +220,20 @@ pub const Flags = packed struct {
 
     /// Whether the symbol has alternate name.
     alt_name: bool = false,
+
+    /// Whether the symbol has a jump thunk.
+    thunk: bool = false,
+
+    /// Whether the symbol is imported by name.
+    names: bool = false,
 };
 
 pub const Extra = struct {
     alt_name: u32 = 0,
+    weak_flag: u32 = 0,
+    thunk: u32 = 0,
+    iat: u32 = 0,
+    names: u32 = 0,
 };
 
 pub const Index = u32;

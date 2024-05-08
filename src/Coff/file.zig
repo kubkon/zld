@@ -95,9 +95,25 @@ pub const File = union(enum) {
         _ = unused_fmt_string;
         _ = options;
         switch (file) {
-            .internal => try writer.writeAll("(internal)"),
-            .object => |x| try writer.print("{}", .{x.fmtPath()}),
-            .dll => |x| try writer.writeAll(x.path),
+            inline else => |x| try writer.print("{}", .{x.fmtPath()}),
+        }
+    }
+
+    /// Like fmtPath but includes only basename.
+    pub fn fmtPathShort(file: File) std.fmt.Formatter(formatPathShort) {
+        return .{ .data = file };
+    }
+
+    fn formatPathShort(
+        file: File,
+        comptime unused_fmt_string: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = unused_fmt_string;
+        _ = options;
+        switch (file) {
+            inline else => |x| try writer.print("{}", .{x.fmtPathShort()}),
         }
     }
 

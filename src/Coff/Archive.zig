@@ -22,8 +22,6 @@ pub fn parse(self: *Archive, path: []const u8, file_handle: File.HandleIndex, co
     } = .{};
     var member_count: usize = 0;
 
-    log.debug("parsing archive {s}", .{path});
-
     var pos: usize = magic.len;
     while (true) {
         if (!mem.isAligned(pos, 2)) {
@@ -38,7 +36,6 @@ pub fn parse(self: *Archive, path: []const u8, file_handle: File.HandleIndex, co
         pos += @sizeOf(Header);
 
         if (!std.mem.eql(u8, &hdr.end, end)) {
-            log.debug("invalid header? {}", .{hdr});
             coff_file.base.fatal("{s}: invalid header delimiter: expected '{s}', found '{s}'", .{
                 path,
                 std.fmt.fmtSliceEscapeLower(magic),
@@ -92,7 +89,8 @@ pub fn parse(self: *Archive, path: []const u8, file_handle: File.HandleIndex, co
             }
         }
 
-        if (hdr.isHybridMap() or hdr.isEcSymbols()) continue;
+        // https://reviews.llvm.org/D120645
+        if (hdr.isHybridMap() or hdr.isEcSymbols() or hdr.isXfgMap()) continue;
 
         const name = if (hdr.getName()) |name|
             name
@@ -182,6 +180,10 @@ const Header = extern struct {
         return std.mem.eql(u8, &hdr.name, ecsymbols_member);
     }
 
+    fn isXfgMap(hdr: *const Header) bool {
+        return std.mem.eql(u8, &hdr.name, xfgmap_member);
+    }
+
     pub fn format(
         hdr: *const Header,
         comptime unused_fmt_string: []const u8,
@@ -218,6 +220,7 @@ const linker_member = genMemberName("/");
 const longnames_member = genMemberName("//");
 const hybridmap_member = genMemberName("/<HYBRIDMAP>/");
 const ecsymbols_member = genMemberName("/<ECSYMBOLS>/");
+const xfgmap_member = genMemberName("/<XFGHASHMAP>/");
 
 const assert = std.debug.assert;
 const coff = std.coff;

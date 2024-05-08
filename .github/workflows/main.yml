@@ -22,13 +22,14 @@ jobs:
 
   windows:
     name: Test Windows
-    runs-on: windows-latest
+    runs-on: windows-2019
     steps:
     - run: git config --global core.autocrlf false
     - uses: actions/checkout@v3
     - uses: goto-bus-stop/setup-zig@v2
       with:
         version: master
+    - uses: ilammy/msvc-dev-cmd@v1
     - run: zig version
     - run: zig fmt --check src 
     - run: zig build test -Dhas-zig

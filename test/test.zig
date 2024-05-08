@@ -32,6 +32,7 @@ pub fn addTests(b: *Build, comp: *Compile, build_opts: struct {
 
     test_step.dependOn(macho.addMachOTests(b, opts));
     test_step.dependOn(elf.addElfTests(b, opts));
+    test_step.dependOn(coff.addCoffTests(b, opts));
 
     return test_step;
 }
@@ -174,7 +175,10 @@ pub const RunSysCmd = struct {
     run: *Run,
 
     pub inline fn expectHelloWorld(rsc: RunSysCmd) void {
-        rsc.run.expectStdOutEqual("Hello world!\n");
+        switch (builtin.target.os.tag) {
+            .windows => rsc.run.expectStdOutEqual("Hello world!\r\n"),
+            else => rsc.run.expectStdOutEqual("Hello world!\n"),
+        }
     }
 
     pub inline fn expectStdOutEqual(rsc: RunSysCmd, exp: []const u8) void {
@@ -246,6 +250,7 @@ pub fn skipTestStep(test_step: *Step) *Step {
 
 const std = @import("std");
 const builtin = @import("builtin");
+const coff = @import("coff.zig");
 const elf = @import("elf.zig");
 const macho = @import("macho.zig");
 
