@@ -1,10 +1,10 @@
 path: []const u8,
 index: File.Index,
 
-exports: std.MultiArrayList(Export) = .{},
-exports_data: std.ArrayListUnmanaged(ExportData) = .{},
+exports: std.ArrayListUnmanaged(Export) = .{},
 strtab: std.ArrayListUnmanaged(u8) = .{},
 symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
+export_symbols: std.MultiArrayList(ExportSymbol) = .{},
 
 thunks: std.ArrayListUnmanaged(Thunk) = .{},
 thunks_table: std.ArrayListUnmanaged(Thunk.Index) = .{},
@@ -14,8 +14,9 @@ idata_ctx: IdataCtx = .{},
 
 pub fn deinit(self: *Dll, allocator: Allocator) void {
     allocator.free(self.path);
+    self.symbols.deinit(allocator);
     self.exports.deinit(allocator);
-    self.exports_data.deinit(allocator);
+    self.export_symbols.deinit(allocator);
     self.strtab.deinit(allocator);
     self.thunks.deinit(allocator);
     self.thunks_table.deinit(allocator);
@@ -23,8 +24,8 @@ pub fn deinit(self: *Dll, allocator: Allocator) void {
 
 pub fn initSymbols(self: *Dll, coff_file: *Coff) !void {
     const gpa = coff_file.base.allocator;
-    try self.symbols.ensureTotalCapacityPrecise(gpa, self.exports.items(.name).len);
-    for (self.exports.items(.name)) |name| {
+    try self.symbols.ensureTotalCapacityPrecise(gpa, self.export_symbols.items(.name).len);
+    for (self.export_symbols.items(.name)) |name| {
         const off = try coff_file.string_intern.insert(gpa, self.getString(name));
         const gop = try coff_file.getOrCreateGlobal(off);
         self.symbols.addOneAssumeCapacity().* = gop.index;
@@ -62,28 +63,28 @@ pub fn addExport(self: *Dll, coff_file: *Coff, args: struct {
             return error.ParseFailed;
         },
     };
-    const data_index: ExportData.Index = @intCast(self.exports_data.items.len);
-    try self.exports_data.append(gpa, .{
+    const exp_index: Export.Index = @intCast(self.exports.items.len);
+    try self.exports.append(gpa, .{
         .name = try self.addString(gpa, ext_name),
         .hint = args.hint,
         .type = args.type,
     });
-    try self.exports.append(gpa, .{
+    try self.export_symbols.append(gpa, .{
         .name = try self.addString(gpa, imp_name),
-        .data = data_index,
+        .exp = exp_index,
         .kind = .direct,
     });
 
     switch (args.type) {
         .CODE, .CONST => {
-            const kind: Export.Kind = switch (args.type) {
+            const kind: ExportSymbol.Kind = switch (args.type) {
                 .CODE => .thunk,
                 .CONST => .alias,
                 else => unreachable,
             };
-            try self.exports.append(gpa, .{
+            try self.export_symbols.append(gpa, .{
                 .name = try self.addString(gpa, args.name),
-                .data = data_index,
+                .exp = exp_index,
                 .kind = kind,
             });
         },
@@ -122,7 +123,7 @@ pub fn addThunks(self: *Dll, coff_file: *Coff) !void {
     try self.thunks_table.resize(gpa, self.symbols.items.len);
     @memset(self.thunks_table.items, 0);
 
-    for (self.symbols.items, self.exports.items(.kind), 0..) |sym_index, exp_kind, index| {
+    for (self.symbols.items, self.export_symbols.items(.kind), 0..) |sym_index, exp_kind, index| {
         const sym = coff_file.getSymbol(sym_index);
         if (!sym.flags.import) continue;
 
@@ -143,11 +144,14 @@ pub fn updateImportSectionSize(self: *Dll, coff_file: *Coff) !void {
     const ctx = &self.idata_ctx;
     var iat: u32 = 0;
     var names: u32 = 0;
-    for (self.symbols.items, self.exports.items(.data)) |sym_index, exp_index| {
+    for (self.symbols.items, self.export_symbols.items(.exp)) |sym_index, exp_index| {
         const sym = coff_file.getSymbol(sym_index);
         if (!sym.flags.import) continue;
 
-        const exp = self.exports_data.items[exp_index];
+        const exp = &self.exports.items[exp_index];
+        if (exp.alive) continue;
+        exp.alive = true;
+
         if (exp.byName(self)) |res| {
             try sym.addExtra(.{ .names = names }, coff_file);
             sym.flags.names = true;
@@ -180,11 +184,13 @@ pub fn writeImportSection(self: *Dll, buffer: []u8, coff_file: *Coff) !void {
     @memcpy(buffer[ctx.dir_table_offset..][0..@sizeOf(coff.ImportDirectoryEntry)], mem.asBytes(&dir_header));
 
     // Lookup and IAT entries
-    for (self.symbols.items, self.exports.items(.data)) |sym_index, exp_index| {
+    for (self.symbols.items, self.export_symbols.items(.exp)) |sym_index, exp_index| {
         const sym = coff_file.getSymbol(sym_index);
         if (!sym.flags.import) continue;
 
-        const exp = self.exports_data.items[exp_index];
+        const exp = self.exports.items[exp_index];
+        if (!exp.alive) continue;
+
         const extra = sym.getExtra(coff_file).?;
         if (exp.byOrdinal(self)) |ord| {
             const lookup_entry = coff.ImportLookupEntry64.ByOrdinal{
@@ -313,9 +319,9 @@ fn formatPathShort(
     try writer.writeAll(std.fs.path.basename(dll.path));
 }
 
-const Export = struct {
+const ExportSymbol = struct {
     name: u32,
-    data: ExportData.Index,
+    exp: Export.Index,
     kind: Kind,
 
     const Kind = enum {
@@ -325,21 +331,22 @@ const Export = struct {
     };
 };
 
-const ExportData = packed struct {
+const Export = packed struct {
     /// Actual export name which doesn't take part in symbol resolution.
     name: u32,
     hint: u16,
     type: coff.ImportType,
+    alive: bool = false,
 
-    fn byName(expdat: ExportData, dll: *const Dll) ?ByName {
-        const name = dll.getString(expdat.name);
+    fn byName(exp: Export, dll: *const Dll) ?ByName {
+        const name = dll.getString(exp.name);
         if (name.len == 0) return null;
-        return .{ .name = name, .hint = expdat.hint };
+        return .{ .name = name, .hint = exp.hint };
     }
 
-    fn byOrdinal(expdat: ExportData, dll: *const Dll) ?u16 {
-        if (expdat.byName(dll)) |_| return null;
-        return expdat.hint;
+    fn byOrdinal(exp: Export, dll: *const Dll) ?u16 {
+        if (exp.byName(dll)) |_| return null;
+        return exp.hint;
     }
 
     const Index = u32;
