@@ -175,7 +175,10 @@ pub const RunSysCmd = struct {
     run: *Run,
 
     pub inline fn expectHelloWorld(rsc: RunSysCmd) void {
-        rsc.run.expectStdOutEqual("Hello world!\n");
+        switch (builtin.target.os.tag) {
+            .windows => rsc.run.expectStdOutEqual("Hello world!\r\n"),
+            else => rsc.run.expectStdOutEqual("Hello world!\n"),
+        }
     }
 
     pub inline fn expectStdOutEqual(rsc: RunSysCmd, exp: []const u8) void {
