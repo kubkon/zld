@@ -1,7 +1,8 @@
 path: []const u8,
 index: File.Index,
 
-exports: std.ArrayListUnmanaged(Export) = .{},
+exports: std.MultiArrayList(Export) = .{},
+exports_data: std.ArrayListUnmanaged(ExportData) = .{},
 strtab: std.ArrayListUnmanaged(u8) = .{},
 symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
 
@@ -14,6 +15,7 @@ idata_ctx: IdataCtx = .{},
 pub fn deinit(self: *Dll, allocator: Allocator) void {
     allocator.free(self.path);
     self.exports.deinit(allocator);
+    self.exports_data.deinit(allocator);
     self.strtab.deinit(allocator);
     self.thunks.deinit(allocator);
     self.thunks_table.deinit(allocator);
@@ -21,10 +23,9 @@ pub fn deinit(self: *Dll, allocator: Allocator) void {
 
 pub fn initSymbols(self: *Dll, coff_file: *Coff) !void {
     const gpa = coff_file.base.allocator;
-    try self.symbols.ensureTotalCapacityPrecise(gpa, self.exports.items.len);
-    for (self.exports.items) |exp| {
-        const name = exp.getImportName(self);
-        const off = try coff_file.string_intern.insert(gpa, name);
+    try self.symbols.ensureTotalCapacityPrecise(gpa, self.exports.items(.name).len);
+    for (self.exports.items(.name)) |name| {
+        const off = try coff_file.string_intern.insert(gpa, self.getString(name));
         const gop = try coff_file.getOrCreateGlobal(off);
         self.symbols.addOneAssumeCapacity().* = gop.index;
     }
@@ -54,19 +55,47 @@ pub fn addExport(self: *Dll, coff_file: *Coff, args: struct {
             break :blk mem.sliceTo(@as([*:0]const u8, @ptrCast(args.strings.ptr + offset)), 0);
         },
         else => |other| {
-            coff_file.base.fatal("{s}: unhandled IMPORT_OBJECT_NAME_TYPE variant: {}", .{
+            coff_file.base.fatal("{s}: unknown IMPORT_OBJECT_NAME_type variant: 0x{x}", .{
                 self.path,
                 other,
             });
             return error.ParseFailed;
         },
     };
-    try self.exports.append(gpa, .{
-        .imp_name = try self.addString(gpa, imp_name),
-        .ext_name = try self.addString(gpa, ext_name),
+    const data_index: ExportData.Index = @intCast(self.exports_data.items.len);
+    try self.exports_data.append(gpa, .{
+        .name = try self.addString(gpa, ext_name),
         .hint = args.hint,
         .type = args.type,
     });
+    try self.exports.append(gpa, .{
+        .name = try self.addString(gpa, imp_name),
+        .data = data_index,
+        .kind = .direct,
+    });
+
+    switch (args.type) {
+        .CODE, .CONST => {
+            const kind: Export.Kind = switch (args.type) {
+                .CODE => .thunk,
+                .CONST => .alias,
+                else => unreachable,
+            };
+            try self.exports.append(gpa, .{
+                .name = try self.addString(gpa, args.name),
+                .data = data_index,
+                .kind = kind,
+            });
+        },
+        .DATA => {},
+        else => |other| {
+            coff_file.base.fatal("{s}: unknown IMPORT_OBJECT_type variant: 0x{x}", .{
+                self.path,
+                other,
+            });
+            return error.ParseFailed;
+        },
+    }
 }
 
 pub fn resolveSymbols(self: *Dll, coff_file: *Coff) void {
@@ -93,23 +122,19 @@ pub fn addThunks(self: *Dll, coff_file: *Coff) !void {
     try self.thunks_table.resize(gpa, self.symbols.items.len);
     @memset(self.thunks_table.items, 0);
 
-    for (self.symbols.items, self.exports.items, 0..) |sym_index, exp, index| {
+    for (self.symbols.items, self.exports.items(.kind), 0..) |sym_index, exp_kind, index| {
         const sym = coff_file.getSymbol(sym_index);
         if (!sym.flags.import) continue;
 
-        switch (exp.type) {
-            .CODE => {
+        switch (exp_kind) {
+            .thunk => {
                 const thunk_index: Thunk.Index = @intCast(self.thunks.items.len);
-                try self.thunks.append(gpa, .{
-                    .sym_index = sym_index,
-                    .exp_index = @intCast(index),
-                });
+                try self.thunks.append(gpa, .{ .sym_index = sym_index });
                 try sym.addExtra(.{ .thunk = thunk_index }, coff_file);
                 self.thunks_table.items[index] = thunk_index;
                 sym.flags.thunk = true;
             },
-            .DATA, .CONST => {},
-            else => unreachable, // Already reported in addExport()
+            .alias, .direct => {},
         }
     }
 }
@@ -118,14 +143,15 @@ pub fn updateImportSectionSize(self: *Dll, coff_file: *Coff) !void {
     const ctx = &self.idata_ctx;
     var iat: u32 = 0;
     var names: u32 = 0;
-    for (self.symbols.items, self.exports.items) |sym_index, exp| {
+    for (self.symbols.items, self.exports.items(.data)) |sym_index, exp_index| {
         const sym = coff_file.getSymbol(sym_index);
         if (!sym.flags.import) continue;
 
-        if (!exp.isByOrdinal(self)) {
+        const exp = self.exports_data.items[exp_index];
+        if (exp.byName(self)) |res| {
             try sym.addExtra(.{ .names = names }, coff_file);
             sym.flags.names = true;
-            var size: u32 = @sizeOf(u16) + @as(u32, @intCast(exp.getExternName(self).len + 1));
+            var size: u32 = @sizeOf(u16) + @as(u32, @intCast(res.name.len + 1));
             if (size % 2 != 0) size += 1;
             ctx.names_table_size += size;
             names += size;
@@ -154,28 +180,28 @@ pub fn writeImportSection(self: *Dll, buffer: []u8, coff_file: *Coff) !void {
     @memcpy(buffer[ctx.dir_table_offset..][0..@sizeOf(coff.ImportDirectoryEntry)], mem.asBytes(&dir_header));
 
     // Lookup and IAT entries
-    for (self.symbols.items, self.exports.items) |sym_index, exp| {
+    for (self.symbols.items, self.exports.items(.data)) |sym_index, exp_index| {
         const sym = coff_file.getSymbol(sym_index);
         if (!sym.flags.import) continue;
 
+        const exp = self.exports_data.items[exp_index];
         const extra = sym.getExtra(coff_file).?;
-        if (exp.isByOrdinal(self)) {
+        if (exp.byOrdinal(self)) |ord| {
             const lookup_entry = coff.ImportLookupEntry64.ByOrdinal{
-                .ordinal_number = exp.hint,
+                .ordinal_number = ord,
             };
             @memcpy(buffer[ctx.lookup_table_offset + extra.iat * @sizeOf(u64) ..][0..@sizeOf(u64)], mem.asBytes(&lookup_entry));
             @memcpy(buffer[ctx.iat_offset + extra.iat * @sizeOf(u64) ..][0..@sizeOf(u64)], mem.asBytes(&lookup_entry));
-        } else {
+        } else if (exp.byName(self)) |res| {
             const lookup_entry = coff.ImportLookupEntry64.ByName{
                 .name_table_rva = @intCast(base_addr + ctx.names_table_offset + extra.names),
             };
             @memcpy(buffer[ctx.lookup_table_offset + extra.iat * @sizeOf(u64) ..][0..@sizeOf(u64)], mem.asBytes(&lookup_entry));
             @memcpy(buffer[ctx.iat_offset + extra.iat * @sizeOf(u64) ..][0..@sizeOf(u64)], mem.asBytes(&lookup_entry));
 
-            const name = exp.getExternName(self);
-            mem.writeInt(u16, buffer[ctx.names_table_offset + extra.names ..][0..2], exp.hint, .little);
-            @memcpy(buffer[ctx.names_table_offset + extra.names + 2 ..][0..name.len], name);
-        }
+            mem.writeInt(u16, buffer[ctx.names_table_offset + extra.names ..][0..2], res.hint, .little);
+            @memcpy(buffer[ctx.names_table_offset + extra.names + 2 ..][0..res.name.len], res.name);
+        } else unreachable;
     }
 
     // DLL name
@@ -287,23 +313,41 @@ fn formatPathShort(
     try writer.writeAll(std.fs.path.basename(dll.path));
 }
 
-pub const Export = packed struct {
-    imp_name: u32,
-    ext_name: u32,
+const Export = struct {
+    name: u32,
+    data: ExportData.Index,
+    kind: Kind,
+
+    const Kind = enum {
+        direct,
+        thunk,
+        alias,
+    };
+};
+
+const ExportData = packed struct {
+    /// Actual export name which doesn't take part in symbol resolution.
+    name: u32,
     hint: u16,
     type: coff.ImportType,
 
-    pub fn getImportName(exp: Export, dll: *const Dll) [:0]const u8 {
-        return dll.getString(exp.imp_name);
+    fn byName(expdat: ExportData, dll: *const Dll) ?ByName {
+        const name = dll.getString(expdat.name);
+        if (name.len == 0) return null;
+        return .{ .name = name, .hint = expdat.hint };
     }
 
-    pub fn getExternName(exp: Export, dll: *const Dll) [:0]const u8 {
-        return dll.getString(exp.ext_name);
+    fn byOrdinal(expdat: ExportData, dll: *const Dll) ?u16 {
+        if (expdat.byName(dll)) |_| return null;
+        return expdat.hint;
     }
 
-    pub fn isByOrdinal(exp: Export, dll: *const Dll) bool {
-        return exp.getExternName(dll).len == 0;
-    }
+    const Index = u32;
+
+    const ByName = struct {
+        name: [:0]const u8,
+        hint: u16,
+    };
 };
 
 /// Import thunk
@@ -311,7 +355,6 @@ pub const Thunk = struct {
     value: u32 = 0,
     out_section_number: ?u16 = null,
     sym_index: Symbol.Index = 0,
-    exp_index: u32 = 0,
 
     pub fn thunkAlignment(coff_file: *Coff) u4 {
         const cpu_arch = coff_file.options.cpu_arch.?;
