@@ -31,7 +31,7 @@ pub fn build(b: *std.Build) void {
 
     const exe = b.addExecutable(.{
         .name = "zld",
-        .root_source_file = .{ .path = "src/main.zig" },
+        .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = mode,
         .use_llvm = use_llvm,
@@ -86,7 +86,7 @@ pub fn build(b: *std.Build) void {
     const has_objc_msgsend_stubs = b.option(bool, "has-objc-msgsend-stubs", "Whether the system compiler supports '-fobjc-msgsend-selector-stubs' flag") orelse false;
 
     const unit_tests = b.addTest(.{
-        .root_source_file = .{ .path = "src/Zld.zig" },
+        .root_source_file = b.path("src/Zld.zig"),
         .target = target,
         .optimize = mode,
         .use_llvm = use_llvm,
