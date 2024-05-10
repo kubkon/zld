@@ -391,6 +391,53 @@ fn initLiteralSections(self: *Object, macho_file: *MachO) !void {
     for (slice.items(.header), 0..) |sect, n_sect| {
         if (!isLiteral(sect)) continue;
 
+        const data = try self.getSectionData(@intCast(n_sect), macho_file);
+        defer gpa.free(data);
+
+        if (sect.type() == macho.S_CSTRING_LITERALS) {
+            std.debug.print("Strings:\n", .{});
+            var start: u32 = 0;
+            while (start < data.len) {
+                var end = start;
+                while (end < data.len - 1 and data[end] != 0) : (end += 1) {}
+                if (data[end] != 0) {
+                    macho_file.base.fatal("{}:{s},{s}: string not null terminated", .{
+                        self.fmtPath(),
+                        sect.segName(),
+                        sect.sectName(),
+                    });
+                    return error.ParseFailed;
+                }
+                end += 1;
+                const string = data[start..end];
+                std.debug.print("  {s}\n", .{string});
+                start = end;
+            }
+        } else {
+            const rec_size: u8 = switch (sect.type()) {
+                macho.S_4BYTE_LITERALS => 4,
+                macho.S_8BYTE_LITERALS => 8,
+                macho.S_16BYTE_LITERALS => 16,
+                macho.S_LITERAL_POINTERS => 8,
+                else => unreachable,
+            };
+            if (sect.size % rec_size != 0) {
+                macho_file.base.fatal("{}:{s},{s}: size not multiple of record size", .{
+                    self.fmtPath(),
+                    sect.segName(),
+                    sect.sectName(),
+                });
+                return error.ParseFailed;
+            }
+            std.debug.print("Literals of size {d}:\n", .{rec_size});
+
+            var pos: u32 = 0;
+            while (pos < data.len) : (pos += rec_size) {
+                const literal = data[pos..][0..rec_size];
+                std.debug.print("  {x}\n", .{std.fmt.fmtSliceHexLower(literal)});
+            }
+        }
+
         const name = try std.fmt.allocPrintZ(gpa, "{s}${s}", .{ sect.segName(), sect.sectName() });
         defer gpa.free(name);
 
