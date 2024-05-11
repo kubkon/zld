@@ -474,6 +474,25 @@ fn initLiteralSections(self: *Object, macho_file: *MachO) !void {
     }
 }
 
+pub fn resolveMergeSections(self: Object, macho_file: *MachO) !void {
+    const gpa = macho_file.base.allocator;
+    const slice = self.sections.slice();
+    for (slice.items(.header), slice.items(.subsections)) |header, subs| {
+        if (!isLiteral(header)) continue;
+        for (subs.items) |sub| {
+            const atom = macho_file.getAtom(sub.atom).?;
+            const extra = atom.getExtra(macho_file).?;
+            const msec = macho_file.getMergeSection(extra.merge_section_index);
+            const res = try msec.insert(gpa, atom.getLiteralString(macho_file).?);
+            if (!res.found_existing) {
+                try msec.atoms.append(gpa, sub.atom);
+                continue;
+            }
+            // TODO kill atom, redo relocations
+        }
+    }
+}
+
 pub fn findAtom(self: Object, addr: u64) ?Atom.Index {
     const tracy = trace(@src());
     defer tracy.end();

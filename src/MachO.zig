@@ -362,6 +362,7 @@ pub fn flush(self: *MachO) !void {
 
     try self.convertTentativeDefinitions();
     try self.createObjcSections();
+    try self.resolveMergeSections();
     try self.claimUnresolved();
 
     if (self.options.dead_strip) {
@@ -1232,6 +1233,12 @@ fn createObjcSections(self: *MachO) !void {
         const name = eatPrefix(sym.getName(self), "_objc_msgSend$").?;
         const selrefs_index = try internal.addObjcMsgsendSections(name, self);
         try sym.addExtra(.{ .objc_selrefs = selrefs_index }, self);
+    }
+}
+
+fn resolveMergeSections(self: *MachO) !void {
+    for (self.objects.items) |index| {
+        try self.getFile(index).?.object.resolveMergeSections(self);
     }
 }
 
@@ -3212,14 +3219,6 @@ pub const MergeSection = struct {
             .key = gop.key_ptr.*,
             .atom = gop.value_ptr,
         };
-    }
-
-    pub fn insertZ(msec: *MergeSection, allocator: Allocator, string: []const u8) !InsertResult {
-        const with_null = try allocator.alloc(u8, string.len + 1);
-        defer allocator.free(with_null);
-        @memcpy(with_null[0..string.len], string);
-        with_null[string.len] = 0;
-        return msec.insert(allocator, with_null);
     }
 
     /// Finalizes the merge section and clears hash table.
