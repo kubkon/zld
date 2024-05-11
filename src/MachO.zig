@@ -379,6 +379,7 @@ pub fn flush(self: *MachO) !void {
 
     try self.scanRelocs();
 
+    try self.finalizeMergeSections();
     try self.initOutputSections();
     try self.initSyntheticSections();
     try self.sortSections();
@@ -1135,21 +1136,48 @@ fn markImportsAndExports(self: *MachO) void {
     }
 }
 
+pub fn finalizeMergeSections(self: *MachO) !void {
+    for (self.merge_sections.items) |*msec| {
+        try msec.finalize(self);
+    }
+}
+
 fn initOutputSections(self: *MachO) !void {
     for (self.objects.items) |index| {
         const object = self.getFile(index).?.object;
         for (object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index) orelse continue;
             if (!atom.flags.alive) continue;
-            atom.out_n_sect = try Atom.initOutputSection(atom.getInputSection(self), self);
+            if (atom.flags.literal) continue;
+            const isec = atom.getInputSection(self);
+            atom.out_n_sect = try Atom.initOutputSection(.{
+                .segname = isec.segName(),
+                .sectname = isec.sectName(),
+                .flags = isec.flags,
+                .is_code = isec.isCode(),
+            }, self);
         }
     }
     if (self.getInternalObject()) |object| {
         for (object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index) orelse continue;
             if (!atom.flags.alive) continue;
-            atom.out_n_sect = try Atom.initOutputSection(atom.getInputSection(self), self);
+            if (atom.flags.literal) continue;
+            const isec = atom.getInputSection(self);
+            atom.out_n_sect = try Atom.initOutputSection(.{
+                .segname = isec.segName(),
+                .sectname = isec.sectName(),
+                .flags = isec.flags,
+                .is_code = isec.isCode(),
+            }, self);
         }
+    }
+    for (self.merge_sections.items) |*msec| {
+        msec.out_n_sect = try Atom.initOutputSection(.{
+            .segname = msec.segName(self),
+            .sectname = msec.sectName(self),
+            .flags = msec.type,
+        }, self);
     }
     if (self.data_sect_index == null) {
         self.data_sect_index = try self.addSection("__DATA", "__data", .{});
@@ -1611,6 +1639,7 @@ pub fn sortSections(self: *MachO) !void {
         for (self.getFile(index).?.object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index) orelse continue;
             if (!atom.flags.alive) continue;
+            if (atom.flags.literal) continue;
             atom.out_n_sect = backlinks[atom.out_n_sect];
         }
     }
@@ -1618,8 +1647,12 @@ pub fn sortSections(self: *MachO) !void {
         for (object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index) orelse continue;
             if (!atom.flags.alive) continue;
+            if (atom.flags.literal) continue;
             atom.out_n_sect = backlinks[atom.out_n_sect];
         }
+    }
+    for (self.merge_sections.items) |*msec| {
+        msec.out_n_sect = backlinks[msec.out_n_sect];
     }
 
     for (&[_]*?u8{
@@ -1648,6 +1681,7 @@ pub fn addAtomsToSections(self: *MachO) !void {
         for (object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index) orelse continue;
             if (!atom.flags.alive) continue;
+            if (atom.flags.literal) continue;
             const atoms = &self.sections.items(.atoms)[atom.out_n_sect];
             try atoms.append(self.base.allocator, atom_index);
         }
@@ -1655,6 +1689,7 @@ pub fn addAtomsToSections(self: *MachO) !void {
             const sym = self.getSymbol(sym_index);
             const atom = sym.getAtom(self) orelse continue;
             if (!atom.flags.alive) continue;
+            if (atom.flags.literal) continue;
             if (sym.getFile(self).?.getIndex() != index) continue;
             sym.out_n_sect = atom.out_n_sect;
         }
@@ -1729,6 +1764,17 @@ fn calcSectionSizes(self: *MachO) !void {
             // Create jump/branch range extenders if needed.
             try thunks.createThunks(@intCast(i), self);
         }
+    }
+
+    for (self.merge_sections.items) |*msec| {
+        try msec.calcSize(self);
+        const header = &self.sections.items(.header)[msec.out_n_sect];
+        const msec_alignment = try math.powi(u32, 2, msec.alignment);
+        const offset = mem.alignForward(u64, header.size, msec_alignment);
+        const padding = offset - header.size;
+        msec.value = offset;
+        header.size += padding + msec.size;
+        header.@"align" = @max(header.@"align", msec.alignment);
     }
 
     if (self.got_sect_index) |idx| {
@@ -2130,6 +2176,18 @@ fn writeAtoms(self: *MachO) !void {
         defer gpa.free(buffer);
         var stream = std.io.fixedBufferStream(buffer);
         try thunk.write(self, stream.writer());
+        try self.base.file.pwriteAll(buffer, offset);
+    }
+
+    for (self.merge_sections.items) |msec| {
+        const header = slice.items(.header)[msec.out_n_sect];
+        const offset = msec.value + header.offset;
+        const buffer = try gpa.alloc(u8, msec.size);
+        defer gpa.free(buffer);
+        msec.write(self, buffer) catch |err| switch (err) {
+            error.ResolveFailed => has_resolve_error = true,
+            else => |e| return e,
+        };
         try self.base.file.pwriteAll(buffer, offset);
     }
 
@@ -2860,14 +2918,46 @@ pub fn setAtomExtra(self: *MachO, index: u32, extra: Atom.Extra) void {
     }
 }
 
-pub fn getOrCreateMergeSection(self: *MachO, @"type": u8) !MergeSection.Index {
+pub fn getOrCreateMergeSection(
+    self: *MachO,
+    segname: []const u8,
+    sectname: []const u8,
+    @"type": u8,
+) !MergeSection.Index {
     const gpa = self.base.allocator;
     for (self.merge_sections.items, 0..) |msec, index| {
-        if (msec.type == @"type") return @intCast(index);
+        switch (@"type") {
+            macho.S_LITERAL_POINTERS => if (msec.type == macho.S_LITERAL_POINTERS and
+                mem.eql(u8, segname, msec.segName(self)) and
+                mem.eql(u8, sectname, msec.sectName(self)))
+            {
+                return @intCast(index);
+            },
+            macho.S_4BYTE_LITERALS,
+            macho.S_8BYTE_LITERALS,
+            macho.S_16BYTE_LITERALS,
+            macho.S_CSTRING_LITERALS,
+            => if (msec.type == @"type") {
+                return @intCast(index);
+            },
+            else => unreachable,
+        }
     }
     const index = @as(MergeSection.Index, @intCast(self.merge_sections.items.len));
     const msec = try self.merge_sections.addOne(gpa);
-    msec.* = .{ .type = @"type" };
+    msec.* = switch (@"type") {
+        macho.S_LITERAL_POINTERS => .{
+            .segname = try self.string_intern.insert(gpa, segname),
+            .sectname = try self.string_intern.insert(gpa, sectname),
+            .type = @"type",
+        },
+        macho.S_4BYTE_LITERALS,
+        macho.S_8BYTE_LITERALS,
+        macho.S_16BYTE_LITERALS,
+        macho.S_CSTRING_LITERALS,
+        => .{ .type = @"type" },
+        else => unreachable,
+    };
     return index;
 }
 
@@ -3179,7 +3269,12 @@ pub const LinkObject = struct {
 const default_pagezero_vmsize: u64 = 0x100000000;
 
 pub const MergeSection = struct {
+    value: u64 = 0,
+    size: u64 = 0,
+    alignment: u32 = 0,
     out_n_sect: u8 = 0,
+    segname: u32 = 0,
+    sectname: u32 = 0,
     type: u8,
     bytes: std.ArrayListUnmanaged(u8) = .{},
     table: std.HashMapUnmanaged(
@@ -3193,7 +3288,19 @@ pub const MergeSection = struct {
     pub fn deinit(msec: *MergeSection, allocator: Allocator) void {
         msec.bytes.deinit(allocator);
         msec.table.deinit(allocator);
-        msec.subsections.deinit(allocator);
+        msec.atoms.deinit(allocator);
+    }
+
+    pub fn segName(msec: MergeSection, macho_file: *MachO) [:0]const u8 {
+        return macho_file.string_intern.getAssumeExists(msec.segname);
+    }
+
+    pub fn sectName(msec: MergeSection, macho_file: *MachO) [:0]const u8 {
+        return macho_file.string_intern.getAssumeExists(msec.sectname);
+    }
+
+    pub fn getAddress(msec: MergeSection, macho_file: *MachO) u64 {
+        return macho_file.sections.items(.header)[msec.out_n_sect].addr + msec.value;
     }
 
     const InsertResult = struct {
@@ -3229,9 +3336,9 @@ pub const MergeSection = struct {
 
         var it = msec.table.iterator();
         while (it.next()) |entry| {
-            const msub = macho_file.getMergeSubsection(entry.value_ptr.*);
-            if (!msub.alive) continue;
-            msec.subsections.appendAssumeCapacity(entry.value_ptr.*);
+            const atom = macho_file.getAtom(entry.value_ptr.*).?;
+            if (!atom.flags.alive) continue;
+            msec.atoms.appendAssumeCapacity(entry.value_ptr.*);
         }
         msec.table.clearAndFree(gpa);
 
@@ -3241,7 +3348,7 @@ pub const MergeSection = struct {
                 const rhs_atom = ctx.getAtom(rhs).?;
                 if (lhs_atom.alignment == rhs_atom.alignment) {
                     if (lhs_atom.size == rhs_atom.size) {
-                        return mem.order(u8, lhs_atom.getString(ctx), rhs_atom.getString(ctx)) == .lt;
+                        return mem.order(u8, lhs_atom.getLiteralString(ctx).?, rhs_atom.getLiteralString(ctx).?) == .lt;
                     }
                     return lhs_atom.size < rhs_atom.size;
                 }
@@ -3250,6 +3357,32 @@ pub const MergeSection = struct {
         }.sortFn;
 
         mem.sort(Atom.Index, msec.atoms.items, macho_file, sortFn);
+    }
+
+    pub fn calcSize(msec: *MergeSection, macho_file: *MachO) !void {
+        const alignment = try math.powi(u32, 2, msec.alignment);
+        for (msec.atoms.items) |atom_index| {
+            const atom = macho_file.getAtom(atom_index).?;
+            const offset = mem.alignForward(u64, msec.size, alignment);
+            atom.value = offset;
+            msec.size += atom.size;
+        }
+    }
+
+    pub fn write(msec: MergeSection, macho_file: *MachO, buffer: []u8) !void {
+        var has_resolve_error = false;
+        for (msec.atoms.items) |atom_index| {
+            const atom = macho_file.getAtom(atom_index).?;
+            const data = atom.getLiteralString(macho_file).?;
+            const off = atom.value;
+            @memcpy(buffer[off..][0..atom.size], data);
+            // TODO audit this; I expect *only* S_LITERAL_POINTERS to contain relocs
+            atom.resolveRelocs(macho_file, buffer[off..][0..atom.size]) catch |err| switch (err) {
+                error.ResolveFailed => has_resolve_error = true,
+                else => |e| return e,
+            };
+        }
+        if (has_resolve_error) return error.ResolveFailed;
     }
 
     pub const IndexContext = struct {
@@ -3315,9 +3448,12 @@ pub const MergeSection = struct {
         _ = unused_fmt_string;
         const msec = ctx.msec;
         const macho_file = ctx.macho_file;
-        try writer.print("sect({d}) : type({x})\n", .{
+        try writer.print("@{x} : sect({d}) : type({x}) : align({x}) : size({x})\n", .{
+            msec.getAddress(macho_file),
             msec.out_n_sect,
             msec.type,
+            msec.alignment,
+            msec.size,
         });
         for (msec.atoms.items) |atom_index| {
             const atom = macho_file.getAtom(atom_index).?;

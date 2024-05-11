@@ -417,7 +417,7 @@ fn initLiteralSections(self: *Object, macho_file: *MachO) !void {
                     .alignment = sect.@"align",
                 }, macho_file);
                 const atom = macho_file.getAtom(atom_index).?;
-                const msec_index = try macho_file.getOrCreateMergeSection(sect.type());
+                const msec_index = try macho_file.getOrCreateMergeSection(sect.segName(), sect.sectName(), sect.type());
                 try atom.addExtra(.{
                     .merge_section_index = msec_index,
                     .literal_string_off = try self.addLiteralString(gpa, string),
@@ -459,7 +459,7 @@ fn initLiteralSections(self: *Object, macho_file: *MachO) !void {
                     .alignment = sect.@"align",
                 }, macho_file);
                 const atom = macho_file.getAtom(atom_index).?;
-                const msec_index = try macho_file.getOrCreateMergeSection(sect.type());
+                const msec_index = try macho_file.getOrCreateMergeSection(sect.segName(), sect.sectName(), sect.type());
                 try atom.addExtra(.{
                     .merge_section_index = msec_index,
                     .literal_string_off = try self.addLiteralString(gpa, string),
@@ -490,7 +490,7 @@ pub fn resolveMergeSections(self: Object, macho_file: *MachO) !void {
             const res = try msec.insert(gpa, atom.getLiteralString(macho_file).?);
             if (!res.found_existing) {
                 res.atom.* = sub.atom;
-                try msec.atoms.append(gpa, sub.atom);
+                msec.alignment = atom.alignment;
                 continue;
             }
             atom.flags.alive = false;
