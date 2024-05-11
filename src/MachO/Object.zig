@@ -476,6 +476,10 @@ fn initLiteralSections(self: *Object, macho_file: *MachO) !void {
 
 pub fn resolveMergeSections(self: Object, macho_file: *MachO) !void {
     const gpa = macho_file.base.allocator;
+
+    var killed_atoms = std.AutoHashMap(Atom.Index, Atom.Index).init(gpa);
+    defer killed_atoms.deinit();
+
     const slice = self.sections.slice();
     for (slice.items(.header), slice.items(.subsections)) |header, subs| {
         if (!isLiteral(header)) continue;
@@ -485,11 +489,36 @@ pub fn resolveMergeSections(self: Object, macho_file: *MachO) !void {
             const msec = macho_file.getMergeSection(extra.merge_section_index);
             const res = try msec.insert(gpa, atom.getLiteralString(macho_file).?);
             if (!res.found_existing) {
+                res.atom.* = sub.atom;
                 try msec.atoms.append(gpa, sub.atom);
                 continue;
             }
-            // TODO kill atom, redo relocations
+            atom.flags.alive = false;
+            try killed_atoms.putNoClobber(sub.atom, res.atom.*);
         }
+    }
+
+    for (self.atoms.items) |atom_index| {
+        if (killed_atoms.get(atom_index)) |_| continue;
+        const atom = macho_file.getAtom(atom_index) orelse continue;
+        if (!atom.flags.alive) continue;
+
+        const relocs = blk: {
+            const extra = atom.getExtra(macho_file).?;
+            const relocs = slice.items(.relocs)[atom.n_sect].items;
+            break :blk relocs[extra.rel_index..][0..extra.rel_count];
+        };
+        for (relocs) |*rel| switch (rel.tag) {
+            .local => if (killed_atoms.get(rel.target)) |new_target| {
+                rel.target = new_target;
+            },
+            .@"extern" => {
+                const target = rel.getTargetSymbol(macho_file);
+                if (killed_atoms.get(target.atom)) |new_atom| {
+                    target.atom = new_atom;
+                }
+            },
+        };
     }
 }
 
