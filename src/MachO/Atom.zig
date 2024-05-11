@@ -117,12 +117,21 @@ pub fn getThunk(self: Atom, macho_file: *MachO) *Thunk {
     return macho_file.getThunk(extra.thunk);
 }
 
+pub fn getLiteralString(self: Atom, macho_file: *MachO) ?[]const u8 {
+    if (!self.flags.literal) return null;
+    const object = self.getFile(macho_file).object;
+    const extra = self.getExtra(macho_file).?;
+    return object.getLiteralString(extra.literal_string_off, @intCast(self.size));
+}
+
 const AddExtraOpts = struct {
     thunk: ?u32 = null,
     rel_index: ?u32 = null,
     rel_count: ?u32 = null,
     unwind_index: ?u32 = null,
     unwind_count: ?u32 = null,
+    merge_section_index: ?u32 = null,
+    literal_string_off: ?u32 = null,
 };
 
 pub fn addExtra(atom: *Atom, opts: AddExtraOpts, macho_file: *MachO) !void {
@@ -890,6 +899,9 @@ pub const Flags = packed struct {
 
     /// Whether this atom has any unwind records.
     unwind: bool = false,
+
+    /// Whether this atom is a literal record.
+    literal: bool = false,
 };
 
 pub const Extra = struct {
@@ -907,6 +919,13 @@ pub const Extra = struct {
 
     /// Count of relocations belonging to this atom.
     unwind_count: u32 = 0,
+
+    /// Index of the merge section this atom belongs to.
+    merge_section_index: u32 = 0,
+
+    /// Offset of the string (payload/data) if this atom is a literal record.
+    /// String size is equal to atom's size.
+    literal_string_off: u32 = 0,
 };
 
 const aarch64 = @import("../aarch64.zig");

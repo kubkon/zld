@@ -11,6 +11,7 @@ strtab: std.ArrayListUnmanaged(u8) = .{},
 
 symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
 atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
+literal_strings: std.ArrayListUnmanaged(u8) = .{},
 
 platform: ?MachO.Options.Platform = null,
 dwarf_info: ?DwarfInfo = null,
@@ -59,6 +60,7 @@ pub fn deinit(self: *Object, allocator: Allocator) void {
     }
     self.stab_files.deinit(allocator);
     self.data_in_code.deinit(allocator);
+    self.literal_strings.deinit(allocator);
 }
 
 pub fn parse(self: *Object, macho_file: *MachO) !void {
@@ -380,13 +382,9 @@ fn addAtom(self: *Object, args: AddAtomArgs, macho_file: *MachO) !Atom.Index {
 fn initLiteralSections(self: *Object, macho_file: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
-    // TODO here we should split into equal-sized records, hash the contents, and then
-    // deduplicate - ICF.
-    // For now, we simply cover each literal section with one large atom.
+
     const gpa = macho_file.base.allocator;
     const slice = self.sections.slice();
-
-    try self.atoms.ensureUnusedCapacity(gpa, self.sections.items(.header).len);
 
     for (slice.items(.header), 0..) |sect, n_sect| {
         if (!isLiteral(sect)) continue;
@@ -395,7 +393,6 @@ fn initLiteralSections(self: *Object, macho_file: *MachO) !void {
         defer gpa.free(data);
 
         if (sect.type() == macho.S_CSTRING_LITERALS) {
-            std.debug.print("Strings:\n", .{});
             var start: u32 = 0;
             while (start < data.len) {
                 var end = start;
@@ -409,8 +406,28 @@ fn initLiteralSections(self: *Object, macho_file: *MachO) !void {
                     return error.ParseFailed;
                 }
                 end += 1;
+
                 const string = data[start..end];
-                std.debug.print("  {s}\n", .{string});
+                const name = "l_.strZZZ";
+                const atom_index = try self.addAtom(.{
+                    .name = try self.addString(gpa, name),
+                    .n_sect = @intCast(n_sect),
+                    .off = start,
+                    .size = end - start,
+                    .alignment = sect.@"align",
+                }, macho_file);
+                const atom = macho_file.getAtom(atom_index).?;
+                const msec_index = try macho_file.getOrCreateMergeSection(sect.type());
+                try atom.addExtra(.{
+                    .merge_section_index = msec_index,
+                    .literal_string_off = try self.addLiteralString(gpa, string),
+                }, macho_file);
+                atom.flags.literal = true;
+                try slice.items(.subsections)[n_sect].append(gpa, .{
+                    .atom = atom_index,
+                    .off = start,
+                });
+
                 start = end;
             }
         } else {
@@ -429,26 +446,31 @@ fn initLiteralSections(self: *Object, macho_file: *MachO) !void {
                 });
                 return error.ParseFailed;
             }
-            std.debug.print("Literals of size {d}:\n", .{rec_size});
 
             var pos: u32 = 0;
             while (pos < data.len) : (pos += rec_size) {
-                const literal = data[pos..][0..rec_size];
-                std.debug.print("  {x}\n", .{std.fmt.fmtSliceHexLower(literal)});
+                const string = data[pos..][0..rec_size];
+                const name = "l_.litZZZ";
+                const atom_index = try self.addAtom(.{
+                    .name = try self.addString(gpa, name),
+                    .n_sect = @intCast(n_sect),
+                    .off = pos,
+                    .size = rec_size,
+                    .alignment = sect.@"align",
+                }, macho_file);
+                const atom = macho_file.getAtom(atom_index).?;
+                const msec_index = try macho_file.getOrCreateMergeSection(sect.type());
+                try atom.addExtra(.{
+                    .merge_section_index = msec_index,
+                    .literal_string_off = try self.addLiteralString(gpa, string),
+                }, macho_file);
+                atom.flags.literal = true;
+                try slice.items(.subsections)[n_sect].append(gpa, .{
+                    .atom = atom_index,
+                    .off = pos,
+                });
             }
         }
-
-        const name = try std.fmt.allocPrintZ(gpa, "{s}${s}", .{ sect.segName(), sect.sectName() });
-        defer gpa.free(name);
-
-        const atom_index = try self.addAtom(.{
-            .name = try self.addString(gpa, name),
-            .n_sect = @intCast(n_sect),
-            .off = 0,
-            .size = sect.size,
-            .alignment = sect.@"align",
-        }, macho_file);
-        try slice.items(.subsections)[n_sect].append(gpa, .{ .atom = atom_index, .off = 0 });
     }
 }
 
@@ -706,7 +728,10 @@ fn initRelocs(self: *Object, macho_file: *MachO) !void {
             while (next_reloc < relocs.items.len and relocs.items[next_reloc].offset < end_addr) : (next_reloc += 1) {}
 
             const rel_count = next_reloc - rel_index;
-            try atom.addExtra(.{ .rel_index = @intCast(rel_index), .rel_count = @intCast(rel_count) }, macho_file);
+            try atom.addExtra(.{
+                .rel_index = @intCast(rel_index),
+                .rel_count = @intCast(rel_count),
+            }, macho_file);
             atom.flags.relocs = true;
         }
     }
@@ -1612,6 +1637,18 @@ fn addString(self: *Object, allocator: Allocator, name: [:0]const u8) error{OutO
 pub fn getString(self: Object, off: u32) [:0]const u8 {
     assert(off < self.strtab.items.len);
     return mem.sliceTo(@as([*:0]const u8, @ptrCast(self.strtab.items.ptr + off)), 0);
+}
+
+fn addLiteralString(self: *Object, allocator: Allocator, str: []const u8) error{OutOfMemory}!u32 {
+    const off: u32 = @intCast(self.literal_strings.items.len);
+    try self.literal_strings.ensureUnusedCapacity(allocator, str.len);
+    self.literal_strings.appendSliceAssumeCapacity(str);
+    return off;
+}
+
+pub fn getLiteralString(self: Object, off: u32, len: u32) []const u8 {
+    assert(off < self.literal_strings.items.len and off + len <= self.literal_strings.items.len);
+    return self.literal_strings.items[off..][0..len];
 }
 
 /// TODO handle multiple CUs

@@ -74,6 +74,7 @@ atoms: std.ArrayListUnmanaged(Atom) = .{},
 atoms_extra: std.ArrayListUnmanaged(u32) = .{},
 thunks: std.ArrayListUnmanaged(Thunk) = .{},
 unwind_records: std.ArrayListUnmanaged(UnwindInfo.Record) = .{},
+merge_sections: std.ArrayListUnmanaged(MergeSection) = .{},
 
 has_tlv: bool = false,
 binds_to_weak: bool = false,
@@ -154,6 +155,7 @@ pub fn deinit(self: *MachO) void {
     self.export_trie.deinit(gpa);
     self.unwind_info.deinit(gpa);
     self.unwind_records.deinit(gpa);
+    self.merge_sections.deinit(gpa);
 }
 
 pub fn flush(self: *MachO) !void {
@@ -2851,6 +2853,22 @@ pub fn setAtomExtra(self: *MachO, index: u32, extra: Atom.Extra) void {
     }
 }
 
+pub fn getOrCreateMergeSection(self: *MachO, @"type": u8) !MergeSection.Index {
+    const gpa = self.base.allocator;
+    for (self.merge_sections.items, 0..) |msec, index| {
+        if (msec.type == @"type") return @intCast(index);
+    }
+    const index = @as(MergeSection.Index, @intCast(self.merge_sections.items.len));
+    const msec = try self.merge_sections.addOne(gpa);
+    msec.* = .{ .type = @"type" };
+    return index;
+}
+
+pub fn getMergeSection(self: *MachO, index: MergeSection.Index) *MergeSection {
+    assert(index < self.merge_sections.items.len);
+    return &self.merge_sections.items[index];
+}
+
 pub fn addSymbol(self: *MachO) !Symbol.Index {
     const index = @as(Symbol.Index, @intCast(self.symbols.items.len));
     const symbol = try self.symbols.addOne(self.base.allocator);
@@ -3016,6 +3034,10 @@ fn fmtDumpState(
     try writer.print("got\n{}\n", .{self.got.fmt(self)});
     try writer.print("tlv_ptr\n{}\n", .{self.tlv_ptr.fmt(self)});
     try writer.writeByte('\n');
+    try writer.print("merge_sections\n", .{});
+    for (self.merge_sections.items) |msec| {
+        try writer.print("{}\n", .{msec.fmt(self)});
+    }
     try writer.print("sections\n{}\n", .{self.fmtSections()});
     try writer.print("segments\n{}\n", .{self.fmtSegments()});
 }
@@ -3148,6 +3170,166 @@ pub const LinkObject = struct {
 /// Default virtual memory offset corresponds to the size of __PAGEZERO segment and
 /// start of __TEXT segment.
 const default_pagezero_vmsize: u64 = 0x100000000;
+
+pub const MergeSection = struct {
+    out_n_sect: u8 = 0,
+    type: u8,
+    bytes: std.ArrayListUnmanaged(u8) = .{},
+    table: std.HashMapUnmanaged(
+        String,
+        Atom.Index,
+        IndexContext,
+        std.hash_map.default_max_load_percentage,
+    ) = .{},
+    atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
+
+    pub fn deinit(msec: *MergeSection, allocator: Allocator) void {
+        msec.bytes.deinit(allocator);
+        msec.table.deinit(allocator);
+        msec.subsections.deinit(allocator);
+    }
+
+    const InsertResult = struct {
+        found_existing: bool,
+        key: String,
+        atom: *Atom.Index,
+    };
+
+    pub fn insert(msec: *MergeSection, allocator: Allocator, string: []const u8) !InsertResult {
+        const gop = try msec.table.getOrPutContextAdapted(
+            allocator,
+            string,
+            IndexAdapter{ .bytes = msec.bytes.items },
+            IndexContext{ .bytes = msec.bytes.items },
+        );
+        if (!gop.found_existing) {
+            const index: u32 = @intCast(msec.bytes.items.len);
+            try msec.bytes.appendSlice(allocator, string);
+            gop.key_ptr.* = .{ .pos = index, .len = @intCast(string.len) };
+        }
+        return .{
+            .found_existing = gop.found_existing,
+            .key = gop.key_ptr.*,
+            .atom = gop.value_ptr,
+        };
+    }
+
+    pub fn insertZ(msec: *MergeSection, allocator: Allocator, string: []const u8) !InsertResult {
+        const with_null = try allocator.alloc(u8, string.len + 1);
+        defer allocator.free(with_null);
+        @memcpy(with_null[0..string.len], string);
+        with_null[string.len] = 0;
+        return msec.insert(allocator, with_null);
+    }
+
+    /// Finalizes the merge section and clears hash table.
+    /// Sorts all owned subsections.
+    pub fn finalize(msec: *MergeSection, macho_file: *MachO) !void {
+        const gpa = macho_file.base.allocator;
+        try msec.atoms.ensureTotalCapacityPrecise(gpa, msec.table.count());
+
+        var it = msec.table.iterator();
+        while (it.next()) |entry| {
+            const msub = macho_file.getMergeSubsection(entry.value_ptr.*);
+            if (!msub.alive) continue;
+            msec.subsections.appendAssumeCapacity(entry.value_ptr.*);
+        }
+        msec.table.clearAndFree(gpa);
+
+        const sortFn = struct {
+            pub fn sortFn(ctx: *MachO, lhs: Atom.Index, rhs: Atom.Index) bool {
+                const lhs_atom = ctx.getAtom(lhs).?;
+                const rhs_atom = ctx.getAtom(rhs).?;
+                if (lhs_atom.alignment == rhs_atom.alignment) {
+                    if (lhs_atom.size == rhs_atom.size) {
+                        return mem.order(u8, lhs_atom.getString(ctx), rhs_atom.getString(ctx)) == .lt;
+                    }
+                    return lhs_atom.size < rhs_atom.size;
+                }
+                return lhs_atom.alignment < rhs_atom.alignment;
+            }
+        }.sortFn;
+
+        mem.sort(Atom.Index, msec.atoms.items, macho_file, sortFn);
+    }
+
+    pub const IndexContext = struct {
+        bytes: []const u8,
+
+        pub fn eql(_: @This(), a: String, b: String) bool {
+            return a.pos == b.pos;
+        }
+
+        pub fn hash(ctx: @This(), key: String) u64 {
+            const str = ctx.bytes[key.pos..][0..key.len];
+            return std.hash_map.hashString(str);
+        }
+    };
+
+    pub const IndexAdapter = struct {
+        bytes: []const u8,
+
+        pub fn eql(ctx: @This(), a: []const u8, b: String) bool {
+            const str = ctx.bytes[b.pos..][0..b.len];
+            return mem.eql(u8, a, str);
+        }
+
+        pub fn hash(_: @This(), adapted_key: []const u8) u64 {
+            return std.hash_map.hashString(adapted_key);
+        }
+    };
+
+    pub const String = struct { pos: u32, len: u32 };
+
+    pub fn format(
+        msec: MergeSection,
+        comptime unused_fmt_string: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = msec;
+        _ = unused_fmt_string;
+        _ = options;
+        _ = writer;
+        @compileError("do not format MergeSection directly");
+    }
+
+    pub fn fmt(msec: MergeSection, macho_file: *MachO) std.fmt.Formatter(format2) {
+        return .{ .data = .{
+            .msec = msec,
+            .macho_file = macho_file,
+        } };
+    }
+
+    const FormatContext = struct {
+        msec: MergeSection,
+        macho_file: *MachO,
+    };
+
+    pub fn format2(
+        ctx: FormatContext,
+        comptime unused_fmt_string: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = options;
+        _ = unused_fmt_string;
+        const msec = ctx.msec;
+        const macho_file = ctx.macho_file;
+        try writer.print("sect({d}) : type({x})\n", .{
+            msec.out_n_sect,
+            msec.type,
+        });
+        for (msec.atoms.items) |atom_index| {
+            const atom = macho_file.getAtom(atom_index).?;
+            try writer.print("   atom({d}) : {s}\n", .{
+                atom_index, std.fmt.fmtSliceEscapeLower(atom.getLiteralString(macho_file).?),
+            });
+        }
+    }
+
+    pub const Index = u32;
+};
 
 const Section = struct {
     header: macho.section_64,
