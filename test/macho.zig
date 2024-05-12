@@ -47,6 +47,7 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testLargeBss(b, opts));
     macho_step.dependOn(testLinkOrder(b, opts));
     macho_step.dependOn(testLoadHidden(b, opts));
+    macho_step.dependOn(testMergeLiterals(b, opts));
     macho_step.dependOn(testMhExecuteHeader(b, opts));
     macho_step.dependOn(testNeededFramework(b, opts));
     macho_step.dependOn(testNeededLibrary(b, opts));
@@ -1722,6 +1723,42 @@ fn testLoadHidden(b: *Build, opts: Options) *Step {
         run.expectExitCode(42);
         test_step.dependOn(run.step());
     }
+
+    return test_step;
+}
+
+fn testMergeLiterals(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-merge-literals", "");
+
+    const a_o = cc(b, "a.o", opts);
+    a_o.addCSource(
+        \\double q1() { return 1.2345; }
+        \\const char* s1 = "hello";
+    );
+    a_o.addArg("-c");
+
+    const b_o = cc(b, "b.o", opts);
+    b_o.addCSource(
+        \\#include <stdio.h>
+        \\double q2() { return 1.2345; }
+        \\const char* s2 = "hello";
+        \\const char* s3 = "world";
+        \\extern double q1();
+        \\extern const char* s1;
+        \\int main() {
+        \\  printf("%s, %s, %s, %f, %f", s1, s2, s3, q1(), q2());
+        \\  return 0;
+        \\}
+    );
+    b_o.addArg("-c");
+
+    const exe = cc(b, "a.out", opts);
+    exe.addFileSource(a_o.getFile());
+    exe.addFileSource(b_o.getFile());
+
+    const run = exe.run();
+    run.expectStdOutEqual("hello, hello, world, 1.234500, 1.234500");
+    test_step.dependOn(run.step());
 
     return test_step;
 }
