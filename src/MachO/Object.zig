@@ -502,6 +502,7 @@ pub fn resolveMergeSections(self: Object, macho_file: *MachO) !void {
         if (killed_atoms.get(atom_index)) |_| continue;
         const atom = macho_file.getAtom(atom_index) orelse continue;
         if (!atom.flags.alive) continue;
+        if (!atom.flags.relocs) continue;
 
         const relocs = blk: {
             const extra = atom.getExtra(macho_file).?;
