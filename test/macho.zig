@@ -1752,13 +1752,39 @@ fn testMergeLiterals(b: *Build, opts: Options) *Step {
     );
     b_o.addArg("-c");
 
-    const exe = cc(b, "a.out", opts);
-    exe.addFileSource(a_o.getFile());
-    exe.addFileSource(b_o.getFile());
+    {
+        const exe = cc(b, "main1", opts);
+        exe.addFileSource(a_o.getFile());
+        exe.addFileSource(b_o.getFile());
 
-    const run = exe.run();
-    run.expectStdOutEqual("hello, hello, world, 1.234500, 1.234500");
-    test_step.dependOn(run.step());
+        const run = exe.run();
+        run.expectStdOutEqual("hello, hello, world, 1.234500, 1.234500");
+        test_step.dependOn(run.step());
+
+        const check = exe.check();
+        check.dumpSection("__TEXT,__const");
+        check.checkContains("\x8d\x97n\x12\x83\xc0\xf3?");
+        check.dumpSection("__TEXT,__cstring");
+        check.checkContains("hello\x00world\x00%s, %s, %s, %f, %f\x00");
+        test_step.dependOn(&check.step);
+    }
+
+    {
+        const exe = cc(b, "main2", opts);
+        exe.addFileSource(b_o.getFile());
+        exe.addFileSource(a_o.getFile());
+
+        const run = exe.run();
+        run.expectStdOutEqual("hello, hello, world, 1.234500, 1.234500");
+        test_step.dependOn(run.step());
+
+        const check = exe.check();
+        check.dumpSection("__TEXT,__const");
+        check.checkContains("\x8d\x97n\x12\x83\xc0\xf3?");
+        check.dumpSection("__TEXT,__cstring");
+        check.checkContains("hello\x00world\x00%s, %s, %s, %f, %f\x00");
+        test_step.dependOn(&check.step);
+    }
 
     return test_step;
 }
