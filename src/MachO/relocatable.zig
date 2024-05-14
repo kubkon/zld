@@ -1,6 +1,8 @@
 pub fn flush(macho_file: *MachO) !void {
+    try macho_file.resolveMergeSections();
     markExports(macho_file);
     claimUnresolved(macho_file);
+    try macho_file.finalizeMergeSections();
     try initOutputSections(macho_file);
     try macho_file.sortSections();
     try macho_file.addAtomsToSections();
@@ -103,6 +105,7 @@ fn initOutputSections(macho_file: *MachO) !void {
         for (object.atoms.items) |atom_index| {
             const atom = macho_file.getAtom(atom_index) orelse continue;
             if (!atom.flags.alive) continue;
+            if (atom.flags.literal) continue;
             const isec = atom.getInputSection(macho_file);
             atom.out_n_sect = try Atom.initOutputSection(.{
                 .segname = isec.segName(),
@@ -111,6 +114,14 @@ fn initOutputSections(macho_file: *MachO) !void {
                 .is_code = isec.isCode(),
             }, macho_file);
         }
+    }
+
+    for (macho_file.merge_sections.items) |*msec| {
+        msec.out_n_sect = try Atom.initOutputSection(.{
+            .segname = msec.segName(macho_file),
+            .sectname = msec.sectName(macho_file),
+            .flags = msec.type,
+        }, macho_file);
     }
 
     const needs_unwind_info = for (macho_file.objects.items) |index| {
@@ -145,6 +156,17 @@ fn calcSectionSizes(macho_file: *MachO) !void {
             header.@"align" = @max(header.@"align", atom.alignment);
             header.nreloc += atom.calcNumRelocs(macho_file);
         }
+    }
+
+    for (macho_file.merge_sections.items) |*msec| {
+        try msec.calcSize(macho_file);
+        const header = &macho_file.sections.items(.header)[msec.out_n_sect];
+        const msec_alignment = try math.powi(u32, 2, msec.alignment);
+        const offset = mem.alignForward(u64, header.size, msec_alignment);
+        const padding = offset - header.size;
+        msec.value = offset;
+        header.size += padding + msec.size;
+        header.@"align" = @max(header.@"align", msec.alignment);
     }
 
     if (macho_file.unwind_info_sect_index) |index| {
@@ -253,6 +275,21 @@ fn writeAtoms(macho_file: *MachO) !void {
         // TODO scattered writes?
         try macho_file.base.file.pwriteAll(code, header.offset);
         try macho_file.base.file.pwriteAll(mem.sliceAsBytes(relocs.items), header.reloff);
+    }
+
+    for (macho_file.merge_sections.items) |msec| {
+        const header = slice.items(.header)[msec.out_n_sect];
+        const offset = msec.value + header.offset;
+        const buffer = try gpa.alloc(u8, msec.size);
+        defer gpa.free(buffer);
+        for (msec.atoms.items) |atom_index| {
+            const atom = macho_file.getAtom(atom_index).?;
+            const data = atom.getLiteralString(macho_file).?;
+            const off = atom.value;
+            @memcpy(buffer[off..][0..atom.size], data);
+            // TODO relocs?
+        }
+        try macho_file.base.file.pwriteAll(buffer, offset);
     }
 }
 

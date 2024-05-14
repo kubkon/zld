@@ -48,13 +48,22 @@ pub fn getInputSection(self: Atom, macho_file: *MachO) macho.section_64 {
     };
 }
 
+pub fn getOutputSectionIndex(self: Atom, macho_file: *MachO) u8 {
+    if (self.flags.literal) {
+        const extra = self.getExtra(macho_file).?;
+        const msec = macho_file.getMergeSection(extra.merge_section_index);
+        return msec.out_n_sect;
+    }
+    return self.out_n_sect;
+}
+
 pub fn getAddress(self: Atom, macho_file: *MachO) u64 {
     if (self.flags.literal) {
         const extra = self.getExtra(macho_file).?;
         const msec = macho_file.getMergeSection(extra.merge_section_index);
         return msec.getAddress(macho_file) + self.value;
     }
-    const header = macho_file.sections.items(.header)[self.out_n_sect];
+    const header = macho_file.sections.items(.header)[self.getOutputSectionIndex(macho_file)];
     return header.addr + self.value;
 }
 
@@ -166,6 +175,15 @@ pub fn initOutputSection(args: struct {
     flags: u32,
     is_code: bool = false,
 }, macho_file: *MachO) !u8 {
+    if (macho_file.options.relocatable) {
+        const osec = macho_file.getSectionByName(args.segname, args.sectname) orelse try macho_file.addSection(
+            args.segname,
+            args.sectname,
+            .{ .flags = args.flags },
+        );
+        return osec;
+    }
+
     const @"type": u8 = @truncate(args.flags & 0xff);
     const segname, const sectname, const flags = blk: {
         if (args.is_code) break :blk .{
@@ -227,9 +245,6 @@ pub fn initOutputSection(args: struct {
         sectname,
         .{ .flags = flags },
     );
-    if (mem.eql(u8, segname, "__DATA") and mem.eql(u8, sectname, "__data")) {
-        macho_file.data_sect_index = osec;
-    }
     return osec;
 }
 
@@ -400,7 +415,7 @@ fn resolveRelocInner(
 ) ResolveError!void {
     const cpu_arch = macho_file.options.cpu_arch.?;
     const rel_offset = rel.offset - self.off;
-    const seg_id = macho_file.sections.items(.segment_id)[self.out_n_sect];
+    const seg_id = macho_file.sections.items(.segment_id)[self.getOutputSectionIndex(macho_file)];
     const seg = macho_file.segments.items[seg_id];
     const P = @as(i64, @intCast(self.getAddress(macho_file))) + @as(i64, @intCast(rel_offset));
     const A = rel.addend + rel.getRelocAddend(cpu_arch);
@@ -729,7 +744,7 @@ pub fn writeRelocs(self: Atom, macho_file: *MachO, code: []u8, buffer: *std.Arra
         const r_address: i32 = math.cast(i32, self.value + rel_offset) orelse return error.Overflow;
         const r_symbolnum = r_symbolnum: {
             const r_symbolnum: u32 = switch (rel.tag) {
-                .local => rel.getTargetAtom(macho_file).out_n_sect + 1,
+                .local => rel.getTargetAtom(macho_file).getOutputSectionIndex(macho_file) + 1,
                 .@"extern" => rel.getTargetSymbol(macho_file).getOutputSymtabIndex(macho_file).?,
             };
             break :r_symbolnum math.cast(u24, r_symbolnum) orelse return error.Overflow;
@@ -873,8 +888,9 @@ fn format2(
     const atom = ctx.atom;
     const macho_file = ctx.macho_file;
     try writer.print("atom({d}) : {s} : @{x} : sect({d}) : align({x}) : size({x})", .{
-        atom.atom_index, atom.getName(macho_file), atom.getAddress(macho_file),
-        atom.out_n_sect, atom.alignment,           atom.size,
+        atom.atom_index,             atom.getName(macho_file),
+        atom.getAddress(macho_file), atom.getOutputSectionIndex(macho_file),
+        atom.alignment,              atom.size,
     });
     if (atom.flags.thunk) try writer.print(" : thunk({d})", .{atom.getExtra(macho_file).?.thunk});
     if (!atom.flags.alive) try writer.writeAll(" : [*]");

@@ -65,7 +65,7 @@ fn advance(sect: *macho.section_64, size: u64, pow2_align: u32) !u64 {
 fn isReachable(atom: *const Atom, rel: Relocation, macho_file: *MachO) bool {
     const target = rel.getTargetSymbol(macho_file);
     if (target.flags.stubs or target.flags.objc_stubs) return false;
-    if (atom.out_n_sect != target.out_n_sect) return false;
+    if (atom.getOutputSectionIndex(macho_file) != target.out_n_sect) return false;
     const target_atom = target.getAtom(macho_file).?;
     if (target_atom.value == @as(u64, @bitCast(@as(i64, -1)))) return false;
     const saddr = @as(i64, @intCast(atom.getAddress(macho_file))) + @as(i64, @intCast(rel.offset - atom.off));

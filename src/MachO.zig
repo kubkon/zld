@@ -1264,7 +1264,7 @@ fn createObjcSections(self: *MachO) !void {
     }
 }
 
-fn resolveMergeSections(self: *MachO) !void {
+pub fn resolveMergeSections(self: *MachO) !void {
     for (self.objects.items) |index| {
         try self.getFile(index).?.object.resolveMergeSections(self);
     }
@@ -2955,7 +2955,11 @@ pub fn getOrCreateMergeSection(
         macho.S_8BYTE_LITERALS,
         macho.S_16BYTE_LITERALS,
         macho.S_CSTRING_LITERALS,
-        => .{ .type = @"type" },
+        => .{
+            .segname = try self.string_intern.insert(gpa, segname),
+            .sectname = try self.string_intern.insert(gpa, sectname),
+            .type = @"type",
+        },
         else => unreachable,
     };
     return index;

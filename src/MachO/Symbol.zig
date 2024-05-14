@@ -14,8 +14,8 @@ file: File.Index = 0,
 /// Use `getAtom` to get the pointer to the atom.
 atom: Atom.Index = 0,
 
-/// Assigned output section index for this atom.
-out_n_sect: u16 = 0,
+/// Assigned output section index for this symbol.
+out_n_sect: u8 = 0,
 
 /// Index of the source nlist this symbol references.
 /// Use `getNlist` to pull the nlist from the relevant file.
@@ -92,6 +92,13 @@ pub fn getDylibOrdinal(symbol: Symbol, macho_file: *MachO) ?u16 {
         .dylib => |x| x.ordinal,
         else => null,
     };
+}
+
+pub fn getOutputSectionIndex(symbol: Symbol, macho_file: *MachO) u8 {
+    if (symbol.getAtom(macho_file)) |atom| {
+        return atom.getOutputSectionIndex(macho_file);
+    }
+    return symbol.out_n_sect;
 }
 
 pub fn getSymbolRank(symbol: Symbol, macho_file: *MachO) u32 {
@@ -203,9 +210,10 @@ pub inline fn setExtra(symbol: Symbol, extra: Extra, macho_file: *MachO) void {
 }
 
 pub fn setOutputSym(symbol: Symbol, macho_file: *MachO, out: *macho.nlist_64) void {
+    const out_n_sect = symbol.getOutputSectionIndex(macho_file);
     if (symbol.isLocal()) {
         out.n_type = if (symbol.flags.abs) macho.N_ABS else macho.N_SECT;
-        out.n_sect = if (symbol.flags.abs) 0 else @intCast(symbol.out_n_sect + 1);
+        out.n_sect = if (symbol.flags.abs) 0 else @intCast(out_n_sect + 1);
         out.n_desc = 0;
         out.n_value = symbol.getAddress(.{ .stubs = false }, macho_file);
 
@@ -217,7 +225,7 @@ pub fn setOutputSym(symbol: Symbol, macho_file: *MachO, out: *macho.nlist_64) vo
         assert(symbol.visibility == .global);
         out.n_type = macho.N_EXT;
         out.n_type |= if (symbol.flags.abs) macho.N_ABS else macho.N_SECT;
-        out.n_sect = if (symbol.flags.abs) 0 else @intCast(symbol.out_n_sect + 1);
+        out.n_sect = if (symbol.flags.abs) 0 else @intCast(out_n_sect + 1);
         out.n_value = symbol.getAddress(.{ .stubs = false }, macho_file);
         out.n_desc = 0;
 
@@ -286,16 +294,17 @@ fn format2(
     _ = options;
     _ = unused_fmt_string;
     const symbol = ctx.symbol;
+    const macho_file = ctx.macho_file;
     try writer.print("%{d} : {s} : @{x}", .{
         symbol.nlist_idx,
-        symbol.getName(ctx.macho_file),
-        symbol.getAddress(.{}, ctx.macho_file),
+        symbol.getName(macho_file),
+        symbol.getAddress(.{}, macho_file),
     });
-    if (symbol.getFile(ctx.macho_file)) |file| {
-        if (symbol.out_n_sect != 0) {
-            try writer.print(" : sect({d})", .{symbol.out_n_sect});
+    if (symbol.getFile(macho_file)) |file| {
+        if (symbol.getOutputSectionIndex(macho_file) != 0) {
+            try writer.print(" : sect({d})", .{symbol.getOutputSectionIndex(macho_file)});
         }
-        if (symbol.getAtom(ctx.macho_file)) |atom| {
+        if (symbol.getAtom(macho_file)) |atom| {
             try writer.print(" : atom({d})", .{atom.atom_index});
         }
         var buf: [2]u8 = .{'_'} ** 2;
@@ -303,7 +312,7 @@ fn format2(
         if (symbol.flags.import) buf[1] = 'I';
         try writer.print(" : {s}", .{&buf});
         if (symbol.flags.weak) try writer.writeAll(" : weak");
-        if (symbol.isSymbolStab(ctx.macho_file)) try writer.writeAll(" : stab");
+        if (symbol.isSymbolStab(macho_file)) try writer.writeAll(" : stab");
         switch (file) {
             .internal => |x| try writer.print(" : internal({d})", .{x.index}),
             .object => |x| try writer.print(" : object({d})", .{x.index}),
