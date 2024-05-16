@@ -167,6 +167,7 @@ fn calcSectionSizes(macho_file: *MachO) !void {
         msec.value = offset;
         header.size += padding + msec.size;
         header.@"align" = @max(header.@"align", msec.alignment);
+        header.nreloc = msec.calcNumRelocs(macho_file);
     }
 
     if (macho_file.unwind_info_sect_index) |index| {
@@ -248,6 +249,9 @@ fn writeAtoms(macho_file: *MachO) !void {
     const cpu_arch = macho_file.options.cpu_arch.?;
     const slice = macho_file.sections.slice();
 
+    var relocs = std.ArrayList(macho.relocation_info).init(gpa);
+    defer relocs.deinit();
+
     for (slice.items(.header), slice.items(.atoms)) |header, atoms| {
         if (atoms.items.len == 0) continue;
         if (header.isZerofill()) continue;
@@ -257,8 +261,7 @@ fn writeAtoms(macho_file: *MachO) !void {
         const padding_byte: u8 = if (header.isCode() and cpu_arch == .x86_64) 0xcc else 0;
         @memset(code, padding_byte);
 
-        var relocs = try std.ArrayList(macho.relocation_info).initCapacity(gpa, header.nreloc);
-        defer relocs.deinit();
+        try relocs.ensureUnusedCapacity(header.nreloc);
 
         for (atoms.items) |atom_index| {
             const atom = macho_file.getAtom(atom_index).?;
@@ -275,21 +278,27 @@ fn writeAtoms(macho_file: *MachO) !void {
         // TODO scattered writes?
         try macho_file.base.file.pwriteAll(code, header.offset);
         try macho_file.base.file.pwriteAll(mem.sliceAsBytes(relocs.items), header.reloff);
+
+        relocs.clearRetainingCapacity();
     }
 
     for (macho_file.merge_sections.items) |msec| {
+        assert(msec.value == 0);
         const header = slice.items(.header)[msec.out_n_sect];
-        const offset = msec.value + header.offset;
+        const offset = header.offset;
         const buffer = try gpa.alloc(u8, msec.size);
         defer gpa.free(buffer);
+        try relocs.ensureUnusedCapacity(header.nreloc);
         for (msec.atoms.items) |atom_index| {
             const atom = macho_file.getAtom(atom_index).?;
             const data = atom.getLiteralString(macho_file).?;
             const off = atom.value;
             @memcpy(buffer[off..][0..atom.size], data);
-            // TODO relocs?
+            try atom.writeRelocs(macho_file, buffer[off..][0..atom.size], &relocs);
         }
         try macho_file.base.file.pwriteAll(buffer, offset);
+        try macho_file.base.file.pwriteAll(mem.sliceAsBytes(relocs.items), header.reloff);
+        relocs.clearRetainingCapacity();
     }
 }
 

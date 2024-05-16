@@ -3373,6 +3373,15 @@ pub const MergeSection = struct {
         }
     }
 
+    pub fn calcNumRelocs(msec: MergeSection, macho_file: *MachO) u32 {
+        var s: u32 = 0;
+        for (msec.atoms.items) |atom_index| {
+            const atom = macho_file.getAtom(atom_index).?;
+            s += atom.calcNumRelocs(macho_file);
+        }
+        return s;
+    }
+
     pub fn write(msec: MergeSection, macho_file: *MachO, buffer: []u8) !void {
         var has_resolve_error = false;
         for (msec.atoms.items) |atom_index| {
