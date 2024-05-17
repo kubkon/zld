@@ -192,7 +192,9 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
         try self.initSections(nlists.items, macho_file);
     }
 
-    try self.initLiteralSections(macho_file);
+    try self.initCstringLiterals(macho_file);
+    try self.initFixedSizeLiterals(macho_file);
+    try self.initLiteralPointers(macho_file);
     try self.linkNlistToAtom(macho_file);
 
     try self.sortAtoms(macho_file);
@@ -226,16 +228,22 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
     }
 }
 
-inline fn isLiteral(sect: macho.section_64) bool {
+fn isCstringLiteral(sect: macho.section_64) bool {
+    return sect.type() == macho.S_CSTRING_LITERALS;
+}
+
+fn isFixedSizeLiteral(sect: macho.section_64) bool {
     return switch (sect.type()) {
-        macho.S_CSTRING_LITERALS,
         macho.S_4BYTE_LITERALS,
         macho.S_8BYTE_LITERALS,
         macho.S_16BYTE_LITERALS,
-        macho.S_LITERAL_POINTERS,
         => true,
         else => false,
     };
+}
+
+fn isPtrLiteral(sect: macho.section_64) bool {
+    return sect.type() == macho.S_LITERAL_POINTERS;
 }
 
 fn initSubsections(self: *Object, nlists: anytype, macho_file: *MachO) !void {
@@ -244,7 +252,9 @@ fn initSubsections(self: *Object, nlists: anytype, macho_file: *MachO) !void {
     const gpa = macho_file.base.allocator;
     const slice = self.sections.slice();
     for (slice.items(.header), slice.items(.subsections), 0..) |sect, *subsections, n_sect| {
-        if (isLiteral(sect)) continue;
+        if (isCstringLiteral(sect)) continue;
+        if (isFixedSizeLiteral(sect)) continue;
+        if (isPtrLiteral(sect)) continue;
 
         const nlist_start = for (nlists, 0..) |nlist, i| {
             if (nlist.nlist.n_sect - 1 == n_sect) break i;
@@ -315,7 +325,9 @@ fn initSections(self: *Object, nlists: anytype, macho_file: *MachO) !void {
     try self.atoms.ensureUnusedCapacity(gpa, self.sections.items(.header).len);
 
     for (slice.items(.header), 0..) |sect, n_sect| {
-        if (isLiteral(sect)) continue;
+        if (isCstringLiteral(sect)) continue;
+        if (isFixedSizeLiteral(sect)) continue;
+        if (isPtrLiteral(sect)) continue;
 
         const name = try std.fmt.allocPrintZ(gpa, "{s}${s}", .{ sect.segName(), sect.sectName() });
         defer gpa.free(name);
@@ -379,7 +391,7 @@ fn addAtom(self: *Object, args: AddAtomArgs, macho_file: *MachO) !Atom.Index {
     return atom_index;
 }
 
-fn initLiteralSections(self: *Object, macho_file: *MachO) !void {
+fn initCstringLiterals(self: *Object, macho_file: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -387,89 +399,150 @@ fn initLiteralSections(self: *Object, macho_file: *MachO) !void {
     const slice = self.sections.slice();
 
     for (slice.items(.header), 0..) |sect, n_sect| {
-        if (!isLiteral(sect)) continue;
+        if (!isCstringLiteral(sect)) continue;
 
         const data = try self.getSectionData(@intCast(n_sect), macho_file);
         defer gpa.free(data);
 
-        if (sect.type() == macho.S_CSTRING_LITERALS) {
-            var start: u32 = 0;
-            while (start < data.len) {
-                var end = start;
-                while (end < data.len - 1 and data[end] != 0) : (end += 1) {}
-                if (data[end] != 0) {
-                    macho_file.base.fatal("{}:{s},{s}: string not null terminated", .{
-                        self.fmtPath(),
-                        sect.segName(),
-                        sect.sectName(),
-                    });
-                    return error.ParseFailed;
-                }
-                end += 1;
-
-                const string = data[start..end];
-                const name = "l_.strZZZ";
-                const atom_index = try self.addAtom(.{
-                    .name = try self.addString(gpa, name),
-                    .n_sect = @intCast(n_sect),
-                    .off = start,
-                    .size = end - start,
-                    .alignment = sect.@"align",
-                }, macho_file);
-                const atom = macho_file.getAtom(atom_index).?;
-                const msec_index = try macho_file.getOrCreateMergeSection(sect.segName(), sect.sectName(), sect.type());
-                try atom.addExtra(.{
-                    .merge_section_index = msec_index,
-                    .literal_string_off = try self.addLiteralString(gpa, string),
-                }, macho_file);
-                atom.flags.literal = true;
-                try slice.items(.subsections)[n_sect].append(gpa, .{
-                    .atom = atom_index,
-                    .off = start,
-                });
-
-                start = end;
-            }
-        } else {
-            const rec_size: u8 = switch (sect.type()) {
-                macho.S_4BYTE_LITERALS => 4,
-                macho.S_8BYTE_LITERALS => 8,
-                macho.S_16BYTE_LITERALS => 16,
-                macho.S_LITERAL_POINTERS => 8,
-                else => unreachable,
-            };
-            if (sect.size % rec_size != 0) {
-                macho_file.base.fatal("{}:{s},{s}: size not multiple of record size", .{
+        var start: u32 = 0;
+        while (start < data.len) {
+            var end = start;
+            while (end < data.len - 1 and data[end] != 0) : (end += 1) {}
+            if (data[end] != 0) {
+                macho_file.base.fatal("{}:{s},{s}: string not null terminated", .{
                     self.fmtPath(),
                     sect.segName(),
                     sect.sectName(),
                 });
                 return error.ParseFailed;
             }
+            end += 1;
 
-            var pos: u32 = 0;
-            while (pos < data.len) : (pos += rec_size) {
-                const string = data[pos..][0..rec_size];
-                const name = "l_.litZZZ";
-                const atom_index = try self.addAtom(.{
-                    .name = try self.addString(gpa, name),
-                    .n_sect = @intCast(n_sect),
-                    .off = pos,
-                    .size = rec_size,
-                    .alignment = sect.@"align",
-                }, macho_file);
-                const atom = macho_file.getAtom(atom_index).?;
-                const msec_index = try macho_file.getOrCreateMergeSection(sect.segName(), sect.sectName(), sect.type());
-                try atom.addExtra(.{
-                    .merge_section_index = msec_index,
-                    .literal_string_off = try self.addLiteralString(gpa, string),
-                }, macho_file);
-                atom.flags.literal = true;
-                try slice.items(.subsections)[n_sect].append(gpa, .{
-                    .atom = atom_index,
-                    .off = pos,
-                });
-            }
+            const string = data[start..end];
+            const name = "l_.strZZZ";
+            const atom_index = try self.addAtom(.{
+                .name = try self.addString(gpa, name),
+                .n_sect = @intCast(n_sect),
+                .off = start,
+                .size = end - start,
+                .alignment = sect.@"align",
+            }, macho_file);
+            const atom = macho_file.getAtom(atom_index).?;
+            const msec_index = try macho_file.getOrCreateMergeSection(sect.segName(), sect.sectName(), sect.type());
+            try atom.addExtra(.{
+                .merge_section_index = msec_index,
+                .literal_string_off = try self.addLiteralString(gpa, string),
+            }, macho_file);
+            atom.flags.literal = true;
+            try slice.items(.subsections)[n_sect].append(gpa, .{
+                .atom = atom_index,
+                .off = start,
+            });
+
+            start = end;
+        }
+    }
+}
+
+fn initFixedSizeLiterals(self: *Object, macho_file: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    const gpa = macho_file.base.allocator;
+    const slice = self.sections.slice();
+
+    for (slice.items(.header), 0..) |sect, n_sect| {
+        if (!isFixedSizeLiteral(sect)) continue;
+
+        const data = try self.getSectionData(@intCast(n_sect), macho_file);
+        defer gpa.free(data);
+
+        const rec_size: u8 = switch (sect.type()) {
+            macho.S_4BYTE_LITERALS => 4,
+            macho.S_8BYTE_LITERALS => 8,
+            macho.S_16BYTE_LITERALS => 16,
+            else => unreachable,
+        };
+        if (sect.size % rec_size != 0) {
+            macho_file.base.fatal("{}:{s},{s}: size not multiple of record size", .{
+                self.fmtPath(),
+                sect.segName(),
+                sect.sectName(),
+            });
+            return error.ParseFailed;
+        }
+
+        var pos: u32 = 0;
+        while (pos < data.len) : (pos += rec_size) {
+            const string = data[pos..][0..rec_size];
+            const name = "l_.litZZZ";
+            const atom_index = try self.addAtom(.{
+                .name = try self.addString(gpa, name),
+                .n_sect = @intCast(n_sect),
+                .off = pos,
+                .size = rec_size,
+                .alignment = sect.@"align",
+            }, macho_file);
+            const atom = macho_file.getAtom(atom_index).?;
+            const msec_index = try macho_file.getOrCreateMergeSection(sect.segName(), sect.sectName(), sect.type());
+            try atom.addExtra(.{
+                .merge_section_index = msec_index,
+                .literal_string_off = try self.addLiteralString(gpa, string),
+            }, macho_file);
+            atom.flags.literal = true;
+            try slice.items(.subsections)[n_sect].append(gpa, .{
+                .atom = atom_index,
+                .off = pos,
+            });
+        }
+    }
+}
+
+fn initLiteralPointers(self: *Object, macho_file: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    const gpa = macho_file.base.allocator;
+    const slice = self.sections.slice();
+
+    for (slice.items(.header), 0..) |sect, n_sect| {
+        if (!isPtrLiteral(sect)) continue;
+
+        // const data = try self.getSectionData(@intCast(n_sect), macho_file);
+        // defer gpa.free(data);
+
+        const rec_size: u8 = 8;
+        if (sect.size % rec_size != 0) {
+            macho_file.base.fatal("{}:{s},{s}: size not multiple of record size", .{
+                self.fmtPath(),
+                sect.segName(),
+                sect.sectName(),
+            });
+            return error.ParseFailed;
+        }
+        const num_ptrs = @divExact(sect.size, rec_size);
+
+        for (0..num_ptrs) |i| {
+            const pos: u32 = @as(u32, @intCast(i)) * rec_size;
+            const name = "l_.litPtrZZZ";
+            const atom_index = try self.addAtom(.{
+                .name = try self.addString(gpa, name),
+                .n_sect = @intCast(n_sect),
+                .off = pos,
+                .size = rec_size,
+                .alignment = sect.@"align",
+            }, macho_file);
+            // const atom = macho_file.getAtom(atom_index).?;
+            // const msec_index = try macho_file.getOrCreateMergeSection(sect.segName(), sect.sectName(), sect.type());
+            // try atom.addExtra(.{
+            //     .merge_section_index = msec_index,
+            //     .literal_string_off = try self.addLiteralString(gpa, string),
+            // }, macho_file);
+            // atom.flags.literal = true;
+            try slice.items(.subsections)[n_sect].append(gpa, .{
+                .atom = atom_index,
+                .off = pos,
+            });
         }
     }
 }
@@ -482,7 +555,7 @@ pub fn resolveMergeSections(self: Object, macho_file: *MachO) !void {
 
     const slice = self.sections.slice();
     for (slice.items(.header), slice.items(.subsections)) |header, subs| {
-        if (!isLiteral(header)) continue;
+        if (!isCstringLiteral(header) and !isFixedSizeLiteral(header)) continue;
         for (subs.items) |sub| {
             const atom = macho_file.getAtom(sub.atom).?;
             const extra = atom.getExtra(macho_file).?;

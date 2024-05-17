@@ -48,6 +48,7 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testLinkOrder(b, opts));
     macho_step.dependOn(testLoadHidden(b, opts));
     macho_step.dependOn(testMergeLiterals(b, opts));
+    macho_step.dependOn(testMergeLiteralsObjc(b, opts));
     macho_step.dependOn(testMhExecuteHeader(b, opts));
     macho_step.dependOn(testNeededFramework(b, opts));
     macho_step.dependOn(testNeededLibrary(b, opts));
@@ -1785,6 +1786,83 @@ fn testMergeLiterals(b: *Build, opts: Options) *Step {
         check.checkContains("hello\x00world\x00%s, %s, %s, %f, %f\x00");
         test_step.dependOn(&check.step);
     }
+
+    return test_step;
+}
+
+fn testMergeLiteralsObjc(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-merge-literals-objc", "");
+
+    const main_o = cc(b, "main.o", opts);
+    main_o.addObjCSource(
+        \\@import Foundation;
+        \\
+        \\extern void foo();
+        \\
+        \\int main() {
+        \\  NSString *thing = @"12345";
+        \\
+        \\  SEL sel = @selector(lowercaseString);
+        \\  NSString *lower = (([thing respondsToSelector:sel]) ? @"YES" : @"NO");
+        \\  NSLog (@"Responds to lowercaseString: %@", lower);
+        \\  if ([thing respondsToSelector:sel]) //(lower == @"YES")
+        \\      NSLog(@"lowercaseString is: %@", [thing lowercaseString]);
+        \\
+        \\  foo();
+        \\}
+    );
+    main_o.addArgs(&.{ "-c", "-fmodules" });
+
+    const a_o = cc(b, "a.o", opts);
+    a_o.addObjCSource(
+        \\@import Foundation;
+        \\
+        \\void foo() {
+        \\  NSString *thing = @"12345";
+        \\  SEL sel = @selector(lowercaseString);
+        \\  NSString *lower = (([thing respondsToSelector:sel]) ? @"YES" : @"NO");
+        \\  NSLog (@"Responds to lowercaseString in foo(): %@", lower);
+        \\  if ([thing respondsToSelector:sel]) //(lower == @"YES")
+        \\      NSLog(@"lowercaseString in foo() is: %@", [thing lowercaseString]);
+        \\}
+    );
+    a_o.addArgs(&.{ "-c", "-fmodules" });
+
+    {
+        const exe = cc(b, "main1", opts);
+        exe.addFileSource(main_o.getFile());
+        exe.addFileSource(a_o.getFile());
+        exe.addArgs(&.{ "-framework", "Foundation" });
+
+        const run = exe.run();
+        run.expectStdErrFuzzy("Responds to lowercaseString: YES");
+        run.expectStdErrFuzzy("lowercaseString is: 12345");
+        run.expectStdErrFuzzy("Responds to lowercaseString in foo(): YES");
+        run.expectStdErrFuzzy("lowercaseString in foo() is: 12345");
+        test_step.dependOn(run.step());
+
+        // const check = exe.check();
+        // check.dumpSection("__DATA,__objc_selrefs");
+        // check.checkContains("\x00\x00\x00\x00\x00\x00\x00\x00");
+        // test_step.dependOn(&check.step);
+    }
+
+    // {
+    //     const exe = cc(b, "main2", opts);
+    //     exe.addFileSource(b_o.getFile());
+    //     exe.addFileSource(a_o.getFile());
+
+    //     const run = exe.run();
+    //     run.expectStdOutEqual("hello, hello, world, 1.234500, 1.234500");
+    //     test_step.dependOn(run.step());
+
+    //     const check = exe.check();
+    //     check.dumpSection("__TEXT,__const");
+    //     check.checkContains("\x8d\x97n\x12\x83\xc0\xf3?");
+    //     check.dumpSection("__TEXT,__cstring");
+    //     check.checkContains("hello\x00world\x00%s, %s, %s, %f, %f\x00");
+    //     test_step.dependOn(&check.step);
+    // }
 
     return test_step;
 }
