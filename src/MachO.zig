@@ -74,7 +74,7 @@ atoms: std.ArrayListUnmanaged(Atom) = .{},
 atoms_extra: std.ArrayListUnmanaged(u32) = .{},
 thunks: std.ArrayListUnmanaged(Thunk) = .{},
 unwind_records: std.ArrayListUnmanaged(UnwindInfo.Record) = .{},
-merge_sections: std.ArrayListUnmanaged(MergeSection) = .{},
+literal_sections: std.ArrayListUnmanaged(LiteralSection) = .{},
 
 has_tlv: bool = false,
 binds_to_weak: bool = false,
@@ -155,7 +155,7 @@ pub fn deinit(self: *MachO) void {
     self.export_trie.deinit(gpa);
     self.unwind_info.deinit(gpa);
     self.unwind_records.deinit(gpa);
-    self.merge_sections.deinit(gpa);
+    self.literal_sections.deinit(gpa);
 }
 
 pub fn flush(self: *MachO) !void {
@@ -362,7 +362,7 @@ pub fn flush(self: *MachO) !void {
 
     try self.convertTentativeDefinitions();
     try self.createObjcSections();
-    try self.resolveMergeSections();
+    try self.resolveLiteralSections();
     try self.claimUnresolved();
 
     if (self.options.dead_strip) {
@@ -379,7 +379,7 @@ pub fn flush(self: *MachO) !void {
 
     try self.scanRelocs();
 
-    try self.finalizeMergeSections();
+    try self.finalizeLiteralSections();
     try self.initOutputSections();
     try self.initSyntheticSections();
     try self.sortSections();
@@ -1136,9 +1136,9 @@ fn markImportsAndExports(self: *MachO) void {
     }
 }
 
-pub fn finalizeMergeSections(self: *MachO) !void {
-    for (self.merge_sections.items) |*msec| {
-        try msec.finalize(self);
+pub fn finalizeLiteralSections(self: *MachO) !void {
+    for (self.literal_sections.items) |*lsec| {
+        try lsec.finalize(self);
     }
 }
 
@@ -1172,11 +1172,11 @@ fn initOutputSections(self: *MachO) !void {
             }, self);
         }
     }
-    for (self.merge_sections.items) |*msec| {
-        msec.out_n_sect = try Atom.initOutputSection(.{
-            .segname = msec.segName(self),
-            .sectname = msec.sectName(self),
-            .flags = msec.type,
+    for (self.literal_sections.items) |*lsec| {
+        lsec.out_n_sect = try Atom.initOutputSection(.{
+            .segname = lsec.segName(self),
+            .sectname = lsec.sectName(self),
+            .flags = lsec.type,
         }, self);
     }
     if (self.data_sect_index == null) {
@@ -1264,9 +1264,9 @@ fn createObjcSections(self: *MachO) !void {
     }
 }
 
-pub fn resolveMergeSections(self: *MachO) !void {
+pub fn resolveLiteralSections(self: *MachO) !void {
     for (self.objects.items) |index| {
-        try self.getFile(index).?.object.resolveMergeSections(self);
+        try self.getFile(index).?.object.resolveLiteralSections(self);
     }
 }
 
@@ -1651,8 +1651,8 @@ pub fn sortSections(self: *MachO) !void {
             atom.out_n_sect = backlinks[atom.out_n_sect];
         }
     }
-    for (self.merge_sections.items) |*msec| {
-        msec.out_n_sect = backlinks[msec.out_n_sect];
+    for (self.literal_sections.items) |*lsec| {
+        lsec.out_n_sect = backlinks[lsec.out_n_sect];
     }
 
     for (&[_]*?u8{
@@ -1766,15 +1766,15 @@ fn calcSectionSizes(self: *MachO) !void {
         }
     }
 
-    for (self.merge_sections.items) |*msec| {
-        try msec.calcSize(self);
-        const header = &self.sections.items(.header)[msec.out_n_sect];
-        const msec_alignment = try math.powi(u32, 2, msec.alignment);
-        const offset = mem.alignForward(u64, header.size, msec_alignment);
+    for (self.literal_sections.items) |*lsec| {
+        try lsec.calcSize(self);
+        const header = &self.sections.items(.header)[lsec.out_n_sect];
+        const lsec_alignment = try math.powi(u32, 2, lsec.alignment);
+        const offset = mem.alignForward(u64, header.size, lsec_alignment);
         const padding = offset - header.size;
-        msec.value = offset;
-        header.size += padding + msec.size;
-        header.@"align" = @max(header.@"align", msec.alignment);
+        lsec.value = offset;
+        header.size += padding + lsec.size;
+        header.@"align" = @max(header.@"align", lsec.alignment);
     }
 
     if (self.got_sect_index) |idx| {
@@ -2179,12 +2179,12 @@ fn writeAtoms(self: *MachO) !void {
         try self.base.file.pwriteAll(buffer, offset);
     }
 
-    for (self.merge_sections.items) |msec| {
-        const header = slice.items(.header)[msec.out_n_sect];
-        const offset = msec.value + header.offset;
-        const buffer = try gpa.alloc(u8, msec.size);
+    for (self.literal_sections.items) |lsec| {
+        const header = slice.items(.header)[lsec.out_n_sect];
+        const offset = lsec.value + header.offset;
+        const buffer = try gpa.alloc(u8, lsec.size);
         defer gpa.free(buffer);
-        msec.write(self, buffer) catch |err| switch (err) {
+        lsec.write(self, buffer) catch |err| switch (err) {
             error.ResolveFailed => has_resolve_error = true,
             else => |e| return e,
         };
@@ -2918,18 +2918,18 @@ pub fn setAtomExtra(self: *MachO, index: u32, extra: Atom.Extra) void {
     }
 }
 
-pub fn getOrCreateMergeSection(
+pub fn getOrCreateLiteralSection(
     self: *MachO,
     segname: []const u8,
     sectname: []const u8,
     @"type": u8,
-) !MergeSection.Index {
+) !LiteralSection.Index {
     const gpa = self.base.allocator;
-    for (self.merge_sections.items, 0..) |msec, index| {
+    for (self.literal_sections.items, 0..) |lsec, index| {
         switch (@"type") {
-            macho.S_LITERAL_POINTERS => if (msec.type == macho.S_LITERAL_POINTERS and
-                mem.eql(u8, segname, msec.segName(self)) and
-                mem.eql(u8, sectname, msec.sectName(self)))
+            macho.S_LITERAL_POINTERS => if (lsec.type == macho.S_LITERAL_POINTERS and
+                mem.eql(u8, segname, lsec.segName(self)) and
+                mem.eql(u8, sectname, lsec.sectName(self)))
             {
                 return @intCast(index);
             },
@@ -2937,15 +2937,15 @@ pub fn getOrCreateMergeSection(
             macho.S_8BYTE_LITERALS,
             macho.S_16BYTE_LITERALS,
             macho.S_CSTRING_LITERALS,
-            => if (msec.type == @"type") {
+            => if (lsec.type == @"type") {
                 return @intCast(index);
             },
             else => unreachable,
         }
     }
-    const index = @as(MergeSection.Index, @intCast(self.merge_sections.items.len));
-    const msec = try self.merge_sections.addOne(gpa);
-    msec.* = switch (@"type") {
+    const index = @as(LiteralSection.Index, @intCast(self.literal_sections.items.len));
+    const lsec = try self.literal_sections.addOne(gpa);
+    lsec.* = switch (@"type") {
         macho.S_LITERAL_POINTERS => .{
             .segname = try self.string_intern.insert(gpa, segname),
             .sectname = try self.string_intern.insert(gpa, sectname),
@@ -2965,9 +2965,9 @@ pub fn getOrCreateMergeSection(
     return index;
 }
 
-pub fn getMergeSection(self: *MachO, index: MergeSection.Index) *MergeSection {
-    assert(index < self.merge_sections.items.len);
-    return &self.merge_sections.items[index];
+pub fn getLiteralSection(self: *MachO, index: LiteralSection.Index) *LiteralSection {
+    assert(index < self.literal_sections.items.len);
+    return &self.literal_sections.items[index];
 }
 
 pub fn addSymbol(self: *MachO) !Symbol.Index {
@@ -3135,9 +3135,9 @@ fn fmtDumpState(
     try writer.print("got\n{}\n", .{self.got.fmt(self)});
     try writer.print("tlv_ptr\n{}\n", .{self.tlv_ptr.fmt(self)});
     try writer.writeByte('\n');
-    try writer.print("merge_sections\n", .{});
-    for (self.merge_sections.items) |msec| {
-        try writer.print("{}\n", .{msec.fmt(self)});
+    try writer.print("literal_sections\n", .{});
+    for (self.literal_sections.items) |lsec| {
+        try writer.print("{}\n", .{lsec.fmt(self)});
     }
     try writer.print("sections\n{}\n", .{self.fmtSections()});
     try writer.print("segments\n{}\n", .{self.fmtSegments()});
@@ -3272,7 +3272,7 @@ pub const LinkObject = struct {
 /// start of __TEXT segment.
 const default_pagezero_vmsize: u64 = 0x100000000;
 
-pub const MergeSection = struct {
+pub const LiteralSection = struct {
     value: u64 = 0,
     size: u64 = 0,
     alignment: u32 = 0,
@@ -3289,22 +3289,22 @@ pub const MergeSection = struct {
     ) = .{},
     atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
 
-    pub fn deinit(msec: *MergeSection, allocator: Allocator) void {
-        msec.bytes.deinit(allocator);
-        msec.table.deinit(allocator);
-        msec.atoms.deinit(allocator);
+    pub fn deinit(lsec: *LiteralSection, allocator: Allocator) void {
+        lsec.bytes.deinit(allocator);
+        lsec.table.deinit(allocator);
+        lsec.atoms.deinit(allocator);
     }
 
-    pub fn segName(msec: MergeSection, macho_file: *MachO) [:0]const u8 {
-        return macho_file.string_intern.getAssumeExists(msec.segname);
+    pub fn segName(lsec: LiteralSection, macho_file: *MachO) [:0]const u8 {
+        return macho_file.string_intern.getAssumeExists(lsec.segname);
     }
 
-    pub fn sectName(msec: MergeSection, macho_file: *MachO) [:0]const u8 {
-        return macho_file.string_intern.getAssumeExists(msec.sectname);
+    pub fn sectName(lsec: LiteralSection, macho_file: *MachO) [:0]const u8 {
+        return macho_file.string_intern.getAssumeExists(lsec.sectname);
     }
 
-    pub fn getAddress(msec: MergeSection, macho_file: *MachO) u64 {
-        return macho_file.sections.items(.header)[msec.out_n_sect].addr + msec.value;
+    pub fn getAddress(lsec: LiteralSection, macho_file: *MachO) u64 {
+        return macho_file.sections.items(.header)[lsec.out_n_sect].addr + lsec.value;
     }
 
     const InsertResult = struct {
@@ -3313,16 +3313,16 @@ pub const MergeSection = struct {
         atom: *Atom.Index,
     };
 
-    pub fn insert(msec: *MergeSection, allocator: Allocator, string: []const u8) !InsertResult {
-        const gop = try msec.table.getOrPutContextAdapted(
+    pub fn insert(lsec: *LiteralSection, allocator: Allocator, string: []const u8) !InsertResult {
+        const gop = try lsec.table.getOrPutContextAdapted(
             allocator,
             string,
-            IndexAdapter{ .bytes = msec.bytes.items },
-            IndexContext{ .bytes = msec.bytes.items },
+            IndexAdapter{ .bytes = lsec.bytes.items },
+            IndexContext{ .bytes = lsec.bytes.items },
         );
         if (!gop.found_existing) {
-            const index: u32 = @intCast(msec.bytes.items.len);
-            try msec.bytes.appendSlice(allocator, string);
+            const index: u32 = @intCast(lsec.bytes.items.len);
+            try lsec.bytes.appendSlice(allocator, string);
             gop.key_ptr.* = .{ .pos = index, .len = @intCast(string.len) };
         }
         return .{
@@ -3332,19 +3332,19 @@ pub const MergeSection = struct {
         };
     }
 
-    /// Finalizes the merge section and clears hash table.
+    /// Finalizes the literal section and clears hash table.
     /// Sorts all owned subsections.
-    pub fn finalize(msec: *MergeSection, macho_file: *MachO) !void {
+    pub fn finalize(lsec: *LiteralSection, macho_file: *MachO) !void {
         const gpa = macho_file.base.allocator;
-        try msec.atoms.ensureTotalCapacityPrecise(gpa, msec.table.count());
+        try lsec.atoms.ensureTotalCapacityPrecise(gpa, lsec.table.count());
 
-        var it = msec.table.iterator();
+        var it = lsec.table.iterator();
         while (it.next()) |entry| {
             const atom = macho_file.getAtom(entry.value_ptr.*).?;
             if (!atom.flags.alive) continue;
-            msec.atoms.appendAssumeCapacity(entry.value_ptr.*);
+            lsec.atoms.appendAssumeCapacity(entry.value_ptr.*);
         }
-        msec.table.clearAndFree(gpa);
+        lsec.table.clearAndFree(gpa);
 
         const sortFn = struct {
             pub fn sortFn(ctx: *MachO, lhs: Atom.Index, rhs: Atom.Index) bool {
@@ -3360,31 +3360,31 @@ pub const MergeSection = struct {
             }
         }.sortFn;
 
-        mem.sort(Atom.Index, msec.atoms.items, macho_file, sortFn);
+        mem.sort(Atom.Index, lsec.atoms.items, macho_file, sortFn);
     }
 
-    pub fn calcSize(msec: *MergeSection, macho_file: *MachO) !void {
-        const alignment = try math.powi(u32, 2, msec.alignment);
-        for (msec.atoms.items) |atom_index| {
+    pub fn calcSize(lsec: *LiteralSection, macho_file: *MachO) !void {
+        const alignment = try math.powi(u32, 2, lsec.alignment);
+        for (lsec.atoms.items) |atom_index| {
             const atom = macho_file.getAtom(atom_index).?;
-            const offset = mem.alignForward(u64, msec.size, alignment);
+            const offset = mem.alignForward(u64, lsec.size, alignment);
             atom.value = offset;
-            msec.size += atom.size;
+            lsec.size += atom.size;
         }
     }
 
-    pub fn calcNumRelocs(msec: MergeSection, macho_file: *MachO) u32 {
+    pub fn calcNumRelocs(lsec: LiteralSection, macho_file: *MachO) u32 {
         var s: u32 = 0;
-        for (msec.atoms.items) |atom_index| {
+        for (lsec.atoms.items) |atom_index| {
             const atom = macho_file.getAtom(atom_index).?;
             s += atom.calcNumRelocs(macho_file);
         }
         return s;
     }
 
-    pub fn write(msec: MergeSection, macho_file: *MachO, buffer: []u8) !void {
+    pub fn write(lsec: LiteralSection, macho_file: *MachO, buffer: []u8) !void {
         var has_resolve_error = false;
-        for (msec.atoms.items) |atom_index| {
+        for (lsec.atoms.items) |atom_index| {
             const atom = macho_file.getAtom(atom_index).?;
             const data = atom.getLiteralString(macho_file).?;
             const off = atom.value;
@@ -3427,27 +3427,27 @@ pub const MergeSection = struct {
     pub const String = struct { pos: u32, len: u32 };
 
     pub fn format(
-        msec: MergeSection,
+        lsec: LiteralSection,
         comptime unused_fmt_string: []const u8,
         options: std.fmt.FormatOptions,
         writer: anytype,
     ) !void {
-        _ = msec;
+        _ = lsec;
         _ = unused_fmt_string;
         _ = options;
         _ = writer;
-        @compileError("do not format MergeSection directly");
+        @compileError("do not format LiteralSection directly");
     }
 
-    pub fn fmt(msec: MergeSection, macho_file: *MachO) std.fmt.Formatter(format2) {
+    pub fn fmt(lsec: LiteralSection, macho_file: *MachO) std.fmt.Formatter(format2) {
         return .{ .data = .{
-            .msec = msec,
+            .lsec = lsec,
             .macho_file = macho_file,
         } };
     }
 
     const FormatContext = struct {
-        msec: MergeSection,
+        lsec: LiteralSection,
         macho_file: *MachO,
     };
 
@@ -3459,16 +3459,16 @@ pub const MergeSection = struct {
     ) !void {
         _ = options;
         _ = unused_fmt_string;
-        const msec = ctx.msec;
+        const lsec = ctx.lsec;
         const macho_file = ctx.macho_file;
         try writer.print("@{x} : sect({d}) : type({x}) : align({x}) : size({x})\n", .{
-            msec.getAddress(macho_file),
-            msec.out_n_sect,
-            msec.type,
-            msec.alignment,
-            msec.size,
+            lsec.getAddress(macho_file),
+            lsec.out_n_sect,
+            lsec.type,
+            lsec.alignment,
+            lsec.size,
         });
-        for (msec.atoms.items) |atom_index| {
+        for (lsec.atoms.items) |atom_index| {
             const atom = macho_file.getAtom(atom_index).?;
             try writer.print("   atom({d}) : {s}\n", .{
                 atom_index, std.fmt.fmtSliceEscapeLower(atom.getLiteralString(macho_file).?),

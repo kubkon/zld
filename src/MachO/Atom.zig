@@ -51,7 +51,7 @@ pub fn getInputSection(self: Atom, macho_file: *MachO) macho.section_64 {
 pub fn getOutputSectionIndex(self: Atom, macho_file: *MachO) u8 {
     if (self.flags.literal) {
         const extra = self.getExtra(macho_file).?;
-        const msec = macho_file.getMergeSection(extra.merge_section_index);
+        const msec = macho_file.getLiteralSection(extra.literal_section_index);
         return msec.out_n_sect;
     }
     return self.out_n_sect;
@@ -60,7 +60,7 @@ pub fn getOutputSectionIndex(self: Atom, macho_file: *MachO) u8 {
 pub fn getAddress(self: Atom, macho_file: *MachO) u64 {
     if (self.flags.literal) {
         const extra = self.getExtra(macho_file).?;
-        const msec = macho_file.getMergeSection(extra.merge_section_index);
+        const msec = macho_file.getLiteralSection(extra.literal_section_index);
         return msec.getAddress(macho_file) + self.value;
     }
     const header = macho_file.sections.items(.header)[self.getOutputSectionIndex(macho_file)];
@@ -144,7 +144,7 @@ const AddExtraOpts = struct {
     rel_count: ?u32 = null,
     unwind_index: ?u32 = null,
     unwind_count: ?u32 = null,
-    merge_section_index: ?u32 = null,
+    literal_section_index: ?u32 = null,
     literal_string_off: ?u32 = null,
 };
 
@@ -945,8 +945,8 @@ pub const Extra = struct {
     /// Count of relocations belonging to this atom.
     unwind_count: u32 = 0,
 
-    /// Index of the merge section this atom belongs to.
-    merge_section_index: u32 = 0,
+    /// Index of the literal section this atom belongs to.
+    literal_section_index: u32 = 0,
 
     /// Offset of the string (payload/data) if this atom is a literal record.
     /// String size is equal to atom's size.

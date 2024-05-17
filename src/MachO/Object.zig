@@ -428,9 +428,9 @@ fn initCstringLiterals(self: *Object, macho_file: *MachO) !void {
                 .alignment = sect.@"align",
             }, macho_file);
             const atom = macho_file.getAtom(atom_index).?;
-            const msec_index = try macho_file.getOrCreateMergeSection(sect.segName(), sect.sectName(), sect.type());
+            const lsec_index = try macho_file.getOrCreateLiteralSection(sect.segName(), sect.sectName(), sect.type());
             try atom.addExtra(.{
-                .merge_section_index = msec_index,
+                .literal_section_index = lsec_index,
                 .literal_string_off = try self.addLiteralString(gpa, string),
             }, macho_file);
             atom.flags.literal = true;
@@ -484,9 +484,9 @@ fn initFixedSizeLiterals(self: *Object, macho_file: *MachO) !void {
                 .alignment = sect.@"align",
             }, macho_file);
             const atom = macho_file.getAtom(atom_index).?;
-            const msec_index = try macho_file.getOrCreateMergeSection(sect.segName(), sect.sectName(), sect.type());
+            const lsec_index = try macho_file.getOrCreateLiteralSection(sect.segName(), sect.sectName(), sect.type());
             try atom.addExtra(.{
-                .merge_section_index = msec_index,
+                .literal_section_index = lsec_index,
                 .literal_string_off = try self.addLiteralString(gpa, string),
             }, macho_file);
             atom.flags.literal = true;
@@ -533,9 +533,9 @@ fn initLiteralPointers(self: *Object, macho_file: *MachO) !void {
                 .alignment = sect.@"align",
             }, macho_file);
             // const atom = macho_file.getAtom(atom_index).?;
-            // const msec_index = try macho_file.getOrCreateMergeSection(sect.segName(), sect.sectName(), sect.type());
+            // const lsec_index = try macho_file.getOrCreateLiteralSection(sect.segName(), sect.sectName(), sect.type());
             // try atom.addExtra(.{
-            //     .merge_section_index = msec_index,
+            //     .literal_section_index = lsec_index,
             //     .literal_string_off = try self.addLiteralString(gpa, string),
             // }, macho_file);
             // atom.flags.literal = true;
@@ -547,7 +547,7 @@ fn initLiteralPointers(self: *Object, macho_file: *MachO) !void {
     }
 }
 
-pub fn resolveMergeSections(self: Object, macho_file: *MachO) !void {
+pub fn resolveLiteralSections(self: Object, macho_file: *MachO) !void {
     const gpa = macho_file.base.allocator;
 
     var killed_atoms = std.AutoHashMap(Atom.Index, Atom.Index).init(gpa);
@@ -559,11 +559,11 @@ pub fn resolveMergeSections(self: Object, macho_file: *MachO) !void {
         for (subs.items) |sub| {
             const atom = macho_file.getAtom(sub.atom).?;
             const extra = atom.getExtra(macho_file).?;
-            const msec = macho_file.getMergeSection(extra.merge_section_index);
-            const res = try msec.insert(gpa, atom.getLiteralString(macho_file).?);
+            const lsec = macho_file.getLiteralSection(extra.literal_section_index);
+            const res = try lsec.insert(gpa, atom.getLiteralString(macho_file).?);
             if (!res.found_existing) {
                 res.atom.* = sub.atom;
-                msec.alignment = atom.alignment;
+                lsec.alignment = atom.alignment;
                 continue;
             }
             atom.flags.alive = false;
