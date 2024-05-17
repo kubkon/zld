@@ -74,7 +74,6 @@ atoms: std.ArrayListUnmanaged(Atom) = .{},
 atoms_extra: std.ArrayListUnmanaged(u32) = .{},
 thunks: std.ArrayListUnmanaged(Thunk) = .{},
 unwind_records: std.ArrayListUnmanaged(UnwindInfo.Record) = .{},
-literal_sections: std.ArrayListUnmanaged(LiteralSection) = .{},
 
 has_tlv: bool = false,
 binds_to_weak: bool = false,
@@ -155,7 +154,6 @@ pub fn deinit(self: *MachO) void {
     self.export_trie.deinit(gpa);
     self.unwind_info.deinit(gpa);
     self.unwind_records.deinit(gpa);
-    self.literal_sections.deinit(gpa);
 }
 
 pub fn flush(self: *MachO) !void {
@@ -362,7 +360,7 @@ pub fn flush(self: *MachO) !void {
 
     try self.convertTentativeDefinitions();
     try self.createObjcSections();
-    try self.resolveLiteralSections();
+    try self.dedupLiterals();
     try self.claimUnresolved();
 
     if (self.options.dead_strip) {
@@ -379,7 +377,6 @@ pub fn flush(self: *MachO) !void {
 
     try self.scanRelocs();
 
-    try self.finalizeLiteralSections();
     try self.initOutputSections();
     try self.initSyntheticSections();
     try self.sortSections();
@@ -1136,19 +1133,12 @@ fn markImportsAndExports(self: *MachO) void {
     }
 }
 
-pub fn finalizeLiteralSections(self: *MachO) !void {
-    for (self.literal_sections.items) |*lsec| {
-        try lsec.finalize(self);
-    }
-}
-
 fn initOutputSections(self: *MachO) !void {
     for (self.objects.items) |index| {
         const object = self.getFile(index).?.object;
         for (object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index) orelse continue;
             if (!atom.flags.alive) continue;
-            if (atom.flags.literal) continue;
             const isec = atom.getInputSection(self);
             atom.out_n_sect = try Atom.initOutputSection(.{
                 .segname = isec.segName(),
@@ -1162,7 +1152,6 @@ fn initOutputSections(self: *MachO) !void {
         for (object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index) orelse continue;
             if (!atom.flags.alive) continue;
-            if (atom.flags.literal) continue;
             const isec = atom.getInputSection(self);
             atom.out_n_sect = try Atom.initOutputSection(.{
                 .segname = isec.segName(),
@@ -1171,13 +1160,6 @@ fn initOutputSections(self: *MachO) !void {
                 .is_code = isec.isCode(),
             }, self);
         }
-    }
-    for (self.literal_sections.items) |*lsec| {
-        lsec.out_n_sect = try Atom.initOutputSection(.{
-            .segname = lsec.segName(self),
-            .sectname = lsec.sectName(self),
-            .flags = lsec.type,
-        }, self);
     }
     if (self.data_sect_index == null) {
         self.data_sect_index = try self.addSection("__DATA", "__data", .{});
@@ -1264,9 +1246,13 @@ fn createObjcSections(self: *MachO) !void {
     }
 }
 
-pub fn resolveLiteralSections(self: *MachO) !void {
+pub fn dedupLiterals(self: *MachO) !void {
+    const gpa = self.base.allocator;
+    var sets = std.AutoHashMap(u8, LiteralSet).init(gpa);
+    defer sets.deinit();
+
     for (self.objects.items) |index| {
-        try self.getFile(index).?.object.resolveLiteralSections(self);
+        try self.getFile(index).?.object.dedupLiterals(&sets, self);
     }
 }
 
@@ -1639,7 +1625,6 @@ pub fn sortSections(self: *MachO) !void {
         for (self.getFile(index).?.object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index) orelse continue;
             if (!atom.flags.alive) continue;
-            if (atom.flags.literal) continue;
             atom.out_n_sect = backlinks[atom.out_n_sect];
         }
     }
@@ -1647,12 +1632,8 @@ pub fn sortSections(self: *MachO) !void {
         for (object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index) orelse continue;
             if (!atom.flags.alive) continue;
-            if (atom.flags.literal) continue;
             atom.out_n_sect = backlinks[atom.out_n_sect];
         }
-    }
-    for (self.literal_sections.items) |*lsec| {
-        lsec.out_n_sect = backlinks[lsec.out_n_sect];
     }
 
     for (&[_]*?u8{
@@ -1681,7 +1662,6 @@ pub fn addAtomsToSections(self: *MachO) !void {
         for (object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index) orelse continue;
             if (!atom.flags.alive) continue;
-            if (atom.flags.literal) continue;
             const atoms = &self.sections.items(.atoms)[atom.out_n_sect];
             try atoms.append(self.base.allocator, atom_index);
         }
@@ -1689,7 +1669,6 @@ pub fn addAtomsToSections(self: *MachO) !void {
             const sym = self.getSymbol(sym_index);
             const atom = sym.getAtom(self) orelse continue;
             if (!atom.flags.alive) continue;
-            if (atom.flags.literal) continue;
             if (sym.getFile(self).?.getIndex() != index) continue;
             sym.out_n_sect = atom.out_n_sect;
         }
@@ -1764,17 +1743,6 @@ fn calcSectionSizes(self: *MachO) !void {
             // Create jump/branch range extenders if needed.
             try thunks.createThunks(@intCast(i), self);
         }
-    }
-
-    for (self.literal_sections.items) |*lsec| {
-        try lsec.calcSize(self);
-        const header = &self.sections.items(.header)[lsec.out_n_sect];
-        const lsec_alignment = try math.powi(u32, 2, lsec.alignment);
-        const offset = mem.alignForward(u64, header.size, lsec_alignment);
-        const padding = offset - header.size;
-        lsec.value = offset;
-        header.size += padding + lsec.size;
-        header.@"align" = @max(header.@"align", lsec.alignment);
     }
 
     if (self.got_sect_index) |idx| {
@@ -2176,18 +2144,6 @@ fn writeAtoms(self: *MachO) !void {
         defer gpa.free(buffer);
         var stream = std.io.fixedBufferStream(buffer);
         try thunk.write(self, stream.writer());
-        try self.base.file.pwriteAll(buffer, offset);
-    }
-
-    for (self.literal_sections.items) |lsec| {
-        const header = slice.items(.header)[lsec.out_n_sect];
-        const offset = lsec.value + header.offset;
-        const buffer = try gpa.alloc(u8, lsec.size);
-        defer gpa.free(buffer);
-        lsec.write(self, buffer) catch |err| switch (err) {
-            error.ResolveFailed => has_resolve_error = true,
-            else => |e| return e,
-        };
         try self.base.file.pwriteAll(buffer, offset);
     }
 
@@ -2918,58 +2874,6 @@ pub fn setAtomExtra(self: *MachO, index: u32, extra: Atom.Extra) void {
     }
 }
 
-pub fn getOrCreateLiteralSection(
-    self: *MachO,
-    segname: []const u8,
-    sectname: []const u8,
-    @"type": u8,
-) !LiteralSection.Index {
-    const gpa = self.base.allocator;
-    for (self.literal_sections.items, 0..) |lsec, index| {
-        switch (@"type") {
-            macho.S_LITERAL_POINTERS => if (lsec.type == macho.S_LITERAL_POINTERS and
-                mem.eql(u8, segname, lsec.segName(self)) and
-                mem.eql(u8, sectname, lsec.sectName(self)))
-            {
-                return @intCast(index);
-            },
-            macho.S_4BYTE_LITERALS,
-            macho.S_8BYTE_LITERALS,
-            macho.S_16BYTE_LITERALS,
-            macho.S_CSTRING_LITERALS,
-            => if (lsec.type == @"type") {
-                return @intCast(index);
-            },
-            else => unreachable,
-        }
-    }
-    const index = @as(LiteralSection.Index, @intCast(self.literal_sections.items.len));
-    const lsec = try self.literal_sections.addOne(gpa);
-    lsec.* = switch (@"type") {
-        macho.S_LITERAL_POINTERS => .{
-            .segname = try self.string_intern.insert(gpa, segname),
-            .sectname = try self.string_intern.insert(gpa, sectname),
-            .type = @"type",
-        },
-        macho.S_4BYTE_LITERALS,
-        macho.S_8BYTE_LITERALS,
-        macho.S_16BYTE_LITERALS,
-        macho.S_CSTRING_LITERALS,
-        => .{
-            .segname = try self.string_intern.insert(gpa, segname),
-            .sectname = try self.string_intern.insert(gpa, sectname),
-            .type = @"type",
-        },
-        else => unreachable,
-    };
-    return index;
-}
-
-pub fn getLiteralSection(self: *MachO, index: LiteralSection.Index) *LiteralSection {
-    assert(index < self.literal_sections.items.len);
-    return &self.literal_sections.items[index];
-}
-
 pub fn addSymbol(self: *MachO) !Symbol.Index {
     const index = @as(Symbol.Index, @intCast(self.symbols.items.len));
     const symbol = try self.symbols.addOne(self.base.allocator);
@@ -3135,10 +3039,6 @@ fn fmtDumpState(
     try writer.print("got\n{}\n", .{self.got.fmt(self)});
     try writer.print("tlv_ptr\n{}\n", .{self.tlv_ptr.fmt(self)});
     try writer.writeByte('\n');
-    try writer.print("literal_sections\n", .{});
-    for (self.literal_sections.items) |lsec| {
-        try writer.print("{}\n", .{lsec.fmt(self)});
-    }
     try writer.print("sections\n{}\n", .{self.fmtSections()});
     try writer.print("segments\n{}\n", .{self.fmtSegments()});
 }
@@ -3272,13 +3172,7 @@ pub const LinkObject = struct {
 /// start of __TEXT segment.
 const default_pagezero_vmsize: u64 = 0x100000000;
 
-pub const LiteralSection = struct {
-    value: u64 = 0,
-    size: u64 = 0,
-    alignment: u32 = 0,
-    out_n_sect: u8 = 0,
-    segname: u32 = 0,
-    sectname: u32 = 0,
+const LiteralSet = struct {
     type: u8,
     bytes: std.ArrayListUnmanaged(u8) = .{},
     table: std.HashMapUnmanaged(
@@ -3289,22 +3183,10 @@ pub const LiteralSection = struct {
     ) = .{},
     atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
 
-    pub fn deinit(lsec: *LiteralSection, allocator: Allocator) void {
+    fn deinit(lsec: *LiteralSet, allocator: Allocator) void {
         lsec.bytes.deinit(allocator);
         lsec.table.deinit(allocator);
         lsec.atoms.deinit(allocator);
-    }
-
-    pub fn segName(lsec: LiteralSection, macho_file: *MachO) [:0]const u8 {
-        return macho_file.string_intern.getAssumeExists(lsec.segname);
-    }
-
-    pub fn sectName(lsec: LiteralSection, macho_file: *MachO) [:0]const u8 {
-        return macho_file.string_intern.getAssumeExists(lsec.sectname);
-    }
-
-    pub fn getAddress(lsec: LiteralSection, macho_file: *MachO) u64 {
-        return macho_file.sections.items(.header)[lsec.out_n_sect].addr + lsec.value;
     }
 
     const InsertResult = struct {
@@ -3313,7 +3195,7 @@ pub const LiteralSection = struct {
         atom: *Atom.Index,
     };
 
-    pub fn insert(lsec: *LiteralSection, allocator: Allocator, string: []const u8) !InsertResult {
+    pub fn insert(lsec: *LiteralSet, allocator: Allocator, string: []const u8) !InsertResult {
         const gop = try lsec.table.getOrPutContextAdapted(
             allocator,
             string,
@@ -3334,7 +3216,7 @@ pub const LiteralSection = struct {
 
     /// Finalizes the literal section and clears hash table.
     /// Sorts all owned subsections.
-    pub fn finalize(lsec: *LiteralSection, macho_file: *MachO) !void {
+    fn finalize(lsec: *LiteralSet, macho_file: *MachO) !void {
         const gpa = macho_file.base.allocator;
         try lsec.atoms.ensureTotalCapacityPrecise(gpa, lsec.table.count());
 
@@ -3363,42 +3245,7 @@ pub const LiteralSection = struct {
         mem.sort(Atom.Index, lsec.atoms.items, macho_file, sortFn);
     }
 
-    pub fn calcSize(lsec: *LiteralSection, macho_file: *MachO) !void {
-        const alignment = try math.powi(u32, 2, lsec.alignment);
-        for (lsec.atoms.items) |atom_index| {
-            const atom = macho_file.getAtom(atom_index).?;
-            const offset = mem.alignForward(u64, lsec.size, alignment);
-            atom.value = offset;
-            lsec.size += atom.size;
-        }
-    }
-
-    pub fn calcNumRelocs(lsec: LiteralSection, macho_file: *MachO) u32 {
-        var s: u32 = 0;
-        for (lsec.atoms.items) |atom_index| {
-            const atom = macho_file.getAtom(atom_index).?;
-            s += atom.calcNumRelocs(macho_file);
-        }
-        return s;
-    }
-
-    pub fn write(lsec: LiteralSection, macho_file: *MachO, buffer: []u8) !void {
-        var has_resolve_error = false;
-        for (lsec.atoms.items) |atom_index| {
-            const atom = macho_file.getAtom(atom_index).?;
-            const data = atom.getLiteralString(macho_file).?;
-            const off = atom.value;
-            @memcpy(buffer[off..][0..atom.size], data);
-            // TODO audit this; I expect *only* S_LITERAL_POINTERS to contain relocs
-            atom.resolveRelocs(macho_file, buffer[off..][0..atom.size]) catch |err| switch (err) {
-                error.ResolveFailed => has_resolve_error = true,
-                else => |e| return e,
-            };
-        }
-        if (has_resolve_error) return error.ResolveFailed;
-    }
-
-    pub const IndexContext = struct {
+    const IndexContext = struct {
         bytes: []const u8,
 
         pub fn eql(_: @This(), a: String, b: String) bool {
@@ -3411,7 +3258,7 @@ pub const LiteralSection = struct {
         }
     };
 
-    pub const IndexAdapter = struct {
+    const IndexAdapter = struct {
         bytes: []const u8,
 
         pub fn eql(ctx: @This(), a: []const u8, b: String) bool {
@@ -3424,10 +3271,10 @@ pub const LiteralSection = struct {
         }
     };
 
-    pub const String = struct { pos: u32, len: u32 };
+    const String = struct { pos: u32, len: u32 };
 
-    pub fn format(
-        lsec: LiteralSection,
+    fn format(
+        lsec: LiteralSet,
         comptime unused_fmt_string: []const u8,
         options: std.fmt.FormatOptions,
         writer: anytype,
@@ -3436,10 +3283,10 @@ pub const LiteralSection = struct {
         _ = unused_fmt_string;
         _ = options;
         _ = writer;
-        @compileError("do not format LiteralSection directly");
+        @compileError("do not format LiteralSet directly");
     }
 
-    pub fn fmt(lsec: LiteralSection, macho_file: *MachO) std.fmt.Formatter(format2) {
+    fn fmt(lsec: LiteralSet, macho_file: *MachO) std.fmt.Formatter(format2) {
         return .{ .data = .{
             .lsec = lsec,
             .macho_file = macho_file,
@@ -3447,11 +3294,11 @@ pub const LiteralSection = struct {
     }
 
     const FormatContext = struct {
-        lsec: LiteralSection,
+        lsec: LiteralSet,
         macho_file: *MachO,
     };
 
-    pub fn format2(
+    fn format2(
         ctx: FormatContext,
         comptime unused_fmt_string: []const u8,
         options: std.fmt.FormatOptions,
@@ -3460,23 +3307,11 @@ pub const LiteralSection = struct {
         _ = options;
         _ = unused_fmt_string;
         const lsec = ctx.lsec;
-        const macho_file = ctx.macho_file;
-        try writer.print("@{x} : sect({d}) : type({x}) : align({x}) : size({x})\n", .{
-            lsec.getAddress(macho_file),
-            lsec.out_n_sect,
-            lsec.type,
-            lsec.alignment,
-            lsec.size,
-        });
+        try writer.print("type({x})\n", .{lsec.type});
         for (lsec.atoms.items) |atom_index| {
-            const atom = macho_file.getAtom(atom_index).?;
-            try writer.print("   atom({d}) : {s}\n", .{
-                atom_index, std.fmt.fmtSliceEscapeLower(atom.getLiteralString(macho_file).?),
-            });
+            try writer.print("   atom({d})\n", .{atom_index});
         }
     }
-
-    pub const Index = u32;
 };
 
 const Section = struct {

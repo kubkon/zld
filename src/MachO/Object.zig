@@ -418,7 +418,6 @@ fn initCstringLiterals(self: *Object, macho_file: *MachO) !void {
             }
             end += 1;
 
-            const string = data[start..end];
             const name = "l_.strZZZ";
             const atom_index = try self.addAtom(.{
                 .name = try self.addString(gpa, name),
@@ -427,13 +426,6 @@ fn initCstringLiterals(self: *Object, macho_file: *MachO) !void {
                 .size = end - start,
                 .alignment = sect.@"align",
             }, macho_file);
-            const atom = macho_file.getAtom(atom_index).?;
-            const lsec_index = try macho_file.getOrCreateLiteralSection(sect.segName(), sect.sectName(), sect.type());
-            try atom.addExtra(.{
-                .literal_section_index = lsec_index,
-                .literal_string_off = try self.addLiteralString(gpa, string),
-            }, macho_file);
-            atom.flags.literal = true;
             try slice.items(.subsections)[n_sect].append(gpa, .{
                 .atom = atom_index,
                 .off = start,
@@ -454,9 +446,6 @@ fn initFixedSizeLiterals(self: *Object, macho_file: *MachO) !void {
     for (slice.items(.header), 0..) |sect, n_sect| {
         if (!isFixedSizeLiteral(sect)) continue;
 
-        const data = try self.getSectionData(@intCast(n_sect), macho_file);
-        defer gpa.free(data);
-
         const rec_size: u8 = switch (sect.type()) {
             macho.S_4BYTE_LITERALS => 4,
             macho.S_8BYTE_LITERALS => 8,
@@ -473,8 +462,7 @@ fn initFixedSizeLiterals(self: *Object, macho_file: *MachO) !void {
         }
 
         var pos: u32 = 0;
-        while (pos < data.len) : (pos += rec_size) {
-            const string = data[pos..][0..rec_size];
+        while (pos < sect.size) : (pos += rec_size) {
             const name = "l_.litZZZ";
             const atom_index = try self.addAtom(.{
                 .name = try self.addString(gpa, name),
@@ -483,13 +471,6 @@ fn initFixedSizeLiterals(self: *Object, macho_file: *MachO) !void {
                 .size = rec_size,
                 .alignment = sect.@"align",
             }, macho_file);
-            const atom = macho_file.getAtom(atom_index).?;
-            const lsec_index = try macho_file.getOrCreateLiteralSection(sect.segName(), sect.sectName(), sect.type());
-            try atom.addExtra(.{
-                .literal_section_index = lsec_index,
-                .literal_string_off = try self.addLiteralString(gpa, string),
-            }, macho_file);
-            atom.flags.literal = true;
             try slice.items(.subsections)[n_sect].append(gpa, .{
                 .atom = atom_index,
                 .off = pos,
@@ -547,23 +528,29 @@ fn initLiteralPointers(self: *Object, macho_file: *MachO) !void {
     }
 }
 
-pub fn resolveLiteralSections(self: Object, macho_file: *MachO) !void {
+pub fn dedupLiterals(self: Object, sets: anytype, macho_file: *MachO) !void {
     const gpa = macho_file.base.allocator;
 
     var killed_atoms = std.AutoHashMap(Atom.Index, Atom.Index).init(gpa);
     defer killed_atoms.deinit();
 
     const slice = self.sections.slice();
-    for (slice.items(.header), slice.items(.subsections)) |header, subs| {
+    for (slice.items(.header), slice.items(.subsections), 0..) |header, subs, n_sect| {
         if (!isCstringLiteral(header) and !isFixedSizeLiteral(header)) continue;
+
+        const data = try self.getSectionData(@intCast(n_sect), macho_file);
+        defer gpa.free(data);
+
         for (subs.items) |sub| {
             const atom = macho_file.getAtom(sub.atom).?;
-            const extra = atom.getExtra(macho_file).?;
-            const lsec = macho_file.getLiteralSection(extra.literal_section_index);
-            const res = try lsec.insert(gpa, atom.getLiteralString(macho_file).?);
+            const atom_data = data[atom.off..][0..atom.size];
+            const gop = try sets.getOrPut(header.type());
+            if (!gop.found_existing) {
+                gop.value_ptr.* = .{ .type = header.type() };
+            }
+            const res = try gop.value_ptr.insert(gpa, atom_data);
             if (!res.found_existing) {
                 res.atom.* = sub.atom;
-                lsec.alignment = atom.alignment;
                 continue;
             }
             atom.flags.alive = false;
@@ -1445,7 +1432,7 @@ pub fn calcStabsSize(self: *Object, macho_file: *MachO) void {
                 const name = sym.getName(macho_file);
                 if (name.len > 0 and (name[0] == 'L' or name[0] == 'l')) continue;
             }
-            const out_n_sect = sym.getOutputSectionIndex(macho_file);
+            const out_n_sect = sym.out_n_sect;
             const sect = macho_file.sections.items(.header)[out_n_sect];
             if (sect.isCode()) {
                 self.output_symtab_ctx.nstabs += 4; // N_BNSYM, N_FUN, N_FUN, N_ENSYM
@@ -1600,7 +1587,7 @@ pub fn writeStabs(self: *const Object, macho_file: *MachO) void {
                 const name = sym.getName(macho_file);
                 if (name.len > 0 and (name[0] == 'L' or name[0] == 'l')) continue;
             }
-            const out_n_sect = sym.getOutputSectionIndex(macho_file);
+            const out_n_sect = sym.out_n_sect;
             const sect = macho_file.sections.items(.header)[out_n_sect];
             const sym_n_strx = n_strx: {
                 const symtab_index = sym.getOutputSymtabIndex(macho_file).?;
@@ -1695,7 +1682,7 @@ pub fn writeStabs(self: *const Object, macho_file: *MachO) void {
                     const osym = macho_file.symtab.items[symtab_index];
                     break :n_strx osym.n_strx;
                 };
-                const sym_n_sect: u8 = if (!sym.flags.abs) @intCast(sym.getOutputSectionIndex(macho_file) + 1) else 0;
+                const sym_n_sect: u8 = if (!sym.flags.abs) @intCast(sym.out_n_sect + 1) else 0;
                 const sym_n_value = sym.getAddress(.{}, macho_file);
                 const sym_size = sym.getSize(macho_file);
                 if (stab.is_func) {

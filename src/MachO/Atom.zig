@@ -48,22 +48,8 @@ pub fn getInputSection(self: Atom, macho_file: *MachO) macho.section_64 {
     };
 }
 
-pub fn getOutputSectionIndex(self: Atom, macho_file: *MachO) u8 {
-    if (self.flags.literal) {
-        const extra = self.getExtra(macho_file).?;
-        const msec = macho_file.getLiteralSection(extra.literal_section_index);
-        return msec.out_n_sect;
-    }
-    return self.out_n_sect;
-}
-
 pub fn getAddress(self: Atom, macho_file: *MachO) u64 {
-    if (self.flags.literal) {
-        const extra = self.getExtra(macho_file).?;
-        const msec = macho_file.getLiteralSection(extra.literal_section_index);
-        return msec.getAddress(macho_file) + self.value;
-    }
-    const header = macho_file.sections.items(.header)[self.getOutputSectionIndex(macho_file)];
+    const header = macho_file.sections.items(.header)[self.out_n_sect];
     return header.addr + self.value;
 }
 
@@ -131,21 +117,12 @@ pub fn getThunk(self: Atom, macho_file: *MachO) *Thunk {
     return macho_file.getThunk(extra.thunk);
 }
 
-pub fn getLiteralString(self: Atom, macho_file: *MachO) ?[]const u8 {
-    if (!self.flags.literal) return null;
-    const object = self.getFile(macho_file).object;
-    const extra = self.getExtra(macho_file).?;
-    return object.getLiteralString(extra.literal_string_off, @intCast(self.size));
-}
-
 const AddExtraOpts = struct {
     thunk: ?u32 = null,
     rel_index: ?u32 = null,
     rel_count: ?u32 = null,
     unwind_index: ?u32 = null,
     unwind_count: ?u32 = null,
-    literal_section_index: ?u32 = null,
-    literal_string_off: ?u32 = null,
 };
 
 pub fn addExtra(atom: *Atom, opts: AddExtraOpts, macho_file: *MachO) !void {
@@ -415,7 +392,7 @@ fn resolveRelocInner(
 ) ResolveError!void {
     const cpu_arch = macho_file.options.cpu_arch.?;
     const rel_offset = rel.offset - self.off;
-    const seg_id = macho_file.sections.items(.segment_id)[self.getOutputSectionIndex(macho_file)];
+    const seg_id = macho_file.sections.items(.segment_id)[self.out_n_sect];
     const seg = macho_file.segments.items[seg_id];
     const P = @as(i64, @intCast(self.getAddress(macho_file))) + @as(i64, @intCast(rel_offset));
     const A = rel.addend + rel.getRelocAddend(cpu_arch);
@@ -744,7 +721,7 @@ pub fn writeRelocs(self: Atom, macho_file: *MachO, code: []u8, buffer: *std.Arra
         const r_address: i32 = math.cast(i32, self.value + rel_offset) orelse return error.Overflow;
         const r_symbolnum = r_symbolnum: {
             const r_symbolnum: u32 = switch (rel.tag) {
-                .local => rel.getTargetAtom(macho_file).getOutputSectionIndex(macho_file) + 1,
+                .local => rel.getTargetAtom(macho_file).out_n_sect + 1,
                 .@"extern" => rel.getTargetSymbol(macho_file).getOutputSymtabIndex(macho_file).?,
             };
             break :r_symbolnum math.cast(u24, r_symbolnum) orelse return error.Overflow;
@@ -889,7 +866,7 @@ fn format2(
     const macho_file = ctx.macho_file;
     try writer.print("atom({d}) : {s} : @{x} : sect({d}) : align({x}) : size({x})", .{
         atom.atom_index,             atom.getName(macho_file),
-        atom.getAddress(macho_file), atom.getOutputSectionIndex(macho_file),
+        atom.getAddress(macho_file), atom.out_n_sect,
         atom.alignment,              atom.size,
     });
     if (atom.flags.thunk) try writer.print(" : thunk({d})", .{atom.getExtra(macho_file).?.thunk});
@@ -924,9 +901,6 @@ pub const Flags = packed struct {
 
     /// Whether this atom has any unwind records.
     unwind: bool = false,
-
-    /// Whether this atom is a literal record.
-    literal: bool = false,
 };
 
 pub const Extra = struct {
@@ -944,13 +918,6 @@ pub const Extra = struct {
 
     /// Count of relocations belonging to this atom.
     unwind_count: u32 = 0,
-
-    /// Index of the literal section this atom belongs to.
-    literal_section_index: u32 = 0,
-
-    /// Offset of the string (payload/data) if this atom is a literal record.
-    /// String size is equal to atom's size.
-    literal_string_off: u32 = 0,
 };
 
 const aarch64 = @import("../aarch64.zig");

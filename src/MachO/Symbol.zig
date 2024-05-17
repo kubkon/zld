@@ -94,13 +94,6 @@ pub fn getDylibOrdinal(symbol: Symbol, macho_file: *MachO) ?u16 {
     };
 }
 
-pub fn getOutputSectionIndex(symbol: Symbol, macho_file: *MachO) u8 {
-    if (symbol.getAtom(macho_file)) |atom| {
-        return atom.getOutputSectionIndex(macho_file);
-    }
-    return symbol.out_n_sect;
-}
-
 pub fn getSymbolRank(symbol: Symbol, macho_file: *MachO) u32 {
     const file = symbol.getFile(macho_file) orelse return std.math.maxInt(u32);
     const in_archive = switch (file) {
@@ -210,7 +203,7 @@ pub inline fn setExtra(symbol: Symbol, extra: Extra, macho_file: *MachO) void {
 }
 
 pub fn setOutputSym(symbol: Symbol, macho_file: *MachO, out: *macho.nlist_64) void {
-    const out_n_sect = symbol.getOutputSectionIndex(macho_file);
+    const out_n_sect = symbol.out_n_sect;
     if (symbol.isLocal()) {
         out.n_type = if (symbol.flags.abs) macho.N_ABS else macho.N_SECT;
         out.n_sect = if (symbol.flags.abs) 0 else @intCast(out_n_sect + 1);
@@ -301,8 +294,8 @@ fn format2(
         symbol.getAddress(.{}, macho_file),
     });
     if (symbol.getFile(macho_file)) |file| {
-        if (symbol.getOutputSectionIndex(macho_file) != 0) {
-            try writer.print(" : sect({d})", .{symbol.getOutputSectionIndex(macho_file)});
+        if (symbol.out_n_sect != 0) {
+            try writer.print(" : sect({d})", .{symbol.out_n_sect});
         }
         if (symbol.getAtom(macho_file)) |atom| {
             try writer.print(" : atom({d})", .{atom.atom_index});
