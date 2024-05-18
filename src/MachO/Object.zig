@@ -194,7 +194,7 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
 
     try self.initCstringLiterals(macho_file);
     try self.initFixedSizeLiterals(macho_file);
-    try self.initLiteralPointers(macho_file);
+    try self.initPointerLiterals(macho_file);
     try self.linkNlistToAtom(macho_file);
 
     try self.sortAtoms(macho_file);
@@ -479,7 +479,7 @@ fn initFixedSizeLiterals(self: *Object, macho_file: *MachO) !void {
     }
 }
 
-fn initLiteralPointers(self: *Object, macho_file: *MachO) !void {
+fn initPointerLiterals(self: *Object, macho_file: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -488,9 +488,6 @@ fn initLiteralPointers(self: *Object, macho_file: *MachO) !void {
 
     for (slice.items(.header), 0..) |sect, n_sect| {
         if (!isPtrLiteral(sect)) continue;
-
-        // const data = try self.getSectionData(@intCast(n_sect), macho_file);
-        // defer gpa.free(data);
 
         const rec_size: u8 = 8;
         if (sect.size % rec_size != 0) {
@@ -513,13 +510,6 @@ fn initLiteralPointers(self: *Object, macho_file: *MachO) !void {
                 .size = rec_size,
                 .alignment = sect.@"align",
             }, macho_file);
-            // const atom = macho_file.getAtom(atom_index).?;
-            // const lsec_index = try macho_file.getOrCreateLiteralSection(sect.segName(), sect.sectName(), sect.type());
-            // try atom.addExtra(.{
-            //     .literal_section_index = lsec_index,
-            //     .literal_string_off = try self.addLiteralString(gpa, string),
-            // }, macho_file);
-            // atom.flags.literal = true;
             try slice.items(.subsections)[n_sect].append(gpa, .{
                 .atom = atom_index,
                 .off = pos,
@@ -528,7 +518,12 @@ fn initLiteralPointers(self: *Object, macho_file: *MachO) !void {
     }
 }
 
-pub fn dedupLiterals(self: Object, sets: anytype, macho_file: *MachO) !void {
+pub fn dedupLiterals(
+    self: Object,
+    literals: anytype,
+    ptr_literals: anytype,
+    macho_file: *MachO,
+) !void {
     const gpa = macho_file.base.allocator;
 
     var killed_atoms = std.AutoHashMap(Atom.Index, Atom.Index).init(gpa);
@@ -536,25 +531,44 @@ pub fn dedupLiterals(self: Object, sets: anytype, macho_file: *MachO) !void {
 
     const slice = self.sections.slice();
     for (slice.items(.header), slice.items(.subsections), 0..) |header, subs, n_sect| {
-        if (!isCstringLiteral(header) and !isFixedSizeLiteral(header)) continue;
+        if (isCstringLiteral(header) or isFixedSizeLiteral(header)) {
+            const data = try self.getSectionData(@intCast(n_sect), macho_file);
+            defer gpa.free(data);
 
-        const data = try self.getSectionData(@intCast(n_sect), macho_file);
-        defer gpa.free(data);
-
-        for (subs.items) |sub| {
-            const atom = macho_file.getAtom(sub.atom).?;
-            const atom_data = data[atom.off..][0..atom.size];
-            const gop = try sets.getOrPut(header.type());
-            if (!gop.found_existing) {
-                gop.value_ptr.* = .{ .type = header.type() };
+            for (subs.items) |sub| {
+                const atom = macho_file.getAtom(sub.atom).?;
+                const atom_data = data[atom.off..][0..atom.size];
+                const gop = try literals.getOrPut(header.type());
+                if (!gop.found_existing) {
+                    gop.value_ptr.* = .{ .type = header.type() };
+                }
+                const res = try gop.value_ptr.insert(gpa, atom_data);
+                if (!res.found_existing) {
+                    res.atom.* = sub.atom;
+                    continue;
+                }
+                atom.flags.alive = false;
+                try killed_atoms.putNoClobber(sub.atom, res.atom.*);
             }
-            const res = try gop.value_ptr.insert(gpa, atom_data);
-            if (!res.found_existing) {
-                res.atom.* = sub.atom;
-                continue;
+        } else if (isPtrLiteral(header)) {
+            for (subs.items) |sub| {
+                const atom = macho_file.getAtom(sub.atom).?;
+                std.debug.print("{s}@{d}\n", .{ atom.getName(macho_file), sub.atom });
+                const relocs = atom.getRelocs(macho_file);
+                assert(relocs.len == 1);
+                const rel = relocs[0];
+                const target = switch (rel.tag) {
+                    .local => rel.target,
+                    .@"extern" => rel.getTargetSymbol(macho_file).atom,
+                };
+                const res = try ptr_literals.insert(gpa, target, rel.addend, macho_file);
+                if (!res.found_existing) {
+                    res.atom.* = sub.atom;
+                    continue;
+                }
+                atom.flags.alive = false;
+                try killed_atoms.putNoClobber(sub.atom, res.atom.*);
             }
-            atom.flags.alive = false;
-            try killed_atoms.putNoClobber(sub.atom, res.atom.*);
         }
     }
 
@@ -1377,6 +1391,8 @@ pub fn calcSymtabSize(self: *Object, macho_file: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
+    const is_relocatable = macho_file.options.relocatable;
+
     for (self.symbols.items) |sym_index| {
         const sym = macho_file.getSymbol(sym_index);
         const file = sym.getFile(macho_file) orelse continue;
@@ -1386,7 +1402,10 @@ pub fn calcSymtabSize(self: *Object, macho_file: *MachO) !void {
         const name = sym.getName(macho_file);
         // TODO in -r mode, we actually want to merge symbol names and emit only one
         // work it out when emitting relocs
-        if (name.len > 0 and (name[0] == 'L' or name[0] == 'l') and !macho_file.options.relocatable) continue;
+        if (name.len > 0 and
+            (name[0] == 'L' or name[0] == 'l' or
+            mem.startsWith(u8, name, "_OBJC_SELECTOR_REFERENCES_")) and
+            !is_relocatable) continue;
         sym.flags.output_symtab = true;
         if (sym.isLocal()) {
             try sym.addExtra(.{ .symtab = self.output_symtab_ctx.nlocals }, macho_file);

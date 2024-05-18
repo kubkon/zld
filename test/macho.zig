@@ -1800,7 +1800,7 @@ fn testMergeLiteralsObjc(b: *Build, opts: Options) *Step {
         \\extern void foo();
         \\
         \\int main() {
-        \\  NSString *thing = @"12345";
+        \\  NSString *thing = @"aaa";
         \\
         \\  SEL sel = @selector(lowercaseString);
         \\  NSString *lower = (([thing respondsToSelector:sel]) ? @"YES" : @"NO");
@@ -1818,12 +1818,17 @@ fn testMergeLiteralsObjc(b: *Build, opts: Options) *Step {
         \\@import Foundation;
         \\
         \\void foo() {
-        \\  NSString *thing = @"12345";
+        \\  NSString *thing = @"aaa";
         \\  SEL sel = @selector(lowercaseString);
         \\  NSString *lower = (([thing respondsToSelector:sel]) ? @"YES" : @"NO");
         \\  NSLog (@"Responds to lowercaseString in foo(): %@", lower);
         \\  if ([thing respondsToSelector:sel]) //(lower == @"YES")
         \\      NSLog(@"lowercaseString in foo() is: %@", [thing lowercaseString]);
+        \\  SEL sel2 = @selector(uppercaseString);
+        \\  NSString *upper = (([thing respondsToSelector:sel2]) ? @"YES" : @"NO");
+        \\  NSLog (@"Responds to uppercaseString in foo(): %@", upper);
+        \\  if ([thing respondsToSelector:sel2]) //(upper == @"YES")
+        \\      NSLog(@"uppercaseString in foo() is: %@", [thing uppercaseString]);
         \\}
     );
     a_o.addArgs(&.{ "-c", "-fmodules" });
@@ -1836,9 +1841,11 @@ fn testMergeLiteralsObjc(b: *Build, opts: Options) *Step {
 
         const run = exe.run();
         run.expectStdErrFuzzy("Responds to lowercaseString: YES");
-        run.expectStdErrFuzzy("lowercaseString is: 12345");
+        run.expectStdErrFuzzy("lowercaseString is: aaa");
         run.expectStdErrFuzzy("Responds to lowercaseString in foo(): YES");
-        run.expectStdErrFuzzy("lowercaseString in foo() is: 12345");
+        run.expectStdErrFuzzy("lowercaseString in foo() is: aaa");
+        run.expectStdErrFuzzy("Responds to uppercaseString in foo(): YES");
+        run.expectStdErrFuzzy("uppercaseString in foo() is: AAA");
         test_step.dependOn(run.step());
 
         // const check = exe.check();

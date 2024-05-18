@@ -1248,11 +1248,22 @@ fn createObjcSections(self: *MachO) !void {
 
 pub fn dedupLiterals(self: *MachO) !void {
     const gpa = self.base.allocator;
-    var sets = std.AutoHashMap(u8, LiteralSet).init(gpa);
-    defer sets.deinit();
-
+    var literals = std.AutoHashMap(u8, LiteralSet).init(gpa);
+    var ptr_literals: PtrLiteralSet = .{};
+    defer {
+        var it = literals.iterator();
+        while (it.next()) |entry| {
+            entry.value_ptr.deinit(gpa);
+        }
+        literals.deinit();
+        ptr_literals.deinit(gpa);
+    }
     for (self.objects.items) |index| {
-        try self.getFile(index).?.object.dedupLiterals(&sets, self);
+        try self.getFile(index).?.object.dedupLiterals(&literals, &ptr_literals, self);
+    }
+
+    for (ptr_literals.keys.items) |key| {
+        std.debug.print("{}\n", .{key});
     }
 }
 
@@ -3214,37 +3225,6 @@ const LiteralSet = struct {
         };
     }
 
-    /// Finalizes the literal section and clears hash table.
-    /// Sorts all owned subsections.
-    fn finalize(lsec: *LiteralSet, macho_file: *MachO) !void {
-        const gpa = macho_file.base.allocator;
-        try lsec.atoms.ensureTotalCapacityPrecise(gpa, lsec.table.count());
-
-        var it = lsec.table.iterator();
-        while (it.next()) |entry| {
-            const atom = macho_file.getAtom(entry.value_ptr.*).?;
-            if (!atom.flags.alive) continue;
-            lsec.atoms.appendAssumeCapacity(entry.value_ptr.*);
-        }
-        lsec.table.clearAndFree(gpa);
-
-        const sortFn = struct {
-            pub fn sortFn(ctx: *MachO, lhs: Atom.Index, rhs: Atom.Index) bool {
-                const lhs_atom = ctx.getAtom(lhs).?;
-                const rhs_atom = ctx.getAtom(rhs).?;
-                if (lhs_atom.alignment == rhs_atom.alignment) {
-                    if (lhs_atom.size == rhs_atom.size) {
-                        return mem.order(u8, lhs_atom.getLiteralString(ctx).?, rhs_atom.getLiteralString(ctx).?) == .lt;
-                    }
-                    return lhs_atom.size < rhs_atom.size;
-                }
-                return lhs_atom.alignment < rhs_atom.alignment;
-            }
-        }.sortFn;
-
-        mem.sort(Atom.Index, lsec.atoms.items, macho_file, sortFn);
-    }
-
     const IndexContext = struct {
         bytes: []const u8,
 
@@ -3272,46 +3252,67 @@ const LiteralSet = struct {
     };
 
     const String = struct { pos: u32, len: u32 };
+};
 
-    fn format(
-        lsec: LiteralSet,
-        comptime unused_fmt_string: []const u8,
-        options: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
-        _ = lsec;
-        _ = unused_fmt_string;
-        _ = options;
-        _ = writer;
-        @compileError("do not format LiteralSet directly");
+const PtrLiteralSet = struct {
+    table: std.AutoArrayHashMapUnmanaged(void, void) = .{},
+    keys: std.ArrayListUnmanaged(Key) = .{},
+    values: std.ArrayListUnmanaged(Atom.Index) = .{},
+
+    fn deinit(lsec: *PtrLiteralSet, allocator: Allocator) void {
+        lsec.table.deinit(allocator);
+        lsec.keys.deinit(allocator);
+        lsec.values.deinit(allocator);
     }
 
-    fn fmt(lsec: LiteralSet, macho_file: *MachO) std.fmt.Formatter(format2) {
-        return .{ .data = .{
-            .lsec = lsec,
-            .macho_file = macho_file,
-        } };
-    }
-
-    const FormatContext = struct {
-        lsec: LiteralSet,
-        macho_file: *MachO,
+    const InsertResult = struct {
+        found_existing: bool,
+        atom: *Atom.Index,
     };
 
-    fn format2(
-        ctx: FormatContext,
-        comptime unused_fmt_string: []const u8,
-        options: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
-        _ = options;
-        _ = unused_fmt_string;
-        const lsec = ctx.lsec;
-        try writer.print("type({x})\n", .{lsec.type});
-        for (lsec.atoms.items) |atom_index| {
-            try writer.print("   atom({d})\n", .{atom_index});
+    pub fn insert(
+        lsec: *PtrLiteralSet,
+        allocator: Allocator,
+        target: Atom.Index,
+        addend: i64,
+        macho_file: *MachO,
+    ) !InsertResult {
+        const adapter = Adapter{ .keys = lsec.keys.items, .macho_file = macho_file };
+        const key = Key{ .atom = target, .addend = addend };
+        const gop = try lsec.table.getOrPutAdapted(allocator, key, adapter);
+        if (!gop.found_existing) {
+            try lsec.keys.append(allocator, key);
+            _ = try lsec.values.addOne(allocator);
         }
+        return .{
+            .found_existing = gop.found_existing,
+            .atom = &lsec.values.items[gop.index],
+        };
     }
+
+    const Key = struct {
+        atom: Atom.Index,
+        addend: i64,
+    };
+
+    const Adapter = struct {
+        keys: []const Key,
+        macho_file: *MachO,
+
+        pub fn eql(ctx: @This(), key: Key, b_void: void, b_map_index: usize) bool {
+            _ = b_void;
+            const macho_file = ctx.macho_file;
+            const key_atom = macho_file.getAtom(key.atom).?;
+            const other_atom = macho_file.getAtom(ctx.keys[b_map_index].atom).?;
+            return mem.eql(u8, key_atom.getName(macho_file), other_atom.getName(macho_file)) and key.addend == ctx.keys[b_map_index].addend;
+        }
+
+        pub fn hash(ctx: @This(), key: Key) u32 {
+            const macho_file = ctx.macho_file;
+            const key_atom = macho_file.getAtom(key.atom).?;
+            return @truncate(std.hash_map.hashString(key_atom.getName(macho_file)) + Hash.hash(1, mem.asBytes(&key.addend)));
+        }
+    };
 };
 
 const Section = struct {
@@ -3377,6 +3378,7 @@ const DwarfInfo = @import("MachO/DwarfInfo.zig");
 const ExportTrieSection = synthetic.ExportTrieSection;
 const File = @import("MachO/file.zig").File;
 const GotSection = synthetic.GotSection;
+const Hash = std.hash.Wyhash;
 const Indsymtab = synthetic.Indsymtab;
 const InternalObject = @import("MachO/InternalObject.zig");
 const MachO = @This();
