@@ -1149,9 +1149,8 @@ fn initOutputSections(self: *MachO) !void {
             atom.out_n_sect = try Atom.initOutputSection(atom.getInputSection(self), self);
         }
     }
-    if (self.data_sect_index == null) {
-        self.data_sect_index = try self.addSection("__DATA", "__data", .{});
-    }
+    self.data_sect_index = self.getSectionByName("__DATA", "__data") orelse
+        try self.addSection("__DATA", "__data", .{});
 }
 
 fn resolveSyntheticSymbols(self: *MachO) !void {
