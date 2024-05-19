@@ -228,11 +228,11 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
     }
 }
 
-fn isCstringLiteral(sect: macho.section_64) bool {
+pub fn isCstringLiteral(sect: macho.section_64) bool {
     return sect.type() == macho.S_CSTRING_LITERALS;
 }
 
-fn isFixedSizeLiteral(sect: macho.section_64) bool {
+pub fn isFixedSizeLiteral(sect: macho.section_64) bool {
     return switch (sect.type()) {
         macho.S_4BYTE_LITERALS,
         macho.S_8BYTE_LITERALS,
@@ -242,7 +242,7 @@ fn isFixedSizeLiteral(sect: macho.section_64) bool {
     };
 }
 
-fn isPtrLiteral(sect: macho.section_64) bool {
+pub fn isPtrLiteral(sect: macho.section_64) bool {
     return sect.type() == macho.S_LITERAL_POINTERS;
 }
 
@@ -553,7 +553,6 @@ pub fn dedupLiterals(
         } else if (isPtrLiteral(header)) {
             for (subs.items) |sub| {
                 const atom = macho_file.getAtom(sub.atom).?;
-                std.debug.print("{s}@{d}\n", .{ atom.getName(macho_file), sub.atom });
                 const relocs = atom.getRelocs(macho_file);
                 assert(relocs.len == 1);
                 const rel = relocs[0];

@@ -38,7 +38,7 @@ pub fn addSymbol(self: *InternalObject, name: [:0]const u8, macho_file: *MachO) 
 }
 
 /// Creates a fake input sections __TEXT,__objc_methname and __DATA,__objc_selrefs.
-pub fn addObjcMsgsendSections(self: *InternalObject, sym_name: []const u8, macho_file: *MachO) !u32 {
+pub fn addObjcMsgsendSections(self: *InternalObject, sym_name: []const u8, macho_file: *MachO) !Atom.Index {
     const methname_atom_index = try self.addObjcMethnameSection(sym_name, macho_file);
     return try self.addObjcSelrefsSection(sym_name, methname_atom_index, macho_file);
 }
@@ -120,6 +120,83 @@ fn addObjcSelrefsSection(
     self.num_rebase_relocs += 1;
 
     return atom_index;
+}
+
+pub fn dedupLiterals(
+    self: InternalObject,
+    literals: anytype,
+    ptr_literals: anytype,
+    macho_file: *MachO,
+) !void {
+    const gpa = macho_file.base.allocator;
+
+    var killed_atoms = std.AutoHashMap(Atom.Index, Atom.Index).init(gpa);
+    defer killed_atoms.deinit();
+
+    const slice = self.sections.slice();
+    for (slice.items(.header), self.atoms.items, 0..) |header, atom_index, n_sect| {
+        if (Object.isCstringLiteral(header) or Object.isFixedSizeLiteral(header)) {
+            const data = self.getSectionData(@intCast(n_sect));
+            const atom = macho_file.getAtom(atom_index).?;
+            const gop = try literals.getOrPut(header.type());
+            if (!gop.found_existing) {
+                gop.value_ptr.* = .{ .type = header.type() };
+            }
+            const res = try gop.value_ptr.insert(gpa, data);
+            if (!res.found_existing) {
+                res.atom.* = atom_index;
+                continue;
+            }
+            atom.flags.alive = false;
+            try killed_atoms.putNoClobber(atom_index, res.atom.*);
+        } else if (Object.isPtrLiteral(header)) {
+            const atom = macho_file.getAtom(atom_index).?;
+            const relocs = atom.getRelocs(macho_file);
+            assert(relocs.len == 1);
+            const rel = relocs[0];
+            assert(rel.tag == .local);
+            const res = try ptr_literals.insert(gpa, rel.target, rel.addend, macho_file);
+            if (!res.found_existing) {
+                res.atom.* = atom_index;
+                continue;
+            }
+            atom.flags.alive = false;
+            try killed_atoms.putNoClobber(atom_index, res.atom.*);
+        }
+    }
+
+    for (self.atoms.items) |atom_index| {
+        if (killed_atoms.get(atom_index)) |_| continue;
+        const atom = macho_file.getAtom(atom_index) orelse continue;
+        if (!atom.flags.alive) continue;
+        if (!atom.flags.relocs) continue;
+
+        const relocs = blk: {
+            const extra = atom.getExtra(macho_file).?;
+            const relocs = slice.items(.relocs)[atom.n_sect].items;
+            break :blk relocs[extra.rel_index..][0..extra.rel_count];
+        };
+        for (relocs) |*rel| switch (rel.tag) {
+            .local => if (killed_atoms.get(rel.target)) |new_target| {
+                rel.target = new_target;
+            },
+            .@"extern" => {
+                const target = rel.getTargetSymbol(macho_file);
+                if (killed_atoms.get(target.atom)) |new_atom| {
+                    target.atom = new_atom;
+                }
+            },
+        };
+    }
+
+    for (self.symbols.items) |sym_index| {
+        const sym = macho_file.getSymbol(sym_index);
+        if (!sym.flags.objc_stubs) continue;
+        const extra = sym.getExtra(macho_file).?;
+        if (killed_atoms.get(extra.objc_selrefs)) |new_atom| {
+            try sym.addExtra(.{ .objc_selrefs = new_atom }, macho_file);
+        }
+    }
 }
 
 pub fn calcSymtabSize(self: *InternalObject, macho_file: *MachO) !void {

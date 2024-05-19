@@ -1243,6 +1243,7 @@ fn createObjcSections(self: *MachO) !void {
         const name = eatPrefix(sym.getName(self), "_objc_msgSend$").?;
         const selrefs_index = try internal.addObjcMsgsendSections(name, self);
         try sym.addExtra(.{ .objc_selrefs = selrefs_index }, self);
+        sym.flags.objc_stubs = true;
     }
 }
 
@@ -1261,9 +1262,8 @@ pub fn dedupLiterals(self: *MachO) !void {
     for (self.objects.items) |index| {
         try self.getFile(index).?.object.dedupLiterals(&literals, &ptr_literals, self);
     }
-
-    for (ptr_literals.keys.items) |key| {
-        std.debug.print("{}\n", .{key});
+    if (self.getInternalObject()) |object| {
+        try object.dedupLiterals(&literals, &ptr_literals, self);
     }
 }
 
@@ -3258,11 +3258,13 @@ const PtrLiteralSet = struct {
     table: std.AutoArrayHashMapUnmanaged(void, void) = .{},
     keys: std.ArrayListUnmanaged(Key) = .{},
     values: std.ArrayListUnmanaged(Atom.Index) = .{},
+    data: std.ArrayListUnmanaged(u8) = .{},
 
     fn deinit(lsec: *PtrLiteralSet, allocator: Allocator) void {
         lsec.table.deinit(allocator);
         lsec.keys.deinit(allocator);
         lsec.values.deinit(allocator);
+        lsec.data.deinit(allocator);
     }
 
     const InsertResult = struct {
@@ -3277,8 +3279,14 @@ const PtrLiteralSet = struct {
         addend: i64,
         macho_file: *MachO,
     ) !InsertResult {
-        const adapter = Adapter{ .keys = lsec.keys.items, .macho_file = macho_file };
-        const key = Key{ .atom = target, .addend = addend };
+        const adapter = Adapter{ .lsec = lsec };
+        const atom = macho_file.getAtom(target).?;
+        const size: u32 = @intCast(@as(i64, @intCast(atom.size)) - addend);
+        try lsec.data.ensureUnusedCapacity(allocator, size);
+        const off: u32 = @intCast(lsec.data.items.len);
+        lsec.data.resize(allocator, off + size) catch unreachable;
+        try atom.getCode(macho_file, lsec.data.items[off..][0..size]);
+        const key = Key{ .off = off, .size = size };
         const gop = try lsec.table.getOrPutAdapted(allocator, key, adapter);
         if (!gop.found_existing) {
             try lsec.keys.append(allocator, key);
@@ -3291,26 +3299,36 @@ const PtrLiteralSet = struct {
     }
 
     const Key = struct {
-        atom: Atom.Index,
-        addend: i64,
+        off: u32,
+        size: u32,
+
+        fn getData(key: Key, lsec: *const PtrLiteralSet) []const u8 {
+            return lsec.data.items[key.off..][0..key.size];
+        }
+
+        fn eql(key: Key, other: Key, lsec: *const PtrLiteralSet) bool {
+            const key_data = key.getData(lsec);
+            const other_data = other.getData(lsec);
+            return mem.eql(u8, key_data, other_data);
+        }
+
+        fn hash(key: Key, lsec: *const PtrLiteralSet) u32 {
+            const data = key.getData(lsec);
+            return @truncate(std.hash_map.hashString(data));
+        }
     };
 
     const Adapter = struct {
-        keys: []const Key,
-        macho_file: *MachO,
+        lsec: *const PtrLiteralSet,
 
         pub fn eql(ctx: @This(), key: Key, b_void: void, b_map_index: usize) bool {
             _ = b_void;
-            const macho_file = ctx.macho_file;
-            const key_atom = macho_file.getAtom(key.atom).?;
-            const other_atom = macho_file.getAtom(ctx.keys[b_map_index].atom).?;
-            return mem.eql(u8, key_atom.getName(macho_file), other_atom.getName(macho_file)) and key.addend == ctx.keys[b_map_index].addend;
+            const other = ctx.lsec.keys.items[b_map_index];
+            return key.eql(other, ctx.lsec);
         }
 
         pub fn hash(ctx: @This(), key: Key) u32 {
-            const macho_file = ctx.macho_file;
-            const key_atom = macho_file.getAtom(key.atom).?;
-            return @truncate(std.hash_map.hashString(key_atom.getName(macho_file)) + Hash.hash(1, mem.asBytes(&key.addend)));
+            return key.hash(ctx.lsec);
         }
     };
 };
