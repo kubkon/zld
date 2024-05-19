@@ -109,12 +109,7 @@ fn addObjcSelrefsSection(self: *InternalObject, methname_atom_index: Atom.Index,
     return atom_index;
 }
 
-pub fn dedupLiterals(
-    self: InternalObject,
-    literals: anytype,
-    ptr_literals: anytype,
-    macho_file: *MachO,
-) !void {
+pub fn dedupLiterals(self: InternalObject, literals: anytype, macho_file: *MachO) !void {
     const gpa = macho_file.base.allocator;
 
     var killed_atoms = std.AutoHashMap(Atom.Index, Atom.Index).init(gpa);
@@ -125,11 +120,7 @@ pub fn dedupLiterals(
         if (Object.isCstringLiteral(header) or Object.isFixedSizeLiteral(header)) {
             const data = self.getSectionData(@intCast(n_sect));
             const atom = macho_file.getAtom(atom_index).?;
-            const gop = try literals.getOrPut(header.type());
-            if (!gop.found_existing) {
-                gop.value_ptr.* = .{ .type = header.type() };
-            }
-            const res = try gop.value_ptr.insert(gpa, data);
+            const res = try literals.insertString(gpa, header.type(), data);
             if (!res.found_existing) {
                 res.atom.* = atom_index;
                 continue;
@@ -142,7 +133,13 @@ pub fn dedupLiterals(
             assert(relocs.len == 1);
             const rel = relocs[0];
             assert(rel.tag == .local);
-            const res = try ptr_literals.insert(gpa, rel.target, rel.addend, macho_file);
+            const res = try literals.insertTargetAtomWithAddend(
+                gpa,
+                header.type(),
+                rel.target,
+                @intCast(rel.addend),
+                macho_file,
+            );
             if (!res.found_existing) {
                 res.atom.* = atom_index;
                 continue;

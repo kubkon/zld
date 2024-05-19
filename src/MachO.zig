@@ -1237,21 +1237,13 @@ fn createObjcSections(self: *MachO) !void {
 
 pub fn dedupLiterals(self: *MachO) !void {
     const gpa = self.base.allocator;
-    var literals = std.AutoHashMap(u8, LiteralSet).init(gpa);
-    var ptr_literals: PtrLiteralSet = .{};
-    defer {
-        var it = literals.iterator();
-        while (it.next()) |entry| {
-            entry.value_ptr.deinit(gpa);
-        }
-        literals.deinit();
-        ptr_literals.deinit(gpa);
-    }
+    var literals: Literals = .{};
+    defer literals.deinit(gpa);
     for (self.objects.items) |index| {
-        try self.getFile(index).?.object.dedupLiterals(&literals, &ptr_literals, self);
+        try self.getFile(index).?.object.dedupLiterals(&literals, self);
     }
     if (self.getInternalObject()) |object| {
-        try object.dedupLiterals(&literals, &ptr_literals, self);
+        try object.dedupLiterals(&literals, self);
     }
 }
 
@@ -3171,84 +3163,13 @@ pub const LinkObject = struct {
 /// start of __TEXT segment.
 const default_pagezero_vmsize: u64 = 0x100000000;
 
-const LiteralSet = struct {
-    type: u8,
-    bytes: std.ArrayListUnmanaged(u8) = .{},
-    table: std.HashMapUnmanaged(
-        String,
-        Atom.Index,
-        IndexContext,
-        std.hash_map.default_max_load_percentage,
-    ) = .{},
-    atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
-
-    fn deinit(lsec: *LiteralSet, allocator: Allocator) void {
-        lsec.bytes.deinit(allocator);
-        lsec.table.deinit(allocator);
-        lsec.atoms.deinit(allocator);
-    }
-
-    const InsertResult = struct {
-        found_existing: bool,
-        key: String,
-        atom: *Atom.Index,
-    };
-
-    pub fn insert(lsec: *LiteralSet, allocator: Allocator, string: []const u8) !InsertResult {
-        const gop = try lsec.table.getOrPutContextAdapted(
-            allocator,
-            string,
-            IndexAdapter{ .bytes = lsec.bytes.items },
-            IndexContext{ .bytes = lsec.bytes.items },
-        );
-        if (!gop.found_existing) {
-            const index: u32 = @intCast(lsec.bytes.items.len);
-            try lsec.bytes.appendSlice(allocator, string);
-            gop.key_ptr.* = .{ .pos = index, .len = @intCast(string.len) };
-        }
-        return .{
-            .found_existing = gop.found_existing,
-            .key = gop.key_ptr.*,
-            .atom = gop.value_ptr,
-        };
-    }
-
-    const IndexContext = struct {
-        bytes: []const u8,
-
-        pub fn eql(_: @This(), a: String, b: String) bool {
-            return a.pos == b.pos;
-        }
-
-        pub fn hash(ctx: @This(), key: String) u64 {
-            const str = ctx.bytes[key.pos..][0..key.len];
-            return std.hash_map.hashString(str);
-        }
-    };
-
-    const IndexAdapter = struct {
-        bytes: []const u8,
-
-        pub fn eql(ctx: @This(), a: []const u8, b: String) bool {
-            const str = ctx.bytes[b.pos..][0..b.len];
-            return mem.eql(u8, a, str);
-        }
-
-        pub fn hash(_: @This(), adapted_key: []const u8) u64 {
-            return std.hash_map.hashString(adapted_key);
-        }
-    };
-
-    const String = struct { pos: u32, len: u32 };
-};
-
-const PtrLiteralSet = struct {
+const Literals = struct {
     table: std.AutoArrayHashMapUnmanaged(void, void) = .{},
     keys: std.ArrayListUnmanaged(Key) = .{},
     values: std.ArrayListUnmanaged(Atom.Index) = .{},
     data: std.ArrayListUnmanaged(u8) = .{},
 
-    fn deinit(lsec: *PtrLiteralSet, allocator: Allocator) void {
+    fn deinit(lsec: *Literals, allocator: Allocator) void {
         lsec.table.deinit(allocator);
         lsec.keys.deinit(allocator);
         lsec.values.deinit(allocator);
@@ -3260,21 +3181,40 @@ const PtrLiteralSet = struct {
         atom: *Atom.Index,
     };
 
-    pub fn insert(
-        lsec: *PtrLiteralSet,
+    pub fn insertString(lsec: *Literals, allocator: Allocator, @"type": u8, string: []const u8) !InsertResult {
+        const size: u32 = @intCast(string.len);
+        try lsec.data.ensureUnusedCapacity(allocator, size);
+        const off: u32 = @intCast(lsec.data.items.len);
+        lsec.data.appendSliceAssumeCapacity(string);
+        const adapter = Adapter{ .lsec = lsec };
+        const key = Key{ .off = off, .size = size, .seed = @"type" };
+        const gop = try lsec.table.getOrPutAdapted(allocator, key, adapter);
+        if (!gop.found_existing) {
+            try lsec.keys.append(allocator, key);
+            _ = try lsec.values.addOne(allocator);
+        }
+        return .{
+            .found_existing = gop.found_existing,
+            .atom = &lsec.values.items[gop.index],
+        };
+    }
+
+    pub fn insertTargetAtomWithAddend(
+        lsec: *Literals,
         allocator: Allocator,
+        @"type": u8,
         target: Atom.Index,
-        addend: i64,
+        addend: u32,
         macho_file: *MachO,
     ) !InsertResult {
-        const adapter = Adapter{ .lsec = lsec };
         const atom = macho_file.getAtom(target).?;
-        const size: u32 = @intCast(@as(i64, @intCast(atom.size)) - addend);
+        const size: u32 = @intCast(atom.size);
         try lsec.data.ensureUnusedCapacity(allocator, size);
         const off: u32 = @intCast(lsec.data.items.len);
         lsec.data.resize(allocator, off + size) catch unreachable;
         try atom.getCode(macho_file, lsec.data.items[off..][0..size]);
-        const key = Key{ .off = off, .size = size };
+        const adapter = Adapter{ .lsec = lsec };
+        const key = Key{ .off = off + addend, .size = size - addend, .seed = @"type" };
         const gop = try lsec.table.getOrPutAdapted(allocator, key, adapter);
         if (!gop.found_existing) {
             try lsec.keys.append(allocator, key);
@@ -3289,25 +3229,26 @@ const PtrLiteralSet = struct {
     const Key = struct {
         off: u32,
         size: u32,
+        seed: u8,
 
-        fn getData(key: Key, lsec: *const PtrLiteralSet) []const u8 {
+        fn getData(key: Key, lsec: *const Literals) []const u8 {
             return lsec.data.items[key.off..][0..key.size];
         }
 
-        fn eql(key: Key, other: Key, lsec: *const PtrLiteralSet) bool {
+        fn eql(key: Key, other: Key, lsec: *const Literals) bool {
             const key_data = key.getData(lsec);
             const other_data = other.getData(lsec);
             return mem.eql(u8, key_data, other_data);
         }
 
-        fn hash(key: Key, lsec: *const PtrLiteralSet) u32 {
+        fn hash(key: Key, lsec: *const Literals) u32 {
             const data = key.getData(lsec);
-            return @truncate(std.hash_map.hashString(data));
+            return @truncate(Hash.hash(key.seed, data));
         }
     };
 
     const Adapter = struct {
-        lsec: *const PtrLiteralSet,
+        lsec: *const Literals,
 
         pub fn eql(ctx: @This(), key: Key, b_void: void, b_map_index: usize) bool {
             _ = b_void;

@@ -513,12 +513,7 @@ fn initPointerLiterals(self: *Object, macho_file: *MachO) !void {
     }
 }
 
-pub fn dedupLiterals(
-    self: Object,
-    literals: anytype,
-    ptr_literals: anytype,
-    macho_file: *MachO,
-) !void {
+pub fn dedupLiterals(self: Object, literals: anytype, macho_file: *MachO) !void {
     const gpa = macho_file.base.allocator;
 
     var killed_atoms = std.AutoHashMap(Atom.Index, Atom.Index).init(gpa);
@@ -533,11 +528,7 @@ pub fn dedupLiterals(
             for (subs.items) |sub| {
                 const atom = macho_file.getAtom(sub.atom).?;
                 const atom_data = data[atom.off..][0..atom.size];
-                const gop = try literals.getOrPut(header.type());
-                if (!gop.found_existing) {
-                    gop.value_ptr.* = .{ .type = header.type() };
-                }
-                const res = try gop.value_ptr.insert(gpa, atom_data);
+                const res = try literals.insertString(gpa, header.type(), atom_data);
                 if (!res.found_existing) {
                     res.atom.* = sub.atom;
                     continue;
@@ -555,7 +546,13 @@ pub fn dedupLiterals(
                     .local => rel.target,
                     .@"extern" => rel.getTargetSymbol(macho_file).atom,
                 };
-                const res = try ptr_literals.insert(gpa, target, rel.addend, macho_file);
+                const res = try literals.insertTargetAtomWithAddend(
+                    gpa,
+                    header.type(),
+                    target,
+                    @intCast(rel.addend),
+                    macho_file,
+                );
                 if (!res.found_existing) {
                     res.atom.* = sub.atom;
                     continue;
