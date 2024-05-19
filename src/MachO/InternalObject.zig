@@ -3,7 +3,6 @@ index: File.Index,
 sections: std.MultiArrayList(Section) = .{},
 atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
 symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
-strtab: std.ArrayListUnmanaged(u8) = .{},
 
 objc_methnames: std.ArrayListUnmanaged(u8) = .{},
 objc_selrefs: [@sizeOf(u64)]u8 = [_]u8{0} ** @sizeOf(u64),
@@ -18,7 +17,6 @@ pub fn deinit(self: *InternalObject, allocator: Allocator) void {
     self.sections.deinit(allocator);
     self.atoms.deinit(allocator);
     self.symbols.deinit(allocator);
-    self.strtab.deinit(allocator);
     self.objc_methnames.deinit(allocator);
 }
 
