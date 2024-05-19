@@ -1787,6 +1787,27 @@ fn testMergeLiterals(b: *Build, opts: Options) *Step {
         test_step.dependOn(&check.step);
     }
 
+    {
+        const c_o = ld(b, "c.o", opts);
+        c_o.addFileSource(a_o.getFile());
+        c_o.addFileSource(b_o.getFile());
+        c_o.addArg("-r");
+
+        const exe = cc(b, "main3", opts);
+        exe.addFileSource(c_o.getFile());
+
+        const run = exe.run();
+        run.expectStdOutEqual("hello, hello, world, 1.234500, 1.234500");
+        test_step.dependOn(run.step());
+
+        const check = exe.check();
+        check.dumpSection("__TEXT,__const");
+        check.checkContains("\x8d\x97n\x12\x83\xc0\xf3?");
+        check.dumpSection("__TEXT,__cstring");
+        check.checkContains("hello\x00world\x00%s, %s, %s, %f, %f\x00");
+        test_step.dependOn(&check.step);
+    }
+
     return test_step;
 }
 
@@ -1848,28 +1869,63 @@ fn testMergeLiteralsObjc(b: *Build, opts: Options) *Step {
         run.expectStdErrFuzzy("uppercaseString in foo() is: AAA");
         test_step.dependOn(run.step());
 
-        // const check = exe.check();
-        // check.dumpSection("__DATA,__objc_selrefs");
-        // check.checkContains("\x00\x00\x00\x00\x00\x00\x00\x00");
-        // test_step.dependOn(&check.step);
+        const check = exe.check();
+        check.dumpSection("__TEXT,__objc_methname");
+        check.checkContains("lowercaseString\x00");
+        check.dumpSection("__TEXT,__objc_methname");
+        check.checkContains("uppercaseString\x00");
+        test_step.dependOn(&check.step);
     }
 
-    // {
-    //     const exe = cc(b, "main2", opts);
-    //     exe.addFileSource(b_o.getFile());
-    //     exe.addFileSource(a_o.getFile());
+    {
+        const exe = cc(b, "main2", opts);
+        exe.addFileSource(a_o.getFile());
+        exe.addFileSource(main_o.getFile());
+        exe.addArgs(&.{ "-framework", "Foundation" });
 
-    //     const run = exe.run();
-    //     run.expectStdOutEqual("hello, hello, world, 1.234500, 1.234500");
-    //     test_step.dependOn(run.step());
+        const run = exe.run();
+        run.expectStdErrFuzzy("Responds to lowercaseString: YES");
+        run.expectStdErrFuzzy("lowercaseString is: aaa");
+        run.expectStdErrFuzzy("Responds to lowercaseString in foo(): YES");
+        run.expectStdErrFuzzy("lowercaseString in foo() is: aaa");
+        run.expectStdErrFuzzy("Responds to uppercaseString in foo(): YES");
+        run.expectStdErrFuzzy("uppercaseString in foo() is: AAA");
+        test_step.dependOn(run.step());
 
-    //     const check = exe.check();
-    //     check.dumpSection("__TEXT,__const");
-    //     check.checkContains("\x8d\x97n\x12\x83\xc0\xf3?");
-    //     check.dumpSection("__TEXT,__cstring");
-    //     check.checkContains("hello\x00world\x00%s, %s, %s, %f, %f\x00");
-    //     test_step.dependOn(&check.step);
-    // }
+        const check = exe.check();
+        check.dumpSection("__TEXT,__objc_methname");
+        check.checkContains("lowercaseString\x00");
+        check.dumpSection("__TEXT,__objc_methname");
+        check.checkContains("uppercaseString\x00");
+        test_step.dependOn(&check.step);
+    }
+
+    {
+        const b_o = ld(b, "b.o", opts);
+        b_o.addFileSource(a_o.getFile());
+        b_o.addFileSource(main_o.getFile());
+        b_o.addArg("-r");
+
+        const exe = cc(b, "main3", opts);
+        exe.addFileSource(b_o.getFile());
+        exe.addArgs(&.{ "-framework", "Foundation" });
+
+        const run = exe.run();
+        run.expectStdErrFuzzy("Responds to lowercaseString: YES");
+        run.expectStdErrFuzzy("lowercaseString is: aaa");
+        run.expectStdErrFuzzy("Responds to lowercaseString in foo(): YES");
+        run.expectStdErrFuzzy("lowercaseString in foo() is: aaa");
+        run.expectStdErrFuzzy("Responds to uppercaseString in foo(): YES");
+        run.expectStdErrFuzzy("uppercaseString in foo() is: AAA");
+        test_step.dependOn(run.step());
+
+        const check = exe.check();
+        check.dumpSection("__TEXT,__objc_methname");
+        check.checkContains("lowercaseString\x00");
+        check.dumpSection("__TEXT,__objc_methname");
+        check.checkContains("uppercaseString\x00");
+        test_step.dependOn(&check.step);
+    }
 
     return test_step;
 }

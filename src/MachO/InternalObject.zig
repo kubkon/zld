@@ -40,7 +40,7 @@ pub fn addSymbol(self: *InternalObject, name: [:0]const u8, macho_file: *MachO) 
 /// Creates a fake input sections __TEXT,__objc_methname and __DATA,__objc_selrefs.
 pub fn addObjcMsgsendSections(self: *InternalObject, sym_name: []const u8, macho_file: *MachO) !Atom.Index {
     const methname_atom_index = try self.addObjcMethnameSection(sym_name, macho_file);
-    return try self.addObjcSelrefsSection(sym_name, methname_atom_index, macho_file);
+    return try self.addObjcSelrefsSection(methname_atom_index, macho_file);
 }
 
 fn addObjcMethnameSection(self: *InternalObject, methname: []const u8, macho_file: *MachO) !Atom.Index {
@@ -48,11 +48,8 @@ fn addObjcMethnameSection(self: *InternalObject, methname: []const u8, macho_fil
     const atom_index = try macho_file.addAtom();
     try self.atoms.append(gpa, atom_index);
 
-    const name = try std.fmt.allocPrintZ(gpa, "__TEXT$__objc_methname${s}", .{methname});
-    defer gpa.free(name);
     const atom = macho_file.getAtom(atom_index).?;
     atom.atom_index = atom_index;
-    atom.name = try self.addString(gpa, name);
     atom.file = self.index;
     atom.size = methname.len + 1;
     atom.alignment = 0;
@@ -72,21 +69,13 @@ fn addObjcMethnameSection(self: *InternalObject, methname: []const u8, macho_fil
     return atom_index;
 }
 
-fn addObjcSelrefsSection(
-    self: *InternalObject,
-    methname: []const u8,
-    methname_atom_index: Atom.Index,
-    macho_file: *MachO,
-) !Atom.Index {
+fn addObjcSelrefsSection(self: *InternalObject, methname_atom_index: Atom.Index, macho_file: *MachO) !Atom.Index {
     const gpa = macho_file.base.allocator;
     const atom_index = try macho_file.addAtom();
     try self.atoms.append(gpa, atom_index);
 
-    const name = try std.fmt.allocPrintZ(gpa, "__DATA$__objc_selrefs${s}", .{methname});
-    defer gpa.free(name);
     const atom = macho_file.getAtom(atom_index).?;
     atom.atom_index = atom_index;
-    atom.name = try self.addString(gpa, name);
     atom.file = self.index;
     atom.size = @sizeOf(u64);
     atom.alignment = 3;
@@ -256,17 +245,10 @@ pub fn getSectionData(self: *const InternalObject, index: u32) []const u8 {
     } else @panic("ref to non-existent section");
 }
 
-fn addString(self: *InternalObject, allocator: Allocator, name: [:0]const u8) error{OutOfMemory}!u32 {
-    const off: u32 = @intCast(self.strtab.items.len);
-    try self.strtab.ensureUnusedCapacity(allocator, name.len + 1);
-    self.strtab.appendSliceAssumeCapacity(name);
-    self.strtab.appendAssumeCapacity(0);
-    return off;
-}
-
 pub fn getString(self: InternalObject, off: u32) [:0]const u8 {
-    assert(off < self.strtab.items.len);
-    return mem.sliceTo(@as([*:0]const u8, @ptrCast(self.strtab.items.ptr + off)), 0);
+    _ = self;
+    _ = off;
+    return "";
 }
 
 pub fn asFile(self: *InternalObject) File {

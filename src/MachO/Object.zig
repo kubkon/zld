@@ -416,9 +416,8 @@ fn initCstringLiterals(self: *Object, macho_file: *MachO) !void {
             }
             end += 1;
 
-            const name = "l_.strZZZ";
             const atom_index = try self.addAtom(.{
-                .name = try self.addString(gpa, name),
+                .name = 0,
                 .n_sect = @intCast(n_sect),
                 .off = start,
                 .size = end - start,
@@ -461,9 +460,8 @@ fn initFixedSizeLiterals(self: *Object, macho_file: *MachO) !void {
 
         var pos: u32 = 0;
         while (pos < sect.size) : (pos += rec_size) {
-            const name = "l_.litZZZ";
             const atom_index = try self.addAtom(.{
-                .name = try self.addString(gpa, name),
+                .name = 0,
                 .n_sect = @intCast(n_sect),
                 .off = pos,
                 .size = rec_size,
@@ -500,9 +498,8 @@ fn initPointerLiterals(self: *Object, macho_file: *MachO) !void {
 
         for (0..num_ptrs) |i| {
             const pos: u32 = @as(u32, @intCast(i)) * rec_size;
-            const name = "l_.litPtrZZZ";
             const atom_index = try self.addAtom(.{
-                .name = try self.addString(gpa, name),
+                .name = 0,
                 .n_sect = @intCast(n_sect),
                 .off = pos,
                 .size = rec_size,
