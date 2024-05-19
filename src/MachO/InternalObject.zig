@@ -109,7 +109,7 @@ fn addObjcSelrefsSection(self: *InternalObject, methname_atom_index: Atom.Index,
     return atom_index;
 }
 
-pub fn dedupLiterals(self: InternalObject, literals: anytype, macho_file: *MachO) !void {
+pub fn dedupLiterals(self: InternalObject, lp: *MachO.LiteralPool, macho_file: *MachO) !void {
     const gpa = macho_file.base.allocator;
 
     var killed_atoms = std.AutoHashMap(Atom.Index, Atom.Index).init(gpa);
@@ -123,7 +123,7 @@ pub fn dedupLiterals(self: InternalObject, literals: anytype, macho_file: *MachO
         if (Object.isCstringLiteral(header) or Object.isFixedSizeLiteral(header)) {
             const data = self.getSectionData(@intCast(n_sect));
             const atom = macho_file.getAtom(atom_index).?;
-            const res = try literals.insert(gpa, header.type(), data);
+            const res = try lp.insert(gpa, header.type(), data);
             if (!res.found_existing) {
                 res.atom.* = atom_index;
                 continue;
@@ -141,7 +141,7 @@ pub fn dedupLiterals(self: InternalObject, literals: anytype, macho_file: *MachO
             try buffer.ensureUnusedCapacity(target.size);
             buffer.resize(target.size) catch unreachable;
             try target.getCode(macho_file, buffer.items);
-            const res = try literals.insert(gpa, header.type(), buffer.items[addend..]);
+            const res = try lp.insert(gpa, header.type(), buffer.items[addend..]);
             buffer.clearRetainingCapacity();
             if (!res.found_existing) {
                 res.atom.* = atom_index;

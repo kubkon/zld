@@ -1237,13 +1237,13 @@ fn createObjcSections(self: *MachO) !void {
 
 pub fn dedupLiterals(self: *MachO) !void {
     const gpa = self.base.allocator;
-    var literals: Literals = .{};
-    defer literals.deinit(gpa);
+    var lp: LiteralPool = .{};
+    defer lp.deinit(gpa);
     for (self.objects.items) |index| {
-        try self.getFile(index).?.object.dedupLiterals(&literals, self);
+        try self.getFile(index).?.object.dedupLiterals(&lp, self);
     }
     if (self.getInternalObject()) |object| {
-        try object.dedupLiterals(&literals, self);
+        try object.dedupLiterals(&lp, self);
     }
 }
 
@@ -3163,17 +3163,17 @@ pub const LinkObject = struct {
 /// start of __TEXT segment.
 const default_pagezero_vmsize: u64 = 0x100000000;
 
-const Literals = struct {
+pub const LiteralPool = struct {
     table: std.AutoArrayHashMapUnmanaged(void, void) = .{},
     keys: std.ArrayListUnmanaged(Key) = .{},
     values: std.ArrayListUnmanaged(Atom.Index) = .{},
     data: std.ArrayListUnmanaged(u8) = .{},
 
-    fn deinit(lsec: *Literals, allocator: Allocator) void {
-        lsec.table.deinit(allocator);
-        lsec.keys.deinit(allocator);
-        lsec.values.deinit(allocator);
-        lsec.data.deinit(allocator);
+    pub fn deinit(lp: *LiteralPool, allocator: Allocator) void {
+        lp.table.deinit(allocator);
+        lp.keys.deinit(allocator);
+        lp.values.deinit(allocator);
+        lp.data.deinit(allocator);
     }
 
     const InsertResult = struct {
@@ -3181,21 +3181,21 @@ const Literals = struct {
         atom: *Atom.Index,
     };
 
-    pub fn insert(lsec: *Literals, allocator: Allocator, @"type": u8, string: []const u8) !InsertResult {
+    pub fn insert(lp: *LiteralPool, allocator: Allocator, @"type": u8, string: []const u8) !InsertResult {
         const size: u32 = @intCast(string.len);
-        try lsec.data.ensureUnusedCapacity(allocator, size);
-        const off: u32 = @intCast(lsec.data.items.len);
-        lsec.data.appendSliceAssumeCapacity(string);
-        const adapter = Adapter{ .lsec = lsec };
+        try lp.data.ensureUnusedCapacity(allocator, size);
+        const off: u32 = @intCast(lp.data.items.len);
+        lp.data.appendSliceAssumeCapacity(string);
+        const adapter = Adapter{ .lp = lp };
         const key = Key{ .off = off, .size = size, .seed = @"type" };
-        const gop = try lsec.table.getOrPutAdapted(allocator, key, adapter);
+        const gop = try lp.table.getOrPutAdapted(allocator, key, adapter);
         if (!gop.found_existing) {
-            try lsec.keys.append(allocator, key);
-            _ = try lsec.values.addOne(allocator);
+            try lp.keys.append(allocator, key);
+            _ = try lp.values.addOne(allocator);
         }
         return .{
             .found_existing = gop.found_existing,
-            .atom = &lsec.values.items[gop.index],
+            .atom = &lp.values.items[gop.index],
         };
     }
 
@@ -3204,33 +3204,33 @@ const Literals = struct {
         size: u32,
         seed: u8,
 
-        fn getData(key: Key, lsec: *const Literals) []const u8 {
-            return lsec.data.items[key.off..][0..key.size];
+        fn getData(key: Key, lp: *const LiteralPool) []const u8 {
+            return lp.data.items[key.off..][0..key.size];
         }
 
-        fn eql(key: Key, other: Key, lsec: *const Literals) bool {
-            const key_data = key.getData(lsec);
-            const other_data = other.getData(lsec);
+        fn eql(key: Key, other: Key, lp: *const LiteralPool) bool {
+            const key_data = key.getData(lp);
+            const other_data = other.getData(lp);
             return mem.eql(u8, key_data, other_data);
         }
 
-        fn hash(key: Key, lsec: *const Literals) u32 {
-            const data = key.getData(lsec);
+        fn hash(key: Key, lp: *const LiteralPool) u32 {
+            const data = key.getData(lp);
             return @truncate(Hash.hash(key.seed, data));
         }
     };
 
     const Adapter = struct {
-        lsec: *const Literals,
+        lp: *const LiteralPool,
 
         pub fn eql(ctx: @This(), key: Key, b_void: void, b_map_index: usize) bool {
             _ = b_void;
-            const other = ctx.lsec.keys.items[b_map_index];
-            return key.eql(other, ctx.lsec);
+            const other = ctx.lp.keys.items[b_map_index];
+            return key.eql(other, ctx.lp);
         }
 
         pub fn hash(ctx: @This(), key: Key) u32 {
-            return key.hash(ctx.lsec);
+            return key.hash(ctx.lp);
         }
     };
 };

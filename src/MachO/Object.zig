@@ -513,7 +513,7 @@ fn initPointerLiterals(self: *Object, macho_file: *MachO) !void {
     }
 }
 
-pub fn dedupLiterals(self: Object, literals: anytype, macho_file: *MachO) !void {
+pub fn dedupLiterals(self: Object, lp: *MachO.LiteralPool, macho_file: *MachO) !void {
     const gpa = macho_file.base.allocator;
 
     var killed_atoms = std.AutoHashMap(Atom.Index, Atom.Index).init(gpa);
@@ -531,7 +531,7 @@ pub fn dedupLiterals(self: Object, literals: anytype, macho_file: *MachO) !void 
             for (subs.items) |sub| {
                 const atom = macho_file.getAtom(sub.atom).?;
                 const atom_data = data[atom.off..][0..atom.size];
-                const res = try literals.insert(gpa, header.type(), atom_data);
+                const res = try lp.insert(gpa, header.type(), atom_data);
                 if (!res.found_existing) {
                     res.atom.* = sub.atom;
                     continue;
@@ -554,7 +554,7 @@ pub fn dedupLiterals(self: Object, literals: anytype, macho_file: *MachO) !void 
                 try buffer.ensureUnusedCapacity(target_atom.size);
                 buffer.resize(target_atom.size) catch unreachable;
                 try target_atom.getCode(macho_file, buffer.items);
-                const res = try literals.insert(gpa, header.type(), buffer.items[addend..]);
+                const res = try lp.insert(gpa, header.type(), buffer.items[addend..]);
                 buffer.clearRetainingCapacity();
                 if (!res.found_existing) {
                     res.atom.* = sub.atom;
