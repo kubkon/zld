@@ -1139,26 +1139,14 @@ fn initOutputSections(self: *MachO) !void {
         for (object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index) orelse continue;
             if (!atom.flags.alive) continue;
-            const isec = atom.getInputSection(self);
-            atom.out_n_sect = try Atom.initOutputSection(.{
-                .segname = isec.segName(),
-                .sectname = isec.sectName(),
-                .flags = isec.flags,
-                .is_code = isec.isCode(),
-            }, self);
+            atom.out_n_sect = try Atom.initOutputSection(atom.getInputSection(self), self);
         }
     }
     if (self.getInternalObject()) |object| {
         for (object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index) orelse continue;
             if (!atom.flags.alive) continue;
-            const isec = atom.getInputSection(self);
-            atom.out_n_sect = try Atom.initOutputSection(.{
-                .segname = isec.segName(),
-                .sectname = isec.sectName(),
-                .flags = isec.flags,
-                .is_code = isec.isCode(),
-            }, self);
+            atom.out_n_sect = try Atom.initOutputSection(atom.getInputSection(self), self);
         }
     }
     if (self.data_sect_index == null) {

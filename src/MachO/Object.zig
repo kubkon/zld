@@ -11,7 +11,6 @@ strtab: std.ArrayListUnmanaged(u8) = .{},
 
 symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
 atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
-literal_strings: std.ArrayListUnmanaged(u8) = .{},
 
 platform: ?MachO.Options.Platform = null,
 dwarf_info: ?DwarfInfo = null,
@@ -60,7 +59,6 @@ pub fn deinit(self: *Object, allocator: Allocator) void {
     }
     self.stab_files.deinit(allocator);
     self.data_in_code.deinit(allocator);
-    self.literal_strings.deinit(allocator);
 }
 
 pub fn parse(self: *Object, macho_file: *MachO) !void {
@@ -1766,18 +1764,6 @@ fn addString(self: *Object, allocator: Allocator, name: [:0]const u8) error{OutO
 pub fn getString(self: Object, off: u32) [:0]const u8 {
     assert(off < self.strtab.items.len);
     return mem.sliceTo(@as([*:0]const u8, @ptrCast(self.strtab.items.ptr + off)), 0);
-}
-
-fn addLiteralString(self: *Object, allocator: Allocator, str: []const u8) error{OutOfMemory}!u32 {
-    const off: u32 = @intCast(self.literal_strings.items.len);
-    try self.literal_strings.ensureUnusedCapacity(allocator, str.len);
-    self.literal_strings.appendSliceAssumeCapacity(str);
-    return off;
-}
-
-pub fn getLiteralString(self: Object, off: u32, len: u32) []const u8 {
-    assert(off < self.literal_strings.items.len and off + len <= self.literal_strings.items.len);
-    return self.literal_strings.items[off..][0..len];
 }
 
 /// TODO handle multiple CUs
