@@ -88,8 +88,7 @@ pub fn generate(info: *UnwindInfo, macho_file: *MachO) !void {
             const rhs = ctx.getUnwindRecord(rhs_index);
             const lhsa = lhs.getAtom(ctx);
             const rhsa = rhs.getAtom(ctx);
-            if (lhsa.out_n_sect == rhsa.out_n_sect)
-                return lhs.getAtomAddress(ctx) < rhs.getAtomAddress(ctx);
+            if (lhsa.out_n_sect == rhsa.out_n_sect) return lhs.getAtomAddress(ctx) < rhs.getAtomAddress(ctx);
             return lhsa.out_n_sect < rhsa.out_n_sect;
         }
     }.sortFn;
