@@ -233,7 +233,7 @@ fn writeAtoms(macho_file: *MachO) !void {
         const padding_byte: u8 = if (header.isCode() and cpu_arch == .x86_64) 0xcc else 0;
         @memset(code, padding_byte);
 
-        try relocs.ensureUnusedCapacity(header.nreloc);
+        try relocs.ensureTotalCapacity(header.nreloc);
 
         for (atoms.items) |atom_index| {
             const atom = macho_file.getAtom(atom_index).?;
