@@ -115,12 +115,15 @@ pub fn dedupLiterals(self: InternalObject, literals: anytype, macho_file: *MachO
     var killed_atoms = std.AutoHashMap(Atom.Index, Atom.Index).init(gpa);
     defer killed_atoms.deinit();
 
+    var buffer = std.ArrayList(u8).init(gpa);
+    defer buffer.deinit();
+
     const slice = self.sections.slice();
     for (slice.items(.header), self.atoms.items, 0..) |header, atom_index, n_sect| {
         if (Object.isCstringLiteral(header) or Object.isFixedSizeLiteral(header)) {
             const data = self.getSectionData(@intCast(n_sect));
             const atom = macho_file.getAtom(atom_index).?;
-            const res = try literals.insertString(gpa, header.type(), data);
+            const res = try literals.insert(gpa, header.type(), data);
             if (!res.found_existing) {
                 res.atom.* = atom_index;
                 continue;
@@ -133,13 +136,13 @@ pub fn dedupLiterals(self: InternalObject, literals: anytype, macho_file: *MachO
             assert(relocs.len == 1);
             const rel = relocs[0];
             assert(rel.tag == .local);
-            const res = try literals.insertTargetAtomWithAddend(
-                gpa,
-                header.type(),
-                rel.target,
-                @intCast(rel.addend),
-                macho_file,
-            );
+            const target = macho_file.getAtom(rel.target).?;
+            const addend = std.math.cast(u32, rel.addend) orelse return error.Overflow;
+            try buffer.ensureUnusedCapacity(target.size);
+            buffer.resize(target.size) catch unreachable;
+            try target.getCode(macho_file, buffer.items);
+            const res = try literals.insert(gpa, header.type(), buffer.items[addend..]);
+            buffer.clearRetainingCapacity();
             if (!res.found_existing) {
                 res.atom.* = atom_index;
                 continue;

@@ -3181,40 +3181,13 @@ const Literals = struct {
         atom: *Atom.Index,
     };
 
-    pub fn insertString(lsec: *Literals, allocator: Allocator, @"type": u8, string: []const u8) !InsertResult {
+    pub fn insert(lsec: *Literals, allocator: Allocator, @"type": u8, string: []const u8) !InsertResult {
         const size: u32 = @intCast(string.len);
         try lsec.data.ensureUnusedCapacity(allocator, size);
         const off: u32 = @intCast(lsec.data.items.len);
         lsec.data.appendSliceAssumeCapacity(string);
         const adapter = Adapter{ .lsec = lsec };
         const key = Key{ .off = off, .size = size, .seed = @"type" };
-        const gop = try lsec.table.getOrPutAdapted(allocator, key, adapter);
-        if (!gop.found_existing) {
-            try lsec.keys.append(allocator, key);
-            _ = try lsec.values.addOne(allocator);
-        }
-        return .{
-            .found_existing = gop.found_existing,
-            .atom = &lsec.values.items[gop.index],
-        };
-    }
-
-    pub fn insertTargetAtomWithAddend(
-        lsec: *Literals,
-        allocator: Allocator,
-        @"type": u8,
-        target: Atom.Index,
-        addend: u32,
-        macho_file: *MachO,
-    ) !InsertResult {
-        const atom = macho_file.getAtom(target).?;
-        const size: u32 = @intCast(atom.size);
-        try lsec.data.ensureUnusedCapacity(allocator, size);
-        const off: u32 = @intCast(lsec.data.items.len);
-        lsec.data.resize(allocator, off + size) catch unreachable;
-        try atom.getCode(macho_file, lsec.data.items[off..][0..size]);
-        const adapter = Adapter{ .lsec = lsec };
-        const key = Key{ .off = off + addend, .size = size - addend, .seed = @"type" };
         const gop = try lsec.table.getOrPutAdapted(allocator, key, adapter);
         if (!gop.found_existing) {
             try lsec.keys.append(allocator, key);

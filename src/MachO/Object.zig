@@ -519,6 +519,9 @@ pub fn dedupLiterals(self: Object, literals: anytype, macho_file: *MachO) !void 
     var killed_atoms = std.AutoHashMap(Atom.Index, Atom.Index).init(gpa);
     defer killed_atoms.deinit();
 
+    var buffer = std.ArrayList(u8).init(gpa);
+    defer buffer.deinit();
+
     const slice = self.sections.slice();
     for (slice.items(.header), slice.items(.subsections), 0..) |header, subs, n_sect| {
         if (isCstringLiteral(header) or isFixedSizeLiteral(header)) {
@@ -528,7 +531,7 @@ pub fn dedupLiterals(self: Object, literals: anytype, macho_file: *MachO) !void 
             for (subs.items) |sub| {
                 const atom = macho_file.getAtom(sub.atom).?;
                 const atom_data = data[atom.off..][0..atom.size];
-                const res = try literals.insertString(gpa, header.type(), atom_data);
+                const res = try literals.insert(gpa, header.type(), atom_data);
                 if (!res.found_existing) {
                     res.atom.* = sub.atom;
                     continue;
@@ -546,13 +549,13 @@ pub fn dedupLiterals(self: Object, literals: anytype, macho_file: *MachO) !void 
                     .local => rel.target,
                     .@"extern" => rel.getTargetSymbol(macho_file).atom,
                 };
-                const res = try literals.insertTargetAtomWithAddend(
-                    gpa,
-                    header.type(),
-                    target,
-                    @intCast(rel.addend),
-                    macho_file,
-                );
+                const addend = math.cast(u32, rel.addend) orelse return error.Overflow;
+                const target_atom = macho_file.getAtom(target).?;
+                try buffer.ensureUnusedCapacity(target_atom.size);
+                buffer.resize(target_atom.size) catch unreachable;
+                try target_atom.getCode(macho_file, buffer.items);
+                const res = try literals.insert(gpa, header.type(), buffer.items[addend..]);
+                buffer.clearRetainingCapacity();
                 if (!res.found_existing) {
                     res.atom.* = sub.atom;
                     continue;
