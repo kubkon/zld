@@ -1238,11 +1238,19 @@ pub fn dedupLiterals(self: *MachO) !void {
     const gpa = self.base.allocator;
     var lp: LiteralPool = .{};
     defer lp.deinit(gpa);
+
     for (self.objects.items) |index| {
-        try self.getFile(index).?.object.dedupLiterals(&lp, self);
+        try self.getFile(index).?.object.resolveLiterals(&lp, self);
     }
     if (self.getInternalObject()) |object| {
-        try object.dedupLiterals(&lp, self);
+        try object.resolveLiterals(&lp, self);
+    }
+
+    for (self.objects.items) |index| {
+        self.getFile(index).?.object.dedupLiterals(self);
+    }
+    if (self.getInternalObject()) |object| {
+        object.dedupLiterals(self);
     }
 }
 

@@ -123,6 +123,7 @@ const AddExtraOpts = struct {
     rel_count: ?u32 = null,
     unwind_index: ?u32 = null,
     unwind_count: ?u32 = null,
+    literal_leader: ?u32 = null,
 };
 
 pub fn addExtra(atom: *Atom, opts: AddExtraOpts, macho_file: *MachO) !void {
@@ -889,6 +890,9 @@ pub const Flags = packed struct {
     /// Specifies if the atom has been visited during garbage collection.
     visited: bool = false,
 
+    /// Specifies if the atom should be deduplicated.
+    literal_dedup: bool = false,
+
     /// Whether this atom has a range extension thunk.
     thunk: bool = false,
 
@@ -914,6 +918,9 @@ pub const Extra = struct {
 
     /// Count of relocations belonging to this atom.
     unwind_count: u32 = 0,
+
+    /// Index of the leader atom for this literal.
+    literal_leader: u32 = 0,
 };
 
 const aarch64 = @import("../aarch64.zig");

@@ -48,6 +48,7 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testLinkOrder(b, opts));
     macho_step.dependOn(testLoadHidden(b, opts));
     macho_step.dependOn(testMergeLiterals(b, opts));
+    macho_step.dependOn(testMergeLiterals2(b, opts));
     macho_step.dependOn(testMergeLiteralsObjc(b, opts));
     macho_step.dependOn(testMhExecuteHeader(b, opts));
     macho_step.dependOn(testNeededFramework(b, opts));
@@ -1807,6 +1808,90 @@ fn testMergeLiterals(b: *Build, opts: Options) *Step {
         check.checkContains("hello\x00world\x00%s, %s, %s, %f, %f\x00");
         test_step.dependOn(&check.step);
     }
+
+    return test_step;
+}
+
+/// This particular test case will generate invalid machine code that will segfault at runtime.
+/// However, this is by design as we want to test that the linker does not panic when linking it
+/// which is also the case for the system linker and lld - linking succeeds, runtime segfaults.
+/// It should also be mentioned that runtime segfault is not due to the linker but faulty input asm.
+fn testMergeLiterals2(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-merge-literals-2", "");
+
+    const a_o = cc(b, "a.o", opts);
+    a_o.addAsmSource(
+        \\.globl _q1
+        \\.globl _s1
+        \\
+        \\.align 4
+        \\_q1:
+        \\  adrp x0, L._q1@PAGE
+        \\  ldr x0, [x0, L._q1@PAGEOFF]
+        \\  ret
+        \\
+        \\.section __TEXT,__cstring,cstring_literals
+        \\_s1:
+        \\  .asciz "hello"
+        \\
+        \\.section __TEXT,__literal8,8byte_literals
+        \\.align 8
+        \\L._q1:
+        \\  .double 1.2345
+    );
+    a_o.addArg("-c");
+
+    const b_o = cc(b, "b.o", opts);
+    b_o.addAsmSource(
+        \\.globl _q2
+        \\.globl _s2
+        \\.globl _s3
+        \\
+        \\.align 4
+        \\_q2:
+        \\  adrp x0, L._q2@PAGE
+        \\  ldr x0, [x0, L._q2@PAGEOFF]
+        \\  ret
+        \\
+        \\.section __TEXT,__cstring,cstring_literals
+        \\_s2:
+        \\  .asciz "hello"
+        \\_s3:
+        \\  .asciz "world"
+        \\
+        \\.section __TEXT,__literal8,8byte_literals
+        \\.align 8
+        \\L._q2:
+        \\  .double 1.2345
+    );
+    b_o.addArg("-c");
+
+    const main_o = cc(b, "main.o", opts);
+    main_o.addCSource(
+        \\#include <stdio.h>
+        \\extern double q1();
+        \\extern double q2();
+        \\extern const char* s1;
+        \\extern const char* s2;
+        \\extern const char* s3;
+        \\int main() {
+        \\  printf("%s, %s, %s, %f, %f", s1, s2, s3, q1(), q2());
+        \\  return 0;
+        \\}
+    );
+    main_o.addArg("-c");
+
+    const exe = cc(b, "main1", opts);
+    exe.addFileSource(a_o.getFile());
+    exe.addFileSource(b_o.getFile());
+    exe.addFileSource(main_o.getFile());
+
+    const check = exe.check();
+    check.dumpSection("__TEXT,__const");
+    check.checkContains("\x8d\x97n\x12\x83\xc0\xf3?");
+    check.dumpSection("__TEXT,__cstring");
+    check.checkContains("hello\x00world\x00%s, %s, %s, %f, %f\x00");
+    test_step.dependOn(&check.step);
 
     return test_step;
 }
