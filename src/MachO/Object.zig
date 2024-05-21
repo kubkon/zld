@@ -531,10 +531,9 @@ pub fn resolveLiterals(self: Object, lp: *MachO.LiteralPool, macho_file: *MachO)
                 const res = try lp.insert(gpa, header.type(), atom_data);
                 if (!res.found_existing) {
                     res.atom.* = sub.atom;
-                    continue;
                 }
-                atom.flags.literal_dedup = true;
-                try atom.addExtra(.{ .literal_leader = res.atom.* }, macho_file);
+                atom.flags.literal_pool = true;
+                try atom.addExtra(.{ .literal_index = res.index }, macho_file);
             }
         } else if (isPtrLiteral(header)) {
             for (subs.items) |sub| {
@@ -555,21 +554,19 @@ pub fn resolveLiterals(self: Object, lp: *MachO.LiteralPool, macho_file: *MachO)
                 buffer.clearRetainingCapacity();
                 if (!res.found_existing) {
                     res.atom.* = sub.atom;
-                    continue;
                 }
-                atom.flags.literal_dedup = true;
-                try atom.addExtra(.{ .literal_leader = res.atom.* }, macho_file);
+                atom.flags.literal_pool = true;
+                try atom.addExtra(.{ .literal_index = res.index }, macho_file);
             }
         }
     }
 }
 
-pub fn dedupLiterals(self: Object, macho_file: *MachO) void {
+pub fn dedupLiterals(self: Object, lp: MachO.LiteralPool, macho_file: *MachO) void {
     for (self.atoms.items) |atom_index| {
         const atom = macho_file.getAtom(atom_index) orelse continue;
         if (!atom.flags.alive) continue;
         if (!atom.flags.relocs) continue;
-        if (atom.flags.literal_dedup) continue;
 
         const relocs = blk: {
             const extra = atom.getExtra(macho_file).?;
@@ -579,15 +576,15 @@ pub fn dedupLiterals(self: Object, macho_file: *MachO) void {
         for (relocs) |*rel| switch (rel.tag) {
             .local => {
                 const target = macho_file.getAtom(rel.target).?;
-                if (target.flags.literal_dedup) {
-                    rel.target = target.getExtra(macho_file).?.literal_leader;
+                if (target.getLiteralPoolIndex(macho_file)) |lp_index| {
+                    rel.target = lp.values.items[lp_index];
                 }
             },
             .@"extern" => {
                 const target_sym = rel.getTargetSymbol(macho_file);
                 if (target_sym.getAtom(macho_file)) |target_atom| {
-                    if (target_atom.flags.literal_dedup) {
-                        target_sym.atom = target_atom.getExtra(macho_file).?.literal_leader;
+                    if (target_atom.getLiteralPoolIndex(macho_file)) |lp_index| {
+                        target_sym.atom = lp.values.items[lp_index];
                     }
                 }
             },

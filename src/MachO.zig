@@ -1247,10 +1247,10 @@ pub fn dedupLiterals(self: *MachO) !void {
     }
 
     for (self.objects.items) |index| {
-        self.getFile(index).?.object.dedupLiterals(self);
+        self.getFile(index).?.object.dedupLiterals(lp, self);
     }
     if (self.getInternalObject()) |object| {
-        object.dedupLiterals(self);
+        object.dedupLiterals(lp, self);
     }
 }
 
@@ -3185,6 +3185,7 @@ pub const LiteralPool = struct {
 
     const InsertResult = struct {
         found_existing: bool,
+        index: Index,
         atom: *Atom.Index,
     };
 
@@ -3202,6 +3203,7 @@ pub const LiteralPool = struct {
         }
         return .{
             .found_existing = gop.found_existing,
+            .index = @intCast(gop.index),
             .atom = &lp.values.items[gop.index],
         };
     }
@@ -3240,6 +3242,8 @@ pub const LiteralPool = struct {
             return key.hash(ctx.lp);
         }
     };
+
+    pub const Index = u32;
 };
 
 const Section = struct {
