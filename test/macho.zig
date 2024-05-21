@@ -1819,6 +1819,8 @@ fn testMergeLiterals(b: *Build, opts: Options) *Step {
 fn testMergeLiterals2(b: *Build, opts: Options) *Step {
     const test_step = b.step("test-macho-merge-literals-2", "");
 
+    if (builtin.target.cpu.arch != .aarch64) return skipTestStep(test_step);
+
     const a_o = cc(b, "a.o", opts);
     a_o.addAsmSource(
         \\.globl _q1
