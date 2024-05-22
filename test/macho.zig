@@ -47,6 +47,9 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testLargeBss(b, opts));
     macho_step.dependOn(testLinkOrder(b, opts));
     macho_step.dependOn(testLoadHidden(b, opts));
+    macho_step.dependOn(testMergeLiterals(b, opts));
+    macho_step.dependOn(testMergeLiterals2(b, opts));
+    macho_step.dependOn(testMergeLiteralsObjc(b, opts));
     macho_step.dependOn(testMhExecuteHeader(b, opts));
     macho_step.dependOn(testNeededFramework(b, opts));
     macho_step.dependOn(testNeededLibrary(b, opts));
@@ -1721,6 +1724,305 @@ fn testLoadHidden(b: *Build, opts: Options) *Step {
         const run = exe.run();
         run.expectExitCode(42);
         test_step.dependOn(run.step());
+    }
+
+    return test_step;
+}
+
+fn testMergeLiterals(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-merge-literals", "");
+
+    const a_o = cc(b, "a.o", opts);
+    a_o.addCSource(
+        \\double q1() { return 1.2345; }
+        \\const char* s1 = "hello";
+    );
+    a_o.addArg("-c");
+
+    const b_o = cc(b, "b.o", opts);
+    b_o.addCSource(
+        \\double q2() { return 1.2345; }
+        \\const char* s2 = "hello";
+        \\const char* s3 = "world";
+    );
+    b_o.addArg("-c");
+
+    const main_o = cc(b, "main.o", opts);
+    main_o.addCSource(
+        \\#include <stdio.h>
+        \\extern double q1();
+        \\extern double q2();
+        \\extern const char* s1;
+        \\extern const char* s2;
+        \\extern const char* s3;
+        \\int main() {
+        \\  printf("%s, %s, %s, %f, %f", s1, s2, s3, q1(), q2());
+        \\  return 0;
+        \\}
+    );
+    main_o.addArg("-c");
+
+    {
+        const exe = cc(b, "main1", opts);
+        exe.addFileSource(a_o.getFile());
+        exe.addFileSource(b_o.getFile());
+        exe.addFileSource(main_o.getFile());
+
+        const run = exe.run();
+        run.expectStdOutEqual("hello, hello, world, 1.234500, 1.234500");
+        test_step.dependOn(run.step());
+
+        const check = exe.check();
+        check.dumpSection("__TEXT,__const");
+        check.checkContains("\x8d\x97n\x12\x83\xc0\xf3?");
+        check.dumpSection("__TEXT,__cstring");
+        check.checkContains("hello\x00world\x00%s, %s, %s, %f, %f\x00");
+        test_step.dependOn(&check.step);
+    }
+
+    {
+        const exe = cc(b, "main2", opts);
+        exe.addFileSource(b_o.getFile());
+        exe.addFileSource(a_o.getFile());
+        exe.addFileSource(main_o.getFile());
+
+        const run = exe.run();
+        run.expectStdOutEqual("hello, hello, world, 1.234500, 1.234500");
+        test_step.dependOn(run.step());
+
+        const check = exe.check();
+        check.dumpSection("__TEXT,__const");
+        check.checkContains("\x8d\x97n\x12\x83\xc0\xf3?");
+        check.dumpSection("__TEXT,__cstring");
+        check.checkContains("hello\x00world\x00%s, %s, %s, %f, %f\x00");
+        test_step.dependOn(&check.step);
+    }
+
+    {
+        const c_o = ld(b, "c.o", opts);
+        c_o.addFileSource(a_o.getFile());
+        c_o.addFileSource(b_o.getFile());
+        c_o.addFileSource(main_o.getFile());
+        c_o.addArg("-r");
+
+        const exe = cc(b, "main3", opts);
+        exe.addFileSource(c_o.getFile());
+
+        const run = exe.run();
+        run.expectStdOutEqual("hello, hello, world, 1.234500, 1.234500");
+        test_step.dependOn(run.step());
+
+        const check = exe.check();
+        check.dumpSection("__TEXT,__const");
+        check.checkContains("\x8d\x97n\x12\x83\xc0\xf3?");
+        check.dumpSection("__TEXT,__cstring");
+        check.checkContains("hello\x00world\x00%s, %s, %s, %f, %f\x00");
+        test_step.dependOn(&check.step);
+    }
+
+    return test_step;
+}
+
+/// This particular test case will generate invalid machine code that will segfault at runtime.
+/// However, this is by design as we want to test that the linker does not panic when linking it
+/// which is also the case for the system linker and lld - linking succeeds, runtime segfaults.
+/// It should also be mentioned that runtime segfault is not due to the linker but faulty input asm.
+fn testMergeLiterals2(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-merge-literals-2", "");
+
+    if (builtin.target.cpu.arch != .aarch64) return skipTestStep(test_step);
+
+    const a_o = cc(b, "a.o", opts);
+    a_o.addAsmSource(
+        \\.globl _q1
+        \\.globl _s1
+        \\
+        \\.align 4
+        \\_q1:
+        \\  adrp x0, L._q1@PAGE
+        \\  ldr x0, [x0, L._q1@PAGEOFF]
+        \\  ret
+        \\
+        \\.section __TEXT,__cstring,cstring_literals
+        \\_s1:
+        \\  .asciz "hello"
+        \\
+        \\.section __TEXT,__literal8,8byte_literals
+        \\.align 8
+        \\L._q1:
+        \\  .double 1.2345
+    );
+    a_o.addArg("-c");
+
+    const b_o = cc(b, "b.o", opts);
+    b_o.addAsmSource(
+        \\.globl _q2
+        \\.globl _s2
+        \\.globl _s3
+        \\
+        \\.align 4
+        \\_q2:
+        \\  adrp x0, L._q2@PAGE
+        \\  ldr x0, [x0, L._q2@PAGEOFF]
+        \\  ret
+        \\
+        \\.section __TEXT,__cstring,cstring_literals
+        \\_s2:
+        \\  .asciz "hello"
+        \\_s3:
+        \\  .asciz "world"
+        \\
+        \\.section __TEXT,__literal8,8byte_literals
+        \\.align 8
+        \\L._q2:
+        \\  .double 1.2345
+    );
+    b_o.addArg("-c");
+
+    const main_o = cc(b, "main.o", opts);
+    main_o.addCSource(
+        \\#include <stdio.h>
+        \\extern double q1();
+        \\extern double q2();
+        \\extern const char* s1;
+        \\extern const char* s2;
+        \\extern const char* s3;
+        \\int main() {
+        \\  printf("%s, %s, %s, %f, %f", s1, s2, s3, q1(), q2());
+        \\  return 0;
+        \\}
+    );
+    main_o.addArg("-c");
+
+    const exe = cc(b, "main1", opts);
+    exe.addFileSource(a_o.getFile());
+    exe.addFileSource(b_o.getFile());
+    exe.addFileSource(main_o.getFile());
+
+    const check = exe.check();
+    check.dumpSection("__TEXT,__const");
+    check.checkContains("\x8d\x97n\x12\x83\xc0\xf3?");
+    check.dumpSection("__TEXT,__cstring");
+    check.checkContains("hello\x00world\x00%s, %s, %s, %f, %f\x00");
+    test_step.dependOn(&check.step);
+
+    return test_step;
+}
+
+fn testMergeLiteralsObjc(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-merge-literals-objc", "");
+
+    const main_o = cc(b, "main.o", opts);
+    main_o.addObjCSource(
+        \\@import Foundation;
+        \\
+        \\extern void foo();
+        \\
+        \\int main() {
+        \\  NSString *thing = @"aaa";
+        \\
+        \\  SEL sel = @selector(lowercaseString);
+        \\  NSString *lower = (([thing respondsToSelector:sel]) ? @"YES" : @"NO");
+        \\  NSLog (@"Responds to lowercaseString: %@", lower);
+        \\  if ([thing respondsToSelector:sel]) //(lower == @"YES")
+        \\      NSLog(@"lowercaseString is: %@", [thing lowercaseString]);
+        \\
+        \\  foo();
+        \\}
+    );
+    main_o.addArgs(&.{ "-c", "-fmodules" });
+
+    const a_o = cc(b, "a.o", opts);
+    a_o.addObjCSource(
+        \\@import Foundation;
+        \\
+        \\void foo() {
+        \\  NSString *thing = @"aaa";
+        \\  SEL sel = @selector(lowercaseString);
+        \\  NSString *lower = (([thing respondsToSelector:sel]) ? @"YES" : @"NO");
+        \\  NSLog (@"Responds to lowercaseString in foo(): %@", lower);
+        \\  if ([thing respondsToSelector:sel]) //(lower == @"YES")
+        \\      NSLog(@"lowercaseString in foo() is: %@", [thing lowercaseString]);
+        \\  SEL sel2 = @selector(uppercaseString);
+        \\  NSString *upper = (([thing respondsToSelector:sel2]) ? @"YES" : @"NO");
+        \\  NSLog (@"Responds to uppercaseString in foo(): %@", upper);
+        \\  if ([thing respondsToSelector:sel2]) //(upper == @"YES")
+        \\      NSLog(@"uppercaseString in foo() is: %@", [thing uppercaseString]);
+        \\}
+    );
+    a_o.addArgs(&.{ "-c", "-fmodules" });
+
+    {
+        const exe = cc(b, "main1", opts);
+        exe.addFileSource(main_o.getFile());
+        exe.addFileSource(a_o.getFile());
+        exe.addArgs(&.{ "-framework", "Foundation" });
+
+        const run = exe.run();
+        run.expectStdErrFuzzy("Responds to lowercaseString: YES");
+        run.expectStdErrFuzzy("lowercaseString is: aaa");
+        run.expectStdErrFuzzy("Responds to lowercaseString in foo(): YES");
+        run.expectStdErrFuzzy("lowercaseString in foo() is: aaa");
+        run.expectStdErrFuzzy("Responds to uppercaseString in foo(): YES");
+        run.expectStdErrFuzzy("uppercaseString in foo() is: AAA");
+        test_step.dependOn(run.step());
+
+        const check = exe.check();
+        check.dumpSection("__TEXT,__objc_methname");
+        check.checkContains("lowercaseString\x00");
+        check.dumpSection("__TEXT,__objc_methname");
+        check.checkContains("uppercaseString\x00");
+        test_step.dependOn(&check.step);
+    }
+
+    {
+        const exe = cc(b, "main2", opts);
+        exe.addFileSource(a_o.getFile());
+        exe.addFileSource(main_o.getFile());
+        exe.addArgs(&.{ "-framework", "Foundation" });
+
+        const run = exe.run();
+        run.expectStdErrFuzzy("Responds to lowercaseString: YES");
+        run.expectStdErrFuzzy("lowercaseString is: aaa");
+        run.expectStdErrFuzzy("Responds to lowercaseString in foo(): YES");
+        run.expectStdErrFuzzy("lowercaseString in foo() is: aaa");
+        run.expectStdErrFuzzy("Responds to uppercaseString in foo(): YES");
+        run.expectStdErrFuzzy("uppercaseString in foo() is: AAA");
+        test_step.dependOn(run.step());
+
+        const check = exe.check();
+        check.dumpSection("__TEXT,__objc_methname");
+        check.checkContains("lowercaseString\x00");
+        check.dumpSection("__TEXT,__objc_methname");
+        check.checkContains("uppercaseString\x00");
+        test_step.dependOn(&check.step);
+    }
+
+    {
+        const b_o = ld(b, "b.o", opts);
+        b_o.addFileSource(a_o.getFile());
+        b_o.addFileSource(main_o.getFile());
+        b_o.addArg("-r");
+
+        const exe = cc(b, "main3", opts);
+        exe.addFileSource(b_o.getFile());
+        exe.addArgs(&.{ "-framework", "Foundation" });
+
+        const run = exe.run();
+        run.expectStdErrFuzzy("Responds to lowercaseString: YES");
+        run.expectStdErrFuzzy("lowercaseString is: aaa");
+        run.expectStdErrFuzzy("Responds to lowercaseString in foo(): YES");
+        run.expectStdErrFuzzy("lowercaseString in foo() is: aaa");
+        run.expectStdErrFuzzy("Responds to uppercaseString in foo(): YES");
+        run.expectStdErrFuzzy("uppercaseString in foo() is: AAA");
+        test_step.dependOn(run.step());
+
+        const check = exe.check();
+        check.dumpSection("__TEXT,__objc_methname");
+        check.checkContains("lowercaseString\x00");
+        check.dumpSection("__TEXT,__objc_methname");
+        check.checkContains("uppercaseString\x00");
+        test_step.dependOn(&check.step);
     }
 
     return test_step;

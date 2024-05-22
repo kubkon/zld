@@ -117,12 +117,18 @@ pub fn getThunk(self: Atom, macho_file: *MachO) *Thunk {
     return macho_file.getThunk(extra.thunk);
 }
 
+pub fn getLiteralPoolIndex(self: Atom, macho_file: *MachO) ?MachO.LiteralPool.Index {
+    if (!self.flags.literal_pool) return null;
+    return self.getExtra(macho_file).?.literal_index;
+}
+
 const AddExtraOpts = struct {
     thunk: ?u32 = null,
     rel_index: ?u32 = null,
     rel_count: ?u32 = null,
     unwind_index: ?u32 = null,
     unwind_count: ?u32 = null,
+    literal_index: ?u32 = null,
 };
 
 pub fn addExtra(atom: *Atom, opts: AddExtraOpts, macho_file: *MachO) !void {
@@ -147,6 +153,16 @@ pub inline fn setExtra(atom: Atom, extra: Extra, macho_file: *MachO) void {
 }
 
 pub fn initOutputSection(sect: macho.section_64, macho_file: *MachO) !u8 {
+    if (macho_file.options.relocatable) {
+        const osec = macho_file.getSectionByName(sect.segName(), sect.sectName()) orelse
+            try macho_file.addSection(
+            sect.segName(),
+            sect.sectName(),
+            .{ .flags = sect.flags },
+        );
+        return osec;
+    }
+
     const segname, const sectname, const flags = blk: {
         if (sect.isCode()) break :blk .{
             "__TEXT",
@@ -209,9 +225,6 @@ pub fn initOutputSection(sect: macho.section_64, macho_file: *MachO) !u8 {
         sectname,
         .{ .flags = flags },
     );
-    if (mem.eql(u8, segname, "__DATA") and mem.eql(u8, sectname, "__data")) {
-        macho_file.data_sect_index = osec;
-    }
     return osec;
 }
 
@@ -890,6 +903,9 @@ pub const Flags = packed struct {
 
     /// Whether this atom has any unwind records.
     unwind: bool = false,
+
+    /// Whether this atom has LiteralPool entry.
+    literal_pool: bool = false,
 };
 
 pub const Extra = struct {
@@ -907,6 +923,9 @@ pub const Extra = struct {
 
     /// Count of relocations belonging to this atom.
     unwind_count: u32 = 0,
+
+    /// Index into LiteralPool entry for this atom.
+    literal_index: u32 = 0,
 };
 
 const aarch64 = @import("../aarch64.zig");

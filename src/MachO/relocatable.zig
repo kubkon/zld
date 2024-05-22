@@ -1,4 +1,5 @@
 pub fn flush(macho_file: *MachO) !void {
+    try macho_file.dedupLiterals();
     markExports(macho_file);
     claimUnresolved(macho_file);
     try initOutputSections(macho_file);
@@ -220,6 +221,9 @@ fn writeAtoms(macho_file: *MachO) !void {
     const cpu_arch = macho_file.options.cpu_arch.?;
     const slice = macho_file.sections.slice();
 
+    var relocs = std.ArrayList(macho.relocation_info).init(gpa);
+    defer relocs.deinit();
+
     for (slice.items(.header), slice.items(.atoms)) |header, atoms| {
         if (atoms.items.len == 0) continue;
         if (header.isZerofill()) continue;
@@ -229,8 +233,7 @@ fn writeAtoms(macho_file: *MachO) !void {
         const padding_byte: u8 = if (header.isCode() and cpu_arch == .x86_64) 0xcc else 0;
         @memset(code, padding_byte);
 
-        var relocs = try std.ArrayList(macho.relocation_info).initCapacity(gpa, header.nreloc);
-        defer relocs.deinit();
+        try relocs.ensureTotalCapacity(header.nreloc);
 
         for (atoms.items) |atom_index| {
             const atom = macho_file.getAtom(atom_index).?;
@@ -247,6 +250,8 @@ fn writeAtoms(macho_file: *MachO) !void {
         // TODO scattered writes?
         try macho_file.base.file.pwriteAll(code, header.offset);
         try macho_file.base.file.pwriteAll(mem.sliceAsBytes(relocs.items), header.reloff);
+
+        relocs.clearRetainingCapacity();
     }
 }
 

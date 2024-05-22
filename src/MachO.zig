@@ -360,6 +360,7 @@ pub fn flush(self: *MachO) !void {
 
     try self.convertTentativeDefinitions();
     try self.createObjcSections();
+    try self.dedupLiterals();
     try self.claimUnresolved();
 
     if (self.options.dead_strip) {
@@ -1148,9 +1149,8 @@ fn initOutputSections(self: *MachO) !void {
             atom.out_n_sect = try Atom.initOutputSection(atom.getInputSection(self), self);
         }
     }
-    if (self.data_sect_index == null) {
-        self.data_sect_index = try self.addSection("__DATA", "__data", .{});
-    }
+    self.data_sect_index = self.getSectionByName("__DATA", "__data") orelse
+        try self.addSection("__DATA", "__data", .{});
 }
 
 fn resolveSyntheticSymbols(self: *MachO) !void {
@@ -1230,6 +1230,27 @@ fn createObjcSections(self: *MachO) !void {
         const name = eatPrefix(sym.getName(self), "_objc_msgSend$").?;
         const selrefs_index = try internal.addObjcMsgsendSections(name, self);
         try sym.addExtra(.{ .objc_selrefs = selrefs_index }, self);
+        sym.flags.objc_stubs = true;
+    }
+}
+
+pub fn dedupLiterals(self: *MachO) !void {
+    const gpa = self.base.allocator;
+    var lp: LiteralPool = .{};
+    defer lp.deinit(gpa);
+
+    for (self.objects.items) |index| {
+        try self.getFile(index).?.object.resolveLiterals(&lp, self);
+    }
+    if (self.getInternalObject()) |object| {
+        try object.resolveLiterals(&lp, self);
+    }
+
+    for (self.objects.items) |index| {
+        self.getFile(index).?.object.dedupLiterals(lp, self);
+    }
+    if (self.getInternalObject()) |object| {
+        object.dedupLiterals(lp, self);
     }
 }
 
@@ -3149,6 +3170,87 @@ pub const LinkObject = struct {
 /// start of __TEXT segment.
 const default_pagezero_vmsize: u64 = 0x100000000;
 
+pub const LiteralPool = struct {
+    table: std.AutoArrayHashMapUnmanaged(void, void) = .{},
+    keys: std.ArrayListUnmanaged(Key) = .{},
+    values: std.ArrayListUnmanaged(Atom.Index) = .{},
+    data: std.ArrayListUnmanaged(u8) = .{},
+
+    pub fn deinit(lp: *LiteralPool, allocator: Allocator) void {
+        lp.table.deinit(allocator);
+        lp.keys.deinit(allocator);
+        lp.values.deinit(allocator);
+        lp.data.deinit(allocator);
+    }
+
+    const InsertResult = struct {
+        found_existing: bool,
+        index: Index,
+        atom: *Atom.Index,
+    };
+
+    pub fn getAtom(lp: LiteralPool, index: Index, macho_file: *MachO) *Atom {
+        assert(index < lp.values.items.len);
+        return macho_file.getAtom(lp.values.items[index]).?;
+    }
+
+    pub fn insert(lp: *LiteralPool, allocator: Allocator, @"type": u8, string: []const u8) !InsertResult {
+        const size: u32 = @intCast(string.len);
+        try lp.data.ensureUnusedCapacity(allocator, size);
+        const off: u32 = @intCast(lp.data.items.len);
+        lp.data.appendSliceAssumeCapacity(string);
+        const adapter = Adapter{ .lp = lp };
+        const key = Key{ .off = off, .size = size, .seed = @"type" };
+        const gop = try lp.table.getOrPutAdapted(allocator, key, adapter);
+        if (!gop.found_existing) {
+            try lp.keys.append(allocator, key);
+            _ = try lp.values.addOne(allocator);
+        }
+        return .{
+            .found_existing = gop.found_existing,
+            .index = @intCast(gop.index),
+            .atom = &lp.values.items[gop.index],
+        };
+    }
+
+    const Key = struct {
+        off: u32,
+        size: u32,
+        seed: u8,
+
+        fn getData(key: Key, lp: *const LiteralPool) []const u8 {
+            return lp.data.items[key.off..][0..key.size];
+        }
+
+        fn eql(key: Key, other: Key, lp: *const LiteralPool) bool {
+            const key_data = key.getData(lp);
+            const other_data = other.getData(lp);
+            return mem.eql(u8, key_data, other_data);
+        }
+
+        fn hash(key: Key, lp: *const LiteralPool) u32 {
+            const data = key.getData(lp);
+            return @truncate(Hash.hash(key.seed, data));
+        }
+    };
+
+    const Adapter = struct {
+        lp: *const LiteralPool,
+
+        pub fn eql(ctx: @This(), key: Key, b_void: void, b_map_index: usize) bool {
+            _ = b_void;
+            const other = ctx.lp.keys.items[b_map_index];
+            return key.eql(other, ctx.lp);
+        }
+
+        pub fn hash(ctx: @This(), key: Key) u32 {
+            return key.hash(ctx.lp);
+        }
+    };
+
+    pub const Index = u32;
+};
+
 const Section = struct {
     header: macho.section_64,
     segment_id: u8,
@@ -3212,6 +3314,7 @@ const DwarfInfo = @import("MachO/DwarfInfo.zig");
 const ExportTrieSection = synthetic.ExportTrieSection;
 const File = @import("MachO/file.zig").File;
 const GotSection = synthetic.GotSection;
+const Hash = std.hash.Wyhash;
 const Indsymtab = synthetic.Indsymtab;
 const InternalObject = @import("MachO/InternalObject.zig");
 const MachO = @This();

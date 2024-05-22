@@ -3,7 +3,6 @@ index: File.Index,
 sections: std.MultiArrayList(Section) = .{},
 atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
 symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
-strtab: std.ArrayListUnmanaged(u8) = .{},
 
 objc_methnames: std.ArrayListUnmanaged(u8) = .{},
 objc_selrefs: [@sizeOf(u64)]u8 = [_]u8{0} ** @sizeOf(u64),
@@ -18,7 +17,6 @@ pub fn deinit(self: *InternalObject, allocator: Allocator) void {
     self.sections.deinit(allocator);
     self.atoms.deinit(allocator);
     self.symbols.deinit(allocator);
-    self.strtab.deinit(allocator);
     self.objc_methnames.deinit(allocator);
 }
 
@@ -38,9 +36,9 @@ pub fn addSymbol(self: *InternalObject, name: [:0]const u8, macho_file: *MachO) 
 }
 
 /// Creates a fake input sections __TEXT,__objc_methname and __DATA,__objc_selrefs.
-pub fn addObjcMsgsendSections(self: *InternalObject, sym_name: []const u8, macho_file: *MachO) !u32 {
+pub fn addObjcMsgsendSections(self: *InternalObject, sym_name: []const u8, macho_file: *MachO) !Atom.Index {
     const methname_atom_index = try self.addObjcMethnameSection(sym_name, macho_file);
-    return try self.addObjcSelrefsSection(sym_name, methname_atom_index, macho_file);
+    return try self.addObjcSelrefsSection(methname_atom_index, macho_file);
 }
 
 fn addObjcMethnameSection(self: *InternalObject, methname: []const u8, macho_file: *MachO) !Atom.Index {
@@ -48,11 +46,8 @@ fn addObjcMethnameSection(self: *InternalObject, methname: []const u8, macho_fil
     const atom_index = try macho_file.addAtom();
     try self.atoms.append(gpa, atom_index);
 
-    const name = try std.fmt.allocPrintZ(gpa, "__TEXT$__objc_methname${s}", .{methname});
-    defer gpa.free(name);
     const atom = macho_file.getAtom(atom_index).?;
     atom.atom_index = atom_index;
-    atom.name = try self.addString(gpa, name);
     atom.file = self.index;
     atom.size = methname.len + 1;
     atom.alignment = 0;
@@ -72,21 +67,13 @@ fn addObjcMethnameSection(self: *InternalObject, methname: []const u8, macho_fil
     return atom_index;
 }
 
-fn addObjcSelrefsSection(
-    self: *InternalObject,
-    methname: []const u8,
-    methname_atom_index: Atom.Index,
-    macho_file: *MachO,
-) !Atom.Index {
+fn addObjcSelrefsSection(self: *InternalObject, methname_atom_index: Atom.Index, macho_file: *MachO) !Atom.Index {
     const gpa = macho_file.base.allocator;
     const atom_index = try macho_file.addAtom();
     try self.atoms.append(gpa, atom_index);
 
-    const name = try std.fmt.allocPrintZ(gpa, "__DATA$__objc_selrefs${s}", .{methname});
-    defer gpa.free(name);
     const atom = macho_file.getAtom(atom_index).?;
     atom.atom_index = atom_index;
-    atom.name = try self.addString(gpa, name);
     atom.file = self.index;
     atom.size = @sizeOf(u64);
     atom.alignment = 3;
@@ -120,6 +107,98 @@ fn addObjcSelrefsSection(
     self.num_rebase_relocs += 1;
 
     return atom_index;
+}
+
+pub fn resolveLiterals(self: InternalObject, lp: *MachO.LiteralPool, macho_file: *MachO) !void {
+    const gpa = macho_file.base.allocator;
+
+    var buffer = std.ArrayList(u8).init(gpa);
+    defer buffer.deinit();
+
+    const slice = self.sections.slice();
+    for (slice.items(.header), self.atoms.items, 0..) |header, atom_index, n_sect| {
+        if (Object.isCstringLiteral(header) or Object.isFixedSizeLiteral(header)) {
+            const data = self.getSectionData(@intCast(n_sect));
+            const atom = macho_file.getAtom(atom_index).?;
+            const res = try lp.insert(gpa, header.type(), data);
+            if (!res.found_existing) {
+                res.atom.* = atom_index;
+            }
+            atom.flags.literal_pool = true;
+            try atom.addExtra(.{ .literal_index = res.index }, macho_file);
+        } else if (Object.isPtrLiteral(header)) {
+            const atom = macho_file.getAtom(atom_index).?;
+            const relocs = atom.getRelocs(macho_file);
+            assert(relocs.len == 1);
+            const rel = relocs[0];
+            assert(rel.tag == .local);
+            const target = macho_file.getAtom(rel.target).?;
+            const addend = std.math.cast(u32, rel.addend) orelse return error.Overflow;
+            try buffer.ensureUnusedCapacity(target.size);
+            buffer.resize(target.size) catch unreachable;
+            try target.getCode(macho_file, buffer.items);
+            const res = try lp.insert(gpa, header.type(), buffer.items[addend..]);
+            buffer.clearRetainingCapacity();
+            if (!res.found_existing) {
+                res.atom.* = atom_index;
+            }
+            atom.flags.literal_pool = true;
+            try atom.addExtra(.{ .literal_index = res.index }, macho_file);
+        }
+    }
+}
+
+pub fn dedupLiterals(self: InternalObject, lp: MachO.LiteralPool, macho_file: *MachO) void {
+    for (self.atoms.items) |atom_index| {
+        const atom = macho_file.getAtom(atom_index) orelse continue;
+        if (!atom.flags.alive) continue;
+        if (!atom.flags.relocs) continue;
+
+        const relocs = blk: {
+            const extra = atom.getExtra(macho_file).?;
+            const relocs = self.sections.items(.relocs)[atom.n_sect].items;
+            break :blk relocs[extra.rel_index..][0..extra.rel_count];
+        };
+        for (relocs) |*rel| switch (rel.tag) {
+            .local => {
+                const target = macho_file.getAtom(rel.target).?;
+                if (target.getLiteralPoolIndex(macho_file)) |lp_index| {
+                    const lp_atom = lp.getAtom(lp_index, macho_file);
+                    if (target.atom_index != lp_atom.atom_index) {
+                        target.flags.alive = false;
+                        rel.target = lp_atom.atom_index;
+                    }
+                }
+            },
+            .@"extern" => {
+                const target_sym = rel.getTargetSymbol(macho_file);
+                if (target_sym.getAtom(macho_file)) |target_atom| {
+                    if (target_atom.getLiteralPoolIndex(macho_file)) |lp_index| {
+                        const lp_atom = lp.getAtom(lp_index, macho_file);
+                        if (target_atom.atom_index != lp_atom.atom_index) {
+                            target_atom.flags.alive = false;
+                            target_sym.atom = lp_atom.atom_index;
+                        }
+                    }
+                }
+            },
+        };
+    }
+
+    for (self.symbols.items) |sym_index| {
+        const sym = macho_file.getSymbol(sym_index);
+        if (!sym.flags.objc_stubs) continue;
+        var extra = sym.getExtra(macho_file).?;
+        const atom = macho_file.getAtom(extra.objc_selrefs).?;
+        if (atom.getLiteralPoolIndex(macho_file)) |lp_index| {
+            const lp_atom = lp.getAtom(lp_index, macho_file);
+            if (atom.atom_index != lp_atom.atom_index) {
+                atom.flags.alive = false;
+                extra.objc_selrefs = lp_atom.atom_index;
+                sym.setExtra(extra, macho_file);
+            }
+        }
+    }
 }
 
 pub fn calcSymtabSize(self: *InternalObject, macho_file: *MachO) !void {
@@ -179,17 +258,10 @@ pub fn getSectionData(self: *const InternalObject, index: u32) []const u8 {
     } else @panic("ref to non-existent section");
 }
 
-fn addString(self: *InternalObject, allocator: Allocator, name: [:0]const u8) error{OutOfMemory}!u32 {
-    const off: u32 = @intCast(self.strtab.items.len);
-    try self.strtab.ensureUnusedCapacity(allocator, name.len + 1);
-    self.strtab.appendSliceAssumeCapacity(name);
-    self.strtab.appendAssumeCapacity(0);
-    return off;
-}
-
 pub fn getString(self: InternalObject, off: u32) [:0]const u8 {
-    assert(off < self.strtab.items.len);
-    return mem.sliceTo(@as([*:0]const u8, @ptrCast(self.strtab.items.ptr + off)), 0);
+    _ = self;
+    _ = off;
+    return "";
 }
 
 pub fn asFile(self: *InternalObject) File {
