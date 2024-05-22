@@ -163,14 +163,22 @@ pub fn dedupLiterals(self: InternalObject, lp: MachO.LiteralPool, macho_file: *M
             .local => {
                 const target = macho_file.getAtom(rel.target).?;
                 if (target.getLiteralPoolIndex(macho_file)) |lp_index| {
-                    rel.target = lp.values.items[lp_index];
+                    const lp_atom = lp.getAtom(lp_index, macho_file);
+                    if (target.atom_index != lp_atom.atom_index) {
+                        target.flags.alive = false;
+                        rel.target = lp_atom.atom_index;
+                    }
                 }
             },
             .@"extern" => {
                 const target_sym = rel.getTargetSymbol(macho_file);
                 if (target_sym.getAtom(macho_file)) |target_atom| {
                     if (target_atom.getLiteralPoolIndex(macho_file)) |lp_index| {
-                        target_sym.atom = lp.values.items[lp_index];
+                        const lp_atom = lp.getAtom(lp_index, macho_file);
+                        if (target_atom.atom_index != lp_atom.atom_index) {
+                            target_atom.flags.alive = false;
+                            target_sym.atom = lp_atom.atom_index;
+                        }
                     }
                 }
             },
@@ -183,8 +191,12 @@ pub fn dedupLiterals(self: InternalObject, lp: MachO.LiteralPool, macho_file: *M
         var extra = sym.getExtra(macho_file).?;
         const atom = macho_file.getAtom(extra.objc_selrefs).?;
         if (atom.getLiteralPoolIndex(macho_file)) |lp_index| {
-            extra.objc_selrefs = lp.values.items[lp_index];
-            sym.setExtra(extra, macho_file);
+            const lp_atom = lp.getAtom(lp_index, macho_file);
+            if (atom.atom_index != lp_atom.atom_index) {
+                atom.flags.alive = false;
+                extra.objc_selrefs = lp_atom.atom_index;
+                sym.setExtra(extra, macho_file);
+            }
         }
     }
 }

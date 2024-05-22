@@ -3189,6 +3189,11 @@ pub const LiteralPool = struct {
         atom: *Atom.Index,
     };
 
+    pub fn getAtom(lp: LiteralPool, index: Index, macho_file: *MachO) *Atom {
+        assert(index < lp.values.items.len);
+        return macho_file.getAtom(lp.values.items[index]).?;
+    }
+
     pub fn insert(lp: *LiteralPool, allocator: Allocator, @"type": u8, string: []const u8) !InsertResult {
         const size: u32 = @intCast(string.len);
         try lp.data.ensureUnusedCapacity(allocator, size);

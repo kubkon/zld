@@ -1741,23 +1741,32 @@ fn testMergeLiterals(b: *Build, opts: Options) *Step {
 
     const b_o = cc(b, "b.o", opts);
     b_o.addCSource(
-        \\#include <stdio.h>
         \\double q2() { return 1.2345; }
         \\const char* s2 = "hello";
         \\const char* s3 = "world";
+    );
+    b_o.addArg("-c");
+
+    const main_o = cc(b, "main.o", opts);
+    main_o.addCSource(
+        \\#include <stdio.h>
         \\extern double q1();
+        \\extern double q2();
         \\extern const char* s1;
+        \\extern const char* s2;
+        \\extern const char* s3;
         \\int main() {
         \\  printf("%s, %s, %s, %f, %f", s1, s2, s3, q1(), q2());
         \\  return 0;
         \\}
     );
-    b_o.addArg("-c");
+    main_o.addArg("-c");
 
     {
         const exe = cc(b, "main1", opts);
         exe.addFileSource(a_o.getFile());
         exe.addFileSource(b_o.getFile());
+        exe.addFileSource(main_o.getFile());
 
         const run = exe.run();
         run.expectStdOutEqual("hello, hello, world, 1.234500, 1.234500");
@@ -1775,6 +1784,7 @@ fn testMergeLiterals(b: *Build, opts: Options) *Step {
         const exe = cc(b, "main2", opts);
         exe.addFileSource(b_o.getFile());
         exe.addFileSource(a_o.getFile());
+        exe.addFileSource(main_o.getFile());
 
         const run = exe.run();
         run.expectStdOutEqual("hello, hello, world, 1.234500, 1.234500");
@@ -1792,6 +1802,7 @@ fn testMergeLiterals(b: *Build, opts: Options) *Step {
         const c_o = ld(b, "c.o", opts);
         c_o.addFileSource(a_o.getFile());
         c_o.addFileSource(b_o.getFile());
+        c_o.addFileSource(main_o.getFile());
         c_o.addArg("-r");
 
         const exe = cc(b, "main3", opts);
