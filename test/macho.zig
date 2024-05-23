@@ -49,6 +49,7 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testLoadHidden(b, opts));
     macho_step.dependOn(testMergeLiterals(b, opts));
     macho_step.dependOn(testMergeLiterals2(b, opts));
+    macho_step.dependOn(testMergeLiteralsAlignment(b, opts));
     macho_step.dependOn(testMergeLiteralsObjc(b, opts));
     macho_step.dependOn(testMhExecuteHeader(b, opts));
     macho_step.dependOn(testNeededFramework(b, opts));
@@ -1905,6 +1906,98 @@ fn testMergeLiterals2(b: *Build, opts: Options) *Step {
     check.dumpSection("__TEXT,__cstring");
     check.checkContains("hello\x00world\x00%s, %s, %s, %f, %f\x00");
     test_step.dependOn(&check.step);
+
+    return test_step;
+}
+
+fn testMergeLiteralsAlignment(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-merge-literals-alignment", "");
+
+    const a_o = cc(b, "a.o", opts);
+    a_o.addAsmSource(
+        \\.globl _s1
+        \\.globl _s2
+        \\
+        \\.section __TEXT,__cstring,cstring_literals
+        \\.align 3
+        \\_s1:
+        \\  .asciz "str1"
+        \\_s2:
+        \\  .asciz "str2"
+    );
+    a_o.addArg("-c");
+
+    const b_o = cc(b, "b.o", opts);
+    b_o.addAsmSource(
+        \\.globl _s3
+        \\.globl _s4
+        \\
+        \\.section __TEXT,__cstring,cstring_literals
+        \\.align 2
+        \\_s3:
+        \\  .asciz "str1"
+        \\_s4:
+        \\  .asciz "str2"
+    );
+    b_o.addArg("-c");
+
+    const main_o = cc(b, "main.o", opts);
+    main_o.addCSource(
+        \\#include <assert.h>
+        \\#include <stdint.h>
+        \\#include <stdio.h>
+        \\extern const char* s1;
+        \\extern const char* s2;
+        \\extern const char* s3;
+        \\extern const char* s4;
+        \\int main() {
+        \\  assert((uintptr_t)(&s1) % 8 == 0 && s1 == s3);
+        \\  assert((uintptr_t)(&s2) % 8 == 0 && s2 == s4);
+        \\  printf("%s%s%s%s", &s1, &s2, &s3, &s4);
+        \\  return 0;
+        \\}
+    );
+    main_o.addArgs(&.{ "-c", "-Wno-format" });
+
+    {
+        const exe = cc(b, "main1", opts);
+        exe.addFileSource(a_o.getFile());
+        exe.addFileSource(b_o.getFile());
+        exe.addFileSource(main_o.getFile());
+
+        const run = exe.run();
+        run.expectStdOutEqual("str1str2str1str2");
+        test_step.dependOn(run.step());
+
+        const check = exe.check();
+        check.dumpSection("__TEXT,__cstring");
+        check.checkContains("str1\x00\x00\x00\x00str2\x00");
+        check.checkInHeaders();
+        check.checkExact("segname __TEXT");
+        check.checkExact("sectname __cstring");
+        check.checkExact("align 3");
+        test_step.dependOn(&check.step);
+    }
+
+    {
+        const exe = cc(b, "main1", opts);
+        exe.addFileSource(b_o.getFile());
+        exe.addFileSource(a_o.getFile());
+        exe.addFileSource(main_o.getFile());
+
+        const run = exe.run();
+        run.expectStdOutEqual("str1str2str1str2");
+        test_step.dependOn(run.step());
+
+        const check = exe.check();
+        check.dumpSection("__TEXT,__cstring");
+        check.checkContains("str1\x00\x00\x00\x00str2\x00");
+        check.checkInHeaders();
+        check.checkExact("segname __TEXT");
+        check.checkExact("sectname __cstring");
+        check.checkExact("align 3");
+        test_step.dependOn(&check.step);
+    }
 
     return test_step;
 }
