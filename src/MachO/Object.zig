@@ -579,6 +579,7 @@ pub fn dedupLiterals(self: Object, lp: MachO.LiteralPool, macho_file: *MachO) vo
                 if (target.getLiteralPoolIndex(macho_file)) |lp_index| {
                     const lp_atom = lp.getAtom(lp_index, macho_file);
                     if (target.atom_index != lp_atom.atom_index) {
+                        lp_atom.alignment = @max(lp_atom.alignment, target.alignment);
                         target.flags.alive = false;
                         rel.target = lp_atom.atom_index;
                     }
@@ -590,6 +591,7 @@ pub fn dedupLiterals(self: Object, lp: MachO.LiteralPool, macho_file: *MachO) vo
                     if (target_atom.getLiteralPoolIndex(macho_file)) |lp_index| {
                         const lp_atom = lp.getAtom(lp_index, macho_file);
                         if (target_atom.atom_index != lp_atom.atom_index) {
+                            lp_atom.alignment = @max(lp_atom.alignment, target_atom.alignment);
                             target_atom.flags.alive = false;
                             target_sym.atom = lp_atom.atom_index;
                         }
