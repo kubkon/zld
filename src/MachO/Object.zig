@@ -206,8 +206,6 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
         try self.parseUnwindRecords(macho_file);
     }
 
-    try self.parseDebugInfo(macho_file);
-
     for (self.atoms.items) |atom_index| {
         const atom = macho_file.getAtom(atom_index).?;
         const isec = atom.getInputSection(macho_file);
@@ -1170,7 +1168,7 @@ fn parseUnwindRecords(self: *Object, macho_file: *MachO) !void {
 /// and record that so that we can emit symbol stabs.
 /// TODO in the future, we want parse debug info and debug line sections so that
 /// we can provide nice error locations to the user.
-fn parseDebugInfo(self: *Object, macho_file: *MachO) !void {
+pub fn parseDebugInfo(self: *Object, macho_file: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
