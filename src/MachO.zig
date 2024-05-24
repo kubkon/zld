@@ -3310,7 +3310,6 @@ const Atom = @import("MachO/Atom.zig");
 const BindSection = synthetic.BindSection;
 const CodeSignature = @import("MachO/CodeSignature.zig");
 const Dylib = @import("MachO/Dylib.zig");
-const DwarfInfo = @import("MachO/DwarfInfo.zig");
 const ExportTrieSection = synthetic.ExportTrieSection;
 const File = @import("MachO/file.zig").File;
 const GotSection = synthetic.GotSection;
