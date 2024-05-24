@@ -69,6 +69,7 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testSegmentBoundarySymbols(b, opts));
     macho_step.dependOn(testStackSize(b, opts));
     macho_step.dependOn(testSymbolStabs(b, opts));
+    macho_step.dependOn(testSymbolStabs2(b, opts));
     macho_step.dependOn(testTbdv3(b, opts));
     macho_step.dependOn(testTentative(b, opts));
     macho_step.dependOn(testThunks(b, opts));
@@ -2998,8 +2999,16 @@ fn testSymbolStabs(b: *Build, opts: Options) *Step {
         );
         test_step.dependOn(run.step());
 
-        // TODO check for _foo and _bar having set sizes in stabs
-
+        const check = exe.check();
+        check.checkInSymtab();
+        check.checkContains("(__TEXT,__text) FUN (stab) _bar");
+        check.checkExtract("{bar_size} FUN (stab)");
+        check.checkComputeCompare("bar_size", .{ .op = .gt, .value = .{ .literal = 0 } });
+        check.checkInSymtab();
+        check.checkContains("(__TEXT,__text) FUN (stab) _foo");
+        check.checkExtract("{foo_size} FUN (stab)");
+        check.checkComputeCompare("foo_size", .{ .op = .gt, .value = .{ .literal = 0 } });
+        test_step.dependOn(&check.step);
     }
 
     {
@@ -3036,6 +3045,60 @@ fn testSymbolStabs(b: *Build, opts: Options) *Step {
         );
         test_step.dependOn(run.step());
     }
+
+    return test_step;
+}
+
+fn testSymbolStabs2(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-symbol-stabs-2", "");
+
+    const a_o = cc(b, "a.o", opts);
+    a_o.addCSource(
+        \\int foo = 42;
+        \\int getFoo() {
+        \\  return foo;
+        \\}
+    );
+    a_o.addArgs(&.{ "-c", "-g" });
+
+    const b_o = cc(b, "b.o", opts);
+    b_o.addCSource(
+        \\int bar = 24;
+        \\int getBar() {
+        \\  return bar;
+        \\}
+    );
+    b_o.addArgs(&.{ "-c", "-g" });
+
+    const main_o = cc(b, "main.o", opts);
+    main_o.addCSource(
+        \\#include <stdio.h>
+        \\extern int getFoo();
+        \\extern int getBar();
+        \\int main() {
+        \\  printf("foo=%d,bar=%d", getFoo(), getBar());
+        \\  return 0;
+        \\}
+    );
+    main_o.addArgs(&.{ "-c", "-g" });
+
+    const exe = cc(b, "main", opts);
+    exe.addFileSource(a_o.getFile());
+    exe.addFileSource(b_o.getFile());
+    exe.addFileSource(main_o.getFile());
+
+    const run = exe.run();
+    run.expectStdOutEqual("foo=42,bar=24");
+    test_step.dependOn(run.step());
+
+    const check = exe.check();
+    check.checkInSymtab();
+    check.checkContains("a.o"); // TODO we really should do a fuzzy search like OSO <ignore>/a.o
+    check.checkInSymtab();
+    check.checkContains("b.o");
+    check.checkInSymtab();
+    check.checkContains("main.o");
+    test_step.dependOn(&check.step);
 
     return test_step;
 }
