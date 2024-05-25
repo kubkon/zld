@@ -395,8 +395,6 @@ fn resolveRelocInner(
 ) ResolveError!void {
     const cpu_arch = macho_file.options.cpu_arch.?;
     const rel_offset = rel.offset - self.off;
-    const seg_id = macho_file.sections.items(.segment_id)[self.out_n_sect];
-    const seg = macho_file.segments.items[seg_id];
     const P = @as(i64, @intCast(self.getAddress(macho_file))) + @as(i64, @intCast(rel_offset));
     const A = rel.addend + rel.getRelocAddend(cpu_arch);
     const S: i64 = @intCast(rel.getTargetAddress(macho_file));
@@ -449,29 +447,8 @@ fn resolveRelocInner(
                         try writer.writeInt(u64, @intCast(S - TLS), .little);
                         return;
                     }
-                    const entry = bind.Entry{
-                        .target = rel.target,
-                        .offset = @as(u64, @intCast(P)) - seg.vmaddr,
-                        .segment_id = seg_id,
-                        .addend = A,
-                    };
-                    if (sym.flags.import) {
-                        macho_file.bind.entries.appendAssumeCapacity(entry);
-                        if (sym.flags.weak) {
-                            macho_file.weak_bind.entries.appendAssumeCapacity(entry);
-                        }
-                        return;
-                    }
-                    if (sym.flags.@"export" and sym.flags.weak) {
-                        macho_file.weak_bind.entries.appendAssumeCapacity(entry);
-                    } else if (sym.flags.interposable) {
-                        macho_file.bind.entries.appendAssumeCapacity(entry);
-                    }
+                    if (sym.flags.import) return;
                 }
-                macho_file.rebase.entries.appendAssumeCapacity(.{
-                    .offset = @as(u64, @intCast(P)) - seg.vmaddr,
-                    .segment_id = seg_id,
-                });
                 try writer.writeInt(u64, @bitCast(S + A - SUB), .little);
             } else if (rel.meta.length == 2) {
                 try writer.writeInt(u32, @bitCast(@as(i32, @truncate(S + A - SUB))), .little);
@@ -945,7 +922,6 @@ pub const Extra = struct {
 
 const aarch64 = @import("../aarch64.zig");
 const assert = std.debug.assert;
-const bind = @import("dyld_info/bind.zig");
 const dis_x86_64 = @import("dis_x86_64");
 const macho = std.macho;
 const math = std.math;

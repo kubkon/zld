@@ -82,6 +82,56 @@ pub const File = union(enum) {
         };
     }
 
+    pub fn addDyldRelocs(file: File, macho_file: *MachO) !void {
+        const tracy = trace(@src());
+        defer tracy.end();
+
+        assert(file != .dylib);
+
+        const cpu_arch = macho_file.options.cpu_arch.?;
+
+        for (file.getAtoms()) |atom_index| {
+            const atom = macho_file.getAtom(atom_index) orelse continue;
+            if (!atom.flags.alive) continue;
+            if (atom.getInputSection(macho_file).isZerofill()) continue;
+            const atom_addr = atom.getAddress(macho_file);
+            const relocs = atom.getRelocs(macho_file);
+            const seg_id = macho_file.sections.items(.segment_id)[atom.out_n_sect];
+            const seg = macho_file.segments.items[seg_id];
+            for (relocs) |rel| {
+                if (rel.type != .unsigned or rel.meta.length != 3) continue;
+                const rel_offset = rel.offset - atom.off;
+                const addend = rel.addend + rel.getRelocAddend(cpu_arch);
+                if (rel.tag == .@"extern") {
+                    const sym = rel.getTargetSymbol(macho_file);
+                    if (sym.isTlvInit(macho_file)) continue;
+                    const entry = bind.Entry{
+                        .target = rel.target,
+                        .offset = atom_addr + rel_offset - seg.vmaddr,
+                        .segment_id = seg_id,
+                        .addend = addend,
+                    };
+                    if (sym.flags.import) {
+                        macho_file.bind.entries.appendAssumeCapacity(entry);
+                        if (sym.flags.weak) {
+                            macho_file.weak_bind.entries.appendAssumeCapacity(entry);
+                        }
+                        continue;
+                    }
+                    if (sym.flags.@"export" and sym.flags.weak) {
+                        macho_file.weak_bind.entries.appendAssumeCapacity(entry);
+                    } else if (sym.flags.interposable) {
+                        macho_file.bind.entries.appendAssumeCapacity(entry);
+                    }
+                }
+                macho_file.rebase.entries.appendAssumeCapacity(.{
+                    .offset = atom_addr + rel_offset - seg.vmaddr,
+                    .segment_id = seg_id,
+                });
+            }
+        }
+    }
+
     pub fn calcSymtabSize(file: File, macho_file: *MachO) !void {
         return switch (file) {
             inline else => |x| x.calcSymtabSize(macho_file),
@@ -107,8 +157,11 @@ pub const File = union(enum) {
     pub const HandleIndex = Index;
 };
 
+const assert = std.debug.assert;
+const bind = @import("dyld_info/bind.zig");
 const macho = std.macho;
 const std = @import("std");
+const trace = @import("../tracy.zig").trace;
 
 const Allocator = std.mem.Allocator;
 const Atom = @import("Atom.zig");

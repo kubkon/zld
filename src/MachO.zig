@@ -2065,6 +2065,13 @@ fn initDyldInfoSections(self: *MachO) !void {
     try self.rebase.entries.ensureUnusedCapacity(gpa, nrebases);
     try self.bind.entries.ensureUnusedCapacity(gpa, nbinds);
     try self.weak_bind.entries.ensureUnusedCapacity(gpa, nweak_binds);
+
+    for (self.objects.items) |index| {
+        try self.getFile(index).?.addDyldRelocs(self);
+    }
+    if (self.getInternalObject()) |obj| {
+        try obj.asFile().addDyldRelocs(self);
+    }
 }
 
 fn initExportTrie(self: *MachO) !void {
