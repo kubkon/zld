@@ -353,6 +353,7 @@ pub fn flush(self: *MachO) !void {
 
     try self.addUndefinedGlobals();
     try self.resolveSymbols();
+    try self.parseDebugInfo();
 
     if (self.options.relocatable) return relocatable.flush(self);
 
@@ -1057,6 +1058,12 @@ fn markLive(self: *MachO) void {
     for (self.objects.items) |index| {
         const object = self.getFile(index).?.object;
         if (object.alive) object.markLive(self);
+    }
+}
+
+fn parseDebugInfo(self: *MachO) !void {
+    for (self.objects.items) |index| {
+        try self.getFile(index).?.object.parseDebugInfo(self);
     }
 }
 
@@ -3310,7 +3317,6 @@ const Atom = @import("MachO/Atom.zig");
 const BindSection = synthetic.BindSection;
 const CodeSignature = @import("MachO/CodeSignature.zig");
 const Dylib = @import("MachO/Dylib.zig");
-const DwarfInfo = @import("MachO/DwarfInfo.zig");
 const ExportTrieSection = synthetic.ExportTrieSection;
 const File = @import("MachO/file.zig").File;
 const GotSection = synthetic.GotSection;
