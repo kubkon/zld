@@ -26,9 +26,6 @@ data_in_code: std.ArrayListUnmanaged(macho.data_in_code_entry) = .{},
 
 alive: bool = true,
 hidden: bool = false,
-num_rebase_relocs: u32 = 0,
-num_bind_relocs: u32 = 0,
-num_weak_bind_relocs: u32 = 0,
 
 output_symtab_ctx: MachO.SymtabCtx = .{},
 

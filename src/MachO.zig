@@ -2043,28 +2043,10 @@ fn initDyldInfoSections(self: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
-    const gpa = self.base.allocator;
-
     if (self.got_sect_index != null) try self.got.addDyldRelocs(self);
     if (self.tlv_ptr_sect_index != null) try self.tlv_ptr.addDyldRelocs(self);
     if (self.la_symbol_ptr_sect_index != null) try self.la_symbol_ptr.addDyldRelocs(self);
     try self.initExportTrie();
-
-    var nrebases: usize = 0;
-    var nbinds: usize = 0;
-    var nweak_binds: usize = 0;
-    for (self.objects.items) |index| {
-        const object = self.getFile(index).?.object;
-        nrebases += object.num_rebase_relocs;
-        nbinds += object.num_bind_relocs;
-        nweak_binds += object.num_weak_bind_relocs;
-    }
-    if (self.getInternalObject()) |int| {
-        nrebases += int.num_rebase_relocs;
-    }
-    try self.rebase.entries.ensureUnusedCapacity(gpa, nrebases);
-    try self.bind.entries.ensureUnusedCapacity(gpa, nbinds);
-    try self.weak_bind.entries.ensureUnusedCapacity(gpa, nweak_binds);
 
     for (self.objects.items) |index| {
         try self.getFile(index).?.addDyldRelocs(self);

@@ -300,21 +300,15 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
                             continue;
                         }
                         if (symbol.flags.import) {
-                            object.num_bind_relocs += 1;
                             if (symbol.flags.weak) {
-                                object.num_weak_bind_relocs += 1;
                                 macho_file.binds_to_weak = true;
                             }
                             continue;
                         }
                         if (symbol.flags.@"export" and symbol.flags.weak) {
-                            object.num_weak_bind_relocs += 1;
                             macho_file.binds_to_weak = true;
-                        } else if (symbol.flags.interposable) {
-                            object.num_bind_relocs += 1;
                         }
                     }
-                    object.num_rebase_relocs += 1;
                 }
             },
 

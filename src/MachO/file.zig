@@ -88,6 +88,7 @@ pub const File = union(enum) {
 
         assert(file != .dylib);
 
+        const gpa = macho_file.base.allocator;
         const cpu_arch = macho_file.options.cpu_arch.?;
 
         for (file.getAtoms()) |atom_index| {
@@ -112,19 +113,19 @@ pub const File = union(enum) {
                         .addend = addend,
                     };
                     if (sym.flags.import) {
-                        macho_file.bind.entries.appendAssumeCapacity(entry);
+                        try macho_file.bind.entries.append(gpa, entry);
                         if (sym.flags.weak) {
-                            macho_file.weak_bind.entries.appendAssumeCapacity(entry);
+                            try macho_file.weak_bind.entries.append(gpa, entry);
                         }
                         continue;
                     }
                     if (sym.flags.@"export" and sym.flags.weak) {
-                        macho_file.weak_bind.entries.appendAssumeCapacity(entry);
+                        try macho_file.weak_bind.entries.append(gpa, entry);
                     } else if (sym.flags.interposable) {
-                        macho_file.bind.entries.appendAssumeCapacity(entry);
+                        try macho_file.bind.entries.append(gpa, entry);
                     }
                 }
-                macho_file.rebase.entries.appendAssumeCapacity(.{
+                try macho_file.rebase.entries.append(gpa, .{
                     .offset = atom_addr + rel_offset - seg.vmaddr,
                     .segment_id = seg_id,
                 });
