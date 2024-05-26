@@ -48,10 +48,6 @@ pub const GotSection = struct {
                     try macho_file.weak_bind.entries.append(gpa, entry);
                 }
             } else {
-                try macho_file.rebase.entries.append(gpa, .{
-                    .offset = addr - seg.vmaddr,
-                    .segment_id = seg_id,
-                });
                 if (sym.flags.weak) {
                     try macho_file.weak_bind.entries.append(gpa, entry);
                 } else if (sym.flags.interposable) {
@@ -339,10 +335,6 @@ pub const LaSymbolPtrSection = struct {
         for (macho_file.stubs.symbols.items, 0..) |sym_index, idx| {
             const sym = macho_file.getSymbol(sym_index);
             const addr = sect.addr + idx * @sizeOf(u64);
-            const rebase_entry = Rebase.Entry{
-                .offset = addr - seg.vmaddr,
-                .segment_id = seg_id,
-            };
             const bind_entry = bind.Entry{
                 .target = sym_index,
                 .offset = addr - seg.vmaddr,
@@ -355,15 +347,12 @@ pub const LaSymbolPtrSection = struct {
                     try macho_file.weak_bind.entries.append(gpa, bind_entry);
                 } else {
                     try macho_file.lazy_bind.entries.append(gpa, bind_entry);
-                    try macho_file.rebase.entries.append(gpa, rebase_entry);
                 }
             } else {
                 if (sym.flags.weak) {
                     try macho_file.weak_bind.entries.append(gpa, bind_entry);
-                    try macho_file.rebase.entries.append(gpa, rebase_entry);
                 } else if (sym.flags.interposable) {
                     try macho_file.lazy_bind.entries.append(gpa, bind_entry);
-                    try macho_file.rebase.entries.append(gpa, rebase_entry);
                 }
             }
         }
@@ -441,10 +430,6 @@ pub const TlvPtrSection = struct {
                     try macho_file.weak_bind.entries.append(gpa, entry);
                 }
             } else {
-                try macho_file.rebase.entries.append(gpa, .{
-                    .offset = addr - seg.vmaddr,
-                    .segment_id = seg_id,
-                });
                 if (sym.flags.weak) {
                     try macho_file.weak_bind.entries.append(gpa, entry);
                 } else if (sym.flags.interposable) {
@@ -652,7 +637,6 @@ pub const Indsymtab = struct {
     }
 };
 
-pub const RebaseSection = Rebase;
 pub const BindSection = bind.Bind;
 pub const WeakBindSection = bind.WeakBind;
 pub const LazyBindSection = bind.LazyBind;

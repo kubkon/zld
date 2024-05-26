@@ -125,10 +125,6 @@ pub const File = union(enum) {
                         try macho_file.bind.entries.append(gpa, entry);
                     }
                 }
-                try macho_file.rebase.entries.append(gpa, .{
-                    .offset = atom_addr + rel_offset - seg.vmaddr,
-                    .segment_id = seg_id,
-                });
             }
         }
     }

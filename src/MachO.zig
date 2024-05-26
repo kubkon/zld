@@ -63,7 +63,7 @@ stubs_helper: StubsHelperSection = .{},
 objc_stubs: ObjcStubsSection = .{},
 la_symbol_ptr: LaSymbolPtrSection = .{},
 tlv_ptr: TlvPtrSection = .{},
-rebase: RebaseSection = .{},
+rebase: Rebase = .{},
 bind: BindSection = .{},
 weak_bind: WeakBindSection = .{},
 lazy_bind: LazyBindSection = .{},
@@ -396,6 +396,7 @@ pub fn flush(self: *MachO) !void {
 
     state_log.debug("{}", .{self.dumpState()});
 
+    try self.rebase.updateSize(self);
     try self.initDyldInfoSections();
     try self.writeAtoms();
     try self.writeUnwindInfo();
@@ -2250,7 +2251,6 @@ fn finalizeDyldInfoSections(self: *MachO) !void {
     defer tracy.end();
     const gpa = self.base.allocator;
 
-    try self.rebase.finalize(gpa);
     try self.bind.finalize(gpa, self);
     try self.weak_bind.finalize(gpa, self);
     try self.lazy_bind.finalize(gpa, self);
@@ -2326,8 +2326,6 @@ fn writeDyldInfoSections(self: *MachO, off: u32) !u32 {
     const cmd = &self.dyld_info_cmd;
     var needed_size: u32 = 0;
 
-    cmd.rebase_off = needed_size;
-    cmd.rebase_size = mem.alignForward(u32, @intCast(self.rebase.size()), @alignOf(u64));
     needed_size += cmd.rebase_size;
 
     cmd.bind_off = needed_size;
@@ -3399,7 +3397,7 @@ pub const Options = @import("MachO/Options.zig");
 const LazyBindSection = synthetic.LazyBindSection;
 const LaSymbolPtrSection = synthetic.LaSymbolPtrSection;
 const LibStub = @import("tapi.zig").LibStub;
-const RebaseSection = synthetic.RebaseSection;
+const Rebase = @import("MachO/dyld_info/Rebase.zig");
 const Symbol = @import("MachO/Symbol.zig");
 const StringTable = @import("StringTable.zig");
 const StubsSection = synthetic.StubsSection;
