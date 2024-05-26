@@ -2043,14 +2043,52 @@ fn allocateSyntheticSymbols(self: *MachO) void {
 }
 
 fn updateDyldInfoSizes(self: *MachO) !void {
-    try self.rebase.updateSize(self);
-    try self.bind.updateSize(self);
-    try self.weak_bind.updateSize(self);
-    try self.lazy_bind.updateSize(self);
-    try self.updateExportTrieSize();
+    const Job = enum {
+        rebase,
+        bind,
+        weak_bind,
+        lazy_bind,
+        trie,
+    };
+    const updateDyldInfoSizesWorker = struct {
+        fn updateDyldInfoSizesWorker(macho_file: *MachO, job: Job, err: *DyldErr!void, wg: *WaitGroup) void {
+            defer wg.finish();
+            err.* = switch (job) {
+                .rebase => macho_file.rebase.updateSize(macho_file),
+                .bind => macho_file.bind.updateSize(macho_file),
+                .weak_bind => macho_file.weak_bind.updateSize(macho_file),
+                .lazy_bind => macho_file.lazy_bind.updateSize(macho_file),
+                .trie => macho_file.updateExportTrieSize(),
+            };
+        }
+    }.updateDyldInfoSizesWorker;
+
+    var wg: WaitGroup = .{};
+
+    var results: [@typeInfo(Job).Enum.fields.len]DyldErr!void = undefined;
+    {
+        wg.reset();
+        defer wg.wait();
+
+        inline for (@typeInfo(Job).Enum.fields, 0..) |field, i| {
+            wg.start();
+            try self.base.thread_pool.spawn(updateDyldInfoSizesWorker, .{
+                self,
+                @field(Job, field.name),
+                &results[i],
+                &wg,
+            });
+        }
+
+        for (&results) |res| {
+            res catch {}; // TODO another panic
+        }
+    }
 }
 
-fn updateExportTrieSize(self: *MachO) !void {
+pub const DyldErr = error{OutOfMemory};
+
+fn updateExportTrieSize(self: *MachO) DyldErr!void {
     const tracy = trace(@src());
     defer tracy.end();
 
