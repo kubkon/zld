@@ -136,6 +136,10 @@ pub fn deinit(self: *MachO) void {
     self.files.deinit(gpa);
 
     self.segments.deinit(gpa);
+    for (self.sections.items(.atoms), self.sections.items(.thunks)) |*atoms, *th| {
+        atoms.deinit(gpa);
+        th.deinit(gpa);
+    }
     self.sections.deinit(gpa);
     self.atoms.deinit(gpa);
     self.atoms_extra.deinit(gpa);
@@ -2104,44 +2108,118 @@ fn writeAtoms(self: *MachO) !void {
     defer tracy.end();
 
     const gpa = self.base.allocator;
-    const cpu_arch = self.options.cpu_arch.?;
     const slice = self.sections.slice();
 
+    var wg: WaitGroup = .{};
     var has_resolve_error = false;
-    for (slice.items(.header), slice.items(.atoms)) |header, atoms| {
-        if (atoms.items.len == 0) continue;
-        if (header.isZerofill()) continue;
 
-        const buffer = try gpa.alloc(u8, header.size);
-        defer gpa.free(buffer);
-        const padding_byte: u8 = if (header.isCode() and cpu_arch == .x86_64) 0xcc else 0;
-        @memset(buffer, padding_byte);
+    const results = try gpa.alloc(BigErr!void, slice.items(.header).len);
+    defer gpa.free(results);
 
-        for (atoms.items) |atom_index| {
-            const atom = self.getAtom(atom_index).?;
-            assert(atom.flags.alive);
-            const off = atom.value;
-            try atom.getCode(self, buffer[off..][0..atom.size]);
-            atom.resolveRelocs(self, buffer[off..][0..atom.size]) catch |err| switch (err) {
-                error.ResolveFailed => has_resolve_error = true,
-                else => |e| return e,
-            };
+    {
+        wg.reset();
+        defer wg.wait();
+
+        for (slice.items(.header), slice.items(.atoms), slice.items(.thunks), results) |header, atoms, thnks, *res| {
+            if (atoms.items.len == 0) continue;
+            if (header.isZerofill()) continue;
+
+            wg.start();
+            try self.base.thread_pool.spawn(writeSectionWorker, .{
+                self,
+                header,
+                atoms.items,
+                thnks.items,
+                &(res.*),
+                &wg,
+            });
         }
-
-        try self.base.file.pwriteAll(buffer, header.offset);
     }
 
-    for (self.thunks.items) |thunk| {
-        const header = slice.items(.header)[thunk.out_n_sect];
-        const offset = thunk.value + header.offset;
-        const buffer = try gpa.alloc(u8, thunk.size());
-        defer gpa.free(buffer);
-        var stream = std.io.fixedBufferStream(buffer);
-        try thunk.write(self, stream.writer());
-        try self.base.file.pwriteAll(buffer, offset);
+    for (results) |res| {
+        res catch |err| switch (err) {
+            error.ResolveFailed => {
+                has_resolve_error = true;
+                continue;
+            },
+            else => {}, // TODO why catching error here panics?
+        };
     }
 
     if (has_resolve_error) return error.ResolveFailed;
+}
+
+const BigErr = error{
+    OutOfMemory,
+    ResolveFailed,
+    Overflow,
+    NoSpaceLeft,
+    DivisionByZero,
+    UnexpectedRemainder,
+    InputOutput,
+    AccessDenied,
+    BrokenPipe,
+    SystemResources,
+    OperationAborted,
+    WouldBlock,
+    ConnectionResetByPeer,
+    Unexpected,
+    IsDir,
+    ConnectionTimedOut,
+    NotOpenForReading,
+    SocketNotConnected,
+    Unseekable,
+    DiskQuota,
+    FileTooBig,
+    DeviceBusy,
+    InvalidArgument,
+    NotOpenForWriting,
+    LockViolation,
+};
+
+fn writeSectionWorker(
+    self: *MachO,
+    header: macho.section_64,
+    atoms: []const Atom.Index,
+    thunkss: []const Thunk.Index,
+    res: *BigErr!void,
+    wg: *WaitGroup,
+) void {
+    const doWork = struct {
+        fn doWork(
+            macho_file: *MachO,
+            h: macho.section_64,
+            atms: []const Atom.Index,
+            thnks: []const Thunk.Index,
+        ) BigErr!void {
+            const gpa = macho_file.base.allocator;
+            const cpu_arch = macho_file.options.cpu_arch.?;
+            const buffer = try gpa.alloc(u8, h.size);
+            defer gpa.free(buffer);
+            const padding_byte: u8 = if (h.isCode() and cpu_arch == .x86_64) 0xcc else 0;
+            @memset(buffer, padding_byte);
+
+            for (atms) |atom_index| {
+                const atom = macho_file.getAtom(atom_index).?;
+                assert(atom.flags.alive);
+                const off = atom.value;
+                try atom.getCode(macho_file, buffer[off..][0..atom.size]);
+                try atom.resolveRelocs(macho_file, buffer[off..][0..atom.size]);
+            }
+            for (thnks) |thunk_index| {
+                const thunk = macho_file.getThunk(thunk_index);
+                const off = thunk.value;
+                const size = thunk.size();
+                var stream = std.io.fixedBufferStream(buffer[off..][0..size]);
+                try thunk.write(macho_file, stream.writer());
+            }
+
+            try macho_file.base.file.pwriteAll(buffer, h.offset);
+        }
+    }.doWork;
+
+    defer wg.finish();
+    res.* = doWork(self, header, atoms, thunkss);
 }
 
 fn writeUnwindInfo(self: *MachO) !void {
@@ -3251,6 +3329,7 @@ const Section = struct {
     header: macho.section_64,
     segment_id: u8,
     atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
+    thunks: std.ArrayListUnmanaged(Thunk.Index) = .{},
 };
 
 pub const SymtabCtx = struct {
@@ -3329,5 +3408,6 @@ const Thunk = thunks.Thunk;
 const ThreadPool = std.Thread.Pool;
 const TlvPtrSection = synthetic.TlvPtrSection;
 const UnwindInfo = @import("MachO/UnwindInfo.zig");
+const WaitGroup = std.Thread.WaitGroup;
 const WeakBindSection = synthetic.WeakBindSection;
 const Zld = @import("Zld.zig");

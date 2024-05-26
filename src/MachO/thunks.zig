@@ -5,6 +5,7 @@ pub fn createThunks(sect_id: u8, macho_file: *MachO) !void {
     const gpa = macho_file.base.allocator;
     const slice = macho_file.sections.slice();
     const header = &slice.items(.header)[sect_id];
+    const thnks = &slice.items(.thunks)[sect_id];
     const atoms = slice.items(.atoms)[sect_id].items;
     assert(atoms.len > 0);
 
@@ -33,6 +34,7 @@ pub fn createThunks(sect_id: u8, macho_file: *MachO) !void {
         const thunk_index = try macho_file.addThunk();
         const thunk = macho_file.getThunk(thunk_index);
         thunk.out_n_sect = sect_id;
+        try thnks.append(gpa, thunk_index);
 
         // Scan relocs in the group and create trampolines for any unreachable callsite
         for (atoms[start..i]) |atom_index| {
