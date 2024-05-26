@@ -43,15 +43,12 @@ pub const GotSection = struct {
                 .addend = 0,
             };
             if (sym.flags.import) {
-                try macho_file.bind.entries.append(gpa, entry);
                 if (sym.flags.weak) {
                     try macho_file.weak_bind.entries.append(gpa, entry);
                 }
             } else {
                 if (sym.flags.weak) {
                     try macho_file.weak_bind.entries.append(gpa, entry);
-                } else if (sym.flags.interposable) {
-                    try macho_file.bind.entries.append(gpa, entry);
                 }
             }
         }
@@ -343,7 +340,6 @@ pub const LaSymbolPtrSection = struct {
             };
             if (sym.flags.import) {
                 if (sym.flags.weak) {
-                    try macho_file.bind.entries.append(gpa, bind_entry);
                     try macho_file.weak_bind.entries.append(gpa, bind_entry);
                 } else {
                     try macho_file.lazy_bind.entries.append(gpa, bind_entry);
@@ -425,15 +421,12 @@ pub const TlvPtrSection = struct {
                 .addend = 0,
             };
             if (sym.flags.import) {
-                try macho_file.bind.entries.append(gpa, entry);
                 if (sym.flags.weak) {
                     try macho_file.weak_bind.entries.append(gpa, entry);
                 }
             } else {
                 if (sym.flags.weak) {
                     try macho_file.weak_bind.entries.append(gpa, entry);
-                } else if (sym.flags.interposable) {
-                    try macho_file.bind.entries.append(gpa, entry);
                 }
             }
         }

@@ -1,14 +1,3 @@
-const std = @import("std");
-const assert = std.debug.assert;
-const leb = std.leb;
-const log = std.log.scoped(.dyld_info);
-const macho = std.macho;
-const testing = std.testing;
-
-const Allocator = std.mem.Allocator;
-const MachO = @import("../../MachO.zig");
-const Symbol = @import("../Symbol.zig");
-
 pub const Entry = struct {
     target: Symbol.Index,
     offset: u64,
@@ -43,7 +32,108 @@ pub const Bind = struct {
         return @as(u64, @intCast(self.buffer.items.len));
     }
 
-    pub fn finalize(self: *Self, gpa: Allocator, ctx: *MachO) !void {
+    pub fn updateSize(self: *Self, macho_file: *MachO) !void {
+        const tracy = trace(@src());
+        defer tracy.end();
+
+        const gpa = macho_file.base.allocator;
+        const cpu_arch = macho_file.options.cpu_arch.?;
+
+        var objects = try std.ArrayList(File.Index).initCapacity(gpa, macho_file.objects.items.len + 1);
+        defer objects.deinit();
+        objects.appendSliceAssumeCapacity(macho_file.objects.items);
+        if (macho_file.getInternalObject()) |obj| objects.appendAssumeCapacity(obj.index);
+
+        for (objects.items) |index| {
+            const file = macho_file.getFile(index).?;
+            for (file.getAtoms()) |atom_index| {
+                const atom = macho_file.getAtom(atom_index) orelse continue;
+                if (!atom.flags.alive) continue;
+                if (atom.getInputSection(macho_file).isZerofill()) continue;
+                const atom_addr = atom.getAddress(macho_file);
+                const relocs = atom.getRelocs(macho_file);
+                const seg_id = macho_file.sections.items(.segment_id)[atom.out_n_sect];
+                const seg = macho_file.segments.items[seg_id];
+                for (relocs) |rel| {
+                    if (rel.type != .unsigned or rel.meta.length != 3 or rel.tag != .@"extern") continue;
+                    const rel_offset = rel.offset - atom.off;
+                    const addend = rel.addend + rel.getRelocAddend(cpu_arch);
+                    const sym = rel.getTargetSymbol(macho_file);
+                    if (sym.isTlvInit(macho_file)) continue;
+                    const entry = Entry{
+                        .target = rel.target,
+                        .offset = atom_addr + rel_offset - seg.vmaddr,
+                        .segment_id = seg_id,
+                        .addend = addend,
+                    };
+                    if (sym.flags.import or sym.flags.interposable) {
+                        try self.entries.append(gpa, entry);
+                    }
+                }
+            }
+        }
+
+        if (macho_file.got_sect_index) |sid| {
+            const seg_id = macho_file.sections.items(.segment_id)[sid];
+            const seg = macho_file.segments.items[seg_id];
+            for (macho_file.got.symbols.items, 0..) |sym_index, idx| {
+                const sym = macho_file.getSymbol(sym_index);
+                const addr = macho_file.got.getAddress(@intCast(idx), macho_file);
+                const entry = Entry{
+                    .target = sym_index,
+                    .offset = addr - seg.vmaddr,
+                    .segment_id = seg_id,
+                    .addend = 0,
+                };
+                if (sym.flags.import or sym.flags.interposable) {
+                    try self.entries.append(gpa, entry);
+                }
+            }
+        }
+
+        if (macho_file.la_symbol_ptr_sect_index) |sid| {
+            const sect = macho_file.sections.items(.header)[sid];
+            const seg_id = macho_file.sections.items(.segment_id)[sid];
+            const seg = macho_file.segments.items[seg_id];
+            for (macho_file.stubs.symbols.items, 0..) |sym_index, idx| {
+                const sym = macho_file.getSymbol(sym_index);
+                const addr = sect.addr + idx * @sizeOf(u64);
+                const bind_entry = Entry{
+                    .target = sym_index,
+                    .offset = addr - seg.vmaddr,
+                    .segment_id = seg_id,
+                    .addend = 0,
+                };
+                if (sym.flags.import and sym.flags.weak) {
+                    try self.entries.append(gpa, bind_entry);
+                }
+            }
+        }
+
+        if (macho_file.tlv_ptr_sect_index) |sid| {
+            const seg_id = macho_file.sections.items(.segment_id)[sid];
+            const seg = macho_file.segments.items[seg_id];
+
+            for (macho_file.tlv_ptr.symbols.items, 0..) |sym_index, idx| {
+                const sym = macho_file.getSymbol(sym_index);
+                const addr = macho_file.tlv_ptr.getAddress(@intCast(idx), macho_file);
+                const entry = Entry{
+                    .target = sym_index,
+                    .offset = addr - seg.vmaddr,
+                    .segment_id = seg_id,
+                    .addend = 0,
+                };
+                if (sym.flags.import or sym.flags.interposable) {
+                    try self.entries.append(gpa, entry);
+                }
+            }
+        }
+
+        try self.finalize(gpa, macho_file);
+        macho_file.dyld_info_cmd.bind_size = mem.alignForward(u32, @intCast(self.size()), @alignOf(u64));
+    }
+
+    fn finalize(self: *Self, gpa: Allocator, ctx: *MachO) !void {
         if (self.entries.items.len == 0) return;
 
         const writer = self.buffer.writer(gpa);
@@ -472,3 +562,17 @@ fn done(writer: anytype) !void {
     log.debug(">>> done", .{});
     try writer.writeByte(macho.BIND_OPCODE_DONE);
 }
+
+const assert = std.debug.assert;
+const leb = std.leb;
+const log = std.log.scoped(.dyld_info);
+const macho = std.macho;
+const mem = std.mem;
+const testing = std.testing;
+const std = @import("std");
+const trace = @import("../../tracy.zig").trace;
+
+const Allocator = mem.Allocator;
+const File = @import("../file.zig").File;
+const MachO = @import("../../MachO.zig");
+const Symbol = @import("../Symbol.zig");

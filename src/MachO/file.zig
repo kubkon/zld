@@ -113,7 +113,6 @@ pub const File = union(enum) {
                         .addend = addend,
                     };
                     if (sym.flags.import) {
-                        try macho_file.bind.entries.append(gpa, entry);
                         if (sym.flags.weak) {
                             try macho_file.weak_bind.entries.append(gpa, entry);
                         }
@@ -121,8 +120,6 @@ pub const File = union(enum) {
                     }
                     if (sym.flags.@"export" and sym.flags.weak) {
                         try macho_file.weak_bind.entries.append(gpa, entry);
-                    } else if (sym.flags.interposable) {
-                        try macho_file.bind.entries.append(gpa, entry);
                     }
                 }
             }

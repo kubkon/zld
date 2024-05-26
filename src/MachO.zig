@@ -64,7 +64,7 @@ objc_stubs: ObjcStubsSection = .{},
 la_symbol_ptr: LaSymbolPtrSection = .{},
 tlv_ptr: TlvPtrSection = .{},
 rebase: Rebase = .{},
-bind: BindSection = .{},
+bind: Bind = .{},
 weak_bind: WeakBindSection = .{},
 lazy_bind: LazyBindSection = .{},
 export_trie: ExportTrieSection = .{},
@@ -397,6 +397,7 @@ pub fn flush(self: *MachO) !void {
     state_log.debug("{}", .{self.dumpState()});
 
     try self.rebase.updateSize(self);
+    try self.bind.updateSize(self);
     try self.initDyldInfoSections();
     try self.writeAtoms();
     try self.writeUnwindInfo();
@@ -2251,7 +2252,6 @@ fn finalizeDyldInfoSections(self: *MachO) !void {
     defer tracy.end();
     const gpa = self.base.allocator;
 
-    try self.bind.finalize(gpa, self);
     try self.weak_bind.finalize(gpa, self);
     try self.lazy_bind.finalize(gpa, self);
     try self.export_trie.finalize(gpa);
@@ -2329,7 +2329,6 @@ fn writeDyldInfoSections(self: *MachO, off: u32) !u32 {
     needed_size += cmd.rebase_size;
 
     cmd.bind_off = needed_size;
-    cmd.bind_size = mem.alignForward(u32, @intCast(self.bind.size()), @alignOf(u64));
     needed_size += cmd.bind_size;
 
     cmd.weak_bind_off = needed_size;
@@ -3354,6 +3353,7 @@ pub const base_tag = Zld.Tag.macho;
 
 const aarch64 = @import("aarch64.zig");
 const assert = std.debug.assert;
+const bind = @import("MachO/dyld_info/bind.zig");
 const build_options = @import("build_options");
 const builtin = @import("builtin");
 const calcUuid = @import("MachO/uuid.zig").calcUuid;
@@ -3380,7 +3380,7 @@ const Allocator = mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const Archive = @import("MachO/Archive.zig");
 const Atom = @import("MachO/Atom.zig");
-const BindSection = synthetic.BindSection;
+const Bind = bind.Bind;
 const CodeSignature = @import("MachO/CodeSignature.zig");
 const Dylib = @import("MachO/Dylib.zig");
 const ExportTrieSection = synthetic.ExportTrieSection;

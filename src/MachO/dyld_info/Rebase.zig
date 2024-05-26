@@ -107,7 +107,6 @@ pub fn updateSize(rebase: *Rebase, macho_file: *MachO) !void {
     }
 
     try rebase.finalize(gpa);
-
     macho_file.dyld_info_cmd.rebase_size = mem.alignForward(u32, @intCast(rebase.size()), @alignOf(u64));
 }
 
