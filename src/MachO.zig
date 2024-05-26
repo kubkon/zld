@@ -398,6 +398,7 @@ pub fn flush(self: *MachO) !void {
 
     try self.rebase.updateSize(self);
     try self.bind.updateSize(self);
+    try self.weak_bind.updateSize(self);
     try self.initDyldInfoSections();
     try self.writeAtoms();
     try self.writeUnwindInfo();
@@ -2049,17 +2050,8 @@ fn initDyldInfoSections(self: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
-    if (self.got_sect_index != null) try self.got.addDyldRelocs(self);
-    if (self.tlv_ptr_sect_index != null) try self.tlv_ptr.addDyldRelocs(self);
     if (self.la_symbol_ptr_sect_index != null) try self.la_symbol_ptr.addDyldRelocs(self);
     try self.initExportTrie();
-
-    for (self.objects.items) |index| {
-        try self.getFile(index).?.addDyldRelocs(self);
-    }
-    if (self.getInternalObject()) |obj| {
-        try obj.asFile().addDyldRelocs(self);
-    }
 }
 
 fn initExportTrie(self: *MachO) !void {
@@ -2252,7 +2244,6 @@ fn finalizeDyldInfoSections(self: *MachO) !void {
     defer tracy.end();
     const gpa = self.base.allocator;
 
-    try self.weak_bind.finalize(gpa, self);
     try self.lazy_bind.finalize(gpa, self);
     try self.export_trie.finalize(gpa);
 }
@@ -2332,7 +2323,6 @@ fn writeDyldInfoSections(self: *MachO, off: u32) !u32 {
     needed_size += cmd.bind_size;
 
     cmd.weak_bind_off = needed_size;
-    cmd.weak_bind_size = mem.alignForward(u32, @intCast(self.weak_bind.size()), @alignOf(u64));
     needed_size += cmd.weak_bind_size;
 
     cmd.lazy_bind_off = needed_size;
