@@ -396,14 +396,9 @@ pub fn flush(self: *MachO) !void {
 
     state_log.debug("{}", .{self.dumpState()});
 
-    try self.rebase.updateSize(self);
-    try self.bind.updateSize(self);
-    try self.weak_bind.updateSize(self);
-    try self.lazy_bind.updateSize(self);
-    try self.initExportTrie();
+    try self.updateDyldInfoSizes();
     try self.writeAtoms();
     try self.writeUnwindInfo();
-    try self.export_trie.finalize(gpa);
     try self.writeSyntheticSections();
 
     var off = math.cast(u32, self.getLinkeditSegment().fileoff) orelse return error.Overflow;
@@ -2047,7 +2042,15 @@ fn allocateSyntheticSymbols(self: *MachO) void {
     }
 }
 
-fn initExportTrie(self: *MachO) !void {
+fn updateDyldInfoSizes(self: *MachO) !void {
+    try self.rebase.updateSize(self);
+    try self.bind.updateSize(self);
+    try self.weak_bind.updateSize(self);
+    try self.lazy_bind.updateSize(self);
+    try self.updateExportTrieSize();
+}
+
+fn updateExportTrieSize(self: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -2088,6 +2091,9 @@ fn initExportTrie(self: *MachO) !void {
             .export_flags = macho.EXPORT_SYMBOL_FLAGS_KIND_REGULAR,
         });
     }
+
+    try self.export_trie.finalize(gpa);
+    self.dyld_info_cmd.export_size = mem.alignForward(u32, @intCast(self.export_trie.size), @alignOf(u64));
 }
 
 fn writeAtoms(self: *MachO) !void {
@@ -2313,7 +2319,6 @@ fn writeDyldInfoSections(self: *MachO, off: u32) !u32 {
     needed_size += cmd.lazy_bind_size;
 
     cmd.export_off = needed_size;
-    cmd.export_size = mem.alignForward(u32, @intCast(self.export_trie.size), @alignOf(u64));
     needed_size += cmd.export_size;
 
     const buffer = try gpa.alloc(u8, needed_size);
