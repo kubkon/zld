@@ -65,8 +65,8 @@ la_symbol_ptr: LaSymbolPtrSection = .{},
 tlv_ptr: TlvPtrSection = .{},
 rebase: Rebase = .{},
 bind: Bind = .{},
-weak_bind: WeakBindSection = .{},
-lazy_bind: LazyBindSection = .{},
+weak_bind: WeakBind = .{},
+lazy_bind: LazyBind = .{},
 export_trie: ExportTrieSection = .{},
 unwind_info: UnwindInfo = .{},
 
@@ -399,10 +399,11 @@ pub fn flush(self: *MachO) !void {
     try self.rebase.updateSize(self);
     try self.bind.updateSize(self);
     try self.weak_bind.updateSize(self);
-    try self.initDyldInfoSections();
+    try self.lazy_bind.updateSize(self);
+    try self.initExportTrie();
     try self.writeAtoms();
     try self.writeUnwindInfo();
-    try self.finalizeDyldInfoSections();
+    try self.export_trie.finalize(gpa);
     try self.writeSyntheticSections();
 
     var off = math.cast(u32, self.getLinkeditSegment().fileoff) orelse return error.Overflow;
@@ -2046,14 +2047,6 @@ fn allocateSyntheticSymbols(self: *MachO) void {
     }
 }
 
-fn initDyldInfoSections(self: *MachO) !void {
-    const tracy = trace(@src());
-    defer tracy.end();
-
-    if (self.la_symbol_ptr_sect_index != null) try self.la_symbol_ptr.addDyldRelocs(self);
-    try self.initExportTrie();
-}
-
 fn initExportTrie(self: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
@@ -2239,15 +2232,6 @@ fn writeUnwindInfo(self: *MachO) !void {
     }
 }
 
-fn finalizeDyldInfoSections(self: *MachO) !void {
-    const tracy = trace(@src());
-    defer tracy.end();
-    const gpa = self.base.allocator;
-
-    try self.lazy_bind.finalize(gpa, self);
-    try self.export_trie.finalize(gpa);
-}
-
 fn writeSyntheticSections(self: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
@@ -2326,7 +2310,6 @@ fn writeDyldInfoSections(self: *MachO, off: u32) !u32 {
     needed_size += cmd.weak_bind_size;
 
     cmd.lazy_bind_off = needed_size;
-    cmd.lazy_bind_size = mem.alignForward(u32, @intCast(self.lazy_bind.size()), @alignOf(u64));
     needed_size += cmd.lazy_bind_size;
 
     cmd.export_off = needed_size;
@@ -3384,7 +3367,7 @@ const Md5 = std.crypto.hash.Md5;
 const Object = @import("MachO/Object.zig");
 const ObjcStubsSection = synthetic.ObjcStubsSection;
 pub const Options = @import("MachO/Options.zig");
-const LazyBindSection = synthetic.LazyBindSection;
+const LazyBind = bind.LazyBind;
 const LaSymbolPtrSection = synthetic.LaSymbolPtrSection;
 const LibStub = @import("tapi.zig").LibStub;
 const Rebase = @import("MachO/dyld_info/Rebase.zig");
@@ -3397,5 +3380,5 @@ const ThreadPool = std.Thread.Pool;
 const TlvPtrSection = synthetic.TlvPtrSection;
 const UnwindInfo = @import("MachO/UnwindInfo.zig");
 const WaitGroup = std.Thread.WaitGroup;
-const WeakBindSection = synthetic.WeakBindSection;
+const WeakBind = bind.WeakBind;
 const Zld = @import("Zld.zig");

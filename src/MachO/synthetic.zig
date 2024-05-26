@@ -291,35 +291,6 @@ pub const LaSymbolPtrSection = struct {
         return macho_file.stubs.symbols.items.len * @sizeOf(u64);
     }
 
-    pub fn addDyldRelocs(laptr: LaSymbolPtrSection, macho_file: *MachO) !void {
-        const tracy = trace(@src());
-        defer tracy.end();
-        _ = laptr;
-        const gpa = macho_file.base.allocator;
-
-        const sect = macho_file.sections.items(.header)[macho_file.la_symbol_ptr_sect_index.?];
-        const seg_id = macho_file.sections.items(.segment_id)[macho_file.la_symbol_ptr_sect_index.?];
-        const seg = macho_file.segments.items[seg_id];
-
-        for (macho_file.stubs.symbols.items, 0..) |sym_index, idx| {
-            const sym = macho_file.getSymbol(sym_index);
-            const addr = sect.addr + idx * @sizeOf(u64);
-            const bind_entry = bind.Entry{
-                .target = sym_index,
-                .offset = addr - seg.vmaddr,
-                .segment_id = seg_id,
-                .addend = 0,
-            };
-            if (sym.flags.import and !sym.flags.weak) {
-                try macho_file.lazy_bind.entries.append(gpa, bind_entry);
-            } else {
-                if (sym.flags.interposable and !sym.flags.weak) {
-                    try macho_file.lazy_bind.entries.append(gpa, bind_entry);
-                }
-            }
-        }
-    }
-
     pub fn write(laptr: LaSymbolPtrSection, macho_file: *MachO, writer: anytype) !void {
         const tracy = trace(@src());
         defer tracy.end();
@@ -568,9 +539,6 @@ pub const Indsymtab = struct {
     }
 };
 
-pub const BindSection = bind.Bind;
-pub const WeakBindSection = bind.WeakBind;
-pub const LazyBindSection = bind.LazyBind;
 pub const ExportTrieSection = Trie;
 
 const aarch64 = @import("../aarch64.zig");

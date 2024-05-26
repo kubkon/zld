@@ -533,7 +533,37 @@ pub const LazyBind = struct {
         return @as(u64, @intCast(self.buffer.items.len));
     }
 
-    pub fn finalize(self: *Self, gpa: Allocator, ctx: *MachO) !void {
+    pub fn updateSize(self: *Self, macho_file: *MachO) !void {
+        const tracy = trace(@src());
+        defer tracy.end();
+
+        const gpa = macho_file.base.allocator;
+
+        if (macho_file.la_symbol_ptr_sect_index) |sid| {
+            const sect = macho_file.sections.items(.header)[sid];
+            const seg_id = macho_file.sections.items(.segment_id)[sid];
+            const seg = macho_file.segments.items[seg_id];
+
+            for (macho_file.stubs.symbols.items, 0..) |sym_index, idx| {
+                const sym = macho_file.getSymbol(sym_index);
+                const addr = sect.addr + idx * @sizeOf(u64);
+                const bind_entry = Entry{
+                    .target = sym_index,
+                    .offset = addr - seg.vmaddr,
+                    .segment_id = seg_id,
+                    .addend = 0,
+                };
+                if ((sym.flags.import and !sym.flags.weak) or (sym.flags.interposable and !sym.flags.weak)) {
+                    try self.entries.append(gpa, bind_entry);
+                }
+            }
+        }
+
+        try self.finalize(gpa, macho_file);
+        macho_file.dyld_info_cmd.lazy_bind_size = mem.alignForward(u32, @intCast(self.size()), @alignOf(u64));
+    }
+
+    fn finalize(self: *Self, gpa: Allocator, ctx: *MachO) !void {
         if (self.entries.items.len == 0) return;
 
         try self.offsets.ensureTotalCapacityPrecise(gpa, self.entries.items.len);
