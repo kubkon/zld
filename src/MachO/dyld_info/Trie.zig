@@ -28,16 +28,6 @@
 //! After the optional exported symbol information is a byte of how many edges (0-255) that
 //! this node has leaving it, followed by each edge. Each edge is a zero terminated UTF8 of
 //! the addition chars in the symbol, followed by a uleb128 offset for the node that edge points to.
-const Trie = @This();
-
-const std = @import("std");
-const mem = std.mem;
-const leb = std.leb;
-const log = std.log.scoped(.macho);
-const macho = std.macho;
-const testing = std.testing;
-const assert = std.debug.assert;
-const Allocator = mem.Allocator;
 
 pub const Node = struct {
     base: *Trie,
@@ -315,6 +305,53 @@ pub fn put(self: *Trie, allocator: Allocator, symbol: ExportSymbol) !void {
         .export_flags = symbol.export_flags,
     };
     self.trie_dirty = true;
+}
+
+pub fn updateSize(self: *Trie, macho_file: *MachO) error{OutOfMemory}!void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    const gpa = macho_file.base.allocator;
+    try self.init(gpa);
+
+    const seg = macho_file.getTextSegment();
+    for (macho_file.objects.items) |index| {
+        for (macho_file.getFile(index).?.getSymbols()) |sym_index| {
+            const sym = macho_file.getSymbol(sym_index);
+            if (!sym.flags.@"export") continue;
+            if (sym.getAtom(macho_file)) |atom| if (!atom.flags.alive) continue;
+            if (sym.getFile(macho_file).?.getIndex() != index) continue;
+            var flags: u64 = if (sym.flags.abs)
+                macho.EXPORT_SYMBOL_FLAGS_KIND_ABSOLUTE
+            else if (sym.flags.tlv)
+                macho.EXPORT_SYMBOL_FLAGS_KIND_THREAD_LOCAL
+            else
+                macho.EXPORT_SYMBOL_FLAGS_KIND_REGULAR;
+            if (sym.flags.weak) {
+                flags |= macho.EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION;
+                // TODO these should be atomic
+                macho_file.weak_defines = true;
+                macho_file.binds_to_weak = true;
+            }
+            try self.put(gpa, .{
+                .name = sym.getName(macho_file),
+                .vmaddr_offset = sym.getAddress(.{ .stubs = false }, macho_file) - seg.vmaddr,
+                .export_flags = flags,
+            });
+        }
+    }
+
+    if (macho_file.mh_execute_header_index) |index| {
+        const sym = macho_file.getSymbol(index);
+        try self.put(gpa, .{
+            .name = sym.getName(macho_file),
+            .vmaddr_offset = sym.getAddress(.{}, macho_file) - seg.vmaddr,
+            .export_flags = macho.EXPORT_SYMBOL_FLAGS_KIND_REGULAR,
+        });
+    }
+
+    try self.finalize(gpa);
+    macho_file.dyld_info_cmd.export_size = mem.alignForward(u32, @intCast(self.size), @alignOf(u64));
 }
 
 /// Finalizes this trie for writing to a byte stream.
@@ -610,3 +647,16 @@ test "ordering bug" {
     _ = try trie.write(stream.writer());
     try expectEqualHexStrings(&exp_buffer, buffer);
 }
+
+const assert = std.debug.assert;
+const leb = std.leb;
+const log = std.log.scoped(.macho);
+const macho = std.macho;
+const mem = std.mem;
+const std = @import("std");
+const testing = std.testing;
+const trace = @import("../../tracy.zig").trace;
+
+const Allocator = mem.Allocator;
+const MachO = @import("../../MachO.zig");
+const Trie = @This();

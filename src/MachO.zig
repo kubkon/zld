@@ -80,6 +80,9 @@ has_tlv: bool = false,
 binds_to_weak: bool = false,
 weak_defines: bool = false,
 
+work_queue: std.fifo.LinearFifo(Job, .Dynamic),
+wait_group: WaitGroup = .{},
+
 pub fn openPath(allocator: Allocator, options: Options, thread_pool: *ThreadPool) !*MachO {
     const file = try options.emit.directory.createFile(options.emit.sub_path, .{
         .truncate = true,
@@ -106,6 +109,7 @@ fn createEmpty(gpa: Allocator, options: Options, thread_pool: *ThreadPool) !*Mac
             .thread_pool = thread_pool,
         },
         .options = options,
+        .work_queue = std.fifo.LinearFifo(Job, .Dynamic).init(gpa),
     };
     return self;
 }
@@ -160,6 +164,7 @@ pub fn deinit(self: *MachO) void {
     self.unwind_info.deinit(gpa);
     self.unwind_records.deinit(gpa);
     self.data_in_code.deinit(gpa);
+    self.work_queue.deinit();
 }
 
 pub fn flush(self: *MachO) !void {
@@ -398,10 +403,12 @@ pub fn flush(self: *MachO) !void {
 
     state_log.debug("{}", .{self.dumpState()});
 
-    try self.updateDyldInfoSizes();
+    try self.updateLinkeditSizes();
     try self.calcSymtabSize();
     try self.indsymtab.updateSize(self);
     try self.data_in_code.updateSize(self);
+
+    try self.performAllTheWork();
 
     try self.allocateLinkeditSegment();
 
@@ -2102,96 +2109,54 @@ fn allocateLinkeditSegment(self: *MachO) error{Overflow}!void {
     seg.filesize = off - seg.fileoff;
 }
 
-fn updateDyldInfoSizes(self: *MachO) !void {
-    const Job = enum {
-        rebase,
-        bind,
-        weak_bind,
-        lazy_bind,
-        trie,
-    };
-    const updateDyldInfoSizesWorker = struct {
-        fn updateDyldInfoSizesWorker(macho_file: *MachO, job: Job, err: *DyldErr!void, wg: *WaitGroup) void {
-            defer wg.finish();
-            err.* = switch (job) {
-                .rebase => macho_file.rebase.updateSize(macho_file),
-                .bind => macho_file.bind.updateSize(macho_file),
-                .weak_bind => macho_file.weak_bind.updateSize(macho_file),
-                .lazy_bind => macho_file.lazy_bind.updateSize(macho_file),
-                .trie => macho_file.updateExportTrieSize(),
-            };
-        }
-    }.updateDyldInfoSizesWorker;
-
-    var wg: WaitGroup = .{};
-
-    var results: [@typeInfo(Job).Enum.fields.len]DyldErr!void = undefined;
-    {
-        wg.reset();
-        defer wg.wait();
-
-        inline for (@typeInfo(Job).Enum.fields, 0..) |field, i| {
-            wg.start();
-            try self.base.thread_pool.spawn(updateDyldInfoSizesWorker, .{
-                self,
-                @field(Job, field.name),
-                &results[i],
-                &wg,
-            });
-        }
-
-        for (&results) |res| {
-            res catch {}; // TODO another panic
-        }
-    }
+fn updateLinkeditSizes(self: *MachO) !void {
+    try self.work_queue.writeItem(.{ .rebase_size = {} });
+    try self.work_queue.writeItem(.{ .bind_size = {} });
+    try self.work_queue.writeItem(.{ .weak_bind_size = {} });
+    try self.work_queue.writeItem(.{ .lazy_bind_size = {} });
+    try self.work_queue.writeItem(.{ .export_trie_size = {} });
 }
 
-pub const DyldErr = error{OutOfMemory};
+fn performAllTheWork(self: *MachO) !void {
+    self.wait_group.reset();
+    defer self.wait_group.wait();
+    while (self.work_queue.readItem()) |job| switch (job) {
+        .rebase_size => self.base.thread_pool.spawnWg(&self.wait_group, updateRebaseSizeWorker, .{self}),
+        .bind_size => self.base.thread_pool.spawnWg(&self.wait_group, updateBindSizeWorker, .{self}),
+        .weak_bind_size => self.base.thread_pool.spawnWg(&self.wait_group, updateWeakBindSizeWorker, .{self}),
+        .lazy_bind_size => self.base.thread_pool.spawnWg(&self.wait_group, updateLazyBindSizeWorker, .{self}),
+        .export_trie_size => self.base.thread_pool.spawnWg(&self.wait_group, updateExportTrieSizeWorker, .{self}),
+    };
+}
 
-fn updateExportTrieSize(self: *MachO) DyldErr!void {
-    const tracy = trace(@src());
-    defer tracy.end();
+fn updateRebaseSizeWorker(self: *MachO) void {
+    self.rebase.updateSize(self) catch |err| {
+        self.base.fatal("could not calculate rebase opcodes size: {s}", .{@errorName(err)});
+    };
+}
 
-    const gpa = self.base.allocator;
-    try self.export_trie.init(gpa);
+fn updateBindSizeWorker(self: *MachO) void {
+    self.bind.updateSize(self) catch |err| {
+        self.base.fatal("could not calculate bind opcodes size: {s}", .{@errorName(err)});
+    };
+}
 
-    const seg = self.getTextSegment();
-    for (self.objects.items) |index| {
-        for (self.getFile(index).?.getSymbols()) |sym_index| {
-            const sym = self.getSymbol(sym_index);
-            if (!sym.flags.@"export") continue;
-            if (sym.getAtom(self)) |atom| if (!atom.flags.alive) continue;
-            if (sym.getFile(self).?.getIndex() != index) continue;
-            var flags: u64 = if (sym.flags.abs)
-                macho.EXPORT_SYMBOL_FLAGS_KIND_ABSOLUTE
-            else if (sym.flags.tlv)
-                macho.EXPORT_SYMBOL_FLAGS_KIND_THREAD_LOCAL
-            else
-                macho.EXPORT_SYMBOL_FLAGS_KIND_REGULAR;
-            if (sym.flags.weak) {
-                flags |= macho.EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION;
-                self.weak_defines = true;
-                self.binds_to_weak = true;
-            }
-            try self.export_trie.put(gpa, .{
-                .name = sym.getName(self),
-                .vmaddr_offset = sym.getAddress(.{ .stubs = false }, self) - seg.vmaddr,
-                .export_flags = flags,
-            });
-        }
-    }
+fn updateWeakBindSizeWorker(self: *MachO) void {
+    self.weak_bind.updateSize(self) catch |err| {
+        self.base.fatal("could not calculate weak bind opcodes size: {s}", .{@errorName(err)});
+    };
+}
 
-    if (self.mh_execute_header_index) |index| {
-        const sym = self.getSymbol(index);
-        try self.export_trie.put(gpa, .{
-            .name = sym.getName(self),
-            .vmaddr_offset = sym.getAddress(.{}, self) - seg.vmaddr,
-            .export_flags = macho.EXPORT_SYMBOL_FLAGS_KIND_REGULAR,
-        });
-    }
+fn updateLazyBindSizeWorker(self: *MachO) void {
+    self.lazy_bind.updateSize(self) catch |err| {
+        self.base.fatal("could not calculate lazy bind opcodes size: {s}", .{@errorName(err)});
+    };
+}
 
-    try self.export_trie.finalize(gpa);
-    self.dyld_info_cmd.export_size = mem.alignForward(u32, @intCast(self.export_trie.size), @alignOf(u64));
+fn updateExportTrieSizeWorker(self: *MachO) void {
+    self.export_trie.updateSize(self) catch |err| {
+        self.base.fatal("could not calculate export trie size: {s}", .{@errorName(err)});
+    };
 }
 
 fn writeAtoms(self: *MachO) !void {
@@ -3352,6 +3317,14 @@ pub const null_sym = macho.nlist_64{
     .n_sect = 0,
     .n_desc = 0,
     .n_value = 0,
+};
+
+pub const Job = union(enum) {
+    rebase_size: void,
+    bind_size: void,
+    weak_bind_size: void,
+    lazy_bind_size: void,
+    export_trie_size: void,
 };
 
 pub const base_tag = Zld.Tag.macho;
