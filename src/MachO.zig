@@ -2163,14 +2163,6 @@ fn writeSections(self: *MachO) !void {
         if (header.isZerofill()) continue;
         try self.work_queue.writeItem(.{ .write_section = @intCast(i) });
     }
-
-    if (self.eh_frame_sect_index) |i| {
-        try self.work_queue.writeItem(.{ .write_synthetic_section = @intCast(i) });
-    }
-
-    if (self.unwind_info_sect_index) |i| {
-        try self.work_queue.writeItem(.{ .write_synthetic_section = @intCast(i) });
-    }
 }
 
 fn writeSectionWorker(self: *MachO, sect_id: u8) void {
@@ -2224,15 +2216,31 @@ fn writeSectionWorker(self: *MachO, sect_id: u8) void {
 fn writeSyntheticSectionWorker(self: *MachO, sect_id: u8) void {
     const tracy = trace(@src());
     defer tracy.end();
-    const Tag = enum { eh_frame, unwind_info };
+    const Tag = enum {
+        eh_frame,
+        unwind_info,
+        got,
+        stubs,
+        stubs_helper,
+        la_symbol_ptr,
+        tlv_ptr,
+        objc_stubs,
+    };
     const doWork = struct {
         fn doWork(macho_file: *MachO, header: macho.section_64, tag: Tag) !void {
             const gpa = macho_file.base.allocator;
             const buffer = try gpa.alloc(u8, header.size);
             defer gpa.free(buffer);
+            var stream = std.io.fixedBufferStream(buffer);
             switch (tag) {
                 .eh_frame => eh_frame.write(macho_file, buffer),
                 .unwind_info => try macho_file.unwind_info.write(macho_file, buffer),
+                .got => try macho_file.got.write(macho_file, stream.writer()),
+                .stubs => try macho_file.stubs.write(macho_file, stream.writer()),
+                .stubs_helper => try macho_file.stubs_helper.write(macho_file, stream.writer()),
+                .la_symbol_ptr => try macho_file.la_symbol_ptr.write(macho_file, stream.writer()),
+                .tlv_ptr => try macho_file.tlv_ptr.write(macho_file, stream.writer()),
+                .objc_stubs => try macho_file.objc_stubs.write(macho_file, stream.writer()),
             }
             try macho_file.base.file.pwriteAll(buffer, header.offset);
         }
@@ -2243,6 +2251,18 @@ fn writeSyntheticSectionWorker(self: *MachO, sect_id: u8) void {
             self.eh_frame_sect_index.? == sect_id) break :tag .eh_frame;
         if (self.unwind_info_sect_index != null and
             self.unwind_info_sect_index.? == sect_id) break :tag .unwind_info;
+        if (self.got_sect_index != null and
+            self.got_sect_index.? == sect_id) break :tag .got;
+        if (self.stubs_sect_index != null and
+            self.stubs_sect_index.? == sect_id) break :tag .stubs;
+        if (self.stubs_helper_sect_index != null and
+            self.stubs_helper_sect_index.? == sect_id) break :tag .stubs_helper;
+        if (self.la_symbol_ptr_sect_index != null and
+            self.la_symbol_ptr_sect_index.? == sect_id) break :tag .la_symbol_ptr;
+        if (self.tlv_ptr_sect_index != null and
+            self.tlv_ptr_sect_index.? == sect_id) break :tag .tlv_ptr;
+        if (self.objc_stubs_sect_index != null and
+            self.objc_stubs_sect_index.? == sect_id) break :tag .objc_stubs;
         unreachable;
     };
     doWork(self, header, tag) catch |err| {
@@ -2255,63 +2275,36 @@ fn writeSyntheticSectionWorker(self: *MachO, sect_id: u8) void {
 }
 
 fn writeSyntheticSections(self: *MachO) !void {
-    const tracy = trace(@src());
-    defer tracy.end();
-
-    const gpa = self.base.allocator;
-
-    if (self.got_sect_index) |sect_id| {
-        const header = self.sections.items(.header)[sect_id];
-        var buffer = try std.ArrayList(u8).initCapacity(gpa, header.size);
-        defer buffer.deinit();
-        try self.got.write(self, buffer.writer());
-        assert(buffer.items.len == header.size);
-        try self.base.file.pwriteAll(buffer.items, header.offset);
+    if (self.eh_frame_sect_index) |i| {
+        try self.work_queue.writeItem(.{ .write_synthetic_section = i });
     }
 
-    if (self.stubs_sect_index) |sect_id| {
-        const header = self.sections.items(.header)[sect_id];
-        var buffer = try std.ArrayList(u8).initCapacity(gpa, header.size);
-        defer buffer.deinit();
-        try self.stubs.write(self, buffer.writer());
-        assert(buffer.items.len == header.size);
-        try self.base.file.pwriteAll(buffer.items, header.offset);
+    if (self.unwind_info_sect_index) |i| {
+        try self.work_queue.writeItem(.{ .write_synthetic_section = i });
     }
 
-    if (self.stubs_helper_sect_index) |sect_id| {
-        const header = self.sections.items(.header)[sect_id];
-        var buffer = try std.ArrayList(u8).initCapacity(gpa, header.size);
-        defer buffer.deinit();
-        try self.stubs_helper.write(self, buffer.writer());
-        assert(buffer.items.len == header.size);
-        try self.base.file.pwriteAll(buffer.items, header.offset);
+    if (self.got_sect_index) |i| {
+        try self.work_queue.writeItem(.{ .write_synthetic_section = i });
     }
 
-    if (self.la_symbol_ptr_sect_index) |sect_id| {
-        const header = self.sections.items(.header)[sect_id];
-        var buffer = try std.ArrayList(u8).initCapacity(gpa, header.size);
-        defer buffer.deinit();
-        try self.la_symbol_ptr.write(self, buffer.writer());
-        assert(buffer.items.len == header.size);
-        try self.base.file.pwriteAll(buffer.items, header.offset);
+    if (self.stubs_sect_index) |i| {
+        try self.work_queue.writeItem(.{ .write_synthetic_section = i });
     }
 
-    if (self.tlv_ptr_sect_index) |sect_id| {
-        const header = self.sections.items(.header)[sect_id];
-        var buffer = try std.ArrayList(u8).initCapacity(gpa, header.size);
-        defer buffer.deinit();
-        try self.tlv_ptr.write(self, buffer.writer());
-        assert(buffer.items.len == header.size);
-        try self.base.file.pwriteAll(buffer.items, header.offset);
+    if (self.stubs_helper_sect_index) |i| {
+        try self.work_queue.writeItem(.{ .write_synthetic_section = i });
     }
 
-    if (self.objc_stubs_sect_index) |sect_id| {
-        const header = self.sections.items(.header)[sect_id];
-        var buffer = try std.ArrayList(u8).initCapacity(gpa, header.size);
-        defer buffer.deinit();
-        try self.objc_stubs.write(self, buffer.writer());
-        assert(buffer.items.len == header.size);
-        try self.base.file.pwriteAll(buffer.items, header.offset);
+    if (self.la_symbol_ptr_sect_index) |i| {
+        try self.work_queue.writeItem(.{ .write_synthetic_section = i });
+    }
+
+    if (self.tlv_ptr_sect_index) |i| {
+        try self.work_queue.writeItem(.{ .write_synthetic_section = i });
+    }
+
+    if (self.objc_stubs_sect_index) |i| {
+        try self.work_queue.writeItem(.{ .write_synthetic_section = i });
     }
 }
 
