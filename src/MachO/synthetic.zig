@@ -539,18 +539,74 @@ pub const Indsymtab = struct {
     }
 };
 
-pub const ExportTrieSection = Trie;
+pub const DataInCode = struct {
+    entries: std.ArrayListUnmanaged(macho.data_in_code_entry) = .{},
+
+    pub fn deinit(dice: *DataInCode, allocator: Allocator) void {
+        dice.entries.deinit(allocator);
+    }
+
+    pub fn size(dice: DataInCode) usize {
+        return dice.entries.items.len * @sizeOf(macho.data_in_code_entry);
+    }
+
+    pub fn updateSize(dice: *DataInCode, macho_file: *MachO) !void {
+        const gpa = macho_file.base.allocator;
+        const base_address = if (!macho_file.options.relocatable)
+            macho_file.getTextSegment().vmaddr
+        else
+            0;
+
+        for (macho_file.objects.items) |index| {
+            const object = macho_file.getFile(index).?.object;
+            const dices = object.getDataInCode();
+
+            try dice.entries.ensureUnusedCapacity(gpa, dices.len);
+
+            var next_dice: usize = 0;
+            for (object.atoms.items) |atom_index| {
+                if (next_dice >= dices.len) break;
+                const atom = macho_file.getAtom(atom_index) orelse continue;
+                const start_off = atom.getInputAddress(macho_file);
+                const end_off = start_off + atom.size;
+                const start_dice = next_dice;
+
+                if (end_off < dices[next_dice].offset) continue;
+
+                while (next_dice < dices.len and
+                    dices[next_dice].offset < end_off) : (next_dice += 1)
+                {}
+
+                if (atom.flags.alive) for (dices[start_dice..next_dice]) |d| {
+                    dice.entries.appendAssumeCapacity(.{
+                        .offset = @intCast(atom.getAddress(macho_file) + d.offset - start_off - base_address),
+                        .length = d.length,
+                        .kind = d.kind,
+                    });
+                };
+            }
+        }
+
+        macho_file.data_in_code_cmd.datasize = math.cast(u32, dice.size()) orelse return error.Overflow;
+    }
+};
+
+pub const Rebase = @import("dyld_info/Rebase.zig");
+pub const Bind = bind.Bind;
+pub const WeakBind = bind.WeakBind;
+pub const LazyBind = bind.LazyBind;
+pub const ExportTrie = Trie;
 
 const aarch64 = @import("../aarch64.zig");
 const assert = std.debug.assert;
 const bind = @import("dyld_info/bind.zig");
+const macho = std.macho;
 const math = std.math;
 const std = @import("std");
 const trace = @import("../tracy.zig").trace;
 
 const Allocator = std.mem.Allocator;
 const MachO = @import("../MachO.zig");
-const Rebase = @import("dyld_info/Rebase.zig");
 const Relocation = @import("Relocation.zig");
 const Symbol = @import("Symbol.zig");
 const Trie = @import("dyld_info/Trie.zig");

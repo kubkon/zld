@@ -67,8 +67,9 @@ rebase: Rebase = .{},
 bind: Bind = .{},
 weak_bind: WeakBind = .{},
 lazy_bind: LazyBind = .{},
-export_trie: ExportTrieSection = .{},
+export_trie: ExportTrie = .{},
 unwind_info: UnwindInfo = .{},
+data_in_code: DataInCode = .{},
 
 atoms: std.ArrayListUnmanaged(Atom) = .{},
 atoms_extra: std.ArrayListUnmanaged(u32) = .{},
@@ -158,6 +159,7 @@ pub fn deinit(self: *MachO) void {
     self.export_trie.deinit(gpa);
     self.unwind_info.deinit(gpa);
     self.unwind_records.deinit(gpa);
+    self.data_in_code.deinit(gpa);
 }
 
 pub fn flush(self: *MachO) !void {
@@ -397,6 +399,9 @@ pub fn flush(self: *MachO) !void {
     state_log.debug("{}", .{self.dumpState()});
 
     try self.updateDyldInfoSizes();
+    try self.calcSymtabSize();
+    try self.data_in_code.updateSize(self);
+
     try self.writeAtoms();
     try self.writeUnwindInfo();
     try self.writeSyntheticSections();
@@ -406,8 +411,7 @@ pub fn flush(self: *MachO) !void {
     off = mem.alignForward(u32, off, @alignOf(u64));
     off = try self.writeFunctionStarts(off);
     off = mem.alignForward(u32, off, @alignOf(u64));
-    off = try self.writeDataInCode(self.getTextSegment().vmaddr, off);
-    try self.calcSymtabSize();
+    off = try self.writeDataInCode(off);
     off = mem.alignForward(u32, off, @alignOf(u64));
     off = try self.writeSymtab(off);
     off = mem.alignForward(u32, off, @alignOf(u32));
@@ -2394,50 +2398,11 @@ fn writeFunctionStarts(self: *MachO, off: u32) !u32 {
     return off;
 }
 
-pub fn writeDataInCode(self: *MachO, base_address: u64, off: u32) !u32 {
+pub fn writeDataInCode(self: *MachO, off: u32) !u32 {
     const cmd = &self.data_in_code_cmd;
     cmd.dataoff = off;
-
-    const gpa = self.base.allocator;
-    var dices = std.ArrayList(macho.data_in_code_entry).init(gpa);
-    defer dices.deinit();
-
-    for (self.objects.items) |index| {
-        const object = self.getFile(index).?.object;
-        const in_dices = object.getDataInCode();
-
-        try dices.ensureUnusedCapacity(in_dices.len);
-
-        var next_dice: usize = 0;
-        for (object.atoms.items) |atom_index| {
-            if (next_dice >= in_dices.len) break;
-            const atom = self.getAtom(atom_index) orelse continue;
-            const start_off = atom.getInputAddress(self);
-            const end_off = start_off + atom.size;
-            const start_dice = next_dice;
-
-            if (end_off < in_dices[next_dice].offset) continue;
-
-            while (next_dice < in_dices.len and
-                in_dices[next_dice].offset < end_off) : (next_dice += 1)
-            {}
-
-            if (atom.flags.alive) for (in_dices[start_dice..next_dice]) |dice| {
-                dices.appendAssumeCapacity(.{
-                    .offset = @intCast(atom.getAddress(self) + dice.offset - start_off - base_address),
-                    .length = dice.length,
-                    .kind = dice.kind,
-                });
-            };
-        }
-    }
-
-    const needed_size = math.cast(u32, dices.items.len * @sizeOf(macho.data_in_code_entry)) orelse return error.Overflow;
-    cmd.datasize = needed_size;
-
-    try self.base.file.pwriteAll(mem.sliceAsBytes(dices.items), cmd.dataoff);
-
-    return off + needed_size;
+    try self.base.file.pwriteAll(mem.sliceAsBytes(self.data_in_code.entries.items), cmd.dataoff);
+    return off + cmd.datasize;
 }
 
 pub fn calcSymtabSize(self: *MachO) !void {
@@ -3369,7 +3334,6 @@ pub const base_tag = Zld.Tag.macho;
 
 const aarch64 = @import("aarch64.zig");
 const assert = std.debug.assert;
-const bind = @import("MachO/dyld_info/bind.zig");
 const build_options = @import("build_options");
 const builtin = @import("builtin");
 const calcUuid = @import("MachO/uuid.zig").calcUuid;
@@ -3396,10 +3360,11 @@ const Allocator = mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const Archive = @import("MachO/Archive.zig");
 const Atom = @import("MachO/Atom.zig");
-const Bind = bind.Bind;
+const Bind = synthetic.Bind;
 const CodeSignature = @import("MachO/CodeSignature.zig");
+const DataInCode = synthetic.DataInCode;
 const Dylib = @import("MachO/Dylib.zig");
-const ExportTrieSection = synthetic.ExportTrieSection;
+const ExportTrie = synthetic.ExportTrie;
 const File = @import("MachO/file.zig").File;
 const GotSection = synthetic.GotSection;
 const Hash = std.hash.Wyhash;
@@ -3410,7 +3375,7 @@ const Md5 = std.crypto.hash.Md5;
 const Object = @import("MachO/Object.zig");
 const ObjcStubsSection = synthetic.ObjcStubsSection;
 pub const Options = @import("MachO/Options.zig");
-const LazyBind = bind.LazyBind;
+const LazyBind = synthetic.LazyBind;
 const LaSymbolPtrSection = synthetic.LaSymbolPtrSection;
 const LibStub = @import("tapi.zig").LibStub;
 const Rebase = @import("MachO/dyld_info/Rebase.zig");
@@ -3423,5 +3388,5 @@ const ThreadPool = std.Thread.Pool;
 const TlvPtrSection = synthetic.TlvPtrSection;
 const UnwindInfo = @import("MachO/UnwindInfo.zig");
 const WaitGroup = std.Thread.WaitGroup;
-const WeakBind = bind.WeakBind;
+const WeakBind = synthetic.WeakBind;
 const Zld = @import("Zld.zig");

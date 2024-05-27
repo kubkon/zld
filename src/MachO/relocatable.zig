@@ -46,12 +46,13 @@ pub fn flush(macho_file: *MachO) !void {
     state_log.debug("{}", .{macho_file.dumpState()});
 
     try macho_file.calcSymtabSize();
+    try macho_file.data_in_code.updateSize(macho_file);
     try writeAtoms(macho_file);
     try writeCompactUnwind(macho_file);
     try writeEhFrame(macho_file);
 
     off = mem.alignForward(u32, off, @alignOf(u64));
-    off = try macho_file.writeDataInCode(0, off);
+    off = try macho_file.writeDataInCode(off);
     off = mem.alignForward(u32, off, @alignOf(u64));
     off = try macho_file.writeSymtab(off);
     off = mem.alignForward(u32, off, @alignOf(u64));
