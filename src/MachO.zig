@@ -394,9 +394,10 @@ pub fn flush(self: *MachO) !void {
     try self.sortSections();
     try self.addAtomsToSections();
     try self.calcSectionSizes();
+    try self.performAllTheWork();
     try self.generateUnwindInfo();
-    try self.initSegments();
 
+    try self.initSegments();
     try self.allocateSections();
     self.allocateSegments();
     self.allocateSyntheticSymbols();
@@ -1730,28 +1731,17 @@ fn calcSectionSizes(self: *MachO) !void {
     }
 
     const slice = self.sections.slice();
-    for (slice.items(.header), slice.items(.atoms)) |*header, atoms| {
+    for (slice.items(.header), slice.items(.atoms), 0..) |header, atoms, i| {
         if (atoms.items.len == 0) continue;
         if (self.requiresThunks() and header.isCode()) continue;
-
-        for (atoms.items) |atom_index| {
-            const atom = self.getAtom(atom_index).?;
-            const atom_alignment = try math.powi(u32, 2, atom.alignment);
-            const offset = mem.alignForward(u64, header.size, atom_alignment);
-            const padding = offset - header.size;
-            atom.value = offset;
-            header.size += padding + atom.size;
-            header.@"align" = @max(header.@"align", atom.alignment);
-        }
+        try self.work_queue.writeItem(.{ .section_size = @intCast(i) });
     }
 
     if (self.requiresThunks()) {
         for (slice.items(.header), slice.items(.atoms), 0..) |header, atoms, i| {
             if (!header.isCode()) continue;
             if (atoms.items.len == 0) continue;
-
-            // Create jump/branch range extenders if needed.
-            try thunks.createThunks(@intCast(i), self);
+            try self.work_queue.writeItem(.{ .create_thunks = @intCast(i) });
         }
     }
 
@@ -1798,6 +1788,47 @@ fn calcSectionSizes(self: *MachO) !void {
             else => 0,
         };
     }
+}
+
+fn calcSectionSizeWorker(self: *MachO, sect_id: u8) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+    const doWork = struct {
+        fn doWork(macho_file: *MachO, header: *macho.section_64, atoms: []const Atom.Index) !void {
+            for (atoms) |atom_index| {
+                const atom = macho_file.getAtom(atom_index).?;
+                const atom_alignment = try math.powi(u32, 2, atom.alignment);
+                const offset = mem.alignForward(u64, header.size, atom_alignment);
+                const padding = offset - header.size;
+                atom.value = offset;
+                header.size += padding + atom.size;
+                header.@"align" = @max(header.@"align", atom.alignment);
+            }
+        }
+    }.doWork;
+    const slice = self.sections.slice();
+    const header = &slice.items(.header)[sect_id];
+    const atoms = slice.items(.atoms)[sect_id].items;
+    doWork(self, header, atoms) catch |err| {
+        self.base.fatal("failed to calculate size of section '{s},{s}': {s}", .{
+            header.segName(),
+            header.sectName(),
+            @errorName(err),
+        });
+    };
+}
+
+fn createThunksWorker(self: *MachO, sect_id: u8) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+    thunks.createThunks(sect_id, self) catch |err| {
+        const header = self.sections.items(.header)[sect_id];
+        self.base.fatal("failed to create thunks and calculate size of section '{s},{s}': {s}", .{
+            header.segName(),
+            header.sectName(),
+            @errorName(err),
+        });
+    };
 }
 
 fn initSegments(self: *MachO) !void {
@@ -2121,6 +2152,8 @@ fn performAllTheWork(self: *MachO) !void {
     self.wait_group.reset();
     defer self.wait_group.wait();
     while (self.work_queue.readItem()) |job| switch (job) {
+        .section_size => |x| self.base.thread_pool.spawnWg(&self.wait_group, calcSectionSizeWorker, .{ self, x }),
+        .create_thunks => |x| self.base.thread_pool.spawnWg(&self.wait_group, createThunksWorker, .{ self, x }),
         .rebase_size => self.base.thread_pool.spawnWg(&self.wait_group, updateLinkeditSizeWorker, .{ self, .rebase }),
         .bind_size => self.base.thread_pool.spawnWg(&self.wait_group, updateLinkeditSizeWorker, .{ self, .bind }),
         .weak_bind_size => self.base.thread_pool.spawnWg(&self.wait_group, updateLinkeditSizeWorker, .{ self, .weak_bind }),
@@ -3266,6 +3299,8 @@ pub const null_sym = macho.nlist_64{
 };
 
 pub const Job = union(enum) {
+    section_size: u8,
+    create_thunks: u8,
     rebase_size: void,
     bind_size: void,
     weak_bind_size: void,
