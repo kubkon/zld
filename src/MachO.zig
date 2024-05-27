@@ -2128,8 +2128,7 @@ fn performAllTheWork(self: *MachO) !void {
         .export_trie_size => self.base.thread_pool.spawnWg(&self.wait_group, updateLinkeditSizeWorker, .{ self, .export_trie }),
         .data_in_code_size => self.base.thread_pool.spawnWg(&self.wait_group, updateLinkeditSizeWorker, .{ self, .data_in_code }),
         .write_section => |x| self.base.thread_pool.spawnWg(&self.wait_group, writeSectionWorker, .{ self, x }),
-        .write_eh_frame => self.base.thread_pool.spawnWg(&self.wait_group, writeEhFrameWorker, .{self}),
-        .write_unwind_info => self.base.thread_pool.spawnWg(&self.wait_group, writeUnwindInfoWorker, .{self}),
+        .write_synthetic_section => |x| self.base.thread_pool.spawnWg(&self.wait_group, writeSyntheticSectionWorker, .{ self, x }),
     };
 }
 
@@ -2165,12 +2164,12 @@ fn writeSections(self: *MachO) !void {
         try self.work_queue.writeItem(.{ .write_section = @intCast(i) });
     }
 
-    if (self.eh_frame_sect_index) |_| {
-        try self.work_queue.writeItem(.{ .write_eh_frame = {} });
+    if (self.eh_frame_sect_index) |i| {
+        try self.work_queue.writeItem(.{ .write_synthetic_section = @intCast(i) });
     }
 
-    if (self.unwind_info_sect_index) |_| {
-        try self.work_queue.writeItem(.{ .write_unwind_info = {} });
+    if (self.unwind_info_sect_index) |i| {
+        try self.work_queue.writeItem(.{ .write_synthetic_section = @intCast(i) });
     }
 }
 
@@ -2222,41 +2221,36 @@ fn writeSectionWorker(self: *MachO, sect_id: u8) void {
     };
 }
 
-fn writeEhFrameWorker(self: *MachO) void {
+fn writeSyntheticSectionWorker(self: *MachO, sect_id: u8) void {
     const tracy = trace(@src());
     defer tracy.end();
+    const Tag = enum { eh_frame, unwind_info };
     const doWork = struct {
-        fn doWork(macho_file: *MachO) !void {
-            const index = macho_file.eh_frame_sect_index.?;
+        fn doWork(macho_file: *MachO, header: macho.section_64, tag: Tag) !void {
             const gpa = macho_file.base.allocator;
-            const header = macho_file.sections.items(.header)[index];
             const buffer = try gpa.alloc(u8, header.size);
             defer gpa.free(buffer);
-            eh_frame.write(macho_file, buffer);
+            switch (tag) {
+                .eh_frame => eh_frame.write(macho_file, buffer),
+                .unwind_info => try macho_file.unwind_info.write(macho_file, buffer),
+            }
             try macho_file.base.file.pwriteAll(buffer, header.offset);
         }
     }.doWork;
-    doWork(self) catch |err| {
-        self.base.fatal("could not write section '__TEXT,__eh_frame' to file: {s}", .{@errorName(err)});
+    const header = self.sections.items(.header)[sect_id];
+    const tag: Tag = tag: {
+        if (self.eh_frame_sect_index != null and
+            self.eh_frame_sect_index.? == sect_id) break :tag .eh_frame;
+        if (self.unwind_info_sect_index != null and
+            self.unwind_info_sect_index.? == sect_id) break :tag .unwind_info;
+        unreachable;
     };
-}
-
-fn writeUnwindInfoWorker(self: *MachO) void {
-    const tracy = trace(@src());
-    defer tracy.end();
-    const doWork = struct {
-        fn doWork(macho_file: *MachO) !void {
-            const index = macho_file.unwind_info_sect_index.?;
-            const gpa = macho_file.base.allocator;
-            const header = macho_file.sections.items(.header)[index];
-            const buffer = try gpa.alloc(u8, header.size);
-            defer gpa.free(buffer);
-            try macho_file.unwind_info.write(macho_file, buffer);
-            try macho_file.base.file.pwriteAll(buffer, header.offset);
-        }
-    }.doWork;
-    doWork(self) catch |err| {
-        self.base.fatal("could not write section '__TEXT,__unwind_info' to file: {s}", .{@errorName(err)});
+    doWork(self, header, tag) catch |err| {
+        self.base.fatal("could not write section '{s},{s}' to file: {s}", .{
+            header.segName(),
+            header.sectName(),
+            @errorName(err),
+        });
     };
 }
 
@@ -3286,8 +3280,7 @@ pub const Job = union(enum) {
     export_trie_size: void,
     data_in_code_size: void,
     write_section: u8,
-    write_eh_frame: void,
-    write_unwind_info: void,
+    write_synthetic_section: u8,
 };
 
 pub const base_tag = Zld.Tag.macho;
