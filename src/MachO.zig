@@ -408,7 +408,7 @@ pub fn flush(self: *MachO) !void {
 
     try self.allocateLinkeditSegment();
 
-    try self.writeAtoms();
+    try self.writeSections();
     try self.writeUnwindInfo();
     try self.writeSyntheticSections();
 
@@ -418,6 +418,7 @@ pub fn flush(self: *MachO) !void {
     try self.writeSymtab();
     try self.writeIndsymtab();
     try self.writeStrtab();
+    try self.performAllTheWork();
 
     var codesig: ?CodeSignature = if (self.requiresCodeSig()) blk: {
         // Preallocate space for the code signature.
@@ -2127,6 +2128,7 @@ fn performAllTheWork(self: *MachO) !void {
         .lazy_bind_size => self.base.thread_pool.spawnWg(&self.wait_group, updateLazyBindSizeWorker, .{self}),
         .export_trie_size => self.base.thread_pool.spawnWg(&self.wait_group, updateExportTrieSizeWorker, .{self}),
         .data_in_code_size => self.base.thread_pool.spawnWg(&self.wait_group, updateDataInCodeSizeWorker, .{self}),
+        .write_section => |x| self.base.thread_pool.spawnWg(&self.wait_group, writeSectionWorker, .{ self, x }),
     };
 }
 
@@ -2166,103 +2168,33 @@ fn updateDataInCodeSizeWorker(self: *MachO) void {
     };
 }
 
-fn writeAtoms(self: *MachO) !void {
-    const tracy = trace(@src());
-    defer tracy.end();
-
-    const gpa = self.base.allocator;
+fn writeSections(self: *MachO) !void {
     const slice = self.sections.slice();
-
-    var wg: WaitGroup = .{};
-    var has_resolve_error = false;
-
-    const results = try gpa.alloc(BigErr!void, slice.items(.header).len);
-    defer gpa.free(results);
-
-    {
-        wg.reset();
-        defer wg.wait();
-
-        for (slice.items(.header), slice.items(.atoms), slice.items(.thunks), results) |header, atoms, thnks, *res| {
-            if (atoms.items.len == 0) continue;
-            if (header.isZerofill()) continue;
-
-            wg.start();
-            try self.base.thread_pool.spawn(writeSectionWorker, .{
-                self,
-                header,
-                atoms.items,
-                thnks.items,
-                &(res.*),
-                &wg,
-            });
-        }
+    for (slice.items(.header), slice.items(.atoms), 0..) |header, atoms, i| {
+        if (atoms.items.len == 0) continue;
+        if (header.isZerofill()) continue;
+        try self.work_queue.writeItem(.{ .write_section = @intCast(i) });
     }
-
-    for (results) |res| {
-        res catch |err| switch (err) {
-            error.ResolveFailed => {
-                has_resolve_error = true;
-                continue;
-            },
-            else => {}, // TODO why catching error here panics?
-        };
-    }
-
-    if (has_resolve_error) return error.ResolveFailed;
 }
 
-const BigErr = error{
-    OutOfMemory,
-    ResolveFailed,
-    Overflow,
-    NoSpaceLeft,
-    DivisionByZero,
-    UnexpectedRemainder,
-    InputOutput,
-    AccessDenied,
-    BrokenPipe,
-    SystemResources,
-    OperationAborted,
-    WouldBlock,
-    ConnectionResetByPeer,
-    Unexpected,
-    IsDir,
-    ConnectionTimedOut,
-    NotOpenForReading,
-    SocketNotConnected,
-    Unseekable,
-    DiskQuota,
-    FileTooBig,
-    DeviceBusy,
-    InvalidArgument,
-    NotOpenForWriting,
-    LockViolation,
-};
-
-fn writeSectionWorker(
-    self: *MachO,
-    header: macho.section_64,
-    atoms: []const Atom.Index,
-    thunkss: []const Thunk.Index,
-    res: *BigErr!void,
-    wg: *WaitGroup,
-) void {
+fn writeSectionWorker(self: *MachO, sect_id: u8) void {
+    const tracy = trace(@src());
+    defer tracy.end();
     const doWork = struct {
         fn doWork(
             macho_file: *MachO,
-            h: macho.section_64,
-            atms: []const Atom.Index,
+            header: macho.section_64,
+            atoms: []const Atom.Index,
             thnks: []const Thunk.Index,
-        ) BigErr!void {
+        ) !void {
             const gpa = macho_file.base.allocator;
             const cpu_arch = macho_file.options.cpu_arch.?;
-            const buffer = try gpa.alloc(u8, h.size);
+            const buffer = try gpa.alloc(u8, header.size);
             defer gpa.free(buffer);
-            const padding_byte: u8 = if (h.isCode() and cpu_arch == .x86_64) 0xcc else 0;
+            const padding_byte: u8 = if (header.isCode() and cpu_arch == .x86_64) 0xcc else 0;
             @memset(buffer, padding_byte);
 
-            for (atms) |atom_index| {
+            for (atoms) |atom_index| {
                 const atom = macho_file.getAtom(atom_index).?;
                 assert(atom.flags.alive);
                 const off = atom.value;
@@ -2277,12 +2209,20 @@ fn writeSectionWorker(
                 try thunk.write(macho_file, stream.writer());
             }
 
-            try macho_file.base.file.pwriteAll(buffer, h.offset);
+            try macho_file.base.file.pwriteAll(buffer, header.offset);
         }
     }.doWork;
-
-    defer wg.finish();
-    res.* = doWork(self, header, atoms, thunkss);
+    const slice = self.sections.slice();
+    const header = slice.items(.header)[sect_id];
+    const atoms = slice.items(.atoms)[sect_id].items;
+    const thnks = slice.items(.thunks)[sect_id].items;
+    doWork(self, header, atoms, thnks) catch |err| {
+        self.base.fatal("could not write section '{s},{s}' to file: {s}", .{
+            header.segName(),
+            header.sectName(),
+            @errorName(err),
+        });
+    };
 }
 
 fn writeUnwindInfo(self: *MachO) !void {
@@ -3333,6 +3273,7 @@ pub const Job = union(enum) {
     lazy_bind_size: void,
     export_trie_size: void,
     data_in_code_size: void,
+    write_section: u8,
 };
 
 pub const base_tag = Zld.Tag.macho;
