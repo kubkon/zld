@@ -6,6 +6,8 @@ pub fn flush(macho_file: *MachO) !void {
     try macho_file.sortSections();
     try macho_file.addAtomsToSections();
     try calcSectionSizes(macho_file);
+    try macho_file.calcSymtabSize();
+    try macho_file.data_in_code.updateSize(macho_file);
 
     {
         // For relocatable, we only ever need a single segment so create it now.
@@ -21,7 +23,7 @@ pub fn flush(macho_file: *MachO) !void {
         seg.cmdsize += seg.nsects * @sizeOf(macho.section_64);
     }
 
-    var off = try allocateSections(macho_file);
+    try allocateSections(macho_file);
 
     {
         // Allocate the single segment.
@@ -45,18 +47,13 @@ pub fn flush(macho_file: *MachO) !void {
 
     state_log.debug("{}", .{macho_file.dumpState()});
 
-    try macho_file.calcSymtabSize();
-    try macho_file.data_in_code.updateSize(macho_file);
     try writeAtoms(macho_file);
     try writeCompactUnwind(macho_file);
     try writeEhFrame(macho_file);
 
-    off = mem.alignForward(u32, off, @alignOf(u64));
-    off = try macho_file.writeDataInCode(off);
-    off = mem.alignForward(u32, off, @alignOf(u64));
-    off = try macho_file.writeSymtab(off);
-    off = mem.alignForward(u32, off, @alignOf(u64));
-    off = try macho_file.writeStrtab(off);
+    try macho_file.writeDataInCode();
+    try macho_file.writeSymtab();
+    try macho_file.writeStrtab();
 
     const ncmds, const sizeofcmds = try writeLoadCommands(macho_file);
     try writeHeader(macho_file, ncmds, sizeofcmds);
@@ -181,7 +178,7 @@ fn calcCompactUnwindSize(macho_file: *MachO, sect_index: u8) void {
     sect.@"align" = 3;
 }
 
-fn allocateSections(macho_file: *MachO) !u32 {
+fn allocateSections(macho_file: *MachO) !void {
     var fileoff = load_commands.calcLoadCommandsSizeObject(macho_file) + @sizeOf(macho.mach_header_64);
     var vmaddr: u64 = 0;
     const slice = macho_file.sections.slice();
@@ -205,7 +202,25 @@ fn allocateSections(macho_file: *MachO) !u32 {
         fileoff = header.reloff + header.nreloc * @sizeOf(macho.relocation_info);
     }
 
-    return fileoff;
+    // In -r mode, there is no LINKEDIT segment and so we allocate required LINKEDIT commands
+    // as if they were detached or part of the single segment.
+
+    // DATA_IN_CODE
+    {
+        const cmd = &macho_file.data_in_code_cmd;
+        cmd.dataoff = fileoff;
+        fileoff += cmd.datasize;
+        fileoff = mem.alignForward(u32, fileoff, @alignOf(u64));
+    }
+
+    // SYMTAB
+    {
+        const cmd = &macho_file.symtab_cmd;
+        cmd.symoff = fileoff;
+        fileoff += cmd.nsyms * @sizeOf(macho.nlist_64);
+        fileoff = mem.alignForward(u32, fileoff, @alignOf(u32));
+        cmd.stroff = fileoff;
+    }
 }
 
 // We need to sort relocations in descending order to be compatible with Apple's linker.

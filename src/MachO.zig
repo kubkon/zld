@@ -400,26 +400,21 @@ pub fn flush(self: *MachO) !void {
 
     try self.updateDyldInfoSizes();
     try self.calcSymtabSize();
+    try self.indsymtab.updateSize(self);
     try self.data_in_code.updateSize(self);
+
+    try self.allocateLinkeditSegment();
 
     try self.writeAtoms();
     try self.writeUnwindInfo();
     try self.writeSyntheticSections();
 
-    var off = math.cast(u32, self.getLinkeditSegment().fileoff) orelse return error.Overflow;
-    off = try self.writeDyldInfoSections(off);
-    off = mem.alignForward(u32, off, @alignOf(u64));
-    off = try self.writeFunctionStarts(off);
-    off = mem.alignForward(u32, off, @alignOf(u64));
-    off = try self.writeDataInCode(off);
-    off = mem.alignForward(u32, off, @alignOf(u64));
-    off = try self.writeSymtab(off);
-    off = mem.alignForward(u32, off, @alignOf(u32));
-    off = try self.writeIndsymtab(off);
-    off = mem.alignForward(u32, off, @alignOf(u64));
-    off = try self.writeStrtab(off);
-
-    self.getLinkeditSegment().filesize = off - self.getLinkeditSegment().fileoff;
+    try self.writeDyldInfoSections();
+    try self.writeFunctionStarts();
+    try self.writeDataInCode();
+    try self.writeSymtab();
+    try self.writeIndsymtab();
+    try self.writeStrtab();
 
     var codesig: ?CodeSignature = if (self.requiresCodeSig()) blk: {
         // Preallocate space for the code signature.
@@ -2046,6 +2041,67 @@ fn allocateSyntheticSymbols(self: *MachO) void {
     }
 }
 
+fn allocateLinkeditSegment(self: *MachO) error{Overflow}!void {
+    const seg = self.getLinkeditSegment();
+    var off = math.cast(u32, seg.fileoff) orelse return error.Overflow;
+    // DYLD_INFO_ONLY
+    {
+        const cmd = &self.dyld_info_cmd;
+        cmd.rebase_off = off;
+        off += cmd.rebase_size;
+        cmd.bind_off = off;
+        off += cmd.bind_size;
+        cmd.weak_bind_off = off;
+        off += cmd.weak_bind_size;
+        cmd.lazy_bind_off = off;
+        off += cmd.lazy_bind_size;
+        cmd.export_off = off;
+        off += cmd.export_size;
+        off = mem.alignForward(u32, off, @alignOf(u64));
+    }
+
+    // FUNCTION_STARTS
+    {
+        const cmd = &self.function_starts_cmd;
+        cmd.dataoff = off;
+        off += cmd.datasize;
+        off = mem.alignForward(u32, off, @alignOf(u64));
+    }
+
+    // DATA_IN_CODE
+    {
+        const cmd = &self.data_in_code_cmd;
+        cmd.dataoff = off;
+        off += cmd.datasize;
+        off = mem.alignForward(u32, off, @alignOf(u64));
+    }
+
+    // SYMTAB (symtab)
+    {
+        const cmd = &self.symtab_cmd;
+        cmd.symoff = off;
+        off += cmd.nsyms * @sizeOf(macho.nlist_64);
+        off = mem.alignForward(u32, off, @alignOf(u32));
+    }
+
+    // DYSYMTAB
+    {
+        const cmd = &self.dysymtab_cmd;
+        cmd.indirectsymoff = off;
+        off += cmd.nindirectsyms * @sizeOf(u32);
+        off = mem.alignForward(u32, off, @alignOf(u64));
+    }
+
+    // SYMTAB (strtab)
+    {
+        const cmd = &self.symtab_cmd;
+        cmd.stroff = off;
+        off += cmd.strsize;
+    }
+
+    seg.filesize = off - seg.fileoff;
+}
+
 fn updateDyldInfoSizes(self: *MachO) !void {
     const Job = enum {
         rebase,
@@ -2341,26 +2397,18 @@ fn writeSyntheticSections(self: *MachO) !void {
     }
 }
 
-fn writeDyldInfoSections(self: *MachO, off: u32) !u32 {
+fn writeDyldInfoSections(self: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
     const gpa = self.base.allocator;
-    const cmd = &self.dyld_info_cmd;
+    const base_off = self.getLinkeditSegment().fileoff;
+    const cmd = self.dyld_info_cmd;
     var needed_size: u32 = 0;
-
     needed_size += cmd.rebase_size;
-
-    cmd.bind_off = needed_size;
     needed_size += cmd.bind_size;
-
-    cmd.weak_bind_off = needed_size;
     needed_size += cmd.weak_bind_size;
-
-    cmd.lazy_bind_off = needed_size;
     needed_size += cmd.lazy_bind_size;
-
-    cmd.export_off = needed_size;
     needed_size += cmd.export_size;
 
     const buffer = try gpa.alloc(u8, needed_size);
@@ -2371,38 +2419,25 @@ fn writeDyldInfoSections(self: *MachO, off: u32) !u32 {
     const writer = stream.writer();
 
     try self.rebase.write(writer);
-    try stream.seekTo(cmd.bind_off);
+    try stream.seekTo(cmd.bind_off - base_off);
     try self.bind.write(writer);
-    try stream.seekTo(cmd.weak_bind_off);
+    try stream.seekTo(cmd.weak_bind_off - base_off);
     try self.weak_bind.write(writer);
-    try stream.seekTo(cmd.lazy_bind_off);
+    try stream.seekTo(cmd.lazy_bind_off - base_off);
     try self.lazy_bind.write(writer);
-    try stream.seekTo(cmd.export_off);
+    try stream.seekTo(cmd.export_off - base_off);
     try self.export_trie.write(writer);
-
-    cmd.rebase_off += off;
-    cmd.bind_off += off;
-    cmd.weak_bind_off += off;
-    cmd.lazy_bind_off += off;
-    cmd.export_off += off;
-
-    try self.base.file.pwriteAll(buffer, off);
-
-    return off + needed_size;
+    try self.base.file.pwriteAll(buffer, cmd.rebase_off);
 }
 
-fn writeFunctionStarts(self: *MachO, off: u32) !u32 {
+fn writeFunctionStarts(self: *MachO) !void {
     // TODO actually write it out
-    const cmd = &self.function_starts_cmd;
-    cmd.dataoff = off;
-    return off;
+    _ = self;
 }
 
-pub fn writeDataInCode(self: *MachO, off: u32) !u32 {
-    const cmd = &self.data_in_code_cmd;
-    cmd.dataoff = off;
+pub fn writeDataInCode(self: *MachO) !void {
+    const cmd = self.data_in_code_cmd;
     try self.base.file.pwriteAll(mem.sliceAsBytes(self.data_in_code.entries.items), cmd.dataoff);
-    return off + cmd.datasize;
 }
 
 pub fn calcSymtabSize(self: *MachO) !void {
@@ -2467,12 +2502,11 @@ pub fn calcSymtabSize(self: *MachO) !void {
     }
 }
 
-pub fn writeSymtab(self: *MachO, off: u32) !u32 {
+pub fn writeSymtab(self: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
     const gpa = self.base.allocator;
-    const cmd = &self.symtab_cmd;
-    cmd.symoff = off;
+    const cmd = self.symtab_cmd;
 
     try self.symtab.resize(gpa, cmd.nsyms);
     try self.strtab.ensureUnusedCapacity(gpa, cmd.strsize - 1);
@@ -2490,32 +2524,22 @@ pub fn writeSymtab(self: *MachO, off: u32) !u32 {
     assert(self.strtab.items.len == cmd.strsize);
 
     try self.base.file.pwriteAll(mem.sliceAsBytes(self.symtab.items), cmd.symoff);
-
-    return off + cmd.nsyms * @sizeOf(macho.nlist_64);
 }
 
-fn writeIndsymtab(self: *MachO, off: u32) !u32 {
+fn writeIndsymtab(self: *MachO) !void {
     const gpa = self.base.allocator;
-    const cmd = &self.dysymtab_cmd;
-    cmd.indirectsymoff = off;
-    cmd.nindirectsyms = self.indsymtab.nsyms(self);
-
+    const cmd = self.dysymtab_cmd;
     const needed_size = cmd.nindirectsyms * @sizeOf(u32);
     var buffer = try std.ArrayList(u8).initCapacity(gpa, needed_size);
     defer buffer.deinit();
     try self.indsymtab.write(self, buffer.writer());
-
     try self.base.file.pwriteAll(buffer.items, cmd.indirectsymoff);
     assert(buffer.items.len == needed_size);
-
-    return off + needed_size;
 }
 
-pub fn writeStrtab(self: *MachO, off: u32) !u32 {
-    const cmd = &self.symtab_cmd;
-    cmd.stroff = off;
+pub fn writeStrtab(self: *MachO) !void {
+    const cmd = self.symtab_cmd;
     try self.base.file.pwriteAll(self.strtab.items, cmd.stroff);
-    return off + cmd.strsize;
 }
 
 fn writeLoadCommands(self: *MachO) !struct { usize, usize, usize } {

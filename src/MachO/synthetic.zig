@@ -516,6 +516,10 @@ pub const Indsymtab = struct {
         return @intCast(macho_file.stubs.symbols.items.len * 2 + macho_file.got.symbols.items.len);
     }
 
+    pub fn updateSize(ind: *Indsymtab, macho_file: *MachO) !void {
+        macho_file.dysymtab_cmd.nindirectsyms = ind.nsyms(macho_file);
+    }
+
     pub fn write(ind: Indsymtab, macho_file: *MachO, writer: anytype) !void {
         const tracy = trace(@src());
         defer tracy.end();
