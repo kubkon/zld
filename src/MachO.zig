@@ -409,7 +409,6 @@ pub fn flush(self: *MachO) !void {
     try self.allocateLinkeditSegment();
 
     try self.writeSections();
-    try self.writeUnwindInfo();
     try self.writeSyntheticSections();
 
     try self.writeDyldInfoSections();
@@ -2122,49 +2121,39 @@ fn performAllTheWork(self: *MachO) !void {
     self.wait_group.reset();
     defer self.wait_group.wait();
     while (self.work_queue.readItem()) |job| switch (job) {
-        .rebase_size => self.base.thread_pool.spawnWg(&self.wait_group, updateRebaseSizeWorker, .{self}),
-        .bind_size => self.base.thread_pool.spawnWg(&self.wait_group, updateBindSizeWorker, .{self}),
-        .weak_bind_size => self.base.thread_pool.spawnWg(&self.wait_group, updateWeakBindSizeWorker, .{self}),
-        .lazy_bind_size => self.base.thread_pool.spawnWg(&self.wait_group, updateLazyBindSizeWorker, .{self}),
-        .export_trie_size => self.base.thread_pool.spawnWg(&self.wait_group, updateExportTrieSizeWorker, .{self}),
-        .data_in_code_size => self.base.thread_pool.spawnWg(&self.wait_group, updateDataInCodeSizeWorker, .{self}),
+        .rebase_size => self.base.thread_pool.spawnWg(&self.wait_group, updateLinkeditSizeWorker, .{ self, .rebase }),
+        .bind_size => self.base.thread_pool.spawnWg(&self.wait_group, updateLinkeditSizeWorker, .{ self, .bind }),
+        .weak_bind_size => self.base.thread_pool.spawnWg(&self.wait_group, updateLinkeditSizeWorker, .{ self, .weak_bind }),
+        .lazy_bind_size => self.base.thread_pool.spawnWg(&self.wait_group, updateLinkeditSizeWorker, .{ self, .lazy_bind }),
+        .export_trie_size => self.base.thread_pool.spawnWg(&self.wait_group, updateLinkeditSizeWorker, .{ self, .export_trie }),
+        .data_in_code_size => self.base.thread_pool.spawnWg(&self.wait_group, updateLinkeditSizeWorker, .{ self, .data_in_code }),
         .write_section => |x| self.base.thread_pool.spawnWg(&self.wait_group, writeSectionWorker, .{ self, x }),
+        .write_eh_frame => self.base.thread_pool.spawnWg(&self.wait_group, writeEhFrameWorker, .{self}),
+        .write_unwind_info => self.base.thread_pool.spawnWg(&self.wait_group, writeUnwindInfoWorker, .{self}),
     };
 }
 
-fn updateRebaseSizeWorker(self: *MachO) void {
-    self.rebase.updateSize(self) catch |err| {
-        self.base.fatal("could not calculate rebase opcodes size: {s}", .{@errorName(err)});
+fn updateLinkeditSizeWorker(self: *MachO, tag: enum {
+    rebase,
+    bind,
+    weak_bind,
+    lazy_bind,
+    export_trie,
+    data_in_code,
+}) void {
+    const res = switch (tag) {
+        .rebase => self.rebase.updateSize(self),
+        .bind => self.bind.updateSize(self),
+        .weak_bind => self.weak_bind.updateSize(self),
+        .lazy_bind => self.lazy_bind.updateSize(self),
+        .export_trie => self.export_trie.updateSize(self),
+        .data_in_code => self.data_in_code.updateSize(self),
     };
-}
-
-fn updateBindSizeWorker(self: *MachO) void {
-    self.bind.updateSize(self) catch |err| {
-        self.base.fatal("could not calculate bind opcodes size: {s}", .{@errorName(err)});
-    };
-}
-
-fn updateWeakBindSizeWorker(self: *MachO) void {
-    self.weak_bind.updateSize(self) catch |err| {
-        self.base.fatal("could not calculate weak bind opcodes size: {s}", .{@errorName(err)});
-    };
-}
-
-fn updateLazyBindSizeWorker(self: *MachO) void {
-    self.lazy_bind.updateSize(self) catch |err| {
-        self.base.fatal("could not calculate lazy bind opcodes size: {s}", .{@errorName(err)});
-    };
-}
-
-fn updateExportTrieSizeWorker(self: *MachO) void {
-    self.export_trie.updateSize(self) catch |err| {
-        self.base.fatal("could not calculate export trie size: {s}", .{@errorName(err)});
-    };
-}
-
-fn updateDataInCodeSizeWorker(self: *MachO) void {
-    self.data_in_code.updateSize(self) catch |err| {
-        self.base.fatal("could not calculate data-in-code size: {s}", .{@errorName(err)});
+    res catch |err| {
+        self.base.fatal("could not calculate {s} opcodes size: {s}", .{
+            @tagName(tag),
+            @errorName(err),
+        });
     };
 }
 
@@ -2174,6 +2163,14 @@ fn writeSections(self: *MachO) !void {
         if (atoms.items.len == 0) continue;
         if (header.isZerofill()) continue;
         try self.work_queue.writeItem(.{ .write_section = @intCast(i) });
+    }
+
+    if (self.eh_frame_sect_index) |_| {
+        try self.work_queue.writeItem(.{ .write_eh_frame = {} });
+    }
+
+    if (self.unwind_info_sect_index) |_| {
+        try self.work_queue.writeItem(.{ .write_unwind_info = {} });
     }
 }
 
@@ -2225,27 +2222,42 @@ fn writeSectionWorker(self: *MachO, sect_id: u8) void {
     };
 }
 
-fn writeUnwindInfo(self: *MachO) !void {
+fn writeEhFrameWorker(self: *MachO) void {
     const tracy = trace(@src());
     defer tracy.end();
+    const doWork = struct {
+        fn doWork(macho_file: *MachO) !void {
+            const index = macho_file.eh_frame_sect_index.?;
+            const gpa = macho_file.base.allocator;
+            const header = macho_file.sections.items(.header)[index];
+            const buffer = try gpa.alloc(u8, header.size);
+            defer gpa.free(buffer);
+            eh_frame.write(macho_file, buffer);
+            try macho_file.base.file.pwriteAll(buffer, header.offset);
+        }
+    }.doWork;
+    doWork(self) catch |err| {
+        self.base.fatal("could not write section '__TEXT,__eh_frame' to file: {s}", .{@errorName(err)});
+    };
+}
 
-    const gpa = self.base.allocator;
-
-    if (self.eh_frame_sect_index) |index| {
-        const header = self.sections.items(.header)[index];
-        const buffer = try gpa.alloc(u8, header.size);
-        defer gpa.free(buffer);
-        eh_frame.write(self, buffer);
-        try self.base.file.pwriteAll(buffer, header.offset);
-    }
-
-    if (self.unwind_info_sect_index) |index| {
-        const header = self.sections.items(.header)[index];
-        const buffer = try gpa.alloc(u8, header.size);
-        defer gpa.free(buffer);
-        try self.unwind_info.write(self, buffer);
-        try self.base.file.pwriteAll(buffer, header.offset);
-    }
+fn writeUnwindInfoWorker(self: *MachO) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+    const doWork = struct {
+        fn doWork(macho_file: *MachO) !void {
+            const index = macho_file.unwind_info_sect_index.?;
+            const gpa = macho_file.base.allocator;
+            const header = macho_file.sections.items(.header)[index];
+            const buffer = try gpa.alloc(u8, header.size);
+            defer gpa.free(buffer);
+            try macho_file.unwind_info.write(macho_file, buffer);
+            try macho_file.base.file.pwriteAll(buffer, header.offset);
+        }
+    }.doWork;
+    doWork(self) catch |err| {
+        self.base.fatal("could not write section '__TEXT,__unwind_info' to file: {s}", .{@errorName(err)});
+    };
 }
 
 fn writeSyntheticSections(self: *MachO) !void {
@@ -3274,6 +3286,8 @@ pub const Job = union(enum) {
     export_trie_size: void,
     data_in_code_size: void,
     write_section: u8,
+    write_eh_frame: void,
+    write_unwind_info: void,
 };
 
 pub const base_tag = Zld.Tag.macho;
