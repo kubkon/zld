@@ -404,10 +404,6 @@ pub fn flush(self: *MachO) !void {
     state_log.debug("{}", .{self.dumpState()});
 
     try self.updateLinkeditSizes();
-    try self.calcSymtabSize();
-    try self.indsymtab.updateSize(self);
-    try self.data_in_code.updateSize(self);
-
     try self.performAllTheWork();
 
     try self.allocateLinkeditSegment();
@@ -2115,6 +2111,10 @@ fn updateLinkeditSizes(self: *MachO) !void {
     try self.work_queue.writeItem(.{ .weak_bind_size = {} });
     try self.work_queue.writeItem(.{ .lazy_bind_size = {} });
     try self.work_queue.writeItem(.{ .export_trie_size = {} });
+    try self.work_queue.writeItem(.{ .data_in_code_size = {} });
+
+    try self.calcSymtabSize();
+    try self.indsymtab.updateSize(self);
 }
 
 fn performAllTheWork(self: *MachO) !void {
@@ -2126,6 +2126,7 @@ fn performAllTheWork(self: *MachO) !void {
         .weak_bind_size => self.base.thread_pool.spawnWg(&self.wait_group, updateWeakBindSizeWorker, .{self}),
         .lazy_bind_size => self.base.thread_pool.spawnWg(&self.wait_group, updateLazyBindSizeWorker, .{self}),
         .export_trie_size => self.base.thread_pool.spawnWg(&self.wait_group, updateExportTrieSizeWorker, .{self}),
+        .data_in_code_size => self.base.thread_pool.spawnWg(&self.wait_group, updateDataInCodeSizeWorker, .{self}),
     };
 }
 
@@ -2156,6 +2157,12 @@ fn updateLazyBindSizeWorker(self: *MachO) void {
 fn updateExportTrieSizeWorker(self: *MachO) void {
     self.export_trie.updateSize(self) catch |err| {
         self.base.fatal("could not calculate export trie size: {s}", .{@errorName(err)});
+    };
+}
+
+fn updateDataInCodeSizeWorker(self: *MachO) void {
+    self.data_in_code.updateSize(self) catch |err| {
+        self.base.fatal("could not calculate data-in-code size: {s}", .{@errorName(err)});
     };
 }
 
@@ -3325,6 +3332,7 @@ pub const Job = union(enum) {
     weak_bind_size: void,
     lazy_bind_size: void,
     export_trie_size: void,
+    data_in_code_size: void,
 };
 
 pub const base_tag = Zld.Tag.macho;
