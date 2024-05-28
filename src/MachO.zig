@@ -26,6 +26,7 @@ globals: std.AutoHashMapUnmanaged(u32, Symbol.Index) = .{},
 /// This table will be populated after `scanRelocs` has run.
 /// Key is symbol index.
 undefs: std.AutoHashMapUnmanaged(Symbol.Index, std.ArrayListUnmanaged(Atom.Index)) = .{},
+undefs_mutex: std.Thread.Mutex = .{},
 /// Global symbols we need to resolve for the link to succeed.
 undefined_symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
 boundary_symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
@@ -1305,8 +1306,9 @@ fn scanRelocs(self: *MachO) !void {
     defer tracy.end();
 
     for (self.objects.items) |index| {
-        try self.getFile(index).?.object.scanRelocs(self);
+        try self.work_queue.writeItem(.{ .scan_relocs = self.getFile(index).?.object });
     }
+    try self.performAllTheWork();
 
     try self.reportUndefs();
 
@@ -1347,6 +1349,15 @@ fn scanRelocs(self: *MachO) !void {
             try self.objc_stubs.addSymbol(index, self);
         }
     }
+}
+
+fn scanRelocsWorker(self: *MachO, object: *const Object) void {
+    object.scanRelocs(self) catch |err| {
+        self.base.fatal("failed to scan relocations in {}: {s}", .{
+            object.fmtPath(),
+            @errorName(err),
+        });
+    };
 }
 
 fn reportUndefs(self: *MachO) !void {
@@ -2152,6 +2163,7 @@ fn performAllTheWork(self: *MachO) !void {
     self.wait_group.reset();
     defer self.wait_group.wait();
     while (self.work_queue.readItem()) |job| switch (job) {
+        .scan_relocs => |x| self.base.thread_pool.spawnWg(&self.wait_group, scanRelocsWorker, .{ self, x }),
         .section_size => |x| self.base.thread_pool.spawnWg(&self.wait_group, calcSectionSizeWorker, .{ self, x }),
         .create_thunks => |x| self.base.thread_pool.spawnWg(&self.wait_group, createThunksWorker, .{ self, x }),
         .rebase_size => self.base.thread_pool.spawnWg(&self.wait_group, updateLinkeditSizeWorker, .{ self, .rebase }),
@@ -3299,6 +3311,7 @@ pub const null_sym = macho.nlist_64{
 };
 
 pub const Job = union(enum) {
+    scan_relocs: *const Object,
     section_size: u8,
     create_thunks: u8,
     rebase_size: void,
