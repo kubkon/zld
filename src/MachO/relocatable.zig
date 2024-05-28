@@ -51,9 +51,8 @@ pub fn flush(macho_file: *MachO) !void {
     try writeCompactUnwind(macho_file);
     try writeEhFrame(macho_file);
 
-    try macho_file.writeDataInCode();
-    try macho_file.writeSymtab();
-    try macho_file.writeStrtab();
+    try writeDataInCode(macho_file);
+    try writeSymtab(macho_file);
 
     const ncmds, const sizeofcmds = try writeLoadCommands(macho_file);
     try writeHeader(macho_file, ncmds, sizeofcmds);
@@ -377,6 +376,39 @@ fn writeEhFrame(macho_file: *MachO) !void {
     // TODO scattered writes?
     try macho_file.base.file.pwriteAll(code, header.offset);
     try macho_file.base.file.pwriteAll(mem.sliceAsBytes(relocs.items), header.reloff);
+}
+
+/// TODO just a temp
+fn writeDataInCode(macho_file: *MachO) !void {
+    const cmd = macho_file.data_in_code_cmd;
+    try macho_file.base.file.pwriteAll(
+        mem.sliceAsBytes(macho_file.data_in_code.entries.items),
+        cmd.dataoff,
+    );
+}
+
+/// TODO just a temp
+fn writeSymtab(macho_file: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+    const gpa = macho_file.base.allocator;
+    const cmd = macho_file.symtab_cmd;
+
+    try macho_file.symtab.resize(gpa, cmd.nsyms);
+    try macho_file.strtab.resize(gpa, cmd.strsize);
+
+    for (macho_file.objects.items) |index| {
+        macho_file.getFile(index).?.writeSymtab(macho_file);
+    }
+    for (macho_file.dylibs.items) |index| {
+        macho_file.getFile(index).?.writeSymtab(macho_file);
+    }
+    if (macho_file.getInternalObject()) |internal| {
+        internal.writeSymtab(macho_file);
+    }
+
+    try macho_file.base.file.pwriteAll(mem.sliceAsBytes(macho_file.symtab.items), cmd.symoff);
+    try macho_file.base.file.pwriteAll(macho_file.strtab.items, cmd.stroff);
 }
 
 fn writeLoadCommands(macho_file: *MachO) !struct { usize, usize } {
