@@ -412,8 +412,8 @@ pub fn flush(self: *MachO) !void {
 
     try self.writeSections();
     try self.writeSyntheticSections();
+    try self.writeLinkeditSections();
 
-    try self.writeDyldInfoSections();
     try self.writeFunctionStarts();
     try self.writeDataInCode();
     try self.writeSymtab();
@@ -2173,6 +2173,7 @@ fn performAllTheWork(self: *MachO) !void {
         .data_in_code_size => self.base.thread_pool.spawnWg(&self.wait_group, updateLinkeditSizeWorker, .{ self, .data_in_code }),
         .write_section => |x| self.base.thread_pool.spawnWg(&self.wait_group, writeSectionWorker, .{ self, x }),
         .write_synthetic_section => |x| self.base.thread_pool.spawnWg(&self.wait_group, writeSyntheticSectionWorker, .{ self, x }),
+        .write_dyld_info => self.base.thread_pool.spawnWg(&self.wait_group, writeDyldInfoWorker, .{self}),
     };
 }
 
@@ -2352,37 +2353,49 @@ fn writeSyntheticSections(self: *MachO) !void {
     }
 }
 
-fn writeDyldInfoSections(self: *MachO) !void {
+fn writeLinkeditSections(self: *MachO) !void {
+    // DYLD_INFO_ONLY
+    try self.work_queue.writeItem(.{ .write_dyld_info = {} });
+}
+
+fn writeDyldInfoWorker(self: *MachO) void {
     const tracy = trace(@src());
     defer tracy.end();
 
-    const gpa = self.base.allocator;
-    const base_off = self.getLinkeditSegment().fileoff;
-    const cmd = self.dyld_info_cmd;
-    var needed_size: u32 = 0;
-    needed_size += cmd.rebase_size;
-    needed_size += cmd.bind_size;
-    needed_size += cmd.weak_bind_size;
-    needed_size += cmd.lazy_bind_size;
-    needed_size += cmd.export_size;
+    const doWork = struct {
+        fn doWork(macho_file: *MachO) !void {
+            const gpa = macho_file.base.allocator;
+            const base_off = macho_file.getLinkeditSegment().fileoff;
+            const cmd = macho_file.dyld_info_cmd;
+            var needed_size: u32 = 0;
+            needed_size += cmd.rebase_size;
+            needed_size += cmd.bind_size;
+            needed_size += cmd.weak_bind_size;
+            needed_size += cmd.lazy_bind_size;
+            needed_size += cmd.export_size;
 
-    const buffer = try gpa.alloc(u8, needed_size);
-    defer gpa.free(buffer);
-    @memset(buffer, 0);
+            const buffer = try gpa.alloc(u8, needed_size);
+            defer gpa.free(buffer);
+            @memset(buffer, 0);
 
-    var stream = std.io.fixedBufferStream(buffer);
-    const writer = stream.writer();
+            var stream = std.io.fixedBufferStream(buffer);
+            const writer = stream.writer();
 
-    try self.rebase.write(writer);
-    try stream.seekTo(cmd.bind_off - base_off);
-    try self.bind.write(writer);
-    try stream.seekTo(cmd.weak_bind_off - base_off);
-    try self.weak_bind.write(writer);
-    try stream.seekTo(cmd.lazy_bind_off - base_off);
-    try self.lazy_bind.write(writer);
-    try stream.seekTo(cmd.export_off - base_off);
-    try self.export_trie.write(writer);
-    try self.base.file.pwriteAll(buffer, cmd.rebase_off);
+            try macho_file.rebase.write(writer);
+            try stream.seekTo(cmd.bind_off - base_off);
+            try macho_file.bind.write(writer);
+            try stream.seekTo(cmd.weak_bind_off - base_off);
+            try macho_file.weak_bind.write(writer);
+            try stream.seekTo(cmd.lazy_bind_off - base_off);
+            try macho_file.lazy_bind.write(writer);
+            try stream.seekTo(cmd.export_off - base_off);
+            try macho_file.export_trie.write(writer);
+            try macho_file.base.file.pwriteAll(buffer, cmd.rebase_off);
+        }
+    }.doWork;
+    doWork(self) catch |err| {
+        self.base.fatal("failed to write dyld_info_only data: {s}", .{@errorName(err)});
+    };
 }
 
 fn writeFunctionStarts(self: *MachO) !void {
@@ -3321,6 +3334,7 @@ pub const Job = union(enum) {
     data_in_code_size: void,
     write_section: u8,
     write_synthetic_section: u8,
+    write_dyld_info: void,
 };
 
 pub const base_tag = Zld.Tag.macho;
