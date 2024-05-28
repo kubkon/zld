@@ -503,6 +503,9 @@ fn initPointerLiterals(self: *Object, macho_file: *MachO) !void {
 }
 
 pub fn resolveLiterals(self: Object, lp: *MachO.LiteralPool, macho_file: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const gpa = macho_file.base.allocator;
 
     var buffer = std.ArrayList(u8).init(gpa);
@@ -552,6 +555,9 @@ pub fn resolveLiterals(self: Object, lp: *MachO.LiteralPool, macho_file: *MachO)
 }
 
 pub fn dedupLiterals(self: Object, lp: MachO.LiteralPool, macho_file: *MachO) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     for (self.atoms.items) |atom_index| {
         const atom = macho_file.getAtom(atom_index) orelse continue;
         if (!atom.flags.alive) continue;

@@ -110,6 +110,9 @@ fn addObjcSelrefsSection(self: *InternalObject, methname_atom_index: Atom.Index,
 }
 
 pub fn resolveLiterals(self: InternalObject, lp: *MachO.LiteralPool, macho_file: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const gpa = macho_file.base.allocator;
 
     var buffer = std.ArrayList(u8).init(gpa);
@@ -149,6 +152,9 @@ pub fn resolveLiterals(self: InternalObject, lp: *MachO.LiteralPool, macho_file:
 }
 
 pub fn dedupLiterals(self: InternalObject, lp: MachO.LiteralPool, macho_file: *MachO) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     for (self.atoms.items) |atom_index| {
         const atom = macho_file.getAtom(atom_index) orelse continue;
         if (!atom.flags.alive) continue;
@@ -335,6 +341,7 @@ const assert = std.debug.assert;
 const macho = std.macho;
 const mem = std.mem;
 const std = @import("std");
+const trace = @import("../tracy.zig").trace;
 
 const Allocator = std.mem.Allocator;
 const Atom = @import("Atom.zig");

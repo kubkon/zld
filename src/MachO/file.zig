@@ -82,6 +82,16 @@ pub const File = union(enum) {
         };
     }
 
+    pub fn initOutputSections(file: File, macho_file: *MachO) !void {
+        const tracy = trace(@src());
+        defer tracy.end();
+        for (file.getAtoms()) |atom_index| {
+            const atom = macho_file.getAtom(atom_index) orelse continue;
+            if (!atom.flags.alive) continue;
+            atom.out_n_sect = try Atom.initOutputSection(atom.getInputSection(macho_file), macho_file);
+        }
+    }
+
     pub fn calcSymtabSize(file: File, macho_file: *MachO) !void {
         return switch (file) {
             inline else => |x| x.calcSymtabSize(macho_file),

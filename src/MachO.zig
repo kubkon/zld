@@ -1110,6 +1110,9 @@ fn convertTentativeDefinitions(self: *MachO) !void {
 }
 
 fn markImportsAndExports(self: *MachO) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     for (self.objects.items) |index| {
         for (self.getFile(index).?.getSymbols()) |sym_index| {
             const sym = self.getSymbol(sym_index);
@@ -1148,20 +1151,13 @@ fn markImportsAndExports(self: *MachO) void {
 }
 
 fn initOutputSections(self: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
     for (self.objects.items) |index| {
-        const object = self.getFile(index).?.object;
-        for (object.atoms.items) |atom_index| {
-            const atom = self.getAtom(atom_index) orelse continue;
-            if (!atom.flags.alive) continue;
-            atom.out_n_sect = try Atom.initOutputSection(atom.getInputSection(self), self);
-        }
+        try self.getFile(index).?.initOutputSections(self);
     }
     if (self.getInternalObject()) |object| {
-        for (object.atoms.items) |atom_index| {
-            const atom = self.getAtom(atom_index) orelse continue;
-            if (!atom.flags.alive) continue;
-            atom.out_n_sect = try Atom.initOutputSection(atom.getInputSection(self), self);
-        }
+        try object.asFile().initOutputSections(self);
     }
     self.data_sect_index = self.getSectionByName("__DATA", "__data") orelse
         try self.addSection("__DATA", "__data", .{});
@@ -1249,6 +1245,9 @@ fn createObjcSections(self: *MachO) !void {
 }
 
 pub fn dedupLiterals(self: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const gpa = self.base.allocator;
     var lp: LiteralPool = .{};
     defer lp.deinit(gpa);
