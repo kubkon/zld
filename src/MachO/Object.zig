@@ -1571,23 +1571,26 @@ pub fn writeSymtab(self: Object, macho_file: *MachO) void {
     const tracy = trace(@src());
     defer tracy.end();
 
+    var n_strx = self.output_symtab_ctx.stroff;
     for (self.symbols.items) |sym_index| {
         const sym = macho_file.getSymbol(sym_index);
         const file = sym.getFile(macho_file) orelse continue;
         if (file.getIndex() != self.index) continue;
         const idx = sym.getOutputSymtabIndex(macho_file) orelse continue;
-        const n_strx = @as(u32, @intCast(macho_file.strtab.items.len));
-        macho_file.strtab.appendSliceAssumeCapacity(sym.getName(macho_file));
-        macho_file.strtab.appendAssumeCapacity(0);
         const out_sym = &macho_file.symtab.items[idx];
         out_sym.n_strx = n_strx;
         sym.setOutputSym(macho_file, out_sym);
+        const name = sym.getName(macho_file);
+        @memcpy(macho_file.strtab.items[n_strx..][0..name.len], name);
+        n_strx += @intCast(name.len);
+        macho_file.strtab.items[n_strx] = 0;
+        n_strx += 1;
     }
 
-    if (!macho_file.options.strip and self.hasDebugInfo()) self.writeStabs(macho_file);
+    if (!macho_file.options.strip and self.hasDebugInfo()) self.writeStabs(n_strx, macho_file);
 }
 
-pub fn writeStabs(self: *const Object, macho_file: *MachO) void {
+pub fn writeStabs(self: *const Object, stroff: u32, macho_file: *MachO) void {
     const writeFuncStab = struct {
         inline fn writeFuncStab(
             n_strx: u32,
@@ -1629,6 +1632,7 @@ pub fn writeStabs(self: *const Object, macho_file: *MachO) void {
     }.writeFuncStab;
 
     var index = self.output_symtab_ctx.istab;
+    var n_strx = stroff;
 
     if (self.compile_unit) |cu| {
         // TODO handle multiple CUs
@@ -1637,9 +1641,6 @@ pub fn writeStabs(self: *const Object, macho_file: *MachO) void {
 
         // Open scope
         // N_SO comp_dir
-        var n_strx = @as(u32, @intCast(macho_file.strtab.items.len));
-        macho_file.strtab.appendSliceAssumeCapacity(comp_dir);
-        macho_file.strtab.appendAssumeCapacity(0);
         macho_file.symtab.items[index] = .{
             .n_strx = n_strx,
             .n_type = macho.N_SO,
@@ -1648,10 +1649,11 @@ pub fn writeStabs(self: *const Object, macho_file: *MachO) void {
             .n_value = 0,
         };
         index += 1;
+        @memcpy(macho_file.strtab.items[n_strx..][0..comp_dir.len], comp_dir);
+        n_strx += @intCast(comp_dir.len);
+        macho_file.strtab.items[n_strx] = 0;
+        n_strx += 1;
         // N_SO tu_name
-        n_strx = @as(u32, @intCast(macho_file.strtab.items.len));
-        macho_file.strtab.appendSliceAssumeCapacity(tu_name);
-        macho_file.strtab.appendAssumeCapacity(0);
         macho_file.symtab.items[index] = .{
             .n_strx = n_strx,
             .n_type = macho.N_SO,
@@ -1660,18 +1662,11 @@ pub fn writeStabs(self: *const Object, macho_file: *MachO) void {
             .n_value = 0,
         };
         index += 1;
+        @memcpy(macho_file.strtab.items[n_strx..][0..tu_name.len], tu_name);
+        n_strx += @intCast(tu_name.len);
+        macho_file.strtab.items[n_strx] = 0;
+        n_strx += 1;
         // N_OSO path
-        n_strx = @as(u32, @intCast(macho_file.strtab.items.len));
-        if (self.archive) |ar| {
-            macho_file.strtab.appendSliceAssumeCapacity(ar.path);
-            macho_file.strtab.appendAssumeCapacity('(');
-            macho_file.strtab.appendSliceAssumeCapacity(self.path);
-            macho_file.strtab.appendAssumeCapacity(')');
-            macho_file.strtab.appendAssumeCapacity(0);
-        } else {
-            macho_file.strtab.appendSliceAssumeCapacity(self.path);
-            macho_file.strtab.appendAssumeCapacity(0);
-        }
         macho_file.symtab.items[index] = .{
             .n_strx = n_strx,
             .n_type = macho.N_OSO,
@@ -1680,6 +1675,23 @@ pub fn writeStabs(self: *const Object, macho_file: *MachO) void {
             .n_value = self.mtime,
         };
         index += 1;
+        if (self.archive) |ar| {
+            @memcpy(macho_file.strtab.items[n_strx..][0..ar.path.len], ar.path);
+            n_strx += @intCast(ar.path.len);
+            macho_file.strtab.items[n_strx] = '(';
+            n_strx += 1;
+            @memcpy(macho_file.strtab.items[n_strx..][0..self.path.len], self.path);
+            n_strx += @intCast(self.path.len);
+            macho_file.strtab.items[n_strx] = ')';
+            n_strx += 1;
+            macho_file.strtab.items[n_strx] = 0;
+            n_strx += 1;
+        } else {
+            @memcpy(macho_file.strtab.items[n_strx..][0..self.path.len], self.path);
+            n_strx += @intCast(self.path.len);
+            macho_file.strtab.items[n_strx] = 0;
+            n_strx += 1;
+        }
 
         for (self.symbols.items) |sym_index| {
             const sym = macho_file.getSymbol(sym_index);
@@ -1736,11 +1748,12 @@ pub fn writeStabs(self: *const Object, macho_file: *MachO) void {
         assert(self.hasSymbolStabs());
 
         for (self.stab_files.items) |sf| {
+            const comp_dir = sf.getCompDir(self);
+            const tu_name = sf.getTuName(self);
+            const oso_path = sf.getOsoPath(self);
+
             // Open scope
             // N_SO comp_dir
-            var n_strx = @as(u32, @intCast(macho_file.strtab.items.len));
-            macho_file.strtab.appendSliceAssumeCapacity(sf.getCompDir(self));
-            macho_file.strtab.appendAssumeCapacity(0);
             macho_file.symtab.items[index] = .{
                 .n_strx = n_strx,
                 .n_type = macho.N_SO,
@@ -1749,10 +1762,11 @@ pub fn writeStabs(self: *const Object, macho_file: *MachO) void {
                 .n_value = 0,
             };
             index += 1;
+            @memcpy(macho_file.strtab.items[n_strx..][0..comp_dir.len], comp_dir);
+            n_strx += @intCast(comp_dir.len);
+            macho_file.strtab.items[n_strx] = 0;
+            n_strx += 1;
             // N_SO tu_name
-            n_strx = @as(u32, @intCast(macho_file.strtab.items.len));
-            macho_file.strtab.appendSliceAssumeCapacity(sf.getTuName(self));
-            macho_file.strtab.appendAssumeCapacity(0);
             macho_file.symtab.items[index] = .{
                 .n_strx = n_strx,
                 .n_type = macho.N_SO,
@@ -1761,10 +1775,11 @@ pub fn writeStabs(self: *const Object, macho_file: *MachO) void {
                 .n_value = 0,
             };
             index += 1;
+            @memcpy(macho_file.strtab.items[n_strx..][0..tu_name.len], tu_name);
+            n_strx += @intCast(tu_name.len);
+            macho_file.strtab.items[n_strx] = 0;
+            n_strx += 1;
             // N_OSO path
-            n_strx = @as(u32, @intCast(macho_file.strtab.items.len));
-            macho_file.strtab.appendSliceAssumeCapacity(sf.getOsoPath(self));
-            macho_file.strtab.appendAssumeCapacity(0);
             macho_file.symtab.items[index] = .{
                 .n_strx = n_strx,
                 .n_type = macho.N_OSO,
@@ -1773,6 +1788,10 @@ pub fn writeStabs(self: *const Object, macho_file: *MachO) void {
                 .n_value = sf.getOsoModTime(self),
             };
             index += 1;
+            @memcpy(macho_file.strtab.items[n_strx..][0..oso_path.len], oso_path);
+            n_strx += @intCast(oso_path.len);
+            macho_file.strtab.items[n_strx] = 0;
+            n_strx += 1;
 
             for (sf.stabs.items) |stab| {
                 const sym = stab.getSymbol(macho_file) orelse continue;

@@ -231,16 +231,19 @@ pub fn calcSymtabSize(self: *InternalObject, macho_file: *MachO) !void {
 }
 
 pub fn writeSymtab(self: InternalObject, macho_file: *MachO) void {
+    var n_strx = self.output_symtab_ctx.stroff;
     for (self.symbols.items) |sym_index| {
         const sym = macho_file.getSymbol(sym_index);
         if (sym.getFile(macho_file)) |file| if (file.getIndex() != self.index) continue;
         const idx = sym.getOutputSymtabIndex(macho_file) orelse continue;
-        const n_strx = @as(u32, @intCast(macho_file.strtab.items.len));
-        macho_file.strtab.appendSliceAssumeCapacity(sym.getName(macho_file));
-        macho_file.strtab.appendAssumeCapacity(0);
         const out_sym = &macho_file.symtab.items[idx];
         out_sym.n_strx = n_strx;
         sym.setOutputSym(macho_file, out_sym);
+        const name = sym.getName(macho_file);
+        @memcpy(macho_file.strtab.items[n_strx..][0..name.len], name);
+        n_strx += @intCast(name.len);
+        macho_file.strtab.items[n_strx] = 0;
+        n_strx += 1;
     }
 }
 

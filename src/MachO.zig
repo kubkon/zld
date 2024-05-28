@@ -413,12 +413,6 @@ pub fn flush(self: *MachO) !void {
     try self.writeSections();
     try self.writeSyntheticSections();
     try self.writeLinkeditSections();
-
-    try self.writeFunctionStarts();
-    try self.writeDataInCode();
-    try self.writeSymtab();
-    try self.writeIndsymtab();
-    try self.writeStrtab();
     try self.performAllTheWork();
 
     var codesig: ?CodeSignature = if (self.requiresCodeSig()) blk: {
@@ -2356,6 +2350,12 @@ fn writeSyntheticSections(self: *MachO) !void {
 fn writeLinkeditSections(self: *MachO) !void {
     // DYLD_INFO_ONLY
     try self.work_queue.writeItem(.{ .write_dyld_info = {} });
+
+    try self.writeFunctionStarts();
+    try self.writeDataInCode();
+    try self.writeSymtab();
+    try self.writeIndsymtab();
+    try self.writeStrtab();
 }
 
 fn writeDyldInfoWorker(self: *MachO) void {
@@ -2435,6 +2435,7 @@ pub fn calcSymtabSize(self: *MachO) !void {
         ctx.istab = nstabs;
         ctx.iexport = nexports;
         ctx.iimport = nimports;
+        ctx.stroff = strsize;
         try file.calcSymtabSize(self);
         nlocals += ctx.nlocals;
         nstabs += ctx.nstabs;
@@ -2477,7 +2478,7 @@ pub fn writeSymtab(self: *MachO) !void {
     const cmd = self.symtab_cmd;
 
     try self.symtab.resize(gpa, cmd.nsyms);
-    try self.strtab.ensureUnusedCapacity(gpa, cmd.strsize - 1);
+    try self.strtab.resize(gpa, cmd.strsize);
 
     for (self.objects.items) |index| {
         self.getFile(index).?.writeSymtab(self);
@@ -2488,8 +2489,6 @@ pub fn writeSymtab(self: *MachO) !void {
     if (self.getInternalObject()) |internal| {
         internal.writeSymtab(self);
     }
-
-    assert(self.strtab.items.len == cmd.strsize);
 
     try self.base.file.pwriteAll(mem.sliceAsBytes(self.symtab.items), cmd.symoff);
 }
@@ -3311,6 +3310,7 @@ pub const SymtabCtx = struct {
     nstabs: u32 = 0,
     nexports: u32 = 0,
     nimports: u32 = 0,
+    stroff: u32 = 0,
     strsize: u32 = 0,
 };
 
