@@ -1474,7 +1474,7 @@ fn addSection(self: *Object, allocator: Allocator, segname: []const u8, sectname
     return n_sect;
 }
 
-pub fn calcSymtabSize(self: *Object, macho_file: *MachO) !void {
+pub fn calcSymtabSize(self: *Object, macho_file: *MachO) void {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -1495,15 +1495,15 @@ pub fn calcSymtabSize(self: *Object, macho_file: *MachO) !void {
             !is_relocatable) continue;
         sym.flags.output_symtab = true;
         if (sym.isLocal()) {
-            try sym.addExtra(.{ .symtab = self.output_symtab_ctx.nlocals }, macho_file);
+            sym.addExtra(.{ .symtab = self.output_symtab_ctx.nlocals }, macho_file);
 
             self.output_symtab_ctx.nlocals += 1;
         } else if (sym.flags.@"export") {
-            try sym.addExtra(.{ .symtab = self.output_symtab_ctx.nexports }, macho_file);
+            sym.addExtra(.{ .symtab = self.output_symtab_ctx.nexports }, macho_file);
             self.output_symtab_ctx.nexports += 1;
         } else {
             assert(sym.flags.import);
-            try sym.addExtra(.{ .symtab = self.output_symtab_ctx.nimports }, macho_file);
+            sym.addExtra(.{ .symtab = self.output_symtab_ctx.nimports }, macho_file);
             self.output_symtab_ctx.nimports += 1;
         }
         self.output_symtab_ctx.strsize += @as(u32, @intCast(sym.getName(macho_file).len + 1));

@@ -519,7 +519,7 @@ pub fn markReferenced(self: *Dylib, macho_file: *MachO) void {
     }
 }
 
-pub fn calcSymtabSize(self: *Dylib, macho_file: *MachO) !void {
+pub fn calcSymtabSize(self: *Dylib, macho_file: *MachO) void {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -530,7 +530,7 @@ pub fn calcSymtabSize(self: *Dylib, macho_file: *MachO) !void {
         if (global.isLocal()) continue;
         assert(global.flags.import);
         global.flags.output_symtab = true;
-        try global.addExtra(.{ .symtab = self.output_symtab_ctx.nimports }, macho_file);
+        global.addExtra(.{ .symtab = self.output_symtab_ctx.nimports }, macho_file);
         self.output_symtab_ctx.nimports += 1;
         self.output_symtab_ctx.strsize += @as(u32, @intCast(global.getName(macho_file).len + 1));
     }

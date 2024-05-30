@@ -32,6 +32,7 @@ pub fn addSymbol(self: *InternalObject, name: [:0]const u8, macho_file: *MachO) 
     sym.atom = 0;
     sym.nlist_idx = 0;
     sym.flags = .{ .global = true };
+    sym.extra = try macho_file.addSymbolExtra(.{});
     return gop.index;
 }
 
@@ -196,7 +197,7 @@ pub fn dedupLiterals(self: InternalObject, lp: MachO.LiteralPool, macho_file: *M
     for (self.symbols.items) |sym_index| {
         const sym = macho_file.getSymbol(sym_index);
         if (!sym.flags.objc_stubs) continue;
-        var extra = sym.getExtra(macho_file).?;
+        var extra = sym.getExtra(macho_file);
         const atom = macho_file.getAtom(extra.objc_selrefs).?;
         if (atom.getLiteralPoolIndex(macho_file)) |lp_index| {
             const lp_atom = lp.getAtom(lp_index, macho_file);
@@ -210,20 +211,20 @@ pub fn dedupLiterals(self: InternalObject, lp: MachO.LiteralPool, macho_file: *M
     }
 }
 
-pub fn calcSymtabSize(self: *InternalObject, macho_file: *MachO) !void {
+pub fn calcSymtabSize(self: *InternalObject, macho_file: *MachO) void {
     for (self.symbols.items) |sym_index| {
         const sym = macho_file.getSymbol(sym_index);
         if (sym.getFile(macho_file)) |file| if (file.getIndex() != self.index) continue;
         sym.flags.output_symtab = true;
         if (sym.isLocal()) {
-            try sym.addExtra(.{ .symtab = self.output_symtab_ctx.nlocals }, macho_file);
+            sym.addExtra(.{ .symtab = self.output_symtab_ctx.nlocals }, macho_file);
             self.output_symtab_ctx.nlocals += 1;
         } else if (sym.flags.@"export") {
-            try sym.addExtra(.{ .symtab = self.output_symtab_ctx.nexports }, macho_file);
+            sym.addExtra(.{ .symtab = self.output_symtab_ctx.nexports }, macho_file);
             self.output_symtab_ctx.nexports += 1;
         } else {
             assert(sym.flags.import);
-            try sym.addExtra(.{ .symtab = self.output_symtab_ctx.nimports }, macho_file);
+            sym.addExtra(.{ .symtab = self.output_symtab_ctx.nimports }, macho_file);
             self.output_symtab_ctx.nimports += 1;
         }
         self.output_symtab_ctx.strsize += @as(u32, @intCast(sym.getName(macho_file).len + 1));

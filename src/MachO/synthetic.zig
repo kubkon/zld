@@ -13,7 +13,7 @@ pub const GotSection = struct {
         const entry = try got.symbols.addOne(gpa);
         entry.* = sym_index;
         const symbol = macho_file.getSymbol(sym_index);
-        try symbol.addExtra(.{ .got = index }, macho_file);
+        symbol.addExtra(.{ .got = index }, macho_file);
     }
 
     pub fn getAddress(got: GotSection, index: Index, macho_file: *MachO) u64 {
@@ -81,7 +81,7 @@ pub const StubsSection = struct {
         const entry = try stubs.symbols.addOne(gpa);
         entry.* = sym_index;
         const symbol = macho_file.getSymbol(sym_index);
-        try symbol.addExtra(.{ .stubs = index }, macho_file);
+        symbol.addExtra(.{ .stubs = index }, macho_file);
     }
 
     pub fn getAddress(stubs: StubsSection, index: Index, macho_file: *MachO) u64 {
@@ -328,7 +328,7 @@ pub const TlvPtrSection = struct {
         const entry = try tlv.symbols.addOne(gpa);
         entry.* = sym_index;
         const symbol = macho_file.getSymbol(sym_index);
-        try symbol.addExtra(.{ .tlv_ptr = index }, macho_file);
+        symbol.addExtra(.{ .tlv_ptr = index }, macho_file);
     }
 
     pub fn getAddress(tlv: TlvPtrSection, index: Index, macho_file: *MachO) u64 {
@@ -406,7 +406,7 @@ pub const ObjcStubsSection = struct {
         const entry = try objc.symbols.addOne(gpa);
         entry.* = sym_index;
         const symbol = macho_file.getSymbol(sym_index);
-        try symbol.addExtra(.{ .objc_stubs = index }, macho_file);
+        symbol.addExtra(.{ .objc_stubs = index }, macho_file);
     }
 
     pub fn getAddress(objc: ObjcStubsSection, index: Index, macho_file: *MachO) u64 {

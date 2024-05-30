@@ -185,7 +185,6 @@ pub fn flush(self: *MachO) !void {
     try self.files.append(gpa, .null);
     // Append null symbols
     try self.symbols.append(gpa, .{});
-    try self.symbols_extra.append(gpa, 0);
 
     var arena_allocator = std.heap.ArenaAllocator.init(gpa);
     defer arena_allocator.deinit();
@@ -1042,6 +1041,14 @@ pub fn resolveSymbols(self: *MachO) !void {
     // Re-resolve the symbols.
     for (self.objects.items) |index| self.getFile(index).?.resolveSymbols(self);
     for (self.dylibs.items) |index| self.getFile(index).?.resolveSymbols(self);
+
+    // Create symbols extra for resolved object files.
+    for (self.objects.items) |index| {
+        try self.getFile(index).?.addSymbolExtra(self);
+    }
+    for (self.dylibs.items) |index| {
+        try self.getFile(index).?.addSymbolExtra(self);
+    }
 }
 
 fn markLive(self: *MachO) void {
@@ -1236,7 +1243,7 @@ fn createObjcSections(self: *MachO) !void {
         sym.visibility = .hidden;
         const name = eatPrefix(sym.getName(self), "_objc_msgSend$").?;
         const selrefs_index = try internal.addObjcMsgsendSections(name, self);
-        try sym.addExtra(.{ .objc_selrefs = selrefs_index }, self);
+        sym.addExtra(.{ .objc_selrefs = selrefs_index }, self);
         sym.flags.objc_stubs = true;
     }
 }
@@ -2150,9 +2157,7 @@ fn updateLinkeditSizes(self: *MachO) !void {
     try self.work_queue.writeItem(.{ .lazy_bind_size = {} });
     try self.work_queue.writeItem(.{ .export_trie_size = {} });
     try self.work_queue.writeItem(.{ .data_in_code_size = {} });
-
-    try self.calcSymtabSize();
-    try self.indsymtab.updateSize(self);
+    try self.work_queue.writeItem(.{ .calc_symtab_size = {} });
 }
 
 fn performAllTheWork(self: *MachO) !void {
@@ -2168,6 +2173,7 @@ fn performAllTheWork(self: *MachO) !void {
         .lazy_bind_size => self.base.thread_pool.spawnWg(&self.wait_group, updateLinkeditSizeWorker, .{ self, .lazy_bind }),
         .export_trie_size => self.base.thread_pool.spawnWg(&self.wait_group, updateLinkeditSizeWorker, .{ self, .export_trie }),
         .data_in_code_size => self.base.thread_pool.spawnWg(&self.wait_group, updateLinkeditSizeWorker, .{ self, .data_in_code }),
+        .calc_symtab_size => self.base.thread_pool.spawnWg(&self.wait_group, calcSymtabSize, .{self}),
         .write_atoms => |x| self.base.thread_pool.spawnWg(&self.wait_group, writeAtomsWorker, .{ self, x[0], x[1] }),
         .write_thunk => |x| self.base.thread_pool.spawnWg(&self.wait_group, writeThunkWorker, .{ self, x[0], x[1] }),
         .write_synthetic_section => |x| self.base.thread_pool.spawnWg(&self.wait_group, writeSyntheticSectionWorker, .{ self, x }),
@@ -2439,16 +2445,16 @@ pub fn writeDataInCodeWorker(self: *MachO) void {
     };
 }
 
-pub fn calcSymtabSize(self: *MachO) !void {
+fn calcSymtabSize(self: *MachO) void {
     const tracy = trace(@src());
     defer tracy.end();
-    const gpa = self.base.allocator;
+    self.calcSymtabSizeImpl() catch |err| {
+        self.base.fatal("failed to calculate symtab size: {s}", .{@errorName(err)});
+    };
+}
 
-    var nlocals: u32 = 0;
-    var nstabs: u32 = 0;
-    var nexports: u32 = 0;
-    var nimports: u32 = 0;
-    var strsize: u32 = 0;
+fn calcSymtabSizeImpl(self: *MachO) !void {
+    const gpa = self.base.allocator;
 
     var files = std.ArrayList(File.Index).init(gpa);
     defer files.deinit();
@@ -2456,6 +2462,22 @@ pub fn calcSymtabSize(self: *MachO) !void {
     for (self.objects.items) |index| files.appendAssumeCapacity(index);
     for (self.dylibs.items) |index| files.appendAssumeCapacity(index);
     if (self.internal_object_index) |index| files.appendAssumeCapacity(index);
+
+    var wg: WaitGroup = .{};
+
+    {
+        wg.reset();
+        defer wg.wait();
+        for (files.items) |index| {
+            self.base.thread_pool.spawnWg(&wg, calcSymtabSizeFileWorker, .{ self, self.getFile(index).? });
+        }
+    }
+
+    var nlocals: u32 = 0;
+    var nstabs: u32 = 0;
+    var nexports: u32 = 0;
+    var nimports: u32 = 0;
+    var strsize: u32 = 0;
 
     for (files.items) |index| {
         const file = self.getFile(index).?;
@@ -2467,7 +2489,6 @@ pub fn calcSymtabSize(self: *MachO) !void {
         ctx.iexport = nexports;
         ctx.iimport = nimports;
         ctx.stroff = strsize;
-        try file.calcSymtabSize(self);
         nlocals += ctx.nlocals;
         nstabs += ctx.nstabs;
         nexports += ctx.nexports;
@@ -2485,6 +2506,8 @@ pub fn calcSymtabSize(self: *MachO) !void {
         ctx.iimport += nlocals + nstabs + nexports;
     }
 
+    try self.indsymtab.updateSize(self);
+
     {
         const cmd = &self.symtab_cmd;
         cmd.nsyms = nlocals + nstabs + nexports + nimports;
@@ -2500,6 +2523,10 @@ pub fn calcSymtabSize(self: *MachO) !void {
         cmd.iundefsym = nlocals + nstabs + nexports;
         cmd.nundefsym = nimports;
     }
+}
+
+fn calcSymtabSizeFileWorker(self: *MachO, file: File) void {
+    file.calcSymtabSize(self);
 }
 
 fn writeSymtab(self: *MachO) !void {
@@ -2973,7 +3000,7 @@ pub fn addSymbolExtra(self: *MachO, extra: Symbol.Extra) !u32 {
     return self.addSymbolExtraAssumeCapacity(extra);
 }
 
-pub fn addSymbolExtraAssumeCapacity(self: *MachO, extra: Symbol.Extra) u32 {
+fn addSymbolExtraAssumeCapacity(self: *MachO, extra: Symbol.Extra) u32 {
     const index = @as(u32, @intCast(self.symbols_extra.items.len));
     const fields = @typeInfo(Symbol.Extra).Struct.fields;
     inline for (fields) |field| {
@@ -2985,8 +3012,7 @@ pub fn addSymbolExtraAssumeCapacity(self: *MachO, extra: Symbol.Extra) u32 {
     return index;
 }
 
-pub fn getSymbolExtra(self: MachO, index: u32) ?Symbol.Extra {
-    if (index == 0) return null;
+pub fn getSymbolExtra(self: MachO, index: u32) Symbol.Extra {
     const fields = @typeInfo(Symbol.Extra).Struct.fields;
     var i: usize = index;
     var result: Symbol.Extra = undefined;
@@ -3001,7 +3027,6 @@ pub fn getSymbolExtra(self: MachO, index: u32) ?Symbol.Extra {
 }
 
 pub fn setSymbolExtra(self: *MachO, index: u32, extra: Symbol.Extra) void {
-    assert(index > 0);
     const fields = @typeInfo(Symbol.Extra).Struct.fields;
     inline for (fields, 0..) |field, i| {
         self.symbols_extra.items[index + i] = switch (field.type) {
@@ -3373,6 +3398,7 @@ pub const Job = union(enum) {
     lazy_bind_size: void,
     export_trie_size: void,
     data_in_code_size: void,
+    calc_symtab_size: void,
     write_atoms: struct { []const Atom.Index, []u8 },
     write_thunk: struct { *const Thunk, []u8 },
     write_synthetic_section: u8,

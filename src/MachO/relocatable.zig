@@ -6,7 +6,7 @@ pub fn flush(macho_file: *MachO) !void {
     try macho_file.sortSections();
     try macho_file.addAtomsToSections();
     try calcSectionSizes(macho_file);
-    try macho_file.calcSymtabSize();
+    try calcSymtabSize(macho_file);
     try macho_file.data_in_code.updateSize(macho_file);
 
     {
@@ -120,6 +120,70 @@ fn initOutputSections(macho_file: *MachO) !void {
     if (needs_eh_frame) {
         assert(needs_unwind_info);
         macho_file.eh_frame_sect_index = try macho_file.addSection("__TEXT", "__eh_frame", .{});
+    }
+}
+
+fn calcSymtabSize(macho_file: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    const gpa = macho_file.base.allocator;
+
+    var nlocals: u32 = 0;
+    var nstabs: u32 = 0;
+    var nexports: u32 = 0;
+    var nimports: u32 = 0;
+    var strsize: u32 = 0;
+
+    var files = std.ArrayList(File.Index).init(gpa);
+    defer files.deinit();
+    try files.ensureTotalCapacityPrecise(macho_file.objects.items.len + macho_file.dylibs.items.len + 1);
+    for (macho_file.objects.items) |index| files.appendAssumeCapacity(index);
+    for (macho_file.dylibs.items) |index| files.appendAssumeCapacity(index);
+    if (macho_file.internal_object_index) |index| files.appendAssumeCapacity(index);
+
+    for (files.items) |index| {
+        const file = macho_file.getFile(index).?;
+        const ctx = switch (file) {
+            inline else => |x| &x.output_symtab_ctx,
+        };
+        ctx.ilocal = nlocals;
+        ctx.istab = nstabs;
+        ctx.iexport = nexports;
+        ctx.iimport = nimports;
+        ctx.stroff = strsize;
+        file.calcSymtabSize(macho_file);
+        nlocals += ctx.nlocals;
+        nstabs += ctx.nstabs;
+        nexports += ctx.nexports;
+        nimports += ctx.nimports;
+        strsize += ctx.strsize;
+    }
+
+    for (files.items) |index| {
+        const file = macho_file.getFile(index).?;
+        const ctx = switch (file) {
+            inline else => |x| &x.output_symtab_ctx,
+        };
+        ctx.istab += nlocals;
+        ctx.iexport += nlocals + nstabs;
+        ctx.iimport += nlocals + nstabs + nexports;
+    }
+
+    {
+        const cmd = &macho_file.symtab_cmd;
+        cmd.nsyms = nlocals + nstabs + nexports + nimports;
+        cmd.strsize = strsize + 1;
+    }
+
+    {
+        const cmd = &macho_file.dysymtab_cmd;
+        cmd.ilocalsym = 0;
+        cmd.nlocalsym = nlocals + nstabs;
+        cmd.iextdefsym = nlocals + nstabs;
+        cmd.nextdefsym = nexports;
+        cmd.iundefsym = nlocals + nstabs + nexports;
+        cmd.nundefsym = nimports;
     }
 }
 
@@ -499,5 +563,6 @@ const std = @import("std");
 const trace = @import("../tracy.zig").trace;
 
 const Atom = @import("Atom.zig");
+const File = @import("file.zig").File;
 const MachO = @import("../MachO.zig");
 const Symbol = @import("Symbol.zig");

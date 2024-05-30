@@ -42,6 +42,16 @@ pub const File = union(enum) {
         }
     }
 
+    pub fn addSymbolExtra(file: File, macho_file: *MachO) !void {
+        for (file.getSymbols()) |sym_index| {
+            const sym = macho_file.getSymbol(sym_index);
+            if (sym.getFile(macho_file)) |fsym| {
+                if (file.getIndex() != fsym.getIndex()) continue;
+            }
+            sym.extra = try macho_file.addSymbolExtra(.{});
+        }
+    }
+
     /// Encodes symbol rank so that the following ordering applies:
     /// * strong in object
     /// * weak in object
@@ -92,7 +102,7 @@ pub const File = union(enum) {
         }
     }
 
-    pub fn calcSymtabSize(file: File, macho_file: *MachO) !void {
+    pub fn calcSymtabSize(file: File, macho_file: *MachO) void {
         return switch (file) {
             inline else => |x| x.calcSymtabSize(macho_file),
         };

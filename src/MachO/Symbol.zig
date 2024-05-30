@@ -123,25 +123,25 @@ pub fn getAddress(symbol: Symbol, opts: struct {
 
 pub fn getGotAddress(symbol: Symbol, macho_file: *MachO) u64 {
     if (!symbol.flags.got) return 0;
-    const extra = symbol.getExtra(macho_file).?;
+    const extra = symbol.getExtra(macho_file);
     return macho_file.got.getAddress(extra.got, macho_file);
 }
 
 pub fn getStubsAddress(symbol: Symbol, macho_file: *MachO) u64 {
     if (!symbol.flags.stubs) return 0;
-    const extra = symbol.getExtra(macho_file).?;
+    const extra = symbol.getExtra(macho_file);
     return macho_file.stubs.getAddress(extra.stubs, macho_file);
 }
 
 pub fn getObjcStubsAddress(symbol: Symbol, macho_file: *MachO) u64 {
     if (!symbol.flags.objc_stubs) return 0;
-    const extra = symbol.getExtra(macho_file).?;
+    const extra = symbol.getExtra(macho_file);
     return macho_file.objc_stubs.getAddress(extra.objc_stubs, macho_file);
 }
 
 pub fn getObjcSelrefsAddress(symbol: Symbol, macho_file: *MachO) u64 {
     if (!symbol.flags.objc_stubs) return 0;
-    const extra = symbol.getExtra(macho_file).?;
+    const extra = symbol.getExtra(macho_file);
     const atom = macho_file.getAtom(extra.objc_selrefs).?;
     assert(atom.flags.alive);
     return atom.getAddress(macho_file);
@@ -149,7 +149,7 @@ pub fn getObjcSelrefsAddress(symbol: Symbol, macho_file: *MachO) u64 {
 
 pub fn getTlvPtrAddress(symbol: Symbol, macho_file: *MachO) u64 {
     if (!symbol.flags.tlv_ptr) return 0;
-    const extra = symbol.getExtra(macho_file).?;
+    const extra = symbol.getExtra(macho_file);
     return macho_file.tlv_ptr.getAddress(extra.tlv_ptr, macho_file);
 }
 
@@ -160,7 +160,7 @@ pub fn getOutputSymtabIndex(symbol: Symbol, macho_file: *MachO) ?u32 {
     const symtab_ctx = switch (file) {
         inline else => |x| x.output_symtab_ctx,
     };
-    var idx = symbol.getExtra(macho_file).?.symtab;
+    var idx = symbol.getExtra(macho_file).symtab;
     if (symbol.isLocal()) {
         idx += symtab_ctx.ilocal;
     } else if (symbol.flags.@"export") {
@@ -181,11 +181,8 @@ const AddExtraOpts = struct {
     symtab: ?u32 = null,
 };
 
-pub fn addExtra(symbol: *Symbol, opts: AddExtraOpts, macho_file: *MachO) !void {
-    if (symbol.getExtra(macho_file) == null) {
-        symbol.extra = try macho_file.addSymbolExtra(.{});
-    }
-    var extra = symbol.getExtra(macho_file).?;
+pub fn addExtra(symbol: *Symbol, opts: AddExtraOpts, macho_file: *MachO) void {
+    var extra = symbol.getExtra(macho_file);
     inline for (@typeInfo(@TypeOf(opts)).Struct.fields) |field| {
         if (@field(opts, field.name)) |x| {
             @field(extra, field.name) = x;
@@ -194,7 +191,7 @@ pub fn addExtra(symbol: *Symbol, opts: AddExtraOpts, macho_file: *MachO) !void {
     symbol.setExtra(extra, macho_file);
 }
 
-pub inline fn getExtra(symbol: Symbol, macho_file: *MachO) ?Extra {
+pub inline fn getExtra(symbol: Symbol, macho_file: *MachO) Extra {
     return macho_file.getSymbolExtra(symbol.extra);
 }
 
