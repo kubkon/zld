@@ -412,10 +412,10 @@ pub fn flush(self: *MachO) !void {
 
     try self.writeSections();
     try self.writeSyntheticSections();
-    try self.writeLinkeditSections();
+    try self.writeSymtab();
     try self.performAllTheWork();
     try self.writeSectionsToFile();
-    try self.writeSymtabToFile();
+    try self.writeLinkeditSectionsToFile();
 
     var codesig: ?CodeSignature = if (self.requiresCodeSig()) blk: {
         // Preallocate space for the code signature.
@@ -2177,10 +2177,7 @@ fn performAllTheWork(self: *MachO) !void {
         .write_atoms => |x| self.base.thread_pool.spawnWg(&self.wait_group, writeAtomsWorker, .{ self, x[0], x[1] }),
         .write_thunk => |x| self.base.thread_pool.spawnWg(&self.wait_group, writeThunkWorker, .{ self, x[0], x[1] }),
         .write_synthetic_section => |x| self.base.thread_pool.spawnWg(&self.wait_group, writeSyntheticSectionWorker, .{ self, x[0], x[1] }),
-        .write_dyld_info => self.base.thread_pool.spawnWg(&self.wait_group, writeDyldInfoWorker, .{self}),
         .write_symtab => |x| self.base.thread_pool.spawnWg(&self.wait_group, writeSymtabWorker, .{ self, x }),
-        .write_indsymtab => self.base.thread_pool.spawnWg(&self.wait_group, writeIndsymtabWorker, .{self}),
-        .write_data_in_code => self.base.thread_pool.spawnWg(&self.wait_group, writeDataInCodeWorker, .{self}),
     };
 }
 
@@ -2360,72 +2357,51 @@ fn writeSyntheticSections(self: *MachO) !void {
     }
 }
 
-fn writeLinkeditSections(self: *MachO) !void {
-    // DYLD_INFO_ONLY
-    try self.work_queue.writeItem(.{ .write_dyld_info = {} });
-    // SYMTAB
-    try self.writeSymtab();
-    // DYSYMTAB
-    try self.work_queue.writeItem(.{ .write_indsymtab = {} });
-    // DATA_IN_CODE
-    try self.work_queue.writeItem(.{ .write_data_in_code = {} });
+fn writeLinkeditSectionsToFile(self: *MachO) !void {
+    try self.writeDyldInfo();
+    try self.writeDataInCode();
+    try self.writeSymtabToFile();
+    try self.writeIndsymtab();
 }
 
-fn writeDyldInfoWorker(self: *MachO) void {
+fn writeDyldInfo(self: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
-    const doWork = struct {
-        fn doWork(macho_file: *MachO) !void {
-            const gpa = macho_file.base.allocator;
-            const base_off = macho_file.getLinkeditSegment().fileoff;
-            const cmd = macho_file.dyld_info_cmd;
-            var needed_size: u32 = 0;
-            needed_size += cmd.rebase_size;
-            needed_size += cmd.bind_size;
-            needed_size += cmd.weak_bind_size;
-            needed_size += cmd.lazy_bind_size;
-            needed_size += cmd.export_size;
+    const gpa = self.base.allocator;
+    const base_off = self.getLinkeditSegment().fileoff;
+    const cmd = self.dyld_info_cmd;
+    var needed_size: u32 = 0;
+    needed_size += cmd.rebase_size;
+    needed_size += cmd.bind_size;
+    needed_size += cmd.weak_bind_size;
+    needed_size += cmd.lazy_bind_size;
+    needed_size += cmd.export_size;
 
-            const buffer = try gpa.alloc(u8, needed_size);
-            defer gpa.free(buffer);
-            @memset(buffer, 0);
+    const buffer = try gpa.alloc(u8, needed_size);
+    defer gpa.free(buffer);
+    @memset(buffer, 0);
 
-            var stream = std.io.fixedBufferStream(buffer);
-            const writer = stream.writer();
+    var stream = std.io.fixedBufferStream(buffer);
+    const writer = stream.writer();
 
-            try macho_file.rebase.write(writer);
-            try stream.seekTo(cmd.bind_off - base_off);
-            try macho_file.bind.write(writer);
-            try stream.seekTo(cmd.weak_bind_off - base_off);
-            try macho_file.weak_bind.write(writer);
-            try stream.seekTo(cmd.lazy_bind_off - base_off);
-            try macho_file.lazy_bind.write(writer);
-            try stream.seekTo(cmd.export_off - base_off);
-            try macho_file.export_trie.write(writer);
-            try macho_file.base.file.pwriteAll(buffer, cmd.rebase_off);
-        }
-    }.doWork;
-    doWork(self) catch |err| {
-        self.base.fatal("failed to write dyld_info_only data: {s}", .{@errorName(err)});
-    };
+    try self.rebase.write(writer);
+    try stream.seekTo(cmd.bind_off - base_off);
+    try self.bind.write(writer);
+    try stream.seekTo(cmd.weak_bind_off - base_off);
+    try self.weak_bind.write(writer);
+    try stream.seekTo(cmd.lazy_bind_off - base_off);
+    try self.lazy_bind.write(writer);
+    try stream.seekTo(cmd.export_off - base_off);
+    try self.export_trie.write(writer);
+    try self.base.file.pwriteAll(buffer, cmd.rebase_off);
 }
 
-pub fn writeDataInCodeWorker(self: *MachO) void {
+pub fn writeDataInCode(self: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
-    const doWork = struct {
-        fn doWork(macho_file: *MachO) !void {
-            const cmd = macho_file.data_in_code_cmd;
-            try macho_file.base.file.pwriteAll(
-                mem.sliceAsBytes(macho_file.data_in_code.entries.items),
-                cmd.dataoff,
-            );
-        }
-    }.doWork;
-    doWork(self) catch |err| {
-        self.base.fatal("failed to write data-in-code data: {s}", .{@errorName(err)});
-    };
+    const cmd = self.data_in_code_cmd;
+    try self.base.file.pwriteAll(mem.sliceAsBytes(self.data_in_code.entries.items), cmd.dataoff);
 }
 
 fn calcSymtabSize(self: *MachO) void {
@@ -2534,23 +2510,16 @@ fn writeSymtabWorker(self: *MachO, file: File) void {
     file.writeSymtab(self);
 }
 
-fn writeIndsymtabWorker(self: *MachO) void {
+fn writeIndsymtab(self: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
-    const doWork = struct {
-        fn doWork(macho_file: *MachO) !void {
-            const gpa = macho_file.base.allocator;
-            const cmd = macho_file.dysymtab_cmd;
-            const needed_size = cmd.nindirectsyms * @sizeOf(u32);
-            var buffer = try std.ArrayList(u8).initCapacity(gpa, needed_size);
-            defer buffer.deinit();
-            try macho_file.indsymtab.write(macho_file, buffer.writer());
-            try macho_file.base.file.pwriteAll(buffer.items, cmd.indirectsymoff);
-        }
-    }.doWork;
-    doWork(self) catch |err| {
-        self.base.fatal("failed to write indirect symtab: {s}", .{@errorName(err)});
-    };
+    const gpa = self.base.allocator;
+    const cmd = self.dysymtab_cmd;
+    const needed_size = cmd.nindirectsyms * @sizeOf(u32);
+    var buffer = try std.ArrayList(u8).initCapacity(gpa, needed_size);
+    defer buffer.deinit();
+    try self.indsymtab.write(self, buffer.writer());
+    try self.base.file.pwriteAll(buffer.items, cmd.indirectsymoff);
 }
 
 pub fn writeSymtabToFile(self: *MachO) !void {
@@ -3385,10 +3354,7 @@ pub const Job = union(enum) {
     write_atoms: struct { []const Atom.Index, []u8 },
     write_thunk: struct { *const Thunk, []u8 },
     write_synthetic_section: struct { u8, []u8 },
-    write_dyld_info: void,
     write_symtab: File,
-    write_indsymtab: void,
-    write_data_in_code: void,
 };
 
 pub const base_tag = Zld.Tag.macho;
